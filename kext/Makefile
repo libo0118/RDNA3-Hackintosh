@@ -29,8 +29,8 @@ LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext \
 
 CXXSRC := src/RDNA3Accel.cpp src/RDNA3Bringup.cpp src/RDNA3Drm.cpp src/RDNA3UserClient.cpp
 CSRC   := ../common/amd_discovery.c ../common/amd_fw.c ../common/range_alloc.c \
-          ../hw/rdna3_hw.c ../hw/psp13.c ../hw/smu13.c ../uapi/rdna3_drm.c src/kmod_info.c
-HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../uapi/*.h ../third_party/amd/*.h)
+          ../hw/rdna3_hw.c ../hw/psp13.c ../hw/smu13.c ../hw/gmc11.c ../uapi/rdna3_drm.c src/kmod_info.c
+HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../hw/gen/*.h ../uapi/*.h ../third_party/amd/*.h)
 OBJS   := $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(CXXSRC))) \
           $(patsubst %.c,$(OBJDIR)/%.o,$(notdir $(CSRC)))
 vpath %.cpp src

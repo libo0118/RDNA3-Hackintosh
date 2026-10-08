@@ -24,6 +24,8 @@
 #include <stdarg.h>
 #include "psp13.h"
 #include "smu13.h"
+#include "gmc11.h"
+#include "gen/gc_11_0_3_gmc.h"
 #include "navi3x_regs.h"
 #include "psp_gfx_if.h"
 #include "amdgpu_ucode_hdr.h"
@@ -72,6 +74,7 @@ typedef struct sim {
      * (read after a 20 ms delay) sees the transition like on hardware */
     uint64_t now_us;
     uint64_t sos_boot_at;
+    unsigned tlb_flushes;
 } sim;
 
 static sim S;
@@ -195,6 +198,18 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         }
         *R(dw) = v;
         return;
+    }
+    /* GFXHUB invalidation engine 17: acknowledge the requested VMIDs */
+    {
+        uint32_t eng_dist = regGCVM_INVALIDATE_ENG1_REQ - regGCVM_INVALIDATE_ENG0_REQ;
+        if (dw == GC_BASE0 + regGCVM_INVALIDATE_ENG0_REQ + 17 * eng_dist) {
+            S.reg[GC_BASE0 + regGCVM_INVALIDATE_ENG0_ACK + 17 * eng_dist] = v & 0xffff;
+            S.tlb_flushes++;
+            if (S.pending_writes)
+                S.unflushed_doorbells++;
+            *R(dw) = v;
+            return;
+        }
     }
     if (dw == MP1(66)) {
         uint32_t arg = *R(MP1(82));
@@ -412,6 +427,32 @@ static void run(const char *fwdir)
     CHECK(smu13_hello(&dev, &smu_ver, &ifv) == RDNA3_OK);
     CHECK(smu_ver == 0x00526100 && ifv == 0x35);
     CHECK(smu13_send_msg(&dev, 0x77, 0, NULL) != RDNA3_OK);
+
+    /* GMC: GART in VRAM, GFXHUB VMID0 + contexts, TLB flush */
+    {
+        static rdna3_gmc gmc;
+        uint64_t pte = 0;
+        CHECK(gmc11_init(&dev, &gmc, 0) == RDNA3_OK);
+        CHECK(gmc.gart_start == 0 && gmc.gart_size == (512ull << 20));
+        CHECK(gfxhub303_gart_enable(&dev, &gmc) == RDNA3_OK);
+        gfxhub303_set_fault_enable_default(&dev, 1);
+        CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT0_CNTL] & GCVM_CONTEXT0_CNTL__ENABLE_CONTEXT_MASK);
+        CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32] ==
+              (uint32_t)(rdna3_vram_pa(&dev, gmc.gart_table) | 1));
+        CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32] ==
+              (uint32_t)(gmc.gart_end >> 12));
+        CHECK((S.reg[GC_BASE0 + regGCVM_CONTEXT1_CNTL] & GCVM_CONTEXT1_CNTL__PAGE_TABLE_DEPTH_MASK) >>
+              GCVM_CONTEXT1_CNTL__PAGE_TABLE_DEPTH__SHIFT == 3);
+        CHECK(S.reg[GC_BASE0 + regGCVM_L2_CNTL] & GCVM_L2_CNTL__ENABLE_L2_CACHE_MASK);
+        CHECK(gmc11_gart_map(&dev, &gmc, 0x10000, 0x123456000ull, 2,
+                             RD_PTE_VALID | RD_PTE_SYSTEM | RD_PTE_SNOOPED | RD_PTE_READABLE |
+                             RD_PTE_WRITEABLE) == RDNA3_OK);
+        memcpy(&pte, S.vram + gmc.gart_table + (0x10000 / 4096 + 1) * 8, 8);
+        CHECK((pte & 0x0000FFFFFFFFF000ull) == 0x123457000ull && (pte & RD_PTE_VALID));
+        CHECK(gfxhub303_flush_tlb(&dev, 0, 0) == RDNA3_OK && S.tlb_flushes == 1);
+        CHECK(gmc11_gart_map(&dev, &gmc, gmc.gart_size, 0, 1, RD_PTE_VALID) == RDNA3_EINVAL);
+        CHECK(S.unflushed_doorbells == 0);
+    }
 
     printf("sim_navi32: %s firmware, %u bootloader cmds, %u LOAD_IP_FW, TMR %u KiB, "
            "VRAM used %llu KiB\n", fwdir ? "real" : "synthetic", S.nbl, S.nipfw,
