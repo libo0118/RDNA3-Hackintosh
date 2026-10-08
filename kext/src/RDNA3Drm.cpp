@@ -18,10 +18,7 @@
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
 
-extern "C" {
-extern int copyin(const user_addr_t uaddr, void *kaddr, size_t len);
-extern int copyout(const void *kaddr, user_addr_t udaddr, size_t len);
-}
+#include <libkern/copyio.h>   /* copyin/copyout (kpi.libkern) */
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
