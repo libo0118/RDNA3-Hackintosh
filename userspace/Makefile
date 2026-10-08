@@ -1,6 +1,6 @@
 # macOS userspace: libdrm_xnu (static + dylib) and the Stage 4 smoke test.
 CC      := xcrun clang
-CFLAGS  := -O2 -g -Wall -Wextra -Werror -arch x86_64 -mmacosx-version-min=11.0 \
+CFLAGS  := -O2 -g -Wall -Wextra -Werror -arch x86_64 -mmacosx-version-min=15.0 \
            -Ilibdrm_xnu -I../uapi -I../common -I../third_party/amd
 LIBS    := -framework IOKit -framework CoreFoundation
 BUILD   := ../build/userspace
