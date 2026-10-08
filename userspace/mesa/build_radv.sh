@@ -46,3 +46,17 @@ meson setup --wipe "$WORK/build" "$WORK/src" \
 ninja -C "$WORK/build" -k 0 2>&1 | tee "$WORK/ninja.log"
 ninja -C "$WORK/build" install
 ls -la "$WORK/install/lib"
+
+# dynamic_lookup hides genuinely missing symbols: list every undefined
+# symbol that neither our libdrm/libdrm_amdgpu nor libSystem/frameworks
+# provide, and that is not an optional (weak) Vulkan entrypoint.
+LIB="$WORK/install/lib/libvulkan_radeon.dylib"
+if [ -f "$LIB" ]; then
+    nm -u "$LIB" | sort -u > "$WORK/undefined.txt"
+    { nm -gU "$PREFIX/lib/libdrm.2.dylib"; nm -gU "$PREFIX/lib/libdrm_amdgpu.1.dylib"; } \
+        | awk '{print $3}' | sort -u > "$WORK/provided.txt"
+    weak=$(nm -m "$LIB" | awk '/weak external/ && /undefined/ {print $NF}' | sort -u)
+    echo "== undefined in libvulkan_radeon.dylib, not from libdrm*, not weak:"
+    comm -23 "$WORK/undefined.txt" "$WORK/provided.txt" | grep -vxF -f <(printf '%s\n' $weak) \
+        | grep -vE '^_(_|dyld|objc|os_|pthread|mach|kevent|dispatch|CF|IO)' | head -200 || true
+fi

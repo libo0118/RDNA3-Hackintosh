@@ -1,0 +1,27 @@
+diff --git a/src/amd/vulkan/meson.build b/src/amd/vulkan/meson.build
+index 0f97c81..6b35700 100644
+--- a/src/amd/vulkan/meson.build
++++ b/src/amd/vulkan/meson.build
+@@ -275,6 +275,14 @@ if radv_u_trace
+   radv_flags += '-DRADV_U_TRACE=1'
+ endif
+ 
++radv_darwin_link_args = []
++if host_machine.system() == 'darwin'
++  # Mach-O has no ELF-style weak undefined symbols at static link time:
++  # optional entrypoints (wsi_*, layer hooks) resolve to NULL at load time.
++  # Same approach as src/kosmickrisp/vulkan/meson.build.
++  radv_darwin_link_args = ['-Wl,-undefined,dynamic_lookup']
++endif
++
+ libvulkan_radeon = shared_library(
+   'vulkan_radeon',
+   [libradv_files, radv_entrypoints, radv_drirc, sha1_h, bvh_spv, radv_annotate_layer],
+@@ -297,6 +305,7 @@ libvulkan_radeon = shared_library(
+   cpp_args : [radv_flags, cpp_msvc_compat_args],
+   link_args : [
+     ld_args_build_id, ld_args_bsymbolic, ld_args_gc_sections, vulkan_icd_link_args,
++    radv_darwin_link_args,
+   ],
+   link_depends : vulkan_icd_link_depends,
+   gnu_symbol_visibility : 'hidden',
