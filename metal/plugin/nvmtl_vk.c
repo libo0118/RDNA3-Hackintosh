@@ -52,14 +52,11 @@ static pthread_mutex_t g_gpu_clock_lock = PTHREAD_MUTEX_INITIALIZER;
 static inline const char *nvmtl_pick_vk(const char *staged, const char *dev) {
     return access(staged, R_OK) == 0 ? staged : dev;
 }
-#define NVMTL_LOADER nvmtl_pick_vk("/Library/GPUBundles/nvmtl/libvulkan.dylib", \
-                                   "/Library/GPUBundles/nvmtl/libvulkan.dylib")
-#define NVMTL_ICD    nvmtl_pick_vk("/Library/GPUBundles/nvmtl/nvk_icd.json", \
-                                   "/Library/GPUBundles/nvmtl/nvk_icd.json")
+#define NVMTL_LOADER nvmtl_pick_vk(RDNA3MTL_LOADER, RDNA3MTL_LOADER)
+#define NVMTL_ICD    nvmtl_pick_vk(RDNA3MTL_ICD_JSON, RDNA3MTL_ICD_JSON)
 static inline const char *nvmtl_icd_lib_path(void) {
     const char *e = getenv("NVMTL_ICD_LIB"); if (e && access(e, R_OK) == 0) return e;
-    return nvmtl_pick_vk("/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib",
-                         "/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib");
+    return nvmtl_pick_vk(RDNA3MTL_ICD_DYLIB, RDNA3MTL_ICD_DYLIB);
 }
 #define NVMTL_ICD_LIB nvmtl_icd_lib_path()
 
@@ -3848,7 +3845,7 @@ int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
     if (!looked) {
 
         const char *path = getenv("NVMTL_NVK_DYLIB");
-        void *h = dlopen(path && *path ? path : "/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib",
+        void *h = dlopen(path && *path ? path : RDNA3MTL_ICD_DYLIB,
                          RTLD_NOW | RTLD_LOCAL);
         looked = 1;
         if (!h) nvlog("sass dispatch: cannot open NVK: %s", dlerror());

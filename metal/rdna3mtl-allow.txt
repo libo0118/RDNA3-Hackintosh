@@ -1,0 +1,6 @@
+# Processes allowed to get the RDNA3 Metal device (one per line, '*' = all,
+# '-name' = deny, '!name' = only once the accelerator kext is armed).
+# Start narrow while bring-up is in progress; widen as things work.
+mtlprobe
+nvmtltest
+vulkaninfo

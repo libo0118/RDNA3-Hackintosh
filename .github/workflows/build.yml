@@ -50,3 +50,20 @@ jobs:
             build/RDNA3Accel.kext
             build/userspace/rdna3_drminfo
             build/userspace/libdrm_xnu.dylib
+
+  metal:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Metal plugin (RDNA3MTLDriver.bundle)
+        run: make -C metal plugin
+      - name: AIR->SPIR-V translator (librdna3mtl_translate.dylib)
+        run: |
+          rustup target add x86_64-apple-darwin
+          make -C metal translator CARGO_BUILD_TARGET=x86_64-apple-darwin || make -C metal translator
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDNA3MTL
+          path: |
+            build/metal/RDNA3MTLDriver.bundle
+            build/metal/librdna3mtl_translate.dylib

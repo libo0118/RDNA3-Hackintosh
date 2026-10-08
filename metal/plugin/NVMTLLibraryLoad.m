@@ -22,14 +22,13 @@ extern char **environ;
 void nvlog(const char *fmt, ...);
 
 #import <CommonCrypto/CommonDigest.h>
-#define NVMTL_AIR_OPT   "/Library/GPUBundles/nvmtl/air-opt"
+#define NVMTL_AIR_OPT   RDNA3MTL_DIR "/air-opt"
 #include <unistd.h>
 static inline const char *nvmtl_pick_ll(const char *staged, const char *dev) {
     return access(staged, R_OK) == 0 ? staged : dev;
 }
 #ifndef NVMTL_XLATE_LIB
-#define NVMTL_XLATE_LIB nvmtl_pick_ll("/Library/GPUBundles/nvmtl/libnvmtl_translate.dylib", \
-                                      "/Library/GPUBundles/nvmtl/libnvmtl_translate.dylib")
+#define NVMTL_XLATE_LIB nvmtl_pick_ll(RDNA3MTL_XLATE_DYLIB, RDNA3MTL_XLATE_DYLIB)
 #endif
 
 typedef int (*nvmtl_translate_fn)(const char *ll, const char *stage, uint8_t **out, size_t *out_len, char *err, size_t err_len);
@@ -102,7 +101,7 @@ static int nvmtl_xlate_ready(void) {
     dispatch_once(&once, ^{
         Dl_info info; NSString *bundled = nil;
         if (dladdr((const void *)&nvmtl_xlate_ready, &info) && info.dli_fname)
-            bundled = [[@(info.dli_fname) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"libnvmtl_translate.dylib"];
+            bundled = [[@(info.dli_fname) stringByDeletingLastPathComponent] stringByAppendingPathComponent:@RDNA3MTL_XLATE_NAME];
         const char *xpath = bundled && access(bundled.fileSystemRepresentation,R_OK)==0 ? bundled.fileSystemRepresentation : NVMTL_XLATE_LIB;
         void *h = dlopen(xpath, RTLD_NOW | RTLD_LOCAL);
         if (h) nvmtl_translator_cache_tag(xpath, gXlateTag, sizeof gXlateTag);
@@ -141,7 +140,7 @@ static int nvmtl_xlate_ready(void) {
 }
 
 #ifndef NVMTL_AIRCACHE_DIR
-#define NVMTL_AIRCACHE_DIR "/Library/GPUBundles/nvmtl/aircache"
+#define NVMTL_AIRCACHE_DIR RDNA3MTL_DIR "/aircache"
 #endif
 
 static _Atomic unsigned long gAirHit, gAirMiss, gAirStored;

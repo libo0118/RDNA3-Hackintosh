@@ -97,7 +97,7 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
           free(dup); }
       unsetenv("NVMTL_CONF_SET"); }
     char recbuf[2048]; size_t recn = 0; recbuf[0] = 0;
-    FILE *f = fopen("/Library/GPUBundles/nvmtl/nvrm610.conf", "r");
+    FILE *f = fopen(RDNA3MTL_CONF, "r");
     if (!f) { if (forgot) nvlog("conf: forgot %u inherited knob(s); no conf file", forgot); return; }
     char line[512];
     unsigned took = 0;
@@ -121,7 +121,7 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
     }
     fclose(f);
     if (recn) setenv("NVMTL_CONF_SET", recbuf, 1);
-    if (took || forgot) nvlog("conf: %u knob(s) read from /Library/GPUBundles/nvmtl/nvrm610.conf, %u inherited conf knob(s) forgotten first (the environment still wins)", took, forgot);
+    if (took || forgot) nvlog("conf: %u knob(s) read from " RDNA3MTL_CONF ", %u inherited conf knob(s) forgotten first (the environment still wins)", took, forgot);
 }
 static int nvmtl_dontcare_clears(void) {
     static int on = -1;

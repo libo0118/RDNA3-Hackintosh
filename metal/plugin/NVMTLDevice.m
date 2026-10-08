@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
  */
 
+#include "rdna3mtl_config.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
@@ -166,7 +167,7 @@ static nvk_queue *nvmtl_device_queue(void) {
 static bool nvmtl_accel_armed(void)
 {
     int v = 0; size_t n = sizeof v;
-    if (sysctlbyname("debug.nvaccelfb", &v, &n, NULL, 0) != 0) return false;
+    if (sysctlbyname(RDNA3MTL_ARMED_SYSCTL, &v, &n, NULL, 0) != 0) return false;
     return v != 0;
 }
 #include <dlfcn.h>
@@ -283,8 +284,8 @@ static bool nvmtl_process_is_allowed(void)
     if (!me) return false;
     if (getenv("NVMTL_ENABLE")) return true;
     if (!strcmp(me, "mtlprobe") || !strcmp(me, "nvmtltest") || !strcmp(me, "nvmtlrender")) return true;
-    FILE *f = fopen("/Library/GPUBundles/nvmtl-allow.txt", "r");
-    if (!f) f = fopen("/Library/Extensions/nvmtl-allow.txt", "r");
+    FILE *f = fopen(RDNA3MTL_ALLOW_LIST, "r");
+    if (!f) f = fopen(RDNA3MTL_ALLOW_LIST_ALT, "r");
     if (!f) { nvlog("  no allow-list readable from this process: no device for %s", me); return false; }
     char line[256]; bool ok = false;
     while (fgets(line, sizeof line, f)) {
@@ -296,7 +297,7 @@ static bool nvmtl_process_is_allowed(void)
         if (*p == '!') { armedOnly = true; p++; while (*p == ' ' || *p == '\t') p++; }
         if (strcmp(p, "*") && strcmp(p, me)) continue;
         if (armedOnly && !nvmtl_accel_armed()) {
-            nvlog("  '%s' is armed-only and debug.nvaccelfb reads 0 -- no device (arm it with sysctl -w debug.nvaccelfb=1)", me);
+            nvlog("  '%s' is armed-only and debug.rdna3accelfb reads 0 -- no device (arm it with sysctl -w debug.rdna3accelfb=1)", me);
             break;
         }
         ok = true; break;
@@ -370,7 +371,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
 }
 
 - (void)nvmtlProbeGPUPass {
-    if (access("/Library/GPUBundles/nvmtl-gpupass-probe", F_OK) != 0) return;
+    if (access(RDNA3MTL_GPUPASS_PROBE, F_OK) != 0) return;
     static int done = 0; if (done) return; done = 1;
     if (nvmtl_vk_init()) { nvlog("gpupass probe: Vulkan is down in this process — cannot answer"); return; }
     NSString *p = @"/System/Library/Frameworks/CoreDisplay.framework/Versions/A/Resources/default.metallib";
