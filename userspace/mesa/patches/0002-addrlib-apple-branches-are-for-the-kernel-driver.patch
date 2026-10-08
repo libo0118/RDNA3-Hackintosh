@@ -1,0 +1,67 @@
+diff --git a/src/amd/addrlib/inc/addrtypes.h b/src/amd/addrlib/inc/addrtypes.h
+index 0934cf0..80c39b6 100644
+--- a/src/amd/addrlib/inc/addrtypes.h
++++ b/src/amd/addrlib/inc/addrtypes.h
+@@ -15,7 +15,7 @@
+ #ifndef __ADDR_TYPES_H__
+ #define __ADDR_TYPES_H__
+ 
+-#if defined(__APPLE__) && !defined(HAVE_TSERVER)
++#if defined(__APPLE__) && defined(ADDR_APPLE_KERNEL) && !defined(HAVE_TSERVER)
+ // External definitions header maintained by Apple driver team, but not for diag team under Mac.
+ // Helps address compilation issues & reduces code covered by NDA
+ #include "addrExtDef.h"
+@@ -642,7 +642,7 @@ typedef enum _AddrTileType
+ //
+ ////////////////////////////////////////////////////////////////////////////////////////////////////
+ 
+-#if !defined(__APPLE__) || defined(HAVE_TSERVER)
++#if !(defined(__APPLE__) && defined(ADDR_APPLE_KERNEL)) || defined(HAVE_TSERVER)
+ 
+ #ifndef BOOL_32        // no bool type in C
+ /// @brief Boolean type, since none is defined in C
+@@ -718,7 +718,7 @@ typedef enum _AddrTileType
+ #define UINT_64  unsigned long long OR unsigned __int64
+ #endif
+ 
+-#endif // #if !defined(__APPLE__) || defined(HAVE_TSERVER)
++#endif // #if !(defined(__APPLE__) && defined(ADDR_APPLE_KERNEL)) || defined(HAVE_TSERVER)
+ 
+ //  ADDR64X is used to print addresses in hex form on both Windows and Linux
+ //
+diff --git a/src/amd/addrlib/src/core/addrcommon.h b/src/amd/addrlib/src/core/addrcommon.h
+index 9c1766a..a54eea7 100644
+--- a/src/amd/addrlib/src/core/addrcommon.h
++++ b/src/amd/addrlib/src/core/addrcommon.h
+@@ -20,7 +20,7 @@
+ #include <stdint.h>
+ 
+ 
+-#if !defined(__APPLE__) || defined(HAVE_TSERVER)
++#if !(defined(__APPLE__) && defined(ADDR_APPLE_KERNEL)) || defined(HAVE_TSERVER)
+     #include <stdlib.h>
+     #include <string.h>
+ #endif
+@@ -41,7 +41,7 @@
+         #define ADDR_DBG_BREAK()    { __debugbreak(); }
+     #elif defined(__GNUC__)
+         #define ADDR_DBG_BREAK()    { raise(SIGTRAP); }
+-    #elif defined(__APPLE__)
++    #elif defined(__APPLE__) && defined(ADDR_APPLE_KERNEL)
+         #define ADDR_DBG_BREAK()    { IOPanic("");}
+     #else
+         #define ADDR_DBG_BREAK()
+diff --git a/src/amd/addrlib/src/core/addrlib.cpp b/src/amd/addrlib/src/core/addrlib.cpp
+index 916b77b..b6585a8 100644
+--- a/src/amd/addrlib/src/core/addrlib.cpp
++++ b/src/amd/addrlib/src/core/addrlib.cpp
+@@ -17,7 +17,8 @@
+ #include "addrlib.h"
+ #include "addrcommon.h"
+ 
+-#if defined(__APPLE__)
++/* the Apple kernel driver build only: macOS userspace (RADV) has libgcc/compiler-rt */
++#if defined(__APPLE__) && defined(ADDR_APPLE_KERNEL)
+ 
+ UINT_32 div64_32(UINT_64 n, UINT_32 base)
+ {

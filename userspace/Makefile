@@ -50,7 +50,7 @@ install: $(BUILD)/libdrm.dylib $(BUILD)/libdrm_amdgpu.dylib
 	cp $(BUILD)/libdrm_amdgpu.dylib $(PREFIX)/lib/libdrm_amdgpu.1.dylib
 	ln -sf libdrm.2.dylib $(PREFIX)/lib/libdrm.dylib
 	ln -sf libdrm_amdgpu.1.dylib $(PREFIX)/lib/libdrm_amdgpu.dylib
-	cp $(LIBDRM)/xf86drm.h $(XNU)/drm_xnu.h $(PREFIX)/include/
+	cp $(LIBDRM)/xf86drm.h $(LIBDRM)/libsync.h $(XNU)/drm_xnu.h $(PREFIX)/include/
 	cp $(LIBDRM)/include/drm/*.h $(LIBDRM)/amdgpu/amdgpu.h $(PREFIX)/include/libdrm/
 	printf 'prefix=%s\nlibdir=$${prefix}/lib\nincludedir=$${prefix}/include\n\nName: libdrm\nDescription: libdrm core subset over RDNA3Accel (drm_xnu)\nVersion: %s\nLibs: -L$${libdir} -ldrm\nCflags: -I$${includedir} -I$${includedir}/libdrm\n' \
 	  "$(PREFIX)" "$(VERSION)" > $(PREFIX)/lib/pkgconfig/libdrm.pc

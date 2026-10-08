@@ -1,0 +1,74 @@
+diff --git a/src/amd/vulkan/radv_physical_device.c b/src/amd/vulkan/radv_physical_device.c
+index 5edb325..2f345e9 100644
+--- a/src/amd/vulkan/radv_physical_device.c
++++ b/src/amd/vulkan/radv_physical_device.c
+@@ -17,6 +17,16 @@
+ #include <sys/sysmacros.h>
+ #endif
+ 
++#ifdef __APPLE__
++/* macOS: the "render node" is RDNA3Accel's IOUserClient (libdrm_xnu) */
++#include "drm_xnu.h"
++#define radv_drm_open(path, flags) drm_xnu_open(path, flags)
++#define radv_drm_close(fd)         drm_xnu_close(fd)
++#else
++#define radv_drm_open(path, flags) open(path, flags)
++#define radv_drm_close(fd)         close(fd)
++#endif
++
+ #include "vk_drm_syncobj.h"
+ #include "vk_log.h"
+ #include "vk_shader_module.h"
+@@ -2604,14 +2614,14 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
+    enum radv_drm_device_type drm_device_type;
+    drmVersionPtr version;
+ 
+-   fd = open(path, O_RDWR | O_CLOEXEC);
++   fd = radv_drm_open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) {
+       return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER, "Could not open device %s: %m", path);
+    }
+ 
+    version = drmGetVersion(fd);
+    if (!version) {
+-      close(fd);
++      radv_drm_close(fd);
+ 
+       return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER,
+                        "Could not get the kernel driver version for device %s: %m", path);
+@@ -2622,7 +2632,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
+ #ifdef HAVE_AMDGPU_VIRTIO
+       if (debug_get_bool_option("AMD_FORCE_VPIPE", false)) {
+          drm_device_type = RADV_DRM_DEVICE_AMDGPU_VPIPE;
+-         close(fd);
++         radv_drm_close(fd);
+          fd = -1;
+       }
+ #endif
+@@ -2634,7 +2644,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
+ #endif
+    {
+       drmFreeVersion(version);
+-      close(fd);
++      radv_drm_close(fd);
+ 
+       return vk_errorf(instance, VK_ERROR_INCOMPATIBLE_DRIVER, "Device '%s' is not using the AMDGPU kernel driver: %m",
+                        path);
+@@ -2939,7 +2949,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
+    *pdev_out = pdev;
+ 
+    if (fd != -1)
+-      close(fd);
++      radv_drm_close(fd);
+    fd = -1;
+ 
+    return VK_SUCCESS;
+@@ -2948,7 +2958,7 @@ fail:
+    radv_physical_device_destroy(&pdev->vk);
+ fail_fd:
+    if (fd != -1)
+-      close(fd);
++      radv_drm_close(fd);
+    return result;
+ #endif
+ }

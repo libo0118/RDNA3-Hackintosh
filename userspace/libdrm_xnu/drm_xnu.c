@@ -25,7 +25,7 @@
  * is its read end. dup()/fcntl(F_DUPFD) of that fd (libdrm_amdgpu does
  * this in amdgpu_device_initialize) refer to the same pipe inode, so any
  * duplicate resolves to the same connection through fstat(). */
-static struct { uintptr_t conn; dev_t dev; ino_t ino; int fd; int used; } g_conns[MAX_CONN];
+static struct { uintptr_t conn; dev_t dev; ino_t ino; int fd; int used; int orphan; } g_conns[MAX_CONN];
 static struct { void *addr; size_t len; int ci; } g_maps[MAX_MAPS];
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_trace = -1;
@@ -60,6 +60,35 @@ int drm_xnu_is_drm_fd(int fd)
     return conn_index(fd) >= 0;
 }
 
+/* A connection outlives its original fd while dup()s of it exist
+ * (RADV closes its fd after libdrm_amdgpu dup()ed it). Once the original
+ * is closed the entry is an orphan; it is released as soon as no fd in
+ * the process refers to the pipe any more. Called with g_lock held. */
+static int inode_in_use(dev_t dev, ino_t ino)
+{
+    long maxfd = sysconf(_SC_OPEN_MAX);
+    struct stat st;
+    int fd;
+    if (maxfd < 0 || maxfd > 65536)
+        maxfd = 65536;
+    for (fd = 0; fd < maxfd; fd++)
+        if (fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode) && st.st_dev == dev && st.st_ino == ino)
+            return 1;
+    return 0;
+}
+
+static void gc_orphans_locked(void)
+{
+    int ci;
+    for (ci = 0; ci < MAX_CONN; ci++)
+        if (g_conns[ci].used && g_conns[ci].orphan &&
+            !inode_in_use(g_conns[ci].dev, g_conns[ci].ino)) {
+            be()->close(g_conns[ci].conn);
+            g_conns[ci].used = 0;
+            g_conns[ci].orphan = 0;
+        }
+}
+
 int drm_xnu_open(const char *path, int flags)
 {
     struct stat st;
@@ -86,6 +115,7 @@ int drm_xnu_open(const char *path, int flags)
         return -1;
     }
     pthread_mutex_lock(&g_lock);
+    gc_orphans_locked();
     for (ci = 0; ci < MAX_CONN && g_conns[ci].used; ci++)
         ;
     if (ci == MAX_CONN) {
@@ -100,6 +130,7 @@ int drm_xnu_open(const char *path, int flags)
     g_conns[ci].ino = st.st_ino;
     g_conns[ci].fd = p[0];
     g_conns[ci].used = 1;
+    g_conns[ci].orphan = 0;
     pthread_mutex_unlock(&g_lock);
     return p[0];
 }
@@ -169,19 +200,16 @@ int drm_xnu_munmap(void *addr, size_t len)
 
 int drm_xnu_close(int fd)
 {
-    int ci = conn_index(fd);
-    uintptr_t conn = 0;
-    if (ci >= 0) {
-        pthread_mutex_lock(&g_lock);
-        if (g_conns[ci].fd == fd) {
-            conn = g_conns[ci].conn;
-            g_conns[ci].used = 0;
-        }
-        pthread_mutex_unlock(&g_lock);
-    }
-    if (conn)
-        be()->close(conn);
-    return close(fd);
+    int ci = conn_index(fd), r;
+    if (ci < 0)
+        return close(fd);
+    pthread_mutex_lock(&g_lock);
+    if (g_conns[ci].fd == fd)
+        g_conns[ci].orphan = 1;
+    r = close(fd);
+    gc_orphans_locked();
+    pthread_mutex_unlock(&g_lock);
+    return r;
 }
 
 int drm_xnu_pci_info(uint16_t *vendor, uint16_t *device, uint16_t *subvendor,

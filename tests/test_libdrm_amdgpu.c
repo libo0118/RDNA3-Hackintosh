@@ -44,6 +44,9 @@ int main(void)
     CHECK(amdgpu_device_initialize(fd, &major, &minor, &dev) == 0);
     CHECK(major == 3 && minor >= 49);
     CHECK(amdgpu_device_get_fd(dev) != fd && drm_xnu_is_drm_fd(amdgpu_device_get_fd(dev)));
+    /* RADV closes its own fd right after creating the winsys */
+    CHECK(drm_xnu_close(fd) == 0);
+    CHECK(drm_xnu_is_drm_fd(amdgpu_device_get_fd(dev)));
 
     memset(&gi, 0, sizeof(gi));
     CHECK(amdgpu_query_gpu_info(dev, &gi) == 0);
@@ -92,6 +95,9 @@ int main(void)
     }
 
     CHECK(amdgpu_device_deinitialize(dev) == 0);
+    /* the orphaned connection is released on the next open */
+    fd = drm_xnu_open("/dev/dri/renderD128", 0);
+    CHECK(fd >= 0);
     CHECK(drm_xnu_close(fd) == 0);
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
