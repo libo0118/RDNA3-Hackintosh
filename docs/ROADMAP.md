@@ -4,13 +4,13 @@ Legenda: ✅ zrobione · 🟡 w toku · ⬜ nie zaczęte
 
 | Etap | Cel | Status |
 |---|---|---|
-| 0 | Stanowisko testowe, kontakt z projektem NVIDIA | 🟡 dokumentacja gotowa ([STAGE0](STAGE0.md)); sprzęt i kontakt po Twojej stronie |
+| 0 | Stanowisko testowe, kontakt z projektem NVIDIA | 🟡 dokumentacja gotowa ([STAGE0](STAGE0.md)), projekt NVIDIA przeanalizowany ([NULLMOTH-ANALYSIS](NULLMOTH-ANALYSIS.md)); sprzęt i kontakt po Twojej stronie |
 | 1 | Kext rozpoznaje kartę, mapuje BAR, czyta rejestry i discovery | 🟡 kod + testy gotowe ([STAGE1](STAGE1.md)); czeka na test na sprzęcie |
 | 2 | Bring-up: PSP, SMU, GMC/GPUVM, IH, ring GFX/SDMA | ⬜ |
 | 3 | Wyświetlanie: DCN 3.2.1, IOFramebuffer | ⬜ |
-| 4 | IOUserClient: BO, mapowania, submit, fence'y, IOSurface | ⬜ |
-| 5 | Vulkan: winsys RADV nad kextem | ⬜ |
-| 6 | Metal: wtyczka sterownika + AIR→SPIR-V→NIR/ACO | ⬜ |
+| 4 | IOUserClient implementujący **UAPI amdgpu** (INFO, GEM, VA, CTX, CS, SYNCOBJ) + IOSurface | ⬜ |
+| 5 | Vulkan: RADV z istniejącym winsysem amdgpu, podmieniona tylko warstwa ioctl/mmap | ⬜ |
+| 6 | Metal: wtyczka (wspólna z NullMoth, jeśli licencja pozwoli) + tłumacz AIR→SPIR-V (LGPL, bez zmian) | ⬜ |
 | 7 | Integracja: WindowServer, CA, PM, sleep | ⬜ |
 | 8 | Pakowanie, OpenCore, wydania | ⬜ |
 
@@ -50,10 +50,20 @@ ile potrzebują przeportowane pliki, a nie emulacja całego jądra Linuksa.
 * **DC (display core)** jest w dużej mierze niezależny od systemu operacyjnego
   (`dc/` + `dmub/`), więc port przez warstwę `dm_services`, wzorem amdgpu_dm,
   jest realny. IOFramebuffer jest przestarzały, ale wciąż działa na x86 w Sequoi.
-* **Etap 4** powinien mieć interfejs uzgodniony z projektem NVIDIA (patrz STAGE0),
-  żeby wspólna warstwa Metal działała z obydwoma kextami.
-* **Etap 6** wymaga reverse engineeringu prywatnych interfejsów Apple
-  (`MTLDevice` bundli `AMDMTLBronzeDriver`/`AMDRadeonX6000MTLDriver`, IOAccelerator).
+* **Etap 4: decyzja po analizie NullMoth.** Nie projektujemy własnego ABI.
+  IOUserClient przyjmuje linuksowe ioctl amdgpu (`amdgpu_drm.h`, MIT) przez
+  `IOConnectCallMethod`, mmap idzie przez `IOConnectMapMemory64`, a w userspace
+  cienka warstwa podmienia `open/ioctl/mmap`. Ten sam układ działa u NullMoth dla NVK.
+  Zysk: RADV i jego testy działają bez przepisywania winsysu, a każdy ioctl
+  można porównać 1:1 z Linuksem.
+* **Etap 5** zaczyna się od `vulkaninfo` i testów compute, które na Linuksie
+  przechodzą na tej samej karcie: ten sam strumień ioctl, więc różnice wskazują
+  błąd w kexcie.
+* **Etap 6**: NullMoth pokazał już, jak Metal znajduje wtyczkę (`MetalPluginName`,
+  `MetalPluginClassName` na usłudze IOAccelerator) i jak wygląda `MTLDevice` nad Vulkanem.
+  Ich wtyczka jest na PolyForm Noncommercial, więc albo wspólny projekt z autorem, albo
+  własna implementacja. Reverse engineering prywatnych interfejsów Apple
+  (bundle AMD, IOAccelerator) jest potrzebny w mniejszym zakresie niż zakładał plan.
   Niepewność prawna: interoperacyjność zwykle przemawia za RE interfejsów, ale
   to nie jest porada prawna.
 * **Horyzont**: macOS 26 jest ostatnim wydaniem na x86_64, więc użyteczność

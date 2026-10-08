@@ -5,33 +5,33 @@ sterownika nie zostawia Cię bez ekranu i bez logów.
 
 ## 1. Współpraca zamiast pisania wszystkiego od zera
 
-Warstwa Metal-nad-Vulkanem i tłumacz shaderów nie zależą od producenta karty.
-Stan na październik 2026 (nie udało mi się zweryfikować nazwy ani repozytorium):
+Projekt NVIDIA to **NullMoth NVIDIA Driver**:
+<https://github.com/nullmoth/nvidia-macos-driver> (v1.1.0, Sequoia 15.7/15.8,
+RTX 5060). Pełna analiza: [NULLMOTH-ANALYSIS.md](NULLMOTH-ANALYSIS.md). Najważniejsze:
 
-* na r/hackintosh pojawiły się wpisy o hobbystycznym sterowniku NVIDIA
-  (RTX 3070 Ti, obraz działa, akceleracja czeka na rozruch GSP) i o tłumaczeniu
-  Metal→Vulkan, które według komentujących jest częściowo otwarte, ale we
-  wczesnej alfie.
-* Gotowe projekty działające w odwrotną stronę (Vulkan nad Metalem: MoltenVK,
-  KosmicKrisp) **nie** rozwiązują naszego problemu, ale ich kod pokazuje, jak
-  mapują się pojęcia obu API.
+* Ich wtyczka Metal ładuje sterownik Vulkan przez `dlopen()` i korzysta głównie ze
+  standardowego Vulkana, więc **nad RADV może działać po wyłączeniu hooków NVK**.
+* Tłumacz AIR→SPIR-V jest na LGPL i nadaje się do użycia bez zmian.
+* Kernel↔userspace robią przez **emulację linuksowych ioctl na IOKit**. U nas to
+  oznacza: kext implementuje UAPI amdgpu, a RADV działa z istniejącym winsysem.
+* Wtyczka i kexty są na **PolyForm Noncommercial**, więc nie wolno ich wkleić do
+  naszego repo MIT bez zgody autora.
 
-Do zrobienia ręcznie (wymaga Twojego konta, nie da się tego zautomatyzować):
+Do zrobienia ręcznie (wymaga Twojego konta): wejdź na Discorda NullMoth (link nie
+jest podany w README; jest wspomniany przy zgłaszaniu błędów w aplikacji 1401)
+i napisz do autora. Szablon:
 
-1. Znajdź repo i Discorda projektu NVIDIA z wątku na r/hackintosh.
-2. Napisz do autora. Szablon:
-
-   > Cześć, piszę otwarty sterownik macOS dla RDNA3 (RX 7800 XT):
-   > https://github.com/voten641/rdna3-hackintosh. Mam kext, który rozpoznaje
-   > kartę i czyta tablicę IP discovery. Twoja warstwa Metal→Vulkan i tłumacz
-   > shaderów są niezależne od producenta, a ja i tak muszę napisać backend
-   > winsys RADV pod własny kext. Czy jesteś otwarty na wspólny interfejs
-   > kext↔userspace (alokacja BO, submit, fence'y, IOSurface), żeby oba
-   > sterowniki mogły używać tej samej warstwy Metal? Chętnie dostosuję się
-   > do Twojej licencji i struktury repo.
-
-3. Ustalcie licencję. Ten projekt jest na MIT (jak amdgpu i Mesa). Jeśli ich kod
-   jest na GPL, warstwy muszą zostać rozdzielone procesowo lub licencyjnie.
+> Cześć, piszę otwarty sterownik macOS dla RDNA3 (RX 7800 XT):
+> https://github.com/voten641/rdna3-hackintosh. Kext rozpoznaje już kartę i czyta
+> tablicę IP discovery. Planuję zrobić jak Wy: kext emulujący linuksowe UAPI
+> (u mnie amdgpu) przez IOConnectCallMethod, a nad nim RADV z Mesy. Wasza wtyczka
+> Metal ładuje ICD przez dlopen, więc mogłaby działać nad RADV.
+> 1) Czy rozważylibyście tryb „generic Vulkan” wtyczki (hooki NVK opcjonalne)?
+> 2) Czy możliwa jest licencja pozwalająca łączyć wtyczkę z kodem MIT, albo
+>    wspólna, neutralna część wtyczki?
+> 3) Jakiego minimalnego zestawu cech Vulkana wymaga wtyczka? Sprawdzę je
+>    wcześniej na RADV pod Linuksem.
+> Chętnie oddam z powrotem poprawki do wtyczki i tłumacza.
 
 ## 2. Sprzęt
 

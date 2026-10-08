@@ -37,6 +37,11 @@ w Sequoi):
 
 Alternatywnie, przy wyłączonym SIP: `sudo kmutil load -p build/RDNA3Accel.kext`.
 
+Wstrzykiwanie przez OpenCore działa tylko dopóki kext linkuje wyłącznie z IOPCIFamily.
+Od Etapu 3 (IOFramebuffer, IOAccelerator) kexty muszą ładować się z Auxiliary Kernel
+Collection (`/Library/Extensions` + `kmutil`), bo IOGraphicsFamily i IOAcceleratorFamily2
+istnieją tylko w kolekcjach jądra Apple. Tak robi NullMoth, patrz [NULLMOTH-ANALYSIS](NULLMOTH-ANALYSIS.md).
+
 ## Co sprawdzić po starcie
 
 ```sh

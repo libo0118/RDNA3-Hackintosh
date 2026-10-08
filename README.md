@@ -17,7 +17,7 @@ zaczynając od **Radeon RX 7800 XT (Navi 32, PCI `1002:747E`)**.
 | `tools/amd_discovery_dump.c` | Dekoder blobu discovery na hoście: wersje IP, bazy rejestrów, potrzebne pliki firmware |
 | `tools/linux/` | Zrzut danych referencyjnych z tej samej karty pod Linuksem/amdgpu |
 | `tools/macos/` | Wyciąga blob discovery opublikowany przez kext z `ioreg` |
-| `docs/` | Plan, przygotowanie stanowiska, instrukcje testów, licencje firmware |
+| `docs/` | Plan, przygotowanie stanowiska, instrukcje testów, licencje firmware, [analiza sterownika NullMoth (NVIDIA)](docs/NULLMOTH-ANALYSIS.md) |
 
 ## Szybki start
 
