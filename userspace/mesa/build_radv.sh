@@ -49,14 +49,19 @@ ls -la "$WORK/install/lib"
 
 # dynamic_lookup hides genuinely missing symbols: list every undefined
 # symbol that neither our libdrm/libdrm_amdgpu nor libSystem/frameworks
-# provide, and that is not an optional (weak) Vulkan entrypoint.
+# provide and that is not an optional Vulkan entrypoint (prefix_VkName).
 LIB="$WORK/install/lib/libvulkan_radeon.dylib"
 if [ -f "$LIB" ]; then
     nm -u "$LIB" | sort -u > "$WORK/undefined.txt"
     { nm -gU "$PREFIX/lib/libdrm.2.dylib"; nm -gU "$PREFIX/lib/libdrm_amdgpu.1.dylib"; } \
         | awk '{print $3}' | sort -u > "$WORK/provided.txt"
-    weak=$(nm -m "$LIB" | awk '/weak external/ && /undefined/ {print $NF}' | sort -u)
-    echo "== undefined in libvulkan_radeon.dylib, not from libdrm*, not weak:"
-    comm -23 "$WORK/undefined.txt" "$WORK/provided.txt" | grep -vxF -f <(printf '%s\n' $weak) \
-        | grep -vE '^_(_|dyld|objc|os_|pthread|mach|kevent|dispatch|CF|IO)' | head -200 || true
+    # anything libSystem exports
+    nm -gU /usr/lib/system/libsystem_*.dylib /usr/lib/libSystem.B.dylib 2>/dev/null \
+        | awk 'NF==3 {print $3}' | sort -u > "$WORK/libsystem.txt" || true
+    comm -23 "$WORK/undefined.txt" "$WORK/provided.txt" \
+        | comm -23 - "$WORK/libsystem.txt" \
+        | grep -vE '^_[a-z0-9_]+_[A-Z][A-Za-z0-9]+$' \
+        | grep -vE '^_(_|dyld|objc|os_|pthread|mach|kevent|dispatch|CF|IO|xpc)' > "$WORK/missing.txt" || true
+    echo "== $(wc -l < "$WORK/undefined.txt") undefined, $(wc -l < "$WORK/missing.txt") possibly missing:"
+    cat "$WORK/missing.txt"
 fi
