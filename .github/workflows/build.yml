@@ -1,0 +1,36 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests + fuzz (ASan/UBSan)
+        run: make test
+      - name: Host tools
+        run: make tools
+
+  kext:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-path
+      - name: Build RDNA3Accel.kext (x86_64)
+        run: make -C kext
+      - name: Inspect
+        run: |
+          file build/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel
+          make -C kext check
+      - name: Host tests on macOS
+        run: make test tools
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RDNA3Accel-kext
+          path: build/RDNA3Accel.kext

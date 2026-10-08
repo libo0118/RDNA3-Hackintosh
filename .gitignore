@@ -1,0 +1,6 @@
+build/
+*.o
+*.dSYM/
+.DS_Store
+# never commit AMD firmware blobs, see docs/FIRMWARE.md
+firmware/*.bin

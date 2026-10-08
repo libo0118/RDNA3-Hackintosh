@@ -1,0 +1,60 @@
+# Plan
+
+Legenda: ✅ zrobione · 🟡 w toku · ⬜ nie zaczęte
+
+| Etap | Cel | Status |
+|---|---|---|
+| 0 | Stanowisko testowe, kontakt z projektem NVIDIA | 🟡 dokumentacja gotowa ([STAGE0](STAGE0.md)); sprzęt i kontakt po Twojej stronie |
+| 1 | Kext rozpoznaje kartę, mapuje BAR, czyta rejestry i discovery | 🟡 kod + testy gotowe ([STAGE1](STAGE1.md)); czeka na test na sprzęcie |
+| 2 | Bring-up: PSP, SMU, GMC/GPUVM, IH, ring GFX/SDMA | ⬜ |
+| 3 | Wyświetlanie: DCN 3.2.1, IOFramebuffer | ⬜ |
+| 4 | IOUserClient: BO, mapowania, submit, fence'y, IOSurface | ⬜ |
+| 5 | Vulkan: winsys RADV nad kextem | ⬜ |
+| 6 | Metal: wtyczka sterownika + AIR→SPIR-V→NIR/ACO | ⬜ |
+| 7 | Integracja: WindowServer, CA, PM, sleep | ⬜ |
+| 8 | Pakowanie, OpenCore, wydania | ⬜ |
+
+## Etap 1: warunek ukończenia
+
+* kext ładuje się na Sequoi i dopasowuje do 7800 XT na wszystkich poziomach 0–3
+  bez zawieszenia;
+* `amd_discovery_dump` z blobu macOS == z blobu Linuksa (patrz STAGE1).
+
+## Etap 2: kolejność prac (port z amdgpu)
+
+Kolejność odpowiada `amdgpu_device_ip_init()` dla SOC21. Każdy krok najpierw
+**czyta** stan, porównuje z Linuksem, dopiero potem **pisze**.
+
+1. **Warstwa rejestrów**: tablica `reg_offset[hwip][inst][seg]` z discovery,
+   makra jak `SOC15_REG_OFFSET`/`RREG32_SOC15`, dostęp SMN (pośredni przez NBIO 4.3).
+2. **Firmware**: ładowanie z zasobów kextu, parsowanie nagłówków `amdgpu_firmware_header`
+   (`amdgpu_ucode.h`, MIT).
+3. **NBIO 4.3 / HDP 6.x**: doorbelle, flush HDP.
+4. **GMC 11 + MMHUB 3.0.x / GFXHUB 11** (dokładne wersje z discovery): rozkład VRAM, aperture, tablice stron GPUVM
+   (VMID0 dla jądra), bufor ochronny (dummy page).
+5. **PSP 13.0.7**: rozruch SOS, ring PSP, ładowanie TMR, a potem za pomocą PSP firmware GFX,
+   SDMA, SMU, DMCUB (front-door loading, jak amdgpu dla RDNA3).
+6. **SMU 13.0.7**: tylko komunikaty startowe i domyślne zegary; bez overdrive.
+7. **IH 6.0.x (OSSSYS)**: ring przerwań, MSI w IOKit (`IOInterruptEventSource` z MSI).
+8. **GFX 11 / MES**: RLC, IMU, MES (na RDNA3 kolejki zarządza MES), ring KIQ;
+   **SDMA 6.0**: pierwszy ring.
+9. **Test**: `WRITE_DATA` na ringu GFX/SDMA do bufora w VRAM i odczyt przez
+   `MM_INDEX`, potem fence + przerwanie.
+
+Sprzęt jest MIT-owy w amdgpu, ale kod jest pisany pod linuksowe API (DRM, TTM,
+`dma_fence`, kref). Plan: cienka warstwa zgodności (`linux_compat/`), tylko tyle,
+ile potrzebują przeportowane pliki, a nie emulacja całego jądra Linuksa.
+
+## Etapy 3–8: znane decyzje i ryzyka
+
+* **DC (display core)** jest w dużej mierze niezależny od systemu operacyjnego
+  (`dc/` + `dmub/`), więc port przez warstwę `dm_services`, wzorem amdgpu_dm,
+  jest realny. IOFramebuffer jest przestarzały, ale wciąż działa na x86 w Sequoi.
+* **Etap 4** powinien mieć interfejs uzgodniony z projektem NVIDIA (patrz STAGE0),
+  żeby wspólna warstwa Metal działała z obydwoma kextami.
+* **Etap 6** wymaga reverse engineeringu prywatnych interfejsów Apple
+  (`MTLDevice` bundli `AMDMTLBronzeDriver`/`AMDRadeonX6000MTLDriver`, IOAccelerator).
+  Niepewność prawna: interoperacyjność zwykle przemawia za RE interfejsów, ale
+  to nie jest porada prawna.
+* **Horyzont**: macOS 26 jest ostatnim wydaniem na x86_64, więc użyteczność
+  projektu kończy się wraz z jego wsparciem.
