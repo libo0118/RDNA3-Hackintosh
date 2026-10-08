@@ -3,9 +3,10 @@
 Otwartoźródłowy sterownik macOS (x86_64, Hackintosh) dla kart AMD RDNA3,
 zaczynając od **Radeon RX 7800 XT (Navi 32, PCI `1002:747E`)**.
 
-> **Status: Etap 1 (rozpoznanie karty).** Sterownik jeszcze niczego nie
-> wyświetla ani nie akceleruje. Pełna ścieżka do Metal to projekt na
-> miesiące–lata, patrz [docs/ROADMAP.md](docs/ROADMAP.md).
+> **Status:** kod etapów 1, 2 (PSP/firmware/SMU), 4, 5 i 6 jest napisany i
+> buduje się w CI, ale **nic nie było jeszcze uruchomione na prawdziwej karcie**.
+> Sterownik niczego nie wyświetla ani nie akceleruje. Stan każdego etapu:
+> [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Co jest w repo
 
@@ -17,6 +18,11 @@ zaczynając od **Radeon RX 7800 XT (Navi 32, PCI `1002:747E`)**.
 | `tools/amd_discovery_dump.c` | Dekoder blobu discovery na hoście: wersje IP, bazy rejestrów, potrzebne pliki firmware |
 | `tools/linux/` | Zrzut danych referencyjnych z tej samej karty pod Linuksem/amdgpu |
 | `tools/macos/` | Wyciąga blob discovery opublikowany przez kext z `ioreg` |
+| `hw/` | Przenośny bring-up (PSP 13.0.x, SMU 13.0.x, rejestry, VRAM), testowany na symulatorze `tests/sim_navi32.c` |
+| `uapi/` | Linuksowe UAPI amdgpu niezależne od OS (używane przez kext i testy) |
+| `userspace/` | `libdrm_xnu` (rdzeń libdrm nad IOKit) + build libdrm_amdgpu; `mesa/` = build RADV na macOS i łatki |
+| `metal/` | Wtyczka Metal i tłumacz AIR→SPIR-V z NullMoth, przystosowane do AMD |
+| `third_party/` | Nagłówki AMD/DRM (MIT) i libdrm_amdgpu (MIT) |
 | `docs/` | Plan, przygotowanie stanowiska, instrukcje testów, licencje firmware, [analiza sterownika NullMoth (NVIDIA)](docs/NULLMOTH-ANALYSIS.md) |
 
 ## Szybki start
