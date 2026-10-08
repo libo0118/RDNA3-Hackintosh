@@ -9,11 +9,16 @@
  *      MM_DATA, validate and decode it, publish it in the IORegistry.
  *   3  + read GC GRBM_STATUS through the discovered GC register base.
  *
+ *   4  + Stage 2 bring-up on a kernel thread (RDNA3Bringup): BAR0, PSP
+ *      bootloader/sOS, TMR, all IP firmware via PSP, RLC autoload.
+ *   5  + SMU mailbox hello.
  *  -rdna3off  disables the driver entirely (probe fails).
  *
- * The driver NEVER writes anything except MM_INDEX/MM_INDEX_HI (the indirect
- * VRAM read window, which is what amdgpu does as its very first access) and
- * never enables bus mastering: there is no DMA in Stage 1.
+ * Levels 0-3 never write anything except MM_INDEX/MM_INDEX_HI (the indirect
+ * VRAM read window, which is what amdgpu does as its very first access).
+ * Levels 4+ program the GPU (PSP, firmware) - test them only with a second
+ * GPU driving the display. Bus mastering is never enabled: PSP and the
+ * firmware buffers all live in VRAM.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -27,6 +32,8 @@
 extern "C" {
 #include "amd_discovery.h"
 }
+
+class RDNA3Bringup;
 
 class RDNA3Accel : public IOService {
     OSDeclareDefaultStructors(RDNA3Accel)
@@ -45,6 +52,7 @@ private:
     IOSimpleLock *fIdxLock  = nullptr;
     uint32_t      fLevel    = 0;
     uint64_t      fVramSize = 0;
+    RDNA3Bringup *fBringup  = nullptr;
 
     /* level 0 */
     void      readConfigSpace();

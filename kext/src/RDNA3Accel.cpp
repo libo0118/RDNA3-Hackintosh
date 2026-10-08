@@ -5,6 +5,7 @@
  */
 #include "RDNA3Accel.hpp"
 #include "RDNA3Regs.h"
+#include "RDNA3Bringup.hpp"
 
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSData.h>
@@ -56,8 +57,22 @@ bool RDNA3Accel::start(IOService *provider)
         } else if (mapMmio() && waitForIfwi() && readVramSize() && fLevel >= 2) {
             amd_discovery *disc = (amd_discovery *)IOMalloc(sizeof(*disc));
             if (disc) {
-                if (readDiscovery(disc) && fLevel >= 3)
+                bool ok = readDiscovery(disc);
+                if (ok && fLevel >= 3)
                     readGcStatus(disc);
+                if (ok && fLevel >= 4) {
+                    fBringup = new RDNA3Bringup;
+                    if (fBringup && fBringup->init(this, fPci, fMmioMap, fLevel, disc, fVramSize)) {
+                        fBringup->start();
+                    } else {
+                        LOG("cannot set up Stage 2 bring-up");
+                        if (fBringup) {
+                            fBringup->stopAndFree();
+                            delete fBringup;
+                            fBringup = nullptr;
+                        }
+                    }
+                }
                 IOFree(disc, sizeof(*disc));
             }
         }
@@ -71,6 +86,11 @@ bool RDNA3Accel::start(IOService *provider)
 void RDNA3Accel::stop(IOService *provider)
 {
     LOG("stop");
+    if (fBringup) {
+        fBringup->stopAndFree();
+        delete fBringup;
+        fBringup = nullptr;
+    }
     OSSafeReleaseNULL(fMmioMap);
     fMmio = nullptr;
     fMmioLen = 0;

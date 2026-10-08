@@ -19,7 +19,7 @@ ARCH     := -arch x86_64 -mmacosx-version-min=11.0
 DEFS     := -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
             -DKEXT_VERSION='"$(VERSION)"'
 COMMONF  := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc \
-            -I$(KHDR) -isystem $(RESDIR)/include -I../common -Isrc \
+            -I$(KHDR) -isystem $(RESDIR)/include -I../common -I../hw -I../third_party/amd -Isrc \
             -O2 -g -Wall -Wextra -Werror -Wno-unused-parameter $(DEFS)
 CFLAGS   := $(COMMONF) -std=gnu11
 CXXFLAGS := $(COMMONF) -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions \
@@ -27,22 +27,32 @@ CXXFLAGS := $(COMMONF) -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions \
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext \
             -lkmod -lkmodc++ -lcc_kext
 
-OBJS := $(OBJDIR)/RDNA3Accel.o $(OBJDIR)/amd_discovery.o $(OBJDIR)/kmod_info.o
+CXXSRC := src/RDNA3Accel.cpp src/RDNA3Bringup.cpp
+CSRC   := ../common/amd_discovery.c ../common/amd_fw.c ../hw/rdna3_hw.c ../hw/psp13.c \
+          ../hw/smu13.c src/kmod_info.c
+HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../third_party/amd/*.h)
+OBJS   := $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(CXXSRC))) \
+          $(patsubst %.c,$(OBJDIR)/%.o,$(notdir $(CSRC)))
+vpath %.cpp src
+vpath %.c src ../common ../hw
 
-.PHONY: all check clean
+.PHONY: all check clean firmware
+
+# make firmware FW_DIR=/path/to/linux-firmware/amdgpu
+# copies the Navi 32 blobs + LICENSE.amdgpu into the built kext (never into git)
+FW_FILES := psp_13_0_7_sos.bin smu_13_0_7.bin sdma_6_0_3.bin gc_11_0_3_imu.bin \
+            gc_11_0_3_pfp.bin gc_11_0_3_me.bin gc_11_0_3_mec.bin gc_11_0_3_rlc.bin \
+            gc_11_0_3_mes_2.bin gc_11_0_3_mes1.bin dcn_3_2_1_dmcub.bin vcn_4_0_4.bin
 
 all: $(BUNDLE)
 
 $(OBJDIR):
 	mkdir -p $@
 
-$(OBJDIR)/RDNA3Accel.o: src/RDNA3Accel.cpp src/RDNA3Accel.hpp src/RDNA3Regs.h ../common/amd_discovery.h | $(OBJDIR)
+$(OBJDIR)/%.o: %.cpp $(HDRS) | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-$(OBJDIR)/amd_discovery.o: ../common/amd_discovery.c ../common/amd_discovery.h | $(OBJDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(OBJDIR)/kmod_info.o: src/kmod_info.c | $(OBJDIR)
+$(OBJDIR)/%.o: %.c $(HDRS) | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUNDLE): $(OBJS) Info.plist
@@ -60,6 +70,13 @@ check: $(BUNDLE)
 	@# kextlibs can only resolve x86_64 KPIs on an Intel Mac / Hackintosh,
 	@# on Apple Silicon CI runners it reports everything as missing.
 	@if [ "$$(uname -m)" = x86_64 ]; then kextlibs -xml $(BUNDLE); fi
+
+firmware: $(BUNDLE)
+	@test -n "$(FW_DIR)" || (echo "set FW_DIR=<linux-firmware>/amdgpu" && false)
+	mkdir -p $(BUNDLE)/Contents/Resources
+	for f in $(FW_FILES); do cp "$(FW_DIR)/$$f" $(BUNDLE)/Contents/Resources/ || exit 1; done
+	-cp "$(FW_DIR)/../LICENSE.amdgpu" "$(FW_DIR)/../LICENSES/LICENSE.amdgpu" $(BUNDLE)/Contents/Resources/ 2>/dev/null
+	@echo "firmware copied into $(BUNDLE)/Contents/Resources"
 
 clean:
 	rm -rf $(OBJDIR) $(BUNDLE)
