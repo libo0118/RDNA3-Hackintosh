@@ -67,3 +67,29 @@ jobs:
           path: |
             build/metal/RDNA3MTLDriver.bundle
             build/metal/librdna3mtl_translate.dylib
+
+  radv-macos:
+    # Experimental: drives the Stage 5 port. Failures here are the to-do list.
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          brew install meson ninja glslang pkgconf || true
+          python3 -m pip install --break-system-packages mako pyyaml packaging || python3 -m pip install mako pyyaml packaging
+      - name: Build RADV against libdrm_xnu
+        run: userspace/mesa/build_radv.sh build/mesa
+      - name: Error summary
+        if: always()
+        run: |
+          grep -E "error:|ERROR:|meson.build:[0-9]+:[0-9]+: ERROR" build/mesa/meson-setup.log build/mesa/ninja.log 2>/dev/null | sort | uniq -c | sort -rn | head -80 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: radv-macos-logs
+          path: |
+            build/mesa/meson-setup.log
+            build/mesa/ninja.log
+            build/mesa/install/lib/libvulkan_radeon.dylib
+            build/mesa/install/share/vulkan/icd.d
