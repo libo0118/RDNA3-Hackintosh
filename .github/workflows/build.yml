@@ -35,6 +35,12 @@ jobs:
           xcrun --sdk macosx --show-sdk-path
       - name: Build RDNA3Accel.kext (x86_64)
         run: make -C kext
+      - name: Build RDNA3Accelerator.kext (Stage 7, Sequoia and Tahoe layouts)
+        run: |
+          make -C accel
+          make -C accel check
+          make -C accel clean && make -C accel NM_TAHOE=1
+          make -C accel clean && make -C accel
       - name: Inspect
         run: |
           file build/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel
@@ -48,6 +54,7 @@ jobs:
           name: RDNA3Accel-kext
           path: |
             build/RDNA3Accel.kext
+            build/RDNA3Accelerator.kext
             build/userspace/rdna3_drminfo
             build/userspace/libdrm_xnu.dylib
 

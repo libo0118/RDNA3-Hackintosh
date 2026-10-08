@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""gen_tahoe_fwd.py NVACCEL_BINARY MISSING_SYMBOLS — writes tahoe_fwd.h for the macOS 26 build.
+"""gen_tahoe_fwd.py RD3ACCEL_BINARY MISSING_SYMBOLS — writes tahoe_fwd.h for the macOS 26 build.
 
 Tahoe (26) made 27 IOAcceleratorFamily2 methods private and retyped 7 more (unsigned int -> enum), so a kext can no longer
-link to them by name. NVAccel never calls them: they only fill vtable slots our classes inherit. The vtable layout itself
+link to them by name. RDNA3Accelerator never calls them: they only fill vtable slots our classes inherit. The vtable layout itself
 is unchanged (every base vtable has the same slot count and order as on macOS 15; checked with tools/vtdump.py against the
 26.7.1 KDK), and Apple still exports every base vtable. So for the 26 build each such slot gets an override that jumps
 through the base class's exported vtable, which reaches Apple's implementation without naming it."""
@@ -10,11 +10,11 @@ import re, subprocess, sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', 'tools'))
 from vtdump import vtables
 HERE = os.path.dirname(os.path.abspath(__file__))
-BASES = {'NVResource': 'IOAccelResource2', 'NVSysMemory': 'IOAccelSysMemory', 'NVVidMemory': 'IOAccelVidMemory',
-         'NVSurface': 'IOAccelLegacySurface', 'NVDisplayPipe': 'IOAccelLegacyDisplayPipe', 'NVGLContext': 'IOAccelGLContext2',
-         'NV2DContext': 'IOAccel2DContext2', 'NVCLContext': 'IOAccelCLContext2', 'NVVideoContext': 'IOAccelVideoContext2',
-         'NVEventMachine': 'IOAccelEventMachineFast2', 'NVDisplayMachine': 'IOAccelLegacyDisplayMachine', 'NVTask': 'IOAccelTask',
-         'NVMemoryMap': 'IOAccelMemoryMap', 'NVAccel': 'IOGraphicsAccelerator2'}
+BASES = {'RD3Resource': 'IOAccelResource2', 'RD3SysMemory': 'IOAccelSysMemory', 'RD3VidMemory': 'IOAccelVidMemory',
+         'RD3Surface': 'IOAccelLegacySurface', 'RD3DisplayPipe': 'IOAccelLegacyDisplayPipe', 'RD3GLContext': 'IOAccelGLContext2',
+         'RD32DContext': 'IOAccel2DContext2', 'RD3CLContext': 'IOAccelCLContext2', 'RD3VideoContext': 'IOAccelVideoContext2',
+         'RD3EventMachine': 'IOAccelEventMachineFast2', 'RD3DisplayMachine': 'IOAccelLegacyDisplayMachine', 'RD3Task': 'IOAccelTask',
+         'RD3MemoryMap': 'IOAccelMemoryMap', 'RDNA3Accelerator': 'IOGraphicsAccelerator2'}
 def decls():
     out = {}
     for sub in ('iofam', 're'):

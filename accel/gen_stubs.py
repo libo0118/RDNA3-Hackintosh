@@ -3,10 +3,10 @@
 v1 missed the family's own overrides because its regex did not accept `APPLE_KEXT_OVERRIDE` before the `;`, so it also
    stubbed methods the family implements (getOwningTask → nullptr …). A stub over a real implementation is a silent lie."""
 import re
-spec = [("NVResource",["IOAccelResource2"]),("NVSysMemory",["IOAccelSysMemory","IOAccelMemory"]),("NVVidMemory",["IOAccelVidMemory","IOAccelMemory"]),
-        ("NVSurface",["IOAccelLegacySurface","IOAccelSurface"]),("NVDisplayPipe",["IOAccelLegacyDisplayPipe","IOAccelDisplayPipe"]),
-        ("NVGLContext",["IOAccelGLContext2","IOAccelContext2","IOAccelSubmitter2"]),("NV2DContext",["IOAccel2DContext2","IOAccelContext2","IOAccelSubmitter2"]),
-        ("NVCLContext",["IOAccelCLContext2","IOAccelContext2","IOAccelSubmitter2"]),("NVVideoContext",["IOAccelVideoContext2","IOAccelContext2","IOAccelSubmitter2"])]
+spec = [("RD3Resource",["IOAccelResource2"]),("RD3SysMemory",["IOAccelSysMemory","IOAccelMemory"]),("RD3VidMemory",["IOAccelVidMemory","IOAccelMemory"]),
+        ("RD3Surface",["IOAccelLegacySurface","IOAccelSurface"]),("RD3DisplayPipe",["IOAccelLegacyDisplayPipe","IOAccelDisplayPipe"]),
+        ("RD3GLContext",["IOAccelGLContext2","IOAccelContext2","IOAccelSubmitter2"]),("RD32DContext",["IOAccel2DContext2","IOAccelContext2","IOAccelSubmitter2"]),
+        ("RD3CLContext",["IOAccelCLContext2","IOAccelContext2","IOAccelSubmitter2"]),("RD3VideoContext",["IOAccelVideoContext2","IOAccelContext2","IOAccelSubmitter2"])]
 def decls(hdr):
     out=[]
     for l in open("iofam/%s.h"%hdr):
@@ -31,4 +31,4 @@ for cls, chain in spec:
         code.append("    %s %s(%s)%s APPLE_KEXT_OVERRIDE { ALOG(\"%s::%s\");%s }" % (t, n, named, c, cls, n, ret)); n_st+=1
     per[cls]=len(pending)
     code.append("};\nOSDefineMetaClassAndStructors(%s, %s)" % (cls, chain[0]))
-open("nvaccel_stubs.h","w").write("\n".join(code)+"\n"); print("stubs:", n_st, per)
+open("rdna3accel_stubs.h","w").write("\n".join(code)+"\n"); print("stubs:", n_st, per)

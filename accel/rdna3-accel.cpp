@@ -1,7 +1,11 @@
 /*
- * NullMoth NVIDIA driver for macOS
+ * Derived from the NullMoth NVIDIA driver for macOS
  * Copyright (c) 2026 NullMoth Systems.
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ *
+ * AMD (RDNA3-Hackintosh) port: identifiers renamed so nothing collides
+ * with a NullMoth install; see PROVENANCE.md. Used with the
+ * author's permission for AMD-only work.
  */
 
 #include <IOKit/IOService.h>
@@ -18,45 +22,56 @@
 #include "IOAccelLegacyDisplayMachine.h"
 #include "IOAccelTask.h"
 #include "IOAccelMemoryMap.h"
-#include "../nvrm_gpuva_abi.h"
-class NVMemoryMap;
-static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
+#define RD3K_SS_KERNEL_ABI 1
+#include "rdna3k_abi.h"
+class RD3MemoryMap;
+static unsigned long long rd3AccelGpuVaAlloc(IOAccelMemoryMap *map,
                                            unsigned long long len, unsigned long long align);
-static void               nvAccelGpuVaFree(IOAccelMemoryMap *map);
-static bool               nvAccelFlipTo(IOAccelResource2 *res);
-static bool               nvAccelCopyToScanout(IOAccelResource2 *res);
-void                      nvAccelSwapProbe(IOAccelResource2 *a1, IOAccelResource2 *a2);
-bool                      nvAccelResHasContent(IOAccelResource2 *res);
-static void               nvAccelWriteStamp(int index, unsigned int value);
-#define ALOG(fmt, ...) do { kprintf("NVAccel: " fmt "\n", ##__VA_ARGS__); IOLog("NVAccel: " fmt "\n", ##__VA_ARGS__); } while (0)
+static void               rd3AccelGpuVaFree(IOAccelMemoryMap *map);
+static bool               rd3AccelFlipTo(IOAccelResource2 *res);
+static bool               rd3AccelCopyToScanout(IOAccelResource2 *res);
+void                      rd3AccelSwapProbe(IOAccelResource2 *a1, IOAccelResource2 *a2);
+bool                      rd3AccelResHasContent(IOAccelResource2 *res);
+static void               rd3AccelWriteStamp(int index, unsigned int value);
+/* Navi 3x display devices (data/amdgpu.ids); the core kext must also claim the card */
+static bool rd3SupportedDevice(unsigned dev)
+{
+    switch (dev) {
+    case 0x7448: case 0x744c: case 0x745e:            /* Navi 31 */
+    case 0x7470: case 0x747e:                         /* Navi 32: RX 7800 XT / 7700 XT */
+    case 0x7480: case 0x7483: case 0x7489:            /* Navi 33 */
+        return true;
+    default:
+        return false;
+    }
+}
+#define ALOG(fmt, ...) do { kprintf("RDNA3Accelerator: " fmt "\n", ##__VA_ARGS__); IOLog("RDNA3Accelerator: " fmt "\n", ##__VA_ARGS__); } while (0)
 #include <libkern/c++/OSSymbol.h>
-#include "nvrm_vram_abi.h"
 #include <IOKit/IODeviceMemory.h>
 #include "tahoe_fwd.h"   // macOS 26: inherited slots Apple no longer exports, forwarded through its vtables
-#include "nvaccel_stubs.h"
-#include "nvkms-kapi.h"
+#include "rdna3accel_stubs.h"
 #include <sys/sysctl.h>
 #include <libkern/OSAtomic.h>
 static volatile SInt64 gCntVmAlloc, gCntVmAllocBytes, gCntVmDealloc, gCntVmDeallocBytes, gCntVmRefused,
                        gCntResNew, gCntResFree, gCntMapCommit, gCntMapRelease, gCntMapFree;
-static void nvaccelInstallSysctl(void);
-static int gNvAccelArmed = 0;
-static const unsigned kNvMaxFB = 4;
-static unsigned gNvHeadsPublished = 0, gNvHeadsRegistered = 0;
-static unsigned gNvHeadsPiped = 0;
+static void rdna3accelInstallSysctl(void);
+static int gRd3AccelArmed = 0;
+static const unsigned kRd3MaxFB = 4;
+static unsigned gRd3HeadsPublished = 0, gRd3HeadsRegistered = 0;
+static unsigned gRd3HeadsPiped = 0;
 
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d); extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
-extern "C" { KMOD_EXPLICIT_DECL(com.nullmoth.NVAccel, "0.1", _start, _stop) }
+extern "C" { KMOD_EXPLICIT_DECL(io.github.voten641.RDNA3Accelerator, "0.1", _start, _stop) }
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d) { return KERN_SUCCESS; }
 extern "C" kern_return_t _stop(kmod_info_t *ki, void *d)  { return KERN_SUCCESS; }
 
-class NVEventMachine : public IOAccelEventMachineFast2 {
-    OSDeclareDefaultStructors(NVEventMachine)
-    NM_TAHOE_FWD(NVEventMachine)
+class RD3EventMachine : public IOAccelEventMachineFast2 {
+    OSDeclareDefaultStructors(RD3EventMachine)
+    NM_TAHOE_FWD(RD3EventMachine)
 public:
     void writeStamp(int s, vendevtCommandRec *r, unsigned int v) APPLE_KEXT_OVERRIDE {
         (void)r;
-        nvAccelWriteStamp(s, v);
+        rd3AccelWriteStamp(s, v);
     }
     void prepareBarrier(vendevtBarrierRec *b) APPLE_KEXT_OVERRIDE { ALOG("EM prepareBarrier(%p)", b); }
     void completeBarrier(vendevtBarrierRec *b) APPLE_KEXT_OVERRIDE { ALOG("EM completeBarrier(%p)", b); }
@@ -65,13 +80,13 @@ public:
     bool checkChannelProgress(int ch) APPLE_KEXT_OVERRIDE { return true; }
     void *eventTimeout(int stamp) APPLE_KEXT_OVERRIDE { ALOG("EM eventTimeout(%d) — ignored, we do not use family channels", stamp); return nullptr; }
 };
-OSDefineMetaClassAndStructors(NVEventMachine, IOAccelEventMachineFast2)
+OSDefineMetaClassAndStructors(RD3EventMachine, IOAccelEventMachineFast2)
 static void (*gEnableAccel)(const char *why) = nullptr;
-static int gNvScanout = 0;
-static int gNvAperture = 0;
-class NVDisplayMachine : public IOAccelLegacyDisplayMachine {
-    OSDeclareDefaultStructors(NVDisplayMachine)
-    NM_TAHOE_FWD(NVDisplayMachine)
+static int gRd3Scanout = 0;
+static int gRd3Aperture = 0;
+class RD3DisplayMachine : public IOAccelLegacyDisplayMachine {
+    OSDeclareDefaultStructors(RD3DisplayMachine)
+    NM_TAHOE_FWD(RD3DisplayMachine)
 public:
     bool displayModeWillChange() APPLE_KEXT_OVERRIDE { ALOG("DM displayModeWillChange"); return true; }
     bool displayModeDidChange() APPLE_KEXT_OVERRIDE {
@@ -80,32 +95,32 @@ public:
         return true;
     }
 };
-OSDefineMetaClassAndStructors(NVDisplayMachine, IOAccelLegacyDisplayMachine)
-#define NV_PRIVATE_VA_BASE  0x800000000000ull
-#define NV_PRIVATE_VA_SIZE  0x000010000000ull
-class NVTask : public IOAccelTask {
-    OSDeclareDefaultStructors(NVTask)
-    NM_TAHOE_FWD(NVTask)
+OSDefineMetaClassAndStructors(RD3DisplayMachine, IOAccelLegacyDisplayMachine)
+#define RD3_PRIVATE_VA_BASE  0x800000000000ull
+#define RD3_PRIVATE_VA_SIZE  0x000010000000ull
+class RD3Task : public IOAccelTask {
+    OSDeclareDefaultStructors(RD3Task)
+    NM_TAHOE_FWD(RD3Task)
 public:
     IORangeAllocator *fVa = nullptr;
     unsigned fAllocLogged = 0, fPrivate = 0;
     unsigned long long allocate(const IOAccelMemoryMap *map) APPLE_KEXT_OVERRIDE {
         const unsigned long long len = map ? ((IOAccelMemoryMap *)map)->getLength() : 0;
         const unsigned long long align = map ? *(const volatile unsigned long long *)((const unsigned char *)map + 0x80) : 0;
-        unsigned long long got = nvAccelGpuVaAlloc((IOAccelMemoryMap *)map, len, align);
+        unsigned long long got = rd3AccelGpuVaAlloc((IOAccelMemoryMap *)map, len, align);
         if (!got && fAllocLogged < 12)
-            ALOG("NVTask::allocate: RM refused %llu bytes (align %llu) -- no GPU address", len, align);
+            ALOG("RD3Task::allocate: RM refused %llu bytes (align %llu) -- no GPU address", len, align);
         return got;
     }
     void deallocate(const IOAccelMemoryMap *map, unsigned long long addr) APPLE_KEXT_OVERRIDE {
         (void)addr;
-        nvAccelGpuVaFree((IOAccelMemoryMap *)map);
+        rd3AccelGpuVaFree((IOAccelMemoryMap *)map);
     }
 };
-OSDefineMetaClassAndStructors(NVTask, IOAccelTask)
-class NVMemoryMap : public IOAccelMemoryMap {
-    OSDeclareDefaultStructors(NVMemoryMap)
-    NM_TAHOE_FWD(NVMemoryMap)
+OSDefineMetaClassAndStructors(RD3Task, IOAccelTask)
+class RD3MemoryMap : public IOAccelMemoryMap {
+    OSDeclareDefaultStructors(RD3MemoryMap)
+    NM_TAHOE_FWD(RD3MemoryMap)
 public:
     IOAccelMemory     *fMem       = nullptr;
     unsigned int       fHVirt     = 0;
@@ -129,18 +144,18 @@ public:
     void releaseFromGPUPageTable() APPLE_KEXT_OVERRIDE;
     bool updateGPUPageTable() APPLE_KEXT_OVERRIDE { return fMapped; }
 };
-OSDefineMetaClassAndStructors(NVMemoryMap, IOAccelMemoryMap)
+OSDefineMetaClassAndStructors(RD3MemoryMap, IOAccelMemoryMap)
 
-#define NV_CARRIERS 32
-class IOAccelNVRMCarrier : public IOService {
-    OSDeclareDefaultStructors(IOAccelNVRMCarrier)
+#define RD3_CARRIERS 32
+class IOAccelRDNA3Carrier : public IOService {
+    OSDeclareDefaultStructors(IOAccelRDNA3Carrier)
 };
-OSDefineMetaClassAndStructors(IOAccelNVRMCarrier, IOService)
+OSDefineMetaClassAndStructors(IOAccelRDNA3Carrier, IOService)
 
-class NVAccel : public IOGraphicsAccelerator2 {
-    OSDeclareDefaultStructors(NVAccel)
-    NM_TAHOE_FWD(NVAccel)
-    IOAccelNVRMCarrier *fCarriers[NV_CARRIERS] = { nullptr };
+class RDNA3Accelerator : public IOGraphicsAccelerator2 {
+    OSDeclareDefaultStructors(RDNA3Accelerator)
+    NM_TAHOE_FWD(RDNA3Accelerator)
+    IOAccelRDNA3Carrier *fCarriers[RD3_CARRIERS] = { nullptr };
     unsigned            fCarrierNext = 0;
     unsigned            fCarrierLogged = 0;
 public:
@@ -149,13 +164,13 @@ public:
         if (!fStamps) { fStamps = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous, 16384, 4096); if (fStamps) { fStamps->prepare(); bzero(fStamps->getBytesNoCopy(), 16384); } }
         if (p) *p = fStamps ? 4096 : 0;
         ALOG("getStampMemory(%p) -> descriptor %p (%u stamps, 16 KB)", p, fStamps, p ? *p : 0); return (uint64_t)fStamps; }
-    OSObject *newEventMachine() APPLE_KEXT_OVERRIDE { NVEventMachine *m = OSTypeAlloc(NVEventMachine); ALOG("newEventMachine -> %p (family inits it)", m); return m; }
+    OSObject *newEventMachine() APPLE_KEXT_OVERRIDE { RD3EventMachine *m = OSTypeAlloc(RD3EventMachine); ALOG("newEventMachine -> %p (family inits it)", m); return m; }
     OSObject *newGPUTask(const char *who) {
         for (unsigned i = 0; i < 32; i++) if (!fRanges[i]) {
             fRanges[i] = IORangeAllocator::withRange(1ULL << 40, 4096);
             if (fRanges[i]) fRanges[i]->allocateRange(0, 0x100000);
         }
-        NVTask *t = OSTypeAlloc(NVTask); bool ok = t && t->init(this, 1, fRanges);
+        RD3Task *t = OSTypeAlloc(RD3Task); bool ok = t && t->init(this, 1, fRanges);
         ALOG("%s -> %p init=%d", who, t, ok); if (t && !ok) { t->release(); t = nullptr; } return t; }
     OSObject *createUserGPUTask() APPLE_KEXT_OVERRIDE { return newGPUTask("createUserGPUTask"); }
     void populateAccelConfig(IOAccelConfig *c) APPLE_KEXT_OVERRIDE {
@@ -169,7 +184,7 @@ public:
         for (unsigned i = 0; i < 0x70; i += 8)
             ALOG("   cfg+0x%02x = 0x%016llx", i, *(const uint64_t *)(p + i));
 
-        *(uint64_t *)(p + 0x00) = (uint64_t)(uintptr_t)"NVIDIAAccelerator";
+        *(uint64_t *)(p + 0x00) = (uint64_t)(uintptr_t)"AMDRadeonRDNA3Accelerator";
         *(uint32_t *)(p + 0x08) = 0x30844300u;
         *(uint32_t *)(p + 0x0c) = 15u;
         *(uint32_t *)(p + 0x18) = 8u;
@@ -183,51 +198,51 @@ public:
         *(uint64_t *)(p + 0x50) = 0x7FFFFFFF0000001FULL;
         *(uint64_t *)(p + 0x58) = 0x0000000C00000000ULL;
         *(uint32_t *)(p + 0x64) = 0x4Bu;
-        *(uint32_t *)(p + 0x28) = kNvMaxFB;
+        *(uint32_t *)(p + 0x28) = kRd3MaxFB;
         ALOG("populateAccelConfig(%p) — filled: AccelCaps=15, flags=0x30844300, maxtex=16384x16384, maxfb=%u written (cfg+0x2c left %u)",
-             p, kNvMaxFB, *(const uint32_t *)(p + 0x2c));
+             p, kRd3MaxFB, *(const uint32_t *)(p + 0x2c));
     }
-    bool      configureDevice(IOPCIDevice *pci) APPLE_KEXT_OVERRIDE { ALOG("configureDevice(%p) %04x:%04x — RM owns the card (NVRM.kext); nothing to do here yet", pci, pci ? pci->configRead16(0) : 0, pci ? pci->configRead16(2) : 0); return true; }
+    bool      configureDevice(IOPCIDevice *pci) APPLE_KEXT_OVERRIDE { ALOG("configureDevice(%p) %04x:%04x — RM owns the card (RDNA3Accel.kext); nothing to do here yet", pci, pci ? pci->configRead16(0) : 0, pci ? pci->configRead16(2) : 0); return true; }
     void      teardownDevice(IOPCIDevice *pci) APPLE_KEXT_OVERRIDE { ALOG("teardownDevice(%p)", pci); }
     OSObject *createKernelGPUTask() APPLE_KEXT_OVERRIDE { return newGPUTask("createKernelGPUTask"); }
     OSObject *newDisplayPipe() APPLE_KEXT_OVERRIDE {
-        NVDisplayPipe *p = OSTypeAlloc(NVDisplayPipe);
+        RD3DisplayPipe *p = OSTypeAlloc(RD3DisplayPipe);
         if (!p) { ALOG("newDisplayPipe: OSTypeAlloc FAILED - the family will store this NULL unchecked"); return NULL; }
         ALOG("newDisplayPipe -> %p", p); return p; }
-    OSObject *newDisplayMachine() APPLE_KEXT_OVERRIDE { NVDisplayMachine *d = OSTypeAlloc(NVDisplayMachine);
+    OSObject *newDisplayMachine() APPLE_KEXT_OVERRIDE { RD3DisplayMachine *d = OSTypeAlloc(RD3DisplayMachine);
         fDM = d;
         ALOG("newDisplayMachine -> %p", d); return d; }
-    OSObject *newGLContext() APPLE_KEXT_OVERRIDE { NVGLContext *c = OSTypeAlloc(NVGLContext); ALOG("newGLContext -> %p", c); return c; }
-    OSObject *newCLContext() APPLE_KEXT_OVERRIDE { NVCLContext *c = OSTypeAlloc(NVCLContext); ALOG("newCLContext -> %p", c); return c; }
-    OSObject *newSurface() APPLE_KEXT_OVERRIDE { NVSurface *o = OSTypeAlloc(NVSurface); ALOG("newSurface -> %p", o); return o; }
-    OSObject *new2DContext() APPLE_KEXT_OVERRIDE { NV2DContext *c = OSTypeAlloc(NV2DContext); ALOG("new2DContext -> %p", c); return c; }
-    OSObject *newVideoContext() APPLE_KEXT_OVERRIDE { NVVideoContext *c = OSTypeAlloc(NVVideoContext); ALOG("newVideoContext -> %p", c); return c; }
-    OSObject *newSysMemory() APPLE_KEXT_OVERRIDE { NVSysMemory *m = OSTypeAlloc(NVSysMemory); ALOG("newSysMemory -> %p", m); return m; }
-    OSObject *newVidMemory() APPLE_KEXT_OVERRIDE { NVVidMemory *m = OSTypeAlloc(NVVidMemory); ALOG("newVidMemory -> %p", m); return m; }
-    OSObject *newResource() APPLE_KEXT_OVERRIDE { NVResource *r = OSTypeAlloc(NVResource); OSAddAtomic64(1, &gCntResNew); ALOG("newResource -> %p", r); return r; }
-    OSObject *newMemoryMap() APPLE_KEXT_OVERRIDE { NVMemoryMap *m = OSTypeAlloc(NVMemoryMap); ALOG("newMemoryMap -> %p", m); return m; }
+    OSObject *newGLContext() APPLE_KEXT_OVERRIDE { RD3GLContext *c = OSTypeAlloc(RD3GLContext); ALOG("newGLContext -> %p", c); return c; }
+    OSObject *newCLContext() APPLE_KEXT_OVERRIDE { RD3CLContext *c = OSTypeAlloc(RD3CLContext); ALOG("newCLContext -> %p", c); return c; }
+    OSObject *newSurface() APPLE_KEXT_OVERRIDE { RD3Surface *o = OSTypeAlloc(RD3Surface); ALOG("newSurface -> %p", o); return o; }
+    OSObject *new2DContext() APPLE_KEXT_OVERRIDE { RD32DContext *c = OSTypeAlloc(RD32DContext); ALOG("new2DContext -> %p", c); return c; }
+    OSObject *newVideoContext() APPLE_KEXT_OVERRIDE { RD3VideoContext *c = OSTypeAlloc(RD3VideoContext); ALOG("newVideoContext -> %p", c); return c; }
+    OSObject *newSysMemory() APPLE_KEXT_OVERRIDE { RD3SysMemory *m = OSTypeAlloc(RD3SysMemory); ALOG("newSysMemory -> %p", m); return m; }
+    OSObject *newVidMemory() APPLE_KEXT_OVERRIDE { RD3VidMemory *m = OSTypeAlloc(RD3VidMemory); ALOG("newVidMemory -> %p", m); return m; }
+    OSObject *newResource() APPLE_KEXT_OVERRIDE { RD3Resource *r = OSTypeAlloc(RD3Resource); OSAddAtomic64(1, &gCntResNew); ALOG("newResource -> %p", r); return r; }
+    OSObject *newMemoryMap() APPLE_KEXT_OVERRIDE { RD3MemoryMap *m = OSTypeAlloc(RD3MemoryMap); ALOG("newMemoryMap -> %p", m); return m; }
 
-    NVDisplayMachine *fDM = nullptr;
+    RD3DisplayMachine *fDM = nullptr;
     IOPCIDevice *fPCI = nullptr;
     IONotifier *fFBNote = nullptr;
-    static NVAccel *gAccel;
+    static RDNA3Accelerator *gAccel;
     IOService *fFB = nullptr;
-    IOService *volatile fFBs[kNvMaxFB] = {};
+    IOService *volatile fFBs[kRd3MaxFB] = {};
     unsigned fFBRegistered = 0;
     IOLock *fRegLock = nullptr;
     OSObject *fMetalPlugin = nullptr;
     static bool fbPublished(void *target, void *ref, IOService *newService, IONotifier *note) {
         (void)ref; (void)note;
-        NVAccel *me = (NVAccel *)target;
+        RDNA3Accelerator *me = (RDNA3Accelerator *)target;
         if (!me || !newService) return true;
         unsigned idx = 0;
         OSNumber *num = OSDynamicCast(OSNumber, newService->getProperty("IOFBDependentIndex"));
         if (num) idx = num->unsigned32BitValue();
         const char *what = "kept";
-        if (idx >= kNvMaxFB) what = "OUT OF RANGE -- this head will get no pipe";
+        if (idx >= kRd3MaxFB) what = "OUT OF RANGE -- this head will get no pipe";
         else {
             newService->retain();
-            if (OSCompareAndSwapPtr(nullptr, newService, (void *volatile *)&me->fFBs[idx])) OSBitOrAtomic(1u << idx, &gNvHeadsPublished);
+            if (OSCompareAndSwapPtr(nullptr, newService, (void *volatile *)&me->fFBs[idx])) OSBitOrAtomic(1u << idx, &gRd3HeadsPublished);
             else { newService->release(); what = "DUPLICATE -- the first one keeps the slot"; }
         }
         newService->retain();
@@ -237,7 +252,7 @@ public:
             if (old == newService) newService->release();
             else if (old) {
                 bool slotted = false;
-                for (unsigned j = 0; j < kNvMaxFB; j++) if (me->fFBs[j] == old) slotted = true;
+                for (unsigned j = 0; j < kRd3MaxFB; j++) if (me->fFBs[j] == old) slotted = true;
                 ALOG("fFB: head 0 (%s) displaced %s, which published first (%s)", newService->getName(), old->getName(),
                      slotted ? "its extra reference returned" : "NOT slotted: keeping its reference rather than risk a reader");
                 if (slotted) old->release();
@@ -245,11 +260,11 @@ public:
         } else if (!OSCompareAndSwapPtr(nullptr, newService, (void *volatile *)&me->fFB)) newService->release();
         unsigned before = me->fDM ? me->fDM->getFramebufferCount() : 0xFFFFFFFFu;
         ALOG("%s published -- display machine framebuffer count = %u (index %u %s)", newService->getName(), before, idx, what);
-        if (gNvAccelArmed)
-            ALOG("  index %u published AFTER the arm: it gets a pipe only when debug.nvaccelfb=3 is written again, "
+        if (gRd3AccelArmed)
+            ALOG("  index %u published AFTER the arm: it gets a pipe only when debug.rdna3accelfb=3 is written again, "
                  "and WindowServer composites it only after a WindowServer restart", idx);
         else
-            ALOG("  to register it:  sudo sysctl -w debug.nvaccelfb=1   (2 = re-run the family's own sweep)");
+            ALOG("  to register it:  sudo sysctl -w debug.rdna3accelfb=1   (2 = re-run the family's own sweep)");
         return true;
     }
     void deliverModeChange() {
@@ -278,12 +293,12 @@ public:
     }
     unsigned registerPendingLocked(const char *why) {
         unsigned added = 0;
-        for (unsigned i = 0; i < kNvMaxFB; i++) {
+        for (unsigned i = 0; i < kRd3MaxFB; i++) {
             IOService *fb = fFBs[i];
             if (!fb) {
-                if (gNvHeadsPublished >> i)
+                if (gRd3HeadsPublished >> i)
                     ALOG("  %s: index %u has not published (published 0x%x): stopping, so no head above it gets a pipe "
-                         "this walk", why, i, gNvHeadsPublished);
+                         "this walk", why, i, gRd3HeadsPublished);
                 break;
             }
             if (fFBRegistered & (1u << i)) continue;
@@ -292,7 +307,7 @@ public:
             fDM->found_framebuffer((IOFramebuffer *)fb);
             unsigned c = fDM->getFramebufferCount();
             fFBRegistered |= 1u << i;
-            gNvHeadsRegistered = fFBRegistered;
+            gRd3HeadsRegistered = fFBRegistered;
             if (c != b + 1) {
                 ALOG("  %s: index %u -- count went %u -> %u; the family did not add it (already known, or the cap "
                      "accel+0xcb0 = %u refused it). Stopping here so no later head takes this one's pipe number.",
@@ -315,14 +330,14 @@ public:
                 break;
             }
             ALOG("  %s: index %u -> pipe %u (%p), count %u", why, i, b, pipe, c);
-            gNvHeadsPiped |= 1u << i;
+            gRd3HeadsPiped |= 1u << i;
             added++;
         }
         return added;
     }
     void onCountGrewLocked() {
         deliverModeChange();
-        gNvAccelArmed = 1;
+        gRd3AccelArmed = 1;
         if (fMetalPlugin && !getProperty("MetalPluginName")) {
             setProperty("MetalPluginName", fMetalPlugin);
             ALOG("  MetalPluginName restored -- a NEW process that asks Metal for this accelerator "
@@ -332,8 +347,8 @@ public:
             setProperty("IOGLBundleName", "AppleMetalOpenGLRenderer");
             ALOG("  IOGLBundleName=AppleMetalOpenGLRenderer -- NEW GL processes get a hardware renderer over Metal");
         }
-        ALOG("  debug.nvaccelfb now reads 1 -- armed-only Metal clients may have a device THIS BOOT ONLY "
-             "(heads published 0x%x, registered 0x%x, piped 0x%x)", gNvHeadsPublished, gNvHeadsRegistered, gNvHeadsPiped);
+        ALOG("  debug.rdna3accelfb now reads 1 -- armed-only Metal clients may have a device THIS BOOT ONLY "
+             "(heads published 0x%x, registered 0x%x, piped 0x%x)", gRd3HeadsPublished, gRd3HeadsRegistered, gRd3HeadsPiped);
     }
     void registerFramebuffer(int how) {
         if (fRegLock) IOLockLock(fRegLock);
@@ -357,18 +372,28 @@ public:
         return false;
     }
     const OSSymbol *fSymAlloc = nullptr, *fSymFree = nullptr;
-    IOReturn askFramebufferForVram(struct NVRMVramRequest *r, bool alloc) {
-        if (!fFB) return kIOReturnNotAttached;
-        if (!fSymAlloc) fSymAlloc = OSSymbol::withCStringNoCopy(NVRM_VRAM_FN_ALLOC);
-        if (!fSymFree)  fSymFree  = OSSymbol::withCStringNoCopy(NVRM_VRAM_FN_FREE);
+    /* VRAM belongs to the core kext (RDNA3Accel), not to a framebuffer:
+     * on AMD the allocator lives next to the GEM heap. */
+    IOService *core() {
+        if (!fCore) {
+            OSDictionary *m = serviceMatching("RDNA3Accel");
+            if (m) { fCore = waitForMatchingService(m, 100ULL * 1000 * 1000); m->release(); }
+        }
+        return fCore;
+    }
+    IOReturn askFramebufferForVram(struct RD3KVramRequest *r, bool alloc) {
+        IOService *c = core();
+        if (!c) return kIOReturnNotAttached;
+        if (!fSymAlloc) fSymAlloc = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_ALLOC);
+        if (!fSymFree)  fSymFree  = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_FREE);
         const OSSymbol *fn = alloc ? fSymAlloc : fSymFree;
         if (!fn) return kIOReturnNoMemory;
-        return fFB->callPlatformFunction(fn, false, r, nullptr, nullptr, nullptr);
+        return c->callPlatformFunction(fn, false, r, nullptr, nullptr, nullptr);
     }
-    IOReturn askFramebufferForScanout(struct NVRMVramRequest *r, IOService *fb = nullptr) {
+    IOReturn askFramebufferForScanout(struct RD3KVramRequest *r, IOService *fb = nullptr) {
         if (!fb) fb = fFB;
         if (!fb) return kIOReturnNotAttached;
-        if (!fSymScanout) fSymScanout = OSSymbol::withCStringNoCopy(NVRM_VRAM_FN_SCANOUT);
+        if (!fSymScanout) fSymScanout = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_SCANOUT);
         return fb->callPlatformFunction(fSymScanout, false, r, nullptr, nullptr, nullptr);
     }
     const OSSymbol *fSymScanout = nullptr;
@@ -376,14 +401,14 @@ public:
         if (!pipe) return nullptr;
         IOService *fb = *(IOService *const volatile *)((const uint8_t *)pipe + 0x98);
         if (!fb) return nullptr;
-        for (unsigned i = 0; i < kNvMaxFB; i++)
+        for (unsigned i = 0; i < kRd3MaxFB; i++)
             if (fFBs[i] == fb) { if (idx) *idx = i; return fb; }
         return nullptr;
     }
-    IOService *fNVRM = nullptr;
+    IOService *fCore = nullptr;
     IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type,
                            IOUserClient **handler) APPLE_KEXT_OVERRIDE {
-        if ((type & 0xFFFF0000u) != 0x4E560000u) {
+        if ((type & 0xFFFF0000u) != RD3K_UC_TYPE_BASE) {
             IOReturn fr = IOGraphicsAccelerator2::newUserClient(owningTask, securityID, type, handler);
             if (fUcLogged < 40) { fUcLogged++;
                 ALOG("newUserClient(type %u / 0x%x) -> family returned 0x%x, client %s",
@@ -392,23 +417,23 @@ public:
             return fr;
         }
 
-        if (!fNVRM) {
-            OSDictionary *m = serviceMatching("NVRM");
-            if (m) fNVRM = waitForMatchingService(m, 100ULL * 1000 * 1000);
+        if (!fCore) {
+            OSDictionary *m = serviceMatching("RDNA3Accel");
+            if (m) fCore = waitForMatchingService(m, 100ULL * 1000 * 1000);
         }
-        if (!fNVRM) { ALOG("newUserClient(0x%x): no NVRM service", type); return kIOReturnNotAttached; }
+        if (!fCore) { ALOG("newUserClient(0x%x): no RDNA3Accel service", type); return kIOReturnNotAttached; }
 
-        const OSSymbol *fnSym = OSSymbol::withCStringNoCopy("nvNewAccelClient");
+        const OSSymbol *fnSym = OSSymbol::withCStringNoCopy(RD3K_FN_NEW_CLIENT);
         if (!fnSym) return kIOReturnNoMemory;
         IOUserClient *uc = nullptr;
-        IOReturn r = fNVRM->callPlatformFunction(fnSym, false, (void *)owningTask,
+        IOReturn r = fCore->callPlatformFunction(fnSym, false, (void *)owningTask,
                                                  (void *)(uintptr_t)(type & 0xFFFFu), &uc, nullptr);
         fnSym->release();
-        if (r != kIOReturnSuccess || !uc) { ALOG("newUserClient(0x%x): NVRM refused (0x%x)", type, r); return r ? r : kIOReturnNoResources; }
+        if (r != kIOReturnSuccess || !uc) { ALOG("newUserClient(0x%x): RDNA3Accel refused (0x%x)", type, r); return r ? r : kIOReturnNoResources; }
 
         IOService *carrier = nullptr;
-        for (unsigned i = 0; i < NV_CARRIERS && !carrier; i++)
-            carrier = fCarriers[(fCarrierNext + i) % NV_CARRIERS];
+        for (unsigned i = 0; i < RD3_CARRIERS && !carrier; i++)
+            carrier = fCarriers[(fCarrierNext + i) % RD3_CARRIERS];
         fCarrierNext++;
         if (!carrier) {
             ALOG("newUserClient(0x%x): NO CARRIER available -- refusing rather than attaching to the "
@@ -422,17 +447,17 @@ public:
         return kIOReturnSuccess;
     }
     static void triggerFromSysctl(int how) {
-        if (!gAccel) { ALOG("sysctl debug.nvaccelfb=%d but no NVAccel is running", how); return; }
-        if (how >= 4) gNvAperture = 1;
+        if (!gAccel) { ALOG("sysctl debug.rdna3accelfb=%d but no RDNA3Accelerator is running", how); return; }
+        if (how >= 4) gRd3Aperture = 1;
         if (how >= 3) {
-            gNvScanout = 1;
+            gRd3Scanout = 1;
             ALOG("  level %d: registering any published head that has no pipe yet", how);
             if (gAccel->fRegLock) IOLockLock(gAccel->fRegLock);
             if (gAccel->registerFramebufferLocked(1))
-                ALOG("sysctl debug.nvaccelfb=%d: scanout-backed display pipe ENABLED; the registration just delivered the mode "
+                ALOG("sysctl debug.rdna3accelfb=%d: scanout-backed display pipe ENABLED; the registration just delivered the mode "
                      "change -- not delivering it twice", how);
             else {
-                ALOG("sysctl debug.nvaccelfb=%d: scanout-backed display pipe ENABLED, re-delivering the mode change", how);
+                ALOG("sysctl debug.rdna3accelfb=%d: scanout-backed display pipe ENABLED, re-delivering the mode change", how);
                 gAccel->deliverModeChange();
             }
             if (gAccel->fRegLock) IOLockUnlock(gAccel->fRegLock);
@@ -445,8 +470,8 @@ public:
         gAccel->enableAccelerator();
         gAccel->fEnableCount++;
         ALOG("enableAccelerator() from %s (call #%u)", why, gAccel->fEnableCount);
-        gAccel->setProperty("NVAccelEnabledFrom", why);
-        gAccel->setProperty("NVAccelEnableCount", gAccel->fEnableCount, 32);
+        gAccel->setProperty("RDNA3AccelEnabledFrom", why);
+        gAccel->setProperty("RDNA3AccelEnableCount", gAccel->fEnableCount, 32);
     }
     unsigned fEnableCount = 0;
     unsigned fUcLogged = 0;
@@ -455,106 +480,106 @@ public:
         if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
             const unsigned cls = pci->configRead8(0x0B), sub = pci->configRead8(0x0A);
             const unsigned ven = pci->configRead16(0x00), dev = pci->configRead16(0x02);
-            if (cls != 0x03 || (sub != 0x00 && sub != 0x02) || ven != 0x10de || dev < 0x0020) {
-                ALOG("%04x:%04x class %02x.%02x is not an NVIDIA display device we support - not claiming",
+            if (cls != 0x03 || (sub != 0x00 && sub != 0x02) || ven != 0x1002 || !rd3SupportedDevice(dev)) {
+                ALOG("%04x:%04x class %02x.%02x is not an RDNA3 display device we support - not claiming",
                      ven, dev, cls, sub);
                 return NULL;
             }
-            ALOG("NVIDIA display device %04x:%04x class %02x.%02x - claiming", ven, dev, cls, sub);
+            ALOG("RDNA3 display device %04x:%04x class %02x.%02x - claiming", ven, dev, cls, sub);
         }
         return IOGraphicsAccelerator2::probe(provider, score);
     }
     virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE {
-        { char nvoff[8]; if (PE_parse_boot_argn("-nvoff", nvoff, sizeof nvoff)) return false; }
+        { char off[8]; if (PE_parse_boot_argn("-rdna3off", off, sizeof off)) return false; }
         uint32_t gate = 0;
-        if (!PE_parse_boot_argn("nvaccel", &gate, sizeof gate) || !gate) { ALOG("boot-arg nvaccel=1 absent: NOT starting (boot-loop guard)"); return false; }
+        if (!PE_parse_boot_argn("rdna3accel", &gate, sizeof gate) || !gate) { ALOG("boot-arg rdna3accel=1 absent: NOT starting (boot-loop guard)"); return false; }
         if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
             unsigned waited = 0;
-            while (pci->getProperty("nvrm-claimed") != kOSBooleanTrue && waited < 300) { IOSleep(100); waited++; }
-            if (pci->getProperty("nvrm-claimed") != kOSBooleanTrue) {
-                ALOG("NVRM never claimed %04x:%04x in 30 s - NOT starting the accelerator on a GPU with no RM",
+            while (pci->getProperty("rdna3-claimed") != kOSBooleanTrue && waited < 300) { IOSleep(100); waited++; }
+            if (pci->getProperty("rdna3-claimed") != kOSBooleanTrue) {
+                ALOG("RDNA3Accel never claimed %04x:%04x in 30 s - NOT starting the accelerator on a GPU with no RM",
                      pci->configRead16(0x00), pci->configRead16(0x02));
                 return false;
             }
-            ALOG("NVRM owns %04x:%04x (waited %u ms) - starting", pci->configRead16(0x00), pci->configRead16(0x02), waited * 100);
+            ALOG("RDNA3Accel owns %04x:%04x (waited %u ms) - starting", pci->configRead16(0x00), pci->configRead16(0x02), waited * 100);
         }
         ALOG("start(%s): calling IOGraphicsAccelerator2::start — the family's own bring-up", provider ? provider->getName() : "?");
         bool r = IOGraphicsAccelerator2::start(provider);
         ALOG("IOGraphicsAccelerator2::start -> %d", r);
         if (r) {
-            registerService(); ALOG("registerService() called — Metal can now find MetalPluginName=%s", "NVMTLDriver");
-            gAccel = this; gEnableAccel = &NVAccel::enableFromHook;
-            for (unsigned i = 0; i < NV_CARRIERS; i++) {
-                IOAccelNVRMCarrier *c = OSTypeAlloc(IOAccelNVRMCarrier);
+            registerService(); ALOG("registerService() called — Metal can now find MetalPluginName=%s", "RDNA3MTLDriver");
+            gAccel = this; gEnableAccel = &RDNA3Accelerator::enableFromHook;
+            for (unsigned i = 0; i < RD3_CARRIERS; i++) {
+                IOAccelRDNA3Carrier *c = OSTypeAlloc(IOAccelRDNA3Carrier);
                 if (!c) break;
                 if (!c->init()) { c->release(); break; }
                 if (!c->attach(this)) { c->release(); break; }
                 if (!c->start(this)) { c->detach(this); c->release(); break; }
                 fCarriers[i] = c;
             }
-            { unsigned n = 0; for (unsigned i = 0; i < NV_CARRIERS; i++) if (fCarriers[i]) n++;
+            { unsigned n = 0; for (unsigned i = 0; i < RD3_CARRIERS; i++) if (fCarriers[i]) n++;
               ALOG("user-client carriers: %u of %u ready (each holds ~1019 clients before "
-                   "IOService::attach starts sleeping)", n, (unsigned)NV_CARRIERS); }
+                   "IOService::attach starts sleeping)", n, (unsigned)RD3_CARRIERS); }
             enableFromHook("start");
             fPCI = OSDynamicCast(IOPCIDevice, provider);
             ALOG("display machine framebuffer count after the family sweep = %u", fDM ? fDM->getFramebufferCount() : 0xFFFFFFFFu);
             fRegLock = IOLockAlloc();
-            ALOG("multi-head: up to %u heads, registration lock %p%s", kNvMaxFB, fRegLock,
+            ALOG("multi-head: up to %u heads, registration lock %p%s", kRd3MaxFB, fRegLock,
                  fRegLock ? "" : " -- NULL: two sysctl writers could interleave a registration");
-            OSDictionary *fbm = serviceMatching("NVRMNVDAFramebuffer");
+            OSDictionary *fbm = serviceMatching("RDNA3Framebuffer");
             if (fbm) {
-                fFBNote = addMatchingNotification(gIOFirstPublishNotification, fbm, &NVAccel::fbPublished, this, nullptr, 0);
+                fFBNote = addMatchingNotification(gIOFirstPublishNotification, fbm, &RDNA3Accelerator::fbPublished, this, nullptr, 0);
                 fbm->release();
-                ALOG("watching for NVRMFramebuffer to publish -> notifier %p", fFBNote);
-                nvaccelInstallSysctl();
+                ALOG("watching for RDNA3Framebuffer to publish -> notifier %p", fFBNote);
+                rdna3accelInstallSysctl();
                 if (getProperty("MetalPluginName")) {
                     OSObject *mp = getProperty("MetalPluginName"); if (mp) mp->retain();
                     fMetalPlugin = mp;
                     removeProperty("MetalPluginName");
                     ALOG("MetalPluginName withheld -- nothing will load the Metal plugin until "
-                         "`sysctl -w debug.nvaccelfb=1` puts it back, and a reboot takes it away again");
+                         "`sysctl -w debug.rdna3accelfb=1` puts it back, and a reboot takes it away again");
                 }
-            } else ALOG("serviceMatching(NVRMFramebuffer) returned NULL -- cannot watch for the framebuffer");
+            } else ALOG("serviceMatching(RDNA3Framebuffer) returned NULL -- cannot watch for the framebuffer");
         }
         return r;
     }
     virtual void stop(IOService *provider) APPLE_KEXT_OVERRIDE { ALOG("stop"); IOGraphicsAccelerator2::stop(provider); }
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
 };
-OSDefineMetaClassAndStructors(NVAccel, IOGraphicsAccelerator2)
-NVAccel *NVAccel::gAccel = nullptr;
+OSDefineMetaClassAndStructors(RDNA3Accelerator, IOGraphicsAccelerator2)
+RDNA3Accelerator *RDNA3Accelerator::gAccel = nullptr;
 
-IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)
+IOAccelMemory *RD3DisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)
 {
-    if (!gNvScanout) {
-        ALOG("NVDisplayPipe::initFramebufferResource(index %u): scanout gate CLOSED -- returning NULL, "
-             "which is the family's own default (sysctl debug.nvaccelfb=3 opens it)", index);
+    if (!gRd3Scanout) {
+        ALOG("RD3DisplayPipe::initFramebufferResource(index %u): scanout gate CLOSED -- returning NULL, "
+             "which is the family's own default (sysctl debug.rdna3accelfb=3 opens it)", index);
         return nullptr;
     }
-    NVAccel *a = NVAccel::gAccel;
-    if (!a || !res) { ALOG("NVDisplayPipe::initFramebufferResource: no accelerator or no resource"); return nullptr; }
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    if (!a || !res) { ALOG("RD3DisplayPipe::initFramebufferResource: no accelerator or no resource"); return nullptr; }
     unsigned head = 0;
     IOService *fb = a->pipeFramebuffer(this, &head);
     if (!fb) {
-        ALOG("NVDisplayPipe::initFramebufferResource(index %u): pipe %p drives framebuffer %p, which is none of ours -- "
+        ALOG("RD3DisplayPipe::initFramebufferResource(index %u): pipe %p drives framebuffer %p, which is none of ours -- "
              "refusing (never head 0's pages: that IS the bug)", index, this,
              *(void *const volatile *)((const uint8_t *)this + 0x98));
         return nullptr;
     }
 
-    struct NVRMVramRequest r;
+    struct RD3KVramRequest r;
     for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
-    r.version = NVRM_VRAM_ABI_VERSION;
+    r.version = RD3K_VRAM_ABI_VERSION;
     IOReturn ret = a->askFramebufferForScanout(&r, fb);
     if (ret != kIOReturnSuccess || !r.phys || !r.actualSize) {
-        ALOG("NVDisplayPipe::initFramebufferResource: framebuffer would not describe its scanout (0x%x)", (unsigned)ret);
+        ALOG("RD3DisplayPipe::initFramebufferResource: framebuffer would not describe its scanout (0x%x)", (unsigned)ret);
         return nullptr;
     }
 
     OSObject *o = a->createVidMemory(nullptr, res, r.actualSize, nullptr);
-    NVVidMemory *m = OSDynamicCast(NVVidMemory, o);
+    RD3VidMemory *m = OSDynamicCast(RD3VidMemory, o);
     if (!m) {
-        ALOG("NVDisplayPipe::initFramebufferResource: createVidMemory gave %p, not an NVVidMemory", o);
+        ALOG("RD3DisplayPipe::initFramebufferResource: createVidMemory gave %p, not an RD3VidMemory", o);
         if (o) o->release();
         return nullptr;
     }
@@ -562,116 +587,116 @@ IOAccelMemory *NVDisplayPipe::initFramebufferResource(unsigned int index, IOAcce
     m->fPhys    = r.phys;
     m->fBytes   = r.actualSize;
     *(volatile unsigned long long *)((unsigned char *)m + 0xc8) = r.phys;
-    ALOG("NVDisplayPipe::initFramebufferResource(head %u, index %u, res %p) -> vidmem %p over the LIVE SCANOUT "
+    ALOG("RD3DisplayPipe::initFramebufferResource(head %u, index %u, res %p) -> vidmem %p over the LIVE SCANOUT "
          "phys 0x%llx %u x %u pitch %u (%llu bytes)",
          head, index, res, m, (unsigned long long)r.phys, r.width, r.height, r.pitch,
          (unsigned long long)r.actualSize);
     return (IOAccelMemory *)m;
 }
 
-static NVVidMemory *nvres_vidmem(IOAccelResource2 *r)
+static RD3VidMemory *rd3res_vidmem(IOAccelResource2 *r)
 {
     if (!r) return nullptr;
     OSObject *o = *(OSObject **)((unsigned char *)r + 0x88);
-    return OSDynamicCast(NVVidMemory, o);
+    return OSDynamicCast(RD3VidMemory, o);
 }
 
-bool NVResource::addToAperture()
+bool RD3Resource::addToAperture()
 {
-    NVVidMemory *m = nvres_vidmem(this);
+    RD3VidMemory *m = rd3res_vidmem(this);
     if (fApLogged < 4) { fApLogged++;
-        ALOG("NVResource::addToAperture -> true (vidmem %p phys 0x%llx %llu bytes, already in BAR1)",
+        ALOG("RD3Resource::addToAperture -> true (vidmem %p phys 0x%llx %llu bytes, already in BAR1)",
              m, m ? m->fPhys : 0ull, m ? m->fBytes : 0ull); }
     return m && m->fPhys && m->fBytes;
 }
 
-void NVResource::removeFromAperture() { }
+void RD3Resource::removeFromAperture() { }
 
-void *NVResource::getApertureMemoryDescriptor(unsigned long long *a0)
+void *RD3Resource::getApertureMemoryDescriptor(unsigned long long *a0)
 {
     if (a0) *a0 = 0;
-    if (!gNvAperture) {
+    if (!gRd3Aperture) {
         if (fApLogged < 4) { fApLogged++;
-            ALOG("NVResource::getApertureMemoryDescriptor: aperture gate CLOSED -- returning nullptr "
-                 "(sysctl debug.nvaccelfb=4 opens it)"); }
+            ALOG("RD3Resource::getApertureMemoryDescriptor: aperture gate CLOSED -- returning nullptr "
+                 "(sysctl debug.rdna3accelfb=4 opens it)"); }
         return nullptr;
     }
     if (fApDesc) return fApDesc;
-    NVVidMemory *m = nvres_vidmem(this);
+    RD3VidMemory *m = rd3res_vidmem(this);
     if (!m || !m->fPhys || !m->fBytes) {
         if (fApLogged < 8) { fApLogged++;
-            ALOG("NVResource::getApertureMemoryDescriptor: no BAR1-backed vidmem at +0x88 (mem %p)", m); }
+            ALOG("RD3Resource::getApertureMemoryDescriptor: no BAR1-backed vidmem at +0x88 (mem %p)", m); }
         return nullptr;
     }
     IODeviceMemory *d = IODeviceMemory::withRange((IOPhysicalAddress)m->fPhys, (IOPhysicalLength)m->fBytes);
-    if (!d) { ALOG("NVResource::getApertureMemoryDescriptor: IODeviceMemory::withRange(0x%llx, %llu) FAILED",
+    if (!d) { ALOG("RD3Resource::getApertureMemoryDescriptor: IODeviceMemory::withRange(0x%llx, %llu) FAILED",
                    m->fPhys, m->fBytes); return nullptr; }
     fApDesc = d;
     if (fApLogged < 8) { fApLogged++;
-        ALOG("NVResource::getApertureMemoryDescriptor -> %p over BAR1 phys 0x%llx (%llu bytes), offset 0",
+        ALOG("RD3Resource::getApertureMemoryDescriptor -> %p over BAR1 phys 0x%llx (%llu bytes), offset 0",
              d, m->fPhys, m->fBytes); }
     return fApDesc;
 }
 
-void NVResource::free()
+void RD3Resource::free()
 {
     if (fApDesc) { fApDesc->release(); fApDesc = nullptr; }
     OSAddAtomic64(1, &gCntResFree);
     IOAccelResource2::free();
 }
 
-bool NVVidMemory::allocPhysical()
+bool RD3VidMemory::allocPhysical()
 {
     if (fScanout) {
-        if (!fPhys || !fBytes) { ALOG("NVVidMemory::allocPhysical(%p): scanout with no address", this); return false; }
+        if (!fPhys || !fBytes) { ALOG("RD3VidMemory::allocPhysical(%p): scanout with no address", this); return false; }
         *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = fPhys;
-        ALOG("NVVidMemory::allocPhysical(%p): SCANOUT phys 0x%llx (%llu bytes) -- already backed, nothing allocated",
+        ALOG("RD3VidMemory::allocPhysical(%p): SCANOUT phys 0x%llx (%llu bytes) -- already backed, nothing allocated",
              this, fPhys, fBytes);
         return true;
     }
     if (fRmHandle) {
-        ALOG("NVVidMemory::allocPhysical(%p): already backed by 0x%llx (%llu bytes) -- false, as AMD's does",
+        ALOG("RD3VidMemory::allocPhysical(%p): already backed by 0x%llx (%llu bytes) -- false, as AMD's does",
              this, fPhys, fBytes);
         return false;
     }
     const unsigned long long want = *(const volatile unsigned long long *)((const unsigned char *)this + 0x40);
-    if (!want) { ALOG("NVVidMemory::allocPhysical(%p): length at +0x40 is 0 -- nothing to back", this); return false; }
-    if (!NVAccel::gAccel) { ALOG("NVVidMemory::allocPhysical(%p): no accelerator", this); return false; }
+    if (!want) { ALOG("RD3VidMemory::allocPhysical(%p): length at +0x40 is 0 -- nothing to back", this); return false; }
+    if (!RDNA3Accelerator::gAccel) { ALOG("RD3VidMemory::allocPhysical(%p): no accelerator", this); return false; }
 
-    struct NVRMVramRequest r;
+    struct RD3KVramRequest r;
     for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
-    r.version = NVRM_VRAM_ABI_VERSION;
+    r.version = RD3K_VRAM_ABI_VERSION;
     r.size    = want;
-    IOReturn ret = NVAccel::gAccel->askFramebufferForVram(&r, true);
+    IOReturn ret = RDNA3Accelerator::gAccel->askFramebufferForVram(&r, true);
     if (ret != kIOReturnSuccess || !r.handle || !r.phys) {
         OSAddAtomic64(1, &gCntVmRefused);
-        ALOG("NVVidMemory::allocPhysical(%p): %llu bytes REFUSED by the framebuffer (0x%x)",
+        ALOG("RD3VidMemory::allocPhysical(%p): %llu bytes REFUSED by the framebuffer (0x%x)",
              this, want, (unsigned)ret);
         return false;
     }
     fRmHandle = r.handle; fKva = r.kva; fPhys = r.phys; fBytes = r.actualSize; fAllocationCookie = r.allocationCookie;
     OSAddAtomic64(1, &gCntVmAlloc); OSAddAtomic64((SInt64)fBytes, &gCntVmAllocBytes);
     *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = fPhys;
-    ALOG("NVVidMemory::allocPhysical(%p): %llu bytes of REAL VRAM -- phys 0x%llx kva %p [BAR1 %llu]",
+    ALOG("RD3VidMemory::allocPhysical(%p): %llu bytes of REAL VRAM -- phys 0x%llx kva %p [BAR1 %llu]",
          this, fBytes, fPhys, fKva, r.mappedTotal);
     return true;
 }
 
-void NVVidMemory::deallocPhysical()
+void RD3VidMemory::deallocPhysical()
 {
     if (fScanout) {
-        ALOG("NVVidMemory::deallocPhysical(%p): SCANOUT -- not ours to free, only forgetting it", this);
+        ALOG("RD3VidMemory::deallocPhysical(%p): SCANOUT -- not ours to free, only forgetting it", this);
         fPhys = 0; fBytes = 0; fScanout = false;
         *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = 0;
         return;
     }
     if (!fRmHandle) return;
     OSAddAtomic64(1, &gCntVmDealloc); OSAddAtomic64((SInt64)fBytes, &gCntVmDeallocBytes);
-    struct NVRMVramRequest r;
+    struct RD3KVramRequest r;
     for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
-    r.version = NVRM_VRAM_ABI_VERSION;
+    r.version = RD3K_VRAM_ABI_VERSION;
     r.handle = fRmHandle; r.kva = fKva; r.actualSize = fBytes; r.allocationCookie = fAllocationCookie;
-    if (NVAccel::gAccel) NVAccel::gAccel->askFramebufferForVram(&r, false);
+    if (RDNA3Accelerator::gAccel) RDNA3Accelerator::gAccel->askFramebufferForVram(&r, false);
     fRmHandle = nullptr; fKva = nullptr; fPhys = 0; fBytes = 0; fAllocationCookie = 0;
     *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = 0;
 }
@@ -691,37 +716,37 @@ public:
     OSObject  *getPlaneResource(unsigned int, unsigned int) const;
 };
 
-static int    gNvIop = 0;
+static int    gRd3Iop = 0;
 static SInt64 gCntIopOk, gCntIopFail, gCntIopEmpty, gCntIopSrcRes, gCntIopSrcSurf, gCntIopBlank;
-static SInt64 gCntIopOkHead[kNvMaxFB];
-#define NVIOP_LOG_MAX 40
+static SInt64 gCntIopOkHead[kRd3MaxFB];
+#define RD3IOP_LOG_MAX 40
 static unsigned gIopLogs = 0;
-#define NVIOPLOG(fmt, ...) do { if (gIopLogs < NVIOP_LOG_MAX) { gIopLogs++; ALOG("iop: " fmt, ##__VA_ARGS__); } } while (0)
-#define NVIOP_FAIL(rc, fmt, ...) do { OSAddAtomic64(1, &gCntIopFail); NVIOPLOG(fmt, ##__VA_ARGS__); return (rc); } while (0)
+#define RD3IOPLOG(fmt, ...) do { if (gIopLogs < RD3IOP_LOG_MAX) { gIopLogs++; ALOG("iop: " fmt, ##__VA_ARGS__); } } while (0)
+#define RD3IOP_FAIL(rc, fmt, ...) do { OSAddAtomic64(1, &gCntIopFail); RD3IOPLOG(fmt, ##__VA_ARGS__); return (rc); } while (0)
 
-void NVDisplayPipe::iopDropSources()
+void RD3DisplayPipe::iopDropSources()
 {
     for (unsigned i = 0; i < kIopSrcSlots; i++) {
-        NVIopSrc *e = &fIopSrc[i];
+        RD3IopSrc *e = &fIopSrc[i];
         if (e->map) { e->map->release(); e->map = nullptr; }
         if (e->md)  { e->md->complete(); e->md->release(); e->md = nullptr; }
         e->id = 0;
     }
 }
 
-void NVDisplayPipe::free()
+void RD3DisplayPipe::free()
 {
     iopDropSources();
     IOAccelLegacyDisplayPipe::free();
 }
 
-const void *NVDisplayPipe::iopMapSurface(unsigned id, IOMemoryDescriptor *md, unsigned long long need)
+const void *RD3DisplayPipe::iopMapSurface(unsigned id, IOMemoryDescriptor *md, unsigned long long need)
 {
     for (unsigned i = 0; i < kIopSrcSlots; i++)
         if (fIopSrc[i].md == md && fIopSrc[i].id == id && fIopSrc[i].map)
             return (fIopSrc[i].map->getLength() >= need) ? (const void *)fIopSrc[i].map->getVirtualAddress() : nullptr;
     if (md->getLength() < need) return nullptr;
-    NVIopSrc *e = &fIopSrc[fIopNext % kIopSrcSlots]; fIopNext++;
+    RD3IopSrc *e = &fIopSrc[fIopNext % kIopSrcSlots]; fIopNext++;
     if (e->map) { e->map->release(); e->map = nullptr; }
     if (e->md)  { e->md->complete(); e->md->release(); e->md = nullptr; }
     e->id = 0;
@@ -729,40 +754,40 @@ const void *NVDisplayPipe::iopMapSurface(unsigned id, IOMemoryDescriptor *md, un
     IOMemoryMap *m = md->map(kIOMapReadOnly);
     if (!m) { md->complete(); return nullptr; }
     md->retain(); e->md = md; e->map = m; e->id = id;
-    NVIOPLOG("mapped source surface 0x%x (%llu bytes) into slot %u", id, (unsigned long long)m->getLength(), (fIopNext - 1) % kIopSrcSlots);
+    RD3IOPLOG("mapped source surface 0x%x (%llu bytes) into slot %u", id, (unsigned long long)m->getLength(), (fIopNext - 1) % kIopSrcSlots);
     return (const void *)m->getVirtualAddress();
 }
 
-IOReturn NVDisplayPipe::validateTransaction(IOAccelDisplayPipeTransaction2 *)
+IOReturn RD3DisplayPipe::validateTransaction(IOAccelDisplayPipeTransaction2 *)
 {
     return kIOReturnSuccess;
 }
 
-static bool nvAccelIopAsyncBusy(const void *pipe);
-bool NVDisplayPipe::isTransactionComplete(IOAccelDisplayPipeTransaction2 *)
+static bool rd3AccelIopAsyncBusy(const void *pipe);
+bool RD3DisplayPipe::isTransactionComplete(IOAccelDisplayPipeTransaction2 *)
 {
-    return gNvIop != 0 && !nvAccelIopAsyncBusy(this);
+    return gRd3Iop != 0 && !rd3AccelIopAsyncBusy(this);
 }
 
-static void nvAccelSurfScanoutSync(IOSurface *s);
-static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
-static void nvAccelIopHome(IOService *fb, unsigned head);
-IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
+static void rd3AccelSurfScanoutSync(IOSurface *s);
+static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
+static void rd3AccelIopHome(IOService *fb, unsigned head);
+IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
 {
-    if (!gNvIop) return (IOReturn)0xe00002c7;
-    if (!txn) NVIOP_FAIL(kIOReturnBadArgument, "performTransaction(NULL)");
-    NVAccel *a = NVAccel::gAccel;
+    if (!gRd3Iop) return (IOReturn)0xe00002c7;
+    if (!txn) RD3IOP_FAIL(kIOReturnBadArgument, "performTransaction(NULL)");
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     unsigned head = 0;
     IOService *fb = a ? a->pipeFramebuffer(this, &head) : nullptr;
-    if (!fb) NVIOP_FAIL(kIOReturnNotAttached, "no accelerator, or pipe %p drives a framebuffer that is none of ours", this);
+    if (!fb) RD3IOP_FAIL(kIOReturnNotAttached, "no accelerator, or pipe %p drives a framebuffer that is none of ours", this);
 
     IOSurface *s  = txn->getPlaneIOSurface(0, 0);
     OSObject  *ro = txn->getPlaneResource(0, 0);
     if (!s && !ro) { OSAddAtomic64(1, &gCntIopEmpty); return kIOReturnSuccess; }
 
     const volatile unsigned int *src = nullptr; unsigned w = 0, h = 0, pitch = 0; bool fromRes = false;
-    NVResource *res = OSDynamicCast(NVResource, ro);
-    NVVidMemory *vm = res ? nvres_vidmem(res) : nullptr;
+    RD3Resource *res = OSDynamicCast(RD3Resource, ro);
+    RD3VidMemory *vm = res ? rd3res_vidmem(res) : nullptr;
     static SInt32 gIopK6Logs;
     if (gIopK6Logs < 6) {
         OSIncrementAtomic(&gIopK6Logs);
@@ -780,37 +805,37 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         w     = *(const volatile unsigned short *)(rr + 0xb0);
         h     = *(const volatile unsigned short *)(rr + 0xb2);
         pitch = *(const volatile unsigned int   *)(rr + 0xb8);
-        if ((unsigned long long)pitch < 4ull * w) NVIOP_FAIL(kIOReturnBadArgument, "resource %ux%u: +0xb8 reads %u, which is not a row pitch (need >= %u) — not a surface buffer", w, h, pitch, 4u * w);
-        if ((unsigned long long)h * pitch > vm->fBytes) NVIOP_FAIL(kIOReturnOverrun, "resource %ux%u pitch %u exceeds its %llu bytes", w, h, pitch, (unsigned long long)vm->fBytes);
+        if ((unsigned long long)pitch < 4ull * w) RD3IOP_FAIL(kIOReturnBadArgument, "resource %ux%u: +0xb8 reads %u, which is not a row pitch (need >= %u) — not a surface buffer", w, h, pitch, 4u * w);
+        if ((unsigned long long)h * pitch > vm->fBytes) RD3IOP_FAIL(kIOReturnOverrun, "resource %ux%u pitch %u exceeds its %llu bytes", w, h, pitch, (unsigned long long)vm->fBytes);
         src = (const volatile unsigned int *)vm->fKva; fromRes = true;
-    } else if (s && nvAccelIopFlip(fb, head, s, this)) {
+    } else if (s && rd3AccelIopFlip(fb, head, s, this)) {
         OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk); OSAddAtomic64(1, &gCntIopOkHead[head]);
         return kIOReturnSuccess;
     } else if (s) {
-        nvAccelSurfScanoutSync(s);
+        rd3AccelSurfScanoutSync(s);
         const unsigned fmt = s->getPixelFormat();
-        if (fmt != 0x42475241u) NVIOP_FAIL(kIOReturnUnsupported, "surface 0x%x format 0x%08x is not BGRA", s->getSurfaceID(), fmt);
+        if (fmt != 0x42475241u) RD3IOP_FAIL(kIOReturnUnsupported, "surface 0x%x format 0x%08x is not BGRA", s->getSurfaceID(), fmt);
         const unsigned long long W = s->getWidth(), H = s->getHeight(), P = s->getBytesPerRow();
-        if (!W || !H || P < 4 || W > 16384 || H > 16384 || P > 16384ull * 8) NVIOP_FAIL(kIOReturnBadArgument, "surface geometry %llux%llu pitch %llu", W, H, P);
-        if (P < 4 * W || (P & 3)) NVIOP_FAIL(kIOReturnBadArgument, "surface %llux%llu: row pitch %llu is under 4*W or not word-aligned", W, H, P);
+        if (!W || !H || P < 4 || W > 16384 || H > 16384 || P > 16384ull * 8) RD3IOP_FAIL(kIOReturnBadArgument, "surface geometry %llux%llu pitch %llu", W, H, P);
+        if (P < 4 * W || (P & 3)) RD3IOP_FAIL(kIOReturnBadArgument, "surface %llux%llu: row pitch %llu is under 4*W or not word-aligned", W, H, P);
         IOMemoryDescriptor *md = s->getMemoryDescriptor();
-        if (!md) NVIOP_FAIL(kIOReturnNoMemory, "surface 0x%x has no memory descriptor", s->getSurfaceID());
+        if (!md) RD3IOP_FAIL(kIOReturnNoMemory, "surface 0x%x has no memory descriptor", s->getSurfaceID());
         src = (const volatile unsigned int *)iopMapSurface(s->getSurfaceID(), md, H * P);
-        if (!src) NVIOP_FAIL(kIOReturnVMError, "surface 0x%x would not prepare/map %llu bytes", s->getSurfaceID(), H * P);
+        if (!src) RD3IOP_FAIL(kIOReturnVMError, "surface 0x%x would not prepare/map %llu bytes", s->getSurfaceID(), H * P);
         w = (unsigned)W; h = (unsigned)H; pitch = (unsigned)P;
     } else {
-        NVIOP_FAIL(kIOReturnUnsupported, "plane resource %p is not an NVResource with a CPU mapping, and there is no IOSurface", ro);
+        RD3IOP_FAIL(kIOReturnUnsupported, "plane resource %p is not an RD3Resource with a CPU mapping, and there is no IOSurface", ro);
     }
-    if (!w || !h || pitch < 4) NVIOP_FAIL(kIOReturnBadArgument, "source geometry %ux%u pitch %u", w, h, pitch);
+    if (!w || !h || pitch < 4) RD3IOP_FAIL(kIOReturnBadArgument, "source geometry %ux%u pitch %u", w, h, pitch);
 
-    struct NVRMVramRequest q;
+    struct RD3KVramRequest q;
     for (unsigned i = 0; i < sizeof q; i++) ((volatile unsigned char *)&q)[i] = 0;
-    q.version = NVRM_VRAM_ABI_VERSION;
+    q.version = RD3K_VRAM_ABI_VERSION;
     IOReturn ret = a->askFramebufferForScanout(&q, fb);
-    if (ret != kIOReturnSuccess || !q.kva || q.pitch < 4 || !q.height) NVIOP_FAIL(kIOReturnNotReady, "framebuffer would not describe its scanout (0x%x kva %p pitch %u)", (unsigned)ret, q.kva, q.pitch);
-    if (w != q.width || h != q.height) NVIOP_FAIL(kIOReturnBadArgument, "source %ux%u is not the scanout's %ux%u", w, h, q.width, q.height);
+    if (ret != kIOReturnSuccess || !q.kva || q.pitch < 4 || !q.height) RD3IOP_FAIL(kIOReturnNotReady, "framebuffer would not describe its scanout (0x%x kva %p pitch %u)", (unsigned)ret, q.kva, q.pitch);
+    if (w != q.width || h != q.height) RD3IOP_FAIL(kIOReturnBadArgument, "source %ux%u is not the scanout's %ux%u", w, h, q.width, q.height);
 
-    nvAccelIopHome(fb, head);
+    rd3AccelIopHome(fb, head);
     const unsigned words = (((pitch < q.pitch) ? pitch : q.pitch) & ~3u) / 4;
     const unsigned spr = pitch / 4, dpr = q.pitch / 4;
     volatile unsigned int *d = (volatile unsigned int *)q.kva;
@@ -838,12 +863,12 @@ IOReturn NVDisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
     return kIOReturnSuccess;
 }
 
-static int nvacceliop_sysctl SYSCTL_HANDLER_ARGS
+static int rdna3acceliop_sysctl SYSCTL_HANDLER_ARGS
 {
-    int v = gNvIop;
+    int v = gRd3Iop;
     int err = sysctl_handle_int(oidp, &v, 0, req);
     if (err || req->newptr == 0) return err;
-    NVAccel *a = NVAccel::gAccel;
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     if (!a) return ENXIO;
     if (v) {
         OSDictionary *caps = OSDictionary::withCapacity(2);
@@ -852,83 +877,83 @@ static int nvacceliop_sysctl SYSCTL_HANDLER_ARGS
         caps->setObject("TransactionsSupported", kOSBooleanTrue);
         a->setProperty("IOAccelDisplayPipeCapabilities", caps);
         caps->release();
-        gNvIop = 1;
-        ALOG("iop: debug.nvaccel_iop=1 -- capabilities published, transaction hooks OPEN");
+        gRd3Iop = 1;
+        ALOG("iop: debug.rdna3accel_iop=1 -- capabilities published, transaction hooks OPEN");
     } else {
-        gNvIop = 0;
+        gRd3Iop = 0;
         a->removeProperty("IOAccelDisplayPipeCapabilities");
-        ALOG("iop: debug.nvaccel_iop=0 -- capabilities removed, transaction hooks answer as the base class");
+        ALOG("iop: debug.rdna3accel_iop=0 -- capabilities removed, transaction hooks answer as the base class");
     }
     return 0;
 }
-SYSCTL_PROC(_debug, OID_AUTO, nvaccel_iop, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
-            NULL, 0, nvacceliop_sysctl, "I",
+SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_iop, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
+            NULL, 0, rdna3acceliop_sysctl, "I",
             "K3: 1 = publish IOAccelDisplayPipeCapabilities and perform display-pipe transactions, 0 = behave as the base class (default)");
 
-static int nvaccelfb_sysctl SYSCTL_HANDLER_ARGS
+static int rdna3accelfb_sysctl SYSCTL_HANDLER_ARGS
 {
-    int v = gNvAccelArmed;
+    int v = gRd3AccelArmed;
     int err = sysctl_handle_int(oidp, &v, 0, req);
     if (err || req->newptr == 0) return err;
-    NVAccel::triggerFromSysctl(v);
+    RDNA3Accelerator::triggerFromSysctl(v);
     return 0;
 }
-SYSCTL_PROC(_debug, OID_AUTO, nvaccelfb, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
-            NULL, 0, nvaccelfb_sysctl, "I",
-            "register the NVIDIA framebuffer with the accelerator display machine (1 = found_framebuffer, 2 = family sweep)");
-#define NVACCEL_CNT(nm, var, desc) SYSCTL_QUAD(_debug, OID_AUTO, nm, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&var, desc)
-NVACCEL_CNT(nvaccel_vm_alloc,         gCntVmAlloc,        "NVVidMemory::allocPhysical successes");
-NVACCEL_CNT(nvaccel_vm_alloc_bytes,   gCntVmAllocBytes,   "bytes of VRAM granted to NVVidMemory");
-NVACCEL_CNT(nvaccel_vm_dealloc,       gCntVmDealloc,      "NVVidMemory::deallocPhysical calls with a handle");
-NVACCEL_CNT(nvaccel_vm_dealloc_bytes, gCntVmDeallocBytes, "bytes of VRAM given back by NVVidMemory");
-NVACCEL_CNT(nvaccel_vm_refused,       gCntVmRefused,      "allocPhysical refused by the framebuffer");
-NVACCEL_CNT(nvaccel_res_new,          gCntResNew,         "NVResource objects created");
-NVACCEL_CNT(nvaccel_res_free,         gCntResFree,        "NVResource objects freed");
-NVACCEL_CNT(nvaccel_map_commit,       gCntMapCommit,      "GPU page-table commits (MAP_MEMORY_DMA ok)");
-NVACCEL_CNT(nvaccel_map_release,      gCntMapRelease,     "GPU page-table releases (UNMAP_ONLY)");
-NVACCEL_CNT(nvaccel_map_free,         gCntMapFree,        "GPU VA ranges freed (nvAccelGpuVaFree)");
-NVACCEL_CNT(nvaccel_iop_ok,           gCntIopOk,          "K3: display-pipe transactions copied to the panel");
-NVACCEL_CNT(nvaccel_iop_ok_h0,        gCntIopOkHead[0],   "frames copied to head 0's panel");
-NVACCEL_CNT(nvaccel_iop_ok_h1,        gCntIopOkHead[1],   "frames copied to head 1's panel");
-NVACCEL_CNT(nvaccel_iop_ok_h2,        gCntIopOkHead[2],   "frames copied to head 2's panel");
-NVACCEL_CNT(nvaccel_iop_ok_h3,        gCntIopOkHead[3],   "frames copied to head 3's panel");
-SYSCTL_UINT(_debug, OID_AUTO, nvaccel_heads_published, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gNvHeadsPublished, 0,
+SYSCTL_PROC(_debug, OID_AUTO, rdna3accelfb, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN,
+            NULL, 0, rdna3accelfb_sysctl, "I",
+            "register the RDNA3 framebuffer with the accelerator display machine (1 = found_framebuffer, 2 = family sweep)");
+#define RD3ACCEL_CNT(nm, var, desc) SYSCTL_QUAD(_debug, OID_AUTO, nm, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&var, desc)
+RD3ACCEL_CNT(rdna3accel_vm_alloc,         gCntVmAlloc,        "RD3VidMemory::allocPhysical successes");
+RD3ACCEL_CNT(rdna3accel_vm_alloc_bytes,   gCntVmAllocBytes,   "bytes of VRAM granted to RD3VidMemory");
+RD3ACCEL_CNT(rdna3accel_vm_dealloc,       gCntVmDealloc,      "RD3VidMemory::deallocPhysical calls with a handle");
+RD3ACCEL_CNT(rdna3accel_vm_dealloc_bytes, gCntVmDeallocBytes, "bytes of VRAM given back by RD3VidMemory");
+RD3ACCEL_CNT(rdna3accel_vm_refused,       gCntVmRefused,      "allocPhysical refused by the framebuffer");
+RD3ACCEL_CNT(rdna3accel_res_new,          gCntResNew,         "RD3Resource objects created");
+RD3ACCEL_CNT(rdna3accel_res_free,         gCntResFree,        "RD3Resource objects freed");
+RD3ACCEL_CNT(rdna3accel_map_commit,       gCntMapCommit,      "GPU page-table commits (MAP_MEMORY_DMA ok)");
+RD3ACCEL_CNT(rdna3accel_map_release,      gCntMapRelease,     "GPU page-table releases (UNMAP_ONLY)");
+RD3ACCEL_CNT(rdna3accel_map_free,         gCntMapFree,        "GPU VA ranges freed (rd3AccelGpuVaFree)");
+RD3ACCEL_CNT(rdna3accel_iop_ok,           gCntIopOk,          "K3: display-pipe transactions copied to the panel");
+RD3ACCEL_CNT(rdna3accel_iop_ok_h0,        gCntIopOkHead[0],   "frames copied to head 0's panel");
+RD3ACCEL_CNT(rdna3accel_iop_ok_h1,        gCntIopOkHead[1],   "frames copied to head 1's panel");
+RD3ACCEL_CNT(rdna3accel_iop_ok_h2,        gCntIopOkHead[2],   "frames copied to head 2's panel");
+RD3ACCEL_CNT(rdna3accel_iop_ok_h3,        gCntIopOkHead[3],   "frames copied to head 3's panel");
+SYSCTL_UINT(_debug, OID_AUTO, rdna3accel_heads_published, CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_KERN, &gRd3HeadsPublished, 0,
             "bit i = head i's framebuffer has published to the accelerator");
-SYSCTL_UINT(_debug, OID_AUTO, nvaccel_heads_registered, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvHeadsRegistered, 0,
+SYSCTL_UINT(_debug, OID_AUTO, rdna3accel_heads_registered, CTLFLAG_RD | CTLFLAG_LOCKED, &gRd3HeadsRegistered, 0,
             "bit i = head i's framebuffer was handed to the display machine (found_framebuffer)");
-SYSCTL_UINT(_debug, OID_AUTO, nvaccel_heads_piped, CTLFLAG_RD | CTLFLAG_LOCKED, &gNvHeadsPiped, 0,
+SYSCTL_UINT(_debug, OID_AUTO, rdna3accel_heads_piped, CTLFLAG_RD | CTLFLAG_LOCKED, &gRd3HeadsPiped, 0,
             "bit i = head i has a display pipe that drives ITS OWN framebuffer (pipe+0x98 read back)");
-static_assert(kNvMaxFB == 4, "kNvMaxFB changed: add debug.nvaccel_iop_ok_h<i> for every new head");
-NVACCEL_CNT(nvaccel_iop_fail,         gCntIopFail,        "K3: transactions refused (see the capped iop: log lines)");
-NVACCEL_CNT(nvaccel_iop_empty,        gCntIopEmpty,       "K3: transactions with no plane (gamma/options only)");
-NVACCEL_CNT(nvaccel_iop_src_res,      gCntIopSrcRes,      "K3: frames sourced from our VRAM resource");
-NVACCEL_CNT(nvaccel_iop_src_surf,     gCntIopSrcSurf,     "K3: frames sourced from the IOSurface memory");
-NVACCEL_CNT(nvaccel_iop_blank,        gCntIopBlank,       "K6: frames copied whose 64 samples were all ONE colour (a blank frame)");
+static_assert(kRd3MaxFB == 4, "kRd3MaxFB changed: add debug.rdna3accel_iop_ok_h<i> for every new head");
+RD3ACCEL_CNT(rdna3accel_iop_fail,         gCntIopFail,        "K3: transactions refused (see the capped iop: log lines)");
+RD3ACCEL_CNT(rdna3accel_iop_empty,        gCntIopEmpty,       "K3: transactions with no plane (gamma/options only)");
+RD3ACCEL_CNT(rdna3accel_iop_src_res,      gCntIopSrcRes,      "K3: frames sourced from our VRAM resource");
+RD3ACCEL_CNT(rdna3accel_iop_src_surf,     gCntIopSrcSurf,     "K3: frames sourced from the IOSurface memory");
+RD3ACCEL_CNT(rdna3accel_iop_blank,        gCntIopBlank,       "K6: frames copied whose 64 samples were all ONE colour (a blank frame)");
 static int    gIopFlip = 0;
 static SInt64 gCntIopFlip, gCntIopFlipHome, gCntIopFlipNo[8];
-SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_flip, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopFlip, 0, "1 = scan the composited IOSurface out of its own VRAM (no copy)");
-NVACCEL_CNT(nvaccel_iop_flips,        gCntIopFlip,        "frames scanned out of the surface's own VRAM (zero copy)");
-NVACCEL_CNT(nvaccel_iop_flip_home,    gCntIopFlipHome,    "flips back to the boot scanout before a copied frame");
-NVACCEL_CNT(nvaccel_iop_flip_lock,    gCntIopFlipNo[3],   "copied because the accelerator lock was busy");
-NVACCEL_CNT(nvaccel_iop_flip_novram,  gCntIopFlipNo[4],   "copied because the surface has no RM VRAM");
-NVACCEL_CNT(nvaccel_iop_flip_stale,   gCntIopFlipNo[5],   "copied because system memory holds the newest copy");
-NVACCEL_CNT(nvaccel_iop_flip_refused, gCntIopFlipNo[7],   "copied because the framebuffer refused the flip");
+SYSCTL_INT(_debug, OID_AUTO, rdna3accel_iop_flip, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopFlip, 0, "1 = scan the composited IOSurface out of its own VRAM (no copy)");
+RD3ACCEL_CNT(rdna3accel_iop_flips,        gCntIopFlip,        "frames scanned out of the surface's own VRAM (zero copy)");
+RD3ACCEL_CNT(rdna3accel_iop_flip_home,    gCntIopFlipHome,    "flips back to the boot scanout before a copied frame");
+RD3ACCEL_CNT(rdna3accel_iop_flip_lock,    gCntIopFlipNo[3],   "copied because the accelerator lock was busy");
+RD3ACCEL_CNT(rdna3accel_iop_flip_novram,  gCntIopFlipNo[4],   "copied because the surface has no RM VRAM");
+RD3ACCEL_CNT(rdna3accel_iop_flip_stale,   gCntIopFlipNo[5],   "copied because system memory holds the newest copy");
+RD3ACCEL_CNT(rdna3accel_iop_flip_refused, gCntIopFlipNo[7],   "copied because the framebuffer refused the flip");
 static SInt64 gCntIopFlipHit, gCntIopFlipMiss;
-NVACCEL_CNT(nvaccel_iop_flip_hit,     gCntIopFlipHit,     "swaps resolved from the cache (no accelerator lock)");
-NVACCEL_CNT(nvaccel_iop_flip_miss,    gCntIopFlipMiss,    "swaps that resolved under the accelerator lock");
+RD3ACCEL_CNT(rdna3accel_iop_flip_hit,     gCntIopFlipHit,     "swaps resolved from the cache (no accelerator lock)");
+RD3ACCEL_CNT(rdna3accel_iop_flip_miss,    gCntIopFlipMiss,    "swaps that resolved under the accelerator lock");
 static int    gIopAsync = 1;
 static SInt64 gCntIopAsync, gCntIopAsyncRefused, gCntIopAsyncDrop;
-SYSCTL_INT(_debug, OID_AUTO, nvaccel_iop_async, CTLFLAG_RW | CTLFLAG_LOCKED, &gIopAsync, 0, "1 = the swap runs on a thread call and completes through signalTransactionInterrupt (Apple's shape); 0 = the earlier synchronous flip");
-NVACCEL_CNT(nvaccel_iop_async_flips,   gCntIopAsync,        "swaps completed asynchronously");
-NVACCEL_CNT(nvaccel_iop_async_refused, gCntIopAsyncRefused, "async swaps NVKMS refused (that frame stayed off the panel)");
-NVACCEL_CNT(nvaccel_iop_async_drop,    gCntIopAsyncDrop,    "frames dropped because a flip was still in flight (never expected)");
+SYSCTL_INT(_debug, OID_AUTO, rdna3accel_iop_async, CTLFLAG_RW | CTLFLAG_LOCKED, &gIopAsync, 0, "1 = the swap runs on a thread call and completes through signalTransactionInterrupt (Apple's shape); 0 = the earlier synchronous flip");
+RD3ACCEL_CNT(rdna3accel_iop_async_flips,   gCntIopAsync,        "swaps completed asynchronously");
+RD3ACCEL_CNT(rdna3accel_iop_async_refused, gCntIopAsyncRefused, "async swaps the display engine refused (that frame stayed off the panel)");
+RD3ACCEL_CNT(rdna3accel_iop_async_drop,    gCntIopAsyncDrop,    "frames dropped because a flip was still in flight (never expected)");
 static int gCrcHead = 0;
-SYSCTL_INT(_debug, OID_AUTO, nvaccel_crc_head, CTLFLAG_RW | CTLFLAG_LOCKED, &gCrcHead, 0, "b85k-crc: which head debug.nvaccel_crc reads");
-static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS;
-SYSCTL_PROC(_debug, OID_AUTO, nvaccel_crc, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, nvaccel_crc_sysctl, "I",
-            "b85k-crc: display CRC32 of what head nvaccel_crc_head is showing (0 = unavailable)");
+SYSCTL_INT(_debug, OID_AUTO, rdna3accel_crc_head, CTLFLAG_RW | CTLFLAG_LOCKED, &gCrcHead, 0, "b85k-crc: which head debug.rdna3accel_crc reads");
+static int rdna3accel_crc_sysctl SYSCTL_HANDLER_ARGS;
+SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_crc, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, rdna3accel_crc_sysctl, "I",
+            "b85k-crc: display CRC32 of what head rdna3accel_crc_head is showing (0 = unavailable)");
 static bool gSysctlInstalled = false;
-static void nvaccelInstallSysctl(void)
+static void rdna3accelInstallSysctl(void)
 {
     if (gSysctlInstalled) return;
     sysctl_register_oid(&sysctl__debug_nvaccelfb);
@@ -956,79 +981,74 @@ static void nvaccelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_nvaccel_heads_published); sysctl_register_oid(&sysctl__debug_nvaccel_heads_registered);
     sysctl_register_oid(&sysctl__debug_nvaccel_heads_piped);
     gSysctlInstalled = true;
-    ALOG("sysctl debug.nvaccelfb installed -- `sudo sysctl -w debug.nvaccelfb=1` registers the framebuffer");
+    ALOG("sysctl debug.rdna3accelfb installed -- `sudo sysctl -w debug.rdna3accelfb=1` registers the framebuffer");
 }
 
-static inline void nvAccelZero(void *p, unsigned long n)
+static inline void rd3AccelZero(void *p, unsigned long n)
 { volatile unsigned char *b = (volatile unsigned char *)p; while (n--) *b++ = 0; }
 
-static struct NVRMRmHandles gRmHandles;
+static struct RD3KRmHandles gRmHandles;
 static bool                 gRmHandlesValid;
 
-static unsigned nvRmHandlesLogged;
+static unsigned rd3RmHandlesLogged;
 
-static bool nvAccelRmHandles(struct NVRMRmHandles *out)
+static bool rd3AccelRmHandles(struct RD3KRmHandles *out)
 {
     if (gRmHandlesValid) { *out = gRmHandles; return true; }
-    NVAccel *a = NVAccel::gAccel;
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     if (!a) {
-        if (nvRmHandlesLogged < 8) { nvRmHandlesLogged++;
-            ALOG("nvAccelRmHandles: no NVAccel instance yet -- too early"); }
+        if (rd3RmHandlesLogged < 8) { rd3RmHandlesLogged++;
+            ALOG("rd3AccelRmHandles: no RDNA3Accelerator instance yet -- too early"); }
         return false;
     }
-    if (!a->fFB) {
-        if (nvRmHandlesLogged < 8) { nvRmHandlesLogged++;
-            ALOG("nvAccelRmHandles: no framebuffer has published yet -- will retry"); }
+    IOService *core = a->core();
+    if (!core) {
+        if (rd3RmHandlesLogged < 8) { rd3RmHandlesLogged++;
+            ALOG("rd3AccelRmHandles: the core kext (RDNA3Accel) has not published -- will retry"); }
         return false;
     }
-    const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_GPUVA_FN_HANDLES);
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_GPUVA_FN_HANDLES);
     if (!sym) {
-        if (nvRmHandlesLogged < 8) { nvRmHandlesLogged++;
-            ALOG("nvAccelRmHandles: OSSymbol allocation failed"); }
+        if (rd3RmHandlesLogged < 8) { rd3RmHandlesLogged++;
+            ALOG("rd3AccelRmHandles: OSSymbol allocation failed"); }
         return false;
     }
-    struct NVRMRmHandles h;
-    nvAccelZero(&h, sizeof h);
-    h.version = NVRM_GPUVA_ABI_VERSION;
-    IOReturn r = a->fFB->callPlatformFunction(sym, false, &h, nullptr, nullptr, nullptr);
+    struct RD3KRmHandles h;
+    rd3AccelZero(&h, sizeof h);
+    h.version = RD3K_GPUVA_ABI_VERSION;
+    IOReturn r = core->callPlatformFunction(sym, false, &h, nullptr, nullptr, nullptr);
     sym->release();
     if (r != kIOReturnSuccess || !h.kapiDevice) {
-        if (nvRmHandlesLogged < 8) { nvRmHandlesLogged++;
-            ALOG("nvAccelRmHandles: framebuffer gave no kapi device (ret 0x%x, kapiDevice %p)",
+        if (rd3RmHandlesLogged < 8) { rd3RmHandlesLogged++;
+            ALOG("rd3AccelRmHandles: core kext gave no device (ret 0x%x, kapiDevice %p)",
                  (unsigned)r, h.kapiDevice); }
         return false;
     }
     gRmHandles = h; gRmHandlesValid = true;
-    ALOG("RM handles: kapiDevice %p (hClient/hDevice resolved inside NVRM by name) "
+    ALOG("RM handles: kapiDevice %p (hClient/hDevice resolved inside RDNA3Accel by name) "
          "*** the accelerator can now build GPU page tables ***", h.kapiDevice);
     *out = h;
     return true;
 }
 
-static IOService *nvAccelNVRM()
+static IOService *rd3AccelCore()
 {
-    NVAccel *a = NVAccel::gAccel;
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     if (!a) return nullptr;
-    if (!a->fNVRM) {
-        OSDictionary *m = IOService::serviceMatching("NVRM");
-        if (m) a->fNVRM = IOService::waitForMatchingService(m, 100ULL * 1000 * 1000);
-    }
-    return a->fNVRM;
+    return a->core();
 }
 
-static IOReturn nvAccelGpuVaCall(const char *fn, struct NVRMGpuVaRequest *g)
+static IOReturn rd3AccelGpuVaCall(const char *fn, struct RD3KGpuVaRequest *g)
 {
-    IOService *nvrm = nvAccelNVRM();
-    if (!nvrm) return kIOReturnNotAttached;
+    IOService *core = rd3AccelCore();
+    if (!core) return kIOReturnNotAttached;
     const OSSymbol *sym = OSSymbol::withCStringNoCopy(fn);
     if (!sym) return kIOReturnNoMemory;
-    IOReturn r = nvrm->callPlatformFunction(sym, false, g, nullptr, nullptr, nullptr);
+    IOReturn r = core->callPlatformFunction(sym, false, g, nullptr, nullptr, nullptr);
     sym->release();
     return r;
 }
 
-#define NVRM_SS_KERNEL_ABI 1
-#include "../nvrm_surfshare_abi.h"
 extern "C" {
 void *_ZN13IOSurfaceRoot13lookupSurfaceEjP4task(void *root, unsigned int id, task_t task);
 void *_ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej(void *accel, void *surface, unsigned int plane);
@@ -1039,7 +1059,7 @@ unsigned int _ZNK9IOSurface12getSurfaceIDEv(void *surface);
 void  _ZN22IOGraphicsAccelerator29lock_busyEv(void *accel);
 void  _ZN22IOGraphicsAccelerator211unlock_busyEv(void *accel);
 }
-static bool nvFamLock(NVAccel *a, bool tryOnly)
+static bool rd3FamLock(RDNA3Accelerator *a, bool tryOnly)
 {
     unsigned char *b = (unsigned char *)a;
     IOLock *lk = *(IOLock *volatile *)(b + 0x88);
@@ -1054,7 +1074,7 @@ static bool nvFamLock(NVAccel *a, bool tryOnly)
     a->acceleratorDidLock("", 0);
     return true;
 }
-static void nvFamUnlock(NVAccel *a)
+static void rd3FamUnlock(RDNA3Accelerator *a)
 {
     a->acceleratorWillUnlock("", 0);
     _ZN22IOGraphicsAccelerator211unlock_busyEv(a);
@@ -1064,7 +1084,7 @@ static unsigned gNVSVLockMiss;
 enum { kNVSVPend = 512 };
 static unsigned gNVSVPendId[kNVSVPend];
 static IOSimpleLock *gNVSVPendLock;
-static bool nvSVPend(unsigned id, int op)
+static bool rd3SVPend(unsigned id, int op)
 {
     if (!id) return op == 1 ? false : false;
     if (!gNVSVPendLock) return op == 1 ? false : false;
@@ -1081,64 +1101,64 @@ static bool nvSVPend(unsigned id, int op)
 }
 static void    *gNVSVRoot;
 static unsigned gNVSVOk, gNVSVRefused;
-static inline void nvSVZero(void *p, unsigned long n) { volatile unsigned char *b = (volatile unsigned char *)p; while (n--) *b++ = 0; }
+static inline void rd3SVZero(void *p, unsigned long n) { volatile unsigned char *b = (volatile unsigned char *)p; while (n--) *b++ = 0; }
 
 static unsigned gNVSVDirty, gNVSVDirtyRefused, gNVSVPageoff, gNVSVPageoffFail;
-static unsigned nvAccelSurfDirty(void *cache, NVResource *res, unsigned plane)
+static unsigned rd3AccelSurfDirty(void *cache, RD3Resource *res, unsigned plane)
 {
     volatile unsigned char *r = (volatile unsigned char *)res;
     unsigned char type = r[0x14];
     unsigned int fl = *(volatile unsigned int *)(r + 0xc);
     volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
-    if (type != 0xc0 || (fl & 0x8000) || !valid || plane > 15) return NVRM_SS_NO_CACHE;
+    if (type != 0xc0 || (fl & 0x8000) || !valid || plane > 15) return RD3K_SS_NO_CACHE;
     if (!gNVSVPendLock) gNVSVPendLock = IOSimpleLockAlloc();
-    if (!nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1)) return NVRM_SS_NO_CACHE;
+    if (!rd3SVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1)) return RD3K_SS_NO_CACHE;
     _ZN20IOSurfaceDeviceCache10setCurrentEv(cache);
     valid[6] |= (unsigned short)(1u << plane);
     valid[0] &= (unsigned short)~(1u << plane);
     return 0;
 }
-static IOReturn nvAccelSurfVram(struct NVRMSurfShareEsc *p, task_t task, unsigned cmd)
+static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsigned cmd)
 {
     p->hSrcClient = p->hSrcMemory = 0;
-    if (p->version != NVRM_SURFSHARE_VERSION) { p->status = NVRM_SS_BAD_VERSION; return kIOReturnSuccess; }
-    NVAccel *a = NVAccel::gAccel;
-    struct NVRMRmHandles h; nvSVZero(&h, sizeof h);
-    if (!task || !a || !nvAccelRmHandles(&h)) { p->status = NVRM_SS_OFF; return kIOReturnSuccess; }
+    if (p->version != RD3K_SURFSHARE_VERSION) { p->status = RD3K_SS_BAD_VERSION; return kIOReturnSuccess; }
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    struct RD3KRmHandles h; rd3SVZero(&h, sizeof h);
+    if (!task || !a || !rd3AccelRmHandles(&h)) { p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
     if (!gNVSVRoot) {
         OSDictionary *m = IOService::serviceMatching("IOSurfaceRoot");
         if (m) { gNVSVRoot = IOService::waitForMatchingService(m, 5ULL * 1000 * 1000 * 1000); m->release(); }
-        if (!gNVSVRoot) { p->status = NVRM_SS_OFF; return kIOReturnSuccess; }
+        if (!gNVSVRoot) { p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
     }
     void *surf = _ZN13IOSurfaceRoot13lookupSurfaceEjP4task(gNVSVRoot, p->surfaceID, task);
-    if (!surf) { p->status = NVRM_SS_NO_SURFACE; gNVSVRefused++; return kIOReturnSuccess; }
-    if (!nvFamLock(a, false)) { ((OSObject *)surf)->release(); p->status = NVRM_SS_OFF; return kIOReturnSuccess; }
+    if (!surf) { p->status = RD3K_SS_NO_SURFACE; gNVSVRefused++; return kIOReturnSuccess; }
+    if (!rd3FamLock(a, false)) { ((OSObject *)surf)->release(); p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
     void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, p->plane);
     OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
-    NVResource *res = OSDynamicCast(NVResource, ctx);
-    NVVidMemory *vm = res ? nvres_vidmem(res) : nullptr;
-    if (cmd == NVRM_ESC_SURF_DIRTY) {
-        p->status = (cache && res && vm && vm->fRmHandle) ? nvAccelSurfDirty(cache, res, p->plane) : NVRM_SS_NO_CACHE;
+    RD3Resource *res = OSDynamicCast(RD3Resource, ctx);
+    RD3VidMemory *vm = res ? rd3res_vidmem(res) : nullptr;
+    if (cmd == RD3K_ESC_SURF_DIRTY) {
+        p->status = (cache && res && vm && vm->fRmHandle) ? rd3AccelSurfDirty(cache, res, p->plane) : RD3K_SS_NO_CACHE;
         if (p->status == 0) gNVSVDirty++; else gNVSVDirtyRefused++;
         if (gNVSVDirty + gNVSVDirtyRefused <= 6 || ((gNVSVDirty + gNVSVDirtyRefused) & 4095) == 0)
             ALOG("surfvram dirty: surface %u plane %u type 0x%x -> %#x (dirty %u, refused %u)", p->surfaceID, p->plane,
                  res ? (unsigned)((volatile unsigned char *)res)[0x14] : 0u, p->status, gNVSVDirty, gNVSVDirtyRefused);
         if (cache) ((OSObject *)cache)->release();
-        nvFamUnlock(a);
+        rd3FamUnlock(a);
         ((OSObject *)surf)->release();
         return kIOReturnSuccess;
     }
     if (vm && !vm->fRmHandle && !vm->fScanout) _ZN16IOAccelVidMemory4wireEv(vm);
-    if (!cache || !res) p->status = NVRM_SS_NO_CACHE;
-    else if (!vm || !vm->fRmHandle || !vm->fBytes) p->status = NVRM_SS_NO_VRAM;
-    else if (p->size > vm->fBytes) p->status = NVRM_SS_TOO_SMALL;
+    if (!cache || !res) p->status = RD3K_SS_NO_CACHE;
+    else if (!vm || !vm->fRmHandle || !vm->fBytes) p->status = RD3K_SS_NO_VRAM;
+    else if (p->size > vm->fBytes) p->status = RD3K_SS_TOO_SMALL;
     else {
-        struct NVRMSurfShareRm g; nvSVZero(&g, sizeof g);
-        g.version = NVRM_SS_RM_VERSION; g.op = NVRM_SS_RM_SHARE_KAPI;
-        g.kapiDevice = h.kapiDevice; g.kapiMemory = vm->fRmHandle; g.target = p->hClient; g.status = NVRM_SS_OFF;
-        IOService *nvrm = nvAccelNVRM();
-        const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_SS_FN_RM);
-        if (nvrm && sym && nvrm->callPlatformFunction(sym, false, &g, nullptr, nullptr, nullptr) == kIOReturnSuccess) {}
+        struct RD3KSurfShareRm g; rd3SVZero(&g, sizeof g);
+        g.version = RD3K_SS_RM_VERSION; g.op = RD3K_SS_RM_SHARE_KAPI;
+        g.kapiDevice = h.kapiDevice; g.kapiMemory = vm->fRmHandle; g.target = p->hClient; g.status = RD3K_SS_OFF;
+        IOService *core = rd3AccelCore();
+        const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_SS_FN_RM);
+        if (core && sym && core->callPlatformFunction(sym, false, &g, nullptr, nullptr, nullptr) == kIOReturnSuccess) {}
         if (sym) sym->release();
         p->status = g.status; p->hSrcClient = g.hClient; p->hSrcMemory = g.hObject; p->size = vm->fBytes;
     }
@@ -1147,7 +1167,7 @@ static IOReturn nvAccelSurfVram(struct NVRMSurfShareEsc *p, task_t task, unsigne
         ALOG("surfvram: surface %u plane %u -> cache %p res %p vidmem %p (%llu B) -> client %#x mem %#x status %#x (ok %u, refused %u)",
              p->surfaceID, p->plane, cache, res, vm, vm ? vm->fBytes : 0ull, p->hSrcClient, p->hSrcMemory, p->status, gNVSVOk, gNVSVRefused);
     if (cache) ((OSObject *)cache)->release();
-    nvFamUnlock(a);
+    rd3FamUnlock(a);
     ((OSObject *)surf)->release();
     return kIOReturnSuccess;
 }
@@ -1156,7 +1176,7 @@ static IOReturn nvAccelSurfVram(struct NVRMSurfShareEsc *p, task_t task, unsigne
 static IOLock *volatile gNVSVStageLock;
 static IOBufferMemoryDescriptor *gNVSVStageBuf;
 static unsigned gNVSVStaged, gNVSVStageNoBuf, gNVSVStageBackoff;
-static IOLock *nvSVStageLock(void)
+static IOLock *rd3SVStageLock(void)
 {
     if (!gNVSVStageLock) {
         IOLock *l = IOLockAlloc();
@@ -1164,7 +1184,7 @@ static IOLock *nvSVStageLock(void)
     }
     return gNVSVStageLock;
 }
-static IOBufferMemoryDescriptor *nvSVStage(unsigned long long len)
+static IOBufferMemoryDescriptor *rd3SVStage(unsigned long long len)
 {
     if (gNVSVStageBuf && gNVSVStageBuf->getLength() >= len) return gNVSVStageBuf;
     if (len > (64ull << 20) || gNVSVStageBackoff) { if (gNVSVStageBackoff) gNVSVStageBackoff--; return nullptr; }
@@ -1183,14 +1203,14 @@ static IOBufferMemoryDescriptor *nvSVStage(unsigned long long len)
     return b;
 }
 
-void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long long a3)
+void RD3Resource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long long a3)
 {
     volatile unsigned char *r = (volatile unsigned char *)this;
     void *cache = *(void *volatile *)(r + 0xe0);
-    NVVidMemory *vm = nvres_vidmem(this);
-    struct NVRMRmHandles h; nvSVZero(&h, sizeof h);
+    RD3VidMemory *vm = rd3res_vidmem(this);
+    struct RD3KRmHandles h; rd3SVZero(&h, sizeof h);
     void *surf = (r[0x14] == 0xc0 && cache) ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
-    if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !nvAccelRmHandles(&h)) {
+    if (!surf || !vm || !vm->fRmHandle || vm->fScanout || !vm->fBytes || !rd3AccelRmHandles(&h)) {
         IOAccelResource2::pageoff(ev, a1, out, a3);
         return;
     }
@@ -1205,22 +1225,22 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     unsigned long long len = md->getLength();
     if (len > vm->fBytes) len = vm->fBytes;
     unsigned long long pages = (len + 4095) >> 12;
-    bool ok = false; unsigned st = NVRM_SS_OFF; unsigned long long usec = 0, cpuUs = 0;
+    bool ok = false; unsigned st = RD3K_SS_OFF; unsigned long long usec = 0, cpuUs = 0;
     bool staged = false;
-    if (IOLock *lk = nvSVStageLock()) {
+    if (IOLock *lk = rd3SVStageLock()) {
         IOLockLock(lk);
-        IOBufferMemoryDescriptor *sb = nvSVStage(len);
+        IOBufferMemoryDescriptor *sb = rd3SVStage(len);
         IOByteCount sl = 0;
         addr64_t sp = sb ? sb->getPhysicalSegment(0, &sl, kIOMemoryMapperNone) : 0;
         unsigned long long *spa = (sp && sl >= len && pages) ? (unsigned long long *)IOMalloc(pages * sizeof *spa) : nullptr;
         if (spa) {
             for (unsigned long long k = 0; k < pages; k++) spa[k] = sp + k * 4096;
-            struct NVRMSurfPageoff q; nvSVZero(&q, sizeof q);
-            q.version = NVRM_SS_RM_VERSION; q.status = NVRM_SS_OFF; q.kapiDevice = h.kapiDevice; q.kapiMemory = vm->fRmHandle;
+            struct RD3KSurfPageoff q; rd3SVZero(&q, sizeof q);
+            q.version = RD3K_SS_RM_VERSION; q.status = RD3K_SS_OFF; q.kapiDevice = h.kapiDevice; q.kapiMemory = vm->fRmHandle;
             q.pages = spa; q.pageCount = pages; q.length = len;
-            IOService *nvrm = nvAccelNVRM();
-            const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_SS_FN_PAGEOFF);
-            if (nvrm && sym) nvrm->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr);
+            IOService *core = rd3AccelCore();
+            const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_SS_FN_PAGEOFF);
+            if (core && sym) core->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr);
             if (sym) sym->release();
             st = q.status; usec = q.usec;
             if (st == 0) {
@@ -1228,7 +1248,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
                 const IOByteCount w = md->writeBytes(0, sb->getBytesNoCopy(), (IOByteCount)len);
                 cpuUs = (mach_absolute_time() - t0) / 1000;
                 ok = (w == (IOByteCount)len);
-                if (!ok) st = NVRM_SS_TOO_SMALL;
+                if (!ok) st = RD3K_SS_TOO_SMALL;
                 else gNVSVStaged++;
             } else if (st == 0x65u) {
                 ALOG("surfvram pageoff: CE copy TIMED OUT into the staging buffer -- abandoning it (%llu B)", (unsigned long long)sb->getLength());
@@ -1249,12 +1269,12 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
             for (IOByteCount k = 0; k < seglen && i < pages; k += 4096, off += 4096) pa[i++] = phys + k;
         }
         if (i == pages) {
-            struct NVRMSurfPageoff q; nvSVZero(&q, sizeof q);
-            q.version = NVRM_SS_RM_VERSION; q.status = NVRM_SS_OFF; q.kapiDevice = h.kapiDevice; q.kapiMemory = vm->fRmHandle;
+            struct RD3KSurfPageoff q; rd3SVZero(&q, sizeof q);
+            q.version = RD3K_SS_RM_VERSION; q.status = RD3K_SS_OFF; q.kapiDevice = h.kapiDevice; q.kapiMemory = vm->fRmHandle;
             q.pages = pa; q.pageCount = pages; q.length = len;
-            IOService *nvrm = nvAccelNVRM();
-            const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_SS_FN_PAGEOFF);
-            if (nvrm && sym) nvrm->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr);
+            IOService *core = rd3AccelCore();
+            const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_SS_FN_PAGEOFF);
+            if (core && sym) core->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr);
             if (sym) sym->release();
             st = q.status; usec = q.usec; ok = st == 0;
             if (st == 0x65u) mayUnwire = false;
@@ -1264,7 +1284,7 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
     if (mayUnwire) md->complete(kIODirectionNone);
     else ALOG("surfvram pageoff: res %p CE copy TIMED OUT -- surface pages stay wired (%llu B)", this, len);
     if (ok) {
-        nvSVPend(_ZNK9IOSurface12getSurfaceIDEv(surf), 0);
+        rd3SVPend(_ZNK9IOSurface12getSurfaceIDEv(surf), 0);
         volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
         if (valid) valid[0] |= 1;
         gNVSVPageoff++;
@@ -1275,21 +1295,21 @@ void NVResource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lon
              this, len, st, usec, staged ? " (staged)" : " (per page)", cpuUs, gNVSVPageoff, gNVSVPageoffFail, gNVSVStaged);
 }
 
-static IOSurface *gIopFlipFront[kNvMaxFB], *gIopFlipPrev[kNvMaxFB];
-static bool gIopFlipped[kNvMaxFB];
+static IOSurface *gIopFlipFront[kRd3MaxFB], *gIopFlipPrev[kRd3MaxFB];
+static bool gIopFlipped[kRd3MaxFB];
 static unsigned gIopFlipLogs;
-static bool nvAccelIopFlipNo(int why) { OSAddAtomic64(1, &gCntIopFlipNo[why & 7]); return false; }
-struct NVIopFlipCache { IOSurface *s; NVResource *res; NVVidMemory *vm; void *kmem; unsigned long long bytes; unsigned long long use; };
-static NVIopFlipCache gIopFlipCache[8];
+static bool rd3AccelIopFlipNo(int why) { OSAddAtomic64(1, &gCntIopFlipNo[why & 7]); return false; }
+struct RD3IopFlipCache { IOSurface *s; RD3Resource *res; RD3VidMemory *vm; void *kmem; unsigned long long bytes; unsigned long long use; };
+static RD3IopFlipCache gIopFlipCache[8];
 static IOSimpleLock *gIopFlipCacheLock;
 static unsigned long long gIopFlipCacheTick;
-static bool nvAccelIopCacheGet(IOSurface *s, NVResource **res, NVVidMemory **vm, void **kmem, unsigned long long *bytes)
+static bool rd3AccelIopCacheGet(IOSurface *s, RD3Resource **res, RD3VidMemory **vm, void **kmem, unsigned long long *bytes)
 {
     if (!gIopFlipCacheLock) return false;
     bool hit = false;
     IOSimpleLockLock(gIopFlipCacheLock);
     for (unsigned i = 0; i < 8; i++) if (gIopFlipCache[i].s == s) {
-        NVVidMemory *v = gIopFlipCache[i].vm;
+        RD3VidMemory *v = gIopFlipCache[i].vm;
         if (v && v->fRmHandle == gIopFlipCache[i].kmem && v->fBytes == gIopFlipCache[i].bytes) {
             *res = gIopFlipCache[i].res; *vm = v; *kmem = gIopFlipCache[i].kmem; *bytes = gIopFlipCache[i].bytes;
             gIopFlipCache[i].use = ++gIopFlipCacheTick; hit = true;
@@ -1299,7 +1319,7 @@ static bool nvAccelIopCacheGet(IOSurface *s, NVResource **res, NVVidMemory **vm,
     IOSimpleLockUnlock(gIopFlipCacheLock);
     return hit;
 }
-static void nvAccelIopCachePut(IOSurface *s, NVResource *res, NVVidMemory *vm, void *kmem, unsigned long long bytes)
+static void rd3AccelIopCachePut(IOSurface *s, RD3Resource *res, RD3VidMemory *vm, void *kmem, unsigned long long bytes)
 {
     if (!gIopFlipCacheLock) { IOSimpleLock *l = IOSimpleLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gIopFlipCacheLock)) IOSimpleLockFree(l); }
     if (!gIopFlipCacheLock) return;
@@ -1323,21 +1343,21 @@ void _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(void *pipe, void *ar
 struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
 int thread_call_enter(struct thread_call *call);
 }
-struct NVIopAsync { void *pipe; IOService *fb; IOSurface *s; struct NVRMFlipRequest f; volatile SInt32 busy; struct thread_call *call; };
-static NVIopAsync gIopAs[kNvMaxFB];
+struct RD3IopAsync { void *pipe; IOService *fb; IOSurface *s; struct RD3KFlipRequest f; volatile SInt32 busy; struct thread_call *call; };
+static RD3IopAsync gIopAs[kRd3MaxFB];
 static SInt32 gIopAsyncRefuseRun;
-static bool nvAccelIopAsyncBusy(const void *pipe)
+static bool rd3AccelIopAsyncBusy(const void *pipe)
 {
-    for (unsigned h = 0; h < kNvMaxFB; h++)
+    for (unsigned h = 0; h < kRd3MaxFB; h++)
         if (gIopAs[h].pipe == pipe && __atomic_load_n(&gIopAs[h].busy, __ATOMIC_ACQUIRE)) return true;
     return false;
 }
-static void nvAccelIopAsyncRun(void *p0, void *)
+static void rd3AccelIopAsyncRun(void *p0, void *)
 {
-    NVIopAsync *e = (NVIopAsync *)p0;
+    RD3IopAsync *e = (RD3IopAsync *)p0;
     const unsigned head = (unsigned)(e - gIopAs);
     IOSurface *s = e->s; e->s = nullptr;
-    const OSSymbol *sym = OSSymbol::withCStringNoCopy("nvFlipToSurfacePure");
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy("rd3FlipToSurfacePure");
     IOReturn rr = sym ? e->fb->callPlatformFunction(sym, false, &e->f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
     if (rr == kIOReturnSuccess) {
@@ -1354,22 +1374,22 @@ static void nvAccelIopAsyncRun(void *p0, void *)
                                                      (unsigned)rr, e->f.flipResult, head); }
         if (++gIopAsyncRefuseRun >= 3 && gIopAsync) {
             gIopAsync = 0;
-            ALOG("iop: b89k 3 async refusals in a row -- debug.nvaccel_iop_async=0 (synchronous flip, which copies on refusal)");
+            ALOG("iop: b89k 3 async refusals in a row -- debug.rdna3accel_iop_async=0 (synchronous flip, which copies on refusal)");
         }
         ((OSObject *)s)->release();
     }
     __atomic_store_n(&e->busy, 0, __ATOMIC_RELEASE);
     _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(e->pipe, nullptr);
 }
-static bool nvAccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSurface *s, const struct NVRMFlipRequest *f)
+static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSurface *s, const struct RD3KFlipRequest *f)
 {
-    NVIopAsync *e = &gIopAs[head];
+    RD3IopAsync *e = &gIopAs[head];
     for (unsigned i = 0; i < 50 && __atomic_load_n(&e->busy, __ATOMIC_ACQUIRE); i++) IOSleep(1);
     if (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE)) {
         OSAddAtomic64(1, &gCntIopAsyncDrop);
         return true;
     }
-    if (!e->call) e->call = thread_call_allocate(nvAccelIopAsyncRun, e);
+    if (!e->call) e->call = thread_call_allocate(rd3AccelIopAsyncRun, e);
     if (!e->call) return false;
     ((OSObject *)s)->retain();
     e->pipe = pipe; e->fb = fb; e->s = s;
@@ -1378,44 +1398,44 @@ static bool nvAccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSur
     thread_call_enter(e->call);
     return true;
 }
-static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe)
+static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe)
 {
-    if (!gIopFlip || !fb || !s || head >= kNvMaxFB) return false;
-    NVAccel *a = NVAccel::gAccel;
-    if (!a) return nvAccelIopFlipNo(1);
-    if (s->getPixelFormat() != 0x42475241u) return nvAccelIopFlipNo(2);
-    NVResource *res = nullptr; NVVidMemory *vm = nullptr; void *kmem = nullptr; unsigned long long bytes = 0;
-    if (nvAccelIopCacheGet(s, &res, &vm, &kmem, &bytes)) {
+    if (!gIopFlip || !fb || !s || head >= kRd3MaxFB) return false;
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    if (!a) return rd3AccelIopFlipNo(1);
+    if (s->getPixelFormat() != 0x42475241u) return rd3AccelIopFlipNo(2);
+    RD3Resource *res = nullptr; RD3VidMemory *vm = nullptr; void *kmem = nullptr; unsigned long long bytes = 0;
+    if (rd3AccelIopCacheGet(s, &res, &vm, &kmem, &bytes)) {
         OSAddAtomic64(1, &gCntIopFlipHit);
     } else {
-        if (!nvFamLock(a, true)) return nvAccelIopFlipNo(3);
+        if (!rd3FamLock(a, true)) return rd3AccelIopFlipNo(3);
         void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, (void *)s, 0);
         OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
-        res = OSDynamicCast(NVResource, ctx);
-        vm = res ? nvres_vidmem(res) : nullptr;
+        res = OSDynamicCast(RD3Resource, ctx);
+        vm = res ? rd3res_vidmem(res) : nullptr;
         kmem = (vm && vm->fRmHandle && vm->fBytes && !vm->fScanout) ? vm->fRmHandle : nullptr;
         bytes = vm ? vm->fBytes : 0;
         if (cache) ((OSObject *)cache)->release();
-        nvFamUnlock(a);
+        rd3FamUnlock(a);
         OSAddAtomic64(1, &gCntIopFlipMiss);
-        if (kmem) nvAccelIopCachePut(s, res, vm, kmem, bytes);
+        if (kmem) rd3AccelIopCachePut(s, res, vm, kmem, bytes);
     }
     volatile unsigned short *valid = res ? *(unsigned short *volatile *)((volatile unsigned char *)res + 0x30) : nullptr;
     const bool vramNewest = valid && (valid[6] & 1u);
-    if (!kmem) return nvAccelIopFlipNo(4);
-    if (!vramNewest) return nvAccelIopFlipNo(5);
+    if (!kmem) return rd3AccelIopFlipNo(4);
+    if (!vramNewest) return rd3AccelIopFlipNo(5);
     const unsigned long long W = s->getWidth(), H = s->getHeight(), P = s->getBytesPerRow();
-    if (!W || !H || P < 4 * W || H * P > bytes) return nvAccelIopFlipNo(6);
-    struct NVRMFlipRequest f; nvSVZero(&f, sizeof f);
-    f.version = NVRM_FLIP_ABI_VERSION; f.kapiMemory = kmem; f.allocationCookie = vm->fAllocationCookie; f.width = (unsigned)W; f.height = (unsigned)H; f.pitch = (unsigned)P;
-    if (gIopAsync && pipe) return nvAccelIopAsyncStart(pipe, fb, head, s, &f);
-    const OSSymbol *sym = OSSymbol::withCStringNoCopy("nvFlipToSurfacePure");
+    if (!W || !H || P < 4 * W || H * P > bytes) return rd3AccelIopFlipNo(6);
+    struct RD3KFlipRequest f; rd3SVZero(&f, sizeof f);
+    f.version = RD3K_FLIP_ABI_VERSION; f.kapiMemory = kmem; f.allocationCookie = vm->fAllocationCookie; f.width = (unsigned)W; f.height = (unsigned)H; f.pitch = (unsigned)P;
+    if (gIopAsync && pipe) return rd3AccelIopAsyncStart(pipe, fb, head, s, &f);
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy("rd3FlipToSurfacePure");
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
     if (rr != kIOReturnSuccess) {
         if (gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: flip REFUSED (0x%x, flipResult %d) head %u %llux%llu pitch %llu -- copying",
                                                      (unsigned)rr, f.flipResult, head, W, H, P); }
-        return nvAccelIopFlipNo(7);
+        return rd3AccelIopFlipNo(7);
     }
     ((OSObject *)s)->retain();
     if (gIopFlipPrev[head]) ((OSObject *)gIopFlipPrev[head])->release();
@@ -1426,40 +1446,36 @@ static bool nvAccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pip
              (long long)n + 1, head, s->getSurfaceID(), W, H, P, f.flipResult);
     return true;
 }
-static int nvaccel_crc_sysctl SYSCTL_HANDLER_ARGS
+static int rdna3accel_crc_sysctl SYSCTL_HANDLER_ARGS
 {
     unsigned v = 0;
-    NVAccel *a = NVAccel::gAccel;
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     IOService *fb = a ? a->fFB : nullptr;
-    IOService *nub = fb ? fb->getProvider() : nullptr;
-    OSNumber *n = nub ? OSDynamicCast(OSNumber, nub->getProperty("nvkms-kapi")) : nullptr;
-    struct NvKmsKapiFunctionsTable *k = n ? (struct NvKmsKapiFunctionsTable *)(uintptr_t)n->unsigned64BitValue() : nullptr;
-    struct NVRMRmHandles h; nvSVZero(&h, sizeof h);
-    if (k && k->getCRC32 && gCrcHead >= 0 && gCrcHead < 8 && nvAccelRmHandles(&h) && h.kapiDevice) {
-        struct NvKmsKapiCrcs c; nvSVZero(&c, sizeof c);
-        if (k->getCRC32((struct NvKmsKapiDevice *)h.kapiDevice, (NvU32)gCrcHead, &c))
-            v = c.compositorCrc32.supported ? c.compositorCrc32.value : (c.outputCrc32.supported ? c.outputCrc32.value : 0);
+    /* DCN OTG CRC (amdgpu_dm_crc.c); the framebuffer answers once Stage 3 has heads */
+    if (fb && gCrcHead >= 0 && gCrcHead < 8) {
+        const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_FN_DISPLAY_CRC);
+        if (sym) { fb->callPlatformFunction(sym, false, (void *)(uintptr_t)gCrcHead, &v, nullptr, nullptr); sym->release(); }
     }
     int out = (int)v;
     return sysctl_handle_int(oidp, &out, 0, req);
 }
-static void nvAccelIopHome(IOService *fb, unsigned head)
+static void rd3AccelIopHome(IOService *fb, unsigned head)
 {
-    if (!fb || head >= kNvMaxFB || !gIopFlipped[head]) return;
-    struct NVRMFlipRequest f; nvSVZero(&f, sizeof f);
-    f.version = NVRM_FLIP_ABI_VERSION; f.flags = 1u;
-    const OSSymbol *sym = OSSymbol::withCStringNoCopy("nvFlipToSurfacePure");
+    if (!fb || head >= kRd3MaxFB || !gIopFlipped[head]) return;
+    struct RD3KFlipRequest f; rd3SVZero(&f, sizeof f);
+    f.version = RD3K_FLIP_ABI_VERSION; f.flags = 1u;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy("rd3FlipToSurfacePure");
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
     OSAddAtomic64(1, &gCntIopFlipHome);
     if (rr != kIOReturnSuccess && gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: HOME flip refused (0x%x) head %u", (unsigned)rr, head); }
     gIopFlipped[head] = false;
 }
-static void nvAccelSurfScanoutSync(IOSurface *s)
+static void rd3AccelSurfScanoutSync(IOSurface *s)
 {
-    if (!s || !NVAccel::gAccel || !nvSVPend(_ZNK9IOSurface12getSurfaceIDEv((void *)s), 2)) return;
-    NVAccel *a = NVAccel::gAccel;
-    if (!nvFamLock(a, true)) {
+    if (!s || !RDNA3Accelerator::gAccel || !rd3SVPend(_ZNK9IOSurface12getSurfaceIDEv((void *)s), 2)) return;
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    if (!rd3FamLock(a, true)) {
         if (++gNVSVLockMiss <= 8 || (gNVSVLockMiss & 1023) == 0)
             ALOG("surfvram scanout: accelerator lock busy, surface %u stays pending (misses %u)",
                  _ZNK9IOSurface12getSurfaceIDEv((void *)s), gNVSVLockMiss);
@@ -1467,80 +1483,80 @@ static void nvAccelSurfScanoutSync(IOSurface *s)
     }
     void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, (void *)s, 0);
     OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
-    NVResource *res = OSDynamicCast(NVResource, ctx);
+    RD3Resource *res = OSDynamicCast(RD3Resource, ctx);
     bool out = false;
     if (res) res->pageoff(nullptr, true, &out, 0);
-    if (!out) nvSVPend(_ZNK9IOSurface12getSurfaceIDEv((void *)s), 0);
+    if (!out) rd3SVPend(_ZNK9IOSurface12getSurfaceIDEv((void *)s), 0);
     if (cache) ((OSObject *)cache)->release();
-    nvFamUnlock(a);
+    rd3FamUnlock(a);
 }
 
-static unsigned nvVaAllocLogged, nvVaMapLogged;
+static unsigned rd3VaAllocLogged, rd3VaMapLogged;
 
-static unsigned long long nvAccelGpuVaAlloc(IOAccelMemoryMap *map,
+static unsigned long long rd3AccelGpuVaAlloc(IOAccelMemoryMap *map,
                                             unsigned long long len, unsigned long long align)
 {
-    NVMemoryMap *mm = OSDynamicCast(NVMemoryMap, map);
+    RD3MemoryMap *mm = OSDynamicCast(RD3MemoryMap, map);
     if (!mm || !len) return 0;
     if (mm->fGpuVa) return mm->fGpuVa;
 
-    struct NVRMRmHandles h;
-    if (!nvAccelRmHandles(&h)) return 0;
+    struct RD3KRmHandles h;
+    if (!rd3AccelRmHandles(&h)) return 0;
 
-    struct NVRMGpuVaRequest g;
-    nvAccelZero(&g, sizeof g);
-    g.version = NVRM_GPUVA_ABI_VERSION;
+    struct RD3KGpuVaRequest g;
+    rd3AccelZero(&g, sizeof g);
+    g.version = RD3K_GPUVA_ABI_VERSION;
     g.kapiDevice = h.kapiDevice;
     g.size = len; g.align = align;
-    if (nvAccelGpuVaCall(NVRM_GPUVA_FN_ALLOC, &g) != kIOReturnSuccess || !g.gpuva) {
-        if (nvVaAllocLogged < 8) { nvVaAllocLogged++;
+    if (rd3AccelGpuVaCall(RD3K_GPUVA_FN_ALLOC, &g) != kIOReturnSuccess || !g.gpuva) {
+        if (rd3VaAllocLogged < 8) { rd3VaAllocLogged++;
             ALOG("gpuVaAlloc: RM refused %llu bytes (align %llu) -> status 0x%x", len, align, g.status); }
         return 0;
     }
     mm->fHVirt = g.hVirt; mm->fGpuVa = g.gpuva; mm->fVaLen = len;
-    if (nvVaAllocLogged < 8) { nvVaAllocLogged++;
+    if (rd3VaAllocLogged < 8) { rd3VaAllocLogged++;
         ALOG("gpuVaAlloc: %llu bytes -> gpuVA 0x%llx (hVirt 0x%x)", len, g.gpuva, g.hVirt); }
     return g.gpuva;
 }
 
-static void nvAccelGpuVaFree(IOAccelMemoryMap *map)
+static void rd3AccelGpuVaFree(IOAccelMemoryMap *map)
 {
-    NVMemoryMap *mm = OSDynamicCast(NVMemoryMap, map);
+    RD3MemoryMap *mm = OSDynamicCast(RD3MemoryMap, map);
     if (!mm || !mm->fHVirt) return;
-    struct NVRMRmHandles h;
-    if (!nvAccelRmHandles(&h)) return;
-    struct NVRMGpuVaRequest g;
-    nvAccelZero(&g, sizeof g);
-    g.version = NVRM_GPUVA_ABI_VERSION;
+    struct RD3KRmHandles h;
+    if (!rd3AccelRmHandles(&h)) return;
+    struct RD3KGpuVaRequest g;
+    rd3AccelZero(&g, sizeof g);
+    g.version = RD3K_GPUVA_ABI_VERSION;
     g.kapiDevice = h.kapiDevice;
     g.hVirt = mm->fHVirt; g.hMemory = mm->fMapped ? mm->fHRmMemory : 0; g.size = mm->fVaLen;
     g.gpuva = mm->fGpuVa;
-    nvAccelGpuVaCall(NVRM_GPUVA_FN_FREE, &g);
+    rd3AccelGpuVaCall(RD3K_GPUVA_FN_FREE, &g);
     OSAddAtomic64(1, &gCntMapFree);
     mm->fHVirt = 0; mm->fGpuVa = 0; mm->fVaLen = 0; mm->fMapped = false;
 }
 
-bool NVMemoryMap::commitIntoGPUPageTable()
+bool RD3MemoryMap::commitIntoGPUPageTable()
 {
     if (fMapped) return true;
-    NVVidMemory *vm = OSDynamicCast(NVVidMemory, fMem);
+    RD3VidMemory *vm = OSDynamicCast(RD3VidMemory, fMem);
     void *kapiMem = vm ? vm->fRmHandle : nullptr;
     unsigned long long len = fVaLen ? fVaLen : getLength();
     if (!fHVirt || !kapiMem || !len) {
         if (fCommits < 8) { fCommits++;
             ALOG("MM commit: NOT MAPPED -- hVirt 0x%x kapiMem %p len %llu (mem %p%s)",
-                 fHVirt, kapiMem, len, fMem, vm ? "" : ", not an NVVidMemory"); }
+                 fHVirt, kapiMem, len, fMem, vm ? "" : ", not an RD3VidMemory"); }
         return false;
     }
-    struct NVRMRmHandles h;
-    if (!nvAccelRmHandles(&h)) return false;
-    struct NVRMGpuVaRequest g;
-    nvAccelZero(&g, sizeof g);
-    g.version = NVRM_GPUVA_ABI_VERSION;
+    struct RD3KRmHandles h;
+    if (!rd3AccelRmHandles(&h)) return false;
+    struct RD3KGpuVaRequest g;
+    rd3AccelZero(&g, sizeof g);
+    g.version = RD3K_GPUVA_ABI_VERSION;
     g.kapiDevice = h.kapiDevice; g.kapiMemory = kapiMem;
-    g.hVirt = fHVirt; g.size = len;
+    g.hVirt = fHVirt; g.size = len; g.gpuva = fGpuVa;
     g.isVidmem = 1;
-    if (nvAccelGpuVaCall(NVRM_GPUVA_FN_MAP, &g) != kIOReturnSuccess) {
+    if (rd3AccelGpuVaCall(RD3K_GPUVA_FN_MAP, &g) != kIOReturnSuccess) {
         if (fCommits < 8) { fCommits++;
             ALOG("MM commit: MAP_MEMORY_DMA refused gpuVA 0x%llx len %llu -> status 0x%x",
                  fGpuVa, len, g.status); }
@@ -1555,41 +1571,41 @@ bool NVMemoryMap::commitIntoGPUPageTable()
     return true;
 }
 
-void NVMemoryMap::releaseFromGPUPageTable()
+void RD3MemoryMap::releaseFromGPUPageTable()
 {
     if (!fMapped || !fHVirt) return;
-    struct NVRMRmHandles h;
-    if (!nvAccelRmHandles(&h)) return;
-    struct NVRMGpuVaRequest g;
-    nvAccelZero(&g, sizeof g);
-    g.version = NVRM_GPUVA_ABI_VERSION;
+    struct RD3KRmHandles h;
+    if (!rd3AccelRmHandles(&h)) return;
+    struct RD3KGpuVaRequest g;
+    rd3AccelZero(&g, sizeof g);
+    g.version = RD3K_GPUVA_ABI_VERSION;
     g.kapiDevice = h.kapiDevice;
     g.hVirt = fHVirt; g.hMemory = fHRmMemory; g.size = fVaLen;
     g.gpuva = fGpuVa;
-    g.flags = NVRM_GPUVA_FLAG_UNMAP_ONLY;
-    nvAccelGpuVaCall(NVRM_GPUVA_FN_FREE, &g);
+    g.flags = RD3K_GPUVA_FLAG_UNMAP_ONLY;
+    rd3AccelGpuVaCall(RD3K_GPUVA_FN_FREE, &g);
     fMapped = false;
     OSAddAtomic64(1, &gCntMapRelease);
 }
 
-static void nvAccelWriteStamp(int index, unsigned int value)
+static void rd3AccelWriteStamp(int index, unsigned int value)
 {
-    NVAccel *a = NVAccel::gAccel;
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     if (!a || !a->fStamps || index < 0 || index >= 4096) return;
     volatile unsigned int *base = (volatile unsigned int *)a->fStamps->getBytesNoCopy();
     if (!base) return;
     base[index] = value;
 }
 
-static unsigned nvFrontSamples, nvFrontFlips;
-static unsigned nvFrontLastSum;
-static void nvAccelSampleFront(NVVidMemory *vm, unsigned w, unsigned h, unsigned pitch)
+static unsigned rd3FrontSamples, rd3FrontFlips;
+static unsigned rd3FrontLastSum;
+static void rd3AccelSampleFront(RD3VidMemory *vm, unsigned w, unsigned h, unsigned pitch)
 {
     if (!vm || !vm->fKva || !pitch || !w || !h) return;
-#define NVFRONT_EVERY 10u
-    if (++nvFrontFlips % NVFRONT_EVERY) return;
-    if (nvFrontSamples >= 40) return;
-    nvFrontSamples++;
+#define RD3FRONT_EVERY 10u
+    if (++rd3FrontFlips % RD3FRONT_EVERY) return;
+    if (rd3FrontSamples >= 40) return;
+    rd3FrontSamples++;
     const volatile unsigned int *px = (const volatile unsigned int *)vm->fKva;
     const unsigned ppr = pitch / 4;
     unsigned n = 0, nonzero = 0, sum = 0;
@@ -1601,22 +1617,22 @@ static void nvAccelSampleFront(NVVidMemory *vm, unsigned w, unsigned h, unsigned
     const unsigned p1 = (w > 100  && h > 100)  ? px[100  * ppr + 100]  : 0u;
     const unsigned p2 = (w > 960  && h > 540)  ? px[540  * ppr + 960]  : 0u;
     const unsigned p3 = (w > 1800 && h > 1000) ? px[1000 * ppr + 1800] : 0u;
-    const bool moved = (nvFrontSamples > 1) && (sum != nvFrontLastSum);
+    const bool moved = (rd3FrontSamples > 1) && (sum != rd3FrontLastSum);
     ALOG("FRONT SURFACE sample %u: sum 0x%08x %s nonzero %u/%u "
          "px(100,100)=0x%08x px(960,540)=0x%08x px(1800,1000)=0x%08x %ux%u pitch %u",
-         nvFrontSamples, sum,
+         rd3FrontSamples, sum,
          moved ? "*** MOVED -- A LIVE WRITER IS PAINTING THE SCANNED-OUT SURFACE ***"
-               : (nvFrontSamples > 1 ? "(UNCHANGED since last sample -- frozen, not proof of a picture)"
+               : (rd3FrontSamples > 1 ? "(UNCHANGED since last sample -- frozen, not proof of a picture)"
                                      : "(first sample -- motion is the proof, wait for the next)"),
          nonzero, n, p1, p2, p3, w, h, pitch);
-    nvFrontLastSum = sum;
+    rd3FrontLastSum = sum;
 }
 
-static unsigned nvSwapProbes;
-static void nvAccelResStats(IOAccelResource2 *res, const char *tag)
+static unsigned rd3SwapProbes;
+static void rd3AccelResStats(IOAccelResource2 *res, const char *tag)
 {
     if (!res) { ALOG("  swap %s: (null)", tag); return; }
-    NVVidMemory *vm = nvres_vidmem(res);
+    RD3VidMemory *vm = rd3res_vidmem(res);
     const unsigned char *r = (const unsigned char *)res;
     const unsigned w     = *(const volatile unsigned short *)(r + 0xb0);
     const unsigned h     = *(const volatile unsigned short *)(r + 0xb2);
@@ -1638,10 +1654,10 @@ static void nvAccelResStats(IOAccelResource2 *res, const char *tag)
          tag, w, h, pitch, (int)vm->fScanout, sum, nonzero, n,
          nonzero ? "*** HAS CONTENT -- THIS IS THE SOURCE ***" : "(empty)");
 }
-bool nvAccelResHasContent(IOAccelResource2 *res)
+bool rd3AccelResHasContent(IOAccelResource2 *res)
 {
     if (!res) return false;
-    NVVidMemory *vm = nvres_vidmem(res);
+    RD3VidMemory *vm = rd3res_vidmem(res);
     if (!vm || !vm->fKva) return false;
     const unsigned char *r = (const unsigned char *)res;
     const unsigned w     = *(const volatile unsigned short *)(r + 0xb0);
@@ -1658,42 +1674,42 @@ bool nvAccelResHasContent(IOAccelResource2 *res)
     return false;
 }
 
-void nvAccelSwapProbe(IOAccelResource2 *a1, IOAccelResource2 *a2)
+void rd3AccelSwapProbe(IOAccelResource2 *a1, IOAccelResource2 *a2)
 {
-    if (nvSwapProbes >= 6) return;
-    nvSwapProbes++;
-    ALOG("SWAP PROBE %u -- which argument holds the composited frame?", nvSwapProbes);
-    nvAccelResStats(a1, "a1");
-    nvAccelResStats(a2, "a2");
+    if (rd3SwapProbes >= 6) return;
+    rd3SwapProbes++;
+    ALOG("SWAP PROBE %u -- which argument holds the composited frame?", rd3SwapProbes);
+    rd3AccelResStats(a1, "a1");
+    rd3AccelResStats(a2, "a2");
 }
 
-static unsigned nvFlipWhy = 0;
-#define NVFLIPWHY(...) do { if (nvFlipWhy < 20) { nvFlipWhy++; ALOG(__VA_ARGS__); } } while (0)
+static unsigned rd3FlipWhy = 0;
+#define RD3FLIPWHY(...) do { if (rd3FlipWhy < 20) { rd3FlipWhy++; ALOG(__VA_ARGS__); } } while (0)
 
-#define NVSCANOUT_COPY_MAX 120
-static unsigned nvScanoutCopies = 0;
-static bool nvAccelCopyToScanout(IOAccelResource2 *res)
+#define RD3SCANOUT_COPY_MAX 120
+static unsigned rd3ScanoutCopies = 0;
+static bool rd3AccelCopyToScanout(IOAccelResource2 *res)
 {
-    if (nvScanoutCopies >= NVSCANOUT_COPY_MAX) return false;
+    if (rd3ScanoutCopies >= RD3SCANOUT_COPY_MAX) return false;
     if (!res) return false;
-    NVAccel *a = NVAccel::gAccel;
-    if (!a || !a->fFB) { NVFLIPWHY("copyToScanout: no accelerator/framebuffer"); return false; }
-    if (gNvHeadsPiped & (gNvHeadsPiped - 1)) { NVFLIPWHY("copyToScanout: refused -- heads piped 0x%x, no way to tell whose frame this is", gNvHeadsPiped); return false; }
-    NVVidMemory *vm = nvres_vidmem(res);
-    if (!vm || !vm->fKva) { NVFLIPWHY("copyToScanout: source has no kva"); return false; }
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    if (!a || !a->fFB) { RD3FLIPWHY("copyToScanout: no accelerator/framebuffer"); return false; }
+    if (gRd3HeadsPiped & (gRd3HeadsPiped - 1)) { RD3FLIPWHY("copyToScanout: refused -- heads piped 0x%x, no way to tell whose frame this is", gRd3HeadsPiped); return false; }
+    RD3VidMemory *vm = rd3res_vidmem(res);
+    if (!vm || !vm->fKva) { RD3FLIPWHY("copyToScanout: source has no kva"); return false; }
 
     const unsigned char *rr = (const unsigned char *)res;
     const unsigned w     = *(const volatile unsigned short *)(rr + 0xb0);
     const unsigned h     = *(const volatile unsigned short *)(rr + 0xb2);
     const unsigned pitch = *(const volatile unsigned int   *)(rr + 0xb8);
-    if (!w || !h || pitch < 4) { NVFLIPWHY("copyToScanout: source geometry %ux%u pitch %u", w, h, pitch); return false; }
+    if (!w || !h || pitch < 4) { RD3FLIPWHY("copyToScanout: source geometry %ux%u pitch %u", w, h, pitch); return false; }
 
-    struct NVRMVramRequest q;
+    struct RD3KVramRequest q;
     for (unsigned i = 0; i < sizeof q; i++) ((volatile unsigned char *)&q)[i] = 0;
-    q.version = NVRM_VRAM_ABI_VERSION;
+    q.version = RD3K_VRAM_ABI_VERSION;
     IOReturn ret = a->askFramebufferForScanout(&q);
     if (ret != kIOReturnSuccess || !q.kva || !q.pitch) {
-        NVFLIPWHY("copyToScanout: framebuffer would not describe its scanout (0x%x kva %p pitch %u)",
+        RD3FLIPWHY("copyToScanout: framebuffer would not describe its scanout (0x%x kva %p pitch %u)",
                   (unsigned)ret, q.kva, q.pitch);
         return false;
     }
@@ -1709,62 +1725,62 @@ static bool nvAccelCopyToScanout(IOAccelResource2 *res)
         volatile unsigned int *dp = d + (unsigned long)y * dpr;
         for (unsigned x = 0; x < words; x++) dp[x] = sp[x];
     }
-    nvScanoutCopies++;
-    if (nvScanoutCopies <= 3 || nvScanoutCopies == NVSCANOUT_COPY_MAX)
+    rd3ScanoutCopies++;
+    if (rd3ScanoutCopies <= 3 || rd3ScanoutCopies == RD3SCANOUT_COPY_MAX)
         ALOG("*** COPIED THE COMPOSITED FRAME ONTO THE PANEL *** #%u: %ux%u, %u rows x %u bytes, "
              "src kva %p pitch %u -> scanout kva %p phys 0x%llx pitch %u%s",
-             nvScanoutCopies, w, h, rows, rowb, vm->fKva, pitch, q.kva,
+             rd3ScanoutCopies, w, h, rows, rowb, vm->fKva, pitch, q.kva,
              (unsigned long long)q.phys, q.pitch,
-             nvScanoutCopies == NVSCANOUT_COPY_MAX ? "  [CAP REACHED -- stopping, panel keeps this frame]" : "");
+             rd3ScanoutCopies == RD3SCANOUT_COPY_MAX ? "  [CAP REACHED -- stopping, panel keeps this frame]" : "");
     return true;
 }
 
-static bool nvAccelFlipTo(IOAccelResource2 *res)
+static bool rd3AccelFlipTo(IOAccelResource2 *res)
 {
-    if (!res) { NVFLIPWHY("nvAccelFlipTo: no resource"); return false; }
-    NVAccel *a = NVAccel::gAccel;
-    if (!a || !a->fFB) { NVFLIPWHY("nvAccelFlipTo: accel %p fFB %p", a, a ? a->fFB : nullptr); return false; }
-    if (gNvHeadsPiped & (gNvHeadsPiped - 1)) { NVFLIPWHY("nvAccelFlipTo: refused -- heads piped 0x%x, no way to tell whose surface this is", gNvHeadsPiped); return false; }
-    NVVidMemory *vm = nvres_vidmem(res);
+    if (!res) { RD3FLIPWHY("rd3AccelFlipTo: no resource"); return false; }
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    if (!a || !a->fFB) { RD3FLIPWHY("rd3AccelFlipTo: accel %p fFB %p", a, a ? a->fFB : nullptr); return false; }
+    if (gRd3HeadsPiped & (gRd3HeadsPiped - 1)) { RD3FLIPWHY("rd3AccelFlipTo: refused -- heads piped 0x%x, no way to tell whose surface this is", gRd3HeadsPiped); return false; }
+    RD3VidMemory *vm = rd3res_vidmem(res);
     if (!vm || !vm->fRmHandle) {
-        NVFLIPWHY("nvAccelFlipTo: vm %p fRmHandle %p -- the composited surface has no RM memory to flip to",
+        RD3FLIPWHY("rd3AccelFlipTo: vm %p fRmHandle %p -- the composited surface has no RM memory to flip to",
                   vm, vm ? vm->fRmHandle : nullptr);
         return false;
     }
-    if (vm->fScanout) { NVFLIPWHY("nvAccelFlipTo: already the scanout"); return false; }
+    if (vm->fScanout) { RD3FLIPWHY("rd3AccelFlipTo: already the scanout"); return false; }
 
     const unsigned char *r = (const unsigned char *)res;
     const unsigned w     = *(const volatile unsigned short *)(r + 0xb0);
     const unsigned h     = *(const volatile unsigned short *)(r + 0xb2);
     const unsigned pitch = *(const volatile unsigned int   *)(r + 0xb8);
-    if (!w || !h || !pitch) { NVFLIPWHY("nvAccelFlipTo: geometry %ux%u pitch %u", w, h, pitch); return false; }
+    if (!w || !h || !pitch) { RD3FLIPWHY("rd3AccelFlipTo: geometry %ux%u pitch %u", w, h, pitch); return false; }
 
-    struct NVRMFlipRequest f;
+    struct RD3KFlipRequest f;
     volatile unsigned char *z = (volatile unsigned char *)&f;
     for (unsigned i = 0; i < sizeof f; i++) z[i] = 0;
-    f.version = NVRM_FLIP_ABI_VERSION;
+    f.version = RD3K_FLIP_ABI_VERSION;
     f.kapiMemory = vm->fRmHandle; f.allocationCookie = vm->fAllocationCookie;
     f.width = w; f.height = h; f.pitch = pitch;
 
-    const OSSymbol *sym = OSSymbol::withCStringNoCopy(NVRM_FLIP_FN);
-    if (!sym) { NVFLIPWHY("nvAccelFlipTo: OSSymbol allocation failed"); return false; }
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_FLIP_FN);
+    if (!sym) { RD3FLIPWHY("rd3AccelFlipTo: OSSymbol allocation failed"); return false; }
     IOReturn rr = a->fFB->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr);
     sym->release();
     if (rr != kIOReturnSuccess) {
-        NVFLIPWHY("nvAccelFlipTo: framebuffer refused the flip (0x%x, flipResult %d) for %ux%u pitch %u kapiMemory %p",
+        RD3FLIPWHY("rd3AccelFlipTo: framebuffer refused the flip (0x%x, flipResult %d) for %ux%u pitch %u kapiMemory %p",
                   (unsigned)rr, f.flipResult, w, h, pitch, vm->fRmHandle);
         return false;
     }
-    NVFLIPWHY("nvAccelFlipTo: *** FLIPPED *** to %ux%u pitch %u kapiMemory %p (flipResult %d)",
+    RD3FLIPWHY("rd3AccelFlipTo: *** FLIPPED *** to %ux%u pitch %u kapiMemory %p (flipResult %d)",
               w, h, pitch, vm->fRmHandle, f.flipResult);
-    nvAccelSampleFront(vm, w, h, pitch);
+    rd3AccelSampleFront(vm, w, h, pitch);
     return true;
 }
 
-IOReturn NVAccel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
+IOReturn RDNA3Accelerator::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
 {
-    if (fn && p1 && fn->isEqualTo(NVACCEL_SS_FN))
-        return nvAccelSurfVram((struct NVRMSurfShareEsc *)p1, (task_t)p2, (unsigned)(uintptr_t)p3);
+    if (fn && p1 && fn->isEqualTo(RD3ACCEL_SS_FN))
+        return rd3AccelSurfVram((struct RD3KSurfShareEsc *)p1, (task_t)p2, (unsigned)(uintptr_t)p3);
     return IOService::callPlatformFunction(fn, wait, p1, p2, p3, p4);
 }
 

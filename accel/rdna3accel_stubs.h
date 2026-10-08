@@ -1,7 +1,11 @@
 /*
- * NullMoth NVIDIA driver for macOS
+ * Derived from the NullMoth NVIDIA driver for macOS
  * Copyright (c) 2026 NullMoth Systems.
  * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ *
+ * AMD (RDNA3-Hackintosh) port: identifiers renamed so nothing collides
+ * with a NullMoth install; see PROVENANCE.md. Used with the
+ * author's permission for AMD-only work.
  */
 
 #pragma once
@@ -14,12 +18,12 @@
 #include "IOAccel2DContext2.h"
 #include "IOAccelCLContext2.h"
 #include "IOAccelVideoContext2.h"
-class NVResource : public IOAccelResource2 {
-    OSDeclareDefaultStructors(NVResource)
-    NM_TAHOE_FWD(NVResource)
+class RD3Resource : public IOAccelResource2 {
+    OSDeclareDefaultStructors(RD3Resource)
+    NM_TAHOE_FWD(RD3Resource)
 public:
     unsigned int fPbLogged = 0;
-    void rebuildPagingBuffer() APPLE_KEXT_OVERRIDE { if (fPbLogged < 4) { fPbLogged++; ALOG("NVResource::rebuildPagingBuffer -- nothing to rebuild until there are page tables (rung 5)"); } }
+    void rebuildPagingBuffer() APPLE_KEXT_OVERRIDE { if (fPbLogged < 4) { fPbLogged++; ALOG("RD3Resource::rebuildPagingBuffer -- nothing to rebuild until there are page tables (rung 5)"); } }
     uint64_t getLevelOffset(unsigned char a0, unsigned char a1, int* a2) APPLE_KEXT_OVERRIDE {
         const unsigned char *r = (const unsigned char *)this;
         if (a2) {
@@ -53,16 +57,16 @@ public:
     unsigned int fApLogged = 0;
     IOMemoryDescriptor *fApDesc = nullptr;
 };
-OSDefineMetaClassAndStructors(NVResource, IOAccelResource2)
-class NVSysMemory : public IOAccelSysMemory {
-    OSDeclareDefaultStructors(NVSysMemory)
-    NM_TAHOE_FWD(NVSysMemory)
+OSDefineMetaClassAndStructors(RD3Resource, IOAccelResource2)
+class RD3SysMemory : public IOAccelSysMemory {
+    OSDeclareDefaultStructors(RD3SysMemory)
+    NM_TAHOE_FWD(RD3SysMemory)
 public:
 };
-OSDefineMetaClassAndStructors(NVSysMemory, IOAccelSysMemory)
-class NVVidMemory : public IOAccelVidMemory {
-    OSDeclareDefaultStructors(NVVidMemory)
-    NM_TAHOE_FWD(NVVidMemory)
+OSDefineMetaClassAndStructors(RD3SysMemory, IOAccelSysMemory)
+class RD3VidMemory : public IOAccelVidMemory {
+    OSDeclareDefaultStructors(RD3VidMemory)
+    NM_TAHOE_FWD(RD3VidMemory)
 public:
     void              *fRmHandle = nullptr;
     unsigned long long fAllocationCookie = 0;
@@ -81,21 +85,21 @@ public:
         return fPhys + a0;
     }
 };
-OSDefineMetaClassAndStructors(NVVidMemory, IOAccelVidMemory)
-class NVSurface : public IOAccelLegacySurface {
-    OSDeclareDefaultStructors(NVSurface)
-    NM_TAHOE_FWD(NVSurface)
+OSDefineMetaClassAndStructors(RD3VidMemory, IOAccelVidMemory)
+class RD3Surface : public IOAccelLegacySurface {
+    OSDeclareDefaultStructors(RD3Surface)
+    NM_TAHOE_FWD(RD3Surface)
 public:
-    void setSyncCommand(unsigned int* a0, unsigned int& a1, unsigned int& a2, _AMDSurfaceSwapSyncOptions const& a3) const APPLE_KEXT_OVERRIDE { ALOG("NVSurface::setSyncCommand"); }
-    void _pure335() APPLE_KEXT_OVERRIDE { ALOG("NVSurface::_pure335"); }
-    bool copyFromBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::copyFromBuffer"); return false; }
-    bool copyToBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::copyToBuffer"); return false; }
+    void setSyncCommand(unsigned int* a0, unsigned int& a1, unsigned int& a2, _AMDSurfaceSwapSyncOptions const& a3) const APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::setSyncCommand"); }
+    void _pure335() APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::_pure335"); }
+    bool copyFromBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::copyFromBuffer"); return false; }
+    bool copyToBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::copyToBuffer"); return false; }
     void submitSwapCopy(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2) APPLE_KEXT_OVERRIDE {
         (void)a0;
-        nvAccelSwapProbe(a1, a2);
-        IOAccelResource2 *src = nvAccelResHasContent(a2) ? a2
-                              : nvAccelResHasContent(a1) ? a1 : nullptr;
-        if (src && !nvAccelFlipTo(src)) nvAccelCopyToScanout(src);
+        rd3AccelSwapProbe(a1, a2);
+        IOAccelResource2 *src = rd3AccelResHasContent(a2) ? a2
+                              : rd3AccelResHasContent(a1) ? a1 : nullptr;
+        if (src && !rd3AccelFlipTo(src)) rd3AccelCopyToScanout(src);
     }
     void shapeSurface(unsigned int a0, unsigned short a1, unsigned short a2) APPLE_KEXT_OVERRIDE {
         const unsigned w = a1, h = a2;
@@ -113,7 +117,7 @@ public:
             present++;
             if (r->initSurfaceBuffer(this, w, h, size, pitch, 0)) shaped++;
         }
-        ALOG("NVSurface::shapeSurface(mode 0x%x, %u x %u) smode 0x%x bpp %u pitch %u size %u -> %u present, %u shaped",
+        ALOG("RD3Surface::shapeSurface(mode 0x%x, %u x %u) smode 0x%x bpp %u pitch %u size %u -> %u present, %u shaped",
              a0, w, h, smode, bpp, pitch, size, present, shaped);
         static int gShapeDumps = 0;
         if (gShapeDumps < 4) { gShapeDumps++;
@@ -122,12 +126,12 @@ public:
                 ALOG("   surf+0x%04x: %016llx %016llx", 0x1160 + o, qq[o / 8], qq[o / 8 + 1]);
         }
     }
-    uint32_t getDirtyBufferBitsFromPrivateModeBits(unsigned long long a0) APPLE_KEXT_OVERRIDE { ALOG("NVSurface::getDirtyBufferBitsFromPrivateModeBits(0x%llx)", (unsigned long long)a0); return 0; }
+    uint32_t getDirtyBufferBitsFromPrivateModeBits(unsigned long long a0) APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::getDirtyBufferBitsFromPrivateModeBits(0x%llx)", (unsigned long long)a0); return 0; }
 };
-OSDefineMetaClassAndStructors(NVSurface, IOAccelLegacySurface)
-class NVDisplayPipe : public IOAccelLegacyDisplayPipe {
-    OSDeclareDefaultStructors(NVDisplayPipe)
-    NM_TAHOE_FWD(NVDisplayPipe)
+OSDefineMetaClassAndStructors(RD3Surface, IOAccelLegacySurface)
+class RD3DisplayPipe : public IOAccelLegacyDisplayPipe {
+    OSDeclareDefaultStructors(RD3DisplayPipe)
+    NM_TAHOE_FWD(RD3DisplayPipe)
 public:
     IOAccelMemory *initFramebufferResource(unsigned int index, IOAccelResource2 *res) APPLE_KEXT_OVERRIDE;
     IOReturn validateTransaction(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
@@ -135,39 +139,39 @@ public:
     bool     isTransactionComplete(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
     void     free() APPLE_KEXT_OVERRIDE;
     enum { kIopSrcSlots = 4 };
-    struct NVIopSrc { unsigned id; IOMemoryDescriptor *md; IOMemoryMap *map; } fIopSrc[kIopSrcSlots];
+    struct RD3IopSrc { unsigned id; IOMemoryDescriptor *md; IOMemoryMap *map; } fIopSrc[kIopSrcSlots];
     unsigned fIopNext;
     const void *iopMapSurface(unsigned id, IOMemoryDescriptor *md, unsigned long long need);
     void        iopDropSources();
 };
-OSDefineMetaClassAndStructors(NVDisplayPipe, IOAccelLegacyDisplayPipe)
-class NVGLContext : public IOAccelGLContext2 {
-    OSDeclareDefaultStructors(NVGLContext)
-    NM_TAHOE_FWD(NVGLContext)
+OSDefineMetaClassAndStructors(RD3DisplayPipe, IOAccelLegacyDisplayPipe)
+class RD3GLContext : public IOAccelGLContext2 {
+    OSDeclareDefaultStructors(RD3GLContext)
+    NM_TAHOE_FWD(RD3GLContext)
 public:
-    void _pure362() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure362"); }
-    void _pure363() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure363"); }
-    void _pure364() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure364"); }
-    void _pure367() APPLE_KEXT_OVERRIDE { ALOG("NVGLContext::_pure367"); }
+    void _pure362() APPLE_KEXT_OVERRIDE { ALOG("RD3GLContext::_pure362"); }
+    void _pure363() APPLE_KEXT_OVERRIDE { ALOG("RD3GLContext::_pure363"); }
+    void _pure364() APPLE_KEXT_OVERRIDE { ALOG("RD3GLContext::_pure364"); }
+    void _pure367() APPLE_KEXT_OVERRIDE { ALOG("RD3GLContext::_pure367"); }
 };
-OSDefineMetaClassAndStructors(NVGLContext, IOAccelGLContext2)
-class NV2DContext : public IOAccel2DContext2 {
-    OSDeclareDefaultStructors(NV2DContext)
-    NM_TAHOE_FWD(NV2DContext)
+OSDefineMetaClassAndStructors(RD3GLContext, IOAccelGLContext2)
+class RD32DContext : public IOAccel2DContext2 {
+    OSDeclareDefaultStructors(RD32DContext)
+    NM_TAHOE_FWD(RD32DContext)
 public:
-    void _pure362() APPLE_KEXT_OVERRIDE { ALOG("NV2DContext::_pure362"); }
-    void _pure363() APPLE_KEXT_OVERRIDE { ALOG("NV2DContext::_pure363"); }
+    void _pure362() APPLE_KEXT_OVERRIDE { ALOG("RD32DContext::_pure362"); }
+    void _pure363() APPLE_KEXT_OVERRIDE { ALOG("RD32DContext::_pure363"); }
 };
-OSDefineMetaClassAndStructors(NV2DContext, IOAccel2DContext2)
-class NVCLContext : public IOAccelCLContext2 {
-    OSDeclareDefaultStructors(NVCLContext)
-    NM_TAHOE_FWD(NVCLContext)
-public:
-};
-OSDefineMetaClassAndStructors(NVCLContext, IOAccelCLContext2)
-class NVVideoContext : public IOAccelVideoContext2 {
-    OSDeclareDefaultStructors(NVVideoContext)
-    NM_TAHOE_FWD(NVVideoContext)
+OSDefineMetaClassAndStructors(RD32DContext, IOAccel2DContext2)
+class RD3CLContext : public IOAccelCLContext2 {
+    OSDeclareDefaultStructors(RD3CLContext)
+    NM_TAHOE_FWD(RD3CLContext)
 public:
 };
-OSDefineMetaClassAndStructors(NVVideoContext, IOAccelVideoContext2)
+OSDefineMetaClassAndStructors(RD3CLContext, IOAccelCLContext2)
+class RD3VideoContext : public IOAccelVideoContext2 {
+    OSDeclareDefaultStructors(RD3VideoContext)
+    NM_TAHOE_FWD(RD3VideoContext)
+public:
+};
+OSDefineMetaClassAndStructors(RD3VideoContext, IOAccelVideoContext2)

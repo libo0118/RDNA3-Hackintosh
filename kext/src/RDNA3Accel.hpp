@@ -54,6 +54,10 @@ public:
     IOMemoryDescriptor *drmMemoryForOffset(rdna3_drm_file *f, uint64_t off,
                                            IOOptionBits *options);
 
+    /* Stage 7: requests from the accelerator kext (RDNA3Platform.cpp) */
+    virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
+                                          void *p3, void *p4) override;
+
 private:
     IOPCIDevice  *fPci      = nullptr;
     IOMemoryMap  *fMmioMap  = nullptr;
@@ -78,6 +82,15 @@ private:
     static void   drmBoFree(void *ctx, rdna3_bo *bo);
     static int    drmCopyin(void *ctx, void *dst, uint64_t uaddr, size_t len);
     static int    drmCopyout(void *ctx, uint64_t uaddr, const void *src, size_t len);
+
+    /* Stage 7 */
+    range_alloc  *fAccelVa = nullptr;
+    uint64_t      fAccelVramBytes = 0;
+    bool          platformInit();
+    void          platformFree();
+    IOReturn      platformVramAlloc(struct RD3KVramRequest *r);
+    IOReturn      platformVramFree(struct RD3KVramRequest *r);
+    IOReturn      platformGpuVa(int op, struct RD3KGpuVaRequest *g);
 
     /* level 0 */
     void      readConfigSpace();

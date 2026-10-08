@@ -19,7 +19,7 @@ ARCH     := -arch x86_64 -mmacosx-version-min=11.0
 DEFS     := -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
             -DKEXT_VERSION='"$(VERSION)"'
 COMMONF  := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc \
-            -I$(KHDR) -isystem $(RESDIR)/include -I../common -I../hw -I../uapi -I../third_party/amd -Isrc \
+            -I$(KHDR) -isystem $(RESDIR)/include -I../common -I../hw -I../uapi -I../third_party/amd -I../accel -Isrc \
             -O2 -g -Wall -Wextra -Werror -Wno-unused-parameter $(DEFS)
 CFLAGS   := $(COMMONF) -std=gnu11
 CXXFLAGS := $(COMMONF) -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions \
@@ -27,10 +27,11 @@ CXXFLAGS := $(COMMONF) -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions \
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext \
             -lkmod -lkmodc++ -lcc_kext
 
-CXXSRC := src/RDNA3Accel.cpp src/RDNA3Bringup.cpp src/RDNA3Drm.cpp src/RDNA3UserClient.cpp
+CXXSRC := src/RDNA3Accel.cpp src/RDNA3Bringup.cpp src/RDNA3Drm.cpp src/RDNA3UserClient.cpp \
+          src/RDNA3Platform.cpp
 CSRC   := ../common/amd_discovery.c ../common/amd_fw.c ../common/range_alloc.c \
           ../hw/rdna3_hw.c ../hw/psp13.c ../hw/smu13.c ../hw/gmc11.c ../uapi/rdna3_drm.c src/kmod_info.c
-HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../hw/gen/*.h ../uapi/*.h ../third_party/amd/*.h)
+HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../hw/gen/*.h ../uapi/*.h ../third_party/amd/*.h ../accel/rdna3k_abi.h)
 OBJS   := $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(CXXSRC))) \
           $(patsubst %.c,$(OBJDIR)/%.o,$(notdir $(CSRC)))
 vpath %.cpp src
