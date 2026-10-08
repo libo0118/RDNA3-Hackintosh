@@ -10,6 +10,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 WORK=${1:-$ROOT/build/mesa}
+mkdir -p "$WORK" && WORK=$(cd "$WORK" && pwd)
 MESA_COMMIT=${MESA_COMMIT:-d381c361aec812e9d772291dd1da9b8e1b234a74}
 MESA_URL=${MESA_URL:-https://github.com/chaotic-cx/mesa-mirror.git}
 PREFIX=$ROOT/build/userspace/prefix

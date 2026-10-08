@@ -70,7 +70,7 @@ jobs:
 
   radv-macos:
     # Experimental: drives the Stage 5 port. Failures here are the to-do list.
-    runs-on: macos-15
+    runs-on: macos-15-intel
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
