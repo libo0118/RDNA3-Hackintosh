@@ -20,7 +20,7 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
             -I. -Iiofam -Ire \
             -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT $(if $(NM_TAHOE),-DNM_TAHOE) \
             -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions -fno-builtin -fno-common \
-            -O2 -g -Wall -Wno-unused-parameter -Wno-inconsistent-missing-override \
+            -O2 -g -ferror-limit=0 -Wall -Wno-unused-parameter -Wno-inconsistent-missing-override \
             -Wno-unused-function -Wno-unused-variable -Wno-deprecated-declarations
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext
 
