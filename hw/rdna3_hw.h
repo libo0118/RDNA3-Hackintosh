@@ -1,0 +1,164 @@
+/*
+ * rdna3_hw.h - OS-independent hardware layer for Navi 3x bring-up.
+ *
+ * This is the equivalent of the slice of amdgpu's struct amdgpu_device
+ * that early bring-up needs: register bases from IP discovery, MMIO and
+ * SMN access, VRAM access through the BAR, HDP flush and a tiny VRAM
+ * allocator. All OS services come in through rdna3_os so the same code
+ * runs in the kext (kext/src/RDNA3Hw.cpp) and against the register
+ * simulator in tests/ (tests/sim_navi32.c).
+ *
+ * Register offsets are in DWORDs like amdgpu (SOC15_REG_OFFSET).
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#ifndef RDNA3_HW_H
+#define RDNA3_HW_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdarg.h>
+#include "amd_discovery.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---- error codes (negative errno style, independent of host errno) ---- */
+enum {
+    RDNA3_OK        = 0,
+    RDNA3_EINVAL    = -22,
+    RDNA3_ENOMEM    = -12,
+    RDNA3_ENODEV    = -19,
+    RDNA3_ETIME     = -62,
+    RDNA3_EIO       = -5,
+    RDNA3_ENOENT    = -2,
+};
+
+/* ---- hardware IP blocks we address registers of (subset of amd_hw_ip_block_type) ---- */
+enum rdna3_hwip {
+    HWIP_GC = 0, HWIP_HDP, HWIP_SDMA0, HWIP_SDMA1, HWIP_MMHUB, HWIP_ATHUB,
+    HWIP_NBIO, HWIP_MP0, HWIP_MP1, HWIP_OSSSYS, HWIP_SMUIO, HWIP_DCE, HWIP_VCN,
+    HWIP_THM, HWIP_CLK, HWIP_UMC,
+    HWIP_MAX
+};
+#define RDNA3_MAX_INST 8
+#define RDNA3_MAX_SEG  AMD_DISC_MAX_BASES
+
+/* ---- OS services ---- */
+typedef struct rdna3_os {
+    void *ctx;
+    void (*udelay)(void *ctx, uint32_t us);
+    void (*msleep)(void *ctx, uint32_t ms);
+    void (*vlog)(void *ctx, int level, const char *fmt, va_list ap);
+    /* full memory barrier so CPU writes through the BAR are posted */
+    void (*wmb)(void *ctx);
+    /* MMIO accessors (byte offset into BAR5). The kext does plain volatile
+     * accesses; the simulator models the registers. */
+    uint32_t (*mmio_rd)(void *ctx, uint64_t byte_off);
+    void     (*mmio_wr)(void *ctx, uint64_t byte_off, uint32_t val);
+    /* optional: told about every CPU write into VRAM (tests track HDP flushes) */
+    void     (*vram_written)(void *ctx, uint64_t off, uint64_t len);
+} rdna3_os;
+
+enum { RDNA3_LOG_ERR = 0, RDNA3_LOG_INFO = 1, RDNA3_LOG_DBG = 2 };
+
+typedef struct rdna3_ipver {
+    uint8_t major, minor, rev;
+    uint8_t present;
+} rdna3_ipver;
+
+/* VRAM allocator: first-fit over a list of free ranges, no holes reuse
+ * needed for bring-up (allocations live as long as the device). */
+#define RDNA3_VRAM_MAX_ALLOCS 64
+typedef struct rdna3_vram_alloc {
+    uint64_t offset, size;   /* offset from start of VRAM */
+    const char *tag;
+} rdna3_vram_block;
+
+typedef struct rdna3_dev {
+    rdna3_os os;
+
+    uint64_t mmio_len;          /* BAR5 size in bytes */
+
+    /* VRAM */
+    uint64_t vram_size;         /* from RCC_CONFIG_MEMSIZE */
+    volatile uint8_t *vram_cpu; /* BAR0 mapping (CPU-visible part), may be NULL */
+    uint64_t vram_cpu_len;
+    uint64_t fb_start;          /* MC address of VRAM offset 0 (GCMC_VM_FB_LOCATION_BASE) */
+    uint64_t fb_end;
+    uint64_t fb_offset;         /* GCMC_VM_FB_OFFSET: physical base for *_pa addresses */
+
+    /* bump allocator window inside the CPU-visible part of VRAM */
+    uint64_t alloc_lo, alloc_hi, alloc_next;
+    uint32_t nallocs;
+    rdna3_vram_block allocs[RDNA3_VRAM_MAX_ALLOCS];
+
+    /* register bases from discovery: reg_base[ip][inst][seg] (DWORDs) */
+    uint32_t reg_base[HWIP_MAX][RDNA3_MAX_INST][RDNA3_MAX_SEG];
+    rdna3_ipver ipver[HWIP_MAX];
+
+    /* HDP remap hole (nbio_v4_3_set_reg_remap) */
+    uint32_t rmmio_remap_offset; /* bytes */
+
+    uint32_t usec_timeout;      /* amdgpu default: 100000 */
+} rdna3_dev;
+
+/* ---- logging ---- */
+void rdna3_log(rdna3_dev *d, int level, const char *fmt, ...)
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 3, 4)))
+#endif
+    ;
+#define RLOG(d, ...)  rdna3_log((d), RDNA3_LOG_INFO, __VA_ARGS__)
+#define RERR(d, ...)  rdna3_log((d), RDNA3_LOG_ERR, __VA_ARGS__)
+#define RDBG(d, ...)  rdna3_log((d), RDNA3_LOG_DBG, __VA_ARGS__)
+
+/* ---- setup ---- */
+void rdna3_dev_init(rdna3_dev *d, const rdna3_os *os, uint64_t mmio_len);
+/* Fill reg_base/ipver from a decoded discovery table (amdgpu_discovery_reg_base_init). */
+int  rdna3_dev_set_discovery(rdna3_dev *d, const amd_discovery *disc);
+
+/* ---- register access (DWORD index) ---- */
+uint32_t rdna3_rreg(rdna3_dev *d, uint32_t reg);
+void     rdna3_wreg(rdna3_dev *d, uint32_t reg, uint32_t v);
+uint32_t rdna3_reg_offset(const rdna3_dev *d, int ip, int inst, int seg, uint32_t reg);
+#define SOC15_OFF(d, ip, inst, reg) \
+    rdna3_reg_offset((d), HWIP_##ip, (inst), reg##_BASE_IDX, reg)
+/* paste here, not through SOC15_OFF, so 'reg' is not macro-expanded first */
+#define RREG32_SOC15(d, ip, inst, reg) \
+    rdna3_rreg((d), rdna3_reg_offset((d), HWIP_##ip, (inst), reg##_BASE_IDX, reg))
+#define WREG32_SOC15(d, ip, inst, reg, v) \
+    rdna3_wreg((d), rdna3_reg_offset((d), HWIP_##ip, (inst), reg##_BASE_IDX, reg), (v))
+
+/* SMN (System Management Network) indirect access through NBIO 4.3 RSMU */
+uint32_t rdna3_smn_rreg(rdna3_dev *d, uint32_t addr);
+void     rdna3_smn_wreg(rdna3_dev *d, uint32_t addr, uint32_t v);
+
+/* Poll reg until (val & mask) == expect (or val != expect if changed). */
+int rdna3_wait_reg(rdna3_dev *d, uint32_t reg, uint32_t expect, uint32_t mask,
+                   int wait_changed, uint32_t usec);
+
+/* ---- VRAM ---- */
+int  rdna3_read_fb_location(rdna3_dev *d);           /* gfxhub_v3_0_3_get_fb_location */
+void rdna3_vram_alloc_init(rdna3_dev *d, uint64_t lo, uint64_t hi);
+/* returns VRAM offset, or UINT64_MAX on failure */
+uint64_t rdna3_vram_alloc(rdna3_dev *d, uint64_t size, uint64_t align, const char *tag);
+static inline uint64_t rdna3_vram_mc(const rdna3_dev *d, uint64_t off) { return d->fb_start + off; }
+static inline uint64_t rdna3_vram_pa(const rdna3_dev *d, uint64_t off) { return d->fb_offset + off; }
+volatile uint8_t *rdna3_vram_cpu(rdna3_dev *d, uint64_t off, uint64_t len);
+void rdna3_vram_write(rdna3_dev *d, uint64_t off, const void *src, uint64_t len);
+void rdna3_vram_read(rdna3_dev *d, uint64_t off, void *dst, uint64_t len);
+void rdna3_vram_fill(rdna3_dev *d, uint64_t off, uint8_t v, uint64_t len);
+/* Indirect access through MM_INDEX/MM_DATA (works for all of VRAM). */
+void rdna3_vram_mm_read(rdna3_dev *d, uint64_t off, uint32_t *dst, uint32_t dwords);
+
+/* ---- NBIO / HDP ---- */
+void rdna3_nbio_remap_hdp(rdna3_dev *d);   /* nbio_v4_3_set_reg_remap + remap_hdp_registers */
+void rdna3_hdp_flush(rdna3_dev *d);        /* amdgpu_hdp_generic_flush */
+void rdna3_hdp_invalidate(rdna3_dev *d);   /* no-op on HDP 6.0, kept for symmetry */
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* RDNA3_HW_H */
