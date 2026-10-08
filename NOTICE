@@ -1,0 +1,26 @@
+RDNA3-Hackintosh - third-party components and permissions
+
+third_party/amd/        Verbatim or extracted headers from the Linux kernel
+                        amdgpu driver (drivers/gpu/drm/amd, include/uapi/drm).
+                        Copyright Advanced Micro Devices, Inc. and others,
+                        MIT licence (text kept at the top of every file).
+
+common/, kext/          Ports of logic from Linux amdgpu (MIT). Files that port
+                        a specific amdgpu source name it in their header.
+
+NullMoth NVIDIA driver  https://github.com/nullmoth/nvidia-macos-driver
+                        (plugin/, kexts/: PolyForm Noncommercial 1.0.0,
+                        translator/: LGPL-3.0-or-later, nvk/: MIT).
+                        Its author granted this project permission, on the
+                        NullMoth Discord (October 2026), to use the NullMoth
+                        code in any way on the condition that it is used only
+                        for AMD GPUs and does not interfere with NullMoth's own
+                        NVIDIA work. Code derived from NullMoth in this
+                        repository is used under that permission and must stay
+                        AMD-only. A written confirmation from the author (e.g.
+                        a comment in a GitHub issue of either repository) should
+                        be linked here: TODO.
+                        The translator keeps its LGPL-3.0-or-later licence.
+
+AMD firmware            Not included. See docs/FIRMWARE.md and LICENSE.amdgpu in
+                        linux-firmware.
