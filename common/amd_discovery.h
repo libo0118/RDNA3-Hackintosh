@@ -88,6 +88,22 @@ typedef struct amd_ip_entry {
     uint32_t base[AMD_DISC_MAX_BASES];
 } amd_ip_entry;
 
+/* GC info table (discovery.h gc_info_v1_x), as amdgpu_discovery_get_gfx_info() reads it */
+typedef struct amd_gc_info {
+    uint16_t version_major, version_minor;
+    uint32_t num_se, num_wgp0_per_sa, num_wgp1_per_sa, num_rb_per_se, num_gl2c;
+    uint32_t num_gprs, num_max_gs_thds, gs_table_depth, gsprim_buff_depth;
+    uint32_t parameter_cache_depth, double_offchip_lds_buffer, wave_size;
+    uint32_t max_waves_per_simd, max_scratch_slots_per_cu, lds_size;
+    uint32_t num_sc_per_se, num_sa_per_se, num_packer_per_sc, num_gl2a;
+    /* v1.1+ */
+    uint32_t num_tcp_per_sa, num_sdp_interface, num_tcps;
+    /* v1.2+ */
+    uint32_t num_tcp_per_wpg, tcp_l1_size, num_sqc_per_wgp;
+    uint32_t l1_instruction_cache_size_per_sqc, l1_data_cache_size_per_sqc;
+    uint32_t gl1c_per_sa, gl1c_size_per_instance, gl2c_per_gpu;
+} amd_gc_info;
+
 typedef struct amd_discovery {
     uint16_t bin_version_major, bin_version_minor;
     uint16_t bin_size;
@@ -96,6 +112,8 @@ typedef struct amd_discovery {
     uint8_t  base_addr_64_bit;
     uint32_t num_ips;           /* entries stored in ips[] */
     uint32_t num_ips_dropped;   /* entries that did not fit */
+    uint8_t  has_gc_info;
+    amd_gc_info gc;
     amd_ip_entry ips[AMD_DISC_MAX_IPS];
 } amd_discovery;
 

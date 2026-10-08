@@ -39,9 +39,14 @@ jobs:
         run: |
           file build/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel
           make -C kext check
+      - name: Userspace (libdrm_xnu, rdna3_drminfo)
+        run: make -C userspace
       - name: Host tests on macOS
         run: make test tools
       - uses: actions/upload-artifact@v4
         with:
           name: RDNA3Accel-kext
-          path: build/RDNA3Accel.kext
+          path: |
+            build/RDNA3Accel.kext
+            build/userspace/rdna3_drminfo
+            build/userspace/libdrm_xnu.dylib

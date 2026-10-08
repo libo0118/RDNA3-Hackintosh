@@ -19,7 +19,7 @@ ARCH     := -arch x86_64 -mmacosx-version-min=11.0
 DEFS     := -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
             -DKEXT_VERSION='"$(VERSION)"'
 COMMONF  := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc \
-            -I$(KHDR) -isystem $(RESDIR)/include -I../common -I../hw -I../third_party/amd -Isrc \
+            -I$(KHDR) -isystem $(RESDIR)/include -I../common -I../hw -I../uapi -I../third_party/amd -Isrc \
             -O2 -g -Wall -Wextra -Werror -Wno-unused-parameter $(DEFS)
 CFLAGS   := $(COMMONF) -std=gnu11
 CXXFLAGS := $(COMMONF) -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions \
@@ -27,14 +27,14 @@ CXXFLAGS := $(COMMONF) -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions \
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext \
             -lkmod -lkmodc++ -lcc_kext
 
-CXXSRC := src/RDNA3Accel.cpp src/RDNA3Bringup.cpp
-CSRC   := ../common/amd_discovery.c ../common/amd_fw.c ../hw/rdna3_hw.c ../hw/psp13.c \
-          ../hw/smu13.c src/kmod_info.c
-HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../third_party/amd/*.h)
+CXXSRC := src/RDNA3Accel.cpp src/RDNA3Bringup.cpp src/RDNA3Drm.cpp src/RDNA3UserClient.cpp
+CSRC   := ../common/amd_discovery.c ../common/amd_fw.c ../common/range_alloc.c \
+          ../hw/rdna3_hw.c ../hw/psp13.c ../hw/smu13.c ../uapi/rdna3_drm.c src/kmod_info.c
+HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../uapi/*.h ../third_party/amd/*.h)
 OBJS   := $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(CXXSRC))) \
           $(patsubst %.c,$(OBJDIR)/%.o,$(notdir $(CSRC)))
 vpath %.cpp src
-vpath %.c src ../common ../hw
+vpath %.c src ../common ../hw ../uapi
 
 .PHONY: all check clean firmware
 

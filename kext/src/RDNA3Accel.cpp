@@ -60,6 +60,8 @@ bool RDNA3Accel::start(IOService *provider)
                 bool ok = readDiscovery(disc);
                 if (ok && fLevel >= 3)
                     readGcStatus(disc);
+                if (ok && !drmInit(disc))
+                    LOG("DRM/amdgpu UAPI not available");
                 if (ok && fLevel >= 4) {
                     fBringup = new RDNA3Bringup;
                     if (fBringup && fBringup->init(this, fPci, fMmioMap, fLevel, disc, fVramSize)) {
@@ -91,6 +93,7 @@ void RDNA3Accel::stop(IOService *provider)
         delete fBringup;
         fBringup = nullptr;
     }
+    drmFree();
     OSSafeReleaseNULL(fMmioMap);
     fMmio = nullptr;
     fMmioLen = 0;

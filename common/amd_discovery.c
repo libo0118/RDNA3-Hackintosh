@@ -130,6 +130,25 @@ amd_disc_status amd_discovery_parse(const uint8_t *bin, size_t len,
 
     const size_t base_sz = out->base_addr_64_bit ? 8u : 4u;
 
+    /* ---- GC info table (optional, only version 1.x decoded) ---- */
+    {
+        size_t gt = tables + TABLE_INFO_SIZE * AMD_DISC_TABLE_GC;
+        size_t go;
+        if (in_bounds(bin_size, gt, TABLE_INFO_SIZE) && (go = rd16(bin + gt)) != 0 &&
+            in_bounds(bin_size, go, 12 + 19 * 4) && rd32(bin + go) == AMD_DISC_GC_TABLE_ID &&
+            rd16(bin + go + 4) == 1) {
+            amd_gc_info *g = &out->gc;
+            uint32_t *f = &g->num_se;
+            unsigned n, k;
+            g->version_major = 1;
+            g->version_minor = rd16(bin + go + 6);
+            n = g->version_minor >= 2 ? 30 : g->version_minor >= 1 ? 22 : 19;
+            for (k = 0; k < n && in_bounds(bin_size, go + 12 + 4 * k, 4); k++)
+                f[k] = rd32(bin + go + 12 + 4 * k);
+            out->has_gc_info = 1;
+        }
+    }
+
     for (i = 0; i < out->num_dies; i++) {
         size_t die_off = rd16(ih + IHDR_DIE_INFO + 4u * i + 2u);
         size_t ip_off;

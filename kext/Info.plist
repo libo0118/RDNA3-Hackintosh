@@ -30,6 +30,8 @@
 			<string>IOPCIDevice</string>
 			<key>IOPCIPrimaryMatch</key>
 			<string>0x747e1002</string>
+			<key>IOUserClientClass</key>
+			<string>RDNA3UserClient</string>
 			<key>IOProbeScore</key>
 			<integer>5000</integer>
 		</dict>

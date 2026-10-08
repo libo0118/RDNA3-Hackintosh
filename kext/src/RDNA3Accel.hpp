@@ -31,6 +31,8 @@
 
 extern "C" {
 #include "amd_discovery.h"
+#include "rdna3_drm.h"
+#include "range_alloc.h"
 }
 
 class RDNA3Bringup;
@@ -44,6 +46,14 @@ public:
     virtual void stop(IOService *provider) override;
     virtual void free() override;
 
+    /* Stage 4: DRM/amdgpu UAPI for RDNA3UserClient (RDNA3Drm.cpp) */
+    bool  drmAvailable() const { return fDrm != nullptr; }
+    int   drmOpen(rdna3_drm_file *f);
+    void  drmClose(rdna3_drm_file *f);
+    int   drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size);
+    IOMemoryDescriptor *drmMemoryForOffset(rdna3_drm_file *f, uint64_t off,
+                                           IOOptionBits *options);
+
 private:
     IOPCIDevice  *fPci      = nullptr;
     IOMemoryMap  *fMmioMap  = nullptr;
@@ -53,6 +63,21 @@ private:
     uint32_t      fLevel    = 0;
     uint64_t      fVramSize = 0;
     RDNA3Bringup *fBringup  = nullptr;
+
+    /* Stage 4 */
+    rdna3_drm_device *fDrm  = nullptr;
+    IOLock       *fDrmLock  = nullptr;
+    range_alloc  *fVramHeap = nullptr;
+    IOMemoryMap  *fVramMap  = nullptr;   /* BAR0, for BO clears / kernel access */
+    IODeviceMemory *fVramDev = nullptr;  /* BAR0 descriptor for user mappings */
+    bool          drmInit(const amd_discovery *disc);
+    void          drmFree();
+    static void  *drmZalloc(void *ctx, size_t n);
+    static void   drmFreeMem(void *ctx, void *p, size_t n);
+    static int    drmBoAlloc(void *ctx, rdna3_bo *bo);
+    static void   drmBoFree(void *ctx, rdna3_bo *bo);
+    static int    drmCopyin(void *ctx, void *dst, uint64_t uaddr, size_t len);
+    static int    drmCopyout(void *ctx, uint64_t uaddr, const void *src, size_t len);
 
     /* level 0 */
     void      readConfigSpace();
