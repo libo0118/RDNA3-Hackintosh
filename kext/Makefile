@@ -54,8 +54,12 @@ $(BUNDLE): $(OBJS) Info.plist
 
 check: $(BUNDLE)
 	plutil -lint Info.plist
-	nm -m $(BUNDLE)/Contents/MacOS/$(KEXT) | grep -E "_kmod_info|RDNA3Accel10gMetaClassE" 
-	-kextlibs -xml $(BUNDLE)
+	nm -m $(BUNDLE)/Contents/MacOS/$(KEXT) | grep -E "_kmod_info|RDNA3Accel10gMetaClassE"
+	@echo "undefined symbols (must all come from the OSBundleLibraries in Info.plist):"
+	@nm -u $(BUNDLE)/Contents/MacOS/$(KEXT)
+	@# kextlibs can only resolve x86_64 KPIs on an Intel Mac / Hackintosh,
+	@# on Apple Silicon CI runners it reports everything as missing.
+	@if [ "$$(uname -m)" = x86_64 ]; then kextlibs -xml $(BUNDLE); fi
 
 clean:
 	rm -rf $(OBJDIR) $(BUNDLE)
