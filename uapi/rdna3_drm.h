@@ -101,6 +101,8 @@ typedef struct rdna3_drm_ops {
     int   (*copyout)(void *ctx, uint64_t uaddr, const void *src, size_t len);
     /* GPU timestamp in counter ticks (AMDGPU_INFO_TIMESTAMP), may be NULL */
     uint64_t (*gpu_clock)(void *ctx);
+    /* MMIO read for AMDGPU_INFO_READ_MMR_REG (whitelisted regs only), may be NULL */
+    uint32_t (*read_reg)(void *ctx, uint32_t dword_offset);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -113,6 +115,8 @@ typedef struct rdna3_drm_device {
     uint32_t ip_ver_major[AMDGPU_HW_IP_NUM], ip_ver_minor[AMDGPU_HW_IP_NUM];
     uint32_t fw_version[32], fw_feature[32];      /* by AMDGPU_INFO_FW_* */
     uint64_t next_mmap_offset;
+    uint32_t gc_base0;            /* GC register segment 0 (discovery) */
+    uint32_t gb_addr_config;      /* cached like adev->gfx.config.gb_addr_config */
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {
@@ -138,6 +142,12 @@ void rdna3_drm_file_close(rdna3_drm_file *f);
 /* Returns 0 or a negative Linux errno. 'data' is a kernel copy of the
  * ioctl payload of 'size' bytes; results are written back into it. */
 int  rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size);
+
+/* Enumeration-only mode: report accel_working and one ring per GFX /
+ * COMPUTE / DMA so libdrm_amdgpu and RADV can create a device (vulkaninfo,
+ * memory and BO paths) before Stage 2 has rings. Every CS still fails
+ * with -ENODEV. Kext: boot-arg rdna3enum=1. */
+void rdna3_drm_device_set_enumeration_only(rdna3_drm_device *dev, int on);
 
 /* Lookup for the OS mmap path: BO whose fake offset is 'off'. */
 rdna3_bo *rdna3_drm_bo_by_mmap_offset(rdna3_drm_file *f, uint64_t off);

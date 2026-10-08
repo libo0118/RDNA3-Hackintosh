@@ -41,13 +41,52 @@ $(BUILD)/test_uapi: tests/test_uapi.c $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
 $(BUILD)/test_range_alloc: tests/test_range_alloc.c $(COMMON) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion $(SAN) $(INC) -o $@ tests/test_range_alloc.c $(COMMON)
 
+# Real libdrm_amdgpu over drm_xnu (loopback backend into uapi/) on the host
+LIBDRM      := third_party/libdrm
+LIBDRM_SRC  := $(filter-out $(LIBDRM)/amdgpu/amdgpu_userq.c,$(wildcard $(LIBDRM)/amdgpu/*.c)) $(LIBDRM)/amdgpu/amdgpu_userq.c
+XNU         := userspace/libdrm_xnu
+LIBDRM_INC  := -I$(XNU)/override -I$(XNU) -I$(LIBDRM) -I$(LIBDRM)/amdgpu -I$(LIBDRM)/include/drm
+LIBDRM_DEFS := -DHAVE_LIBDRM_ATOMIC_PRIMITIVES=1 -DAMDGPU_ASIC_ID_TABLE='"$(CURDIR)/$(LIBDRM)/data/amdgpu.ids"' -D_GNU_SOURCE
+
+$(BUILD)/libdrm-host/%.o: $(LIBDRM)/amdgpu/%.c | $(BUILD)
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -std=gnu11 $(SAN) -fno-sanitize=undefined $(LIBDRM_INC) $(LIBDRM_DEFS) -w -c $< -o $@
+
+$(BUILD)/libdrm-host/xnu_%.o: $(XNU)/%.c $(wildcard $(XNU)/*.h) | $(BUILD)
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -std=gnu11 -Wall -Wextra -Werror $(SAN) $(LIBDRM_INC) -D_GNU_SOURCE -c $< -o $@
+
+# the loopback backend talks to uapi/, which uses the Mesa/kernel UAPI headers
+$(BUILD)/libdrm-host/loopback.o: $(XNU)/backend_loopback.c $(COMMON_H) | $(BUILD)
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -std=gnu11 -Wall -Wextra -Werror $(SAN) -I$(XNU) $(INC) -D_GNU_SOURCE -c $< -o $@
+
+LIBDRM_HOST_OBJS := $(patsubst $(LIBDRM)/amdgpu/%.c,$(BUILD)/libdrm-host/%.o,$(LIBDRM_SRC)) \
+                    $(BUILD)/libdrm-host/xnu_drm_xnu.o $(BUILD)/libdrm-host/xnu_xf86drm_xnu.o \
+                    $(BUILD)/libdrm-host/loopback.o
+
+# uapi/ and common/ are built against the kernel/Mesa UAPI headers, not libdrm's copies
+$(BUILD)/libdrm-host/k_%.o: uapi/%.c $(COMMON_H) | $(BUILD)
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -std=gnu11 $(SAN) $(INC) -c $< -o $@
+$(BUILD)/libdrm-host/c_%.o: common/%.c $(COMMON_H) | $(BUILD)
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -std=gnu11 $(SAN) $(INC) -c $< -o $@
+KOBJS := $(patsubst uapi/%.c,$(BUILD)/libdrm-host/k_%.o,$(UAPI)) \
+         $(patsubst common/%.c,$(BUILD)/libdrm-host/c_%.o,$(COMMON))
+
+$(BUILD)/test_libdrm_amdgpu: tests/test_libdrm_amdgpu.c $(LIBDRM_HOST_OBJS) $(KOBJS) | $(BUILD)
+	$(CC) $(CFLAGS) -std=gnu11 $(SAN) $(LIBDRM_INC) -D_GNU_SOURCE -o $@ tests/test_libdrm_amdgpu.c \
+	  $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
+
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc
+test: $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_libdrm_amdgpu
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
 	$(BUILD)/test_uapi
 	$(BUILD)/test_range_alloc
+	$(BUILD)/test_libdrm_amdgpu
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump
 

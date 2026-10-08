@@ -17,6 +17,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
+#include <pexpert/pexpert.h>
 
 #include <libkern/copyio.h>   /* copyin/copyout (kpi.libkern) */
 
@@ -126,6 +127,22 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     rdna3_drm_device_init(fDrm, &ops, disc, fPci->configRead16(kIOPCIConfigDeviceID), rev,
                           0 /* TODO: NBIO strap rev_id */, fVramSize,
                           visible > fVramSize ? fVramSize : visible, gtt);
+    /* GB_ADDR_CONFIG (gfx_v11_0 get_gb_addr_config): read once, cache.
+     * Only at rdna3lvl>=3, the level that already reads GC registers. */
+    if (fLevel >= 3 && fDrm->gc_base0 && fMmio) {
+        uint32_t off = (fDrm->gc_base0 + 0x13de) * 4;
+        if (off + 4 <= fMmioLen)
+            fDrm->gb_addr_config = *(volatile uint32_t *)(fMmio + off);
+    }
+    if (!fDrm->gb_addr_config)
+        fDrm->gb_addr_config = 0x00000545; /* TODO: verify on hardware */
+    setProperty("RDNA3,GBAddrConfig", fDrm->gb_addr_config, 32);
+
+    uint32_t enumOnly = 0;
+    if (PE_parse_boot_argn("rdna3enum", &enumOnly, sizeof(enumOnly)) && enumOnly) {
+        rdna3_drm_device_set_enumeration_only(fDrm, 1);
+        LOG("rdna3enum=1: reporting accel_working + rings for enumeration; CS still fails");
+    }
     LOG("DRM/amdgpu UAPI ready: VRAM %llu MiB (%llu MiB visible), user heap %llu MiB",
         (unsigned long long)(fVramSize >> 20), (unsigned long long)(visible >> 20),
         (unsigned long long)(range_alloc_free_bytes(fVramHeap) >> 20));

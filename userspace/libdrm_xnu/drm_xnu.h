@@ -1,9 +1,9 @@
 /*
  * drm_xnu.h - Linux DRM device semantics on macOS, backed by RDNA3Accel.
  *
- * A "DRM fd" is a real file descriptor (dup of /dev/null) so that it can
- * be stored, polled for validity and closed like on Linux; the library
- * keeps the fd -> io_connect_t table. Same approach as NullMoth's
+ * A "DRM fd" is the read end of a private pipe, so it can be stored,
+ * dup()ed (libdrm_amdgpu does) and closed like on Linux; the connection
+ * is found again from any duplicate through the pipe's inode. Same approach as NullMoth's
  * nvrm_xnu.c, implemented independently for the amdgpu UAPI.
  *
  * Patch points in libdrm (userspace/patches/libdrm-xnu.patch):
@@ -39,6 +39,9 @@ int   drm_xnu_ioctl_nr(int fd, uint32_t nr, void *arg, uint32_t size);
 void *drm_xnu_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off);
 int   drm_xnu_munmap(void *addr, size_t len);
 int   drm_xnu_close(int fd);
+int   drm_xnu_pci_info(uint16_t *vendor, uint16_t *device, uint16_t *subvendor,
+                       uint16_t *subdevice, uint8_t *revision, uint16_t *domain,
+                       uint8_t *bus, uint8_t *dev, uint8_t *func);
 
 #ifdef __cplusplus
 }

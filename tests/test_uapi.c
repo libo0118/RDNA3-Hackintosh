@@ -48,7 +48,7 @@ int main(void)
 {
     static rdna3_drm_device dev;
     static rdna3_drm_file file;
-    rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL };
+    rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 

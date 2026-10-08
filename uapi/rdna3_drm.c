@@ -126,6 +126,7 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
     dev->accel_working = 0;
     ip = amd_discovery_find(disc, AMD_HWID_GC, 0);
     if (ip) {
+        dev->gc_base0 = ip->num_base_kept ? ip->base[0] : 0;
         dev->ip_ver_major[AMDGPU_HW_IP_GFX] = ip->major;
         dev->ip_ver_minor[AMDGPU_HW_IP_GFX] = ip->minor;
         dev->ip_ver_major[AMDGPU_HW_IP_COMPUTE] = ip->major;
@@ -136,6 +137,14 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
         dev->ip_ver_major[AMDGPU_HW_IP_DMA] = ip->major;
         dev->ip_ver_minor[AMDGPU_HW_IP_DMA] = ip->minor;
     }
+}
+
+void rdna3_drm_device_set_enumeration_only(rdna3_drm_device *dev, int on)
+{
+    dev->accel_working = on ? 1 : 0;
+    dev->available_rings[AMDGPU_HW_IP_GFX] = on ? 1 : 0;
+    dev->available_rings[AMDGPU_HW_IP_COMPUTE] = on ? 1 : 0;
+    dev->available_rings[AMDGPU_HW_IP_DMA] = on ? 1 : 0;
 }
 
 /* ------------------------------ file ------------------------------ */
@@ -630,8 +639,30 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         zero(&caps, sizeof(caps));   /* no VCN yet */
         return info_out(f, in, &caps, sizeof(caps));
     }
+    case AMDGPU_INFO_READ_MMR_REG: {
+        /* soc21_allowed_read_registers (GC 11.0.3 offsets, gc_11_0_3_offset.h) */
+        static const uint32_t allowed[] = {
+            0x0da4 /* GRBM_STATUS */, 0x0da2 /* GRBM_STATUS2 */, 0x0da5, 0x0da6, 0x0da7,
+            0x0da8 /* GRBM_STATUS_SE0..3 */, 0x0f40 /* CP_STAT */, 0x13de /* GB_ADDR_CONFIG */,
+        };
+        uint32_t n = in->read_mmr_reg.count, vals[64], i, k;
+        if (!n || n > 64 || (size_t)in->return_size < n * 4ull)
+            return -RD_EINVAL;
+        for (i = 0; i < n; i++) {
+            uint32_t reg = in->read_mmr_reg.dword_offset + i, rel = reg - dev->gc_base0;
+            int ok = 0;
+            for (k = 0; k < sizeof(allowed) / sizeof(allowed[0]); k++)
+                ok |= rel == allowed[k];
+            if (!ok)
+                return -RD_EINVAL;
+            if (rel == 0x13de)
+                vals[i] = dev->gb_addr_config;
+            else
+                vals[i] = dev->ops.read_reg ? dev->ops.read_reg(dev->ops.ctx, reg) : 0;
+        }
+        return info_out(f, in, vals, n * 4);
+    }
     case AMDGPU_INFO_SENSOR:
-    case AMDGPU_INFO_READ_MMR_REG:  /* TODO(stage2-gfx): whitelist like amdgpu */
     case AMDGPU_INFO_VBIOS:
     case AMDGPU_INFO_GDS_CONFIG:
     default:
