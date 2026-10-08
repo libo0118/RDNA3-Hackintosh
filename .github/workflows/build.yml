@@ -101,3 +101,4 @@ jobs:
             build/mesa/install/lib/libvulkan_radeon.dylib
             build/mesa/install/share/vulkan/icd.d
             build/mesa/missing.txt
+            build/mesa/weak.txt

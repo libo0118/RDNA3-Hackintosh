@@ -38,7 +38,7 @@ meson setup --wipe "$WORK/build" "$WORK/src" \
     -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dopengl=false \
     -Dgles1=disabled -Dgles2=disabled -Dllvm=disabled -Damd-use-llvm=false \
     -Dvideo-codecs= -Dbuild-tests=false -Dvulkan-layers= -Dtools= \
-    -Dshared-glapi=disabled -Dzstd=disabled -Dexpat=disabled \
+    -Dshared-glapi=disabled -Dzstd=disabled -Dexpat=disabled -Dspirv-tools=disabled \
     -Dc_args="-arch x86_64" -Dcpp_args="-arch x86_64" \
     -Dc_link_args="-arch x86_64 -Wl,-rpath,$PREFIX/lib" \
     -Dcpp_link_args="-arch x86_64 -Wl,-rpath,$PREFIX/lib" \
@@ -47,21 +47,20 @@ ninja -C "$WORK/build" -k 0 2>&1 | tee "$WORK/ninja.log"
 ninja -C "$WORK/build" install
 ls -la "$WORK/install/lib"
 
-# dynamic_lookup hides genuinely missing symbols: list every undefined
-# symbol that neither our libdrm/libdrm_amdgpu nor libSystem/frameworks
-# provide and that is not an optional Vulkan entrypoint (prefix_VkName).
+# dynamic_lookup hides genuinely missing symbols. nm -m names the dylib each
+# undefined symbol binds to; "dynamically looked up" ones have none. A
+# non-weak one of those makes dlopen fail (chained fixups bind at load), a
+# weak one resolves to NULL (optional entrypoints). missing.txt = the former.
 LIB="$WORK/install/lib/libvulkan_radeon.dylib"
 if [ -f "$LIB" ]; then
-    nm -u "$LIB" | sort -u > "$WORK/undefined.txt"
-    { nm -gU "$PREFIX/lib/libdrm.2.dylib"; nm -gU "$PREFIX/lib/libdrm_amdgpu.1.dylib"; } \
-        | awk '{print $3}' | sort -u > "$WORK/provided.txt"
-    # anything libSystem exports
-    nm -gU /usr/lib/system/libsystem_*.dylib /usr/lib/libSystem.B.dylib 2>/dev/null \
-        | awk 'NF==3 {print $3}' | sort -u > "$WORK/libsystem.txt" || true
-    comm -23 "$WORK/undefined.txt" "$WORK/provided.txt" \
-        | comm -23 - "$WORK/libsystem.txt" \
-        | grep -vE '^_[a-z0-9_]+_[A-Z][A-Za-z0-9]+$' \
-        | grep -vE '^_(_|dyld|objc|os_|pthread|mach|kevent|dispatch|CF|IO|xpc)' > "$WORK/missing.txt" || true
-    echo "== $(wc -l < "$WORK/undefined.txt") undefined, $(wc -l < "$WORK/missing.txt") possibly missing:"
+    nm -m "$LIB" | grep '(undefined)' > "$WORK/undefined.txt" || true
+    grep 'dynamically looked up' "$WORK/undefined.txt" | grep -v ' weak ' \
+        | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^_/) { print $i; break }}' \
+        | sort -u > "$WORK/missing.txt" || true
+    grep 'dynamically looked up' "$WORK/undefined.txt" | grep ' weak ' \
+        | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^_/) { print $i; break }}' \
+        | sort -u > "$WORK/weak.txt" || true
+    echo "== $(wc -l < "$WORK/undefined.txt") undefined; $(wc -l < "$WORK/weak.txt") weak (NULL at load);" \
+         "$(wc -l < "$WORK/missing.txt") MISSING (dlopen would fail):"
     cat "$WORK/missing.txt"
 fi

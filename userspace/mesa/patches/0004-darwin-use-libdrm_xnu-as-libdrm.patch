@@ -1,0 +1,16 @@
+diff --git a/meson.build b/meson.build
+index 7b6a80a..a960482 100644
+--- a/meson.build
++++ b/meson.build
+@@ -810,6 +810,11 @@ if system_has_kms_drm
+       'amdgpu' : _libdrm_checks['amdgpu']['enabled'].to_string('enabled', 'disabled'),
+     },
+   )
++elif host_machine.system() == 'darwin' and with_amd_vk
++  # macOS: libdrm_xnu (RDNA3-Hackintosh) provides the libdrm core API on
++  # top of the RDNA3Accel kext, so RADV gets the same syncobj/sync-provider
++  # code as on Linux. Optional: without it this stays a no-libdrm system.
++  dep_libdrm = dependency('libdrm', version : '>=' + _drm_ver, required : false)
+ else
+   # We should prevent libdrm from being available when the target doesn't have it to avoid transitive
+   # dependencies (such as vk-runtime) linking to it

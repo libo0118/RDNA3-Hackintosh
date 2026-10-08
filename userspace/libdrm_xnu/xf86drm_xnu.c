@@ -470,3 +470,39 @@ drm_public int drmDevicesEqual(drmDevicePtr a, drmDevicePtr b)
         return 0;
     return !memcmp(a->businfo.pci, b->businfo.pci, sizeof(drmPciBusInfo));
 }
+
+/* Format modifier names (libdrm xf86drm.c). Mesa only prints them in debug
+ * dumps and free()s the result; we name the cases RADV produces and
+ * describe AMD modifiers by their fields (drm_fourcc.h AMD_FMT_MOD_*). */
+drm_public char *drmGetFormatModifierVendor(uint64_t modifier)
+{
+    switch (modifier >> 56) {
+    case 0x00: return strdup("NONE");
+    case 0x02: return strdup("AMD");
+    default:   return NULL;
+    }
+}
+
+drm_public char *drmGetFormatModifierName(uint64_t modifier)
+{
+    char *s = NULL;
+
+    if (modifier == 0)
+        return strdup("LINEAR");
+    if (modifier == 0x00ffffffffffffffull)
+        return strdup("INVALID");
+    if ((modifier >> 56) != 0x02)
+        return NULL;
+    if (asprintf(&s, "AMD(TILE_VERSION=%u,TILE=%u,DCC=%u,DCC_RETILE=%u,DCC_PIPE_ALIGN=%u,"
+                 "DCC_INDEPENDENT_64B=%u,DCC_INDEPENDENT_128B=%u,DCC_MAX_COMPRESSED_BLOCK=%u,"
+                 "PIPE_XOR_BITS=%u,BANK_XOR_BITS=%u,PACKERS=%u,RB=%u,PIPE=%u)",
+                 (unsigned)(modifier & 0xff), (unsigned)((modifier >> 8) & 0x1f),
+                 (unsigned)((modifier >> 13) & 1), (unsigned)((modifier >> 14) & 1),
+                 (unsigned)((modifier >> 15) & 1), (unsigned)((modifier >> 16) & 1),
+                 (unsigned)((modifier >> 17) & 1), (unsigned)((modifier >> 18) & 3),
+                 (unsigned)((modifier >> 20) & 7), (unsigned)((modifier >> 23) & 7),
+                 (unsigned)((modifier >> 26) & 7), (unsigned)((modifier >> 29) & 7),
+                 (unsigned)((modifier >> 32) & 7)) < 0)
+        return NULL;
+    return s;
+}

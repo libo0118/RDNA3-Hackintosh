@@ -99,6 +99,18 @@ int main(void)
     fd = drm_xnu_open("/dev/dri/renderD128", 0);
     CHECK(fd >= 0);
     CHECK(drm_xnu_close(fd) == 0);
+
+    /* modifier names (Mesa's debug dumps free() them) */
+    {
+        char *n0 = drmGetFormatModifierName(0);
+        /* AMD_FMT_MOD | TILE_VERSION GFX11 (4) | TILE 64K_R_X (27 & 0x1f) */
+        char *na = drmGetFormatModifierName((2ull << 56) | 4 | (27ull << 8));
+        CHECK(n0 && !strcmp(n0, "LINEAR"));
+        CHECK(na && !strncmp(na, "AMD(TILE_VERSION=4,TILE=27,", 27));
+        CHECK(drmGetFormatModifierName(1ull << 56) == NULL);
+        free(n0);
+        free(na);
+    }
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;
