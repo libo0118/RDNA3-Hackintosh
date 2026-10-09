@@ -42,6 +42,7 @@ extern "C" {
 #include "doorbell.h"
 #include "smu13.h"
 #include "dmub32.h"
+#include "xfer.h"
 #include "rdna3_drm.h"
 #include "amd_fw.h"
 }
@@ -78,6 +79,10 @@ public:
                 uint32_t flags);
     void  vmUnmap(void *vm, uint64_t va, uint64_t size);
     bool  vmLive(void *vm) const;   /* false: record-only (created before the GMC) */
+    /* VRAM -> system pages on SDMA0 through the last 16 MiB of GART (called
+     * under the DRM lock, which also serializes the DMA ring's submits).
+     * RDNA3_ENODEV until GMC and SDMA are up (rdna3lvl>=7). */
+    int   copyVramToPages(uint64_t vramOff, const uint64_t *pages, uint64_t npages, uint64_t len);
 
     /* command submission (DMA ring 0 = SDMA0 from rdna3lvl=7) */
     int   submit(void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,

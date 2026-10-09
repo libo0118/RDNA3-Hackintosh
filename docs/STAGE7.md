@@ -41,7 +41,7 @@ make -C accel check           # sprawdza, że nie został żaden metaclass NV*
 | `rdna3GpuVaMap` | ✅ własny kontekst GPUVM akceleratora (osobny VMID), liniowe PTE do alokacji VRAM; unmap/free czyści PTE |
 | `rdna3NewAccelClient` | ⬜ `kIOReturnUnsupported`; RADV otwiera `RDNA3Accel` bezpośrednio |
 | `rdna3ScanoutInfo`, `rdna3FlipToSurface`, `rdna3DisplayCrc` | 🟡 `RDNA3Framebuffer` ([STAGE3](STAGE3.md)); flip przez `rdna3DisplayFlip` w rdzeniu, sprawdzone tylko w symulatorze |
-| `rdna3SurfPageoff` | 🟡 kopia VRAM → strony systemowe przez CPU i BAR (wolne, ale dokładne); SDMA przez GART później |
+| `rdna3SurfPageoff` | ✅ od `rdna3lvl=7` SDMA0 przez okno GART (16 MiB na końcu GART, jak `amdgpu_ttm_map_buffer`); wcześniej CPU przez BAR |
 | `rdna3SurfShare` | ⬜ brak odpowiednika uchwytów RM między klientami; RADV współdzieli przez GEM |
 
 ## Co dalej

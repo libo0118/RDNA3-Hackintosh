@@ -1117,6 +1117,17 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
     return 0;
 }
 
+int RDNA3Bringup::copyVramToPages(uint64_t vramOff, const uint64_t *pages, uint64_t npages,
+                                  uint64_t len)
+{
+    const uint32_t winPages = 4096;   /* 16 MiB at the top of GART, nothing else maps there */
+    if (!fGmc || !fGmc->mmhub_enabled || !fSdma || !fSdma->ready ||
+        fGmc->gart_size < (uint64_t)winPages * 4096)
+        return RDNA3_ENODEV;
+    return rdna3_copy_vram_to_pages(fDev, fGmc, fSdma, vramOff, pages, npages, len,
+                                    fGmc->gart_size - (uint64_t)winPages * 4096, winPages);
+}
+
 bool RDNA3Bringup::vmLive(void *p) const
 {
     return p && ((const RDNA3Vm *)p)->live && fVmReady;

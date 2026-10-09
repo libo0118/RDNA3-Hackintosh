@@ -12,7 +12,8 @@
  *                                    into, linear 4 KiB PTEs
  *   rdna3SurfPageoff                 copies an accelerator VRAM allocation
  *                                    into a list of system pages (IOSurface
- *                                    page-off), CPU through the BAR for now
+ *                                    page-off): SDMA0 through a GART window
+ *                                    from rdna3lvl=7, else the CPU via BAR
  *   rdna3SurfShare                   not offered (no RM-style cross-client
  *                                    handles on AMD; RADV shares by GEM)
  *   rdna3NewAccelClient              not offered: RADV opens RDNA3Accel
@@ -198,9 +199,10 @@ IOReturn RDNA3Accel::platformGpuVa(int op, RD3KGpuVaRequest *g)
 }
 
 /* IOSurface page-off: copy the allocation's bytes into the caller's wired
- * system pages. NVIDIA's version runs a copy-engine job; here the CPU reads
- * VRAM through the BAR mapping (uncached, slow but exact). An SDMA copy
- * through GART is the faster path once IOSurfaces carry real traffic. */
+ * system pages. Like NVIDIA's copy-engine job, SDMA0 does it when the GMC
+ * and the DMA ring are up (the pages go into a GART window, amdgpu's
+ * amdgpu_ttm_map_buffer pattern); otherwise the CPU reads VRAM through the
+ * BAR mapping (uncached, slow but exact). */
 IOReturn RDNA3Accel::platformPageoff(RD3KSurfPageoff *q)
 {
     if (!q || q->version != RD3K_SS_RM_VERSION) {
@@ -216,8 +218,22 @@ IOReturn RDNA3Accel::platformPageoff(RD3KSurfPageoff *q)
         q->status = RD3K_SS_TOO_SMALL;
         return kIOReturnSuccess;
     }
+    uint64_t t0 = mach_absolute_time(), ns = 0;
+    if (fBringup && fDrmLock) {
+        IOLockLock(fDrmLock);
+        int r = fBringup->copyVramToPages(h->offset, q->pages, q->pageCount, q->length);
+        IOLockUnlock(fDrmLock);
+        if (r == RDNA3_OK) {
+            absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+            q->usec = ns / 1000;
+            q->status = 0;
+            return kIOReturnSuccess;
+        }
+        if (r != RDNA3_ENODEV)
+            LOG("pageoff: SDMA copy failed (%d), the CPU does it", r);
+    }
     const uint8_t *src = (const uint8_t *)(fVramMap->getVirtualAddress() + h->offset);
-    uint64_t t0 = mach_absolute_time(), done = 0;
+    uint64_t done = 0;
     for (uint64_t i = 0; i < q->pageCount && done < q->length; i++) {
         uint64_t n = q->length - done < 4096 ? q->length - done : 4096;
         /* task NULL: the range is a physical address (64-bit safe) */
@@ -236,7 +252,6 @@ IOReturn RDNA3Accel::platformPageoff(RD3KSurfPageoff *q)
         }
         done += n;
     }
-    uint64_t ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     q->usec = ns / 1000;
     q->status = 0;

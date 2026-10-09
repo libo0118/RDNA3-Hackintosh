@@ -31,6 +31,7 @@
 #include "dmub32.h"
 #include "dcn32_mode.h"
 #include "gfx11_info.h"
+#include "xfer.h"
 #include "gen/gc_11_0_0_harvest.h"
 #include "gen/gc_11_0_0_sdma_reset.h"
 #include "gen/dcn_3_2_1_dmcub.h"
@@ -181,7 +182,9 @@ typedef struct sim {
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
     int      sdma_hang;              /* the engine stopped consuming its ring */
     uint32_t harvest_wgp[8][2];
-    uint64_t tsc;                    /* GOLDEN_TSC: +4 on every access of either half */      /* INACTIVE_WGPS per SE/SA (CC_GC_SHADER_ARRAY_CONFIG) */
+    uint64_t tsc;                    /* GOLDEN_TSC: +4 on every access of either half */
+    uint8_t  sysmem[1u << 20];       /* system RAM at SYS_PHYS, reached through GART */
+    unsigned gart_unmapped;      /* INACTIVE_WGPS per SE/SA (CC_GC_SHADER_ARRAY_CONFIG) */
     unsigned sdma_resets, sdma_resets_unfrozen;
 } sim;
 
@@ -197,6 +200,32 @@ static uint8_t *mc_ptr(uint64_t mc, uint64_t len)
     if (mc < FB_START || mc - FB_START + len > BAR_LEN)
         return NULL;
     return S.vram + (mc - FB_START);
+}
+
+/* VMID0 on MMHUB: an MC address in the GART range goes through the flat
+ * PTE table; system pages land in S.sysmem (bus address SYS_PHYS..) */
+#define SYS_PHYS 0x200000000ull
+static uint8_t *gart_page(uint64_t mc)
+{
+    uint64_t start = ((uint64_t)S.reg[MM_BASE0 + regMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32] |
+                      ((uint64_t)S.reg[MM_BASE0 + regMMVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32] << 32)) << 12;
+    uint64_t end = (((uint64_t)S.reg[MM_BASE0 + regMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32] |
+                     ((uint64_t)S.reg[MM_BASE0 + regMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32] << 32)) << 12) | 0xfff;
+    uint64_t table = ((uint64_t)S.reg[MM_BASE0 + regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32] |
+                      ((uint64_t)S.reg[MM_BASE0 + regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32] << 32)) & ~1ull;
+    uint64_t pte, pa;
+    if (mc < start || mc > end || table + ((mc - start) >> 12) * 8 + 8 > BAR_LEN)
+        return NULL;
+    memcpy(&pte, S.vram + table + ((mc - start) >> 12) * 8, 8);   /* FB_OFFSET 0: pa = VRAM offset */
+    if (!(pte & 1)) {
+        S.gart_unmapped++;
+        return NULL;
+    }
+    pa = pte & 0x0000FFFFFFFFF000ull;
+    if (pte & 2)
+        return (pa >= SYS_PHYS && pa - SYS_PHYS < sizeof(S.sysmem)) ? S.sysmem + (pa - SYS_PHYS) + (mc & 0xfff)
+                                                                     : NULL;
+    return pa + 4096 <= BAR_LEN ? S.vram + pa + (mc & 0xfff) : NULL;
 }
 
 /* ---- VBIOS and PMFW tables ---- */
@@ -1186,7 +1215,22 @@ static void sdma_run(uint32_t wptr_bytes)
             uint32_t len = RD(1) + 1;
             uint64_t s = RD(3) | ((uint64_t)RD(4) << 32), d = RD(5) | ((uint64_t)RD(6) << 32);
             uint8_t *ps = mc_ptr(s, len), *pd = mc_ptr(d, len);
-            if (ps && pd) memmove(pd, ps, len); else S.sdma_bad++;
+            if (ps && pd) {
+                memmove(pd, ps, len);
+            } else if (ps) {
+                /* destination through GART, one page at a time */
+                uint32_t k = 0;
+                while (k < len) {
+                    uint32_t c = 4096 - (uint32_t)((d + k) & 0xfff);
+                    uint8_t *q = gart_page(d + k);
+                    if (c > len - k) c = len - k;
+                    if (!q) { S.sdma_bad++; break; }
+                    memcpy(q, ps + k, c);
+                    k += c;
+                }
+            } else {
+                S.sdma_bad++;
+            }
             n = 7;
         } else if (op == SDMA_OP_CONST_FILL) {
             uint64_t d = RD(1) | ((uint64_t)RD(2) << 32);
@@ -2166,6 +2210,28 @@ static void run(const char *fwdir)
                                        sizeof(pat)) == RDNA3_OK);
                 again = sd.fence_seq;
                 CHECK(again == hung + 1 && S.sdma_bad == 0);
+            }
+            /* VRAM -> scattered system pages through a GART window, as the
+             * IOSurface page-off does: 3 pages in a 2-page window = two chunks */
+            {
+                uint64_t pg[3] = { SYS_PHYS + 0x5000, SYS_PHYS + 0x1000, SYS_PHYS + 0x9000 };
+                uint64_t win = gmc.gart_size - 16 * 4096, wpte = 0;
+                uint32_t pat2[3 * 1024], f0 = S.mm_tlb_flushes;
+                for (j = 0; j < 3 * 1024; j++) pat2[j] = 0xc0de0000u + j;
+                uint64_t xsrc = rdna3_vram_alloc(&dev, 3 * 4096, 4096, "xfer-src");
+                rdna3_vram_write(&dev, xsrc, pat2, sizeof(pat2));
+                memset(S.sysmem, 0, sizeof(S.sysmem));
+                CHECK(rdna3_copy_vram_to_pages(&dev, &gmc, &sd, xsrc, pg, 3, 3 * 4096 - 100, win, 2) == RDNA3_OK);
+                CHECK(!memcmp(S.sysmem + 0x5000, pat2, 4096) && !memcmp(S.sysmem + 0x1000, pat2 + 1024, 4096) &&
+                      !memcmp(S.sysmem + 0x9000, pat2 + 2048, 4096 - 100) && S.sysmem[0x9000 + 4096 - 100] == 0);
+                CHECK(S.sdma_bad == 0 && S.gart_unmapped == 0 && S.mm_tlb_flushes >= f0 + 4);
+                memcpy(&wpte, S.vram + gmc.gart_table + (win / 4096) * 8, 8);
+                CHECK(wpte == 0);                           /* the window is left unmapped */
+                CHECK(rdna3_copy_vram_to_pages(&dev, &gmc, &sd, src, pg, 1, 8192, win, 2) == RDNA3_EINVAL);
+                pg[1] |= 0x10;
+                CHECK(rdna3_copy_vram_to_pages(&dev, &gmc, &sd, src, pg, 3, 8192, win, 2) == RDNA3_EINVAL);
+                memcpy(&wpte, S.vram + gmc.gart_table + (win / 4096) * 8, 8);
+                CHECK(wpte == 0);                          /* nothing mapped on a refusal */
             }
             sdma60_stop(&dev, &sd);
             CHECK(!sd.ready && (S.reg[0xA000 + regSDMA0_F32_CNTL] & SDMA0_F32_CNTL__HALT_MASK));
