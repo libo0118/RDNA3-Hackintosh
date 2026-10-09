@@ -7,3 +7,4 @@
 2 2026-10-09 vm IP discovery GC 11.0.3, 4 display paths; no lit head in the VM (no GOP picture)
 3 2026-10-09 vm 60 active CUs
 4 2026-10-09 vm PSP 13.0.10 sOS 0x00321717, 29 ucodes loaded, RLC autoload started
+5 2026-10-09 vm SMU 13.0.10 PMFW 80.92, SCPM, dpm running, gfxclk 500..2124, uclk 96..1218, PPT 212 W, hotspot 36 C
