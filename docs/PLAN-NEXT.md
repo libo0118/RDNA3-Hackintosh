@@ -1,0 +1,79 @@
+# Plan: najtrudniejsze i najważniejsze części (kolejność wykonania)
+
+Stan wyjściowy: commit `d333e25` na `stage1-kext`. Wszystko poniżej da się
+pisać i sprawdzać bez karty (symulator `tests/sim_navi32.c` + CI), sprzęt
+potwierdzi to dopiero przy pierwszych testach (`docs/STAGE3.md`).
+
+Zasady bez zmian: port z amdgpu (MIT) z nazwą źródłowej funkcji w
+komentarzu, każda część z testem w symulatorze, kod NullMoth tylko dla AMD,
+commity z `[skip ci]` i jeden przebieg CI na paczkę zmian.
+
+## 1. Przerwania MSI i fence'y z IH (dokończenie, mały)
+* `RDNA3Bringup`: własny `IOWorkLoop`, `IOFilterInterruptEventSource` na
+  indeksie MSI z `IOPCIDevice::getInterruptType`, akcja = `ih60_process`
+  → `ih60_iv_fence` → `IOLockWakeup`.
+* Włączenie źródeł: `sdma60_set_trap_interrupt`, `gfx11_set_eop_interrupt`.
+* `fenceWait`: `IOLockSleepDeadline` zamiast pętli, zapas 5 ms na zgubione
+  przerwanie, bez trzymania `fDrmLock` w czasie snu.
+* Brama `rdna3msi=1`; symulator: model generowania IV dla EOP i TRAP.
+
+## 2. Doorbelle + MES (duży, najważniejszy dla RADV/compute)
+* NBIO 4.3: apertura doorbelli (`nbio_v4_3_enable_doorbell_aperture`,
+  zakresy SDMA/IH/VCN), mapowanie BAR2 w kexcie, `WDOORBELL64`.
+* Ring GFX i SDMA przez doorbell (jak amdgpu), wptr w pamięci.
+* MES 11 (`mes_v11_0.c`, `amdgpu_mes.c`): ładowanie przez PSP już jest;
+  dochodzi ring MES, `SET_HW_RESOURCES`, `ADD_QUEUE`/`REMOVE_QUEUE`,
+  MQD dla kolejek gfx/compute/sdma. Alternatywa na start: KIQ + MEC
+  (`gfx_v11_0_kiq_*`, `compute_mqd_init`, `MAP_QUEUES`), bez MES.
+* UAPI: `AMDGPU_HW_IP_COMPUTE` w `rdna3_drm.c`, osobne ringi na plik.
+* Symulator: model KIQ/MES (pakiety MAP_QUEUES, MQD → HQD).
+
+## 3. Display Core z amdgpu (największy)
+Cel: modesetting, EDID, wiele monitorów, hotplug, zmiana rozdzielczości.
+* Warstwa `dm_services` dla XNU (alokacja, logi, zegary, rejestry, delay)
+  i kompilacja `drivers/gpu/drm/amd/display/dc` dla DCN 3.2.1 jako
+  biblioteki C w kexcie (MIT). Najpierw `dc_create` + odczyt stanu, potem
+  `dc_commit_streams`.
+* DMCUB: ładowanie `dcn_3_2_1_dmcub.bin` (`dmub_srv`), bez niego DC na
+  DCN 3.x nie działa.
+* Link: AUX/I2C (EDID), trening DP, HDMI; HPD przez IH (źródła DCN).
+* `RDNA3Framebuffer`: prawdziwa lista trybów z EDID, `setDisplayMode`,
+  wiele głowic (jedna instancja na OTG), hotplug przez connect interrupt.
+* Ryzyko: rozmiar (~150 tys. linii) i zależności od `drm_*`; plan B to
+  własny mini-DC tylko dla DP+HDMI SST na DCN 3.2.
+
+## 4. SMU 13.0.7: zarządzanie energią
+* `smu_v13_0_7_ppt.c`: PPTable z VBIOS, `SetAllowedFeaturesMask`,
+  `EnableAllSmuFeatures` (DPM, wentylator, termika), odczyt metryk
+  (`SMU_TABLE_SMU_METRICS`: temperatura, zegary, pobór).
+* Bez tego karta może zostać na zegarach z rozruchu; to warunek dla
+  wydajności i stabilności.
+* Później: BACO/sleep, `IOPMPowerState` w kexcie, wybudzanie.
+
+## 5. Odporność: wykrywanie zawieszeń i reset GPU
+* Timeout fence'a → odczyt `GRBM_STATUS`, `CP_STAT`, ringów; zrzut stanu do
+  IORegistry.
+* Soft reset ringu / kolejki (MES `RESET_QUEUE`), potem pełny reset przez
+  PSP/SMU (mode1) z ponowną inicjalizacją poziomów 4–8.
+* Ochrona przed błędami stron GPUVM: obsługa przerwań VM fault z IH
+  (adres, VMID, klient) i zabicie kontekstu zamiast zawieszenia systemu.
+
+## 6. UAPI dla RADV na serio
+* Timeline syncobj, `AMDGPU_CTX` z priorytetami, `BO_LIST`, chunki CS,
+  `AMDGPU_INFO` kompletny względem `radv_physical_device`.
+* PRIME/IOSurface: eksport/import BO jako IOSurface (wspólne z akceleratorem,
+  `rdna3SurfShare`), USERPTR przez `IOMemoryDescriptor::withAddressRange`.
+* Test end-to-end na hoście: `vulkaninfo` i proste testy dEQP przez
+  loopback (symulator wykonuje IB SDMA; GFX tylko pakiety, bez shaderów).
+
+## 7. Ścieżka WindowServer / Metal
+* Akcelerator: powierzchnie IOSurface w VRAM, kompozycja przez flipy
+  (już jest szkielet z NullMoth), `populateAccelConfig` pod RDNA3.
+* Wtyczka Metal: przegląd translatora NullMoth pod różnice AMD (formaty,
+  limity, tiling RDNA3), uruchomienie prostych przykładów Metal.
+
+## Kolejność
+1 → 2 → 4 → 5 → 6 → 3 → 7. DC jest największy, ale bez sprzętu trudno go
+zweryfikować, a przejęcie trybu z GOP (`RDNA3Framebuffer`) wystarcza do
+pierwszych testów. Każdy punkt kończy się kartą przesuniętą na tablicy
+w Notion i wpisem w `docs/ROADMAP.md`.
