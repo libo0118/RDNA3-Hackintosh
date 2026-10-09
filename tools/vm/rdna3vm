@@ -283,6 +283,27 @@ msrs() {   # macOS needs unknown MSRs ignored
     echo 0 | sudo tee /sys/module/kvm/parameters/report_ignored_msrs >/dev/null 2>&1 || true
 }
 
+# the HTTP server the VM fetches the bundle from and sends reports to
+# (127.0.0.1:8000 = 10.0.2.2:8000 inside the VM). A server left over from an
+# earlier run holds the port, so stop it first and check the new one listens.
+SHARE_PID=
+start_share() {
+    pkill -f "vmtool.py serve " 2>/dev/null || true
+    sleep 0.5
+    $VMTOOL serve "$WORK/share" 8000 "$WORK/reports" >>"$WORK/share.log" 2>&1 &
+    SHARE_PID=$!
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if python3 -c "import socket; socket.create_connection(('127.0.0.1', 8000), 1)" 2>/dev/null; then
+            kill -0 $SHARE_PID 2>/dev/null && return 0
+            echo "!! port 8000 is taken by another program (not our server)"; return 1
+        fi
+        sleep 0.3
+    done
+    echo "!! the report server did not start, see $WORK/share.log"
+    return 1
+}
+
 cmd_window() {
     load_conf
     msrs
@@ -292,9 +313,8 @@ cmd_window() {
     [ -f "$INSTALLER" ] && QARGS+=(-drive id=InstallMedia,if=none,format=raw,file="$INSTALLER"
                                   -device ide-hd,bus=sata.3,drive=InstallMedia)
     QARGS+=(-device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 -device vmware-svga)
-    $VMTOOL serve "$WORK/share" 8000 "$WORK/reports" >"$WORK/share.log" 2>&1 &
-    local srv=$!
-    trap 'kill $srv 2>/dev/null' EXIT
+    start_share || exit 1
+    trap "kill $SHARE_PID 2>/dev/null" EXIT
     say "macOS in a window (the card stays with Linux). In the macOS Terminal:"
     echo "    curl -s http://10.0.2.2:8000/setup.sh | sudo sh"
     qemu-system-x86_64 "${QARGS[@]}"
@@ -497,7 +517,8 @@ cmd__passthrough() {
     detach || exit 1
 
     local srv inh pk tm qpid
-    $VMTOOL serve "$WORK/share" 8000 "$WORK/reports" >>"$WORK/share.log" 2>&1 & srv=$!
+    start_share || echo "!! no report server: macOS cannot send its report this time"
+    srv=$SHARE_PID
     systemd-inhibit --what=handle-power-key --who=rdna3vm --why="the power button stops the VM" --mode=block sleep infinity & inh=$!
     $VMTOOL stopkeys "${KBDS[@]}" & pk=$!
     local limit=${RDNA3VM_TIMEOUT:-$TIMEOUT_MIN}
