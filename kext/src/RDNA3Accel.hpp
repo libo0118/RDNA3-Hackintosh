@@ -12,6 +12,7 @@
  *   4  + Stage 2 bring-up on a kernel thread (RDNA3Bringup): BAR0, PSP
  *      bootloader/sOS, TMR, all IP firmware via PSP, RLC autoload.
  *   5  + SMU mailbox hello.
+ *   6  + GMC: GART table in VRAM, MMHUB 3.0.2 GART enable + TLB flush.
  *  -rdna3off  disables the driver entirely (probe fails).
  *
  * Levels 0-3 never write anything except MM_INDEX/MM_INDEX_HI (the indirect

@@ -5,9 +5,9 @@
  *
  * Scope today: the system-domain GART that kernel-side engines use
  * (rings, fences, MES/KIQ buffers), with its flat page table in VRAM,
- * plus the per-VMID context setup userspace VMs will use. MMHUB 3.0.x
- * (needed by SDMA/IH/DCN/VCN) is the next piece; gmc_v11_0_gart_enable
- * enables MMHUB, while gfx_v11_0_hw_init enables GFXHUB.
+ * plus the per-VMID context setup userspace VMs will use. MMHUB 3.0.2
+ * (SDMA/IH/DCN/VCN) is in mmhub302.c; gmc11_gart_enable() enables MMHUB
+ * like gmc_v11_0_gart_enable, while GFXHUB follows in gfx hw_init.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -42,8 +42,8 @@ typedef struct rdna3_gmc {
     uint64_t dummy_page_pa;                     /* fault default page (bus address) */
     uint64_t max_pfn;                           /* 1 << (48 - 12) */
     uint32_t num_level, block_size;             /* amdgpu_vm_adjust_size(.., 9, 3, 48) */
-    uint32_t vm_cntx_cntl;
-    int      gfxhub_enabled;
+    uint32_t vm_cntx_cntl, mm_vm_cntx_cntl;
+    int      gfxhub_enabled, mmhub_enabled;
 } rdna3_gmc;
 
 /* Place GART (BEST_FIT, 4 GiB aligned), allocate table + scratch in VRAM. */
@@ -62,6 +62,16 @@ void gfxhub303_set_fault_enable_default(rdna3_dev *d, int value);
 int  gfxhub303_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type);
 /* program VMID n's page directory base (gfxhub_v3_0_3_setup_vm_pt_regs) */
 void gfxhub303_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd_addr);
+
+/* MMHUB 3.0.2 (mmhub302.c, mmhub_v3_0_2.c): SDMA/IH/VCN/DCN/PSP side */
+int      mmhub302_gart_enable(rdna3_dev *d, rdna3_gmc *g);
+void     mmhub302_gart_disable(rdna3_dev *d);
+void     mmhub302_set_fault_enable_default(rdna3_dev *d, int value);
+int      mmhub302_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type);
+void     mmhub302_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd_addr);
+uint64_t mmhub302_get_fb_location(rdna3_dev *d);
+/* gmc_v11_0_gart_enable(): MMHUB GART + fault defaults + VMID0 flush */
+int      gmc11_gart_enable(rdna3_dev *d, rdna3_gmc *g);
 
 #ifdef __cplusplus
 }

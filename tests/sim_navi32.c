@@ -26,6 +26,7 @@
 #include "smu13.h"
 #include "gmc11.h"
 #include "gen/gc_11_0_3_gmc.h"
+#include "gen/mmhub_3_0_2.h"
 #include "navi3x_regs.h"
 #include "psp_gfx_if.h"
 #include "amdgpu_ucode_hdr.h"
@@ -45,6 +46,7 @@ static int failures;
 #define MP0_BASE   0x16000u
 #define MP1_BASE   0x16000u
 #define GC_BASE0   0x1260u
+#define MM_BASE0   0x1A000u
 #define NBIO_B0    0x0u
 #define NBIO_B1    0x14u
 #define NBIO_B2    0xD20u
@@ -75,6 +77,7 @@ typedef struct sim {
     uint64_t now_us;
     uint64_t sos_boot_at;
     unsigned tlb_flushes;
+    unsigned mm_tlb_flushes, mm_sem_held, mm_flush_without_sem, mm_private_inv;
 } sim;
 
 static sim S;
@@ -211,6 +214,30 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             return;
         }
     }
+    /* MMHUB engine 17: semaphore, request/ack, private invalidation */
+    {
+        uint32_t eng_dist = regMMVM_INVALIDATE_ENG1_REQ - regMMVM_INVALIDATE_ENG0_REQ;
+        if (dw == MM_BASE0 + regMMVM_INVALIDATE_ENG0_SEM + 17 * eng_dist) {
+            S.mm_sem_held = 0;      /* driver writes 0 to release */
+            *R(dw) = 1;             /* next read acquires again */
+            return;
+        }
+        if (dw == MM_BASE0 + regMMVM_INVALIDATE_ENG0_REQ + 17 * eng_dist) {
+            if (!S.mm_sem_held)
+                S.mm_flush_without_sem++;
+            S.reg[MM_BASE0 + regMMVM_INVALIDATE_ENG0_ACK + 17 * eng_dist] = v & 0xffff;
+            S.mm_tlb_flushes++;
+            if (S.pending_writes)
+                S.unflushed_doorbells++;
+            *R(dw) = v;
+            return;
+        }
+        if (dw == MM_BASE0 + regMMVM_L2_BANK_SELECT_RESERVED_CID2 && (v & (1u << 25))) {
+            S.mm_private_inv++;
+            *R(dw) = v & ~(1u << 25);
+            return;
+        }
+    }
     if (dw == MP1(66)) {
         uint32_t arg = *R(MP1(82));
         S.smu_msgs++;
@@ -243,6 +270,13 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
     sim_tick();
     if (off >= MMIO_LEN)
         return ~0u;
+    if (off / 4 == MM_BASE0 + regMMVM_INVALIDATE_ENG0_SEM +
+                   17 * (regMMVM_INVALIDATE_ENG1_REQ - regMMVM_INVALIDATE_ENG0_REQ)) {
+        if (S.mm_sem_held)
+            return 0;             /* busy until released */
+        S.mm_sem_held = 1;
+        return 1;
+    }
     return S.reg[off / 4];
 }
 
@@ -278,6 +312,7 @@ static void make_discovery(amd_discovery *disc)
     IP(AMD_HWID_MP1, 13, 0, 7, MP1_BASE, 0, 0);
     IP(AMD_HWID_NBIF, 4, 3, 0, NBIO_B0, NBIO_B1, NBIO_B2);
     IP(AMD_HWID_HDP, 6, 0, 0, 0xF20, 0, 0);
+    IP(AMD_HWID_MMHUB, 3, 0, 2, MM_BASE0, 0, 0);
     disc->num_dies = 1;
 }
 
@@ -451,6 +486,22 @@ static void run(const char *fwdir)
         CHECK((pte & 0x0000FFFFFFFFF000ull) == 0x123457000ull && (pte & RD_PTE_VALID));
         CHECK(gfxhub303_flush_tlb(&dev, 0, 0) == RDNA3_OK && S.tlb_flushes == 1);
         CHECK(gmc11_gart_map(&dev, &gmc, gmc.gart_size, 0, 1, RD_PTE_VALID) == RDNA3_EINVAL);
+        CHECK(S.unflushed_doorbells == 0);
+
+        /* MMHUB 3.0.2: gmc_v11_0_gart_enable() */
+        CHECK(gmc11_gart_enable(&dev, &gmc) == RDNA3_OK && gmc.mmhub_enabled);
+        CHECK(S.reg[MM_BASE0 + regMMVM_CONTEXT0_CNTL] & MMVM_CONTEXT0_CNTL__ENABLE_CONTEXT_MASK);
+        CHECK(S.reg[MM_BASE0 + regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32] ==
+              (uint32_t)(rdna3_vram_pa(&dev, gmc.gart_table) | 1));
+        CHECK(S.reg[MM_BASE0 + regMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32] ==
+              (uint32_t)(gmc.gart_end >> 12));
+        CHECK(S.reg[MM_BASE0 + regMMVM_L2_CNTL] & MMVM_L2_CNTL__ENABLE_L2_CACHE_MASK);
+        CHECK(S.reg[MM_BASE0 + regMMMC_VM_MX_L1_TLB_CNTL] & MMMC_VM_MX_L1_TLB_CNTL__ENABLE_L1_TLB_MASK);
+        CHECK(S.reg[MM_BASE0 + regMMVM_L2_PROTECTION_FAULT_CNTL] &
+              MMVM_L2_PROTECTION_FAULT_CNTL__RANGE_PROTECTION_FAULT_ENABLE_DEFAULT_MASK);
+        CHECK(S.mm_tlb_flushes == 1 && S.mm_flush_without_sem == 0 && !S.mm_sem_held);
+        CHECK(S.mm_private_inv == 1);
+        CHECK(mmhub302_get_fb_location(&dev) == 0);   /* MMMC FB base not modelled */
         CHECK(S.unflushed_doorbells == 0);
     }
 

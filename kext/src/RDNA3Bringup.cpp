@@ -120,8 +120,9 @@ void RDNA3Bringup::stopAndFree()
     if (fDev) IOFree(fDev, sizeof(*fDev));
     if (fPsp) IOFree(fPsp, sizeof(*fPsp));
     if (fPlan) IOFree(fPlan, sizeof(*fPlan));
+    if (fGmc) IOFree(fGmc, sizeof(*fGmc));
     if (fLock) IOLockFree(fLock);
-    fDisc = nullptr; fDev = nullptr; fPsp = nullptr; fPlan = nullptr; fLock = nullptr;
+    fDisc = nullptr; fDev = nullptr; fPsp = nullptr; fPlan = nullptr; fGmc = nullptr; fLock = nullptr;
 }
 
 void RDNA3Bringup::publish(const char *key, uint64_t v)
@@ -281,5 +282,26 @@ void RDNA3Bringup::run()
         publish("RDNA3,SMUVersion", smuv);
         publish("RDNA3,SMUDriverIF", ifv);
         publishString("RDNA3,Stage2", ret ? "failed: SMU" : "PSP + SMU up");
+        if (ret)
+            return;
+    }
+
+    /* level 6: GMC (gmc_v11_0_hw_init -> gart_enable): GART table in
+     * VRAM, MMHUB 3.0.2 VMID0 + contexts, VMID0 TLB flush. GFXHUB comes
+     * with the GFX block (gfx_v11_0_hw_init), not here. */
+    if (fLevel >= 6) {
+        fGmc = (rdna3_gmc *)IOMalloc(sizeof(*fGmc));
+        if (!fGmc) {
+            publishString("RDNA3,Stage2", "failed: GMC (no memory)");
+            return;
+        }
+        bzero(fGmc, sizeof(*fGmc));
+        ret = gmc11_init(fDev, fGmc, 0);
+        if (!ret)
+            ret = gmc11_gart_enable(fDev, fGmc);
+        publish("RDNA3,GMCResult", (uint64_t)(int64_t)ret);
+        publish("RDNA3,GARTStartMC", fGmc->gart_start);
+        publish("RDNA3,GARTSize", fGmc->gart_size);
+        publishString("RDNA3,Stage2", ret ? "failed: GMC" : "PSP + SMU + MMHUB GART up");
     }
 }
