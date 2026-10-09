@@ -77,6 +77,20 @@ int psp13_wait_for_bootloader(rdna3_psp *psp)
     return ret;
 }
 
+int psp13_bootloader_stuck(rdna3_psp *psp)
+{
+    return !psp13_is_sos_alive(psp) &&
+           !(rdna3_rreg(psp->d, C2P(psp, 35)) & 0x80000000u);
+}
+
+void psp13_log_state(rdna3_psp *psp, const char *when)
+{
+    RLOG(psp->d, "PSP state (%s): C2PMSG_33 0x%08x 35 0x%08x 36 0x%08x 58 0x%08x 64 0x%08x 81 0x%08x",
+         when, rdna3_rreg(psp->d, C2P(psp, 33)), rdna3_rreg(psp->d, C2P(psp, 35)),
+         rdna3_rreg(psp->d, C2P(psp, 36)), rdna3_rreg(psp->d, C2P(psp, 58)),
+         rdna3_rreg(psp->d, C2P(psp, 64)), rdna3_rreg(psp->d, C2P(psp, 81)));
+}
+
 /* psp_copy_fw() */
 static int psp13_copy_fw(rdna3_psp *psp, uint8_t bin)
 {

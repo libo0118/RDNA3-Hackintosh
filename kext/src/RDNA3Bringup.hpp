@@ -113,6 +113,7 @@ private:
     bool loadFirmware(const char *name, RDNA3Firmware *out);
     bool mapVram();
     bool postIfNeeded();
+    void resetIfPspStuck();
     void publish(const char *key, uint64_t v);
     void publishString(const char *key, const char *s);
 

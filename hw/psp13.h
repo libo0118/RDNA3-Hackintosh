@@ -56,6 +56,12 @@ int psp13_init(rdna3_psp *psp, rdna3_dev *d, const uint8_t *sos_fw, size_t sos_l
 int  psp13_is_sos_alive(rdna3_psp *psp);
 /* C2PMSG_35 bit 31: the bootloader is up (also what a mode-1 reset ends in) */
 int  psp13_wait_for_bootloader(rdna3_psp *psp);
+/* neither sOS alive (C2PMSG_81) nor the bootloader ready (C2PMSG_35 bit 31):
+ * a PSP that a PCI bus reset left half-initialised (passthrough after the
+ * host driver); only a mode-1 reset brings the bootloader back */
+int  psp13_bootloader_stuck(rdna3_psp *psp);
+/* C2PMSG 33/35/36/58/64/81 into the log */
+void psp13_log_state(rdna3_psp *psp, const char *when);
 int  psp13_bootloader_load_all(rdna3_psp *psp);   /* KDB..SOS (psp_hw_start part 1) */
 int  psp13_ring_create(rdna3_psp *psp);
 int  psp13_ring_stop(rdna3_psp *psp);

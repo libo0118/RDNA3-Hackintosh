@@ -3007,9 +3007,16 @@ static void run(const char *fwdir)
     {
         static rdna3_psp p3;
         uint32_t ipfw0 = S.nipfw;
+        CHECK(!psp13_bootloader_stuck(&psp));                  /* sOS alive */
         CHECK(smu13_mode1_reset(&dev) == RDNA3_OK);
         CHECK(S.mode1_resets == 1 && !S.sos_alive && !S.smu_loaded);
         CHECK(psp13_wait_for_bootloader(&psp) == RDNA3_OK);
+        CHECK(!psp13_bootloader_stuck(&psp));
+        /* passthrough after the host driver: no sOS, bootloader not ready */
+        *R(MP0(35)) = 0;
+        CHECK(psp13_bootloader_stuck(&psp));
+        psp13_log_state(&psp, "test");
+        *R(MP0(35)) = 0x80000000u;
         CHECK(rdna3_rreg(&dev, mmRCC_CONFIG_MEMSIZE) == (uint32_t)(VRAM_SIZE >> 20));
         rdna3_vram_alloc_init(&dev, 16u << 20, BAR_LEN);
         CHECK(psp13_init(&p3, &dev, sos, sos_len) == RDNA3_OK);

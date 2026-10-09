@@ -295,6 +295,57 @@ bool RDNA3Bringup::mapDoorbell()
     return true;
 }
 
+/* Passthrough: a PCI bus reset after the host's amdgpu leaves the PSP with
+ * neither sOS alive nor the bootloader ready (C2PMSG_35 reads 0), and every
+ * bootloader command times out. The only way back is what amdgpu's GPU
+ * recovery uses, a mode-1 reset through the PMFW (soc21_asic_mode1_reset:
+ * bus mastering off, PCI config saved and restored around it).
+ * rdna3reset=0: never, 1 (default): when stuck, 2: always. */
+void RDNA3Bringup::resetIfPspStuck()
+{
+    static const uint8_t kSaved[] = { 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x3C };
+    uint32_t mode = 1, cfg[sizeof(kSaved)], i;
+    uint16_t cmd;
+    rdna3_psp *bl;
+    int stuck, ret;
+
+    PE_parse_boot_argn("rdna3reset", &mode, sizeof(mode));
+    bl = (rdna3_psp *)IOMalloc(sizeof(*bl));
+    if (!bl)
+        return;
+    bzero(bl, sizeof(*bl));
+    bl->d = fDev;
+    psp13_log_state(bl, "init");
+    stuck = psp13_bootloader_stuck(bl);
+    publish("RDNA3,PSPStuckAtInit", (uint64_t)stuck);
+    if (mode == 0 || (mode == 1 && !stuck)) {
+        if (stuck)
+            BLOG("PSP bootloader not ready, rdna3reset=0: no mode-1 reset");
+        IOFree(bl, sizeof(*bl));
+        return;
+    }
+    BLOG("PSP: %s: mode-1 reset before init (rdna3reset=0 skips it)",
+         stuck ? "no sOS and the bootloader is not ready" : "rdna3reset=2");
+    cmd = fPci->configRead16(kIOPCIConfigCommand);
+    for (i = 0; i < sizeof(kSaved); i++)
+        cfg[i] = fPci->configRead32(kSaved[i]);
+    fPci->setBusMasterEnable(false);
+    smu13_mode1_reset(fDev);
+    for (i = 0; i < fDev->usec_timeout; i++) {
+        if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu)
+            break;
+        IODelay(1);
+    }
+    for (i = 0; i < sizeof(kSaved); i++)
+        fPci->configWrite32(kSaved[i], cfg[i]);
+    fPci->configWrite16(kIOPCIConfigCommand, cmd);
+    ret = psp13_wait_for_bootloader(bl);
+    psp13_log_state(bl, "after mode-1 reset");
+    publish("RDNA3,InitResetResult", (uint64_t)(int64_t)ret);
+    BLOG("PSP: mode-1 reset %s", ret == RDNA3_OK ? "done, bootloader ready" : "did not bring the bootloader back");
+    IOFree(bl, sizeof(*bl));
+}
+
 /* amdgpu_device_init: "Post card if necessary". amdgpu_device_need_post
  * (BIOS scratch 7) -> amdgpu_device_asic_init for GC 11: wait for the PSP
  * bootloader, then amdgpu_atomfirmware_asic_init. In a passthrough VM whose
@@ -377,8 +428,12 @@ void RDNA3Bringup::run()
     publishString("RDNA3,Stage2", "starting");
     rdna3_dev_init(fDev, &os, fMmio->getLength());
     fDev->vram_size = fVramSize;
-    if (rdna3_dev_set_discovery(fDev, fDisc) != RDNA3_OK || !mapVram() ||
-        !postIfNeeded() || rdna3_read_fb_location(fDev) != RDNA3_OK) {
+    if (rdna3_dev_set_discovery(fDev, fDisc) != RDNA3_OK || !mapVram()) {
+        publishString("RDNA3,Stage2", "failed: device setup");
+        return;
+    }
+    resetIfPspStuck();
+    if (!postIfNeeded() || rdna3_read_fb_location(fDev) != RDNA3_OK) {
         publishString("RDNA3,Stage2", "failed: device setup");
         return;
     }
