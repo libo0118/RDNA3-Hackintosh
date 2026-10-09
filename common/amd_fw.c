@@ -430,7 +430,7 @@ const char *amd_fw_status_str(amd_fw_status s)
 }
 
 const char *const amd_navi32_fw_names[AMD_BLOB_COUNT] = {
-    [AMD_BLOB_SMC]   = "smu_13_0_7.bin",
+    [AMD_BLOB_SMC]   = "smu_13_0_10.bin",
     [AMD_BLOB_SDMA]  = "sdma_6_0_3.bin",
     [AMD_BLOB_PFP]   = "gc_11_0_3_pfp.bin",
     [AMD_BLOB_ME]    = "gc_11_0_3_me.bin",
@@ -439,7 +439,7 @@ const char *const amd_navi32_fw_names[AMD_BLOB_COUNT] = {
     [AMD_BLOB_IMU]   = "gc_11_0_3_imu.bin",
     [AMD_BLOB_MES]   = "gc_11_0_3_mes_2.bin",
     [AMD_BLOB_MES1]  = "gc_11_0_3_mes1.bin",
-    [AMD_BLOB_DMCUB] = "dcn_3_2_1_dmcub.bin",
-    [AMD_BLOB_VCN]   = "vcn_4_0_4.bin",
+    [AMD_BLOB_DMCUB] = "dcn_3_2_0_dmcub.bin",
+    [AMD_BLOB_VCN]   = "vcn_4_0_0.bin",
 };
-const char *const amd_navi32_sos_name = "psp_13_0_7_sos.bin";
+const char *const amd_navi32_sos_name = "psp_13_0_10_sos.bin";

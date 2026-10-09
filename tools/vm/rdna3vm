@@ -18,9 +18,9 @@ VMTOOL="python3 $TOOLS/vmtool.py"
 WORK=${RDNA3VM_DIR:-$HOME/rdna3-vm}
 CONF=$WORK/config
 OSK="ourhardworkbythesewordsguardedpleasedontsteal(c)AppleComputerInc"
-FW_FILES="psp_13_0_7_sos.bin smu_13_0_7.bin sdma_6_0_3.bin gc_11_0_3_imu.bin gc_11_0_3_pfp.bin
+FW_FILES="psp_13_0_10_sos.bin smu_13_0_10.bin sdma_6_0_3.bin gc_11_0_3_imu.bin gc_11_0_3_pfp.bin
 gc_11_0_3_me.bin gc_11_0_3_mec.bin gc_11_0_3_rlc.bin gc_11_0_3_mes_2.bin gc_11_0_3_mes1.bin
-dcn_3_2_1_dmcub.bin vcn_4_0_4.bin"
+dcn_3_2_0_dmcub.bin vcn_4_0_0.bin"
 DEBUG_ARGS="-v keepsyms=1 debug=0x100 serial=3 msgbuf=1048576"
 
 say()  { printf '\033[1m== %s\033[0m\n' "$*"; }
@@ -99,9 +99,9 @@ cmd_check() {
         if command -v "$t" >/dev/null; then ok "$t"; else bad "missing $t"; fail=1; fi
     done
     if modinfo vfio-pci >/dev/null 2>&1 || [ -d /sys/bus/pci/drivers/vfio-pci ]; then ok "vfio-pci"; else bad "no vfio-pci module"; fail=1; fi
-    if ls /lib/firmware/amdgpu/psp_13_0_7_sos.bin* >/dev/null 2>&1; then ok "amdgpu firmware in /lib/firmware/amdgpu"
-    else bad "no /lib/firmware/amdgpu/psp_13_0_7_sos.bin* (package linux-firmware)"; fail=1; fi
-    if ls /lib/firmware/amdgpu/psp_13_0_7_sos.bin.zst >/dev/null 2>&1 && ! command -v zstd >/dev/null; then
+    if ls /lib/firmware/amdgpu/psp_13_0_10_sos.bin* >/dev/null 2>&1; then ok "amdgpu firmware in /lib/firmware/amdgpu"
+    else bad "no /lib/firmware/amdgpu/psp_13_0_10_sos.bin* (package linux-firmware)"; fail=1; fi
+    if ls /lib/firmware/amdgpu/psp_13_0_10_sos.bin.zst >/dev/null 2>&1 && ! command -v zstd >/dev/null; then
         bad "the firmware is .zst compressed - install zstd"; fail=1
     fi
     if systemctl cat display-manager.service >/dev/null 2>&1; then ok "display-manager.service"

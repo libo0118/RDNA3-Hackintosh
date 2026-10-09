@@ -259,6 +259,7 @@ static void put32(uint8_t *p, uint32_t v) { put16(p, (uint16_t)v); put16(p + 2, 
 #define ATOM_REG_A  0xFF00u    /* plain storage registers the bytecode pokes (16-bit operands) */
 #define ATOM_REG_B  0xFF04u
 #define ATOM_REG_C  0xFF08u
+#define SIM_BIOS_SCRATCH 0xFE00u /* firmware_info bios_scratch_reg_startaddr (dword index) */
 
 static void make_vbios_display(void)
 {
@@ -335,9 +336,12 @@ static void make_vbios_cmd_tables(void)
     put16(b + VB_CMD_DIR, 4 + 2 * RD_ATOM_CMD_COUNT); b[VB_CMD_DIR + 2] = 2; b[VB_CMD_DIR + 3] = 1;
     vb_pc = VB_CMD_CODE;
 
-    /* ASIC_Init: REG_A = PS[0] (boot sclk) */
+    /* ASIC_Init v2.1: REG_A = PS[0] (boot sclk), then BIOS_SCRATCH_7 =
+     * ASIC_INIT_COMPLETE as the real table reports a posted GPU */
     table_begin(RD_ATOM_CMD_ASIC_INIT, 0, 8);
+    S.vbios[vb_start + 2] = 2;
     E8(OP_MOVE_REG); E8(A_PS); E16(ATOM_REG_A); E8(0);
+    E8(OP_MOVE_REG); E8(A_IMM); E16(SIM_BIOS_SCRATCH + 7); E32(0x200);
     E8(OP_EOT);
     table_end();
 
@@ -443,6 +447,7 @@ static void make_vbios(void)
     put32(b + VB_FWINFO + 4, 0x02000f);
     put32(b + VB_FWINFO + 8, 50000);    /* 500 MHz boot gfxclk */
     put32(b + VB_FWINFO + 12, 9600);    /* 96 MHz boot uclk */
+    put32(b + VB_FWINFO + 24, SIM_BIOS_SCRATCH);
     put16(b + VB_FWINFO + 28, 800);
     put16(b + VB_FWINFO + 30, 1250);
     put32(b + VB_FWINFO + 60, 0);       /* pptable from VBIOS/PMFW, not the driver */
@@ -2887,7 +2892,15 @@ static void run(const char *fwdir)
         CHECK(at.cmd_table == VB_CMD_DIR && at.iio[0x81] == VB_IIO + 6);
         CHECK(atom_cmd_revision(&at, RD_ATOM_CMD_SET_PIXEL_CLOCK, &fr, &cr) && fr == 1 && cr == 1);
         CHECK(!atom_cmd_revision(&at, RD_ATOM_CMD_DIG1_TRANSMITTER_CONTROL, NULL, NULL));
+        /* amdgpu_device_need_post -> amdgpu_device_asic_init (passthrough
+         * VM: OVMF did not run the option ROM's init) */
+        S.reg[SIM_BIOS_SCRATCH + 7] = 0;
+        CHECK(atom_need_post(&at) == 1);
         CHECK(atom_asic_init(&at) == RDNA3_OK && S.reg[ATOM_REG_A] == 50000);
+        CHECK(atom_need_post(&at) == 0);
+        S.vbios[VB_CMD_CODE + 2] = 1;                 /* ASIC_Init v1.1: not atomfirmware's */
+        CHECK(atom_asic_init(&at) == RDNA3_EINVAL);
+        S.vbios[VB_CMD_CODE + 2] = 2;
         ps[0] = 100;
         ps[2] = 21;
         t0 = S.now_us;

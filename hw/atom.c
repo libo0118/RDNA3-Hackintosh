@@ -22,6 +22,8 @@
 #define ATOM_DATA_IIO_PTR   0x32
 #define ATOM_FWI_DEFSCLK_PTR 8
 #define ATOM_FWI_DEFMCLK_PTR 0xC
+#define ATOM_FWI_SCRATCH_PTR 0x18   /* atom_firmware_info_v3_1.bios_scratch_reg_startaddr */
+#define ATOM_S7_ASIC_INIT_COMPLETE_MASK 0x00000200u
 
 #define ATOM_CT_SIZE_PTR    0
 #define ATOM_CT_WS_PTR      4
@@ -1053,19 +1055,39 @@ int atom_init(rdna3_atom *a, rdna3_dev *d, const rdna3_vbios *v, uint32_t *scrat
     return RDNA3_OK;
 }
 
+/* amdgpu_atomfirmware_asic_init(adev, fb_reset = true): asic_init_ps_allocation_v2_1
+ * with the firmware_info boot clocks, engineflag b3NORMAL_ENGINE_INIT (0),
+ * memflag 0 */
 int atom_asic_init(rdna3_atom *a)
 {
     uint32_t ps[16], hwi;
+    uint8_t frev = 0, crev = 0;
     unsigned i;
     for (i = 0; i < 16; i++)
         ps[i] = 0;
     a->bad_access = 0;
     hwi = cu16(a, a->data_table + ATOM_DATA_FWI_PTR);
-    ps[0] = cu32(a, hwi + ATOM_FWI_DEFSCLK_PTR);
-    ps[1] = cu32(a, hwi + ATOM_FWI_DEFMCLK_PTR);
-    if (a->bad_access || !ps[0] || !ps[1])
+    ps[0] = cu32(a, hwi + ATOM_FWI_DEFSCLK_PTR) & 0xFFFFFFu;
+    ps[1] = cu32(a, hwi + ATOM_FWI_DEFMCLK_PTR) & 0xFFFFFFu;
+    if (a->bad_access || !hwi || !ps[0] || !ps[1])
         return RDNA3_EINVAL;
-    if (!atom_cmd_revision(a, RD_ATOM_CMD_ASIC_INIT, NULL, NULL))
+    if (!atom_cmd_revision(a, RD_ATOM_CMD_ASIC_INIT, &frev, &crev))
         return RDNA3_ENOENT;
+    if (frev != 2 || crev < 1)
+        return RDNA3_EINVAL;
     return atom_execute(a, RD_ATOM_CMD_ASIC_INIT, ps, 16);
+}
+
+/* amdgpu_atomfirmware_scratch_regs_init + amdgpu_atombios_scratch_need_asic_init:
+ * BIOS_SCRATCH_7.ASIC_INIT_COMPLETE clear -> the VBIOS never posted this GPU
+ * (a passthrough VM whose firmware did not run the option ROM's init). */
+int atom_need_post(rdna3_atom *a)
+{
+    uint32_t hwi, scratch;
+    a->bad_access = 0;
+    hwi = cu16(a, a->data_table + ATOM_DATA_FWI_PTR);
+    scratch = cu32(a, hwi + ATOM_FWI_SCRATCH_PTR);
+    if (a->bad_access || !hwi || !scratch)
+        return RDNA3_EINVAL;
+    return (rdna3_rreg(a->d, scratch + 7) & ATOM_S7_ASIC_INIT_COMPLETE_MASK) ? 0 : 1;
 }

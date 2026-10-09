@@ -41,9 +41,9 @@ vpath %.c src ../common ../hw ../uapi
 
 # make firmware FW_DIR=/path/to/linux-firmware/amdgpu
 # copies the Navi 32 blobs + LICENSE.amdgpu into the built kext (never into git)
-FW_FILES := psp_13_0_7_sos.bin smu_13_0_7.bin sdma_6_0_3.bin gc_11_0_3_imu.bin \
+FW_FILES := psp_13_0_10_sos.bin smu_13_0_10.bin sdma_6_0_3.bin gc_11_0_3_imu.bin \
             gc_11_0_3_pfp.bin gc_11_0_3_me.bin gc_11_0_3_mec.bin gc_11_0_3_rlc.bin \
-            gc_11_0_3_mes_2.bin gc_11_0_3_mes1.bin dcn_3_2_1_dmcub.bin vcn_4_0_4.bin
+            gc_11_0_3_mes_2.bin gc_11_0_3_mes1.bin dcn_3_2_0_dmcub.bin vcn_4_0_0.bin
 
 all: $(BUNDLE)
 

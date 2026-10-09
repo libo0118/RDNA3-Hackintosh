@@ -2,7 +2,7 @@
  * RDNA3Bringup - Stage 2 driver: runs hw/ (PSP, SMU) on the real GPU.
  *
  * Runs on its own kernel thread because it has to wait for
- * kernelmanagerd to hand over firmware (OSKextRequestResource) and the
+ * the root volume to read the firmware files and the
  * PSP sequence takes seconds. Levels (boot-arg rdna3lvl=):
  *   4  map BAR0, discovery, FB location, HDP remap, PSP bootloader + sOS,
  *      KM ring, TMR, all IP firmware, RLC autoload
@@ -45,6 +45,7 @@ extern "C" {
 #include "xfer.h"
 #include "rdna3_drm.h"
 #include "amd_fw.h"
+#include "atom.h"
 }
 
 class RDNA3Accel;
@@ -110,9 +111,8 @@ private:
     static void threadMain(void *arg, int wait_result);
     void run();
     bool loadFirmware(const char *name, RDNA3Firmware *out);
-    static void fwCallback(unsigned int tag, int result, const void *data,
-                           uint32_t len, void *ctx);
     bool mapVram();
+    bool postIfNeeded();
     void publish(const char *key, uint64_t v);
     void publishString(const char *key, const char *s);
 
@@ -195,8 +195,6 @@ private:
     uint32_t      fGds[16][6] = {};
     bool          fGdsKnown[16] = {};
     uint32_t      fSdmaResets = 0;   /* one IH consumer at a time (MSI action or a polling waiter) */
-    bool          fFwDone = false;
-    RDNA3Firmware fFwResult = {};
 
     /* interrupts (rdna3msi=1) */
     bool          fMsi = false;             /* asked for */

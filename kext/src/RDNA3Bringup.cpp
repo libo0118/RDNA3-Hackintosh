@@ -34,7 +34,6 @@ extern "C" void thread_deallocate(thread_t thread);
 /* amdgpu_device_check_vram_lost: a word written at bring-up and read back after a reset */
 static const uint32_t kResetMagic = 0x52444E33u;   /* "RDN3" */
 
-static const char *kBundleID = "io.github.voten641.RDNA3Accel";
 
 /* --------------------------- rdna3_os --------------------------- */
 
@@ -200,28 +199,9 @@ void RDNA3Bringup::publishString(const char *key, const char *s)
 
 /* --------------------------- firmware --------------------------- */
 
-void RDNA3Bringup::fwCallback(unsigned int, int result, const void *data, uint32_t len,
-                              void *ctx)
-{
-    RDNA3Bringup *b = (RDNA3Bringup *)ctx;
-    RDNA3Firmware fw = {};
-    if (result == kOSReturnSuccess && data && len) {
-        fw.data = (uint8_t *)IOMalloc(len);
-        if (fw.data) {
-            memcpy(fw.data, data, len);
-            fw.len = len;
-        }
-    }
-    IOLockLock(b->fLock);
-    b->fFwResult = fw;
-    b->fFwDone = true;
-    IOLockWakeup(b->fLock, &b->fFwDone, false);
-    IOLockUnlock(b->fLock);
-}
-
-/* Reads the installed bundle's copy directly. OSKextRequestResource needs
- * kernelmanagerd to accept the bundle, which it does not for a kext that
- * OpenCore injected (or one it judged invalid for the Auxiliary KC). */
+/* Reads the installed bundle's copy directly. Not OSKextRequestResource:
+ * kernelmanagerd never answers it for a kext that OpenCore injected (or one
+ * it judged invalid for the Auxiliary KC), and its callback may never run. */
 static const char *kFwDirs[] = {
     "/Library/Extensions/RDNA3Accel.kext/Contents/Resources/",
     "/Library/Application Support/RDNA3VM/kexts/RDNA3Accel.kext/Contents/Resources/",
@@ -262,31 +242,13 @@ static bool readFileFromDisk(const char *path, RDNA3Firmware *out)
 
 bool RDNA3Bringup::loadFirmware(const char *name, RDNA3Firmware *out)
 {
-    /* the root volume or kernelmanagerd may not be up yet early in boot:
-     * retry for ~2 min */
+    /* the root volume may not be mounted yet early in boot: retry ~2 min */
     for (int attempt = 0; attempt < 120 && !fAbort; attempt++) {
         char path[256];
         for (unsigned d = 0; d < sizeof(kFwDirs) / sizeof(kFwDirs[0]); d++) {
             snprintf(path, sizeof(path), "%s%s", kFwDirs[d], name);
             if (readFileFromDisk(path, out)) {
                 BLOG("firmware %s: %u bytes (%s)", name, out->len, path);
-                return true;
-            }
-        }
-        OSKextRequestTag tag;
-        fFwDone = false;
-        fFwResult = {};
-        OSReturn r = OSKextRequestResource(kBundleID, name,
-                                           (OSKextRequestResourceCallback)fwCallback,
-                                           this, &tag);
-        if (r == kOSReturnSuccess) {
-            IOLockLock(fLock);
-            while (!fFwDone)
-                IOLockSleep(fLock, &fFwDone, THREAD_UNINT);
-            IOLockUnlock(fLock);
-            if (fFwResult.data) {
-                *out = fFwResult;
-                BLOG("firmware %s: %u bytes", name, out->len);
                 return true;
             }
         }
@@ -333,6 +295,69 @@ bool RDNA3Bringup::mapDoorbell()
     return true;
 }
 
+/* amdgpu_device_init: "Post card if necessary". amdgpu_device_need_post
+ * (BIOS scratch 7) -> amdgpu_device_asic_init for GC 11: wait for the PSP
+ * bootloader, then amdgpu_atomfirmware_asic_init. In a passthrough VM whose
+ * UEFI did not run the card's option ROM the GPU is not posted: the FB
+ * location reads 0. boot-arg rdna3post=0 skips it. */
+bool RDNA3Bringup::postIfNeeded()
+{
+    static const uint32_t kScratchBytes = 20u * 1024u;   /* amdgpu's minimum FB scratch */
+    uint32_t want = 1, *scratch = nullptr;
+    rdna3_atom *atom = nullptr;
+    rdna3_psp *bl = nullptr;
+    int ret, need;
+    bool ok = true;
+
+    PE_parse_boot_argn("rdna3post", &want, sizeof(want));
+    if (!fRom)
+        fRom = (uint8_t *)IOMalloc(RD_VBIOS_MAX_LEN);
+    atom = (rdna3_atom *)IOMalloc(sizeof(*atom));
+    scratch = (uint32_t *)IOMalloc(kScratchBytes);
+    bl = (rdna3_psp *)IOMalloc(sizeof(*bl));
+    if (!fRom || !atom || !scratch || !bl) {
+        BLOG("post: no memory");
+        ok = false;
+        goto out;
+    }
+    bzero(scratch, kScratchBytes);
+    bzero(bl, sizeof(*bl));
+    bl->d = fDev;
+    ret = vbios_read(fDev, &fVbios, fRom, RD_VBIOS_MAX_LEN);
+    if (ret == RDNA3_OK)
+        ret = atom_init(atom, fDev, &fVbios, scratch, kScratchBytes);
+    if (ret != RDNA3_OK) {
+        /* no VBIOS: amdgpu fails here only when the GPU needs posting */
+        BLOG("post: no VBIOS/ATOM context (%d), assuming posted", ret);
+        publish("RDNA3,PostResult", (uint64_t)(int64_t)ret);
+        goto out;
+    }
+    need = atom_need_post(atom);
+    publish("RDNA3,NeedPost", (uint64_t)(int64_t)need);
+    if (need != 1)
+        goto out;
+    if (!want) {
+        BLOG("post: GPU not posted, rdna3post=0: skipping ASIC_Init");
+        goto out;
+    }
+    BLOG("GPU posting now...");
+    if (psp13_wait_for_bootloader(bl) != RDNA3_OK)
+        BLOG("post: PSP bootloader not ready (C2PMSG_35 bit 31), running ASIC_Init anyway");
+    ret = atom_asic_init(atom);
+    publish("RDNA3,PostResult", (uint64_t)(int64_t)ret);
+    if (ret != RDNA3_OK) {
+        BLOG("gpu post error! (%d)", ret);
+        ok = false;
+    } else {
+        BLOG("post: done, ASIC_INIT_COMPLETE %s", atom_need_post(atom) == 0 ? "set" : "still clear");
+    }
+out:
+    if (bl) IOFree(bl, sizeof(*bl));
+    if (scratch) IOFree(scratch, kScratchBytes);
+    if (atom) IOFree(atom, sizeof(*atom));
+    return ok;
+}
+
 /* ------------------------------ run ------------------------------ */
 
 void RDNA3Bringup::run()
@@ -353,7 +378,7 @@ void RDNA3Bringup::run()
     rdna3_dev_init(fDev, &os, fMmio->getLength());
     fDev->vram_size = fVramSize;
     if (rdna3_dev_set_discovery(fDev, fDisc) != RDNA3_OK || !mapVram() ||
-        rdna3_read_fb_location(fDev) != RDNA3_OK) {
+        !postIfNeeded() || rdna3_read_fb_location(fDev) != RDNA3_OK) {
         publishString("RDNA3,Stage2", "failed: device setup");
         return;
     }
@@ -779,7 +804,7 @@ void RDNA3Bringup::dmubInit()
         return;
     }
     if (!fw->data) {
-        publishString("RDNA3,DMUB", "failed: no dcn_3_2_1_dmcub.bin");
+        publishString("RDNA3,DMUB", "failed: no dcn_3_2_0_dmcub.bin");
         return;
     }
     /* the VBIOS image goes into window CW3: the firmware runs its tables */

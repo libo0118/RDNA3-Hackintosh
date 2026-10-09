@@ -127,7 +127,7 @@ typedef struct rdna3_dmub {
     uint32_t feature_caps[4];       /* QUERY_FEATURE_CAPS reply (raw) */
 } rdna3_dmub;
 
-/* dm_dmub_sw_init: parse the firmware blob (dcn_3_2_1_dmcub.bin), find
+/* dm_dmub_sw_init: parse the firmware blob (dcn_3_2_0_dmcub.bin), find
  * its meta info, lay out the windows and allocate them in VRAM.
  * 'vbios_size' is the image the hw_init will copy into CW3. */
 int  dmub32_sw_init(rdna3_dmub *dm, rdna3_dev *d, const uint8_t *fw, uint32_t fw_len,

@@ -21,10 +21,11 @@ CMD_NAMES = {
     76: "dig1transmittercontrol", 78: "processauxchanneltransaction",
 }
 DATA_NAMES = {
-    3: "firmwareinfo", 6: "lcd_info", 8: "smu_info", 10: "vram_usagebyfirmware",
-    11: "gpio_pin_lut", 13: "gfx_info", 14: "powerplayinfo", 22: "displayobjectinfo",
-    23: "indirectioaccess", 24: "umc_info", 29: "dce_info", 30: "vram_info",
-    32: "integratedsysteminfo", 33: "asic_profiling_info", 34: "voltageobject_info",
+    0: "utilitypipeline", 1: "multimedia_info", 2: "smc_dpm_info", 4: "firmwareinfo",
+    6: "lcd_info", 8: "smu_info", 11: "vram_usagebyfirmware", 12: "gpio_pin_lut",
+    14: "gfx_info", 15: "powerplayinfo", 22: "displayobjectinfo", 23: "indirectioaccess",
+    24: "umc_info", 27: "dce_info", 28: "vram_info", 30: "integratedsysteminfo",
+    31: "asic_profiling_info", 32: "voltageobject_info",
 }
 
 

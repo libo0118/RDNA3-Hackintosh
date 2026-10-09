@@ -104,8 +104,11 @@ int  atom_execute(rdna3_atom *a, unsigned index, uint32_t *params, unsigned para
  * format/content revisions (DC picks the parameter layout by them). */
 int  atom_cmd_revision(const rdna3_atom *a, unsigned index, uint8_t *frev, uint8_t *crev);
 
-/* amdgpu_atom_asic_init: ASIC_Init with the firmwareinfo boot clocks. */
+/* amdgpu_atomfirmware_asic_init: ASIC_Init v2.1 with the firmwareinfo boot clocks. */
 int  atom_asic_init(rdna3_atom *a);
+/* amdgpu_device_need_post for atomfirmware dGPUs: 1 = not posted (BIOS
+ * scratch 7 lacks ASIC_INIT_COMPLETE), 0 = posted, < 0 = no firmware_info */
+int  atom_need_post(rdna3_atom *a);
 
 #ifdef __cplusplus
 }

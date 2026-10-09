@@ -1,9 +1,9 @@
 {
  "amdgpu": {
-  "works": 50,
-  "ported": 218,
+  "works": 51,
+  "ported": 219,
   "total": 1277,
-  "works_pct": 3.9,
+  "works_pct": 4.0,
   "ported_pct": 17.1,
   "groups": [
    {
@@ -998,11 +998,11 @@
     "steps": [
      "2"
     ],
-    "works": 50,
+    "works": 51,
     "ported": 0,
-    "todo": 77,
+    "todo": 76,
     "items": {
-     "amdgpu_atom_asic_init": "works",
+     "amdgpu_atom_asic_init": "todo",
      "amdgpu_atom_destroy": "todo",
      "amdgpu_atom_execute_table": "works",
      "amdgpu_atom_execute_table_locked": "todo",
@@ -1012,7 +1012,7 @@
      "amdgpu_atomfirmware_allocate_fb_scratch": "todo",
      "amdgpu_atomfirmware_allocate_fb_v2_1": "todo",
      "amdgpu_atomfirmware_allocate_fb_v2_2": "todo",
-     "amdgpu_atomfirmware_asic_init": "todo",
+     "amdgpu_atomfirmware_asic_init": "works",
      "amdgpu_atomfirmware_dynamic_boot_config_supported": "todo",
      "amdgpu_atomfirmware_get_clock_info": "todo",
      "amdgpu_atomfirmware_get_fw_reserved_fb_size": "todo",
@@ -1022,7 +1022,7 @@
      "amdgpu_atomfirmware_mem_ecc_supported": "todo",
      "amdgpu_atomfirmware_mem_training_supported": "todo",
      "amdgpu_atomfirmware_query_firmware_capability": "todo",
-     "amdgpu_atomfirmware_scratch_regs_init": "todo",
+     "amdgpu_atomfirmware_scratch_regs_init": "works",
      "amdgpu_atomfirmware_sram_ecc_supported": "todo",
      "amdgpu_discovery_calculate_checksum": "todo",
      "amdgpu_discovery_fini": "todo",

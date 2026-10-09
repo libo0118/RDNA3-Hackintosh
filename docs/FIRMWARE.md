@@ -7,12 +7,12 @@ the amdgpu driver's `MODULE_FIRMWARE()`:
 
 | Block (IP) | Files |
 |---|---|
-| PSP (MP0 13.0.7) | `psp_13_0_7_sos.bin`, `psp_13_0_7_ta.bin` |
-| SMU (MP1 13.0.7) | `smu_13_0_7.bin` |
+| PSP (MP0 13.0.10) | `psp_13_0_10_sos.bin`, `psp_13_0_10_ta.bin` |
+| SMU (MP1 13.0.10) | `smu_13_0_10.bin` |
 | GFX (GC 11.0.3) | `gc_11_0_3_imu.bin`, `gc_11_0_3_pfp.bin`, `gc_11_0_3_me.bin`, `gc_11_0_3_mec.bin`, `gc_11_0_3_rlc.bin`, `gc_11_0_3_mes_2.bin`, `gc_11_0_3_mes1.bin` |
 | SDMA 6.0.3 | `sdma_6_0_3.bin` |
-| Display (DCN 3.2.1) | `dcn_3_2_1_dmcub.bin` |
-| Video (VCN 4.0.4, optional) | `vcn_4_0_4.bin` |
+| Display (DCN 3.2.0) | `dcn_3_2_0_dmcub.bin` |
+| Video (VCN 4.0.0, optional) | `vcn_4_0_0.bin` |
 
 Before use, confirm the IP versions on your card: `amd_discovery_dump` prints
 the expected file prefixes based on the discovery table.
