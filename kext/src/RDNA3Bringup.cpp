@@ -343,7 +343,7 @@ void RDNA3Bringup::run()
         /* page tables for user VMs: 16 MiB of 4 KiB tables */
         fPtPool = (rdna3_pt_pool *)IOMalloc(sizeof(*fPtPool));
         if (fPtPool && gpuvm_pool_init(fDev, fPtPool, 4096) == RDNA3_OK) {
-            OSMemoryBarrier();
+            __sync_synchronize();   /* publish the pool before fVmReady */
             fVmReady = true;
             publish("RDNA3,VMTablePages", fPtPool->npages);
         } else {

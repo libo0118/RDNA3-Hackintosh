@@ -35,8 +35,12 @@ jobs:
       - id: f
         env:
           BEFORE: ${{ github.event.before }}
-          FULL: ${{ github.event_name == 'workflow_dispatch' && inputs.full }}
+          EVENT: ${{ github.event_name }}
+          FULL: ${{ inputs.full }}
         run: |
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$FULL" != "true" ]; then
+            echo "metal=false" >> "$GITHUB_OUTPUT"; echo "radv=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
           if [ "$FULL" = "true" ] || [ -z "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
              || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
             echo "metal=true" >> "$GITHUB_OUTPUT"; echo "radv=true" >> "$GITHUB_OUTPUT"; exit 0
@@ -75,7 +79,7 @@ jobs:
           xcodebuild -version
           xcrun --sdk macosx --show-sdk-path
       - name: Build RDNA3Accel.kext (x86_64)
-        run: make -C kext
+        run: make -k -C kext   # -k: one run lists every compile error
       - name: Build RDNA3Accelerator.kext (Stage 7, Sequoia and Tahoe layouts)
         run: |
           make -C accel
