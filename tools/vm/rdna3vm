@@ -91,7 +91,7 @@ cmd_check() {
         local start end _ bar0
         read -r start end _ < /sys/bus/pci/devices/$bdf/resource
         bar0=$(( (end - start + 1) / 1048576 ))
-        echo "     BAR0 (VRAM window): ${bar0} MiB$( [ "$bar0" -gt 256 ] && echo ' (Resizable BAR on - fine; turn it off in the BIOS if the VM has trouble)')"
+        echo "     BAR0 (VRAM window): ${bar0} MiB$( [ "$bar0" -gt 256 ] && echo ' (amdgpu enlarges it by itself; step N shrinks it to 256 MiB for the VM)')"
     else bad "no 1002:747e card found"; fail=1; fi
     say "Programs"
     local t
@@ -359,6 +359,27 @@ cmd_args() {
 
 DM=0
 DEVS=()
+# amdgpu grows BAR0 to all of VRAM (16 GiB) by itself, even with Resizable
+# BAR off in the BIOS; the VM's UEFI then fails to bring up the card's GOP.
+# With no driver bound, shrink it back (2^N MiB, RESIZE_BAR_LOG2, default 8 =
+# 256 MiB) through the kernel's resourceN_resize (Linux 6.1+); amdgpu grows
+# it again when it gets the card back.
+resize_bar0() {
+    local gpu f start end _ mb
+    gpu=$(gpu_bdf) || return 0
+    f=/sys/bus/pci/devices/$gpu/resource0_resize
+    read -r start end _ < /sys/bus/pci/devices/$gpu/resource
+    mb=$(( (end - start + 1) / 1048576 ))
+    [ "${RESIZE_BAR_LOG2:-8}" = 0 ] && { echo "  BAR0 ${mb} MiB (kept, RESIZE_BAR_LOG2=0)"; return 0; }
+    [ "$mb" -le $((1 << ${RESIZE_BAR_LOG2:-8})) ] && { echo "  BAR0 ${mb} MiB"; return 0; }
+    if [ -w "$f" ] && echo "${RESIZE_BAR_LOG2:-8}" > "$f" 2>/dev/null; then
+        read -r start end _ < /sys/bus/pci/devices/$gpu/resource
+        echo "  BAR0 ${mb} MiB -> $(( (end - start + 1) / 1048576 )) MiB"
+    else
+        echo "  BAR0 ${mb} MiB (could not shrink it: no $f or refused)"
+    fi
+}
+
 detach() {
     local d drv
     if systemctl is-active --quiet display-manager 2>/dev/null; then
@@ -371,6 +392,9 @@ detach() {
     for d in "${DEVS[@]}"; do
         drv=$(readlink -f /sys/bus/pci/devices/$d/driver 2>/dev/null || true)
         [ -n "$drv" ] && [ "$(basename "$drv")" != vfio-pci ] && echo "$d" > "$drv/unbind"
+    done
+    resize_bar0
+    for d in "${DEVS[@]}"; do
         echo vfio-pci > /sys/bus/pci/devices/$d/driver_override
         echo "$d" > /sys/bus/pci/drivers_probe
         [ "$(basename "$(readlink -f /sys/bus/pci/devices/$d/driver)")" = vfio-pci ] || { echo "vfio-pci did not take $d"; return 1; }
