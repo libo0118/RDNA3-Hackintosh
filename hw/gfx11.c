@@ -8,6 +8,7 @@
 #include "gen/gc_11_0_0_reset.h"
 #include "gen/gc_11_0_0_sdma.h"
 #include "gen/gc_11_0_0_gds.h"
+#include "gen/gc_11_0_0_rs64.h"
 #include "clearstate_defs.h"
 #include "clearstate_gfx11.h"
 #include "amdgpu_ucode_hdr.h"
@@ -359,6 +360,7 @@ static void cp_gfx_start(rdna3_dev *d, rdna3_gfx_ring *r)
     WG(d, regCP_MAX_CONTEXT, MAX_HW_CONTEXTS - 1);
     WG(d, regCP_DEVICE_ID, 1);
     gfx11_cp_gfx_enable(d, 1);
+    RLOG(d, "GFX: CP unhalted, ME_CNTL 0x%08x CP_STAT 0x%08x", RG(d, regCP_ME_CNTL), RG(d, regCP_STAT));
     n = gfx11_csb_fill(g_csb, 1024);
     for (i = 0; i < n; i++)
         gfx11_write(d, r, g_csb[i]);
@@ -391,6 +393,16 @@ int gfx11_ring_test(rdna3_dev *d, rdna3_gfx_ring *r)
              RG(d, regCP_RB0_RPTR_ADDR_HI), RG(d, regCP_RB0_RPTR_ADDR),
              RG(d, regCP_RB_WPTR_POLL_ADDR_HI), RG(d, regCP_RB_WPTR_POLL_ADDR_LO),
              RG(d, regCP_RB_DOORBELL_CONTROL), RG(d, regCP_RB_VMID), RG(d, regCP_RB_ACTIVE));
+        /* RS64: where PSP pointed the PFP/ME instruction and data caches,
+         * and where the pipes are executing */
+        RERR(d, "  RS64 PFP_IC 0x%08x_%08x (cntl 0x%08x) ME_IC 0x%08x_%08x DC0 0x%08x_%08x "
+             "PC_START pfp 0x%08x me 0x%08x INSTR_PNTR pfp 0x%x me 0x%x p0 0x%x p1 0x%x",
+             RG(d, regCP_PFP_IC_BASE_HI), RG(d, regCP_PFP_IC_BASE_LO), RG(d, regCP_PFP_IC_BASE_CNTL),
+             RG(d, regCP_ME_IC_BASE_HI), RG(d, regCP_ME_IC_BASE_LO),
+             RG(d, regCP_GFX_RS64_DC_BASE0_HI), RG(d, regCP_GFX_RS64_DC_BASE0_LO),
+             RG(d, regCP_PFP_PRGRM_CNTR_START), RG(d, regCP_ME_PRGRM_CNTR_START),
+             RG(d, regCP_PFP_INSTR_PNTR), RG(d, regCP_ME_INSTR_PNTR),
+             RG(d, regCP_GFX_RS64_INSTR_PNTR0), RG(d, regCP_GFX_RS64_INSTR_PNTR1));
     }
     return RDNA3_ETIME;
 }
