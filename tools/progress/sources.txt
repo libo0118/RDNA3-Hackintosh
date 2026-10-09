@@ -1,0 +1,41 @@
+# amdgpu source files the project ports from or plans to (Linux, drivers/gpu/drm/amd/).
+# group | path       - the group is one cell of the progress map; its ladder
+# steps (what proves it works on the card) are in tools/progress.py GROUPS.
+# Adding a file grows the total: the status counts what the project knows of.
+
+PSP 13               | amdgpu/psp_v13_0.c
+PSP 13               | amdgpu/amdgpu_psp.c
+SMU 13 power         | pm/swsmu/smu13/smu_v13_0.c
+SMU 13 power         | pm/swsmu/smu13/smu_v13_0_7_ppt.c
+GMC / GPUVM          | amdgpu/gmc_v11_0.c
+GMC / GPUVM          | amdgpu/mmhub_v3_0_2.c
+GMC / GPUVM          | amdgpu/gfxhub_v3_0_3.c
+GMC / GPUVM          | amdgpu/amdgpu_gmc.c
+GMC / GPUVM          | amdgpu/amdgpu_vm_pt.c
+IH interrupts        | amdgpu/ih_v6_0.c
+IH interrupts        | amdgpu/amdgpu_ih.c
+SoC / NBIO / HDP     | amdgpu/soc21.c
+SoC / NBIO / HDP     | amdgpu/nbio_v4_3.c
+SoC / NBIO / HDP     | amdgpu/hdp_v6_0.c
+SoC / NBIO / HDP     | amdgpu/smuio_v13_0_6.c
+SDMA 6               | amdgpu/sdma_v6_0.c
+GFX 11               | amdgpu/gfx_v11_0.c
+GFX 11               | amdgpu/amdgpu_gfx.c
+Rings / fences       | amdgpu/amdgpu_ring.c
+Rings / fences       | amdgpu/amdgpu_ib.c
+Rings / fences       | amdgpu/amdgpu_fence.c
+MES queues           | amdgpu/mes_v11_0.c
+Discovery / VBIOS    | amdgpu/amdgpu_discovery.c
+Discovery / VBIOS    | amdgpu/atom.c
+Discovery / VBIOS    | amdgpu/amdgpu_atomfirmware.c
+Discovery / VBIOS    | amdgpu/amdgpu_ucode.c
+DMCUB                | display/dmub/src/dmub_dcn32.c
+DMCUB                | display/dmub/src/dmub_srv.c
+Display: OTG / AUX   | display/dc/optc/dcn10/dcn10_optc.c
+Display: OTG / AUX   | display/dc/optc/dcn32/dcn32_optc.c
+Display: OTG / AUX   | display/dc/dce/dce_aux.c
+Display: modeset     | display/dc/hwss/dcn32/dcn32_hwseq.c
+Display: modeset     | display/dc/dccg/dcn32/dcn32_dccg.c
+Display: modeset     | display/dc/hubp/dcn32/dcn32_hubp.c
+Display: modeset     | display/dc/dio/dcn32/dcn32_dio_stream_encoder.c
+Display: modeset     | display/dc/link/protocols/link_dp_training.c

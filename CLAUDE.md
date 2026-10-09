@@ -12,3 +12,8 @@
   `serial-*.log`, `host-*.log`, `*-tests.txt`): follow
   [docs/AFTER-TESTS.md](docs/AFTER-TESTS.md) step by step.
 - Test procedures the user runs: `docs/TESTING-VM.md`, `docs/TESTING-HW.md`.
+- README status (`docs/status/`): run `python3 tools/progress.py` before every
+  commit that changes driver code (CI checks it). A ladder step that passed
+  on the card goes into `docs/status/hw-verified.txt`, then regenerate.
+  New amdgpu source files to track: `tools/progress/sources.txt`, then
+  `python3 tools/progress/update_index.py`.

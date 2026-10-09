@@ -8,6 +8,20 @@ starting with the **Radeon RX 7800 XT (Navi 32, PCI `1002:747E`)**.
 > The driver does not display or accelerate anything. Status of each stage:
 > [docs/ROADMAP.md](docs/ROADMAP.md).
 
+## Status
+
+[![amdgpu port](docs/status/badge-amdgpu.svg)](docs/status/STATUS.md) [![amdgpu UAPI](docs/status/badge-uapi.svg)](docs/status/STATUS.md)
+
+[![progress map](docs/status/progress.svg)](docs/status/STATUS.md)
+
+<sub>🟩 works: ported and verified on the card · 🟨 ported, checked only in the simulator and CI · ⬜ not ported.
+"Ported" includes "works" (e.g. 30% works + 20% unverified = 50% ported).
+\* amdgpu kernel functions: percentage of the functions in the amdgpu source files the project ports from
+(listed in [tools/progress/sources.txt](tools/progress/sources.txt), Linux v6.12), not of all of amdgpu;
+the total grows as files are added. A block turns green when the ladder steps that exercise it passed on
+the card ([docs/status/hw-verified.txt](docs/status/hw-verified.txt)). Per-function lists:
+[docs/status/STATUS.md](docs/status/STATUS.md).</sub>
+
 ## What is in the repo
 
 | Path | What it is |

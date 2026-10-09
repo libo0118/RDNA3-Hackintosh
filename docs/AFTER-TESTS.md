@@ -88,10 +88,14 @@ exactly what to run next. One round = one report batch → one fix → one retes
    build/host/amd_discovery_dump reports/<date>/linux-reference/discovery.bin > /tmp/linux.txt
    diff /tmp/linux.txt /tmp/mac.txt    # must be empty, else fix step 2 first
    ```
-4. Notion: create a card `HW test <date>` (Etap `0 Stanowisko/CI`) with the
+4. For every step that passed: add `<step> <date> <vm|metal>` to
+   `docs/status/hw-verified.txt` and run `python3 tools/progress.py`
+   (the README map turns those blocks green). A step that fails again later
+   is removed from that file.
+5. Notion: create a card `HW test <date>` (Etap `0 Stanowisko/CI`) with the
    PASS/FAIL list; move cards of verified parts to `🟢 Działa na sprzęcie`,
    the failing part to `🔴 Zepsute / zablokowane`.
-5. Go to the failing step in §3.
+6. Go to the failing step in §3.
 
 ## 2. Fix loop (every failure)
 

@@ -69,6 +69,8 @@ jobs:
         run: make tools && build/host/amd_fw_dump "$RUNNER_TEMP/fw"
       - name: Host tools
         run: make tools
+      - name: README status is up to date
+        run: python3 tools/progress.py --check
 
   kext:
     runs-on: macos-15

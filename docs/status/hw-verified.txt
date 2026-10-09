@@ -1,0 +1,5 @@
+# Ladder steps (docs/TESTING-VM.md, docs/TESTING-HW.md) that passed on the real card.
+# One line per step: <step> <yyyy-mm-dd> <vm|metal> [note]
+# Read by tools/progress.py: a group of the status map turns green when all
+# the steps it lists (AMDGPU_STEPS / UAPI_STEPS there) are here.
+# Nothing has run on the card yet.
