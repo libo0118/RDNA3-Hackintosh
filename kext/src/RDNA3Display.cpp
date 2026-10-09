@@ -27,6 +27,7 @@ extern "C" {
 #include "edid.h"
 #include "vbios.h"
 #include "atom.h"
+#include "dcn32_mode.h"
 }
 #include "rdna3k_abi.h"
 
@@ -225,11 +226,34 @@ void RDNA3Accel::displayProbeConnectors()
                 setProperty(key, e.name[0] ? e.name : e.manufacturer);
                 snprintf(key, sizeof(key), "RDNA3,Connector%u,Modes", i);
                 setNumber(key, e.nmodes);
-                for (uint32_t m = 0; m < e.nmodes; m++)
-                    LOG("display: AUX%u %s %ux%u%s @ %u.%03u Hz%s", c->aux, e.name,
+                uint32_t usable = 0;
+                for (uint32_t m = 0; m < e.nmodes; m++) {
+                    /* the DP link the sink offers (DPCD max rate/lanes, downspread) */
+                    int why = dcn32_mode_check(&e.mode[m], c->dp ? c->max_link_rate : 0,
+                                               c->dp ? (c->max_lane_count & 0x1f) : 0, 1);
+                    if (why == RD_MODE_OK)
+                        usable++;
+                    LOG("display: AUX%u %s %ux%u%s @ %u.%03u Hz%s%s", c->aux, e.name,
                         e.mode[m].h_active, e.mode[m].v_active, e.mode[m].interlaced ? "i" : "",
                         e.mode[m].refresh_mhz / 1000, e.mode[m].refresh_mhz % 1000,
-                        e.mode[m].preferred ? " (preferred)" : "");
+                        e.mode[m].preferred ? " (preferred)" : "",
+                        why == RD_MODE_OK ? "" : why == RD_MODE_NO_TIMING ? " [no timing]"
+                                               : why == RD_MODE_LINK_BW ? " [link too slow]" : " [refused]");
+                }
+                snprintf(key, sizeof(key), "RDNA3,Connector%u,ModesUsable", i);
+                setNumber(key, usable);
+                /* the EDID mode the boot display is running, if it is this sink */
+                if (fDcn && fDcn->nheads) {
+                    int k = dcn32_match_head_mode(&fDcn->head[0], 0, &e);
+                    if (k >= 0) {
+                        char val[64];
+                        snprintf(val, sizeof(val), "%ux%u@%u.%03u%s on AUX%u", e.mode[k].h_active,
+                                 e.mode[k].v_active, e.mode[k].refresh_mhz / 1000,
+                                 e.mode[k].refresh_mhz % 1000, e.mode[k].preferred ? " preferred" : "",
+                                 c->aux);
+                        setProperty("RDNA3,Head0EdidMode", val);
+                    }
+                }
             }
         }
     }

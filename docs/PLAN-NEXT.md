@@ -37,8 +37,13 @@ Cel: modesetting, EDID, wiele monitorów, hotplug, zmiana rozdzielczości.
   (złącze → UNIPHY, DDC/AUX, HPD, możliwości enkodera).
 * ✅ Krok 3: serwis DMCUB (`hw/dmub32.c`, `rdna3dmub=1`): reset ze STOP_FW,
   okna, inbox1, QUERY_FEATURE_CAPS, komendy VBIOS przez DMCUB.
-  Dalej: `DIGxEncoderControl`/`SetPixelClock` przez DMCUB, trening DP
-  (DPCD + PHY), programowanie OTG/HUBP/DPP pod tryb z EDID, modeset.
+* ✅ Krok 4a (obliczenia, bez zapisu rejestrów): `hw/dcn32_mode.c` —
+  wartości OTG z trybu EDID (`optc1_program_timing`), przepustowość DP
+  8b/10b, filtr trybów, rozpoznanie trybu GOP (`RDNA3,Head0EdidMode`,
+  `RDNA3,Connector<n>,ModesUsable`).
+  Dalej (wymaga karty): DML (watermarki, DLG/TTU, vstartup), zegar piksela
+  (DCCG DTO), MSA enkodera strumienia, rozmiary HUBP/DPP, trening DP,
+  `DIGxEncoderControl`/`SetPixelClock` przez DMCUB, modeset.
 * Warstwa `dm_services` dla XNU (alokacja, logi, zegary, rejestry, delay)
   i kompilacja `drivers/gpu/drm/amd/display/dc` dla DCN 3.2.1 jako
   biblioteki C w kexcie (MIT). Najpierw `dc_create` + odczyt stanu, potem

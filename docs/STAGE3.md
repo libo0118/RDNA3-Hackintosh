@@ -132,6 +132,18 @@ Symulator modeluje firmware: sprawdza okna, kopię VBIOS i skrzynkę przed
 zgłoszeniem gotowości, odpowiada na STOP_FW, wykonuje komendy z ringu;
 testy obejmują prawdziwy `dcn_3_2_1_dmcub.bin` (wersja 0x07003300).
 
+## Obliczenia trybu (krok 4a)
+
+`hw/dcn32_mode.c` liczy to, co da się sprawdzić bez karty: wartości pól OTG
+dla trybu z EDID dokładnie jak `optc1_program_timing` (z poprawką przedniego
+ganku), przepustowość łącza DP 8b/10b z kodu prędkości i liczby linii (z
+marginesem 0,5 % na downspread), filtr trybów (brak timingu szczegółowego,
+przeplot, łącze za wolne przy 24 bpp, zachowawcze limity jednego potoku bez
+ODM) i rozpoznanie, który tryb z EDID prowadzi GOP. Symulator sprawdza, że
+wartości policzone dla trybu 1440p z EDID są dokładnie tymi, które GOP ma w
+OTG. Kext publikuje `RDNA3,Head0EdidMode` i `RDNA3,Connector<n>,ModesUsable`,
+a log opisuje każdy tryb z powodem odrzucenia.
+
 ## Ograniczenia (do zrobienia)
 
 * jedna głowica (head 0), jeden tryb; brak EDID (AUX/I2C DCN), brak zmiany

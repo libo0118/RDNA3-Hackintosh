@@ -29,6 +29,7 @@
 #include "edid.h"
 #include "atom.h"
 #include "dmub32.h"
+#include "dcn32_mode.h"
 #include "gen/gc_11_0_0_sdma_reset.h"
 #include "gen/dcn_3_2_1_dmcub.h"
 #include "gen/dcn_3_2_1_aux.h"
@@ -2535,6 +2536,48 @@ static void run(const char *fwdir)
         CHECK(dc.head[0].v_total == 1481 && dc.head[0].v_active == 1440 && dc.head[0].v_front == 3 &&
               dc.head[0].v_sync == 5 && dc.head[0].v_sync_neg && !dc.head[0].h_sync_neg);
         CHECK(dcn32_frame_count(&dev, &dc, 0) == 1234 && dcn32_scanline(&dev, &dc, 0) == 777);
+
+        /* the mode computations: which EDID mode the GOP runs, and the OTG
+         * values optc1_program_timing would write for it (they must be the
+         * ones already in the OTG); DP bandwidth and the mode filter */
+        {
+            rdna3_edid e;
+            rdna3_otg_timing t;
+            rdna3_mode m;
+            int k;
+            CHECK(edid_parse(S.edid, 256, &e) == 0);
+            k = dcn32_match_head_mode(&dc.head[0], 241500, &e);
+            CHECK(k >= 0 && e.mode[k].h_active == 2560 && e.mode[k].preferred);
+            CHECK(dcn32_match_head_mode(&dc.head[0], 148500, &e) == -1);   /* wrong clock */
+            CHECK(dcn32_match_head_mode(&dc.head[0], 0, &e) == k);
+            CHECK(dcn32_otg_timing(&e.mode[k], 1, &t) == RDNA3_OK);
+            CHECK(t.h_total == S.reg[OTG(regOTG0_OTG_H_TOTAL, 2)] &&
+                  (t.h_blank_start | (t.h_blank_end << 16)) == S.reg[OTG(regOTG0_OTG_H_BLANK_START_END, 2)] &&
+                  (t.h_sync_start | (t.h_sync_end << 16)) == S.reg[OTG(regOTG0_OTG_H_SYNC_A, 2)] &&
+                  t.v_total == S.reg[OTG(regOTG0_OTG_V_TOTAL, 2)] &&
+                  (t.v_blank_start | (t.v_blank_end << 16)) == S.reg[OTG(regOTG0_OTG_V_BLANK_START_END, 2)] &&
+                  (t.v_sync_start | (t.v_sync_end << 16)) == S.reg[OTG(regOTG0_OTG_V_SYNC_A, 2)]);
+            CHECK(t.start_point == 1 && t.h_sync_pol == 0 && t.v_sync_pol == 0 && !t.interlace);
+            /* front porch workaround: a zero vertical front porch becomes 1 */
+            m = e.mode[k];
+            m.v_front = 0;
+            CHECK(dcn32_otg_timing(&m, 1, &t) == RDNA3_OK && t.v_blank_start == m.v_total - 1);
+            /* 241.5 MHz x 24 bpp = 5.796 Gbps */
+            CHECK(dcn32_dp_link_kbps(0x1e, 4, 0) == 25920000ull && dcn32_dp_link_kbps(0x0a, 1, 0) == 2160000ull);
+            CHECK(dcn32_mode_kbps(&e.mode[k], 24) == 5796000ull);
+            CHECK(dcn32_mode_check(&e.mode[k], 0x0a, 1, 0) == RD_MODE_LINK_BW);
+            CHECK(dcn32_mode_check(&e.mode[k], 0x14, 2, 1) == RD_MODE_OK);
+            CHECK(dcn32_mode_check(&e.mode[k], 0, 0, 0) == RD_MODE_OK);   /* no link known: no bw test */
+            m = e.mode[k];
+            m.interlaced = 1;
+            CHECK(dcn32_mode_check(&m, 0x1e, 4, 1) == RD_MODE_INTERLACED);
+            m = e.mode[k];
+            m.pixel_khz = RD_DCN32_MAX_PCLK_KHZ + 1;
+            CHECK(dcn32_mode_check(&m, 0x1e, 4, 1) == RD_MODE_PIXEL_CLOCK);
+            m.pixel_khz = 0;   /* a standard timing: size and rate only */
+            CHECK(dcn32_mode_check(&m, 0x1e, 4, 1) == RD_MODE_NO_TIMING &&
+                  dcn32_otg_timing(&m, 1, &t) == RDNA3_EINVAL);
+        }
 
         /* same pitch: plain flip, latched */
         CHECK(dcn32_flip(&dev, &dc, 0, FB_START + 0x4000000, 2560, 0) == RDNA3_OK);
