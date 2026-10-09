@@ -211,7 +211,7 @@ EOF
     else ok "already there: $WORK/vbios.rom"; fi
 
     say "Reference data from Linux (amdgpu)"
-    if [ ! -d "$WORK/reports/linux-reference" ]; then
+    if [ ! -f "$WORK/reports/linux-reference/sysfs-pm.txt" ]; then
         sudo sh "$ROOT/tools/linux/dump_amdgpu_reference.sh" "$WORK/reports/linux-reference" >/dev/null 2>&1 \
             && sudo chown -R "$(id -u):$(id -g)" "$WORK/reports/linux-reference" && ok "reports/linux-reference" \
             || echo "  skipped (amdgpu not loaded?)"

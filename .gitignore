@@ -5,3 +5,4 @@ build/
 # never commit AMD firmware blobs, see docs/FIRMWARE.md
 firmware/*.bin
 __pycache__/
+reports/

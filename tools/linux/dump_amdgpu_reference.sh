@@ -37,4 +37,24 @@ if [ -d "$card/ip_discovery" ]; then
 fi
 
 dmesg | grep -iE "amdgpu|drm" > "$out/dmesg-amdgpu.txt" 2>/dev/null || true
+
+# what the kext's bring-up gets compared with (docs/AFTER-TESTS.md):
+# DPM levels per clock domain, current link, VBIOS, fan/temps
+for f in pp_dpm_sclk pp_dpm_mclk pp_dpm_fclk pp_dpm_socclk pp_dpm_dcefclk pp_dpm_pcie \
+         pp_power_profile_mode power_dpm_force_performance_level vbios_version \
+         current_link_speed current_link_width mem_info_vram_total; do
+    [ -r "$card/$f" ] && { echo "== $f"; cat "$card/$f"; } >> "$out/sysfs-pm.txt" 2>/dev/null
+done
+for f in "$card"/hwmon/hwmon*/temp*_input "$card"/hwmon/hwmon*/fan1_input "$card"/hwmon/hwmon*/power1_cap; do
+    [ -r "$f" ] && echo "$(basename "$f") $(cat "$f")" >> "$out/sysfs-pm.txt" 2>/dev/null
+done
+[ -r "$card/gpu_metrics" ] && cat "$card/gpu_metrics" > "$out/gpu_metrics.bin" 2>/dev/null
+# RADV's device info: gb_addr_config, CU/RB counts, clocks, firmware - the
+# same numbers DEV_INFO reports on macOS
+if command -v vulkaninfo >/dev/null; then
+    RADV_DEBUG=info vulkaninfo --summary > "$out/radv-info.txt" 2>&1 || true
+fi
+if command -v umr >/dev/null; then
+    umr -O bits -r *.gfx1100.mmGB_ADDR_CONFIG > "$out/umr-gb_addr_config.txt" 2>&1 || true
+fi
 echo "done: $out"

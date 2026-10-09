@@ -45,6 +45,7 @@ CI (GitHub Actions) builds the kext on `macos-15` and attaches it as an artifact
 **Test on Linux with this card as the only one (macOS in a VM, passthrough):**
 [docs/TESTING-VM.md](docs/TESTING-VM.md), i.e. a single script `tools/vm/rdna3vm`, step by step.
 Test on a hackintosh: [docs/TESTING-HW.md](docs/TESTING-HW.md).
+What to do with the test reports: [docs/AFTER-TESTS.md](docs/AFTER-TESTS.md).
 
 Loading the kext on the test machine and the safety levels (`rdna3lvl=`)
 are described in [docs/STAGE1.md](docs/STAGE1.md). Read

@@ -72,3 +72,4 @@ as the ported files need, not an emulation of the whole Linux kernel.
   ends together with its support.
 
 Step-by-step hardware test: [TESTING-HW](TESTING-HW.md) (report: `tools/macos/collect.sh`).
+In a VM on Linux: [TESTING-VM](TESTING-VM.md). What to do with the reports: [AFTER-TESTS](AFTER-TESTS.md).

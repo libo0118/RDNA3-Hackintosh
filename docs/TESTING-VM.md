@@ -218,6 +218,10 @@ From each step send the files from `~/rdna3-vm/reports`:
 
 With the first submission also include the `linux-reference` directory.
 
+Want a first look yourself? `python3 ~/RDNA3-Hackintosh/tools/triage_reports.py ~/rdna3-vm/reports`
+prints PASS / FAIL per step. What happens with the reports next is in
+[AFTER-TESTS](AFTER-TESTS.md).
+
 ## New driver version
 
 1. Download the new artifact (step C, item 1).
