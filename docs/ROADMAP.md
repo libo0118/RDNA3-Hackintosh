@@ -6,9 +6,9 @@ Legenda: ✅ zrobione · 🟡 w toku · ⬜ nie zaczęte
 |---|---|---|
 | 0 | Stanowisko testowe, kontakt z projektem NVIDIA | 🟡 dokumentacja gotowa ([STAGE0](STAGE0.md)), projekt NVIDIA przeanalizowany ([NULLMOTH-ANALYSIS](NULLMOTH-ANALYSIS.md)); sprzęt i kontakt po Twojej stronie |
 | 1 | Kext rozpoznaje kartę, mapuje BAR, czyta rejestry i discovery | 🟡 kod + testy gotowe ([STAGE1](STAGE1.md)); czeka na test na sprzęcie |
-| 2 | Bring-up | 🟡 PSP + 29 firmware + SMU + GMC/GFXHUB GART gotowe i przetestowane w symulatorze ([STAGE2](STAGE2.md)); MMHUB/IH/ringi do zrobienia |
+| 2 | Bring-up | 🟡 PSP + firmware + SMU, GMC (GART, MMHUB, GFXHUB), IH 6.0, GPUVM, SDMA 6.0, ring GFX 11 — w symulatorze ([STAGE2](STAGE2.md)); poziomy `rdna3lvl` 4–8; compute/MES, MSI do zrobienia |
 | 3 | Wyświetlanie: DCN 3.2.1, IOFramebuffer | ⬜ |
-| 4 | IOUserClient implementujący **UAPI amdgpu** | 🟡 bez CS/PRIME ([STAGE4](STAGE4.md)); niezmienione libdrm_amdgpu działa end-to-end na hoście |
+| 4 | IOUserClient implementujący **UAPI amdgpu** | 🟡 CS na ringach DMA/GFX, fence'y, syncobj, GPUVM ([STAGE4](STAGE4.md)); niezmienione libdrm_amdgpu wysyła CS end-to-end na hoście; PRIME/USERPTR do zrobienia |
 | 5 | Vulkan: RADV z istniejącym winsysem amdgpu | 🟡 `libvulkan_radeon.dylib` buduje się i linkuje na macOS w CI z 3 łatkami ([STAGE5](STAGE5.md)) |
 | 6 | Metal: wtyczka + tłumacz z NullMoth | 🟡 zaimportowane, przystosowane do AMD, budują się w CI ([STAGE6](STAGE6.md)) |
 | 7 | Integracja: WindowServer, CA, PM, sleep | 🟡 akcelerator IOAcceleratorFamily2 przeniesiony z NullMoth, buduje się w CI ([STAGE7](STAGE7.md)); PM/sleep ⬜ |
