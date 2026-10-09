@@ -59,6 +59,9 @@ typedef struct rdna3_os {
     void     (*mmio_wr)(void *ctx, uint64_t byte_off, uint32_t val);
     /* optional: told about every CPU write into VRAM (tests track HDP flushes) */
     void     (*vram_written)(void *ctx, uint64_t off, uint64_t len);
+    /* optional: 64-bit doorbell write (dword index into the doorbell BAR);
+     * when NULL, rdna3_doorbell_wr64 writes through d->doorbell_cpu */
+    void     (*doorbell_wr)(void *ctx, uint32_t index, uint64_t val);
 } rdna3_os;
 
 enum { RDNA3_LOG_ERR = 0, RDNA3_LOG_INFO = 1, RDNA3_LOG_DBG = 2 };
@@ -100,6 +103,12 @@ typedef struct rdna3_dev {
 
     /* HDP remap hole (nbio_v4_3_set_reg_remap) */
     uint32_t rmmio_remap_offset; /* bytes */
+
+    /* doorbell BAR (BAR2): CPU mapping, bus address, size; doorbell_ok is
+     * set by nbio43_doorbell_init() once the aperture is enabled */
+    volatile uint8_t *doorbell_cpu;
+    uint64_t doorbell_bus, doorbell_len;
+    int      doorbell_ok;
 
     uint32_t usec_timeout;      /* amdgpu default: 100000 */
 } rdna3_dev;
@@ -152,6 +161,9 @@ void rdna3_vram_read(rdna3_dev *d, uint64_t off, void *dst, uint64_t len);
 void rdna3_vram_fill(rdna3_dev *d, uint64_t off, uint8_t v, uint64_t len);
 /* Indirect access through MM_INDEX/MM_DATA (works for all of VRAM). */
 void rdna3_vram_mm_read(rdna3_dev *d, uint64_t off, uint32_t *dst, uint32_t dwords);
+
+/* ---- doorbells (WDOORBELL64) ---- */
+void rdna3_doorbell_wr64(rdna3_dev *d, uint32_t index, uint64_t v);
 
 /* ---- NBIO / HDP ---- */
 void rdna3_nbio_remap_hdp(rdna3_dev *d);   /* nbio_v4_3_set_reg_remap + remap_hdp_registers */

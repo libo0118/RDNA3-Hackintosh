@@ -8,7 +8,7 @@ Zasady bez zmian: port z amdgpu (MIT) z nazwą źródłowej funkcji w
 komentarzu, każda część z testem w symulatorze, kod NullMoth tylko dla AMD,
 commity z `[skip ci]` i jeden przebieg CI na paczkę zmian.
 
-## 1. Przerwania MSI i fence'y z IH (dokończenie, mały)
+## 1. ✅ Przerwania MSI i fence'y z IH (b1f8132)
 * `RDNA3Bringup`: własny `IOWorkLoop`, `IOFilterInterruptEventSource` na
   indeksie MSI z `IOPCIDevice::getInterruptType`, akcja = `ih60_process`
   → `ih60_iv_fence` → `IOLockWakeup`.
@@ -17,7 +17,7 @@ commity z `[skip ci]` i jeden przebieg CI na paczkę zmian.
   przerwanie, bez trzymania `fDrmLock` w czasie snu.
 * Brama `rdna3msi=1`; symulator: model generowania IV dla EOP i TRAP.
 
-## 2. Doorbelle + MES (duży, najważniejszy dla RADV/compute)
+## 2. 🟡 Doorbelle + KIQ/KCQ zrobione (bez MES); MES i więcej kolejek później
 * NBIO 4.3: apertura doorbelli (`nbio_v4_3_enable_doorbell_aperture`,
   zakresy SDMA/IH/VCN), mapowanie BAR2 w kexcie, `WDOORBELL64`.
 * Ring GFX i SDMA przez doorbell (jak amdgpu), wptr w pamięci.

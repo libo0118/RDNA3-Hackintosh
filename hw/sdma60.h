@@ -5,8 +5,9 @@
  *
  * Bring-up shape: the ring, its rptr writeback, the wptr poll slot and the
  * fence slot all live in VRAM and are addressed by MC address (VMID0
- * system aperture), like the PSP and IH buffers. No doorbell yet: the
- * write pointer is written to the poll slot (F32_WPTR_POLL_ENABLE) and to
+ * system aperture), like the PSP and IH buffers. The write pointer goes
+ * to the poll slot (F32_WPTR_POLL_ENABLE) and then through the doorbell
+ * when the aperture is up (sdma_v6_0_ring_set_wptr), else to
  * QUEUE0_RB_WPTR. Firmware comes from the PSP load (SDMA_UCODE_TH0/TH1).
  *
  * SPDX-License-Identifier: MIT
@@ -48,6 +49,8 @@ typedef struct rdna3_sdma_ring {
     uint32_t fence_seq;
     int      ready;
     int      fence_irq;     /* each fence also raises an IH trap */
+    int      use_doorbell;  /* wptr goes through the doorbell (d->doorbell_ok at start) */
+    uint32_t doorbell;      /* RD_DB_INDEX(RD_DB_SDMA_ENGINEn) */
 } rdna3_sdma_ring;
 
 #define RD_SDMA_WB_RPTR  0

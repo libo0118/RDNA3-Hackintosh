@@ -285,6 +285,20 @@ void rdna3_vram_mm_read(rdna3_dev *d, uint64_t pos, uint32_t *dst, uint32_t dwor
     }
 }
 
+/* ----------------------------- doorbells ----------------------------- */
+
+void rdna3_doorbell_wr64(rdna3_dev *d, uint32_t index, uint64_t v)
+{
+    if (d->os.wmb)
+        d->os.wmb(d->os.ctx);   /* ring contents before the doorbell */
+    if (d->os.doorbell_wr) {
+        d->os.doorbell_wr(d->os.ctx, index, v);
+        return;
+    }
+    if (d->doorbell_cpu && (uint64_t)index * 4 + 8 <= d->doorbell_len)
+        *(volatile uint64_t *)(d->doorbell_cpu + (uint64_t)index * 4) = v;
+}
+
 /* ---------------------------- NBIO / HDP ---------------------------- */
 
 void rdna3_nbio_remap_hdp(rdna3_dev *d)

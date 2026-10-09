@@ -7,7 +7,9 @@
  *   4  map BAR0, discovery, FB location, HDP remap, PSP bootloader + sOS,
  *      KM ring, TMR, all IP firmware, RLC autoload
  *   5  + SMU hello (TestMessage / GetSmuVersion / GetDriverIfVersion)
- *   6  + GMC, IH; with rdna3msi=1 the IH ring is drained from the device's
+ *   6  + GMC, IH, doorbell aperture (BAR2; rdna3doorbell=0 keeps the rings
+ *        on their wptr registers and skips the compute queues);
+ *        with rdna3msi=1 the IH ring is drained from the device's
  *        MSI (IOFilterInterruptEventSource on our own work loop) and fence
  *        waits sleep until the handler wakes them; a 5 ms guard sleep covers
  *        a lost interrupt. Level 7 verifies the first SDMA trap interrupt
@@ -32,6 +34,7 @@ extern "C" {
 #include "sdma60.h"
 #include "gpuvm.h"
 #include "gfx11.h"
+#include "doorbell.h"
 #include "rdna3_drm.h"
 #include "amd_fw.h"
 }
@@ -102,6 +105,11 @@ private:
     rdna3_ih     *fIh     = nullptr;   /* level 6 */
     rdna3_sdma_ring *fSdma = nullptr;  /* level 7 */
     rdna3_gfx_ring  *fGfx  = nullptr;  /* level 8 */
+    rdna3_mec_ring  *fKiq  = nullptr;  /* level 8, with doorbells */
+    rdna3_mec_ring  *fKcq  = nullptr;  /* level 8: the first kernel compute queue */
+    IOMemoryMap     *fDoorbell = nullptr;   /* BAR2 */
+    bool             fDoorbells = true;     /* boot-arg rdna3doorbell */
+    bool             mapDoorbell();
     rdna3_pt_pool *fPtPool = nullptr;  /* level 6: page tables for user VMs */
     uint32_t      fVmidUsed = 0;       /* bit n = VMID n taken (0 is the kernel's) */
     uint64_t      fVmPd[16] = {};      /* page directory per live VMID */
@@ -122,7 +130,7 @@ private:
     IOFilterInterruptEventSource *fIntr = nullptr;
     int           fFenceEvent = 0;          /* IOLockSleep event on fLock */
     volatile uint64_t fIrqCount = 0, fIvCount = 0;
-    volatile uint64_t fIrqFenceGfx = 0, fIrqFenceSdma = 0, fIrqOther = 0;
+    volatile uint64_t fIrqFenceGfx = 0, fIrqFenceSdma = 0, fIrqFenceComp = 0, fIrqOther = 0;
     bool          setupInterrupt();
     void          teardownInterrupt();
     static bool   irqFilter(OSObject *owner, IOFilterInterruptEventSource *src);

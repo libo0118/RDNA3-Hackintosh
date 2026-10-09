@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "sdma60.h"
+#include "doorbell.h"
 #include "gen/gc_11_0_0_sdma.h"
 
 #define REG_FIELD_SHIFT(reg, field) reg##__##field##__SHIFT
@@ -55,11 +56,17 @@ void sdma60_write(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t v)
 }
 
 /* sdma_v6_0_ring_set_wptr (no doorbell) + the poll slot the F32 reads */
+/* sdma_v6_0_ring_set_wptr: wptr in bytes to the poll slot, then the
+ * doorbell or the registers */
 void sdma60_commit(rdna3_dev *d, rdna3_sdma_ring *r)
 {
     uint64_t w = r->wptr << 2;
     rdna3_vram_write(d, r->wb + RD_SDMA_WB_WPTR, &w, 8);
     rdna3_hdp_flush(d);
+    if (r->use_doorbell) {
+        rdna3_doorbell_wr64(d, r->doorbell, w);
+        return;
+    }
     WS(d, r->inst, regSDMA0_QUEUE0_RB_WPTR, (uint32_t)w);
     WS(d, r->inst, regSDMA0_QUEUE0_RB_WPTR_HI, (uint32_t)(w >> 32));
 }
@@ -233,10 +240,16 @@ int sdma60_start(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t inst, uint32_t ring_
     WS(d, inst, regSDMA0_QUEUE0_RB_WPTR, 0);
     WS(d, inst, regSDMA0_QUEUE0_RB_WPTR_HI, 0);
 
+    /* doorbell when the aperture is up (sdma_v6_0_gfx_resume_instance) */
+    r->use_doorbell = d->doorbell_ok;
+    r->doorbell = RD_DB_INDEX(inst ? RD_DB_SDMA_ENGINE1 : RD_DB_SDMA_ENGINE0);
     tmp = RS(d, inst, regSDMA0_QUEUE0_DOORBELL);
-    tmp = REG_SET_FIELD(tmp, SDMA0_QUEUE0_DOORBELL, ENABLE, 0);
+    tmp = REG_SET_FIELD(tmp, SDMA0_QUEUE0_DOORBELL, ENABLE, r->use_doorbell ? 1 : 0);
     WS(d, inst, regSDMA0_QUEUE0_DOORBELL, tmp);
-    WS(d, inst, regSDMA0_QUEUE0_DOORBELL_OFFSET, RS(d, inst, regSDMA0_QUEUE0_DOORBELL_OFFSET));
+    tmp = RS(d, inst, regSDMA0_QUEUE0_DOORBELL_OFFSET);
+    tmp = REG_SET_FIELD(tmp, SDMA0_QUEUE0_DOORBELL_OFFSET, OFFSET, r->use_doorbell ? r->doorbell : 0);
+    WS(d, inst, regSDMA0_QUEUE0_DOORBELL_OFFSET, tmp);
+    nbio43_sdma_doorbell_range(d, inst, r->use_doorbell, r->doorbell, RD_DB_SDMA_DOORBELL_RANGE * 2);
     /* nbio sdma_doorbell_range(use_doorbell = false): S2A_DOORBELL_ENTRY_2_CTRL
      * is outside the MMIO BAR, left at reset like IH's entry */
 

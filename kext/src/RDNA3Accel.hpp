@@ -15,7 +15,9 @@
  *   6  + GMC: GART table in VRAM, MMHUB 3.0.2 GART enable + TLB flush;
  *        IH 6.0 interrupt ring (polled).
  *   7  + SDMA0 ring, ring test, 64 KiB VRAM copy verified by the CPU.
- *   8  + GFX 11: RS64, GFXHUB, clear state, gfx ring 0 + ring test.
+ *   8  + GFX 11: RS64, GFXHUB, clear state, gfx ring 0 + ring test; with
+ *        doorbells the KIQ and the first compute queue (MEC) + ring tests.
+ *  rdna3doorbell=0 keeps the rings on their wptr registers (no compute).
  *  rdna3msi=1 drains the interrupt ring from the device's MSI (level 6+)
  *             and wakes fence waiters from it instead of polling.
  *  -rdna3off  disables the driver entirely (probe fails).

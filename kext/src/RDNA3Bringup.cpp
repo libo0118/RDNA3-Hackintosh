@@ -66,9 +66,11 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
     fLevel = level;
     fVramSize = vramSize;
     {
-        uint32_t msi = 0;
+        uint32_t msi = 0, db = 1;
         PE_parse_boot_argn("rdna3msi", &msi, sizeof(msi));
+        PE_parse_boot_argn("rdna3doorbell", &db, sizeof(db));
         fMsi = msi != 0;
+        fDoorbells = db != 0;
     }
     fLock = IOLockAlloc();
     fDisc = (amd_discovery *)IOMalloc(sizeof(*fDisc));
@@ -119,6 +121,7 @@ void RDNA3Bringup::stopAndFree()
     if (fPsp && fPsp->ring_created)
         psp13_ring_stop(fPsp);
     OSSafeReleaseNULL(fVram);
+    OSSafeReleaseNULL(fDoorbell);
     for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)
         if (fBlobs[i].data)
             IOFree(fBlobs[i].data, fBlobs[i].len);
@@ -131,6 +134,13 @@ void RDNA3Bringup::stopAndFree()
     fVmReady = false;
     if (fPtPool) IOFree(fPtPool, sizeof(*fPtPool));
     fPtPool = nullptr;
+    if (fKcq && fKcq->rb.ready && fDev)
+        gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
+    if (fKiq && fDev)
+        gfx11_mec_stop(fDev, fKiq, fKcq);
+    if (fKcq) IOFree(fKcq, sizeof(*fKcq));
+    if (fKiq) IOFree(fKiq, sizeof(*fKiq));
+    fKcq = nullptr; fKiq = nullptr;
     if (fGfx) {
         if (fGfx->ready && fDev) gfx11_set_eop_interrupt(fDev, fGfx, 0);
         if (fGfx->ready && fDev) gfx11_cp_gfx_enable(fDev, 0);
@@ -232,6 +242,24 @@ bool RDNA3Bringup::mapVram()
          (unsigned long long)(fDev->vram_cpu_len >> 20),
          (unsigned long long)fVram->getPhysicalAddress());
     publish("RDNA3,VRAMApertureMB", fDev->vram_cpu_len >> 20);
+    return true;
+}
+
+/* BAR2: the doorbell aperture (amdgpu_doorbell_init) */
+bool RDNA3Bringup::mapDoorbell()
+{
+    fDoorbell = fPci->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2, kIOMapInhibitCache);
+    if (!fDoorbell || fDoorbell->getLength() < 4096) {
+        BLOG("no doorbell BAR (BAR2): rings keep their wptr registers, no compute queues");
+        OSSafeReleaseNULL(fDoorbell);
+        return false;
+    }
+    fDev->doorbell_cpu = (volatile uint8_t *)fDoorbell->getVirtualAddress();
+    fDev->doorbell_len = fDoorbell->getLength();
+    fDev->doorbell_bus = fDoorbell->getPhysicalAddress();
+    BLOG("BAR2 doorbells %llu KiB at phys 0x%llx", (unsigned long long)(fDev->doorbell_len >> 10),
+         (unsigned long long)fDev->doorbell_bus);
+    publish("RDNA3,DoorbellKB", fDev->doorbell_len >> 10);
     return true;
 }
 
@@ -340,6 +368,11 @@ void RDNA3Bringup::run()
          * through the page tables). amdgpu: pci_set_master() at probe. */
         fPci->setBusMasterEnable(true);
         publish("RDNA3,BusMaster", 1);
+        /* soc21_common_hw_init: doorbell aperture (gfx ring, SDMA and the
+         * compute queues ring their doorbells from level 7/8 on) */
+        if (fDoorbells && mapDoorbell())
+            nbio43_doorbell_init(fDev);
+        publish("RDNA3,Doorbells", fDev->doorbell_ok ? 1 : 0);
 
         /* IH 6.0 ring 0, polled (no MSI registration yet) */
         fIh = (rdna3_ih *)IOMalloc(sizeof(*fIh));
@@ -459,6 +492,29 @@ void RDNA3Bringup::run()
         publish("RDNA3,GFXResult", (uint64_t)(int64_t)ret);
         if (!ret && fIrqLive)
             gfx11_set_eop_interrupt(fDev, fGfx, 1);
+        /* MEC: the KIQ and the first kernel compute queue (needs doorbells) */
+        if (!ret && fDev->doorbell_ok) {
+            int kr;
+            fKiq = (rdna3_mec_ring *)IOMalloc(sizeof(*fKiq));
+            fKcq = (rdna3_mec_ring *)IOMalloc(sizeof(*fKcq));
+            if (fKiq && fKcq) {
+                bzero(fKiq, sizeof(*fKiq));
+                bzero(fKcq, sizeof(*fKcq));
+                kr = gfx11_mec_ring_init(fDev, fKiq, 1, RD_KIQ_PIPE, 0, RD_DB_KIQ, 0);
+                if (!kr)
+                    kr = gfx11_mec_ring_init(fDev, fKcq, 0, RD_KCQ0_PIPE, 0, RD_DB_MEC_RING0, 0);
+                if (!kr)
+                    kr = gfx11_kiq_start(fDev, fKiq);
+                publish("RDNA3,KIQResult", (uint64_t)(int64_t)kr);
+                if (!kr)
+                    kr = gfx11_kcq_start(fDev, fKiq, fKcq);
+                publish("RDNA3,KCQResult", (uint64_t)(int64_t)kr);
+                if (!kr && fIrqLive)
+                    gfx11_set_eop_interrupt(fDev, &fKcq->rb, 1);
+                if (kr)
+                    BLOG("compute queues unavailable (%d): GFX and DMA rings only", kr);
+            }
+        }
         if (!ret && fVmReady) {
             /* VMs opened before the GFXHUB came up get their context now
              * (gfxhub303_gart_enable reset VMID 1-15) */
@@ -468,7 +524,12 @@ void RDNA3Bringup::run()
                     gfxhub303_flush_tlb(fDev, id, 0);
                 }
             fOwner->drmRingReady(AMDGPU_HW_IP_GFX, 1);
-            publishString("RDNA3,Rings", "DMA0 GFX0");
+            if (fKcq && fKcq->rb.ready) {
+                fOwner->drmRingReady(AMDGPU_HW_IP_COMPUTE, 1);
+                publishString("RDNA3,Rings", "DMA0 GFX0 COMP0");
+            } else {
+                publishString("RDNA3,Rings", "DMA0 GFX0");
+            }
         }
         publishString("RDNA3,Stage2", ret ? "failed: GFX" : "GFX ring 0 up, ring test passed");
     }
@@ -480,6 +541,7 @@ void RDNA3Bringup::run()
         publish("RDNA3,IRQIVs", fIvCount);
         publish("RDNA3,IRQFenceGFX", fIrqFenceGfx);
         publish("RDNA3,IRQFenceSDMA", fIrqFenceSdma);
+        publish("RDNA3,IRQFenceCompute", fIrqFenceComp);
         publish("RDNA3,IRQOther", fIrqOther);
     }
 }
@@ -491,6 +553,7 @@ struct RDNA3Vm {
     uint32_t vmid;
     bool     live;       /* page tables exist */
     bool     gfxFlush;   /* next GFX job re-points the VMID and flushes from the ring */
+    bool     compFlush;  /* same for the next compute job (the hub is shared, the rings are not) */
 };
 
 void *RDNA3Bringup::vmCreate()
@@ -517,7 +580,7 @@ void *RDNA3Bringup::vmCreate()
             if (fGmc && fGmc->gfxhub_enabled)
                 gfxhub303_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
             vmFlush(id);
-            v->gfxFlush = true;
+            v->gfxFlush = v->compFlush = true;
             break;
         }
     }
@@ -584,7 +647,7 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
     if (r)
         return -RD_ENOMEM;
     vmFlush(v->vmid);
-    v->gfxFlush = true;
+    v->gfxFlush = v->compFlush = true;
     return 0;
 }
 
@@ -595,7 +658,7 @@ void RDNA3Bringup::vmUnmap(void *p, uint64_t va, uint64_t size)
         return;
     gpuvm_unmap(fDev, &v->vm, va, size / 4096);
     vmFlush(v->vmid);
-    v->gfxFlush = true;
+    v->gfxFlush = v->compFlush = true;
 }
 
 /* --------------------------- submission --------------------------- */
@@ -632,6 +695,23 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
         *seq = s;
         return 0;
     }
+    if (ip == AMDGPU_HW_IP_COMPUTE && fKcq && fKcq->rb.ready) {
+        rdna3_gfx_ib g[RD_GFX_MAX_IBS];
+        if (n > RD_GFX_MAX_IBS)
+            return -RD_EINVAL;
+        for (uint32_t i = 0; i < n; i++) {
+            g[i].va = ibs[i].va;
+            g[i].ndw = ibs[i].length_dw;
+            g[i].flags = ibs[i].flags;
+        }
+        uint32_t s = gfx11_submit_compute_job(fDev, fKcq, (uint64_t)(uintptr_t)v, v->vmid,
+                                              v->compFlush ? gpuvm_pd_addr(fDev, &v->vm) : 0, g, n);
+        if (!s)
+            return -RD_EBUSY;
+        v->compFlush = false;
+        *seq = s;
+        return 0;
+    }
     return -RD_EINVAL;
 }
 
@@ -643,6 +723,8 @@ int RDNA3Bringup::fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq)
         return sdma60_fence_passed(fDev, fSdma, (uint32_t)seq);
     if (ip == AMDGPU_HW_IP_GFX && fGfx)
         return gfx11_fence_passed(fDev, fGfx, (uint32_t)seq);
+    if (ip == AMDGPU_HW_IP_COMPUTE && fKcq)
+        return gfx11_fence_passed(fDev, &fKcq->rb, (uint32_t)seq);
     return 1;
 }
 
@@ -706,6 +788,7 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
     switch (ih60_iv_fence(iv)) {
     case RD_IH_FENCE_GFX:   b->fIrqFenceGfx++; break;
     case RD_IH_FENCE_SDMA0: b->fIrqFenceSdma++; break;
+    case RD_IH_FENCE_COMPUTE0: b->fIrqFenceComp++; break;
     default:                b->fIrqOther++; break;
     }
 }

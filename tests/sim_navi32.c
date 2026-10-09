@@ -34,6 +34,8 @@
 #include "gen/gc_11_0_0_sdma.h"
 #include "gfx11.h"
 #include "dcn32.h"
+#include "doorbell.h"
+#include "gen/nbio_4_3_0_doorbell.h"
 #include "gen/dcn_3_2_1.h"
 #include "gen/gc_11_0_0_gfx.h"
 #include "navi3x_regs.h"
@@ -101,6 +103,27 @@ typedef struct sim {
     uint32_t cp_last_cntxcntl, cp_last_ib_vmid;
     unsigned dcn_flips, dcn_pitch_unlocked;
     unsigned ih_ivs, ih_msi, ih_dropped;   /* IVs the "hardware" queued, MSIs it raised */
+
+    /* RSMU index/data window: registers outside the MMIO BAR (S2A doorbell ranges) */
+    uint32_t smn_index;
+    struct { uint32_t addr, val; } smn[64];
+    unsigned nsmn;
+
+    /* doorbells: 64-bit writes into BAR2, dispatched to the engine whose
+     * doorbell register names the index */
+    unsigned db_writes, db_unclaimed;
+    uint32_t db_last_index;
+
+    /* MEC: one HQD register file per (pipe, queue) of MEC1, selected by
+     * GRBM_GFX_CNTL for register access, loaded from the MQD by MAP_QUEUES */
+    struct hqd {
+        uint32_t reg[64];     /* CP_MQD_BASE_ADDR .. CP_HQD_PQ_WPTR_HI window */
+        uint64_t rptr;        /* dwords */
+        int mapped_by_kiq;
+    } hqd[4][4];
+    unsigned kiq_maps, kiq_unmaps, mec_runs, mec_bad_queue;
+    uint64_t set_resources_mask;
+    uint32_t cp_cur_me, cp_cur_pipe, cp_cur_queue;   /* engine running cp_exec */
     int dcn_hold;              /* 1: flips stay pending (no vupdate yet) */
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
 } sim;
@@ -116,6 +139,49 @@ static uint8_t *mc_ptr(uint64_t mc, uint64_t len)
     if (mc < FB_START || mc - FB_START + len > BAR_LEN)
         return NULL;
     return S.vram + (mc - FB_START);
+}
+
+/* HQD register window (GC segment 0): CP_MQD_BASE_ADDR .. CP_HQD_PQ_WPTR_HI */
+#define HQD_FIRST regCP_MQD_BASE_ADDR
+#define HQD_LAST  regCP_HQD_PQ_WPTR_HI
+static struct hqd *hqd_sel(void)
+{
+    uint32_t c = S.reg[GCR(regGRBM_GFX_CNTL)];
+    uint32_t me = (c & GRBM_GFX_CNTL__MEID_MASK) >> GRBM_GFX_CNTL__MEID__SHIFT;
+    uint32_t pipe = (c & GRBM_GFX_CNTL__PIPEID_MASK) >> GRBM_GFX_CNTL__PIPEID__SHIFT;
+    uint32_t q = (c & GRBM_GFX_CNTL__QUEUEID_MASK) >> GRBM_GFX_CNTL__QUEUEID__SHIFT;
+    if (me != 1 || q > 3)
+        return NULL;
+    return &S.hqd[pipe][q];
+}
+#define HQD(hq, r_) ((hq)->reg[(r_) - HQD_FIRST])
+
+/* MAP_QUEUES: the firmware loads the HQD from the MQD in memory */
+static const struct { uint32_t mqd, reg; } mqd_map[] = {
+    { 128, regCP_MQD_BASE_ADDR }, { 129, regCP_MQD_BASE_ADDR_HI }, { 130, regCP_HQD_ACTIVE },
+    { 131, regCP_HQD_VMID }, { 132, regCP_HQD_PERSISTENT_STATE }, { 136, regCP_HQD_PQ_BASE },
+    { 137, regCP_HQD_PQ_BASE_HI }, { 138, regCP_HQD_PQ_RPTR }, { 139, regCP_HQD_PQ_RPTR_REPORT_ADDR },
+    { 140, regCP_HQD_PQ_RPTR_REPORT_ADDR_HI }, { 141, regCP_HQD_PQ_WPTR_POLL_ADDR },
+    { 142, regCP_HQD_PQ_WPTR_POLL_ADDR_HI }, { 143, regCP_HQD_PQ_DOORBELL_CONTROL },
+    { 145, regCP_HQD_PQ_CONTROL }, { 149, regCP_HQD_IB_CONTROL }, { 162, regCP_MQD_CONTROL },
+    { 165, regCP_HQD_EOP_BASE_ADDR }, { 166, regCP_HQD_EOP_BASE_ADDR_HI }, { 167, regCP_HQD_EOP_CONTROL },
+    { 182, regCP_HQD_PQ_WPTR_LO }, { 183, regCP_HQD_PQ_WPTR_HI },
+};
+static int hqd_load_mqd(struct hqd *h, uint64_t mqd_mc, uint32_t doorbell_index)
+{
+    const uint32_t *m = (const uint32_t *)mc_ptr(mqd_mc, 4 * RD_MQD_DWORDS);
+    if (!m || m[0] != 0xC0310800u)
+        return 0;
+    for (unsigned i = 0; i < sizeof(mqd_map) / sizeof(mqd_map[0]); i++)
+        h->reg[mqd_map[i].reg - HQD_FIRST] = m[mqd_map[i].mqd];
+    HQD(h, regCP_HQD_ACTIVE) = 1;
+    HQD(h, regCP_HQD_PQ_DOORBELL_CONTROL) =
+        (HQD(h, regCP_HQD_PQ_DOORBELL_CONTROL) & ~CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) |
+        ((doorbell_index << CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET__SHIFT) &
+         CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) | CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK;
+    h->rptr = 0;
+    h->mapped_by_kiq = 1;
+    return 1;
 }
 
 /* IH model: an engine queues an 8-dword IV on ring 0 (IH_RB_BASE, size
@@ -153,6 +219,8 @@ static void ih_push(uint32_t client, uint32_t src, uint32_t ring_id)
  * job framing packets and INDIRECT_BUFFER through the VMID's page tables */
 static void sim_wr(void *ctx, uint64_t off, uint32_t v);
 static uint32_t sim_rd(void *ctx, uint64_t off);
+static void cp_run(uint32_t wptr_dw);
+static void sdma_run(uint32_t wptr_bytes);
 
 /* walk VMID n's 4-level tables like the GFXHUB would (FB_OFFSET is 0, so a
  * PDE/PTE address is a VRAM offset) */
@@ -194,6 +262,36 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
         case PACKET3_CONTEXT_CONTROL: S.cp_last_cntxcntl = PK(1); break;
         case PACKET3_PREAMBLE_CNTL: case PACKET3_NOP: break;
         case PACKET3_PFP_SYNC_ME: S.cp_pfp_sync++; break;
+        case PACKET3_SET_RESOURCES:
+            if (cnt == 6 && S.cp_cur_me == 1) S.set_resources_mask = PK(2) | ((uint64_t)PK(3) << 32);
+            else S.cp_bad++;
+            break;
+        case PACKET3_MAP_QUEUES: {
+            uint32_t q = (PK(1) >> 13) & 7, pipe = (PK(1) >> 16) & 3, me = (PK(1) >> 18) & 3;
+            uint32_t db = (PK(2) >> 2) & 0x3ffffff;
+            uint64_t mqd = PK(3) | ((uint64_t)PK(4) << 32);
+            if (cnt != 5 || S.cp_cur_me != 1 || me != 1 || q > 3) { S.cp_bad++; break; }
+            if (!(S.set_resources_mask & (1ull << (pipe * 8 + q)))) { S.mec_bad_queue++; break; }
+            if (!hqd_load_mqd(&S.hqd[pipe][q], mqd, db)) { S.cp_bad++; break; }
+            S.kiq_maps++;
+            break;
+        }
+        case PACKET3_UNMAP_QUEUES: {
+            uint32_t db = (PK(2) >> 2) & 0x3ffffff;
+            int found = 0;
+            if (cnt != 4 || S.cp_cur_me != 1) { S.cp_bad++; break; }
+            for (uint32_t p2 = 0; p2 < 4; p2++)
+                for (uint32_t q2 = 0; q2 < 4; q2++) {
+                    struct hqd *hq = &S.hqd[p2][q2];
+                    uint32_t dc = HQD(hq, regCP_HQD_PQ_DOORBELL_CONTROL);
+                    if ((dc & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK) &&
+                        ((dc & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == db && hq->mapped_by_kiq) {
+                        HQD(hq, regCP_HQD_ACTIVE) = 0; hq->mapped_by_kiq = 0; found = 1;
+                    }
+                }
+            if (found) S.kiq_unmaps++; else S.mec_bad_queue++;
+            break;
+        }
         case PACKET3_ACQUIRE_MEM: if (cnt == 6 && PK(7)) S.cp_acquire++; else S.cp_bad++; break;
         case PACKET3_FRAME_CONTROL:
             if (PK(1) >> 28) S.cp_frame_end++; else S.cp_frame_begin++;
@@ -227,7 +325,7 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
         }
         case PACKET3_INDIRECT_BUFFER: {
             uint64_t va = PK(1) | ((uint64_t)PK(2) << 32);
-            uint32_t ndw = PK(3) & 0xfffff, vmid = (PK(3) >> 24) & 0xf, i;
+            uint32_t ndw = PK(3) & 0xfffff, vmid = (PK(3) >> 24) & 0xf, i;   /* bit 23 = VALID */
             static uint32_t ib[4096];
             if (in_ib || ndw > 4096) { S.cp_bad++; break; }
             for (i = 0; i < ndw; i++) {
@@ -247,9 +345,15 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
             uint64_t a = PK(3) | ((uint64_t)PK(4) << 32);
             uint8_t *p = mc_ptr(a, 4);
             if (p && ((PK(2) >> 29) & 7) == 1) memcpy(p, &PK(5), 4); else S.cp_bad++;
-            if (((PK(2) >> 24) & 7) == 2 &&
-                (S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE_MASK))
-                ih_push(RD_IH_CLIENT_GRBM_CP, RD_IH_SRC_CP_EOP, 0);
+            if (((PK(2) >> 24) & 7) == 2) {
+                /* EOP interrupt: gated per engine, ring_id = queue<<4 | me<<2 | pipe */
+                uint32_t en = S.cp_cur_me == 0
+                    ? S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE_MASK
+                    : S.reg[GCR(regCP_ME1_PIPE0_INT_CNTL) + S.cp_cur_pipe] & CP_ME1_PIPE0_INT_CNTL__TIME_STAMP_INT_ENABLE_MASK;
+                if (en)
+                    ih_push(RD_IH_CLIENT_GRBM_CP, RD_IH_SRC_CP_EOP,
+                            (S.cp_cur_queue << 4) | (S.cp_cur_me << 2) | S.cp_cur_pipe);
+            }
             break;
         }
         default: S.cp_bad++; break;
@@ -258,6 +362,68 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
     }
 #undef PK
     return rptr;
+}
+
+/* a mapped MEC queue runs its PQ up to the doorbell value (dwords) */
+static void mec_run(uint32_t pipe, uint32_t q, uint64_t wptr)
+{
+    struct hqd *h = &S.hqd[pipe][q];
+    uint32_t ctl = HQD(h, regCP_HQD_PQ_CONTROL);
+    uint32_t ndw = 2u << (ctl & CP_HQD_PQ_CONTROL__QUEUE_SIZE_MASK);
+    uint64_t base = ((uint64_t)HQD(h, regCP_HQD_PQ_BASE) << 8) | ((uint64_t)HQD(h, regCP_HQD_PQ_BASE_HI) << 40);
+    uint64_t rwb = HQD(h, regCP_HQD_PQ_RPTR_REPORT_ADDR) | ((uint64_t)HQD(h, regCP_HQD_PQ_RPTR_REPORT_ADDR_HI) << 32);
+    uint32_t *ring = (uint32_t *)mc_ptr(base, 4ull * ndw);
+    uint32_t mec = S.reg[GCR(regCP_MEC_RS64_CNTL)];
+    uint8_t *wb;
+    if (!(HQD(h, regCP_HQD_ACTIVE) & 1) || !ring) { S.mec_bad_queue++; return; }
+    if ((mec & CP_MEC_RS64_CNTL__MEC_HALT_MASK) || !(mec & (CP_MEC_RS64_CNTL__MEC_PIPE0_ACTIVE_MASK << pipe))) {
+        S.cp_while_halted++;
+        return;
+    }
+    if (S.pending_writes)
+        S.unflushed_doorbells++;
+    S.cp_cur_me = 1; S.cp_cur_pipe = pipe; S.cp_cur_queue = q;
+    h->rptr = cp_exec(ring, ndw - 1, h->rptr, wptr, 0);
+    S.cp_cur_me = 0; S.cp_cur_pipe = 0; S.cp_cur_queue = 0;
+    S.mec_runs++;
+    wb = mc_ptr(rwb, 4);
+    if (wb) {
+        uint32_t r32 = (uint32_t)(h->rptr & (ndw - 1));
+        memcpy(wb, &r32, 4);
+    }
+}
+
+/* 64-bit doorbell write (BAR2 dword index): find the engine that owns it */
+static void sim_doorbell(void *ctx, uint32_t index, uint64_t v)
+{
+    uint32_t dc = S.reg[GCR(regCP_RB_DOORBELL_CONTROL)];
+    uint32_t sd = S.reg[GC_BASE0 + regSDMA0_QUEUE0_DOORBELL];
+    uint32_t so = S.reg[GC_BASE0 + regSDMA0_QUEUE0_DOORBELL_OFFSET];
+    (void)ctx;
+    S.db_writes++;
+    S.db_last_index = index;
+    if ((dc & CP_RB_DOORBELL_CONTROL__DOORBELL_EN_MASK) &&
+        ((dc & CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == index) {
+        cp_run((uint32_t)v);
+        return;
+    }
+    if ((sd & SDMA0_QUEUE0_DOORBELL__ENABLE_MASK) &&
+        ((so & SDMA0_QUEUE0_DOORBELL_OFFSET__OFFSET_MASK) >> 2) == index) {
+        sdma_run((uint32_t)v);
+        return;
+    }
+    for (uint32_t p = 0; p < 4; p++)
+        for (uint32_t q = 0; q < 4; q++) {
+            struct hqd *h = &S.hqd[p][q];
+            uint32_t c = HQD(h, regCP_HQD_PQ_DOORBELL_CONTROL);
+            if ((c & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK) &&
+                ((c & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == index &&
+                (HQD(h, regCP_HQD_ACTIVE) & 1)) {
+                mec_run(p, q, v);
+                return;
+            }
+        }
+    S.db_unclaimed++;
 }
 
 static void cp_run(uint32_t wptr_dw)
@@ -399,12 +565,59 @@ static void psp_exec(uint64_t cmd_mc, uint64_t fence_mc, uint32_t fence_val)
     *fence = fence_val;
 }
 
+static uint32_t *smn_slot(uint32_t addr, int create)
+{
+    for (unsigned i = 0; i < S.nsmn; i++)
+        if (S.smn[i].addr == addr)
+            return &S.smn[i].val;
+    if (!create || S.nsmn >= 64)
+        return NULL;
+    S.smn[S.nsmn].addr = addr;
+    S.smn[S.nsmn].val = 0;
+    return &S.smn[S.nsmn++].val;
+}
+
+/* what the driver wrote to a register beyond the BAR (SMN byte address) */
+static uint32_t smn_val(uint32_t reg_dw)
+{
+    uint32_t *p = smn_slot(reg_dw * 4u, 0);
+    return p ? *p : 0;
+}
+
 static void sim_wr(void *ctx, uint64_t off, uint32_t v)
 {
     uint32_t dw = (uint32_t)(off / 4);
     (void)ctx;
     if (off >= MMIO_LEN)
         return;
+    /* RSMU index/data: the indirect window to registers beyond the BAR */
+    if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_INDEX) {
+        S.smn_index = v;
+        *R(dw) = v;
+        return;
+    }
+    if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_DATA) {
+        uint32_t *p = smn_slot(S.smn_index, 1);
+        if (p) *p = v;
+        *R(dw) = v;
+        return;
+    }
+    /* MEC HQD registers: the file of the queue GRBM_GFX_CNTL selects */
+    if (dw >= GC_BASE0 + HQD_FIRST && dw <= GC_BASE0 + HQD_LAST) {
+        struct hqd *h = hqd_sel();
+        uint32_t reg = dw - GC_BASE0;
+        if (!h) { *R(dw) = v; return; }
+        if (reg == regCP_HQD_DEQUEUE_REQUEST && v) {
+            HQD(h, regCP_HQD_ACTIVE) = 0;   /* drained at once */
+            return;
+        }
+        if (reg == regCP_HQD_ACTIVE && (v & 1) && !(HQD(h, regCP_HQD_PQ_DOORBELL_CONTROL) & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK))
+            S.mec_bad_queue++;   /* a queue without a doorbell can never be kicked */
+        if (reg == regCP_HQD_ACTIVE && (v & 1))
+            h->rptr = 0;
+        HQD(h, reg) = v;
+        return;
+    }
 
     /* HDP flush through the remap hole */
     if (off == RDNA3_MMIO_REG_HOLE_OFFSET + KFD_MMIO_REMAP_HDP_MEM_FLUSH_CNTL) {
@@ -598,10 +811,20 @@ static void sim_tick(void)
 
 static uint32_t sim_rd(void *ctx, uint64_t off)
 {
+    uint32_t dw = (uint32_t)(off / 4);
     (void)ctx;
     sim_tick();
     if (off >= MMIO_LEN)
         return ~0u;
+    if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_DATA) {
+        uint32_t *p = smn_slot(S.smn_index, 0);
+        return p ? *p : 0;
+    }
+    if (dw >= GC_BASE0 + HQD_FIRST && dw <= GC_BASE0 + HQD_LAST) {
+        struct hqd *h = hqd_sel();
+        if (h)
+            return HQD(h, dw - GC_BASE0);
+    }
     if (off / 4 == MM_BASE0 + regMMVM_INVALIDATE_ENG0_SEM +
                    17 * (regMMVM_INVALIDATE_ENG1_REQ - regMMVM_INVALIDATE_ENG0_REQ)) {
         if (S.mm_sem_held)
@@ -734,10 +957,11 @@ static void run(const char *fwdir)
     static rdna3_psp psp;
     static rdna3_dev dev;
     static rdna3_gfx_ring gr;
+    static rdna3_mec_ring kiq, kcq;
     amd_fw_blob_ref blobs[AMD_BLOB_COUNT];
     amd_discovery disc;
     rdna3_os os = { NULL, sim_udelay, sim_msleep, sim_vlog, sim_wmb, sim_rd, sim_wr,
-                     sim_vram_written };
+                     sim_vram_written, sim_doorbell };
     const uint8_t *sos = NULL;
     size_t sos_len = 0;
     uint32_t smu_ver = 0, ifv = 0;
@@ -778,6 +1002,16 @@ static void run(const char *fwdir)
     CHECK(dev.fb_start == FB_START);
     rdna3_nbio_remap_hdp(&dev);
     CHECK(S.reg[NBIO_B2 + regBIF_BX0_REMAP_HDP_MEM_FLUSH_CNTL] == RDNA3_MMIO_REG_HOLE_OFFSET);
+
+    /* doorbell BAR: 2 MiB at a made-up bus address; without a CPU mapping
+     * the os hook takes the writes (the kext maps BAR2 instead) */
+    CHECK(nbio43_doorbell_init(&dev) == RDNA3_ENODEV && !dev.doorbell_ok);
+    dev.doorbell_bus = 0xF0000000ull;
+    dev.doorbell_len = 2u << 20;
+    CHECK(nbio43_doorbell_init(&dev) == RDNA3_OK && dev.doorbell_ok);
+    CHECK(S.reg[NBIO_B2 + regRCC_DEV0_EPF0_RCC_DOORBELL_APER_EN] & RCC_DEV0_EPF0_RCC_DOORBELL_APER_EN__BIF_DOORBELL_APER_EN_MASK);
+    CHECK(S.reg[NBIO_B2 + regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_BASE_LOW] == 0xF0000000u);
+    CHECK(S.reg[NBIO_B2 + regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL] & BIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL__DOORBELL_SELFRING_GPA_APER_EN_MASK);
     rdna3_vram_alloc_init(&dev, 16u << 20, BAR_LEN);
 
     CHECK(psp13_init(&psp, &dev, sos, sos_len) == RDNA3_OK);
@@ -886,6 +1120,21 @@ static void run(const char *fwdir)
             S.reg[0xA000 + regSDMA0_F32_CNTL] = SDMA0_F32_CNTL__HALT_MASK;  /* reset state */
             CHECK(sdma60_start(&dev, &sd, 0, 4096) == RDNA3_OK && sd.ready);
             CHECK(S.sdma_while_halted == 0 && S.sdma_bad == 0);
+            /* doorbell: QUEUE0_DOORBELL enabled at index 0x200, S2A port 2
+             * range programmed through the RSMU window, ring test went
+             * through the doorbell */
+            CHECK(sd.use_doorbell && sd.doorbell == RD_DB_INDEX(RD_DB_SDMA_ENGINE0));
+            CHECK(S.reg[GC_BASE0 + regSDMA0_QUEUE0_DOORBELL] & SDMA0_QUEUE0_DOORBELL__ENABLE_MASK);
+            CHECK(((S.reg[GC_BASE0 + regSDMA0_QUEUE0_DOORBELL_OFFSET] & SDMA0_QUEUE0_DOORBELL_OFFSET__OFFSET_MASK) >> 2) == sd.doorbell);
+            {
+                uint32_t s2a = smn_val(regS2A_DOORBELL_ENTRY_2_CTRL);
+                CHECK(s2a & S2A_DOORBELL_ENTRY_2_CTRL__S2A_DOORBELL_PORT2_ENABLE_MASK);
+                CHECK(((s2a & S2A_DOORBELL_ENTRY_2_CTRL__S2A_DOORBELL_PORT2_RANGE_OFFSET_MASK) >>
+                       S2A_DOORBELL_ENTRY_2_CTRL__S2A_DOORBELL_PORT2_RANGE_OFFSET__SHIFT) == sd.doorbell);
+                CHECK(((s2a & S2A_DOORBELL_ENTRY_2_CTRL__S2A_DOORBELL_PORT2_RANGE_SIZE_MASK) >>
+                       S2A_DOORBELL_ENTRY_2_CTRL__S2A_DOORBELL_PORT2_RANGE_SIZE__SHIFT) == 40);
+            }
+            CHECK(S.db_writes >= 1 && S.db_last_index == sd.doorbell && S.db_unclaimed == 0);
             CHECK(S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_BASE] == (uint32_t)(rdna3_vram_mc(&dev, sd.ring) >> 8));
             CHECK(S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_CNTL] & SDMA0_QUEUE0_RB_CNTL__RPTR_WRITEBACK_ENABLE_MASK);
             src = rdna3_vram_alloc(&dev, 8192, 4096, "sdma-test-src");
@@ -933,6 +1182,15 @@ static void run(const char *fwdir)
             S.reg[GCR(regRLC_RLCS_BOOTLOAD_STATUS)] = RLC_RLCS_BOOTLOAD_STATUS__BOOTLOAD_COMPLETE_MASK;
             CHECK(gfx11_hw_init(&dev, &gmc, &gr, &rs, 8192) == RDNA3_OK && gr.ready);
             CHECK(gmc.gfxhub_enabled);
+            /* gfx ring 0 through its doorbell; GC doorbell ranges and the
+             * S2A entries 0/3 (nbio_v4_3_gc_doorbell_init) programmed */
+            CHECK(gr.use_doorbell && gr.doorbell == RD_DB_INDEX(RD_DB_GFX_RING0));
+            CHECK(S.reg[GCR(regCP_RB_DOORBELL_CONTROL)] & CP_RB_DOORBELL_CONTROL__DOORBELL_EN_MASK);
+            CHECK(((S.reg[GCR(regCP_RB_DOORBELL_CONTROL)] & CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == gr.doorbell);
+            CHECK(S.reg[GCR(regCP_RB_DOORBELL_RANGE_LOWER)] == (RD_DB_INDEX(RD_DB_GFX_RING0) << 2));
+            CHECK(S.reg[GCR(regCP_MEC_DOORBELL_RANGE_UPPER)] == (RD_DB_INDEX(RD_DB_USERQUEUE_END) << 2));
+            CHECK(smn_val(regS2A_DOORBELL_ENTRY_0_CTRL) == 0x30000007u && smn_val(regS2A_DOORBELL_ENTRY_3_CTRL) == 0x3000000du);
+            CHECK(S.db_last_index == gr.doorbell && S.db_unclaimed == 0);
             CHECK(S.reg[GCR(regCP_ME_PRGRM_CNTR_START)] == ((0x3u << 30) | (0x2000 >> 2)));
             CHECK(S.reg[GCR(regCP_MEC_RS64_PRGRM_CNTR_START_HI)] == 0);
             CHECK(S.reg[0xC000 + 0x40] == 0xDEADBEEF);       /* SCRATCH_REG0 via SET_UCONFIG_REG */
@@ -1039,6 +1297,55 @@ static void run(const char *fwdir)
                 }
                 CHECK(gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK && S.cp_bad == 0 &&
                       S.cp_wait_stuck == 0 && gfx11_ring_space(&dev, &gr) == gr.buf_mask);
+
+                /* KIQ (MEC1 pipe 1 queue 0) through its HQD registers, then
+                 * KCQ0 (pipe 0 queue 0) mapped by the KIQ's MAP_QUEUES; a
+                 * compute job runs the same IB through the page tables */
+                {
+                    uint32_t ibs0 = S.cp_ibs, tlb0 = S.ring_tlb_flushes, sync0 = S.cp_pfp_sync, acq0 = S.cp_acquire;
+                    uint32_t fault0 = S.cp_ib_fault;   /* the gfx test faulted one IB on purpose */
+                    struct hqd *hk = &S.hqd[RD_KIQ_PIPE][0], *hc = &S.hqd[RD_KCQ0_PIPE][0];
+                    CHECK(gfx11_mec_ring_init(&dev, &kiq, 1, RD_KIQ_PIPE, 0, RD_DB_KIQ, 0) == RDNA3_OK);
+                    CHECK(gfx11_mec_ring_init(&dev, &kcq, 0, RD_KCQ0_PIPE, 0, RD_DB_MEC_RING0, 0) == RDNA3_OK);
+                    CHECK(kiq.rb.kind == RD_RING_KIQ && kcq.rb.kind == RD_RING_COMPUTE && kcq.rb.doorbell == 6);
+                    CHECK(gfx11_kcq_start(&dev, &kiq, &kcq) == RDNA3_EINVAL);   /* KIQ first */
+                    CHECK(gfx11_kiq_start(&dev, &kiq) == RDNA3_OK && kiq.rb.ready);
+                    CHECK((S.reg[GCR(regRLC_CP_SCHEDULERS)] & 0xff) == (0x80 | (1u << 5) | (RD_KIQ_PIPE << 3)));
+                    CHECK(!(S.reg[GCR(regCP_MEC_RS64_CNTL)] & CP_MEC_RS64_CNTL__MEC_HALT_MASK));
+                    CHECK(S.reg[GCR(regCP_MEC_RS64_CNTL)] & CP_MEC_RS64_CNTL__MEC_PIPE0_ACTIVE_MASK);
+                    CHECK(HQD(hk, regCP_HQD_ACTIVE) == 1 && !hk->mapped_by_kiq);
+                    CHECK(HQD(hk, regCP_HQD_PQ_BASE) == (uint32_t)(rdna3_vram_mc(&dev, kiq.rb.ring) >> 8));
+                    CHECK(((HQD(hk, regCP_HQD_PQ_DOORBELL_CONTROL) & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == kiq.rb.doorbell);
+                    CHECK(HQD(hk, regCP_MQD_BASE_ADDR) == (uint32_t)rdna3_vram_mc(&dev, kiq.mqd));
+                    CHECK(S.reg[GCR(regGRBM_GFX_CNTL)] == 0);   /* selection restored */
+                    CHECK(S.reg[0xC000 + 0x40] == 0xDEADBEEF && S.cp_bad == 0 && S.mec_runs == 1);
+                    CHECK(gfx11_kcq_start(&dev, &kiq, &kcq) == RDNA3_OK && kcq.rb.ready && kcq.mapped);
+                    CHECK(S.kiq_maps == 1 && S.set_resources_mask == 1ull && S.mec_bad_queue == 0);
+                    CHECK(HQD(hc, regCP_HQD_ACTIVE) == 1 && hc->mapped_by_kiq);
+                    CHECK(HQD(hc, regCP_HQD_PQ_BASE) == (uint32_t)(rdna3_vram_mc(&dev, kcq.rb.ring) >> 8));
+                    CHECK(((HQD(hc, regCP_HQD_PQ_CONTROL) & CP_HQD_PQ_CONTROL__QUEUE_SIZE_MASK)) == 9);   /* 1024 dw */
+                    CHECK(HQD(hc, regCP_HQD_PQ_CONTROL) & CP_HQD_PQ_CONTROL__KMD_QUEUE_MASK);
+                    CHECK(S.cp_bad == 0 && S.db_unclaimed == 0);
+                    /* the compute job */
+                    rdna3_vram_fill(&dev, dst, 0, 4096);
+                    S.reg[scratch] = 0;
+                    jobs[0].va = ibva; jobs[0].ndw = n;
+                    seq = gfx11_submit_compute_job(&dev, &kcq, 0xC0FFEE, 5, gpuvm_pd_addr(&dev, &vm), jobs, 1);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &kcq.rb, seq) == RDNA3_OK);
+                    rdna3_vram_read(&dev, dst, &got, 4);
+                    CHECK(got == 0xFACEFEED && S.reg[scratch] == 0x5EED1234);
+                    CHECK(S.cp_ibs == ibs0 + 1 && S.cp_last_ib_vmid == 5 && S.cp_ib_fault == fault0);
+                    CHECK(S.ring_tlb_flushes == tlb0 + 1 && S.cp_pfp_sync == sync0 /* no PFP on MEC */);
+                    CHECK(S.cp_acquire == acq0 + 1 && S.cp_bad == 0 && S.cp_wait_stuck == 0);
+                    CHECK(gfx11_submit_compute_job(&dev, &kcq, 1, 16, 0, jobs, 1) == 0);
+                    CHECK(gfx11_submit_compute_job(&dev, &kcq, 1, 5, 0, jobs, 0) == 0);
+                    for (uint32_t k = 0; k < 200; k++) {   /* wraps the 4 KiB queue */
+                        seq = gfx11_submit_compute_job(&dev, &kcq, k, 5, 0, jobs, 1);
+                        CHECK(seq != 0);
+                    }
+                    CHECK(gfx11_wait_fence(&dev, &kcq.rb, seq) == RDNA3_OK && S.cp_bad == 0 &&
+                          gfx11_ring_space(&dev, &kcq.rb) == kcq.rb.buf_mask);
+                }
                 gpuvm_vm_fini(&dev, &vm);
             }
         }
@@ -1087,6 +1394,24 @@ static void run(const char *fwdir)
                 uint32_t n = ih60_process(&dev, &ih2, sim_iv_cb, &seen);
                 CHECK(n == (gr.ready ? 2u : 1u) && seen.n == n);
             }
+            /* compute: RELEASE_MEM on KCQ0 behind CP_ME1_PIPE0_INT_CNTL,
+             * ring_id names me 1 pipe 0 queue 0 */
+            if (kcq.rb.ready) {
+                uint32_t dw[8]; rdna3_iv iv; uint32_t ivs1 = S.ih_ivs, off = (gr.ready ? 2u : 1u) * RD_IH_IV_SIZE;
+                seq = gfx11_emit_fence(&dev, &kcq.rb);
+                gfx11_commit(&dev, &kcq.rb);
+                CHECK(gfx11_wait_fence(&dev, &kcq.rb, seq) == RDNA3_OK && S.ih_ivs == ivs1);
+                gfx11_set_eop_interrupt(&dev, &kcq.rb, 1);
+                CHECK(S.reg[GCR(regCP_ME1_PIPE0_INT_CNTL)] & CP_ME1_PIPE0_INT_CNTL__TIME_STAMP_INT_ENABLE_MASK);
+                seq = gfx11_emit_fence(&dev, &kcq.rb);
+                gfx11_commit(&dev, &kcq.rb);
+                CHECK(gfx11_wait_fence(&dev, &kcq.rb, seq) == RDNA3_OK && S.ih_ivs == ivs1 + 1);
+                CHECK(ih60_process(&dev, &ih2, NULL, NULL) == 1);
+                memcpy(dw, S.vram + ih2.ring + off, 32);
+                ih60_decode_iv(dw, &iv);
+                CHECK(iv.ring_id == 0x04 && ih60_iv_fence(&iv) == RD_IH_FENCE_COMPUTE0);
+                gfx11_set_eop_interrupt(&dev, &kcq.rb, 0);
+            }
             /* decode what was queued, in order, straight from the ring */
             for (uint32_t off = 0; off < 2 * RD_IH_IV_SIZE; off += RD_IH_IV_SIZE) {
                 uint32_t dw[8]; rdna3_iv iv;
@@ -1119,6 +1444,12 @@ static void run(const char *fwdir)
             CHECK(ih60_process(&dev, &ih2, NULL, NULL) > 0 && ih2.overflows == 1);
             sdma60_stop(&dev, &sd2);
             gfx11_set_eop_interrupt(&dev, &gr, 0);
+            /* UNMAP_QUEUES through the KIQ, then the MEC halts */
+            gfx11_mec_stop(&dev, &kiq, &kcq);
+            CHECK(S.kiq_unmaps == 1 && !kcq.mapped && !kcq.rb.ready && !kiq.rb.ready);
+            CHECK(HQD(&S.hqd[RD_KCQ0_PIPE][0], regCP_HQD_ACTIVE) == 0);
+            CHECK(S.reg[GCR(regCP_MEC_RS64_CNTL)] & CP_MEC_RS64_CNTL__MEC_HALT_MASK);
+            CHECK(S.mec_bad_queue == 0 && S.cp_bad == 0);
             ih60_disable(&dev, &ih2);
             (void)fences;
         }

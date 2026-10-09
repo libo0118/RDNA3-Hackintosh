@@ -67,6 +67,7 @@ uint32_t ih60_process(rdna3_dev *d, rdna3_ih *ih, rdna3_iv_cb cb, void *ctx);
 #define RD_IH_SRC_SDMA_TRAP       49
 #define RD_IH_FENCE_GFX           1u
 #define RD_IH_FENCE_SDMA0         2u
+#define RD_IH_FENCE_COMPUTE0      3u   /* MEC1 pipe 0 queue 0 (the first KCQ) */
 /* which kernel ring's fence an IV reports (RD_IH_FENCE_*), 0 if none */
 uint32_t ih60_iv_fence(const rdna3_iv *iv);
 

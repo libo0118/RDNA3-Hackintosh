@@ -8,10 +8,12 @@
  *   ring test (SET_UCONFIG_REG SCRATCH_REG0)
  *
  * Like amdgpu with amdgpu_mes=0 and amdgpu_async_gfx_ring=0: the gfx ring
- * is programmed through CP_RB0_* registers, no MES, no KIQ (compute queues
- * need KIQ/MES and come later). Ring, rptr writeback, wptr poll slot,
- * fence slot and the clear-state buffer live in VRAM (MC addresses); the
- * write pointer goes through CP_RB0_WPTR (no doorbell yet).
+ * is programmed through CP_RB0_* registers, no MES; compute queues are
+ * MEC HQDs mapped by the KIQ (gfx_v11_0_kiq_*, MAP_QUEUES). Ring, rptr
+ * writeback, wptr poll slot, fence slot, MQDs and the clear-state buffer
+ * live in VRAM (MC addresses); the write pointer goes through the doorbell
+ * when the aperture is up (doorbell.h), else CP_RB0_WPTR (gfx only: a MEC
+ * queue needs its doorbell).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -42,6 +44,10 @@ extern "C" {
 #define PACKET3_SET_CONTEXT_REG    0x69
 #define PACKET3_SET_CONTEXT_REG_START 0x0000a000
 #define PACKET3_SET_UCONFIG_REG    0x79
+#define PACKET3_SET_RESOURCES      0xA0
+#define PACKET3_MAP_QUEUES         0xA2
+#define PACKET3_UNMAP_QUEUES       0xA3
+#define INDIRECT_BUFFER_VALID      (1u << 23)
 #define PACKET3_SET_UCONFIG_REG_START 0x0000c000
 #define WRITE_DATA_DST_SEL(x)      ((uint32_t)(x) << 8)
 #define WR_CONFIRM                 (1u << 20)
@@ -63,7 +69,14 @@ typedef struct rdna3_rs64_start {
     uint32_t pfp_lo, pfp_hi, me_lo, me_hi, mec_lo, mec_hi;
 } rdna3_rs64_start;
 
+/* which CP engine runs the ring: packet flavours differ (emit_wreg's
+ * ENGINE_SEL, PFP sync, HDP flush mask) */
+enum { RD_RING_GFX = 0, RD_RING_COMPUTE = 1, RD_RING_KIQ = 2 };
+
 typedef struct rdna3_gfx_ring {
+    uint32_t kind, pipe;    /* RD_RING_*; pipe for the HDP flush mask */
+    int      use_doorbell;
+    uint32_t doorbell;      /* RD_DB_INDEX(...) */
     uint64_t ring;          /* VRAM offsets */
     uint64_t wb;            /* 4 KiB: rptr @0, wptr poll @8, fence @16, test @24 */
     uint64_t csb;           /* clear-state buffer */
@@ -141,6 +154,41 @@ int  gfx11_wait_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq);
  * its contents (gfx_v11_0_get_csb_buffer); exposed for tests */
 uint32_t gfx11_csb_size(void);
 uint32_t gfx11_csb_fill(uint32_t *buf, uint32_t max_dw);
+
+/* ---- MEC queues: the KIQ and kernel compute queues (KCQ) ----
+ * A MEC queue is an HQD (me 1, pipe, queue) described by a v11_compute_mqd
+ * in VRAM; the KIQ is set up through its registers (gfx_v11_0_kiq_init_
+ * register), every other queue by the KIQ's MAP_QUEUES packet. Both need
+ * doorbells (gfx_v11_0_ring_set_wptr_compute). */
+#define RD_MQD_DWORDS   512          /* sizeof(struct v11_compute_mqd) / 4 */
+#define RD_MEC_HPD_SIZE 2048         /* GFX11_MEC_HPD_SIZE: EOP buffer per queue */
+
+typedef struct rdna3_mec_ring {
+    rdna3_gfx_ring rb;      /* kind COMPUTE or KIQ */
+    uint32_t me, pipe, queue;
+    uint64_t mqd, eop;      /* VRAM offsets */
+    int      mapped;        /* HQD active (KIQ) / mapped by the KIQ (KCQ) */
+} rdna3_mec_ring;
+
+/* amdgpu_gfx_kiq_acquire / amdgpu_gfx_compute_queue_acquire for one MEC
+ * with 4 pipes x 4 queues: the KIQ is pipe 1 queue 0, KCQ0 pipe 0 queue 0 */
+#define RD_KIQ_PIPE  1
+#define RD_KCQ0_PIPE 0
+
+/* allocate ring, writeback, MQD and EOP; 'kiq' selects RD_RING_KIQ */
+int  gfx11_mec_ring_init(rdna3_dev *d, rdna3_mec_ring *r, int kiq, uint32_t pipe, uint32_t queue,
+                         uint32_t doorbell_assignment, uint32_t ring_size);
+/* gfx_v11_0_cp_compute_enable + kiq_resume: KIQ HQD programmed, ring test */
+int  gfx11_kiq_start(rdna3_dev *d, rdna3_mec_ring *kiq);
+/* gfx_v11_0_kcq_resume + amdgpu_gfx_enable_kcq: MQD, SET_RESOURCES and
+ * MAP_QUEUES on the KIQ, then the KCQ ring test */
+int  gfx11_kcq_start(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq);
+/* amdgpu_gfx_disable_kcq (UNMAP_QUEUES) + cp_compute_enable(false) */
+void gfx11_mec_stop(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq);
+/* compute job: VM flush, ACQUIRE_MEM, HDP flush, IBs, fence (no PFP, no
+ * frame control); returns the fence seq, 0 on error */
+uint32_t gfx11_submit_compute_job(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t ctx, uint32_t vmid,
+                                  uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n);
 
 #ifdef __cplusplus
 }
