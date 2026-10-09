@@ -64,13 +64,17 @@ Cel: modesetting, EDID, wiele monitorów, hotplug, zmiana rozdzielczości.
 * Zostaje: reset pojedynczej kolejki przez MES (`RESET_QUEUE`), gdy MES
   dojdzie; soft reset SDMA; `drop fDrmLock` w czasie czekania.
 
-## 6. UAPI dla RADV na serio
-* Timeline syncobj, `AMDGPU_CTX` z priorytetami, `BO_LIST`, chunki CS,
-  `AMDGPU_INFO` kompletny względem `radv_physical_device`.
-* PRIME/IOSurface: eksport/import BO jako IOSurface (wspólne z akceleratorem,
-  `rdna3SurfShare`), USERPTR przez `IOMemoryDescriptor::withAddressRange`.
-* Test end-to-end na hoście: `vulkaninfo` i proste testy dEQP przez
-  loopback (symulator wykonuje IB SDMA; GFX tylko pakiety, bez shaderów).
+## 6. 🟡 UAPI dla RADV na serio
+* ✅ Timeline syncobj, `SYNCOBJ_TRANSFER`, syncobj-fd w procesie
+  (`drm_xnu`), `AMDGPU_CTX` z priorytetami i stanem resetu, `BO_LIST`,
+  chunki CS (user fence pomijany — RADV go nie czyta), `AMDGPU_INFO`
+  z `SENSOR` (metryki SMU) i `GPUVM_FAULT`, `GEM_USERPTR` przez
+  `IOMemoryDescriptor::withAddressRange`.
+* ✅ `vulkaninfo` na runnerze macOS bez karty: `libdrm_loopback.dylib`
+  w jobie `radv-macos` (uruchomienie `full: true`).
+* Zostaje: PRIME/IOSurface (eksport/import BO, wspólne z akceleratorem),
+  syncobj-fd między procesami, dEQP compute przez loopback (potrzebuje
+  wykonywania shaderów — dopiero na karcie).
 
 ## 7. Ścieżka WindowServer / Metal
 * Akcelerator: powierzchnie IOSurface w VRAM, kompozycja przez flipy

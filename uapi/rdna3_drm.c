@@ -411,6 +411,26 @@ static int syncobj_for_each(rdna3_drm_file *f, uint64_t handles_ptr, uint32_t co
     return 0;
 }
 
+/* drm_syncobj_transfer_ioctl: copy the fence of (src, src_point) into
+ * (dst, dst_point). Syncobjs are per file here, so this is a snapshot, not
+ * a shared object: what a sync_file export/import pair does on Linux. */
+static int syncobj_transfer(rdna3_drm_file *f, struct drm_syncobj_transfer *t)
+{
+    rdna3_syncobj *src = sobj(f, t->src_handle), *dst = sobj(f, t->dst_handle);
+    if (!src || !dst)
+        return -RD_ENOENT;
+    if (t->flags & ~DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT)
+        return -RD_EINVAL;
+    if (t->src_point && src->point < t->src_point)
+        return -RD_EINVAL;   /* that point was never submitted */
+    dst->signaled = sobj_signaled(f->dev, src) ? 1 : src->signaled;
+    dst->has_fence = src->has_fence && !dst->signaled;
+    dst->fence = src->fence;
+    if (t->dst_point)
+        dst->point = t->dst_point;
+    return 0;
+}
+
 /* ------------------------------ CS ------------------------------ */
 
 static int ring_ok(rdna3_drm_device *dev, uint32_t ip, uint32_t ring)
@@ -711,13 +731,58 @@ static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
     return 0;
 }
 
+/* amdgpu_gem_userptr_ioctl: a BO over the client's own pages */
+static int gem_userptr(rdna3_drm_file *f, struct drm_amdgpu_gem_userptr *a)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_bo *bo;
+    uint32_t handle = 0;
+    int r;
+
+    if (a->flags & ~(uint32_t)(AMDGPU_GEM_USERPTR_READONLY | AMDGPU_GEM_USERPTR_ANONONLY |
+                               AMDGPU_GEM_USERPTR_VALIDATE | AMDGPU_GEM_USERPTR_REGISTER))
+        return -RD_EINVAL;
+    /* reject unknown flags and no-op combinations like amdgpu */
+    if (!(a->flags & AMDGPU_GEM_USERPTR_READONLY) && !(a->flags & AMDGPU_GEM_USERPTR_REGISTER))
+        return -RD_EACCES;
+    if (!a->size || (a->addr & 4095) || (a->size & 4095) || a->size > dev->gtt_size)
+        return -RD_EINVAL;
+    if (!dev->ops.bo_userptr)
+        return -RD_ENOSYS;
+
+    bo = (rdna3_bo *)dev->ops.zalloc(dev->ops.ctx, sizeof(*bo));
+    if (!bo)
+        return -RD_ENOMEM;
+    bo->refcnt = 1;
+    bo->size = a->size;
+    bo->alignment = 4096;
+    bo->domains = AMDGPU_GEM_DOMAIN_GTT;
+    bo->placement = AMDGPU_GEM_DOMAIN_GTT;
+    bo->flags = (a->flags & AMDGPU_GEM_USERPTR_READONLY) ? AMDGPU_GEM_CREATE_NO_CPU_ACCESS : 0;
+    bo->userptr = 1;
+    bo->user_addr = a->addr;
+    r = dev->ops.bo_userptr(dev->ops.ctx, f->os, bo, a->addr, a->flags);
+    if (r) {
+        dev->ops.free(dev->ops.ctx, bo, sizeof(*bo));
+        return r;
+    }
+    dev->gtt_usage += bo->size;
+    r = handle_alloc(f, bo, &handle);
+    if (r) {
+        bo_put(f, bo);
+        return r;
+    }
+    a->handle = handle;
+    return 0;
+}
+
 static int gem_mmap(rdna3_drm_file *f, union drm_amdgpu_gem_mmap *m)
 {
     rdna3_bo *bo = rdna3_drm_bo_lookup(f, m->in.handle);
     if (!bo)
         return -RD_ENOENT;
-    if (bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS)
-        return -RD_EPERM;
+    if ((bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) || bo->userptr)
+        return -RD_EPERM;   /* amdgpu: userptr BOs are never mmap()ed */
     m->out.addr_ptr = bo->mmap_offset;
     return 0;
 }
@@ -1008,7 +1073,27 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         }
         return info_out(f, in, vals, n * 4);
     }
-    case AMDGPU_INFO_SENSOR:
+    case AMDGPU_INFO_SENSOR: {
+        /* amdgpu_dpm_read_sensor through the OS (SMU metrics) */
+        uint32_t v = 0;
+        if (!dev->ops.sensor || dev->ops.sensor(dev->ops.ctx, in->sensor_info.type, &v))
+            return -RD_EINVAL;
+        return info_out(f, in, &v, 4);
+    }
+    case AMDGPU_INFO_GPUVM_FAULT: {
+        /* amdgpu_vm_update_fault_cache: the last fault of this client's VM */
+        struct drm_amdgpu_info_gpuvm_fault gf;
+        uint64_t addr = 0;
+        uint32_t status = 0, hub = 0;
+        zero(&gf, sizeof(gf));
+        if (dev->ops.vm_fault_info && f->vm &&
+            !dev->ops.vm_fault_info(dev->ops.ctx, f->vm, &addr, &status, &hub)) {
+            gf.addr = addr;
+            gf.status = status;
+            gf.vmhub = hub;
+        }
+        return info_out(f, in, &gf, sizeof(gf));
+    }
     case AMDGPU_INFO_VBIOS:
     case AMDGPU_INFO_GDS_CONFIG:
     default:
@@ -1138,12 +1223,14 @@ int rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
         }
         return (op == AMDGPU_BO_LIST_OP_DESTROY || op == AMDGPU_BO_LIST_OP_UPDATE) ? 0 : -RD_EINVAL;
     }
-    case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR):   /* TODO(stage4): wire memory */
+    case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR): NEED(struct drm_amdgpu_gem_userptr);
+        return gem_userptr(f, (struct drm_amdgpu_gem_userptr *)data);
+    case RD_NR_SYNCOBJ_TRANSFER: NEED(struct drm_syncobj_transfer);
+        return syncobj_transfer(f, (struct drm_syncobj_transfer *)data);
     case RD_NR_PRIME_HANDLE_TO_FD:               /* TODO(stage4): IOSurface sharing */
     case RD_NR_PRIME_FD_TO_HANDLE:
-    case RD_NR_SYNCOBJ_HANDLE_TO_FD:
+    case RD_NR_SYNCOBJ_HANDLE_TO_FD:             /* fds are the libdrm_xnu layer's (drm_xnu.c) */
     case RD_NR_SYNCOBJ_FD_TO_HANDLE:
-    case RD_NR_SYNCOBJ_TRANSFER:
         return -RD_ENOSYS;
     default:
         return -RD_EINVAL;
@@ -1162,6 +1249,8 @@ const char *rdna3_drm_ioctl_name(uint32_t nr)
     case RD_NR_SYNCOBJ_WAIT: return "SYNCOBJ_WAIT";
     case RD_NR_SYNCOBJ_RESET: return "SYNCOBJ_RESET";
     case RD_NR_SYNCOBJ_SIGNAL: return "SYNCOBJ_SIGNAL";
+    case RD_NR_SYNCOBJ_TRANSFER: return "SYNCOBJ_TRANSFER";
+    case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR): return "AMDGPU_GEM_USERPTR";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE): return "AMDGPU_GEM_CREATE";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP): return "AMDGPU_GEM_MMAP";
     case RD_NR_AMDGPU(DRM_AMDGPU_CTX): return "AMDGPU_CTX";

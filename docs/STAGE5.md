@@ -30,6 +30,16 @@ czyta `nm -m`: symbol „dynamically looked up” nie ma właściciela. Słabe
 pusta. SPIRV-Tools są wyłączone (`-Dspirv-tools=disabled`): tylko dla
 zrzutów debug, a ich symbole nie trafiały do linkowania.
 
+## vulkaninfo bez karty
+
+Job `radv-macos` po zbudowaniu RADV podmienia `libdrm.2.dylib` na
+`libdrm_loopback.dylib` (`make -C userspace loopback`: ten sam rdzeń libdrm na
+`uapi/rdna3_drm.c` w procesie, backend loopback z programowym SDMA) i uruchamia
+`vulkaninfo --summary` (loader i narzędzia z brew). To end-to-end test UAPI
+bez kextu: `radv_physical_device` pyta o wszystko, czego potrzebuje
+(DEV_INFO, HW_IP_INFO, FW_VERSION, MEMORY, SENSOR, GPUVM_FAULT, syncobj).
+Log w artefakcie `radv-macos-logs/vulkaninfo.log`.
+
 ## Dalej
 
 1. `vulkaninfo` na Macu z kextem na

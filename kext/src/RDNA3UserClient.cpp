@@ -34,6 +34,7 @@ bool RDNA3UserClient::start(IOService *provider)
         fFile = nullptr;
         return false;
     }
+    fFile->os = fTask;   /* GEM_USERPTR wires pages of this task */
     fOpen = true;
     return true;
 }

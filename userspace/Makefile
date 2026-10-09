@@ -19,8 +19,25 @@ CORE_OBJS := $(BUILD)/obj/drm_xnu.o $(BUILD)/obj/xf86drm_xnu.o $(BUILD)/obj/back
 AMD_SRC   := $(wildcard $(LIBDRM)/amdgpu/*.c)
 AMD_OBJS  := $(patsubst $(LIBDRM)/amdgpu/%.c,$(BUILD)/obj/amdgpu_%.o,$(AMD_SRC))
 
-.PHONY: all install clean
+.PHONY: all install clean loopback
 all: $(BUILD)/libdrm.dylib $(BUILD)/libdrm_amdgpu.dylib $(BUILD)/rdna3_drminfo install
+
+# libdrm_loopback.dylib: the same libdrm core on the in-process UAPI
+# (backend_loopback + uapi/rdna3_drm.c), for vulkaninfo / RADV runs on a Mac
+# without the kext (CI). Same install name, so it drops in for libdrm.2.dylib.
+LB_INC  := -I$(XNU) -I../uapi -I../common -I../third_party/amd
+LB_OBJS := $(BUILD)/obj/drm_xnu.o $(BUILD)/obj/xf86drm_xnu.o $(BUILD)/obj/lb_backend_loopback.o \
+           $(BUILD)/obj/lb_rdna3_drm.o $(BUILD)/obj/lb_amd_discovery.o
+loopback: $(BUILD)/libdrm_loopback.dylib
+$(BUILD)/obj/lb_backend_loopback.o: $(XNU)/backend_loopback.c | $(BUILD)/obj
+	$(CC) $(CFLAGS) $(WARN) $(LB_INC) -c $< -o $@
+$(BUILD)/obj/lb_rdna3_drm.o: ../uapi/rdna3_drm.c | $(BUILD)/obj
+	$(CC) $(CFLAGS) $(WARN) $(LB_INC) -c $< -o $@
+$(BUILD)/obj/lb_amd_discovery.o: ../common/amd_discovery.c | $(BUILD)/obj
+	$(CC) $(CFLAGS) $(WARN) $(LB_INC) -c $< -o $@
+$(BUILD)/libdrm_loopback.dylib: $(LB_OBJS)
+	$(CC) $(ARCH) -dynamiclib -install_name @rpath/libdrm.2.dylib \
+	  -current_version 2.4.134 -compatibility_version 2.0.0 -o $@ $^
 
 $(BUILD)/obj:
 	mkdir -p $@

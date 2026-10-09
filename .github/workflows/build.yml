@@ -141,6 +141,17 @@ jobs:
           python3 -m pip install --break-system-packages mako pyyaml packaging || python3 -m pip install mako pyyaml packaging
       - name: Build RADV against libdrm_xnu
         run: userspace/mesa/build_radv.sh build/mesa
+      - name: vulkaninfo on the in-process UAPI (loopback libdrm, no kext)
+        if: always()
+        run: |
+          brew install vulkan-loader vulkan-tools || true
+          make -C userspace loopback
+          cp build/userspace/libdrm_loopback.dylib build/userspace/prefix/lib/libdrm.2.dylib
+          export VK_ICD_FILENAMES="$PWD/build/mesa/install/share/vulkan/icd.d/radeon_icd.x86_64.json"
+          export VK_LOADER_DEBUG=error,warn
+          export DRM_XNU_TRACE=1
+          vulkaninfo --summary 2>&1 | tee build/mesa/vulkaninfo.log | head -120
+          grep -q "RADV" build/mesa/vulkaninfo.log && echo "RADV enumerated through the loopback UAPI" || echo "vulkaninfo did not enumerate RADV (see log)"
       - name: Error summary
         if: always()
         run: |
@@ -156,3 +167,4 @@ jobs:
             build/mesa/install/share/vulkan/icd.d
             build/mesa/missing.txt
             build/mesa/weak.txt
+            build/mesa/vulkaninfo.log

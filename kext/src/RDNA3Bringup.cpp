@@ -13,6 +13,7 @@
 #include <libkern/c++/OSString.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
+#include <mach/mach_time.h>
 #include <pexpert/pexpert.h>
 
 extern "C" {
@@ -716,6 +717,8 @@ struct RDNA3Vm {
     bool     live;       /* page tables exist */
     bool     guilty;     /* a job of this VM hung or page-faulted: no more submissions */
     uint32_t resetSeen, vramLostSeen;   /* fResetCount / fVramLostCount when created */
+    uint64_t faultAddr;  /* amdgpu_vm_update_fault_cache: last fault for AMDGPU_INFO_GPUVM_FAULT */
+    uint32_t faultStatus, faultHub;
     bool     gfxFlush;   /* next GFX job re-points the VMID and flushes from the ring */
     bool     compFlush;  /* same for the next compute job (the hub is shared, the rings are not) */
 };
@@ -746,6 +749,55 @@ uint32_t RDNA3Bringup::vmQuery(void *p)
     if (v->vramLostSeen != fVramLostCount)
         fl |= AMDGPU_CTX_QUERY2_FLAGS_RESET | AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
     return fl;
+}
+
+int RDNA3Bringup::vmFaultInfo(void *p, uint64_t *addr, uint32_t *status, uint32_t *vmhub)
+{
+    RDNA3Vm *v = (RDNA3Vm *)p;
+    if (!v)
+        return -RD_EINVAL;
+    *addr = v->faultAddr;
+    *status = v->faultStatus;
+    *vmhub = v->faultHub;
+    return 0;
+}
+
+/* amdgpu_dpm_read_sensor through smu_v13_0_7_read_sensor: the units are
+ * amdgpu's (MHz, millidegrees, %, W, mV). Called under the DRM lock once
+ * the bring-up finished, so the SMU mailbox is ours. */
+int RDNA3Bringup::sensor(uint32_t type, uint32_t *value)
+{
+    uint64_t now = mach_absolute_time(), ns = 0;
+    if (!fPmUp || !fFinished || !fSmu)
+        return -RD_EINVAL;
+    switch (type) {
+    case AMDGPU_INFO_SENSOR_STABLE_PSTATE_GFX_SCLK:
+    case AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_SCLK:
+        *value = fSmu->gfx.level[fSmu->gfx.count ? fSmu->gfx.count - 1 : 0];
+        return 0;
+    case AMDGPU_INFO_SENSOR_STABLE_PSTATE_GFX_MCLK:
+    case AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_MCLK:
+        *value = fSmu->uclk.level[fSmu->uclk.count ? fSmu->uclk.count - 1 : 0];
+        return 0;
+    default:
+        break;
+    }
+    absolutetime_to_nanoseconds(now - fMetricsAt, &ns);
+    if (!fMetricsAt || ns > 100ull * 1000 * 1000) {
+        if (smu13_read_metrics(fDev, fSmu))
+            return -RD_EIO;
+        fMetricsAt = now;
+    }
+    switch (type) {
+    case AMDGPU_INFO_SENSOR_GFX_SCLK:     *value = smu13_metric_gfxclk_mhz(fSmu); return 0;
+    case AMDGPU_INFO_SENSOR_GFX_MCLK:     *value = smu13_metric_uclk_mhz(fSmu); return 0;
+    case AMDGPU_INFO_SENSOR_GPU_TEMP:     *value = smu13_metric_temp_edge_c(fSmu) * 1000; return 0;
+    case AMDGPU_INFO_SENSOR_GPU_LOAD:     *value = smu13_metric_gfx_activity(fSmu); return 0;
+    case AMDGPU_INFO_SENSOR_GPU_AVG_POWER: *value = smu13_metric_power_w(fSmu); return 0;
+    case AMDGPU_INFO_SENSOR_VDDGFX:       *value = smu13_metric_vddgfx_mv(fSmu); return 0;
+    default:
+        return -RD_EINVAL;
+    }
 }
 
 /* amdgpu_fence_driver_force_completion on every kernel ring: the last
@@ -1126,6 +1178,11 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
         gmc11_decode_vm_fault(b->fDev, iv, &f);
         gmc11_log_vm_fault(b->fDev, &f);
         b->fVmFaults++;
+        if (f.vmid < 16 && b->fVmByVmid[f.vmid]) {
+            b->fVmByVmid[f.vmid]->faultAddr = f.addr;
+            b->fVmByVmid[f.vmid]->faultStatus = f.status;
+            b->fVmByVmid[f.vmid]->faultHub = f.hub ? AMDGPU_VMHUB_TYPE_MM0 : AMDGPU_VMHUB_TYPE_GFX;
+        }
         b->markGuilty(f.vmid, f.hub ? "MMHUB page fault" : "GFXHUB page fault");
         b->publish("RDNA3,VMFaults", b->fVmFaults);
         b->publish("RDNA3,LastFaultAddr", f.addr);

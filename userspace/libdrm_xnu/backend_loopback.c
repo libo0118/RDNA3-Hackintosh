@@ -24,7 +24,38 @@ static int lb_bo_alloc(void *c, rdna3_bo *bo)
     bo->backing = mmap(NULL, (size_t)bo->size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     return bo->backing == MAP_FAILED ? (bo->backing = NULL, -RD_ENOMEM) : 0;
 }
-static void lb_bo_free(void *c, rdna3_bo *bo) { (void)c; munmap(bo->backing, (size_t)bo->size); }
+static void lb_bo_free(void *c, rdna3_bo *bo)
+{
+    (void)c;
+    if (!bo->userptr)   /* a userptr BO's pages are the client's */
+        munmap(bo->backing, (size_t)bo->size);
+}
+/* GEM_USERPTR: in one process the client's pages are already ours */
+static int lb_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32_t flags)
+{
+    (void)c; (void)os; (void)flags;
+    bo->backing = (void *)(uintptr_t)uaddr;
+    return 0;
+}
+/* AMDGPU_INFO_SENSOR: what a quiet card reports (RADV's winsys asks for
+ * temperature and clocks at creation) */
+static int lb_sensor(void *c, uint32_t type, uint32_t *v)
+{
+    (void)c;
+    switch (type) {
+    case AMDGPU_INFO_SENSOR_GFX_SCLK: *v = 500; return 0;
+    case AMDGPU_INFO_SENSOR_GFX_MCLK: *v = 96; return 0;
+    case AMDGPU_INFO_SENSOR_GPU_TEMP: *v = 35000; return 0;
+    case AMDGPU_INFO_SENSOR_GPU_LOAD: *v = 0; return 0;
+    case AMDGPU_INFO_SENSOR_GPU_AVG_POWER: *v = 12; return 0;
+    case AMDGPU_INFO_SENSOR_VDDGFX: *v = 650; return 0;
+    case AMDGPU_INFO_SENSOR_STABLE_PSTATE_GFX_SCLK:
+    case AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_SCLK: *v = 2124; return 0;
+    case AMDGPU_INFO_SENSOR_STABLE_PSTATE_GFX_MCLK:
+    case AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_MCLK: *v = 1218; return 0;
+    default: return -RD_EINVAL;
+    }
+}
 static int lb_copyin(void *c, void *d, uint64_t u, size_t n) { (void)c; memcpy(d, (void *)(uintptr_t)u, n); return 0; }
 static int lb_copyout(void *c, uint64_t u, const void *s, size_t n) { (void)c; memcpy((void *)(uintptr_t)u, s, n); return 0; }
 
@@ -152,7 +183,8 @@ static void dev_init(void)
 {
     rdna3_drm_ops ops = { NULL, lb_zalloc, lb_free, lb_bo_alloc, lb_bo_free, lb_copyin, lb_copyout, NULL, NULL,
                           lb_vm_create, lb_vm_destroy, lb_vm_map, lb_vm_unmap,
-                          lb_submit, lb_signaled, lb_wait, NULL };
+                          lb_submit, lb_signaled, lb_wait, NULL,
+                          lb_bo_userptr, lb_sensor, NULL };
     amd_discovery disc;
     if (g_dev_ready)
         return;

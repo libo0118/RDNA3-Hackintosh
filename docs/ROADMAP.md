@@ -8,7 +8,7 @@ Legenda: ✅ zrobione · 🟡 w toku · ⬜ nie zaczęte
 | 1 | Kext rozpoznaje kartę, mapuje BAR, czyta rejestry i discovery | 🟡 kod + testy gotowe ([STAGE1](STAGE1.md)); czeka na test na sprzęcie |
 | 2 | Bring-up | 🟡 PSP + firmware + SMU, GMC (GART, MMHUB, GFXHUB), IH 6.0, GPUVM, SDMA 6.0, ring GFX 11 — w symulatorze ([STAGE2](STAGE2.md)); poziomy `rdna3lvl` 4–8; doorbelle, KIQ + KCQ0, MSI (`rdna3msi=1`), SMU PM (PPTable, DPM GFXCLK/SOCCLK, throttlery, wentylator, metryki; `rdna3pm`), zawieszenia → soft recovery / soft reset GFX / reset mode-1, VM fault → guilty ctx; MES, BACO/sleep do zrobienia |
 | 3 | Wyświetlanie: DCN 3.2.1, IOFramebuffer | 🟡 przejęcie trybu z GOP, flipy, VBL z licznika klatek, CRC w symulatorze; `RDNA3Framebuffer.kext` z NVRMFB ([STAGE3](STAGE3.md)); modesetting/EDID ⬜ |
-| 4 | IOUserClient implementujący **UAPI amdgpu** | 🟡 CS na ringach DMA/GFX, fence'y, syncobj, GPUVM ([STAGE4](STAGE4.md)); niezmienione libdrm_amdgpu wysyła CS end-to-end na hoście; PRIME/USERPTR do zrobienia |
+| 4 | IOUserClient implementujący **UAPI amdgpu** | 🟡 CS na ringach DMA/GFX/COMPUTE, fence'y, syncobj (+TRANSFER, fd w procesie), GPUVM, USERPTR, SENSOR, GPUVM_FAULT, stan resetu ctx ([STAGE4](STAGE4.md)); niezmienione libdrm_amdgpu wysyła CS end-to-end na hoście; PRIME/IOSurface do zrobienia |
 | 5 | Vulkan: RADV z istniejącym winsysem amdgpu | 🟡 `libvulkan_radeon.dylib` buduje się i linkuje na macOS w CI z 3 łatkami ([STAGE5](STAGE5.md)) |
 | 6 | Metal: wtyczka + tłumacz z NullMoth | 🟡 zaimportowane, przystosowane do AMD, budują się w CI ([STAGE6](STAGE6.md)) |
 | 7 | Integracja: WindowServer, CA, PM, sleep | 🟡 akcelerator IOAcceleratorFamily2 przeniesiony z NullMoth, buduje się w CI ([STAGE7](STAGE7.md)); PM/sleep ⬜ |

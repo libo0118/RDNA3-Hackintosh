@@ -6,9 +6,11 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "amdgpu.h"
 #include "amdgpu_drm.h"
 #include "xf86drm.h"
@@ -84,6 +86,48 @@ int main(void)
         CHECK(amdgpu_bo_free(bo) == 0);
     }
 
+    /* syncobj "fds" (drm_xnu's process-local table): a sync_file export is a
+     * snapshot, an opaque export is the same object, transfer copies points */
+    {
+        uint32_t a = 0, b = 0, c = 0;
+        int sfd = -1, ofd = -1;
+        CHECK(amdgpu_cs_create_syncobj2(dev, 0, &a) == 0 && amdgpu_cs_create_syncobj2(dev, 0, &b) == 0);
+        CHECK(amdgpu_cs_syncobj_wait(dev, &b, 1, 0, 0, NULL) == -ETIME);
+        CHECK(amdgpu_cs_syncobj_signal(dev, &a, 1) == 0);
+        CHECK(amdgpu_cs_syncobj_export_sync_file(dev, a, &sfd) == 0 && sfd >= 0);
+        CHECK(amdgpu_cs_syncobj_import_sync_file(dev, b, sfd) == 0);
+        CHECK(amdgpu_cs_syncobj_wait(dev, &b, 1, 0, 0, NULL) == 0);
+        CHECK(amdgpu_cs_export_syncobj(dev, a, &ofd) == 0 && ofd >= 0 && ofd != sfd);
+        CHECK(amdgpu_cs_import_syncobj(dev, ofd, &c) == 0 && c == a);
+        CHECK(amdgpu_cs_syncobj_reset(dev, &b, 1) == 0);
+        CHECK(amdgpu_cs_syncobj_timeline_signal(dev, &a, (uint64_t[]){ 3 }, 1) == 0);
+        CHECK(amdgpu_cs_syncobj_transfer(dev, b, 4, a, 3, 0) == 0);
+        {
+            uint64_t pt = 0;
+            CHECK(amdgpu_cs_syncobj_query(dev, &b, &pt, 1) == 0 && pt == 4);
+        }
+        CHECK(amdgpu_cs_syncobj_import_sync_file(dev, b, 12345) != 0);   /* not ours */
+        close(sfd); close(ofd);
+        CHECK(amdgpu_cs_destroy_syncobj(dev, a) == 0 && amdgpu_cs_destroy_syncobj(dev, b) == 0);
+    }
+    /* GEM_USERPTR through libdrm_amdgpu (amdgpu_create_bo_from_user_mem):
+     * the BO is the client's own pages, VA-mappable, never mmap()ed */
+    {
+        static uint8_t pages[4 * 4096] __attribute__((aligned(4096)));
+        amdgpu_bo_handle ubo = NULL;
+        amdgpu_va_handle vah;
+        uint64_t va = 0;
+        void *p = NULL;
+        CHECK(amdgpu_create_bo_from_user_mem(dev, pages, sizeof(pages), &ubo) == 0 && ubo);
+        CHECK(amdgpu_create_bo_from_user_mem(dev, pages + 8, 4096, &ubo) != 0);   /* unaligned */
+        CHECK(amdgpu_bo_cpu_map(ubo, &p) != 0);
+        CHECK(amdgpu_va_range_alloc(dev, amdgpu_gpu_va_range_general, sizeof(pages), 4096, 0, &va,
+                                    &vah, 0) == 0 && va);
+        CHECK(amdgpu_bo_va_op(ubo, 0, sizeof(pages), va, 0, AMDGPU_VA_OP_MAP) == 0);
+        CHECK(amdgpu_bo_va_op(ubo, 0, sizeof(pages), va, 0, AMDGPU_VA_OP_UNMAP) == 0);
+        CHECK(amdgpu_va_range_free(vah) == 0);
+        CHECK(amdgpu_bo_free(ubo) == 0);
+    }
     /* CS on the (software) DMA ring through libdrm_amdgpu, like RADV's
      * winsys: raw submit with chunks, then the fence query */
     {

@@ -57,10 +57,11 @@ class IODMACommand;
  * the GPU must see it (through the system mapper / VT-d when present).
  * bo->backing points at one of these. */
 struct RDNA3Gtt {
-    IOBufferMemoryDescriptor *md;
+    IOMemoryDescriptor       *md;        /* IOBufferMemoryDescriptor, or the client's pages (userptr) */
     IODMACommand             *dma;
     uint64_t                 *pages;
     uint64_t                  npages;
+    bool                      prepared;  /* userptr: md->prepare() holds the pages wired */
 };
 
 class RDNA3Accel : public IOService {
@@ -113,7 +114,11 @@ private:
     static void  *drmZalloc(void *ctx, size_t n);
     static void   drmFreeMem(void *ctx, void *p, size_t n);
     static int    drmBoAlloc(void *ctx, rdna3_bo *bo);
+    static int    drmBoUserptr(void *ctx, void *fileOs, rdna3_bo *bo, uint64_t uaddr, uint32_t flags);
+    static int    drmSensor(void *ctx, uint32_t type, uint32_t *value);
+    static int    drmVmFaultInfo(void *ctx, void *vm, uint64_t *addr, uint32_t *status, uint32_t *vmhub);
     int           gttAlloc(rdna3_bo *bo);
+    int           gttWire(rdna3_bo *bo, IOMemoryDescriptor *md, bool prepared);
     static void   gttFree(RDNA3Gtt *g);
     static void   drmBoFree(void *ctx, rdna3_bo *bo);
     static int    drmCopyin(void *ctx, void *dst, uint64_t uaddr, size_t len);

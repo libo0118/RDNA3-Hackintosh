@@ -89,6 +89,10 @@ public:
     /* AMDGPU_CTX_QUERY2_FLAGS_* of a VM: reset since it was made, VRAM
      * lost, guilty (one of its jobs hung or page-faulted) */
     uint32_t vmQuery(void *vm);
+    /* AMDGPU_INFO_GPUVM_FAULT: the VM's last page fault */
+    int      vmFaultInfo(void *vm, uint64_t *addr, uint32_t *status, uint32_t *vmhub);
+    /* AMDGPU_INFO_SENSOR from the SMU metrics (re-read at most every 100 ms) */
+    int      sensor(uint32_t type, uint32_t *value);
 
 private:
     static void threadMain(void *arg, int wait_result);
@@ -126,6 +130,7 @@ private:
     rdna3_vbios      fVbios = {};
     uint8_t         *fRom = nullptr;        /* RD_VBIOS_MAX_LEN */
     bool             fPmUp = false;
+    uint64_t         fMetricsAt = 0;         /* mach_absolute_time of the last metrics read */
     void             pmInit();
     void             pmPublishMetrics();
 

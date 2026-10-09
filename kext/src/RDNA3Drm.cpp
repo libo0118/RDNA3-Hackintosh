@@ -68,17 +68,53 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
 int RDNA3Accel::gttAlloc(rdna3_bo *bo)
 {
     const uint64_t mask = (1ull << 44) - 4096;
-    RDNA3Gtt *g = (RDNA3Gtt *)IOMalloc(sizeof(*g));
-    if (!g)
+    uint64_t npages = (bo->size + 4095) / 4096;
+    IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared, npages * 4096, mask);
+    if (!md)
         return -RD_ENOMEM;
+    bzero(md->getBytesNoCopy(), (size_t)(npages * 4096));
+    return gttWire(bo, md, false);
+}
+
+/* amdgpu_gem_userptr_ioctl: the client's own pages become a GTT BO. The
+ * descriptor over the task's range is prepared (wired) for as long as the
+ * BO lives; the DMA command hands out the bus address of every page. */
+int RDNA3Accel::drmBoUserptr(void *ctx, void *fileOs, rdna3_bo *bo, uint64_t uaddr, uint32_t flags)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    task_t task = (task_t)fileOs;
+    IOOptionBits dir = (flags & AMDGPU_GEM_USERPTR_READONLY) ? kIODirectionIn : kIODirectionInOut;
+    IOMemoryDescriptor *md;
+    if (!task)
+        return -RD_EINVAL;
+    md = IOMemoryDescriptor::withAddressRange(uaddr, bo->size, dir, task);
+    if (!md)
+        return -RD_EFAULT;
+    if (md->prepare() != kIOReturnSuccess) {
+        md->release();
+        return -RD_EFAULT;
+    }
+    return a->gttWire(bo, md, true);
+}
+
+/* a GTT backing from any memory descriptor (takes the reference) */
+int RDNA3Accel::gttWire(rdna3_bo *bo, IOMemoryDescriptor *md, bool prepared)
+{
+    RDNA3Gtt *g = (RDNA3Gtt *)IOMalloc(sizeof(*g));
+    if (!g) {
+        if (prepared)
+            md->complete();
+        md->release();
+        return -RD_ENOMEM;
+    }
     bzero(g, sizeof(*g));
+    g->md = md;
+    g->prepared = prepared;
     g->npages = (bo->size + 4095) / 4096;
-    g->md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-        kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared, g->npages * 4096, mask);
     g->pages = (uint64_t *)IOMalloc((size_t)(g->npages * sizeof(uint64_t)));
-    if (!g->md || !g->pages)
+    if (!g->pages)
         goto fail;
-    bzero(g->md->getBytesNoCopy(), (size_t)(g->npages * 4096));
     g->dma = IODMACommand::withSpecification(IODMACommand::OutputHost64, 44, 0,
                                              IODMACommand::kMapped, 0, 4096);
     if (!g->dma || g->dma->setMemoryDescriptor(g->md, true) != kIOReturnSuccess)
@@ -112,6 +148,8 @@ void RDNA3Accel::gttFree(RDNA3Gtt *g)
     }
     if (g->pages)
         IOFree(g->pages, (size_t)(g->npages * sizeof(uint64_t)));
+    if (g->md && g->prepared)
+        g->md->complete();
     OSSafeReleaseNULL(g->md);
     IOFree(g, sizeof(*g));
 }
@@ -188,6 +226,18 @@ int RDNA3Accel::drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq
     return a->fBringup ? a->fBringup->fenceWait(ip, ring, seq, absNs) : 0;
 }
 
+int RDNA3Accel::drmSensor(void *ctx, uint32_t type, uint32_t *value)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->sensor(type, value) : -RD_EINVAL;
+}
+
+int RDNA3Accel::drmVmFaultInfo(void *ctx, void *vm, uint64_t *addr, uint32_t *status, uint32_t *vmhub)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->vmFaultInfo(vm, addr, status, vmhub) : -RD_EINVAL;
+}
+
 uint32_t RDNA3Accel::drmVmQuery(void *ctx, void *vm)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
@@ -222,6 +272,9 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.fence_signaled = drmFenceSignaled;
     ops.fence_wait = drmFenceWait;
     ops.vm_query = drmVmQuery;
+    ops.bo_userptr = drmBoUserptr;
+    ops.sensor = drmSensor;
+    ops.vm_fault_info = drmVmFaultInfo;
     ops.gpu_clock = nullptr; /* TODO(stage2-gfx): RLC GPU clock counter */
 
     fDrmLock = IOLockAlloc();

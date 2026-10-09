@@ -20,15 +20,19 @@ uapi/rdna3_drm.c  (niezależne od OS, testowane na hoście)
 | `DRM_IOCTL_VERSION`, `GET_CAP`, `SET_CLIENT_CAP` | ✅ (`amdgpu` 3.61) |
 | `GEM_CLOSE` | ✅ |
 | `SYNCOBJ_CREATE/DESTROY/RESET/SIGNAL/WAIT/TIMELINE_*/QUERY` | ✅ syncobj niesie fence CS i sygnalizuje się, gdy GPU go minie |
-| `SYNCOBJ_HANDLE_TO_FD/FD_TO_HANDLE/TRANSFER`, `PRIME_*` | ⬜ `-ENOSYS` (wymaga IOSurface/eksportu, Etap 4b) |
+| `SYNCOBJ_TRANSFER` | ✅ kopia fence'a/punktu (snapshot, syncobj są per plik) |
+| `SYNCOBJ_HANDLE_TO_FD/FD_TO_HANDLE` | ✅ w `libdrm_xnu` (`drm_xnu.c`): kext nie ma deskryptorów, więc eksport to fd `/dev/null` w tablicy procesu; sync_file = snapshot przez `TRANSFER`, opaque = ten sam handle. Tylko w obrębie procesu (RADV, `VK_KHR_external_semaphore_fd`); między procesami ⬜ |
+| `PRIME_*` | ⬜ `-ENOSYS` (wymaga IOSurface/eksportu, Etap 7) |
 | `AMDGPU_GEM_CREATE` | ✅ GTT: `IOBufferMemoryDescriptor`; VRAM: sterta w VRAM (od 512 MiB), mapowalna przez BAR0 |
 | `AMDGPU_GEM_MMAP` + `mmap` | ✅ przez `clientMemoryForType` |
 | `AMDGPU_GEM_VA` | ✅ MAP/UNMAP/CLEAR/REPLACE; na `rdna3lvl>=6` zapis prawdziwych tablic stron (`hw/gpuvm.c`), mapowanie trzyma referencję BO, `GEM_CLOSE` zdejmuje mapowania jak amdgpu |
 | `AMDGPU_GEM_METADATA/OP/WAIT_IDLE`, `AMDGPU_VM`, `AMDGPU_CTX` | ✅ |
-| `AMDGPU_INFO` | ✅ ACCEL_WORKING, DEV_INFO (z tabeli GC discovery), HW_IP_INFO/COUNT, FW_VERSION, VRAM_GTT, MEMORY, *_USAGE, READ_MMR_REG (biała lista soc21), MAX_IBS, VIDEO_CAPS |
+| `AMDGPU_INFO` | ✅ ACCEL_WORKING, DEV_INFO (z tabeli GC discovery), HW_IP_INFO/COUNT, FW_VERSION, VRAM_GTT, MEMORY, *_USAGE, READ_MMR_REG (biała lista soc21), MAX_IBS, VIDEO_CAPS, SENSOR (z metryk SMU: zegary, temperatura, obciążenie, moc, VDDGFX, pstate), GPUVM_FAULT (ostatni błąd stron VM klienta) |
 | `AMDGPU_CS` | ✅ chunki IB / DEPENDENCIES / SYNCOBJ_IN/OUT / TIMELINE / BO_HANDLES; ring DMA prawdziwy od `rdna3lvl=7` (SDMA0, IB w VMID pliku), GFX/COMPUTE tylko ogłaszane (`rdna3enum`) |
 | `WAIT_CS`, `WAIT_FENCES`, `FENCE_TO_HANDLE` (syncobj), `BO_LIST` | ✅ prawdziwe fence'y SDMA; termin jako CLOCK_MONOTONIC (`mach_continuous_time`), limit 10 s |
-| `GEM_USERPTR` | ⬜ `-ENOSYS` |
+| `GEM_USERPTR` | ✅ `IOMemoryDescriptor::withAddressRange` nad taskiem klienta, `prepare()` na czas życia BO, strony przez `IODMACommand`; bez `mmap` (`-EPERM` jak amdgpu); `amdgpu_create_bo_from_user_mem` w teście loopback |
+| `AMDGPU_CTX_OP_QUERY_STATE/STATE2` | ✅ RESET / VRAMLOST / GUILTY z resetów i błędów stron (`vm_query`), guilty → `CS` = `-ECANCELED` |
+| `AMDGPU_CS` chunk `FENCE` (user fence) | 🟡 przyjmowany i pomijany: RADV nie czyta `fence_map`, używa syncobj i `WAIT_CS` |
 
 ## Tryb enumeracji (`rdna3enum=1`)
 

@@ -26,7 +26,7 @@ extern "C" {
 
 /* Linux errno values: the shim returns them to libdrm as-is */
 enum {
-    RD_EPERM = 1, RD_ENOENT = 2, RD_EINTR = 4, RD_EIO = 5, RD_EBADF = 9,
+    RD_EPERM = 1, RD_ENOENT = 2, RD_EINTR = 4, RD_EIO = 5, RD_EBADF = 9, RD_EACCES = 13,
     RD_ENOMEM = 12, RD_EFAULT = 14, RD_EBUSY = 16, RD_EINVAL = 22, RD_ENOSPC = 28,
     RD_ECANCELED = 89,
     RD_ENOSYS = 38, RD_ENODEV = 19, RD_ETIME = 62, RD_EOPNOTSUPP = 95,
@@ -78,6 +78,8 @@ typedef struct rdna3_bo {
     uint8_t  metadata[256];
     uint32_t metadata_size;
     uint64_t tiling_info;
+    uint8_t  userptr;         /* GEM_USERPTR: backing wraps the client's pages, no mmap */
+    uint64_t user_addr;
 } rdna3_bo;
 
 typedef struct rdna3_va {
@@ -141,6 +143,16 @@ typedef struct rdna3_drm_ops {
      * made), _VRAMLOST, _GUILTY (one of its jobs hung or faulted). Optional;
      * a guilty VM's submissions fail with -ECANCELED like amdgpu's. */
     uint32_t (*vm_query)(void *ctx, void *vm);
+    /* GEM_USERPTR: wire the client's pages [uaddr, uaddr + bo->size) for the
+     * GPU (file_os = rdna3_drm_file.os, the owning task); optional.
+     * flags = AMDGPU_GEM_USERPTR_*. */
+    int   (*bo_userptr)(void *ctx, void *file_os, rdna3_bo *bo, uint64_t uaddr, uint32_t flags);
+    /* AMDGPU_INFO_SENSOR: AMDGPU_INFO_SENSOR_* -> value in amdgpu's units
+     * (MHz, millidegrees, %, W, mV); optional, -EINVAL when missing */
+    int   (*sensor)(void *ctx, uint32_t type, uint32_t *value);
+    /* AMDGPU_INFO_GPUVM_FAULT: the last page fault of this VM (addr, hub
+     * L2_PROTECTION_FAULT_STATUS, AMDGPU_VMHUB_TYPE_*); optional */
+    int   (*vm_fault_info)(void *ctx, void *vm, uint64_t *addr, uint32_t *status, uint32_t *vmhub);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -168,6 +180,7 @@ typedef struct rdna3_drm_file {
     rdna3_va *vas;            /* [RD_MAX_VA] */
     uint32_t nvas;
     void    *vm;              /* ops.vm_create() result, may be NULL */
+    void    *os;              /* the OS's handle on the client (its task), for bo_userptr */
     uint32_t next_bo_list;
     uint64_t client_caps;
 } rdna3_drm_file;
