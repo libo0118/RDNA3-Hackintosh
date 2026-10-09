@@ -6,3 +6,4 @@
 1 2026-10-09 vm VRAMSizeMB 16368 = Linux mem_info_vram_total, C2PMSG33 0x80000000
 2 2026-10-09 vm IP discovery GC 11.0.3, 4 display paths; no lit head in the VM (no GOP picture)
 3 2026-10-09 vm 60 active CUs
+4 2026-10-09 vm PSP 13.0.10 sOS 0x00321717, 29 ucodes loaded, RLC autoload started
