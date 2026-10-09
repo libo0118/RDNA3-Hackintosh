@@ -121,6 +121,35 @@ void RDNA3Accel::drmVmUnmap(void *ctx, void *vm, uint64_t va, uint64_t size)
         a->fBringup->vmUnmap(vm, va, size);
 }
 
+int RDNA3Accel::drmSubmit(void *ctx, void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs,
+                          uint32_t n, uint64_t *seq)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->submit(vm, ip, ring, ibs, n, seq) : -RD_ENODEV;
+}
+
+int RDNA3Accel::drmFenceSignaled(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->fenceSignaled(ip, ring, seq) : 1;
+}
+
+int RDNA3Accel::drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->fenceWait(ip, ring, seq, absNs) : 0;
+}
+
+void RDNA3Accel::drmRingReady(uint32_t ip, uint32_t mask)
+{
+    if (!fDrm || !fDrmLock)
+        return;
+    IOLockLock(fDrmLock);
+    rdna3_drm_device_set_ring_ready(fDrm, ip, mask);
+    IOLockUnlock(fDrmLock);
+    LOG("HW IP %u ring mask 0x%x ready for command submission", ip, mask);
+}
+
 bool RDNA3Accel::drmInit(const amd_discovery *disc)
 {
     rdna3_drm_ops ops = {};
@@ -135,6 +164,9 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.vm_destroy = drmVmDestroy;
     ops.vm_map = drmVmMap;
     ops.vm_unmap = drmVmUnmap;
+    ops.submit = drmSubmit;
+    ops.fence_signaled = drmFenceSignaled;
+    ops.fence_wait = drmFenceWait;
     ops.gpu_clock = nullptr; /* TODO(stage2-gfx): RLC GPU clock counter */
 
     fDrmLock = IOLockAlloc();

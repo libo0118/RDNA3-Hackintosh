@@ -13,6 +13,7 @@
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
 #include <kern/thread_call.h>
+#include <kern/clock.h>
 
 extern "C" {
 #include "smu13.h"
@@ -384,6 +385,11 @@ void RDNA3Bringup::run()
                 ret = RDNA3_EIO;
         }
         publishString("RDNA3,Stage2", ret ? "failed: SDMA" : "PSP + SMU + GART + IH + SDMA up, copy verified");
+        if (!ret && fVmReady) {
+            /* userspace may now submit to the DMA ring */
+            fOwner->drmRingReady(AMDGPU_HW_IP_DMA, 1);
+            publishString("RDNA3,Rings", "DMA0");
+        }
     }
 }
 
@@ -492,4 +498,50 @@ void RDNA3Bringup::vmUnmap(void *p, uint64_t va, uint64_t size)
         return;
     gpuvm_unmap(fDev, &v->vm, va, size / 4096);
     vmFlush(v->vmid);
+}
+
+/* --------------------------- submission --------------------------- */
+
+int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
+                         uint64_t *seq)
+{
+    RDNA3Vm *v = (RDNA3Vm *)p;
+    if (ip != AMDGPU_HW_IP_DMA || ring != 0 || !fSdma || !fSdma->ready)
+        return -RD_EINVAL;
+    if (!v || !v->live)
+        return -RD_EINVAL;   /* record-only VM: the IB VA means nothing to the GPU */
+    for (uint32_t i = 0; i < n; i++)
+        sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);
+    *seq = sdma60_emit_fence(fDev, fSdma);
+    sdma60_commit(fDev, fSdma);
+    return 0;
+}
+
+int RDNA3Bringup::fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq)
+{
+    if (ip != AMDGPU_HW_IP_DMA || ring != 0 || !fSdma)
+        return 1;
+    return sdma60_fence_passed(fDev, fSdma, (uint32_t)seq);
+}
+
+extern "C" uint64_t mach_continuous_time(void);
+
+int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs)
+{
+    /* userspace deadlines are CLOCK_MONOTONIC, which on macOS counts
+     * mach_continuous_time. Cap every wait at 10 s so a hung engine cannot
+     * hold the DRM lock forever (TODO: IH-driven wakeups, no lock held). */
+    uint64_t start, now, capNs = 10ull * 1000 * 1000 * 1000;
+    absolutetime_to_nanoseconds(mach_continuous_time(), &start);
+    for (uint32_t spins = 0;; spins++) {
+        if (fenceSignaled(ip, ring, seq))
+            return 0;
+        absolutetime_to_nanoseconds(mach_continuous_time(), &now);
+        if ((absNs != UINT64_MAX && now >= absNs) || now - start >= capNs)
+            return -RD_ETIME;
+        if (spins < 1000)
+            IODelay(1);
+        else
+            IOSleep(1);
+    }
 }

@@ -141,10 +141,20 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
 
 void rdna3_drm_device_set_enumeration_only(rdna3_drm_device *dev, int on)
 {
+    dev->enumeration_only = on;
     dev->accel_working = on ? 1 : 0;
     dev->available_rings[AMDGPU_HW_IP_GFX] = on ? 1 : 0;
     dev->available_rings[AMDGPU_HW_IP_COMPUTE] = on ? 1 : 0;
     dev->available_rings[AMDGPU_HW_IP_DMA] = on ? 1 : 0;
+}
+
+void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_t mask)
+{
+    if (ip >= AMDGPU_HW_IP_NUM)
+        return;
+    dev->ready_rings[ip] |= mask;
+    dev->available_rings[ip] |= mask;
+    dev->accel_working = 1;
 }
 
 /* ------------------------------ file ------------------------------ */
@@ -303,8 +313,34 @@ static int gem_close(rdna3_drm_file *f, struct drm_gem_close *c)
 }
 
 /* --------------------------- syncobj --------------------------- */
-/* With no GPU execution yet, a syncobj is either signaled or not;
- * CS will attach real fences later (TODO(stage4-cs)). */
+/* A syncobj is signaled outright, or carries the fence of the CS that
+ * signals it (SYNCOBJ_OUT / FENCE_TO_HANDLE) and is signaled once that
+ * fence passes. Timeline points are tracked as a single value. */
+
+static int fence_done(rdna3_drm_device *dev, const rdna3_fence *fe)
+{
+    if (!dev->ops.fence_signaled)
+        return 1;
+    return dev->ops.fence_signaled(dev->ops.ctx, fe->ip, fe->ring, fe->seq);
+}
+
+static int fence_wait_abs(rdna3_drm_device *dev, const rdna3_fence *fe, uint64_t abs_ns)
+{
+    if (fence_done(dev, fe))
+        return 0;
+    if (!abs_ns || !dev->ops.fence_wait)
+        return -RD_ETIME;
+    return dev->ops.fence_wait(dev->ops.ctx, fe->ip, fe->ring, fe->seq, abs_ns);
+}
+
+static int sobj_signaled(rdna3_drm_device *dev, rdna3_syncobj *s)
+{
+    if (!s->signaled && s->has_fence && fence_done(dev, &s->fence)) {
+        s->signaled = 1;
+        s->has_fence = 0;
+    }
+    return s->signaled;
+}
 
 static rdna3_syncobj *sobj(rdna3_drm_file *f, uint32_t h)
 {
@@ -337,7 +373,7 @@ static int syncobj_destroy(rdna3_drm_file *f, struct drm_syncobj_destroy *d)
 }
 
 static int syncobj_for_each(rdna3_drm_file *f, uint64_t handles_ptr, uint32_t count,
-                            uint64_t points_ptr, int op)
+                            uint64_t points_ptr, int op, uint64_t abs_ns)
 {
     uint32_t i, h;
     uint64_t pt = 0;
@@ -351,16 +387,268 @@ static int syncobj_for_each(rdna3_drm_file *f, uint64_t handles_ptr, uint32_t co
         if (!s)
             return -RD_ENOENT;
         switch (op) {
-        case 0: s->signaled = 0; break;                       /* reset */
-        case 1: s->signaled = 1; if (pt > s->point) s->point = pt; break; /* signal */
-        case 2: if (!s->signaled && (!points_ptr || s->point < pt)) return -RD_ETIME; break;
+        case 0: s->signaled = 0; s->has_fence = 0; break;    /* reset */
+        case 1: s->signaled = 1; s->has_fence = 0; if (pt > s->point) s->point = pt; break;
+        case 2: /* wait (all) */
+            if (sobj_signaled(f->dev, s) && (!points_ptr || s->point >= pt))
+                break;
+            if (s->has_fence) {
+                int r = fence_wait_abs(f->dev, &s->fence, abs_ns);
+                if (r)
+                    return r;
+                s->signaled = 1;
+                s->has_fence = 0;
+                break;
+            }
+            return -RD_ETIME;
         case 3: /* query */
-            pt = s->signaled ? s->point : 0;
+            pt = sobj_signaled(f->dev, s) ? s->point : 0;
             if (f->dev->ops.copyout(f->dev->ops.ctx, points_ptr + 8ull * i, &pt, 8))
                 return -RD_EFAULT;
             break;
         }
     }
+    return 0;
+}
+
+/* ------------------------------ CS ------------------------------ */
+
+static int ring_ok(rdna3_drm_device *dev, uint32_t ip, uint32_t ring)
+{
+    return ip < AMDGPU_HW_IP_NUM && ring < 4 && (dev->ready_rings[ip] & (1u << ring));
+}
+
+/* DEPENDENCIES / WAIT_CS handles: ~0 = latest on that ring, 0 = none */
+static uint64_t dep_seq(rdna3_drm_device *dev, uint32_t ip, uint32_t ring, uint64_t h)
+{
+    if (h == ~0ull)
+        return dev->last_seq[ip][ring];
+    return h;
+}
+
+static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_drm_ops *ops = &dev->ops;
+    rdna3_ib ibs[RD_MAX_CS_IBS];
+    uint32_t nibs = 0, ip = 0, ring = 0, i, j;
+    /* syncobjs to signal once queued: handle + timeline point */
+    uint32_t out_h[16];
+    uint64_t out_pt[16];
+    uint32_t nout = 0;
+    uint64_t seq = 0;
+    int r;
+
+    if (!ops->submit)
+        return -RD_ENODEV;
+    if (!cs->in.num_chunks || cs->in.num_chunks > 64)
+        return -RD_EINVAL;
+
+    for (i = 0; i < cs->in.num_chunks; i++) {
+        uint64_t cptr;
+        struct drm_amdgpu_cs_chunk ch;
+        if (ops->copyin(ops->ctx, &cptr, cs->in.chunks + 8ull * i, 8) ||
+            ops->copyin(ops->ctx, &ch, cptr, sizeof(ch)))
+            return -RD_EFAULT;
+        switch (ch.chunk_id) {
+        case AMDGPU_CHUNK_ID_IB: {
+            struct drm_amdgpu_cs_chunk_ib ib;
+            zero(&ib, sizeof(ib));
+            if (ops->copyin(ops->ctx, &ib, ch.chunk_data,
+                            MIN((uint64_t)ch.length_dw * 4, sizeof(ib))))
+                return -RD_EFAULT;
+            if (nibs == RD_MAX_CS_IBS || (ib.ib_bytes & 3) || !ib.ib_bytes || ib.ip_instance)
+                return -RD_EINVAL;
+            if (nibs && (ib.ip_type != ip || ib.ring != ring))
+                return -RD_EINVAL;   /* one ring per submission, like amdgpu */
+            if (!ring_ok(dev, ib.ip_type, ib.ring))
+                return dev->enumeration_only ? -RD_ENODEV : -RD_EINVAL;  /* faked ring */
+            if (ib.flags & (AMDGPU_IB_FLAG_PREAMBLE | AMDGPU_IB_FLAG_CE))
+                continue;            /* no CE on GFX11; preambles can be dropped */
+            ip = ib.ip_type;
+            ring = ib.ring;
+            ibs[nibs].va = ib.va_start;
+            ibs[nibs].length_dw = ib.ib_bytes / 4;
+            ibs[nibs].flags = ib.flags;
+            nibs++;
+            break;
+        }
+        case AMDGPU_CHUNK_ID_DEPENDENCIES:
+        case AMDGPU_CHUNK_ID_SCHEDULED_DEPENDENCIES: {
+            uint32_t n = ch.length_dw * 4 / sizeof(struct drm_amdgpu_cs_chunk_dep);
+            for (j = 0; j < n; j++) {
+                struct drm_amdgpu_cs_chunk_dep dep;
+                rdna3_fence fe;
+                if (ops->copyin(ops->ctx, &dep, ch.chunk_data + sizeof(dep) * j, sizeof(dep)))
+                    return -RD_EFAULT;
+                if (!dep.handle || !ring_ok(dev, dep.ip_type, dep.ring))
+                    continue;
+                fe.ip = dep.ip_type;
+                fe.ring = dep.ring;
+                fe.seq = dep_seq(dev, dep.ip_type, dep.ring, dep.handle);
+                /* same ring: in-order execution already covers it */
+                if (ch.chunk_id == AMDGPU_CHUNK_ID_DEPENDENCIES && !fence_done(dev, &fe) &&
+                    (r = fence_wait_abs(dev, &fe, ~0ull)) != 0)
+                    return r;
+            }
+            break;
+        }
+        case AMDGPU_CHUNK_ID_SYNCOBJ_IN:
+        case AMDGPU_CHUNK_ID_SYNCOBJ_TIMELINE_WAIT: {
+            int tl = ch.chunk_id == AMDGPU_CHUNK_ID_SYNCOBJ_TIMELINE_WAIT;
+            uint32_t sz = tl ? sizeof(struct drm_amdgpu_cs_chunk_syncobj)
+                             : sizeof(struct drm_amdgpu_cs_chunk_sem);
+            uint32_t n = ch.length_dw * 4 / sz;
+            for (j = 0; j < n; j++) {
+                struct drm_amdgpu_cs_chunk_syncobj so;
+                rdna3_syncobj *s;
+                zero(&so, sizeof(so));
+                if (ops->copyin(ops->ctx, &so, ch.chunk_data + (uint64_t)sz * j, sz))
+                    return -RD_EFAULT;
+                s = sobj(f, so.handle);
+                if (!s)
+                    return -RD_EINVAL;
+                if (!sobj_signaled(dev, s) && s->has_fence) {
+                    r = fence_wait_abs(dev, &s->fence, ~0ull);
+                    if (r)
+                        return r;
+                }
+            }
+            break;
+        }
+        case AMDGPU_CHUNK_ID_SYNCOBJ_OUT:
+        case AMDGPU_CHUNK_ID_SYNCOBJ_TIMELINE_SIGNAL: {
+            int tl = ch.chunk_id == AMDGPU_CHUNK_ID_SYNCOBJ_TIMELINE_SIGNAL;
+            uint32_t sz = tl ? sizeof(struct drm_amdgpu_cs_chunk_syncobj)
+                             : sizeof(struct drm_amdgpu_cs_chunk_sem);
+            uint32_t n = ch.length_dw * 4 / sz;
+            for (j = 0; j < n; j++) {
+                struct drm_amdgpu_cs_chunk_syncobj so;
+                zero(&so, sizeof(so));
+                if (nout == 16)
+                    return -RD_EINVAL;
+                if (ops->copyin(ops->ctx, &so, ch.chunk_data + (uint64_t)sz * j, sz))
+                    return -RD_EFAULT;
+                if (!sobj(f, so.handle))
+                    return -RD_EINVAL;
+                out_h[nout] = so.handle;
+                out_pt[nout] = tl ? so.point : 0;
+                nout++;
+            }
+            break;
+        }
+        case AMDGPU_CHUNK_ID_BO_HANDLES:   /* residency: everything is resident */
+        case AMDGPU_CHUNK_ID_FENCE:        /* user fence: TODO(cs) */
+        case AMDGPU_CHUNK_ID_CP_GFX_SHADOW:
+            break;
+        default:
+            return -RD_EINVAL;
+        }
+    }
+    if (!nibs)
+        return -RD_EINVAL;
+
+    r = ops->submit(ops->ctx, f->vm, ip, ring, ibs, nibs, &seq);
+    if (r)
+        return r;
+    dev->last_seq[ip][ring] = seq;
+    for (i = 0; i < nout; i++) {
+        rdna3_syncobj *s = sobj(f, out_h[i]);
+        s->signaled = 0;
+        s->has_fence = 1;
+        s->fence.ip = ip;
+        s->fence.ring = ring;
+        s->fence.seq = seq;
+        if (out_pt[i] > s->point)
+            s->point = out_pt[i];
+    }
+    cs->out.handle = seq;
+    return 0;
+}
+
+static int wait_cs(rdna3_drm_file *f, union drm_amdgpu_wait_cs *w)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_fence fe;
+    uint64_t timeout = w->in.timeout;
+    if (!ring_ok(dev, w->in.ip_type, w->in.ring))
+        return -RD_EINVAL;
+    fe.ip = w->in.ip_type;
+    fe.ring = w->in.ring;
+    fe.seq = dep_seq(dev, fe.ip, fe.ring, w->in.handle);
+    zero(&w->out, sizeof(w->out));
+    if (!fe.seq)
+        return 0;
+    w->out.status = fence_wait_abs(dev, &fe, timeout) ? 1 : 0;
+    return 0;
+}
+
+static int wait_fences(rdna3_drm_file *f, union drm_amdgpu_wait_fences *w)
+{
+    rdna3_drm_device *dev = f->dev;
+    uint32_t i, n = w->in.fence_count, all = w->in.wait_all, first = ~0u, done = 0;
+    uint64_t timeout = w->in.timeout_ns;
+    if (!n || n > 1024)
+        return -RD_EINVAL;
+    for (i = 0; i < n; i++) {
+        struct drm_amdgpu_fence af;
+        rdna3_fence fe;
+        if (dev->ops.copyin(dev->ops.ctx, &af, w->in.fences + sizeof(af) * i, sizeof(af)))
+            return -RD_EFAULT;
+        if (!ring_ok(dev, af.ip_type, af.ring))
+            return -RD_EINVAL;
+        fe.ip = af.ip_type;
+        fe.ring = af.ring;
+        fe.seq = af.seq_no;
+        if (fence_done(dev, &fe) || (all && !fence_wait_abs(dev, &fe, timeout))) {
+            done++;
+            if (first == ~0u)
+                first = i;
+            if (!all)
+                break;
+        }
+    }
+    if (!all && !done) {
+        /* wait for the first one; good enough for a single ring */
+        struct drm_amdgpu_fence af;
+        rdna3_fence fe;
+        if (dev->ops.copyin(dev->ops.ctx, &af, w->in.fences, sizeof(af)))
+            return -RD_EFAULT;
+        fe.ip = af.ip_type;
+        fe.ring = af.ring;
+        fe.seq = af.seq_no;
+        if (!fence_wait_abs(dev, &fe, timeout)) {
+            done = 1;
+            first = 0;
+        }
+    }
+    zero(&w->out, sizeof(w->out));
+    w->out.status = all ? (done == n) : (done > 0);
+    w->out.first_signaled = first == ~0u ? 0 : first;
+    return 0;
+}
+
+static int fence_to_handle(rdna3_drm_file *f, union drm_amdgpu_fence_to_handle *h)
+{
+    struct drm_syncobj_create c;
+    rdna3_syncobj *s;
+    int r;
+    if (h->in.what != AMDGPU_FENCE_TO_HANDLE_GET_SYNCOBJ)
+        return -RD_EOPNOTSUPP;   /* FDs need PRIME-style export (Stage 4b) */
+    if (!ring_ok(f->dev, h->in.fence.ip_type, h->in.fence.ring))
+        return -RD_EINVAL;
+    zero(&c, sizeof(c));
+    r = syncobj_create(f, &c);
+    if (r)
+        return r;
+    s = sobj(f, c.handle);
+    s->fence.ip = h->in.fence.ip_type;
+    s->fence.ring = h->in.fence.ring;
+    s->fence.seq = dep_seq(f->dev, s->fence.ip, s->fence.ring, h->in.fence.seq_no);
+    s->has_fence = s->fence.seq != 0;
+    s->signaled = !s->has_fence;
+    zero(&h->out, sizeof(h->out));
+    h->out.handle = c.handle;
     return 0;
 }
 
@@ -737,34 +1025,34 @@ int rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
     case RD_NR_SYNCOBJ_RESET: {
         struct drm_syncobj_array *a = (struct drm_syncobj_array *)data;
         NEED(struct drm_syncobj_array);
-        return syncobj_for_each(f, a->handles, a->count_handles, 0, 0);
+        return syncobj_for_each(f, a->handles, a->count_handles, 0, 0, 0);
     }
     case RD_NR_SYNCOBJ_SIGNAL: {
         struct drm_syncobj_array *a = (struct drm_syncobj_array *)data;
         NEED(struct drm_syncobj_array);
-        return syncobj_for_each(f, a->handles, a->count_handles, 0, 1);
+        return syncobj_for_each(f, a->handles, a->count_handles, 0, 1, 0);
     }
     case RD_NR_SYNCOBJ_TIMELINE_SIGNAL: {
         struct drm_syncobj_timeline_array *a = (struct drm_syncobj_timeline_array *)data;
         NEED(struct drm_syncobj_timeline_array);
-        return syncobj_for_each(f, a->handles, a->count_handles, a->points, 1);
+        return syncobj_for_each(f, a->handles, a->count_handles, a->points, 1, 0);
     }
     case RD_NR_SYNCOBJ_QUERY: {
         struct drm_syncobj_timeline_array *a = (struct drm_syncobj_timeline_array *)data;
         NEED(struct drm_syncobj_timeline_array);
-        return syncobj_for_each(f, a->handles, a->count_handles, a->points, 3);
+        return syncobj_for_each(f, a->handles, a->count_handles, a->points, 3, 0);
     }
     case RD_NR_SYNCOBJ_WAIT: {
         struct drm_syncobj_wait *w = (struct drm_syncobj_wait *)data;
         NEED(struct drm_syncobj_wait);
         w->first_signaled = 0;
-        return syncobj_for_each(f, w->handles, w->count_handles, 0, 2);
+        return syncobj_for_each(f, w->handles, w->count_handles, 0, 2, w->timeout_nsec > 0 ? (uint64_t)w->timeout_nsec : 0);
     }
     case RD_NR_SYNCOBJ_TIMELINE_WAIT: {
         struct drm_syncobj_timeline_wait *w = (struct drm_syncobj_timeline_wait *)data;
         NEED(struct drm_syncobj_timeline_wait);
         w->first_signaled = 0;
-        return syncobj_for_each(f, w->handles, w->count_handles, w->points, 2);
+        return syncobj_for_each(f, w->handles, w->count_handles, w->points, 2, w->timeout_nsec > 0 ? (uint64_t)w->timeout_nsec : 0);
     }
 
     /* ---- amdgpu ---- */
@@ -801,16 +1089,26 @@ int rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
         zero(v, sizeof(*v));
         return 0;
     }
-    case RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS): {
-        union drm_amdgpu_wait_cs *w = (union drm_amdgpu_wait_cs *)data;
-        NEED(union drm_amdgpu_wait_cs);
-        zero(&w->out, sizeof(w->out));
-        return 0;
-    }
-    case RD_NR_AMDGPU(DRM_AMDGPU_CS):        /* TODO(stage2-rings): submit IBs */
-    case RD_NR_AMDGPU(DRM_AMDGPU_BO_LIST):
-    case RD_NR_AMDGPU(DRM_AMDGPU_WAIT_FENCES):
-    case RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE):
+    case RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS): NEED(union drm_amdgpu_wait_cs);
+        if (!f->dev->ops.submit ||
+            !ring_ok(f->dev, ((union drm_amdgpu_wait_cs *)data)->in.ip_type,
+                     ((union drm_amdgpu_wait_cs *)data)->in.ring)) {
+            /* faked ring (rdna3enum) or no submission: nothing ever runs */
+            zero(&((union drm_amdgpu_wait_cs *)data)->out, sizeof(struct drm_amdgpu_wait_cs_out));
+            return 0;
+        }
+        return wait_cs(f, (union drm_amdgpu_wait_cs *)data);
+    case RD_NR_AMDGPU(DRM_AMDGPU_CS): NEED(union drm_amdgpu_cs);
+        return cs_ioctl(f, (union drm_amdgpu_cs *)data);
+    case RD_NR_AMDGPU(DRM_AMDGPU_WAIT_FENCES): NEED(union drm_amdgpu_wait_fences);
+        if (!f->dev->ops.submit)
+            return -RD_ENODEV;
+        return wait_fences(f, (union drm_amdgpu_wait_fences *)data);
+    case RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE): NEED(union drm_amdgpu_fence_to_handle);
+        if (!f->dev->ops.submit)
+            return -RD_ENODEV;
+        return fence_to_handle(f, (union drm_amdgpu_fence_to_handle *)data);
+    case RD_NR_AMDGPU(DRM_AMDGPU_BO_LIST):   /* legacy; libdrm uses BO_HANDLES chunks */
         return -RD_ENODEV;
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR):   /* TODO(stage4): wire memory */
     case RD_NR_PRIME_HANDLE_TO_FD:               /* TODO(stage4): IOSurface sharing */

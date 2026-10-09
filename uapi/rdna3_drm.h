@@ -85,10 +85,24 @@ typedef struct rdna3_va {
     rdna3_bo *bo;             /* referenced while mapped */
 } rdna3_va;
 
+/* a GPU fence: ring 'ring' of HW IP 'ip' passes sequence number 'seq' */
+typedef struct rdna3_fence {
+    uint32_t ip, ring;
+    uint64_t seq;
+} rdna3_fence;
+
 typedef struct rdna3_syncobj {
-    uint8_t  used, signaled;
+    uint8_t  used, signaled, has_fence;
     uint64_t point;
+    rdna3_fence fence;        /* when has_fence: signaled once it passes */
 } rdna3_syncobj;
+
+#define RD_MAX_CS_IBS 8
+typedef struct rdna3_ib {
+    uint64_t va;              /* GPU VA in the submitting file's VM */
+    uint32_t length_dw;
+    uint32_t flags;           /* AMDGPU_IB_FLAG_* */
+} rdna3_ib;
 
 typedef struct rdna3_drm_ops {
     void *ctx;
@@ -112,6 +126,15 @@ typedef struct rdna3_drm_ops {
     int   (*vm_map)(void *ctx, void *vm, rdna3_bo *bo, uint64_t va, uint64_t offset,
                     uint64_t size, uint32_t flags);
     void  (*vm_unmap)(void *ctx, void *vm, uint64_t va, uint64_t size);
+    /* command submission, optional (NULL = CS is -ENODEV). Only rings the
+     * OS marked in available_rings reach submit. submit queues the IBs on
+     * (ip, ring) in 'vm' and returns the fence sequence; fence_signaled
+     * polls; fence_wait blocks until 'seq' passed or the absolute
+     * CLOCK_MONOTONIC deadline (ns, UINT64_MAX = forever), 0 / -RD_ETIME. */
+    int   (*submit)(void *ctx, void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs,
+                    uint32_t nibs, uint64_t *seq);
+    int   (*fence_signaled)(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq);
+    int   (*fence_wait)(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t abs_ns);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -126,6 +149,9 @@ typedef struct rdna3_drm_device {
     uint64_t next_mmap_offset;
     uint32_t gc_base0;            /* GC register segment 0 (discovery) */
     uint32_t gb_addr_config;      /* cached like adev->gfx.config.gb_addr_config */
+    int      enumeration_only;    /* rings faked for libdrm (rdna3enum=1) */
+    uint32_t ready_rings[AMDGPU_HW_IP_NUM];  /* rings that really execute */
+    uint64_t last_seq[AMDGPU_HW_IP_NUM][4];  /* last submitted per ring */
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {
@@ -158,6 +184,9 @@ int  rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size);
  * memory and BO paths) before Stage 2 has rings. Every CS still fails
  * with -ENODEV. Kext: boot-arg rdna3enum=1. */
 void rdna3_drm_device_set_enumeration_only(rdna3_drm_device *dev, int on);
+/* the OS brought ring(s) 'mask' of HW IP 'ip' up: advertise them and let
+ * CS reach ops.submit for them (also sets accel_working) */
+void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_t mask);
 
 /* Lookup for the OS mmap path: BO whose fake offset is 'off'. */
 rdna3_bo *rdna3_drm_bo_by_mmap_offset(rdna3_drm_file *f, uint64_t off);

@@ -57,6 +57,9 @@ public:
     IOMemoryDescriptor *drmMemoryForOffset(rdna3_drm_file *f, uint64_t off,
                                            IOOptionBits *options);
 
+    /* called by the bring-up thread when a ring really executes */
+    void  drmRingReady(uint32_t ip, uint32_t mask);
+
     /* Stage 7: requests from the accelerator kext (RDNA3Platform.cpp) */
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
                                           void *p3, void *p4) override;
@@ -90,6 +93,10 @@ private:
     static int    drmVmMap(void *ctx, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off,
                            uint64_t size, uint32_t flags);
     static void   drmVmUnmap(void *ctx, void *vm, uint64_t va, uint64_t size);
+    static int    drmSubmit(void *ctx, void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs,
+                            uint32_t n, uint64_t *seq);
+    static int    drmFenceSignaled(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq);
+    static int    drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs);
 
     /* Stage 7 */
     range_alloc  *fAccelVa = nullptr;

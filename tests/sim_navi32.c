@@ -662,6 +662,19 @@ static void run(const char *fwdir)
             rdna3_vram_read(&dev, dst, out, 64);
             CHECK(out[0] == 0xabcdef01u && out[15] == 0xabcdef01u && out[16] == pat[16]);
             CHECK(S.sdma_bad == 0 && S.unflushed_doorbells == 0);
+            /* INDIRECT packet layout and 8-dword alignment */
+            {
+                uint32_t pkt[6], start;
+                sdma60_write(&dev, &sd, 0);          /* knock wptr off alignment */
+                sdma60_emit_ib(&dev, &sd, 5, 0x123456789A0ull, 48);
+                CHECK(((uint32_t)sd.wptr & 7) == 0);
+                start = ((uint32_t)sd.wptr - 6) & sd.buf_mask;
+                rdna3_vram_read(&dev, sd.ring + 4ull * start, pkt, sizeof(pkt));
+                CHECK(pkt[0] == (SDMA_OP_INDIRECT | (5u << 16)) && pkt[1] == 0x456789A0u &&
+                      pkt[2] == 0x123 && pkt[3] == 48 && pkt[4] == 0 && pkt[5] == 0);
+                CHECK(!sdma60_fence_passed(&dev, &sd, sd.fence_seq + 1));
+                CHECK(sdma60_fence_passed(&dev, &sd, sd.fence_seq));
+            }
             sdma60_stop(&dev, &sd);
             CHECK(!sd.ready && (S.reg[0xA000 + regSDMA0_F32_CNTL] & SDMA0_F32_CNTL__HALT_MASK));
         }

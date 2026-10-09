@@ -59,6 +59,12 @@ public:
                 uint32_t flags);
     void  vmUnmap(void *vm, uint64_t va, uint64_t size);
 
+    /* command submission (DMA ring 0 = SDMA0 from rdna3lvl=7) */
+    int   submit(void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
+                 uint64_t *seq);
+    int   fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq);
+    int   fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs);
+
 private:
     static void threadMain(void *arg, int wait_result);
     void run();

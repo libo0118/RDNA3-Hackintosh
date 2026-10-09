@@ -55,6 +55,71 @@ static void h_vm_unmap(void *c, void *vm, uint64_t va, uint64_t size)
     vm_mapped -= size;
 }
 
+/* fake ring: submissions complete when fence_wait is called or when
+ * 'ring_done' is advanced by hand */
+static uint64_t ring_next, ring_done;
+static uint32_t last_ip, last_ring, last_nibs;
+static rdna3_ib last_ibs[RD_MAX_CS_IBS];
+static void *last_vm;
+static int h_submit(void *c, void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs,
+                    uint32_t n, uint64_t *seq)
+{
+    (void)c;
+    last_vm = vm; last_ip = ip; last_ring = ring; last_nibs = n;
+    memcpy(last_ibs, ibs, sizeof(*ibs) * n);
+    *seq = ++ring_next;
+    return 0;
+}
+static int h_signaled(void *c, uint32_t ip, uint32_t ring, uint64_t seq)
+{
+    (void)c; (void)ip; (void)ring;
+    return seq <= ring_done;
+}
+static int h_wait(void *c, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t abs_ns)
+{
+    (void)c; (void)ip; (void)ring;
+    if (abs_ns == 1)          /* "already expired" */
+        return -RD_ETIME;
+    if (seq > ring_done)
+        ring_done = seq;
+    return 0;
+}
+
+static uint64_t chunk_ptrs[8];
+static struct drm_amdgpu_cs_chunk chunks[8];
+static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip, uint32_t in_sobj,
+                     uint32_t out_sobj, uint64_t *handle)
+{
+    static struct drm_amdgpu_cs_chunk_ib ib;
+    static struct drm_amdgpu_cs_chunk_sem in, out;
+    union drm_amdgpu_cs cs;
+    uint32_t n = 0;
+    int r;
+    memset(&ib, 0, sizeof(ib));
+    ib.va_start = va; ib.ib_bytes = bytes; ib.ip_type = ip;
+    chunks[n].chunk_id = AMDGPU_CHUNK_ID_IB; chunks[n].length_dw = sizeof(ib) / 4;
+    chunks[n].chunk_data = (uint64_t)(uintptr_t)&ib; n++;
+    if (in_sobj) {
+        in.handle = in_sobj;
+        chunks[n].chunk_id = AMDGPU_CHUNK_ID_SYNCOBJ_IN; chunks[n].length_dw = 1;
+        chunks[n].chunk_data = (uint64_t)(uintptr_t)&in; n++;
+    }
+    if (out_sobj) {
+        out.handle = out_sobj;
+        chunks[n].chunk_id = AMDGPU_CHUNK_ID_SYNCOBJ_OUT; chunks[n].length_dw = 1;
+        chunks[n].chunk_data = (uint64_t)(uintptr_t)&out; n++;
+    }
+    for (uint32_t i = 0; i < n; i++)
+        chunk_ptrs[i] = (uint64_t)(uintptr_t)&chunks[i];
+    memset(&cs, 0, sizeof(cs));
+    cs.in.num_chunks = n;
+    cs.in.chunks = (uint64_t)(uintptr_t)chunk_ptrs;
+    r = rdna3_drm_ioctl(f, RD_NR_AMDGPU(DRM_AMDGPU_CS), &cs, sizeof(cs));
+    if (!r && handle)
+        *handle = cs.out.handle;
+    return r;
+}
+
 #define IOCTL(f, nr, arg) rdna3_drm_ioctl((f), (nr), &(arg), sizeof(arg))
 
 static int info(rdna3_drm_file *f, uint32_t query, void *out, uint32_t size)
@@ -72,7 +137,7 @@ int main(void)
     static rdna3_drm_device dev;
     static rdna3_drm_file file;
     rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
-                          h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap };
+                          h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -230,7 +295,62 @@ int main(void)
     {
         union drm_amdgpu_cs cs;
         memset(&cs, 0, sizeof(cs));
-        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CS), cs) == -RD_ENODEV);
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CS), cs) == -RD_ENODEV);   /* no submit op */
+    }
+    /* real CS on the DMA ring through fake ring ops */
+    {
+        union drm_amdgpu_wait_cs w;
+        union drm_amdgpu_fence_to_handle fth;
+        struct drm_syncobj_create sc;
+        struct drm_syncobj_wait sw;
+        uint32_t so, so2;
+        uint64_t h1 = 0, h2 = 0, pt = 0;
+        struct drm_syncobj_timeline_array q;
+
+        dev.ops.submit = h_submit;
+        dev.ops.fence_signaled = h_signaled;
+        dev.ops.fence_wait = h_wait;
+        rdna3_drm_device_set_ring_ready(&dev, AMDGPU_HW_IP_DMA, 1);
+
+        CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_GFX, 0, 0, NULL) == -RD_EINVAL); /* no GFX ring */
+        CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);   /* not dwords */
+        memset(&sc, 0, sizeof(sc));
+        CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, sc) == 0);
+        so = sc.handle;
+        CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, so, &h1) == 0);
+        CHECK(h1 == 1 && last_ip == AMDGPU_HW_IP_DMA && last_nibs == 1 &&
+              last_ibs[0].va == 0x400000 && last_ibs[0].length_dw == 16 && last_vm == &vm_dummy);
+        /* busy until the ring passes it */
+        memset(&w, 0, sizeof(w));
+        w.in.handle = h1; w.in.ip_type = AMDGPU_HW_IP_DMA; w.in.timeout = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 1);
+        memset(&q, 0, sizeof(q));
+        q.handles = (uint64_t)(uintptr_t)&so; q.points = (uint64_t)(uintptr_t)&pt; q.count_handles = 1;
+        CHECK(IOCTL(f, RD_NR_SYNCOBJ_QUERY, q) == 0 && pt == 0);
+        /* waiting on the out syncobj waits for the fence */
+        memset(&sw, 0, sizeof(sw));
+        sw.handles = (uint64_t)(uintptr_t)&so; sw.count_handles = 1; sw.timeout_nsec = INT64_MAX;
+        CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == 0 && ring_done == 1);
+        w.in.timeout = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 0);
+        /* in-syncobj with a pending fence is waited before submitting */
+        CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, so, &h2) == 0 && h2 == 2);
+        CHECK(cs_submit(f, 0x500000, 32, AMDGPU_HW_IP_DMA, so, 0, NULL) == 0 && ring_done == 2);
+        /* fence -> syncobj */
+        memset(&fth, 0, sizeof(fth));
+        fth.in.fence.ip_type = AMDGPU_HW_IP_DMA; fth.in.fence.seq_no = 3;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE), fth) == 0);
+        so2 = fth.out.handle;
+        sw.handles = (uint64_t)(uintptr_t)&so2; sw.timeout_nsec = 0;
+        CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == -RD_ETIME);   /* poll only */
+        sw.timeout_nsec = INT64_MAX;
+        CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == 0 && ring_done == 3);
+        /* WAIT_CS on ~0 = latest */
+        w.in.handle = ~0ull; w.in.timeout = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 0);
+        dev.ops.submit = NULL;
+        dev.available_rings[AMDGPU_HW_IP_DMA] = 0;
+        dev.ready_rings[AMDGPU_HW_IP_DMA] = 0;
     }
     /* short payloads are rejected */
     {

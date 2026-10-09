@@ -67,6 +67,11 @@ void sdma60_emit_copy(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src_mc, uint64_
                       uint32_t bytes);
 void sdma60_emit_fill(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst_mc, uint32_t value,
                       uint32_t bytes);
+/* sdma_v6_0_ring_emit_ib: NOP-pad so the 6-dword INDIRECT packet ends on
+ * an 8-dword boundary, then run 'ndw' dwords at GPU VA 'va' in 'vmid' */
+void sdma60_emit_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t va, uint32_t ndw);
+/* fence 'seq' has been written back */
+int  sdma60_fence_passed(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq);
 /* emit a fence write of ++fence_seq; returns that sequence number */
 uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r);
 int  sdma60_wait_fence(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq);

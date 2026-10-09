@@ -84,6 +84,24 @@ void sdma60_emit_fill(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t v
     sdma60_write(d, r, bytes - 1);
 }
 
+void sdma60_emit_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t va, uint32_t ndw)
+{
+    uint32_t pad = (2 - (uint32_t)r->wptr) & 7, i;
+    for (i = 0; i < pad; i++)
+        sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_NOP));
+    sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_INDIRECT) | SDMA_PKT_INDIRECT_HEADER_VMID(vmid));
+    sdma60_write(d, r, (uint32_t)va & 0xffffffe0);   /* 32-byte aligned base */
+    sdma60_write(d, r, (uint32_t)(va >> 32));
+    sdma60_write(d, r, ndw);
+    sdma60_write(d, r, 0);                           /* CSA: none */
+    sdma60_write(d, r, 0);
+}
+
+int sdma60_fence_passed(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq)
+{
+    return (int32_t)(wb_read32(d, r, RD_SDMA_WB_FENCE) - seq) >= 0;
+}
+
 /* sdma_v6_0_ring_emit_fence (32-bit, no interrupt) */
 uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r)
 {
