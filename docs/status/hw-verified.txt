@@ -9,3 +9,4 @@
 4 2026-10-09 vm PSP 13.0.10 sOS 0x00321717, 29 ucodes loaded, RLC autoload started
 5 2026-10-09 vm SMU 13.0.10 PMFW 80.92, SCPM, dpm running, gfxclk 500..2124, uclk 96..1218, PPT 212 W, hotspot 36 C
 6 2026-10-09 vm GART 512 MiB on MMHUB (FB 0x8000000000), IH ring polled, GOP head lit 800x600
+6b 2026-10-09 vm MSI interrupts live (IH wakeups)
