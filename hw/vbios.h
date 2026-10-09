@@ -92,6 +92,11 @@ int vbios_bootup_values(rdna3_dev *d, const rdna3_vbios *v, rdna3_vbios_boot *b)
  * firmware's reservation at the top of VRAM. 0 when absent. */
 int vbios_fw_vram_reservation(const rdna3_vbios *v, uint64_t *start, uint64_t *size);
 
+/* amdgpu_atomfirmware_get_fw_reserved_fb_size: firmwareinfo v3.4/v3.5
+ * fw_reserved_size_in_kb, the block amdgpu_ttm_reserve_tmr keeps at the top
+ * of VRAM (IP discovery, memory training, PSP runtime data). 0 if absent. */
+uint64_t vbios_fw_reserved_fb_size(const rdna3_vbios *v);
+
 /* ---- display object table (displayobjectinfo v1.4 / v1.5, bios_parser2) ----
  * One entry per display path: connector -> encoder (UNIPHY A..G), the DDC
  * line that feeds its AUX engine and the HPD pin. Which OTG drives a path

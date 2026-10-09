@@ -95,6 +95,9 @@ typedef struct rdna3_dev {
 
     /* bump allocator window inside the CPU-visible part of VRAM */
     uint64_t alloc_lo, alloc_hi, alloc_next;
+    /* top-down window for what the CPU never touches (amdgpu's NO_CPU_ACCESS
+     * kernel BOs get TTM_PL_FLAG_TOPDOWN), e.g. the PSP TMR; 0 = none */
+    uint64_t alloc_top_lo, alloc_top_hi, alloc_top_next;
     uint32_t nallocs;
     rdna3_vram_block allocs[RDNA3_VRAM_MAX_ALLOCS];
 
@@ -154,6 +157,11 @@ int  rdna3_read_fb_location(rdna3_dev *d);           /* gfxhub_v3_0_3_get_fb_loc
 void rdna3_vram_alloc_init(rdna3_dev *d, uint64_t lo, uint64_t hi);
 /* returns VRAM offset, or UINT64_MAX on failure */
 uint64_t rdna3_vram_alloc(rdna3_dev *d, uint64_t size, uint64_t align, const char *tag);
+/* [lo, hi) for rdna3_vram_alloc_top; rdna3_vram_alloc_init rewinds it too */
+void rdna3_vram_alloc_top_init(rdna3_dev *d, uint64_t lo, uint64_t hi);
+/* from the top of that window down; falls back to rdna3_vram_alloc when
+ * there is no top window */
+uint64_t rdna3_vram_alloc_top(rdna3_dev *d, uint64_t size, uint64_t align, const char *tag);
 static inline uint64_t rdna3_vram_mc(const rdna3_dev *d, uint64_t off) { return d->fb_start + off; }
 static inline uint64_t rdna3_vram_pa(const rdna3_dev *d, uint64_t off) { return d->fb_offset + off; }
 volatile uint8_t *rdna3_vram_cpu(rdna3_dev *d, uint64_t off, uint64_t len);

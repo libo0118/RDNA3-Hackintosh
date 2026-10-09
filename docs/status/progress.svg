@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 8.6%   ported 17.6%   (111 / 227 / 1291)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 8.8%   ported 17.7%   (113 / 229 / 1291)</text>
 <g><title>GFX 11: works 0%, ported 24% (0+59 of 243); verified by step(s) 8</title>
 <rect x="1.0" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="11.4" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
@@ -530,7 +530,7 @@
 <text x="152.2" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">GMC / GPUVM</text>
 <text x="152.2" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 19%</text>
 </g>
-<g><title>Discovery / VBIOS: works 40%, ported 40% (51+0 of 127); verified by step(s) 2</title>
+<g><title>Discovery / VBIOS: works 41%, ported 41% (52+0 of 127); verified by step(s) 2</title>
 <rect x="148.2" y="155.9" width="9.5" height="11.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="157.7" y="155.9" width="9.5" height="11.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="167.2" y="155.9" width="9.5" height="11.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -582,7 +582,7 @@
 <rect x="199.0" y="189.0" width="10.2" height="11.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="209.2" y="189.0" width="10.2" height="11.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="219.3" y="189.0" width="10.2" height="11.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="229.5" y="189.0" width="10.2" height="11.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="229.5" y="189.0" width="10.2" height="11.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="239.6" y="189.0" width="10.2" height="11.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="249.8" y="189.0" width="10.2" height="11.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="259.9" y="189.0" width="10.2" height="11.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -660,9 +660,9 @@
 <rect x="280.2" y="244.2" width="10.2" height="11.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="147.2" y="154.9" width="144.2" height="101.3" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="152.2" y="169.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Discovery / VBIOS</text>
-<text x="152.2" y="183.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">40% / 40%</text>
+<text x="152.2" y="183.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">41% / 41%</text>
 </g>
-<g><title>PSP 13: works 13%, ported 13% (16+0 of 120); verified by step(s) 4</title>
+<g><title>PSP 13: works 14%, ported 14% (17+0 of 120); verified by step(s) 4</title>
 <rect x="148.2" y="257.3" width="10.2" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="158.4" y="257.3" width="10.2" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="168.5" y="257.3" width="10.2" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -679,7 +679,7 @@
 <rect x="280.2" y="257.3" width="10.2" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="148.2" y="267.7" width="10.2" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="158.4" y="267.7" width="10.2" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="168.5" y="267.7" width="10.2" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="168.5" y="267.7" width="10.2" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="178.7" y="267.7" width="10.2" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="188.9" y="267.7" width="10.2" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="199.0" y="267.7" width="10.2" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -785,7 +785,7 @@
 <rect x="279.5" y="340.6" width="10.9" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="147.2" y="256.3" width="144.2" height="95.7" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="152.2" y="271.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">PSP 13</text>
-<text x="152.2" y="285.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">13% / 13%</text>
+<text x="152.2" y="285.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">14% / 14%</text>
 </g>
 <g><title>Display: modeset: works 0%, ported 0% (0+0 of 117); verified by step(s) modeset</title>
 <rect x="292.4" y="53.0" width="10.0" height="10.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>

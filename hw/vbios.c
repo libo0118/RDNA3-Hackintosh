@@ -229,6 +229,17 @@ int vbios_fw_vram_reservation(const rdna3_vbios *v, uint64_t *start, uint64_t *s
     return RDNA3_OK;
 }
 
+uint64_t vbios_fw_reserved_fb_size(const rdna3_vbios *v)
+{
+    uint16_t sz;
+    uint8_t frev, crev;
+    const uint8_t *t = vbios_data_table(v, RD_ATOM_DT_FIRMWAREINFO, &sz, &frev, &crev);
+    /* atom_firmware_info_v3_4 / v3_5: fw_reserved_size_in_kb at 84 */
+    if (!t || frev != 3 || (crev != 4 && crev != 5) || sz < 88)
+        return 0;
+    return (uint64_t)rd32(t + 84) << 10;
+}
+
 /* ---- display object table: bios_parser2 get_bios_object / get_*_record ---- */
 
 #define ATOM_RECORD_END     0xFF

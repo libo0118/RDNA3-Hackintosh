@@ -439,15 +439,25 @@ void RDNA3Bringup::run()
     }
     publish("RDNA3,FBStartMC", fDev->fb_start);
 
-    /* Keep away from the first 16 MiB (pre-OS framebuffer / VGA stolen
-     * memory) and from the top of VRAM (discovery, IFWI reservations):
-     * stay inside the CPU-visible aperture, at most 512 MiB. */
-    uint64_t hi = fDev->vram_cpu_len < (512ull << 20) ? fDev->vram_cpu_len : (512ull << 20);
-    /* above the boot scanout (a 4K GOP framebuffer is 32 MiB) */
-    uint64_t lo = fOwner->displayReserveEnd() > (16ull << 20) ? fOwner->displayReserveEnd() : (16ull << 20);
-    if (lo + (64ull << 20) > hi) {
-        publishString("RDNA3,Stage2", "failed: boot scanout leaves no room below 512 MiB");
+    /* Kernel VRAM (see the layout in RDNA3Accel.hpp): CPU-visible window
+     * above the first 16 MiB (pre-OS framebuffer / VGA stolen memory) and
+     * the boot scanout (a 4K GOP framebuffer is 32 MiB), the rest of the BAR
+     * for user BOs; GPU-only buffers top-down below the firmware's block. */
+    uint64_t lo = fOwner->displayReserveEnd() > kVramKernelLowStart ? fOwner->displayReserveEnd()
+                                                                     : kVramKernelLowStart;
+    uint64_t hi = lo + kVramKernelLowSize;
+    if (hi > fDev->vram_cpu_len) {
+        publishString("RDNA3,Stage2", "failed: boot scanout leaves no room in the BAR window");
         return;
+    }
+    {
+        /* amdgpu_ttm_reserve_tmr: the VBIOS's fw_reserved_size at the top */
+        uint64_t reserve = fVbios.len ? vbios_fw_reserved_fb_size(&fVbios) : 0;
+        if (reserve < kVramMinTopReserve)
+            reserve = kVramMinTopReserve;
+        publish("RDNA3,VRAMFwReservedKB", reserve >> 10);
+        if (fVramSize > kVramKernelTopSize + reserve)
+            rdna3_vram_alloc_top_init(fDev, fVramSize - kVramKernelTopSize, fVramSize - reserve);
     }
     fAllocLo = lo;
     fAllocHi = hi;

@@ -26,8 +26,6 @@
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
-static const uint64_t kUserVramStart = 512ull << 20;
-static const uint64_t kUserVramTopReserve = 256ull << 20;
 
 void *RDNA3Accel::drmZalloc(void *, size_t n)
 {
@@ -47,10 +45,18 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
     if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
-        if (!a->fVramHeap)
+        if (!a->fVramHeap || !a->fVramHeapHi)
             return -RD_ENOMEM;
-        uint64_t off = range_alloc_get(a->fVramHeap, bo->size,
-                                       bo->alignment > 4096 ? bo->alignment : 4096);
+        /* amdgpu_bo_placement_from_domain: CPU_ACCESS_REQUIRED stays in the
+         * visible part; NO_CPU_ACCESS goes outside it first; anything else
+         * prefers visible (nothing here migrates a BO on a CPU fault) */
+        uint64_t align = bo->alignment > 4096 ? bo->alignment : 4096;
+        range_alloc *first = (bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) ? a->fVramHeapHi
+                                                                           : a->fVramHeap;
+        range_alloc *second = first == a->fVramHeap ? a->fVramHeapHi : a->fVramHeap;
+        uint64_t off = range_alloc_get(first, bo->size, align);
+        if (off == RANGE_ALLOC_FAIL && !(bo->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED))
+            off = range_alloc_get(second, bo->size, align);
         if (off == RANGE_ALLOC_FAIL)
             return -RD_ENOMEM;
         bo->vram_offset = off;
@@ -159,8 +165,9 @@ void RDNA3Accel::drmBoFree(void *ctx, rdna3_bo *bo)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
     if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
-        if (a->fVramHeap)
-            range_alloc_put(a->fVramHeap, bo->vram_offset, bo->size);
+        range_alloc *h = bo->vram_offset < a->fVramHeapVisEnd ? a->fVramHeap : a->fVramHeapHi;
+        if (h)
+            range_alloc_put(h, bo->vram_offset, bo->size);
     } else if (bo->backing) {
         gttFree((RDNA3Gtt *)bo->backing);
         bo->backing = nullptr;
@@ -313,7 +320,8 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     fDrmLock = IOLockAlloc();
     fDrm = (rdna3_drm_device *)drmZalloc(this, sizeof(*fDrm));
     fVramHeap = (range_alloc *)drmZalloc(this, sizeof(*fVramHeap));
-    if (!fDrmLock || !fDrm || !fVramHeap) {
+    fVramHeapHi = (range_alloc *)drmZalloc(this, sizeof(*fVramHeapHi));
+    if (!fDrmLock || !fDrm || !fVramHeap || !fVramHeapHi) {
         drmFree();
         return false;
     }
@@ -325,12 +333,23 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
                                                  kIOMapWriteCombineCache);
     uint64_t visible = fVramMap ? fVramMap->getLength() : 0;
 
-    /* above the boot scanout when the firmware put a large one high */
-    uint64_t heapStart = fDispReserveEnd > kUserVramStart ? fDispReserveEnd : kUserVramStart;
-    if (fVramSize > heapStart + kUserVramTopReserve)
-        range_alloc_init(fVramHeap, heapStart, fVramSize - heapStart - kUserVramTopReserve);
+    /* user heaps between the kernel's two windows (layout in RDNA3Accel.hpp) */
+    uint64_t heapStart = (fDispReserveEnd > kVramKernelLowStart ? fDispReserveEnd
+                                                                : kVramKernelLowStart) +
+                         kVramKernelLowSize;
+    uint64_t heapEnd = fVramSize > kVramKernelTopSize ? fVramSize - kVramKernelTopSize : 0;
+    uint64_t visEnd = visible < heapEnd ? visible : heapEnd;
+    if (visEnd > heapStart)
+        range_alloc_init(fVramHeap, heapStart, visEnd - heapStart);
     else
         range_alloc_init(fVramHeap, 0, 0);
+    if (visEnd < heapStart)
+        visEnd = heapStart;
+    if (heapEnd > visEnd)
+        range_alloc_init(fVramHeapHi, visEnd, heapEnd - visEnd);
+    else
+        range_alloc_init(fVramHeapHi, 0, 0);
+    fVramHeapVisEnd = visEnd;
 
     /* amdgpu sizes GTT at TTM's page limit, half of system RAM; the kext
      * cannot read the RAM size through the KPIs it links (sysctlbyname is
@@ -384,9 +403,10 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
         rdna3_drm_device_set_enumeration_only(fDrm, 1);
         LOG("rdna3enum=1: reporting accel_working + rings for enumeration; CS still fails");
     }
-    LOG("DRM/amdgpu UAPI ready: VRAM %llu MiB (%llu MiB visible), user heap %llu MiB",
-        (unsigned long long)(fVramSize >> 20), (unsigned long long)(visible >> 20),
-        (unsigned long long)(range_alloc_free_bytes(fVramHeap) >> 20));
+    LOG("DRM/amdgpu UAPI ready: VRAM %llu MiB (%llu MiB visible), user heap %llu MiB visible + "
+        "%llu MiB", (unsigned long long)(fVramSize >> 20), (unsigned long long)(visible >> 20),
+        (unsigned long long)(range_alloc_free_bytes(fVramHeap) >> 20),
+        (unsigned long long)(range_alloc_free_bytes(fVramHeapHi) >> 20));
     setProperty("IOUserClientClass", "RDNA3UserClient");
     return true;
 }
@@ -399,12 +419,15 @@ void RDNA3Accel::drmFree()
         drmFreeMem(this, fDrm, sizeof(*fDrm));
     if (fVramHeap)
         drmFreeMem(this, fVramHeap, sizeof(*fVramHeap));
+    if (fVramHeapHi)
+        drmFreeMem(this, fVramHeapHi, sizeof(*fVramHeapHi));
     if (fDrmLock)
         IOLockFree(fDrmLock);
     OSSafeReleaseNULL(fVramMap);
     OSSafeReleaseNULL(fVramDev);
     fDrm = nullptr;
     fVramHeap = nullptr;
+    fVramHeapHi = nullptr;
     fDrmLock = nullptr;
 }
 

@@ -1,19 +1,19 @@
 {
  "amdgpu": {
-  "works": 111,
-  "ported": 227,
+  "works": 113,
+  "ported": 229,
   "total": 1291,
-  "works_pct": 8.6,
-  "ported_pct": 17.6,
+  "works_pct": 8.8,
+  "ported_pct": 17.7,
   "groups": [
    {
     "name": "PSP 13",
     "steps": [
      "4"
     ],
-    "works": 16,
+    "works": 17,
     "ported": 0,
-    "todo": 104,
+    "todo": 103,
     "items": {
      "acquire_psp_cmd_buf": "todo",
      "amdgpu_bin_flash_attr_is_visible": "todo",
@@ -99,7 +99,7 @@
      "psp_ta_invoke": "todo",
      "psp_ta_load": "todo",
      "psp_ta_unload": "todo",
-     "psp_tmr_init": "todo",
+     "psp_tmr_init": "works",
      "psp_tmr_load": "todo",
      "psp_tmr_terminate": "todo",
      "psp_tmr_unload": "todo",
@@ -1012,9 +1012,9 @@
     "steps": [
      "2"
     ],
-    "works": 51,
+    "works": 52,
     "ported": 0,
-    "todo": 76,
+    "todo": 75,
     "items": {
      "amdgpu_atom_asic_init": "todo",
      "amdgpu_atom_destroy": "todo",
@@ -1029,7 +1029,7 @@
      "amdgpu_atomfirmware_asic_init": "works",
      "amdgpu_atomfirmware_dynamic_boot_config_supported": "todo",
      "amdgpu_atomfirmware_get_clock_info": "todo",
-     "amdgpu_atomfirmware_get_fw_reserved_fb_size": "todo",
+     "amdgpu_atomfirmware_get_fw_reserved_fb_size": "works",
      "amdgpu_atomfirmware_get_gfx_info": "todo",
      "amdgpu_atomfirmware_get_vram_info": "todo",
      "amdgpu_atomfirmware_gpu_virtualization_supported": "todo",

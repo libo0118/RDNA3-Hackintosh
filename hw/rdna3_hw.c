@@ -197,7 +197,42 @@ void rdna3_vram_alloc_init(rdna3_dev *d, uint64_t lo, uint64_t hi)
     d->alloc_lo = lo;
     d->alloc_hi = hi;
     d->alloc_next = lo;
+    d->alloc_top_next = d->alloc_top_hi;
     d->nallocs = 0;
+}
+
+void rdna3_vram_alloc_top_init(rdna3_dev *d, uint64_t lo, uint64_t hi)
+{
+    d->alloc_top_lo = lo;
+    d->alloc_top_hi = hi;
+    d->alloc_top_next = hi;
+}
+
+uint64_t rdna3_vram_alloc_top(rdna3_dev *d, uint64_t size, uint64_t align, const char *tag)
+{
+    uint64_t start;
+    if (!d->alloc_top_hi)
+        return rdna3_vram_alloc(d, size, align, tag);
+    if (!align)
+        align = 4096;
+    if ((align & (align - 1)) || size > d->alloc_top_next ||
+        d->nallocs >= RDNA3_VRAM_MAX_ALLOCS) {
+        RERR(d, "VRAM top alloc of %llu bytes for %s failed", (unsigned long long)size, tag);
+        return UINT64_MAX;
+    }
+    start = (d->alloc_top_next - size) & ~(align - 1);
+    if (start < d->alloc_top_lo) {
+        RERR(d, "VRAM top alloc of %llu bytes for %s failed", (unsigned long long)size, tag);
+        return UINT64_MAX;
+    }
+    d->alloc_top_next = start;
+    d->allocs[d->nallocs].offset = start;
+    d->allocs[d->nallocs].size = size;
+    d->allocs[d->nallocs].tag = tag;
+    d->nallocs++;
+    RDBG(d, "VRAM %-10s 0x%09llx +0x%llx (MC 0x%llx, top-down)", tag, (unsigned long long)start,
+         (unsigned long long)size, (unsigned long long)rdna3_vram_mc(d, start));
+    return start;
 }
 
 uint64_t rdna3_vram_alloc(rdna3_dev *d, uint64_t size, uint64_t align, const char *tag)

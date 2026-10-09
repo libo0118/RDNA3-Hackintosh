@@ -99,6 +99,7 @@ typedef struct sim {
     uint32_t bl_cmds[16];
     unsigned nbl;
     int sos_alive;
+    uint64_t tmr_mc;              /* where SETUP_TMR put the TMR */
 
     /* sOS */
     uint64_t ring_mc;
@@ -453,6 +454,7 @@ static void make_vbios(void)
     put32(b + VB_FWINFO + 8, 50000);    /* 500 MHz boot gfxclk */
     put32(b + VB_FWINFO + 12, 9600);    /* 96 MHz boot uclk */
     put32(b + VB_FWINFO + 24, SIM_BIOS_SCRATCH);
+    put32(b + VB_FWINFO + 84, 16 * 1024);  /* fw_reserved_size_in_kb */
     put16(b + VB_FWINFO + 28, 800);
     put16(b + VB_FWINFO + 30, 1250);
     put32(b + VB_FWINFO + 60, 0);       /* pptable from VBIOS/PMFW, not the driver */
@@ -1318,6 +1320,8 @@ static void psp_exec(uint64_t cmd_mc, uint64_t fence_mc, uint32_t fence_val)
     case GFX_CMD_ID_SETUP_TMR:
         S.tmr_setup = 1;
         S.tmr_after_smu = S.smu_loaded;
+        S.tmr_mc = cmd->cmd.cmd_setup_tmr.buf_phy_addr_lo |
+                   ((uint64_t)cmd->cmd.cmd_setup_tmr.buf_phy_addr_hi << 32);
         if (!cmd->cmd.cmd_setup_tmr.bitfield.virt_phy_addr || cmd->cmd.cmd_setup_tmr.buf_size != 0x600000)
             cmd->resp.status = 0xFFFF0001;
         break;
@@ -2014,6 +2018,9 @@ static void run(const char *fwdir)
     CHECK(S.reg[NBIO_B2 + regRCC_DEV0_EPF0_RCC_DOORBELL_APER_EN] & RCC_DEV0_EPF0_RCC_DOORBELL_APER_EN__BIF_DOORBELL_APER_EN_MASK);
     CHECK(S.reg[NBIO_B2 + regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_BASE_LOW] == 0xF0000000u);
     CHECK(S.reg[NBIO_B2 + regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL] & BIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL__DOORBELL_SELFRING_GPA_APER_EN_MASK);
+    /* the TMR goes top-down out of the CPU-visible window, below the
+     * firmware's reservation (amdgpu: NO_CPU_ACCESS kernel BO, TTM top-down) */
+    rdna3_vram_alloc_top_init(&dev, VRAM_SIZE - (256ull << 20), VRAM_SIZE - (16ull << 20));
     rdna3_vram_alloc_init(&dev, 16u << 20, BAR_LEN);
 
     CHECK(psp13_init(&psp, &dev, sos, sos_len) == RDNA3_OK);
@@ -2026,6 +2033,9 @@ static void run(const char *fwdir)
     CHECK(S.bl_cmds[S.nbl - 1] == 0x20000u);
     CHECK(S.sos_alive && psp.sos_fw_version == 0x00330024);
     CHECK(S.toc_loaded && S.tmr_setup && S.tmr_after_smu);
+    CHECK(psp.tmr >= VRAM_SIZE - (256ull << 20) && psp.tmr + psp.tmr_size <= VRAM_SIZE - (16ull << 20) &&
+          (psp.tmr & (PSP_TMR_ALIGNMENT - 1)) == 0 && S.tmr_mc == FB_START + psp.tmr);
+    CHECK(dev.alloc_next < (32u << 20));          /* the visible window stays free */
     CHECK(S.nipfw == plan.count);
     CHECK(S.ip_fw_types[0] == GFX_FW_TYPE_SMU);
     CHECK(S.autoload && S.autoload_after_rlc_g);
@@ -2051,6 +2061,7 @@ static void run(const char *fwdir)
         CHECK(strcmp(vb.part_number, "RX 7800 XT SIM") == 0);
         CHECK(vbios_data_table(&vb, RD_ATOM_DT_POWERPLAYINFO, NULL, NULL, NULL) == NULL);
         CHECK(vbios_bootup_values(&dev, &vb, &boot) == RDNA3_OK);
+        CHECK(vbios_fw_reserved_fb_size(&vb) == (16ull << 20));
         CHECK(boot.gfxclk == 50000 && boot.uclk == 9600 && boot.socclk == 60000 &&
               boot.fclk == 100000 && boot.vclk == 50000 && boot.vddc == 800 && boot.fw_crev == 4 &&
               boot.firmware_revision == 0x02000f && boot.pp_table_id == 0);

@@ -363,7 +363,9 @@ int psp13_tmr_init(rdna3_psp *psp)
             size = PSP_TMR_SIZE_DEFAULT;
     }
     psp->tmr_size = size;
-    psp->tmr = rdna3_vram_alloc(psp->d, size, PSP_TMR_ALIGNMENT, "psp-tmr");
+    /* psp_tmr_init: amdgpu_bo_create_kernel without a CPU address, i.e.
+     * NO_CPU_ACCESS, which TTM places top-down, out of the visible VRAM */
+    psp->tmr = rdna3_vram_alloc_top(psp->d, size, PSP_TMR_ALIGNMENT, "psp-tmr");
     return psp->tmr == UINT64_MAX ? RDNA3_ENOMEM : RDNA3_OK;
 }
 

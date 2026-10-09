@@ -64,6 +64,19 @@ struct RDNA3Gtt {
     bool                      prepared;  /* userptr: md->prepare() holds the pages wired */
 };
 
+/* VRAM layout (offsets from VRAM start):
+ *   [16 MiB or the boot scanout's end, +kVramKernelLowSize)  kernel, CPU-visible
+ *   [.., end of the BAR window)                              user BOs, visible
+ *   [.., VRAM - kVramKernelTopSize)                          user BOs, not visible
+ *   [VRAM - kVramKernelTopSize, VRAM - firmware reservation) kernel, GPU only
+ *                                                            (PSP TMR), top-down
+ * as amdgpu keeps CPU-visible VRAM for what the CPU maps and lets TTM place
+ * NO_CPU_ACCESS kernel BOs top-down. */
+static const uint64_t kVramKernelLowStart = 16ull << 20;
+static const uint64_t kVramKernelLowSize  = 96ull << 20;
+static const uint64_t kVramKernelTopSize  = 256ull << 20;
+static const uint64_t kVramMinTopReserve  = 16ull << 20;
+
 class RDNA3Accel : public IOService {
     OSDeclareDefaultStructors(RDNA3Accel)
 
@@ -108,7 +121,9 @@ private:
     /* Stage 4 */
     rdna3_drm_device *fDrm  = nullptr;
     IOLock       *fDrmLock  = nullptr;
-    range_alloc  *fVramHeap = nullptr;
+    range_alloc  *fVramHeap = nullptr;   /* user BOs, CPU-visible part of VRAM */
+    range_alloc  *fVramHeapHi = nullptr; /* user BOs beyond the BAR window */
+    uint64_t      fVramHeapVisEnd = 0;   /* offsets below this are in fVramHeap */
     IOMemoryMap  *fVramMap  = nullptr;   /* BAR0, for BO clears / kernel access */
     IODeviceMemory *fVramDev = nullptr;  /* BAR0 descriptor for user mappings */
     bool          drmInit(const amd_discovery *disc);
