@@ -50,6 +50,23 @@
 #define regMP1_SMN_C2PMSG_90            0x029a   /* response */
 #define regMP1_SMN_C2PMSG_90_BASE_IDX   0
 
+/* ---- SMUIO 13.0.6 (asic_reg/smuio/smuio_13_0_6_offset.h): VBIOS ROM window ---- */
+#define regROM_INDEX                    0x00e4
+#define regROM_INDEX_BASE_IDX           0
+#define regROM_DATA                     0x00e5
+#define regROM_DATA_BASE_IDX            0
+
+/* ---- NBIO 4.3: ROM offset strap (nbio_v4_3_get_rom_offset); segment 5 is
+ * beyond the BAR, so rdna3_rreg reaches it through the RSMU window ---- */
+#define regREGS_ROM_OFFSET_CTRL         0xcc23
+#define regREGS_ROM_OFFSET_CTRL_BASE_IDX 5
+#define REGS_ROM_OFFSET_CTRL__ROM_OFFSET_MASK 0x7F
+
+/* ---- MP1 firmware flags (smu_v13_0_7_check_fw_status): SMN byte address,
+ * MP1_Public (0x03b00000) | smnMP1_FIRMWARE_FLAGS_SMU_13_0_7 ---- */
+#define RD_SMN_MP1_FIRMWARE_FLAGS       0x03b10028u
+#define MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK 0x1
+
 /* ---- GC 11.0.3 (asic_reg/gc/gc_11_0_3_offset.h / _sh_mask.h) ---- */
 #define regGRBM_STATUS                  0x0da4
 #define regGRBM_STATUS_BASE_IDX         0
