@@ -381,6 +381,7 @@ cmd_args() {
 }
 
 DM=0
+VT=
 DEVS=()
 # amdgpu grows BAR0 to all of VRAM (16 GiB) by itself, even with Resizable
 # BAR off in the BIOS; the VM's UEFI then fails to bring up the card's GOP.
@@ -405,6 +406,8 @@ resize_bar0() {
 
 detach() {
     local d drv
+    # the desktop's virtual terminal, to switch back to it afterwards
+    VT=$(sed -n 's/^tty\([0-9][0-9]*\)$/\1/p' /sys/class/tty/tty0/active 2>/dev/null || true)
     if systemctl is-active --quiet display-manager 2>/dev/null; then
         DM=1; systemctl stop display-manager; sleep 3
     fi
@@ -455,6 +458,11 @@ restore() {
     fi
     for d in /sys/class/vtconsole/vtcon*/bind; do echo 1 > "$d" 2>/dev/null || true; done
     [ $DM = 1 ] && systemctl start display-manager
+    # the suspend / restart leaves a text console in front: go back to the
+    # desktop's terminal once the login screen is up
+    if [ -n "$VT" ] && command -v chvt >/dev/null; then
+        sleep 4; chvt "$VT" 2>/dev/null || true
+    fi
     return 0
 }
 
