@@ -6,6 +6,8 @@
  *   rdna3_drminfo --dma-test   (rdna3lvl>=7) also submits an SDMA IB from a
  *                              VRAM BO through AMDGPU_CS and checks what the
  *                              GPU wrote: the first userspace job on the card.
+ *   rdna3_drminfo --gfx-test   (rdna3lvl>=8) the same with a PM4 WRITE_DATA IB
+ *                              on the GFX ring.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -18,7 +20,7 @@
 
 #define IOCTL(fd, nr, arg) drm_xnu_ioctl_nr((fd), (nr), &(arg), sizeof(arg))
 
-static int dma_test(int fd)
+static int job_test(int fd, int gfx)
 {
     union drm_amdgpu_gem_create c;
     union drm_amdgpu_gem_mmap m;
@@ -51,18 +53,32 @@ static int dma_test(int fd)
     if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va)) { perror("GEM_VA"); return 1; }
 
     memset(p, 0, 64 << 10);
-    p[n++] = 2;                       /* WRITE_LINEAR 2 dwords at +32K */
-    p[n++] = (uint32_t)(gva + 0x8000); p[n++] = 0; p[n++] = 1;
-    p[n++] = 0xC0FFEE01; p[n++] = 0xC0FFEE02;
-    p[n++] = 11;                      /* CONST_FILL 256 bytes at +48K */
-    p[n++] = (uint32_t)(gva + 0xC000); p[n++] = 0; p[n++] = 0x5A5A5A5A; p[n++] = 255;
-    while (n & 7)
-        p[n++] = 0;
+    if (!gfx) {
+        p[n++] = 2;                   /* SDMA WRITE_LINEAR 2 dwords at +32K */
+        p[n++] = (uint32_t)(gva + 0x8000); p[n++] = 0; p[n++] = 1;
+        p[n++] = 0xC0FFEE01; p[n++] = 0xC0FFEE02;
+        p[n++] = 11;                  /* SDMA CONST_FILL 256 bytes at +48K */
+        p[n++] = (uint32_t)(gva + 0xC000); p[n++] = 0; p[n++] = 0x5A5A5A5A; p[n++] = 255;
+        while (n & 7)
+            p[n++] = 0;
+    } else {
+        /* PM4 WRITE_DATA (DST_SEL 5 = memory, WR_CONFIRM): 2 dwords at +32K,
+         * then 64 dwords of 0x5A5A5A5A at +48K */
+        p[n++] = (3u << 30) | (0x37u << 8) | ((3u + 2 - 1) << 16);
+        p[n++] = (5u << 8) | (1u << 20);
+        p[n++] = (uint32_t)(gva + 0x8000); p[n++] = 0;
+        p[n++] = 0xC0FFEE01; p[n++] = 0xC0FFEE02;
+        p[n++] = (3u << 30) | (0x37u << 8) | ((3u + 64 - 1) << 16);
+        p[n++] = (5u << 8) | (1u << 20);
+        p[n++] = (uint32_t)(gva + 0xC000); p[n++] = 0;
+        for (unsigned i = 0; i < 64; i++)
+            p[n++] = 0x5A5A5A5A;
+    }
 
     memset(&ib, 0, sizeof(ib));
     ib.va_start = gva;
     ib.ib_bytes = n * 4;
-    ib.ip_type = AMDGPU_HW_IP_DMA;
+    ib.ip_type = gfx ? AMDGPU_HW_IP_GFX : AMDGPU_HW_IP_DMA;
     ch.chunk_id = AMDGPU_CHUNK_ID_IB;
     ch.length_dw = sizeof(ib) / 4;
     ch.chunk_data = (uint64_t)(uintptr_t)&ib;
@@ -70,22 +86,26 @@ static int dma_test(int fd)
     memset(&cs, 0, sizeof(cs));
     cs.in.num_chunks = 1;
     cs.in.chunks = (uint64_t)(uintptr_t)&chunk_ptr;
-    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_CS), cs)) { perror("AMDGPU_CS (needs rdna3lvl>=7)"); return 1; }
-    printf("DMA job submitted, fence %llu\n", (unsigned long long)cs.out.handle);
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_CS), cs)) {
+        perror(gfx ? "AMDGPU_CS (GFX needs rdna3lvl>=8)" : "AMDGPU_CS (DMA needs rdna3lvl>=7)");
+        return 1;
+    }
+    printf("%s job submitted, fence %llu\n", gfx ? "GFX" : "DMA", (unsigned long long)cs.out.handle);
 
     clock_gettime(CLOCK_MONOTONIC, &ts);
     memset(&w, 0, sizeof(w));
     w.in.handle = cs.out.handle;
-    w.in.ip_type = AMDGPU_HW_IP_DMA;
+    w.in.ip_type = ib.ip_type;
     w.in.timeout = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec + 2000000000ull;
     if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w)) { perror("WAIT_CS"); return 1; }
-    if (w.out.status) { printf("DMA job did NOT complete within 2 s\n"); return 1; }
+    if (w.out.status) { printf("%s job did NOT complete within 2 s\n", gfx ? "GFX" : "DMA"); return 1; }
 
     bad += p[0x8000 / 4] != 0xC0FFEE01 || p[0x8000 / 4 + 1] != 0xC0FFEE02;
     for (unsigned i = 0; i < 64; i++)
         bad += p[0xC000 / 4 + i] != 0x5A5A5A5A;
     bad += p[0xC000 / 4 + 64] != 0;
-    printf("DMA job results %s\n", bad ? "WRONG" : "verified (WRITE_LINEAR + CONST_FILL)");
+    printf("%s job results %s\n", gfx ? "GFX" : "DMA",
+           bad ? "WRONG" : (gfx ? "verified (PM4 WRITE_DATA)" : "verified (WRITE_LINEAR + CONST_FILL)"));
     drm_xnu_munmap(p, 64 << 10);
     return bad != 0;
 }
@@ -153,8 +173,12 @@ int main(int argc, char **argv)
         cl.pad = 0;
         if (IOCTL(fd, RD_NR_GEM_CLOSE, cl)) { perror("GEM_CLOSE"); fails++; }
     }
-    if (argc > 1 && !strcmp(argv[1], "--dma-test"))
-        fails += dma_test(fd);
+    for (int a = 1; a < argc; a++) {
+        if (!strcmp(argv[a], "--dma-test"))
+            fails += job_test(fd, 0);
+        else if (!strcmp(argv[a], "--gfx-test"))
+            fails += job_test(fd, 1);
+    }
     drm_xnu_close(fd);
     printf("%s\n", fails ? "SOME CHECKS FAILED" : "Stage 4 UAPI smoke test passed");
     return fails ? 1 : 0;
