@@ -259,6 +259,16 @@ uint32_t RDNA3Accel::drmVmQuery(void *ctx, void *vm)
     return a->fBringup ? a->fBringup->vmQuery(vm) : 0;
 }
 
+void RDNA3Accel::drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t minMclkKhz,
+                              uint32_t maxMclkKhz)
+{
+    if (!fDrm || !fDrmLock)
+        return;
+    IOLockLock(fDrmLock);
+    rdna3_drm_device_set_clocks(fDrm, minSclkKhz, maxSclkKhz, minMclkKhz, maxMclkKhz);
+    IOLockUnlock(fDrmLock);
+}
+
 void RDNA3Accel::drmRingReady(uint32_t ip, uint32_t mask)
 {
     if (!fDrm || !fDrmLock)

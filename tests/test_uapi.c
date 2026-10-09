@@ -253,6 +253,13 @@ int main(void)
             bm[0][1] = 0x3ff; bm[2][1] = 0x3ff;
             rdna3_drm_device_set_cu_info(&dev, bm, 60, 0xfff);
         }
+        /* clocks from DPM: 500..2124 MHz gfx, 96..1218 MHz uclk; 0 keeps */
+        rdna3_drm_device_set_clocks(&dev, 500000, 2124000, 96000, 1218000);
+        rdna3_drm_device_set_clocks(&dev, 0, 0, 0, 0);
+        memset(&di, 0, sizeof(di));
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0);
+        CHECK(di.min_engine_clock == 500000 && di.max_engine_clock == 2124000 &&
+              di.min_memory_clock == 96000 && di.max_memory_clock == 1218000);
     }
     /* hw ip */
     {

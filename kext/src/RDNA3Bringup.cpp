@@ -677,6 +677,10 @@ void RDNA3Bringup::pmInit()
     publish("RDNA3,PMResult", (uint64_t)(int64_t)ret);
     if (ret) {
         publishString("RDNA3,PM", "failed: smu_smc_hw_setup");
+        /* DEV_INFO clocks: the VBIOS boot clocks (10 kHz units) at least */
+        if (fOwner && fSmu->boot.gfxclk)
+            fOwner->drmSetClocks(fSmu->boot.gfxclk * 10, fSmu->boot.gfxclk * 10, fSmu->boot.uclk * 10,
+                                 fSmu->boot.uclk * 10);
         return;
     }
     fPmUp = true;
@@ -693,6 +697,12 @@ void RDNA3Bringup::pmInit()
     publish("RDNA3,PMTempLimitEdge", fSmu->pptable.SkuTable.TemperatureLimit[TEMP_EDGE]);
     publish("RDNA3,PMTempLimitHotspot", fSmu->pptable.SkuTable.TemperatureLimit[TEMP_HOTSPOT]);
     publish("RDNA3,PMFanMaxRPM", fSmu->pptable.SkuTable.FanMaximumRpm);
+
+    /* DEV_INFO clock range (amdgpu_kms with dpm_enabled: amdgpu_dpm_get_sclk
+     * / get_mclk, lowest and highest DPM level), MHz -> kHz */
+    if (fOwner && fSmu->gfx.count && fSmu->uclk.count)
+        fOwner->drmSetClocks(fSmu->gfx.level[0] * 1000, fSmu->gfx.level[fSmu->gfx.count - 1] * 1000,
+                             fSmu->uclk.level[0] * 1000, fSmu->uclk.level[fSmu->uclk.count - 1] * 1000);
 }
 
 /* SMU_TABLE_SMU_METRICS snapshot into the IORegistry */

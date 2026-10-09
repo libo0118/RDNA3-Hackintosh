@@ -213,6 +213,10 @@ void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_
 /* Harvesting read from the GC (gfx11_get_cu_info): replaces the "all CUs
  * and RBs active" defaults in DEV_INFO. 'bitmap' uses cu_info->bitmap[0]'s
  * 4x4 layout. */
+/* DEV_INFO engine/memory clock range in kHz (amdgpu_kms: from DPM when it
+ * runs, else the VBIOS boot clocks). 0 leaves a value as it is. */
+void rdna3_drm_device_set_clocks(rdna3_drm_device *dev, uint32_t min_sclk_khz, uint32_t max_sclk_khz,
+                                 uint32_t min_mclk_khz, uint32_t max_mclk_khz);
 void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4][4],
                                   uint32_t cu_active, uint32_t rb_mask);
 

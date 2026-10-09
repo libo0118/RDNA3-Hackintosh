@@ -83,6 +83,7 @@ public:
 
     /* called by the bring-up thread when a ring really executes */
     void  drmRingReady(uint32_t ip, uint32_t mask);
+    void  drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t minMclkKhz, uint32_t maxMclkKhz);
     RDNA3Bringup *bringup() const { return fBringup; }
 
     /* Stage 3: VRAM below this offset holds the firmware's scanout(s);

@@ -73,7 +73,8 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
     di->num_shader_arrays_per_engine = sa;
     di->num_cu_per_sh = cu_per_sa;
     di->gpu_counter_freq = 100000;        /* soc21_get_xclk(): 100 MHz, in kHz */
-    /* TODO(stage2-smu): real clocks from the SMU DPM tables */
+    /* placeholders until the SMU's DPM tables or the VBIOS boot clocks
+     * arrive (rdna3_drm_device_set_clocks) */
     di->max_engine_clock = di->min_engine_clock = 2430000;
     di->max_memory_clock = di->min_memory_clock = 2438000;
 
@@ -146,6 +147,16 @@ void rdna3_drm_device_set_enumeration_only(rdna3_drm_device *dev, int on)
     dev->available_rings[AMDGPU_HW_IP_GFX] = on ? 1 : 0;
     dev->available_rings[AMDGPU_HW_IP_COMPUTE] = on ? 1 : 0;
     dev->available_rings[AMDGPU_HW_IP_DMA] = on ? 1 : 0;
+}
+
+void rdna3_drm_device_set_clocks(rdna3_drm_device *dev, uint32_t min_sclk_khz, uint32_t max_sclk_khz,
+                                 uint32_t min_mclk_khz, uint32_t max_mclk_khz)
+{
+    struct drm_amdgpu_info_device *di = &dev->dev_info;
+    if (min_sclk_khz) di->min_engine_clock = min_sclk_khz;
+    if (max_sclk_khz) di->max_engine_clock = max_sclk_khz;
+    if (min_mclk_khz) di->min_memory_clock = min_mclk_khz;
+    if (max_mclk_khz) di->max_memory_clock = max_mclk_khz;
 }
 
 void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4][4],
