@@ -27,6 +27,7 @@
 #include "vbios.h"
 #include "dcaux.h"
 #include "edid.h"
+#include "atom.h"
 #include "gen/dcn_3_2_1_aux.h"
 #include "gmc11.h"
 #include "gen/gc_11_0_3_gmc.h"
@@ -201,6 +202,176 @@ static void put32(uint8_t *p, uint32_t v) { put16(p, (uint16_t)v); put16(p + 2, 
 #define SIM_SMU_SUPPORTED ((RD_SMU_FEATURES_AMDGPU | RD_SMU_FEATURE(FEATURE_GFXOFF_BIT)) & \
                            ~RD_SMU_FEATURE(FEATURE_DPM_DCN_BIT))
 
+/* ---- display object table and GPIO pin LUT (bios_parser2 view) ----
+ * DP on UNIPHY A fed by DDC1 / HPD1 (the sink model sits on AUX0), HDMI on
+ * UNIPHY B fed by DDC2 / HPD2, plus a generic object DC skips. */
+#define VB_OBJ      0x1000
+#define VB_GPIOLUT  0x1100
+#define VB_IIO      0x1180
+#define VB_CMD_DIR  0x900
+#define VB_CMD_CODE 0xA00
+#define ATOM_REG_A  0xFF00u    /* plain storage registers the bytecode pokes (16-bit operands) */
+#define ATOM_REG_B  0xFF04u
+#define ATOM_REG_C  0xFF08u
+
+static void make_vbios_display(void)
+{
+    uint8_t *b = S.vbios, *t = b + VB_OBJ, *g = b + VB_GPIOLUT;
+    static const struct { uint32_t reg; uint8_t shift, id; } pins[] = {
+        { 0x34C0u + 0x28d1u, 0, 0x90 },   /* DDC1 */
+        { 0x34C0u + 0x28d5u, 0, 0x91 },   /* DDC2 */
+        { 0x34C0u + 0x28f5u, 0x00, 0x10 },/* HPD1 */
+        { 0x34C0u + 0x28f5u, 0x08, 0x11 },/* HPD2 */
+    };
+    unsigned i;
+    /* display_object_info_table_v1_4: 8-byte header, 3 paths of 16 bytes */
+    t[2] = 1; t[3] = 4;
+    put16(t + 4, 0x0088);
+    t[6] = 3;
+    /* path 0: DP enum 1 -> UNIPHY A, records at +0x40, encoder records at +0x60 */
+    put16(t + 8, 0x3113); put16(t + 10, 0x40); put16(t + 12, 0x211E);
+    put16(t + 16, 0x60); put16(t + 20, 0x0008);
+    /* path 1: HDMI enum 1 -> UNIPHY B, records at +0x70 */
+    put16(t + 24, 0x310C); put16(t + 26, 0x70); put16(t + 28, 0x221E); put16(t + 36, 0x0080);
+    /* path 2: a generic object (GLSync) without encoder */
+    put16(t + 40, 0x6102); put16(t + 42, 0);
+    put16(t, 8 + 3 * 16);
+    /* records: I2C, HPD, connector speed; then the encoder caps */
+    memcpy(t + 0x40, "\x01\x04\x90\x00" "\x02\x04\x10\x01" "\x04\x08\xa4\x1f\x00\x00\x00\x00" "\xff\x02", 18);
+    memcpy(t + 0x60, "\x14\x06\x0b\x00\x00\x00" "\xff\x02", 8);
+    memcpy(t + 0x70, "\x01\x04\x91\x00" "\x02\x04\x11\x01" "\xff\x02", 10);
+    /* atom_gpio_pin_lut_v2_1 */
+    put16(g, (uint16_t)(4 + 8 * 4)); g[2] = 2; g[3] = 1;
+    for (i = 0; i < 4; i++) {
+        put32(g + 4 + 8 * i, pins[i].reg);
+        g[4 + 8 * i + 4] = pins[i].shift;
+        g[4 + 8 * i + 6] = pins[i].id;
+    }
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_DISPLAYOBJECTINFO, VB_OBJ);
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_GPIO_PIN_LUT, VB_GPIOLUT);
+}
+
+/* ---- AtomBIOS command tables: a tiny assembler for the bytecode ---- */
+static uint32_t vb_pc, vb_start;
+static void E8(uint32_t v)  { S.vbios[vb_pc++] = (uint8_t)v; }
+static void E16(uint32_t v) { put16(S.vbios + vb_pc, (uint16_t)v); vb_pc += 2; }
+static void E32(uint32_t v) { put32(S.vbios + vb_pc, v); vb_pc += 4; }
+static uint32_t here(void)  { return vb_pc - vb_start; }   /* jump targets: table-relative */
+static void table_begin(unsigned index, unsigned ws_dwords, unsigned ps_bytes)
+{
+    vb_pc = (vb_pc + 15) & ~15u;
+    vb_start = vb_pc;
+    put16(S.vbios + VB_CMD_DIR + 4 + 2 * index, (uint16_t)vb_pc);
+    E16(0); E8(1); E8(1);      /* size, frev, crev */
+    E8(ws_dwords); E8(ps_bytes);
+}
+static void table_end(void) { put16(S.vbios + vb_start, (uint16_t)(vb_pc - vb_start)); }
+
+enum { OP_MOVE_REG = 1, OP_MOVE_PS = 2, OP_MOVE_WS = 3, OP_MOVE_FB = 4, OP_SHL_WS_IMM = 21,
+       OP_MUL_PS = 32, OP_DIV_WS = 39, OP_ADD_WS = 45, OP_SETPORT_ATI = 55, OP_SETFBBASE = 59,
+       OP_COMPARE_WS = 62, OP_SWITCH = 66, OP_JUMP = 67, OP_JUMP_BELOW = 69, OP_DELAY_MS = 80,
+       OP_DELAY_US = 81, OP_CALLTABLE = 82, OP_EOT = 91, OP_MASK_WS = 94, OP_SETDATABLOCK = 102,
+       OP_XOR_WS = 105 };
+/* attr: src arg (0-2), src alignment (3-5), dst alignment selector (6-7) */
+#define A_PS 0x01
+#define A_WS 0x02
+#define A_FB 0x03
+#define A_ID 0x04
+#define A_IMM 0x05
+#define A_IMM_B0 0x25
+
+static void make_vbios_cmd_tables(void)
+{
+    uint8_t *b = S.vbios;
+    uint32_t loop, sw_case3, t2, fixup5, fixup3;
+
+    put16(b + VB_ROM_HDR + 0x1E, VB_CMD_DIR);
+    put16(b + VB_CMD_DIR, 4 + 2 * RD_ATOM_CMD_COUNT); b[VB_CMD_DIR + 2] = 2; b[VB_CMD_DIR + 3] = 1;
+    vb_pc = VB_CMD_CODE;
+
+    /* ASIC_Init: REG_A = PS[0] (boot sclk) */
+    table_begin(RD_ATOM_CMD_ASIC_INIT, 0, 8);
+    E8(OP_MOVE_REG); E8(A_PS); E16(ATOM_REG_A); E8(0);
+    E8(OP_EOT);
+    table_end();
+
+    /* SetEngineClock (10): PS[0] *= 2 through the quotient register */
+    table_begin(RD_ATOM_CMD_SET_ENGINE_CLOCK, 0, 4);
+    E8(OP_MUL_PS); E8(A_IMM); E8(0); E32(2);
+    E8(OP_MOVE_PS); E8(A_WS); E8(0); E8(0x40);
+    E8(OP_EOT);
+    table_end();
+
+    /* SetPixelClock (12): the opcode tour */
+    table_begin(RD_ATOM_CMD_SET_PIXEL_CLOCK, 3, 8);
+    E8(OP_MOVE_WS); E8(A_PS); E8(0); E8(0);                   /* WS0 = PS0 */
+    E8(OP_ADD_WS); E8(A_IMM); E8(0); E32(0x10);              /* WS0 += 16 */
+    E8(OP_MOVE_REG); E8(A_WS); E16(ATOM_REG_A); E8(0);        /* REG_A = WS0 */
+    loop = here();
+    E8(OP_ADD_WS); E8(A_IMM_B0); E8(1); E8(1);                /* WS1.b0++ */
+    E8(OP_COMPARE_WS); E8(A_IMM_B0); E8(1); E8(5);
+    E8(OP_JUMP_BELOW); E16(loop);                            /* while < 5 */
+    E8(OP_MOVE_WS); E8(A_IMM); E8(2); E32(0x00F0F0F0);
+    E8(OP_MASK_WS); E8(A_IMM); E8(2); E32(0xFFFF0000); E32(0x1234);   /* 0x00F01234 */
+    E8(OP_SHL_WS_IMM); E8(0x00); E8(2); E8(4);               /* 0x0F012340 */
+    E8(OP_XOR_WS); E8(A_IMM); E8(2); E32(0x0F000000);         /* 0x00012340 */
+    E8(OP_MOVE_REG); E8(A_WS); E16(ATOM_REG_B); E8(2);
+    E8(OP_SWITCH); E8(A_WS); E8(1);
+    E8(0x63); E32(3); fixup3 = vb_pc; E16(0);
+    E8(0x63); E32(5); fixup5 = vb_pc; E16(0);
+    E8(0x5A); E8(0x5A);
+    sw_case3 = here();                                       /* default and case 3: wrong */
+    E8(OP_MOVE_PS); E8(A_IMM); E8(2); E32(0xBAD);
+    t2 = here();
+    put16(b + fixup3, (uint16_t)sw_case3);
+    put16(b + fixup5, (uint16_t)t2);
+    E8(OP_CALLTABLE); E8(RD_ATOM_CMD_SET_ENGINE_CLOCK);       /* PS[2] (callee PS0) *= 2 */
+    E8(OP_SETDATABLOCK); E8(RD_ATOM_DT_FIRMWAREINFO);
+    E8(OP_MOVE_PS); E8(A_ID); E8(1); E16(8);                  /* PS1 = fwinfo boot sclk */
+    E8(OP_SETFBBASE); E8(A_IMM); E32(0x10);
+    E8(OP_MOVE_FB); E8(A_IMM); E8(1); E32(0xABCD);            /* scratch[5] */
+    E8(OP_MOVE_PS); E8(A_FB); E8(3); E8(1);                   /* PS3 = FB[1] */
+    E8(OP_SETPORT_ATI); E16(1);
+    E8(OP_MOVE_REG); E8(A_PS); E16(0); E8(1);                 /* IIO write method 0x81 */
+    E8(OP_SETPORT_ATI); E16(0);
+    E8(OP_DELAY_US); E8(10);
+    E8(OP_DIV_WS); E8(A_IMM); E8(0); E32(7);
+    E8(OP_MOVE_PS); E8(A_WS); E8(0); E8(0x40);                /* PS0 = WS0 / 7 */
+    E8(OP_EOT);
+    table_end();
+
+    /* EnableDispPowerGating (13): a loop that never ends */
+    table_begin(RD_ATOM_CMD_ENABLE_DISP_POWER_GATING, 0, 0);
+    E8(OP_DELAY_MS); E8(255);
+    E8(OP_JUMP); E16(6);
+    table_end();
+
+    /* BlankCRTC (34): reads data far outside the image */
+    table_begin(RD_ATOM_CMD_BLANK_CRTC, 1, 0);
+    E8(OP_MOVE_WS); E8(A_ID); E8(0); E16(0xFFF0);
+    E8(OP_EOT);
+    table_end();
+
+    /* EnableCRTC (35): calls itself */
+    table_begin(RD_ATOM_CMD_ENABLE_CRTC, 0, 0);
+    E8(OP_CALLTABLE); E8(RD_ATOM_CMD_ENABLE_CRTC);
+    E8(OP_EOT);
+    table_end();
+
+    /* SelectCRTC_Source (42): an opcode past the table ends it quietly */
+    table_begin(RD_ATOM_CMD_SELECT_CRTC_SOURCE, 0, 0);
+    E8(0x7F);
+    table_end();
+
+    /* indirect IO: write method 0x81 = "REG_C = data" (data table 23) */
+    put16(b + VB_DATA_DIR + 4 + 2 * 23, VB_IIO);
+    vb_pc = VB_IIO + 4;
+    E8(1); E8(0x81);                  /* START 0x81 */
+    E8(8); E8(32); E8(0); E8(0);      /* MOVE_DATA 32 bits from 0 to 0 */
+    E8(3); E16(ATOM_REG_C);           /* WRITE */
+    E8(9); E8(0); E8(0);              /* END */
+}
+
 static void make_vbios(void)
 {
     uint8_t *b = S.vbios;
@@ -247,6 +418,8 @@ static void make_vbios(void)
     put16(b + VB_VRAMUSAGE, 12); b[VB_VRAMUSAGE + 2] = 2; b[VB_VRAMUSAGE + 3] = 1;
     put32(b + VB_VRAMUSAGE + 4, (uint32_t)((VRAM_SIZE - (48ull << 20)) >> 10));
     put16(b + VB_VRAMUSAGE + 8, 48 * 1024);
+    make_vbios_display();
+    make_vbios_cmd_tables();
 }
 
 /* the "combo" powerplay table the PMFW hands out: driver portion + PPTable_t
@@ -2325,6 +2498,55 @@ static void run(const char *fwdir)
         CHECK(conn[0].aux == 0 && conn[0].hpd && conn[0].dp && conn[0].dpcd_rev == 0x14 &&
               conn[0].max_link_rate == 0x1e && conn[0].max_lane_count == 4 && conn[0].edid_len == 256);
         CHECK(S.aux_bad == 0);
+    }
+
+    /* AtomBIOS: the interpreter on the bytecode above, and the display
+     * object table (connector -> UNIPHY, DDC line = AUX engine, HPD pin) */
+    {
+        static rdna3_vbios vb;
+        static rdna3_atom at;
+        static uint32_t scratch[64];
+        rdna3_display_path dp[RD_VBIOS_MAX_PATHS];
+        uint32_t ps[8] = { 0 };
+        uint8_t fr = 0, cr = 0;
+        uint64_t t0;
+        CHECK(vbios_parse(&dev, &vb, S.vbios, VBIOS_LEN) == RDNA3_OK);
+        CHECK(atom_init(&at, &dev, &vb, scratch, sizeof(scratch)) == RDNA3_OK);
+        CHECK(at.cmd_table == VB_CMD_DIR && at.iio[0x81] == VB_IIO + 6);
+        CHECK(atom_cmd_revision(&at, RD_ATOM_CMD_SET_PIXEL_CLOCK, &fr, &cr) && fr == 1 && cr == 1);
+        CHECK(!atom_cmd_revision(&at, RD_ATOM_CMD_DIG1_TRANSMITTER_CONTROL, NULL, NULL));
+        CHECK(atom_asic_init(&at) == RDNA3_OK && S.reg[ATOM_REG_A] == 50000);
+        ps[0] = 100;
+        ps[2] = 21;
+        t0 = S.now_us;
+        CHECK(atom_execute(&at, RD_ATOM_CMD_SET_PIXEL_CLOCK, ps, 8) == RDNA3_OK);
+        CHECK(S.reg[ATOM_REG_A] == 116);              /* move, add, reg write */
+        CHECK(S.reg[ATOM_REG_B] == 0x00012340);       /* mask, shift, xor */
+        CHECK(ps[2] == 42);                           /* loop + switch case 5 + nested table */
+        CHECK(ps[1] == 50000);                        /* data block + ID operand */
+        CHECK(ps[3] == 0xABCD && scratch[5] == 0xABCD);   /* FB window */
+        CHECK(S.reg[ATOM_REG_C] == 50000);            /* indirect IO write method */
+        CHECK(ps[0] == 116 / 7);                      /* div -> quotient */
+        CHECK(S.now_us - t0 >= 10 && at.tables_run == 3);
+        CHECK(atom_execute(&at, RD_ATOM_CMD_ENABLE_DISP_POWER_GATING, ps, 0) == RDNA3_EINVAL);
+        CHECK(atom_execute(&at, RD_ATOM_CMD_BLANK_CRTC, ps, 0) == RDNA3_EINVAL);
+        CHECK(atom_execute(&at, RD_ATOM_CMD_ENABLE_CRTC, ps, 0) == RDNA3_EINVAL && at.depth == 0);
+        CHECK(atom_execute(&at, RD_ATOM_CMD_SELECT_CRTC_SOURCE, ps, 0) == RDNA3_OK && at.unknown_ops == 1);
+        CHECK(atom_execute(&at, RD_ATOM_CMD_DIG1_TRANSMITTER_CONTROL, ps, 0) == RDNA3_ENOENT);
+        CHECK(at.ws_top == 0);
+        /* still usable after the aborts */
+        ps[0] = 100; ps[2] = 1;
+        CHECK(atom_execute(&at, RD_ATOM_CMD_SET_PIXEL_CLOCK, ps, 8) == RDNA3_OK && ps[2] == 2);
+
+        CHECK(vbios_display_paths(&vb, dp, RD_VBIOS_MAX_PATHS) == 2);
+        CHECK(dp[0].connector == RD_ATOM_CONN_DISPLAYPORT && dp[0].connector_enum == 1 &&
+              dp[0].transmitter == 0 && dp[0].ddc_line == 0 && dp[0].hpd == 0 &&
+              dp[0].hpd_active == 1 && dp[0].max_link_mhz == 8100 && dp[0].device_tag == 0x0008 &&
+              dp[0].encoder_caps == (RD_ATOM_ENC_CAP_MST | RD_ATOM_ENC_CAP_HBR2 | RD_ATOM_ENC_CAP_HBR3));
+        CHECK(dp[1].connector == RD_ATOM_CONN_HDMI_A && dp[1].transmitter == 1 &&
+              dp[1].ddc_line == 1 && dp[1].hpd == 1 && dp[1].encoder_caps == 0);
+        CHECK(strcmp(vbios_connector_name(dp[1].connector), "HDMI") == 0);
+        CHECK(vbios_display_paths(&vb, dp, 1) == 1);
     }
 
     /* GPU reset: mode-1 through the PMFW debug mailbox takes the chip back

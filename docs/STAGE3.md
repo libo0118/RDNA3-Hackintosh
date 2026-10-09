@@ -75,6 +75,27 @@ macOS buduje `IODisplayEDID` i pokazuje nazwę monitora. Modesetting z tych
 trybów wymaga jeszcze: interpretera ATOM (tablice `TransmitterControl`,
 `SetPixelClock`), treningu łącza DP i programowania OTG/HUBP pod nowy tryb.
 
+## Tablica obiektów VBIOS i interpreter AtomBIOS (krok 2)
+
+`vbios_display_paths` (port `bios_parser2`: `get_bios_object`,
+`get_hpd_record`, `get_gpio_i2c_info`) czyta `displayobjectinfo` v1.4/v1.5
+i `gpio_pin_lut`: złącze (DP/HDMI/USB-C), enkoder (UNIPHY A..G), linia DDC
+(= silnik AUX), pin HPD, możliwości enkodera (HBR3, UHBR, MST) i limit
+łącza. Kext publikuje `RDNA3,DisplayPath<n>` i opisuje złącza AUX ich typem.
+Który OTG prowadzi ścieżkę, nie ma w VBIOS: Display Core przydziela potoki
+przy modesecie.
+
+`hw/atom.c` to port `atom.c` z amdgpu: wszystkie 126 opkodów, metody IIO,
+okno FB (scratch), zagnieżdżone `CALLTABLE` (limit 32), wykrywanie pętli
+(20 s zleconych opóźnień) plus budżet opkodów. W odróżnieniu od Linuksa nie
+alokuje pamięci (workspace z puli w kontekście) i sprawdza granice obrazu
+przy każdym odczycie bajtkodu. Kext tworzy kontekst i publikuje wersje
+tablic `DIGxEncoderControl`, `DIG1TransmitterControl`, `SetPixelClock`,
+`EnableDispPowerGating`, `SetDCEClock` (`RDNA3,AtomCommandTables`), ale
+niczego jeszcze nie wykonuje. Symulator ma mini-asembler bajtkodu i testuje
+każdą grupę opkodów, IIO, FB, przerwanie pętli, dostęp poza obraz i
+rekurencję.
+
 ## Ograniczenia (do zrobienia)
 
 * jedna głowica (head 0), jeden tryb; brak EDID (AUX/I2C DCN), brak zmiany

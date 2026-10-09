@@ -92,6 +92,65 @@ int vbios_bootup_values(rdna3_dev *d, const rdna3_vbios *v, rdna3_vbios_boot *b)
  * firmware's reservation at the top of VRAM. 0 when absent. */
 int vbios_fw_vram_reservation(const rdna3_vbios *v, uint64_t *start, uint64_t *size);
 
+/* ---- display object table (displayobjectinfo v1.4 / v1.5, bios_parser2) ----
+ * One entry per display path: connector -> encoder (UNIPHY A..G), the DDC
+ * line that feeds its AUX engine and the HPD pin. Which OTG drives a path
+ * is not in the VBIOS: Display Core assigns pipes at modeset time. */
+#define RD_ATOM_OBJ_TYPE(id)  (((id) >> 12) & 0x7)
+#define RD_ATOM_OBJ_ENUM(id)  (((id) >> 8) & 0x7)
+#define RD_ATOM_OBJ_ID(id)    ((id) & 0xff)
+#define RD_ATOM_OBJ_TYPE_ENCODER   2
+#define RD_ATOM_OBJ_TYPE_CONNECTOR 3
+
+#define RD_ATOM_CONN_DVI_D        0x03
+#define RD_ATOM_CONN_DUAL_DVI_D   0x04
+#define RD_ATOM_CONN_HDMI_A       0x0C
+#define RD_ATOM_CONN_DISPLAYPORT  0x13
+#define RD_ATOM_CONN_EDP          0x14
+#define RD_ATOM_CONN_USBC         0x17
+
+#define RD_ATOM_ENC_UNIPHY   0x1E   /* A (enum 1) / B (enum 2) */
+#define RD_ATOM_ENC_UNIPHY1  0x20   /* C / D */
+#define RD_ATOM_ENC_UNIPHY2  0x21   /* E / F */
+#define RD_ATOM_ENC_UNIPHY3  0x25   /* G */
+
+/* atom_encoder_caps_record.encodercaps */
+#define RD_ATOM_ENC_CAP_MST       0x01
+#define RD_ATOM_ENC_CAP_HBR2      0x02
+#define RD_ATOM_ENC_CAP_HDMI6G    0x04
+#define RD_ATOM_ENC_CAP_HBR3      0x08
+#define RD_ATOM_ENC_CAP_DP2       0x10
+#define RD_ATOM_ENC_CAP_UHBR10    0x20
+#define RD_ATOM_ENC_CAP_UHBR13_5  0x40
+#define RD_ATOM_ENC_CAP_UHBR20    0x80
+#define RD_ATOM_ENC_CAP_USB_C     0x100
+
+#define RD_VBIOS_MAX_PATHS 8
+
+typedef struct rdna3_display_path {
+    uint16_t connector_objid;   /* raw ATOM object ids */
+    uint16_t encoder_objid;
+    uint16_t device_tag;
+    uint8_t  connector;         /* RD_ATOM_CONN_* */
+    uint8_t  connector_enum;    /* 1-based instance of that connector type */
+    int8_t   transmitter;       /* 0 = UNIPHY A .. 6 = G, -1 unknown */
+    int8_t   ddc_line;          /* DDC1 = 0 .. DDC5 = 4: the AUX engine; -1 none */
+    int8_t   hpd;               /* HPD1 = 0 .. HPD6 = 5; -1 none */
+    uint8_t  i2c_id;            /* atom_i2c_record.i2c_id */
+    uint8_t  hpd_pin_id;        /* atom_hpd_int_record.pin_id (GPIO_PIN_LUT id) */
+    uint8_t  hpd_active;        /* plugin_pin_state */
+    uint32_t encoder_caps;      /* RD_ATOM_ENC_CAP_*, 0 when no record */
+    uint32_t connector_caps;
+    uint32_t max_link_mhz;      /* ATOM_CONNECTOR_SPEED_UPTO, 0 when absent */
+} rdna3_display_path;
+
+/* Parse displayobjectinfo into 'out' (up to 'max' paths, connectors only).
+ * Returns the number of paths, 0 when the table is absent, RDNA3_EINVAL
+ * for a malformed one. */
+int vbios_display_paths(const rdna3_vbios *v, rdna3_display_path *out, unsigned max);
+
+const char *vbios_connector_name(uint8_t connector);
+
 #ifdef __cplusplus
 }
 #endif

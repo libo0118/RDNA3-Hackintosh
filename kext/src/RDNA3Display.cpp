@@ -25,6 +25,8 @@ extern "C" {
 #include "dcn32.h"
 #include "dcaux.h"
 #include "edid.h"
+#include "vbios.h"
+#include "atom.h"
 }
 #include "rdna3k_abi.h"
 
@@ -99,8 +101,85 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     }
     fDispReserveEnd = (fDispReserveEnd + (2ull << 20) - 1) & ~((2ull << 20) - 1);
     setNumber("RDNA3,DisplayReserveEnd", fDispReserveEnd, 64);
+    displayReadVbios();
     displayProbeConnectors();
     return true;
+}
+
+#define RD_ATOM_SCRATCH_BYTES (20u * 1024u)   /* amdgpu's minimum FB scratch */
+
+/* The VBIOS display object table (connector -> UNIPHY, DDC line = AUX
+ * engine, HPD pin) and an AtomBIOS context for the command tables Display
+ * Core calls (transmitter control, pixel clock). Nothing is executed here:
+ * the GOP already ran ASIC_Init and lit the boot display. */
+void RDNA3Accel::displayReadVbios()
+{
+    int ret;
+    fDispRom = (uint8_t *)IOMalloc(RD_VBIOS_MAX_LEN);
+    fDispVbios = (rdna3_vbios *)IOMalloc(sizeof(rdna3_vbios));
+    fPaths = (rdna3_display_path *)IOMalloc(sizeof(rdna3_display_path) * RD_VBIOS_MAX_PATHS);
+    if (!fDispRom || !fDispVbios || !fPaths)
+        return;
+    bzero(fDispVbios, sizeof(rdna3_vbios));
+    ret = vbios_read(fDispDev, fDispVbios, fDispRom, RD_VBIOS_MAX_LEN);
+    if (ret != RDNA3_OK) {
+        LOG("display: VBIOS not readable (%d), no display paths", ret);
+        return;
+    }
+    ret = vbios_display_paths(fDispVbios, fPaths, RD_VBIOS_MAX_PATHS);
+    fNPaths = ret > 0 ? (uint32_t)ret : 0;
+    setNumber("RDNA3,DisplayPaths", fNPaths);
+    for (uint32_t i = 0; i < fNPaths; i++) {
+        const rdna3_display_path *p = &fPaths[i];
+        char key[48], val[96];
+        snprintf(key, sizeof(key), "RDNA3,DisplayPath%u", i);
+        snprintf(val, sizeof(val), "%s-%u UNIPHY%c DDC%d HPD%d caps 0x%x max %u MHz",
+                 vbios_connector_name(p->connector), p->connector_enum,
+                 p->transmitter >= 0 ? 'A' + p->transmitter : '?', p->ddc_line + 1, p->hpd + 1,
+                 p->encoder_caps, p->max_link_mhz);
+        setProperty(key, val);
+        LOG("display: path %u: %s", i, val);
+    }
+
+    fAtom = (rdna3_atom *)IOMalloc(sizeof(rdna3_atom));
+    fAtomScratch = (uint32_t *)IOMalloc(RD_ATOM_SCRATCH_BYTES);
+    if (!fAtom || !fAtomScratch)
+        return;
+    bzero(fAtomScratch, RD_ATOM_SCRATCH_BYTES);
+    ret = atom_init(fAtom, fDispDev, fDispVbios, fAtomScratch, RD_ATOM_SCRATCH_BYTES);
+    if (ret != RDNA3_OK) {
+        IOFree(fAtom, sizeof(rdna3_atom));
+        fAtom = nullptr;
+        return;
+    }
+    {
+        static const struct { unsigned idx; const char *name; } t[] = {
+            { RD_ATOM_CMD_DIGX_ENCODER_CONTROL, "DIGxEncoderControl" },
+            { RD_ATOM_CMD_DIG1_TRANSMITTER_CONTROL, "DIG1TransmitterControl" },
+            { RD_ATOM_CMD_SET_PIXEL_CLOCK, "SetPixelClock" },
+            { RD_ATOM_CMD_ENABLE_DISP_POWER_GATING, "EnableDispPowerGating" },
+            { RD_ATOM_CMD_SET_DCE_CLOCK, "SetDCEClock" },
+        };
+        char buf[192];
+        size_t n = 0;
+        buf[0] = 0;
+        for (size_t k = 0; k < sizeof(t) / sizeof(t[0]) && n < sizeof(buf); k++) {
+            uint8_t fr = 0, cr = 0;
+            if (atom_cmd_revision(fAtom, t[k].idx, &fr, &cr))
+                n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%s v%u.%u", n ? ", " : "",
+                                      t[k].name, fr, cr);
+        }
+        setProperty("RDNA3,AtomCommandTables", buf);
+    }
+}
+
+/* the display path whose DDC line feeds AUX engine 'aux' */
+static const rdna3_display_path *path_for_aux(const rdna3_display_path *p, uint32_t n, uint32_t aux)
+{
+    for (uint32_t i = 0; i < n; i++)
+        if (p[i].ddc_line >= 0 && (uint32_t)p[i].ddc_line == aux)
+            return &p[i];
+    return nullptr;
 }
 
 /* DP AUX engines 0-4: HPD sense, DPCD, EDID. Read-only on the display
@@ -122,6 +201,12 @@ void RDNA3Accel::displayProbeConnectors()
         setNumber(key, c->aux);
         snprintf(key, sizeof(key), "RDNA3,Connector%u,HPD", i);
         setNumber(key, (uint64_t)c->hpd);
+        if (const rdna3_display_path *p = path_for_aux(fPaths, fNPaths, c->aux)) {
+            snprintf(key, sizeof(key), "RDNA3,Connector%u,Type", i);
+            setProperty(key, vbios_connector_name(p->connector));
+            snprintf(key, sizeof(key), "RDNA3,Connector%u,Transmitter", i);
+            setNumber(key, (uint64_t)(int64_t)p->transmitter);
+        }
         if (c->dp) {
             snprintf(key, sizeof(key), "RDNA3,Connector%u,DPCD", i);
             setNumber(key, ((uint64_t)c->dpcd_rev << 16) | ((uint64_t)c->max_link_rate << 8) |
@@ -181,6 +266,17 @@ void RDNA3Accel::displayFree()
             if (fDcnCrcOn[i])
                 dcn32_crc_enable(fDispDev, fDcn, i, 0);
     }
+    if (fAtom) IOFree(fAtom, sizeof(rdna3_atom));
+    if (fAtomScratch) IOFree(fAtomScratch, RD_ATOM_SCRATCH_BYTES);
+    if (fPaths) IOFree(fPaths, sizeof(rdna3_display_path) * RD_VBIOS_MAX_PATHS);
+    if (fDispVbios) IOFree(fDispVbios, sizeof(rdna3_vbios));
+    if (fDispRom) IOFree(fDispRom, RD_VBIOS_MAX_LEN);
+    fAtom = nullptr;
+    fAtomScratch = nullptr;
+    fPaths = nullptr;
+    fDispVbios = nullptr;
+    fDispRom = nullptr;
+    fNPaths = 0;
     if (fConnectors) IOFree(fConnectors, sizeof(rdna3_connector) * RD_AUX_ENGINES);
     fConnectors = nullptr;
     fNConnectors = 0;

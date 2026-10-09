@@ -32,7 +32,11 @@ commity z `[skip ci]` i jeden przebieg CI na paczkę zmian.
 Cel: modesetting, EDID, wiele monitorów, hotplug, zmiana rozdzielczości.
 * ✅ Krok 1: DP AUX (DPCD, I2C-over-AUX), HPD sense, EDID + parser trybów
   (`hw/dcaux.c`, `hw/edid.c`), sonda złączy w kexcie, `IODisplayEDID`
-  przez framebuffer. Dalej: interpreter ATOM, DMCUB, trening DP, modeset.
+  przez framebuffer.
+* ✅ Krok 2: interpreter AtomBIOS (`hw/atom.c`), tablica obiektów VBIOS
+  (złącze → UNIPHY, DDC/AUX, HPD, możliwości enkodera).
+  Dalej: DMCUB, wywołania `DIG1TransmitterControl`/`SetPixelClock`
+  (command_table2), trening DP, modeset.
 * Warstwa `dm_services` dla XNU (alokacja, logi, zegary, rejestry, delay)
   i kompilacja `drivers/gpu/drm/amd/display/dc` dla DCN 3.2.1 jako
   biblioteki C w kexcie (MIT). Najpierw `dc_create` + odczyt stanu, potem

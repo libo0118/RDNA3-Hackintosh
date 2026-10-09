@@ -149,6 +149,14 @@ private:
     IOLock       *fDispLock    = nullptr;
     struct rdna3_connector *fConnectors = nullptr;   /* DP AUX / HPD probe (hw/dcaux.c) */
     uint32_t      fNConnectors = 0;
+    /* VBIOS for Display Core: display paths and the AtomBIOS interpreter
+     * (read here, before the bring-up thread starts using the ROM window) */
+    uint8_t      *fDispRom     = nullptr;
+    struct rdna3_vbios *fDispVbios = nullptr;
+    struct rdna3_atom  *fAtom      = nullptr;
+    uint32_t     *fAtomScratch = nullptr;
+    struct rdna3_display_path *fPaths = nullptr;
+    uint32_t      fNPaths      = 0;
     uint32_t      fDispRefresh[4] = {};   /* measured, mHz */
     bool          fDispMeasured = false;
     bool          fDcnCrcOn[4]  = {};
@@ -163,6 +171,7 @@ private:
     IOReturn      displayCursor(struct RD3KDisplayCursor *c);
     IOReturn      displayEdid(struct RD3KDisplayEdid *e);
     void          displayProbeConnectors();
+    void          displayReadVbios();
     static uint32_t dispMmioRd(void *ctx, uint64_t off);
     static void     dispMmioWr(void *ctx, uint64_t off, uint32_t v);
 

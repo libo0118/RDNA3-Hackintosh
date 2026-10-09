@@ -228,3 +228,199 @@ int vbios_fw_vram_reservation(const rdna3_vbios *v, uint64_t *start, uint64_t *s
     *size = (uint64_t)rd16(t + 8) << 10;
     return RDNA3_OK;
 }
+
+/* ---- display object table: bios_parser2 get_bios_object / get_*_record ---- */
+
+#define ATOM_RECORD_END     0xFF
+#define ATOM_REC_I2C        1
+#define ATOM_REC_HPD_INT    2
+#define ATOM_REC_CONN_CAP   3
+#define ATOM_REC_CONN_SPEED 4
+#define ATOM_REC_ENC_CAP    20
+#define ATOM_REC_DISP_CAPS  23
+#define BIOS_MAX_NUM_RECORD 20
+
+/* DCN 3.2 GPIO registers as the GPIO_PIN_LUT names them: absolute dword
+ * offsets (DCN_BASE__INST0_SEG2 0x34C0 + reg), as hw_translate_dcn32.c */
+#define DCN32_SEG2            0x34C0u
+#define DCN32_GPIO_DDC1_A     (DCN32_SEG2 + 0x28d1u)   /* DDCn_A every 4 dwords */
+#define DCN32_GPIO_HPD_A      (DCN32_SEG2 + 0x28f5u)
+
+static const uint8_t *gpio_pin(const rdna3_vbios *v, uint8_t gpio_id, int match_i2c)
+{
+    /* atom_gpio_pin_lut_v2_1: header + atom_gpio_pin_assignment[] (8 bytes) */
+    uint16_t size;
+    uint8_t frev, crev;
+    const uint8_t *t = vbios_data_table(v, RD_ATOM_DT_GPIO_PIN_LUT, &size, &frev, &crev);
+    unsigned i, n;
+    if (!t || crev != 1 || size < 4 + 8)
+        return NULL;
+    n = (size - 4u) / 8u;
+    for (i = 0; i < n; i++) {
+        const uint8_t *p = t + 4 + 8 * i;
+        uint8_t id = p[6];
+        if (match_i2c ? ((id & 0x80) == (gpio_id & 0x80) && (id & 0x70) == (gpio_id & 0x70) &&
+                         (id & 0x0f) == (gpio_id & 0x0f))
+                      : id == gpio_id)
+            return p;
+    }
+    return NULL;
+}
+
+static int hpd_from_pin(const rdna3_vbios *v, uint8_t pin_id)
+{
+    static const uint8_t shifts[6] = { 0x00, 0x08, 0x10, 0x18, 0x1a, 0x1c };
+    const uint8_t *p = gpio_pin(v, pin_id, 0);
+    unsigned i;
+    if (!p || rd32(p) != DCN32_GPIO_HPD_A)
+        return -1;
+    for (i = 0; i < 6; i++)
+        if (p[4] == shifts[i])
+            return (int)i;
+    return -1;
+}
+
+static int ddc_from_i2c(const rdna3_vbios *v, uint8_t i2c_id)
+{
+    const uint8_t *p = gpio_pin(v, i2c_id, 1);
+    if (p) {
+        uint32_t reg = rd32(p);
+        if (reg >= DCN32_GPIO_DDC1_A && reg < DCN32_GPIO_DDC1_A + 5 * 4 &&
+            (reg - DCN32_GPIO_DDC1_A) % 4 == 0)
+            return (int)((reg - DCN32_GPIO_DDC1_A) / 4);
+    }
+    /* no LUT entry: the hardware-assisted I2C line number is the DDC line */
+    if ((i2c_id & 0x80) && (i2c_id & 0x0f) < 5)
+        return i2c_id & 0x0f;
+    return -1;
+}
+
+static void walk_records(const rdna3_vbios *v, uint32_t off, rdna3_display_path *p)
+{
+    unsigned i;
+    for (i = 0; i < BIOS_MAX_NUM_RECORD; i++) {
+        const uint8_t *r;
+        uint8_t type, sz;
+        if (!off || off + 2 > v->len)
+            return;
+        r = v->data + off;
+        type = r[0];
+        sz = r[1];
+        if (type == ATOM_RECORD_END || !sz || off + sz > v->len)
+            return;
+        switch (type) {
+        case ATOM_REC_I2C:
+            if (sz >= 4) {
+                p->i2c_id = r[2];
+                p->ddc_line = (int8_t)ddc_from_i2c(v, r[2]);
+            }
+            break;
+        case ATOM_REC_HPD_INT:
+            if (sz >= 4) {
+                p->hpd_pin_id = r[2];
+                p->hpd_active = r[3];
+                p->hpd = (int8_t)hpd_from_pin(v, r[2]);
+            }
+            break;
+        case ATOM_REC_CONN_CAP:
+            if (sz >= 4)
+                p->connector_caps = rd16(r + 2);
+            break;
+        case ATOM_REC_CONN_SPEED:
+            if (sz >= 6)
+                p->max_link_mhz = rd32(r + 2);
+            break;
+        case ATOM_REC_ENC_CAP:
+            if (sz >= 6)
+                p->encoder_caps = rd32(r + 2);
+            break;
+        case ATOM_REC_DISP_CAPS:
+            if (sz >= 6)
+                p->connector_caps = rd32(r + 2);
+            break;
+        default:
+            break;
+        }
+        off += sz;
+    }
+}
+
+static int8_t transmitter_of(uint16_t enc)
+{
+    unsigned id = RD_ATOM_OBJ_ID(enc), en = RD_ATOM_OBJ_ENUM(enc);
+    int base;
+    if (RD_ATOM_OBJ_TYPE(enc) != RD_ATOM_OBJ_TYPE_ENCODER || en < 1 || en > 2)
+        return -1;
+    switch (id) {
+    case RD_ATOM_ENC_UNIPHY:  base = 0; break;
+    case RD_ATOM_ENC_UNIPHY1: base = 2; break;
+    case RD_ATOM_ENC_UNIPHY2: base = 4; break;
+    case RD_ATOM_ENC_UNIPHY3: base = 6; if (en != 1) return -1; break;
+    default: return -1;
+    }
+    return (int8_t)(base + (int)en - 1);
+}
+
+int vbios_display_paths(const rdna3_vbios *v, rdna3_display_path *out, unsigned max)
+{
+    uint16_t size;
+    uint8_t frev, crev;
+    const uint8_t *t = vbios_data_table(v, RD_ATOM_DT_DISPLAYOBJECTINFO, &size, &frev, &crev);
+    uint32_t tbl;
+    unsigned i, n, cnt = 0;
+
+    if (!t)
+        return 0;
+    if (frev != 1 || (crev != 4 && crev != 5) || size < 8)
+        return RDNA3_EINVAL;
+    tbl = (uint32_t)(t - v->data);
+    n = t[6];
+    if (8u + 16u * n > size)
+        return RDNA3_EINVAL;
+    for (i = 0; i < n && cnt < max; i++) {
+        const uint8_t *e = t + 8 + 16 * i;
+        uint16_t disp = rd16(e), drec = rd16(e + 2), enc = rd16(e + 4);
+        rdna3_display_path *p = &out[cnt];
+        unsigned k;
+        /* a generic object (GLSync, MXM) has no encoder: skip, as DC does */
+        if (!enc || RD_ATOM_OBJ_TYPE(disp) != RD_ATOM_OBJ_TYPE_CONNECTOR)
+            continue;
+        for (k = 0; k < sizeof(*p); k++)
+            ((uint8_t *)p)[k] = 0;
+        p->connector_objid = disp;
+        p->encoder_objid = enc;
+        p->connector = (uint8_t)RD_ATOM_OBJ_ID(disp);
+        p->connector_enum = (uint8_t)RD_ATOM_OBJ_ENUM(disp);
+        p->transmitter = transmitter_of(enc);
+        p->ddc_line = -1;
+        p->hpd = -1;
+        if (crev == 4) {
+            /* atom_display_object_path_v2: ..., encoder_recordoffset at 8,
+             * device_tag at 12 */
+            p->device_tag = rd16(e + 12);
+            walk_records(v, drec ? tbl + drec : 0, p);
+            if (rd16(e + 8))
+                walk_records(v, tbl + rd16(e + 8), p);
+        } else {
+            /* atom_display_object_path_v3: device_tag at 12, no encoder
+             * records (bios_parser2: "not available in v1_5") */
+            p->device_tag = rd16(e + 12);
+            walk_records(v, drec ? tbl + drec : 0, p);
+        }
+        cnt++;
+    }
+    return (int)cnt;
+}
+
+const char *vbios_connector_name(uint8_t c)
+{
+    switch (c) {
+    case RD_ATOM_CONN_DVI_D:       return "DVI-D";
+    case RD_ATOM_CONN_DUAL_DVI_D:  return "DVI-D DL";
+    case RD_ATOM_CONN_HDMI_A:      return "HDMI";
+    case RD_ATOM_CONN_DISPLAYPORT: return "DP";
+    case RD_ATOM_CONN_EDP:         return "eDP";
+    case RD_ATOM_CONN_USBC:        return "USB-C";
+    default:                       return "?";
+    }
+}
