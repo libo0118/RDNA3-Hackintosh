@@ -70,3 +70,5 @@ ile potrzebują przeportowane pliki, a nie emulacja całego jądra Linuksa.
   to nie jest porada prawna.
 * **Horyzont**: macOS 26 jest ostatnim wydaniem na x86_64, więc użyteczność
   projektu kończy się wraz z jego wsparciem.
+
+Test na sprzęcie krok po kroku: [TESTING-HW](TESTING-HW.md) (raport: `tools/macos/collect.sh`).

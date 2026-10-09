@@ -1,0 +1,49 @@
+#!/bin/sh
+# Collect everything needed to diagnose one test boot of RDNA3-Hackintosh
+# into a single archive (run on the hackintosh, after the boot under test):
+#   tools/macos/collect.sh [label]        -> ~/rdna3-report-<label>-<date>.tar.gz
+# Read-only: it changes nothing on the system. sudo only for the kernel log
+# of the last boot when the current user cannot read it.
+set -u
+label=${1:-test}
+stamp=$(date +%Y%m%d-%H%M%S)
+dir=$(mktemp -d "/tmp/rdna3-report-XXXXXX")
+out="$HOME/rdna3-report-$label-$stamp.tar.gz"
+root=$(cd "$(dirname "$0")/../.." && pwd)
+
+run() {   # run <file> <command...>: output and exit code, never stops the script
+    f=$1; shift
+    { echo "\$ $*"; "$@"; echo "[exit $?]"; } > "$dir/$f" 2>&1
+}
+
+run 00-system.txt sw_vers
+uname -a >> "$dir/00-system.txt" 2>&1
+run 01-boot-args.txt nvram boot-args
+run 02-csr.txt csrutil status
+run 03-kexts.txt sh -c "kmutil showloaded 2>/dev/null | grep -i -E 'rdna3|amd|radeon|IONDRV' || kextstat | grep -i -E 'rdna3|amd|radeon'"
+run 04-pci.txt sh -c "ioreg -l -w0 -r -n display 2>/dev/null | head -400"
+run 10-ioreg-core.txt ioreg -l -w0 -r -c RDNA3Accel
+run 11-ioreg-props.txt sh -c "ioreg -l -w0 -r -c RDNA3Accel | grep -E '\"RDNA3,' | grep -v -E 'DiscoveryBinary|,EDID\"'"
+run 12-ioreg-fb.txt ioreg -l -w0 -r -c RDNA3Framebuffer
+run 13-ioreg-accel.txt ioreg -l -w0 -r -c RDNA3Accelerator
+run 14-ioreg-displays.txt sh -c "ioreg -l -w0 -r -c IODisplayConnect | head -200"
+run 15-system-profiler.txt system_profiler SPDisplaysDataType
+run 20-log-rdna3.txt log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3" OR eventMessage CONTAINS "rdna3" OR eventMessage CONTAINS "RD3" OR eventMessage CONTAINS "RDNA3MTL"'
+run 21-log-panics.txt sh -c "ls -lt /Library/Logs/DiagnosticReports/ 2>/dev/null | head -20; for f in \$(ls -t /Library/Logs/DiagnosticReports/*.panic 2>/dev/null | head -2); do echo \"== \$f\"; head -120 \"\$f\"; done"
+run 22-log-windowserver.txt log show --last boot --style compact --predicate 'process == "WindowServer" AND (eventMessage CONTAINS "GPU" OR eventMessage CONTAINS "Metal" OR eventMessage CONTAINS "accel")'
+[ -s "$dir/20-log-rdna3.txt" ] && grep -q "RDNA3" "$dir/20-log-rdna3.txt" || \
+    run 20-log-rdna3-sudo.txt sudo log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3"'
+
+# the discovery blob, decoded when the host tools are built
+if [ -x "$root/tools/macos/ioreg_discovery.sh" ]; then
+    (cd "$dir" && sh "$root/tools/macos/ioreg_discovery.sh" discovery.bin > 30-discovery.txt 2>&1)
+fi
+# userspace view, when the tools are built (rdna3lvl>=2)
+info="$root/build/userspace/rdna3_drminfo"
+[ -x "$info" ] && run 31-drminfo.txt "$info"
+vki="$root/build/mesa/vulkaninfo.log"
+[ -f "$vki" ] && cp "$vki" "$dir/32-vulkaninfo-ci.log"
+
+tar -C "$(dirname "$dir")" -czf "$out" "$(basename "$dir")" && rm -rf "$dir"
+echo "report: $out"
+echo "most useful first: 11-ioreg-props.txt and 20-log-rdna3.txt"
