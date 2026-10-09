@@ -73,6 +73,18 @@ static int aux_acquire(rdna3_dev *d, uint32_t n)
     uint32_t v, i;
     /* dce_aux acquire(): dal_ddc_open(..., GPIO_DDC_CONFIG_TYPE_MODE_AUX) first */
     (void)ddc_pad_aux(d, n, 1);
+    /* dcn10_aux_initialize (link encoder hw_init): the engine follows its own
+     * HPD pin (hpd_source; DDCn and HPDn pair up on this board's VBIOS
+     * paths), no LS reads, receive window 0. With HPD_SEL left at 0 every
+     * engine watched HPD1 and reported AUX_SW_NON_AUX_MODE on the card. */
+    v = RA(d, regDP_AUX0_AUX_CONTROL, n);
+    if (GET(v, DP_AUX0_AUX_CONTROL, AUX_HPD_SEL) != n || GET(v, DP_AUX0_AUX_CONTROL, AUX_LS_READ_EN)) {
+        v = SET(v, DP_AUX0_AUX_CONTROL, AUX_HPD_SEL, n);
+        v = SET(v, DP_AUX0_AUX_CONTROL, AUX_LS_READ_EN, 0);
+        WA(d, regDP_AUX0_AUX_CONTROL, n, v);
+        v = RA(d, regDP_AUX0_AUX_DPHY_RX_CONTROL0, n);
+        WA(d, regDP_AUX0_AUX_DPHY_RX_CONTROL0, n, SET(v, DP_AUX0_AUX_DPHY_RX_CONTROL0, AUX_RX_RECEIVE_WINDOW, 0));
+    }
     v = RA(d, regDP_AUX0_AUX_ARB_CONTROL, n);
     if (GET(v, DP_AUX0_AUX_ARB_CONTROL, AUX_REG_RW_CNTL_STATUS) == DMCU_CAN_ACCESS_AUX)
         return RD_AUX_ERR_ACQUIRE;

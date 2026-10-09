@@ -824,6 +824,13 @@ static void aux_go(uint32_t n)
         S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK | DP_AUX0_AUX_SW_STATUS__AUX_SW_NON_AUX_MODE_MASK;
         return;
     }
+    if (((S.reg[AUXR(regDP_AUX0_AUX_CONTROL, n)] & DP_AUX0_AUX_CONTROL__AUX_HPD_SEL_MASK) >>
+         DP_AUX0_AUX_CONTROL__AUX_HPD_SEL__SHIFT) != n) {
+        /* mode detection on another connector's HPD pin (the card: HPD_SEL 0) */
+        S.aux_non_aux++;
+        S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK | DP_AUX0_AUX_SW_STATUS__AUX_SW_NON_AUX_MODE_MASK;
+        return;
+    }
     if (n != 0) {   /* nothing plugged in: the receiver times out */
         S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK | DP_AUX0_AUX_SW_STATUS__AUX_SW_RX_TIMEOUT_MASK;
         return;
@@ -3196,6 +3203,8 @@ static void run(const char *fwdir)
         CHECK(S.reg[DCN_B2 + regDC_GPIO_DDC1_MASK] & DC_GPIO_DDC1_MASK__AUX_PAD1_MODE_MASK);
         CHECK(!(S.reg[DCN_B2 + regDC_GPIO_DDC3_MASK] & DC_GPIO_DDC1_MASK__AUX_PAD1_MODE_MASK));
         CHECK(S.aux_non_aux == 0);
+        CHECK(((S.reg[AUXR(regDP_AUX0_AUX_CONTROL, 2)] & DP_AUX0_AUX_CONTROL__AUX_HPD_SEL_MASK) >>
+               DP_AUX0_AUX_CONTROL__AUX_HPD_SEL__SHIFT) == 2);
         CHECK(conn[0].aux == 0 && conn[0].hpd && conn[0].dp && conn[0].dpcd_rev == 0x14 &&
               conn[0].max_link_rate == 0x1e && conn[0].max_lane_count == 4 && conn[0].edid_len == 256);
         CHECK(S.aux_bad == 0);
