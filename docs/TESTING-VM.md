@@ -188,11 +188,18 @@ keyboard and mouse back to Linux and restores the desktop:
 The script gives the card back to Linux even when QEMU itself crashes.
 The restore is hooked to the script's exit, not to macOS.
 
-Last resort, when the desktop does not come back after the VM closes: the card
-could not be reset (a known RDNA3 passthrough issue). Then briefly
-press the power button. The VM is no longer running, so Linux shuts down
-normally. After you turn the computer back on, everything works. If even that
-does not work, hold the button for 5 seconds. It does not harm the card.
+After the VM the card does not always come back to Linux (a known RDNA3
+passthrough issue: amdgpu logs `DMCUB error` / `failed to blank crtc` and the
+screen stays black). The script checks for that and then **reboots the
+computer cleanly by itself** (the reports are already saved): wait about a
+minute and log in. To avoid the reboot, set `RESTORE_MODE=suspend` in
+`~/rdna3-vm/config`: after the VM the computer sleeps for 5 seconds, which
+powers the card off and on (needs working suspend). `RESTORE_MODE=reboot`
+always reboots.
+
+Last resort, when nothing happens for 2 minutes after the VM closed: briefly
+press the power button (Linux shuts down normally), or hold it for 5 seconds.
+It does not harm the card.
 
 ## When something goes wrong
 

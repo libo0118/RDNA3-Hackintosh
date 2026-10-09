@@ -173,6 +173,11 @@ CPUS=${CPUS:-$cpus}
 CPU_MODEL="${CPU_MODEL:-$CPU_DEFAULT}"
 TIMEOUT_MIN=${TIMEOUT_MIN:-30}
 AUTO_TIMEOUT_MIN=${AUTO_TIMEOUT_MIN:-8}
+# after the VM: auto = give the card to amdgpu, reboot cleanly if amdgpu
+# cannot drive it (RDNA3 does not always come back from passthrough);
+# suspend = suspend-to-RAM for a few seconds first (powers the card off and
+# on, usually avoids the reboot); reboot = always reboot
+RESTORE_MODE=${RESTORE_MODE:-auto}
 EOF
     [ -n "${BASE_ARGS:-}" ] && echo "BASE_ARGS=\"$BASE_ARGS\"" >> "$CONF"
     ok "$CONF (RAM ${RAM_GB:-$ram} GiB, $cpus CPU)"
@@ -374,14 +379,30 @@ detach() {
 }
 
 restore() {
-    local d
-    echo "== giving the card back to Linux"
+    local d since
+    echo "== giving the card back to Linux (RESTORE_MODE=${RESTORE_MODE:-auto})"
+    if [ "${RESTORE_MODE:-auto}" = reboot ]; then
+        echo "== rebooting (RESTORE_MODE=reboot)"; sync; systemctl reboot; return 0
+    fi
+    if [ "${RESTORE_MODE:-auto}" = suspend ] && command -v rtcwake >/dev/null; then
+        echo "== suspend to RAM for 5 s to power-cycle the card"
+        sync; rtcwake -m mem -s 5 || echo "   suspend failed, going on"
+        sleep 2
+    fi
+    since=$(date '+%Y-%m-%d %H:%M:%S')
     for d in "${DEVS[@]}"; do
         [ -e /sys/bus/pci/drivers/vfio-pci/$d ] && echo "$d" > /sys/bus/pci/drivers/vfio-pci/unbind
         echo > /sys/bus/pci/devices/$d/driver_override
         echo "$d" > /sys/bus/pci/drivers_probe 2>/dev/null || true
     done
-    sleep 2
+    # does amdgpu drive the card again? (otherwise the screen stays black)
+    sleep 12
+    if journalctl -k --since "$since" --no-pager 2>/dev/null |
+       grep -q -E "DMCUB error|failed to blank crtc|amdgpu.*(probe|init).*fail|GPU reset failed|ring .* test failed"; then
+        echo "== amdgpu cannot drive the card after the VM - rebooting cleanly (the reports are saved)"
+        journalctl -k --since "$since" --no-pager | grep -i amdgpu | tail -20
+        sync; systemctl reboot; return 0
+    fi
     for d in /sys/class/vtconsole/vtcon*/bind; do echo 1 > "$d" 2>/dev/null || true; done
     [ $DM = 1 ] && systemctl start display-manager
     return 0
