@@ -1012,6 +1012,7 @@ static void run(const char *fwdir)
         static rdna3_dcn dc;
         const uint64_t gop = FB_START + 0x200000;
         uint32_t r = 0, g = 0, b = 0;
+        memset(&dc, 0, sizeof(dc));   /* run() goes twice (synthetic + real firmware) */
         S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 0)] = HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK;
         S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] = 2u << HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL__SHIFT;
         S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 2)] = 0;   /* not blanked, but its OTG 0 is off */
