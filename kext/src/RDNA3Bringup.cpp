@@ -1088,6 +1088,11 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
     return 0;
 }
 
+bool RDNA3Bringup::vmLive(void *p) const
+{
+    return p && ((const RDNA3Vm *)p)->live && fVmReady;
+}
+
 void RDNA3Bringup::vmUnmap(void *p, uint64_t va, uint64_t size)
 {
     RDNA3Vm *v = (RDNA3Vm *)p;

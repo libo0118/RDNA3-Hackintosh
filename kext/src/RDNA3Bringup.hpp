@@ -77,6 +77,7 @@ public:
     int   vmMap(void *vm, rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size,
                 uint32_t flags);
     void  vmUnmap(void *vm, uint64_t va, uint64_t size);
+    bool  vmLive(void *vm) const;   /* false: record-only (created before the GMC) */
 
     /* command submission (DMA ring 0 = SDMA0 from rdna3lvl=7) */
     int   submit(void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,

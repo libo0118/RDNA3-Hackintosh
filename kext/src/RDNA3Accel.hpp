@@ -136,6 +136,8 @@ private:
 
     /* Stage 7 */
     range_alloc  *fAccelVa = nullptr;
+    void         *fAccelVm = nullptr;    /* the accelerator's GPUVM context (its own VMID) */
+    IOReturn      platformPageoff(struct RD3KSurfPageoff *q);
     uint64_t      fAccelVramBytes = 0;
     bool          platformInit();
     void          platformFree();

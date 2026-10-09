@@ -38,10 +38,11 @@ make -C accel check           # sprawdza, że nie został żaden metaclass NV*
 | `rdna3AllocVram` / `rdna3FreeVram` | ✅ ta sama sterta VRAM co GEM, tylko w zakresie BAR0 (kva + phys) |
 | `rdna3DeviceHandles` | ✅ cookie urządzenia |
 | `rdna3GpuVaAlloc` / `Free` | ✅ zakres 1 TiB od 64 TiB |
-| `rdna3GpuVaMap` | 🟡 zapamiętuje tylko zakres; tablice stron po GPUVM (Etap 2) |
+| `rdna3GpuVaMap` | ✅ własny kontekst GPUVM akceleratora (osobny VMID), liniowe PTE do alokacji VRAM; unmap/free czyści PTE |
 | `rdna3NewAccelClient` | ⬜ `kIOReturnUnsupported`; RADV otwiera `RDNA3Accel` bezpośrednio |
 | `rdna3ScanoutInfo`, `rdna3FlipToSurface`, `rdna3DisplayCrc` | 🟡 `RDNA3Framebuffer` ([STAGE3](STAGE3.md)); flip przez `rdna3DisplayFlip` w rdzeniu, sprawdzone tylko w symulatorze |
-| `rdna3SurfVram` / `rdna3SurfShare` / `rdna3SurfPageoff` | ⬜ współdzielenie IOSurface (Etap 4b) |
+| `rdna3SurfPageoff` | 🟡 kopia VRAM → strony systemowe przez CPU i BAR (wolne, ale dokładne); SDMA przez GART później |
+| `rdna3SurfShare` | ⬜ brak odpowiednika uchwytów RM między klientami; RADV współdzieli przez GEM |
 
 ## Co dalej
 

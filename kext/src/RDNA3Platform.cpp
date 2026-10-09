@@ -6,10 +6,15 @@
  *   rdna3AllocVram / rdna3FreeVram   VRAM from the same heap as GEM BOs,
  *                                    CPU-visible through BAR0
  *   rdna3DeviceHandles               device cookie (this)
- *   rdna3GpuVaAlloc / Map / Free     GPU VA ranges for the family's tasks.
- *                                    TODO(stage2-gpuvm): Map writes the
- *                                    task's page tables; today it records
- *                                    the range only (no GPU work runs yet)
+ *   rdna3GpuVaAlloc / Map / Free     GPU VA ranges for the family's tasks,
+ *                                    backed by one GPUVM context (its own
+ *                                    VMID) the accelerator's VRAM is mapped
+ *                                    into, linear 4 KiB PTEs
+ *   rdna3SurfPageoff                 copies an accelerator VRAM allocation
+ *                                    into a list of system pages (IOSurface
+ *                                    page-off), CPU through the BAR for now
+ *   rdna3SurfShare                   not offered (no RM-style cross-client
+ *                                    handles on AMD; RADV shares by GEM)
  *   rdna3NewAccelClient              not offered: RADV opens RDNA3Accel
  *                                    directly (RDNA3UserClient)
  *
@@ -24,7 +29,12 @@
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSSymbol.h>
 
+#define RD3K_SS_KERNEL_ABI 1
 #include "rdna3k_abi.h"
+#include "RDNA3Bringup.hpp"
+#include <IOKit/IOMemoryDescriptor.h>
+#include <mach/mach_time.h>
+#include <kern/clock.h>
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
@@ -51,6 +61,9 @@ bool RDNA3Accel::platformInit()
 
 void RDNA3Accel::platformFree()
 {
+    if (fAccelVm && fBringup)
+        fBringup->vmDestroy(fAccelVm);
+    fAccelVm = nullptr;
     if (fPci)
         fPci->removeProperty("rdna3-claimed");
     if (fAccelVa)
@@ -95,9 +108,8 @@ IOReturn RDNA3Accel::platformVramAlloc(RD3KVramRequest *r)
     r->kva = (void *)(fVramMap->getVirtualAddress() + off);
     r->handle = h;
     r->mappedTotal = total;
-    /* MC address the GPU sees: FB aperture base + offset. TODO(stage2):
-     * take fb_start from the GMC once the bring-up publishes it; until then
-     * the offset itself, which is what the GMC maps at FB base 0. */
+    /* the cookie is the VRAM offset: RDNA3Framebuffer hands it back in
+     * flips and rdna3DisplayFlip adds the FB aperture base (fb_start) */
     r->allocationCookie = off;
     return kIOReturnSuccess;
 }
@@ -139,21 +151,96 @@ IOReturn RDNA3Accel::platformGpuVa(int op, RD3KGpuVaRequest *g)
         g->hVirt = 1; /* non-zero: "this map has a range" */
         return kIOReturnSuccess;
     }
-    case 1: /* map: TODO(stage2-gpuvm) write PTEs for g->kapiMemory at g->gpuva */
-        if (!g->gpuva || !g->kapiMemory)
+    case 1: { /* map: linear PTEs for the VRAM allocation at g->gpuva */
+        const RDNA3VramHandle *h = (const RDNA3VramHandle *)g->kapiMemory;
+        if (!g->gpuva || !h || (g->gpuva & 4095))
             return kIOReturnBadArgument;
-        return kIOReturnSuccess;
-    case 2: /* free (or unmap only) */
-        if (g->flags & RD3K_GPUVA_FLAG_UNMAP_ONLY)
-            return kIOReturnSuccess;
-        if (!g->gpuva || !g->size)
-            return kIOReturnBadArgument;
+        uint64_t size = g->size ? ((g->size + 4095) & ~4095ull) : h->size;
+        if (size > h->size)
+            size = h->size;
         IOLockLock(fDrmLock);
-        range_alloc_put(fAccelVa, g->gpuva, (g->size + 65535) & ~65535ull);
+        if (fBringup && (!fAccelVm || !fBringup->vmLive(fAccelVm))) {
+            /* made before the GMC was up: record-only, make a real one */
+            if (fAccelVm)
+                fBringup->vmDestroy(fAccelVm);
+            fAccelVm = fBringup->vmCreate();
+        }
+        int r = 0;
+        if (fBringup && fAccelVm && fBringup->vmLive(fAccelVm)) {
+            rdna3_bo bo;
+            bzero(&bo, sizeof(bo));
+            bo.size = h->size;
+            bo.domains = bo.placement = AMDGPU_GEM_DOMAIN_VRAM;
+            bo.vram_offset = h->offset;
+            r = fBringup->vmMap(fAccelVm, &bo, g->gpuva, 0, size,
+                                AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE);
+        }
+        IOLockUnlock(fDrmLock);
+        if (r) {
+            g->status = r;
+            return kIOReturnNoMemory;
+        }
+        g->hMemory = 1;
+        return kIOReturnSuccess;
+    }
+    case 2: /* free (or unmap only) */
+        if (!g->gpuva || !g->size)
+            return (g->flags & RD3K_GPUVA_FLAG_UNMAP_ONLY) ? kIOReturnSuccess : kIOReturnBadArgument;
+        IOLockLock(fDrmLock);
+        if (fBringup && fAccelVm)
+            fBringup->vmUnmap(fAccelVm, g->gpuva, (g->size + 4095) & ~4095ull);
+        if (!(g->flags & RD3K_GPUVA_FLAG_UNMAP_ONLY))
+            range_alloc_put(fAccelVa, g->gpuva, (g->size + 65535) & ~65535ull);
         IOLockUnlock(fDrmLock);
         return kIOReturnSuccess;
     }
     return kIOReturnUnsupported;
+}
+
+/* IOSurface page-off: copy the allocation's bytes into the caller's wired
+ * system pages. NVIDIA's version runs a copy-engine job; here the CPU reads
+ * VRAM through the BAR mapping (uncached, slow but exact). An SDMA copy
+ * through GART is the faster path once IOSurfaces carry real traffic. */
+IOReturn RDNA3Accel::platformPageoff(RD3KSurfPageoff *q)
+{
+    if (!q || q->version != RD3K_SS_RM_VERSION) {
+        if (q) q->status = RD3K_SS_BAD_VERSION;
+        return kIOReturnBadArgument;
+    }
+    const RDNA3VramHandle *h = (const RDNA3VramHandle *)q->kapiMemory;
+    if (!h || !fVramMap) {
+        q->status = RD3K_SS_NO_VRAM;
+        return kIOReturnSuccess;
+    }
+    if (!q->pages || q->length > h->size || q->pageCount * 4096 < q->length) {
+        q->status = RD3K_SS_TOO_SMALL;
+        return kIOReturnSuccess;
+    }
+    const uint8_t *src = (const uint8_t *)(fVramMap->getVirtualAddress() + h->offset);
+    uint64_t t0 = mach_absolute_time(), done = 0;
+    for (uint64_t i = 0; i < q->pageCount && done < q->length; i++) {
+        uint64_t n = q->length - done < 4096 ? q->length - done : 4096;
+        /* task NULL: the range is a physical address (64-bit safe) */
+        IOMemoryDescriptor *md = IOMemoryDescriptor::withAddressRange(
+            (mach_vm_address_t)q->pages[i], (mach_vm_size_t)n, kIODirectionIn | kIOMemoryMapperNone,
+            nullptr);
+        if (!md) {
+            q->status = RD3K_SS_OFF;
+            return kIOReturnNoMemory;
+        }
+        IOByteCount w = md->writeBytes(0, src + done, (IOByteCount)n);
+        md->release();
+        if (w != n) {
+            q->status = RD3K_SS_TOO_SMALL;
+            return kIOReturnSuccess;
+        }
+        done += n;
+    }
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    q->usec = ns / 1000;
+    q->status = 0;
+    return kIOReturnSuccess;
 }
 
 IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
@@ -194,6 +281,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return platformGpuVa(2, (RD3KGpuVaRequest *)p1);
         if (fn->isEqualTo(RD3K_FN_NEW_CLIENT))
             return kIOReturnUnsupported;
+        if (fn->isEqualTo(RD3K_SS_FN_PAGEOFF))
+            return platformPageoff((RD3KSurfPageoff *)p1);
     }
     return IOService::callPlatformFunction(fn, wait, p1, p2, p3, p4);
 }
