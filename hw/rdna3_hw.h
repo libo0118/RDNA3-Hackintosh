@@ -89,7 +89,7 @@ typedef struct rdna3_dev {
     uint64_t vram_size;         /* from RCC_CONFIG_MEMSIZE */
     volatile uint8_t *vram_cpu; /* BAR0 mapping (CPU-visible part), may be NULL */
     uint64_t vram_cpu_len;
-    uint64_t fb_start;          /* MC address of VRAM offset 0 (GCMC_VM_FB_LOCATION_BASE) */
+    uint64_t fb_start;          /* MC address of VRAM offset 0 (MMMC_VM_FB_LOCATION_BASE) */
     uint64_t fb_end;
     uint64_t fb_offset;         /* GCMC_VM_FB_OFFSET: physical base for *_pa addresses */
 

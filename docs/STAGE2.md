@@ -1,6 +1,6 @@
 # Stage 2: hardware bring-up
 
-Status: **PSP + firmware + SMU + GMC (GART, MMHUB 3.0.2, GFXHUB 3.0.3)
+Status: **PSP + firmware + SMU + GMC (GART, MMHUB 3.0.0, GFXHUB 3.0.3)
 + IH 6.0 + SDMA 6.0 written and tested in the simulator**; GFX/MES
 not yet.
 
@@ -116,7 +116,7 @@ its in-flight ioctls.
 
 ## Next (order as in `amdgpu_device_ip_init`)
 
-1. ✅ **GMC 11 / MMHUB 3.0.2 / GFXHUB 3.0.3**: GART in VRAM, VMID0 and
+1. ✅ **GMC 11 / MMHUB 3.0.0 / GFXHUB 3.0.3**: GART in VRAM, VMID0 and
    contexts 1–15, TLB flush (MMHUB with a semaphore and private invalidation).
    ✅ Per-VM page tables (`hw/gpuvm.c`): PDB2→PDB1→PDB0→PTB in VRAM from a
    16 MiB pool, VMID 1–15 per open DRM file, `GEM_VA` writes PTEs (VRAM: physical

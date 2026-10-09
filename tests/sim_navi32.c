@@ -39,7 +39,7 @@
 #include "gen/dcn_3_2_1_aux.h"
 #include "gmc11.h"
 #include "gen/gc_11_0_3_gmc.h"
-#include "gen/mmhub_3_0_2.h"
+#include "gen/mmhub_3_0_0.h"
 #include "ih60.h"
 #include "gen/osssys_6_0_0.h"
 #include "sdma60.h"
@@ -53,7 +53,7 @@
 #include "gen/gc_11_0_0_gfx.h"
 #include "gen/gc_11_0_0_reset.h"
 #include "gen/gc_11_0_3_gmc.h"
-#include "gen/mmhub_3_0_2.h"
+#include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
 #include "psp_gfx_if.h"
 #include "amdgpu_ucode_hdr.h"
@@ -831,7 +831,7 @@ static void aux_go(uint32_t n)
 static void sim_mode1_reset(void)
 {
     uint32_t memsize = *R(mmRCC_CONFIG_MEMSIZE);
-    uint32_t fbb = *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_BASE), fbt = *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_TOP);
+    uint32_t fbb = *R(MM_BASE0 + regMMMC_VM_FB_LOCATION_BASE), fbt = *R(MM_BASE0 + regMMMC_VM_FB_LOCATION_TOP);
     memset(S.reg, 0, sizeof(S.reg));
     memset(S.hqd, 0, sizeof(S.hqd));
     memset(&S.smu, 0, sizeof(S.smu));
@@ -843,8 +843,8 @@ static void sim_mode1_reset(void)
     *R(MP0(35)) = 0x80000000u;
     *R(MP0(33)) = 0x80000000u;
     *R(mmRCC_CONFIG_MEMSIZE) = memsize;
-    *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_BASE) = fbb;
-    *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_TOP) = fbt;
+    *R(MM_BASE0 + regMMMC_VM_FB_LOCATION_BASE) = fbb;
+    *R(MM_BASE0 + regMMMC_VM_FB_LOCATION_TOP) = fbt;
     S.mode1_resets++;
 }
 
@@ -1930,9 +1930,13 @@ static void run(const char *fwdir)
     *smn_slot(SMN_ROM_OFFSET_CTRL, 1) = ROM_STRAP;
     *R(MP0(33)) = 0x80000000u;  /* IFWI done */
     *R(mmRCC_CONFIG_MEMSIZE) = (uint32_t)(VRAM_SIZE >> 20);
-    *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_BASE) = (uint32_t)(FB_START >> 24);
-    *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_TOP) = (uint32_t)((FB_START + VRAM_SIZE - 1) >> 24);
-    *R(GC_BASE0 + regGCMC_VM_FB_OFFSET) = 0;
+    /* the IFWI programs the FB location in MMHUB; the GC copy reads 0 until
+     * the gfxhub is set up (as on the RX 7800 XT, 2026-10-09) */
+    *R(MM_BASE0 + regMMMC_VM_FB_LOCATION_BASE) = (uint32_t)(FB_START >> 24);
+    *R(MM_BASE0 + regMMMC_VM_FB_LOCATION_TOP) = (uint32_t)((FB_START + VRAM_SIZE - 1) >> 24);
+    *R(MM_BASE0 + regMMMC_VM_FB_OFFSET) = 0;
+    *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_BASE) = 0;
+    *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_TOP) = 0;
 
     memset(blobs, 0, sizeof(blobs));
     if (fwdir) {
@@ -2107,7 +2111,8 @@ static void run(const char *fwdir)
               MMVM_L2_PROTECTION_FAULT_CNTL__RANGE_PROTECTION_FAULT_ENABLE_DEFAULT_MASK);
         CHECK(S.mm_tlb_flushes == 1 && S.mm_flush_without_sem == 0 && !S.mm_sem_held);
         CHECK(S.mm_private_inv == 1);
-        CHECK(mmhub302_get_fb_location(&dev) == 0);   /* MMMC FB base not modelled */
+        CHECK(mmhub302_get_fb_location(&dev) == FB_START && dev.fb_start == FB_START);
+        CHECK(mmhub302_get_mc_fb_offset(&dev) == dev.fb_offset);
         CHECK(S.unflushed_doorbells == 0);
 
         /* IH 6.0: ring in VRAM, polled */

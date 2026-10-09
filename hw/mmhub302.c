@@ -1,6 +1,8 @@
 /*
- * mmhub302.c - MMHUB 3.0.2 (Navi 32) VMID0 GART and contexts, ported from
- * Linux amdgpu mmhub_v3_0_2.c, plus the MMHUB half of gmc_v11_0.c
+ * mmhub302.c - MMHUB VMID0 GART and contexts, ported from Linux amdgpu
+ * mmhub_v3_0_2.c, plus the MMHUB half of gmc_v11_0.c. Navi 32 is MMHUB
+ * 3.0.0 (mmhub_v3_0.c): the same sequence on bare metal, other register
+ * offsets, so it uses the generated mmhub_3_0_0 header
  * (gart_enable, MMIO TLB flush with the invalidation semaphore). MIT.
  *
  * SDMA, IH, VCN, DCN and the PSP/SMU clients reach memory through MMHUB,
@@ -10,7 +12,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "gmc11.h"
-#include "gen/mmhub_3_0_2.h"
+#include "gen/mmhub_3_0_0.h"
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -31,7 +33,7 @@
 #define WMM_OFF(d, reg, o, v) \
     rdna3_wreg((d), rdna3_reg_offset((d), HWIP_MMHUB, 0, reg##_BASE_IDX, reg) + (o), (v))
 
-/* mmhub_v3_0_2_init(): distances */
+/* mmhub_v3_0_init(): distances */
 #define CTX_DISTANCE      (regMMVM_CONTEXT1_CNTL - regMMVM_CONTEXT0_CNTL)
 #define CTX_ADDR_DISTANCE (regMMVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 - \
                            regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32)
@@ -39,7 +41,7 @@
 #define ENG_ADDR_DISTANCE (regMMVM_INVALIDATE_ENG1_ADDR_RANGE_LO32 - \
                            regMMVM_INVALIDATE_ENG0_ADDR_RANGE_LO32)
 
-/* mmhub_v3_0_2.c */
+/* mmhub_v3_0.c */
 #define regMMVM_L2_CNTL3_DEFAULT 0x80100007
 #define regMMVM_L2_CNTL4_DEFAULT 0x000000c1
 #define regMMVM_L2_CNTL5_DEFAULT 0x00003fe0
@@ -290,10 +292,17 @@ int mmhub302_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
     return RDNA3_OK;
 }
 
+/* mmhub_v3_0_get_fb_location */
 uint64_t mmhub302_get_fb_location(rdna3_dev *d)
 {
     uint64_t base = RMM(d, regMMMC_VM_FB_LOCATION_BASE);
     return (base & MMMC_VM_FB_LOCATION_BASE__FB_BASE_MASK) << 24;
+}
+
+/* mmhub_v3_0_get_mc_fb_offset */
+uint64_t mmhub302_get_mc_fb_offset(rdna3_dev *d)
+{
+    return (uint64_t)RMM(d, regMMMC_VM_FB_OFFSET) << 24;
 }
 
 /* gmc_v11_0_gart_enable(): MMHUB, HDP flush, fault defaults, flush VMID0 */

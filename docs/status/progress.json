@@ -1,10 +1,10 @@
 {
  "amdgpu": {
   "works": 51,
-  "ported": 219,
+  "ported": 220,
   "total": 1277,
   "works_pct": 4.0,
-  "ported_pct": 17.1,
+  "ported_pct": 17.2,
   "groups": [
    {
     "name": "PSP 13",
@@ -282,8 +282,8 @@
      "7"
     ],
     "works": 0,
-    "ported": 21,
-    "todo": 108,
+    "ported": 22,
+    "todo": 107,
     "items": {
      "amdgpu_gmc_agp_addr": "todo",
      "amdgpu_gmc_agp_location": "ported",
@@ -309,7 +309,7 @@
      "amdgpu_gmc_tmz_set": "todo",
      "amdgpu_gmc_vram_checking": "todo",
      "amdgpu_gmc_vram_cpu_pa": "todo",
-     "amdgpu_gmc_vram_location": "todo",
+     "amdgpu_gmc_vram_location": "ported",
      "amdgpu_gmc_vram_mc2pa": "ported",
      "amdgpu_gmc_vram_pa": "todo",
      "amdgpu_vm_pde_update": "todo",
@@ -392,7 +392,7 @@
      "gmc_v11_0_sw_init": "ported",
      "gmc_v11_0_use_invalidate_semaphore": "ported",
      "gmc_v11_0_vm_fault_interrupt_state": "ported",
-     "gmc_v11_0_vram_gtt_location": "todo",
+     "gmc_v11_0_vram_gtt_location": "ported",
      "gmc_v11_0_wait_for_idle": "todo",
      "mmhub_v3_0_2_disable_identity_aperture": "todo",
      "mmhub_v3_0_2_enable_system_domain": "todo",
@@ -402,7 +402,7 @@
      "mmhub_v3_0_2_get_fb_location": "todo",
      "mmhub_v3_0_2_get_invalidate_req": "todo",
      "mmhub_v3_0_2_get_mc_fb_offset": "todo",
-     "mmhub_v3_0_2_init": "ported",
+     "mmhub_v3_0_2_init": "todo",
      "mmhub_v3_0_2_init_cache_regs": "todo",
      "mmhub_v3_0_2_init_gart_aperture_regs": "todo",
      "mmhub_v3_0_2_init_system_aperture_regs": "todo",

@@ -10,6 +10,7 @@
  */
 #include "rdna3_hw.h"
 #include "navi3x_regs.h"
+#include "gen/mmhub_3_0_0.h"
 
 void rdna3_log(rdna3_dev *d, int level, const char *fmt, ...)
 {
@@ -166,20 +167,25 @@ int rdna3_wait_reg(rdna3_dev *d, uint32_t reg, uint32_t expect, uint32_t mask,
 
 /* ---------------------------- VRAM ---------------------------- */
 
+/* gmc_v11_0_vram_gtt_location + amdgpu_gmc_vram_location: the FB base comes
+ * from MMHUB (mmhub_v3_0_get_fb_location), VRAM spans vram_size from there,
+ * the physical offset is MMHUB's FB_OFFSET (get_mc_fb_offset). The GC copy
+ * of these registers reads 0 until the gfxhub is programmed. */
 int rdna3_read_fb_location(rdna3_dev *d)
 {
-    uint64_t base = RREG32_SOC15(d, GC, 0, regGCMC_VM_FB_LOCATION_BASE);
-    uint64_t top  = RREG32_SOC15(d, GC, 0, regGCMC_VM_FB_LOCATION_TOP);
-    uint64_t off  = RREG32_SOC15(d, GC, 0, regGCMC_VM_FB_OFFSET);
+    uint64_t base = RREG32_SOC15(d, MMHUB, 0, regMMMC_VM_FB_LOCATION_BASE);
+    uint64_t top  = RREG32_SOC15(d, MMHUB, 0, regMMMC_VM_FB_LOCATION_TOP);
+    uint64_t off  = RREG32_SOC15(d, MMHUB, 0, regMMMC_VM_FB_OFFSET);
 
-    base &= GCMC_VM_FB_LOCATION_BASE__FB_BASE_MASK;
-    top  &= GCMC_VM_FB_LOCATION_TOP__FB_TOP_MASK;
+    base &= MMMC_VM_FB_LOCATION_BASE__FB_BASE_MASK;
+    top  &= MMMC_VM_FB_LOCATION_TOP__FB_TOP_MASK;
     d->fb_start  = base << 24;
-    d->fb_end    = (top << 24) | 0xFFFFFFull;
+    d->fb_end    = d->vram_size ? d->fb_start + d->vram_size - 1 : (top << 24) | 0xFFFFFFull;
     d->fb_offset = off << 24;
-    RLOG(d, "FB MC 0x%llx-0x%llx, phys offset 0x%llx", (unsigned long long)d->fb_start,
-         (unsigned long long)d->fb_end, (unsigned long long)d->fb_offset);
-    if (d->fb_end <= d->fb_start) {
+    RLOG(d, "FB MC 0x%llx-0x%llx, phys offset 0x%llx (MMHUB top 0x%llx)",
+         (unsigned long long)d->fb_start, (unsigned long long)d->fb_end,
+         (unsigned long long)d->fb_offset, (unsigned long long)((top << 24) | 0xFFFFFFull));
+    if (!base && !top) {
         RERR(d, "FB location not programmed (vBIOS did not post this GPU?)");
         return RDNA3_ENODEV;
     }

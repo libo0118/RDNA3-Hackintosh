@@ -102,6 +102,7 @@ void     mmhub302_set_fault_enable_default(rdna3_dev *d, int value);
 int      mmhub302_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type);
 void     mmhub302_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd_addr);
 uint64_t mmhub302_get_fb_location(rdna3_dev *d);
+uint64_t mmhub302_get_mc_fb_offset(rdna3_dev *d);
 /* gmc_v11_0_gart_enable(): MMHUB GART + fault defaults + VMID0 flush */
 int      gmc11_gart_enable(rdna3_dev *d, rdna3_gmc *g);
 
