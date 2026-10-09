@@ -529,9 +529,6 @@ cmd__passthrough() {
 
     qemu_common
     QARGS+=(-vga none -display none -serial "file:$WORK/reports/serial-$stamp.log")
-    # OVMF's 64-bit PCI window (MiB); 0 = OVMF's default size
-    [ "${PCI_MMIO64_MB:-65536}" != 0 ] &&
-        QARGS+=(-fw_cfg "name=opt/ovmf/X-PciMmio64Mb,string=${PCI_MMIO64_MB:-65536}")
     slot=${bdf%.*}; i=1; rp=0
     QARGS+=(-device pcie-root-port,id=rp0,bus=pcie.0,chassis=1,slot=1)
     for d in "${DEVS[@]}"; do
@@ -572,6 +569,17 @@ cmd__passthrough() {
 
     trap restore EXIT
     detach || exit 1
+    # OVMF's 64-bit PCI window in MiB; 0 = no 64-bit window, so OVMF puts
+    # every BAR below 4 GiB (fits once detach shrank BAR0 to 256 MiB);
+    # "default" = OVMF's own size
+    local mm=${PCI_MMIO64_MB:-0} b0=0 r0s r0e
+    read -r r0s r0e _ < "/sys/bus/pci/devices/$bdf/resource" 2>/dev/null &&
+        b0=$(( (r0e - r0s + 1) >> 20 ))
+    # a BAR0 that is still large (resize failed) does not fit below 4 GiB
+    [ "$mm" = 0 ] && [ "$b0" -gt 1024 ] && { echo "  BAR0 $b0 MiB: 64-bit PCI window kept"; mm=65536; }
+    [ "$mm" != default ] &&
+        QARGS+=(-fw_cfg "name=opt/ovmf/X-PciMmio64Mb,string=$mm")
+    echo "  OVMF 64-bit PCI window: $mm MiB (BAR0 $b0 MiB)"
 
     local srv inh pk tm qpid
     start_share || echo "!! no report server: macOS cannot send its report this time"
