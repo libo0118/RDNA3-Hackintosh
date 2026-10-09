@@ -2455,6 +2455,10 @@ static void run(const char *fwdir)
             CHECK(gfx11_hw_init(&dev, &gmc, &gr, &rs, 8192) == RDNA3_ETIME);   /* autoload not done */
             S.reg[GCR(regRLC_RLCS_BOOTLOAD_STATUS)] = RLC_RLCS_BOOTLOAD_STATUS__BOOTLOAD_COMPLETE_MASK;
             CHECK(gfx11_hw_init(&dev, &gmc, &gr, &rs, 8192) == RDNA3_OK && gr.ready);
+            /* gfx_v11_0_cp_gfx_resume programs RB0_CNTL with BUFSZ/BLKSZ only;
+             * KMD_QUEUE belongs to the MQD queues (the card stalled with the
+             * CPG reading MC 0 when RB0 had it) */
+            CHECK(!(S.reg[GCR(regCP_RB0_CNTL)] & CP_RB0_CNTL__KMD_QUEUE_MASK));
             CHECK(gmc.gfxhub_enabled);
             /* gfx ring 0 through its doorbell; GC doorbell ranges and the
              * S2A entries 0/3 (nbio_v4_3_gc_doorbell_init) programmed */

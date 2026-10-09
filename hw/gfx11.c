@@ -317,7 +317,6 @@ static void cp_gfx_resume(rdna3_dev *d, rdna3_gfx_ring *r)
 
     tmp = REG_SET_FIELD(0u, CP_RB0_CNTL, RB_BUFSZ, rb_bufsz);
     tmp = REG_SET_FIELD(tmp, CP_RB0_CNTL, RB_BLKSZ, rb_bufsz - 2);
-    tmp = REG_SET_FIELD(tmp, CP_RB0_CNTL, KMD_QUEUE, 1);
     WG(d, regCP_RB0_CNTL, tmp);
     r->wptr = 0;
     WG(d, regCP_RB0_WPTR, 0);
@@ -382,6 +381,17 @@ int gfx11_ring_test(rdna3_dev *d, rdna3_gfx_ring *r)
     }
     RERR(d, "GFX: ring test timeout (SCRATCH_REG0 0x%08x, CP_STAT 0x%08x, GRBM_STATUS 0x%08x)",
          v, RG(d, regCP_STAT), RG(d, regGRBM_STATUS));
+    {
+        rdna3_gfx_status st;
+        gfx11_read_status(d, r, &st);
+        gfx11_log_status(d, &st, "ring test");
+        RERR(d, "  RB0_CNTL 0x%08x BASE 0x%08x_%08x RPTR_ADDR 0x%08x_%08x WPTR_POLL 0x%08x_%08x "
+             "DOORBELL_CNTL 0x%08x RB_VMID 0x%x ACTIVE 0x%x",
+             RG(d, regCP_RB0_CNTL), RG(d, regCP_RB0_BASE_HI), RG(d, regCP_RB0_BASE),
+             RG(d, regCP_RB0_RPTR_ADDR_HI), RG(d, regCP_RB0_RPTR_ADDR),
+             RG(d, regCP_RB_WPTR_POLL_ADDR_HI), RG(d, regCP_RB_WPTR_POLL_ADDR_LO),
+             RG(d, regCP_RB_DOORBELL_CONTROL), RG(d, regCP_RB_VMID), RG(d, regCP_RB_ACTIVE));
+    }
     return RDNA3_ETIME;
 }
 
