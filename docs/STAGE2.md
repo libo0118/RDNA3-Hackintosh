@@ -1,7 +1,7 @@
 # Etap 2: bring-up sprzętu
 
 Stan: **PSP + firmware + SMU + GMC (GART, MMHUB 3.0.2, GFXHUB 3.0.3)
-+ IH 6.0 napisane i przetestowane w symulatorze**; ringi GFX/SDMA i MES
++ IH 6.0 + SDMA 6.0 napisane i przetestowane w symulatorze**; GFX/MES
 jeszcze nie.
 
 ## Co jest zrobione
@@ -26,7 +26,10 @@ jeszcze nie.
 
 2. boot-args: `rdna3lvl=4` (PSP + firmware), `rdna3lvl=5` (+ SMU) lub
    `rdna3lvl=6` (+ GMC: GART w VRAM, MMHUB, flush TLB; `RDNA3,GMCResult`;
-   + ring IH 6.0, `RDNA3,IHResult`, `RDNA3,IHEarlyIVs`).
+   + ring IH 6.0, `RDNA3,IHResult`, `RDNA3,IHEarlyIVs`) lub `rdna3lvl=7`
+   (+ SDMA0: ring, test ringu, kopia 64 KiB VRAM→VRAM sprawdzona przez CPU;
+   `RDNA3,SDMAResult`, `RDNA3,SDMACopyMismatches`). **Poziom 7 to pierwszy,
+   na którym GPU sam wykonuje polecenia.**
 3. Wyniki w IORegistry (`ioreg -l -r -c RDNA3Accel`): `RDNA3,Stage2`,
    `RDNA3,PSPResult`, `RDNA3,SOSVersion`, `RDNA3,SMUVersion`, `RDNA3,FBStartMC`.
    Log: `log show --last boot --predicate 'eventMessage CONTAINS "RDNA3:"'`.
@@ -63,6 +66,8 @@ wersji linux-firmware), 29× `LOAD_IP_FW ... ok`, `RLC autoload started`,
    (`registerInterrupt`), ring 1 (page faulty), doorbell rptr.
 3. **GFX 11**: RLC już startuje przez autoload; potem MES (kolejki),
    ring GFX/KIQ, test `WRITE_DATA`.
-4. **SDMA 6.0**: ring + test kopiowania.
+4. 🟡 **SDMA 6.0** (`hw/sdma60.c`): ring QUEUE0 w VRAM, test ringu, kopia,
+   fill, fence; bez doorbelli (wptr przez rejestr + slot poll). Zostaje:
+   IB (`INDIRECT`), przerwanie TRAP przez IH, SDMA1, doorbelle.
 5. Wtedy `AMDGPU_CS` w `uapi/` dostaje prawdziwą implementację, a tryb
    `rdna3enum=1` przestaje być potrzebny.

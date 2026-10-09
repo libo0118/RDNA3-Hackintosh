@@ -120,13 +120,17 @@ void RDNA3Bringup::stopAndFree()
     if (fDev) IOFree(fDev, sizeof(*fDev));
     if (fPsp) IOFree(fPsp, sizeof(*fPsp));
     if (fPlan) IOFree(fPlan, sizeof(*fPlan));
+    if (fSdma) {
+        if (fSdma->ready && fDev) sdma60_stop(fDev, fSdma);
+        IOFree(fSdma, sizeof(*fSdma));
+    }
     if (fIh) {
         if (fIh->enabled && fDev) ih60_disable(fDev, fIh);
         IOFree(fIh, sizeof(*fIh));
     }
     if (fGmc) IOFree(fGmc, sizeof(*fGmc));
     if (fLock) IOLockFree(fLock);
-    fDisc = nullptr; fDev = nullptr; fPsp = nullptr; fPlan = nullptr; fGmc = nullptr; fIh = nullptr; fLock = nullptr;
+    fDisc = nullptr; fDev = nullptr; fPsp = nullptr; fPlan = nullptr; fGmc = nullptr; fIh = nullptr; fSdma = nullptr; fLock = nullptr;
 }
 
 void RDNA3Bringup::publish(const char *key, uint64_t v)
@@ -325,5 +329,46 @@ void RDNA3Bringup::run()
             publish("RDNA3,IHEarlyIVs", ih60_process(fDev, fIh, nullptr, nullptr));
         }
         publishString("RDNA3,Stage2", ret ? "failed: IH" : "PSP + SMU + MMHUB GART + IH up");
+        if (ret)
+            return;
+    }
+
+    /* level 7: SDMA0 ring + ring test + a 64 KiB VRAM->VRAM copy check */
+    if (fLevel >= 7) {
+        fSdma = (rdna3_sdma_ring *)IOMalloc(sizeof(*fSdma));
+        if (!fSdma) {
+            publishString("RDNA3,Stage2", "failed: SDMA (no memory)");
+            return;
+        }
+        bzero(fSdma, sizeof(*fSdma));
+        ret = sdma60_start(fDev, fSdma, 0, 0);
+        publish("RDNA3,SDMAResult", (uint64_t)(int64_t)ret);
+        if (!ret) {
+            const uint32_t len = 64 * 1024;
+            uint64_t src = rdna3_vram_alloc(fDev, len, 4096, "sdma-selftest-src");
+            uint64_t dst = rdna3_vram_alloc(fDev, len, 4096, "sdma-selftest-dst");
+            uint32_t mism = 0xFFFFFFFFu;
+            if (src != UINT64_MAX && dst != UINT64_MAX) {
+                uint32_t i, a, b;
+                for (i = 0; i < len / 4; i++) {
+                    a = 0x0A3D0000u ^ i;
+                    rdna3_vram_write(fDev, src + 4ull * i, &a, 4);
+                }
+                rdna3_vram_fill(fDev, dst, 0, len);
+                ret = sdma60_copy_sync(fDev, fSdma, rdna3_vram_mc(fDev, src), rdna3_vram_mc(fDev, dst), len);
+                if (!ret) {
+                    mism = 0;
+                    for (i = 0; i < len / 4; i++) {
+                        rdna3_vram_read(fDev, dst + 4ull * i, &b, 4);
+                        if (b != (0x0A3D0000u ^ i))
+                            mism++;
+                    }
+                }
+            }
+            publish("RDNA3,SDMACopyMismatches", mism);
+            if (!ret && mism)
+                ret = RDNA3_EIO;
+        }
+        publishString("RDNA3,Stage2", ret ? "failed: SDMA" : "PSP + SMU + GART + IH + SDMA up, copy verified");
     }
 }

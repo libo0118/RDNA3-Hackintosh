@@ -29,6 +29,8 @@
 #include "gen/mmhub_3_0_2.h"
 #include "ih60.h"
 #include "gen/osssys_6_0_0.h"
+#include "sdma60.h"
+#include "gen/gc_11_0_0_sdma.h"
 #include "navi3x_regs.h"
 #include "psp_gfx_if.h"
 #include "amdgpu_ucode_hdr.h"
@@ -81,6 +83,8 @@ typedef struct sim {
     uint64_t sos_boot_at;
     unsigned tlb_flushes;
     unsigned mm_tlb_flushes, mm_sem_held, mm_flush_without_sem, mm_private_inv;
+    uint64_t sdma_rptr;         /* bytes */
+    unsigned sdma_pkts, sdma_bad, sdma_while_halted;
 } sim;
 
 static sim S;
@@ -94,6 +98,68 @@ static uint8_t *mc_ptr(uint64_t mc, uint64_t len)
     if (mc < FB_START || mc - FB_START + len > BAR_LEN)
         return NULL;
     return S.vram + (mc - FB_START);
+}
+
+/* SDMA 6.0 engine model: WRITE_LINEAR, COPY_LINEAR, CONST_FILL, FENCE, NOP */
+static void sdma_run(uint32_t wptr_bytes)
+{
+    uint32_t cntl = S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_CNTL];
+    uint32_t f32 = S.reg[0xA000 + regSDMA0_F32_CNTL];
+    uint64_t base = ((uint64_t)S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_BASE] << 8) |
+                    ((uint64_t)S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_BASE_HI] << 40);
+    uint32_t size = 4u << ((cntl & SDMA0_QUEUE0_RB_CNTL__RB_SIZE_MASK) >> SDMA0_QUEUE0_RB_CNTL__RB_SIZE__SHIFT);
+    uint64_t rptr_wb = ((uint64_t)S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_RPTR_ADDR_HI] << 32) |
+                       S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_RPTR_ADDR_LO];
+    uint8_t *ring = mc_ptr(base, size);
+    if (!(cntl & SDMA0_QUEUE0_RB_CNTL__RB_ENABLE_MASK))
+        return;
+    if (f32 & SDMA0_F32_CNTL__HALT_MASK) {
+        S.sdma_while_halted++;
+        return;
+    }
+    if (S.pending_writes)
+        S.unflushed_doorbells++;
+#define RD(i) (*(uint32_t *)(ring + ((S.sdma_rptr + 4 * (i)) & (size - 1))))
+    while (ring && (S.sdma_rptr & (size - 1)) != (wptr_bytes & (size - 1))) {
+        uint32_t h = RD(0), op = h & 0xff, sub = (h >> 8) & 0xff, n;
+        S.sdma_pkts++;
+        if (op == SDMA_OP_NOP) {
+            n = 1 + ((h >> 16) & 0x3fff);
+        } else if (op == SDMA_OP_WRITE && sub == 0) {
+            uint64_t a = RD(1) | ((uint64_t)RD(2) << 32);
+            uint32_t cnt = (RD(3) & 0xfffff) + 1, i;
+            uint8_t *p = mc_ptr(a, 4ull * cnt);
+            for (i = 0; p && i < cnt; i++)
+                memcpy(p + 4 * i, &RD(4 + i), 4);
+            if (!p) S.sdma_bad++;
+            n = 4 + cnt;
+        } else if (op == SDMA_OP_COPY && sub == 0) {
+            uint32_t len = RD(1) + 1;
+            uint64_t s = RD(3) | ((uint64_t)RD(4) << 32), d = RD(5) | ((uint64_t)RD(6) << 32);
+            uint8_t *ps = mc_ptr(s, len), *pd = mc_ptr(d, len);
+            if (ps && pd) memmove(pd, ps, len); else S.sdma_bad++;
+            n = 7;
+        } else if (op == SDMA_OP_CONST_FILL) {
+            uint64_t d = RD(1) | ((uint64_t)RD(2) << 32);
+            uint32_t val = RD(3), len = RD(4) + 1, i;
+            uint8_t *pd = mc_ptr(d, len);
+            for (i = 0; pd && i + 4 <= len; i += 4) memcpy(pd + i, &val, 4);
+            if (!pd) S.sdma_bad++;
+            n = 5;
+        } else if (op == SDMA_OP_FENCE) {
+            uint64_t a = RD(1) | ((uint64_t)RD(2) << 32);
+            uint8_t *p = mc_ptr(a, 4);
+            if (p) memcpy(p, &RD(3), 4); else S.sdma_bad++;
+            n = 4;
+        } else {
+            S.sdma_bad++;
+            n = 1;
+        }
+        S.sdma_rptr += 4ull * n;
+    }
+#undef RD
+    if (mc_ptr(rptr_wb, 8))
+        memcpy(mc_ptr(rptr_wb, 8), &S.sdma_rptr, 8);
 }
 
 static void psp_exec(uint64_t cmd_mc, uint64_t fence_mc, uint32_t fence_val)
@@ -217,6 +283,12 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             return;
         }
     }
+    /* SDMA0 QUEUE0: a write of RB_WPTR runs the ring up to it */
+    if (dw == GC_BASE0 + regSDMA0_QUEUE0_RB_WPTR) {
+        *R(dw) = v;
+        sdma_run(v);
+        return;
+    }
     /* IH: WPTR_OVERFLOW_CLEAR clears the overflow flag in IH_RB_WPTR */
     if (dw == OSS_BASE0 + regIH_RB_CNTL && (v & IH_RB_CNTL__WPTR_OVERFLOW_CLEAR_MASK))
         S.reg[OSS_BASE0 + regIH_RB_WPTR] &= ~(uint32_t)IH_RB_WPTR__RB_OVERFLOW_MASK;
@@ -332,6 +404,7 @@ static void make_discovery(amd_discovery *disc)
     IP(AMD_HWID_HDP, 6, 0, 0, 0xF20, 0, 0);
     IP(AMD_HWID_MMHUB, 3, 0, 2, MM_BASE0, 0, 0);
     IP(AMD_HWID_OSSSYS, 6, 0, 0, OSS_BASE0, 0, 0);
+    IP(AMD_HWID_SDMA0, 6, 0, 3, GC_BASE0, 0xA000, 0x1C000);
     disc->num_dies = 1;
 }
 
@@ -559,6 +632,37 @@ static void run(const char *fwdir)
             CHECK(ih.overflows == 1 && ih.rptr == 64);
             ih60_disable(&dev, &ih);
             CHECK(!ih.enabled && !(S.reg[OSS_BASE0 + regIH_RB_CNTL] & IH_RB_CNTL__RB_ENABLE_MASK));
+        }
+
+        /* SDMA 6.0: ring + test, copy, fill, fences across the ring wrap */
+        {
+            static rdna3_sdma_ring sd;
+            uint64_t src, dst;
+            uint32_t pat[256], out[256], j, k;
+            S.reg[0xA000 + regSDMA0_F32_CNTL] = SDMA0_F32_CNTL__HALT_MASK;  /* reset state */
+            CHECK(sdma60_start(&dev, &sd, 0, 4096) == RDNA3_OK && sd.ready);
+            CHECK(S.sdma_while_halted == 0 && S.sdma_bad == 0);
+            CHECK(S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_BASE] == (uint32_t)(rdna3_vram_mc(&dev, sd.ring) >> 8));
+            CHECK(S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_CNTL] & SDMA0_QUEUE0_RB_CNTL__RPTR_WRITEBACK_ENABLE_MASK);
+            src = rdna3_vram_alloc(&dev, 8192, 4096, "sdma-test-src");
+            dst = rdna3_vram_alloc(&dev, 8192, 4096, "sdma-test-dst");
+            for (j = 0; j < 256; j++) pat[j] = 0x5a000000u + j;
+            rdna3_vram_write(&dev, src, pat, sizeof(pat));
+            for (k = 0; k < 40; k++) {  /* 40 x 11 dwords > 1024-dword ring: wraps */
+                CHECK(sdma60_copy_sync(&dev, &sd, rdna3_vram_mc(&dev, src), rdna3_vram_mc(&dev, dst),
+                                       sizeof(pat)) == RDNA3_OK);
+            }
+            rdna3_vram_read(&dev, dst, out, sizeof(out));
+            CHECK(!memcmp(out, pat, sizeof(pat)));
+            sdma60_emit_fill(&dev, &sd, rdna3_vram_mc(&dev, dst), 0xabcdef01u, 64);
+            k = sdma60_emit_fence(&dev, &sd);
+            sdma60_commit(&dev, &sd);
+            CHECK(k == 41 && sdma60_wait_fence(&dev, &sd, k) == RDNA3_OK);
+            rdna3_vram_read(&dev, dst, out, 64);
+            CHECK(out[0] == 0xabcdef01u && out[15] == 0xabcdef01u && out[16] == pat[16]);
+            CHECK(S.sdma_bad == 0 && S.unflushed_doorbells == 0);
+            sdma60_stop(&dev, &sd);
+            CHECK(!sd.ready && (S.reg[0xA000 + regSDMA0_F32_CNTL] & SDMA0_F32_CNTL__HALT_MASK));
         }
     }
 
