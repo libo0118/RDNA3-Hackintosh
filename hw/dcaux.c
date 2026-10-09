@@ -362,7 +362,21 @@ int dcaux_probe(rdna3_dev *d, rdna3_connector *out, uint32_t max)
             c->max_link_rate = dpcd[1];
             c->max_lane_count = dpcd[2] & 0x1f;
         }
+        if (c->hpd && !c->dp) {
+            /* a sink is plugged but DPCD does not answer: what the engine saw
+             * (an HDMI sink has no DPCD; a DP one should) */
+            uint32_t reply = 0xff;
+            int r1 = dcaux_transfer(d, n, RD_AUX_DP_READ, 0x000, dpcd, 1, &reply);
+            RERR(d, "AUX%u: HPD high, DPCD read %d (reply 0x%x): CONTROL 0x%08x ARB 0x%08x "
+                 "SW_STATUS 0x%08x SW_CONTROL 0x%08x DPHY_TX 0x%08x RX0 0x%08x RX1 0x%08x", n, r1,
+                 reply, RA(d, regDP_AUX0_AUX_CONTROL, n), RA(d, regDP_AUX0_AUX_ARB_CONTROL, n),
+                 RA(d, regDP_AUX0_AUX_SW_STATUS, n), RA(d, regDP_AUX0_AUX_SW_CONTROL, n),
+                 RA(d, regDP_AUX0_AUX_DPHY_TX_CONTROL, n), RA(d, regDP_AUX0_AUX_DPHY_RX_CONTROL0, n),
+                 RA(d, regDP_AUX0_AUX_DPHY_RX_CONTROL1, n));
+        }
         r = dcaux_read_edid(d, n, c->edid, sizeof(c->edid));
+        if (c->hpd && r <= 0)
+            RERR(d, "AUX%u: HPD high, EDID over I2C-over-AUX failed (%d)", n, r);
         c->edid_len = r > 0 ? r : 0;
         if (c->hpd || c->dp || c->edid_len) {
             RLOG(d, "AUX%u: HPD %d, %s, EDID %d bytes", n, c->hpd,
