@@ -94,6 +94,7 @@ def report(path, show_all):
         log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt")
         panics = read_member(tar, "21-log-panics.txt")
         kexts = read_member(tar, "03-kexts.txt")
+        pci = read_member(tar, "04-pci.txt")
     args = " ".join(l for l in args.splitlines() if not l.startswith("$") and not l.startswith("[exit"))
     args = args.replace("boot-args", "").strip()
     lvl = bootarg_level(args)
@@ -103,6 +104,11 @@ def report(path, show_all):
     print("boot-args:", args or "?")
     if "RDNA3Accel" not in kexts and not props:
         print("!! RDNA3Accel not loaded (03-kexts.txt) -> AFTER-TESTS step 0")
+        amd = pci.split("\n== AMD devices", 1)[1] if "\n== AMD devices" in pci else ""
+        ids = [l.strip(" |") for l in amd.splitlines()
+               if re.search(r'\+-o|"(vendor-id|device-id)"', l)]
+        print("   AMD PCI devices seen by macOS (04-pci.txt): %s" %
+              ("; ".join(ids[:9]) if ids else "none (or an old collect.sh)"))
         return True
     print("level %s (requested %d), Stage2: %s, Rings: %s" % (
         props.get("Level", "?"), lvl, props.get("Stage2", "-"), props.get("Rings", "-")))

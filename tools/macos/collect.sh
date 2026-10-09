@@ -21,7 +21,11 @@ uname -a >> "$dir/00-system.txt" 2>&1
 run 01-boot-args.txt nvram boot-args
 run 02-csr.txt csrutil status
 run 03-kexts.txt sh -c "kmutil showloaded 2>/dev/null | grep -i -E 'rdna3|amd|radeon|IONDRV' || kextstat | grep -i -E 'rdna3|amd|radeon'"
-run 04-pci.txt sh -c "ioreg -l -w0 -r -n display 2>/dev/null | head -400"
+# every PCI device with its ids (the card is 0x1002 / 0x747e), then the full
+# entry of the AMD ones; "display" alone can be an IOServiceCompatibility stub
+run 04-pci.txt sh -c "ioreg -l -w0 -r -c IOPCIDevice | grep -E '^[ |]*\+-o|\"(vendor-id|device-id|class-code|subsystem-vendor-id|assigned-addresses|IOPCIResourced|IOPCIConfigured|IOPCIMSIMode)\" ='; echo; echo '== AMD devices'; ioreg -l -w0 -r -c IOPCIDevice | awk '/^[ |]*\+-o/{if(b~/<02100000>/)print b; b=\"\"} {b=b\"\\n\"\$0} END{if(b~/<02100000>/)print b}' | head -300"
+run 05-pci-profiler.txt system_profiler SPPCIDataType
+run 06-kexts-all.txt sh -c "kmutil showloaded 2>/dev/null | grep -v com.apple; echo; echo '== RDNA3 in the boot/aux KC log'; log show --last boot --style compact --predicate 'eventMessage CONTAINS \"voten641\"' 2>/dev/null | head -40"
 run 10-ioreg-core.txt ioreg -l -w0 -r -c RDNA3Accel
 run 11-ioreg-props.txt sh -c "ioreg -l -w0 -r -c RDNA3Accel | grep -E '\"RDNA3,' | grep -v -E 'DiscoveryBinary|,EDID\"'"
 run 12-ioreg-fb.txt ioreg -l -w0 -r -c RDNA3Framebuffer

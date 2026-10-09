@@ -9,6 +9,14 @@ HOST=http://10.0.2.2:8000
 export HOME=/var/root
 sleep 90
 
+# newest report scripts from the host (rdna3vm start_share); autoreport.sh
+# itself takes effect from the next boot
+for f in collect.sh ioreg_discovery.sh autoreport.sh; do
+    case $f in autoreport.sh) dst="$D/$f" ;; *) dst="$D/tools/macos/$f" ;; esac
+    curl -sf "$HOST/tools/$f" -o "$dst.new" && [ -s "$dst.new" ] && mv "$dst.new" "$dst"
+    rm -f "$dst.new"
+done
+
 args=$(nvram boot-args 2>/dev/null | cut -f2-)
 label=$(echo "$args" | tr ' ' '\n' | grep -E '^rdna3(lvl|dmub|msi|fb|accel)=' | tr '=' '-' | tr '\n' '_' | sed 's/_$//')
 [ -n "$label" ] || label=no-rdna3

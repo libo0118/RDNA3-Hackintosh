@@ -307,6 +307,11 @@ msrs() {   # macOS needs unknown MSRs ignored
 # earlier run holds the port, so stop it first and check the new one listens.
 SHARE_PID=
 start_share() {
+    # the current report scripts: autoreport.sh in the VM fetches them on
+    # every boot, so changes to them need no new setup.sh run
+    mkdir -p "$WORK/share/tools"
+    cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" \
+       "$TOOLS/macos/autoreport.sh" "$WORK/share/tools/" 2>/dev/null || true
     pkill -f "vmtool.py serve " 2>/dev/null || true
     sleep 0.5
     $VMTOOL serve "$WORK/share" 8000 "$WORK/reports" >>"$WORK/share.log" 2>&1 &
