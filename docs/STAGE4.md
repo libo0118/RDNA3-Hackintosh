@@ -23,7 +23,7 @@ uapi/rdna3_drm.c  (niezależne od OS, testowane na hoście)
 | `SYNCOBJ_HANDLE_TO_FD/FD_TO_HANDLE/TRANSFER`, `PRIME_*` | ⬜ `-ENOSYS` (wymaga IOSurface/eksportu, Etap 4b) |
 | `AMDGPU_GEM_CREATE` | ✅ GTT: `IOBufferMemoryDescriptor`; VRAM: sterta w VRAM (od 512 MiB), mapowalna przez BAR0 |
 | `AMDGPU_GEM_MMAP` + `mmap` | ✅ przez `clientMemoryForType` |
-| `AMDGPU_GEM_VA` | 🟡 walidacja + zapis mapowań; tablice stron GPUVM po GMC (Etap 2) |
+| `AMDGPU_GEM_VA` | ✅ MAP/UNMAP/CLEAR/REPLACE; na `rdna3lvl>=6` zapis prawdziwych tablic stron (`hw/gpuvm.c`), mapowanie trzyma referencję BO, `GEM_CLOSE` zdejmuje mapowania jak amdgpu |
 | `AMDGPU_GEM_METADATA/OP/WAIT_IDLE`, `AMDGPU_VM`, `AMDGPU_CTX` | ✅ |
 | `AMDGPU_INFO` | ✅ ACCEL_WORKING, DEV_INFO (z tabeli GC discovery), HW_IP_INFO/COUNT, FW_VERSION, VRAM_GTT, MEMORY, *_USAGE, READ_MMR_REG (biała lista soc21), MAX_IBS, VIDEO_CAPS |
 | `AMDGPU_CS`, `BO_LIST`, `WAIT_FENCES`, `FENCE_TO_HANDLE` | ⬜ `-ENODEV` do czasu ringów |

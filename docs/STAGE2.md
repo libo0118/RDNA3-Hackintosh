@@ -60,7 +60,10 @@ wersji linux-firmware), 29× `LOAD_IP_FW ... ok`, `RLC autoload started`,
 
 1. ✅ **GMC 11 / MMHUB 3.0.2 / GFXHUB 3.0.3**: GART w VRAM, VMID0 i
    konteksty 1–15, flush TLB (MMHUB z semaforem i prywatną inwalidacją).
-   Zostaje: tablice stron per-VM, żeby `GEM_VA` z Etapu 4 je programował.
+   ✅ Tablice stron per-VM (`hw/gpuvm.c`): PDB2→PDB1→PDB0→PTB w VRAM z puli
+   16 MiB, VMID 1–15 na otwarty plik DRM, `GEM_VA` zapisuje PTE (VRAM: adres
+   fizyczny VRAM, GTT: strony systemowe + SNOOPED), flush TLB po każdej
+   zmianie. Działa od `rdna3lvl=6`; niżej mapowania są tylko zapamiętywane.
 2. 🟡 **IH 6.0** (`hw/ih60.c`): ring 0 w VRAM, writeback wptr, dekodowanie IV,
    obsługa przepełnienia; odpytywany. Zostaje: MSI w IOKit
    (`registerInterrupt`), ring 1 (page faulty), doorbell rptr.

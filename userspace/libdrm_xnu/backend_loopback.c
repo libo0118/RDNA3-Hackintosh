@@ -30,7 +30,8 @@ static int lb_copyout(void *c, uint64_t u, const void *s, size_t n) { (void)c; m
 
 static void dev_init(void)
 {
-    rdna3_drm_ops ops = { NULL, lb_zalloc, lb_free, lb_bo_alloc, lb_bo_free, lb_copyin, lb_copyout, NULL, NULL };
+    rdna3_drm_ops ops = { NULL, lb_zalloc, lb_free, lb_bo_alloc, lb_bo_free, lb_copyin, lb_copyout, NULL, NULL,
+                          NULL, NULL, NULL, NULL };
     amd_discovery disc;
     if (g_dev_ready)
         return;

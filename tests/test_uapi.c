@@ -32,6 +32,29 @@ static void h_bo_free(void *c, rdna3_bo *bo) { (void)c; free(bo->backing); live_
 static int h_copyin(void *c, void *d, uint64_t u, size_t n) { (void)c; memcpy(d, (void *)(uintptr_t)u, n); return 0; }
 static int h_copyout(void *c, uint64_t u, const void *s, size_t n) { (void)c; memcpy((void *)(uintptr_t)u, s, n); return 0; }
 
+/* fake page tables: count what the uapi asks for */
+static int vm_live, vm_maps, vm_unmaps;
+static uint64_t vm_mapped;
+static int vm_dummy;
+static void *h_vm_create(void *c) { (void)c; vm_live++; return &vm_dummy; }
+static void h_vm_destroy(void *c, void *vm) { (void)c; (void)vm; vm_live--; }
+static int h_vm_map(void *c, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off, uint64_t size,
+                    uint32_t flags)
+{
+    (void)c; (void)vm; (void)bo; (void)va; (void)off; (void)flags;
+    if (va == 0xBAD000)
+        return -RD_ENOMEM;
+    vm_maps++;
+    vm_mapped += size;
+    return 0;
+}
+static void h_vm_unmap(void *c, void *vm, uint64_t va, uint64_t size)
+{
+    (void)c; (void)vm; (void)va;
+    vm_unmaps++;
+    vm_mapped -= size;
+}
+
 #define IOCTL(f, nr, arg) rdna3_drm_ioctl((f), (nr), &(arg), sizeof(arg))
 
 static int info(rdna3_drm_file *f, uint32_t query, void *out, uint32_t size)
@@ -48,7 +71,8 @@ int main(void)
 {
     static rdna3_drm_device dev;
     static rdna3_drm_file file;
-    rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL };
+    rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
+                          h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -63,6 +87,7 @@ int main(void)
 
     rdna3_drm_device_init(&dev, &ops, &disc, 0x747E, 0xC8, 0x0, 16ull << 30, 256ull << 20, 8ull << 30);
     CHECK(rdna3_drm_file_open(&dev, f) == 0);
+    CHECK(vm_live == 1);
 
     /* drmGetVersion */
     {
@@ -145,10 +170,29 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL);
         va.operation = AMDGPU_VA_OP_UNMAP; va.map_size = 1 << 20;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
+        CHECK(vm_maps == 1 && vm_unmaps == 1 && vm_mapped == 0);
+        /* a failing page-table update fails the ioctl and records nothing */
+        va.operation = AMDGPU_VA_OP_MAP; va.va_address = 0xBAD000; va.map_size = 4096;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_ENOMEM);
+        /* unaligned offset */
+        va.va_address = 0x300000; va.offset_in_bo = 0x800;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL);
+        va.offset_in_bo = 0;
+        /* REPLACE drops what it overlaps */
+        va.va_address = 0x200000; va.map_size = 2 * 4096;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
+        va.operation = AMDGPU_VA_OP_REPLACE; va.va_address = 0x201000; va.map_size = 4096;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
+        CHECK(vm_maps == 3 && vm_unmaps == 2 && vm_mapped == 4096);
+        /* closing the handle drops its mappings, like amdgpu_gem_object_close */
 
         cl.handle = h; cl.pad = 0;
         CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == 0);
         CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == -RD_EINVAL);
+        CHECK(vm_mapped == 0 && vm_unmaps == 3);
+        va.operation = AMDGPU_VA_OP_CLEAR; va.va_address = 0x200000; va.map_size = 1 << 20;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
+        CHECK(vm_unmaps == 3);
         CHECK(info(f, AMDGPU_INFO_VRAM_USAGE, &vram, 8) == 0 && vram == 0);
         CHECK(live_bos == 1);
     }
@@ -195,7 +239,7 @@ int main(void)
     }
 
     rdna3_drm_file_close(f);
-    CHECK(live_bos == 0);
+    CHECK(live_bos == 0 && vm_live == 0);
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

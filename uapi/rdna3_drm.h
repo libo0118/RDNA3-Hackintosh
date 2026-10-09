@@ -82,6 +82,7 @@ typedef struct rdna3_bo {
 typedef struct rdna3_va {
     uint32_t handle;          /* 0 = free slot */
     uint64_t va, offset, size, flags;
+    rdna3_bo *bo;             /* referenced while mapped */
 } rdna3_va;
 
 typedef struct rdna3_syncobj {
@@ -103,6 +104,14 @@ typedef struct rdna3_drm_ops {
     uint64_t (*gpu_clock)(void *ctx);
     /* MMIO read for AMDGPU_INFO_READ_MMR_REG (whitelisted regs only), may be NULL */
     uint32_t (*read_reg)(void *ctx, uint32_t dword_offset);
+    /* GPU page tables, all optional (NULL = mappings are only recorded):
+     * vm_create when a file opens, vm_map/vm_unmap for GEM_VA (va, size and
+     * offset page aligned, flags = AMDGPU_VM_PAGE_*), vm_destroy on close. */
+    void *(*vm_create)(void *ctx);
+    void  (*vm_destroy)(void *ctx, void *vm);
+    int   (*vm_map)(void *ctx, void *vm, rdna3_bo *bo, uint64_t va, uint64_t offset,
+                    uint64_t size, uint32_t flags);
+    void  (*vm_unmap)(void *ctx, void *vm, uint64_t va, uint64_t size);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -126,6 +135,7 @@ typedef struct rdna3_drm_file {
     rdna3_syncobj *syncobjs;  /* [RD_MAX_SYNCOBJ], index = handle - 1 */
     rdna3_va *vas;            /* [RD_MAX_VA] */
     uint32_t nvas;
+    void    *vm;              /* ops.vm_create() result, may be NULL */
     uint64_t client_caps;
 } rdna3_drm_file;
 

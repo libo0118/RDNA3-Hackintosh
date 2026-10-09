@@ -85,6 +85,11 @@ private:
     static void   drmBoFree(void *ctx, rdna3_bo *bo);
     static int    drmCopyin(void *ctx, void *dst, uint64_t uaddr, size_t len);
     static int    drmCopyout(void *ctx, uint64_t uaddr, const void *src, size_t len);
+    static void  *drmVmCreate(void *ctx);
+    static void   drmVmDestroy(void *ctx, void *vm);
+    static int    drmVmMap(void *ctx, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off,
+                           uint64_t size, uint32_t flags);
+    static void   drmVmUnmap(void *ctx, void *vm, uint64_t va, uint64_t size);
 
     /* Stage 7 */
     range_alloc  *fAccelVa = nullptr;

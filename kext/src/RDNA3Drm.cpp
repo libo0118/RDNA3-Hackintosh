@@ -12,6 +12,7 @@
  */
 #include "RDNA3Accel.hpp"
 #include "RDNA3Regs.h"
+#include "RDNA3Bringup.hpp"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -89,6 +90,37 @@ int RDNA3Accel::drmCopyout(void *, uint64_t uaddr, const void *src, size_t len)
     return copyout(src, (user_addr_t)uaddr, len) ? -RD_EFAULT : 0;
 }
 
+/* GPUVM hooks: forward to the bring-up, which owns the hardware state */
+void *RDNA3Accel::drmVmCreate(void *ctx)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    if (a->fBringup)
+        return a->fBringup->vmCreate();
+    static int recordOnly;   /* no bring-up (rdna3lvl < 4): any non-NULL token */
+    return &recordOnly;
+}
+
+void RDNA3Accel::drmVmDestroy(void *ctx, void *vm)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    if (a->fBringup)
+        a->fBringup->vmDestroy(vm);
+}
+
+int RDNA3Accel::drmVmMap(void *ctx, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off,
+                         uint64_t size, uint32_t flags)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->vmMap(vm, bo, va, off, size, flags) : 0;
+}
+
+void RDNA3Accel::drmVmUnmap(void *ctx, void *vm, uint64_t va, uint64_t size)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    if (a->fBringup)
+        a->fBringup->vmUnmap(vm, va, size);
+}
+
 bool RDNA3Accel::drmInit(const amd_discovery *disc)
 {
     rdna3_drm_ops ops = {};
@@ -99,6 +131,10 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.bo_free = drmBoFree;
     ops.copyin = drmCopyin;
     ops.copyout = drmCopyout;
+    ops.vm_create = drmVmCreate;
+    ops.vm_destroy = drmVmDestroy;
+    ops.vm_map = drmVmMap;
+    ops.vm_unmap = drmVmUnmap;
     ops.gpu_clock = nullptr; /* TODO(stage2-gfx): RLC GPU clock counter */
 
     fDrmLock = IOLockAlloc();

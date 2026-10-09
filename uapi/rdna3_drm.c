@@ -161,6 +161,13 @@ int rdna3_drm_file_open(rdna3_drm_device *dev, rdna3_drm_file *f)
         rdna3_drm_file_close(f);
         return -RD_ENOMEM;
     }
+    if (dev->ops.vm_create) {
+        f->vm = dev->ops.vm_create(dev->ops.ctx);
+        if (!f->vm) {
+            rdna3_drm_file_close(f);
+            return -RD_ENOMEM;
+        }
+    }
     return 0;
 }
 
@@ -178,10 +185,28 @@ static void bo_put(rdna3_drm_file *f, rdna3_bo *bo)
     dev->ops.free(dev->ops.ctx, bo, sizeof(*bo));
 }
 
+static void va_release(rdna3_drm_file *f, rdna3_va *m)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    if (f->vm && ops->vm_unmap)
+        ops->vm_unmap(ops->ctx, f->vm, m->va, m->size);
+    if (m->bo)
+        bo_put(f, m->bo);
+    m->bo = NULL;
+    m->handle = 0;
+}
+
 void rdna3_drm_file_close(rdna3_drm_file *f)
 {
     rdna3_drm_ops *ops = &f->dev->ops;
     uint32_t i;
+    if (f->vas)
+        for (i = 0; i < f->nvas; i++)
+            if (f->vas[i].handle)
+                va_release(f, &f->vas[i]);
+    if (f->vm && ops->vm_destroy)
+        ops->vm_destroy(ops->ctx, f->vm);
+    f->vm = NULL;
     if (f->bos) {
         for (i = 0; i < RD_MAX_HANDLES; i++)
             if (f->bos[i])
@@ -272,7 +297,7 @@ static int gem_close(rdna3_drm_file *f, struct drm_gem_close *c)
     f->bos[c->handle - 1] = NULL;
     for (i = 0; i < f->nvas; i++)
         if (f->vas[i].handle == c->handle)
-            f->vas[i].handle = 0;
+            va_release(f, &f->vas[i]);   /* amdgpu_gem_object_close drops the bo_va */
     bo_put(f, bo);
     return 0;
 }
@@ -408,10 +433,12 @@ static int gem_mmap(rdna3_drm_file *f, union drm_amdgpu_gem_mmap *m)
 
 static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
 {
+    rdna3_drm_ops *ops = &f->dev->ops;
     uint32_t i;
-    /* TODO(stage2-gmc): program GPUVM page tables; for now this only
-     * validates and records mappings so userspace logic can run. */
-    if (va->va_address < VA_RESERVED_BOTTOM || (va->va_address & 4095) || (va->map_size & 4095))
+    /* mappings are recorded always and written into the GPU page tables
+     * when the OS layer provides vm_map (hw/gpuvm.c behind it) */
+    if (va->va_address < VA_RESERVED_BOTTOM || (va->va_address & 4095) || (va->map_size & 4095) ||
+        (va->offset_in_bo & 4095))
         return -RD_EINVAL;
     switch (va->operation) {
     case AMDGPU_VA_OP_MAP:
@@ -419,8 +446,15 @@ static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
         rdna3_bo *bo = rdna3_drm_bo_lookup(f, va->handle);
         if (!bo)
             return -RD_ENOENT;
-        if (va->offset_in_bo + va->map_size > bo->size)
+        if (!va->map_size || va->offset_in_bo + va->map_size > bo->size)
             return -RD_EINVAL;
+        if (va->operation == AMDGPU_VA_OP_REPLACE)
+            for (i = 0; i < f->nvas; i++) {
+                rdna3_va *m = &f->vas[i];
+                if (m->handle && m->va < va->va_address + va->map_size &&
+                    va->va_address < m->va + m->size)
+                    va_release(f, m);
+            }
         for (i = 0; i < f->nvas; i++)
             if (!f->vas[i].handle)
                 break;
@@ -429,6 +463,14 @@ static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
                 return -RD_ENOSPC;
             f->nvas++;
         }
+        if (f->vm && ops->vm_map) {
+            int r = ops->vm_map(ops->ctx, f->vm, bo, va->va_address, va->offset_in_bo,
+                                va->map_size, va->flags);
+            if (r)
+                return r;
+        }
+        bo->refcnt++;
+        f->vas[i].bo = bo;
         f->vas[i].handle = va->handle;
         f->vas[i].va = va->va_address;
         f->vas[i].offset = va->offset_in_bo;
@@ -445,7 +487,7 @@ static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
             if (va->operation == AMDGPU_VA_OP_UNMAP ? m->va == va->va_address
                                                     : (m->va < va->va_address + va->map_size &&
                                                        va->va_address < m->va + m->size))
-                m->handle = 0;
+                va_release(f, m);
         }
         return 0;
     default:

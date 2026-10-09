@@ -30,6 +30,7 @@
 #include "ih60.h"
 #include "gen/osssys_6_0_0.h"
 #include "sdma60.h"
+#include "gpuvm.h"
 #include "gen/gc_11_0_0_sdma.h"
 #include "navi3x_regs.h"
 #include "psp_gfx_if.h"
@@ -663,6 +664,45 @@ static void run(const char *fwdir)
             CHECK(S.sdma_bad == 0 && S.unflushed_doorbells == 0);
             sdma60_stop(&dev, &sd);
             CHECK(!sd.ready && (S.reg[0xA000 + regSDMA0_F32_CNTL] & SDMA0_F32_CNTL__HALT_MASK));
+        }
+
+        /* GPUVM: 4-level tables, mapping across 2 MiB and 1 GiB boundaries */
+        {
+            static rdna3_pt_pool pool;
+            static rdna3_vm vm;
+            const uint64_t va = 0x00007FFFBFF00000ull;   /* crosses a PDB1 (1 GiB) boundary */
+            const uint64_t pa = 0x123400000ull;
+            uint64_t vpte = gpuvm_pte_flags((1u << 1) | (1u << 2) | (4u << 5), 0), e;
+            CHECK(gpuvm_pool_init(&dev, &pool, 64) == RDNA3_OK && pool.nfree == 64);
+            CHECK(gpuvm_vm_init(&dev, &vm, &pool) == RDNA3_OK && vm.tables == 1);
+            CHECK((vpte & RD_PTE_VALID) && (vpte & RD_PTE_READABLE) && (vpte & RD_PTE_WRITEABLE) &&
+                  !(vpte & RD_PTE_EXECUTABLE) && (vpte >> 48) == RD_MTYPE_UC);
+            CHECK(gpuvm_map_linear(&dev, &vm, va, pa, 1024, vpte) == RDNA3_OK);
+            /* root + 1 PDB1 + 2 PDB0 (one per GiB) + 3 PTB (2 MiB blocks: 1 + 2 + 1 MiB) */
+            CHECK(vm.tables == 1 + 1 + 2 + 3);
+            CHECK(gpuvm_lookup(&dev, &vm, va) == pa);
+            CHECK(gpuvm_lookup(&dev, &vm, va + 0x100000 + 0x123) == pa + 0x100000 + 0x123);
+            CHECK(gpuvm_lookup(&dev, &vm, va + 1023ull * 4096) == pa + 1023ull * 4096);
+            CHECK(gpuvm_lookup(&dev, &vm, va + 1024ull * 4096) == 0);
+            /* sign-extended high-half addresses hit the same tables */
+            CHECK(gpuvm_lookup(&dev, &vm, va | 0xFFFF000000000000ull) == pa);
+            /* the root PDE points at a table inside the pool */
+            rdna3_vram_read(&dev, vm.root + 8ull * ((va >> 39) & 511), &e, 8);
+            CHECK((e & RD_PTE_VALID) && (e & 0x0000FFFFFFFFF000ull) - rdna3_vram_pa(&dev, 0) >= pool.base);
+            gpuvm_unmap(&dev, &vm, va + 4096, 1);
+            CHECK(gpuvm_lookup(&dev, &vm, va + 4096) == 0 && gpuvm_lookup(&dev, &vm, va) == pa);
+            CHECK(gpuvm_map_linear(&dev, &vm, va + 1, pa, 1, vpte) == RDNA3_EINVAL);
+            gpuvm_vm_fini(&dev, &vm);
+            CHECK(vm.tables == 0 && pool.nfree == 64);
+            gfxhub303_setup_vm_pt_regs(&dev, 3, 0x123456789000ull | 1);
+            CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 +
+                        3 * (regGCVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 -
+                             regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32)] == 0x56789001u);
+            /* exhaustion is reported, not corrupting */
+            CHECK(gpuvm_vm_init(&dev, &vm, &pool) == RDNA3_OK);
+            CHECK(gpuvm_map_linear(&dev, &vm, 0x1000000000ull, pa, 512ull * 70, vpte) == RDNA3_ENOMEM);
+            gpuvm_vm_fini(&dev, &vm);
+            CHECK(pool.nfree == 64);
         }
     }
 

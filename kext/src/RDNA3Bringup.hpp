@@ -23,6 +23,8 @@ extern "C" {
 #include "gmc11.h"
 #include "ih60.h"
 #include "sdma60.h"
+#include "gpuvm.h"
+#include "rdna3_drm.h"
 #include "amd_fw.h"
 }
 
@@ -47,6 +49,15 @@ public:
     static void     osWmb(void *ctx);
     static uint32_t osMmioRd(void *ctx, uint64_t off);
     static void     osMmioWr(void *ctx, uint64_t off, uint32_t v);
+
+    /* GPUVM for the DRM UAPI (called under RDNA3Accel's fDrmLock). Before
+     * the GMC is up (rdna3lvl < 6, or the thread still running) a VM is
+     * created "record only" and map/unmap do nothing. */
+    void *vmCreate();
+    void  vmDestroy(void *vm);
+    int   vmMap(void *vm, rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size,
+                uint32_t flags);
+    void  vmUnmap(void *vm, uint64_t va, uint64_t size);
 
 private:
     static void threadMain(void *arg, int wait_result);
@@ -73,6 +84,10 @@ private:
     rdna3_gmc    *fGmc    = nullptr;   /* level 6 */
     rdna3_ih     *fIh     = nullptr;   /* level 6 */
     rdna3_sdma_ring *fSdma = nullptr;  /* level 7 */
+    rdna3_pt_pool *fPtPool = nullptr;  /* level 6: page tables for user VMs */
+    uint32_t      fVmidUsed = 0;       /* bit n = VMID n taken (0 is the kernel's) */
+    volatile bool fVmReady = false;
+    void          vmFlush(uint32_t vmid);
     RDNA3Firmware fSos    = {};
     RDNA3Firmware fBlobs[AMD_BLOB_COUNT] = {};
 

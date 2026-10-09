@@ -9,6 +9,7 @@
 #include <IOKit/IOLib.h>
 #include <libkern/OSKextLib.h>
 #include <libkern/OSAtomic.h>
+#include <libkern/OSAtomic.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
 #include <kern/thread_call.h>
@@ -120,6 +121,9 @@ void RDNA3Bringup::stopAndFree()
     if (fDev) IOFree(fDev, sizeof(*fDev));
     if (fPsp) IOFree(fPsp, sizeof(*fPsp));
     if (fPlan) IOFree(fPlan, sizeof(*fPlan));
+    fVmReady = false;
+    if (fPtPool) IOFree(fPtPool, sizeof(*fPtPool));
+    fPtPool = nullptr;
     if (fSdma) {
         if (fSdma->ready && fDev) sdma60_stop(fDev, fSdma);
         IOFree(fSdma, sizeof(*fSdma));
@@ -331,6 +335,16 @@ void RDNA3Bringup::run()
         publishString("RDNA3,Stage2", ret ? "failed: IH" : "PSP + SMU + MMHUB GART + IH up");
         if (ret)
             return;
+
+        /* page tables for user VMs: 16 MiB of 4 KiB tables */
+        fPtPool = (rdna3_pt_pool *)IOMalloc(sizeof(*fPtPool));
+        if (fPtPool && gpuvm_pool_init(fDev, fPtPool, 4096) == RDNA3_OK) {
+            OSMemoryBarrier();
+            fVmReady = true;
+            publish("RDNA3,VMTablePages", fPtPool->npages);
+        } else {
+            BLOG("no page-table pool: GEM_VA stays record-only");
+        }
     }
 
     /* level 7: SDMA0 ring + ring test + a 64 KiB VRAM->VRAM copy check */
@@ -371,4 +385,111 @@ void RDNA3Bringup::run()
         }
         publishString("RDNA3,Stage2", ret ? "failed: SDMA" : "PSP + SMU + GART + IH + SDMA up, copy verified");
     }
+}
+
+/* ------------------------------ GPUVM ------------------------------ */
+
+struct RDNA3Vm {
+    rdna3_vm vm;
+    uint32_t vmid;
+    bool     live;   /* page tables exist */
+};
+
+void *RDNA3Bringup::vmCreate()
+{
+    RDNA3Vm *v = (RDNA3Vm *)IOMalloc(sizeof(*v));
+    if (!v)
+        return nullptr;
+    bzero(v, sizeof(*v));
+    v->vm.root = UINT64_MAX;
+    if (!fVmReady)
+        return v;
+    /* one VMID per open file for now (amdgpu hands VMIDs out per job) */
+    for (uint32_t id = 1; id < 16; id++) {
+        if (!(fVmidUsed & (1u << id))) {
+            if (gpuvm_vm_init(fDev, &v->vm, fPtPool) != RDNA3_OK)
+                break;
+            fVmidUsed |= 1u << id;
+            v->vmid = id;
+            v->vm.vmid = id;
+            v->live = true;
+            /* both hubs: SDMA/VCN walk MMHUB, shaders GFXHUB */
+            mmhub302_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
+            if (fGmc && fGmc->gfxhub_enabled)
+                gfxhub303_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
+            vmFlush(id);
+            break;
+        }
+    }
+    if (!v->live)
+        BLOG("VM: no VMID or page tables left, this client's VM is record-only");
+    return v;
+}
+
+void RDNA3Bringup::vmFlush(uint32_t vmid)
+{
+    mmhub302_flush_tlb(fDev, vmid, 0);
+    if (fGmc && fGmc->gfxhub_enabled)
+        gfxhub303_flush_tlb(fDev, vmid, 0);
+}
+
+void RDNA3Bringup::vmDestroy(void *p)
+{
+    RDNA3Vm *v = (RDNA3Vm *)p;
+    if (!v)
+        return;
+    if (v->live && fVmReady) {
+        mmhub302_setup_vm_pt_regs(fDev, v->vmid, 0);
+        if (fGmc && fGmc->gfxhub_enabled)
+            gfxhub303_setup_vm_pt_regs(fDev, v->vmid, 0);
+        vmFlush(v->vmid);
+        gpuvm_vm_fini(fDev, &v->vm);
+        fVmidUsed &= ~(1u << v->vmid);
+    }
+    IOFree(v, sizeof(*v));
+}
+
+struct GttPages {
+    IOMemoryDescriptor *md;
+    uint64_t offset;
+};
+
+static uint64_t gttPagePa(void *ctx, uint64_t i)
+{
+    GttPages *g = (GttPages *)ctx;
+    /* TODO(dma): IODMACommand mapping once bus mastering / an IOMMU is in
+     * the picture; on a Hackintosh without VT-d this is the bus address */
+    return g->md->getPhysicalSegment(g->offset + i * 4096, nullptr, kIOMemoryMapperNone);
+}
+
+int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size,
+                        uint32_t flags)
+{
+    RDNA3Vm *v = (RDNA3Vm *)p;
+    int r;
+    if (!v || !v->live || !fVmReady)
+        return 0;   /* record-only VM */
+    uint64_t pages = size / 4096;
+    if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
+        r = gpuvm_map_linear(fDev, &v->vm, va, rdna3_vram_pa(fDev, bo->vram_offset + offset), pages,
+                             gpuvm_pte_flags(flags, 0));
+    } else {
+        GttPages g = { (IOMemoryDescriptor *)bo->backing, offset };
+        if (!g.md)
+            return -RD_EINVAL;
+        r = gpuvm_map(fDev, &v->vm, va, pages, gttPagePa, &g, gpuvm_pte_flags(flags, 1));
+    }
+    if (r)
+        return -RD_ENOMEM;
+    vmFlush(v->vmid);
+    return 0;
+}
+
+void RDNA3Bringup::vmUnmap(void *p, uint64_t va, uint64_t size)
+{
+    RDNA3Vm *v = (RDNA3Vm *)p;
+    if (!v || !v->live || !fVmReady)
+        return;
+    gpuvm_unmap(fDev, &v->vm, va, size / 4096);
+    vmFlush(v->vmid);
 }
