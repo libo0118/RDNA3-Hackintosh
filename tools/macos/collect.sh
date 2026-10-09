@@ -11,9 +11,15 @@ dir=$(mktemp -d "/tmp/rdna3-report-XXXXXX")
 out="$HOME/rdna3-report-$label-$stamp.tar.gz"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 
-run() {   # run <file> <command...>: output and exit code, never stops the script
+run() {   # run <file> <command...>: output and exit code, never stops the
+          # script; a command still running after 45 s is killed
     f=$1; shift
-    { echo "\$ $*"; "$@"; echo "[exit $?]"; } > "$dir/$f" 2>&1
+    { echo "\$ $*"
+      "$@" & p=$!
+      ( sleep 45; kill -9 "$p" 2>/dev/null ) & w=$!
+      wait "$p"; r=$?
+      kill "$w" 2>/dev/null
+      echo "[exit $r]"; } > "$dir/$f" 2>&1
 }
 
 run 00-system.txt sw_vers
