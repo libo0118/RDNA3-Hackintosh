@@ -81,7 +81,7 @@
 #define NM_TAHOE_FWD_RD3MemoryMap \
     bool matchOptionBits(unsigned int a0) override; \
     unsigned long long getLength() const override;
-#define NM_TAHOE_FWD_RD3Accel \
+#define NM_TAHOE_FWD_RDNA3Accelerator \
     uint64_t tmpTotalVRAM() override; \
     uint64_t totalTextureMemory() override;
 #define NM_TAHOE_FWD(cls) NM_TAHOE_FWD_##cls
