@@ -32,6 +32,8 @@
 #include "sdma60.h"
 #include "gpuvm.h"
 #include "gen/gc_11_0_0_sdma.h"
+#include "gfx11.h"
+#include "gen/gc_11_0_0_gfx.h"
 #include "navi3x_regs.h"
 #include "psp_gfx_if.h"
 #include "amdgpu_ucode_hdr.h"
@@ -52,6 +54,8 @@ static int failures;
 #define MP1_BASE   0x16000u
 #define GC_BASE0   0x1260u
 #define MM_BASE0   0x1A000u
+/* absolute dword of a GC register from its BASE_IDX (segments 0 / 1) */
+#define GCR(reg) ((reg##_BASE_IDX ? 0xA000u : GC_BASE0) + reg)
 #define OSS_BASE0  0x4260u
 #define NBIO_B0    0x0u
 #define NBIO_B1    0x14u
@@ -85,6 +89,8 @@ typedef struct sim {
     unsigned tlb_flushes;
     unsigned mm_tlb_flushes, mm_sem_held, mm_flush_without_sem, mm_private_inv;
     uint64_t sdma_rptr;         /* bytes */
+    uint64_t cp_rptr;           /* dwords */
+    unsigned cp_pkts, cp_bad, cp_while_halted, cp_clear_state, cp_ctx_regs;
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
 } sim;
 
@@ -99,6 +105,50 @@ static uint8_t *mc_ptr(uint64_t mc, uint64_t len)
     if (mc < FB_START || mc - FB_START + len > BAR_LEN)
         return NULL;
     return S.vram + (mc - FB_START);
+}
+
+/* CP (ME/PFP) model for the kernel gfx ring: SET_UCONFIG_REG, the clear
+ * state packets, RELEASE_MEM fence writes, NOP */
+static void cp_run(uint32_t wptr_dw)
+{
+    uint32_t cntl = S.reg[GCR(regCP_RB0_CNTL)];
+    uint32_t me = S.reg[GCR(regCP_ME_CNTL)];
+    uint64_t base = ((uint64_t)S.reg[GCR(regCP_RB0_BASE)] << 8) |
+                    ((uint64_t)S.reg[GCR(regCP_RB0_BASE_HI)] << 40);
+    uint32_t ndw = 2u << ((cntl & CP_RB0_CNTL__RB_BUFSZ_MASK) >> CP_RB0_CNTL__RB_BUFSZ__SHIFT);
+    uint32_t *ring = (uint32_t *)mc_ptr(base, 4ull * ndw);
+    if (!S.reg[GCR(regCP_RB_ACTIVE)] || !ring)
+        return;
+    if (me & (CP_ME_CNTL__ME_HALT_MASK | CP_ME_CNTL__PFP_HALT_MASK)) {
+        S.cp_while_halted++;
+        return;
+    }
+    if (S.pending_writes)
+        S.unflushed_doorbells++;
+#define PK(i) ring[(S.cp_rptr + (i)) & (ndw - 1)]
+    while ((S.cp_rptr & (ndw - 1)) != (wptr_dw & (ndw - 1))) {
+        uint32_t h = PK(0), type = h >> 30, op = (h >> 8) & 0xff, cnt = (h >> 16) & 0x3fff;
+        S.cp_pkts++;
+        if (type != 3) { S.cp_bad++; S.cp_rptr++; continue; }
+        switch (op) {
+        case PACKET3_SET_UCONFIG_REG:
+            for (uint32_t i = 0; i < cnt; i++)
+                S.reg[0xC000 + PK(1) + i] = PK(2 + i);
+            break;
+        case PACKET3_SET_CONTEXT_REG: S.cp_ctx_regs += cnt; break;
+        case PACKET3_CLEAR_STATE: S.cp_clear_state++; break;
+        case PACKET3_PREAMBLE_CNTL: case PACKET3_CONTEXT_CONTROL: case PACKET3_NOP: break;
+        case PACKET3_RELEASE_MEM: {
+            uint64_t a = PK(3) | ((uint64_t)PK(4) << 32);
+            uint8_t *p = mc_ptr(a, 4);
+            if (p && ((PK(2) >> 29) & 7) == 1) memcpy(p, &PK(5), 4); else S.cp_bad++;
+            break;
+        }
+        default: S.cp_bad++; break;
+        }
+        S.cp_rptr += 2 + cnt;
+    }
+#undef PK
 }
 
 /* SDMA 6.0 engine model: WRITE_LINEAR, COPY_LINEAR, CONST_FILL, FENCE, NOP */
@@ -283,6 +333,12 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             *R(dw) = v;
             return;
         }
+    }
+    /* CP gfx ring 0: a write of CP_RB0_WPTR runs PM4 up to it */
+    if (dw == GCR(regCP_RB0_WPTR)) {
+        *R(dw) = v;
+        cp_run(v);
+        return;
     }
     /* SDMA0 QUEUE0: a write of RB_WPTR runs the ring up to it */
     if (dw == GC_BASE0 + regSDMA0_QUEUE0_RB_WPTR) {
@@ -677,6 +733,33 @@ static void run(const char *fwdir)
             }
             sdma60_stop(&dev, &sd);
             CHECK(!sd.ready && (S.reg[0xA000 + regSDMA0_F32_CNTL] & SDMA0_F32_CNTL__HALT_MASK));
+        }
+
+        /* GFX 11: RLC autoload done, RS64 start addresses, GFXHUB, clear state,
+         * ring 0 test through SCRATCH_REG0, fence via RELEASE_MEM */
+        {
+            static rdna3_gfx_ring gr;
+            rdna3_rs64_start rs = { 0x1000, 0x2, 0x2000, 0x3, 0x4000, 0x1 };
+            uint32_t k;
+            S.reg[GCR(regCP_ME_CNTL)] = CP_ME_CNTL__ME_HALT_MASK | CP_ME_CNTL__PFP_HALT_MASK;
+            S.reg[GCR(regRLC_RLCS_BOOTLOAD_STATUS)] = 0;
+            CHECK(gfx11_hw_init(&dev, &gmc, &gr, &rs, 8192) == RDNA3_ETIME);   /* autoload not done */
+            S.reg[GCR(regRLC_RLCS_BOOTLOAD_STATUS)] = RLC_RLCS_BOOTLOAD_STATUS__BOOTLOAD_COMPLETE_MASK;
+            CHECK(gfx11_hw_init(&dev, &gmc, &gr, &rs, 8192) == RDNA3_OK && gr.ready);
+            CHECK(gmc.gfxhub_enabled);
+            CHECK(S.reg[GCR(regCP_ME_PRGRM_CNTR_START)] == ((0x3u << 30) | (0x2000 >> 2)));
+            CHECK(S.reg[GCR(regCP_MEC_RS64_PRGRM_CNTR_START_HI)] == 0);
+            CHECK(S.reg[0xC000 + 0x40] == 0xDEADBEEF);       /* SCRATCH_REG0 via SET_UCONFIG_REG */
+            CHECK(S.cp_clear_state == 1 && S.cp_ctx_regs == 934 + 1 && S.cp_bad == 0 &&
+                  S.cp_while_halted == 0);
+            CHECK(gfx11_csb_size() == 960);
+            CHECK(S.reg[GCR(regRLC_CSIB_LENGTH)] == 960);
+            for (k = 0; k < 600; k++) {   /* 600 x 8 dw > 2048-dw ring: wraps */
+                uint32_t seq = gfx11_emit_fence(&dev, &gr);
+                gfx11_commit(&dev, &gr);
+                CHECK(gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+            }
+            CHECK(gr.fence_seq == 600 && S.cp_bad == 0 && S.unflushed_doorbells == 0);
         }
 
         /* GPUVM: 4-level tables, mapping across 2 MiB and 1 GiB boundaries */

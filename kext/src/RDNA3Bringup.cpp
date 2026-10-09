@@ -9,7 +9,6 @@
 #include <IOKit/IOLib.h>
 #include <libkern/OSKextLib.h>
 #include <libkern/OSAtomic.h>
-#include <libkern/OSAtomic.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
 #include <kern/thread_call.h>
@@ -125,6 +124,10 @@ void RDNA3Bringup::stopAndFree()
     fVmReady = false;
     if (fPtPool) IOFree(fPtPool, sizeof(*fPtPool));
     fPtPool = nullptr;
+    if (fGfx) {
+        if (fGfx->ready && fDev) gfx11_cp_gfx_enable(fDev, 0);
+        IOFree(fGfx, sizeof(*fGfx));
+    }
     if (fSdma) {
         if (fSdma->ready && fDev) sdma60_stop(fDev, fSdma);
         IOFree(fSdma, sizeof(*fSdma));
@@ -135,7 +138,7 @@ void RDNA3Bringup::stopAndFree()
     }
     if (fGmc) IOFree(fGmc, sizeof(*fGmc));
     if (fLock) IOLockFree(fLock);
-    fDisc = nullptr; fDev = nullptr; fPsp = nullptr; fPlan = nullptr; fGmc = nullptr; fIh = nullptr; fSdma = nullptr; fLock = nullptr;
+    fDisc = nullptr; fDev = nullptr; fPsp = nullptr; fPlan = nullptr; fGmc = nullptr; fIh = nullptr; fSdma = nullptr; fGfx = nullptr; fLock = nullptr;
 }
 
 void RDNA3Bringup::publish(const char *key, uint64_t v)
@@ -390,6 +393,38 @@ void RDNA3Bringup::run()
             fOwner->drmRingReady(AMDGPU_HW_IP_DMA, 1);
             publishString("RDNA3,Rings", "DMA0");
         }
+        if (ret)
+            return;
+    }
+
+    /* level 8: GFX 11 (RLC autoload check, RS64, GFXHUB, clear state) and
+     * the kernel gfx ring 0 with its ring test */
+    if (fLevel >= 8) {
+        rdna3_rs64_start rs64;
+        fGfx = (rdna3_gfx_ring *)IOMalloc(sizeof(*fGfx));
+        if (!fGfx) {
+            publishString("RDNA3,Stage2", "failed: GFX (no memory)");
+            return;
+        }
+        bzero(fGfx, sizeof(*fGfx));
+        ret = gfx11_rs64_from_fw(fBlobs[AMD_BLOB_PFP].data, fBlobs[AMD_BLOB_PFP].len,
+                                 fBlobs[AMD_BLOB_ME].data, fBlobs[AMD_BLOB_ME].len,
+                                 fBlobs[AMD_BLOB_MEC].data, fBlobs[AMD_BLOB_MEC].len, &rs64);
+        if (!ret)
+            ret = gfx11_hw_init(fDev, fGmc, fGfx, &rs64, 0);
+        publish("RDNA3,GFXResult", (uint64_t)(int64_t)ret);
+        if (!ret && fVmReady) {
+            /* VMs opened before the GFXHUB came up get their context now
+             * (gfxhub303_gart_enable reset VMID 1-15) */
+            for (uint32_t id = 1; id < 16; id++)
+                if (fVmidUsed & (1u << id)) {
+                    gfxhub303_setup_vm_pt_regs(fDev, id, fVmPd[id]);
+                    gfxhub303_flush_tlb(fDev, id, 0);
+                }
+            fOwner->drmRingReady(AMDGPU_HW_IP_GFX, 1);
+            publishString("RDNA3,Rings", "DMA0 GFX0");
+        }
+        publishString("RDNA3,Stage2", ret ? "failed: GFX" : "GFX ring 0 up, ring test passed");
     }
 }
 
@@ -419,6 +454,7 @@ void *RDNA3Bringup::vmCreate()
             v->vmid = id;
             v->vm.vmid = id;
             v->live = true;
+            fVmPd[id] = gpuvm_pd_addr(fDev, &v->vm);
             /* both hubs: SDMA/VCN walk MMHUB, shaders GFXHUB */
             mmhub302_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
             if (fGmc && fGmc->gfxhub_enabled)
@@ -451,6 +487,7 @@ void RDNA3Bringup::vmDestroy(void *p)
         vmFlush(v->vmid);
         gpuvm_vm_fini(fDev, &v->vm);
         fVmidUsed &= ~(1u << v->vmid);
+        fVmPd[v->vmid] = 0;
     }
     IOFree(v, sizeof(*v));
 }
@@ -506,22 +543,36 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
                          uint64_t *seq)
 {
     RDNA3Vm *v = (RDNA3Vm *)p;
-    if (ip != AMDGPU_HW_IP_DMA || ring != 0 || !fSdma || !fSdma->ready)
-        return -RD_EINVAL;
-    if (!v || !v->live)
+    if (!v || !v->live || ring != 0)
         return -RD_EINVAL;   /* record-only VM: the IB VA means nothing to the GPU */
-    for (uint32_t i = 0; i < n; i++)
-        sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);
-    *seq = sdma60_emit_fence(fDev, fSdma);
-    sdma60_commit(fDev, fSdma);
-    return 0;
+    if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready) {
+        for (uint32_t i = 0; i < n; i++)
+            sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);
+        *seq = sdma60_emit_fence(fDev, fSdma);
+        sdma60_commit(fDev, fSdma);
+        return 0;
+    }
+    if (ip == AMDGPU_HW_IP_GFX && fGfx && fGfx->ready) {
+        /* TODO(gfx): amdgpu also emits a VM flush, HDP flush and ACQUIRE_MEM
+         * cache sync around each job (gfx_v11_0_ring_emit_vm_flush etc.) */
+        for (uint32_t i = 0; i < n; i++)
+            gfx11_emit_ib(fDev, fGfx, v->vmid, ibs[i].va, ibs[i].length_dw);
+        *seq = gfx11_emit_fence(fDev, fGfx);
+        gfx11_commit(fDev, fGfx);
+        return 0;
+    }
+    return -RD_EINVAL;
 }
 
 int RDNA3Bringup::fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq)
 {
-    if (ip != AMDGPU_HW_IP_DMA || ring != 0 || !fSdma)
+    if (ring != 0)
         return 1;
-    return sdma60_fence_passed(fDev, fSdma, (uint32_t)seq);
+    if (ip == AMDGPU_HW_IP_DMA && fSdma)
+        return sdma60_fence_passed(fDev, fSdma, (uint32_t)seq);
+    if (ip == AMDGPU_HW_IP_GFX && fGfx)
+        return gfx11_fence_passed(fDev, fGfx, (uint32_t)seq);
+    return 1;
 }
 
 extern "C" uint64_t mach_continuous_time(void);

@@ -24,6 +24,7 @@ extern "C" {
 #include "ih60.h"
 #include "sdma60.h"
 #include "gpuvm.h"
+#include "gfx11.h"
 #include "rdna3_drm.h"
 #include "amd_fw.h"
 }
@@ -90,8 +91,10 @@ private:
     rdna3_gmc    *fGmc    = nullptr;   /* level 6 */
     rdna3_ih     *fIh     = nullptr;   /* level 6 */
     rdna3_sdma_ring *fSdma = nullptr;  /* level 7 */
+    rdna3_gfx_ring  *fGfx  = nullptr;  /* level 8 */
     rdna3_pt_pool *fPtPool = nullptr;  /* level 6: page tables for user VMs */
     uint32_t      fVmidUsed = 0;       /* bit n = VMID n taken (0 is the kernel's) */
+    uint64_t      fVmPd[16] = {};      /* page directory per live VMID */
     volatile bool fVmReady = false;
     void          vmFlush(uint32_t vmid);
     RDNA3Firmware fSos    = {};

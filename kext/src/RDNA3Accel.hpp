@@ -15,6 +15,7 @@
  *   6  + GMC: GART table in VRAM, MMHUB 3.0.2 GART enable + TLB flush;
  *        IH 6.0 interrupt ring (polled).
  *   7  + SDMA0 ring, ring test, 64 KiB VRAM copy verified by the CPU.
+ *   8  + GFX 11: RS64, GFXHUB, clear state, gfx ring 0 + ring test.
  *  -rdna3off  disables the driver entirely (probe fails).
  *
  * Levels 0-3 never write anything except MM_INDEX/MM_INDEX_HI (the indirect
