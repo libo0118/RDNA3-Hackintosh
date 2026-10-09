@@ -1,152 +1,152 @@
-# Etap 3: wyświetlanie (DCN 3.2)
+# Stage 3: display (DCN 3.2)
 
-Pełny port Display Core z amdgpu (modesetting, trening łącza, DMCUB) to ponad
-100 tys. linii. Pierwszy krok jest dużo mniejszy: **przejmujemy tryb, który
-ustawiło VBIOS / UEFI GOP**. Karta już wyświetla obraz z liniowego bufora w VRAM;
-sterownik tylko odczytuje, gdzie ten bufor jest i jak wygląda timing, a potem
-przełącza (flip) wyświetlanie na inne bufory w VRAM, które przygotował
-akcelerator. Łącze, zegary i routing OPP/MPC zostają takie, jak zostawił firmware.
+A full port of Display Core from amdgpu (modesetting, link training, DMCUB) is over
+100k lines. The first step is much smaller: **we take over the mode that
+the VBIOS / UEFI GOP set**. The card already displays a picture from a linear buffer in VRAM;
+the driver only reads where that buffer is and what the timing looks like, and then
+switches (flips) the display to other buffers in VRAM that the
+accelerator prepared. The link, clocks and OPP/MPC routing stay as the firmware left them.
 
 ```
-GOP / VBIOS ──▶ DCN 3.2: HUBP (adres, pitch, format) ─▶ OTG (timing) ─▶ monitor
-                    ▲  odczyt + flip                       ▲ licznik klatek, CRC
+GOP / VBIOS ──▶ DCN 3.2: HUBP (address, pitch, format) ─▶ OTG (timing) ─▶ monitor
+                    ▲  read + flip                         ▲ frame counter, CRC
           hw/dcn32.c (MIT) ◀── RDNA3Accel.kext: rdna3DisplayInfo/Flip/Status/Crc
                                      ▲  (kext/src/RDNA3Display.cpp)
-                         RDNA3Framebuffer.kext (fb/, IOFramebuffer, z NVRMFB)
+                         RDNA3Framebuffer.kext (fb/, IOFramebuffer, from NVRMFB)
                                      ▲
-                    WindowServer / RDNA3Accelerator (flipy powierzchni)
+                    WindowServer / RDNA3Accelerator (surface flips)
 ```
 
-## Części
+## Parts
 
-| Plik | Co robi |
+| File | What it does |
 |---|---|
-| `hw/dcn32.c` | sprzętowy kursor 256×256 ARGB (HUBP + DPP, jak `hubp2_cursor_set_*` / `dpp2_set_cursor_attributes`); szuka zapalonych głowic (HUBP bez blank, OTG włączony), czyta format, tiling, DCC, viewport, pitch, adres MC, timing OTG (jak `optc1_get_hw_timing`); flip (`hubp2_program_surface_flip_and_addr`, zmiana pitch pod `SURFACE_UPDATE_LOCK`), flip pending, licznik klatek, linia, vblank, CRC OTG |
-| `kext/src/RDNA3Display.cpp` | na `rdna3lvl>=2` czyta głowice (**tylko odczyt**), mierzy odświeżanie z licznika klatek, odpowiada na wywołania framebuffera; alokatory VRAM zaczynają się nad buforem GOP (4K = 32 MiB) |
-| `fb/rdna3-fb.cpp` | `RDNA3Framebuffer`: jeden tryb (ten z firmware), apertura BAR0, VBL z licznika klatek OTG, flipy dla akceleratora; bez rdzenia albo bez użytecznej głowicy działa jak zwykły framebuffer na buforze konsoli z bootloadera (`PE_Video`) |
+| `hw/dcn32.c` | 256×256 ARGB hardware cursor (HUBP + DPP, like `hubp2_cursor_set_*` / `dpp2_set_cursor_attributes`); finds lit heads (HUBP not blanked, OTG enabled), reads format, tiling, DCC, viewport, pitch, MC address, OTG timing (like `optc1_get_hw_timing`); flip (`hubp2_program_surface_flip_and_addr`, pitch change under `SURFACE_UPDATE_LOCK`), flip pending, frame counter, line, vblank, OTG CRC |
+| `kext/src/RDNA3Display.cpp` | at `rdna3lvl>=2` reads the heads (**read only**), measures the refresh rate from the frame counter, answers framebuffer calls; the VRAM allocators start above the GOP buffer (4K = 32 MiB) |
+| `fb/rdna3-fb.cpp` | `RDNA3Framebuffer`: one mode (the one from firmware), BAR0 aperture, VBL from the OTG frame counter, flips for the accelerator; without the core or without a usable head it works as a plain framebuffer on the bootloader console buffer (`PE_Video`) |
 
-## Bramki
+## Gates
 
-| Boot-arg | Efekt |
+| Boot-arg | Effect |
 |---|---|
-| brak `rdna3fb=1` | `RDNA3Framebuffer` się nie uruchamia; ekran obsługuje IONDRVFramebuffer Apple |
-| `rdna3fb=1` | nasz framebuffer bierze kategorię `IOFramebuffer` (wynik 30000 > 20000 IONDRV); gdy `start()` się nie uda, IOKit wraca do IONDRV |
-| `rdna3lvl=2` (albo więcej) | rdzeń zna głowice: tryb DCN (flipy, prawdziwy VBL) zamiast trybu konsoli |
-| `rdna3cursor=0` | kursor programowy zamiast sprzętowego kursora DCN |
-| `-rdna3off` | wyłącza wszystko |
+| no `rdna3fb=1` | `RDNA3Framebuffer` does not start; Apple's IONDRVFramebuffer drives the screen |
+| `rdna3fb=1` | our framebuffer takes the `IOFramebuffer` category (score 30000 > 20000 IONDRV); if `start()` fails, IOKit falls back to IONDRV |
+| `rdna3lvl=2` (or higher) | the core knows the heads: DCN mode (flips, real VBL) instead of console mode |
+| `rdna3cursor=0` | software cursor instead of the DCN hardware cursor |
+| `-rdna3off` | disables everything |
 
-Zapisy do rejestrów DCN zdarzają się tylko przy flipie albo przy włączeniu CRC,
-czyli dopiero gdy akcelerator zacznie wyświetlać swoje powierzchnie.
+Writes to DCN registers happen only on a flip or when CRC is enabled,
+that is, only once the accelerator starts displaying its own surfaces.
 
-## Testy z jedną kartą (bez iGPU)
+## Tests with a single card (no iGPU)
 
-macOS bez sterownika dla 7800 XT startuje na buforze GOP (IONDRVFramebuffer):
-bez akceleracji, jedna rozdzielczość, jeden monitor. To wystarczy.
+macOS without a driver for the 7800 XT boots on the GOP buffer (IONDRVFramebuffer):
+no acceleration, one resolution, one monitor. That is enough.
 
-1. BIOS: CSM wyłączony (czysty UEFI GOP). Jeśli są problemy z Resizable BAR:
-   wyłączyć go albo `ResizeAppleGpuBars = -1` w OpenCore. **Nie** blokować
-   `IONDRVSupport` w tym etapie.
-2. W macOS włączyć Logowanie zdalne (SSH) i łączyć się z innego urządzenia.
-3. Kexty instalować (`package/install.sh`), ale **pierwsze testy robić przez
-   ręczne ładowanie**, nie przy starcie: zawieszenie naprawia twardy reset.
-4. Kolejność:
-   1. `rdna3lvl=2`: tylko odczyty. W `ioreg -l -w0 | grep RDNA3` powinny być
-      `RDNA3,DisplayHeads`, `RDNA3,DisplayReserveEnd`; w logu
+1. BIOS: CSM disabled (pure UEFI GOP). If there are problems with Resizable BAR:
+   disable it or set `ResizeAppleGpuBars = -1` in OpenCore. **Do not** block
+   `IONDRVSupport` in this stage.
+2. In macOS enable Remote Login (SSH) and connect from another device.
+3. Install the kexts (`package/install.sh`), but **do the first tests by
+   loading them manually**, not at boot: a hard reset fixes a hang.
+4. Order:
+   1. `rdna3lvl=2`: reads only. `ioreg -l -w0 | grep RDNA3` should show
+      `RDNA3,DisplayHeads`, `RDNA3,DisplayReserveEnd`; in the log
       `display: head 0 …x… pitch … usable`.
-   2. `rdna3lvl=2 rdna3fb=1`: nasz framebuffer zamiast IONDRV. Oczekiwane:
-      pulpit wygląda tak samo, w logu `RDNA3-fb: DCN mode: …`. Jeśli ekran
-      zgaśnie: SSH i logi, potem restart bez `rdna3fb=1`.
-   3. Dopiero potem akcelerator (`rdna3accel=1`, Etap 7) i flipy.
-5. Logi: `log show --last 10m --predicate 'eventMessage CONTAINS "RDNA3"'`.
+   2. `rdna3lvl=2 rdna3fb=1`: our framebuffer instead of IONDRV. Expected:
+      the desktop looks the same, in the log `RDNA3-fb: DCN mode: …`. If the screen
+      goes dark: SSH and logs, then reboot without `rdna3fb=1`.
+   3. Only then the accelerator (`rdna3accel=1`, Stage 7) and flips.
+5. Logs: `log show --last 10m --predicate 'eventMessage CONTAINS "RDNA3"'`.
 
-## DP AUX, HPD, EDID (pierwszy krok Display Core)
+## DP AUX, HPD, EDID (first step of Display Core)
 
-`hw/dcaux.c` (port `dce_aux.c`: arbiter, `AUX_SW_DATA` FIFO, `AUX_SW_GO`,
-status, odpowiedź) daje natywny odczyt/zapis DPCD, I2C-over-AUX i EDID
-(128 B + rozszerzenia, segment E-DDC), `dcaux_hpd_sense` czyta
-`DC_HPD_INT_STATUS.DC_HPD_SENSE`. Przypisanie silnik AUX ↔ złącze ↔ OTG
-jest w tablicy obiektów VBIOS (jeszcze nie parsowanej), więc kext sonduje
-wszystkie 5 silników przy starcie (`RDNA3,Connectors`,
-`RDNA3,Connector<n>,{AUX,HPD,DPCD,EDID,Monitor,Modes}`), a `hw/edid.c`
-wyciąga z EDID nazwę, tryby szczegółowe (DTD, w tym CTA-861), standardowe
-i ustalone. `RDNA3Framebuffer` odpowiada `hasDDCConnect`/`getDDCBlock`
-(`rdna3DisplayEdid`: głowica 0 = pierwszy podłączony sink z EDID), więc
-macOS buduje `IODisplayEDID` i pokazuje nazwę monitora. Modesetting z tych
-trybów wymaga jeszcze: interpretera ATOM (tablice `TransmitterControl`,
-`SetPixelClock`), treningu łącza DP i programowania OTG/HUBP pod nowy tryb.
+`hw/dcaux.c` (port of `dce_aux.c`: arbiter, `AUX_SW_DATA` FIFO, `AUX_SW_GO`,
+status, reply) provides native DPCD read/write, I2C-over-AUX and EDID
+(128 B + extensions, E-DDC segment), `dcaux_hpd_sense` reads
+`DC_HPD_INT_STATUS.DC_HPD_SENSE`. The AUX engine ↔ connector ↔ OTG assignment
+is in the VBIOS object table (not parsed yet), so the kext probes
+all 5 engines at startup (`RDNA3,Connectors`,
+`RDNA3,Connector<n>,{AUX,HPD,DPCD,EDID,Monitor,Modes}`), and `hw/edid.c`
+extracts from the EDID the name, the detailed modes (DTD, including CTA-861), the standard
+and the established ones. `RDNA3Framebuffer` answers `hasDDCConnect`/`getDDCBlock`
+(`rdna3DisplayEdid`: head 0 = first connected sink with an EDID), so
+macOS builds `IODisplayEDID` and shows the monitor name. Modesetting from these
+modes still needs: an ATOM interpreter (the `TransmitterControl`,
+`SetPixelClock` tables), DP link training and OTG/HUBP programming for the new mode.
 
-## Tablica obiektów VBIOS i interpreter AtomBIOS (krok 2)
+## VBIOS object table and AtomBIOS interpreter (step 2)
 
-`vbios_display_paths` (port `bios_parser2`: `get_bios_object`,
-`get_hpd_record`, `get_gpio_i2c_info`) czyta `displayobjectinfo` v1.4/v1.5
-i `gpio_pin_lut`: złącze (DP/HDMI/USB-C), enkoder (UNIPHY A..G), linia DDC
-(= silnik AUX), pin HPD, możliwości enkodera (HBR3, UHBR, MST) i limit
-łącza. Kext publikuje `RDNA3,DisplayPath<n>` i opisuje złącza AUX ich typem.
-Który OTG prowadzi ścieżkę, nie ma w VBIOS: Display Core przydziela potoki
-przy modesecie.
+`vbios_display_paths` (port of `bios_parser2`: `get_bios_object`,
+`get_hpd_record`, `get_gpio_i2c_info`) reads `displayobjectinfo` v1.4/v1.5
+and `gpio_pin_lut`: connector (DP/HDMI/USB-C), encoder (UNIPHY A..G), DDC line
+(= AUX engine), HPD pin, encoder capabilities (HBR3, UHBR, MST) and link
+limit. The kext publishes `RDNA3,DisplayPath<n>` and labels the AUX connectors with their type.
+Which OTG drives a path is not in the VBIOS: Display Core assigns pipes
+at modeset.
 
-`hw/atom.c` to port `atom.c` z amdgpu: wszystkie 126 opkodów, metody IIO,
-okno FB (scratch), zagnieżdżone `CALLTABLE` (limit 32), wykrywanie pętli
-(20 s zleconych opóźnień) plus budżet opkodów. W odróżnieniu od Linuksa nie
-alokuje pamięci (workspace z puli w kontekście) i sprawdza granice obrazu
-przy każdym odczycie bajtkodu. Kext tworzy kontekst i publikuje wersje
-tablic `DIGxEncoderControl`, `DIG1TransmitterControl`, `SetPixelClock`,
-`EnableDispPowerGating`, `SetDCEClock` (`RDNA3,AtomCommandTables`), ale
-niczego jeszcze nie wykonuje. Symulator ma mini-asembler bajtkodu i testuje
-każdą grupę opkodów, IIO, FB, przerwanie pętli, dostęp poza obraz i
-rekurencję.
+`hw/atom.c` is a port of `atom.c` from amdgpu: all 126 opcodes, IIO methods,
+FB window (scratch), nested `CALLTABLE` (limit 32), loop detection
+(20 s of requested delays) plus an opcode budget. Unlike Linux, it does not
+allocate memory (workspace from a pool in the context) and checks the image bounds
+on every bytecode read. The kext creates a context and publishes the versions of the
+`DIGxEncoderControl`, `DIG1TransmitterControl`, `SetPixelClock`,
+`EnableDispPowerGating`, `SetDCEClock` tables (`RDNA3,AtomCommandTables`), but
+does not execute anything yet. The simulator has a mini bytecode assembler and tests
+every opcode group, IIO, FB, loop abort, out-of-image access and
+recursion.
 
-Uwaga: na DCN 3.2 Linux nie wykonuje tych tablic w sterowniku
-(`dcn32 debug.dmub_command_table = true`). `command_table2` wysyła je do
-DMCUB jako komendy `DMUB_CMD__VBIOS`, a firmware DMCUB wykonuje je z kopii
-VBIOS w oknie CW3. Interpreter jest więc ścieżką zapasową i narzędziem
-diagnostycznym, a główną drogą jest DMCUB (niżej).
+Note: on DCN 3.2 Linux does not execute these tables in the driver
+(`dcn32 debug.dmub_command_table = true`). `command_table2` sends them to
+DMCUB as `DMUB_CMD__VBIOS` commands, and the DMCUB firmware executes them from a copy
+of the VBIOS in the CW3 window. So the interpreter is a fallback path and a
+diagnostic tool, and the main path is DMCUB (below).
 
-## DMCUB (krok 3)
+## DMCUB (step 3)
 
-`hw/dmub32.c` to port `dmub_srv.c` + `dmub_dcn32.c` oraz
+`hw/dmub32.c` is a port of `dmub_srv.c` + `dmub_dcn32.c` and
 `dm_dmub_sw_init`/`dm_dmub_hw_init`:
 
-* odczyt nagłówka `dcmub_firmware_header_v1_0` i bloku metadanych
-  `dmub_fw_meta` (za 256- lub 512-bajtową stopką PSP), rozkład 12 okien
-  (inst const, stos, BSS, VBIOS, mailbox, trace, stan FW, scratch, IB,
-  shared state, LSDMA, cursor offload) w VRAM, wyrównanie jak w Linuksie;
-* reset: `GPINT STOP_FW` do działającego firmware (zostawionego przez
-  VBIOS), czekanie na `0xDEADDEAD` w SCRATCH7 i `PWAIT_MODE`, soft reset,
-  wyłączenie okien CW2-CW7, wyzerowanie skrzynek;
-* obraz instrukcji ładuje PSP (już w planie `LOAD_IP_FW`), więc CW0/CW1
-  zostają jego; ścieżka backdoor (kopiowanie obrazu do CW0 z adresem
-  fizycznym FB) też jest;
-* okna CW3 (VBIOS), CW4 (inbox1 + outbox1), CW5 + region 5 (trace /
-  outbox0), CW6 (stan FW), opcje startu, `reset_release`, czekanie na
+* reads the `dcmub_firmware_header_v1_0` header and the
+  `dmub_fw_meta` metadata block (behind the 256- or 512-byte PSP footer), lays out 12 windows
+  (inst const, stack, BSS, VBIOS, mailbox, trace, FW state, scratch, IB,
+  shared state, LSDMA, cursor offload) in VRAM, with alignment as in Linux;
+* reset: `GPINT STOP_FW` to the running firmware (left by the
+  VBIOS), waiting for `0xDEADDEAD` in SCRATCH7 and `PWAIT_MODE`, soft reset,
+  disabling the CW2-CW7 windows, clearing the mailboxes;
+* the instruction image is loaded by PSP (already in the `LOAD_IP_FW` plan), so CW0/CW1
+  stay PSP's; the backdoor path (copying the image to CW0 with the physical
+  FB address) is there too;
+* windows CW3 (VBIOS), CW4 (inbox1 + outbox1), CW5 + region 5 (trace /
+  outbox0), CW6 (FW state), boot options, `reset_release`, waiting for
   `DAL_FW | MAILBOX_RDY`;
-* ring inbox1 (64-bajtowe komendy, wrap, pełny ring, odczyt odpowiedzi ze
-  slotu), `QUERY_FEATURE_CAPS` jako pierwsza wymiana, `DMUB_CMD__VBIOS`
-  z `DIG1TransmitterControl` v1.7.
+* inbox1 ring (64-byte commands, wrap, full ring, reading the reply from the
+  slot), `QUERY_FEATURE_CAPS` as the first exchange, `DMUB_CMD__VBIOS`
+  with `DIG1TransmitterControl` v1.7.
 
-W kexcie to poziom 5 za flagą `rdna3dmub=1` (domyślnie wyłączone, bo
-DMCUB obsługuje wyświetlacz uruchomiony przez GOP i reset trzeba najpierw
-sprawdzić na karcie). Wynik: `RDNA3,DMUB`, `RDNA3,DMUBResult`,
+In the kext this is level 5 behind the `rdna3dmub=1` flag (off by default, because
+DMCUB drives the display brought up by GOP and the reset must first be
+checked on the card). Result: `RDNA3,DMUB`, `RDNA3,DMUBResult`,
 `RDNA3,DMUBVersion`, `RDNA3,DMUBBootStatus`, `RDNA3,DMUBCaps`.
-Symulator modeluje firmware: sprawdza okna, kopię VBIOS i skrzynkę przed
-zgłoszeniem gotowości, odpowiada na STOP_FW, wykonuje komendy z ringu;
-testy obejmują prawdziwy `dcn_3_2_1_dmcub.bin` (wersja 0x07003300).
+The simulator models the firmware: it checks the windows, the VBIOS copy and the mailbox before
+reporting ready, answers STOP_FW, executes commands from the ring;
+the tests cover the real `dcn_3_2_1_dmcub.bin` (version 0x07003300).
 
-## Obliczenia trybu (krok 4a)
+## Mode calculations (step 4a)
 
-`hw/dcn32_mode.c` liczy to, co da się sprawdzić bez karty: wartości pól OTG
-dla trybu z EDID dokładnie jak `optc1_program_timing` (z poprawką przedniego
-ganku), przepustowość łącza DP 8b/10b z kodu prędkości i liczby linii (z
-marginesem 0,5 % na downspread), filtr trybów (brak timingu szczegółowego,
-przeplot, łącze za wolne przy 24 bpp, zachowawcze limity jednego potoku bez
-ODM) i rozpoznanie, który tryb z EDID prowadzi GOP. Symulator sprawdza, że
-wartości policzone dla trybu 1440p z EDID są dokładnie tymi, które GOP ma w
-OTG. Kext publikuje `RDNA3,Head0EdidMode` i `RDNA3,Connector<n>,ModesUsable`,
-a log opisuje każdy tryb z powodem odrzucenia.
+`hw/dcn32_mode.c` computes what can be checked without the card: OTG field values
+for a mode from the EDID exactly like `optc1_program_timing` (with the front porch
+correction), DP 8b/10b link bandwidth from the rate code and the lane count (with
+a 0.5 % margin for downspread), a mode filter (no detailed timing,
+interlace, link too slow at 24 bpp, conservative single-pipe limits without
+ODM) and detection of which EDID mode the GOP drives. The simulator checks that
+the values computed for the 1440p mode from the EDID are exactly the ones the GOP has in the
+OTG. The kext publishes `RDNA3,Head0EdidMode` and `RDNA3,Connector<n>,ModesUsable`,
+and the log describes each mode with the reason it was rejected.
 
-## Ograniczenia (do zrobienia)
+## Limitations (to do)
 
-* jedna głowica (head 0), jeden tryb; brak EDID (AUX/I2C DCN), brak zmiany
-  rozdzielczości i odświeżania, brak gammy;
-* przerwania VBLANK z IH (teraz odpytywanie licznika klatek);
-* pełny DC (modesetting) później, osobny duży etap.
+* one head (head 0), one mode; no EDID (DCN AUX/I2C), no change of
+  resolution or refresh rate, no gamma;
+* VBLANK interrupts from IH (now polling the frame counter);
+* full DC (modesetting) later, a separate large stage.

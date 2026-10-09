@@ -1,91 +1,91 @@
-# Etap 1: kext rozpoznający kartę
+# Stage 1: kext that recognizes the card
 
-`RDNA3Accel.kext` dopasowuje się do `1002:747E` (Navi 32) i, stopniowo, czyta
-coraz więcej ze sprzętu. Każdy poziom włączasz osobno boot-argiem `rdna3lvl=`,
-więc jeśli któryś zawiesi system, wiesz dokładnie który.
+`RDNA3Accel.kext` matches `1002:747E` (Navi 32) and step by step reads
+more and more from the hardware. You enable each level separately with the `rdna3lvl=` boot-arg,
+so if one of them hangs the system, you know exactly which one.
 
-| `rdna3lvl` | Co robi | Ryzyko |
+| `rdna3lvl` | What it does | Risk |
 |---|---|---|
-| `0` (domyślnie) | dopasowanie PCI, odczyt przestrzeni konfiguracyjnej (ID, rewizja, link PCIe, stan zasilania). Nie dotyka BAR-ów | brak |
-| `1` | + sprawdza czy karta jest w D0, włącza dekodowanie pamięci, mapuje **BAR5 (MMIO)**, czeka (max 2 s) aż firmware PSP zgłosi gotowość (`MP0_SMN_C2PMSG_33` bit 31), czyta rozmiar VRAM (`RCC_CONFIG_MEMSIZE`) | niskie: to dokładnie pierwsze odczyty amdgpu |
-| `2` | + czyta 10 KiB tablicy IP discovery z końca VRAM przez okno `MM_INDEX`/`MM_DATA`, weryfikuje sumy kontrolne, dekoduje i publikuje w IORegistry | niskie: jedyne zapisy to `MM_INDEX`/`MM_INDEX_HI` |
-| `3` | + czyta `GRBM_STATUS` z bloku GC pod adresem z discovery | niskie, pierwszy rejestr adresowany przez discovery |
+| `0` (default) | PCI matching, reads config space (ID, revision, PCIe link, power state). Does not touch the BARs | none |
+| `1` | + checks that the card is in D0, enables memory decoding, maps **BAR5 (MMIO)**, waits (max 2 s) for the PSP firmware to report ready (`MP0_SMN_C2PMSG_33` bit 31), reads the VRAM size (`RCC_CONFIG_MEMSIZE`) | low: these are exactly the first reads amdgpu does |
+| `2` | + reads 10 KiB of the IP discovery table from the end of VRAM through the `MM_INDEX`/`MM_DATA` window, verifies checksums, decodes it and publishes it in the IORegistry | low: the only writes are `MM_INDEX`/`MM_INDEX_HI` |
+| `3` | + reads `GRBM_STATUS` from the GC block at the address from discovery | low, first register addressed through discovery |
 
-`-rdna3off` całkowicie wyłącza kext (probe kończy się porażką).
+`-rdna3off` disables the kext completely (probe fails).
 
-Kext **nigdy** nie włącza bus masteringu (brak DMA) i nie ładuje firmware.
+The kext **never** enables bus mastering (no DMA) and does not load firmware.
 
-## Budowanie
+## Building
 
 ```sh
-make kext            # na Macu; wynik: build/RDNA3Accel.kext
-make -C kext check   # plutil, symbole kmod_info i metaklasy, kextlibs
+make kext            # on a Mac; output: build/RDNA3Accel.kext
+make -C kext check   # plutil, kmod_info and metaclass symbols, kextlibs
 ```
 
-## Ładowanie
+## Loading
 
-Zalecane: wstrzyknięcie przez OpenCore (działa niezależnie od zabezpieczeń kextów
-w Sequoi):
+Recommended: injection through OpenCore (works regardless of the kext security
+in Sequoia):
 
-1. Skopiuj `RDNA3Accel.kext` do `EFI/OC/Kexts/`.
-2. W `config.plist > Kernel > Add` dodaj wpis:
+1. Copy `RDNA3Accel.kext` to `EFI/OC/Kexts/`.
+2. In `config.plist > Kernel > Add` add an entry:
    `BundlePath = RDNA3Accel.kext`, `ExecutablePath = Contents/MacOS/RDNA3Accel`,
    `PlistPath = Contents/Info.plist`, `Enabled = true`, `Arch = x86_64`,
    `MinKernel = 24.0.0` (Sequoia).
-3. Zostaw drugi wpis w pickerze OpenCore / drugą kopię EFI z `Enabled = false`
-   jako drogę ratunkową.
+3. Keep a second entry in the OpenCore picker / a second EFI copy with `Enabled = false`
+   as a way out.
 
-Alternatywnie, przy wyłączonym SIP: `sudo kmutil load -p build/RDNA3Accel.kext`.
+Alternatively, with SIP disabled: `sudo kmutil load -p build/RDNA3Accel.kext`.
 
-Wstrzykiwanie przez OpenCore działa tylko dopóki kext linkuje wyłącznie z IOPCIFamily.
-Od Etapu 3 (IOFramebuffer, IOAccelerator) kexty muszą ładować się z Auxiliary Kernel
-Collection (`/Library/Extensions` + `kmutil`), bo IOGraphicsFamily i IOAcceleratorFamily2
-istnieją tylko w kolekcjach jądra Apple. Tak robi NullMoth, patrz [NULLMOTH-ANALYSIS](NULLMOTH-ANALYSIS.md).
+Injection through OpenCore only works as long as the kext links only against IOPCIFamily.
+From Stage 3 on (IOFramebuffer, IOAccelerator) the kexts must load from the Auxiliary Kernel
+Collection (`/Library/Extensions` + `kmutil`), because IOGraphicsFamily and IOAcceleratorFamily2
+exist only in Apple's kernel collections. NullMoth does it this way, see [NULLMOTH-ANALYSIS](NULLMOTH-ANALYSIS.md).
 
-## Co sprawdzić po starcie
+## What to check after boot
 
 ```sh
 log show --last boot --predicate 'eventMessage CONTAINS "RDNA3:"'
 ioreg -l -w0 -r -c RDNA3Accel
-tools/macos/ioreg_discovery.sh          # (rdna3lvl>=2) zapis + dekodowanie blobu
+tools/macos/ioreg_discovery.sh          # (rdna3lvl>=2) save + decode the blob
 ```
 
-Oczekiwane na `rdna3lvl=2` dla RX 7800 XT:
+Expected at `rdna3lvl=2` for the RX 7800 XT:
 
 * `RDNA3,VRAMSizeMB = 16384`
 * `IP discovery ... : ok`
-* w tabeli: GC **11.0.3**, wraz z MP0/MP1 (PSP/SMU), SDMA, DMU (DCN), VCN, NBIF.
-  Dokładne wersje porównaj z Linuksem; `amd_discovery_dump` podpowiada też, jakie
-  pliki firmware będą potrzebne w etapie 2.
+* in the table: GC **11.0.3**, along with MP0/MP1 (PSP/SMU), SDMA, DMU (DCN), VCN, NBIF.
+  Compare the exact versions with Linux; `amd_discovery_dump` also hints which
+  firmware files will be needed in stage 2.
 
-### Porównanie z Linuksem (warunek ukończenia etapu)
+### Comparison with Linux (stage completion criterion)
 
 ```sh
-# Linux, ta sama karta:
+# Linux, same card:
 sudo tools/linux/dump_amdgpu_reference.sh ref/
 build/host/amd_discovery_dump ref/discovery.bin > linux.txt
 # macOS:
 tools/macos/ioreg_discovery.sh mac.bin && build/host/amd_discovery_dump mac.bin > mac.txt
-diff linux.txt mac.txt     # oczekiwane: brak różnic
+diff linux.txt mac.txt     # expected: no differences
 ```
 
-## Gdy coś pójdzie źle
+## When something goes wrong
 
-| Objaw | Prawdopodobna przyczyna |
+| Symptom | Likely cause |
 |---|---|
-| kext się nie ładuje, brak logów | inny sterownik wygrał dopasowanie (fake-ID w OpenCore?) albo zły `Arch`/`MinKernel` |
-| `device not in D0` | karta uśpiona przez firmware; dodaj ją do `DeviceProperties` z `built-in`, sprawdź ustawienia ASPM/ASPM L1 w BIOS |
-| `MMIO reads all-ones` | BAR5 nieprzypisany (włącz Above 4G), karta w D3cold, albo zły slot |
-| `IFWI NOT ready` | karta nie została zainicjalizowana przez firmware; sprawdź czy działa pod Linuksem/Windows |
-| `RCC_CONFIG_MEMSIZE = 0` | VRAM nie wytrenowany; tablica discovery w pamięci systemowej (nietypowe dla dGPU) |
-| `no discovery signature` | inny układ VRAM niż zakładamy; porównaj `DRIVER_SCRATCH_0..2` z Linuksem |
-| zawieszenie przy `rdna3lvl=N` | zostań na `N-1`, zgłoś issue z logiem z poprzedniego poziomu |
+| kext does not load, no logs | another driver won the match (fake-ID in OpenCore?) or wrong `Arch`/`MinKernel` |
+| `device not in D0` | card put to sleep by firmware; add it to `DeviceProperties` with `built-in`, check the ASPM/ASPM L1 settings in the BIOS |
+| `MMIO reads all-ones` | BAR5 not assigned (enable Above 4G), card in D3cold, or wrong slot |
+| `IFWI NOT ready` | the card was not initialized by firmware; check that it works under Linux/Windows |
+| `RCC_CONFIG_MEMSIZE = 0` | VRAM not trained; discovery table in system memory (unusual for a dGPU) |
+| `no discovery signature` | different VRAM layout than we assume; compare `DRIVER_SCRATCH_0..2` with Linux |
+| hang at `rdna3lvl=N` | stay at `N-1`, file an issue with the log from the previous level |
 
-## Źródła offsetów
+## Offset sources
 
-Wszystkie stałe w `kext/src/RDNA3Regs.h` i `common/amd_discovery.*` zostały
-sprawdzone z Linuksem (gałąź master, październik 2026):
+All constants in `kext/src/RDNA3Regs.h` and `common/amd_discovery.*` were
+checked against Linux (master branch, October 2026):
 `amdgpu_discovery.c`, `include/discovery.h`, `include/soc15_hw_ip.h`,
 `asic_reg/gc/gc_11_0_3_offset.h`, `asic_reg/nbio/nbio_4_3_0_offset.h`,
-`amdgpu_device.c` (BAR5 = MMIO), `amdgpu_device_mm_access()` (sekwencja
-`MM_INDEX`/`MM_DATA`).
+`amdgpu_device.c` (BAR5 = MMIO), `amdgpu_device_mm_access()` (the
+`MM_INDEX`/`MM_DATA` sequence).
