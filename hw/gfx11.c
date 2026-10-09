@@ -7,6 +7,7 @@
 #include "gen/gc_11_0_0_gfx.h"
 #include "gen/gc_11_0_0_reset.h"
 #include "gen/gc_11_0_0_sdma.h"
+#include "gen/gc_11_0_0_gds.h"
 #include "clearstate_defs.h"
 #include "clearstate_gfx11.h"
 #include "amdgpu_ucode_hdr.h"
@@ -166,8 +167,21 @@ static void golden_registers(rdna3_dev *d)
     WG(d, regTCP_CNTL, tmp);
 }
 
+/* gfx_v11_0_init_gds_vmid: no GDS, GWS or OA for VMIDs 1-15 until a job
+ * that owns a partition switches it in (VMID0 keeps access for the HWS) */
+static void init_gds_vmid(rdna3_dev *d)
+{
+    uint32_t vmid;
+    for (vmid = 1; vmid < 16; vmid++) {
+        rdna3_wreg(d, OFF(d, regGDS_VMID0_BASE) + 2 * vmid, 0);
+        rdna3_wreg(d, OFF(d, regGDS_VMID0_SIZE) + 2 * vmid, 0);
+        rdna3_wreg(d, OFF(d, regGDS_GWS_VMID0) + vmid, 0);
+        rdna3_wreg(d, OFF(d, regGDS_OA_VMID0) + vmid, 0);
+    }
+}
+
 /* gfx_v11_0_constants_init, minus what discovery already gave us (RB/CU
- * info) and the compute/GDS VMID setup (with the compute queues) */
+ * info) and the compute VMID setup (with the compute queues) */
 static void constants_init(rdna3_dev *d)
 {
     uint32_t tmp, i;
@@ -190,6 +204,7 @@ static void constants_init(rdna3_dev *d)
         }
     }
     grbm_select(d, 0, 0, 0, 0);
+    init_gds_vmid(d);
 }
 
 /* ---------------------------- clear state ---------------------------- */
@@ -502,9 +517,38 @@ void gfx11_emit_frame_cntl(rdna3_dev *d, rdna3_gfx_ring *r, int start, int secur
 uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
                           uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n)
 {
-    /* emit_frame_size for what we emit: vm flush 5+5+7+2, mem sync 8,
-     * hdp 7, cntxcntl 3, frame 2+2, fence 8, plus 4 per IB */
-    uint32_t i, seq, ndw = 19 + 8 + 7 + 3 + 4 + 8 + 4 * n;
+    return gfx11_submit_job_ex(d, r, ctx, vmid, pd_addr, ibs, n, NULL);
+}
+
+void gfx11_emit_gds_switch(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid,
+                           uint32_t gds_base, uint32_t gds_size, uint32_t gws_base,
+                           uint32_t gws_size, uint32_t oa_base, uint32_t oa_size)
+{
+    /* gfx_v11_0_write_data_to_reg(ring, 0, false, reg, val): ME, no confirm */
+    const uint32_t reg[4] = { OFF(d, regGDS_VMID0_BASE) + 2 * vmid,
+                              OFF(d, regGDS_VMID0_SIZE) + 2 * vmid,
+                              OFF(d, regGDS_GWS_VMID0) + vmid, OFF(d, regGDS_OA_VMID0) + vmid };
+    const uint32_t val[4] = { gds_base, gds_size,
+                              gws_size << GDS_GWS_VMID0__SIZE__SHIFT | gws_base,
+                              (1u << (oa_size + oa_base)) - (1u << oa_base) };
+    uint32_t i;
+    for (i = 0; i < 4; i++) {
+        gfx11_write(d, r, PACKET3(PACKET3_WRITE_DATA, 3));
+        gfx11_write(d, r, WRITE_DATA_ENGINE_SEL(0) | WRITE_DATA_DST_SEL(0));
+        gfx11_write(d, r, reg[i]);
+        gfx11_write(d, r, 0);
+        gfx11_write(d, r, val[i]);
+    }
+}
+
+uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
+                             uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n,
+                             const rdna3_gfx_job_ext *x)
+{
+    /* emit_frame_size for what we emit: vm flush 5+5+7+2, gds switch 20,
+     * mem sync 8, hdp 7, cntxcntl 3, frame 2+2, user fence 8, fence 8,
+     * plus 4 per IB */
+    uint32_t i, seq, ndw = 19 + 20 + 8 + 7 + 3 + 4 + 8 + 8 + 4 * n;
     int ctx_switch = ctx != r->last_ctx, secure;
     if (!r->ready || !n || n > RD_GFX_MAX_IBS || vmid > 15)
         return 0;
@@ -512,6 +556,9 @@ uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_
         return 0;
     if (pd_addr)
         gfx11_emit_vm_flush(d, r, vmid, pd_addr);
+    if (x && x->gds_switch)
+        gfx11_emit_gds_switch(d, r, vmid, x->gds_base, x->gds_size, x->gws_base, x->gws_size,
+                              x->oa_base, x->oa_size);
     gfx11_emit_mem_sync(d, r);
     gfx11_emit_hdp_flush(d, r);
     gfx11_emit_cntxcntl(d, r, ctx_switch);
@@ -520,6 +567,8 @@ uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_
     for (i = 0; i < n; i++)
         gfx11_emit_ib(d, r, vmid, ibs[i].va, ibs[i].ndw);
     gfx11_emit_frame_cntl(d, r, 0, secure);
+    if (x && x->uf_addr)   /* the job's number: the fence emitted next */
+        gfx11_emit_user_fence(d, r, x->uf_addr, (uint32_t)(r->fence_seq + 1));
     seq = gfx11_emit_fence(d, r);
     gfx11_commit(d, r);
     r->last_ctx = ctx;
@@ -544,6 +593,21 @@ uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r)
     gfx11_write(d, r, 0);
     gfx11_write(d, r, 0);
     return seq;
+}
+
+void gfx11_emit_user_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t addr, uint64_t seq)
+{
+    gfx11_write(d, r, PACKET3(PACKET3_RELEASE_MEM, 6));
+    gfx11_write(d, r, (1u << 22) /* GCR_SEQ */ | (1u << 21) /* GCR_GL2_WB */ |
+                      (1u << 13) /* GCR_GLM_INV */ | (1u << 12) /* GCR_GLM_WB */ |
+                      (3u << 25) /* CACHE_POLICY bypass */ |
+                      CACHE_FLUSH_AND_INV_TS_EVENT | (5u << 8) /* EVENT_INDEX */);
+    gfx11_write(d, r, 2u << 29);   /* DATA_SEL 2: 64 bits, INT_SEL 0 */
+    gfx11_write(d, r, (uint32_t)addr);
+    gfx11_write(d, r, (uint32_t)(addr >> 32));
+    gfx11_write(d, r, (uint32_t)seq);
+    gfx11_write(d, r, (uint32_t)(seq >> 32));
+    gfx11_write(d, r, 0);
 }
 
 void gfx11_set_eop_interrupt(rdna3_dev *d, rdna3_gfx_ring *r, int enable)
@@ -992,15 +1056,26 @@ void gfx11_mec_stop(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq)
 uint32_t gfx11_submit_compute_job(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t ctx, uint32_t vmid,
                                   uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n)
 {
+    return gfx11_submit_compute_job_ex(d, kcq, ctx, vmid, pd_addr, ibs, n, NULL);
+}
+
+uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t ctx,
+                                     uint32_t vmid, uint64_t pd_addr, const rdna3_gfx_ib *ibs,
+                                     uint32_t n, const rdna3_gfx_job_ext *x)
+{
     rdna3_gfx_ring *r = &kcq->rb;
-    /* vm flush 5+5+7, mem sync 8, hdp 7, fence 8, 4 per IB */
-    uint32_t i, seq, ndw = 17 + 8 + 7 + 8 + 4 * n;
+    /* vm flush 5+5+7, gds switch 20, mem sync 8, hdp 7, user fence 8,
+     * fence 8, 4 per IB */
+    uint32_t i, seq, ndw = 17 + 20 + 8 + 7 + 8 + 8 + 4 * n;
     if (!r->ready || !n || n > RD_GFX_MAX_IBS || vmid > 15)
         return 0;
     if (ring_wait_space(d, r, ndw))
         return 0;
     if (pd_addr)
         gfx11_emit_vm_flush(d, r, vmid, pd_addr);
+    if (x && x->gds_switch)
+        gfx11_emit_gds_switch(d, r, vmid, x->gds_base, x->gds_size, x->gws_base, x->gws_size,
+                              x->oa_base, x->oa_size);
     gfx11_emit_mem_sync(d, r);
     gfx11_emit_hdp_flush(d, r);
     for (i = 0; i < n; i++) {   /* gfx_v11_0_ring_emit_ib_compute */
@@ -1009,6 +1084,8 @@ uint32_t gfx11_submit_compute_job(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t ct
         gfx11_write(d, r, (uint32_t)(ibs[i].va >> 32));
         gfx11_write(d, r, INDIRECT_BUFFER_VALID | ibs[i].ndw | (vmid << 24));
     }
+    if (x && x->uf_addr)
+        gfx11_emit_user_fence(d, r, x->uf_addr, (uint32_t)(r->fence_seq + 1));
     seq = gfx11_emit_fence(d, r);
     gfx11_commit(d, r);
     r->last_ctx = ctx;

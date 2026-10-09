@@ -112,6 +112,28 @@ typedef struct rdna3_syncobj {
     rdna3_fence fence;        /* when has_fence: signaled once it passes */
 } rdna3_syncobj;
 
+/* what a CS carries besides its IBs (amdgpu_job) */
+typedef struct rdna3_cs_job {
+    /* AMDGPU_CHUNK_ID_FENCE: once the job is done the GPU writes its 64-bit
+     * sequence number at 'uf_offset' in the one-page BO 'uf_bo' (NULL: none) */
+    rdna3_bo *uf_bo;
+    uint64_t uf_offset;
+    /* the GDS (bytes) / GWS (entries) / OA (counters) partitions of the
+     * BO list's on-chip BOs; size 0: none (amdgpu_job_set_resources) */
+    uint32_t gds_base, gds_size, gws_base, gws_size, oa_base, oa_size;
+} rdna3_cs_job;
+
+/* GFX 11 on-chip resources (gfx_v11_0_set_gds_init) */
+#define RD_GDS_SIZE 0x1000
+#define RD_GWS_SIZE 64
+#define RD_OA_SIZE  16
+#define RD_ONCHIP_DOMAINS (AMDGPU_GEM_DOMAIN_GDS | AMDGPU_GEM_DOMAIN_GWS | AMDGPU_GEM_DOMAIN_OA)
+/* BO lists (AMDGPU_BO_LIST) per file: everything is resident, so a list
+ * only remembers its on-chip BOs */
+#define RD_MAX_BO_LISTS 256
+/* user fences the GPU may still write: their BOs stay referenced */
+#define RD_MAX_UF_PENDING 64
+
 #define RD_MAX_CS_IBS 8
 typedef struct rdna3_ib {
     uint64_t va;              /* GPU VA in the submitting file's VM */
@@ -145,9 +167,10 @@ typedef struct rdna3_drm_ops {
      * OS marked in available_rings reach submit. submit queues the IBs on
      * (ip, ring) in 'vm' and returns the fence sequence; fence_signaled
      * polls; fence_wait blocks until 'seq' passed or the absolute
-     * CLOCK_MONOTONIC deadline (ns, UINT64_MAX = forever), 0 / -RD_ETIME. */
+     * CLOCK_MONOTONIC deadline (ns, UINT64_MAX = forever), 0 / -RD_ETIME.
+     * 'job': user fence and GDS/GWS/OA partitions (never NULL). */
     int   (*submit)(void *ctx, void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs,
-                    uint32_t nibs, uint64_t *seq);
+                    uint32_t nibs, const rdna3_cs_job *job, uint64_t *seq);
     int   (*fence_signaled)(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq);
     int   (*fence_wait)(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t abs_ns);
     /* GPU reset / fault state of a VM for AMDGPU_CTX_OP_QUERY_STATE*:
@@ -182,6 +205,9 @@ typedef struct rdna3_drm_device {
     int      enumeration_only;    /* rings faked for libdrm (rdna3enum=1) */
     uint32_t ready_rings[AMDGPU_HW_IP_NUM];  /* rings that really execute */
     uint64_t last_seq[AMDGPU_HW_IP_NUM][4];  /* last submitted per ring */
+    struct { rdna3_bo *bo; rdna3_fence fence; } uf_pending[RD_MAX_UF_PENDING];
+    /* on-chip allocations, one bit per byte / entry / counter */
+    uint64_t gds_map[RD_GDS_SIZE / 64], gws_map[RD_GWS_SIZE / 64], oa_map[1];
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {
@@ -194,6 +220,7 @@ typedef struct rdna3_drm_file {
     void    *vm;              /* ops.vm_create() result, may be NULL */
     void    *os;              /* the OS's handle on the client (its task), for bo_userptr */
     uint32_t next_bo_list;
+    struct { uint32_t handle; rdna3_bo *gds, *gws, *oa; } bo_lists[RD_MAX_BO_LISTS];
     uint64_t client_caps;
     /* ioctls of this file in progress: the OS layer may drop its lock while
      * a fence wait sleeps, and must not tear the file down under them */
@@ -206,6 +233,10 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
                            uint8_t pci_revision, uint32_t rev_id,
                            uint64_t vram_size, uint64_t vis_vram_size,
                            uint64_t gtt_size);
+
+/* drops what the device still holds (user fence BOs); call with the
+ * rings stopped */
+void rdna3_drm_device_fini(rdna3_drm_device *dev);
 
 int  rdna3_drm_file_open(rdna3_drm_device *dev, rdna3_drm_file *f);
 void rdna3_drm_file_close(rdna3_drm_file *f);

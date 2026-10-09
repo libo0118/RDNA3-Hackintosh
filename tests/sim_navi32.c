@@ -33,6 +33,7 @@
 #include "gfx11_info.h"
 #include "xfer.h"
 #include "gen/gc_11_0_0_harvest.h"
+#include "gen/gc_11_0_0_gds.h"
 #include "gen/gc_11_0_0_sdma_reset.h"
 #include "gen/dcn_3_2_1_dmcub.h"
 #include "gen/dcn_3_2_1_aux.h"
@@ -1065,8 +1066,11 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
         }
         case PACKET3_RELEASE_MEM: {
             uint64_t a = PK(3) | ((uint64_t)PK(4) << 32);
-            uint8_t *p = mc_ptr(a, 4);
-            if (p && ((PK(2) >> 29) & 7) == 1) memcpy(p, &PK(5), 4); else S.cp_bad++;
+            uint32_t sel = (PK(2) >> 29) & 7;   /* DATA_SEL 1: 32 bits, 2: 64 bits */
+            uint8_t *p = mc_ptr(a, sel == 2 ? 8 : 4);
+            if (p && sel == 1) memcpy(p, &PK(5), 4);
+            else if (p && sel == 2 && !(a & 7)) { memcpy(p, &PK(5), 4); memcpy(p + 4, &PK(6), 4); }
+            else S.cp_bad++;
             if (((PK(2) >> 24) & 7) == 2) {
                 /* EOP interrupt: gated per engine, ring_id = queue<<4 | me<<2 | pipe */
                 uint32_t en = S.cp_cur_me == 0
@@ -2178,6 +2182,13 @@ static void run(const char *fwdir)
             k = sdma60_emit_fence(&dev, &sd);
             sdma60_commit(&dev, &sd);
             CHECK(k == 41 && sdma60_wait_fence(&dev, &sd, k) == RDNA3_OK);
+            /* user fence: two FENCE packets, low and high dword */
+            sdma60_emit_fence64(&dev, &sd, rdna3_vram_mc(&dev, dst + 4096), 0x1234567800000042ull);
+            k = sdma60_emit_fence(&dev, &sd);
+            sdma60_commit(&dev, &sd);
+            CHECK(k == 42 && sdma60_wait_fence(&dev, &sd, k) == RDNA3_OK);
+            rdna3_vram_read(&dev, dst + 4096, out, 8);
+            CHECK(out[0] == 0x42 && out[1] == 0x12345678u);
             rdna3_vram_read(&dev, dst, out, 64);
             CHECK(out[0] == 0xabcdef01u && out[15] == 0xabcdef01u && out[16] == pat[16]);
             CHECK(S.sdma_bad == 0 && S.unflushed_doorbells == 0);
@@ -2349,6 +2360,35 @@ static void run(const char *fwdir)
                 seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);
                 CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
                 CHECK(S.ring_tlb_flushes == 1 && S.cp_last_cntxcntl == 0x80000000u && S.cp_ibs == 3);
+                /* user fence (AMDGPU_CHUNK_ID_FENCE): the job's number as
+                 * 64 bits, written before the ring fence */
+                {
+                    uint64_t uf = 0xDEADBEEFDEADBEEFull;
+                    rdna3_gfx_job_ext x;
+                    memset(&x, 0, sizeof(x));
+                    x.uf_addr = rdna3_vram_mc(&dev, dst + 64);
+                    rdna3_vram_write(&dev, dst + 64, &uf, 8);
+                    seq = gfx11_submit_job_ex(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1, &x);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                    rdna3_vram_read(&dev, dst + 64, &uf, 8);
+                    CHECK(uf == seq && S.cp_bad == 0);
+                    /* GDS switch (gfx_v11_0_ring_emit_gds_switch): VMID 5
+                     * gets GDS bytes 0x100+0x200, GWS 4..11, OA 2..4; hw
+                     * init left VMIDs 1-15 without any */
+                    CHECK(S.reg[GC_BASE0 + regGDS_VMID0_SIZE + 10] == 0 &&
+                          S.reg[GC_BASE0 + regGDS_OA_VMID0 + 5] == 0);
+                    memset(&x, 0, sizeof(x));
+                    x.gds_switch = 1;
+                    x.gds_base = 0x100; x.gds_size = 0x200;
+                    x.gws_base = 4; x.gws_size = 8; x.oa_base = 2; x.oa_size = 3;
+                    seq = gfx11_submit_job_ex(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1, &x);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                    CHECK(S.reg[GC_BASE0 + regGDS_VMID0_BASE + 10] == 0x100 &&
+                          S.reg[GC_BASE0 + regGDS_VMID0_SIZE + 10] == 0x200 &&
+                          S.reg[GC_BASE0 + regGDS_GWS_VMID0 + 5] == ((8u << 16) | 4) &&
+                          S.reg[GC_BASE0 + regGDS_OA_VMID0 + 5] == 0x1C && S.cp_bad == 0);
+                    jobs[0].va = ibva;
+                }
                 /* an unmapped IB faults instead of running garbage */
                 jobs[0].va = 0x0000500000000000ull;
                 seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);

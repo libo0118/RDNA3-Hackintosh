@@ -85,6 +85,10 @@ void sdma60_set_trap_interrupt(rdna3_dev *d, rdna3_sdma_ring *r, int enable);
 int  sdma60_fence_passed(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq);
 /* emit a fence write of ++fence_seq; returns that sequence number */
 uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r);
+/* a user fence (AMDGPU_CHUNK_ID_FENCE): sdma_v6_0_ring_emit_fence with
+ * AMDGPU_FENCE_FLAG_64BIT and no interrupt - two FENCE packets, low then
+ * high dword of 'seq' at MC address 'addr' (8-byte aligned) */
+void sdma60_emit_fence64(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t addr, uint64_t seq);
 int  sdma60_wait_fence(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq);
 
 /* copy 'bytes' (<= 1 GiB) between MC addresses and wait for it */

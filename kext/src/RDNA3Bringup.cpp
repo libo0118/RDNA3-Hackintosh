@@ -899,6 +899,8 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
     rdna3_gfx_status st;
     bool ok = false;
 
+    /* whatever runs next re-programs its GDS partition (amdgpu_vmid_reset) */
+    memset(fGdsKnown, 0, sizeof(fGdsKnown));
     BLOG("hang: %s ring %u, fence %llu not signalled within 10 s",
          ip == AMDGPU_HW_IP_DMA ? "DMA" : ip == AMDGPU_HW_IP_GFX ? "GFX" : "COMPUTE", ring,
          (unsigned long long)seq);
@@ -1145,18 +1147,91 @@ void RDNA3Bringup::vmUnmap(void *p, uint64_t va, uint64_t size)
 
 /* --------------------------- submission --------------------------- */
 
+/* the VMID0 (MC) address the ring writes a user fence to */
+int RDNA3Bringup::ufAddr(const rdna3_cs_job *job, uint64_t *mc, int *slot)
+{
+    const rdna3_bo *bo = job->uf_bo;
+    const uint64_t ufOff = job->uf_offset;
+    *slot = -1;
+    if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
+        *mc = rdna3_vram_mc(fDev, bo->vram_offset + ufOff);
+        return 0;
+    }
+    const RDNA3Gtt *gt = (const RDNA3Gtt *)bo->backing;
+    const uint64_t winPages = 4096;   /* copyVramToPages' window, above the slots */
+    if (!gt || !gt->npages || !fGmc || !fGmc->mmhub_enabled ||
+        fGmc->gart_size < (winPages + kUfSlots) * 4096)
+        return -RD_ENODEV;
+    uint64_t pa = gt->pages[0];
+    uint64_t base = fGmc->gart_size - (winPages + kUfSlots) * 4096;
+    int idle = -1;
+    for (uint32_t i = 0; i < kUfSlots; i++) {
+        if (fUfSlot[i].used && fUfSlot[i].pa == pa) {   /* already mapped there */
+            *slot = (int)i;
+            *mc = fGmc->gart_start + base + i * 4096ull + ufOff;
+            return 0;
+        }
+        if (idle < 0 && (!fUfSlot[i].used || fenceSignaled(fUfSlot[i].ip, 0, fUfSlot[i].seq)))
+            idle = (int)i;
+    }
+    if (idle < 0)
+        return -RD_EBUSY;
+    const uint64_t flags = RD_PTE_VALID | RD_PTE_SYSTEM | RD_PTE_SNOOPED | RD_PTE_READABLE |
+                           RD_PTE_WRITEABLE | RD_PTE_MTYPE_NV10(RD_MTYPE_UC);
+    if (gmc11_gart_map(fDev, fGmc, base + idle * 4096ull, pa, 1, flags) != RDNA3_OK)
+        return -RD_ENOMEM;
+    vmFlush(0);   /* both hubs: SDMA through the MMHUB, CP through the GFXHUB */
+    fUfSlot[idle].pa = pa;
+    fUfSlot[idle].used = true;
+    fUfSlot[idle].seq = 0;
+    *slot = idle;
+    *mc = fGmc->gart_start + base + idle * 4096ull + ufOff;
+    return 0;
+}
+
 int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
-                         uint64_t *seq)
+                         const rdna3_cs_job *job, uint64_t *seq)
 {
     RDNA3Vm *v = (RDNA3Vm *)p;
+    uint64_t ufMc = 0;
+    int ufSlot = -1;
     if (!v || !v->live || ring != 0)
         return -RD_EINVAL;   /* record-only VM: the IB VA means nothing to the GPU */
     if (v->guilty)
         return -RD_ECANCELED;   /* amdgpu_cs_submit on a guilty context */
+    if (job->uf_bo) {
+        int r = ufAddr(job, &ufMc, &ufSlot);
+        if (r)
+            return r;
+    }
+    int r = submitRing(v, ip, ibs, n, job, ufMc, seq);
+    if (!r && ufSlot >= 0) {
+        fUfSlot[ufSlot].ip = ip;
+        fUfSlot[ufSlot].seq = *seq;
+    }
+    return r;
+}
+
+int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, const rdna3_ib *ibs, uint32_t n,
+                             const rdna3_cs_job *job, uint64_t ufMc, uint64_t *seq)
+{
+    /* GFX and compute: user fence, and the GDS switch when the VMID's
+     * partition is not the job's (amdgpu_vm_flush gds_switch_needed); the
+     * DMA ring has no GDS */
+    rdna3_gfx_job_ext x = {};
+    const uint32_t want[6] = { job->gds_base, job->gds_size, job->gws_base, job->gws_size,
+                               job->oa_base, job->oa_size };
+    x.uf_addr = ufMc;
+    x.gds_switch = !fGdsKnown[v->vmid] || memcmp(fGds[v->vmid], want, sizeof(want)) != 0;
+    x.gds_base = want[0]; x.gds_size = want[1];
+    x.gws_base = want[2]; x.gws_size = want[3];
+    x.oa_base = want[4]; x.oa_size = want[5];
     if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready) {
         for (uint32_t i = 0; i < n; i++)
             sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);
         fSdmaLastVmid = v->vmid;
+        if (ufMc)   /* amdgpu_ib_schedule: the user fence, then the ring fence */
+            sdma60_emit_fence64(fDev, fSdma, ufMc, (uint32_t)(fSdma->fence_seq + 1));
         *seq = sdma60_emit_fence(fDev, fSdma);
         sdma60_commit(fDev, fSdma);
         return 0;
@@ -1172,10 +1247,13 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
             g[i].ndw = ibs[i].length_dw;
             g[i].flags = ibs[i].flags;
         }
-        uint32_t s = gfx11_submit_job(fDev, fGfx, (uint64_t)(uintptr_t)v, v->vmid,
-                                      v->gfxFlush ? gpuvm_pd_addr(fDev, &v->vm) : 0, g, n);
+        uint32_t s = gfx11_submit_job_ex(fDev, fGfx, (uint64_t)(uintptr_t)v, v->vmid,
+                                         v->gfxFlush ? gpuvm_pd_addr(fDev, &v->vm) : 0, g, n,
+                                         &x);
         if (!s)
             return -RD_EBUSY;
+        memcpy(fGds[v->vmid], want, sizeof(want));
+        fGdsKnown[v->vmid] = true;
         v->gfxFlush = false;
         *seq = s;
         return 0;
@@ -1189,10 +1267,13 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
             g[i].ndw = ibs[i].length_dw;
             g[i].flags = ibs[i].flags;
         }
-        uint32_t s = gfx11_submit_compute_job(fDev, fKcq, (uint64_t)(uintptr_t)v, v->vmid,
-                                              v->compFlush ? gpuvm_pd_addr(fDev, &v->vm) : 0, g, n);
+        uint32_t s = gfx11_submit_compute_job_ex(fDev, fKcq, (uint64_t)(uintptr_t)v, v->vmid,
+                                                 v->compFlush ? gpuvm_pd_addr(fDev, &v->vm) : 0,
+                                                 g, n, &x);
         if (!s)
             return -RD_EBUSY;
+        memcpy(fGds[v->vmid], want, sizeof(want));
+        fGdsKnown[v->vmid] = true;
         v->compFlush = false;
         *seq = s;
         return 0;

@@ -127,6 +127,19 @@ uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r)
     return seq;
 }
 
+void sdma60_emit_fence64(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t addr, uint64_t seq)
+{
+    sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_FENCE) | SDMA_PKT_FENCE_HEADER_MTYPE(0x3));
+    sdma60_write(d, r, (uint32_t)addr);
+    sdma60_write(d, r, (uint32_t)(addr >> 32));
+    sdma60_write(d, r, (uint32_t)seq);
+    addr += 4;
+    sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_FENCE) | SDMA_PKT_FENCE_HEADER_MTYPE(0x3));
+    sdma60_write(d, r, (uint32_t)addr);
+    sdma60_write(d, r, (uint32_t)(addr >> 32));
+    sdma60_write(d, r, (uint32_t)(seq >> 32));
+}
+
 void sdma60_set_trap_interrupt(rdna3_dev *d, rdna3_sdma_ring *r, int enable)
 {
     uint32_t tmp = RS(d, r->inst, regSDMA0_CNTL);

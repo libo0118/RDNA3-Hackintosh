@@ -86,7 +86,7 @@ public:
 
     /* command submission (DMA ring 0 = SDMA0 from rdna3lvl=7) */
     int   submit(void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
-                 uint64_t *seq);
+                 const rdna3_cs_job *job, uint64_t *seq);
     int   fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq);
     /* capHit == nullptr: run recover() at the 10 s cap (caller holds the
      * DRM lock). Otherwise report the cap in *capHit and let the caller
@@ -179,6 +179,21 @@ private:
     IOLock       *fLock   = nullptr;
     IOLock       *fIhLock = nullptr;
     uint32_t      fSdmaLastVmid = 0;   /* VMID of the last IB on the DMA ring (hang blame) */
+    /* user fences (AMDGPU_CHUNK_ID_FENCE) in GTT BOs: the ring writes them
+     * in VMID0, so their page gets one of these GART slots, right under the
+     * 16 MiB transfer window (amdgpu_ttm_alloc_gart for uf_bo). A slot is
+     * remapped only once its last job's fence passed. */
+    static const uint32_t kUfSlots = 64;
+    struct UfSlot { uint64_t pa; uint64_t seq; uint32_t ip; bool used; };
+    UfSlot        fUfSlot[kUfSlots] = {};
+    int           ufAddr(const rdna3_cs_job *job, uint64_t *mc, int *slot);
+    int           submitRing(RDNA3Vm *v, uint32_t ip, const rdna3_ib *ibs, uint32_t n,
+                             const rdna3_cs_job *job, uint64_t ufMc, uint64_t *seq);
+    /* GDS / GWS / OA partition each VMID has (amdgpu_vmid gds_base...):
+     * a job whose partition differs switches it from the ring. Unknown
+     * after a reset, so the next job writes it again. */
+    uint32_t      fGds[16][6] = {};
+    bool          fGdsKnown[16] = {};
     uint32_t      fSdmaResets = 0;   /* one IH consumer at a time (MSI action or a polling waiter) */
     bool          fFwDone = false;
     RDNA3Firmware fFwResult = {};

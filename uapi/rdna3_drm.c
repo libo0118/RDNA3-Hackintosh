@@ -206,11 +206,65 @@ int rdna3_drm_file_open(rdna3_drm_device *dev, rdna3_drm_file *f)
     return 0;
 }
 
-static void bo_put(rdna3_drm_file *f, rdna3_bo *bo)
+/* ---- GDS / GWS / OA: on-chip ranges (amdgpu_ttm_init_on_chip) ---- */
+
+static uint64_t *onchip_map(rdna3_drm_device *dev, uint32_t dom, uint32_t *total)
 {
-    rdna3_drm_device *dev = f->dev;
+    if (dom == AMDGPU_GEM_DOMAIN_GDS) { *total = RD_GDS_SIZE; return dev->gds_map; }
+    if (dom == AMDGPU_GEM_DOMAIN_GWS) { *total = RD_GWS_SIZE; return dev->gws_map; }
+    if (dom == AMDGPU_GEM_DOMAIN_OA)  { *total = RD_OA_SIZE;  return dev->oa_map; }
+    return NULL;
+}
+
+static int onchip_bit(const uint64_t *m, uint32_t i)
+{
+    return (int)((m[i / 64] >> (i % 64)) & 1);
+}
+
+static void onchip_set(uint64_t *m, uint32_t base, uint32_t n, int on)
+{
+    uint32_t i;
+    for (i = base; i < base + n; i++) {
+        if (on)
+            m[i / 64] |= 1ull << (i % 64);
+        else
+            m[i / 64] &= ~(1ull << (i % 64));
+    }
+}
+
+/* first fit, 'align' units apart */
+static int onchip_alloc(uint64_t *m, uint32_t total, uint32_t n, uint32_t align, uint32_t *base)
+{
+    uint32_t b = 0, i;
+    while (b + n <= total) {
+        for (i = 0; i < n && !onchip_bit(m, b + i); i++)
+            ;
+        if (i == n) {
+            onchip_set(m, b, n, 1);
+            *base = b;
+            return 0;
+        }
+        b = (b + i + 1 + align - 1) / align * align;   /* past the busy unit */
+    }
+    return -RD_ENOMEM;
+}
+
+static int bo_onchip(const rdna3_bo *bo)
+{
+    return (bo->placement & RD_ONCHIP_DOMAINS) != 0;
+}
+
+static void bo_put_dev(rdna3_drm_device *dev, rdna3_bo *bo)
+{
     if (--bo->refcnt)
         return;
+    if (bo_onchip(bo)) {   /* no backing: the range goes back */
+        uint32_t total;
+        onchip_set(onchip_map(dev, bo->placement, &total), (uint32_t)bo->vram_offset,
+                   (uint32_t)bo->size, 0);
+        dev->ops.free(dev->ops.ctx, bo, sizeof(*bo));
+        return;
+    }
     if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
         dev->vram_usage -= bo->size;
     } else {
@@ -218,6 +272,40 @@ static void bo_put(rdna3_drm_file *f, rdna3_bo *bo)
     }
     dev->ops.bo_free(dev->ops.ctx, bo);
     dev->ops.free(dev->ops.ctx, bo, sizeof(*bo));
+}
+
+static void bo_put(rdna3_drm_file *f, rdna3_bo *bo)
+{
+    bo_put_dev(f->dev, bo);
+}
+
+static void bo_list_release(rdna3_drm_file *f, uint32_t i)
+{
+    if (f->bo_lists[i].gds)
+        bo_put(f, f->bo_lists[i].gds);
+    if (f->bo_lists[i].gws)
+        bo_put(f, f->bo_lists[i].gws);
+    if (f->bo_lists[i].oa)
+        bo_put(f, f->bo_lists[i].oa);
+    zero(&f->bo_lists[i], sizeof(f->bo_lists[i]));
+}
+
+static int fence_done(rdna3_drm_device *dev, const rdna3_fence *fe);
+
+/* user fence BOs whose job finished can go (amdgpu_job_free drops uf_bo) */
+static void uf_reap(rdna3_drm_device *dev, int all)
+{
+    uint32_t i;
+    for (i = 0; i < RD_MAX_UF_PENDING; i++)
+        if (dev->uf_pending[i].bo && (all || fence_done(dev, &dev->uf_pending[i].fence))) {
+            bo_put_dev(dev, dev->uf_pending[i].bo);
+            dev->uf_pending[i].bo = NULL;
+        }
+}
+
+void rdna3_drm_device_fini(rdna3_drm_device *dev)
+{
+    uf_reap(dev, 1);
 }
 
 static void va_release(rdna3_drm_file *f, rdna3_va *m)
@@ -235,6 +323,9 @@ void rdna3_drm_file_close(rdna3_drm_file *f)
 {
     rdna3_drm_ops *ops = &f->dev->ops;
     uint32_t i;
+    uf_reap(f->dev, 0);
+    for (i = 0; i < RD_MAX_BO_LISTS; i++)
+        bo_list_release(f, i);
     if (f->vas)
         for (i = 0; i < f->nvas; i++)
             if (f->vas[i].handle)
@@ -268,7 +359,7 @@ rdna3_bo *rdna3_drm_bo_by_mmap_offset(rdna3_drm_file *f, uint64_t off)
 {
     uint32_t i;
     for (i = 0; i < RD_MAX_HANDLES; i++)
-        if (f->bos[i] && f->bos[i]->mmap_offset == off)
+        if (f->bos[i] && !bo_onchip(f->bos[i]) && f->bos[i]->mmap_offset == off)
             return f->bos[i];
     return NULL;
 }
@@ -521,6 +612,92 @@ static uint64_t dep_seq(rdna3_drm_device *dev, uint32_t ip, uint32_t ring, uint6
     return h;
 }
 
+/* the on-chip BOs of a BO list, as handles (amdgpu_bo_list_create: the
+ * last one of each kind wins); every handle must exist */
+static int bo_list_scan(rdna3_drm_file *f, uint64_t ptr, uint32_t n, uint32_t esz, uint32_t h[3])
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    uint32_t i;
+    h[0] = h[1] = h[2] = 0;
+    if (n > RD_MAX_HANDLES || (n && esz < sizeof(uint32_t)))
+        return -RD_EINVAL;
+    for (i = 0; i < n; i++) {
+        struct drm_amdgpu_bo_list_entry e;
+        rdna3_bo *bo;
+        zero(&e, sizeof(e));
+        if (ops->copyin(ops->ctx, &e, ptr + (uint64_t)esz * i, MIN(esz, sizeof(e))))
+            return -RD_EFAULT;
+        bo = rdna3_drm_bo_lookup(f, e.bo_handle);
+        if (!bo)
+            return -RD_ENOENT;
+        if (bo->placement == AMDGPU_GEM_DOMAIN_GDS)
+            h[0] = e.bo_handle;
+        else if (bo->placement == AMDGPU_GEM_DOMAIN_GWS)
+            h[1] = e.bo_handle;
+        else if (bo->placement == AMDGPU_GEM_DOMAIN_OA)
+            h[2] = e.bo_handle;
+    }
+    return 0;
+}
+
+static int bo_list_find(rdna3_drm_file *f, uint32_t handle)
+{
+    int i;
+    for (i = 0; handle && i < RD_MAX_BO_LISTS; i++)
+        if (f->bo_lists[i].handle == handle)
+            return i;
+    return -1;
+}
+
+/* AMDGPU_BO_LIST: every BO is resident anyway; a list keeps references
+ * to its GDS / GWS / OA BOs for the jobs that name it */
+static int bo_list_ioctl(rdna3_drm_file *f, union drm_amdgpu_bo_list *l)
+{
+    uint32_t op = l->in.operation, h[3], handle;
+    int i, r;
+    if (op == AMDGPU_BO_LIST_OP_DESTROY) {
+        i = bo_list_find(f, l->in.list_handle);
+        if (i >= 0)
+            bo_list_release(f, (uint32_t)i);
+        return 0;
+    }
+    if (op != AMDGPU_BO_LIST_OP_CREATE && op != AMDGPU_BO_LIST_OP_UPDATE)
+        return -RD_EINVAL;
+    r = bo_list_scan(f, l->in.bo_info_ptr, l->in.bo_number, l->in.bo_info_size, h);
+    if (r)
+        return r;
+    if (op == AMDGPU_BO_LIST_OP_UPDATE) {
+        handle = l->in.list_handle;
+        i = bo_list_find(f, handle);
+        if (i < 0)
+            return -RD_ENOENT;
+        bo_list_release(f, (uint32_t)i);
+    } else {
+        for (i = 0; i < RD_MAX_BO_LISTS && f->bo_lists[i].handle; i++)
+            ;
+        if (i == RD_MAX_BO_LISTS)
+            return -RD_ENOMEM;
+        if (!++f->next_bo_list)
+            ++f->next_bo_list;
+        handle = f->next_bo_list;
+    }
+    f->bo_lists[i].handle = handle;
+    if ((f->bo_lists[i].gds = rdna3_drm_bo_lookup(f, h[0])) != NULL)
+        f->bo_lists[i].gds->refcnt++;
+    if ((f->bo_lists[i].gws = rdna3_drm_bo_lookup(f, h[1])) != NULL)
+        f->bo_lists[i].gws->refcnt++;
+    if ((f->bo_lists[i].oa = rdna3_drm_bo_lookup(f, h[2])) != NULL)
+        f->bo_lists[i].oa->refcnt++;
+    zero(&l->out, sizeof(l->out));
+    l->out.list_handle = handle;
+    return 0;
+}
+
+static int uf_bo_ok(const rdna3_bo *bo, uint64_t offset)
+{
+    return bo && bo->size == 4096 && !bo->userptr && offset <= 4096 - 8 && !(offset & 7);
+}
+
 static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
 {
     rdna3_drm_device *dev = f->dev;
@@ -532,12 +709,21 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
     uint64_t out_pt[16];
     uint32_t nout = 0;
     uint64_t seq = 0;
+    rdna3_cs_job job;
+    uint64_t uf_offset = 0;
+    uint32_t uf_handle = 0, uf_slot = RD_MAX_UF_PENDING;
+    uint32_t onchip[3] = { 0, 0, 0 };   /* BO_HANDLES chunk: GDS / GWS / OA handles */
+    int have_bo_handles = 0;
     int r;
 
     if (!ops->submit)
         return -RD_ENODEV;
+    uf_reap(dev, 0);
+    zero(&job, sizeof(job));
     if (!cs->in.num_chunks || cs->in.num_chunks > 64)
         return -RD_EINVAL;
+    if (cs->in.bo_list_handle && bo_list_find(f, cs->in.bo_list_handle) < 0)
+        return -RD_ENOENT;   /* amdgpu_bo_list_get */
     /* amdgpu_cs_submit: a guilty context never runs again */
     if (ops->vm_query && f->vm && (ops->vm_query(ops->ctx, f->vm) & AMDGPU_CTX_QUERY2_FLAGS_GUILTY))
         return -RD_ECANCELED;
@@ -635,8 +821,36 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
             }
             break;
         }
-        case AMDGPU_CHUNK_ID_BO_HANDLES:   /* residency: everything is resident */
-        case AMDGPU_CHUNK_ID_FENCE:        /* user fence: TODO(cs) */
+        case AMDGPU_CHUNK_ID_FENCE: {
+            /* amdgpu_cs_p1_user_fence: one page, not userptr, room for 8
+             * bytes; 8-byte aligned too, since the GPU writes a qword */
+            struct drm_amdgpu_cs_chunk_fence cf;
+            zero(&cf, sizeof(cf));
+            if (uf_handle || ops->copyin(ops->ctx, &cf, ch.chunk_data,
+                                         MIN((uint64_t)ch.length_dw * 4, sizeof(cf))))
+                return uf_handle ? -RD_EINVAL : -RD_EFAULT;
+            if (!uf_bo_ok(rdna3_drm_bo_lookup(f, cf.handle), cf.offset))
+                return -RD_EINVAL;
+            uf_handle = cf.handle;   /* looked up again after the waits */
+            uf_offset = cf.offset;
+            break;
+        }
+        case AMDGPU_CHUNK_ID_BO_HANDLES: {
+            /* residency: everything is resident; only the on-chip BOs
+             * matter. A single list per job, like amdgpu */
+            struct drm_amdgpu_bo_list_in bl;
+            zero(&bl, sizeof(bl));
+            if (have_bo_handles || cs->in.bo_list_handle)
+                return -RD_EINVAL;
+            if (ops->copyin(ops->ctx, &bl, ch.chunk_data,
+                            MIN((uint64_t)ch.length_dw * 4, sizeof(bl))))
+                return -RD_EFAULT;
+            r = bo_list_scan(f, bl.bo_info_ptr, bl.bo_number, bl.bo_info_size, onchip);
+            if (r)
+                return r;
+            have_bo_handles = 1;
+            break;
+        }
         case AMDGPU_CHUNK_ID_CP_GFX_SHADOW:
             break;
         default:
@@ -645,13 +859,77 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
     }
     if (!nibs)
         return -RD_EINVAL;
+    if (uf_handle) {
+        /* a slot to hold the BO until the GPU wrote it; all busy: the
+         * oldest job of the table is waited for */
+        for (i = 0; i < RD_MAX_UF_PENDING && dev->uf_pending[i].bo; i++)
+            ;
+        if (i == RD_MAX_UF_PENDING) {
+            r = fence_wait_abs(dev, &dev->uf_pending[0].fence, ~0ull);
+            if (r)
+                return r;
+            uf_reap(dev, 0);
+            for (i = 0; i < RD_MAX_UF_PENDING && dev->uf_pending[i].bo; i++)
+                ;
+            if (i == RD_MAX_UF_PENDING)
+                return -RD_EBUSY;
+        }
+        uf_slot = i;
+        /* the waits above may have let a GEM_CLOSE in */
+        job.uf_bo = rdna3_drm_bo_lookup(f, uf_handle);
+        job.uf_offset = uf_offset;
+        if (!uf_bo_ok(job.uf_bo, uf_offset))
+            return -RD_EINVAL;
+    }
+    /* GDS / GWS / OA partitions (amdgpu_job_set_resources), looked up
+     * after the waits as well */
+    {
+        rdna3_bo *gds = NULL, *gws = NULL, *oa = NULL;
+        if (cs->in.bo_list_handle) {
+            int li = bo_list_find(f, cs->in.bo_list_handle);
+            if (li < 0)
+                return -RD_ENOENT;
+            gds = f->bo_lists[li].gds;
+            gws = f->bo_lists[li].gws;
+            oa = f->bo_lists[li].oa;
+        } else {
+            gds = rdna3_drm_bo_lookup(f, onchip[0]);
+            gws = rdna3_drm_bo_lookup(f, onchip[1]);
+            oa = rdna3_drm_bo_lookup(f, onchip[2]);
+            if ((onchip[0] && !gds) || (onchip[1] && !gws) || (onchip[2] && !oa))
+                return -RD_ENOENT;
+        }
+        if (gds) {
+            job.gds_base = (uint32_t)gds->vram_offset;
+            job.gds_size = (uint32_t)gds->size;
+        }
+        if (gws) {
+            job.gws_base = (uint32_t)gws->vram_offset;
+            job.gws_size = (uint32_t)gws->size;
+        }
+        if (oa) {
+            job.oa_base = (uint32_t)oa->vram_offset;
+            job.oa_size = (uint32_t)oa->size;
+        }
+    }
 
-    r = ops->submit(ops->ctx, f->vm, ip, ring, ibs, nibs, &seq);
+    r = ops->submit(ops->ctx, f->vm, ip, ring, ibs, nibs, &job, &seq);
     if (r)
         return r;
     dev->last_seq[ip][ring] = seq;
+    if (job.uf_bo) {
+        job.uf_bo->refcnt++;
+        dev->uf_pending[uf_slot].bo = job.uf_bo;
+        dev->uf_pending[uf_slot].fence.ip = ip;
+        dev->uf_pending[uf_slot].fence.ring = ring;
+        dev->uf_pending[uf_slot].fence.seq = seq;
+    }
     for (i = 0; i < nout; i++) {
+        /* looked up again: a dependency wait drops the OS lock, and a
+         * SYNCOBJ_DESTROY may have run meanwhile */
         rdna3_syncobj *s = sobj(f, out_h[i]);
+        if (!s)
+            continue;
         s->signaled = 0;
         s->has_fence = 1;
         s->fence.ip = ip;
@@ -756,6 +1034,8 @@ static int fence_to_handle(rdna3_drm_file *f, union drm_amdgpu_fence_to_handle *
 
 /* --------------------------- amdgpu GEM --------------------------- */
 
+static int gem_create_onchip(rdna3_drm_file *f, union drm_amdgpu_gem_create *a);
+
 static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
 {
     rdna3_drm_device *dev = f->dev;
@@ -769,9 +1049,10 @@ static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
         return -RD_EINVAL;
     if (dom & ~(uint32_t)AMDGPU_GEM_DOMAIN_MASK)
         return -RD_EINVAL;
-    if (dom & (AMDGPU_GEM_DOMAIN_GDS | AMDGPU_GEM_DOMAIN_GWS | AMDGPU_GEM_DOMAIN_OA |
-               AMDGPU_GEM_DOMAIN_DOORBELL))
-        return -RD_EOPNOTSUPP; /* TODO(stage4): GDS/GWS/OA/doorbell BOs */
+    if (dom & AMDGPU_GEM_DOMAIN_DOORBELL)
+        return -RD_EOPNOTSUPP; /* TODO(stage4): doorbell BOs (user queues) */
+    if (dom & RD_ONCHIP_DOMAINS)
+        return gem_create_onchip(f, a);
 
     bo = (rdna3_bo *)dev->ops.zalloc(dev->ops.ctx, sizeof(*bo));
     if (!bo)
@@ -800,6 +1081,45 @@ static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
     else
         dev->gtt_usage += bo->size;
 
+    r = handle_alloc(f, bo, &handle);
+    if (r) {
+        bo_put(f, bo);
+        return r;
+    }
+    zero(a, sizeof(*a));
+    a->out.handle = handle;
+    return 0;
+}
+
+/* amdgpu_gem_create_ioctl for GDS / GWS / OA: sizes and alignment are in
+ * units (bytes / entries / counters), never CPU-visible, never in a VM;
+ * a job gets them through its BO list */
+static int gem_create_onchip(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
+{
+    rdna3_drm_device *dev = f->dev;
+    uint32_t dom = (uint32_t)a->in.domains, total = 0, base = 0, handle = 0;
+    uint64_t *map = onchip_map(dev, dom, &total);   /* exactly one of them */
+    uint64_t align = a->in.alignment ? a->in.alignment : 1;
+    rdna3_bo *bo;
+    int r;
+    if (!map || a->in.bo_size > total || align > total ||
+        (a->in.domain_flags & AMDGPU_GEM_CREATE_VM_ALWAYS_VALID))
+        return -RD_EINVAL;   /* "GDS bo cannot be per-vm-bo" */
+    r = onchip_alloc(map, total, (uint32_t)a->in.bo_size, (uint32_t)align, &base);
+    if (r)
+        return r;
+    bo = (rdna3_bo *)dev->ops.zalloc(dev->ops.ctx, sizeof(*bo));
+    if (!bo) {
+        onchip_set(map, base, (uint32_t)a->in.bo_size, 0);
+        return -RD_ENOMEM;
+    }
+    bo->refcnt = 1;
+    bo->size = a->in.bo_size;
+    bo->alignment = align;
+    bo->domains = dom;
+    bo->placement = dom;
+    bo->flags = a->in.domain_flags | AMDGPU_GEM_CREATE_NO_CPU_ACCESS;
+    bo->vram_offset = base;
     r = handle_alloc(f, bo, &handle);
     if (r) {
         bo_put(f, bo);
@@ -881,7 +1201,7 @@ static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
         rdna3_bo *bo = rdna3_drm_bo_lookup(f, va->handle);
         if (!bo)
             return -RD_ENOENT;
-        if (!va->map_size || va->offset_in_bo + va->map_size > bo->size)
+        if (!va->map_size || va->offset_in_bo + va->map_size > bo->size || bo_onchip(bo))
             return -RD_EINVAL;
         if (va->operation == AMDGPU_VA_OP_REPLACE)
             for (i = 0; i < f->nvas; i++) {
@@ -970,6 +1290,8 @@ static int gem_op(rdna3_drm_file *f, struct drm_amdgpu_gem_op *o)
                    ? -RD_EFAULT : 0;
     }
     case AMDGPU_GEM_OP_SET_PLACEMENT:
+        if (bo_onchip(bo))
+            return -RD_EINVAL;   /* the BO lists find them by domain */
         bo->domains = (uint32_t)o->value; /* migration: TODO */
         return 0;
     default:
@@ -1173,8 +1495,16 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         }
         return info_out(f, in, &gf, sizeof(gf));
     }
+    case AMDGPU_INFO_GDS_CONFIG: {   /* amdgpu_kms.c: the compute fields only */
+        struct drm_amdgpu_info_gds g;
+        zero(&g, sizeof(g));
+        g.compute_partition_size = RD_GDS_SIZE;
+        g.gds_total_size = RD_GDS_SIZE;
+        g.gws_per_compute_partition = RD_GWS_SIZE;
+        g.oa_per_compute_partition = RD_OA_SIZE;
+        return info_out(f, in, &g, sizeof(g));
+    }
     case AMDGPU_INFO_VBIOS:
-    case AMDGPU_INFO_GDS_CONFIG:
     default:
         return -RD_EINVAL;
     }
@@ -1289,18 +1619,8 @@ int rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
             return -RD_ENODEV;
         return fence_to_handle(f, (union drm_amdgpu_fence_to_handle *)data);
     case RD_NR_AMDGPU(DRM_AMDGPU_BO_LIST): {
-        /* residency lists: every BO is always resident here, so a list is
-         * only a handle (amdgpu_bo_list_create / amdgpu_cs_submit) */
-        union drm_amdgpu_bo_list *l = (union drm_amdgpu_bo_list *)data;
-        uint32_t op;
         NEED(union drm_amdgpu_bo_list);
-        op = l->in.operation;
-        if (op == AMDGPU_BO_LIST_OP_CREATE) {
-            zero(&l->out, sizeof(l->out));
-            l->out.list_handle = ++f->next_bo_list;
-            return 0;
-        }
-        return (op == AMDGPU_BO_LIST_OP_DESTROY || op == AMDGPU_BO_LIST_OP_UPDATE) ? 0 : -RD_EINVAL;
+        return bo_list_ioctl(f, (union drm_amdgpu_bo_list *)data);
     }
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR): NEED(struct drm_amdgpu_gem_userptr);
         return gem_userptr(f, (struct drm_amdgpu_gem_userptr *)data);

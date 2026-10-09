@@ -33,7 +33,9 @@ uapi/rdna3_drm.c  (niezależne od OS, testowane na hoście)
 | `GEM_USERPTR` | ✅ `IOMemoryDescriptor::withAddressRange` nad taskiem klienta, `prepare()` na czas życia BO, strony przez `IODMACommand`; bez `mmap` (`-EPERM` jak amdgpu); `amdgpu_create_bo_from_user_mem` w teście loopback |
 | (wszystkie) | errno w numeracji Linuksa z UAPI; `drm_xnu` tłumaczy na macOS (`ETIME` 62→92, `ENOSYS` 38→78, `EOPNOTSUPP` 95→102), bo RADV porównuje z `-ETIME`/`-ECANCELED` hosta |
 | `AMDGPU_CTX_OP_QUERY_STATE/STATE2` | ✅ RESET / VRAMLOST / GUILTY z resetów i błędów stron (`vm_query`), guilty → `CS` = `-ECANCELED` |
-| `AMDGPU_CS` chunk `FENCE` (user fence) | 🟡 przyjmowany i pomijany: RADV nie czyta `fence_map`, używa syncobj i `WAIT_CS` |
+| `AMDGPU_CS` chunk `FENCE` (user fence) | ✅ jak `amdgpu_cs_p1_user_fence`: BO jednej strony, nie userptr, offset ≤ 4088 (i wyrównany do 8). Ring zapisuje 64-bitowy numer zadania tuż przed fence'em ringu (`amdgpu_ib_schedule`): SDMA dwa pakiety FENCE, GFX/compute `RELEASE_MEM` DATA_SEL 2. Adres w VMID0: VRAM = adres MC, GTT = jeden z 64 slotów GART pod oknem transferowym (przemapowany dopiero, gdy jego ostatnie zadanie minęło). BO trzymane referencją do przejścia fence'a (`uf_pending`, zwalniane przy kolejnym CS / zamknięciu pliku), więc `GEM_CLOSE` w trakcie nie zwalnia stron, do których GPU pisze |
+| BO w `GDS` / `GWS` / `OA` | ✅ zakresy na chipie (`gfx_v11_0_set_gds_init`: 4 KiB GDS, 64 GWS, 16 OA), rozmiar i wyrównanie w jednostkach; `NO_CPU_ACCESS` (`mmap` = `-EPERM`), bez `GEM_VA`, `VM_ALWAYS_VALID` = `-EINVAL`. `INFO_GDS_CONFIG` jak amdgpu 6.12. Zadanie dostaje partycje z listy BO (chunk `BO_HANDLES` albo `bo_list_handle`, nie oba), kext przełącza je z ringu (`gfx_v11_0_ring_emit_gds_switch`) tylko gdy VMID ma inną; po resecie zawsze. `gfx_v11_0_init_gds_vmid` przy starcie GC. Dzisiejszy Mesa na GFX11 GDS nie używa — to dla zgodności UAPI |
+| `BO_LIST` | ✅ CREATE/UPDATE/DESTROY; wszystko i tak jest rezydentne, lista trzyma referencje tylko do swoich BO GDS/GWS/OA (do 256 list na plik); nieznany BO = `-ENOENT` |
 
 ## Tryb enumeracji (`rdna3enum=1`)
 

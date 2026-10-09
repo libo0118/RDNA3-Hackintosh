@@ -122,6 +122,9 @@ void gfx11_commit(rdna3_dev *d, rdna3_gfx_ring *r);
 void gfx11_emit_ib(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid, uint64_t va, uint32_t ndw);
 /* gfx_v11_0_ring_emit_fence: RELEASE_MEM with cache flush, ++fence_seq */
 uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r);
+/* the same RELEASE_MEM for a user fence (AMDGPU_CHUNK_ID_FENCE):
+ * AMDGPU_FENCE_FLAG_64BIT (DATA_SEL 2), no interrupt, 'seq' at MC 'addr' */
+void gfx11_emit_user_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t addr, uint64_t seq);
 /* building blocks of a job (gfx_v11_0_ring_emit_*) */
 void gfx11_emit_wreg(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t reg, uint32_t val);
 void gfx11_emit_wait_reg_mem(rdna3_dev *d, rdna3_gfx_ring *r, int eng_sel, int mem_space, int opt,
@@ -144,6 +147,23 @@ uint32_t gfx11_ring_space(rdna3_dev *d, rdna3_gfx_ring *r);
  * ring. Waits for ring space; commits. Returns the fence seq, 0 on error. */
 uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
                           uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n);
+/* what a job may carry beyond its IBs (amdgpu_job) */
+typedef struct rdna3_gfx_job_ext {
+    /* != 0: the job's sequence number is written there (64-bit) right
+     * before the ring fence, as amdgpu_ib_schedule does with uf_addr */
+    uint64_t uf_addr;
+    /* amdgpu_vm_flush's gds_switch_needed: program the VMID's GDS / GWS /
+     * OA partition (bytes / entries / counters) before the IBs */
+    int      gds_switch;
+    uint32_t gds_base, gds_size, gws_base, gws_size, oa_base, oa_size;
+} rdna3_gfx_job_ext;
+uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
+                             uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n,
+                             const rdna3_gfx_job_ext *x);
+/* gfx_v11_0_ring_emit_gds_switch: WRITE_DATA of the four GDS registers */
+void gfx11_emit_gds_switch(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid,
+                           uint32_t gds_base, uint32_t gds_size, uint32_t gws_base,
+                           uint32_t gws_size, uint32_t oa_base, uint32_t oa_size);
 
 /* CP_INT_CNTL_RING0 TIME_STAMP/GENERIC0 (gfx_v11_0_set_gfx_eop_interrupt_state
  * me 0 pipe 0); also switches the fences to interrupt-raising */
@@ -219,6 +239,9 @@ void gfx11_mec_stop(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq);
  * frame control); returns the fence seq, 0 on error */
 uint32_t gfx11_submit_compute_job(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t ctx, uint32_t vmid,
                                   uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n);
+uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t ctx,
+                                     uint32_t vmid, uint64_t pd_addr, const rdna3_gfx_ib *ibs,
+                                     uint32_t n, const rdna3_gfx_job_ext *x);
 
 #ifdef __cplusplus
 }

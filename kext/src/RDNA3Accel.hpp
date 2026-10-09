@@ -131,7 +131,7 @@ private:
                            uint64_t size, uint32_t flags);
     static void   drmVmUnmap(void *ctx, void *vm, uint64_t va, uint64_t size);
     static int    drmSubmit(void *ctx, void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs,
-                            uint32_t n, uint64_t *seq);
+                            uint32_t n, const rdna3_cs_job *job, uint64_t *seq);
     static int    drmFenceSignaled(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq);
     static int    drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs);
     static uint32_t drmVmQuery(void *ctx, void *vm);

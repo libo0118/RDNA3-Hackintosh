@@ -209,10 +209,10 @@ void RDNA3Accel::drmVmUnmap(void *ctx, void *vm, uint64_t va, uint64_t size)
 }
 
 int RDNA3Accel::drmSubmit(void *ctx, void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs,
-                          uint32_t n, uint64_t *seq)
+                          uint32_t n, const rdna3_cs_job *job, uint64_t *seq)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
-    return a->fBringup ? a->fBringup->submit(vm, ip, ring, ibs, n, seq) : -RD_ENODEV;
+    return a->fBringup ? a->fBringup->submit(vm, ip, ring, ibs, n, job, seq) : -RD_ENODEV;
 }
 
 uint64_t RDNA3Accel::drmGpuClock(void *ctx)
@@ -393,6 +393,8 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
 
 void RDNA3Accel::drmFree()
 {
+    if (fDrm && fDrm->ops.bo_free)   /* user fence BOs still held (rings are down) */
+        rdna3_drm_device_fini(fDrm);
     if (fDrm)
         drmFreeMem(this, fDrm, sizeof(*fDrm));
     if (fVramHeap)

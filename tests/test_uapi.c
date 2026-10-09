@@ -87,10 +87,12 @@ static uint64_t ring_next, ring_done;
 static uint32_t last_ip, last_ring, last_nibs;
 static rdna3_ib last_ibs[RD_MAX_CS_IBS];
 static void *last_vm;
+static rdna3_cs_job last_job;
 static int h_submit(void *c, void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs,
-                    uint32_t n, uint64_t *seq)
+                    uint32_t n, const rdna3_cs_job *job, uint64_t *seq)
 {
     (void)c;
+    last_job = *job;
     last_vm = vm; last_ip = ip; last_ring = ring; last_nibs = n;
     memcpy(last_ibs, ibs, sizeof(*ibs) * n);
     *seq = ++ring_next;
@@ -130,6 +132,13 @@ static void destroy_during_wait(void)
 
 static uint64_t chunk_ptrs[8];
 static struct drm_amdgpu_cs_chunk chunks[8];
+/* set g_uf.handle to add an AMDGPU_CHUNK_ID_FENCE to cs_submit;
+ * g_out_first puts the out-syncobj chunk before the in-syncobj one */
+static struct drm_amdgpu_cs_chunk_fence g_uf;
+static int g_out_first;
+/* g_bl: an AMDGPU_CHUNK_ID_BO_HANDLES chunk; g_bl_handle: cs.in.bo_list_handle */
+static struct drm_amdgpu_bo_list_in *g_bl;
+static uint32_t g_bl_handle;
 static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip, uint32_t in_sobj,
                      uint32_t out_sobj, uint64_t *handle)
 {
@@ -142,21 +151,35 @@ static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip
     ib.va_start = va; ib.ib_bytes = bytes; ib.ip_type = ip;
     chunks[n].chunk_id = AMDGPU_CHUNK_ID_IB; chunks[n].length_dw = sizeof(ib) / 4;
     chunks[n].chunk_data = (uint64_t)(uintptr_t)&ib; n++;
+    if (out_sobj && g_out_first) {
+        out.handle = out_sobj;
+        chunks[n].chunk_id = AMDGPU_CHUNK_ID_SYNCOBJ_OUT; chunks[n].length_dw = 1;
+        chunks[n].chunk_data = (uint64_t)(uintptr_t)&out; n++;
+    }
     if (in_sobj) {
         in.handle = in_sobj;
         chunks[n].chunk_id = AMDGPU_CHUNK_ID_SYNCOBJ_IN; chunks[n].length_dw = 1;
         chunks[n].chunk_data = (uint64_t)(uintptr_t)&in; n++;
     }
-    if (out_sobj) {
+    if (out_sobj && !g_out_first) {
         out.handle = out_sobj;
         chunks[n].chunk_id = AMDGPU_CHUNK_ID_SYNCOBJ_OUT; chunks[n].length_dw = 1;
         chunks[n].chunk_data = (uint64_t)(uintptr_t)&out; n++;
+    }
+    if (g_uf.handle) {
+        chunks[n].chunk_id = AMDGPU_CHUNK_ID_FENCE; chunks[n].length_dw = sizeof(g_uf) / 4;
+        chunks[n].chunk_data = (uint64_t)(uintptr_t)&g_uf; n++;
+    }
+    if (g_bl) {
+        chunks[n].chunk_id = AMDGPU_CHUNK_ID_BO_HANDLES; chunks[n].length_dw = sizeof(*g_bl) / 4;
+        chunks[n].chunk_data = (uint64_t)(uintptr_t)g_bl; n++;
     }
     for (uint32_t i = 0; i < n; i++)
         chunk_ptrs[i] = (uint64_t)(uintptr_t)&chunks[i];
     memset(&cs, 0, sizeof(cs));
     cs.in.num_chunks = n;
     cs.in.chunks = (uint64_t)(uintptr_t)chunk_ptrs;
+    cs.in.bo_list_handle = g_bl_handle;
     r = rdna3_drm_ioctl(f, RD_NR_AMDGPU(DRM_AMDGPU_CS), &cs, sizeof(cs));
     if (!r && handle)
         *handle = cs.out.handle;
@@ -164,6 +187,21 @@ static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip
 }
 
 #define IOCTL(f, nr, arg) rdna3_drm_ioctl((f), (nr), &(arg), sizeof(arg))
+
+/* GEM_CREATE of a GDS / GWS / OA BO: 0 and its handle, or the error */
+static int onchip_create(rdna3_drm_file *f, uint32_t dom, uint64_t size, uint64_t align, uint64_t flags,
+                  uint32_t *handle)
+{
+    union drm_amdgpu_gem_create gc;
+    int r;
+    memset(&gc, 0, sizeof(gc));
+    gc.in.bo_size = size; gc.in.alignment = align; gc.in.domains = dom;
+    gc.in.domain_flags = flags;
+    r = IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gc);
+    if (!r)
+        *handle = gc.out.handle;
+    return r;
+}
 
 static int info(rdna3_drm_file *f, uint32_t query, void *out, uint32_t size)
 {
@@ -581,6 +619,165 @@ int main(void)
         sw.handles = (uint64_t)(uintptr_t)&sc.handle; sw.timeout_nsec = INT64_MAX;
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == 0 && h_during_wait == NULL);
         CHECK(!f->syncobjs[sc.handle - 1].used && !f->syncobjs[sc.handle - 1].signaled);
+        /* the out syncobj goes away while CS waits for an in-fence: the
+         * submit still goes through and nothing touches the freed slot */
+        {
+            uint32_t sin, sout;
+            memset(&sc, 0, sizeof(sc));
+            CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, sc) == 0);
+            sin = sc.handle;
+            CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, sc) == 0);
+            sout = sc.handle;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, sin, NULL) == 0);
+            g_wait_handle = sout;
+            h_during_wait = destroy_during_wait;
+            g_out_first = 1;   /* validated before the wait that destroys it */
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, sin, sout, NULL) == 0 &&
+                  h_during_wait == NULL);
+            g_out_first = 0;
+            CHECK(!f->syncobjs[sout - 1].used && !f->syncobjs[sout - 1].has_fence);
+            {
+                struct drm_syncobj_destroy d = { sin, 0 };
+                CHECK(IOCTL(f, RD_NR_SYNCOBJ_DESTROY, d) == 0);
+            }
+        }
+        /* user fence (AMDGPU_CHUNK_ID_FENCE): a one-page, non-userptr BO,
+         * 8 bytes at an aligned offset; held until the job is done */
+        {
+            union drm_amdgpu_gem_create gc;
+            struct drm_gem_close cl;
+            uint32_t ufh, big;
+            unsigned live;
+            memset(&gc, 0, sizeof(gc));
+            gc.in.bo_size = 4096; gc.in.domains = AMDGPU_GEM_DOMAIN_GTT;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gc) == 0);
+            ufh = gc.out.handle;
+            memset(&gc, 0, sizeof(gc));
+            gc.in.bo_size = 8192; gc.in.domains = AMDGPU_GEM_DOMAIN_GTT;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gc) == 0);
+            big = gc.out.handle;
+            g_uf.handle = big; g_uf.offset = 0;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_uf.handle = ufh; g_uf.offset = 4092;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_uf.offset = 12;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_uf.handle = 9999; g_uf.offset = 0;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_uf.handle = ufh; g_uf.offset = 16;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &h2) == 0);
+            CHECK(last_job.uf_bo == rdna3_drm_bo_lookup(f, ufh) && last_job.uf_offset == 16);
+            CHECK(dev.uf_pending[0].bo == last_job.uf_bo &&
+                  dev.uf_pending[0].fence.seq == h2 && last_job.uf_bo->refcnt == 2);
+            /* GEM_CLOSE while the GPU may still write it: the BO stays */
+            live = live_bos;
+            memset(&cl, 0, sizeof(cl));
+            cl.handle = ufh;
+            CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == 0 && live_bos == live);
+            cl.handle = big;
+            CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == 0 && live_bos == live - 1);
+            g_uf.handle = 0;
+            /* the next CS after the fence passed lets it go */
+            ring_done = h2;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &h2) == 0 && !last_job.uf_bo);
+            CHECK(!dev.uf_pending[0].bo && live_bos == live - 2);
+            ring_done = h2;
+        }
+        /* GDS / GWS / OA BOs: on-chip ranges in units, no CPU or VM
+         * access; a job gets them through its BO list */
+        {
+            union drm_amdgpu_gem_mmap mm;
+            struct drm_amdgpu_gem_va gv;
+            struct drm_amdgpu_info_gds gi;
+            struct drm_amdgpu_bo_list_entry ent[3];
+            struct drm_amdgpu_bo_list_in bl;
+            union drm_amdgpu_bo_list l;
+            struct drm_gem_close cl;
+            uint32_t gds, gds2, gws, oa, list, i;
+            unsigned live = live_bos;
+
+            memset(&gi, 0, sizeof(gi));
+            CHECK(info(f, AMDGPU_INFO_GDS_CONFIG, &gi, sizeof(gi)) == 0 &&
+                  gi.gds_total_size == 0x1000 && gi.compute_partition_size == 0x1000 &&
+                  gi.gws_per_compute_partition == 64 && gi.oa_per_compute_partition == 16);
+            CHECK(onchip_create(f, AMDGPU_GEM_DOMAIN_GDS, 0x100, 4, 0, &gds) == 0);
+            CHECK(onchip_create(f, AMDGPU_GEM_DOMAIN_GDS, 0x80, 0x200, 0, &gds2) == 0);
+            CHECK(onchip_create(f, AMDGPU_GEM_DOMAIN_GWS, 8, 0, 0, &gws) == 0);
+            CHECK(onchip_create(f, AMDGPU_GEM_DOMAIN_OA, 3, 0, 0, &oa) == 0);
+            CHECK(rdna3_drm_bo_lookup(f, gds)->vram_offset == 0 &&
+                  rdna3_drm_bo_lookup(f, gds2)->vram_offset == 0x200 && live_bos == live);
+            CHECK(onchip_create(f, AMDGPU_GEM_DOMAIN_GDS, 0x1000, 0, 0, &i) != 0);    /* no room */
+            CHECK(onchip_create(f, AMDGPU_GEM_DOMAIN_OA, 17, 0, 0, &i) != 0);         /* > 16 */
+            CHECK(onchip_create(f, AMDGPU_GEM_DOMAIN_GDS | AMDGPU_GEM_DOMAIN_GTT, 16, 0, 0, &i) != 0);
+            CHECK(onchip_create(f, AMDGPU_GEM_DOMAIN_GWS, 1, 0, AMDGPU_GEM_CREATE_VM_ALWAYS_VALID, &i) != 0);
+            memset(&mm, 0, sizeof(mm));
+            mm.in.handle = gds;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP), mm) == -RD_EPERM);
+            memset(&gv, 0, sizeof(gv));
+            gv.handle = gds; gv.operation = AMDGPU_VA_OP_MAP; gv.va_address = 0x800000;
+            gv.map_size = 4096;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), gv) == -RD_EINVAL);
+            /* BO_HANDLES chunk: the partitions reach the job */
+            ent[0].bo_handle = gds2; ent[1].bo_handle = gws; ent[2].bo_handle = oa;
+            ent[0].bo_priority = ent[1].bo_priority = ent[2].bo_priority = 0;
+            memset(&bl, 0, sizeof(bl));
+            bl.bo_number = 3; bl.bo_info_size = sizeof(ent[0]);
+            bl.bo_info_ptr = (uint64_t)(uintptr_t)ent;
+            g_bl = &bl;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
+            CHECK(last_job.gds_base == 0x200 && last_job.gds_size == 0x80 &&
+                  last_job.gws_base == 0 && last_job.gws_size == 8 &&
+                  last_job.oa_base == 0 && last_job.oa_size == 3);
+            ent[1].bo_handle = 4242;                     /* unknown BO */
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ENOENT);
+            ent[1].bo_handle = gws;
+            g_bl = NULL;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0 &&
+                  !last_job.gds_size && !last_job.gws_size && !last_job.oa_size);
+            /* a BO list keeps its on-chip BOs past GEM_CLOSE */
+            memset(&l, 0, sizeof(l));
+            l.in.operation = AMDGPU_BO_LIST_OP_CREATE;
+            l.in.bo_number = 2; l.in.bo_info_size = sizeof(ent[0]);
+            l.in.bo_info_ptr = (uint64_t)(uintptr_t)ent;   /* gds2, gws */
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_BO_LIST), l) == 0 && l.out.list_handle);
+            list = l.out.list_handle;
+            memset(&cl, 0, sizeof(cl));
+            cl.handle = gds2;
+            CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == 0);
+            g_bl_handle = list;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0 &&
+                  last_job.gds_base == 0x200 && last_job.gds_size == 0x80 &&
+                  last_job.gws_size == 8 && !last_job.oa_size);
+            g_bl = &bl;                                  /* both kinds of list: no */
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_bl = NULL;
+            /* UPDATE replaces the BOs, DESTROY drops the last reference */
+            memset(&l, 0, sizeof(l));
+            l.in.operation = AMDGPU_BO_LIST_OP_UPDATE; l.in.list_handle = list;
+            l.in.bo_number = 1; l.in.bo_info_size = sizeof(ent[0]);
+            l.in.bo_info_ptr = (uint64_t)(uintptr_t)&ent[2];   /* oa */
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_BO_LIST), l) == 0 && l.out.list_handle == list);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0 &&
+                  !last_job.gds_size && last_job.oa_size == 3);
+            CHECK(onchip_create(f, AMDGPU_GEM_DOMAIN_GDS, 0x80, 0x200, 0, &i) == 0 &&
+                  rdna3_drm_bo_lookup(f, i)->vram_offset == 0x200);   /* the range came back */
+            cl.handle = i;
+            CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == 0);
+            memset(&l, 0, sizeof(l));
+            l.in.operation = AMDGPU_BO_LIST_OP_DESTROY; l.in.list_handle = list;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_BO_LIST), l) == 0);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ENOENT);
+            g_bl_handle = 0;
+            l.in.operation = AMDGPU_BO_LIST_OP_UPDATE;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_BO_LIST), l) == -RD_ENOENT);
+            cl.handle = gds; CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == 0);
+            cl.handle = gws; CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == 0);
+            cl.handle = oa;  CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == 0);
+            for (i = 0; i < RD_GDS_SIZE / 64; i++)
+                CHECK(dev.gds_map[i] == 0);
+            CHECK(dev.gws_map[0] == 0 && dev.oa_map[0] == 0 && live_bos == live);
+            ring_done = ring_next;
+        }
         /* WAIT_CS on ~0 = latest */
         w.in.handle = ~0ull; w.in.timeout = 1;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 0);

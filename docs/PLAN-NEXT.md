@@ -81,7 +81,8 @@ Cel: modesetting, EDID, wiele monitorów, hotplug, zmiana rozdzielczości.
 ## 6. 🟡 UAPI dla RADV na serio
 * ✅ Timeline syncobj, `SYNCOBJ_TRANSFER`, syncobj-fd w procesie
   (`drm_xnu`), `AMDGPU_CTX` z priorytetami i stanem resetu, `BO_LIST`,
-  chunki CS (user fence pomijany — RADV go nie czyta), `AMDGPU_INFO`
+  chunki CS (user fence zapisywany przez ring, BO GDS/GWS/OA z listy BO
+  przełączane per VMID), `AMDGPU_INFO`
   z `SENSOR` (metryki SMU) i `GPUVM_FAULT`, `GEM_USERPTR` przez
   `IOMemoryDescriptor::withAddressRange`.
 * ✅ `vulkaninfo` na runnerze macOS bez karty: `libdrm_loopback.dylib`

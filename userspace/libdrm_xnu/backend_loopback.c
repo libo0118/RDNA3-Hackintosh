@@ -149,7 +149,7 @@ static int lb_run_ib(struct lb_vm *vm, const uint32_t *ib, uint32_t ndw)
     return 0;
 }
 static int lb_submit(void *c, void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
-                     uint64_t *seq)
+                     const rdna3_cs_job *job, uint64_t *seq)
 {
     struct lb_vm *vm = (struct lb_vm *)p;
     uint32_t i;
@@ -166,6 +166,8 @@ static int lb_submit(void *c, void *p, uint32_t ip, uint32_t ring, const rdna3_i
             return r;
     }
     *seq = ++g_seq;   /* runs synchronously: done as soon as it is queued */
+    if (job->uf_bo)   /* the user fence write the GPU does after the job */
+        memcpy((uint8_t *)job->uf_bo->backing + job->uf_offset, seq, 8);
     return 0;
 }
 static int lb_signaled(void *c, uint32_t ip, uint32_t ring, uint64_t seq)
