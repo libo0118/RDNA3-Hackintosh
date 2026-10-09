@@ -18,9 +18,8 @@ Jak to wygląda w praktyce:
 instalacja macOS). Potem każdy krok zajmuje około 3 minut.
 
 > Na czas kroku Linux nie ma obrazu, a klawiatura i mysz należą do macOS.
-> Zapisz wcześniej otwarte rzeczy. **Awaryjne wyjście w każdej chwili:
-> krótko wciśnij przycisk zasilania komputera.** Zamyka to tylko VM i
-> przywraca pulpit Linuksa.
+> Zapisz wcześniej otwarte rzeczy. Nie utkniesz bez obrazu, patrz
+> [Awaryjne wyjście](#awaryjne-wyjście): **oba Ctrl naraz, potem 3× Esc**.
 
 ---
 
@@ -168,15 +167,39 @@ albo przyciskiem zasilania. Raport wyśle się mimo to.
 Wartości, jakich oczekujemy w każdym kroku, opisuje [TESTING-HW](TESTING-HW.md).
 Nie musisz ich sprawdzać, wystarczy przysłać raporty.
 
+## Awaryjne wyjście
+
+Każdy z poniższych sposobów zamyka **tylko VM**. Skrypt oddaje wtedy kartę,
+klawiaturę i mysz Linuksowi i przywraca pulpit:
+
+1. **Oba Ctrl naraz, potem 3× Esc** (w ciągu 3 sekund). Oba Ctrl zabierają
+   klawiaturę macOS i oddają ją Linuksowi, a 3× Esc zamyka VM. Działa także
+   przy zawieszonym macOS i przy kernel panic, bo klawiaturę czyta Linux,
+   nie macOS.
+2. **Krótkie wciśnięcie przycisku zasilania komputera.** Na czas VM Linux
+   nie wyłącza się od niego, tylko zamyka VM.
+3. **Nic nie robisz:** automatyczny krok sam zamyka VM po 8 minutach
+   (zwykle kończy się po około 3). Z `--stay` limit wynosi 30 minut. Oba
+   limity zmienisz w `~/rdna3-vm/config` (`AUTO_TIMEOUT_MIN`, `TIMEOUT_MIN`).
+
+Skrypt oddaje kartę Linuksowi także wtedy, gdy QEMU sam się wysypie.
+Przywracanie jest podpięte pod zakończenie skryptu, a nie pod macOS.
+
+Ostatnia deska ratunku, gdy po zamknięciu VM pulpit nie wraca: karta nie
+dała się zresetować (znany kłopot RDNA3 z passthrough). Wtedy krótko
+wciśnij przycisk zasilania. VM już nie działa, więc Linux wyłączy się
+normalnie. Po włączeniu komputera wszystko działa. Gdyby nawet to nie
+zadziałało, przytrzymaj przycisk 5 sekund. Karcie to nie szkodzi.
+
 ## Gdy coś pójdzie nie tak
 
 | Objaw | Co zrobić |
 |---|---|
-| czarny ekran albo zawieszenie dłużej niż 5 min, kernel panic | **krótko wciśnij przycisk zasilania**: VM się zamknie i wróci pulpit. Przyślij raporty i **nie idź dalej** |
-| po zamknięciu VM pulpit Linuksa nie wraca | wciśnij przycisk zasilania jeszcze raz: Linux wyłączy się normalnie. Znany kłopot z resetem kart RDNA3 po passthrough; po włączeniu wszystko działa |
+| czarny ekran albo zawieszenie dłużej niż 5 min, kernel panic | [awaryjne wyjście](#awaryjne-wyjście) (oba Ctrl, 3× Esc). Przyślij raporty i **nie idź dalej** |
+| po zamknięciu VM pulpit Linuksa nie wraca | krótko przycisk zasilania: Linux wyłączy się normalnie (patrz wyżej) |
 | `step` kończy się od razu, pulpit nie znika | przeczytaj `~/rdna3-vm/reports/host-*.log` (najnowszy) i przyślij go |
 | macOS nie wysłał raportu | uruchom ten sam krok z `--stay` i w Terminalu macOS wykonaj `sudo sh "/Library/Application Support/RDNA3VM/autoreport.sh"` |
-| po 30 min VM zamyka się sama | to limit bezpieczeństwa; zmienisz go w `~/rdna3-vm/config` (`TIMEOUT_MIN`) |
+| klawiatura nie działa w macOS | VM uruchomiła się bez przechwytu: przyślij `host-*.log`; wyjście przyciskiem zasilania |
 
 Komputer bez menedżera logowania (start do konsoli) też działa. Skrypt sam
 zatrzymuje `display-manager` i potem go wznawia.
@@ -212,8 +235,10 @@ Przy pierwszej wysyłce dołącz też katalog `linux-reference`.
   - przepina kartę z `amdgpu` na `vfio-pci`;
   - uruchamia QEMU z kartą, klawiaturą i myszą USB;
   - po wyłączeniu VM oddaje wszystko Linuksowi.
-- Przycisk zasilania na czas VM zamyka tylko VM (`systemd-inhibit` + nasłuch
-  klawisza). Po VM znów działa zwyczajnie.
+- Klawiaturę i mysz QEMU czyta z Linuksa (`input-linux`, przełącznik
+  „oba Ctrl”) i podaje macOS jako urządzenia USB. Linux sam pilnuje 3× Esc
+  i przycisku zasilania (`vmtool.py stopkeys`, `systemd-inhibit`). Po VM
+  przycisk znów działa zwyczajnie.
 - macOS widzi Linuksa pod adresem `10.0.2.2`. Pod tym adresem
   `tools/vm/vmtool.py serve` udostępnia paczkę i przyjmuje raporty (tylko
   lokalnie, `127.0.0.1:8000`).

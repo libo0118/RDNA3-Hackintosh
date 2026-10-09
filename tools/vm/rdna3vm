@@ -89,7 +89,13 @@ cmd_check() {
     if systemctl cat display-manager.service >/dev/null 2>&1; then ok "display-manager.service"
     else echo "  ?   brak display-manager.service - pulpit trzeba będzie zamknąć ręcznie (patrz docs)"; fi
     say "Klawiatura i mysz, które dostanie macOS"
-    $VMTOOL usbhid | sed 's/^/     /'
+    if [ -n "$($VMTOOL evdev)" ]; then
+        $VMTOOL evdev | sed 's/^/     /'
+        echo "     awaryjne wyjście z VM: oba Ctrl naraz, potem 3x Esc (albo przycisk zasilania)"
+    else
+        $VMTOOL usbhid | sed 's/^/     /'
+        echo "     brak /dev/input/by-id: awaryjne wyjście tylko przyciskiem zasilania"
+    fi
     echo
     [ $fail = 0 ] && echo "Wszystko gotowe." || echo "Popraw pozycje oznaczone BŁĄD i uruchom 'rdna3vm check' ponownie."
     return $fail
@@ -148,6 +154,7 @@ RAM_GB=${RAM_GB:-$ram}
 CPUS=${CPUS:-$cpus}
 CPU_MODEL="${CPU_MODEL:-Haswell-noTSX,kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check}"
 TIMEOUT_MIN=${TIMEOUT_MIN:-30}
+AUTO_TIMEOUT_MIN=${AUTO_TIMEOUT_MIN:-8}
 EOF
     [ -n "${BASE_ARGS:-}" ] && echo "BASE_ARGS=\"$BASE_ARGS\"" >> "$CONF"
     ok "$CONF (RAM ${RAM_GB:-$ram} GiB, $cpus CPU)"
@@ -288,6 +295,10 @@ launch() {   # launch "rdna3 args" stay(0/1)
     bootargs="$BASE_ARGS $DEBUG_ARGS $extra"
     [ "$stay" = 1 ] || bootargs="$bootargs rdna3vmauto=1"
     sudo -v || die "potrzebne sudo"
+    # an automatic step is done in ~3 min; a stuck one should not keep the
+    # screen dark for long. --stay keeps TIMEOUT_MIN.
+    local limit=$TIMEOUT_MIN
+    [ "$stay" = 1 ] || limit=${AUTO_TIMEOUT_MIN:-8}
     say "Start VM z kartą: $extra"
     echo "  Za chwilę ekran zgaśnie (Linux oddaje kartę), potem pojawi się macOS."
     if [ "$stay" = 1 ]; then
@@ -295,11 +306,14 @@ launch() {   # launch "rdna3 args" stay(0/1)
     else
         echo "  Po ~2 min od startu macOS sam wyśle raport i się wyłączy; wróci pulpit."
     fi
-    echo "  Zawieszenie / czarny ekran: KRÓTKO wciśnij przycisk zasilania komputera"
-    echo "  (zamyka tylko VM). Limit bezpieczeństwa: $TIMEOUT_MIN min."
+    echo "  Zawieszenie / czarny ekran - awaryjne wyjście (zamyka tylko VM):"
+    echo "    * oba Ctrl naraz, potem 3x Esc"
+    echo "    * albo KRÓTKO przycisk zasilania komputera"
+    echo "  Bez reakcji: VM zamknie się sama po $limit min."
     sleep 5
     sudo systemd-run --unit="rdna3vm-$(date +%H%M%S)" --collect --quiet \
         --setenv=RDNA3VM_DIR="$WORK" --setenv=RDNA3VM_BOOTARGS="$bootargs" \
+        --setenv=RDNA3VM_TIMEOUT="$limit" \
         bash "$SELF" _passthrough
 }
 
@@ -386,10 +400,26 @@ cmd__passthrough() {
                     -device "vfio-pci,host=$d,bus=rp$rp")
         fi
     done
-    while read -r vid pid name; do
-        QARGS+=(-device "usb-host,bus=xhci.0,vendorid=0x$vid,productid=0x$pid")
-        echo "USB do VM: $vid:$pid $name"
-    done < <($VMTOOL usbhid)
+    # keyboard and mouse: QEMU reads them from Linux (input-linux) and feeds
+    # USB HID devices in the guest. Linux keeps the devices, so both Ctrl
+    # keys hand them back to Linux and Esc x3 then stops the VM. Without
+    # evdev nodes, fall back to passing the USB devices through (then only
+    # the power button and the time cap can stop the VM).
+    local kind path n=0 KBDS=()
+    while read -r kind path; do
+        n=$((n + 1))
+        QARGS+=(-object "input-linux,id=in$n,evdev=$path,grab_all=on,repeat=on,grab-toggle=ctrl-ctrl")
+        [ "$kind" = kbd ] && KBDS+=("$path")
+        echo "wejście do VM: $kind $path"
+    done < <($VMTOOL evdev)
+    if [ $n -gt 0 ]; then
+        QARGS+=(-device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0)
+    else
+        while read -r vid pid name; do
+            QARGS+=(-device "usb-host,bus=xhci.0,vendorid=0x$vid,productid=0x$pid")
+            echo "USB do VM: $vid:$pid $name"
+        done < <($VMTOOL usbhid)
+    fi
 
     trap restore EXIT
     detach || exit 1
@@ -397,16 +427,17 @@ cmd__passthrough() {
     local srv inh pk tm qpid
     $VMTOOL serve "$WORK/share" 8000 >>"$WORK/share.log" 2>&1 & srv=$!
     systemd-inhibit --what=handle-power-key --who=rdna3vm --why="przycisk zamyka VM" --mode=block sleep infinity & inh=$!
-    $VMTOOL powerkey & pk=$!
-    sleep $((TIMEOUT_MIN * 60)) & tm=$!
+    $VMTOOL stopkeys "${KBDS[@]}" & pk=$!
+    local limit=${RDNA3VM_TIMEOUT:-$TIMEOUT_MIN}
+    sleep $((limit * 60)) & tm=$!
     echo "== qemu start"
     qemu-system-x86_64 "${QARGS[@]}" & qpid=$!
     while kill -0 $qpid 2>/dev/null && kill -0 $pk 2>/dev/null && kill -0 $tm 2>/dev/null; do
         wait -n || true
     done
     if kill -0 $qpid 2>/dev/null; then
-        kill -0 $pk 2>/dev/null || echo "== przycisk zasilania: zamykam VM"
-        kill -0 $tm 2>/dev/null || echo "== limit $TIMEOUT_MIN min: zamykam VM"
+        kill -0 $pk 2>/dev/null || echo "== awaryjne wyjście (przycisk / Ctrl+Ctrl, Esc x3): zamykam VM"
+        kill -0 $tm 2>/dev/null || echo "== limit $limit min: zamykam VM"
         kill $qpid; sleep 3; kill -9 $qpid 2>/dev/null || true
     else
         echo "== VM wyłączyła się sama"
