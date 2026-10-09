@@ -9,6 +9,7 @@
 #include "gen/gc_11_0_0_sdma.h"
 #include "gen/gc_11_0_0_gds.h"
 #include "gen/gc_11_0_0_rs64.h"
+#include "gen/gc_11_0_0_mes.h"
 #include "clearstate_defs.h"
 #include "clearstate_gfx11.h"
 #include "amdgpu_ucode_hdr.h"
@@ -789,6 +790,7 @@ int gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs6
 #define MQD_CP_HQD_PQ_DOORBELL_CONTROL 143
 #define MQD_CP_HQD_PQ_CONTROL          145
 #define MQD_CP_HQD_IB_CONTROL          149
+#define MQD_CP_HQD_IQ_TIMER            150
 #define MQD_CP_HQD_DEQUEUE_REQUEST     152
 #define MQD_CP_MQD_CONTROL             162
 #define MQD_CP_HQD_EOP_BASE_ADDR_LO    165
@@ -996,6 +998,153 @@ static int kiq_init_register(rdna3_dev *d, rdna3_mec_ring *r)
     return ret;
 }
 
+/* amdgpu_mes_init_microcode: mes_uc_start_addr of each pipe's firmware */
+int gfx11_mes_from_fw(const void *mes, uint32_t mes_len, const void *mes1, uint32_t mes1_len,
+                      uint64_t uc_start[2])
+{
+    const struct mes_firmware_header_v1_0 *h[2];
+    if (!mes || !mes1 || mes_len < sizeof(*h[0]) || mes1_len < sizeof(*h[0]))
+        return RDNA3_EINVAL;
+    h[0] = (const struct mes_firmware_header_v1_0 *)mes;
+    h[1] = (const struct mes_firmware_header_v1_0 *)mes1;
+    for (int i = 0; i < 2; i++) {
+        if (h[i]->header.header_version_major != 1)
+            return RDNA3_EINVAL;
+        uc_start[i] = h[i]->mes_uc_start_addr_lo | ((uint64_t)h[i]->mes_uc_start_addr_hi << 32);
+    }
+    return RDNA3_OK;
+}
+
+/* mes_v11_0_kiq_ring_init: me 3 pipe 1 queue 0, doorbell MES_RING1 */
+int gfx11_mes_kiq_ring_init(rdna3_dev *d, rdna3_mec_ring *r, const uint64_t uc_start[2])
+{
+    int ret = gfx11_mec_ring_init(d, r, 1, 1, 0, RD_DB_MES_RING1, 0);
+    if (ret)
+        return ret;
+    r->me = 3;
+    r->mes_uc_start[0] = uc_start[0];
+    r->mes_uc_start[1] = uc_start[1];
+    return RDNA3_OK;
+}
+
+/* mes_v11_0_enable(true) with enable_mes_kiq: both pipes from their start
+ * addresses, then unhalted and active */
+static void mes_enable(rdna3_dev *d, const uint64_t uc_start[2])
+{
+    uint32_t pipe, v = RG(d, regCP_MES_CNTL);
+    v = REG_SET_FIELD(v, CP_MES_CNTL, MES_PIPE0_RESET, 1);
+    v = REG_SET_FIELD(v, CP_MES_CNTL, MES_PIPE1_RESET, 1);
+    WG(d, regCP_MES_CNTL, v);
+    for (pipe = 0; pipe < 2; pipe++) {
+        uint64_t a = uc_start[pipe] >> 2;
+        grbm_select(d, 3, pipe, 0, 0);
+        WG(d, regCP_MES_PRGRM_CNTR_START, (uint32_t)a);
+        WG(d, regCP_MES_PRGRM_CNTR_START_HI, (uint32_t)(a >> 32));
+    }
+    grbm_select(d, 0, 0, 0, 0);
+    v = REG_SET_FIELD(0u, CP_MES_CNTL, MES_PIPE0_ACTIVE, 1);
+    v = REG_SET_FIELD(v, CP_MES_CNTL, MES_PIPE1_ACTIVE, 1);
+    WG(d, regCP_MES_CNTL, v);
+    d->os.udelay(d->os.ctx, 500);
+}
+
+/* mes_v11_0_enable(false) */
+static void mes_disable(rdna3_dev *d)
+{
+    uint32_t v = RG(d, regCP_MES_CNTL);
+    v = REG_SET_FIELD(v, CP_MES_CNTL, MES_PIPE0_ACTIVE, 0);
+    v = REG_SET_FIELD(v, CP_MES_CNTL, MES_PIPE1_ACTIVE, 0);
+    v = REG_SET_FIELD(v, CP_MES_CNTL, MES_INVALIDATE_ICACHE, 1);
+    v = REG_SET_FIELD(v, CP_MES_CNTL, MES_PIPE0_RESET, 1);
+    v = REG_SET_FIELD(v, CP_MES_CNTL, MES_PIPE1_RESET, 1);
+    v = REG_SET_FIELD(v, CP_MES_CNTL, MES_HALT, 1);
+    WG(d, regCP_MES_CNTL, v);
+}
+
+/* mes_v11_0_mqd_init for the KIQ ring */
+static void mes_mqd_init(rdna3_dev *d, rdna3_mec_ring *r)
+{
+    rdna3_gfx_ring *rb = &r->rb;
+    uint64_t eop = rdna3_vram_mc(d, r->eop) >> 8, mqd = rdna3_vram_mc(d, r->mqd);
+    uint64_t hqd = rdna3_vram_mc(d, rb->ring) >> 8, wb;
+    uint32_t tmp, i;
+
+    for (i = 0; i < RD_MQD_DWORDS; i++)
+        g_mqd[i] = 0;
+    g_mqd[MQD_HEADER] = 0xC0310800;
+    g_mqd[MQD_COMPUTE_PIPELINESTAT_ENABLE] = 1;
+    g_mqd[MQD_COMPUTE_STATIC_THREAD_MGMT_SE0] = 0xffffffff;
+    g_mqd[MQD_COMPUTE_STATIC_THREAD_MGMT_SE1] = 0xffffffff;
+    g_mqd[MQD_COMPUTE_STATIC_THREAD_MGMT_SE2] = 0xffffffff;
+    g_mqd[MQD_COMPUTE_STATIC_THREAD_MGMT_SE3] = 0xffffffff;
+    g_mqd[MQD_COMPUTE_MISC_RESERVED] = 7;
+    tmp = REG_SET_FIELD(regCP_HQD_EOP_CONTROL_DEFAULT, CP_HQD_EOP_CONTROL, EOP_SIZE,
+                        order_base_2(RD_MEC_HPD_SIZE / 4) - 1);   /* MES_EOP_SIZE 2048 */
+    g_mqd[MQD_CP_HQD_EOP_BASE_ADDR_LO] = (uint32_t)eop;
+    g_mqd[MQD_CP_HQD_EOP_BASE_ADDR_HI] = (uint32_t)(eop >> 32);
+    g_mqd[MQD_CP_HQD_EOP_CONTROL] = tmp;
+    rb->wptr = 0;
+    g_mqd[MQD_CP_MQD_BASE_ADDR_LO] = (uint32_t)mqd & 0xfffffffc;
+    g_mqd[MQD_CP_MQD_BASE_ADDR_HI] = (uint32_t)(mqd >> 32);
+    g_mqd[MQD_CP_MQD_CONTROL] = REG_SET_FIELD(regCP_MQD_CONTROL_DEFAULT, CP_MQD_CONTROL, VMID, 0);
+    g_mqd[MQD_CP_HQD_PQ_BASE_LO] = (uint32_t)hqd;
+    g_mqd[MQD_CP_HQD_PQ_BASE_HI] = (uint32_t)(hqd >> 32);
+    wb = rdna3_vram_mc(d, rb->wb + RD_GFX_WB_RPTR);
+    g_mqd[MQD_CP_HQD_PQ_RPTR_REPORT_ADDR_LO] = (uint32_t)wb & 0xfffffffc;
+    g_mqd[MQD_CP_HQD_PQ_RPTR_REPORT_ADDR_HI] = (uint32_t)(wb >> 32) & 0xffff;
+    wb = rdna3_vram_mc(d, rb->wb + RD_GFX_WB_WPTR);
+    g_mqd[MQD_CP_HQD_PQ_WPTR_POLL_ADDR_LO] = (uint32_t)wb & 0xfffffff8;
+    g_mqd[MQD_CP_HQD_PQ_WPTR_POLL_ADDR_HI] = (uint32_t)(wb >> 32) & 0xffff;
+    /* RPTR_BLOCK_SIZE: amdgpu passes the value pre-shifted by 8, which
+     * REG_SET_FIELD masks to 0 */
+    tmp = REG_SET_FIELD(regCP_HQD_PQ_CONTROL_DEFAULT, CP_HQD_PQ_CONTROL, QUEUE_SIZE,
+                        order_base_2(rb->ring_size / 4) - 1);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, RPTR_BLOCK_SIZE, (order_base_2(4096 / 4) - 1) << 8);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, UNORD_DISPATCH, 1);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, TUNNEL_DISPATCH, 0);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, PRIV_STATE, 1);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, KMD_QUEUE, 1);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, NO_UPDATE_RPTR, 1);
+    g_mqd[MQD_CP_HQD_PQ_CONTROL] = tmp;
+    tmp = REG_SET_FIELD(0u, CP_HQD_PQ_DOORBELL_CONTROL, DOORBELL_OFFSET, rb->doorbell);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_DOORBELL_CONTROL, DOORBELL_EN, 1);
+    g_mqd[MQD_CP_HQD_PQ_DOORBELL_CONTROL] = tmp;
+    g_mqd[MQD_CP_HQD_VMID] = 0;
+    g_mqd[MQD_CP_HQD_ACTIVE] = 1;
+    g_mqd[MQD_CP_HQD_PERSISTENT_STATE] =
+        REG_SET_FIELD(regCP_HQD_PERSISTENT_STATE_DEFAULT, CP_HQD_PERSISTENT_STATE, PRELOAD_SIZE, 0x55);
+    g_mqd[MQD_CP_HQD_IB_CONTROL] = regCP_HQD_IB_CONTROL_DEFAULT;
+    g_mqd[MQD_CP_HQD_IQ_TIMER] = regCP_HQD_IQ_TIMER_DEFAULT;
+    g_mqd[MQD_CP_HQD_QUANTUM] = regCP_HQD_QUANTUM_DEFAULT;
+    rdna3_vram_write(d, r->mqd, g_mqd, sizeof(g_mqd));
+    rdna3_hdp_flush(d);
+}
+
+/* mes_v11_0_queue_init_register for the KIQ pipe */
+static void mes_queue_init_register(rdna3_dev *d, rdna3_mec_ring *r)
+{
+    uint32_t v;
+    grbm_select(d, 3, r->pipe, 0, 0);
+    v = RG(d, regCP_HQD_VMID);
+    WG(d, regCP_HQD_VMID, REG_SET_FIELD(v, CP_HQD_VMID, VMID, 0));
+    v = RG(d, regCP_HQD_PQ_DOORBELL_CONTROL);
+    WG(d, regCP_HQD_PQ_DOORBELL_CONTROL, REG_SET_FIELD(v, CP_HQD_PQ_DOORBELL_CONTROL, DOORBELL_EN, 0));
+    WG(d, regCP_MQD_BASE_ADDR, g_mqd[MQD_CP_MQD_BASE_ADDR_LO]);
+    WG(d, regCP_MQD_BASE_ADDR_HI, g_mqd[MQD_CP_MQD_BASE_ADDR_HI]);
+    WG(d, regCP_MQD_CONTROL, 0);
+    WG(d, regCP_HQD_PQ_BASE, g_mqd[MQD_CP_HQD_PQ_BASE_LO]);
+    WG(d, regCP_HQD_PQ_BASE_HI, g_mqd[MQD_CP_HQD_PQ_BASE_HI]);
+    WG(d, regCP_HQD_PQ_RPTR_REPORT_ADDR, g_mqd[MQD_CP_HQD_PQ_RPTR_REPORT_ADDR_LO]);
+    WG(d, regCP_HQD_PQ_RPTR_REPORT_ADDR_HI, g_mqd[MQD_CP_HQD_PQ_RPTR_REPORT_ADDR_HI]);
+    WG(d, regCP_HQD_PQ_CONTROL, g_mqd[MQD_CP_HQD_PQ_CONTROL]);
+    WG(d, regCP_HQD_PQ_WPTR_POLL_ADDR, g_mqd[MQD_CP_HQD_PQ_WPTR_POLL_ADDR_LO]);
+    WG(d, regCP_HQD_PQ_WPTR_POLL_ADDR_HI, g_mqd[MQD_CP_HQD_PQ_WPTR_POLL_ADDR_HI]);
+    WG(d, regCP_HQD_PQ_DOORBELL_CONTROL, g_mqd[MQD_CP_HQD_PQ_DOORBELL_CONTROL]);
+    WG(d, regCP_HQD_PERSISTENT_STATE, g_mqd[MQD_CP_HQD_PERSISTENT_STATE]);
+    WG(d, regCP_HQD_ACTIVE, g_mqd[MQD_CP_HQD_ACTIVE]);
+    grbm_select(d, 0, 0, 0, 0);
+}
+
 /* gfx_v11_0_ring_test_ring for the KIQ: SCRATCH_REG0 through WRITE_DATA */
 static int kiq_ring_test(rdna3_dev *d, rdna3_mec_ring *kiq)
 {
@@ -1019,10 +1168,33 @@ int gfx11_kiq_start(rdna3_dev *d, rdna3_mec_ring *kiq)
     int ret;
     if (!d->doorbell_ok || kiq->rb.kind != RD_RING_KIQ)
         return RDNA3_EINVAL;
+    if (kiq->me == 3) {
+        /* mes_v11_0_kiq_hw_init (PSP loaded both MES pipes); the MEC runs
+         * the KCQs (gfx_v11_0_cp_resume enables it first) */
+        cp_compute_enable(d, 1);
+        mes_enable(d, kiq->mes_uc_start);
+        tmp = RG(d, regRLC_CP_SCHEDULERS) & 0xffffff00;   /* mes_v11_0_kiq_setting */
+        tmp |= (kiq->me << 5) | (kiq->pipe << 3) | kiq->queue;
+        WG(d, regRLC_CP_SCHEDULERS, tmp);
+        WG(d, regRLC_CP_SCHEDULERS, tmp | 0x80);
+        mes_mqd_init(d, kiq);
+        mes_queue_init_register(d, kiq);
+        kiq->mapped = 1;
+        kiq->rb.wptr = 0;
+        ret = kiq_ring_test(d, kiq);
+        if (ret)
+            return ret;
+        kiq->rb.ready = 1;
+        RLOG(d, "KIQ: MES me 3 pipe 1 up (start 0x%llx/0x%llx), doorbell 0x%x, ring test passed",
+             (unsigned long long)kiq->mes_uc_start[0], (unsigned long long)kiq->mes_uc_start[1],
+             kiq->rb.doorbell);
+        return RDNA3_OK;
+    }
     cp_compute_enable(d, 1);
     /* gfx_v11_0_kiq_setting: tell the RLC which queue is the KIQ */
     tmp = RG(d, regRLC_CP_SCHEDULERS) & 0xffffff00;
     tmp |= (kiq->me << 5) | (kiq->pipe << 3) | kiq->queue;
+    WG(d, regRLC_CP_SCHEDULERS, tmp);
     WG(d, regRLC_CP_SCHEDULERS, tmp | 0x80);
     /* gfx_v11_0_kiq_init_queue */
     compute_mqd_init(d, kiq);
@@ -1222,6 +1394,8 @@ void gfx11_mec_stop(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq)
         kcq->rb.ready = 0;
     }
     cp_compute_enable(d, 0);
+    if (kiq && kiq->me == 3)
+        mes_disable(d);   /* mes_v11_0_kiq_hw_fini */
     if (kiq) {
         kiq->rb.ready = 0;
         kiq->mapped = 0;

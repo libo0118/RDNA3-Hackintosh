@@ -735,7 +735,18 @@ bool RDNA3Bringup::hwInit()
             if (fKiq && fKcq) {
                 bzero(fKiq, sizeof(*fKiq));
                 bzero(fKcq, sizeof(*fKcq));
-                kr = gfx11_mec_ring_init(fDev, fKiq, 1, RD_KIQ_PIPE, 0, RD_DB_KIQ, 0);
+                /* GC 11: the KIQ is MES pipe 1 (amdgpu enable_mes_kiq);
+                 * the MEC KIQ ignores MAP_QUEUES on the card */
+                uint64_t mesStart[2];
+                if (gfx11_mes_from_fw(fBlobs[AMD_BLOB_MES].data, fBlobs[AMD_BLOB_MES].len,
+                                      fBlobs[AMD_BLOB_MES1].data, fBlobs[AMD_BLOB_MES1].len,
+                                      mesStart) == RDNA3_OK) {
+                    kr = gfx11_mes_kiq_ring_init(fDev, fKiq, mesStart);
+                } else {
+                    BLOG("MES firmware headers unusable: MEC KIQ (scheduling will not work)");
+                    kr = gfx11_mec_ring_init(fDev, fKiq, 1, RD_KIQ_PIPE, 0, RD_DB_KIQ, 0);
+                }
+                publish("RDNA3,KIQOnMES", fKiq->me == 3 ? 1 : 0);
                 if (!kr)
                     kr = gfx11_mec_ring_init(fDev, fKcq, 0, RD_KCQ0_PIPE, 0, RD_DB_MEC_RING0, 0);
                 if (!kr)

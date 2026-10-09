@@ -233,7 +233,19 @@ typedef struct rdna3_mec_ring {
     uint32_t me, pipe, queue;
     uint64_t mqd, eop;      /* VRAM offsets */
     int      mapped;        /* HQD active (KIQ) / mapped by the KIQ (KCQ) */
+    uint64_t mes_uc_start[2];   /* MES KIQ (me 3): scheduler / KIQ pipe start addresses */
 } rdna3_mec_ring;
+
+/* GC 11 always runs MES with the KIQ on its pipe 1 (amdgpu_discovery:
+ * enable_mes_kiq); the MEC KIQ answers a ring test but not SET_RESOURCES or
+ * MAP_QUEUES. gfx11_mes_kiq_ring_init sets the KIQ up as me 3 pipe 1 with
+ * the MES_RING1 doorbell (mes_v11_0_kiq_ring_init); gfx11_kiq_start then
+ * follows mes_v11_0_kiq_hw_init. The start addresses come from the
+ * mes_firmware_header_v1_0 of the scheduler and KIQ firmware. */
+#define RD_DB_MES_RING1 0x00C
+int  gfx11_mes_from_fw(const void *mes, uint32_t mes_len, const void *mes1, uint32_t mes1_len,
+                       uint64_t uc_start[2]);
+int  gfx11_mes_kiq_ring_init(rdna3_dev *d, rdna3_mec_ring *r, const uint64_t uc_start[2]);
 
 /* amdgpu_gfx_kiq_acquire / amdgpu_gfx_compute_queue_acquire for one MEC
  * with 4 pipes x 4 queues: the KIQ is pipe 1 queue 0, KCQ0 pipe 0 queue 0 */

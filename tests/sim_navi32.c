@@ -53,6 +53,7 @@
 #include "gen/gc_11_0_0_gfx.h"
 #include "gen/gc_11_0_0_reset.h"
 #include "gen/gc_11_0_0_rs64.h"
+#include "gen/gc_11_0_0_mes.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
@@ -144,7 +145,10 @@ typedef struct sim {
         uint32_t reg[64];     /* CP_MQD_BASE_ADDR .. CP_HQD_PQ_WPTR_HI window */
         uint64_t rptr;        /* dwords */
         int mapped_by_kiq;
-    } hqd[4][4];
+    } hqd[4][4], mes_hqd[2];   /* MEC1 4x4; MES pipes 0 (scheduler) and 1 (KIQ) */
+    /* the card: the MEC KIQ runs WRITE_DATA but stalls on SET_RESOURCES /
+     * MAP_QUEUES / UNMAP_QUEUES; GC 11 schedules through the MES KIQ */
+    unsigned mec_kiq_sched_ignored;
     unsigned kiq_maps, kiq_unmaps, mec_runs, mec_bad_queue;
     /* gfx queue mapped by the KIQ from its v11_gfx_mqd (ENGINE_SEL 4); the
      * RS64 gfx firmware fetches through CP_GFX_HQD_* then. rs64_needs_mqd
@@ -899,6 +903,8 @@ static struct hqd *hqd_sel(void)
     uint32_t me = (c & GRBM_GFX_CNTL__MEID_MASK) >> GRBM_GFX_CNTL__MEID__SHIFT;
     uint32_t pipe = (c & GRBM_GFX_CNTL__PIPEID_MASK) >> GRBM_GFX_CNTL__PIPEID__SHIFT;
     uint32_t q = (c & GRBM_GFX_CNTL__QUEUEID_MASK) >> GRBM_GFX_CNTL__QUEUEID__SHIFT;
+    if (me == 3 && pipe < 2 && q == 0)
+        return &S.mes_hqd[pipe];
     if (me != 1 || q > 3)
         return NULL;
     return &S.hqd[pipe][q];
@@ -1031,14 +1037,16 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
         case PACKET3_PREAMBLE_CNTL: case PACKET3_NOP: break;
         case PACKET3_PFP_SYNC_ME: S.cp_pfp_sync++; break;
         case PACKET3_SET_RESOURCES:
-            if (cnt == 6 && S.cp_cur_me == 1) S.set_resources_mask = PK(2) | ((uint64_t)PK(3) << 32);
+            if (S.cp_cur_me == 1) { S.mec_kiq_sched_ignored++; return rptr; }
+            if (cnt == 6 && S.cp_cur_me == 3) S.set_resources_mask = PK(2) | ((uint64_t)PK(3) << 32);
             else S.cp_bad++;
             break;
         case PACKET3_MAP_QUEUES: {
             uint32_t q = (PK(1) >> 13) & 7, pipe = (PK(1) >> 16) & 3, me = (PK(1) >> 18) & 3;
             uint32_t db = (PK(2) >> 2) & 0x3ffffff, eng = (PK(1) >> 26) & 7;
             uint64_t mqd = PK(3) | ((uint64_t)PK(4) << 32);
-            if (cnt == 5 && S.cp_cur_me == 1 && me == 0 && eng == 4) {
+            if (S.cp_cur_me == 1) { S.mec_kiq_sched_ignored++; return rptr; }
+            if (cnt == 5 && S.cp_cur_me == 3 && me == 0 && eng == 4) {
                 const uint32_t *m = (const uint32_t *)mc_ptr(mqd, 4 * RD_MQD_DWORDS);
                 uint32_t i2, dc;
                 if (!m || q || pipe || (m[128] & ~0xfffffffcu) || m[128] != (uint32_t)mqd) { S.cp_bad++; break; }
@@ -1053,7 +1061,7 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
                 S.kgq_maps++;
                 break;
             }
-            if (cnt != 5 || S.cp_cur_me != 1 || me != 1 || q > 3) { S.cp_bad++; break; }
+            if (cnt != 5 || S.cp_cur_me != 3 || me != 1 || q > 3) { S.cp_bad++; break; }
             if (!(S.set_resources_mask & (1ull << (pipe * 8 + q)))) { S.mec_bad_queue++; break; }
             if (!hqd_load_mqd(&S.hqd[pipe][q], mqd, db)) { S.cp_bad++; break; }
             S.kiq_maps++;
@@ -1062,7 +1070,8 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
         case PACKET3_UNMAP_QUEUES: {
             uint32_t db = (PK(2) >> 2) & 0x3ffffff;
             int found = 0;
-            if (cnt != 4 || S.cp_cur_me != 1) { S.cp_bad++; break; }
+            if (S.cp_cur_me == 1) { S.mec_kiq_sched_ignored++; return rptr; }
+            if (cnt != 4 || S.cp_cur_me != 3) { S.cp_bad++; break; }
             if (((PK(1) >> 26) & 7) == 4) {
                 uint32_t dc = S.reg[GCR(regCP_RB_DOORBELL_CONTROL)];
                 if (S.gfx_mapped && ((dc & CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == db) {
@@ -1176,24 +1185,30 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
 }
 
 /* a mapped MEC queue runs its PQ up to the doorbell value (dwords) */
-static void mec_run(uint32_t pipe, uint32_t q, uint64_t wptr)
+static void mec_run(uint32_t me, uint32_t pipe, uint32_t q, uint64_t wptr)
 {
-    struct hqd *h = &S.hqd[pipe][q];
+    struct hqd *h = me == 3 ? &S.mes_hqd[pipe] : &S.hqd[pipe][q];
     uint32_t ctl = HQD(h, regCP_HQD_PQ_CONTROL);
     uint32_t ndw = 2u << (ctl & CP_HQD_PQ_CONTROL__QUEUE_SIZE_MASK);
     uint64_t base = ((uint64_t)HQD(h, regCP_HQD_PQ_BASE) << 8) | ((uint64_t)HQD(h, regCP_HQD_PQ_BASE_HI) << 40);
     uint64_t rwb = HQD(h, regCP_HQD_PQ_RPTR_REPORT_ADDR) | ((uint64_t)HQD(h, regCP_HQD_PQ_RPTR_REPORT_ADDR_HI) << 32);
     uint32_t *ring = (uint32_t *)mc_ptr(base, 4ull * ndw);
-    uint32_t mec = S.reg[GCR(regCP_MEC_RS64_CNTL)];
+    uint32_t mec = S.reg[GCR(regCP_MEC_RS64_CNTL)], mes = S.reg[GCR(regCP_MES_CNTL)];
     uint8_t *wb;
     if (!(HQD(h, regCP_HQD_ACTIVE) & 1) || !ring) { S.mec_bad_queue++; return; }
-    if ((mec & CP_MEC_RS64_CNTL__MEC_HALT_MASK) || !(mec & (CP_MEC_RS64_CNTL__MEC_PIPE0_ACTIVE_MASK << pipe))) {
+    if (me == 1 && ((mec & CP_MEC_RS64_CNTL__MEC_HALT_MASK) ||
+                    !(mec & (CP_MEC_RS64_CNTL__MEC_PIPE0_ACTIVE_MASK << pipe)))) {
+        S.cp_while_halted++;
+        return;
+    }
+    if (me == 3 && ((mes & (CP_MES_CNTL__MES_HALT_MASK | (CP_MES_CNTL__MES_PIPE0_RESET_MASK << pipe))) ||
+                    !(mes & (CP_MES_CNTL__MES_PIPE0_ACTIVE_MASK << pipe)))) {
         S.cp_while_halted++;
         return;
     }
     if (S.pending_writes)
         S.unflushed_doorbells++;
-    S.cp_cur_me = 1; S.cp_cur_pipe = pipe; S.cp_cur_queue = q;
+    S.cp_cur_me = me; S.cp_cur_pipe = pipe; S.cp_cur_queue = q;
     h->rptr = cp_exec(ring, ndw - 1, h->rptr, wptr, 0);
     S.cp_cur_me = 0; S.cp_cur_pipe = 0; S.cp_cur_queue = 0;
     S.mec_runs++;
@@ -1230,10 +1245,20 @@ static void sim_doorbell(void *ctx, uint32_t index, uint64_t v)
             if ((c & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK) &&
                 ((c & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == index &&
                 (HQD(h, regCP_HQD_ACTIVE) & 1)) {
-                mec_run(p, q, v);
+                mec_run(1, p, q, v);
                 return;
             }
         }
+    for (uint32_t p = 0; p < 2; p++) {
+        struct hqd *h = &S.mes_hqd[p];
+        uint32_t c = HQD(h, regCP_HQD_PQ_DOORBELL_CONTROL);
+        if ((c & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK) &&
+            ((c & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == index &&
+            (HQD(h, regCP_HQD_ACTIVE) & 1)) {
+            mec_run(3, p, 0, v);
+            return;
+        }
+    }
     S.db_unclaimed++;
 }
 
@@ -1801,6 +1826,7 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             S.soft_resets++;
             S.cp_rptr = 0;
             memset(S.hqd, 0, sizeof(S.hqd));
+            memset(S.mes_hqd, 0, sizeof(S.mes_hqd));
             S.gfx_mapped = 0;
             *R(GCR(regCP_GFX_HQD_ACTIVE)) = 0;
             *R(GCR(regCP_GFX_MQD_BASE_ADDR)) = 0;
@@ -2699,27 +2725,44 @@ static void run(const char *fwdir)
                 CHECK(gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK && S.cp_bad == 0 &&
                       S.cp_wait_stuck == 0 && gfx11_ring_space(&dev, &gr) == gr.buf_mask);
 
-                /* KIQ (MEC1 pipe 1 queue 0) through its HQD registers, then
-                 * KCQ0 (pipe 0 queue 0) mapped by the KIQ's MAP_QUEUES; a
-                 * compute job runs the same IB through the page tables */
+                /* KIQ, then KCQ0 (MEC1 pipe 0 queue 0) mapped by the KIQ's
+                 * MAP_QUEUES; a compute job runs the same IB through the page
+                 * tables. A MEC KIQ (pipe 1) passes its ring test but stalls
+                 * on SET_RESOURCES (the card); GC 11 runs the KIQ on MES
+                 * pipe 1 (mes_v11_0_kiq_hw_init) */
                 {
                     uint32_t ibs0 = S.cp_ibs, tlb0 = S.ring_tlb_flushes, sync0 = S.cp_pfp_sync, acq0 = S.cp_acquire;
                     uint32_t fault0 = S.cp_ib_fault;   /* the gfx test faulted one IB on purpose */
-                    struct hqd *hk = &S.hqd[RD_KIQ_PIPE][0], *hc = &S.hqd[RD_KCQ0_PIPE][0];
+                    const uint64_t ucs[2] = { 0x10000, 0x20000 };
+                    struct hqd *hk = &S.mes_hqd[1], *hc = &S.hqd[RD_KCQ0_PIPE][0];
                     CHECK(gfx11_mec_ring_init(&dev, &kiq, 1, RD_KIQ_PIPE, 0, RD_DB_KIQ, 0) == RDNA3_OK);
                     CHECK(gfx11_mec_ring_init(&dev, &kcq, 0, RD_KCQ0_PIPE, 0, RD_DB_MEC_RING0, 0) == RDNA3_OK);
                     CHECK(kiq.rb.kind == RD_RING_KIQ && kcq.rb.kind == RD_RING_COMPUTE && kcq.rb.doorbell == 6);
                     CHECK(gfx11_kcq_start(&dev, &kiq, &kcq) == RDNA3_EINVAL);   /* KIQ first */
                     CHECK(gfx11_kiq_start(&dev, &kiq) == RDNA3_OK && kiq.rb.ready);
-                    CHECK((S.reg[GCR(regRLC_CP_SCHEDULERS)] & 0xff) == (0x80 | (1u << 5) | (RD_KIQ_PIPE << 3)));
+                    CHECK(S.reg[0xC000 + 0x40] == 0xDEADBEEF);
+                    CHECK(gfx11_kcq_start(&dev, &kiq, &kcq) == RDNA3_ETIME && !kcq.mapped);
+                    CHECK(S.mec_kiq_sched_ignored >= 1 && S.kiq_maps == 0);
+                    gfx11_mec_stop(&dev, &kiq, NULL);
+                    S.hqd[RD_KIQ_PIPE][0].reg[regCP_HQD_ACTIVE - HQD_FIRST] = 0;
+                    CHECK(gfx11_mes_kiq_ring_init(&dev, &kiq, ucs) == RDNA3_OK && kiq.me == 3 && kiq.pipe == 1);
+                    CHECK(kiq.rb.doorbell == RD_DB_INDEX(RD_DB_MES_RING1));
+                    S.reg[0xC000 + 0x40] = 0;
+                    CHECK(gfx11_kiq_start(&dev, &kiq) == RDNA3_OK && kiq.rb.ready);
+                    CHECK((S.reg[GCR(regRLC_CP_SCHEDULERS)] & 0xff) == (0x80 | (3u << 5) | (1u << 3)));
+                    CHECK((S.reg[GCR(regCP_MES_CNTL)] & (CP_MES_CNTL__MES_PIPE0_ACTIVE_MASK | CP_MES_CNTL__MES_PIPE1_ACTIVE_MASK)) ==
+                          (CP_MES_CNTL__MES_PIPE0_ACTIVE_MASK | CP_MES_CNTL__MES_PIPE1_ACTIVE_MASK));
+                    CHECK(!(S.reg[GCR(regCP_MES_CNTL)] & (CP_MES_CNTL__MES_HALT_MASK | CP_MES_CNTL__MES_PIPE1_RESET_MASK)));
+                    CHECK(S.reg[GCR(regCP_MES_PRGRM_CNTR_START)] == 0x20000 >> 2);   /* pipe 1 written last */
                     CHECK(!(S.reg[GCR(regCP_MEC_RS64_CNTL)] & CP_MEC_RS64_CNTL__MEC_HALT_MASK));
                     CHECK(S.reg[GCR(regCP_MEC_RS64_CNTL)] & CP_MEC_RS64_CNTL__MEC_PIPE0_ACTIVE_MASK);
                     CHECK(HQD(hk, regCP_HQD_ACTIVE) == 1 && !hk->mapped_by_kiq);
                     CHECK(HQD(hk, regCP_HQD_PQ_BASE) == (uint32_t)(rdna3_vram_mc(&dev, kiq.rb.ring) >> 8));
                     CHECK(((HQD(hk, regCP_HQD_PQ_DOORBELL_CONTROL) & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == kiq.rb.doorbell);
                     CHECK(HQD(hk, regCP_MQD_BASE_ADDR) == (uint32_t)rdna3_vram_mc(&dev, kiq.mqd));
+                    CHECK(HQD(hk, regCP_HQD_PQ_CONTROL) & CP_HQD_PQ_CONTROL__NO_UPDATE_RPTR_MASK);
                     CHECK(S.reg[GCR(regGRBM_GFX_CNTL)] == 0);   /* selection restored */
-                    CHECK(S.reg[0xC000 + 0x40] == 0xDEADBEEF && S.cp_bad == 0 && S.mec_runs == 1);
+                    CHECK(S.reg[0xC000 + 0x40] == 0xDEADBEEF && S.cp_bad == 0);
                     CHECK(gfx11_kcq_start(&dev, &kiq, &kcq) == RDNA3_OK && kcq.rb.ready && kcq.mapped);
                     CHECK(S.kiq_maps == 1 && S.set_resources_mask == 1ull && S.mec_bad_queue == 0);
                     CHECK(HQD(hc, regCP_HQD_ACTIVE) == 1 && hc->mapped_by_kiq);
