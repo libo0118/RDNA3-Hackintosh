@@ -237,6 +237,21 @@ static int syncobj_fd_to_handle(int ci, struct xnu_syncobj_handle *a)
     return 0;
 }
 
+/* The UAPI (uapi/rdna3_drm.h) answers with Linux errno numbers, as amdgpu
+ * does, since that is what RADV and libdrm compare against (-ETIME on a
+ * syncobj wait, -ECANCELED for a guilty context). On macOS a few of them
+ * have different values, so translate at the one place errno is set. */
+static int rd_errno_to_host(int e)
+{
+    switch (e) {
+    case 62:  return ETIME;         /* RD_ETIME */
+    case 89:  return ECANCELED;     /* RD_ECANCELED */
+    case 38:  return ENOSYS;        /* RD_ENOSYS */
+    case 95:  return EOPNOTSUPP;    /* RD_EOPNOTSUPP */
+    default:  return e;             /* EPERM..ENOSPC share their numbers */
+    }
+}
+
 int drm_xnu_ioctl_nr(int fd, uint32_t nr, void *arg, uint32_t size)
 {
     int ci = conn_index(fd), err;
@@ -254,7 +269,7 @@ int drm_xnu_ioctl_nr(int fd, uint32_t nr, void *arg, uint32_t size)
     if (trace())
         fprintf(stderr, "drm_xnu: fd %d ioctl nr 0x%02x size %u -> %d\n", fd, nr, size, err);
     if (err) {
-        errno = err;
+        errno = rd_errno_to_host(err);
         return -1;
     }
     return 0;

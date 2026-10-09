@@ -31,6 +31,7 @@ uapi/rdna3_drm.c  (niezależne od OS, testowane na hoście)
 | `AMDGPU_CS` | ✅ chunki IB / DEPENDENCIES / SYNCOBJ_IN/OUT / TIMELINE / BO_HANDLES; ring DMA prawdziwy od `rdna3lvl=7` (SDMA0, IB w VMID pliku), GFX/COMPUTE tylko ogłaszane (`rdna3enum`) |
 | `WAIT_CS`, `WAIT_FENCES`, `FENCE_TO_HANDLE` (syncobj), `BO_LIST` | ✅ prawdziwe fence'y SDMA; termin jako CLOCK_MONOTONIC (`mach_continuous_time`), limit 10 s |
 | `GEM_USERPTR` | ✅ `IOMemoryDescriptor::withAddressRange` nad taskiem klienta, `prepare()` na czas życia BO, strony przez `IODMACommand`; bez `mmap` (`-EPERM` jak amdgpu); `amdgpu_create_bo_from_user_mem` w teście loopback |
+| (wszystkie) | errno w numeracji Linuksa z UAPI; `drm_xnu` tłumaczy na macOS (`ETIME` 62→92, `ENOSYS` 38→78, `EOPNOTSUPP` 95→102), bo RADV porównuje z `-ETIME`/`-ECANCELED` hosta |
 | `AMDGPU_CTX_OP_QUERY_STATE/STATE2` | ✅ RESET / VRAMLOST / GUILTY z resetów i błędów stron (`vm_query`), guilty → `CS` = `-ECANCELED` |
 | `AMDGPU_CS` chunk `FENCE` (user fence) | 🟡 przyjmowany i pomijany: RADV nie czyta `fence_map`, używa syncobj i `WAIT_CS` |
 
