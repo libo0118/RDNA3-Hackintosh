@@ -8,7 +8,7 @@ vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
       them), SecureBootModel Disabled, picker timeout
   vmtool.py romcheck FILE        a PCI option ROM with a UEFI (GOP) image?
   vmtool.py unzip ZIP DIR        extract (keeps the tree)
-  vmtool.py serve DIR PORT       HTTP on 127.0.0.1: GET files, PUT into reports/
+  vmtool.py serve DIR PORT [UP]  HTTP on 127.0.0.1: GET files, PUT into UP (DIR/reports)
   vmtool.py stopkeys [KBD...]    return on the power button, or Esc x3 on a keyboard
   vmtool.py evdev                keyboards / mice as evdev nodes ("kbd PATH")
   vmtool.py usbhid               USB keyboards / mice: "vendor product name"
@@ -170,20 +170,28 @@ class Share(http.server.SimpleHTTPRequestHandler):
             self.send_error(403)
             return
         n = int(self.headers.get("Content-Length", "0"))
-        os.makedirs("reports", exist_ok=True)
-        with open(os.path.join("reports", name), "wb") as f:
+        os.makedirs(UPLOADS, exist_ok=True)
+        with open(os.path.join(UPLOADS, name), "wb") as f:
             while n > 0:
                 chunk = self.rfile.read(min(n, 1 << 20))
                 if not chunk:
                     break
                 f.write(chunk)
                 n -= len(chunk)
-        print("received reports/" + name, flush=True)
+        print("received " + os.path.join(UPLOADS, name), flush=True)
         self.send_response(201)
         self.end_headers()
 
 
+UPLOADS = "reports"
+
+
 def cmd_serve(argv):
+    """serve DIR PORT [UPLOAD_DIR]: GET from DIR, PUT /reports/<name> into
+    UPLOAD_DIR (default DIR/reports)"""
+    global UPLOADS
+    if len(argv) > 2:
+        UPLOADS = os.path.abspath(argv[2])
     os.chdir(argv[0])
     # the VM reaches the host's loopback as 10.0.2.2 (QEMU user networking)
     http.server.ThreadingHTTPServer(("127.0.0.1", int(argv[1])), Share).serve_forever()

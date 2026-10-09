@@ -289,7 +289,7 @@ cmd_window() {
     [ -f "$INSTALLER" ] && QARGS+=(-drive id=InstallMedia,if=none,format=raw,file="$INSTALLER"
                                   -device ide-hd,bus=sata.3,drive=InstallMedia)
     QARGS+=(-device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 -device vmware-svga)
-    $VMTOOL serve "$WORK/share" 8000 >"$WORK/share.log" 2>&1 &
+    $VMTOOL serve "$WORK/share" 8000 "$WORK/reports" >"$WORK/share.log" 2>&1 &
     local srv=$!
     trap 'kill $srv 2>/dev/null' EXIT
     say "macOS in a window (the card stays with Linux). In the macOS Terminal:"
@@ -421,10 +421,13 @@ restore() {
     done
     # does amdgpu drive the card again? (otherwise the screen stays black)
     sleep 12
-    if journalctl -k --since "$since" --no-pager 2>/dev/null |
-       grep -q -E "DMCUB error|failed to blank crtc|amdgpu.*(probe|init).*fail|GPU reset failed|ring .* test failed"; then
+    # (read it whole first: with pipefail, grep -q closing the pipe early
+    # made the check report "no errors")
+    local klog
+    klog=$(journalctl -k --since "$since" --no-pager 2>/dev/null || true)
+    if grep -q -E "DMCUB error|failed to blank crtc|amdgpu.*(probe|init).*fail|GPU reset failed|ring .* test failed" <<<"$klog"; then
         echo "== amdgpu cannot drive the card after the VM - rebooting cleanly (the reports are saved)"
-        journalctl -k --since "$since" --no-pager | grep -i amdgpu | tail -20
+        grep -i amdgpu <<<"$klog" | tail -20 || true
         sync; systemctl reboot; return 0
     fi
     for d in /sys/class/vtconsole/vtcon*/bind; do echo 1 > "$d" 2>/dev/null || true; done
@@ -490,7 +493,7 @@ cmd__passthrough() {
     detach || exit 1
 
     local srv inh pk tm qpid
-    $VMTOOL serve "$WORK/share" 8000 >>"$WORK/share.log" 2>&1 & srv=$!
+    $VMTOOL serve "$WORK/share" 8000 "$WORK/reports" >>"$WORK/share.log" 2>&1 & srv=$!
     systemd-inhibit --what=handle-power-key --who=rdna3vm --why="the power button stops the VM" --mode=block sleep infinity & inh=$!
     $VMTOOL stopkeys "${KBDS[@]}" & pk=$!
     local limit=${RDNA3VM_TIMEOUT:-$TIMEOUT_MIN}
