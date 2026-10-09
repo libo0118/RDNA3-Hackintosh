@@ -48,7 +48,7 @@ it together with a description of the symptom. Module details are in `STAGE1`–
 
 | Step | Boot-args (append) | What it does | Check (`11-ioreg-props.txt`, `20-log-rdna3.txt`) | Risk |
 |---|---|---|---|---|
-| 1 | `rdna3lvl=1` | maps BAR5, waits for PSP, reads the VRAM size | `RDNA3,VRAMSizeMB = 16384`, no `MMIO reads all-ones` | low |
+| 1 | `rdna3lvl=1` | maps BAR5, waits for PSP, reads the VRAM size | `RDNA3,VRAMSizeMB` = Linux's `mem_info_vram_total` (16368 on the RX 7800 XT), no `MMIO reads all-ones` | low |
 | 2 | `rdna3lvl=2` | IP discovery table, reading DCN heads, VBIOS, display paths, DP AUX/EDID | `IP discovery ... ok`, GC 11.0.3; `RDNA3,DisplayHeads = 1`; `RDNA3,DisplayPath0` (e.g. `DP-1 UNIPHYA DDC1 HPD1`); `RDNA3,Connector0,Monitor` = monitor name; `RDNA3,Head0EdidMode`; `RDNA3,AtomCommandTables` | low: writes only to read windows and AUX registers |
 | 3 | `rdna3lvl=3` | first GC register from discovery | `GRBM_STATUS`, `RDNA3,GBAddrConfig`, `RDNA3,ActiveCUs = 60` | low |
 | 4 | `rdna3lvl=4` | PSP: bootloader, sOS, TMR, loading all firmware | `RDNA3,Stage2 = PSP up, firmware loaded`, `sOS running`, 29× `LOAD_IP_FW ... ok`, `RLC autoload started` | medium: first writes to PSP |

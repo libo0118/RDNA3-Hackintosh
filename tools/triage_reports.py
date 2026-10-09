@@ -28,7 +28,10 @@ def signed(v):
 
 # (key, minimum rdna3lvl, extra boot-arg or None, check, what is expected)
 CHECKS = [
-    ("VRAMSizeMB", 1, None, lambda v: v == 16384, "16384"),
+    # RCC_CONFIG_MEMSIZE, the value amdgpu also reports (mem_info_vram_total):
+    # 16368 on the RX 7800 XT, 16 MiB below the 16 GiB on the box
+    ("VRAMSizeMB", 1, None, lambda v: v == REF_VRAM_MB if REF_VRAM_MB else v in (16368, 16384),
+     "Linux's mem_info_vram_total (linux-reference), else 16368"),
     ("C2PMSG33", 1, None, lambda v: v != 0 and v != 0xFFFFFFFF, "IFWI ready, not 0 / all-ones"),
     ("IPDiscovery", 2, None, lambda v: bool(v), "present (IP list)"),
     ("DisplayHeads", 2, None, lambda v: v >= 1, ">= 1"),
@@ -52,6 +55,21 @@ CHECKS = [
     ("VMFaults", 7, None, lambda v: v == 0, "0"),
     ("GPUResets", 4, None, lambda v: v == 0, "0"),
 ]
+
+REF_VRAM_MB = 0
+
+
+def load_linux_reference(d):
+    """mem_info_vram_total from <reports>/linux-reference/sysfs-pm.txt"""
+    global REF_VRAM_MB
+    try:
+        txt = open(os.path.join(d, "linux-reference", "sysfs-pm.txt"), errors="replace").read()
+    except OSError:
+        return
+    m = re.search(r"== mem_info_vram_total\s+(\d+)", txt)
+    if m:
+        REF_VRAM_MB = int(m.group(1)) >> 20
+
 
 PROP = re.compile(r'"RDNA3,([A-Za-z0-9,]+)"\s*=\s*(.*)$')
 
@@ -114,6 +132,8 @@ def report(path, show_all):
         props.get("Level", "?"), lvl, props.get("Stage2", "-"), props.get("Rings", "-")))
     first_fail = None
     for key, minlvl, need, check, want in CHECKS:
+        if key == "VRAMSizeMB" and REF_VRAM_MB:
+            want = "%d, as Linux" % REF_VRAM_MB
         if lvl < minlvl or (need and need not in args):
             if show_all:
                 print("   --   %-20s (not at this level)" % key)
@@ -177,6 +197,7 @@ def main():
         sys.exit(__doc__)
     d = sys.argv[1]
     show_all = "--all" in sys.argv
+    load_linux_reference(d)
     failed = False
     reports = sorted(glob.glob(os.path.join(d, "rdna3-report-*.tar.gz")), key=os.path.getmtime)
     if not reports:
