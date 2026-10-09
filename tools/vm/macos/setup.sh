@@ -24,7 +24,12 @@ for k in "$D"/kexts/*.kext; do
     chown -R root:wheel "/Library/Extensions/$n"
     chmod -R go-w "/Library/Extensions/$n"
     chmod 755 "/Library/Extensions/$n/Contents/MacOS/"* 2>/dev/null || true
-    echo "   $n"
+    # ad-hoc signature over the final bundle (firmware included): without one
+    # kernelmanagerd refuses it ("invalid codeful kernel extension"), and SIP
+    # off lets an ad-hoc signed kext into the Auxiliary KC
+    codesign --force --deep --sign - "/Library/Extensions/$n" >/dev/null 2>&1 ||
+        echo "   WARNING: codesign failed for $n"
+    echo "   $n ($(codesign -dv "/Library/Extensions/$n" 2>&1 | grep -o 'Signature=.*' || echo unsigned))"
 done
 chmod +x "$D/bin/"* "$D/tools/macos/"*.sh "$D/autoreport.sh" 2>/dev/null || true
 

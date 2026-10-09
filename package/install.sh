@@ -92,6 +92,11 @@ run cp "$ROOT/metal/rdna3mtl-allow.txt" "$GB/"
 run chown -R root:wheel "$DIR" "$GB/rdna3mtl-allow.txt"
 [ -d "$GB/RDNA3MTLDriver.bundle" ] && run chown -R root:wheel "$GB/RDNA3MTLDriver.bundle"
 
+# ad-hoc signatures over the final bundles (the firmware went into
+# RDNA3Accel's Resources above): kernelmanagerd refuses unsigned kexts
+for k in RDNA3Accel RDNA3Accelerator RDNA3Framebuffer; do
+    [ -d "/Library/Extensions/$k.kext" ] && run codesign --force --deep --sign - "/Library/Extensions/$k.kext"
+done
 run kmutil install --update-all --check-rebuild || run kmutil load -p /Library/Extensions/RDNA3Accel.kext || true
 echo
 echo "Installed. Reboot, approve the extension in System Settings > Privacy & Security"
