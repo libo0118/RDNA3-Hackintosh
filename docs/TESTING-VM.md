@@ -18,6 +18,9 @@ What it looks like in practice:
 the macOS installation). After that each step takes about 3 minutes.
 
 > During a step Linux has no display, and the keyboard and mouse belong to macOS.
+> **Every step logs you out of the Linux desktop**: the desktop session holds the
+> card, so the script stops the display manager to hand the card over and starts
+> it again afterwards. You come back to the login screen; that is expected.
 > Save your open work beforehand. You will not get stuck without a display, see
 > [Emergency exit](#emergency-exit): **both Ctrl keys at once, then Esc 3×**.
 
