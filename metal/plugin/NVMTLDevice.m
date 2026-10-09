@@ -172,6 +172,7 @@ static bool nvmtl_accel_armed(void)
 }
 #include <dlfcn.h>
 #include <libgen.h>
+#if RDNA3MTL_NV_VIDEO_CODECS
 static void nvmtl_nvdec_register(void)
 {
     static dispatch_once_t once;
@@ -278,6 +279,7 @@ static void nvmtl_nvenc_hevc_register(void)
               st ? "NOT registered" : "REGISTERED", me, (int)st, path);
     });
 }
+#endif /* RDNA3MTL_NV_VIDEO_CODECS */
 static bool nvmtl_process_is_allowed(void)
 {
     const char *me = getprogname();
@@ -355,10 +357,12 @@ static void nvmtl_install_hw_resource_pools(id dev)
         nvlog("  NVK did not come up in this process - refusing to be the Metal device for %s", getprogname());
         return nil;
     }
+#if RDNA3MTL_NV_VIDEO_CODECS
     nvmtl_nvdec_register();
     nvmtl_nvenc_register();
     nvmtl_nvdec_hevc_register();
     nvmtl_nvenc_hevc_register();
+#endif
     SEL il = sel_registerName("initLimits");
     if ([self respondsToSelector:il]) {
         ((void (*)(id, SEL))objc_msgSend)(self, il);
@@ -394,16 +398,16 @@ static void nvmtl_install_hw_resource_pools(id dev)
 - (NSString *)vendorName {
     static NSMutableSet *seen; static dispatch_once_t once; dispatch_once(&once, ^{ seen = [NSMutableSet new]; });
     Dl_info i = {0}; const char *who = dladdr(__builtin_return_address(0), &i) && i.dli_fname ? i.dli_fname : "?";
-    @synchronized(seen) { NSString *k = @(who); if (![seen containsObject:k]) { [seen addObject:k]; nvlog("vendorName -> NVIDIA (asked by %s)", who); } }
-    return @"NVIDIA";
+    @synchronized(seen) { NSString *k = @(who); if (![seen containsObject:k]) { [seen addObject:k]; nvlog("vendorName -> %s (asked by %s)", RDNA3MTL_VENDOR_NAME, who); } }
+    return @RDNA3MTL_VENDOR_NAME;
 }
 - (NSString *)name {
     static int vk = 0; if (!vk) { vk = 1; nvmtl_vk_init(); }
     const char *vkname = nvmtl_vk_device_name();
-    NSString *full = [NSString stringWithUTF8String:(vkname ? vkname : "NVIDIA GPU")];
-    NSRange cut = [full rangeOfString:@" (NVK "];
+    NSString *full = [NSString stringWithUTF8String:(vkname ? vkname : RDNA3MTL_FALLBACK_NAME)];
+    NSRange cut = [full rangeOfString:@RDNA3MTL_VK_NAME_CUT];
     NSString *marketing = (cut.location != NSNotFound) ? [full substringToIndex:cut.location] : full;
-    return [NSString stringWithFormat:@"%@ (NVMTL over %@)", marketing, full];
+    return [NSString stringWithFormat:@"%@ (" RDNA3MTL_TAG " over %@)", marketing, full];
 }
 - (id<MTLCommandQueue>)newCommandQueue { return [self newCommandQueueWithMaxCommandBufferCount:64]; }
 - (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)n {

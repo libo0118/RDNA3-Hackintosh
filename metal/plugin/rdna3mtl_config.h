@@ -28,8 +28,19 @@
 /* sysctl the accelerator kext sets once WindowServer may use it */
 #define RDNA3MTL_ARMED_SYSCTL   "debug.rdna3accelfb"
 
+/* What the device reports. RADV names the device "AMD Radeon RX 7800 XT
+ * (RADV NAVI32)"; the marketing name is the part before " (RADV ". */
+#define RDNA3MTL_VENDOR_NAME    "AMD"
+#define RDNA3MTL_FALLBACK_NAME  "AMD Radeon GPU"
+#define RDNA3MTL_VK_NAME_CUT    " (RADV "
+#define RDNA3MTL_TAG            "RDNA3MTL"
+
 /* NVIDIA-only lanes stay compiled but can never find their pieces on an
  * AMD install: NVIDIAShared (vendor compiler, env-gated anyway), the NVK
- * SASS dispatch hook (falls back to SPIR-V), NVDEC/NVENC dylibs. */
+ * SASS dispatch hook (falls back to SPIR-V). The NVDEC/NVENC VideoToolbox
+ * registrations are off: there is no such hardware, and a hardware codec
+ * advertised with rating 1000 must never reach VideoToolbox (VCN 4.0
+ * would be the AMD equivalent, not ported). */
+#define RDNA3MTL_NV_VIDEO_CODECS 0
 
 #endif

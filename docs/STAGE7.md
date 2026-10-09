@@ -50,8 +50,17 @@ make -C accel check           # sprawdza, że nie został żaden metaclass NV*
    karta na ekranie. Oczekiwane: `ioreg -c RDNA3Accelerator` pokazuje usługę,
    log `IOGraphicsAccelerator2::start -> 1`.
 2. `populateAccelConfig`: wartości (flagi, limity tekstur) są z NVIDII.
-   RDNA3 obsługuje 16384×16384, więc limity pasują; resztę trzeba porównać
-   z tym, czego oczekuje wtyczka.
+   RDNA3 obsługuje 16384×16384, więc limity pasują. Znaczenie pozostałych
+   pól `IOAccelConfig` nie jest opisane (Apple ich nie publikuje), a te
+   wartości działały na sprzęcie w NullMoth, więc zostają, dopóki test na
+   karcie nie pokaże różnicy. Akcelerator loguje, co rodzina wpisała przed
+   nami (`cfg+0x..`), do porównania.
+4. Wtyczka Metal w buildzie AMD: `vendorName` zwraca `AMD`, nazwa urządzenia
+   to część nazwy RADV przed ` (RADV ` (np. „AMD Radeon RX 7800 XT
+   (RDNA3MTL over AMD Radeon RX 7800 XT (RADV NAVI32))”), a rejestracja
+   koderów NVDEC/NVENC w VideoToolbox jest wyłączona
+   (`RDNA3MTL_NV_VIDEO_CODECS 0`). Odpowiednikiem byłby VCN 4.0, nie
+   przeniesiony.
 3. `RDNA3Framebuffer` (Etap 3): bez niego display machine nie ma głowic,
    więc `debug.rdna3accelfb=1` nie ma czego zarejestrować i WindowServer nie
    komponuje na tej karcie.
