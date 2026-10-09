@@ -176,11 +176,11 @@ static int setup_pptable(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios)
     s->platform_caps = rd32(hdr + RD_SMU_PP_PLATFORM_CAPS_OFF);
     s->thermal_controller = hdr[RD_SMU_PP_THERMAL_CTRL_OFF];
     s->software_shutdown_temp = rd16(hdr + RD_SMU_PP_SHUTDOWN_TEMP_OFF);
-    if (s->pp_frev != RD_SMU_PP_TABLE_FORMAT_REVISION) {
-        RERR(d, "SMU: powerplay table format %u.%u, expected %u.x", s->pp_frev, s->pp_crev,
-             RD_SMU_PP_TABLE_FORMAT_REVISION);
-        return RDNA3_EINVAL;
-    }
+    /* amdgpu never checks the format (smu_v13_0_0_check_powerplay_table):
+     * PMFW 80.92 on the RX 7800 XT reports 20.0 for the same layout */
+    if (s->pp_frev != RD_SMU_PP_TABLE_FORMAT_REVISION)
+        RLOG(d, "SMU: powerplay table format %u.%u (header documents %u.x), used as is",
+             s->pp_frev, s->pp_crev, RD_SMU_PP_TABLE_FORMAT_REVISION);
     if (rd16(hdr) < RD_SMU_PP_SMC_PPTABLE_OFF) {
         RERR(d, "SMU: powerplay table too short (%u bytes)", rd16(hdr));
         return RDNA3_EINVAL;

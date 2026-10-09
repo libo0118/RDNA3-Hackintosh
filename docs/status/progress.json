@@ -1,10 +1,10 @@
 {
  "amdgpu": {
   "works": 80,
-  "ported": 226,
+  "ported": 227,
   "total": 1291,
   "works_pct": 6.2,
-  "ported_pct": 17.5,
+  "ported_pct": 17.6,
   "groups": [
    {
     "name": "PSP 13",
@@ -143,14 +143,14 @@
      "5"
     ],
     "works": 0,
-    "ported": 20,
-    "todo": 121,
+    "ported": 21,
+    "todo": 120,
     "items": {
      "convert_to_vddc": "todo",
      "smu_v13_0_0_allocate_dpm_context": "todo",
      "smu_v13_0_0_append_powerplay_table": "ported",
      "smu_v13_0_0_check_ecc_table_support": "todo",
-     "smu_v13_0_0_check_powerplay_table": "todo",
+     "smu_v13_0_0_check_powerplay_table": "ported",
      "smu_v13_0_0_enable_gfx_features": "todo",
      "smu_v13_0_0_enable_mgpu_fan_boost": "todo",
      "smu_v13_0_0_force_clk_levels": "todo",

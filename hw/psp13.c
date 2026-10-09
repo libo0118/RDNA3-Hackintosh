@@ -115,7 +115,8 @@ int psp13_scpm_enabled(rdna3_dev *d, uint32_t *status)
             return 0;
         }
         rdna3_vram_mm_read(d, hdr_pos + (ent[1] & 0xffff), status, 1);
-        RLOG(d, "PSP: runtime database: SCPM status %u", *status);
+        /* psp_sw_init: anything but SCPM_DISABLE (0) counts as enabled */
+        RLOG(d, "PSP: runtime database: SCPM status 0x%x", *status);
         return *status != 0;
     }
     return 0;

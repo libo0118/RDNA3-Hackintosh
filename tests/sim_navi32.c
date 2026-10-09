@@ -178,6 +178,7 @@ typedef struct sim {
         uint64_t enabled;
         int pptable_written, btc, bad_board, unload;
         int scpm;             /* the PSP handed the PPTable over; mask/table writes refused */
+        uint8_t pp_frev;      /* combo table format; 0 = the header's 15 */
         unsigned scpm_violations;
         uint32_t hard_min[PPCLK_COUNT];
         unsigned unflushed, bad_addr, pcie_overrides, soft_limits, xfers;
@@ -484,7 +485,7 @@ static void make_combo_pptable(uint8_t *out)
     PPTable_t *pp = (PPTable_t *)(out + RD_SMU_PP_SMC_PPTABLE_OFF);
     memset(out, 0, RD_SMU_COMBO_PPTABLE_SIZE);
     put16(out, RD_SMU_PP_SMC_PPTABLE_OFF + sizeof(PPTable_t));
-    out[2] = RD_SMU_PP_TABLE_FORMAT_REVISION; out[3] = 0;
+    out[2] = S.smu.pp_frev ? S.smu.pp_frev : RD_SMU_PP_TABLE_FORMAT_REVISION; out[3] = 0;
     out[4] = 2;                                  /* table_revision */
     put16(out + 6, RD_SMU_PP_SMC_PPTABLE_OFF);   /* table_size */
     put32(out + RD_SMU_PP_PLATFORM_CAPS_OFF, RD_SMU_PP_PLATFORM_CAP_POWERPLAY |
@@ -2123,9 +2124,11 @@ static void run(const char *fwdir)
             CHECK(psp13_scpm_enabled(&dev, &st) == 1 && st == 1);
             memset(&S.smu.hard_min, 0, sizeof(S.smu.hard_min));
             S.smu.scpm = 1; S.smu.scpm_violations = 0;
+            S.smu.pp_frev = 20;                                     /* PMFW 80.92 on the card */
             S.smu.pptable_written = 1; S.smu.btc = 0;               /* written by the PSP */
             CHECK(smu13_pm_init(&dev, &smu, &vb, RD_SMU_FEATURES_SAFE, 3, 6, 1) == RDNA3_OK);
             CHECK(S.smu.scpm_violations == 0 && S.smu.btc && smu.scpm && !smu.board_table_appended);
+            CHECK(smu.pp_frev == 20 && smu.platform_caps == 0x19);
             CHECK(smu.enabled & RD_SMU_FEATURE(FEATURE_DPM_UCLK_BIT));
             CHECK(smu.uclk.count == 4 && S.smu.hard_min[PPCLK_UCLK] == 1218);
             CHECK(smu.fclk.count == 2 && S.smu.hard_min[PPCLK_FCLK] == 1800);
@@ -2133,7 +2136,7 @@ static void run(const char *fwdir)
             memset(&S.smu.hard_min, 0, sizeof(S.smu.hard_min));
             CHECK(smu13_pm_init(&dev, &smu, &vb, RD_SMU_FEATURES_AMDGPU, 3, 6, 1) == RDNA3_OK);
             CHECK(S.smu.hard_min[PPCLK_UCLK] == 0 && S.smu.scpm_violations == 0);
-            S.smu.scpm = 0;
+            S.smu.scpm = 0; S.smu.pp_frev = 0;
             memset(db, 0, 0x300);
         }
 
