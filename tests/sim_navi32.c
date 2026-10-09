@@ -180,7 +180,8 @@ typedef struct sim {
     } smu;
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
     int      sdma_hang;              /* the engine stopped consuming its ring */
-    uint32_t harvest_wgp[8][2];      /* INACTIVE_WGPS per SE/SA (CC_GC_SHADER_ARRAY_CONFIG) */
+    uint32_t harvest_wgp[8][2];
+    uint64_t tsc;                    /* GOLDEN_TSC: +4 on every access of either half */      /* INACTIVE_WGPS per SE/SA (CC_GC_SHADER_ARRAY_CONFIG) */
     unsigned sdma_resets, sdma_resets_unfrozen;
 } sim;
 
@@ -1673,6 +1674,14 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
             return (S.reg[dw] & ~DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_MASK) | (b << 8);
         }
     }
+    if (dw == 0x16A00u + regGOLDEN_TSC_COUNT_UPPER) {
+        S.tsc += 4;
+        return (uint32_t)(S.tsc >> 32);
+    }
+    if (dw == 0x16A00u + regGOLDEN_TSC_COUNT_LOWER) {
+        S.tsc += 4;
+        return (uint32_t)S.tsc;
+    }
     if (dw == GCR(regCC_GC_SHADER_ARRAY_CONFIG)) {
         /* per SE/SA: the one GRBM_GFX_INDEX selects */
         uint32_t sel = S.reg[GCR(regGRBM_GFX_INDEX)];
@@ -2721,6 +2730,18 @@ static void run(const char *fwdir)
               conn[0].max_link_rate == 0x1e && conn[0].max_lane_count == 4 && conn[0].edid_len == 256);
         CHECK(S.aux_bad == 0);
     }
+
+    /* GPU timestamp: a carry between the two reads must not tear it */
+    S.tsc = 0xFFFFFFF4ull;
+    CHECK(rdna3_gpu_clock_counter(&dev) == 0x100000004ull);
+    S.tsc = 0x500000000ull;
+    CHECK(rdna3_gpu_clock_counter(&dev) == 0x500000008ull);
+
+    /* chip revision from the NBIO strap, not the PCI revision */
+    S.reg[NBIO_B2 + regRCC_STRAP0_RCC_DEV0_EPF0_STRAP0] = 0x02000000u | 0x1234u;
+    CHECK(rdna3_nbio_rev_id(&dev) == 2);
+    S.reg[NBIO_B2 + regRCC_STRAP0_RCC_DEV0_EPF0_STRAP0] = 0;
+    CHECK(rdna3_nbio_rev_id(&dev) == 0);
 
     /* harvesting: one SA, one RB and one WGP fused off */
     {

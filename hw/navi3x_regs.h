@@ -114,4 +114,16 @@
 #define KFD_MMIO_REMAP_HDP_MEM_FLUSH_CNTL 0
 #define KFD_MMIO_REMAP_HDP_REG_FLUSH_CNTL 4
 
+/* NBIO 4.3 strap with the chip revision (nbio_v4_3_get_rev_id) */
+#define regRCC_STRAP0_RCC_DEV0_EPF0_STRAP0            0x0016
+#define regRCC_STRAP0_RCC_DEV0_EPF0_STRAP0_BASE_IDX   2
+#define RCC_STRAP0_RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0_MASK   0x0F000000u
+#define RCC_STRAP0_RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0__SHIFT 24
+
+/* SMUIO 13.0.6 GOLDEN_TSC: the 100 MHz GPU timestamp (gfx_v11_0_get_gpu_clock_counter) */
+#define regGOLDEN_TSC_COUNT_UPPER            0x002d
+#define regGOLDEN_TSC_COUNT_UPPER_BASE_IDX   1
+#define regGOLDEN_TSC_COUNT_LOWER            0x002e
+#define regGOLDEN_TSC_COUNT_LOWER_BASE_IDX   1
+
 #endif /* NAVI3X_REGS_H */

@@ -167,7 +167,13 @@ void rdna3_vram_mm_read(rdna3_dev *d, uint64_t off, uint32_t *dst, uint32_t dwor
 void rdna3_doorbell_wr64(rdna3_dev *d, uint32_t index, uint64_t v);
 
 /* ---- NBIO / HDP ---- */
-void rdna3_nbio_remap_hdp(rdna3_dev *d);   /* nbio_v4_3_set_reg_remap + remap_hdp_registers */
+void rdna3_nbio_remap_hdp(rdna3_dev *d);
+/* nbio_v4_3_get_rev_id: the chip revision from the NBIO strap (not the PCI
+ * revision); DEV_INFO's external_rev is this + 0x20 on GC 11.0.3 */
+uint32_t rdna3_nbio_rev_id(rdna3_dev *d);
+/* gfx_v11_0_get_gpu_clock_counter: GOLDEN_TSC, upper read twice so a carry
+ * between the two halves cannot tear the value (AMDGPU_INFO_TIMESTAMP) */
+uint64_t rdna3_gpu_clock_counter(rdna3_dev *d);   /* nbio_v4_3_set_reg_remap + remap_hdp_registers */
 void rdna3_hdp_flush(rdna3_dev *d);        /* amdgpu_hdp_generic_flush */
 void rdna3_hdp_invalidate(rdna3_dev *d);   /* no-op on HDP 6.0, kept for symmetry */
 

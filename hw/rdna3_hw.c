@@ -322,3 +322,22 @@ void rdna3_hdp_invalidate(rdna3_dev *d)
 {
     (void)d;
 }
+
+uint32_t rdna3_nbio_rev_id(rdna3_dev *d)
+{
+    uint32_t v = RREG32_SOC15(d, NBIO, 0, regRCC_STRAP0_RCC_DEV0_EPF0_STRAP0);
+    if (v == 0xffffffffu)
+        return 0;
+    return (v & RCC_STRAP0_RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0_MASK) >>
+           RCC_STRAP0_RCC_DEV0_EPF0_STRAP0__STRAP_ATI_REV_ID_DEV0_F0__SHIFT;
+}
+
+uint64_t rdna3_gpu_clock_counter(rdna3_dev *d)
+{
+    uint64_t hi_pre = RREG32_SOC15(d, SMUIO, 0, regGOLDEN_TSC_COUNT_UPPER);
+    uint64_t lo = RREG32_SOC15(d, SMUIO, 0, regGOLDEN_TSC_COUNT_LOWER);
+    uint64_t hi_after = RREG32_SOC15(d, SMUIO, 0, regGOLDEN_TSC_COUNT_UPPER);
+    if (hi_pre != hi_after)
+        lo = RREG32_SOC15(d, SMUIO, 0, regGOLDEN_TSC_COUNT_LOWER);
+    return lo | (hi_after << 32);
+}

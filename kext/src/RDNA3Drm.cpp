@@ -215,6 +215,14 @@ int RDNA3Accel::drmSubmit(void *ctx, void *vm, uint32_t ip, uint32_t ring, const
     return a->fBringup ? a->fBringup->submit(vm, ip, ring, ibs, n, seq) : -RD_ENODEV;
 }
 
+uint64_t RDNA3Accel::drmGpuClock(void *ctx)
+{
+    /* read-only SMUIO registers through the display's register view: no
+     * lock needed, and present from rdna3lvl=2 */
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fDispDev ? rdna3_gpu_clock_counter(a->fDispDev) : 0;
+}
+
 int RDNA3Accel::drmFenceSignaled(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
@@ -300,7 +308,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.bo_userptr = drmBoUserptr;
     ops.sensor = drmSensor;
     ops.vm_fault_info = drmVmFaultInfo;
-    ops.gpu_clock = nullptr; /* TODO(stage2-gfx): RLC GPU clock counter */
+    ops.gpu_clock = drmGpuClock;   /* AMDGPU_INFO_TIMESTAMP: SMUIO GOLDEN_TSC */
 
     fDrmLock = IOLockAlloc();
     fDrm = (rdna3_drm_device *)drmZalloc(this, sizeof(*fDrm));
@@ -324,11 +332,22 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     else
         range_alloc_init(fVramHeap, 0, 0);
 
-    uint64_t gtt = 8ull << 30; /* TODO: from system memory size, like amdgpu */
+    /* amdgpu sizes GTT at TTM's page limit, half of system RAM; the kext
+     * cannot read the RAM size through the KPIs it links (sysctlbyname is
+     * not exported, max_mem only in the unsupported KPI), so a fixed 8 GiB
+     * that any machine able to run this card has twice over */
+    uint64_t gtt = 8ull << 30;
     uint8_t rev = fPci->configRead8(kIOPCIConfigRevisionID);
+    /* nbio_v4_3_get_rev_id: the chip revision is the NBIO strap, not the
+     * PCI revision; external_rev = rev_id + 0x20 for GC 11.0.3, which is
+     * how Mesa tells NAVI32 apart */
+    uint32_t revId = 0;
+    if (fDispDev) {
+        revId = rdna3_nbio_rev_id(fDispDev);
+        setProperty("RDNA3,ChipRevId", revId, 32);
+    }
     rdna3_drm_device_init(fDrm, &ops, disc, fPci->configRead16(kIOPCIConfigDeviceID), rev,
-                          0 /* TODO: NBIO strap rev_id */, fVramSize,
-                          visible > fVramSize ? fVramSize : visible, gtt);
+                          revId, fVramSize, visible > fVramSize ? fVramSize : visible, gtt);
     /* GB_ADDR_CONFIG (gfx_v11_0 get_gb_addr_config): read once, cache.
      * Only at rdna3lvl>=3, the level that already reads GC registers. */
     if (fLevel >= 3 && fDrm->gc_base0 && fMmio) {
