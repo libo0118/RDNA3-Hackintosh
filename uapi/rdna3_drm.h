@@ -162,6 +162,7 @@ typedef struct rdna3_drm_file {
     rdna3_va *vas;            /* [RD_MAX_VA] */
     uint32_t nvas;
     void    *vm;              /* ops.vm_create() result, may be NULL */
+    uint32_t next_bo_list;
     uint64_t client_caps;
 } rdna3_drm_file;
 

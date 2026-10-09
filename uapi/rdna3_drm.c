@@ -1108,8 +1108,20 @@ int rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
         if (!f->dev->ops.submit)
             return -RD_ENODEV;
         return fence_to_handle(f, (union drm_amdgpu_fence_to_handle *)data);
-    case RD_NR_AMDGPU(DRM_AMDGPU_BO_LIST):   /* legacy; libdrm uses BO_HANDLES chunks */
-        return -RD_ENODEV;
+    case RD_NR_AMDGPU(DRM_AMDGPU_BO_LIST): {
+        /* residency lists: every BO is always resident here, so a list is
+         * only a handle (amdgpu_bo_list_create / amdgpu_cs_submit) */
+        union drm_amdgpu_bo_list *l = (union drm_amdgpu_bo_list *)data;
+        uint32_t op;
+        NEED(union drm_amdgpu_bo_list);
+        op = l->in.operation;
+        if (op == AMDGPU_BO_LIST_OP_CREATE) {
+            zero(&l->out, sizeof(l->out));
+            l->out.list_handle = ++f->next_bo_list;
+            return 0;
+        }
+        return (op == AMDGPU_BO_LIST_OP_DESTROY || op == AMDGPU_BO_LIST_OP_UPDATE) ? 0 : -RD_EINVAL;
+    }
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR):   /* TODO(stage4): wire memory */
     case RD_NR_PRIME_HANDLE_TO_FD:               /* TODO(stage4): IOSurface sharing */
     case RD_NR_PRIME_FD_TO_HANDLE:
