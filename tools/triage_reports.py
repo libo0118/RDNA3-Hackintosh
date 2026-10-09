@@ -34,9 +34,9 @@ CHECKS = [
      "Linux's mem_info_vram_total (linux-reference), else 16368"),
     ("C2PMSG33", 1, None, lambda v: v != 0 and v != 0xFFFFFFFF, "IFWI ready, not 0 / all-ones"),
     ("IPDiscovery", 2, None, lambda v: bool(v), "present (IP list)"),
-    ("DisplayHeads", 2, None, lambda v: v >= 1, ">= 1"),
+    # heads the UEFI GOP lit; none in the VM, where OVMF shows no picture
+    ("DisplayHeads", 2, None, lambda v: v >= 1 or IN_VM, ">= 1 (any in the VM)"),
     ("DisplayPaths", 2, None, lambda v: v >= 1, ">= 1"),
-    ("AtomCommandTables", 2, None, lambda v: bool(v), "present"),
     ("ActiveCUs", 3, None, lambda v: v == 60, "60 (compare Linux if fused)"),
     ("PSPResult", 4, None, lambda v: signed(v) == 0, "0"),
     ("SMUVersion", 5, None, lambda v: v != 0, "!= 0"),
@@ -57,6 +57,7 @@ CHECKS = [
 ]
 
 REF_VRAM_MB = 0
+IN_VM = False           # set per report: rdna3vm passes rdna3vmauto=1
 
 
 def load_linux_reference(d):
@@ -116,6 +117,8 @@ def report(path, show_all):
     args = " ".join(l for l in args.splitlines() if not l.startswith("$") and not l.startswith("[exit"))
     args = args.replace("boot-args", "").strip()
     lvl = bootarg_level(args)
+    global IN_VM
+    IN_VM = "rdna3vmauto=1" in args
     props = parse_props(props_txt)
     print("=" * 78)
     print(os.path.basename(path))
@@ -162,6 +165,7 @@ def report(path, show_all):
             print("   %s %-20s = %s (expected %s)" % ("PASS" if ok else "FAIL", key, shown, want))
     for key in ("SOSVersion", "SMUDriverIF", "PMGfxClkMinMHz", "PMGfxClkMaxMHz", "PMUclkMaxMHz",
                 "PMFanRPM", "DMUBVersion", "GBAddrConfig", "ChipRevId", "Head0EdidMode",
+                "AtomCommandTables",
                 "LastFaultAddr", "LastFaultStatus"):
         if key in props:
             v = props[key]

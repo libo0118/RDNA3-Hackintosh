@@ -4,3 +4,5 @@
 # the steps it lists (AMDGPU_STEPS / UAPI_STEPS there) are here.
 0 2026-10-09 vm kext injected by OpenCore, matched 1002:747e on pcie.0
 1 2026-10-09 vm VRAMSizeMB 16368 = Linux mem_info_vram_total, C2PMSG33 0x80000000
+2 2026-10-09 vm IP discovery GC 11.0.3, 4 display paths; no lit head in the VM (no GOP picture)
+3 2026-10-09 vm 60 active CUs
