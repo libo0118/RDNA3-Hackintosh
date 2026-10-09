@@ -106,7 +106,7 @@ jobs:
             build/RDNA3Accelerator.kext
             build/RDNA3Framebuffer.kext
             build/userspace/rdna3_drminfo
-            build/userspace/libdrm_xnu.dylib
+            build/userspace/libdrm.dylib
 
   metal:
     needs: changes

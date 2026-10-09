@@ -1,6 +1,8 @@
 # Test na sprzęcie: drabinka krok po kroku
 
-Jedna procedura dla hackintosha z RX 7800 XT. Każdy krok dokłada jedną
+Jedna procedura dla hackintosha z RX 7800 XT. Masz Linuksa i tę kartę jako
+jedyną? Ta sama drabinka w maszynie wirtualnej, zautomatyzowana:
+[TESTING-VM](TESTING-VM.md). Każdy krok dokłada jedną
 rzecz, a po każdym zbierasz raport jednym skryptem. Jeśli krok zawiesi
 system albo zgasi ekran, wracasz do poprzedniego i przysyłasz raport z
 niego oraz opis objawu. Szczegóły modułów są w `STAGE1`–`STAGE7`.

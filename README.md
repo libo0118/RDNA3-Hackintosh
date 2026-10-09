@@ -42,6 +42,10 @@ make kext     # -> build/RDNA3Accel.kext (x86_64)
 
 CI (GitHub Actions) buduje kext na `macos-15` i dołącza go jako artefakt.
 
+**Test na Linuksie z tą kartą jako jedyną (macOS w VM, passthrough):**
+[docs/TESTING-VM.md](docs/TESTING-VM.md), czyli jeden skrypt `tools/vm/rdna3vm`, krok po kroku.
+Test na hackintoshu: [docs/TESTING-HW.md](docs/TESTING-HW.md).
+
 Ładowanie kextu na maszynie testowej i poziomy bezpieczeństwa (`rdna3lvl=`)
 opisuje [docs/STAGE1.md](docs/STAGE1.md). Najpierw przeczytaj
 [docs/STAGE0.md](docs/STAGE0.md): **bez drugiej karty do obrazu nie testuj.**
