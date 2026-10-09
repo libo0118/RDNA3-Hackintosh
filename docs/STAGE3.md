@@ -96,6 +96,42 @@ niczego jeszcze nie wykonuje. Symulator ma mini-asembler bajtkodu i testuje
 każdą grupę opkodów, IIO, FB, przerwanie pętli, dostęp poza obraz i
 rekurencję.
 
+Uwaga: na DCN 3.2 Linux nie wykonuje tych tablic w sterowniku
+(`dcn32 debug.dmub_command_table = true`). `command_table2` wysyła je do
+DMCUB jako komendy `DMUB_CMD__VBIOS`, a firmware DMCUB wykonuje je z kopii
+VBIOS w oknie CW3. Interpreter jest więc ścieżką zapasową i narzędziem
+diagnostycznym, a główną drogą jest DMCUB (niżej).
+
+## DMCUB (krok 3)
+
+`hw/dmub32.c` to port `dmub_srv.c` + `dmub_dcn32.c` oraz
+`dm_dmub_sw_init`/`dm_dmub_hw_init`:
+
+* odczyt nagłówka `dcmub_firmware_header_v1_0` i bloku metadanych
+  `dmub_fw_meta` (za 256- lub 512-bajtową stopką PSP), rozkład 12 okien
+  (inst const, stos, BSS, VBIOS, mailbox, trace, stan FW, scratch, IB,
+  shared state, LSDMA, cursor offload) w VRAM, wyrównanie jak w Linuksie;
+* reset: `GPINT STOP_FW` do działającego firmware (zostawionego przez
+  VBIOS), czekanie na `0xDEADDEAD` w SCRATCH7 i `PWAIT_MODE`, soft reset,
+  wyłączenie okien CW2-CW7, wyzerowanie skrzynek;
+* obraz instrukcji ładuje PSP (już w planie `LOAD_IP_FW`), więc CW0/CW1
+  zostają jego; ścieżka backdoor (kopiowanie obrazu do CW0 z adresem
+  fizycznym FB) też jest;
+* okna CW3 (VBIOS), CW4 (inbox1 + outbox1), CW5 + region 5 (trace /
+  outbox0), CW6 (stan FW), opcje startu, `reset_release`, czekanie na
+  `DAL_FW | MAILBOX_RDY`;
+* ring inbox1 (64-bajtowe komendy, wrap, pełny ring, odczyt odpowiedzi ze
+  slotu), `QUERY_FEATURE_CAPS` jako pierwsza wymiana, `DMUB_CMD__VBIOS`
+  z `DIG1TransmitterControl` v1.7.
+
+W kexcie to poziom 5 za flagą `rdna3dmub=1` (domyślnie wyłączone, bo
+DMCUB obsługuje wyświetlacz uruchomiony przez GOP i reset trzeba najpierw
+sprawdzić na karcie). Wynik: `RDNA3,DMUB`, `RDNA3,DMUBResult`,
+`RDNA3,DMUBVersion`, `RDNA3,DMUBBootStatus`, `RDNA3,DMUBCaps`.
+Symulator modeluje firmware: sprawdza okna, kopię VBIOS i skrzynkę przed
+zgłoszeniem gotowości, odpowiada na STOP_FW, wykonuje komendy z ringu;
+testy obejmują prawdziwy `dcn_3_2_1_dmcub.bin` (wersja 0x07003300).
+
 ## Ograniczenia (do zrobienia)
 
 * jedna głowica (head 0), jeden tryb; brak EDID (AUX/I2C DCN), brak zmiany

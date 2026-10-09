@@ -70,8 +70,10 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
     fLevel = level;
     fVramSize = vramSize;
     {
-        uint32_t msi = 0, db = 1, pm = 1;
+        uint32_t msi = 0, db = 1, pm = 1, dmub = 0;
         uint64_t pmmask = 0;
+        PE_parse_boot_argn("rdna3dmub", &dmub, sizeof(dmub));
+        fDmubMode = dmub;
         PE_parse_boot_argn("rdna3msi", &msi, sizeof(msi));
         PE_parse_boot_argn("rdna3doorbell", &db, sizeof(db));
         PE_parse_boot_argn("rdna3pm", &pm, sizeof(pm));
@@ -137,6 +139,7 @@ void RDNA3Bringup::stopAndFree()
     if (fSos.data)
         IOFree(fSos.data, fSos.len);
     if (fSmu) IOFree(fSmu, sizeof(*fSmu));
+    if (fDmub) IOFree(fDmub, sizeof(*fDmub));
     if (fRom) IOFree(fRom, RD_VBIOS_MAX_LEN);
     if (fDisc) IOFree(fDisc, sizeof(*fDisc));
     if (fDev) IOFree(fDev, sizeof(*fDev));
@@ -393,6 +396,9 @@ bool RDNA3Bringup::hwInit()
         /* smu_hw_init: power management, before the GMC like soc21's IP order */
         if (fPmMode)
             pmInit();
+        /* amdgpu_dm hw_init comes after the SMU in soc21's IP order */
+        if (fDmubMode)
+            dmubInit();
     }
 
     /* level 6: GMC (gmc_v11_0_hw_init -> gart_enable): GART table in
@@ -687,6 +693,58 @@ void RDNA3Bringup::pmInit()
 }
 
 /* SMU_TABLE_SMU_METRICS snapshot into the IORegistry */
+/* ------------------------------ DMCUB ------------------------------ */
+
+/* dm_dmub_sw_init + dm_dmub_hw_init: the PSP loaded the DMCUB image with
+ * the rest of the firmware (LOAD_IP_FW GFX_FW_TYPE_DMUB); stop whatever the
+ * VBIOS left running, give it data/VBIOS/mailbox/trace/state windows in
+ * VRAM, release it and wait for DAL_FW + MAILBOX_RDY, then do the first
+ * mailbox round trip (QUERY_FEATURE_CAPS) like dc_dmub_srv. Opt-in until
+ * tested on the card: the boot display runs through this core. */
+void RDNA3Bringup::dmubInit()
+{
+    const amd_fw_blob_ref *fw = &fBlobRefs[AMD_BLOB_DMCUB];
+    int ret, pspLoaded;
+
+    if (!fDmub)
+        fDmub = (rdna3_dmub *)IOMalloc(sizeof(*fDmub));
+    if (!fDmub) {
+        publishString("RDNA3,DMUB", "failed: no memory");
+        return;
+    }
+    if (!fw->data) {
+        publishString("RDNA3,DMUB", "failed: no dcn_3_2_1_dmcub.bin");
+        return;
+    }
+    /* the VBIOS image goes into window CW3: the firmware runs its tables */
+    if (!fVbios.len) {
+        if (!fRom)
+            fRom = (uint8_t *)IOMalloc(RD_VBIOS_MAX_LEN);
+        if (!fRom || vbios_read(fDev, &fVbios, fRom, RD_VBIOS_MAX_LEN) != RDNA3_OK) {
+            publishString("RDNA3,DMUB", "failed: VBIOS not readable");
+            return;
+        }
+    }
+    pspLoaded = amd_ucode_plan_find(fPlan, AMD_UCODE_DMCUB) != nullptr;
+    ret = dmub32_sw_init(fDmub, fDev, (const uint8_t *)fw->data, (uint32_t)fw->len, fVbios.len);
+    if (ret == RDNA3_OK)
+        ret = dmub32_hw_init(fDmub, fVbios.data, fVbios.len, pspLoaded, 100000);
+    publish("RDNA3,DMUBResult", (uint64_t)(int64_t)ret);
+    publish("RDNA3,DMUBVersion", fDmub->fw_version);
+    publish("RDNA3,DMUBBootStatus", fDmub->boot_status);
+    if (ret != RDNA3_OK) {
+        publishString("RDNA3,DMUB", ret == RDNA3_ENODEV ? "not present" : "failed");
+        return;
+    }
+    ret = dmub32_query_caps(fDmub);
+    publish("RDNA3,DMUBCapsResult", (uint64_t)(int64_t)ret);
+    if (ret == RDNA3_OK)
+        publish("RDNA3,DMUBCaps", fDmub->feature_caps[0]);
+    publishString("RDNA3,DMUB", ret == RDNA3_OK ? "running, mailbox up" : "running, mailbox silent");
+    BLOG("DMUB: firmware 0x%08x, boot status 0x%x, %s, caps 0x%08x", fDmub->fw_version,
+         fDmub->boot_status, pspLoaded ? "PSP-loaded" : "backdoor", fDmub->feature_caps[0]);
+}
+
 void RDNA3Bringup::pmPublishMetrics()
 {
     int ret = smu13_read_metrics(fDev, fSmu);

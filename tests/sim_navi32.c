@@ -28,6 +28,8 @@
 #include "dcaux.h"
 #include "edid.h"
 #include "atom.h"
+#include "dmub32.h"
+#include "gen/dcn_3_2_1_dmcub.h"
 #include "gen/dcn_3_2_1_aux.h"
 #include "gmc11.h"
 #include "gen/gc_11_0_3_gmc.h"
@@ -145,6 +147,12 @@ typedef struct sim {
     unsigned aux_gos, aux_bad;
     uint8_t  dpcd[0x800];
     uint8_t  edid[256];
+    /* DMCUB: the firmware's view (boot checks, mailbox, GPINT) */
+    struct {
+        int running, psp_loaded, hang;
+        unsigned boots, stops, bad_boots, cmds, caps_queries, bad_cmds, tx_cmds;
+        uint8_t tx[16];
+    } dmub;
     uint32_t i2c_off, i2c_seg;
     /* recovery: SQ_CMD kills, RLC safe mode, GRBM soft resets, mode-1 resets,
      * page-fault IVs */
@@ -633,6 +641,79 @@ static void make_sink(void)
     memcpy(e + 132, dtd_1080p, 18);
     e[255] = edid_sum(e + 128);
     S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 0)] = HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK;
+}
+
+/* ---- DMCUB model ---- */
+#define DMR(reg) (DCN_B2 + (reg))
+static uint64_t dmub_cw_offset(unsigned n)
+{
+    static const uint32_t lo[8] = { regDMCUB_REGION3_CW0_OFFSET, regDMCUB_REGION3_CW1_OFFSET,
+        regDMCUB_REGION3_CW2_OFFSET, regDMCUB_REGION3_CW3_OFFSET, regDMCUB_REGION3_CW4_OFFSET,
+        regDMCUB_REGION3_CW5_OFFSET, regDMCUB_REGION3_CW6_OFFSET, regDMCUB_REGION3_CW7_OFFSET };
+    return S.reg[DMR(lo[n])] | ((uint64_t)S.reg[DMR(lo[n] + 1)] << 32);   /* OFFSET_HIGH follows */
+}
+static int dmub_cw_enabled(uint32_t top_reg) { return (S.reg[DMR(top_reg)] & 0x80000000u) != 0; }
+
+/* the core leaves reset: what the real firmware needs before it reports
+ * DAL_FW | MAILBOX_RDY in SCRATCH0 */
+static void dmub_boot(void)
+{
+    const uint8_t *vb = mc_ptr(dmub_cw_offset(3), 64);
+    int ok = (S.dmub.psp_loaded || dmub_cw_enabled(regDMCUB_REGION3_CW0_TOP_ADDRESS)) &&
+             dmub_cw_enabled(regDMCUB_REGION3_CW3_TOP_ADDRESS) &&
+             dmub_cw_enabled(regDMCUB_REGION3_CW4_TOP_ADDRESS) &&
+             dmub_cw_enabled(regDMCUB_REGION3_CW5_TOP_ADDRESS) &&
+             dmub_cw_enabled(regDMCUB_REGION3_CW6_TOP_ADDRESS) &&
+             (S.reg[DMR(regDMCUB_REGION5_TOP_ADDRESS)] & 0x80000000u) &&
+             S.reg[DMR(regDMCUB_INBOX1_BASE_ADDRESS)] == RD_DMUB_CW4_BASE &&
+             S.reg[DMR(regDMCUB_INBOX1_SIZE)] == RD_DMUB_RB_SIZE &&
+             vb && memcmp(vb, S.vbios, 64) == 0;   /* the VBIOS copy behind CW3 */
+    if (!ok) {
+        S.dmub.bad_boots++;
+        return;
+    }
+    S.dmub.running = 1;
+    S.dmub.boots++;
+    S.reg[DMR(regDMCUB_SCRATCH0)] = RD_DMUB_BOOT_DAL_FW | RD_DMUB_BOOT_MAILBOX_RDY | RD_DMUB_BOOT_HW_PWR_INIT;
+}
+
+static void dmub_inbox(uint32_t wptr)
+{
+    uint32_t rptr = S.reg[DMR(regDMCUB_INBOX1_RPTR)];
+    uint64_t base = dmub_cw_offset(4);
+    if (!S.dmub.running || S.dmub.hang)
+        return;
+    while (rptr != wptr) {
+        uint8_t *c = mc_ptr(base + rptr, RD_DMUB_RB_CMD_SIZE);
+        uint32_t hdr;
+        if (!c) {
+            S.dmub.bad_cmds++;
+            break;
+        }
+        memcpy(&hdr, c, 4);
+        S.dmub.cmds++;
+        switch (hdr & 0xff) {
+        case RD_DMUB_CMD_QUERY_FEATURE_CAPS:
+            S.dmub.caps_queries++;
+            c[4] = 1;      /* psr version */
+            c[5] = 2;      /* fw_assisted_mclk_switch_ver */
+            hdr &= ~RD_DMUB_HDR_RET_STATUS;
+            memcpy(c, &hdr, 4);
+            break;
+        case RD_DMUB_CMD_VBIOS:
+            if (((hdr >> 8) & 0xff) == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && ((hdr >> 24) & 0x3f) == 60) {
+                memcpy(S.dmub.tx, c + 4, 16);
+                S.dmub.tx_cmds++;
+            } else {
+                S.dmub.bad_cmds++;
+            }
+            break;
+        default:
+            S.dmub.bad_cmds++;
+        }
+        rptr = (rptr + RD_DMUB_RB_CMD_SIZE) % RD_DMUB_RB_SIZE;
+    }
+    S.reg[DMR(regDMCUB_INBOX1_RPTR)] = rptr;
 }
 
 /* AUX_SW_GO on engine n: decode the request FIFO, answer like the sink */
@@ -1153,6 +1234,11 @@ static void psp_exec(uint64_t cmd_mc, uint64_t fence_mc, uint32_t fence_val)
             cmd->resp.status = 0xFFFF0002;
         if (S.nipfw < 64)
             S.ip_fw_types[S.nipfw++] = t;
+        if (t == GFX_FW_TYPE_DMUB) {
+            /* the PSP puts the image behind CW0 and opens the window */
+            S.dmub.psp_loaded = 1;
+            *R(DCN_B2 + regDMCUB_REGION3_CW0_TOP_ADDRESS) |= DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_ENABLE_MASK;
+        }
         if (t == GFX_FW_TYPE_SMU) {
             uint32_t *fl = smn_slot(RD_SMN_MP1_FIRMWARE_FLAGS, 1);
             S.smu_loaded = 1;
@@ -1380,6 +1466,37 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     if (dw == MP1(66)) {
         S.smu_msgs++;
         smu_msg(v);
+        return;
+    }
+    /* DMCUB */
+    if (dw == DMR(regDMCUB_GPINT_DATAIN1)) {
+        *R(dw) = v;
+        if (S.dmub.running && (v >> 28) && ((v >> 16) & 0xfff) == RD_DMUB_GPINT_STOP_FW) {
+            S.dmub.running = 0;
+            S.dmub.stops++;
+            S.reg[DMR(regDMCUB_SCRATCH7)] = RD_DMUB_GPINT_STOP_FW_RESPONSE;
+            S.reg[DMR(regDMCUB_CNTL)] |= DMCUB_CNTL__DMCUB_PWAIT_MODE_STATUS_MASK;
+        }
+        return;
+    }
+    if (dw == DMR(regDMCUB_CNTL) || dw == DMR(regDMCUB_CNTL2)) {
+        int was = (S.reg[DMR(regDMCUB_CNTL)] & DMCUB_CNTL__DMCUB_ENABLE_MASK) &&
+                  !(S.reg[DMR(regDMCUB_CNTL2)] & DMCUB_CNTL2__DMCUB_SOFT_RESET_MASK);
+        int now;
+        *R(dw) = v;
+        now = (S.reg[DMR(regDMCUB_CNTL)] & DMCUB_CNTL__DMCUB_ENABLE_MASK) &&
+              !(S.reg[DMR(regDMCUB_CNTL2)] & DMCUB_CNTL2__DMCUB_SOFT_RESET_MASK);
+        if (!now) {
+            S.dmub.running = 0;
+        } else if (!was) {
+            S.reg[DMR(regDMCUB_CNTL)] &= ~DMCUB_CNTL__DMCUB_PWAIT_MODE_STATUS_MASK;
+            dmub_boot();
+        }
+        return;
+    }
+    if (dw == DMR(regDMCUB_INBOX1_WPTR)) {
+        *R(dw) = v;
+        dmub_inbox(v);
         return;
     }
     /* DP AUX engines (DCN segment 2) */
@@ -1675,6 +1792,17 @@ static void synth(amd_fw_blob_ref blobs[AMD_BLOB_COUNT], const uint8_t **sos, si
         w32(syn_blob[i] + offsetof(struct mes_firmware_header_v1_0, mes_ucode_data_offset_bytes), 2048);
     }
     w32(syn_blob[AMD_BLOB_DMCUB] + offsetof(struct dmcub_firmware_header_v1_0, inst_const_bytes), 1024);
+    /* dmub_fw_meta at the end of the image, in front of a 256-byte PSP footer */
+    {
+        uint8_t *m = syn_blob[AMD_BLOB_DMCUB] + 256 + 1024 - 256 - 64;
+        w32(syn_blob[AMD_BLOB_DMCUB] + 16, 0x07001234u);
+        memset(m, 0, 64);
+        w32(m, RD_DMUB_FW_META_MAGIC);
+        w32(m + 4, 8192);          /* fw_region_size */
+        w32(m + 8, 4096 + 16);     /* trace_buffer_size */
+        w32(m + 12, 0x07001234u);
+        m[16] = 1;
+    }
 }
 
 /* ---------------------------- test ---------------------------- */
@@ -1702,6 +1830,11 @@ static void run(const char *fwdir)
     *R(MP0(35)) = 0x80000000u;  /* bootloader ready */
     make_vbios();
     make_sink();
+    /* DMCUB fused on, and still running the firmware the VBIOS started */
+    *R(DCN_B2 + regCC_DC_PIPE_DIS) = CC_DC_PIPE_DIS__DC_DMCUB_ENABLE_MASK;
+    *R(DCN_B2 + regDMCUB_CNTL) = DMCUB_CNTL__DMCUB_ENABLE_MASK;
+    *R(DCN_B2 + regDMCUB_SCRATCH0) = RD_DMUB_BOOT_DAL_FW | RD_DMUB_BOOT_MAILBOX_RDY;
+    S.dmub.running = 1;
     *smn_slot(SMN_ROM_OFFSET_CTRL, 1) = ROM_STRAP;
     *R(MP0(33)) = 0x80000000u;  /* IFWI done */
     *R(mmRCC_CONFIG_MEMSIZE) = (uint32_t)(VRAM_SIZE >> 20);
@@ -2547,6 +2680,73 @@ static void run(const char *fwdir)
               dp[1].ddc_line == 1 && dp[1].hpd == 1 && dp[1].encoder_caps == 0);
         CHECK(strcmp(vbios_connector_name(dp[1].connector), "HDMI") == 0);
         CHECK(vbios_display_paths(&vb, dp, 1) == 1);
+    }
+
+    /* DMCUB: stop the firmware the VBIOS left running, lay out the windows,
+     * boot it again on the PSP-loaded image, talk to it through inbox1 */
+    {
+        static rdna3_dmub dm;
+        rdna3_dig_tx_v1_7 tx;
+        uint32_t k;
+        uint64_t cw;
+        CHECK(dmub32_is_supported(&dev) && dmub32_is_hw_init(&dev));
+        CHECK(dmub32_sw_init(&dm, &dev, blobs[AMD_BLOB_DMCUB].data, (uint32_t)blobs[AMD_BLOB_DMCUB].len,
+                             VBIOS_LEN) == RDNA3_OK);
+        CHECK(dm.meta.found && dm.meta.dal_fw == 1);
+        if (fwdir)
+            CHECK(dm.fw_version == 0x07003300u && dm.meta.trace_buffer_size == 65552 &&
+                  dm.meta.fw_region_size == 47296 && dm.bss_data_size == 0);
+        else
+            CHECK(dm.fw_version == 0x07001234u && dm.inst_const_size == 1024 - 256 - 256 &&
+                  dm.meta.fw_region_size == 8192);
+        for (k = 0; k < RD_DMUB_WIN_TOTAL; k++)
+            CHECK((dm.region[k].base & 255) == 0 && dm.region[k].top >= dm.region[k].base &&
+                  (k == 0 || dm.region[k].base >= dm.region[k - 1].top));
+        CHECK(dm.region[RD_DMUB_WIN_MAILBOX].top - dm.region[RD_DMUB_WIN_MAILBOX].base == 2 * RD_DMUB_RB_SIZE);
+        CHECK(S.dmub.psp_loaded);
+        CHECK(dmub32_hw_init(&dm, S.vbios, VBIOS_LEN, 1, 100000) == RDNA3_OK);
+        CHECK(S.dmub.stops == 1 && S.dmub.boots == 1 && S.dmub.bad_boots == 0 && S.dmub.running);
+        CHECK((dm.boot_status & 3) == 3 && dmub32_is_hw_init(&dev));
+        cw = dmub_cw_offset(3);
+        CHECK(cw == rdna3_vram_mc(&dev, dm.fb_off + dm.region[RD_DMUB_WIN_VBIOS].base));
+        CHECK(S.reg[DMR(regDMCUB_REGION3_CW3_BASE_ADDRESS)] == RD_DMUB_CW3_BASE &&
+              S.reg[DMR(regDMCUB_OUTBOX0_BASE_ADDRESS)] == RD_DMUB_REGION5_BASE + 16 &&
+              S.reg[DMR(regDMCUB_OUTBOX1_BASE_ADDRESS)] == RD_DMUB_CW4_BASE + RD_DMUB_RB_SIZE &&
+              S.reg[DMR(regDMCUB_SCRATCH7)] == RD_DMUB_GPINT_STOP_FW_RESPONSE &&
+              S.reg[DMR(regDMCUB_GPINT_DATAIN1)] == 0);
+        /* the mailbox: feature caps with a reply, then a VBIOS command */
+        CHECK(dmub32_query_caps(&dm) == RDNA3_OK && (dm.feature_caps[0] & 0xffff) == 0x0201);
+        memset(&tx, 0, sizeof(tx));
+        tx.phyid = 0; tx.action = RD_ATOM_TX_ENABLE; tx.digmode = 0; tx.lanenum = 4;
+        tx.symclk_10khz = 81000; tx.hpdsel = 1; tx.digfe_sel = 1; tx.connobj_id = RD_ATOM_CONN_DISPLAYPORT;
+        CHECK(dmub32_transmitter_control(&dm, &tx) == RDNA3_OK);
+        CHECK(S.dmub.tx_cmds == 1 && S.dmub.tx[1] == RD_ATOM_TX_ENABLE && S.dmub.tx[3] == 4 &&
+              S.dmub.tx[4] == (81000 & 0xff) && S.dmub.tx[8] == 1 && S.dmub.tx[10] == 0x13);
+        /* the ring wraps */
+        for (k = 0; k < 2 * RD_DMUB_RB_MAX_ENTRY; k++)
+            if (dmub32_query_caps(&dm) != RDNA3_OK)
+                break;
+        CHECK(k == 2 * RD_DMUB_RB_MAX_ENTRY && S.dmub.bad_cmds == 0 &&
+              dm.submitted == dm.reported && dm.submitted == 2 + 2 * RD_DMUB_RB_MAX_ENTRY);
+        /* a firmware that stops answering */
+        S.dmub.hang = 1;
+        CHECK(dmub32_query_caps(&dm) == RDNA3_ETIME);
+        S.dmub.hang = 0;
+        /* back in business after a re-init, this time with a backdoor load */
+        CHECK(dmub32_hw_init(&dm, S.vbios, VBIOS_LEN, 0, 100000) == RDNA3_OK);
+        CHECK(S.dmub.stops == 2 && S.dmub.boots == 2);
+        cw = dmub_cw_offset(0);
+        CHECK(cw == dm.fb_off + dm.region[RD_DMUB_WIN_INST_CONST].base);   /* FB physical, offset 0 */
+        CHECK(memcmp(S.vram + dm.fb_off + dm.region[RD_DMUB_WIN_INST_CONST].base, dm.fw_inst_const, 64) == 0);
+        CHECK(dmub32_query_caps(&dm) == RDNA3_OK);
+        /* unload */
+        dmub32_hw_reset(&dm);
+        CHECK(!dmub32_is_hw_init(&dev) && !S.dmub.running && S.dmub.stops == 3);
+        CHECK(dmub32_query_caps(&dm) == RDNA3_EIO);
+        /* fused off */
+        *R(DMR(regCC_DC_PIPE_DIS)) = 0;
+        CHECK(dmub32_hw_init(&dm, S.vbios, VBIOS_LEN, 1, 1000) == RDNA3_ENODEV);
+        *R(DMR(regCC_DC_PIPE_DIS)) = CC_DC_PIPE_DIS__DC_DMCUB_ENABLE_MASK;
     }
 
     /* GPU reset: mode-1 through the PMFW debug mailbox takes the chip back

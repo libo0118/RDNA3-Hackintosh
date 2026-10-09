@@ -41,6 +41,7 @@ extern "C" {
 #include "gfx11.h"
 #include "doorbell.h"
 #include "smu13.h"
+#include "dmub32.h"
 #include "rdna3_drm.h"
 #include "amd_fw.h"
 }
@@ -133,6 +134,10 @@ private:
     uint64_t         fMetricsAt = 0;         /* mach_absolute_time of the last metrics read */
     void             pmInit();
     void             pmPublishMetrics();
+    /* DMCUB (level 5, rdna3dmub=1): dm_dmub_hw_init on the PSP-loaded image */
+    uint32_t         fDmubMode = 0;
+    rdna3_dmub      *fDmub = nullptr;
+    void             dmubInit();
 
     /* robustness: amdgpu_job_timedout -> soft recovery -> GFX soft reset ->
      * mode-1 reset and a new bring-up from level 4 (hwInit); page faults

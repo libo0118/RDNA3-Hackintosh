@@ -33,6 +33,7 @@ enum {
     RDNA3_ETIME     = -62,
     RDNA3_EIO       = -5,
     RDNA3_ENOENT    = -2,
+    RDNA3_EBUSY     = -16,
 };
 
 /* ---- hardware IP blocks we address registers of (subset of amd_hw_ip_block_type) ---- */

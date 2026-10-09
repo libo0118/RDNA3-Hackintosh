@@ -35,8 +35,10 @@ Cel: modesetting, EDID, wiele monitorów, hotplug, zmiana rozdzielczości.
   przez framebuffer.
 * ✅ Krok 2: interpreter AtomBIOS (`hw/atom.c`), tablica obiektów VBIOS
   (złącze → UNIPHY, DDC/AUX, HPD, możliwości enkodera).
-  Dalej: DMCUB, wywołania `DIG1TransmitterControl`/`SetPixelClock`
-  (command_table2), trening DP, modeset.
+* ✅ Krok 3: serwis DMCUB (`hw/dmub32.c`, `rdna3dmub=1`): reset ze STOP_FW,
+  okna, inbox1, QUERY_FEATURE_CAPS, komendy VBIOS przez DMCUB.
+  Dalej: `DIGxEncoderControl`/`SetPixelClock` przez DMCUB, trening DP
+  (DPCD + PHY), programowanie OTG/HUBP/DPP pod tryb z EDID, modeset.
 * Warstwa `dm_services` dla XNU (alokacja, logi, zegary, rejestry, delay)
   i kompilacja `drivers/gpu/drm/amd/display/dc` dla DCN 3.2.1 jako
   biblioteki C w kexcie (MIT). Najpierw `dc_create` + odczyt stanu, potem
