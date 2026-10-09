@@ -1,72 +1,72 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 11.5%   ported 18.7%   (149 / 241 / 1291)</text>
-<g><title>GFX 11: works 0%, ported 26% (0+64 of 243); verified by step(s) 8</title>
-<rect x="1.0" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="11.4" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="21.7" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="32.1" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="42.5" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="52.9" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="63.2" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="73.6" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="84.0" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="94.4" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="104.7" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="115.1" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="125.5" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="135.9" y="53.0" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="1.0" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="11.4" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="21.7" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="32.1" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="42.5" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="52.9" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="63.2" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="73.6" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="84.0" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="94.4" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="104.7" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="115.1" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="125.5" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="135.9" y="63.4" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="1.0" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="11.4" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="21.7" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="32.1" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="42.5" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="52.9" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="63.2" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="73.6" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="84.0" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="94.4" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="104.7" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="115.1" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="125.5" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="135.9" y="73.9" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="1.0" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="11.4" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="21.7" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="32.1" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="42.5" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="52.9" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="63.2" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="73.6" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="84.0" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="94.4" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="104.7" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="115.1" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="125.5" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="135.9" y="84.3" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="1.0" y="94.7" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="11.4" y="94.7" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="21.7" y="94.7" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="32.1" y="94.7" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="42.5" y="94.7" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="52.9" y="94.7" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="63.2" y="94.7" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="73.6" y="94.7" width="10.4" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 17.0%   ported 18.7%   (219 / 241 / 1291)</text>
+<g><title>GFX 11: works 26%, ported 26% (64+0 of 243); verified by step(s) 8</title>
+<rect x="1.0" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="11.4" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="21.7" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="32.1" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="42.5" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="52.9" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="63.2" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="73.6" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="84.0" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="94.4" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="104.7" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="115.1" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="125.5" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="135.9" y="53.0" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="1.0" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="11.4" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="21.7" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="32.1" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="42.5" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="52.9" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="63.2" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="73.6" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="84.0" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="94.4" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="104.7" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="115.1" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="125.5" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="135.9" y="63.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="1.0" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="11.4" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="21.7" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="32.1" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="42.5" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="52.9" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="63.2" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="73.6" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="84.0" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="94.4" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="104.7" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="115.1" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="125.5" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="135.9" y="73.9" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="1.0" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="11.4" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="21.7" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="32.1" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="42.5" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="52.9" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="63.2" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="73.6" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="84.0" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="94.4" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="104.7" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="115.1" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="125.5" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="135.9" y="84.3" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="1.0" y="94.7" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="11.4" y="94.7" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="21.7" y="94.7" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="32.1" y="94.7" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="42.5" y="94.7" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="52.9" y="94.7" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="63.2" y="94.7" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="73.6" y="94.7" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="84.0" y="94.7" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="94.4" y="94.7" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="104.7" y="94.7" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -248,7 +248,7 @@
 <rect x="135.1" y="230.4" width="11.2" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="0.0" y="52.0" width="147.2" height="189.8" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="5.0" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">GFX 11</text>
-<text x="5.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 26%</text>
+<text x="5.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">26% / 26%</text>
 </g>
 <g><title>SMU 13 power: works 15%, ported 15% (21+0 of 141); verified by step(s) 5</title>
 <rect x="1.0" y="242.8" width="9.7" height="10.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1138,13 +1138,13 @@
 <text x="296.4" y="275.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">SoC / NBI…</text>
 <text x="296.4" y="289.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">20% / 20%</text>
 </g>
-<g><title>Rings / fences: works 0%, ported 10% (0+6 of 61); verified by step(s) 7, 8</title>
-<rect x="374.4" y="163.7" width="8.8" height="10.8" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="383.3" y="163.7" width="8.8" height="10.8" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="392.1" y="163.7" width="8.8" height="10.8" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="401.0" y="163.7" width="8.8" height="10.8" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="409.8" y="163.7" width="8.8" height="10.8" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="418.7" y="163.7" width="8.8" height="10.8" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<g><title>Rings / fences: works 10%, ported 10% (6+0 of 61); verified by step(s) 7, 8</title>
+<rect x="374.4" y="163.7" width="8.8" height="10.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="383.3" y="163.7" width="8.8" height="10.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="392.1" y="163.7" width="8.8" height="10.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="401.0" y="163.7" width="8.8" height="10.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="409.8" y="163.7" width="8.8" height="10.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="418.7" y="163.7" width="8.8" height="10.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="427.5" y="163.7" width="8.8" height="10.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="374.4" y="174.5" width="10.3" height="10.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="384.8" y="174.5" width="10.3" height="10.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -1202,7 +1202,7 @@
 <rect x="426.0" y="260.7" width="10.3" height="10.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="373.4" y="162.7" width="63.9" height="109.8" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="378.4" y="177.7" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Rings /…</text>
-<text x="378.4" y="191.7" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 10%</text>
+<text x="378.4" y="191.7" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">10% / 10%</text>
 </g>
 <g><title>SDMA 6: works 20%, ported 20% (11+0 of 55); verified by step(s) 7</title>
 <rect x="438.4" y="163.7" width="9.3" height="10.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1359,7 +1359,7 @@
 <text x="446.5" y="301.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">27% / 27%</text>
 </g>
 <text x="509.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu UAPI (ioctls, INFO, CS chunks)</text>
-<text x="509.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 26.5%   ported 59.8%   (31 / 70 / 117)</text>
+<text x="509.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 59.8%   ported 59.8%   (70 / 70 / 117)</text>
 <g><title>INFO firmware / sensors: works 26%, ported 26% (10+0 of 39); verified by step(s) 5, 7</title>
 <rect x="506.0" y="53.0" width="32.6" height="37.2" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="538.6" y="53.0" width="32.6" height="37.2" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1439,22 +1439,22 @@
 <text x="675.0" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">INFO queries</text>
 <text x="675.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">70% / 70%</text>
 </g>
-<g><title>amdgpu ioctls: works 0%, ported 71% (0+15 of 21); verified by step(s) 7, 8</title>
-<rect x="671.0" y="229.5" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="701.5" y="229.5" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="732.1" y="229.5" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="762.6" y="229.5" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="793.2" y="229.5" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="823.7" y="229.5" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="854.2" y="229.5" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="671.0" y="270.0" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="701.5" y="270.0" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="732.1" y="270.0" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="762.6" y="270.0" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="793.2" y="270.0" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="823.7" y="270.0" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="854.2" y="270.0" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="671.0" y="310.5" width="30.5" height="40.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<g><title>amdgpu ioctls: works 71%, ported 71% (15+0 of 21); verified by step(s) 7, 8</title>
+<rect x="671.0" y="229.5" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="701.5" y="229.5" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="732.1" y="229.5" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="762.6" y="229.5" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="793.2" y="229.5" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="823.7" y="229.5" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="854.2" y="229.5" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="671.0" y="270.0" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="701.5" y="270.0" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="732.1" y="270.0" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="762.6" y="270.0" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="793.2" y="270.0" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="823.7" y="270.0" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="854.2" y="270.0" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="671.0" y="310.5" width="30.5" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="701.5" y="310.5" width="30.5" height="40.5" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="732.1" y="310.5" width="30.5" height="40.5" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="762.6" y="310.5" width="30.5" height="40.5" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -1463,44 +1463,44 @@
 <rect x="854.2" y="310.5" width="30.5" height="40.5" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="670.0" y="228.5" width="215.8" height="123.5" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="675.0" y="243.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu ioctls</text>
-<text x="675.0" y="257.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 71%</text>
+<text x="675.0" y="257.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">71% / 71%</text>
 </g>
-<g><title>DRM core ioctls: works 0%, ported 88% (0+15 of 17); verified by step(s) 7, 8</title>
-<rect x="886.8" y="53.0" width="28.1" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="914.8" y="53.0" width="28.1" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="942.9" y="53.0" width="28.1" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="970.9" y="53.0" width="28.1" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="886.8" y="90.4" width="28.1" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="914.8" y="90.4" width="28.1" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="942.9" y="90.4" width="28.1" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="970.9" y="90.4" width="28.1" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="886.8" y="127.8" width="37.4" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="924.2" y="127.8" width="37.4" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="961.6" y="127.8" width="37.4" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="886.8" y="165.1" width="37.4" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="924.2" y="165.1" width="37.4" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="961.6" y="165.1" width="37.4" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="886.8" y="202.5" width="37.4" height="37.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<g><title>DRM core ioctls: works 88%, ported 88% (15+0 of 17); verified by step(s) 7, 8</title>
+<rect x="886.8" y="53.0" width="28.1" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="914.8" y="53.0" width="28.1" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="942.9" y="53.0" width="28.1" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="970.9" y="53.0" width="28.1" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="886.8" y="90.4" width="28.1" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="914.8" y="90.4" width="28.1" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="942.9" y="90.4" width="28.1" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="970.9" y="90.4" width="28.1" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="886.8" y="127.8" width="37.4" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="924.2" y="127.8" width="37.4" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="961.6" y="127.8" width="37.4" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="886.8" y="165.1" width="37.4" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="924.2" y="165.1" width="37.4" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="961.6" y="165.1" width="37.4" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="886.8" y="202.5" width="37.4" height="37.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="924.2" y="202.5" width="37.4" height="37.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="961.6" y="202.5" width="37.4" height="37.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="885.8" y="52.0" width="114.2" height="188.9" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="890.8" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">DRM core ioctls</text>
-<text x="890.8" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 88%</text>
+<text x="890.8" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">88% / 88%</text>
 </g>
-<g><title>CS chunks: works 0%, ported 90% (0+9 of 10); verified by step(s) 7, 8</title>
-<rect x="886.8" y="241.9" width="28.1" height="36.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="914.8" y="241.9" width="28.1" height="36.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="942.9" y="241.9" width="28.1" height="36.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="970.9" y="241.9" width="28.1" height="36.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="886.8" y="278.3" width="37.4" height="36.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="924.2" y="278.3" width="37.4" height="36.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="961.6" y="278.3" width="37.4" height="36.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="886.8" y="314.6" width="37.4" height="36.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="924.2" y="314.6" width="37.4" height="36.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<g><title>CS chunks: works 90%, ported 90% (9+0 of 10); verified by step(s) 7, 8</title>
+<rect x="886.8" y="241.9" width="28.1" height="36.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="914.8" y="241.9" width="28.1" height="36.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="942.9" y="241.9" width="28.1" height="36.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="970.9" y="241.9" width="28.1" height="36.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="886.8" y="278.3" width="37.4" height="36.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="924.2" y="278.3" width="37.4" height="36.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="961.6" y="278.3" width="37.4" height="36.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="886.8" y="314.6" width="37.4" height="36.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="924.2" y="314.6" width="37.4" height="36.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="961.6" y="314.6" width="37.4" height="36.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="885.8" y="240.9" width="114.2" height="111.1" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="890.8" y="255.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">CS chunks</text>
-<text x="890.8" y="269.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 90%</text>
+<text x="890.8" y="269.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">90% / 90%</text>
 </g>
 <rect x="4.0" y="358.0" width="12.0" height="12.0" fill="#2ea043" stroke="#0d1117" stroke-width="0"/>
 <text x="21.0" y="369.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works (verified on the card)</text>
