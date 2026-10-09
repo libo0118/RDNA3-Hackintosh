@@ -461,7 +461,13 @@ restore() {
     # the suspend / restart leaves a text console in front: go back to the
     # desktop's terminal once the login screen is up
     if [ -n "$VT" ] && command -v chvt >/dev/null; then
-        sleep 4; chvt "$VT" 2>/dev/null || true
+        local i
+        for i in $(seq 20); do
+            systemctl is-active --quiet display-manager 2>/dev/null && break
+            sleep 0.25
+        done
+        chvt "$VT" 2>/dev/null || true
+        sleep 2; chvt "$VT" 2>/dev/null || true   # again once the greeter took its VT
     fi
     return 0
 }
