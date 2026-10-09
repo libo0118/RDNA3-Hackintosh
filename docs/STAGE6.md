@@ -1,44 +1,44 @@
-# Etap 6: Metal
+# Stage 6: Metal
 
-Wtyczkę Metal i tłumacza AIR→SPIR-V przenieśliśmy z projektu NullMoth
-(`metal/`, pochodzenie i licencje w `metal/PROVENANCE.md`, zgoda autora
-na użycie dla AMD w `NOTICE`).
+We ported the Metal plugin and the AIR→SPIR-V translator from the NullMoth project
+(`metal/`; origin and licenses in `metal/PROVENANCE.md`, the author's permission
+to use it for AMD in `NOTICE`).
 
 ```
 Metal app → RDNA3MTLDriver.bundle (metal/plugin) → librdna3mtl_translate.dylib (AIR→SPIR-V)
-          → libvulkan_radeon.dylib (RADV, Etap 5) → libdrm_xnu → RDNA3Accel.kext
+          → libvulkan_radeon.dylib (RADV, Stage 5) → libdrm_xnu → RDNA3Accel.kext
 ```
 
 ```sh
-make -C metal plugin        # RDNA3MTLDriver.bundle (pobiera Vulkan-Headers)
+make -C metal plugin        # RDNA3MTLDriver.bundle (downloads Vulkan-Headers)
 make -C metal translator    # librdna3mtl_translate.dylib (cargo)
 ```
 
-## Co zmieniliśmy względem NullMoth
+## What we changed compared to NullMoth
 
-* `metal/plugin/rdna3mtl_config.h`: wszystkie ścieżki i nazwy AMD w jednym
-  miejscu (`/Library/GPUBundles/rdna3mtl/`: RADV, loader, tłumacz, konfiguracja;
-  `rdna3mtl-allow.txt`; sysctl `debug.rdna3accelfb`). Nic nie koliduje z
-  instalacją NullMoth.
-* Kod wtyczki zmieniony tylko w miejscach ze ścieżkami. Elementy wyłącznie
-  NVIDIA (kompilator `NVIDIAShared`, hook SASS w NVK, NVDEC/NVENC) i tak mają
-  czyste ścieżki zapasowe, gdy ich pliki nie istnieją.
-* Tłumacz bez zmian (LGPL-3.0+), budowany jako osobny dylib pod nową nazwą.
+* `metal/plugin/rdna3mtl_config.h`: all AMD paths and names in one
+  place (`/Library/GPUBundles/rdna3mtl/`: RADV, loader, translator, configuration;
+  `rdna3mtl-allow.txt`; sysctl `debug.rdna3accelfb`). Nothing conflicts with
+  a NullMoth installation.
+* Plugin code changed only where it has paths. NVIDIA-only parts
+  (the `NVIDIAShared` compiler, the SASS hook in NVK, NVDEC/NVENC) already have
+  clean fallback paths when their files do not exist.
+* Translator unchanged (LGPL-3.0+), built as a separate dylib under a new name.
 
-## Co jeszcze potrzebne, żeby Metal zobaczył kartę
+## What is still needed for Metal to see the card
 
-1. **Akcelerator (IOAccelerator)**: usługa z `MetalPluginName` /
-   `MetalPluginClassName`, przez którą `MTLCopyAllDevices` znajduje wtyczkę,
-   a WindowServer kompozytuje. NullMoth ma ją w `kexts/NVRM/accel`
-   (IOAcceleratorFamily2 z odtworzonymi nagłówkami). Port dla AMD to osobny
-   kext ładowany z AuxKC (Etap 7).
-2. RADV z działającym CS (Etap 2 + 5).
-3. Allow-lista procesów (`metal/rdna3mtl-allow.txt`) zaczyna się wąsko:
+1. **Accelerator (IOAccelerator)**: a service with `MetalPluginName` /
+   `MetalPluginClassName`, through which `MTLCopyAllDevices` finds the plugin
+   and WindowServer composites. NullMoth has it in `kexts/NVRM/accel`
+   (IOAcceleratorFamily2 with reconstructed headers). The AMD port is a separate
+   kext loaded from the AuxKC (Stage 7).
+2. RADV with a working CS (Stage 2 + 5).
+3. The process allow list (`metal/rdna3mtl-allow.txt`) starts narrow:
    `mtlprobe`, `nvmtltest`, `vulkaninfo`.
 
-## Uwagi
+## Notes
 
-* Testy jednostkowe tłumacza wymagają `validation/fixtures`, których NullMoth
-  nie publikuje. Sama biblioteka buduje się na Linuksie i macOS (CI).
-* Nazwy klas Obj-C (`NVMTLDevice` itd.) zostały jak upstream, żeby diff był
-  mały. Kolizja możliwa tylko, gdyby oba bundle trafiły do jednego procesu.
+* The translator's unit tests need `validation/fixtures`, which NullMoth
+  does not publish. The library itself builds on Linux and macOS (CI).
+* Obj-C class names (`NVMTLDevice` etc.) were kept as upstream to keep the diff
+  small. A collision is only possible if both bundles end up in one process.

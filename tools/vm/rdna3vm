@@ -25,11 +25,11 @@ DEBUG_ARGS="-v keepsyms=1 debug=0x100 serial=3 msgbuf=1048576"
 
 say()  { printf '\033[1m== %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mOK\033[0m  %s\n' "$*"; }
-bad()  { printf '  \033[31mBŁĄD\033[0m %s\n' "$*"; }
+bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
 load_conf() {
-    [ -f "$CONF" ] || die "Brak $CONF - najpierw: rdna3vm prepare --osx-kvm ... --artifact ..."
+    [ -f "$CONF" ] || die "No $CONF - run first: rdna3vm prepare --osx-kvm ... --artifact ..."
     # shellcheck source=/dev/null
     . "$CONF"
 }
@@ -56,48 +56,48 @@ group_devs() {
 # ------------------------------------------------------------------ check
 cmd_check() {
     local fail=0 bdf
-    say "Procesor i KVM"
-    if grep -qE 'vmx|svm' /proc/cpuinfo; then ok "wirtualizacja w CPU"; else bad "włącz SVM/VT-x w BIOS"; fail=1; fi
-    if [ -e /dev/kvm ]; then ok "/dev/kvm"; else bad "brak /dev/kvm (moduł kvm_amd / kvm_intel)"; fail=1; fi
-    [ -w /dev/kvm ] || echo "     (dodaj się do grupy kvm: sudo usermod -aG kvm $USER, potem wyloguj)"
+    say "CPU and KVM"
+    if grep -qE 'vmx|svm' /proc/cpuinfo; then ok "CPU virtualization"; else bad "enable SVM/VT-x in the BIOS"; fail=1; fi
+    if [ -e /dev/kvm ]; then ok "/dev/kvm"; else bad "no /dev/kvm (module kvm_amd / kvm_intel)"; fail=1; fi
+    [ -w /dev/kvm ] || echo "     (join the kvm group: sudo usermod -aG kvm $USER, then log out and back in)"
     say "IOMMU"
-    if [ -n "$(ls /sys/kernel/iommu_groups 2>/dev/null)" ]; then ok "IOMMU włączone"
-    else bad "IOMMU wyłączone: BIOS (AMD-Vi/VT-d) + parametr jądra amd_iommu=on iommu=pt (Intel: intel_iommu=on iommu=pt)"; fail=1; fi
-    say "Karta"
+    if [ -n "$(ls /sys/kernel/iommu_groups 2>/dev/null)" ]; then ok "IOMMU enabled"
+    else bad "IOMMU disabled: BIOS (AMD-Vi/VT-d) + kernel parameter iommu=pt (Intel: intel_iommu=on iommu=pt)"; fail=1; fi
+    say "Card"
     if bdf=$(gpu_bdf); then
-        ok "RX 7800 XT: $bdf, sterownik: $(basename "$(readlink -f /sys/bus/pci/devices/$bdf/driver)" 2>/dev/null || echo brak)"
+        ok "RX 7800 XT: $bdf, driver: $(basename "$(readlink -f /sys/bus/pci/devices/$bdf/driver)" 2>/dev/null || echo none)"
         if [ -d /sys/bus/pci/devices/$bdf/iommu_group ]; then
-            echo "     grupa IOMMU $(basename "$(readlink -f /sys/bus/pci/devices/$bdf/iommu_group)"), do VM pójdą:"
+            echo "     IOMMU group $(basename "$(readlink -f /sys/bus/pci/devices/$bdf/iommu_group)"), going to the VM:"
             group_devs "$bdf" | while read -r d; do echo "       $d  $(lspci -nns "$d" 2>/dev/null | cut -d' ' -f2-)"; done
         fi
         local start end _ bar0
         read -r start end _ < /sys/bus/pci/devices/$bdf/resource
         bar0=$(( (end - start + 1) / 1048576 ))
-        echo "     BAR0 (okno VRAM): ${bar0} MiB$( [ "$bar0" -gt 256 ] && echo ' (Resizable BAR włączony - OK, przy kłopotach wyłącz go w BIOS)')"
-    else bad "nie widzę karty 1002:747e"; fail=1; fi
-    say "Programy"
+        echo "     BAR0 (VRAM window): ${bar0} MiB$( [ "$bar0" -gt 256 ] && echo ' (Resizable BAR on - fine; turn it off in the BIOS if the VM has trouble)')"
+    else bad "no 1002:747e card found"; fail=1; fi
+    say "Programs"
     local t
     for t in qemu-system-x86_64 qemu-img python3 losetup systemd-run systemd-inhibit modprobe; do
-        if command -v "$t" >/dev/null; then ok "$t"; else bad "brak $t"; fail=1; fi
+        if command -v "$t" >/dev/null; then ok "$t"; else bad "missing $t"; fail=1; fi
     done
-    if modinfo vfio-pci >/dev/null 2>&1 || [ -d /sys/bus/pci/drivers/vfio-pci ]; then ok "vfio-pci"; else bad "brak modułu vfio-pci"; fail=1; fi
-    if ls /lib/firmware/amdgpu/psp_13_0_7_sos.bin* >/dev/null 2>&1; then ok "firmware amdgpu w /lib/firmware/amdgpu"
-    else bad "brak /lib/firmware/amdgpu/psp_13_0_7_sos.bin* (pakiet linux-firmware)"; fail=1; fi
+    if modinfo vfio-pci >/dev/null 2>&1 || [ -d /sys/bus/pci/drivers/vfio-pci ]; then ok "vfio-pci"; else bad "no vfio-pci module"; fail=1; fi
+    if ls /lib/firmware/amdgpu/psp_13_0_7_sos.bin* >/dev/null 2>&1; then ok "amdgpu firmware in /lib/firmware/amdgpu"
+    else bad "no /lib/firmware/amdgpu/psp_13_0_7_sos.bin* (package linux-firmware)"; fail=1; fi
     if ls /lib/firmware/amdgpu/psp_13_0_7_sos.bin.zst >/dev/null 2>&1 && ! command -v zstd >/dev/null; then
-        bad "firmware jest w .zst - zainstaluj zstd"; fail=1
+        bad "the firmware is .zst compressed - install zstd"; fail=1
     fi
     if systemctl cat display-manager.service >/dev/null 2>&1; then ok "display-manager.service"
-    else echo "  ?   brak display-manager.service - pulpit trzeba będzie zamknąć ręcznie (patrz docs)"; fi
-    say "Klawiatura i mysz, które dostanie macOS"
+    else echo "  ?   no display-manager.service - close the desktop session yourself before a step (see docs)"; fi
+    say "Keyboard and mouse macOS will get"
     if [ -n "$($VMTOOL evdev)" ]; then
         $VMTOOL evdev | sed 's/^/     /'
-        echo "     awaryjne wyjście z VM: oba Ctrl naraz, potem 3x Esc (albo przycisk zasilania)"
+        echo "     emergency exit from the VM: both Ctrl keys together, then Esc 3x (or the power button)"
     else
         $VMTOOL usbhid | sed 's/^/     /'
-        echo "     brak /dev/input/by-id: awaryjne wyjście tylko przyciskiem zasilania"
+        echo "     no /dev/input/by-id: the emergency exit is the power button only"
     fi
     echo
-    [ $fail = 0 ] && echo "Wszystko gotowe." || echo "Popraw pozycje oznaczone BŁĄD i uruchom 'rdna3vm check' ponownie."
+    [ $fail = 0 ] && echo "All good." || echo "Fix the lines marked FAIL and run 'rdna3vm check' again."
     return $fail
 }
 
@@ -110,7 +110,7 @@ fw_copy() {   # fw_copy DESTDIR: the firmware the kext loads, decompressed
         if [ -f "$src" ]; then cp "$src" "$dst/$f"
         elif [ -f "$src.zst" ]; then zstd -q -d -f "$src.zst" -o "$dst/$f"
         elif [ -f "$src.xz" ]; then xz -d -c "$src.xz" > "$dst/$f"
-        else die "brak firmware $src (zaktualizuj linux-firmware)"; fi
+        else die "missing firmware $src (update linux-firmware)"; fi
     done
     for f in /lib/firmware/LICENSE.amdgpu /lib/firmware/LICENSES/LICENSE.amdgpu /usr/share/licenses/linux-firmware*/LICENSE.amdgpu; do
         [ -f "$f" ] && cp "$f" "$dst/" && break
@@ -124,22 +124,22 @@ cmd_prepare() {
         case "$1" in
             --osx-kvm) osx=$(readlink -f "$2"); shift 2 ;;
             --artifact) zip=$(readlink -f "$2"); shift 2 ;;
-            *) die "nieznana opcja $1" ;;
+            *) die "unknown option $1" ;;
         esac
     done
     if [ -f "$CONF" ]; then . "$CONF"; osx=${osx:-$OSXKVM}; fi
-    [ -n "$osx" ] && [ -d "$osx/OpenCore" ] || die "podaj --osx-kvm <katalog OSX-KVM> (git clone https://github.com/kholia/OSX-KVM)"
-    [ -n "$zip" ] && [ -f "$zip" ] || die "podaj --artifact <RDNA3Accel-kext.zip z GitHub Actions>"
+    [ -n "$osx" ] && [ -d "$osx/OpenCore" ] || die "give --osx-kvm <OSX-KVM directory> (git clone https://github.com/kholia/OSX-KVM)"
+    [ -n "$zip" ] && [ -f "$zip" ] || die "give --artifact <RDNA3Accel-kext.zip from GitHub Actions>"
     mkdir -p "$WORK/reports" "$WORK/share"
 
-    say "Konfiguracja"
+    say "Configuration"
     local code vars disk
     for code in "$osx/OVMF_CODE_4M.fd" "$osx/OVMF_CODE.fd"; do [ -f "$code" ] && break; done
-    [ -f "$code" ] || die "brak OVMF_CODE*.fd w $osx"
+    [ -f "$code" ] || die "no OVMF_CODE*.fd in $osx"
     for vars in "$osx/OVMF_VARS-1920x1080.fd" "$osx/OVMF_VARS-1024x768.fd" "$osx/OVMF_VARS.fd"; do [ -f "$vars" ] && break; done
-    [ -f "$vars" ] || die "brak OVMF_VARS*.fd w $osx"
+    [ -f "$vars" ] || die "no OVMF_VARS*.fd in $osx"
     disk=$osx/mac_hdd_ng.img
-    [ -f "$disk" ] || { echo "  tworzę dysk macOS 128 GiB: $disk"; qemu-img create -f qcow2 "$disk" 128G >/dev/null; }
+    [ -f "$disk" ] || { echo "  creating a 128 GiB macOS disk: $disk"; qemu-img create -f qcow2 "$disk" 128G >/dev/null; }
     [ -f "$WORK/OVMF_VARS.fd" ] || cp "$vars" "$WORK/OVMF_VARS.fd"
     local ram cpus
     ram=$(awk '/MemTotal/ {m=int($2/1048576/2); if (m>16) m=16; if (m<4) m=4; print m}' /proc/meminfo)
@@ -160,7 +160,7 @@ EOF
     ok "$CONF (RAM ${RAM_GB:-$ram} GiB, $cpus CPU)"
     . "$CONF"
 
-    say "OpenCore (kopia z OSX-KVM, wyłączony SIP, timeout pickera 5 s)"
+    say "OpenCore (copy of OSX-KVM's, SIP off, 5 s picker timeout)"
     if [ ! -f "$WORK/OpenCore-rdna3.img" ]; then
         qemu-img convert -O raw "$osx/OpenCore/OpenCore.qcow2" "$WORK/OpenCore-rdna3.img"
     fi
@@ -173,22 +173,22 @@ EOF
     grep -q '^BASE_ARGS=' "$CONF" || echo "BASE_ARGS=\"$base\"" >> "$CONF"
     . "$CONF"
     base=$BASE_ARGS
-    ok "OpenCore gotowy (boot-args z OSX-KVM: $base)"
+    ok "OpenCore ready (OSX-KVM boot-args: $base)"
 
-    say "Paczka dla macOS"
+    say "Bundle for macOS"
     local st=$WORK/stage
     rm -rf "$st" && mkdir -p "$st/kexts" "$st/bin" "$st/tools/macos"
     $VMTOOL unzip "$zip" "$st/artifact"
     local a=$st/artifact
     [ -d "$a/RDNA3Accel.kext" ] || a=$(dirname "$(find "$st/artifact" -name RDNA3Accel.kext -type d | head -1)")
-    [ -d "$a/RDNA3Accel.kext" ] || die "w $zip nie ma RDNA3Accel.kext"
+    [ -d "$a/RDNA3Accel.kext" ] || die "no RDNA3Accel.kext in $zip"
     cp -R "$a"/*.kext "$st/kexts/"
     fw_copy "$st/kexts/RDNA3Accel.kext/Contents/Resources"
-    ok "kexty: $(cd "$st/kexts" && echo *.kext), firmware: $(ls "$st/kexts/RDNA3Accel.kext/Contents/Resources" | wc -l) plików"
+    ok "kexts: $(cd "$st/kexts" && echo *.kext), firmware: $(ls "$st/kexts/RDNA3Accel.kext/Contents/Resources" | wc -l) files"
     if [ -f "$a/userspace/rdna3_drminfo" ]; then
         cp "$a/userspace/rdna3_drminfo" "$st/bin/"
         if [ -f "$a/userspace/libdrm.dylib" ]; then cp "$a/userspace/libdrm.dylib" "$st/bin/libdrm.2.dylib"
-        else echo "  (artefakt bez libdrm.dylib: testy DMA/GFX w krokach 7-8 się nie uruchomią)"; fi
+        else echo "  (artifact without libdrm.dylib: the DMA/GFX tests of steps 7-8 will not run)"; fi
     fi
     cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" "$st/tools/macos/"
     cp "$TOOLS/macos/autoreport.sh" "$st/"
@@ -198,37 +198,37 @@ EOF
     ok "$WORK/share/rdna3-bundle.tar.gz"
 
     local bdf
-    bdf=$(gpu_bdf) || die "nie widzę karty 1002:747e"
-    say "VBIOS karty (dla UEFI w VM)"
+    bdf=$(gpu_bdf) || die "no 1002:747e card found"
+    say "Card VBIOS (for the VM's UEFI)"
     if [ ! -f "$WORK/vbios.rom" ]; then
         sudo sh -c "echo 1 > /sys/bus/pci/devices/$bdf/rom; cat /sys/bus/pci/devices/$bdf/rom > '$WORK/vbios.rom.tmp'; echo 0 > /sys/bus/pci/devices/$bdf/rom" 2>/dev/null || true
         sudo chown "$(id -u):$(id -g)" "$WORK/vbios.rom.tmp" 2>/dev/null || true
         if [ -s "$WORK/vbios.rom.tmp" ] && $VMTOOL romcheck "$WORK/vbios.rom.tmp"; then
             mv "$WORK/vbios.rom.tmp" "$WORK/vbios.rom"; ok "$WORK/vbios.rom"
         else
-            rm -f "$WORK/vbios.rom.tmp"; echo "  nie udało się - VM odczyta ROM z karty sam (zwykle działa)"
+            rm -f "$WORK/vbios.rom.tmp"; echo "  failed - the VM reads the ROM from the card itself (usually works)"
         fi
-    else ok "już jest: $WORK/vbios.rom"; fi
+    else ok "already there: $WORK/vbios.rom"; fi
 
-    say "Dane referencyjne z Linuksa (amdgpu)"
+    say "Reference data from Linux (amdgpu)"
     if [ ! -d "$WORK/reports/linux-reference" ]; then
         sudo sh "$ROOT/tools/linux/dump_amdgpu_reference.sh" "$WORK/reports/linux-reference" >/dev/null 2>&1 \
             && sudo chown -R "$(id -u):$(id -g)" "$WORK/reports/linux-reference" && ok "reports/linux-reference" \
-            || echo "  pominięte (amdgpu nie jest załadowany?)"
-    else ok "już są"; fi
+            || echo "  skipped (amdgpu not loaded?)"
+    else ok "already there"; fi
     echo
-    echo "Gotowe. Dalej: 'rdna3vm window' (instalacja macOS / setup w VM)."
+    echo "Done. Next: 'rdna3vm window' (macOS install / setup in the VM)."
 }
 
 # OpenCore config.plist edits, as root: rdna3vm _oc <vmtool plist options>
 cmd__oc() {
     local img=$WORK/OpenCore-rdna3.img mnt loop part
-    [ -f "$img" ] || die "brak $img"
+    [ -f "$img" ] || die "no $img"
     mnt=$(mktemp -d)
     loop=$(losetup --find --show --partscan "$img")
     part=${loop}p1
     [ -b "$part" ] || part=$loop
-    mount -t vfat "$part" "$mnt" || { losetup -d "$loop"; die "nie mogę zamontować OpenCore"; }
+    mount -t vfat "$part" "$mnt" || { losetup -d "$loop"; die "cannot mount OpenCore"; }
     local rc=0
     $VMTOOL plist "$mnt/EFI/OC/config.plist" "$@" || rc=$?
     sync; umount "$mnt"; losetup -d "$loop"; rmdir "$mnt"
@@ -267,7 +267,7 @@ cmd_window() {
     $VMTOOL serve "$WORK/share" 8000 >"$WORK/share.log" 2>&1 &
     local srv=$!
     trap 'kill $srv 2>/dev/null' EXIT
-    say "macOS w oknie (karta zostaje przy Linuksie). W Terminalu macOS:"
+    say "macOS in a window (the card stays with Linux). In the macOS Terminal:"
     echo "    curl -s http://10.0.2.2:8000/setup.sh | sudo sh"
     qemu-system-x86_64 "${QARGS[@]}"
 }
@@ -291,25 +291,25 @@ step_args() {
 launch() {   # launch "rdna3 args" stay(0/1)
     load_conf
     local extra=$1 stay=$2 bootargs
-    gpu_bdf >/dev/null || die "nie widzę karty 1002:747e"
+    gpu_bdf >/dev/null || die "no 1002:747e card found"
     bootargs="$BASE_ARGS $DEBUG_ARGS $extra"
     [ "$stay" = 1 ] || bootargs="$bootargs rdna3vmauto=1"
-    sudo -v || die "potrzebne sudo"
+    sudo -v || die "sudo is needed"
     # an automatic step is done in ~3 min; a stuck one should not keep the
     # screen dark for long. --stay keeps TIMEOUT_MIN.
     local limit=$TIMEOUT_MIN
     [ "$stay" = 1 ] || limit=${AUTO_TIMEOUT_MIN:-8}
-    say "Start VM z kartą: $extra"
-    echo "  Za chwilę ekran zgaśnie (Linux oddaje kartę), potem pojawi się macOS."
+    say "Starting the VM with the card: $extra"
+    echo "  The screen goes dark in a moment (Linux hands the card over), then macOS appears."
     if [ "$stay" = 1 ]; then
-        echo "  VM zostaje włączona; zamknij macOS normalnie (Apple -> Wyłącz)."
+        echo "  The VM stays up; shut macOS down normally (Apple menu -> Shut Down)."
     else
-        echo "  Po ~2 min od startu macOS sam wyśle raport i się wyłączy; wróci pulpit."
+        echo "  About 2 min after booting, macOS sends its report and shuts down; the desktop comes back."
     fi
-    echo "  Zawieszenie / czarny ekran - awaryjne wyjście (zamyka tylko VM):"
-    echo "    * oba Ctrl naraz, potem 3x Esc"
-    echo "    * albo KRÓTKO przycisk zasilania komputera"
-    echo "  Bez reakcji: VM zamknie się sama po $limit min."
+    echo "  Hang / black screen - emergency exit (stops the VM only):"
+    echo "    * both Ctrl keys together, then Esc 3x"
+    echo "    * or a SHORT press of the PC's power button"
+    echo "  Otherwise the VM stops by itself after $limit min."
     sleep 5
     sudo systemd-run --unit="rdna3vm-$(date +%H%M%S)" --collect --quiet \
         --setenv=RDNA3VM_DIR="$WORK" --setenv=RDNA3VM_BOOTARGS="$bootargs" \
@@ -319,15 +319,15 @@ launch() {   # launch "rdna3 args" stay(0/1)
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "podaj numer kroku: 0 1 2 3 4 5 5b 6 6b 7 8 9 10"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 6 6b 7 8 9 10"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "nieznany krok $n (0 1 2 3 4 5 5b 6 6b 7 8 9 10 off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 6 6b 7 8 9 10 off)"
     launch "$a" "$stay"
 }
 
 cmd_args() {
     local stay=0
-    [ -n "${1:-}" ] || die 'podaj boot-args, np. rdna3vm args "rdna3lvl=2"'
+    [ -n "${1:-}" ] || die 'give boot-args, e.g. rdna3vm args "rdna3lvl=2"'
     [ "${2:-}" = --stay ] && stay=1
     launch "$1" "$stay"
 }
@@ -348,14 +348,14 @@ detach() {
         [ -n "$drv" ] && [ "$(basename "$drv")" != vfio-pci ] && echo "$d" > "$drv/unbind"
         echo vfio-pci > /sys/bus/pci/devices/$d/driver_override
         echo "$d" > /sys/bus/pci/drivers_probe
-        [ "$(basename "$(readlink -f /sys/bus/pci/devices/$d/driver)")" = vfio-pci ] || { echo "vfio-pci nie przejął $d"; return 1; }
+        [ "$(basename "$(readlink -f /sys/bus/pci/devices/$d/driver)")" = vfio-pci ] || { echo "vfio-pci did not take $d"; return 1; }
         echo "  $d -> vfio-pci"
     done
 }
 
 restore() {
     local d
-    echo "== przywracam kartę Linuksowi"
+    echo "== giving the card back to Linux"
     for d in "${DEVS[@]}"; do
         [ -e /sys/bus/pci/drivers/vfio-pci/$d ] && echo "$d" > /sys/bus/pci/drivers/vfio-pci/unbind
         echo > /sys/bus/pci/devices/$d/driver_override
@@ -377,7 +377,7 @@ cmd__passthrough() {
     cmd__oc --boot-args "$RDNA3VM_BOOTARGS" || exit 1
     bdf=$(gpu_bdf)
     mapfile -t DEVS < <(group_devs "$bdf")
-    echo "do VM: ${DEVS[*]}"
+    echo "to the VM: ${DEVS[*]}"
     echo 1 > /sys/module/kvm/parameters/ignore_msrs
     echo 0 > /sys/module/kvm/parameters/report_ignored_msrs 2>/dev/null || true
 
@@ -410,14 +410,14 @@ cmd__passthrough() {
         n=$((n + 1))
         QARGS+=(-object "input-linux,id=in$n,evdev=$path,grab_all=on,repeat=on,grab-toggle=ctrl-ctrl")
         [ "$kind" = kbd ] && KBDS+=("$path")
-        echo "wejście do VM: $kind $path"
+        echo "input to the VM: $kind $path"
     done < <($VMTOOL evdev)
     if [ $n -gt 0 ]; then
         QARGS+=(-device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0)
     else
         while read -r vid pid name; do
             QARGS+=(-device "usb-host,bus=xhci.0,vendorid=0x$vid,productid=0x$pid")
-            echo "USB do VM: $vid:$pid $name"
+            echo "USB to the VM: $vid:$pid $name"
         done < <($VMTOOL usbhid)
     fi
 
@@ -426,7 +426,7 @@ cmd__passthrough() {
 
     local srv inh pk tm qpid
     $VMTOOL serve "$WORK/share" 8000 >>"$WORK/share.log" 2>&1 & srv=$!
-    systemd-inhibit --what=handle-power-key --who=rdna3vm --why="przycisk zamyka VM" --mode=block sleep infinity & inh=$!
+    systemd-inhibit --what=handle-power-key --who=rdna3vm --why="the power button stops the VM" --mode=block sleep infinity & inh=$!
     $VMTOOL stopkeys "${KBDS[@]}" & pk=$!
     local limit=${RDNA3VM_TIMEOUT:-$TIMEOUT_MIN}
     sleep $((limit * 60)) & tm=$!
@@ -436,11 +436,11 @@ cmd__passthrough() {
         wait -n || true
     done
     if kill -0 $qpid 2>/dev/null; then
-        kill -0 $pk 2>/dev/null || echo "== awaryjne wyjście (przycisk / Ctrl+Ctrl, Esc x3): zamykam VM"
-        kill -0 $tm 2>/dev/null || echo "== limit $limit min: zamykam VM"
+        kill -0 $pk 2>/dev/null || echo "== emergency exit (power button / Ctrl+Ctrl, Esc x3): stopping the VM"
+        kill -0 $tm 2>/dev/null || echo "== $limit min limit: stopping the VM"
         kill $qpid; sleep 3; kill -9 $qpid 2>/dev/null || true
     else
-        echo "== VM wyłączyła się sama"
+        echo "== the VM shut down by itself"
     fi
     wait $qpid 2>/dev/null || true
     kill $srv $inh $pk $tm 2>/dev/null || true
@@ -450,7 +450,7 @@ cmd__passthrough() {
 cmd_reports() {
     ls -lt "$WORK/reports" | head -30
     echo
-    echo "Prześlij mi najnowsze: rdna3-report-*.tar.gz, *-tests.txt, serial-*.log, host-*.log"
+    echo "Send the newest: rdna3-report-*.tar.gz, *-tests.txt, serial-*.log, host-*.log"
 }
 
 case "${1:-}" in

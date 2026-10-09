@@ -1,94 +1,94 @@
-# Test na sprzęcie: drabinka krok po kroku
+# Hardware test: step-by-step ladder
 
-Jedna procedura dla hackintosha z RX 7800 XT. Masz Linuksa i tę kartę jako
-jedyną? Ta sama drabinka w maszynie wirtualnej, zautomatyzowana:
-[TESTING-VM](TESTING-VM.md). Każdy krok dokłada jedną
-rzecz, a po każdym zbierasz raport jednym skryptem. Jeśli krok zawiesi
-system albo zgasi ekran, wracasz do poprzedniego i przysyłasz raport z
-niego oraz opis objawu. Szczegóły modułów są w `STAGE1`–`STAGE7`.
+A single procedure for a hackintosh with an RX 7800 XT. Do you have Linux and this card as
+the only one? The same ladder runs in a virtual machine, automated:
+[TESTING-VM](TESTING-VM.md). Each step adds one
+thing, and after each one you collect a report with a single script. If a step hangs
+the system or turns off the screen, go back to the previous one and send the report from
+it together with a description of the symptom. Module details are in `STAGE1`–`STAGE7`.
 
-## Przed pierwszym krokiem
+## Before the first step
 
-1. **Droga powrotu.** W OpenCore zostaw drugi wpis albo drugą kopię EFI, w
-   której kexty RDNA3 są wyłączone. Boot-arg `-rdna3off` też wyłącza
-   wszystko. Sprawdź raz, że umiesz edytować boot-args w pickerze (spacja,
-   potem wpis z boot-args albo `Cmd+V` dla trybu verbose).
-2. **Zdalny dostęp.** Ustawienia → Ogólne → Udostępnianie → Logowanie
-   zdalne (SSH). Gdy ekran zgaśnie, raport zbierzesz przez SSH z innego
-   komputera.
-3. **BIOS.** CSM wyłączony, Above 4G Decoding włączony. Przy kłopotach z
-   Resizable BAR: wyłącz go albo `ResizeAppleGpuBars = -1` w OpenCore.
-4. **Budowanie i instalacja.** Na Macu w katalogu repozytorium:
+1. **A way back.** In OpenCore keep a second entry or a second copy of the EFI in
+   which the RDNA3 kexts are disabled. The boot-arg `-rdna3off` also disables
+   everything. Check once that you can edit boot-args in the picker (space,
+   then the entry with boot-args, or `Cmd+V` for verbose mode).
+2. **Remote access.** System Settings → General → Sharing → Remote
+   Login (SSH). When the screen goes dark, you collect the report over SSH from another
+   computer.
+3. **BIOS.** CSM disabled, Above 4G Decoding enabled. If you have trouble with
+   Resizable BAR: disable it or set `ResizeAppleGpuBars = -1` in OpenCore.
+4. **Build and install.** On the Mac, in the repository directory:
 
    ```sh
    make kext && make -C userspace && make tools
-   make -C accel && make -C fb          # akcelerator i framebuffer (od kroku 9)
-   sudo package/install.sh --fw /ścieżka/do/linux-firmware/amdgpu
+   make -C accel && make -C fb          # accelerator and framebuffer (from step 9)
+   sudo package/install.sh --fw /path/to/linux-firmware/amdgpu
    ```
 
-   Firmware nie jest w repozytorium (`docs/FIRMWARE.md`). Instalator
-   przebudowuje Auxiliary Kernel Collection; potrzebny jest restart.
-5. **Boot-args ustawiasz raz na krok**, na przykład:
+   Firmware is not in the repository (`docs/FIRMWARE.md`). The installer
+   rebuilds the Auxiliary Kernel Collection; a restart is required.
+5. **Set boot-args once per step**, for example:
 
    ```sh
    sudo nvram boot-args="-v keepsyms=1 rdna3lvl=2"
    ```
 
-   Zachowaj swoje dotychczasowe boot-args i dopisuj do nich te z tabeli.
-6. **Raport po każdym kroku** (po restarcie, ze zwykłego terminala lub SSH):
+   Keep your existing boot-args and append the ones from the table.
+6. **Report after each step** (after the restart, from a normal terminal or SSH):
 
    ```sh
-   tools/macos/collect.sh krok3
+   tools/macos/collect.sh step3
    ```
 
-   Skrypt niczego nie zmienia. Tworzy `~/rdna3-report-krok3-<data>.tar.gz`
-   z logami, IORegistry, boot-args i ewentualnym raportem paniki.
+   The script changes nothing. It creates `~/rdna3-report-step3-<date>.tar.gz`
+   with logs, IORegistry, boot-args and a panic report, if any.
 
-## Drabinka
+## The ladder
 
-| Krok | Boot-args (dopisz) | Co robi | Sprawdź (`11-ioreg-props.txt`, `20-log-rdna3.txt`) | Ryzyko |
+| Step | Boot-args (append) | What it does | Check (`11-ioreg-props.txt`, `20-log-rdna3.txt`) | Risk |
 |---|---|---|---|---|
-| 1 | `rdna3lvl=1` | mapuje BAR5, czeka na PSP, czyta rozmiar VRAM | `RDNA3,VRAMSizeMB = 16384`, brak `MMIO reads all-ones` | niskie |
-| 2 | `rdna3lvl=2` | tablica IP discovery, odczyt głowic DCN, VBIOS, ścieżki wyświetlania, DP AUX/EDID | `IP discovery ... ok`, GC 11.0.3; `RDNA3,DisplayHeads = 1`; `RDNA3,DisplayPath0` (np. `DP-1 UNIPHYA DDC1 HPD1`); `RDNA3,Connector0,Monitor` = nazwa monitora; `RDNA3,Head0EdidMode`; `RDNA3,AtomCommandTables` | niskie: zapisy tylko do okien odczytu i rejestrów AUX |
-| 3 | `rdna3lvl=3` | pierwszy rejestr GC z discovery | `GRBM_STATUS`, `RDNA3,GBAddrConfig`, `RDNA3,ActiveCUs = 60` | niskie |
-| 4 | `rdna3lvl=4` | PSP: bootloader, sOS, TMR, ładowanie całego firmware | `RDNA3,Stage2 = PSP up, firmware loaded`, `sOS running`, 29× `LOAD_IP_FW ... ok`, `RLC autoload started` | średnie: pierwsze zapisy do PSP |
-| 5 | `rdna3lvl=5` | SMU: PMFW, VBIOS, PPTable, cechy bezpieczne, metryki | `RDNA3,SMUVersion`, `RDNA3,PM`, `RDNA3,PMFeaturesRunning`, `RDNA3,PMTempHotspotC`, `RDNA3,PMFanRPM` | średnie: zegary i wentylator |
-| 5b | `rdna3lvl=5 rdna3dmub=1` | DMCUB: zatrzymanie firmware z VBIOS, okna, ponowny start, skrzynka komend | `RDNA3,DMUB = running, mailbox up`, `RDNA3,DMUBVersion = 0x07003300` (lub zbliżona), `RDNA3,DMUBBootStatus` z bitami 0 i 1 | **ekran może mrugnąć lub zgasnąć**; wtedy SSH, raport, krok bez `rdna3dmub` |
-| 6 | `rdna3lvl=6` | GMC (GART, MMHUB), ring IH, doorbelle | `RDNA3,GMCResult = 0`, `RDNA3,IHResult = 0`, `RDNA3,Doorbells` | średnie |
-| 6b | `rdna3lvl=6 rdna3msi=1` | przerwania MSI zamiast odpytywania | `RDNA3,IRQs` rośnie | niskie |
-| 7 | `rdna3lvl=7 rdna3msi=1` | SDMA0: test ringu, kopia 64 KiB VRAM→VRAM | `RDNA3,SDMAResult = 0`, `RDNA3,SDMACopyMismatches = 0`, `RDNA3,MSIVerified = 1` | średnie: **pierwsze polecenia wykonywane przez GPU** |
-| 7b | jak 7 | z terminala: `build/userspace/rdna3_drminfo --dma-test` | `DMA job results verified (WRITE_LINEAR + CONST_FILL)` | średnie |
-| 8 | `rdna3lvl=8 rdna3msi=1` | GFX 11: RLC, RS64, ring GFX, KIQ, KCQ | `RDNA3,GFXResult = 0`, `RDNA3,KIQResult = 0`, `RDNA3,KCQResult = 0` | średnie |
-| 8b | jak 8 | `build/userspace/rdna3_drminfo --gfx-test` | `GFX job results verified (PM4 WRITE_DATA)` | średnie |
-| 9 | jak 8 + `rdna3fb=1` | nasz framebuffer zamiast IONDRV na trybie z GOP | pulpit bez zmian, w logu `RDNA3FB: ... EDID ... from AUX` i nazwa monitora w Ustawieniach → Monitory | **ekran może zgasnąć** |
-| 10 | jak 9 + `rdna3accel=1` | akcelerator IOAcceleratorFamily2 | `ioreg -c RDNA3Accelerator`, w logu `populateAccelConfig ... what the FAMILY pre-filled` | wysokie: WindowServer |
-| 11 | jak 10 | `vulkaninfo --summary` z RADV z `/Library/GPUBundles/rdna3mtl` | urządzenie `AMD Radeon RX 7800 XT (RADV NAVI32)` | średnie |
-| 12 | jak 10, potem `sudo sysctl -w debug.rdna3accelfb=1` | wtyczka Metal dla procesów z listy `rdna3mtl-allow.txt` | `mtlprobe` widzi urządzenie AMD | wysokie |
+| 1 | `rdna3lvl=1` | maps BAR5, waits for PSP, reads the VRAM size | `RDNA3,VRAMSizeMB = 16384`, no `MMIO reads all-ones` | low |
+| 2 | `rdna3lvl=2` | IP discovery table, reading DCN heads, VBIOS, display paths, DP AUX/EDID | `IP discovery ... ok`, GC 11.0.3; `RDNA3,DisplayHeads = 1`; `RDNA3,DisplayPath0` (e.g. `DP-1 UNIPHYA DDC1 HPD1`); `RDNA3,Connector0,Monitor` = monitor name; `RDNA3,Head0EdidMode`; `RDNA3,AtomCommandTables` | low: writes only to read windows and AUX registers |
+| 3 | `rdna3lvl=3` | first GC register from discovery | `GRBM_STATUS`, `RDNA3,GBAddrConfig`, `RDNA3,ActiveCUs = 60` | low |
+| 4 | `rdna3lvl=4` | PSP: bootloader, sOS, TMR, loading all firmware | `RDNA3,Stage2 = PSP up, firmware loaded`, `sOS running`, 29× `LOAD_IP_FW ... ok`, `RLC autoload started` | medium: first writes to PSP |
+| 5 | `rdna3lvl=5` | SMU: PMFW, VBIOS, PPTable, safe features, metrics | `RDNA3,SMUVersion`, `RDNA3,PM`, `RDNA3,PMFeaturesRunning`, `RDNA3,PMTempHotspotC`, `RDNA3,PMFanRPM` | medium: clocks and fan |
+| 5b | `rdna3lvl=5 rdna3dmub=1` | DMCUB: stopping the firmware started by the VBIOS, windows, restart, command mailbox | `RDNA3,DMUB = running, mailbox up`, `RDNA3,DMUBVersion = 0x07003300` (or close), `RDNA3,DMUBBootStatus` with bits 0 and 1 | **the screen may flicker or go dark**; then SSH, report, step without `rdna3dmub` |
+| 6 | `rdna3lvl=6` | GMC (GART, MMHUB), IH ring, doorbells | `RDNA3,GMCResult = 0`, `RDNA3,IHResult = 0`, `RDNA3,Doorbells` | medium |
+| 6b | `rdna3lvl=6 rdna3msi=1` | MSI interrupts instead of polling | `RDNA3,IRQs` increases | low |
+| 7 | `rdna3lvl=7 rdna3msi=1` | SDMA0: ring test, 64 KiB VRAM→VRAM copy | `RDNA3,SDMAResult = 0`, `RDNA3,SDMACopyMismatches = 0`, `RDNA3,MSIVerified = 1` | medium: **first commands executed by the GPU** |
+| 7b | same as 7 | from a terminal: `build/userspace/rdna3_drminfo --dma-test` | `DMA job results verified (WRITE_LINEAR + CONST_FILL)` | medium |
+| 8 | `rdna3lvl=8 rdna3msi=1` | GFX 11: RLC, RS64, GFX ring, KIQ, KCQ | `RDNA3,GFXResult = 0`, `RDNA3,KIQResult = 0`, `RDNA3,KCQResult = 0` | medium |
+| 8b | same as 8 | `build/userspace/rdna3_drminfo --gfx-test` | `GFX job results verified (PM4 WRITE_DATA)` | medium |
+| 9 | same as 8 + `rdna3fb=1` | our framebuffer instead of IONDRV on the GOP mode | desktop unchanged, `RDNA3FB: ... EDID ... from AUX` in the log and the monitor name in System Settings → Displays | **the screen may go dark** |
+| 10 | same as 9 + `rdna3accel=1` | IOAcceleratorFamily2 accelerator | `ioreg -c RDNA3Accelerator`, `populateAccelConfig ... what the FAMILY pre-filled` in the log | high: WindowServer |
+| 11 | same as 10 | `vulkaninfo --summary` with RADV from `/Library/GPUBundles/rdna3mtl` | device `AMD Radeon RX 7800 XT (RADV NAVI32)` | medium |
+| 12 | same as 10, then `sudo sysctl -w debug.rdna3accelfb=1` | Metal plugin for processes listed in `rdna3mtl-allow.txt` | `mtlprobe` sees the AMD device | high |
 
-Zasada: **nie przechodź dalej, dopóki krok nie daje oczekiwanych wartości.**
-Gdy wynik jest inny niż w tabeli, przyślij raport. To jest dokładnie ta
-informacja, której nie da się uzyskać w symulatorze.
+Rule: **do not move on until a step gives the expected values.**
+When a result differs from the table, send the report. That is exactly the
+information that cannot be obtained in the simulator.
 
-## Gdy coś pójdzie źle
+## When something goes wrong
 
-| Objaw | Co zrobić |
+| Symptom | What to do |
 |---|---|
-| zawieszenie przy starcie na kroku N | restart z boot-args kroku N−1 (picker OpenCore) i raport z tego startu; opisz, na którym etapie logu verbose stanął |
-| kernel panic | po restarcie `collect.sh` sam dołącza dwa ostatnie raporty paniki |
-| czarny ekran, system żyje | SSH, `tools/macos/collect.sh ekran`, potem `sudo nvram boot-args="..."` bez ostatniej flagi i `sudo reboot` |
-| brak jakichkolwiek wpisów `RDNA3` w logu | kext się nie załadował: `03-kexts.txt` i `kmutil showloaded`; sprawdź, czy instalator przebudował kolekcję i czy SIP pozwala na kexty z `/Library/Extensions` |
-| `RDNA3,PSPResult` różny od 0 | brakuje firmware w `RDNA3Accel.kext/Contents/Resources` albo to inna wersja niż oczekiwana; przyślij raport |
+| hang at boot on step N | restart with the boot-args of step N−1 (OpenCore picker) and a report from that boot; describe at which point of the verbose log it stopped |
+| kernel panic | after the restart `collect.sh` attaches the two latest panic reports by itself |
+| black screen, system alive | SSH, `tools/macos/collect.sh screen`, then `sudo nvram boot-args="..."` without the last flag and `sudo reboot` |
+| no `RDNA3` entries at all in the log | the kext did not load: `03-kexts.txt` and `kmutil showloaded`; check that the installer rebuilt the collection and that SIP allows kexts from `/Library/Extensions` |
+| `RDNA3,PSPResult` other than 0 | firmware is missing from `RDNA3Accel.kext/Contents/Resources` or it is a different version than expected; send the report |
 
-## Czego nie da się sprawdzić bez karty
+## What cannot be checked without the card
 
-Symulator modeluje zachowanie z kodu Linuksa, ale nie wie, jak naprawdę
-zachowa się karta. Pierwszy test powie przede wszystkim:
+The simulator models the behaviour from the Linux code, but it does not know how the card
+will really behave. The first test will tell us above all:
 
-* czy PSP przyjmuje nasz porządek ładowania firmware (krok 4);
-* czy PMFW akceptuje BoardTable z VBIOS i bezpieczny zestaw cech (krok 5);
-* czy reset DMCUB pod działającym obrazem z GOP jest bezpieczny (krok 5b);
-* czy GPU wykonuje nasze pakiety SDMA i PM4 (kroki 7 i 8);
-* jak IOAcceleratorFamily2 wypełnia `IOAccelConfig` przed nami (krok 10).
+* whether PSP accepts our firmware loading order (step 4);
+* whether PMFW accepts the BoardTable from the VBIOS and the safe feature set (step 5);
+* whether resetting DMCUB under a live GOP image is safe (step 5b);
+* whether the GPU executes our SDMA and PM4 packets (steps 7 and 8);
+* how IOAcceleratorFamily2 fills `IOAccelConfig` before us (step 10).
 
-Dalsza praca nad modesetem (DML, zegar piksela, trening DP) zaczyna się po
-krokach 2, 5b i 9, bo potrzebuje prawdziwych wartości rejestrów DCN.
+Further modeset work (DML, pixel clock, DP training) starts after
+steps 2, 5b and 9, because it needs real DCN register values.

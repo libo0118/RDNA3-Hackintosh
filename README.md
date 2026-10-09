@@ -1,67 +1,67 @@
 # RDNA3-Hackintosh
 
-Otwartoźródłowy sterownik macOS (x86_64, Hackintosh) dla kart AMD RDNA3,
-zaczynając od **Radeon RX 7800 XT (Navi 32, PCI `1002:747E`)**.
+An open-source macOS driver (x86_64, Hackintosh) for AMD RDNA3 cards,
+starting with the **Radeon RX 7800 XT (Navi 32, PCI `1002:747E`)**.
 
-> **Status:** kod etapów 1, 2 (PSP/firmware/SMU), 4, 5 i 6 jest napisany i
-> buduje się w CI, ale **nic nie było jeszcze uruchomione na prawdziwej karcie**.
-> Sterownik niczego nie wyświetla ani nie akceleruje. Stan każdego etapu:
+> **Status:** the code for stages 1, 2 (PSP/firmware/SMU), 4, 5 and 6 is written and
+> builds in CI, but **nothing has run on a real card yet**.
+> The driver does not display or accelerate anything. Status of each stage:
 > [docs/ROADMAP.md](docs/ROADMAP.md).
 
-## Co jest w repo
+## What is in the repo
 
-| Ścieżka | Co to jest |
+| Path | What it is |
 |---|---|
-| `kext/` | `RDNA3Accel.kext`: dopasowanie PCI, mapowanie BAR5 (MMIO), bezpieczne odczyty, odczyt i dekodowanie tablicy IP discovery z VRAM |
-| `common/amd_discovery.[ch]` | Przenośny parser tablicy *IP discovery* (C99, bez libc, sprawdza wszystkie granice). Ten sam kod działa w kexcie i na hoście |
-| `tests/` | Testy jednostkowe parsera i fuzzing mutacyjny pod ASan/UBSan |
-| `tools/amd_discovery_dump.c` | Dekoder blobu discovery na hoście: wersje IP, bazy rejestrów, potrzebne pliki firmware |
-| `tools/linux/` | Zrzut danych referencyjnych z tej samej karty pod Linuksem/amdgpu |
-| `tools/macos/` | Wyciąga blob discovery opublikowany przez kext z `ioreg` |
-| `hw/` | Przenośny bring-up (PSP 13.0.x, SMU 13.0.x, rejestry, VRAM), testowany na symulatorze `tests/sim_navi32.c` |
-| `uapi/` | Linuksowe UAPI amdgpu niezależne od OS (używane przez kext i testy) |
-| `userspace/` | `libdrm_xnu` (rdzeń libdrm nad IOKit) + build libdrm_amdgpu; `mesa/` = build RADV na macOS i łatki |
-| `metal/` | Wtyczka Metal i tłumacz AIR→SPIR-V z NullMoth, przystosowane do AMD |
-| `third_party/` | Nagłówki AMD/DRM (MIT) i libdrm_amdgpu (MIT) |
-| `docs/` | Plan, przygotowanie stanowiska, instrukcje testów, licencje firmware, [analiza sterownika NullMoth (NVIDIA)](docs/NULLMOTH-ANALYSIS.md) |
+| `kext/` | `RDNA3Accel.kext`: PCI matching, BAR5 (MMIO) mapping, safe reads, reading and decoding the IP discovery table from VRAM |
+| `common/amd_discovery.[ch]` | Portable parser for the *IP discovery* table (C99, no libc, checks all bounds). The same code runs in the kext and on the host |
+| `tests/` | Parser unit tests and mutation fuzzing under ASan/UBSan |
+| `tools/amd_discovery_dump.c` | Host-side discovery blob decoder: IP versions, register bases, required firmware files |
+| `tools/linux/` | Dump of reference data from the same card under Linux/amdgpu |
+| `tools/macos/` | Extracts the discovery blob published by the kext from `ioreg` |
+| `hw/` | Portable bring-up (PSP 13.0.x, SMU 13.0.x, registers, VRAM), tested on the `tests/sim_navi32.c` simulator |
+| `uapi/` | OS-independent Linux amdgpu UAPI (used by the kext and the tests) |
+| `userspace/` | `libdrm_xnu` (libdrm core over IOKit) + libdrm_amdgpu build; `mesa/` = RADV build on macOS and patches |
+| `metal/` | Metal plugin and AIR→SPIR-V translator from NullMoth, adapted to AMD |
+| `third_party/` | AMD/DRM headers (MIT) and libdrm_amdgpu (MIT) |
+| `docs/` | Plan, test bench setup, test instructions, firmware licenses, [analysis of the NullMoth driver (NVIDIA)](docs/NULLMOTH-ANALYSIS.md) |
 
-## Szybki start
+## Quick start
 
-Na dowolnym systemie (Linux/macOS):
+On any system (Linux/macOS):
 
 ```sh
-make test     # testy parsera + fuzzing (ASan/UBSan)
+make test     # parser tests + fuzzing (ASan/UBSan)
 make tools    # build/host/amd_discovery_dump
 ```
 
-Na Macu z Xcode (kext budujemy tylko tam):
+On a Mac with Xcode (the kext is built only there):
 
 ```sh
 make kext     # -> build/RDNA3Accel.kext (x86_64)
 ```
 
-CI (GitHub Actions) buduje kext na `macos-15` i dołącza go jako artefakt.
+CI (GitHub Actions) builds the kext on `macos-15` and attaches it as an artifact.
 
-**Test na Linuksie z tą kartą jako jedyną (macOS w VM, passthrough):**
-[docs/TESTING-VM.md](docs/TESTING-VM.md), czyli jeden skrypt `tools/vm/rdna3vm`, krok po kroku.
-Test na hackintoshu: [docs/TESTING-HW.md](docs/TESTING-HW.md).
+**Test on Linux with this card as the only one (macOS in a VM, passthrough):**
+[docs/TESTING-VM.md](docs/TESTING-VM.md), i.e. a single script `tools/vm/rdna3vm`, step by step.
+Test on a hackintosh: [docs/TESTING-HW.md](docs/TESTING-HW.md).
 
-Ładowanie kextu na maszynie testowej i poziomy bezpieczeństwa (`rdna3lvl=`)
-opisuje [docs/STAGE1.md](docs/STAGE1.md). Najpierw przeczytaj
-[docs/STAGE0.md](docs/STAGE0.md): **bez drugiej karty do obrazu nie testuj.**
+Loading the kext on the test machine and the safety levels (`rdna3lvl=`)
+are described in [docs/STAGE1.md](docs/STAGE1.md). Read
+[docs/STAGE0.md](docs/STAGE0.md) first: **do not test without a second card for display.**
 
-## Zasady projektu
+## Project rules
 
-* **amdgpu (Linux) jest źródłem prawdy** dla sprzętu. Każdy rejestr w kodzie ma
-  odnośnik do pliku nagłówkowego amdgpu, z którego pochodzi. amdgpu jest na
-  licencji MIT, więc port jest zgodny licencyjnie.
-* **Najpierw tylko odczyt.** Każdy etap dodaje zapisy do sprzętu dopiero gdy
-  odczyty zgadzają się z referencją z Linuksa (`tools/linux/`).
-* **Dane ze sprzętu są niezaufane.** Parsery sprawdzają granice i są fuzzowane;
-  zły blob nie może wywalić jądra.
-* **Firmware AMD nie trafia do repo.** Patrz [docs/FIRMWARE.md](docs/FIRMWARE.md).
+* **amdgpu (Linux) is the source of truth** for the hardware. Every register in the code has
+  a reference to the amdgpu header file it comes from. amdgpu is
+  MIT-licensed, so the port is license-compatible.
+* **Read-only first.** Each stage adds writes to the hardware only once
+  the reads match the Linux reference (`tools/linux/`).
+* **Data from the hardware is untrusted.** Parsers check bounds and are fuzzed;
+  a bad blob must not crash the kernel.
+* **AMD firmware does not go into the repo.** See [docs/FIRMWARE.md](docs/FIRMWARE.md).
 
-## Licencja
+## License
 
-MIT, patrz [LICENSE](LICENSE). Firmware AMD ma własną licencję (`LICENSE.amdgpu`
-z linux-firmware) i nie jest tu dystrybuowany.
+MIT, see [LICENSE](LICENSE). AMD firmware has its own license (`LICENSE.amdgpu`
+from linux-firmware) and is not distributed here.

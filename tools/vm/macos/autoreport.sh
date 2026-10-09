@@ -11,7 +11,7 @@ sleep 90
 
 args=$(nvram boot-args 2>/dev/null | cut -f2-)
 label=$(echo "$args" | tr ' ' '\n' | grep -E '^rdna3(lvl|dmub|msi|fb|accel)=' | tr '=' '-' | tr '\n' '_' | sed 's/_$//')
-[ -n "$label" ] || label=bez-rdna3
+[ -n "$label" ] || label=no-rdna3
 lvl=$(echo "$args" | sed -n 's/.*rdna3lvl=\([0-9]*\).*/\1/p')
 
 extra="$HOME/rdna3-extra.txt"

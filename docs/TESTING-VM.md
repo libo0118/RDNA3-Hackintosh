@@ -1,249 +1,249 @@
-# Test w maszynie wirtualnej (Linux + jedna karta RX 7800 XT)
+# Test in a virtual machine (Linux + a single RX 7800 XT card)
 
-Instrukcja dla komputera z Linuksem, w którym **jedyną kartą graficzną jest
-RX 7800 XT** (bez iGPU i bez drugiej karty). macOS działa w maszynie
-wirtualnej QEMU, a karta zostaje do niej przekazana (passthrough). Wszystko
-robi jeden skrypt: `tools/vm/rdna3vm`.
+Instructions for a Linux computer in which **the only graphics card is the
+RX 7800 XT** (no iGPU and no second card). macOS runs in a QEMU virtual
+machine, and the card is passed through to it (passthrough). One script
+does everything: `tools/vm/rdna3vm`.
 
-Jak to wygląda w praktyce:
+What it looks like in practice:
 
-1. Wpisujesz `rdna3vm step 2`. Pulpit Linuksa znika, bo Linux oddaje kartę.
-2. Na monitorze pojawia się macOS. Uruchamia się z naszym sterownikiem na
-   poziomie z danego kroku.
-3. Po około 2 minutach macOS sam zbiera raport, wysyła go do Linuksa i się
-   wyłącza. Wraca pulpit Linuksa.
-4. Raport leży w `~/rdna3-vm/reports`. Wpisujesz następny krok.
+1. You type `rdna3vm step 2`. The Linux desktop disappears, because Linux hands over the card.
+2. macOS appears on the monitor. It boots with our driver at the
+   level for the given step.
+3. After about 2 minutes macOS collects a report by itself, sends it to Linux and
+   shuts down. The Linux desktop comes back.
+4. The report is in `~/rdna3-vm/reports`. You type the next step.
 
-**Czas:** przygotowanie raz, około 1–1,5 godziny (prawie cały ten czas to
-instalacja macOS). Potem każdy krok zajmuje około 3 minut.
+**Time:** one-time setup, about 1–1.5 hours (almost all of that time is
+the macOS installation). After that each step takes about 3 minutes.
 
-> Na czas kroku Linux nie ma obrazu, a klawiatura i mysz należą do macOS.
-> Zapisz wcześniej otwarte rzeczy. Nie utkniesz bez obrazu, patrz
-> [Awaryjne wyjście](#awaryjne-wyjście): **oba Ctrl naraz, potem 3× Esc**.
+> During a step Linux has no display, and the keyboard and mouse belong to macOS.
+> Save your open work beforehand. You will not get stuck without a display, see
+> [Emergency exit](#emergency-exit): **both Ctrl keys at once, then Esc 3×**.
 
 ---
 
-## Krok A. BIOS i Linux (raz, 10 min)
+## Step A. BIOS and Linux (once, 10 min)
 
-**BIOS płyty głównej:**
-- włączone: **SVM** (AMD) albo **VT-x** (Intel);
-- włączone: **IOMMU** (AMD-Vi) albo **VT-d** (Intel);
-- włączone: **Above 4G Decoding**;
-- wyłączony: **CSM**.
+**Motherboard BIOS:**
+- enabled: **SVM** (AMD) or **VT-x** (Intel);
+- enabled: **IOMMU** (AMD-Vi) or **VT-d** (Intel);
+- enabled: **Above 4G Decoding**;
+- disabled: **CSM**.
 
-Resizable BAR może zostać włączony.
+Resizable BAR can stay enabled.
 
-**Parametr jądra** `iommu=pt` (na Intelu dodatkowo `intel_iommu=on`):
+**Kernel parameter** `iommu=pt` (on Intel also `intel_iommu=on`):
 
-| Dystrybucja | Polecenie |
+| Distribution | Command |
 |---|---|
-| Ubuntu / Debian / Mint | w `/etc/default/grub` dopisz do `GRUB_CMDLINE_LINUX_DEFAULT` tekst `iommu=pt`, potem `sudo update-grub` |
+| Ubuntu / Debian / Mint | in `/etc/default/grub` add the text `iommu=pt` to `GRUB_CMDLINE_LINUX_DEFAULT`, then `sudo update-grub` |
 | Fedora | `sudo grubby --update-kernel=ALL --args="iommu=pt"` |
-| Arch (GRUB) | jak Ubuntu, potem `sudo grub-mkconfig -o /boot/grub/grub.cfg` |
+| Arch (GRUB) | like Ubuntu, then `sudo grub-mkconfig -o /boot/grub/grub.cfg` |
 
-Potem zrestartuj komputer.
+Then restart the computer.
 
-**Pakiety:**
+**Packages:**
 
-| Dystrybucja | Polecenie |
+| Distribution | Command |
 |---|---|
 | Ubuntu / Debian | `sudo apt install qemu-system-x86 qemu-utils python3 git dmg2img zstd psmisc` |
 | Fedora | `sudo dnf install qemu-kvm qemu-img python3 git dmg2img zstd psmisc` |
-| Arch | `sudo pacman -S qemu-full python git zstd psmisc`; `dmg2img` jest w AUR |
+| Arch | `sudo pacman -S qemu-full python git zstd psmisc`; `dmg2img` is in the AUR |
 
-Na koniec dodaj się do grupy `kvm`: `sudo usermod -aG kvm $USER`. Potem
-wyloguj się i zaloguj ponownie.
+Finally, add yourself to the `kvm` group: `sudo usermod -aG kvm $USER`. Then
+log out and log back in.
 
-**Sprawdzenie:**
+**Check:**
 
 ```sh
 git clone -b stage1-kext https://github.com/Voten641/RDNA3-Hackintosh ~/RDNA3-Hackintosh
 ~/RDNA3-Hackintosh/tools/vm/rdna3vm check
 ```
 
-Każda linia ma mieć `OK`. Skrypt pokazuje też, co trafi do VM: kartę (z jej
-funkcją audio HDMI) oraz klawiaturę i mysz USB.
+Every line should show `OK`. The script also shows what will go to the VM: the card (with its
+HDMI audio function) and the USB keyboard and mouse.
 
-Dla wygody ustaw alias. Później wystarczy pisać `rdna3vm`:
+For convenience, set an alias. After that typing `rdna3vm` is enough:
 
 ```sh
 echo "alias rdna3vm=~/RDNA3-Hackintosh/tools/vm/rdna3vm" >> ~/.bashrc && . ~/.bashrc
 ```
 
-## Krok B. Pobranie macOS (raz, 10 min)
+## Step B. Downloading macOS (once, 10 min)
 
-Używamy gotowego projektu [OSX-KVM](https://github.com/kholia/OSX-KVM):
+We use the existing [OSX-KVM](https://github.com/kholia/OSX-KVM) project:
 
 ```sh
 git clone --depth 1 --recursive https://github.com/kholia/OSX-KVM.git ~/OSX-KVM
 cd ~/OSX-KVM
-./fetch-macOS-v2.py                      # wybierz Sequoia (macOS 15)
+./fetch-macOS-v2.py                      # choose Sequoia (macOS 15)
 dmg2img -i BaseSystem.dmg BaseSystem.img
 ```
 
-## Krok C. Paczka ze sterownikiem (raz i po każdej nowej wersji)
+## Step C. Driver package (once and after every new version)
 
-1. Otwórz [GitHub → Actions](https://github.com/Voten641/RDNA3-Hackintosh/actions).
-   Wejdź w najnowszy zielony przebieg **build** na gałęzi `stage1-kext` i
-   pobierz artefakt **RDNA3Accel-kext** (plik `.zip`).
-2. Uruchom:
+1. Open [GitHub → Actions](https://github.com/Voten641/RDNA3-Hackintosh/actions).
+   Go to the latest green **build** run on the `stage1-kext` branch and
+   download the **RDNA3Accel-kext** artifact (a `.zip` file).
+2. Run:
 
 ```sh
 rdna3vm prepare --osx-kvm ~/OSX-KVM --artifact ~/Downloads/RDNA3Accel-kext.zip
 ```
 
-Skrypt robi kolejno:
-- kopię OpenCore z wyłączonym SIP (wymagane dla niepodpisanego kextu);
-- paczkę dla macOS: kexty z firmware wziętym z `/lib/firmware/amdgpu` twojego
-  Linuksa;
-- zrzut VBIOS karty;
-- dane referencyjne z amdgpu (`reports/linux-reference`), z którymi
-  porównujemy wyniki.
+The script does, in order:
+- a copy of OpenCore with SIP disabled (required for an unsigned kext);
+- a package for macOS: kexts with firmware taken from `/lib/firmware/amdgpu` of your
+  Linux;
+- a dump of the card's VBIOS;
+- reference data from amdgpu (`reports/linux-reference`), which we
+  compare the results with.
 
-O hasło `sudo` pyta kilka razy.
+It asks for the `sudo` password a few times.
 
-## Krok D. Instalacja macOS w oknie (raz, ~1 h)
+## Step D. Installing macOS in a window (once, ~1 h)
 
-Ten krok działa **bez przekazywania karty**: macOS otwiera się w zwykłym
-oknie na pulpicie Linuksa.
+This step works **without passing through the card**: macOS opens in a normal
+window on the Linux desktop.
 
 ```sh
 rdna3vm window
 ```
 
-1. W menu OpenCore wybierz **macOS Base System**.
-2. **Narzędzie dyskowe** → wybierz *QEMU HARDDISK* (ok. 128 GB) → **Wymaż**:
-   nazwa `macOS`, format **APFS**. Zamknij Narzędzie dyskowe.
-3. **Zainstaluj ponownie macOS Sequoia** → wybierz dysk `macOS`. Instalator
-   sam kilka razy restartuje VM. Jeśli zobaczysz menu OpenCore, wybierz
-   wpis instalatora (*macOS Installer*), a na koniec po prostu `macOS`.
-4. Załóż konto. Apple ID, lokalizację i inne opcje możesz pominąć.
-5. W macOS otwórz **Terminal** (Cmd+Spacja, wpisz „Terminal”) i wklej:
+1. In the OpenCore menu choose **macOS Base System**.
+2. **Disk Utility** → choose *QEMU HARDDISK* (about 128 GB) → **Erase**:
+   name `macOS`, format **APFS**. Close Disk Utility.
+3. **Reinstall macOS Sequoia** → choose the `macOS` disk. The installer
+   restarts the VM several times by itself. If you see the OpenCore menu, choose
+   the installer entry (*macOS Installer*), and at the end simply `macOS`.
+4. Create an account. You can skip Apple ID, location and other options.
+5. In macOS open **Terminal** (Cmd+Space, type "Terminal") and paste:
 
 ```sh
 curl -s http://10.0.2.2:8000/setup.sh | sudo sh
 ```
 
-To instaluje sterownik i automatyczne raporty. Gdy skończy, wyłącz VM
-poleceniem `sudo shutdown -h now`.
+This installs the driver and the automatic reports. When it finishes, shut down the VM
+with `sudo shutdown -h now`.
 
-Jeśli macOS pokaże „Rozszerzenie systemowe zablokowane”: wejdź w Ustawienia
-systemowe → Prywatność i ochrona → **Zezwól**, uruchom ponownie i wyłącz VM.
+If macOS shows "System Extension Blocked": go to System
+Settings → Privacy & Security → **Allow**, restart and shut down the VM.
 
-## Krok E. Testy na karcie (każdy około 3 min)
+## Step E. Tests on the card (about 3 min each)
 
-Wykonuj kroki **po kolei**. Następny uruchamiasz dopiero, gdy poprzedni
-wrócił z raportem:
+Run the steps **in order**. Start the next one only when the previous one
+has come back with a report:
 
 ```sh
 rdna3vm step 0
 ```
 
-Pulpit zgaśnie, na monitorze pojawi się OpenCore, a potem macOS z białym
-tekstem na czarnym tle (tryb verbose). Po około 2 minutach od pojawienia się
-pulpitu macOS sam się wyłączy i wróci pulpit Linuksa. Potem uruchom kolejne
-kroki:
+The desktop goes dark, OpenCore appears on the monitor, and then macOS with white
+text on a black background (verbose mode). About 2 minutes after the desktop
+appears, macOS shuts down by itself and the Linux desktop comes back. Then run the next
+steps:
 
-| Krok | Co testuje | Na co patrzysz na ekranie |
+| Step | What it tests | What you watch on the screen |
 |---|---|---|
-| `0` | kext się ładuje, nic nie robi | macOS startuje normalnie |
-| `1` | odczyt rejestrów, rozmiar VRAM | j.w. |
-| `2` | tablica IP discovery, VBIOS, monitor (EDID) | j.w. |
-| `3` | rejestry bloku GC, liczba CU | j.w. |
-| `4` | PSP: ładowanie firmware | j.w.; pierwszy krok, który zapisuje do karty |
-| `5` | SMU: zegary, wentylator, temperatura | wentylator może zmienić obroty |
-| `5b` | DMCUB (firmware wyświetlania) | **ekran może mrugnąć albo zgasnąć** |
-| `6` | pamięć GPU (GART), przerwania | j.w. |
-| `6b` | przerwania MSI | j.w. |
-| `7` | SDMA: pierwsze polecenia wykonane przez GPU (+ test DMA) | j.w. |
-| `8` | GFX: ring grafiki (+ test GFX) | j.w. |
-| `9` | nasz framebuffer zamiast obrazu z UEFI | obraz ma zostać bez zmian; **może zgasnąć** |
-| `10` | akcelerator (WindowServer) | ryzykowny; najpierw wyślij raporty z 0–9 |
+| `0` | the kext loads, does nothing | macOS boots normally |
+| `1` | register reads, VRAM size | same as above |
+| `2` | IP discovery table, VBIOS, monitor (EDID) | same as above |
+| `3` | GC block registers, CU count | same as above |
+| `4` | PSP: firmware loading | same as above; the first step that writes to the card |
+| `5` | SMU: clocks, fan, temperature | the fan speed may change |
+| `5b` | DMCUB (display firmware) | **the screen may flicker or go dark** |
+| `6` | GPU memory (GART), interrupts | same as above |
+| `6b` | MSI interrupts | same as above |
+| `7` | SDMA: first commands executed by the GPU (+ DMA test) | same as above |
+| `8` | GFX: graphics ring (+ GFX test) | same as above |
+| `9` | our framebuffer instead of the UEFI image | the image should stay unchanged; **it may go dark** |
+| `10` | accelerator (WindowServer) | risky; send the reports from 0–9 first |
 
-Jeśli chcesz popatrzeć dłużej, dopisz `--stay`, na przykład `rdna3vm step 9 --stay`.
-VM nie wyłączy się wtedy sama. Zamknij macOS normalnie (Apple → Wyłącz)
-albo przyciskiem zasilania. Raport wyśle się mimo to.
+If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
+The VM will then not shut down by itself. Shut down macOS normally (Apple menu → Shut Down)
+or with the power button. The report is sent anyway.
 
-Wartości, jakich oczekujemy w każdym kroku, opisuje [TESTING-HW](TESTING-HW.md).
-Nie musisz ich sprawdzać, wystarczy przysłać raporty.
+The values we expect at each step are described in [TESTING-HW](TESTING-HW.md).
+You do not need to check them, sending the reports is enough.
 
-## Awaryjne wyjście
+## Emergency exit
 
-Każdy z poniższych sposobów zamyka **tylko VM**. Skrypt oddaje wtedy kartę,
-klawiaturę i mysz Linuksowi i przywraca pulpit:
+Each of the methods below closes **only the VM**. The script then gives the card,
+keyboard and mouse back to Linux and restores the desktop:
 
-1. **Oba Ctrl naraz, potem 3× Esc** (w ciągu 3 sekund). Oba Ctrl zabierają
-   klawiaturę macOS i oddają ją Linuksowi, a 3× Esc zamyka VM. Działa także
-   przy zawieszonym macOS i przy kernel panic, bo klawiaturę czyta Linux,
-   nie macOS.
-2. **Krótkie wciśnięcie przycisku zasilania komputera.** Na czas VM Linux
-   nie wyłącza się od niego, tylko zamyka VM.
-3. **Nic nie robisz:** automatyczny krok sam zamyka VM po 8 minutach
-   (zwykle kończy się po około 3). Z `--stay` limit wynosi 30 minut. Oba
-   limity zmienisz w `~/rdna3-vm/config` (`AUTO_TIMEOUT_MIN`, `TIMEOUT_MIN`).
+1. **Both Ctrl keys at once, then Esc 3×** (within 3 seconds). Both Ctrl keys take
+   the keyboard away from macOS and give it back to Linux, and Esc 3× closes the VM. It works even
+   when macOS hangs or has a kernel panic, because the keyboard is read by Linux,
+   not macOS.
+2. **A short press of the computer's power button.** While the VM is running Linux
+   does not shut down from it, it only closes the VM.
+3. **You do nothing:** an automatic step closes the VM by itself after 8 minutes
+   (it usually finishes after about 3). With `--stay` the limit is 30 minutes. You can change both
+   limits in `~/rdna3-vm/config` (`AUTO_TIMEOUT_MIN`, `TIMEOUT_MIN`).
 
-Skrypt oddaje kartę Linuksowi także wtedy, gdy QEMU sam się wysypie.
-Przywracanie jest podpięte pod zakończenie skryptu, a nie pod macOS.
+The script gives the card back to Linux even when QEMU itself crashes.
+The restore is hooked to the script's exit, not to macOS.
 
-Ostatnia deska ratunku, gdy po zamknięciu VM pulpit nie wraca: karta nie
-dała się zresetować (znany kłopot RDNA3 z passthrough). Wtedy krótko
-wciśnij przycisk zasilania. VM już nie działa, więc Linux wyłączy się
-normalnie. Po włączeniu komputera wszystko działa. Gdyby nawet to nie
-zadziałało, przytrzymaj przycisk 5 sekund. Karcie to nie szkodzi.
+Last resort, when the desktop does not come back after the VM closes: the card
+could not be reset (a known RDNA3 passthrough issue). Then briefly
+press the power button. The VM is no longer running, so Linux shuts down
+normally. After you turn the computer back on, everything works. If even that
+does not work, hold the button for 5 seconds. It does not harm the card.
 
-## Gdy coś pójdzie nie tak
+## When something goes wrong
 
-| Objaw | Co zrobić |
+| Symptom | What to do |
 |---|---|
-| czarny ekran albo zawieszenie dłużej niż 5 min, kernel panic | [awaryjne wyjście](#awaryjne-wyjście) (oba Ctrl, 3× Esc). Przyślij raporty i **nie idź dalej** |
-| po zamknięciu VM pulpit Linuksa nie wraca | krótko przycisk zasilania: Linux wyłączy się normalnie (patrz wyżej) |
-| `step` kończy się od razu, pulpit nie znika | przeczytaj `~/rdna3-vm/reports/host-*.log` (najnowszy) i przyślij go |
-| macOS nie wysłał raportu | uruchom ten sam krok z `--stay` i w Terminalu macOS wykonaj `sudo sh "/Library/Application Support/RDNA3VM/autoreport.sh"` |
-| klawiatura nie działa w macOS | VM uruchomiła się bez przechwytu: przyślij `host-*.log`; wyjście przyciskiem zasilania |
+| black screen or a hang longer than 5 min, kernel panic | [emergency exit](#emergency-exit) (both Ctrl keys, Esc 3×). Send the reports and **do not go further** |
+| the Linux desktop does not come back after the VM closes | short press of the power button: Linux shuts down normally (see above) |
+| `step` ends immediately, the desktop does not disappear | read `~/rdna3-vm/reports/host-*.log` (the newest) and send it |
+| macOS did not send a report | run the same step with `--stay` and in the macOS Terminal run `sudo sh "/Library/Application Support/RDNA3VM/autoreport.sh"` |
+| the keyboard does not work in macOS | the VM started without input capture: send `host-*.log`; exit with the power button |
 
-Komputer bez menedżera logowania (start do konsoli) też działa. Skrypt sam
-zatrzymuje `display-manager` i potem go wznawia.
+A computer without a login manager (booting to a console) also works. The script itself
+stops `display-manager` and then starts it again.
 
-## Co mi wysłać
+## What to send me
 
 ```sh
 rdna3vm reports
 ```
 
-Z każdego kroku przyślij pliki z `~/rdna3-vm/reports`:
-- `rdna3-report-*.tar.gz` (raport z macOS);
-- `*-tests.txt` (wyniki testów DMA i GFX, od kroku 7);
-- `serial-*.log` (log jądra macOS; zostaje także po zawieszeniu i panice);
-- `host-*.log` (co robił skrypt na Linuksie).
+From each step send the files from `~/rdna3-vm/reports`:
+- `rdna3-report-*.tar.gz` (report from macOS);
+- `*-tests.txt` (DMA and GFX test results, from step 7);
+- `serial-*.log` (macOS kernel log; it is kept even after a hang or a panic);
+- `host-*.log` (what the script did on Linux).
 
-Przy pierwszej wysyłce dołącz też katalog `linux-reference`.
+With the first submission also include the `linux-reference` directory.
 
-## Nowa wersja sterownika
+## New driver version
 
-1. Pobierz nowy artefakt (krok C, punkt 1).
-2. Uruchom `rdna3vm prepare --artifact ~/Downloads/RDNA3Accel-kext.zip`.
-3. Uruchom `rdna3vm window` i w Terminalu macOS wklej to samo polecenie
-   `curl ... | sudo sh` co w kroku D. Potem `sudo shutdown -h now`.
-4. Wróć do kroku E.
+1. Download the new artifact (step C, item 1).
+2. Run `rdna3vm prepare --artifact ~/Downloads/RDNA3Accel-kext.zip`.
+3. Run `rdna3vm window` and in the macOS Terminal paste the same
+   `curl ... | sudo sh` command as in step D. Then `sudo shutdown -h now`.
+4. Go back to step E.
 
-## Jak to działa (dla ciekawych)
+## How it works (for the curious)
 
-- `rdna3vm step N` zapisuje boot-args kroku do `config.plist` OpenCore (kopia
-  w `~/rdna3-vm/OpenCore-rdna3.img`). Potem jako usługa systemd (`rdna3vm-*`,
-  działa także po zgaszeniu pulpitu):
-  - zatrzymuje pulpit i odłącza konsolę;
-  - przepina kartę z `amdgpu` na `vfio-pci`;
-  - uruchamia QEMU z kartą, klawiaturą i myszą USB;
-  - po wyłączeniu VM oddaje wszystko Linuksowi.
-- Klawiaturę i mysz QEMU czyta z Linuksa (`input-linux`, przełącznik
-  „oba Ctrl”) i podaje macOS jako urządzenia USB. Linux sam pilnuje 3× Esc
-  i przycisku zasilania (`vmtool.py stopkeys`, `systemd-inhibit`). Po VM
-  przycisk znów działa zwyczajnie.
-- macOS widzi Linuksa pod adresem `10.0.2.2`. Pod tym adresem
-  `tools/vm/vmtool.py serve` udostępnia paczkę i przyjmuje raporty (tylko
-  lokalnie, `127.0.0.1:8000`).
-- W macOS demon `org.rdna3.vmreport` zbiera raport 90 s po starcie, czyli
-  `tools/macos/collect.sh` plus testy `rdna3_drminfo`. Wysyła go i, jeśli host
-  o to poprosił (`rdna3vmauto=1`), wyłącza system.
-- Log jądra idzie na port szeregowy VM (`serial=3`) do `serial-*.log`, a
-  `debug=0x100` zatrzymuje macOS na panice zamiast restartu.
+- `rdna3vm step N` writes the step's boot-args to the OpenCore `config.plist` (a copy
+  in `~/rdna3-vm/OpenCore-rdna3.img`). Then, as a systemd service (`rdna3vm-*`,
+  which keeps running after the desktop goes dark), it:
+  - stops the desktop and detaches the console;
+  - rebinds the card from `amdgpu` to `vfio-pci`;
+  - starts QEMU with the card and the USB keyboard and mouse;
+  - after the VM shuts down, gives everything back to Linux.
+- QEMU reads the keyboard and mouse from Linux (`input-linux`, the
+  "both Ctrl" toggle) and passes them to macOS as USB devices. Linux itself watches for Esc 3×
+  and the power button (`vmtool.py stopkeys`, `systemd-inhibit`). After the VM
+  the button works normally again.
+- macOS sees Linux at the address `10.0.2.2`. At that address
+  `tools/vm/vmtool.py serve` serves the package and receives reports (only
+  locally, `127.0.0.1:8000`).
+- In macOS the `org.rdna3.vmreport` daemon collects a report 90 s after boot, i.e.
+  `tools/macos/collect.sh` plus the `rdna3_drminfo` tests. It sends it and, if the host
+  asked for it (`rdna3vmauto=1`), shuts down the system.
+- The kernel log goes to the VM serial port (`serial=3`) into `serial-*.log`, and
+  `debug=0x100` halts macOS on a panic instead of restarting.

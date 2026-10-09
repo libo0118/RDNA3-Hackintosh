@@ -1,51 +1,51 @@
-# Etap 5: Vulkan (RADV na macOS)
+# Stage 5: Vulkan (RADV on macOS)
 
-RADV z Mesy budujemy na macOS **z niezmienionym winsysem amdgpu**:
-`libdrm_amdgpu` (oryginał, `third_party/libdrm`) + nasz rdzeń libdrm
-(`userspace/libdrm_xnu`), który zamiast `/dev/dri` rozmawia z kextem.
+We build Mesa's RADV on macOS **with the amdgpu winsys unchanged**:
+`libdrm_amdgpu` (the original, `third_party/libdrm`) + our libdrm core
+(`userspace/libdrm_xnu`), which talks to the kext instead of `/dev/dri`.
 
 ```sh
-userspace/mesa/build_radv.sh build/mesa     # na Macu z Xcode, meson, ninja, glslang, mako
-# wynik: build/mesa/install/lib/libvulkan_radeon.dylib + radeon_icd.x86_64.json
+userspace/mesa/build_radv.sh build/mesa     # on a Mac with Xcode, meson, ninja, glslang, mako
+# output: build/mesa/install/lib/libvulkan_radeon.dylib + radeon_icd.x86_64.json
 ```
 
-`build_radv.sh` przypina commit Mesy (`MESA_COMMIT`, lustro GitHub),
-nakłada `userspace/mesa/patches/*.patch` i buduje
-`-Dvulkan-drivers=amd -Dllvm=disabled` (ACO, bez LLVM). Job CI `radv-macos`
-(runner Intel) robi to samo; jego podsumowanie błędów to lista zadań portu.
+`build_radv.sh` pins a Mesa commit (`MESA_COMMIT`, GitHub mirror),
+applies `userspace/mesa/patches/*.patch` and builds with
+`-Dvulkan-drivers=amd -Dllvm=disabled` (ACO, no LLVM). The CI job `radv-macos`
+(Intel runner) does the same; its error summary is the port's task list.
 
-## Łatki
+## Patches
 
-| Łatka | Po co |
+| Patch | Purpose |
 |---|---|
-| `0001-radv-open-render-node-through-drm_xnu` | RADV otwiera i zamyka węzeł renderujący przez `drm_xnu` zamiast `open(2)` |
-| `0002-addrlib-apple-branches-are-for-the-kernel-driver` | gałęzie `__APPLE__` w addrlib są dla sterownika jądra Apple (nagłówek pod NDA, `__umoddi3`, `IOPanic`); w userspace ich nie chcemy |
-| `0003-radv-darwin-weak-entrypoints-via-dynamic-lookup` | słabe, niezdefiniowane symbole `wsi_*` i opcjonalne entrypointy: ld64 na macOS wymaga `-undefined dynamic_lookup` |
-| `0004-darwin-use-libdrm_xnu-as-libdrm` | na macOS `dep_libdrm` = nasze libdrm: `HAVE_LIBDRM`, `vk_drm_syncobj.c`, `u_sync_provider.c` i `wsi_common_drm.c` budują się jak na Linuksie (bez tego `vk_drm_syncobj_*` nie istniały i dlopen by się nie udał) |
+| `0001-radv-open-render-node-through-drm_xnu` | RADV opens and closes the render node through `drm_xnu` instead of `open(2)` |
+| `0002-addrlib-apple-branches-are-for-the-kernel-driver` | the `__APPLE__` branches in addrlib are for Apple's kernel driver (NDA header, `__umoddi3`, `IOPanic`); we do not want them in userspace |
+| `0003-radv-darwin-weak-entrypoints-via-dynamic-lookup` | weak, undefined `wsi_*` symbols and optional entrypoints: ld64 on macOS requires `-undefined dynamic_lookup` |
+| `0004-darwin-use-libdrm_xnu-as-libdrm` | on macOS `dep_libdrm` = our libdrm: `HAVE_LIBDRM`, `vk_drm_syncobj.c`, `u_sync_provider.c` and `wsi_common_drm.c` build as on Linux (without this, `vk_drm_syncobj_*` did not exist and dlopen would fail) |
 
-`libvulkan_radeon.dylib` buduje się i linkuje w CI. Po linkowaniu skrypt
-czyta `nm -m`: symbol „dynamically looked up” nie ma właściciela. Słabe
-(`weak.txt`) dostają NULL przy ładowaniu (opcjonalne entrypointy); niesłabe
-(`missing.txt`) sprawiłyby, że dlopen się nie uda, więc ta lista musi być
-pusta. SPIRV-Tools są wyłączone (`-Dspirv-tools=disabled`): tylko dla
-zrzutów debug, a ich symbole nie trafiały do linkowania.
+`libvulkan_radeon.dylib` builds and links in CI. After linking, the script
+reads `nm -m`: a "dynamically looked up" symbol has no owner. Weak ones
+(`weak.txt`) get NULL at load time (optional entrypoints); non-weak ones
+(`missing.txt`) would make dlopen fail, so this list must be
+empty. SPIRV-Tools are disabled (`-Dspirv-tools=disabled`): they are only for
+debug dumps, and their symbols were not making it into the link.
 
-## vulkaninfo bez karty
+## vulkaninfo without a card
 
-Job `radv-macos` po zbudowaniu RADV podmienia `libdrm.2.dylib` na
-`libdrm_loopback.dylib` (`make -C userspace loopback`: ten sam rdzeń libdrm na
-`uapi/rdna3_drm.c` w procesie, backend loopback z programowym SDMA) i uruchamia
-`vulkaninfo --summary` (loader i narzędzia z brew). To end-to-end test UAPI
-bez kextu: `radv_physical_device` pyta o wszystko, czego potrzebuje
+After building RADV, the `radv-macos` job swaps `libdrm.2.dylib` for
+`libdrm_loopback.dylib` (`make -C userspace loopback`: the same libdrm core on
+`uapi/rdna3_drm.c` in-process, loopback backend with software SDMA) and runs
+`vulkaninfo --summary` (loader and tools from brew). This is an end-to-end UAPI test
+without the kext: `radv_physical_device` queries everything it needs
 (DEV_INFO, HW_IP_INFO, FW_VERSION, MEMORY, SENSOR, GPUVM_FAULT, syncobj).
-Log w artefakcie `radv-macos-logs/vulkaninfo.log`.
+The log is in the artifact `radv-macos-logs/vulkaninfo.log`.
 
-## Dalej
+## Next
 
-1. `vulkaninfo` na Macu z kextem na
+1. `vulkaninfo` on a Mac with the kext at
    `rdna3lvl=2 rdna3enum=1`.
-2. WSI: na macOS nie ma KMS; obrazy do wyświetlenia idą przez IOSurface,
-   a wtyczka Metal (Etap 6) jest właścicielem prezentacji.
-3. Synchronizacja: `vk_drm_syncobj` na naszych syncobj; prawdziwe fence'y
-   przyjdą razem z CS (Etap 2 → ringi).
-4. Testy compute (CTS `dEQP-VK.compute.*`) po pierwszym działającym CS.
+2. WSI: macOS has no KMS; images for display go through IOSurface,
+   and the Metal plugin (Stage 6) owns presentation.
+3. Synchronization: `vk_drm_syncobj` on our syncobjs; real fences
+   will come together with CS (Stage 2 → rings).
+4. Compute tests (CTS `dEQP-VK.compute.*`) after the first working CS.

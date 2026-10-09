@@ -9,14 +9,14 @@
 set -eu
 HOST=http://10.0.2.2:8000
 D="/Library/Application Support/RDNA3VM"
-[ "$(id -u)" = 0 ] || { echo "uruchom przez sudo"; exit 1; }
+[ "$(id -u)" = 0 ] || { echo "run it with sudo"; exit 1; }
 
-echo "== pobieram paczkę z hosta"
+echo "== fetching the bundle from the host"
 rm -rf "$D"
 mkdir -p "$D"
 curl -sf "$HOST/rdna3-bundle.tar.gz" | tar -xz -C "$D"
 
-echo "== kexty -> /Library/Extensions"
+echo "== kexts -> /Library/Extensions"
 for k in "$D"/kexts/*.kext; do
     n=$(basename "$k")
     rm -rf "/Library/Extensions/$n"
@@ -28,7 +28,7 @@ for k in "$D"/kexts/*.kext; do
 done
 chmod +x "$D/bin/"* "$D/tools/macos/"*.sh "$D/autoreport.sh" 2>/dev/null || true
 
-echo "== demon raportu"
+echo "== report daemon"
 cat > /Library/LaunchDaemons/org.rdna3.vmreport.plist <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -46,11 +46,11 @@ PLIST
 chown root:wheel /Library/LaunchDaemons/org.rdna3.vmreport.plist
 chmod 644 /Library/LaunchDaemons/org.rdna3.vmreport.plist
 
-csrutil status | grep -q disabled || echo "UWAGA: SIP nie jest wyłączony (csrutil status). Uruchom 'rdna3vm prepare' jeszcze raz na hoście."
+csrutil status | grep -q disabled || echo "WARNING: SIP is not disabled (csrutil status). Run 'rdna3vm prepare' on the host again."
 
-echo "== przebudowa kolekcji kextów (chwilę trwa)"
+echo "== rebuilding the kext collection (takes a moment)"
 kmutil install --update-all || true
 echo
-echo "Gotowe. Jeśli macOS pokaże 'Rozszerzenie systemowe zablokowane':"
-echo "Ustawienia systemowe -> Prywatność i ochrona -> Zezwól, potem restart."
-echo "Teraz wyłącz VM:  sudo shutdown -h now"
+echo "Done. If macOS shows 'System Extension Blocked':"
+echo "System Settings -> Privacy & Security -> Allow, then restart."
+echo "Now shut the VM down:  sudo shutdown -h now"
