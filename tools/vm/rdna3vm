@@ -585,12 +585,20 @@ cmd__passthrough() {
     local mon=$WORK/qemu-monitor.sock
     rm -f "$mon"
     QARGS+=(-monitor "unix:$mon,server=on,wait=off")
+    # OVMF's own log (only debug builds of OVMF write it)
+    QARGS+=(-debugcon "file:$WORK/reports/ovmf-$stamp.log" -global isa-debugcon.iobase=0x402)
     command -v lspci >/dev/null &&
         lspci -vv -s "$bdf" 2>/dev/null | grep -E 'Region|BAR [0-9]|Resizable|LnkSta:' | sed 's/^/  host: /'
     echo "== qemu start"
     qemu-system-x86_64 "${QARGS[@]}" & qpid=$!
-    { sleep 40; echo "== guest PCI bus (QEMU 'info pci', 40 s after start)"
-      $VMTOOL monitor "$mon" "info pci" 2>&1 | sed 's/^/  /'; } &
+    # 8 s: what OVMF assigned (OpenCore / boot.efi run); 40 s: after macOS
+    # configured the bus
+    { local t
+      for t in 8 40; do
+          sleep $((t == 8 ? 8 : 32))
+          echo "== guest PCI bus (QEMU 'info pci', $t s after start)"
+          $VMTOOL monitor "$mon" "info pci" 2>&1 | sed 's/^/  /'
+      done; } &
     while kill -0 $qpid 2>/dev/null && kill -0 $pk 2>/dev/null && kill -0 $tm 2>/dev/null; do
         wait -n || true
     done
