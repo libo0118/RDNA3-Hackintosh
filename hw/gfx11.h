@@ -88,6 +88,8 @@ typedef struct rdna3_gfx_ring {
     uint64_t last_ctx;      /* amdgpu ring->current_ctx: context of the last job */
     uint32_t last_vmid;     /* VMID of the last job (whose waves a recovery kills) */
     int      fence_irq;     /* fences use RELEASE_MEM INT_SEL 2 (EOP interrupt) */
+    int      async;         /* amdgpu_async_gfx_ring: the KIQ maps the queue from 'mqd' */
+    uint64_t mqd;           /* v11_gfx_mqd (VRAM offset) when async */
 } rdna3_gfx_ring;
 
 /* one IB of a job (VA in the job's VMID) */
@@ -116,6 +118,15 @@ int  gfx11_gfxhub_enable(rdna3_dev *d, rdna3_gmc *g);
 /* gfx_v11_0_hw_init up to and including the gfx ring test */
 int  gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs64_start *rs64,
                    uint32_t ring_size);
+/* r->async (needs doorbells): gfx11_hw_init stops once both CPs run, like
+ * gfx_v11_0_cp_resume with amdgpu_async_gfx_ring; after the KIQ is up,
+ * gfx11_kgq_start does gfx_v11_0_cp_async_gfx_ring_resume: the v11_gfx_mqd,
+ * the KIQ's MAP_QUEUES (me 0, ENGINE_SEL 4), the clear state, the ring test.
+ * The RS64 gfx firmware reads the queue's MQD (CP_GFX_MQD_BASE_ADDR), so the
+ * register-programmed RB0 path faults on MC 0. */
+struct rdna3_mec_ring;
+int  gfx11_kgq_start(rdna3_dev *d, struct rdna3_mec_ring *kiq, rdna3_gfx_ring *r);
+void gfx11_kgq_stop(rdna3_dev *d, struct rdna3_mec_ring *kiq, rdna3_gfx_ring *r);
 void gfx11_cp_gfx_enable(rdna3_dev *d, int enable);
 int  gfx11_ring_test(rdna3_dev *d, rdna3_gfx_ring *r);
 

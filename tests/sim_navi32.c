@@ -52,6 +52,7 @@
 #include "gen/dcn_3_2_1.h"
 #include "gen/gc_11_0_0_gfx.h"
 #include "gen/gc_11_0_0_reset.h"
+#include "gen/gc_11_0_0_rs64.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
@@ -145,6 +146,12 @@ typedef struct sim {
         int mapped_by_kiq;
     } hqd[4][4];
     unsigned kiq_maps, kiq_unmaps, mec_runs, mec_bad_queue;
+    /* gfx queue mapped by the KIQ from its v11_gfx_mqd (ENGINE_SEL 4); the
+     * RS64 gfx firmware fetches through CP_GFX_HQD_* then. rs64_needs_mqd
+     * models the card: a register-programmed RB0 without an MQD makes the
+     * CPG read MC 0 and the CP halts */
+    int gfx_mapped, rs64_needs_mqd;
+    unsigned kgq_maps, kgq_unmaps, cp_mqd_faults;
     uint64_t set_resources_mask;
     uint32_t cp_cur_me, cp_cur_pipe, cp_cur_queue;   /* engine running cp_exec */
     int dcn_hold;              /* 1: flips stay pending (no vupdate yet) */
@@ -909,6 +916,18 @@ static const struct { uint32_t mqd, reg; } mqd_map[] = {
     { 165, regCP_HQD_EOP_BASE_ADDR }, { 166, regCP_HQD_EOP_BASE_ADDR_HI }, { 167, regCP_HQD_EOP_CONTROL },
     { 182, regCP_HQD_PQ_WPTR_LO }, { 183, regCP_HQD_PQ_WPTR_HI },
 };
+/* MAP_QUEUES ENGINE_SEL 4: struct v11_gfx_mqd -> the gfx HQD registers */
+static const struct { uint32_t mqd, reg; } gfx_mqd_map[] = {
+    { 128, regCP_GFX_MQD_BASE_ADDR }, { 129, regCP_GFX_MQD_BASE_ADDR_HI }, { 130, regCP_GFX_HQD_ACTIVE },
+    { 131, regCP_GFX_HQD_VMID }, { 134, regCP_GFX_HQD_QUEUE_PRIORITY }, { 135, regCP_GFX_HQD_QUANTUM },
+    { 136, regCP_GFX_HQD_BASE }, { 137, regCP_GFX_HQD_BASE_HI }, { 138, regCP_GFX_HQD_RPTR },
+    { 139, regCP_GFX_HQD_RPTR_ADDR }, { 140, regCP_GFX_HQD_RPTR_ADDR_HI },
+    { 141, regCP_RB_WPTR_POLL_ADDR_LO }, { 142, regCP_RB_WPTR_POLL_ADDR_HI },
+    { 143, regCP_RB_DOORBELL_CONTROL }, { 144, regCP_GFX_HQD_OFFSET }, { 145, regCP_GFX_HQD_CNTL },
+    { 148, regCP_GFX_HQD_CSMD_RPTR }, { 149, regCP_GFX_HQD_WPTR }, { 150, regCP_GFX_HQD_WPTR_HI },
+    { 162, regCP_GFX_MQD_CONTROL },
+};
+
 static int hqd_load_mqd(struct hqd *h, uint64_t mqd_mc, uint32_t doorbell_index)
 {
     const uint32_t *m = (const uint32_t *)mc_ptr(mqd_mc, 4 * RD_MQD_DWORDS);
@@ -1017,8 +1036,23 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
             break;
         case PACKET3_MAP_QUEUES: {
             uint32_t q = (PK(1) >> 13) & 7, pipe = (PK(1) >> 16) & 3, me = (PK(1) >> 18) & 3;
-            uint32_t db = (PK(2) >> 2) & 0x3ffffff;
+            uint32_t db = (PK(2) >> 2) & 0x3ffffff, eng = (PK(1) >> 26) & 7;
             uint64_t mqd = PK(3) | ((uint64_t)PK(4) << 32);
+            if (cnt == 5 && S.cp_cur_me == 1 && me == 0 && eng == 4) {
+                const uint32_t *m = (const uint32_t *)mc_ptr(mqd, 4 * RD_MQD_DWORDS);
+                uint32_t i2, dc;
+                if (!m || q || pipe || (m[128] & ~0xfffffffcu) || m[128] != (uint32_t)mqd) { S.cp_bad++; break; }
+                for (i2 = 0; i2 < sizeof(gfx_mqd_map) / sizeof(gfx_mqd_map[0]); i2++)
+                    S.reg[GC_BASE0 + gfx_mqd_map[i2].reg] = m[gfx_mqd_map[i2].mqd];
+                dc = S.reg[GCR(regCP_RB_DOORBELL_CONTROL)] & ~CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK;
+                S.reg[GCR(regCP_RB_DOORBELL_CONTROL)] = dc | CP_RB_DOORBELL_CONTROL__DOORBELL_EN_MASK |
+                    ((db << CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET__SHIFT) & CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK);
+                S.reg[GCR(regCP_GFX_HQD_ACTIVE)] = 1;
+                S.gfx_mapped = 1;
+                S.cp_rptr = 0;
+                S.kgq_maps++;
+                break;
+            }
             if (cnt != 5 || S.cp_cur_me != 1 || me != 1 || q > 3) { S.cp_bad++; break; }
             if (!(S.set_resources_mask & (1ull << (pipe * 8 + q)))) { S.mec_bad_queue++; break; }
             if (!hqd_load_mqd(&S.hqd[pipe][q], mqd, db)) { S.cp_bad++; break; }
@@ -1029,6 +1063,17 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
             uint32_t db = (PK(2) >> 2) & 0x3ffffff;
             int found = 0;
             if (cnt != 4 || S.cp_cur_me != 1) { S.cp_bad++; break; }
+            if (((PK(1) >> 26) & 7) == 4) {
+                uint32_t dc = S.reg[GCR(regCP_RB_DOORBELL_CONTROL)];
+                if (S.gfx_mapped && ((dc & CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == db) {
+                    S.gfx_mapped = 0;
+                    S.reg[GCR(regCP_GFX_HQD_ACTIVE)] = 0;
+                    S.kgq_unmaps++;
+                } else {
+                    S.cp_bad++;
+                }
+                break;
+            }
             for (uint32_t p2 = 0; p2 < 4; p2++)
                 for (uint32_t q2 = 0; q2 < 4; q2++) {
                     struct hqd *hq = &S.hqd[p2][q2];
@@ -1194,19 +1239,31 @@ static void sim_doorbell(void *ctx, uint32_t index, uint64_t v)
 
 static void cp_run(uint32_t wptr_dw)
 {
-    uint32_t cntl = S.reg[GCR(regCP_RB0_CNTL)];
+    int mapped = S.gfx_mapped && S.reg[GCR(regCP_GFX_HQD_ACTIVE)];
+    uint32_t cntl = mapped ? S.reg[GCR(regCP_GFX_HQD_CNTL)] : S.reg[GCR(regCP_RB0_CNTL)];
     uint32_t me = S.reg[GCR(regCP_ME_CNTL)];
-    uint64_t base = ((uint64_t)S.reg[GCR(regCP_RB0_BASE)] << 8) |
-                    ((uint64_t)S.reg[GCR(regCP_RB0_BASE_HI)] << 40);
+    uint64_t base = mapped ? ((uint64_t)S.reg[GCR(regCP_GFX_HQD_BASE)] << 8) |
+                             ((uint64_t)S.reg[GCR(regCP_GFX_HQD_BASE_HI)] << 40)
+                           : ((uint64_t)S.reg[GCR(regCP_RB0_BASE)] << 8) |
+                             ((uint64_t)S.reg[GCR(regCP_RB0_BASE_HI)] << 40);
     uint32_t ndw = 2u << ((cntl & CP_RB0_CNTL__RB_BUFSZ_MASK) >> CP_RB0_CNTL__RB_BUFSZ__SHIFT);
     uint32_t *ring = (uint32_t *)mc_ptr(base, 4ull * ndw);
-    uint64_t rptr_wb = ((uint64_t)S.reg[GCR(regCP_RB0_RPTR_ADDR_HI)] << 32) |
-                       S.reg[GCR(regCP_RB0_RPTR_ADDR)];
+    uint64_t rptr_wb = mapped ? ((uint64_t)S.reg[GCR(regCP_GFX_HQD_RPTR_ADDR_HI)] << 32) |
+                                S.reg[GCR(regCP_GFX_HQD_RPTR_ADDR)]
+                              : ((uint64_t)S.reg[GCR(regCP_RB0_RPTR_ADDR_HI)] << 32) |
+                                S.reg[GCR(regCP_RB0_RPTR_ADDR)];
     uint8_t *wb;
-    if (!S.reg[GCR(regCP_RB_ACTIVE)] || !ring)
+    if ((!mapped && !S.reg[GCR(regCP_RB_ACTIVE)]) || !ring)
         return;
     if (me & (CP_ME_CNTL__ME_HALT_MASK | CP_ME_CNTL__PFP_HALT_MASK)) {
         S.cp_while_halted++;
+        return;
+    }
+    if (!mapped && S.rs64_needs_mqd && !S.reg[GCR(regCP_GFX_MQD_BASE_ADDR)]) {
+        /* the card: GFXHUB fault at MC 0 from the CPG, CE/PFP/ME halted */
+        S.cp_mqd_faults++;
+        S.reg[GCR(regCP_ME_CNTL)] |= CP_ME_CNTL__CE_HALT_MASK | CP_ME_CNTL__PFP_HALT_MASK |
+                                     CP_ME_CNTL__ME_HALT_MASK;
         return;
     }
     if (S.pending_writes)
@@ -1446,6 +1503,12 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         uint32_t *p = smn_slot(S.smn_index, 1);
         if (p) *p = v;
         *R(dw) = v;
+        return;
+    }
+    /* gfx HQD dequeue (soft reset): drained at once, the KIQ mapping is gone */
+    if (dw == GCR(regCP_GFX_HQD_DEQUEUE_REQUEST) && v) {
+        *R(GCR(regCP_GFX_HQD_ACTIVE)) = 0;
+        S.gfx_mapped = 0;
         return;
     }
     /* MEC HQD registers: the file of the queue GRBM_GFX_CNTL selects */
@@ -1738,6 +1801,9 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             S.soft_resets++;
             S.cp_rptr = 0;
             memset(S.hqd, 0, sizeof(S.hqd));
+            S.gfx_mapped = 0;
+            *R(GCR(regCP_GFX_HQD_ACTIVE)) = 0;
+            *R(GCR(regCP_GFX_MQD_BASE_ADDR)) = 0;
             *R(GCR(regCP_RB_ACTIVE)) = 0;
             *R(GCR(regCP_VMID_RESET)) = 0;
         }
@@ -2814,6 +2880,48 @@ static void run(const char *fwdir)
             CHECK(S.reg[OSS_BASE0 + regIH_RB_WPTR] & IH_RB_WPTR__RB_OVERFLOW_MASK);
             CHECK(ih60_process(&dev, &ih2, NULL, NULL) > 0 && ih2.overflows == 1);
             sdma60_stop(&dev, &sd2);
+            /* the card's RS64 gfx firmware reads the queue's MQD: RB0 set up
+             * through registers (amdgpu_async_gfx_ring=0) faults on MC 0 and
+             * halts the CP; the KIQ-mapped queue (amdgpu's default) runs,
+             * survives a soft reset and is unmapped through the KIQ */
+            {
+                static rdna3_gfx_ring ga;
+                rdna3_rs64_start rs = { 0x1000, 0x2, 0x2000, 0x3, 0x4000, 0x1 };
+                uint32_t aseq;
+                S.rs64_needs_mqd = 1;
+                memset(&ga, 0, sizeof(ga));
+                CHECK(gfx11_hw_init(&dev, &gmc, &ga, &rs, 8192) == RDNA3_ETIME && !ga.ready);
+                CHECK(S.cp_mqd_faults >= 1 && (S.reg[GCR(regCP_ME_CNTL)] & CP_ME_CNTL__PFP_HALT_MASK));
+                memset(&ga, 0, sizeof(ga));
+                ga.async = 1;
+                CHECK(gfx11_kgq_start(&dev, &kiq, &ga) == RDNA3_EINVAL);   /* no ring yet */
+                CHECK(gfx11_hw_init(&dev, &gmc, &ga, &rs, 8192) == RDNA3_OK && ga.async && !ga.ready);
+                CHECK(!(S.reg[GCR(regCP_ME_CNTL)] & (CP_ME_CNTL__PFP_HALT_MASK | CP_ME_CNTL__ME_HALT_MASK)));
+                CHECK(gfx11_kgq_start(&dev, &kiq, &ga) == RDNA3_OK && ga.ready);
+                CHECK(S.kgq_maps == 1 && S.gfx_mapped && S.reg[GCR(regCP_GFX_HQD_ACTIVE)] == 1);
+                CHECK(S.reg[GCR(regCP_GFX_MQD_BASE_ADDR)] == (uint32_t)rdna3_vram_mc(&dev, ga.mqd));
+                CHECK(S.reg[GCR(regCP_GFX_MQD_BASE_ADDR_HI)] == (uint32_t)(rdna3_vram_mc(&dev, ga.mqd) >> 32));
+                CHECK(S.reg[GCR(regCP_GFX_HQD_BASE)] == (uint32_t)(rdna3_vram_mc(&dev, ga.ring) >> 8));
+                CHECK(S.reg[GCR(regCP_GFX_HQD_RPTR_ADDR)] == (uint32_t)rdna3_vram_mc(&dev, ga.wb + RD_GFX_WB_RPTR));
+                CHECK(S.reg[GCR(regCP_RB_WPTR_POLL_ADDR_LO)] == (uint32_t)rdna3_vram_mc(&dev, ga.wb + RD_GFX_WB_WPTR));
+                CHECK(((S.reg[GCR(regCP_GFX_HQD_CNTL)] & CP_GFX_HQD_CNTL__RB_BUFSZ_MASK) >>
+                       CP_GFX_HQD_CNTL__RB_BUFSZ__SHIFT) == 10);   /* 8 KiB = 2048 dw */
+                CHECK(S.reg[GCR(regCP_GFX_MQD_CONTROL)] & CP_GFX_MQD_CONTROL__PRIV_STATE_MASK);
+                CHECK(S.reg[0xC000 + 0x40] == 0xDEADBEEF);
+                aseq = gfx11_emit_fence(&dev, &ga);
+                gfx11_commit(&dev, &ga);
+                CHECK(gfx11_wait_fence(&dev, &ga, aseq) == RDNA3_OK);
+                CHECK(gfx11_soft_reset(&dev, &ga, &kiq, &kcq) == RDNA3_OK && ga.ready && kcq.rb.ready);
+                CHECK(S.kgq_maps == 2 && S.gfx_mapped);
+                aseq = gfx11_emit_fence(&dev, &ga);
+                gfx11_commit(&dev, &ga);
+                CHECK(gfx11_wait_fence(&dev, &ga, aseq) == RDNA3_OK);
+                gfx11_kgq_stop(&dev, &kiq, &ga);
+                CHECK(S.kgq_unmaps == 1 && !S.gfx_mapped && !ga.ready);
+                CHECK(S.reg[GCR(regCP_ME_CNTL)] & CP_ME_CNTL__ME_HALT_MASK);
+                CHECK(S.cp_bad == 0);
+                S.rs64_needs_mqd = 0;
+            }
             gfx11_set_eop_interrupt(&dev, &gr, 0);
             /* UNMAP_QUEUES through the KIQ, then the MEC halts */
             gfx11_mec_stop(&dev, &kiq, &kcq);

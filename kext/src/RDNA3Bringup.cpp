@@ -153,6 +153,10 @@ void RDNA3Bringup::stopAndFree()
     fPtPool = nullptr;
     if (fKcq && fKcq->rb.ready && fDev)
         gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
+    if (fGfx && fGfx->async && fGfx->ready && fDev) {
+        gfx11_set_eop_interrupt(fDev, fGfx, 0);
+        gfx11_kgq_stop(fDev, fKiq, fGfx);   /* unmapped while the KIQ still runs */
+    }
     if (fKiq && fDev)
         gfx11_mec_stop(fDev, fKiq, fKcq);
     if (fKcq) IOFree(fKcq, sizeof(*fKcq));
@@ -714,14 +718,13 @@ bool RDNA3Bringup::hwInit()
             return false;
         }
         bzero(fGfx, sizeof(*fGfx));
+        /* amdgpu_async_gfx_ring (default 1): the KIQ maps the gfx queue */
+        fGfx->async = fDev->doorbell_ok;
         ret = gfx11_rs64_from_fw(fBlobs[AMD_BLOB_PFP].data, fBlobs[AMD_BLOB_PFP].len,
                                  fBlobs[AMD_BLOB_ME].data, fBlobs[AMD_BLOB_ME].len,
                                  fBlobs[AMD_BLOB_MEC].data, fBlobs[AMD_BLOB_MEC].len, &rs64);
         if (!ret)
             ret = gfx11_hw_init(fDev, fGmc, fGfx, &rs64, 0);
-        publish("RDNA3,GFXResult", (uint64_t)(int64_t)ret);
-        if (!ret && fIrqLive)
-            gfx11_set_eop_interrupt(fDev, fGfx, 1);
         /* MEC: the KIQ and the first kernel compute queue (needs doorbells) */
         if (!ret && fDev->doorbell_ok) {
             int kr;
@@ -746,7 +749,17 @@ bool RDNA3Bringup::hwInit()
                 if (kr)
                     BLOG("compute queues unavailable (%d): GFX and DMA rings only", kr);
             }
+            /* gfx_v11_0_cp_async_gfx_ring_resume, after the KCQs as in
+             * gfx_v11_0_cp_resume */
+            if (fGfx->async)
+                ret = (fKiq && fKiq->rb.ready) ? gfx11_kgq_start(fDev, fKiq, fGfx) : RDNA3_ENODEV;
         }
+        if (!ret && !fGfx->ready)
+            ret = RDNA3_ENODEV;   /* async queue never mapped (no KIQ) */
+        publish("RDNA3,GFXResult", (uint64_t)(int64_t)ret);
+        publish("RDNA3,GFXAsync", fGfx->async ? 1 : 0);
+        if (!ret && fIrqLive)
+            gfx11_set_eop_interrupt(fDev, fGfx, 1);
         if (!ret && fVmReady) {
             /* VMs opened before the GFXHUB came up get their context now
              * (gfxhub303_gart_enable reset VMID 1-15) */
