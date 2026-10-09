@@ -15,9 +15,10 @@ BUILD    := ../build
 OBJDIR   := $(BUILD)/kext-obj
 BUNDLE   := $(BUILD)/$(KEXT).kext
 
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 ARCH     := -arch x86_64 -mmacosx-version-min=11.0
 DEFS     := -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
-            -DKEXT_VERSION='"$(VERSION)"'
+            -DKEXT_VERSION='"$(VERSION)"' -DKEXT_COMMIT='"$(GIT_COMMIT)"'
 COMMONF  := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc \
             -I$(KHDR) -isystem $(RESDIR)/include -I../common -I../hw -I../uapi -I../third_party/amd -I../accel -Isrc \
             -O2 -g -Wall -Wextra -Werror -Wno-unused-parameter $(DEFS)

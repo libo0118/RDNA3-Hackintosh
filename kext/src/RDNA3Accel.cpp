@@ -47,7 +47,7 @@ bool RDNA3Accel::start(IOService *provider)
     fLevel = 0;
     PE_parse_boot_argn("rdna3lvl", &fLevel, sizeof(fLevel));
     setNumber("RDNA3,Level", fLevel);
-    LOG("start, safety level %u", fLevel);
+    LOG("start, safety level %u, build %s (%s)", fLevel, KEXT_COMMIT, KEXT_VERSION);
 
     readConfigSpace();
 
