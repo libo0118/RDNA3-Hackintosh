@@ -53,8 +53,14 @@ chmod 644 /Library/LaunchDaemons/org.rdna3.vmreport.plist
 
 csrutil status | grep -q disabled || echo "WARNING: SIP is not disabled (csrutil status). Run 'rdna3vm prepare' on the host again."
 
-echo "== rebuilding the kext collection (takes a moment)"
-kmutil install --update-all || true
+# Only the Auxiliary KC holds third-party kexts; 'kmutil install
+# --update-all' also tries the boot/system collections and fails without a
+# KDK. kernelmanagerd rebuilds the Auxiliary KC from the approved kexts in
+# /Library/Extensions at the next boot anyway; 'load -p' asks for it now.
+echo "== registering the kexts (the Auxiliary KC is rebuilt at the next boot)"
+for k in /Library/Extensions/RDNA3*.kext; do
+    kmutil load -p "$k" >/dev/null 2>&1 || true
+done
 echo
 echo "Done. If macOS shows 'System Extension Blocked':"
 echo "System Settings -> Privacy & Security -> Allow, then restart."
