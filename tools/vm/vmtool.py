@@ -13,6 +13,7 @@ vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
   vmtool.py stopkeys [KBD...]    return on the power button, or Esc x3 on a keyboard
   vmtool.py evdev                keyboards / mice as evdev nodes ("kbd PATH")
   vmtool.py usbhid               USB keyboards / mice: "vendor product name"
+  vmtool.py monitor SOCK CMD     run one QEMU human-monitor command, print its output
 """
 import http.server
 import os
@@ -344,12 +345,42 @@ def cmd_usbhid(argv):
     return 0
 
 
+def cmd_monitor(argv):
+    import socket
+    import time
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(argv[0])
+    out = b""
+
+    def drain(until):
+        nonlocal out
+        end = time.time() + 5
+        while until not in out and time.time() < end:
+            try:
+                chunk = s.recv(65536)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            out += chunk
+
+    drain(b"(qemu) ")                      # banner
+    out = b""
+    s.sendall((" ".join(argv[1:]) + "\n").encode())
+    drain(b"(qemu) ")
+    text = out.decode("utf-8", "replace").replace("\r", "")
+    lines = text.split("\n")[1:]           # the echoed command
+    print("\n".join(l for l in lines if not l.startswith("(qemu)")).rstrip())
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     cmds = {"plist": cmd_plist, "romcheck": cmd_romcheck, "unzip": cmd_unzip,
             "serve": cmd_serve, "stopkeys": cmd_stopkeys, "evdev": cmd_evdev,
-            "usbhid": cmd_usbhid}
+            "usbhid": cmd_usbhid, "monitor": cmd_monitor}
     fn = cmds.get(sys.argv[1])
     if not fn:
         sys.exit(__doc__)

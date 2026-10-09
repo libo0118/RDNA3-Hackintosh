@@ -528,8 +528,10 @@ cmd__passthrough() {
     echo 0 > /sys/module/kvm/parameters/report_ignored_msrs 2>/dev/null || true
 
     qemu_common
-    QARGS+=(-vga none -display none -serial "file:$WORK/reports/serial-$stamp.log"
-        -fw_cfg name=opt/ovmf/X-PciMmio64Mb,string=65536)
+    QARGS+=(-vga none -display none -serial "file:$WORK/reports/serial-$stamp.log")
+    # OVMF's 64-bit PCI window (MiB); 0 = OVMF's default size
+    [ "${PCI_MMIO64_MB:-65536}" != 0 ] &&
+        QARGS+=(-fw_cfg "name=opt/ovmf/X-PciMmio64Mb,string=${PCI_MMIO64_MB:-65536}")
     slot=${bdf%.*}; i=1; rp=0
     QARGS+=(-device pcie-root-port,id=rp0,bus=pcie.0,chassis=1,slot=1)
     for d in "${DEVS[@]}"; do
@@ -578,8 +580,17 @@ cmd__passthrough() {
     $VMTOOL stopkeys "${KBDS[@]}" & pk=$!
     local limit=${RDNA3VM_TIMEOUT:-$TIMEOUT_MIN}
     sleep $((limit * 60)) & tm=$!
+    # what the guest's PCI bus looks like (devices, BARs as the firmware
+    # assigned them) and the card as the host exposes it, for the host log
+    local mon=$WORK/qemu-monitor.sock
+    rm -f "$mon"
+    QARGS+=(-monitor "unix:$mon,server=on,wait=off")
+    command -v lspci >/dev/null &&
+        lspci -vv -s "$bdf" 2>/dev/null | grep -E 'Region|BAR [0-9]|Resizable|LnkSta:' | sed 's/^/  host: /'
     echo "== qemu start"
     qemu-system-x86_64 "${QARGS[@]}" & qpid=$!
+    { sleep 40; echo "== guest PCI bus (QEMU 'info pci', 40 s after start)"
+      $VMTOOL monitor "$mon" "info pci" 2>&1 | sed 's/^/  /'; } &
     while kill -0 $qpid 2>/dev/null && kill -0 $pk 2>/dev/null && kill -0 $tm 2>/dev/null; do
         wait -n || true
     done
