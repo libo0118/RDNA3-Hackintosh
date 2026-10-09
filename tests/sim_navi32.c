@@ -3036,6 +3036,8 @@ static void run(const char *fwdir)
         CHECK(dm.region[RD_DMUB_WIN_MAILBOX].top - dm.region[RD_DMUB_WIN_MAILBOX].base == 2 * RD_DMUB_RB_SIZE);
         CHECK(S.dmub.psp_loaded);
         CHECK(dmub32_hw_init(&dm, S.vbios, VBIOS_LEN, 1, 100000) == RDNA3_OK);
+        CHECK(dmub32_wait_boot(&dm, 1000) == RDNA3_OK && dm.hw_init);
+        dmub32_log_state(&dm, "test");
         CHECK(S.dmub.stops == 1 && S.dmub.boots == 1 && S.dmub.bad_boots == 0 && S.dmub.running);
         CHECK((dm.boot_status & 3) == 3 && dmub32_is_hw_init(&dev));
         cw = dmub_cw_offset(3);

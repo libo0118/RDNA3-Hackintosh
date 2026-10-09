@@ -881,6 +881,17 @@ void RDNA3Bringup::dmubInit()
     ret = dmub32_sw_init(fDmub, fDev, (const uint8_t *)fw->data, (uint32_t)fw->len, fVbios.len);
     if (ret == RDNA3_OK)
         ret = dmub32_hw_init(fDmub, fVbios.data, fVbios.len, pspLoaded, 100000);
+    if (ret == RDNA3_ETIME) {
+        /* amdgpu only warns here ("Wait for DMUB auto-load failed"); see
+         * whether the firmware comes up late */
+        if (dmub32_wait_boot(fDmub, 2000000) == RDNA3_OK) {
+            BLOG("DMUB: firmware came up within 2 s after the 100 ms wait");
+            publish("RDNA3,DMUBLateBoot", 1);
+            ret = RDNA3_OK;
+        }
+        if (ret)
+            dmub32_log_state(fDmub, "after 2 s more");
+    }
     publish("RDNA3,DMUBResult", (uint64_t)(int64_t)ret);
     publish("RDNA3,DMUBVersion", fDmub->fw_version);
     publish("RDNA3,DMUBBootStatus", fDmub->boot_status);

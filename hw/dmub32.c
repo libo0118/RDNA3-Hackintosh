@@ -272,6 +272,47 @@ static void dcn32_setup_windows(rdna3_dmub *dm)
                RD_DMUB_CW6_BASE + win_size(dm, RD_DMUB_WIN_FW_STATE));
 }
 
+/* What the PSP and the firmware left: code/stack windows (programmed by
+ * the PSP when it loads the DMCUB, never by the driver), the fault
+ * addresses and whether the microcontroller's timer is running. */
+void dmub32_log_state(rdna3_dmub *dm, const char *when)
+{
+    rdna3_dev *d = dm->d;
+    uint32_t t0 = RR(d, regDMCUB_TIMER_CURRENT), t1;
+    udelay(d, 10);
+    t1 = RR(d, regDMCUB_TIMER_CURRENT);
+    RLOG(d, "DMUB state (%s): CNTL 0x%08x CNTL2 0x%08x SEC_CNTL 0x%08x SCRATCH0 0x%08x 7 0x%08x "
+         "14 0x%08x 15 0x%08x timer %u -> %u", when, RR(d, regDMCUB_CNTL), RR(d, regDMCUB_CNTL2),
+         RR(d, regDMCUB_SEC_CNTL), RR(d, regDMCUB_SCRATCH0), RR(d, regDMCUB_SCRATCH7),
+         RR(d, regDMCUB_SCRATCH14), RR(d, regDMCUB_SCRATCH15), t0, t1);
+    RLOG(d, "DMUB state (%s): CW0 off 0x%08x%08x base 0x%08x top 0x%08x, CW1 off 0x%08x%08x "
+         "base 0x%08x top 0x%08x", when, RR(d, regDMCUB_REGION3_CW0_OFFSET_HIGH),
+         RR(d, regDMCUB_REGION3_CW0_OFFSET), RR(d, regDMCUB_REGION3_CW0_BASE_ADDRESS),
+         RR(d, regDMCUB_REGION3_CW0_TOP_ADDRESS), RR(d, regDMCUB_REGION3_CW1_OFFSET_HIGH),
+         RR(d, regDMCUB_REGION3_CW1_OFFSET), RR(d, regDMCUB_REGION3_CW1_BASE_ADDRESS),
+         RR(d, regDMCUB_REGION3_CW1_TOP_ADDRESS));
+    RLOG(d, "DMUB state (%s): faults inst 0x%08x data-write 0x%08x undefined 0x%08x, "
+         "CW4 off 0x%08x base 0x%08x", when, RR(d, regDMCUB_INST_FETCH_FAULT_ADDR),
+         RR(d, regDMCUB_DATA_WRITE_FAULT_ADDR), RR(d, regDMCUB_UNDEFINED_ADDRESS_FAULT_ADDR),
+         RR(d, regDMCUB_REGION3_CW4_OFFSET), RR(d, regDMCUB_REGION3_CW4_BASE_ADDRESS));
+}
+
+int dmub32_wait_boot(rdna3_dmub *dm, uint32_t timeout_us)
+{
+    uint32_t i, st = 0;
+    for (i = 0; i <= timeout_us; i += 100) {
+        st = RR(dm->d, regDMCUB_SCRATCH0);
+        if ((st & RD_DMUB_BOOT_DAL_FW) && (st & RD_DMUB_BOOT_MAILBOX_RDY)) {
+            dm->boot_status = st;
+            dm->hw_init = 1;
+            return RDNA3_OK;
+        }
+        udelay(dm->d, 100);
+    }
+    dm->boot_status = st;
+    return RDNA3_ETIME;
+}
+
 void dmub32_hw_reset(rdna3_dmub *dm)
 {
     dcn32_reset(dm->d);
@@ -293,6 +334,7 @@ int dmub32_hw_init(rdna3_dmub *dm, const uint8_t *vbios, uint32_t vbios_len, int
         return RDNA3_ENODEV;
     }
     /* dm_dmub_hw_init: reset if it was running, before its memory changes */
+    dmub32_log_state(dm, "before reset");
     dmub32_hw_reset(dm);
     dm->psp_loaded = psp_loaded;
 
@@ -340,6 +382,7 @@ int dmub32_hw_init(rdna3_dmub *dm, const uint8_t *vbios, uint32_t vbios_len, int
     if (!((st & RD_DMUB_BOOT_DAL_FW) && (st & RD_DMUB_BOOT_MAILBOX_RDY))) {
         RERR(d, "DMUB: auto-load timed out (SCRATCH0 0x%08x, CNTL 0x%08x, SEC_CNTL 0x%08x)", st,
              RR(d, regDMCUB_CNTL), RR(d, regDMCUB_SEC_CNTL));
+        dmub32_log_state(dm, "auto-load timeout");
         return RDNA3_ETIME;
     }
     RLOG(d, "DMUB: firmware 0x%08x running, boot status 0x%x", dm->fw_version, st);
