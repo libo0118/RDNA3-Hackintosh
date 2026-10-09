@@ -15,7 +15,7 @@ vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
 """
 import http.server
 import os
-import plistlib
+import re
 import select
 import struct
 import sys
@@ -24,38 +24,116 @@ import zipfile
 APPLE_NVRAM = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
 
 
+class PlistEditError(Exception):
+    pass
+
+
+def _element_end(text, pos, tag):
+    """index just past the </tag> closing the <tag> that starts at pos"""
+    depth, i = 0, pos
+    pat = re.compile(r"<(/?)%s\b[^>]*?(/?)>" % tag)
+    while True:
+        m = pat.search(text, i)
+        if not m:
+            raise PlistEditError("unterminated <%s>" % tag)
+        if m.group(1):
+            depth -= 1
+        elif not m.group(2):
+            depth += 1
+        i = m.end()
+        if depth == 0:
+            return i
+
+
+def _value_after_key(text, key, start=0, stop=None):
+    """(key_start, value_start, value_end) of <key>key</key><value> in text[start:stop]"""
+    stop = len(text) if stop is None else stop
+    m = re.compile(r"<key>%s</key>\s*" % re.escape(key)).search(text, start, stop)
+    if not m:
+        return None
+    v = re.compile(r"<(dict|array|string|data|integer|true|false|real|date)\b[^>]*?(/?)>").match(text, m.end())
+    if not v:
+        raise PlistEditError("key %s has no value" % key)
+    if v.group(2) or v.group(1) in ("true", "false"):
+        return m.start(), v.start(), v.end()
+    if v.group(1) in ("dict", "array"):
+        return m.start(), v.start(), _element_end(text, v.start(), v.group(1))
+    close = text.index("</%s>" % v.group(1), v.end())
+    return m.start(), v.start(), close + len("</%s>" % v.group(1))
+
+
+def _section(text, *path):
+    """(start, end) of the <dict> reached by following the keys in path"""
+    start, end = 0, len(text)
+    for key in path:
+        found = _value_after_key(text, key, start, end)
+        if not found or not text.startswith("<dict", found[1]):
+            raise PlistEditError("no %s dict in config.plist" % "/".join(path))
+        start, end = found[1], found[2]
+    return start, end
+
+
+def _set(text, sec, key, value_xml):
+    """replace (or add) key's value inside the dict text[sec[0]:sec[1]]"""
+    found = _value_after_key(text, key, sec[0], sec[1])
+    if found:
+        return text[:found[1]] + value_xml + text[found[2]:]
+    close = text.rindex("</dict>", sec[0], sec[1])
+    return text[:close] + "\t<key>%s</key>\n\t%s\n" % (key, value_xml) + text[close:]
+
+
+def _xml(s):
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def cmd_plist(argv):
+    """Edits only the values it changes, as text: OpenCore accepts plists
+    that Python's plistlib refuses (and a rewrite would reformat the file)."""
     path = argv[0]
-    with open(path, "rb") as f:
-        cfg = plistlib.load(f)
-    add = cfg.setdefault("NVRAM", {}).setdefault("Add", {}).setdefault(APPLE_NVRAM, {})
+    text = open(path, encoding="utf-8").read()
+    add = lambda: _section(text, "NVRAM", "Add", APPLE_NVRAM)
     if "--show" in argv:
-        print(add.get("boot-args", ""))
+        found = _value_after_key(text, "boot-args", *add())
+        m = re.match(r"<string>(.*?)</string>", text[found[1]:found[2]], re.S) if found else None
+        print(m.group(1) if m else "")
         return 0
-    delete = cfg["NVRAM"].setdefault("Delete", {}).setdefault(APPLE_NVRAM, [])
+
+    def delete_list(name):
+        nonlocal text
+        sec = _section(text, "NVRAM", "Delete")
+        found = _value_after_key(text, APPLE_NVRAM, *sec)
+        if not found:
+            text = _set(text, sec, APPLE_NVRAM, "<array>\n\t</array>")
+            found = _value_after_key(text, APPLE_NVRAM, *_section(text, "NVRAM", "Delete"))
+        arr = text[found[1]:found[2]]
+        if "<string>%s</string>" % name not in arr:
+            close = found[1] + arr.rindex("</array>")
+            text = text[:close] + "\t<string>%s</string>\n\t\t\t" % name + text[close:]
+
     i = 1
     while i < len(argv):
         a = argv[i]
         if a == "--boot-args":
-            add["boot-args"] = argv[i + 1]
-            if "boot-args" not in delete:
-                delete.append("boot-args")
+            text = _set(text, add(), "boot-args", "<string>%s</string>" % _xml(argv[i + 1]))
+            delete_list("boot-args")
             i += 2
         elif a == "--sip-off":
             # 0x0FEF: SIP off, unsigned and unapproved kexts allowed (test VM only)
-            add["csr-active-config"] = bytes([0xEF, 0x0F, 0x00, 0x00])
-            if "csr-active-config" not in delete:
-                delete.append("csr-active-config")
-            cfg.setdefault("Misc", {}).setdefault("Security", {})["SecureBootModel"] = "Disabled"
+            text = _set(text, add(), "csr-active-config", "<data>7w8AAA==</data>")
+            delete_list("csr-active-config")
+            text = _set(text, _section(text, "Misc", "Security"), "SecureBootModel",
+                        "<string>Disabled</string>")
             i += 1
         elif a == "--timeout":
-            cfg.setdefault("Misc", {}).setdefault("Boot", {})["Timeout"] = int(argv[i + 1])
+            text = _set(text, _section(text, "Misc", "Boot"), "Timeout",
+                        "<integer>%d</integer>" % int(argv[i + 1]))
             i += 2
         else:
             sys.exit("unknown option " + a)
-    with open(path, "wb") as f:
-        plistlib.dump(cfg, f)
-    print("boot-args:", add.get("boot-args", ""))
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    found = _value_after_key(text, "boot-args", *add())
+    print("boot-args:", re.sub(r"</?string>", "", text[found[1]:found[2]]) if found else "")
     return 0
 
 
