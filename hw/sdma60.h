@@ -62,6 +62,10 @@ typedef struct rdna3_sdma_ring {
  * sdma_v6_0_ring_test_ring(). */
 int  sdma60_start(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t inst, uint32_t ring_size);
 void sdma60_stop(rdna3_dev *d, rdna3_sdma_ring *r);
+/* sdma_v6_0_soft_reset (FREEZE, HALT + TH1_RESET, GRBM_SOFT_RESET.SDMAn),
+ * then the queue again on the same ring: pending fences read as done,
+ * numbering continues. The hang recovery for the DMA ring (no MES). */
+int  sdma60_soft_reset(rdna3_dev *d, rdna3_sdma_ring *r);
 int  sdma60_test_ring(rdna3_dev *d, rdna3_sdma_ring *r);
 
 /* ring building */

@@ -885,7 +885,7 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
 {
     rdna3_gfx_ring *r = ip == AMDGPU_HW_IP_GFX ? fGfx
                       : (ip == AMDGPU_HW_IP_COMPUTE && fKcq) ? &fKcq->rb : nullptr;
-    uint32_t vmid = r ? r->last_vmid : 0;
+    uint32_t vmid = r ? r->last_vmid : (ip == AMDGPU_HW_IP_DMA ? fSdmaLastVmid : 0);
     rdna3_gfx_status st;
     bool ok = false;
 
@@ -910,6 +910,22 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
             BLOG("hang: soft recovery worked, the ring runs again");
             return 0;
         }
+    }
+
+    /* a DMA hang: sdma_v6_0_soft_reset on that engine alone (amdgpu would
+     * use MES RESET_QUEUE, which needs the MES this driver does not run);
+     * its pending fences read as done afterwards */
+    if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ring != UINT64_MAX &&
+        sdma60_soft_reset(fDev, fSdma) == RDNA3_OK) {
+        fSdmaResets++;
+        fResetCount++;
+        publish("RDNA3,SDMAResets", fSdmaResets);
+        publish("RDNA3,Resets", fResetCount);
+        IOLockLock(fLock);
+        IOLockWakeup(fLock, &fFenceEvent, false);
+        IOLockUnlock(fLock);
+        BLOG("hang: SDMA0 soft reset done, the DMA ring runs again");
+        return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
     }
 
     /* the engine needs a reset; pending fences complete first so every
@@ -1119,6 +1135,7 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
     if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready) {
         for (uint32_t i = 0; i < n; i++)
             sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);
+        fSdmaLastVmid = v->vmid;
         *seq = sdma60_emit_fence(fDev, fSdma);
         sdma60_commit(fDev, fSdma);
         return 0;

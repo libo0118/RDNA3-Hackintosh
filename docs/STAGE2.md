@@ -71,14 +71,23 @@ ringu zostaje „guilty” (jego `CS` kończą się `-ECANCELED`, `AMDGPU_CTX_OP
 zwraca `GUILTY|RESET`), `SQ_CMD` zabija fale tego VMID i czeka 100 ms na
 fence. Gdy to nie pomaga: fence'y wszystkich ringów są dopełniane, GFX
 przechodzi soft reset (`gfx_v11_0_soft_reset` + ring 0, KIQ, KCQ od nowa),
-a gdy i to zawiedzie (albo zawiesił się SDMA) — reset mode-1 przez PMFW i
+zawieszony SDMA dostaje własny soft reset (`sdma_v6_0_soft_reset`: FREEZE,
+HALT + TH1_RESET, `GRBM_SOFT_RESET.SDMA0`, kolejka od nowa na tym samym
+ringu, oczekujące fence'y uznane za wykonane, VM ostatniego IB guilty), a
+gdy i to zawiedzie — reset mode-1 przez PMFW i
 `hwInit()` od poziomu 4 (PSP, firmware, SMU, GMC, IH, SDMA, GFX). Tablice
 stron VM zostają (VRAM przeżywa mode-1; słowo kontrolne `RDN3` to sprawdza,
 inaczej klienci dostają `VRAMLOST`). Błędy stron GPUVM (klient VMC/GFX,
 źródło 0) są dekodowane z IV (`gmc11_decode_vm_fault`: hub, VMID, adres,
 `L2_PROTECTION_FAULT_STATUS`) i też oznaczają VM jako guilty. Liczniki w
 IORegistry: `RDNA3,VMFaults`, `RDNA3,LastFaultAddr`, `RDNA3,SoftRecoveries`,
-`RDNA3,Resets`, `RDNA3,GPUResets`, `RDNA3,VRAMLost`.
+`RDNA3,Resets`, `RDNA3,SDMAResets`, `RDNA3,GPUResets`, `RDNA3,VRAMLost`.
+
+Czekanie na fence nie trzyma globalnej blokady DRM: `drmFenceWait` zwalnia
+ją na czas snu (inni klienci działają dalej), odzyskiwanie po 10 s robi już
+pod blokadą i tylko raz. UAPI nie trzyma wskaźników przez to okno (fence'y
+przez wartość, syncobj wyszukiwany ponownie), a zamknięcie pliku czeka na
+jego ioctle w toku.
 
 ## Decyzje i ryzyka (do sprawdzenia na sprzęcie)
 

@@ -6,6 +6,8 @@
 #include "sdma60.h"
 #include "doorbell.h"
 #include "gen/gc_11_0_0_sdma.h"
+#include "gen/gc_11_0_0_sdma_reset.h"
+#include "gen/gc_11_0_0_reset.h"
 
 #define REG_FIELD_SHIFT(reg, field) reg##__##field##__SHIFT
 #define REG_FIELD_MASK(reg, field)  reg##__##field##_MASK
@@ -170,10 +172,10 @@ int sdma60_test_ring(rdna3_dev *d, rdna3_sdma_ring *r)
     return RDNA3_ETIME;
 }
 
+static int sdma_program(rdna3_dev *d, rdna3_sdma_ring *r);
+
 int sdma60_start(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t inst, uint32_t ring_size)
 {
-    uint32_t rb_cntl, ib_cntl, tmp;
-    uint64_t ring_mc, rptr_mc, wptr_mc;
     uint8_t zero[64] = { 0 };
 
     if (!d->ipver[HWIP_SDMA0].present || d->ipver[HWIP_SDMA0].major != 6) {
@@ -200,6 +202,16 @@ int sdma60_start(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t inst, uint32_t ring_
     rdna3_vram_fill(d, r->ring, 0, ring_size);
     rdna3_vram_write(d, r->wb, zero, sizeof(zero));
     rdna3_hdp_flush(d);
+    return sdma_program(d, r);
+}
+
+/* sdma_v6_0_start for one instance on an allocated ring: unhalt, the
+ * queue registers (gfx_resume_instance), ring test */
+static int sdma_program(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    uint32_t rb_cntl, ib_cntl, tmp, inst = r->inst, ring_size = r->ring_size;
+    uint64_t ring_mc, rptr_mc, wptr_mc;
+
     ring_mc = rdna3_vram_mc(d, r->ring);
     rptr_mc = rdna3_vram_mc(d, r->wb + RD_SDMA_WB_RPTR);
     wptr_mc = rdna3_vram_mc(d, r->wb + RD_SDMA_WB_WPTR);
@@ -288,6 +300,47 @@ int sdma60_start(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t inst, uint32_t ring_
     RLOG(d, "SDMA%u: ring %u KiB at MC 0x%llx, ring test passed", inst, ring_size / 1024,
          (unsigned long long)ring_mc);
     return RDNA3_OK;
+}
+
+/* sdma_v6_0_soft_reset for one instance, then the queue comes back on the
+ * same ring buffer with the fence numbering kept: whatever was in flight is
+ * dropped and its fences are completed (amdgpu force-completes them), so
+ * every waiter returns. */
+int sdma60_soft_reset(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    uint32_t tmp, seq = r->fence_seq;
+    uint8_t zero[16] = { 0 };
+
+    if (r->ring == 0 || r->ring == UINT64_MAX || !r->ring_size)
+        return RDNA3_EINVAL;
+    sdma60_stop(d, r);
+    tmp = RS(d, r->inst, regSDMA0_FREEZE);
+    tmp |= SDMA0_FREEZE__FREEZE_MASK;
+    WS(d, r->inst, regSDMA0_FREEZE, tmp);
+    tmp = RS(d, r->inst, regSDMA0_F32_CNTL);
+    tmp |= SDMA0_F32_CNTL__HALT_MASK | SDMA0_F32_CNTL__TH1_RESET_MASK;
+    WS(d, r->inst, regSDMA0_F32_CNTL, tmp);
+    WS(d, r->inst, regSDMA0_QUEUE0_PREEMPT, 0);
+    d->os.udelay(d->os.ctx, 100);
+
+    tmp = GRBM_SOFT_RESET__SOFT_RESET_SDMA0_MASK << r->inst;
+    WREG32_SOC15(d, GC, 0, regGRBM_SOFT_RESET, tmp);
+    (void)RREG32_SOC15(d, GC, 0, regGRBM_SOFT_RESET);
+    d->os.udelay(d->os.ctx, 100);
+    WREG32_SOC15(d, GC, 0, regGRBM_SOFT_RESET, 0);
+    (void)RREG32_SOC15(d, GC, 0, regGRBM_SOFT_RESET);
+    d->os.udelay(d->os.ctx, 100);
+
+    /* the ring starts empty at 0; the fence slot says "all done" */
+    r->wptr = 0;
+    rdna3_vram_fill(d, r->ring, 0, r->ring_size);
+    rdna3_vram_write(d, r->wb + RD_SDMA_WB_RPTR, zero, sizeof(zero));
+    rdna3_vram_write(d, r->wb + RD_SDMA_WB_FENCE, &seq, 4);
+    rdna3_hdp_flush(d);
+    tmp = sdma_program(d, r);
+    RLOG(d, "SDMA%u: soft reset %s, fences completed up to %u", r->inst,
+         tmp == RDNA3_OK ? "done" : "failed", seq);
+    return (int)tmp;
 }
 
 /* sdma_v6_0_gfx_stop + halt */

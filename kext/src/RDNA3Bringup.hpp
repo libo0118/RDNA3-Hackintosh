@@ -172,7 +172,9 @@ private:
 
     /* firmware request rendezvous */
     IOLock       *fLock   = nullptr;
-    IOLock       *fIhLock = nullptr;   /* one IH consumer at a time (MSI action or a polling waiter) */
+    IOLock       *fIhLock = nullptr;
+    uint32_t      fSdmaLastVmid = 0;   /* VMID of the last IB on the DMA ring (hang blame) */
+    uint32_t      fSdmaResets = 0;   /* one IH consumer at a time (MSI action or a polling waiter) */
     bool          fFwDone = false;
     RDNA3Firmware fFwResult = {};
 

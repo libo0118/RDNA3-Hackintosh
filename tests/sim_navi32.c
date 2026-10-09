@@ -29,6 +29,7 @@
 #include "edid.h"
 #include "atom.h"
 #include "dmub32.h"
+#include "gen/gc_11_0_0_sdma_reset.h"
 #include "gen/dcn_3_2_1_dmcub.h"
 #include "gen/dcn_3_2_1_aux.h"
 #include "gmc11.h"
@@ -175,6 +176,8 @@ typedef struct sim {
         PPTable_t pptable;    /* as written by the driver */
     } smu;
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
+    int      sdma_hang;              /* the engine stopped consuming its ring */
+    unsigned sdma_resets, sdma_resets_unfrozen;
 } sim;
 
 static sim S;
@@ -1156,6 +1159,8 @@ static void sdma_run(uint32_t wptr_bytes)
         S.sdma_while_halted++;
         return;
     }
+    if (S.sdma_hang)
+        return;
     if (S.pending_writes)
         S.unflushed_doorbells++;
 #define RD(i) (*(uint32_t *)(ring + ((S.sdma_rptr + 4 * (i)) & (size - 1))))
@@ -1568,6 +1573,17 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         return;
     }
     if (dw == GCR(regGRBM_SOFT_RESET)) {
+        if (v & GRBM_SOFT_RESET__SOFT_RESET_SDMA0_MASK) {
+            /* SDMA0 back to its reset state: halted, queue off, unfrozen */
+            S.sdma_resets++;
+            if (!(S.reg[GC_BASE0 + regSDMA0_FREEZE] & SDMA0_FREEZE__FREEZE_MASK))
+                S.sdma_resets_unfrozen++;
+            S.sdma_hang = 0;
+            S.sdma_rptr = 0;
+            S.reg[GC_BASE0 + regSDMA0_FREEZE] = 0;
+            S.reg[0xA000 + regSDMA0_F32_CNTL] = SDMA0_F32_CNTL__HALT_MASK;
+            S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_CNTL] &= ~SDMA0_QUEUE0_RB_CNTL__RB_ENABLE_MASK;
+        }
         if (v & GRBM_SOFT_RESET__SOFT_RESET_CP_MASK) {
             /* CP/CPF/CPC/CPG reset: queues gone, pointers at 0, VMID reset done */
             S.soft_resets++;
@@ -2110,6 +2126,23 @@ static void run(const char *fwdir)
                       pkt[2] == 0x123 && pkt[3] == 48 && pkt[4] == 0 && pkt[5] == 0);
                 CHECK(!sdma60_fence_passed(&dev, &sd, sd.fence_seq + 1));
                 CHECK(sdma60_fence_passed(&dev, &sd, sd.fence_seq));
+            }
+            /* a hung engine: the fence never lands until the soft reset,
+             * which completes it and brings the queue back on the same ring */
+            {
+                uint32_t hung, again;
+                S.sdma_hang = 1;
+                sdma60_emit_copy(&dev, &sd, rdna3_vram_mc(&dev, src), rdna3_vram_mc(&dev, dst), 256);
+                hung = sdma60_emit_fence(&dev, &sd);
+                sdma60_commit(&dev, &sd);
+                CHECK(!sdma60_fence_passed(&dev, &sd, hung));
+                CHECK(sdma60_soft_reset(&dev, &sd) == RDNA3_OK && sd.ready);
+                CHECK(S.sdma_resets == 1 && S.sdma_resets_unfrozen == 0 && !S.sdma_hang);
+                CHECK(sdma60_fence_passed(&dev, &sd, hung) && sd.wptr > 0);
+                CHECK(sdma60_copy_sync(&dev, &sd, rdna3_vram_mc(&dev, src), rdna3_vram_mc(&dev, dst),
+                                       sizeof(pat)) == RDNA3_OK);
+                again = sd.fence_seq;
+                CHECK(again == hung + 1 && S.sdma_bad == 0);
             }
             sdma60_stop(&dev, &sd);
             CHECK(!sd.ready && (S.reg[0xA000 + regSDMA0_F32_CNTL] & SDMA0_F32_CNTL__HALT_MASK));
