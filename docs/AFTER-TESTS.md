@@ -1,214 +1,274 @@
-# After the hardware tests: action plan
+# Agent playbook: acting on hardware-test reports
 
-What to do the moment reports from the first hardware runs arrive, so the
-work starts without a planning round. The test procedure itself is in
-[TESTING-VM](TESTING-VM.md) (Linux host, VM with the card passed through) and
-[TESTING-HW](TESTING-HW.md) (bare-metal hackintosh). Steps below use the
-ladder numbers from there (`0 1 2 3 4 5 5b 6 6b 7 8 9 10`).
+**Audience: an AI coding agent** continuing this project after the user ran
+the hardware tests. Follow it literally; it exists so that no planning round
+is needed. The user is not the reader of this file.
 
-Rules that do not change: port from amdgpu (MIT) with the source function
-named in a comment, every fix first reproduced in the simulator
-(`tests/sim_navi32.c`), commits with `[skip ci]`, one CI run with
-`full: "false"` per batch (never `full: true` without asking: CI minutes).
+You cannot touch the hardware. The user runs tests on their machine and sends
+reports; you diagnose, fix, verify in the simulator and CI, and tell the user
+exactly what to run next. One round = one report batch → one fix → one retest.
 
 ---
 
-## 1. Intake (every batch of reports, ~10 min)
+## 0. Context you need (read once per session)
 
-1. Put the files in `reports/<yyyy-mm-dd>/` in the working copy. **Never
-   commit them**: they contain EDID and serial numbers (`reports/` is in
-   `.gitignore`).
-2. Run the triage:
+- **Project:** macOS (Hackintosh) driver for AMD RX 7800 XT (Navi 32, PCI
+  `1002:747E`), ported from Linux amdgpu (MIT). Branch **`stage1-kext`** of
+  `voten641/rdna3-hackintosh`. Do not open a PR unless asked.
+- **Nothing had run on real hardware before these tests.** Everything was
+  verified only in the simulator `tests/sim_navi32.c` and in CI builds.
+- **Test procedures the user follows:** `docs/TESTING-VM.md` (Linux host,
+  macOS VM with the card passed through, driven by `tools/vm/rdna3vm`) and
+  `docs/TESTING-HW.md` (bare-metal hackintosh). Ladder steps:
+  `0 1 2 3 4 5 5b 6 6b 7 8 9 10`; boot-args per step are in
+  `step_args()` in `tools/vm/rdna3vm`.
+- **Kext layout:** `kext/src/RDNA3Accel.cpp` (levels 0–3: PCI, BAR5, IFWI
+  wait, VRAM size, discovery), `RDNA3Display.cpp` (VBIOS paths, AUX/EDID,
+  DMCUB glue), `RDNA3Drm.cpp` (amdgpu UAPI), `RDNA3Bringup.cpp`
+  (`hwInit()`: levels 4–8 = PSP, SMU/PM, DMCUB, GMC, IH, SDMA, GFX/KIQ/KCQ;
+  recovery). Hardware logic is portable C in `hw/` (one file per IP block,
+  register headers generated in `hw/gen/` by `tools/gen_regs.py`).
+- **Where amdgpu lives:** fetch the exact Linux file you compare against
+  into your scratchpad, e.g.
+  `curl -sfL https://raw.githubusercontent.com/torvalds/linux/v6.12/drivers/gpu/drm/amd/amdgpu/psp_v13_0.c`.
+  Register headers: `drivers/gpu/drm/amd/include/asic_reg/...`.
 
-   ```sh
-   python3 tools/triage_reports.py reports/<date> --all
-   ```
+### Hard rules
 
-   It prints per boot: boot-args, `RDNA3,Stage2`, every check as
-   PASS / FAIL, the kext's ERROR lines, the DMA/GFX test results and the
-   tails of the serial and host logs. Exit status 1 = something failed.
-3. Compare the IP discovery blob with Linux (once, from step 2 on):
+1. **Language:** talk to the user in **Polish**. Everything committed to the
+   repo (code, comments, docs, commit messages) is **English only**.
+2. **CI minutes are scarce (user's explicit instruction).**
+   - Every commit message carries **`[skip ci]`**.
+   - Verify with **one** manual run per batch, always with
+     `inputs: {"full": "false"}` — the workflow input defaults to `true`, so
+     never dispatch without it. Never run `full: true` (Metal + RADV) without
+     asking the user first.
+   - A push of `metal/**` without `[skip ci]` starts the expensive Metal job.
+3. **Port, don't invent.** Each hardware change follows a named amdgpu
+   function; name it in a comment. NullMoth-derived code stays AMD-only.
+4. **Simulator first.** Every hardware fix must be reproduced in
+   `tests/sim_navi32.c` (make the model behave like the card in the report)
+   and pass `make test` before it is pushed.
+5. **One step per round.** Fix the first failing ladder step only; later
+   failures are often consequences.
+6. **Commit trailers:** follow the session's attribution instructions.
+   Never put a model identifier in the repo.
+7. **Never commit reports** (`reports/` is git-ignored: EDID, serials).
 
+### Tools and state outside the repo
+
+- **Notion kanban:** data source `collection://2dad47f8-8a55-4222-96e5-39b401eb72ed`
+  (title property `Zadanie`; `Status`: `📋 Do zrobienia`, `🔨 W toku`,
+  `✅ Zrobione (CI)`, `🧪 Przetestowane (symulator)`, `🟢 Działa na sprzęcie`,
+  `🔴 Zepsute / zablokowane`; `Etap`: `0 Stanowisko/CI` … `8 Pakowanie`;
+  `Priorytet`: Wysoki/Średni/Niski; text `Pliki`, `Notatki`). Status page
+  with per-stage percentages: `3f4560305d0d81058363de48e7e2efbd`.
+  The board is in Polish (it is the user's, not the repo).
+- **CI:** `.github/workflows/build.yml`. Artifact **`RDNA3Accel-kext`**
+  (kexts, `rdna3_drminfo`, `libdrm.dylib`) is what the user installs.
+- **Local tests:** `make test RDNA3_FW_DIR=<dir>`; fetch the firmware into
+  the scratchpad first with the same loop as the `host-tests` job in
+  `build.yml` (linux-firmware `amdgpu/*.bin`).
+
+---
+
+## 1. Intake (start of every round)
+
+1. Collect the user's files into `reports/<yyyy-mm-dd>/`. Expected:
+   `rdna3-report-*.tar.gz`, `*-tests.txt`, `serial-*.log`, `host-*.log`,
+   and once `linux-reference/`. If something needed is missing, ask for those
+   exact files (in Polish) and stop.
+2. Run `python3 tools/triage_reports.py reports/<date> --all`.
+   Exit 1 = a check failed. The first `FAIL` (in ladder order) is your target.
+3. From step 2 on, check discovery once:
    ```sh
    make tools
-   tar -xzf reports/<date>/rdna3-report-*lvl-2*.tar.gz -C /tmp
-   build/host/amd_discovery_dump /tmp/rdna3-report-*/discovery.bin > /tmp/mac.txt
+   mkdir -p /tmp/rep && tar -xzf reports/<date>/rdna3-report-*lvl-2*.tar.gz -C /tmp/rep
+   build/host/amd_discovery_dump /tmp/rep/*/discovery.bin > /tmp/mac.txt
    build/host/amd_discovery_dump reports/<date>/linux-reference/discovery.bin > /tmp/linux.txt
-   diff /tmp/linux.txt /tmp/mac.txt      # must be empty
+   diff /tmp/linux.txt /tmp/mac.txt    # must be empty, else fix step 2 first
    ```
+4. Notion: create a card `HW test <date>` (Etap `0 Stanowisko/CI`) with the
+   PASS/FAIL list; move cards of verified parts to `🟢 Działa na sprzęcie`,
+   the failing part to `🔴 Zepsute / zablokowane`.
+5. Go to the failing step in §3.
 
-4. In Notion create one card "HW test <date>" (stage 0, status by result)
-   with the PASS/FAIL table, and move the cards of the passing parts to
-   "🟢 Działa na sprzęcie".
-5. Find the **first** FAIL in ladder order and go to its section in §3.
-   Fix one step per round: a later failure may be a consequence of the
-   first.
+## 2. Fix loop (every failure)
 
-## 2. The fix loop (same for every failure)
-
-1. **Evidence.** From the report: `RDNA3,Stage2`, the `*Result` value
-   (negative errno: -5 EIO, -12 ENOMEM, -16 EBUSY, -19 ENODEV, -22 EINVAL,
-   -62 ETIME), the first `ERROR` line and the register values it prints,
-   the last serial lines before a hang.
-2. **Compare with amdgpu.** Open the amdgpu function named in the comment
-   of our code at the failing point (`git grep -n "<function>"`) and diff the
-   register sequence with ours: offsets (our `hw/gen/*.h` vs Linux
-   `asic_reg`), order, delays, polled bits.
-3. **Not enough evidence → diagnostic build first.** Add `RLOG`/`publish`
-   of the registers that decide between the hypotheses (status, version,
-   pointer registers). One diagnostic round is cheaper than two wrong fixes.
-   Mark such a build in the commit message and ask for exactly one step.
-4. **Reproduce in the simulator.** Make `tests/sim_navi32.c` behave like
-   the card did (the register value from the report, the missing ack...),
-   watch the test fail, fix the driver, `make test` green.
-5. **Ship.** Commit `[skip ci]`; when the batch is ready, one CI run
-   (`full: "false"`); give the user the run link and the exact retest:
-   *download the artifact → `rdna3vm prepare --artifact …` → `rdna3vm
-   window` → `curl … | sudo sh` → shut down → `rdna3vm step N` (and the step
-   before it as a regression check).*
-6. **Record.** Notion card, `docs/ROADMAP.md`, and the step's section here
-   if a new failure mode was learned.
+1. **Evidence.** `RDNA3,Stage2`, the `*Result` value (negative errno:
+   -5 EIO, -12 ENOMEM, -16 EBUSY, -19 ENODEV, -22 EINVAL, -62 ETIME),
+   the first `ERROR` line with its register values, the last serial lines.
+2. **Compare with amdgpu.** Find the amdgpu function named in the comment at
+   the failing spot (`git grep -n`), fetch it, diff the register sequence:
+   offsets (`hw/gen/*.h` vs `asic_reg`), order, delays, polled bits.
+3. **Evidence too thin → diagnostic build, not a guess.** Add `RLOG` /
+   `publish("RDNA3,…")` for the registers that separate the hypotheses,
+   say "diagnostic build" in the commit message, and ask for that one
+   step only.
+4. **Reproduce in the simulator**, watch it fail, fix, `make test` green.
+5. **Ship:** commit `[skip ci]`, push, one CI run `full: "false"`, wait for
+   green. Fix and repeat if red (never hand the user a red build).
+6. **Tell the user** (Polish) with the template in §5.
+7. **Record:** Notion cards and the status page percentages, `docs/ROADMAP.md`,
+   and add the new failure mode to §3 of this file.
 
 ---
 
-## 3. Per step: symptom → likely cause → action
+## 3. Decision tables: symptom → likely cause → action
 
-Hypotheses are ordered by likelihood. "VM:" marks what can only happen with
-passthrough (a bare-metal hackintosh boots the card cold from its GOP).
+Hypotheses are ordered by likelihood. "VM:" = only possible with passthrough
+(bare metal boots the card cold from its GOP).
 
-### Step 0 (`rdna3lvl=0`): the kext loads, touches nothing
+### Step 0 (`rdna3lvl=0`): kext loads, touches nothing
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| no `RDNA3` lines at all, `03-kexts.txt` without RDNA3Accel | kext not in the Auxiliary KC: `kmutil` error, SIP, approval | read `/var/log/rdna3-vmreport.log` and the `setup.sh` output; check `02-csr.txt` (must be disabled). Fix `tools/vm/macos/setup.sh` (e.g. `kmutil load -p` fallback like `package/install.sh`) |
-| loaded, not matched to the card | `IOPCIMatch` / class match; VM: the card behind a different topology | `04-pci.txt` (device-id, `IOName`); adjust `kext/Info.plist` matching |
-| hang or black screen already at step 0 | not our driver: VM firmware / GOP / BAR placement | `rdna3vm step off` (kext disabled) must boot. If it does not: VM problem → `romfile` (re-dump VBIOS with amdgpu loaded), disable Resizable BAR, raise `X-PciMmio64Mb`, try `CPU_MODEL=Penryn,…` in `~/rdna3-vm/config` |
+| no `RDNA3` log lines, `03-kexts.txt` without RDNA3Accel | not in the Auxiliary KC: `kmutil` error, SIP, approval | ask for `/var/log/rdna3-vmreport.log` and the `setup.sh` output; `02-csr.txt` must say disabled; add a `kmutil load -p` fallback to `tools/vm/macos/setup.sh` like `package/install.sh` |
+| loaded, not matched | `IOPCIMatch` / topology | `04-pci.txt`; fix matching in `kext/Info.plist` |
+| hang / black screen at step 0 | VM firmware, not the driver | ask for `rdna3vm step off`. If that hangs too: VM setup — re-dump VBIOS with amdgpu loaded, Resizable BAR off, larger `X-PciMmio64Mb`, `CPU_MODEL=Penryn,…` in `~/rdna3-vm/config` |
 
 ### Step 1 (`rdna3lvl=1`): BAR5, IFWI wait, VRAM size
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `device not in D0, refusing to touch MMIO` | VM: the card left in D3hot by vfio / host | host: `vfio-pci.disable_idle_d3=1` (add to `rdna3vm` modprobe options); kext: put the device in D0 like `pci_set_power_state(D0)` before mapping (`RDNA3Accel::readConfigSpace`) |
-| `MMIO reads all-ones` | BAR5 not decoded (memory space bit off), wrong BAR, device in reset | log line `BAR5 (MMIO) raw …, memory decode …`; compare the address with `linux-reference/lspci.txt` Region 5; enable memory decode in `mapMmio()` |
-| `RCC_CONFIG_MEMSIZE = 0 … not posted` or `C2PMSG33` 0 | the card was not posted (VM: OVMF did not run the GOP ROM) | first `romfile` check in `host-*.log`; then port `amdgpu_device_asic_init` for GC ≥ 11: wait for the PSP bootloader (`psp13_wait_for_bootloader`), then `amdgpu_atomfirmware_asic_init(adev, true)` — we have the interpreter (`hw/atom.c`, `atom_asic_init`); call it from `readVramSize()` when MEMSIZE is 0 |
-| `RDNA3,VRAMSizeMB` ≠ 16384 | wrong register / units | compare `linux-reference/sysfs-pm.txt` `mem_info_vram_total`; fix `readVramSize()` |
+| `device not in D0, refusing to touch MMIO` | VM: card left in D3hot | host: add `vfio-pci disable_idle_d3=1` handling in `rdna3vm`; kext: bring the device to D0 (`pci_set_power_state(D0)` equivalent) in `RDNA3Accel::readConfigSpace` |
+| `MMIO reads all-ones` | BAR5 not decoded / wrong BAR / in reset | log `BAR5 (MMIO) raw …, memory decode …`; compare with `linux-reference/lspci.txt` Region 5; enable memory decode in `mapMmio()` |
+| `RCC_CONFIG_MEMSIZE = 0 … not posted`, `C2PMSG33` 0 | card not posted (VM: GOP ROM not run) | check `romfile` in `host-*.log`; port `amdgpu_device_asic_init` for GC ≥ 11 (`psp13_wait_for_bootloader`, then `atom_asic_init` from `hw/atom.c`) and call it from `readVramSize()` when MEMSIZE is 0 |
+| `VRAMSizeMB` ≠ 16384 | register/units | `linux-reference/sysfs-pm.txt` `mem_info_vram_total`; fix `readVramSize()` |
 
 ### Step 2 (`rdna3lvl=2`): discovery, display paths, AUX/EDID
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `no discovery signature` / `scratch offset outside VRAM` | the table is not at `VRAM top − 64 KiB` on this board | port `amdgpu_discovery_get_tmr_info` / the scratch-register path of `amdgpu_discovery_read_binary_from_mem`; compare with Linux `dmesg-amdgpu.txt` |
-| `amd_discovery_dump` diff mac vs Linux non-empty | parser bug | add the Linux `discovery.bin` as a test vector to `tests/test_discovery.c`, fix `common/amd_discovery.c` |
-| `GC is x.y.z, expected 11.0.3` | another Navi 3x board | check device-id; most code keys off discovery, only the firmware names (`amd_navi32_*`) and SMU tables are 11.0.3-specific |
-| `DisplayPaths` 0, `AtomCommandTables` empty | VBIOS not found / object table parse | `RDNA3,VBIOSSize`; compare the ROM with `~/rdna3-vm/vbios.rom`; extend `tests/sim_navi32.c` with this VBIOS's table header versions |
-| `Connector<n>,Monitor` empty, EDID missing | AUX: wrong instance, DDC line, timeout | `RDNA3,Connector<n>,AUX` / `,DPCD`; compare `vbios_display_paths` output with Linux `dmesg` connector list; fix the AUX engine index map in `hw/dcaux.c` |
+| `no discovery signature` / `scratch offset outside VRAM` | table not at VRAM top − 64 KiB | port `amdgpu_discovery_get_tmr_info` / `amdgpu_discovery_read_binary_from_mem`; compare `dmesg-amdgpu.txt` |
+| discovery diff non-empty | parser bug | add Linux `discovery.bin` as a vector in `tests/test_discovery.c`; fix `common/amd_discovery.c` |
+| `GC is x.y.z, expected 11.0.3` | other Navi 3x | stop and ask the user which card; firmware names `amd_navi32_*` and SMU tables are 11.0.3-specific |
+| `DisplayPaths` 0, `AtomCommandTables` empty | VBIOS not read / object table versions | `RDNA3,VBIOSSize`; ask for `~/rdna3-vm/vbios.rom`; teach `hw/vbios.c` the header versions; add them to the simulator |
+| `Connector<n>,Monitor` empty | AUX instance / DDC map / timeout | `RDNA3,Connector<n>,AUX`/`,DPCD`; compare `vbios_display_paths` with Linux connectors; fix the AUX map in `hw/dcaux.c` |
 
 ### Step 3 (`rdna3lvl=3`): GC registers, harvesting
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `ActiveCUs` ≠ Linux | harvesting registers / SE-SA select | compare `linux-reference/radv-info.txt` (`num_cu`, `num_rb`, `gb_addr_config`); fix `hw/gfx11_info.c` (`gfx11_get_cu_info`) and its sim model |
-| `GBAddrConfig` ≠ Linux | golden value / register | same comparison; `gfx_v11_0_gpu_early_init` |
+| `ActiveCUs` / `GBAddrConfig` ≠ Linux | harvesting / SE-SA select / golden value | compare `linux-reference/radv-info.txt`; fix `hw/gfx11_info.c` (`gfx11_get_cu_info`) and its sim model; `gfx_v11_0_gpu_early_init` |
 
-### Step 4 (`rdna3lvl=4`): PSP and firmware — the most likely first wall
+### Step 4 (`rdna3lvl=4`): PSP and firmware — most likely first wall
 
-Read `RDNA3,Stage2`, `PSPResult`, `SOSVersion` and the PSP ERROR line.
-
-| Symptom | Likely cause | Action |
-|---|---|---|
-| `failed: no PSP firmware` / `firmware set incomplete` | packaging: files missing in `RDNA3Accel.kext/Contents/Resources` | `firmware plan:` log line; check names in `kext/Makefile` `FW_FILES` vs `common/amd_fw.c` `amd_navi32_fw_names`; fix `rdna3vm` `fw_copy` |
-| log `sOS already alive, skipping bootloader`, then any PSP failure | **VM: the card arrives initialised by Linux amdgpu.** amdgpu never reuses that state: `soc21_need_reset_on_init` (sOS sign of life in `MP0 C2PMSG_81`) → full ASIC reset on load, then `amdgpu_device_asic_init` | port it: at the start of `hwInit()`, if sign of life is set and it is not our own reinit → `smu13_mode1_reset` (exists, used by recovery) + wait for the bootloader + `atom_asic_init`, then the cold PSP path. Simulator: start the PSP model with SOL set and stale ring registers |
-| `PSP: load <component> failed (C2PMSG_35=…)` during bootloader | bootloader command order / component IDs / wait bits for 13.0.7 | diff with `psp_v13_0_bootloader_load_{kdb,spl,sysdrv,sosdrv,intf_drv,dbg_drv,ras_drv}` and `psp_v13_0_bootloader_load_sos`; `firmware_info.txt` from Linux shows the versions the same files produce |
-| `trust OS not ready for ring creation` / `ring create failed (C2PMSG_64=…)` | sOS did not come up, or ring address/size | value of C2PMSG_64; `psp_v13_0_ring_create`; the ring buffer must be in VRAM below our 512 MiB window — check `RDNA3,FBStartMC` vs Linux |
-| `failed to load TOC` / TMR errors | TMR size/alignment/placement | `psp_tmr_init`: amdgpu puts the TMR at the **end** of VRAM (`amdgpu_bo_create_kernel` with `PSP_TMR_ALIGNMENT`); ours is inside the low window → move it |
-| `LOAD_IP_FW <x> … failed` for one ucode | wrong fw type id / skipped component | `psp_get_fw_type` vs `common/amd_fw.c` table; `fw_load_skip_check` |
-| `failed to start RLC autoload` | autoload buffer / TOC layout | `gfx_v11_0_rlc_backdoor_autoload_*` vs our layout in `hw/psp13.c` |
-| freeze, serial stops in PSP | a PSP command pointed at a wrong MC address → bus hang | diagnostic build: log every command's MC addresses; compare `fb_start` / `vram_mc` with Linux |
-
-### Step 5 (`rdna3lvl=5`): SMU / power management
+Inputs: `RDNA3,Stage2`, `PSPResult`, `SOSVersion`, the PSP ERROR line.
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `SMU: MP1 firmware flags …, PMFW not running` | PMFW not started (it comes from the IFWI/PSP) | check the SMU blob was in the plan; `smu_v13_0_check_fw_status`; register offsets `MP1_FIRMWARE_FLAGS` |
-| `SMU: not ready for msg … (resp 0)` | mailbox registers (C2PMSG_66/82/90) wrong | diff `hw/smu13.c` offsets with `smu_v13_0_7_ppt.c` `smu_v13_0_set_smu_mailbox_registers` |
-| `SMUDriverIF` ≠ our header's version | PMFW newer/older than `smu13_driver_if_v13_0_7.h` | take the header matching the PMFW from Linux (`SMU13_0_7_DRIVER_IF_VERSION`), regenerate, re-check `PPTable_t` / `SmuMetrics_t` sizes in the simulator |
-| `TransferTable…` / `EnableAllSmuFeatures failed` | table address / feature mask | retry with `rdna3pmmask=` (start from a minimal mask), `rdna3pm=1`; compare with Linux `pp_features` |
-| values nonsense (temp 0 or 255, fan 0 while spinning) | metrics layout version | compare with `linux-reference/sysfs-pm.txt` / `gpu_metrics.bin`; fix `SmuMetrics_t` parsing |
-| PASS | — | `PMGfxClkMin/MaxMHz`, `PMUclkMaxMHz` must equal the first/last lines of Linux `pp_dpm_sclk` / `pp_dpm_mclk` |
+| `failed: no PSP firmware` / `firmware set incomplete` | packaging | `firmware plan:` log; `kext/Makefile` `FW_FILES` vs `common/amd_fw.c` `amd_navi32_fw_names`; fix `fw_copy` in `tools/vm/rdna3vm` |
+| log `sOS already alive, skipping bootloader`, then any PSP failure | **VM: the card arrives initialised by Linux amdgpu.** amdgpu never reuses that state: `soc21_need_reset_on_init` (sign of life `MP0 C2PMSG_81` ≠ 0) → ASIC reset on load, then `amdgpu_device_asic_init` (`amdgpu_device_init`, Linux v6.12 `amdgpu_device.c` ~4265 and ~4300) | at the start of `RDNA3Bringup::hwInit()` (first init only, not `fReinit`): if sign of life is set → `smu13_mode1_reset` (exists; used by recovery) → `psp13_wait_for_bootloader` → `atom_asic_init` → cold PSP path. Simulator: start the PSP model with SOL set and stale ring registers |
+| `PSP: load <component> failed (C2PMSG_35=…)` in bootloader | command order / component ids / ready bits for 13.0.7 | diff with `psp_v13_0_bootloader_load_{kdb,spl,sysdrv,sosdrv,intf_drv,dbg_drv,ras_drv}`, `psp_v13_0_bootloader_load_sos`; `linux-reference/firmware_info.txt` |
+| `trust OS not ready for ring creation` / `ring create failed (C2PMSG_64=…)` | sOS not up / ring address | `psp_v13_0_ring_create`; compare `RDNA3,FBStartMC` with Linux |
+| `failed to load TOC` / TMR errors | TMR placement | amdgpu puts the TMR at the end of VRAM (`psp_tmr_init`, `PSP_TMR_ALIGNMENT`); ours comes from the low window (`psp13_tmr_init` → `rdna3_vram_alloc`) → move it |
+| `LOAD_IP_FW <x> … failed` | fw type id / skip list | `psp_get_fw_type`, `fw_load_skip_check` vs `common/amd_fw.c` |
+| `failed to start RLC autoload` | autoload TOC/buffer layout | `gfx_v11_0_rlc_backdoor_autoload_*` vs `hw/psp13.c` |
+| freeze, serial stops inside PSP | a command with a wrong MC address | diagnostic build logging every command's MC addresses |
+
+### Step 5 (`rdna3lvl=5`): SMU / PM
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `MP1 firmware flags …, PMFW not running` | PMFW not started | SMU blob in the plan; `smu_v13_0_check_fw_status` |
+| `not ready for msg … (resp 0)` | mailbox offsets | `smu_v13_0_7_set_smu_mailbox_registers` vs `hw/smu13.c` |
+| `SMUDriverIF` ≠ header version | PMFW vs `hw/gen/smu13_driver_if_v13_0_7.h` | take the matching Linux header, regenerate, re-check struct sizes in the sim |
+| `TransferTable…` / `EnableAllSmuFeatures failed` | table address / mask | ask for a retest with `rdna3vm args "rdna3lvl=5 rdna3pmmask=<minimal>"`, then widen |
+| implausible temps/fan | metrics layout | compare `linux-reference/sysfs-pm.txt`, `gpu_metrics.bin` |
+| pass criterion | — | `PMGfxClkMin/MaxMHz`, `PMUclkMaxMHz` = first/last lines of Linux `pp_dpm_sclk`/`pp_dpm_mclk` |
 
 ### Step 5b (`rdna3dmub=1`): DMCUB
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `DMUB: firmware did not stop (SCRATCH7 …)` | STOP_FW GPINT protocol differs on this firmware | `dmub_dcn32_reset` vs `hw/dmub32.c`; consider **not** resetting a running DMCUB and only attaching the mailbox (decision for Display Core) |
-| `command … not consumed` | inbox1 registers / region addresses | `RDNA3,DMUBBootStatus`; `dmub_dcn32_setup_windows` |
-| screen went black but log is fine | expected risk: the boot scanout depends on the DMCUB we restarted | note it; stay without `rdna3dmub` until the modeset work (§4) |
+| `firmware did not stop (SCRATCH7 …)` | STOP_FW protocol | `dmub_dcn32_reset` vs `hw/dmub32.c`; option: attach to the running DMCUB without reset |
+| `command … not consumed` | inbox/regions | `RDNA3,DMUBBootStatus`, `dmub_dcn32_setup_windows` |
+| screen black, log fine | expected risk | record; keep `rdna3dmub` off until modeset work (§4) |
 
-### Step 6 / 6b (`rdna3lvl=6`, `rdna3msi=1`): GMC, IH, interrupts
-
-| Symptom | Likely cause | Action |
-|---|---|---|
-| `GMCResult` ≠ 0, `GFXHUB/MMHUB TLB flush timeout` | invalidation engine / ack registers | `gmc_v11_0_flush_gpu_tlb`, `mmhub_v3_0_2`; hub register offsets |
-| `VMFaults` > 0 right after GMC | GART table / page directory address wrong | `RDNA3,LastFaultAddr/Status`; `gmc_v11_0_gart_enable` |
-| `IHResult` ≠ 0 or `IHEarlyIVs` huge | ring base / wptr writeback / leftover interrupts (VM: state from Linux) | `ih_v6_0_irq_init`; the reset-on-init fix of step 4 usually also cures the leftovers |
-| `MSILive` 0 | no MSI index / registration failed | `RDNA3,MSIIndex`; `IOPCIDevice::getInterruptType`; VM: QEMU vfio MSI is standard, so check the log line `MSI: cannot register interrupt` |
-
-### Step 7 (`rdna3lvl=7 rdna3msi=1`): SDMA, the first GPU work
+### Step 6 / 6b (`rdna3lvl=6`, `rdna3msi=1`): GMC, IH, MSI
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `SDMA0: ring test timeout (…, status …)` | SDMA not running: firmware not loaded, RB registers, doorbell vs wptr poll | `SDMA0_STATUS` value from the log; `sdma_v6_0_gfx_resume_instance`; check the SDMA ucode was in `LOAD_IP_FW` |
-| `SDMACopyMismatches` > 0 | MC address / HDP coherence | `rdna3_vram_mc` vs `FBStartMC`; HDP flush before the CPU readback |
-| `MSIVerified` 0 | SDMA trap not routed | `SDMA0_CNTL.TRAP_ENABLE`, IH client id for SDMA0 (`SOC21_IH_CLIENTID_GFX`) |
-| `--dma-test` fails, `VMFaults` > 0 | user VM page tables / GTT pages | `LastFaultAddr` vs the test's VA; `hw/gpuvm.c` PTE flags vs `amdgpu_vm_bo_update` |
+| `GMCResult` ≠ 0, TLB flush timeout | invalidation engine | `gmc_v11_0_flush_gpu_tlb`, `mmhub_v3_0_2` offsets |
+| `VMFaults` > 0 right after GMC | GART/PD address | `LastFaultAddr/Status`; `gmc_v11_0_gart_enable` |
+| `IHResult` ≠ 0, `IHEarlyIVs` huge | ring setup / VM: leftovers from Linux | `ih_v6_0_irq_init`; the step-4 reset-on-init fix also clears leftovers |
+| `MSILive` 0 | registration | `RDNA3,MSIIndex`, log `MSI: cannot register interrupt` |
+
+### Step 7 (`rdna3lvl=7 rdna3msi=1`): SDMA
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `SDMA0: ring test timeout (…, status …)` | engine not running / RB regs / doorbell | `sdma_v6_0_gfx_resume_instance`; SDMA ucode loaded in step 4? |
+| `SDMACopyMismatches` > 0 | MC address / HDP | `rdna3_vram_mc` vs `FBStartMC`; HDP flush before readback |
+| `MSIVerified` 0 | trap routing | `SDMA0_CNTL.TRAP_ENABLE`, IH client id |
+| `--dma-test` fails, faults | user page tables | `LastFaultAddr` vs test VA; `hw/gpuvm.c` vs `amdgpu_vm_bo_update` |
 
 ### Step 8 (`rdna3lvl=8 rdna3msi=1`): GFX, KIQ, KCQ
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `GFX: rlc autoload timeout` | RLC autoload did not finish (PSP step 4 marginal) | `BOOTLOAD_STATUS`; `gfx_v11_0_wait_for_rlc_autoload_complete` |
-| `GFX: ring test timeout (SCRATCH_REG0 …, CP_STAT …)` | CP RS64 start / ring registers / doorbell | `gfx_v11_0_cp_gfx_start`, RS64 program addresses from `gfx11_rs64_from_fw` |
-| `KIQ: ring test timeout` / `KCQ: … MAP_QUEUES` | MQD fields / doorbell range | `gfx_v11_0_kiq_init_register`, `compute_mqd_init`; `nbio43_doorbell_init` ranges |
-| `--gfx-test` fails | PM4 / VM on GFXHUB | `LastFaultAddr`, `GRBM_STATUS` in the log |
+| `rlc autoload timeout` | step 4 marginal | `gfx_v11_0_wait_for_rlc_autoload_complete` |
+| `GFX: ring test timeout` | RS64 start / ring regs | `gfx_v11_0_cp_gfx_start`; `gfx11_rs64_from_fw` |
+| `KIQ`/`KCQ` failures | MQD / doorbell range | `gfx_v11_0_kiq_init_register`, `compute_mqd_init`, `nbio43_doorbell_init` |
+| `--gfx-test` fails | PM4 / GFXHUB VM | `LastFaultAddr`, `GRBM_STATUS` |
 
-### Step 9 (`rdna3fb=1`): our framebuffer
-
-| Symptom | Likely cause | Action |
-|---|---|---|
-| black screen, system alive | scanout surface address / pitch differs from the GOP's | `12-ioreg-fb.txt`; compare `RDNA3,Head0EdidMode` with the GOP mode; `fb/rdna3-fb.cpp` |
-| wrong resolution / no monitor name | EDID path | step 2 AUX results |
-
-### Step 10 (`rdna3accel=1`): accelerator
+### Step 9 / 10 (`rdna3fb=1`, `rdna3accel=1`)
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| WindowServer crash loop | `IOAccelConfig` / missing methods | `22-log-windowserver.txt`; `populateAccelConfig`; `accel/gen_stubs.py` stub list; go back to step 9 boot-args while fixing |
+| step 9 black screen, system alive | scanout address/pitch vs GOP | `12-ioreg-fb.txt`, `Head0EdidMode`; `fb/rdna3-fb.cpp` |
+| step 10 WindowServer crash loop | `IOAccelConfig` / missing methods | `22-log-windowserver.txt`; `populateAccelConfig`; `accel/gen_stubs.py` |
 
 ---
 
-## 4. When everything up to step 8 passes: next development, in order
+## 4. When steps 0–8 pass: next work, in order
 
-1. **Make it default.** Default `rdna3lvl` to the highest level that passed
-   twice, keep the boot-args as overrides; update TESTING docs.
-2. **RADV on the card (stage 5).** Add `rdna3vm step 11`: installs the RADV
-   build from the `radv-macos` CI job into the bundle and runs
-   `vulkaninfo --summary`, then a compute smoke test (a dEQP-VK
-   `compute.basic.*` subset). Fix the winsys gaps it shows. This needs one
-   `full: true` CI run — ask first (CI minutes).
-3. **Display Core (stage 3, plan §3).** With real DCN registers: dump DCN
-   state on Linux and on macOS at the same mode (diagnostic build), then
-   DCCG pixel clock, DP link training, DML, modeset; hotplug through IH.
-4. **Metal (stage 6).** `mtlprobe` against the device; first Metal sample.
-5. **Power (stage 2/7).** UCLK/FCLK/DCN DPM once Display Core owns the
-   display, then BACO/sleep, `IOPMPowerState`.
-6. **MES (queue management)** only when user queues or more rings are needed.
-7. **Packaging (stage 8).** OpenCore guide, release zip with
-   `LICENSE.amdgpu`, versioning.
+1. Default `rdna3lvl` to the highest level that passed twice (boot-args stay
+   overrides); update the testing docs and Notion percentages.
+2. **RADV on the card:** add `rdna3vm step 11` (RADV from the `radv-macos`
+   CI job into the bundle; `vulkaninfo --summary`; a dEQP-VK
+   `compute.basic.*` subset). Needs one `full: true` run — ask first.
+3. **Display Core:** diagnostic build dumping DCN state at the GOP mode,
+   compared with Linux; then DCCG pixel clock, DP training, DML, modeset,
+   hotplug (`docs/PLAN-NEXT.md` §3).
+4. **Metal:** `mtlprobe`, first sample.
+5. **Power:** UCLK/FCLK/DCN DPM after Display Core; BACO/sleep.
+6. **MES** only when needed. 7. **Packaging:** OpenCore guide, release zip.
 
-## 5. Bare metal vs VM
+## 5. Message to the user (Polish template)
 
-The bare-metal hackintosh boots the card cold from its GOP; the VM gets it
-after Linux amdgpu (warm PSP, leftover interrupts, possibly no post). A
-failure seen only in the VM points at §3 step 4 "sOS already alive" or at
-the VM setup (step 0). A failure in both is ours. When the VM passes,
-bare metal still needs one run of steps 4–8 before calling a stage done.
+Keep it short, no internals beyond one sentence of cause.
+
+```
+Wynik: kroki 0–N przeszły, krok M nie (<jedno zdanie: co i dlaczego>).
+Poprawka: <jedno zdanie>. CI: <link do przebiegu> (zielone).
+
+Co zrobić:
+1. Pobierz artefakt RDNA3Accel-kext z <link>.
+2. rdna3vm prepare --artifact ~/Downloads/RDNA3Accel-kext.zip
+3. rdna3vm window → w Terminalu macOS: curl -s http://10.0.2.2:8000/setup.sh | sudo sh
+   → sudo shutdown -h now
+4. rdna3vm step M (potem step M-1 jako kontrola)
+5. Prześlij nowe pliki z ~/rdna3-vm/reports.
+```
+
+For a diagnostic build say so explicitly ("to wersja diagnostyczna, nic nie
+naprawia, potrzebuję tylko raportu z kroku M").
+
+## 6. Bare metal vs VM
+
+VM failures that bare metal would not have: warm PSP (step 4 "sOS already
+alive"), leftover interrupts (step 6), unposted card (step 1), VM setup
+(step 0). A failure in both environments is ours. A stage counts as done
+only after steps 4–8 also passed once on bare metal (or the user decides
+the VM is enough).
+
+## 7. Known pitfalls of this environment
+
+- Shell heredocs: a line `EOF` inside a Python heredoc ends it — write longer
+  scripts to a scratch file instead.
+- `grep -P '[ąę…]'` and `\b` match arrows/dashes byte-wise here; check Polish
+  text with a Unicode-aware Python scan.
+- The kext cannot be compiled locally (no macOS SDK): kext-side changes are
+  verified only by the CI run — read them twice before pushing.
