@@ -111,7 +111,19 @@ uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r)
     sdma60_write(d, r, (uint32_t)addr);
     sdma60_write(d, r, (uint32_t)(addr >> 32));
     sdma60_write(d, r, seq);
+    if (r->fence_irq) {   /* sdma_v6_0_ring_emit_fence, AMDGPU_FENCE_FLAG_INT */
+        sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_TRAP));
+        sdma60_write(d, r, 0);   /* INT_CONTEXT 0 */
+    }
     return seq;
+}
+
+void sdma60_set_trap_interrupt(rdna3_dev *d, rdna3_sdma_ring *r, int enable)
+{
+    uint32_t tmp = RS(d, r->inst, regSDMA0_CNTL);
+    tmp = REG_SET_FIELD(tmp, SDMA0_CNTL, TRAP_ENABLE, enable ? 1 : 0);
+    WS(d, r->inst, regSDMA0_CNTL, tmp);
+    r->fence_irq = enable;
 }
 
 int sdma60_wait_fence(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq)

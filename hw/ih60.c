@@ -229,3 +229,16 @@ uint32_t ih60_process(rdna3_dev *d, rdna3_ih *ih, rdna3_iv_cb cb, void *ctx)
     ih->processed += n;
     return n;
 }
+
+uint32_t ih60_iv_fence(const rdna3_iv *iv)
+{
+    /* gfx_v11_0_eop_irq: ring_id = me << 2 | pipe << 0 ... me 0 pipe 0 queue 0 */
+    if (iv->client_id == RD_IH_CLIENT_GRBM_CP && iv->src_id == RD_IH_SRC_CP_EOP &&
+        (iv->ring_id & 0x7f) == 0)
+        return RD_IH_FENCE_GFX;
+    /* sdma_v6_0_process_trap_irq: ring_id = instance << 4 | queue */
+    if (iv->client_id == RD_IH_CLIENT_GFX && iv->src_id == RD_IH_SRC_SDMA_TRAP &&
+        (iv->ring_id & 0xff) == 0)
+        return RD_IH_FENCE_SDMA0;
+    return 0;
+}

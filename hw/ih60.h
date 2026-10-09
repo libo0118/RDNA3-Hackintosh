@@ -54,6 +54,18 @@ void ih60_disable(rdna3_dev *d, rdna3_ih *ih);
 typedef void (*rdna3_iv_cb)(void *ctx, const rdna3_iv *iv);
 uint32_t ih60_process(rdna3_dev *d, rdna3_ih *ih, rdna3_iv_cb cb, void *ctx);
 
+/* fence interrupts the kernel rings raise (soc15_ih_clientid.h,
+ * irqsrcs_gfx_11_0_0.h): CP end-of-pipe for gfx ME0 pipe 0 (RELEASE_MEM
+ * INT_SEL 2), SDMA0 queue 0 trap (SDMA TRAP packet) */
+#define RD_IH_CLIENT_GFX          0x0a
+#define RD_IH_CLIENT_GRBM_CP      0x14
+#define RD_IH_SRC_CP_EOP          181
+#define RD_IH_SRC_SDMA_TRAP       49
+#define RD_IH_FENCE_GFX           1u
+#define RD_IH_FENCE_SDMA0         2u
+/* which kernel ring's fence an IV reports (RD_IH_FENCE_*), 0 if none */
+uint32_t ih60_iv_fence(const rdna3_iv *iv);
+
 /* decode one 8-dword IV (pure; exposed for tests) */
 void ih60_decode_iv(const uint32_t dw[8], rdna3_iv *iv);
 

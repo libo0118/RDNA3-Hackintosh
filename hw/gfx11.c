@@ -497,13 +497,23 @@ uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r)
                       (1u << 13) /* GCR_GLM_INV */ | (1u << 12) /* GCR_GLM_WB */ |
                       (3u << 25) /* CACHE_POLICY bypass */ |
                       CACHE_FLUSH_AND_INV_TS_EVENT | (5u << 8) /* EVENT_INDEX */);
-    gfx11_write(d, r, 1u << 29);   /* DATA_SEL 1: low 32 bits, no interrupt */
+    /* DATA_SEL 1: low 32 bits; INT_SEL 2: interrupt once the write landed */
+    gfx11_write(d, r, (1u << 29) | (r->fence_irq ? 2u << 24 : 0));
     gfx11_write(d, r, (uint32_t)addr);
     gfx11_write(d, r, (uint32_t)(addr >> 32));
     gfx11_write(d, r, seq);
     gfx11_write(d, r, 0);
     gfx11_write(d, r, 0);
     return seq;
+}
+
+void gfx11_set_eop_interrupt(rdna3_dev *d, rdna3_gfx_ring *r, int enable)
+{
+    uint32_t tmp = RG(d, regCP_INT_CNTL_RING0);
+    tmp = REG_SET_FIELD(tmp, CP_INT_CNTL_RING0, TIME_STAMP_INT_ENABLE, enable ? 1 : 0);
+    tmp = REG_SET_FIELD(tmp, CP_INT_CNTL_RING0, GENERIC0_INT_ENABLE, enable ? 1 : 0);
+    WG(d, regCP_INT_CNTL_RING0, tmp);
+    r->fence_irq = enable;
 }
 
 int gfx11_fence_passed(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq)

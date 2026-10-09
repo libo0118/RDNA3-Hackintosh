@@ -73,6 +73,7 @@ typedef struct rdna3_gfx_ring {
     uint32_t fence_seq;
     int      ready;
     uint64_t last_ctx;      /* amdgpu ring->current_ctx: context of the last job */
+    int      fence_irq;     /* fences use RELEASE_MEM INT_SEL 2 (EOP interrupt) */
 } rdna3_gfx_ring;
 
 /* one IB of a job (VA in the job's VMID) */
@@ -130,6 +131,9 @@ uint32_t gfx11_ring_space(rdna3_dev *d, rdna3_gfx_ring *r);
 uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
                           uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n);
 
+/* CP_INT_CNTL_RING0 TIME_STAMP/GENERIC0 (gfx_v11_0_set_gfx_eop_interrupt_state
+ * me 0 pipe 0); also switches the fences to interrupt-raising */
+void gfx11_set_eop_interrupt(rdna3_dev *d, rdna3_gfx_ring *r, int enable);
 int  gfx11_fence_passed(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq);
 int  gfx11_wait_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq);
 

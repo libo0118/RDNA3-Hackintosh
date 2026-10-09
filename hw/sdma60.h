@@ -47,6 +47,7 @@ typedef struct rdna3_sdma_ring {
     uint64_t wptr;          /* dwords */
     uint32_t fence_seq;
     int      ready;
+    int      fence_irq;     /* each fence also raises an IH trap */
 } rdna3_sdma_ring;
 
 #define RD_SDMA_WB_RPTR  0
@@ -70,6 +71,9 @@ void sdma60_emit_fill(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst_mc, uint32_
 /* sdma_v6_0_ring_emit_ib: NOP-pad so the 6-dword INDIRECT packet ends on
  * an 8-dword boundary, then run 'ndw' dwords at GPU VA 'va' in 'vmid' */
 void sdma60_emit_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t va, uint32_t ndw);
+/* SDMA0_CNTL.TRAP_ENABLE (sdma_v6_0_set_trap_irq_state); also makes
+ * every following fence emit a TRAP packet */
+void sdma60_set_trap_interrupt(rdna3_dev *d, rdna3_sdma_ring *r, int enable);
 /* fence 'seq' has been written back */
 int  sdma60_fence_passed(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq);
 /* emit a fence write of ++fence_seq; returns that sequence number */
