@@ -253,6 +253,9 @@ prints PASS / FAIL per step. What happens with the reports next is in
   (`PRE_SUSPEND=1`): that powers the card off, so the VM gets it cold, as
   after a fresh boot. Without it the card's boot screen (OpenCore menu)
   stays dark: the monitor reports no signal.
+- `prepare` sets OpenCore's `UEFI/Output/Resolution` to `Max`
+  (`OC_RESOLUTION` in the config; empty = leave it): OVMF hands the
+  card's GOP 800x600, and macOS keeps whatever mode the boot screen had.
 - QEMU reads the keyboard and mouse from Linux (`input-linux`, the
   "both Ctrl" toggle) and passes them to macOS as USB devices. Linux itself watches for Esc 3×
   and the power button (`vmtool.py stopkeys`, `systemd-inhibit`). After the VM

@@ -3,10 +3,12 @@
 vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
 
   vmtool.py plist CONFIG [--show] [--boot-args S] [--sip-off] [--timeout N] [--kext NAME]
+                  [--resolution WxH|Max]
       edit an OpenCore config.plist: boot-args and csr-active-config under
       NVRAM/Add (and listed under NVRAM/Delete so OpenCore really applies
       them), SecureBootModel Disabled, picker timeout, a Kernel/Add entry
-      for EFI/OC/Kexts/NAME.kext
+      for EFI/OC/Kexts/NAME.kext, UEFI/Output/Resolution (the GOP mode
+      OpenCore sets before macOS: the boot framebuffer's size)
   vmtool.py romcheck FILE        a PCI option ROM with a UEFI (GOP) image?
   vmtool.py unzip ZIP DIR        extract (keeps the tree)
   vmtool.py serve DIR PORT [UP]  HTTP on 127.0.0.1: GET files, PUT into UP (DIR/reports)
@@ -168,6 +170,10 @@ def cmd_plist(argv):
             i += 2
         elif a == "--kext":
             text = add_kext(text, argv[i + 1])
+            i += 2
+        elif a == "--resolution":
+            text = _set(text, _section(text, "UEFI", "Output"), "Resolution",
+                        "<string>%s</string>" % _xml(argv[i + 1]))
             i += 2
         else:
             sys.exit("unknown option " + a)

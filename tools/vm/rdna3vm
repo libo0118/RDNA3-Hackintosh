@@ -184,6 +184,9 @@ USE_ROMFILE=${USE_ROMFILE:-1}
 # 1 = suspend for 5 s before the VM too, so it gets a powered-off card
 # (its boot screen needs that after the host used it)
 PRE_SUSPEND=${PRE_SUSPEND:-1}
+# GOP mode OpenCore picks before macOS (UEFI/Output/Resolution): OVMF leaves
+# 800x600; Max = the largest mode the card's GOP offers for the monitor
+OC_RESOLUTION=${OC_RESOLUTION:-Max}
 EOF
     [ -n "${BASE_ARGS:-}" ] && echo "BASE_ARGS=\"$BASE_ARGS\"" >> "$CONF"
     ok "$CONF (RAM ${RAM_GB:-$ram} GiB, $cpus CPU)"
@@ -223,7 +226,9 @@ EOF
     cp "$TOOLS/macos/autoreport.sh" "$st/"
     tar -czf "$WORK/share/rdna3-bundle.tar.gz" -C "$st" kexts bin tools autoreport.sh
     cp "$TOOLS/macos/setup.sh" "$WORK/share/setup.sh"
-    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --kexts "$st/kexts" >/dev/null ||
+    local res=${OC_RESOLUTION-Max}   # unset in older configs: Max; empty: leave OpenCore's
+    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --kexts "$st/kexts" \
+        ${res:+--resolution "$res"} >/dev/null ||
         die "cannot copy the kexts into OpenCore"
     rm -rf "$st"
     ok "$WORK/share/rdna3-bundle.tar.gz"
