@@ -147,6 +147,8 @@ private:
     struct rdna3_dev *fDispDev = nullptr;
     struct rdna3_dcn *fDcn     = nullptr;
     IOLock       *fDispLock    = nullptr;
+    struct rdna3_connector *fConnectors = nullptr;   /* DP AUX / HPD probe (hw/dcaux.c) */
+    uint32_t      fNConnectors = 0;
     uint32_t      fDispRefresh[4] = {};   /* measured, mHz */
     bool          fDispMeasured = false;
     bool          fDcnCrcOn[4]  = {};
@@ -159,6 +161,8 @@ private:
     IOReturn      displayStatus(struct RD3KDisplayStatus *s);
     IOReturn      displayCrc(uint32_t head, uint32_t *crc);
     IOReturn      displayCursor(struct RD3KDisplayCursor *c);
+    IOReturn      displayEdid(struct RD3KDisplayEdid *e);
+    void          displayProbeConnectors();
     static uint32_t dispMmioRd(void *ctx, uint64_t off);
     static void     dispMmioWr(void *ctx, uint64_t off, uint32_t v);
 

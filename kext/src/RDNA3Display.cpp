@@ -23,6 +23,8 @@
 extern "C" {
 #include "rdna3_hw.h"
 #include "dcn32.h"
+#include "dcaux.h"
+#include "edid.h"
 }
 #include "rdna3k_abi.h"
 
@@ -97,7 +99,79 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     }
     fDispReserveEnd = (fDispReserveEnd + (2ull << 20) - 1) & ~((2ull << 20) - 1);
     setNumber("RDNA3,DisplayReserveEnd", fDispReserveEnd, 64);
+    displayProbeConnectors();
     return true;
+}
+
+/* DP AUX engines 0-4: HPD sense, DPCD, EDID. Read-only on the display
+ * state (the AUX channel is a side band); what it finds goes into the
+ * IORegistry as RDNA3,Connector<n>,* and to the framebuffer (displayEdid). */
+void RDNA3Accel::displayProbeConnectors()
+{
+    fConnectors = (rdna3_connector *)IOMalloc(sizeof(rdna3_connector) * RD_AUX_ENGINES);
+    if (!fConnectors)
+        return;
+    bzero(fConnectors, sizeof(rdna3_connector) * RD_AUX_ENGINES);
+    int n = dcaux_probe(fDispDev, fConnectors, RD_AUX_ENGINES);
+    fNConnectors = n > 0 ? (uint32_t)n : 0;
+    setNumber("RDNA3,Connectors", fNConnectors);
+    for (uint32_t i = 0; i < fNConnectors; i++) {
+        const rdna3_connector *c = &fConnectors[i];
+        char key[48];
+        snprintf(key, sizeof(key), "RDNA3,Connector%u,AUX", i);
+        setNumber(key, c->aux);
+        snprintf(key, sizeof(key), "RDNA3,Connector%u,HPD", i);
+        setNumber(key, (uint64_t)c->hpd);
+        if (c->dp) {
+            snprintf(key, sizeof(key), "RDNA3,Connector%u,DPCD", i);
+            setNumber(key, ((uint64_t)c->dpcd_rev << 16) | ((uint64_t)c->max_link_rate << 8) |
+                               c->max_lane_count);
+        }
+        if (c->edid_len > 0) {
+            rdna3_edid e;
+            OSData *d = OSData::withBytes(c->edid, (unsigned)c->edid_len);
+            snprintf(key, sizeof(key), "RDNA3,Connector%u,EDID", i);
+            if (d) {
+                setProperty(key, d);
+                d->release();
+            }
+            if (edid_parse(c->edid, (uint32_t)c->edid_len, &e) == 0) {
+                snprintf(key, sizeof(key), "RDNA3,Connector%u,Monitor", i);
+                setProperty(key, e.name[0] ? e.name : e.manufacturer);
+                snprintf(key, sizeof(key), "RDNA3,Connector%u,Modes", i);
+                setNumber(key, e.nmodes);
+                for (uint32_t m = 0; m < e.nmodes; m++)
+                    LOG("display: AUX%u %s %ux%u%s @ %u.%03u Hz%s", c->aux, e.name,
+                        e.mode[m].h_active, e.mode[m].v_active, e.mode[m].interlaced ? "i" : "",
+                        e.mode[m].refresh_mhz / 1000, e.mode[m].refresh_mhz % 1000,
+                        e.mode[m].preferred ? " (preferred)" : "");
+            }
+        }
+    }
+}
+
+IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
+{
+    if (!e || e->version != RD3K_DISPLAY_ABI_VERSION)
+        return kIOReturnBadArgument;
+    if (!fDcn || !fDispDev)
+        return kIOReturnNotReady;
+    e->length = 0;
+    e->connector = ~0u;
+    /* head -> connector: the first connected sink with an EDID, for head 0 */
+    if (e->head != 0)
+        return kIOReturnNotFound;
+    for (uint32_t i = 0; i < fNConnectors; i++) {
+        const rdna3_connector *c = &fConnectors[i];
+        if (c->edid_len > 0 && (c->hpd || c->dp)) {
+            uint32_t n = (uint32_t)c->edid_len < RD3K_EDID_MAX ? (uint32_t)c->edid_len : RD3K_EDID_MAX;
+            memcpy(e->data, c->edid, n);
+            e->length = n;
+            e->connector = c->aux;
+            return kIOReturnSuccess;
+        }
+    }
+    return kIOReturnNotFound;
 }
 
 void RDNA3Accel::displayFree()
@@ -107,6 +181,9 @@ void RDNA3Accel::displayFree()
             if (fDcnCrcOn[i])
                 dcn32_crc_enable(fDispDev, fDcn, i, 0);
     }
+    if (fConnectors) IOFree(fConnectors, sizeof(rdna3_connector) * RD_AUX_ENGINES);
+    fConnectors = nullptr;
+    fNConnectors = 0;
     if (fDcn) IOFree(fDcn, sizeof(rdna3_dcn));
     if (fDispDev) IOFree(fDispDev, sizeof(rdna3_dev));
     if (fDispLock) IOLockFree(fDispLock);

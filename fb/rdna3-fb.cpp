@@ -95,7 +95,9 @@ class RDNA3Framebuffer : public IOFramebuffer {
     bool     fFlipped = false;
 
     const OSSymbol *fSymInfo = nullptr, *fSymFlip = nullptr, *fSymStatus = nullptr;
-    const OSSymbol *fSymCursor = nullptr;
+    const OSSymbol *fSymCursor = nullptr, *fSymEdid = nullptr;
+    struct RD3KDisplayEdid fEdid = {};
+    bool     fEdidAsked = false;
 
     /* hardware cursor: 256x256 ARGB8888 premultiplied in VRAM from the core */
     static const uint32_t kCurDim = 256;
@@ -168,11 +170,23 @@ public:
         if (flags) *flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | kDisplayModeDefaultFlag;
         return kIOReturnSuccess;
     }
-    bool hasDDCConnect(IOIndex) override { return false; }   /* TODO: DCN AUX/I2C EDID */
-    IOReturn getDDCBlock(IOIndex, UInt32, IOSelect, IOOptionBits, UInt8 *, IOByteCount *) override
+    /* EDID from the core's DP AUX probe (rdna3DisplayEdid): IOKit builds
+     * IODisplayEDID from these blocks, so the monitor gets its name and
+     * the right display profile */
+    bool hasDDCConnect(IOIndex) override { return fetchEdid(); }
+    IOReturn getDDCBlock(IOIndex, UInt32 blockNumber, IOSelect blockType, IOOptionBits,
+                         UInt8 *data, IOByteCount *length) override
     {
-        return kIOReturnUnsupported;
+        if (blockType != kIODDCBlockTypeEDID || !data || !length || !fetchEdid())
+            return kIOReturnUnsupported;
+        if (!blockNumber || blockNumber * 128 > fEdid.length)
+            return kIOReturnNotFound;
+        IOByteCount n = *length < 128 ? *length : 128;
+        memcpy(data, fEdid.data + (blockNumber - 1) * 128, n);
+        *length = n;
+        return kIOReturnSuccess;
     }
+    bool fetchEdid();
     IOReturn setGammaTable(UInt32, UInt32, UInt32, void *) override { return kIOReturnSuccess; }
     IOReturn setGammaTable(UInt32, UInt32, UInt32, void *, bool) override { return kIOReturnSuccess; }
     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
@@ -290,7 +304,8 @@ bool RDNA3Framebuffer::start(IOService *provider)
     fSymFlip = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_FLIP);
     fSymStatus = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_STATUS);
     fSymCursor = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_CURSOR);
-    if (!fLock || !fSymInfo || !fSymFlip || !fSymStatus || !fSymCursor)
+    fSymEdid = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_EDID);
+    if (!fLock || !fSymInfo || !fSymFlip || !fSymStatus || !fSymCursor || !fSymEdid)
         return false;
 
     fCore = findCore(provider);
@@ -376,6 +391,7 @@ void RDNA3Framebuffer::free()
     OSSafeReleaseNULL(fSymFlip);
     OSSafeReleaseNULL(fSymStatus);
     OSSafeReleaseNULL(fSymCursor);
+    OSSafeReleaseNULL(fSymEdid);
     if (fLock) {
         IOSimpleLockFree(fLock);
         fLock = nullptr;
@@ -693,6 +709,23 @@ void RDNA3Framebuffer::cursorFree()
         fCore->callPlatformFunction(fr, false, &fCurVram, nullptr, nullptr, nullptr);
     OSSafeReleaseNULL(fr);
     fCurKva = nullptr;
+}
+
+bool RDNA3Framebuffer::fetchEdid()
+{
+    if (fEdidAsked)
+        return fEdid.length > 0;
+    if (!fCore || !fSymEdid)
+        return false;
+    bzero(&fEdid, sizeof(fEdid));
+    fEdid.version = RD3K_DISPLAY_ABI_VERSION;
+    fEdid.head = fHead;
+    if (fCore->callPlatformFunction(fSymEdid, false, &fEdid, nullptr, nullptr, nullptr) != kIOReturnSuccess)
+        fEdid.length = 0;
+    fEdidAsked = true;
+    if (fEdid.length)
+        IOLog("RDNA3FB: head %u EDID %u bytes from AUX%u\n", fHead, fEdid.length, fEdid.connector);
+    return fEdid.length > 0;
 }
 
 bool RDNA3Framebuffer::cursorCall(unsigned op)

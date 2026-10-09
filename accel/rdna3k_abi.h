@@ -117,6 +117,19 @@ struct RD3KDisplayFlip {
     unsigned long long vramOffset;    /* VRAM offset of the new surface (allocationCookie) */
     int                result;        /* 0 or a negative RDNA3_E* code */
 };
+/* EDID of the sink a head shows (rdna3DisplayEdid). The DP AUX / HPD probe
+ * does not know yet which AUX engine feeds which OTG (that mapping is in
+ * the VBIOS object table), so the core answers head 0 with the first
+ * connected sink that returned an EDID; connector = its AUX engine. */
+#define RD3K_DISPLAY_FN_EDID     "rdna3DisplayEdid"
+#define RD3K_EDID_MAX            512u
+struct RD3KDisplayEdid {
+    unsigned int  version;
+    unsigned int  head;
+    unsigned int  connector;      /* out: AUX engine index */
+    unsigned int  length;         /* out: bytes in data, 0 = no EDID */
+    unsigned char data[RD3K_EDID_MAX];
+};
 #define RD3K_DISPLAY_FN_CURSOR   "rdna3DisplayCursor"
 #define RD3K_CURSOR_OP_IMAGE     1u   /* vramOffset + size (64/128/256) */
 #define RD3K_CURSOR_OP_MOVE      2u   /* x, y (top-left, may be negative), visible */

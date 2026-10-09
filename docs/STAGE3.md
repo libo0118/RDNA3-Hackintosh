@@ -59,6 +59,22 @@ bez akceleracji, jedna rozdzielczość, jeden monitor. To wystarczy.
    3. Dopiero potem akcelerator (`rdna3accel=1`, Etap 7) i flipy.
 5. Logi: `log show --last 10m --predicate 'eventMessage CONTAINS "RDNA3"'`.
 
+## DP AUX, HPD, EDID (pierwszy krok Display Core)
+
+`hw/dcaux.c` (port `dce_aux.c`: arbiter, `AUX_SW_DATA` FIFO, `AUX_SW_GO`,
+status, odpowiedź) daje natywny odczyt/zapis DPCD, I2C-over-AUX i EDID
+(128 B + rozszerzenia, segment E-DDC), `dcaux_hpd_sense` czyta
+`DC_HPD_INT_STATUS.DC_HPD_SENSE`. Przypisanie silnik AUX ↔ złącze ↔ OTG
+jest w tablicy obiektów VBIOS (jeszcze nie parsowanej), więc kext sonduje
+wszystkie 5 silników przy starcie (`RDNA3,Connectors`,
+`RDNA3,Connector<n>,{AUX,HPD,DPCD,EDID,Monitor,Modes}`), a `hw/edid.c`
+wyciąga z EDID nazwę, tryby szczegółowe (DTD, w tym CTA-861), standardowe
+i ustalone. `RDNA3Framebuffer` odpowiada `hasDDCConnect`/`getDDCBlock`
+(`rdna3DisplayEdid`: głowica 0 = pierwszy podłączony sink z EDID), więc
+macOS buduje `IODisplayEDID` i pokazuje nazwę monitora. Modesetting z tych
+trybów wymaga jeszcze: interpretera ATOM (tablice `TransmitterControl`,
+`SetPixelClock`), treningu łącza DP i programowania OTG/HUBP pod nowy tryb.
+
 ## Ograniczenia (do zrobienia)
 
 * jedna głowica (head 0), jeden tryb; brak EDID (AUX/I2C DCN), brak zmiany

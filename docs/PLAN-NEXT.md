@@ -28,8 +28,11 @@ commity z `[skip ci]` i jeden przebieg CI na paczkę zmian.
 * UAPI: `AMDGPU_HW_IP_COMPUTE` w `rdna3_drm.c`, osobne ringi na plik.
 * Symulator: model KIQ/MES (pakiety MAP_QUEUES, MQD → HQD).
 
-## 3. Display Core z amdgpu (największy)
+## 3. 🟡 Display Core z amdgpu (największy)
 Cel: modesetting, EDID, wiele monitorów, hotplug, zmiana rozdzielczości.
+* ✅ Krok 1: DP AUX (DPCD, I2C-over-AUX), HPD sense, EDID + parser trybów
+  (`hw/dcaux.c`, `hw/edid.c`), sonda złączy w kexcie, `IODisplayEDID`
+  przez framebuffer. Dalej: interpreter ATOM, DMCUB, trening DP, modeset.
 * Warstwa `dm_services` dla XNU (alokacja, logi, zegary, rejestry, delay)
   i kompilacja `drivers/gpu/drm/amd/display/dc` dla DCN 3.2.1 jako
   biblioteki C w kexcie (MIT). Najpierw `dc_create` + odczyt stanu, potem

@@ -25,6 +25,9 @@
 #include "psp13.h"
 #include "smu13.h"
 #include "vbios.h"
+#include "dcaux.h"
+#include "edid.h"
+#include "gen/dcn_3_2_1_aux.h"
 #include "gmc11.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_2.h"
@@ -134,6 +137,14 @@ typedef struct sim {
     uint64_t set_resources_mask;
     uint32_t cp_cur_me, cp_cur_pipe, cp_cur_queue;   /* engine running cp_exec */
     int dcn_hold;              /* 1: flips stay pending (no vupdate yet) */
+    /* DP AUX engine 0 with a sink behind it (DPCD, EDID at I2C 0x50); the
+     * other engines answer with a receive timeout */
+    uint8_t  aux_tx[20], aux_rx[20];
+    uint32_t aux_ptr, aux_nrx, aux_status, aux_arb;
+    unsigned aux_gos, aux_bad;
+    uint8_t  dpcd[0x800];
+    uint8_t  edid[256];
+    uint32_t i2c_off, i2c_seg;
     /* recovery: SQ_CMD kills, RLC safe mode, GRBM soft resets, mode-1 resets,
      * page-fault IVs */
     unsigned sq_kills, sq_outside_safe, soft_resets, mode1_resets, fault_ivs;
@@ -403,6 +414,119 @@ static void smu_msg(uint32_t v)
     default: resp = PPSMC_Result_UnknownCmd;
     }
     *R(MP1(90)) = resp;
+}
+
+/* ---- DisplayPort sink behind AUX engine 0 ---- */
+
+#define AUXR(reg, n) (DCN_B2 + reg + (regDP_AUX1_AUX_CONTROL - regDP_AUX0_AUX_CONTROL) * (n))
+#define HPDR(reg, n) (DCN_B2 + reg + (regHPD1_DC_HPD_CONTROL - regHPD0_DC_HPD_CONTROL) * (n))
+
+static uint8_t edid_sum(const uint8_t *b) { uint32_t i, s = 0; for (i = 0; i < 127; i++) s += b[i]; return (uint8_t)(256 - (s & 0xff)); }
+
+static void make_sink(void)
+{
+    uint8_t *e = S.edid;
+    static const uint8_t dtd_1440p[18] = { 0x56, 0x5E, 0x00, 0xA0, 0xA0, 0xA0, 0x29, 0x50, 0x30, 0x20,
+                                           0x35, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E };
+    static const uint8_t dtd_1080p[18] = { 0x02, 0x3A, 0x80, 0x18, 0x71, 0x38, 0x2D, 0x40, 0x58, 0x2C,
+                                           0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E };
+    memset(S.dpcd, 0, sizeof(S.dpcd));
+    S.dpcd[0x000] = 0x14;   /* DPCD 1.4 */
+    S.dpcd[0x001] = 0x1e;   /* HBR3 */
+    S.dpcd[0x002] = 0x84;   /* 4 lanes, enhanced framing */
+    S.dpcd[0x600] = 0x01;   /* D0 */
+    memset(e, 0, sizeof(S.edid));
+    memcpy(e, "\x00\xff\xff\xff\xff\xff\xff\x00", 8);
+    e[8] = 0x48; e[9] = 0x8E;             /* "RDN": R=18 D=4 N=14 -> 0 10010 00100 01110 */
+    e[10] = 0x00; e[11] = 0x78;           /* product 0x7800 */
+    e[16] = 1; e[17] = 34;                /* week 1 of 2024 */
+    e[18] = 1; e[19] = 4;                 /* EDID 1.4 */
+    e[20] = 0x80 | 0x05;                  /* digital, 8 bpc, DisplayPort */
+    e[21] = 60; e[22] = 34;               /* cm */
+    e[23] = 0x78;                         /* gamma 2.2 */
+    e[24] = 0x0a;                         /* RGB, preferred timing descriptor */
+    e[35] = 0x21;                         /* 640x480@60, 800x600@60 */
+    e[38] = 209; e[39] = 0xC0;            /* 1920x1080@60 standard timing */
+    e[40] = 0x01; e[41] = 0x01;           /* unused slots */
+    memset(e + 42, 0x01, 12);
+    memcpy(e + 54, dtd_1440p, 18);
+    e[72] = 0; e[73] = 0; e[74] = 0; e[75] = 0xFC; e[76] = 0;
+    memcpy(e + 77, "RDNA3 SIM\n   ", 13);
+    e[90] = 0; e[91] = 0; e[92] = 0; e[93] = 0x10;   /* dummy descriptors */
+    e[108] = 0; e[109] = 0; e[110] = 0; e[111] = 0x10;
+    e[126] = 1;                           /* one extension */
+    e[127] = edid_sum(e);
+    e[128] = 0x02; e[129] = 0x03; e[130] = 0x04; e[131] = 0x00;
+    memcpy(e + 132, dtd_1080p, 18);
+    e[255] = edid_sum(e + 128);
+    S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 0)] = HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK;
+}
+
+/* AUX_SW_GO on engine n: decode the request FIFO, answer like the sink */
+static void aux_go(uint32_t n)
+{
+    uint32_t wr = (S.reg[AUXR(regDP_AUX0_AUX_SW_CONTROL, n)] & DP_AUX0_AUX_SW_CONTROL__AUX_SW_WR_BYTES_MASK)
+                  >> DP_AUX0_AUX_SW_CONTROL__AUX_SW_WR_BYTES__SHIFT;
+    uint32_t action = S.aux_tx[0] & 0xf0, addr = ((S.aux_tx[0] & 0xf) << 16) | (S.aux_tx[1] << 8) | S.aux_tx[2];
+    uint32_t len = wr > 3 ? (uint32_t)S.aux_tx[3] + 1 : 0, i;
+    uint32_t reply = RD_AUX_REPLY_ACK;
+    S.aux_gos++;
+    S.aux_nrx = 0;
+    memset(S.aux_rx, 0, sizeof(S.aux_rx));
+    if (n != 0) {   /* nothing plugged in: the receiver times out */
+        S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK | DP_AUX0_AUX_SW_STATUS__AUX_SW_RX_TIMEOUT_MASK;
+        return;
+    }
+    if (wr < 3 || wr > 20) { S.aux_bad++; S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK; return; }
+    switch (action) {
+    case RD_AUX_DP_READ:
+        for (i = 0; i < len && addr + i < sizeof(S.dpcd); i++)
+            S.aux_rx[1 + i] = S.dpcd[addr + i];
+        S.aux_nrx = 1 + i;
+        break;
+    case RD_AUX_DP_WRITE:
+        if (wr != 4 + len) { S.aux_bad++; }
+        for (i = 0; i < len && addr + i < sizeof(S.dpcd); i++)
+            S.dpcd[addr + i] = S.aux_tx[4 + i];
+        S.aux_nrx = 1;
+        break;
+    case RD_AUX_I2C_WRITE:
+    case RD_AUX_I2C_WRITE_MOT:
+        if (addr == 0x50) {
+            if (len) S.i2c_off = S.aux_tx[4];
+        } else if (addr == 0x30) {
+            if (len) S.i2c_seg = S.aux_tx[4];
+        } else {
+            reply = RD_AUX_REPLY_I2C_NACK;
+        }
+        if (action == RD_AUX_I2C_WRITE)
+            S.i2c_seg = 0;
+        S.aux_nrx = 1;
+        break;
+    case RD_AUX_I2C_READ:
+    case RD_AUX_I2C_READ_MOT:
+        if (addr != 0x50) {
+            reply = RD_AUX_REPLY_I2C_NACK;
+            S.aux_nrx = 1;
+            break;
+        }
+        for (i = 0; i < len; i++) {
+            uint32_t o = S.i2c_seg * 256 + S.i2c_off;
+            S.aux_rx[1 + i] = o < sizeof(S.edid) ? S.edid[o] : 0xff;
+            S.i2c_off = (S.i2c_off + 1) & 0xff;
+        }
+        if (action == RD_AUX_I2C_READ)
+            S.i2c_seg = 0;
+        S.aux_nrx = 1 + len;
+        break;
+    default:
+        S.aux_bad++;
+        reply = RD_AUX_REPLY_NACK;
+        S.aux_nrx = 1;
+    }
+    S.aux_rx[0] = (uint8_t)(reply << 4);
+    S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK |
+                   (S.aux_nrx << DP_AUX0_AUX_SW_STATUS__AUX_SW_REPLY_BYTE_COUNT__SHIFT);
 }
 
 /* mode-1 reset: every block back to power-on except the memory controller
@@ -1085,6 +1209,50 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         smu_msg(v);
         return;
     }
+    /* DP AUX engines (DCN segment 2) */
+    for (uint32_t n = 0; n < RD_AUX_ENGINES; n++) {
+        if (dw == AUXR(regDP_AUX0_AUX_ARB_CONTROL, n)) {
+            uint32_t st = 0;
+            if (v & DP_AUX0_AUX_ARB_CONTROL__AUX_SW_USE_AUX_REG_REQ_MASK)
+                st = 1;   /* SW_CAN_ACCESS_AUX */
+            if (v & DP_AUX0_AUX_ARB_CONTROL__AUX_SW_DONE_USING_AUX_REG_MASK)
+                st = 0;
+            *R(dw) = (v & ~(DP_AUX0_AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS_MASK |
+                            DP_AUX0_AUX_ARB_CONTROL__AUX_SW_DONE_USING_AUX_REG_MASK)) |
+                     (st << DP_AUX0_AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS__SHIFT);
+            return;
+        }
+        if (dw == AUXR(regDP_AUX0_AUX_CONTROL, n)) {
+            /* RESET_DONE follows RESET */
+            *R(dw) = (v & ~DP_AUX0_AUX_CONTROL__AUX_RESET_DONE_MASK) |
+                     ((v & DP_AUX0_AUX_CONTROL__AUX_RESET_MASK) ? DP_AUX0_AUX_CONTROL__AUX_RESET_DONE_MASK : 0);
+            return;
+        }
+        if (dw == AUXR(regDP_AUX0_AUX_INTERRUPT_CONTROL, n)) {
+            if (v & DP_AUX0_AUX_INTERRUPT_CONTROL__AUX_SW_DONE_ACK_MASK)
+                S.aux_status &= ~DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK;
+            *R(dw) = v & ~DP_AUX0_AUX_INTERRUPT_CONTROL__AUX_SW_DONE_ACK_MASK;
+            return;
+        }
+        if (dw == AUXR(regDP_AUX0_AUX_SW_DATA, n)) {
+            uint32_t idx = (v & DP_AUX0_AUX_SW_DATA__AUX_SW_INDEX_MASK) >> DP_AUX0_AUX_SW_DATA__AUX_SW_INDEX__SHIFT;
+            if (v & DP_AUX0_AUX_SW_DATA__AUX_SW_AUTOINCREMENT_DISABLE_MASK)
+                S.aux_ptr = idx;
+            if (!(v & DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_RW_MASK)) {
+                if (S.aux_ptr < sizeof(S.aux_tx))
+                    S.aux_tx[S.aux_ptr] = (uint8_t)((v & DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_MASK) >> 8);
+                S.aux_ptr++;
+            }
+            *R(dw) = v;
+            return;
+        }
+        if (dw == AUXR(regDP_AUX0_AUX_SW_CONTROL, n)) {
+            *R(dw) = v & ~DP_AUX0_AUX_SW_CONTROL__AUX_SW_GO_MASK;
+            if (v & DP_AUX0_AUX_SW_CONTROL__AUX_SW_GO_MASK)
+                aux_go(n);
+            return;
+        }
+    }
     if (dw == MP1(75)) {
         /* debug mailbox: DEBUGSMC_MSG_Mode1Reset takes the chip back to the
          * PSP bootloader with VRAM intact */
@@ -1185,6 +1353,15 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
     if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_DATA) {
         uint32_t *p = smn_slot(S.smn_index, 0);
         return p ? *p : 0;
+    }
+    for (uint32_t n = 0; n < RD_AUX_ENGINES; n++) {
+        if (dw == AUXR(regDP_AUX0_AUX_SW_STATUS, n))
+            return S.aux_status;
+        if (dw == AUXR(regDP_AUX0_AUX_SW_DATA, n)) {
+            uint32_t b = S.aux_ptr < S.aux_nrx ? S.aux_rx[S.aux_ptr] : 0;
+            S.aux_ptr++;
+            return (S.reg[dw] & ~DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_MASK) | (b << 8);
+        }
     }
     if (dw == SMUIO_B0 + regROM_DATA) {
         /* the window maps the ROM at ROM_STRAP << 17; reads auto-increment */
@@ -1351,6 +1528,7 @@ static void run(const char *fwdir)
     S.vram = calloc(1, BAR_LEN);
     *R(MP0(35)) = 0x80000000u;  /* bootloader ready */
     make_vbios();
+    make_sink();
     *smn_slot(SMN_ROM_OFFSET_CTRL, 1) = ROM_STRAP;
     *R(MP0(33)) = 0x80000000u;  /* IFWI done */
     *R(mmRCC_CONFIG_MEMSIZE) = (uint32_t)(VRAM_SIZE >> 20);
@@ -2092,6 +2270,61 @@ static void run(const char *fwdir)
         /* display off: no heads */
         S.reg[OTG(regOTG0_OTG_CONTROL, 2)] = 0;
         CHECK(dcn32_read_state(&dev, &dc) == 0);
+    }
+
+    /* DisplayPort AUX: HPD sense, DPCD, I2C-over-AUX EDID, the probe of all
+     * five engines, and the EDID parser on what came back */
+    {
+        static rdna3_connector conn[RD_AUX_ENGINES];
+        static uint8_t edid[RD_EDID_MAX];
+        rdna3_edid e;
+        uint8_t dpcd[16], pwr = 2;
+        uint32_t reply = 0, k, got1440 = 0, got1080 = 0, got480 = 0;
+        int r;
+        CHECK(dcaux_hpd_sense(&dev, 0) == 1 && dcaux_hpd_sense(&dev, 1) == 0);
+        CHECK(S.reg[HPDR(regHPD0_DC_HPD_CONTROL, 1)] & HPD0_DC_HPD_CONTROL__DC_HPD_EN_MASK);
+        CHECK(dcaux_dpcd_read(&dev, 0, 0x000, dpcd, 16) == 16);
+        CHECK(dpcd[0] == 0x14 && dpcd[1] == 0x1e && dpcd[2] == 0x84 && S.aux_bad == 0);
+        CHECK(dcaux_dpcd_write(&dev, 0, 0x600, &pwr, 1) == 1 && S.dpcd[0x600] == 2);
+        CHECK(dcaux_transfer(&dev, 1, RD_AUX_DP_READ, 0, dpcd, 1, &reply) == RD_AUX_ERR_TIMEOUT);
+        CHECK(dcaux_transfer(&dev, 0, RD_AUX_I2C_READ, 0x3a, dpcd, 1, &reply) == RD_AUX_ERR_NACK &&
+              reply == RD_AUX_REPLY_I2C_NACK);
+        CHECK(dcaux_transfer(&dev, 7, RD_AUX_DP_READ, 0, dpcd, 1, &reply) == RDNA3_EINVAL);
+        /* the engine is given back after every transaction */
+        CHECK(((S.reg[AUXR(regDP_AUX0_AUX_ARB_CONTROL, 0)] & DP_AUX0_AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS_MASK)
+               >> DP_AUX0_AUX_ARB_CONTROL__AUX_REG_RW_CNTL_STATUS__SHIFT) == 0);
+        r = dcaux_read_edid(&dev, 0, edid, sizeof(edid));
+        CHECK(r == 256 && memcmp(edid, S.edid, 256) == 0);
+        CHECK(dcaux_read_edid(&dev, 1, edid, sizeof(edid)) == RD_AUX_ERR_TIMEOUT);
+        CHECK(edid_parse(S.edid, 256, &e) == 0);
+        CHECK(strcmp(e.manufacturer, "RDN") == 0 && e.product == 0x7800 && e.digital &&
+              e.version == 1 && e.revision == 4 && e.extensions == 1);
+        CHECK(strcmp(e.name, "RDNA3 SIM") == 0 && e.width_cm == 60);
+        for (k = 0; k < e.nmodes; k++) {
+            const rdna3_mode *m = &e.mode[k];
+            if (m->h_active == 2560 && m->v_active == 1440) {
+                got1440++;
+                CHECK(m->preferred && m->pixel_khz == 241500 && m->h_total == 2720 && m->v_total == 1481 &&
+                      m->h_front == 48 && m->h_sync == 32 && m->v_front == 3 && m->v_sync == 5 &&
+                      m->h_sync_pos && m->v_sync_pos && m->refresh_mhz / 1000 == 59);
+            }
+            if (m->h_active == 1920 && m->v_active == 1080) {
+                got1080++;   /* once: the standard timing merged into the CTA detailed one */
+                CHECK(m->pixel_khz == 148500 && m->h_total == 2200 && m->v_total == 1125);
+            }
+            if (m->h_active == 640 && m->v_active == 480)
+                got480++;
+        }
+        CHECK(got1440 == 1 && got1080 == 1 && got480 == 1 && e.nmodes >= 4);
+        CHECK(edid_parse(S.edid, 100, &e) == -1);
+        S.edid[5] = 0;
+        CHECK(edid_parse(S.edid, 128, &e) == -1);
+        S.edid[5] = 0xff;
+        /* the probe finds the one sink */
+        CHECK(dcaux_probe(&dev, conn, RD_AUX_ENGINES) == 1);
+        CHECK(conn[0].aux == 0 && conn[0].hpd && conn[0].dp && conn[0].dpcd_rev == 0x14 &&
+              conn[0].max_link_rate == 0x1e && conn[0].max_lane_count == 4 && conn[0].edid_len == 256);
+        CHECK(S.aux_bad == 0);
     }
 
     /* GPU reset: mode-1 through the PMFW debug mailbox takes the chip back
