@@ -327,6 +327,10 @@ void RDNA3Bringup::run()
         publishString("RDNA3,Stage2", ret ? "failed: GMC" : "PSP + SMU + MMHUB GART up");
         if (ret)
             return;
+        /* GPUVM can now translate: let the GPU reach system memory (GTT BOs
+         * through the page tables). amdgpu: pci_set_master() at probe. */
+        fPci->setBusMasterEnable(true);
+        publish("RDNA3,BusMaster", 1);
 
         /* IH 6.0 ring 0, polled (no MSI registration yet) */
         fIh = (rdna3_ih *)IOMalloc(sizeof(*fIh));
@@ -501,16 +505,16 @@ void RDNA3Bringup::vmDestroy(void *p)
 }
 
 struct GttPages {
-    IOMemoryDescriptor *md;
-    uint64_t offset;
+    const RDNA3Gtt *g;
+    uint64_t first;   /* page index of the mapping's start */
 };
 
 static uint64_t gttPagePa(void *ctx, uint64_t i)
 {
-    GttPages *g = (GttPages *)ctx;
-    /* TODO(dma): IODMACommand mapping once bus mastering / an IOMMU is in
-     * the picture; on a Hackintosh without VT-d this is the bus address */
-    return g->md->getPhysicalSegment(g->offset + i * 4096, nullptr, kIOMemoryMapperNone);
+    /* bus addresses from the BO's IODMACommand (mapper-translated when an
+     * IOMMU is active); bus mastering is on since level 6 */
+    GttPages *p = (GttPages *)ctx;
+    return p->g->pages[p->first + i];
 }
 
 int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size,
@@ -525,9 +529,10 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
         r = gpuvm_map_linear(fDev, &v->vm, va, rdna3_vram_pa(fDev, bo->vram_offset + offset), pages,
                              gpuvm_pte_flags(flags, 0));
     } else {
-        GttPages g = { (IOMemoryDescriptor *)bo->backing, offset };
-        if (!g.md)
+        const RDNA3Gtt *gt = (const RDNA3Gtt *)bo->backing;
+        if (!gt || (offset & 4095) || offset / 4096 + pages > gt->npages)
             return -RD_EINVAL;
+        GttPages g = { gt, offset / 4096 };
         r = gpuvm_map(fDev, &v->vm, va, pages, gttPagePa, &g, gpuvm_pte_flags(flags, 1));
     }
     if (r)

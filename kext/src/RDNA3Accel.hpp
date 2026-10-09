@@ -20,9 +20,10 @@
  *
  * Levels 0-3 never write anything except MM_INDEX/MM_INDEX_HI (the indirect
  * VRAM read window, which is what amdgpu does as its very first access).
- * Levels 4+ program the GPU (PSP, firmware) - test them only with a second
- * GPU driving the display. Bus mastering is never enabled: PSP and the
- * firmware buffers all live in VRAM.
+ * Levels 4+ program the GPU (PSP, firmware) - test them with SSH access
+ * (docs/STAGE3.md). Bus mastering stays off below level 6: PSP and the
+ * firmware buffers all live in VRAM; level 6 turns it on once GPUVM can
+ * translate, so GTT BOs (RDNA3Gtt, IODMACommand) are reachable.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -40,6 +41,19 @@ extern "C" {
 }
 
 class RDNA3Bringup;
+class IOBufferMemoryDescriptor;
+class IODMACommand;
+
+/* A GTT (system memory) BO's backing: kernel buffer shared with the user
+ * mapping, prepared for DMA, and the bus address of every 4 KiB page as
+ * the GPU must see it (through the system mapper / VT-d when present).
+ * bo->backing points at one of these. */
+struct RDNA3Gtt {
+    IOBufferMemoryDescriptor *md;
+    IODMACommand             *dma;
+    uint64_t                 *pages;
+    uint64_t                  npages;
+};
 
 class RDNA3Accel : public IOService {
     OSDeclareDefaultStructors(RDNA3Accel)
@@ -90,6 +104,8 @@ private:
     static void  *drmZalloc(void *ctx, size_t n);
     static void   drmFreeMem(void *ctx, void *p, size_t n);
     static int    drmBoAlloc(void *ctx, rdna3_bo *bo);
+    int           gttAlloc(rdna3_bo *bo);
+    static void   gttFree(RDNA3Gtt *g);
     static void   drmBoFree(void *ctx, rdna3_bo *bo);
     static int    drmCopyin(void *ctx, void *dst, uint64_t uaddr, size_t len);
     static int    drmCopyout(void *ctx, uint64_t uaddr, const void *src, size_t len);

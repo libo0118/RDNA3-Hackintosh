@@ -18,6 +18,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
+#include <IOKit/IODMACommand.h>
 #include <pexpert/pexpert.h>
 
 #include <libkern/copyio.h>   /* copyin/copyout (kpi.libkern) */
@@ -59,13 +60,60 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
             bzero((void *)(a->fVramMap->getVirtualAddress() + off), (size_t)bo->size);
         return 0;
     }
-    IOBufferMemoryDescriptor *md = IOBufferMemoryDescriptor::inTaskWithOptions(
-        kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared, bo->size, 4096);
-    if (!md)
+    return a->gttAlloc(bo);
+}
+
+/* GTT: amdgpu's dma mask for GFX 11 is 44 bits; the pages are wired by
+ * the DMA command for the BO's whole life (TTM pins GTT BOs while bound) */
+int RDNA3Accel::gttAlloc(rdna3_bo *bo)
+{
+    const uint64_t mask = (1ull << 44) - 4096;
+    RDNA3Gtt *g = (RDNA3Gtt *)IOMalloc(sizeof(*g));
+    if (!g)
         return -RD_ENOMEM;
-    bzero(md->getBytesNoCopy(), (size_t)bo->size);
-    bo->backing = md;
+    bzero(g, sizeof(*g));
+    g->npages = (bo->size + 4095) / 4096;
+    g->md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared, g->npages * 4096, mask);
+    g->pages = (uint64_t *)IOMalloc((size_t)(g->npages * sizeof(uint64_t)));
+    if (!g->md || !g->pages)
+        goto fail;
+    bzero(g->md->getBytesNoCopy(), (size_t)(g->npages * 4096));
+    g->dma = IODMACommand::withSpecification(IODMACommand::OutputHost64, 44, 0,
+                                             IODMACommand::kMapped, 0, 4096);
+    if (!g->dma || g->dma->setMemoryDescriptor(g->md, true) != kIOReturnSuccess)
+        goto fail;
+    {
+        uint64_t off = 0, page = 0;
+        while (page < g->npages) {
+            IODMACommand::Segment64 seg[8];
+            UInt32 n = 8;
+            if (g->dma->gen64IOVMSegments(&off, seg, &n) != kIOReturnSuccess || !n)
+                goto fail;
+            for (UInt32 i = 0; i < n; i++)
+                for (uint64_t b = 0; b < seg[i].fLength && page < g->npages; b += 4096)
+                    g->pages[page++] = seg[i].fIOVMAddr + b;
+        }
+    }
+    bo->backing = g;
     return 0;
+fail:
+    gttFree(g);
+    return -RD_ENOMEM;
+}
+
+void RDNA3Accel::gttFree(RDNA3Gtt *g)
+{
+    if (!g)
+        return;
+    if (g->dma) {
+        g->dma->clearMemoryDescriptor(true);
+        g->dma->release();
+    }
+    if (g->pages)
+        IOFree(g->pages, (size_t)(g->npages * sizeof(uint64_t)));
+    OSSafeReleaseNULL(g->md);
+    IOFree(g, sizeof(*g));
 }
 
 void RDNA3Accel::drmBoFree(void *ctx, rdna3_bo *bo)
@@ -75,7 +123,7 @@ void RDNA3Accel::drmBoFree(void *ctx, rdna3_bo *bo)
         if (a->fVramHeap)
             range_alloc_put(a->fVramHeap, bo->vram_offset, bo->size);
     } else if (bo->backing) {
-        ((IOBufferMemoryDescriptor *)bo->backing)->release();
+        gttFree((RDNA3Gtt *)bo->backing);
         bo->backing = nullptr;
     }
 }
@@ -264,7 +312,7 @@ IOMemoryDescriptor *RDNA3Accel::drmMemoryForOffset(rdna3_drm_file *f, uint64_t o
     IOLockLock(fDrmLock);
     rdna3_bo *bo = rdna3_drm_bo_by_mmap_offset(f, off);
     if (bo && bo->placement != AMDGPU_GEM_DOMAIN_VRAM && bo->backing) {
-        md = (IOBufferMemoryDescriptor *)bo->backing;
+        md = ((RDNA3Gtt *)bo->backing)->md;
         md->retain();
         *options = 0;
     } else if (bo && fVramDev && bo->vram_offset + bo->size <= fVramDev->getLength()) {
