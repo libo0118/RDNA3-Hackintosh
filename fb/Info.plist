@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key><string>en</string>
+	<key>CFBundleExecutable</key><string>RDNA3Framebuffer</string>
+	<key>CFBundleIdentifier</key><string>io.github.voten641.RDNA3Framebuffer</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>CFBundleName</key><string>RDNA3Framebuffer</string>
+	<key>CFBundlePackageType</key><string>KEXT</string>
+	<key>CFBundleShortVersionString</key><string>0.1.0</string>
+	<key>CFBundleVersion</key><string>0.1.0</string>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.iokit.IOGraphicsFamily</key><string>1.0.0b1</string>
+		<key>com.apple.iokit.IOPCIFamily</key><string>1.0.0b1</string>
+		<key>com.apple.kpi.iokit</key><string>8.0</string>
+		<key>com.apple.kpi.libkern</key><string>8.0</string>
+		<key>com.apple.kpi.mach</key><string>8.0</string>
+		<key>com.apple.kpi.bsd</key><string>8.0</string>
+	</dict>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<!-- One framebuffer per card for now (head 0). The IOFramebuffer match
+		     category with a score above IONDRVFramebuffer (20000): only one
+		     framebuffer publishes the boot VRAM. probe() declines without the
+		     boot-arg rdna3fb=1, and then IONDRVFramebuffer drives the display. -->
+		<key>RDNA3Framebuffer</key>
+		<dict>
+			<key>CFBundleIdentifier</key><string>io.github.voten641.RDNA3Framebuffer</string>
+			<key>IOClass</key><string>RDNA3Framebuffer</string>
+			<key>IOProviderClass</key><string>IOPCIDevice</string>
+			<key>IOPCIPrimaryMatch</key><string>0x747e1002</string>
+			<key>IOMatchCategory</key><string>IOFramebuffer</string>
+			<key>IOProbeScore</key><integer>30000</integer>
+		</dict>
+	</dict>
+</dict>
+</plist>

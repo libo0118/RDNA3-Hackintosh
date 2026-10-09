@@ -12,7 +12,7 @@ IOAcceleratorFamily2
       │
 RDNA3Accelerator.kext (accel/)   ── callPlatformFunction (accel/rdna3k_abi.h) ──▶ RDNA3Accel.kext
       │  VRAM, uchwyt urządzenia, zakresy GPU VA                                  (kext/src/RDNA3Platform.cpp)
-      └─ scanout, flip, CRC ──▶ RDNA3Framebuffer (Etap 3, jeszcze nie istnieje)
+      └─ scanout, flip, CRC ──▶ RDNA3Framebuffer (Etap 3, fb/) ──▶ RDNA3Accel (DCN)
 ```
 
 ```sh
@@ -40,7 +40,7 @@ make -C accel check           # sprawdza, że nie został żaden metaclass NV*
 | `rdna3GpuVaAlloc` / `Free` | ✅ zakres 1 TiB od 64 TiB |
 | `rdna3GpuVaMap` | 🟡 zapamiętuje tylko zakres; tablice stron po GPUVM (Etap 2) |
 | `rdna3NewAccelClient` | ⬜ `kIOReturnUnsupported`; RADV otwiera `RDNA3Accel` bezpośrednio |
-| `rdna3ScanoutInfo`, `rdna3FlipToSurface`, `rdna3DisplayCrc` | ⬜ po stronie framebuffera (Etap 3) |
+| `rdna3ScanoutInfo`, `rdna3FlipToSurface`, `rdna3DisplayCrc` | 🟡 `RDNA3Framebuffer` ([STAGE3](STAGE3.md)); flip przez `rdna3DisplayFlip` w rdzeniu, sprawdzone tylko w symulatorze |
 | `rdna3SurfVram` / `rdna3SurfShare` / `rdna3SurfPageoff` | ⬜ współdzielenie IOSurface (Etap 4b) |
 
 ## Co dalej

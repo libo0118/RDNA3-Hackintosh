@@ -86,6 +86,10 @@ jobs:
           make -C accel check
           make -C accel clean && make -C accel NM_TAHOE=1
           make -C accel clean && make -C accel
+      - name: Build RDNA3Framebuffer.kext (Stage 3)
+        run: |
+          make -C fb
+          make -C fb check
       - name: Inspect
         run: |
           file build/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel
@@ -100,6 +104,7 @@ jobs:
           path: |
             build/RDNA3Accel.kext
             build/RDNA3Accelerator.kext
+            build/RDNA3Framebuffer.kext
             build/userspace/rdna3_drminfo
             build/userspace/libdrm_xnu.dylib
 

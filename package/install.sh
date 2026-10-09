@@ -5,6 +5,7 @@
 # Installs (nothing overlaps a NullMoth install):
 #   /Library/Extensions/RDNA3Accel.kext          kext (+ firmware in Resources)
 #   /Library/Extensions/RDNA3Accelerator.kext    Stage 7 accelerator (if built)
+#   /Library/Extensions/RDNA3Framebuffer.kext    Stage 3 framebuffer (if built)
 #   /Library/GPUBundles/RDNA3MTLDriver.bundle    Metal plugin
 #   /Library/GPUBundles/rdna3mtl/                libdrm, libdrm_amdgpu, RADV, ICD json,
 #                                                translator, amdgpu.ids
@@ -50,6 +51,14 @@ if [ -d "$ACCEL" ]; then
     run chown -R root:wheel /Library/Extensions/RDNA3Accelerator.kext
     run chmod -R go-w /Library/Extensions/RDNA3Accelerator.kext
     echo "NOTE: the accelerator starts only with boot-arg rdna3accel=1"
+fi
+FB=$ROOT/build/RDNA3Framebuffer.kext
+if [ -d "$FB" ]; then
+    run rm -rf /Library/Extensions/RDNA3Framebuffer.kext
+    run cp -R "$FB" /Library/Extensions/
+    run chown -R root:wheel /Library/Extensions/RDNA3Framebuffer.kext
+    run chmod -R go-w /Library/Extensions/RDNA3Framebuffer.kext
+    echo "NOTE: the framebuffer starts only with boot-arg rdna3fb=1 (rdna3lvl>=2 for DCN mode)"
 fi
 
 run mkdir -p "$DIR"

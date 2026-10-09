@@ -20,6 +20,8 @@ NullMoth NVIDIA driver  https://github.com/nullmoth/nvidia-macos-driver
                         AMD-only. A written confirmation from the author (e.g.
                         a comment in a GitHub issue of either repository) should
                         be linked here: TODO.
+                        In this repository: accel/ (NullMoth accelerator),
+                        fb/ (derived from NVRMFB), metal/ (plugin, translator).
                         The translator keeps its LGPL-3.0-or-later licence.
 
 AMD firmware            Not included. See docs/FIRMWARE.md and LICENSE.amdgpu in
