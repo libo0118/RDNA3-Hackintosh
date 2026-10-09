@@ -5,7 +5,7 @@
  * submit_channel_request, get_channel_status, read_channel_reply) and the
  * HPD GPIO (DC_HPD_INT_STATUS.DC_HPD_SENSE). MIT.
  *
- * DCN 3.2.1 has five AUX engines and five HPD pins (instance n = AUX0 +
+ * DCN 3.2.0 / 3.2.1 have five AUX engines and five HPD pins (instance n = AUX0 +
  * n * (AUX1 - AUX0)). Which connector they belong to is in the VBIOS object
  * table; until that is parsed the caller probes: HPD sense, then DPCD, then
  * EDID.

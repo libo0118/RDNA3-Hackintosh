@@ -169,8 +169,11 @@ the PSP ERROR line.
 SMUIO 13.0.6. Earlier code assumed Navi 33's 13.0.7 / 3.2.1 / 4.0.4; fixed:
 firmware names, MMHUB 3.0.0 registers, and `hw/smu13.c` now follows
 `smu_v13_0_0_ppt.c` (driver_if v13_0_0, SCPM, MP1 firmware flags at
-0x3010024). Still open: the DCN register headers are generated from
-`dcn_3_2_1_*`; diff them with `dcn_3_2_0_*` before step 5b/9.
+0x3010024). The DCN register headers come from `dcn_3_2_1_*`; every
+define they hold (display, AUX/HPD, DMCUB: 1088) has the same value in
+`dcn_3_2_0_*`, and amdgpu uses the same DMUB code (dmub_dcn32.c) and pipe /
+AUX / HPD counts for both, so nothing changes for steps 5b and 9 apart
+from the firmware (`dcn_3_2_0_dmcub.bin`).
 
 | Symptom | Likely cause | Action |
 |---|---|---|

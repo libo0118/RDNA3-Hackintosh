@@ -9,7 +9,8 @@
  * hubp2_program_surface_flip_and_addr / hubp2_program_size, read the way
  * hubp2_read_state / optc1_get_crtc_timing do. Full DC comes later.
  *
- * Register offsets are DCN 3.2.1 (Navi 32/33); HUBP n = HUBP0 + n * 0xdc,
+ * Register offsets: the generated dcn_3_2_1 headers, which match DCN 3.2.0
+ * (Navi 32, checked define by define); HUBP n = HUBP0 + n * 0xdc,
  * OTG n = OTG0 + n * 0x80 (segment 2 of the DCN discovery base).
  *
  * SPDX-License-Identifier: MIT
