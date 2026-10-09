@@ -3,3 +3,4 @@
 # Read by tools/progress.py: a group of the status map turns green when all
 # the steps it lists (AMDGPU_STEPS / UAPI_STEPS there) are here.
 0 2026-10-09 vm kext injected by OpenCore, matched 1002:747e on pcie.0
+1 2026-10-09 vm VRAMSizeMB 16368 = Linux mem_info_vram_total, C2PMSG33 0x80000000
