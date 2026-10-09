@@ -8,6 +8,7 @@
 #include "clearstate_defs.h"
 #include "clearstate_gfx11.h"
 #include "amdgpu_ucode_hdr.h"
+#include "navi3x_regs.h"
 
 #define REG_FIELD_SHIFT(reg, field) reg##__##field##__SHIFT
 #define REG_FIELD_MASK(reg, field)  reg##__##field##_MASK
@@ -341,12 +342,150 @@ int gfx11_ring_test(rdna3_dev *d, rdna3_gfx_ring *r)
     return RDNA3_ETIME;
 }
 
+uint32_t gfx11_ring_space(rdna3_dev *d, rdna3_gfx_ring *r)
+{
+    /* gfx11 rptr is 32 bit (gfx_v11_0_ring_get_rptr_gfx) */
+    uint32_t rptr = wb_read32(d, r, RD_GFX_WB_RPTR) & r->buf_mask;
+    uint32_t used = ((uint32_t)r->wptr - rptr) & r->buf_mask;
+    return r->buf_mask - used;   /* one slot stays empty: full != empty */
+}
+
+/* amdgpu_ring_alloc: wait (bounded) until 'ndw' dwords fit */
+static int ring_wait_space(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t ndw)
+{
+    uint32_t i;
+    if (ndw > r->buf_mask)
+        return RDNA3_EINVAL;
+    for (i = 0; i < d->usec_timeout; i++) {
+        if (gfx11_ring_space(d, r) >= ndw)
+            return RDNA3_OK;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    RERR(d, "GFX: ring full (rptr 0x%x, wptr 0x%llx)", wb_read32(d, r, RD_GFX_WB_RPTR),
+         (unsigned long long)r->wptr);
+    return RDNA3_ETIME;
+}
+
+/* gfx_v11_0_ring_emit_ib_gfx (no MCBP preemption) */
 void gfx11_emit_ib(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid, uint64_t va, uint32_t ndw)
 {
     gfx11_write(d, r, PACKET3(PACKET3_INDIRECT_BUFFER, 2));
     gfx11_write(d, r, (uint32_t)va & ~3u);
     gfx11_write(d, r, (uint32_t)(va >> 32));
     gfx11_write(d, r, ndw | (vmid << 24));
+}
+
+/* gfx_v11_0_ring_emit_wreg for the gfx ring: WRITE_DATA from the PFP */
+void gfx11_emit_wreg(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t reg, uint32_t val)
+{
+    gfx11_write(d, r, PACKET3(PACKET3_WRITE_DATA, 3));
+    gfx11_write(d, r, WRITE_DATA_ENGINE_SEL(1) | WR_CONFIRM);
+    gfx11_write(d, r, reg);
+    gfx11_write(d, r, 0);
+    gfx11_write(d, r, val);
+}
+
+/* gfx_v11_0_wait_reg_mem */
+void gfx11_emit_wait_reg_mem(rdna3_dev *d, rdna3_gfx_ring *r, int eng_sel, int mem_space, int opt,
+                             uint32_t addr0, uint32_t addr1, uint32_t ref, uint32_t mask,
+                             uint32_t inv)
+{
+    gfx11_write(d, r, PACKET3(PACKET3_WAIT_REG_MEM, 5));
+    gfx11_write(d, r, WAIT_REG_MEM_MEM_SPACE(mem_space) | WAIT_REG_MEM_OPERATION(opt) |
+                      WAIT_REG_MEM_FUNCTION(3) /* equal */ | WAIT_REG_MEM_ENGINE(eng_sel));
+    gfx11_write(d, r, addr0);
+    gfx11_write(d, r, addr1);
+    gfx11_write(d, r, ref);
+    gfx11_write(d, r, mask);
+    gfx11_write(d, r, inv);
+}
+
+/* gfx_v11_0_ring_emit_vm_flush -> gmc_v11_0_emit_flush_gpu_tlb (GFXHUB: no
+ * semaphore) + PFP_SYNC_ME */
+void gfx11_emit_vm_flush(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid, uint64_t pd_addr)
+{
+    rdna3_vm_flush_regs f;
+    gfxhub303_flush_regs(d, vmid, RD_GFX_VM_INV_ENG, &f);
+    gfx11_emit_wreg(d, r, f.pt_lo, (uint32_t)pd_addr);
+    gfx11_emit_wreg(d, r, f.pt_hi, (uint32_t)(pd_addr >> 32));
+    /* gfx_v11_0_ring_emit_reg_write_reg_wait: write req, wait for the ack bit */
+    gfx11_emit_wait_reg_mem(d, r, 1, 0, 1, f.req, f.ack, f.req_val, 1u << vmid, 0x20);
+    gfx11_write(d, r, PACKET3(PACKET3_PFP_SYNC_ME, 0));
+    gfx11_write(d, r, 0);
+}
+
+/* gfx_v11_0_ring_emit_hdp_flush: kick the NBIO HDP flush engine for CP0
+ * (gfx pipe 0) and wait for its done bit, from the PFP */
+void gfx11_emit_hdp_flush(rdna3_dev *d, rdna3_gfx_ring *r)
+{
+    uint32_t m = BIF_BX_PF_GPU_HDP_FLUSH_DONE__CP0_MASK;
+    gfx11_emit_wait_reg_mem(d, r, 1, 0, 1,
+                            SOC15_OFF(d, NBIO, 0, regBIF_BX_PF0_GPU_HDP_FLUSH_REQ),
+                            SOC15_OFF(d, NBIO, 0, regBIF_BX_PF0_GPU_HDP_FLUSH_DONE), m, m, 0x20);
+}
+
+/* gfx_v11_0_emit_mem_sync: ACQUIRE_MEM invalidating/writing back GL2, GLM,
+ * GL1, GLV, GLK, GLI over the whole address space */
+void gfx11_emit_mem_sync(rdna3_dev *d, rdna3_gfx_ring *r)
+{
+    const uint32_t gcr_cntl = (1u << 14) /* GL2_INV */ | (1u << 15) /* GL2_WB */ |
+                              (1u << 5) /* GLM_INV */ | (1u << 4) /* GLM_WB */ |
+                              (1u << 9) /* GL1_INV */ | (1u << 8) /* GLV_INV */ |
+                              (1u << 7) /* GLK_INV */ | (1u << 0) /* GLI_INV */;
+    gfx11_write(d, r, PACKET3(PACKET3_ACQUIRE_MEM, 6));
+    gfx11_write(d, r, 0);            /* CP_COHER_CNTL */
+    gfx11_write(d, r, 0xffffffff);   /* CP_COHER_SIZE */
+    gfx11_write(d, r, 0xffffff);     /* CP_COHER_SIZE_HI */
+    gfx11_write(d, r, 0);            /* CP_COHER_BASE */
+    gfx11_write(d, r, 0);            /* CP_COHER_BASE_HI */
+    gfx11_write(d, r, 0x0000000A);   /* POLL_INTERVAL */
+    gfx11_write(d, r, gcr_cntl);
+}
+
+/* gfx_v11_0_ring_emit_cntxcntl */
+void gfx11_emit_cntxcntl(rdna3_dev *d, rdna3_gfx_ring *r, int ctx_switch)
+{
+    uint32_t dw2 = 0x80000000;   /* load_enable, otherwise the packet is a NOP */
+    if (ctx_switch)
+        dw2 |= 0x8001 /* global config + uconfig */ | 0x01000000 /* cs sh regs */ |
+               0x10002 /* per-context state + gfx sh regs */;
+    gfx11_write(d, r, PACKET3(PACKET3_CONTEXT_CONTROL, 1));
+    gfx11_write(d, r, dw2);
+    gfx11_write(d, r, 0);
+}
+
+/* gfx_v11_0_ring_emit_frame_cntl */
+void gfx11_emit_frame_cntl(rdna3_dev *d, rdna3_gfx_ring *r, int start, int secure)
+{
+    gfx11_write(d, r, PACKET3(PACKET3_FRAME_CONTROL, 0));
+    gfx11_write(d, r, (secure ? FRAME_TMZ : 0) | FRAME_CMD(start ? 0 : 1));
+}
+
+uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
+                          uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n)
+{
+    /* emit_frame_size for what we emit: vm flush 5+5+7+2, mem sync 8,
+     * hdp 7, cntxcntl 3, frame 2+2, fence 8, plus 4 per IB */
+    uint32_t i, seq, ndw = 19 + 8 + 7 + 3 + 4 + 8 + 4 * n;
+    int ctx_switch = ctx != r->last_ctx, secure;
+    if (!r->ready || !n || n > RD_GFX_MAX_IBS || vmid > 15)
+        return 0;
+    if (ring_wait_space(d, r, ndw))
+        return 0;
+    if (pd_addr)
+        gfx11_emit_vm_flush(d, r, vmid, pd_addr);
+    gfx11_emit_mem_sync(d, r);
+    gfx11_emit_hdp_flush(d, r);
+    gfx11_emit_cntxcntl(d, r, ctx_switch);
+    secure = (ibs[0].flags & RD_GFX_IB_FLAG_TMZ) != 0;
+    gfx11_emit_frame_cntl(d, r, 1, secure);
+    for (i = 0; i < n; i++)
+        gfx11_emit_ib(d, r, vmid, ibs[i].va, ibs[i].ndw);
+    gfx11_emit_frame_cntl(d, r, 0, secure);
+    seq = gfx11_emit_fence(d, r);
+    gfx11_commit(d, r);
+    r->last_ctx = ctx;
+    return seq;
 }
 
 uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r)
@@ -406,6 +545,7 @@ int gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs6
     r->wptr = 0;
     r->fence_seq = 0;
     r->ready = 0;
+    r->last_ctx = 0;
     r->csb_dw = csb_dw;
     r->ring = rdna3_vram_alloc(d, ring_size, 4096, "gfx-ring");
     r->wb = rdna3_vram_alloc(d, 4096, 4096, "gfx-wb");

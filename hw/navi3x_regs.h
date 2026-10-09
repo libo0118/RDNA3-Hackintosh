@@ -69,6 +69,14 @@
 #define regBIF_BX_PF0_RSMU_INDEX_BASE_IDX 1
 #define regBIF_BX_PF0_RSMU_DATA         0x0001
 #define regBIF_BX_PF0_RSMU_DATA_BASE_IDX  1
+/* the HDP flush engine CP/SDMA packets kick (nbio_v4_3_get_hdp_flush_*_offset) */
+#define regBIF_BX_PF0_GPU_HDP_FLUSH_REQ            0x0106
+#define regBIF_BX_PF0_GPU_HDP_FLUSH_REQ_BASE_IDX   2
+#define regBIF_BX_PF0_GPU_HDP_FLUSH_DONE           0x0107
+#define regBIF_BX_PF0_GPU_HDP_FLUSH_DONE_BASE_IDX  2
+#define BIF_BX_PF_GPU_HDP_FLUSH_DONE__CP0_MASK     0x00000001u
+#define BIF_BX_PF_GPU_HDP_FLUSH_DONE__CP2_MASK     0x00000004u
+#define BIF_BX_PF_GPU_HDP_FLUSH_DONE__SDMA0_MASK   0x00000400u
 #define regBIF_BX0_REMAP_HDP_MEM_FLUSH_CNTL          0x012d
 #define regBIF_BX0_REMAP_HDP_MEM_FLUSH_CNTL_BASE_IDX 2
 #define regBIF_BX0_REMAP_HDP_REG_FLUSH_CNTL          0x012e

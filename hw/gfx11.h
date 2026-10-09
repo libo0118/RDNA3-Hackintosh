@@ -35,10 +35,23 @@ extern "C" {
 #define PACKET3_INDIRECT_BUFFER    0x3F
 #define PACKET3_RELEASE_MEM        0x49
 #define PACKET3_PREAMBLE_CNTL      0x4A
+#define PACKET3_WAIT_REG_MEM       0x3C
+#define PACKET3_PFP_SYNC_ME        0x42
+#define PACKET3_ACQUIRE_MEM        0x58
+#define PACKET3_FRAME_CONTROL      0x90
 #define PACKET3_SET_CONTEXT_REG    0x69
 #define PACKET3_SET_CONTEXT_REG_START 0x0000a000
 #define PACKET3_SET_UCONFIG_REG    0x79
 #define PACKET3_SET_UCONFIG_REG_START 0x0000c000
+#define WRITE_DATA_DST_SEL(x)      ((uint32_t)(x) << 8)
+#define WR_CONFIRM                 (1u << 20)
+#define WRITE_DATA_ENGINE_SEL(x)   ((uint32_t)(x) << 30)
+#define WAIT_REG_MEM_FUNCTION(x)   ((uint32_t)(x) << 0)
+#define WAIT_REG_MEM_MEM_SPACE(x)  ((uint32_t)(x) << 4)
+#define WAIT_REG_MEM_OPERATION(x)  ((uint32_t)(x) << 6)
+#define WAIT_REG_MEM_ENGINE(x)     ((uint32_t)(x) << 8)
+#define FRAME_TMZ                  (1u << 0)
+#define FRAME_CMD(x)               ((uint32_t)(x) << 28)
 #define PACKET3_PREAMBLE_BEGIN_CLEAR_STATE (2u << 28)
 #define PACKET3_PREAMBLE_END_CLEAR_STATE   (3u << 28)
 
@@ -59,7 +72,19 @@ typedef struct rdna3_gfx_ring {
     uint64_t wptr;          /* dwords */
     uint32_t fence_seq;
     int      ready;
+    uint64_t last_ctx;      /* amdgpu ring->current_ctx: context of the last job */
 } rdna3_gfx_ring;
+
+/* one IB of a job (VA in the job's VMID) */
+typedef struct rdna3_gfx_ib {
+    uint64_t va;
+    uint32_t ndw;
+    uint32_t flags;         /* AMDGPU_IB_FLAG_* (only TMZ is looked at) */
+} rdna3_gfx_ib;
+
+#define RD_GFX_IB_FLAG_TMZ (1u << 4)   /* AMDGPU_IB_FLAGS_SECURE */
+#define RD_GFX_VM_INV_ENG  0           /* first free GFXHUB engine (eng 17 = MMIO/GART) */
+#define RD_GFX_MAX_IBS     16
 
 #define RD_GFX_WB_RPTR  0
 #define RD_GFX_WB_WPTR  8
@@ -82,6 +107,29 @@ void gfx11_commit(rdna3_dev *d, rdna3_gfx_ring *r);
 void gfx11_emit_ib(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid, uint64_t va, uint32_t ndw);
 /* gfx_v11_0_ring_emit_fence: RELEASE_MEM with cache flush, ++fence_seq */
 uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r);
+/* building blocks of a job (gfx_v11_0_ring_emit_*) */
+void gfx11_emit_wreg(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t reg, uint32_t val);
+void gfx11_emit_wait_reg_mem(rdna3_dev *d, rdna3_gfx_ring *r, int eng_sel, int mem_space, int opt,
+                             uint32_t addr0, uint32_t addr1, uint32_t ref, uint32_t mask,
+                             uint32_t inv);
+void gfx11_emit_vm_flush(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid, uint64_t pd_addr);
+void gfx11_emit_hdp_flush(rdna3_dev *d, rdna3_gfx_ring *r);
+void gfx11_emit_mem_sync(rdna3_dev *d, rdna3_gfx_ring *r);
+void gfx11_emit_cntxcntl(rdna3_dev *d, rdna3_gfx_ring *r, int ctx_switch);
+void gfx11_emit_frame_cntl(rdna3_dev *d, rdna3_gfx_ring *r, int start, int secure);
+
+/* free ring space in dwords (from the rptr writeback) */
+uint32_t gfx11_ring_space(rdna3_dev *d, rdna3_gfx_ring *r);
+
+/* amdgpu_ib_schedule() for the gfx ring, in amdgpu's order:
+ *   [VM flush + PFP_SYNC_ME] -> ACQUIRE_MEM -> HDP flush -> CONTEXT_CONTROL ->
+ *   FRAME_CONTROL begin -> IBs -> FRAME_CONTROL end -> RELEASE_MEM fence
+ * 'ctx' identifies the submitter (a context switch reloads state);
+ * 'pd_addr' != 0 reprograms VMID 'vmid' and invalidates its TLBs from the
+ * ring. Waits for ring space; commits. Returns the fence seq, 0 on error. */
+uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
+                          uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n);
+
 int  gfx11_fence_passed(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq);
 int  gfx11_wait_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq);
 

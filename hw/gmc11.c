@@ -292,11 +292,10 @@ void gfxhub303_set_fault_enable_default(rdna3_dev *d, int value)
     WGC(d, regGCVM_L2_PROTECTION_FAULT_CNTL, tmp);
 }
 
-int gfxhub303_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
+/* gfxhub_v3_0_3_get_invalidate_req */
+static uint32_t invalidate_req(uint32_t vmid, uint32_t flush_type)
 {
-    const uint32_t eng = 17;   /* "Use register 17 for GART" */
-    uint32_t req = 0, i, ack = 0;
-
+    uint32_t req = 0;
     req = REG_SET_FIELD(req, GCVM_INVALIDATE_ENG0_REQ, PER_VMID_INVALIDATE_REQ, 1u << vmid);
     req = REG_SET_FIELD(req, GCVM_INVALIDATE_ENG0_REQ, FLUSH_TYPE, flush_type);
     req = REG_SET_FIELD(req, GCVM_INVALIDATE_ENG0_REQ, INVALIDATE_L2_PTES, 1);
@@ -305,6 +304,26 @@ int gfxhub303_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
     req = REG_SET_FIELD(req, GCVM_INVALIDATE_ENG0_REQ, INVALIDATE_L2_PDE2, 1);
     req = REG_SET_FIELD(req, GCVM_INVALIDATE_ENG0_REQ, INVALIDATE_L1_PTES, 1);
     req = REG_SET_FIELD(req, GCVM_INVALIDATE_ENG0_REQ, CLEAR_PROTECTION_FAULT_STATUS_ADDR, 0);
+    return req;
+}
+
+void gfxhub303_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o)
+{
+    o->pt_lo = rdna3_reg_offset(d, HWIP_GC, 0, regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX,
+                                regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32) + CTX_ADDR_DISTANCE * vmid;
+    o->pt_hi = rdna3_reg_offset(d, HWIP_GC, 0, regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX,
+                                regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32) + CTX_ADDR_DISTANCE * vmid;
+    o->req = rdna3_reg_offset(d, HWIP_GC, 0, regGCVM_INVALIDATE_ENG0_REQ_BASE_IDX,
+                              regGCVM_INVALIDATE_ENG0_REQ) + ENG_DISTANCE * eng;
+    o->ack = rdna3_reg_offset(d, HWIP_GC, 0, regGCVM_INVALIDATE_ENG0_ACK_BASE_IDX,
+                              regGCVM_INVALIDATE_ENG0_ACK) + ENG_DISTANCE * eng;
+    o->req_val = invalidate_req(vmid, 0);
+}
+
+int gfxhub303_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
+{
+    const uint32_t eng = 17;   /* "Use register 17 for GART" */
+    uint32_t req = invalidate_req(vmid, flush_type), i, ack = 0;
 
     rdna3_hdp_flush(d);
     /* GFXHUB: no invalidation semaphore (gmc_v11_0_use_invalidate_semaphore) */

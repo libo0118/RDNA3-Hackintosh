@@ -433,7 +433,8 @@ void RDNA3Bringup::run()
 struct RDNA3Vm {
     rdna3_vm vm;
     uint32_t vmid;
-    bool     live;   /* page tables exist */
+    bool     live;       /* page tables exist */
+    bool     gfxFlush;   /* next GFX job re-points the VMID and flushes from the ring */
 };
 
 void *RDNA3Bringup::vmCreate()
@@ -460,6 +461,7 @@ void *RDNA3Bringup::vmCreate()
             if (fGmc && fGmc->gfxhub_enabled)
                 gfxhub303_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
             vmFlush(id);
+            v->gfxFlush = true;
             break;
         }
     }
@@ -525,6 +527,7 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
     if (r)
         return -RD_ENOMEM;
     vmFlush(v->vmid);
+    v->gfxFlush = true;
     return 0;
 }
 
@@ -535,6 +538,7 @@ void RDNA3Bringup::vmUnmap(void *p, uint64_t va, uint64_t size)
         return;
     gpuvm_unmap(fDev, &v->vm, va, size / 4096);
     vmFlush(v->vmid);
+    v->gfxFlush = true;
 }
 
 /* --------------------------- submission --------------------------- */
@@ -553,12 +557,22 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
         return 0;
     }
     if (ip == AMDGPU_HW_IP_GFX && fGfx && fGfx->ready) {
-        /* TODO(gfx): amdgpu also emits a VM flush, HDP flush and ACQUIRE_MEM
-         * cache sync around each job (gfx_v11_0_ring_emit_vm_flush etc.) */
-        for (uint32_t i = 0; i < n; i++)
-            gfx11_emit_ib(fDev, fGfx, v->vmid, ibs[i].va, ibs[i].length_dw);
-        *seq = gfx11_emit_fence(fDev, fGfx);
-        gfx11_commit(fDev, fGfx);
+        /* amdgpu_ib_schedule order: VM flush, ACQUIRE_MEM, HDP flush,
+         * CONTEXT_CONTROL, framed IBs, fence (gfx11_submit_job) */
+        rdna3_gfx_ib g[RD_GFX_MAX_IBS];
+        if (n > RD_GFX_MAX_IBS)
+            return -RD_EINVAL;
+        for (uint32_t i = 0; i < n; i++) {
+            g[i].va = ibs[i].va;
+            g[i].ndw = ibs[i].length_dw;
+            g[i].flags = ibs[i].flags;
+        }
+        uint32_t s = gfx11_submit_job(fDev, fGfx, (uint64_t)(uintptr_t)v, v->vmid,
+                                      v->gfxFlush ? gpuvm_pd_addr(fDev, &v->vm) : 0, g, n);
+        if (!s)
+            return -RD_EBUSY;
+        v->gfxFlush = false;
+        *seq = s;
         return 0;
     }
     return -RD_EINVAL;

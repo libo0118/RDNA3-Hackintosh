@@ -91,6 +91,9 @@ typedef struct sim {
     uint64_t sdma_rptr;         /* bytes */
     uint64_t cp_rptr;           /* dwords */
     unsigned cp_pkts, cp_bad, cp_while_halted, cp_clear_state, cp_ctx_regs;
+    unsigned cp_wait_stuck, cp_acquire, cp_pfp_sync, cp_frame_begin, cp_frame_end, cp_ibs;
+    unsigned cp_ib_dw, cp_ib_fault, ring_tlb_flushes, hdp_engine_flushes;
+    uint32_t cp_last_cntxcntl, cp_last_ib_vmid;
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
 } sim;
 
@@ -108,28 +111,41 @@ static uint8_t *mc_ptr(uint64_t mc, uint64_t len)
 }
 
 /* CP (ME/PFP) model for the kernel gfx ring: SET_UCONFIG_REG, the clear
- * state packets, RELEASE_MEM fence writes, NOP */
-static void cp_run(uint32_t wptr_dw)
+ * state packets, RELEASE_MEM fence writes, WRITE_DATA, WAIT_REG_MEM, the
+ * job framing packets and INDIRECT_BUFFER through the VMID's page tables */
+static void sim_wr(void *ctx, uint64_t off, uint32_t v);
+static uint32_t sim_rd(void *ctx, uint64_t off);
+
+/* walk VMID n's 4-level tables like the GFXHUB would (FB_OFFSET is 0, so a
+ * PDE/PTE address is a VRAM offset) */
+static uint8_t *vm_ptr(uint32_t vmid, uint64_t va, uint64_t len)
 {
-    uint32_t cntl = S.reg[GCR(regCP_RB0_CNTL)];
-    uint32_t me = S.reg[GCR(regCP_ME_CNTL)];
-    uint64_t base = ((uint64_t)S.reg[GCR(regCP_RB0_BASE)] << 8) |
-                    ((uint64_t)S.reg[GCR(regCP_RB0_BASE_HI)] << 40);
-    uint32_t ndw = 2u << ((cntl & CP_RB0_CNTL__RB_BUFSZ_MASK) >> CP_RB0_CNTL__RB_BUFSZ__SHIFT);
-    uint32_t *ring = (uint32_t *)mc_ptr(base, 4ull * ndw);
-    if (!S.reg[GCR(regCP_RB_ACTIVE)] || !ring)
-        return;
-    if (me & (CP_ME_CNTL__ME_HALT_MASK | CP_ME_CNTL__PFP_HALT_MASK)) {
-        S.cp_while_halted++;
-        return;
+    static const uint32_t shift[4] = { 39, 30, 21, 12 };
+    uint32_t dist = regGCVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 - regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32;
+    uint64_t e = S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 + dist * vmid] |
+                 ((uint64_t)S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32 + dist * vmid] << 32);
+    va &= 0x0000FFFFFFFFFFFFull;
+    if ((va & 4095) + len > 4096)
+        return NULL;   /* the model reads within one page */
+    for (int l = 0; l < 4; l++) {
+        uint64_t t = e & 0x0000FFFFFFFFF000ull;
+        if (!(e & 1) || t + 4096 > BAR_LEN)
+            return NULL;
+        memcpy(&e, S.vram + t + 8 * ((va >> shift[l]) & 511), 8);
     }
-    if (S.pending_writes)
-        S.unflushed_doorbells++;
-#define PK(i) ring[(S.cp_rptr + (i)) & (ndw - 1)]
-    while ((S.cp_rptr & (ndw - 1)) != (wptr_dw & (ndw - 1))) {
+    if (!(e & 1) || (e & 0x0000FFFFFFFFF000ull) + 4096 > BAR_LEN)
+        return NULL;
+    return S.vram + (e & 0x0000FFFFFFFFF000ull) + (va & 4095);
+}
+
+/* run packets [rptr, end) of buffer 'buf' (index mask 'mask'); returns new rptr */
+static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint64_t end, int in_ib)
+{
+#define PK(i) buf[(rptr + (i)) & mask]
+    while ((rptr & mask) != (end & mask)) {
         uint32_t h = PK(0), type = h >> 30, op = (h >> 8) & 0xff, cnt = (h >> 16) & 0x3fff;
         S.cp_pkts++;
-        if (type != 3) { S.cp_bad++; S.cp_rptr++; continue; }
+        if (type != 3) { S.cp_bad++; rptr++; continue; }
         switch (op) {
         case PACKET3_SET_UCONFIG_REG:
             for (uint32_t i = 0; i < cnt; i++)
@@ -137,7 +153,58 @@ static void cp_run(uint32_t wptr_dw)
             break;
         case PACKET3_SET_CONTEXT_REG: S.cp_ctx_regs += cnt; break;
         case PACKET3_CLEAR_STATE: S.cp_clear_state++; break;
-        case PACKET3_PREAMBLE_CNTL: case PACKET3_CONTEXT_CONTROL: case PACKET3_NOP: break;
+        case PACKET3_CONTEXT_CONTROL: S.cp_last_cntxcntl = PK(1); break;
+        case PACKET3_PREAMBLE_CNTL: case PACKET3_NOP: break;
+        case PACKET3_PFP_SYNC_ME: S.cp_pfp_sync++; break;
+        case PACKET3_ACQUIRE_MEM: if (cnt == 6 && PK(7)) S.cp_acquire++; else S.cp_bad++; break;
+        case PACKET3_FRAME_CONTROL:
+            if (PK(1) >> 28) S.cp_frame_end++; else S.cp_frame_begin++;
+            break;
+        case PACKET3_WRITE_DATA: {
+            uint32_t dst = (PK(1) >> 8) & 0xf;
+            for (uint32_t i = 0; i + 3 < cnt + 1; i++) {
+                if (dst == 0) {
+                    sim_wr(NULL, 4ull * (PK(2) + i), PK(4 + i));
+                } else if (dst == 5) {
+                    uint8_t *p = mc_ptr((PK(2) | ((uint64_t)PK(3) << 32)) + 4ull * i, 4);
+                    if (p) memcpy(p, &PK(4 + i), 4); else S.cp_bad++;
+                } else {
+                    S.cp_bad++;
+                }
+            }
+            break;
+        }
+        case PACKET3_WAIT_REG_MEM: {
+            uint32_t ctl = PK(1), ref = PK(4), mask_ = PK(5), v;
+            if (ctl & (1u << 4)) { S.cp_bad++; break; }   /* memory polls not modelled */
+            if (ctl & (1u << 6)) {                        /* write, then wait */
+                sim_wr(NULL, 4ull * PK(2), ref);
+                v = sim_rd(NULL, 4ull * PK(3));
+            } else {
+                v = sim_rd(NULL, 4ull * PK(2));
+            }
+            if ((v & mask_) != (ref & mask_))
+                S.cp_wait_stuck++;                        /* would hang the CP */
+            break;
+        }
+        case PACKET3_INDIRECT_BUFFER: {
+            uint64_t va = PK(1) | ((uint64_t)PK(2) << 32);
+            uint32_t ndw = PK(3) & 0xfffff, vmid = (PK(3) >> 24) & 0xf, i;
+            static uint32_t ib[4096];
+            if (in_ib || ndw > 4096) { S.cp_bad++; break; }
+            for (i = 0; i < ndw; i++) {
+                uint8_t *p = vm_ptr(vmid, va + 4ull * i, 4);
+                if (!p) { S.cp_ib_fault++; break; }
+                memcpy(&ib[i], p, 4);
+            }
+            if (i < ndw)
+                break;
+            S.cp_ibs++;
+            S.cp_ib_dw += ndw;
+            S.cp_last_ib_vmid = vmid;
+            cp_exec(ib, ~0ull, 0, ndw, 1);
+            break;
+        }
         case PACKET3_RELEASE_MEM: {
             uint64_t a = PK(3) | ((uint64_t)PK(4) << 32);
             uint8_t *p = mc_ptr(a, 4);
@@ -146,9 +213,38 @@ static void cp_run(uint32_t wptr_dw)
         }
         default: S.cp_bad++; break;
         }
-        S.cp_rptr += 2 + cnt;
+        rptr += 2 + cnt;
     }
 #undef PK
+    return rptr;
+}
+
+static void cp_run(uint32_t wptr_dw)
+{
+    uint32_t cntl = S.reg[GCR(regCP_RB0_CNTL)];
+    uint32_t me = S.reg[GCR(regCP_ME_CNTL)];
+    uint64_t base = ((uint64_t)S.reg[GCR(regCP_RB0_BASE)] << 8) |
+                    ((uint64_t)S.reg[GCR(regCP_RB0_BASE_HI)] << 40);
+    uint32_t ndw = 2u << ((cntl & CP_RB0_CNTL__RB_BUFSZ_MASK) >> CP_RB0_CNTL__RB_BUFSZ__SHIFT);
+    uint32_t *ring = (uint32_t *)mc_ptr(base, 4ull * ndw);
+    uint64_t rptr_wb = ((uint64_t)S.reg[GCR(regCP_RB0_RPTR_ADDR_HI)] << 32) |
+                       S.reg[GCR(regCP_RB0_RPTR_ADDR)];
+    uint8_t *wb;
+    if (!S.reg[GCR(regCP_RB_ACTIVE)] || !ring)
+        return;
+    if (me & (CP_ME_CNTL__ME_HALT_MASK | CP_ME_CNTL__PFP_HALT_MASK)) {
+        S.cp_while_halted++;
+        return;
+    }
+    if (S.pending_writes)
+        S.unflushed_doorbells++;
+    S.cp_rptr = cp_exec(ring, ndw - 1, S.cp_rptr, wptr_dw, 0);
+    /* rptr writeback (dwords, 32 bit) */
+    wb = mc_ptr(rptr_wb, 4);
+    if (wb) {
+        uint32_t r32 = (uint32_t)(S.cp_rptr & (ndw - 1));
+        memcpy(wb, &r32, 4);
+    }
 }
 
 /* SDMA 6.0 engine model: WRITE_LINEAR, COPY_LINEAR, CONST_FILL, FENCE, NOP */
@@ -325,6 +421,13 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     /* GFXHUB invalidation engine 17: acknowledge the requested VMIDs */
     {
         uint32_t eng_dist = regGCVM_INVALIDATE_ENG1_REQ - regGCVM_INVALIDATE_ENG0_REQ;
+        if (dw == GC_BASE0 + regGCVM_INVALIDATE_ENG0_REQ + RD_GFX_VM_INV_ENG * eng_dist) {
+            /* the gfx ring's engine (gmc_v11_0_emit_flush_gpu_tlb) */
+            S.reg[GC_BASE0 + regGCVM_INVALIDATE_ENG0_ACK + RD_GFX_VM_INV_ENG * eng_dist] = v & 0xffff;
+            S.ring_tlb_flushes++;
+            *R(dw) = v;
+            return;
+        }
         if (dw == GC_BASE0 + regGCVM_INVALIDATE_ENG0_REQ + 17 * eng_dist) {
             S.reg[GC_BASE0 + regGCVM_INVALIDATE_ENG0_ACK + 17 * eng_dist] = v & 0xffff;
             S.tlb_flushes++;
@@ -333,6 +436,14 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             *R(dw) = v;
             return;
         }
+    }
+    /* NBIO HDP flush engine: a request completes at once */
+    if (dw == NBIO_B2 + regBIF_BX_PF0_GPU_HDP_FLUSH_REQ) {
+        S.reg[NBIO_B2 + regBIF_BX_PF0_GPU_HDP_FLUSH_DONE] = v;
+        S.hdp_engine_flushes++;
+        S.pending_writes = 0;
+        *R(dw) = v;
+        return;
     }
     /* CP gfx ring 0: a write of CP_RB0_WPTR runs PM4 up to it */
     if (dw == GCR(regCP_RB0_WPTR)) {
@@ -547,6 +658,7 @@ static void run(const char *fwdir)
     static amd_ucode_plan plan;
     static rdna3_psp psp;
     static rdna3_dev dev;
+    static rdna3_gfx_ring gr;
     amd_fw_blob_ref blobs[AMD_BLOB_COUNT];
     amd_discovery disc;
     rdna3_os os = { NULL, sim_udelay, sim_msleep, sim_vlog, sim_wmb, sim_rd, sim_wr,
@@ -738,7 +850,6 @@ static void run(const char *fwdir)
         /* GFX 11: RLC autoload done, RS64 start addresses, GFXHUB, clear state,
          * ring 0 test through SCRATCH_REG0, fence via RELEASE_MEM */
         {
-            static rdna3_gfx_ring gr;
             rdna3_rs64_start rs = { 0x1000, 0x2, 0x2000, 0x3, 0x4000, 0x1 };
             uint32_t k;
             S.reg[GCR(regCP_ME_CNTL)] = CP_ME_CNTL__ME_HALT_MASK | CP_ME_CNTL__PFP_HALT_MASK;
@@ -799,6 +910,62 @@ static void run(const char *fwdir)
             CHECK(gpuvm_map_linear(&dev, &vm, 0x1000000000ull, pa, 512ull * 70, vpte) == RDNA3_ENOMEM);
             gpuvm_vm_fini(&dev, &vm);
             CHECK(pool.nfree == 64);
+
+            /* a GFX job in VMID 5 (amdgpu_ib_schedule order): VM flush from
+             * the ring, ACQUIRE_MEM, HDP flush, CONTEXT_CONTROL, framed IBs
+             * fetched through the page tables, fence */
+            CHECK(gr.ready);
+            if (gr.ready) {
+                const uint64_t ibva = 0x0000400000001000ull, dstva = 0x0000400000200000ull;
+                uint64_t ibpage = rdna3_vram_alloc(&dev, 4096, 4096, "test-ib");
+                uint64_t dst = rdna3_vram_alloc(&dev, 4096, 4096, "test-dst");
+                uint64_t f = gpuvm_pte_flags((1u << 1) | (1u << 2) | (1u << 3), 0);
+                uint32_t ib[16], n = 0, got = 0, seq, scratch = 0xC000 + 0x40;
+                rdna3_gfx_ib jobs[2];
+                CHECK(gpuvm_vm_init(&dev, &vm, &pool) == RDNA3_OK);
+                CHECK(gpuvm_map_linear(&dev, &vm, ibva, rdna3_vram_pa(&dev, ibpage), 1, f) == RDNA3_OK);
+                CHECK(gpuvm_map_linear(&dev, &vm, dstva, rdna3_vram_pa(&dev, dst), 1, f) == RDNA3_OK);
+                ib[n++] = PACKET3(PACKET3_SET_UCONFIG_REG, 1);
+                ib[n++] = 0x40;                       /* SCRATCH_REG0 */
+                ib[n++] = 0x5EED1234;
+                ib[n++] = PACKET3(PACKET3_WRITE_DATA, 3);
+                ib[n++] = WRITE_DATA_DST_SEL(5) | WR_CONFIRM;
+                ib[n++] = (uint32_t)rdna3_vram_mc(&dev, dst);
+                ib[n++] = (uint32_t)(rdna3_vram_mc(&dev, dst) >> 32);
+                ib[n++] = 0xFACEFEED;
+                rdna3_vram_write(&dev, ibpage, ib, 4ull * n);
+                jobs[0].va = ibva; jobs[0].ndw = n; jobs[0].flags = 0;
+                jobs[1].va = ibva; jobs[1].ndw = 3; jobs[1].flags = 0;
+                S.reg[scratch] = 0;
+                seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, gpuvm_pd_addr(&dev, &vm), jobs, 2);
+                CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                rdna3_vram_read(&dev, dst, &got, 4);
+                CHECK(got == 0xFACEFEED && S.reg[scratch] == 0x5EED1234);
+                CHECK(S.cp_ibs == 2 && S.cp_ib_dw == n + 3 && S.cp_last_ib_vmid == 5 && !S.cp_ib_fault);
+                CHECK(S.ring_tlb_flushes == 1 && S.cp_pfp_sync == 1 && S.cp_acquire == 1 &&
+                      S.hdp_engine_flushes == 1 && S.cp_frame_begin == 1 && S.cp_frame_end == 1);
+                CHECK(S.cp_last_cntxcntl == 0x81018003u);   /* load_enable + context switch */
+                CHECK(S.cp_wait_stuck == 0 && S.cp_bad == 0);
+                /* same context, no VM change: no flush, no reload */
+                seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);
+                CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                CHECK(S.ring_tlb_flushes == 1 && S.cp_last_cntxcntl == 0x80000000u && S.cp_ibs == 3);
+                /* an unmapped IB faults instead of running garbage */
+                jobs[0].va = 0x0000500000000000ull;
+                seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);
+                CHECK(seq != 0 && S.cp_ib_fault == 1);
+                CHECK(gfx11_submit_job(&dev, &gr, 1, 16, 0, jobs, 1) == 0);
+                CHECK(gfx11_submit_job(&dev, &gr, 1, 5, 0, jobs, 0) == 0);
+                /* many jobs: the ring wraps and space accounting holds */
+                jobs[0].va = ibva;
+                for (uint32_t k = 0; k < 300; k++) {
+                    seq = gfx11_submit_job(&dev, &gr, k & 1, 5, 0, jobs, 1);
+                    CHECK(seq != 0);
+                }
+                CHECK(gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK && S.cp_bad == 0 &&
+                      S.cp_wait_stuck == 0 && gfx11_ring_space(&dev, &gr) == gr.buf_mask);
+                gpuvm_vm_fini(&dev, &vm);
+            }
         }
     }
 

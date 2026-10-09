@@ -60,6 +60,14 @@ int  gfxhub303_gart_enable(rdna3_dev *d, rdna3_gmc *g);
 void gfxhub303_set_fault_enable_default(rdna3_dev *d, int value);
 /* gmc_v11_0_flush_gpu_tlb() for the GFXHUB, MMIO path (before KIQ/MES) */
 int  gfxhub303_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type);
+/* register offsets + request word a ring needs to switch VMID n's page
+ * directory and invalidate it on engine 'eng' (gmc_v11_0_emit_flush_gpu_tlb) */
+typedef struct rdna3_vm_flush_regs {
+    uint32_t pt_lo, pt_hi;   /* GCVM_CONTEXTn_PAGE_TABLE_BASE_ADDR_LO32/HI32 */
+    uint32_t req, ack;       /* GCVM_INVALIDATE_ENGe_REQ/ACK */
+    uint32_t req_val;        /* get_invalidate_req(vmid, 0) */
+} rdna3_vm_flush_regs;
+void gfxhub303_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o);
 /* program VMID n's page directory base (gfxhub_v3_0_3_setup_vm_pt_regs) */
 void gfxhub303_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd_addr);
 
