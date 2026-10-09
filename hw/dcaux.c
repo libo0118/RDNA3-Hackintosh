@@ -7,6 +7,7 @@
  */
 #include "dcaux.h"
 #include "gen/dcn_3_2_1_aux.h"
+#include "gen/dcn_3_2_0_gpio.h"
 
 #define AUX_STRIDE (regDP_AUX1_AUX_CONTROL - regDP_AUX0_AUX_CONTROL)
 #define HPD_STRIDE (regHPD1_DC_HPD_CONTROL - regHPD0_DC_HPD_CONTROL)
@@ -47,10 +48,32 @@ int dcaux_hpd_sense(rdna3_dev *d, uint32_t n)
     return GET(v, HPD0_DC_HPD_INT_STATUS, DC_HPD_SENSE) ? 1 : 0;
 }
 
+/* DC_GPIO_DDCn_MASK of AUX engine n's DDC line (DDC1..DDC5, stride 4) */
+static uint32_t ddc_mask_reg(rdna3_dev *d, uint32_t n)
+{
+    return rdna3_reg_offset(d, HWIP_DCE, 0, regDC_GPIO_DDC1_MASK_BASE_IDX, regDC_GPIO_DDC1_MASK) +
+           (regDC_GPIO_DDC2_MASK - regDC_GPIO_DDC1_MASK) * n;
+}
+
+/* hw_ddc.c set_config: GPIO_DDC_CONFIG_TYPE_MODE_AUX sets AUX_PAD1_MODE,
+ * MODE_I2C clears it; returns the previous mode. With the pad in I2C mode
+ * the engine reports AUX_SW_NON_AUX_MODE and sends nothing. */
+static int ddc_pad_aux(rdna3_dev *d, uint32_t n, int aux)
+{
+    uint32_t reg = ddc_mask_reg(d, n), v = rdna3_rreg(d, reg);
+    int was = GET(v, DC_GPIO_DDC1_MASK, AUX_PAD1_MODE) != 0;
+    if (was != (aux != 0))
+        rdna3_wreg(d, reg, SET(v, DC_GPIO_DDC1_MASK, AUX_PAD1_MODE, aux ? 1 : 0));
+    return was;
+}
+
 /* acquire_engine: SW asks the arbiter for the AUX registers */
 static int aux_acquire(rdna3_dev *d, uint32_t n)
 {
-    uint32_t v = RA(d, regDP_AUX0_AUX_ARB_CONTROL, n), i;
+    uint32_t v, i;
+    /* dce_aux acquire(): dal_ddc_open(..., GPIO_DDC_CONFIG_TYPE_MODE_AUX) first */
+    (void)ddc_pad_aux(d, n, 1);
+    v = RA(d, regDP_AUX0_AUX_ARB_CONTROL, n);
     if (GET(v, DP_AUX0_AUX_ARB_CONTROL, AUX_REG_RW_CNTL_STATUS) == DMCU_CAN_ACCESS_AUX)
         return RD_AUX_ERR_ACQUIRE;
     v = RA(d, regDP_AUX0_AUX_CONTROL, n);
@@ -353,6 +376,7 @@ int dcaux_probe(rdna3_dev *d, rdna3_connector *out, uint32_t max)
         unsigned i;
         for (i = 0; i < sizeof(*c); i++)
             ((uint8_t *)c)[i] = 0;
+        int pad_was_aux = ddc_pad_aux(d, n, 1);
         c->aux = n;
         c->hpd = dcaux_hpd_sense(d, n);
         r = dcaux_dpcd_read(d, n, 0x000, dpcd, 16);
@@ -378,6 +402,9 @@ int dcaux_probe(rdna3_dev *d, rdna3_connector *out, uint32_t max)
         if (c->hpd && r <= 0)
             RERR(d, "AUX%u: HPD high, EDID over I2C-over-AUX failed (%d)", n, r);
         c->edid_len = r > 0 ? r : 0;
+        /* no DisplayPort sink: give the pad back its I2C mode (HDMI/DVI DDC) */
+        if (!c->dp && !pad_was_aux)
+            (void)ddc_pad_aux(d, n, 0);
         if (c->hpd || c->dp || c->edid_len) {
             RLOG(d, "AUX%u: HPD %d, %s, EDID %d bytes", n, c->hpd,
                  c->dp ? "DisplayPort sink" : "no DPCD", c->edid_len);

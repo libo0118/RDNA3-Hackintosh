@@ -54,6 +54,7 @@
 #include "gen/gc_11_0_0_reset.h"
 #include "gen/gc_11_0_0_rs64.h"
 #include "gen/gc_11_0_0_mes.h"
+#include "gen/dcn_3_2_0_gpio.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
@@ -163,7 +164,7 @@ typedef struct sim {
      * other engines answer with a receive timeout */
     uint8_t  aux_tx[20], aux_rx[20];
     uint32_t aux_ptr, aux_nrx, aux_status, aux_arb;
-    unsigned aux_gos, aux_bad;
+    unsigned aux_gos, aux_bad, aux_non_aux;
     uint8_t  dpcd[0x800];
     uint8_t  edid[256];
     /* DMCUB: the firmware's view (boot checks, mailbox, GPINT) */
@@ -816,6 +817,13 @@ static void aux_go(uint32_t n)
     S.aux_gos++;
     S.aux_nrx = 0;
     memset(S.aux_rx, 0, sizeof(S.aux_rx));
+    if (!(S.reg[DCN_B2 + regDC_GPIO_DDC1_MASK + (regDC_GPIO_DDC2_MASK - regDC_GPIO_DDC1_MASK) * n] &
+          DC_GPIO_DDC1_MASK__AUX_PAD1_MODE_MASK)) {
+        /* the pad is in I2C mode (the card, 2026-10-10): nothing goes out */
+        S.aux_non_aux++;
+        S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK | DP_AUX0_AUX_SW_STATUS__AUX_SW_NON_AUX_MODE_MASK;
+        return;
+    }
     if (n != 0) {   /* nothing plugged in: the receiver times out */
         S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK | DP_AUX0_AUX_SW_STATUS__AUX_SW_RX_TIMEOUT_MASK;
         return;
@@ -3182,8 +3190,12 @@ static void run(const char *fwdir)
         S.edid[5] = 0;
         CHECK(edid_parse(S.edid, 128, &e) == -1);
         S.edid[5] = 0xff;
-        /* the probe finds the one sink */
+        /* the probe finds the one sink; its pad stays in AUX mode, the
+         * others go back to I2C */
         CHECK(dcaux_probe(&dev, conn, RD_AUX_ENGINES) == 1);
+        CHECK(S.reg[DCN_B2 + regDC_GPIO_DDC1_MASK] & DC_GPIO_DDC1_MASK__AUX_PAD1_MODE_MASK);
+        CHECK(!(S.reg[DCN_B2 + regDC_GPIO_DDC3_MASK] & DC_GPIO_DDC1_MASK__AUX_PAD1_MODE_MASK));
+        CHECK(S.aux_non_aux == 0);
         CHECK(conn[0].aux == 0 && conn[0].hpd && conn[0].dp && conn[0].dpcd_rev == 0x14 &&
               conn[0].max_link_rate == 0x1e && conn[0].max_lane_count == 4 && conn[0].edid_len == 256);
         CHECK(S.aux_bad == 0);
