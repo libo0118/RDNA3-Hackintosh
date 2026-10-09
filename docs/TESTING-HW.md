@@ -48,7 +48,7 @@ niego oraz opis objawu. Szczegóły modułów są w `STAGE1`–`STAGE7`.
 |---|---|---|---|---|
 | 1 | `rdna3lvl=1` | mapuje BAR5, czeka na PSP, czyta rozmiar VRAM | `RDNA3,VRAMSizeMB = 16384`, brak `MMIO reads all-ones` | niskie |
 | 2 | `rdna3lvl=2` | tablica IP discovery, odczyt głowic DCN, VBIOS, ścieżki wyświetlania, DP AUX/EDID | `IP discovery ... ok`, GC 11.0.3; `RDNA3,DisplayHeads = 1`; `RDNA3,DisplayPath0` (np. `DP-1 UNIPHYA DDC1 HPD1`); `RDNA3,Connector0,Monitor` = nazwa monitora; `RDNA3,Head0EdidMode`; `RDNA3,AtomCommandTables` | niskie: zapisy tylko do okien odczytu i rejestrów AUX |
-| 3 | `rdna3lvl=3` | pierwszy rejestr GC z discovery | `GRBM_STATUS`, `RDNA3,GBAddrConfig` | niskie |
+| 3 | `rdna3lvl=3` | pierwszy rejestr GC z discovery | `GRBM_STATUS`, `RDNA3,GBAddrConfig`, `RDNA3,ActiveCUs = 60` | niskie |
 | 4 | `rdna3lvl=4` | PSP: bootloader, sOS, TMR, ładowanie całego firmware | `RDNA3,Stage2 = PSP up, firmware loaded`, `sOS running`, 29× `LOAD_IP_FW ... ok`, `RLC autoload started` | średnie: pierwsze zapisy do PSP |
 | 5 | `rdna3lvl=5` | SMU: PMFW, VBIOS, PPTable, cechy bezpieczne, metryki | `RDNA3,SMUVersion`, `RDNA3,PM`, `RDNA3,PMFeaturesRunning`, `RDNA3,PMTempHotspotC`, `RDNA3,PMFanRPM` | średnie: zegary i wentylator |
 | 5b | `rdna3lvl=5 rdna3dmub=1` | DMCUB: zatrzymanie firmware z VBIOS, okna, ponowny start, skrzynka komend | `RDNA3,DMUB = running, mailbox up`, `RDNA3,DMUBVersion = 0x07003300` (lub zbliżona), `RDNA3,DMUBBootStatus` z bitami 0 i 1 | **ekran może mrugnąć lub zgasnąć**; wtedy SSH, raport, krok bez `rdna3dmub` |

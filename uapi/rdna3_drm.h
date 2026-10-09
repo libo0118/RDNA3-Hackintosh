@@ -210,6 +210,11 @@ void rdna3_drm_device_set_enumeration_only(rdna3_drm_device *dev, int on);
 /* the OS brought ring(s) 'mask' of HW IP 'ip' up: advertise them and let
  * CS reach ops.submit for them (also sets accel_working) */
 void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_t mask);
+/* Harvesting read from the GC (gfx11_get_cu_info): replaces the "all CUs
+ * and RBs active" defaults in DEV_INFO. 'bitmap' uses cu_info->bitmap[0]'s
+ * 4x4 layout. */
+void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4][4],
+                                  uint32_t cu_active, uint32_t rb_mask);
 
 /* Lookup for the OS mmap path: BO whose fake offset is 'off'. */
 rdna3_bo *rdna3_drm_bo_by_mmap_offset(rdna3_drm_file *f, uint64_t off);

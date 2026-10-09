@@ -13,6 +13,7 @@
 #include "RDNA3Accel.hpp"
 #include "RDNA3Regs.h"
 #include "RDNA3Bringup.hpp"
+#include "gfx11_info.h"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -328,6 +329,26 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     if (!fDrm->gb_addr_config)
         fDrm->gb_addr_config = 0x00000545; /* TODO: verify on hardware */
     setProperty("RDNA3,GBAddrConfig", fDrm->gb_addr_config, 32);
+
+    /* harvesting (gfx_v11_0_get_cu_info / setup_rb) at rdna3lvl>=3, on the
+     * display's register view; the bring-up thread, which also selects
+     * SE/SA through GRBM_GFX_INDEX, has not started yet */
+    if (fLevel >= 3 && fDispDev && disc->has_gc_info) {
+        rdna3_gfx_cu_info ci;
+        bzero(&ci, sizeof(ci));
+        ci.max_se = disc->gc.num_se;
+        ci.max_sa_per_se = disc->gc.num_sa_per_se;
+        ci.max_cu_per_sa = 2 * (disc->gc.num_wgp0_per_sa + disc->gc.num_wgp1_per_sa);
+        ci.max_backends_per_se = disc->gc.num_rb_per_se;
+        if (gfx11_get_cu_info(fDispDev, &ci) == RDNA3_OK && ci.cu_active) {
+            rdna3_drm_device_set_cu_info(fDrm, ci.cu_bitmap, ci.cu_active, ci.rb_active);
+            setProperty("RDNA3,ActiveCUs", ci.cu_active, 32);
+            setProperty("RDNA3,ActiveRBMask", ci.rb_active, 32);
+            setProperty("RDNA3,ActiveSAMask", ci.sa_active, 32);
+            LOG("GC: %u active CUs, RB mask 0x%x (%u RBs), SA mask 0x%x", ci.cu_active, ci.rb_active,
+                ci.num_rbs, ci.sa_active);
+        }
+    }
 
     uint32_t enumOnly = 0;
     if (PE_parse_boot_argn("rdna3enum", &enumOnly, sizeof(enumOnly)) && enumOnly) {

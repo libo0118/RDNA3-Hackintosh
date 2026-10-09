@@ -30,6 +30,8 @@
 #include "atom.h"
 #include "dmub32.h"
 #include "dcn32_mode.h"
+#include "gfx11_info.h"
+#include "gen/gc_11_0_0_harvest.h"
 #include "gen/gc_11_0_0_sdma_reset.h"
 #include "gen/dcn_3_2_1_dmcub.h"
 #include "gen/dcn_3_2_1_aux.h"
@@ -178,6 +180,7 @@ typedef struct sim {
     } smu;
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
     int      sdma_hang;              /* the engine stopped consuming its ring */
+    uint32_t harvest_wgp[8][2];      /* INACTIVE_WGPS per SE/SA (CC_GC_SHADER_ARRAY_CONFIG) */
     unsigned sdma_resets, sdma_resets_unfrozen;
 } sim;
 
@@ -1670,6 +1673,16 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
             return (S.reg[dw] & ~DP_AUX0_AUX_SW_DATA__AUX_SW_DATA_MASK) | (b << 8);
         }
     }
+    if (dw == GCR(regCC_GC_SHADER_ARRAY_CONFIG)) {
+        /* per SE/SA: the one GRBM_GFX_INDEX selects */
+        uint32_t sel = S.reg[GCR(regGRBM_GFX_INDEX)];
+        uint32_t se = (sel & GRBM_GFX_INDEX__SE_INDEX_MASK) >> GRBM_GFX_INDEX__SE_INDEX__SHIFT;
+        uint32_t sa = (sel & GRBM_GFX_INDEX__SA_INDEX_MASK) >> GRBM_GFX_INDEX__SA_INDEX__SHIFT;
+        if ((sel & (GRBM_GFX_INDEX__SE_BROADCAST_WRITES_MASK | GRBM_GFX_INDEX__SA_BROADCAST_WRITES_MASK)) ||
+            se >= 8 || sa >= 2)
+            return S.reg[dw];
+        return (S.reg[dw] & 0xffff) | (S.harvest_wgp[se][sa] << 16);
+    }
     if (dw == SMUIO_B0 + regROM_DATA) {
         /* the window maps the ROM at ROM_STRAP << 17; reads auto-increment */
         uint32_t ro = S.rom_index - (ROM_STRAP << 17), w = 0xffffffffu;
@@ -2707,6 +2720,29 @@ static void run(const char *fwdir)
         CHECK(conn[0].aux == 0 && conn[0].hpd && conn[0].dp && conn[0].dpcd_rev == 0x14 &&
               conn[0].max_link_rate == 0x1e && conn[0].max_lane_count == 4 && conn[0].edid_len == 256);
         CHECK(S.aux_bad == 0);
+    }
+
+    /* harvesting: one SA, one RB and one WGP fused off */
+    {
+        rdna3_gfx_cu_info ci;
+        memset(&ci, 0, sizeof(ci));
+        ci.max_se = 3; ci.max_sa_per_se = 2; ci.max_cu_per_sa = 10; ci.max_backends_per_se = 4;
+        S.reg[GCR(regCC_GC_SA_UNIT_DISABLE)] = (1u << 5) << CC_GC_SA_UNIT_DISABLE__SA_DISABLE__SHIFT;  /* SE2 SA1 */
+        S.reg[GCR(regCC_RB_BACKEND_DISABLE)] = 1u << CC_RB_BACKEND_DISABLE__BACKEND_DISABLE__SHIFT;   /* RB0 */
+        S.harvest_wgp[0][1] = 1u << 4;                                                              /* SE0 SA1 WGP4 */
+        CHECK(gfx11_get_cu_info(&dev, &ci) == RDNA3_OK);
+        CHECK(ci.sa_active == 0x1f);
+        CHECK(ci.rb_active == (0x3ffu & ~1u) && ci.num_rbs == 9);
+        CHECK(ci.cu_active == 48 && ci.cu_bitmap[0][0] == 0x3ff && ci.cu_bitmap[0][1] == 0xff &&
+              ci.cu_bitmap[2][1] == 0 && ci.cu_bitmap[2][0] == 0x3ff);
+        CHECK(S.reg[GCR(regGRBM_GFX_INDEX)] == (GRBM_GFX_INDEX__SE_BROADCAST_WRITES_MASK |
+                                               GRBM_GFX_INDEX__SA_BROADCAST_WRITES_MASK |
+                                               GRBM_GFX_INDEX__INSTANCE_BROADCAST_WRITES_MASK));
+        ci.max_sa_per_se = 3;
+        CHECK(gfx11_get_cu_info(&dev, &ci) == RDNA3_EINVAL);
+        S.reg[GCR(regCC_GC_SA_UNIT_DISABLE)] = 0;
+        S.reg[GCR(regCC_RB_BACKEND_DISABLE)] = 0;
+        S.harvest_wgp[0][1] = 0;
     }
 
     /* AtomBIOS: the interpreter on the bytecode above, and the display

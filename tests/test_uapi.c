@@ -238,6 +238,21 @@ int main(void)
         CHECK(di.num_rb_pipes == 12 && di.wave_front_size == 32);
         CHECK(di.virtual_address_max == 0x0000800000000000ull);
         CHECK(info(f, AMDGPU_INFO_ACCEL_WORKING, &aw, 4) == 0 && aw == 0);
+        CHECK(di.cu_bitmap[0][0] == 0x3ff && di.cu_ao_mask == 0 && di.cu_ao_bitmap[0][0] == 0 &&
+              di.enabled_rb_pipes_mask == 0xfff);
+        /* harvesting read from the GC replaces the defaults */
+        {
+            uint32_t bm[4][4];
+            memset(bm, 0, sizeof(bm));
+            bm[0][0] = 0x3ff; bm[0][1] = 0xff; bm[1][0] = 0x3ff; bm[1][1] = 0x3ff; bm[2][0] = 0x3ff;
+            rdna3_drm_device_set_cu_info(&dev, bm, 48, 0x3fe);
+            memset(&di, 0, sizeof(di));
+            CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0);
+            CHECK(di.cu_active_number == 48 && di.cu_bitmap[0][1] == 0xff && di.cu_bitmap[2][1] == 0 &&
+                  di.enabled_rb_pipes_mask == 0x3fe && di.num_rb_pipes == 12);
+            bm[0][1] = 0x3ff; bm[2][1] = 0x3ff;
+            rdna3_drm_device_set_cu_info(&dev, bm, 60, 0xfff);
+        }
     }
     /* hw ip */
     {

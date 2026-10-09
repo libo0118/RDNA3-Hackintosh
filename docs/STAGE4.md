@@ -61,5 +61,9 @@ dalej zwraca `-ENODEV`.
 
 * `RDNA3,GBAddrConfig` w ioreg (`rdna3lvl>=3`): wartość zastępcza `0x545`
   to tylko placeholder; RADV liczy z niej swizzle tekstur.
-* Harvesting CU/RB: `DEV_INFO` zakłada wszystkie 60 CU/12 RB aktywne
-  (`CC_GC_SHADER_ARRAY_CONFIG` do odczytania w Etapie 2).
+* Harvesting CU/RB: od `rdna3lvl=3` kext czyta maski jak
+  `gfx_v11_0_get_cu_info`/`setup_rb` (`CC/GC_USER_SA_UNIT_DISABLE`,
+  `CC/GC_USER_RB_BACKEND_DISABLE`, `CC/GC_USER_SHADER_ARRAY_CONFIG` na SE/SA
+  wybranym przez `GRBM_GFX_INDEX`) i podmienia nimi domyślne „wszystko
+  aktywne” w `DEV_INFO` (`RDNA3,ActiveCUs`, `RDNA3,ActiveRBMask`). RX 7800 XT
+  powinien pokazać 60 CU; inna liczba znaczy, że trzeba porównać z Linuksem.

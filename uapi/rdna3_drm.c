@@ -77,13 +77,13 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
     di->max_engine_clock = di->min_engine_clock = 2430000;
     di->max_memory_clock = di->min_memory_clock = 2438000;
 
-    /* TODO(stage2-gfx): harvesting. Assume all CUs/RBs active until
-     * CC_GC_SHADER_ARRAY_CONFIG / CC_RB_BACKEND_DISABLE are read. */
+    /* all CUs/RBs active until the OS reads the harvesting registers
+     * (rdna3_drm_device_set_cu_info). gfx_v11_0_get_cu_info fills no
+     * always-on CU masks, so cu_ao_* stay 0 as on Linux. */
     di->cu_active_number = 0;
     for (i = 0; i < se && i < 4; i++)
         for (j = 0; j < sa && j < 4; j++) {
             di->cu_bitmap[i][j] = (cu_per_sa >= 32) ? 0xffffffffu : ((1u << cu_per_sa) - 1);
-            di->cu_ao_bitmap[i][j] = MIN(di->cu_bitmap[i][j], 0x3u);
             di->cu_active_number += cu_per_sa;
         }
     di->cu_ao_mask = 0;
@@ -146,6 +146,20 @@ void rdna3_drm_device_set_enumeration_only(rdna3_drm_device *dev, int on)
     dev->available_rings[AMDGPU_HW_IP_GFX] = on ? 1 : 0;
     dev->available_rings[AMDGPU_HW_IP_COMPUTE] = on ? 1 : 0;
     dev->available_rings[AMDGPU_HW_IP_DMA] = on ? 1 : 0;
+}
+
+void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4][4],
+                                  uint32_t cu_active, uint32_t rb_mask)
+{
+    struct drm_amdgpu_info_device *di = &dev->dev_info;
+    uint32_t i, j;
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++)
+            di->cu_bitmap[i][j] = bitmap[i][j];
+    di->cu_active_number = cu_active;
+    /* amdgpu_kms: enabled_rb_pipes_mask = backend_enable_mask; num_rb_pipes
+     * stays max_backends_per_se * max_shader_engines */
+    di->enabled_rb_pipes_mask = rb_mask;
 }
 
 void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_t mask)
