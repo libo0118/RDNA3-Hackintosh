@@ -181,6 +181,9 @@ RESTORE_MODE=${RESTORE_MODE:-suspend}
 # 1 = give the VM the VBIOS dumped by prepare (vbios.rom), 0 = let QEMU read
 # the card's own ROM
 USE_ROMFILE=${USE_ROMFILE:-1}
+# 1 = suspend for 5 s before the VM too, so it gets a powered-off card
+# (its boot screen needs that after the host used it)
+PRE_SUSPEND=${PRE_SUSPEND:-1}
 EOF
     [ -n "${BASE_ARGS:-}" ] && echo "BASE_ARGS=\"$BASE_ARGS\"" >> "$CONF"
     ok "$CONF (RAM ${RAM_GB:-$ram} GiB, $cpus CPU)"
@@ -578,6 +581,16 @@ cmd__passthrough() {
 
     trap restore EXIT
     detach || exit 1
+    # Power-cycle the card before the VM: after the host's amdgpu a bus
+    # reset leaves it half-initialised, and its UEFI GOP (OpenCore picker,
+    # boot screen) does not start - the monitor gets no signal. Suspend to
+    # RAM with the card already on vfio-pci gives the VM a cold card, like a
+    # fresh boot. PRE_SUSPEND=0 in the config skips it.
+    if [ "${PRE_SUSPEND:-1}" = 1 ] && command -v rtcwake >/dev/null; then
+        echo "== suspend to RAM for 5 s to power-cycle the card before the VM"
+        sync; rtcwake -m mem -s 5 || echo "   suspend failed, going on"
+        sleep 2
+    fi
     # OVMF's 64-bit PCI window in MiB; 0 = no 64-bit window, so OVMF puts
     # every BAR below 4 GiB (fits once detach shrank BAR0 to 256 MiB);
     # "default" = OVMF's own size

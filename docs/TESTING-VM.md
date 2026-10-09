@@ -249,6 +249,10 @@ prints PASS / FAIL per step. What happens with the reports next is in
   - rebinds the card from `amdgpu` to `vfio-pci`;
   - starts QEMU with the card and the USB keyboard and mouse;
   - after the VM shuts down, gives everything back to Linux.
+- Before the VM starts, the computer also sleeps for 5 seconds
+  (`PRE_SUSPEND=1`): that powers the card off, so the VM gets it cold, as
+  after a fresh boot. Without it the card's boot screen (OpenCore menu)
+  stays dark: the monitor reports no signal.
 - QEMU reads the keyboard and mouse from Linux (`input-linux`, the
   "both Ctrl" toggle) and passes them to macOS as USB devices. Linux itself watches for Esc 3×
   and the power button (`vmtool.py stopkeys`, `systemd-inhibit`). After the VM
