@@ -55,12 +55,20 @@ gpu_bdf() {
 }
 
 # every non-bridge device of the GPU's IOMMU group (all of them go to the VM)
+# Every function of the card's slot (VGA, HDMI audio, ...) and every
+# non-bridge device of their IOMMU groups. vfio can only reset the card (bus
+# reset) when it owns all of them; the audio function often sits in a group
+# of its own.
 group_devs() {
-    local bdf=$1 d
-    for d in /sys/bus/pci/devices/"$bdf"/iommu_group/devices/*; do
-        case "$(cat "$d/class")" in 0x0604*) continue ;; esac
-        basename "$d"
-    done
+    local bdf=$1 f d
+    {
+        for f in /sys/bus/pci/devices/"${bdf%.*}".*; do
+            for d in "$f"/iommu_group/devices/*; do
+                case "$(cat "$d/class")" in 0x0604*) continue ;; esac
+                basename "$d"
+            done
+        done
+    } | sort -u
 }
 
 # ------------------------------------------------------------------ check

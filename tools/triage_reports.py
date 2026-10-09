@@ -170,7 +170,12 @@ def main():
     d = sys.argv[1]
     show_all = "--all" in sys.argv
     failed = False
-    for p in sorted(glob.glob(os.path.join(d, "rdna3-report-*.tar.gz")), key=os.path.getmtime):
+    reports = sorted(glob.glob(os.path.join(d, "rdna3-report-*.tar.gz")), key=os.path.getmtime)
+    if not reports:
+        print("!! no rdna3-report-*.tar.gz: macOS never sent a report (did not boot far enough,")
+        print("   no network to the host, or the VM was stopped before ~2 min) - read the serial log")
+        failed = True
+    for p in reports:
         failed |= report(p, show_all)
         tests = p[:-len(".tar.gz")] + "-tests.txt"
         if os.path.exists(tests):
