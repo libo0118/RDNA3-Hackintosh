@@ -1,8 +1,8 @@
 # Etap 2: bring-up sprzętu
 
 Stan: **PSP + firmware + SMU + GMC (GART, MMHUB 3.0.2, GFXHUB 3.0.3)
-napisane i przetestowane w symulatorze**; IH (przerwania), ringi GFX/SDMA i
-MES jeszcze nie.
++ IH 6.0 napisane i przetestowane w symulatorze**; ringi GFX/SDMA i MES
+jeszcze nie.
 
 ## Co jest zrobione
 
@@ -25,7 +25,8 @@ MES jeszcze nie.
    ```
 
 2. boot-args: `rdna3lvl=4` (PSP + firmware), `rdna3lvl=5` (+ SMU) lub
-   `rdna3lvl=6` (+ GMC: GART w VRAM, MMHUB, flush TLB; `RDNA3,GMCResult`).
+   `rdna3lvl=6` (+ GMC: GART w VRAM, MMHUB, flush TLB; `RDNA3,GMCResult`;
+   + ring IH 6.0, `RDNA3,IHResult`, `RDNA3,IHEarlyIVs`).
 3. Wyniki w IORegistry (`ioreg -l -r -c RDNA3Accel`): `RDNA3,Stage2`,
    `RDNA3,PSPResult`, `RDNA3,SOSVersion`, `RDNA3,SMUVersion`, `RDNA3,FBStartMC`.
    Log: `log show --last boot --predicate 'eventMessage CONTAINS "RDNA3:"'`.
@@ -57,7 +58,9 @@ wersji linux-firmware), 29× `LOAD_IP_FW ... ok`, `RLC autoload started`,
 1. ✅ **GMC 11 / MMHUB 3.0.2 / GFXHUB 3.0.3**: GART w VRAM, VMID0 i
    konteksty 1–15, flush TLB (MMHUB z semaforem i prywatną inwalidacją).
    Zostaje: tablice stron per-VM, żeby `GEM_VA` z Etapu 4 je programował.
-2. **IH 6.0**: ring przerwań + MSI w IOKit.
+2. 🟡 **IH 6.0** (`hw/ih60.c`): ring 0 w VRAM, writeback wptr, dekodowanie IV,
+   obsługa przepełnienia; odpytywany. Zostaje: MSI w IOKit
+   (`registerInterrupt`), ring 1 (page faulty), doorbell rptr.
 3. **GFX 11**: RLC już startuje przez autoload; potem MES (kolejki),
    ring GFX/KIQ, test `WRITE_DATA`.
 4. **SDMA 6.0**: ring + test kopiowania.

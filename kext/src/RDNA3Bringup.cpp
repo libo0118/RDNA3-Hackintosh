@@ -120,9 +120,13 @@ void RDNA3Bringup::stopAndFree()
     if (fDev) IOFree(fDev, sizeof(*fDev));
     if (fPsp) IOFree(fPsp, sizeof(*fPsp));
     if (fPlan) IOFree(fPlan, sizeof(*fPlan));
+    if (fIh) {
+        if (fIh->enabled && fDev) ih60_disable(fDev, fIh);
+        IOFree(fIh, sizeof(*fIh));
+    }
     if (fGmc) IOFree(fGmc, sizeof(*fGmc));
     if (fLock) IOLockFree(fLock);
-    fDisc = nullptr; fDev = nullptr; fPsp = nullptr; fPlan = nullptr; fGmc = nullptr; fLock = nullptr;
+    fDisc = nullptr; fDev = nullptr; fPsp = nullptr; fPlan = nullptr; fGmc = nullptr; fIh = nullptr; fLock = nullptr;
 }
 
 void RDNA3Bringup::publish(const char *key, uint64_t v)
@@ -303,5 +307,23 @@ void RDNA3Bringup::run()
         publish("RDNA3,GARTStartMC", fGmc->gart_start);
         publish("RDNA3,GARTSize", fGmc->gart_size);
         publishString("RDNA3,Stage2", ret ? "failed: GMC" : "PSP + SMU + MMHUB GART up");
+        if (ret)
+            return;
+
+        /* IH 6.0 ring 0, polled (no MSI registration yet) */
+        fIh = (rdna3_ih *)IOMalloc(sizeof(*fIh));
+        if (!fIh) {
+            publishString("RDNA3,Stage2", "failed: IH (no memory)");
+            return;
+        }
+        bzero(fIh, sizeof(*fIh));
+        ret = ih60_init(fDev, fIh, 0, fGmc->dummy_page_pa);
+        publish("RDNA3,IHResult", (uint64_t)(int64_t)ret);
+        if (!ret) {
+            /* anything already queued (e.g. from firmware) is drained and counted */
+            IOSleep(10);
+            publish("RDNA3,IHEarlyIVs", ih60_process(fDev, fIh, nullptr, nullptr));
+        }
+        publishString("RDNA3,Stage2", ret ? "failed: IH" : "PSP + SMU + MMHUB GART + IH up");
     }
 }

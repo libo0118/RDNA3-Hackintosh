@@ -27,6 +27,8 @@
 #include "gmc11.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_2.h"
+#include "ih60.h"
+#include "gen/osssys_6_0_0.h"
 #include "navi3x_regs.h"
 #include "psp_gfx_if.h"
 #include "amdgpu_ucode_hdr.h"
@@ -47,6 +49,7 @@ static int failures;
 #define MP1_BASE   0x16000u
 #define GC_BASE0   0x1260u
 #define MM_BASE0   0x1A000u
+#define OSS_BASE0  0x4260u
 #define NBIO_B0    0x0u
 #define NBIO_B1    0x14u
 #define NBIO_B2    0xD20u
@@ -214,6 +217,9 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             return;
         }
     }
+    /* IH: WPTR_OVERFLOW_CLEAR clears the overflow flag in IH_RB_WPTR */
+    if (dw == OSS_BASE0 + regIH_RB_CNTL && (v & IH_RB_CNTL__WPTR_OVERFLOW_CLEAR_MASK))
+        S.reg[OSS_BASE0 + regIH_RB_WPTR] &= ~(uint32_t)IH_RB_WPTR__RB_OVERFLOW_MASK;
     /* MMHUB engine 17: semaphore, request/ack, private invalidation */
     {
         uint32_t eng_dist = regMMVM_INVALIDATE_ENG1_REQ - regMMVM_INVALIDATE_ENG0_REQ;
@@ -251,6 +257,18 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         return;
     }
     *R(dw) = v;
+}
+
+struct sim_seen { unsigned n; uint32_t client, src, vmid, pasid, d3; };
+static void sim_iv_cb(void *ctx, const rdna3_iv *iv)
+{
+    struct sim_seen *s = (struct sim_seen *)ctx;
+    s->n++;
+    s->client = iv->client_id;
+    s->src = iv->src_id;
+    s->vmid = iv->vmid;
+    s->pasid = iv->pasid;
+    s->d3 = iv->src_data[3];
 }
 
 static void sim_tick(void)
@@ -313,6 +331,7 @@ static void make_discovery(amd_discovery *disc)
     IP(AMD_HWID_NBIF, 4, 3, 0, NBIO_B0, NBIO_B1, NBIO_B2);
     IP(AMD_HWID_HDP, 6, 0, 0, 0xF20, 0, 0);
     IP(AMD_HWID_MMHUB, 3, 0, 2, MM_BASE0, 0, 0);
+    IP(AMD_HWID_OSSSYS, 6, 0, 0, OSS_BASE0, 0, 0);
     disc->num_dies = 1;
 }
 
@@ -503,6 +522,44 @@ static void run(const char *fwdir)
         CHECK(S.mm_private_inv == 1);
         CHECK(mmhub302_get_fb_location(&dev) == 0);   /* MMMC FB base not modelled */
         CHECK(S.unflushed_doorbells == 0);
+
+        /* IH 6.0: ring in VRAM, polled */
+        {
+            static rdna3_ih ih;
+            uint32_t iv[8] = { 0x0a | (0x5u << 8) | (2u << 16) | (3u << 24), 0x1234, 0x8000005, 0x00010007,
+                               0x11, 0x22, 0x33, 0x44 };
+            uint32_t wptr, cntl;
+            struct sim_seen seen = { 0, 0, 0, 0, 0, 0 };
+            CHECK(ih60_init(&dev, &ih, 4096, gmc.dummy_page_pa) == RDNA3_OK && ih.enabled);
+            cntl = S.reg[OSS_BASE0 + regIH_RB_CNTL];
+            CHECK(cntl & IH_RB_CNTL__RB_ENABLE_MASK);
+            CHECK(cntl & IH_RB_CNTL__WPTR_WRITEBACK_ENABLE_MASK);
+            CHECK(((cntl & IH_RB_CNTL__RB_SIZE_MASK) >> IH_RB_CNTL__RB_SIZE__SHIFT) == 10); /* 4 KiB / 4 */
+            CHECK(((cntl & IH_RB_CNTL__MC_SPACE_MASK) >> IH_RB_CNTL__MC_SPACE__SHIFT) == 4);
+            CHECK(S.reg[OSS_BASE0 + regIH_RB_BASE] == (uint32_t)(rdna3_vram_mc(&dev, ih.ring) >> 8));
+            CHECK(S.reg[OSS_BASE0 + regIH_RB_WPTR_ADDR_LO] == (uint32_t)rdna3_vram_mc(&dev, ih.wptr_wb));
+            /* the "hardware" writes three IVs, the third one wrapping the 4 KiB ring */
+            ih.rptr = 4096 - 64;
+            S.reg[OSS_BASE0 + regIH_RB_RPTR] = ih.rptr;
+            memcpy(S.vram + ih.ring + 4096 - 64, iv, 32);
+            memcpy(S.vram + ih.ring + 4096 - 32, iv, 32);
+            memcpy(S.vram + ih.ring, iv, 32);
+            wptr = 32;
+            memcpy(S.vram + ih.wptr_wb, &wptr, 4);
+            CHECK(ih60_process(&dev, &ih, sim_iv_cb, &seen) == 3);
+            CHECK(seen.n == 3 && seen.client == 0x0a && seen.src == 5 && seen.vmid == 3 &&
+                  seen.pasid == 7 && seen.d3 == 0x44);
+            CHECK(ih.rptr == 32 && S.reg[OSS_BASE0 + regIH_RB_RPTR] == 32);
+            CHECK(ih60_process(&dev, &ih, sim_iv_cb, &seen) == 0);
+            /* overflow: writeback and register both flag it; skip past wptr + 32 */
+            wptr = 64 | IH_RB_WPTR__RB_OVERFLOW_MASK;
+            memcpy(S.vram + ih.wptr_wb, &wptr, 4);
+            S.reg[OSS_BASE0 + regIH_RB_WPTR] = wptr;
+            CHECK(ih60_process(&dev, &ih, sim_iv_cb, &seen) == 4064 / 32);
+            CHECK(ih.overflows == 1 && ih.rptr == 64);
+            ih60_disable(&dev, &ih);
+            CHECK(!ih.enabled && !(S.reg[OSS_BASE0 + regIH_RB_CNTL] & IH_RB_CNTL__RB_ENABLE_MASK));
+        }
     }
 
     printf("sim_navi32: %s firmware, %u bootloader cmds, %u LOAD_IP_FW, TMR %u KiB, "

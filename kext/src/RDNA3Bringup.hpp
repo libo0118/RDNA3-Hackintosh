@@ -21,6 +21,7 @@ extern "C" {
 #include "rdna3_hw.h"
 #include "psp13.h"
 #include "gmc11.h"
+#include "ih60.h"
 #include "amd_fw.h"
 }
 
@@ -69,6 +70,7 @@ private:
     rdna3_psp    *fPsp    = nullptr;
     amd_ucode_plan *fPlan = nullptr;
     rdna3_gmc    *fGmc    = nullptr;   /* level 6 */
+    rdna3_ih     *fIh     = nullptr;   /* level 6 */
     RDNA3Firmware fSos    = {};
     RDNA3Firmware fBlobs[AMD_BLOB_COUNT] = {};
 
