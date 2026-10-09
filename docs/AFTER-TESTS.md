@@ -127,7 +127,8 @@ Hypotheses are ordered by likelihood. "VM:" = only possible with passthrough
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| no `RDNA3` log lines, `03-kexts.txt` without RDNA3Accel | not in the Auxiliary KC: `kmutil` error, SIP, approval | ask for `/var/log/rdna3-vmreport.log` and the `setup.sh` output; `02-csr.txt` must say disabled; add a `kmutil load -p` fallback to `tools/vm/macos/setup.sh` like `package/install.sh` |
+| no `RDNA3` log lines, `03-kexts.txt` without RDNA3Accel | VM: no AMD device in `04-pci.txt` (triage prints the AMD ids) | the card must sit on `pcie.0` (`GPU_BUS=pcie0`, default): behind a `pcie-root-port` macOS leaves it unconfigured. Check `host-*.log` "guest PCI bus": BAR0 mapped at 40 s |
+| same, AMD device present | not loaded: kernelmanagerd refuses ad-hoc kexts in the Auxiliary KC ("invalid codeful kernel extension") | the VM injects the kexts with OpenCore (`rdna3vm prepare`, `EFI/OC/Kexts`); serial log must show "a prelinked copy … is already present" for the `/Library/Extensions` copy |
 | loaded, not matched | `IOPCIMatch` / topology | `04-pci.txt`; fix matching in `kext/Info.plist` |
 | hang / black screen at step 0 | VM firmware, not the driver | ask for `rdna3vm step off`. If that hangs too: VM setup — re-dump VBIOS with amdgpu loaded, Resizable BAR off, larger `X-PciMmio64Mb`, `CPU_MODEL=Penryn,…` in `~/rdna3-vm/config` |
 
