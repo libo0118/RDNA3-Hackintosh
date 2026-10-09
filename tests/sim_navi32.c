@@ -24,6 +24,7 @@
 #include <stdarg.h>
 #include "psp13.h"
 #include "smu13.h"
+#include "vbios.h"
 #include "gmc11.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_2.h"
@@ -64,6 +65,11 @@ static int failures;
 #define NBIO_B0    0x0u
 #define NBIO_B1    0x14u
 #define NBIO_B2    0xD20u
+#define NBIO_B5    0x04040000u /* beyond the BAR: reached through the RSMU window */
+#define SMUIO_B0   0x16800u
+#define ROM_STRAP  1u          /* REGS_ROM_OFFSET_CTRL.ROM_OFFSET */
+#define SMN_ROM_OFFSET_CTRL ((NBIO_B5 + regREGS_ROM_OFFSET_CTRL) * 4u)
+#define VBIOS_LEN  8192u
 #define DCN_B2     0x34C0u   /* DCN segment 2 (dcn_3_2_1 DCN_BASE__INST0_SEG2) */
 #define HUBP(reg, n) (DCN_B2 + reg + (regHUBP1_DCHUBP_CNTL - regHUBP0_DCHUBP_CNTL) * (n))
 #define OTG(reg, n)  (DCN_B2 + reg + (regOTG1_OTG_CONTROL - regOTG0_OTG_CONTROL) * (n))
@@ -125,6 +131,21 @@ typedef struct sim {
     uint64_t set_resources_mask;
     uint32_t cp_cur_me, cp_cur_pipe, cp_cur_queue;   /* engine running cp_exec */
     int dcn_hold;              /* 1: flips stay pending (no vupdate yet) */
+
+    /* VBIOS behind the SMUIO ROM window (auto-incrementing index) */
+    uint8_t  vbios[VBIOS_LEN];
+    uint32_t rom_index;
+    unsigned rom_reads;
+    /* PMFW: what the driver programmed, and the tables it exchanges */
+    struct {
+        uint64_t driver_addr, tool_addr;
+        uint32_t allowed_lo, allowed_hi;
+        uint64_t enabled;
+        int pptable_written, btc, bad_board, unload;
+        unsigned unflushed, bad_addr, pcie_overrides, soft_limits, xfers;
+        uint32_t last_pcie_arg, workload, ppt_limit;
+        PPTable_t pptable;    /* as written by the driver */
+    } smu;
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
 } sim;
 
@@ -139,6 +160,240 @@ static uint8_t *mc_ptr(uint64_t mc, uint64_t len)
     if (mc < FB_START || mc - FB_START + len > BAR_LEN)
         return NULL;
     return S.vram + (mc - FB_START);
+}
+
+/* ---- VBIOS and PMFW tables ---- */
+
+static void put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
+static void put32(uint8_t *p, uint32_t v) { put16(p, (uint16_t)v); put16(p + 2, (uint16_t)(v >> 16)); }
+
+#define VB_ROM_HDR   0x100
+#define VB_MSG       0x80
+#define VB_DATA_DIR  0x200
+#define VB_FWINFO    0x300
+#define VB_SMCDPM    0x400
+#define VB_SMUINFO   0x700
+#define VB_VRAMUSAGE 0x840
+#define VB_BOARD_VERSION 0xB0A2Du
+#define PMFW_SKU_VERSION 0x12345u
+#define PMFW_BOARD_PLACEHOLDER 0xDEADu
+/* features this PMFW model can run: DCN DPM needs a display driver it does not have */
+#define SIM_SMU_SUPPORTED ((RD_SMU_FEATURES_AMDGPU | RD_SMU_FEATURE(FEATURE_GFXOFF_BIT)) & \
+                           ~RD_SMU_FEATURE(FEATURE_DPM_DCN_BIT))
+
+static void make_vbios(void)
+{
+    uint8_t *b = S.vbios;
+    BoardTable_t bt;
+    memset(b, 0, VBIOS_LEN);
+    b[0] = 0x55; b[1] = 0xAA; b[2] = VBIOS_LEN / 512;
+    memcpy(b + 0x30, " 761295520", 10);
+    put16(b + 0x48, VB_ROM_HDR);
+    memcpy(b + VB_MSG, "\r\nRX 7800 XT SIM\0", 17);
+    /* atom_rom_header_v2_2 */
+    put16(b + VB_ROM_HDR, 0x24); b[VB_ROM_HDR + 2] = 2; b[VB_ROM_HDR + 3] = 2;
+    memcpy(b + VB_ROM_HDR + 4, "ATOM", 4);
+    put16(b + VB_ROM_HDR + 0x10, VB_MSG);
+    put16(b + VB_ROM_HDR + 0x20, VB_DATA_DIR);
+    /* atom_master_data_table_v2_1 */
+    put16(b + VB_DATA_DIR, 4 + 2 * RD_ATOM_DT_COUNT); b[VB_DATA_DIR + 2] = 2; b[VB_DATA_DIR + 3] = 1;
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_FIRMWAREINFO, VB_FWINFO);
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_SMC_DPM_INFO, VB_SMCDPM);
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_SMU_INFO, VB_SMUINFO);
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_VRAM_USAGEBYFIRMWARE, VB_VRAMUSAGE);
+    /* atom_firmware_info_v3_4 */
+    put16(b + VB_FWINFO, 108); b[VB_FWINFO + 2] = 3; b[VB_FWINFO + 3] = 4;
+    put32(b + VB_FWINFO + 4, 0x02000f);
+    put32(b + VB_FWINFO + 8, 50000);    /* 500 MHz boot gfxclk */
+    put32(b + VB_FWINFO + 12, 9600);    /* 96 MHz boot uclk */
+    put16(b + VB_FWINFO + 28, 800);
+    put16(b + VB_FWINFO + 30, 1250);
+    put32(b + VB_FWINFO + 60, 0);       /* pptable from VBIOS/PMFW, not the driver */
+    /* smc_dpm_info 4.9: header + BoardTable_t */
+    put16(b + VB_SMCDPM, (uint16_t)(4 + sizeof(bt))); b[VB_SMCDPM + 2] = 4; b[VB_SMCDPM + 3] = 9;
+    memset(&bt, 0, sizeof(bt));
+    bt.Version = VB_BOARD_VERSION;
+    bt.VddGfxVrMapping = 0x11;
+    bt.HsrEnabled = 1;
+    memcpy(b + VB_SMCDPM + 4, &bt, sizeof(bt));
+    /* atom_smu_info_v4_0 */
+    put16(b + VB_SMUINFO, 288); b[VB_SMUINFO + 2] = 4; b[VB_SMUINFO + 3] = 0;
+    put32(b + VB_SMUINFO + 40, 60000);  /* socclk */
+    put32(b + VB_SMUINFO + 56, 40000);  /* dcefclk */
+    put32(b + VB_SMUINFO + 72, 100000); /* fclk */
+    put32(b + VB_SMUINFO + 196, 40000); /* dclk0 */
+    put32(b + VB_SMUINFO + 200, 50000); /* vclk0 */
+    /* vram_usagebyfirmware_v2_1: 48 MiB at the top */
+    put16(b + VB_VRAMUSAGE, 12); b[VB_VRAMUSAGE + 2] = 2; b[VB_VRAMUSAGE + 3] = 1;
+    put32(b + VB_VRAMUSAGE + 4, (uint32_t)((VRAM_SIZE - (48ull << 20)) >> 10));
+    put16(b + VB_VRAMUSAGE + 8, 48 * 1024);
+}
+
+/* the "combo" powerplay table the PMFW hands out: driver portion + PPTable_t
+ * whose BoardTable is a placeholder the driver must replace from the VBIOS */
+static void make_combo_pptable(uint8_t *out)
+{
+    PPTable_t *pp = (PPTable_t *)(out + RD_SMU_PP_SMC_PPTABLE_OFF);
+    memset(out, 0, RD_SMU_COMBO_PPTABLE_SIZE);
+    put16(out, RD_SMU_PP_SMC_PPTABLE_OFF + sizeof(PPTable_t));
+    out[2] = RD_SMU_PP_TABLE_FORMAT_REVISION; out[3] = 0;
+    out[4] = 2;                                  /* table_revision */
+    put16(out + 6, RD_SMU_PP_SMC_PPTABLE_OFF);   /* table_size */
+    put32(out + RD_SMU_PP_PLATFORM_CAPS_OFF, RD_SMU_PP_PLATFORM_CAP_POWERPLAY |
+          RD_SMU_PP_PLATFORM_CAP_BACO | RD_SMU_PP_PLATFORM_CAP_MACO);
+    out[RD_SMU_PP_THERMAL_CTRL_OFF] = 28;
+    put16(out + RD_SMU_PP_SHUTDOWN_TEMP_OFF, 118);
+    pp->SkuTable.Version = PMFW_SKU_VERSION;
+    pp->SkuTable.SocketPowerLimitAc[PPT_THROTTLER_PPT0] = 263;
+    pp->SkuTable.SocketPowerLimitDc[PPT_THROTTLER_PPT0] = 263;
+    pp->SkuTable.MsgLimits.Power[PPT_THROTTLER_PPT0][POWER_SOURCE_AC] = 280;
+    pp->SkuTable.TemperatureLimit[TEMP_EDGE] = 100;
+    pp->SkuTable.TemperatureLimit[TEMP_HOTSPOT] = 110;
+    pp->SkuTable.TemperatureLimit[TEMP_MEM] = 105;
+    pp->SkuTable.PcieGenSpeed[0] = 2; pp->SkuTable.PcieLaneCount[0] = 6; pp->SkuTable.LclkFreq[0] = 600;
+    pp->SkuTable.PcieGenSpeed[1] = 3; pp->SkuTable.PcieLaneCount[1] = 6; pp->SkuTable.LclkFreq[1] = 900;
+    pp->SkuTable.PcieGenSpeed[2] = 3; pp->SkuTable.PcieLaneCount[2] = 6; pp->SkuTable.LclkFreq[2] = 1200;
+    pp->SkuTable.FanMaximumRpm = 3300;
+    pp->SkuTable.DriverReportedClocks.GameClockAc = 2124;
+    pp->BoardTable.Version = PMFW_BOARD_PLACEHOLDER;
+}
+
+static void make_metrics(SmuMetricsExternal_t *m)
+{
+    memset(m, 0, sizeof(*m));
+    m->SmuMetrics.CurrClock[PPCLK_GFXCLK] = 2100;
+    m->SmuMetrics.CurrClock[PPCLK_UCLK] =
+        (S.smu.enabled & RD_SMU_FEATURE(FEATURE_DPM_UCLK_BIT)) ? 1218 : 96;
+    m->SmuMetrics.AverageGfxclkFrequencyPreDs = 2050;
+    m->SmuMetrics.AvgTemperature[TEMP_EDGE] = 45;
+    m->SmuMetrics.AvgTemperature[TEMP_HOTSPOT] = 60;
+    m->SmuMetrics.AvgTemperature[TEMP_MEM] = 50;
+    m->SmuMetrics.AverageSocketPower = 150;
+    m->SmuMetrics.AverageGfxActivity = 12;
+    m->SmuMetrics.AvgFanRpm = 900;
+    m->SmuMetrics.AvgVoltage[SVI_PLANE_GFX] = 850;
+}
+
+/* DPM levels per PPCLK (MHz); gfxclk is fine grained (two end points) */
+static unsigned sim_dpm_levels(uint32_t clk, const uint32_t **lv, int *fine)
+{
+    static const uint32_t gfx[] = { 500, 2124 }, uclk[] = { 96, 500, 1000, 1218 },
+                          soc[] = { 600, 900, 1200 }, fclk[] = { 1000, 1800 };
+    *fine = 0;
+    switch (clk) {
+    case PPCLK_GFXCLK: *lv = gfx; *fine = 1; return 2;
+    case PPCLK_UCLK:   *lv = uclk; return 4;
+    case PPCLK_SOCCLK: *lv = soc; return 3;
+    case PPCLK_FCLK:   *lv = fclk; return 2;
+    default: *lv = NULL; return 0;
+    }
+}
+
+static int sim_dpm_enabled(uint32_t clk)
+{
+    switch (clk) {
+    case PPCLK_GFXCLK: return (S.smu.enabled & RD_SMU_FEATURE(FEATURE_DPM_GFXCLK_BIT)) != 0;
+    case PPCLK_UCLK:   return (S.smu.enabled & RD_SMU_FEATURE(FEATURE_DPM_UCLK_BIT)) != 0;
+    case PPCLK_SOCCLK: return (S.smu.enabled & RD_SMU_FEATURE(FEATURE_DPM_SOCCLK_BIT)) != 0;
+    case PPCLK_FCLK:   return (S.smu.enabled & RD_SMU_FEATURE(FEATURE_DPM_FCLK_BIT)) != 0;
+    default: return 0;
+    }
+}
+
+/* PMFW mailbox: message 'v' with the argument register; leaves the result
+ * in C2PMSG_90 and the reply in C2PMSG_82 */
+static void smu_msg(uint32_t v)
+{
+    uint32_t arg = *R(MP1(82));
+    uint32_t resp = PPSMC_Result_OK;
+    uint8_t *tbl = mc_ptr(S.smu.driver_addr, RD_SMU_COMBO_PPTABLE_SIZE);
+    const uint32_t *lv;
+    int fine;
+    unsigned n;
+
+    switch (v) {
+    case PPSMC_MSG_TestMessage:        *R(MP1(82)) = arg + 1; break;
+    case PPSMC_MSG_GetSmuVersion:      *R(MP1(82)) = 0x00526100; break;
+    case PPSMC_MSG_GetDriverIfVersion: *R(MP1(82)) = 0x35; break;
+    case PPSMC_MSG_SetDriverDramAddrHigh:
+        S.smu.driver_addr = (S.smu.driver_addr & 0xffffffffull) | ((uint64_t)arg << 32); break;
+    case PPSMC_MSG_SetDriverDramAddrLow:
+        S.smu.driver_addr = (S.smu.driver_addr & ~0xffffffffull) | arg; break;
+    case PPSMC_MSG_SetToolsDramAddrHigh:
+        S.smu.tool_addr = (S.smu.tool_addr & 0xffffffffull) | ((uint64_t)arg << 32); break;
+    case PPSMC_MSG_SetToolsDramAddrLow:
+        S.smu.tool_addr = (S.smu.tool_addr & ~0xffffffffull) | arg; break;
+    case PPSMC_MSG_TransferTableSmu2Dram:
+        S.smu.xfers++;
+        if (!tbl) { S.smu.bad_addr++; resp = PPSMC_Result_Failed; break; }
+        switch (arg & 0xffff) {
+        case TABLE_COMBO_PPTABLE: make_combo_pptable(tbl); break;
+        case TABLE_SMU_METRICS: {
+            SmuMetricsExternal_t m;
+            make_metrics(&m);
+            memcpy(tbl, &m, sizeof(m));
+            break;
+        }
+        default: resp = PPSMC_Result_Failed;
+        }
+        break;
+    case PPSMC_MSG_TransferTableDram2Smu:
+        S.smu.xfers++;
+        if (!tbl) { S.smu.bad_addr++; resp = PPSMC_Result_Failed; break; }
+        if ((arg & 0xffff) != TABLE_PPTABLE) { resp = PPSMC_Result_Failed; break; }
+        if (S.pending_writes)
+            S.smu.unflushed++;
+        memcpy(&S.smu.pptable, tbl, sizeof(S.smu.pptable));
+        S.smu.bad_board = S.smu.pptable.BoardTable.Version != VB_BOARD_VERSION ||
+                          S.smu.pptable.SkuTable.Version != PMFW_SKU_VERSION;
+        S.smu.pptable_written = 1;
+        break;
+    case PPSMC_MSG_RunDcBtc:
+        if (!S.smu.pptable_written) { resp = PPSMC_Result_CmdRejectedPrereq; break; }
+        S.smu.btc = 1;
+        break;
+    case PPSMC_MSG_SetAllowedFeaturesMaskLow:  S.smu.allowed_lo = arg; break;
+    case PPSMC_MSG_SetAllowedFeaturesMaskHigh: S.smu.allowed_hi = arg; break;
+    case PPSMC_MSG_EnableAllSmuFeatures:
+        if (!S.smu.pptable_written || !S.smu.btc) { resp = PPSMC_Result_CmdRejectedPrereq; break; }
+        S.smu.enabled = (((uint64_t)S.smu.allowed_hi << 32) | S.smu.allowed_lo) & SIM_SMU_SUPPORTED;
+        break;
+    case PPSMC_MSG_DisableAllSmuFeatures: S.smu.enabled = 0; break;
+    case PPSMC_MSG_GetRunningSmuFeaturesLow:  *R(MP1(82)) = (uint32_t)S.smu.enabled; break;
+    case PPSMC_MSG_GetRunningSmuFeaturesHigh: *R(MP1(82)) = (uint32_t)(S.smu.enabled >> 32); break;
+    case PPSMC_MSG_OverridePcieParameters:
+        S.smu.pcie_overrides++;
+        S.smu.last_pcie_arg = arg;
+        break;
+    case PPSMC_MSG_GetDpmFreqByIndex:
+        n = sim_dpm_levels(arg >> 16, &lv, &fine);
+        if (!n || !sim_dpm_enabled(arg >> 16)) { resp = PPSMC_Result_CmdRejectedPrereq; break; }
+        if ((arg & 0xffff) == 0xff)
+            *R(MP1(82)) = n | (fine ? 0x80000000u : 0);
+        else if ((arg & 0xffff) < n)
+            *R(MP1(82)) = lv[arg & 0xffff];
+        else
+            resp = PPSMC_Result_Failed;
+        break;
+    case PPSMC_MSG_GetMinDpmFreq:
+    case PPSMC_MSG_GetMaxDpmFreq:
+        n = sim_dpm_levels(arg >> 16, &lv, &fine);
+        if (!n || !sim_dpm_enabled(arg >> 16)) { resp = PPSMC_Result_CmdRejectedPrereq; break; }
+        *R(MP1(82)) = v == PPSMC_MSG_GetMinDpmFreq ? lv[0] : lv[n - 1];
+        break;
+    case PPSMC_MSG_SetSoftMinByFreq:
+    case PPSMC_MSG_SetSoftMaxByFreq:
+        if (!sim_dpm_enabled(arg >> 16)) { resp = PPSMC_Result_CmdRejectedPrereq; break; }
+        S.smu.soft_limits++;
+        break;
+    case PPSMC_MSG_GetPptLimit: *R(MP1(82)) = S.smu.ppt_limit ? S.smu.ppt_limit : 263; break;
+    case PPSMC_MSG_SetPptLimit: S.smu.ppt_limit = arg; break;
+    case PPSMC_MSG_SetWorkloadMask: S.smu.workload = arg; break;
+    case PPSMC_MSG_NotifyPowerSource: break;
+    case PPSMC_MSG_PrepareMp1ForUnload: S.smu.unload = 1; break;
+    default: resp = PPSMC_Result_UnknownCmd;
+    }
+    *R(MP1(90)) = resp;
 }
 
 /* HQD register window (GC segment 0): CP_MQD_BASE_ADDR .. CP_HQD_PQ_WPTR_HI */
@@ -218,6 +473,7 @@ static void ih_push(uint32_t client, uint32_t src, uint32_t ring_id)
  * state packets, RELEASE_MEM fence writes, WRITE_DATA, WAIT_REG_MEM, the
  * job framing packets and INDIRECT_BUFFER through the VMID's page tables */
 static void sim_wr(void *ctx, uint64_t off, uint32_t v);
+static uint32_t *smn_slot(uint32_t addr, int create);
 static uint32_t sim_rd(void *ctx, uint64_t off);
 static void cp_run(uint32_t wptr_dw);
 static void sdma_run(uint32_t wptr_bytes);
@@ -550,8 +806,10 @@ static void psp_exec(uint64_t cmd_mc, uint64_t fence_mc, uint32_t fence_val)
         if (S.nipfw < 64)
             S.ip_fw_types[S.nipfw++] = t;
         if (t == GFX_FW_TYPE_SMU) {
+            uint32_t *fl = smn_slot(RD_SMN_MP1_FIRMWARE_FLAGS, 1);
             S.smu_loaded = 1;
             *R(MP1(90)) = 1; /* PMFW up, mailbox idle */
+            if (fl) *fl = MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK;
         }
         break;
     }
@@ -772,15 +1030,13 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         }
     }
     if (dw == MP1(66)) {
-        uint32_t arg = *R(MP1(82));
         S.smu_msgs++;
-        switch (v) {
-        case PPSMC_MSG_TestMessage:      *R(MP1(82)) = arg + 1; break;
-        case PPSMC_MSG_GetSmuVersion:    *R(MP1(82)) = 0x00526100; break;
-        case PPSMC_MSG_GetDriverIfVersion: *R(MP1(82)) = 0x35; break;
-        default: *R(MP1(90)) = PPSMC_Result_UnknownCmd; return;
-        }
-        *R(MP1(90)) = PPSMC_Result_OK;
+        smu_msg(v);
+        return;
+    }
+    if (dw == SMUIO_B0 + regROM_INDEX) {
+        S.rom_index = v;
+        *R(dw) = v;
         return;
     }
     *R(dw) = v;
@@ -819,6 +1075,15 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
     if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_DATA) {
         uint32_t *p = smn_slot(S.smn_index, 0);
         return p ? *p : 0;
+    }
+    if (dw == SMUIO_B0 + regROM_DATA) {
+        /* the window maps the ROM at ROM_STRAP << 17; reads auto-increment */
+        uint32_t ro = S.rom_index - (ROM_STRAP << 17), w = 0xffffffffu;
+        S.rom_reads++;
+        if (S.rom_index >= (ROM_STRAP << 17) && ro + 4 <= VBIOS_LEN)
+            memcpy(&w, S.vbios + ro, 4);
+        S.rom_index += 4;
+        return w;
     }
     if (dw >= GC_BASE0 + HQD_FIRST && dw <= GC_BASE0 + HQD_LAST) {
         struct hqd *h = hqd_sel();
@@ -866,6 +1131,9 @@ static void make_discovery(amd_discovery *disc)
     IP(AMD_HWID_MP0, 13, 0, 7, MP0_BASE, 0, 0);
     IP(AMD_HWID_MP1, 13, 0, 7, MP1_BASE, 0, 0);
     IP(AMD_HWID_NBIF, 4, 3, 0, NBIO_B0, NBIO_B1, NBIO_B2);
+    disc->ips[disc->num_ips - 1].num_base = disc->ips[disc->num_ips - 1].num_base_kept = 6;
+    disc->ips[disc->num_ips - 1].base[5] = NBIO_B5;
+    IP(AMD_HWID_SMUIO, 13, 0, 6, SMUIO_B0, 0x16A00, 0x440000);
     IP(AMD_HWID_HDP, 6, 0, 0, 0xF20, 0, 0);
     IP(AMD_HWID_MMHUB, 3, 0, 2, MM_BASE0, 0, 0);
     IP(AMD_HWID_OSSSYS, 6, 0, 0, OSS_BASE0, 0, 0);
@@ -972,6 +1240,8 @@ static void run(const char *fwdir)
     S.verbose = getenv("SIM_VERBOSE") != NULL;
     S.vram = calloc(1, BAR_LEN);
     *R(MP0(35)) = 0x80000000u;  /* bootloader ready */
+    make_vbios();
+    *smn_slot(SMN_ROM_OFFSET_CTRL, 1) = ROM_STRAP;
     *R(MP0(33)) = 0x80000000u;  /* IFWI done */
     *R(mmRCC_CONFIG_MEMSIZE) = (uint32_t)(VRAM_SIZE >> 20);
     *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_BASE) = (uint32_t)(FB_START >> 24);
@@ -1032,6 +1302,86 @@ static void run(const char *fwdir)
     CHECK(smu13_hello(&dev, &smu_ver, &ifv) == RDNA3_OK);
     CHECK(smu_ver == 0x00526100 && ifv == 0x35);
     CHECK(smu13_send_msg(&dev, 0x77, 0, NULL) != RDNA3_OK);
+
+    /* VBIOS through the SMUIO ROM window, then the power-management
+     * bring-up (smu_smc_hw_setup) against the PMFW model */
+    {
+        static uint8_t rom[RD_VBIOS_MAX_LEN];
+        static rdna3_vbios vb;
+        static rdna3_smu smu;
+        rdna3_vbios_boot boot;
+        uint64_t rs = 0, rsz = 0;
+        uint32_t w = 0;
+
+        CHECK(vbios_read(&dev, &vb, rom, sizeof(rom)) == RDNA3_OK);
+        CHECK(vb.len == VBIOS_LEN && vb.rom_offset == (ROM_STRAP << 17) && vb.data_table == VB_DATA_DIR);
+        CHECK(S.rom_reads == 16 + VBIOS_LEN / 4);
+        CHECK(strcmp(vb.part_number, "RX 7800 XT SIM") == 0);
+        CHECK(vbios_data_table(&vb, RD_ATOM_DT_POWERPLAYINFO, NULL, NULL, NULL) == NULL);
+        CHECK(vbios_bootup_values(&dev, &vb, &boot) == RDNA3_OK);
+        CHECK(boot.gfxclk == 50000 && boot.uclk == 9600 && boot.socclk == 60000 &&
+              boot.fclk == 100000 && boot.vclk == 50000 && boot.vddc == 800 && boot.fw_crev == 4 &&
+              boot.firmware_revision == 0x02000f && boot.pp_table_id == 0);
+        CHECK(vbios_fw_vram_reservation(&vb, &rs, &rsz) == RDNA3_OK &&
+              rs == VRAM_SIZE - (48ull << 20) && rsz == (48ull << 20));
+        CHECK(smu13_check_fw_status(&dev) == RDNA3_OK);
+
+        /* the default (no Display Core) feature set on a Gen4 x16 link */
+        CHECK(smu13_pm_init(&dev, &smu, &vb, RD_SMU_FEATURES_SAFE, 3, 6) == RDNA3_OK);
+        CHECK(S.smu.driver_addr == rdna3_vram_mc(&dev, smu.driver_table));
+        CHECK(S.smu.tool_addr == rdna3_vram_mc(&dev, smu.tool_table));
+        CHECK(S.smu.pptable_written && S.smu.btc && !S.smu.bad_board && S.smu.unflushed == 0 &&
+              S.smu.bad_addr == 0);
+        CHECK(smu.pp_frev == RD_SMU_PP_TABLE_FORMAT_REVISION && smu.platform_caps == 0x19 &&
+              smu.thermal_controller == 28 && smu.software_shutdown_temp == 118);
+        CHECK(smu.pptable.SkuTable.Version == PMFW_SKU_VERSION);
+        CHECK(smu.board_table_appended && smu.pptable.BoardTable.Version == VB_BOARD_VERSION &&
+              smu.pptable.BoardTable.VddGfxVrMapping == 0x11);
+        CHECK((((uint64_t)S.smu.allowed_hi << 32) | S.smu.allowed_lo) == RD_SMU_FEATURES_SAFE);
+        CHECK(smu.enabled == RD_SMU_FEATURES_SAFE && smu.dpm_running);
+        CHECK(!(smu.enabled & RD_SMU_FEATURE(FEATURE_GFXOFF_BIT)));
+        CHECK(smu.gfx.count == 2 && smu.gfx.fine_grained && smu.gfx.level[0] == 500 &&
+              smu.gfx.level[1] == 2124);
+        /* UCLK/FCLK DPM not allowed: the boot clocks from the VBIOS */
+        CHECK(smu.uclk.count == 1 && smu.uclk.level[0] == 96);
+        CHECK(smu.fclk.count == 1 && smu.fclk.level[0] == 1000);
+        CHECK(smu.soc.count == 3 && smu.soc.level[2] == 1200);
+        CHECK(S.smu.pcie_overrides == 0 && smu.pcie_levels == 3);
+        CHECK(smu.ppt_limit_w == 263);
+        CHECK(S.smu.workload == (1u << WORKLOAD_PPLIB_DEFAULT_BIT));
+
+        CHECK(smu13_read_metrics(&dev, &smu) == RDNA3_OK && smu.metrics_valid);
+        CHECK(smu13_metric_gfxclk_mhz(&smu) == 2050 && smu13_metric_uclk_mhz(&smu) == 96);
+        CHECK(smu13_metric_temp_edge_c(&smu) == 45 && smu13_metric_temp_hotspot_c(&smu) == 60 &&
+              smu13_metric_temp_mem_c(&smu) == 50);
+        CHECK(smu13_metric_power_w(&smu) == 150 && smu13_metric_gfx_activity(&smu) == 12 &&
+              smu13_metric_fan_rpm(&smu) == 900 && smu13_metric_vddgfx_mv(&smu) == 850);
+        CHECK(smu13_metric_throttlers(&smu) == 0);
+
+        CHECK(smu13_set_power_limit(&dev, &smu, 300) == RDNA3_EINVAL);   /* above MsgLimits */
+        CHECK(smu13_set_power_limit(&dev, &smu, 270) == RDNA3_OK && S.smu.ppt_limit == 270);
+        CHECK(smu13_get_power_limit(&dev, &smu, &w) == RDNA3_OK && w == 270);
+        CHECK(smu13_set_soft_freq_range(&dev, &smu, PPCLK_GFXCLK, 1000, 2000) == RDNA3_OK &&
+              S.smu.soft_limits == 2);
+        CHECK(smu13_set_soft_freq_range(&dev, &smu, PPCLK_UCLK, 500, 0) != RDNA3_OK);
+
+        /* amdgpu's full set on a Gen3 x8 host: UCLK DPM comes up, DCN DPM
+         * is refused by the firmware, the three gen4/x16 link levels are
+         * clamped by OverridePcieParameters */
+        CHECK(smu13_pm_init(&dev, &smu, &vb, RD_SMU_FEATURES_AMDGPU, 2, 4) == RDNA3_OK);
+        CHECK(smu.enabled == (RD_SMU_FEATURES_AMDGPU & ~RD_SMU_FEATURE(FEATURE_DPM_DCN_BIT)));
+        CHECK(smu.uclk.count == 4 && smu.uclk.level[3] == 1218 && !smu.uclk.fine_grained);
+        CHECK(smu.fclk.count == 2 && smu.fclk.level[1] == 1800);
+        CHECK(S.smu.pcie_overrides == 3 && S.smu.last_pcie_arg == ((2u << 16) | (2u << 8) | 4));
+        CHECK(smu13_read_metrics(&dev, &smu) == RDNA3_OK && smu13_metric_uclk_mhz(&smu) == 1218);
+        CHECK(smu13_pm_fini(&dev, &smu) == RDNA3_OK && S.smu.unload);
+
+        /* without a VBIOS the PMFW's placeholder BoardTable goes back as is */
+        CHECK(smu13_pm_init(&dev, &smu, NULL, RD_SMU_FEATURES_SAFE, 3, 6) == RDNA3_OK);
+        CHECK(!smu.board_table_appended && S.smu.bad_board &&
+              smu.pptable.BoardTable.Version == PMFW_BOARD_PLACEHOLDER);
+        CHECK(smu.gfx.count == 2 && smu.uclk.count == 1 && smu.uclk.level[0] == 0);
+    }
 
     /* GMC: GART in VRAM, GFXHUB VMID0 + contexts, TLB flush */
     {

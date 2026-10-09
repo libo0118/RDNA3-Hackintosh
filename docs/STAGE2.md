@@ -13,6 +13,8 @@ jeszcze nie.
 | Firmware: podział SOS, plan LOAD_IP_FW | `common/amd_fw.c` | `psp_init_sos_microcode`, `amdgpu_ucode_init_single_fw` | `tests/test_fw.c` + prawdziwe pliki z linux-firmware w CI |
 | PSP 13.0.7: bootloader (KDB/SPL/SYS/SOS), ring KM, TOC/TMR, LOAD_IP_FW (29 ucode), RLC autoload | `hw/psp13.c` | `psp_v13_0.c`, `amdgpu_psp.c` | sim (syntetyczny i prawdziwy firmware) |
 | SMU 13.0.7: mailbox, TestMessage/GetSmuVersion/GetDriverIfVersion | `hw/smu13.c` | `smu_cmn.c` | sim |
+| VBIOS przez okno ROM SMUIO, tablice ATOM (firmwareinfo, smu_info, smc_dpm_info, vram_usagebyfirmware) | `hw/vbios.c` | `amdgpu_bios.c`, `atom.c`, `amdgpu_atomfirmware.c` | sim (syntetyczny obraz) |
+| SMU 13.0.7 PM: tablice driver/tool w VRAM, combo PPTable z PMFW + BoardTable z VBIOS, `TransferTableDram2Smu`, `RunDcBtc`, `SetAllowedFeaturesMask`, `OverridePcieParameters`, `EnableAllSmuFeatures`, tablice DPM, limit PPT, workload, metryki (`SMU_TABLE_SMU_METRICS`) | `hw/smu13.c` | `amdgpu_smu.c` (`smu_smc_hw_setup`), `smu_v13_0.c`, `smu_v13_0_7_ppt.c` | sim (model PMFW: tablice, cechy, poziomy DPM) |
 | Uruchomienie w kexcie (wątek, firmware z Resources) | `kext/src/RDNA3Bringup.cpp` | `amdgpu_device_init` (fragment) | CI build |
 
 ## Uruchomienie na sprzęcie
@@ -24,7 +26,16 @@ jeszcze nie.
    make -C kext firmware FW_DIR=/ścieżka/do/linux-firmware/amdgpu
    ```
 
-2. boot-args: `rdna3lvl=4` (PSP + firmware), `rdna3lvl=5` (+ SMU) lub
+2. boot-args: `rdna3lvl=4` (PSP + firmware), `rdna3lvl=5` (+ SMU; domyślnie
+   `rdna3pm=1` czyta VBIOS i uruchamia zarządzanie energią PMFW — zestaw
+   „bezpieczny” bez DPM pamięci/fabric/DCN, bo bez Display Core nikt nie mówi
+   PMFW, kiedy przełączenie p-state nie zepsuje skanowania; `rdna3pm=0`
+   zostawia zegary rozruchowe, `rdna3pm=2` pełny zestaw amdgpu,
+   `rdna3pmmask=<hex>` maska cech wprost; wyniki: `RDNA3,PM`,
+   `RDNA3,PMResult`, `RDNA3,PMFeaturesRunning`, `RDNA3,PMGfxClkMaxMHz`,
+   `RDNA3,PMPowerLimitW`, `RDNA3,VBIOSPartNumber`, a po bring-upie metryki
+   `RDNA3,PMGfxClkMHz`, `RDNA3,PMTempHotspotC`, `RDNA3,PMPowerW`,
+   `RDNA3,PMFanRPM`) lub
    `rdna3lvl=6` (+ GMC: GART w VRAM, MMHUB, flush TLB; `RDNA3,GMCResult`;
    + ring IH 6.0, `RDNA3,IHResult`, `RDNA3,IHEarlyIVs`) lub `rdna3lvl=7`
    (+ SDMA0: ring, test ringu, kopia 64 KiB VRAM→VRAM sprawdzona przez CPU;
@@ -58,7 +69,14 @@ wersji linux-firmware), 29× `LOAD_IP_FW ... ok`, `RLC autoload started`,
 * **Okno alokacji 16 MiB–512 MiB VRAM**, w części widocznej przez BAR0.
   Pierwsze 16 MiB pomijamy (framebuffer przed-OS), górę VRAM też (discovery,
   rezerwacje IFWI). amdgpu czyta dokładne rezerwacje z tablic ATOM
-  (`vram_usagebyfirmware`). To jeszcze nie jest zaimplementowane.
+  (`vram_usagebyfirmware`); `vbios_fw_vram_reservation()` już je czyta,
+  alokator jeszcze z nich nie korzysta.
+* **PM bez Display Core**: amdgpu włącza DPM UCLK/FCLK/DCN, bo jego DC
+  programuje watermarki i mówi PMFW (przez DMCUB), kiedy p-state może się
+  przełączyć. My zostawiamy skanowanie z GOP nietknięte, więc domyślnie te
+  cechy są wyłączone (`RD_SMU_FEATURES_SAFE`), a GFXOFF nigdy — nikt nie
+  wysyła `AllowGfxOff`. Pełny zestaw (`rdna3pm=2`) to test na własne ryzyko:
+  możliwe migotanie/underflow obrazu.
 * **Bez długiego treningu DRAM** (`psp_v13_0_memory_training`). IFWI trenuje
   pamięć przy włączeniu zasilania. Jeśli wystąpią błędy pamięci, to pierwszy
   podejrzany.

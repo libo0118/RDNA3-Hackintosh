@@ -42,13 +42,17 @@ Cel: modesetting, EDID, wiele monitorów, hotplug, zmiana rozdzielczości.
 * Ryzyko: rozmiar (~150 tys. linii) i zależności od `drm_*`; plan B to
   własny mini-DC tylko dla DP+HDMI SST na DCN 3.2.
 
-## 4. SMU 13.0.7: zarządzanie energią
-* `smu_v13_0_7_ppt.c`: PPTable z VBIOS, `SetAllowedFeaturesMask`,
-  `EnableAllSmuFeatures` (DPM, wentylator, termika), odczyt metryk
-  (`SMU_TABLE_SMU_METRICS`: temperatura, zegary, pobór).
-* Bez tego karta może zostać na zegarach z rozruchu; to warunek dla
-  wydajności i stabilności.
-* Później: BACO/sleep, `IOPMPowerState` w kexcie, wybudzanie.
+## 4. 🟡 SMU 13.0.7: zarządzanie energią (bring-up zrobiony, sleep później)
+* ✅ `hw/vbios.c`: VBIOS przez okno ROM SMUIO, tablice ATOM; `hw/smu13.c`:
+  `smu_smc_hw_setup` — PPTable z PMFW (combo) + BoardTable z VBIOS,
+  `RunDcBtc`, `SetAllowedFeaturesMask`, `OverridePcieParameters`,
+  `EnableAllSmuFeatures`, tablice DPM, limit PPT, workload, metryki
+  (`SMU_TABLE_SMU_METRICS`). Kext: poziom 5, `rdna3pm=0/1/2`,
+  `rdna3pmmask`; symulator modeluje PMFW (tablice, cechy, poziomy DPM).
+* Domyślnie bez DPM UCLK/FCLK/DCN i bez GFXOFF — do czasu Display Core
+  (patrz STAGE2 „PM bez Display Core”).
+* Później: BACO/sleep, `IOPMPowerState` w kexcie, wybudzanie, przerwania
+  termiczne (THM) przez IH.
 
 ## 5. Odporność: wykrywanie zawieszeń i reset GPU
 * Timeout fence'a → odczyt `GRBM_STATUS`, `CP_STAT`, ringów; zrzut stanu do

@@ -11,7 +11,11 @@
  *
  *   4  + Stage 2 bring-up on a kernel thread (RDNA3Bringup): BAR0, PSP
  *      bootloader/sOS, TMR, all IP firmware via PSP, RLC autoload.
- *   5  + SMU mailbox hello.
+ *   5  + SMU mailbox hello; rdna3pm=1 (default) reads the VBIOS and brings
+ *        up the PMFW power management (PPTable, GFXCLK/SOCCLK DPM,
+ *        throttlers, fan, thermal CTF). rdna3pm=0: boot clocks only;
+ *        rdna3pm=2: amdgpu's full feature set incl. UCLK/FCLK/DCN DPM;
+ *        rdna3pmmask=<hex>: allowed feature bits directly.
  *   6  + GMC: GART table in VRAM, MMHUB 3.0.2 GART enable + TLB flush;
  *        IH 6.0 interrupt ring (polled).
  *   7  + SDMA0 ring, ring test, 64 KiB VRAM copy verified by the CPU.

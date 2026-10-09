@@ -6,7 +6,12 @@
  * PSP sequence takes seconds. Levels (boot-arg rdna3lvl=):
  *   4  map BAR0, discovery, FB location, HDP remap, PSP bootloader + sOS,
  *      KM ring, TMR, all IP firmware, RLC autoload
- *   5  + SMU hello (TestMessage / GetSmuVersion / GetDriverIfVersion)
+ *   5  + SMU hello (TestMessage / GetSmuVersion / GetDriverIfVersion);
+ *        with rdna3pm=1 (default) the VBIOS is read through the ROM window
+ *        and the PMFW power management is brought up (PPTable, DPM,
+ *        throttlers, fan): rdna3pm=0 leaves the boot clocks, rdna3pm=2
+ *        allows amdgpu's full feature set (UCLK/FCLK/DCN DPM too),
+ *        rdna3pmmask=<hex> sets the allowed feature mask directly.
  *   6  + GMC, IH, doorbell aperture (BAR2; rdna3doorbell=0 keeps the rings
  *        on their wptr registers and skips the compute queues);
  *        with rdna3msi=1 the IH ring is drained from the device's
@@ -35,6 +40,7 @@ extern "C" {
 #include "gpuvm.h"
 #include "gfx11.h"
 #include "doorbell.h"
+#include "smu13.h"
 #include "rdna3_drm.h"
 #include "amd_fw.h"
 }
@@ -108,6 +114,15 @@ private:
     rdna3_mec_ring  *fKiq  = nullptr;  /* level 8, with doorbells */
     rdna3_mec_ring  *fKcq  = nullptr;  /* level 8: the first kernel compute queue */
     IOMemoryMap     *fDoorbell = nullptr;   /* BAR2 */
+    /* power management (level 5, rdna3pm) */
+    uint32_t         fPmMode = 1;
+    uint64_t         fPmMask = 0;           /* rdna3pmmask override, 0 = by mode */
+    rdna3_smu       *fSmu = nullptr;
+    rdna3_vbios      fVbios = {};
+    uint8_t         *fRom = nullptr;        /* RD_VBIOS_MAX_LEN */
+    bool             fPmUp = false;
+    void             pmInit();
+    void             pmPublishMetrics();
     bool             fDoorbells = true;     /* boot-arg rdna3doorbell */
     bool             mapDoorbell();
     rdna3_pt_pool *fPtPool = nullptr;  /* level 6: page tables for user VMs */

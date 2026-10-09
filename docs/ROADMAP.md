@@ -6,7 +6,7 @@ Legenda: ✅ zrobione · 🟡 w toku · ⬜ nie zaczęte
 |---|---|---|
 | 0 | Stanowisko testowe, kontakt z projektem NVIDIA | 🟡 dokumentacja gotowa ([STAGE0](STAGE0.md)), projekt NVIDIA przeanalizowany ([NULLMOTH-ANALYSIS](NULLMOTH-ANALYSIS.md)); sprzęt i kontakt po Twojej stronie |
 | 1 | Kext rozpoznaje kartę, mapuje BAR, czyta rejestry i discovery | 🟡 kod + testy gotowe ([STAGE1](STAGE1.md)); czeka na test na sprzęcie |
-| 2 | Bring-up | 🟡 PSP + firmware + SMU, GMC (GART, MMHUB, GFXHUB), IH 6.0, GPUVM, SDMA 6.0, ring GFX 11 — w symulatorze ([STAGE2](STAGE2.md)); poziomy `rdna3lvl` 4–8; doorbelle, KIQ + KCQ0, MSI (`rdna3msi=1`); MES i PM do zrobienia |
+| 2 | Bring-up | 🟡 PSP + firmware + SMU, GMC (GART, MMHUB, GFXHUB), IH 6.0, GPUVM, SDMA 6.0, ring GFX 11 — w symulatorze ([STAGE2](STAGE2.md)); poziomy `rdna3lvl` 4–8; doorbelle, KIQ + KCQ0, MSI (`rdna3msi=1`), SMU PM (PPTable, DPM GFXCLK/SOCCLK, throttlery, wentylator, metryki; `rdna3pm`); MES, BACO/sleep do zrobienia |
 | 3 | Wyświetlanie: DCN 3.2.1, IOFramebuffer | 🟡 przejęcie trybu z GOP, flipy, VBL z licznika klatek, CRC w symulatorze; `RDNA3Framebuffer.kext` z NVRMFB ([STAGE3](STAGE3.md)); modesetting/EDID ⬜ |
 | 4 | IOUserClient implementujący **UAPI amdgpu** | 🟡 CS na ringach DMA/GFX, fence'y, syncobj, GPUVM ([STAGE4](STAGE4.md)); niezmienione libdrm_amdgpu wysyła CS end-to-end na hoście; PRIME/USERPTR do zrobienia |
 | 5 | Vulkan: RADV z istniejącym winsysem amdgpu | 🟡 `libvulkan_radeon.dylib` buduje się i linkuje na macOS w CI z 3 łatkami ([STAGE5](STAGE5.md)) |
@@ -34,7 +34,9 @@ Kolejność odpowiada `amdgpu_device_ip_init()` dla SOC21. Każdy krok najpierw
    (VMID0 dla jądra), bufor ochronny (dummy page).
 5. **PSP 13.0.7**: rozruch SOS, ring PSP, ładowanie TMR, a potem za pomocą PSP firmware GFX,
    SDMA, SMU, DMCUB (front-door loading, jak amdgpu dla RDNA3).
-6. **SMU 13.0.7**: tylko komunikaty startowe i domyślne zegary; bez overdrive.
+6. **SMU 13.0.7**: ✅ `smu_smc_hw_setup` (PPTable z PMFW + BoardTable z VBIOS,
+   cechy, DPM, PPT, workload, metryki); bez overdrive; DPM pamięci/DCN czeka
+   na Display Core.
 7. **IH 6.0.x (OSSSYS)**: ring przerwań, MSI w IOKit (`IOInterruptEventSource` z MSI).
 8. **GFX 11 / MES**: RLC, IMU, MES (na RDNA3 kolejki zarządza MES), ring KIQ;
    **SDMA 6.0**: pierwszy ring.

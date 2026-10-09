@@ -66,11 +66,16 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
     fLevel = level;
     fVramSize = vramSize;
     {
-        uint32_t msi = 0, db = 1;
+        uint32_t msi = 0, db = 1, pm = 1;
+        uint64_t pmmask = 0;
         PE_parse_boot_argn("rdna3msi", &msi, sizeof(msi));
         PE_parse_boot_argn("rdna3doorbell", &db, sizeof(db));
+        PE_parse_boot_argn("rdna3pm", &pm, sizeof(pm));
+        PE_parse_boot_argn("rdna3pmmask", &pmmask, sizeof(pmmask));
         fMsi = msi != 0;
         fDoorbells = db != 0;
+        fPmMode = pm;
+        fPmMask = pmmask;
     }
     fLock = IOLockAlloc();
     fDisc = (amd_discovery *)IOMalloc(sizeof(*fDisc));
@@ -127,6 +132,8 @@ void RDNA3Bringup::stopAndFree()
             IOFree(fBlobs[i].data, fBlobs[i].len);
     if (fSos.data)
         IOFree(fSos.data, fSos.len);
+    if (fSmu) IOFree(fSmu, sizeof(*fSmu));
+    if (fRom) IOFree(fRom, RD_VBIOS_MAX_LEN);
     if (fDisc) IOFree(fDisc, sizeof(*fDisc));
     if (fDev) IOFree(fDev, sizeof(*fDev));
     if (fPsp) IOFree(fPsp, sizeof(*fPsp));
@@ -343,6 +350,9 @@ void RDNA3Bringup::run()
         publishString("RDNA3,Stage2", ret ? "failed: SMU" : "PSP + SMU up");
         if (ret)
             return;
+        /* smu_hw_init: power management, before the GMC like soc21's IP order */
+        if (fPmMode)
+            pmInit();
     }
 
     /* level 6: GMC (gmc_v11_0_hw_init -> gart_enable): GART table in
@@ -534,6 +544,9 @@ void RDNA3Bringup::run()
         publishString("RDNA3,Stage2", ret ? "failed: GFX" : "GFX ring 0 up, ring test passed");
     }
 
+    if (fPmUp)
+        pmPublishMetrics();
+
     if (fMsi) {
         /* snapshot after bring-up (the handler keeps counting afterwards) */
         publish("RDNA3,MSILive", fIrqLive ? 1 : 0);
@@ -544,6 +557,105 @@ void RDNA3Bringup::run()
         publish("RDNA3,IRQFenceCompute", fIrqFenceComp);
         publish("RDNA3,IRQOther", fIrqOther);
     }
+}
+
+/* -------------------------- power management -------------------------- */
+
+/* smu_hw_init -> smu_smc_hw_setup on the PMFW the PSP just loaded. Failure
+ * here is not fatal for the rest of the bring-up: the GPU stays on its boot
+ * clocks like with rdna3pm=0. */
+void RDNA3Bringup::pmInit()
+{
+    uint64_t allowed = fPmMask ? fPmMask
+                     : (fPmMode >= 2 ? RD_SMU_FEATURES_AMDGPU : RD_SMU_FEATURES_SAFE);
+    uint32_t gen = 3, width = 6;     /* Gen4 x16 unless the link says less */
+    const rdna3_vbios *vb = nullptr;
+    int ret;
+
+    fSmu = (rdna3_smu *)IOMalloc(sizeof(*fSmu));
+    fRom = (uint8_t *)IOMalloc(RD_VBIOS_MAX_LEN);
+    if (!fSmu || !fRom) {
+        publishString("RDNA3,PM", "failed: no memory");
+        return;
+    }
+    bzero(fSmu, sizeof(*fSmu));
+
+    /* the VBIOS: boot-up clocks and the PMFW BoardTable */
+    ret = vbios_read(fDev, &fVbios, fRom, RD_VBIOS_MAX_LEN);
+    publish("RDNA3,VBIOSResult", (uint64_t)(int64_t)ret);
+    if (ret == RDNA3_OK) {
+        publish("RDNA3,VBIOSSize", fVbios.len);
+        publishString("RDNA3,VBIOSPartNumber", fVbios.part_number);
+        vb = &fVbios;
+    } else {
+        BLOG("PM: VBIOS not readable (%d), going on with the PMFW's BoardTable", ret);
+    }
+
+    /* smu_smc_hw_setup's pcie_gen / pcie_width from the link capability
+     * (PCIe cap LNKCAP: max speed 1..5 -> 0..4, max width x1..x32 -> 1..7) */
+    {
+        UInt8 pcie = 0;
+        if (fPci->findPCICapability(kIOPCIPCIExpressCapability, &pcie) && pcie) {
+            uint32_t lnkcap = fPci->configRead32(pcie + 0x0C);
+            uint32_t speed = lnkcap & 0xf, lanes = (lnkcap >> 4) & 0x3f;
+            if (speed >= 1 && speed <= 5)
+                gen = speed - 1;
+            switch (lanes) {
+            case 1: width = 1; break;
+            case 2: width = 2; break;
+            case 4: width = 3; break;
+            case 8: width = 4; break;
+            case 12: width = 5; break;
+            case 16: width = 6; break;
+            case 32: width = 7; break;
+            default: break;
+            }
+        }
+    }
+
+    ret = smu13_pm_init(fDev, fSmu, vb, allowed, gen, width);
+    publish("RDNA3,PMResult", (uint64_t)(int64_t)ret);
+    if (ret) {
+        publishString("RDNA3,PM", "failed: smu_smc_hw_setup");
+        return;
+    }
+    fPmUp = true;
+    publishString("RDNA3,PM", fSmu->dpm_running ? "dpm running" : "features enabled, dpm off");
+    publish("RDNA3,PMFeaturesAllowed", fSmu->allowed);
+    publish("RDNA3,PMFeaturesRunning", fSmu->enabled);
+    publish("RDNA3,PMBootGfxClkMHz", fSmu->boot.gfxclk / 100);
+    publish("RDNA3,PMBootUclkMHz", fSmu->boot.uclk / 100);
+    publish("RDNA3,PMGfxClkMinMHz", fSmu->gfx.level[0]);
+    publish("RDNA3,PMGfxClkMaxMHz", fSmu->gfx.level[fSmu->gfx.count ? fSmu->gfx.count - 1 : 0]);
+    publish("RDNA3,PMUclkMaxMHz", fSmu->uclk.level[fSmu->uclk.count ? fSmu->uclk.count - 1 : 0]);
+    publish("RDNA3,PMSocClkMaxMHz", fSmu->soc.level[fSmu->soc.count ? fSmu->soc.count - 1 : 0]);
+    publish("RDNA3,PMPowerLimitW", fSmu->ppt_limit_w);
+    publish("RDNA3,PMTempLimitEdge", fSmu->pptable.SkuTable.TemperatureLimit[TEMP_EDGE]);
+    publish("RDNA3,PMTempLimitHotspot", fSmu->pptable.SkuTable.TemperatureLimit[TEMP_HOTSPOT]);
+    publish("RDNA3,PMFanMaxRPM", fSmu->pptable.SkuTable.FanMaximumRpm);
+}
+
+/* SMU_TABLE_SMU_METRICS snapshot into the IORegistry */
+void RDNA3Bringup::pmPublishMetrics()
+{
+    int ret = smu13_read_metrics(fDev, fSmu);
+    publish("RDNA3,PMMetricsResult", (uint64_t)(int64_t)ret);
+    if (ret)
+        return;
+    publish("RDNA3,PMGfxClkMHz", smu13_metric_gfxclk_mhz(fSmu));
+    publish("RDNA3,PMUclkMHz", smu13_metric_uclk_mhz(fSmu));
+    publish("RDNA3,PMTempEdgeC", smu13_metric_temp_edge_c(fSmu));
+    publish("RDNA3,PMTempHotspotC", smu13_metric_temp_hotspot_c(fSmu));
+    publish("RDNA3,PMTempMemC", smu13_metric_temp_mem_c(fSmu));
+    publish("RDNA3,PMPowerW", smu13_metric_power_w(fSmu));
+    publish("RDNA3,PMGfxActivity", smu13_metric_gfx_activity(fSmu));
+    publish("RDNA3,PMFanRPM", smu13_metric_fan_rpm(fSmu));
+    publish("RDNA3,PMVddGfxmV", smu13_metric_vddgfx_mv(fSmu));
+    publish("RDNA3,PMThrottlers", smu13_metric_throttlers(fSmu));
+    BLOG("PM: gfxclk %u MHz, uclk %u MHz, edge %u C, hotspot %u C, %u W, fan %u rpm",
+         smu13_metric_gfxclk_mhz(fSmu), smu13_metric_uclk_mhz(fSmu),
+         smu13_metric_temp_edge_c(fSmu), smu13_metric_temp_hotspot_c(fSmu),
+         smu13_metric_power_w(fSmu), smu13_metric_fan_rpm(fSmu));
 }
 
 /* ------------------------------ GPUVM ------------------------------ */
