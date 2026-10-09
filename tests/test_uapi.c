@@ -505,6 +505,46 @@ int main(void)
         CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, so, &h1) == 0);
         CHECK(h1 == 1 && last_ip == AMDGPU_HW_IP_DMA && last_nibs == 1 &&
               last_ibs[0].va == 0x400000 && last_ibs[0].length_dw == 16 && last_vm == &vm_dummy);
+        /* XNU_SYNCOBJ_FENCE (libdrm_xnu's cross-process sync_file): the
+         * fence by value; SET only accepts a fence that was submitted */
+        {
+            struct rd_xnu_syncobj_fence x;
+            uint32_t s3;
+            memset(&x, 0, sizeof(x));
+            x.handle = so;
+            CHECK(IOCTL(f, RD_NR_XNU_SYNCOBJ_FENCE, x) == 0 && !x.signaled &&
+                  x.ip == AMDGPU_HW_IP_DMA && x.ring == 0 && x.seq == 1);
+            memset(&sc, 0, sizeof(sc));
+            CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, sc) == 0);
+            s3 = sc.handle;
+            x.handle = s3; x.op = RD_XNU_FENCE_SET;
+            x.seq = 2;                                   /* never submitted */
+            CHECK(IOCTL(f, RD_NR_XNU_SYNCOBJ_FENCE, x) == -RD_EINVAL);
+            x.seq = 1; x.ip = AMDGPU_HW_IP_GFX;          /* no such ring */
+            CHECK(IOCTL(f, RD_NR_XNU_SYNCOBJ_FENCE, x) == -RD_EINVAL);
+            x.ip = AMDGPU_HW_IP_DMA;
+            CHECK(IOCTL(f, RD_NR_XNU_SYNCOBJ_FENCE, x) == 0);
+            memset(&x, 0, sizeof(x));
+            x.handle = s3;
+            CHECK(IOCTL(f, RD_NR_XNU_SYNCOBJ_FENCE, x) == 0 && !x.signaled && x.seq == 1);
+            x.op = 7;
+            CHECK(IOCTL(f, RD_NR_XNU_SYNCOBJ_FENCE, x) == -RD_EINVAL);
+            x.op = RD_XNU_FENCE_SET; x.signaled = 1;
+            CHECK(IOCTL(f, RD_NR_XNU_SYNCOBJ_FENCE, x) == 0);
+            x.op = RD_XNU_FENCE_GET; x.signaled = 0;
+            CHECK(IOCTL(f, RD_NR_XNU_SYNCOBJ_FENCE, x) == 0 && x.signaled && !x.seq);
+            x.handle = 999;
+            CHECK(IOCTL(f, RD_NR_XNU_SYNCOBJ_FENCE, x) == -RD_EINVAL);
+            {
+                struct drm_syncobj_destroy d = { s3, 0 };
+                CHECK(IOCTL(f, RD_NR_SYNCOBJ_DESTROY, d) == 0);
+            }
+            /* WAIT_CS on a sequence that was never submitted: -EINVAL,
+             * not a wait until the hang cap */
+            memset(&w, 0, sizeof(w));
+            w.in.handle = 5; w.in.ip_type = AMDGPU_HW_IP_DMA; w.in.timeout = 1;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == -RD_EINVAL);
+        }
         /* busy until the ring passes it */
         memset(&w, 0, sizeof(w));
         w.in.handle = h1; w.in.ip_type = AMDGPU_HW_IP_DMA; w.in.timeout = 1;

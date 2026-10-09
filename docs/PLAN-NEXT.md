@@ -86,8 +86,10 @@ Cel: modesetting, EDID, wiele monitorów, hotplug, zmiana rozdzielczości.
   `IOMemoryDescriptor::withAddressRange`.
 * ✅ `vulkaninfo` na runnerze macOS bez karty: `libdrm_loopback.dylib`
   w jobie `radv-macos` (uruchomienie `full: true`).
+* ✅ syncobj sync_file między procesami (plik z fence po wartości,
+  `RD_NR_XNU_SYNCOBJ_FENCE`); opaque fd zostaje w obrębie procesu.
 * Zostaje: PRIME/IOSurface (eksport/import BO, wspólne z akceleratorem),
-  syncobj-fd między procesami, dEQP compute przez loopback (potrzebuje
+  dEQP compute przez loopback (potrzebuje
   wykonywania shaderów — dopiero na karcie).
 
 ## 7. Ścieżka WindowServer / Metal

@@ -471,6 +471,48 @@ static int ring_ok(rdna3_drm_device *dev, uint32_t ip, uint32_t ring)
     return ip < AMDGPU_HW_IP_NUM && ring < 4 && (dev->ready_rings[ip] & (1u << ring));
 }
 
+/* amdgpu_ctx_get_fence: a sequence number that was never submitted is
+ * -EINVAL, not something to wait for (it would only end at the hang cap,
+ * with a GPU reset) */
+static int seq_submitted(const rdna3_drm_device *dev, uint32_t ip, uint32_t ring, uint64_t seq)
+{
+    return ip < AMDGPU_HW_IP_NUM && ring < 4 && seq <= dev->last_seq[ip][ring];
+}
+
+/* RD_NR_XNU_SYNCOBJ_FENCE: the syncobj's state by value, for libdrm_xnu's
+ * cross-process sync_file. SET validates like WAIT_CS: only a fence that was
+ * submitted on this device may be installed, a forged future one would
+ * block its waiters until the hang cap and a GPU reset. */
+static int syncobj_fence(rdna3_drm_file *f, struct rd_xnu_syncobj_fence *x)
+{
+    rdna3_syncobj *s = sobj(f, x->handle);
+    if (!s || x->pad)
+        return -RD_EINVAL;
+    if (x->op == RD_XNU_FENCE_GET) {
+        x->signaled = sobj_signaled(f->dev, s) ? 1 : 0;
+        x->ip = s->has_fence ? s->fence.ip : 0;
+        x->ring = s->has_fence ? s->fence.ring : 0;
+        x->seq = s->has_fence ? s->fence.seq : 0;
+        return 0;
+    }
+    if (x->op != RD_XNU_FENCE_SET)
+        return -RD_EINVAL;
+    if (x->signaled) {
+        s->signaled = 1;
+        s->has_fence = 0;
+        return 0;
+    }
+    if (x->seq && (!ring_ok(f->dev, x->ip, x->ring) ||
+                   !seq_submitted(f->dev, x->ip, x->ring, x->seq)))
+        return -RD_EINVAL;
+    s->signaled = 0;
+    s->has_fence = x->seq != 0;
+    s->fence.ip = x->ip;
+    s->fence.ring = x->ring;
+    s->fence.seq = x->seq;
+    return 0;
+}
+
 /* DEPENDENCIES / WAIT_CS handles: ~0 = latest on that ring, 0 = none */
 static uint64_t dep_seq(rdna3_drm_device *dev, uint32_t ip, uint32_t ring, uint64_t h)
 {
@@ -635,6 +677,8 @@ static int wait_cs(rdna3_drm_file *f, union drm_amdgpu_wait_cs *w)
     zero(&w->out, sizeof(w->out));
     if (!fe.seq)
         return 0;
+    if (!seq_submitted(dev, fe.ip, fe.ring, fe.seq))
+        return -RD_EINVAL;
     w->out.status = fence_wait_abs(dev, &fe, timeout) ? 1 : 0;
     return 0;
 }
@@ -656,6 +700,8 @@ static int wait_fences(rdna3_drm_file *f, union drm_amdgpu_wait_fences *w)
         fe.ip = af.ip_type;
         fe.ring = af.ring;
         fe.seq = af.seq_no;
+        if (!seq_submitted(dev, fe.ip, fe.ring, fe.seq))
+            return -RD_EINVAL;
         if (fence_done(dev, &fe) || (all && !fence_wait_abs(dev, &fe, timeout))) {
             done++;
             if (first == ~0u)
@@ -1260,6 +1306,8 @@ int rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
         return gem_userptr(f, (struct drm_amdgpu_gem_userptr *)data);
     case RD_NR_SYNCOBJ_TRANSFER: NEED(struct drm_syncobj_transfer);
         return syncobj_transfer(f, (struct drm_syncobj_transfer *)data);
+    case RD_NR_XNU_SYNCOBJ_FENCE: NEED(struct rd_xnu_syncobj_fence);
+        return syncobj_fence(f, (struct rd_xnu_syncobj_fence *)data);
     case RD_NR_PRIME_HANDLE_TO_FD:               /* TODO(stage4): IOSurface sharing */
     case RD_NR_PRIME_FD_TO_HANDLE:
     case RD_NR_SYNCOBJ_HANDLE_TO_FD:             /* fds are the libdrm_xnu layer's (drm_xnu.c) */
@@ -1283,6 +1331,7 @@ const char *rdna3_drm_ioctl_name(uint32_t nr)
     case RD_NR_SYNCOBJ_RESET: return "SYNCOBJ_RESET";
     case RD_NR_SYNCOBJ_SIGNAL: return "SYNCOBJ_SIGNAL";
     case RD_NR_SYNCOBJ_TRANSFER: return "SYNCOBJ_TRANSFER";
+    case RD_NR_XNU_SYNCOBJ_FENCE: return "XNU_SYNCOBJ_FENCE";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR): return "AMDGPU_GEM_USERPTR";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE): return "AMDGPU_GEM_CREATE";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP): return "AMDGPU_GEM_MMAP";

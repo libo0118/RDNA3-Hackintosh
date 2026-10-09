@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include "amdgpu.h"
 #include "amdgpu_drm.h"
 #include "xf86drm.h"
@@ -86,8 +87,9 @@ int main(void)
         CHECK(amdgpu_bo_free(bo) == 0);
     }
 
-    /* syncobj "fds" (drm_xnu's process-local table): a sync_file export is a
-     * snapshot, an opaque export is the same object, transfer copies points */
+    /* syncobj "fds": a sync_file export is a file holding the fence by value
+     * (usable in any process), an opaque export is the same object
+     * (process-local), transfer copies points */
     {
         uint32_t a = 0, b = 0, c = 0;
         int sfd = -1, ofd = -1;
@@ -176,6 +178,31 @@ int main(void)
         CHECK(amdgpu_cs_query_fence_status(&fence, AMDGPU_TIMEOUT_INFINITE, 0, &expired) == 0 &&
               expired);
         CHECK(amdgpu_cs_syncobj_wait(dev, &so, 1, INT64_MAX, 0, NULL) == 0);
+        /* the out fence as a sync_file, imported over another connection
+         * and in a forked child (a different process, same device) */
+        {
+            int sfd = -1, fd2, st = -1;
+            uint32_t h2 = 0;
+            pid_t pid;
+            CHECK(drmSyncobjExportSyncFile(amdgpu_device_get_fd(dev), so, &sfd) == 0 && sfd >= 0);
+            fd2 = drm_xnu_open("/dev/dri/renderD128", 0);
+            CHECK(fd2 >= 0);
+            CHECK(drmSyncobjFDToHandle(fd2, sfd, &h2) == 0 && h2);
+            CHECK(drmSyncobjWait(fd2, &h2, 1, 0, 0, NULL) == 0);
+            CHECK(drmSyncobjDestroy(fd2, h2) == 0);
+            pid = fork();
+            if (pid == 0) {
+                int cfd = drm_xnu_open("/dev/dri/renderD128", 0);
+                uint32_t ch = 0;
+                int ok = cfd >= 0 && drmSyncobjCreate(cfd, 0, &ch) == 0 &&
+                         drmSyncobjImportSyncFile(cfd, ch, sfd) == 0 &&
+                         drmSyncobjWait(cfd, &ch, 1, INT64_MAX, 0, NULL) == 0;
+                _exit(ok ? 0 : 1);
+            }
+            CHECK(pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+            close(sfd);
+            drm_xnu_close(fd2);
+        }
         CHECK(p[0x8000 / 4] == 0x11111111 && p[0x8000 / 4 + 1] == 0x22222222);
         CHECK(p[0xA000 / 4] == 0x11111111 && p[0xA000 / 4 + 1] == 0x22222222);
         CHECK(p[0xC000 / 4] == 0x77777777 && p[0xC000 / 4 + 15] == 0x77777777 &&

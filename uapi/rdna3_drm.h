@@ -51,6 +51,18 @@ enum {
 #define RD_NR_SYNCOBJ_TRANSFER     0xCC
 #define RD_NR_SYNCOBJ_TIMELINE_SIGNAL 0xCD
 #define RD_NR_AMDGPU(x)            (DRM_COMMAND_BASE + (x))
+/* private, not a Linux DRM ioctl: read or set a syncobj's fence by value,
+ * so libdrm_xnu can carry a sync_file across processes as a file holding
+ * (ip, ring, seq) - sequence numbers are per device, not per file */
+#define RD_NR_XNU_SYNCOBJ_FENCE    0xF0
+struct rd_xnu_syncobj_fence {
+    uint32_t handle, op;           /* RD_XNU_FENCE_GET / _SET */
+    uint32_t ip, ring;
+    uint64_t seq;                  /* 0 with signaled = 0: no fence (reset) */
+    uint32_t signaled, pad;
+};
+#define RD_XNU_FENCE_GET 0
+#define RD_XNU_FENCE_SET 1
 
 /* We advertise the amdgpu DRM version RADV/libdrm expect from Linux 6.x */
 #define RD_DRM_MAJOR 3

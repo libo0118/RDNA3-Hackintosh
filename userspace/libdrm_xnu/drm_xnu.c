@@ -28,13 +28,21 @@
 static struct { uintptr_t conn; dev_t dev; ino_t ino; int fd; int used; int orphan; } g_conns[MAX_CONN];
 static struct { void *addr; size_t len; int ci; } g_maps[MAX_MAPS];
 /* Syncobj "fds" (DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD / FD_TO_HANDLE): the kext has
- * no file descriptors, so an export is a /dev/null fd remembered here with
- * the syncobj it stands for. A sync_file export snapshots the fence into a
- * hidden syncobj (SYNCOBJ_TRANSFER); an opaque export shares the handle.
- * Process-local: it covers RADV's own exports/imports and VK_KHR_external_
- * semaphore_fd inside one process, not sharing between processes. */
+ * no file descriptors.
+ * - sync_file export: an unlinked temporary file holding the fence by value
+ *   (struct xnu_sync_file: ip, ring, seq or "signaled"), read back through
+ *   RD_NR_XNU_SYNCOBJ_FENCE. Sequence numbers are per device, so the fd works
+ *   in any process (fork, SCM_RIGHTS, XPC fd passing); the kext only accepts
+ *   a fence that was really submitted.
+ * - opaque export: a /dev/null fd remembered here with the syncobj it
+ *   stands for (the same object, so it stays process-local: a syncobj's
+ *   later signals cannot follow it into another process). */
 #define MAX_SYNCFD 256
-static struct { int fd; int ci; uint32_t handle; int snapshot; int used; } g_syncfd[MAX_SYNCFD];
+static struct { int fd; int ci; uint32_t handle; int used; } g_syncfd[MAX_SYNCFD];
+#define XNU_SYNC_FILE_MAGIC "RD3SYNC1"
+struct xnu_sync_file { char magic[8]; uint32_t version, signaled, ip, ring; uint64_t seq; };
+struct xnu_syncobj_fence { uint32_t handle, op, ip, ring; uint64_t seq; uint32_t signaled, pad; };
+#define XNU_NR_SYNCOBJ_FENCE         0xF0   /* RD_NR_XNU_SYNCOBJ_FENCE */
 struct xnu_syncobj_handle { uint32_t handle, flags; int32_t fd; uint32_t pad; };
 struct xnu_syncobj_transfer { uint32_t src_handle, dst_handle; uint64_t src_point, dst_point; uint32_t flags, pad; };
 struct xnu_syncobj_create { uint32_t handle, flags; };
@@ -163,29 +171,87 @@ static int syncobj_transfer(int ci, uint32_t src, uint32_t dst)
     return be()->ioctl(g_conns[ci].conn, XNU_NR_SYNCOBJ_TRANSFER, &t, sizeof(t));
 }
 
-static int syncobj_snapshot(int ci, uint32_t src, uint32_t *out)
+static int syncobj_fence(int ci, struct xnu_syncobj_fence *x)
 {
-    struct xnu_syncobj_create c = { 0, 0 };
-    int err = be()->ioctl(g_conns[ci].conn, XNU_NR_SYNCOBJ_CREATE, &c, sizeof(c));
+    return be()->ioctl(g_conns[ci].conn, XNU_NR_SYNCOBJ_FENCE, x, sizeof(*x));
+}
+
+static int sync_file_export(int ci, uint32_t handle, int *out)
+{
+    struct xnu_syncobj_fence x;
+    struct xnu_sync_file sf;
+    const char *tmp = getenv("TMPDIR");
+    char path[1024];
+    int fd, err;
+    memset(&x, 0, sizeof(x));
+    x.handle = handle;
+    x.op = 0;                                 /* GET */
+    err = syncobj_fence(ci, &x);
     if (err)
         return err;
-    err = syncobj_transfer(ci, src, c.handle);
-    if (err) {
-        struct xnu_syncobj_destroy d = { c.handle, 0 };
-        be()->ioctl(g_conns[ci].conn, XNU_NR_SYNCOBJ_DESTROY, &d, sizeof(d));
+    memset(&sf, 0, sizeof(sf));
+    memcpy(sf.magic, XNU_SYNC_FILE_MAGIC, 8);
+    sf.version = 1;
+    sf.signaled = x.signaled || !x.seq;       /* nothing to wait for */
+    sf.ip = x.ip;
+    sf.ring = x.ring;
+    sf.seq = sf.signaled ? 0 : x.seq;
+    snprintf(path, sizeof(path), "%s/rdna3-syncfile.XXXXXX", tmp && *tmp ? tmp : "/tmp");
+    fd = mkstemp(path);
+    if (fd < 0)
+        return errno ? errno : EMFILE;
+    unlink(path);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (pwrite(fd, &sf, sizeof(sf), 0) != (ssize_t)sizeof(sf)) {
+        err = errno ? errno : EIO;
+        close(fd);
         return err;
     }
-    *out = c.handle;
+    *out = fd;
     return 0;
+}
+
+/* 1: fd is one of our sync_files (fence read into *sf), 0: it is not */
+static int sync_file_read(int fd, struct xnu_sync_file *sf)
+{
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_size != (off_t)sizeof(*sf))
+        return 0;
+    if (pread(fd, sf, sizeof(*sf), 0) != (ssize_t)sizeof(*sf))
+        return 0;
+    return !memcmp(sf->magic, XNU_SYNC_FILE_MAGIC, 8) && sf->version == 1;
+}
+
+static int sync_file_apply(int ci, uint32_t handle, const struct xnu_sync_file *sf)
+{
+    struct xnu_syncobj_fence x;
+    memset(&x, 0, sizeof(x));
+    x.handle = handle;
+    x.op = 1;                                 /* SET */
+    x.signaled = sf->signaled ? 1 : 0;
+    x.ip = sf->ip;
+    x.ring = sf->ring;
+    x.seq = sf->signaled ? 0 : sf->seq;
+    if (!x.signaled && !x.seq)
+        x.signaled = 1;
+    return syncobj_fence(ci, &x);
 }
 
 static int syncobj_handle_to_fd(int ci, struct xnu_syncobj_handle *a)
 {
     int fd, i, err;
-    uint32_t handle = a->handle;
-    int snapshot = (a->flags & XNU_SYNCOBJ_EXPORT_SYNC_FILE) != 0;
-    if (snapshot) {
-        err = syncobj_snapshot(ci, a->handle, &handle);
+    if (a->flags & XNU_SYNCOBJ_EXPORT_SYNC_FILE) {
+        err = sync_file_export(ci, a->handle, &fd);
+        if (err)
+            return err;
+        a->fd = fd;
+        return 0;
+    }
+    {   /* opaque: the handle must exist (GET fails with EINVAL otherwise) */
+        struct xnu_syncobj_fence x;
+        memset(&x, 0, sizeof(x));
+        x.handle = a->handle;
+        err = syncobj_fence(ci, &x);
         if (err)
             return err;
     }
@@ -202,8 +268,7 @@ static int syncobj_handle_to_fd(int ci, struct xnu_syncobj_handle *a)
     }
     g_syncfd[i].fd = fd;
     g_syncfd[i].ci = ci;
-    g_syncfd[i].handle = handle;
-    g_syncfd[i].snapshot = snapshot;
+    g_syncfd[i].handle = a->handle;
     g_syncfd[i].used = 1;
     pthread_mutex_unlock(&g_lock);
     a->fd = fd;
@@ -212,8 +277,26 @@ static int syncobj_handle_to_fd(int ci, struct xnu_syncobj_handle *a)
 
 static int syncobj_fd_to_handle(int ci, struct xnu_syncobj_handle *a)
 {
+    struct xnu_sync_file sf;
     int i, found = -1;
-    uint32_t src;
+    /* a sync_file first: its fd number may reuse a stale opaque entry */
+    if (sync_file_read(a->fd, &sf)) {
+        struct xnu_syncobj_create c = { 0, 0 };
+        int err;
+        if (a->flags & XNU_SYNCOBJ_IMPORT_SYNC_FILE)
+            return sync_file_apply(ci, a->handle, &sf);
+        err = be()->ioctl(g_conns[ci].conn, XNU_NR_SYNCOBJ_CREATE, &c, sizeof(c));
+        if (err)
+            return err;
+        err = sync_file_apply(ci, c.handle, &sf);
+        if (err) {
+            struct xnu_syncobj_destroy d = { c.handle, 0 };
+            be()->ioctl(g_conns[ci].conn, XNU_NR_SYNCOBJ_DESTROY, &d, sizeof(d));
+            return err;
+        }
+        a->handle = c.handle;
+        return 0;
+    }
     pthread_mutex_lock(&g_lock);
     for (i = 0; i < MAX_SYNCFD; i++)
         if (g_syncfd[i].used && g_syncfd[i].fd == a->fd && g_syncfd[i].ci == ci)
@@ -222,17 +305,13 @@ static int syncobj_fd_to_handle(int ci, struct xnu_syncobj_handle *a)
         pthread_mutex_unlock(&g_lock);
         return EINVAL;
     }
-    src = g_syncfd[found].handle;
     if (a->flags & XNU_SYNCOBJ_IMPORT_SYNC_FILE) {
-        /* import into the caller's syncobj: copy the fence */
+        /* an opaque fd given as a sync_file: copy its current fence */
+        uint32_t src = g_syncfd[found].handle;
         pthread_mutex_unlock(&g_lock);
         return syncobj_transfer(ci, src, a->handle);
     }
-    if (g_syncfd[found].snapshot) {
-        pthread_mutex_unlock(&g_lock);
-        return syncobj_snapshot(ci, src, &a->handle);
-    }
-    a->handle = src;   /* opaque fd: the same object */
+    a->handle = g_syncfd[found].handle;   /* opaque fd: the same object */
     pthread_mutex_unlock(&g_lock);
     return 0;
 }

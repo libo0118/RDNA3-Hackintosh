@@ -21,7 +21,7 @@ uapi/rdna3_drm.c  (niezależne od OS, testowane na hoście)
 | `GEM_CLOSE` | ✅ |
 | `SYNCOBJ_CREATE/DESTROY/RESET/SIGNAL/WAIT/TIMELINE_*/QUERY` | ✅ syncobj niesie fence CS i sygnalizuje się, gdy GPU go minie |
 | `SYNCOBJ_TRANSFER` | ✅ kopia fence'a/punktu (snapshot, syncobj są per plik) |
-| `SYNCOBJ_HANDLE_TO_FD/FD_TO_HANDLE` | ✅ w `libdrm_xnu` (`drm_xnu.c`): kext nie ma deskryptorów, więc eksport to fd `/dev/null` w tablicy procesu; sync_file = snapshot przez `TRANSFER`, opaque = ten sam handle. Tylko w obrębie procesu (RADV, `VK_KHR_external_semaphore_fd`); między procesami ⬜ |
+| `SYNCOBJ_HANDLE_TO_FD/FD_TO_HANDLE` | ✅ w `libdrm_xnu` (`drm_xnu.c`): kext nie ma deskryptorów. **sync_file** = odlinkowany plik tymczasowy z fence po wartości (`ip, ring, seq` albo „signaled”), odczyt/zapis przez prywatne `RD_NR_XNU_SYNCOBJ_FENCE` (0xF0) — działa między procesami (fork, SCM_RIGHTS, XPC); kext przyjmuje tylko fence faktycznie zgłoszony (`seq ≤ last_seq`), więc podrobiony plik nie wymusi czekania do limitu i resetu GPU. **opaque** = fd `/dev/null` w tablicy procesu, ten sam handle (tylko w obrębie procesu). Test: `test_uapi` (GET/SET, odrzucenie), `test_libdrm_amdgpu` (drugie połączenie + dziecko po `fork()`) |
 | `PRIME_*` | ⬜ `-ENOSYS` (wymaga IOSurface/eksportu, Etap 7) |
 | `AMDGPU_GEM_CREATE` | ✅ GTT: `IOBufferMemoryDescriptor`; VRAM: sterta w VRAM (od 512 MiB), mapowalna przez BAR0 |
 | `AMDGPU_GEM_MMAP` + `mmap` | ✅ przez `clientMemoryForType` |
