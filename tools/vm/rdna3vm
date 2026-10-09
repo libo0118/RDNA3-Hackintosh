@@ -530,7 +530,16 @@ cmd__passthrough() {
     qemu_common
     QARGS+=(-vga none -display none -serial "file:$WORK/reports/serial-$stamp.log")
     slot=${bdf%.*}; i=1; rp=0
-    QARGS+=(-device pcie-root-port,id=rp0,bus=pcie.0,chassis=1,slot=1)
+    # GPU_BUS=rootport: behind a PCIe root port, without hot-plug (macOS
+    # resets a hot-plug capable port's slot and then finds nothing behind
+    # it); pcie0: directly on the root bus (00:10.x)
+    local gbus=rp0 gaddr="00"
+    if [ "${GPU_BUS:-rootport}" = pcie0 ]; then
+        gbus=pcie.0; gaddr="10"
+    else
+        QARGS+=(-device pcie-root-port,id=rp0,bus=pcie.0,chassis=1,slot=1,hotplug=off)
+    fi
+    echo "  GPU on: ${GPU_BUS:-rootport}"
     for d in "${DEVS[@]}"; do
         if [ "${d%.*}" = "$slot" ]; then
             local fn=${d##*.} o=""
@@ -539,7 +548,7 @@ cmd__passthrough() {
                 [ "${USE_ROMFILE:-1}" = 1 ] && [ -f "$WORK/vbios.rom" ] && o="$o,romfile=$WORK/vbios.rom"
                 echo "GPU ROM: $( [ "${USE_ROMFILE:-1}" = 1 ] && [ -f "$WORK/vbios.rom" ] && echo "$WORK/vbios.rom" || echo "the card's own")"
             fi
-            QARGS+=(-device "vfio-pci,host=$d,bus=rp0,addr=00.$fn$o")
+            QARGS+=(-device "vfio-pci,host=$d,bus=$gbus,addr=$gaddr.$fn$o")
         else
             i=$((i + 1)); rp=$((rp + 1))
             QARGS+=(-device pcie-root-port,id=rp$rp,bus=pcie.0,chassis=$i,slot=$i
