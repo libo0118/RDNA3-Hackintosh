@@ -54,6 +54,8 @@ typedef struct rdna3_psp {
 int psp13_init(rdna3_psp *psp, rdna3_dev *d, const uint8_t *sos_fw, size_t sos_len);
 
 int  psp13_is_sos_alive(rdna3_psp *psp);
+/* C2PMSG_35 bit 31: the bootloader is up (also what a mode-1 reset ends in) */
+int  psp13_wait_for_bootloader(rdna3_psp *psp);
 int  psp13_bootloader_load_all(rdna3_psp *psp);   /* KDB..SOS (psp_hw_start part 1) */
 int  psp13_ring_create(rdna3_psp *psp);
 int  psp13_ring_stop(rdna3_psp *psp);

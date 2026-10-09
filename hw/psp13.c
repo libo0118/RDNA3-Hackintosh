@@ -65,7 +65,7 @@ int psp13_is_sos_alive(rdna3_psp *psp)
     return rdna3_rreg(psp->d, C2P(psp, 81)) != 0;
 }
 
-static int psp13_wait_for_bootloader(rdna3_psp *psp)
+int psp13_wait_for_bootloader(rdna3_psp *psp)
 {
     int retry, ret = RDNA3_ETIME;
     /* 10 retries for 13.0.7 (psp_v13_0_wait_for_bootloader) */

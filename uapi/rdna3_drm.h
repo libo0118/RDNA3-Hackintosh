@@ -28,6 +28,7 @@ extern "C" {
 enum {
     RD_EPERM = 1, RD_ENOENT = 2, RD_EINTR = 4, RD_EIO = 5, RD_EBADF = 9,
     RD_ENOMEM = 12, RD_EFAULT = 14, RD_EBUSY = 16, RD_EINVAL = 22, RD_ENOSPC = 28,
+    RD_ECANCELED = 89,
     RD_ENOSYS = 38, RD_ENODEV = 19, RD_ETIME = 62, RD_EOPNOTSUPP = 95,
 };
 
@@ -135,6 +136,11 @@ typedef struct rdna3_drm_ops {
                     uint32_t nibs, uint64_t *seq);
     int   (*fence_signaled)(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq);
     int   (*fence_wait)(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t abs_ns);
+    /* GPU reset / fault state of a VM for AMDGPU_CTX_OP_QUERY_STATE*:
+     * AMDGPU_CTX_QUERY2_FLAGS_RESET (a reset happened since the VM was
+     * made), _VRAMLOST, _GUILTY (one of its jobs hung or faulted). Optional;
+     * a guilty VM's submissions fail with -ECANCELED like amdgpu's. */
+    uint32_t (*vm_query)(void *ctx, void *vm);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {

@@ -65,6 +65,8 @@ uint32_t ih60_process(rdna3_dev *d, rdna3_ih *ih, rdna3_iv_cb cb, void *ctx);
 #define RD_IH_CLIENT_GRBM_CP      0x14
 #define RD_IH_SRC_CP_EOP          181
 #define RD_IH_SRC_SDMA_TRAP       49
+#define RD_IH_CLIENT_VMC          0x12   /* MMHUB page faults (VMC_1_0__SRCID__VM_FAULT) */
+#define RD_IH_SRC_VM_FAULT        0      /* also UTCL2_1_0__SRCID__FAULT on client GFX */
 #define RD_IH_FENCE_GFX           1u
 #define RD_IH_FENCE_SDMA0         2u
 #define RD_IH_FENCE_COMPUTE0      3u   /* MEC1 pipe 0 queue 0 (the first KCQ) */

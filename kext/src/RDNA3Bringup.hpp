@@ -46,6 +46,7 @@ extern "C" {
 }
 
 class RDNA3Accel;
+struct RDNA3Vm;
 
 struct RDNA3Firmware {
     uint8_t *data;
@@ -85,6 +86,10 @@ public:
     /* MSI: called on the work loop for every interrupt */
     void  handleInterrupt();
 
+    /* AMDGPU_CTX_QUERY2_FLAGS_* of a VM: reset since it was made, VRAM
+     * lost, guilty (one of its jobs hung or page-faulted) */
+    uint32_t vmQuery(void *vm);
+
 private:
     static void threadMain(void *arg, int wait_result);
     void run();
@@ -123,6 +128,22 @@ private:
     bool             fPmUp = false;
     void             pmInit();
     void             pmPublishMetrics();
+
+    /* robustness: amdgpu_job_timedout -> soft recovery -> GFX soft reset ->
+     * mode-1 reset and a new bring-up from level 4 (hwInit); page faults
+     * from the IH make the VM guilty (gmc_v11_0_process_interrupt) */
+    amd_fw_blob_ref  fBlobRefs[AMD_BLOB_COUNT] = {};
+    uint64_t         fAllocLo = 0, fAllocHi = 0;
+    bool             fReinit = false;        /* hwInit() runs again after a reset */
+    uint32_t         fResetCount = 0, fVramLostCount = 0;
+    uint64_t         fGpuResets = 0, fSoftRecoveries = 0, fVmFaults = 0;
+    uint64_t         fResetMagic = UINT64_MAX;   /* VRAM slot: did VRAM survive the reset? */
+    RDNA3Vm         *fVmByVmid[16] = {};
+    bool             hwInit();
+    int              recover(uint32_t ip, uint32_t ring, uint64_t seq);
+    bool             gpuReset();
+    void             markGuilty(uint32_t vmid, const char *why);
+    void             forceFences();
     bool             fDoorbells = true;     /* boot-arg rdna3doorbell */
     bool             mapDoorbell();
     rdna3_pt_pool *fPtPool = nullptr;  /* level 6: page tables for user VMs */

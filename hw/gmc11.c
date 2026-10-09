@@ -337,3 +337,78 @@ int gfxhub303_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
     RERR(d, "GMC: GFXHUB TLB flush timeout (vmid %u, ack 0x%x)", vmid, ack);
     return RDNA3_ETIME;
 }
+
+/* ------------------------- page faults ------------------------- */
+
+#define GC_FAULT_IRQ_MASK \
+    (GCVM_CONTEXT1_CNTL__RANGE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     GCVM_CONTEXT1_CNTL__DUMMY_PAGE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     GCVM_CONTEXT1_CNTL__PDE0_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     GCVM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     GCVM_CONTEXT1_CNTL__READ_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     GCVM_CONTEXT1_CNTL__WRITE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     GCVM_CONTEXT1_CNTL__EXECUTE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK)
+
+int gmc11_iv_is_vm_fault(const rdna3_iv *iv)
+{
+    if (iv->src_id != RD_IH_SRC_VM_FAULT)
+        return 0;
+    return iv->client_id == RD_IH_CLIENT_VMC || iv->client_id == RD_IH_CLIENT_GFX;
+}
+
+void gmc11_decode_vm_fault(rdna3_dev *d, const rdna3_iv *iv, rdna3_vm_fault *f)
+{
+    uint32_t st;
+    f->hub = iv->client_id == RD_IH_CLIENT_VMC ? 1 : 0;
+    f->vmid = iv->vmid;
+    f->pasid = iv->pasid;
+    f->client = iv->client_id;
+    f->src_id = iv->src_id;
+    f->ring_id = iv->ring_id;
+    f->addr = ((uint64_t)iv->src_data[0] << 12) | (((uint64_t)iv->src_data[1] & 0xf) << 44);
+    f->retry = (iv->src_data[1] & 0x80) != 0;   /* AMDGPU_GMC9_FAULT_SOURCE_DATA_RETRY */
+    f->write = (iv->src_data[1] & 0x20) != 0;   /* AMDGPU_GMC9_FAULT_SOURCE_DATA_WRITE */
+    if (f->hub) {
+        st = mmhub302_fault_status(d, 1);
+    } else {
+        /* a dummy read first: the fast GRBM interface may hand out a stale value */
+        (void)RGC(d, regGCVM_L2_PROTECTION_FAULT_STATUS);
+        st = RGC(d, regGCVM_L2_PROTECTION_FAULT_STATUS);
+        WGC(d, regGCVM_L2_PROTECTION_FAULT_CNTL,
+            (RGC(d, regGCVM_L2_PROTECTION_FAULT_CNTL) & ~1u) | 1u);
+    }
+    f->status = st;
+    f->more_faults = st & 0x1;
+    f->walker_error = (st >> 1) & 0x7;
+    f->permission_faults = (st >> 4) & 0xf;
+    f->mapping_error = (st >> 8) & 0x1;
+    f->cid = (st >> 9) & 0x1ff;
+    if (st & (1u << 18))
+        f->write = 1;
+}
+
+void gmc11_log_vm_fault(rdna3_dev *d, const rdna3_vm_fault *f)
+{
+    RERR(d, "[%s] page fault (src_id:%u ring:%u vmid:%u pasid:%u) at 0x%016llx from client %u",
+         f->hub ? "mmhub" : "gfxhub", f->src_id, f->ring_id, f->vmid, f->pasid,
+         (unsigned long long)f->addr, f->client);
+    if (f->status)
+        RERR(d, "  L2_PROTECTION_FAULT_STATUS 0x%08x: UTCL2 client 0x%x, MORE_FAULTS %u, "
+             "WALKER_ERROR %u, PERMISSION_FAULTS 0x%x, MAPPING_ERROR %u, RW %s",
+             f->status, f->cid, f->more_faults, f->walker_error, f->permission_faults,
+             f->mapping_error, f->write ? "write" : "read");
+}
+
+void gmc11_set_vm_fault_interrupts(rdna3_dev *d, int enable)
+{
+    uint32_t i, tmp;
+    for (i = 0; i < 16; i++) {
+        tmp = RGC_OFF(d, regGCVM_CONTEXT0_CNTL, i * CTX_DISTANCE);
+        if (enable)
+            tmp |= GC_FAULT_IRQ_MASK;
+        else
+            tmp &= ~GC_FAULT_IRQ_MASK;
+        WGC_OFF(d, regGCVM_CONTEXT0_CNTL, i * CTX_DISTANCE, tmp);
+    }
+    mmhub302_set_vm_fault_interrupts(d, enable);
+}

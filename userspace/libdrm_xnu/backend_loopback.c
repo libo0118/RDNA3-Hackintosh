@@ -152,7 +152,7 @@ static void dev_init(void)
 {
     rdna3_drm_ops ops = { NULL, lb_zalloc, lb_free, lb_bo_alloc, lb_bo_free, lb_copyin, lb_copyout, NULL, NULL,
                           lb_vm_create, lb_vm_destroy, lb_vm_map, lb_vm_unmap,
-                          lb_submit, lb_signaled, lb_wait };
+                          lb_submit, lb_signaled, lb_wait, NULL };
     amd_discovery disc;
     if (g_dev_ready)
         return;

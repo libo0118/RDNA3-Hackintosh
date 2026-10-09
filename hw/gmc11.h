@@ -55,6 +55,30 @@ int  gmc11_gart_map(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_off, uint64_t pa,
                     uint32_t pages, uint64_t flags);
 void gmc11_gart_unmap(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_off, uint32_t pages);
 
+/* ---- GPU page faults (gmc_v11_0_process_interrupt) ----
+ * A fault IV comes from client VMC (MMHUB) or GFX/UTCL2 (GFXHUB) with
+ * source 0; src_data[0..1] carry the faulting page, the hub's
+ * L2_PROTECTION_FAULT_STATUS the rest. Without retry faults (noretry on
+ * dGPUs) the offending wave is dead; the owner of the VMID is guilty. */
+#include "ih60.h"
+typedef struct rdna3_vm_fault {
+    int      hub;               /* 0 = GFXHUB, 1 = MMHUB */
+    uint32_t vmid, pasid, client, src_id, ring_id;
+    uint64_t addr;              /* faulting virtual address (page granular) */
+    uint32_t status;            /* L2_PROTECTION_FAULT_STATUS */
+    uint32_t cid;               /* UTCL2 client id */
+    int      write, retry, more_faults, walker_error, permission_faults, mapping_error;
+} rdna3_vm_fault;
+int  gmc11_iv_is_vm_fault(const rdna3_iv *iv);
+/* decode + read and clear the hub's fault status (RW the status cache) */
+void gmc11_decode_vm_fault(rdna3_dev *d, const rdna3_iv *iv, rdna3_vm_fault *f);
+void gmc11_log_vm_fault(rdna3_dev *d, const rdna3_vm_fault *f);
+/* amdgpu_gmc_set_vm_fault_masks for both hubs (gmc_v11_0_vm_fault_interrupt_state) */
+void gmc11_set_vm_fault_interrupts(rdna3_dev *d, int enable);
+/* MMHUB side helpers (mmhub302.c) */
+uint32_t mmhub302_fault_status(rdna3_dev *d, int clear);
+void     mmhub302_set_vm_fault_interrupts(rdna3_dev *d, int enable);
+
 /* gfxhub_v3_0_3_gart_enable() + set_fault_enable_default() */
 int  gfxhub303_gart_enable(rdna3_dev *d, rdna3_gmc *g);
 void gfxhub303_set_fault_enable_default(rdna3_dev *d, int value);

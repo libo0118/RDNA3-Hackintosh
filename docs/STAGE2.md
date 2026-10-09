@@ -14,6 +14,7 @@ jeszcze nie.
 | PSP 13.0.7: bootloader (KDB/SPL/SYS/SOS), ring KM, TOC/TMR, LOAD_IP_FW (29 ucode), RLC autoload | `hw/psp13.c` | `psp_v13_0.c`, `amdgpu_psp.c` | sim (syntetyczny i prawdziwy firmware) |
 | SMU 13.0.7: mailbox, TestMessage/GetSmuVersion/GetDriverIfVersion | `hw/smu13.c` | `smu_cmn.c` | sim |
 | VBIOS przez okno ROM SMUIO, tablice ATOM (firmwareinfo, smu_info, smc_dpm_info, vram_usagebyfirmware) | `hw/vbios.c` | `amdgpu_bios.c`, `atom.c`, `amdgpu_atomfirmware.c` | sim (syntetyczny obraz) |
+| Odporność: dump stanu (GRBM/CP/SDMA), zabicie fal VMID (`SQ_CMD`), soft reset GFX (`GRBM_SOFT_RESET` + cp_resume), reset mode-1 przez debug mailbox PMFW + ponowny bring-up od poziomu 4, VM fault z IH (adres, VMID, status L2) → kontekst „guilty”, flagi `AMDGPU_CTX_OP_QUERY_STATE2`, `-ECANCELED` | `hw/gfx11.c`, `hw/gmc11.c`, `hw/smu13.c`, `kext/src/RDNA3Bringup.cpp` | `gfx_v11_0_soft_reset`, `gfx_v10_0_ring_soft_recovery`, `smu_v13_0_7_mode1_reset`, `gmc_v11_0_process_interrupt`, `amdgpu_job_timedout`, `amdgpu_ctx_query2` | sim (zawieszenie CP, fault IB, mode-1) |
 | SMU 13.0.7 PM: tablice driver/tool w VRAM, combo PPTable z PMFW + BoardTable z VBIOS, `TransferTableDram2Smu`, `RunDcBtc`, `SetAllowedFeaturesMask`, `OverridePcieParameters`, `EnableAllSmuFeatures`, tablice DPM, limit PPT, workload, metryki (`SMU_TABLE_SMU_METRICS`) | `hw/smu13.c` | `amdgpu_smu.c` (`smu_smc_hw_setup`), `smu_v13_0.c`, `smu_v13_0_7_ppt.c` | sim (model PMFW: tablice, cechy, poziomy DPM) |
 | Uruchomienie w kexcie (wątek, firmware z Resources) | `kext/src/RDNA3Bringup.cpp` | `amdgpu_device_init` (fragment) | CI build |
 
@@ -61,6 +62,23 @@ jeszcze nie.
 Oczekiwane na RX 7800 XT: `sOS running, version 0x00330024` (zależnie od
 wersji linux-firmware), 29× `LOAD_IP_FW ... ok`, `RLC autoload started`,
 `SMU: PMFW 82.97.0` (lub podobnie).
+
+## Zawieszenia, reset, błędy stron
+
+`fenceWait` daje każdemu fence'owi 10 s. Potem (`amdgpu_job_timedout`):
+zrzut stanu do logu (`GFX timeout: GRBM_STATUS ...`), VM ostatniego joba na tym
+ringu zostaje „guilty” (jego `CS` kończą się `-ECANCELED`, `AMDGPU_CTX_OP_QUERY_STATE2`
+zwraca `GUILTY|RESET`), `SQ_CMD` zabija fale tego VMID i czeka 100 ms na
+fence. Gdy to nie pomaga: fence'y wszystkich ringów są dopełniane, GFX
+przechodzi soft reset (`gfx_v11_0_soft_reset` + ring 0, KIQ, KCQ od nowa),
+a gdy i to zawiedzie (albo zawiesił się SDMA) — reset mode-1 przez PMFW i
+`hwInit()` od poziomu 4 (PSP, firmware, SMU, GMC, IH, SDMA, GFX). Tablice
+stron VM zostają (VRAM przeżywa mode-1; słowo kontrolne `RDN3` to sprawdza,
+inaczej klienci dostają `VRAMLOST`). Błędy stron GPUVM (klient VMC/GFX,
+źródło 0) są dekodowane z IV (`gmc11_decode_vm_fault`: hub, VMID, adres,
+`L2_PROTECTION_FAULT_STATUS`) i też oznaczają VM jako guilty. Liczniki w
+IORegistry: `RDNA3,VMFaults`, `RDNA3,LastFaultAddr`, `RDNA3,SoftRecoveries`,
+`RDNA3,Resets`, `RDNA3,GPUResets`, `RDNA3,VRAMLost`.
 
 ## Decyzje i ryzyka (do sprawdzenia na sprzęcie)
 

@@ -5,6 +5,8 @@
  */
 #include "gfx11.h"
 #include "gen/gc_11_0_0_gfx.h"
+#include "gen/gc_11_0_0_reset.h"
+#include "gen/gc_11_0_0_sdma.h"
 #include "clearstate_defs.h"
 #include "clearstate_gfx11.h"
 #include "amdgpu_ucode_hdr.h"
@@ -521,6 +523,7 @@ uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_
     seq = gfx11_emit_fence(d, r);
     gfx11_commit(d, r);
     r->last_ctx = ctx;
+    r->last_vmid = vmid;
     return seq;
 }
 
@@ -1009,5 +1012,196 @@ uint32_t gfx11_submit_compute_job(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t ct
     seq = gfx11_emit_fence(d, r);
     gfx11_commit(d, r);
     r->last_ctx = ctx;
+    r->last_vmid = vmid;
     return seq;
+}
+
+/* ------------------------- hangs and recovery ------------------------- */
+
+void gfx11_read_status(rdna3_dev *d, const rdna3_gfx_ring *r, rdna3_gfx_status *st)
+{
+    uint32_t wb = 0;
+    st->grbm_status = RG(d, regGRBM_STATUS);
+    st->grbm_status2 = RG(d, regGRBM_STATUS2);
+    st->grbm_status_se0 = RG(d, regGRBM_STATUS_SE0);
+    st->cp_stat = RG(d, regCP_STAT);
+    st->cp_stalled_stat1 = RG(d, regCP_STALLED_STAT1);
+    st->cp_cpc_status = RG(d, regCP_CPC_STATUS);
+    st->cp_cpc_stalled_stat1 = RG(d, regCP_CPC_STALLED_STAT1);
+    st->cp_cpf_status = RG(d, regCP_CPF_STATUS);
+    st->cp_me_cntl = RG(d, regCP_ME_CNTL);
+    st->rb0_rptr = RG(d, regCP_RB0_RPTR);
+    st->rb0_wptr = RG(d, regCP_RB0_WPTR);
+    st->cp_int_cntl = RG(d, regCP_INT_CNTL);
+    st->rlc_safe_mode = RG(d, regRLC_SAFE_MODE);
+    st->sdma0_status = rdna3_rreg(d, rdna3_reg_offset(d, HWIP_GC, 0, regSDMA0_STATUS_REG_BASE_IDX,
+                                                      regSDMA0_STATUS_REG));
+    if (r && r->wb != UINT64_MAX)
+        rdna3_vram_read(d, r->wb + RD_GFX_WB_RPTR, &wb, 4);
+    st->rb0_rptr_wb = wb;
+}
+
+void gfx11_log_status(rdna3_dev *d, const rdna3_gfx_status *st, const char *why)
+{
+    RERR(d, "GFX %s: GRBM_STATUS 0x%08x (%s) STATUS2 0x%08x SE0 0x%08x", why, st->grbm_status,
+         (st->grbm_status & GRBM_STATUS__GUI_ACTIVE_MASK) ? "busy" : "idle", st->grbm_status2,
+         st->grbm_status_se0);
+    RERR(d, "  CP_STAT 0x%08x STALLED1 0x%08x CPC 0x%08x/0x%08x CPF 0x%08x ME_CNTL 0x%08x",
+         st->cp_stat, st->cp_stalled_stat1, st->cp_cpc_status, st->cp_cpc_stalled_stat1,
+         st->cp_cpf_status, st->cp_me_cntl);
+    RERR(d, "  RB0 rptr 0x%x (wb 0x%x) wptr 0x%x, CP_INT_CNTL 0x%08x, RLC_SAFE_MODE 0x%x, "
+         "SDMA0_STATUS 0x%08x", st->rb0_rptr, st->rb0_rptr_wb, st->rb0_wptr, st->cp_int_cntl,
+         st->rlc_safe_mode, st->sdma0_status);
+}
+
+int gfx11_is_idle(rdna3_dev *d)
+{
+    return (RG(d, regGRBM_STATUS) & GRBM_STATUS__GUI_ACTIVE_MASK) == 0;
+}
+
+/* gfx_v11_0_set_safe_mode / gfx_v11_0_unset_safe_mode */
+static void rlc_safe_mode(rdna3_dev *d, int enter)
+{
+    uint32_t i, v = RLC_SAFE_MODE__CMD_MASK;
+    if (enter)
+        v |= 1u << RLC_SAFE_MODE__MESSAGE__SHIFT;
+    WG(d, regRLC_SAFE_MODE, v);
+    for (i = 0; i < d->usec_timeout; i++) {
+        if (!(RG(d, regRLC_SAFE_MODE) & RLC_SAFE_MODE__CMD_MASK))
+            return;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    RERR(d, "GFX: RLC did not %s safe mode", enter ? "enter" : "leave");
+}
+
+void gfx11_kill_waves(rdna3_dev *d, uint32_t vmid)
+{
+    uint32_t v = 0;
+    v = REG_SET_FIELD(v, SQ_CMD, CMD, 0x03);        /* SQ_IND_CMD_CMD_KILL */
+    v = REG_SET_FIELD(v, SQ_CMD, MODE, 0x01);       /* SQ_IND_CMD_MODE_BROADCAST */
+    v = REG_SET_FIELD(v, SQ_CMD, CHECK_VMID, 1);
+    v = REG_SET_FIELD(v, SQ_CMD, VM_ID, vmid);
+    rlc_safe_mode(d, 1);
+    WG(d, regSQ_CMD, v);
+    rlc_safe_mode(d, 0);
+    RLOG(d, "GFX: killed the waves of VMID %u (soft recovery)", vmid);
+}
+
+void gfx11_force_fence_completion(rdna3_dev *d, rdna3_gfx_ring *r)
+{
+    if (r->wb == UINT64_MAX)
+        return;
+    rdna3_vram_write(d, r->wb + RD_GFX_WB_FENCE, &r->fence_seq, 4);
+}
+
+int gfx11_soft_reset(rdna3_dev *d, rdna3_gfx_ring *r, struct rdna3_mec_ring *kiq,
+                     struct rdna3_mec_ring *kcq)
+{
+    uint32_t tmp, i, pipe, queue;
+    uint8_t zero[8] = { 0 };
+    int ret;
+
+    rlc_safe_mode(d, 1);
+
+    tmp = RG(d, regCP_INT_CNTL);
+    tmp &= ~(CP_INT_CNTL__CMP_BUSY_INT_ENABLE_MASK | CP_INT_CNTL__CNTX_BUSY_INT_ENABLE_MASK |
+             CP_INT_CNTL__CNTX_EMPTY_INT_ENABLE_MASK | CP_INT_CNTL__GFX_IDLE_INT_ENABLE_MASK);
+    WG(d, regCP_INT_CNTL, tmp);
+
+    /* dequeue every compute HQD (MEC1, 4 pipes x 4 queues) and the gfx HQD */
+    for (pipe = 0; pipe < 4; pipe++)
+        for (queue = 0; queue < 4; queue++) {
+            grbm_select(d, 1, pipe, queue, 0);
+            WG(d, regCP_HQD_DEQUEUE_REQUEST, 0x2);
+            WG(d, regSPI_COMPUTE_QUEUE_RESET, 0x1);
+        }
+    grbm_select(d, 0, 0, 0, 0);
+    WG(d, regCP_GFX_HQD_DEQUEUE_REQUEST, 0x1);
+    grbm_select(d, 0, 0, 0, 0);
+
+    /* reset every VMID but 0; three reads give GFX_HQD_ACTIVE time to drop */
+    WG(d, regCP_VMID_RESET, 0xfffffffe);
+    (void)RG(d, regCP_VMID_RESET);
+    (void)RG(d, regCP_VMID_RESET);
+    (void)RG(d, regCP_VMID_RESET);
+    for (i = 0; i < d->usec_timeout; i++) {
+        if (!RG(d, regCP_HQD_ACTIVE) && !RG(d, regCP_GFX_HQD_ACTIVE))
+            break;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    if (i >= d->usec_timeout) {
+        RERR(d, "GFX: soft reset: the pipes would not drain");
+        rlc_safe_mode(d, 0);
+        return RDNA3_ETIME;
+    }
+
+    tmp = RG(d, regGRBM_SOFT_RESET);
+    tmp |= GRBM_SOFT_RESET__SOFT_RESET_CP_MASK | GRBM_SOFT_RESET__SOFT_RESET_GFX_MASK |
+           GRBM_SOFT_RESET__SOFT_RESET_CPF_MASK | GRBM_SOFT_RESET__SOFT_RESET_CPC_MASK |
+           GRBM_SOFT_RESET__SOFT_RESET_CPG_MASK;
+    WG(d, regGRBM_SOFT_RESET, tmp);
+    tmp = RG(d, regGRBM_SOFT_RESET);
+    tmp &= ~(GRBM_SOFT_RESET__SOFT_RESET_CP_MASK | GRBM_SOFT_RESET__SOFT_RESET_GFX_MASK |
+             GRBM_SOFT_RESET__SOFT_RESET_CPF_MASK | GRBM_SOFT_RESET__SOFT_RESET_CPC_MASK |
+             GRBM_SOFT_RESET__SOFT_RESET_CPG_MASK);
+    WG(d, regGRBM_SOFT_RESET, tmp);
+
+    tmp = RG(d, regCP_SOFT_RESET_CNTL);
+    tmp |= CP_SOFT_RESET_CNTL__CMP_HQD_REG_RESET_MASK;
+    WG(d, regCP_SOFT_RESET_CNTL, tmp);
+    WG(d, regCP_ME_CNTL, 0);
+    WG(d, regCP_MEC_RS64_CNTL, 0);
+    for (i = 0; i < d->usec_timeout; i++) {
+        if (!RG(d, regCP_VMID_RESET))
+            break;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    if (i >= d->usec_timeout) {
+        RERR(d, "GFX: soft reset: CP_VMID_RESET stuck at 0x%x", RG(d, regCP_VMID_RESET));
+        rlc_safe_mode(d, 0);
+        return RDNA3_ETIME;
+    }
+
+    tmp = RG(d, regCP_INT_CNTL);
+    tmp |= CP_INT_CNTL__CMP_BUSY_INT_ENABLE_MASK | CP_INT_CNTL__CNTX_BUSY_INT_ENABLE_MASK |
+           CP_INT_CNTL__CNTX_EMPTY_INT_ENABLE_MASK | CP_INT_CNTL__GFX_IDLE_INT_ENABLE_MASK;
+    WG(d, regCP_INT_CNTL, tmp);
+    rlc_safe_mode(d, 0);
+
+    /* gfx_v11_0_cp_resume: ring 0 from scratch (the rptr writeback must
+     * read 0 again, the fence slot keeps the last completed seq) */
+    if (d->doorbell_ok)
+        cp_set_doorbell_range(d);
+    r->ready = 0;
+    rdna3_vram_write(d, r->wb + RD_GFX_WB_RPTR, zero, 8);
+    rdna3_hdp_flush(d);
+    cp_gfx_resume(d, r);
+    cp_gfx_start(d, r);
+    ret = gfx11_ring_test(d, r);
+    if (ret) {
+        RERR(d, "GFX: ring test failed after soft reset");
+        return ret;
+    }
+    r->ready = 1;
+    r->last_ctx = 0;
+    if (kiq) {
+        kiq->mapped = 0;
+        kiq->rb.ready = 0;
+        if (kcq) {
+            kcq->mapped = 0;
+            kcq->rb.ready = 0;
+            rdna3_vram_write(d, kcq->rb.wb + RD_GFX_WB_RPTR, zero, 8);
+        }
+        rdna3_vram_write(d, kiq->rb.wb + RD_GFX_WB_RPTR, zero, 8);
+        rdna3_hdp_flush(d);
+        ret = gfx11_kiq_start(d, kiq);
+        if (!ret && kcq)
+            ret = gfx11_kcq_start(d, kiq, kcq);
+        if (ret) {
+            RERR(d, "GFX: compute queues did not come back after soft reset (%d)", ret);
+            return ret;
+        }
+    }
+    RLOG(d, "GFX: soft reset done, rings back up");
+    return RDNA3_OK;
 }

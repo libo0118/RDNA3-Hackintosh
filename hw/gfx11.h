@@ -86,6 +86,7 @@ typedef struct rdna3_gfx_ring {
     uint32_t fence_seq;
     int      ready;
     uint64_t last_ctx;      /* amdgpu ring->current_ctx: context of the last job */
+    uint32_t last_vmid;     /* VMID of the last job (whose waves a recovery kills) */
     int      fence_irq;     /* fences use RELEASE_MEM INT_SEL 2 (EOP interrupt) */
 } rdna3_gfx_ring;
 
@@ -149,6 +150,35 @@ uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_
 void gfx11_set_eop_interrupt(rdna3_dev *d, rdna3_gfx_ring *r, int enable);
 int  gfx11_fence_passed(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq);
 int  gfx11_wait_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq);
+
+/* ---- hang detection and recovery ----
+ * amdgpu_job_timedout: dump the engine state, try to kill the hanging
+ * job's waves (soft recovery), else reset. gfx11_soft_reset is
+ * gfx_v11_0_soft_reset + cp_resume for the rings given; the heavier way out
+ * is smu13_mode1_reset and a full re-init from level 4. */
+typedef struct rdna3_gfx_status {
+    uint32_t grbm_status, grbm_status2, grbm_status_se0;
+    uint32_t cp_stat, cp_stalled_stat1, cp_cpc_status, cp_cpc_stalled_stat1, cp_cpf_status;
+    uint32_t cp_me_cntl, rb0_rptr, rb0_wptr, rb0_rptr_wb;
+    uint32_t cp_int_cntl, rlc_safe_mode;
+    uint32_t sdma0_status;
+} rdna3_gfx_status;
+void gfx11_read_status(rdna3_dev *d, const rdna3_gfx_ring *r, rdna3_gfx_status *st);
+void gfx11_log_status(rdna3_dev *d, const rdna3_gfx_status *st, const char *why);
+/* GRBM_STATUS.GUI_ACTIVE == 0 (gfx_v11_0_is_idle) */
+int  gfx11_is_idle(rdna3_dev *d);
+/* gfx_v10_0_ring_soft_recovery: SQ_CMD KILL broadcast to the waves of 'vmid'
+ * inside RLC safe mode; the job's fence may then land */
+void gfx11_kill_waves(rdna3_dev *d, uint32_t vmid);
+/* amdgpu_fence_driver_force_completion: the last emitted seq lands in the
+ * fence slot so every waiter returns (used right before a reset) */
+void gfx11_force_fence_completion(rdna3_dev *d, rdna3_gfx_ring *r);
+/* gfx_v11_0_soft_reset (dequeue every HQD, CP_VMID_RESET, GRBM soft reset of
+ * CP/GFX/CPF/CPC/CPG) followed by gfx_v11_0_cp_resume: the gfx ring, and the
+ * KIQ + KCQ when given (NULL = not in use), come back with a ring test. */
+struct rdna3_mec_ring;
+int  gfx11_soft_reset(rdna3_dev *d, rdna3_gfx_ring *r, struct rdna3_mec_ring *kiq,
+                      struct rdna3_mec_ring *kcq);
 
 /* size of the clear-state buffer in dwords (gfx_v11_0_get_csb_size) and
  * its contents (gfx_v11_0_get_csb_buffer); exposed for tests */

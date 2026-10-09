@@ -188,6 +188,12 @@ int RDNA3Accel::drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq
     return a->fBringup ? a->fBringup->fenceWait(ip, ring, seq, absNs) : 0;
 }
 
+uint32_t RDNA3Accel::drmVmQuery(void *ctx, void *vm)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->vmQuery(vm) : 0;
+}
+
 void RDNA3Accel::drmRingReady(uint32_t ip, uint32_t mask)
 {
     if (!fDrm || !fDrmLock)
@@ -215,6 +221,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.submit = drmSubmit;
     ops.fence_signaled = drmFenceSignaled;
     ops.fence_wait = drmFenceWait;
+    ops.vm_query = drmVmQuery;
     ops.gpu_clock = nullptr; /* TODO(stage2-gfx): RLC GPU clock counter */
 
     fDrmLock = IOLockAlloc();

@@ -443,6 +443,9 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
         return -RD_ENODEV;
     if (!cs->in.num_chunks || cs->in.num_chunks > 64)
         return -RD_EINVAL;
+    /* amdgpu_cs_submit: a guilty context never runs again */
+    if (ops->vm_query && f->vm && (ops->vm_query(ops->ctx, f->vm) & AMDGPU_CTX_QUERY2_FLAGS_GUILTY))
+        return -RD_ECANCELED;
 
     for (i = 0; i < cs->in.num_chunks; i++) {
         uint64_t cptr;
@@ -851,11 +854,24 @@ static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
         f->ctx_used[id] = 0;
         return 0;
     case AMDGPU_CTX_OP_QUERY_STATE:
-    case AMDGPU_CTX_OP_QUERY_STATE2:
+    case AMDGPU_CTX_OP_QUERY_STATE2: {
+        /* amdgpu_ctx_query / amdgpu_ctx_query2: the reset state lives
+         * with the VM here (one VM per file, one VMID per VM) */
+        uint32_t fl = 0, op = c->in.op;
         if (!id || id >= RD_MAX_CTX || !f->ctx_used[id])
             return -RD_EINVAL;
+        if (f->dev->ops.vm_query && f->vm)
+            fl = f->dev->ops.vm_query(f->dev->ops.ctx, f->vm);
         zero(c, sizeof(*c));
+        if (op == AMDGPU_CTX_OP_QUERY_STATE2) {
+            c->out.state.flags = fl;
+        } else {
+            c->out.state.reset_status = (fl & AMDGPU_CTX_QUERY2_FLAGS_GUILTY) ? AMDGPU_CTX_GUILTY_RESET
+                                      : (fl & AMDGPU_CTX_QUERY2_FLAGS_RESET) ? AMDGPU_CTX_INNOCENT_RESET
+                                      : AMDGPU_CTX_NO_RESET;
+        }
         return 0;
+    }
     case AMDGPU_CTX_OP_GET_STABLE_PSTATE:
         zero(c, sizeof(*c));
         c->out.pstate.flags = AMDGPU_CTX_STABLE_PSTATE_NONE;

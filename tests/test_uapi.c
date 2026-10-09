@@ -37,6 +37,8 @@ static int vm_live, vm_maps, vm_unmaps;
 static uint64_t vm_mapped;
 static int vm_dummy;
 static void *h_vm_create(void *c) { (void)c; vm_live++; return &vm_dummy; }
+static uint32_t h_query_flags;
+static uint32_t h_vm_query(void *c, void *vm) { (void)c; (void)vm; return h_query_flags; }
 static void h_vm_destroy(void *c, void *vm) { (void)c; (void)vm; vm_live--; }
 static int h_vm_map(void *c, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off, uint64_t size,
                     uint32_t flags)
@@ -137,7 +139,7 @@ int main(void)
     static rdna3_drm_device dev;
     static rdna3_drm_file file;
     rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
-                          h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL };
+                          h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -274,6 +276,30 @@ int main(void)
         c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = id;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == -RD_EINVAL);
+        /* reset state comes from the OS through vm_query (amdgpu_ctx_query2) */
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_ALLOC_CTX;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+        id = c.out.alloc.ctx_id;
+        dev.ops.vm_query = h_vm_query;
+        h_query_flags = AMDGPU_CTX_QUERY2_FLAGS_RESET | AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = id;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 && c.out.state.flags == h_query_flags);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE; c.in.ctx_id = id;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
+              c.out.state.reset_status == AMDGPU_CTX_INNOCENT_RESET);
+        h_query_flags |= AMDGPU_CTX_QUERY2_FLAGS_GUILTY;
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE; c.in.ctx_id = id;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
+              c.out.state.reset_status == AMDGPU_CTX_GUILTY_RESET);
+        h_query_flags = 0;
+        dev.ops.vm_query = NULL;
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = id;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
     }
     /* syncobj */
     {
@@ -313,6 +339,12 @@ int main(void)
         rdna3_drm_device_set_ring_ready(&dev, AMDGPU_HW_IP_DMA, 1);
 
         CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_GFX, 0, 0, NULL) == -RD_EINVAL); /* no GFX ring */
+        /* a guilty context (hung or faulted) never submits again */
+        dev.ops.vm_query = h_vm_query;
+        h_query_flags = AMDGPU_CTX_QUERY2_FLAGS_GUILTY | AMDGPU_CTX_QUERY2_FLAGS_RESET;
+        CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED);
+        h_query_flags = AMDGPU_CTX_QUERY2_FLAGS_RESET;
+        dev.ops.vm_query = NULL;
         CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);   /* not dwords */
         memset(&sc, 0, sizeof(sc));
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, sc) == 0);

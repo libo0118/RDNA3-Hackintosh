@@ -311,3 +311,36 @@ int gmc11_gart_enable(rdna3_dev *d, rdna3_gmc *g)
              (unsigned long long)(g->gart_size >> 20), (unsigned long long)g->gart_table);
     return r;
 }
+
+/* ------------------------- page faults ------------------------- */
+
+#define MM_FAULT_IRQ_MASK \
+    (MMVM_CONTEXT1_CNTL__RANGE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     MMVM_CONTEXT1_CNTL__DUMMY_PAGE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     MMVM_CONTEXT1_CNTL__PDE0_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     MMVM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     MMVM_CONTEXT1_CNTL__READ_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     MMVM_CONTEXT1_CNTL__WRITE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK | \
+     MMVM_CONTEXT1_CNTL__EXECUTE_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK)
+
+uint32_t mmhub302_fault_status(rdna3_dev *d, int clear)
+{
+    uint32_t st = RMM(d, regMMVM_L2_PROTECTION_FAULT_STATUS);
+    if (clear)
+        WMM(d, regMMVM_L2_PROTECTION_FAULT_CNTL,
+            (RMM(d, regMMVM_L2_PROTECTION_FAULT_CNTL) & ~1u) | 1u);
+    return st;
+}
+
+void mmhub302_set_vm_fault_interrupts(rdna3_dev *d, int enable)
+{
+    uint32_t i, tmp;
+    for (i = 0; i < 16; i++) {
+        tmp = RMM_OFF(d, regMMVM_CONTEXT0_CNTL, i * CTX_DISTANCE);
+        if (enable)
+            tmp |= MM_FAULT_IRQ_MASK;
+        else
+            tmp &= ~MM_FAULT_IRQ_MASK;
+        WMM_OFF(d, regMMVM_CONTEXT0_CNTL, i * CTX_DISTANCE, tmp);
+    }
+}

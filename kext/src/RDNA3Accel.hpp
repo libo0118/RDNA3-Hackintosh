@@ -127,6 +127,7 @@ private:
                             uint32_t n, uint64_t *seq);
     static int    drmFenceSignaled(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq);
     static int    drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs);
+    static uint32_t drmVmQuery(void *ctx, void *vm);
 
     /* Stage 7 */
     range_alloc  *fAccelVa = nullptr;

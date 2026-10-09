@@ -234,6 +234,14 @@ int smu13_get_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t *watts);
 /* smu_v13_0_7_set_power_profile_mode: WORKLOAD_PPLIB_*_BIT */
 int smu13_set_workload(rdna3_dev *d, uint32_t workload_bit);
 
+/* smu_v13_0_7_mode1_reset: DEBUGSMC_MSG_Mode1Reset through the debug
+ * mailbox (C2PMSG_53/75/54, no response), then SMU13_MODE1_RESET_WAIT_TIME.
+ * Afterwards the PSP bootloader is back (psp13_wait_for_bootloader) and
+ * everything from level 4 on has to be redone. */
+#define RD_DEBUGSMC_MSG_Mode1Reset   2
+#define RD_SMU_MODE1_RESET_WAIT_MS   500
+int smu13_mode1_reset(rdna3_dev *d);
+
 /* smu_hw_fini for a driver unload: on 13.0.7 the PMFW handles the DPM
  * features itself (smu_disable_dpms returns early), the driver only sends
  * PrepareMp1ForUnload (smu_reset_mp1_state). */

@@ -487,6 +487,17 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
     return RDNA3_OK;
 }
 
+int smu13_mode1_reset(rdna3_dev *d)
+{
+    /* __smu_cmn_send_debug_msg: param, message, response = 0; the PMFW
+     * takes the whole chip through reset, so nothing answers */
+    rdna3_wreg(d, SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_53), 0);
+    rdna3_wreg(d, SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_75), RD_DEBUGSMC_MSG_Mode1Reset);
+    rdna3_wreg(d, SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_54), 0);
+    d->os.msleep(d->os.ctx, RD_SMU_MODE1_RESET_WAIT_MS);
+    return RDNA3_OK;
+}
+
 int smu13_pm_fini(rdna3_dev *d, rdna3_smu *s)
 {
     (void)s;

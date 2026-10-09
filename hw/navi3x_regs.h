@@ -49,6 +49,13 @@
 #define regMP1_SMN_C2PMSG_82_BASE_IDX   0
 #define regMP1_SMN_C2PMSG_90            0x029a   /* response */
 #define regMP1_SMN_C2PMSG_90_BASE_IDX   0
+/* debug mailbox (smu_v13_0_7_init_msg_ctl): param 53, message 75, response 54 */
+#define regMP1_SMN_C2PMSG_53            0x0275
+#define regMP1_SMN_C2PMSG_53_BASE_IDX   0
+#define regMP1_SMN_C2PMSG_54            0x0276
+#define regMP1_SMN_C2PMSG_54_BASE_IDX   0
+#define regMP1_SMN_C2PMSG_75            0x028b
+#define regMP1_SMN_C2PMSG_75_BASE_IDX   0
 
 /* ---- SMUIO 13.0.6 (asic_reg/smuio/smuio_13_0_6_offset.h): VBIOS ROM window ---- */
 #define regROM_INDEX                    0x00e4

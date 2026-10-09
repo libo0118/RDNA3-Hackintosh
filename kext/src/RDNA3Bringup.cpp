@@ -27,6 +27,9 @@ extern "C" void thread_deallocate(thread_t thread);
 
 #define BLOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
+/* amdgpu_device_check_vram_lost: a word written at bring-up and read back after a reset */
+static const uint32_t kResetMagic = 0x52444E33u;   /* "RDN3" */
+
 static const char *kBundleID = "io.github.voten641.RDNA3Accel";
 
 /* --------------------------- rdna3_os --------------------------- */
@@ -277,7 +280,6 @@ void RDNA3Bringup::run()
     rdna3_os os = {};
     amd_fw_blob_ref blobs[AMD_BLOB_COUNT] = {};
     amd_fw_status fst;
-    int ret;
 
     os.ctx = this;
     os.udelay = osUdelay;
@@ -307,9 +309,9 @@ void RDNA3Bringup::run()
         publishString("RDNA3,Stage2", "failed: boot scanout leaves no room below 512 MiB");
         return;
     }
+    fAllocLo = lo;
+    fAllocHi = hi;
     rdna3_vram_alloc_init(fDev, lo, hi);
-
-    rdna3_nbio_remap_hdp(fDev);
 
     /* firmware */
     if (!loadFirmware(amd_navi32_sos_name, &fSos)) {
@@ -329,16 +331,53 @@ void RDNA3Bringup::run()
         return;
     }
     BLOG("firmware plan: %u ucodes, %u KiB", fPlan->count, fPlan->total_aligned / 1024);
+    for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)
+        fBlobRefs[i] = blobs[i];
+
+    if (!hwInit())
+        return;
+
+    if (fPmUp)
+        pmPublishMetrics();
+
+    if (fMsi) {
+        /* snapshot after bring-up (the handler keeps counting afterwards) */
+        publish("RDNA3,MSILive", fIrqLive ? 1 : 0);
+        publish("RDNA3,IRQs", fIrqCount);
+        publish("RDNA3,IRQIVs", fIvCount);
+        publish("RDNA3,IRQFenceGFX", fIrqFenceGfx);
+        publish("RDNA3,IRQFenceSDMA", fIrqFenceSdma);
+        publish("RDNA3,IRQFenceCompute", fIrqFenceComp);
+        publish("RDNA3,IRQOther", fIrqOther);
+    }
+}
+
+/* Levels 4-8 on the device: the PSP, firmware, SMU, GMC, IH, SDMA, GFX and
+ * compute queues. Runs once from run() and again after a GPU reset
+ * (fReinit: the structures and the page-table pool stay, the hardware is
+ * programmed from scratch). Returns false when a level fails; the
+ * IORegistry says which. */
+bool RDNA3Bringup::hwInit()
+{
+    int ret;
+
+    rdna3_nbio_remap_hdp(fDev);
+    /* a known word in VRAM: after a reset it tells whether VRAM survived */
+    fResetMagic = rdna3_vram_alloc(fDev, 4096, 4096, "reset-magic");
+    if (fResetMagic != UINT64_MAX) {
+        uint32_t m = kResetMagic;
+        rdna3_vram_write(fDev, fResetMagic, &m, 4);
+    }
 
     /* PSP */
     ret = psp13_init(fPsp, fDev, fSos.data, fSos.len);
     if (!ret)
-        ret = psp13_hw_init(fPsp, fPlan, blobs);
+        ret = psp13_hw_init(fPsp, fPlan, fBlobRefs);
     publish("RDNA3,PSPResult", (uint64_t)(int64_t)ret);
     publish("RDNA3,SOSVersion", fPsp->sos_fw_version);
     if (ret) {
         publishString("RDNA3,Stage2", "failed: PSP");
-        return;
+        return false;
     }
     publishString("RDNA3,Stage2", "PSP up, firmware loaded");
 
@@ -349,7 +388,7 @@ void RDNA3Bringup::run()
         publish("RDNA3,SMUDriverIF", ifv);
         publishString("RDNA3,Stage2", ret ? "failed: SMU" : "PSP + SMU up");
         if (ret)
-            return;
+            return false;
         /* smu_hw_init: power management, before the GMC like soc21's IP order */
         if (fPmMode)
             pmInit();
@@ -359,10 +398,11 @@ void RDNA3Bringup::run()
      * VRAM, MMHUB 3.0.2 VMID0 + contexts, VMID0 TLB flush. GFXHUB comes
      * with the GFX block (gfx_v11_0_hw_init), not here. */
     if (fLevel >= 6) {
-        fGmc = (rdna3_gmc *)IOMalloc(sizeof(*fGmc));
+        if (!fGmc)
+            fGmc = (rdna3_gmc *)IOMalloc(sizeof(*fGmc));
         if (!fGmc) {
             publishString("RDNA3,Stage2", "failed: GMC (no memory)");
-            return;
+            return false;
         }
         bzero(fGmc, sizeof(*fGmc));
         ret = gmc11_init(fDev, fGmc, 0);
@@ -373,11 +413,18 @@ void RDNA3Bringup::run()
         publish("RDNA3,GARTSize", fGmc->gart_size);
         publishString("RDNA3,Stage2", ret ? "failed: GMC" : "PSP + SMU + MMHUB GART up");
         if (ret)
-            return;
+            return false;
         /* GPUVM can now translate: let the GPU reach system memory (GTT BOs
          * through the page tables). amdgpu: pci_set_master() at probe. */
         fPci->setBusMasterEnable(true);
         publish("RDNA3,BusMaster", 1);
+        /* after a reset the live VMs get their MMHUB contexts back (the
+         * GFXHUB side follows at level 8) */
+        for (uint32_t id = 1; id < 16; id++)
+            if (fVmidUsed & (1u << id)) {
+                mmhub302_setup_vm_pt_regs(fDev, id, fVmPd[id]);
+                mmhub302_flush_tlb(fDev, id, 0);
+            }
         /* soc21_common_hw_init: doorbell aperture (gfx ring, SDMA and the
          * compute queues ring their doorbells from level 7/8 on) */
         if (fDoorbells && mapDoorbell())
@@ -385,10 +432,11 @@ void RDNA3Bringup::run()
         publish("RDNA3,Doorbells", fDev->doorbell_ok ? 1 : 0);
 
         /* IH 6.0 ring 0, polled (no MSI registration yet) */
-        fIh = (rdna3_ih *)IOMalloc(sizeof(*fIh));
+        if (!fIh)
+            fIh = (rdna3_ih *)IOMalloc(sizeof(*fIh));
         if (!fIh) {
             publishString("RDNA3,Stage2", "failed: IH (no memory)");
-            return;
+            return false;
         }
         bzero(fIh, sizeof(*fIh));
         ret = ih60_init(fDev, fIh, 0, fGmc->dummy_page_pa, fMsi ? 1 : 0);
@@ -397,30 +445,36 @@ void RDNA3Bringup::run()
             /* anything already queued (e.g. from firmware) is drained and counted */
             IOSleep(10);
             publish("RDNA3,IHEarlyIVs", ih60_process(fDev, fIh, nullptr, nullptr));
-            if (fMsi && !setupInterrupt())
+            if (fMsi && !fWorkLoop && !setupInterrupt())
                 BLOG("MSI: not available, the IH ring stays polled");
+            /* gmc_v11_0 late_init: page faults of both hubs raise IVs */
+            gmc11_set_vm_fault_interrupts(fDev, 1);
         }
         publishString("RDNA3,Stage2", ret ? "failed: IH" : "PSP + SMU + MMHUB GART + IH up");
         if (ret)
-            return;
+            return false;
 
-        /* page tables for user VMs: 16 MiB of 4 KiB tables */
-        fPtPool = (rdna3_pt_pool *)IOMalloc(sizeof(*fPtPool));
-        if (fPtPool && gpuvm_pool_init(fDev, fPtPool, 4096) == RDNA3_OK) {
-            __sync_synchronize();   /* publish the pool before fVmReady */
-            fVmReady = true;
-            publish("RDNA3,VMTablePages", fPtPool->npages);
-        } else {
-            BLOG("no page-table pool: GEM_VA stays record-only");
+        /* page tables for user VMs: 16 MiB of 4 KiB tables (kept across a
+         * GPU reset: VRAM survives a mode-1 reset) */
+        if (!fReinit) {
+            fPtPool = (rdna3_pt_pool *)IOMalloc(sizeof(*fPtPool));
+            if (fPtPool && gpuvm_pool_init(fDev, fPtPool, 4096) == RDNA3_OK) {
+                __sync_synchronize();   /* publish the pool before fVmReady */
+                fVmReady = true;
+                publish("RDNA3,VMTablePages", fPtPool->npages);
+            } else {
+                BLOG("no page-table pool: GEM_VA stays record-only");
+            }
         }
     }
 
     /* level 7: SDMA0 ring + ring test + a 64 KiB VRAM->VRAM copy check */
     if (fLevel >= 7) {
-        fSdma = (rdna3_sdma_ring *)IOMalloc(sizeof(*fSdma));
+        if (!fSdma)
+            fSdma = (rdna3_sdma_ring *)IOMalloc(sizeof(*fSdma));
         if (!fSdma) {
             publishString("RDNA3,Stage2", "failed: SDMA (no memory)");
-            return;
+            return false;
         }
         bzero(fSdma, sizeof(*fSdma));
         ret = sdma60_start(fDev, fSdma, 0, 0);
@@ -481,17 +535,18 @@ void RDNA3Bringup::run()
             publishString("RDNA3,Rings", "DMA0");
         }
         if (ret)
-            return;
+            return false;
     }
 
     /* level 8: GFX 11 (RLC autoload check, RS64, GFXHUB, clear state) and
      * the kernel gfx ring 0 with its ring test */
     if (fLevel >= 8) {
         rdna3_rs64_start rs64;
-        fGfx = (rdna3_gfx_ring *)IOMalloc(sizeof(*fGfx));
+        if (!fGfx)
+            fGfx = (rdna3_gfx_ring *)IOMalloc(sizeof(*fGfx));
         if (!fGfx) {
             publishString("RDNA3,Stage2", "failed: GFX (no memory)");
-            return;
+            return false;
         }
         bzero(fGfx, sizeof(*fGfx));
         ret = gfx11_rs64_from_fw(fBlobs[AMD_BLOB_PFP].data, fBlobs[AMD_BLOB_PFP].len,
@@ -505,8 +560,10 @@ void RDNA3Bringup::run()
         /* MEC: the KIQ and the first kernel compute queue (needs doorbells) */
         if (!ret && fDev->doorbell_ok) {
             int kr;
-            fKiq = (rdna3_mec_ring *)IOMalloc(sizeof(*fKiq));
-            fKcq = (rdna3_mec_ring *)IOMalloc(sizeof(*fKcq));
+            if (!fKiq)
+                fKiq = (rdna3_mec_ring *)IOMalloc(sizeof(*fKiq));
+            if (!fKcq)
+                fKcq = (rdna3_mec_ring *)IOMalloc(sizeof(*fKcq));
             if (fKiq && fKcq) {
                 bzero(fKiq, sizeof(*fKiq));
                 bzero(fKcq, sizeof(*fKcq));
@@ -544,19 +601,9 @@ void RDNA3Bringup::run()
         publishString("RDNA3,Stage2", ret ? "failed: GFX" : "GFX ring 0 up, ring test passed");
     }
 
-    if (fPmUp)
-        pmPublishMetrics();
-
-    if (fMsi) {
-        /* snapshot after bring-up (the handler keeps counting afterwards) */
-        publish("RDNA3,MSILive", fIrqLive ? 1 : 0);
-        publish("RDNA3,IRQs", fIrqCount);
-        publish("RDNA3,IRQIVs", fIvCount);
-        publish("RDNA3,IRQFenceGFX", fIrqFenceGfx);
-        publish("RDNA3,IRQFenceSDMA", fIrqFenceSdma);
-        publish("RDNA3,IRQFenceCompute", fIrqFenceComp);
-        publish("RDNA3,IRQOther", fIrqOther);
-    }
+    publish("RDNA3,GPUResets", fGpuResets);
+    publish("RDNA3,VRAMLost", fVramLostCount);
+    return true;
 }
 
 /* -------------------------- power management -------------------------- */
@@ -572,8 +619,11 @@ void RDNA3Bringup::pmInit()
     const rdna3_vbios *vb = nullptr;
     int ret;
 
-    fSmu = (rdna3_smu *)IOMalloc(sizeof(*fSmu));
-    fRom = (uint8_t *)IOMalloc(RD_VBIOS_MAX_LEN);
+    fPmUp = false;
+    if (!fSmu)
+        fSmu = (rdna3_smu *)IOMalloc(sizeof(*fSmu));
+    if (!fRom)
+        fRom = (uint8_t *)IOMalloc(RD_VBIOS_MAX_LEN);
     if (!fSmu || !fRom) {
         publishString("RDNA3,PM", "failed: no memory");
         return;
@@ -658,15 +708,176 @@ void RDNA3Bringup::pmPublishMetrics()
          smu13_metric_power_w(fSmu), smu13_metric_fan_rpm(fSmu));
 }
 
-/* ------------------------------ GPUVM ------------------------------ */
+/* ----------------------------- recovery ----------------------------- */
 
 struct RDNA3Vm {
     rdna3_vm vm;
     uint32_t vmid;
     bool     live;       /* page tables exist */
+    bool     guilty;     /* a job of this VM hung or page-faulted: no more submissions */
+    uint32_t resetSeen, vramLostSeen;   /* fResetCount / fVramLostCount when created */
     bool     gfxFlush;   /* next GFX job re-points the VMID and flushes from the ring */
     bool     compFlush;  /* same for the next compute job (the hub is shared, the rings are not) */
 };
+
+
+void RDNA3Bringup::markGuilty(uint32_t vmid, const char *why)
+{
+    RDNA3Vm *v = vmid < 16 ? fVmByVmid[vmid] : nullptr;
+    if (!v) {
+        BLOG("%s on VMID %u, which no client owns", why, vmid);
+        return;
+    }
+    if (!v->guilty)
+        BLOG("%s: VMID %u's client is guilty, its submissions now fail", why, vmid);
+    v->guilty = true;
+}
+
+uint32_t RDNA3Bringup::vmQuery(void *p)
+{
+    RDNA3Vm *v = (RDNA3Vm *)p;
+    uint32_t fl = 0;
+    if (!v)
+        return 0;
+    if (v->guilty)
+        fl |= AMDGPU_CTX_QUERY2_FLAGS_GUILTY;
+    if (v->resetSeen != fResetCount)
+        fl |= AMDGPU_CTX_QUERY2_FLAGS_RESET;
+    if (v->vramLostSeen != fVramLostCount)
+        fl |= AMDGPU_CTX_QUERY2_FLAGS_RESET | AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
+    return fl;
+}
+
+/* amdgpu_fence_driver_force_completion on every kernel ring: the last
+ * emitted seq lands, waiters wake up (and see the guilty flag) */
+void RDNA3Bringup::forceFences()
+{
+    if (fGfx)
+        gfx11_force_fence_completion(fDev, fGfx);
+    if (fKcq)
+        gfx11_force_fence_completion(fDev, &fKcq->rb);
+    if (fKiq)
+        gfx11_force_fence_completion(fDev, &fKiq->rb);
+    if (fSdma && fSdma->wb != UINT64_MAX)
+        rdna3_vram_write(fDev, fSdma->wb + RD_SDMA_WB_FENCE, &fSdma->fence_seq, 4);
+    IOLockLock(fLock);
+    IOLockWakeup(fLock, &fFenceEvent, false);
+    IOLockUnlock(fLock);
+}
+
+/* amdgpu_job_timedout for (ip, ring): state dump, soft recovery of the
+ * guilty VMID's waves, then a GFX soft reset, then the whole chip. Called
+ * from fenceWait under the DRM lock, so nothing else touches the rings. */
+int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
+{
+    rdna3_gfx_ring *r = ip == AMDGPU_HW_IP_GFX ? fGfx
+                      : (ip == AMDGPU_HW_IP_COMPUTE && fKcq) ? &fKcq->rb : nullptr;
+    uint32_t vmid = r ? r->last_vmid : 0;
+    rdna3_gfx_status st;
+    bool ok = false;
+
+    BLOG("hang: %s ring %u, fence %llu not signalled within 10 s",
+         ip == AMDGPU_HW_IP_DMA ? "DMA" : ip == AMDGPU_HW_IP_GFX ? "GFX" : "COMPUTE", ring,
+         (unsigned long long)seq);
+    if (fGfx) {
+        gfx11_read_status(fDev, fGfx, &st);
+        gfx11_log_status(fDev, &st, "timeout");
+    }
+    if (vmid)
+        markGuilty(vmid, "GPU hang");
+
+    /* amdgpu_ring_soft_recovery: kill the waves, give the fence 100 ms */
+    if (r && vmid) {
+        gfx11_kill_waves(fDev, vmid);
+        fSoftRecoveries++;
+        publish("RDNA3,SoftRecoveries", fSoftRecoveries);
+        for (int i = 0; i < 100 && !fenceSignaled(ip, ring, seq); i++)
+            IOSleep(1);
+        if (fenceSignaled(ip, ring, seq)) {
+            BLOG("hang: soft recovery worked, the ring runs again");
+            return 0;
+        }
+    }
+
+    /* the engine needs a reset; pending fences complete first so every
+     * waiter returns (guilty contexts see -ECANCELED afterwards) */
+    forceFences();
+    if (r && fGfx && fGfx->ready) {
+        ok = gfx11_soft_reset(fDev, fGfx, fKiq, fKcq) == RDNA3_OK;
+        if (ok) {
+            for (uint32_t id = 1; id < 16; id++)
+                if (fVmByVmid[id])
+                    fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = true;
+            fResetCount++;
+            BLOG("hang: GFX soft reset done (%u resets so far)", fResetCount);
+        }
+    }
+    if (!ok)
+        ok = gpuReset();
+    publish("RDNA3,GPUResets", fGpuResets);
+    publish("RDNA3,Resets", fResetCount);
+    return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
+}
+
+/* amdgpu_device_gpu_recover with the mode-1 method (soc21): the PMFW
+ * resets the chip, the PSP bootloader comes back, levels 4-8 run again.
+ * VRAM normally survives; the magic word says so. */
+bool RDNA3Bringup::gpuReset()
+{
+    uint32_t magic = 0, i;
+    bool ok;
+
+    fGpuResets++;
+    BLOG("GPU reset #%llu: mode-1 through the PMFW, then bring-up from level 4",
+         (unsigned long long)fGpuResets);
+    if (fIntr)
+        fIntr->disable();
+    for (uint32_t id = 1; id < 16; id++)
+        if (fVmByVmid[id])
+            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = true;
+    if (fKcq && fKcq->rb.ready)
+        gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
+    if (fGfx && fGfx->ready)
+        gfx11_set_eop_interrupt(fDev, fGfx, 0);
+
+    /* soc21_asic_mode1_reset: no bus mastering across the reset */
+    fPci->setBusMasterEnable(false);
+    smu13_mode1_reset(fDev);
+    if (psp13_wait_for_bootloader(fPsp) != RDNA3_OK)
+        BLOG("GPU reset: the PSP bootloader did not come back");
+    for (i = 0; i < fDev->usec_timeout; i++) {
+        if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu)
+            break;
+        IODelay(1);
+    }
+    if (fResetMagic != UINT64_MAX) {
+        rdna3_vram_read(fDev, fResetMagic, &magic, 4);
+        if (magic != kResetMagic) {
+            fVramLostCount++;
+            BLOG("GPU reset: VRAM content lost (0x%08x), clients see VRAMLOST", magic);
+        }
+    }
+
+    /* everything from level 4 on is programmed again by hwInit() */
+    rdna3_vram_alloc_init(fDev, fAllocLo, fAllocHi);
+    fDev->doorbell_ok = 0;
+    if (fSdma) fSdma->ready = 0;
+    if (fGfx) fGfx->ready = 0;
+    if (fKiq) { fKiq->rb.ready = 0; fKiq->mapped = 0; }
+    if (fKcq) { fKcq->rb.ready = 0; fKcq->mapped = 0; }
+    fReinit = true;
+    ok = hwInit();
+    fReinit = false;
+    fResetCount++;
+    if (fIntr)
+        fIntr->enable();
+    BLOG("GPU reset #%llu %s", (unsigned long long)fGpuResets, ok ? "done, rings back up" : "FAILED");
+    publish("RDNA3,VRAMLost", fVramLostCount);
+    return ok;
+}
+
+/* ------------------------------ GPUVM ------------------------------ */
+
 
 void *RDNA3Bringup::vmCreate()
 {
@@ -675,6 +886,8 @@ void *RDNA3Bringup::vmCreate()
         return nullptr;
     bzero(v, sizeof(*v));
     v->vm.root = UINT64_MAX;
+    v->resetSeen = fResetCount;
+    v->vramLostSeen = fVramLostCount;
     if (!fVmReady)
         return v;
     /* one VMID per open file for now (amdgpu hands VMIDs out per job) */
@@ -687,6 +900,7 @@ void *RDNA3Bringup::vmCreate()
             v->vm.vmid = id;
             v->live = true;
             fVmPd[id] = gpuvm_pd_addr(fDev, &v->vm);
+            fVmByVmid[id] = v;
             /* both hubs: SDMA/VCN walk MMHUB, shaders GFXHUB */
             mmhub302_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
             if (fGmc && fGmc->gfxhub_enabled)
@@ -721,6 +935,7 @@ void RDNA3Bringup::vmDestroy(void *p)
         gpuvm_vm_fini(fDev, &v->vm);
         fVmidUsed &= ~(1u << v->vmid);
         fVmPd[v->vmid] = 0;
+        fVmByVmid[v->vmid] = nullptr;
     }
     IOFree(v, sizeof(*v));
 }
@@ -781,6 +996,8 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
     RDNA3Vm *v = (RDNA3Vm *)p;
     if (!v || !v->live || ring != 0)
         return -RD_EINVAL;   /* record-only VM: the IB VA means nothing to the GPU */
+    if (v->guilty)
+        return -RD_ECANCELED;   /* amdgpu_cs_submit on a guilty context */
     if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready) {
         for (uint32_t i = 0; i < n; i++)
             sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);
@@ -855,8 +1072,10 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
         if (fenceSignaled(ip, ring, seq))
             return 0;
         absolutetime_to_nanoseconds(mach_continuous_time(), &now);
-        if ((absNs != UINT64_MAX && now >= absNs) || now - start >= capNs)
+        if (absNs != UINT64_MAX && now >= absNs)
             return -RD_ETIME;
+        if (now - start >= capNs)
+            return recover(ip, ring, seq);   /* amdgpu_job_timedout */
         if (fIrqLive) {
             uint64_t ns = 5ull * 1000 * 1000, left = capNs - (now - start), deadline;
             if (absNs != UINT64_MAX && absNs - now < left)
@@ -874,6 +1093,9 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
         } else if (spins < 1000) {
             IODelay(1);
         } else {
+            /* polled IH: page faults and other IVs are only seen here */
+            if (fIh && fIh->enabled)
+                ih60_process(fDev, fIh, ivCallback, this);
             IOSleep(1);
         }
     }
@@ -897,6 +1119,20 @@ void RDNA3Bringup::irqAction(OSObject *owner, IOInterruptEventSource *, int)
 void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
 {
     RDNA3Bringup *b = (RDNA3Bringup *)ctx;
+    if (gmc11_iv_is_vm_fault(iv)) {
+        /* gmc_v11_0_process_interrupt: no retry faults on a dGPU, the wave
+         * is gone; the VM that owns the VMID is guilty from now on */
+        rdna3_vm_fault f;
+        gmc11_decode_vm_fault(b->fDev, iv, &f);
+        gmc11_log_vm_fault(b->fDev, &f);
+        b->fVmFaults++;
+        b->markGuilty(f.vmid, f.hub ? "MMHUB page fault" : "GFXHUB page fault");
+        b->publish("RDNA3,VMFaults", b->fVmFaults);
+        b->publish("RDNA3,LastFaultAddr", f.addr);
+        b->publish("RDNA3,LastFaultVMID", f.vmid);
+        b->publish("RDNA3,LastFaultStatus", f.status);
+        return;
+    }
     switch (ih60_iv_fence(iv)) {
     case RD_IH_FENCE_GFX:   b->fIrqFenceGfx++; break;
     case RD_IH_FENCE_SDMA0: b->fIrqFenceSdma++; break;

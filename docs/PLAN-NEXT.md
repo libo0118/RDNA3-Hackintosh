@@ -54,13 +54,15 @@ Cel: modesetting, EDID, wiele monitorów, hotplug, zmiana rozdzielczości.
 * Później: BACO/sleep, `IOPMPowerState` w kexcie, wybudzanie, przerwania
   termiczne (THM) przez IH.
 
-## 5. Odporność: wykrywanie zawieszeń i reset GPU
-* Timeout fence'a → odczyt `GRBM_STATUS`, `CP_STAT`, ringów; zrzut stanu do
-  IORegistry.
-* Soft reset ringu / kolejki (MES `RESET_QUEUE`), potem pełny reset przez
-  PSP/SMU (mode1) z ponowną inicjalizacją poziomów 4–8.
-* Ochrona przed błędami stron GPUVM: obsługa przerwań VM fault z IH
-  (adres, VMID, klient) i zabicie kontekstu zamiast zawieszenia systemu.
+## 5. ✅ Odporność: wykrywanie zawieszeń i reset GPU
+* ✅ Timeout fence'a (10 s) → zrzut `GRBM_STATUS`/`CP_STAT`/`SDMA0_STATUS`
+  do logu, VM joba „guilty”, `SQ_CMD` zabija fale (soft recovery), soft
+  reset GFX (`gfx_v11_0_soft_reset` + ring 0/KIQ/KCQ od nowa), reset mode-1
+  przez PMFW i `hwInit()` od poziomu 4; `VRAMLOST` po słowie kontrolnym.
+* ✅ VM fault z IH (VMC/GFX źródło 0): adres, VMID, status L2, kontekst
+  guilty, `AMDGPU_CTX_OP_QUERY_STATE2` i `-ECANCELED` jak w amdgpu.
+* Zostaje: reset pojedynczej kolejki przez MES (`RESET_QUEUE`), gdy MES
+  dojdzie; soft reset SDMA; `drop fDrmLock` w czasie czekania.
 
 ## 6. UAPI dla RADV na serio
 * Timeline syncobj, `AMDGPU_CTX` z priorytetami, `BO_LIST`, chunki CS,

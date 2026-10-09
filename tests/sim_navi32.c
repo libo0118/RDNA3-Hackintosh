@@ -39,6 +39,9 @@
 #include "gen/nbio_4_3_0_doorbell.h"
 #include "gen/dcn_3_2_1.h"
 #include "gen/gc_11_0_0_gfx.h"
+#include "gen/gc_11_0_0_reset.h"
+#include "gen/gc_11_0_3_gmc.h"
+#include "gen/mmhub_3_0_2.h"
 #include "navi3x_regs.h"
 #include "psp_gfx_if.h"
 #include "amdgpu_ucode_hdr.h"
@@ -131,6 +134,11 @@ typedef struct sim {
     uint64_t set_resources_mask;
     uint32_t cp_cur_me, cp_cur_pipe, cp_cur_queue;   /* engine running cp_exec */
     int dcn_hold;              /* 1: flips stay pending (no vupdate yet) */
+    /* recovery: SQ_CMD kills, RLC safe mode, GRBM soft resets, mode-1 resets,
+     * page-fault IVs */
+    unsigned sq_kills, sq_outside_safe, soft_resets, mode1_resets, fault_ivs;
+    uint32_t sq_last_vmid;
+    int rlc_safe;
 
     /* VBIOS behind the SMUIO ROM window (auto-incrementing index) */
     uint8_t  vbios[VBIOS_LEN];
@@ -152,6 +160,7 @@ typedef struct sim {
 static sim S;
 
 static uint32_t *R(uint32_t dw) { return &S.reg[dw]; }
+static uint32_t *smn_slot(uint32_t addr, int create);
 #define MP0(n) (MP0_BASE + regMP0_SMN_C2PMSG_##n)
 #define MP1(n) (MP1_BASE + regMP1_SMN_C2PMSG_##n)
 
@@ -396,6 +405,28 @@ static void smu_msg(uint32_t v)
     *R(MP1(90)) = resp;
 }
 
+/* mode-1 reset: every block back to power-on except the memory controller
+ * (VRAM content stays); the PSP bootloader is ready again */
+static void sim_mode1_reset(void)
+{
+    uint32_t memsize = *R(mmRCC_CONFIG_MEMSIZE);
+    uint32_t fbb = *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_BASE), fbt = *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_TOP);
+    memset(S.reg, 0, sizeof(S.reg));
+    memset(S.hqd, 0, sizeof(S.hqd));
+    memset(&S.smu, 0, sizeof(S.smu));
+    S.nsmn = 0;
+    *smn_slot(SMN_ROM_OFFSET_CTRL, 1) = ROM_STRAP;
+    S.sos_alive = 0; S.sos_boot_at = 0; S.rptr_dw = 0; S.ring_mc = 0;
+    S.smu_loaded = 0; S.tmr_setup = 0; S.toc_loaded = 0; S.autoload = 0;
+    S.cp_rptr = 0; S.sdma_rptr = 0; S.rlc_safe = 0;
+    *R(MP0(35)) = 0x80000000u;
+    *R(MP0(33)) = 0x80000000u;
+    *R(mmRCC_CONFIG_MEMSIZE) = memsize;
+    *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_BASE) = fbb;
+    *R(GC_BASE0 + regGCMC_VM_FB_LOCATION_TOP) = fbt;
+    S.mode1_resets++;
+}
+
 /* HQD register window (GC segment 0): CP_MQD_BASE_ADDR .. CP_HQD_PQ_WPTR_HI */
 #define HQD_FIRST regCP_MQD_BASE_ADDR
 #define HQD_LAST  regCP_HQD_PQ_WPTR_HI
@@ -442,7 +473,14 @@ static int hqd_load_mqd(struct hqd *h, uint64_t mqd_mc, uint32_t doorbell_index)
 /* IH model: an engine queues an 8-dword IV on ring 0 (IH_RB_BASE, size
  * from IH_RB_CNTL), advances IH_RB_WPTR (+ the writeback dword), flags an
  * overflow when it catches the rptr, and raises an MSI when ENABLE_INTR */
+static void ih_push_iv(uint32_t client, uint32_t src, uint32_t ring_id, uint32_t vmid,
+                       uint32_t pasid, uint32_t sd0, uint32_t sd1);
 static void ih_push(uint32_t client, uint32_t src, uint32_t ring_id)
+{
+    ih_push_iv(client, src, ring_id, 0, 0, 0, 0);
+}
+static void ih_push_iv(uint32_t client, uint32_t src, uint32_t ring_id, uint32_t vmid,
+                       uint32_t pasid, uint32_t sd0, uint32_t sd1)
 {
     uint32_t cntl = S.reg[OSS_BASE0 + regIH_RB_CNTL];
     uint64_t base = ((uint64_t)S.reg[OSS_BASE0 + regIH_RB_BASE] << 8) |
@@ -452,7 +490,7 @@ static void ih_push(uint32_t client, uint32_t src, uint32_t ring_id)
     uint32_t size = 4u << ((cntl & IH_RB_CNTL__RB_SIZE_MASK) >> IH_RB_CNTL__RB_SIZE__SHIFT);
     uint32_t wreg = S.reg[OSS_BASE0 + regIH_RB_WPTR], wptr = wreg & (size - 1);
     uint32_t rptr = S.reg[OSS_BASE0 + regIH_RB_RPTR] & (size - 1);
-    uint32_t iv[8] = { client | (src << 8) | (ring_id << 16), 0, 0, 0, 0, 0, 0, 0 };
+    uint32_t iv[8] = { client | (src << 8) | (ring_id << 16) | (vmid << 24), 0, 0, pasid, sd0, sd1, 0, 0 };
     uint8_t *p = (cntl & IH_RB_CNTL__RB_ENABLE_MASK) ? mc_ptr(base + wptr, 32) : NULL;
     if (!p) {
         S.ih_dropped++;
@@ -473,7 +511,6 @@ static void ih_push(uint32_t client, uint32_t src, uint32_t ring_id)
  * state packets, RELEASE_MEM fence writes, WRITE_DATA, WAIT_REG_MEM, the
  * job framing packets and INDIRECT_BUFFER through the VMID's page tables */
 static void sim_wr(void *ctx, uint64_t off, uint32_t v);
-static uint32_t *smn_slot(uint32_t addr, int create);
 static uint32_t sim_rd(void *ctx, uint64_t off);
 static void cp_run(uint32_t wptr_dw);
 static void sdma_run(uint32_t wptr_bytes);
@@ -586,7 +623,21 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
             if (in_ib || ndw > 4096) { S.cp_bad++; break; }
             for (i = 0; i < ndw; i++) {
                 uint8_t *p = vm_ptr(vmid, va + 4ull * i, 4);
-                if (!p) { S.cp_ib_fault++; break; }
+                if (!p) {
+                    uint64_t fa = va + 4ull * i;
+                    uint32_t cntl = S.reg[GC_BASE0 + regGCVM_CONTEXT0_CNTL +
+                                          vmid * (regGCVM_CONTEXT1_CNTL - regGCVM_CONTEXT0_CNTL)];
+                    S.cp_ib_fault++;
+                    /* UTCL2 fault: status for the GFXHUB, IV on client GFX source 0 */
+                    S.reg[GC_BASE0 + regGCVM_L2_PROTECTION_FAULT_STATUS] =
+                        (vmid << 20) | (0x12u << 9) | (1u << 8) /* MAPPING_ERROR */;
+                    if (cntl & GCVM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK) {
+                        S.fault_ivs++;
+                        ih_push_iv(RD_IH_CLIENT_GFX, RD_IH_SRC_VM_FAULT, 0, vmid, 0,
+                                   (uint32_t)(fa >> 12), (uint32_t)((fa >> 44) & 0xf) | 0x40);
+                    }
+                    break;
+                }
                 memcpy(&ib[i], p, 4);
             }
             if (i < ndw)
@@ -1034,6 +1085,54 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         smu_msg(v);
         return;
     }
+    if (dw == MP1(75)) {
+        /* debug mailbox: DEBUGSMC_MSG_Mode1Reset takes the chip back to the
+         * PSP bootloader with VRAM intact */
+        if (v == RD_DEBUGSMC_MSG_Mode1Reset)
+            sim_mode1_reset();
+        *R(dw) = v;
+        return;
+    }
+    if (dw == GCR(regRLC_SAFE_MODE)) {
+        /* the RLC acknowledges at once: CMD clears, MESSAGE says in/out */
+        S.rlc_safe = (v >> RLC_SAFE_MODE__MESSAGE__SHIFT) & 1;
+        *R(dw) = v & ~RLC_SAFE_MODE__CMD_MASK;
+        return;
+    }
+    if (dw == GCR(regSQ_CMD)) {
+        if ((v & SQ_CMD__CMD_MASK) == 3) {
+            S.sq_kills++;
+            S.sq_last_vmid = (v & SQ_CMD__VM_ID_MASK) >> SQ_CMD__VM_ID__SHIFT;
+            if (!S.rlc_safe)
+                S.sq_outside_safe++;
+        }
+        *R(dw) = v;
+        return;
+    }
+    if (dw == GCR(regGRBM_SOFT_RESET)) {
+        if (v & GRBM_SOFT_RESET__SOFT_RESET_CP_MASK) {
+            /* CP/CPF/CPC/CPG reset: queues gone, pointers at 0, VMID reset done */
+            S.soft_resets++;
+            S.cp_rptr = 0;
+            memset(S.hqd, 0, sizeof(S.hqd));
+            *R(GCR(regCP_RB_ACTIVE)) = 0;
+            *R(GCR(regCP_VMID_RESET)) = 0;
+        }
+        *R(dw) = v;
+        return;
+    }
+    if (dw == GC_BASE0 + regGCVM_L2_PROTECTION_FAULT_CNTL) {
+        if (v & 1)   /* CLEAR_PROTECTION_FAULT_STATUS_ADDR */
+            *R(GC_BASE0 + regGCVM_L2_PROTECTION_FAULT_STATUS) = 0;
+        *R(dw) = v & ~1u;
+        return;
+    }
+    if (dw == MM_BASE0 + regMMVM_L2_PROTECTION_FAULT_CNTL) {
+        if (v & 1)
+            *R(MM_BASE0 + regMMVM_L2_PROTECTION_FAULT_STATUS) = 0;
+        *R(dw) = v & ~1u;
+        return;
+    }
     if (dw == SMUIO_B0 + regROM_INDEX) {
         S.rom_index = v;
         *R(dw) = v;
@@ -1052,6 +1151,17 @@ static void sim_iv_cb(void *ctx, const rdna3_iv *iv)
     s->vmid = iv->vmid;
     s->pasid = iv->pasid;
     s->d3 = iv->src_data[3];
+}
+
+struct fault_seen { unsigned n; rdna3_dev *d; rdna3_vm_fault f; };
+static void fault_cb(void *ctx, const rdna3_iv *iv)
+{
+    struct fault_seen *s = (struct fault_seen *)ctx;
+    if (!gmc11_iv_is_vm_fault(iv))
+        return;
+    s->n++;
+    gmc11_decode_vm_fault(s->d, iv, &s->f);
+    gmc11_log_vm_fault(s->d, &s->f);
 }
 
 static void sim_tick(void)
@@ -1636,7 +1746,35 @@ static void run(const char *fwdir)
                 /* an unmapped IB faults instead of running garbage */
                 jobs[0].va = 0x0000500000000000ull;
                 seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);
-                CHECK(seq != 0 && S.cp_ib_fault == 1);
+                CHECK(seq != 0 && S.cp_ib_fault == 1 && S.fault_ivs == 0);
+                /* with the fault interrupts on the same fault reaches the IH
+                 * ring as a VM fault IV the GMC decoder attributes to the
+                 * GFXHUB, VMID 5 and the faulting page; the decoder clears
+                 * the L2 status */
+                {
+                    static rdna3_ih ih3;
+                    struct fault_seen fs;
+                    uint32_t ctx5 = GC_BASE0 + regGCVM_CONTEXT0_CNTL +
+                                    5 * (regGCVM_CONTEXT1_CNTL - regGCVM_CONTEXT0_CNTL);
+                    memset(&fs, 0, sizeof(fs));
+                    fs.d = &dev;
+                    CHECK(ih60_init(&dev, &ih3, 4096, gmc.dummy_page_pa, 0) == RDNA3_OK);
+                    gmc11_set_vm_fault_interrupts(&dev, 1);
+                    CHECK(S.reg[ctx5] & GCVM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK);
+                    CHECK(S.reg[MM_BASE0 + regMMVM_CONTEXT0_CNTL + 5 * (regMMVM_CONTEXT1_CNTL - regMMVM_CONTEXT0_CNTL)] &
+                          MMVM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK);
+                    seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);
+                    CHECK(seq != 0 && S.cp_ib_fault == 2 && S.fault_ivs == 1);
+                    CHECK(ih60_process(&dev, &ih3, fault_cb, &fs) == 1);
+                    CHECK(fs.n == 1 && fs.f.hub == 0 && fs.f.vmid == 5 && fs.f.client == RD_IH_CLIENT_GFX);
+                    CHECK(fs.f.addr == 0x0000500000000000ull && fs.f.mapping_error && fs.f.cid == 0x12 &&
+                          !fs.f.write && !fs.f.retry && fs.f.status != 0);
+                    CHECK(S.reg[GC_BASE0 + regGCVM_L2_PROTECTION_FAULT_STATUS] == 0);
+                    gmc11_set_vm_fault_interrupts(&dev, 0);
+                    CHECK(!(S.reg[ctx5] & GCVM_CONTEXT1_CNTL__VALID_PROTECTION_FAULT_ENABLE_INTERRUPT_MASK));
+                    seq = gfx11_submit_job(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1);
+                    CHECK(seq != 0 && S.cp_ib_fault == 3 && S.fault_ivs == 1);
+                }
                 CHECK(gfx11_submit_job(&dev, &gr, 1, 16, 0, jobs, 1) == 0);
                 CHECK(gfx11_submit_job(&dev, &gr, 1, 5, 0, jobs, 0) == 0);
                 /* many jobs: the ring wraps and space accounting holds */
@@ -1695,6 +1833,42 @@ static void run(const char *fwdir)
                     }
                     CHECK(gfx11_wait_fence(&dev, &kcq.rb, seq) == RDNA3_OK && S.cp_bad == 0 &&
                           gfx11_ring_space(&dev, &kcq.rb) == kcq.rb.buf_mask);
+
+                    /* a hang: the CP stalls under a job (the model halts it),
+                     * the fence never lands. Soft recovery kills the VMID's
+                     * waves inside RLC safe mode, the fence is forced so the
+                     * waiter returns, then the GFX soft reset brings ring 0
+                     * and both compute queues back and jobs run again */
+                    {
+                        rdna3_gfx_status st;
+                        uint32_t kills0 = S.sq_kills, resets0 = S.soft_resets;
+                        jobs[0].va = ibva; jobs[0].ndw = n;
+                        S.reg[GCR(regCP_ME_CNTL)] |= CP_ME_CNTL__ME_HALT_MASK;
+                        seq = gfx11_submit_job(&dev, &gr, 7, 5, 0, jobs, 1);
+                        CHECK(seq != 0 && !gfx11_fence_passed(&dev, &gr, seq) && gr.last_vmid == 5);
+                        gfx11_read_status(&dev, &gr, &st);
+                        CHECK(st.cp_me_cntl & CP_ME_CNTL__ME_HALT_MASK);
+                        CHECK(st.rb0_rptr_wb != (uint32_t)gr.wptr);   /* the ring did not drain */
+                        gfx11_log_status(&dev, &st, "hang test");
+                        gfx11_kill_waves(&dev, 5);
+                        CHECK(S.sq_kills == kills0 + 1 && S.sq_last_vmid == 5 && S.sq_outside_safe == 0 &&
+                              !S.rlc_safe);
+                        gfx11_force_fence_completion(&dev, &gr);
+                        CHECK(gfx11_fence_passed(&dev, &gr, seq));
+                        CHECK(gfx11_soft_reset(&dev, &gr, &kiq, &kcq) == RDNA3_OK);
+                        CHECK(S.soft_resets == resets0 + 1 && gr.ready && kiq.rb.ready && kcq.rb.ready);
+                        CHECK(!(S.reg[GCR(regCP_ME_CNTL)] & CP_ME_CNTL__ME_HALT_MASK) && !S.rlc_safe);
+                        CHECK(S.reg[GCR(regCP_VMID_RESET)] == 0 && S.reg[GCR(regGRBM_GFX_CNTL)] == 0);
+                        CHECK(HQD(hk, regCP_HQD_ACTIVE) == 1 && HQD(hc, regCP_HQD_ACTIVE) == 1 && hc->mapped_by_kiq);
+                        CHECK(S.cp_bad == 0 && S.mec_bad_queue == 0);
+                        S.reg[scratch] = 0;
+                        seq = gfx11_submit_job(&dev, &gr, 8, 5, gpuvm_pd_addr(&dev, &vm), jobs, 1);
+                        CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK && S.reg[scratch] == 0x5EED1234);
+                        S.reg[scratch] = 0;
+                        seq = gfx11_submit_compute_job(&dev, &kcq, 8, 5, gpuvm_pd_addr(&dev, &vm), jobs, 1);
+                        CHECK(seq != 0 && gfx11_wait_fence(&dev, &kcq.rb, seq) == RDNA3_OK && S.reg[scratch] == 0x5EED1234);
+                        CHECK(S.cp_bad == 0 && S.cp_wait_stuck == 0);
+                    }
                 }
                 gpuvm_vm_fini(&dev, &vm);
             }
@@ -1918,6 +2092,24 @@ static void run(const char *fwdir)
         /* display off: no heads */
         S.reg[OTG(regOTG0_OTG_CONTROL, 2)] = 0;
         CHECK(dcn32_read_state(&dev, &dc) == 0);
+    }
+
+    /* GPU reset: mode-1 through the PMFW debug mailbox takes the chip back
+     * to the PSP bootloader with VRAM intact; PSP, the firmware and the SMU
+     * come up again from there (what the kext redoes from level 4) */
+    {
+        static rdna3_psp p3;
+        uint32_t ipfw0 = S.nipfw;
+        CHECK(smu13_mode1_reset(&dev) == RDNA3_OK);
+        CHECK(S.mode1_resets == 1 && !S.sos_alive && !S.smu_loaded);
+        CHECK(psp13_wait_for_bootloader(&psp) == RDNA3_OK);
+        CHECK(rdna3_rreg(&dev, mmRCC_CONFIG_MEMSIZE) == (uint32_t)(VRAM_SIZE >> 20));
+        rdna3_vram_alloc_init(&dev, 16u << 20, BAR_LEN);
+        CHECK(psp13_init(&p3, &dev, sos, sos_len) == RDNA3_OK);
+        CHECK(psp13_hw_init(&p3, &plan, blobs) == RDNA3_OK);
+        CHECK(S.sos_alive && S.nipfw == ipfw0 + plan.count && S.smu_loaded);
+        CHECK(smu13_check_fw_status(&dev) == RDNA3_OK);
+        CHECK(smu13_hello(&dev, &smu_ver, &ifv) == RDNA3_OK);
     }
 
     printf("sim_navi32: %s firmware, %u bootloader cmds, %u LOAD_IP_FW, TMR %u KiB, "
