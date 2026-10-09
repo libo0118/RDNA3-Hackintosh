@@ -8,6 +8,9 @@
 
 #include <IOKit/IOLib.h>
 #include <libkern/OSKextLib.h>
+#include <sys/vnode.h>
+#include <sys/uio.h>
+#include <sys/fcntl.h>
 #include <libkern/OSAtomic.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
@@ -216,10 +219,60 @@ void RDNA3Bringup::fwCallback(unsigned int, int result, const void *data, uint32
     IOLockUnlock(b->fLock);
 }
 
+/* Reads the installed bundle's copy directly. OSKextRequestResource needs
+ * kernelmanagerd to accept the bundle, which it does not for a kext that
+ * OpenCore injected (or one it judged invalid for the Auxiliary KC). */
+static const char *kFwDirs[] = {
+    "/Library/Extensions/RDNA3Accel.kext/Contents/Resources/",
+    "/Library/Application Support/RDNA3VM/kexts/RDNA3Accel.kext/Contents/Resources/",
+};
+
+static bool readFileFromDisk(const char *path, RDNA3Firmware *out)
+{
+    vfs_context_t ctx = vfs_context_create(NULL);
+    vnode_t vp = NULLVP;
+    bool ok = false;
+    if (!ctx)
+        return false;
+    if (vnode_open(path, FREAD, 0, 0, &vp, ctx) == 0) {
+        struct vnode_attr va;
+        VATTR_INIT(&va);
+        VATTR_WANTED(&va, va_data_size);
+        if (vnode_getattr(vp, &va, ctx) == 0 && va.va_data_size > 0 &&
+            va.va_data_size < (64ull << 20)) {
+            uint32_t len = (uint32_t)va.va_data_size;
+            uint8_t *buf = (uint8_t *)IOMalloc(len);
+            uio_t uio = buf ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
+            if (uio && uio_addiov(uio, CAST_USER_ADDR_T(buf), len) == 0 &&
+                VNOP_READ(vp, uio, 0, ctx) == 0 && uio_resid(uio) == 0) {
+                out->data = buf;
+                out->len = len;
+                ok = true;
+            }
+            if (uio)
+                uio_free(uio);
+            if (!ok && buf)
+                IOFree(buf, len);
+        }
+        vnode_close(vp, FREAD, ctx);
+    }
+    vfs_context_rele(ctx);
+    return ok;
+}
+
 bool RDNA3Bringup::loadFirmware(const char *name, RDNA3Firmware *out)
 {
-    /* kernelmanagerd may not be up yet early in boot: retry for ~2 min */
+    /* the root volume or kernelmanagerd may not be up yet early in boot:
+     * retry for ~2 min */
     for (int attempt = 0; attempt < 120 && !fAbort; attempt++) {
+        char path[256];
+        for (unsigned d = 0; d < sizeof(kFwDirs) / sizeof(kFwDirs[0]); d++) {
+            snprintf(path, sizeof(path), "%s%s", kFwDirs[d], name);
+            if (readFileFromDisk(path, out)) {
+                BLOG("firmware %s: %u bytes (%s)", name, out->len, path);
+                return true;
+            }
+        }
         OSKextRequestTag tag;
         fFwDone = false;
         fFwResult = {};

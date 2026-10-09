@@ -2,10 +2,11 @@
 """
 vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
 
-  vmtool.py plist CONFIG [--show] [--boot-args S] [--sip-off] [--timeout N]
+  vmtool.py plist CONFIG [--show] [--boot-args S] [--sip-off] [--timeout N] [--kext NAME]
       edit an OpenCore config.plist: boot-args and csr-active-config under
       NVRAM/Add (and listed under NVRAM/Delete so OpenCore really applies
-      them), SecureBootModel Disabled, picker timeout
+      them), SecureBootModel Disabled, picker timeout, a Kernel/Add entry
+      for EFI/OC/Kexts/NAME.kext
   vmtool.py romcheck FILE        a PCI option ROM with a UEFI (GOP) image?
   vmtool.py unzip ZIP DIR        extract (keeps the tree)
   vmtool.py serve DIR PORT [UP]  HTTP on 127.0.0.1: GET files, PUT into UP (DIR/reports)
@@ -86,6 +87,42 @@ def _xml(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+KEXT_ENTRY = """<dict>
+				<key>Arch</key>
+				<string>x86_64</string>
+				<key>BundlePath</key>
+				<string>%(name)s.kext</string>
+				<key>Comment</key>
+				<string>RDNA3-Hackintosh (rdna3vm)</string>
+				<key>Enabled</key>
+				<true/>
+				<key>ExecutablePath</key>
+				<string>Contents/MacOS/%(name)s</string>
+				<key>MaxKernel</key>
+				<string></string>
+				<key>MinKernel</key>
+				<string></string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>"""
+
+
+def add_kext(text, name):
+    """Kernel/Add entry injecting EFI/OC/Kexts/NAME.kext (kept if present)"""
+    sec = _section(text, "Kernel")
+    found = _value_after_key(text, "Add", *sec)
+    if not found or not text.startswith("<array", found[1]):
+        raise PlistEditError("no Kernel/Add array in config.plist")
+    arr = text[found[1]:found[2]]
+    if "<string>%s.kext</string>" % name in arr:
+        return text
+    if arr.endswith("/>"):                 # <array/>
+        entry = "<array>\n\t\t\t%s\n\t\t</array>" % (KEXT_ENTRY % {"name": name})
+        return text[:found[1]] + entry + text[found[2]:]
+    close = found[1] + arr.rindex("</array>")
+    return text[:close] + "\t" + KEXT_ENTRY % {"name": name} + "\n\t\t" + text[close:]
+
+
 def cmd_plist(argv):
     """Edits only the values it changes, as text: OpenCore accepts plists
     that Python's plistlib refuses (and a rewrite would reformat the file)."""
@@ -127,6 +164,9 @@ def cmd_plist(argv):
         elif a == "--timeout":
             text = _set(text, _section(text, "Misc", "Boot"), "Timeout",
                         "<integer>%d</integer>" % int(argv[i + 1]))
+            i += 2
+        elif a == "--kext":
+            text = add_kext(text, argv[i + 1])
             i += 2
         else:
             sys.exit("unknown option " + a)

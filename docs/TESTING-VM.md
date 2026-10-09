@@ -253,6 +253,11 @@ prints PASS / FAIL per step. What happens with the reports next is in
   "both Ctrl" toggle) and passes them to macOS as USB devices. Linux itself watches for Esc 3×
   and the power button (`vmtool.py stopkeys`, `systemd-inhibit`). After the VM
   the button works normally again.
+- `prepare` also copies the kexts into the OpenCore image (`EFI/OC/Kexts`,
+  `Kernel/Add`), and OpenCore injects them at boot. macOS itself refuses our
+  ad-hoc signed kexts ("invalid codeful kernel extension"). The copy in
+  `/Library/Extensions` (from `setup.sh`) only provides the firmware files,
+  which the kext reads from disk.
 - macOS sees Linux at the address `10.0.2.2`. At that address
   `tools/vm/vmtool.py serve` serves the package and receives reports (only
   locally, `127.0.0.1:8000`).

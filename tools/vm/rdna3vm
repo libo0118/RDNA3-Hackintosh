@@ -220,8 +220,11 @@ EOF
     cp "$TOOLS/macos/autoreport.sh" "$st/"
     tar -czf "$WORK/share/rdna3-bundle.tar.gz" -C "$st" kexts bin tools autoreport.sh
     cp "$TOOLS/macos/setup.sh" "$WORK/share/setup.sh"
+    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --kexts "$st/kexts" >/dev/null ||
+        die "cannot copy the kexts into OpenCore"
     rm -rf "$st"
     ok "$WORK/share/rdna3-bundle.tar.gz"
+    ok "kexts injected by OpenCore (EFI/OC/Kexts, Kernel/Add)"
 
     local bdf
     bdf=$(gpu_bdf) || die "no 1002:747e card found"
@@ -247,16 +250,32 @@ EOF
 }
 
 # OpenCore config.plist edits, as root: rdna3vm _oc <vmtool plist options>
+# With --kexts DIR first: also copy DIR/*.kext (code and Info.plist only)
+# into EFI/OC/Kexts and add them to Kernel/Add. OpenCore injects them into
+# the kernel at boot: kernelmanagerd refuses our ad-hoc signed kexts in the
+# Auxiliary KC ("invalid codeful kernel extension").
 cmd__oc() {
-    local img=$WORK/OpenCore-rdna3.img mnt loop part
+    local img=$WORK/OpenCore-rdna3.img mnt loop part kdir=""
     [ -f "$img" ] || die "no $img"
+    if [ "${1:-}" = --kexts ]; then kdir=$2; shift 2; fi
     mnt=$(mktemp -d)
     loop=$(losetup --find --show --partscan "$img")
     part=${loop}p1
     [ -b "$part" ] || part=$loop
     mount -t vfat "$part" "$mnt" || { losetup -d "$loop"; die "cannot mount OpenCore"; }
-    local rc=0
-    $VMTOOL plist "$mnt/EFI/OC/config.plist" "$@" || rc=$?
+    local rc=0 k n
+    if [ -n "$kdir" ]; then
+        rm -rf "$mnt"/EFI/OC/Kexts/RDNA3*.kext
+        for k in "$kdir"/RDNA3*.kext; do
+            n=$(basename "$k" .kext)
+            [ -f "$k/Contents/MacOS/$n" ] || continue
+            mkdir -p "$mnt/EFI/OC/Kexts/$n.kext/Contents/MacOS"
+            cp "$k/Contents/Info.plist" "$mnt/EFI/OC/Kexts/$n.kext/Contents/" &&
+                cp "$k/Contents/MacOS/$n" "$mnt/EFI/OC/Kexts/$n.kext/Contents/MacOS/" || rc=1
+            set -- "$@" --kext "$n"
+        done
+    fi
+    [ $rc = 0 ] && { $VMTOOL plist "$mnt/EFI/OC/config.plist" "$@" || rc=$?; }
     sync; umount "$mnt"; losetup -d "$loop"; rmdir "$mnt"
     return $rc
 }
