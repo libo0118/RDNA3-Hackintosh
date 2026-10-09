@@ -60,6 +60,10 @@ bool RDNA3Accel::start(IOService *provider)
                 bool ok = readDiscovery(disc);
                 if (ok && fLevel >= 3)
                     readGcStatus(disc);
+                /* Stage 3: which heads the firmware lit (reads only) - before
+                 * the heaps, so they start above the boot scanout */
+                if (ok && !displayInit(disc))
+                    LOG("display heads unknown");
                 if (ok && !drmInit(disc))
                     LOG("DRM/amdgpu UAPI not available");
                 else if (ok && !platformInit())
@@ -97,6 +101,7 @@ void RDNA3Accel::stop(IOService *provider)
     }
     platformFree();
     drmFree();
+    displayFree();
     OSSafeReleaseNULL(fMmioMap);
     fMmio = nullptr;
     fMmioLen = 0;

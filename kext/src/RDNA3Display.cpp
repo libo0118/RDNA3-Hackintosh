@@ -1,0 +1,235 @@
+/*
+ * RDNA3Display.cpp - Stage 3, core side: the display heads the VBIOS /
+ * UEFI GOP lit, read from DCN 3.2 at rdna3lvl>=2 (reads only), and the
+ * calls RDNA3Framebuffer makes over callPlatformFunction
+ * (accel/rdna3k_abi.h):
+ *
+ *   rdna3DisplayInfo     heads, geometry, timing, BAR0 address, refresh
+ *   rdna3DisplayFlip     scan out another VRAM surface (HUBP address/pitch)
+ *   rdna3DisplayStatus   OTG frame counter, scanline, vblank, flip pending
+ *   rdna3DisplayCrc      OTG CRC of the last frame
+ *
+ * Nothing here writes a register until the framebuffer asks for a flip or
+ * a CRC, and the framebuffer only starts with the boot-arg rdna3fb=1.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#include "RDNA3Accel.hpp"
+
+#include <IOKit/IOLib.h>
+#include <kern/clock.h>
+
+extern "C" {
+#include "rdna3_hw.h"
+#include "dcn32.h"
+}
+#include "rdna3k_abi.h"
+
+#define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
+
+static void dispUdelay(void *, uint32_t us) { IODelay(us); }
+static void dispMsleep(void *, uint32_t ms) { IOSleep(ms); }
+static void dispWmb(void *) { OSSynchronizeIO(); }
+static void dispVlog(void *, int level, const char *fmt, va_list ap)
+{
+    char buf[256];
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    IOLog("RDNA3: %s%s\n", level == RDNA3_LOG_ERR ? "ERROR: " : "", buf);
+}
+
+uint32_t RDNA3Accel::dispMmioRd(void *ctx, uint64_t off)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    if (!a->regValid(off))
+        return ~0u;
+    return *(volatile uint32_t *)(a->fMmio + off);
+}
+
+void RDNA3Accel::dispMmioWr(void *ctx, uint64_t off, uint32_t v)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    if (a->regValid(off))
+        *(volatile uint32_t *)(a->fMmio + off) = v;
+}
+
+bool RDNA3Accel::displayInit(const amd_discovery *disc)
+{
+    rdna3_os os = {};
+    os.ctx = this;
+    os.udelay = dispUdelay;
+    os.msleep = dispMsleep;
+    os.vlog = dispVlog;
+    os.wmb = dispWmb;
+    os.mmio_rd = dispMmioRd;
+    os.mmio_wr = dispMmioWr;
+
+    fDispLock = IOLockAlloc();
+    fDispDev = (rdna3_dev *)IOMalloc(sizeof(rdna3_dev));
+    fDcn = (rdna3_dcn *)IOMalloc(sizeof(rdna3_dcn));
+    if (!fDispLock || !fDispDev || !fDcn) {
+        displayFree();
+        return false;
+    }
+    bzero(fDispDev, sizeof(rdna3_dev));
+    bzero(fDcn, sizeof(rdna3_dcn));
+    rdna3_dev_init(fDispDev, &os, fMmioLen);
+    fDispDev->vram_size = fVramSize;
+    if (rdna3_dev_set_discovery(fDispDev, disc) != RDNA3_OK ||
+        rdna3_read_fb_location(fDispDev) != RDNA3_OK) {
+        LOG("display: no GC/DCN register map, heads unknown");
+        displayFree();
+        return false;
+    }
+    int n = dcn32_read_state(fDispDev, fDcn);
+    setNumber("RDNA3,DisplayHeads", (uint64_t)(n > 0 ? n : 0));
+
+    /* keep allocators off every boot scanout in the low GiB */
+    for (uint32_t i = 0; i < fDcn->nheads; i++) {
+        const rdna3_dcn_head *h = &fDcn->head[i];
+        uint64_t off = h->address - fDispDev->fb_start;
+        uint64_t end = off + (uint64_t)h->pitch_px * 4 * h->height;
+        if (h->address >= fDispDev->fb_start && off < (1ull << 30) && end > fDispReserveEnd)
+            fDispReserveEnd = end;
+        LOG("display: head %u %ux%u pitch %u B at VRAM 0x%llx, %s", i, h->width, h->height,
+            h->pitch_px * 4, (unsigned long long)off,
+            dcn32_head_usable(fDispDev, h) ? "usable" : "NOT usable (tiled/DCC/format)");
+    }
+    fDispReserveEnd = (fDispReserveEnd + (2ull << 20) - 1) & ~((2ull << 20) - 1);
+    setNumber("RDNA3,DisplayReserveEnd", fDispReserveEnd, 64);
+    return true;
+}
+
+void RDNA3Accel::displayFree()
+{
+    if (fDcn && fDispDev && fDispLock) {
+        for (uint32_t i = 0; i < fDcn->nheads && i < 4; i++)
+            if (fDcnCrcOn[i])
+                dcn32_crc_enable(fDispDev, fDcn, i, 0);
+    }
+    if (fDcn) IOFree(fDcn, sizeof(rdna3_dcn));
+    if (fDispDev) IOFree(fDispDev, sizeof(rdna3_dev));
+    if (fDispLock) IOLockFree(fDispLock);
+    fDcn = nullptr;
+    fDispDev = nullptr;
+    fDispLock = nullptr;
+}
+
+/* refresh = frames counted over ~250 ms of wall time (no pixel clock read
+ * from DCCG needed); exact enough for IOFramebuffer's timing info */
+void RDNA3Accel::displayMeasureRefresh()
+{
+    uint32_t f0[4], f1[4], i;
+    uint64_t t0, t1, ns;
+    for (i = 0; i < fDcn->nheads && i < 4; i++)
+        f0[i] = dcn32_frame_count(fDispDev, fDcn, i);
+    clock_get_uptime(&t0);
+    IOSleep(250);
+    for (i = 0; i < fDcn->nheads && i < 4; i++)
+        f1[i] = dcn32_frame_count(fDispDev, fDcn, i);
+    clock_get_uptime(&t1);
+    absolutetime_to_nanoseconds(t1 - t0, &ns);
+    for (i = 0; i < fDcn->nheads && i < 4; i++) {
+        uint64_t frames = (f1[i] - f0[i]) & 0xffffff;
+        uint64_t mhz = ns ? frames * 1000000000000ull / ns : 0;
+        /* round to the nearest common rate when within 0.5 % */
+        static const uint32_t common[] = { 23976, 24000, 25000, 29970, 30000, 50000, 59940,
+                                           60000, 72000, 75000, 90000, 100000, 119880, 120000,
+                                           144000, 165000, 240000 };
+        for (uint32_t k = 0; k < sizeof(common) / sizeof(common[0]); k++)
+            if (mhz * 1000 > (uint64_t)common[k] * 995 && mhz * 1000 < (uint64_t)common[k] * 1005)
+                mhz = common[k];
+        fDispRefresh[i] = mhz > 1000 && mhz < 1000000 ? (uint32_t)mhz : 0;
+    }
+    fDispMeasured = true;
+}
+
+IOReturn RDNA3Accel::displayInfo(RD3KDisplayInfo *r)
+{
+    if (!r || r->version != RD3K_DISPLAY_ABI_VERSION)
+        return kIOReturnBadArgument;
+    if (!fDcn || !fDispDev)
+        return kIOReturnNotReady;
+    IOLockLock(fDispLock);
+    if (!fDispMeasured)
+        displayMeasureRefresh();
+    uint64_t barPhys = fVramDev ? fVramDev->getPhysicalAddress() : 0;
+    uint64_t barLen = fVramDev ? fVramDev->getLength() : 0;
+    r->nheads = fDcn->nheads < RD3K_MAX_HEADS ? fDcn->nheads : RD3K_MAX_HEADS;
+    for (uint32_t i = 0; i < r->nheads; i++) {
+        const rdna3_dcn_head *h = &fDcn->head[i];
+        RD3KDisplayHead *o = &r->head[i];
+        bzero(o, sizeof(*o));
+        uint64_t off = h->address - fDispDev->fb_start;
+        uint64_t bytes = (uint64_t)h->pitch_px * 4 * h->height;
+        bool inBar = h->address >= fDispDev->fb_start && barPhys && off + bytes <= barLen;
+        o->usable = dcn32_head_usable(fDispDev, h) && inBar;
+        o->width = h->width;
+        o->height = h->height;
+        o->pitch = h->pitch_px * 4;
+        o->format = h->format == RD_DCN_FMT_ABGR8888 ? RD3K_FMT_XBGR8888 : RD3K_FMT_XRGB8888;
+        o->vramOffset = off;
+        o->phys = inBar ? barPhys + off : 0;
+        o->hTotal = h->h_total;
+        o->vTotal = h->v_total;
+        o->hFront = h->h_front;
+        o->hSync = h->h_sync;
+        o->vFront = h->v_front;
+        o->vSync = h->v_sync;
+        o->hSyncNeg = h->h_sync_neg;
+        o->vSyncNeg = h->v_sync_neg;
+        o->refreshMilliHz = fDispRefresh[i];
+    }
+    IOLockUnlock(fDispLock);
+    return kIOReturnSuccess;
+}
+
+IOReturn RDNA3Accel::displayFlip(RD3KDisplayFlip *f)
+{
+    if (!f || f->version != RD3K_DISPLAY_ABI_VERSION || (f->pitch & 3))
+        return kIOReturnBadArgument;
+    if (!fDcn || !fDispDev)
+        return kIOReturnNotReady;
+    IOLockLock(fDispLock);
+    int r = RDNA3_EINVAL;
+    if (f->head < fDcn->nheads && dcn32_head_usable(fDispDev, &fDcn->head[f->head]))
+        r = dcn32_flip(fDispDev, fDcn, f->head, fDispDev->fb_start + f->vramOffset, f->pitch / 4,
+                       (f->flags & RD3K_DISPLAY_FLIP_IMMEDIATE) != 0);
+    IOLockUnlock(fDispLock);
+    f->result = r;
+    return r ? kIOReturnBadArgument : kIOReturnSuccess;
+}
+
+IOReturn RDNA3Accel::displayStatus(RD3KDisplayStatus *s)
+{
+    if (!s || s->version != RD3K_DISPLAY_ABI_VERSION)
+        return kIOReturnBadArgument;
+    if (!fDcn || !fDispDev || s->head >= fDcn->nheads)
+        return kIOReturnNotReady;
+    /* reads only: no lock needed beyond the head table, which never shrinks */
+    s->frame = dcn32_frame_count(fDispDev, fDcn, s->head);
+    s->scanline = dcn32_scanline(fDispDev, fDcn, s->head);
+    s->inVblank = (unsigned)dcn32_in_vblank(fDispDev, fDcn, s->head);
+    IOLockLock(fDispLock);
+    s->flipPending = (unsigned)dcn32_flip_pending(fDispDev, fDcn, s->head);
+    IOLockUnlock(fDispLock);
+    return kIOReturnSuccess;
+}
+
+IOReturn RDNA3Accel::displayCrc(uint32_t head, uint32_t *crc)
+{
+    uint32_t r = 0, g = 0, b = 0;
+    if (!crc)
+        return kIOReturnBadArgument;
+    if (!fDcn || !fDispDev || head >= fDcn->nheads || head >= 4)
+        return kIOReturnNotReady;
+    IOLockLock(fDispLock);
+    if (!fDcnCrcOn[head]) {
+        dcn32_crc_enable(fDispDev, fDcn, head, 1);
+        fDcnCrcOn[head] = true;
+    }
+    int ret = dcn32_crc_read(fDispDev, fDcn, head, &r, &g, &b);
+    IOLockUnlock(fDispLock);
+    /* one number for the sysctl: R ^ G<<8 ^ B<<16 */
+    *crc = ret ? 0 : (r ^ (g << 8) ^ (b << 16));
+    return ret ? kIOReturnNotReady : kIOReturnSuccess;
+}

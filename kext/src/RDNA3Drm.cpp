@@ -184,9 +184,10 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
                                                  kIOMapWriteCombineCache);
     uint64_t visible = fVramMap ? fVramMap->getLength() : 0;
 
-    if (fVramSize > kUserVramStart + kUserVramTopReserve)
-        range_alloc_init(fVramHeap, kUserVramStart,
-                         fVramSize - kUserVramStart - kUserVramTopReserve);
+    /* above the boot scanout when the firmware put a large one high */
+    uint64_t heapStart = fDispReserveEnd > kUserVramStart ? fDispReserveEnd : kUserVramStart;
+    if (fVramSize > heapStart + kUserVramTopReserve)
+        range_alloc_init(fVramHeap, heapStart, fVramSize - heapStart - kUserVramTopReserve);
     else
         range_alloc_init(fVramHeap, 0, 0);
 

@@ -83,6 +83,49 @@ struct RD3KFlipRequest {
     unsigned long long allocationCookie;
 };
 
+/* ---- display heads (answered by the core kext, asked by RDNA3Framebuffer):
+ *      what the firmware left on screen, flips, frame counter ---- */
+#define RD3K_DISPLAY_ABI_VERSION 1u
+#define RD3K_DISPLAY_FN_INFO     "rdna3DisplayInfo"
+#define RD3K_DISPLAY_FN_FLIP     "rdna3DisplayFlip"
+#define RD3K_DISPLAY_FN_STATUS   "rdna3DisplayStatus"
+#define RD3K_MAX_HEADS           4
+#define RD3K_FMT_XRGB8888        0u   /* IO32BitDirectPixels */
+#define RD3K_FMT_XBGR8888        1u
+struct RD3KDisplayHead {
+    unsigned int       usable;        /* 32 bpp linear, inside BAR0: CPU draws, flips work */
+    unsigned int       width, height; /* pixels */
+    unsigned int       pitch;         /* bytes */
+    unsigned int       format;        /* RD3K_FMT_* */
+    unsigned long long phys;          /* CPU-physical (BAR0) address of the boot scanout */
+    unsigned long long vramOffset;    /* VRAM offset of the boot scanout */
+    unsigned int       hTotal, vTotal, hFront, hSync, vFront, vSync;
+    unsigned int       hSyncNeg, vSyncNeg;
+    unsigned int       refreshMilliHz;/* measured from the OTG frame counter, 0 = unknown */
+};
+struct RD3KDisplayInfo {
+    unsigned int version;
+    unsigned int nheads;
+    struct RD3KDisplayHead head[RD3K_MAX_HEADS];
+};
+#define RD3K_DISPLAY_FLIP_IMMEDIATE 1u
+struct RD3KDisplayFlip {
+    unsigned int       version;
+    unsigned int       head;
+    unsigned int       flags;         /* RD3K_DISPLAY_FLIP_* */
+    unsigned int       pitch;         /* bytes, multiple of 4 */
+    unsigned long long vramOffset;    /* VRAM offset of the new surface (allocationCookie) */
+    int                result;        /* 0 or a negative RDNA3_E* code */
+};
+struct RD3KDisplayStatus {
+    unsigned int version;
+    unsigned int head;
+    unsigned int frame;               /* OTG frame counter (24 bit) */
+    unsigned int scanline;
+    unsigned int inVblank;
+    unsigned int flipPending;
+};
+
 /* display CRC: p1 = head (uintptr_t), p2 = unsigned *crc out */
 #define RD3K_FN_DISPLAY_CRC "rdna3DisplayCrc"
 

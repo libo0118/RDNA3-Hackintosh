@@ -33,6 +33,8 @@
 #include "gpuvm.h"
 #include "gen/gc_11_0_0_sdma.h"
 #include "gfx11.h"
+#include "dcn32.h"
+#include "gen/dcn_3_2_1.h"
 #include "gen/gc_11_0_0_gfx.h"
 #include "navi3x_regs.h"
 #include "psp_gfx_if.h"
@@ -60,6 +62,9 @@ static int failures;
 #define NBIO_B0    0x0u
 #define NBIO_B1    0x14u
 #define NBIO_B2    0xD20u
+#define DCN_B2     0x34C0u   /* DCN segment 2 (dcn_3_2_1 DCN_BASE__INST0_SEG2) */
+#define HUBP(reg, n) (DCN_B2 + reg + (regHUBP1_DCHUBP_CNTL - regHUBP0_DCHUBP_CNTL) * (n))
+#define OTG(reg, n)  (DCN_B2 + reg + (regOTG1_OTG_CONTROL - regOTG0_OTG_CONTROL) * (n))
 
 typedef struct sim {
     uint32_t reg[MMIO_LEN / 4];
@@ -94,6 +99,8 @@ typedef struct sim {
     unsigned cp_wait_stuck, cp_acquire, cp_pfp_sync, cp_frame_begin, cp_frame_end, cp_ibs;
     unsigned cp_ib_dw, cp_ib_fault, ring_tlb_flushes, hdp_engine_flushes;
     uint32_t cp_last_cntxcntl, cp_last_ib_vmid;
+    unsigned dcn_flips, dcn_pitch_unlocked;
+    int dcn_hold;              /* 1: flips stay pending (no vupdate yet) */
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
 } sim;
 
@@ -437,6 +444,35 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             return;
         }
     }
+    /* DCN HUBPREQ: the LOW address write latches the flip (at the next
+     * vupdate, which the model takes as "now" unless dcn_hold) */
+    for (uint32_t n = 0; n < RD_DCN_MAX_PIPES; n++) {
+        if (dw == HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, n)) {
+            *R(dw) = v;
+            S.dcn_flips++;
+            if (S.dcn_hold) {
+                S.reg[HUBP(regHUBPREQ0_DCSURF_FLIP_CONTROL, n)] |= HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_PENDING_MASK;
+            } else {
+                S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, n)] = v;
+                S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH, n)] =
+                    S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, n)];
+            }
+            return;
+        }
+        if (dw == HUBP(regHUBPREQ0_DCSURF_SURFACE_PITCH, n)) {
+            if (!(S.reg[HUBP(regHUBPREQ0_DCSURF_FLIP_CONTROL, n)] &
+                  HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_UPDATE_LOCK_MASK))
+                S.dcn_pitch_unlocked++;
+            *R(dw) = v;
+            return;
+        }
+        if (dw == HUBP(regHUBPREQ0_DCSURF_FLIP_CONTROL, n)) {
+            /* SURFACE_FLIP_PENDING is read-only status */
+            uint32_t pend = HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_PENDING_MASK;
+            *R(dw) = (v & ~pend) | (*R(dw) & pend);
+            return;
+        }
+    }
     /* NBIO HDP flush engine: a request completes at once */
     if (dw == NBIO_B2 + regBIF_BX_PF0_GPU_HDP_FLUSH_REQ) {
         S.reg[NBIO_B2 + regBIF_BX_PF0_GPU_HDP_FLUSH_DONE] = v;
@@ -573,6 +609,7 @@ static void make_discovery(amd_discovery *disc)
     IP(AMD_HWID_MMHUB, 3, 0, 2, MM_BASE0, 0, 0);
     IP(AMD_HWID_OSSSYS, 6, 0, 0, OSS_BASE0, 0, 0);
     IP(AMD_HWID_SDMA0, 6, 0, 3, GC_BASE0, 0xA000, 0x1C000);
+    IP(AMD_HWID_DMU, 3, 2, 1, 0x12, 0xC0, DCN_B2);
     disc->num_dies = 1;
 }
 
@@ -967,6 +1004,83 @@ static void run(const char *fwdir)
                 gpuvm_vm_fini(&dev, &vm);
             }
         }
+    }
+
+    /* DCN 3.2: the GOP left 2560x1440 linear ARGB8888 on pipe 1 -> OTG 2,
+     * pipe 0 is blanked; take it over, flip, change pitch under lock */
+    {
+        static rdna3_dcn dc;
+        const uint64_t gop = FB_START + 0x200000;
+        uint32_t r = 0, g = 0, b = 0;
+        S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 0)] = HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK;
+        S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] = 2u << HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL__SHIFT;
+        S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 2)] = 0;   /* not blanked, but its OTG 0 is off */
+        S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 3)] = HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK;
+        S.reg[OTG(regOTG0_OTG_CONTROL, 2)] = 1;
+        S.reg[HUBP(regHUBP0_DCSURF_SURFACE_CONFIG, 1)] = RD_DCN_FMT_ARGB8888;
+        S.reg[HUBP(regHUBP0_DCSURF_TILING_CONFIG, 1)] = 0;
+        S.reg[HUBP(regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, 1)] = 2560u | (1440u << 16);
+        S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_PITCH, 1)] = 2560 - 1;
+        S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, 1)] = (uint32_t)gop;
+        S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, 1)] = (uint32_t)(gop >> 32);
+        /* CVT-RB 2560x1440@60: htotal 2720, hfront 48, hsync 32; vtotal 1481, vfront 3, vsync 5 */
+        S.reg[OTG(regOTG0_OTG_H_TOTAL, 2)] = 2720 - 1;
+        S.reg[OTG(regOTG0_OTG_H_BLANK_START_END, 2)] = (2720 - 48) | ((2720 - 48 - 2560) << 16);
+        S.reg[OTG(regOTG0_OTG_H_SYNC_A, 2)] = 32u << 16;
+        S.reg[OTG(regOTG0_OTG_V_TOTAL, 2)] = 1481 - 1;
+        S.reg[OTG(regOTG0_OTG_V_BLANK_START_END, 2)] = (1481 - 3) | ((1481 - 3 - 1440) << 16);
+        S.reg[OTG(regOTG0_OTG_V_SYNC_A, 2)] = 5u << 16;
+        S.reg[OTG(regOTG0_OTG_V_SYNC_A_CNTL, 2)] = 1;   /* negative */
+        S.reg[OTG(regOTG0_OTG_STATUS_FRAME_COUNT, 2)] = 1234;
+        S.reg[OTG(regOTG0_OTG_STATUS_POSITION, 2)] = 777;
+
+        CHECK(dcn32_read_state(&dev, &dc) == 1);
+        CHECK(dc.head[0].pipe == 1 && dc.head[0].otg == 2);
+        CHECK(dc.head[0].width == 2560 && dc.head[0].height == 1440 && dc.head[0].pitch_px == 2560);
+        CHECK(dc.head[0].address == gop && dcn32_head_usable(&dev, &dc.head[0]));
+        CHECK(dc.head[0].h_total == 2720 && dc.head[0].h_active == 2560 && dc.head[0].h_front == 48 &&
+              dc.head[0].h_sync == 32);
+        CHECK(dc.head[0].v_total == 1481 && dc.head[0].v_active == 1440 && dc.head[0].v_front == 3 &&
+              dc.head[0].v_sync == 5 && dc.head[0].v_sync_neg && !dc.head[0].h_sync_neg);
+        CHECK(dcn32_frame_count(&dev, &dc, 0) == 1234 && dcn32_scanline(&dev, &dc, 0) == 777);
+
+        /* same pitch: plain flip, latched */
+        CHECK(dcn32_flip(&dev, &dc, 0, FB_START + 0x4000000, 2560, 0) == RDNA3_OK);
+        CHECK(S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, 1)] == (uint32_t)(FB_START + 0x4000000));
+        CHECK(!dcn32_flip_pending(&dev, &dc, 0) && S.dcn_flips == 1);
+        /* held: pending until the model latches */
+        S.dcn_hold = 1;
+        CHECK(dcn32_flip(&dev, &dc, 0, FB_START + 0x5000000, 2560, 0) == RDNA3_OK);
+        CHECK(dcn32_flip_pending(&dev, &dc, 0));
+        S.reg[HUBP(regHUBPREQ0_DCSURF_FLIP_CONTROL, 1)] &= ~HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_PENDING_MASK;
+        CHECK(dcn32_flip_pending(&dev, &dc, 0));   /* EARLIEST_INUSE still the old one */
+        S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, 1)] = (uint32_t)(FB_START + 0x5000000);
+        CHECK(!dcn32_flip_pending(&dev, &dc, 0));
+        S.dcn_hold = 0;
+        /* pitch change goes under SURFACE_UPDATE_LOCK, and the lock is released */
+        CHECK(dcn32_flip(&dev, &dc, 0, FB_START + 0x6000000, 2624, 1) == RDNA3_OK);
+        CHECK(S.dcn_pitch_unlocked == 0 && S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_PITCH, 1)] == 2623);
+        CHECK(!(S.reg[HUBP(regHUBPREQ0_DCSURF_FLIP_CONTROL, 1)] & HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_UPDATE_LOCK_MASK));
+        CHECK(S.reg[HUBP(regHUBPREQ0_DCSURF_FLIP_CONTROL, 1)] & HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_TYPE_MASK);
+        /* bad requests: unaligned, outside VRAM, too narrow, no such head */
+        CHECK(dcn32_flip(&dev, &dc, 0, FB_START + 0x6000010, 2624, 0) == RDNA3_EINVAL);
+        CHECK(dcn32_flip(&dev, &dc, 0, FB_START + VRAM_SIZE - 4096, 2624, 0) == RDNA3_EINVAL);
+        CHECK(dcn32_flip(&dev, &dc, 0, 0x1000, 2624, 0) == RDNA3_EINVAL);
+        CHECK(dcn32_flip(&dev, &dc, 0, FB_START, 2000, 0) == RDNA3_EINVAL);
+        CHECK(dcn32_flip(&dev, &dc, 1, FB_START, 2560, 0) == RDNA3_EINVAL);
+        CHECK(S.dcn_flips == 3);
+        /* CRC */
+        CHECK(dcn32_crc_read(&dev, &dc, 0, &r, &g, &b) == RDNA3_ENODEV);
+        dcn32_crc_enable(&dev, &dc, 0, 1);
+        S.reg[OTG(regOTG0_OTG_CRC0_DATA_RG, 2)] = 0x22221111;
+        S.reg[OTG(regOTG0_OTG_CRC0_DATA_B, 2)] = 0x3333;
+        CHECK(dcn32_crc_read(&dev, &dc, 0, &r, &g, &b) == RDNA3_OK && r == 0x1111 && g == 0x2222 && b == 0x3333);
+        /* tiled or DCC scanout cannot be drawn by the CPU */
+        dc.head[0].sw_mode = 27;
+        CHECK(!dcn32_head_usable(&dev, &dc.head[0]));
+        /* display off: no heads */
+        S.reg[OTG(regOTG0_OTG_CONTROL, 2)] = 0;
+        CHECK(dcn32_read_state(&dev, &dc) == 0);
     }
 
     printf("sim_navi32: %s firmware, %u bootloader cmds, %u LOAD_IP_FW, TMR %u KiB, "

@@ -13,7 +13,9 @@
  *   rdna3NewAccelClient              not offered: RADV opens RDNA3Accel
  *                                    directly (RDNA3UserClient)
  *
- * Scanout and flips are the framebuffer's (Stage 3), not answered here.
+ * Display heads (Stage 3, RDNA3Display.cpp) are answered here for
+ * RDNA3Framebuffer; the accelerator's own scanout/flip requests go to the
+ * framebuffer, which forwards them.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -157,6 +159,16 @@ IOReturn RDNA3Accel::platformGpuVa(int op, RD3KGpuVaRequest *g)
 IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
                                           void *p3, void *p4)
 {
+    if (fn) {
+        if (fn->isEqualTo(RD3K_DISPLAY_FN_INFO))
+            return displayInfo((RD3KDisplayInfo *)p1);
+        if (fn->isEqualTo(RD3K_DISPLAY_FN_FLIP))
+            return displayFlip((RD3KDisplayFlip *)p1);
+        if (fn->isEqualTo(RD3K_DISPLAY_FN_STATUS))
+            return displayStatus((RD3KDisplayStatus *)p1);
+        if (fn->isEqualTo(RD3K_FN_DISPLAY_CRC))
+            return displayCrc((uint32_t)(uintptr_t)p1, (uint32_t *)p2);
+    }
     if (fn && fDrm) {
         if (fn->isEqualTo(RD3K_VRAM_FN_ALLOC))
             return platformVramAlloc((RD3KVramRequest *)p1);

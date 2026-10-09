@@ -61,6 +61,10 @@ public:
     /* called by the bring-up thread when a ring really executes */
     void  drmRingReady(uint32_t ip, uint32_t mask);
 
+    /* Stage 3: VRAM below this offset holds the firmware's scanout(s);
+     * the bring-up and GEM heaps start above it (RDNA3Display.cpp) */
+    uint64_t displayReserveEnd() const { return fDispReserveEnd; }
+
     /* Stage 7: requests from the accelerator kext (RDNA3Platform.cpp) */
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
                                           void *p3, void *p4) override;
@@ -107,6 +111,24 @@ private:
     IOReturn      platformVramAlloc(struct RD3KVramRequest *r);
     IOReturn      platformVramFree(struct RD3KVramRequest *r);
     IOReturn      platformGpuVa(int op, struct RD3KGpuVaRequest *g);
+
+    /* Stage 3: display heads the firmware lit (RDNA3Display.cpp) */
+    struct rdna3_dev *fDispDev = nullptr;
+    struct rdna3_dcn *fDcn     = nullptr;
+    IOLock       *fDispLock    = nullptr;
+    uint32_t      fDispRefresh[4] = {};   /* measured, mHz */
+    bool          fDispMeasured = false;
+    bool          fDcnCrcOn[4]  = {};
+    uint64_t      fDispReserveEnd = 0;
+    bool          displayInit(const amd_discovery *disc);
+    void          displayFree();
+    void          displayMeasureRefresh();
+    IOReturn      displayInfo(struct RD3KDisplayInfo *r);
+    IOReturn      displayFlip(struct RD3KDisplayFlip *f);
+    IOReturn      displayStatus(struct RD3KDisplayStatus *s);
+    IOReturn      displayCrc(uint32_t head, uint32_t *crc);
+    static uint32_t dispMmioRd(void *ctx, uint64_t off);
+    static void     dispMmioWr(void *ctx, uint64_t off, uint32_t v);
 
     /* level 0 */
     void      readConfigSpace();

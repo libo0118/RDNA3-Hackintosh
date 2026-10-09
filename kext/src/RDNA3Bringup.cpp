@@ -257,7 +257,13 @@ void RDNA3Bringup::run()
      * memory) and from the top of VRAM (discovery, IFWI reservations):
      * stay inside the CPU-visible aperture, at most 512 MiB. */
     uint64_t hi = fDev->vram_cpu_len < (512ull << 20) ? fDev->vram_cpu_len : (512ull << 20);
-    rdna3_vram_alloc_init(fDev, 16ull << 20, hi);
+    /* above the boot scanout (a 4K GOP framebuffer is 32 MiB) */
+    uint64_t lo = fOwner->displayReserveEnd() > (16ull << 20) ? fOwner->displayReserveEnd() : (16ull << 20);
+    if (lo + (64ull << 20) > hi) {
+        publishString("RDNA3,Stage2", "failed: boot scanout leaves no room below 512 MiB");
+        return;
+    }
+    rdna3_vram_alloc_init(fDev, lo, hi);
 
     rdna3_nbio_remap_hdp(fDev);
 
