@@ -187,6 +187,7 @@ typedef struct sim {
         PPTable_t pptable;    /* as written by the driver */
     } smu;
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
+    unsigned sdma_ibs, sdma_ib_fault;   /* INDIRECT packets run, ones the GFXHUB could not translate */
     int      sdma_hang;              /* the engine stopped consuming its ring */
     uint32_t harvest_wgp[8][2];
     uint64_t tsc;                    /* GOLDEN_TSC: +4 on every access of either half */
@@ -1220,6 +1221,51 @@ static void cp_run(uint32_t wptr_dw)
 }
 
 /* SDMA 6.0 engine model: WRITE_LINEAR, COPY_LINEAR, CONST_FILL, FENCE, NOP */
+/* SDMA 6.0 is a GC client: an IB with VMID n is fetched, and its addresses
+ * resolved, through GFXHUB context n (sdma_v6_0: ring->vm_hub =
+ * AMDGPU_GFXHUB(0)); a context the GFXHUB never enabled translates nothing */
+static uint8_t *sdma_vm_ptr(uint32_t vmid, uint64_t va, uint64_t len)
+{
+    uint32_t dist = regGCVM_CONTEXT1_CNTL - regGCVM_CONTEXT0_CNTL;
+    if (!(S.reg[GC_BASE0 + regGCVM_CONTEXT0_CNTL + dist * vmid] & GCVM_CONTEXT0_CNTL__ENABLE_CONTEXT_MASK))
+        return NULL;
+    return vm_ptr(vmid, va, len);
+}
+
+static void sdma_run_ib(uint32_t vmid, uint64_t va, uint32_t ndw)
+{
+    const uint32_t *ib = (const uint32_t *)sdma_vm_ptr(vmid, va, 4ull * ndw);
+    uint32_t i = 0;
+    S.sdma_ibs++;
+    if (!ib) {
+        S.sdma_ib_fault++;
+        return;
+    }
+    while (i < ndw) {
+        uint32_t h = ib[i], op = h & 0xff, sub = (h >> 8) & 0xff, n;
+        if (op == SDMA_OP_NOP) {
+            n = 1 + ((h >> 16) & 0x3fff);
+        } else if (op == SDMA_OP_WRITE && sub == 0) {
+            uint64_t a = ib[i + 1] | ((uint64_t)ib[i + 2] << 32);
+            uint32_t cnt = (ib[i + 3] & 0xfffff) + 1;
+            uint8_t *p = sdma_vm_ptr(vmid, a, 4ull * cnt);
+            if (p) memcpy(p, &ib[i + 4], 4ull * cnt); else S.sdma_ib_fault++;
+            n = 4 + cnt;
+        } else if (op == SDMA_OP_CONST_FILL) {
+            uint64_t a = ib[i + 1] | ((uint64_t)ib[i + 2] << 32);
+            uint32_t val = ib[i + 3], len = ib[i + 4] + 1, k;
+            uint8_t *p = sdma_vm_ptr(vmid, a, len);
+            for (k = 0; p && k + 4 <= len; k += 4) memcpy(p + k, &val, 4);
+            if (!p) S.sdma_ib_fault++;
+            n = 5;
+        } else {
+            S.sdma_bad++;
+            return;
+        }
+        i += n;
+    }
+}
+
 static void sdma_run(uint32_t wptr_bytes)
 {
     uint32_t cntl = S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_CNTL];
@@ -1287,6 +1333,9 @@ static void sdma_run(uint32_t wptr_bytes)
             uint8_t *p = mc_ptr(a, 4);
             if (p) memcpy(p, &RD(3), 4); else S.sdma_bad++;
             n = 4;
+        } else if (op == SDMA_OP_INDIRECT) {
+            sdma_run_ib((h >> 16) & 0xf, (RD(1) & 0xffffffe0u) | ((uint64_t)RD(2) << 32), RD(3));
+            n = 6;
         } else if (op == SDMA_OP_TRAP) {
             if (S.reg[GC_BASE0 + regSDMA0_CNTL] & SDMA0_CNTL__TRAP_ENABLE_MASK)
                 ih_push(RD_IH_CLIENT_GFX, RD_IH_SRC_SDMA_TRAP, 0);
@@ -2316,6 +2365,59 @@ static void run(const char *fwdir)
                                        sizeof(pat)) == RDNA3_OK);
                 again = sd.fence_seq;
                 CHECK(again == hung + 1 && S.sdma_bad == 0);
+            }
+            /* a userspace DMA job (rdna3_drminfo --dma-test at rdna3lvl=7): IB
+             * and target in one VRAM BO mapped in VMID 6. SDMA 6.0 walks the
+             * GFXHUB, so a VM set up on MMHUB alone signals its fence and
+             * writes nothing (the "DMA job results WRONG" on the card) until
+             * gfx_v11_0_gfxhub_enable has run */
+            {
+                static rdna3_pt_pool upool;
+                static rdna3_vm uvm;
+                const uint64_t gva = 0x100000;
+                const uint32_t ctx6 = GC_BASE0 + regGCVM_CONTEXT0_CNTL +
+                                      6 * (regGCVM_CONTEXT1_CNTL - regGCVM_CONTEXT0_CNTL);
+                uint64_t bo = rdna3_vram_alloc(&dev, 64 << 10, 4096, "test-user-bo");
+                uint64_t f = gpuvm_pte_flags((1u << 1) | (1u << 2) | (1u << 3), 0);
+                uint32_t ib[16], got[3], n = 0, seq, saved = S.reg[ctx6], pass;
+                CHECK(gpuvm_pool_init(&dev, &upool, 16) == RDNA3_OK);
+                CHECK(gpuvm_vm_init(&dev, &uvm, &upool) == RDNA3_OK);
+                CHECK(gpuvm_map_linear(&dev, &uvm, gva, rdna3_vram_pa(&dev, bo), 16, f) == RDNA3_OK);
+                ib[n++] = SDMA_OP_WRITE; ib[n++] = (uint32_t)(gva + 0x8000); ib[n++] = 0; ib[n++] = 1;
+                ib[n++] = 0xC0FFEE01; ib[n++] = 0xC0FFEE02;
+                ib[n++] = SDMA_OP_CONST_FILL; ib[n++] = (uint32_t)(gva + 0xC000); ib[n++] = 0;
+                ib[n++] = 0x5A5A5A5A; ib[n++] = 255;
+                while (n & 7)
+                    ib[n++] = 0;
+                rdna3_vram_fill(&dev, bo, 0, 64 << 10);
+                rdna3_vram_write(&dev, bo, ib, 4ull * n);
+                for (pass = 0; pass < 2; pass++) {
+                    uint32_t faults = S.sdma_ib_fault;
+                    if (!pass) {
+                        S.reg[ctx6] = 0;   /* level 7 before the fix: MMHUB only */
+                        mmhub302_setup_vm_pt_regs(&dev, 6, gpuvm_pd_addr(&dev, &uvm));
+                        mmhub302_flush_tlb(&dev, 6, 0);
+                    } else {
+                        S.reg[ctx6] = saved;
+                        CHECK(gfx11_gfxhub_enable(&dev, &gmc) == RDNA3_OK && gmc.gfxhub_enabled);
+                        CHECK(S.reg[ctx6] & GCVM_CONTEXT0_CNTL__ENABLE_CONTEXT_MASK);
+                        gfxhub303_setup_vm_pt_regs(&dev, 6, gpuvm_pd_addr(&dev, &uvm));
+                        CHECK(gfxhub303_flush_tlb(&dev, 6, 0) == RDNA3_OK);
+                    }
+                    sdma60_emit_ib(&dev, &sd, 6, gva, n);
+                    seq = sdma60_emit_fence(&dev, &sd);
+                    sdma60_commit(&dev, &sd);
+                    CHECK(sdma60_wait_fence(&dev, &sd, seq) == RDNA3_OK);
+                    rdna3_vram_read(&dev, bo + 0x8000, got, 8);
+                    rdna3_vram_read(&dev, bo + 0xC000 + 252, &got[2], 4);
+                    if (!pass)
+                        CHECK(S.sdma_ib_fault == faults + 1 && got[0] == 0 && got[2] == 0);
+                    else
+                        CHECK(S.sdma_ib_fault == faults && got[0] == 0xC0FFEE01 &&
+                              got[1] == 0xC0FFEE02 && got[2] == 0x5A5A5A5A);
+                }
+                gpuvm_vm_fini(&dev, &uvm);
+                CHECK(S.sdma_bad == 0);
             }
             /* VRAM -> scattered system pages through a GART window, as the
              * IOSurface page-off does: 3 pages in a 2-page window = two chunks */

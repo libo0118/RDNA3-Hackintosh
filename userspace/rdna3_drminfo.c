@@ -106,6 +106,10 @@ static int job_test(int fd, int gfx)
     bad += p[0xC000 / 4 + 64] != 0;
     printf("%s job results %s\n", gfx ? "GFX" : "DMA",
            bad ? "WRONG" : (gfx ? "verified (PM4 WRITE_DATA)" : "verified (WRITE_LINEAR + CONST_FILL)"));
+    if (bad)
+        printf("  +0x8000: %08x %08x (want c0ffee01 c0ffee02), +0xC000: %08x .. +0xC0FC: %08x "
+               "(want 5a5a5a5a), +0xC100: %08x (want 0)\n", p[0x8000 / 4], p[0x8000 / 4 + 1],
+               p[0xC000 / 4], p[0xC000 / 4 + 63], p[0xC000 / 4 + 64]);
     drm_xnu_munmap(p, 64 << 10);
     return bad != 0;
 }

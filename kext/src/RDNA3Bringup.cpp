@@ -630,7 +630,19 @@ bool RDNA3Bringup::hwInit()
             return false;
         }
         bzero(fSdma, sizeof(*fSdma));
-        ret = sdma60_start(fDev, fSdma, 0, 0);
+        /* SDMA 6.0 translates through the GFXHUB (sdma_v6_0: vm_hub =
+         * AMDGPU_GFXHUB(0)); amdgpu enables it in GFX hw_init, which runs
+         * before SDMA's, so without level 8 it comes up here */
+        ret = fGmc->gfxhub_enabled ? 0 : gfx11_gfxhub_enable(fDev, fGmc);
+        publish("RDNA3,GFXHUBResult", (uint64_t)(int64_t)ret);
+        if (!ret)
+            for (uint32_t id = 1; id < 16; id++)
+                if (fVmidUsed & (1u << id)) {
+                    gfxhub303_setup_vm_pt_regs(fDev, id, fVmPd[id]);
+                    gfxhub303_flush_tlb(fDev, id, 0);
+                }
+        if (!ret)
+            ret = sdma60_start(fDev, fSdma, 0, 0);
         publish("RDNA3,SDMAResult", (uint64_t)(int64_t)ret);
         if (!ret) {
             const uint32_t len = 64 * 1024;
@@ -1202,7 +1214,7 @@ void *RDNA3Bringup::vmCreate()
             v->live = true;
             fVmPd[id] = gpuvm_pd_addr(fDev, &v->vm);
             fVmByVmid[id] = v;
-            /* both hubs: SDMA/VCN walk MMHUB, shaders GFXHUB */
+            /* both hubs: VCN walks MMHUB, SDMA and shaders the GFXHUB */
             mmhub302_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
             if (fGmc && fGmc->gfxhub_enabled)
                 gfxhub303_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));

@@ -148,7 +148,7 @@ static void config_gfx_rs64(rdna3_dev *d, const rdna3_rs64_start *s)
 }
 
 /* gfx_v11_0_gfxhub_enable */
-static int gfxhub_enable(rdna3_dev *d, rdna3_gmc *g)
+int gfx11_gfxhub_enable(rdna3_dev *d, rdna3_gmc *g)
 {
     int r = gfxhub303_gart_enable(d, g);
     if (r)
@@ -684,7 +684,7 @@ int gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs6
         return ret;
     if (rs64)
         config_gfx_rs64(d, rs64);
-    ret = gfxhub_enable(d, g);
+    ret = gfx11_gfxhub_enable(d, g);
     if (ret)
         return ret;
     golden_registers(d);

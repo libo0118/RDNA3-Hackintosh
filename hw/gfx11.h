@@ -109,6 +109,10 @@ typedef struct rdna3_gfx_ib {
 int  gfx11_rs64_from_fw(const void *pfp, uint32_t pfp_len, const void *me, uint32_t me_len,
                         const void *mec, uint32_t mec_len, rdna3_rs64_start *out);
 
+/* gfx_v11_0_gfxhub_enable: GART + VMID 1-15 contexts on the GFXHUB, which
+ * SDMA 6.0 walks too (amdgpu runs it in GFX hw_init, before SDMA's) */
+int  gfx11_gfxhub_enable(rdna3_dev *d, rdna3_gmc *g);
+
 /* gfx_v11_0_hw_init up to and including the gfx ring test */
 int  gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs64_start *rs64,
                    uint32_t ring_size);
