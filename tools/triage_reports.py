@@ -153,7 +153,9 @@ def report(path, show_all):
         print("   kext errors (%d):" % len(errs))
         for l in errs[:25]:
             print("     " + l[-160:])
-    if ".panic" in panics:
+    # collect.sh prints "== <file>" per panic report (the command line
+    # itself also contains "*.panic")
+    if re.search(r"^== .*\.panic\s*$", panics, re.M):
         print("   !! panic report(s) present: see 21-log-panics.txt")
         failed = True
     return failed

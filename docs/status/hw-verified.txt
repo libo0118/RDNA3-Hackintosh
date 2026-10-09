@@ -2,4 +2,4 @@
 # One line per step: <step> <yyyy-mm-dd> <vm|metal> [note]
 # Read by tools/progress.py: a group of the status map turns green when all
 # the steps it lists (AMDGPU_STEPS / UAPI_STEPS there) are here.
-# Nothing has run on the card yet.
+0 2026-10-09 vm kext injected by OpenCore, matched 1002:747e on pcie.0
