@@ -83,7 +83,12 @@ public:
     int   submit(void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
                  uint64_t *seq);
     int   fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq);
-    int   fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs);
+    /* capHit == nullptr: run recover() at the 10 s cap (caller holds the
+     * DRM lock). Otherwise report the cap in *capHit and let the caller
+     * take the lock and recover: the wait itself runs unlocked. */
+    int   fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs,
+                    bool *capHit = nullptr);
+    int   recoverHang(uint32_t ip, uint32_t ring, uint64_t seq) { return recover(ip, ring, seq); }
 
     /* MSI: called on the work loop for every interrupt */
     void  handleInterrupt();
@@ -167,6 +172,7 @@ private:
 
     /* firmware request rendezvous */
     IOLock       *fLock   = nullptr;
+    IOLock       *fIhLock = nullptr;   /* one IH consumer at a time (MSI action or a polling waiter) */
     bool          fFwDone = false;
     RDNA3Firmware fFwResult = {};
 

@@ -101,14 +101,31 @@ static int h_signaled(void *c, uint32_t ip, uint32_t ring, uint64_t seq)
     (void)c; (void)ip; (void)ring;
     return seq <= ring_done;
 }
+/* runs "while the lock is dropped": what another thread could do meanwhile */
+static void (*h_during_wait)(void);
 static int h_wait(void *c, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t abs_ns)
 {
     (void)c; (void)ip; (void)ring;
+    if (h_during_wait) {
+        void (*fn)(void) = h_during_wait;
+        h_during_wait = NULL;
+        fn();
+    }
     if (abs_ns == 1)          /* "already expired" */
         return -RD_ETIME;
     if (seq > ring_done)
         ring_done = seq;
     return 0;
+}
+
+static rdna3_drm_file *g_wait_file;
+static uint32_t g_wait_handle;
+static void destroy_during_wait(void)
+{
+    struct drm_syncobj_destroy d;
+    memset(&d, 0, sizeof(d));
+    d.handle = g_wait_handle;
+    rdna3_drm_ioctl(g_wait_file, RD_NR_SYNCOBJ_DESTROY, &d, sizeof(d));
 }
 
 static uint64_t chunk_ptrs[8];
@@ -491,6 +508,17 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == -RD_ETIME);   /* poll only */
         sw.timeout_nsec = INT64_MAX;
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == 0 && ring_done == 3);
+        /* the syncobj goes away while the wait sleeps (another thread, with
+         * the OS lock dropped): the slot must stay free afterwards */
+        memset(&sc, 0, sizeof(sc));
+        CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, sc) == 0);
+        CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, sc.handle, NULL) == 0);
+        g_wait_file = f;
+        g_wait_handle = sc.handle;
+        h_during_wait = destroy_during_wait;
+        sw.handles = (uint64_t)(uintptr_t)&sc.handle; sw.timeout_nsec = INT64_MAX;
+        CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == 0 && h_during_wait == NULL);
+        CHECK(!f->syncobjs[sc.handle - 1].used && !f->syncobjs[sc.handle - 1].signaled);
         /* WAIT_CS on ~0 = latest */
         w.in.handle = ~0ull; w.in.timeout = 1;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 0);

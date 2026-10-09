@@ -183,6 +183,9 @@ typedef struct rdna3_drm_file {
     void    *os;              /* the OS's handle on the client (its task), for bo_userptr */
     uint32_t next_bo_list;
     uint64_t client_caps;
+    /* ioctls of this file in progress: the OS layer may drop its lock while
+     * a fence wait sleeps, and must not tear the file down under them */
+    uint32_t inflight;
 } rdna3_drm_file;
 
 /* Fill dev_info and sizes for a Navi 3x from discovery + PCI identity. */

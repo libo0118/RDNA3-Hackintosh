@@ -84,11 +84,12 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
         fPmMask = pmmask;
     }
     fLock = IOLockAlloc();
+    fIhLock = IOLockAlloc();
     fDisc = (amd_discovery *)IOMalloc(sizeof(*fDisc));
     fDev = (rdna3_dev *)IOMalloc(sizeof(*fDev));
     fPsp = (rdna3_psp *)IOMalloc(sizeof(*fPsp));
     fPlan = (amd_ucode_plan *)IOMalloc(sizeof(*fPlan));
-    if (!fLock || !fDisc || !fDev || !fPsp || !fPlan)
+    if (!fLock || !fIhLock || !fDisc || !fDev || !fPsp || !fPlan)
         return false;
     memcpy(fDisc, disc, sizeof(*fDisc));
     return true;
@@ -171,6 +172,8 @@ void RDNA3Bringup::stopAndFree()
     }
     if (fGmc) IOFree(fGmc, sizeof(*fGmc));
     if (fLock) IOLockFree(fLock);
+    if (fIhLock) IOLockFree(fIhLock);
+    fIhLock = nullptr;
     fDisc = nullptr; fDev = nullptr; fPsp = nullptr; fPlan = nullptr; fGmc = nullptr; fIh = nullptr; fSdma = nullptr; fGfx = nullptr; fLock = nullptr;
 }
 
@@ -1174,13 +1177,17 @@ int RDNA3Bringup::fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq)
 
 extern "C" uint64_t mach_continuous_time(void);
 
-int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs)
+int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs,
+                            bool *capHit)
 {
     /* userspace deadlines are CLOCK_MONOTONIC, which on macOS counts
-     * mach_continuous_time. Cap every wait at 10 s so a hung engine cannot
-     * hold the DRM lock forever. With MSI the wait sleeps on fLock until the
-     * IH handler wakes it (5 ms guard against a lost interrupt); without it
-     * the ring is polled. TODO(uapi): drop fDrmLock while sleeping. */
+     * mach_continuous_time. Every wait is capped at 10 s (amdgpu's job
+     * timeout). With MSI the wait sleeps on fLock until the IH handler wakes
+     * it (5 ms guard against a lost interrupt); without it the ring is
+     * polled. The DRM ioctl path calls this with fDrmLock dropped (capHit
+     * set), so other clients keep going while one waits. */
+    if (capHit)
+        *capHit = false;
     uint64_t start, now, capNs = 10ull * 1000 * 1000 * 1000;
     absolutetime_to_nanoseconds(mach_continuous_time(), &start);
     for (uint32_t spins = 0;; spins++) {
@@ -1189,8 +1196,13 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
         absolutetime_to_nanoseconds(mach_continuous_time(), &now);
         if (absNs != UINT64_MAX && now >= absNs)
             return -RD_ETIME;
-        if (now - start >= capNs)
+        if (now - start >= capNs) {
+            if (capHit) {
+                *capHit = true;          /* the caller recovers under its lock */
+                return -RD_ETIME;
+            }
             return recover(ip, ring, seq);   /* amdgpu_job_timedout */
+        }
         if (fIrqLive) {
             uint64_t ns = 5ull * 1000 * 1000, left = capNs - (now - start), deadline;
             if (absNs != UINT64_MAX && absNs - now < left)
@@ -1209,8 +1221,10 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
             IODelay(1);
         } else {
             /* polled IH: page faults and other IVs are only seen here */
-            if (fIh && fIh->enabled)
+            if (fIh && fIh->enabled && IOLockTryLock(fIhLock)) {
                 ih60_process(fDev, fIh, ivCallback, this);
+                IOLockUnlock(fIhLock);
+            }
             IOSleep(1);
         }
     }
@@ -1265,7 +1279,9 @@ void RDNA3Bringup::handleInterrupt()
 {
     if (!fIh || !fDev)
         return;
+    IOLockLock(fIhLock);
     uint32_t n = ih60_process(fDev, fIh, ivCallback, this);
+    IOLockUnlock(fIhLock);
     IOLockLock(fLock);
     fIrqCount++;
     fIvCount += n;

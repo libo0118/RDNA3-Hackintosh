@@ -220,10 +220,24 @@ int RDNA3Accel::drmFenceSignaled(void *ctx, uint32_t ip, uint32_t ring, uint64_t
     return a->fBringup ? a->fBringup->fenceSignaled(ip, ring, seq) : 1;
 }
 
+/* Called from rdna3_drm_ioctl, i.e. with fDrmLock held. The sleep runs
+ * without it, so one client's wait (up to the 10 s cap) does not stall the
+ * others; the UAPI holds no pointers across it (fences by value, syncobjs
+ * looked up again) and drmClose waits for in-flight ioctls. Recovery after
+ * the cap runs with the lock again, once, if the fence is still pending. */
 int RDNA3Accel::drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
-    return a->fBringup ? a->fBringup->fenceWait(ip, ring, seq, absNs) : 0;
+    bool cap = false;
+    int r;
+    if (!a->fBringup)
+        return 0;
+    IOLockUnlock(a->fDrmLock);
+    r = a->fBringup->fenceWait(ip, ring, seq, absNs, &cap);
+    IOLockLock(a->fDrmLock);
+    if (cap)
+        r = a->fBringup->fenceSignaled(ip, ring, seq) ? 0 : a->fBringup->recoverHang(ip, ring, seq);
+    return r;
 }
 
 int RDNA3Accel::drmSensor(void *ctx, uint32_t type, uint32_t *value)
@@ -353,6 +367,10 @@ int RDNA3Accel::drmOpen(rdna3_drm_file *f)
 void RDNA3Accel::drmClose(rdna3_drm_file *f)
 {
     IOLockLock(fDrmLock);
+    /* another thread of the client may sit in a fence wait with the lock
+     * dropped: let it finish before the file goes away */
+    while (f->inflight)
+        IOLockSleep(fDrmLock, &f->inflight, THREAD_UNINT);
     rdna3_drm_file_close(f);
     IOLockUnlock(fDrmLock);
 }
@@ -360,7 +378,10 @@ void RDNA3Accel::drmClose(rdna3_drm_file *f)
 int RDNA3Accel::drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
 {
     IOLockLock(fDrmLock);
+    f->inflight++;
     int r = rdna3_drm_ioctl(f, nr, data, size);
+    if (--f->inflight == 0)
+        IOLockWakeup(fDrmLock, &f->inflight, false);
     IOLockUnlock(fDrmLock);
     return r;
 }

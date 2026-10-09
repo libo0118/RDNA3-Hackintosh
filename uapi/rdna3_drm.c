@@ -393,11 +393,19 @@ static int syncobj_for_each(rdna3_drm_file *f, uint64_t handles_ptr, uint32_t co
             if (sobj_signaled(f->dev, s) && (!points_ptr || s->point >= pt))
                 break;
             if (s->has_fence) {
-                int r = fence_wait_abs(f->dev, &s->fence, abs_ns);
+                /* the fence by value: ops.fence_wait may drop the OS lock,
+                 * and another thread can reset, replace or destroy the
+                 * syncobj meanwhile */
+                rdna3_fence fe = s->fence;
+                int r = fence_wait_abs(f->dev, &fe, abs_ns);
                 if (r)
                     return r;
-                s->signaled = 1;
-                s->has_fence = 0;
+                s = sobj(f, h);
+                if (s && s->has_fence && s->fence.ip == fe.ip && s->fence.ring == fe.ring &&
+                    s->fence.seq == fe.seq) {
+                    s->signaled = 1;
+                    s->has_fence = 0;
+                }
                 break;
             }
             return -RD_ETIME;
