@@ -32,7 +32,12 @@ jeszcze nie.
    na którym GPU sam wykonuje polecenia.** `rdna3lvl=8` dodaje GFX 11:
    sprawdzenie autoloadu RLC, adresy startowe RS64, GFXHUB, golden registers,
    SH_MEM, CSB + SRM, ring GFX0 z clear state i testem `SCRATCH_REG0`
-   (`RDNA3,GFXResult`).
+   (`RDNA3,GFXResult`). `rdna3msi=1` (od poziomu 6) rejestruje MSI karty
+   w IOKit: ring IH jest opróżniany z przerwania, a oczekiwanie na fence
+   śpi do wybudzenia przez handler (zapas 5 ms na zgubione przerwanie).
+   Poziom 7 sprawdza pierwsze przerwanie trap z SDMA (`RDNA3,MSIVerified`);
+   gdy nie dojdzie w 200 ms, sterownik wraca do odpytywania. Liczniki:
+   `RDNA3,IRQs`, `RDNA3,IRQIVs`, `RDNA3,IRQFenceGFX`, `RDNA3,IRQFenceSDMA`.
 3. Wyniki w IORegistry (`ioreg -l -r -c RDNA3Accel`): `RDNA3,Stage2`,
    `RDNA3,PSPResult`, `RDNA3,SOSVersion`, `RDNA3,SMUVersion`, `RDNA3,FBStartMC`.
    Log: `log show --last boot --predicate 'eventMessage CONTAINS "RDNA3:"'`.
@@ -68,14 +73,15 @@ wersji linux-firmware), 29× `LOAD_IP_FW ... ok`, `RLC autoload started`,
    fizyczny VRAM, GTT: strony systemowe + SNOOPED), flush TLB po każdej
    zmianie. Działa od `rdna3lvl=6`; niżej mapowania są tylko zapamiętywane.
 2. 🟡 **IH 6.0** (`hw/ih60.c`): ring 0 w VRAM, writeback wptr, dekodowanie IV,
-   obsługa przepełnienia; odpytywany. Zostaje: MSI w IOKit
-   (`registerInterrupt`), ring 1 (page faulty), doorbell rptr.
+   obsługa przepełnienia; odpytywany albo z MSI (`rdna3msi=1`,
+   `RPTR_REARM`, fence'y GFX EOP / SDMA trap → `ih60_iv_fence`). Zostaje:
+   ring 1 (page faulty), doorbell rptr, VM fault → zabicie kontekstu.
 3. 🟡 **GFX 11** (`hw/gfx11.c`): ring GFX0 przez rejestry `CP_RB0_*` (jak
    amdgpu z `amdgpu_mes=0`), clear state, test ringu, IB + fence
    `RELEASE_MEM`; CS na `AMDGPU_HW_IP_GFX` od `rdna3lvl=8`. Zostaje: VM flush /
    ACQUIRE_MEM wokół jobów, KIQ + kolejki compute (MEC) albo MES, doorbelle.
 4. 🟡 **SDMA 6.0** (`hw/sdma60.c`): ring QUEUE0 w VRAM, test ringu, kopia,
-   fill, fence; bez doorbelli (wptr przez rejestr + slot poll). Zostaje:
-   IB (`INDIRECT`), przerwanie TRAP przez IH, SDMA1, doorbelle.
+   fill, fence, IB (`INDIRECT`), TRAP po fence przy MSI; bez doorbelli
+   (wptr przez rejestr + slot poll). Zostaje: SDMA1, doorbelle.
 5. Wtedy `AMDGPU_CS` w `uapi/` dostaje prawdziwą implementację, a tryb
    `rdna3enum=1` przestaje być potrzebny.

@@ -100,6 +100,7 @@ typedef struct sim {
     unsigned cp_ib_dw, cp_ib_fault, ring_tlb_flushes, hdp_engine_flushes;
     uint32_t cp_last_cntxcntl, cp_last_ib_vmid;
     unsigned dcn_flips, dcn_pitch_unlocked;
+    unsigned ih_ivs, ih_msi, ih_dropped;   /* IVs the "hardware" queued, MSIs it raised */
     int dcn_hold;              /* 1: flips stay pending (no vupdate yet) */
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
 } sim;
@@ -115,6 +116,36 @@ static uint8_t *mc_ptr(uint64_t mc, uint64_t len)
     if (mc < FB_START || mc - FB_START + len > BAR_LEN)
         return NULL;
     return S.vram + (mc - FB_START);
+}
+
+/* IH model: an engine queues an 8-dword IV on ring 0 (IH_RB_BASE, size
+ * from IH_RB_CNTL), advances IH_RB_WPTR (+ the writeback dword), flags an
+ * overflow when it catches the rptr, and raises an MSI when ENABLE_INTR */
+static void ih_push(uint32_t client, uint32_t src, uint32_t ring_id)
+{
+    uint32_t cntl = S.reg[OSS_BASE0 + regIH_RB_CNTL];
+    uint64_t base = ((uint64_t)S.reg[OSS_BASE0 + regIH_RB_BASE] << 8) |
+                    ((uint64_t)S.reg[OSS_BASE0 + regIH_RB_BASE_HI] << 40);
+    uint64_t wb = S.reg[OSS_BASE0 + regIH_RB_WPTR_ADDR_LO] |
+                  ((uint64_t)S.reg[OSS_BASE0 + regIH_RB_WPTR_ADDR_HI] << 32);
+    uint32_t size = 4u << ((cntl & IH_RB_CNTL__RB_SIZE_MASK) >> IH_RB_CNTL__RB_SIZE__SHIFT);
+    uint32_t wreg = S.reg[OSS_BASE0 + regIH_RB_WPTR], wptr = wreg & (size - 1);
+    uint32_t rptr = S.reg[OSS_BASE0 + regIH_RB_RPTR] & (size - 1);
+    uint32_t iv[8] = { client | (src << 8) | (ring_id << 16), 0, 0, 0, 0, 0, 0, 0 };
+    uint8_t *p = (cntl & IH_RB_CNTL__RB_ENABLE_MASK) ? mc_ptr(base + wptr, 32) : NULL;
+    if (!p) {
+        S.ih_dropped++;
+        return;
+    }
+    memcpy(p, iv, 32);
+    wptr = (wptr + 32) & (size - 1);
+    wreg = wptr | (wreg & IH_RB_WPTR__RB_OVERFLOW_MASK) | (wptr == rptr ? IH_RB_WPTR__RB_OVERFLOW_MASK : 0);
+    S.reg[OSS_BASE0 + regIH_RB_WPTR] = wreg;
+    if ((cntl & IH_RB_CNTL__WPTR_WRITEBACK_ENABLE_MASK) && mc_ptr(wb, 4))
+        memcpy(mc_ptr(wb, 4), &wreg, 4);
+    S.ih_ivs++;
+    if (cntl & IH_RB_CNTL__ENABLE_INTR_MASK)
+        S.ih_msi++;
 }
 
 /* CP (ME/PFP) model for the kernel gfx ring: SET_UCONFIG_REG, the clear
@@ -216,6 +247,9 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
             uint64_t a = PK(3) | ((uint64_t)PK(4) << 32);
             uint8_t *p = mc_ptr(a, 4);
             if (p && ((PK(2) >> 29) & 7) == 1) memcpy(p, &PK(5), 4); else S.cp_bad++;
+            if (((PK(2) >> 24) & 7) == 2 &&
+                (S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE_MASK))
+                ih_push(RD_IH_CLIENT_GRBM_CP, RD_IH_SRC_CP_EOP, 0);
             break;
         }
         default: S.cp_bad++; break;
@@ -305,6 +339,10 @@ static void sdma_run(uint32_t wptr_bytes)
             uint8_t *p = mc_ptr(a, 4);
             if (p) memcpy(p, &RD(3), 4); else S.sdma_bad++;
             n = 4;
+        } else if (op == SDMA_OP_TRAP) {
+            if (S.reg[GC_BASE0 + regSDMA0_CNTL] & SDMA0_CNTL__TRAP_ENABLE_MASK)
+                ih_push(RD_IH_CLIENT_GFX, RD_IH_SRC_SDMA_TRAP, 0);
+            n = 2;
         } else {
             S.sdma_bad++;
             n = 1;
@@ -809,7 +847,7 @@ static void run(const char *fwdir)
                                0x11, 0x22, 0x33, 0x44 };
             uint32_t wptr, cntl;
             struct sim_seen seen = { 0, 0, 0, 0, 0, 0 };
-            CHECK(ih60_init(&dev, &ih, 4096, gmc.dummy_page_pa) == RDNA3_OK && ih.enabled);
+            CHECK(ih60_init(&dev, &ih, 4096, gmc.dummy_page_pa, 0) == RDNA3_OK && ih.enabled);
             cntl = S.reg[OSS_BASE0 + regIH_RB_CNTL];
             CHECK(cntl & IH_RB_CNTL__RB_ENABLE_MASK);
             CHECK(cntl & IH_RB_CNTL__WPTR_WRITEBACK_ENABLE_MASK);
@@ -1004,6 +1042,87 @@ static void run(const char *fwdir)
                 gpuvm_vm_fini(&dev, &vm);
             }
         }
+
+        /* fence interrupts: IH in MSI mode, SDMA0 trap and CP EOP raise IVs the
+         * ih60_iv_fence() decoder attributes to the right ring */
+        {
+            static rdna3_ih ih2;
+            static rdna3_sdma_ring sd2;
+            uint64_t a = rdna3_vram_alloc(&dev, 8192, 4096, "irq-test");
+            uint32_t ivs0, msi0, seq, fences = 0;
+            struct { uint32_t gfx, sdma, other; } got = { 0, 0, 0 };
+            CHECK(ih60_init(&dev, &ih2, 4096, gmc.dummy_page_pa, 1) == RDNA3_OK && ih2.msi);
+            CHECK(S.reg[OSS_BASE0 + regIH_RB_CNTL] & IH_RB_CNTL__RPTR_REARM_MASK);
+            CHECK(S.reg[OSS_BASE0 + regIH_RB_CNTL] & IH_RB_CNTL__ENABLE_INTR_MASK);
+            S.reg[0xA000 + regSDMA0_F32_CNTL] = SDMA0_F32_CNTL__HALT_MASK;
+            CHECK(sdma60_start(&dev, &sd2, 0, 4096) == RDNA3_OK);
+            ivs0 = S.ih_ivs; msi0 = S.ih_msi;
+            /* without the trap source enabled a fence raises nothing */
+            CHECK(sdma60_copy_sync(&dev, &sd2, rdna3_vram_mc(&dev, a), rdna3_vram_mc(&dev, a + 4096), 4096) == RDNA3_OK);
+            CHECK(S.ih_ivs == ivs0 && S.ih_msi == msi0);
+            sdma60_set_trap_interrupt(&dev, &sd2, 1);
+            CHECK(S.reg[GC_BASE0 + regSDMA0_CNTL] & SDMA0_CNTL__TRAP_ENABLE_MASK);
+            CHECK(sdma60_copy_sync(&dev, &sd2, rdna3_vram_mc(&dev, a), rdna3_vram_mc(&dev, a + 4096), 4096) == RDNA3_OK);
+            CHECK(S.ih_ivs == ivs0 + 1 && S.ih_msi == msi0 + 1 && S.sdma_bad == 0);
+            /* the engine honours SDMA0_CNTL even when the packet is there */
+            S.reg[GC_BASE0 + regSDMA0_CNTL] &= ~SDMA0_CNTL__TRAP_ENABLE_MASK;
+            seq = sdma60_emit_fence(&dev, &sd2);
+            sdma60_commit(&dev, &sd2);
+            CHECK(sdma60_wait_fence(&dev, &sd2, seq) == RDNA3_OK && S.ih_ivs == ivs0 + 1);
+            S.reg[GC_BASE0 + regSDMA0_CNTL] |= SDMA0_CNTL__TRAP_ENABLE_MASK;
+            /* GFX: RELEASE_MEM with INT_SEL 2 behind CP_INT_CNTL_RING0 */
+            if (gr.ready) {
+                seq = gfx11_emit_fence(&dev, &gr);
+                gfx11_commit(&dev, &gr);
+                CHECK(gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK && S.ih_ivs == ivs0 + 1);
+                gfx11_set_eop_interrupt(&dev, &gr, 1);
+                CHECK(S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE_MASK);
+                seq = gfx11_emit_fence(&dev, &gr);
+                gfx11_commit(&dev, &gr);
+                CHECK(gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK && S.ih_ivs == ivs0 + 2 && S.cp_bad == 0);
+            }
+            /* drain: the two IVs map to their rings */
+            {
+                struct sim_seen seen = { 0, 0, 0, 0, 0, 0 };
+                uint32_t n = ih60_process(&dev, &ih2, sim_iv_cb, &seen);
+                CHECK(n == (gr.ready ? 2u : 1u) && seen.n == n);
+            }
+            /* decode what was queued, in order, straight from the ring */
+            for (uint32_t off = 0; off < 2 * RD_IH_IV_SIZE; off += RD_IH_IV_SIZE) {
+                uint32_t dw[8]; rdna3_iv iv;
+                memcpy(dw, S.vram + ih2.ring + off, 32);
+                ih60_decode_iv(dw, &iv);
+                switch (ih60_iv_fence(&iv)) {
+                case RD_IH_FENCE_SDMA0: got.sdma++; break;
+                case RD_IH_FENCE_GFX: got.gfx++; break;
+                default: got.other++; break;
+                }
+                fences++;
+            }
+            CHECK(got.sdma == 1 && got.gfx == (gr.ready ? 1u : 0u) && got.other == (gr.ready ? 0u : 1u));
+            /* other clients / rings are nobody's fence */
+            {
+                rdna3_iv iv = { RD_IH_CLIENT_GRBM_CP, RD_IH_SRC_CP_EOP, 0x10 /* me 1 */, 0, 0, 0, 0, 0, 0, { 0, 0, 0, 0 } };
+                CHECK(ih60_iv_fence(&iv) == 0);
+                iv.ring_id = 0; iv.src_id = 1;
+                CHECK(ih60_iv_fence(&iv) == 0);
+                iv.client_id = RD_IH_CLIENT_GFX; iv.src_id = RD_IH_SRC_SDMA_TRAP; iv.ring_id = 0x10; /* SDMA1 */
+                CHECK(ih60_iv_fence(&iv) == 0);
+            }
+            /* MSI off: IVs still queue but nothing is raised; ring full = overflow */
+            S.reg[OSS_BASE0 + regIH_RB_CNTL] &= ~IH_RB_CNTL__ENABLE_INTR_MASK;
+            msi0 = S.ih_msi; ivs0 = S.ih_ivs;
+            for (uint32_t k = 0; k < 4096 / 32 + 2; k++)
+                ih_push(RD_IH_CLIENT_GFX, RD_IH_SRC_SDMA_TRAP, 0);
+            CHECK(S.ih_msi == msi0 && S.ih_ivs == ivs0 + 4096 / 32 + 2);
+            CHECK(S.reg[OSS_BASE0 + regIH_RB_WPTR] & IH_RB_WPTR__RB_OVERFLOW_MASK);
+            CHECK(ih60_process(&dev, &ih2, NULL, NULL) > 0 && ih2.overflows == 1);
+            sdma60_stop(&dev, &sd2);
+            gfx11_set_eop_interrupt(&dev, &gr, 0);
+            ih60_disable(&dev, &ih2);
+            (void)fences;
+        }
+
     }
 
     /* DCN 3.2: the GOP left 2560x1440 linear ARGB8888 on pipe 1 -> OTG 2,

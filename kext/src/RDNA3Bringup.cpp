@@ -13,6 +13,7 @@
 #include <libkern/c++/OSString.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
+#include <pexpert/pexpert.h>
 
 extern "C" {
 #include "smu13.h"
@@ -64,6 +65,11 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
     fMmioBase = (volatile uint8_t *)mmio->getVirtualAddress();
     fLevel = level;
     fVramSize = vramSize;
+    {
+        uint32_t msi = 0;
+        PE_parse_boot_argn("rdna3msi", &msi, sizeof(msi));
+        fMsi = msi != 0;
+    }
     fLock = IOLockAlloc();
     fDisc = (amd_discovery *)IOMalloc(sizeof(*fDisc));
     fDev = (rdna3_dev *)IOMalloc(sizeof(*fDev));
@@ -109,6 +115,7 @@ void RDNA3Bringup::stopAndFree()
             IOLockSleep(fLock, &fFinished, THREAD_UNINT);
         IOLockUnlock(fLock);
     }
+    teardownInterrupt();   /* no handler may touch fIh / the rings past here */
     if (fPsp && fPsp->ring_created)
         psp13_ring_stop(fPsp);
     OSSafeReleaseNULL(fVram);
@@ -125,10 +132,12 @@ void RDNA3Bringup::stopAndFree()
     if (fPtPool) IOFree(fPtPool, sizeof(*fPtPool));
     fPtPool = nullptr;
     if (fGfx) {
+        if (fGfx->ready && fDev) gfx11_set_eop_interrupt(fDev, fGfx, 0);
         if (fGfx->ready && fDev) gfx11_cp_gfx_enable(fDev, 0);
         IOFree(fGfx, sizeof(*fGfx));
     }
     if (fSdma) {
+        if (fSdma->ready && fDev) sdma60_set_trap_interrupt(fDev, fSdma, 0);
         if (fSdma->ready && fDev) sdma60_stop(fDev, fSdma);
         IOFree(fSdma, sizeof(*fSdma));
     }
@@ -339,12 +348,14 @@ void RDNA3Bringup::run()
             return;
         }
         bzero(fIh, sizeof(*fIh));
-        ret = ih60_init(fDev, fIh, 0, fGmc->dummy_page_pa);
+        ret = ih60_init(fDev, fIh, 0, fGmc->dummy_page_pa, fMsi ? 1 : 0);
         publish("RDNA3,IHResult", (uint64_t)(int64_t)ret);
         if (!ret) {
             /* anything already queued (e.g. from firmware) is drained and counted */
             IOSleep(10);
             publish("RDNA3,IHEarlyIVs", ih60_process(fDev, fIh, nullptr, nullptr));
+            if (fMsi && !setupInterrupt())
+                BLOG("MSI: not available, the IH ring stays polled");
         }
         publishString("RDNA3,Stage2", ret ? "failed: IH" : "PSP + SMU + MMHUB GART + IH up");
         if (ret)
@@ -396,6 +407,29 @@ void RDNA3Bringup::run()
             publish("RDNA3,SDMACopyMismatches", mism);
             if (!ret && mism)
                 ret = RDNA3_EIO;
+            if (!ret && fIrqLive) {
+                /* the first real interrupt: a fence with a TRAP behind it must
+                 * reach the handler; otherwise MSI is not working on this
+                 * machine and polling stays (the sources stay off) */
+                uint64_t before = fIrqFenceSdma;
+                uint32_t i;
+                sdma60_set_trap_interrupt(fDev, fSdma, 1);
+                uint32_t seq = sdma60_emit_fence(fDev, fSdma);
+                sdma60_commit(fDev, fSdma);
+                sdma60_wait_fence(fDev, fSdma, seq);
+                for (i = 0; i < 200 && fIrqFenceSdma == before; i++)
+                    IOSleep(1);
+                bool ok = fIrqFenceSdma != before;
+                publish("RDNA3,MSIVerified", ok ? 1 : 0);
+                if (!ok) {
+                    BLOG("MSI: no SDMA trap interrupt within 200 ms (irqs %llu), back to polling",
+                         (unsigned long long)fIrqCount);
+                    sdma60_set_trap_interrupt(fDev, fSdma, 0);
+                    fIrqLive = false;
+                } else {
+                    BLOG("MSI: verified, fence waits now sleep on the interrupt");
+                }
+            }
         }
         publishString("RDNA3,Stage2", ret ? "failed: SDMA" : "PSP + SMU + GART + IH + SDMA up, copy verified");
         if (!ret && fVmReady) {
@@ -423,6 +457,8 @@ void RDNA3Bringup::run()
         if (!ret)
             ret = gfx11_hw_init(fDev, fGmc, fGfx, &rs64, 0);
         publish("RDNA3,GFXResult", (uint64_t)(int64_t)ret);
+        if (!ret && fIrqLive)
+            gfx11_set_eop_interrupt(fDev, fGfx, 1);
         if (!ret && fVmReady) {
             /* VMs opened before the GFXHUB came up get their context now
              * (gfxhub303_gart_enable reset VMID 1-15) */
@@ -435,6 +471,16 @@ void RDNA3Bringup::run()
             publishString("RDNA3,Rings", "DMA0 GFX0");
         }
         publishString("RDNA3,Stage2", ret ? "failed: GFX" : "GFX ring 0 up, ring test passed");
+    }
+
+    if (fMsi) {
+        /* snapshot after bring-up (the handler keeps counting afterwards) */
+        publish("RDNA3,MSILive", fIrqLive ? 1 : 0);
+        publish("RDNA3,IRQs", fIrqCount);
+        publish("RDNA3,IRQIVs", fIvCount);
+        publish("RDNA3,IRQFenceGFX", fIrqFenceGfx);
+        publish("RDNA3,IRQFenceSDMA", fIrqFenceSdma);
+        publish("RDNA3,IRQOther", fIrqOther);
     }
 }
 
@@ -606,7 +652,9 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
 {
     /* userspace deadlines are CLOCK_MONOTONIC, which on macOS counts
      * mach_continuous_time. Cap every wait at 10 s so a hung engine cannot
-     * hold the DRM lock forever (TODO: IH-driven wakeups, no lock held). */
+     * hold the DRM lock forever. With MSI the wait sleeps on fLock until the
+     * IH handler wakes it (5 ms guard against a lost interrupt); without it
+     * the ring is polled. TODO(uapi): drop fDrmLock while sleeping. */
     uint64_t start, now, capNs = 10ull * 1000 * 1000 * 1000;
     absolutetime_to_nanoseconds(mach_continuous_time(), &start);
     for (uint32_t spins = 0;; spins++) {
@@ -615,9 +663,109 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
         absolutetime_to_nanoseconds(mach_continuous_time(), &now);
         if ((absNs != UINT64_MAX && now >= absNs) || now - start >= capNs)
             return -RD_ETIME;
-        if (spins < 1000)
+        if (fIrqLive) {
+            uint64_t ns = 5ull * 1000 * 1000, left = capNs - (now - start), deadline;
+            if (absNs != UINT64_MAX && absNs - now < left)
+                left = absNs - now;
+            if (left < ns)
+                ns = left;
+            clock_interval_to_deadline((uint32_t)(ns / 1000), kMicrosecondScale, &deadline);
+            /* the handler wakes under fLock after the fence landed: re-check
+             * under the lock so no wakeup between the check and the sleep
+             * is lost */
+            IOLockLock(fLock);
+            if (!fenceSignaled(ip, ring, seq))
+                IOLockSleepDeadline(fLock, &fFenceEvent, deadline, THREAD_UNINT);
+            IOLockUnlock(fLock);
+        } else if (spins < 1000) {
             IODelay(1);
-        else
+        } else {
             IOSleep(1);
+        }
+    }
+}
+
+/* ---------------------------- interrupts ---------------------------- */
+
+bool RDNA3Bringup::irqFilter(OSObject *, IOFilterInterruptEventSource *)
+{
+    return true;   /* MSI: the vector is ours alone, no register read at primary level */
+}
+
+void RDNA3Bringup::irqAction(OSObject *owner, IOInterruptEventSource *, int)
+{
+    RDNA3Accel *a = OSDynamicCast(RDNA3Accel, owner);
+    RDNA3Bringup *b = a ? a->bringup() : nullptr;
+    if (b)
+        b->handleInterrupt();
+}
+
+void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
+{
+    RDNA3Bringup *b = (RDNA3Bringup *)ctx;
+    switch (ih60_iv_fence(iv)) {
+    case RD_IH_FENCE_GFX:   b->fIrqFenceGfx++; break;
+    case RD_IH_FENCE_SDMA0: b->fIrqFenceSdma++; break;
+    default:                b->fIrqOther++; break;
+    }
+}
+
+void RDNA3Bringup::handleInterrupt()
+{
+    if (!fIh || !fDev)
+        return;
+    uint32_t n = ih60_process(fDev, fIh, ivCallback, this);
+    IOLockLock(fLock);
+    fIrqCount++;
+    fIvCount += n;
+    IOLockWakeup(fLock, &fFenceEvent, false);
+    IOLockUnlock(fLock);
+}
+
+bool RDNA3Bringup::setupInterrupt()
+{
+    int index = -1, type = 0;
+    for (int i = 0; fPci->getInterruptType(i, &type) == kIOReturnSuccess; i++)
+        if (type & kIOInterruptTypePCIMessaged) {
+            index = i;
+            break;
+        }
+    if (index < 0) {
+        BLOG("MSI: the device offers no message-signalled interrupt");
+        return false;
+    }
+    fWorkLoop = IOWorkLoop::workLoop();
+    fIntr = IOFilterInterruptEventSource::filterInterruptEventSource(fOwner, irqAction, irqFilter,
+                                                                     fPci, index);
+    if (!fWorkLoop || !fIntr || fWorkLoop->addEventSource(fIntr) != kIOReturnSuccess) {
+        BLOG("MSI: cannot register interrupt %d", index);
+        teardownInterrupt();
+        return false;
+    }
+    fIntr->enable();
+    fIrqLive = true;
+    publish("RDNA3,MSIIndex", (uint64_t)index);
+    BLOG("MSI: interrupt index %d registered on the bring-up work loop", index);
+    return true;
+}
+
+void RDNA3Bringup::teardownInterrupt()
+{
+    fIrqLive = false;
+    if (fIntr) {
+        fIntr->disable();
+        if (fWorkLoop)
+            fWorkLoop->removeEventSource(fIntr);
+        fIntr->release();
+        fIntr = nullptr;
+    }
+    if (fWorkLoop) {
+        fWorkLoop->release();
+        fWorkLoop = nullptr;
+    }
+    if (fLock) {
+        IOLockLock(fLock);
+        IOLockWakeup(fLock, &fFenceEvent, false);   /* sleepers fall back to polling */
+        IOLockUnlock(fLock);
     }
 }

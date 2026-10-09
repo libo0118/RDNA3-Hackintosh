@@ -9,8 +9,10 @@
  *    their MC address (MC_SPACE 4, VMID0), like the PSP buffers, so no
  *    bus mastering is needed,
  *  - no doorbell: the read pointer goes through IH_RB_RPTR,
- *  - no MSI yet: ih60_process() is polled; the OS layer will call it from
- *    its interrupt handler once IOKit interrupt registration is in place.
+ *  - with 'msi' the ring re-arms the interrupt on every rptr write
+ *    (IH_RB_CNTL.RPTR_REARM, what amdgpu does with msi_enabled) and the OS
+ *    layer calls ih60_process() from its MSI handler; without it the ring
+ *    is polled.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -41,12 +43,14 @@ typedef struct rdna3_ih {
     uint32_t ptr_mask;
     uint32_t rptr;          /* bytes */
     int      enabled;
+    int      msi;
     uint32_t overflows;
     uint64_t processed;
 } rdna3_ih;
 
-/* amdgpu_ih_ring_init + ih_v6_0_irq_init (ring 0) */
-int  ih60_init(rdna3_dev *d, rdna3_ih *ih, uint32_t ring_size, uint64_t dummy_page_pa);
+/* amdgpu_ih_ring_init + ih_v6_0_irq_init (ring 0); 'msi' = an MSI handler
+ * will drain the ring (RPTR_REARM), otherwise it is polled */
+int  ih60_init(rdna3_dev *d, rdna3_ih *ih, uint32_t ring_size, uint64_t dummy_page_pa, int msi);
 /* ih_v6_0_irq_disable */
 void ih60_disable(rdna3_dev *d, rdna3_ih *ih);
 /* amdgpu_ih_process: decode every IV between rptr and wptr, call 'cb' for

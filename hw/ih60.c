@@ -69,7 +69,7 @@ static void force_update_wptr_for_self_int(rdna3_dev *d, uint32_t threshold, uin
     WOSS(d, regIH_CNTL2, ih_cntl);
 }
 
-int ih60_init(rdna3_dev *d, rdna3_ih *ih, uint32_t ring_size, uint64_t dummy_page_pa)
+int ih60_init(rdna3_dev *d, rdna3_ih *ih, uint32_t ring_size, uint64_t dummy_page_pa, int msi)
 {
     uint64_t ring_mc, wb_mc;
     uint32_t tmp, zero[2] = { 0, 0 };
@@ -91,6 +91,7 @@ int ih60_init(rdna3_dev *d, rdna3_ih *ih, uint32_t ring_size, uint64_t dummy_pag
     ih->rptr = 0;
     ih->overflows = 0;
     ih->processed = 0;
+    ih->msi = msi;
     ih->ring = rdna3_vram_alloc(d, ring_size, 4096, "ih-ring");
     ih->wptr_wb = rdna3_vram_alloc(d, 4096, 4096, "ih-wptr");
     if (ih->ring == UINT64_MAX || ih->wptr_wb == UINT64_MAX)
@@ -124,7 +125,7 @@ int ih60_init(rdna3_dev *d, rdna3_ih *ih, uint32_t ring_size, uint64_t dummy_pag
     tmp = REG_SET_FIELD(tmp, IH_RB_CNTL, MC_SNOOP, 0);          /* VRAM: nothing to snoop */
     tmp = REG_SET_FIELD(tmp, IH_RB_CNTL, MC_RO, 0);
     tmp = REG_SET_FIELD(tmp, IH_RB_CNTL, MC_VMID, 0);
-    tmp = REG_SET_FIELD(tmp, IH_RB_CNTL, RPTR_REARM, 0);        /* no MSI yet */
+    tmp = REG_SET_FIELD(tmp, IH_RB_CNTL, RPTR_REARM, msi ? 1 : 0);   /* !!adev->irq.msi_enabled */
     WOSS(d, regIH_RB_CNTL, tmp);
     WOSS(d, regIH_RB_WPTR_ADDR_LO, (uint32_t)wb_mc);
     WOSS(d, regIH_RB_WPTR_ADDR_HI, (uint32_t)(wb_mc >> 32) & 0xFFFF);
@@ -148,8 +149,9 @@ int ih60_init(rdna3_dev *d, rdna3_ih *ih, uint32_t ring_size, uint64_t dummy_pag
     toggle(d, ih, 1);
     force_update_wptr_for_self_int(d, 0, 8, 1);
 
-    RLOG(d, "IH: ring %u KiB at MC 0x%llx, wptr writeback at MC 0x%llx (polled)",
-         ring_size / 1024, (unsigned long long)ring_mc, (unsigned long long)wb_mc);
+    RLOG(d, "IH: ring %u KiB at MC 0x%llx, wptr writeback at MC 0x%llx (%s)",
+         ring_size / 1024, (unsigned long long)ring_mc, (unsigned long long)wb_mc,
+         msi ? "MSI" : "polled");
     return RDNA3_OK;
 }
 

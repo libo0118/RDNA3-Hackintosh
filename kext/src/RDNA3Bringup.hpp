@@ -7,6 +7,11 @@
  *   4  map BAR0, discovery, FB location, HDP remap, PSP bootloader + sOS,
  *      KM ring, TMR, all IP firmware, RLC autoload
  *   5  + SMU hello (TestMessage / GetSmuVersion / GetDriverIfVersion)
+ *   6  + GMC, IH; with rdna3msi=1 the IH ring is drained from the device's
+ *        MSI (IOFilterInterruptEventSource on our own work loop) and fence
+ *        waits sleep until the handler wakes them; a 5 ms guard sleep covers
+ *        a lost interrupt. Level 7 verifies the first SDMA trap interrupt
+ *        and falls back to polling when none arrives.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -15,6 +20,8 @@
 
 #include <IOKit/IOService.h>
 #include <IOKit/IOLocks.h>
+#include <IOKit/IOWorkLoop.h>
+#include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/pci/IOPCIDevice.h>
 
 extern "C" {
@@ -66,6 +73,9 @@ public:
     int   fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq);
     int   fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs);
 
+    /* MSI: called on the work loop for every interrupt */
+    void  handleInterrupt();
+
 private:
     static void threadMain(void *arg, int wait_result);
     void run();
@@ -104,6 +114,20 @@ private:
     IOLock       *fLock   = nullptr;
     bool          fFwDone = false;
     RDNA3Firmware fFwResult = {};
+
+    /* interrupts (rdna3msi=1) */
+    bool          fMsi = false;             /* asked for */
+    volatile bool fIrqLive = false;         /* handler registered and verified */
+    IOWorkLoop   *fWorkLoop = nullptr;
+    IOFilterInterruptEventSource *fIntr = nullptr;
+    int           fFenceEvent = 0;          /* IOLockSleep event on fLock */
+    volatile uint64_t fIrqCount = 0, fIvCount = 0;
+    volatile uint64_t fIrqFenceGfx = 0, fIrqFenceSdma = 0, fIrqOther = 0;
+    bool          setupInterrupt();
+    void          teardownInterrupt();
+    static bool   irqFilter(OSObject *owner, IOFilterInterruptEventSource *src);
+    static void   irqAction(OSObject *owner, IOInterruptEventSource *src, int count);
+    static void   ivCallback(void *ctx, const rdna3_iv *iv);
 
     /* thread state */
     bool          fRunning = false;

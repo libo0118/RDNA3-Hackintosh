@@ -16,6 +16,8 @@
  *        IH 6.0 interrupt ring (polled).
  *   7  + SDMA0 ring, ring test, 64 KiB VRAM copy verified by the CPU.
  *   8  + GFX 11: RS64, GFXHUB, clear state, gfx ring 0 + ring test.
+ *  rdna3msi=1 drains the interrupt ring from the device's MSI (level 6+)
+ *             and wakes fence waiters from it instead of polling.
  *  -rdna3off  disables the driver entirely (probe fails).
  *
  * Levels 0-3 never write anything except MM_INDEX/MM_INDEX_HI (the indirect
@@ -74,6 +76,7 @@ public:
 
     /* called by the bring-up thread when a ring really executes */
     void  drmRingReady(uint32_t ip, uint32_t mask);
+    RDNA3Bringup *bringup() const { return fBringup; }
 
     /* Stage 3: VRAM below this offset holds the firmware's scanout(s);
      * the bring-up and GEM heaps start above it (RDNA3Display.cpp) */
