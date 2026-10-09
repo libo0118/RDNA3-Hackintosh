@@ -452,6 +452,21 @@ detach() {
     done
 }
 
+greeter_vt() {   # VT of the graphical login screen / session, from logind
+    local s c v
+    for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+        c=$(loginctl show-session "$s" -p Class --value 2>/dev/null)
+        v=$(loginctl show-session "$s" -p VTNr --value 2>/dev/null)
+        case "$c" in greeter|user)
+            [ -n "$v" ] && [ "$v" != 0 ] &&
+                [ "$(loginctl show-session "$s" -p Type --value 2>/dev/null)" != tty ] &&
+                [ "$(loginctl show-session "$s" -p State --value 2>/dev/null)" != closing ] &&
+                { echo "$v"; return 0; } ;;
+        esac
+    done
+    return 1
+}
+
 restore() {
     local d since
     echo "== giving the card back to Linux (RESTORE_MODE=${RESTORE_MODE:-suspend})"
@@ -482,16 +497,18 @@ restore() {
     fi
     for d in /sys/class/vtconsole/vtcon*/bind; do echo 1 > "$d" 2>/dev/null || true; done
     [ $DM = 1 ] && systemctl start display-manager
-    # the suspend / restart leaves a text console in front: go back to the
-    # desktop's terminal once the login screen is up
-    if [ -n "$VT" ] && command -v chvt >/dev/null; then
-        local i
-        for i in $(seq 20); do
-            systemctl is-active --quiet display-manager 2>/dev/null && break
+    # the suspend / restart leaves a text console in front: switch once to
+    # the VT of the login screen as soon as logind knows it (the greeter can
+    # start on another VT than the old desktop, so $VT is only a fallback)
+    if command -v chvt >/dev/null; then
+        local i t=""
+        for i in $(seq 60); do
+            t=$(greeter_vt)
+            [ -n "$t" ] && break
             sleep 0.25
         done
-        chvt "$VT" 2>/dev/null || true
-        sleep 2; chvt "$VT" 2>/dev/null || true   # again once the greeter took its VT
+        t=${t:-$VT}
+        [ -n "$t" ] && chvt "$t" 2>/dev/null || true
     fi
     return 0
 }
