@@ -1,10 +1,51 @@
 name: build
 
+# CI minutes on macOS cost 10x: kext + host tests run on every push, the
+# Metal plugin and RADV only when their sources change (or on a manual run
+# with "full"), docs-only pushes run nothing, and a newer push cancels an
+# older run of the same branch.
 on:
   push:
-  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'NOTICE'
+      - 'LICENSE*'
+  workflow_dispatch:
+    inputs:
+      full:
+        description: 'Build everything (Metal plugin + RADV too)'
+        type: boolean
+        default: true
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      metal: ${{ steps.f.outputs.metal }}
+      radv: ${{ steps.f.outputs.radv }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: f
+        env:
+          BEFORE: ${{ github.event.before }}
+          FULL: ${{ github.event_name == 'workflow_dispatch' && inputs.full }}
+        run: |
+          if [ "$FULL" = "true" ] || [ -z "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+             || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "metal=true" >> "$GITHUB_OUTPUT"; echo "radv=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          changed=$(git diff --name-only "$BEFORE" HEAD)
+          echo "$changed"
+          echo "$changed" | grep -qE '^metal/' && echo "metal=true" >> "$GITHUB_OUTPUT" || echo "metal=false" >> "$GITHUB_OUTPUT"
+          echo "$changed" | grep -qE '^(userspace/|third_party/libdrm/)' && echo "radv=true" >> "$GITHUB_OUTPUT" || echo "radv=false" >> "$GITHUB_OUTPUT"
+
   host-tests:
     runs-on: ubuntu-latest
     steps:
@@ -59,6 +100,8 @@ jobs:
             build/userspace/libdrm_xnu.dylib
 
   metal:
+    needs: changes
+    if: needs.changes.outputs.metal == 'true'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -77,6 +120,8 @@ jobs:
 
   radv-macos:
     # Experimental: drives the Stage 5 port. Failures here are the to-do list.
+    needs: changes
+    if: needs.changes.outputs.radv == 'true'
     runs-on: macos-15-intel
     continue-on-error: true
     steps:
