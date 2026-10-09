@@ -1,7 +1,8 @@
 /*
  * smu13.c - see smu13.h. Mailbox mirrors smu_cmn_send_smc_msg_with_param():
  *   wait resp != 0 -> resp = 0 -> arg -> msg -> wait resp != 0 -> read arg.
- * Power management mirrors smu_hw_init -> smu_smc_hw_setup for SMU 13.0.7.
+ * Power management mirrors smu_hw_init -> smu_smc_hw_setup for SMU 13.0.10
+ * (smu_v13_0_0_ppt.c).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -74,9 +75,9 @@ int smu13_hello(rdna3_dev *d, uint32_t *smu_version, uint32_t *if_version)
     RLOG(d, "SMU: PMFW %u.%u.%u, driver interface 0x%x",
          (*smu_version >> 16) & 0xff, (*smu_version >> 8) & 0xff, *smu_version & 0xff,
          *if_version);
-    if (*if_version != SMU13_0_7_DRIVER_IF_VERSION)
+    if (*if_version != SMU13_0_0_DRIVER_IF_VERSION)
         RLOG(d, "SMU: driver interface 0x%x differs from the header's 0x%x "
-             "(amdgpu goes on with a warning too)", *if_version, SMU13_0_7_DRIVER_IF_VERSION);
+             "(amdgpu goes on with a warning too)", *if_version, SMU13_0_0_DRIVER_IF_VERSION);
     return RDNA3_OK;
 }
 
@@ -124,7 +125,7 @@ int smu13_table_write(rdna3_dev *d, rdna3_smu *s, uint32_t table_id, uint32_t ar
     return xfer(d, table_id, arg, 1);
 }
 
-/* ---- setup pieces (smu_v13_0.c / smu_v13_0_7_ppt.c) ---- */
+/* ---- setup pieces (smu_v13_0.c / smu_v13_0_0_ppt.c) ---- */
 
 static int set_table_locations(rdna3_dev *d, rdna3_smu *s)
 {
@@ -151,14 +152,15 @@ static uint32_t rd32(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-/* smu_v13_0_7_setup_pptable: combo table from the PMFW, driver portion
- * parsed, PPTable_t stored, BoardTable from the VBIOS appended. */
+/* smu_v13_0_0_setup_pptable: combo table from the PMFW, driver portion
+ * parsed (check_powerplay_table), PPTable_t stored, BoardTable from the
+ * VBIOS appended unless SCPM is on. */
 static int setup_pptable(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios)
 {
     uint8_t hdr[RD_SMU_PP_SMC_PPTABLE_OFF];
     int ret;
 
-    /* smu_v13_0_7_get_pptable_from_pmfw -> smu_cmn_get_combo_pptable */
+    /* smu_v13_0_0_get_pptable_from_pmfw -> smu_cmn_get_combo_pptable */
     ret = xfer(d, TABLE_COMBO_PPTABLE, 0, 0);
     if (ret) {
         RERR(d, "SMU: TransferTableSmu2Dram(COMBO_PPTABLE) failed");
@@ -184,9 +186,13 @@ static int setup_pptable(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios)
         return RDNA3_EINVAL;
     }
 
-    /* smu_v13_0_7_append_powerplay_table: BoardTable_t from smc_dpm_info */
+    /* smu_v13_0_0_append_powerplay_table: BoardTable_t from smc_dpm_info
+     * (atom_smc_dpm_info_table_13_0_0); with SCPM the PSP did it */
     s->board_table_appended = 0;
-    if (vbios) {
+    if (s->scpm) {
+        RLOG(d, "SMU: SCPM: the PSP provided the PPTable (BoardTable version 0x%x)",
+             s->pptable.BoardTable.Version);
+    } else if (vbios) {
         uint16_t size = 0;
         uint8_t frev = 0, crev = 0;
         const uint8_t *t = vbios_data_table(vbios, RD_ATOM_DT_SMC_DPM_INFO, &size, &frev, &crev);
@@ -247,7 +253,7 @@ static int get_enabled_mask(rdna3_dev *d, uint64_t *mask)
     return RDNA3_OK;
 }
 
-/* smu_v13_0_7_update_pcie_parameters with PP_PCIE_DPM on: clamp the
+/* smu_v13_0_0_update_pcie_parameters with PP_PCIE_DPM on: clamp the
  * table's levels to what the link supports */
 static int update_pcie_parameters(rdna3_dev *d, rdna3_smu *s)
 {
@@ -334,7 +340,7 @@ int smu13_set_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t watts)
     uint32_t hi = pp > msg ? pp : msg, lo = pp < msg ? pp : msg;
     if (!(s->enabled & RD_SMU_FEATURE(FEATURE_THROTTLERS_BIT)))
         return RDNA3_EINVAL;
-    /* smu_v13_0_7_init_ppt_limits: [min(pp,msg), max(pp,msg)] without overdrive */
+    /* smu_v13_0_0_init_ppt_limits: [min(pp,msg), max(pp,msg)] without overdrive */
     if (watts < lo || watts > hi) {
         RERR(d, "SMU: power limit %u W outside %u..%u W", watts, lo, hi);
         return RDNA3_EINVAL;
@@ -347,8 +353,19 @@ int smu13_set_workload(rdna3_dev *d, uint32_t workload_bit)
     return smu13_send_msg(d, PPSMC_MSG_SetWorkloadMask, 1u << workload_bit, NULL);
 }
 
+/* SetHardMinByFreq to the table's top level: the clock stays there */
+static int pin_to_top(rdna3_dev *d, uint32_t ppclk, const rdna3_smu_dpm *t, const char *name)
+{
+    uint32_t mhz;
+    if (!t->count)
+        return RDNA3_OK;
+    mhz = t->level[t->count - 1];
+    RLOG(d, "SMU: %s pinned at %u MHz (no p-state switch under the firmware's scanout)", name, mhz);
+    return smu13_send_msg(d, PPSMC_MSG_SetHardMinByFreq, (ppclk << 16) | (mhz & 0xffff), NULL);
+}
+
 int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t allowed,
-                  uint32_t pcie_gen_cap, uint32_t pcie_width_cap)
+                  uint32_t pcie_gen_cap, uint32_t pcie_width_cap, int scpm)
 {
     int ret;
     unsigned i;
@@ -357,6 +374,7 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
         ((uint8_t *)s)[i] = 0;
     s->pcie_gen_cap = pcie_gen_cap;
     s->pcie_width_cap = pcie_width_cap;
+    s->scpm = scpm;
 
     /* smu_start_smc_engine (PSP loaded the PMFW) -> check_fw_status, versions */
     ret = smu13_check_fw_status(d);
@@ -386,8 +404,8 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
             return ret;
     }
 
-    /* smu_smc_hw_setup. NumOfDisplays (init_display_count) and
-     * DALNotPresent / SetMinDeepSleepDcefclk are not 13.0.7 messages. */
+    /* smu_smc_hw_setup. init_display_count is a no-op on 13.0.x (no
+     * NumOfDisplays message); DALNotPresent is only sent by DC. */
     ret = set_table_locations(d, s);
     if (ret) {
         RERR(d, "SMU: SetDriverDramAddr/SetToolsDramAddr failed");
@@ -396,21 +414,26 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
     ret = setup_pptable(d, s, vbios);
     if (ret)
         return ret;
-    /* smu_write_pptable -> smu_cmn_write_pptable */
-    ret = smu13_table_write(d, s, TABLE_PPTABLE, 0, &s->pptable, sizeof(s->pptable));
-    if (ret) {
-        RERR(d, "SMU: TransferTableDram2Smu(PPTABLE) failed");
-        return ret;
+    /* smu_write_pptable -> smu_cmn_write_pptable; with SCPM "PSP is
+     * responsible for the PPTable transferring" */
+    if (!s->scpm) {
+        ret = smu13_table_write(d, s, TABLE_PPTABLE, 0, &s->pptable, sizeof(s->pptable));
+        if (ret) {
+            RERR(d, "SMU: TransferTableDram2Smu(PPTABLE) failed");
+            return ret;
+        }
     }
-    /* smu_v13_0_7_run_btc */
+    /* smu_v13_0_run_btc */
     ret = smu13_send_msg(d, PPSMC_MSG_RunDcBtc, 0, NULL);
     if (ret)
         return ret;
-    /* smu_feature_set_allowed_mask */
+    /* smu_feature_set_allowed_mask: "not needed and permitted" with SCPM */
     s->allowed = allowed;
-    ret = set_allowed_mask(d, allowed);
-    if (ret)
-        return ret;
+    if (!s->scpm) {
+        ret = set_allowed_mask(d, allowed);
+        if (ret)
+            return ret;
+    }
     /* smu_update_pcie_parameters */
     ret = update_pcie_parameters(d, s);
     if (ret) {
@@ -431,7 +454,7 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
          (unsigned long long)s->allowed, (unsigned long long)s->enabled,
          s->dpm_running ? "running" : "disabled");
 
-    /* smu_v13_0_7_set_default_dpm_table for the clocks we report */
+    /* smu_v13_0_0_set_default_dpm_table for the clocks we report */
     if (s->enabled & RD_SMU_FEATURE(FEATURE_DPM_GFXCLK_BIT)) {
         ret = smu13_get_dpm_table(d, PPCLK_GFXCLK, &s->gfx);
         if (ret)
@@ -474,8 +497,21 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
          s->uclk.level[0], s->uclk.level[s->uclk.count ? s->uclk.count - 1 : 0], s->uclk.count,
          s->soc.level[0], s->soc.level[s->soc.count ? s->soc.count - 1 : 0], s->soc.count);
 
+    /* the PMFW runs UCLK/FCLK DPM although 'allowed' keeps them off
+     * (SCPM ignores the allowed mask): hold them at the top level */
+    if ((s->enabled & ~allowed & RD_SMU_FEATURE(FEATURE_DPM_UCLK_BIT)) && s->uclk.count) {
+        ret = pin_to_top(d, PPCLK_UCLK, &s->uclk, "UCLK");
+        if (ret)
+            return ret;
+    }
+    if ((s->enabled & ~allowed & RD_SMU_FEATURE(FEATURE_DPM_FCLK_BIT)) && s->fclk.count) {
+        ret = pin_to_top(d, PPCLK_FCLK, &s->fclk, "FCLK");
+        if (ret)
+            return ret;
+    }
+
     /* smu_late_init bits that matter: the PPT limit and the default
-     * workload (smu_v13_0_7_set_power_profile_mode -> SetWorkloadMask) */
+     * workload (smu_v13_0_0_set_power_profile_mode -> SetWorkloadMask) */
     if (s->enabled & RD_SMU_FEATURE(FEATURE_THROTTLERS_BIT)) {
         uint32_t w = 0;
         if (!smu13_get_power_limit(d, s, &w))
@@ -525,7 +561,7 @@ uint32_t smu13_metric_fan_rpm(const rdna3_smu *s)        { return M(s)->AvgFanRp
 uint32_t smu13_metric_vddgfx_mv(const rdna3_smu *s)      { return M(s)->AvgVoltage[SVI_PLANE_GFX]; }
 uint32_t smu13_metric_throttlers(const rdna3_smu *s)
 {
-    /* smu_v13_0_7_get_throttler_status */
+    /* smu_v13_0_get_throttler_status */
     uint32_t st = 0, i;
     for (i = 0; i < THROTTLER_COUNT; i++)
         if (M(s)->ThrottlingPercentage[i])

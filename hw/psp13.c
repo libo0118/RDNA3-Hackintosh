@@ -83,6 +83,44 @@ int psp13_bootloader_stuck(rdna3_psp *psp)
            !(rdna3_rreg(psp->d, C2P(psp, 35)) & 0x80000000u);
 }
 
+int psp13_scpm_enabled(rdna3_dev *d, uint32_t *status)
+{
+    /* struct psp_runtime_data_header { u16 cookie, version; } and the
+     * directory { u16 entry_count; entry_list[] } right after it, entries
+     * { u32 entry_type; u16 offset, size; } 4-byte aligned */
+    uint64_t hdr_pos, dir_pos;
+    uint32_t w, count, i, ent[2];
+    *status = 0;
+    if (d->vram_size <= RD_PSP_RUNTIME_DB_OFFSET)
+        return 0;
+    hdr_pos = d->vram_size - RD_PSP_RUNTIME_DB_OFFSET;
+    dir_pos = hdr_pos + 4;
+    rdna3_vram_mm_read(d, hdr_pos, &w, 1);
+    if ((w & 0xffff) != RD_PSP_RUNTIME_DB_COOKIE_ID) {
+        RLOG(d, "PSP: no runtime database (cookie 0x%04x): SCPM off", w & 0xffff);
+        return 0;
+    }
+    rdna3_vram_mm_read(d, dir_pos, &w, 1);
+    count = w & 0xffff;
+    if (count >= RD_PSP_RUNTIME_DB_MAX) {
+        RERR(d, "PSP: invalid runtime database entry count %u", count);
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        rdna3_vram_mm_read(d, dir_pos + 4 + 8ull * i, ent, 2);
+        if (ent[0] != RD_PSP_RUNTIME_ENTRY_SCPM)
+            continue;
+        if ((ent[1] >> 16) < 4) {
+            RERR(d, "PSP: invalid runtime database scpm entry size");
+            return 0;
+        }
+        rdna3_vram_mm_read(d, hdr_pos + (ent[1] & 0xffff), status, 1);
+        RLOG(d, "PSP: runtime database: SCPM status %u", *status);
+        return *status != 0;
+    }
+    return 0;
+}
+
 void psp13_log_state(rdna3_psp *psp, const char *when)
 {
     RLOG(psp->d, "PSP state (%s): C2PMSG_33 0x%08x 35 0x%08x 36 0x%08x 58 0x%08x 64 0x%08x 81 0x%08x",

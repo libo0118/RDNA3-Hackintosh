@@ -166,12 +166,11 @@ the PSP ERROR line.
 
 **IP versions of the real card** (discovery, 2026-10-09): GC 11.0.3, MP0/MP1
 **13.0.10**, DCN **3.2.0**, VCN **4.0.0**, MMHUB 3.0.0, SDMA 6.0.3, NBIO 4.3.0,
-SMUIO 13.0.6. Earlier code assumed Navi 33's 13.0.7 / 3.2.1 / 4.0.4; the
-firmware names are fixed, but `hw/smu13.c` ports `smu_v13_0_7_ppt.c` while
-amdgpu drives MP1 13.0.10 with `smu_v13_0_0_ppt.c` (driver_if v13_0_0,
-different PPTable/messages): port those differences before step 5. The DCN
-register headers are generated from `dcn_3_2_1_*`; diff them with
-`dcn_3_2_0_*` before step 5b/9.
+SMUIO 13.0.6. Earlier code assumed Navi 33's 13.0.7 / 3.2.1 / 4.0.4; fixed:
+firmware names, MMHUB 3.0.0 registers, and `hw/smu13.c` now follows
+`smu_v13_0_0_ppt.c` (driver_if v13_0_0, SCPM, MP1 firmware flags at
+0x3010024). Still open: the DCN register headers are generated from
+`dcn_3_2_1_*`; diff them with `dcn_3_2_0_*` before step 5b/9.
 
 | Symptom | Likely cause | Action |
 |---|---|---|
@@ -193,9 +192,11 @@ register headers are generated from `dcn_3_2_1_*`; diff them with
 | Symptom | Likely cause | Action |
 |---|---|---|
 | `MP1 firmware flags …, PMFW not running` | PMFW not started | SMU blob in the plan; `smu_v13_0_check_fw_status` |
-| `not ready for msg … (resp 0)` | mailbox offsets | `smu_v13_0_7_set_smu_mailbox_registers` vs `hw/smu13.c` |
-| `SMUDriverIF` ≠ header version | PMFW vs `hw/gen/smu13_driver_if_v13_0_7.h` | take the matching Linux header, regenerate, re-check struct sizes in the sim |
+| `not ready for msg … (resp 0)` | mailbox offsets | `smu_v13_0_0_init_msg_ctl` vs `hw/smu13.c` |
+| `SMUDriverIF` ≠ header version | PMFW vs `hw/gen/smu13_driver_if_v13_0_0.h` | take the matching Linux header, regenerate, re-check struct sizes in the sim |
 | `TransferTable…` / `EnableAllSmuFeatures failed` | table address / mask | ask for a retest with `rdna3vm args "rdna3lvl=5 rdna3pmmask=<minimal>"`, then widen |
+| `SCPM` 1 and `TransferTableDram2Smu(PPTABLE)` / `SetAllowedFeatures…` rejected | SCPM not detected (runtime DB read) | `psp13_scpm_enabled`: the database is 1 MiB below the top of VRAM, read through MM_INDEX/MM_DATA |
+| `SCPM` 1, `PMFeaturesRunning` has UCLK/FCLK DPM | expected: SCPM ignores the allowed mask; log must show `UCLK pinned at … MHz`, `FCLK pinned …` | none; watch for scanout flicker on metal |
 | implausible temps/fan | metrics layout | compare `linux-reference/sysfs-pm.txt`, `gpu_metrics.bin` |
 | pass criterion | — | `PMGfxClkMin/MaxMHz`, `PMUclkMaxMHz` = first/last lines of Linux `pp_dpm_sclk`/`pp_dpm_mclk` |
 

@@ -806,7 +806,13 @@ void RDNA3Bringup::pmInit()
         }
     }
 
-    ret = smu13_pm_init(fDev, fSmu, vb, allowed, gen, width);
+    /* psp_sw_init: SCPM status from the PSP runtime database */
+    {
+        uint32_t scpm_status = 0;
+        int scpm = psp13_scpm_enabled(fDev, &scpm_status);
+        publish("RDNA3,SCPM", scpm_status);
+        ret = smu13_pm_init(fDev, fSmu, vb, allowed, gen, width, scpm);
+    }
     publish("RDNA3,PMResult", (uint64_t)(int64_t)ret);
     if (ret) {
         publishString("RDNA3,PM", "failed: smu_smc_hw_setup");
@@ -966,7 +972,7 @@ int RDNA3Bringup::vmFaultInfo(void *p, uint64_t *addr, uint32_t *status, uint32_
     return 0;
 }
 
-/* amdgpu_dpm_read_sensor through smu_v13_0_7_read_sensor: the units are
+/* amdgpu_dpm_read_sensor through smu_v13_0_0_read_sensor: the units are
  * amdgpu's (MHz, millidegrees, %, W, mV). Called under the DRM lock once
  * the bring-up finished, so the SMU mailbox is ours. */
 int RDNA3Bringup::sensor(uint32_t type, uint32_t *value)

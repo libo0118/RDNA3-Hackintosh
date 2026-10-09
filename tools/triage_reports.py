@@ -165,7 +165,7 @@ def report(path, show_all):
             print("   %s %-20s = %s (expected %s)" % ("PASS" if ok else "FAIL", key, shown, want))
     for key in ("SOSVersion", "SMUDriverIF", "PMGfxClkMinMHz", "PMGfxClkMaxMHz", "PMUclkMaxMHz",
                 "PMFanRPM", "DMUBVersion", "GBAddrConfig", "ChipRevId", "Head0EdidMode",
-                "AtomCommandTables", "PSPStuckAtInit", "InitResetResult", "NeedPost", "PostResult",
+                "AtomCommandTables", "SCPM", "PMFeaturesRunning", "PSPStuckAtInit", "InitResetResult", "NeedPost", "PostResult",
                 "LastFaultAddr", "LastFaultStatus"):
         if key in props:
             v = props[key]

@@ -1,6 +1,8 @@
 /*
- * smu13.h - SMU 13.0.7 (MP1, PMFW) for Navi 3x, ported from Linux amdgpu
- * smu_cmn.c / smu_v13_0.c / smu_v13_0_7_ppt.c / amdgpu_smu.c (MIT).
+ * smu13.h - SMU 13.0.10 (MP1, PMFW) for Navi 32, ported from Linux amdgpu
+ * smu_cmn.c / smu_v13_0.c / smu_v13_0_0_ppt.c / amdgpu_smu.c (MIT). amdgpu
+ * drives MP1 13.0.0 (Navi 31) and 13.0.10 (Navi 32) with smu_v13_0_0_ppt.c
+ * and smu13_driver_if_v13_0_0.h.
  *
  * Mailbox: C2PMSG_66 = message, C2PMSG_82 = argument, C2PMSG_90 = response.
  *
@@ -19,13 +21,13 @@
 
 #include "rdna3_hw.h"
 #include "vbios.h"
-#include "gen/smu13_driver_if_v13_0_7.h"
+#include "gen/smu13_driver_if_v13_0_0.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* smu_v13_0_7_ppsmc.h */
+/* smu_v13_0_0_ppsmc.h */
 #define PPSMC_Result_OK                 0x1
 #define PPSMC_Result_Failed             0xFF
 #define PPSMC_Result_UnknownCmd         0xFE
@@ -91,33 +93,19 @@ int smu13_send_msg(rdna3_dev *d, uint32_t msg, uint32_t param, uint32_t *out);
 /* Waits for PMFW to be up (response register non-zero), then
  * TestMessage + GetSmuVersion + GetDriverIfVersion. */
 int smu13_hello(rdna3_dev *d, uint32_t *smu_version, uint32_t *if_version);
-/* smu_v13_0_7_check_fw_status: MP1_FIRMWARE_FLAGS.INTERRUPTS_ENABLED */
+/* smu_v13_0_check_fw_status: MP1_FIRMWARE_FLAGS.INTERRUPTS_ENABLED */
 int smu13_check_fw_status(rdna3_dev *d);
 
 /* ---- power management ---- */
 
 #define RD_SMU_FEATURE(bit) (1ull << (bit))
 
-/* What amdgpu allows on 13.0.7 with its default ppfeaturemask
- * (smu_v13_0_7_init_allowed_features), minus GFXOFF (nothing here sends
+/* smu_v13_0_0_init_allowed_features with amdgpu's default ppfeaturemask on
+ * GC 11.0.3: every bit, minus ATHUB_MMHUB_PG (soc21 sets no ATHUB/MMHUB
+ * PG flags for 11.0.3) and minus GFXOFF (nothing here sends
  * AllowGfxOff/DisallowGfxOff yet). */
 #define RD_SMU_FEATURES_AMDGPU \
-    (RD_SMU_FEATURE(FEATURE_FW_DATA_READ_BIT) | RD_SMU_FEATURE(FEATURE_DPM_GFXCLK_BIT) | \
-     RD_SMU_FEATURE(FEATURE_GFX_IMU_BIT) | RD_SMU_FEATURE(FEATURE_DPM_GFX_POWER_OPTIMIZER_BIT) | \
-     RD_SMU_FEATURE(FEATURE_DPM_UCLK_BIT) | RD_SMU_FEATURE(FEATURE_DPM_FCLK_BIT) | \
-     RD_SMU_FEATURE(FEATURE_VMEMP_SCALING_BIT) | RD_SMU_FEATURE(FEATURE_VDDIO_MEM_SCALING_BIT) | \
-     RD_SMU_FEATURE(FEATURE_DPM_SOCCLK_BIT) | RD_SMU_FEATURE(FEATURE_DPM_LINK_BIT) | \
-     RD_SMU_FEATURE(FEATURE_DS_GFXCLK_BIT) | RD_SMU_FEATURE(FEATURE_GFX_ULV_BIT) | \
-     RD_SMU_FEATURE(FEATURE_DS_LCLK_BIT) | RD_SMU_FEATURE(FEATURE_DPM_MP0CLK_BIT) | \
-     RD_SMU_FEATURE(FEATURE_MM_DPM_BIT) | RD_SMU_FEATURE(FEATURE_DS_VCN_BIT) | \
-     RD_SMU_FEATURE(FEATURE_DS_FCLK_BIT) | RD_SMU_FEATURE(FEATURE_DF_CSTATE_BIT) | \
-     RD_SMU_FEATURE(FEATURE_THROTTLERS_BIT) | RD_SMU_FEATURE(FEATURE_VR0HOT_BIT) | \
-     RD_SMU_FEATURE(FEATURE_FW_CTF_BIT) | RD_SMU_FEATURE(FEATURE_FAN_CONTROL_BIT) | \
-     RD_SMU_FEATURE(FEATURE_DS_SOCCLK_BIT) | RD_SMU_FEATURE(FEATURE_GFXCLK_SPREAD_SPECTRUM_BIT) | \
-     RD_SMU_FEATURE(FEATURE_MEM_TEMP_READ_BIT) | RD_SMU_FEATURE(FEATURE_FW_DSTATE_BIT) | \
-     RD_SMU_FEATURE(FEATURE_SOC_MPCLK_DS_BIT) | RD_SMU_FEATURE(FEATURE_BACO_MPCLK_DS_BIT) | \
-     RD_SMU_FEATURE(FEATURE_GFX_PCC_DFLL_BIT) | RD_SMU_FEATURE(FEATURE_SOC_CG_BIT) | \
-     RD_SMU_FEATURE(FEATURE_BACO_BIT) | RD_SMU_FEATURE(FEATURE_DPM_DCN_BIT))
+    (~0ull & ~(RD_SMU_FEATURE(FEATURE_ATHUB_MMHUB_PG_BIT) | RD_SMU_FEATURE(FEATURE_GFXOFF_BIT)))
 
 /* Default for a driver without Display Core: amdgpu's DC tells the PMFW
  * when memory / fabric p-state switches and DCN clock changes are safe for
@@ -133,20 +121,20 @@ int smu13_check_fw_status(rdna3_dev *d);
      RD_SMU_FEATURE(FEATURE_FW_DSTATE_BIT) | RD_SMU_FEATURE(FEATURE_SOC_MPCLK_DS_BIT) | \
      RD_SMU_FEATURE(FEATURE_BACO_MPCLK_DS_BIT) | RD_SMU_FEATURE(FEATURE_DS_FCLK_BIT)))
 
-/* smu_v13_0_7_dpm_features: any of these running = "dpm is running" */
+/* smu_v13_0_0_dpm_features: any of these running = "dpm is running" */
 #define RD_SMU_FEATURES_DPM \
     (RD_SMU_FEATURE(FEATURE_DPM_GFXCLK_BIT) | RD_SMU_FEATURE(FEATURE_DPM_UCLK_BIT) | \
      RD_SMU_FEATURE(FEATURE_DPM_LINK_BIT) | RD_SMU_FEATURE(FEATURE_DPM_SOCCLK_BIT) | \
      RD_SMU_FEATURE(FEATURE_DPM_FCLK_BIT) | RD_SMU_FEATURE(FEATURE_DPM_MP0CLK_BIT))
 
-/* smu_13_0_7_powerplay_table (smu_v13_0_7_pptable.h), the "combo" table
- * TransferTableSmu2Dram(TABLE_COMBO_PPTABLE) delivers; PPTable_t follows
- * the driver portion at RD_SMU_PP_SMC_PPTABLE_OFF. */
+/* smu_13_0_0_powerplay_table (smu_v13_0_0_pptable.h, #pragma pack(1)),
+ * the "combo" table TransferTableSmu2Dram(TABLE_COMBO_PPTABLE) delivers;
+ * PPTable_t follows the driver portion at RD_SMU_PP_SMC_PPTABLE_OFF. */
 #define RD_SMU_PP_TABLE_FORMAT_REVISION 15
 #define RD_SMU_PP_SMC_PPTABLE_OFF   832
-#define RD_SMU_PP_PLATFORM_CAPS_OFF 20
-#define RD_SMU_PP_THERMAL_CTRL_OFF  24
-#define RD_SMU_PP_SHUTDOWN_TEMP_OFF 31
+#define RD_SMU_PP_PLATFORM_CAPS_OFF 18
+#define RD_SMU_PP_THERMAL_CTRL_OFF  22
+#define RD_SMU_PP_SHUTDOWN_TEMP_OFF 29
 #define RD_SMU_PP_PLATFORM_CAP_POWERPLAY   0x1
 #define RD_SMU_PP_PLATFORM_CAP_HARDWAREDC  0x4
 #define RD_SMU_PP_PLATFORM_CAP_BACO        0x8
@@ -177,6 +165,7 @@ typedef struct rdna3_smu {
     uint8_t  thermal_controller;
     uint16_t software_shutdown_temp;
     int      board_table_appended;
+    int      scpm;                     /* PSP owns the PPTable / feature mask */
 
     PPTable_t pptable;                 /* what was written to the PMFW */
 
@@ -192,7 +181,13 @@ typedef struct rdna3_smu {
 } rdna3_smu;
 
 /* Allocates the driver and tool tables in VRAM (needs rdna3_vram_alloc_init
- * done), reads the boot-up values from the VBIOS and runs smu_smc_hw_setup:
+ * done), reads the boot-up values from the VBIOS and runs smu_smc_hw_setup.
+ * 'scpm' (psp13_scpm_enabled): the PSP validated and handed the PPTable to
+ * the PMFW, so like amdgpu the BoardTable is not appended, the PPTable not
+ * written and the allowed mask not sent; the PMFW runs its own feature set.
+ * Then, when 'allowed' keeps UCLK/FCLK DPM off but the PMFW runs them,
+ * both are pinned to their top level (SetHardMinByFreq) so no memory or
+ * fabric p-state switch can disturb the firmware's scanout. Sequence:
  * SetDriverDramAddr, SetToolsDramAddr, combo PPTable from the PMFW,
  * BoardTable from the VBIOS, write PPTable, RunDcBtc, allowed features,
  * OverridePcieParameters (caps from the PCIe link: gen 0..4 = Gen1..Gen5,
@@ -201,7 +196,7 @@ typedef struct rdna3_smu {
  * when the ROM could not be read: the PMFW's BoardTable is then written
  * back unchanged, which amdgpu only does with SCPM. */
 int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t allowed,
-                  uint32_t pcie_gen_cap, uint32_t pcie_width_cap);
+                  uint32_t pcie_gen_cap, uint32_t pcie_width_cap, int scpm);
 
 /* smu_cmn_update_table: VRAM driver table <-> PMFW table 'table_id' */
 int smu13_table_read(rdna3_dev *d, rdna3_smu *s, uint32_t table_id, uint32_t arg, void *dst,
@@ -211,7 +206,7 @@ int smu13_table_write(rdna3_dev *d, rdna3_smu *s, uint32_t table_id, uint32_t ar
 
 /* SMU_TABLE_SMU_METRICS -> s->metrics (smu_cmn_get_metrics_table) */
 int smu13_read_metrics(rdna3_dev *d, rdna3_smu *s);
-/* convenience over s->metrics (units as in smu_v13_0_7_get_smu_metrics_data) */
+/* convenience over s->metrics (units as in smu_v13_0_0_get_smu_metrics_data) */
 uint32_t smu13_metric_gfxclk_mhz(const rdna3_smu *s);     /* AverageGfxclkFrequencyPreDs */
 uint32_t smu13_metric_uclk_mhz(const rdna3_smu *s);       /* CurrClock[PPCLK_UCLK] */
 uint32_t smu13_metric_temp_edge_c(const rdna3_smu *s);
@@ -231,18 +226,19 @@ int smu13_set_soft_freq_range(rdna3_dev *d, const rdna3_smu *s, uint32_t ppclk, 
 /* smu_v13_0_set_ppt_limit / smu_v13_0_get_ppt_limit (W, AC) */
 int smu13_set_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t watts);
 int smu13_get_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t *watts);
-/* smu_v13_0_7_set_power_profile_mode: WORKLOAD_PPLIB_*_BIT */
+/* smu_v13_0_0_set_power_profile_mode: WORKLOAD_PPLIB_*_BIT */
 int smu13_set_workload(rdna3_dev *d, uint32_t workload_bit);
 
-/* smu_v13_0_7_mode1_reset: DEBUGSMC_MSG_Mode1Reset through the debug
- * mailbox (C2PMSG_53/75/54, no response), then SMU13_MODE1_RESET_WAIT_TIME.
+/* smu_v13_0_0_mode1_reset (13.0.10): DEBUGSMC_MSG_Mode1Reset, param 0 (no
+ * RAS recovery) through the debug mailbox (C2PMSG_53/75/54, no response),
+ * then SMU13_MODE1_RESET_WAIT_TIME.
  * Afterwards the PSP bootloader is back (psp13_wait_for_bootloader) and
  * everything from level 4 on has to be redone. */
 #define RD_DEBUGSMC_MSG_Mode1Reset   2
 #define RD_SMU_MODE1_RESET_WAIT_MS   500
 int smu13_mode1_reset(rdna3_dev *d);
 
-/* smu_hw_fini for a driver unload: on 13.0.7 the PMFW handles the DPM
+/* smu_hw_fini for a driver unload: on 13.0.10 the PMFW handles the DPM
  * features itself (smu_disable_dpms returns early), the driver only sends
  * PrepareMp1ForUnload (smu_reset_mp1_state). */
 int smu13_pm_fini(rdna3_dev *d, rdna3_smu *s);

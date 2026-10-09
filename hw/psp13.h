@@ -60,6 +60,16 @@ int  psp13_wait_for_bootloader(rdna3_psp *psp);
  * a PSP that a PCI bus reset left half-initialised (passthrough after the
  * host driver); only a mode-1 reset brings the bootloader back */
 int  psp13_bootloader_stuck(rdna3_psp *psp);
+/* psp_get_runtime_db_entry(PSP_RUNTIME_ENTRY_TYPE_PPTABLE_ERR_STATUS), as
+ * psp_sw_init uses it: the PSP runtime database 1 MiB below the top of
+ * VRAM (read through MM_INDEX/MM_DATA). Returns 1 when SCPM is enabled
+ * (*status = SCPM_ENABLE / SCPM_ENABLE_WITH_SCPM_ERR), 0 when disabled or
+ * there is no database. */
+#define RD_PSP_RUNTIME_DB_OFFSET     0x100000u
+#define RD_PSP_RUNTIME_DB_COOKIE_ID  0x0ed5u
+#define RD_PSP_RUNTIME_DB_MAX        0x40u
+#define RD_PSP_RUNTIME_ENTRY_SCPM    0x6u
+int  psp13_scpm_enabled(rdna3_dev *d, uint32_t *status);
 /* C2PMSG 33/35/36/58/64/81 into the log */
 void psp13_log_state(rdna3_psp *psp, const char *when);
 int  psp13_bootloader_load_all(rdna3_psp *psp);   /* KDB..SOS (psp_hw_start part 1) */

@@ -49,7 +49,7 @@
 #define regMP1_SMN_C2PMSG_82_BASE_IDX   0
 #define regMP1_SMN_C2PMSG_90            0x029a   /* response */
 #define regMP1_SMN_C2PMSG_90_BASE_IDX   0
-/* debug mailbox (smu_v13_0_7_init_msg_ctl): param 53, message 75, response 54 */
+/* debug mailbox (smu_v13_0_0_init_msg_ctl): param 53, message 75, response 54 */
 #define regMP1_SMN_C2PMSG_53            0x0275
 #define regMP1_SMN_C2PMSG_53_BASE_IDX   0
 #define regMP1_SMN_C2PMSG_54            0x0276
@@ -69,9 +69,10 @@
 #define regREGS_ROM_OFFSET_CTRL_BASE_IDX 5
 #define REGS_ROM_OFFSET_CTRL__ROM_OFFSET_MASK 0x7F
 
-/* ---- MP1 firmware flags (smu_v13_0_7_check_fw_status): SMN byte address,
- * MP1_Public (0x03b00000) | smnMP1_FIRMWARE_FLAGS_SMU_13_0_7 ---- */
-#define RD_SMN_MP1_FIRMWARE_FLAGS       0x03b10028u
+/* ---- MP1 firmware flags (smu_v13_0_check_fw_status, used by 13.0.10):
+ * SMN byte address MP1_Public (0x03b00000) | smnMP1_FIRMWARE_FLAGS
+ * (0x3010024); 13.0.7 has its own 0x3010028 ---- */
+#define RD_SMN_MP1_FIRMWARE_FLAGS       0x03b10024u
 #define MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK 0x1
 
 /* ---- GC 11.0.3 (asic_reg/gc/gc_11_0_3_offset.h / _sh_mask.h) ---- */
