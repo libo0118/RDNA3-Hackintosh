@@ -2945,9 +2945,9 @@ static void run(const char *fwdir)
         CHECK(dmub32_sw_init(&dm, &dev, blobs[AMD_BLOB_DMCUB].data, (uint32_t)blobs[AMD_BLOB_DMCUB].len,
                              VBIOS_LEN) == RDNA3_OK);
         CHECK(dm.meta.found && dm.meta.dal_fw == 1);
-        if (fwdir)
-            CHECK(dm.fw_version == 0x07003300u && dm.meta.trace_buffer_size == 65552 &&
-                  dm.meta.fw_region_size == 47296 && dm.bss_data_size == 0);
+        if (fwdir)          /* whatever linux-firmware ships today: sane, not pinned */
+            CHECK(dm.fw_version != 0 && dm.meta.trace_buffer_size > 0 &&
+                  dm.meta.fw_region_size > 0 && dm.inst_const_size > 0);
         else
             CHECK(dm.fw_version == 0x07001234u && dm.inst_const_size == 1024 - 256 - 256 &&
                   dm.meta.fw_region_size == 8192);
