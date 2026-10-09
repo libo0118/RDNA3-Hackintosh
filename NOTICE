@@ -11,15 +11,16 @@ common/, kext/          Ports of logic from Linux amdgpu (MIT). Files that port
 NullMoth NVIDIA driver  https://github.com/nullmoth/nvidia-macos-driver
                         (plugin/, kexts/: PolyForm Noncommercial 1.0.0,
                         translator/: LGPL-3.0-or-later, nvk/: MIT).
-                        Its author granted this project permission, on the
-                        NullMoth Discord (October 2026), to use the NullMoth
-                        code in any way on the condition that it is used only
-                        for AMD GPUs and does not interfere with NullMoth's own
-                        NVIDIA work. Code derived from NullMoth in this
-                        repository is used under that permission and must stay
-                        AMD-only. A written confirmation from the author (e.g.
-                        a comment in a GitHub issue of either repository) should
-                        be linked here: TODO.
+                        RDNA3-Hackintosh is a private, non-commercial project
+                        and is never sold, so the code derived from NullMoth
+                        is used under PolyForm Noncommercial 1.0.0 as written
+                        (metal/LICENSE.PolyForm-Noncommercial-1.0.0); anyone
+                        who takes it from this repository is bound by the same
+                        licence. In addition, the NullMoth author told this
+                        project on the NullMoth Discord (October 2026) that the
+                        code may be used in any way for AMD GPUs as long as it
+                        does not interfere with NullMoth's NVIDIA work; the
+                        derived code here therefore stays AMD-only.
                         In this repository: accel/ (NullMoth accelerator),
                         fb/ (derived from NVRMFB), metal/ (plugin, translator).
                         The translator keeps its LGPL-3.0-or-later licence.
