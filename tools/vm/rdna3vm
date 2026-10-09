@@ -28,10 +28,20 @@ ok()   { printf '  \033[32mOK\033[0m  %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
+# the CPU model OSX-KVM's OpenCore-Boot.sh marks as required for Sequoia /
+# Tahoe; the earlier default (Haswell-noTSX) hangs at the Apple logo there
+CPU_DEFAULT="Skylake-Client,-hle,-rtm,kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check"
+
 load_conf() {
     [ -f "$CONF" ] || die "No $CONF - run first: rdna3vm prepare --osx-kvm ... --artifact ..."
     # shellcheck source=/dev/null
     . "$CONF"
+    case "$CPU_MODEL" in
+        Haswell-noTSX,*)
+            sed -i "s|^CPU_MODEL=.*|CPU_MODEL=\"$CPU_DEFAULT\"|" "$CONF"
+            CPU_MODEL=$CPU_DEFAULT
+            echo "  (config: CPU model updated to Skylake-Client for macOS Sequoia)" ;;
+    esac
 }
 
 gpu_bdf() {
@@ -152,7 +162,7 @@ MACDISK="$disk"
 INSTALLER="$osx/BaseSystem.img"
 RAM_GB=${RAM_GB:-$ram}
 CPUS=${CPUS:-$cpus}
-CPU_MODEL="${CPU_MODEL:-Haswell-noTSX,kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check}"
+CPU_MODEL="${CPU_MODEL:-$CPU_DEFAULT}"
 TIMEOUT_MIN=${TIMEOUT_MIN:-30}
 AUTO_TIMEOUT_MIN=${AUTO_TIMEOUT_MIN:-8}
 EOF
@@ -260,6 +270,8 @@ msrs() {   # macOS needs unknown MSRs ignored
 cmd_window() {
     load_conf
     msrs
+    # verbose boot without our drivers' levels: a hang shows where it stops
+    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --boot-args "$BASE_ARGS -v keepsyms=1 debug=0x100" >/dev/null
     qemu_common
     [ -f "$INSTALLER" ] && QARGS+=(-drive id=InstallMedia,if=none,format=raw,file="$INSTALLER"
                                   -device ide-hd,bus=sata.3,drive=InstallMedia)
