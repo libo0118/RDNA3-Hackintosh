@@ -1069,6 +1069,42 @@ static void run(const char *fwdir)
         CHECK(dcn32_flip(&dev, &dc, 0, FB_START, 2000, 0) == RDNA3_EINVAL);
         CHECK(dcn32_flip(&dev, &dc, 1, FB_START, 2560, 0) == RDNA3_EINVAL);
         CHECK(S.dcn_flips == 3);
+        /* hardware cursor: HUBP pipe 1 + DPP 1 */
+        {
+            const uint32_t dpp = regCNVC_CUR1_CURSOR0_CONTROL - regCNVC_CUR0_CURSOR0_CONTROL;
+            uint32_t cc, dc_ctl;
+            CHECK(dcn32_cursor_set_position(&dev, &dc, 0, 10, 10, 1) == RDNA3_EINVAL);   /* no image */
+            CHECK(dcn32_cursor_set_image(&dev, &dc, 0, FB_START + 0x7000000, 100) == RDNA3_EINVAL);
+            CHECK(dcn32_cursor_set_image(&dev, &dc, 0, FB_START + 0x7000080, 64) == RDNA3_EINVAL);
+            CHECK(dcn32_cursor_set_image(&dev, &dc, 0, FB_START + 0x7000000, 256) == RDNA3_OK);
+            CHECK(S.reg[HUBP(regCURSOR0_0_CURSOR_SURFACE_ADDRESS, 1)] == (uint32_t)(FB_START + 0x7000000));
+            CHECK(S.reg[HUBP(regCURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH, 1)] == (uint32_t)((FB_START + 0x7000000) >> 32));
+            CHECK(S.reg[HUBP(regCURSOR0_0_CURSOR_SIZE, 1)] == (256u | (256u << 16)));
+            cc = S.reg[HUBP(regCURSOR0_0_CURSOR_CONTROL, 1)];
+            CHECK(((cc & CURSOR0_0_CURSOR_CONTROL__CURSOR_MODE_MASK) >> CURSOR0_0_CURSOR_CONTROL__CURSOR_MODE__SHIFT) == 2);
+            CHECK(((cc & CURSOR0_0_CURSOR_CONTROL__CURSOR_PITCH_MASK) >> CURSOR0_0_CURSOR_CONTROL__CURSOR_PITCH__SHIFT) == 2);
+            CHECK(!(cc & CURSOR0_0_CURSOR_CONTROL__CURSOR_ENABLE_MASK));
+            CHECK(dcn32_cursor_set_position(&dev, &dc, 0, 100, 200, 1) == RDNA3_OK);
+            CHECK(S.reg[HUBP(regCURSOR0_0_CURSOR_POSITION, 1)] == ((100u << 16) | 200u));
+            CHECK(S.reg[HUBP(regCURSOR0_0_CURSOR_HOT_SPOT, 1)] == 0);
+            CHECK(S.reg[HUBP(regCURSOR0_0_CURSOR_CONTROL, 1)] & CURSOR0_0_CURSOR_CONTROL__CURSOR_ENABLE_MASK);
+            dc_ctl = S.reg[DCN_B2 + regCNVC_CUR0_CURSOR0_CONTROL + dpp * 1];
+            CHECK((dc_ctl & CNVC_CUR0_CURSOR0_CONTROL__CUR0_ENABLE_MASK) &&
+                  ((dc_ctl & CNVC_CUR0_CURSOR0_CONTROL__CUR0_MODE_MASK) >> CNVC_CUR0_CURSOR0_CONTROL__CUR0_MODE__SHIFT) == 2);
+            CHECK(S.reg[DCN_B2 + regCNVC_CUR0_CURSOR0_CONTROL] == 0);   /* DPP 0 untouched */
+            /* off the top-left edge: position 0, overhang in the hot spot */
+            CHECK(dcn32_cursor_set_position(&dev, &dc, 0, -5, -7, 1) == RDNA3_OK);
+            CHECK(S.reg[HUBP(regCURSOR0_0_CURSOR_POSITION, 1)] == 0 &&
+                  S.reg[HUBP(regCURSOR0_0_CURSOR_HOT_SPOT, 1)] == ((5u << 16) | 7u));
+            /* fully off screen or hidden: disabled on both sides */
+            CHECK(dcn32_cursor_set_position(&dev, &dc, 0, -300, 10, 1) == RDNA3_OK);
+            CHECK(!(S.reg[HUBP(regCURSOR0_0_CURSOR_CONTROL, 1)] & CURSOR0_0_CURSOR_CONTROL__CURSOR_ENABLE_MASK));
+            CHECK(!(S.reg[DCN_B2 + regCNVC_CUR0_CURSOR0_CONTROL + dpp] & CNVC_CUR0_CURSOR0_CONTROL__CUR0_ENABLE_MASK));
+            CHECK(dcn32_cursor_set_position(&dev, &dc, 0, 2600, 10, 1) == RDNA3_OK);
+            CHECK(!(S.reg[HUBP(regCURSOR0_0_CURSOR_CONTROL, 1)] & CURSOR0_0_CURSOR_CONTROL__CURSOR_ENABLE_MASK));
+            CHECK(dcn32_cursor_set_position(&dev, &dc, 0, 10, 10, 0) == RDNA3_OK);
+            CHECK(!(S.reg[HUBP(regCURSOR0_0_CURSOR_CONTROL, 1)] & CURSOR0_0_CURSOR_CONTROL__CURSOR_ENABLE_MASK));
+        }
         /* CRC */
         CHECK(dcn32_crc_read(&dev, &dc, 0, &r, &g, &b) == RDNA3_ENODEV);
         dcn32_crc_enable(&dev, &dc, 0, 1);

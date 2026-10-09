@@ -8,6 +8,7 @@
 
 #define HUBP_STRIDE (regHUBP1_DCHUBP_CNTL - regHUBP0_DCHUBP_CNTL)    /* 0xdc */
 #define OTG_STRIDE  (regOTG1_OTG_CONTROL - regOTG0_OTG_CONTROL)      /* 0x80 */
+#define DPP_STRIDE  (regCNVC_CUR1_CURSOR0_CONTROL - regCNVC_CUR0_CURSOR0_CONTROL)   /* 0x16b */
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -24,6 +25,11 @@
     rdna3_rreg((d), rdna3_reg_offset((d), HWIP_DCE, 0, reg##_BASE_IDX, reg) + OTG_STRIDE * (n))
 #define WO(d, reg, n, v) \
     rdna3_wreg((d), rdna3_reg_offset((d), HWIP_DCE, 0, reg##_BASE_IDX, reg) + OTG_STRIDE * (n), (v))
+
+#define RD(d, reg, n) \
+    rdna3_rreg((d), rdna3_reg_offset((d), HWIP_DCE, 0, reg##_BASE_IDX, reg) + DPP_STRIDE * (n))
+#define WD(d, reg, n, v) \
+    rdna3_wreg((d), rdna3_reg_offset((d), HWIP_DCE, 0, reg##_BASE_IDX, reg) + DPP_STRIDE * (n), (v))
 
 static void read_timing(rdna3_dev *d, uint32_t o, rdna3_dcn_head *h)
 {
@@ -150,6 +156,83 @@ int dcn32_flip_pending(rdna3_dev *d, rdna3_dcn *dc, uint32_t i)
     inuse = RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, p) |
             ((uint64_t)(RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH, p) & 0xffff) << 32);
     return inuse != dc->requested[p];
+}
+
+int dcn32_cursor_set_image(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t mc, uint32_t size)
+{
+    uint32_t p, v, pitch, lpc;
+    if (i >= dc->nheads)
+        return RDNA3_EINVAL;
+    p = dc->head[i].pipe;
+    switch (size) {
+    case 64:  pitch = 0; lpc = 3; break;   /* CURSOR_PITCH_64, LINE_PER_CHUNK_8 */
+    case 128: pitch = 1; lpc = 2; break;   /* 128, 4 */
+    case 256: pitch = 2; lpc = 1; break;   /* 256, 2 */
+    default:  return RDNA3_EINVAL;
+    }
+    if ((mc & 0xff) || mc < d->fb_start || mc - d->fb_start + 4ull * size * size > d->vram_size)
+        return RDNA3_EINVAL;
+    WH(d, regCURSOR0_0_CURSOR_SURFACE_ADDRESS_HIGH, p, (uint32_t)(mc >> 32) & 0xffff);
+    WH(d, regCURSOR0_0_CURSOR_SURFACE_ADDRESS, p, (uint32_t)mc);
+    v = SET(0u, CURSOR0_0_CURSOR_SIZE, CURSOR_WIDTH, size);
+    v = SET(v, CURSOR0_0_CURSOR_SIZE, CURSOR_HEIGHT, size);
+    WH(d, regCURSOR0_0_CURSOR_SIZE, p, v);
+    v = RH(d, regCURSOR0_0_CURSOR_CONTROL, p);
+    v = SET(v, CURSOR0_0_CURSOR_CONTROL, CURSOR_MODE, RD_DCN_CURSOR_MODE_PREMULT);
+    v = SET(v, CURSOR0_0_CURSOR_CONTROL, CURSOR_2X_MAGNIFY, 0);
+    v = SET(v, CURSOR0_0_CURSOR_CONTROL, CURSOR_PITCH, pitch);
+    v = SET(v, CURSOR0_0_CURSOR_CONTROL, CURSOR_LINES_PER_CHUNK, lpc);
+    WH(d, regCURSOR0_0_CURSOR_CONTROL, p, v);
+    /* no shift of the cursor HDL schedule, chunk deadline adjust 3 */
+    v = SET(0u, HUBPREQ0_CURSOR_SETTINGS, CURSOR0_CHUNK_HDL_ADJUST, 3);
+    WH(d, regHUBPREQ0_CURSOR_SETTINGS, p, v);
+    /* DPP side: same mode, no expansion, no degamma ROM */
+    v = RD(d, regCNVC_CUR0_CURSOR0_CONTROL, p);
+    v = SET(v, CNVC_CUR0_CURSOR0_CONTROL, CUR0_MODE, RD_DCN_CURSOR_MODE_PREMULT);
+    v = SET(v, CNVC_CUR0_CURSOR0_CONTROL, CUR0_EXPANSION_MODE, 0);
+    v = SET(v, CNVC_CUR0_CURSOR0_CONTROL, CUR0_ROM_EN, 0);
+    WD(d, regCNVC_CUR0_CURSOR0_CONTROL, p, v);
+    dc->cursor_size[p] = size;
+    return RDNA3_OK;
+}
+
+int dcn32_cursor_set_position(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, int32_t x, int32_t y,
+                              int visible)
+{
+    const rdna3_dcn_head *h;
+    uint32_t p, v, hx = 0, hy = 0, size;
+    int on;
+    if (i >= dc->nheads)
+        return RDNA3_EINVAL;
+    h = &dc->head[i];
+    p = h->pipe;
+    size = dc->cursor_size[p];
+    if (!size)
+        return RDNA3_EINVAL;   /* hubp2_cursor_set_position: no attributes yet */
+    /* the hardware draws the image with its hot spot at POSITION, so the
+     * top-left corner is POSITION - HOT_SPOT. POSITION is unsigned: a
+     * cursor hanging off the top/left edge gets POSITION 0 and the
+     * overhang as hot spot (amdgpu_dm get_cursor_position) */
+    if (x < 0) { hx = (uint32_t)(-x); x = 0; }
+    if (y < 0) { hy = (uint32_t)(-y); y = 0; }
+    on = visible && hx < size && hy < size && (uint32_t)x < h->width && (uint32_t)y < h->height;
+    if (hx > 255) hx = 255;
+    if (hy > 255) hy = 255;
+    if (on != dc->cursor_on[p]) {
+        v = RH(d, regCURSOR0_0_CURSOR_CONTROL, p);
+        WH(d, regCURSOR0_0_CURSOR_CONTROL, p, SET(v, CURSOR0_0_CURSOR_CONTROL, CURSOR_ENABLE, on));
+        v = RD(d, regCNVC_CUR0_CURSOR0_CONTROL, p);
+        WD(d, regCNVC_CUR0_CURSOR0_CONTROL, p, SET(v, CNVC_CUR0_CURSOR0_CONTROL, CUR0_ENABLE, on));
+        dc->cursor_on[p] = on;
+    }
+    v = SET(0u, CURSOR0_0_CURSOR_POSITION, CURSOR_X_POSITION, (uint32_t)x);
+    v = SET(v, CURSOR0_0_CURSOR_POSITION, CURSOR_Y_POSITION, (uint32_t)y);
+    WH(d, regCURSOR0_0_CURSOR_POSITION, p, v);
+    v = SET(0u, CURSOR0_0_CURSOR_HOT_SPOT, CURSOR_HOT_SPOT_X, hx);
+    v = SET(v, CURSOR0_0_CURSOR_HOT_SPOT, CURSOR_HOT_SPOT_Y, hy);
+    WH(d, regCURSOR0_0_CURSOR_HOT_SPOT, p, v);
+    WH(d, regCURSOR0_0_CURSOR_DST_OFFSET, p, 0);
+    return RDNA3_OK;
 }
 
 uint32_t dcn32_frame_count(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i)

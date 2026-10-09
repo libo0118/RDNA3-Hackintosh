@@ -95,6 +95,18 @@ class RDNA3Framebuffer : public IOFramebuffer {
     bool     fFlipped = false;
 
     const OSSymbol *fSymInfo = nullptr, *fSymFlip = nullptr, *fSymStatus = nullptr;
+    const OSSymbol *fSymCursor = nullptr;
+
+    /* hardware cursor: 256x256 ARGB8888 premultiplied in VRAM from the core */
+    static const uint32_t kCurDim = 256;
+    struct RD3KVramRequest fCurVram = {};
+    volatile uint32_t *fCurKva = nullptr;
+    bool     fCurReady = false, fCurHaveImage = false, fCurVisible = false;
+    SInt32   fCurX = 0, fCurY = 0;
+    unsigned fCurImages = 0;
+    bool     cursorInit();
+    void     cursorFree();
+    bool     cursorCall(unsigned op);
 
     IOService *findCore(IOService *provider);
     bool       readCore();
@@ -164,9 +176,9 @@ public:
     IOReturn setGammaTable(UInt32, UInt32, UInt32, void *) override { return kIOReturnSuccess; }
     IOReturn setGammaTable(UInt32, UInt32, UInt32, void *, bool) override { return kIOReturnSuccess; }
     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
-    /* software cursor until the DCN hardware cursor is wired */
-    IOReturn setCursorImage(void *) override { return kIOReturnUnsupported; }
-    IOReturn setCursorState(SInt32, SInt32, bool) override { return kIOReturnUnsupported; }
+    /* DCN hardware cursor (DCN mode); software cursor otherwise */
+    IOReturn setCursorImage(void *cursorImage) override;
+    IOReturn setCursorState(SInt32 x, SInt32 y, bool visible) override;
 
     IOReturn registerForInterruptType(IOSelect type, IOFBInterruptProc proc, OSObject *target,
                                       void *ref, void **interruptRef) override;
@@ -277,7 +289,8 @@ bool RDNA3Framebuffer::start(IOService *provider)
     fSymInfo = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_INFO);
     fSymFlip = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_FLIP);
     fSymStatus = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_STATUS);
-    if (!fLock || !fSymInfo || !fSymFlip || !fSymStatus)
+    fSymCursor = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_CURSOR);
+    if (!fLock || !fSymInfo || !fSymFlip || !fSymStatus || !fSymCursor)
         return false;
 
     fCore = findCore(provider);
@@ -310,7 +323,10 @@ bool RDNA3Framebuffer::start(IOService *provider)
         scheduleVbl(d);
     }
     registerPowerDriver(this, kFBPowerStates, 2);
-    FBLOG("started (head %u, VBL %s)", fHead, fDcn ? "locked to the OTG frame counter" : "timer");
+    if (fDcn)
+        cursorInit();
+    FBLOG("started (head %u, VBL %s, %s cursor)", fHead,
+          fDcn ? "locked to the OTG frame counter" : "timer", fCurReady ? "hardware" : "software");
     return true;
 }
 
@@ -348,6 +364,7 @@ void RDNA3Framebuffer::stop(IOService *provider)
         int rc;
         flipTo(fBootVram, fW, fH, fBootPitch, &rc);   /* leave the boot surface on screen */
     }
+    cursorFree();
     super::stop(provider);
 }
 
@@ -358,6 +375,7 @@ void RDNA3Framebuffer::free()
     OSSafeReleaseNULL(fSymInfo);
     OSSafeReleaseNULL(fSymFlip);
     OSSafeReleaseNULL(fSymStatus);
+    OSSafeReleaseNULL(fSymCursor);
     if (fLock) {
         IOSimpleLockFree(fLock);
         fLock = nullptr;
@@ -565,7 +583,7 @@ IOReturn RDNA3Framebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
         return kIOReturnSuccess;
     }
     if (attribute == kIOHardwareCursorAttribute) {
-        if (value) *value = 0;
+        if (value) *value = fCurReady ? 1 : 0;
         return kIOReturnSuccess;
     }
     return super::getAttribute(attribute, value);
@@ -631,6 +649,137 @@ IOReturn RDNA3Framebuffer::setPowerState(unsigned long ordinal, IOService *)
     FBLOG("setPowerState %lu", ordinal);
     handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
     return kIOPMAckImplied;
+}
+
+/* ----------------------------- cursor ----------------------------- */
+
+bool RDNA3Framebuffer::cursorInit()
+{
+    uint32_t gate = 1;
+    PE_parse_boot_argn("rdna3cursor", &gate, sizeof(gate));
+    if (!gate || !fCore) {
+        FBLOG("hardware cursor off (%s)", gate ? "no core kext" : "rdna3cursor=0");
+        return false;
+    }
+    const OSSymbol *alloc = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_ALLOC);
+    if (!alloc)
+        return false;
+    bzero(&fCurVram, sizeof(fCurVram));
+    fCurVram.version = RD3K_VRAM_ABI_VERSION;
+    fCurVram.size = (unsigned long long)kCurDim * kCurDim * 4;
+    IOReturn r = fCore->callPlatformFunction(alloc, false, &fCurVram, nullptr, nullptr, nullptr);
+    alloc->release();
+    if (r != kIOReturnSuccess || !fCurVram.kva) {
+        FBLOG("hardware cursor: no CPU-visible VRAM (0x%x), software cursor", r);
+        bzero(&fCurVram, sizeof(fCurVram));
+        return false;
+    }
+    fCurKva = (volatile uint32_t *)fCurVram.kva;   /* zeroed by the core */
+    fCurReady = true;
+    FBLOG("hardware cursor: %ux%u at VRAM 0x%llx", kCurDim, kCurDim,
+          (unsigned long long)fCurVram.allocationCookie);
+    return true;
+}
+
+void RDNA3Framebuffer::cursorFree()
+{
+    if (!fCurReady)
+        return;
+    fCurVisible = false;
+    cursorCall(RD3K_CURSOR_OP_MOVE);   /* hide before the memory goes */
+    fCurReady = false;
+    const OSSymbol *fr = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_FREE);
+    if (fr && fCore)
+        fCore->callPlatformFunction(fr, false, &fCurVram, nullptr, nullptr, nullptr);
+    OSSafeReleaseNULL(fr);
+    fCurKva = nullptr;
+}
+
+bool RDNA3Framebuffer::cursorCall(unsigned op)
+{
+    if (!fCore || !fSymCursor)
+        return false;
+    RD3KDisplayCursor c;
+    bzero(&c, sizeof(c));
+    c.version = RD3K_DISPLAY_ABI_VERSION;
+    c.head = fHead;
+    c.op = op;
+    c.size = kCurDim;
+    c.vramOffset = fCurVram.allocationCookie;
+    c.x = fCurX;
+    c.y = fCurY;
+    c.visible = (fCurVisible && fCurHaveImage) ? 1 : 0;
+    return fCore->callPlatformFunction(fSymCursor, false, &c, nullptr, nullptr, nullptr) == kIOReturnSuccess;
+}
+
+IOReturn RDNA3Framebuffer::setCursorImage(void *cursorImage)
+{
+    if (!fCurReady)
+        return kIOReturnUnsupported;
+    size_t bytes = (size_t)kCurDim * kCurDim * 4;
+    uint32_t *staging = (uint32_t *)IOMalloc(bytes);
+    if (!staging)
+        return kIOReturnNoMemory;
+    bzero(staging, bytes);
+    IOHardwareCursorDescriptor d;
+    bzero(&d, sizeof(d));
+    d.majorVersion = kHardwareCursorDescriptorMajorVersion;
+    d.minorVersion = kHardwareCursorDescriptorMinorVersion;
+    d.width = kCurDim;
+    d.height = kCurDim;
+    d.bitDepth = 32;
+    d.supportedSpecialEncodings = kTransparentEncodedPixel;
+    IOHardwareCursorInfo ci;
+    bzero(&ci, sizeof(ci));
+    ci.majorVersion = kHardwareCursorInfoMajorVersion;
+    ci.minorVersion = kHardwareCursorInfoMinorVersion;
+    ci.hardwareCursorData = (UInt8 *)staging;
+    bool ok = convertCursorImage(cursorImage, &d, &ci) && ci.cursorWidth && ci.cursorHeight &&
+              ci.cursorWidth <= kCurDim && ci.cursorHeight <= kCurDim;
+    if (ok) {
+        /* convertCursorImage gives straight alpha, packed cursorWidth wide;
+         * DCN wants premultiplied rows of kCurDim pixels */
+        for (uint32_t y = 0; y < kCurDim; y++)
+            for (uint32_t x = 0; x < kCurDim; x++) {
+                uint32_t p = 0;
+                if (y < ci.cursorHeight && x < ci.cursorWidth) {
+                    uint32_t s = staging[y * ci.cursorWidth + x], a = s >> 24;
+                    uint32_t r = (((s >> 16) & 255) * a + 127) / 255;
+                    uint32_t g = (((s >> 8) & 255) * a + 127) / 255;
+                    uint32_t b = ((s & 255) * a + 127) / 255;
+                    p = (a << 24) | (r << 16) | (g << 8) | b;
+                }
+                fCurKva[y * kCurDim + x] = p;
+            }
+        __asm__ volatile("sfence" ::: "memory");
+    }
+    IOFree(staging, bytes);
+    if (!ok) {
+        fCurHaveImage = false;
+        cursorCall(RD3K_CURSOR_OP_MOVE);
+        return kIOReturnUnsupported;
+    }
+    bool first = !fCurHaveImage;
+    fCurHaveImage = true;
+    if (fCurImages++ < 4)
+        FBLOG("cursor image %u: %ux%u", fCurImages, (unsigned)ci.cursorWidth, (unsigned)ci.cursorHeight);
+    /* the image address never changes; program it once, then only move */
+    if (first && !cursorCall(RD3K_CURSOR_OP_IMAGE)) {
+        fCurHaveImage = false;
+        return kIOReturnUnsupported;
+    }
+    cursorCall(RD3K_CURSOR_OP_MOVE);
+    return kIOReturnSuccess;
+}
+
+IOReturn RDNA3Framebuffer::setCursorState(SInt32 x, SInt32 y, bool visible)
+{
+    if (!fCurReady)
+        return kIOReturnUnsupported;
+    fCurX = x;
+    fCurY = y;
+    fCurVisible = visible;
+    return (cursorCall(RD3K_CURSOR_OP_MOVE) || !fCurHaveImage) ? kIOReturnSuccess : kIOReturnError;
 }
 
 /* ------------------------------ flips ------------------------------ */

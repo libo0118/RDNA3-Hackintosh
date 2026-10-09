@@ -21,7 +21,7 @@ GOP / VBIOS ──▶ DCN 3.2: HUBP (adres, pitch, format) ─▶ OTG (timing) �
 
 | Plik | Co robi |
 |---|---|
-| `hw/dcn32.c` | szuka zapalonych głowic (HUBP bez blank, OTG włączony), czyta format, tiling, DCC, viewport, pitch, adres MC, timing OTG (jak `optc1_get_hw_timing`); flip (`hubp2_program_surface_flip_and_addr`, zmiana pitch pod `SURFACE_UPDATE_LOCK`), flip pending, licznik klatek, linia, vblank, CRC OTG |
+| `hw/dcn32.c` | sprzętowy kursor 256×256 ARGB (HUBP + DPP, jak `hubp2_cursor_set_*` / `dpp2_set_cursor_attributes`); szuka zapalonych głowic (HUBP bez blank, OTG włączony), czyta format, tiling, DCC, viewport, pitch, adres MC, timing OTG (jak `optc1_get_hw_timing`); flip (`hubp2_program_surface_flip_and_addr`, zmiana pitch pod `SURFACE_UPDATE_LOCK`), flip pending, licznik klatek, linia, vblank, CRC OTG |
 | `kext/src/RDNA3Display.cpp` | na `rdna3lvl>=2` czyta głowice (**tylko odczyt**), mierzy odświeżanie z licznika klatek, odpowiada na wywołania framebuffera; alokatory VRAM zaczynają się nad buforem GOP (4K = 32 MiB) |
 | `fb/rdna3-fb.cpp` | `RDNA3Framebuffer`: jeden tryb (ten z firmware), apertura BAR0, VBL z licznika klatek OTG, flipy dla akceleratora; bez rdzenia albo bez użytecznej głowicy działa jak zwykły framebuffer na buforze konsoli z bootloadera (`PE_Video`) |
 
@@ -32,6 +32,7 @@ GOP / VBIOS ──▶ DCN 3.2: HUBP (adres, pitch, format) ─▶ OTG (timing) �
 | brak `rdna3fb=1` | `RDNA3Framebuffer` się nie uruchamia; ekran obsługuje IONDRVFramebuffer Apple |
 | `rdna3fb=1` | nasz framebuffer bierze kategorię `IOFramebuffer` (wynik 30000 > 20000 IONDRV); gdy `start()` się nie uda, IOKit wraca do IONDRV |
 | `rdna3lvl=2` (albo więcej) | rdzeń zna głowice: tryb DCN (flipy, prawdziwy VBL) zamiast trybu konsoli |
+| `rdna3cursor=0` | kursor programowy zamiast sprzętowego kursora DCN |
 | `-rdna3off` | wyłącza wszystko |
 
 Zapisy do rejestrów DCN zdarzają się tylko przy flipie albo przy włączeniu CRC,
@@ -61,7 +62,6 @@ bez akceleracji, jedna rozdzielczość, jeden monitor. To wystarczy.
 ## Ograniczenia (do zrobienia)
 
 * jedna głowica (head 0), jeden tryb; brak EDID (AUX/I2C DCN), brak zmiany
-  rozdzielczości i odświeżania, brak sprzętowego kursora (macOS rysuje
-  kursor programowo), brak gammy;
+  rozdzielczości i odświeżania, brak gammy;
 * przerwania VBLANK z IH (teraz odpytywanie licznika klatek);
 * pełny DC (modesetting) później, osobny duży etap.

@@ -127,6 +127,7 @@ private:
     IOReturn      displayFlip(struct RD3KDisplayFlip *f);
     IOReturn      displayStatus(struct RD3KDisplayStatus *s);
     IOReturn      displayCrc(uint32_t head, uint32_t *crc);
+    IOReturn      displayCursor(struct RD3KDisplayCursor *c);
     static uint32_t dispMmioRd(void *ctx, uint64_t off);
     static void     dispMmioWr(void *ctx, uint64_t off, uint32_t v);
 

@@ -117,6 +117,19 @@ struct RD3KDisplayFlip {
     unsigned long long vramOffset;    /* VRAM offset of the new surface (allocationCookie) */
     int                result;        /* 0 or a negative RDNA3_E* code */
 };
+#define RD3K_DISPLAY_FN_CURSOR   "rdna3DisplayCursor"
+#define RD3K_CURSOR_OP_IMAGE     1u   /* vramOffset + size (64/128/256) */
+#define RD3K_CURSOR_OP_MOVE      2u   /* x, y (top-left, may be negative), visible */
+struct RD3KDisplayCursor {
+    unsigned int       version;
+    unsigned int       head;
+    unsigned int       op;            /* RD3K_CURSOR_OP_* */
+    unsigned int       size;          /* square ARGB8888 premultiplied, pitch = size */
+    unsigned long long vramOffset;
+    int                x, y;
+    unsigned int       visible;
+    int                result;
+};
 struct RD3KDisplayStatus {
     unsigned int version;
     unsigned int head;

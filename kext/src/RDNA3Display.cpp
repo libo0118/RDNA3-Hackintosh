@@ -8,6 +8,7 @@
  *   rdna3DisplayFlip     scan out another VRAM surface (HUBP address/pitch)
  *   rdna3DisplayStatus   OTG frame counter, scanline, vblank, flip pending
  *   rdna3DisplayCrc      OTG CRC of the last frame
+ *   rdna3DisplayCursor   hardware cursor image (VRAM) and position
  *
  * Nothing here writes a register until the framebuffer asks for a flip or
  * a CRC, and the framebuffer only starts with the boot-arg rdna3fb=1.
@@ -232,4 +233,21 @@ IOReturn RDNA3Accel::displayCrc(uint32_t head, uint32_t *crc)
     /* one number for the sysctl: R ^ G<<8 ^ B<<16 */
     *crc = ret ? 0 : (r ^ (g << 8) ^ (b << 16));
     return ret ? kIOReturnNotReady : kIOReturnSuccess;
+}
+
+IOReturn RDNA3Accel::displayCursor(RD3KDisplayCursor *c)
+{
+    if (!c || c->version != RD3K_DISPLAY_ABI_VERSION)
+        return kIOReturnBadArgument;
+    if (!fDcn || !fDispDev || c->head >= fDcn->nheads)
+        return kIOReturnNotReady;
+    int r = RDNA3_EINVAL;
+    IOLockLock(fDispLock);
+    if (c->op == RD3K_CURSOR_OP_IMAGE)
+        r = dcn32_cursor_set_image(fDispDev, fDcn, c->head, fDispDev->fb_start + c->vramOffset, c->size);
+    else if (c->op == RD3K_CURSOR_OP_MOVE)
+        r = dcn32_cursor_set_position(fDispDev, fDcn, c->head, c->x, c->y, c->visible != 0);
+    IOLockUnlock(fDispLock);
+    c->result = r;
+    return r ? kIOReturnBadArgument : kIOReturnSuccess;
 }

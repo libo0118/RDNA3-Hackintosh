@@ -51,6 +51,8 @@ typedef struct rdna3_dcn {
     uint32_t nheads;
     rdna3_dcn_head head[RD_DCN_MAX_PIPES];
     uint64_t requested[RD_DCN_MAX_PIPES];   /* last address written per pipe */
+    uint32_t cursor_size[RD_DCN_MAX_PIPES]; /* 0 = no image programmed */
+    int      cursor_on[RD_DCN_MAX_PIPES];
 } rdna3_dcn;
 
 /* Scan the four pipes for lit ones: HUBP not blanked, OTG master enabled.
@@ -68,6 +70,17 @@ int  dcn32_flip(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t mc, uint32_t p
                 int immediate);
 /* hubp2_is_flip_pending: 1 while the last flip of head 'i' has not latched */
 int  dcn32_flip_pending(rdna3_dev *d, rdna3_dcn *dc, uint32_t i);
+
+/* Hardware cursor (hubp2_cursor_set_attributes / hubp2_cursor_set_position
+ * + dpp2_set_cursor_attributes / dpp1_set_cursor_position): a square
+ * ARGB8888 premultiplied-alpha image of 'size' = 64, 128 or 256 pixels
+ * (pitch = size) at MC address 'mc' (256 B aligned). DPP instance =
+ * pipe instance. */
+#define RD_DCN_CURSOR_MODE_PREMULT 2   /* CURSOR_MODE_COLOR_PRE_MULTIPLIED_ALPHA */
+int  dcn32_cursor_set_image(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t mc, uint32_t size);
+/* top-left corner on screen (may be negative: moves into the hot spot) */
+int  dcn32_cursor_set_position(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, int32_t x, int32_t y,
+                               int visible);
 
 /* OTG frame counter (24 bit) and current scan line */
 uint32_t dcn32_frame_count(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i);
