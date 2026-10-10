@@ -27,6 +27,7 @@
 #include "vbios.h"
 #include "dcaux.h"
 #include "edid.h"
+#include "dcn32_modeset.h"
 #include "atom.h"
 #include "dmub32.h"
 #include "dcn32_mode.h"
@@ -49,6 +50,7 @@
 #include "dcn32.h"
 #include "soc21_cg.h"
 #include "gen/athub_3_0_0_cg.h"
+#include "gen/dcn_3_2_0_mode.h"
 #include "gen/hdp_6_0_0_cg.h"
 #include "gen/dcn_3_2_0_scale.h"
 #include "gen/dcn_3_2_0_crc.h"
@@ -4237,6 +4239,120 @@ static void run(const char *fwdir)
                 CHECK(dcn32_dentist_divider(0x08) == 8 && dcn32_dentist_divider(0x40) == 64 &&
                       dcn32_dentist_divider(0x60) == 128 && dcn32_dentist_divider(0x7f) == 512 &&
                       dcn32_dentist_divider(0) == 8);
+            }
+            /* a mode set on the lit HDMI head (pipe 1, OTG 2, DIGC -> UNIPHY B):
+             * 2560x1440 at 241.5 MHz -> 1920x1080 at 148.5 MHz (DMT) */
+            {
+                static rdna3_dcn_modeset ms;
+                static rdna3_dcn_scale sc;
+                rdna3_display_path own;
+                rdna3_mode m;
+                uint32_t r_new, k3;
+                memset(&own, 0, sizeof(own));
+                own.transmitter = 1;
+                own.hpd = 0;
+                own.encoder_objid = 0x211e;
+                own.connector_objid = 0x310c;
+                /* the GOP's DLG/TTU and global sync for 1440p (DML values) */
+                S.reg[HUBP(regHUBPREQ0_REF_FREQ_TO_PIX_FREQ, 1)] = 217093;          /* 100 / 241.5 x 2^19 */
+                S.reg[HUBP(regHUBPREQ0_DST_DIMENSIONS, 1)] = 288192;                /* x 2720 x 2^8 */
+                S.reg[HUBP(regHUBPREQ0_PER_LINE_DELIVERY, 1)] = 1060;
+                S.reg[HUBP(regHUBPREQ0_PER_LINE_DELIVERY_PRE, 1)] = 1060;
+                S.reg[HUBP(regHUBPREQ0_DCN_SURF0_TTU_CNTL0, 1)] = 0x10000 | (8u << 24);
+                S.reg[HUBP(regHUBPREQ0_DCN_SURF0_TTU_CNTL1, 1)] = 0x10000;
+                S.reg[HUBP(regHUBPREQ0_PREFETCH_SETTINGS, 1)] = (40u << 24) | (1u << 19);   /* 10 lines, vratio 1 */
+                S.reg[HUBP(regHUBPREQ0_DCN_GLOBAL_TTU_CNTL, 1)] = 1000;
+                S.reg[HUBP(regHUBPREQ0_DST_AFTER_SCALER, 1)] = 100 | (3u << 16);
+                S.reg[OTG(regOTG0_OTG_VSTARTUP_PARAM, 2)] = 40;
+                S.reg[OTG(regOTG0_OTG_VUPDATE_PARAM, 2)] = 680 | (30u << 16);
+                S.reg[OTG(regOTG0_OTG_VREADY_PARAM, 2)] = 100;
+                S.reg[DCN_B2 + regOPPBUF0_OPPBUF_CONTROL + RD_CLONE_OPP_STRIDE * 2] = 2560 | (1u << 16);
+                CHECK(dcn32_read_state(&dev, &dc2) == 1 && dc2.head[0].h_active == 2560 && dc2.head[0].dig_be == 1);
+                CHECK(edid_dmt(1920, 1080, 60, &m) == 0);
+                /* refused: no timing, DP head, too fast for the clocks */
+                {
+                    rdna3_mode none = m;
+                    none.pixel_khz = 0;
+                    CHECK(dcn32_modeset_plan(&dev, &dc2, 0, &own, 241500, &none, &ms) == RD_MODESET_NO_TIMING);
+                    none = m;
+                    none.pixel_khz = 900000;
+                    CHECK(dcn32_modeset_plan(&dev, &dc2, 0, &own, 241500, &none, &ms) == RD_MODESET_TMDS_CLOCK);
+                    S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x7f;   /* DISPCLK 33.6 MHz */
+                    CHECK(dcn32_modeset_plan(&dev, &dc2, 0, &own, 241500, &m, &ms) == RD_MODESET_CLOCKS);
+                    S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x18;
+                    dc2.head[0].dig_mode = 0;
+                    CHECK(dcn32_modeset_plan(&dev, &dc2, 0, &own, 241500, &m, &ms) == RD_MODESET_NOT_TMDS);
+                    dc2.head[0].dig_mode = 3;
+                }
+                CHECK(dcn32_modeset_plan(&dev, &dc2, 0, &own, 241500, &m, &ms) == RD_MODESET_OK);
+                CHECK(ms.pipe == 1 && ms.otg == 2 && ms.opp == 2 && ms.fe == 2 && ms.be == 1 && ms.dig_mode == 3);
+                CHECK(ms.cur.h_total == 2719 && ms.cur.pclk_khz == 241500);
+                /* optc1_program_timing */
+                CHECK(ms.want.h_total == 2199 && ms.want.v_total == 1124 &&
+                      ms.want.h_blank == ((2200u - 88) | (192u << 16)) && ms.want.h_sync == (44u << 16) &&
+                      ms.want.v_blank == ((1125u - 4) | (41u << 16)) && ms.want.v_sync == (5u << 16));
+                /* DML 3.2: VStartup = vblank - 1, VUpdateOffset = htotal / 4,
+                 * the times rescaled: ceil(30 x 148.5 / 241.5), ceil(100 x ...) */
+                CHECK(ms.want.vstartup == 44 && ms.want.vupdate == (550u | (19u << 16)) && ms.want.vready == 62);
+                /* VTG: VCOUNT_INIT 1121, FP2 = -(41 - 44 + 1) = 2 */
+                CHECK((ms.want.vtg & 0x7fff) == 2 && ((ms.want.vtg >> 16) & 0x7fff) == 1121);
+                /* DLG: ref/pix at 100 MHz / 148.5 MHz, htotal, h blank end, QoS */
+                r_new = ms.want.ref_to_pix & 0x1fffff;
+                CHECK(r_new >= 353050 && r_new <= 353060);
+                CHECK(ms.want.dst_dim == (uint32_t)(((uint64_t)r_new * 2200) >> 11));
+                CHECK((ms.want.blank0 & 0x1fff) == 129 && (ms.want.blank0 >> 16) == 41);
+                CHECK((ms.want.qos_wm >> 16) == (uint32_t)((4ull * 2200 * r_new) >> 19));
+                CHECK((ms.want.blank1 & 0x3ffff) == 4u * 1122 + 1);
+                /* delivery: 1060 x (1920 / 2560) x (241.5 / 148.5) = 1293 */
+                CHECK(ms.want.line >= 1291 && ms.want.line <= 1294);
+                CHECK((ms.want.prefetch >> 24) == 40 && ms.want.viewport_dim == (1920u | 1080u << 16) &&
+                      (ms.want.oppbuf & 0x3fff) == 1920 && (ms.want.oppbuf >> 16) == 1);
+                /* apply: frames move, no underflow */
+                S.dmub.nseq = 0;
+                S.dcn_frames = 1;
+                CHECK(dcn32_modeset_apply(&dev, NULL, &dc2, &sc, &ms, FB_START + 0x8000000, 1920, FB_START, 2560, 50) ==
+                      RDNA3_ENODEV);
+                CHECK(dcn32_modeset_apply(&dev, &dm, &dc2, &sc, &ms, FB_START + 0x8000000, 1920, FB_START, 2560, 50) ==
+                      RDNA3_OK);
+                CHECK(S.dmub.nseq == 4 && S.dmub.seq[0] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL &&
+                      S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE && S.dmub.seq[1] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK &&
+                      S.dmub.seq[2] == RD_DMUB_VBIOS_DIGX_ENCODER_CONTROL &&
+                      S.dmub.seq[3] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && S.dmub.seq_tx_action[3] == RD_ATOM_TX_ENABLE);
+                CHECK(S.dmub.pixclk[0] == (1485000 & 0xff) && S.dmub.pixclk[2] == (1485000 >> 16) &&
+                      S.dmub.pixclk[4] == RD_ATOM_COMBOPHY_PLL0 + 1 && S.dmub.pixclk[8] == 2);
+                CHECK(S.dmub.enc[0] == 2 && S.dmub.enc[4] == (14850 & 0xff) && S.dmub.tx[0] == 1);
+                CHECK(S.reg[OTG(regOTG0_OTG_H_TOTAL, 2)] == 2199 && S.reg[OTG(regOTG0_OTG_V_TOTAL_MIN, 2)] == 1124 &&
+                      (S.reg[OTG(regOTG0_OTG_CONTROL, 2)] & 1) && (S.reg[DCN_B2 + regVTG0_CONTROL + 2] & VTG0_CONTROL__VTG0_ENABLE_MASK) &&
+                      S.reg[HUBP(regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, 1)] == (1920u | 1080u << 16) &&
+                      S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, 1)] == (uint32_t)(FB_START + 0x8000000) &&
+                      (S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_PITCH, 1)] & 0x3fff) == 1919 &&
+                      !(S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK));
+                CHECK(dc2.head[0].width == 1920 && dc2.head[0].h_total == 2200 && dc2.head[0].v_front == 4 &&
+                      sc.native_w[1] == 1920 && !sc.saved[1]);
+                CHECK(S.reg[DCN_B2 + regDIG0_HDMI_GENERIC_PACKET_CONTROL0 + RD_CLONE_DIGFE_STRIDE * 2] == 0);
+                /* the read-back agrees: the core finds the new timing */
+                CHECK(dcn32_read_state(&dev, &dc2) == 1 && dc2.head[0].h_active == 1920 && dc2.head[0].v_total == 1125);
+                /* back up to 1440p from the new state, then a mode that does
+                 * not run (frames frozen): the old one comes back */
+                {
+                    rdna3_mode up;
+                    memset(&up, 0, sizeof(up));
+                    up.h_active = 2560; up.v_active = 1440; up.h_total = 2720; up.v_total = 1481;
+                    up.h_front = 48; up.h_sync = 32; up.v_front = 3; up.v_sync = 5; up.pixel_khz = 241500;
+                    up.h_sync_pos = up.v_sync_pos = 1;
+                    CHECK(dcn32_modeset_plan(&dev, &dc2, 0, &own, 148500, &up, &ms) == RD_MODESET_OK);
+                    S.dcn_frames = 0;
+                    S.dmub.nseq = 0;
+                    k3 = S.reg[OTG(regOTG0_OTG_H_TOTAL, 2)];
+                    CHECK(dcn32_modeset_apply(&dev, &dm, &dc2, &sc, &ms, FB_START, 2560, FB_START + 0x8000000, 1920, 50) ==
+                          RDNA3_EIO);
+                    CHECK(S.dmub.nseq == 8 && S.reg[OTG(regOTG0_OTG_H_TOTAL, 2)] == k3 && dc2.head[0].width == 1920 &&
+                          S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, 1)] == (uint32_t)(FB_START + 0x8000000));
+                    S.dcn_frames = 1;
+                    CHECK(dcn32_modeset_apply(&dev, &dm, &dc2, &sc, &ms, FB_START, 2560, FB_START + 0x8000000, 1920, 50) ==
+                          RDNA3_OK && dc2.head[0].width == 2560 && S.reg[OTG(regOTG0_OTG_H_TOTAL, 2)] == 2719);
+                    S.dcn_frames = 0;
+                }
             }
             S.dcn_pg = 0;
         }

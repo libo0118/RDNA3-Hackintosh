@@ -1,10 +1,10 @@
 {
  "amdgpu": {
-  "works": 265,
-  "ported": 290,
+  "works": 268,
+  "ported": 293,
   "total": 1328,
-  "works_pct": 20.0,
-  "ported_pct": 21.8,
+  "works_pct": 20.2,
+  "ported_pct": 22.1,
   "groups": [
    {
     "name": "PSP 13",
@@ -1232,9 +1232,9 @@
      "2",
      "9"
     ],
-    "works": 17,
+    "works": 20,
     "ported": 0,
-    "todo": 62,
+    "todo": 59,
     "items": {
      "acquire": "works",
      "acquire_engine": "works",
@@ -1277,7 +1277,7 @@
      "optc1_is_two_pixels_per_container": "todo",
      "optc1_lock": "todo",
      "optc1_program_blank_color": "todo",
-     "optc1_program_global_sync": "todo",
+     "optc1_program_global_sync": "works",
      "optc1_program_manual_trigger": "todo",
      "optc1_program_stereo": "todo",
      "optc1_program_timing": "works",
@@ -1289,8 +1289,8 @@
      "optc1_set_static_screen_control": "todo",
      "optc1_set_test_pattern": "todo",
      "optc1_set_timing_double_buffer": "todo",
-     "optc1_set_vtg_params": "todo",
-     "optc1_set_vtotal_min_max": "todo",
+     "optc1_set_vtg_params": "works",
+     "optc1_set_vtotal_min_max": "works",
      "optc1_setup_manual_trigger": "todo",
      "optc1_setup_vertical_interrupt0": "todo",
      "optc1_setup_vertical_interrupt1": "todo",
