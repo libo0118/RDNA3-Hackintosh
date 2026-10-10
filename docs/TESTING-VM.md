@@ -201,7 +201,7 @@ also name the steps yourself: `rdna3vm queue 5b 8c 9`.
 The [emergency exit](#emergency-exit) stops the VM **and** the rest of
 the queue. If the computer reboots on the way (amdgpu could not take the
 card back), log in and run `rdna3vm queue` without steps: it goes on
-with what is left. Send all reports at the end (`rdna3vm reports`).
+with what is left. At the end, `rdna3vm result` packs them into one file to send.
 
 Step 9 in the VM: OpenCore sets the largest GOP mode (`OC_RESOLUTION`), so
 the desktop comes up at the monitor's native mode; only the monitor the GOP
@@ -261,16 +261,20 @@ stops `display-manager` and then starts it again.
 ## What to send me
 
 ```sh
-rdna3vm reports
+rdna3vm result
 ```
 
-From each step send the files from `~/rdna3-vm/reports`:
+It packs every report written since the last `step` / `args` / `queue`
+started (plus a triage summary) into **one** file,
+`~/Downloads/rdna3-result.tar.gz`, replaced each time it runs. Send that file.
+
+`rdna3vm reports` only lists them. What one step writes to `~/rdna3-vm/reports`:
 - `rdna3-report-*.tar.gz` (report from macOS);
 - `*-tests.txt` (DMA and GFX test results, from step 7);
 - `serial-*.log` (macOS kernel log; it is kept even after a hang or a panic);
 - `host-*.log` (what the script did on Linux).
 
-With the first submission also include the `linux-reference` directory.
+With the first submission also include the `linux-reference` directory (not in the result file).
 
 Want a first look yourself? `python3 ~/RDNA3-Hackintosh/tools/triage_reports.py ~/rdna3-vm/reports`
 prints PASS / FAIL per step. What happens with the reports next is in

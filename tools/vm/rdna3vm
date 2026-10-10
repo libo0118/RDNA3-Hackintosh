@@ -12,6 +12,8 @@
 #   rdna3vm queue                                 go on with a queue a host reboot interrupted
 #   rdna3vm approve                               allow a new framebuffer build in macOS (once per build)
 #   rdna3vm reports                               what came back
+#   rdna3vm result                                the last run's reports in ONE file to send
+#                                                 (~/Downloads/rdna3-result.tar.gz, replaced each time)
 #   rdna3vm update                                git pull + the newest CI artifact + prepare
 #
 # Everything lives in $RDNA3VM_DIR (default ~/rdna3-vm).
@@ -398,6 +400,7 @@ launch() {   # launch "rdna3 args" stay(0/1)
     # screen dark for long. --stay keeps TIMEOUT_MIN.
     local limit=$TIMEOUT_MIN
     [ "$stay" = 1 ] || limit=${AUTO_TIMEOUT_MIN:-8}
+    mark_run_start
     say "Starting the VM with the card: $extra"
     echo "  The screen goes dark in a moment (Linux hands the card over), then macOS appears."
     if [ "$stay" = 1 ]; then
@@ -467,6 +470,7 @@ cmd_queue() {
         [ "$1" = pending ] && set -- $PENDING_STEPS
         for n in "$@"; do step_args "$n" >/dev/null || die "unknown step $n"; done
         printf '%s\n' "$@" > "$QUEUE"
+        mark_run_start
     fi
     [ -s "$QUEUE" ] || die "no queue: give steps, e.g. rdna3vm queue 5b 8c 9  (or: rdna3vm queue pending = $PENDING_STEPS)"
     gpu_bdf >/dev/null || die "no 1002:747e card found"
@@ -804,6 +808,38 @@ print(a[0]["id"] if a else "")')
     echo "Updated to build #$run_no. A new framebuffer/accelerator build needs 'rdna3vm approve' once."
 }
 
+# 'rdna3vm result' packs the reports written since the last step / args /
+# new queue started (this marker); a queue a host reboot interrupted keeps it
+RUN_MARK=$WORK/run-start
+mark_run_start() { mkdir -p "$WORK"; touch "$RUN_MARK"; }
+
+cmd_result() {
+    local out=${RDNA3VM_RESULT:-$HOME/Downloads/rdna3-result.tar.gz} tmp f
+    local -a sel
+    [ -d "$WORK/reports" ] || die "no $WORK/reports yet"
+    if [ -f "$RUN_MARK" ]; then
+        mapfile -t sel < <(find "$WORK/reports" -maxdepth 1 -type f -newer "$RUN_MARK" -printf '%P\n' | sort)
+    else
+        mapfile -t sel < <(find "$WORK/reports" -maxdepth 1 -type f -mmin -180 -printf '%P\n' | sort)
+    fi
+    [ ${#sel[@]} -gt 0 ] || die "no reports since the last run started ($(date -r "$RUN_MARK" '+%F %T' 2>/dev/null || echo '3 h'))"
+    tmp=$(mktemp -d)
+    mkdir -p "$tmp/rdna3-result"
+    for f in "${sel[@]}"; do cp "$WORK/reports/$f" "$tmp/rdna3-result/" 2>/dev/null || sudo cat "$WORK/reports/$f" > "$tmp/rdna3-result/$f"; done
+    git -C "$ROOT" log -1 --format='repo %h %s' > "$tmp/rdna3-result/00-host.txt" 2>/dev/null || true
+    [ -f "$WORK/artifact-run" ] && echo "artifact from CI run $(cat "$WORK/artifact-run")" >> "$tmp/rdna3-result/00-host.txt" 
+    python3 "$ROOT/tools/triage_reports.py" "$tmp/rdna3-result" > "$tmp/rdna3-result/00-triage.txt" 2>&1 || true
+    mkdir -p "$(dirname "$out")"
+    tar -czf "$out.tmp" -C "$tmp" rdna3-result && mv -f "$out.tmp" "$out"
+    say "Result: $out ($(du -h "$out" | cut -f1), ${#sel[@]} files)"
+    printf '  %s\n' "${sel[@]}"
+    echo
+    tail -n 3 "$tmp/rdna3-result/00-triage.txt"
+    echo
+    rm -rf "$tmp"
+    echo "Send this one file. The next 'rdna3vm result' replaces it."
+}
+
 cmd_reports() {
     ls -lt "$WORK/reports" | head -30
     echo
@@ -820,9 +856,10 @@ case "${1:-}" in
     approve) shift; cmd_approve "$@" ;;
     _queue) shift; cmd__queue "$@" ;;
     reports) shift; cmd_reports "$@" ;;
+    result|results) shift; cmd_result "$@" ;;
     update) shift; cmd_update "$@" ;;
     _update) shift; cmd__update "$@" ;;
     _oc) shift; cmd__oc "$@" ;;
     _passthrough) shift; cmd__passthrough "$@" ;;
-    *) sed -n '2,15p' "$SELF"; exit 1 ;;
+    *) sed -n '2,17p' "$SELF"; exit 1 ;;
 esac

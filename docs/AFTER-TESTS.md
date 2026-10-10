@@ -74,7 +74,9 @@ exactly what to run next. One round = one report batch → one fix → one retes
 
 ## 1. Intake (start of every round)
 
-1. Collect the user's files into `reports/<yyyy-mm-dd>/`. Expected:
+1. Collect the user's files into `reports/<yyyy-mm-dd>/` (usually one
+   `rdna3-result.tar.gz` from `rdna3vm result`: unpack it there; its
+   `00-triage.txt` is the host's triage, `00-host.txt` the commit and CI run). Expected:
    `rdna3-report-*.tar.gz`, `*-tests.txt`, `serial-*.log`, `host-*.log`,
    and once `linux-reference/`. If something needed is missing, ask for those
    exact files (in Polish) and stop.
