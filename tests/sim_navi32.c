@@ -52,6 +52,7 @@
 #include "gen/dcn_3_2_1.h"
 #include "gen/gc_11_0_0_gfx.h"
 #include "gen/gc_11_0_0_reset.h"
+#include "gen/gc_11_0_0_cg.h"
 #include "gen/gc_11_0_0_rs64.h"
 #include "gen/gc_11_0_0_mes.h"
 #include "gen/dcn_3_2_0_gpio.h"
@@ -215,6 +216,7 @@ typedef struct sim {
     /* recovery: SQ_CMD kills, RLC safe mode, GRBM soft resets, mode-1 resets,
      * page-fault IVs */
     unsigned sq_kills, sq_outside_safe, soft_resets, mode1_resets, fault_ivs;
+    unsigned cg_writes, cg_outside_safe;   /* RLC clock-gating registers */
     uint32_t sq_last_vmid;
     int rlc_safe;
 
@@ -2090,6 +2092,13 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         *R(dw) = v & ~RLC_SAFE_MODE__CMD_MASK;
         return;
     }
+    if (dw == GCR(regRLC_CGTT_MGCG_OVERRIDE) || dw == GCR(regRLC_CGCG_CGLS_CTRL)) {
+        S.cg_writes++;
+        if (!S.rlc_safe)
+            S.cg_outside_safe++;
+        *R(dw) = v;
+        return;
+    }
     if (dw == GCR(regSQ_CMD)) {
         if ((v & SQ_CMD__CMD_MASK) == 3) {
             S.sq_kills++;
@@ -3223,6 +3232,38 @@ static void run(const char *fwdir)
                         CHECK(S.reg[GCR(regCP_VMID_RESET)] == 0 && S.reg[GCR(regGRBM_GFX_CNTL)] == 0);
                         CHECK(HQD(hk, regCP_HQD_ACTIVE) == 1 && HQD(hc, regCP_HQD_ACTIVE) == 1 && hc->mapped_by_kiq);
                         CHECK(S.cp_bad == 0 && S.mec_bad_queue == 0);
+                        /* gfx_v11_0_update_gfx_clock_gating for GC 11.0.3, in RLC safe mode */
+                        {
+                            uint32_t ov0 = RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGCG_OVERRIDE_MASK |
+                                           RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGLS_OVERRIDE_MASK |
+                                           RLC_CGTT_MGCG_OVERRIDE__GRBM_CGTT_SCLK_OVERRIDE_MASK |
+                                           RLC_CGTT_MGCG_OVERRIDE__RLC_CGTT_SCLK_OVERRIDE_MASK |
+                                           RLC_CGTT_MGCG_OVERRIDE__GFXIP_MGCG_OVERRIDE_MASK |
+                                           RLC_CGTT_MGCG_OVERRIDE__GFXIP_REPEATER_FGCG_OVERRIDE_MASK;
+                            S.reg[GCR(regRLC_CNTL)] = 0;
+                            CHECK(gfx11_set_clock_gating(&dev, 1, RD_GFX_CG_GC_11_0_3) == RDNA3_ENODEV);
+                            S.reg[GCR(regRLC_CNTL)] = RLC_CNTL__RLC_ENABLE_F32_MASK;
+                            S.reg[GCR(regRLC_CGTT_MGCG_OVERRIDE)] = ov0 | 0x80000000u;
+                            S.reg[GCR(regRLC_CGCG_CGLS_CTRL)] = 0;
+                            S.cg_writes = S.cg_outside_safe = 0;
+                            CHECK(gfx11_set_clock_gating(&dev, 1, RD_GFX_CG_GC_11_0_3) == RDNA3_OK);
+                            CHECK(S.cg_writes > 0 && S.cg_outside_safe == 0 && !S.rlc_safe);
+                            CHECK(S.reg[GCR(regRLC_CGTT_MGCG_OVERRIDE)] == 0x80000000u);   /* only the overrides cleared */
+                            CHECK((S.reg[GCR(regRLC_CGCG_CGLS_CTRL)] & RLC_CGCG_CGLS_CTRL__CGCG_EN_MASK) &&
+                                  (S.reg[GCR(regRLC_CGCG_CGLS_CTRL)] & RLC_CGCG_CGLS_CTRL__CGLS_EN_MASK) &&
+                                  ((S.reg[GCR(regRLC_CGCG_CGLS_CTRL)] & RLC_CGCG_CGLS_CTRL__CGCG_GFX_IDLE_THRESHOLD_MASK) >>
+                                   RLC_CGCG_CGLS_CTRL__CGCG_GFX_IDLE_THRESHOLD__SHIFT) == 0x36);
+                            CHECK((S.reg[GCR(regCP_RB_WPTR_POLL_CNTL)] & (CP_RB_WPTR_POLL_CNTL__POLL_FREQUENCY_MASK |
+                                   CP_RB_WPTR_POLL_CNTL__IDLE_POLL_COUNT_MASK)) == 0x00900100u);
+                            CHECK(S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__GFX_IDLE_INT_ENABLE_MASK);
+                            CHECK(gfx11_set_clock_gating(&dev, 0, RD_GFX_CG_GC_11_0_3) == RDNA3_OK);
+                            CHECK(S.cg_outside_safe == 0 && !S.rlc_safe &&
+                                  (S.reg[GCR(regRLC_CGTT_MGCG_OVERRIDE)] & (ov0 & ~(RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGCG_OVERRIDE_MASK |
+                                   RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGLS_OVERRIDE_MASK))) ==
+                                  (ov0 & ~(RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGCG_OVERRIDE_MASK | RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGLS_OVERRIDE_MASK)) &&
+                                  !(S.reg[GCR(regRLC_CGCG_CGLS_CTRL)] & (RLC_CGCG_CGLS_CTRL__CGCG_EN_MASK | RLC_CGCG_CGLS_CTRL__CGLS_EN_MASK)) &&
+                                  !(S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__GFX_IDLE_INT_ENABLE_MASK));
+                        }
                         S.reg[scratch] = 0;
                         seq = gfx11_submit_job(&dev, &gr, 8, 5, gpuvm_pd_addr(&dev, &vm), jobs, 1);
                         CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK && S.reg[scratch] == 0x5EED1234);

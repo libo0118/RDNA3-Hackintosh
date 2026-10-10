@@ -85,6 +85,11 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
         PE_parse_boot_argn("rdna3pmmask", &pmmask, sizeof(pmmask));
         PE_parse_boot_argn("rdna3mes", &mes, sizeof(mes));
         fMesWanted = mes != 0;
+        {
+            uint32_t cg = 0;
+            PE_parse_boot_argn("rdna3cg", &cg, sizeof(cg));
+            fCgWanted = cg != 0;
+        }
         fMsi = msi != 0;
         fDoorbells = db != 0;
         fPmMode = pm;
@@ -143,6 +148,9 @@ void RDNA3Bringup::stopAndFree()
 
     /* 2. the engines, in gfx_v11_0_hw_fini order, while fDev, the BAR and
      *    the doorbells are still mapped */
+    /* amdgpu_device_ip_fini_early: clock gating off (UNGATE) first */
+    if (fCgWanted && fGfx && fGfx->ready && fDev)
+        gfx11_set_clock_gating(fDev, 0, RD_GFX_CG_GC_11_0_3);
     if (fKcq && fKcq->rb.ready && fDev)
         gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
     if (fGfx && fGfx->async && fGfx->ready && fDev) {
@@ -862,6 +870,9 @@ bool RDNA3Bringup::hwInit()
          * kernel queues are mapped by the KIQ already (step 8c, opt-in) */
         if (!ret && fMesWanted && fKiq && fKiq->rb.ready && fKiq->me == 3)
             mesStart("level 8");
+        /* amdgpu_device_ip_late_init -> amdgpu_device_set_cg_state(GATE) */
+        if (!ret && fCgWanted)
+            cgStart("level 8");
         if (!ret && fIrqLive)
             gfx11_set_eop_interrupt(fDev, fGfx, 1);
         if (!ret && fVmReady) {
@@ -1067,6 +1078,15 @@ void RDNA3Bringup::dmubInit()
 
 /* mes_v11_0_hw_init: the scheduler pipe mapped by the KIQ, SET_HW_RESOURCES,
  * QUERY_SCHEDULER_STATUS; the firmware version decides the legacy queue map */
+/* gfx_v11_0_set_clockgating_state(GATE): the RLC may stop the GFX clocks
+ * when it is idle, so the PMFW stops counting it as 100 % busy */
+void RDNA3Bringup::cgStart(const char *why)
+{
+    int r = gfx11_set_clock_gating(fDev, 1, RD_GFX_CG_GC_11_0_3);
+    BLOG("GFX clock gating (%s): %d", why, r);
+    publish("RDNA3,GfxCGResult", (uint64_t)(int64_t)r);
+}
+
 void RDNA3Bringup::mesStart(const char *why)
 {
     int ret = RDNA3_OK;
@@ -1317,6 +1337,8 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
             /* the KIQ restart reset both MES pipes: the scheduler again */
             if (fMes && fMes->ring.rb.ring_size)
                 mesStart("after soft reset");
+            if (fCgWanted)
+                cgStart("after soft reset");
         }
     }
     if (!ok)

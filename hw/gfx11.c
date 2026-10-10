@@ -10,6 +10,7 @@
 #include "gen/gc_11_0_0_gds.h"
 #include "gen/gc_11_0_0_rs64.h"
 #include "gen/gc_11_0_0_mes.h"
+#include "gen/gc_11_0_0_cg.h"
 #include "clearstate_defs.h"
 #include "clearstate_gfx11.h"
 #include "amdgpu_ucode_hdr.h"
@@ -1635,6 +1636,99 @@ uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t
     r->last_ctx = ctx;
     r->last_vmid = vmid;
     return seq;
+}
+
+/* ------------------------- clock gating ------------------------- */
+
+static void rlc_safe_mode(rdna3_dev *d, int enter);
+
+int gfx11_set_clock_gating(rdna3_dev *d, int enable, uint32_t flags)
+{
+    const uint32_t cp_int = CP_INT_CNTL__CNTX_BUSY_INT_ENABLE_MASK | CP_INT_CNTL__CNTX_EMPTY_INT_ENABLE_MASK |
+                            CP_INT_CNTL__CMP_BUSY_INT_ENABLE_MASK | CP_INT_CNTL__GFX_IDLE_INT_ENABLE_MASK;
+    uint32_t def, v;
+    /* gfx_v11_0_is_rlc_enabled: amdgpu_gfx_rlc_enter_safe_mode does nothing without it */
+    if (!(RG(d, regRLC_CNTL) & RLC_CNTL__RLC_ENABLE_F32_MASK)) {
+        RERR(d, "GFX: clock gating: the RLC is not running");
+        return RDNA3_ENODEV;
+    }
+    rlc_safe_mode(d, 1);
+
+    /* gfx_v11_0_update_coarse_grain_clock_gating */
+    if (flags & (RD_GFX_CG_CGCG | RD_GFX_CG_CGLS)) {
+        if (enable) {
+            def = v = RG(d, regRLC_CGTT_MGCG_OVERRIDE);
+            if (flags & RD_GFX_CG_CGCG)
+                v &= ~RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGCG_OVERRIDE_MASK;
+            if (flags & RD_GFX_CG_CGLS)
+                v &= ~RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGLS_OVERRIDE_MASK;
+            if (v != def)
+                WG(d, regRLC_CGTT_MGCG_OVERRIDE, v);
+            /* the CGCG FSM (0x0000363F) */
+            def = v = RG(d, regRLC_CGCG_CGLS_CTRL);
+            if (flags & RD_GFX_CG_CGCG) {
+                v &= ~RLC_CGCG_CGLS_CTRL__CGCG_GFX_IDLE_THRESHOLD_MASK;
+                v |= (0x36u << RLC_CGCG_CGLS_CTRL__CGCG_GFX_IDLE_THRESHOLD__SHIFT) | RLC_CGCG_CGLS_CTRL__CGCG_EN_MASK;
+            }
+            if (flags & RD_GFX_CG_CGLS) {
+                v &= ~RLC_CGCG_CGLS_CTRL__CGLS_REP_COMPANSAT_DELAY_MASK;
+                v |= (0xfu << RLC_CGCG_CGLS_CTRL__CGLS_REP_COMPANSAT_DELAY__SHIFT) | RLC_CGCG_CGLS_CTRL__CGLS_EN_MASK;
+            }
+            if (v != def)
+                WG(d, regRLC_CGCG_CGLS_CTRL, v);
+            /* IDLE_POLL_COUNT (0x00900100) */
+            def = v = RG(d, regCP_RB_WPTR_POLL_CNTL);
+            v &= ~(CP_RB_WPTR_POLL_CNTL__POLL_FREQUENCY_MASK | CP_RB_WPTR_POLL_CNTL__IDLE_POLL_COUNT_MASK);
+            v |= (0x0100u << CP_RB_WPTR_POLL_CNTL__POLL_FREQUENCY__SHIFT) |
+                 (0x0090u << CP_RB_WPTR_POLL_CNTL__IDLE_POLL_COUNT__SHIFT);
+            if (v != def)
+                WG(d, regCP_RB_WPTR_POLL_CNTL, v);
+            WG(d, regCP_INT_CNTL, RG(d, regCP_INT_CNTL) | cp_int);
+            WG(d, regSDMA0_RLC_CGCG_CTRL, RG(d, regSDMA0_RLC_CGCG_CTRL) | SDMA0_RLC_CGCG_CTRL__CGCG_INT_ENABLE_MASK);
+            WG(d, regSDMA1_RLC_CGCG_CTRL, RG(d, regSDMA1_RLC_CGCG_CTRL) | SDMA1_RLC_CGCG_CTRL__CGCG_INT_ENABLE_MASK);
+        } else {
+            def = v = RG(d, regRLC_CGCG_CGLS_CTRL);
+            if (flags & RD_GFX_CG_CGCG)
+                v &= ~RLC_CGCG_CGLS_CTRL__CGCG_EN_MASK;
+            if (flags & RD_GFX_CG_CGLS)
+                v &= ~RLC_CGCG_CGLS_CTRL__CGLS_EN_MASK;
+            if (v != def)
+                WG(d, regRLC_CGCG_CGLS_CTRL, v);
+            WG(d, regSDMA0_RLC_CGCG_CTRL, RG(d, regSDMA0_RLC_CGCG_CTRL) & ~SDMA0_RLC_CGCG_CTRL__CGCG_INT_ENABLE_MASK);
+            WG(d, regSDMA1_RLC_CGCG_CTRL, RG(d, regSDMA1_RLC_CGCG_CTRL) & ~SDMA1_RLC_CGCG_CTRL__CGCG_INT_ENABLE_MASK);
+        }
+    }
+    /* gfx_v11_0_update_medium_grain_clock_gating */
+    if (flags & RD_GFX_CG_MGCG) {
+        const uint32_t m = RLC_CGTT_MGCG_OVERRIDE__GRBM_CGTT_SCLK_OVERRIDE_MASK |
+                           RLC_CGTT_MGCG_OVERRIDE__RLC_CGTT_SCLK_OVERRIDE_MASK |
+                           RLC_CGTT_MGCG_OVERRIDE__GFXIP_MGCG_OVERRIDE_MASK;
+        def = v = RG(d, regRLC_CGTT_MGCG_OVERRIDE);
+        v = enable ? (v & ~m) : (v | m);
+        if (v != def)
+            WG(d, regRLC_CGTT_MGCG_OVERRIDE, v);
+    }
+    /* gfx_v11_0_update_repeater_fgcg */
+    if (flags & RD_GFX_CG_REPEATER_FGCG) {
+        def = v = RG(d, regRLC_CGTT_MGCG_OVERRIDE);
+        if (enable)
+            v &= ~RLC_CGTT_MGCG_OVERRIDE__GFXIP_REPEATER_FGCG_OVERRIDE_MASK;
+        else
+            v |= RLC_CGTT_MGCG_OVERRIDE__GFXIP_REPEATER_FGCG_OVERRIDE_MASK;
+        if (v != def)
+            WG(d, regRLC_CGTT_MGCG_OVERRIDE, v);
+    }
+    /* gfx_v11_0_enable_gui_idle_interrupt: me 0 pipe 0 */
+    if (flags & (RD_GFX_CG_CGCG | RD_GFX_CG_CGLS | RD_GFX_CG_MGCG)) {
+        const uint32_t r0 = CP_INT_CNTL_RING0__CNTX_BUSY_INT_ENABLE_MASK | CP_INT_CNTL_RING0__CNTX_EMPTY_INT_ENABLE_MASK |
+                            CP_INT_CNTL_RING0__CMP_BUSY_INT_ENABLE_MASK | CP_INT_CNTL_RING0__GFX_IDLE_INT_ENABLE_MASK;
+        v = RG(d, regCP_INT_CNTL_RING0);
+        WG(d, regCP_INT_CNTL_RING0, enable ? (v | r0) : (v & ~r0));
+    }
+    rlc_safe_mode(d, 0);
+    RLOG(d, "GFX: clock gating %s (flags 0x%x): RLC_CGTT_MGCG_OVERRIDE 0x%08x RLC_CGCG_CGLS_CTRL 0x%08x",
+         enable ? "on" : "off", flags, RG(d, regRLC_CGTT_MGCG_OVERRIDE), RG(d, regRLC_CGCG_CGLS_CTRL));
+    return RDNA3_OK;
 }
 
 /* ------------------------- hangs and recovery ------------------------- */

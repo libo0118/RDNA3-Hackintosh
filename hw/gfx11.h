@@ -208,6 +208,19 @@ void gfx11_kill_waves(rdna3_dev *d, uint32_t vmid);
 /* amdgpu_fence_driver_force_completion: the last emitted seq lands in the
  * fence slot so every waiter returns (used right before a reset) */
 void gfx11_force_fence_completion(rdna3_dev *d, rdna3_gfx_ring *r);
+/* gfx_v11_0_update_gfx_clock_gating for GC 11.0.3 (soc21_common_early_init
+ * cg_flags: GFX_CGCG, GFX_CGLS, GFX_MGCG, REPEATER_FGCG), inside RLC safe
+ * mode: the RLC may stop the GFX clocks when the GFX is idle. Without it
+ * the PMFW counts the GFX as 100 % busy (first card runs: ~200 W, 2.7 GHz
+ * while GRBM_STATUS said idle). 'enable' 0 sets the overrides back.
+ * RDNA3_ENODEV when the RLC is not running. */
+#define RD_GFX_CG_CGCG          (1u << 0)
+#define RD_GFX_CG_CGLS          (1u << 1)
+#define RD_GFX_CG_MGCG          (1u << 2)
+#define RD_GFX_CG_REPEATER_FGCG (1u << 3)
+#define RD_GFX_CG_GC_11_0_3     (RD_GFX_CG_CGCG | RD_GFX_CG_CGLS | RD_GFX_CG_MGCG | RD_GFX_CG_REPEATER_FGCG)
+int  gfx11_set_clock_gating(rdna3_dev *d, int enable, uint32_t flags);
+
 /* gfx_v11_0_soft_reset (dequeue every HQD, CP_VMID_RESET, GRBM soft reset of
  * CP/GFX/CPF/CPC/CPG) followed by gfx_v11_0_cp_resume: the gfx ring, and the
  * KIQ + KCQ when given (NULL = not in use), come back with a ring test. */
