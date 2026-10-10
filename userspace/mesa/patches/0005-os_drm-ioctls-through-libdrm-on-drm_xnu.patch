@@ -1,0 +1,28 @@
+diff --git a/src/util/os_drm.h b/src/util/os_drm.h
+index 0390ecd..90751ff 100644
+--- a/src/util/os_drm.h
++++ b/src/util/os_drm.h
+@@ -18,6 +18,15 @@
+ #include <errno.h>
+ #include <xf86drm.h>
+ 
++#if defined(__APPLE__) || defined(RADV_DRM_XNU)
++/* libdrm_xnu (RDNA3-Hackintosh): the fd is not a kernel file, only libdrm's
++ * drmIoctl reaches the driver (it retries EINTR/EAGAIN itself) */
++static inline int
++drm_ioctl(int fd, uint32_t request, void *arg)
++{
++   return drmIoctl(fd, request, arg) ? -errno : 0;
++}
++#else
+ static inline int
+ drm_ioctl(int fd, uint32_t request, void *arg)
+ {
+@@ -29,6 +38,7 @@ drm_ioctl(int fd, uint32_t request, void *arg)
+ 
+    return ret ? -errno : 0;
+ }
++#endif
+ 
+ static inline int
+ drm_ioctl_write(int fd, unsigned drm_command_index, void *data, unsigned size)
