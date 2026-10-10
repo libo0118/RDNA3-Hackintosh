@@ -115,6 +115,13 @@ int  dcn32_clone_verify(rdna3_dev *d, const rdna3_dcn_clone *c, uint32_t wait_ms
  * out of the tree, give the DET segments back. */
 int  dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c);
 
+/* Monitor standby on the clone (dpms off with the link down, as amdgpu's
+ * link_set_dpms_off for TMDS: hubp2_set_blank, then
+ * dcn10_link_encoder_disable_output = TransmitterControl DISABLE; the OTG
+ * and the PHY PLL keep running) and back (TransmitterControl ENABLE =
+ * dcn10_link_encoder_enable_tmds_output, then unblank). */
+int  dcn32_clone_link(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c, int on);
+
 #ifdef __cplusplus
 }
 #endif

@@ -4141,6 +4141,25 @@ static void run(const char *fwdir)
                 CHECK(S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS] == (uint32_t)(FB_START + 0x7000000) &&
                       S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS + RD_CLONE_HUBP_STRIDE] == boot_lo);
             }
+            /* monitor standby on the clone: blank + TransmitterControl
+             * DISABLE, back with ENABLE + unblank; nothing else touched */
+            {
+                uint32_t ctl = S.reg[DCN_B2 + regOTG0_OTG_CONTROL + RD_CLONE_OTG_STRIDE * cl.dst_otg];
+                S.reg[DCN_B2 + regHUBP0_DCHUBP_CNTL + RD_CLONE_HUBP_STRIDE * cl.dst_pipe] |=
+                    HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ_MASK;
+                S.dmub.nseq = 0;
+                CHECK(dcn32_clone_link(&dev, &dm, &cl, 0) == RDNA3_OK);
+                CHECK(S.dmub.nseq == 1 && S.dmub.seq[0] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL &&
+                      S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE);
+                CHECK(S.reg[DCN_B2 + regHUBP0_DCHUBP_CNTL + RD_CLONE_HUBP_STRIDE * cl.dst_pipe] &
+                      HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK);
+                CHECK(dcn32_clone_link(&dev, &dm, &cl, 1) == RDNA3_OK);
+                CHECK(S.dmub.nseq == 2 && S.dmub.seq_tx_action[1] == RD_ATOM_TX_ENABLE);
+                CHECK(!(S.reg[DCN_B2 + regHUBP0_DCHUBP_CNTL + RD_CLONE_HUBP_STRIDE * cl.dst_pipe] &
+                        HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK));
+                CHECK(S.reg[DCN_B2 + regOTG0_OTG_CONTROL + RD_CLONE_OTG_STRIDE * cl.dst_otg] == ctl);
+                CHECK(dcn32_clone_link(&dev, NULL, &cl, 0) == RDNA3_ENODEV);
+            }
             /* the transmitter is lit: a second plan for it is refused */
             CHECK(dcn32_clone_plan(&dev, &dc2, 1, &path, 148500, &cl) == RDNA3_EBUSY);
             /* and off again */

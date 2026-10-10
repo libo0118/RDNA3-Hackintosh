@@ -130,7 +130,7 @@ extra="$HOME/rdna3-extra.txt"
         done
         # display sleep (rdna3dpms=1): the heads must blank, then come back
         case " $args " in
-            *" rdna3dpms=1 "*)
+            *" rdna3dpms=1 "*|*" rdna3dpms=2 "*)
                 echo "== display sleep: pmset displaysleepnow"
                 pmset displaysleepnow 2>&1
                 sleep 8

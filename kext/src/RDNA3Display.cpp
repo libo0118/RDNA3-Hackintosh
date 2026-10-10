@@ -807,14 +807,20 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
     if (wanted < 0) {
         uint32_t v = 0;
         PE_parse_boot_argn("rdna3dpms", &v, sizeof(v));
-        wanted = v != 0;
+        wanted = (int)(v > 2 ? 2 : v);
     }
     if (!wanted)
         return kIOReturnUnsupported;
     if (!fDcn || !fDispDev || head >= fDcn->nheads)
         return kIOReturnNotReady;
     IOLockLock(fDispLock);
-    int r = dcn32_set_blank(fDispDev, fDcn, head, blank ? 1 : 0);
+    int r;
+    /* rdna3dpms=2: the head we lit ourselves also takes its link down, so
+     * the monitor goes to standby (dcn32_clone_link) */
+    if (wanted == 2 && fMirrorOn && fMirror && fMirrorDm && fCloneHead >= 0 && (uint32_t)fCloneHead == head)
+        r = dcn32_clone_link(fDispDev, fMirrorDm, fMirror, blank ? 0 : 1);
+    else
+        r = dcn32_set_blank(fDispDev, fDcn, head, blank ? 1 : 0);
     IOLockUnlock(fDispLock);
     LOG("display: head %u %s (%d)", head, blank ? "blanked (display sleep)" : "unblanked", r);
     return r ? kIOReturnError : kIOReturnSuccess;

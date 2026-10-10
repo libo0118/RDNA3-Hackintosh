@@ -390,7 +390,7 @@ cmd_window() {
 auto_limit() {
     local m=${AUTO_TIMEOUT_MIN:-8} soak
     soak=$(printf '%s\n' $1 | sed -n 's/^rdna3soak=\([0-9]*\)$/\1/p' | head -1)
-    case " $1 " in *" rdna3modes=1 "*|*" rdna3hangtest=1 "*|*" rdna3dpms=1 "*) [ "$m" -lt 12 ] && m=12 ;; esac
+    case " $1 " in *" rdna3modes=1 "*|*" rdna3hangtest=1 "*|*" rdna3dpms=1 "*|*" rdna3dpms=2 "*) [ "$m" -lt 12 ] && m=12 ;; esac
     [ -n "$soak" ] && m=$((m + soak))
     echo "$m"
 }

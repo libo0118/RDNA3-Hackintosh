@@ -581,6 +581,30 @@ int dcn32_clone_verify(rdna3_dev *d, const rdna3_dcn_clone *c, uint32_t wait_ms,
     return k->running && (k->crc_match || !k->crc_valid) ? RDNA3_OK : RDNA3_EIO;
 }
 
+int dcn32_clone_link(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c, int on)
+{
+    uint32_t v, t;
+    int ret;
+    if (!dm || !dm->hw_init)
+        return RDNA3_ENODEV;
+    v = RI(d, regHUBP0_DCHUBP_CNTL, c->dst_pipe, HUBP_S);
+    if (!on) {
+        /* hubp2_set_blank_regs: wait for the outstanding requests first */
+        for (t = 0; t < 100000 && !GET(RI(d, regHUBP0_DCHUBP_CNTL, c->dst_pipe, HUBP_S), HUBP0_DCHUBP_CNTL,
+                                        HUBP_NO_OUTSTANDING_REQ); t++)
+            d->os.udelay(d->os.ctx, 1);
+        v = RI(d, regHUBP0_DCHUBP_CNTL, c->dst_pipe, HUBP_S);
+        WI(d, regHUBP0_DCHUBP_CNTL, c->dst_pipe, HUBP_S, SET(v, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN, 1));
+        ret = vbios_transmitter(dm, c, RD_ATOM_TX_DISABLE);
+    } else {
+        ret = vbios_transmitter(dm, c, RD_ATOM_TX_ENABLE);
+        v = RI(d, regHUBP0_DCHUBP_CNTL, c->dst_pipe, HUBP_S);
+        WI(d, regHUBP0_DCHUBP_CNTL, c->dst_pipe, HUBP_S, SET(v, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN, 0));
+    }
+    RLOG(d, "clone: link %s on UNIPHY%c (%d)", on ? "up" : "down (monitor standby)", 'A' + c->dst_be, ret);
+    return ret;
+}
+
 int dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
 {
     uint32_t v;
