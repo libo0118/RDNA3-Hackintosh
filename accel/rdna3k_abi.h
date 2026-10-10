@@ -130,6 +130,9 @@ struct RD3KDisplayEdid {
     unsigned int  length;         /* out: bytes in data, 0 = no EDID */
     unsigned char data[RD3K_EDID_MAX];
 };
+/* display sleep: p1 = head, p2 = 1 blank / 0 unblank (HUBP blank, the
+ * link stays up); kIOReturnUnsupported unless the core runs with rdna3dpms=1 */
+#define RD3K_DISPLAY_FN_BLANK    "rdna3DisplayBlank"
 #define RD3K_DISPLAY_FN_CURSOR   "rdna3DisplayCursor"
 #define RD3K_CURSOR_OP_IMAGE     1u   /* vramOffset + size (64/128/256) */
 #define RD3K_CURSOR_OP_MOVE      2u   /* x, y (top-left, may be negative), visible */

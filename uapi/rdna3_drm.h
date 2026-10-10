@@ -91,7 +91,7 @@ struct rd_xnu_scanout {
     uint32_t pipe, row0;                           /* in */
     uint32_t powered, lit, otg, format, sw_mode, dcc;
     uint32_t width, height, pitch_px, flip_pending;
-    uint32_t out_w, out_h, nrows, pad;
+    uint32_t out_w, out_h, nrows, blanked;         /* blanked: HUBP_BLANK_EN */
     uint64_t address, inuse;                       /* MC addresses */
     uint8_t  rgb[RD_XNU_SCANOUT_W * RD_XNU_SCANOUT_ROWS * 3];
 };

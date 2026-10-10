@@ -272,6 +272,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return displayCursor((RD3KDisplayCursor *)p1);
         if (fn->isEqualTo(RD3K_DISPLAY_FN_EDID))
             return displayEdid((RD3KDisplayEdid *)p1);
+        if (fn->isEqualTo(RD3K_DISPLAY_FN_BLANK))
+            return displayBlank((uint32_t)(uintptr_t)p1, p2 != nullptr);
         if (fn->isEqualTo(RD3K_FN_DISPLAY_CRC))
             return displayCrc((uint32_t)(uintptr_t)p1, (uint32_t *)p2);
     }

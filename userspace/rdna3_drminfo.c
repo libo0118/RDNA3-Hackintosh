@@ -197,7 +197,8 @@ static int scanout_dump(int fd, const char *dir)
             return 1;
         }
         printf("pipe %u: %s%s otg %u %ux%u pitch %u fmt %u sw %u dcc %u address 0x%llx in use 0x%llx%s\n",
-               p, s.powered ? "" : "power-gated ", s.lit ? "LIT" : "off", s.otg, s.width, s.height,
+               p, s.powered ? "" : "power-gated ", s.lit ? "LIT" : s.blanked ? "BLANKED" : "off", s.otg,
+               s.width, s.height,
                s.pitch_px, s.format, s.sw_mode, s.dcc, (unsigned long long)s.address,
                (unsigned long long)s.inuse, s.flip_pending ? " flip pending" : "");
         if (!s.lit)

@@ -3607,6 +3607,22 @@ static void run(const char *fwdir)
             memcpy((void *)px, save, sizeof(save));
             CHECK(dcn32_scanout_info(&dev, 0, &si) == RDNA3_OK && !si.lit);   /* blanked */
             CHECK(dcn32_scanout_info(&dev, 4, &si) == RDNA3_EINVAL);
+            /* display sleep: hubp2_set_blank_regs on head 0 = pipe 1 */
+            {
+                uint32_t c0 = S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)];
+                S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] |= HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ_MASK;
+                CHECK(dcn32_set_blank(&dev, &dc, 0, 1) == RDNA3_OK);
+                CHECK((S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & (HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK |
+                       HUBP0_DCHUBP_CNTL__HUBP_TTU_DISABLE_MASK)) ==
+                      (HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK | HUBP0_DCHUBP_CNTL__HUBP_TTU_DISABLE_MASK));
+                CHECK(dcn32_scanout_info(&dev, 1, &si) == RDNA3_OK && si.blanked && !si.lit);
+                CHECK(dcn32_set_blank(&dev, &dc, 0, 0) == RDNA3_OK);
+                CHECK(dcn32_scanout_info(&dev, 1, &si) == RDNA3_OK && !si.blanked && si.lit);
+                CHECK((S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL_MASK) ==
+                      (c0 & HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL_MASK));
+                CHECK(dcn32_set_blank(&dev, &dc, 3, 1) == RDNA3_EINVAL);
+                S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] = c0;
+            }
         }
         /* hardware cursor: HUBP pipe 1 + DPP 1 */
         {

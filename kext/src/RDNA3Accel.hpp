@@ -227,6 +227,8 @@ private:
     IOReturn      displayFlip(struct RD3KDisplayFlip *f);
     IOReturn      displayStatus(struct RD3KDisplayStatus *s);
     IOReturn      displayCrc(uint32_t head, uint32_t *crc);
+    /* display sleep from the framebuffer (rdna3DisplayBlank, rdna3dpms=1) */
+    IOReturn      displayBlank(uint32_t head, bool blank);
     IOReturn      displayCursor(struct RD3KDisplayCursor *c);
     IOReturn      displayEdid(struct RD3KDisplayEdid *e);
     void          displayProbeConnectors();

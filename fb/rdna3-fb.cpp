@@ -108,6 +108,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
     bool     fFlipped = false;
 
     const OSSymbol *fSymInfo = nullptr, *fSymFlip = nullptr, *fSymStatus = nullptr;
+    const OSSymbol *fSymBlank = nullptr;
     const OSSymbol *fSymCursor = nullptr, *fSymEdid = nullptr;
     struct RD3KDisplayEdid fEdid = {};
     bool     fEdidAsked = false;
@@ -334,6 +335,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
     fLock = IOSimpleLockAlloc();
     fSymInfo = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_INFO);
     fSymFlip = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_FLIP);
+    fSymBlank = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_BLANK);
     fSymStatus = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_STATUS);
     fSymCursor = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_CURSOR);
     fSymEdid = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_EDID);
@@ -433,6 +435,7 @@ void RDNA3Framebuffer::free()
     OSSafeReleaseNULL(fCore);
     OSSafeReleaseNULL(fSymInfo);
     OSSafeReleaseNULL(fSymFlip);
+    OSSafeReleaseNULL(fSymBlank);
     OSSafeReleaseNULL(fSymStatus);
     OSSafeReleaseNULL(fSymCursor);
     OSSafeReleaseNULL(fSymEdid);
@@ -654,6 +657,15 @@ IOReturn RDNA3Framebuffer::setAttribute(IOSelect attribute, uintptr_t value)
     if (attribute == kIOWindowServerActiveAttribute)
         return kIOReturnSuccess;
     if (attribute == kIOPowerAttribute) {
+        /* display sleep: the core blanks the head (rdna3dpms=1; it answers
+         * unsupported otherwise and nothing changes) */
+        if (fCore && fSymBlank) {
+            IOReturn b = fCore->callPlatformFunction(fSymBlank, false, (void *)(uintptr_t)fHead,
+                                                     (void *)(uintptr_t)(value ? 0 : 1), nullptr, nullptr);
+            if (b != kIOReturnUnsupported)
+                FBLOG("power %lu: head %u %s (0x%x)", (unsigned long)value, fHead,
+                      value ? "unblanked" : "blanked", (unsigned)b);
+        }
         if (value)
             handleEvent(kIOFBNotifyDidPowerOn);
         else

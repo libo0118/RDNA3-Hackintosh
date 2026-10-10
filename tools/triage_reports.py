@@ -347,7 +347,7 @@ def main():
                 # scan the same surface (a mirrored picture)
                 print("   screens (what each display pipe scanned out):")
                 for blk in txt.split("== rdna3_drminfo --scanout")[1:]:
-                    look = re.match(r"\s*\(look (\d+)\)", blk)
+                    look = re.match(r"\s*\(look (\w+)\)", blk)
                     addrs = []
                     print("     look %s:" % (look.group(1) if look else "1"))
                     for l in blk.splitlines()[1:]:
@@ -360,6 +360,16 @@ def main():
                             addrs.append(m.group(2))
                     if len(addrs) > 1 and len(set(addrs)) < len(addrs):
                         print("       !! two lit pipes scan the same surface: both monitors show one picture")
+                    # display sleep (rdna3dpms=1): blanked while asleep, lit after the wake
+                    if look and look.group(1) == "sleep":
+                        nb = len(re.findall(r"^pipe \d+: BLANKED", blk, re.M))
+                        print("       %s display sleep: %d pipe(s) blanked" % ("PASS" if nb else "FAIL", nb))
+                        failed = failed or not nb
+                    if look and look.group(1) == "wake":
+                        nl, nb = len(addrs), len(re.findall(r"^pipe \d+: BLANKED", blk, re.M))
+                        print("       %s display wake: %d pipe(s) lit, %d still blanked" %
+                              ("PASS" if nl and not nb else "FAIL", nl, nb))
+                        failed = failed or not nl or nb > 0
             for ppm in sorted(glob.glob(p[:-len(".tar.gz")] + "-scanout*-pipe*.ppm")):
                 try:
                     print("     picture: " + ppm_to_png(ppm))

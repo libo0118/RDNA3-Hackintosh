@@ -153,6 +153,26 @@ int dcn32_head_usable(rdna3_dev *d, const rdna3_dcn_head *h)
     return h->address >= d->fb_start && h->address - d->fb_start + end <= d->vram_size;
 }
 
+int dcn32_set_blank(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, int blank)
+{
+    uint32_t p, cntl, t;
+    if (i >= dc->nheads)
+        return RDNA3_EINVAL;
+    p = dc->head[i].pipe;
+    cntl = RH(d, regHUBP0_DCHUBP_CNTL, p);
+    if (blank && cntl) {
+        /* hubp2_set_blank_regs: REG_WAIT(HUBP_NO_OUTSTANDING_REQ, 1, 1 us, 100000) */
+        for (t = 0; t < 100000 && !GET(RH(d, regHUBP0_DCHUBP_CNTL, p), HUBP0_DCHUBP_CNTL,
+                                        HUBP_NO_OUTSTANDING_REQ); t++)
+            d->os.udelay(d->os.ctx, 1);
+        cntl = RH(d, regHUBP0_DCHUBP_CNTL, p);
+    }
+    cntl = SET(cntl, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN, blank ? 1 : 0);
+    cntl = SET(cntl, HUBP0_DCHUBP_CNTL, HUBP_TTU_DISABLE, blank ? 1 : 0);
+    WH(d, regHUBP0_DCHUBP_CNTL, p, cntl);
+    return RDNA3_OK;
+}
+
 int dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s)
 {
     uint32_t cntl, dim, i;
@@ -171,7 +191,8 @@ int dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s)
     if (cntl == 0xffffffffu)
         return RDNA3_OK;
     s->otg = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_VTG_SEL);
-    s->lit = !GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN) && s->otg < RD_DCN_MAX_PIPES &&
+    s->blanked = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN);
+    s->lit = !s->blanked && s->otg < RD_DCN_MAX_PIPES &&
              GET(RO(d, regOTG0_OTG_CONTROL, s->otg), OTG0_OTG_CONTROL, OTG_MASTER_EN);
     s->format = GET(RH(d, regHUBP0_DCSURF_SURFACE_CONFIG, pipe), HUBP0_DCSURF_SURFACE_CONFIG,
                     SURFACE_PIXEL_FORMAT);

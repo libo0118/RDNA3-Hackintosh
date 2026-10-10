@@ -128,6 +128,24 @@ extra="$HOME/rdna3-extra.txt"
             echo "[exit $?]"
             [ $k = 3 ] || sleep 20
         done
+        # display sleep (rdna3dpms=1): the heads must blank, then come back
+        case " $args " in
+            *" rdna3dpms=1 "*)
+                echo "== display sleep: pmset displaysleepnow"
+                pmset displaysleepnow 2>&1
+                sleep 8
+                for k in sleep wake; do
+                    mkdir -p "$HOME/rdna3-scanout/$k"
+                    echo "== rdna3_drminfo --scanout (look $k)"
+                    with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/$k" 2>&1
+                    echo "[exit $?]"
+                    if [ $k = sleep ]; then
+                        echo "== display wake: caffeinate -u"
+                        caffeinate -u -t 3 2>&1
+                        sleep 8
+                    fi
+                done ;;
+        esac
     fi
     if [ "${lvl:-0}" -ge 7 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
         echo "== rdna3_drminfo --dma-test"

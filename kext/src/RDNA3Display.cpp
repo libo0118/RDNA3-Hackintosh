@@ -324,6 +324,7 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
         return -RD_EINVAL;
     s->powered = si.powered;
     s->lit = si.lit;
+    s->blanked = si.blanked;
     s->otg = si.otg;
     s->format = si.format;
     s->sw_mode = si.sw_mode;
@@ -793,6 +794,27 @@ IOReturn RDNA3Accel::displayFlip(RD3KDisplayFlip *f)
     IOLockUnlock(fDispLock);
     f->result = r;
     return r ? kIOReturnBadArgument : kIOReturnSuccess;
+}
+
+/* IOFramebuffer power off (display sleep) -> dcn32_set_blank; opt-in until
+ * a card run shows the panels come back */
+IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
+{
+    static int wanted = -1;
+    if (wanted < 0) {
+        uint32_t v = 0;
+        PE_parse_boot_argn("rdna3dpms", &v, sizeof(v));
+        wanted = v != 0;
+    }
+    if (!wanted)
+        return kIOReturnUnsupported;
+    if (!fDcn || !fDispDev || head >= fDcn->nheads)
+        return kIOReturnNotReady;
+    IOLockLock(fDispLock);
+    int r = dcn32_set_blank(fDispDev, fDcn, head, blank ? 1 : 0);
+    IOLockUnlock(fDispLock);
+    LOG("display: head %u %s (%d)", head, blank ? "blanked (display sleep)" : "unblanked", r);
+    return r ? kIOReturnError : kIOReturnSuccess;
 }
 
 IOReturn RDNA3Accel::displayStatus(RD3KDisplayStatus *s)

@@ -67,6 +67,7 @@ typedef struct rdna3_scanout_info {
     uint32_t pipe;
     uint32_t powered;           /* DOMAIN<pipe> power-up (not power-gated) */
     uint32_t lit;               /* HUBP not blanked and its OTG master enabled */
+    uint32_t blanked;           /* HUBP_BLANK_EN (dcn32_set_blank, display sleep) */
     uint32_t otg, format, sw_mode, dcc;
     uint32_t width, height, pitch_px;
     uint32_t flip_pending;      /* SURFACE_FLIP_PENDING */
@@ -85,6 +86,11 @@ int  dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s);
  * the surface is outside the CPU-visible VRAM. */
 int  dcn32_scanout_sample(rdna3_dev *d, const rdna3_scanout_info *s, uint32_t out_w,
                           uint32_t out_h, uint32_t row0, uint32_t nrows, uint8_t *rgb);
+
+/* Display sleep without turning the link off: hubp2_set_blank_regs
+ * (wait for HUBP_NO_OUTSTANDING_REQ, then HUBP_BLANK_EN + HUBP_TTU_DISABLE);
+ * the MPC then sends its black background. 0 unblanks. */
+int  dcn32_set_blank(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, int blank);
 
 /* Scan the four pipes for lit ones: HUBP not blanked, OTG master enabled.
  * Returns the number of heads found (0 when the display is off or DCN is
