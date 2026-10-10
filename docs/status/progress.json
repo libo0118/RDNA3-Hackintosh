@@ -1,10 +1,10 @@
 {
  "amdgpu": {
   "works": 268,
-  "ported": 293,
+  "ported": 298,
   "total": 1328,
   "works_pct": 20.2,
-  "ported_pct": 22.1,
+  "ported_pct": 22.4,
   "groups": [
    {
     "name": "PSP 13",
@@ -1323,8 +1323,8 @@
      "modeset"
     ],
     "works": 0,
-    "ported": 11,
-    "todo": 143,
+    "ported": 16,
+    "todo": 138,
     "items": {
      "apply_symclk_on_tx_off_wa": "todo",
      "configure_lttpr_mode_non_transparent": "todo",
@@ -1369,9 +1369,9 @@
      "dcn32_get_vco_frequency_from_reg": "ported",
      "dcn32_hubp_pg_control": "ported",
      "dcn32_init_blank": "todo",
-     "dcn32_init_clocks": "todo",
+     "dcn32_init_clocks": "ported",
      "dcn32_init_hw": "todo",
-     "dcn32_init_single_clock": "todo",
+     "dcn32_init_single_clock": "ported",
      "dcn32_initialize_min_clocks": "todo",
      "dcn32_interdependent_update_lock": "todo",
      "dcn32_is_dp_dig_pixel_rate_div_policy": "todo",
@@ -1406,10 +1406,10 @@
      "dcn32_subvp_pipe_control_lock_fast": "todo",
      "dcn32_unblank_stream": "todo",
      "dcn32_update_clocks": "ported",
-     "dcn32_update_clocks_update_dentist": "todo",
-     "dcn32_update_clocks_update_dpp_dto": "todo",
+     "dcn32_update_clocks_update_dentist": "ported",
+     "dcn32_update_clocks_update_dpp_dto": "ported",
      "dcn32_update_clocks_update_dtb_dto": "todo",
-     "dcn32_update_dppclk_dispclk_freq": "todo",
+     "dcn32_update_dppclk_dispclk_freq": "ported",
      "dcn32_update_dsc_on_stream": "todo",
      "dcn32_update_dsc_pg": "todo",
      "dcn32_update_force_pstate": "todo",

@@ -159,7 +159,7 @@ static int job_test(int fd, int gfx, int hang)
 
 /* one pipe's picture, all rows; returns the number of rows read */
 static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info, uint8_t *img,
-                             size_t cap)
+                             size_t cap, uint32_t flags)
 {
     static struct rd_xnu_scanout s;
     uint32_t row = 0;
@@ -167,6 +167,7 @@ static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info,
         memset(&s, 0, sizeof(s));
         s.pipe = pipe;
         s.row0 = row;
+        s.flags = row ? 0 : flags;
         if (IOCTL(fd, RD_NR_XNU_SCANOUT, s))
             return row ? row : (uint32_t)-1;
         if (row == 0)
@@ -189,7 +190,10 @@ static int scanout_dump(int fd, const char *dir)
         return 1;
     for (uint32_t p = 0; p < 4; p++) {
         struct rd_xnu_scanout s, s2 = {0};
-        uint32_t rows = scanout_grab(fd, p, &s, img, CAP), i, n, nonblack = 0, diff = 0;
+        /* the sticky underflow is read, then cleared: the second look 2 s
+         * later tells whether it keeps coming (bandwidth) or was a switch */
+        uint32_t rows = scanout_grab(fd, p, &s, img, CAP, RD_XNU_SCANOUT_CLEAR_UNDERFLOW), i, n, nonblack = 0,
+                 diff = 0;
         uint64_t sum[3] = {0, 0, 0};
         if (rows == (uint32_t)-1) {
             perror("XNU_SCANOUT");
@@ -205,6 +209,12 @@ static int scanout_dump(int fd, const char *dir)
             printf("  UNDERFLOW status %u: the pipe ran out of data (bandwidth / watermarks)\n", s.underflow);
         if (s.crc_valid)
             printf("  OTG CRC %04x/%04x/%04x (what leaves the pipe)\n", s.crc_rg & 0xffff, s.crc_rg >> 16, s.crc_b);
+        if (s.powered)
+            printf("  DET %u x 64 KiB (compbuf %u), DISPCLK %u kHz, DPPCLK %u kHz (pipe), DSCL mode %u LB 0x%08x "
+                   "mem pwr 0x%08x, DLG after scaler %u/%u req %u line %u\n",
+                   s.det_segs, s.compbuf_segs, s.dispclk_khz, s.dppclk_khz, s.dscl_mode, s.lb_memory_ctrl,
+                   s.dscl_mem_pwr, (s.dlg_after_scaler >> 16) & 7, s.dlg_after_scaler & 0x1fff, s.dlg_req_delivery,
+                   s.dlg_line_delivery);
         if (!s.lit)
             continue;
         lit++;
@@ -220,13 +230,18 @@ static int scanout_dump(int fd, const char *dir)
         }
         /* a second look 2 s later: is something drawing? */
         sleep(2);
-        if (scanout_grab(fd, p, &s2, img2, CAP) == rows)
+        if (scanout_grab(fd, p, &s2, img2, CAP, 0) == rows)
             for (i = 0; i < n * 3; i++)
                 diff += img[i] != img2[i];
         printf("  picture %ux%u: %u%% not black, mean rgb %u %u %u, %u bytes changed in 2 s%s\n",
                s.out_w, rows, (unsigned)((uint64_t)nonblack * 100 / n), (unsigned)(sum[0] / n),
                (unsigned)(sum[1] / n), (unsigned)(sum[2] / n), diff,
                s2.inuse != s.inuse ? " (flipped meanwhile)" : "");
+        if (s2.underflow)
+            printf("  UNDERFLOW again within 2 s of clearing it (status %u): it keeps running out of data\n",
+                   s2.underflow);
+        else if (s.underflow)
+            printf("  no underflow in the 2 s after clearing it: it happened before (a switch)\n");
         if (dir) {
             char path[1024];
             FILE *f;

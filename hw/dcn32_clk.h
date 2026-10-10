@@ -10,6 +10,10 @@
  * Navi 32 (GC 11.0.3) takes the CLK1 register set of dcn32_clk_mgr_construct;
  * the addresses are absolute, as in amdgpu.
  *
+ * And the raise path of dcn32_update_clocks for a mode set that needs more
+ * DISPCLK / DPPCLK than the GOP left (the DML 3.2 clock floors, the PMFW's
+ * DPM limits, SetHardMinByFreq, the pipe's DPPCLK DTO).
+ *
  * SPDX-License-Identifier: MIT
  */
 #ifndef RDNA3_DCN32_CLK_H
@@ -78,6 +82,51 @@ int  dcn32_smu_set_hard_min(rdna3_dev *d, uint32_t ppclk, uint32_t mhz, uint32_t
  * floor, before the downspread and ramping margins it adds). 0 or
  * RDNA3_EBUSY. */
 int  dcn32_clk_fits(const rdna3_dcn_clocks *c, uint32_t pclk_khz);
+
+/* --- raising DISPCLK / DPPCLK for a faster timing (rdna3dispclk=1) --- */
+#define RD_DALSMC_MSG_GetDpmFreqByIndex  0xB
+/* dcn32_init_clocks: "HW recommends limit of 1950 MHz in display clock" */
+#define RD_DCN32_DISPCLK_LIMIT_KHZ 1950000u
+/* dml32 (dcn3_2_soc / dcn3_2_ip): dcn_downspread_percent 0.5,
+ * dispclk_ramp_margin_percent 1 */
+#define RD_DCN32_DOWNSPREAD_PER_MILLE 5
+#define RD_DCN32_RAMP_PERCENT 1
+
+/* What the PMFW lets the display clocks reach (dcn32_init_clocks:
+ * dcn30_smu_get_smu_version, dcn32_init_single_clock for PPCLK_DISPCLK /
+ * PPCLK_DPPCLK through the DAL mailbox, capped at 1950 MHz). */
+typedef struct rdna3_dcn_clk_limits {
+    uint32_t pmfw;                          /* GetSmuVersion */
+    uint32_t dispclk_levels, dppclk_levels;
+    uint32_t dispclk_max_khz, dppclk_max_khz;
+} rdna3_dcn_clk_limits;
+int  dcn32_clk_limits_read(rdna3_dev *d, rdna3_dcn_clk_limits *l);
+
+/* dml32_RoundToDFSGranularity: VCO x 4 / floor(VCO x 4 / clk) (round up)
+ * or / ceil(...) (round down) */
+uint32_t dcn32_dfs_round(uint32_t vco_khz, uint64_t clk_khz_x1e6, int up);
+/* dml32_CalculateRequiredDispclk without ODM: pclk x (1 + downspread) x
+ * (1 + ramping margin), to the DFS granularity; without the ramping margin
+ * when that does not fit under 'max_khz'. 0 = more than 'max_khz' even so. */
+uint32_t dcn32_required_dispclk(uint32_t pclk_khz, uint32_t vco_khz, uint32_t max_khz);
+/* dml32_CalculateDPPCLK for one pipe at scale ratio <= 1 (no downscale):
+ * pclk x (1 + downspread), to the DFS granularity */
+uint32_t dcn32_required_dppclk(uint32_t pclk_khz, uint32_t vco_khz);
+/* the DPP clock of pipe 'pipe': the global DPPCLK through its DCCG DTO
+ * (DPPCLK<n>_DTO_PARAM phase / modulo when DPPCLK<n>_DTO_ENABLE) */
+uint32_t dcn32_pipe_dppclk(rdna3_dev *d, const rdna3_dcn_clocks *c, uint32_t pipe);
+
+/* The raise half of dcn32_update_clocks (prepare_bandwidth, safe_to_lower
+ * false), before a timing that needs more: dcn32_update_dppclk_dispclk_freq
+ * (to the dentist's divider), SetHardMinByFreq(PPCLK_DPPCLK) when DPPCLK
+ * goes up, dcn32_update_clocks_update_dentist = SetHardMinByFreq
+ * (PPCLK_DISPCLK), both "floored in MHz", then
+ * dcn32_update_clocks_update_dpp_dto -> dccg2_update_dpp_dto for 'pipe'
+ * when its DTO would give it less than 'dppclk_khz'. Nothing is lowered.
+ * The clocks read back afterwards go to 'now' (may be NULL); RDNA3_EBUSY
+ * when the PMFW did not set them. */
+int  dcn32_clk_raise(rdna3_dev *d, uint32_t pmfw, uint32_t pipe, uint32_t dispclk_khz, uint32_t dppclk_khz,
+                     rdna3_dcn_clocks *now);
 
 #ifdef __cplusplus
 }

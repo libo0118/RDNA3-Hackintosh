@@ -334,6 +334,9 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
         a->fDispDev->vram_cpu_len = a->fVramMap->getLength();
     }
     r = dcn32_scanout_info(a->fDispDev, pipe, &si);
+    /* hubp2_clear_underflow once read: the next look shows if it comes back */
+    if (r == RDNA3_OK && row0 == 0 && (s->flags & RD_XNU_SCANOUT_CLEAR_UNDERFLOW) && si.underflow)
+        dcn32_clear_underflow(a->fDispDev, pipe);
     if (r == RDNA3_OK && si.lit && si.width && si.height) {
         out_h = (uint32_t)((uint64_t)si.height * RD_XNU_SCANOUT_W / si.width);
         if (out_h > 4 * RD_XNU_SCANOUT_W)
@@ -367,6 +370,16 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
     s->nrows = nrows;
     s->address = si.address;
     s->inuse = si.inuse;
+    s->det_segs = si.det_segs;
+    s->compbuf_segs = si.compbuf_segs;
+    s->dispclk_khz = si.dispclk_khz;
+    s->dppclk_khz = si.dppclk_khz;
+    s->dscl_mode = si.dscl_mode;
+    s->lb_memory_ctrl = si.lb_memory_ctrl;
+    s->dscl_mem_pwr = si.dscl_mem_pwr;
+    s->dlg_after_scaler = si.dlg_after_scaler;
+    s->dlg_req_delivery = si.dlg_req_delivery;
+    s->dlg_line_delivery = si.dlg_line_delivery;
     return 0;
 }
 
@@ -718,6 +731,8 @@ void RDNA3Accel::displayFree()
     fMirror = nullptr;
     if (fScale) IOFree(fScale, sizeof(rdna3_dcn_scale));
     fScale = nullptr;
+    if (fClkLim) IOFree(fClkLim, sizeof(rdna3_dcn_clk_limits));
+    fClkLim = nullptr;
     for (uint32_t i = 0; i < 4; i++) {
         if (fModeTab[i]) IOFree(fModeTab[i], sizeof(rdna3_mode) * RD3K_MAX_MODES);
         fModeTab[i] = nullptr;
@@ -868,8 +883,11 @@ IOReturn RDNA3Accel::displaySetSource(RD3KDisplaySource *s)
     IOLockLock(fDispLock);
     if (!fScale) {
         fScale = (rdna3_dcn_scale *)IOMalloc(sizeof(rdna3_dcn_scale));
-        if (fScale)
+        if (fScale) {
             bzero(fScale, sizeof(*fScale));
+            /* line buffer + DLG/TTU for scaled sources (dcn32_set_source) */
+            fScale->dlg = rd3_arg("rdna3scaledlg", 0);
+        }
     }
     int r = fScale ? dcn32_set_source(fDispDev, fDcn, fScale, s->head, fDispDev->fb_start + s->vramOffset,
                                       s->width, s->height, s->pitch / 4)
@@ -887,6 +905,28 @@ static uint32_t head_pclk_khz(const rdna3_dcn_head *h, const rdna3_edid *ed, uin
     if (k >= 0)
         return ed->mode[k].pixel_khz;
     return (uint32_t)((uint64_t)h->h_total * h->v_total * refresh_mhz / 1000000ull);
+}
+
+/* rdna3dispclk=1: what the PMFW lets DISPCLK / DPPCLK reach (dcn32_init_clocks
+ * over the DAL mailbox), read once; nullptr (or no limits) = the clocks the
+ * GOP left are the limit, as before. Called with fDispLock held. */
+const rdna3_dcn_clk_limits *RDNA3Accel::displayClkLimits()
+{
+    if (!rd3_arg("rdna3dispclk", 0) || !fDispDev)
+        return nullptr;
+    if (!fClkLim) {
+        fClkLim = (rdna3_dcn_clk_limits *)IOMalloc(sizeof(rdna3_dcn_clk_limits));
+        if (!fClkLim)
+            return nullptr;
+        bzero(fClkLim, sizeof(*fClkLim));
+        int r = dcn32_clk_limits_read(fDispDev, fClkLim);
+        LOG("display: rdna3dispclk: PMFW 0x%x, DISPCLK up to %u kHz (%u levels), DPPCLK up to %u kHz (%u levels) (%d)",
+            fClkLim->pmfw, fClkLim->dispclk_max_khz, fClkLim->dispclk_levels, fClkLim->dppclk_max_khz,
+            fClkLim->dppclk_levels, r);
+        if (r)
+            fClkLim->dispclk_max_khz = fClkLim->dppclk_max_khz = 0;
+    }
+    return fClkLim;
 }
 
 /* rdna3DisplayModes: the sink's EDID timings the head can switch to
@@ -925,10 +965,11 @@ IOReturn RDNA3Accel::displayModes(RD3KDisplayModes *r)
         const rdna3_display_path *p = aux >= 0 ? path_for_aux(fPaths, fNPaths, (uint32_t)aux) : nullptr;
         uint32_t cur = head_pclk_khz(h, ed, fDispRefresh[r->head]), n = 0;
         int k = dcn32_match_head_mode(h, 0, ed);
+        const rdna3_dcn_clk_limits *lim = displayClkLimits();
         for (uint32_t i = 0; i < ed->nmodes && n < RD3K_MAX_MODES; i++) {
             const rdna3_mode *m = &ed->mode[i];
             int why = (int)i == k ? RD_MODESET_OK
-                    : p ? dcn32_modeset_plan(fDispDev, fDcn, r->head, p, cur, m, ms) : RD_MODESET_BAD_HEAD;
+                    : p ? dcn32_modeset_plan_clk(fDispDev, fDcn, r->head, p, cur, m, lim, ms) : RD_MODESET_BAD_HEAD;
             LOG("display: head %u mode %ux%u %u.%03u Hz %u kHz: %s (%d)", r->head, m->h_active, m->v_active,
                 m->refresh_mhz / 1000, m->refresh_mhz % 1000, m->pixel_khz,
                 (int)i == k ? "current" : why ? "refused" : "offered", why);
@@ -954,6 +995,12 @@ IOReturn RDNA3Accel::displayModes(RD3KDisplayModes *r)
         r->count = n;
         IOLockUnlock(fDispLock);
         ret = kIOReturnSuccess;
+        if (lim) {
+            char val[96];
+            snprintf(val, sizeof(val), "DISPCLK %u DPPCLK %u kHz max, PMFW 0x%x", lim->dispclk_max_khz,
+                     lim->dppclk_max_khz, lim->pmfw);
+            setProperty("RDNA3,DCNClockLimits", val);
+        }
     }
 out:
     if (e) IOFree(e, sizeof(*e));
@@ -983,8 +1030,11 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     IOLockLock(fDispLock);
     if (!fScale) {
         fScale = (rdna3_dcn_scale *)IOMalloc(sizeof(rdna3_dcn_scale));
-        if (fScale)
+        if (fScale) {
             bzero(fScale, sizeof(*fScale));
+            /* line buffer + DLG/TTU for scaled sources (dcn32_set_source) */
+            fScale->dlg = rd3_arg("rdna3scaledlg", 0);
+        }
     }
     const rdna3_mode *want = &fModeTab[m->head][m->index];
     const rdna3_dcn_head *h = &fDcn->head[m->head];
@@ -993,7 +1043,8 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     /* the running pixel clock: what the last mode set left, else the
      * refresh measured at start */
     uint32_t cur = (uint32_t)((uint64_t)h->h_total * h->v_total * fDispRefresh[m->head] / 1000000ull);
-    int r = p ? dcn32_modeset_plan(fDispDev, fDcn, m->head, p, cur, want, ms) : RD_MODESET_BAD_HEAD;
+    int r = p ? dcn32_modeset_plan_clk(fDispDev, fDcn, m->head, p, cur, want, displayClkLimits(), ms)
+              : RD_MODESET_BAD_HEAD;
     if (r == RD_MODESET_OK)
         r = dcn32_modeset_apply(fDispDev, dm, fDcn, fScale, ms, fDispDev->fb_start + m->vramOffset, m->pitch / 4,
                                 fDispDev->fb_start + m->oldVramOffset, m->oldPitch / 4, 200);
@@ -1001,7 +1052,15 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
         r = RDNA3_EINVAL;
     if (r == RDNA3_OK)
         fDispRefresh[m->head] = want->refresh_mhz;
+    rdna3_dcn_clocks ck;
+    dcn32_clk_read(fDispDev, &ck);   /* raised or not: the report sees them */
     IOLockUnlock(fDispLock);
+    {
+        char val[128];
+        snprintf(val, sizeof(val), "VCO %u DISPCLK %u DPPCLK %u DPREFCLK %u DCFCLK %u DTBCLK %u kHz",
+                 ck.vco_khz, ck.dispclk_khz, ck.dppclk_khz, ck.dprefclk_khz, ck.dcfclk_khz, ck.dtbclk_khz);
+        setProperty("RDNA3,DCNClocks", val);
+    }
     IOFree(ms, sizeof(*ms));
     m->result = r;
     {
