@@ -495,6 +495,13 @@ static void make_vbios(void)
     memcpy(b + 0x30, " 761295520", 10);
     put16(b + 0x48, VB_ROM_HDR);
     memcpy(b + VB_MSG, "\r\nRX 7800 XT SIM\0", 17);
+    /* identification strings (atom.c): 4 strings at 0x130, then CR LF and
+     * the name; the date at 0x50; the version anchor further on */
+    b[0x2f] = 4;
+    put16(b + 0x6e, 0x130);
+    memcpy(b + 0x130, "113-SIMPN-001\0NAVI32\0PCI_EXPRESS\0GDDR6\0\r\nSIM RX 7800 XT   \0", 57);
+    memcpy(b + 0x50, "10/09/26 12:34", 14);
+    memcpy(b + 0x1A0, "ATOMBIOSBK-AMD VER022.001.002.008.000001", 40);
     /* atom_rom_header_v2_2 */
     put16(b + VB_ROM_HDR, 0x24); b[VB_ROM_HDR + 2] = 2; b[VB_ROM_HDR + 3] = 2;
     memcpy(b + VB_ROM_HDR + 4, "ATOM", 4);
@@ -3842,6 +3849,13 @@ static void run(const char *fwdir)
         uint8_t fr = 0, cr = 0;
         uint64_t t0;
         CHECK(vbios_parse(&dev, &vb, S.vbios, VBIOS_LEN) == RDNA3_OK);
+        {
+            rdna3_vbios_strings vs;
+            vbios_strings(&vb, &vs);
+            CHECK(!strcmp(vs.name, "SIM RX 7800 XT") && !strcmp(vs.pn, "113-SIMPN-001"));
+            CHECK(!strcmp(vs.date, "2026/10/09 12:34") && !strncmp(vs.ver_str, "022.001.002.008.000001", 22));
+            CHECK(vs.version != 0);   /* atom_firmware_info revision */
+        }
         CHECK(atom_init(&at, &dev, &vb, scratch, sizeof(scratch)) == RDNA3_OK);
         CHECK(at.cmd_table == VB_CMD_DIR && at.iio[0x81] == VB_IIO + 6);
         CHECK(atom_cmd_revision(&at, RD_ATOM_CMD_SET_PIXEL_CLOCK, &fr, &cr) && fr == 1 && cr == 1);

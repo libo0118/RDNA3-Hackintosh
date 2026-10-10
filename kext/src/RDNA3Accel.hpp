@@ -107,6 +107,8 @@ public:
     IOLock       *drmLock() const { return fDrmLock; }
     /* AMDGPU_INFO_FW_VERSION table from the bring-up (amd_fw_versions) */
     void          drmSetFirmware(const uint32_t ver[32], const uint32_t feature[32]);
+    /* AMDGPU_INFO_VBIOS: a copy of the image and its strings */
+    void          drmSetVbios(const uint8_t *image, uint32_t len, const struct drm_amdgpu_info_vbios *info);
 
     /* Stage 3: VRAM below this offset holds the firmware's scanout(s);
      * the bring-up and GEM heaps start above it (RDNA3Display.cpp) */
@@ -235,6 +237,9 @@ private:
     IOReturn      displaySetSource(struct RD3KDisplaySource *s);
     struct rdna3_dcn_scale *fScale = nullptr;
     uint32_t      fFwVer[32] = {}, fFwFeat[32] = {};
+    uint8_t      *fVbiosCopy = nullptr;
+    uint32_t      fVbiosCopyLen = 0;
+    struct drm_amdgpu_info_vbios fVbiosInfo = {};
     IOReturn      displayCursor(struct RD3KDisplayCursor *c);
     IOReturn      displayEdid(struct RD3KDisplayEdid *e);
     void          displayProbeConnectors();

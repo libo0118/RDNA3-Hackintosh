@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 19.6%   ported 21.5%   (260 / 285 / 1328)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 20.0%   ported 21.8%   (265 / 290 / 1328)</text>
 <g><title>GFX 11: works 30%, ported 30% (73+0 of 243); verified by step(s) 8</title>
 <rect x="1.0" y="53.0" width="9.7" height="10.7" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="10.7" y="53.0" width="9.7" height="10.7" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -689,7 +689,7 @@
 <text x="153.0" y="173.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">GMC / GPUVM</text>
 <text x="153.0" y="187.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">21% / 21%</text>
 </g>
-<g><title>Discovery / VBIOS: works 41%, ported 41% (52+0 of 127); verified by step(s) 2</title>
+<g><title>Discovery / VBIOS: works 45%, ported 45% (57+0 of 127); verified by step(s) 2</title>
 <rect x="149.0" y="257.0" width="9.7" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="158.7" y="257.0" width="9.7" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="168.4" y="257.0" width="9.7" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -742,11 +742,11 @@
 <rect x="211.5" y="288.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="222.0" y="288.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="232.4" y="288.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="242.8" y="288.4" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="253.2" y="288.4" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="263.7" y="288.4" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="274.1" y="288.4" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="284.5" y="288.4" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="242.8" y="288.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="253.2" y="288.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="263.7" y="288.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="274.1" y="288.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="284.5" y="288.4" width="10.4" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="149.0" y="298.8" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="159.4" y="298.8" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="169.8" y="298.8" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -819,7 +819,7 @@
 <rect x="284.5" y="340.6" width="10.4" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="148.0" y="256.0" width="148.0" height="96.0" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="153.0" y="271.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Discovery / VBIOS</text>
-<text x="153.0" y="285.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">41% / 41%</text>
+<text x="153.0" y="285.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">45% / 45%</text>
 </g>
 <g><title>PSP 13: works 15%, ported 15% (18+0 of 120); verified by step(s) 4</title>
 <rect x="297.0" y="53.0" width="10.7" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1396,7 +1396,7 @@
 <text x="447.7" y="302.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">30% / 30%</text>
 </g>
 <text x="509.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu UAPI (ioctls, INFO, CS chunks)</text>
-<text x="509.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 75.8%   ported 75.8%   (91 / 91 / 120)</text>
+<text x="509.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 79.2%   ported 79.2%   (95 / 95 / 120)</text>
 <g><title>INFO firmware / sensors: works 72%, ported 72% (28+0 of 39); verified by step(s) 5, 7</title>
 <rect x="506.0" y="53.0" width="31.8" height="33.1" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="537.8" y="53.0" width="31.8" height="33.1" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1441,7 +1441,7 @@
 <text x="510.0" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">INFO firmware / sens…</text>
 <text x="510.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">72% / 72%</text>
 </g>
-<g><title>INFO queries: works 70%, ported 70% (21+0 of 30); verified by step(s) 7</title>
+<g><title>INFO queries: works 83%, ported 83% (25+0 of 30); verified by step(s) 7</title>
 <rect x="666.9" y="53.0" width="34.7" height="34.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="701.6" y="53.0" width="34.7" height="34.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="736.3" y="53.0" width="34.7" height="34.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1463,10 +1463,10 @@
 <rect x="666.9" y="157.7" width="34.7" height="34.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="701.6" y="157.7" width="34.7" height="34.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="736.3" y="157.7" width="34.7" height="34.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="771.1" y="157.7" width="34.7" height="34.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="805.8" y="157.7" width="34.7" height="34.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="840.5" y="157.7" width="34.7" height="34.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="666.9" y="192.6" width="34.7" height="34.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="771.1" y="157.7" width="34.7" height="34.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="805.8" y="157.7" width="34.7" height="34.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="840.5" y="157.7" width="34.7" height="34.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="666.9" y="192.6" width="34.7" height="34.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="701.6" y="192.6" width="34.7" height="34.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="736.3" y="192.6" width="34.7" height="34.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="771.1" y="192.6" width="34.7" height="34.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -1474,7 +1474,7 @@
 <rect x="840.5" y="192.6" width="34.7" height="34.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="665.9" y="52.0" width="210.4" height="176.5" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="670.9" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">INFO queries</text>
-<text x="670.9" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">70% / 70%</text>
+<text x="670.9" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">83% / 83%</text>
 </g>
 <g><title>amdgpu ioctls: works 71%, ported 71% (15+0 of 21); verified by step(s) 7, 8</title>
 <rect x="666.9" y="229.5" width="29.8" height="40.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>

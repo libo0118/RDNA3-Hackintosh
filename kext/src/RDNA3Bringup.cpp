@@ -999,6 +999,20 @@ void RDNA3Bringup::pmInit()
         publish("RDNA3,VBIOSSize", fVbios.len);
         publishString("RDNA3,VBIOSPartNumber", fVbios.part_number);
         vb = &fVbios;
+        {
+            /* AMDGPU_INFO_VBIOS_INFO: amdgpu_atom_parse's strings */
+            rdna3_vbios_strings vs;
+            struct drm_amdgpu_info_vbios vi;
+            vbios_strings(&fVbios, &vs);
+            bzero(&vi, sizeof(vi));
+            memcpy(vi.name, vs.name, sizeof(vi.name));
+            memcpy(vi.vbios_pn, vs.pn, sizeof(vi.vbios_pn));
+            memcpy(vi.vbios_ver_str, vs.ver_str, sizeof(vi.vbios_ver_str));
+            memcpy(vi.date, vs.date, sizeof(vi.date));
+            vi.version = vs.version;
+            fOwner->drmSetVbios(fVbios.data, fVbios.len, &vi);
+            BLOG("VBIOS %s, P/N %s, version %s, %s", vs.name, vs.pn, vs.ver_str, vs.date);
+        }
     } else {
         BLOG("PM: VBIOS not readable (%d), going on with the PMFW's BoardTable", ret);
     }

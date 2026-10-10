@@ -340,6 +340,28 @@ void RDNA3Accel::drmSetFirmware(const uint32_t ver[32], const uint32_t feature[3
     }
 }
 
+void RDNA3Accel::drmSetVbios(const uint8_t *image, uint32_t len, const drm_amdgpu_info_vbios *info)
+{
+    if (fVbiosCopy || !image || !len || len > (4u << 20))
+        return;   /* once: the image does not change */
+    uint8_t *c = (uint8_t *)IOMalloc(len);
+    if (!c)
+        return;
+    memcpy(c, image, len);
+    if (fDrmLock)
+        IOLockLock(fDrmLock);
+    fVbiosCopy = c;
+    fVbiosCopyLen = len;
+    fVbiosInfo = *info;
+    if (fDrm) {
+        fDrm->vbios = fVbiosCopy;
+        fDrm->vbios_len = fVbiosCopyLen;
+        fDrm->vbios_info = fVbiosInfo;
+    }
+    if (fDrmLock)
+        IOLockUnlock(fDrmLock);
+}
+
 int RDNA3Accel::drmSensor(void *ctx, uint32_t type, uint32_t *value)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
@@ -463,6 +485,9 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
                           revId, fVramSize, visible > fVramSize ? fVramSize : visible, gtt);
     memcpy(fDrm->fw_version, fFwVer, sizeof(fFwVer));
     memcpy(fDrm->fw_feature, fFwFeat, sizeof(fFwFeat));
+    fDrm->vbios = fVbiosCopy;
+    fDrm->vbios_len = fVbiosCopyLen;
+    fDrm->vbios_info = fVbiosInfo;
     /* GB_ADDR_CONFIG (gfx_v11_0 get_gb_addr_config): read once, cache.
      * Only at rdna3lvl>=3, the level that already reads GC registers. */
     if (fLevel >= 3 && fDrm->gc_base0 && fMmio) {
@@ -521,6 +546,10 @@ void RDNA3Accel::drmFree()
         IOLockFree(fDrmLock);
     OSSafeReleaseNULL(fVramMap);
     OSSafeReleaseNULL(fVramDev);
+    if (fVbiosCopy)
+        IOFree(fVbiosCopy, fVbiosCopyLen);
+    fVbiosCopy = nullptr;
+    fVbiosCopyLen = 0;
     fDrm = nullptr;
     fVramHeap = nullptr;
     fVramHeapHi = nullptr;

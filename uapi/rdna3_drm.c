@@ -1621,7 +1621,23 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         g.oa_per_compute_partition = RD_OA_SIZE;
         return info_out(f, in, &g, sizeof(g));
     }
-    case AMDGPU_INFO_VBIOS:
+    case AMDGPU_INFO_VBIOS:   /* amdgpu_info_ioctl: size, image (from offset), strings */
+        switch (in->vbios_info.type) {
+        case AMDGPU_INFO_VBIOS_SIZE: {
+            uint32_t n = dev->vbios_len;
+            return info_out(f, in, &n, 4);
+        }
+        case AMDGPU_INFO_VBIOS_IMAGE:
+            if (!dev->vbios || in->vbios_info.offset >= dev->vbios_len)
+                return -RD_EINVAL;
+            return info_out(f, in, dev->vbios + in->vbios_info.offset, dev->vbios_len - in->vbios_info.offset);
+        case AMDGPU_INFO_VBIOS_INFO:
+            if (!dev->vbios)
+                return -RD_EINVAL;
+            return info_out(f, in, &dev->vbios_info, sizeof(dev->vbios_info));
+        default:
+            return -RD_EINVAL;
+        }
     default:
         return -RD_EINVAL;
     }

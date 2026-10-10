@@ -238,6 +238,11 @@ typedef struct rdna3_drm_device {
     uint32_t available_rings[AMDGPU_HW_IP_NUM];   /* bitmask per HW IP */
     uint32_t ip_ver_major[AMDGPU_HW_IP_NUM], ip_ver_minor[AMDGPU_HW_IP_NUM];
     uint32_t fw_version[32], fw_feature[32];      /* by AMDGPU_INFO_FW_* */
+    /* AMDGPU_INFO_VBIOS: the image (owned by the OS layer, NULL = none) and
+     * amdgpu_atom_parse's strings */
+    const uint8_t *vbios;
+    uint32_t vbios_len;
+    struct drm_amdgpu_info_vbios vbios_info;
     uint64_t next_mmap_offset;
     uint32_t gc_base0;            /* GC register segment 0 (discovery) */
     uint32_t gb_addr_config;      /* cached like adev->gfx.config.gb_addr_config */

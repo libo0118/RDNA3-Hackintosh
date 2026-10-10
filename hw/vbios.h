@@ -58,6 +58,15 @@ typedef struct rdna3_vbios {
     char     part_number[32];   /* from the ROM header's string, when present */
 } rdna3_vbios;
 
+/* amdgpu_atom_parse's identification strings (atom_get_vbios_name / _pn /
+ * _date / _version) for AMDGPU_INFO_VBIOS_INFO, and the firmware revision
+ * (atom_firmware_info.firmware_revision). */
+typedef struct rdna3_vbios_strings {
+    char     name[64], pn[64], ver_str[32], date[32];
+    uint32_t version;
+} rdna3_vbios_strings;
+void vbios_strings(const rdna3_vbios *v, rdna3_vbios_strings *s);
+
 /* Read the image through ROM_INDEX/ROM_DATA into v->data (v->cap bytes).
  * Validates 0x55AA, the " 761295520" signature at 0x30 and the "ATOM"
  * ROM header (check_atom_bios), then locates the data table directory.

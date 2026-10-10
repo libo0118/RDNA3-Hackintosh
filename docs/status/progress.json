@@ -1,10 +1,10 @@
 {
  "amdgpu": {
-  "works": 260,
-  "ported": 285,
+  "works": 265,
+  "ported": 290,
   "total": 1328,
-  "works_pct": 19.6,
-  "ported_pct": 21.5,
+  "works_pct": 20.0,
+  "ported_pct": 21.8,
   "groups": [
    {
     "name": "PSP 13",
@@ -1012,9 +1012,9 @@
     "steps": [
      "2"
     ],
-    "works": 52,
+    "works": 57,
     "ported": 0,
-    "todo": 75,
+    "todo": 70,
     "items": {
      "amdgpu_atom_asic_init": "todo",
      "amdgpu_atom_destroy": "todo",
@@ -1088,15 +1088,15 @@
      "amdgpu_ucode_request": "todo",
      "amdgpu_ucode_sys_visible": "todo",
      "amdgpu_ucode_validate": "todo",
-     "atom_find_str_in_rom": "todo",
+     "atom_find_str_in_rom": "works",
      "atom_get_dst": "works",
      "atom_get_src": "works",
      "atom_get_src_direct": "works",
      "atom_get_src_int": "works",
-     "atom_get_vbios_date": "todo",
-     "atom_get_vbios_name": "todo",
-     "atom_get_vbios_pn": "todo",
-     "atom_get_vbios_version": "todo",
+     "atom_get_vbios_date": "works",
+     "atom_get_vbios_name": "works",
+     "atom_get_vbios_pn": "works",
+     "atom_get_vbios_version": "works",
      "atom_iio_execute": "works",
      "atom_index_iio": "works",
      "atom_op_add": "works",
@@ -1485,11 +1485,11 @@
   ]
  },
  "uapi": {
-  "works": 91,
-  "ported": 91,
+  "works": 95,
+  "ported": 95,
   "total": 120,
-  "works_pct": 75.8,
-  "ported_pct": 75.8,
+  "works_pct": 79.2,
+  "ported_pct": 79.2,
   "groups": [
    {
     "name": "amdgpu ioctls",
@@ -1561,9 +1561,9 @@
     "steps": [
      "7"
     ],
-    "works": 21,
+    "works": 25,
     "ported": 0,
-    "todo": 9,
+    "todo": 5,
     "items": {
      "AMDGPU_INFO_ACCEL_WORKING": "works",
      "AMDGPU_INFO_CRTC_FROM_ID": "todo",
@@ -1585,10 +1585,10 @@
      "AMDGPU_INFO_SENSOR": "works",
      "AMDGPU_INFO_TIMESTAMP": "works",
      "AMDGPU_INFO_UQ_FW_AREAS": "todo",
-     "AMDGPU_INFO_VBIOS": "todo",
-     "AMDGPU_INFO_VBIOS_IMAGE": "todo",
-     "AMDGPU_INFO_VBIOS_INFO": "todo",
-     "AMDGPU_INFO_VBIOS_SIZE": "todo",
+     "AMDGPU_INFO_VBIOS": "works",
+     "AMDGPU_INFO_VBIOS_IMAGE": "works",
+     "AMDGPU_INFO_VBIOS_INFO": "works",
+     "AMDGPU_INFO_VBIOS_SIZE": "works",
      "AMDGPU_INFO_VCE_CLOCK_TABLE": "todo",
      "AMDGPU_INFO_VIDEO_CAPS": "works",
      "AMDGPU_INFO_VIS_VRAM_USAGE": "works",

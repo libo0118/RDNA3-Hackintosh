@@ -435,3 +435,102 @@ const char *vbios_connector_name(uint8_t c)
     default:                       return "?";
     }
 }
+
+/* ---- identification strings (atom.c, Linux v6.12) ---- */
+
+#define OFF_STRINGS_NUMBER 0x2f   /* OFFSET_TO_GET_ATOMBIOS_NUMBER_OF_STRINGS */
+#define OFF_STRINGS_START  0x6e   /* OFFSET_TO_GET_ATOMBIOS_STRING_START */
+#define OFF_PART_NUMBER    0x80   /* OFFSET_TO_VBIOS_PART_NUMBER */
+#define OFF_DATE           0x50   /* OFFSET_TO_VBIOS_DATE */
+#define OFF_ROM_HEADER_PTR 0x48   /* OFFSET_TO_ATOM_ROM_HEADER_POINTER */
+
+/* atom_find_str_in_rom: first offset in [start, end] where str begins */
+static int find_str(const rdna3_vbios *v, const char *str, uint32_t start, uint32_t end)
+{
+    uint32_t n = 0, i;
+    while (str[n])
+        n++;
+    for (; start <= end && start + n <= v->len; start++) {
+        for (i = 0; i < n && v->data[start + i] == (uint8_t)str[i]; i++)
+            ;
+        if (i == n)
+            return (int)start;
+    }
+    return -1;
+}
+
+void vbios_strings(const rdna3_vbios *v, rdna3_vbios_strings *s)
+{
+    const uint8_t *p = v->data;
+    uint32_t len = v->len, i, off, num;
+    int at;
+    for (i = 0; i < sizeof(*s); i++)
+        ((uint8_t *)s)[i] = 0;
+    if (!p || len < 0x100)
+        return;
+    num = p[OFF_STRINGS_NUMBER];
+    off = rd16(p + OFF_STRINGS_START);
+    /* atom_get_vbios_name: past the num strings (P/N, ASIC, bus, memory)
+     * and their CR LF, trailing spaces cut */
+    if (num && off < len) {
+        uint32_t c = off, k;
+        for (k = 0; k < num && c < len; k++) {
+            while (c < len && p[c])
+                c++;
+            c++;
+        }
+        c += 2;
+        for (k = 0; k < sizeof(s->name) - 1 && c + k < len && p[c + k]; k++)
+            s->name[k] = (char)p[c + k];
+        while (k && s->name[k - 1] == ' ')
+            s->name[--k] = 0;
+    } else {
+        for (i = 0; i < 7; i++)
+            s->name[i] = "--N/A--"[i];
+    }
+    /* atom_get_vbios_pn: the first string, else the fixed offset, else
+     * after "ATOMBIOS"; printable characters only */
+    {
+        uint32_t c = num ? off : OFF_PART_NUMBER, k;
+        if (c >= len || !p[c]) {
+            at = find_str(v, "ATOMBIOS", 3, 1024);
+            c = at < 0 ? len : (uint32_t)at + 8;
+        }
+        if (c < len && !p[c])
+            c++;
+        for (k = 0; k < 43 && k < sizeof(s->pn) - 1 && c + k < len && p[c + k] >= ' ' && p[c + k] <= 'z'; k++)
+            s->pn[k] = (char)p[c + k];
+    }
+    /* atom_get_vbios_date: "20YY/MM/DD HH:MM" from "MM/DD/YY HH:MM" */
+    {
+        const uint8_t *d = p + OFF_DATE;
+        const uint8_t idx[] = { 6, 7, 0, 1, 3, 4, 9, 10, 11, 12, 13 };
+        char out[17] = "20xx/xx/xx xxxxx";
+        static const uint8_t pos[] = { 2, 3, 5, 6, 8, 9, 11, 12, 13, 14, 15 };
+        for (i = 0; i < sizeof(idx); i++)
+            out[pos[i]] = (char)d[idx[i]];
+        for (i = 0; i < 17; i++)
+            s->date[i] = out[i];
+    }
+    /* atom_get_vbios_version: after the "ATOMBIOSBK-AMD VER" anchor between
+     * the strings and the ROM header (3..1024 if those are not set) */
+    {
+        uint32_t start = off, end = rd16(p + OFF_ROM_HEADER_PTR);
+        if (end <= start) {
+            start = 3;
+            end = 1024;
+        }
+        at = find_str(v, "ATOMBIOSBK-AMD", start, end);
+        if (at >= 0)
+            for (i = 0; i < sizeof(s->ver_str) - 1 && (uint32_t)at + 18 + i < len; i++)
+                s->ver_str[i] = (char)p[at + 18 + i];
+    }
+    /* ctx->version = atom_firmware_info's revision */
+    {
+        uint16_t size;
+        uint8_t frev, crev;
+        const uint8_t *t = vbios_data_table(v, RD_ATOM_DT_FIRMWAREINFO, &size, &frev, &crev);
+        if (t && size >= 8)
+            s->version = rd32(t + 4);
+    }
+}

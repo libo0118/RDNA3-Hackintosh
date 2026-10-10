@@ -838,6 +838,44 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
     }
 
+    /* AMDGPU_INFO_VBIOS: size, image from an offset, strings; none -> 0 / EINVAL */
+    {
+        static uint8_t rom[1024];
+        struct drm_amdgpu_info in;
+        struct drm_amdgpu_info_vbios vi;
+        uint32_t n = 1;
+        uint8_t part[16];
+        memset(&in, 0, sizeof(in));
+        in.query = AMDGPU_INFO_VBIOS;
+        in.vbios_info.type = AMDGPU_INFO_VBIOS_SIZE;
+        in.return_pointer = (uint64_t)(uintptr_t)&n;
+        in.return_size = 4;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && n == 0);
+        in.vbios_info.type = AMDGPU_INFO_VBIOS_INFO;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+        for (unsigned i = 0; i < sizeof(rom); i++)
+            rom[i] = (uint8_t)i;
+        dev.vbios = rom;
+        dev.vbios_len = sizeof(rom);
+        memcpy(dev.vbios_info.vbios_pn, "113-TEST", 9);
+        in.vbios_info.type = AMDGPU_INFO_VBIOS_SIZE;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && n == sizeof(rom));
+        in.vbios_info.type = AMDGPU_INFO_VBIOS_IMAGE;
+        in.vbios_info.offset = 0x100;
+        in.return_pointer = (uint64_t)(uintptr_t)part;
+        in.return_size = sizeof(part);
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && part[0] == 0x00 && part[5] == 0x05);
+        in.vbios_info.offset = sizeof(rom);
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+        in.vbios_info.type = AMDGPU_INFO_VBIOS_INFO;
+        in.vbios_info.offset = 0;
+        in.return_pointer = (uint64_t)(uintptr_t)&vi;
+        in.return_size = sizeof(vi);
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && !strcmp((char *)vi.vbios_pn, "113-TEST"));
+        dev.vbios = NULL;
+        dev.vbios_len = 0;
+    }
+
     /* XNU_SCANOUT: unsupported without the op, else the op fills it */
     {
         static struct rd_xnu_scanout so;
