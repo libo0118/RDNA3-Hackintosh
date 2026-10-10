@@ -443,9 +443,9 @@ cmd_args() {
 
 # the steps still waiting, one per line; the first is the one running
 QUEUE=$WORK/queue
-# GFX clock gating is default now (card run 8): a regression pass, and
-# 8o: GFXOFF on top (rdna3gfxoff=1) for the rest of the idle power
-PENDING_STEPS="8 8o 9b 9c"
+# 8: RLC/CP power status in the PM trend, and rdna3_vktest when the bundle
+# has RADV (prepare --radv); 10: first accelerator start (needs 'approve')
+PENDING_STEPS="8 10"
 
 cmd_queue() {
     load_conf
