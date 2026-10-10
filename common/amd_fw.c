@@ -585,3 +585,21 @@ void amd_fw_versions(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT], const amd_psp_
         ver[AMDGPU_INFO_FW_TOC] = feature[AMDGPU_INFO_FW_TOC] = sos->bin[AMD_PSP_BIN_TOC].fw_version;
     }
 }
+
+/* ---------------- gfx_v11_0_check_fw_cp_gfx_shadow ---------------- */
+
+int amd_gfx11_check_fw_cp_gfx_shadow(uint32_t gc_ip_version, uint32_t me, uint32_t pfp,
+                                     uint32_t mec, int sriov_vf)
+{
+    switch (gc_ip_version) {
+    case AMD_IP_VERSION(11, 0, 0):
+    case AMD_IP_VERSION(11, 0, 2):
+    case AMD_IP_VERSION(11, 0, 3):
+        /* the firmware can, but amdgpu turns it on for a VF only */
+        if (me >= 1505 && pfp >= 1600 && mec >= 512)
+            return sriov_vf ? 1 : 0;
+        return 0;
+    default:
+        return 0;
+    }
+}

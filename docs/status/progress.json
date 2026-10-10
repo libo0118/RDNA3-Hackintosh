@@ -1,11 +1,11 @@
 {
  "amdgpu": {
-  "works": 310,
-  "ported": 336,
+  "works": 313,
+  "ported": 339,
   "total": 1297,
   "not_applicable": 201,
-  "works_pct": 23.9,
-  "ported_pct": 25.9,
+  "works_pct": 24.1,
+  "ported_pct": 26.1,
   "groups": [
    {
     "name": "PSP 13",
@@ -640,9 +640,9 @@
     "steps": [
      "8"
     ],
-    "works": 73,
+    "works": 76,
     "ported": 0,
-    "todo": 133,
+    "todo": 130,
     "items": {
      "amdgpu_gfx_bit_to_me_queue": "todo",
      "amdgpu_gfx_compute_queue_acquire": "works",
@@ -681,7 +681,7 @@
      "gfx11_kiq_unmap_queues": "works",
      "gfx_v11_0_bad_op_irq": "todo",
      "gfx_v11_0_calc_toc_total_size": "todo",
-     "gfx_v11_0_check_fw_cp_gfx_shadow": "todo",
+     "gfx_v11_0_check_fw_cp_gfx_shadow": "works",
      "gfx_v11_0_check_soft_reset": "todo",
      "gfx_v11_0_compute_mqd_init": "works",
      "gfx_v11_0_compute_ring_init": "todo",
@@ -722,7 +722,7 @@
      "gfx_v11_0_get_csb_size": "works",
      "gfx_v11_0_get_cu_active_bitmap_per_sh": "todo",
      "gfx_v11_0_get_cu_info": "works",
-     "gfx_v11_0_get_gfx_shadow_info": "todo",
+     "gfx_v11_0_get_gfx_shadow_info": "works",
      "gfx_v11_0_get_gpu_clock_counter": "works",
      "gfx_v11_0_get_rb_active_bitmap": "todo",
      "gfx_v11_0_get_sa_active_bitmap": "todo",
@@ -775,7 +775,7 @@
      "gfx_v11_0_ring_emit_fence_kiq": "todo",
      "gfx_v11_0_ring_emit_frame_cntl": "works",
      "gfx_v11_0_ring_emit_gds_switch": "works",
-     "gfx_v11_0_ring_emit_gfx_shadow": "todo",
+     "gfx_v11_0_ring_emit_gfx_shadow": "works",
      "gfx_v11_0_ring_emit_hdp_flush": "works",
      "gfx_v11_0_ring_emit_ib_compute": "works",
      "gfx_v11_0_ring_emit_ib_gfx": "works",
@@ -1708,12 +1708,12 @@
   ]
  },
  "uapi": {
-  "works": 100,
-  "ported": 100,
+  "works": 101,
+  "ported": 101,
   "total": 105,
   "not_applicable": 15,
-  "works_pct": 95.2,
-  "ported_pct": 95.2,
+  "works_pct": 96.2,
+  "ported_pct": 96.2,
   "groups": [
    {
     "name": "amdgpu ioctls",
@@ -1886,12 +1886,12 @@
      "7",
      "8"
     ],
-    "works": 9,
+    "works": 10,
     "ported": 0,
-    "todo": 1,
+    "todo": 0,
     "items": {
      "AMDGPU_CHUNK_ID_BO_HANDLES": "works",
-     "AMDGPU_CHUNK_ID_CP_GFX_SHADOW": "todo",
+     "AMDGPU_CHUNK_ID_CP_GFX_SHADOW": "works",
      "AMDGPU_CHUNK_ID_DEPENDENCIES": "works",
      "AMDGPU_CHUNK_ID_FENCE": "works",
      "AMDGPU_CHUNK_ID_IB": "works",

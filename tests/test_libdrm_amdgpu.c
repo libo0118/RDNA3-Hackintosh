@@ -58,6 +58,8 @@ int main(void)
     CHECK(gi.num_shader_engines == 3 && gi.cu_active_number == 60);
     memset(&di, 0, sizeof(di));
     CHECK(amdgpu_query_info(dev, AMDGPU_INFO_DEV_INFO, sizeof(di), &di) == 0);
+    /* no CP gfx shadowing on a physical function (gfx_v11_0_check_fw_cp_gfx_shadow) */
+    CHECK(di.shadow_size == 0 && di.shadow_alignment == 0 && di.csa_size == 0 && di.csa_alignment == 0);
     printf("libdrm_amdgpu sees: %s, family %u, %u CUs\n",
            amdgpu_get_marketing_name(dev) ? amdgpu_get_marketing_name(dev) : "(no name)",
            gi.family_id, gi.cu_active_number);
@@ -220,6 +222,23 @@ int main(void)
         CHECK(amdgpu_cs_query_fence_status(&fence, AMDGPU_TIMEOUT_INFINITE, 0, &expired) == 0 &&
               expired);
         CHECK(amdgpu_cs_syncobj_wait(dev, &so, 1, INT64_MAX, 0, NULL) == 0);
+        /* AMDGPU_CHUNK_ID_CP_GFX_SHADOW through amdgpu_cs_submit_raw2: taken
+         * with INIT_SHADOW (a ring without shadowing ignores it), refused
+         * with an unknown flag (amdgpu_cs_p2_shadow) */
+        {
+            struct drm_amdgpu_cs_chunk sch[2];
+            struct drm_amdgpu_cs_chunk_cp_gfx_shadow sh;
+            uint64_t s2 = 0;
+            memset(&sh, 0, sizeof(sh));
+            sh.shadow_va = va + 0x10000; sh.csa_va = va + 0x20000;
+            sh.flags = AMDGPU_CS_CHUNK_CP_GFX_SHADOW_FLAGS_INIT_SHADOW;
+            sch[0] = ch[0];
+            sch[1].chunk_id = AMDGPU_CHUNK_ID_CP_GFX_SHADOW; sch[1].length_dw = sizeof(sh) / 4;
+            sch[1].chunk_data = (uint64_t)(uintptr_t)&sh;
+            CHECK(amdgpu_cs_submit_raw2(dev, ctx, 0, 2, sch, &s2) == 0 && s2 > seq);
+            sh.flags = 4;
+            CHECK(amdgpu_cs_submit_raw2(dev, ctx, 0, 2, sch, &s2) == -EINVAL);
+        }
         /* FENCE_TO_HANDLE with fds (libdrm_xnu makes them): a sync_file
          * and an opaque syncobj fd of the CS fence */
         {

@@ -153,6 +153,22 @@ static void synthetic(void)
 }
 
 /* PSP TA container (parse_ta_v2_microcode / parse_ta_bin_descriptor) */
+/* gfx_v11_0_check_fw_cp_gfx_shadow: GC 11.0.0/2/3, ME 1505, PFP 1600,
+ * MEC 512, SR-IOV only */
+static void shadow_check(void)
+{
+    const uint32_t gc1103 = AMD_IP_VERSION(11, 0, 3);
+    CHECK(amd_gfx11_check_fw_cp_gfx_shadow(gc1103, 1505, 1600, 512, 1) == 1);
+    CHECK(amd_gfx11_check_fw_cp_gfx_shadow(AMD_IP_VERSION(11, 0, 0), 1505, 1600, 512, 1) == 1);
+    CHECK(amd_gfx11_check_fw_cp_gfx_shadow(AMD_IP_VERSION(11, 0, 2), 1505, 1600, 512, 1) == 1);
+    CHECK(amd_gfx11_check_fw_cp_gfx_shadow(gc1103, 1505, 1600, 512, 0) == 0);   /* bare metal */
+    CHECK(amd_gfx11_check_fw_cp_gfx_shadow(gc1103, 1504, 1600, 512, 1) == 0);
+    CHECK(amd_gfx11_check_fw_cp_gfx_shadow(gc1103, 1505, 1599, 512, 1) == 0);
+    CHECK(amd_gfx11_check_fw_cp_gfx_shadow(gc1103, 1505, 1600, 511, 1) == 0);
+    CHECK(amd_gfx11_check_fw_cp_gfx_shadow(AMD_IP_VERSION(11, 0, 1), 9999, 9999, 9999, 1) == 0);
+    CHECK(amd_gfx11_check_fw_cp_gfx_shadow(AMD_IP_VERSION(11, 5, 0), 9999, 9999, 9999, 1) == 0);
+}
+
 static void ta_synthetic(void)
 {
     static uint8_t b[256 + 4000], work[256 + 4000];
@@ -269,6 +285,10 @@ static void real(const char *dir)
         printf("test_fw: versions ME 0x%x/%u PFP 0x%x/%u MEC 0x%x/%u RLC 0x%x/%u SDMA 0x%x/%u MES 0x%x/%u "
                "SOS 0x%x IMU 0x%x DMCUB 0x%x\n", ver[4], feat[4], ver[5], feat[5], ver[8], feat[8], ver[7],
                feat[7], ver[0xb], feat[0xb], ver[0x1a], feat[0x1a], ver[0xc], ver[0x1b], ver[0x14]);
+        /* gfx_v11_0_check_fw_cp_gfx_shadow on these files: new enough
+         * for CP gfx shadowing, which amdgpu still enables on a VF only */
+        CHECK(amd_gfx11_check_fw_cp_gfx_shadow(AMD_IP_VERSION(11, 0, 3), ver[4], ver[5], ver[8], 1) == 1);
+        CHECK(amd_gfx11_check_fw_cp_gfx_shadow(AMD_IP_VERSION(11, 0, 3), ver[4], ver[5], ver[8], 0) == 0);
     }
     for (i = 0; i < AMD_BLOB_COUNT; i++)
         free((void *)blobs[i].data);
@@ -303,6 +323,7 @@ static void real(const char *dir)
 int main(int argc, char **argv)
 {
     synthetic();
+    shadow_check();
     ta_synthetic();
     if (argc > 1 && argv[1][0])
         real(argv[1]);

@@ -175,6 +175,12 @@ typedef struct rdna3_cs_job {
     /* the GDS (bytes) / GWS (entries) / OA (counters) partitions of the
      * BO list's on-chip BOs; size 0: none (amdgpu_job_set_resources) */
     uint32_t gds_base, gds_size, gws_base, gws_size, oa_base, oa_size;
+    /* AMDGPU_CHUNK_ID_CP_GFX_SHADOW (amdgpu_cs_p2_shadow -> job->shadow_va,
+     * csa_va, gds_va, init_shadow): the gfx ring's SET_Q_PREEMPTION_MODE
+     * (gfx_v11_0_ring_emit_gfx_shadow) when the CP shadows state; 0 = none.
+     * Other rings and a ring without cp_gfx_shadow ignore them, as amdgpu. */
+    uint64_t shadow_va, csa_va, gds_va;
+    uint32_t init_shadow;
 } rdna3_cs_job;
 
 /* GFX 11 on-chip resources (gfx_v11_0_set_gds_init) */
@@ -188,6 +194,12 @@ typedef struct rdna3_cs_job {
 /* user fences the GPU may still write: their BOs stay referenced */
 #define RD_MAX_UF_PENDING 64
 
+/* gfx_v11_0_get_gfx_shadow_info: what a gfx11 CP shadow area and its
+ * firmware work area (CSA) need (AMDGPU_INFO_DEV_INFO shadow_* / csa_*) */
+#define RD_MQD_SHADOW_BASE_SIZE      73728
+#define RD_MQD_SHADOW_BASE_ALIGNMENT 256
+#define RD_MQD_FWWORKAREA_SIZE       484
+#define RD_MQD_FWWORKAREA_ALIGNMENT  256
 #define RD_MAX_CS_IBS 8
 typedef struct rdna3_ib {
     uint64_t va;              /* GPU VA in the submitting file's VM */
@@ -287,6 +299,13 @@ typedef struct rdna3_drm_device {
     /* open files, for DRM_AMDGPU_SCHED's target (by rdna3_drm_file.id) */
     struct rdna3_drm_file *files;
     uint32_t next_file_id;
+    /* amdgpu_ip_version(adev, GC_HWIP, 0): AMD_IP_VERSION(major, minor, rev)
+     * from discovery; with fw_version[] it decides cp_gfx_shadow
+     * (amd_gfx11_check_fw_cp_gfx_shadow) */
+    uint32_t gc_ip_version;
+    /* amdgpu_sriov_vf(adev): 0, the card is a physical function (the
+     * tests set it to see amdgpu's SR-IOV answers) */
+    uint32_t sriov_vf;
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {

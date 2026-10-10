@@ -139,6 +139,9 @@ static int g_out_first;
 /* g_bl: an AMDGPU_CHUNK_ID_BO_HANDLES chunk; g_bl_handle: cs.in.bo_list_handle */
 static struct drm_amdgpu_bo_list_in *g_bl;
 static uint32_t g_bl_handle;
+/* g_shadow: an AMDGPU_CHUNK_ID_CP_GFX_SHADOW chunk of g_shadow_dw dwords */
+static struct drm_amdgpu_cs_chunk_cp_gfx_shadow *g_shadow;
+static uint32_t g_shadow_dw;
 static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip, uint32_t in_sobj,
                      uint32_t out_sobj, uint64_t *handle)
 {
@@ -173,6 +176,10 @@ static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip
     if (g_bl) {
         chunks[n].chunk_id = AMDGPU_CHUNK_ID_BO_HANDLES; chunks[n].length_dw = sizeof(*g_bl) / 4;
         chunks[n].chunk_data = (uint64_t)(uintptr_t)g_bl; n++;
+    }
+    if (g_shadow) {
+        chunks[n].chunk_id = AMDGPU_CHUNK_ID_CP_GFX_SHADOW; chunks[n].length_dw = g_shadow_dw;
+        chunks[n].chunk_data = (uint64_t)(uintptr_t)g_shadow; n++;
     }
     for (uint32_t i = 0; i < n; i++)
         chunk_ptrs[i] = (uint64_t)(uintptr_t)&chunks[i];
@@ -899,6 +906,41 @@ int main(void)
             CHECK(dev.gws_map[0] == 0 && dev.oa_map[0] == 0 && live_bos == live);
             ring_done = ring_next;
         }
+        /* AMDGPU_CHUNK_ID_CP_GFX_SHADOW (amdgpu_cs_p2_shadow): flags other
+         * than INIT_SHADOW are refused, the VAs reach the job unchecked
+         * (0 = no shadowing), a job without the chunk carries none */
+        {
+            struct drm_amdgpu_cs_chunk_cp_gfx_shadow sh;
+            memset(&sh, 0, sizeof(sh));
+            sh.shadow_va = 0x0000400000100000ull; sh.csa_va = 0x0000400000200000ull;
+            sh.gds_va = 0x0000400000300000ull;
+            sh.flags = AMDGPU_CS_CHUNK_CP_GFX_SHADOW_FLAGS_INIT_SHADOW;
+            g_shadow = &sh; g_shadow_dw = sizeof(sh) / 4;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
+            CHECK(last_job.shadow_va == sh.shadow_va && last_job.csa_va == sh.csa_va &&
+                  last_job.gds_va == sh.gds_va && last_job.init_shadow == 1);
+            sh.flags = 0;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0 &&
+                  last_job.shadow_va == sh.shadow_va && last_job.init_shadow == 0);
+            sh.flags = 2;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            sh.flags = AMDGPU_CS_CHUNK_CP_GFX_SHADOW_FLAGS_INIT_SHADOW | (1ull << 32);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            /* all zero: shadowing off for this job (gfx_v11_0_ring_emit_gfx_shadow
+             * with shadow_va 0) */
+            memset(&sh, 0, sizeof(sh));
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0 &&
+                  !last_job.shadow_va && !last_job.csa_va && !last_job.gds_va && !last_job.init_shadow);
+            /* a short chunk reads as zeros past its end */
+            sh.shadow_va = 0x1000; sh.csa_va = 0x2000; sh.gds_va = 0x3000; sh.flags = 1;
+            g_shadow_dw = 2;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0 &&
+                  last_job.shadow_va == 0x1000 && !last_job.csa_va && !last_job.init_shadow);
+            g_shadow = NULL; g_shadow_dw = 0;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0 &&
+                  !last_job.shadow_va && !last_job.init_shadow);
+            ring_done = ring_next;
+        }
         /* WAIT_CS on ~0 = latest */
         w.in.handle = ~0ull; w.in.timeout = 1;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 0);
@@ -965,6 +1007,31 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
         in.query_fw.index = 8;   /* XGMI_AUX: amdgpu_firmware_info has no case for it */
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+    }
+    /* DEV_INFO shadow_* / csa_* (gfx_v11_0_get_gfx_shadow_info): only with
+     * cp_gfx_shadow - firmware new enough (ME 1505, PFP 1600, MEC 512) and,
+     * as amdgpu decides it, a VF. The card's firmware qualifies, the card
+     * is no VF: zeros, so RADV / radeonsi never ask for shadowing. */
+    {
+        struct drm_amdgpu_info_device di;
+        CHECK(dev.gc_ip_version == 0x0b0003);
+        dev.fw_version[AMDGPU_INFO_FW_GFX_ME] = 2540;
+        dev.fw_version[AMDGPU_INFO_FW_GFX_PFP] = 2710;
+        dev.fw_version[AMDGPU_INFO_FW_GFX_MEC] = 2790;
+        memset(&di, 0xff, sizeof(di));
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0);
+        CHECK(di.shadow_size == 0 && di.shadow_alignment == 0 && di.csa_size == 0 &&
+              di.csa_alignment == 0 && di.device_id == 0x747E);
+        dev.sriov_vf = 1;
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0);
+        CHECK(di.shadow_size == 73728 && di.shadow_alignment == 256 && di.csa_size == 484 &&
+              di.csa_alignment == 256);
+        CHECK(dev.dev_info.shadow_size == 0);   /* answered per query, the table stays */
+        dev.fw_version[AMDGPU_INFO_FW_GFX_PFP] = 1599;   /* too old even for a VF */
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.shadow_size == 0 &&
+              di.csa_size == 0);
+        dev.sriov_vf = 0;
+        dev.fw_version[AMDGPU_INFO_FW_GFX_PFP] = 2710;
     }
 
     /* AMDGPU_INFO_VBIOS: size, image from an offset, strings; none -> 0 / EINVAL */
