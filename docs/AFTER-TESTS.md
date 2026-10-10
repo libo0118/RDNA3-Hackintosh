@@ -739,3 +739,25 @@ running head before the link goes down and marks it (fHeadLinkDown), the
 wake brings back the link of every head macOS unblanked while asleep
 (displayLinkUp), and hwInit's displayMirror leaves a lit clone alone on a
 reset or resume.
+
+### Step `gamma` with the accelerator: plane-less transactions to the base class
+
+Card run 30: with the accelerator's display pipe, macOS sends the gamma
+tables as display-pipe transactions without a plane
+(`debug.rdna3accel_iop_empty` +6: 3 tables x 2 heads) and never calls
+`setGammaTable`; without the accelerator (`gamma0`) `setGammaTable`
+reaches the framebuffer and the OGAM works. With `rdna3gamma=1`,
+`RD3DisplayPipe::performTransaction` now hands a plane-less transaction to
+IOAcceleratorFamily2's own `performTransaction` (IOAccelLegacyDisplayPipe's
+if it exports one, else IOAccelDisplayPipe's; weak imports, so a missing
+symbol cannot stop the kext loading) and returns its result. The next run
+of step `gamma` should show the accelerator log line `iop: plane-less
+transaction handed to <class>::performTransaction -> 0x0`,
+`debug.rdna3accel_iop_empty_base` going up with `iop_empty`, and then the
+framebuffer's `first setGammaTable` / core `display: head N gamma` lines
+and the CRCs moving as in `gamma0`. `iop_empty_base_err` going up (or the
+log line with a non-zero result) means the base refused the transaction;
+`IOAcceleratorFamily2 exports no performTransaction` means neither symbol
+resolved (the transaction is then answered as before). A refusal goes back
+to WindowServer as the base's error; booting without `rdna3gamma=1` brings
+back the old answer.

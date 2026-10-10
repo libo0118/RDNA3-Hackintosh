@@ -325,10 +325,10 @@ static bool rootFsReady()
     return true;
 }
 
-bool RDNA3Bringup::loadFirmware(const char *name, RDNA3Firmware *out)
+bool RDNA3Bringup::loadFirmware(const char *name, RDNA3Firmware *out, bool optional)
 {
     /* the root volume may not be mounted yet early in boot: retry ~2 min */
-    for (int attempt = 0; attempt < 120 && !fAbort; attempt++) {
+    for (int attempt = 0; attempt < (optional ? 1 : 120) && !fAbort; attempt++) {
         if (!rootFsReady()) {
             IOSleep(1000);
             continue;
@@ -341,6 +341,8 @@ bool RDNA3Bringup::loadFirmware(const char *name, RDNA3Firmware *out)
                 return true;
             }
         }
+        if (optional)
+            break;
         IOSleep(1000);
     }
     BLOG("firmware %s: not available (copy it into the kext's Resources)", name);
@@ -585,8 +587,24 @@ void RDNA3Bringup::run()
     /* AMDGPU_INFO_FW_VERSION (amdgpu_firmware_info): the headers' versions,
      * the PMFW's own (smu_cmn_get_smc_version) and the running MES pipes' */
     {
-        uint32_t ver[32], feat[32];
+        uint32_t ver[32], feat[32], ta[RD_TA_TYPES] = {};
         amd_fw_versions(fBlobRefs, fPsp ? &fPsp->sos : nullptr, ver, feat);
+        /* AMDGPU_INFO_FW_ASD / _TA: psp_init_ta_microcode's view of the TA
+         * file (only its versions: the kext loads no TA). Optional - an
+         * older install lacks the file and reports 0, as for a TA amdgpu
+         * does not find. */
+        {
+            RDNA3Firmware taFw = {};
+            amd_psp_ta t;
+            if (loadFirmware(amd_navi32_ta_name, &taFw, true)) {
+                amd_fw_status tst = amd_psp_ta_parse(taFw.data, taFw.len, &t);
+                if (tst == AMD_FW_OK)
+                    amd_fw_ta_versions(&t, ver, feat, ta);
+                else
+                    BLOG("firmware %s: %s", amd_navi32_ta_name, amd_fw_status_str(tst));
+                IOFree(taFw.data, taFw.len);
+            }
+        }
         if (fSmuVersion)
             ver[AMDGPU_INFO_FW_SMC] = fSmuVersion;
         if (fMes && fMes->sched_version) {
@@ -597,11 +615,11 @@ void RDNA3Bringup::run()
             ver[AMDGPU_INFO_FW_MES_KIQ] = fMes->kiq_version & 0xfff;
             feat[AMDGPU_INFO_FW_MES_KIQ] = (fMes->kiq_version >> 12) & 0xfff;
         }
-        fOwner->drmSetFirmware(ver, feat);
-        BLOG("firmware versions: ME 0x%x PFP 0x%x MEC 0x%x RLC 0x%x SDMA 0x%x SMC 0x%x SOS 0x%x MES 0x%x",
-             ver[AMDGPU_INFO_FW_GFX_ME], ver[AMDGPU_INFO_FW_GFX_PFP], ver[AMDGPU_INFO_FW_GFX_MEC],
+        fOwner->drmSetFirmware(ver, feat, ta);
+        BLOG("firmware versions: ME 0x%x PFP 0x%x MEC 0x%x RLC 0x%x SDMA 0x%x SMC 0x%x SOS 0x%x MES 0x%x "
+             "ASD 0x%x", ver[AMDGPU_INFO_FW_GFX_ME], ver[AMDGPU_INFO_FW_GFX_PFP], ver[AMDGPU_INFO_FW_GFX_MEC],
              ver[AMDGPU_INFO_FW_GFX_RLC], ver[AMDGPU_INFO_FW_SDMA], ver[AMDGPU_INFO_FW_SMC],
-             ver[AMDGPU_INFO_FW_SOS], ver[AMDGPU_INFO_FW_MES]);
+             ver[AMDGPU_INFO_FW_SOS], ver[AMDGPU_INFO_FW_MES], ver[AMDGPU_INFO_FW_ASD]);
     }
 
     if (fPmUp)
@@ -1481,6 +1499,12 @@ int RDNA3Bringup::sensor(uint32_t type, uint32_t *value)
     case AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_MCLK:
         *value = fSmu->uclk.level[fSmu->uclk.count ? fSmu->uclk.count - 1 : 0];
         return 0;
+    /* smu_v13_0_0_read_sensor (MP1 13.0.0 / 13.0.10) has no
+     * AMDGPU_PP_SENSOR_GPU_INPUT_POWER: -EOPNOTSUPP, which amdgpu_info_ioctl
+     * turns into -EINVAL. The metrics table's power is the average
+     * (AverageSocketPower, AMDGPU_INFO_SENSOR_GPU_AVG_POWER). */
+    case AMDGPU_INFO_SENSOR_GPU_INPUT_POWER:
+        return -RD_EINVAL;
     default:
         break;
     }

@@ -224,6 +224,32 @@ static int info_sensor(rdna3_drm_file *f, uint32_t type, uint32_t *out)
     return IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in);
 }
 
+static int h_priv;
+static int h_privileged(void *c) { (void)c; return h_priv; }
+
+static int ctx_alloc(rdna3_drm_file *f, int32_t prio, uint32_t *id)
+{
+    union drm_amdgpu_ctx c;
+    int r;
+    memset(&c, 0, sizeof(c));
+    c.in.op = AMDGPU_CTX_OP_ALLOC_CTX;
+    c.in.priority = prio;
+    r = IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c);
+    *id = r ? 0 : c.out.alloc.ctx_id;
+    return r;
+}
+
+static int sched(rdna3_drm_file *f, uint32_t op, int32_t fd, int32_t prio, uint32_t ctx)
+{
+    union drm_amdgpu_sched s;
+    memset(&s, 0, sizeof(s));
+    s.in.op = op;
+    s.in.fd = fd;
+    s.in.priority = prio;
+    s.in.ctx_id = ctx;
+    return IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_SCHED), s);
+}
+
 static int h_scanout(void *ctx, struct rd_xnu_scanout *s)
 {
     (void)ctx;
@@ -241,7 +267,7 @@ int main(void)
     static rdna3_drm_file file;
     rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
                           h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL, NULL,
-                          NULL, NULL, NULL, NULL, NULL };
+                          NULL, NULL, NULL, NULL, NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -424,6 +450,90 @@ int main(void)
         memset(&c, 0, sizeof(c));
         c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = id;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+    }
+    /* context priorities (amdgpu_ctx_ioctl / amdgpu_ctx_priority_permit) and
+     * DRM_AMDGPU_SCHED overrides (amdgpu_sched_ioctl), by file id */
+    {
+        static rdna3_drm_file other;
+        struct rd_xnu_file_id fid, oid;
+        uint32_t a, b, c2;
+        CHECK(rdna3_drm_file_open(&dev, &other) == 0);
+        memset(&fid, 0xff, sizeof(fid));
+        CHECK(IOCTL(f, RD_NR_XNU_FILE_ID, fid) == 0 && fid.id != 0 && fid.pad == 0);
+        CHECK(IOCTL(&other, RD_NR_XNU_FILE_ID, oid) == 0 && oid.id != 0 && oid.id != fid.id);
+        /* garbage priority -> NORMAL; above NORMAL needs privilege */
+        CHECK(ctx_alloc(&other, 12345, &a) == 0 && rdna3_drm_ctx_priority(&other, a) == AMDGPU_CTX_PRIORITY_NORMAL);
+        CHECK(ctx_alloc(&other, AMDGPU_CTX_PRIORITY_LOW, &b) == 0 &&
+              rdna3_drm_ctx_priority(&other, b) == AMDGPU_CTX_PRIORITY_LOW);
+        CHECK(ctx_alloc(&other, AMDGPU_CTX_PRIORITY_HIGH, &c2) == -RD_EACCES);
+        dev.ops.privileged = h_privileged;
+        CHECK(ctx_alloc(&other, AMDGPU_CTX_PRIORITY_HIGH, &c2) == -RD_EACCES);
+        h_priv = 1;
+        CHECK(ctx_alloc(&other, AMDGPU_CTX_PRIORITY_VERY_HIGH, &c2) == 0 &&
+              rdna3_drm_ctx_priority(&other, c2) == AMDGPU_CTX_PRIORITY_VERY_HIGH);
+        h_priv = 0;
+        /* SCHED: DRM_MASTER first (-EACCES), then op, priority, target */
+        CHECK(sched(f, AMDGPU_SCHED_OP_CONTEXT_PRIORITY_OVERRIDE, (int32_t)oid.id,
+                    AMDGPU_CTX_PRIORITY_HIGH, a) == -RD_EACCES);
+        h_priv = 1;
+        CHECK(sched(f, 3, (int32_t)oid.id, AMDGPU_CTX_PRIORITY_HIGH, a) == -RD_EINVAL);
+        CHECK(sched(f, AMDGPU_SCHED_OP_CONTEXT_PRIORITY_OVERRIDE, (int32_t)oid.id, 100, a) == -RD_EINVAL);
+        CHECK(sched(f, AMDGPU_SCHED_OP_CONTEXT_PRIORITY_OVERRIDE, (int32_t)oid.id,
+                    AMDGPU_CTX_PRIORITY_UNSET, a) == -RD_EINVAL);
+        CHECK(sched(f, AMDGPU_SCHED_OP_CONTEXT_PRIORITY_OVERRIDE, 0, AMDGPU_CTX_PRIORITY_HIGH, a) == -RD_EINVAL);
+        CHECK(sched(f, AMDGPU_SCHED_OP_CONTEXT_PRIORITY_OVERRIDE, (int32_t)oid.id,
+                    AMDGPU_CTX_PRIORITY_HIGH, 77) == -RD_EINVAL);
+        CHECK(sched(f, AMDGPU_SCHED_OP_CONTEXT_PRIORITY_OVERRIDE, (int32_t)oid.id,
+                    AMDGPU_CTX_PRIORITY_HIGH, a) == 0);
+        CHECK(rdna3_drm_ctx_priority(&other, a) == AMDGPU_CTX_PRIORITY_HIGH &&
+              rdna3_drm_ctx_priority(&other, b) == AMDGPU_CTX_PRIORITY_LOW);
+        /* process: every context of the file; init priority kept underneath */
+        CHECK(sched(f, AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE, (int32_t)oid.id,
+                    AMDGPU_CTX_PRIORITY_VERY_LOW, 0) == 0);
+        CHECK(rdna3_drm_ctx_priority(&other, a) == AMDGPU_CTX_PRIORITY_VERY_LOW &&
+              rdna3_drm_ctx_priority(&other, b) == AMDGPU_CTX_PRIORITY_VERY_LOW &&
+              rdna3_drm_ctx_priority(&other, c2) == AMDGPU_CTX_PRIORITY_VERY_LOW);
+        CHECK(other.ctx_init_prio[c2] == AMDGPU_CTX_PRIORITY_VERY_HIGH);
+        CHECK(rdna3_drm_ctx_priority(&other, 200) == AMDGPU_CTX_PRIORITY_UNSET);
+        /* a new context starts from its own priority, not the override */
+        {
+            uint32_t d;
+            CHECK(ctx_alloc(&other, AMDGPU_CTX_PRIORITY_NORMAL, &d) == 0 &&
+                  rdna3_drm_ctx_priority(&other, d) == AMDGPU_CTX_PRIORITY_NORMAL);
+        }
+        h_priv = 0;
+        dev.ops.privileged = NULL;
+        rdna3_drm_file_close(&other);
+        /* a closed file is no target any more */
+        h_priv = 1;
+        dev.ops.privileged = h_privileged;
+        CHECK(sched(f, AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE, (int32_t)oid.id,
+                    AMDGPU_CTX_PRIORITY_LOW, 0) == -RD_EINVAL);
+        CHECK(sched(f, AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE, (int32_t)fid.id,
+                    AMDGPU_CTX_PRIORITY_LOW, 0) == 0);
+        h_priv = 0;
+        dev.ops.privileged = NULL;
+    }
+    /* DRM_AMDGPU_PROC_OPTIONS: no KFD (amdgpu without CONFIG_HSA_AMD);
+     * AMDGPU_INFO_NUM_HANDLES: unlimited UVD handles since Polaris */
+    {
+        struct drm_amdgpu_proc_options po;
+        struct drm_amdgpu_info_num_handles nh;
+        struct drm_amdgpu_info in;
+        memset(&po, 0, sizeof(po));
+        po.op = AMDGPU_PROC_OPTIONS_OP_KFD_SIGBUS_DELAY;
+        po.kfd_sigbus_delay.value = 100;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_PROC_OPTIONS), po) == -RD_EOPNOTSUPP);
+        po.op = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_PROC_OPTIONS), po) == -RD_EINVAL);
+        memset(&in, 0, sizeof(in));
+        in.return_pointer = (uint64_t)(uintptr_t)&nh;
+        in.return_size = sizeof(nh);
+        in.query = AMDGPU_INFO_NUM_HANDLES;
+        in.query_hw_ip.type = AMDGPU_HW_IP_UVD;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_ENODATA);
+        in.query_hw_ip.type = AMDGPU_HW_IP_VCN_DEC;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
     }
     /* GEM_USERPTR: the OS wires the client's pages; no mmap, VA maps work */
     {
@@ -835,6 +945,25 @@ int main(void)
         in.query_fw.index = 1;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && fw.ver == 0);
         in.query_fw.index = 2;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+        /* ASD from the table; TA by TA_FW_TYPE_PSP_* sub-index (XGMI 2 ..
+         * SECUREDISPLAY 7), 0 for a TA the file lacks, others refused */
+        dev.fw_version[AMDGPU_INFO_FW_ASD] = dev.fw_feature[AMDGPU_INFO_FW_ASD] = 0x21000118;
+        dev.ta_version[4] = 0x17000053;   /* HDCP */
+        dev.ta_version[1] = 0x21000118;   /* ASD: not a FW_TA sub-index */
+        in.query_fw.fw_type = AMDGPU_INFO_FW_ASD;
+        in.query_fw.index = 0;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && fw.ver == 0x21000118 &&
+              fw.feature == 0x21000118);
+        in.query_fw.fw_type = AMDGPU_INFO_FW_TA;
+        in.query_fw.index = 4;
+        fw.feature = 7;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && fw.ver == 0x17000053 && fw.feature == 0);
+        in.query_fw.index = 7;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && fw.ver == 0);
+        in.query_fw.index = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+        in.query_fw.index = 8;   /* XGMI_AUX: amdgpu_firmware_info has no case for it */
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
     }
 

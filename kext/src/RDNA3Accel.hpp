@@ -110,8 +110,10 @@ public:
      * reaches must not take it again (card run 27: resume hung there) */
     void          drmHeldHere(bool on) { fDrmHeldBy = on ? IOThreadSelf() : nullptr; }
     bool          drmHeldByMe() const { return fDrmHeldBy && fDrmHeldBy == IOThreadSelf(); }
-    /* AMDGPU_INFO_FW_VERSION table from the bring-up (amd_fw_versions) */
-    void          drmSetFirmware(const uint32_t ver[32], const uint32_t feature[32]);
+    /* AMDGPU_INFO_FW_VERSION table from the bring-up (amd_fw_versions);
+     * ta: AMDGPU_INFO_FW_TA versions by TA_FW_TYPE_* (amd_fw_ta_versions) */
+    void          drmSetFirmware(const uint32_t ver[32], const uint32_t feature[32],
+                                 const uint32_t ta[RD_TA_TYPES]);
     /* AMDGPU_INFO_VBIOS: a copy of the image and its strings */
     void          drmSetVbios(const uint8_t *image, uint32_t len, const struct drm_amdgpu_info_vbios *info);
 
@@ -265,7 +267,7 @@ private:
     /* rdna3dispclk=1: the PMFW's DISPCLK / DPPCLK limits, read once */
     struct rdna3_dcn_clk_limits *fClkLim = nullptr;
     const struct rdna3_dcn_clk_limits *displayClkLimits();
-    uint32_t      fFwVer[32] = {}, fFwFeat[32] = {};
+    uint32_t      fFwVer[32] = {}, fFwFeat[32] = {}, fTaVer[RD_TA_TYPES] = {};
     uint8_t      *fVbiosCopy = nullptr;
     uint32_t      fVbiosCopyLen = 0;
     struct drm_amdgpu_info_vbios fVbiosInfo = {};

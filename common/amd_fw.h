@@ -60,6 +60,36 @@ typedef struct amd_psp_sos {
 
 amd_fw_status amd_psp_sos_parse(const uint8_t *fw, size_t len, amd_psp_sos *out);
 
+/* ---------------- PSP TA container (psp_<ver>_ta.bin) ---------------- */
+
+/* TA_FW_TYPE_* (enum ta_fw_type, amdgpu_ucode.h); also the sub-index of
+ * AMDGPU_INFO_FW_TA */
+enum {
+    AMD_TA_ASD = 1, AMD_TA_XGMI, AMD_TA_RAS, AMD_TA_HDCP, AMD_TA_DTM, AMD_TA_RAP,
+    AMD_TA_SECUREDISPLAY, AMD_TA_XGMI_AUX, AMD_TA_MAX
+};
+
+/* the trusted applications of the TA file as amdgpu's psp contexts keep
+ * them after psp_init_ta_microcode -> parse_ta_v2_microcode ->
+ * parse_ta_bin_descriptor: by TA type, offset from the start of the file,
+ * size 0 = not in the file. On MP0 other than 13.0.6 an XGMI_AUX entry
+ * lands in the XGMI slot (is_ta_fw_applicable), so bin[AMD_TA_XGMI_AUX]
+ * stays empty. */
+typedef struct amd_psp_ta {
+    uint32_t    ucode_version;
+    amd_psp_bin bin[AMD_TA_MAX];
+} amd_psp_ta;
+
+amd_fw_status amd_psp_ta_parse(const uint8_t *fw, size_t len, amd_psp_ta *out);
+
+/* AMDGPU_INFO_FW_ASD and AMDGPU_INFO_FW_TA (amdgpu_firmware_info): ASD's
+ * version goes into ver[] and feature[] (parse_ta_bin_descriptor sets the
+ * ASD feature to its fw_version); ta_ver[] gets each TA's version by
+ * AMD_TA_* (their feature versions stay 0: a v2 TA file carries none).
+ * A TA the file lacks reads 0, as amdgpu's zeroed context does. */
+void amd_fw_ta_versions(const amd_psp_ta *ta, uint32_t ver[32], uint32_t feature[32],
+                        uint32_t ta_ver[AMD_TA_MAX]);
+
 /* PSP bootloader commands (enum psp_bootloader_cmd, amdgpu_psp.h) in the
  * order psp_hw_start() issues them. SOS goes last and has its own
  * handshake (C2PMSG_81 sign of life). */
@@ -166,6 +196,7 @@ const char *amd_fw_status_str(amd_fw_status s);
 /* linux-firmware file names for Navi 32 (GC 11.0.3), index by enum amd_fw_blob */
 extern const char *const amd_navi32_fw_names[AMD_BLOB_COUNT];
 extern const char *const amd_navi32_sos_name;
+extern const char *const amd_navi32_ta_name;   /* optional: only versions come from it */
 
 /* AMDGPU_INFO_FW_VERSION (amdgpu_firmware_info): version and feature of
  * each firmware, by AMDGPU_INFO_FW_* index (< 32), from the blobs' headers

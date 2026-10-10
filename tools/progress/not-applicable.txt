@@ -31,6 +31,7 @@ dmub_dcn32_skip_dmub_panel_power_sequence|dmub_srv_set_skip_panel_power_sequence
 mpc3_(program_shaper|program_shaper_lut|program_shaper_luta_settings|program_shaper_lutb_settings|configure_shaper_lut|get_shaper_current|power_on_shaper_3dlut|program_3dlut|select_3dlut_ram|select_3dlut_ram_mask|set3dlut_ram10|set3dlut_ram12|set_3dlut_mode|read_mpcc_state|set_rmu_mux|get_rmu_mux_status)|mpcc3_(acquire|release)_rmu|get3dlut_config  DCN 3.0 code path: DCN 3.2 uses its own mpc32_* / mpc1_* (dcn32_mpc_funcs)
 AMDGPU_INFO_FW_(UVD|VCE|DMCU|GFX_CE|VPE|GMC|CAP)  firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP)
 AMDGPU_INFO_SENSOR_VDDNB  northbridge voltage: APUs only
+AMDGPU_INFO_SENSOR_GPU_INPUT_POWER  input power: amdgpu does not report it for SMU 13.0.0 / 13.0.10 (smu_v13_0_0_read_sensor: -EOPNOTSUPP; this card answers average power)
 AMDGPU_INFO_VCE_CLOCK_TABLE  VCE: Navi 32 has VCN instead
 AMDGPU_INFO_RAS_ENABLED_FEATURES  RAS: not on this card
 

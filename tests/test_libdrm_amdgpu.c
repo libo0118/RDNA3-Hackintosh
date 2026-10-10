@@ -283,6 +283,16 @@ int main(void)
         amdgpu_context_handle ctx;
         uint32_t so;
         CHECK(amdgpu_cs_ctx_create(dev, &ctx) == 0);
+        /* DRM_AMDGPU_SCHED on a "master" fd naming the device's fd: the
+         * shim turns that fd into its file id; root only (DRM_MASTER) */
+        {
+            int mfd = drm_xnu_open("/dev/dri/renderD128", 0);
+            int want = geteuid() == 0 ? 0 : -EACCES;
+            CHECK(mfd >= 0);
+            CHECK(amdgpu_cs_ctx_override_priority(dev, ctx, mfd, AMDGPU_CTX_PRIORITY_HIGH) == want);
+            CHECK(amdgpu_cs_ctx_override_priority(dev, ctx, mfd, 7) == (want ? want : -EINVAL));
+            CHECK(drm_xnu_close(mfd) == 0);
+        }
         CHECK(amdgpu_cs_ctx_free(ctx) == 0);
         CHECK(amdgpu_cs_create_syncobj2(dev, DRM_SYNCOBJ_CREATE_SIGNALED, &so) == 0);
         CHECK(amdgpu_cs_syncobj_wait(dev, &so, 1, 0, 0, NULL) == 0);

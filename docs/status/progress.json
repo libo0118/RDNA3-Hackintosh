@@ -1,29 +1,29 @@
 {
  "amdgpu": {
-  "works": 307,
-  "ported": 333,
+  "works": 310,
+  "ported": 336,
   "total": 1297,
   "not_applicable": 201,
-  "works_pct": 23.7,
-  "ported_pct": 25.7,
+  "works_pct": 23.9,
+  "ported_pct": 25.9,
   "groups": [
    {
     "name": "PSP 13",
     "steps": [
      "4"
     ],
-    "works": 18,
+    "works": 21,
     "ported": 0,
-    "todo": 79,
+    "todo": 76,
     "items": {
      "acquire_psp_cmd_buf": "todo",
      "amdgpu_psp_wait_for_bootloader": "todo",
      "fw_load_skip_check": "works",
      "is_psp_fw_valid": "todo",
      "parse_sos_bin_descriptor": "todo",
-     "parse_ta_bin_descriptor": "todo",
+     "parse_ta_bin_descriptor": "works",
      "parse_ta_v1_microcode": "todo",
-     "parse_ta_v2_microcode": "todo",
+     "parse_ta_v2_microcode": "works",
      "psp_asd_initialize": "todo",
      "psp_asd_terminate": "todo",
      "psp_boot_config_get": "todo",
@@ -51,7 +51,7 @@
      "psp_init_cap_microcode": "todo",
      "psp_init_sos_base_fw": "works",
      "psp_init_sos_microcode": "works",
-     "psp_init_ta_microcode": "todo",
+     "psp_init_ta_microcode": "works",
      "psp_init_toc_microcode": "todo",
      "psp_load_fw": "todo",
      "psp_load_fw_list": "todo",
@@ -1708,12 +1708,12 @@
   ]
  },
  "uapi": {
-  "works": 95,
-  "ported": 95,
-  "total": 106,
-  "not_applicable": 14,
-  "works_pct": 89.6,
-  "ported_pct": 89.6,
+  "works": 100,
+  "ported": 100,
+  "total": 105,
+  "not_applicable": 15,
+  "works_pct": 95.2,
+  "ported_pct": 95.2,
   "groups": [
    {
     "name": "amdgpu ioctls",
@@ -1721,9 +1721,9 @@
      "7",
      "8"
     ],
-    "works": 15,
+    "works": 17,
     "ported": 0,
-    "todo": 5,
+    "todo": 3,
     "items": {
      "DRM_AMDGPU_BO_LIST": "works",
      "DRM_AMDGPU_CS": "works",
@@ -1737,8 +1737,8 @@
      "DRM_AMDGPU_GEM_VA": "works",
      "DRM_AMDGPU_GEM_WAIT_IDLE": "works",
      "DRM_AMDGPU_INFO": "works",
-     "DRM_AMDGPU_PROC_OPTIONS": "todo",
-     "DRM_AMDGPU_SCHED": "todo",
+     "DRM_AMDGPU_PROC_OPTIONS": "works",
+     "DRM_AMDGPU_SCHED": "works",
      "DRM_AMDGPU_USERQ": "todo",
      "DRM_AMDGPU_USERQ_SIGNAL": "todo",
      "DRM_AMDGPU_USERQ_WAIT": "todo",
@@ -1789,9 +1789,9 @@
     "steps": [
      "7"
     ],
-    "works": 25,
+    "works": 26,
     "ported": 0,
-    "todo": 2,
+    "todo": 1,
     "items": {
      "AMDGPU_INFO_ACCEL_WORKING": "works",
      "AMDGPU_INFO_DEV_INFO": "works",
@@ -1805,7 +1805,7 @@
      "AMDGPU_INFO_MEMORY": "works",
      "AMDGPU_INFO_NUM_BYTES_MOVED": "works",
      "AMDGPU_INFO_NUM_EVICTIONS": "works",
-     "AMDGPU_INFO_NUM_HANDLES": "todo",
+     "AMDGPU_INFO_NUM_HANDLES": "works",
      "AMDGPU_INFO_NUM_VRAM_CPU_PAGE_FAULTS": "works",
      "AMDGPU_INFO_READ_MMR_REG": "works",
      "AMDGPU_INFO_SENSOR": "works",
@@ -1833,11 +1833,11 @@
      "5",
      "7"
     ],
-    "works": 28,
+    "works": 30,
     "ported": 0,
-    "todo": 3,
+    "todo": 0,
     "items": {
-     "AMDGPU_INFO_FW_ASD": "todo",
+     "AMDGPU_INFO_FW_ASD": "works",
      "AMDGPU_INFO_FW_DMCUB": "works",
      "AMDGPU_INFO_FW_GFX_ME": "works",
      "AMDGPU_INFO_FW_GFX_MEC": "works",
@@ -1854,13 +1854,12 @@
      "AMDGPU_INFO_FW_SDMA": "works",
      "AMDGPU_INFO_FW_SMC": "works",
      "AMDGPU_INFO_FW_SOS": "works",
-     "AMDGPU_INFO_FW_TA": "todo",
+     "AMDGPU_INFO_FW_TA": "works",
      "AMDGPU_INFO_FW_TOC": "works",
      "AMDGPU_INFO_FW_VCN": "works",
      "AMDGPU_INFO_SENSOR_GFX_MCLK": "works",
      "AMDGPU_INFO_SENSOR_GFX_SCLK": "works",
      "AMDGPU_INFO_SENSOR_GPU_AVG_POWER": "works",
-     "AMDGPU_INFO_SENSOR_GPU_INPUT_POWER": "todo",
      "AMDGPU_INFO_SENSOR_GPU_LOAD": "works",
      "AMDGPU_INFO_SENSOR_GPU_TEMP": "works",
      "AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_MCLK": "works",
@@ -1877,6 +1876,7 @@
      "AMDGPU_INFO_FW_UVD": "firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP)",
      "AMDGPU_INFO_FW_VCE": "firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP)",
      "AMDGPU_INFO_FW_VPE": "firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP)",
+     "AMDGPU_INFO_SENSOR_GPU_INPUT_POWER": "input power: amdgpu does not report it for SMU 13.0.0 / 13.0.10 (smu_v13_0_0_read_sensor: -EOPNOTSUPP; this card answers average power)",
      "AMDGPU_INFO_SENSOR_VDDNB": "northbridge voltage: APUs only"
     }
    },

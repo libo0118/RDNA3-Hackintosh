@@ -196,7 +196,7 @@ def collect_uapi(passed):
         return n in srcwords
 
     core = [n for n in re.findall(r"#define\s+(RD_NR_[A-Z0-9_]+)", rdh)
-            if n not in ("RD_NR_AMDGPU", "RD_NR_XNU_SYNCOBJ_FENCE")]
+            if n not in ("RD_NR_AMDGPU", "RD_NR_XNU_SYNCOBJ_FENCE", "RD_NR_XNU_FILE_ID")]   # libdrm_xnu helpers
     fd_in_xnu = {"RD_NR_SYNCOBJ_HANDLE_TO_FD": "XNU_NR_SYNCOBJ_HANDLE_TO_FD",
                  "RD_NR_SYNCOBJ_FD_TO_HANDLE": "XNU_NR_SYNCOBJ_FD_TO_HANDLE"}
 

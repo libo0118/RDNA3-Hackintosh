@@ -14,7 +14,7 @@
 # Sane = the size in the common firmware header (first 32-bit word) equals
 # the file size, so an HTML error page or a truncated download never lands.
 set -u
-FILES="psp_13_0_10_sos.bin smu_13_0_10.bin sdma_6_0_3.bin gc_11_0_3_imu.bin
+FILES="psp_13_0_10_sos.bin psp_13_0_10_ta.bin smu_13_0_10.bin sdma_6_0_3.bin gc_11_0_3_imu.bin
 gc_11_0_3_pfp.bin gc_11_0_3_me.bin gc_11_0_3_mec.bin gc_11_0_3_rlc.bin
 gc_11_0_3_mes_2.bin gc_11_0_3_mes1.bin dcn_3_2_0_dmcub.bin vcn_4_0_0.bin"
 PIN=20260916
@@ -22,6 +22,7 @@ REF=${RDNA3_FW_REF:-$PIN}
 URL=${RDNA3_FW_URL:-https://gitlab.com/kernel-firmware/linux-firmware/-/raw}
 # SHA-256 of the files at linux-firmware tag $PIN (checked only for that tag)
 SUMS="psp_13_0_10_sos.bin 0bcaaad9cd8578d3841ae69155a6bd4fc3ceae8f4fb5a6ba4f576e7ace94d1d9
+psp_13_0_10_ta.bin 4a8c32aad88e028b70fcc220a859a1603684949782ac2cd09e8fa1cc5e46ff7a
 smu_13_0_10.bin d1c59c86d7d2b021218fa6a5c24a64057d39a86e115c8be4b99938499baae28e
 sdma_6_0_3.bin d47ac4db523aa35d77b27d57c35d4c04f431229dec6c0d667c36d98b985a6933
 gc_11_0_3_imu.bin beaf704d5acdf4623456b0d0cbcea8b8e428058340cd922a259a9045f5c457a3
