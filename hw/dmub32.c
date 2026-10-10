@@ -36,11 +36,12 @@ static uint32_t rd32le(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
-static uint32_t align_up(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }
+static uint32_t align_up(uint32_t v, uint32_t a) { return (v + a - 1) / a * a; }   /* dmub_align */
 static void udelay(rdna3_dev *d, uint32_t us) { d->os.udelay(d->os.ctx, us); }
 
 /* ---- firmware blob ---- */
 
+/* dmub_get_fw_meta_info_from_blob */
 static int meta_from_blob(const uint8_t *blob, uint32_t size, uint32_t meta_offset, rdna3_dmub_meta *m)
 {
     const uint8_t *p;
@@ -152,11 +153,13 @@ static uint64_t win_mc(const rdna3_dmub *dm, unsigned w) { return rdna3_vram_mc(
 
 /* ---- hardware (dmub_dcn32.c) ---- */
 
+/* dmub_dcn32_is_supported */
 int dmub32_is_supported(rdna3_dev *d)
 {
     return GET(RR(d, regCC_DC_PIPE_DIS), CC_DC_PIPE_DIS, DC_DMCUB_ENABLE) != 0;
 }
 
+/* dmub_dcn32_is_hw_init */
 int dmub32_is_hw_init(rdna3_dev *d)
 {
     return GET(RR(d, regDMCUB_CNTL), DMCUB_CNTL, DMCUB_ENABLE) &&
@@ -210,6 +213,7 @@ static void dcn32_reset(rdna3_dev *d)
     WR(d, regDMCUB_GPINT_DATAIN1, 0);
 }
 
+/* dmub_dcn32_reset_release */
 static void dcn32_reset_release(rdna3_dev *d, uint32_t psp_version)
 {
     uint32_t v;
@@ -233,10 +237,12 @@ static void dcn32_reset_release(rdna3_dev *d, uint32_t psp_version)
                 DMCUB_REGION3_CW##n##_TOP_ADDRESS, DMCUB_REGION3_CW##n##_ENABLE, 1));          \
     } while (0)
 
+/* dmub_dcn32_backdoor_load */
 static void dcn32_backdoor_load(rdna3_dmub *dm)
 {
     rdna3_dev *d = dm->d;
-    /* dmub_dcn32_translate_addr: MC address -> FB physical */
+    /* dmub_dcn32_translate_addr: MC address -> FB physical; the FB base and
+     * offset amdgpu_dm hands over (dmub_dcn32_get_fb_base_offset) */
     uint64_t fb_base = d->fb_start, fb_offset = d->fb_offset;
     uint64_t cw0 = win_mc(dm, RD_DMUB_WIN_INST_CONST) - fb_base + fb_offset;
     uint64_t cw1 = win_mc(dm, RD_DMUB_WIN_STACK) - fb_base + fb_offset;
@@ -382,22 +388,24 @@ int dmub32_hw_init(rdna3_dmub *dm, const uint8_t *vbios, uint32_t vbios_len, int
         dcn32_backdoor_load(dm);
     dcn32_setup_windows(dm);
     trace_size = win_size(dm, RD_DMUB_WIN_TRACEBUFF);
-    /* outbox0 = the trace buffer after its header entry */
+    /* outbox0 = the trace buffer after its header entry (dmub_dcn32_setup_outbox0) */
     WR(d, regDMCUB_OUTBOX0_BASE_ADDRESS, RD_DMUB_REGION5_BASE + RD_DMUB_TRACE_ENTRY_OFFSET);
     WR(d, regDMCUB_OUTBOX0_SIZE, trace_size - RD_DMUB_TRACE_ENTRY_OFFSET);
-    /* inbox1 / outbox1: the two halves of the mailbox window */
+    /* inbox1 / outbox1: the two halves of the mailbox window
+     * (dmub_dcn32_setup_mailbox, dmub_dcn32_setup_out_mailbox) */
     WR(d, regDMCUB_INBOX1_BASE_ADDRESS, RD_DMUB_CW4_BASE);
     WR(d, regDMCUB_INBOX1_SIZE, RD_DMUB_RB_SIZE);
     WR(d, regDMCUB_OUTBOX1_BASE_ADDRESS, RD_DMUB_CW4_BASE + RD_DMUB_RB_SIZE);
     WR(d, regDMCUB_OUTBOX1_SIZE, RD_DMUB_RB_SIZE);
-    /* boot options (z10_disable = 0), then skip_phy_init_panel_sequence = 0 */
+    /* boot options (z10_disable = 0, dmub_dcn32_enable_dmub_boot_options), then
+     * skip_phy_init_panel_sequence = 0 */
     WR(d, regDMCUB_SCRATCH14, 0);
     dcn32_reset_release(d, 0);
     dm->hw_init = 1;
 
     /* dmub_srv_wait_for_auto_load */
     for (i = 0; i <= timeout_us; i += 100) {
-        st = RR(d, regDMCUB_SCRATCH0);
+        st = RR(d, regDMCUB_SCRATCH0);   /* dmub_dcn32_get_fw_boot_status */
         if ((st & RD_DMUB_BOOT_DAL_FW) && (st & RD_DMUB_BOOT_MAILBOX_RDY))
             break;
         udelay(d, 100);
@@ -427,7 +435,7 @@ static int rb_full(const rdna3_dmub *dm)
 
 static int update_rptr(rdna3_dmub *dm)
 {
-    uint32_t rptr = RR(dm->d, regDMCUB_INBOX1_RPTR);
+    uint32_t rptr = RR(dm->d, regDMCUB_INBOX1_RPTR);   /* dmub_dcn32_get_inbox1_rptr */
     if (rptr > rb_size(dm))
         return RDNA3_EIO;
     if (dm->inbox1_rptr > rptr)
@@ -438,6 +446,8 @@ static int update_rptr(rdna3_dmub *dm)
     return RDNA3_OK;
 }
 
+/* dmub_srv_cmd_with_reply_data (reply) or the dc_dmub_srv run of one command:
+ * dmub_srv_cmd_queue, dmub_srv_cmd_execute, dmub_srv_wait_for_idle */
 int dmub32_cmd_execute(rdna3_dmub *dm, uint8_t cmd[RD_DMUB_RB_CMD_SIZE], int reply,
                        uint32_t timeout_us)
 {
@@ -467,7 +477,7 @@ int dmub32_cmd_execute(rdna3_dmub *dm, uint8_t cmd[RD_DMUB_RB_CMD_SIZE], int rep
     dm->submitted++;
     /* the DMCUB reads the ring from VRAM: make the BAR writes land first */
     rdna3_hdp_flush(d);
-    WR(d, regDMCUB_INBOX1_WPTR, dm->inbox1_wptr);
+    WR(d, regDMCUB_INBOX1_WPTR, dm->inbox1_wptr);   /* dmub_dcn32_set_inbox1_wptr */
     dm->inbox1_last_wptr = dm->inbox1_wptr;
 
     for (i = 0; i < timeout_us; i++) {
@@ -558,6 +568,7 @@ int dmub32_attach(rdna3_dmub *dm, rdna3_dev *d)
         return RDNA3_EINVAL;
     }
     dm->rb_size = size;
+    /* dmub_srv_sync_inbox1: dmub_dcn32_get_inbox1_rptr / dmub_dcn32_get_inbox1_wptr */
     dm->inbox1_rptr = RR(d, regDMCUB_INBOX1_RPTR);
     dm->inbox1_wptr = RR(d, regDMCUB_INBOX1_WPTR);
     for (i = 0; i < 100000 && dm->inbox1_rptr != dm->inbox1_wptr; i++) {
@@ -678,6 +689,7 @@ int dmub32_encoder_control(rdna3_dmub *dm, const rdna3_dig_enc_v1_5 *p)
     return dmub32_vbios_cmd(dm, RD_DMUB_VBIOS_DIGX_ENCODER_CONTROL, b, sizeof(b));
 }
 
+/* dmub_dcn32_get_outbox0_wptr */
 uint32_t dmub32_trace_wptr(rdna3_dmub *dm)
 {
     return RR(dm->d, regDMCUB_OUTBOX0_WPTR);

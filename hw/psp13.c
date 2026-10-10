@@ -415,7 +415,7 @@ int psp13_stage_ucodes(rdna3_psp *psp, const amd_ucode_plan *plan,
     uint32_t i;
 
     psp->fw_buf_size = plan->total_aligned;
-    psp->fw_buf = rdna3_vram_alloc(d, plan->total_aligned, 4096, "ucode-buf");
+    psp->fw_buf = rdna3_vram_alloc(d, plan->total_aligned, 4096, "ucode-buf");   /* amdgpu_ucode_create_bo */
     if (psp->fw_buf == UINT64_MAX)
         return RDNA3_ENOMEM;
     pos = psp->fw_buf;

@@ -179,7 +179,7 @@ int vbios_bootup_values(rdna3_dev *d, const rdna3_vbios *v, rdna3_vbios_boot *b)
     b->firmware_revision = rd32(t + 4);
     b->gfxclk = rd32(t + 8);
     b->uclk = rd32(t + 12);
-    b->firmware_capability = rd32(t + 16);
+    b->firmware_capability = rd32(t + 16);   /* amdgpu_atomfirmware_query_firmware_capability */
     b->vddc = rd16(t + 28);
     b->vddci = rd16(t + 30);
     b->mvddc = rd16(t + 32);

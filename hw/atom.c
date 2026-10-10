@@ -675,6 +675,7 @@ static void atom_op_postcard(atom_exec *ctx, int *ptr, int arg)
     (void)ctx;
 }
 
+/* atom_op_repeat, atom_op_savereg, atom_op_restorereg */
 static void atom_op_unimplemented(atom_exec *ctx, int *ptr, int arg)
 {
     /* repeat / savereg / restorereg: amdgpu prints "unimplemented!" and
@@ -896,6 +897,7 @@ static const struct {
 #undef SIX
 };
 
+/* amdgpu_atom_execute_table_locked */
 static int execute_locked(rdna3_atom *a, unsigned index, uint32_t *params, int params_size)
 {
     uint32_t base;
