@@ -1,9 +1,9 @@
 {
  "amdgpu": {
-  "works": 300,
+  "works": 307,
   "ported": 333,
   "total": 1498,
-  "works_pct": 20.0,
+  "works_pct": 20.5,
   "ported_pct": 22.2,
   "groups": [
    {
@@ -1594,8 +1594,8 @@
     "steps": [
      "hotplug"
     ],
-    "works": 0,
-    "ported": 7,
+    "works": 7,
+    "ported": 0,
     "todo": 8,
     "items": {
      "dal_hw_hpd_construct": "todo",
@@ -1604,15 +1604,15 @@
      "dal_hw_hpd_get_pin": "todo",
      "dal_hw_hpd_init": "todo",
      "get_hpd_line": "todo",
-     "get_value": "ported",
+     "get_value": "works",
      "link_disable_hpd": "todo",
-     "link_enable_hpd": "ported",
-     "link_enable_hpd_filter": "ported",
+     "link_enable_hpd": "works",
+     "link_enable_hpd_filter": "works",
      "link_get_hpd_gpio": "todo",
-     "link_get_hpd_state": "ported",
-     "program_hpd_filter": "ported",
-     "query_hpd_status": "ported",
-     "set_config": "ported"
+     "link_get_hpd_state": "works",
+     "program_hpd_filter": "works",
+     "query_hpd_status": "works",
+     "set_config": "works"
     }
    },
    {
@@ -1897,6 +1897,7 @@
   "9d",
   "9m",
   "9s",
+  "hotplug",
   "modeset",
   "modeset2"
  ]

@@ -128,7 +128,16 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
     # framebuffer/accelerator wait for "Allow" in Privacy & Security, which
     # only shows up now - open it for whoever is logged in and say so
     case " $(nvram boot-args 2>/dev/null | cut -f2-) " in
-        *" rdna3vmauto=1 "*) ;;
+        *" rdna3vmauto=1 "*)
+            # the new framebuffer/accelerator load from the Auxiliary KC only
+            # from the next boot: a step tested now would test the old ones
+            # (card run 27: gamma ran on the stale framebuffer). Tell the
+            # host to run this step again and stop here.
+            if [ -n "$updated" ] && [ -n "$HOST" ]; then
+                echo "new kexts installed; the host runs this step again" > /tmp/rdna3-rerun.txt
+                curl -sf --max-time 10 -T /tmp/rdna3-rerun.txt "$HOST/reports/rerun-$(date +%Y%m%d-%H%M%S).txt" >/dev/null 2>&1 &&
+                    finish
+            fi ;;
         *)
             if [ -n "$updated" ]; then
                 u=$(stat -f %Su /dev/console 2>/dev/null)

@@ -931,7 +931,7 @@ bool RDNA3Bringup::hwInit()
         if (!ret && fGfxOffWanted && fPmUp && fSmu) {
             fGfxOffCall = thread_call_allocate((thread_call_func_t)gfxOffTick, this);
             if (fGfxOffCall) {
-                IOLock *l = fOwner->drmLock();
+                IOLock *l = fOwner->drmHeldByMe() ? nullptr : fOwner->drmLock();
                 if (l)
                     IOLockLock(l);
                 gfxOffRelease();
@@ -1660,7 +1660,9 @@ bool RDNA3Bringup::gpuReset()
     if (fKiq) { fKiq->rb.ready = 0; fKiq->mapped = 0; }
     if (fKcq) { fKcq->rb.ready = 0; fKcq->mapped = 0; }
     fReinit = true;
+    fOwner->drmHeldHere(true);   /* the caller holds fDrmLock */
     ok = hwInit();
+    fOwner->drmHeldHere(false);
     fReinit = false;
     fResetCount++;
     if (fIntr)
@@ -1734,7 +1736,9 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
     if (fKiq) { fKiq->rb.ready = 0; fKiq->mapped = 0; }
     if (fKcq) { fKcq->rb.ready = 0; fKcq->mapped = 0; }
     fReinit = true;
+    fOwner->drmHeldHere(true);   /* the caller holds fDrmLock */
     ok = hwInit();
+    fOwner->drmHeldHere(false);
     fReinit = false;
     fResetCount++;
     if (fIntr)

@@ -678,3 +678,20 @@ shows the queue.
 | GAMMA: FAIL, no "first setGammaTable" line in the fb log | IOFramebuffer does not hand gamma down | check IOFBGammaWidth/IOFBGammaCount on RDNA3Framebuffer in ioreg |
 | "first setGammaTable" logged, no "gamma ... -> 0x0" | the core refused (rdna3gamma=1? DCN head?) | core log `display: gamma` |
 | the call reaches the core, the CRC does not move | OGAM not reaching the pipe (MPCC routing, memory power, MODE_CURRENT) | `RDNA3,Head<n>,Gamma` state |
+
+### Card run 27 (queue `gamma sleep hotplug`, build 102)
+
+- `gamma`: ran on the stale framebuffer (498e4d3fdc; the new one loads
+  from the Auxiliary KC only from the next boot), no result. autoreport now
+  stops a step that installed new kexts and the host's queue runs it again.
+- `sleep`: display sleep/wake passed (both pipes blanked, both lit again).
+  The system sleep woke on its RTC alarm with the card powered off (PSP
+  sOS gone, both heads lost); with rdna3resume=1 the bring-up ran PSP,
+  firmware and SMU and then hung for good: resumeAfterPowerLoss runs under
+  fDrmLock, and pmInit's drmSetClocks took it again (IOLock, not
+  recursive). gpuReset (from recover(), also under fDrmLock) had the same
+  deadlock - the likely reason the GFX hang test froze the VM. The drm*
+  setters now skip the lock when the reinit's caller holds it
+  (drmHeldHere/drmHeldByMe).
+- `hotplug`: passed - DP-3 pulled, its pipe down; plugged back, EDID re-read
+  and the pipe lit again; the framebuffer told; both pipes lit at the end.

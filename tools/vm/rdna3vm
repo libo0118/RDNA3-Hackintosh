@@ -520,7 +520,7 @@ cmd_queue() {
 
 cmd__queue() {
     load_conf
-    local n a how retried=
+    local n a how retried= rerun=
     while [ -s "$QUEUE" ]; do
         n=$(head -n1 "$QUEUE")
         sed -i 1d "$QUEUE"
@@ -530,6 +530,18 @@ cmd__queue() {
         RDNA3VM_BOOTARGS="$BASE_ARGS $DEBUG_ARGS $a rdna3vmauto=1" \
             RDNA3VM_TIMEOUT="$(auto_limit "$a")" bash "$SELF" _passthrough || true
         how=$(cat "$WORK/last-run" 2>/dev/null || echo unknown)
+        # the VM installed a new bundle and stopped (autoreport: the new
+        # framebuffer loads from the next boot): the same step again
+        if ls "$WORK"/reports/rerun-*.txt >/dev/null 2>&1; then
+            rm -f "$WORK"/reports/rerun-*.txt
+            if [ "${rerun:-}" != "$n" ]; then
+                echo "== queue: step $n installed new kexts; running it again so they are the ones tested"
+                rerun=$n
+                { printf '%s\n' "$n"; cat "$QUEUE"; } > "$QUEUE.new" && mv "$QUEUE.new" "$QUEUE"
+                sleep 60
+                continue
+            fi
+        fi
         # no last-run = the VM never started (the card not handed to
         # vfio-pci, queue run 24): the same step once more after a pause
         if [ "$how" = unknown ] && [ "${retried:-}" != "$n" ]; then

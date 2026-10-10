@@ -105,6 +105,11 @@ public:
     void  drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t minMclkKhz, uint32_t maxMclkKhz);
     RDNA3Bringup *bringup() const { return fBringup; }
     IOLock       *drmLock() const { return fDrmLock; }
+    /* hwInit() again (GPU reset from recover(), resume after a power
+     * loss) runs with fDrmLock held by its caller: the drm* setters it
+     * reaches must not take it again (card run 27: resume hung there) */
+    void          drmHeldHere(bool on) { fDrmHeldBy = on ? IOThreadSelf() : nullptr; }
+    bool          drmHeldByMe() const { return fDrmHeldBy && fDrmHeldBy == IOThreadSelf(); }
     /* AMDGPU_INFO_FW_VERSION table from the bring-up (amd_fw_versions) */
     void          drmSetFirmware(const uint32_t ver[32], const uint32_t feature[32]);
     /* AMDGPU_INFO_VBIOS: a copy of the image and its strings */
@@ -145,6 +150,7 @@ private:
     /* Stage 4 */
     rdna3_drm_device *fDrm  = nullptr;
     IOLock       *fDrmLock  = nullptr;
+    IOThread      fDrmHeldBy = nullptr;
     range_alloc  *fVramHeap = nullptr;   /* user BOs, CPU-visible part of VRAM */
     range_alloc  *fVramHeapHi = nullptr; /* user BOs beyond the BAR window */
     uint64_t      fVramHeapVisEnd = 0;   /* offsets below this are in fVramHeap */

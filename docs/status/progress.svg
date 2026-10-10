@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 20.0%   ported 22.2%   (300 / 333 / 1498)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 20.5%   ported 22.2%   (307 / 333 / 1498)</text>
 <g><title>Display: modeset: works 12%, ported 12% (32+0 of 261); verified by step(s) modeset</title>
 <rect x="1.0" y="53.0" width="9.7" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="10.7" y="53.0" width="9.7" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1555,14 +1555,14 @@
 <text x="389.7" y="320.2" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">IH interr…</text>
 <text x="389.7" y="334.2" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">30% / 30%</text>
 </g>
-<g><title>Display: hotplug: works 0%, ported 47% (0+7 of 15); verified by step(s) hotplug</title>
-<rect x="464.2" y="306.2" width="9.9" height="9.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="474.1" y="306.2" width="9.9" height="9.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="484.1" y="306.2" width="9.9" height="9.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="464.2" y="315.2" width="9.9" height="9.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="474.1" y="315.2" width="9.9" height="9.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="484.1" y="315.2" width="9.9" height="9.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="464.2" y="324.1" width="9.9" height="9.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<g><title>Display: hotplug: works 47%, ported 47% (7+0 of 15); verified by step(s) hotplug</title>
+<rect x="464.2" y="306.2" width="9.9" height="9.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="474.1" y="306.2" width="9.9" height="9.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="484.1" y="306.2" width="9.9" height="9.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="464.2" y="315.2" width="9.9" height="9.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="474.1" y="315.2" width="9.9" height="9.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="484.1" y="315.2" width="9.9" height="9.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="464.2" y="324.1" width="9.9" height="9.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="474.1" y="324.1" width="9.9" height="9.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="484.1" y="324.1" width="9.9" height="9.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="464.2" y="333.1" width="9.9" height="9.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>

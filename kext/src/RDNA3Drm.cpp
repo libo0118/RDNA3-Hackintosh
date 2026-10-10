@@ -333,10 +333,13 @@ void RDNA3Accel::drmSetFirmware(const uint32_t ver[32], const uint32_t feature[3
     memcpy(fFwVer, ver, sizeof(fFwVer));
     memcpy(fFwFeat, feature, sizeof(fFwFeat));
     if (fDrm && fDrmLock) {
-        IOLockLock(fDrmLock);
+        bool held = drmHeldByMe();
+        if (!held)
+            IOLockLock(fDrmLock);
         memcpy(fDrm->fw_version, fFwVer, sizeof(fFwVer));
         memcpy(fDrm->fw_feature, fFwFeat, sizeof(fFwFeat));
-        IOLockUnlock(fDrmLock);
+        if (!held)
+            IOLockUnlock(fDrmLock);
     }
 }
 
@@ -348,7 +351,8 @@ void RDNA3Accel::drmSetVbios(const uint8_t *image, uint32_t len, const drm_amdgp
     if (!c)
         return;
     memcpy(c, image, len);
-    if (fDrmLock)
+    bool held = drmHeldByMe();
+    if (fDrmLock && !held)
         IOLockLock(fDrmLock);
     fVbiosCopy = c;
     fVbiosCopyLen = len;
@@ -358,7 +362,7 @@ void RDNA3Accel::drmSetVbios(const uint8_t *image, uint32_t len, const drm_amdgp
         fDrm->vbios_len = fVbiosCopyLen;
         fDrm->vbios_info = fVbiosInfo;
     }
-    if (fDrmLock)
+    if (fDrmLock && !held)
         IOLockUnlock(fDrmLock);
 }
 
@@ -385,18 +389,24 @@ void RDNA3Accel::drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t
 {
     if (!fDrm || !fDrmLock)
         return;
-    IOLockLock(fDrmLock);
+    bool held = drmHeldByMe();
+    if (!held)
+        IOLockLock(fDrmLock);
     rdna3_drm_device_set_clocks(fDrm, minSclkKhz, maxSclkKhz, minMclkKhz, maxMclkKhz);
-    IOLockUnlock(fDrmLock);
+    if (!held)
+        IOLockUnlock(fDrmLock);
 }
 
 void RDNA3Accel::drmRingReady(uint32_t ip, uint32_t mask)
 {
     if (!fDrm || !fDrmLock)
         return;
-    IOLockLock(fDrmLock);
+    bool held = drmHeldByMe();
+    if (!held)
+        IOLockLock(fDrmLock);
     rdna3_drm_device_set_ring_ready(fDrm, ip, mask);
-    IOLockUnlock(fDrmLock);
+    if (!held)
+        IOLockUnlock(fDrmLock);
     LOG("HW IP %u ring mask 0x%x ready for command submission", ip, mask);
 }
 
