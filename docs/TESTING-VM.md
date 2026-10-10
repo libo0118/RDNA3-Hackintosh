@@ -161,7 +161,9 @@ steps:
 | `7` | SDMA: first commands executed by the GPU (+ DMA test) | same as above |
 | `8` | GFX: graphics ring (+ GFX test) | same as above |
 | `9` | our framebuffer instead of the UEFI image | the image should stay unchanged; **it may go dark** |
-| `9b` | the second monitor with the same picture (`rdna3vm args "rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=1"`) | only after step 5b passed; **either screen may go dark** |
+| `8c` | MES scheduler (`rdna3mes=1`) | low risk, the kernel rings stay on the KIQ |
+| `9b` | the second monitor with the same picture (`rdna3dmub=1 rdna3mirror=1`) | only after step 5b passed; **either screen may go dark** |
+| `9c` | the second monitor as its own display (`rdna3mirror=2`) | after 9b; **either screen may go dark** |
 | `10` | accelerator (WindowServer) | risky; send the reports from 0–9 first |
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.

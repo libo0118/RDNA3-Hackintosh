@@ -361,7 +361,10 @@ step_args() {
         6b) echo "rdna3lvl=6 rdna3msi=1" ;;
         7|7b) echo "rdna3lvl=7 rdna3msi=1" ;;
         8|8b) echo "rdna3lvl=8 rdna3msi=1" ;;
+        8c) echo "rdna3lvl=8 rdna3msi=1 rdna3mes=1" ;;
         9) echo "rdna3lvl=8 rdna3msi=1 rdna3fb=1" ;;
+        9b) echo "rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=1" ;;
+        9c) echo "rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2" ;;
         10) echo "rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3accel=1" ;;
         off) echo "-rdna3off" ;;
         *) return 1 ;;
@@ -399,9 +402,9 @@ launch() {   # launch "rdna3 args" stay(0/1)
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 6 6b 7 8 9 10"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 6 6b 7 8 8c 9 9b 9c 10"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 6 6b 7 8 9 10 off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 6 6b 7 8 8c 9 9b 9c 10 off)"
     launch "$a" "$stay"
 }
 
