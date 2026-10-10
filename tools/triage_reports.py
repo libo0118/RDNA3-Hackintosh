@@ -225,6 +225,10 @@ def report(path, show_all):
         last = [l for l in log.splitlines() if pat in l]
         if last:
             print("   info " + last[-1][last[-1].find("PM:"):][:150])
+    # rdna3idlecap=1: the GFXCLK cap while nothing is submitted
+    caps = [l[l.find("PM: "):] for l in log.splitlines() if "GFXCLK cap" in l or "GFXCLK capped" in l]
+    if caps:
+        print("   idle cap: %s ... (%d lines)" % (caps[0][:110], len(caps)))
     # rdna3pmexp=1: one line per idle-power variant (10 s each)
     exp = [l[l.find("PM experiment"):] for l in log.splitlines() if "PM experiment" in l and "activity" in l]
     if exp:

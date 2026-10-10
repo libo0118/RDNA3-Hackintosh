@@ -101,6 +101,9 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
             uint32_t pmexp = 0;
             PE_parse_boot_argn("rdna3pmexp", &pmexp, sizeof(pmexp));
             fPmExpWanted = pmexp != 0;
+            uint32_t idlecap = 0;
+            PE_parse_boot_argn("rdna3idlecap", &idlecap, sizeof(idlecap));
+            fIdleCapWanted = idlecap != 0;
         }
         fMsi = msi != 0;
         fDoorbells = db != 0;
@@ -1370,6 +1373,36 @@ bool RDNA3Bringup::pmExperimentTick()
     return true;
 }
 
+/* Idle power without the PMFW's help (card runs 8-17: it counts the GFX
+ * 100 % busy and keeps GFXCLK near 2.7 GHz while nothing runs): no
+ * submission for 5 s -> SetSoftMaxByFreq(GFXCLK, lowest level), the next
+ * submission lifts it (smu_v13_0_set_soft_freq_limited_range). Not an
+ * amdgpu policy: a workaround until the busy signal is understood. */
+void RDNA3Bringup::idleCapTick()
+{
+    uint64_t ns = 0;
+    if (!fIdleCapWanted || fIdleCapped || !fFinished || !fPmUp || !fSmu || !fDev || !fSmu->gfx.count)
+        return;
+    if (fPmExpWanted && fPmExpPhase < 6)
+        return;   /* the experiment owns the clocks while it runs */
+    absolutetime_to_nanoseconds(mach_absolute_time() - fLastSubmit, &ns);
+    if (fLastSubmit && ns < 5ull * 1000 * 1000 * 1000)
+        return;
+    int r = smu13_set_soft_freq_range(fDev, fSmu, PPCLK_GFXCLK, 0, fSmu->gfx.level[0]);
+    fIdleCapped = r == RDNA3_OK;
+    if (fIdleCaps++ < 4)
+        BLOG("PM: idle, GFXCLK capped at %u MHz (%d)", fSmu->gfx.level[0], r);
+    publish("RDNA3,IdleCaps", fIdleCaps);
+}
+
+void RDNA3Bringup::idleCapLift()
+{
+    int r = smu13_set_soft_freq_range(fDev, fSmu, PPCLK_GFXCLK, 0, fSmu->gfx.level[fSmu->gfx.count - 1]);
+    fIdleCapped = false;
+    if (fIdleCaps <= 4)
+        BLOG("PM: work, GFXCLK cap lifted to %u MHz (%d)", fSmu->gfx.level[fSmu->gfx.count - 1], r);
+}
+
 void RDNA3Bringup::logBusy()
 {
     rdna3_gfx_status st;
@@ -1765,6 +1798,9 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
         return -RD_EINVAL;   /* record-only VM: the IB VA means nothing to the GPU */
     if (v->guilty)
         return -RD_ECANCELED;   /* amdgpu_cs_submit on a guilty context */
+    fLastSubmit = mach_absolute_time();
+    if (fIdleCapped)
+        idleCapLift();   /* full clocks before the work reaches the ring */
     if (job->uf_bo) {
         int r = ufAddr(job, &ufMc, &ufSlot);
         if (r)

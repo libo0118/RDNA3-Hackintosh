@@ -271,6 +271,8 @@ void RDNA3Accel::statsTick(void *owner, void *)
         /* the idle-power experiment (rdna3pmexp=1) reads no GC registers */
         if (ok && !a->fBringup->pmExperimentTick() && a->fStatsTicks % 15 == 0)
             a->fBringup->logBusy();
+        if (ok)
+            a->fBringup->idleCapTick();
         IOLockUnlock(a->fDrmLock);
     }
     if (ok) {

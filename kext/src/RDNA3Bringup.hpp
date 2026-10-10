@@ -119,6 +119,10 @@ public:
      * from the 2 s stats tick (DRM lock held); true while it runs (the
      * caller then leaves the GC registers alone) */
     bool     pmExperimentTick();
+    /* rdna3idlecap=1: GFXCLK soft max at the lowest level after 5 s
+     * without a submission, lifted at the next one (2 s stats tick, DRM
+     * lock held) */
+    void     idleCapTick();
 
 private:
     static void threadMain(void *arg, int wait_result);
@@ -153,6 +157,10 @@ private:
     bool             fCgWanted = false;   /* GFX clock gating, default on (rdna3cg=0: off) */
     bool             fSocCgWanted = false; /* HDP + ATHUB gating (rdna3socg=1) */
     bool             fPmExpWanted = false; /* rdna3pmexp=1 */
+    bool             fIdleCapWanted = false, fIdleCapped = false;   /* rdna3idlecap=1 */
+    uint64_t         fLastSubmit = 0;      /* mach_absolute_time */
+    uint32_t         fIdleCaps = 0;
+    void             idleCapLift();
     uint32_t         fPmExpTick = 0, fPmExpPhase = 0, fPmExpSamples = 0;
     uint64_t         fPmExpSum[8] = {};
     /* GFXOFF (rdna3gfxoff=1, step 8o): amdgpu_gfx_off_ctrl. The GFX may
