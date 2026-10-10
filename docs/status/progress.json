@@ -1,10 +1,10 @@
 {
  "amdgpu": {
   "works": 225,
-  "ported": 264,
+  "ported": 266,
   "total": 1328,
   "works_pct": 16.9,
-  "ported_pct": 19.9,
+  "ported_pct": 20.0,
   "groups": [
    {
     "name": "PSP 13",
@@ -1323,8 +1323,8 @@
      "modeset"
     ],
     "works": 0,
-    "ported": 9,
-    "todo": 145,
+    "ported": 11,
+    "todo": 143,
     "items": {
      "apply_symclk_on_tx_off_wa": "todo",
      "configure_lttpr_mode_non_transparent": "todo",
@@ -1398,14 +1398,14 @@
      "dcn32_smu_set_hard_min_by_freq": "ported",
      "dcn32_smu_set_pme_workaround": "todo",
      "dcn32_smu_transfer_wm_table_dram_2_smu": "todo",
-     "dcn32_smu_wait_for_dmub_ack_mclk": "todo",
+     "dcn32_smu_wait_for_dmub_ack_mclk": "ported",
      "dcn32_smu_wait_for_response": "ported",
      "dcn32_smu_wait_for_response_delay": "todo",
      "dcn32_smu_wait_get_hard_min_status": "ported",
      "dcn32_subvp_pipe_control_lock": "todo",
      "dcn32_subvp_pipe_control_lock_fast": "todo",
      "dcn32_unblank_stream": "todo",
-     "dcn32_update_clocks": "todo",
+     "dcn32_update_clocks": "ported",
      "dcn32_update_clocks_update_dentist": "todo",
      "dcn32_update_clocks_update_dpp_dto": "todo",
      "dcn32_update_clocks_update_dtb_dto": "todo",

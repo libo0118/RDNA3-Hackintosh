@@ -30,6 +30,10 @@ extern "C" {
 #define RD_DALSMC_MSG_SetHardMinByFreq   0x9
 #define RD_DALSMC_MSG_NumOfDisplays      0xE
 #define RD_DALSMC_MSG_ReturnHardMinStatus 0x15
+/* dcn32_smu_wait_for_dmub_ack_mclk: 1 = the PMFW waits for the DMCUB's ack
+ * before an MCLK switch (FW-assisted MCLK switching), 0 = it does not;
+ * dcn32_update_clocks sends 0 when no stream uses FAMS */
+#define RD_DALSMC_MSG_SetAlwaysWaitDmcubResp 0x14
 #define RD_CHECK_HARD_MIN_CLK_DISPCLK    0x1
 #define RD_CHECK_HARD_MIN_CLK_DPPCLK     0x2
 #define RD_CHECK_HARD_MIN_CLK_DPREFCLK   0x4

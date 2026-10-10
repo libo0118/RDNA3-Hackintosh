@@ -9,6 +9,7 @@
 #   rdna3vm args "BOOT-ARGS" [--stay]             the same with your own rdna3* boot-args
 #   rdna3vm queue STEP... | pending               several steps one after the other, unattended
 #   rdna3vm queue                                 go on with a queue a host reboot interrupted
+#   rdna3vm approve                               allow a new framebuffer build in macOS (once per build)
 #   rdna3vm reports                               what came back
 #
 # Everything lives in $RDNA3VM_DIR (default ~/rdna3-vm).
@@ -404,6 +405,19 @@ cmd_step() {
     launch "$a" "$stay"
 }
 
+# macOS loads RDNA3Framebuffer / RDNA3Accelerator from the Auxiliary KC
+# only after the user allowed the new (ad-hoc signed) build in System
+# Settings; OpenCore cannot inject them (they link IOGraphicsFamily)
+cmd_approve() {
+    say "Allowing the new framebuffer build in macOS (once per build)"
+    echo "  macOS starts and stays up. In macOS:"
+    echo "    1. System Settings -> Privacy & Security, scroll down"
+    echo "    2. 'System software from developer ... was blocked' -> Allow (password)"
+    echo "    3. when it asks to restart: choose Not Now, then Apple menu -> Shut Down"
+    echo "  No 'Allow' button? Then this build is allowed already: just shut down."
+    launch "$(step_args 0)" 1
+}
+
 cmd_args() {
     local stay=0
     [ -n "${1:-}" ] || die 'give boot-args, e.g. rdna3vm args "rdna3lvl=2"'
@@ -413,10 +427,10 @@ cmd_args() {
 
 # the steps still waiting, one per line; the first is the one running
 QUEUE=$WORK/queue
-# 9: the Auxiliary KC is rebuilt with the new framebuffer (amfi=0x80) and
-# diagnosed; 9b: framebuffer build check, which DMCUB VBIOS command of the
-# clone stops the PMFW
-PENDING_STEPS="9 9b"
+# 9b / 9bw: does the PMFW survive a metrics transfer with the clone lit,
+# without and with SetAlwaysWaitDmcubResp 0; 9c: the extended desktop
+# (needs the new framebuffer approved: rdna3vm approve)
+PENDING_STEPS="9b 9bw 9c"
 
 cmd_queue() {
     load_conf
@@ -714,9 +728,10 @@ case "${1:-}" in
     step) shift; cmd_step "$@" ;;
     args) shift; cmd_args "$@" ;;
     queue) shift; cmd_queue "$@" ;;
+    approve) shift; cmd_approve "$@" ;;
     _queue) shift; cmd__queue "$@" ;;
     reports) shift; cmd_reports "$@" ;;
     _oc) shift; cmd__oc "$@" ;;
     _passthrough) shift; cmd__passthrough "$@" ;;
-    *) sed -n '2,14p' "$SELF"; exit 1 ;;
+    *) sed -n '2,15p' "$SELF"; exit 1 ;;
 esac

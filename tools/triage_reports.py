@@ -165,7 +165,7 @@ def report(path, show_all):
             print("   %s %-20s = %s (expected %s)" % ("PASS" if ok else "FAIL", key, shown, want))
     for key in ("SOSVersion", "SMUDriverIF", "PMGfxClkMinMHz", "PMGfxClkMaxMHz", "PMUclkMaxMHz",
                 "PMFanRPM", "DMUBVersion", "GBAddrConfig", "ChipRevId", "Head0EdidMode",
-                "AtomCommandTables", "SCPM", "PMFeaturesRunning", "PSPStuckAtInit", "InitResetResult", "GFXHUBResult", "GFXAsync", "KIQOnMES", "Mirror", "MirrorResult", "MirrorCheck", "ExtendHead", "DMUB", "DMUBCapsResult", "IdleSleepBlocked", "DCNClocks", "HotplugEvents", "HotplugPins", "MESResult", "MESSchedVersion", "MESKiqVersion", "MESLegacyQueueMap", "NeedPost", "PostResult",
+                "AtomCommandTables", "SCPM", "PMFeaturesRunning", "PSPStuckAtInit", "InitResetResult", "GFXHUBResult", "GFXAsync", "KIQOnMES", "Mirror", "MirrorResult", "MirrorCheck", "ExtendHead", "DMUB", "DMUBCapsResult", "IdleSleepBlocked", "DCNClocks", "CloneMetricsResult", "DMUBWaitAckResult", "HotplugEvents", "HotplugPins", "MESResult", "MESSchedVersion", "MESKiqVersion", "MESLegacyQueueMap", "NeedPost", "PostResult",
                 "LastFaultAddr", "LastFaultStatus"):
         if key in props:
             v = props[key]
@@ -244,6 +244,9 @@ def main():
         tests = p[:-len(".tar.gz")] + "-tests.txt"
         if os.path.exists(tests):
             txt = open(tests, errors="replace").read()
+            if "not approved to load" in txt:
+                print("   !! a new RDNA3Framebuffer/RDNA3Accelerator waits for approval in macOS: run "
+                      "'rdna3vm approve' (System Settings -> Privacy & Security -> Allow)")
             if "--dma-test" in txt or "--gfx-test" in txt:
                 print("   tests:")
                 for l in txt.splitlines():

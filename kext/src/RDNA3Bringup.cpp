@@ -24,6 +24,7 @@ extern "C" {
 #include "navi3x_regs.h"
 }
 #include "dcaux.h"
+#include "dcn32_clk.h"
 
 /* kpi.mach; declared here to avoid depending on private headers */
 extern "C" kern_return_t kernel_thread_start(thread_continue_t continuation,
@@ -575,8 +576,25 @@ bool RDNA3Bringup::hwInit()
         /* amdgpu_dm hw_init comes after the SMU in soc21's IP order */
         if (fDmubMode) {
             dmubInit();
-            if (fDmub && fDmub->hw_init)
+            if (fDmub && fDmub->hw_init) {
+                /* rdna3dmubwait=0: dcn32_smu_wait_for_dmub_ack_mclk(false) as
+                 * dcn32_update_clocks sends it without FAMS; the first card
+                 * runs lost the PMFW at the first metrics transfer after the
+                 * clone (step 9bw tests this) */
+                uint32_t wait = 1;
+                if (PE_parse_boot_argn("rdna3dmubwait", &wait, sizeof(wait)) && !wait) {
+                    int r = dcn32_smu_send(fDev, RD_DALSMC_MSG_SetAlwaysWaitDmcubResp, 0, NULL);
+                    BLOG("DAL SMU: SetAlwaysWaitDmcubResp 0 -> %d", r);
+                    publish("RDNA3,DMUBWaitAckResult", (uint64_t)(int64_t)r);
+                }
                 fOwner->displayMirror(fDmub, true);   /* rdna3mirror=1: step 9b */
+                /* does the PMFW still move a table to DRAM with the clone lit? */
+                if (fPmUp && fSmu) {
+                    int m = smu13_read_metrics(fDev, fSmu);
+                    BLOG("clone: PMFW metrics transfer after the clone: %s (%d)", m ? "FAILED" : "ok", m);
+                    publish("RDNA3,CloneMetricsResult", (uint64_t)(int64_t)m);
+                }
+            }
         }
     }
 

@@ -168,14 +168,28 @@ steps:
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
 
+### A new framebuffer build: allow it once
+
+OpenCore injects the core kext itself, but `RDNA3Framebuffer` and
+`RDNA3Accelerator` load from macOS's own kext cache, and macOS takes a new
+ad-hoc signed build only after you allowed it. After `rdna3vm prepare`
+with a build that changed them (the reports say so: `waits for approval`):
+
+```sh
+rdna3vm approve
+```
+
+macOS starts and stays up: System Settings → Privacy & Security, scroll
+down, **Allow** next to the blocked system software, enter the password,
+then **Not Now** at the restart question and Apple menu → Shut Down.
+
 ### Several steps in one go
 
 ```sh
 rdna3vm queue pending
 ```
 
-runs the steps still waiting for the card (`9 9b`: the framebuffer build
-and the PMFW check of the clone)
+runs the steps still waiting for the card (`9b 9bw 9c`)
 one after the other: each one boots macOS, sends its report and shuts
 down, the desktop comes back for a moment, then the next one starts
 (about 5 minutes a step, 40 in all; both monitors connected). You can
