@@ -501,6 +501,8 @@ cmd_queue() {
     if [ $# -gt 0 ]; then
         [ "$1" = pending ] && set -- $PENDING_STEPS
         for n in "$@"; do step_args "$n" >/dev/null || die "unknown step $n"; done
+        # an older runner (as root) replaced the file: take it back
+        [ -e "$QUEUE" ] && [ ! -w "$QUEUE" ] && { sudo rm -f "$QUEUE" "$QUEUE.new" || die "cannot replace $QUEUE"; }
         printf '%s\n' "$@" > "$QUEUE"
         mark_run_start
     fi
@@ -537,7 +539,7 @@ cmd__queue() {
             if [ "${rerun:-}" != "$n" ]; then
                 echo "== queue: step $n installed new kexts; running it again so they are the ones tested"
                 rerun=$n
-                { printf '%s\n' "$n"; cat "$QUEUE"; } > "$QUEUE.new" && mv "$QUEUE.new" "$QUEUE"
+                { printf '%s\n' "$n"; cat "$QUEUE"; } > "$QUEUE.new" && cat "$QUEUE.new" > "$QUEUE"; rm -f "$QUEUE.new"
                 sleep 60
                 continue
             fi
@@ -547,7 +549,7 @@ cmd__queue() {
         if [ "$how" = unknown ] && [ "${retried:-}" != "$n" ]; then
             echo "== queue: step $n did not start, trying it once more in 30 s"
             retried=$n
-            { printf '%s\n' "$n"; cat "$QUEUE"; } > "$QUEUE.new" && mv "$QUEUE.new" "$QUEUE"
+            { printf '%s\n' "$n"; cat "$QUEUE"; } > "$QUEUE.new" && cat "$QUEUE.new" > "$QUEUE"; rm -f "$QUEUE.new"
             sleep 30
             continue
         fi
