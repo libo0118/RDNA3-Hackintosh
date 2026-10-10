@@ -140,6 +140,7 @@ per mode (S4).
 | S1+S2 (scaled modes only) | `e4d49bf` | `rdna3modes=1`: DPP scaler on the native timing, `rdna3_modetest` |
 | A swap routing fix | `2bcd676` | stale pointer matches after WindowServer re-created its resources |
 | screen read-back | `944d983`, `8e0f267` | pictures + underflow per pipe in every report |
+| V1 Vulkan draw, images, timeline | `83c8872` | triangle read back, GFX + SDMA image copies; loopback submits only |
 | UAPI: firmware versions, VBIOS info | `eceebce`, `d815309` | RADV saw 0 for every firmware before |
 
 Open from this batch: S5 gamma, real mode setting (other timings), monitor
