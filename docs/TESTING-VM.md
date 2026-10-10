@@ -284,6 +284,18 @@ prints PASS / FAIL per step. What happens with the reports next is in
    `curl ... | sudo sh` command as in step D. Then `sudo shutdown -h now`.
 4. Go back to step E.
 
+### With Vulkan (RADV)
+
+A build made with `full` or `radv` on also has the artifact
+`radv-macos-logs.zip` (RADV + `rdna3_vktest`). Pass it to prepare too:
+
+```sh
+rdna3vm prepare --artifact ~/Downloads/RDNA3Accel-kext.zip --radv ~/Downloads/radv-macos-logs.zip
+```
+
+From step 8 on the report then has a `== rdna3_vktest` section: RADV creates
+a Vulkan device on the card and fills and copies buffers on every queue.
+
 ## How it works (for the curious)
 
 - `rdna3vm step N` writes the step's boot-args to the OpenCore `config.plist` (a copy

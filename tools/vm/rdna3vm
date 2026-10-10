@@ -4,6 +4,7 @@
 #
 #   rdna3vm check                                 is this machine ready?
 #   rdna3vm prepare --osx-kvm DIR --artifact ZIP  one-time setup (+ after a new build)
+#           [--radv radv-macos-logs.zip]        + RADV: rdna3_vktest from step 8 on
 #   rdna3vm window                                macOS in a window (install, setup)
 #   rdna3vm step N [--stay]                       ladder step N with the GPU passed through
 #   rdna3vm args "BOOT-ARGS" [--stay]             the same with your own rdna3* boot-args
@@ -143,11 +144,12 @@ fw_copy() {   # fw_copy DESTDIR: the firmware the kext loads, decompressed
 }
 
 cmd_prepare() {
-    local osx="" zip=""
+    local osx="" zip="" radv=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --osx-kvm) osx=$(readlink -f "$2"); shift 2 ;;
             --artifact) zip=$(readlink -f "$2"); shift 2 ;;
+            --radv) radv=$(readlink -f "$2"); shift 2 ;;
             *) die "unknown option $1" ;;
         esac
     done
@@ -227,6 +229,20 @@ EOF
         cp "$a/userspace/rdna3_drminfo" "$st/bin/"
         if [ -f "$a/userspace/libdrm.dylib" ]; then cp "$a/userspace/libdrm.dylib" "$st/bin/libdrm.2.dylib"
         else echo "  (artifact without libdrm.dylib: the DMA/GFX tests of steps 7-8 will not run)"; fi
+    fi
+    [ -f "$a/userspace/libdrm_amdgpu.dylib" ] && cp "$a/userspace/libdrm_amdgpu.dylib" "$st/bin/libdrm_amdgpu.1.dylib"
+    # RADV (radv-macos-logs.zip of a build with radv): rdna3_vktest runs it
+    # from step 8 on
+    if [ -n "$radv" ]; then
+        [ -f "$radv" ] || die "no $radv"
+        $VMTOOL unzip "$radv" "$st/radv"
+        local rl rt
+        rl=$(find "$st/radv" -name libvulkan_radeon.dylib | head -1)
+        rt=$(find "$st/radv" -name rdna3_vktest -type f | head -1)
+        [ -n "$rl" ] && [ -n "$rt" ] || die "$radv has no libvulkan_radeon.dylib + rdna3_vktest (a radv-macos build after the vktest commit)"
+        [ -f "$st/bin/libdrm_amdgpu.1.dylib" ] || die "the kext artifact has no libdrm_amdgpu.dylib (RADV needs it): use a newer build"
+        cp "$rl" "$rt" "$st/bin/"
+        ok "RADV + rdna3_vktest in the bundle"
     fi
     cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" "$st/tools/macos/"
     cp "$TOOLS/macos/autoreport.sh" "$st/"

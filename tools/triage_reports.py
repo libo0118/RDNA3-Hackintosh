@@ -295,6 +295,16 @@ def main():
                         print("     " + l)
                 if re.search(r"\[exit [1-9]", txt):
                     failed = True
+            if "== rdna3_vktest" in txt:
+                vk = txt[txt.index("== rdna3_vktest"):]
+                print("   vulkan (RADV):")
+                for l in vk.splitlines()[1:]:
+                    if l.startswith("==") and "rdna3_vktest" not in l:
+                        break
+                    if re.match(r"(PASS|FAIL|device|physical devices|ALL PASSED|FAILED|NOTHING|\[exit)", l):
+                        print("     " + l[:150])
+                if not re.search(r"^ALL PASSED", vk, re.M):
+                    failed = True
     serials = sorted(glob.glob(os.path.join(d, "serial-*.log")), key=os.path.getmtime)
     hosts = sorted(glob.glob(os.path.join(d, "host-*.log")), key=os.path.getmtime)
     for s in serials:

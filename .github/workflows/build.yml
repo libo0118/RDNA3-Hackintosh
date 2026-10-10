@@ -17,6 +17,10 @@ on:
         description: 'Build everything (Metal plugin + RADV too)'
         type: boolean
         default: true
+      radv:
+        description: 'With full off: build RADV + rdna3_vktest too (no Metal plugin)'
+        type: boolean
+        default: false
 
 concurrency:
   group: build-${{ github.ref }}
@@ -37,9 +41,12 @@ jobs:
           BEFORE: ${{ github.event.before }}
           EVENT: ${{ github.event_name }}
           FULL: ${{ inputs.full }}
+          RADV: ${{ inputs.radv }}
         run: |
           if [ "$EVENT" = "workflow_dispatch" ] && [ "$FULL" != "true" ]; then
-            echo "metal=false" >> "$GITHUB_OUTPUT"; echo "radv=false" >> "$GITHUB_OUTPUT"; exit 0
+            echo "metal=false" >> "$GITHUB_OUTPUT"
+            [ "$RADV" = "true" ] && echo "radv=true" >> "$GITHUB_OUTPUT" || echo "radv=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           if [ "$FULL" = "true" ] || [ -z "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
              || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
@@ -109,6 +116,7 @@ jobs:
             build/RDNA3Framebuffer.kext
             build/userspace/rdna3_drminfo
             build/userspace/libdrm.dylib
+            build/userspace/libdrm_amdgpu.dylib
 
   metal:
     needs: changes
@@ -143,6 +151,11 @@ jobs:
           python3 -m pip install --break-system-packages mako pyyaml packaging || python3 -m pip install mako pyyaml packaging
       - name: Build RADV against libdrm_xnu
         run: userspace/mesa/build_radv.sh build/mesa
+      - name: rdna3_vktest (the VM runs it against the card from step 8)
+        run: |
+          mkdir -p build/mesa/install/bin
+          xcrun clang -O1 -g -arch x86_64 -mmacosx-version-min=15.0 -std=gnu11 -Wall -Wextra -Werror \
+            -I build/mesa/src/include -o build/mesa/install/bin/rdna3_vktest userspace/rdna3_vktest.c
       - name: vulkaninfo on the in-process UAPI (loopback libdrm, no kext)
         if: always()
         run: |
@@ -154,6 +167,8 @@ jobs:
           export DRM_XNU_TRACE=1
           vulkaninfo --summary 2>&1 | tee build/mesa/vulkaninfo.log | head -120
           grep -q "RADV" build/mesa/vulkaninfo.log && echo "RADV enumerated through the loopback UAPI" || echo "vulkaninfo did not enumerate RADV (see log)"
+          build/mesa/install/bin/rdna3_vktest --loopback build/mesa/install/lib/libvulkan_radeon.dylib 2>&1 \
+            | tee build/mesa/vktest.log || true
       - name: Error summary
         if: always()
         run: |
@@ -166,7 +181,9 @@ jobs:
             build/mesa/meson-setup.log
             build/mesa/ninja.log
             build/mesa/install/lib/libvulkan_radeon.dylib
+            build/mesa/install/bin/rdna3_vktest
             build/mesa/install/share/vulkan/icd.d
             build/mesa/missing.txt
             build/mesa/weak.txt
             build/mesa/vulkaninfo.log
+            build/mesa/vktest.log

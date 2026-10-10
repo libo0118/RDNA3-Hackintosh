@@ -109,6 +109,14 @@ extra="$HOME/rdna3-extra.txt"
         with_limit 60 "$D/bin/rdna3_drminfo" --gfx-test 2>&1
         echo "[exit $?]"
     fi
+    # Vulkan: RADV (prepare --radv) straight through its ICD entry points,
+    # no loader; libdrm_xnu talks to RDNA3Accel's user client
+    if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_vktest" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then
+        echo "== rdna3_vktest"
+        DYLD_LIBRARY_PATH="$D/bin" RADV_DEBUG=startup with_limit 90 "$D/bin/rdna3_vktest" \
+            "$D/bin/libvulkan_radeon.dylib" 2>&1
+        echo "[exit $?]"
+    fi
 } > "$extra" 2>&1
 
 # collect.sh packs everything from ~/rdna3-*; put the extra file next to its logs
