@@ -523,3 +523,15 @@ DMA hang recovered, idle 14 W. Metal lists the card ("AMD Radeon RX 7800 XT
 the plugin: no air-runtime/libLLVM.dylib in the bundle and no air-opt. The
 plugin now falls back to Apple's libLLVM in GPUCompiler.framework (the
 plugin's GL path already uses its C API).
+
+### Card run 21 (step `metal`, plugin with the system libLLVM)
+
+The kernel compiled: Apple's front end, AIR read through GPUCompiler's
+libLLVM, translated. Pipeline creation then hit `Assertion failed:
+(mutable_size && mutable_align), radv_CreateDescriptorSetLayout`: RADV
+indexes pMutableDescriptorTypeLists with the binding's position after
+sorting by number, the spec ties list i to pBindings[i]; the plugin's
+layout has binding 640 before 480..607. Reproduced by rdna3_vktest on the
+host loopback; fixed in Mesa (patches/0007) and worked around in the
+plugin (its bindings sorted by number), so the VM's RADV need not be
+rebuilt for the next try.

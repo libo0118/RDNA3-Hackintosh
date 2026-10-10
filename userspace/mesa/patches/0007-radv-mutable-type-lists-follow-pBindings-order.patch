@@ -1,0 +1,83 @@
+From: RDNA3-Hackintosh
+Subject: [PATCH] radv: mutable descriptor type lists follow pBindings order
+
+VkMutableDescriptorTypeCreateInfoEXT::pMutableDescriptorTypeLists[i]
+describes pBindings[i], but radv_CreateDescriptorSetLayout and
+radv_GetDescriptorSetLayoutSupport index it with the position in the
+bindings sorted by binding number. With bindings not given in that order
+(the Metal plugin declares 0..191, 640, 480..607) a mutable binding got
+another binding's list, often an empty one: "Assertion `mutable_size &&
+mutable_align' failed" (card run 21), or a wrong descriptor size in a
+release build. Look the list up by binding number instead.
+---
+diff --git a/src/amd/vulkan/radv_descriptor_set.c b/src/amd/vulkan/radv_descriptor_set.c
+index b7a1adb..8a20e3b 100644
+--- a/src/amd/vulkan/radv_descriptor_set.c
++++ b/src/amd/vulkan/radv_descriptor_set.c
+@@ -13,6 +13,20 @@
+ #include "radv_sampler.h"
+ #include "vk_descriptors.h"
+ 
++/* pMutableDescriptorTypeLists[i] describes pBindings[i], but the layout code
++ * walks the bindings sorted by binding number: look the list up by number. */
++static const VkMutableDescriptorTypeListEXT *
++radv_mutable_type_list(const VkDescriptorSetLayoutCreateInfo *info,
++                       const VkMutableDescriptorTypeCreateInfoEXT *mutable_info, uint32_t binding)
++{
++   static const VkMutableDescriptorTypeListEXT empty = {0};
++   for (uint32_t i = 0; mutable_info && i < info->bindingCount && i < mutable_info->mutableDescriptorTypeListCount; i++) {
++      if (info->pBindings[i].binding == binding)
++         return &mutable_info->pMutableDescriptorTypeLists[i];
++   }
++   return &empty;
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
+                                const VkAllocationCallbacks *pAllocator, VkDescriptorSetLayout *pSetLayout)
+@@ -103,8 +117,8 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
+       if (bindings[pCreateInfo->bindingCount - 1].descriptorType == VK_DESCRIPTOR_TYPE_MUTABLE_EXT) {
+          uint64_t mutable_size = 0, mutable_align = 0;
+          radv_mutable_descriptor_type_size_alignment(
+-            device, &mutable_info->pMutableDescriptorTypeLists[pCreateInfo->bindingCount - 1], &mutable_size,
+-            &mutable_align);
++            device, radv_mutable_type_list(pCreateInfo, mutable_info, bindings[pCreateInfo->bindingCount - 1].binding),
++            &mutable_size, &mutable_align);
+          last_alignment = mutable_align;
+       }
+ 
+@@ -165,8 +179,9 @@ radv_CreateDescriptorSetLayout(VkDevice _device, const VkDescriptorSetLayoutCrea
+             break;
+          case VK_DESCRIPTOR_TYPE_MUTABLE_EXT: {
+             uint64_t mutable_size = 0, mutable_align = 0;
+-            radv_mutable_descriptor_type_size_alignment(device, &mutable_info->pMutableDescriptorTypeLists[j],
+-                                                        &mutable_size, &mutable_align);
++            radv_mutable_descriptor_type_size_alignment(
++               device, radv_mutable_type_list(pCreateInfo, mutable_info, binding->binding), &mutable_size,
++               &mutable_align);
+             assert(mutable_size && mutable_align);
+             set_layout->binding[b].size = mutable_size;
+             alignment = mutable_align;
+@@ -278,8 +293,8 @@ radv_GetDescriptorSetLayoutSupport(VkDevice _device, const VkDescriptorSetLayout
+       if (bindings[pCreateInfo->bindingCount - 1].descriptorType == VK_DESCRIPTOR_TYPE_MUTABLE_EXT) {
+          uint64_t mutable_size = 0, mutable_align = 0;
+          radv_mutable_descriptor_type_size_alignment(
+-            device, &mutable_info->pMutableDescriptorTypeLists[pCreateInfo->bindingCount - 1], &mutable_size,
+-            &mutable_align);
++            device, radv_mutable_type_list(pCreateInfo, mutable_info, bindings[pCreateInfo->bindingCount - 1].binding),
++            &mutable_size, &mutable_align);
+          last_alignment = mutable_align;
+       }
+ 
+@@ -323,8 +338,9 @@ radv_GetDescriptorSetLayoutSupport(VkDevice _device, const VkDescriptorSetLayout
+             descriptor_count = 1;
+             break;
+          case VK_DESCRIPTOR_TYPE_MUTABLE_EXT:
+-            if (!radv_mutable_descriptor_type_size_alignment(device, &mutable_info->pMutableDescriptorTypeLists[i],
+-                                                             &descriptor_size, &descriptor_alignment)) {
++            if (!radv_mutable_descriptor_type_size_alignment(
++                   device, radv_mutable_type_list(pCreateInfo, mutable_info, binding->binding), &descriptor_size,
++                   &descriptor_alignment)) {
+                supported = false;
+             }
+             break;

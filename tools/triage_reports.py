@@ -340,7 +340,12 @@ def summary(path, serial=None):
     vk = re.search(r"^(ALL PASSED.*|.*FAILED.*)$", txt[txt.find("== rdna3_vktest"):], re.M) if "== rdna3_vktest" in txt else None
     out.append(("Vulkan", vk.group(1)[:80] if vk else "not run"))
     mt = re.search(r"^METAL: .*$", txt, re.M)
-    out.append(("Metal", mt.group(0)[:80] if mt else "not run"))
+    if not mt and "== mtlprobe" in txt:   # no verdict: the probe died (a driver assert)
+        mt = re.search(r"^(Assertion failed.*|.*Assertion .* failed.*|\[exit [1-9]\d*\])$",
+                       txt[txt.index("== mtlprobe"):], re.M)
+        out.append(("Metal", "CRASHED: " + mt.group(0)[:100] if mt else "no verdict"))
+    else:
+        out.append(("Metal", mt.group(0)[:80] if mt else "not run"))
     for blk in txt.split("== rdna3_drminfo --scanout")[1:]:
         look = re.match(r"\s*\(look (\S+)\)", blk)
         lit = re.findall(r"^pipe (\d+): LIT .* in use (0x[0-9a-f]+)", blk, re.M)

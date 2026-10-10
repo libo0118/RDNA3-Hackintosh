@@ -2077,6 +2077,15 @@ static int ensure_descriptors_locked(void)
             else if (b[i].descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) { b[i].descriptorType = VK_DESCRIPTOR_TYPE_MUTABLE_EXT; mlists[i] = (VkMutableDescriptorTypeListEXT){ 2, stexTypes }; }
         }
         lci.pNext = &mci;
+        /* RDNA3MTL: RADV before userspace/mesa/patches/0007 takes the type
+         * list of the i-th binding in binding-number order, not of
+         * pBindings[i]; the address binding (640) sits before the storage
+         * band (480..) here. Both arrays in number order suit every driver. */
+        for (uint32_t i = 1; i < NVMTL_NBIND; i++)
+            for (uint32_t k = i; k > 0 && b[k - 1].binding > b[k].binding; k--) {
+                VkDescriptorSetLayoutBinding tb = b[k]; b[k] = b[k - 1]; b[k - 1] = tb;
+                VkMutableDescriptorTypeListEXT tl = mlists[k]; mlists[k] = mlists[k - 1]; mlists[k - 1] = tl;
+            }
     }
     VKCK(pvkCreateDescriptorSetLayout(g_dev, &lci, NULL, &g_setLayout), "vkCreateDescriptorSetLayout");
     if (nvmtl_desc_pool_open()) return -1;

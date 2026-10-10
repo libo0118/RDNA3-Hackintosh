@@ -856,6 +856,38 @@ out:
     return ret;
 }
 
+/* ---- a descriptor set layout with a mutable binding, bindings not in
+ * binding-number order (as the Metal plugin declares them): the type list
+ * pMutableDescriptorTypeLists[i] belongs to pBindings[i], whatever order
+ * the driver sorts them into. Host-side only, no GPU work. ---- */
+static int mutable_layout_test(struct ctx *c)
+{
+    DFN(c->dev, vkCreateDescriptorSetLayout);
+    DFN(c->dev, vkDestroyDescriptorSetLayout);
+    static const VkDescriptorType tex[2] = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER };
+    /* sorted by number the mutable binding moves from index 0 to 1 */
+    VkDescriptorSetLayoutBinding b[3] = {
+        { .binding = 480, .descriptorType = VK_DESCRIPTOR_TYPE_MUTABLE_EXT, .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_ALL },
+        { .binding = 640, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_ALL },
+        { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+          .stageFlags = VK_SHADER_STAGE_ALL } };
+    VkMutableDescriptorTypeListEXT ml[3] = { { 2, tex }, { 0, NULL }, { 0, NULL } };
+    VkMutableDescriptorTypeCreateInfoEXT mci = { .sType = VK_STRUCTURE_TYPE_MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT,
+        .mutableDescriptorTypeListCount = 3, .pMutableDescriptorTypeLists = ml };
+    VkDescriptorSetLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .pNext = &mci,
+        .bindingCount = 3, .pBindings = b };
+    VkDescriptorSetLayout l = VK_NULL_HANDLE;
+    VkResult r = vkCreateDescriptorSetLayout(c->dev, &lci, NULL, &l);
+    if (r != VK_SUCCESS) {
+        printf("FAIL mutable layout -> %d (%s)\n", r, vkr(r));
+        return 1;
+    }
+    vkDestroyDescriptorSetLayout(c->dev, l, NULL);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *lib = NULL;
@@ -950,18 +982,19 @@ int main(int argc, char **argv)
     }
     /* the interop the Metal plugin needs, when RADV offers it */
     IFN(c.inst, vkEnumerateDeviceExtensionProperties);
-    const char *want[2] = { "VK_EXT_external_memory_host", "VK_KHR_external_memory_fd" };
-    const char *ext[2];
+    const char *want[3] = { "VK_EXT_external_memory_host", "VK_KHR_external_memory_fd",
+                            "VK_EXT_mutable_descriptor_type" };
+    const char *ext[3];
     uint32_t next = 0, ne = 0;
-    int has_host = 0, has_fd = 0;
+    int has_host = 0, has_fd = 0, has_mut = 0;
     vkEnumerateDeviceExtensionProperties(c.pd, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof(*ep));
     if (ep && vkEnumerateDeviceExtensionProperties(c.pd, NULL, &ne, ep) == VK_SUCCESS)
         for (uint32_t i = 0; i < ne; i++)
-            for (int w = 0; w < 2; w++)
+            for (int w = 0; w < 3; w++)
                 if (!strcmp(ep[i].extensionName, want[w])) {
                     ext[next++] = want[w];
-                    if (w == 0) has_host = 1; else has_fd = 1;
+                    if (w == 0) has_host = 1; else if (w == 1) has_fd = 1; else has_mut = 1;
                 }
     free(ep);
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostp = {
@@ -972,8 +1005,11 @@ int main(int argc, char **argv)
     printf("  VK_EXT_external_memory_host: %s (alignment %llu), VK_KHR_external_memory_fd: %s\n",
            has_host ? "yes" : "NO", (unsigned long long)hostp.minImportedHostPointerAlignment, has_fd ? "yes" : "NO");
     /* timeline semaphores are a Vulkan 1.2 feature to turn on */
+    VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT fmut = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT,
+        .mutableDescriptorType = VK_TRUE };
     VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-                                             .timelineSemaphore = VK_TRUE };
+                                             .pNext = has_mut ? &fmut : NULL, .timelineSemaphore = VK_TRUE };
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f12, .queueCreateInfoCount = nq,
                                .pQueueCreateInfos = qci, .enabledExtensionCount = next,
                                .ppEnabledExtensionNames = ext };
@@ -1027,6 +1063,14 @@ int main(int argc, char **argv)
     if (!failed && has_fd) {
         int fr = opaque_fd_test(&c, xq, 0xfdfd0000u);
         printf("%s OPAQUE_FD export + import: fill through one, copy out through the other\n", fr ? "FAIL" : "PASS");
+        failed |= fr != 0;
+        tested++;
+    }
+    if (!failed && has_mut) {
+        fflush(stdout);   /* an assert in the driver kills the process */
+        int fr = mutable_layout_test(&c);
+        printf("%s mutable descriptor layout, bindings out of order (the Metal plugin's layout)\n",
+               fr ? "FAIL" : "PASS");
         failed |= fr != 0;
         tested++;
     }
