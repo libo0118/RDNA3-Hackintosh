@@ -839,7 +839,13 @@ cmd_result() {
     else
         mapfile -t sel < <(find "$WORK/reports" -maxdepth 1 -type f -mmin -180 -printf '%P\n' | sort)
     fi
-    [ ${#sel[@]} -gt 0 ] || die "no reports since the last run started ($(date -r "$RUN_MARK" '+%F %T' 2>/dev/null || echo '3 h'))"
+    if [ ${#sel[@]} -eq 0 ]; then
+        # nothing since the run started (a hung VM, a hard reset of the
+        # computer): the newest serial and host log are still worth sending
+        say "no files since the last run started ($(date -r "$RUN_MARK" '+%F %T' 2>/dev/null || echo '3 h ago')): taking the newest serial and host log"
+        mapfile -t sel < <(cd "$WORK/reports" && { ls -t serial-*.log 2>/dev/null | head -1; ls -t host-*.log 2>/dev/null | head -1; })
+        [ ${#sel[@]} -gt 0 ] || die "no serial or host logs in $WORK/reports at all"
+    fi
     tmp=$(mktemp -d)
     mkdir -p "$tmp/rdna3-result"
     for f in "${sel[@]}"; do cp "$WORK/reports/$f" "$tmp/rdna3-result/" 2>/dev/null || sudo cat "$WORK/reports/$f" > "$tmp/rdna3-result/$f"; done
