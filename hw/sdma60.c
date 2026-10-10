@@ -73,6 +73,7 @@ void sdma60_commit(rdna3_dev *d, rdna3_sdma_ring *r)
     WS(d, r->inst, regSDMA0_QUEUE0_RB_WPTR_HI, (uint32_t)(w >> 32));
 }
 
+/* sdma_v6_0_emit_copy_buffer (no TMZ) */
 void sdma60_emit_copy(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint64_t dst, uint32_t bytes)
 {
     sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_COPY) | SDMA_PKT_HEADER_SUB_OP(SDMA_SUBOP_COPY_LINEAR));
@@ -84,6 +85,7 @@ void sdma60_emit_copy(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint64_t d
     sdma60_write(d, r, (uint32_t)(dst >> 32));
 }
 
+/* sdma_v6_0_emit_fill_buffer */
 void sdma60_emit_fill(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t value, uint32_t bytes)
 {
     sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_CONST_FILL));
@@ -96,7 +98,7 @@ void sdma60_emit_fill(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t v
 void sdma60_emit_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t va, uint32_t ndw)
 {
     uint32_t pad = (2 - (uint32_t)r->wptr) & 7, i;
-    for (i = 0; i < pad; i++)
+    for (i = 0; i < pad; i++)   /* sdma_v6_0_ring_insert_nop (no burst NOP on SDMA 6) */
         sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_NOP));
     sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_INDIRECT) | SDMA_PKT_INDIRECT_HEADER_VMID(vmid));
     sdma60_write(d, r, (uint32_t)va & 0xffffffe0);   /* 32-byte aligned base */
@@ -229,7 +231,7 @@ static int sdma_program(rdna3_dev *d, rdna3_sdma_ring *r)
     rptr_mc = rdna3_vram_mc(d, r->wb + RD_SDMA_WB_RPTR);
     wptr_mc = rdna3_vram_mc(d, r->wb + RD_SDMA_WB_WPTR);
 
-    /* sdma_v6_0_start: unhalt, ctxempty interrupt */
+    /* sdma_v6_0_start: unhalt (sdma_v6_0_enable(true)), ctxempty interrupt */
     tmp = RS(d, inst, regSDMA0_F32_CNTL);
     tmp = REG_SET_FIELD(tmp, SDMA0_F32_CNTL, HALT, 0);
     WS(d, inst, regSDMA0_F32_CNTL, tmp);
@@ -237,7 +239,7 @@ static int sdma_program(rdna3_dev *d, rdna3_sdma_ring *r)
     tmp = REG_SET_FIELD(tmp, SDMA0_CNTL, CTXEMPTY_INT_ENABLE, 1);
     WS(d, inst, regSDMA0_CNTL, tmp);
 
-    /* sdma_v6_0_gfx_resume_instance */
+    /* sdma_v6_0_gfx_resume (gfx_resume_instance in later kernels) */
     WS(d, inst, regSDMA0_SEM_WAIT_FAIL_TIMER_CNTL, 0);
     rb_cntl = RS(d, inst, regSDMA0_QUEUE0_RB_CNTL);
     rb_cntl = REG_SET_FIELD(rb_cntl, SDMA0_QUEUE0_RB_CNTL, RB_SIZE, order_base_2(ring_size / 4));
@@ -356,7 +358,7 @@ int sdma60_soft_reset(rdna3_dev *d, rdna3_sdma_ring *r)
     return (int)tmp;
 }
 
-/* sdma_v6_0_gfx_stop + halt */
+/* sdma_v6_0_enable(false): sdma_v6_0_gfx_stop + halt (rlc_stop is empty) */
 void sdma60_stop(rdna3_dev *d, rdna3_sdma_ring *r)
 {
     uint32_t tmp = RS(d, r->inst, regSDMA0_QUEUE0_RB_CNTL);

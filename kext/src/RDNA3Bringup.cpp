@@ -1613,7 +1613,8 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
     return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
 }
 
-/* amdgpu_device_gpu_recover with the mode-1 method (soc21): the PMFW
+/* amdgpu_device_gpu_recover with the mode-1 method (soc21_asic_reset_method
+ * on MP1 13.0.10, soc21_asic_reset -> amdgpu_device_mode1_reset): the PMFW
  * resets the chip, the PSP bootloader comes back, levels 4-8 run again.
  * VRAM normally survives; the magic word says so. */
 bool RDNA3Bringup::gpuReset()

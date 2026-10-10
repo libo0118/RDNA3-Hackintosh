@@ -80,6 +80,7 @@ int vbios_parse(rdna3_dev *d, rdna3_vbios *v, uint8_t *buf, uint32_t len)
 
 int vbios_read(rdna3_dev *d, rdna3_vbios *v, uint8_t *buf, uint32_t cap)
 {
+    /* smuio_v13_0_6_get_rom_index_offset, smuio_v13_0_6_get_rom_data_offset */
     uint32_t idx = SOC15_OFF(d, SMUIO, 0, regROM_INDEX);
     uint32_t dat = SOC15_OFF(d, SMUIO, 0, regROM_DATA);
     uint32_t i, dwords, len;

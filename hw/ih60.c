@@ -32,7 +32,8 @@ static uint32_t order_base_2(uint32_t n)
     return r;
 }
 
-/* ih_v6_0_toggle_ring_interrupts(ring 0) */
+/* ih_v6_0_toggle_ring_interrupts(ring 0); with ring 0 the only ring this is
+ * also ih_v6_0_toggle_interrupts */
 static void toggle(rdna3_dev *d, rdna3_ih *ih, int enable)
 {
     uint32_t tmp = ROSS(d, regIH_RB_CNTL);
@@ -69,6 +70,7 @@ static void force_update_wptr_for_self_int(rdna3_dev *d, uint32_t threshold, uin
     WOSS(d, regIH_CNTL2, ih_cntl);
 }
 
+/* ih_v6_0_hw_init: amdgpu_ih_ring_init + ih_v6_0_irq_init */
 int ih60_init(rdna3_dev *d, rdna3_ih *ih, uint32_t ring_size, uint64_t dummy_page_pa, int msi)
 {
     uint64_t ring_mc, wb_mc;
@@ -155,6 +157,7 @@ int ih60_init(rdna3_dev *d, rdna3_ih *ih, uint32_t ring_size, uint64_t dummy_pag
     return RDNA3_OK;
 }
 
+/* ih_v6_0_hw_fini -> ih_v6_0_irq_disable */
 void ih60_disable(rdna3_dev *d, rdna3_ih *ih)
 {
     force_update_wptr_for_self_int(d, 0, 8, 0);

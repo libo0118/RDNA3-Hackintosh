@@ -100,10 +100,12 @@ uint32_t rdna3_reg_offset(const rdna3_dev *d, int ip, int inst, int seg, uint32_
 
 /* ---------------------------- MMIO ---------------------------- */
 
+/* nbio_v4_3_get_pcie_index_offset */
 static uint32_t pcie_index(rdna3_dev *d)
 {
     return SOC15_OFF(d, NBIO, 0, regBIF_BX_PF0_RSMU_INDEX);
 }
+/* nbio_v4_3_get_pcie_data_offset */
 static uint32_t pcie_data(rdna3_dev *d)
 {
     return SOC15_OFF(d, NBIO, 0, regBIF_BX_PF0_RSMU_DATA);
@@ -356,6 +358,7 @@ void rdna3_doorbell_wr64(rdna3_dev *d, uint32_t index, uint64_t v)
 
 /* ---------------------------- NBIO / HDP ---------------------------- */
 
+/* nbio_v4_3_remap_hdp_registers */
 void rdna3_nbio_remap_hdp(rdna3_dev *d)
 {
     WREG32_SOC15(d, NBIO, 0, regBIF_BX0_REMAP_HDP_MEM_FLUSH_CNTL,
@@ -364,6 +367,7 @@ void rdna3_nbio_remap_hdp(rdna3_dev *d)
                  d->rmmio_remap_offset + KFD_MMIO_REMAP_HDP_REG_FLUSH_CNTL);
 }
 
+/* hdp_v6_0_flush_hdp (no ring: the MMIO write, read back to post it) */
 void rdna3_hdp_flush(rdna3_dev *d)
 {
     uint32_t reg = (d->rmmio_remap_offset + KFD_MMIO_REMAP_HDP_MEM_FLUSH_CNTL) >> 2;

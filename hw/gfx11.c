@@ -506,6 +506,7 @@ void gfx11_emit_hdp_flush(rdna3_dev *d, rdna3_gfx_ring *r)
                : r->kind == RD_RING_KIQ ? BIF_BX_PF_GPU_HDP_FLUSH_DONE__CP9_MASK
                : BIF_BX_PF_GPU_HDP_FLUSH_DONE__CP2_MASK << r->pipe;
     gfx11_emit_wait_reg_mem(d, r, r->kind == RD_RING_GFX ? 1 : 0, 0, 1,
+                            /* nbio_v4_3_get_hdp_flush_req_offset, nbio_v4_3_get_hdp_flush_done_offset */
                             SOC15_OFF(d, NBIO, 0, regBIF_BX_PF0_GPU_HDP_FLUSH_REQ),
                             SOC15_OFF(d, NBIO, 0, regBIF_BX_PF0_GPU_HDP_FLUSH_DONE), m, m, 0x20);
 }

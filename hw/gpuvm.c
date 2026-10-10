@@ -50,6 +50,7 @@ static uint64_t pool_get(rdna3_dev *d, rdna3_pt_pool *p)
     return UINT64_MAX;
 }
 
+/* amdgpu_vm_pt_free: one page-table page back to the pool */
 static void pool_put(rdna3_pt_pool *p, uint64_t off)
 {
     uint32_t i;
@@ -115,6 +116,8 @@ static uint64_t walk_to_ptb(rdna3_dev *d, rdna3_vm *vm, uint64_t va, int create)
             if (next == UINT64_MAX)
                 return UINT64_MAX;
             vm->tables++;
+            /* amdgpu_vm_pde_update -> amdgpu_gmc_get_pde_for_bo -> gmc_v11_0_get_vm_pde
+             * (no translate_further: the table's physical address | VALID) */
             pde = rdna3_vram_pa(d, next) | RD_PTE_VALID;
             entry_write(d, table, idx, pde);
         }
@@ -204,6 +207,7 @@ static void free_level(rdna3_dev *d, rdna3_vm *vm, uint64_t table, int level)
     vm->tables--;
 }
 
+/* amdgpu_vm_pt_free_root: every table, depth first */
 void gpuvm_vm_fini(rdna3_dev *d, rdna3_vm *vm)
 {
     if (vm->root == UINT64_MAX || !vm->pool)
@@ -220,6 +224,7 @@ uint64_t gpuvm_pte_flags(uint32_t f, int system_memory)
     if (f & (1u << 1)) pte |= RD_PTE_READABLE;     /* AMDGPU_VM_PAGE_READABLE */
     if (f & (1u << 2)) pte |= RD_PTE_WRITEABLE;    /* AMDGPU_VM_PAGE_WRITEABLE */
     if (f & (1u << 3)) pte |= RD_PTE_EXECUTABLE;   /* AMDGPU_VM_PAGE_EXECUTABLE */
+    /* gmc_v11_0_map_mtype */
     switch ((f >> 5) & 0xf) {                      /* AMDGPU_VM_MTYPE_* */
     case 2: mtype = 1; break;                      /* WC */
     case 3: mtype = 2; break;                      /* CC */
