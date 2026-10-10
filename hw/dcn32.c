@@ -7,6 +7,7 @@
 #include "gen/dcn_3_2_1.h"
 #include "gen/dcn_3_2_0_dig.h"
 #include "gen/dcn_3_2_0_pipe.h"
+#include "gen/dcn_3_2_0_scale.h"
 
 #define HUBP_STRIDE (regHUBP1_DCHUBP_CNTL - regHUBP0_DCHUBP_CNTL)    /* 0xdc */
 #define OTG_STRIDE  (regOTG1_OTG_CONTROL - regOTG0_OTG_CONTROL)      /* 0x80 */
@@ -151,6 +152,148 @@ int dcn32_head_usable(rdna3_dev *d, const rdna3_dcn_head *h)
         return 0;
     /* the surface sits in VRAM (MC FB aperture) */
     return h->address >= d->fb_start && h->address - d->fb_start + end <= d->vram_size;
+}
+
+/* the DSCL registers dpp1_dscl_set_scaler_manual_scale writes, then the
+ * HUBP size registers hubp2_program_size writes, in one list for save /
+ * restore (DSCL instance n at DPP_STRIDE, HUBP at HUBP_STRIDE) */
+static const uint32_t kDscl[] = {
+    regDSCL0_DSCL_AUTOCAL, regDSCL0_DSCL_CONTROL, regDSCL0_RECOUT_START, regDSCL0_RECOUT_SIZE,
+    regDSCL0_MPC_SIZE, regDSCL0_SCL_MODE, regDSCL0_SCL_HORZ_FILTER_SCALE_RATIO,
+    regDSCL0_SCL_VERT_FILTER_SCALE_RATIO, regDSCL0_SCL_HORZ_FILTER_SCALE_RATIO_C,
+    regDSCL0_SCL_VERT_FILTER_SCALE_RATIO_C, regDSCL0_SCL_HORZ_FILTER_INIT,
+    regDSCL0_SCL_HORZ_FILTER_INIT_C, regDSCL0_SCL_VERT_FILTER_INIT, regDSCL0_SCL_VERT_FILTER_INIT_BOT,
+    regDSCL0_SCL_VERT_FILTER_INIT_C, regDSCL0_SCL_VERT_FILTER_INIT_BOT_C, regDSCL0_SCL_TAP_CONTROL,
+    regDSCL0_DSCL_2TAP_CONTROL,
+};
+#define N_DSCL (sizeof(kDscl) / sizeof(kDscl[0]))
+static const uint32_t kHubp[] = {
+    regHUBP0_DCSURF_PRI_VIEWPORT_START, regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION,
+    regHUBPREQ0_DCSURF_SURFACE_PITCH,
+};
+#define N_HUBP (sizeof(kHubp) / sizeof(kHubp[0]))
+typedef char rd_scale_regs_fit[(N_DSCL + N_HUBP <= RD_SCALE_REGS) ? 1 : -1];
+
+static uint32_t dscl_off(rdna3_dev *d, uint32_t reg, uint32_t p)
+{
+    return rdna3_reg_offset(d, HWIP_DCE, 0, regDSCL0_SCL_MODE_BASE_IDX, reg) + DPP_STRIDE * p;
+}
+
+static uint32_t hubp_off(rdna3_dev *d, uint32_t reg, uint32_t p)
+{
+    return rdna3_reg_offset(d, HWIP_DCE, 0, regHUBP0_DCHUBP_CNTL_BASE_IDX, reg) + HUBP_STRIDE * p;
+}
+
+/* u3.19 in a 3.24 field, low 5 bits zero (dc_fixpt_u3d19(x) << 5); x in 1/2^24 */
+static uint32_t u3d19(uint64_t x) { return (uint32_t)(((x >> 5) << 5) & 0x07ffffffu); }
+
+/* (ratio + taps + 1) / 2 as SCL_x_INIT: frac 0.24 (u0d19 << 5), int 4 bits */
+static uint32_t scl_init(uint64_t ratio, uint32_t taps, uint64_t add)
+{
+    uint64_t init = (ratio + ((uint64_t)(taps + 1) << 24)) / 2 + add;
+    return (uint32_t)((((init & 0xffffff) >> 5) << 5) | ((init >> 24) & 0xf) << 24);
+}
+
+/* optc3_lock: the pipe's double-buffered registers wait for the unlock */
+static void otg_lock(rdna3_dev *d, uint32_t otg, int lock)
+{
+    uint32_t v, t;
+    if (lock) {
+        v = RO(d, regOTG0_OTG_GLOBAL_CONTROL2, otg);
+        WO(d, regOTG0_OTG_GLOBAL_CONTROL2, otg, SET(v, OTG0_OTG_GLOBAL_CONTROL2, OTG_MASTER_UPDATE_LOCK_SEL, otg));
+    }
+    WO(d, regOTG0_OTG_MASTER_UPDATE_LOCK, otg, lock ? OTG0_OTG_MASTER_UPDATE_LOCK__OTG_MASTER_UPDATE_LOCK_MASK : 0);
+    for (t = 0; lock && t < 10 && !GET(RO(d, regOTG0_OTG_MASTER_UPDATE_LOCK, otg),
+                                       OTG0_OTG_MASTER_UPDATE_LOCK, UPDATE_LOCK_STATUS); t++)
+        d->os.udelay(d->os.ctx, 1);
+}
+
+int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t i, uint64_t mc,
+                     uint32_t w, uint32_t h, uint32_t pitch_px)
+{
+    rdna3_dcn_head *hd;
+    uint32_t p, k, nw, nh, v;
+    uint64_t hr, vr;
+    if (i >= dc->nheads)
+        return RDNA3_EINVAL;
+    hd = &dc->head[i];
+    p = hd->pipe;
+    if (!sc->saved[p]) {
+        sc->native_w[p] = hd->width;
+        sc->native_h[p] = hd->height;
+    }
+    nw = sc->native_w[p];
+    nh = sc->native_h[p];
+    if (!w || !h || w > nw || h > nh || w * 4 < nw || h * 4 < nh || pitch_px < w || pitch_px > 0x4000 ||
+        (mc & 0xff) || mc < d->fb_start || mc - d->fb_start + (uint64_t)pitch_px * 4 * h > d->vram_size)
+        return RDNA3_EINVAL;
+    if (!sc->saved[p] && (w != nw || h != nh)) {
+        for (k = 0; k < N_DSCL; k++)
+            sc->reg[p][k] = rdna3_rreg(d, dscl_off(d, kDscl[k], p));
+        for (k = 0; k < N_HUBP; k++)
+            sc->reg[p][N_DSCL + k] = rdna3_rreg(d, hubp_off(d, kHubp[k], p));
+        sc->saved[p] = 1;
+    }
+    otg_lock(d, hd->otg, 1);
+    if (w == nw && h == nh) {
+        if (sc->saved[p]) {
+            for (k = 0; k < N_DSCL; k++)
+                rdna3_wreg(d, dscl_off(d, kDscl[k], p), sc->reg[p][k]);
+            for (k = 0; k < N_HUBP; k++)
+                rdna3_wreg(d, hubp_off(d, kHubp[k], p), sc->reg[p][N_DSCL + k]);
+            sc->saved[p] = 0;
+        }
+        v = RH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p);
+        WH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
+    } else {
+        hr = ((uint64_t)w << 24) / nw;
+        vr = ((uint64_t)h << 24) / nh;
+        /* autocal off, boundary mode clean, recout = the whole active area */
+        rdna3_wreg(d, dscl_off(d, regDSCL0_DSCL_AUTOCAL, p), 0);
+        rdna3_wreg(d, dscl_off(d, regDSCL0_DSCL_CONTROL, p), 0);
+        rdna3_wreg(d, dscl_off(d, regDSCL0_RECOUT_START, p), 0);
+        rdna3_wreg(d, dscl_off(d, regDSCL0_RECOUT_SIZE, p), nw | nh << DSCL0_RECOUT_SIZE__RECOUT_HEIGHT__SHIFT);
+        rdna3_wreg(d, dscl_off(d, regDSCL0_MPC_SIZE, p), nw | nh << DSCL0_MPC_SIZE__MPC_HEIGHT__SHIFT);
+        v = rdna3_rreg(d, dscl_off(d, regDSCL0_SCL_MODE, p));
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_MODE, p),
+                   SET(v, DSCL0_SCL_MODE, DSCL_MODE, 1));   /* DSCL_MODE_SCALING_444_RGB_ENABLE */
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_HORZ_FILTER_SCALE_RATIO, p), u3d19(hr));
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_VERT_FILTER_SCALE_RATIO, p), u3d19(vr));
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_HORZ_FILTER_SCALE_RATIO_C, p), u3d19(hr));
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_VERT_FILTER_SCALE_RATIO_C, p), u3d19(vr));
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_HORZ_FILTER_INIT, p), scl_init(hr, 2, 0));
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_HORZ_FILTER_INIT_C, p), scl_init(hr, 2, 0));
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_VERT_FILTER_INIT, p), scl_init(vr, 2, 0));
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_VERT_FILTER_INIT_BOT, p), scl_init(vr, 2, vr));
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_VERT_FILTER_INIT_C, p), scl_init(vr, 2, 0));
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_VERT_FILTER_INIT_BOT_C, p), scl_init(vr, 2, vr));
+        /* 2 taps everywhere (taps - 1), hardcoded bilinear coefficients */
+        rdna3_wreg(d, dscl_off(d, regDSCL0_SCL_TAP_CONTROL, p),
+                   1u << DSCL0_SCL_TAP_CONTROL__SCL_V_NUM_TAPS__SHIFT |
+                   1u << DSCL0_SCL_TAP_CONTROL__SCL_H_NUM_TAPS__SHIFT |
+                   1u << DSCL0_SCL_TAP_CONTROL__SCL_V_NUM_TAPS_C__SHIFT |
+                   1u << DSCL0_SCL_TAP_CONTROL__SCL_H_NUM_TAPS_C__SHIFT);
+        rdna3_wreg(d, dscl_off(d, regDSCL0_DSCL_2TAP_CONTROL, p),
+                   DSCL0_DSCL_2TAP_CONTROL__SCL_H_2TAP_HARDCODE_COEF_EN_MASK |
+                   DSCL0_DSCL_2TAP_CONTROL__SCL_V_2TAP_HARDCODE_COEF_EN_MASK);
+        /* hubp2_program_size: the viewport is the whole (smaller) surface */
+        WH(d, regHUBP0_DCSURF_PRI_VIEWPORT_START, p, 0);
+        WH(d, regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, p, w | h << 16);
+        v = RH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p);
+        WH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
+    }
+    /* hubp2_program_surface_flip_and_addr: HIGH first, the LOW write latches */
+    WH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, p, (uint32_t)(mc >> 32) & 0xffff);
+    WH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, p, (uint32_t)mc);
+    otg_lock(d, hd->otg, 0);
+    hd->width = w;
+    hd->height = h;
+    hd->pitch_px = pitch_px;
+    hd->address = mc;
+    dc->requested[p] = mc;
+    RLOG(d, "DCN: head %u source %ux%u pitch %u at MC 0x%llx on a %ux%u timing (%s)", i, w, h, pitch_px,
+         (unsigned long long)mc, nw, nh, w == nw && h == nh ? "native, scaler restored" : "DPP scaler");
+    return RDNA3_OK;
 }
 
 int dcn32_set_blank(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, int blank)

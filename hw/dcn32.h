@@ -88,6 +88,27 @@ int  dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s);
 int  dcn32_scanout_sample(rdna3_dev *d, const rdna3_scanout_info *s, uint32_t out_w,
                           uint32_t out_h, uint32_t row0, uint32_t nrows, uint8_t *rgb);
 
+/* Scaled modes on a lit head: the monitor keeps its timing, the DPP
+ * scaler stretches a smaller surface over the active area. The registers
+ * the GOP left are saved on the first scaled source and put back when the
+ * native size comes back. */
+#define RD_SCALE_REGS 22
+typedef struct rdna3_dcn_scale {
+    int      saved[RD_DCN_MAX_PIPES];
+    uint32_t native_w[RD_DCN_MAX_PIPES], native_h[RD_DCN_MAX_PIPES];
+    uint32_t reg[RD_DCN_MAX_PIPES][RD_SCALE_REGS];
+} rdna3_dcn_scale;
+
+/* Show the w x h surface at MC address 'mc' (pitch_px pixels per row) on
+ * head i, upscaled to the head's native active size: HUBP viewport/pitch/
+ * address + dpp1_dscl_set_scaler_manual_scale (444 RGB, 2-tap hardcoded
+ * coefficients, ratio src/dst, init (ratio + taps + 1) / 2), all under the
+ * OTG master update lock (optc3_lock / optc1_unlock) so they latch in one
+ * frame. w x h == native restores the saved bypass state. Upscaling only,
+ * down to 1/4 of the native size. */
+int  dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t i, uint64_t mc,
+                      uint32_t w, uint32_t h, uint32_t pitch_px);
+
 /* Display sleep without turning the link off: hubp2_set_blank_regs
  * (wait for HUBP_NO_OUTSTANDING_REQ, then HUBP_BLANK_EN + HUBP_TTU_DISABLE);
  * the MPC then sends its black background. 0 unblanks. */

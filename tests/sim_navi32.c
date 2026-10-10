@@ -50,6 +50,7 @@
 #include "soc21_cg.h"
 #include "gen/athub_3_0_0_cg.h"
 #include "gen/hdp_6_0_0_cg.h"
+#include "gen/dcn_3_2_0_scale.h"
 #include "doorbell.h"
 #include "gen/nbio_4_3_0_doorbell.h"
 #include "gen/dcn_3_2_1.h"
@@ -3623,6 +3624,49 @@ static void run(const char *fwdir)
                 CHECK(dcn32_set_blank(&dev, &dc, 3, 1) == RDNA3_EINVAL);
                 S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] = c0;
             }
+        }
+        /* scaled source on head 0 (pipe 1): DPP scaler + HUBP viewport under
+         * the OTG lock, bypass state back for the native size */
+        {
+            static rdna3_dcn_scale sc;
+            const uint32_t dpp = regCNVC_CUR1_CURSOR0_CONTROL - regCNVC_CUR0_CURSOR0_CONTROL;
+#define DSC(r) S.reg[DCN_B2 + (r) + dpp]
+            const uint32_t mode0 = 0x00000100u, vp0 = S.reg[HUBP(regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, 1)];
+            const uint32_t pitch0 = S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_PITCH, 1)];
+            memset(&sc, 0, sizeof(sc));
+            DSC(regDSCL0_SCL_MODE) = mode0;
+            DSC(regDSCL0_SCL_TAP_CONTROL) = 0;
+            DSC(regDSCL0_MPC_SIZE) = 2560u | 1440u << 16;
+            CHECK(dcn32_set_source(&dev, &dc, &sc, 0, FB_START + 0x2000000, 3000, 1440, 3000) == RDNA3_EINVAL);
+            CHECK(dcn32_set_source(&dev, &dc, &sc, 0, FB_START + 0x2000000, 600, 1440, 600) == RDNA3_EINVAL);
+            CHECK(dcn32_set_source(&dev, &dc, &sc, 0, FB_START + 0x2000010, 1280, 720, 1280) == RDNA3_EINVAL);
+            CHECK(dcn32_set_source(&dev, &dc, &sc, 0, FB_START + 0x2000000, 1280, 720, 1280) == RDNA3_OK);
+            CHECK((DSC(regDSCL0_SCL_MODE) & 7) == 1 && (DSC(regDSCL0_SCL_MODE) & ~7u) == (mode0 & ~7u));
+            CHECK(DSC(regDSCL0_SCL_HORZ_FILTER_SCALE_RATIO) == 0x800000u &&
+                  DSC(regDSCL0_SCL_VERT_FILTER_SCALE_RATIO) == 0x800000u);
+            CHECK(DSC(regDSCL0_SCL_HORZ_FILTER_INIT) == 0x01C00000u &&      /* (0.5 + 3) / 2 = 1.75 */
+                  DSC(regDSCL0_SCL_VERT_FILTER_INIT_BOT) == 0x02400000u);  /* + ratio = 2.25 */
+            CHECK(DSC(regDSCL0_SCL_TAP_CONTROL) == 0x1111u && (DSC(regDSCL0_DSCL_2TAP_CONTROL) & 0x10001u) == 0x10001u);
+            CHECK(DSC(regDSCL0_RECOUT_SIZE) == (2560u | 1440u << 16) && DSC(regDSCL0_MPC_SIZE) == (2560u | 1440u << 16));
+            CHECK(S.reg[HUBP(regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, 1)] == (1280u | 720u << 16));
+            CHECK((S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_PITCH, 1)] & 0x3fff) == 1279);
+            CHECK(S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, 1)] == (uint32_t)(FB_START + 0x2000000));
+            CHECK(!(S.reg[OTG(regOTG0_OTG_MASTER_UPDATE_LOCK, 2)] & 1) &&
+                  ((S.reg[OTG(regOTG0_OTG_GLOBAL_CONTROL2, 2)] >> 25) & 7) == 2);   /* locked OTG 2, released */
+            CHECK(dc.head[0].width == 1280 && dc.head[0].height == 720 && dc.head[0].pitch_px == 1280);
+            /* flips keep working at the scaled size */
+            CHECK(dcn32_flip(&dev, &dc, 0, FB_START + 0x2100000, 1280, 1) == RDNA3_OK);
+            /* another scaled size reuses the saved native state */
+            CHECK(dcn32_set_source(&dev, &dc, &sc, 0, FB_START + 0x2000000, 1920, 1080, 1920) == RDNA3_OK);
+            CHECK(DSC(regDSCL0_SCL_HORZ_FILTER_SCALE_RATIO) == 0xC00000u);   /* 0.75 */
+            /* native: everything as the GOP left it */
+            CHECK(dcn32_set_source(&dev, &dc, &sc, 0, FB_START + 0x6000000, 2560, 1440, 2624) == RDNA3_OK);
+            CHECK(DSC(regDSCL0_SCL_MODE) == mode0 && DSC(regDSCL0_SCL_TAP_CONTROL) == 0 &&
+                  DSC(regDSCL0_MPC_SIZE) == (2560u | 1440u << 16));
+            CHECK(S.reg[HUBP(regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, 1)] == vp0);
+            CHECK((S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_PITCH, 1)] & 0x3fff) == (pitch0 & 0x3fff) && !sc.saved[1]);
+            CHECK(dc.head[0].width == 2560 && dc.head[0].height == 1440);
+#undef DSC
         }
         /* hardware cursor: HUBP pipe 1 + DPP 1 */
         {
