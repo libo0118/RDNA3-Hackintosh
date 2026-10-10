@@ -135,3 +135,49 @@ will really behave. The first test will tell us above all:
 
 Further modeset work (DML, pixel clock, DP training) starts after
 steps 2, 5b and 9, because it needs real DCN register values.
+
+## Bare metal with the installer (no VM harness)
+
+For a hackintosh where the driver is installed with the `.pkg` (or the
+tarball's `install.sh`) instead of a build tree:
+[INSTALL-OPENCORE](INSTALL-OPENCORE.md) covers the package, the OpenCore
+settings and the way back. Everything below runs from
+`/Library/Application Support/RDNA3` (written `$R` here); nothing needs the
+repository or a Linux host.
+
+1. **Way back first** ([INSTALL-OPENCORE §8](INSTALL-OPENCORE.md#8-the-way-back)):
+   a USB copy of the EFI with `RDNA3Accel.kext` disabled and `-rdna3off`.
+   SSH on (Remote Login), so a dark screen still gives a report.
+2. **Install:** the `.pkg`, then
+   `sudo "$R/oc_install.sh" --efi /Volumes/EFI` (EFI mounted) for the
+   OpenCore entry of the core kext. Check the security settings of
+   INSTALL-OPENCORE §4 (`csr-active-config`, `SecureBootModel`, `amfi=0x80`).
+   Restart, **Allow** in Privacy & Security if asked, restart again.
+3. **Boot with the default profile:** no `rdna3` boot-args at all. Expected:
+   the desktop on the RX 7800 XT at the GOP resolution, a second monitor as
+   an extended display, `ioreg -rc RDNA3Accel -d1 | grep -E 'Stage2|GFXResult|PMFeatures'`
+   shows the bring-up done.
+4. **Report** (after the desktop is up, from Terminal or SSH):
+
+   ```sh
+   sudo "/Library/Application Support/RDNA3/autoreport.sh" --standalone
+   ```
+
+   The same tests and report the VM runs after each boot (`tools/vm/macos/autoreport.sh`):
+   scanout pictures, display sleep and wake, scaled mode switches, the DMA
+   and GFX tests, Vulkan and Metal when installed, then `collect.sh`. It
+   takes 3 to 8 minutes, a Terminal window shows the progress, and the files
+   land in `/Users/Shared/rdna3-reports/`: `rdna3-report-<label>-<date>.tar.gz`,
+   `…-tests.txt` and `…-scanout*.ppm`. Send all of them; they are what
+   [AFTER-TESTS](AFTER-TESTS.md) expects from the VM.
+   Only the collection, without running any test:
+   `"$R/tools/macos/collect.sh" <label>` (writes `~/rdna3-report-<label>-<date>.tar.gz`).
+5. **A ladder step instead of the profile**, when the default profile fails:
+   `sudo "$R/oc_install.sh" --efi /Volumes/EFI --step 2` (any step of the
+   table above; `--step default` goes back to no `rdna3` boot-args), restart,
+   report as in 4. Walk up from the last step that worked.
+6. **Roll back:** `--off` (sets `-rdna3off`), the USB EFI, or from Recovery
+   as INSTALL-OPENCORE §8 describes; `sudo "$R/uninstall.sh"` removes the install.
+
+A dark screen with the system alive: SSH in, run step 4 there, then
+`--off` and restart.

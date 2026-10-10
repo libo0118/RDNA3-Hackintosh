@@ -1,0 +1,72 @@
+#!/bin/sh
+# .pkg postinstall, also run by the release tarball's install.sh. $3 = the
+# target volume. Makes the installed files usable the way the VM harness
+# does (tools/vm/macos/setup.sh): executables, root:wheel, ad-hoc
+# signatures over the final bundles (kernelmanagerd refuses unsigned kexts),
+# the kexts registered with kernelmanagerd for the Auxiliary KC, then
+# warnings about what the user still has to set (docs/INSTALL-OPENCORE.md).
+set -u
+DST=${3:-/}
+[ "$DST" = / ] && DST=
+A="$DST/Library/Application Support/RDNA3"
+E="$DST/Library/Extensions"
+GB="$DST/Library/GPUBundles"
+# sys: a real install (macOS, root): ownership and signatures; live: on the
+# running system: kernelmanagerd and the checks
+sys=0; [ "$(uname -s)" = Darwin ] && [ "$(id -u)" = 0 ] && sys=1
+live=0; [ $sys = 1 ] && [ -z "$DST" ] && live=1
+say() { echo "RDNA3: $*"; }
+
+sh "$A/firmware.sh" --dest "$A/firmware" --check >/dev/null ||
+    { say "the firmware in $A/firmware is incomplete (firmware.sh --check)"; exit 1; }
+
+# CI artifacts are zips, which drop the x bit
+for f in "$E"/RDNA3*.kext/Contents/MacOS/* "$A"/bin/* "$A"/*.sh "$A"/package/*.sh \
+         "$GB"/RDNA3MTLDriver.bundle/Contents/MacOS/* "$GB"/rdna3mtl/*.dylib; do
+    [ -f "$f" ] && [ ! -L "$f" ] && chmod 755 "$f"
+done
+for k in "$E"/RDNA3*.kext; do
+    [ -d "$k" ] || continue
+    chmod -R go-w "$k"
+    [ $sys = 1 ] && chown -R root:wheel "$k"
+    # the signature covers the final bundle; setup.sh signs the same way
+    [ $sys = 1 ] && { codesign --force --deep --sign - "$k" >/dev/null 2>&1 || say "WARNING: codesign failed for $k"; }
+done
+if [ $sys = 1 ]; then
+    chown -R root:wheel "$A"
+    for p in "$GB/RDNA3MTLDriver.bundle" "$GB/rdna3mtl" "$GB/rdna3mtl-allow.txt"; do
+        [ -e "$p" ] && chown -R root:wheel "$p"
+    done
+    [ -d "$GB/RDNA3MTLDriver.bundle" ] && codesign -f -s - "$GB/RDNA3MTLDriver.bundle" >/dev/null 2>&1
+    for f in "$GB"/rdna3mtl/*.dylib "$A"/bin/*; do
+        [ -f "$f" ] && [ ! -L "$f" ] && codesign -f -s - "$f" >/dev/null 2>&1
+    done
+fi
+
+if [ $live = 1 ]; then
+    # As setup.sh in the VM: 'load -p' hands a new build to kernelmanagerd,
+    # which asks for approval (System Settings -> Privacy & Security) and
+    # rebuilds the Auxiliary KC; the kexts run from the next boot. An
+    # OpenCore-injected RDNA3Accel is already loaded, and its copy here only
+    # gets "a prelinked copy is already present".
+    for k in "$E"/RDNA3*.kext; do
+        [ -d "$k" ] && { kmutil load -p "$k" >/dev/null 2>&1 || true; }
+    done
+
+    csr=$(csrutil status 2>/dev/null)
+    case "$csr" in
+        *disabled*) ;;
+        *) say "WARNING: SIP is on ($csr). macOS loads ad-hoc signed kexts only with SIP off" \
+               "(csr-active-config EF0F0000 in OpenCore, docs/INSTALL-OPENCORE.md)." ;;
+    esac
+    args=" $(nvram boot-args 2>/dev/null | cut -f2-) "
+    case "$args" in *" amfi=0x80 "*) ;; *) say "NOTE: boot-arg amfi=0x80 is not set: kernelmanagerd may call the" \
+        "framebuffer an 'invalid codeful kernel extension' (docs/INSTALL-OPENCORE.md)." ;; esac
+    case "$args" in *" -rdna3off "*) say "NOTE: boot-arg -rdna3off is set: the driver stays off until you remove it." ;; esac
+    case "$args" in *" rdna3lvl="*) say "NOTE: rdna3lvl= is set: a test-ladder step, not the default profile." ;; esac
+    loaded=$(kmutil showloaded --list-only 2>/dev/null | grep -o -i -E '[a-z0-9.]*(whatevergreen|radeonsensor|smcradeongpu)[a-z0-9.]*' | sort -u | tr '\n' ' ')
+    [ -n "$loaded" ] && say "NOTE: loaded now: $loaded- see 'What to remove' in docs/INSTALL-OPENCORE.md."
+fi
+say "installed $(head -1 "$A/VERSION" 2>/dev/null). Restart, approve the extensions in"
+say "System Settings -> Privacy & Security if asked, and restart once more."
+exit 0

@@ -37,7 +37,7 @@ DIR=$GB/rdna3mtl
 if [ -n "$FW" ]; then
     run make -C "$ROOT/kext" firmware FW_DIR="$FW"
 else
-    echo "NOTE: no --fw given; rdna3lvl>=4 needs firmware in the kext's Resources"
+    echo "NOTE: no --fw given; rdna3lvl>=4 and the default profile need the firmware (package/firmware.sh)"
 fi
 
 run rm -rf /Library/Extensions/RDNA3Accel.kext
@@ -50,7 +50,7 @@ if [ -d "$ACCEL" ]; then
     run cp -R "$ACCEL" /Library/Extensions/
     run chown -R root:wheel /Library/Extensions/RDNA3Accelerator.kext
     run chmod -R go-w /Library/Extensions/RDNA3Accelerator.kext
-    echo "NOTE: the accelerator starts only with boot-arg rdna3accel=1"
+    echo "NOTE: the accelerator starts in the default profile (no rdna3lvl) or with rdna3accel=1"
 fi
 FB=$ROOT/build/RDNA3Framebuffer.kext
 if [ -d "$FB" ]; then
@@ -58,7 +58,7 @@ if [ -d "$FB" ]; then
     run cp -R "$FB" /Library/Extensions/
     run chown -R root:wheel /Library/Extensions/RDNA3Framebuffer.kext
     run chmod -R go-w /Library/Extensions/RDNA3Framebuffer.kext
-    echo "NOTE: the framebuffer starts only with boot-arg rdna3fb=1 (rdna3lvl>=2 for DCN mode)"
+    echo "NOTE: the framebuffer starts in the default profile (no rdna3lvl) or with rdna3fb=1"
 fi
 
 run mkdir -p "$DIR"
@@ -100,4 +100,5 @@ done
 run kmutil install --update-all --check-rebuild || run kmutil load -p /Library/Extensions/RDNA3Accel.kext || true
 echo
 echo "Installed. Reboot, approve the extension in System Settings > Privacy & Security"
-echo "if asked, and reboot again. Start with boot-arg rdna3lvl=0 (docs/STAGE1.md)."
+echo "if asked, and reboot again. Without rdna3 boot-args the default profile runs;"
+echo "for the step-by-step ladder start with rdna3lvl=0 (docs/TESTING-HW.md)."

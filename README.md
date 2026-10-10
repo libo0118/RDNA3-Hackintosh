@@ -36,6 +36,7 @@ the card ([docs/status/hw-verified.txt](docs/status/hw-verified.txt)). Per-funct
 | `uapi/` | OS-independent Linux amdgpu UAPI (used by the kext and the tests) |
 | `userspace/` | `libdrm_xnu` (libdrm core over IOKit) + libdrm_amdgpu build; `mesa/` = RADV build on macOS and patches |
 | `metal/` | Metal plugin and AIR→SPIR-V translator from NullMoth, adapted to AMD |
+| `package/` | Installer: `.pkg`/tarball (`make_pkg.sh`), firmware download, OpenCore helper and snippet, uninstall |
 | `third_party/` | AMD/DRM headers (MIT) and libdrm_amdgpu (MIT) |
 | `docs/` | Plan, test bench setup, test instructions, firmware licenses, [analysis of the NullMoth driver (NVIDIA)](docs/NULLMOTH-ANALYSIS.md) |
 
@@ -64,6 +65,16 @@ What to do with the test reports: [docs/AFTER-TESTS.md](docs/AFTER-TESTS.md).
 Loading the kext on the test machine and the safety levels (`rdna3lvl=`)
 are described in [docs/STAGE1.md](docs/STAGE1.md). Read
 [docs/STAGE0.md](docs/STAGE0.md) first: **do not test without a second card for display.**
+
+## Install
+
+On a bare-metal Hackintosh (macOS 15, OpenCore): the installer package
+(CI artifact `RDNA3-pkg`, or `package/make_pkg.sh` on a Mac) puts the kexts in
+`/Library/Extensions` and downloads the AMD firmware from linux-firmware; no
+boot-args are needed (default profile). OpenCore settings, opt-in boot-args and
+the way back: [docs/INSTALL-OPENCORE.md](docs/INSTALL-OPENCORE.md). Testing
+and reports without the VM:
+[docs/TESTING-HW.md](docs/TESTING-HW.md#bare-metal-with-the-installer-no-vm-harness).
 
 ## Project rules
 
