@@ -810,6 +810,58 @@ bool RD3DisplayPipe::isTransactionComplete(IOAccelDisplayPipeTransaction2 *)
 static void rd3AccelSurfScanoutSync(IOSurface *s);
 static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
 static void rd3AccelIopHome(IOService *fb, unsigned head);
+
+/* The base class's performTransaction for a plane-less (gamma) transaction.
+ * Card run 30: with this display pipe active, macOS sends the gamma tables
+ * in display-pipe transactions without a plane (debug.rdna3accel_iop_empty
+ * +6 for 3 tables x 2 heads) and never calls IOFramebuffer::setGammaTable;
+ * without the accelerator setGammaTable reaches the framebuffer and the
+ * MPCC OGAM works. IOAcceleratorFamily2's own implementation presumably
+ * hands such a transaction's gamma to the pipe's IOFramebuffer, so with
+ * rdna3gamma=1 it gets the transaction instead of the "done" we answer.
+ * Weak imports, called like signalTransactionInterrupt below: the immediate
+ * base IOAccelLegacyDisplayPipe if it overrides the method, else
+ * IOAccelDisplayPipe's - and neither symbol can keep the kext from loading
+ * (unresolved weak symbols bind to gOSKextUnresolved). */
+extern "C" {
+IOReturn _ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2(void *pipe, IOAccelDisplayPipeTransaction2 *txn) __attribute__((weak_import));
+IOReturn _ZN18IOAccelDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2(void *pipe, IOAccelDisplayPipeTransaction2 *txn) __attribute__((weak_import));
+}
+static int    gIopGammaBase = -1;   /* rdna3gamma, read on first use */
+static SInt64 gCntIopEmptyBase, gCntIopEmptyBaseErr;
+static IOReturn rd3AccelIopGammaToBase(void *pipe, IOAccelDisplayPipeTransaction2 *txn, bool *handled)
+{
+    typedef IOReturn (*PerformFn)(void *, IOAccelDisplayPipeTransaction2 *);
+    PerformFn fn = nullptr;
+    const char *which = nullptr;
+    *handled = false;
+    if (gIopGammaBase < 0)
+        gIopGammaBase = rd3_arg("rdna3gamma", 0) ? 1 : 0;
+    if (!gIopGammaBase)
+        return kIOReturnSuccess;
+    /* OSKextSymbolIsResolved, with the cast a function pointer needs in C++ */
+#define RD3_WEAK_RESOLVED(f) ((const void *)&(f) != gOSKextUnresolved)
+    if (RD3_WEAK_RESOLVED(_ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2)) {
+        fn = _ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2;
+        which = "IOAccelLegacyDisplayPipe";
+    } else if (RD3_WEAK_RESOLVED(_ZN18IOAccelDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2)) {
+        fn = _ZN18IOAccelDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2;
+        which = "IOAccelDisplayPipe";
+    }
+    static SInt32 gIopBaseLogs;
+    if (!fn) {
+        if (OSIncrementAtomic(&gIopBaseLogs) < 2)
+            ALOG("iop: rdna3gamma=1 but IOAcceleratorFamily2 exports no performTransaction: plane-less transaction answered as before");
+        return kIOReturnSuccess;
+    }
+    const IOReturn r = fn(pipe, txn);
+    *handled = true;
+    OSAddAtomic64(1, r == kIOReturnSuccess ? &gCntIopEmptyBase : &gCntIopEmptyBaseErr);
+    if (OSIncrementAtomic(&gIopBaseLogs) < 8)
+        ALOG("iop: plane-less transaction handed to %s::performTransaction -> 0x%x", which, (unsigned)r);
+    return r;
+}
+
 IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
 {
     if (!gRd3Iop) return (IOReturn)0xe00002c7;
@@ -833,7 +885,10 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
                 ALOG("iop: empty #%lld +0x%03x: %08x %08x %08x %08x %08x %08x %08x %08x", (long long)e, o * 4,
                      w[o], w[o + 1], w[o + 2], w[o + 3], w[o + 4], w[o + 5], w[o + 6], w[o + 7]);
         }
-        return kIOReturnSuccess;
+        /* rdna3gamma=1: the base class gets it (rd3AccelIopGammaToBase) */
+        bool handled;
+        const IOReturn br = rd3AccelIopGammaToBase(this, txn, &handled);
+        return handled ? br : kIOReturnSuccess;
     }
 
     const volatile unsigned int *src = nullptr; unsigned w = 0, h = 0, pitch = 0; bool fromRes = false;
@@ -989,6 +1044,8 @@ SYSCTL_UINT(_debug, OID_AUTO, rdna3accel_heads_piped, CTLFLAG_RD | CTLFLAG_LOCKE
 static_assert(kRd3MaxFB == 4, "kRd3MaxFB changed: add debug.rdna3accel_iop_ok_h<i> for every new head");
 RD3ACCEL_CNT(rdna3accel_iop_fail,         gCntIopFail,        "K3: transactions refused (see the capped iop: log lines)");
 RD3ACCEL_CNT(rdna3accel_iop_empty,        gCntIopEmpty,       "K3: transactions with no plane (gamma/options only)");
+RD3ACCEL_CNT(rdna3accel_iop_empty_base,   gCntIopEmptyBase,   "rdna3gamma=1: plane-less transactions the base class performed");
+RD3ACCEL_CNT(rdna3accel_iop_empty_base_err, gCntIopEmptyBaseErr, "rdna3gamma=1: plane-less transactions the base class refused");
 RD3ACCEL_CNT(rdna3accel_iop_src_res,      gCntIopSrcRes,      "K3: frames sourced from our VRAM resource");
 RD3ACCEL_CNT(rdna3accel_iop_src_surf,     gCntIopSrcSurf,     "K3: frames sourced from the IOSurface memory");
 RD3ACCEL_CNT(rdna3accel_iop_blank,        gCntIopBlank,       "K6: frames copied whose 64 samples were all ONE colour (a blank frame)");
@@ -1029,6 +1086,7 @@ static void rdna3accelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_ok);         sysctl_register_oid(&sysctl__debug_rdna3accel_iop_fail);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_empty);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_empty_base); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_empty_base_err);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_src_res);    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_src_surf);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_blank);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flip);       sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flips);
