@@ -264,10 +264,14 @@ void RDNA3Accel::displayProbeConnectors()
 
 IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
 {
-    if (!e || e->version != RD3K_DISPLAY_ABI_VERSION)
+    if (!e || e->version != RD3K_DISPLAY_ABI_VERSION) {
+        LOG("display: EDID request with ABI %u (want %u)", e ? e->version : 0, RD3K_DISPLAY_ABI_VERSION);
         return kIOReturnBadArgument;
-    if (!fDcn || !fDispDev)
+    }
+    if (!fDcn || !fDispDev) {
+        LOG("display: EDID request before the display core is up");
         return kIOReturnNotReady;
+    }
     e->length = 0;
     e->connector = ~0u;
     /* head -> connector, until the OTG -> DIG -> PHY routing is read back:
@@ -292,8 +296,10 @@ IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
             bestScore = score;
         }
     }
-    if (best < 0)
+    if (best < 0) {
+        LOG("display: EDID request for head %u: none of %u connectors has one", e->head, fNConnectors);
         return kIOReturnNotFound;
+    }
     const rdna3_connector *c = &fConnectors[best];
     uint32_t n = (uint32_t)c->edid_len < RD3K_EDID_MAX ? (uint32_t)c->edid_len : RD3K_EDID_MAX;
     memcpy(e->data, c->edid, n);

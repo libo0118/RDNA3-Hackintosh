@@ -98,6 +98,8 @@ class RDNA3Framebuffer : public IOFramebuffer {
     const OSSymbol *fSymCursor = nullptr, *fSymEdid = nullptr;
     struct RD3KDisplayEdid fEdid = {};
     bool     fEdidAsked = false;
+    unsigned fEdidTries = 0;
+    IOReturn fEdidLast = kIOReturnSuccess;
 
     /* hardware cursor: 256x256 ARGB8888 premultiplied in VRAM from the core */
     static const uint32_t kCurDim = 256;
@@ -173,7 +175,12 @@ public:
     /* EDID from the core's DP AUX probe (rdna3DisplayEdid): IOKit builds
      * IODisplayEDID from these blocks, so the monitor gets its name and
      * the right display profile */
-    bool hasDDCConnect(IOIndex) override { return fetchEdid(); }
+    bool hasDDCConnect(IOIndex) override
+    {
+        bool ok = fetchEdid();
+        IOLog("RDNA3FB: hasDDCConnect -> %d\n", ok);
+        return ok;
+    }
     IOReturn getDDCBlock(IOIndex, UInt32 blockNumber, IOSelect blockType, IOOptionBits,
                          UInt8 *data, IOByteCount *length) override
     {
@@ -632,10 +639,13 @@ IOReturn RDNA3Framebuffer::getAttributeForConnection(IOIndex idx, IOSelect attri
     case kConnectionColorMode:                 if (value) *value = 0x00000001; return kIOReturnSuccess;
     case kConnectionCheckEnable:               if (value) *value = 1; return kIOReturnSuccess;
     case kConnectionDisplayFlags:              if (value) *value = 1; return kIOReturnSuccess;
-    case kConnectionSupportsHLDDCSense:
+    case kConnectionSupportsHLDDCSense: {
         /* IOGraphics asks hasDDCConnect / getDDCBlock only when this
          * succeeds: the EDID the core read over AUX or the DDC */
-        return fetchEdid() ? kIOReturnSuccess : kIOReturnUnsupported;
+        bool ok = fetchEdid();
+        IOLog("RDNA3FB: kConnectionSupportsHLDDCSense -> %s\n", ok ? "yes" : "no");
+        return ok ? kIOReturnSuccess : kIOReturnUnsupported;
+    }
     case kConnectionSupportsAppleSense:
     case kConnectionSupportsLLDDCSense:
     case kConnectionDisplayParameterCount:
@@ -716,6 +726,8 @@ void RDNA3Framebuffer::cursorFree()
 
 bool RDNA3Framebuffer::fetchEdid()
 {
+    /* asked once when it worked; a failure (the core not ready yet, no
+     * sink) is retried a few times and logged whenever the answer changes */
     if (fEdidAsked)
         return fEdid.length > 0;
     if (!fCore || !fSymEdid)
@@ -723,12 +735,21 @@ bool RDNA3Framebuffer::fetchEdid()
     bzero(&fEdid, sizeof(fEdid));
     fEdid.version = RD3K_DISPLAY_ABI_VERSION;
     fEdid.head = fHead;
-    if (fCore->callPlatformFunction(fSymEdid, false, &fEdid, nullptr, nullptr, nullptr) != kIOReturnSuccess)
+    IOReturn r = fCore->callPlatformFunction(fSymEdid, false, &fEdid, nullptr, nullptr, nullptr);
+    if (r != kIOReturnSuccess)
         fEdid.length = 0;
-    fEdidAsked = true;
-    if (fEdid.length)
-        IOLog("RDNA3FB: head %u EDID %u bytes from connector AUX%u\n", fHead, fEdid.length, fEdid.connector);
-    return fEdid.length > 0;
+    if (fEdid.length) {
+        fEdidAsked = true;
+        IOLog("RDNA3FB: head %u EDID %u bytes from connector AUX%u\n", fHead, fEdid.length,
+              fEdid.connector);
+        return true;
+    }
+    if (r != fEdidLast || !fEdidTries)
+        IOLog("RDNA3FB: head %u no EDID from the core (0x%x, try %u)\n", fHead, r, fEdidTries + 1);
+    fEdidLast = r;
+    if (++fEdidTries >= 8)
+        fEdidAsked = true;
+    return false;
 }
 
 bool RDNA3Framebuffer::cursorCall(unsigned op)
