@@ -354,6 +354,11 @@ bool RDNA3Framebuffer::start(IOService *provider)
     }
     FBLOG("%s mode: %ux%u pitch %u at phys 0x%llx, %u.%03u Hz", fDcn ? "DCN" : "console", fW, fH,
           fPitch, (unsigned long long)fPhys, fRefreshMilliHz / 1000, fRefreshMilliHz % 1000);
+    /* the core probed the connectors before it registered: ask for the
+     * EDID now, so IOGraphics' first HLDDC sense / hasDDCConnect question
+     * (asked once, while the display is attached) already gets a yes */
+    if (fDcn)
+        fetchEdid();
 
     setProperty("IOFBDependentID", (unsigned long long)0x5244334600000001ull, 64);  /* 'RD3F' */
     setProperty("IOFBDependentIndex", (unsigned long long)fHead, 32);
