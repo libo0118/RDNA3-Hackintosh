@@ -15,7 +15,8 @@
 # (Xcode command line tools, as for building). bash 3.2 compatible.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-PLIST="python3 $ROOT/tools/vm/vmtool.py plist"
+# a function, not a string: the installed copy lives under "Application Support"
+plist() { python3 "$ROOT/tools/vm/vmtool.py" plist "$@"; }
 BUILD=${RDNA3_BUILD:-$ROOT/build}
 EFI=""; FW=""; STEP=""; OFF=0; DRY=0
 while [ $# -gt 0 ]; do
@@ -36,7 +37,8 @@ CONF=$EFI/EFI/OC/config.plist
 run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
 
 # the boot-args OpenCore sets now, without our rdna3* ones
-current=$($PLIST "$CONF" --show)
+current=$(plist "$CONF" --show)
+# shellcheck disable=SC2086 # split into words on purpose
 keep=$(printf '%s\n' $current | { grep -v -E '^-?rdna3' || true; } | tr '\n' ' ' | sed 's/ *$//')
 
 if [ $OFF = 1 ]; then
@@ -52,7 +54,7 @@ elif [ -n "$STEP" ]; then
 else
     args=""
 fi
-args=$(echo "$args" | sed 's/^ *//')
+args=${args#"${args%%[! ]*}"}
 
 run cp "$CONF" "$CONF.rdna3-$(date +%Y%m%d-%H%M%S)"
 
@@ -70,7 +72,7 @@ if [ -n "$FW" ] || { [ $OFF = 0 ] && [ -z "$STEP" ]; }; then
     done
     [ ${#kexts[@]} -gt 0 ] || { echo "no built kexts in $BUILD (make kext; make -C fb; make -C accel)"; exit 1; }
     for k in /Library/Extensions/RDNA3*.kext; do
-        [ -e "$k" ] && echo "NOTE: $k is installed too (package/install.sh); remove it with package/uninstall.sh"
+        [ -e "$k" ] && echo "NOTE: $k is installed too: fine (the .pkg does it: the framebuffer and accelerator load from there; an injected RDNA3Accel wins over its copy)"
     done
 fi
 
@@ -85,9 +87,9 @@ set --
 [ -n "$args" ] && set -- --boot-args "$args"
 if [ $# -gt 0 ] || [ ${#kexts[@]} -gt 0 ]; then
     if [ $DRY = 1 ]; then
-        echo "+ $PLIST $CONF $* ${kexts[*]+${kexts[*]}}"
+        echo "+ vmtool.py plist $CONF $* ${kexts[*]+${kexts[*]}}"
     else
-        $PLIST "$CONF" ${1+"$@"} ${kexts[@]+"${kexts[@]}"}
+        plist "$CONF" ${1+"$@"} ${kexts[@]+"${kexts[@]}"}
     fi
 fi
 echo "Done. Restart; OpenCore applies the boot-args (NVRAM/Add + NVRAM/Delete)."

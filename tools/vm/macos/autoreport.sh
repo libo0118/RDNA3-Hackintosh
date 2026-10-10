@@ -7,6 +7,14 @@
 D="/Library/Application Support/RDNA3VM"
 HOST=http://10.0.2.2:8000
 export HOME=/var/root
+# --standalone: a bare-metal install (package/make_pkg.sh, docs/TESTING-HW.md),
+# run by hand with sudo: the same tests and report, but no VM host - no
+# wait, no updates, no uploads - the files land in /Users/Shared/rdna3-reports
+STANDALONE=
+if [ "${1:-}" = --standalone ]; then
+    STANDALONE=1; HOST=; D="/Library/Application Support/RDNA3"; shift
+    [ "$(id -u)" = 0 ] || { echo "run it with sudo"; exit 1; }
+fi
 
 # with_limit SECONDS command...: never let one stage hold the VM up
 with_limit() {
@@ -53,7 +61,7 @@ if [ "${1:-}" = --sync-metal ]; then
     exit 0
 fi
 
-if [ "${1:-}" != --updated ]; then
+if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ]; then
     sleep 90
     # newest report scripts from the host (rdna3vm start_share); a new
     # autoreport.sh takes over right away
@@ -71,7 +79,7 @@ fi
 # Auxiliary KC, which kernelmanagerd rebuilds from /Library/Extensions:
 # the new copies run from the next boot on.
 updated=
-new=$(curl -sf --max-time 10 "$HOST/rdna3-bundle.sha256" | cut -c1-64)
+new=$([ -n "$HOST" ] && curl -sf --max-time 10 "$HOST/rdna3-bundle.sha256" | cut -c1-64)
 if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
     t=$(mktemp -d /tmp/rdna3b.XXXXXX)
     if curl -sf --max-time 120 "$HOST/rdna3-bundle.tar.gz" | tar -xz -C "$t" && [ -d "$t/kexts" ]; then
@@ -126,6 +134,7 @@ extra="$HOME/rdna3-extra.txt"
 stamp=$(date +%Y%m%d-%H%M%S)
 base=rdna3-report-$label-$stamp
 partial() {
+    [ -n "$HOST" ] || return 0
     curl -sf --max-time 10 -T "$extra" "$HOST/reports/$base-tests.txt" >/dev/null 2>&1
 }
 
@@ -309,6 +318,24 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             fi ;;
     esac
 } > "$extra" 2>&1
+
+if [ -n "$STANDALONE" ]; then
+    # the names the VM's uploads get (docs/AFTER-TESTS.md reads them)
+    out=/Users/Shared/rdna3-reports
+    mkdir -p "$out"
+    cp "$extra" "$out/$base-tests.txt"
+    for p in "$HOME"/rdna3-scanout/*/scanout-pipe*.ppm; do
+        [ -f "$p" ] && cp "$p" "$out/$base-scanout$(basename "$(dirname "$p")")-$(basename "$p" | sed 's/^scanout-//')"
+    done
+    prog "tests done - the full report (up to 6 min)"
+    RDNA3_STAMP=$stamp with_limit 360 sh "$D/tools/macos/collect.sh" "$label"
+    [ -f "$HOME/$base.tar.gz" ] && mv "$HOME/$base.tar.gz" "$out/"
+    chmod -R a+rX "$out"
+    ls -l "$out"/"$base"*
+    prog "all done: $out/$base*"
+    notify "All done: the report is in $out"
+    exit 0
+fi
 
 # the test results and pictures go up first: they matter most, and
 # collect.sh (log show, system_profiler on a GPU the hang test just reset)

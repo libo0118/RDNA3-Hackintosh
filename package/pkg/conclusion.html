@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>RDNA3-Hackintosh</title>
+<style>body { font: 13px -apple-system, sans-serif; } code { font: 12px Menlo, monospace; }</style>
+</head><body>
+<h3>Installed. Before you restart:</h3>
+<ol>
+<li><b>OpenCore</b> (<code>docs/INSTALL-OPENCORE.md</code> in the repository): SIP off
+(<code>csr-active-config</code> <code>EF0F0000</code>), <code>SecureBootModel</code> <code>Disabled</code>,
+boot-arg <code>amfi=0x80</code>, and no WhateverGreen / device-id spoof for the RX 7800 XT.
+Recommended: inject the core kext with OpenCore:
+<code>sudo diskutil mount disk0s1</code> (your EFI partition), then
+<code>sudo "/Library/Application Support/RDNA3/oc_install.sh" --efi /Volumes/EFI</code>.</li>
+<li><b>A way back:</b> keep a second OpenCore entry or EFI copy without the RDNA3 kexts, or boot
+with <code>-rdna3off</code>.</li>
+<li>Restart. If macOS reports blocked system software: System Settings &rarr; Privacy &amp; Security
+&rarr; <b>Allow</b>, then restart again.</li>
+</ol>
+<p>No <code>rdna3</code> boot-args are needed: the driver runs its default profile.
+Report for the developers: <code>sudo "/Library/Application Support/RDNA3/autoreport.sh" --standalone</code>
+(files in <code>/Users/Shared/rdna3-reports</code>).
+Uninstall: <code>sudo "/Library/Application Support/RDNA3/uninstall.sh"</code>.</p>
+</body></html>

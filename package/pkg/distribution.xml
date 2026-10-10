@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- productbuild distribution for package/make_pkg.sh; @VERSION@, @MACOS_MIN@
+     and @MACOS_BEFORE@ are filled in there. -->
+<installer-gui-script minSpecVersion="2">
+    <title>RDNA3-Hackintosh @VERSION@</title>
+    <license file="license.txt"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <options customize="never" require-scripts="true" hostArchitectures="x86_64"/>
+    <domains enable_localSystem="true" enable_anywhere="false" enable_currentUserHome="false"/>
+    <installation-check script="rd3_check()"/>
+    <script><![CDATA[
+function rd3_check() {
+    var v = system.version.ProductVersion;
+    if (system.compareVersions(v, '@MACOS_MIN@') < 0 || system.compareVersions(v, '@MACOS_BEFORE@') >= 0) {
+        my.result.type = 'Fatal';
+        my.result.title = 'Unsupported macOS';
+        my.result.message = 'This build of the RDNA3 kexts is for macOS @MACOS_MIN@ up to (not including) @MACOS_BEFORE@; this Mac runs ' + v + '.';
+        return false;
+    }
+    return true;
+}
+]]></script>
+    <choices-outline>
+        <line choice="default">
+            <line choice="io.github.voten641.rdna3"/>
+        </line>
+    </choices-outline>
+    <choice id="default"/>
+    <choice id="io.github.voten641.rdna3" visible="false">
+        <pkg-ref id="io.github.voten641.rdna3"/>
+    </choice>
+    <pkg-ref id="io.github.voten641.rdna3" version="@VERSION@" onConclusion="RequireRestart">rdna3.pkg</pkg-ref>
+</installer-gui-script>

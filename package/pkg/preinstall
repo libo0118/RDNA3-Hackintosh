@@ -1,0 +1,41 @@
+#!/bin/sh
+# .pkg preinstall, also run by the release tarball's install.sh
+# (package/make_pkg.sh puts it, firmware.sh, manifest and remove.txt into
+# the package's scripts). Arguments as Installer passes them: $3 = target
+# volume ("/").
+#
+# The firmware comes first: without it nothing is installed (the kext would
+# wait ~2 min per missing file at every boot). Kept when already in place,
+# else copied from $RDNA3_FW_FROM (install.sh --fw) or downloaded from
+# linux-firmware. Then the previous install's copies of everything this
+# payload brings are removed, so no stale file survives an upgrade.
+set -u
+DST=${3:-/}
+[ "$DST" = / ] && DST=
+H=$(cd "$(dirname "$0")" && pwd)
+FW_BUNDLED=0
+# shellcheck source=/dev/null
+. "$H/manifest"
+A="$DST/Library/Application Support/RDNA3"
+
+if [ "$FW_BUNDLED" != 1 ]; then
+    if [ -n "${RDNA3_FW_FROM:-}" ]; then
+        sh "$H/firmware.sh" --dest "$A/firmware" --from "$RDNA3_FW_FROM"
+    else
+        sh "$H/firmware.sh" --dest "$A/firmware"
+    fi || {
+        echo "RDNA3: no AMD firmware: nothing installed. Connect to the internet, or put the"
+        echo "RDNA3: linux-firmware amdgpu/ files in place first:"
+        echo "RDNA3:   sudo sh firmware.sh --from <linux-firmware>/amdgpu   (in the release tarball)"
+        exit 1
+    }
+fi
+
+while IFS= read -r p; do
+    case "$p" in
+        Library/Extensions/RDNA3*|Library/GPUBundles/*|"Library/Application Support/RDNA3/"?*)
+            # shellcheck disable=SC2115 # DST is empty for "/", p never is
+            rm -rf "$DST/$p" ;;
+    esac
+done < "$H/remove.txt"
+exit 0
