@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 static rdna3_drm_device g_dev;
 static int g_dev_ready;
@@ -94,6 +95,8 @@ static int lb_sensor(void *c, uint32_t type, uint32_t *v)
     default: return -RD_EINVAL;
     }
 }
+/* DRM_AMDGPU_SCHED / high context priorities: root, as the kext */
+static int lb_privileged(void *c) { (void)c; return geteuid() == 0; }
 static int lb_copyin(void *c, void *d, uint64_t u, size_t n) { (void)c; memcpy(d, (void *)(uintptr_t)u, n); return 0; }
 static int lb_copyout(void *c, uint64_t u, const void *s, size_t n) { (void)c; memcpy((void *)(uintptr_t)u, s, n); return 0; }
 
@@ -304,7 +307,7 @@ static void dev_init(void)
     rdna3_drm_ops ops = { NULL, lb_zalloc, lb_free, lb_bo_alloc, lb_bo_free, lb_copyin, lb_copyout, NULL, NULL,
                           lb_vm_create, lb_vm_destroy, lb_vm_map, lb_vm_unmap,
                           lb_submit, lb_signaled, lb_wait, NULL,
-                          lb_bo_userptr, lb_sensor, NULL, lb_random64, lb_scanout };
+                          lb_bo_userptr, lb_sensor, NULL, lb_random64, lb_scanout, lb_privileged };
     amd_discovery disc;
     if (g_dev_ready)
         return;

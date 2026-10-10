@@ -29,7 +29,7 @@ enum {
     RD_EPERM = 1, RD_ENOENT = 2, RD_EINTR = 4, RD_EIO = 5, RD_EBADF = 9, RD_EACCES = 13,
     RD_ENOMEM = 12, RD_EFAULT = 14, RD_EBUSY = 16, RD_EINVAL = 22, RD_ENOSPC = 28,
     RD_ECANCELED = 89,
-    RD_ENOSYS = 38, RD_ENODEV = 19, RD_ETIME = 62, RD_EOPNOTSUPP = 95,
+    RD_ENOSYS = 38, RD_ENODEV = 19, RD_ENODATA = 61, RD_ETIME = 62, RD_EOPNOTSUPP = 95,
 };
 
 /* ioctl numbers (the 'nr' byte of DRM_IO*, drm.h) */
@@ -108,6 +108,14 @@ struct rd_xnu_scanout {
 /* after the read, clear the sticky HUBP underflow status (hubp2_clear_underflow):
  * a later look shows whether it comes back */
 #define RD_XNU_SCANOUT_CLEAR_UNDERFLOW 1u
+/* private: this file's device-wide id (non-zero, never reused while the
+ * device lives). DRM_AMDGPU_SCHED names the file whose contexts it changes
+ * by a DRM fd; the kext has no fds, so libdrm_xnu puts the id of that fd's
+ * connection into drm_amdgpu_sched_in.fd (0: not a DRM fd). */
+#define RD_NR_XNU_FILE_ID          0xF4
+struct rd_xnu_file_id {
+    uint32_t id, pad;              /* out */
+};
 
 /* We advertise the amdgpu DRM version RADV/libdrm expect from Linux 6.x */
 #define RD_DRM_MAJOR 3
@@ -240,6 +248,11 @@ typedef struct rdna3_drm_ops {
     /* RD_NR_XNU_SCANOUT: fill everything after row0 (pipe and row0 are
      * set); optional, -EOPNOTSUPP when missing. The OS checks privilege. */
     int   (*scanout)(void *ctx, struct rd_xnu_scanout *s);
+    /* may the calling thread raise scheduling priority? Linux: DRM master
+     * (drm_is_current_master) or CAP_SYS_NICE; the OS's stand-in (root on
+     * macOS). Gates DRM_AMDGPU_SCHED and context priorities above NORMAL.
+     * Optional: NULL = never. */
+    int   (*privileged)(void *ctx);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -271,6 +284,9 @@ typedef struct rdna3_drm_device {
     /* exported BOs (RD_NR_XNU_BO_EXPORT): each entry holds a reference */
     struct { uint64_t token; rdna3_bo *bo; const struct rdna3_drm_file *owner; } exports[RD_MAX_EXPORTS];
     uint64_t export_ctr;
+    /* open files, for DRM_AMDGPU_SCHED's target (by rdna3_drm_file.id) */
+    struct rdna3_drm_file *files;
+    uint32_t next_file_id;
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {
@@ -288,6 +304,11 @@ typedef struct rdna3_drm_file {
     /* ioctls of this file in progress: the OS layer may drop its lock while
      * a fence wait sleeps, and must not tear the file down under them */
     uint32_t inflight;
+    /* amdgpu_ctx init_priority / override_priority (AMDGPU_CTX_PRIORITY_*,
+     * override UNSET until DRM_AMDGPU_SCHED sets one) by context id */
+    int16_t  ctx_init_prio[RD_MAX_CTX], ctx_override_prio[RD_MAX_CTX];
+    uint32_t id;                       /* RD_NR_XNU_FILE_ID */
+    struct rdna3_drm_file *next_file;  /* rdna3_drm_device.files */
 } rdna3_drm_file;
 
 /* Fill dev_info and sizes for a Navi 3x from discovery + PCI identity. */
@@ -325,6 +346,12 @@ void rdna3_drm_device_set_clocks(rdna3_drm_device *dev, uint32_t min_sclk_khz, u
                                  uint32_t min_mclk_khz, uint32_t max_mclk_khz);
 void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4][4],
                                   uint32_t cu_active, uint32_t rb_mask);
+
+/* the priority a context's jobs run at: its override when DRM_AMDGPU_SCHED
+ * set one, else the one it was created with (amdgpu_ctx_priority_override's
+ * ctx_prio); AMDGPU_CTX_PRIORITY_UNSET for no such context. The rings run
+ * one queue each in submission order, so nothing acts on it yet. */
+int32_t rdna3_drm_ctx_priority(const rdna3_drm_file *f, uint32_t ctx_id);
 
 /* Lookup for the OS mmap path: BO whose fake offset is 'off'. */
 rdna3_bo *rdna3_drm_bo_by_mmap_offset(rdna3_drm_file *f, uint64_t off);

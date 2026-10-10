@@ -78,6 +78,14 @@ struct xnu_fence_to_handle {
 #define XNU_FENCE_TO_HANDLE_GET_SYNCOBJ    0
 #define XNU_FENCE_TO_HANDLE_GET_SYNCOBJ_FD 1
 #define XNU_FENCE_TO_HANDLE_GET_SYNC_FILE_FD 2
+/* DRM_AMDGPU_SCHED names the file whose contexts it re-prioritizes by a DRM
+ * fd (amdgpu_sched_*_priority_override: fget + amdgpu_file_to_fpriv); the
+ * kext has no fds, so the fd is replaced by its connection's file id
+ * (RD_NR_XNU_FILE_ID), 0 when it is no DRM fd of this process */
+#define XNU_NR_AMDGPU_SCHED          (0x40 + 0x15)
+#define XNU_NR_FILE_ID               0xF4   /* RD_NR_XNU_FILE_ID */
+struct xnu_sched { uint32_t op; int32_t fd; int32_t priority; uint32_t ctx_id; };
+struct xnu_file_id { uint32_t id, pad; };
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_trace = -1;
 
@@ -421,6 +429,18 @@ static int fence_to_fd(int ci, struct xnu_fence_to_handle *a)
     return 0;
 }
 
+static int sched_ioctl(int ci, const struct xnu_sched *a)
+{
+    struct xnu_sched k = *a;
+    struct xnu_file_id id = { 0, 0 };
+    int ti = conn_index(a->fd);
+    /* the kext still checks privilege first (-EACCES), then the id */
+    if (ti >= 0 && be()->ioctl(g_conns[ti].conn, XNU_NR_FILE_ID, &id, sizeof(id)) != 0)
+        id.id = 0;
+    k.fd = (int32_t)id.id;
+    return be()->ioctl(g_conns[ci].conn, XNU_NR_AMDGPU_SCHED, &k, sizeof(k));
+}
+
 /* The UAPI (uapi/rdna3_drm.h) answers with Linux errno numbers, as amdgpu
  * does, since that is what RADV and libdrm compare against (-ETIME on a
  * syncobj wait, -ECANCELED for a guilty context). On macOS a few of them
@@ -431,6 +451,7 @@ static int rd_errno_to_host(int e)
     case 62:  return ETIME;         /* RD_ETIME */
     case 89:  return ECANCELED;     /* RD_ECANCELED */
     case 38:  return ENOSYS;        /* RD_ENOSYS */
+    case 61:  return ENODATA;       /* RD_ENODATA */
     case 95:  return EOPNOTSUPP;    /* RD_EOPNOTSUPP */
     default:  return e;             /* EPERM..ENOSPC share their numbers */
     }
@@ -456,6 +477,8 @@ int drm_xnu_ioctl_nr(int fd, uint32_t nr, void *arg, uint32_t size)
         err = prime_handle_to_fd(ci, (struct xnu_prime_handle *)arg);
     else if (nr == XNU_NR_PRIME_FD_TO_HANDLE && size >= sizeof(struct xnu_prime_handle))
         err = prime_fd_to_handle(ci, (struct xnu_prime_handle *)arg);
+    else if (nr == XNU_NR_AMDGPU_SCHED && size >= sizeof(struct xnu_sched))
+        err = sched_ioctl(ci, (const struct xnu_sched *)arg);   /* in only (DRM_IOW) */
     else
         err = be()->ioctl(g_conns[ci].conn, nr, arg, size);
     if (trace())

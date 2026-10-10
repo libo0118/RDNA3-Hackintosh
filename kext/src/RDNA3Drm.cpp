@@ -22,6 +22,7 @@
 #include <IOKit/IODMACommand.h>
 #include <pexpert/pexpert.h>
 #include <libkern/libkern.h>
+#include <sys/kauth.h>
 #include <mach/mach_time.h>
 
 #include <libkern/copyio.h>   /* copyin/copyout (kpi.libkern) */
@@ -421,6 +422,15 @@ static uint64_t drmRandom64(void *)
     return (((uint64_t)random() << 32) | (uint32_t)random()) ^ (mach_absolute_time() * 0x9E3779B97F4A7C15ull);
 }
 
+/* DRM_AMDGPU_SCHED and context priorities above NORMAL: Linux lets the
+ * DRM master or CAP_SYS_NICE (amdgpu_ctx_priority_permit, DRM_MASTER on the
+ * ioctl). macOS has no DRM master - the window server is no DRM client - so
+ * the caller's credentials decide: root. Called in the client's thread. */
+static int drmPrivileged(void *)
+{
+    return kauth_cred_issuser(kauth_cred_get()) ? 1 : 0;
+}
+
 bool RDNA3Accel::drmInit(const amd_discovery *disc)
 {
     rdna3_drm_ops ops = {};
@@ -445,6 +455,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.vm_fault_info = drmVmFaultInfo;
     ops.random64 = drmRandom64;
     ops.gpu_clock = drmGpuClock;   /* AMDGPU_INFO_TIMESTAMP: SMUIO GOLDEN_TSC */
+    ops.privileged = drmPrivileged;
 
     fDrmLock = IOLockAlloc();
     fDrm = (rdna3_drm_device *)drmZalloc(this, sizeof(*fDrm));

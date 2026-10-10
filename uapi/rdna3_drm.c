@@ -203,6 +203,11 @@ int rdna3_drm_file_open(rdna3_drm_device *dev, rdna3_drm_file *f)
             return -RD_ENOMEM;
         }
     }
+    if (!++dev->next_file_id)
+        ++dev->next_file_id;
+    f->id = dev->next_file_id;
+    f->next_file = dev->files;
+    dev->files = f;
     return 0;
 }
 
@@ -350,7 +355,15 @@ static void exports_gc(rdna3_drm_device *dev, const struct rdna3_drm_file *closi
 void rdna3_drm_file_close(rdna3_drm_file *f)
 {
     rdna3_drm_ops *ops = &f->dev->ops;
+    rdna3_drm_file **pp;
     uint32_t i;
+    for (pp = &f->dev->files; *pp; pp = &(*pp)->next_file)
+        if (*pp == f) {
+            *pp = f->next_file;
+            break;
+        }
+    f->next_file = NULL;
+    f->id = 0;
     uf_reap(f->dev, 0);
     for (i = 0; i < RD_MAX_BO_LISTS; i++)
         bo_list_release(f, i);
@@ -1414,14 +1427,55 @@ static int gem_op(rdna3_drm_file *f, struct drm_amdgpu_gem_op *o)
 
 /* ------------------------------ ctx ------------------------------ */
 
+/* amdgpu_ctx_priority_is_valid: the five levels; UNSET is not one */
+static int ctx_prio_valid(int32_t p)
+{
+    return p == AMDGPU_CTX_PRIORITY_VERY_LOW || p == AMDGPU_CTX_PRIORITY_LOW ||
+           p == AMDGPU_CTX_PRIORITY_NORMAL || p == AMDGPU_CTX_PRIORITY_HIGH ||
+           p == AMDGPU_CTX_PRIORITY_VERY_HIGH;
+}
+
+/* drm_is_current_master || capable(CAP_SYS_NICE), as the OS sees it */
+static int caller_privileged(const rdna3_drm_device *dev)
+{
+    return dev->ops.privileged && dev->ops.privileged(dev->ops.ctx);
+}
+
+/* amdgpu_ctx_priority_permit: NORMAL and below for everyone */
+static int ctx_prio_permit(const rdna3_drm_device *dev, int32_t p)
+{
+    if (p <= AMDGPU_CTX_PRIORITY_NORMAL || caller_privileged(dev))
+        return 0;
+    return -RD_EACCES;
+}
+
+int32_t rdna3_drm_ctx_priority(const rdna3_drm_file *f, uint32_t ctx_id)
+{
+    if (!ctx_id || ctx_id >= RD_MAX_CTX || !f->ctx_used[ctx_id])
+        return AMDGPU_CTX_PRIORITY_UNSET;
+    return f->ctx_override_prio[ctx_id] == AMDGPU_CTX_PRIORITY_UNSET ? f->ctx_init_prio[ctx_id]
+                                                                     : f->ctx_override_prio[ctx_id];
+}
+
 static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
 {
     uint32_t id = c->in.ctx_id, i;
+    int32_t prio = c->in.priority;
+    int r;
+    /* amdgpu_ctx_ioctl: garbage in the priority field means NORMAL, for
+     * backwards compatibility */
+    if (!ctx_prio_valid(prio))
+        prio = AMDGPU_CTX_PRIORITY_NORMAL;
     switch (c->in.op) {
     case AMDGPU_CTX_OP_ALLOC_CTX:
+        /* amdgpu_ctx_alloc -> amdgpu_ctx_init: above NORMAL needs privilege */
+        if ((r = ctx_prio_permit(f->dev, prio)) != 0)
+            return r;
         for (i = 1; i < RD_MAX_CTX; i++)
             if (!f->ctx_used[i]) {
                 f->ctx_used[i] = 1;
+                f->ctx_init_prio[i] = (int16_t)prio;
+                f->ctx_override_prio[i] = AMDGPU_CTX_PRIORITY_UNSET;
                 zero(c, sizeof(*c));
                 c->out.alloc.ctx_id = i;
                 return 0;
@@ -1460,6 +1514,59 @@ static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
     default:
         return -RD_EINVAL;
     }
+}
+
+/* ------------------------------ sched ------------------------------ */
+
+static rdna3_drm_file *file_by_id(rdna3_drm_device *dev, uint32_t id)
+{
+    rdna3_drm_file *t;
+    for (t = dev->files; id && t; t = t->next_file)
+        if (t->id == id)
+            return t;
+    return NULL;
+}
+
+/* amdgpu_sched_ioctl (DRM_MASTER in amdgpu_ioctls_kms): the op, then the
+ * priority, then the target file (here by RD_NR_XNU_FILE_ID id: the fd
+ * libdrm_xnu translated). PROCESS overrides every context of that file
+ * (amdgpu_sched_process_priority_override), CONTEXT one of them
+ * (amdgpu_sched_context_priority_override); both through
+ * amdgpu_ctx_priority_override, which keeps init_priority. */
+static int sched_ioctl(rdna3_drm_file *f, union drm_amdgpu_sched *a)
+{
+    uint32_t op = a->in.op, cid = a->in.ctx_id, i;
+    int32_t prio = a->in.priority;
+    rdna3_drm_file *t;
+    if (!caller_privileged(f->dev))   /* drm_ioctl_permit: not the DRM master */
+        return -RD_EACCES;
+    if (op != AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE && op != AMDGPU_SCHED_OP_CONTEXT_PRIORITY_OVERRIDE)
+        return -RD_EINVAL;
+    if (!ctx_prio_valid(prio))
+        return -RD_EINVAL;
+    t = file_by_id(f->dev, (uint32_t)a->in.fd);
+    if (!t)                           /* fd_empty / amdgpu_file_to_fpriv */
+        return -RD_EINVAL;
+    if (op == AMDGPU_SCHED_OP_PROCESS_PRIORITY_OVERRIDE) {
+        for (i = 1; i < RD_MAX_CTX; i++)
+            if (t->ctx_used[i])
+                t->ctx_override_prio[i] = (int16_t)prio;
+        return 0;
+    }
+    if (!cid || cid >= RD_MAX_CTX || !t->ctx_used[cid])   /* amdgpu_ctx_get */
+        return -RD_EINVAL;
+    t->ctx_override_prio[cid] = (int16_t)prio;
+    return 0;
+}
+
+/* amdgpu_proc_options_ioctl: the one option is KFD's SIGBUS delay for
+ * poison / RAS events (amdgpu_amdkfd_set_sigbus_delay); there is no KFD
+ * here, so it answers like amdgpu built without CONFIG_HSA_AMD */
+static int proc_options_ioctl(struct drm_amdgpu_proc_options *o)
+{
+    if (o->op == AMDGPU_PROC_OPTIONS_OP_KFD_SIGBUS_DELAY)
+        return -RD_EOPNOTSUPP;
+    return -RD_EINVAL;
 }
 
 /* ------------------------------ info ------------------------------ */
@@ -1622,6 +1729,10 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         }
         return info_out(f, in, &gf, sizeof(gf));
     }
+    case AMDGPU_INFO_NUM_HANDLES:
+        /* amdgpu_info_ioctl: UVD handles are counted before Polaris only,
+         * later ASICs have unlimited ones (-ENODATA); other IPs -EINVAL */
+        return in->query_hw_ip.type == AMDGPU_HW_IP_UVD ? -RD_ENODATA : -RD_EINVAL;
     case AMDGPU_INFO_GDS_CONFIG: {   /* amdgpu_kms.c: the compute fields only */
         struct drm_amdgpu_info_gds g;
         zero(&g, sizeof(g));
@@ -1775,6 +1886,14 @@ static int drm_ioctl_dispatch(rdna3_drm_file *f, uint32_t nr, void *data, uint32
         return bo_import(f, (struct rd_xnu_bo_share *)data);
     case RD_NR_XNU_SYNCOBJ_FENCE: NEED(struct rd_xnu_syncobj_fence);
         return syncobj_fence(f, (struct rd_xnu_syncobj_fence *)data);
+    case RD_NR_AMDGPU(DRM_AMDGPU_SCHED): NEED(union drm_amdgpu_sched);
+        return sched_ioctl(f, (union drm_amdgpu_sched *)data);
+    case RD_NR_AMDGPU(DRM_AMDGPU_PROC_OPTIONS): NEED(struct drm_amdgpu_proc_options);
+        return proc_options_ioctl((struct drm_amdgpu_proc_options *)data);
+    case RD_NR_XNU_FILE_ID: NEED(struct rd_xnu_file_id);
+        ((struct rd_xnu_file_id *)data)->id = f->id;
+        ((struct rd_xnu_file_id *)data)->pad = 0;
+        return 0;
     case RD_NR_XNU_SCANOUT: NEED(struct rd_xnu_scanout);
         if (!f->dev->ops.scanout)
             return -RD_EOPNOTSUPP;
@@ -1806,6 +1925,9 @@ const char *rdna3_drm_ioctl_name(uint32_t nr)
     case RD_NR_XNU_BO_EXPORT: return "XNU_BO_EXPORT";
     case RD_NR_XNU_BO_IMPORT: return "XNU_BO_IMPORT";
     case RD_NR_XNU_SCANOUT: return "XNU_SCANOUT";
+    case RD_NR_XNU_FILE_ID: return "XNU_FILE_ID";
+    case RD_NR_AMDGPU(DRM_AMDGPU_SCHED): return "AMDGPU_SCHED";
+    case RD_NR_AMDGPU(DRM_AMDGPU_PROC_OPTIONS): return "AMDGPU_PROC_OPTIONS";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR): return "AMDGPU_GEM_USERPTR";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE): return "AMDGPU_GEM_CREATE";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP): return "AMDGPU_GEM_MMAP";
