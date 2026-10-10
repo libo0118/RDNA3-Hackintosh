@@ -15,6 +15,7 @@
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSDictionary.h>
 #include <pexpert/pexpert.h>
+#include "rdna3_bootargs.h"
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
@@ -45,8 +46,7 @@ bool RDNA3Accel::start(IOService *provider)
     }
     fPci->retain();
 
-    fLevel = 0;
-    PE_parse_boot_argn("rdna3lvl", &fLevel, sizeof(fLevel));
+    fLevel = rd3_arg("rdna3lvl", 0);   /* 8 by default: rdna3_bootargs.h */
     setNumber("RDNA3,Level", fLevel);
     LOG("start, safety level %u, build %s (%s)", fLevel, KEXT_COMMIT, KEXT_VERSION);
     /* the framebuffer publishes its own: a mismatch means one of the two

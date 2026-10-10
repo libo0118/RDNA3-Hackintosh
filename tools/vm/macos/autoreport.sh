@@ -111,7 +111,13 @@ fi
 
 args=$(nvram boot-args 2>/dev/null | cut -f2-)
 label=$(echo "$args" | tr ' ' '\n' | grep -E '^rdna3(lvl|dmub|msi|fb|accel)=' | tr '=' '-' | tr '\n' '_' | sed 's/_$//')
-[ -n "$label" ] || label=no-rdna3
+[ -n "$label" ] || label=default-profile
+# no rdna3lvl: the kexts run their default profile (common/rdna3_bootargs.h);
+# the tests below gate on the same settings
+case " $args " in
+    *" rdna3lvl="*|*" rdna3profile=0 "*) ;;
+    *) args="$args rdna3lvl=8 rdna3msi=1 rdna3dmub=1 rdna3fb=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1" ;;
+esac
 lvl=$(echo "$args" | sed -n 's/.*rdna3lvl=\([0-9]*\).*/\1/p')
 
 extra="$HOME/rdna3-extra.txt"

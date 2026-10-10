@@ -42,6 +42,7 @@
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSSymbol.h>
+#include "../common/rdna3_bootargs.h"
 #include <libkern/OSAtomic.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
@@ -67,8 +68,7 @@ static const char kFlipPureFn[] = "rd3FlipToSurfacePure";   /* the accelerator's
 
 static bool bootArgOn(const char *name)
 {
-    uint32_t v = 0;
-    return PE_parse_boot_argn(name, &v, sizeof(v)) && v;
+    return rd3_arg(name, 0) != 0;   /* with the default profile (rdna3_bootargs.h) */
 }
 
 /* ------------------------------------------------------------------ */
@@ -567,7 +567,7 @@ void RDNA3Framebuffer::modesInit()
     fNativeBytes = fBytes;
     fNativeVram = fBootVram;
     fNativePitch = fBootPitch;
-    PE_parse_boot_argn("rdna3modes", &want, sizeof(want));
+    want = rd3_arg("rdna3modes", want);
     if (!want || !fDcn || !fSymSource)
         return;
     static const uint32_t kNum[] = { 5, 3, 2, 1 }, kDen[] = { 6, 4, 3, 2 };

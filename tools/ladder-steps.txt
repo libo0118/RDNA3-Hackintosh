@@ -46,6 +46,10 @@ big2 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna
 # MetalPluginName is published, then the report's DMA/GFX, Vulkan and
 # mtlprobe; no modes, soak, power experiment or hang test (~6 min)
 metal rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1
+# no rdna3 boot-arg at all: the kexts' default profile (rdna3_bootargs.h),
+# what an installed driver runs; the report tests it like big2 without the
+# power experiment, soak and hang test
+default
 # the GFX hang and its recovery alone: in card run 19 it froze the whole
 # host. Nothing else runs; every recovery step is logged before it runs
 hanggfx rdna3lvl=8 rdna3msi=1 rdna3hangtest=2

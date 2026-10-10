@@ -18,6 +18,7 @@
 #include <kern/clock.h>
 #include <mach/mach_time.h>
 #include <pexpert/pexpert.h>
+#include "rdna3_bootargs.h"
 
 extern "C" {
 #include "smu13.h"
@@ -77,11 +78,11 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
     {
         uint32_t msi = 0, db = 1, pm = 1, dmub = 0, mes = 0;
         uint64_t pmmask = 0;
-        PE_parse_boot_argn("rdna3dmub", &dmub, sizeof(dmub));
+        dmub = rd3_arg("rdna3dmub", dmub);
         fDmubMode = dmub;
-        PE_parse_boot_argn("rdna3msi", &msi, sizeof(msi));
+        msi = rd3_arg("rdna3msi", msi);
         PE_parse_boot_argn("rdna3doorbell", &db, sizeof(db));
-        PE_parse_boot_argn("rdna3pm", &pm, sizeof(pm));
+        pm = rd3_arg("rdna3pm", pm);
         PE_parse_boot_argn("rdna3pmmask", &pmmask, sizeof(pmmask));
         PE_parse_boot_argn("rdna3mes", &mes, sizeof(mes));
         fMesWanted = mes != 0;
@@ -101,8 +102,7 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
             uint32_t pmexp = 0;
             PE_parse_boot_argn("rdna3pmexp", &pmexp, sizeof(pmexp));
             fPmExpWanted = pmexp != 0;
-            uint32_t idlecap = 0;
-            PE_parse_boot_argn("rdna3idlecap", &idlecap, sizeof(idlecap));
+            uint32_t idlecap = rd3_arg("rdna3idlecap", 0);
             fIdleCapWanted = idlecap != 0;
         }
         fMsi = msi != 0;

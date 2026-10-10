@@ -12,6 +12,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <pexpert/pexpert.h>
+#include "../common/rdna3_bootargs.h"
 #include <libkern/OSKextLib.h>
 #include <mach/kmod.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -519,10 +520,11 @@ public:
         ALOG("build %s", ACCEL_SRC);
         setProperty("RDNA3,AccelSource", ACCEL_SRC);
         { char off[8]; if (PE_parse_boot_argn("-rdna3off", off, sizeof off)) return false; }
-        uint32_t gate = 0;
-        if (!PE_parse_boot_argn("rdna3accel", &gate, sizeof gate) || !gate) { ALOG("boot-arg rdna3accel=1 absent: NOT starting (boot-loop guard)"); return false; }
-        PE_parse_boot_argn("rdna3accelfb", &gBootAccelFb, sizeof gBootAccelFb);
-        PE_parse_boot_argn("rdna3acceliop", &gBootIop, sizeof gBootIop);
+        /* on in the default profile (no rdna3lvl, rdna3_bootargs.h); a test step
+         * without rdna3accel=1 keeps it off (boot-loop guard) */
+        if (!rd3_arg("rdna3accel", 0)) { ALOG("rdna3accel off: NOT starting (boot-loop guard)"); return false; }
+        gBootAccelFb = (int)rd3_arg("rdna3accelfb", (uint32_t)gBootAccelFb);
+        gBootIop = (int)rd3_arg("rdna3acceliop", (uint32_t)gBootIop);
         if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
             unsigned waited = 0;
             while (pci->getProperty("rdna3-claimed") != kOSBooleanTrue && waited < 300) { IOSleep(100); waited++; }

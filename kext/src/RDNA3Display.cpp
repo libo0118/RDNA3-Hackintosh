@@ -25,6 +25,7 @@
 
 extern "C" {
 #include "rdna3_hw.h"
+#include "rdna3_bootargs.h"
 #include "dcn32.h"
 #include "dcn32_clk.h"
 #include "dcaux.h"
@@ -415,8 +416,7 @@ void RDNA3Accel::displayPublishRoutes()
  * not move. */
 void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe)
 {
-    uint32_t want = 0;
-    PE_parse_boot_argn("rdna3mirror", &want, sizeof(want));
+    uint32_t want = rd3_arg("rdna3mirror", 0);
     if (!want)
         return;
     fMirrorDm = dm;   /* hotplug lights it later, or switches it off */
@@ -831,8 +831,7 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
 {
     static int wanted = -1;
     if (wanted < 0) {
-        uint32_t v = 0;
-        PE_parse_boot_argn("rdna3dpms", &v, sizeof(v));
+        uint32_t v = rd3_arg("rdna3dpms", 0);
         wanted = (int)(v > 2 ? 2 : v);
     }
     if (!wanted)
