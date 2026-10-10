@@ -13,6 +13,22 @@ batch, only when a card test needs the build.
 Legend: **[sim]** can be finished and verified in the simulator now;
 **[card]** needs a run on the card to confirm; **[big]** several sessions.
 
+## Status after the night of 2026-10-10 (simulator only, nothing card-tested)
+
+| Item | Commit | What the card has to show |
+|---|---|---|
+| A2 head -> connector | `2440cea` | `RDNA3,Head0,Route` names the lit connector |
+| A4 refresh read-back | `264dce3` | `display: head 0 ... refresh` near 60 Hz |
+| A3 DMCUB windows logged | `c9f4315` | the three `DMUB state` lines (step 5b) |
+| E1/E2 triage + docs | `7d95ce8` | - |
+| B1-B4 clone onto a 2nd TMDS monitor | `bf056d5` | step 9b (`rdna3dmub=1 rdna3mirror=1`), needs 5b |
+| B7 HPD interrupts | `ab2665b` | unplug/plug: `display: HPDn ...` (with `rdna3msi=1`) |
+| C1 MES scheduler, C2 teardown order | `98702fd` | step 8c (`rdna3mes=1`): `RDNA3,MESResult = 0` |
+
+Still open: A1 (monitor name), A3 (DMCUB on the card), B5 (bandwidth /
+watermarks for real modesets), B6 (one framebuffer per head, mode
+change: step 9c), C3, C4, D.
+
 ## A. Open findings from the card (first)
 
 1. **macOS monitor name ("Unknown")** [card] - `fb/rdna3-fb.cpp`.
