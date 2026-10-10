@@ -61,6 +61,31 @@ typedef struct rdna3_dcn {
     int      cursor_on[RD_DCN_MAX_PIPES];
 } rdna3_dcn;
 
+/* What one pipe scans out right now, read back from HUBP/OTG (for the
+ * report's screen snapshot: proof of what reaches the panel). */
+typedef struct rdna3_scanout_info {
+    uint32_t pipe;
+    uint32_t powered;           /* DOMAIN<pipe> power-up (not power-gated) */
+    uint32_t lit;               /* HUBP not blanked and its OTG master enabled */
+    uint32_t otg, format, sw_mode, dcc;
+    uint32_t width, height, pitch_px;
+    uint32_t flip_pending;      /* SURFACE_FLIP_PENDING */
+    uint64_t address;           /* PRIMARY_SURFACE_ADDRESS (requested) */
+    uint64_t inuse;             /* SURFACE_EARLIEST_INUSE (being scanned) */
+} rdna3_scanout_info;
+
+/* Read pipe 'pipe' (0..3). Reads only; a power-gated pipe returns with
+ * powered 0 and no HUBP read. */
+int  dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s);
+
+/* Rows [row0, row0 + nrows) of the surface scaled to out_w x out_h
+ * (nearest pixel), as RGB888 into rgb (nrows * out_w * 3 bytes). Reads the
+ * surface the pipe scans (inuse, else address) through the CPU BAR.
+ * Only 32 bpp linear surfaces without DCC; -RDNA3_EINVAL otherwise or when
+ * the surface is outside the CPU-visible VRAM. */
+int  dcn32_scanout_sample(rdna3_dev *d, const rdna3_scanout_info *s, uint32_t out_w,
+                          uint32_t out_h, uint32_t row0, uint32_t nrows, uint8_t *rgb);
+
 /* Scan the four pipes for lit ones: HUBP not blanked, OTG master enabled.
  * Returns the number of heads found (0 when the display is off or DCN is
  * not in discovery). Reads only. */

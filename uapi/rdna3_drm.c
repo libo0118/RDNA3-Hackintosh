@@ -1745,6 +1745,10 @@ static int drm_ioctl_dispatch(rdna3_drm_file *f, uint32_t nr, void *data, uint32
         return bo_import(f, (struct rd_xnu_bo_share *)data);
     case RD_NR_XNU_SYNCOBJ_FENCE: NEED(struct rd_xnu_syncobj_fence);
         return syncobj_fence(f, (struct rd_xnu_syncobj_fence *)data);
+    case RD_NR_XNU_SCANOUT: NEED(struct rd_xnu_scanout);
+        if (!f->dev->ops.scanout)
+            return -RD_EOPNOTSUPP;
+        return f->dev->ops.scanout(f->dev->ops.ctx, (struct rd_xnu_scanout *)data);
     case RD_NR_PRIME_HANDLE_TO_FD:               /* libdrm_xnu: RD_NR_XNU_BO_EXPORT/IMPORT */
     case RD_NR_PRIME_FD_TO_HANDLE:
     case RD_NR_SYNCOBJ_HANDLE_TO_FD:             /* fds are the libdrm_xnu layer's (drm_xnu.c) */
@@ -1771,6 +1775,7 @@ const char *rdna3_drm_ioctl_name(uint32_t nr)
     case RD_NR_XNU_SYNCOBJ_FENCE: return "XNU_SYNCOBJ_FENCE";
     case RD_NR_XNU_BO_EXPORT: return "XNU_BO_EXPORT";
     case RD_NR_XNU_BO_IMPORT: return "XNU_BO_IMPORT";
+    case RD_NR_XNU_SCANOUT: return "XNU_SCANOUT";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR): return "AMDGPU_GEM_USERPTR";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE): return "AMDGPU_GEM_CREATE";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP): return "AMDGPU_GEM_MMAP";

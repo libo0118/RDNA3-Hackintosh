@@ -80,6 +80,21 @@ struct rd_xnu_bo_share {
     uint64_t size;                 /* out */
 };
 #define RD_MAX_EXPORTS 1024
+/* private, root only: what display pipe 'pipe' scans out right now
+ * (HUBP/OTG read back) and rows [row0, row0 + nrows) of it scaled to
+ * out_w x out_h, RGB888 - the report's proof of what reaches each panel.
+ * nrows 0: the surface cannot be sampled (tiled, DCC, outside the BAR). */
+#define RD_NR_XNU_SCANOUT          0xF3
+#define RD_XNU_SCANOUT_W           320
+#define RD_XNU_SCANOUT_ROWS        4
+struct rd_xnu_scanout {
+    uint32_t pipe, row0;                           /* in */
+    uint32_t powered, lit, otg, format, sw_mode, dcc;
+    uint32_t width, height, pitch_px, flip_pending;
+    uint32_t out_w, out_h, nrows, pad;
+    uint64_t address, inuse;                       /* MC addresses */
+    uint8_t  rgb[RD_XNU_SCANOUT_W * RD_XNU_SCANOUT_ROWS * 3];
+};
 
 /* We advertise the amdgpu DRM version RADV/libdrm expect from Linux 6.x */
 #define RD_DRM_MAJOR 3
@@ -208,6 +223,9 @@ typedef struct rdna3_drm_ops {
     /* 64 random bits for BO export tokens; optional (a counter mixed with
      * the GPU clock otherwise, guessable) */
     uint64_t (*random64)(void *ctx);
+    /* RD_NR_XNU_SCANOUT: fill everything after row0 (pipe and row0 are
+     * set); optional, -EOPNOTSUPP when missing. The OS checks privilege. */
+    int   (*scanout)(void *ctx, struct rd_xnu_scanout *s);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {

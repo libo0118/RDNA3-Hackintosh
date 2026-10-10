@@ -3,6 +3,7 @@
 triage_reports.py - one summary of a batch of hardware-test reports.
 
     python3 tools/triage_reports.py ~/rdna3-vm/reports [--all]
+    python3 tools/triage_reports.py --picture scanout.ppm   (-> scanout.png)
 
 Reads every rdna3-report-*.tar.gz (tools/macos/collect.sh), the matching
 *-tests.txt (DMA/GFX tests), serial-*.log (macOS kernel output of the VM)
@@ -10,14 +11,18 @@ and host-*.log (tools/vm/rdna3vm), oldest first, and prints per boot:
 boot-args, the bring-up stage reached, every check below as PASS / FAIL /
 -- (not reached at that level), the kext's ERROR lines and the tail of
 the serial log. The first FAIL is where docs/AFTER-TESTS.md starts.
+The pictures of what each display pipe scanned (<report>-scanout-pipe<N>.ppm,
+rdna3_drminfo --scanout) are turned into PNGs next to them.
 Exit status: 0 all reached checks pass, 1 something failed.
 """
 import glob
 import io
 import os
 import re
+import struct
 import sys
 import tarfile
+import zlib
 
 U64 = 1 << 64
 
@@ -118,6 +123,27 @@ def fb_source_hash(files=("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.
     except OSError:
         return None
     return h.hexdigest()[:10]
+
+
+def ppm_to_png(path):
+    """binary PPM (P6, maxval 255) -> PNG next to it; returns the PNG path"""
+    data = open(path, "rb").read()
+    m = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\s", data)
+    if not m:
+        raise ValueError("not a P6 PPM: " + path)
+    w, h = int(m.group(1)), int(m.group(2))
+    px = data[m.end():m.end() + w * h * 3]
+    if len(px) < w * h * 3:
+        raise ValueError("short PPM: " + path)
+    raw = b"".join(b"\0" + px[y * w * 3:(y + 1) * w * 3] for y in range(h))
+
+    def chunk(t, b):
+        return struct.pack(">I", len(b)) + t + b + struct.pack(">I", zlib.crc32(t + b) & 0xffffffff)
+    out = os.path.splitext(path)[0] + ".png"
+    with open(out, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) +
+                chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+    return out
 
 
 def report(path, show_all):
@@ -283,6 +309,10 @@ def tail_file(path, n, pattern=None):
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
+    if sys.argv[1] == "--picture":
+        for p in sys.argv[2:]:
+            print(ppm_to_png(p))
+        return
     d = sys.argv[1]
     show_all = "--all" in sys.argv
     load_linux_reference(d)
@@ -300,6 +330,21 @@ def main():
             if "not approved to load" in txt:
                 print("   !! a new RDNA3Framebuffer/RDNA3Accelerator waits for approval in macOS: run "
                       "'rdna3vm approve' (System Settings -> Privacy & Security -> Allow)")
+            if "== rdna3_drminfo --scanout" in txt:
+                # what the panels showed: per pipe the HUBP state, how much
+                # of the picture is not black, whether it changed in 2 s
+                sc = txt[txt.index("== rdna3_drminfo --scanout"):]
+                print("   screens (what each display pipe scanned out):")
+                for l in sc.splitlines()[1:]:
+                    if l.startswith("=="):
+                        break
+                    if l.startswith(("pipe", "  picture", "[exit")) and "power-gated off" not in l:
+                        print("     " + l[:160])
+            for ppm in sorted(glob.glob(p[:-len(".tar.gz")] + "-scanout-pipe*.ppm")):
+                try:
+                    print("     picture: " + ppm_to_png(ppm))
+                except (OSError, ValueError) as e:
+                    print("     picture: " + str(e))
             if "--dma-test" in txt or "--gfx-test" in txt:
                 print("   tests:")
                 for l in txt.splitlines():

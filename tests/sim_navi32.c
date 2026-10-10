@@ -3550,6 +3550,38 @@ static void run(const char *fwdir)
         CHECK(dcn32_flip(&dev, &dc, 0, FB_START, 2000, 0) == RDNA3_EINVAL);
         CHECK(dcn32_flip(&dev, &dc, 1, FB_START, 2560, 0) == RDNA3_EINVAL);
         CHECK(S.dcn_flips == 3);
+        /* the report's screen snapshot: what pipe 1 scans (EARLIEST_INUSE);
+         * its 2624-pitch surface at +96 MiB is past the 64 MiB BAR model */
+        {
+            rdna3_scanout_info si;
+            uint8_t rgb[320 * 4 * 3], save[64 * 32 * 4];
+            volatile uint32_t *px = (volatile uint32_t *)(void *)(S.vram + 0x3000000);
+            CHECK(dcn32_scanout_info(&dev, 1, &si) == RDNA3_OK && si.powered && si.lit && si.otg == 2);
+            CHECK(si.inuse == FB_START + 0x6000000 && si.pitch_px == 2624 && si.width == 2560 &&
+                  si.height == 1440 && !si.flip_pending && si.format == RD_DCN_FMT_ARGB8888);
+            CHECK(dcn32_scanout_sample(&dev, &si, 320, 180, 0, 4, rgb) == RDNA3_EINVAL);
+            /* a small one inside the BAR: ARGB8888 -> RGB, nearest pixel */
+            memcpy(save, (const void *)px, sizeof(save));
+            for (uint32_t y = 0; y < 32; y++)
+                for (uint32_t x = 0; x < 64; x++)
+                    px[y * 64 + x] = 0xff000042u | x << 16 | y << 8;
+            si.inuse = FB_START + 0x3000000;
+            si.width = si.pitch_px = 64;
+            si.height = 32;
+            CHECK(dcn32_scanout_sample(&dev, &si, 16, 8, 4, 4, rgb) == RDNA3_OK);
+            /* out (3, 5) <- surface (12, 20) */
+            CHECK(rgb[(1 * 16 + 3) * 3] == 12 && rgb[(1 * 16 + 3) * 3 + 1] == 20 &&
+                  rgb[(1 * 16 + 3) * 3 + 2] == 0x42);
+            si.format = RD_DCN_FMT_ABGR8888;
+            CHECK(dcn32_scanout_sample(&dev, &si, 16, 8, 4, 4, rgb) == RDNA3_OK &&
+                  rgb[(1 * 16 + 3) * 3] == 0x42 && rgb[(1 * 16 + 3) * 3 + 2] == 12);
+            CHECK(dcn32_scanout_sample(&dev, &si, 16, 8, 6, 4, rgb) == RDNA3_EINVAL);   /* past out_h */
+            si.sw_mode = 1;
+            CHECK(dcn32_scanout_sample(&dev, &si, 16, 8, 0, 4, rgb) == RDNA3_EINVAL);   /* tiled */
+            memcpy((void *)px, save, sizeof(save));
+            CHECK(dcn32_scanout_info(&dev, 0, &si) == RDNA3_OK && !si.lit);   /* blanked */
+            CHECK(dcn32_scanout_info(&dev, 4, &si) == RDNA3_EINVAL);
+        }
         /* hardware cursor: HUBP pipe 1 + DPP 1 */
         {
             const uint32_t dpp = regCNVC_CUR1_CURSOR0_CONTROL - regCNVC_CUR0_CURSOR0_CONTROL;

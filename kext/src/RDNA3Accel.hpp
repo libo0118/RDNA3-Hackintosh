@@ -150,6 +150,7 @@ private:
     static int    drmBoAlloc(void *ctx, rdna3_bo *bo);
     static int    drmBoUserptr(void *ctx, void *fileOs, rdna3_bo *bo, uint64_t uaddr, uint32_t flags);
     static int    drmSensor(void *ctx, uint32_t type, uint32_t *value);
+    static int    drmScanout(void *ctx, struct rd_xnu_scanout *s);   /* RDNA3Display.cpp */
     static int    drmVmFaultInfo(void *ctx, void *vm, uint64_t *addr, uint32_t *status, uint32_t *vmhub);
     int           gttAlloc(rdna3_bo *bo);
     int           gttWire(rdna3_bo *bo, IOMemoryDescriptor *md, bool prepared);

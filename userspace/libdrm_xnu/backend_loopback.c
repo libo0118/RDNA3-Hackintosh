@@ -40,6 +40,41 @@ static int lb_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32
 }
 /* AMDGPU_INFO_SENSOR: what a quiet card reports (RADV's winsys asks for
  * temperature and clocks at creation) */
+/* RD_NR_XNU_SCANOUT: pipe 0 "scans" a 1920x1080 test picture (blue-green
+ * gradient, a white box in the middle) so rdna3_drminfo --scanout and the
+ * report's picture path run on the host */
+static int lb_scanout(void *c, struct rd_xnu_scanout *s)
+{
+    uint32_t r, x;
+    (void)c;
+    if (s->pipe > 3)
+        return -RD_EINVAL;
+    if (s->pipe != 0) {
+        s->powered = 0;
+        return 0;
+    }
+    s->powered = s->lit = 1;
+    s->format = 8;
+    s->width = s->pitch_px = 1920;
+    s->height = 1080;
+    s->address = s->inuse = 0x8000000000ull;
+    s->out_w = RD_XNU_SCANOUT_W;
+    s->out_h = 1080 * RD_XNU_SCANOUT_W / 1920;
+    s->nrows = s->row0 < s->out_h ? s->out_h - s->row0 : 0;
+    if (s->nrows > RD_XNU_SCANOUT_ROWS)
+        s->nrows = RD_XNU_SCANOUT_ROWS;
+    for (r = 0; r < s->nrows; r++)
+        for (x = 0; x < s->out_w; x++) {
+            uint32_t y = s->row0 + r;
+            uint8_t *o = s->rgb + (r * s->out_w + x) * 3;
+            int box = x >= 140 && x < 180 && y >= 70 && y < 110;
+            o[0] = box ? 255 : 0;
+            o[1] = box ? 255 : (uint8_t)(y * 255 / s->out_h);
+            o[2] = box ? 255 : (uint8_t)(x * 255 / s->out_w);
+        }
+    return 0;
+}
+
 static int lb_sensor(void *c, uint32_t type, uint32_t *v)
 {
     (void)c;
@@ -267,7 +302,7 @@ static void dev_init(void)
     rdna3_drm_ops ops = { NULL, lb_zalloc, lb_free, lb_bo_alloc, lb_bo_free, lb_copyin, lb_copyout, NULL, NULL,
                           lb_vm_create, lb_vm_destroy, lb_vm_map, lb_vm_unmap,
                           lb_submit, lb_signaled, lb_wait, NULL,
-                          lb_bo_userptr, lb_sensor, NULL, lb_random64 };
+                          lb_bo_userptr, lb_sensor, NULL, lb_random64, lb_scanout };
     amd_discovery disc;
     if (g_dev_ready)
         return;

@@ -21,6 +21,7 @@
 #include <kern/clock.h>
 #include <kern/thread_call.h>
 #include <libkern/OSAtomic.h>
+#include <sys/kauth.h>
 
 extern "C" {
 #include "rdna3_hw.h"
@@ -280,6 +281,63 @@ void RDNA3Accel::displayProbeConnectors()
             }
         }
     }
+}
+
+/* RD_NR_XNU_SCANOUT: what pipe s->pipe scans out, and a scaled slice of
+ * it, for the report (rdna3_drminfo --scanout): proof of what reaches each
+ * panel without anyone at the screen. Screen contents: root only. */
+int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    rdna3_scanout_info si;
+    uint32_t pipe = s->pipe, row0 = s->row0, nrows = 0, out_h = 0;
+    int r;
+    if (!kauth_cred_issuser(kauth_cred_get()))
+        return -RD_EPERM;
+    if (!a->fDispDev || !a->fDispLock)
+        return -RD_ENODEV;
+    IOLockLock(a->fDispLock);
+    /* the display's register device has no BAR0 view of its own: lend it
+     * the DRM's for this read only */
+    volatile uint8_t *oldCpu = a->fDispDev->vram_cpu;
+    uint64_t oldLen = a->fDispDev->vram_cpu_len;
+    if (!oldCpu && a->fVramMap) {
+        a->fDispDev->vram_cpu = (volatile uint8_t *)a->fVramMap->getVirtualAddress();
+        a->fDispDev->vram_cpu_len = a->fVramMap->getLength();
+    }
+    r = dcn32_scanout_info(a->fDispDev, pipe, &si);
+    if (r == RDNA3_OK && si.lit && si.width && si.height) {
+        out_h = (uint32_t)((uint64_t)si.height * RD_XNU_SCANOUT_W / si.width);
+        if (out_h > 4 * RD_XNU_SCANOUT_W)
+            out_h = 4 * RD_XNU_SCANOUT_W;
+        if (row0 < out_h) {
+            nrows = out_h - row0 < RD_XNU_SCANOUT_ROWS ? out_h - row0 : RD_XNU_SCANOUT_ROWS;
+            if (dcn32_scanout_sample(a->fDispDev, &si, RD_XNU_SCANOUT_W, out_h, row0, nrows,
+                                     s->rgb) != RDNA3_OK)
+                nrows = 0;
+        }
+    }
+    a->fDispDev->vram_cpu = oldCpu;
+    a->fDispDev->vram_cpu_len = oldLen;
+    IOLockUnlock(a->fDispLock);
+    if (r != RDNA3_OK)
+        return -RD_EINVAL;
+    s->powered = si.powered;
+    s->lit = si.lit;
+    s->otg = si.otg;
+    s->format = si.format;
+    s->sw_mode = si.sw_mode;
+    s->dcc = si.dcc;
+    s->width = si.width;
+    s->height = si.height;
+    s->pitch_px = si.pitch_px;
+    s->flip_pending = si.flip_pending;
+    s->out_w = RD_XNU_SCANOUT_W;
+    s->out_h = out_h;
+    s->nrows = nrows;
+    s->address = si.address;
+    s->inuse = si.inuse;
+    return 0;
 }
 
 /* RDNA3,Head<n>,Route: what the head drives, from the DIG routing */

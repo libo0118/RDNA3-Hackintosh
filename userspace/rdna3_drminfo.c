@@ -8,11 +8,17 @@
  *                              GPU wrote: the first userspace job on the card.
  *   rdna3_drminfo --gfx-test   (rdna3lvl>=8) the same with a PM4 WRITE_DATA IB
  *                              on the GFX ring.
+ *   rdna3_drminfo --scanout DIR  (root) what each display pipe scans out right
+ *                              now: HUBP state and a 320-wide picture of it,
+ *                              DIR/scanout-pipe<N>.ppm - the report's proof of
+ *                              what reaches each panel. Nothing else runs.
  *
  * SPDX-License-Identifier: MIT
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <time.h>
 #include <sys/mman.h>
 #include "drm_xnu.h"
@@ -114,6 +120,91 @@ static int job_test(int fd, int gfx)
     return bad != 0;
 }
 
+/* one pipe's picture, all rows; returns the number of rows read */
+static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info, uint8_t *img,
+                             size_t cap)
+{
+    static struct rd_xnu_scanout s;
+    uint32_t row = 0;
+    for (;;) {
+        memset(&s, 0, sizeof(s));
+        s.pipe = pipe;
+        s.row0 = row;
+        if (IOCTL(fd, RD_NR_XNU_SCANOUT, s))
+            return row ? row : (uint32_t)-1;
+        if (row == 0)
+            *info = s;
+        if (!s.nrows || (size_t)(row + s.nrows) * s.out_w * 3 > cap)
+            return row;
+        memcpy(img + (size_t)row * s.out_w * 3, s.rgb, (size_t)s.nrows * s.out_w * 3);
+        row += s.nrows;
+        if (row >= s.out_h)
+            return row;
+    }
+}
+
+static int scanout_dump(int fd, const char *dir)
+{
+    enum { CAP = RD_XNU_SCANOUT_W * RD_XNU_SCANOUT_W * 4 * 3 };
+    uint8_t *img = malloc(CAP), *img2 = malloc(CAP);
+    int lit = 0;
+    if (!img || !img2)
+        return 1;
+    for (uint32_t p = 0; p < 4; p++) {
+        struct rd_xnu_scanout s, s2 = {0};
+        uint32_t rows = scanout_grab(fd, p, &s, img, CAP), i, n, nonblack = 0, diff = 0;
+        uint64_t sum[3] = {0, 0, 0};
+        if (rows == (uint32_t)-1) {
+            perror("XNU_SCANOUT");
+            free(img); free(img2);
+            return 1;
+        }
+        printf("pipe %u: %s%s otg %u %ux%u pitch %u fmt %u sw %u dcc %u address 0x%llx in use 0x%llx%s\n",
+               p, s.powered ? "" : "power-gated ", s.lit ? "LIT" : "off", s.otg, s.width, s.height,
+               s.pitch_px, s.format, s.sw_mode, s.dcc, (unsigned long long)s.address,
+               (unsigned long long)s.inuse, s.flip_pending ? " flip pending" : "");
+        if (!s.lit)
+            continue;
+        lit++;
+        if (!rows || rows < s.out_h) {
+            printf("  picture: not readable (%u of %u rows; tiled, DCC or outside the BAR)\n", rows, s.out_h);
+            continue;
+        }
+        n = s.out_w * rows;
+        for (i = 0; i < n; i++) {
+            const uint8_t *px = img + (size_t)i * 3;
+            nonblack += (px[0] | px[1] | px[2]) > 8;
+            sum[0] += px[0]; sum[1] += px[1]; sum[2] += px[2];
+        }
+        /* a second look 2 s later: is something drawing? */
+        sleep(2);
+        if (scanout_grab(fd, p, &s2, img2, CAP) == rows)
+            for (i = 0; i < n * 3; i++)
+                diff += img[i] != img2[i];
+        printf("  picture %ux%u: %u%% not black, mean rgb %u %u %u, %u bytes changed in 2 s%s\n",
+               s.out_w, rows, (unsigned)((uint64_t)nonblack * 100 / n), (unsigned)(sum[0] / n),
+               (unsigned)(sum[1] / n), (unsigned)(sum[2] / n), diff,
+               s2.inuse != s.inuse ? " (flipped meanwhile)" : "");
+        if (dir) {
+            char path[1024];
+            FILE *f;
+            snprintf(path, sizeof(path), "%s/scanout-pipe%u.ppm", dir, p);
+            f = fopen(path, "wb");
+            if (f) {
+                fprintf(f, "P6\n%u %u\n255\n", s.out_w, rows);
+                fwrite(img, 1, (size_t)n * 3, f);
+                fclose(f);
+                printf("  -> %s\n", path);
+            } else {
+                perror(path);
+            }
+        }
+    }
+    printf("%d pipe(s) lit\n", lit);
+    free(img); free(img2);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     struct drm_version v;
@@ -135,6 +226,11 @@ int main(int argc, char **argv)
     v.name_len = sizeof(name) - 1;
     if (IOCTL(fd, RD_NR_VERSION, v)) { perror("DRM_IOCTL_VERSION"); return 1; }
     printf("driver %s %d.%d.%d\n", name, v.version_major, v.version_minor, v.version_patchlevel);
+    if (argc > 1 && !strcmp(argv[1], "--scanout")) {
+        fails = scanout_dump(fd, argc > 2 ? argv[2] : NULL);
+        drm_xnu_close(fd);
+        return fails;
+    }
 
     memset(&in, 0, sizeof(in));
     memset(&di, 0, sizeof(di));

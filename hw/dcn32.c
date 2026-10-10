@@ -153,6 +153,76 @@ int dcn32_head_usable(rdna3_dev *d, const rdna3_dcn_head *h)
     return h->address >= d->fb_start && h->address - d->fb_start + end <= d->vram_size;
 }
 
+int dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s)
+{
+    uint32_t cntl, dim, i;
+    for (i = 0; i < sizeof(*s); i++)
+        ((uint8_t *)s)[i] = 0;
+    s->pipe = pipe;
+    if (pipe >= RD_DCN_MAX_PIPES)
+        return RDNA3_EINVAL;
+    /* the same power check as dcn32_read_state: a gated HUBP reads junk */
+    if (GET(rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, regDOMAIN0_PG_STATUS_BASE_IDX,
+                                           regDOMAIN0_PG_STATUS + PG_STRIDE * pipe)),
+            DOMAIN0_PG_STATUS, DOMAIN_PGFSM_PWR_STATUS))
+        return RDNA3_OK;
+    s->powered = 1;
+    cntl = RH(d, regHUBP0_DCHUBP_CNTL, pipe);
+    if (cntl == 0xffffffffu)
+        return RDNA3_OK;
+    s->otg = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_VTG_SEL);
+    s->lit = !GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN) && s->otg < RD_DCN_MAX_PIPES &&
+             GET(RO(d, regOTG0_OTG_CONTROL, s->otg), OTG0_OTG_CONTROL, OTG_MASTER_EN);
+    s->format = GET(RH(d, regHUBP0_DCSURF_SURFACE_CONFIG, pipe), HUBP0_DCSURF_SURFACE_CONFIG,
+                    SURFACE_PIXEL_FORMAT);
+    s->sw_mode = GET(RH(d, regHUBP0_DCSURF_TILING_CONFIG, pipe), HUBP0_DCSURF_TILING_CONFIG, SW_MODE);
+    s->dcc = GET(RH(d, regHUBPREQ0_DCSURF_SURFACE_CONTROL, pipe), HUBPREQ0_DCSURF_SURFACE_CONTROL,
+                 PRIMARY_SURFACE_DCC_EN);
+    dim = RH(d, regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, pipe);
+    s->width = GET(dim, HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, PRI_VIEWPORT_WIDTH);
+    s->height = GET(dim, HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, PRI_VIEWPORT_HEIGHT);
+    s->pitch_px = GET(RH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, pipe), HUBPREQ0_DCSURF_SURFACE_PITCH,
+                      PITCH) + 1;
+    s->flip_pending = GET(RH(d, regHUBPREQ0_DCSURF_FLIP_CONTROL, pipe),
+                          HUBPREQ0_DCSURF_FLIP_CONTROL, SURFACE_FLIP_PENDING);
+    s->address = RH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, pipe) |
+                 ((uint64_t)(RH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, pipe) & 0xffff) << 32);
+    s->inuse = RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, pipe) |
+               ((uint64_t)(RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH, pipe) & 0xffff) << 32);
+    return RDNA3_OK;
+}
+
+int dcn32_scanout_sample(rdna3_dev *d, const rdna3_scanout_info *s, uint32_t out_w,
+                         uint32_t out_h, uint32_t row0, uint32_t nrows, uint8_t *rgb)
+{
+    uint64_t mc = s->inuse ? s->inuse : s->address, off, len;
+    volatile uint8_t *base;
+    uint32_t r, x;
+    if ((s->format != RD_DCN_FMT_ARGB8888 && s->format != RD_DCN_FMT_ABGR8888) || s->sw_mode ||
+        s->dcc || !s->width || !s->height || s->pitch_px < s->width || !out_w || !out_h ||
+        row0 + nrows > out_h || mc < d->fb_start)
+        return RDNA3_EINVAL;
+    off = mc - d->fb_start;
+    len = (uint64_t)s->pitch_px * 4 * s->height;
+    base = rdna3_vram_cpu(d, off, len);
+    if (!base)
+        return RDNA3_EINVAL;
+    for (r = 0; r < nrows; r++) {
+        uint32_t sy = (uint32_t)((uint64_t)(row0 + r) * s->height / out_h);
+        const volatile uint32_t *row = (const volatile uint32_t *)(base + (uint64_t)sy * s->pitch_px * 4);
+        for (x = 0; x < out_w; x++) {
+            uint32_t v = row[(uint64_t)x * s->width / out_w];
+            uint8_t *o = rgb + ((uint64_t)r * out_w + x) * 3;
+            if (s->format == RD_DCN_FMT_ARGB8888) {   /* 0xAARRGGBB */
+                o[0] = (uint8_t)(v >> 16); o[1] = (uint8_t)(v >> 8); o[2] = (uint8_t)v;
+            } else {                                  /* 0xAABBGGRR */
+                o[0] = (uint8_t)v; o[1] = (uint8_t)(v >> 8); o[2] = (uint8_t)(v >> 16);
+            }
+        }
+    }
+    return RDNA3_OK;
+}
+
 int dcn32_flip(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t mc, uint32_t pitch_px,
                int immediate)
 {

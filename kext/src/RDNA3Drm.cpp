@@ -391,6 +391,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.vm_query = drmVmQuery;
     ops.bo_userptr = drmBoUserptr;
     ops.sensor = drmSensor;
+    ops.scanout = drmScanout;
     ops.vm_fault_info = drmVmFaultInfo;
     ops.random64 = drmRandom64;
     ops.gpu_clock = drmGpuClock;   /* AMDGPU_INFO_TIMESTAMP: SMUIO GOLDEN_TSC */

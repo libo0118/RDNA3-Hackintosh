@@ -81,6 +81,12 @@ exactly what to run next. One round = one report batch → one fix → one retes
    and once `linux-reference/`. If something needed is missing, ask for those
    exact files (in Polish) and stop.
 2. Run `python3 tools/triage_reports.py reports/<date> --all`.
+   From step 2 on each report comes with `<report>-scanout-pipe<N>.ppm`:
+   what that display pipe really scanned out ~2 min after boot
+   (`rdna3_drminfo --scanout`, HUBP read back + a 320-wide picture). Triage
+   prints the per-pipe state ("screens") and writes the PNGs next to them:
+   **look at them** (the user is often not at the screen) before asking
+   what the monitors showed.
    Exit 1 = a check failed. The first `FAIL` (in ladder order) is your target.
 3. From step 2 on, check discovery once:
    ```sh
