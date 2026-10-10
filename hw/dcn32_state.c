@@ -171,6 +171,7 @@ static void blk_write(rdna3_dev *d, const rdna3_dcn_head_state *h, uint32_t b)
         wr(d, kBlocks[b].seg, blk_addr(h, b, k), h->reg[base + k]);
 }
 
+/* dcn10_is_dig_enabled */
 static int be_enabled(rdna3_dev *d, uint32_t be)
 {
     uint32_t en = RI(d, regDIG0_DIG_BE_EN_CNTL, be, DIG_S);
@@ -263,6 +264,7 @@ int dcn32_state_save(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdn
     h->phypll_rate_cntl = RI(d, regOTG0_PHYPLL_PIXEL_RATE_CNTL, h->otg, PRC_S);
     h->dp_dto_phase = RI(d, regDP_DTO0_PHASE, h->otg, PRC_S);
     h->dp_dto_modulo = RI(d, regDP_DTO0_MODULO, h->otg, PRC_S);
+        /* dccg32_get_pixel_rate_div: K1 and K2 of this OTG */
     h->pixel_rate_k = (RI(d, regOTG_PIXEL_RATE_DIV, 0, 0) >> (3 * h->otg)) & 7u;
     h->dppclk_dto = RI(d, regDPPCLK0_DTO_PARAM, h->pipe, DPPDTO_S);
     h->dppclk_dto_ctrl = (RI(d, regDPPCLK_DTO_CTRL, 0, 0) >> (4 * h->pipe)) & 3u;

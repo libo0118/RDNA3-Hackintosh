@@ -455,6 +455,7 @@ int dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s)
     s->otg = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_VTG_SEL);
     s->blanked = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN);
     s->underflow = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_UNDERFLOW_STATUS);
+    /* optc1_is_tg_enabled: OTG_MASTER_EN */
     s->lit = !s->blanked && s->otg < RD_DCN_MAX_PIPES &&
              GET(RO(d, regOTG0_OTG_CONTROL, s->otg), OTG0_OTG_CONTROL, OTG_MASTER_EN);
     s->format = GET(RH(d, regHUBP0_DCSURF_SURFACE_CONFIG, pipe), HUBP0_DCSURF_SURFACE_CONFIG,
@@ -671,6 +672,7 @@ int dcn32_cursor_set_position(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, int32_t x
     return RDNA3_OK;
 }
 
+/* optc1_get_vblank_counter */
 uint32_t dcn32_frame_count(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i)
 {
     if (i >= dc->nheads)
@@ -720,6 +722,7 @@ void dcn32_crc_enable(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i, int enable)
         dcn32_otg_crc_config(d, dc->head[i].otg, enable);
 }
 
+/* optc1_get_crc */
 int dcn32_crc_read(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i, uint32_t *r, uint32_t *g,
                    uint32_t *b)
 {
