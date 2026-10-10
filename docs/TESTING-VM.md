@@ -195,7 +195,8 @@ rdna3vm queue pending
 
 runs the step(s) still waiting for the card - since round 16 one big
 step (`big2`): macOS boots once and the report itself runs everything
-(DMA/GFX/Vulkan tests, the idle-power experiment, three looks at what
+(DMA/GFX/Vulkan tests - buffers, a triangle, images, timeline semaphores -,
+Metal when the plugin is installed, the idle-power experiment, three looks at what
 each monitor shows, display sleep and wake, a switch through scaled
 modes, a 2-minute soak, the hang test last), then shuts down. About 12
 minutes, nobody needs to watch the screens; both monitors connected.
@@ -320,6 +321,22 @@ and `rdna3_vktest` where the report runs them.
 
 From step 8 on the report then has a `== rdna3_vktest` section: RADV creates
 a Vulkan device on the card and fills and copies buffers on every queue.
+
+### Metal plugin (optional, once)
+
+After `build_radv.sh`, in the same `rdna3vm window` session:
+
+```sh
+bash <(curl -s http://10.0.2.2:8000/tools/build_metal.sh)
+```
+
+Installs Rust through rustup on the first run, builds the Metal plugin and
+the AIR->SPIR-V translator (5-10 minutes) and installs them with RADV into
+`/Library/GPUBundles`. From then on the report has a `== mtlprobe` section:
+does Metal list the AMD device, and does a compute kernel compiled from
+source run on it (`METAL: ALL PASSED`). Without the plugin it only lists
+the Metal devices. Only processes in `rdna3mtl-allow.txt` (and `mtlprobe`)
+get the device; everything else, WindowServer included, sees nothing new.
 
 ## How it works (for the curious)
 

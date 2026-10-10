@@ -31,6 +31,28 @@ finish() {
     exit 0
 }
 
+# the Metal plugin's RADV + libdrm (build_metal.sh installs the plugin):
+# the copies next to it follow the report's bin, so a new bundle reaches
+# Metal too. RADV finds libdrm through the rpath added here.
+sync_metal() {
+    m=/Library/GPUBundles/rdna3mtl
+    [ -d "$m" ] && [ -f "$1/libvulkan_radeon.dylib" ] || return 0
+    for f in libvulkan_radeon.dylib libdrm.2.dylib libdrm_amdgpu.1.dylib; do
+        [ -f "$1/$f" ] && ! cmp -s "$1/$f" "$m/$f" && cp "$1/$f" "$m/$f" && touch "$m/.changed"
+    done
+    if [ -f "$m/.changed" ]; then
+        install_name_tool -add_rpath "$m" "$m/libvulkan_radeon.dylib" 2>/dev/null
+        for f in "$m"/*.dylib; do codesign -f -s - "$f" >/dev/null 2>&1; done
+        rm -f "$m/.changed"
+    fi
+    printf '{\n    "ICD": {\n        "api_version": "1.4.0",\n        "library_path": "%s/libvulkan_radeon.dylib"\n    },\n    "file_format_version": "1.0.0"\n}\n' \
+        "$m" > "$m/radeon_icd.x86_64.json"
+}
+if [ "${1:-}" = --sync-metal ]; then
+    sync_metal "$2"
+    exit 0
+fi
+
 if [ "${1:-}" != --updated ]; then
     sleep 90
     # newest report scripts from the host (rdna3vm start_share); a new
@@ -177,6 +199,20 @@ extra="$HOME/rdna3-extra.txt"
         DYLD_LIBRARY_PATH="$D/bin" RADV_DEBUG=startup with_limit 90 "$D/bin/rdna3_vktest" \
             "$D/bin/libvulkan_radeon.dylib" 2>&1
         echo "[exit $?]"
+    fi
+    # Metal (build_metal.sh installed the plugin): devices and a compute
+    # kernel through plugin -> translator -> RADV; the plugin's log after it
+    if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/mtlprobe" ] && [ -d /Library/GPUBundles/RDNA3MTLDriver.bundle ]; then
+        sync_metal "$D/bin"
+        echo "== mtlprobe (MetalPluginName: $(ioreg -r -c RDNA3Accelerator -w0 | grep -c MetalPluginName))"
+        rm -f /tmp/rdna3-nvmtl.log
+        NVMTL_LOG_PATH=/tmp/rdna3-nvmtl.log with_limit 90 "$D/bin/mtlprobe" 2>&1
+        echo "[exit $?]"
+        echo "== plugin log (last 60 lines)"
+        tail -60 /tmp/rdna3-nvmtl.log 2>/dev/null
+    elif [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/mtlprobe" ]; then
+        echo "== mtlprobe: plugin not installed (tools/build_metal.sh in the VM)"
+        with_limit 30 "$D/bin/mtlprobe" --list 2>&1
     fi
     # soak (rdna3soak=<minutes>): DMA + GFX jobs and the Vulkan test in a
     # loop; the PM trend in the serial log runs alongside

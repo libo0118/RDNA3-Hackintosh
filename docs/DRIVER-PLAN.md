@@ -141,6 +141,7 @@ per mode (S4).
 | A swap routing fix | `2bcd676` | stale pointer matches after WindowServer re-created its resources |
 | screen read-back | `944d983`, `8e0f267` | pictures + underflow per pipe in every report |
 | V1 Vulkan draw, images, timeline | `83c8872` | triangle read back, GFX + SDMA image copies; loopback submits only |
+| M1 Metal probe | (this batch) | `build_metal.sh` in the VM installs the plugin; the report runs `mtlprobe` (devices + a compute kernel) |
 | UAPI: firmware versions, VBIOS info | `eceebce`, `d815309` | RADV saw 0 for every firmware before |
 
 Open from this batch: S5 gamma, real mode setting (other timings), monitor

@@ -105,6 +105,9 @@ jobs:
           make -C kext check
       - name: Userspace (libdrm_xnu, rdna3_drminfo, rdna3_modetest)
         run: make -C userspace
+      - name: rdna3_vktest + mtlprobe (bundled into the VM's report bin)
+        continue-on-error: true
+        run: make -C userspace probes
       - name: Host tests on macOS
         run: make test tools
       - uses: actions/upload-artifact@v4
@@ -116,6 +119,8 @@ jobs:
             build/RDNA3Framebuffer.kext
             build/userspace/rdna3_drminfo
             build/userspace/rdna3_modetest
+            build/userspace/rdna3_vktest
+            build/userspace/mtlprobe
             build/userspace/libdrm.dylib
             build/userspace/libdrm_amdgpu.dylib
 

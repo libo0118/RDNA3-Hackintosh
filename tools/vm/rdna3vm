@@ -248,6 +248,11 @@ EOF
         cp "$rl" "$rt" "$st/bin/"
         ok "RADV + rdna3_vktest in the bundle"
     fi
+    # the kext build's own rdna3_vktest (same commit, newer than the RADV
+    # build's) and mtlprobe; RADV itself stays the one in the VM
+    for f in rdna3_vktest mtlprobe; do
+        [ -f "$a/userspace/$f" ] && cp "$a/userspace/$f" "$st/bin/"
+    done
     cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" "$st/tools/macos/"
     cp "$TOOLS/macos/autoreport.sh" "$st/"
     tar -czf "$WORK/share/rdna3-bundle.tar.gz" -C "$st" kexts bin tools autoreport.sh
@@ -349,7 +354,8 @@ start_share() {
     # every boot, so changes to them need no new setup.sh run
     mkdir -p "$WORK/share/tools"
     cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" \
-       "$TOOLS/macos/autoreport.sh" "$TOOLS/macos/build_radv.sh" "$WORK/share/tools/" 2>/dev/null || true
+       "$TOOLS/macos/autoreport.sh" "$TOOLS/macos/build_radv.sh" \
+       "$TOOLS/macos/build_metal.sh" "$WORK/share/tools/" 2>/dev/null || true
     # this checkout for tools/build_radv.sh (RADV built inside the VM)
     git -C "$ROOT" archive --format=tar.gz -o "$WORK/share/rdna3-src.tar.gz" HEAD 2>/dev/null || true
     pkill -f "vmtool.py serve " 2>/dev/null || true

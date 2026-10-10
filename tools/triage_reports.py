@@ -472,6 +472,18 @@ def main():
                         print("     " + l[:150])
                 if not re.search(r"^ALL PASSED", vk, re.M):
                     failed = True
+            if "== mtlprobe" in txt:
+                mt = txt[txt.index("== mtlprobe"):]
+                print("   metal:")
+                print("     " + mt.splitlines()[0][:150])
+                for l in mt.splitlines()[1:]:
+                    if l.startswith("== ") and not re.match(r"== (compile|pipeline|dispatch|using|plugin log)", l):
+                        break
+                    if re.match(r"(device |  families|\d+ Metal|== |  \d+ words|  status|METAL:|\[exit)", l) or \
+                       re.search(r"FAIL|refus|not allow|dlopen|error", l, re.I):
+                        print("     " + l[:150])
+                if "plugin not installed" not in mt and not re.search(r"^METAL: ALL PASSED", mt, re.M):
+                    failed = True
     serials = sorted(glob.glob(os.path.join(d, "serial-*.log")), key=os.path.getmtime)
     hosts = sorted(glob.glob(os.path.join(d, "host-*.log")), key=os.path.getmtime)
     for s in serials:

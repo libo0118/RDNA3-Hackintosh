@@ -4,6 +4,9 @@
 #   include/ + pkgconfig/ so Mesa's meson finds them as "libdrm" / "libdrm_amdgpu"
 #   rdna3_drminfo       - Stage 4 smoke test against the kext
 #   rdna3_modetest      - list / switch display modes (CoreGraphics) for the report
+#   rdna3_vktest        - Vulkan test against RADV's ICD entry points (needs
+#                         Vulkan-Headers: cloned into build/ if not given)
+#   mtlprobe            - Metal devices + a compute kernel through the plugin
 CC      := xcrun clang
 ARCH    := -arch x86_64 -mmacosx-version-min=15.0
 BUILD   := $(abspath ../build/userspace)
@@ -20,8 +23,10 @@ CORE_OBJS := $(BUILD)/obj/drm_xnu.o $(BUILD)/obj/xf86drm_xnu.o $(BUILD)/obj/back
 AMD_SRC   := $(wildcard $(LIBDRM)/amdgpu/*.c)
 AMD_OBJS  := $(patsubst $(LIBDRM)/amdgpu/%.c,$(BUILD)/obj/amdgpu_%.o,$(AMD_SRC))
 
-.PHONY: all install clean loopback
+.PHONY: all install clean loopback probes
 all: $(BUILD)/libdrm.dylib $(BUILD)/libdrm_amdgpu.dylib $(BUILD)/rdna3_drminfo $(BUILD)/rdna3_modetest install
+# separate from all: a failure here must not cost the kext artifact (CI)
+probes: $(BUILD)/rdna3_vktest $(BUILD)/mtlprobe
 
 # libdrm_loopback.dylib: the same libdrm core on the in-process UAPI
 # (backend_loopback + uapi/rdna3_drm.c), for vulkaninfo / RADV runs on a Mac
@@ -64,6 +69,17 @@ $(BUILD)/rdna3_drminfo: rdna3_drminfo.c $(BUILD)/libdrm.dylib
 
 $(BUILD)/rdna3_modetest: rdna3_modetest.c | $(BUILD)/obj
 	$(CC) -O2 -g $(ARCH) $(WARN) -o $@ $< -framework CoreGraphics -framework CoreFoundation
+
+VULKAN_HEADERS ?= $(BUILD)/Vulkan-Headers/include
+$(VULKAN_HEADERS)/vulkan/vulkan_core.h: | $(BUILD)/obj
+	git -c advice.detachedHead=false clone -q --depth 1 --branch v1.3.290 \
+	  https://github.com/KhronosGroup/Vulkan-Headers.git $(BUILD)/Vulkan-Headers
+
+$(BUILD)/rdna3_vktest: rdna3_vktest.c $(VULKAN_HEADERS)/vulkan/vulkan_core.h
+	$(CC) -O1 -g $(ARCH) -std=gnu11 $(WARN) -I$(VULKAN_HEADERS) -o $@ $<
+
+$(BUILD)/mtlprobe: mtlprobe.m | $(BUILD)/obj
+	$(CC) -O1 -g $(ARCH) -fobjc-arc $(WARN) -o $@ $< -framework Metal -framework Foundation
 
 install: $(BUILD)/libdrm.dylib $(BUILD)/libdrm_amdgpu.dylib
 	mkdir -p $(PREFIX)/lib/pkgconfig $(PREFIX)/include/libdrm

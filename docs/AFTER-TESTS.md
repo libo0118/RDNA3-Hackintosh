@@ -305,6 +305,9 @@ Unplug and plug a monitor cable while macOS runs: the log shows `HPD: hotplug in
 | `rdna3_vktest`: `draw` FAIL, pixels wrong | the graphics pipeline: all blue = the draw never wrote (PS export / CB), all 0x5a5a5a5a = the copy-out never ran, garbage = tiling/DCC of the image | first wrong pixel and its value; `hang:` dump if the fence timed out |
 | `rdna3_vktest`: `images` FAIL | image tiling (swizzle modes, optimal layout) on GFX (compute/CP copy) or, for the transfer-queue line, SDMA tiled copies | the pattern encodes x, y in R, G: the first wrong pixel's value shows where it came from |
 | `rdna3_vktest`: timeline semaphore FAIL | syncobj timeline UAPI (`SYNCOBJ_TIMELINE_SIGNAL/WAIT`, `QUERY`) | `DRM_XNU_TRACE=1`; the loopback passes it |
+| `mtlprobe`: `METAL: FAILED no AMD device` | Metal did not load the plugin: `MetalPluginName: 0` in the section header = the accelerator did not publish it (registration of the heads, `rdna3accelfb`); 1 = the plugin refused (its log: allow list, `vk:` lines = RADV did not come up) | plugin log under the section; `20-log-rdna3.txt` for `MetalPluginName restored` |
+| `mtlprobe`: FAILED `newLibraryWithSource` / pipeline | Apple's compiler service or the translator (`translate:` lines in the plugin log) | the plugin log; reproduce the AIR in the VM without the card |
+| `mtlprobe`: FAILED command buffer / kernel result | the plugin's submit path into RADV, then the same as a vktest compute failure | `hang:` dump, vktest result of the same boot |
 | `rdna3_vktest`: OPAQUE_FD import FAIL | PRIME export/import tokens (`RD_NR_XNU_BO_EXPORT/IMPORT`), or an ioctl struct size mismatch (uapi/ zero-extends shorter structs like `drm_ioctl` since 2026-10-10) | `DRM_XNU_TRACE=1` shows the failing ioctl nr |
 
 ### Step 9 / 10 (`rdna3fb=1`, `rdna3accel=1`)
