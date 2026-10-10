@@ -183,6 +183,10 @@ macOS starts and stays up: System Settings → Privacy & Security, scroll
 down, **Allow** next to the blocked system software, enter the password,
 then **Not Now** at the restart question and Apple menu → Shut Down.
 
+`rdna3vm window` works as well (the card stays with Linux): about 2
+minutes after the login the boot-time report script has installed the
+new kexts, and the **Allow** button appears in the same place.
+
 ### Several steps in one go
 
 ```sh

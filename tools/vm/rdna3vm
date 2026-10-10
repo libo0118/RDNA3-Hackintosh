@@ -350,7 +350,7 @@ cmd_window() {
     load_conf
     msrs
     # verbose boot without our drivers' levels: a hang shows where it stops
-    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --boot-args "$BASE_ARGS -v keepsyms=1 debug=0x100" >/dev/null
+    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --boot-args "$BASE_ARGS -v keepsyms=1 debug=0x100 amfi=0x80" >/dev/null
     qemu_common
     [ -f "$INSTALLER" ] && QARGS+=(-drive id=InstallMedia,if=none,format=raw,file="$INSTALLER"
                                   -device ide-hd,bus=sata.3,drive=InstallMedia)
