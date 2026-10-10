@@ -42,7 +42,7 @@ CHECKS = [
     ("SMUVersion", 5, None, lambda v: v != 0, "!= 0"),
     ("PMResult", 5, None, lambda v: signed(v) == 0, "0"),
     ("PMTempHotspotC", 5, None, lambda v: 15 <= v <= 95, "15..95"),
-    ("DMUBResult", 5, "rdna3dmub=1", lambda v: signed(v) == 0, "0"),
+    ("DMUBResult", 5, "rdna3dmub=", lambda v: signed(v) == 0, "0 (rdna3dmub=1 load, =3 attach)"),
     ("GMCResult", 6, None, lambda v: signed(v) == 0, "0"),
     ("IHResult", 6, None, lambda v: signed(v) == 0, "0"),
     ("MSILive", 6, "rdna3msi=1", lambda v: v == 1, "1"),
@@ -165,7 +165,7 @@ def report(path, show_all):
             print("   %s %-20s = %s (expected %s)" % ("PASS" if ok else "FAIL", key, shown, want))
     for key in ("SOSVersion", "SMUDriverIF", "PMGfxClkMinMHz", "PMGfxClkMaxMHz", "PMUclkMaxMHz",
                 "PMFanRPM", "DMUBVersion", "GBAddrConfig", "ChipRevId", "Head0EdidMode",
-                "AtomCommandTables", "SCPM", "PMFeaturesRunning", "PSPStuckAtInit", "InitResetResult", "GFXHUBResult", "GFXAsync", "KIQOnMES", "Mirror", "MirrorResult", "ExtendHead", "HotplugEvents", "HotplugPins", "MESResult", "MESSchedVersion", "MESKiqVersion", "MESLegacyQueueMap", "NeedPost", "PostResult",
+                "AtomCommandTables", "SCPM", "PMFeaturesRunning", "PSPStuckAtInit", "InitResetResult", "GFXHUBResult", "GFXAsync", "KIQOnMES", "Mirror", "MirrorResult", "ExtendHead", "DMUB", "DMUBCapsResult", "IdleSleepBlocked", "HotplugEvents", "HotplugPins", "MESResult", "MESSchedVersion", "MESKiqVersion", "MESLegacyQueueMap", "NeedPost", "PostResult",
                 "LastFaultAddr", "LastFaultStatus"):
         if key in props:
             v = props[key]
