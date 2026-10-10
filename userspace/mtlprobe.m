@@ -5,7 +5,9 @@
  *   mtlprobe            every Metal device, then on the AMD one: a kernel
  *                       compiled from source (Apple's front end -> AIR ->
  *                       the plugin's AIR->SPIR-V translator -> RADV), run
- *                       over 4096 threads into a shared buffer, checked
+ *                       over 4096 threads into a shared buffer, checked;
+ *                       then a triangle rendered into a texture, blitted
+ *                       into a buffer and checked
  *   mtlprobe --list     the device list only
  *
  * The plugin hands out a device only to allow-listed processes; "mtlprobe"
@@ -133,6 +135,99 @@ static int compute(id<MTLDevice> d)
     return 0;
 }
 
+/* ---- render: a red triangle on a blue clear into a 64x64 RGBA8 texture,
+ * blitted into a shared buffer and checked (the Vulkan test's picture) ---- */
+#define IMG 64u
+static NSString *const kRenderSrc =
+    @"#include <metal_stdlib>\n"
+     "using namespace metal;\n"
+     "vertex float4 tri_vs(uint v [[vertex_id]]) {\n"
+     "    const float2 p[3] = { float2(-1.0, -1.0), float2(-1.0, 1.0), float2(1.0, 1.0) };\n"
+     "    return float4(p[v], 0.0, 1.0);\n"
+     "}\n"
+     "fragment float4 tri_fs() { return float4(1.0, 0.0, 0.0, 1.0); }\n";
+
+static int render(id<MTLDevice> d)
+{
+    NSError *e = nil;
+    printf("== render: compile (vertex + fragment)\n");
+    fflush(stdout);
+    id<MTLLibrary> lib = [d newLibraryWithSource:kRenderSrc options:nil error:&e];
+    if (!lib)
+        return fail("render newLibraryWithSource", e);
+    MTLRenderPipelineDescriptor *rpd = [MTLRenderPipelineDescriptor new];
+    rpd.vertexFunction = [lib newFunctionWithName:@"tri_vs"];
+    rpd.fragmentFunction = [lib newFunctionWithName:@"tri_fs"];
+    rpd.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    if (!rpd.vertexFunction || !rpd.fragmentFunction)
+        return fail("render newFunctionWithName", nil);
+    printf("== render: pipeline (newRenderPipelineStateWithDescriptor)\n");
+    fflush(stdout);
+    id<MTLRenderPipelineState> ps = [d newRenderPipelineStateWithDescriptor:rpd error:&e];
+    if (!ps)
+        return fail("newRenderPipelineStateWithDescriptor", e);
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                  width:IMG height:IMG mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> tex = [d newTextureWithDescriptor:td];
+    id<MTLBuffer> out = [d newBufferWithLength:IMG * IMG * 4 options:MTLResourceStorageModeShared];
+    if (!tex || !out)
+        return fail("render texture/buffer", nil);
+    memset(out.contents, 0x5a, IMG * IMG * 4);
+    id<MTLCommandQueue> q = [d newCommandQueue];
+    id<MTLCommandBuffer> cb = [q commandBuffer];
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = tex;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 1, 1);
+    id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:pass];
+    if (!re)
+        return fail("renderCommandEncoderWithDescriptor", nil);
+    [re setRenderPipelineState:ps];
+    [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [re endEncoding];
+    id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+    [be copyFromTexture:tex sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+             sourceSize:MTLSizeMake(IMG, IMG, 1) toBuffer:out destinationOffset:0
+      destinationBytesPerRow:IMG * 4 destinationBytesPerImage:IMG * IMG * 4];
+    [be endEncoding];
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+        (void)c;
+        dispatch_semaphore_signal(done);
+    }];
+    printf("== render: draw + blit to a buffer, commit\n");
+    fflush(stdout);
+    [cb commit];
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)))
+        return fail("render command buffer not completed in 10 s", nil);
+    if (cb.status != MTLCommandBufferStatusCompleted)
+        return fail("render command buffer status", cb.error);
+    /* Metal's NDC has y up and the texture's row 0 at the top: the vertices
+     * land on pixels (0,64) (0,0) (64,0), so red fills the upper-left half,
+     * x + y < 63; the pixels on the edge (x + y == 63) may go either way */
+    const uint32_t *p = out.contents, red = 0xff0000ff, blue = 0xffff0000;
+    uint32_t bad = 0, fx = 0, fy = 0, got = 0, want = 0, nred = 0;
+    for (uint32_t y = 0; y < IMG; y++)
+        for (uint32_t x = 0; x < IMG; x++) {
+            uint32_t v = p[y * IMG + x], w = x + y < IMG - 1 ? red : blue;
+            nred += v == red;
+            if (x + y == IMG - 1 || v == w)
+                continue;
+            if (!bad++) { fx = x; fy = y; got = v; want = w; }
+        }
+    printf("  %u red pixels of %u; %u wrong off the edge", nred, IMG * IMG, bad);
+    if (bad)
+        printf(", first (%u,%u) = 0x%08x, want 0x%08x (0x5a5a5a5a: the blit never wrote; red in the lower-right: "
+               "y flipped)", fx, fy, got, want);
+    printf("\n");
+    if (bad)
+        return fail("render result", nil);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     @autoreleasepool {
@@ -157,7 +252,10 @@ int main(int argc, char **argv)
         printf("== using \"%s\"\n", amd.name.UTF8String);
         if (compute(amd))
             return 1;
-        printf("METAL: ALL PASSED device \"%s\", compute kernel checked\n", amd.name.UTF8String);
+        if (render(amd))
+            return 1;
+        printf("METAL: ALL PASSED device \"%s\", compute kernel and a rendered triangle checked\n",
+               amd.name.UTF8String);
         return 0;
     }
 }

@@ -497,9 +497,9 @@ def main():
                 print("   metal:")
                 print("     " + mt.splitlines()[0][:150])
                 for l in mt.splitlines()[1:]:
-                    if l.startswith("== ") and not re.match(r"== (compile|pipeline|dispatch|using|plugin log)", l):
+                    if l.startswith("== ") and not re.match(r"== (compile|pipeline|dispatch|using|render|plugin log)", l):
                         break
-                    if re.match(r"(device |  families|\d+ Metal|== |  \d+ words|  status|METAL:|\[exit)", l) or \
+                    if re.match(r"(device |  families|\d+ Metal|== |  \d+ words|  \d+ red|  status|METAL:|\[exit)", l) or \
                        re.search(r"FAIL|refus|not allow|dlopen|error", l, re.I):
                         print("     " + l[:150])
                 if "plugin not installed" not in mt and not re.search(r"^METAL: ALL PASSED", mt, re.M):
