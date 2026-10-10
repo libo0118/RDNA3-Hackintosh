@@ -482,7 +482,7 @@ QUEUE=$WORK/queue
 # every swap refused (no head named). From now on ONE big step per round:
 # "big" = everything at once, the accelerator tries its head strategies
 # itself and logs which one worked
-PENDING_STEPS="modeset2 gamma sleep hotplug"
+PENDING_STEPS="gamma sleep hotplug"
 
 cmd_queue() {
     load_conf
@@ -532,8 +532,9 @@ cmd__queue() {
             echo "== queue stopped by the emergency exit; left: $(tr '\n' ' ' < "$QUEUE")"
             return 0
         fi
-        # the desktop is back; give the card a moment before the next detach
-        sleep 20
+        # the desktop is back; give amdgpu time to finish with the card
+        # before the next detach (runs 24, 25: still probing after 20 s)
+        sleep 60
     done
     echo "== queue done"
 }
@@ -596,12 +597,16 @@ detach() {
             [ "$(basename "$(readlink -f /sys/bus/pci/devices/$d/driver 2>/dev/null)")" = vfio-pci ] || ok=0
         done
         [ $ok = 1 ] && break
-        echo "  vfio-pci did not take the card yet (try $try), waiting"
+        echo "  vfio-pci did not take the card yet (try $try): driver $(basename "$(readlink -f /sys/bus/pci/devices/${DEVS[0]}/driver 2>/dev/null)" 2>/dev/null), power $(cat /sys/bus/pci/devices/${DEVS[0]}/power_state 2>/dev/null), waiting"
         sleep 3
         command -v udevadm >/dev/null && udevadm settle --timeout=10 2>/dev/null || true
     done
     for d in "${DEVS[@]}"; do
-        [ "$(basename "$(readlink -f /sys/bus/pci/devices/$d/driver 2>/dev/null)")" = vfio-pci ] || { echo "vfio-pci did not take $d"; return 1; }
+        [ "$(basename "$(readlink -f /sys/bus/pci/devices/$d/driver 2>/dev/null)")" = vfio-pci ] || {
+            echo "vfio-pci did not take $d; the host kernel on it (last 3 min):"
+            journalctl --no-pager -q -k --since "-3min" -o short-iso 2>/dev/null |
+                grep -E -i "amdgpu|vfio|0000:2d:00" | tail -n 40 || true
+            return 1; }
         echo "  $d -> vfio-pci"
     done
 }
@@ -917,7 +922,16 @@ cmd_result() {
       # the queue runner (a systemd unit): which steps ran, why it stopped
       echo; echo "== queue runner (last 60 lines)"; echo "left in the queue: $(tr '\n' ' ' < "$QUEUE" 2>/dev/null)"
       { sudo -n journalctl --no-pager -q -o short-iso --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null ||
-        journalctl --no-pager -q -o short-iso --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null; } | tail -n 60; } \
+        journalctl --no-pager -q -o short-iso --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null; } | tail -n 60
+      # the host kernel on the card between the steps (amdgpu probe after
+      # the VM, vfio-pci, suspend/resume), this boot and the one before
+      for b in -1 0; do
+          echo; echo "== host kernel, boot $b: amdgpu / vfio / the card / suspend (last 80)"
+          { sudo -n journalctl --no-pager -q -k -b "$b" -o short-iso 2>/dev/null ||
+            journalctl --no-pager -q -k -b "$b" -o short-iso 2>/dev/null; } |
+              grep -E -i "amdgpu|vfio|0000:2d:00|PM: suspend|PM: resume|ACPI: PM|Killed process|oom|hung_task|blocked for more" |
+              tail -n 80
+      done; } \
         >> "$tmp/rdna3-result/00-host.txt" || true   # set -e + pipefail: ls dies of SIGPIPE behind head
     python3 "$ROOT/tools/triage_reports.py" "$tmp/rdna3-result" > "$tmp/rdna3-result/00-triage.txt" 2>&1 || true
     mkdir -p "$(dirname "$out")"

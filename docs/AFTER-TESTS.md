@@ -636,3 +636,16 @@ vfio-pci did not take the card (`driver/unbind: No such file`): amdgpu was
 still probing it after the previous step's restore. `detach` now waits for
 udev, sets the override first and retries; the queue retries a step that
 did not start once; `rdna3vm result` adds the queue runner's journal.
+
+### Card run 25 (queue `modeset2 gamma sleep hotplug`, build 101)
+
+Step `modeset2` passed: the DAL mailbox answered (PMFW 0x505c00, DISPCLK
+and DPPCLK up to 1950 MHz), the hard mins raised DISPCLK 165 -> 220 MHz
+and DPPCLK -> 215 MHz, 1080p@71.91 ran on both heads, the 60 Hz modes and
+native as before, Vulkan 13/13, Metal passed. The queue stopped again on
+the host: the passthrough of `modeset2` was SIGKILLed 6 s after the
+restore's suspend/resume, `gamma`'s detach found the card still not
+handed to vfio-pci after 5 tries, and the queue runner's journal ends
+with the next suspend. `rdna3vm result` now adds the host kernel's
+amdgpu/vfio/suspend lines of this boot and the one before; detach says
+which driver holds the card; the pause between steps is 60 s.
