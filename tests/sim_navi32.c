@@ -68,6 +68,8 @@
 #include "gen/dcn_3_2_0_pipe.h"
 #include "gen/dcn_3_2_0_clone.h"
 #include "dcn32_clone.h"
+#include "dcn32_gamma.h"
+#include "gen/dcn_3_2_0_gamma.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
@@ -1711,6 +1713,96 @@ static uint32_t smn_val(uint32_t reg_dw)
     return p ? *p : 0;
 }
 
+/* MPCC output gamma (OGAM): the two LUT RAMs behind MPCC_OGAM_LUT_INDEX /
+ * _DATA (auto-increment, WRITE_COLOR_MASK 4 R / 2 G / 1 B, HOST_SEL RAM A
+ * or B), MPCC_OGAM_MODE / _SELECT latching into _CURRENT when the OTG
+ * master update lock is released, and the OGAM memory power state: LUT
+ * writes while it is not powered (MEM_PWR_STATE != 0) are lost. */
+#define OGAM_R(reg, n) (DCN_B3 + reg + (regMPCC_OGAM1_MPCC_OGAM_CONTROL - regMPCC_OGAM0_MPCC_OGAM_CONTROL) * (n))
+#define MPCC_R(reg, n) (DCN_B3 + reg + RD_CLONE_MPCC_STRIDE * (n))
+static struct {
+    uint32_t ram[RD_DCN_MAX_PIPES][2][3][512];   /* [mpcc][A/B][R/G/B] */
+    uint32_t index[RD_DCN_MAX_PIPES];
+    unsigned writes, dropped, latches;
+    int      pwr_stuck;                          /* the memory never powers up */
+} ogam;
+
+static void ogam_latch(void)
+{
+    for (uint32_t n = 0; n < RD_DCN_MAX_PIPES; n++) {
+        uint32_t *c = &S.reg[OGAM_R(regMPCC_OGAM0_MPCC_OGAM_CONTROL, n)];
+        uint32_t mode = (*c & MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_MODE_MASK) >>
+                        MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_MODE__SHIFT;
+        uint32_t sel = (*c & MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_SELECT_MASK) >>
+                       MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_SELECT__SHIFT;
+        *c = (*c & ~(MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_MODE_CURRENT_MASK |
+                     MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_SELECT_CURRENT_MASK)) |
+             mode << MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_MODE_CURRENT__SHIFT |
+             sel << MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_SELECT_CURRENT__SHIFT;
+    }
+    ogam.latches++;
+}
+
+/* 1 when the write was an OGAM register the model handled */
+static int ogam_wr(uint32_t dw, uint32_t v)
+{
+    const uint32_t cur = MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_MODE_CURRENT_MASK |
+                         MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_SELECT_CURRENT_MASK;
+    for (uint32_t o = 0; o < RD_DCN_MAX_PIPES; o++)
+        if (dw == OTG(regOTG0_OTG_MASTER_UPDATE_LOCK, o) && !(v & 1)) {
+            *R(dw) = v;
+            ogam_latch();
+            return 1;
+        }
+    for (uint32_t n = 0; n < RD_DCN_MAX_PIPES; n++) {
+        uint32_t lc = S.reg[OGAM_R(regMPCC_OGAM0_MPCC_OGAM_LUT_CONTROL, n)];
+        if (dw == OGAM_R(regMPCC_OGAM0_MPCC_OGAM_CONTROL, n)) {
+            *R(dw) = (v & ~cur) | (S.reg[dw] & cur);       /* _CURRENT: read only */
+            return 1;
+        }
+        if (dw == OGAM_R(regMPCC_OGAM0_MPCC_OGAM_LUT_INDEX, n)) {
+            ogam.index[n] = v & MPCC_OGAM0_MPCC_OGAM_LUT_INDEX__MPCC_OGAM_LUT_INDEX_MASK;
+            *R(dw) = ogam.index[n];
+            return 1;
+        }
+        if (dw == OGAM_R(regMPCC_OGAM0_MPCC_OGAM_LUT_DATA, n)) {
+            uint32_t mask = lc & MPCC_OGAM0_MPCC_OGAM_LUT_CONTROL__MPCC_OGAM_LUT_WRITE_COLOR_MASK_MASK;
+            uint32_t ram = (lc & MPCC_OGAM0_MPCC_OGAM_LUT_CONTROL__MPCC_OGAM_LUT_HOST_SEL_MASK) ? 1 : 0;
+            ogam.writes++;
+            if (S.reg[MPCC_R(regMPCC0_MPCC_MEM_PWR_CTRL, n)] & MPCC0_MPCC_MEM_PWR_CTRL__MPCC_OGAM_MEM_PWR_STATE_MASK) {
+                ogam.dropped++;
+            } else {
+                for (uint32_t c = 0; c < 3; c++)
+                    if (mask & (4u >> c))
+                        ogam.ram[n][ram][c][ogam.index[n] & 511] = v & MPCC_OGAM0_MPCC_OGAM_LUT_DATA__MPCC_OGAM_LUT_DATA_MASK;
+            }
+            ogam.index[n] = (ogam.index[n] + 1) & 511;
+            return 1;
+        }
+        if (dw == MPCC_R(regMPCC0_MPCC_MEM_PWR_CTRL, n)) {
+            int on = (v & MPCC0_MPCC_MEM_PWR_CTRL__MPCC_OGAM_MEM_PWR_DIS_MASK) && !ogam.pwr_stuck;
+            *R(dw) = (v & ~MPCC0_MPCC_MEM_PWR_CTRL__MPCC_OGAM_MEM_PWR_STATE_MASK) |
+                     (on ? 0u : 1u << MPCC0_MPCC_MEM_PWR_CTRL__MPCC_OGAM_MEM_PWR_STATE__SHIFT);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* what the OGAM of MPCC n does to the picture, for the OTG CRC: 0 in bypass */
+static uint32_t ogam_crc(uint32_t n)
+{
+    uint32_t c = S.reg[OGAM_R(regMPCC_OGAM0_MPCC_OGAM_CONTROL, n)], h = 0;
+    uint32_t ram = (c & MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_SELECT_CURRENT_MASK) ? 1 : 0;
+    if (((c & MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_MODE_CURRENT_MASK) >>
+         MPCC_OGAM0_MPCC_OGAM_CONTROL__MPCC_OGAM_MODE_CURRENT__SHIFT) != 2)
+        return 0;
+    for (uint32_t k = 0; k < 3; k++)
+        for (uint32_t i = 0; i < RD_GAMMA_HW_POINTS; i++)
+            h = (h ^ ogam.ram[n][ram][k][i]) * 16777619u;
+    return h;
+}
+
 static void sim_wr(void *ctx, uint64_t off, uint32_t v)
 {
     uint32_t dw = (uint32_t)(off / 4);
@@ -1849,6 +1941,8 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         HQD(&S.mes_hqd[0], regCP_HQD_ACTIVE) = 0;
         S.mes_hqd[0].mapped_by_kiq = 0;
     }
+    if (ogam_wr(dw, v))
+        return;
     /* DCN power domains, DET segments */
     if (dw >= DCN_B2 + regDOMAIN0_PG_CONFIG && dw < DCN_B2 + regDOMAIN0_PG_CONFIG + 4 * 2 &&
         !((dw - DCN_B2 - regDOMAIN0_PG_CONFIG) & 1)) {
@@ -2296,6 +2390,7 @@ static void dcn_tick(uint32_t ms)
                 continue;
             crc = (S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, p)] * 2654435761u) ^
                   S.reg[OTG(regOTG0_OTG_H_TOTAL, o)];
+            crc ^= ogam_crc(p);    /* MPCC p: the pipe's own */
             S.reg[OTG(regOTG0_OTG_CRC0_DATA_RG, o)] = (crc & 0xffff) | ((crc >> 16) << 16);
             S.reg[OTG(regOTG0_OTG_CRC0_DATA_B, o)] = (crc ^ 0xa5a5) & 0xffff;
         }
@@ -2438,6 +2533,132 @@ static void synth(amd_fw_blob_ref blobs[AMD_BLOB_COUNT], const uint8_t **sos, si
 }
 
 /* ---------------------------- test ---------------------------- */
+
+/* output gamma (hw/dcn32_gamma.c) on the two heads the clone test leaves:
+ * dc->head[1] is the boot head (pipe 1, OTG 2 -> OPP 2 -> MPCC 1),
+ * dc->head[0] the clone (pipe 0, OTG 1 -> its OPP -> MPCC 0). Expected
+ * values by hand: custom float 6e12m = exponent (bias 31) << 12 | mantissa,
+ * e.g. 2^-10 -> 21 << 12, 0.5 -> 30 << 12, 0.75 -> 30 << 12 | 0x800, 1 -> 31 << 12;
+ * 2 as 6e10m -> 32 << 10. Point 136 is x = 0.5, 144 x = 0.75, 152 x = 1. */
+static void test_gamma(rdna3_dev *dev, const rdna3_dcn *dc)
+{
+    static uint16_t ident[256];
+    static rdna3_gamma_pwl pw, pc, pd;
+    /* R = identity, G = x / 3, B = 1 - x (per channel, two entries each) */
+    static const uint16_t chan[6] = { 0, 65535, 0, 21845, 65535, 0 };
+    static const uint16_t dark[2] = { 0, 16384 };
+    const uint32_t rb = regMPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_B - regMPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_B;
+    rdna3_gamma_state st;
+    uint32_t mpcc[2], i, crc_a, crc_b;
+#define OG(r_) S.reg[OGAM_R(r_, 1)]
+#define OGAM_CRC() (dev->os.msleep(dev->os.ctx, 32), S.reg[OTG(regOTG0_OTG_CRC0_DATA_RG, 2)])
+
+    memset(&ogam, 0, sizeof(ogam));
+    for (i = 0; i < RD_DCN_MAX_PIPES; i++)     /* the GOP leaves the memory in light sleep */
+        S.reg[MPCC_R(regMPCC0_MPCC_MEM_PWR_CTRL, i)] = 1u << MPCC0_MPCC_MEM_PWR_CTRL__MPCC_OGAM_MEM_PWR_STATE__SHIFT;
+    for (i = 0; i < 256; i++)
+        ident[i] = (uint16_t)(i * 257);
+
+    /* the curve */
+    CHECK(dcn32_gamma_build(ident, 2, 256, &pw) == RDNA3_EINVAL);
+    CHECK(dcn32_gamma_build(ident, 1, 1, &pw) == RDNA3_EINVAL);
+    CHECK(dcn32_gamma_build(ident, 1, RD_GAMMA_MAX_ENTRIES + 1, &pw) == RDNA3_EINVAL);
+    CHECK(dcn32_gamma_build(ident, 1, 256, &pw) == RDNA3_OK && pw.num == RD_GAMMA_HW_POINTS &&
+          pw.linear && pw.rgb_equal);
+    CHECK(pw.start_x[0] == 0x15000 && pw.start_x[2] == 0x15000 && pw.end_x[1] == 0x8000 && pw.end_slope[0] == 0);
+    CHECK(pw.start_slope[0] == 0x1F000 && pw.end_base[2] == 0x1F000);          /* y = x: slope 1, y(2) = 1 */
+    CHECK(pw.lut[0][0] == 0x15000 && pw.lut[1][136] == 0x1E000 && pw.lut[2][144] == 0x1E800 &&
+          pw.lut[0][152] == 0x1F000 && pw.lut[0][153] == 0x1F000 && pw.lut[0][154] == 0x1F000);
+    /* arr_curve_points: offsets 0, 8, 24, ... 152, 154; segments 3, 4 x 9, 1 */
+    CHECK(pw.region[0] == 0x40083000u && pw.region[1] == 0x40284018u && pw.region[4] == 0x40884078u &&
+          pw.region[5] == 0x009A1098u && pw.region[6] == 0 && pw.region[16] == 0);
+    CHECK(dcn32_gamma_build(chan, 3, 2, &pc) == RDNA3_OK && !pc.linear && !pc.rgb_equal);
+    /* slopes 1, 1/3 (1/3 = 2^-2 * 1.333: 29 << 12 | 0x555), 1023 (= 2^9 * 1.998: 40 << 12 | 0xff8) */
+    CHECK(pc.start_slope[0] == 0x1F000 && pc.start_slope[1] == 0x1D555 && pc.start_slope[2] == 0x28FF8);
+    CHECK(pc.end_base[0] == 0x1F000 && pc.end_base[1] == 0x1D555 && pc.end_base[2] == 0);
+    CHECK(pc.lut[1][0] == 0x13555 && pc.lut[2][0] == 0x1EFF8);   /* 2^-10 / 3, 1 - 2^-10 */
+    CHECK(dcn32_gamma_build(dark, 1, 2, &pd) == RDNA3_OK && pd.rgb_equal && !pd.linear);
+
+    /* the boot head's MPCC; OTG 4 does not exist */
+    CHECK(dcn32_gamma_otg_mpccs(dev, dc->head[1].otg, mpcc) == 1 && mpcc[0] == 1);
+    CHECK(dcn32_gamma_otg_mpccs(dev, 4, mpcc) == RDNA3_EINVAL);
+    CHECK(dcn32_gamma_set_head(dev, dc, 2, &pw) == RDNA3_EINVAL);
+
+    /* bypass -> RAM A: memory forced on, one pass for all colours, the
+     * new mode latched at the OTG unlock */
+    CHECK(dcn32_gamma_state(dev, 1, &st) == RDNA3_OK && st.current == RD_GAMMA_LUT_BYPASS && st.mem_pwr_state == 1);
+    CHECK(dcn32_gamma_set_head(dev, dc, 1, &pw) == RDNA3_OK);
+    CHECK(dcn32_gamma_state(dev, 1, &st) == RDNA3_OK && st.mode == 2 && st.select == 0 &&
+          st.current == RD_GAMMA_LUT_RAM_A && st.mem_pwr_state == 0);
+    {   /* the DPP's degamma, read for the report (GOP: none) */
+        uint32_t *gc = &S.reg[DCN_B2 + regCM0_CM_GAMCOR_CONTROL + RD_CLONE_DPP_STRIDE], gc0 = *gc;
+        CHECK(st.dpp_degamma == ((gc0 & CM0_CM_GAMCOR_CONTROL__CM_GAMCOR_MODE_CURRENT_MASK) >>
+                                 CM0_CM_GAMCOR_CONTROL__CM_GAMCOR_MODE_CURRENT__SHIFT));
+        *gc = 2u << CM0_CM_GAMCOR_CONTROL__CM_GAMCOR_MODE_CURRENT__SHIFT;
+        CHECK(dcn32_gamma_state(dev, 1, &st) == RDNA3_OK && st.dpp_degamma == 2);
+        *gc = gc0;
+    }
+    CHECK(ogam.writes == RD_GAMMA_HW_POINTS && !ogam.dropped && ogam.latches == 1 &&
+          !(S.reg[OTG(regOTG0_OTG_MASTER_UPDATE_LOCK, 2)] & 1));
+    CHECK(OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_B) == 0x15000 && OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_START_CNTL_R) == 0x15000 &&
+          OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_START_SLOPE_CNTL_G) == 0x1F000 &&
+          OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_R) == 0x1F000 && OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL2_B) == 0x8000 &&
+          OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1) == 0x40083000u &&
+          OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1 + 5) == 0x009A1098u &&
+          OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_REGION_32_33) == 0 && OG(regMPCC_OGAM0_MPCC_OGAM_RAMB_START_CNTL_B) == 0);
+    CHECK(ogam.ram[1][0][0][0] == 0x15000 && ogam.ram[1][0][1][136] == 0x1E000 && ogam.ram[1][0][2][144] == 0x1E800 &&
+          ogam.ram[1][0][2][154] == 0x1F000 && ogam.ram[1][0][0][155] == 0);
+    CHECK(ogam.ram[0][0][0][0] == 0 && ogam.ram[1][1][0][0] == 0);   /* the clone's MPCC, RAM B untouched */
+
+    /* a table per channel -> RAM B, red / green / blue in three passes */
+    CHECK(dcn32_gamma_set_head(dev, dc, 1, &pc) == RDNA3_OK);
+    CHECK(dcn32_gamma_state(dev, 1, &st) == RDNA3_OK && st.select == 1 && st.current == RD_GAMMA_LUT_RAM_B);
+    CHECK(ogam.writes == 4 * RD_GAMMA_HW_POINTS && !ogam.dropped);
+    CHECK(ogam.ram[1][1][0][136] == 0x1E000 && ogam.ram[1][1][1][136] == 0x1C555 && ogam.ram[1][1][2][136] == 0x1E000);
+    CHECK(ogam.ram[1][1][1][0] == 0x13555 && ogam.ram[1][1][2][0] == 0x1EFF8 && ogam.ram[1][1][2][154] == 0 &&
+          ogam.ram[1][1][0][154] == 0x1F000);
+    CHECK(OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_START_SLOPE_CNTL_B + rb) == 0x28FF8 &&
+          OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_START_SLOPE_CNTL_G + rb) == 0x1D555 &&
+          OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_START_SLOPE_CNTL_R + rb) == 0x1F000 &&
+          OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_B + rb) == 0 && OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_END_CNTL1_G + rb) == 0x1D555 &&
+          OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_REGION_0_1 + rb) == 0x40083000u);
+    CHECK(OG(regMPCC_OGAM0_MPCC_OGAM_RAMA_START_SLOPE_CNTL_B) == 0x1F000 && ogam.ram[1][0][2][136] == 0x1E000);   /* RAM A kept */
+    /* ping-pong back to RAM A */
+    CHECK(dcn32_gamma_set_head(dev, dc, 1, &pw) == RDNA3_OK);
+    CHECK(dcn32_gamma_state(dev, 1, &st) == RDNA3_OK && st.select == 0 && st.current == RD_GAMMA_LUT_RAM_A);
+
+    /* what the card test checks: the OTG CRC moves with a dark table and
+     * comes back with the bypass */
+    dcn32_otg_crc_config(dev, dc->head[1].otg, 1);
+    S.dcn_frames = 1;
+    CHECK(dcn32_gamma_set_head(dev, dc, 1, NULL) == RDNA3_OK);
+    CHECK(dcn32_gamma_state(dev, 1, &st) == RDNA3_OK && st.mode == 0 && st.current == RD_GAMMA_LUT_BYPASS);
+    crc_a = OGAM_CRC();
+    CHECK(dcn32_gamma_set_head(dev, dc, 1, &pd) == RDNA3_OK);
+    CHECK(dcn32_gamma_state(dev, 1, &st) == RDNA3_OK && st.current == RD_GAMMA_LUT_RAM_A);   /* from bypass: A */
+    crc_b = OGAM_CRC();
+    CHECK(crc_b != crc_a);
+    CHECK(dcn32_gamma_set_head(dev, dc, 1, NULL) == RDNA3_OK && OGAM_CRC() == crc_a);
+    S.dcn_frames = 0;
+    dcn32_otg_crc_config(dev, dc->head[1].otg, 0);
+
+    /* the clone head has an MPCC of its own */
+    CHECK(dcn32_gamma_otg_mpccs(dev, dc->head[0].otg, mpcc) == 1 && mpcc[0] == 0);
+    CHECK(dcn32_gamma_set_head(dev, dc, 0, &pc) == RDNA3_OK);
+    CHECK(dcn32_gamma_state(dev, 0, &st) == RDNA3_OK && st.current == RD_GAMMA_LUT_RAM_A &&
+          ogam.ram[0][0][1][136] == 0x1C555);
+    CHECK(dcn32_gamma_set_head(dev, dc, 0, NULL) == RDNA3_OK);
+
+    /* the memory does not power up: refused, the mode stays as it was */
+    ogam.pwr_stuck = 1;
+    S.reg[MPCC_R(regMPCC0_MPCC_MEM_PWR_CTRL, 1)] = 1u << MPCC0_MPCC_MEM_PWR_CTRL__MPCC_OGAM_MEM_PWR_STATE__SHIFT;
+    CHECK(dcn32_gamma_set_head(dev, dc, 1, &pc) == RDNA3_ETIME);
+    CHECK(dcn32_gamma_state(dev, 1, &st) == RDNA3_OK && st.mode == 0 && st.current == RD_GAMMA_LUT_BYPASS &&
+          !(S.reg[OTG(regOTG0_OTG_MASTER_UPDATE_LOCK, 2)] & 1));
+    ogam.pwr_stuck = 0;
+#undef OG
+#undef OGAM_CRC
+}
 
 static void run(const char *fwdir)
 {
@@ -4172,6 +4393,8 @@ static void run(const char *fwdir)
                 CHECK(S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS] == (uint32_t)(FB_START + 0x7000000) &&
                       S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS + RD_CLONE_HUBP_STRIDE] == boot_lo);
             }
+            /* output gamma on both heads (hw/dcn32_gamma.c) */
+            test_gamma(&dev, &dc2);
             /* monitor standby on the clone: blank + TransmitterControl
              * DISABLE, back with ENABLE + unblank; nothing else touched */
             {

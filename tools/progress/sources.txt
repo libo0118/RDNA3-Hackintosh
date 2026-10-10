@@ -41,3 +41,5 @@ Display: modeset     | display/dc/dio/dcn32/dcn32_dio_stream_encoder.c
 Display: modeset     | display/dc/link/protocols/link_dp_training.c
 Display: modeset     | display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c
 Display: modeset     | display/dc/clk_mgr/dcn32/dcn32_clk_mgr_smu_msg.c
+Display: color       | display/dc/mpc/dcn30/dcn30_mpc.c
+Display: color       | display/dc/dcn30/dcn30_cm_common.c

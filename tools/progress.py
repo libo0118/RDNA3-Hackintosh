@@ -43,7 +43,7 @@ AMDGPU_STEPS = {
     "IH interrupts": ["6", "6b"], "SoC / NBIO / HDP": ["1", "4"], "SDMA 6": ["7"],
     "GFX 11": ["8"], "Rings / fences": ["7", "8"], "MES queues": ["mes"],
     "Discovery / VBIOS": ["2"], "DMCUB": ["5b"], "Display: OTG / AUX": ["2", "9"],
-    "Display: modeset": ["modeset"],
+    "Display: modeset": ["modeset"], "Display: color": ["gamma"],
 }
 UAPI_STEPS = {
     "amdgpu ioctls": ["7", "8"], "DRM core ioctls": ["7", "8"], "INFO queries": ["7"],
