@@ -144,6 +144,42 @@ the values computed for the 1440p mode from the EDID are exactly the ones the GO
 OTG. The kext publishes `RDNA3,Head0EdidMode` and `RDNA3,Connector<n>,ModesUsable`,
 and the log describes each mode with the reason it was rejected.
 
+## DisplayPort SST mode set (step 5)
+
+`hw/dcn32_dp.c` ports the DP SST / 8b/10b part of Display Core so a DP head
+can be re-timed by the driver, as the TMDS heads already are
+(`hw/dcn32_modeset.c`): `retrieve_link_cap` (subset) with
+`dp_retrieve_lttpr_cap` and `wake_up_aux_channel`, `dp_get_max_link_cap`
+(sink caps, the VBIOS encoder caps, an LTTPR's limits),
+`link_decide_link_settings` / `decide_dp_link_settings` over
+`dp_link_bandwidth_kbps` and `dc_bandwidth_in_kbps_from_timing`,
+`decide_fallback_link_setting`, `dp_verify_link_cap_with_retries`,
+`perform_link_training_with_retries`, `dp_perform_link_training`,
+`dp_perform_8b_10b_link_training` with its clock recovery and channel
+equalization sequences (TPS1, then TPS2/3/4 as sink and encoder allow),
+`perform_post_lt_adj_req_sequence`, `dp_transition_to_video_idle`. The
+hardware side is the DCN 3.2 one of DC: the DIO link hwss, the dcn10 link
+encoder (training pattern registers, `enc1_configure_encoder`, and the VBIOS
+TransmitterControl ENABLE / DISABLE / SETUP_VSEMPH, sent to the DMCUB as for
+TMDS), the stream encoder (`enc1_stream_encoder_dp_set_stream_attribute`
+MSA, `enc1_stream_encoder_dp_blank`, `enc32_stream_encoder_dp_unblank` M/N
+and FIFOs) and `dcn31_program_pix_clk`'s DP branch (the DP DTO from
+DPREFCLK). The mode set takes the link down as `link_set_dpms_off` does,
+programs the timing, verifies the link cap once, and brings the link up as
+`link_set_dpms_on`; a training that fails puts the old timing back.
+
+Not ported: UHBR / 128b/132b (HPO encoder, DTBCLK), FEC and DSC, MST,
+non-transparent LTTPR training (an LTTPR is put in transparent mode), eDP,
+the source OUI write. The stream encoder keeps the pixels per cycle the GOP
+chose (DC's `enable_dp_dig_pixel_rate_div_policy` would choose two on DCN
+3.2), and the DCCG pixel rate divider stays as the GOP set it.
+
+Gate: `rdna3dplink=1` (default off, not in the default profile) with
+`rdna3modeset=1`; step `dplink` of the ladder. The simulator has a DP sink
+with a link layer: it locks clock recovery after a set number of
+voltage-swing requests, channel EQ after pre-emphasis requests, and fails
+clock recovery at HBR3 to exercise the fallback.
+
 ## Limitations (to do)
 
 * one head (head 0), one mode; no EDID (DCN AUX/I2C), no change of

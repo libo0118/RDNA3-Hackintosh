@@ -267,6 +267,9 @@ private:
     /* rdna3dispclk=1: the PMFW's DISPCLK / DPPCLK limits, read once */
     struct rdna3_dcn_clk_limits *fClkLim = nullptr;
     const struct rdna3_dcn_clk_limits *displayClkLimits();
+    /* rdna3dplink=1: the DP SST link per head (hw/dcn32_dp.c) for mode sets */
+    struct rdna3_dp_link *fDpLink[4] = {};
+    struct rdna3_dp_link *displayDpLink(uint32_t head, const struct rdna3_display_path *p);
     uint32_t      fFwVer[32] = {}, fFwFeat[32] = {}, fTaVer[RD_TA_TYPES] = {};
     uint8_t      *fVbiosCopy = nullptr;
     uint32_t      fVbiosCopyLen = 0;
