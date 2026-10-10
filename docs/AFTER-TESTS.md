@@ -371,3 +371,19 @@ names the last phase if the machine hangs. Use it as ground truth:
 | `display/*.edid`, `display/card*-*.txt` | `RDNA3,Connector*` EDIDs and routing |
 | `vulkan/rdna3_vktest.txt` | the same test on macOS: a pass on Linux means a macOS failure is ours |
 
+### Linux reference of this card (dump 2026-10-10, kernel amdgpu, idle, both monitors)
+
+- SMU feature mask `0x0003ebbc71ffffff`: **the same as ours** (SCPM runs the
+  same features whatever we allow).
+- Idle: ~12 W, GFX activity 7-10 % (gpu_metrics), GFXCLK 135-226 MHz (SCLK
+  deep sleep 40 MHz), **UCLK 96 MHz, FCLK 601 MHz** with two 1080p60 heads.
+- GFX clock gating flags: MGCG, CGCG, CGLS, REPEATER_FGCG (= ours) plus
+  BIF MGCG, HDP shutdown, IH CG, ATHUB MGCG/LS (not ported yet).
+- DC watermarks (us): set A urgent 17.32, sr_enter 59.72, sr_exit 52.74,
+  dram_clk_change 417.32; set C dram_clk_change 67.32. DCFCLK 199 MHz,
+  DISPCLK 215 MHz, DPPCLK 212 MHz. OTG 2591x1127 total (1080p60 CVT-RB).
+- amdgpu runs the MES (`uni_mes=1`); our default is the legacy RB0 ring.
+- Our activity was already 46-49 % at level 5 (before any GFX bring-up of
+  ours), so the PMFW's busy reading comes from the RLC/GFX state, not work.
+- `rdna3_vktest` on Linux RADV: ALL PASSED 8/8 (the test itself is right).
+
