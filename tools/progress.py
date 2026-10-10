@@ -49,6 +49,7 @@ AMDGPU_STEPS = {
     "GFX 11": ["8"], "Rings / fences": ["7", "8"], "MES queues": ["mes"],
     "Discovery / VBIOS": ["2"], "DMCUB": ["5b"], "Display: OTG / AUX": ["2", "9"],
     "Display: modeset": ["modeset"],
+    "Display: DP link": ["dplink"],
     "Display: hotplug": ["hotplug"],
     "Display: color": ["gamma"],
 }

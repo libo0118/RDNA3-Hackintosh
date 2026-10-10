@@ -38,7 +38,7 @@ Display: modeset     | display/dc/hwss/dcn32/dcn32_hwseq.c
 Display: modeset     | display/dc/dccg/dcn32/dcn32_dccg.c
 Display: modeset     | display/dc/hubp/dcn32/dcn32_hubp.c
 Display: modeset     | display/dc/dio/dcn32/dcn32_dio_stream_encoder.c
-Display: modeset     | display/dc/link/protocols/link_dp_training.c
+Display: DP link     | display/dc/link/protocols/link_dp_training.c
 Display: modeset     | display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c
 Display: modeset     | display/dc/clk_mgr/dcn32/dcn32_clk_mgr_smu_msg.c
 Display: hotplug     | display/dc/link/protocols/link_hpd.c
@@ -48,3 +48,9 @@ Display: color       | display/dc/dcn30/dcn30_cm_common.c
 Display: modeset     | display/dc/link/link_dpms.c
 Display: modeset     | display/dc/dio/dcn10/dcn10_link_encoder.c
 Display: modeset     | display/dc/hubbub/dcn30/dcn30_hubbub.c
+Display: DP link     | display/dc/link/protocols/link_dp_training_8b_10b.c
+Display: DP link     | display/dc/link/protocols/link_dp_capability.c
+Display: DP link     | display/dc/link/protocols/link_dp_phy.c
+Display: DP link     | display/dc/link/hwss/link_hwss_dio.c
+Display: DP link     | display/dc/link/link_validation.c
+Display: DP link     | display/dc/dio/dcn10/dcn10_stream_encoder.c

@@ -27,6 +27,8 @@ amdgpu_discovery_set_(isp|vpe|umsch_mm)_ip_blocks  ISP, VPE, UMSCH: APU blocks, 
 amdgpu_discovery_read_binary_from_sysmem  discovery table from ACPI system memory: APUs
 amdgpu_ring_ib_on_emit_(ce|cntl|de)  software ring muxer for GFX9 mid-command-buffer preemption
 enable_link_(edp|lvds)|link_blank_all_edp_displays|setup_panel_mode|dcn10_psr_.*  eDP / LVDS panels and PSR: a desktop card has no built-in panel
+edp_decide_link_settings|decide_edp_link_settings_with_dsc|detect_edp_sink_caps|increase_edp_link_rate  eDP link rate sets (ILR): a desktop card has no built-in panel
+apply_usbc_combo_phy_reset_wa|get_usbc_cable_id|link_validate_dpia_bandwidth  USB-C combo PHY / DP tunnelling (DPIA): the card has no USB-C port
 dmub_dcn32_skip_dmub_panel_power_sequence|dmub_srv_set_skip_panel_power_sequence|dmub_dcn32_backdoor_load_zfb_mode  built-in panel power / zero-frame-buffer (APU) DMCUB modes
 mpc3_(program_shaper|program_shaper_lut|program_shaper_luta_settings|program_shaper_lutb_settings|configure_shaper_lut|get_shaper_current|power_on_shaper_3dlut|program_3dlut|select_3dlut_ram|select_3dlut_ram_mask|set3dlut_ram10|set3dlut_ram12|set_3dlut_mode|read_mpcc_state|set_rmu_mux|get_rmu_mux_status)|mpcc3_(acquire|release)_rmu|get3dlut_config  DCN 3.0 code path: DCN 3.2 uses its own mpc32_* / mpc1_* (dcn32_mpc_funcs)
 mmhub_v3_0_set_clockgating|ih_v6_0_set_clockgating_state  clock gating the card's cg_flags do not enable (soc21_common_early_init: no MC / IH flags for GC 11.0.3), a no-op here
