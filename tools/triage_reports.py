@@ -105,6 +105,20 @@ def bootarg_level(args):
     return int(m.group(1)) if m else 0
 
 
+def fb_source_hash():
+    """fb/Makefile's FB_SRC_HASH: sha1 of the concatenated sources, 10 hex"""
+    import hashlib
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    h = hashlib.sha1()
+    try:
+        for f in ("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h"):
+            with open(os.path.join(root, f), "rb") as fh:
+                h.update(fh.read())
+    except OSError:
+        return None
+    return h.hexdigest()[:10]
+
+
 def report(path, show_all):
     failed = False
     with tarfile.open(path) as tar:
@@ -184,14 +198,16 @@ def report(path, show_all):
         # the framebuffer must be the same build as the core: OpenCore cannot
         # inject it (it links IOGraphicsFamily), so the VM loads the copy
         # setup.sh last put in the Auxiliary KC
-        core_c = props.get("Commit")
+        # its build id is a hash of its sources (fb/Makefile): compare with
+        # this checkout, which should be the tested commit
+        want = fb_source_hash()
         fb_c = re.search(r"RDNA3-fb: started .*?, build (\S+)", log)
-        same = bool(core_c and fb_c and fb_c.group(1) == core_c)
+        same = bool(want and fb_c and fb_c.group(1) == want)
         print("   %s %-20s %s" % ("PASS" if same else "FAIL", "framebuffer build",
-                                 "%s = core" % core_c if same else
-                                 "framebuffer %s, core %s: stale RDNA3Framebuffer.kext - run setup.sh "
-                                 "in the VM (rdna3vm window) and boot twice" %
-                                 (fb_c.group(1) if fb_c else "older than the build check", core_c or "?")))
+                                 "%s = these sources" % want if same else
+                                 "framebuffer %s, these sources %s: stale RDNA3Framebuffer.kext - "
+                                 "'rdna3vm approve' (or the checkout is not the tested commit)" %
+                                 (fb_c.group(1) if fb_c else "older than the build check", want or "?")))
         failed = failed or not same
         fb_edid = re.search(r"RDNA3FB: head \d+ EDID \d+ bytes", log)
         print("   %s %-20s %s" % ("PASS" if fb_started else "FAIL", "framebuffer",

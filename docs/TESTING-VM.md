@@ -189,7 +189,7 @@ then **Not Now** at the restart question and Apple menu → Shut Down.
 rdna3vm queue pending
 ```
 
-runs the steps still waiting for the card (`9b 9bw 9c`)
+runs the steps still waiting for the card (`9bp 9bu 9bpu`)
 one after the other: each one boots macOS, sends its report and shuts
 down, the desktop comes back for a moment, then the next one starts
 (about 5 minutes a step, 40 in all; both monitors connected). You can

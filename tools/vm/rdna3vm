@@ -427,10 +427,10 @@ cmd_args() {
 
 # the steps still waiting, one per line; the first is the one running
 QUEUE=$WORK/queue
-# 9b / 9bw: does the PMFW survive a metrics transfer with the clone lit,
-# without and with SetAlwaysWaitDmcubResp 0; 9c: the extended desktop
-# (needs the new framebuffer approved: rdna3vm approve)
-PENDING_STEPS="9b 9bw 9c"
+# does the PMFW survive a metrics transfer with the clone lit when the
+# DCHUBBUB arbiter is forced to allow p-state changes (9bp), USR
+# retraining (9bu) or both (9bpu)?
+PENDING_STEPS="9bp 9bu 9bpu"
 
 cmd_queue() {
     load_conf

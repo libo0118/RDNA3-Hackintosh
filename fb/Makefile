@@ -19,8 +19,12 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
             -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions -fno-builtin -fno-common \
             -O2 -g -ferror-limit=0 -Wall -Wextra -Werror -Wno-unused-parameter \
             -Wno-inconsistent-missing-override -Wno-deprecated-declarations
-GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-CXXFLAGS += -DFB_COMMIT='"$(GIT_COMMIT)"'
+# the build id is a hash of the sources, not the git commit: macOS asks the
+# user to allow every new binary (Auxiliary KC), so the binary may change
+# only when the framebuffer itself does (tools/triage_reports.py computes
+# the same hash)
+FB_SRC_HASH := $(shell cat rdna3-fb.cpp Info.plist ../accel/rdna3k_abi.h | shasum | cut -c1-10)
+CXXFLAGS += -DFB_COMMIT='"$(FB_SRC_HASH)"'
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext
 
 .PHONY: all check clean

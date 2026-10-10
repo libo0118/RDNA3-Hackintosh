@@ -367,7 +367,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
     setProperty("IOFBDependentIndex", (unsigned long long)fHead, 32);
     setProperty("IOFBMemorySize", (unsigned long long)fBytes, 64);
     setProperty("RDNA3,Mode", fDcn ? "dcn" : "console");
-    setProperty("RDNA3,Commit", FB_COMMIT);
+    setProperty("RDNA3,FBSource", FB_COMMIT);
     setName("RDNA3Framebuffer");
 
     if (!super::start(provider)) {

@@ -363,6 +363,13 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe)
         }
         ret = dcn32_clone_plan(fDispDev, fDcn, 0, p, e.mode[k].pixel_khz, fMirror);
         fMirror->smu_probe = probe;
+        /* rdna3pstate: force the DCHUBBUB arbiter to allow p-state changes
+         * (1), USR retraining (2) or both (3) while two heads run */
+        {
+            uint32_t pf = 0;
+            PE_parse_boot_argn("rdna3pstate", &pf, sizeof(pf));
+            fMirror->pstate_force = pf & 3;
+        }
         if (ret == RDNA3_OK)
             ret = dcn32_clone_enable(fDispDev, dm, fMirror);
         if (ret == RDNA3_OK) {

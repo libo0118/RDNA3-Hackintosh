@@ -3871,9 +3871,14 @@ static void run(const char *fwdir)
             S.dmub.nseq = 0;
             S.dal_displays = 0;
             cl.smu_probe = 1;           /* the PMFW keeps answering: 5 TestMessages */
+            cl.pstate_force = 3;        /* arbiter: p-state and USR retraining allowed */
+            S.reg[DCN_B2 + RD_DCHUBBUB_ARB_DRAM_STATE_CNTL] = 0x1;
+            S.reg[DCN_B2 + RD_DCHUBBUB_ARB_USR_RETRAINING_CNTL] = 0x1;   /* a retraining request pending */
             k2 = S.smu_msgs;
             CHECK(dcn32_clone_enable(&dev, &dm, &cl) == RDNA3_OK);
             CHECK(S.smu_msgs - k2 == 5);
+            CHECK(S.reg[DCN_B2 + RD_DCHUBBUB_ARB_DRAM_STATE_CNTL] == (0x1 | RD_ARB_ALLOW_PSTATE_FORCE_VALUE | RD_ARB_ALLOW_PSTATE_FORCE_ENABLE) &&
+                  S.reg[DCN_B2 + RD_DCHUBBUB_ARB_USR_RETRAINING_CNTL] == (0x1 | RD_ARB_USR_FORCE_VALUE | RD_ARB_USR_FORCE_ENABLE));
             CHECK(S.dal_displays == 0);   /* no NumOfDisplays: it wedged the PMFW on the card */
             CHECK(S.dcn_gated_drops == 0 && S.dcn_pg_no_request == 0 && S.dmub.bad_cmds == 0);
             CHECK(S.reg[DCN_B2 + regDOMAIN0_PG_STATUS] == 0 &&
@@ -3967,9 +3972,12 @@ static void run(const char *fwdir)
                 off.connector_id = 0x0c; off.dig_mode = 3; off.pclk_khz = 148500;
                 off.det_src = 8; off.det_dst = 0; off.det_src_new = 4; off.det_dst_new = 4;
                 off.displays = 2;
+                off.pstate_force = 3; off.arb_dram_state = 0x1; off.arb_usr_retraining = 0x1;
                 S.dmub.nseq = 0;
                 CHECK(dcn32_clone_disable(&dev, &dm, &off) == RDNA3_OK);
                 CHECK(S.dal_displays == 0);
+                CHECK(S.reg[DCN_B2 + RD_DCHUBBUB_ARB_DRAM_STATE_CNTL] == 0x1 &&
+                      S.reg[DCN_B2 + RD_DCHUBBUB_ARB_USR_RETRAINING_CNTL] == 0x1);   /* back */
             }
             CHECK(S.dmub.nseq == 2 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE &&
                   S.dmub.seq[1] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.pixclk[0] == 0 && S.dmub.pixclk[2] == 0);

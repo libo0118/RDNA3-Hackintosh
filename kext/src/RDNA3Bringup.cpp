@@ -25,6 +25,7 @@ extern "C" {
 }
 #include "dcaux.h"
 #include "dcn32_clk.h"
+#include "dcn32_clone.h"
 
 /* kpi.mach; declared here to avoid depending on private headers */
 extern "C" kern_return_t kernel_thread_start(thread_continue_t continuation,
@@ -592,6 +593,7 @@ bool RDNA3Bringup::hwInit()
                 if (fPmUp && fSmu) {
                     int m = smu13_read_metrics(fDev, fSmu);
                     BLOG("clone: PMFW metrics transfer after the clone: %s (%d)", m ? "FAILED" : "ok", m);
+                    dcn32_hubbub_log(fDev, "after the metrics transfer");
                     publish("RDNA3,CloneMetricsResult", (uint64_t)(int64_t)m);
                 }
             }

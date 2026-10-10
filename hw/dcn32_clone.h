@@ -62,7 +62,26 @@ typedef struct rdna3_dcn_clone {
      * still answers, and the clone stops at the first one that broke it
      * (the first card runs lost the PMFW right after the clone) */
     int      smu_probe;
+    /* DCHUBBUB arbiter: the values before the clone (plan), and what the
+     * caller wants forced once two unsynchronised heads run (bit 0: allow
+     * p-state change, hubbub3_force_pstate_change_control(true, true) as
+     * dcn30_hardware_release does when p-state is unsupported; bit 1: allow
+     * USR retraining, hubbub32_force_usr_retraining_allow(true)) */
+    uint32_t arb_dram_state, arb_usr_retraining;
+    uint32_t pstate_force;
 } rdna3_dcn_clone;
+
+/* DCHUBBUB_ARB_DRAM_STATE_CNTL / _USR_RETRAINING_CNTL (DCN segment 2) */
+#define RD_DCHUBBUB_ARB_DRAM_STATE_CNTL      0x04fc
+#define RD_DCHUBBUB_ARB_USR_RETRAINING_CNTL  0x04fd
+#define RD_ARB_ALLOW_PSTATE_FORCE_VALUE      0x10
+#define RD_ARB_ALLOW_PSTATE_FORCE_ENABLE     0x20
+#define RD_ARB_USR_RETRAINING_REQUEST        0x1
+#define RD_ARB_ALLOW_USR_RETRAINING          0x2
+#define RD_ARB_USR_FORCE_VALUE               0x100
+#define RD_ARB_USR_FORCE_ENABLE              0x200
+/* log both arbiter registers (is a p-state / retraining request pending?) */
+void dcn32_hubbub_log(rdna3_dev *d, const char *when);
 
 /* Pick free instances for showing lit head 'head' of 'dc' on the connector
  * 'dst' (a VBIOS display path) at 'pclk_khz'. Reads only. RDNA3_EINVAL for

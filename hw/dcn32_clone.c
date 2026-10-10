@@ -200,6 +200,10 @@ int dcn32_clone_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head,
 
     /* DET: the GOP gave its pipe the segments; split them when the new
      * pipe has none (dcn32_program_det_size, 64 KiB segments) */
+    c->arb_dram_state = rd(d, 2, RD_DCHUBBUB_ARB_DRAM_STATE_CNTL);
+    c->arb_usr_retraining = rd(d, 2, RD_DCHUBBUB_ARB_USR_RETRAINING_CNTL);
+    c->pstate_force = 0;
+    c->smu_probe = 0;
     c->det_src = GET(RI(d, regDCHUBBUB_DET0_CTRL, c->src_pipe, DET_S), DCHUBBUB_DET0_CTRL, DET0_SIZE);
     c->det_dst = GET(RI(d, regDCHUBBUB_DET0_CTRL, c->dst_pipe, DET_S), DCHUBBUB_DET0_CTRL, DET0_SIZE);
     c->det_src_new = c->det_src;
@@ -337,6 +341,15 @@ static const uint16_t tmds_be[] = {
     regDIG0_TMDS_DCBALANCER_CONTROL, regDIG0_TMDS_SYNC_DCBALANCE_CHAR, regDIG0_TMDS_CTL0_1_GEN_CNTL,
     regDIG0_TMDS_CTL2_3_GEN_CNTL,
 };
+
+void dcn32_hubbub_log(rdna3_dev *d, const char *when)
+{
+    uint32_t ds = rd(d, 2, RD_DCHUBBUB_ARB_DRAM_STATE_CNTL);
+    uint32_t usr = rd(d, 2, RD_DCHUBBUB_ARB_USR_RETRAINING_CNTL);
+    RLOG(d, "DCHUBBUB %s: DRAM_STATE_CNTL 0x%08x USR_RETRAINING_CNTL 0x%08x (retraining %s, %s)", when, ds,
+         usr, (usr & RD_ARB_USR_RETRAINING_REQUEST) ? "REQUESTED" : "not requested",
+         (usr & RD_ARB_ALLOW_USR_RETRAINING) ? "allowed" : "not allowed");
+}
 
 /* is the PMFW still answering its driver mailbox? */
 static int pmfw_alive(rdna3_dev *d, const rdna3_dcn_clone *c, const char *after)
@@ -489,6 +502,19 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
          RI(d, regDOMAIN0_PG_STATUS, c->dst_pipe, PG_S), RI(d, regDCHUBBUB_DET0_CTRL, c->dst_pipe, DET_S),
          RI(d, regOTG0_PIXEL_RATE_CNTL, c->dst_otg, PRC_S),
          RI(d, regOTG0_PHYPLL_PIXEL_RATE_CNTL, c->dst_otg, PRC_S));
+    /* two heads that are not synchronised: the arbiter never allows a
+     * p-state change by itself; amdgpu forces it then (UCLK stays pinned) */
+    dcn32_hubbub_log(d, "with the clone");
+    if (c->pstate_force & 1) {
+        v = rd(d, 2, RD_DCHUBBUB_ARB_DRAM_STATE_CNTL);
+        wr(d, 2, RD_DCHUBBUB_ARB_DRAM_STATE_CNTL, v | RD_ARB_ALLOW_PSTATE_FORCE_VALUE | RD_ARB_ALLOW_PSTATE_FORCE_ENABLE);
+    }
+    if (c->pstate_force & 2) {
+        v = rd(d, 2, RD_DCHUBBUB_ARB_USR_RETRAINING_CNTL);
+        wr(d, 2, RD_DCHUBBUB_ARB_USR_RETRAINING_CNTL, v | RD_ARB_USR_FORCE_VALUE | RD_ARB_USR_FORCE_ENABLE);
+    }
+    if (c->pstate_force)
+        dcn32_hubbub_log(d, "forced");
     /* the PMFW may react a little later */
     if (c->smu_probe) {
         d->os.msleep(d->os.ctx, 200);
@@ -594,6 +620,11 @@ int dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
     v = RI(d, regDPPCLK_DTO_CTRL, 0, 0);
     WI(d, regDPPCLK_DTO_CTRL, 0, 0, v & ~(3u << (4 * c->dst_pipe)));
     pipe_power(d, c->dst_pipe, 0);
+    /* one head again: the arbiter's own p-state / retraining decisions */
+    if (c->pstate_force) {
+        wr(d, 2, RD_DCHUBBUB_ARB_DRAM_STATE_CNTL, c->arb_dram_state);
+        wr(d, 2, RD_DCHUBBUB_ARB_USR_RETRAINING_CNTL, c->arb_usr_retraining);
+    }
     RLOG(d, "clone: pipe %u off (transmitter %u: %d)", c->dst_pipe, c->dst_be, ret);
     return ret;
 }
