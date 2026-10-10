@@ -1,10 +1,10 @@
 {
  "amdgpu": {
-  "works": 258,
-  "ported": 283,
+  "works": 259,
+  "ported": 284,
   "total": 1328,
-  "works_pct": 19.4,
-  "ported_pct": 21.3,
+  "works_pct": 19.5,
+  "ported_pct": 21.4,
   "groups": [
    {
     "name": "PSP 13",
@@ -1232,9 +1232,9 @@
      "2",
      "9"
     ],
-    "works": 16,
+    "works": 17,
     "ported": 0,
-    "todo": 63,
+    "todo": 62,
     "items": {
      "acquire": "works",
      "acquire_engine": "works",
@@ -1297,7 +1297,7 @@
      "optc1_setup_vertical_interrupt2": "todo",
      "optc1_tg_init": "todo",
      "optc1_unblank_crtc": "todo",
-     "optc1_unlock": "todo",
+     "optc1_unlock": "works",
      "optc1_validate_timing": "todo",
      "optc1_wait_for_state": "todo",
      "optc32_disable_crtc": "works",

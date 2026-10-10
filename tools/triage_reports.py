@@ -375,6 +375,19 @@ def main():
                     print("     picture: " + ppm_to_png(ppm))
                 except (OSError, ValueError) as e:
                     print("     picture: " + str(e))
+            if "== rdna3_modetest" in txt:
+                # scaled modes: what macOS listed, each switch, the pipes after it
+                ml = txt[txt.index("== rdna3_modetest"):]
+                print("   display modes (rdna3modes=1):")
+                for l in ml.splitlines():
+                    if re.match(r"(display \d|  current|== mode|MODES:)", l) or \
+                       ("mode " in l and re.search(r"\d+x\d+ \(pixels", l) and "IO flags" in l and l.startswith("  mode")):
+                        print("     " + l[:150])
+                    if l.startswith("== rdna3_drminfo --hang-test") or l.startswith("SOAK"):
+                        break
+                m = re.search(r"^MODES: (\d+) switch\(es\) tried, (\d+) failed", ml, re.M)
+                if m and m.group(2) != "0":
+                    failed = True
             m = re.search(r"^SOAK: (\d+) rounds, (\d+) failed", txt, re.M)
             if m:
                 print("   %s soak: %s rounds of DMA/GFX/Vulkan tests, %s failed" %

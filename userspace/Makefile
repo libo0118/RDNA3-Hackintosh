@@ -3,6 +3,7 @@
 #   libdrm_amdgpu.dylib - unmodified libdrm_amdgpu (third_party/libdrm) on top of it
 #   include/ + pkgconfig/ so Mesa's meson finds them as "libdrm" / "libdrm_amdgpu"
 #   rdna3_drminfo       - Stage 4 smoke test against the kext
+#   rdna3_modetest      - list / switch display modes (CoreGraphics) for the report
 CC      := xcrun clang
 ARCH    := -arch x86_64 -mmacosx-version-min=15.0
 BUILD   := $(abspath ../build/userspace)
@@ -20,7 +21,7 @@ AMD_SRC   := $(wildcard $(LIBDRM)/amdgpu/*.c)
 AMD_OBJS  := $(patsubst $(LIBDRM)/amdgpu/%.c,$(BUILD)/obj/amdgpu_%.o,$(AMD_SRC))
 
 .PHONY: all install clean loopback
-all: $(BUILD)/libdrm.dylib $(BUILD)/libdrm_amdgpu.dylib $(BUILD)/rdna3_drminfo install
+all: $(BUILD)/libdrm.dylib $(BUILD)/libdrm_amdgpu.dylib $(BUILD)/rdna3_drminfo $(BUILD)/rdna3_modetest install
 
 # libdrm_loopback.dylib: the same libdrm core on the in-process UAPI
 # (backend_loopback + uapi/rdna3_drm.c), for vulkaninfo / RADV runs on a Mac
@@ -60,6 +61,9 @@ $(BUILD)/libdrm_amdgpu.dylib: $(AMD_OBJS) $(BUILD)/libdrm.dylib
 $(BUILD)/rdna3_drminfo: rdna3_drminfo.c $(BUILD)/libdrm.dylib
 	$(CC) -O2 -g $(ARCH) $(WARN) -I$(XNU) -I../uapi -I../common -I../third_party/amd \
 	  -o $@ $< -L$(BUILD) -ldrm -Wl,-rpath,@executable_path $(LIBS)
+
+$(BUILD)/rdna3_modetest: rdna3_modetest.c | $(BUILD)/obj
+	$(CC) -O2 -g $(ARCH) $(WARN) -o $@ $< -framework CoreGraphics -framework CoreFoundation
 
 install: $(BUILD)/libdrm.dylib $(BUILD)/libdrm_amdgpu.dylib
 	mkdir -p $(PREFIX)/lib/pkgconfig $(PREFIX)/include/libdrm

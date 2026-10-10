@@ -229,6 +229,9 @@ private:
     IOReturn      displayCrc(uint32_t head, uint32_t *crc);
     /* display sleep from the framebuffer (rdna3DisplayBlank, rdna3dpms=1) */
     IOReturn      displayBlank(uint32_t head, bool blank);
+    /* scaled modes from the framebuffer (rdna3DisplaySetSource) */
+    IOReturn      displaySetSource(struct RD3KDisplaySource *s);
+    struct rdna3_dcn_scale *fScale = nullptr;
     IOReturn      displayCursor(struct RD3KDisplayCursor *c);
     IOReturn      displayEdid(struct RD3KDisplayEdid *e);
     void          displayProbeConnectors();

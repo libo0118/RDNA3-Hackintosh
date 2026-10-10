@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 19.4%   ported 21.3%   (258 / 283 / 1328)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 19.5%   ported 21.4%   (259 / 284 / 1328)</text>
 <g><title>GFX 11: works 30%, ported 30% (73+0 of 243); verified by step(s) 8</title>
 <rect x="1.0" y="53.0" width="9.7" height="10.7" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="10.7" y="53.0" width="9.7" height="10.7" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -946,7 +946,7 @@
 <text x="301.0" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">PSP 13</text>
 <text x="301.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">14% / 14%</text>
 </g>
-<g><title>Display: OTG / AUX: works 20%, ported 20% (16+0 of 79); verified by step(s) 2, 9</title>
+<g><title>Display: OTG / AUX: works 22%, ported 22% (17+0 of 79); verified by step(s) 2, 9</title>
 <rect x="417.0" y="53.0" width="9.6" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="426.6" y="53.0" width="9.6" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="436.2" y="53.0" width="9.6" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -963,7 +963,7 @@
 <rect x="465.1" y="63.0" width="9.6" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="474.7" y="63.0" width="9.6" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="484.4" y="63.0" width="9.6" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="417.0" y="73.0" width="11.0" height="10.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="417.0" y="73.0" width="11.0" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="428.0" y="73.0" width="11.0" height="10.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="439.0" y="73.0" width="11.0" height="10.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="450.0" y="73.0" width="11.0" height="10.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -1028,7 +1028,7 @@
 <rect x="483.0" y="152.8" width="11.0" height="10.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="416.0" y="52.0" width="79.0" height="111.8" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="421.0" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Display: …</text>
-<text x="421.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">20% / 20%</text>
+<text x="421.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">22% / 22%</text>
 </g>
 <g><title>DMCUB: works 7%, ported 7% (5+0 of 70); verified by step(s) 5b</title>
 <rect x="297.0" y="164.8" width="9.8" height="10.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>

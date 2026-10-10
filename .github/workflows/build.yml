@@ -103,7 +103,7 @@ jobs:
         run: |
           file build/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel
           make -C kext check
-      - name: Userspace (libdrm_xnu, rdna3_drminfo)
+      - name: Userspace (libdrm_xnu, rdna3_drminfo, rdna3_modetest)
         run: make -C userspace
       - name: Host tests on macOS
         run: make test tools
@@ -115,6 +115,7 @@ jobs:
             build/RDNA3Accelerator.kext
             build/RDNA3Framebuffer.kext
             build/userspace/rdna3_drminfo
+            build/userspace/rdna3_modetest
             build/userspace/libdrm.dylib
             build/userspace/libdrm_amdgpu.dylib
 

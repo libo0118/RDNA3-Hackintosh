@@ -687,6 +687,8 @@ void RDNA3Accel::displayFree()
     if (fDcn) IOFree(fDcn, sizeof(rdna3_dcn));
     if (fMirror) IOFree(fMirror, sizeof(rdna3_dcn_clone));
     fMirror = nullptr;
+    if (fScale) IOFree(fScale, sizeof(rdna3_dcn_scale));
+    fScale = nullptr;
     if (fDispDev) IOFree(fDispDev, sizeof(rdna3_dev));
     if (fDispLock) IOLockFree(fDispLock);
     fDcn = nullptr;
@@ -816,6 +818,27 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
     IOLockUnlock(fDispLock);
     LOG("display: head %u %s (%d)", head, blank ? "blanked (display sleep)" : "unblanked", r);
     return r ? kIOReturnError : kIOReturnSuccess;
+}
+
+IOReturn RDNA3Accel::displaySetSource(RD3KDisplaySource *s)
+{
+    if (!s || s->version != RD3K_DISPLAY_ABI_VERSION || (s->pitch & 255))
+        return kIOReturnBadArgument;
+    if (!fDcn || !fDispDev || s->head >= fDcn->nheads)
+        return kIOReturnNotReady;
+    IOLockLock(fDispLock);
+    if (!fScale) {
+        fScale = (rdna3_dcn_scale *)IOMalloc(sizeof(rdna3_dcn_scale));
+        if (fScale)
+            bzero(fScale, sizeof(*fScale));
+    }
+    int r = fScale ? dcn32_set_source(fDispDev, fDcn, fScale, s->head, fDispDev->fb_start + s->vramOffset,
+                                      s->width, s->height, s->pitch / 4)
+                   : RDNA3_ENOMEM;
+    IOLockUnlock(fDispLock);
+    s->result = r;
+    LOG("display: head %u source %ux%u pitch %u -> %d", s->head, s->width, s->height, s->pitch, r);
+    return r ? kIOReturnBadArgument : kIOReturnSuccess;
 }
 
 IOReturn RDNA3Accel::displayStatus(RD3KDisplayStatus *s)

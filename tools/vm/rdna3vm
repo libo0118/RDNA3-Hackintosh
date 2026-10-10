@@ -234,6 +234,7 @@ EOF
         else echo "  (artifact without libdrm.dylib: the DMA/GFX tests of steps 7-8 will not run)"; fi
     fi
     [ -f "$a/userspace/libdrm_amdgpu.dylib" ] && cp "$a/userspace/libdrm_amdgpu.dylib" "$st/bin/libdrm_amdgpu.1.dylib"
+    [ -f "$a/userspace/rdna3_modetest" ] && cp "$a/userspace/rdna3_modetest" "$st/bin/"
     # RADV (radv-macos-logs.zip of a build with radv): rdna3_vktest runs it
     # from step 8 on
     if [ -n "$radv" ]; then

@@ -130,6 +130,18 @@ struct RD3KDisplayEdid {
     unsigned int  length;         /* out: bytes in data, 0 = no EDID */
     unsigned char data[RD3K_EDID_MAX];
 };
+/* scaled modes: show a smaller surface on the head's native timing through
+ * the DPP scaler (dcn32_set_source); width x height == native restores
+ * the bypass. result: 0 or a negative RDNA3_E* code */
+#define RD3K_DISPLAY_FN_SOURCE   "rdna3DisplaySetSource"
+struct RD3KDisplaySource {
+    unsigned int       version;       /* RD3K_DISPLAY_ABI_VERSION */
+    unsigned int       head;
+    unsigned int       width, height; /* source pixels */
+    unsigned int       pitch;         /* bytes, multiple of 256 */
+    unsigned long long vramOffset;    /* VRAM offset of the surface */
+    int                result;
+};
 /* display sleep: p1 = head, p2 = 1 blank / 0 unblank (HUBP blank, the
  * link stays up); kIOReturnUnsupported unless the core runs with rdna3dpms=1 */
 #define RD3K_DISPLAY_FN_BLANK    "rdna3DisplayBlank"

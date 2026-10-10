@@ -146,6 +146,19 @@ extra="$HOME/rdna3-extra.txt"
                     fi
                 done ;;
         esac
+        # scaled modes (rdna3modes=1): each display through two smaller
+        # modes, a look at the pipes after each switch, then native again
+        case " $args " in
+            *" rdna3modes=1 "*)
+                if [ -x "$D/bin/rdna3_modetest" ]; then
+                    echo "== rdna3_modetest list"
+                    with_limit 30 "$D/bin/rdna3_modetest" list 2>&1
+                    echo "[exit $?]"
+                    echo "== rdna3_modetest cycle"
+                    with_limit 150 "$D/bin/rdna3_modetest" cycle "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
+                    echo "[exit $?]"
+                fi ;;
+        esac
     fi
     if [ "${lvl:-0}" -ge 7 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
         echo "== rdna3_drminfo --dma-test"
