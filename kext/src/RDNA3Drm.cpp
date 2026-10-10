@@ -29,6 +29,8 @@
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
+extern "C" uint64_t mach_continuous_time(void);
+
 
 void *RDNA3Accel::drmZalloc(void *, size_t n)
 {
@@ -172,9 +174,106 @@ void RDNA3Accel::drmBoFree(void *ctx, rdna3_bo *bo)
         if (h)
             range_alloc_put(h, bo->vram_offset, bo->size);
     } else if (bo->backing) {
-        gttFree((RDNA3Gtt *)bo->backing);
+        RDNA3Gtt *g = (RDNA3Gtt *)bo->backing;
+        if (g->gartSlot && a->fBringup)   /* a user queue's wptr page was bound to GART */
+            a->fBringup->gartRelease(g->gartSlot);
+        gttFree(g);
         bo->backing = nullptr;
     }
+}
+
+/* ---- user queues (rdna3userq=1): the OS half of mes_userqueue.c ---- */
+
+/* amdgpu_bo_kmap: VRAM inside the BAR0 window, a kernel GTT buffer */
+void *RDNA3Accel::drmBoKmap(void *ctx, rdna3_bo *bo)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM)
+        return (a->fVramMap && bo->vram_offset + bo->size <= a->fVramMap->getLength())
+                   ? (void *)(a->fVramMap->getVirtualAddress() + bo->vram_offset)
+                   : nullptr;
+    if (bo->placement == AMDGPU_GEM_DOMAIN_GTT && bo->backing && !bo->userptr) {
+        IOBufferMemoryDescriptor *b = OSDynamicCast(IOBufferMemoryDescriptor, ((RDNA3Gtt *)bo->backing)->md);
+        return b ? b->getBytesNoCopy() : nullptr;
+    }
+    return nullptr;
+}
+
+int RDNA3Accel::drmBoGpuAddr(void *ctx, rdna3_bo *bo, uint64_t *mc)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->gpuAddr(bo, mc) : -RD_ENODEV;
+}
+
+int RDNA3Accel::drmUserqMqdInit(void *ctx, uint32_t ip, void *mqd, const amd_mqd_prop *p)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->userqMqdInit(ip, mqd, p) : -RD_ENODEV;
+}
+
+int RDNA3Accel::drmUserqAdd(void *ctx, void *vm, amd_mes_add_queue *in)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->userqAdd(vm, in) : -RD_ENODEV;
+}
+
+int RDNA3Accel::drmUserqRemove(void *ctx, const amd_mes_remove_queue *in)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    return a->fBringup ? a->fBringup->userqRemove(in) : -RD_ENODEV;
+}
+
+/* CLOCK_MONOTONIC as userspace deadlines count it on macOS */
+uint64_t RDNA3Accel::drmNowNs(void *)
+{
+    uint64_t ns;
+    absolutetime_to_nanoseconds(mach_continuous_time(), &ns);
+    return ns;
+}
+
+/* a user queue fence wait: done() under fDrmLock, the sleeps without it
+ * (as drmFenceWait), capped at 10 s like a kernel fence wait. A user queue
+ * that never gets there is the client's: no recovery runs for it. */
+int RDNA3Accel::drmUserqWait(void *ctx, int (*done)(void *), void *arg, uint64_t absNs)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    const uint64_t capNs = 10ull * 1000 * 1000 * 1000;
+    uint64_t start = drmNowNs(ctx), now, until;
+    if (!a->fBringup)
+        return done(arg) ? 0 : -RD_ETIME;
+    until = absNs != UINT64_MAX && absNs - start < capNs ? absNs : start + capNs;
+    for (;;) {
+        if (done(arg))
+            return 0;
+        now = drmNowNs(ctx);
+        if (now >= until)
+            return -RD_ETIME;
+        IOLockUnlock(a->fDrmLock);
+        a->fBringup->waitInterrupt(until);
+        IOLockLock(a->fDrmLock);
+    }
+}
+
+void RDNA3Accel::drmUserqReady(uint32_t ipMask, uint64_t doorbellSize)
+{
+    if (!fDrm || !fDrmLock || !fUserqArg)
+        return;
+    if (!fDoorbellDev) {
+        fDoorbellDev = fPci->getDeviceMemoryWithRegister(kIOPCIConfigBaseAddress2);
+        if (fDoorbellDev)
+            fDoorbellDev->retain();
+    }
+    if (!fDoorbellDev)
+        return;
+    bool held = drmHeldByMe();
+    if (!held)
+        IOLockLock(fDrmLock);
+    rdna3_drm_device_set_userq(fDrm, ipMask, doorbellSize);
+    if (!held)
+        IOLockUnlock(fDrmLock);
+    setProperty("RDNA3,UserQueueIPs", ipMask, 32);
+    LOG("user queues: DRM_AMDGPU_USERQ for IP mask 0x%x, %llu KiB of doorbells", ipMask,
+        (unsigned long long)(doorbellSize >> 10));
 }
 
 int RDNA3Accel::drmCopyin(void *, void *dst, uint64_t uaddr, size_t len)
@@ -456,6 +555,23 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.random64 = drmRandom64;
     ops.gpu_clock = drmGpuClock;   /* AMDGPU_INFO_TIMESTAMP: SMUIO GOLDEN_TSC */
     ops.privileged = drmPrivileged;
+    {
+        /* user queues: the hooks only with rdna3userq=1, so the default
+         * profile has no path into them; the UAPI offers queues once the
+         * bring-up's MES runs (drmUserqReady) */
+        uint32_t uq = 0;
+        PE_parse_boot_argn("rdna3userq", &uq, sizeof(uq));
+        fUserqArg = uq != 0;
+        if (fUserqArg) {
+            ops.bo_kmap = drmBoKmap;
+            ops.bo_gpu_addr = drmBoGpuAddr;
+            ops.userq_mqd_init = drmUserqMqdInit;
+            ops.userq_add_hw_queue = drmUserqAdd;
+            ops.userq_remove_hw_queue = drmUserqRemove;
+            ops.userq_wait = drmUserqWait;
+            ops.now_ns = drmNowNs;
+        }
+    }
 
     fDrmLock = IOLockAlloc();
     fDrm = (rdna3_drm_device *)drmZalloc(this, sizeof(*fDrm));
@@ -571,6 +687,7 @@ void RDNA3Accel::drmFree()
         IOLockFree(fDrmLock);
     OSSafeReleaseNULL(fVramMap);
     OSSafeReleaseNULL(fVramDev);
+    OSSafeReleaseNULL(fDoorbellDev);
     if (fVbiosCopy)
         IOFree(fVbiosCopy, fVbiosCopyLen);
     fVbiosCopy = nullptr;
@@ -623,7 +740,14 @@ IOMemoryDescriptor *RDNA3Accel::drmMemoryForOffset(rdna3_drm_file *f, uint64_t o
     IOMemoryDescriptor *md = nullptr;
     IOLockLock(fDrmLock);
     rdna3_bo *bo = rdna3_drm_bo_by_mmap_offset(f, off);
-    if (bo && bo->placement != AMDGPU_GEM_DOMAIN_VRAM && bo->backing) {
+    if (bo && bo->placement == AMDGPU_GEM_DOMAIN_DOORBELL) {
+        /* a user queue's doorbell page in BAR2, uncached */
+        if (fDoorbellDev && bo->vram_offset + bo->size <= fDoorbellDev->getLength()) {
+            md = IOSubMemoryDescriptor::withSubRange(fDoorbellDev, bo->vram_offset, bo->size,
+                                                     kIODirectionInOut);
+            *options = kIOMapInhibitCache;
+        }
+    } else if (bo && bo->placement != AMDGPU_GEM_DOMAIN_VRAM && bo->backing) {
         md = ((RDNA3Gtt *)bo->backing)->md;
         md->retain();
         *options = 0;

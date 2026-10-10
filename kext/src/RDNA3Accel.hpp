@@ -62,6 +62,8 @@ struct RDNA3Gtt {
     uint64_t                 *pages;
     uint64_t                  npages;
     bool                      prepared;  /* userptr: md->prepare() holds the pages wired */
+    uint32_t                  gartSlot;  /* 1 + the GART slot a user queue's wptr page is bound
+                                          * to (amdgpu_ttm_alloc_gart), 0 = none */
 };
 
 /* VRAM layout (offsets from VRAM start):
@@ -101,6 +103,9 @@ public:
 
     /* called by the bring-up thread when a ring really executes */
     void  drmRingReady(uint32_t ip, uint32_t mask);
+    /* the MES runs and rdna3userq=1: user queues for the IPs of 'ipMask'
+     * (1 << AMDGPU_HW_IP_*), doorbell BOs from BAR2 */
+    void  drmUserqReady(uint32_t ipMask, uint64_t doorbellSize);
     static uint64_t drmGpuClock(void *ctx);
     void  drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t minMclkKhz, uint32_t maxMclkKhz);
     RDNA3Bringup *bringup() const { return fBringup; }
@@ -158,6 +163,15 @@ private:
     uint64_t      fVramHeapVisEnd = 0;   /* offsets below this are in fVramHeap */
     IOMemoryMap  *fVramMap  = nullptr;   /* BAR0, for BO clears / kernel access */
     IODeviceMemory *fVramDev = nullptr;  /* BAR0 descriptor for user mappings */
+    IODeviceMemory *fDoorbellDev = nullptr;  /* BAR2 descriptor: user queue doorbell BOs */
+    bool          fUserqArg = false;     /* rdna3userq=1: the user queue hooks are installed */
+    static void  *drmBoKmap(void *ctx, rdna3_bo *bo);
+    static int    drmBoGpuAddr(void *ctx, rdna3_bo *bo, uint64_t *mc);
+    static int    drmUserqMqdInit(void *ctx, uint32_t ip, void *mqd, const amd_mqd_prop *p);
+    static int    drmUserqAdd(void *ctx, void *vm, amd_mes_add_queue *in);
+    static int    drmUserqRemove(void *ctx, const amd_mes_remove_queue *in);
+    static int    drmUserqWait(void *ctx, int (*done)(void *), void *arg, uint64_t absNs);
+    static uint64_t drmNowNs(void *ctx);
     bool          drmInit(const amd_discovery *disc);
     void          drmFree();
     static void  *drmZalloc(void *ctx, size_t n);

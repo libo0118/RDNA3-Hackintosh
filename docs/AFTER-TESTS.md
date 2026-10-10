@@ -233,6 +233,17 @@ from the firmware (`dcn_3_2_0_dmcub.bin`).
 | `no answer to opcode 0`, fence advanced but status 0 | the firmware rejected the frame | packet layout vs `mes_v11_api_def.h` of the firmware's API version |
 | 8b fails only with `rdna3mes=1` | MES grabbed the kernel queues (hqd masks) | `compute_hqd_mask` 0xc / `gfx_hqd_mask` 0xfffffffe leave queue 0 to the kernel |
 
+### Step userq (`rdna3userq=1`): user queues through the MES
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `RDNA3,UserQueues = 0`, log `user queues: IP mask 0x0` | firmware older than amdgpu's gate (ME 2390, PFP 2530, MEC 2600, MES 120, SDMA 25) | the log line names the versions; newer linux-firmware |
+| log `rdna3userq=1, but the MES scheduler or the doorbells are not up` | step 8c fails, or no doorbell BAR | fix 8c first |
+| `USERQ CREATE: Invalid argument` | a buffer not mapped where the queue says (`amdgpu_userq_input_va_validate`), no doorbell BO, the wptr BO larger than a page | `uapi/rdna3_drm.c` `userq_create` / `mes_userq_mqd_create` |
+| `user queue: ADD_QUEUE ... : -62` (timeout) | the MES refused the frame: no API status fence | `MESAPI__ADD_QUEUE` layout vs the firmware's API version (`RDNA3,MESSchedVersion` bits 12-23), the MQD (`gfx11_compute_mqd_init`), `vm_context_cntl`, `page_table_base_addr` |
+| queue created, `dst` stays 0 | the queue never ran: doorbell index (BO offset / 4 + offset * 2), the doorbell write did not reach BAR2, or the wptr poll address (GART slot of the wptr BO) | `RDNA3,LastFaultVMID` 8-15 is the queue's process faulting: the VM flush of VMIDs 8-15 |
+| `dst` right, fence `did NOT signal` | the firmware did not write the rptr to the MQD's fence address, or no EOP interrupt reached the waiter | the fence slot is in the seq64 BO (VRAM); the model in `tests/sim_navi32.c` (`uq_eop`) is an assumption until this step passes |
+
 ### Hotplug (any step from 6b with `rdna3msi=1`)
 
 Unplug and plug a monitor cable while macOS runs: the log shows `HPD: hotplug interrupts enabled`, then `display: HPDn disconnected` / `connected` and `hotplug on pins ...`; `RDNA3,HotplugEvents` counts them.

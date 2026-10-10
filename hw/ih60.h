@@ -72,6 +72,12 @@ uint32_t ih60_process(rdna3_dev *d, rdna3_ih *ih, rdna3_iv_cb cb, void *ctx);
 #define RD_IH_FENCE_COMPUTE0      3u   /* MEC1 pipe 0 queue 0 (the first KCQ) */
 /* which kernel ring's fence an IV reports (RD_IH_FENCE_*), 0 if none */
 uint32_t ih60_iv_fence(const rdna3_iv *iv);
+/* user queue fences (MES-scheduled queues): a CP end-of-pipe or an SDMA
+ * user fence (GFX_11_0_0__SRCID__SDMA_FENCE) whose src_data[0] names the
+ * queue's doorbell; returns that doorbell index (the key of adev->userq_xa),
+ * 0 if the IV is no user queue fence */
+#define RD_IH_SRC_SDMA_FENCE      67
+uint32_t ih60_iv_userq_doorbell(const rdna3_iv *iv);
 
 /* decode one 8-dword IV (pure; exposed for tests) */
 void ih60_decode_iv(const uint32_t dw[8], rdna3_iv *iv);

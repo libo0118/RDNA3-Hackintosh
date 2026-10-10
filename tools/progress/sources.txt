@@ -1,6 +1,8 @@
 # amdgpu source files the project ports from or plans to (Linux, drivers/gpu/drm/amd/).
-# group | path       - the group is one cell of the progress map; its ladder
+# group | path [| tag] - the group is one cell of the progress map; its ladder
 # steps (what proves it works on the card) are in tools/progress.py GROUPS.
+# The tag is the Linux release to read the file from when it is newer than
+# update_index.py's pin.
 # Adding a file grows the total: the status counts what the project knows of.
 
 PSP 13               | amdgpu/psp_v13_0.c
@@ -25,6 +27,10 @@ Rings / fences       | amdgpu/amdgpu_ring.c
 Rings / fences       | amdgpu/amdgpu_ib.c
 Rings / fences       | amdgpu/amdgpu_fence.c
 MES queues           | amdgpu/mes_v11_0.c
+User queues          | amdgpu/amdgpu_userq.c          | v6.16
+User queues          | amdgpu/amdgpu_userq_fence.c    | v6.16
+User queues          | amdgpu/mes_userqueue.c         | v6.16
+User queues          | amdgpu/amdgpu_seq64.c          | v6.16
 Discovery / VBIOS    | amdgpu/amdgpu_discovery.c
 Discovery / VBIOS    | amdgpu/atom.c
 Discovery / VBIOS    | amdgpu/amdgpu_atomfirmware.c

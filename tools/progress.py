@@ -47,6 +47,7 @@ AMDGPU_STEPS = {
     "PSP 13": ["4"], "SMU 13 power": ["5"], "GMC / GPUVM": ["6", "7"],
     "IH interrupts": ["6", "6b"], "SoC / NBIO / HDP": ["1", "4"], "SDMA 6": ["7"],
     "GFX 11": ["8"], "Rings / fences": ["7", "8"], "MES queues": ["mes"],
+    "User queues": ["userq"],
     "Discovery / VBIOS": ["2"], "DMCUB": ["5b"], "Display: OTG / AUX": ["2", "9"],
     "Display: modeset": ["modeset"],
     "Display: hotplug": ["hotplug"],
@@ -56,6 +57,16 @@ UAPI_STEPS = {
     "amdgpu ioctls": ["7", "8"], "DRM core ioctls": ["7", "8"], "INFO queries": ["7"],
     "INFO firmware / sensors": ["5", "7"], "CS chunks": ["7", "8"],
 }
+# items added to a group after its steps passed: they need their own step
+# (regex over the item name -> steps) before they count as working
+ITEM_STEPS = [
+    (re.compile(r"DRM_AMDGPU_USERQ(_SIGNAL|_WAIT)?|AMDGPU_INFO_UQ_FW_AREAS"), ["userq"]),
+    # amdgpu enables CP gfx shadowing only on SR-IOV VFs: no step can run it
+    (re.compile(r"AMDGPU_CHUNK_ID_CP_GFX_SHADOW|gfx_v11_0_ring_emit_(gfx_shadow|init_cond_exec)"
+                r"|amdgpu_ring_patch_cond_exec|gfx_v11_0_get_gfx_shadow_info"), ["gfxshadow"]),
+    (re.compile(r"gfx_v11_0_gfx_mqd_set_priority|sdma_v6_0_mqd_init"
+                r"|gfx_v11_0_get_gfx_shadow_info_nocheck"), ["userq"]),
+]
 
 GREEN, YELLOW, GRAY = "#2ea043", "#d29922", "#6e7681"
 BG, TEXT = "#0d1117", "#ffffff"
@@ -105,7 +116,14 @@ def na_reason(item):
     return None
 
 
-def group_entry(name, steps, works_ok, items):
+def item_works(item, works_ok, passed):
+    for rx, steps in ITEM_STEPS:
+        if rx.fullmatch(item):
+            return all(s in passed for s in steps)
+    return works_ok
+
+
+def group_entry(name, steps, works_ok, items, passed=frozenset()):
     """items: [(item, ported_bool)]; an item that does not apply and is not
     ported is left out of the counts (listed under "na")"""
     state, na = {}, {}
@@ -114,7 +132,8 @@ def group_entry(name, steps, works_ok, items):
         if why:
             na[item] = why
             continue
-        state[item] = ("works" if works_ok else "ported") if ported else "todo"
+        works = item_works(item, works_ok, passed)
+        state[item] = ("works" if works else "ported") if ported else "todo"
     count = {k: sum(1 for v in state.values() if v == k) for k in ("works", "ported", "todo")}
     return {"name": name, "steps": steps, **count, "items": dict(sorted(state.items())),
             "na": dict(sorted(na.items()))}
@@ -141,7 +160,7 @@ def collect_amdgpu(words, passed):
     for name, fns in groups.items():
         steps = AMDGPU_STEPS.get(name, ["?"])
         out.append(group_entry(name, steps, all(s in passed for s in steps),
-                               [(f, f in words) for f in fns]))
+                               [(f, f in words) for f in fns], passed))
     return summarize(out)
 
 
@@ -218,7 +237,7 @@ def collect_uapi(passed):
     out = []
     for name, items in sets.items():
         steps = UAPI_STEPS[name]
-        out.append(group_entry(name, steps, all(s in passed for s in steps), items))
+        out.append(group_entry(name, steps, all(s in passed for s in steps), items, passed))
     return summarize(out)
 
 

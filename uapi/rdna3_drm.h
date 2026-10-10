@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include "amdgpu_drm.h"
 #include "amd_discovery.h"
+#include "amd_mqd.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -207,6 +208,69 @@ typedef struct rdna3_ib {
     uint32_t flags;           /* AMDGPU_IB_FLAG_* */
 } rdna3_ib;
 
+/* ---- user queues (amdgpu_userq.c, amdgpu_userq_fence.c, mes_userqueue.c) ----
+ * A user queue is a ring in the client's VM that the MES scheduler runs
+ * from a doorbell the client rings itself; the kernel only builds its MQD,
+ * hands it to the MES (ADD_QUEUE / REMOVE_QUEUE) and keeps its fence
+ * driver: a 64-bit seq64 slot the firmware writes the queue's rptr to. A
+ * user queue fence is "slot >= value". In a syncobj it is an rdna3_fence
+ * with ip RD_USERQ_FENCE_IP, ring = the fence driver's context and seq =
+ * the value; once that context is gone the fence counts as signaled (amdgpu
+ * signals a dying fence driver's fences with -ECANCELED). */
+#define RD_MAX_USERQ          64      /* per file, ids 1..63 (AMDGPU_MAX_USERQ_COUNT 512) */
+#define RD_USERQ_FENCE_IP     0x100u  /* rdna3_fence.ip of a user queue fence */
+#define RD_MAX_FENCE_DRV      256     /* fence drivers alive at once, device-wide */
+#define RD_USERQ_WAIT_REFS    64      /* fence drivers one queue may wait on (its fence_drv_xa) */
+#define RD_USERQ_DEFERRED     4096    /* references parked on not yet signaled fences */
+/* amdgpu_seq64: one kernel BO of 64-bit slots, mapped read-only into every
+ * user queue client's VM at AMDGPU_VA_RESERVED_SEQ64_START (sign-extended).
+ * 64 KiB instead of the 2 MiB reservation: 8192 slots. */
+#define RD_SEQ64_SIZE         (64u << 10)
+#define RD_SEQ64_SLOTS        (RD_SEQ64_SIZE / 8)
+#define RD_SEQ64_VA           0xFFFFFFFFFFC00000ull   /* amdgpu_seq64_get_va_base */
+/* the doorbell BAR: the kernel doorbells and the MES page first
+ * (amdgpu_doorbell_create_kernel_doorbells: 0x591 dwords page-aligned + a
+ * page), then doorbell BOs, a page at a time */
+#define RD_DOORBELL_KERNEL_SIZE (12u << 10)
+#define RD_MAX_DOORBELL_PAGES 2048
+
+enum { RD_USERQ_STATE_UNMAPPED = 0, RD_USERQ_STATE_MAPPED, RD_USERQ_STATE_PREEMPTED,
+       RD_USERQ_STATE_HUNG };
+
+/* amdgpu_userq_obj: a kernel BO with its CPU view and VMID 0 address */
+typedef struct rdna3_userq_obj {
+    rdna3_bo *obj;
+    void     *cpu_ptr;
+    uint64_t  gpu_addr;
+} rdna3_userq_obj;
+
+/* amdgpu_userq_fence_driver */
+typedef struct rdna3_userq_fence_drv {
+    uint32_t refcnt;                 /* 0: free entry */
+    uint32_t context;                /* dma_fence context, never reused */
+    uint64_t va, gpu_addr;           /* seq64 slot: in the VMs, in VMID 0 */
+    volatile uint64_t *cpu_addr;
+    uint32_t doorbell_index;         /* adev->userq_xa key */
+    uint64_t last_seq;               /* highest fence value created on it */
+} rdna3_userq_fence_drv;
+
+/* amdgpu_usermode_queue */
+typedef struct rdna3_userq {
+    uint32_t used;
+    uint32_t queue_type;             /* AMDGPU_HW_IP_GFX / COMPUTE / DMA */
+    uint32_t state;                  /* RD_USERQ_STATE_* */
+    uint32_t doorbell_handle;
+    uint32_t doorbell_index;
+    int32_t  priority;               /* AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_* */
+    amd_mqd_prop prop;               /* userq_prop */
+    rdna3_userq_obj mqd, fw_obj, wptr_obj;
+    rdna3_bo *db_obj;
+    uint32_t fence_ctx;              /* its fence driver, by context */
+    uint32_t fence_drv_xa[RD_USERQ_WAIT_REFS];   /* fence drivers it waits on (referenced) */
+    uint32_t nxa;
+    rdna3_fence last_fence;          /* ip 0: none yet */
+} rdna3_userq;
+
 typedef struct rdna3_drm_ops {
     void *ctx;
     void *(*zalloc)(void *ctx, size_t size);
@@ -265,6 +329,29 @@ typedef struct rdna3_drm_ops {
      * macOS). Gates DRM_AMDGPU_SCHED and context priorities above NORMAL.
      * Optional: NULL = never. */
     int   (*privileged)(void *ctx);
+    /* ---- user queues, all optional; DRM_AMDGPU_USERQ needs them and an
+     * rdna3_drm_device_set_userq() from the OS once the MES runs ---- */
+    /* amdgpu_bo_kmap: the kernel's CPU view of a BO; NULL: none (VRAM
+     * outside the visible BAR, a userptr BO) */
+    void *(*bo_kmap)(void *ctx, rdna3_bo *bo);
+    /* amdgpu_bo_gpu_offset after amdgpu_ttm_alloc_gart: the BO's address
+     * in VMID 0, binding a GTT BO (one page at most) to GART. 0 / -errno */
+    int   (*bo_gpu_addr)(void *ctx, rdna3_bo *bo, uint64_t *mc);
+    /* adev->mqds[ip].init_mqd (gfx_v11_0_gfx_mqd_init,
+     * gfx_v11_0_compute_mqd_init, sdma_v6_0_mqd_init) on a zeroed MQD */
+    int   (*userq_mqd_init)(void *ctx, uint32_t ip, void *mqd, const amd_mqd_prop *prop);
+    /* adev->mes.funcs->add_hw_queue / remove_hw_queue; the OS fills
+     * process_id (the VM's PASID) and page_table_base_addr from 'vm' */
+    int   (*userq_add_hw_queue)(void *ctx, void *vm, amd_mes_add_queue *in);
+    int   (*userq_remove_hw_queue)(void *ctx, const amd_mes_remove_queue *in);
+    /* a user queue fence wait: sleep until done(arg) - which the OS calls
+     * with its lock held - or the absolute CLOCK_MONOTONIC deadline abs_ns
+     * (UINT64_MAX: the OS's hang cap). 0 / -RD_ETIME. The OS may drop its
+     * lock while it sleeps; the UAPI holds no pointers across the call. */
+    int   (*userq_wait)(void *ctx, int (*done)(void *arg), void *arg, uint64_t abs_ns);
+    /* CLOCK_MONOTONIC in ns, for the bounded waits of a queue teardown
+     * (amdgpu_userq_wait_for_last_fence: 100 ms); optional */
+    uint64_t (*now_ns)(void *ctx);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -306,6 +393,22 @@ typedef struct rdna3_drm_device {
     /* amdgpu_sriov_vf(adev): 0, the card is a physical function (the
      * tests set it to see amdgpu's SR-IOV answers) */
     uint32_t sriov_vf;
+    /* user queues: amdgpu_userq_get_supported_ip_mask (0: none), the
+     * doorbell BAR's size and its pages handed out to doorbell BOs */
+    uint32_t userq_ip_mask;
+    uint64_t doorbell_size;
+    uint8_t  doorbell_used[RD_MAX_DOORBELL_PAGES / 8];
+    /* amdgpu_seq64 (created with the first fence driver) */
+    rdna3_bo *seq64_bo;
+    volatile uint64_t *seq64_cpu;
+    uint64_t seq64_gpu_addr;
+    uint8_t  seq64_used[RD_SEQ64_SLOTS / 8];
+    /* fence drivers [RD_MAX_FENCE_DRV] and the references parked on user
+     * queue fences until they signal [RD_USERQ_DEFERRED] (zalloc'ed with the
+     * first one); the next dma_fence context */
+    rdna3_userq_fence_drv *fence_drv;
+    struct { uint32_t owner, ref; uint64_t seq; } *uq_deferred;
+    uint32_t next_fence_ctx;
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {
@@ -328,6 +431,10 @@ typedef struct rdna3_drm_file {
     int16_t  ctx_init_prio[RD_MAX_CTX], ctx_override_prio[RD_MAX_CTX];
     uint32_t id;                       /* RD_NR_XNU_FILE_ID */
     struct rdna3_drm_file *next_file;  /* rdna3_drm_device.files */
+    /* amdgpu_userq_mgr: the file's user queues [RD_MAX_USERQ] (index = id - 1,
+     * zalloc'ed with the first one) and whether seq64 is in its VM */
+    rdna3_userq *userqs;
+    uint32_t seq64_mapped;
 } rdna3_drm_file;
 
 /* Fill dev_info and sizes for a Navi 3x from discovery + PCI identity. */
@@ -365,6 +472,12 @@ void rdna3_drm_device_set_clocks(rdna3_drm_device *dev, uint32_t min_sclk_khz, u
                                  uint32_t min_mclk_khz, uint32_t max_mclk_khz);
 void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4][4],
                                   uint32_t cu_active, uint32_t rb_mask);
+
+/* user queues (amdgpu_userq_funcs set for the IPs in 'ip_mask', 1 <<
+ * AMDGPU_HW_IP_*): the MES runs, the ops are in place. 'doorbell_size' is
+ * the doorbell BAR's length; doorbell BOs come from it after the kernel's
+ * RD_DOORBELL_KERNEL_SIZE. ip_mask 0 turns user queues off for new queues. */
+void rdna3_drm_device_set_userq(rdna3_drm_device *dev, uint32_t ip_mask, uint64_t doorbell_size);
 
 /* the priority a context's jobs run at: its override when DRM_AMDGPU_SCHED
  * set one, else the one it was created with (amdgpu_ctx_priority_override's

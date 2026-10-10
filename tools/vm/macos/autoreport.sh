@@ -387,6 +387,16 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         with_limit 60 "$D/bin/rdna3_drminfo" --gfx-test 2>&1
         done_ $?
     fi
+    # user queues (step userq): a compute queue the MES runs from the
+    # client's own doorbell
+    case " $args " in
+    *" rdna3userq=1 "*)
+        if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
+            hdr "rdna3_drminfo --userq-test"
+            with_limit 60 "$D/bin/rdna3_drminfo" --userq-test 2>&1
+            done_ $?
+        fi ;;
+    esac
     # Vulkan: RADV (prepare --radv) straight through its ICD entry points,
     # no loader; libdrm_xnu talks to RDNA3Accel's user client
     if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_vktest" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then

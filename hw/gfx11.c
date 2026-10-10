@@ -12,6 +12,7 @@
 #include "gen/gc_11_0_0_mes.h"
 #include "gen/gc_11_0_0_cg.h"
 #include "gen/gc_11_0_0_pm.h"
+#include "gen/gc_11_0_0_userq.h"
 #include "clearstate_defs.h"
 #include "clearstate_gfx11.h"
 #include "amdgpu_ucode_hdr.h"
@@ -1550,6 +1551,267 @@ void gfx11_mes_sched_stop(rdna3_dev *d, rdna3_mes *m)
     m->ring.rb.ready = 0;
 }
 
+/* --------------------------- user queues --------------------------- */
+
+/* struct v11_gfx_mqd / v11_compute_mqd fields user queues add (v11_structs.h) */
+#define MQD_GFX_SHADOW_BASE_LO         0
+#define MQD_GFX_SHADOW_BASE_HI         1
+#define MQD_GFX_GDS_BKUP_BASE_LO       2
+#define MQD_GFX_GDS_BKUP_BASE_HI       3
+#define MQD_GFX_FW_WORK_AREA_BASE_LO   4
+#define MQD_GFX_FW_WORK_AREA_BASE_HI   5
+#define MQD_GFX_FENCE_ADDRESS_LO       510
+#define MQD_GFX_FENCE_ADDRESS_HI       511
+#define MQD_COMPUTE_FENCE_ADDRESS_LO   446
+#define MQD_COMPUTE_FENCE_ADDRESS_HI   447
+
+/* Ported from gfx_v11_0_gfx_mqd_set_priority: 0 low, 1 high */
+static uint32_t gfx_mqd_priority(const amd_mqd_prop *p)
+{
+    uint32_t tmp = regCP_GFX_HQD_QUEUE_PRIORITY_DEFAULT;
+    return REG_SET_FIELD(tmp, CP_GFX_HQD_QUEUE_PRIORITY, PRIORITY_LEVEL,
+                         p->hqd_pipe_priority == AMD_GFX_PIPE_PRIO_HIGH ? 1 : 0);
+}
+
+/* Ported from gfx_v11_0_gfx_mqd_init */
+int gfx11_gfx_mqd_init(rdna3_dev *d, uint32_t *mqd, const amd_mqd_prop *p)
+{
+    uint64_t hqd_gpu_addr, wb_gpu_addr;
+    uint32_t tmp, rb_bufsz;
+    (void)d;
+
+    /* set up gfx hqd wptr */
+    mqd[MQD_GFX_HQD_WPTR] = 0;
+    mqd[MQD_GFX_HQD_WPTR_HI] = 0;
+    /* set the pointer to the MQD */
+    mqd[MQD_CP_MQD_BASE_ADDR_LO] = (uint32_t)p->mqd_gpu_addr & 0xfffffffc;
+    mqd[MQD_CP_MQD_BASE_ADDR_HI] = (uint32_t)(p->mqd_gpu_addr >> 32);
+    /* set up mqd control */
+    tmp = regCP_GFX_MQD_CONTROL_DEFAULT;
+    tmp = REG_SET_FIELD(tmp, CP_GFX_MQD_CONTROL, VMID, 0);
+    tmp = REG_SET_FIELD(tmp, CP_GFX_MQD_CONTROL, PRIV_STATE, 1);
+    tmp = REG_SET_FIELD(tmp, CP_GFX_MQD_CONTROL, CACHE_POLICY, 0);
+    mqd[MQD_GFX_MQD_CONTROL] = tmp;
+    /* the ring buffer's vmid: 0, the MES sets the queue's */
+    mqd[MQD_GFX_HQD_VMID] = 0;
+    mqd[MQD_GFX_HQD_QUEUE_PRIORITY] = gfx_mqd_priority(p);
+    /* set up time quantum */
+    tmp = regCP_GFX_HQD_QUANTUM_DEFAULT;
+    mqd[MQD_GFX_HQD_QUANTUM] = REG_SET_FIELD(tmp, CP_GFX_HQD_QUANTUM, QUANTUM_EN, 1);
+    /* set up gfx hqd base, this is similar as CP_RB_BASE */
+    hqd_gpu_addr = p->hqd_base_gpu_addr >> 8;
+    mqd[MQD_GFX_HQD_BASE] = (uint32_t)hqd_gpu_addr;
+    mqd[MQD_GFX_HQD_BASE_HI] = (uint32_t)(hqd_gpu_addr >> 32);
+    /* set up hqd_rptr_addr/_hi, similar as CP_RB_RPTR */
+    wb_gpu_addr = p->rptr_gpu_addr;
+    mqd[MQD_GFX_HQD_RPTR_ADDR] = (uint32_t)wb_gpu_addr & 0xfffffffc;
+    mqd[MQD_GFX_HQD_RPTR_ADDR_HI] = (uint32_t)(wb_gpu_addr >> 32) & 0xffff;
+    /* set up rb_wptr_poll addr */
+    wb_gpu_addr = p->wptr_gpu_addr;
+    mqd[MQD_GFX_RB_WPTR_POLL_ADDR_LO] = (uint32_t)wb_gpu_addr & 0xfffffffc;
+    mqd[MQD_GFX_RB_WPTR_POLL_ADDR_HI] = (uint32_t)(wb_gpu_addr >> 32) & 0xffff;
+    /* set up the gfx_hqd_control, similar as CP_RB0_CNTL */
+    rb_bufsz = order_base_2(p->queue_size / 4) - 1;
+    tmp = regCP_GFX_HQD_CNTL_DEFAULT;
+    tmp = REG_SET_FIELD(tmp, CP_GFX_HQD_CNTL, RB_BUFSZ, rb_bufsz);
+    tmp = REG_SET_FIELD(tmp, CP_GFX_HQD_CNTL, RB_BLKSZ, rb_bufsz - 2);
+    if (p->tmz_queue)
+        tmp = REG_SET_FIELD(tmp, CP_GFX_HQD_CNTL, TMZ_MATCH, 1);
+    mqd[MQD_GFX_HQD_CNTL] = tmp;
+    /* set up cp_doorbell_control */
+    tmp = regCP_RB_DOORBELL_CONTROL_DEFAULT;
+    if (p->use_doorbell) {
+        tmp = REG_SET_FIELD(tmp, CP_RB_DOORBELL_CONTROL, DOORBELL_OFFSET, p->doorbell_index);
+        tmp = REG_SET_FIELD(tmp, CP_RB_DOORBELL_CONTROL, DOORBELL_EN, 1);
+    } else {
+        tmp = REG_SET_FIELD(tmp, CP_RB_DOORBELL_CONTROL, DOORBELL_EN, 0);
+    }
+    mqd[MQD_GFX_RB_DOORBELL_CONTROL] = tmp;
+    /* reset read and write pointers, similar to CP_RB0_WPTR/_RPTR */
+    mqd[MQD_GFX_HQD_RPTR] = regCP_GFX_HQD_RPTR_DEFAULT;
+    /* activate the queue */
+    mqd[MQD_GFX_HQD_ACTIVE] = 1;
+    /* set gfx UQ items */
+    mqd[MQD_GFX_SHADOW_BASE_LO] = (uint32_t)p->shadow_addr;
+    mqd[MQD_GFX_SHADOW_BASE_HI] = (uint32_t)(p->shadow_addr >> 32);
+    mqd[MQD_GFX_GDS_BKUP_BASE_LO] = (uint32_t)p->gds_bkup_addr;
+    mqd[MQD_GFX_GDS_BKUP_BASE_HI] = (uint32_t)(p->gds_bkup_addr >> 32);
+    mqd[MQD_GFX_FW_WORK_AREA_BASE_LO] = (uint32_t)p->csa_addr;
+    mqd[MQD_GFX_FW_WORK_AREA_BASE_HI] = (uint32_t)(p->csa_addr >> 32);
+    mqd[MQD_GFX_FENCE_ADDRESS_LO] = (uint32_t)p->fence_address;
+    mqd[MQD_GFX_FENCE_ADDRESS_HI] = (uint32_t)(p->fence_address >> 32);
+    return RDNA3_OK;
+}
+
+/* Ported from gfx_v11_0_compute_mqd_init */
+int gfx11_compute_mqd_init(rdna3_dev *d, uint32_t *mqd, const amd_mqd_prop *p)
+{
+    uint64_t hqd_gpu_addr, wb_gpu_addr, eop_base_addr;
+    uint32_t tmp;
+    (void)d;
+
+    mqd[MQD_HEADER] = 0xC0310800;
+    mqd[MQD_COMPUTE_PIPELINESTAT_ENABLE] = 0x00000001;
+    mqd[MQD_COMPUTE_STATIC_THREAD_MGMT_SE0] = 0xffffffff;
+    mqd[MQD_COMPUTE_STATIC_THREAD_MGMT_SE1] = 0xffffffff;
+    mqd[MQD_COMPUTE_STATIC_THREAD_MGMT_SE2] = 0xffffffff;
+    mqd[MQD_COMPUTE_STATIC_THREAD_MGMT_SE3] = 0xffffffff;
+    mqd[MQD_COMPUTE_MISC_RESERVED] = 0x00000007;
+
+    eop_base_addr = p->eop_gpu_addr >> 8;
+    mqd[MQD_CP_HQD_EOP_BASE_ADDR_LO] = (uint32_t)eop_base_addr;
+    mqd[MQD_CP_HQD_EOP_BASE_ADDR_HI] = (uint32_t)(eop_base_addr >> 32);
+    /* set the EOP size, register value is 2^(EOP_SIZE+1) dwords */
+    tmp = regCP_HQD_EOP_CONTROL_DEFAULT;
+    tmp = REG_SET_FIELD(tmp, CP_HQD_EOP_CONTROL, EOP_SIZE, order_base_2(RD_MEC_HPD_SIZE / 4) - 1);
+    mqd[MQD_CP_HQD_EOP_CONTROL] = tmp;
+
+    /* disable the queue if it's active */
+    mqd[MQD_CP_HQD_DEQUEUE_REQUEST] = 0;
+    mqd[MQD_CP_HQD_PQ_RPTR] = 0;
+    mqd[MQD_CP_HQD_PQ_WPTR_LO] = 0;
+    mqd[MQD_CP_HQD_PQ_WPTR_HI] = 0;
+    /* set the pointer to the MQD */
+    mqd[MQD_CP_MQD_BASE_ADDR_LO] = (uint32_t)p->mqd_gpu_addr & 0xfffffffc;
+    mqd[MQD_CP_MQD_BASE_ADDR_HI] = (uint32_t)(p->mqd_gpu_addr >> 32);
+    /* set MQD vmid to 0 */
+    tmp = regCP_MQD_CONTROL_DEFAULT;
+    mqd[MQD_CP_MQD_CONTROL] = REG_SET_FIELD(tmp, CP_MQD_CONTROL, VMID, 0);
+    /* set the pointer to the HQD, this is similar CP_RB0_BASE/_HI */
+    hqd_gpu_addr = p->hqd_base_gpu_addr >> 8;
+    mqd[MQD_CP_HQD_PQ_BASE_LO] = (uint32_t)hqd_gpu_addr;
+    mqd[MQD_CP_HQD_PQ_BASE_HI] = (uint32_t)(hqd_gpu_addr >> 32);
+    /* set up the HQD, this is similar to CP_RB0_CNTL */
+    tmp = regCP_HQD_PQ_CONTROL_DEFAULT;
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, QUEUE_SIZE, order_base_2(p->queue_size / 4) - 1);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, RPTR_BLOCK_SIZE, order_base_2(4096 / 4) - 1);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, UNORD_DISPATCH, 1);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, TUNNEL_DISPATCH, p->allow_tunneling ? 1 : 0);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, PRIV_STATE, 1);
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, KMD_QUEUE, 1);
+    if (p->tmz_queue)
+        tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, TMZ, 1);
+    mqd[MQD_CP_HQD_PQ_CONTROL] = tmp;
+    /* set the wb address whether it's enabled or not */
+    wb_gpu_addr = p->rptr_gpu_addr;
+    mqd[MQD_CP_HQD_PQ_RPTR_REPORT_ADDR_LO] = (uint32_t)wb_gpu_addr & 0xfffffffc;
+    mqd[MQD_CP_HQD_PQ_RPTR_REPORT_ADDR_HI] = (uint32_t)(wb_gpu_addr >> 32) & 0xffff;
+    /* only used if CP_PQ_WPTR_POLL_CNTL.CP_PQ_WPTR_POLL_CNTL__EN_MASK=1 */
+    wb_gpu_addr = p->wptr_gpu_addr;
+    mqd[MQD_CP_HQD_PQ_WPTR_POLL_ADDR_LO] = (uint32_t)wb_gpu_addr & 0xfffffffc;
+    mqd[MQD_CP_HQD_PQ_WPTR_POLL_ADDR_HI] = (uint32_t)(wb_gpu_addr >> 32) & 0xffff;
+    /* enable the doorbell if requested */
+    tmp = 0;
+    if (p->use_doorbell) {
+        tmp = regCP_HQD_PQ_DOORBELL_CONTROL_DEFAULT;
+        tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_DOORBELL_CONTROL, DOORBELL_OFFSET, p->doorbell_index);
+        tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_DOORBELL_CONTROL, DOORBELL_EN, 1);
+        tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_DOORBELL_CONTROL, DOORBELL_SOURCE, 0);
+        tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_DOORBELL_CONTROL, DOORBELL_HIT, 0);
+    }
+    mqd[MQD_CP_HQD_PQ_DOORBELL_CONTROL] = tmp;
+    /* reset read and write pointers, similar to CP_RB0_WPTR/_RPTR */
+    mqd[MQD_CP_HQD_PQ_RPTR] = regCP_HQD_PQ_RPTR_DEFAULT;
+    /* set the vmid for the queue */
+    mqd[MQD_CP_HQD_VMID] = 0;
+    tmp = regCP_HQD_PERSISTENT_STATE_DEFAULT;
+    mqd[MQD_CP_HQD_PERSISTENT_STATE] = REG_SET_FIELD(tmp, CP_HQD_PERSISTENT_STATE, PRELOAD_SIZE, 0x55);
+    /* set MIN_IB_AVAIL_SIZE */
+    tmp = regCP_HQD_IB_CONTROL_DEFAULT;
+    mqd[MQD_CP_HQD_IB_CONTROL] = REG_SET_FIELD(tmp, CP_HQD_IB_CONTROL, MIN_IB_AVAIL_SIZE, 3);
+    /* set static priority for a compute queue/ring */
+    mqd[MQD_CP_HQD_PIPE_PRIORITY] = p->hqd_pipe_priority;
+    mqd[MQD_CP_HQD_QUEUE_PRIORITY] = p->hqd_queue_priority;
+    mqd[MQD_CP_HQD_ACTIVE] = p->hqd_active ? 1 : 0;
+    /* set UQ fenceaddress */
+    mqd[MQD_COMPUTE_FENCE_ADDRESS_LO] = (uint32_t)p->fence_address;
+    mqd[MQD_COMPUTE_FENCE_ADDRESS_HI] = (uint32_t)(p->fence_address >> 32);
+    return RDNA3_OK;
+}
+
+/* the GC 11.0.3 user queue gate of gfx_v11_0's gpu_early_init (firmware levels;
+ * amdgpu.user_queue=1 is the kext's rdna3userq=1) */
+int gfx11_userq_supported(uint32_t me_ver, uint32_t pfp_ver, uint32_t mec_ver, uint32_t mes_ver)
+{
+    return me_ver >= 2390 && pfp_ver >= 2530 && mec_ver >= 2600 && mes_ver >= 120;
+}
+
+/* Ported from convert_to_mes_queue_type: AMDGPU_RING_TYPE_GFX / COMPUTE /
+ * SDMA (the user queue's AMDGPU_HW_IP_* has the same numbers) to
+ * MES_QUEUE_TYPE_*; -1 for anything else (amdgpu: BUG()) */
+static int mes_queue_type(uint32_t queue_type)
+{
+    switch (queue_type) {
+    case 0: return 0;   /* MES_QUEUE_TYPE_GFX */
+    case 1: return 1;   /* MES_QUEUE_TYPE_COMPUTE */
+    case 2: return 2;   /* MES_QUEUE_TYPE_SDMA */
+    default: return -1;
+    }
+}
+
+/* Ported from convert_to_mes_priority_level: AMDGPU_MES_PRIORITY_LEVEL_* to
+ * MES_AMD_PRIORITY_LEVEL_* (the same numbers; NORMAL for anything else) */
+static uint32_t mes_priority_level(uint32_t level)
+{
+    return level <= AMD_MES_PRIORITY_LEVEL_REALTIME ? level : AMD_MES_PRIORITY_LEVEL_NORMAL;
+}
+
+/* Ported from mes_v11_0_add_hw_queue */
+int gfx11_mes_add_hw_queue(rdna3_dev *d, rdna3_mes *m, const amd_mes_add_queue *in,
+                           uint32_t vm_cntx_cntl)
+{
+    uint32_t p[RD_MES_API_DWORDS], i;
+    int type = mes_queue_type(in->queue_type);
+    if (!m->ready || type < 0)
+        return RDNA3_EINVAL;
+    for (i = 0; i < RD_MES_API_DWORDS; i++)
+        p[i] = 0;
+    p[0] = RD_MES_API_HEADER(RD_MES_SCH_API_ADD_QUEUE);
+    p[1] = in->process_id;
+    put64(p + 2, in->page_table_base_addr);
+    put64(p + 4, in->process_va_start);
+    put64(p + 6, in->process_va_end);
+    put64(p + 8, in->process_quantum);
+    put64(p + 10, in->process_context_addr);
+    put64(p + 12, in->gang_quantum);
+    put64(p + 14, in->gang_context_addr);
+    p[16] = mes_priority_level(in->inprocess_gang_priority);
+    p[17] = mes_priority_level(in->gang_global_priority_level);
+    p[18] = in->doorbell_offset;
+    put64(p + 19, in->mqd_addr);
+    if (((m->sched_version & RD_MES_API_VERSION_MASK) >> RD_MES_API_VERSION_SHIFT) >= 2)
+        put64(p + 21, in->wptr_mc_addr);
+    else
+        put64(p + 21, in->wptr_addr);
+    p[27] = (uint32_t)type;            /* queue_type */
+    /* For KFD, gds_size is re-used for queue size (needed in MES for AQL queues) */
+    p[29] = in->queue_size;            /* gds_size */
+    p[30] = in->gws_base;
+    p[31] = in->gws_size;
+    put64(p + 33, in->tba_addr);       /* trap_handler_addr */
+    p[35] = vm_cntx_cntl;
+    p[36] = (in->paging ? 1u << 0 : 0) | (in->is_kfd_process ? 1u << 9 : 0) |
+            (in->trap_en ? 1u << 10 : 0) | (in->is_aql_queue ? 1u << 11 : 0) |
+            (in->skip_process_ctx_clear ? 1u << 12 : 0) |
+            (in->exclusively_scheduled ? 1u << 14 : 0);
+    put64(p + 41, in->tma_addr);
+    return gfx11_mes_submit(d, m, p, RD_MES_ADD_QUEUE_STATUS_DW);
+}
+
+/* Ported from mes_v11_0_remove_hw_queue */
+int gfx11_mes_remove_hw_queue(rdna3_dev *d, rdna3_mes *m, const amd_mes_remove_queue *in)
+{
+    uint32_t p[RD_MES_API_DWORDS], i;
+    if (!m->ready)
+        return RDNA3_EINVAL;
+    for (i = 0; i < RD_MES_API_DWORDS; i++)
+        p[i] = 0;
+    p[0] = RD_MES_API_HEADER(RD_MES_SCH_API_REMOVE_QUEUE);
+    p[1] = in->doorbell_offset;
+    put64(p + 2, in->gang_context_addr);
+    return gfx11_mes_submit(d, m, p, RD_MES_REMOVE_QUEUE_STATUS_DW);
+}
+
 /* gfx11_kiq_set_resources + gfx11_kiq_map_queues (amdgpu_gfx_enable_kcq) */
 static void kiq_map_kcq(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq)
 {
@@ -2094,4 +2356,28 @@ int gfx11_soft_reset(rdna3_dev *d, rdna3_gfx_ring *r, struct rdna3_mec_ring *kiq
     }
     RLOG(d, "GFX: soft reset done, rings back up");
     return RDNA3_OK;
+}
+
+/* Ported from gfx_v11_0_set_userq_eop_interrupts: EOP interrupts on every
+ * pipe the MES may put a user queue on - ME0 pipe 0 for GFX, MEC1 pipes 0-3
+ * for compute (amdgpu_irq_get per pipe; the kernel rings' own enables are
+ * the same bits, so this never turns theirs off unless 'enable' is 0) */
+void gfx11_set_userq_eop_interrupts(rdna3_dev *d, uint32_t ip_mask, int enable)
+{
+    rdna3_gfx_ring r;
+    uint32_t p;
+
+    for (p = 0; p < sizeof(r); p++)
+        ((uint8_t *)&r)[p] = 0;
+    if (ip_mask & (1u << 0)) {   /* AMDGPU_HW_IP_GFX */
+        r.kind = RD_RING_GFX;
+        gfx11_set_eop_interrupt(d, &r, enable);
+    }
+    if (ip_mask & (1u << 1)) {   /* AMDGPU_HW_IP_COMPUTE */
+        r.kind = RD_RING_COMPUTE;
+        for (p = 0; p < 4; p++) {
+            r.pipe = p;
+            gfx11_set_eop_interrupt(d, &r, enable);
+        }
+    }
 }
