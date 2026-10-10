@@ -714,3 +714,19 @@ shows the queue.
   up are kept and sent at the next boot.
 - `hanggfx`: passed - GFX hang noticed, waves killed, GFX soft reset, the
   next GFX job verified (this step froze the VM before the deadlock fix).
+
+### Card run 29 (queue `gamma gamma0 sleep`, build 104)
+
+- The new RDNA3Accelerator (gamma diagnostics) waited for approval in
+  macOS: the old one ran, no transaction dump. Needs `rdna3vm approve`.
+- `gamma` and `gamma0`: rdna3_modetest saw 0 displays (both pipes lit,
+  WindowServer had both framebuffers open); run 28 saw 2. The report's
+  daemon now runs rdna3_modetest in the console user's session
+  (`launchctl asuser`) and the tool asks CoreGraphics again for 30 s.
+  Display pipe counters: 65 plane-less transactions at boot, none during
+  the (not run) gamma test.
+- `sleep`: two system sleeps in the boot, one with the card powered, one
+  without; both times the GPU came back (resume with the full bring-up),
+  head 0 restored and running, head 1 restored but its check says LOST
+  (routing). Again no network after the wake: when nothing went up, the VM
+  now restarts once and that boot only sends the waiting results.

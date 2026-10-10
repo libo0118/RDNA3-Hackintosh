@@ -57,10 +57,19 @@ static void print_mode(const char *tag, CGDisplayModeRef m)
 
 static uint32_t displays(CGDirectDisplayID *ids)
 {
-    uint32_t n = 0;
-    if (CGGetOnlineDisplayList(MAX_DISPLAYS, ids, &n) != kCGErrorSuccess)
-        return 0;
-    return n;
+    /* card run 29: an empty list from the report's daemon while both
+     * framebuffers were open - ask again for up to 30 s and say why */
+    for (int t = 0; t < 10; t++) {
+        uint32_t n = 0;
+        CGError e = CGGetOnlineDisplayList(MAX_DISPLAYS, ids, &n);
+        if (e == kCGErrorSuccess && n)
+            return n;
+        if (t == 0 || t == 9)
+            fprintf(stderr, "rdna3_modetest: CGGetOnlineDisplayList -> error %d, %u display(s)%s\n", (int)e, n,
+                    t == 9 ? ", giving up" : ", asking again");
+        sleep(3);
+    }
+    return 0;
 }
 
 static int list(void)

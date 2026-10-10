@@ -166,6 +166,15 @@ extra="$HOME/rdna3-extra.txt"
 # under it, so a test that freezes the GPU (and the VM) still leaves them
 stamp=$(date +%Y%m%d-%H%M%S)
 base=rdna3-report-$label-$stamp
+in_session() {   # in_session command...: as root, in the console user's GUI session (CoreGraphics)
+    u=$(stat -f %Su /dev/console 2>/dev/null)
+    uid=$(id -u "$u" 2>/dev/null)
+    if [ -n "$uid" ] && [ "$u" != root ] && [ "$u" != loginwindow ]; then
+        launchctl asuser "$uid" "$@"
+    else
+        "$@"
+    fi
+}
 partial() {
     [ -n "$HOST" ] || return 0
     curl -sf --max-time 10 -T "$extra" "$HOST/reports/$base-tests.txt" >/dev/null 2>&1
@@ -176,6 +185,13 @@ for pf in /var/db/rdna3-pending-*; do
     [ -f "$pf" ] && [ -n "$HOST" ] || continue
     curl -sf --max-time 60 -T "$pf" "$HOST/reports/${pf#/var/db/rdna3-pending-}" >/dev/null 2>&1 && rm -f "$pf"
 done
+# a restart only to send them (the VM's network does not come back from S3,
+# card runs 28, 29): sent, so stop here
+if [ -f /var/db/rdna3-upload-only ]; then
+    rm -f /var/db/rdna3-upload-only
+    echo "upload-only boot: the results of the boot before are sent"
+    finish
+fi
 
 # progress on the desktop: a Terminal window in the logged-in user's
 # session follows /Users/Shared/rdna3-progress.log (one line per test and
@@ -290,10 +306,10 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             *" rdna3modes=1 "*)
                 if [ -x "$D/bin/rdna3_modetest" ]; then
                     hdr "rdna3_modetest list"
-                    with_limit 30 "$D/bin/rdna3_modetest" list 2>&1
+                    with_limit 60 in_session "$D/bin/rdna3_modetest" list 2>&1
                     done_ $?
                     hdr "rdna3_modetest cycle"
-                    with_limit 240 "$D/bin/rdna3_modetest" cycle "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
+                    with_limit 240 in_session "$D/bin/rdna3_modetest" cycle "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
                     done_ $?
                 fi ;;
         esac
@@ -345,7 +361,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                     # pipe transactions (empty = no plane, gamma/options only)?
                     echo "== display pipe counters before"; sysctl debug 2>/dev/null | grep -E "rdna3accel_iop" || true
                     hdr "rdna3_modetest gamma"
-                    with_limit 150 "$D/bin/rdna3_modetest" gamma "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
+                    with_limit 180 in_session "$D/bin/rdna3_modetest" gamma "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
                     done_ $?
                     echo "== display pipe counters after"; sysctl debug 2>/dev/null | grep -E "rdna3accel_iop" || true
                     echo "== IOAcceleratorFamily2: display pipe transaction and gamma symbols"
@@ -525,5 +541,16 @@ f="$HOME/$base.tar.gz"
     rm -f "/var/db/rdna3-pending-$base.tar.gz"
 if [ -f "$f" ]; then prog "report sent - all done"; notify "All done, report sent"
 else prog "the full report did not finish (the test results were sent)"; notify "Done, without the full report"; fi
+# nothing reached the host (no network since the system sleep): restart
+# once, the next boot sends what is waiting and stops
+if ls /var/db/rdna3-pending-* >/dev/null 2>&1; then
+    case " $args " in
+        *" rdna3resume=1 "*" rdna3vmauto=1 "*|*" rdna3vmauto=1 "*" rdna3resume=1 "*)
+            prog "no network since the system sleep: restarting to send the results"
+            touch /var/db/rdna3-upload-only
+            shutdown -r now
+            sleep 60 ;;
+    esac
+fi
 case " $args " in *" rdna3vmauto=1 "*) prog "shutting down in 10 s"; sleep 10 ;; esac
 finish

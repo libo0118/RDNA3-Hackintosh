@@ -402,6 +402,9 @@ auto_limit() {
     [ -n "$soak" ] && m=$((m + soak))
     # rdna3hotplug=1: the report waits 2 min for the cable to be pulled and put back
     case " $1 " in *" rdna3hotplug=1 "*) m=$((m + 3)) ;; esac
+    # rdna3resume=1: a system sleep, and a restart to send the results when
+    # the VM's network did not come back from it
+    case " $1 " in *" rdna3resume=1 "*) m=$((m + 5)) ;; esac
     echo "$m"
 }
 
