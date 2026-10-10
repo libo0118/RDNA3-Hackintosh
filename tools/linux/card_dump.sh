@@ -2,8 +2,15 @@
 # card_dump.sh - everything Linux/amdgpu knows about the RX 7800 XT, in one
 # archive: the ground truth the macOS driver is compared with.
 #
-#   sudo bash tools/linux/card_dump.sh [outdir]      (default ~/Downloads/rdna3-card-dump)
+#   sudo bash tools/linux/card_dump.sh [--regs] [outdir]   (default ~/Downloads/rdna3-card-dump)
 #   -> <outdir>.tar.gz
+#
+# Only reads what amdgpu itself reports (sysfs, debugfs). --regs also reads
+# a short list of GC registers through debugfs amdgpu_regs (GFXOFF held off
+# meanwhile). Never sweep register files blindly: the first version read
+# every DCN 3.2 register, and touching a power-gated DCN block hung the
+# whole machine (2026-10-10). Each phase is written to
+# ~/Downloads/rdna3-card-dump.progress (synced) so a hang shows where.
 #
 # Run it on the Linux host with amdgpu driving the card and the desktop
 # idle (no VM, no games): about a minute. Read-only, except that GFXOFF is
@@ -15,8 +22,7 @@
 #   ip/       discovery blob, ip_discovery sysfs, firmware versions
 #   pm/       pp_* files, pp_features, pp_table, gpu_metrics samples,
 #             gpu_busy_percent over 20 s idle, GFXOFF status/residency, hwmon
-#   regs/     GC (status, RLC power/clock gating, golden settings) and the
-#             whole DCN 3.2 register file, read through debugfs amdgpu_regs
+#   regs/     (--regs) GC status, RLC power/clock gating, golden settings
 #   display/  DC's DTN log (every pipe's HUBP/DPP/MPC/OPP/OTG state), DMUB
 #             state, atomic state, EDID + modes of every connector
 #   vulkan/   vulkaninfo, RADV_DEBUG=info, rdna3_vktest on the real card
@@ -25,9 +31,13 @@ set -u
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
 user_home=$(getent passwd "${SUDO_USER:-root}" | cut -d: -f6)
+want_regs=0
+[ "${1:-}" = --regs ] && { want_regs=1; shift; }
 out=${1:-$user_home/Downloads/rdna3-card-dump}
+progress=$out.progress
 rm -rf "$out" && mkdir -p "$out"/{pci,vbios,ip,pm,regs,display,vulkan,sys}
-log() { printf '== %s\n' "$*"; }
+log() { printf '== %s\n' "$*"; printf '%s %s\n' "$(date +%T)" "$*" >> "$progress"; sync; }
+: > "$progress"
 run() { local f=$1; shift; { echo "\$ $*"; "$@"; echo "[exit $?]"; } > "$f" 2>&1; }
 
 card=""
@@ -61,9 +71,9 @@ run "$out/sys/sensors.txt" sensors
 
 # ---------------------------------------------------------------- pci
 log "PCI"
-run "$out/pci/gpu-lspci.txt" lspci -nnvvvxxxx -s "$pci"
+run "$out/pci/gpu-lspci.txt" lspci -nnvvvxxx -s "$pci"
 fn=${pci%.*}
-for f in 1 2 3; do lspci -s "$fn.$f" >/dev/null 2>&1 && [ -n "$(lspci -s "$fn.$f")" ] && run "$out/pci/func$f-lspci.txt" lspci -nnvvvxxxx -s "$fn.$f"; done
+for f in 1 2 3; do lspci -s "$fn.$f" >/dev/null 2>&1 && [ -n "$(lspci -s "$fn.$f")" ] && run "$out/pci/func$f-lspci.txt" lspci -nnvvvxxx -s "$fn.$f"; done
 # the bridges above the card (the RX 7800 XT has its own switch)
 p=$card; i=0
 while p=$(dirname "$p"); [ "$(basename "$p")" != devices ] && [ $i -lt 6 ]; do
@@ -81,11 +91,8 @@ g=$(basename "$(readlink -f "$card/iommu_group" 2>/dev/null)")
 # ---------------------------------------------------------------- vbios / ip
 log "VBIOS, IP discovery, firmware"
 cat "$card/vbios_version" > "$out/vbios/vbios_version.txt" 2>/dev/null
-if [ -n "$dbg" ] && [ -r "$dbg/amdgpu_vbios" ]; then
-    cat "$dbg/amdgpu_vbios" > "$out/vbios/vbios.rom" 2>/dev/null
-else
-    echo 1 > "$card/rom" 2>/dev/null && cat "$card/rom" > "$out/vbios/vbios.rom" 2>/dev/null; echo 0 > "$card/rom" 2>/dev/null
-fi
+# the driver's copy only (enabling the ROM BAR on a live card is not worth it)
+[ -n "$dbg" ] && [ -r "$dbg/amdgpu_vbios" ] && cat "$dbg/amdgpu_vbios" > "$out/vbios/vbios.rom" 2>/dev/null
 [ -n "$dbg" ] && cp "$dbg/amdgpu_discovery" "$out/ip/discovery.bin" 2>/dev/null
 [ -n "$dbg" ] && cat "$dbg/amdgpu_firmware_info" > "$out/ip/firmware_info.txt" 2>/dev/null
 if [ -d "$card/ip_discovery" ]; then
@@ -150,8 +157,8 @@ for n in ('amdgpu_gfxoff_count', 'amdgpu_gfxoff_entrycount'):
 EOF
 
 # ---------------------------------------------------------------- registers
-log "registers (GC with GFXOFF held off, whole DCN 3.2)"
-if [ -n "$dbg" ] && [ -r "$dbg/amdgpu_regs" ]; then
+if [ "$want_regs" = 1 ] && [ -n "$dbg" ] && [ -r "$dbg/amdgpu_regs" ]; then
+    log "GC registers (--regs, GFXOFF held off)"
     python3 -I - "$card" "$dbg" "$ROOT/tools/linux/regs" "$out/regs" <<'EOF'
 import glob, os, re, struct, sys, time
 card, dbg, regdir, out = sys.argv[1:5]
@@ -164,7 +171,7 @@ def bases(hwid):
         except OSError:
             pass
     return None
-ips = {'gc_11_0_0': 11, 'dcn_3_2_0': 271}      # GC_HWID, DMU_HWID
+ips = {'gc_11_0_0': 11}      # GC_HWID only: never sweep DCN (power-gated blocks hang the bus)
 fd = os.open(dbg + '/amdgpu_regs', os.O_RDONLY)
 gfxoff = dbg + '/amdgpu_gfxoff'
 held = False
@@ -203,20 +210,20 @@ if held:
     with open(gfxoff, 'wb') as f: f.write(struct.pack('<I', 1))
 EOF
 else
-    echo "no debugfs amdgpu_regs" > "$out/regs/missing.txt"
+    echo "not read (run with --regs; or no debugfs amdgpu_regs)" > "$out/regs/missing.txt"
 fi
 
 # ---------------------------------------------------------------- display
 log "display"
 if [ -n "$dbg" ]; then
     for f in amdgpu_dm_dtn_log amdgpu_dm_dmub_fw_state amdgpu_dm_dmub_tracebuffer amdgpu_dm_capabilities \
-             amdgpu_dm_visual_confirm amdgpu_dm_ips_status state clients framebuffer amdgpu_fence_info \
-             amdgpu_gem_info amdgpu_sa_info amdgpu_vm_info; do
+             amdgpu_dm_ips_status state clients framebuffer amdgpu_fence_info; do
         [ -r "$dbg/$f" ] && timeout 10 cat "$dbg/$f" > "$out/display/$f.txt" 2>&1
     done
     for c in "$dbg"/*-A-* "$dbg"/DP-* "$dbg"/HDMI-* "$dbg"/DVI-*; do
         [ -d "$c" ] || continue
-        for f in "$c"/*; do [ -f "$f" ] && [ -r "$f" ] && { echo "== $(basename "$f")"; timeout 3 cat "$f" 2>&1 | head -50; }; done \
+        for n in link_settings output_bpc dp_dsc_clock_en dp_dsc_slice_width hdcp_sink_capability is_mst_connector; do
+            f=$c/$n; [ -f "$f" ] && [ -r "$f" ] && { echo "== $n"; timeout 3 cat "$f" 2>&1 | head -50; }; done \
             > "$out/display/debugfs-$(basename "$c").txt"
     done
 fi

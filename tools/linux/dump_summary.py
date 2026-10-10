@@ -93,13 +93,9 @@ def main():
                         ours = l.strip()
         print("  macOS: " + (ours[ours.find("PM:"):] if ours else "no 'PM: RLC_STAT' line in the reports"))
 
-    print("== DCHUBBUB (Linux DC)")
-    d = regs(txt("regs/dcn_3_2_0.txt"))
-    for n in sorted(k for k in d if k.startswith("DCHUBBUB_ARB_") or k.startswith("DCHUBBUB_DET")
-                    or k.startswith("DCHUBBUB_COMPBUF")):
-        print("  %-48s 0x%08x" % (n, d[n]))
-    for n in sorted(k for k in d if re.match(r"OTG\d_OTG_(H|V)_TOTAL$|OTG\d_OTG_CONTROL$", k)):
-        print("  %-48s 0x%08x" % (n, d[n]))
+    print("== DC state (DTN log: HUBBUB watermarks, pipes, OTG)")
+    dtn = txt("display/amdgpu_dm_dtn_log.txt").splitlines()
+    print("  " + "\n  ".join(dtn[:80]) if dtn else "  no DTN log")
 
     print("== displays")
     for n in sorted(f):

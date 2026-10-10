@@ -359,14 +359,15 @@ the VM is enough).
 ## Linux reference dump (`tools/linux/card_dump.sh`)
 
 `sudo bash tools/linux/card_dump.sh` on the Linux host (amdgpu, idle desktop)
-gives `~/Downloads/rdna3-card-dump.tar.gz`. Use it as ground truth:
+gives `~/Downloads/rdna3-card-dump.tar.gz`; `~/Downloads/rdna3-card-dump.progress`
+names the last phase if the machine hangs. Use it as ground truth:
 
 | File | Compare with |
 |---|---|
-| `regs/gc_11_0_0.txt` | our `PM: RLC_STAT ...` / `GRBM_STATUS` lines: RLC_GPM_STAT, RLC_PG_CNTL, RLC_CGCG_CGLS_CTRL, CGTT override under Linux idle |
+| `regs/gc_11_0_0.txt` (only with `--regs`) | our `PM: RLC_STAT ...` / `GRBM_STATUS` lines: RLC_GPM_STAT, RLC_PG_CNTL, RLC_CGCG_CGLS_CTRL, CGTT override under Linux idle |
 | `pm/idle-samples.txt`, `pm/gfxoff-residency.txt` | `PM: activity` (100 % on macOS): Linux idle activity and GFXOFF residency |
 | `pm/sysfs.txt` (`pp_features`) | `RDNA3,PMFeaturesRunning` |
-| `regs/dcn_3_2_0.txt`, `display/amdgpu_dm_dtn_log.txt` | DCHUBBUB watermarks / DRAM state, DET, DCCG, OTG timing for B5 and a real modeset |
+| `display/amdgpu_dm_dtn_log.txt` (never sweep DCN registers raw: a power-gated block hung the host) | DCHUBBUB watermarks / DRAM state, DET, DCCG, OTG timing for B5 and a real modeset |
 | `display/*.edid`, `display/card*-*.txt` | `RDNA3,Connector*` EDIDs and routing |
 | `vulkan/rdna3_vktest.txt` | the same test on macOS: a pass on Linux means a macOS failure is ours |
 
