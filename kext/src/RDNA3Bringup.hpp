@@ -106,6 +106,9 @@ public:
     int      vmFaultInfo(void *vm, uint64_t *addr, uint32_t *status, uint32_t *vmhub);
     /* AMDGPU_INFO_SENSOR from the SMU metrics (re-read at most every 100 ms) */
     int      sensor(uint32_t type, uint32_t *value);
+    /* PerformanceStatistics: activity %, edge / hotspot / memory C, fan
+     * rpm, gfx / memory clock MHz, power W; under the DRM lock */
+    bool     stats(uint32_t v[8]);
 
 private:
     static void threadMain(void *arg, int wait_result);

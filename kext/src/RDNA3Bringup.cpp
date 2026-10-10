@@ -1110,6 +1110,28 @@ int RDNA3Bringup::vmFaultInfo(void *p, uint64_t *addr, uint32_t *status, uint32_
     return 0;
 }
 
+bool RDNA3Bringup::stats(uint32_t v[8])
+{
+    uint64_t now = mach_absolute_time(), ns = 0;
+    if (!fPmUp || !fFinished || !fSmu)
+        return false;
+    absolutetime_to_nanoseconds(now - fMetricsAt, &ns);
+    if (!fMetricsAt || ns > 100ull * 1000 * 1000) {
+        if (smu13_read_metrics(fDev, fSmu))
+            return false;
+        fMetricsAt = now;
+    }
+    v[0] = smu13_metric_gfx_activity(fSmu);
+    v[1] = smu13_metric_temp_edge_c(fSmu);
+    v[2] = smu13_metric_temp_hotspot_c(fSmu);
+    v[3] = smu13_metric_temp_mem_c(fSmu);
+    v[4] = smu13_metric_fan_rpm(fSmu);
+    v[5] = smu13_metric_gfxclk_mhz(fSmu);
+    v[6] = smu13_metric_uclk_mhz(fSmu);
+    v[7] = smu13_metric_power_w(fSmu);
+    return true;
+}
+
 /* amdgpu_dpm_read_sensor through smu_v13_0_0_read_sensor: the units are
  * amdgpu's (MHz, millidegrees, %, W, mV). Called under the DRM lock once
  * the bring-up finished, so the SMU mailbox is ours. */

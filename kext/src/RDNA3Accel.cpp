@@ -87,6 +87,7 @@ bool RDNA3Accel::start(IOService *provider)
                     fBringup = new RDNA3Bringup;
                     if (fBringup && fBringup->init(this, fPci, fMmioMap, fLevel, disc, fVramSize)) {
                         fBringup->start();
+                        statsStart();   /* idle until the SMU is up */
                     } else {
                         LOG("cannot set up Stage 2 bring-up");
                         if (fBringup) {
@@ -109,6 +110,7 @@ bool RDNA3Accel::start(IOService *provider)
 void RDNA3Accel::stop(IOService *provider)
 {
     LOG("stop");
+    statsStop();
     if (fSleepAssertion) {
         if (IOPMrootDomain *root = getPMRootDomain())
             root->releasePMAssertion(fSleepAssertion);

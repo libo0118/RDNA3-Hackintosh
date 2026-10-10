@@ -258,6 +258,66 @@ int RDNA3Accel::drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq
     return r;
 }
 
+void RDNA3Accel::statsTick(void *owner, void *)
+{
+    RDNA3Accel *a = (RDNA3Accel *)owner;
+    uint32_t v[8];
+    bool ok = false;
+    if (a->fStatsStop)
+        return;
+    if (a->fDrmLock) {
+        IOLockLock(a->fDrmLock);
+        ok = a->fBringup && a->fBringup->stats(v);
+        IOLockUnlock(a->fDrmLock);
+    }
+    if (ok) {
+        static const char *const keys[8] = {
+            "Device Utilization %", "Temperature(C)", "Junction Temperature(C)", "Memory Temperature(C)",
+            "Fan Speed(RPM)", "Core Clock(MHz)", "Memory Clock(MHz)", "Total Power(W)",
+        };
+        OSDictionary *d = OSDictionary::withCapacity(9);
+        if (d) {
+            for (unsigned i = 0; i < 8; i++) {
+                OSNumber *n = OSNumber::withNumber((unsigned long long)v[i], 32);
+                if (n) {
+                    d->setObject(keys[i], n);
+                    n->release();
+                }
+            }
+            if (OSNumber *n = OSNumber::withNumber((unsigned long long)v[0], 32)) {
+                d->setObject("GPU Activity(%)", n);
+                n->release();
+            }
+            a->setProperty("PerformanceStatistics", d);
+            d->release();
+        }
+    }
+    if (!a->fStatsStop && a->fStatsCall) {
+        uint64_t dl;
+        clock_interval_to_deadline(2000, kMillisecondScale, &dl);
+        thread_call_enter_delayed(a->fStatsCall, dl);
+    }
+}
+
+void RDNA3Accel::statsStart()
+{
+    fStatsStop = false;
+    if (!fStatsCall)
+        fStatsCall = thread_call_allocate((thread_call_func_t)statsTick, this);
+    if (fStatsCall)
+        thread_call_enter(fStatsCall);
+}
+
+void RDNA3Accel::statsStop()
+{
+    fStatsStop = true;
+    if (fStatsCall) {
+        thread_call_cancel_wait(fStatsCall);
+        thread_call_free(fStatsCall);
+        fStatsCall = nullptr;
+    }
+}
+
 int RDNA3Accel::drmSensor(void *ctx, uint32_t type, uint32_t *value)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;

@@ -75,6 +75,14 @@ Sleep: from level 4 on the kext keeps macOS from idle sleep
 after a sleep the firmware and the GOP's picture are gone. Do not put the
 machine to sleep by hand during tests; `rdna3sleep=1` lifts the block.
 
+Sensors: once the SMU is up (level 6 and higher) `RDNA3Accel` publishes
+`PerformanceStatistics` every 2 s, with the keys AMD's macOS drivers use
+(`Temperature(C)`, `Junction Temperature(C)`, `Fan Speed(RPM)`,
+`Core Clock(MHz)`, `Memory Clock(MHz)`, `Total Power(W)`,
+`Device Utilization %`). Check with
+`ioreg -rc RDNA3Accel -d1 | grep -A9 PerformanceStatistics`; the values
+must change under load and the temperature must look plausible (30-90).
+
 Rule: **do not move on until a step gives the expected values.**
 When a result differs from the table, send the report. That is exactly the
 information that cannot be obtained in the simulator.

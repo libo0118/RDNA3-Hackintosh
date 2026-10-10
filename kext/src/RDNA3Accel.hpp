@@ -191,6 +191,13 @@ private:
     struct rdna3_dcn_clone *fMirror = nullptr;   /* hw/dcn32_clone.c plan, when lit */
     bool          fMirrorOn    = false;
     uint64_t      fSleepAssertion = 0;        /* IOPMDriverAssertionID: no idle sleep (no resume yet) */
+    /* PerformanceStatistics (what AMD's drivers publish; read by Activity
+     * Monitor-style tools), refreshed every 2 s from the SMU metrics */
+    struct thread_call *fStatsCall = nullptr;
+    volatile bool fStatsStop = false;
+    static void   statsTick(void *owner, void *);
+    void          statsStart();
+    void          statsStop();
     int           fCloneHead   = -1;          /* rdna3mirror=2: fDcn head of the clone */
     IOService    *fHeadNub     = nullptr;     /* "RDNA3DisplayHead" for its framebuffer */
     void          displayAddCloneHead();
