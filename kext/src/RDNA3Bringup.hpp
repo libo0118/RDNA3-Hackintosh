@@ -142,7 +142,7 @@ private:
     rdna3_mec_ring  *fKcq  = nullptr;  /* level 8: the first kernel compute queue */
     struct rdna3_mes *fMes = nullptr;  /* level 8 + rdna3mes=1: MES scheduler pipe (C1) */
     bool             fMesWanted = false;
-    bool             fCgWanted = false;   /* rdna3cg=1: GFX clock gating (step 8g) */
+    bool             fCgWanted = false;   /* GFX clock gating, default on (rdna3cg=0: off) */
     void             cgStart(const char *why);
     void             mesStart(const char *why);
     IOMemoryMap     *fDoorbell = nullptr;   /* BAR2 */

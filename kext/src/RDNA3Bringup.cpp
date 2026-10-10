@@ -86,7 +86,9 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
         PE_parse_boot_argn("rdna3mes", &mes, sizeof(mes));
         fMesWanted = mes != 0;
         {
-            uint32_t cg = 0;
+            /* on by default since card run 8: ~200 W -> ~75 W idle, hotspot
+             * 78 -> 55 C, DMA/GFX tests still pass; rdna3cg=0 turns it off */
+            uint32_t cg = 1;
             PE_parse_boot_argn("rdna3cg", &cg, sizeof(cg));
             fCgWanted = cg != 0;
         }

@@ -427,11 +427,8 @@ cmd_args() {
 
 # the steps still waiting, one per line; the first is the one running
 QUEUE=$WORK/queue
-# 8: the firmware load waits for the root file system (run 6 panicked in
-# namei 0.7 s into boot); 8g: GFX clock gating (rdna3cg=1), against the
-# ~200 W / 100 % activity with an idle GFX; 9b / 9c: the clone with the
-# p-state allow now default (the PMFW stays up)
-PENDING_STEPS="8 8g 9b 9c"
+# GFX clock gating is default now (card run 8): one regression pass
+PENDING_STEPS="8 9b 9c"
 
 cmd_queue() {
     load_conf
