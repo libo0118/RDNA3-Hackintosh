@@ -127,6 +127,24 @@ each display pipe scans out. Planned additions, each cheap: `mtlprobe` (M1),
 CTS subset (V2), hang test (R1), soak (R2), mode switching with a picture
 per mode (S4).
 
+## Done since the plan was written (round 18 batch, sim/host verified, step `big2`)
+
+| Item | Commit | Notes |
+|---|---|---|
+| P1 HDP/ATHUB clock gating | `2bcd676` | `rdna3socg=1`; MC/IH/BIF CG flags are not set on GC 11.0.3 |
+| P2 idle-power experiment | `b4acec0` | `rdna3pmexp=1`, six variants in one boot |
+| P2 workaround: idle GFXCLK cap | `9616cdf` | `rdna3idlecap=1` |
+| R1 hang test | `f555390` | `rdna3hangtest=1`, run last |
+| R2 soak | `8e0f267` | `rdna3soak=<min>` |
+| S6 display sleep (HUBP blank) | `c1c9126` | `rdna3dpms=1`; the link stays up (no monitor standby yet) |
+| S1+S2 (scaled modes only) | `e4d49bf` | `rdna3modes=1`: DPP scaler on the native timing, `rdna3_modetest` |
+| A swap routing fix | `2bcd676` | stale pointer matches after WindowServer re-created its resources |
+| screen read-back | `944d983`, `8e0f267` | pictures + underflow per pipe in every report |
+| UAPI: firmware versions, VBIOS info | `eceebce`, `d815309` | RADV saw 0 for every firmware before |
+
+Open from this batch: S5 gamma, real mode setting (other timings), monitor
+standby (link off), display restore after a mode-1 GPU reset.
+
 ## Order
 
 1. A1 (pictures confirm two heads) -> defaults on (A1, P3).
