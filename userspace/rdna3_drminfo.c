@@ -8,6 +8,12 @@
  *                              GPU wrote: the first userspace job on the card.
  *   rdna3_drminfo --gfx-test   (rdna3lvl>=8) the same with a PM4 WRITE_DATA IB
  *                              on the GFX ring.
+ *   rdna3_drminfo --hang-test  (rdna3lvl>=8) submits a DMA job and a GFX job
+ *                              that never finish (POLL_REGMEM / WAIT_REG_MEM on
+ *                              a value that never comes): the kernel must
+ *                              notice within its 10 s cap, recover (SDMA soft
+ *                              reset / GFX soft recovery or reset) and run the
+ *                              next DMA and GFX jobs correctly. Run it last.
  *   rdna3_drminfo --scanout DIR  (root) what each display pipe scans out right
  *                              now: HUBP state and a 320-wide picture of it,
  *                              DIR/scanout-pipe<N>.ppm - the report's proof of
@@ -26,7 +32,7 @@
 
 #define IOCTL(fd, nr, arg) drm_xnu_ioctl_nr((fd), (nr), &(arg), sizeof(arg))
 
-static int job_test(int fd, int gfx)
+static int job_test(int fd, int gfx, int hang)
 {
     union drm_amdgpu_gem_create c;
     union drm_amdgpu_gem_mmap m;
@@ -59,7 +65,24 @@ static int job_test(int fd, int gfx)
     if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va)) { perror("GEM_VA"); return 1; }
 
     memset(p, 0, 64 << 10);
-    if (!gfx) {
+    if (hang && !gfx) {
+        /* SDMA POLL_REGMEM (sdma_v6_0_ring_emit_wait_reg_mem): memory, func
+         * 3 (equal), +32K == 0xDEADBEEF, retry count 0xfff = forever */
+        p[n++] = 8u | (1u << 31) | (3u << 28);
+        p[n++] = (uint32_t)(gva + 0x8000); p[n++] = 0;
+        p[n++] = 0xDEADBEEF; p[n++] = 0xffffffff;
+        p[n++] = 10u | (0xfffu << 16);
+        while (n & 7)
+            p[n++] = 0;
+    } else if (hang) {
+        /* PM4 WAIT_REG_MEM (gfx_v11_0_wait_reg_mem): memory, equal, ME,
+         * +32K == 0xDEADBEEF: the CP waits forever */
+        p[n++] = (3u << 30) | (0x3Cu << 8) | (5u << 16);
+        p[n++] = 3u | (1u << 4);
+        p[n++] = (uint32_t)(gva + 0x8000); p[n++] = 0;
+        p[n++] = 0xDEADBEEF; p[n++] = 0xffffffff;
+        p[n++] = 4;
+    } else if (!gfx) {
         p[n++] = 2;                   /* SDMA WRITE_LINEAR 2 dwords at +32K */
         p[n++] = (uint32_t)(gva + 0x8000); p[n++] = 0; p[n++] = 1;
         p[n++] = 0xC0FFEE01; p[n++] = 0xC0FFEE02;
@@ -102,7 +125,21 @@ static int job_test(int fd, int gfx)
     memset(&w, 0, sizeof(w));
     w.in.handle = cs.out.handle;
     w.in.ip_type = ib.ip_type;
-    w.in.timeout = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec + 2000000000ull;
+    w.in.timeout = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec +
+                   (hang ? 30000000000ull : 2000000000ull);
+    if (hang) {
+        /* the kernel caps the wait at 10 s and recovers; any return within
+         * the 30 s is the pass, the job's own result does not matter */
+        struct timespec t1;
+        int r = IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double s = (double)(t1.tv_sec - ts.tv_sec) + (double)(t1.tv_nsec - ts.tv_nsec) / 1e9;
+        printf("%s hang job: WAIT_CS returned %d (status %llu) after %.1f s -> %s\n",
+               gfx ? "GFX" : "DMA", r, (unsigned long long)w.out.status, s,
+               s < 29.0 ? "recovered (kernel noticed the hang)" : "NOT recovered");
+        drm_xnu_munmap(p, 64 << 10);
+        return s < 29.0 ? 0 : 1;
+    }
     if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w)) { perror("WAIT_CS"); return 1; }
     if (w.out.status) { printf("%s job did NOT complete within 2 s\n", gfx ? "GFX" : "DMA"); return 1; }
 
@@ -275,9 +312,18 @@ int main(int argc, char **argv)
     }
     for (int a = 1; a < argc; a++) {
         if (!strcmp(argv[a], "--dma-test"))
-            fails += job_test(fd, 0);
+            fails += job_test(fd, 0, 0);
         else if (!strcmp(argv[a], "--gfx-test"))
-            fails += job_test(fd, 1);
+            fails += job_test(fd, 1, 0);
+        else if (!strcmp(argv[a], "--hang-test")) {
+            /* each hang, then the same engine must work again */
+            int f = job_test(fd, 0, 1);
+            f += job_test(fd, 0, 0);
+            f += job_test(fd, 1, 1);
+            f += job_test(fd, 1, 0);
+            printf("HANG TEST: %s\n", f ? "FAILED" : "PASSED (both engines recovered and ran the next job)");
+            fails += f;
+        }
     }
     drm_xnu_close(fd);
     printf("%s\n", fails ? "SOME CHECKS FAILED" : "Stage 4 UAPI smoke test passed");

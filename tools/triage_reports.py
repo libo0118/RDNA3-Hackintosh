@@ -365,6 +365,16 @@ def main():
                     print("     picture: " + ppm_to_png(ppm))
                 except (OSError, ValueError) as e:
                     print("     picture: " + str(e))
+            if "== rdna3_drminfo --hang-test" in txt:
+                ht = txt[txt.index("== rdna3_drminfo --hang-test"):]
+                print("   hang test (a DMA and a GFX job that never finish, then normal jobs):")
+                for l in ht.splitlines()[1:]:
+                    if l.startswith("=="):
+                        break
+                    if "hang job" in l or "verified" in l or "WRONG" in l or "HANG TEST" in l or l.startswith("[exit"):
+                        print("     " + l[:150])
+                if "HANG TEST: PASSED" not in ht:
+                    failed = True
             if "--dma-test" in txt or "--gfx-test" in txt:
                 print("   tests:")
                 for l in txt.splitlines():

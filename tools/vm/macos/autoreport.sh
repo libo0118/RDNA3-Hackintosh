@@ -147,6 +147,16 @@ extra="$HOME/rdna3-extra.txt"
             "$D/bin/libvulkan_radeon.dylib" 2>&1
         echo "[exit $?]"
     fi
+    # last, it resets engines: a DMA and a GFX job that never finish, the
+    # kernel must recover both (only when the step asks: rdna3hangtest=1)
+    case " $args " in
+        *" rdna3hangtest=1 "*)
+            if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
+                echo "== rdna3_drminfo --hang-test"
+                with_limit 120 "$D/bin/rdna3_drminfo" --hang-test 2>&1
+                echo "[exit $?]"
+            fi ;;
+    esac
 } > "$extra" 2>&1
 
 # collect.sh packs everything from ~/rdna3-*; put the extra file next to its logs
