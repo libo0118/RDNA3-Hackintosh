@@ -1,10 +1,10 @@
 {
  "amdgpu": {
   "works": 219,
-  "ported": 242,
+  "ported": 247,
   "total": 1291,
   "works_pct": 17.0,
-  "ported_pct": 18.7,
+  "ported_pct": 19.1,
   "groups": [
    {
     "name": "PSP 13",
@@ -1233,8 +1233,8 @@
      "9"
     ],
     "works": 0,
-    "ported": 12,
-    "todo": 67,
+    "ported": 15,
+    "todo": 64,
     "items": {
      "acquire": "ported",
      "acquire_engine": "ported",
@@ -1255,7 +1255,7 @@
      "optc1_clear_optc_underflow": "todo",
      "optc1_configure_crc": "ported",
      "optc1_did_triggered_reset_occur": "todo",
-     "optc1_disable_crtc": "todo",
+     "optc1_disable_crtc": "ported",
      "optc1_disable_reset_trigger": "todo",
      "optc1_disable_stereo": "todo",
      "optc1_enable_crtc": "todo",
@@ -1302,13 +1302,13 @@
      "optc1_wait_for_state": "todo",
      "optc32_disable_crtc": "todo",
      "optc32_disable_phantom_otg": "todo",
-     "optc32_enable_crtc": "todo",
+     "optc32_enable_crtc": "ported",
      "optc32_get_double_buffer_pending": "todo",
      "optc32_get_odm_combine_segments": "todo",
      "optc32_phantom_crtc_post_enable": "todo",
      "optc32_set_drr": "todo",
      "optc32_set_h_timing_div_manual_mode": "todo",
-     "optc32_set_odm_bypass": "todo",
+     "optc32_set_odm_bypass": "ported",
      "optc32_set_odm_combine": "todo",
      "optc32_setup_manual_trigger": "todo",
      "optc32_wait_odm_doublebuffer_pending_clear": "todo",
@@ -1323,8 +1323,8 @@
      "modeset"
     ],
     "works": 0,
-    "ported": 0,
-    "todo": 117,
+    "ported": 2,
+    "todo": 115,
     "items": {
      "apply_symclk_on_tx_off_wa": "todo",
      "configure_lttpr_mode_non_transparent": "todo",
@@ -1337,7 +1337,7 @@
      "dccg32_set_dpstreamclk": "todo",
      "dccg32_set_dtbclk_dto": "todo",
      "dccg32_set_dtbclk_p_src": "todo",
-     "dccg32_set_pixel_rate_div": "todo",
+     "dccg32_set_pixel_rate_div": "ported",
      "dccg32_set_valid_pixel_rate": "todo",
      "dccg32_trigger_dio_fifo_resync": "todo",
      "dcn32_apply_idle_power_optimizations": "todo",
@@ -1355,7 +1355,7 @@
      "dcn32_dsc_pg_status": "todo",
      "dcn32_enable_phantom_streams": "todo",
      "dcn32_enable_power_gating_plane": "todo",
-     "dcn32_hubp_pg_control": "todo",
+     "dcn32_hubp_pg_control": "ported",
      "dcn32_init_blank": "todo",
      "dcn32_init_hw": "todo",
      "dcn32_initialize_min_clocks": "todo",

@@ -103,6 +103,11 @@ public:
     /* Stage 3: VRAM below this offset holds the firmware's scanout(s);
      * the bring-up and GEM heaps start above it (RDNA3Display.cpp) */
     uint64_t displayReserveEnd() const { return fDispReserveEnd; }
+    /* Step 9b (rdna3mirror=1): show the boot head on the other TMDS
+     * monitor too, through the DMCUB the bring-up started; off again
+     * before the bring-up frees it (RDNA3Display.cpp) */
+    void displayMirror(struct rdna3_dmub *dm);
+    void displayMirrorOff(struct rdna3_dmub *dm);
 
     /* Stage 7: requests from the accelerator kext (RDNA3Platform.cpp) */
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
@@ -180,6 +185,8 @@ private:
     bool          fDispMeasured = false;
     bool          fDcnCrcOn[4]  = {};
     uint64_t      fDispReserveEnd = 0;
+    struct rdna3_dcn_clone *fMirror = nullptr;   /* hw/dcn32_clone.c plan, when lit */
+    bool          fMirrorOn    = false;
     bool          displayInit(const amd_discovery *disc);
     void          displayFree();
     void          displayMeasureRefresh();

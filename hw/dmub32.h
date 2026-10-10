@@ -198,6 +198,47 @@ typedef struct rdna3_dig_tx_v1_7 {
 /* transmitter_control_v1_7 through the DMCUB */
 int  dmub32_transmitter_control(rdna3_dmub *dm, const rdna3_dig_tx_v1_7 *p);
 
+/* struct set_pixel_clock_parameter_v1_7 (atomfirmware.h), the payload of
+ * DMUB_CMD__VBIOS_SET_PIXEL_CLOCK (set_pixel_clock_dmcub) */
+typedef struct rdna3_pixclk_v1_7 {
+    uint32_t pixclk_100hz;    /* target pixel clock in 100 Hz */
+    uint8_t  pll_id;          /* RD_ATOM_COMBOPHY_PLL0 + n, RD_ATOM_PPLL0 */
+    uint8_t  encoderobjid;    /* encoder object id (low byte of the ATOM id) */
+    uint8_t  encoder_mode;    /* RD_ATOM_ENCODER_MODE_* */
+    uint8_t  miscinfo;        /* PIXEL_CLOCK_V7_MISC_* */
+    uint8_t  crtc_id;         /* ATOM_CRTC1 = 0: the OTG instance */
+    uint8_t  deep_color_ratio;/* 0 = 8 bpc */
+} rdna3_pixclk_v1_7;
+
+#define RD_ATOM_PPLL0              2
+#define RD_ATOM_COMBOPHY_PLL0      20
+#define RD_ATOM_ENCODER_MODE_DP    0
+#define RD_ATOM_ENCODER_MODE_DVI   2
+#define RD_ATOM_ENCODER_MODE_HDMI  3
+
+/* set_pixel_clock_v7 through the DMCUB */
+int  dmub32_set_pixel_clock(rdna3_dmub *dm, const rdna3_pixclk_v1_7 *p);
+
+/* struct dig_encoder_stream_setup_parameters_v1_5, the payload of
+ * DMUB_CMD__VBIOS_DIGX_ENCODER_CONTROL (encoder_control_dmcub); the
+ * command carries the whole 12-byte union dig_encoder_control_parameters_v1_5 */
+typedef struct rdna3_dig_enc_v1_5 {
+    uint8_t  digid;           /* DIG front end, 0 = DIGA */
+    uint8_t  action;          /* RD_ATOM_ENCODER_CMD_* */
+    uint8_t  digmode;         /* RD_ATOM_ENCODER_MODE_* */
+    uint8_t  lanenum;
+    uint32_t pclk_10khz;
+    uint8_t  bitpercolor;     /* RD_ATOM_PANEL_8BIT_PER_COLOR */
+    uint8_t  dplinkrate_270mhz;
+} rdna3_dig_enc_v1_5;
+
+#define RD_ATOM_ENCODER_CMD_STREAM_SETUP 0x0F
+#define RD_ATOM_ENCODER_CMD_LINK_SETUP   0x11
+#define RD_ATOM_PANEL_8BIT_PER_COLOR     0x02
+
+/* encoder_control_digx_v1_5 through the DMCUB */
+int  dmub32_encoder_control(rdna3_dmub *dm, const rdna3_dig_enc_v1_5 *p);
+
 /* the trace buffer (outbox0): entries the firmware logged since 'from' */
 uint32_t dmub32_trace_wptr(rdna3_dmub *dm);
 

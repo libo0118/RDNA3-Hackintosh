@@ -519,6 +519,45 @@ int dmub32_transmitter_control(rdna3_dmub *dm, const rdna3_dig_tx_v1_7 *p)
     return dmub32_vbios_cmd(dm, RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL, b, sizeof(b));
 }
 
+static void put32(uint8_t *b, uint32_t v)
+{
+    b[0] = (uint8_t)v; b[1] = (uint8_t)(v >> 8); b[2] = (uint8_t)(v >> 16); b[3] = (uint8_t)(v >> 24);
+}
+
+int dmub32_set_pixel_clock(rdna3_dmub *dm, const rdna3_pixclk_v1_7 *p)
+{
+    /* payload_bytes = sizeof(struct set_pixel_clock_parameter_v1_7) = 16 */
+    uint8_t b[16];
+    uint32_t i;
+    for (i = 0; i < sizeof(b); i++)
+        b[i] = 0;
+    put32(b, p->pixclk_100hz);
+    b[4] = p->pll_id;
+    b[5] = p->encoderobjid;
+    b[6] = p->encoder_mode;
+    b[7] = p->miscinfo;
+    b[8] = p->crtc_id;
+    b[9] = p->deep_color_ratio;
+    return dmub32_vbios_cmd(dm, RD_DMUB_VBIOS_SET_PIXEL_CLOCK, b, sizeof(b));
+}
+
+int dmub32_encoder_control(rdna3_dmub *dm, const rdna3_dig_enc_v1_5 *p)
+{
+    /* payload_bytes = sizeof(union dig_encoder_control_parameters_v1_5) = 12 */
+    uint8_t b[12];
+    uint32_t i;
+    for (i = 0; i < sizeof(b); i++)
+        b[i] = 0;
+    b[0] = p->digid;
+    b[1] = p->action;
+    b[2] = p->digmode;
+    b[3] = p->lanenum;
+    put32(b + 4, p->pclk_10khz);
+    b[8] = p->bitpercolor;
+    b[9] = p->dplinkrate_270mhz;
+    return dmub32_vbios_cmd(dm, RD_DMUB_VBIOS_DIGX_ENCODER_CONTROL, b, sizeof(b));
+}
+
 uint32_t dmub32_trace_wptr(rdna3_dmub *dm)
 {
     return RR(dm->d, regDMCUB_OUTBOX0_WPTR);

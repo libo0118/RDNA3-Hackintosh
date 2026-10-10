@@ -142,7 +142,10 @@ void RDNA3Bringup::stopAndFree()
     if (fSos.data)
         IOFree(fSos.data, fSos.len);
     if (fSmu) IOFree(fSmu, sizeof(*fSmu));
-    if (fDmub) IOFree(fDmub, sizeof(*fDmub));
+    if (fDmub) {
+        fOwner->displayMirrorOff(fDmub);
+        IOFree(fDmub, sizeof(*fDmub));
+    }
     if (fRom) IOFree(fRom, RD_VBIOS_MAX_LEN);
     if (fDisc) IOFree(fDisc, sizeof(*fDisc));
     if (fDev) IOFree(fDev, sizeof(*fDev));
@@ -553,8 +556,11 @@ bool RDNA3Bringup::hwInit()
         if (fDmubMode && fPmMode && dmub32_is_supported(fDev))
             dmub32_log_regs(fDev, "after the SMU");
         /* amdgpu_dm hw_init comes after the SMU in soc21's IP order */
-        if (fDmubMode)
+        if (fDmubMode) {
             dmubInit();
+            if (fDmub && fDmub->hw_init)
+                fOwner->displayMirror(fDmub);   /* rdna3mirror=1: step 9b */
+        }
     }
 
     /* level 6: GMC (gmc_v11_0_hw_init -> gart_enable): GART table in

@@ -6,10 +6,12 @@
 #include "dcn32.h"
 #include "gen/dcn_3_2_1.h"
 #include "gen/dcn_3_2_0_dig.h"
+#include "gen/dcn_3_2_0_pipe.h"
 
 #define HUBP_STRIDE (regHUBP1_DCHUBP_CNTL - regHUBP0_DCHUBP_CNTL)    /* 0xdc */
 #define OTG_STRIDE  (regOTG1_OTG_CONTROL - regOTG0_OTG_CONTROL)      /* 0x80 */
 #define DPP_STRIDE  (regCNVC_CUR1_CURSOR0_CONTROL - regCNVC_CUR0_CURSOR0_CONTROL)   /* 0x16b */
+#define PG_STRIDE   (regDOMAIN1_PG_CONFIG - regDOMAIN0_PG_CONFIG)                  /* 2 */
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -101,6 +103,12 @@ int dcn32_read_state(rdna3_dev *d, rdna3_dcn *dc)
         uint32_t cntl = RH(d, regHUBP0_DCHUBP_CNTL, p), otg, dim;
         rdna3_dcn_head *h = &dc->head[dc->nheads];
         if (cntl == 0xffffffffu || GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN))
+            continue;
+        /* a power-gated pipe (dcn32_hubp_pg_control) reads back nothing
+         * meaningful: BLANK_EN 0 / VTG_SEL 0 would look lit on OTG 0 */
+        if (GET(rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, regDOMAIN0_PG_STATUS_BASE_IDX,
+                                               regDOMAIN0_PG_STATUS + PG_STRIDE * p)),
+                DOMAIN0_PG_STATUS, DOMAIN_PGFSM_PWR_STATUS))
             continue;
         otg = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_VTG_SEL);
         if (otg >= RD_DCN_MAX_PIPES ||

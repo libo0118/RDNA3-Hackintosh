@@ -28,6 +28,7 @@ extern "C" {
 #include "vbios.h"
 #include "atom.h"
 #include "dcn32_mode.h"
+#include "dcn32_clone.h"
 }
 #include "rdna3k_abi.h"
 
@@ -305,6 +306,74 @@ void RDNA3Accel::displayPublishRoutes()
     }
 }
 
+/* rdna3mirror=1 with rdna3dmub=1: the boot head's picture on the other
+ * TMDS monitor (hw/dcn32_clone.c). The connector must have a sink (HPD),
+ * a DDC EDID (TMDS: HDMI or a DP++ adaptor) and the boot mode in it. fDcn
+ * keeps describing the boot heads only: the framebuffer's head numbers do
+ * not move. */
+void RDNA3Accel::displayMirror(rdna3_dmub *dm)
+{
+    uint32_t want = 0;
+    PE_parse_boot_argn("rdna3mirror", &want, sizeof(want));
+    if (!want)
+        return;
+    if (!fDcn || !fDispDev || !fDispLock || !fPaths || !fConnectors || !fDcn->nheads) {
+        setProperty("RDNA3,Mirror", "failed: no boot head / connectors");
+        return;
+    }
+    if (!fMirror)
+        fMirror = (rdna3_dcn_clone *)IOMalloc(sizeof(rdna3_dcn_clone));
+    if (!fMirror)
+        return;
+    IOLockLock(fDispLock);
+    const rdna3_dcn_head *h = &fDcn->head[0];
+    int boot_aux = head_aux(h, fPaths, fNPaths);
+    int ret = RDNA3_ENODEV;
+    char val[128];
+    snprintf(val, sizeof(val), "failed: no other TMDS monitor with the boot mode");
+    for (uint32_t i = 0; i < fNConnectors && !fMirrorOn; i++) {
+        const rdna3_connector *c = &fConnectors[i];
+        const rdna3_display_path *p = path_for_aux(fPaths, fNPaths, c->aux);
+        rdna3_edid e;
+        int k;
+        if ((int)c->aux == boot_aux || !c->hpd || c->dp || c->edid_len <= 0 || !p)
+            continue;
+        if (edid_parse(c->edid, (uint32_t)c->edid_len, &e) != 0 ||
+            (k = dcn32_match_head_mode(h, 0, &e)) < 0) {
+            LOG("display: mirror: the monitor on AUX%u has no %ux%u mode like the boot head", c->aux,
+                h->h_active, h->v_active);
+            continue;
+        }
+        ret = dcn32_clone_plan(fDispDev, fDcn, 0, p, e.mode[k].pixel_khz, fMirror);
+        if (ret == RDNA3_OK)
+            ret = dcn32_clone_enable(fDispDev, dm, fMirror);
+        if (ret == RDNA3_OK) {
+            fMirrorOn = true;
+            snprintf(val, sizeof(val), "%s-%u UNIPHY%c, pipe %u OTG %u DIG%c, %u kHz",
+                     vbios_connector_name(p->connector), p->connector_enum, 'A' + fMirror->dst_be,
+                     fMirror->dst_pipe, fMirror->dst_otg, 'A' + fMirror->dst_fe, fMirror->pclk_khz);
+        } else {
+            snprintf(val, sizeof(val), "failed (%d) on %s-%u", ret, vbios_connector_name(p->connector),
+                     p->connector_enum);
+        }
+        break;
+    }
+    IOLockUnlock(fDispLock);
+    setProperty("RDNA3,Mirror", val);
+    setNumber("RDNA3,MirrorResult", (uint64_t)(int64_t)ret, 64);
+    LOG("display: mirror: %s", val);
+}
+
+void RDNA3Accel::displayMirrorOff(rdna3_dmub *dm)
+{
+    if (!fMirrorOn || !fMirror || !fDispLock)
+        return;
+    IOLockLock(fDispLock);
+    dcn32_clone_disable(fDispDev, dm, fMirror);
+    fMirrorOn = false;
+    IOLockUnlock(fDispLock);
+}
+
 IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
 {
     if (!e || e->version != RD3K_DISPLAY_ABI_VERSION) {
@@ -382,6 +451,8 @@ void RDNA3Accel::displayFree()
     fConnectors = nullptr;
     fNConnectors = 0;
     if (fDcn) IOFree(fDcn, sizeof(rdna3_dcn));
+    if (fMirror) IOFree(fMirror, sizeof(rdna3_dcn_clone));
+    fMirror = nullptr;
     if (fDispDev) IOFree(fDispDev, sizeof(rdna3_dev));
     if (fDispLock) IOLockFree(fDispLock);
     fDcn = nullptr;

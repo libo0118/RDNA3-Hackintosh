@@ -57,6 +57,9 @@
 #include "gen/dcn_3_2_0_gpio.h"
 #include "gen/dcn_3_2_0_i2c.h"
 #include "gen/dcn_3_2_0_dig.h"
+#include "gen/dcn_3_2_0_pipe.h"
+#include "gen/dcn_3_2_0_clone.h"
+#include "dcn32_clone.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
@@ -91,6 +94,8 @@ static int failures;
 #define SMN_ROM_OFFSET_CTRL ((NBIO_B5 + regREGS_ROM_OFFSET_CTRL) * 4u)
 #define VBIOS_LEN  8192u
 #define DCN_B2     0x34C0u   /* DCN segment 2 (dcn_3_2_1 DCN_BASE__INST0_SEG2) */
+#define DCN_B3     0x9000u   /* DCN segment 3: MPC */
+#define DCN_B1     0xC0u     /* DCN segment 1: DCCG */
 #define HUBP(reg, n) (DCN_B2 + reg + (regHUBP1_DCHUBP_CNTL - regHUBP0_DCHUBP_CNTL) * (n))
 #define OTG(reg, n)  (DCN_B2 + reg + (regOTG1_OTG_CONTROL - regOTG0_OTG_CONTROL) * (n))
 
@@ -180,7 +185,16 @@ typedef struct sim {
         int running, psp_loaded, hang;
         unsigned boots, stops, bad_boots, cmds, caps_queries, bad_cmds, tx_cmds;
         uint8_t tx[16];
+        /* VBIOS commands in order: sub type, and the payloads of the last
+         * SetPixelClock / DIGxEncoderControl */
+        uint8_t seq[16], seq_tx_action[16];
+        unsigned nseq;
+        uint8_t pixclk[16], enc[12];
     } dmub;
+    /* DCN pipe power domains (DOMAINn_PG_*) once dcn_pg is on: writes to
+     * the HUBP/DPP of a gated pipe are lost, as on the chip */
+    int dcn_pg;
+    unsigned dcn_gated_drops, dcn_pg_no_request;
     uint32_t i2c_off, i2c_seg;
     /* recovery: SQ_CMD kills, RLC safe mode, GRBM soft resets, mode-1 resets,
      * page-fault IVs */
@@ -798,14 +812,32 @@ static void dmub_inbox(uint32_t wptr)
             hdr &= ~RD_DMUB_HDR_RET_STATUS;
             memcpy(c, &hdr, 4);
             break;
-        case RD_DMUB_CMD_VBIOS:
-            if (((hdr >> 8) & 0xff) == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && ((hdr >> 24) & 0x3f) == 60) {
+        case RD_DMUB_CMD_VBIOS: {
+            uint32_t sub = (hdr >> 8) & 0xff, len = (hdr >> 24) & 0x3f;
+            if (S.dmub.nseq < 16) {
+                S.dmub.seq_tx_action[S.dmub.nseq] = c[5];
+                S.dmub.seq[S.dmub.nseq++] = (uint8_t)sub;
+            }
+            if (sub == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && len == 60) {
                 memcpy(S.dmub.tx, c + 4, 16);
                 S.dmub.tx_cmds++;
+                /* what the table does to the back end of the PHY */
+                if (c[4] < 5 && (c[5] == RD_ATOM_TX_ENABLE || c[5] == RD_ATOM_TX_DISABLE)) {
+                    uint32_t *en = &S.reg[DCN_B2 + regDIG0_DIG_BE_EN_CNTL + RD_CLONE_DIGFE_STRIDE * c[4]];
+                    if (c[5] == RD_ATOM_TX_ENABLE)
+                        *en |= DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK;
+                    else
+                        *en &= ~DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK;
+                }
+            } else if (sub == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && len == 16) {
+                memcpy(S.dmub.pixclk, c + 4, 16);
+            } else if (sub == RD_DMUB_VBIOS_DIGX_ENCODER_CONTROL && len == 12) {
+                memcpy(S.dmub.enc, c + 4, 12);
             } else {
                 S.dmub.bad_cmds++;
             }
             break;
+        }
         default:
             S.dmub.bad_cmds++;
         }
@@ -1692,6 +1724,42 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             return;
         }
     }
+    /* DCN power domains, DET segments */
+    if (dw >= DCN_B2 + regDOMAIN0_PG_CONFIG && dw < DCN_B2 + regDOMAIN0_PG_CONFIG + 4 * 2 &&
+        !((dw - DCN_B2 - regDOMAIN0_PG_CONFIG) & 1)) {
+        uint32_t gate = (v & DOMAIN0_PG_CONFIG__DOMAIN_POWER_GATE_MASK) ? 2u : 0u;
+        *R(dw) = v;
+        if (!(S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL] & DC_IP_REQUEST_CNTL__IP_REQUEST_EN_MASK))
+            S.dcn_pg_no_request++;
+        else
+            S.reg[dw + 1] = gate << DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT;
+        return;
+    }
+    if (dw >= DCN_B2 + regDCHUBBUB_DET0_CTRL && dw < DCN_B2 + regDCHUBBUB_DET0_CTRL + 4) {
+        uint32_t sz = v & DCHUBBUB_DET0_CTRL__DET0_SIZE_MASK;
+        *R(dw) = (v & ~DCHUBBUB_DET0_CTRL__DET0_SIZE_CURRENT_MASK) |
+                 (sz << DCHUBBUB_DET0_CTRL__DET0_SIZE_CURRENT__SHIFT);
+        return;
+    }
+    if (S.dcn_pg) {
+        for (uint32_t n = 0; n < RD_DCN_MAX_PIPES; n++) {
+            uint32_t st = S.reg[DCN_B2 + regDOMAIN0_PG_STATUS + 2 * n];
+            if (!(st & DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS_MASK))
+                continue;
+            for (size_t k = 0; k < sizeof(rd_clone_hubp) / 2 + 1; k++) {
+                uint32_t ro = k < sizeof(rd_clone_hubp) / 2 ? rd_clone_hubp[k] : regHUBP0_DCHUBP_CNTL;
+                if (dw == DCN_B2 + ro + RD_CLONE_HUBP_STRIDE * n) {
+                    S.dcn_gated_drops++;
+                    return;
+                }
+            }
+            for (size_t k = 0; k < sizeof(rd_clone_dpp) / 2; k++)
+                if (dw == DCN_B2 + rd_clone_dpp[k] + RD_CLONE_DPP_STRIDE * n) {
+                    S.dcn_gated_drops++;
+                    return;
+                }
+        }
+    }
     /* DCN HUBPREQ: the LOW address write latches the flip (at the next
      * vupdate, which the model takes as "now" unless dcn_hold) */
     for (uint32_t n = 0; n < RD_DCN_MAX_PIPES; n++) {
@@ -2097,6 +2165,8 @@ static void make_discovery(amd_discovery *disc)
     IP(AMD_HWID_OSSSYS, 6, 0, 0, OSS_BASE0, 0, 0);
     IP(AMD_HWID_SDMA0, 6, 0, 3, GC_BASE0, 0xA000, 0x1C000);
     IP(AMD_HWID_DMU, 3, 2, 1, 0x12, 0xC0, DCN_B2);
+    disc->ips[disc->num_ips - 1].num_base = disc->ips[disc->num_ips - 1].num_base_kept = 4;
+    disc->ips[disc->num_ips - 1].base[3] = DCN_B3;
     disc->num_dies = 1;
 }
 
@@ -3479,6 +3549,153 @@ static void run(const char *fwdir)
         CHECK(cw == dm.fb_off + dm.region[RD_DMUB_WIN_INST_CONST].base);   /* FB physical, offset 0 */
         CHECK(memcmp(S.vram + dm.fb_off + dm.region[RD_DMUB_WIN_INST_CONST].base, dm.fw_inst_const, 64) == 0);
         CHECK(dmub32_query_caps(&dm) == RDNA3_OK);
+
+        /* second monitor: clone the GOP head (pipe 1 -> OTG 2 -> OPP 2,
+         * DIGC -> UNIPHY B, HDMI) onto UNIPHY D. The free pipes are power
+         * gated and own no DET; the PHY side goes through the DMCUB. */
+        {
+            static rdna3_dcn dc2;
+            static rdna3_dcn_clone cl;
+            rdna3_display_path path;
+            uint32_t k2, n;
+            memset(&dc2, 0, sizeof(dc2));
+            S.dcn_pg = 1;
+            for (n = 0; n < RD_DCN_MAX_PIPES; n++) {
+                int on = n == 1;
+                S.reg[DCN_B2 + regDOMAIN0_PG_CONFIG + 2 * n] = on ? 0 : DOMAIN0_PG_CONFIG__DOMAIN_POWER_GATE_MASK;
+                S.reg[DCN_B2 + regDOMAIN0_PG_STATUS + 2 * n] = on ? 0 : 2u << DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT;
+                S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL + RD_CLONE_MPCC_STRIDE * n] = on ? 1 : 0xf;
+                S.reg[DCN_B3 + regMPCC0_MPCC_BOT_SEL + RD_CLONE_MPCC_STRIDE * n] = 0xf;
+                S.reg[DCN_B3 + regMPCC0_MPCC_OPP_ID + RD_CLONE_MPCC_STRIDE * n] = on ? 2 : 0xf;
+                S.reg[DCN_B3 + regMPC_OUT0_MUX + (regMPC_OUT1_MUX - regMPC_OUT0_MUX) * n] = n == 2 ? 1 : 0xf;
+                S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + n] = on ? (8u | 8u << 8) : 0;
+            }
+            S.reg[DCN_B2 + regODM0_OPTC_DATA_SOURCE_SELECT + RD_CLONE_ODM_STRIDE * 2] =
+                2u << ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG0_SRC_SEL__SHIFT;
+            /* values to carry over: every block gets a marker */
+            for (k2 = 0; k2 < sizeof(rd_clone_hubp) / 2; k2++)
+                S.reg[DCN_B2 + rd_clone_hubp[k2] + RD_CLONE_HUBP_STRIDE] = 0x1000 + k2;
+            for (k2 = 0; k2 < sizeof(rd_clone_dpp) / 2; k2++)
+                S.reg[DCN_B2 + rd_clone_dpp[k2] + RD_CLONE_DPP_STRIDE] = 0x2000 + k2;
+            S.reg[DCN_B2 + regCM0_CM_GAMCOR_CONTROL + RD_CLONE_DPP_STRIDE] = 1;   /* LUT RAM in use */
+            S.reg[DCN_B2 + regHUBP0_DCHUBP_CNTL + RD_CLONE_HUBP_STRIDE] =
+                (2u << HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL__SHIFT) | HUBP0_DCHUBP_CNTL__HUBP_TTU_DISABLE_MASK;
+            S.reg[DCN_B2 + 0x2094u + RD_CLONE_DIGFE_STRIDE * 2] = 0x11;
+            S.reg[DCN_B2 + regDIG0_HDMI_GENERIC_PACKET_CONTROL0 + RD_CLONE_DIGFE_STRIDE * 2] = 0x33;
+            S.reg[DCN_B2 + regDIG0_DIG_FE_CNTL + RD_CLONE_DIGFE_STRIDE * 2] =
+                2u | DIG0_DIG_FE_CNTL__DIG_SYMCLK_FE_ON_MASK;
+            S.reg[DCN_B2 + regDIG0_TMDS_CTL_BITS + RD_CLONE_DIGFE_STRIDE * 1] = 0x44;
+            S.reg[DCN_B1 + regDPPCLK0_DTO_PARAM + 1] = 0x00640032;
+            S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] = 3u << 4;
+            S.reg[DCN_B1 + regOTG_PIXEL_RATE_DIV] = 5u << 6;
+            S.reg[DCN_B1 + regOTG0_PIXEL_RATE_CNTL + 4 * 2] = OTG0_PIXEL_RATE_CNTL__DPDTO0_ENABLE_STATUS_MASK;
+
+            /* the ATOM tests above ran the VBIOS CRTC tables: light OTG 2
+             * again (DIG route as the DCN test set it) */
+            S.reg[OTG(regOTG0_OTG_CONTROL, 2)] = 1;
+            CHECK(dcn32_read_state(&dev, &dc2) == 1 && dc2.head[0].dig_mode == 3);
+            memset(&path, 0, sizeof(path));
+            path.transmitter = 3;           /* UNIPHY D: encoder UNIPHY1 enum 2 */
+            path.hpd = 2;
+            path.encoder_objid = 0x2120;
+            path.connector_objid = 0x310c;  /* HDMI type A */
+            /* not lit: no such head, no clock, DP source refused */
+            CHECK(dcn32_clone_plan(&dev, &dc2, 1, &path, 148500, &cl) == RDNA3_EINVAL);
+            CHECK(dcn32_clone_plan(&dev, &dc2, 0, &path, 0, &cl) == RDNA3_EINVAL);
+            dc2.head[0].dig_mode = 0;
+            CHECK(dcn32_clone_plan(&dev, &dc2, 0, &path, 148500, &cl) == RDNA3_EINVAL);
+            dc2.head[0].dig_mode = 3;
+            path.transmitter = 1;           /* the GOP's own PHY */
+            CHECK(dcn32_clone_plan(&dev, &dc2, 0, &path, 148500, &cl) == RDNA3_EBUSY);
+            path.transmitter = 3;
+            CHECK(dcn32_clone_plan(&dev, &dc2, 0, &path, 148500, &cl) == RDNA3_OK);
+            CHECK(cl.src_pipe == 1 && cl.src_otg == 2 && cl.src_opp == 2 && cl.src_mpcc == 1 &&
+                  cl.src_fe == 2 && cl.src_be == 1);
+            /* OTG 0 is taken: the stale DIGA back end still sources it */
+            CHECK(cl.dst_pipe == 0 && cl.dst_otg == 1 && cl.dst_opp == 1 && cl.dst_mpcc == 0 &&
+                  cl.dst_fe == 3 && cl.dst_be == 3 && cl.pll == 3);
+            CHECK(cl.det_src_new == 4 && cl.det_dst_new == 4);
+            /* no DMCUB, no picture */
+            CHECK(dcn32_clone_enable(&dev, NULL, &cl) == RDNA3_ENODEV);
+            S.dmub.nseq = 0;
+            CHECK(dcn32_clone_enable(&dev, &dm, &cl) == RDNA3_OK);
+            CHECK(S.dcn_gated_drops == 0 && S.dcn_pg_no_request == 0 && S.dmub.bad_cmds == 0);
+            CHECK(S.reg[DCN_B2 + regDOMAIN0_PG_STATUS] == 0 &&
+                  !(S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL] & DC_IP_REQUEST_CNTL__IP_REQUEST_EN_MASK));
+            CHECK((S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + 1] & 0x1f) == 4 &&
+                  (S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL] & 0x1f) == 4);
+            /* the copies */
+            for (k2 = 0; k2 < sizeof(rd_clone_hubp) / 2; k2++)
+                if (S.reg[DCN_B2 + rd_clone_hubp[k2]] != S.reg[DCN_B2 + rd_clone_hubp[k2] + RD_CLONE_HUBP_STRIDE])
+                    break;
+            CHECK(k2 == sizeof(rd_clone_hubp) / 2);
+            for (k2 = 0; k2 < sizeof(rd_clone_otg) / 2; k2++)
+                if (S.reg[DCN_B2 + rd_clone_otg[k2] + RD_CLONE_OTG_STRIDE] != S.reg[DCN_B2 + rd_clone_otg[k2] + RD_CLONE_OTG_STRIDE * 2])
+                    break;
+            CHECK(k2 == sizeof(rd_clone_otg) / 2);
+            CHECK(S.reg[DCN_B2 + regCM0_CM_GAMCOR_CONTROL] == 0 &&
+                  S.reg[DCN_B2 + rd_clone_dpp[0]] == 0x2000);
+            CHECK(S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS] ==
+                  S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS + RD_CLONE_HUBP_STRIDE]);
+            /* routing: OTG 1 <- OPP 1 <- MPCC 0 <- DPP 0, DIGD sources OTG 1,
+             * UNIPHY D takes DIGD in HDMI mode */
+            CHECK(S.reg[DCN_B2 + regHUBP0_DCHUBP_CNTL] ==
+                  (HUBP0_DCHUBP_CNTL__HUBP_TTU_DISABLE_MASK | 1u << HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL__SHIFT));
+            CHECK((S.reg[OTG(regOTG0_OTG_CONTROL, 1)] & 1) && ((S.reg[OTG(regOTG0_OTG_CONTROL, 1)] >> 8) & 3) == 2);
+            CHECK(((S.reg[DCN_B2 + regODM0_OPTC_DATA_SOURCE_SELECT + RD_CLONE_ODM_STRIDE] >> 16) & 0xf) == 1);
+            CHECK(S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL] == 0 && S.reg[DCN_B3 + regMPCC0_MPCC_OPP_ID] == 1 &&
+                  S.reg[DCN_B3 + regMPCC0_MPCC_BOT_SEL] == 0xf && (S.reg[DCN_B3 + regMPC_OUT1_MUX] & 0xf) == 0);
+            CHECK(S.reg[DCN_B2 + regDIG0_DIG_FE_CNTL + RD_CLONE_DIGFE_STRIDE * 3] ==
+                  (1u | DIG0_DIG_FE_CNTL__DIG_SYMCLK_FE_ON_MASK));
+            CHECK(S.reg[DCN_B2 + 0x2094u + RD_CLONE_DIGFE_STRIDE * 3] == 0x11 &&
+                  S.reg[DCN_B2 + regDIG0_HDMI_GENERIC_PACKET_CONTROL0 + RD_CLONE_DIGFE_STRIDE * 3] == 0);
+            CHECK(S.reg[DCN_B2 + regDIG0_TMDS_CTL_BITS + RD_CLONE_DIGFE_STRIDE * 3] == 0x44);
+            {
+                uint32_t be = S.reg[DCN_B2 + regDIG0_DIG_BE_CNTL + RD_CLONE_DIGFE_STRIDE * 3];
+                CHECK(((be >> 8) & 0x7f) == 1u << 3 && ((be >> 16) & 7) == 3);
+            }
+            /* DCCG */
+            CHECK(S.reg[DCN_B1 + regDPPCLK0_DTO_PARAM] == 0x00640032 && (S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] & 3) == 3);
+            CHECK(((S.reg[DCN_B1 + regOTG_PIXEL_RATE_DIV] >> 3) & 7) == 5 &&
+                  S.reg[DCN_B1 + regOTG1_PIXEL_RATE_CNTL] == 0);   /* status bits not copied */
+            /* the VBIOS commands: pixel clock, stream setup, PHY init, enable */
+            CHECK(S.dmub.nseq == 4 && S.dmub.seq[0] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK &&
+                  S.dmub.seq[1] == RD_DMUB_VBIOS_DIGX_ENCODER_CONTROL &&
+                  S.dmub.seq[2] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && S.dmub.seq_tx_action[2] == RD_ATOM_TX_INIT &&
+                  S.dmub.seq[3] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && S.dmub.seq_tx_action[3] == RD_ATOM_TX_ENABLE);
+            CHECK(S.dmub.pixclk[0] == (1485000 & 0xff) && S.dmub.pixclk[2] == (1485000 >> 16) &&
+                  S.dmub.pixclk[4] == RD_ATOM_COMBOPHY_PLL0 + 3 && S.dmub.pixclk[5] == 0x20 &&
+                  S.dmub.pixclk[6] == RD_ATOM_ENCODER_MODE_HDMI && S.dmub.pixclk[8] == 1);
+            CHECK(S.dmub.enc[0] == 3 && S.dmub.enc[1] == RD_ATOM_ENCODER_CMD_STREAM_SETUP &&
+                  S.dmub.enc[2] == RD_ATOM_ENCODER_MODE_HDMI && S.dmub.enc[3] == 4 &&
+                  S.dmub.enc[4] == (14850 & 0xff) && S.dmub.enc[5] == (14850 >> 8) && S.dmub.enc[8] == 2);
+            CHECK(S.dmub.tx[0] == 3 && S.dmub.tx[2] == 3 && S.dmub.tx[3] == 4 && S.dmub.tx[4] == (14850 & 0xff) &&
+                  S.dmub.tx[8] == 3 && S.dmub.tx[9] == 1u << 3 && S.dmub.tx[10] == 0x0c);
+            /* the core sees two heads now, the new one on UNIPHY D */
+            CHECK(dcn32_read_state(&dev, &dc2) == 2 && dc2.head[0].pipe == 0 && dc2.head[0].otg == 1 &&
+                  dc2.head[0].dig_fe == 3 && dc2.head[0].dig_be == 3 && dc2.head[0].dig_mode == 3 &&
+                  dc2.head[0].h_total == dc2.head[1].h_total && dc2.head[0].address == dc2.head[1].address);
+            /* the transmitter is lit: a second plan for it is refused */
+            CHECK(dcn32_clone_plan(&dev, &dc2, 1, &path, 148500, &cl) == RDNA3_EBUSY);
+            /* and off again */
+            {
+                static rdna3_dcn_clone off;
+                off.src_pipe = 1; off.src_otg = 2; off.dst_pipe = 0; off.dst_otg = 1; off.dst_opp = 1;
+                off.dst_mpcc = 0; off.dst_fe = 3; off.dst_be = 3; off.pll = 3; off.hpd = 2;
+                off.connector_id = 0x0c; off.dig_mode = 3; off.pclk_khz = 148500;
+                off.det_src = 8; off.det_dst = 0; off.det_src_new = 4; off.det_dst_new = 4;
+                S.dmub.nseq = 0;
+                CHECK(dcn32_clone_disable(&dev, &dm, &off) == RDNA3_OK);
+            }
+            CHECK(S.dmub.nseq == 1 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE);
+            CHECK(dcn32_read_state(&dev, &dc2) == 1 && dc2.head[0].pipe == 1);
+            CHECK((S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + 1] & 0x1f) == 8 &&
+                  (S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL] & 0x1f) == 0 &&
+                  S.reg[DCN_B2 + regDOMAIN0_PG_STATUS] == 2u << DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT &&
+                  S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL] == 0xf);
+            CHECK(S.dcn_gated_drops == 0 && S.dcn_pg_no_request == 0);   /* blanked before the gate */
+            S.dcn_pg = 0;
+        }
         /* unload */
         dmub32_hw_reset(&dm);
         CHECK(!dmub32_is_hw_init(&dev) && !S.dmub.running && S.dmub.stops == 3);
