@@ -88,7 +88,8 @@ logs "a prelinked copy … is already present". Without the entry all three
 load from the Auxiliary KC, which should work with the settings of section
 4 but has not been tried.
 
-The easy way (copies the kext, adds the entry, backs up `config.plist`):
+The easy way (copies the kext, adds the entry, backs up `config.plist`;
+needs `python3`, i.e. the Xcode command line tools: `xcode-select --install`):
 
 ```sh
 sudo diskutil mount disk0s1          # your EFI partition: diskutil list
