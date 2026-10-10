@@ -149,6 +149,9 @@ int  dmub32_hw_init(rdna3_dmub *dm, const uint8_t *vbios, uint32_t vbios_len, in
 /* CNTL/SEC_CNTL/scratch, the PSP-programmed CW0/CW1 and the fault
  * addresses into the log */
 void dmub32_log_state(rdna3_dmub *dm, const char *when);
+/* the same without a dmub_srv: when the PSP-programmed code windows
+ * (CW0/CW1) appear and disappear during bring-up (step 5b) */
+void dmub32_log_regs(rdna3_dev *d, const char *when);
 /* dmub_srv_wait_for_auto_load again, after a timed-out dmub32_hw_init */
 int  dmub32_wait_boot(rdna3_dmub *dm, uint32_t timeout_us);
 void dmub32_hw_reset(rdna3_dmub *dm);

@@ -277,7 +277,11 @@ static void dcn32_setup_windows(rdna3_dmub *dm)
  * addresses and whether the microcontroller's timer is running. */
 void dmub32_log_state(rdna3_dmub *dm, const char *when)
 {
-    rdna3_dev *d = dm->d;
+    dmub32_log_regs(dm->d, when);
+}
+
+void dmub32_log_regs(rdna3_dev *d, const char *when)
+{
     uint32_t t0 = RR(d, regDMCUB_TIMER_CURRENT), t1;
     udelay(d, 10);
     t1 = RR(d, regDMCUB_TIMER_CURRENT);

@@ -534,6 +534,10 @@ bool RDNA3Bringup::hwInit()
         return false;
     }
     publishString("RDNA3,Stage2", "PSP up, firmware loaded");
+    /* step 5b: the PSP programs the DMCUB code windows when it loads the
+     * image; see whether they are there now and after the SMU */
+    if (fDmubMode && dmub32_is_supported(fDev))
+        dmub32_log_regs(fDev, "after the PSP load");
 
     if (fLevel >= 5) {
         uint32_t smuv = 0, ifv = 0;
@@ -546,6 +550,8 @@ bool RDNA3Bringup::hwInit()
         /* smu_hw_init: power management, before the GMC like soc21's IP order */
         if (fPmMode)
             pmInit();
+        if (fDmubMode && fPmMode && dmub32_is_supported(fDev))
+            dmub32_log_regs(fDev, "after the SMU");
         /* amdgpu_dm hw_init comes after the SMU in soc21's IP order */
         if (fDmubMode)
             dmubInit();
