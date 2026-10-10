@@ -60,6 +60,7 @@ int psp13_init(rdna3_psp *psp, rdna3_dev *d, const uint8_t *sos_fw, size_t sos_l
 
 /* ------------------------- bootloader ------------------------- */
 
+/* psp_v13_0_is_sos_alive() */
 int psp13_is_sos_alive(rdna3_psp *psp)
 {
     return rdna3_rreg(psp->d, C2P(psp, 81)) != 0;
@@ -171,6 +172,7 @@ static int psp13_bl_load_sos(rdna3_psp *psp, const amd_psp_bl_step *s)
 {
     int ret;
     if (psp13_is_sos_alive(psp)) {
+        /* psp_v13_0_init_sos_version() */
         psp->sos_fw_version = rdna3_rreg(psp->d, C2P(psp, 58));
         RLOG(psp->d, "PSP: sOS already alive (0x%08x), skipping bootloader", psp->sos_fw_version);
         return RDNA3_OK;
@@ -197,6 +199,7 @@ int psp13_bootloader_load_all(rdna3_psp *psp)
     int ret;
     for (i = 0; i < amd_psp_bl_sequence_len; i++) {
         const amd_psp_bl_step *s = &amd_psp_bl_sequence[i];
+        /* is_psp_fw_valid() */
         if (!psp->sos.bin[s->bin].size || !psp->sos.bin[s->src].size)
             continue;
         RLOG(psp->d, "PSP: bootloader load %s (%u bytes)", s->name, psp->sos.bin[s->src].size);
@@ -214,6 +217,7 @@ int psp13_bootloader_load_all(rdna3_psp *psp)
 
 /* ---------------------------- ring ---------------------------- */
 
+/* psp_v13_0_ring_create() (bare metal) */
 int psp13_ring_create(rdna3_psp *psp)
 {
     rdna3_dev *d = psp->d;
@@ -239,6 +243,7 @@ int psp13_ring_create(rdna3_psp *psp)
     return ret;
 }
 
+/* psp_v13_0_ring_stop() (bare metal) */
 int psp13_ring_stop(rdna3_psp *psp)
 {
     rdna3_dev *d = psp->d;
@@ -255,7 +260,7 @@ static int psp13_ring_submit(rdna3_psp *psp, uint64_t cmd_mc, uint64_t fence_mc,
     const uint32_t ring_dw = PSP_RING_SIZE / 4;
     const uint32_t frame_dw = (uint32_t)sizeof(struct psp_gfx_rb_frame) / 4;
     struct psp_gfx_rb_frame f;
-    uint32_t wptr = rdna3_rreg(d, C2P(psp, 67));
+    uint32_t wptr = rdna3_rreg(d, C2P(psp, 67));   /* psp_v13_0_ring_get_wptr() */
     uint64_t frame_off;
 
     if (wptr % ring_dw == 0)
@@ -276,7 +281,7 @@ static int psp13_ring_submit(rdna3_psp *psp, uint64_t cmd_mc, uint64_t fence_mc,
     rdna3_hdp_flush(d);
 
     wptr = (wptr + frame_dw) % ring_dw;
-    rdna3_wreg(d, C2P(psp, 67), wptr);
+    rdna3_wreg(d, C2P(psp, 67), wptr);   /* psp_v13_0_ring_set_wptr() */
     return RDNA3_OK;
 }
 
@@ -326,6 +331,7 @@ static int psp13_cmd_submit(rdna3_psp *psp, struct psp_gfx_cmd_resp *cmd)
 
 /* ---------------------------- TMR ---------------------------- */
 
+/* psp_load_toc(), psp_prep_load_toc_cmd_buf() */
 int psp13_load_toc(rdna3_psp *psp, uint32_t *tmr_size)
 {
     struct psp_gfx_cmd_resp cmd;
@@ -369,6 +375,7 @@ int psp13_tmr_init(rdna3_psp *psp)
     return psp->tmr == UINT64_MAX ? RDNA3_ENOMEM : RDNA3_OK;
 }
 
+/* psp_tmr_load(), psp_prep_tmr_cmd_buf() (bare metal: SETUP_TMR) */
 int psp13_tmr_load(rdna3_psp *psp)
 {
     struct psp_gfx_cmd_resp cmd;
@@ -388,6 +395,7 @@ int psp13_tmr_load(rdna3_psp *psp)
     return psp13_cmd_submit(psp, &cmd);
 }
 
+/* psp_rlc_autoload_start() */
 int psp13_autoload_rlc(rdna3_psp *psp)
 {
     struct psp_gfx_cmd_resp cmd;
@@ -421,6 +429,8 @@ int psp13_stage_ucodes(rdna3_psp *psp, const amd_ucode_plan *plan,
     return RDNA3_OK;
 }
 
+/* psp_execute_ip_fw_load(), psp_prep_load_ip_fw_cmd_buf(); the fw_type
+ * (psp_get_fw_type) comes with the ucode from amd_ucode_plan_build() */
 int psp13_load_ip_fw(rdna3_psp *psp, const amd_ucode *u, uint64_t mc)
 {
     struct psp_gfx_cmd_resp cmd;
@@ -464,7 +474,7 @@ int psp13_hw_init(rdna3_psp *psp, const amd_ucode_plan *plan,
 
     /* pmfw_centralized_cstate_management: PMFW before SETUP_TMR */
     smc = amd_ucode_plan_find(plan, AMD_UCODE_SMC);
-    if (smc) {
+    if (smc) {   /* psp_load_smu_fw() */
         ret = psp13_load_ip_fw(psp, smc, mc[smc - plan->ucode]);
         if (ret)
             return ret;

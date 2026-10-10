@@ -437,7 +437,7 @@ void RDNA3Bringup::resetIfPspStuck()
 
 /* amdgpu_device_init: "Post card if necessary". amdgpu_device_need_post
  * (BIOS scratch 7) -> amdgpu_device_asic_init for GC 11: wait for the PSP
- * bootloader, then amdgpu_atomfirmware_asic_init. In a passthrough VM whose
+ * bootloader (amdgpu_psp_wait_for_bootloader), then amdgpu_atomfirmware_asic_init. In a passthrough VM whose
  * UEFI did not run the card's option ROM the GPU is not posted: the FB
  * location reads 0. boot-arg rdna3post=0 skips it. */
 bool RDNA3Bringup::postIfNeeded()

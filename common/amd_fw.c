@@ -142,7 +142,10 @@ amd_fw_status amd_psp_sos_parse(const uint8_t *fw, size_t len, amd_psp_sos *out)
     return AMD_FW_OK;
 }
 
-/* psp_hw_start() order; values from enum psp_bootloader_cmd */
+/* psp_hw_start() order; values from enum psp_bootloader_cmd. One step per
+ * psp_v13_0_bootloader_load_* (psp13.c runs them): psp_v13_0_bootloader_load_kdb,
+ * psp_v13_0_bootloader_load_sysdrv, psp_v13_0_bootloader_load_soc_drv,
+ * psp_v13_0_bootloader_load_intf_drv, psp_v13_0_bootloader_load_dbg_drv */
 const amd_psp_bl_step amd_psp_bl_sequence[] = {
     { AMD_PSP_BIN_KDB,      AMD_PSP_BIN_KDB,      0x80000u,    "KDB" },
     /* psp_v13_0_bootloader_load_spl() passes &psp->kdb, not &psp->spl.
@@ -185,7 +188,7 @@ static void add(builder *bd, uint16_t id, uint16_t type, uint8_t which,
     }
     u = &bd->plan->ucode[bd->plan->count++];
     u->ucode_id = id;
-    u->psp_type = type;
+    u->psp_type = type;   /* psp_get_fw_type(), per ucode below */
     u->blob = which;
     u->offset = off;
     u->size = size;
