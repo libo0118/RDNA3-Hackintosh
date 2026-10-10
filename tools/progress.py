@@ -44,6 +44,7 @@ AMDGPU_STEPS = {
     "GFX 11": ["8"], "Rings / fences": ["7", "8"], "MES queues": ["mes"],
     "Discovery / VBIOS": ["2"], "DMCUB": ["5b"], "Display: OTG / AUX": ["2", "9"],
     "Display: modeset": ["modeset"],
+    "Display: hotplug": ["hotplug"],
 }
 UAPI_STEPS = {
     "amdgpu ioctls": ["7", "8"], "DRM core ioctls": ["7", "8"], "INFO queries": ["7"],

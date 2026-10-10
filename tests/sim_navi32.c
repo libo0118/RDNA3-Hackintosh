@@ -26,6 +26,7 @@
 #include "smu13.h"
 #include "vbios.h"
 #include "dcaux.h"
+#include "dchpd.h"
 #include "edid.h"
 #include "dcn32_modeset.h"
 #include "atom.h"
@@ -216,6 +217,13 @@ typedef struct sim {
      * (0 = never), as it did on the card after the clone */
     unsigned smu_wedge_at;
     unsigned hpd_irqs;
+    /* HPD cable model (dchpd.c): pins in hpd_model have a cable level and
+     * the toggle filter: DC_HPD_SENSE follows the cable at once,
+     * DC_HPD_SENSE_DELAYED once the cable held its level for the
+     * DC_HPD_TOGGLE_FILT_CNTL connect / disconnect delay (10 ms units) */
+    uint32_t hpd_model;
+    int8_t   hpd_cable[6], hpd_delayed[6];
+    uint64_t hpd_since[6];
     /* lit OTGs count frames while time passes; with OTG_CRC_EN their CRC
      * is a function of what they scan out (surface address + timing) */
     int dcn_frames;
@@ -809,6 +817,35 @@ static void hpd_eval(uint32_t n)
     *st |= HPD0_DC_HPD_INT_STATUS__DC_HPD_INT_STATUS_MASK;
     S.hpd_irqs++;
     ih_push_iv(RD_IH_CLIENT_DCE, RD_IH_SRC_DC_HPD1_INT, 0, 0, 0, n, 0);
+}
+static void hpd_filter_eval(uint32_t n)
+{
+    uint32_t f = S.reg[HPDR(regHPD0_DC_HPD_TOGGLE_FILT_CNTL, n)];
+    uint32_t *st = &S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, n)];
+    uint64_t delay = S.hpd_cable[n]
+        ? 10000ull * ((f & HPD0_DC_HPD_TOGGLE_FILT_CNTL__DC_HPD_CONNECT_INT_DELAY_MASK) >>
+                      HPD0_DC_HPD_TOGGLE_FILT_CNTL__DC_HPD_CONNECT_INT_DELAY__SHIFT)
+        : 10000ull * ((f & HPD0_DC_HPD_TOGGLE_FILT_CNTL__DC_HPD_DISCONNECT_INT_DELAY_MASK) >>
+                      HPD0_DC_HPD_TOGGLE_FILT_CNTL__DC_HPD_DISCONNECT_INT_DELAY__SHIFT);
+    if (S.hpd_delayed[n] != S.hpd_cable[n] && S.now_us - S.hpd_since[n] >= delay)
+        S.hpd_delayed[n] = S.hpd_cable[n];
+    *st &= ~(HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK | HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED_MASK);
+    *st |= (S.hpd_cable[n] ? HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK : 0) |
+           (S.hpd_delayed[n] ? HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED_MASK : 0);
+}
+static void hpd_cable(uint32_t n, int on)
+{
+    if (!(S.hpd_model & (1u << n))) {
+        S.hpd_model |= 1u << n;
+        S.hpd_delayed[n] = (S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, n)] &
+                            HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED_MASK) ? 1 : 0;
+        S.hpd_cable[n] = S.hpd_delayed[n];
+    }
+    if (S.hpd_cable[n] != (on ? 1 : 0)) {
+        S.hpd_cable[n] = on ? 1 : 0;
+        S.hpd_since[n] = S.now_us;
+    }
+    hpd_filter_eval(n);
 }
 static void hpd_plug(uint32_t n, int on)
 {
@@ -2227,6 +2264,9 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
         uint32_t b = S.i2c_buf[S.i2c_ri++ % sizeof(S.i2c_buf)];
         return (S.reg[dw] & ~DC_I2C_DATA__DC_I2C_DATA_MASK) | (b << DC_I2C_DATA__DC_I2C_DATA__SHIFT);
     }
+    for (uint32_t n = 0; n < RD_AUX_ENGINES; n++)
+        if ((S.hpd_model & (1u << n)) && dw == HPDR(regHPD0_DC_HPD_INT_STATUS, n))
+            hpd_filter_eval(n);
     for (uint32_t n = 0; n < RD_AUX_ENGINES; n++) {
         if (dw == AUXR(regDP_AUX0_AUX_SW_STATUS, n))
             return S.aux_status;
@@ -3834,6 +3874,134 @@ static void run(const char *fwdir)
         CHECK(S.aux_bad == 0);
     }
 
+    /* hotplug after boot (dchpd.c, rdna3hotplug=1): program_hpd_filter on
+     * the toggle filter, the debounced DC_HPD_SENSE_DELAYED poll, the sink
+     * read again with dm_helpers_read_local_edid's tries, and what a change
+     * on each pin means for the display side */
+    {
+        static rdna3_hpd_track t;
+        static rdna3_connector c;
+        rdna3_display_path paths[2];
+        rdna3_dcn_head h;
+        rdna3_hp_view v;
+        uint32_t on_ms = 0, off_ms = 0, tf = 0, ft = 0, raw = 0, gen;
+        uint64_t t0;
+        /* TMDS 500/100 ms, DP 80/0 ms in 10 ms units; eDP not programmed */
+        S.reg[HPDR(regHPD0_DC_HPD_CONTROL, 2)] = 0;
+        S.reg[HPDR(regHPD0_DC_HPD_FAST_TRAIN_CNTL, 2)] = 0x10000a05u;
+        CHECK(dchpd_program_filter(&dev, 2, RD_ATOM_CONN_HDMI_A, 1) == RDNA3_OK);
+        CHECK(S.reg[HPDR(regHPD0_DC_HPD_CONTROL, 2)] & HPD0_DC_HPD_CONTROL__DC_HPD_EN_MASK);
+        dchpd_filter_info(&dev, 2, &on_ms, &off_ms, &tf, &ft);
+        CHECK(on_ms == 500 && off_ms == 100 && tf == (50u | 10u << 20) && ft == 0x10000a05u);
+        CHECK(dchpd_program_filter(&dev, 0, RD_ATOM_CONN_DISPLAYPORT, 1) == RDNA3_OK);
+        CHECK(S.reg[HPDR(regHPD0_DC_HPD_TOGGLE_FILT_CNTL, 0)] == 8);
+        CHECK(dchpd_program_filter(&dev, 3, RD_ATOM_CONN_EDP, 1) == RDNA3_EINVAL &&
+              S.reg[HPDR(regHPD0_DC_HPD_TOGGLE_FILT_CNTL, 3)] == 0);
+        CHECK(dchpd_program_filter(&dev, 5, RD_ATOM_CONN_HDMI_A, 1) == RDNA3_EINVAL);
+        CHECK(dchpd_program_filter(&dev, 1, RD_ATOM_CONN_DVI_D, 0) == RDNA3_OK &&
+              S.reg[HPDR(regHPD0_DC_HPD_TOGGLE_FILT_CNTL, 1)] == 0);
+        CHECK(S.reg[HPDR(regHPD0_DC_HPD_FAST_TRAIN_CNTL, 2)] == 0x10000a05u);   /* DC leaves it */
+        CHECK(dchpd_program_filter(&dev, 1, RD_ATOM_CONN_DVI_D, 1) == RDNA3_OK);
+        /* pin 0 has its DP sink, pin 2 a cable not plugged yet */
+        hpd_cable(0, 1);
+        hpd_cable(2, 0);
+        S.now_us += 1000000;
+        dchpd_track_init(&t, &dev, RD_AUX_ENGINES, RD_HPD_DEBOUNCE);
+        CHECK(t.state[0] == 1 && t.state[2] == 0 && t.state[1] == 0 && t.generation == 0);
+        /* plug: the raw sense follows at once, the filtered one after
+         * 500 ms, the poll after two equal looks */
+        hpd_cable(2, 1);
+        sim_msleep(NULL, 100);
+        CHECK(dchpd_track_poll(&t, &dev, &raw) == 0 && raw == 0);
+        CHECK((S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] &
+               (HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK | HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED_MASK)) ==
+              HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK);
+        sim_msleep(NULL, RD_HPD_POLL_MS);
+        CHECK(dchpd_track_poll(&t, &dev, &raw) == 0 && raw == 1u << 2 && t.state[2] == 0);
+        sim_msleep(NULL, RD_HPD_POLL_MS);
+        CHECK(dchpd_track_poll(&t, &dev, &raw) == 1u << 2 && raw == 0);
+        CHECK(t.state[2] == 1 && t.generation == 1 && t.events == 1 && t.glitches == 0);
+        /* a bounce shorter than the 100 ms disconnect filter: never seen */
+        hpd_cable(2, 0);
+        sim_msleep(NULL, 50);
+        hpd_cable(2, 1);
+        sim_msleep(NULL, RD_HPD_POLL_MS);
+        CHECK(dchpd_track_poll(&t, &dev, &raw) == 0 && raw == 0);
+        /* longer than the filter but back before the second look: a glitch */
+        hpd_cable(2, 0);
+        sim_msleep(NULL, 150);
+        CHECK(dchpd_track_poll(&t, &dev, &raw) == 0 && raw == 1u << 2);
+        hpd_cable(2, 1);
+        sim_msleep(NULL, 600);
+        CHECK(dchpd_track_poll(&t, &dev, &raw) == 0 && t.state[2] == 1 && t.glitches == 1);
+        /* the device gone (all-ones): no sample, no event */
+        gen = t.generation;
+        S.hpd_model &= ~(1u << 2);
+        S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] = ~0u;
+        sim_msleep(NULL, RD_HPD_POLL_MS);
+        CHECK(dchpd_sense_delayed(&dev, 2) == -1);
+        CHECK(dchpd_track_poll(&t, &dev, NULL) == 0 && dchpd_track_poll(&t, &dev, NULL) == 0 &&
+              t.generation == gen);
+        S.hpd_model |= 1u << 2;
+        /* the sink read again: a TMDS sink on DDC3 answers with its EDID */
+        S.i2c_sink = 2;
+        CHECK(dchpd_detect(&dev, 2, &c, RD_HPD_EDID_TRIES) == RD_HPD_SINK);
+        CHECK(c.aux == 2 && c.hpd && !c.dp && c.edid_ddc && c.edid_len == 256 && memcmp(c.edid, S.edid, 256) == 0);
+        /* HPD high but no EDID yet: three tries 100 ms apart */
+        S.i2c_sink = -1;
+        t0 = S.now_us;
+        CHECK(dchpd_detect(&dev, 2, &c, RD_HPD_EDID_TRIES) == RD_HPD_SINK_NO_EDID && c.edid_len == 0);
+        CHECK(S.now_us - t0 >= 2000ull * RD_HPD_EDID_RETRY_MS);
+        /* unplug: two looks after the 100 ms filter */
+        hpd_cable(2, 0);
+        sim_msleep(NULL, RD_HPD_POLL_MS);
+        CHECK(dchpd_track_poll(&t, &dev, NULL) == 0);
+        sim_msleep(NULL, RD_HPD_POLL_MS);
+        CHECK(dchpd_track_poll(&t, &dev, NULL) == 1u << 2 && t.state[2] == 0 && t.generation == gen + 1);
+        t0 = S.now_us;
+        CHECK(dchpd_detect(&dev, 2, &c, RD_HPD_EDID_TRIES) == RD_HPD_NO_SINK &&
+              S.now_us - t0 < 1000ull * RD_HPD_EDID_RETRY_MS);
+        /* routing: HDMI on UNIPHY B / DDC2 / HPD2, DP on UNIPHY D / DDC3 / HPD3 */
+        memset(paths, 0, sizeof(paths));
+        paths[0].connector = RD_ATOM_CONN_HDMI_A; paths[0].transmitter = 1; paths[0].ddc_line = 1; paths[0].hpd = 1;
+        paths[1].connector = RD_ATOM_CONN_DISPLAYPORT; paths[1].transmitter = 3; paths[1].ddc_line = 2;
+        paths[1].hpd = 2;
+        memset(&h, 0, sizeof(h));
+        h.dig_be = 1;
+        CHECK(dchpd_head_pin(&h, paths, 2) == 1 && dchpd_pin_aux(2, paths, 2) == 2 && dchpd_pin_aux(4, paths, 2) == 4);
+        CHECK(dchpd_pin_path(2, paths, 2) == &paths[1] && dchpd_pin_path(0, paths, 2) == NULL);
+        h.dig_be = -1;
+        CHECK(dchpd_head_pin(&h, paths, 2) == -1);
+        /* decisions: boot head reported only, a TMDS sink lights the clone
+         * once, the clone's pin unplugged takes it down, DP sinks wait */
+        memset(&c, 0, sizeof(c));
+        c.aux = 2; c.hpd = 1; c.edid_len = 256; c.edid_ddc = 1;
+        v.boot_pin = 1; v.clone_pin = -1; v.mirror = 2; v.can_clone = 1;
+        CHECK(dchpd_decide(&v, 1, 0, NULL) == RD_HP_BOOT && dchpd_decide(&v, 1, 1, &c) == RD_HP_BOOT);
+        CHECK(dchpd_decide(&v, 2, 1, &c) == RD_HP_CLONE_ON);
+        CHECK(dchpd_decide(&v, 2, 0, NULL) == RD_HP_NONE);
+        v.mirror = 0;
+        CHECK(dchpd_decide(&v, 2, 1, &c) == RD_HP_NONE);
+        v.mirror = 2; v.can_clone = 0;
+        CHECK(dchpd_decide(&v, 2, 1, &c) == RD_HP_NONE);
+        v.can_clone = 1;
+        c.dp = 1;
+        CHECK(dchpd_decide(&v, 2, 1, &c) == RD_HP_NONE);
+        c.dp = 0; c.edid_len = 0;
+        CHECK(dchpd_decide(&v, 2, 1, &c) == RD_HP_NONE);   /* detect_link_and_local_sink: no EDID, no sink */
+        c.edid_len = 256;
+        v.clone_pin = 2;
+        CHECK(dchpd_decide(&v, 2, 1, &c) == RD_HP_NONE && dchpd_decide(&v, 2, 0, NULL) == RD_HP_CLONE_OFF);
+        CHECK(dchpd_decide(&v, 3, 0, NULL) == RD_HP_NONE);
+        CHECK(strcmp(dchpd_action_name(RD_HP_CLONE_OFF), "take the second monitor's pipe down") == 0);
+        S.hpd_model = 0;
+        S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] = 0;
+        S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 0)] = HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK |
+                                                    HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED_MASK;
+        for (uint32_t n = 0; n < 4; n++)
+            S.reg[HPDR(regHPD0_DC_HPD_TOGGLE_FILT_CNTL, n)] = 0;
+    }
+
     /* GPU timestamp: a carry between the two reads must not tear it */
     S.tsc = 0xFFFFFFF4ull;
     CHECK(rdna3_gpu_clock_counter(&dev) == 0x100000004ull);
@@ -4218,6 +4386,79 @@ static void run(const char *fwdir)
                   S.reg[DCN_B2 + regDOMAIN0_PG_STATUS] == 2u << DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT &&
                   S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL] == 0xf);
             CHECK(S.dcn_gated_drops == 0 && S.dcn_pg_no_request == 0);   /* blanked before the gate */
+            /* hotplug drives the clone (rdna3hotplug=1 with rdna3mirror=2):
+             * the HDMI cable on HPD3 plugged after boot lights it, pulled
+             * takes it down; the boot head's own cable only gets reported */
+            {
+                static rdna3_hpd_track ht;
+                static rdna3_connector hc;
+                rdna3_display_path hp[2];
+                rdna3_hp_view hv;
+                uint32_t ch = 0, k3;
+                int act;
+                memset(hp, 0, sizeof(hp));
+                hp[0].connector = RD_ATOM_CONN_HDMI_A; hp[0].transmitter = 1; hp[0].ddc_line = 0; hp[0].hpd = 0;
+                hp[1] = path;
+                hp[1].connector = RD_ATOM_CONN_HDMI_A; hp[1].ddc_line = 2;
+                for (k3 = 0; k3 < 2; k3++)
+                    CHECK(dchpd_program_filter(&dev, (uint32_t)hp[k3].hpd, hp[k3].connector, 1) == RDNA3_OK);
+                hpd_cable(0, 1);
+                hpd_cable(2, 0);
+                S.now_us += 1000000;
+                dchpd_track_init(&ht, &dev, RD_AUX_ENGINES, RD_HPD_DEBOUNCE);
+                hv.boot_pin = dchpd_head_pin(&dc2.head[0], hp, 2);
+                hv.clone_pin = -1; hv.mirror = 2; hv.can_clone = 1;
+                CHECK(hv.boot_pin == 0);
+                hpd_cable(2, 1);
+                for (k3 = 0; k3 < 4 && !ch; k3++) {
+                    sim_msleep(NULL, RD_HPD_POLL_MS);
+                    ch = dchpd_track_poll(&ht, &dev, NULL);
+                }
+                CHECK(ch == 1u << 2 && k3 == 2);
+                S.i2c_sink = 2;
+                CHECK(dchpd_detect(&dev, (uint32_t)dchpd_pin_aux(2, hp, 2), &hc, RD_HPD_EDID_TRIES) == RD_HPD_SINK);
+                S.i2c_sink = -1;
+                act = dchpd_decide(&hv, 2, ht.state[2], &hc);
+                CHECK(act == RD_HP_CLONE_ON);
+                CHECK(dcn32_clone_plan(&dev, &dc2, 0, dchpd_pin_path(2, hp, 2), 148500, &cl) == RDNA3_OK);
+                cl.smu_probe = 0;
+                S.dmub.nseq = 0;
+                CHECK(dcn32_clone_enable(&dev, &dm, &cl) == RDNA3_OK && cl.hpd == 2);
+                CHECK(dcn32_read_state(&dev, &dc2) == 2);
+                hv.clone_pin = cl.hpd;
+                /* replugged within the filter: nothing */
+                hpd_cable(2, 0);
+                sim_msleep(NULL, 50);
+                hpd_cable(2, 1);
+                sim_msleep(NULL, RD_HPD_POLL_MS);
+                CHECK(dchpd_track_poll(&ht, &dev, NULL) == 0);
+                /* the boot head's cable: reported, its pipe untouched */
+                hpd_cable(0, 0);
+                for (ch = 0, k3 = 0; k3 < 4 && !ch; k3++) {
+                    sim_msleep(NULL, RD_HPD_POLL_MS);
+                    ch = dchpd_track_poll(&ht, &dev, NULL);
+                }
+                CHECK(ch == 1u << 0 && dchpd_decide(&hv, 0, ht.state[0], NULL) == RD_HP_BOOT);
+                hpd_cable(0, 1);
+                /* the clone's cable pulled: its pipe goes */
+                hpd_cable(2, 0);
+                for (ch = 0, k3 = 0; k3 < 6 && !(ch & (1u << 2)); k3++) {
+                    sim_msleep(NULL, RD_HPD_POLL_MS);
+                    ch |= dchpd_track_poll(&ht, &dev, NULL);
+                }
+                CHECK(ch & (1u << 2));
+                CHECK(dchpd_detect(&dev, 2, &hc, RD_HPD_EDID_TRIES) == RD_HPD_NO_SINK);
+                act = dchpd_decide(&hv, 2, ht.state[2], &hc);
+                CHECK(act == RD_HP_CLONE_OFF);
+                S.dmub.nseq = 0;
+                CHECK(dcn32_clone_disable(&dev, &dm, &cl) == RDNA3_OK);
+                CHECK(dcn32_read_state(&dev, &dc2) == 1 && dc2.head[0].pipe == 1);
+                CHECK(ht.state[0] == 1 && ht.events == 4 && ht.generation == 4);
+                S.hpd_model = 0;
+                S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] = 0;
+                for (k3 = 0; k3 < 4; k3++)
+                    S.reg[HPDR(regHPD0_DC_HPD_TOGGLE_FILT_CNTL, k3)] = 0;
+            }
             /* the PMFW stops answering after the third VBIOS command
              * (TransmitterControl INIT): the clone stops there, undone */
             CHECK(dcn32_clone_plan(&dev, &dc2, 0, &path, 148500, &cl) == RDNA3_OK);

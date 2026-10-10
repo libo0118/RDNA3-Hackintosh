@@ -142,6 +142,13 @@ class RDNA3Framebuffer : public IOFramebuffer {
     bool     fEdidAsked = false;
     unsigned fEdidTries = 0;
     IOReturn fEdidLast = kIOReturnSuccess;
+    /* hotplug (rdna3hotplug=1): the core's generation of this head's sink
+     * (rdna3DisplayHotplug), looked at every ~30 VBLs; a new one drops the
+     * cached EDID and raises IOFramebuffer's connect-change interrupt */
+    const OSSymbol *fSymHotplug = nullptr;
+    bool     fHpOn = false, fConnected = true;
+    uint32_t fHpGen = 0, fHpTick = 0, fHpChanges = 0;
+    void     hotplugPoll(bool first);
 
     /* hardware cursor: 256x256 ARGB8888 premultiplied in VRAM from the core */
     static const uint32_t kCurDim = 256;
@@ -394,6 +401,9 @@ bool RDNA3Framebuffer::start(IOService *provider)
     if (fDcn)
         fetchEdid();
     modesInit();
+    fSymHotplug = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_HOTPLUG);
+    if (fDcn && bootArgOn("rdna3hotplug"))
+        hotplugPoll(true);
 
     setProperty("IOFBDependentID", (unsigned long long)0x5244334600000001ull, 64);  /* 'RD3F' */
     setProperty("IOFBDependentIndex", (unsigned long long)fHead, 32);
@@ -474,6 +484,7 @@ void RDNA3Framebuffer::free()
     OSSafeReleaseNULL(fSymStatus);
     OSSafeReleaseNULL(fSymCursor);
     OSSafeReleaseNULL(fSymEdid);
+    OSSafeReleaseNULL(fSymHotplug);
     if (fLock) {
         IOSimpleLockFree(fLock);
         fLock = nullptr;
@@ -538,6 +549,10 @@ void RDNA3Framebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
     }
     if (me->fVbl.proc)
         me->fVbl.proc(me->fVbl.target, me->fVbl.ref);
+    if (me->fHpOn && ++me->fHpTick >= 30) {
+        me->fHpTick = 0;
+        me->hotplugPoll(false);
+    }
     me->scheduleVbl(me->fVblNext);
     me->release();
 }
@@ -974,14 +989,14 @@ IOReturn RDNA3Framebuffer::setAttribute(IOSelect attribute, uintptr_t value)
 IOReturn RDNA3Framebuffer::getAttributeForConnection(IOIndex idx, IOSelect attribute, uintptr_t *value)
 {
     switch (attribute) {
-    case kConnectionEnable:                    if (value) *value = 1; return kIOReturnSuccess;
+    case kConnectionEnable:                    if (value) *value = fConnected ? 1 : 0; return kIOReturnSuccess;
     case kConnectionFlags:                     if (value) *value = 0; return kIOReturnSuccess;
     case kConnectionColorModesSupported:       if (value) *value = 0x00000001; return kIOReturnSuccess;
     case kConnectionColorDepthsSupported:      if (value) *value = 0x00000002; return kIOReturnSuccess;
     case kConnectionControllerColorDepth:      if (value) *value = 0x00000002; return kIOReturnSuccess;
     case kConnectionControllerDepthsSupported: if (value) *value = 0x00000002; return kIOReturnSuccess;
     case kConnectionColorMode:                 if (value) *value = 0x00000001; return kIOReturnSuccess;
-    case kConnectionCheckEnable:               if (value) *value = 1; return kIOReturnSuccess;
+    case kConnectionCheckEnable:               if (value) *value = fConnected ? 1 : 0; return kIOReturnSuccess;
     case kConnectionDisplayFlags:              if (value) *value = 1; return kIOReturnSuccess;
     case kConnectionSupportsHLDDCSense: {
         /* IOGraphics asks hasDDCConnect / getDDCBlock only when this
@@ -1003,6 +1018,14 @@ IOReturn RDNA3Framebuffer::getAttributeForConnection(IOIndex idx, IOSelect attri
 IOReturn RDNA3Framebuffer::setAttributeForConnection(IOIndex idx, IOSelect attribute, uintptr_t value)
 {
     switch (attribute) {
+    case kConnectionChanged:
+        /* IOGraphics re-probes after a connect change: the EDID again */
+        if (fHpOn) {
+            fEdidAsked = false;
+            fEdidTries = 0;
+            FBLOG("head %u: connection changed, %s", fHead, fConnected ? "the EDID is read again" : "no sink");
+        }
+        return kIOReturnSuccess;
     case kConnectionPower:
     case kConnectionColorModesSupported:
     case kConnectionColorDepthsSupported:
@@ -1131,10 +1154,55 @@ void RDNA3Framebuffer::cursorFree()
     fCurKva = nullptr;
 }
 
+/* rdna3DisplayHotplug: the first call takes the state as it is; later ones
+ * act when the head's generation moved */
+void RDNA3Framebuffer::hotplugPoll(bool first)
+{
+    if (!fCore || !fSymHotplug)
+        return;
+    struct RD3KDisplayHotplug q;
+    bzero(&q, sizeof(q));
+    q.version = RD3K_DISPLAY_ABI_VERSION;
+    q.head = fHead;
+    IOReturn r = fCore->callPlatformFunction(fSymHotplug, false, &q, nullptr, nullptr, nullptr);
+    if (r != kIOReturnSuccess) {
+        if (first)
+            FBLOG("head %u: no hotplug from the core (0x%x)", fHead, r);
+        return;
+    }
+    if (first) {
+        fHpOn = true;
+        fHpGen = q.generation;
+        fConnected = q.connected != 0;
+        setProperty("RDNA3,Connected", fConnected);
+        FBLOG("head %u: hotplug on, HPD%d %s", fHead, q.pin == ~0u ? 0 : (int)q.pin + 1,
+              fConnected ? "connected" : "disconnected");
+        return;
+    }
+    if (q.generation == fHpGen)
+        return;
+    fHpGen = q.generation;
+    fConnected = q.connected != 0;
+    fHpChanges++;
+    fEdidAsked = false;
+    fEdidTries = 0;
+    if (fConnected)
+        fetchEdid();
+    setProperty("RDNA3,Connected", fConnected);
+    setProperty("RDNA3,HotplugChanges", (unsigned long long)fHpChanges, 32);
+    FBLOG("head %u: the monitor on HPD%d is %s: connect change %u to IOGraphics%s", fHead,
+          q.pin == ~0u ? 0 : (int)q.pin + 1, fConnected ? "back" : "gone", fHpChanges,
+          fConnect.proc ? "" : " (no handler registered)");
+    if (fConnect.proc)
+        fConnect.proc(fConnect.target, fConnect.ref);
+}
+
 bool RDNA3Framebuffer::fetchEdid()
 {
     /* asked once when it worked; a failure (the core not ready yet, no
      * sink) is retried a few times and logged whenever the answer changes */
+    if (fHpOn && !fConnected)
+        return false;   /* the head's cable is out (hotplug): no EDID, not another sink's */
     if (fEdidAsked)
         return fEdid.length > 0;
     if (!fCore || !fSymEdid)

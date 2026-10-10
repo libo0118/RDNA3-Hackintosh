@@ -122,6 +122,9 @@ typedef struct rdna3_connector {
 /* Probe every engine: HPD, DPCD 0x000..0x00f, EDID. Fills up to
  * RD_AUX_ENGINES entries (HPD or DPCD or EDID seen), returns the count. */
 int  dcaux_probe(rdna3_dev *d, rdna3_connector *out, uint32_t max);
+/* the same for engine 'n' alone (hotplug, dchpd.c): fills *c, returns 1
+ * when it saw HPD, DPCD or an EDID, else 0 */
+int  dcaux_probe_one(rdna3_dev *d, uint32_t n, rdna3_connector *c);
 
 #ifdef __cplusplus
 }

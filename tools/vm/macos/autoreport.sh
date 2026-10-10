@@ -245,6 +245,44 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                     done_ $?
                 fi ;;
         esac
+        # hotplug (rdna3hotplug=1): a marked window in which the user pulls
+        # the second monitor's cable and puts it back; every connector's HPD
+        # state (RDNA3,HPDState) whenever it changes, the kext's hotplug
+        # lines, then a look at what the pipes show
+        case " $args " in
+            *" rdna3hotplug=1 "*)
+                hpstate() {
+                    ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null |
+                        grep -E '"RDNA3,(HPDState|HotplugGeneration|HotplugLast|HotplugClonesLit|HotplugClonesOff|HotplugBootHead|Mirror|ExtendHead)"' |
+                        sed 's/^[ |]*//' | tr '\n' ' '
+                }
+                hdr "hotplug window (120 s): unplug and replug the second monitor now"
+                notify "Unplug and replug the second monitor now (2 minutes)"
+                prog "    >>> unplug and replug the second monitor now: cable out ~10 s, then back in <<<"
+                hplast=; hpt0=$(date +%s)
+                while [ $(( $(date +%s) - hpt0 )) -lt 120 ]; do
+                    hpcur=$(hpstate)
+                    if [ "$hpcur" != "$hplast" ]; then
+                        echo "$(date +%H:%M:%S) $hpcur"
+                        prog "    $(echo "$hpcur" | sed -n 's/.*"RDNA3,HPDState" = "\([^"]*\)".*/\1/p')"
+                        hplast=$hpcur
+                    fi
+                    sleep 2
+                done
+                echo "== kext and framebuffer hotplug lines"
+                with_limit 30 log show --last 5m --style compact \
+                    --predicate 'eventMessage CONTAINS "hotplug" OR eventMessage CONTAINS "connect change" OR eventMessage CONTAINS "mirror:" OR eventMessage CONTAINS "extend:"' \
+                    2>/dev/null | grep -E 'RDNA3' | tail -80
+                hpgen=$(hpstate | sed -n 's/.*"RDNA3,HotplugGeneration" = \([0-9]*\).*/\1/p')
+                echo "HOTPLUG: ${hpgen:-0} HPD change(s) seen (2 expected: out and back in)"
+                prog "    HOTPLUG: ${hpgen:-0} HPD change(s) seen (2 expected: out and back in)"
+                partial
+                mkdir -p "$HOME/rdna3-scanout/hotplug"
+                hdr "rdna3_drminfo --scanout (look hotplug)"
+                with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/hotplug" 2>&1
+                done_ $?
+                ;;
+        esac
     fi
     if [ "${lvl:-0}" -ge 7 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
         hdr "rdna3_drminfo --dma-test"

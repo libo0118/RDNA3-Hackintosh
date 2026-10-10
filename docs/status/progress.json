@@ -1,10 +1,10 @@
 {
  "amdgpu": {
   "works": 268,
-  "ported": 293,
-  "total": 1328,
-  "works_pct": 20.2,
-  "ported_pct": 22.1,
+  "ported": 300,
+  "total": 1343,
+  "works_pct": 20.0,
+  "ported_pct": 22.3,
   "groups": [
    {
     "name": "PSP 13",
@@ -1480,6 +1480,32 @@
      "perform_post_lt_adj_req_sequence": "todo",
      "repeater_training_done": "todo",
      "start_clock_recovery_pattern_early": "todo"
+    }
+   },
+   {
+    "name": "Display: hotplug",
+    "steps": [
+     "hotplug"
+    ],
+    "works": 0,
+    "ported": 7,
+    "todo": 8,
+    "items": {
+     "dal_hw_hpd_construct": "todo",
+     "dal_hw_hpd_destroy": "todo",
+     "dal_hw_hpd_destruct": "todo",
+     "dal_hw_hpd_get_pin": "todo",
+     "dal_hw_hpd_init": "todo",
+     "get_hpd_line": "todo",
+     "get_value": "ported",
+     "link_disable_hpd": "todo",
+     "link_enable_hpd": "ported",
+     "link_enable_hpd_filter": "ported",
+     "link_get_hpd_gpio": "todo",
+     "link_get_hpd_state": "ported",
+     "program_hpd_filter": "ported",
+     "query_hpd_status": "ported",
+     "set_config": "ported"
     }
    }
   ]

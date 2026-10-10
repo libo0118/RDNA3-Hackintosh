@@ -701,55 +701,63 @@ int dcddc_read_edid(rdna3_dev *d, uint32_t n, uint8_t *edid, uint32_t cap)
     return (int)(blocks * RD_EDID_BLOCK);
 }
 
+int dcaux_probe_one(rdna3_dev *d, uint32_t n, rdna3_connector *c)
+{
+    uint8_t dpcd[16];
+    uint32_t aux_status;
+    int r, pad_was_aux;
+    unsigned i;
+    if (!d->ipver[HWIP_DCE].present || n >= RD_AUX_ENGINES)
+        return 0;
+    pad_was_aux = ddc_pad_aux(d, n, 1);
+    for (i = 0; i < sizeof(*c); i++)
+        ((uint8_t *)c)[i] = 0;
+    c->aux = n;
+    c->hpd = dcaux_hpd_sense(d, n);
+    r = dcaux_dpcd_read(d, n, 0x000, dpcd, 16);
+    aux_status = RA(d, regDP_AUX0_AUX_SW_STATUS, n);
+    if (r == 16 && dpcd[0]) {
+        c->dp = 1;
+        c->dpcd_rev = dpcd[0];
+        c->max_link_rate = dpcd[1];
+        c->max_lane_count = dpcd[2] & 0x1f;
+        r = dcaux_read_edid(d, n, c->edid, sizeof(c->edid));
+        c->edid_len = r > 0 ? r : 0;
+        if (c->hpd && r <= 0)
+            RERR(d, "AUX%u: DisplayPort sink, EDID over I2C-over-AUX failed (%d)", n, r);
+    } else {
+        /* no DPCD: an HDMI/DVI sink, or a DP++ adaptor (NON_AUX_MODE);
+         * its EDID is on the DDC, through the I2C engine */
+        (void)pad_was_aux;
+        if (c->hpd) {
+            r = dcddc_read_edid(d, n, c->edid, sizeof(c->edid));
+            c->edid_len = r > 0 ? r : 0;
+            c->edid_ddc = r > 0;
+            if (r <= 0)
+                RERR(d, "AUX%u/DDC%u: HPD high, no DPCD (AUX_SW_STATUS 0x%08x) and no EDID on "
+                     "the DDC (%d), DDC%u_MASK 0x%08x, I2C SW_STATUS 0x%08x", n, n + 1,
+                     aux_status, r, n + 1, rdna3_rreg(d, ddc_mask_reg(d, n)),
+                     rdna3_rreg(d, RI(d, regDC_I2C_SW_STATUS)));
+        } else {
+            (void)ddc_pad_aux(d, n, 0);   /* nothing there: back to I2C mode */
+        }
+    }
+    if (c->hpd || c->dp || c->edid_len) {
+        RLOG(d, "AUX%u: HPD %d, %s, EDID %d bytes%s", n, c->hpd,
+             c->dp ? "DisplayPort sink" : "no DPCD", c->edid_len,
+             c->edid_ddc ? " (DDC, TMDS sink)" : "");
+        return 1;
+    }
+    return 0;
+}
+
 int dcaux_probe(rdna3_dev *d, rdna3_connector *out, uint32_t max)
 {
     uint32_t n, found = 0;
     if (!d->ipver[HWIP_DCE].present)
         return 0;
-    for (n = 0; n < RD_AUX_ENGINES && found < max; n++) {
-        rdna3_connector *c = &out[found];
-        uint8_t dpcd[16];
-        uint32_t aux_status;
-        int r, pad_was_aux = ddc_pad_aux(d, n, 1);
-        unsigned i;
-        for (i = 0; i < sizeof(*c); i++)
-            ((uint8_t *)c)[i] = 0;
-        c->aux = n;
-        c->hpd = dcaux_hpd_sense(d, n);
-        r = dcaux_dpcd_read(d, n, 0x000, dpcd, 16);
-        aux_status = RA(d, regDP_AUX0_AUX_SW_STATUS, n);
-        if (r == 16 && dpcd[0]) {
-            c->dp = 1;
-            c->dpcd_rev = dpcd[0];
-            c->max_link_rate = dpcd[1];
-            c->max_lane_count = dpcd[2] & 0x1f;
-            r = dcaux_read_edid(d, n, c->edid, sizeof(c->edid));
-            c->edid_len = r > 0 ? r : 0;
-            if (c->hpd && r <= 0)
-                RERR(d, "AUX%u: DisplayPort sink, EDID over I2C-over-AUX failed (%d)", n, r);
-        } else {
-            /* no DPCD: an HDMI/DVI sink, or a DP++ adaptor (NON_AUX_MODE);
-             * its EDID is on the DDC, through the I2C engine */
-            (void)pad_was_aux;
-            if (c->hpd) {
-                r = dcddc_read_edid(d, n, c->edid, sizeof(c->edid));
-                c->edid_len = r > 0 ? r : 0;
-                c->edid_ddc = r > 0;
-                if (r <= 0)
-                    RERR(d, "AUX%u/DDC%u: HPD high, no DPCD (AUX_SW_STATUS 0x%08x) and no EDID on "
-                         "the DDC (%d), DDC%u_MASK 0x%08x, I2C SW_STATUS 0x%08x", n, n + 1,
-                         aux_status, r, n + 1, rdna3_rreg(d, ddc_mask_reg(d, n)),
-                         rdna3_rreg(d, RI(d, regDC_I2C_SW_STATUS)));
-            } else {
-                (void)ddc_pad_aux(d, n, 0);   /* nothing there: back to I2C mode */
-            }
-        }
-        if (c->hpd || c->dp || c->edid_len) {
-            RLOG(d, "AUX%u: HPD %d, %s, EDID %d bytes%s", n, c->hpd,
-                 c->dp ? "DisplayPort sink" : "no DPCD", c->edid_len,
-                 c->edid_ddc ? " (DDC, TMDS sink)" : "");
+    for (n = 0; n < RD_AUX_ENGINES && found < max; n++)
+        if (dcaux_probe_one(d, n, &out[found]))
             found++;
-        }
-    }
     return (int)found;
 }

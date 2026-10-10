@@ -197,6 +197,25 @@ struct RD3KDisplayStatus {
     unsigned int flipPending;
 };
 
+/* hotplug (rdna3hotplug=1, kext/src/RDNA3Hotplug.cpp): the core polls the
+ * HPD pins (DC_HPD_SENSE_DELAYED after the toggle filter, debounced) and
+ * re-reads a changed sink's EDID; the framebuffer polls this function from
+ * its VBL thread (about every half second) and, when the head's generation
+ * moved, drops its cached EDID and calls IOFramebuffer's connect-change
+ * interrupt, so IOGraphics asks kConnectionCheckEnable / hasDDCConnect /
+ * getDDCBlock again. A second monitor's head comes and goes with its own
+ * framebuffer (the RDNA3DisplayHead nub). kIOReturnUnsupported without
+ * rdna3hotplug=1. */
+#define RD3K_DISPLAY_FN_HOTPLUG  "rdna3DisplayHotplug"
+struct RD3KDisplayHotplug {
+    unsigned int version;         /* RD3K_DISPLAY_ABI_VERSION */
+    unsigned int head;
+    unsigned int generation;      /* out: +1 on every debounced change of this head's sink */
+    unsigned int connected;       /* out: 1 = the head's connector senses a sink */
+    unsigned int pin;             /* out: its HPD pin (HPD1 = 0), ~0u unknown */
+    unsigned int events;          /* out: debounced changes on all pins since start */
+};
+
 /* display CRC: p1 = head (uintptr_t), p2 = unsigned *crc out */
 #define RD3K_FN_DISPLAY_CRC "rdna3DisplayCrc"
 

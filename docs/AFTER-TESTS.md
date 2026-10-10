@@ -243,6 +243,22 @@ Unplug and plug a monitor cable while macOS runs: the log shows `HPD: hotplug in
 | many `HPDn` lines for one unplug | polarity / ack order (`hpd_ack` in irq_service_dcn32.c) | send the log; check `DC_HPD_INT_POLARITY` after the ack |
 | `connected` but the connector has no EDID afterwards | re-probe too early (sink not ready) | delay the re-probe (amdgpu waits through `dc_link_detect` retries) |
 
+### Step `hotplug` (`rdna3hotplug=1`): hotplug to the framebuffer
+
+The report's `hotplug window` section has `RDNA3,HPDState` (`HPD1 1 HPD2 0 ...`, debounced; `(now n)` = a look that has not counted yet) each time it changed, the kext / framebuffer lines (`hotplug:`, `connect change`, `mirror:`, `extend:`) and `HOTPLUG: N HPD change(s)`; then a `look hotplug` scanout picture. At start the log has one `hotplug: HPDn (...) filter set: connect 500 ms, disconnect 100 ms` line per VBIOS path (DP: 80 / 0 ms) and `RDNA3,Hotplug` says it polls.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `HOTPLUG: 0` and `HPDState` never moved | the user missed the window, or `DC_HPD_SENSE_DELAYED` does not follow the cable | ask whether the cable was pulled; else compare `DC_HPD_SENSE` (raw) with the delayed bit: log `TOGGLE_FILT_CNTL` from the start line (a delay of 0xff x 10 ms would hide it) |
+| `(now 0)` appears but no `hotplug: HPDn disconnected` line | the level went back before the second look (a glitch: `RDNA3,HotplugGlitches`) | a cable that bounces longer than the filter; if every unplug looks like this, raise `RD_HPD_DEBOUNCE` / check the 500 ms tick ran (`RDNA3,HotplugPolledEvents`) |
+| several `disconnected`/`connected` pairs for one pull | the filter delays not taken (connect 500 / disconnect 100 ms for HDMI, 80 / 0 for DP) | the start line's `TOGGLE_FILT_CNTL`; `program_hpd_filter` / hw_hpd.c `set_config` units (10 ms) |
+| `disconnected ... nothing to do` for the second monitor's pin | the clone's HPD pin is not the pin that moved (`fMirror->hpd` vs the VBIOS path) | `RDNA3,DisplayPath<n>` HPD numbers vs `RDNA3,Mirror`; `dchpd_decide` gets `clone_pin` from the clone plan |
+| `take the second monitor's pipe down`, then a panic or WindowServer restart loop | the second framebuffer / accelerator head torn down under WindowServer (`displayMirrorDisable` terminates the RDNA3DisplayHead nub synchronously) | `23-windowserver-crash.txt`, the panic; next: hide the head first (connect change on head 1 with `kConnectionEnable` 0) and terminate after IOGraphics let go |
+| `connected ... no EDID` | the DDC did not answer in 3 tries 100 ms apart (`dm_helpers_read_local_edid`) | `RDNA3,HotplugNoEdid`; the `AUXn/DDCn: HPD high, no DPCD ... no EDID on the DDC` line; raise `RD_HPD_EDID_TRIES` / `RD_HPD_EDID_RETRY_MS` |
+| `light the second monitor` then `second monitor NOT lit` | the clone path refused (same as 9b/9c) | `RDNA3,Mirror` / `RDNA3,MirrorResult`: the 9b table below |
+| lit again but macOS shows one display | the new RDNA3Framebuffer on the head nub did not start or did not publish | `RDNA3-fb: head 1` lines after the replug; `ioreg -c RDNA3Framebuffer` count in the report |
+| the boot monitor's cable pulled: `boot head: pipe kept, reported` and macOS loses its only display | expected: head 0 reports `kConnectionEnable` 0 while its cable is out; the pipe keeps scanning | none if it comes back on replug (`RDNA3,HotplugBootHead`, fb line `the monitor on HPDn is back`) |
+
 ### Step 9b (`rdna3dmub=1 rdna3mirror=1`): second monitor (clone)
 
 | Symptom | Likely cause | Action |
