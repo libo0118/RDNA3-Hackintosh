@@ -6,6 +6,7 @@
 #include "RDNA3Accel.hpp"
 #include "RDNA3Regs.h"
 #include "RDNA3Bringup.hpp"
+#include <IOKit/pwr_mgt/RootDomain.h>
 
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSData.h>
@@ -69,6 +70,20 @@ bool RDNA3Accel::start(IOService *provider)
                 else if (ok && !platformInit())
                     LOG("accelerator interface not available");
                 if (ok && fLevel >= 4) {
+                    /* no suspend/resume yet: after a sleep the GPU has
+                     * lost the firmware and the GOP's display, and only a
+                     * modeset of our own could bring the picture back. Keep
+                     * the machine from idle sleep while the bring-up runs
+                     * (rdna3sleep=1 allows it, to test) */
+                    uint32_t sleepOk = 0;
+                    PE_parse_boot_argn("rdna3sleep", &sleepOk, sizeof(sleepOk));
+                    IOPMrootDomain *root = getPMRootDomain();
+                    if (!sleepOk && root) {
+                        fSleepAssertion = root->createPMAssertion(kIOPMDriverAssertionPreventSystemIdleSleepBit,
+                                                                  kIOPMDriverAssertionLevelOn, this,
+                                                                  "RDNA3Accel: no GPU suspend/resume yet");
+                        setNumber("RDNA3,IdleSleepBlocked", fSleepAssertion ? 1 : 0);
+                    }
                     fBringup = new RDNA3Bringup;
                     if (fBringup && fBringup->init(this, fPci, fMmioMap, fLevel, disc, fVramSize)) {
                         fBringup->start();
@@ -94,6 +109,11 @@ bool RDNA3Accel::start(IOService *provider)
 void RDNA3Accel::stop(IOService *provider)
 {
     LOG("stop");
+    if (fSleepAssertion) {
+        if (IOPMrootDomain *root = getPMRootDomain())
+            root->releasePMAssertion(fSleepAssertion);
+        fSleepAssertion = 0;
+    }
     if (fBringup) {
         fBringup->stopAndFree();
         delete fBringup;

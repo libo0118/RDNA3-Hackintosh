@@ -69,6 +69,11 @@ it together with a description of the symptom. Module details are in `STAGE1`–
 | 11 | same as 10 | `vulkaninfo --summary` with RADV from `/Library/GPUBundles/rdna3mtl` | device `AMD Radeon RX 7800 XT (RADV NAVI32)` | medium |
 | 12 | same as 10, then `sudo sysctl -w debug.rdna3accelfb=1` | Metal plugin for processes listed in `rdna3mtl-allow.txt` | `mtlprobe` sees the AMD device | high |
 
+Sleep: from level 4 on the kext keeps macOS from idle sleep
+(`RDNA3,IdleSleepBlocked = 1`): there is no GPU suspend/resume yet, and
+after a sleep the firmware and the GOP's picture are gone. Do not put the
+machine to sleep by hand during tests; `rdna3sleep=1` lifts the block.
+
 Rule: **do not move on until a step gives the expected values.**
 When a result differs from the table, send the report. That is exactly the
 information that cannot be obtained in the simulator.

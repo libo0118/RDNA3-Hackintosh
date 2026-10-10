@@ -190,6 +190,7 @@ private:
     uint64_t      fDispReserveEnd = 0;
     struct rdna3_dcn_clone *fMirror = nullptr;   /* hw/dcn32_clone.c plan, when lit */
     bool          fMirrorOn    = false;
+    uint64_t      fSleepAssertion = 0;        /* IOPMDriverAssertionID: no idle sleep (no resume yet) */
     int           fCloneHead   = -1;          /* rdna3mirror=2: fDcn head of the clone */
     IOService    *fHeadNub     = nullptr;     /* "RDNA3DisplayHead" for its framebuffer */
     void          displayAddCloneHead();
