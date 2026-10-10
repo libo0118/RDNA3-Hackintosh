@@ -1499,6 +1499,12 @@ int RDNA3Bringup::sensor(uint32_t type, uint32_t *value)
     case AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_MCLK:
         *value = fSmu->uclk.level[fSmu->uclk.count ? fSmu->uclk.count - 1 : 0];
         return 0;
+    /* smu_v13_0_0_read_sensor (MP1 13.0.0 / 13.0.10) has no
+     * AMDGPU_PP_SENSOR_GPU_INPUT_POWER: -EOPNOTSUPP, which amdgpu_info_ioctl
+     * turns into -EINVAL. The metrics table's power is the average
+     * (AverageSocketPower, AMDGPU_INFO_SENSOR_GPU_AVG_POWER). */
+    case AMDGPU_INFO_SENSOR_GPU_INPUT_POWER:
+        return -RD_EINVAL;
     default:
         break;
     }

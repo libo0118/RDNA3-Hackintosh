@@ -1710,10 +1710,10 @@
  "uapi": {
   "works": 97,
   "ported": 97,
-  "total": 106,
-  "not_applicable": 14,
-  "works_pct": 91.5,
-  "ported_pct": 91.5,
+  "total": 105,
+  "not_applicable": 15,
+  "works_pct": 92.4,
+  "ported_pct": 92.4,
   "groups": [
    {
     "name": "amdgpu ioctls",
@@ -1835,7 +1835,7 @@
     ],
     "works": 30,
     "ported": 0,
-    "todo": 1,
+    "todo": 0,
     "items": {
      "AMDGPU_INFO_FW_ASD": "works",
      "AMDGPU_INFO_FW_DMCUB": "works",
@@ -1860,7 +1860,6 @@
      "AMDGPU_INFO_SENSOR_GFX_MCLK": "works",
      "AMDGPU_INFO_SENSOR_GFX_SCLK": "works",
      "AMDGPU_INFO_SENSOR_GPU_AVG_POWER": "works",
-     "AMDGPU_INFO_SENSOR_GPU_INPUT_POWER": "todo",
      "AMDGPU_INFO_SENSOR_GPU_LOAD": "works",
      "AMDGPU_INFO_SENSOR_GPU_TEMP": "works",
      "AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_MCLK": "works",
@@ -1877,6 +1876,7 @@
      "AMDGPU_INFO_FW_UVD": "firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP)",
      "AMDGPU_INFO_FW_VCE": "firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP)",
      "AMDGPU_INFO_FW_VPE": "firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP)",
+     "AMDGPU_INFO_SENSOR_GPU_INPUT_POWER": "input power: amdgpu does not report it for SMU 13.0.0 / 13.0.10 (smu_v13_0_0_read_sensor: -EOPNOTSUPP; this card answers average power)",
      "AMDGPU_INFO_SENSOR_VDDNB": "northbridge voltage: APUs only"
     }
    },

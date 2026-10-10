@@ -257,16 +257,16 @@ Not counted (does not apply):
 
 ## amdgpu UAPI
 
-14 items that do not apply (not on the RX 7800 XT, or of no use on macOS) are left out of the totals; each group lists them with the reason (`tools/progress/not-applicable.txt`).
+15 items that do not apply (not on the RX 7800 XT, or of no use on macOS) are left out of the totals; each group lists them with the reason (`tools/progress/not-applicable.txt`).
 
 | Group | Works | Ported | Total | Works % | Ported % | Verified by step |
 |---|---:|---:|---:|---:|---:|---|
 | amdgpu ioctls | 15 | 15 | 20 | 75% | 75% | 7, 8 |
 | CS chunks | 9 | 9 | 10 | 90% | 90% | 7, 8 |
 | DRM core ioctls | 18 | 18 | 18 | 100% | 100% | 7, 8 |
-| INFO firmware / sensors | 30 | 30 | 31 | 97% | 97% | 5, 7 |
+| INFO firmware / sensors | 30 | 30 | 30 | 100% | 100% | 5, 7 |
 | INFO queries | 25 | 25 | 27 | 93% | 93% | 7 |
-| **Total** | 97 | 97 | 106 | 91.5% | 91.5% | |
+| **Total** | 97 | 97 | 105 | 92.4% | 92.4% | |
 
 <details><summary>amdgpu ioctls: 15 ported, 5 to do, 1 do not apply</summary>
 
@@ -298,15 +298,14 @@ Not counted (does not apply):
 
 </details>
 
-<details><summary>INFO firmware / sensors: 30 ported, 1 to do, 8 do not apply</summary>
+<details><summary>INFO firmware / sensors: 30 ported, 0 to do, 9 do not apply</summary>
 
 Ported: `AMDGPU_INFO_FW_ASD`, `AMDGPU_INFO_FW_DMCUB`, `AMDGPU_INFO_FW_GFX_ME`, `AMDGPU_INFO_FW_GFX_MEC`, `AMDGPU_INFO_FW_GFX_PFP`, `AMDGPU_INFO_FW_GFX_RLC`, `AMDGPU_INFO_FW_GFX_RLCP`, `AMDGPU_INFO_FW_GFX_RLCV`, `AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_CNTL`, `AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_GPM_MEM`, `AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_SRM_MEM`, `AMDGPU_INFO_FW_IMU`, `AMDGPU_INFO_FW_MES`, `AMDGPU_INFO_FW_MES_KIQ`, `AMDGPU_INFO_FW_SDMA`, `AMDGPU_INFO_FW_SMC`, `AMDGPU_INFO_FW_SOS`, `AMDGPU_INFO_FW_TA`, `AMDGPU_INFO_FW_TOC`, `AMDGPU_INFO_FW_VCN`, `AMDGPU_INFO_SENSOR_GFX_MCLK`, `AMDGPU_INFO_SENSOR_GFX_SCLK`, `AMDGPU_INFO_SENSOR_GPU_AVG_POWER`, `AMDGPU_INFO_SENSOR_GPU_LOAD`, `AMDGPU_INFO_SENSOR_GPU_TEMP`, `AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_MCLK`, `AMDGPU_INFO_SENSOR_PEAK_PSTATE_GFX_SCLK`, `AMDGPU_INFO_SENSOR_STABLE_PSTATE_GFX_MCLK`, `AMDGPU_INFO_SENSOR_STABLE_PSTATE_GFX_SCLK`, `AMDGPU_INFO_SENSOR_VDDGFX`
-
-To do: `AMDGPU_INFO_SENSOR_GPU_INPUT_POWER`
 
 Not counted (does not apply):
 
 - firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP): `AMDGPU_INFO_FW_CAP`, `AMDGPU_INFO_FW_DMCU`, `AMDGPU_INFO_FW_GFX_CE`, `AMDGPU_INFO_FW_GMC`, `AMDGPU_INFO_FW_UVD`, `AMDGPU_INFO_FW_VCE`, `AMDGPU_INFO_FW_VPE`
+- input power: amdgpu does not report it for SMU 13.0.0 / 13.0.10 (smu_v13_0_0_read_sensor: -EOPNOTSUPP; this card answers average power): `AMDGPU_INFO_SENSOR_GPU_INPUT_POWER`
 - northbridge voltage: APUs only: `AMDGPU_INFO_SENSOR_VDDNB`
 
 </details>
