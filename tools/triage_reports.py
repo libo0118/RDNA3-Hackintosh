@@ -320,6 +320,54 @@ def tail_file(path, n, pattern=None):
         print("     " + l[-160:])
 
 
+def summary(path, serial=None):
+    """one line per area for the newest report: what a round's message to
+    the user is made of"""
+    with tarfile.open(path) as tar:
+        log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt")
+        args = read_member(tar, "01-boot-args.txt")
+    tests = path[:-len(".tar.gz")] + "-tests.txt"
+    txt = open(tests, errors="replace").read() if os.path.exists(tests) else ""
+    if serial:   # the kernel log of the same boot has the whole PM trend
+        log = log + "\n" + open(serial, errors="replace").read()
+    out = []
+    m = re.search(r"rdna3lvl=\S+.*", args)
+    out.append(("boot-args", m.group(0)[:150] if m else "?"))
+    out.append(("DMA/GFX jobs", "%d verified, %d wrong" % (len(re.findall(r"job results verified", txt)),
+                                                         len(re.findall(r"job results WRONG", txt)))))
+    vk = re.search(r"^(ALL PASSED.*|.*FAILED.*)$", txt[txt.find("== rdna3_vktest"):], re.M) if "== rdna3_vktest" in txt else None
+    out.append(("Vulkan", vk.group(1)[:80] if vk else "not run"))
+    mt = re.search(r"^METAL: .*$", txt, re.M)
+    out.append(("Metal", mt.group(0)[:80] if mt else "not run"))
+    for blk in txt.split("== rdna3_drminfo --scanout")[1:]:
+        look = re.match(r"\s*\(look (\S+)\)", blk)
+        lit = re.findall(r"^pipe (\d+): LIT .* in use (0x[0-9a-f]+)", blk, re.M)
+        blank = len(re.findall(r"^pipe \d+: BLANKED", blk, re.M))
+        uf = len(re.findall(r"UNDERFLOW", blk))
+        same = len(lit) > 1 and len(set(a for _, a in lit)) < len(lit)
+        out.append(("screens %s" % (look.group(1) if look else "1"),
+                    "%d lit%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
+                                      ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "")))
+    for pat, name in ((r"^MODES: .*$", "scaled modes"), (r"^SOAK: .*$", "soak"), (r"^HANG TEST: .*$", "hang test")):
+        m = re.search(pat, txt, re.M)
+        if m:
+            out.append((name, m.group(0)[:100]))
+    pm = [l[l.find("PM: activity"):] for l in log.splitlines() if "PM: activity" in l]
+    if pm:
+        out.append(("power (last)", pm[-1][:110]))
+    exp = [l for l in log.splitlines() if "PM experiment" in l and " W," in l]
+    if exp:
+        best = min(exp, key=lambda l: int(re.search(r"(\d+) W,", l).group(1)))
+        out.append(("lowest-power variant", best[best.find("PM experiment"):][:150]))
+    caps = [l for l in log.splitlines() if "GFXCLK capped" in l]
+    if caps:
+        out.append(("idle cap", "%d cap(s), e.g. %s" % (len(caps), caps[0][caps[0].find("PM:"):][:80])))
+    print("=" * 78)
+    print("SUMMARY of the newest report (%s)" % os.path.basename(path))
+    for k, v in out:
+        print("  %-22s %s" % (k, v))
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
@@ -434,6 +482,11 @@ def main():
         print("=" * 78)
         print(os.path.basename(h))
         tail_file(h, 12, r"^==|boot-args|vfio|FAIL|error|Error")
+    if reports:
+        try:
+            summary(reports[-1], serials[-1] if serials else None)
+        except (OSError, tarfile.TarError, ValueError) as e:
+            print("summary: " + str(e))
     print("=" * 78)
     print("RESULT:", "something failed - start at the first FAIL (docs/AFTER-TESTS.md)"
           if failed else "every reached check passed")
