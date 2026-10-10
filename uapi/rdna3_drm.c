@@ -1627,7 +1627,7 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
 
 #define NEED(type) do { if (size < sizeof(type)) return -RD_EINVAL; } while (0)
 
-int rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
+static int drm_ioctl_dispatch(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
 {
     switch (nr) {
     /* ---- DRM core ---- */
@@ -1781,4 +1781,25 @@ const char *rdna3_drm_ioctl_name(uint32_t nr)
     case RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS): return "AMDGPU_WAIT_CS";
     default: return "?";
     }
+}
+
+/* drm_ioctl: a client built against an older UAPI passes a shorter struct
+ * (e.g. drm_amdgpu_gem_op before num_entries, 16 bytes instead of 24); the
+ * kernel copies min(user, kernel) bytes in, zero-fills the rest and copies
+ * the same length back out. Do the same, so an older libdrm/Mesa works and
+ * a newer one does not lose its fields. */
+int rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
+{
+    uint64_t ext[64];   /* 512 bytes: larger than every DRM/amdgpu ioctl struct */
+    int r;
+    if (size < 8 || size >= sizeof(ext))
+        return drm_ioctl_dispatch(f, nr, data, size);
+    uint32_t i;
+    zero(ext, sizeof(ext));
+    for (i = 0; i < size; i++)
+        ((uint8_t *)ext)[i] = ((const uint8_t *)data)[i];
+    r = drm_ioctl_dispatch(f, nr, ext, sizeof(ext));
+    for (i = 0; i < size; i++)
+        ((uint8_t *)data)[i] = ((const uint8_t *)ext)[i];
+    return r;
 }

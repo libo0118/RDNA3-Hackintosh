@@ -790,6 +790,24 @@ int main(void)
         uint32_t tiny = 0;
         CHECK(rdna3_drm_ioctl(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), &tiny, 4) == -RD_EINVAL);
     }
+    /* an older UAPI's shorter struct is zero-extended like drm_ioctl does:
+     * drm_amdgpu_gem_op without num_entries (16 bytes, Mesa's header) */
+    {
+        struct drm_amdgpu_gem_create_in ci;
+        union drm_amdgpu_gem_create gc;
+        struct { uint32_t handle, op; uint64_t value; } old_op;
+        memset(&gc, 0, sizeof(gc));
+        gc.in.bo_size = 4096;
+        gc.in.domains = AMDGPU_GEM_DOMAIN_GTT;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gc) == 0);
+        memset(&ci, 0, sizeof(ci));
+        old_op.handle = gc.out.handle;
+        old_op.op = AMDGPU_GEM_OP_GET_GEM_CREATE_INFO;
+        old_op.value = (uintptr_t)&ci;
+        CHECK(sizeof(old_op) == 16 && sizeof(struct drm_amdgpu_gem_op) > 16);
+        CHECK(rdna3_drm_ioctl(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_OP), &old_op, sizeof(old_op)) == 0);
+        CHECK(ci.bo_size == 4096 && ci.domains == AMDGPU_GEM_DOMAIN_GTT);
+    }
 
     /* PRIME: the export holds the BO while its exporter's file is open or
      * another file has it; then the token is dead and the BO freed */

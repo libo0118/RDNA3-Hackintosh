@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan_core.h>
@@ -118,9 +119,10 @@ static void free_buf(struct ctx *c, struct buf *o)
     memset(o, 0, sizeof(*o));
 }
 
-/* fill 'size' bytes of a device buffer with 'pat' on queue family 'qf',
- * copy into a host buffer, check */
-static int fill_copy(struct ctx *c, uint32_t qf, VkDeviceSize size, uint32_t pat, int verify)
+/* record and run on queue family 'qf': fill 'fill' with 'pat', then (if
+ * 'src') copy src -> dst; waits for the fence. 0 = ran. */
+static int submit_fill_copy(struct ctx *c, uint32_t qf, VkBuffer fill, VkBuffer src, VkBuffer dst,
+                            VkDeviceSize size, uint32_t pat)
 {
     DFN(c->dev, vkGetDeviceQueue);
     DFN(c->dev, vkCreateCommandPool);
@@ -135,19 +137,11 @@ static int fill_copy(struct ctx *c, uint32_t qf, VkDeviceSize size, uint32_t pat
     DFN(c->dev, vkDestroyFence);
     DFN(c->dev, vkQueueSubmit);
     DFN(c->dev, vkWaitForFences);
-    DFN(c->dev, vkMapMemory);
-    DFN(c->dev, vkUnmapMemory);
-    struct buf dbuf = { 0 }, hbuf = { 0 };
     VkCommandPool pool = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     VkQueue q;
-    int ret = 1;
-
-    if (make_buf(c, &dbuf, size, 0) || make_buf(c, &hbuf, size, 1))
-        goto out;
-    vkGetDeviceQueue(c->dev, qf, 0, &q);
-    VkCommandPoolCreateInfo pi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = qf };
     VkCommandBuffer cb;
+    VkCommandPoolCreateInfo pi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = qf };
     VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
     VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -160,28 +154,21 @@ static int fill_copy(struct ctx *c, uint32_t qf, VkDeviceSize size, uint32_t pat
         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
     VkBufferCopy region = { 0, 0, size };
     VkResult r;
-    void *p;
+    int ret = 1;
 
+    vkGetDeviceQueue(c->dev, qf, 0, &q);
     if ((r = vkCreateCommandPool(c->dev, &pi, NULL, &pool)) != VK_SUCCESS ||
         (cai.commandPool = pool, r = vkAllocateCommandBuffers(c->dev, &cai, &cb)) != VK_SUCCESS ||
         (r = vkCreateFence(c->dev, &fi, NULL, &fence)) != VK_SUCCESS) {
         printf("FAIL pool/command buffer/fence -> %d (%s)\n", r, vkr(r));
         goto out;
     }
-    /* the host buffer starts with a different pattern, so a copy that never
-     * ran cannot pass */
-    if ((r = vkMapMemory(c->dev, hbuf.m, 0, size, 0, &p)) != VK_SUCCESS) {
-        printf("FAIL vkMapMemory -> %d (%s)\n", r, vkr(r));
-        goto out;
-    }
-    memset(p, 0x5a, (size_t)size);
-    vkUnmapMemory(c->dev, hbuf.m);
-
     vkBeginCommandBuffer(cb, &bi);
-    vkCmdFillBuffer(cb, dbuf.b, 0, size, pat);
+    vkCmdFillBuffer(cb, fill, 0, size, pat);
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL,
                          0, NULL);
-    vkCmdCopyBuffer(cb, dbuf.b, hbuf.b, 1, &region);
+    if (src)
+        vkCmdCopyBuffer(cb, src, dst, 1, &region);
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, NULL,
                          0, NULL);
     if ((r = vkEndCommandBuffer(cb)) != VK_SUCCESS) {
@@ -197,31 +184,205 @@ static int fill_copy(struct ctx *c, uint32_t qf, VkDeviceSize size, uint32_t pat
         printf("FAIL fence not signalled in 5 s -> %d (%s)\n", r, vkr(r));
         goto out;
     }
-    if ((r = vkMapMemory(c->dev, hbuf.m, 0, size, 0, &p)) != VK_SUCCESS) {
-        printf("FAIL vkMapMemory -> %d (%s)\n", r, vkr(r));
-        goto out;
-    }
-    if (!verify) {
-        ret = 0;
-    } else {
-        const uint32_t *w = (const uint32_t *)p;
-        size_t n = (size_t)size / 4, bad = 0, first = n;
-        for (size_t i = 0; i < n; i++)
-            if (w[i] != pat) {
-                if (first == n) first = i;
-                bad++;
-            }
-        if (bad)
-            printf("FAIL %zu of %zu words wrong, first at %zu: 0x%08x (want 0x%08x)\n", bad, n, first, w[first], pat);
-        else
-            ret = 0;
-    }
-    vkUnmapMemory(c->dev, hbuf.m);
+    ret = 0;
 out:
     if (fence) vkDestroyFence(c->dev, fence, NULL);
     if (pool) vkDestroyCommandPool(c->dev, pool, NULL);
+    return ret;
+}
+
+static int check_words(const void *p, VkDeviceSize size, uint32_t pat)
+{
+    const uint32_t *w = (const uint32_t *)p;
+    size_t n = (size_t)size / 4, bad = 0, first = n;
+    for (size_t i = 0; i < n; i++)
+        if (w[i] != pat) {
+            if (first == n) first = i;
+            bad++;
+        }
+    if (bad)
+        printf("FAIL %zu of %zu words wrong, first at %zu: 0x%08x (want 0x%08x)\n", bad, n, first, w[first], pat);
+    return bad != 0;
+}
+
+/* the host buffer starts with a different pattern, so a copy that never
+ * ran cannot pass */
+static int host_buf_preset(struct ctx *c, struct buf *h, VkDeviceSize size)
+{
+    DFN(c->dev, vkMapMemory);
+    DFN(c->dev, vkUnmapMemory);
+    void *p;
+    VkResult r = vkMapMemory(c->dev, h->m, 0, size, 0, &p);
+    if (r != VK_SUCCESS) {
+        printf("FAIL vkMapMemory -> %d (%s)\n", r, vkr(r));
+        return 1;
+    }
+    memset(p, 0x5a, (size_t)size);
+    vkUnmapMemory(c->dev, h->m);
+    return 0;
+}
+
+static int host_buf_check(struct ctx *c, struct buf *h, VkDeviceSize size, uint32_t pat)
+{
+    DFN(c->dev, vkMapMemory);
+    DFN(c->dev, vkUnmapMemory);
+    void *p;
+    VkResult r = vkMapMemory(c->dev, h->m, 0, size, 0, &p);
+    if (r != VK_SUCCESS) {
+        printf("FAIL vkMapMemory -> %d (%s)\n", r, vkr(r));
+        return 1;
+    }
+    int bad = check_words(p, size, pat);
+    vkUnmapMemory(c->dev, h->m);
+    return bad;
+}
+
+/* fill 'size' bytes of a device buffer with 'pat' on queue family 'qf',
+ * copy into a host buffer, check */
+static int fill_copy(struct ctx *c, uint32_t qf, VkDeviceSize size, uint32_t pat, int verify)
+{
+    struct buf dbuf = { 0 }, hbuf = { 0 };
+    int ret = 1;
+    if (make_buf(c, &dbuf, size, 0) || make_buf(c, &hbuf, size, 1) || host_buf_preset(c, &hbuf, size) ||
+        submit_fill_copy(c, qf, dbuf.b, dbuf.b, hbuf.b, size, pat))
+        goto out;
+    ret = verify ? host_buf_check(c, &hbuf, size, pat) : 0;
+out:
     free_buf(c, &dbuf);
     free_buf(c, &hbuf);
+    return ret;
+}
+
+/* VK_EXT_external_memory_host (the Metal plugin imports the caller's pages
+ * this way; RADV -> GEM_USERPTR): the GPU fills malloc'd memory directly */
+static int host_ptr_test(struct ctx *c, uint32_t qf, VkDeviceSize align, uint32_t pat)
+{
+    DFN(c->dev, vkGetMemoryHostPointerPropertiesEXT);
+    DFN(c->dev, vkCreateBuffer);
+    DFN(c->dev, vkGetBufferMemoryRequirements);
+    DFN(c->dev, vkAllocateMemory);
+    DFN(c->dev, vkBindBufferMemory);
+    const VkDeviceSize size = 64 * 1024;
+    struct buf b = { 0 };
+    void *host = NULL;
+    VkResult r;
+    int ret = 1;
+    if (!vkGetMemoryHostPointerPropertiesEXT || !align || posix_memalign(&host, (size_t)align, (size_t)size)) {
+        printf("FAIL no vkGetMemoryHostPointerPropertiesEXT / alignment %llu\n", (unsigned long long)align);
+        return 1;
+    }
+    memset(host, 0x5a, (size_t)size);
+    VkMemoryHostPointerPropertiesEXT hp = { .sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
+    if ((r = vkGetMemoryHostPointerPropertiesEXT(c->dev, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
+                                                 host, &hp)) != VK_SUCCESS || !hp.memoryTypeBits) {
+        printf("FAIL vkGetMemoryHostPointerPropertiesEXT -> %d (%s), types 0x%x\n", r, vkr(r), hp.memoryTypeBits);
+        goto out;
+    }
+    VkExternalMemoryBufferCreateInfo eb = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT };
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+    VkMemoryRequirements mr;
+    if ((r = vkCreateBuffer(c->dev, &bi, NULL, &b.b)) != VK_SUCCESS) {
+        printf("FAIL vkCreateBuffer (host pointer) -> %d (%s)\n", r, vkr(r));
+        goto out;
+    }
+    vkGetBufferMemoryRequirements(c->dev, b.b, &mr);
+    uint32_t types = mr.memoryTypeBits & hp.memoryTypeBits;
+    int t = -1;
+    for (uint32_t i = 0; i < 32 && t < 0; i++)
+        if (types & (1u << i)) t = (int)i;
+    if (t < 0) {
+        printf("FAIL no memory type for the host pointer (buffer 0x%x, pointer 0x%x)\n", mr.memoryTypeBits,
+               hp.memoryTypeBits);
+        goto out;
+    }
+    VkImportMemoryHostPointerInfoEXT imp = { .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT, .pHostPointer = host };
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &imp,
+        .allocationSize = size, .memoryTypeIndex = (uint32_t)t };
+    if ((r = vkAllocateMemory(c->dev, &ai, NULL, &b.m)) != VK_SUCCESS ||
+        (r = vkBindBufferMemory(c->dev, b.b, b.m, 0)) != VK_SUCCESS) {
+        printf("FAIL import of the host pointer -> %d (%s)\n", r, vkr(r));
+        goto out;
+    }
+    if (submit_fill_copy(c, qf, b.b, VK_NULL_HANDLE, VK_NULL_HANDLE, size, pat))
+        goto out;
+    ret = check_words(host, size, pat);
+out:
+    free_buf(c, &b);
+    free(host);
+    return ret;
+}
+
+/* VK_KHR_external_memory_fd (the Metal plugin imports OPAQUE_FD memory;
+ * RADV -> PRIME handle <-> fd through drm_xnu): export a device buffer's
+ * memory, import it again, fill through the first and read through the
+ * second */
+static int opaque_fd_test(struct ctx *c, uint32_t qf, uint32_t pat)
+{
+    DFN(c->dev, vkGetMemoryFdKHR);
+    DFN(c->dev, vkCreateBuffer);
+    DFN(c->dev, vkGetBufferMemoryRequirements);
+    DFN(c->dev, vkAllocateMemory);
+    DFN(c->dev, vkBindBufferMemory);
+    const VkDeviceSize size = 64 * 1024;
+    struct buf a = { 0 }, b = { 0 }, h = { 0 };
+    VkResult r;
+    int fd = -1, ret = 1;
+    if (!vkGetMemoryFdKHR) {
+        printf("FAIL no vkGetMemoryFdKHR\n");
+        return 1;
+    }
+    VkExternalMemoryBufferCreateInfo eb = { .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+    VkMemoryRequirements mr;
+    if ((r = vkCreateBuffer(c->dev, &bi, NULL, &a.b)) != VK_SUCCESS ||
+        (r = vkCreateBuffer(c->dev, &bi, NULL, &b.b)) != VK_SUCCESS) {
+        printf("FAIL vkCreateBuffer (external) -> %d (%s)\n", r, vkr(r));
+        goto out;
+    }
+    vkGetBufferMemoryRequirements(c->dev, a.b, &mr);
+    a.type = find_type(&c->mp, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    VkExportMemoryAllocateInfo ex = { .sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &ex,
+        .allocationSize = mr.size, .memoryTypeIndex = (uint32_t)(a.type < 0 ? 0 : a.type) };
+    if ((r = vkAllocateMemory(c->dev, &ai, NULL, &a.m)) != VK_SUCCESS ||
+        (r = vkBindBufferMemory(c->dev, a.b, a.m, 0)) != VK_SUCCESS) {
+        printf("FAIL exportable allocation -> %d (%s)\n", r, vkr(r));
+        goto out;
+    }
+    VkMemoryGetFdInfoKHR gi = { .sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = a.m,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT };
+    if ((r = vkGetMemoryFdKHR(c->dev, &gi, &fd)) != VK_SUCCESS) {
+        printf("FAIL vkGetMemoryFdKHR -> %d (%s)\n", r, vkr(r));
+        goto out;
+    }
+    VkImportMemoryFdInfoKHR imp = { .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT, .fd = fd };
+    ai.pNext = &imp;
+    if ((r = vkAllocateMemory(c->dev, &ai, NULL, &b.m)) != VK_SUCCESS) {
+        printf("FAIL import of the exported fd %d -> %d (%s)\n", fd, r, vkr(r));
+        goto out;
+    }
+    fd = -1;   /* the import owns it now */
+    if ((r = vkBindBufferMemory(c->dev, b.b, b.m, 0)) != VK_SUCCESS) {
+        printf("FAIL vkBindBufferMemory (imported) -> %d (%s)\n", r, vkr(r));
+        goto out;
+    }
+    if (make_buf(c, &h, size, 1) || host_buf_preset(c, &h, size) ||
+        submit_fill_copy(c, qf, a.b, b.b, h.b, size, pat))
+        goto out;
+    ret = host_buf_check(c, &h, size, pat);
+out:
+    if (fd >= 0)
+        close(fd);
+    free_buf(c, &a);
+    free_buf(c, &b);
+    free_buf(c, &h);
     return ret;
 }
 
@@ -317,8 +478,32 @@ int main(int argc, char **argv)
         qci[i] = (VkDeviceQueueCreateInfo){ .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                             .queueFamilyIndex = i, .queueCount = 1, .pQueuePriorities = &prio };
     }
+    /* the interop the Metal plugin needs, when RADV offers it */
+    IFN(c.inst, vkEnumerateDeviceExtensionProperties);
+    const char *want[2] = { "VK_EXT_external_memory_host", "VK_KHR_external_memory_fd" };
+    const char *ext[2];
+    uint32_t next = 0, ne = 0;
+    int has_host = 0, has_fd = 0;
+    vkEnumerateDeviceExtensionProperties(c.pd, NULL, &ne, NULL);
+    VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof(*ep));
+    if (ep && vkEnumerateDeviceExtensionProperties(c.pd, NULL, &ne, ep) == VK_SUCCESS)
+        for (uint32_t i = 0; i < ne; i++)
+            for (int w = 0; w < 2; w++)
+                if (!strcmp(ep[i].extensionName, want[w])) {
+                    ext[next++] = want[w];
+                    if (w == 0) has_host = 1; else has_fd = 1;
+                }
+    free(ep);
+    VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostp = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT };
+    VkPhysicalDeviceProperties2 hp2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &hostp };
+    if (has_host)
+        vkGetPhysicalDeviceProperties2(c.pd, &hp2);
+    printf("  VK_EXT_external_memory_host: %s (alignment %llu), VK_KHR_external_memory_fd: %s\n",
+           has_host ? "yes" : "NO", (unsigned long long)hostp.minImportedHostPointerAlignment, has_fd ? "yes" : "NO");
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = nq,
-                               .pQueueCreateInfos = qci };
+                               .pQueueCreateInfos = qci, .enabledExtensionCount = next,
+                               .ppEnabledExtensionNames = ext };
     VkResult r = vkCreateDevice(c.pd, &dci, NULL, &c.dev);
     if (r != VK_SUCCESS) {
         printf("FAIL vkCreateDevice -> %d (%s)\n", r, vkr(r));
@@ -351,6 +536,26 @@ int main(int argc, char **argv)
             if (fr)
                 break;   /* a lost device fails every later submit too */
         }
+    }
+    /* interop on the queue that really executes everywhere: the transfer
+     * queue if there is one (the loopback runs SDMA only), else general */
+    uint32_t xq = 0;
+    for (uint32_t i = 0; i < nq; i++)
+        if (!(qp[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) &&
+            (qp[i].queueFlags & VK_QUEUE_TRANSFER_BIT))
+            xq = i;
+    if (!failed && has_host) {
+        int fr = host_ptr_test(&c, xq, hostp.minImportedHostPointerAlignment, 0xb0570000u);
+        printf("%s host pointer import (VK_EXT_external_memory_host): GPU fill of 64 KiB of malloc'd memory\n",
+               fr ? "FAIL" : "PASS");
+        failed |= fr != 0;
+        tested++;
+    }
+    if (!failed && has_fd) {
+        int fr = opaque_fd_test(&c, xq, 0xfdfd0000u);
+        printf("%s OPAQUE_FD export + import: fill through one, copy out through the other\n", fr ? "FAIL" : "PASS");
+        failed |= fr != 0;
+        tested++;
     }
     DFN(c.dev, vkDestroyDevice);
     vkDestroyDevice(c.dev, NULL);
