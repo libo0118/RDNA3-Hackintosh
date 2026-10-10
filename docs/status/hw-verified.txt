@@ -18,3 +18,4 @@
 9 2026-10-10 vm framebuffer with the EDID: macOS names the monitor (C24F390) instead of "Unknown"
 9c 2026-10-10 vm extended desktop: second RDNA3Framebuffer on the cloned head, macOS lists two C24F390 displays, mirror off
 8g 2026-10-10 vm GFX clock gating (CGCG/CGLS/MGCG/repeater FGCG): idle ~200 W -> ~75 W, hotspot 78 -> 55 C, DMA/GFX tests pass
+8o 2026-10-10 vm GFXOFF allowed (AllowGfxOff 0), DMA/GFX tests pass; no power change: the PMFW still counts the GFX busy
