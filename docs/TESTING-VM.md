@@ -293,6 +293,18 @@ A build made with `full` or `radv` on also has the artifact
 rdna3vm prepare --artifact ~/Downloads/RDNA3Accel-kext.zip --radv ~/Downloads/radv-macos-logs.zip
 ```
 
+Or build RADV inside the VM, no CI needed (no card either): `git pull`, then
+`rdna3vm window`, and in the macOS Terminal:
+
+```sh
+bash <(curl -s http://10.0.2.2:8000/tools/build_radv.sh)
+```
+
+The first run installs the Xcode Command Line Tools (click Install in the
+dialog, then run the command again) and Homebrew (asks for the password);
+Mesa takes 10-20 minutes. It ends with a loopback check and installs RADV
+and `rdna3_vktest` where the report runs them.
+
 From step 8 on the report then has a `== rdna3_vktest` section: RADV creates
 a Vulkan device on the card and fills and copies buffers on every queue.
 
