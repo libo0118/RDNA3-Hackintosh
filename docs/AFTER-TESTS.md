@@ -310,6 +310,26 @@ Unplug and plug a monitor cable while macOS runs: the log shows `HPD: hotplug in
 |---|---|---|
 | step 9 black screen, system alive | scanout address/pitch vs GOP | `12-ioreg-fb.txt`, `Head0EdidMode`; `fb/rdna3-fb.cpp` |
 | step 10 WindowServer crash loop | `IOAccelConfig` / missing methods | `22-log-windowserver.txt`; `populateAccelConfig`; `accel/gen_stubs.py` |
+| triage `!! two lit pipes scan the same surface` | a swap routed to the wrong head | serial log `swap #N: head X now gets head Y's frame` / `surface ... moves from head` / `... freed`: which rule (`kHow`) answered; `rd3AccelSwapToPanel` |
+| `display sleep: FAIL` (no BLANKED pipe) | IOFramebuffer never set power 0, or the core refused | fb log `power 0: head N blanked`; core `display: head N blanked`; `rdna3dpms=1` in the boot args? |
+| `display wake: FAIL` (still BLANKED) | power 1 not delivered / unblank lost | same lines with `unblanked`; `dcn32_set_blank` |
+
+### Idle power (`rdna3pmexp=1`)
+
+Triage prints one line per variant (10 s each): baseline, GFXOFF allowed,
+workload POWER_SAVING, HDP/ATHUB gating, GFXCLK soft max lowest. Read
+activity and watts per line: the first variant that drops activity below
+~20 % or the watts below ~25 W is the lever - make it the default (port the
+matching amdgpu default if it was a workaround). If only the GFXCLK cap
+lowers the watts while activity stays 100 %, the PMFW's busy signal is the
+problem (RLC/CP idle reporting), not the clock policy.
+
+### Hang test (`rdna3hangtest=1`)
+
+`HANG TEST: PASSED` = both the SDMA and the GFX ring recovered within the
+10 s cap and ran a verified job afterwards. A `NOT recovered` line: the
+`hang:` lines in the serial log name the path taken (soft recovery, SDMA
+soft reset, GFX soft reset, mode-1 reset).
 
 ---
 
@@ -448,3 +468,12 @@ piped / argument is the pipe resource / shares its vidmem / surface seen
 before / next unclaimed head) and logs `swap: surface ... -> head N (how)`.
 From now on one step per round: `big`.
 
+### Card run 16-17 (step `big`, scanout pictures)
+
+Both heads routed and flipped (run 16). Run 17's pictures: both pipes lit
+with the macOS login screen, but at the end both scanned the first
+monitor's surface, and the user saw the second monitor switch between its
+own picture and the first one's. WindowServer re-creates pipe resources and
+swap surfaces; the router matched stale pointers. Fixed in `2bcd676`
+(surface keeps its head, freed objects leave the tables, route changes
+logged); the report now looks three times, 20 s apart.
