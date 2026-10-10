@@ -836,6 +836,25 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && fw.ver == 0);
         in.query_fw.index = 2;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+        /* ASD from the table; TA by TA_FW_TYPE_PSP_* sub-index (XGMI 2 ..
+         * SECUREDISPLAY 7), 0 for a TA the file lacks, others refused */
+        dev.fw_version[AMDGPU_INFO_FW_ASD] = dev.fw_feature[AMDGPU_INFO_FW_ASD] = 0x21000118;
+        dev.ta_version[4] = 0x17000053;   /* HDCP */
+        dev.ta_version[1] = 0x21000118;   /* ASD: not a FW_TA sub-index */
+        in.query_fw.fw_type = AMDGPU_INFO_FW_ASD;
+        in.query_fw.index = 0;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && fw.ver == 0x21000118 &&
+              fw.feature == 0x21000118);
+        in.query_fw.fw_type = AMDGPU_INFO_FW_TA;
+        in.query_fw.index = 4;
+        fw.feature = 7;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && fw.ver == 0x17000053 && fw.feature == 0);
+        in.query_fw.index = 7;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && fw.ver == 0);
+        in.query_fw.index = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+        in.query_fw.index = 8;   /* XGMI_AUX: amdgpu_firmware_info has no case for it */
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
     }
 
     /* AMDGPU_INFO_VBIOS: size, image from an offset, strings; none -> 0 / EINVAL */

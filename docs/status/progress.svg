@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 23.7%   ported 25.7%   (307 / 333 / 1297)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 23.9%   ported 25.9%   (310 / 336 / 1297)</text>
 <g><title>Display: modeset: works 14%, ported 14% (32+0 of 230); verified by step(s) modeset</title>
 <rect x="1.0" y="53.0" width="10.3" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="11.3" y="53.0" width="10.3" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -821,7 +821,7 @@
 <text x="171.4" y="274.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Discovery / VBIOS</text>
 <text x="171.4" y="288.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">51% / 51%</text>
 </g>
-<g><title>PSP 13: works 19%, ported 19% (18+0 of 97); verified by step(s) 4</title>
+<g><title>PSP 13: works 22%, ported 22% (21+0 of 97); verified by step(s) 4</title>
 <rect x="304.0" y="53.0" width="9.9" height="10.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="313.9" y="53.0" width="9.9" height="10.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="323.8" y="53.0" width="9.9" height="10.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -840,9 +840,9 @@
 <rect x="343.6" y="63.9" width="9.9" height="10.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="353.5" y="63.9" width="9.9" height="10.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="363.4" y="63.9" width="9.9" height="10.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="373.3" y="63.9" width="9.9" height="10.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="383.2" y="63.9" width="9.9" height="10.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="393.1" y="63.9" width="9.9" height="10.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="373.3" y="63.9" width="9.9" height="10.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="383.2" y="63.9" width="9.9" height="10.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="393.1" y="63.9" width="9.9" height="10.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="403.0" y="63.9" width="9.9" height="10.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="304.0" y="74.8" width="9.9" height="10.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="313.9" y="74.8" width="9.9" height="10.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -921,7 +921,7 @@
 <rect x="402.0" y="140.3" width="10.9" height="10.9" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="303.0" y="52.0" width="110.8" height="100.2" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="308.0" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">PSP 13</text>
-<text x="308.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">19% / 19%</text>
+<text x="308.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">22% / 22%</text>
 </g>
 <g><title>Display: OTG / AUX: works 28%, ported 28% (20+0 of 71); verified by step(s) 2, 9</title>
 <rect x="414.9" y="53.0" width="9.9" height="10.9" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1373,8 +1373,8 @@
 <rect x="460.6" y="312.1" width="34.4" height="39.9" fill="none" stroke="#0d1117" stroke-width="2"/>
 </g>
 <text x="509.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu UAPI (ioctls, INFO, CS chunks)</text>
-<text x="509.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 89.6%   ported 89.6%   (95 / 95 / 106)</text>
-<g><title>INFO firmware / sensors: works 90%, ported 90% (28+0 of 31); verified by step(s) 5, 7</title>
+<text x="509.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 91.5%   ported 91.5%   (97 / 97 / 106)</text>
+<g><title>INFO firmware / sensors: works 97%, ported 97% (30+0 of 31); verified by step(s) 5, 7</title>
 <rect x="506.0" y="53.0" width="33.6" height="39.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="539.6" y="53.0" width="33.6" height="39.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="573.2" y="53.0" width="33.6" height="39.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1403,12 +1403,12 @@
 <rect x="544.4" y="171.8" width="38.4" height="39.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="582.8" y="171.8" width="38.4" height="39.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="621.2" y="171.8" width="38.4" height="39.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="659.6" y="171.8" width="38.4" height="39.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="698.0" y="171.8" width="38.4" height="39.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="659.6" y="171.8" width="38.4" height="39.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="698.0" y="171.8" width="38.4" height="39.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="736.4" y="171.8" width="38.4" height="39.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="505.0" y="52.0" width="270.8" height="160.3" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="510.0" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">INFO firmware / sensors</text>
-<text x="510.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">90% / 90%</text>
+<text x="510.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">97% / 97%</text>
 </g>
 <g><title>INFO queries: works 93%, ported 93% (25+0 of 27); verified by step(s) 7</title>
 <rect x="506.0" y="213.3" width="38.4" height="34.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>

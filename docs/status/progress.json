@@ -1,29 +1,29 @@
 {
  "amdgpu": {
-  "works": 307,
-  "ported": 333,
+  "works": 310,
+  "ported": 336,
   "total": 1297,
   "not_applicable": 201,
-  "works_pct": 23.7,
-  "ported_pct": 25.7,
+  "works_pct": 23.9,
+  "ported_pct": 25.9,
   "groups": [
    {
     "name": "PSP 13",
     "steps": [
      "4"
     ],
-    "works": 18,
+    "works": 21,
     "ported": 0,
-    "todo": 79,
+    "todo": 76,
     "items": {
      "acquire_psp_cmd_buf": "todo",
      "amdgpu_psp_wait_for_bootloader": "todo",
      "fw_load_skip_check": "works",
      "is_psp_fw_valid": "todo",
      "parse_sos_bin_descriptor": "todo",
-     "parse_ta_bin_descriptor": "todo",
+     "parse_ta_bin_descriptor": "works",
      "parse_ta_v1_microcode": "todo",
-     "parse_ta_v2_microcode": "todo",
+     "parse_ta_v2_microcode": "works",
      "psp_asd_initialize": "todo",
      "psp_asd_terminate": "todo",
      "psp_boot_config_get": "todo",
@@ -51,7 +51,7 @@
      "psp_init_cap_microcode": "todo",
      "psp_init_sos_base_fw": "works",
      "psp_init_sos_microcode": "works",
-     "psp_init_ta_microcode": "todo",
+     "psp_init_ta_microcode": "works",
      "psp_init_toc_microcode": "todo",
      "psp_load_fw": "todo",
      "psp_load_fw_list": "todo",
@@ -1708,12 +1708,12 @@
   ]
  },
  "uapi": {
-  "works": 95,
-  "ported": 95,
+  "works": 97,
+  "ported": 97,
   "total": 106,
   "not_applicable": 14,
-  "works_pct": 89.6,
-  "ported_pct": 89.6,
+  "works_pct": 91.5,
+  "ported_pct": 91.5,
   "groups": [
    {
     "name": "amdgpu ioctls",
@@ -1833,11 +1833,11 @@
      "5",
      "7"
     ],
-    "works": 28,
+    "works": 30,
     "ported": 0,
-    "todo": 3,
+    "todo": 1,
     "items": {
-     "AMDGPU_INFO_FW_ASD": "todo",
+     "AMDGPU_INFO_FW_ASD": "works",
      "AMDGPU_INFO_FW_DMCUB": "works",
      "AMDGPU_INFO_FW_GFX_ME": "works",
      "AMDGPU_INFO_FW_GFX_MEC": "works",
@@ -1854,7 +1854,7 @@
      "AMDGPU_INFO_FW_SDMA": "works",
      "AMDGPU_INFO_FW_SMC": "works",
      "AMDGPU_INFO_FW_SOS": "works",
-     "AMDGPU_INFO_FW_TA": "todo",
+     "AMDGPU_INFO_FW_TA": "works",
      "AMDGPU_INFO_FW_TOC": "works",
      "AMDGPU_INFO_FW_VCN": "works",
      "AMDGPU_INFO_SENSOR_GFX_MCLK": "works",

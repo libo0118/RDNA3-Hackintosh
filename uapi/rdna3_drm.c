@@ -1511,6 +1511,16 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
          * SDMA by instance (two on Navi 32, one firmware) */
         if ((t == AMDGPU_INFO_FW_GFX_MEC || t == AMDGPU_INFO_FW_SDMA) && in->query_fw.index > 1)
             return -RD_EINVAL;
+        if (t == AMDGPU_INFO_FW_TA) {
+            /* by TA_FW_TYPE_PSP_*: XGMI 2, RAS 3, HDCP 4, DTM 5, RAP 6,
+             * SECUREDISPLAY 7, from the PSP contexts' bin_desc (0 for a TA
+             * the file lacks); feature_version is never set for them */
+            uint32_t i = in->query_fw.index;
+            if (i < 2 || i > 7)
+                return -RD_EINVAL;
+            fw.ver = dev->ta_version[i];
+            return info_out(f, in, &fw, sizeof(fw));
+        }
         if (t < 32 && !(t == AMDGPU_INFO_FW_GFX_MEC && in->query_fw.index == 1)) {
             fw.ver = dev->fw_version[t];
             fw.feature = dev->fw_feature[t];

@@ -118,6 +118,7 @@ struct rd_xnu_scanout {
 #define RD_MAX_CTX      256
 #define RD_MAX_SYNCOBJ  4096
 #define RD_MAX_VA       65536
+#define RD_TA_TYPES     16      /* > TA_FW_TYPE_MAX_INDEX (amdgpu_ucode.h) */
 
 struct rdna3_drm_device;
 
@@ -250,6 +251,9 @@ typedef struct rdna3_drm_device {
     uint32_t available_rings[AMDGPU_HW_IP_NUM];   /* bitmask per HW IP */
     uint32_t ip_ver_major[AMDGPU_HW_IP_NUM], ip_ver_minor[AMDGPU_HW_IP_NUM];
     uint32_t fw_version[32], fw_feature[32];      /* by AMDGPU_INFO_FW_* */
+    /* AMDGPU_INFO_FW_TA: version of each trusted application of the PSP TA
+     * file by TA_FW_TYPE_* (the query's index; amd_fw_ta_versions) */
+    uint32_t ta_version[RD_TA_TYPES];
     /* AMDGPU_INFO_VBIOS: the image (owned by the OS layer, NULL = none) and
      * amdgpu_atom_parse's strings */
     const uint8_t *vbios;

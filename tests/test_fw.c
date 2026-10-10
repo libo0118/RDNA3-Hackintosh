@@ -152,6 +152,65 @@ static void synthetic(void)
     }
 }
 
+/* PSP TA container (parse_ta_v2_microcode / parse_ta_bin_descriptor) */
+static void ta_synthetic(void)
+{
+    static uint8_t b[256 + 4000], work[256 + 4000];
+    struct { uint32_t type, ver, off, size; } bins[] = {
+        { 1, 0x21000118, 0, 2000 },      /* ASD */
+        { 8, 0x00000a14, 2000, 100 },    /* XGMI_AUX: the XGMI slot off MP0 13.0.6 */
+        { 4, 0x17000053, 2100, 900 },    /* HDCP */
+        { 9, 0x1, 3000, 100 },           /* unknown type: skipped */
+        { 3, 0x1b32000d, 3100, 900 },    /* RAS */
+    };
+    uint32_t ver[32], feat[32], ta[AMD_TA_MAX];
+    amd_psp_ta t;
+    unsigned i, it;
+    memset(b, 0, sizeof(b));
+    common(b, sizeof(b), 2, 0, 4000);
+    w32(b + offsetof(struct ta_firmware_header_v2_0, ta_fw_bin_count), 5);
+    for (i = 0; i < 5; i++) {
+        uint8_t *d = b + offsetof(struct ta_firmware_header_v2_0, ta_fw_bin) + 16 * i;
+        w32(d + 0, bins[i].type);
+        w32(d + 4, bins[i].ver);
+        w32(d + 8, bins[i].off);
+        w32(d + 12, bins[i].size);
+    }
+    CHECK(amd_psp_ta_parse(b, sizeof(b), &t) == AMD_FW_OK);
+    CHECK(t.bin[AMD_TA_ASD].offset == 256 && t.bin[AMD_TA_ASD].size == 2000);
+    CHECK(t.bin[AMD_TA_XGMI].fw_version == 0xa14 && t.bin[AMD_TA_XGMI_AUX].size == 0);
+    CHECK(t.bin[AMD_TA_RAS].offset == 256 + 3100 && t.bin[AMD_TA_DTM].size == 0);
+    memset(ver, 0xee, sizeof(ver));
+    memset(feat, 0xee, sizeof(feat));
+    amd_fw_ta_versions(&t, ver, feat, ta);
+    CHECK(ver[0x0d] == 0x21000118 && feat[0x0d] == 0x21000118);   /* AMDGPU_INFO_FW_ASD */
+    CHECK(ta[AMD_TA_HDCP] == 0x17000053 && ta[AMD_TA_RAS] == 0x1b32000d && ta[AMD_TA_DTM] == 0 &&
+          ta[AMD_TA_SECUREDISPLAY] == 0 && ta[AMD_TA_XGMI] == 0xa14);
+    CHECK(ver[0x04] == 0xeeeeeeeeu);   /* other entries untouched */
+
+    /* a descriptor past the end, too many descriptors, a v1 header */
+    memcpy(work, b, sizeof(b));
+    w32(work + offsetof(struct ta_firmware_header_v2_0, ta_fw_bin) + 16 * 4 + 12, 901);
+    CHECK(amd_psp_ta_parse(work, sizeof(work), &t) == AMD_FW_E_TRUNCATED);
+    memcpy(work, b, sizeof(b));
+    w32(work + offsetof(struct ta_firmware_header_v2_0, ta_fw_bin_count), 13);
+    CHECK(amd_psp_ta_parse(work, sizeof(work), &t) == AMD_FW_E_TOO_MANY);
+    memcpy(work, b, sizeof(b));
+    w16(work + 8, 1);
+    CHECK(amd_psp_ta_parse(work, sizeof(work), &t) == AMD_FW_E_VERSION);
+    /* fuzz: never read out of bounds */
+    srand(11);
+    for (it = 0; it < 50000; it++) {
+        size_t len = (size_t)(rand() % (int)sizeof(work));
+        memcpy(work, b, sizeof(b));
+        for (i = 0; i < 1 + (unsigned)(rand() % 6); i++)
+            work[rand() % 128] = (uint8_t)rand();
+        if (amd_psp_ta_parse(work, len, &t) == AMD_FW_OK)
+            for (i = 1; i < AMD_TA_MAX; i++)
+                CHECK((uint64_t)t.bin[i].offset + t.bin[i].size <= len);
+    }
+}
+
 /* ------------------------------ real ------------------------------ */
 
 static uint8_t *slurp(const char *dir, const char *name, size_t *len)
@@ -214,11 +273,37 @@ static void real(const char *dir)
     for (i = 0; i < AMD_BLOB_COUNT; i++)
         free((void *)blobs[i].data);
     free(sos);
+
+    /* psp_13_0_10_ta.bin: what amdgpu_firmware_info answers for
+     * AMDGPU_INFO_FW_ASD and AMDGPU_INFO_FW_TA on this card */
+    {
+        amd_psp_ta t;
+        uint32_t ver[32] = { 0 }, feat[32] = { 0 }, ta[AMD_TA_MAX];
+        uint8_t *tf = slurp(dir, amd_navi32_ta_name, &n);
+        if (!tf) {
+            printf("test_fw: no %s in %s, TA versions not checked\n", amd_navi32_ta_name, dir);
+            return;
+        }
+        CHECK(amd_psp_ta_parse(tf, n, &t) == AMD_FW_OK);
+        amd_fw_ta_versions(&t, ver, feat, ta);
+        /* the file carries ASD, HDCP, DTM and RAS (linux-firmware 20260916:
+         * 0x21000118, 0x17000053, 0x1200001f, 0x1b32000d); no XGMI, RAP or
+         * secure display TA, for which amdgpu reports 0 */
+        CHECK(ver[0x0d] && feat[0x0d] == ver[0x0d] && ta[AMD_TA_ASD] == ver[0x0d]);
+        CHECK(ta[AMD_TA_HDCP] && ta[AMD_TA_DTM] && ta[AMD_TA_RAS]);
+        CHECK(ta[AMD_TA_XGMI] == 0 && ta[AMD_TA_RAP] == 0 && ta[AMD_TA_SECUREDISPLAY] == 0);
+        for (i = 1; i < AMD_TA_MAX; i++)
+            CHECK(t.bin[i].size <= 0x100000);
+        printf("test_fw: TA ASD 0x%08x HDCP 0x%08x DTM 0x%08x RAS 0x%08x\n", ta[AMD_TA_ASD],
+               ta[AMD_TA_HDCP], ta[AMD_TA_DTM], ta[AMD_TA_RAS]);
+        free(tf);
+    }
 }
 
 int main(int argc, char **argv)
 {
     synthetic();
+    ta_synthetic();
     if (argc > 1 && argv[1][0])
         real(argv[1]);
     if (failures) {

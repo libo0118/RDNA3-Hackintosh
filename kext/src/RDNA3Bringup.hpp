@@ -135,7 +135,8 @@ private:
     uint32_t         fResumes = 0;          /* D4: resumes after a power loss */
     static void threadMain(void *arg, int wait_result);
     void run();
-    bool loadFirmware(const char *name, RDNA3Firmware *out);
+    /* optional: one look in each directory, no waiting for the file */
+    bool loadFirmware(const char *name, RDNA3Firmware *out, bool optional = false);
     bool mapVram();
     bool postIfNeeded();
     void resetIfPspStuck();

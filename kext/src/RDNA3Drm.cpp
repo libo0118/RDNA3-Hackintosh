@@ -328,16 +328,19 @@ void RDNA3Accel::statsStop()
     }
 }
 
-void RDNA3Accel::drmSetFirmware(const uint32_t ver[32], const uint32_t feature[32])
+void RDNA3Accel::drmSetFirmware(const uint32_t ver[32], const uint32_t feature[32],
+                                const uint32_t ta[RD_TA_TYPES])
 {
     memcpy(fFwVer, ver, sizeof(fFwVer));
     memcpy(fFwFeat, feature, sizeof(fFwFeat));
+    memcpy(fTaVer, ta, sizeof(fTaVer));
     if (fDrm && fDrmLock) {
         bool held = drmHeldByMe();
         if (!held)
             IOLockLock(fDrmLock);
         memcpy(fDrm->fw_version, fFwVer, sizeof(fFwVer));
         memcpy(fDrm->fw_feature, fFwFeat, sizeof(fFwFeat));
+        memcpy(fDrm->ta_version, fTaVer, sizeof(fTaVer));
         if (!held)
             IOLockUnlock(fDrmLock);
     }
@@ -495,6 +498,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
                           revId, fVramSize, visible > fVramSize ? fVramSize : visible, gtt);
     memcpy(fDrm->fw_version, fFwVer, sizeof(fFwVer));
     memcpy(fDrm->fw_feature, fFwFeat, sizeof(fFwFeat));
+    memcpy(fDrm->ta_version, fTaVer, sizeof(fTaVer));
     fDrm->vbios = fVbiosCopy;
     fDrm->vbios_len = fVbiosCopyLen;
     fDrm->vbios_info = fVbiosInfo;

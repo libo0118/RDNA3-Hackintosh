@@ -142,6 +142,75 @@ amd_fw_status amd_psp_sos_parse(const uint8_t *fw, size_t len, amd_psp_sos *out)
     return AMD_FW_OK;
 }
 
+/* ------------------------------ TA ------------------------------ */
+
+typedef char amd_ta_enum_matches[((int)AMD_TA_ASD == (int)TA_FW_TYPE_PSP_ASD &&
+                                  (int)AMD_TA_XGMI == (int)TA_FW_TYPE_PSP_XGMI &&
+                                  (int)AMD_TA_SECUREDISPLAY == (int)TA_FW_TYPE_PSP_SECUREDISPLAY &&
+                                  (int)AMD_TA_MAX == (int)TA_FW_TYPE_MAX_INDEX) ? 1 : -1];
+
+/* UCODE_MAX_PSP_PACKAGING (amdgpu_ucode.h): the descriptors that fit in the
+ * 256-byte amdgpu_firmware_header after the common header and the count */
+#define AMD_TA_MAX_PACKAGING ((256u - (uint32_t)sizeof(struct common_firmware_header) - 4u) / \
+                              (uint32_t)sizeof(struct psp_fw_bin_desc))
+
+/* psp_init_ta_microcode for a v2 header (parse_ta_v2_microcode): every
+ * descriptor through parse_ta_bin_descriptor. Version 1 files (pre-Navi 2x
+ * ASICs) are not parsed. */
+amd_fw_status amd_psp_ta_parse(const uint8_t *fw, size_t len, amd_psp_ta *out)
+{
+    blob b = { fw, len };
+    common_hdr h;
+    amd_fw_status st;
+    uint32_t count, i;
+
+    if (!fw || !out)
+        return AMD_FW_E_ARGS;
+    zero(out, sizeof(*out));
+    if ((st = read_common(&b, &h)) != AMD_FW_OK)
+        return st;
+    if (h.hv_major != 2)
+        return AMD_FW_E_VERSION;
+    out->ucode_version = h.ucode_version;
+    if (!rd32(&b, OFF(ta_firmware_header_v2_0, ta_fw_bin_count), &count))
+        return AMD_FW_E_TRUNCATED;
+    if (count >= AMD_TA_MAX_PACKAGING)   /* "packed TA count exceeds maximum limit" */
+        return AMD_FW_E_TOO_MANY;
+    for (i = 0; i < count; i++) {
+        uint32_t d = OFF(ta_firmware_header_v2_0, ta_fw_bin) + i * (uint32_t)sizeof(struct psp_fw_bin_desc);
+        uint32_t type, ver, off, size;
+        uint64_t start;
+        if (!rd32(&b, d + OFF(psp_fw_bin_desc, fw_type), &type) ||
+            !rd32(&b, d + OFF(psp_fw_bin_desc, fw_version), &ver) ||
+            !rd32(&b, d + OFF(psp_fw_bin_desc, offset_bytes), &off) ||
+            !rd32(&b, d + OFF(psp_fw_bin_desc, size_bytes), &size))
+            return AMD_FW_E_TRUNCATED;
+        if (type == 0 || type >= AMD_TA_MAX)
+            continue;   /* "Unsupported TA type": warned and skipped */
+        /* ucode_start_addr = header + offset_bytes + ucode_array_offset_bytes */
+        start = (uint64_t)off + h.ucode_array_offset_bytes;
+        if (!range_ok(&b, start, size))
+            return AMD_FW_E_TRUNCATED;
+        if (type == AMD_TA_XGMI_AUX)   /* is_ta_fw_applicable: both fill xgmi_context off MP0 13.0.6 */
+            type = AMD_TA_XGMI;
+        out->bin[type] = (amd_psp_bin){ (uint32_t)start, size, ver };
+    }
+    return AMD_FW_OK;
+}
+
+void amd_fw_ta_versions(const amd_psp_ta *ta, uint32_t ver[32], uint32_t feature[32],
+                        uint32_t ta_ver[AMD_TA_MAX])
+{
+    unsigned i;
+    for (i = 0; i < AMD_TA_MAX; i++)
+        ta_ver[i] = ta ? ta->bin[i].fw_version : 0;
+    /* amdgpu_firmware_info: AMDGPU_INFO_FW_ASD = asd_context.bin_desc, whose
+     * feature_version parse_ta_bin_descriptor sets to the fw_version too */
+    ver[AMDGPU_INFO_FW_ASD] = feature[AMDGPU_INFO_FW_ASD] = ta_ver[AMD_TA_ASD];
+    /* AMDGPU_INFO_FW_TA has a version per TA: the UAPI answers it by
+     * sub-index from ta_ver[] (rdna3_drm_device.ta_version) */
+}
+
 /* psp_hw_start() order; values from enum psp_bootloader_cmd */
 const amd_psp_bl_step amd_psp_bl_sequence[] = {
     { AMD_PSP_BIN_KDB,      AMD_PSP_BIN_KDB,      0x80000u,    "KDB" },
@@ -444,6 +513,7 @@ const char *const amd_navi32_fw_names[AMD_BLOB_COUNT] = {
     [AMD_BLOB_VCN]   = "vcn_4_0_0.bin",
 };
 const char *const amd_navi32_sos_name = "psp_13_0_10_sos.bin";
+const char *const amd_navi32_ta_name = "psp_13_0_10_ta.bin";
 
 /* ---------------- AMDGPU_INFO_FW_VERSION ---------------- */
 
