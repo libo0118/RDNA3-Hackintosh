@@ -19,6 +19,8 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
             -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions -fno-builtin -fno-common \
             -O2 -g -ferror-limit=0 -Wall -Wextra -Werror -Wno-unused-parameter \
             -Wno-inconsistent-missing-override -Wno-deprecated-declarations
+GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+CXXFLAGS += -DFB_COMMIT='"$(GIT_COMMIT)"'
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext
 
 .PHONY: all check clean

@@ -56,6 +56,9 @@ extern "C" kern_return_t _start(kmod_info_t *, void *) { return KERN_SUCCESS; }
 extern "C" kern_return_t _stop(kmod_info_t *, void *) { return KERN_SUCCESS; }
 
 #define FBLOG(fmt, ...) IOLog("RDNA3-fb: " fmt "\n", ##__VA_ARGS__)
+#ifndef FB_COMMIT
+#define FB_COMMIT "unknown"
+#endif
 #define FBSEL(a) char _s[5] = { (char)((a) >> 24), (char)((a) >> 16), (char)((a) >> 8), (char)(a), 0 }
 
 static const char kPixelFormats[] = IO32BitDirectPixels "\0";
@@ -364,6 +367,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
     setProperty("IOFBDependentIndex", (unsigned long long)fHead, 32);
     setProperty("IOFBMemorySize", (unsigned long long)fBytes, 64);
     setProperty("RDNA3,Mode", fDcn ? "dcn" : "console");
+    setProperty("RDNA3,Commit", FB_COMMIT);
     setName("RDNA3Framebuffer");
 
     if (!super::start(provider)) {
@@ -379,8 +383,8 @@ bool RDNA3Framebuffer::start(IOService *provider)
     registerPowerDriver(this, kFBPowerStates, 2);
     if (fDcn)
         cursorInit();
-    FBLOG("started (head %u, VBL %s, %s cursor)", fHead,
-          fDcn ? "locked to the OTG frame counter" : "timer", fCurReady ? "hardware" : "software");
+    FBLOG("started (head %u, VBL %s, %s cursor), build %s", fHead,
+          fDcn ? "locked to the OTG frame counter" : "timer", fCurReady ? "hardware" : "software", FB_COMMIT);
     return true;
 }
 

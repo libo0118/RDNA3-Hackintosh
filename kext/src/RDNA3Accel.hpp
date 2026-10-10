@@ -85,6 +85,11 @@ public:
     virtual bool start(IOService *provider) override;
     virtual void stop(IOService *provider) override;
     virtual void free() override;
+    /* amdgpu_pci_shutdown, display part: the card goes back to the GOP's
+     * single head before macOS powers off or restarts (a joined PM tree
+     * member gets this call; the power states themselves are no-ops) */
+    virtual void systemWillShutdown(IOOptionBits specifier) override;
+    virtual IOReturn setPowerState(unsigned long state, IOService *dev) override;
 
     /* Stage 4: DRM/amdgpu UAPI for RDNA3UserClient (RDNA3Drm.cpp) */
     bool  drmAvailable() const { return fDrm != nullptr; }
@@ -111,6 +116,7 @@ public:
     /* B7: an HPD pin changed (bring-up work loop, after the ack); the
      * connectors are probed again on a thread call */
     void displayHotplug(uint32_t pin, int connected);
+    void displayShutdown();
 
     /* Stage 7: requests from the accelerator kext (RDNA3Platform.cpp) */
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
@@ -190,11 +196,13 @@ private:
     uint64_t      fDispReserveEnd = 0;
     struct rdna3_dcn_clone *fMirror = nullptr;   /* hw/dcn32_clone.c plan, when lit */
     bool          fMirrorOn    = false;
+    bool          fPmJoined = false;
     uint64_t      fSleepAssertion = 0;        /* IOPMDriverAssertionID: no idle sleep (no resume yet) */
     /* PerformanceStatistics (what AMD's drivers publish; read by Activity
      * Monitor-style tools), refreshed every 2 s from the SMU metrics */
     struct thread_call *fStatsCall = nullptr;
     volatile bool fStatsStop = false;
+    uint32_t      fStatsTicks = 0;
     static void   statsTick(void *owner, void *);
     void          statsStart();
     void          statsStop();

@@ -69,19 +69,21 @@ int  dcn32_clone_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head,
 
 /* Program the plan; 'dm' is the running DMCUB (dmub32_hw_init). Returns
  * 0, or the first error (power gate, DET or DMCUB command) after undoing
- * what it can. Logs every step. When lit, the PMFW is told the display
- * count (dcn30_smu_set_num_of_displays, as dcn32_update_clocks does). */
+ * what it can. Logs every step. The PMFW is not told the display count
+ * (see dcn32_clone_enable: NumOfDisplays wedged its mailbox on the card). */
 int  dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c);
 
 /* Is the clone producing the picture? Over 'wait_ms' its OTG frame
  * counter must move, and the OTG CRC (optc1_configure_crc, whole frame)
  * of the clone must equal the boot head's: same surface, same timing,
  * same colour pipeline. A clone that passes but stays black on the
- * monitor points at the PHY / PLL side. Returns 0 when both hold. */
+ * monitor points at the PHY / PLL side. Returns 0 when both hold, or when
+ * the OTG runs and the CRCs all read zero (no CRC: not compared). */
 typedef struct rdna3_clone_check {
     uint32_t frames_src, frames_dst;          /* frames counted over the wait */
     uint32_t crc_src[3], crc_dst[3];          /* R/Cr, G/Y, B/Cb */
     int      running, crc_match;
+    int      crc_valid;                       /* any CRC word non-zero */
 } rdna3_clone_check;
 int  dcn32_clone_verify(rdna3_dev *d, const rdna3_dcn_clone *c, uint32_t wait_ms, rdna3_clone_check *k);
 

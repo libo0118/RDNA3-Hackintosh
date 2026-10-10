@@ -49,6 +49,9 @@ bool RDNA3Accel::start(IOService *provider)
     PE_parse_boot_argn("rdna3lvl", &fLevel, sizeof(fLevel));
     setNumber("RDNA3,Level", fLevel);
     LOG("start, safety level %u, build %s (%s)", fLevel, KEXT_COMMIT, KEXT_VERSION);
+    /* the framebuffer publishes its own: a mismatch means one of the two
+     * kexts is a stale copy (the Auxiliary KC keeps the last setup.sh one) */
+    setProperty("RDNA3,Commit", KEXT_COMMIT);
 
     readConfigSpace();
 
@@ -102,14 +105,39 @@ bool RDNA3Accel::start(IOService *provider)
         }
     }
 
+    /* in the power tree only to hear about shutdown and restart */
+    static IOPMPowerState states[2] = {
+        { kIOPMPowerStateVersion1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        { kIOPMPowerStateVersion1, kIOPMPowerOn, kIOPMPowerOn, kIOPMPowerOn, 0, 0, 0, 0, 0, 0, 0, 0 },
+    };
+    PMinit();
+    provider->joinPMtree(this);
+    fPmJoined = registerPowerDriver(this, states, 2) == kIOReturnSuccess;
+
     registerService();
     LOG("started");
     return true;
 }
 
+IOReturn RDNA3Accel::setPowerState(unsigned long, IOService *)
+{
+    return kIOPMAckImplied;
+}
+
+void RDNA3Accel::systemWillShutdown(IOOptionBits specifier)
+{
+    LOG("system %s: display back to the boot head", specifier == kIOMessageSystemWillRestart ? "restart" : "power off");
+    displayShutdown();
+    super::systemWillShutdown(specifier);
+}
+
 void RDNA3Accel::stop(IOService *provider)
 {
     LOG("stop");
+    if (fPmJoined) {
+        PMstop();
+        fPmJoined = false;
+    }
     statsStop();
     if (fSleepAssertion) {
         if (IOPMrootDomain *root = getPMRootDomain())

@@ -3864,7 +3864,7 @@ static void run(const char *fwdir)
             S.dmub.nseq = 0;
             S.dal_displays = 0;
             CHECK(dcn32_clone_enable(&dev, &dm, &cl) == RDNA3_OK);
-            CHECK(S.dal_displays == 2);
+            CHECK(S.dal_displays == 0);   /* no NumOfDisplays: it wedged the PMFW on the card */
             CHECK(S.dcn_gated_drops == 0 && S.dcn_pg_no_request == 0 && S.dmub.bad_cmds == 0);
             CHECK(S.reg[DCN_B2 + regDOMAIN0_PG_STATUS] == 0 &&
                   !(S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL] & DC_IP_REQUEST_CNTL__IP_REQUEST_EN_MASK));
@@ -3959,7 +3959,7 @@ static void run(const char *fwdir)
                 off.displays = 2;
                 S.dmub.nseq = 0;
                 CHECK(dcn32_clone_disable(&dev, &dm, &off) == RDNA3_OK);
-                CHECK(S.dal_displays == 1);
+                CHECK(S.dal_displays == 0);
             }
             CHECK(S.dmub.nseq == 2 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE &&
                   S.dmub.seq[1] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.pixclk[0] == 0 && S.dmub.pixclk[2] == 0);

@@ -268,6 +268,8 @@ void RDNA3Accel::statsTick(void *owner, void *)
     if (a->fDrmLock) {
         IOLockLock(a->fDrmLock);
         ok = a->fBringup && a->fBringup->stats(v);
+        if (ok && a->fStatsTicks % 15 == 0)
+            a->fBringup->logBusy();
         IOLockUnlock(a->fDrmLock);
     }
     if (ok) {
@@ -291,6 +293,11 @@ void RDNA3Accel::statsTick(void *owner, void *)
             a->setProperty("PerformanceStatistics", d);
             d->release();
         }
+        /* the trend from boot on (the first card run read ~197 W, 2700 MHz
+         * and 100 % activity 90 s after boot, even at rdna3lvl=5) */
+        if (a->fStatsTicks++ % 15 == 0)
+            LOG("PM: activity %u%%, gfxclk %u MHz, uclk %u MHz, %u W, edge %u C, hotspot %u C, mem %u C, fan %u rpm",
+                v[0], v[5], v[6], v[7], v[1], v[2], v[3], v[4]);
     }
     if (!a->fStatsStop && a->fStatsCall) {
         uint64_t dl;

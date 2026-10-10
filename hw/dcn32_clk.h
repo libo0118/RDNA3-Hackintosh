@@ -59,7 +59,9 @@ void dcn32_clk_read(rdna3_dev *d, rdna3_dcn_clocks *c);
 /* dcn32_smu_send_msg_with_param: 0, or RDNA3_ETIME when the PMFW does not
  * answer, RDNA3_EIO for any answer but OK */
 int  dcn32_smu_send(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out);
-/* dcn30_smu_set_num_of_displays */
+/* dcn30_smu_set_num_of_displays. NOT used: on the RX 7800 XT (PMFW 80.92,
+ * driver interface 0x40) the driver mailbox stopped answering right after
+ * it, in a VM where the PMFW never saw amdgpu's DAL setup. */
 int  dcn32_smu_num_displays(rdna3_dev *d, uint32_t n);
 /* dcn32_smu_set_hard_min_by_freq (+ dcn32_smu_wait_get_hard_min_status
  * when the PMFW has it: 'pmfw' >= 0x503900 on GC 11.0.3). 'got_khz' is the

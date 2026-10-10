@@ -43,6 +43,35 @@ if [ "${1:-}" != --updated ]; then
     done
 fi
 
+# a new build on the host (rdna3vm prepare): install its kexts like
+# setup.sh does. OpenCore injects RDNA3Accel itself, but the framebuffer
+# and the accelerator link IOGraphicsFamily, so they load from the
+# Auxiliary KC, which kernelmanagerd rebuilds from /Library/Extensions:
+# the new copies run from the next boot on.
+updated=
+new=$(curl -sf --max-time 10 "$HOST/rdna3-bundle.sha256" | cut -c1-64)
+if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
+    t=$(mktemp -d /tmp/rdna3b.XXXXXX)
+    if curl -sf --max-time 120 "$HOST/rdna3-bundle.tar.gz" | tar -xz -C "$t" && [ -d "$t/kexts" ]; then
+        for k in "$t"/kexts/*.kext; do
+            n=$(basename "$k")
+            rm -rf "/Library/Extensions/$n" "$D/kexts/$n"
+            mkdir -p "$D/kexts"
+            cp -R "$k" "$D/kexts/"
+            cp -R "$k" /Library/Extensions/
+            chown -R root:wheel "/Library/Extensions/$n"
+            chmod -R go-w "/Library/Extensions/$n"
+            codesign --force --deep --sign - "/Library/Extensions/$n" >/dev/null 2>&1
+            kmutil load -p "/Library/Extensions/$n" >/dev/null 2>&1
+        done
+        mkdir -p "$D/bin"
+        cp "$t"/bin/* "$D/bin/" 2>/dev/null && chmod +x "$D/bin/"*
+        echo "$new" > "$D/bundle.sha256"
+        updated="kexts updated to the host's new bundle: the framebuffer from it runs from the next boot"
+    fi
+    rm -rf "$t"
+fi
+
 args=$(nvram boot-args 2>/dev/null | cut -f2-)
 label=$(echo "$args" | tr ' ' '\n' | grep -E '^rdna3(lvl|dmub|msi|fb|accel)=' | tr '=' '-' | tr '\n' '_' | sed 's/_$//')
 [ -n "$label" ] || label=no-rdna3
@@ -51,6 +80,7 @@ lvl=$(echo "$args" | sed -n 's/.*rdna3lvl=\([0-9]*\).*/\1/p')
 extra="$HOME/rdna3-extra.txt"
 {
     echo "boot-args: $args"
+    [ -n "$updated" ] && echo "== $updated"
     if [ "${lvl:-0}" -ge 7 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
         echo "== rdna3_drminfo --dma-test"
         with_limit 60 "$D/bin/rdna3_drminfo" --dma-test 2>&1

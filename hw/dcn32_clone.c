@@ -462,9 +462,10 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
          RI(d, regDOMAIN0_PG_STATUS, c->dst_pipe, PG_S), RI(d, regDCHUBBUB_DET0_CTRL, c->dst_pipe, DET_S),
          RI(d, regOTG0_PIXEL_RATE_CNTL, c->dst_otg, PRC_S),
          RI(d, regOTG0_PHYPLL_PIXEL_RATE_CNTL, c->dst_otg, PRC_S));
-    /* dcn32_update_clocks -> dcn30_smu_set_num_of_displays; advisory */
-    if (c->displays)
-        dcn32_smu_num_displays(d, c->displays);
+    /* No dcn30_smu_set_num_of_displays here: on the RX 7800 XT (PMFW
+     * 80.92) the driver mailbox stopped answering right after NumOfDisplays
+     * 2 went through the DAL mailbox (metrics "msg 0x12 timed out", then
+     * never ready again), and the host could not take the card back. */
     return RDNA3_OK;
 
 fail:
@@ -503,13 +504,21 @@ int dcn32_clone_verify(rdna3_dev *d, const rdna3_dcn_clone *c, uint32_t wait_ms,
     WI(d, regOTG0_OTG_CRC_CNTL, c->dst_otg, OTG_S, saved_dst);
     k->running = k->frames_dst > 0;
     k->crc_match = 1;
-    for (i = 0; i < 3; i++)
+    k->crc_valid = 0;
+    for (i = 0; i < 3; i++) {
         k->crc_match &= k->crc_src[i] == k->crc_dst[i];
+        k->crc_valid |= k->crc_src[i] || k->crc_dst[i];
+    }
+    /* all zero on the card (RX 7800 XT, first run): the CRC block did not
+     * produce anything, which proves nothing about the picture */
+    if (!k->crc_valid)
+        k->crc_match = 0;
     RLOG(d, "clone: check over %u ms: frames boot %u clone %u, CRC boot %04x/%04x/%04x clone "
          "%04x/%04x/%04x (%s)", wait_ms, k->frames_src, k->frames_dst, k->crc_src[0], k->crc_src[1],
          k->crc_src[2], k->crc_dst[0], k->crc_dst[1], k->crc_dst[2],
-         !k->running ? "the clone OTG does not run" : k->crc_match ? "same picture" : "different picture");
-    return k->running && k->crc_match ? RDNA3_OK : RDNA3_EIO;
+         !k->running ? "the clone OTG does not run" : !k->crc_valid ? "no CRC: picture not compared" :
+         k->crc_match ? "same picture" : "different picture");
+    return k->running && (k->crc_match || !k->crc_valid) ? RDNA3_OK : RDNA3_EIO;
 }
 
 int dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
@@ -551,8 +560,6 @@ int dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
     v = RI(d, regDPPCLK_DTO_CTRL, 0, 0);
     WI(d, regDPPCLK_DTO_CTRL, 0, 0, v & ~(3u << (4 * c->dst_pipe)));
     pipe_power(d, c->dst_pipe, 0);
-    if (c->displays > 1)
-        dcn32_smu_num_displays(d, c->displays - 1);
     RLOG(d, "clone: pipe %u off (transmitter %u: %d)", c->dst_pipe, c->dst_be, ret);
     return ret;
 }

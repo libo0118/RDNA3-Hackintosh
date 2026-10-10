@@ -227,6 +227,10 @@ EOF
     cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" "$st/tools/macos/"
     cp "$TOOLS/macos/autoreport.sh" "$st/"
     tar -czf "$WORK/share/rdna3-bundle.tar.gz" -C "$st" kexts bin tools autoreport.sh
+    # autoreport.sh in macOS installs a bundle with a new checksum by itself
+    # (the framebuffer and accelerator load from the Auxiliary KC, which
+    # OpenCore cannot replace)
+    sha256sum "$WORK/share/rdna3-bundle.tar.gz" | cut -d' ' -f1 > "$WORK/share/rdna3-bundle.sha256"
     cp "$TOOLS/macos/setup.sh" "$WORK/share/setup.sh"
     local res=${OC_RESOLUTION-Max}   # unset in older configs: Max; empty: leave OpenCore's
     sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --kexts "$st/kexts" \
@@ -406,7 +410,8 @@ cmd_args() {
 
 # the steps still waiting, one per line; the first is the one running
 QUEUE=$WORK/queue
-PENDING_STEPS="5b 5c 8c 9 9b3 9c3 9b 9c"
+# step 0 first: its boot installs a new build's framebuffer in macOS
+PENDING_STEPS="0 9 9b 9c"
 
 cmd_queue() {
     load_conf

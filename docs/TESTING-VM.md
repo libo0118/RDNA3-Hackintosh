@@ -174,7 +174,8 @@ If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
 rdna3vm queue pending
 ```
 
-runs the steps still waiting for the card (`5b 5c 8c 9 9b3 9c3 9b 9c`)
+runs the steps still waiting for the card (`0 9 9b 9c`; step 0 first, its
+boot installs a new build's framebuffer in macOS)
 one after the other: each one boots macOS, sends its report and shuts
 down, the desktop comes back for a moment, then the next one starts
 (about 5 minutes a step, 40 in all; both monitors connected). You can

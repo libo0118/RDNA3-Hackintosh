@@ -1133,6 +1133,18 @@ bool RDNA3Bringup::stats(uint32_t v[8])
     return true;
 }
 
+void RDNA3Bringup::logBusy()
+{
+    rdna3_gfx_status st;
+    if (!fFinished || !fDev)
+        return;
+    gfx11_read_status(fDev, fGfx, &st);
+    BLOG("PM: GRBM_STATUS 0x%08x STATUS2 0x%08x SE0 0x%08x CP_STAT 0x%08x CPC 0x%08x CPF 0x%08x "
+         "ME_CNTL 0x%08x RLC_SAFE_MODE 0x%x SDMA0 0x%08x", st.grbm_status, st.grbm_status2,
+         st.grbm_status_se0, st.cp_stat, st.cp_cpc_status, st.cp_cpf_status, st.cp_me_cntl,
+         st.rlc_safe_mode, st.sdma0_status);
+}
+
 /* amdgpu_dpm_read_sensor through smu_v13_0_0_read_sensor: the units are
  * amdgpu's (MHz, millidegrees, %, W, mV). Called under the DRM lock once
  * the bring-up finished, so the SMU mailbox is ours. */

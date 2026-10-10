@@ -181,6 +181,18 @@ def report(path, show_all):
     # step 9: our framebuffer (rdna3fb=1) took the head and has the EDID
     if "rdna3fb=1" in args:
         fb_started = "RDNA3-fb: started" in log
+        # the framebuffer must be the same build as the core: OpenCore cannot
+        # inject it (it links IOGraphicsFamily), so the VM loads the copy
+        # setup.sh last put in the Auxiliary KC
+        core_c = props.get("Commit")
+        fb_c = re.search(r"RDNA3-fb: started .*?, build (\S+)", log)
+        same = bool(core_c and fb_c and fb_c.group(1) == core_c)
+        print("   %s %-20s %s" % ("PASS" if same else "FAIL", "framebuffer build",
+                                 "%s = core" % core_c if same else
+                                 "framebuffer %s, core %s: stale RDNA3Framebuffer.kext - run setup.sh "
+                                 "in the VM (rdna3vm window) and boot twice" %
+                                 (fb_c.group(1) if fb_c else "older than the build check", core_c or "?")))
+        failed = failed or not same
         fb_edid = re.search(r"RDNA3FB: head \d+ EDID \d+ bytes", log)
         print("   %s %-20s %s" % ("PASS" if fb_started else "FAIL", "framebuffer",
                                  "started" if fb_started else "no 'RDNA3-fb: started' in the log"))

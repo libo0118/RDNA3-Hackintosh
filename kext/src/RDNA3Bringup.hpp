@@ -109,6 +109,8 @@ public:
     /* PerformanceStatistics: activity %, edge / hotspot / memory C, fan
      * rpm, gfx / memory clock MHz, power W; under the DRM lock */
     bool     stats(uint32_t v[8]);
+    /* which GC block is busy (GRBM / CP status), next to the PM trend */
+    void     logBusy();
 
 private:
     static void threadMain(void *arg, int wait_result);

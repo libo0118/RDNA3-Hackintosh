@@ -372,6 +372,7 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm)
             char chk[96];
             snprintf(chk, sizeof(chk), "%s, %u frames in 100 ms, CRC %s",
                      ck.running ? "running" : "NOT running", ck.frames_dst,
+                     !ck.crc_valid ? "not compared (CRC reads 0)" :
                      ck.crc_match ? "same as the boot head" : "DIFFERENT");
             setProperty("RDNA3,MirrorCheck", chk);
             setNumber("RDNA3,MirrorCheckResult", (uint64_t)(int64_t)vr, 64);
@@ -482,6 +483,27 @@ void RDNA3Accel::displayAddCloneHead()
     OSSafeReleaseNULL(fHeadNub);
     fDcn->nheads--;
     fCloneHead = -1;
+}
+
+/* amdgpu_pci_shutdown: no clone left lit for whoever drives the card next
+ * (the host's amdgpu after the VM, the GOP after a restart). The second
+ * framebuffer's head goes away with it; its nub stays until stop(). */
+void RDNA3Accel::displayShutdown()
+{
+    rdna3_dmub *dm = fMirrorDm;
+    fMirrorDm = nullptr;
+    if (fHotplugCall)
+        thread_call_cancel_wait(fHotplugCall);
+    if (!dm || !fMirrorOn || !fMirror || !fDispLock)
+        return;
+    IOLockLock(fDispLock);
+    if (fCloneHead >= 0 && (uint32_t)fCloneHead == fDcn->nheads - 1)
+        fDcn->nheads--;
+    fCloneHead = -1;
+    dcn32_clone_disable(fDispDev, dm, fMirror);
+    fMirrorOn = false;
+    IOLockUnlock(fDispLock);
+    LOG("display: shutdown: the second monitor is off");
 }
 
 /* the bring-up is going (its DMCUB with it): no hotplug may use it */

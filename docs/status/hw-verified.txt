@@ -12,3 +12,6 @@
 6b 2026-10-09 vm MSI interrupts live (IH wakeups)
 7 2026-10-10 vm SDMA ring + copy verified, userspace DMA job in VMID 1 (GFXHUB) verified, VRAM/GTT BO mmap
 8 2026-10-10 vm GFX ring 0 KIQ-mapped (MES KIQ me 3 pipe 1), KCQ0 mapped, userspace PM4 WRITE_DATA job verified
+5b 2026-10-10 vm DMCUB loaded by the PSP: running, caps query answered (DMUBResult 0)
+8c 2026-10-10 vm MES scheduler pipe: SET_HW_RESOURCES + status query (MESResult 0), legacy queue map
+9b 2026-10-10 vm second monitor (DP-3 UNIPHYB, HDMI adaptor) lit by cloning the GOP pipe through the DMCUB, picture seen on both

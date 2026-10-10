@@ -1,10 +1,10 @@
 {
  "amdgpu": {
-  "works": 220,
-  "ported": 265,
+  "works": 225,
+  "ported": 264,
   "total": 1328,
-  "works_pct": 16.6,
-  "ported_pct": 20.0,
+  "works_pct": 16.9,
+  "ported_pct": 19.9,
   "groups": [
    {
     "name": "PSP 13",
@@ -1150,8 +1150,8 @@
     "steps": [
      "5b"
     ],
-    "works": 0,
-    "ported": 5,
+    "works": 5,
+    "ported": 0,
     "todo": 65,
     "items": {
      "dmub_align": "todo",
@@ -1185,9 +1185,9 @@
      "dmub_dcn32_setup_mailbox": "todo",
      "dmub_dcn32_setup_out_mailbox": "todo",
      "dmub_dcn32_setup_outbox0": "todo",
-     "dmub_dcn32_setup_windows": "ported",
+     "dmub_dcn32_setup_windows": "works",
      "dmub_dcn32_skip_dmub_panel_power_sequence": "todo",
-     "dmub_dcn32_translate_addr": "ported",
+     "dmub_dcn32_translate_addr": "works",
      "dmub_flush_buffer_mem": "todo",
      "dmub_get_fw_meta_info": "todo",
      "dmub_get_fw_meta_info_from_blob": "todo",
@@ -1207,8 +1207,8 @@
      "dmub_srv_get_gpint_response": "todo",
      "dmub_srv_get_outbox0_msg": "todo",
      "dmub_srv_has_hw_support": "todo",
-     "dmub_srv_hw_init": "ported",
-     "dmub_srv_hw_reset": "ported",
+     "dmub_srv_hw_init": "works",
+     "dmub_srv_hw_reset": "works",
      "dmub_srv_hw_setup": "todo",
      "dmub_srv_is_hw_init": "todo",
      "dmub_srv_is_hw_pwr_up": "todo",
@@ -1220,7 +1220,7 @@
      "dmub_srv_should_detect": "todo",
      "dmub_srv_subvp_save_surf_addr": "todo",
      "dmub_srv_sync_inbox1": "todo",
-     "dmub_srv_wait_for_auto_load": "ported",
+     "dmub_srv_wait_for_auto_load": "works",
      "dmub_srv_wait_for_hw_pwr_up": "todo",
      "dmub_srv_wait_for_idle": "todo",
      "dmub_srv_wait_for_inbox0_ack": "todo"
@@ -1323,8 +1323,8 @@
      "modeset"
     ],
     "works": 0,
-    "ported": 10,
-    "todo": 144,
+    "ported": 9,
+    "todo": 145,
     "items": {
      "apply_symclk_on_tx_off_wa": "todo",
      "configure_lttpr_mode_non_transparent": "todo",
@@ -1405,7 +1405,7 @@
      "dcn32_subvp_pipe_control_lock": "todo",
      "dcn32_subvp_pipe_control_lock_fast": "todo",
      "dcn32_unblank_stream": "todo",
-     "dcn32_update_clocks": "ported",
+     "dcn32_update_clocks": "todo",
      "dcn32_update_clocks_update_dentist": "todo",
      "dcn32_update_clocks_update_dpp_dto": "todo",
      "dcn32_update_clocks_update_dtb_dto": "todo",
@@ -1678,9 +1678,12 @@
   "3",
   "4",
   "5",
+  "5b",
   "6",
   "6b",
   "7",
-  "8"
+  "8",
+  "8c",
+  "9b"
  ]
 }
