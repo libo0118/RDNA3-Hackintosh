@@ -33,6 +33,10 @@ Legend: **[sim]** can be finished and verified in the simulator now;
 | `rdna3vm queue`, `package/oc_install.sh` | `3127016`, `8786936` | - |
 | B5 subset: DCN clock read-back, DAL mailbox | `e8f4261` | `RDNA3,DCNClocks`; step 9b log `DAL SMU: 2 display(s)` |
 | `rdna3vm step 8c / 9b / 9c` | `3f743e5` | - |
+| RLC/CP power status in the PM trend | `4187e5d` | step 8: `PM: RLC_STAT ... GPM_STAT (pwr clk ls)` lines |
+| accelerator build id, step 10 triage | `9b5b663` | step 10: `accelerator build` PASS, `IOGraphicsAccelerator2::start -> 1` |
+| RADV on the host (`tools/radv_host.sh`), patches 0001/0005/0006, `rdna3_vktest` | `a6e2019`..`9ae7106` | step 8 with `prepare --radv`: `ALL PASSED` in the report |
+| Linux reference dump (`tools/linux/card_dump.sh`, `dump_summary.py`) | `dfcc46e`, `83bab28` | - (run on the Linux host) |
 
 Still open: A1 (monitor name), A3 (DMCUB on the card), B5 (bandwidth /
 watermarks for real modesets), B6 (one framebuffer per head, mode
