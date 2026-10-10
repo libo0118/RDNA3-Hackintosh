@@ -8,8 +8,8 @@
  *                              GPU wrote: the first userspace job on the card.
  *   rdna3_drminfo --gfx-test   (rdna3lvl>=8) the same with a PM4 WRITE_DATA IB
  *                              on the GFX ring.
- *   rdna3_drminfo --hang-test  (rdna3lvl>=8) submits a DMA job and a GFX job
- *                              that never finish (POLL_REGMEM / WAIT_REG_MEM on
+ *   rdna3_drminfo --hang-test  (rdna3lvl>=7) submits a DMA job (--hang-test-gfx:
+ *                              a GFX job, rdna3lvl>=8) that never finishes (POLL_REGMEM / WAIT_REG_MEM on
  *                              a value that never comes): the kernel must
  *                              notice within its 10 s cap, recover (SDMA soft
  *                              reset / GFX soft recovery or reset) and run the
@@ -320,21 +320,25 @@ int main(int argc, char **argv)
             fails += job_test(fd, 0, 0);
         else if (!strcmp(argv[a], "--gfx-test"))
             fails += job_test(fd, 1, 0);
-        else if (!strcmp(argv[a], "--hang-test")) {
+        else if (!strcmp(argv[a], "--hang-test") || !strcmp(argv[a], "--hang-test-gfx")) {
             /* each hang, then the same engine must work again. The hung
              * job's client is guilty from then on (amdgpu_cs_submit returns
              * -ECANCELED for it, as for a guilty amdgpu context), so every
              * job runs on its own connection, like a new Vulkan device
              * after VK_ERROR_DEVICE_LOST */
-            int f = 0;
-            for (int e = 0; e < 2; e++)
+            /* --hang-test: the DMA engine only (SDMA soft reset). The GFX
+             * hang froze the whole host in the VM (card run 19): only with
+             * --hang-test-gfx */
+            int f = 0, gfx = !strcmp(argv[a], "--hang-test-gfx");
+            for (int e = gfx; e < 1 + gfx; e++)
                 for (int h = 1; h >= 0; h--) {
                     int jfd = drm_xnu_open(DRM_XNU_RENDER_NODE, 0);
                     if (jfd < 0) { perror("open RDNA3Accel"); f++; continue; }
                     f += job_test(jfd, e, h);
                     drm_xnu_close(jfd);
                 }
-            printf("HANG TEST: %s\n", f ? "FAILED" : "PASSED (both engines recovered and ran the next job)");
+            printf("HANG TEST: %s\n", f ? "FAILED" : gfx ? "PASSED (GFX recovered and ran the next job)"
+                                                       : "PASSED (DMA recovered and ran the next job)");
             fails += f;
         }
     }

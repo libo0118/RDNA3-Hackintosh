@@ -396,7 +396,7 @@ cmd_window() {
 auto_limit() {
     local m=${AUTO_TIMEOUT_MIN:-8} soak
     soak=$(printf '%s\n' $1 | sed -n 's/^rdna3soak=\([0-9]*\)$/\1/p' | head -1)
-    case " $1 " in *" rdna3modes=1 "*|*" rdna3hangtest=1 "*|*" rdna3dpms=1 "*|*" rdna3dpms=2 "*) [ "$m" -lt 12 ] && m=12 ;; esac
+    case " $1 " in *" rdna3modes=1 "*|*" rdna3hangtest=1 "*|*" rdna3hangtest=2 "*|*" rdna3dpms=1 "*|*" rdna3dpms=2 "*) [ "$m" -lt 12 ] && m=12 ;; esac
     [ -n "$soak" ] && m=$((m + soak))
     echo "$m"
 }
@@ -438,9 +438,9 @@ launch() {   # launch "rdna3 args" stay(0/1)
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 hanggfx"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 hanggfx off)"
     launch "$a" "$stay"
 }
 
@@ -739,6 +739,12 @@ cmd__passthrough() {
         lspci -vv -s "$bdf" 2>/dev/null | grep -E 'Region|BAR [0-9]|Resizable|LnkSta:' | sed 's/^/  host: /'
     echo "== qemu start"
     qemu-system-x86_64 "${QARGS[@]}" & qpid=$!
+    # the serial log onto the disk every 2 s: a GPU reset that freezes the
+    # whole computer otherwise leaves its last minutes (the interesting
+    # ones) in the page cache, lost at the hard reset
+    ( while kill -0 $qpid 2>/dev/null; do
+          sleep 2; sync "$WORK/reports/serial-$stamp.log" "$log" 2>/dev/null
+      done ) &
     # 8 s: what OVMF assigned (OpenCore / boot.efi run); 40 s: after macOS
     # configured the bus
     { local t

@@ -237,13 +237,22 @@ partial() {
         done
         echo "SOAK: $n rounds, $bad failed"
     fi
-    # last, it resets engines: a DMA and a GFX job that never finish, the
-    # kernel must recover both (only when the step asks: rdna3hangtest=1)
+    # last, it resets engines: a DMA job that never finishes, the kernel
+    # must recover (rdna3hangtest=1); =2 also a GFX one, which froze the
+    # whole host in the VM once (card run 19) - a step of its own
     case " $args " in
-        *" rdna3hangtest=1 "*)
-            if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
+        *" rdna3hangtest=1 "*|*" rdna3hangtest=2 "*)
+            if [ "${lvl:-0}" -ge 7 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
                 echo "== rdna3_drminfo --hang-test"; partial
                 with_limit 120 "$D/bin/rdna3_drminfo" --hang-test 2>&1
+                echo "[exit $?]"; partial
+            fi ;;
+    esac
+    case " $args " in
+        *" rdna3hangtest=2 "*)
+            if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
+                echo "== rdna3_drminfo --hang-test-gfx"; partial
+                with_limit 120 "$D/bin/rdna3_drminfo" --hang-test-gfx 2>&1
                 echo "[exit $?]"; partial
             fi ;;
     esac

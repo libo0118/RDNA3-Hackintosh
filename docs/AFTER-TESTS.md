@@ -498,3 +498,15 @@ nothing (48-56 W), GFXCLK soft max 500 MHz gives 21 W, the idle cap holds
 the DMA hang was detected and SDMA0 soft-reset, but the follow-up jobs ran
 on the guilty client's connection and got -ECANCELED, so the GFX hang never
 ran; each job now has its own connection.
+
+### Card run 19 (step `big2`, CI build 96): the GFX hang froze the host
+
+Scaled modes (1600x900 and 960x540 on each head, then native), display
+sleep/wake, DMA/GFX, vktest, mtlprobe and the soak all ran. The hang test,
+now with one connection per job, detected and recovered the DMA hang, ran
+the next DMA job, then submitted the GFX hang: no `hang: GFX` line followed
+and the whole computer froze (the serial log ends in zeros: never written
+to disk). The GFX hang is now its own step (`hanggfx`, `rdna3hangtest=2`);
+`big2`'s hang test is DMA only. Every recovery step is logged with 100 ms
+for the log to drain before it runs, and the host fsyncs the serial log
+every 2 s, so the next attempt shows the step that takes the bus down.

@@ -1519,6 +1519,11 @@ void RDNA3Bringup::forceFences()
     IOLockUnlock(fLock);
 }
 
+/* recovery steps can take the bus down with them (card run 19 froze the
+ * whole VM host during a GFX recovery, its last lines lost): each step is
+ * logged, then 100 ms for IOLog to reach the serial port before it runs */
+#define HLOG(fmt, ...) do { BLOG("hang: " fmt, ##__VA_ARGS__); IOSleep(100); } while (0)
+
 /* amdgpu_job_timedout for (ip, ring): state dump, soft recovery of the
  * guilty VMID's waves, then a GFX soft reset, then the whole chip. Called
  * from fenceWait under the DRM lock, so nothing else touches the rings. */
@@ -1532,7 +1537,7 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
 
     /* whatever runs next re-programs its GDS partition (amdgpu_vmid_reset) */
     memset(fGdsKnown, 0, sizeof(fGdsKnown));
-    BLOG("hang: %s ring %u, fence %llu not signalled within 10 s",
+    HLOG("%s ring %u, fence %llu not signalled within 10 s",
          ip == AMDGPU_HW_IP_DMA ? "DMA" : ip == AMDGPU_HW_IP_GFX ? "GFX" : "COMPUTE", ring,
          (unsigned long long)seq);
     if (fGfx) {
@@ -1544,6 +1549,7 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
 
     /* amdgpu_ring_soft_recovery: kill the waves, give the fence 100 ms */
     if (r && vmid) {
+        HLOG("soft recovery: killing the waves of VMID %u", vmid);
         gfx11_kill_waves(fDev, vmid);
         fSoftRecoveries++;
         publish("RDNA3,SoftRecoveries", fSoftRecoveries);
@@ -1558,6 +1564,8 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
     /* a DMA hang: sdma_v6_0_soft_reset on that engine alone (amdgpu would
      * use MES RESET_QUEUE, which needs the MES this driver does not run);
      * its pending fences read as done afterwards */
+    if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ring != UINT64_MAX)
+        HLOG("SDMA0 soft reset");
     if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ring != UINT64_MAX &&
         sdma60_soft_reset(fDev, fSdma) == RDNA3_OK) {
         fSdmaResets++;
@@ -1573,9 +1581,13 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
 
     /* the engine needs a reset; pending fences complete first so every
      * waiter returns (guilty contexts see -ECANCELED afterwards) */
+    HLOG("forcing the pending fences");
     forceFences();
     if (r && fGfx && fGfx->ready) {
+        HLOG("GFX soft reset (GRBM_SOFT_RESET CP/GFX, KIQ/KCQ/GFX rings restart)");
         ok = gfx11_soft_reset(fDev, fGfx, fKiq, fKcq) == RDNA3_OK;
+        if (!ok)
+            HLOG("GFX soft reset failed: the whole chip next");
         if (ok) {
             for (uint32_t id = 1; id < 16; id++)
                 if (fVmByVmid[id])
@@ -1605,7 +1617,7 @@ bool RDNA3Bringup::gpuReset()
     bool ok;
 
     fGpuResets++;
-    BLOG("GPU reset #%llu: mode-1 through the PMFW, then bring-up from level 4",
+    HLOG("GPU reset #%llu: mode-1 through the PMFW, then bring-up from level 4",
          (unsigned long long)fGpuResets);
     if (fIntr)
         fIntr->disable();
