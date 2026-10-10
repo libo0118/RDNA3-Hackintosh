@@ -11,6 +11,7 @@
 #include "gen/gc_11_0_0_rs64.h"
 #include "gen/gc_11_0_0_mes.h"
 #include "gen/gc_11_0_0_cg.h"
+#include "gen/gc_11_0_0_pm.h"
 #include "clearstate_defs.h"
 #include "clearstate_gfx11.h"
 #include "amdgpu_ucode_hdr.h"
@@ -1754,6 +1755,13 @@ void gfx11_read_status(rdna3_dev *d, const rdna3_gfx_ring *r, rdna3_gfx_status *
     if (r && r->wb != UINT64_MAX)
         rdna3_vram_read(d, r->wb + RD_GFX_WB_RPTR, &wb, 4);
     st->rb0_rptr_wb = wb;
+    st->rlc_stat = RG(d, regRLC_STAT);
+    st->rlc_gpm_stat = RG(d, regRLC_GPM_STAT);
+    st->rlc_pg_cntl = RG(d, regRLC_PG_CNTL);
+    st->rlc_cgcg_cgls_ctrl = RG(d, regRLC_CGCG_CGLS_CTRL);
+    st->cp_busy_stat = RG(d, regCP_BUSY_STAT);
+    st->cp_cpc_busy_stat = RG(d, regCP_CPC_BUSY_STAT);
+    st->cp_cpf_busy_stat = RG(d, regCP_CPF_BUSY_STAT);
 }
 
 void gfx11_log_status(rdna3_dev *d, const rdna3_gfx_status *st, const char *why)
@@ -1767,6 +1775,9 @@ void gfx11_log_status(rdna3_dev *d, const rdna3_gfx_status *st, const char *why)
     RERR(d, "  RB0 rptr 0x%x (wb 0x%x) wptr 0x%x, CP_INT_CNTL 0x%08x, RLC_SAFE_MODE 0x%x, "
          "SDMA0_STATUS 0x%08x", st->rb0_rptr, st->rb0_rptr_wb, st->rb0_wptr, st->cp_int_cntl,
          st->rlc_safe_mode, st->sdma0_status);
+    RERR(d, "  RLC_STAT 0x%08x GPM_STAT 0x%08x PG_CNTL 0x%08x CGCG_CGLS 0x%08x CP_BUSY 0x%08x "
+         "CPC_BUSY 0x%08x CPF_BUSY 0x%08x", st->rlc_stat, st->rlc_gpm_stat, st->rlc_pg_cntl,
+         st->rlc_cgcg_cgls_ctrl, st->cp_busy_stat, st->cp_cpc_busy_stat, st->cp_cpf_busy_stat);
 }
 
 int gfx11_is_idle(rdna3_dev *d)

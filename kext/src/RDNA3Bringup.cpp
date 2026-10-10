@@ -1291,6 +1291,14 @@ void RDNA3Bringup::logBusy()
          "ME_CNTL 0x%08x RLC_SAFE_MODE 0x%x SDMA0 0x%08x", st.grbm_status, st.grbm_status2,
          st.grbm_status_se0, st.cp_stat, st.cp_cpc_status, st.cp_cpf_status, st.cp_me_cntl,
          st.rlc_safe_mode, st.sdma0_status);
+    /* RLC_GPM_STAT bit 1 GFX_POWER_STATUS, bit 2 GFX_CLOCK_STATUS, bit 3
+     * GFX_LS_STATUS: whether the RLC actually gated the GFX clocks, i.e.
+     * whether the PMFW's 100 % activity comes from busy GC or ungated clocks */
+    BLOG("PM: RLC_STAT 0x%08x GPM_STAT 0x%08x (pwr %u clk %u ls %u) PG_CNTL 0x%08x CGCG_CGLS 0x%08x "
+         "CP_BUSY 0x%08x CPC_BUSY 0x%08x CPF_BUSY 0x%08x", st.rlc_stat, st.rlc_gpm_stat,
+         (st.rlc_gpm_stat >> 1) & 1, (st.rlc_gpm_stat >> 2) & 1, (st.rlc_gpm_stat >> 3) & 1,
+         st.rlc_pg_cntl, st.rlc_cgcg_cgls_ctrl, st.cp_busy_stat, st.cp_cpc_busy_stat,
+         st.cp_cpf_busy_stat);
 }
 
 /* amdgpu_dpm_read_sensor through smu_v13_0_0_read_sensor: the units are

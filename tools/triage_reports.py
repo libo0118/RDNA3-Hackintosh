@@ -192,6 +192,12 @@ def report(path, show_all):
     for l in log.splitlines():
         if "refresh" in l and "display: head" in l:
             print("   info " + l[l.find("display:"):][:110])
+    # PM trend: the last activity line and the last RLC/CP status line (why
+    # the PMFW counts the GFX as busy while GRBM_STATUS is idle)
+    for pat in ("PM: activity", "PM: GRBM_STATUS", "PM: RLC_STAT"):
+        last = [l for l in log.splitlines() if pat in l]
+        if last:
+            print("   info " + last[-1][last[-1].find("PM:"):][:150])
     # step 9: our framebuffer (rdna3fb=1) took the head and has the EDID
     if "rdna3fb=1" in args:
         fb_started = "RDNA3-fb: started" in log

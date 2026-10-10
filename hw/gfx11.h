@@ -197,6 +197,10 @@ typedef struct rdna3_gfx_status {
     uint32_t cp_me_cntl, rb0_rptr, rb0_wptr, rb0_rptr_wb;
     uint32_t cp_int_cntl, rlc_safe_mode;
     uint32_t sdma0_status;
+    /* RLC/CP busy and power status: what the RLC tells the PMFW about GFX
+     * activity (RLC_GPM_STAT GFX_POWER/CLOCK_STATUS, CGCG/CGLS state) */
+    uint32_t rlc_stat, rlc_gpm_stat, rlc_pg_cntl, rlc_cgcg_cgls_ctrl;
+    uint32_t cp_busy_stat, cp_cpc_busy_stat, cp_cpf_busy_stat;
 } rdna3_gfx_status;
 void gfx11_read_status(rdna3_dev *d, const rdna3_gfx_ring *r, rdna3_gfx_status *st);
 void gfx11_log_status(rdna3_dev *d, const rdna3_gfx_status *st, const char *why);
