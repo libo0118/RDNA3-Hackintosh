@@ -41,6 +41,10 @@ extern "C" {
 #define PACKET3_PFP_SYNC_ME        0x42
 #define PACKET3_ACQUIRE_MEM        0x58
 #define PACKET3_FRAME_CONTROL      0x90
+#define PACKET3_COND_EXEC          0x22
+#define PACKET3_SET_Q_PREEMPTION_MODE 0xF0
+#define PACKET3_SET_Q_PREEMPTION_MODE_IB_VMID(x)      ((uint32_t)(x) << 0)
+#define PACKET3_SET_Q_PREEMPTION_MODE_INIT_SHADOW_MEM (1u << 0)
 #define PACKET3_SET_CONTEXT_REG    0x69
 #define PACKET3_SET_CONTEXT_REG_START 0x0000a000
 #define PACKET3_SET_UCONFIG_REG    0x79
@@ -90,6 +94,18 @@ typedef struct rdna3_gfx_ring {
     int      fence_irq;     /* fences use RELEASE_MEM INT_SEL 2 (EOP interrupt) */
     int      async;         /* amdgpu_async_gfx_ring: the KIQ maps the queue from 'mqd' */
     uint64_t mqd;           /* v11_gfx_mqd (VRAM offset) when async */
+    /* adev->gfx.cp_gfx_shadow (gfx_v11_0_check_fw_cp_gfx_shadow): jobs get
+     * SET_Q_PREEMPTION_MODE and the COND_EXEC framing of amdgpu_ib_schedule.
+     * Set by the caller before the first job; off on bare metal. */
+    int      cp_gfx_shadow;
+    /* amdgpu_ring set_q_mode_offs / set_q_mode_ptr / set_q_mode_token:
+     * the dword (ring index) that gates the next SET_Q_PREEMPTION_MODE,
+     * the one the CPU may clear to skip a postfix (valid flag + index),
+     * and the last job's shadow configuration */
+    uint32_t set_q_mode_offs;
+    int      set_q_mode_ptr_valid;
+    uint32_t set_q_mode_ptr;
+    uint64_t set_q_mode_token;
 } rdna3_gfx_ring;
 
 /* one IB of a job (VA in the job's VMID) */
@@ -106,6 +122,9 @@ typedef struct rdna3_gfx_ib {
 #define RD_GFX_WB_RPTR  0
 #define RD_GFX_WB_WPTR  8
 #define RD_GFX_WB_FENCE 16
+/* ring->cond_exe_gpu_addr: 1 = run (amdgpu_ring_init sets it; only
+ * gfx_v11_0_ring_preempt_ib, not ported, would clear it) */
+#define RD_GFX_WB_COND_EXE 32
 
 /* parse the RS64 start addresses (returns RDNA3_EINVAL for a non-v2 header) */
 int  gfx11_rs64_from_fw(const void *pfp, uint32_t pfp_len, const void *me, uint32_t me_len,
@@ -157,6 +176,9 @@ uint32_t gfx11_ring_space(rdna3_dev *d, rdna3_gfx_ring *r);
 /* amdgpu_ib_schedule() for the gfx ring, in amdgpu's order:
  *   [VM flush + PFP_SYNC_ME] -> ACQUIRE_MEM -> HDP flush -> CONTEXT_CONTROL ->
  *   FRAME_CONTROL begin -> IBs -> FRAME_CONTROL end -> RELEASE_MEM fence
+ * with r->cp_gfx_shadow also SET_Q_PREEMPTION_MODE (job's VAs) + COND_EXEC
+ * before the HDP flush and SET_Q_PREEMPTION_MODE (zero) + COND_EXEC before
+ * the fence, the first COND_EXEC patched to cover the rest of the job
  * 'ctx' identifies the submitter (a context switch reloads state);
  * 'pd_addr' != 0 reprograms VMID 'vmid' and invalidates its TLBs from the
  * ring. Waits for ring space; commits. Returns the fence seq, 0 on error. */
@@ -171,10 +193,25 @@ typedef struct rdna3_gfx_job_ext {
      * OA partition (bytes / entries / counters) before the IBs */
     int      gds_switch;
     uint32_t gds_base, gds_size, gws_base, gws_size, oa_base, oa_size;
+    /* AMDGPU_CHUNK_ID_CP_GFX_SHADOW (job->shadow_va, csa_va, gds_va,
+     * init_shadow): used only on a ring with cp_gfx_shadow */
+    uint64_t shadow_va, csa_va, gds_va;
+    int      init_shadow;
 } rdna3_gfx_job_ext;
 uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
                              uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n,
                              const rdna3_gfx_job_ext *x);
+/* gfx_v11_0_ring_emit_gfx_shadow: NOP holding the gate dword, COND_EXEC on
+ * the previous gate, WRITE_DATA re-arming the gate (postfix), then
+ * SET_Q_PREEMPTION_MODE; nothing without r->cp_gfx_shadow. At most 22 dw. */
+void gfx11_emit_gfx_shadow(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t shadow_va, uint64_t csa_va,
+                           uint64_t gds_va, int init_shadow, uint32_t vmid);
+/* gfx_v11_0_ring_emit_init_cond_exec: COND_EXEC on the dword at MC 'addr',
+ * returns the ring index of its count dword for gfx11_ring_patch_cond_exec */
+uint32_t gfx11_emit_init_cond_exec(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t addr);
+/* amdgpu_ring_patch_cond_exec: the count = dwords written after it */
+void gfx11_ring_patch_cond_exec(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t offset);
+
 /* gfx_v11_0_ring_emit_gds_switch: WRITE_DATA of the four GDS registers */
 void gfx11_emit_gds_switch(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid,
                            uint32_t gds_base, uint32_t gds_size, uint32_t gws_base,

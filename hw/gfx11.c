@@ -307,6 +307,16 @@ void gfx11_cp_gfx_enable(rdna3_dev *d, int enable)
     RERR(d, "GFX: failed to %s cp gfx", enable ? "unhalt" : "halt");
 }
 
+/* the ring starts over (wptr 0): no SET_Q_PREEMPTION_MODE gate to chain
+ * to yet (amdgpu_ring's set_q_mode_offs 0) */
+static void shadow_state_reset(rdna3_gfx_ring *r)
+{
+    r->set_q_mode_offs = 0;
+    r->set_q_mode_ptr = 0;
+    r->set_q_mode_ptr_valid = 0;
+    r->set_q_mode_token = 0;
+}
+
 /* gfx_v11_0_cp_gfx_resume for ring 0 */
 static void cp_gfx_resume(rdna3_dev *d, rdna3_gfx_ring *r)
 {
@@ -325,6 +335,7 @@ static void cp_gfx_resume(rdna3_dev *d, rdna3_gfx_ring *r)
     tmp = REG_SET_FIELD(tmp, CP_RB0_CNTL, RB_BLKSZ, rb_bufsz - 2);
     WG(d, regCP_RB0_CNTL, tmp);
     r->wptr = 0;
+    shadow_state_reset(r);
     WG(d, regCP_RB0_WPTR, 0);
     WG(d, regCP_RB0_WPTR_HI, 0);
     WG(d, regCP_RB0_RPTR_ADDR, (uint32_t)rptr);
@@ -547,6 +558,100 @@ void gfx11_emit_frame_cntl(rdna3_dev *d, rdna3_gfx_ring *r, int start, int secur
     gfx11_write(d, r, (secure ? FRAME_TMZ : 0) | FRAME_CMD(start ? 0 : 1));
 }
 
+static void ring_poke(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t idx, uint32_t v)
+{
+    rdna3_vram_write(d, r->ring + (uint64_t)(idx & r->buf_mask) * 4, &v, 4);
+}
+
+/* gfx_v11_0_ring_emit_init_cond_exec */
+uint32_t gfx11_emit_init_cond_exec(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t addr)
+{
+    uint32_t ret;
+    gfx11_write(d, r, PACKET3(PACKET3_COND_EXEC, 3));
+    gfx11_write(d, r, (uint32_t)addr);
+    gfx11_write(d, r, (uint32_t)(addr >> 32));
+    /* discard following DWs if *cond_exec_gpu_addr==0 */
+    gfx11_write(d, r, 0);
+    ret = (uint32_t)r->wptr & r->buf_mask;
+    /* patch dummy value later */
+    gfx11_write(d, r, 0);
+    return ret;
+}
+
+/* amdgpu_ring_patch_cond_exec */
+void gfx11_ring_patch_cond_exec(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t offset)
+{
+    uint32_t cur = ((uint32_t)r->wptr - 1) & r->buf_mask;
+    if (cur < offset)
+        cur += r->ring_size >> 2;
+    ring_poke(d, r, offset, cur - offset);
+}
+
+/* gfx_v11_0_ring_emit_gfx_shadow. Each job gets a prefix (the job's shadow
+ * VAs) and a postfix (all zero: shadowing off); each starts with a NOP whose
+ * first payload dword gates the next one through COND_EXEC. The prefix is
+ * skipped unless the previous postfix ran (it re-arms its gate with
+ * WRITE_DATA); the postfix runs while its prefix's gate is set. The CPU
+ * clears the previous prefix's gate when the configuration did not change,
+ * so a postfix the CP has not reached yet does not drop the shadow state. */
+void gfx11_emit_gfx_shadow(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t shadow_va, uint64_t csa_va,
+                           uint64_t gds_va, int init_shadow, uint32_t vmid)
+{
+    uint32_t offs, end = 0;
+    uint64_t ring_mc = rdna3_vram_mc(d, r->ring);
+
+    if (!r->cp_gfx_shadow)
+        return;
+
+    /* the dw in the NOP controls if the next SET_Q_MODE packet should be
+     * executed or not; 64 bits reserved */
+    gfx11_write(d, r, PACKET3(PACKET3_NOP, 1));
+    offs = (uint32_t)r->wptr & r->buf_mask;
+    /* start with skipping the prefix and always executing the postfix;
+     * the postfix's WRITE_DATA below changes that once it ran */
+    gfx11_write(d, r, shadow_va ? 1 : 0);
+    gfx11_write(d, r, 0);
+
+    if (r->set_q_mode_offs)
+        end = gfx11_emit_init_cond_exec(d, r, ring_mc + ((uint64_t)r->set_q_mode_offs << 2));
+
+    /* when the postfix SET_Q_MODE executes the next prefix must as well */
+    if (!shadow_va) {
+        uint64_t addr = ring_mc + ((uint64_t)offs << 2);
+        gfx11_write(d, r, PACKET3(PACKET3_WRITE_DATA, 3));
+        gfx11_write(d, r, WRITE_DATA_DST_SEL(5) | WR_CONFIRM);
+        gfx11_write(d, r, (uint32_t)addr);
+        gfx11_write(d, r, (uint32_t)(addr >> 32));
+        gfx11_write(d, r, 0x1);
+    }
+
+    gfx11_write(d, r, PACKET3(PACKET3_SET_Q_PREEMPTION_MODE, 7));
+    gfx11_write(d, r, (uint32_t)shadow_va);
+    gfx11_write(d, r, (uint32_t)(shadow_va >> 32));
+    gfx11_write(d, r, (uint32_t)gds_va);
+    gfx11_write(d, r, (uint32_t)(gds_va >> 32));
+    gfx11_write(d, r, (uint32_t)csa_va);
+    gfx11_write(d, r, (uint32_t)(csa_va >> 32));
+    gfx11_write(d, r, shadow_va ? PACKET3_SET_Q_PREEMPTION_MODE_IB_VMID(vmid) : 0);
+    gfx11_write(d, r, init_shadow ? PACKET3_SET_Q_PREEMPTION_MODE_INIT_SHADOW_MEM : 0);
+
+    if (r->set_q_mode_offs)
+        gfx11_ring_patch_cond_exec(d, r, end);
+
+    if (shadow_va) {
+        uint64_t token = shadow_va ^ csa_va ^ gds_va ^ vmid;
+        /* same configuration: try to skip the last postfix so the state
+         * is not saved and restored every time */
+        if (r->set_q_mode_ptr_valid && r->set_q_mode_token == token)
+            ring_poke(d, r, r->set_q_mode_ptr, 0);
+        r->set_q_mode_token = token;
+    } else {
+        r->set_q_mode_ptr = r->set_q_mode_offs;
+        r->set_q_mode_ptr_valid = 1;
+    }
+    r->set_q_mode_offs = offs;
+}
+
 uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
                           uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n)
 {
@@ -581,10 +686,13 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
     /* emit_frame_size for what we emit: vm flush 5+5+7+2, gds switch 20,
      * mem sync 8, hdp 7, cntxcntl 3, frame 2+2, user fence 8, fence 8,
      * plus 4 per IB */
-    uint32_t i, seq, ndw = 19 + 20 + 8 + 7 + 3 + 4 + 8 + 8 + 4 * n;
+    uint32_t i, seq, ndw = 19 + 20 + 8 + 7 + 3 + 4 + 8 + 8 + 4 * n, cond_exec = 0;
+    uint64_t cond_addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_COND_EXE);
     int ctx_switch = ctx != r->last_ctx, secure;
     if (!r->ready || !n || n > RD_GFX_MAX_IBS || vmid > 15)
         return 0;
+    if (r->cp_gfx_shadow)
+        ndw += 2 * (22 + 5);   /* SET_Q_PREEMPTION_MODE + COND_EXEC, twice */
     if (ring_wait_space(d, r, ndw))
         return 0;
     if (pd_addr)
@@ -593,6 +701,16 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
         gfx11_emit_gds_switch(d, r, vmid, x->gds_base, x->gds_size, x->gws_base, x->gws_size,
                               x->oa_base, x->oa_size);
     gfx11_emit_mem_sync(d, r);
+    /* amdgpu_ib_schedule: amdgpu_ring_emit_gfx_shadow with the job's VAs,
+     * then amdgpu_ring_init_cond_exec on ring->cond_exe_gpu_addr. The
+     * COND_EXEC only matters for MCBP preemption (gfx_v11_0_ring_preempt_ib
+     * clears the slot), which is not ported: without cp_gfx_shadow it is
+     * left out and the stream stays the one verified on the card. */
+    if (r->cp_gfx_shadow) {
+        gfx11_emit_gfx_shadow(d, r, x ? x->shadow_va : 0, x ? x->csa_va : 0, x ? x->gds_va : 0,
+                              x ? x->init_shadow : 0, vmid);
+        cond_exec = gfx11_emit_init_cond_exec(d, r, cond_addr);
+    }
     gfx11_emit_hdp_flush(d, r);
     gfx11_emit_cntxcntl(d, r, ctx_switch);
     secure = (ibs[0].flags & RD_GFX_IB_FLAG_TMZ) != 0;
@@ -602,7 +720,16 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
     gfx11_emit_frame_cntl(d, r, 0, secure);
     if (x && x->uf_addr)   /* the job's number: the fence emitted next */
         gfx11_emit_user_fence(d, r, x->uf_addr, (uint32_t)(r->fence_seq + 1));
+    /* amdgpu_ib_schedule: the postfix (shadowing off) and a second
+     * COND_EXEC before the fence; the first COND_EXEC then covers
+     * everything up to and including the fence */
+    if (r->cp_gfx_shadow) {
+        gfx11_emit_gfx_shadow(d, r, 0, 0, 0, 0, 0);
+        gfx11_emit_init_cond_exec(d, r, cond_addr);
+    }
     seq = gfx11_emit_fence(d, r);
+    if (r->cp_gfx_shadow)
+        gfx11_ring_patch_cond_exec(d, r, cond_exec);
     gfx11_commit(d, r);
     r->last_ctx = ctx;
     r->last_vmid = vmid;
@@ -714,6 +841,12 @@ int gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs6
         return RDNA3_ENOMEM;
     rdna3_vram_fill(d, r->ring, 0, ring_size);
     rdna3_vram_write(d, r->wb, zero, sizeof(zero));
+    {
+        /* amdgpu_ring_init: "always set cond_exec_polling to CONTINUE" */
+        uint32_t one = 1;
+        rdna3_vram_write(d, r->wb + RD_GFX_WB_COND_EXE, &one, 4);
+    }
+    shadow_state_reset(r);
 
     ret = wait_rlc_autoload(d);
     if (ret)
@@ -1509,6 +1642,7 @@ int gfx11_kgq_start(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_gfx_ring *r)
     r->doorbell = RD_DB_INDEX(RD_DB_GFX_RING0);
     rdna3_vram_fill(d, r->ring, 0, r->ring_size);
     rdna3_vram_write(d, r->wb + RD_GFX_WB_RPTR, zero, sizeof(zero));   /* rptr + wptr poll */
+    shadow_state_reset(r);
     gfx_mqd_init(d, r);
     kiq_map_kgq(d, kiq, r);
     ret = kiq_ring_test(d, kiq);   /* amdgpu_gfx_enable_kgq */

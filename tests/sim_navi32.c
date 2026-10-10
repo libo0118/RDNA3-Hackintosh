@@ -146,6 +146,10 @@ typedef struct sim {
     unsigned cp_wait_stuck, cp_acquire, cp_pfp_sync, cp_frame_begin, cp_frame_end, cp_ibs;
     unsigned cp_ib_dw, cp_ib_fault, ring_tlb_flushes, hdp_engine_flushes;
     uint32_t cp_last_cntxcntl, cp_last_ib_vmid;
+    /* SET_Q_PREEMPTION_MODE packets the CP ran (dw 1-8 of the last four)
+     * and COND_EXEC packets that discarded their dwords */
+    unsigned cp_qmode, cp_cond_skips;
+    uint32_t cp_qmode_hist[4][8];
     unsigned dcn_flips, dcn_pitch_unlocked;
     unsigned ih_ivs, ih_msi, ih_dropped;   /* IVs the "hardware" queued, MSIs it raised */
 
@@ -1305,6 +1309,26 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
             break;
         }
         case PACKET3_ACQUIRE_MEM: if (cnt == 6 && PK(7)) S.cp_acquire++; else S.cp_bad++; break;
+        case PACKET3_COND_EXEC: {
+            /* ADDR_LO, ADDR_HI, 0, EXEC_COUNT: the next EXEC_COUNT dwords
+             * are discarded while the dword at ADDR reads 0 */
+            uint8_t *p = cnt == 3 && !(PK(1) & 3) ? mc_ptr(PK(1) | ((uint64_t)PK(2) << 32), 4) : NULL;
+            uint32_t v, skip = PK(4);
+            if (!p || in_ib) { S.cp_bad++; break; }
+            memcpy(&v, p, 4);
+            if (!v) {
+                S.cp_cond_skips++;
+                rptr += skip;
+            }
+            break;
+        }
+        case PACKET3_SET_Q_PREEMPTION_MODE:
+            /* shadow VA, GDS VA, CSA VA (lo/hi each), IB_VMID, INIT_SHADOW_MEM */
+            if (cnt != 7 || in_ib) { S.cp_bad++; break; }
+            for (uint32_t i = 0; i < 8; i++)
+                S.cp_qmode_hist[S.cp_qmode & 3][i] = PK(1 + i);
+            S.cp_qmode++;
+            break;
         case PACKET3_FRAME_CONTROL:
             if (PK(1) >> 28) S.cp_frame_end++; else S.cp_frame_begin++;
             break;
@@ -2344,6 +2368,31 @@ static void sim_iv_cb(void *ctx, const rdna3_iv *iv)
     s->vmid = iv->vmid;
     s->pasid = iv->pasid;
     s->d3 = iv->src_data[3];
+}
+
+/* the PM4 packets a gfx ring holds between two write pointers, as emitted
+ * (COND_EXEC is not followed): opcodes into ops[], ring indexes into at[] */
+static unsigned ring_ops(rdna3_dev *d, const rdna3_gfx_ring *r, uint64_t from, uint64_t to,
+                         uint32_t *ops, uint32_t *at, unsigned max)
+{
+    unsigned n = 0;
+    while (from < to && n < max) {
+        uint32_t h;
+        rdna3_vram_read(d, r->ring + 4ull * (from & r->buf_mask), &h, 4);
+        if (h >> 30 != 3)
+            return 0;
+        ops[n] = (h >> 8) & 0xff;
+        at[n++] = (uint32_t)(from & r->buf_mask);
+        from += 2 + ((h >> 16) & 0x3fff);
+    }
+    return from == to ? n : 0;
+}
+
+static uint32_t ring_dw(rdna3_dev *d, const rdna3_gfx_ring *r, uint32_t idx)
+{
+    uint32_t v;
+    rdna3_vram_read(d, r->ring + 4ull * (idx & r->buf_mask), &v, 4);
+    return v;
 }
 
 struct fault_seen { unsigned n; rdna3_dev *d; rdna3_vm_fault f; };
@@ -3612,6 +3661,139 @@ static void run(const char *fwdir)
                           S.reg[GC_BASE0 + regGDS_GWS_VMID0 + 5] == ((8u << 16) | 4) &&
                           S.reg[GC_BASE0 + regGDS_OA_VMID0 + 5] == 0x1C && S.cp_bad == 0);
                     jobs[0].va = ibva;
+                }
+                /* AMDGPU_CHUNK_ID_CP_GFX_SHADOW on the gfx ring
+                 * (gfx_v11_0_ring_emit_gfx_shadow from amdgpu_ib_schedule) */
+                {
+                    const uint64_t shva = 0x0000400000100000ull, csva = 0x0000400000180000ull,
+                                   gdva = 0x00004000001c0000ull;
+                    static const uint32_t first[] = {
+                        PACKET3_ACQUIRE_MEM, PACKET3_NOP, PACKET3_SET_Q_PREEMPTION_MODE, PACKET3_COND_EXEC,
+                        PACKET3_WAIT_REG_MEM, PACKET3_CONTEXT_CONTROL, PACKET3_FRAME_CONTROL,
+                        PACKET3_INDIRECT_BUFFER, PACKET3_FRAME_CONTROL, PACKET3_NOP, PACKET3_COND_EXEC,
+                        PACKET3_WRITE_DATA, PACKET3_SET_Q_PREEMPTION_MODE, PACKET3_COND_EXEC,
+                        PACKET3_RELEASE_MEM };
+                    static const uint32_t next[] = {
+                        PACKET3_ACQUIRE_MEM, PACKET3_NOP, PACKET3_COND_EXEC, PACKET3_SET_Q_PREEMPTION_MODE,
+                        PACKET3_COND_EXEC, PACKET3_WAIT_REG_MEM, PACKET3_CONTEXT_CONTROL,
+                        PACKET3_FRAME_CONTROL, PACKET3_INDIRECT_BUFFER, PACKET3_FRAME_CONTROL,
+                        PACKET3_NOP, PACKET3_COND_EXEC, PACKET3_WRITE_DATA, PACKET3_SET_Q_PREEMPTION_MODE,
+                        PACKET3_COND_EXEC, PACKET3_RELEASE_MEM };
+                    rdna3_gfx_job_ext x;
+                    uint32_t ops[32], at[32], k, nops, qm, ibs0, skips, cond, gate_q;
+                    uint64_t w0, ring_mc = rdna3_vram_mc(&dev, gr.ring), cond_mc;
+                    const uint32_t *h;
+                    uint32_t me_cntl;
+
+                    memset(&x, 0, sizeof(x));
+                    x.shadow_va = shva; x.csa_va = csva; x.gds_va = gdva; x.init_shadow = 1;
+                    /* adev->gfx.cp_gfx_shadow off (bare metal): the chunk
+                     * changes nothing, no COND_EXEC either */
+                    qm = S.cp_qmode;
+                    w0 = gr.wptr;
+                    seq = gfx11_submit_job_ex(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1, &x);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK && S.cp_qmode == qm);
+                    nops = ring_ops(&dev, &gr, w0, gr.wptr, ops, at, 32);
+                    CHECK(nops == 7);
+                    for (k = 0; k < nops; k++)
+                        CHECK(ops[k] != PACKET3_SET_Q_PREEMPTION_MODE && ops[k] != PACKET3_COND_EXEC &&
+                              ops[k] != PACKET3_NOP);
+                    /* cp_gfx_shadow on (what amdgpu does for a VF): first job,
+                     * no earlier gate - prefix, outer COND_EXEC, ..., postfix,
+                     * second COND_EXEC, fence */
+                    rdna3_vram_read(&dev, gr.wb + RD_GFX_WB_COND_EXE, &k, 4);
+                    CHECK(k == 1 && gr.set_q_mode_offs == 0);
+                    cond_mc = rdna3_vram_mc(&dev, gr.wb + RD_GFX_WB_COND_EXE);
+                    gr.cp_gfx_shadow = 1;
+                    ibs0 = S.cp_ibs; skips = S.cp_cond_skips;
+                    w0 = gr.wptr;
+                    seq = gfx11_submit_job_ex(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1, &x);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                    nops = ring_ops(&dev, &gr, w0, gr.wptr, ops, at, 32);
+                    CHECK(nops == sizeof(first) / 4 && !memcmp(ops, first, sizeof(first)));
+                    if (nops == sizeof(first) / 4) {
+                        /* prefix: gate 1, SET_Q with the VAs, VMID 5, INIT_SHADOW_MEM */
+                        CHECK(ring_dw(&dev, &gr, at[1] + 1) == 1 && ring_dw(&dev, &gr, at[1] + 2) == 0);
+                        CHECK(ring_dw(&dev, &gr, at[2] + 1) == (uint32_t)shva &&
+                              ring_dw(&dev, &gr, at[2] + 2) == (uint32_t)(shva >> 32) &&
+                              ring_dw(&dev, &gr, at[2] + 3) == (uint32_t)gdva &&
+                              ring_dw(&dev, &gr, at[2] + 4) == (uint32_t)(gdva >> 32) &&
+                              ring_dw(&dev, &gr, at[2] + 5) == (uint32_t)csva &&
+                              ring_dw(&dev, &gr, at[2] + 6) == (uint32_t)(csva >> 32) &&
+                              ring_dw(&dev, &gr, at[2] + 7) == 5 && ring_dw(&dev, &gr, at[2] + 8) == 1);
+                        /* outer COND_EXEC on ring->cond_exe_gpu_addr, covering
+                         * everything up to the end of the fence */
+                        CHECK(ring_dw(&dev, &gr, at[3] + 1) == (uint32_t)cond_mc &&
+                              ring_dw(&dev, &gr, at[3] + 2) == (uint32_t)(cond_mc >> 32) &&
+                              ring_dw(&dev, &gr, at[3] + 3) == 0 &&
+                              ring_dw(&dev, &gr, at[3] + 4) == ((uint32_t)(gr.wptr - 1 - (at[3] + 4)) & gr.buf_mask));
+                        /* postfix: gate 0 at first, COND_EXEC on the prefix's
+                         * gate over WRITE_DATA + SET_Q (5 + 9 dw), the
+                         * WRITE_DATA re-arms its own gate, SET_Q all zero */
+                        gate_q = at[9] + 1;
+                        cond = at[10];
+                        CHECK(ring_dw(&dev, &gr, cond + 1) == (uint32_t)(ring_mc + 4ull * (at[1] + 1)) &&
+                              ring_dw(&dev, &gr, cond + 4) == 14);
+                        CHECK(ring_dw(&dev, &gr, at[11] + 1) == (WRITE_DATA_DST_SEL(5) | WR_CONFIRM) &&
+                              ring_dw(&dev, &gr, at[11] + 2) == (uint32_t)(ring_mc + 4ull * gate_q) &&
+                              ring_dw(&dev, &gr, at[11] + 4) == 1);
+                        for (k = 1; k <= 8; k++)
+                            CHECK(ring_dw(&dev, &gr, at[12] + k) == 0);
+                        /* the second COND_EXEC keeps a count of 0 (amdgpu
+                         * patches only the first) */
+                        CHECK(ring_dw(&dev, &gr, at[13] + 1) == (uint32_t)cond_mc &&
+                              ring_dw(&dev, &gr, at[13] + 4) == 0);
+                        /* the CP ran both SET_Qs, the postfix armed its gate */
+                        CHECK(S.cp_qmode == qm + 2 && ring_dw(&dev, &gr, gate_q) == 1);
+                        h = S.cp_qmode_hist[qm & 3];
+                        CHECK(h[0] == (uint32_t)shva && h[2] == (uint32_t)gdva && h[4] == (uint32_t)csva &&
+                              h[6] == 5 && h[7] == 1);
+                        h = S.cp_qmode_hist[(qm + 1) & 3];
+                        CHECK(!h[0] && !h[1] && !h[4] && !h[6] && !h[7]);
+                        CHECK(gr.set_q_mode_offs == gate_q && gr.set_q_mode_ptr_valid &&
+                              gr.set_q_mode_ptr == at[1] + 1);
+                    }
+                    CHECK(S.cp_ibs == ibs0 + 1 && S.cp_cond_skips == skips && S.cp_bad == 0 &&
+                          S.cp_wait_stuck == 0);
+                    /* the next job chains its prefix to the last postfix's gate */
+                    x.init_shadow = 0;
+                    gate_q = gr.set_q_mode_offs;
+                    w0 = gr.wptr;
+                    seq = gfx11_submit_job_ex(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1, &x);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                    nops = ring_ops(&dev, &gr, w0, gr.wptr, ops, at, 32);
+                    CHECK(nops == sizeof(next) / 4 && !memcmp(ops, next, sizeof(next)));
+                    if (nops == sizeof(next) / 4)
+                        CHECK(ring_dw(&dev, &gr, at[2] + 1) == (uint32_t)(ring_mc + 4ull * gate_q) &&
+                              ring_dw(&dev, &gr, at[2] + 4) == 9 &&      /* over SET_Q */
+                              ring_dw(&dev, &gr, at[3] + 8) == 0);       /* no INIT_SHADOW_MEM */
+                    CHECK(S.cp_qmode == qm + 4 && S.cp_cond_skips == skips && S.cp_ibs == ibs0 + 2);
+                    /* the CP behind by two jobs of the same configuration:
+                     * the CPU clears the gate of the older postfix, so that
+                     * postfix and the next prefix are skipped and the state
+                     * stays shadowed - one prefix and one postfix run */
+                    me_cntl = S.reg[GCR(regCP_ME_CNTL)];
+                    S.reg[GCR(regCP_ME_CNTL)] = me_cntl | CP_ME_CNTL__ME_HALT_MASK | CP_ME_CNTL__PFP_HALT_MASK;
+                    CHECK(gfx11_submit_job_ex(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1, &x) != 0);
+                    seq = gfx11_submit_job_ex(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1, &x);
+                    CHECK(seq != 0 && S.cp_qmode == qm + 4);
+                    S.reg[GCR(regCP_ME_CNTL)] = me_cntl;
+                    cp_run((uint32_t)gr.wptr);
+                    CHECK(gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                    CHECK(S.cp_qmode == qm + 6 && S.cp_cond_skips == skips + 2 && S.cp_ibs == ibs0 + 4);
+                    h = S.cp_qmode_hist[(qm + 4) & 3];
+                    CHECK(h[0] == (uint32_t)shva && h[6] == 5);
+                    h = S.cp_qmode_hist[(qm + 5) & 3];
+                    CHECK(!h[0] && !h[6]);
+                    /* a job without the chunk on a shadowing ring: its prefix
+                     * turns shadowing off (VAs and VMID 0) and re-arms */
+                    seq = gfx11_submit_job_ex(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1, NULL);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                    CHECK(S.cp_qmode == qm + 8);
+                    h = S.cp_qmode_hist[(qm + 6) & 3];
+                    CHECK(!h[0] && !h[2] && !h[4] && !h[6] && !h[7]);
+                    CHECK(S.cp_bad == 0 && S.cp_wait_stuck == 0);
+                    gr.cp_gfx_shadow = 0;
                 }
                 /* an unmapped IB faults instead of running garbage */
                 jobs[0].va = 0x0000500000000000ull;

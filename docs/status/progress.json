@@ -1,11 +1,11 @@
 {
  "amdgpu": {
-  "works": 313,
-  "ported": 339,
+  "works": 315,
+  "ported": 341,
   "total": 1297,
   "not_applicable": 201,
-  "works_pct": 24.1,
-  "ported_pct": 26.1,
+  "works_pct": 24.3,
+  "ported_pct": 26.3,
   "groups": [
    {
     "name": "PSP 13",
@@ -640,9 +640,9 @@
     "steps": [
      "8"
     ],
-    "works": 76,
+    "works": 78,
     "ported": 0,
-    "todo": 130,
+    "todo": 128,
     "items": {
      "amdgpu_gfx_bit_to_me_queue": "todo",
      "amdgpu_gfx_compute_queue_acquire": "works",
@@ -779,7 +779,7 @@
      "gfx_v11_0_ring_emit_hdp_flush": "works",
      "gfx_v11_0_ring_emit_ib_compute": "works",
      "gfx_v11_0_ring_emit_ib_gfx": "works",
-     "gfx_v11_0_ring_emit_init_cond_exec": "todo",
+     "gfx_v11_0_ring_emit_init_cond_exec": "works",
      "gfx_v11_0_ring_emit_pipeline_sync": "todo",
      "gfx_v11_0_ring_emit_reg_wait": "todo",
      "gfx_v11_0_ring_emit_reg_write_reg_wait": "works",
@@ -791,7 +791,7 @@
      "gfx_v11_0_ring_get_wptr_compute": "todo",
      "gfx_v11_0_ring_get_wptr_gfx": "todo",
      "gfx_v11_0_ring_invalidate_tlbs": "todo",
-     "gfx_v11_0_ring_preempt_ib": "todo",
+     "gfx_v11_0_ring_preempt_ib": "works",
      "gfx_v11_0_ring_set_wptr_compute": "works",
      "gfx_v11_0_ring_set_wptr_gfx": "works",
      "gfx_v11_0_ring_soft_recovery": "todo",
