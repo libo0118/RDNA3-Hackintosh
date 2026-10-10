@@ -21,7 +21,7 @@
 	</dict>
 	<key>IOKitPersonalities</key>
 	<dict>
-		<!-- One framebuffer per card for now (head 0). The IOFramebuffer match
+		<!-- Head 0 on the PCI device. The IOFramebuffer match
 		     category with a score above IONDRVFramebuffer (20000): only one
 		     framebuffer publishes the boot VRAM. probe() declines without the
 		     boot-arg rdna3fb=1, and then IONDRVFramebuffer drives the display. -->
@@ -31,6 +31,17 @@
 			<key>IOClass</key><string>RDNA3Framebuffer</string>
 			<key>IOProviderClass</key><string>IOPCIDevice</string>
 			<key>IOPCIPrimaryMatch</key><string>0x747e1002</string>
+			<key>IOMatchCategory</key><string>IOFramebuffer</string>
+			<key>IOProbeScore</key><integer>30000</integer>
+		</dict>
+		<!-- Further heads (rdna3mirror=2): RDNA3Accel publishes an
+		     "RDNA3DisplayHead" nub with RDNA3,Head = n for a monitor it lit. -->
+		<key>RDNA3FramebufferHead</key>
+		<dict>
+			<key>CFBundleIdentifier</key><string>io.github.voten641.RDNA3Framebuffer</string>
+			<key>IOClass</key><string>RDNA3Framebuffer</string>
+			<key>IOProviderClass</key><string>IOService</string>
+			<key>IONameMatch</key><string>RDNA3DisplayHead</string>
 			<key>IOMatchCategory</key><string>IOFramebuffer</string>
 			<key>IOProbeScore</key><integer>30000</integer>
 		</dict>

@@ -11,7 +11,11 @@
  * RDNA3Accel.kext reads and flips (rdna3DisplayInfo / rdna3DisplayFlip,
  * accel/rdna3k_abi.h). See PROVENANCE.md.
  *
- * RDNA3Framebuffer - one head, the firmware's mode (no mode setting yet):
+ * RDNA3Framebuffer - one head per instance, the firmware's mode (no mode
+ * setting yet). Head 0 matches the IOPCIDevice; with rdna3mirror=2 the core
+ * lights a second monitor and publishes an "RDNA3DisplayHead" nub for it,
+ * on which another instance starts with a surface of its own in VRAM (an
+ * extended desktop at the same mode):
  *   DCN mode       RDNA3Accel reported a usable head: BAR0 aperture of the
  *                  boot scanout, flips to accelerator surfaces, VBL locked
  *                  to the OTG frame counter, CRC.
@@ -74,6 +78,12 @@ class RDNA3Framebuffer : public IOFramebuffer {
     bool         fDcn = false;             /* DCN mode (flips, real VBL) */
     unsigned     fHead = 0;
     struct RD3KDisplayHead fInfo = {};
+    /* heads > 0: the surface this instance allocated (the head shows the
+     * boot surface, a mirror, until we flip it to ours) */
+    struct RD3KVramRequest fOwnVram = {};
+    bool         fOwnSurface = false;
+    bool         ownSurfaceInit();
+    void         ownSurfaceFree();
 
     /* the scanout (boot surface): CPU physical, size, geometry */
     uint64_t fPhys = 0, fBytes = 0, fBootVram = 0;
@@ -262,8 +272,9 @@ bool RDNA3Framebuffer::readCore()
     bool ok = ret == kIOReturnSuccess && r->nheads > fHead && r->head[fHead].usable &&
               r->head[fHead].format == RD3K_FMT_XRGB8888;
     if (ret == kIOReturnSuccess)
-        FBLOG("core reports %u head(s)%s", r->nheads,
-              r->nheads > fHead ? (r->head[fHead].usable ? "" : ", head 0 not usable (tiled/DCC/format/outside BAR0)") : "");
+        FBLOG("core reports %u head(s)%s (this is head %u)", r->nheads,
+              r->nheads > fHead ? (r->head[fHead].usable ? "" : ", not usable (tiled/DCC/format/outside BAR0)") : "",
+              fHead);
     if (ok) {
         fInfo = r->head[fHead];
         fPhys = fInfo.phys;
@@ -304,8 +315,19 @@ bool RDNA3Framebuffer::readConsole()
 bool RDNA3Framebuffer::start(IOService *provider)
 {
     fPci = OSDynamicCast(IOPCIDevice, provider);
-    if (!fPci)
-        return false;
+    if (!fPci) {
+        /* a head nub of the core (RDNA3Accel -> RDNA3DisplayHead) */
+        OSNumber *h = OSDynamicCast(OSNumber, provider->getProperty("RDNA3,Head"));
+        IOService *core = provider->getProvider();
+        if (!h || !core || !h->unsigned32BitValue())
+            return false;
+        fHead = h->unsigned32BitValue();
+        fPci = OSDynamicCast(IOPCIDevice, core->getProvider());
+        if (!fPci)
+            return false;
+        core->retain();
+        fCore = core;
+    }
     fLock = IOSimpleLockAlloc();
     fSymInfo = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_INFO);
     fSymFlip = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_FLIP);
@@ -315,8 +337,13 @@ bool RDNA3Framebuffer::start(IOService *provider)
     if (!fLock || !fSymInfo || !fSymFlip || !fSymStatus || !fSymCursor || !fSymEdid)
         return false;
 
-    fCore = findCore(provider);
+    if (!fCore)
+        fCore = findCore(provider);
     fDcn = readCore();
+    if (fHead && (!fDcn || !ownSurfaceInit())) {
+        FBLOG("head %u: no usable scanout or no VRAM for its surface: not starting", fHead);
+        return false;
+    }
     if (!fDcn && !readConsole()) {
         /* super::start() not called yet: nothing to unwind, and with no
          * framebuffer at all the IONDRV claim would leave a black screen,
@@ -386,6 +413,7 @@ void RDNA3Framebuffer::stop(IOService *provider)
         int rc;
         flipTo(fBootVram, fW, fH, fBootPitch, &rc);   /* leave the boot surface on screen */
     }
+    ownSurfaceFree();
     cursorFree();
     super::stop(provider);
 }
@@ -681,6 +709,53 @@ IOReturn RDNA3Framebuffer::setPowerState(unsigned long ordinal, IOService *)
 }
 
 /* ----------------------------- cursor ----------------------------- */
+
+/* heads > 0: a surface of our own (zeroed by the core), shown at once */
+bool RDNA3Framebuffer::ownSurfaceInit()
+{
+    const OSSymbol *alloc = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_ALLOC);
+    uint32_t pitch = (fW * 4 + 255) & ~255u;
+    int rc = -1;
+    if (!alloc)
+        return false;
+    bzero(&fOwnVram, sizeof(fOwnVram));
+    fOwnVram.version = RD3K_VRAM_ABI_VERSION;
+    fOwnVram.size = (unsigned long long)pitch * fH;
+    IOReturn r = fCore->callPlatformFunction(alloc, false, &fOwnVram, nullptr, nullptr, nullptr);
+    alloc->release();
+    if (r != kIOReturnSuccess || !fOwnVram.phys) {
+        FBLOG("head %u: no CPU-visible VRAM for a %ux%u surface (0x%x)", fHead, fW, fH, r);
+        return false;
+    }
+    fOwnSurface = true;
+    /* the boot surface is head 0's: ours replaces it as "home" */
+    fPhys = fOwnVram.phys;
+    fBootVram = fOwnVram.allocationCookie;
+    fPitch = fBootPitch = pitch;
+    fBytes = (uint64_t)pitch * fH;
+    if (!flipTo(fBootVram, fW, fH, fBootPitch, &rc)) {
+        FBLOG("head %u: flip to its own surface failed (%d)", fHead, rc);
+        ownSurfaceFree();
+        return false;
+    }
+    FBLOG("head %u: own surface %ux%u pitch %u at VRAM 0x%llx", fHead, fW, fH, pitch,
+          (unsigned long long)fBootVram);
+    return true;
+}
+
+void RDNA3Framebuffer::ownSurfaceFree()
+{
+    if (!fOwnSurface)
+        return;
+    int rc;
+    /* back to the mirror of the boot surface before the memory goes */
+    flipTo(fInfo.vramOffset, fW, fH, fInfo.pitch, &rc);
+    const OSSymbol *fr = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_FREE);
+    if (fr && fCore)
+        fCore->callPlatformFunction(fr, false, &fOwnVram, nullptr, nullptr, nullptr);
+    OSSafeReleaseNULL(fr);
+    fOwnSurface = false;
+}
 
 bool RDNA3Framebuffer::cursorInit()
 {

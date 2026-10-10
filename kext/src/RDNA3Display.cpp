@@ -353,6 +353,8 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm)
             ret = dcn32_clone_enable(fDispDev, dm, fMirror);
         if (ret == RDNA3_OK) {
             fMirrorOn = true;
+            if (want == 2)
+                displayAddCloneHead();
             snprintf(val, sizeof(val), "%s-%u UNIPHY%c, pipe %u OTG %u DIG%c, %u kHz",
                      vbios_connector_name(p->connector), p->connector_enum, 'A' + fMirror->dst_be,
                      fMirror->dst_pipe, fMirror->dst_otg, 'A' + fMirror->dst_fe, fMirror->pclk_khz);
@@ -393,11 +395,62 @@ void RDNA3Accel::displayHotplugWork(void *owner, void *)
     LOG("display: hotplug on pins 0x%x: %u connectors with a sink or DPCD", (unsigned)pins, a->fNConnectors);
 }
 
+/* rdna3mirror=2: the clone becomes head <n> of fDcn (the boot heads keep
+ * their numbers) and gets a nub, RDNA3DisplayHead, on which a second
+ * RDNA3Framebuffer starts with its own surface: an extended desktop.
+ * Called with fDispLock held. */
+void RDNA3Accel::displayAddCloneHead()
+{
+    rdna3_dcn *all = (rdna3_dcn *)IOMalloc(sizeof(rdna3_dcn));
+    if (!all)
+        return;
+    bzero(all, sizeof(*all));
+    dcn32_read_state(fDispDev, all);
+    for (uint32_t i = 0; i < all->nheads; i++) {
+        if (all->head[i].pipe != fMirror->dst_pipe || fDcn->nheads >= RD_DCN_MAX_PIPES)
+            continue;
+        fCloneHead = fDcn->nheads;
+        fDcn->head[fCloneHead] = all->head[i];
+        fDcn->requested[all->head[i].pipe] = all->head[i].address;
+        fDcn->nheads++;
+        break;
+    }
+    IOFree(all, sizeof(*all));
+    if (fCloneHead < 0) {
+        LOG("display: extend: the clone pipe %u does not read back as lit", fMirror->dst_pipe);
+        return;
+    }
+    fHeadNub = new IOService;
+    if (fHeadNub && fHeadNub->init()) {
+        fHeadNub->setName("RDNA3DisplayHead");
+        fHeadNub->setProperty("RDNA3,Head", (unsigned long long)fCloneHead, 32);
+        if (fHeadNub->attach(this)) {
+            fHeadNub->registerService();
+            setNumber("RDNA3,ExtendHead", (uint64_t)fCloneHead);
+            LOG("display: extend: head %d (pipe %u OTG %u) published for a second framebuffer",
+                fCloneHead, fMirror->dst_pipe, fMirror->dst_otg);
+            return;
+        }
+    }
+    OSSafeReleaseNULL(fHeadNub);
+    fDcn->nheads--;
+    fCloneHead = -1;
+}
+
 void RDNA3Accel::displayMirrorOff(rdna3_dmub *dm)
 {
     if (!fMirrorOn || !fMirror || !fDispLock)
         return;
+    /* the second framebuffer goes first (its stop() calls back into the
+     * display functions, which take fDispLock) */
+    if (fHeadNub) {
+        fHeadNub->terminate(kIOServiceSynchronous);
+        OSSafeReleaseNULL(fHeadNub);
+    }
     IOLockLock(fDispLock);
+    if (fCloneHead >= 0 && (uint32_t)fCloneHead == fDcn->nheads - 1)
+        fDcn->nheads--;
+    fCloneHead = -1;
     dcn32_clone_disable(fDispDev, dm, fMirror);
     fMirrorOn = false;
     IOLockUnlock(fDispLock);
@@ -418,11 +471,11 @@ IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
     /* head -> connector, until the OTG -> DIG -> PHY routing is read back:
      * the sink whose EDID has the mode head 0 is scanning out (its preferred
      * mode first), else the first connected sink with an EDID */
-    if (e->head != 0)
+    if (e->head >= fDcn->nheads)
         return kIOReturnNotFound;
     int best = -1, bestScore = -1;
     /* the connector the head's DIG route leads to wins outright */
-    int routed = fDcn->nheads ? head_aux(&fDcn->head[0], fPaths, fNPaths) : -1;
+    int routed = head_aux(&fDcn->head[e->head], fPaths, fNPaths);
     for (uint32_t i = 0; routed >= 0 && i < fNConnectors; i++)
         if (fConnectors[i].aux == (uint32_t)routed && fConnectors[i].edid_len > 0) {
             best = (int)i;
@@ -432,8 +485,8 @@ IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
         const rdna3_connector *c = &fConnectors[i];
         rdna3_edid ed;
         int score = 0;
-        if (bestScore == 3)
-            break;
+        if (bestScore == 3 || e->head != 0)
+            break;   /* heads we lit ourselves have a known route only */
         if (c->edid_len <= 0 || !(c->hpd || c->dp))
             continue;
         if (fDcn->nheads && edid_parse(c->edid, (uint32_t)c->edid_len, &ed) == 0) {

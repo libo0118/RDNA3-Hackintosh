@@ -3852,6 +3852,14 @@ static void run(const char *fwdir)
             CHECK(dcn32_read_state(&dev, &dc2) == 2 && dc2.head[0].pipe == 0 && dc2.head[0].otg == 1 &&
                   dc2.head[0].dig_fe == 3 && dc2.head[0].dig_be == 3 && dc2.head[0].dig_mode == 3 &&
                   dc2.head[0].h_total == dc2.head[1].h_total && dc2.head[0].address == dc2.head[1].address);
+            /* extend (rdna3mirror=2): the clone head flips to a surface of
+             * its own, the boot head keeps the GOP's */
+            {
+                uint32_t boot_lo = S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS + RD_CLONE_HUBP_STRIDE];
+                CHECK(dcn32_flip(&dev, &dc2, 0, FB_START + 0x7000000, dc2.head[0].pitch_px, 1) == RDNA3_OK);
+                CHECK(S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS] == (uint32_t)(FB_START + 0x7000000) &&
+                      S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS + RD_CLONE_HUBP_STRIDE] == boot_lo);
+            }
             /* the transmitter is lit: a second plan for it is refused */
             CHECK(dcn32_clone_plan(&dev, &dc2, 1, &path, 148500, &cl) == RDNA3_EBUSY);
             /* and off again */
