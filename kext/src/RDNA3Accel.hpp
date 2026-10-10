@@ -224,6 +224,17 @@ private:
     volatile UInt32 fHotplugPending = 0;      /* bit n = HPD pin n changed */
     uint32_t      fHotplugEvents = 0;
     static void   displayHotplugWork(void *owner, void *);
+    /* D6 hotplug to the framebuffer (rdna3hotplug=1, RDNA3Hotplug.cpp) */
+    struct RDNA3HotplugState *fHp = nullptr;
+    void          hotplugInit();
+    void          hotplugStop();
+    void          hotplugFree();
+    bool          hotplugKick();
+    void          hotplugHandle(uint32_t changed);
+    void          hotplugPublish(uint32_t raw, uint32_t changed);
+    void          hotplugTidyProps();
+    static void   hotplugTick(void *owner, void *);
+    IOReturn      displayHotplugQuery(struct RD3KDisplayHotplug *q);
     bool          displayInit(const amd_discovery *disc);
     void          displayFree();
     void          displayMeasureRefresh();

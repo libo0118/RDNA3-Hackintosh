@@ -113,6 +113,7 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     displayProbeConnectors();
     displayPublishRoutes();
     fHotplugCall = thread_call_allocate((thread_call_func_t)displayHotplugWork, this);
+    hotplugInit();   /* rdna3hotplug=1: RDNA3Hotplug.cpp polls and handles */
     return true;
 }
 
@@ -508,6 +509,8 @@ void RDNA3Accel::displayHotplugWork(void *owner, void *)
     UInt32 pins = OSBitAndAtomic(0, &a->fHotplugPending);
     if (!a->fDispDev || !a->fDispLock)
         return;
+    if (a->hotplugKick())   /* rdna3hotplug=1: the poll decides (RDNA3Hotplug.cpp) */
+        return;
     IOLockLock(a->fDispLock);
     a->displayProbeConnectors();
     IOLockUnlock(a->fDispLock);
@@ -591,6 +594,7 @@ void RDNA3Accel::displayShutdown()
     fMirrorDm = nullptr;
     if (fHotplugCall)
         thread_call_cancel_wait(fHotplugCall);
+    hotplugStop();
     if (!dm || !fMirrorOn || !fMirror || !fDispLock)
         return;
     IOLockLock(fDispLock);
@@ -610,6 +614,7 @@ void RDNA3Accel::displayMirrorOff(rdna3_dmub *dm)
     fDisplayDm = nullptr;
     if (fHotplugCall)
         thread_call_cancel_wait(fHotplugCall);
+    hotplugStop();
     displayMirrorDisable(dm);
 }
 
@@ -689,6 +694,7 @@ IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
 
 void RDNA3Accel::displayFree()
 {
+    hotplugFree();
     if (fHotplugCall) {
         thread_call_cancel_wait(fHotplugCall);
         thread_call_free(fHotplugCall);
