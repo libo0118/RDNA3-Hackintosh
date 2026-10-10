@@ -649,3 +649,14 @@ handed to vfio-pci after 5 tries, and the queue runner's journal ends
 with the next suspend. `rdna3vm result` now adds the host kernel's
 amdgpu/vfio/suspend lines of this boot and the one before; detach says
 which driver holds the card; the pause between steps is 60 s.
+
+Cause (the host's kernel log): at the first detach amdgpu logged
+"finishing device" but its release ("ttm finalized") came 11 s later, after
+vfio-pci had the card - a DRM file was still open (a killed compositor
+waiting for its GPU work). The late release ran on vfio-pci's device; the
+vfio-pci unbind after the VM then oopsed in vfio_pci_core_sriov_configure,
+which SIGKILLed the passthrough, left the device locked (no vfio-pci for
+`gamma`) and froze the host on the next suspend. `detach` now waits for
+amdgpu's release (the kernel log, 30 s at most, killing every process
+that still holds /dev/dri or /dev/kfd) before vfio-pci may bind, and gives
+up rather than bind early.

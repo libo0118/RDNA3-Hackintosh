@@ -563,6 +563,35 @@ resize_bar0() {
     fi
 }
 
+# After an unbind amdgpu frees the card only when the last open /dev/dri or
+# /dev/kfd file goes ("ttm finalized"). Bound to vfio-pci before that, the
+# late release runs on vfio-pci's device: queue run 25 ("vfio-pci
+# 0000:2d:00.0: ttm finalized" 11 s after the bind), then the vfio-pci
+# unbind after the VM oopsed in vfio_pci_core_sriov_configure, the device
+# stayed locked and the host froze on the next suspend. So: wait for the
+# release, killing whatever still holds a DRM file, and give up rather
+# than bind too early.
+amdgpu_pending() {   # the card's last amdgpu "finishing device" (unbind) has no release after it
+    journalctl -k -b --no-pager -q 2>/dev/null | grep -E "$1: (finishing device| *ttm finalized)" |
+        tail -n 1 | grep -q "finishing device"
+}
+amdgpu_released() {   # amdgpu_released BDF: wait for the release (true), 30 s at most
+    local i p
+    for i in $(seq 30); do
+        amdgpu_pending "$1" || { [ $i -gt 1 ] && echo "  amdgpu released the card after ${i} s"; return 0; }
+        if [ $((i % 3)) = 0 ]; then
+            for p in $(find /proc/[0-9]*/fd -lname '/dev/dri/*' -o -lname '/dev/kfd*' 2>/dev/null | cut -d/ -f3 | sort -u); do
+                echo "  pid $p ($(cat /proc/$p/comm 2>/dev/null)) still holds a DRM file: killing it"
+                kill -9 "$p" 2>/dev/null || true
+            done
+        fi
+        sleep 1
+    done
+    echo "!! amdgpu has not released the card after 30 s (a DRM file still open?): not handing it to vfio-pci"
+    find /proc/[0-9]*/fd -lname '/dev/dri/*' -o -lname '/dev/kfd*' 2>/dev/null | head -10
+    return 1
+}
+
 detach() {
     local d drv
     # the desktop's virtual terminal, to switch back to it afterwards
@@ -572,7 +601,7 @@ detach() {
     fi
     for d in /sys/class/vtconsole/vtcon*/bind; do echo 0 > "$d" 2>/dev/null || true; done
     echo efi-framebuffer.0 > /sys/bus/platform/drivers/efi-framebuffer/unbind 2>/dev/null || true
-    if command -v fuser >/dev/null; then fuser -k /dev/dri/* 2>/dev/null || true; sleep 1; fi
+    if command -v fuser >/dev/null; then fuser -k /dev/dri/* /dev/kfd 2>/dev/null || true; sleep 1; fi
     modprobe vfio-pci
     # right after the previous step's restore amdgpu may still be probing the
     # card (queue run 24: no driver yet at the unbind, amdgpu bound it a
@@ -587,12 +616,19 @@ detach() {
         for d in "${DEVS[@]}"; do
             if [ -e /sys/bus/pci/devices/$d/driver ]; then
                 drv=$(readlink -f /sys/bus/pci/devices/$d/driver)
-                [ "$(basename "$drv")" != vfio-pci ] && { echo "$d" > "$drv/unbind" || true; }
+                if [ "$(basename "$drv")" = amdgpu ]; then
+                    echo "$d" > "$drv/unbind" || true
+                    amdgpu_released "$d" || return 1
+                elif [ "$(basename "$drv")" != vfio-pci ]; then
+                    echo "$d" > "$drv/unbind" || true
+                fi
             fi
         done
         resize_bar0   # no-op once BAR0 is small
         ok=1
         for d in "${DEVS[@]}"; do
+            # an unbind from an earlier try or run may still be releasing
+            [ -e /sys/bus/pci/devices/$d/driver ] || amdgpu_released "$d" || return 1
             [ -e /sys/bus/pci/devices/$d/driver ] || echo "$d" > /sys/bus/pci/drivers_probe 2>/dev/null || true
             [ "$(basename "$(readlink -f /sys/bus/pci/devices/$d/driver 2>/dev/null)")" = vfio-pci ] || ok=0
         done
