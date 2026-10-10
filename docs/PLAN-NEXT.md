@@ -1,5 +1,8 @@
 # Plan: what is left, where and how (2026-10-10)
 
+> The roadmap to a finished driver, and the order from here on, is
+> [DRIVER-PLAN.md](DRIVER-PLAN.md). This file is the log of what was done.
+
 Starting point: commit `1b38786` on `stage1-kext`. Ladder steps 0-8 passed
 on the card in the VM (`docs/status/hw-verified.txt`). Step 9 runs (our
 framebuffer takes over the GOP head at 1920x1080, hardware cursor, EDID of

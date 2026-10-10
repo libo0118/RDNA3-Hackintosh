@@ -1,0 +1,138 @@
+# What a finished driver needs (2026-10-10)
+
+The roadmap from today's state to a finished driver: what exists, what is
+missing, what can be written now without the card, and what only a card
+run can settle. `docs/PLAN-NEXT.md` stays the log of the items already
+done; this file decides the order from here.
+
+## Two finish lines
+
+| | **D: desktop driver** | **M: Metal driver** |
+|---|---|---|
+| What the user gets | macOS on the RX 7800 XT as the only GPU: both monitors, every resolution the monitor offers, hotplug, sleep/wake, idle power near Linux (~12-15 W), stable for days | D + Metal apps run on the GPU (Safari, Preview, Final Cut, games through Metal/MoltenVK), WindowServer composites on the GPU |
+| Left (estimate) | ~30-40 % | ~70-80 % |
+| Biggest risk | DCN mode setting without the full amdgpu DC/DML | the Metal plugin (NullMoth port) has never run here; how much of Metal it covers decides everything |
+
+Horizon: macOS 26 is the last x86_64 release; the work only pays while it
+is supported.
+
+## State per area
+
+Legend: **card** = verified on the card (`docs/status/hw-verified.txt`),
+**sim** = simulator/host tests only, **-** = missing.
+
+| Area | card | sim only | missing |
+|---|---|---|---|
+| Bring-up (PSP, SMU, GMC/GART, IH+MSI, SDMA, GFX, KIQ on MES, KCQ) | all | MES scheduler pipe | bare metal cold boot (only the VM so far) |
+| Recovery (hang, soft reset, mode-1 reset, VM faults) | - | all | a card run that provokes a hang |
+| Power | GFX CG, GFXOFF allowed, UCLK DPM free (52 W idle) | - | idle power: PMFW counts GFX 100 % busy; non-GFX clock gating; suspend/resume (S3); runtime idle |
+| Display | GOP takeover 1080p, cursor, EDID names, clone and extended desktop on a 2nd monitor | HPD interrupts, own timing values | own mode setting (other resolutions/refresh), mode list, hotplug to the framebuffer, DP link training, gamma LUT, DPMS blank, HDMI audio |
+| UAPI (amdgpu ioctls) | CS on DMA/GFX/compute, fences, BO mmap, USERPTR, PRIME | timeline/syncobj fds | IOSurface sharing with the accelerator |
+| Vulkan (RADV) | compute + transfer 8/8 (`rdna3_vktest`) | - | graphics pipeline (draw), images/formats, WSI (present), CTS subset |
+| Accelerator / WindowServer | desktop composited (CPU) into VRAM surfaces, flipped on head 0; two-head routing logged | - | screens proven on both heads (pictures since `944d983`), gates on by default, GPU blits, IOSurface <-> BO |
+| Metal | - | plugin + translator build in CI | everything on the card: device found, shader compile, compute, render, CAMetalLayer present, WindowServer on Metal |
+| Video (VCN 4.0) | - | - | decode/encode, VideoToolbox plugin (optional) |
+| Packaging | OpenCore in the VM | `package/oc_install.sh` | bare metal guide, installer, release builds, Tahoe (26) layout |
+
+## Work items
+
+Size: S < 300 lines, M 300-1500, L 1500-5000, XL > 5000 (or unknown).
+**now** = can be written and verified on the host/simulator today;
+**1 boot** = written now, one card run confirms (batched into the round's
+single big step); **iterate** = depends on what the card / macOS does,
+needs several rounds, cannot be written far ahead.
+
+### P - power (finish line D)
+
+| # | Item | amdgpu source | Size | Test |
+|---|---|---|---|---|
+| P1 | Non-GFX clock gating: MMHUB, ATHUB, HDP, BIF/NBIO, IH, SDMA, MP0/MP1 light sleep | `soc21_common_set_clockgating_state`, `mmhub_v3_0_set_clockgating`, `athub_v3_0_set_clockgating`, `hdp_v6_0_set_clockgating_state`, `nbio_v4_3_update_medium_grain_*`, `sdma_v6_0_set_clockgating_state` | M | now -> 1 boot (watts in the PM trend) |
+| P2 | Why the PMFW counts GFX busy: compare every register amdgpu writes after `gfx_v11_0_hw_init` that we skip (RLC CGTT, `RLC_PG_*`, IMU, `CP_*_IDLE`), log them; GFXOFF entry/exit counters (`smu_v13_0_0_get_gfx_off_residency`) | `gfx_v11_0_set_powergating_state`, `gfx_v11_0_update_gfx_clock_gating`, `amdgpu_gfx_off_ctrl` | M | now (diagnostics) -> iterate |
+| P3 | Power profile + fan as amdgpu's defaults (BOOTUP_DEFAULT workload, fan curve from the PPTable), `rdna3pm=2` default | `smu_v13_0_0_set_power_profile_mode` | S | 1 boot |
+| P4 | Suspend/resume (S3) and shutdown: `setPowerState` -> the reinit path the reset already has (fini in reverse, VRAM kept, rings re-created, display restored) | `amdgpu_device_suspend` / `_resume`, `amdgpu_device_ip_suspend_phase1/2` | L | now (sim: suspend+resume cycle) -> iterate (VM sleep with passthrough is unreliable; bare metal) |
+| P5 | Runtime idle: no `PreventSystemIdleSleep` assertion once P4 works | - | S | with P4 |
+
+### S - display (finish line D)
+
+| # | Item | amdgpu source | Size | Test |
+|---|---|---|---|---|
+| S1 | Mode list from the EDID (detailed timings + CTA/DisplayID), filtered to what the link/clock can carry | `drm_add_edid_modes`, `dc_link_validate_mode` | M | now |
+| S2 | Own mode set on a lit TMDS head: OTG timing, pixel clock (DCCG DTO / VBIOS `SetPixelClock` / DMCUB), HUBP surface, OPP/MPC, encoder | `dcn20_enable_stream_timing`, `dcn20_program_pipe`, `dce110_enable_stream`, `optc1_program_timing` | L | now (sim model) -> iterate (a wrong value = black screen; the boot step tries the variant table and keeps the GOP mode as fallback) |
+| S3 | Bandwidth: DISPCLK/DPPCLK/DCFCLK minima through the SMU, watermarks/DLG for the modes S1 allows (a table for <= 4K60, not full DML) | `dcn32_prepare_bandwidth`, `dcn32_calculate_wm_and_dlg` | L | now -> 1 boot per mode class |
+| S4 | Framebuffer: `getDisplayModes`/`setDisplayMode` -> S2, connect interrupt on HPD (S7 of the old plan done in sim), one fb per head always | IOFramebuffer | M | 1 boot (the report switches modes itself and grabs pictures) |
+| S5 | Gamma/regamma LUT (`setGammaTable`, Night Shift, calibration) | `dpp3_program_blnd_lut`, `dpp20_program_regamma` | M | now -> 1 boot |
+| S6 | DPMS: blank/unblank and display sleep | `dcn10_blank_pixel_data`, `dce110_blank_stream` | S | now -> 1 boot |
+| S7 | DP SST link training (native DP monitors) | `dp_perform_link_training`, `dpcd` | L | iterate (needs a native DP monitor) |
+| S8 | HDMI/DP audio | `dce_aud` | L | later (optional) |
+
+### V - Vulkan (feeds M)
+
+| # | Item | Size | Test |
+|---|---|---|---|
+| V1 | `rdna3_vktest`: draw a triangle into an image and read it back, image layout/format copies, timeline semaphores, two queues at once | M | now (host loopback runs the submit path) -> 1 boot |
+| V2 | CTS subset in the report (`deqp-vk` with a fixed case list: api.*, memory.*, compute.*, a few draw cases), results summarised by triage | M | 1 boot per round (runs unattended) |
+| V3 | Present: VK_EXT_metal_surface comes from MoltenVK's world; for RADV on macOS: present through the accelerator (IOSurface -> flip) | L | iterate |
+
+### A - accelerator / WindowServer (D, prerequisite of M)
+
+| # | Item | Size | Test |
+|---|---|---|---|
+| A1 | Two heads confirmed by the scanout pictures, then `rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1` default (boot-loop guard kept: `-rdna3off`) | S | 1 boot |
+| A2 | Swap copies by SDMA/GPU instead of the CPU (`submitSwapCopy` -> SDMA linear copy), BAR reads avoided | M | now -> 1 boot |
+| A3 | IOSurface <-> GEM BO (same VRAM allocation visible to WindowServer and to RADV/Metal) | L | iterate |
+
+### M - Metal (finish line M)
+
+| # | Item | Size | Test |
+|---|---|---|---|
+| M1 | Install the plugin + translator + RADV into `/Library/GPUBundles/rdna3mtl` from `rdna3vm prepare`, `debug.rdna3accelfb=1` by boot-arg; report runs `mtlprobe` (`MTLCopyAllDevices`, device name, families) | M | 1 boot |
+| M2 | Compute: a Metal compute kernel (shipped as a precompiled `.metallib`, built in CI on the macOS runner) through translator -> RADV, result checked | M | iterate |
+| M3 | Render pass offscreen, texture formats, blits | L | iterate |
+| M4 | CAMetalLayer / drawable present (IOSurface from A3, flip) | L | iterate |
+| M5 | WindowServer on Metal (SkyLight's Metal compositor instead of the CPU path) | XL | iterate |
+| M6 | App coverage (Safari, Preview, a game), allow-list widened | XL | iterate |
+
+### R - robustness and release
+
+| # | Item | Size | Test |
+|---|---|---|---|
+| R1 | Hang/recovery on the card: the report submits a deliberately hanging IB and checks the soft reset path | S | 1 boot |
+| R2 | Soak: the report loops vktest/DMA for N minutes, PM trend, no leaks (`ioreg` BO counts) | S | 1 boot (longer step) |
+| R3 | Bare metal: `docs/TESTING-HW.md` run on the real machine (GOP cold boot, no Linux before) | - | user, once D is near |
+| R4 | Tahoe (macOS 26): `NM_TAHOE=1` accelerator layout, kext checks | M | VM with 26 |
+| R5 | Release: signed-as-possible bundle, `package/` installer, OpenCore snippet, versioned artifacts | M | now |
+| R6 | Video VCN 4.0 + VideoToolbox | XL | optional, last |
+
+## How much can be written without the card
+
+- **Simulator-verifiable ports** (register sequences from named amdgpu
+  functions: P1, P4, S1-S3, S5, S6, A2, V1, R1, R2, R5) can be written in
+  large batches - several thousand lines before a card run - because the
+  simulator checks the order and values against amdgpu. What stays unknown is
+  how the card reacts; each batch therefore ships behind a boot-arg and the
+  round's single big step turns all of them on, with variant fallbacks in code
+  (as the accelerator's head strategies did).
+- **Behaviour-dependent work** (P2, S2's exact clock path, A3, M2-M6, V3)
+  depends on what macOS / the card do and cannot be written far ahead: one
+  round per discovery. Here the gain is in making each round report more
+  (pictures, power trend, mtlprobe, CTS) so no round is spent on a question
+  the report could have answered.
+
+## Test rounds
+
+One boot per round (`rdna3vm queue pending`, step `big`), unattended, then
+`rdna3vm result`. The report already holds: DMA/GFX tests, Vulkan, PM
+trend, accelerator swap/flip log, and (from `944d983`) a picture of what
+each display pipe scans out. Planned additions, each cheap: `mtlprobe` (M1),
+CTS subset (V2), hang test (R1), soak (R2), mode switching with a picture
+per mode (S4).
+
+## Order
+
+1. A1 (pictures confirm two heads) -> defaults on (A1, P3).
+2. P1 + P2 diagnostics (idle power), S1 + S5 + S6, V1, R1 - one batch, one boot.
+3. M1 (does Metal see the card at all?) - early, because it sizes finish line M.
+4. S2-S4 (mode setting), A2.
+5. P4/P5 (sleep), R2, R3 (bare metal).
+6. M2 -> M6 iteratively; V2/V3 alongside.
+7. R4, R5; R6 only if everything else holds.
