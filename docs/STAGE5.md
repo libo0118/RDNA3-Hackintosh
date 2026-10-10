@@ -52,6 +52,14 @@ physical device, device creation, and fill + copy on the transfer queue
 (the loopback executes SDMA only). Everything RADV asks of the UAPI at
 startup is exercised here first.
 
+First result (2026-10-10): with patches 0001 (all three opens), 0005 and
+0006, RADV enumerates "AMD Radeon RX 7800 XT (RADV NAVI32)", creates the
+device (general, compute, transfer, sparse families) and the SDMA fill +
+copy on the transfer queue verifies through libdrm_amdgpu -> drm_xnu ->
+uapi/. Before them, each of these failed in turn: no physical device
+(`ac_drm_query_gpu_info`), `vkCreateDevice`, `vkMapMemory` - all three
+would have failed on the card the same way.
+
 ## rdna3_vktest
 
 `userspace/rdna3_vktest.c` loads the ICD directly (the VM has no Vulkan

@@ -8,7 +8,8 @@
  * What runs where: on the general and compute queues RADV fills and copies
  * 64 KiB with its own compute shaders (ACO-compiled meta shaders: a real
  * dispatch through the GFX/compute ring) and 256 bytes with CP DMA; on a
- * transfer queue it uses SDMA packets.
+ * transfer queue (RADV_EXPERIMENTAL=transfer_queue, set here) it uses SDMA
+ * packets.
  *
  *   rdna3_vktest [--loopback] [path/to/libvulkan_radeon.{dylib,so}]
  *
@@ -235,6 +236,8 @@ int main(int argc, char **argv)
 #else
         lib = "libvulkan_radeon.so";
 #endif
+    /* RADV exposes its SDMA transfer queue only on request: test it too */
+    setenv("RADV_EXPERIMENTAL", "transfer_queue", 0);
     void *h = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
     if (!h) {
         printf("FAIL dlopen %s: %s\n", lib, dlerror());
@@ -322,6 +325,10 @@ int main(int argc, char **argv)
         VkQueueFlags f = qp[i].queueFlags;
         int transfer_only = !(f & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT));
         const char *what = (f & VK_QUEUE_GRAPHICS_BIT) ? "general" : (f & VK_QUEUE_COMPUTE_BIT) ? "compute" : "transfer";
+        if (!(f & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT))) {
+            printf("queue family %u: sparse binding only, no copies to test\n", i);
+            continue;
+        }
         if (loopback && !transfer_only) {
             printf("queue family %u (%s): skipped (the loopback executes SDMA only)\n", i, what);
             continue;
