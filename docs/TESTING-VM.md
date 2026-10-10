@@ -165,6 +165,7 @@ steps:
 | `9b` | the second monitor with the same picture (`rdna3dmub=1 rdna3mirror=1`) | only after step 5b passed; **either screen may go dark** |
 | `9c` | the second monitor as its own display (`rdna3mirror=2`) | after 9b; **either screen may go dark** |
 | `10` | accelerator (WindowServer) | risky; send the reports from 0–9 first |
+| `sleep` | monitor standby on every monitor, then a short system sleep: the display is saved, taken down and brought back (`rdna3dpms=2 rdna3resume=1`) | both monitors go to standby (no signal) and come back; then macOS sleeps for ~30 s and wakes by itself (the host wakes the VM after 90 s otherwise). **A screen may stay dark after the wake** |
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
 
