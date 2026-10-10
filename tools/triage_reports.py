@@ -105,13 +105,14 @@ def bootarg_level(args):
     return int(m.group(1)) if m else 0
 
 
-def fb_source_hash():
-    """fb/Makefile's FB_SRC_HASH: sha1 of the concatenated sources, 10 hex"""
+def fb_source_hash(files=("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h")):
+    """fb/Makefile's FB_SRC_HASH (accel/Makefile's ACCEL_SRC_HASH with the
+    accelerator's files): sha1 of the concatenated sources, 10 hex"""
     import hashlib
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     h = hashlib.sha1()
     try:
-        for f in ("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h"):
+        for f in files:
             with open(os.path.join(root, f), "rb") as fh:
                 h.update(fh.read())
     except OSError:
@@ -225,6 +226,24 @@ def report(path, show_all):
             if "RDNA3FB:" in l and not fb_edid:
                 print("     " + l[l.find("RDNA3FB:"):][:140])
         failed = failed or not fb_started or not fb_edid
+    # step 10: the accelerator also loads from the Auxiliary KC
+    if "rdna3accel=1" in args:
+        want = fb_source_hash(("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_abi.h",
+                               "accel/rdna3accel_stubs.h"))
+        ac = re.search(r"RDNA3Accelerator: build (\S+)", log)
+        same = bool(want and ac and ac.group(1) == want)
+        print("   %s %-20s %s" % ("PASS" if same else "FAIL", "accelerator build",
+                                 "%s = these sources" % want if same else
+                                 "accelerator %s, these sources %s: stale RDNA3Accelerator.kext - "
+                                 "'rdna3vm approve'" % (ac.group(1) if ac else "older than the build id", want or "?")))
+        started = re.search(r"IOGraphicsAccelerator2::start -> (\d)", log)
+        print("   %s %-20s %s" % ("PASS" if started and started.group(1) == "1" else "FAIL", "accelerator start",
+                                 started.group(0) if started else "no 'IOGraphicsAccelerator2::start' in the log"))
+        for l in log.splitlines():
+            if "RDNA3Accelerator:" in l and ("NOT starting" in l or "never claimed" in l or
+                                             "populateAccelConfig" in l or "refus" in l):
+                print("     " + l[l.find("RDNA3Accelerator:"):][:140])
+        failed = failed or not same or not (started and started.group(1) == "1")
     errs = [l for l in log.splitlines() if "ERROR" in l or "failed" in l or "timeout" in l]
     if errs:
         print("   kext errors (%d):" % len(errs))

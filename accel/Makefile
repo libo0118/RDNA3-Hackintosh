@@ -22,6 +22,11 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
             -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions -fno-builtin -fno-common \
             -O2 -g -ferror-limit=0 -Wall -Wno-unused-parameter -Wno-inconsistent-missing-override \
             -Wno-unused-function -Wno-unused-variable -Wno-deprecated-declarations
+# build id = hash of the sources (tools/triage_reports.py computes the same):
+# the VM loads this kext from the Auxiliary KC, which keeps an old copy until
+# the user approves a new one, and the report must tell which one ran
+ACCEL_SRC_HASH := $(shell cat rdna3-accel.cpp Info.plist rdna3k_abi.h rdna3accel_stubs.h | shasum | cut -c1-10)
+CXXFLAGS += -DACCEL_SRC='"$(ACCEL_SRC_HASH)"'
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext
 
 HDRS     := $(wildcard *.h iofam/*.h re/*.h)

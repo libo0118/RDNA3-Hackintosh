@@ -45,6 +45,11 @@ static bool rd3SupportedDevice(unsigned dev)
         return false;
     }
 }
+/* accel/Makefile: hash of this kext's sources, so a report tells which
+ * build the Auxiliary KC actually loaded (tools/triage_reports.py) */
+#ifndef ACCEL_SRC
+#define ACCEL_SRC "unknown"
+#endif
 #define ALOG(fmt, ...) do { kprintf("RDNA3Accelerator: " fmt "\n", ##__VA_ARGS__); IOLog("RDNA3Accelerator: " fmt "\n", ##__VA_ARGS__); } while (0)
 #include <libkern/c++/OSSymbol.h>
 #include <IOKit/IODeviceMemory.h>
@@ -490,6 +495,8 @@ public:
         return IOGraphicsAccelerator2::probe(provider, score);
     }
     virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE {
+        ALOG("build %s", ACCEL_SRC);
+        setProperty("RDNA3,AccelSource", ACCEL_SRC);
         { char off[8]; if (PE_parse_boot_argn("-rdna3off", off, sizeof off)) return false; }
         uint32_t gate = 0;
         if (!PE_parse_boot_argn("rdna3accel", &gate, sizeof gate) || !gate) { ALOG("boot-arg rdna3accel=1 absent: NOT starting (boot-loop guard)"); return false; }
