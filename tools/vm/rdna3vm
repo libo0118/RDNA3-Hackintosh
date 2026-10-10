@@ -410,8 +410,9 @@ cmd_args() {
 
 # the steps still waiting, one per line; the first is the one running
 QUEUE=$WORK/queue
-# step 0 first: its boot installs a new build's framebuffer in macOS
-PENDING_STEPS="0 9 9b 9c"
+# 9: framebuffer build + Auxiliary KC diagnostics; 9b: which DMCUB VBIOS
+# command of the clone stops the PMFW
+PENDING_STEPS="9 9b"
 
 cmd_queue() {
     load_conf

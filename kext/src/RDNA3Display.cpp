@@ -327,7 +327,7 @@ void RDNA3Accel::displayPublishRoutes()
  * a DDC EDID (TMDS: HDMI or a DP++ adaptor) and the boot mode in it. fDcn
  * keeps describing the boot heads only: the framebuffer's head numbers do
  * not move. */
-void RDNA3Accel::displayMirror(rdna3_dmub *dm)
+void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe)
 {
     uint32_t want = 0;
     PE_parse_boot_argn("rdna3mirror", &want, sizeof(want));
@@ -362,6 +362,7 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm)
             continue;
         }
         ret = dcn32_clone_plan(fDispDev, fDcn, 0, p, e.mode[k].pixel_khz, fMirror);
+        fMirror->smu_probe = probe;
         if (ret == RDNA3_OK)
             ret = dcn32_clone_enable(fDispDev, dm, fMirror);
         if (ret == RDNA3_OK) {

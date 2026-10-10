@@ -56,7 +56,12 @@ typedef struct rdna3_dcn_clone {
     /* DET segments (64 KiB) before / after the split */
     uint32_t det_src, det_dst, det_src_new, det_dst_new;
     rdna3_dcn_clocks clk;         /* display clocks the GOP left (dcn32_clk_read) */
-    uint32_t displays;            /* lit heads with the clone, for the PMFW */
+    uint32_t displays;            /* lit heads with the clone (not sent: see enable) */
+    /* set by the caller after the plan when nothing else uses the PMFW
+     * mailbox: after each DMCUB VBIOS command a TestMessage checks the PMFW
+     * still answers, and the clone stops at the first one that broke it
+     * (the first card runs lost the PMFW right after the clone) */
+    int      smu_probe;
 } rdna3_dcn_clone;
 
 /* Pick free instances for showing lit head 'head' of 'dc' on the connector

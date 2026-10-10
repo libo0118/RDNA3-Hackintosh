@@ -81,6 +81,33 @@ extra="$HOME/rdna3-extra.txt"
 {
     echo "boot-args: $args"
     [ -n "$updated" ] && echo "== $updated"
+    # why the Auxiliary KC keeps an old RDNA3Framebuffer (first card runs:
+    # kernelmanagerd "invalid codeful kernel extension in the restricted
+    # lookup table" for every /Library/Extensions copy)
+    echo "== Auxiliary KC diagnostics"
+    ls -l /Library/KernelCollections/ 2>&1
+    kmutil showloaded --list-only 2>/dev/null | grep -i rdna3
+    for n in RDNA3Framebuffer RDNA3Accelerator; do
+        k=/Library/Extensions/$n.kext
+        [ -d "$k" ] || continue
+        echo "-- $n"
+        codesign --verify --deep --strict -vv "$k" 2>&1 | tail -4
+        codesign -dv "$k" 2>&1 | grep -E "Identifier|Format|Signature|CDHash"
+        with_limit 60 kmutil load -p "$k" 2>&1 | tail -6
+    done
+    echo "-- kernelmanagerd / kmutil errors this boot"
+    with_limit 60 log show --last boot --style compact \
+        --predicate '(process == "kernelmanagerd" OR process == "kmutil" OR process == "syspolicyd") AND (messageType == error OR eventMessage CONTAINS[c] "invalid" OR eventMessage CONTAINS[c] "collection")' \
+        2>/dev/null | tail -40
+    echo "-- a test build of the Auxiliary KC into /tmp (nothing installed)"
+    with_limit 120 kmutil create -n aux -a x86_64 -V release \
+        --boot-path /System/Library/KernelCollections/BootKernelExtensions.kc \
+        --system-path /System/Library/KernelCollections/SystemKernelExtensions.kc \
+        --aux-path /tmp/rdna3-aux-test.kc -r /Library/Extensions 2>&1 | tail -25
+    rm -f /tmp/rdna3-aux-test.kc
+    echo "-- kmutil create / install options"
+    kmutil create --help 2>&1 | head -60
+    kmutil install --help 2>&1 | head -40
     if [ "${lvl:-0}" -ge 7 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
         echo "== rdna3_drminfo --dma-test"
         with_limit 60 "$D/bin/rdna3_drminfo" --dma-test 2>&1

@@ -204,6 +204,9 @@ typedef struct sim {
     unsigned dcn_gated_drops, dcn_pg_no_request;
     /* DAL mailbox of the PMFW (dcn32_clk_mgr_smu_msg.c) */
     unsigned dal_msgs, dal_displays, dal_hard_min[16];
+    /* the PMFW stops answering once the DMCUB ran this many VBIOS commands
+     * (0 = never), as it did on the card after the clone */
+    unsigned smu_wedge_at;
     unsigned hpd_irqs;
     /* lit OTGs count frames while time passes; with OTG_CRC_EN their CRC
      * is a function of what they scan out (surface address + timing) */
@@ -1940,6 +1943,10 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     }
     if (dw == MP1(66)) {
         S.smu_msgs++;
+        if (S.smu_wedge_at && S.dmub.nseq >= S.smu_wedge_at) {
+            *R(dw) = v;          /* taken, never answered */
+            return;
+        }
         smu_msg(v);
         return;
     }
@@ -3863,7 +3870,10 @@ static void run(const char *fwdir)
             CHECK(dcn32_clone_enable(&dev, NULL, &cl) == RDNA3_ENODEV);
             S.dmub.nseq = 0;
             S.dal_displays = 0;
+            cl.smu_probe = 1;           /* the PMFW keeps answering: 5 TestMessages */
+            k2 = S.smu_msgs;
             CHECK(dcn32_clone_enable(&dev, &dm, &cl) == RDNA3_OK);
+            CHECK(S.smu_msgs - k2 == 5);
             CHECK(S.dal_displays == 0);   /* no NumOfDisplays: it wedged the PMFW on the card */
             CHECK(S.dcn_gated_drops == 0 && S.dcn_pg_no_request == 0 && S.dmub.bad_cmds == 0);
             CHECK(S.reg[DCN_B2 + regDOMAIN0_PG_STATUS] == 0 &&
@@ -3971,6 +3981,18 @@ static void run(const char *fwdir)
                   S.reg[DCN_B2 + regDOMAIN0_PG_STATUS] == 2u << DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT &&
                   S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL] == 0xf);
             CHECK(S.dcn_gated_drops == 0 && S.dcn_pg_no_request == 0);   /* blanked before the gate */
+            /* the PMFW stops answering after the third VBIOS command
+             * (TransmitterControl INIT): the clone stops there, undone */
+            CHECK(dcn32_clone_plan(&dev, &dc2, 0, &path, 148500, &cl) == RDNA3_OK);
+            cl.smu_probe = 1;
+            S.smu_wedge_at = 3;
+            S.dmub.nseq = 0;
+            CHECK(dcn32_clone_enable(&dev, &dm, &cl) == RDNA3_EIO);
+            CHECK(S.dmub.nseq >= 4 && S.dmub.seq[2] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL &&
+                  S.dmub.seq_tx_action[2] == RD_ATOM_TX_INIT && S.dmub.seq_tx_action[3] != RD_ATOM_TX_ENABLE);
+            S.smu_wedge_at = 0;
+            S.reg[MP1(90)] = 1;      /* the PMFW back (a reset in real life) */
+            CHECK(dcn32_read_state(&dev, &dc2) == 1);
             /* dcn32_smu_set_hard_min_by_freq with the status wait */
             {
                 uint32_t got = 0;

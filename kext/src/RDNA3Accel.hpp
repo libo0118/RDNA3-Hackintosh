@@ -111,7 +111,9 @@ public:
     /* Step 9b (rdna3mirror=1): show the boot head on the other TMDS
      * monitor too, through the DMCUB the bring-up started; off again
      * before the bring-up frees it (RDNA3Display.cpp) */
-    void displayMirror(struct rdna3_dmub *dm);
+    /* 'probe': called from the bring-up, which owns the PMFW mailbox then:
+     * the clone checks the PMFW answers after each DMCUB VBIOS command */
+    void displayMirror(struct rdna3_dmub *dm, bool probe = false);
     void displayMirrorOff(struct rdna3_dmub *dm);
     /* B7: an HPD pin changed (bring-up work loop, after the ack); the
      * connectors are probed again on a thread call */

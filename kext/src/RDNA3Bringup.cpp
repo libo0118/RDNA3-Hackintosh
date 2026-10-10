@@ -576,7 +576,7 @@ bool RDNA3Bringup::hwInit()
         if (fDmubMode) {
             dmubInit();
             if (fDmub && fDmub->hw_init)
-                fOwner->displayMirror(fDmub);   /* rdna3mirror=1: step 9b */
+                fOwner->displayMirror(fDmub, true);   /* rdna3mirror=1: step 9b */
         }
     }
 

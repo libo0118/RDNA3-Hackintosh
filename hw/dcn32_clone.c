@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "dcn32_clone.h"
+#include "smu13.h"
 #include "gen/dcn_3_2_1.h"
 #include "gen/dcn_3_2_0_dig.h"
 #include "gen/dcn_3_2_0_pipe.h"
@@ -337,6 +338,24 @@ static const uint16_t tmds_be[] = {
     regDIG0_TMDS_CTL2_3_GEN_CNTL,
 };
 
+/* is the PMFW still answering its driver mailbox? */
+static int pmfw_alive(rdna3_dev *d, const rdna3_dcn_clone *c, const char *after)
+{
+    uint32_t v = 0;
+    int r;
+    if (!c->smu_probe)
+        return RDNA3_OK;
+    r = smu13_send_msg(d, PPSMC_MSG_TestMessage, 0x5a5a, &v);
+    if (!r && v != 0x5a5b)
+        r = RDNA3_EIO;
+    if (r) {
+        RERR(d, "clone: the PMFW stopped answering after %s (%d): stopping here", after, r);
+        return RDNA3_EIO;
+    }
+    RLOG(d, "clone: PMFW answers after %s", after);
+    return RDNA3_OK;
+}
+
 int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
 {
     const uint32_t keep_hubp = HUBP0_DCHUBP_CNTL__HUBP_VREADY_AT_OR_AFTER_VSYNC_MASK |
@@ -366,6 +385,8 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
     /* 2. dcn20_enable_stream_timing: pixel clock, timing, ODM, enable */
     dccg_copy(d, c);
     ret = vbios_pixel_clock(dm, c, 1);
+    if (!ret)
+        ret = pmfw_alive(d, c, "SetPixelClock");
     if (ret) {
         RERR(d, "clone: SetPixelClock through the DMCUB failed (%d)", ret);
         goto fail;
@@ -426,6 +447,8 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
         e.pclk_10khz = c->pclk_khz / 10;
         e.bitpercolor = RD_ATOM_PANEL_8BIT_PER_COLOR;
         ret = dmub32_encoder_control(dm, &e);
+        if (!ret)
+            ret = pmfw_alive(d, c, "DIGxEncoderControl STREAM_SETUP");
         if (ret) {
             RERR(d, "clone: DIGxEncoderControl STREAM_SETUP through the DMCUB failed (%d)", ret);
             goto fail;
@@ -447,7 +470,11 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
     WI(d, regDIG0_DIG_BE_CNTL, c->dst_be, DIG_S, v);
     ret = vbios_transmitter(dm, c, RD_ATOM_TX_INIT);
     if (!ret)
+        ret = pmfw_alive(d, c, "TransmitterControl INIT");
+    if (!ret)
         ret = vbios_transmitter(dm, c, RD_ATOM_TX_ENABLE);
+    if (!ret)
+        ret = pmfw_alive(d, c, "TransmitterControl ENABLE");
     if (ret) {
         RERR(d, "clone: DIG1TransmitterControl through the DMCUB failed (%d)", ret);
         goto fail;
@@ -462,6 +489,13 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
          RI(d, regDOMAIN0_PG_STATUS, c->dst_pipe, PG_S), RI(d, regDCHUBBUB_DET0_CTRL, c->dst_pipe, DET_S),
          RI(d, regOTG0_PIXEL_RATE_CNTL, c->dst_otg, PRC_S),
          RI(d, regOTG0_PHYPLL_PIXEL_RATE_CNTL, c->dst_otg, PRC_S));
+    /* the PMFW may react a little later */
+    if (c->smu_probe) {
+        d->os.msleep(d->os.ctx, 200);
+        ret = pmfw_alive(d, c, "the clone lit (+200 ms)");
+        if (ret)
+            goto fail;
+    }
     /* No dcn30_smu_set_num_of_displays here: on the RX 7800 XT (PMFW
      * 80.92) the driver mailbox stopped answering right after NumOfDisplays
      * 2 went through the DAL mailbox (metrics "msg 0x12 timed out", then
