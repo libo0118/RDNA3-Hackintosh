@@ -219,6 +219,22 @@ struct RD3KDisplayHotplug {
 /* display CRC: p1 = head (uintptr_t), p2 = unsigned *crc out */
 #define RD3K_FN_DISPLAY_CRC "rdna3DisplayCrc"
 
+/* output gamma (rdna3gamma=1): the IOFramebuffer::setGammaTable table of a
+ * head as the MPCC output gamma (hw/dcn32_gamma.c). channels 1 (one table
+ * for R, G and B) or 3 (R, G, B tables one after the other) of count
+ * entries, 0..65535; channels 0 = bypass. An identity table also bypasses.
+ * kIOReturnUnsupported without the boot-arg. */
+#define RD3K_DISPLAY_FN_GAMMA    "rdna3DisplayGamma"
+#define RD3K_GAMMA_MAX           1024u
+struct RD3KDisplayGamma {
+    unsigned int   version;       /* RD3K_DISPLAY_ABI_VERSION */
+    unsigned int   head;
+    unsigned int   channels;      /* 0, 1 or 3 */
+    unsigned int   count;         /* entries per channel, 2..RD3K_GAMMA_MAX */
+    unsigned short data[3 * RD3K_GAMMA_MAX];
+    int            result;        /* 0 or a negative RDNA3_E* code */
+};
+
 /* user clients: newUserClient types 'RD'xxxx go to the core kext */
 #define RD3K_UC_TYPE_BASE     0x52440000u
 #define RD3K_FN_NEW_CLIENT    "rdna3NewAccelClient"

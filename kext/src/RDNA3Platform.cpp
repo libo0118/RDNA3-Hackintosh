@@ -284,6 +284,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return displayCrc((uint32_t)(uintptr_t)p1, (uint32_t *)p2);
         if (fn->isEqualTo(RD3K_DISPLAY_FN_HOTPLUG))
             return displayHotplugQuery((RD3KDisplayHotplug *)p1);
+        if (fn->isEqualTo(RD3K_DISPLAY_FN_GAMMA))
+            return displayGamma((RD3KDisplayGamma *)p1);
     }
     if (fn && fDrm) {
         if (fn->isEqualTo(RD3K_VRAM_FN_ALLOC))

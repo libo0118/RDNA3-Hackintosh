@@ -9,6 +9,7 @@
  *   rdna3DisplayStatus   OTG frame counter, scanline, vblank, flip pending
  *   rdna3DisplayCrc      OTG CRC of the last frame
  *   rdna3DisplayCursor   hardware cursor image (VRAM) and position
+ *   rdna3DisplayGamma    output gamma table (MPCC OGAM, rdna3gamma=1)
  *
  * Nothing here writes a register until the framebuffer asks for a flip or
  * a CRC, and the framebuffer only starts with the boot-arg rdna3fb=1.
@@ -35,6 +36,7 @@ extern "C" {
 #include "dcn32_mode.h"
 #include "dcn32_clone.h"
 #include "dcn32_modeset.h"
+#include "dcn32_gamma.h"
 }
 #include "rdna3k_abi.h"
 
@@ -1070,5 +1072,63 @@ IOReturn RDNA3Accel::displayCursor(RD3KDisplayCursor *c)
         r = dcn32_cursor_set_position(fDispDev, fDcn, c->head, c->x, c->y, c->visible != 0);
     IOLockUnlock(fDispLock);
     c->result = r;
+    return r ? kIOReturnBadArgument : kIOReturnSuccess;
+}
+
+/* rdna3DisplayGamma: the framebuffer's gamma table as the head's MPCC
+ * output gamma (hw/dcn32_gamma.c: dcn32_set_output_transfer_func ->
+ * mpc3_set_output_gamma). An identity table (__is_lut_linear) and
+ * channels 0 put the OGAM in bypass, which is what the GOP left. A
+ * mirror clone (rdna3mirror=1) shows this head's picture through an MPCC
+ * of its own and gets the same table; an extended clone head is a head of
+ * fDcn and asks for itself. */
+IOReturn RDNA3Accel::displayGamma(RD3KDisplayGamma *g)
+{
+    if (!g || g->version != RD3K_DISPLAY_ABI_VERSION || (g->channels != 0 && g->channels != 1 && g->channels != 3) ||
+        (g->channels && (g->count < 2 || g->count > RD3K_GAMMA_MAX)))
+        return kIOReturnBadArgument;
+    g->result = 0;
+    if (!rd3_arg("rdna3gamma", 0))
+        return kIOReturnUnsupported;
+    if (!fDcn || !fDispDev || !fDispLock || g->head >= fDcn->nheads || g->head >= 4)
+        return kIOReturnNotReady;
+    rdna3_gamma_pwl *p = nullptr;
+    int r = RDNA3_OK;
+    if (g->channels) {
+        p = (rdna3_gamma_pwl *)IOMalloc(sizeof(rdna3_gamma_pwl));
+        if (!p)
+            return kIOReturnNoMemory;
+        r = dcn32_gamma_build(g->data, g->channels, g->count, p);
+    }
+    const rdna3_gamma_pwl *use = p && !p->linear ? p : nullptr;
+    rdna3_gamma_state st = {};
+    uint32_t mpcc[2] = {}, clone = 0;
+    if (r == RDNA3_OK) {
+        IOLockLock(fDispLock);
+        r = dcn32_gamma_set_head(fDispDev, fDcn, g->head, use);
+        if (r == RDNA3_OK && fMirrorOn && fMirror && fCloneHead < 0 && fMirror->src_otg == fDcn->head[g->head].otg) {
+            r = dcn32_gamma_apply(fDispDev, fMirror->dst_otg, fMirror->dst_mpcc, use);
+            clone = 1;
+        }
+        if (dcn32_gamma_otg_mpccs(fDispDev, fDcn->head[g->head].otg, mpcc) > 0)
+            dcn32_gamma_state(fDispDev, mpcc[0], &st);
+        IOLockUnlock(fDispLock);
+    }
+    g->result = r;
+    uint32_t n = ++fGammaCalls[g->head];
+    {
+        static const char *const cur[] = { "bypass", "RAM A", "RAM B" };
+        char key[32], val[128];
+        snprintf(key, sizeof(key), "RDNA3,Head%u,Gamma", g->head);
+        snprintf(val, sizeof(val), "%s %ux%u -> %d: MPCC %u mode %u %s%s, DPP degamma %u, %u calls",
+                 !g->channels ? "bypass" : use ? "table" : "identity", g->channels, g->count, r, mpcc[0], st.mode,
+                 st.current < 3 ? cur[st.current] : "?", clone ? " + mirror clone" : "", st.dpp_degamma, n);
+        setProperty(key, val);
+        /* Night Shift and ColorSync send tables often: the first ones, then every 256th */
+        if (n <= 8 || !(n & 255) || r)
+            LOG("display: head %u gamma %s", g->head, val);
+    }
+    if (p)
+        IOFree(p, sizeof(rdna3_gamma_pwl));
     return r ? kIOReturnBadArgument : kIOReturnSuccess;
 }

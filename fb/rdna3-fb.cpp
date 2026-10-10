@@ -241,8 +241,20 @@ public:
         return kIOReturnSuccess;
     }
     bool fetchEdid();
-    IOReturn setGammaTable(UInt32, UInt32, UInt32, void *) override { return kIOReturnSuccess; }
-    IOReturn setGammaTable(UInt32, UInt32, UInt32, void *, bool) override { return kIOReturnSuccess; }
+    /* gamma: to the core's MPCC output gamma (rdna3gamma=1); success either way */
+    IOReturn setGammaTable(UInt32 channels, UInt32 count, UInt32 width, void *data) override
+    {
+        return gammaToCore(channels, count, width, data);
+    }
+    IOReturn setGammaTable(UInt32 channels, UInt32 count, UInt32 width, void *data, bool) override
+    {
+        return gammaToCore(channels, count, width, data);
+    }
+    const OSSymbol *fSymGamma = nullptr;
+    struct RD3KDisplayGamma *fGamma = nullptr;
+    bool     fGammaOff = false;            /* the core said unsupported: stop asking */
+    unsigned fGammaCalls = 0;
+    IOReturn gammaToCore(UInt32 channels, UInt32 count, UInt32 width, const void *data);
     IOReturn setCLUTWithEntries(IOColorEntry *, UInt32, UInt32, IOOptionBits) override { return kIOReturnSuccess; }
     /* DCN hardware cursor (DCN mode); software cursor otherwise */
     IOReturn setCursorImage(void *cursorImage) override;
@@ -485,6 +497,11 @@ void RDNA3Framebuffer::free()
     OSSafeReleaseNULL(fSymCursor);
     OSSafeReleaseNULL(fSymEdid);
     OSSafeReleaseNULL(fSymHotplug);
+    OSSafeReleaseNULL(fSymGamma);
+    if (fGamma) {
+        IOFree(fGamma, sizeof(*fGamma));
+        fGamma = nullptr;
+    }
     if (fLock) {
         IOSimpleLockFree(fLock);
         fLock = nullptr;
@@ -1195,6 +1212,47 @@ void RDNA3Framebuffer::hotplugPoll(bool first)
           fConnect.proc ? "" : " (no handler registered)");
     if (fConnect.proc)
         fConnect.proc(fConnect.target, fConnect.ref);
+}
+
+/* IOFramebuffer::setGammaTable: 'channels' (1 or 3) tables of 'count'
+ * entries of 'width' bits, channel-planar (all of R, then G, then B); 8 bit
+ * and narrower entries are bytes, wider ones UInt16. Scaled to 16 bits and,
+ * above RD3K_GAMMA_MAX entries, resampled; the core programs them as the
+ * head's MPCC output gamma (RDNA3Accel::displayGamma). The answer to
+ * IOFramebuffer stays success when the core does not do gamma. */
+IOReturn RDNA3Framebuffer::gammaToCore(UInt32 channels, UInt32 count, UInt32 width, const void *data)
+{
+    if (fGammaOff || !fDcn || !fCore || !data || (channels != 1 && channels != 3) || count < 2 || !width ||
+        width > 16)
+        return kIOReturnSuccess;
+    if (!fSymGamma)
+        fSymGamma = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_GAMMA);
+    if (!fGamma)
+        fGamma = (struct RD3KDisplayGamma *)IOMalloc(sizeof(*fGamma));
+    if (!fSymGamma || !fGamma)
+        return kIOReturnSuccess;
+    uint32_t n = count > RD3K_GAMMA_MAX ? RD3K_GAMMA_MAX : count, max = (1u << width) - 1;
+    bzero(fGamma, sizeof(*fGamma));
+    fGamma->version = RD3K_DISPLAY_ABI_VERSION;
+    fGamma->head = fHead;
+    fGamma->channels = channels;
+    fGamma->count = n;
+    for (uint32_t c = 0; c < channels; c++)
+        for (uint32_t i = 0; i < n; i++) {
+            /* entry i of n <- entry i * (count - 1) / (n - 1) of count, rounded */
+            uint32_t k = (uint32_t)(((uint64_t)i * (count - 1) * 2 + (n - 1)) / (2 * (uint64_t)(n - 1)));
+            uint32_t v = width <= 8 ? ((const UInt8 *)data)[c * count + k] : ((const UInt16 *)data)[c * count + k];
+            if (v > max)
+                v = max;
+            fGamma->data[c * n + i] = (unsigned short)(((uint64_t)v * 65535 + max / 2) / max);
+        }
+    IOReturn r = fCore->callPlatformFunction(fSymGamma, false, fGamma, nullptr, nullptr, nullptr);
+    if (++fGammaCalls <= 4 || r != kIOReturnSuccess)
+        FBLOG("head %u: gamma %ux%u of %u bits -> 0x%x (%d)", fHead, (unsigned)channels, (unsigned)count,
+              (unsigned)width, (unsigned)r, fGamma->result);
+    if (r == kIOReturnUnsupported)
+        fGammaOff = true;
+    return kIOReturnSuccess;
 }
 
 bool RDNA3Framebuffer::fetchEdid()

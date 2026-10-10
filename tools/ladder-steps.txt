@@ -50,6 +50,10 @@ metal rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdn
 # EDID modes, rdna3_modetest switches to two of them and back, a picture of
 # each; scaled modes alongside
 modeset rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1
+# output gamma (hw/dcn32_gamma.c): the step metal plus the gamma table as
+# the MPCC OGAM; rdna3_modetest gamma sets a dark table, the identity and
+# the ColorSync settings back, the OTG CRC after each
+gamma rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3gamma=1
 # no rdna3 boot-arg at all: the kexts' default profile (rdna3_bootargs.h),
 # what an installed driver runs; the report tests it like big2 without the
 # power experiment, soak and hang test

@@ -45,6 +45,7 @@ AMDGPU_STEPS = {
     "Discovery / VBIOS": ["2"], "DMCUB": ["5b"], "Display: OTG / AUX": ["2", "9"],
     "Display: modeset": ["modeset"],
     "Display: hotplug": ["hotplug"],
+    "Display: color": ["gamma"],
 }
 UAPI_STEPS = {
     "amdgpu ioctls": ["7", "8"], "DRM core ioctls": ["7", "8"], "INFO queries": ["7"],

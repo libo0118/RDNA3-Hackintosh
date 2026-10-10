@@ -357,7 +357,8 @@ def summary(path, serial=None):
         out.append(("screens %s" % (look.group(1) if look else "1"),
                     "%d lit%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
                                       ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "")))
-    for pat, name in ((r"^MODES: .*$", "scaled modes"), (r"^SOAK: .*$", "soak"), (r"^HANG TEST: .*$", "hang test")):
+    for pat, name in ((r"^MODES: .*$", "scaled modes"), (r"^GAMMA: .*$", "gamma"), (r"^SOAK: .*$", "soak"),
+                      (r"^HANG TEST: .*$", "hang test")):
         m = re.search(pat, txt, re.M)
         if m:
             out.append((name, m.group(0)[:100]))
@@ -449,19 +450,27 @@ def main():
                     print("     picture: " + ppm_to_png(ppm))
                 except (OSError, ValueError) as e:
                     print("     picture: " + str(e))
-            if "== rdna3_modetest" in txt:
+            if "== rdna3_modetest list" in txt:
                 # scaled modes: what macOS listed, each switch, the pipes after it
-                ml = txt[txt.index("== rdna3_modetest"):]
+                ml = txt[txt.index("== rdna3_modetest list"):]
                 print("   display modes (rdna3modes=1):")
                 for l in ml.splitlines():
                     if re.match(r"(display \d|  current|== mode|MODES:)", l) or \
                        ("mode " in l and re.search(r"\d+x\d+ \(pixels", l) and "IO flags" in l and l.startswith("  mode")):
                         print("     " + l[:150])
-                    if l.startswith("== rdna3_drminfo --hang-test") or l.startswith("SOAK"):
+                    if l.startswith("== rdna3_drminfo --hang-test") or l.startswith("SOAK") or \
+                       l.startswith("== rdna3_modetest gamma"):
                         break
                 m = re.search(r"^MODES: (\d+) switch\(es\) tried, (\d+) failed", ml, re.M)
                 if m and m.group(2) != "0":
                     failed = True
+            m = re.search(r"^GAMMA: (\w+).*$", txt, re.M)
+            if m:
+                # output gamma (rdna3gamma=1): the OTG CRC per pipe after each table
+                print("   " + m.group(0)[:150])
+                for l in re.findall(r"^== gamma pipe .*$", txt, re.M):
+                    print("     " + l[3:170])
+                failed = failed or m.group(1) == "FAIL"
             m = re.search(r"^SOAK: (\d+) rounds, (\d+) failed", txt, re.M)
             if m:
                 print("   %s soak: %s rounds of DMA/GFX/Vulkan tests, %s failed" %

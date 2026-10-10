@@ -174,7 +174,7 @@ done_() {   # done_ EXIT: the test's exit code and summary line
     echo "[exit $1]"
     partial
     sum=$(tail -n +"$((hl + 1))" "$extra" 2>/dev/null |
-          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
+          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
     if [ "$1" = 0 ]; then prog "    OK  ${sum}"; else prog "    FAIL (exit $1)  ${sum}"; fi
 }
 rm -f "$P"; touch "$P"; chmod 644 "$P"
@@ -282,6 +282,16 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/hotplug" 2>&1
                 done_ $?
                 ;;
+        esac
+        # output gamma (rdna3gamma=1): a dark table, the identity, the
+        # ColorSync settings back; each pipe's OTG CRC must follow
+        case " $args " in
+            *" rdna3gamma=1 "*)
+                if [ -x "$D/bin/rdna3_modetest" ]; then
+                    hdr "rdna3_modetest gamma"
+                    with_limit 150 "$D/bin/rdna3_modetest" gamma "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
+                    done_ $?
+                fi ;;
         esac
     fi
     if [ "${lvl:-0}" -ge 7 ] && [ -x "$D/bin/rdna3_drminfo" ]; then

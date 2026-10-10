@@ -34,6 +34,7 @@ CSRC   := ../common/amd_discovery.c ../common/amd_fw.c ../common/range_alloc.c \
           ../hw/rdna3_hw.c ../hw/psp13.c ../hw/smu13.c ../hw/gmc11.c ../hw/mmhub302.c ../hw/ih60.c ../hw/sdma60.c ../hw/gpuvm.c ../hw/gfx11.c ../hw/dcn32.c ../hw/doorbell.c ../hw/vbios.c ../hw/dcaux.c ../hw/edid.c ../hw/atom.c ../hw/dmub32.c ../hw/dcn32_mode.c ../hw/dcn32_clone.c ../hw/dcn32_modeset.c ../hw/dcn32_clk.c ../hw/gfx11_info.c ../hw/xfer.c ../hw/soc21_cg.c ../uapi/rdna3_drm.c src/kmod_info.c
 CXXSRC += src/RDNA3Hotplug.cpp
 CSRC   += ../hw/dchpd.c
+CSRC   += ../hw/dcn32_gamma.c
 HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../hw/gen/*.h ../uapi/*.h ../third_party/amd/*.h ../accel/rdna3k_abi.h)
 OBJS   := $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(CXXSRC))) \
           $(patsubst %.c,$(OBJDIR)/%.o,$(notdir $(CSRC)))

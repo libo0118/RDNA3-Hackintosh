@@ -1,10 +1,10 @@
 {
  "amdgpu": {
   "works": 268,
-  "ported": 300,
-  "total": 1343,
-  "works_pct": 20.0,
-  "ported_pct": 22.3,
+  "ported": 313,
+  "total": 1391,
+  "works_pct": 19.3,
+  "ported_pct": 22.5,
   "groups": [
    {
     "name": "PSP 13",
@@ -1323,8 +1323,8 @@
      "modeset"
     ],
     "works": 0,
-    "ported": 11,
-    "todo": 143,
+    "ported": 12,
+    "todo": 142,
     "items": {
      "apply_symclk_on_tx_off_wa": "todo",
      "configure_lttpr_mode_non_transparent": "todo",
@@ -1389,7 +1389,7 @@
      "dcn32_set_mcm_luts": "todo",
      "dcn32_set_min_memclk": "todo",
      "dcn32_set_mpc_shaper_3dlut": "todo",
-     "dcn32_set_output_transfer_func": "todo",
+     "dcn32_set_output_transfer_func": "ported",
      "dcn32_smu_get_hard_min_status": "todo",
      "dcn32_smu_send_cab_for_uclk_message": "todo",
      "dcn32_smu_send_fclk_pstate_message": "todo",
@@ -1506,6 +1506,65 @@
      "program_hpd_filter": "ported",
      "query_hpd_status": "ported",
      "set_config": "ported"
+    }
+   },
+   {
+    "name": "Display: color",
+    "steps": [
+     "gamma"
+    ],
+    "works": 0,
+    "ported": 12,
+    "todo": 36,
+    "items": {
+     "cm3_helper_convert_to_custom_float": "ported",
+     "cm3_helper_translate_curve_to_degamma_hw_format": "todo",
+     "cm3_helper_translate_curve_to_hw_format": "ported",
+     "cm_helper_program_gamcor_xfer_func": "ported",
+     "dcn30_mpc_construct": "todo",
+     "get3dlut_config": "todo",
+     "is_rgb_equal": "ported",
+     "mpc3_configure_ogam_lut": "ported",
+     "mpc3_configure_shaper_lut": "todo",
+     "mpc3_disable_dwb_mux": "todo",
+     "mpc3_get_gamut_remap": "todo",
+     "mpc3_get_ogam_current": "ported",
+     "mpc3_get_rmu_mux_status": "todo",
+     "mpc3_get_shaper_current": "todo",
+     "mpc3_init_mpcc": "todo",
+     "mpc3_is_dwb_idle": "todo",
+     "mpc3_mpc_init": "todo",
+     "mpc3_mpc_init_single_inst": "todo",
+     "mpc3_ogam_get_reg_field": "ported",
+     "mpc3_power_on_ogam_lut": "ported",
+     "mpc3_power_on_shaper_3dlut": "todo",
+     "mpc3_program_3dlut": "todo",
+     "mpc3_program_luta": "ported",
+     "mpc3_program_lutb": "ported",
+     "mpc3_program_ogam_pwl": "ported",
+     "mpc3_program_shaper": "todo",
+     "mpc3_program_shaper_lut": "todo",
+     "mpc3_program_shaper_luta_settings": "todo",
+     "mpc3_program_shaper_lutb_settings": "todo",
+     "mpc3_read_mpcc_state": "todo",
+     "mpc3_select_3dlut_ram": "todo",
+     "mpc3_select_3dlut_ram_mask": "todo",
+     "mpc3_set3dlut_ram10": "todo",
+     "mpc3_set3dlut_ram12": "todo",
+     "mpc3_set_3dlut_mode": "todo",
+     "mpc3_set_denorm": "todo",
+     "mpc3_set_denorm_clamp": "todo",
+     "mpc3_set_dwb_mux": "todo",
+     "mpc3_set_gamut_remap": "todo",
+     "mpc3_set_mpc_mem_lp_mode": "todo",
+     "mpc3_set_ocsc_default": "todo",
+     "mpc3_set_output_csc": "todo",
+     "mpc3_set_output_gamma": "ported",
+     "mpc3_set_rmu_mux": "todo",
+     "mpcc3_acquire_rmu": "todo",
+     "mpcc3_release_rmu": "todo",
+     "program_gamut_remap": "todo",
+     "read_gamut_remap": "todo"
     }
    }
   ]
