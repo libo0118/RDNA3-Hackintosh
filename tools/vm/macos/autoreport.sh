@@ -232,6 +232,16 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                     fi
                 done ;;
         esac
+        # monitor standby on every TMDS head (rdna3dpms=2, step sleep): the
+        # kext's check of each head after the link went down and came back
+        # (RDNA3,Head<n>,State: power, OTG, DIG, frames counted in 50 ms)
+        case " $args " in
+            *" rdna3dpms=2 "*)
+                hdr "monitor standby: the heads' state (RDNA3Accel)"
+                ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null |
+                    grep -E '"RDNA3,(Head[0-9],State|DisplayStateSaves|DisplayStateRestores)"'
+                done_ $? ;;
+        esac
         # scaled modes (rdna3modes=1): each display through two smaller
         # modes (first to the fastest timing of its own size, if any: the
         # DISPCLK raise), a look at the pipes after each switch with underflow,
@@ -348,6 +358,47 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         if [ "$bad" = 0 ]; then prog "    OK  SOAK: $n rounds"; else prog "    FAIL  SOAK: $n rounds, $bad failed"; fi
         partial
     fi
+    # system sleep (rdna3resume=1, step sleep): a short S3 with an RTC wake
+    # (rdna3vm wakes the VM after 90 s otherwise), the heads before and
+    # after (picture, OTG CRC), the kext's verdict (RDNA3,Wake: did the
+    # card keep its power, which heads were restored), then the rings
+    case " $args " in
+        *" rdna3resume=1 "*)
+            if [ "${lvl:-0}" -ge 2 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
+                for k in sysbefore syswake; do
+                    if [ $k = syswake ]; then
+                        hdr "system sleep: pmset relative wake 30; pmset sleepnow"
+                        s0=$(sysctl -n kern.sleeptime 2>/dev/null)
+                        pmset relative wake 30 2>&1
+                        pmset sleepnow 2>&1
+                        sleep 60
+                        caffeinate -u -t 2 2>&1
+                        sleep 15
+                        s1=$(sysctl -n kern.sleeptime 2>/dev/null)
+                        echo "kern.sleeptime before: $s0"
+                        echo "kern.sleeptime after:  $s1, waketime $(sysctl -n kern.waketime 2>/dev/null)"
+                        pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Failure) ' | tail -6
+                        ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null |
+                            grep -E '"RDNA3,(Sleeps|Wakes|Wake|WakePowerLost|WakeHeadsLost|WakeResumeResult|Resumes|ResumeResult|VRAMLost|Head[0-9],State|DisplayStateRestores)"'
+                        lost=$(ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null |
+                               sed -n 's/.*"RDNA3,WakeHeadsLost" = \([0-9]*\).*/\1/p' | head -1)
+                        if [ "$s0" = "$s1" ]; then echo "SYSTEM SLEEP: the system did not sleep"; r=1
+                        elif [ "${lost:-1}" != 0 ]; then echo "SYSTEM SLEEP: slept, ${lost:-?} head(s) not back"; r=1
+                        else echo "SYSTEM SLEEP: slept and woke, every head back"; r=0; fi
+                        done_ $r
+                    fi
+                    mkdir -p "$HOME/rdna3-scanout/$k"
+                    hdr "rdna3_drminfo --scanout (look $k)"
+                    with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/$k" 2>&1
+                    done_ $?
+                done
+                if [ "${lvl:-0}" -ge 8 ]; then
+                    hdr "rdna3_drminfo --dma-test --gfx-test (after the wake)"
+                    with_limit 60 "$D/bin/rdna3_drminfo" --dma-test --gfx-test 2>&1
+                    done_ $?
+                fi
+            fi ;;
+    esac
     # last, it resets engines: a DMA job that never finishes, the kernel
     # must recover (rdna3hangtest=1); =2 also a GFX one, which froze the
     # whole host in the VM once (card run 19) - a step of its own

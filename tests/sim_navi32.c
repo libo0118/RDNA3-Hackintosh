@@ -71,6 +71,7 @@
 #include "dcn32_clone.h"
 #include "dcn32_gamma.h"
 #include "gen/dcn_3_2_0_gamma.h"
+#include "dcn32_state.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
@@ -2600,6 +2601,243 @@ static void synth(amd_fw_blob_ref blobs[AMD_BLOB_COUNT], const uint8_t **sos, si
     }
 }
 
+/* D4: display state save / restore (hw/dcn32_state.c). A head's registers
+ * as the power loss of a reset or S3 leaves them (dm_suspend / dm_resume
+ * model): its lists zeroed, OTG off, HUBP blanked, DIG off, the pipe power
+ * gated, DCCG / DET / routing / the system aperture gone. */
+static uint32_t st_snap[MMIO_LEN / 4];
+
+static void st_wipe(uint32_t pipe, uint32_t otg, uint32_t opp, uint32_t mpcc, uint32_t fe, uint32_t be)
+{
+    static const uint16_t tmds[] = { regDIG0_TMDS_CNTL, regDIG0_TMDS_CONTROL_CHAR, regDIG0_TMDS_CONTROL0_FEEDBACK,
+        regDIG0_TMDS_SYNC_CHAR_PATTERN_0_1, regDIG0_TMDS_SYNC_CHAR_PATTERN_2_3, regDIG0_TMDS_CTL_BITS,
+        regDIG0_TMDS_DCBALANCER_CONTROL, regDIG0_TMDS_SYNC_DCBALANCE_CHAR, regDIG0_TMDS_CTL0_1_GEN_CNTL,
+        regDIG0_TMDS_CTL2_3_GEN_CNTL };
+    size_t k;
+    for (k = 0; k < sizeof(rd_clone_hubp) / 2; k++)
+        S.reg[DCN_B2 + rd_clone_hubp[k] + RD_CLONE_HUBP_STRIDE * pipe] = 0;
+    for (k = 0; k < sizeof(rd_clone_dpp) / 2; k++)
+        S.reg[DCN_B2 + rd_clone_dpp[k] + RD_CLONE_DPP_STRIDE * pipe] = 0;
+    for (k = 0; k < sizeof(rd_clone_mpcc) / 2; k++)
+        S.reg[DCN_B3 + rd_clone_mpcc[k] + RD_CLONE_MPCC_STRIDE * mpcc] = 0;
+    for (k = 0; k < sizeof(rd_clone_opp) / 2; k++)
+        S.reg[DCN_B2 + rd_clone_opp[k] + RD_CLONE_OPP_STRIDE * opp] = 0;
+    for (k = 0; k < sizeof(rd_clone_odm) / 2; k++)
+        S.reg[DCN_B2 + rd_clone_odm[k] + RD_CLONE_ODM_STRIDE * otg] = 0;
+    for (k = 0; k < sizeof(rd_clone_otg) / 2; k++)
+        S.reg[DCN_B2 + rd_clone_otg[k] + RD_CLONE_OTG_STRIDE * otg] = 0;
+    for (k = 0; k < sizeof(rd_clone_digfe) / 2; k++)
+        S.reg[DCN_B2 + rd_clone_digfe[k] + RD_CLONE_DIGFE_STRIDE * fe] = 0;
+    for (k = 0; k < sizeof(tmds) / 2; k++)
+        S.reg[DCN_B2 + tmds[k] + RD_CLONE_DIGFE_STRIDE * be] = 0;
+    for (k = regCURSOR0_0_CURSOR_CONTROL; k <= regCURSOR0_0_CURSOR_DST_OFFSET; k++)
+        S.reg[HUBP(k, pipe)] = 0;
+    S.reg[HUBP(regHUBP0_DCHUBP_CNTL, pipe)] = HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK;
+    S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, pipe)] = 0;
+    S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, pipe)] = 0;
+    S.reg[OTG(regOTG0_OTG_CONTROL, otg)] = 0;
+    S.reg[DCN_B2 + regVTG0_CONTROL + otg] = 0;
+    S.reg[DCN_B2 + regODM0_OPTC_DATA_SOURCE_SELECT + RD_CLONE_ODM_STRIDE * otg] = 0;
+    S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL + RD_CLONE_MPCC_STRIDE * mpcc] = 0xf;
+    S.reg[DCN_B3 + regMPCC0_MPCC_BOT_SEL + RD_CLONE_MPCC_STRIDE * mpcc] = 0xf;
+    S.reg[DCN_B3 + regMPCC0_MPCC_OPP_ID + RD_CLONE_MPCC_STRIDE * mpcc] = 0xf;
+    S.reg[DCN_B3 + regMPC_OUT0_MUX + (regMPC_OUT1_MUX - regMPC_OUT0_MUX) * opp] = 0xf;
+    S.reg[DCN_B3 + regMPCC_OGAM0_MPCC_OGAM_CONTROL + 0x5e * mpcc] = 0;
+    S.reg[DCN_B2 + regDIG0_DIG_FE_CNTL + RD_CLONE_DIGFE_STRIDE * fe] = 0;
+    S.reg[DCN_B2 + regDIG0_DIG_BE_CNTL + RD_CLONE_DIGFE_STRIDE * be] = 0;
+    S.reg[DCN_B2 + regDIG0_DIG_BE_EN_CNTL + RD_CLONE_DIGFE_STRIDE * be] = 0;
+    S.reg[DCN_B1 + regOTG0_PIXEL_RATE_CNTL + 4 * otg] = 0;
+    S.reg[DCN_B1 + regDP_DTO0_PHASE + 4 * otg] = 0;
+    S.reg[DCN_B1 + regDP_DTO0_MODULO + 4 * otg] = 0;
+    S.reg[DCN_B1 + regOTG_PIXEL_RATE_DIV] &= ~(7u << (3 * otg));
+    S.reg[DCN_B1 + regDPPCLK0_DTO_PARAM + pipe] = 0;
+    S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] &= ~(3u << (4 * pipe));
+    S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + pipe] = 0;
+    S.reg[DCN_B2 + regDOMAIN0_PG_CONFIG + 2 * pipe] = DOMAIN0_PG_CONFIG__DOMAIN_POWER_GATE_MASK;
+    S.reg[DCN_B2 + regDOMAIN0_PG_STATUS + 2 * pipe] = 2u << DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT;
+}
+
+/* registers of the DCN windows that differ from the snapshot, minus the
+ * DC_IP request the power steps leave behind; the first ones printed */
+static unsigned st_diff(const char *when)
+{
+    static const struct { uint32_t base, len; } win[] = {
+        { DCN_B1, 0x100 }, { DCN_B2 + 0x400, 0x2200 }, { DCN_B3, 0x200 } };
+    unsigned n = 0, w, i;
+    for (w = 0; w < 3; w++)
+        for (i = win[w].base; i < win[w].base + win[w].len; i++) {
+            uint32_t ign = 0, p;
+            for (p = 0; p < RD_DCN_MAX_PIPES; p++)
+                if (i == HUBP(regHUBP0_DCHUBP_CNTL, p))   /* trigger and status bits */
+                    ign = HUBP0_DCHUBP_CNTL__HUBP_UNDERFLOW_CLEAR_MASK | HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ_MASK;
+                else if (i == DCN_B1 + regOTG0_PIXEL_RATE_CNTL + 4 * p)
+                    ign = OTG0_PIXEL_RATE_CNTL__DPDTO0_ENABLE_STATUS_MASK;
+            if (((S.reg[i] ^ st_snap[i]) & ~ign) == 0 || i == DCN_B2 + regDC_IP_REQUEST_CNTL)
+                continue;
+            if (n++ < 8)
+                fprintf(stderr, "dcn32_state %s: reg 0x%x (window +0x%x) 0x%x, was 0x%x\n", when, i,
+                        i - win[w].base, S.reg[i], st_snap[i]);
+        }
+    return n;
+}
+
+static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
+{
+    static rdna3_dcn dc, dp;
+    static rdna3_dcn_state st, stdp;
+    static rdna3_dcn_clone cl;
+    rdna3_display_path own, other;
+    rdna3_dcn_state_check k;
+    uint32_t ctl, i, wm;
+    uint8_t bring_up[4], bring_up_tx[4];
+
+    memset(&st, 0, sizeof(st));   /* run() goes twice */
+    memset(&stdp, 0, sizeof(stdp));
+    memset(&own, 0, sizeof(own));
+    own.transmitter = 1; own.hpd = 0; own.encoder_objid = 0x211e; own.connector_objid = 0x310c;
+    memset(&other, 0, sizeof(other));
+    other.transmitter = 3; other.hpd = 2; other.encoder_objid = 0x2120; other.connector_objid = 0x310c;
+    /* the boot head (pipe 1, OTG 2, DIGC -> UNIPHY B, 1440p) and a clone
+     * of it on UNIPHY D: the clone's DMCUB commands are the bring-up a
+     * restore after a power loss must repeat */
+    CHECK(dcn32_read_state(dev, &dc) == 1 && dc.head[0].pipe == 1);
+    CHECK(dcn32_clone_plan(dev, &dc, 0, &other, 241500, &cl) == RDNA3_OK);
+    S.dmub.nseq = 0;
+    CHECK(dcn32_clone_enable(dev, dm, &cl) == RDNA3_OK && S.dmub.nseq == 4);
+    for (i = 0; i < 4; i++) {
+        bring_up[i] = S.dmub.seq[i];
+        bring_up_tx[i] = S.dmub.seq_tx_action[i];
+    }
+    /* global state the bring-up (hubbub3_init_dchub_sys_ctx, dccg2_init) left */
+    S.reg[DCN_B2 + 0x0475] = 0x80;      /* DCN_VM_FB_LOCATION_BASE */
+    S.reg[DCN_B2 + 0x0476] = 0x83;      /* DCN_VM_FB_LOCATION_TOP */
+    S.reg[DCN_B1 + 0x007b] = 0x120464;  /* MICROSECOND_TIME_BASE_DIV */
+    S.reg[DCN_B3 + regMPCC_OGAM0_MPCC_OGAM_CONTROL + 0x5e * 1] = 2;   /* boot head: OGAM RAM A */
+    CHECK(dcn32_read_state(dev, &dc) == 2 && dc.head[0].pipe == 0 && dc.head[1].pipe == 1);
+    CHECK(dcn32_state_save(dev, &dc, 0, &other, 241500, &st) == RDNA3_OK && st.head[0].tmds);
+    CHECK(dcn32_state_save(dev, &dc, 1, &own, 0, &st) == RDNA3_OK && st.head[1].tmds);
+    CHECK(st.head[1].pclk_khz >= 241400 && st.head[1].pclk_khz <= 241600);   /* from REF_FREQ_TO_PIX_FREQ */
+    CHECK(st.head[0].otg == 1 && st.head[0].fe == 3 && st.head[0].be == 3 && st.head[1].otg == 2 &&
+          st.head[1].opp == 2 && st.head[1].fe == 2 && st.head[1].be == 1 && st.saves == 2);
+    CHECK(dcn32_state_check(dev, &st, 0, 0, &k) == 0 && k.otg_on && k.dig_on && k.ndiff == 0);
+    CHECK(dcn32_state_check(dev, &st, 2, 0, &k) == RDNA3_EINVAL);
+
+    /* 1. monitor standby on the boot head (rdna3dpms=2): blank +
+     * TransmitterControl DISABLE on UNIPHY B, back with ENABLE + unblank;
+     * the OTG keeps running */
+    ctl = S.reg[OTG(regOTG0_OTG_CONTROL, 2)];
+    S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] |= HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ_MASK;
+    S.dmub.nseq = 0;
+    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 0) == RDNA3_OK);
+    CHECK(S.dmub.nseq == 1 && S.dmub.seq[0] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL &&
+          S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE && S.dmub.tx[0] == 1 && S.dmub.tx[2] == 3 &&
+          S.dmub.tx[8] == 1 && S.dmub.tx[9] == 1u << 2 && S.dmub.tx[10] == 0x0c);
+    CHECK((S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) &&
+          !(S.reg[DCN_B2 + regDIG0_DIG_BE_EN_CNTL + RD_CLONE_DIGFE_STRIDE] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK));
+    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 0) == RDNA3_OK && S.dmub.nseq == 1);   /* DIG off: no command */
+    /* a snapshot taken in standby keeps the DIG ids of the last one */
+    dp = dc;
+    dp.head[1].dig_fe = dp.head[1].dig_be = -1;
+    CHECK(dcn32_state_save(dev, &dp, 1, &own, 241500, &st) == RDNA3_OK && st.head[1].tmds &&
+          st.head[1].fe == 2 && st.head[1].be == 1);
+    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 1) == RDNA3_OK);
+    CHECK(S.dmub.nseq == 2 && S.dmub.seq_tx_action[1] == RD_ATOM_TX_ENABLE && S.dmub.tx[4] == (24150 & 0xff));
+    CHECK(!(S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) &&
+          (S.reg[DCN_B2 + regDIG0_DIG_BE_EN_CNTL + RD_CLONE_DIGFE_STRIDE] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK) &&
+          S.reg[OTG(regOTG0_OTG_CONTROL, 2)] == ctl);
+    CHECK(dcn32_head_link(dev, NULL, &dc, &st, 1, 0) == RDNA3_ENODEV);
+    /* a DP head: refused (no link training), the caller keeps it blank */
+    dp = dc;
+    dp.head[1].dig_mode = 0;
+    CHECK(dcn32_state_save(dev, &dp, 1, &own, 241500, &stdp) == RDNA3_OK && !stdp.head[1].tmds);
+    CHECK(dcn32_head_link(dev, dm, &dp, &stdp, 1, 0) == RDNA3_EINVAL);
+    CHECK(dcn32_state_restore(dev, dm, &dp, &stdp, 1, 0, 0) == RDNA3_EINVAL);
+    CHECK(dcn32_state_save(dev, &dc, 1, &own, 241500, &st) == RDNA3_OK);
+    memcpy(st_snap, S.reg, sizeof(st_snap));
+
+    /* 2. system sleep without a power loss: both streams down
+     * (amdgpu_dm_commit_zero_streams), then the snapshot back */
+    S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 0)] |= HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ_MASK;
+    wm = S.reg[DCN_B2 + 0x04fe];
+    S.reg[DCN_B2 + 0x04fe] = 0x1234;   /* a watermark set after the snapshot: the sleep keeps it */
+    memcpy(st_snap, S.reg, sizeof(st_snap));
+    S.dmub.nseq = 0;
+    CHECK(dcn32_state_head_off(dev, dm, &dc, &st, 0) == RDNA3_OK && dcn32_state_head_off(dev, dm, &dc, &st, 1) == RDNA3_OK);
+    CHECK(S.dmub.nseq == 4 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE &&
+          S.dmub.seq[1] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.seq_tx_action[2] == RD_ATOM_TX_DISABLE &&
+          S.dmub.seq[3] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.pixclk[0] == 0);
+    CHECK(dcn32_read_state(dev, &dp) == 0);
+    CHECK(dcn32_state_check(dev, &st, 1, 0, &k) == 1 && !k.otg_on && k.blanked && !k.dig_on && k.powered);
+    S.dmub.nseq = 0;
+    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0) == RDNA3_OK &&
+          dcn32_state_restore(dev, dm, &dc, &st, 1, 0, 0) == RDNA3_OK);
+    /* per head: pixel clock, stream setup, enable (the PHY kept its setup) */
+    CHECK(S.dmub.nseq == 6);
+    for (i = 0; i < 6; i += 3)
+        CHECK(S.dmub.seq[i] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.seq[i + 1] == RD_DMUB_VBIOS_DIGX_ENCODER_CONTROL &&
+              S.dmub.seq[i + 2] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && S.dmub.seq_tx_action[i + 2] == RD_ATOM_TX_ENABLE);
+    CHECK(S.dmub.pixclk[0] == (2415000 & 0xff) && S.dmub.pixclk[4] == RD_ATOM_COMBOPHY_PLL0 + 1 && S.dmub.pixclk[8] == 2);
+    CHECK(st_diff("after sleep") == 0 && st.restores == 2);
+    S.dcn_frames = 1;
+    CHECK(dcn32_state_check(dev, &st, 1, 50, &k) == 0 && k.frames > 0 && !k.blanked && k.dig_on);
+    S.dcn_frames = 0;
+    S.reg[DCN_B2 + 0x04fe] = wm;
+
+    /* 3. a power loss (mode-1 reset, S3): both heads and the global state
+     * wiped; the restore repeats the clone's bring-up per head */
+    memcpy(st_snap, S.reg, sizeof(st_snap));
+    st_wipe(0, 1, 1, 0, 3, 3);
+    st_wipe(1, 2, 2, 1, 2, 1);
+    S.reg[DCN_B2 + 0x0475] = S.reg[DCN_B2 + 0x0476] = 0;
+    S.reg[DCN_B1 + 0x007b] = 0;
+    CHECK(dcn32_read_state(dev, &dp) == 0);
+    CHECK(dcn32_state_check(dev, &st, 0, 0, &k) == 1 && !k.powered && !k.sys_ok && !k.routed && k.ndiff > 100);
+    /* the clocks can no longer carry the head: refused (no clock manager) */
+    S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x7f;
+    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0) == RDNA3_EBUSY);
+    S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x18;
+    CHECK(dcn32_state_restore(dev, NULL, &dc, &st, 0, 0, 0) == RDNA3_ENODEV);
+    i = S.dcn_gated_drops;
+    S.dmub.nseq = 0;
+    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0) == RDNA3_OK &&
+          dcn32_state_restore(dev, dm, &dc, &st, 1, 0, 0) == RDNA3_OK);
+    CHECK(S.dcn_gated_drops == i && S.dcn_pg_no_request == 0);   /* powered before the writes */
+    CHECK(S.dmub.nseq == 8);
+    for (i = 0; i < 8; i++)
+        CHECK(S.dmub.seq[i] == bring_up[i % 4] &&
+              (bring_up[i % 4] != RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL || S.dmub.seq_tx_action[i] == bring_up_tx[i % 4]));
+    /* the gamma LUT RAMs did not survive: output gamma of the boot head
+     * and the degamma the GOP left on its DPP go to bypass */
+    CHECK(S.reg[DCN_B3 + regMPCC_OGAM0_MPCC_OGAM_CONTROL + 0x5e * 1] == 0 &&
+          S.reg[DCN_B2 + regCM0_CM_GAMCOR_CONTROL + RD_CLONE_DPP_STRIDE] == 0);
+    S.reg[DCN_B3 + regMPCC_OGAM0_MPCC_OGAM_CONTROL + 0x5e * 1] = 2;
+    S.reg[DCN_B2 + regCM0_CM_GAMCOR_CONTROL + RD_CLONE_DPP_STRIDE] = 1;
+    CHECK(st_diff("after power loss") == 0);
+    CHECK(dcn32_read_state(dev, &dp) == 2 && dp.head[1].h_active == 2560 && dp.head[1].dig_be == 1 &&
+          dp.head[0].dig_be == 3 && dp.head[0].address == dp.head[1].address);
+    S.dcn_frames = 1;
+    CHECK(dcn32_state_check(dev, &st, 0, 50, &k) == 0 && dcn32_state_check(dev, &st, 1, 50, &k) == 0);
+    S.dcn_frames = 0;
+    /* restore into display sleep with the monitor in standby: no ENABLE */
+    st_wipe(1, 2, 2, 1, 2, 1);
+    S.dmub.nseq = 0;
+    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 1, 1, 1) == RDNA3_OK && S.dmub.nseq == 3 &&
+          S.dmub.seq_tx_action[2] == RD_ATOM_TX_INIT);
+    CHECK((S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) &&
+          (S.reg[OTG(regOTG0_OTG_CONTROL, 2)] & 1));
+    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 1) == RDNA3_OK && S.dmub.nseq == 4 &&
+          S.dmub.seq_tx_action[3] == RD_ATOM_TX_ENABLE);
+
+    /* leave the GOP's single head, as the tests after this expect */
+    CHECK(dcn32_clone_disable(dev, dm, &cl) == RDNA3_OK);
+    dcn32_state_drop(&st, 0);
+    CHECK(dcn32_state_check(dev, &st, 0, 0, &k) == RDNA3_EINVAL);
+    S.reg[DCN_B2 + 0x0475] = S.reg[DCN_B2 + 0x0476] = 0;
+    S.reg[DCN_B1 + 0x007b] = 0;
+    S.reg[DCN_B3 + regMPCC_OGAM0_MPCC_OGAM_CONTROL + 0x5e * 1] = 0;
+    CHECK(dcn32_read_state(dev, &dc) == 1 && dc.head[0].pipe == 1);
+}
+
 /* ---------------------------- test ---------------------------- */
 
 /* output gamma (hw/dcn32_gamma.c) on the two heads the clone test leaves:
@@ -4983,6 +5221,7 @@ static void run(const char *fwdir)
                     S.dcn_frames = 0;
                 }
             }
+            test_dcn_state(&dev, &dm);
             S.dcn_pg = 0;
         }
         /* attach (rdna3dmub=3): no reset, no load, the running firmware's

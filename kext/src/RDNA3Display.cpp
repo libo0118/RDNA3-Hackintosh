@@ -114,6 +114,7 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     displayReadVbios();
     displayProbeConnectors();
     displayPublishRoutes();
+    displayStateSaveAll();   /* D4: what a reset or a sleep must bring back */
     fHotplugCall = thread_call_allocate((thread_call_func_t)displayHotplugWork, this);
     hotplugInit();   /* rdna3hotplug=1: RDNA3Hotplug.cpp polls and handles */
     return true;
@@ -576,6 +577,7 @@ void RDNA3Accel::displayAddCloneHead()
         fDcn->head[fCloneHead] = all->head[i];
         fDcn->requested[all->head[i].pipe] = all->head[i].address;
         fDcn->nheads++;
+        displayStateSave((uint32_t)fCloneHead);   /* D4 */
         break;
     }
     IOFree(all, sizeof(*all));
@@ -871,11 +873,15 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
         return kIOReturnNotReady;
     IOLockLock(fDispLock);
     int r;
+    displayNoteBlank(head, blank);   /* D4: what a restore brings back */
     /* rdna3dpms=2: the head we lit ourselves also takes its link down, so
      * the monitor goes to standby (dcn32_clone_link) */
-    if (wanted == 2 && fMirrorOn && fMirror && fMirrorDm && fCloneHead >= 0 && (uint32_t)fCloneHead == head)
+    if (fDispAsleep)
+        r = RDNA3_OK;   /* D4: the wake work applies it */
+    else if (wanted == 2 && fMirrorOn && fMirror && fMirrorDm && fCloneHead >= 0 && (uint32_t)fCloneHead == head)
         r = dcn32_clone_link(fDispDev, fMirrorDm, fMirror, blank ? 0 : 1);
-    else
+    /* D4: the other TMDS heads too (dcn32_head_link); DP keeps the blank */
+    else if (wanted != 2 || (r = displayHeadDpms(head, blank)) == RDNA3_EINVAL)
         r = dcn32_set_blank(fDispDev, fDcn, head, blank ? 1 : 0);
     IOLockUnlock(fDispLock);
     LOG("display: head %u %s (%d)", head, blank ? "blanked (display sleep)" : "unblanked", r);
@@ -900,6 +906,8 @@ IOReturn RDNA3Accel::displaySetSource(RD3KDisplaySource *s)
     int r = fScale ? dcn32_set_source(fDispDev, fDcn, fScale, s->head, fDispDev->fb_start + s->vramOffset,
                                       s->width, s->height, s->pitch / 4)
                    : RDNA3_ENOMEM;
+    if (r == RDNA3_OK)
+        displayStateSave(s->head);   /* D4 */
     IOLockUnlock(fDispLock);
     s->result = r;
     LOG("display: head %u source %ux%u pitch %u -> %d", s->head, s->width, s->height, s->pitch, r);
@@ -1058,8 +1066,10 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
                                 fDispDev->fb_start + m->oldVramOffset, m->oldPitch / 4, 200);
     else
         r = RDNA3_EINVAL;
-    if (r == RDNA3_OK)
+    if (r == RDNA3_OK) {
         fDispRefresh[m->head] = want->refresh_mhz;
+        displayStateSave(m->head);   /* D4 */
+    }
     rdna3_dcn_clocks ck;
     dcn32_clk_read(fDispDev, &ck);   /* raised or not: the report sees them */
     IOLockUnlock(fDispLock);
@@ -1125,8 +1135,11 @@ IOReturn RDNA3Accel::displayCursor(RD3KDisplayCursor *c)
         return kIOReturnNotReady;
     int r = RDNA3_EINVAL;
     IOLockLock(fDispLock);
-    if (c->op == RD3K_CURSOR_OP_IMAGE)
+    if (c->op == RD3K_CURSOR_OP_IMAGE) {
         r = dcn32_cursor_set_image(fDispDev, fDcn, c->head, fDispDev->fb_start + c->vramOffset, c->size);
+        if (r == RDNA3_OK)
+            displayStateSave(c->head);   /* D4 */
+    }
     else if (c->op == RD3K_CURSOR_OP_MOVE)
         r = dcn32_cursor_set_position(fDispDev, fDcn, c->head, c->x, c->y, c->visible != 0);
     IOLockUnlock(fDispLock);

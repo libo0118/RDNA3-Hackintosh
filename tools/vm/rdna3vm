@@ -442,9 +442,9 @@ launch() {   # launch "rdna3 args" stay(0/1)
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 metal modeset modeset2 hotplug gamma default hanggfx"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 metal modeset modeset2 hotplug gamma default hanggfx sleep"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 metal modeset modeset2 hotplug gamma default hanggfx off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 metal modeset modeset2 hotplug gamma default hanggfx sleep off)"
     launch "$a" "$stay"
 }
 
@@ -482,7 +482,7 @@ QUEUE=$WORK/queue
 # every swap refused (no head named). From now on ONE big step per round:
 # "big" = everything at once, the accelerator tries its head strategies
 # itself and logs which one worked
-PENDING_STEPS="modeset modeset2 gamma hotplug"
+PENDING_STEPS="modeset modeset2 gamma sleep hotplug"
 
 cmd_queue() {
     load_conf
@@ -654,6 +654,8 @@ cmd__passthrough() {
 
     qemu_common
     QARGS+=(-vga none -display none -serial "file:$WORK/reports/serial-$stamp.log")
+    # step sleep (rdna3resume=1): the guest may suspend to RAM (pmset sleepnow)
+    case " $RDNA3VM_BOOTARGS " in *" rdna3resume=1 "*) QARGS+=(-global ICH9-LPC.disable_s3=0) ;; esac
     slot=${bdf%.*}; i=1; rp=0
     # GPU_BUS=pcie0 (default, as OSX-KVM's boot-passthrough.sh): directly on
     # the root bus (00:10.x). rootport: behind a pcie-root-port; macOS leaves
@@ -757,6 +759,25 @@ cmd__passthrough() {
           echo "== guest PCI bus (QEMU 'info pci', $t s after start)"
           $VMTOOL monitor "$mon" "info pci" 2>&1 | sed 's/^/  /'
       done; } &
+    # step sleep: the guest wakes on its RTC alarm (pmset relative wake 30);
+    # still suspended after 90 s, QEMU's system_wakeup brings it back
+    case " $RDNA3VM_BOOTARGS " in
+        *" rdna3resume=1 "*)
+            { local n=0
+              while kill -0 $qpid 2>/dev/null; do
+                  sleep 30
+                  if $VMTOOL monitor "$mon" "info status" 2>/dev/null | grep -q suspended; then
+                      n=$((n + 1))
+                      if [ $n -ge 3 ]; then
+                          echo "== the guest is still suspended after 90 s: system_wakeup"
+                          $VMTOOL monitor "$mon" "system_wakeup" 2>&1 | sed 's/^/  /'
+                          n=0
+                      fi
+                  else
+                      n=0
+                  fi
+              done; } & ;;
+    esac
     while kill -0 $qpid 2>/dev/null && kill -0 $pk 2>/dev/null && kill -0 $tm 2>/dev/null; do
         wait -n || true
     done

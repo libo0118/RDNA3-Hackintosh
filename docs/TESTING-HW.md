@@ -95,11 +95,15 @@ it together with a description of the symptom. Module details are in `STAGE1`–
 | big | `rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2` | everything at once (one boot instead of ten): DMA/GFX tests, Vulkan, UCLK/FCLK DPM, extended desktop, the desktop composited through the accelerator on both heads | triage: tests PASS, `swap: surface ... -> head 0/1`, `FLIPPED head 0/1`, `LIVE WRITER`; the desktop on both monitors | high: any of the above |
 | 11 | same as 10 | `vulkaninfo --summary` with RADV from `/Library/GPUBundles/rdna3mtl` | device `AMD Radeon RX 7800 XT (RADV NAVI32)` | medium |
 | 12 | same as 10, then `sudo sysctl -w debug.rdna3accelfb=1` | Metal plugin for processes listed in `rdna3mtl-allow.txt` | `mtlprobe` sees the AMD device | high |
+| sleep | step `metal` + `rdna3dpms=2 rdna3resume=1` | display sleep takes the link down on every TMDS monitor (standby, no signal) and back (`hw/dcn32_state.c`); then `pmset relative wake 30; pmset sleepnow`: the heads saved and taken down, on the wake a power loss detected (PCI, `RCC_CONFIG_MEMSIZE`, ASIC_Init flag, PSP sOS) and, if so, the GPU posted and brought up again, the heads restored from the snapshot | `RDNA3,Head<n>,State` (`intact` / `restored (0), running`), `RDNA3,Wake` (what the wake found), `RDNA3,WakeHeadsLost = 0`, `RDNA3,WakeResumeResult = 1` after a power loss; report: `SYSTEM SLEEP: slept and woke, every head back`, the DMA/GFX tests after the wake pass | high: a monitor may stay dark after the wake; the rings may be dead after a power loss |
 
 Sleep: from level 4 on the kext keeps macOS from idle sleep
 (`RDNA3,IdleSleepBlocked = 1`): there is no GPU suspend/resume yet, and
 after a sleep the firmware and the GOP's picture are gone. Do not put the
 machine to sleep by hand during tests; `rdna3sleep=1` lifts the block.
+`rdna3resume=1` (step `sleep`) is the first try at a resume: the display
+state is saved and restored, and a GPU that lost its power is posted and
+brought up again (see `docs/DRIVER-PLAN.md`, D4, for what is missing).
 
 Sensors: once the SMU is up (level 6 and higher) `RDNA3Accel` publishes
 `PerformanceStatistics` every 2 s, with the keys AMD's macOS drivers use

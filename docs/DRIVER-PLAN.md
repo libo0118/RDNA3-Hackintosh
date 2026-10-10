@@ -156,3 +156,53 @@ standby (link off), display restore after a mode-1 GPU reset.
 5. P4/P5 (sleep), R2, R3 (bare metal).
 6. M2 -> M6 iteratively; V2/V3 alongside.
 7. R4, R5; R6 only if everything else holds.
+
+## D4: display state across resets and sleep (2026-10-10, sim/host verified, step `sleep`)
+
+What exists (`hw/dcn32_state.c`, `kext/src/RDNA3Resume.cpp`):
+
+| Piece | amdgpu model | Behind |
+|---|---|---|
+| Snapshot of every lit head: the clone's per-instance register lists, DIG back end TMDS setup, routing, DCCG, DET, cursor, gamma mode, VBIOS ids, pixel clock; global DCHUBBUB system context / arbiter / DCCG part | `dm_suspend`'s cached state | always (reads only) |
+| Check: power, OTG, blank, DIG, timing, system aperture, routing, registers that differ, frames | - | always (reads only) |
+| Restore of a head (also a power-gated pipe with nothing left) in the `dcn32_modeset_apply` / `dcn32_clone_enable` order | `dm_resume` -> `dc_commit_streams` (`dcn20_enable_stream_timing`, `link_set_dpms_on`, `dcn32_hubp_pg_control`, `dcn32_program_det_size`, `dcn10_link_encoder_hw_init`) | `rdna3resume=1` |
+| Monitor standby on any TMDS head (the boot heads too) | `link_set_dpms_off` / `link_set_dpms_on` (`dcn10_link_encoder_disable_output`, `dcn10_link_encoder_enable_tmds_output`) | `rdna3dpms=2` |
+| After a GFX / SDMA soft reset: the heads checked (those resets never touch DCN) | - | always |
+| After the mode-1 reset: the heads restored | `amdgpu_device_gpu_recover` -> `dm_resume` | `rdna3resume=1` |
+| System sleep: snapshot, streams down | `amdgpu_dm_commit_zero_streams` | `rdna3resume=1` (snapshot always) |
+| Wake: power loss detected (PCI config, `RCC_CONFIG_MEMSIZE`, BIOS scratch 7 ASIC_INIT_COMPLETE, PSP sOS, heads), published as `RDNA3,Wake*` | `amdgpu_device_need_post` | always |
+| Wake after a power loss: `resetIfPspStuck` (a VM wake comes with a bus reset), ASIC_Init, the whole `hwInit()` again (PSP, firmware, SMU/PM, DMCUB, GMC, IH, SDMA, GFX, MES), then the heads restored | `amdgpu_device_resume` -> `amdgpu_device_asic_init`, `amdgpu_device_ip_resume` | `rdna3resume=1` |
+
+The S3 gap - what a full resume still lacks, in the order it will bite:
+
+1. **Suspend side.** Nothing of `amdgpu_device_suspend` /
+   `amdgpu_device_ip_suspend_phase1/2` runs: the rings are not stopped, the
+   PMFW gets no `PrepareMp1ForUnload` (`smu_v13_0_0` `set_mp1_state`), the
+   PSP ring is not destroyed, IH and interrupts stay on. On S3 the card
+   loses its power anyway; on a sleep where it keeps it (S0ix, a VM
+   without a device reset) the engines just stay as they were.
+2. **VRAM contents.** amdgpu evicts every VRAM BO to system memory before
+   the sleep (`amdgpu_device_evict_resources`) and moves them back; here
+   VRAM is simply lost: user BOs, the accelerator's and the framebuffer's
+   surfaces (black until WindowServer redraws), and the **GPUVM page-table
+   pool** - live VMs get their MMHUB/GFXHUB contexts back from `fVmPd` but
+   the tables behind them are garbage, so old contexts fault (clients see
+   VRAM lost). Needs: eviction of the PT pool (or a rebuild from each VM's
+   mapping list) and of the scanout surfaces, through SDMA to GTT.
+3. **Display init.** `dcn32_init_hw` is not ported: the clock manager
+   (`dcn32_init_clocks`, `dcn32_update_clocks`: DISPCLK / DPPCLK / DCFCLK
+   hard minimums through the DAL mailbox) - the restore refuses a head the
+   clocks no longer carry (`restored (-16)`); DIO / PHY init of the unused
+   links; the replay of the saved DCHUBBUB / DCCG globals stands in for
+   `hubbub32_init`, `dccg32_init` and `hubbub3_init_dchub_sys_ctx`.
+4. **Lost display contents.** The gamma / degamma LUT RAMs (a restore after
+   a power loss sets them to bypass; the gamma code must load its table
+   again), the VPG infoframe contents (infoframes off, as after a mode set),
+   HDMI audio.
+5. **DMCUB.** Only `rdna3dmub=1` (our own load through the PSP) survives a
+   power loss; `rdna3dmub=3` attaches to the GOP's firmware, which is gone.
+6. **DP heads.** Neither standby nor restore (no link training).
+7. **Ordering with macOS.** The wake work runs on a thread call after
+   `setPowerState(1)`; framebuffer power requests that arrive earlier are
+   recorded and applied afterwards. Nothing yet tells IOFramebuffer that
+   its VRAM contents are gone.
