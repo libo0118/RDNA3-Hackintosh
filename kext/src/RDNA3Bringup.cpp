@@ -134,9 +134,35 @@ void RDNA3Bringup::stopAndFree()
             IOLockSleep(fLock, &fFinished, THREAD_UNINT);
         IOLockUnlock(fLock);
     }
+    /* 1. the second monitor goes while its DMCUB and the BAR still work */
+    if (fDmub)
+        fOwner->displayMirrorOff(fDmub);
     teardownInterrupt();   /* no handler may touch fIh / the rings past here */
+
+    /* 2. the engines, in gfx_v11_0_hw_fini order, while fDev, the BAR and
+     *    the doorbells are still mapped */
+    if (fKcq && fKcq->rb.ready && fDev)
+        gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
+    if (fGfx && fGfx->async && fGfx->ready && fDev) {
+        gfx11_set_eop_interrupt(fDev, fGfx, 0);
+        gfx11_kgq_stop(fDev, fKiq, fGfx);   /* unmapped while the KIQ still runs */
+    }
+    if (fKiq && fDev)
+        gfx11_mec_stop(fDev, fKiq, fKcq, fMes);
+    if (fGfx && fGfx->ready && fDev) {
+        gfx11_set_eop_interrupt(fDev, fGfx, 0);
+        gfx11_cp_gfx_enable(fDev, 0);
+    }
+    if (fSdma && fSdma->ready && fDev) {
+        sdma60_set_trap_interrupt(fDev, fSdma, 0);
+        sdma60_stop(fDev, fSdma);
+    }
+    if (fIh && fIh->enabled && fDev)
+        ih60_disable(fDev, fIh);
     if (fPsp && fPsp->ring_created)
         psp13_ring_stop(fPsp);
+
+    /* 3. memory: mappings, firmware, state; fDev last */
     OSSafeReleaseNULL(fVram);
     OSSafeReleaseNULL(fDoorbell);
     for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)
@@ -145,46 +171,25 @@ void RDNA3Bringup::stopAndFree()
     if (fSos.data)
         IOFree(fSos.data, fSos.len);
     if (fSmu) IOFree(fSmu, sizeof(*fSmu));
-    if (fDmub) {
-        fOwner->displayMirrorOff(fDmub);
-        IOFree(fDmub, sizeof(*fDmub));
-    }
+    if (fDmub) IOFree(fDmub, sizeof(*fDmub));
+    fDmub = nullptr;
     if (fRom) IOFree(fRom, RD_VBIOS_MAX_LEN);
-    if (fDisc) IOFree(fDisc, sizeof(*fDisc));
-    if (fDev) IOFree(fDev, sizeof(*fDev));
-    if (fPsp) IOFree(fPsp, sizeof(*fPsp));
-    if (fPlan) IOFree(fPlan, sizeof(*fPlan));
     fVmReady = false;
     if (fPtPool) IOFree(fPtPool, sizeof(*fPtPool));
     fPtPool = nullptr;
-    if (fKcq && fKcq->rb.ready && fDev)
-        gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
-    if (fGfx && fGfx->async && fGfx->ready && fDev) {
-        gfx11_set_eop_interrupt(fDev, fGfx, 0);
-        gfx11_kgq_stop(fDev, fKiq, fGfx);   /* unmapped while the KIQ still runs */
-    }
-    if (fKiq && fDev)
-        gfx11_mec_stop(fDev, fKiq, fKcq, fMes);   /* gfx_v11_0_hw_fini order */
     if (fMes) IOFree(fMes, sizeof(*fMes));
     fMes = nullptr;
     if (fKcq) IOFree(fKcq, sizeof(*fKcq));
     if (fKiq) IOFree(fKiq, sizeof(*fKiq));
     fKcq = nullptr; fKiq = nullptr;
-    if (fGfx) {
-        if (fGfx->ready && fDev) gfx11_set_eop_interrupt(fDev, fGfx, 0);
-        if (fGfx->ready && fDev) gfx11_cp_gfx_enable(fDev, 0);
-        IOFree(fGfx, sizeof(*fGfx));
-    }
-    if (fSdma) {
-        if (fSdma->ready && fDev) sdma60_set_trap_interrupt(fDev, fSdma, 0);
-        if (fSdma->ready && fDev) sdma60_stop(fDev, fSdma);
-        IOFree(fSdma, sizeof(*fSdma));
-    }
-    if (fIh) {
-        if (fIh->enabled && fDev) ih60_disable(fDev, fIh);
-        IOFree(fIh, sizeof(*fIh));
-    }
+    if (fGfx) IOFree(fGfx, sizeof(*fGfx));
+    if (fSdma) IOFree(fSdma, sizeof(*fSdma));
+    if (fIh) IOFree(fIh, sizeof(*fIh));
     if (fGmc) IOFree(fGmc, sizeof(*fGmc));
+    if (fDisc) IOFree(fDisc, sizeof(*fDisc));
+    if (fPsp) IOFree(fPsp, sizeof(*fPsp));
+    if (fPlan) IOFree(fPlan, sizeof(*fPlan));
+    if (fDev) IOFree(fDev, sizeof(*fDev));
     if (fLock) IOLockFree(fLock);
     if (fIhLock) IOLockFree(fIhLock);
     fIhLock = nullptr;

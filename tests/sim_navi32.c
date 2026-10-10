@@ -3763,6 +3763,8 @@ static void run(const char *fwdir)
                 2u | DIG0_DIG_FE_CNTL__DIG_SYMCLK_FE_ON_MASK;
             S.reg[DCN_B2 + regDIG0_TMDS_CTL_BITS + RD_CLONE_DIGFE_STRIDE * 1] = 0x44;
             S.reg[DCN_B1 + regDPPCLK0_DTO_PARAM + 1] = 0x00640032;
+            S.reg[DCN_B2 + regVTG0_CONTROL + 2] = 0x80050003u;   /* GOP's VTG 2: FP2 3, VCOUNT_INIT 5, on */
+            S.reg[DCN_B2 + regVTG0_CONTROL + 1] = 0;
             S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] = 3u << 4;
             S.reg[DCN_B1 + regOTG_PIXEL_RATE_DIV] = 5u << 6;
             S.reg[DCN_B1 + regOTG0_PIXEL_RATE_CNTL + 4 * 2] = OTG0_PIXEL_RATE_CNTL__DPDTO0_ENABLE_STATUS_MASK;
@@ -3819,6 +3821,7 @@ static void run(const char *fwdir)
             CHECK(S.reg[DCN_B2 + regHUBP0_DCHUBP_CNTL] ==
                   (HUBP0_DCHUBP_CNTL__HUBP_TTU_DISABLE_MASK | 1u << HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL__SHIFT));
             CHECK((S.reg[OTG(regOTG0_OTG_CONTROL, 1)] & 1) && ((S.reg[OTG(regOTG0_OTG_CONTROL, 1)] >> 8) & 3) == 2);
+            CHECK(S.reg[DCN_B2 + regVTG0_CONTROL + 1] == 0x80050003u);   /* VTG programmed and enabled */
             CHECK(((S.reg[DCN_B2 + regODM0_OPTC_DATA_SOURCE_SELECT + RD_CLONE_ODM_STRIDE] >> 16) & 0xf) == 1);
             CHECK(S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL] == 0 && S.reg[DCN_B3 + regMPCC0_MPCC_OPP_ID] == 1 &&
                   S.reg[DCN_B3 + regMPCC0_MPCC_BOT_SEL] == 0xf && (S.reg[DCN_B3 + regMPC_OUT1_MUX] & 0xf) == 0);
@@ -3872,7 +3875,10 @@ static void run(const char *fwdir)
                 S.dmub.nseq = 0;
                 CHECK(dcn32_clone_disable(&dev, &dm, &off) == RDNA3_OK);
             }
-            CHECK(S.dmub.nseq == 1 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE);
+            CHECK(S.dmub.nseq == 2 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE &&
+                  S.dmub.seq[1] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.pixclk[0] == 0 && S.dmub.pixclk[2] == 0);
+            CHECK(!(S.reg[DCN_B2 + regVTG0_CONTROL + 1] & VTG0_CONTROL__VTG0_ENABLE_MASK) &&
+                  !(S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] & 3));
             CHECK(dcn32_read_state(&dev, &dc2) == 1 && dc2.head[0].pipe == 1);
             CHECK((S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + 1] & 0x1f) == 8 &&
                   (S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL] & 0x1f) == 0 &&

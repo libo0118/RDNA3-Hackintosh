@@ -292,15 +292,20 @@ static void bo_list_release(rdna3_drm_file *f, uint32_t i)
 
 static int fence_done(rdna3_drm_device *dev, const rdna3_fence *fe);
 
+static void exports_gc(rdna3_drm_device *dev, const struct rdna3_drm_file *closing);
+
 /* user fence BOs whose job finished can go (amdgpu_job_free drops uf_bo) */
 static void uf_reap(rdna3_drm_device *dev, int all)
 {
-    uint32_t i;
+    uint32_t i, dropped = 0;
     for (i = 0; i < RD_MAX_UF_PENDING; i++)
         if (dev->uf_pending[i].bo && (all || fence_done(dev, &dev->uf_pending[i].fence))) {
             bo_put_dev(dev, dev->uf_pending[i].bo);
             dev->uf_pending[i].bo = NULL;
+            dropped++;
         }
+    if (dropped && !all)
+        exports_gc(dev, NULL);   /* that may have been an export's last other holder */
 }
 
 void rdna3_drm_device_fini(rdna3_drm_device *dev)
@@ -327,7 +332,7 @@ static void va_release(rdna3_drm_file *f, rdna3_va *m)
 
 /* exports nobody can reach any more: the exporter's file is gone (or
  * 'closing' is going) and no file holds the BO, only the export itself */
-static void exports_gc(rdna3_drm_device *dev, const rdna3_drm_file *closing)
+static void exports_gc(rdna3_drm_device *dev, const struct rdna3_drm_file *closing)
 {
     uint32_t i;
     for (i = 0; i < RD_MAX_EXPORTS; i++) {

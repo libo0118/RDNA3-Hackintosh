@@ -33,6 +33,7 @@
 #define PG_S    (regDOMAIN1_PG_CONFIG - regDOMAIN0_PG_CONFIG)
 #define PRC_S   (regOTG1_PIXEL_RATE_CNTL - regOTG0_PIXEL_RATE_CNTL)    /* DCCG per OTG */
 #define DPPDTO_S (regDPPCLK1_DTO_PARAM - regDPPCLK0_DTO_PARAM)
+#define VTG_S   (regVTG1_CONTROL - regVTG0_CONTROL)
 #define NDIG    5          /* DIGA..DIGE / UNIPHY A..E */
 #define MPCC_NONE 0xfu
 
@@ -367,7 +368,11 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
     WI(d, regODM0_OPTC_DATA_SOURCE_SELECT, c->dst_otg, ODM_S,
        SET(v, ODM0_OPTC_DATA_SOURCE_SELECT, OPTC_SEG0_SRC_SEL, c->dst_opp));
     COPY(d, opp, OPP, c->src_opp, c->dst_opp);
-    /* optc32_enable_crtc */
+    /* optc1_program_timing: the VTG's FP2 / VCOUNT_INIT; optc32_enable_crtc:
+     * "VTG enable first is for HW workaround", then the master enable */
+    v = RI(d, regVTG0_CONTROL, c->src_otg, VTG_S);
+    WI(d, regVTG0_CONTROL, c->dst_otg, VTG_S, SET(v, VTG0_CONTROL, VTG0_ENABLE, 0));
+    WI(d, regVTG0_CONTROL, c->dst_otg, VTG_S, SET(v, VTG0_CONTROL, VTG0_ENABLE, 1));
     WI(d, regOTG0_OTG_CONTROL, c->dst_otg, OTG_S,
        SET(SET(otgc, OTG0_OTG_CONTROL, OTG_DISABLE_POINT_CNTL, 2), OTG0_OTG_CONTROL, OTG_MASTER_EN, 1));
 
@@ -396,12 +401,10 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
     v = RI(d, regMPC_OUT0_MUX, c->dst_opp, MUX_S);
     WI(d, regMPC_OUT0_MUX, c->dst_opp, MUX_S, SET(v, MPC_OUT0_MUX, MPC_OUT_MUX, c->dst_mpcc));
 
-    /* 4. stream encoder (DIG front end): the source's HDMI setup, no
-     * infoframes or audio, sourcing the new OTG; then STREAM_SETUP */
-    COPY(d, digfe, DIGFE, (uint32_t)c->src_fe, c->dst_fe);
-    WI(d, regDIG0_HDMI_INFOFRAME_CONTROL0, c->dst_fe, DIG_S, 0);
-    WI(d, regDIG0_HDMI_INFOFRAME_CONTROL1, c->dst_fe, DIG_S, 0);
-    WI(d, regDIG0_HDMI_GENERIC_PACKET_CONTROL0, c->dst_fe, DIG_S, 0);
+    /* 4. stream encoder (DIG front end): connected to the new OTG
+     * (enc1_dig_connect_to_otg), then STREAM_SETUP, then - as
+     * enc3_stream_encoder_hdmi_set_stream_attribute after its VBIOS call -
+     * the source's HDMI registers, without infoframes or audio */
     v = RI(d, regDIG0_DIG_FE_CNTL, (uint32_t)c->src_fe, DIG_S);
     WI(d, regDIG0_DIG_FE_CNTL, c->dst_fe, DIG_S, SET(v, DIG0_DIG_FE_CNTL, DIG_SOURCE_SELECT, c->dst_otg));
     {
@@ -418,6 +421,10 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
             goto fail;
         }
     }
+    COPY(d, digfe, DIGFE, (uint32_t)c->src_fe, c->dst_fe);
+    WI(d, regDIG0_HDMI_INFOFRAME_CONTROL0, c->dst_fe, DIG_S, 0);
+    WI(d, regDIG0_HDMI_INFOFRAME_CONTROL1, c->dst_fe, DIG_S, 0);
+    WI(d, regDIG0_HDMI_GENERIC_PACKET_CONTROL0, c->dst_fe, DIG_S, 0);
 
     /* 5. link encoder: TMDS setup of the source's back end, DIG mode,
      * front end select, then the transmitter */
@@ -468,6 +475,12 @@ int dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
     v = RI(d, regOTG0_OTG_CONTROL, c->dst_otg, OTG_S);
     v = SET(v, OTG0_OTG_CONTROL, OTG_DISABLE_POINT_CNTL, 0);
     WI(d, regOTG0_OTG_CONTROL, c->dst_otg, OTG_S, SET(v, OTG0_OTG_CONTROL, OTG_MASTER_EN, 0));
+    /* optc32_disable_crtc: the VTG goes with the OTG */
+    v = RI(d, regVTG0_CONTROL, c->dst_otg, VTG_S);
+    WI(d, regVTG0_CONTROL, c->dst_otg, VTG_S, SET(v, VTG0_CONTROL, VTG0_ENABLE, 0));
+    /* dce110_clock_source_power_down: SetPixelClock with 0 stops the PHY PLL */
+    if (dm && dm->hw_init)
+        vbios_pixel_clock(dm, c, 0);
     v = RI(d, regMPC_OUT0_MUX, c->dst_opp, MUX_S);
     WI(d, regMPC_OUT0_MUX, c->dst_opp, MUX_S, SET(v, MPC_OUT0_MUX, MPC_OUT_MUX, MPCC_NONE));
     WI(d, regMPCC0_MPCC_TOP_SEL, c->dst_mpcc, MPCC_S, MPCC_NONE);
@@ -476,6 +489,14 @@ int dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
     if (c->det_dst_new != c->det_dst &&
         GET(RI(d, regDCHUBBUB_DET0_CTRL, c->dst_pipe, DET_S), DCHUBBUB_DET0_CTRL, DET0_SIZE) != c->det_dst)
         det_program(d, c->dst_pipe, c->det_dst, c->src_pipe, c->det_src);
+    /* dcn20_plane_atomic_disable: HUBP and DPP clocks off, the DPP DTO
+     * disabled, then the power gate */
+    v = RI(d, regHUBP0_HUBP_CLK_CNTL, c->dst_pipe, HUBP_S);
+    WI(d, regHUBP0_HUBP_CLK_CNTL, c->dst_pipe, HUBP_S, SET(v, HUBP0_HUBP_CLK_CNTL, HUBP_CLOCK_ENABLE, 0));
+    v = RI(d, regDPP_TOP0_DPP_CONTROL, c->dst_pipe, DPP_S);
+    WI(d, regDPP_TOP0_DPP_CONTROL, c->dst_pipe, DPP_S, SET(v, DPP_TOP0_DPP_CONTROL, DPP_CLOCK_ENABLE, 0));
+    v = RI(d, regDPPCLK_DTO_CTRL, 0, 0);
+    WI(d, regDPPCLK_DTO_CTRL, 0, 0, v & ~(3u << (4 * c->dst_pipe)));
     pipe_power(d, c->dst_pipe, 0);
     RLOG(d, "clone: pipe %u off (transmitter %u: %d)", c->dst_pipe, c->dst_be, ret);
     return ret;
