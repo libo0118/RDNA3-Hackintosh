@@ -193,11 +193,13 @@ new kexts, and the **Allow** button appears in the same place.
 rdna3vm queue pending
 ```
 
-runs the steps still waiting for the card (`8 8o 9b 9c`)
-one after the other: each one boots macOS, sends its report and shuts
-down, the desktop comes back for a moment, then the next one starts
-(about 5 minutes a step, 40 in all; both monitors connected). You can
-also name the steps yourself: `rdna3vm queue 5b 8c 9`.
+runs the step(s) still waiting for the card - since round 16 one big
+step (`big2`): macOS boots once and the report itself runs everything
+(DMA/GFX/Vulkan tests, the idle-power experiment, three looks at what
+each monitor shows, display sleep and wake, a switch through scaled
+modes, a 2-minute soak, the hang test last), then shuts down. About 12
+minutes, nobody needs to watch the screens; both monitors connected.
+You can also name steps yourself: `rdna3vm queue 5b 8c 9`.
 The [emergency exit](#emergency-exit) stops the VM **and** the rest of
 the queue. If the computer reboots on the way (amdgpu could not take the
 card back), log in and run `rdna3vm queue` without steps: it goes on

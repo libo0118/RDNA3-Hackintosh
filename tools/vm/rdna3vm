@@ -385,6 +385,16 @@ cmd_window() {
 }
 
 # ------------------------------------------------------- ladder / passthrough
+# minutes an automatic step may run: the config's AUTO_TIMEOUT_MIN, more for
+# the big steps (looks, mode switches, soak, hang test: ~10 min + the soak)
+auto_limit() {
+    local m=${AUTO_TIMEOUT_MIN:-8} soak
+    soak=$(printf '%s\n' $1 | sed -n 's/^rdna3soak=\([0-9]*\)$/\1/p' | head -1)
+    case " $1 " in *" rdna3modes=1 "*|*" rdna3hangtest=1 "*|*" rdna3dpms=1 "*) [ "$m" -lt 12 ] && m=12 ;; esac
+    [ -n "$soak" ] && m=$((m + soak))
+    echo "$m"
+}
+
 step_args() {   # the rdna3 boot-args of a ladder step (tools/ladder-steps.txt)
     awk -v n="$1" '$1 == n { $1 = ""; sub(/^ +/, ""); print; f = 1 } END { exit !f }' \
         "$ROOT/tools/ladder-steps.txt"
@@ -400,7 +410,7 @@ launch() {   # launch "rdna3 args" stay(0/1)
     # an automatic step is done in ~3 min; a stuck one should not keep the
     # screen dark for long. --stay keeps TIMEOUT_MIN.
     local limit=$TIMEOUT_MIN
-    [ "$stay" = 1 ] || limit=${AUTO_TIMEOUT_MIN:-8}
+    [ "$stay" = 1 ] || limit=$(auto_limit "$extra")
     mark_run_start
     say "Starting the VM with the card: $extra"
     echo "  The screen goes dark in a moment (Linux hands the card over), then macOS appears."
@@ -422,9 +432,9 @@ launch() {   # launch "rdna3 args" stay(0/1)
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 off)"
     launch "$a" "$stay"
 }
 
@@ -462,7 +472,7 @@ QUEUE=$WORK/queue
 # every swap refused (no head named). From now on ONE big step per round:
 # "big" = everything at once, the accelerator tries its head strategies
 # itself and logs which one worked
-PENDING_STEPS="big"
+PENDING_STEPS="big2"
 
 cmd_queue() {
     load_conf
@@ -497,7 +507,7 @@ cmd__queue() {
         echo "== queue: step $n ($a), left: $(tr '\n' ' ' < "$QUEUE")"
         rm -f "$WORK/last-run"
         RDNA3VM_BOOTARGS="$BASE_ARGS $DEBUG_ARGS $a rdna3vmauto=1" \
-            RDNA3VM_TIMEOUT="${AUTO_TIMEOUT_MIN:-8}" bash "$SELF" _passthrough || true
+            RDNA3VM_TIMEOUT="$(auto_limit "$a")" bash "$SELF" _passthrough || true
         how=$(cat "$WORK/last-run" 2>/dev/null || echo unknown)
         if [ "$how" = emergency ]; then
             echo "== queue stopped by the emergency exit; left: $(tr '\n' ' ' < "$QUEUE")"
