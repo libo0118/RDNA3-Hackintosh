@@ -401,3 +401,11 @@ names the last phase if the machine hangs. Use it as ground truth:
   activity 100 %. The sample itself reads GC registers (which wakes the
   clock), so it does not prove CGCG never engages; still open.
 
+### Card run 12 (build #91): step 10s
+
+Same black desktop - but the run used the OLD accelerator (`accelerator
+build FAIL 1e8fedbbfc`): the queue's first boot installed the new bundle,
+after `rdna3vm approve` had already run, so nothing was waiting for
+approval yet. autoreport now opens Privacy & Security with a dialog right
+after it installs a new bundle on an interactive boot (approve / window).
+

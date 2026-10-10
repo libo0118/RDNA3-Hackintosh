@@ -70,6 +70,21 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
         updated="kexts updated to the host's new bundle: the framebuffer from it runs from the next boot"
     fi
     rm -rf "$t"
+    # an interactive boot (rdna3vm approve / window, no rdna3vmauto): the new
+    # framebuffer/accelerator wait for "Allow" in Privacy & Security, which
+    # only shows up now - open it for whoever is logged in and say so
+    case " $(nvram boot-args 2>/dev/null | cut -f2-) " in
+        *" rdna3vmauto=1 "*) ;;
+        *)
+            if [ -n "$updated" ]; then
+                u=$(stat -f %Su /dev/console 2>/dev/null)
+                uid=$(id -u "$u" 2>/dev/null)
+                if [ -n "$uid" ] && [ "$u" != root ]; then
+                    launchctl asuser "$uid" sudo -u "$u" open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension" 2>/dev/null
+                    launchctl asuser "$uid" sudo -u "$u" osascript -e 'display dialog "RDNA3: new kexts installed. In Privacy & Security scroll down and click Allow (password), choose Not Now for the restart, then shut down." buttons {"OK"} with title "RDNA3VM approve"' >/dev/null 2>&1 &
+                fi
+            fi ;;
+    esac
 fi
 
 args=$(nvram boot-args 2>/dev/null | cut -f2-)

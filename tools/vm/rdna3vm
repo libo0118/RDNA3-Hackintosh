@@ -427,12 +427,14 @@ cmd_step() {
 # only after the user allowed the new (ad-hoc signed) build in System
 # Settings; OpenCore cannot inject them (they link IOGraphicsFamily)
 cmd_approve() {
-    say "Allowing the new framebuffer build in macOS (once per build)"
-    echo "  macOS starts and stays up. In macOS:"
-    echo "    1. System Settings -> Privacy & Security, scroll down"
-    echo "    2. 'System software from developer ... was blocked' -> Allow (password)"
-    echo "    3. when it asks to restart: choose Not Now, then Apple menu -> Shut Down"
-    echo "  No 'Allow' button? Then this build is allowed already: just shut down."
+    say "Allowing the new framebuffer/accelerator build in macOS (once per build)"
+    echo "  macOS starts and stays up. Wait ~2 minutes after the desktop appears:"
+    echo "  the new kexts are installed then, and Privacy & Security opens by itself"
+    echo "  with a dialog. Then:"
+    echo "    1. scroll down: 'System software from developer ... was blocked' -> Allow (password)"
+    echo "    2. when it asks to restart: choose Not Now, then Apple menu -> Shut Down"
+    echo "  No dialog after 3 minutes? The bundle was already installed: check Privacy &"
+    echo "  Security yourself; no 'Allow' button there = already allowed, just shut down."
     launch "$(step_args 0)" 1
 }
 
