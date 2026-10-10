@@ -7,7 +7,9 @@
  * dml32_CalculateVUpdateAndDynamicMetadataParameters and the VStartup /
  * MIN_DST_Y_NEXT_START part of dml32 ModeSupportAndSystemConfiguration;
  * with clock limits, dml32_CalculateRequiredDispclk / dml32_CalculateDPPCLK
- * and the raise half of dcn32_update_clocks (hw/dcn32_clk.c).
+ * and the raise half of dcn32_update_clocks (hw/dcn32_clk.c). DP SST
+ * heads: dce110_apply_single_controller_ctx_to_hw's order (pixel clock,
+ * timing, OTG on, then link_set_dpms_on), the link through hw/dcn32_dp.c.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -18,6 +20,7 @@
 #include "gen/dcn_3_2_0_clone.h"
 #include "gen/dcn_3_2_0_scale.h"
 #include "gen/dcn_3_2_0_mode.h"
+#include "gen/dcn_3_2_0_dp.h"
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -146,6 +149,32 @@ int dcn32_modeset_plan_clk(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, con
                            uint32_t cur_pclk_khz, const rdna3_mode *m, const rdna3_dcn_clk_limits *lim,
                            rdna3_dcn_modeset *ms)
 {
+    return dcn32_modeset_plan_dp(d, dc, head, path, NULL, cur_pclk_khz, m, lim, ms);
+}
+
+/* the running timing of head 'h' at 'pclk_khz' as a mode (MSA, link settings) */
+static void head_mode(const rdna3_dcn_head *h, uint32_t pclk_khz, rdna3_mode *m)
+{
+    uint32_t i;
+    for (i = 0; i < sizeof(*m); i++)
+        ((uint8_t *)m)[i] = 0;
+    m->h_active = h->h_active;
+    m->v_active = h->v_active;
+    m->h_total = h->h_total;
+    m->v_total = h->v_total;
+    m->h_front = h->h_front;
+    m->h_sync = h->h_sync;
+    m->v_front = h->v_front;
+    m->v_sync = h->v_sync;
+    m->h_sync_pos = h->h_sync_neg ? 0 : 1;
+    m->v_sync_pos = h->v_sync_neg ? 0 : 1;
+    m->pixel_khz = pclk_khz;
+}
+
+int dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
+                          rdna3_dp_link *dp, uint32_t cur_pclk_khz, const rdna3_mode *m,
+                          const rdna3_dcn_clk_limits *lim, rdna3_dcn_modeset *ms)
+{
     const rdna3_dcn_head *h;
     rdna3_otg_timing t;
     rdna3_modeset_regs *c, *w;
@@ -159,14 +188,30 @@ int dcn32_modeset_plan_clk(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, con
     h = &dc->head[head];
     for (i = 0; i < sizeof(*ms); i++)
         ((uint8_t *)ms)[i] = 0;
-    if (h->dig_fe < 0 || h->dig_be < 0 || (h->dig_mode != 2 && h->dig_mode != 3))
+    if (h->dig_fe < 0 || h->dig_be < 0 || (h->dig_mode != 2 && h->dig_mode != 3 && !(h->dig_mode == 0 && dp)))
         return RD_MODESET_NOT_TMDS;
     if (!m->pixel_khz || !m->h_total || !m->v_total)
         return RD_MODESET_NO_TIMING;
     if (m->interlaced)
         return RD_MODESET_INTERLACED;
-    if (m->pixel_khz > 340000)
+    if (h->dig_mode != 0 && m->pixel_khz > 340000)
         return RD_MODESET_TMDS_CLOCK;
+    if (h->dig_mode == 0) {
+        rdna3_dp_link_settings ls;
+        uint32_t ppc;
+        if (!dp->caps_valid || dp->be != (uint32_t)h->dig_be || dp->fe != (uint32_t)h->dig_fe || dp->otg != h->otg)
+            return RD_MODESET_DP_LINK;
+        /* link_decide_link_settings over the link cap (dp_validate_mode_timing) */
+        if (dcn32_dp_decide_link_settings(dp, dcn32_dp_stream_kbps(m->pixel_khz, 8), &ls))
+            return RD_MODESET_LINK_BW;
+        /* the stream encoder's pixels per cycle stay as the boot set them:
+         * two need is_h_timing_divisible_by_2 */
+        ppc = dp->pix_per_cycle ? dp->pix_per_cycle
+                                : (GET(RI(d, regDIG0_DIG_FIFO_CTRL0, (uint32_t)h->dig_fe, DIG_S), DIG0_DIG_FIFO_CTRL0,
+                                       DIG_FIFO_OUTPUT_PIXEL_MODE) ? 2 : 1);
+        if (ppc == 2 && ((m->h_total | m->h_active | m->h_front | m->h_sync) & 1))
+            return RD_MODESET_SIZE;
+    }
     if (m->h_active < 320 || m->v_active < 200 || m->h_active > 4096 || m->v_active > 2160 ||
         m->v_total - m->v_active < 4)
         return RD_MODESET_SIZE;
@@ -184,6 +229,11 @@ int dcn32_modeset_plan_clk(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, con
     ms->encoder_id = (uint8_t)path->encoder_objid;
     ms->connector_id = (uint8_t)path->connector_objid;
     dcn32_clk_read(d, &ms->clk);
+    if (h->dig_mode == 0) {
+        ms->dp = dp;
+        if (ms->clk.dprefclk_khz)
+            dp->dprefclk_khz = ms->clk.dprefclk_khz;
+    }
     if (lim && lim->dispclk_max_khz && lim->dppclk_max_khz) {
         /* dcn32_update_clocks: what DML 3.2 asks, raised before the timing */
         uint32_t disp = dcn32_required_dispclk(m->pixel_khz, ms->clk.vco_khz, lim->dispclk_max_khz);
@@ -231,8 +281,12 @@ int dcn32_modeset_plan_clk(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, con
     w->v_active = m->v_active;
 
     /* optc1_program_timing (dcn32_otg_timing has the front porch workaround) */
-    if (dcn32_otg_timing(m, 0, &t))
+    if (dcn32_otg_timing(m, ms->dp != NULL, &t))
         return RD_MODESET_NO_TIMING;
+    if (ms->dp) {
+        head_mode(h, cur_pclk_khz, &ms->dp_cur);
+        ms->dp_want = *m;
+    }
     w->h_total = t.h_total;
     w->h_sync = FIELD(OTG0_OTG_H_SYNC_A, OTG_H_SYNC_A_START, t.h_sync_start) |
                 FIELD(OTG0_OTG_H_SYNC_A, OTG_H_SYNC_A_END, t.h_sync_end);
@@ -435,6 +489,52 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
     return ret;
 }
 
+/* the same for a DP SST head: link_set_dpms_off, the timing with the DP DTO
+ * (dcn31_program_pix_clk), the link cap verified once (detection's
+ * dp_verify_link_cap_with_retries), OTG on, link_set_dpms_on */
+static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, const rdna3_modeset_regs *r,
+                      const rdna3_mode *m, uint64_t mc, uint32_t pitch_px)
+{
+    rdna3_dp_link *dp = ms->dp;
+    uint32_t v;
+    int ret;
+
+    /* hubp2_set_blank, link_set_dpms_off */
+    dcn32_set_blank(d, dc, ms->head, 1);
+    dcn32_dp_link_set_dpms_off(dp);
+    /* optc32_disable_crtc */
+    v = RI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S);
+    WI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S, SET(v, OTG0_OTG_CONTROL, OTG_MASTER_EN, 0));
+    v = RI(d, regVTG0_CONTROL, ms->otg, VTG_S);
+    WI(d, regVTG0_CONTROL, ms->otg, VTG_S, SET(v, VTG0_CONTROL, VTG0_ENABLE, 0));
+    if (rdna3_wait_reg(d, AI(d, regOTG0_OTG_CLOCK_CONTROL, ms->otg, OTG_S), 0,
+                       OTG0_OTG_CLOCK_CONTROL__OTG_BUSY_MASK, 0, 150000))
+        RERR(d, "modeset: OTG %u stays busy after the disable", ms->otg);
+    /* dcn31_program_pix_clk: DP signals run on the DP DTO */
+    dcn32_dp_program_pix_clk(dp, r->pclk_khz);
+    write_regs(d, ms->pipe, ms->otg, ms->opp, r);
+    v = RI(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, ms->pipe, HUBP_S);
+    WI(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, ms->pipe, HUBP_S, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
+    WI(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, ms->pipe, HUBP_S, (uint32_t)(mc >> 32) & 0xffff);
+    WI(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, ms->pipe, HUBP_S, (uint32_t)mc);
+    /* the link cap: what the sink trains at, falling back from its max */
+    if (!dp->verified)
+        dcn32_dp_verify_link_cap(dp, RD_DP_LINK_TRAINING_MAX_VERIFY_RETRY);
+    /* optc32_enable_crtc */
+    v = RI(d, regVTG0_CONTROL, ms->otg, VTG_S);
+    WI(d, regVTG0_CONTROL, ms->otg, VTG_S, SET(v, VTG0_CONTROL, VTG0_ENABLE, 1));
+    v = RI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S);
+    WI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S,
+       SET(SET(v, OTG0_OTG_CONTROL, OTG_DISABLE_POINT_CNTL, 2), OTG0_OTG_CONTROL, OTG_MASTER_EN, 1));
+    /* link_set_dpms_on (DC trains without fallback here: the verified
+     * cap already fell back) */
+    ret = dcn32_dp_link_set_dpms_on(dp, m, 0);
+    v = RI(d, regHUBP0_DCHUBP_CNTL, ms->pipe, HUBP_S);
+    WI(d, regHUBP0_DCHUBP_CNTL, ms->pipe, HUBP_S, SET(v, HUBP0_DCHUBP_CNTL, HUBP_UNDERFLOW_CLEAR, 1));
+    dcn32_set_blank(d, dc, ms->head, 0);
+    return ret;
+}
+
 static void update_head(rdna3_dcn *dc, rdna3_dcn_scale *sc, const rdna3_dcn_modeset *ms,
                         const rdna3_modeset_regs *r, uint64_t mc, uint32_t pitch_px)
 {
@@ -471,6 +571,8 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
 
     if (!dm || !dm->hw_init)
         return RDNA3_ENODEV;
+    if (ms->dp)
+        ms->dp->dm = dm;   /* the transmitter commands go through it */
     if (!dc || ms->head >= dc->nheads || pitch_px < ms->want.h_active || (mc & 0xff) || mc < d->fb_start ||
         mc - d->fb_start + (uint64_t)pitch_px * 4 * ms->want.v_active > d->vram_size)
         return RDNA3_EINVAL;
@@ -487,7 +589,8 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     /* a scaled source first goes back to the GOP's bypass state */
     if (sc && sc->saved[ms->pipe])
         dcn32_set_source(d, dc, sc, ms->head, old_mc, sc->native_w[ms->pipe], sc->native_h[ms->pipe], old_pitch_px);
-    ret = program(d, dm, dc, ms, &ms->want, mc, pitch_px);
+    ret = ms->dp ? program_dp(d, dc, ms, &ms->want, &ms->dp_want, mc, pitch_px)
+                 : program(d, dm, dc, ms, &ms->want, mc, pitch_px);
     if (!ret) {
         f0 = RI(d, regOTG0_OTG_STATUS_FRAME_COUNT, ms->otg, OTG_S) & fmask;
         d->os.msleep(d->os.ctx, settle_ms);
@@ -500,10 +603,14 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
             ret = RDNA3_EIO;
         }
     } else {
-        RERR(d, "modeset: a VBIOS command failed (%d): back to %ux%u", ret, ms->cur.h_active, ms->cur.v_active);
+        RERR(d, "modeset: %s failed (%d): back to %ux%u", ms->dp ? "the DP link" : "a VBIOS command", ret,
+             ms->cur.h_active, ms->cur.v_active);
     }
     if (ret) {
-        program(d, dm, dc, ms, &ms->cur, old_mc, old_pitch_px);
+        if (ms->dp)
+            program_dp(d, dc, ms, &ms->cur, &ms->dp_cur, old_mc, old_pitch_px);
+        else
+            program(d, dm, dc, ms, &ms->cur, old_mc, old_pitch_px);
         update_head(dc, sc, ms, &ms->cur, old_mc, old_pitch_px);
         return ret;
     }

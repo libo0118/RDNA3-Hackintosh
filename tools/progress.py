@@ -50,6 +50,7 @@ AMDGPU_STEPS = {
     "User queues": ["userq"],
     "Discovery / VBIOS": ["2"], "DMCUB": ["5b"], "Display: OTG / AUX": ["2", "9"],
     "Display: modeset": ["modeset"],
+    "Display: DP link": ["dplink"],
     "Display: hotplug": ["hotplug"],
     "Display: color": ["gamma"],
 }
@@ -66,6 +67,14 @@ ITEM_STEPS = [
                 r"|amdgpu_ring_patch_cond_exec|gfx_v11_0_get_gfx_shadow_info"), ["gfxshadow"]),
     (re.compile(r"gfx_v11_0_gfx_mqd_set_priority|sdma_v6_0_mqd_init"
                 r"|gfx_v11_0_get_gfx_shadow_info_nocheck"), ["userq"]),
+    # the DP side of files the TMDS modeset step verified
+    (re.compile(r"dcn10_link_encoder_(dp_set_lane_settings|dp_set_phy_pattern|enable_dp_output"
+                r"|get_max_link_cap|set_dp_phy_pattern_training_pattern)"
+                r"|dcn32_(disable_link_output|unblank_stream)|(enable|disable)_link_dp|disable_prbs_mode"
+                r"|enable_phy_bypass_mode|enc1_configure_encoder|enc32_(dp_set_odm_combine|enable_fifo"
+                r"|reset_fifo|set_dig_input_mode|stream_encoder_dp_unblank)|link_encoder_disable"
+                r"|link_transmitter_control|set_dp_phy_pattern_passthrough_mode"
+                r"|set_link_training_complete|setup_panel_mode"), ["dplink"]),
 ]
 
 GREEN, YELLOW, GRAY = "#2ea043", "#d29922", "#6e7681"

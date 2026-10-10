@@ -73,6 +73,8 @@
 #include "dcn32_gamma.h"
 #include "gen/dcn_3_2_0_gamma.h"
 #include "dcn32_state.h"
+#include "dcn32_dp.h"
+#include "gen/dcn_3_2_0_dp.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
@@ -223,6 +225,26 @@ typedef struct sim {
     uint32_t i2c_wi, i2c_ri;
     unsigned i2c_gos, i2c_nacks;
     uint8_t  dpcd[0x800];
+    uint8_t  dpcd_ext[0x20];     /* 0x2200.. extended receiver caps */
+    uint8_t  dpcd_lttpr[0x10];   /* 0xf0000.. LTTPR caps (zero: no repeater) */
+    /* the DP sink's link layer (dp_sink_eval): the sink is cabled to
+     * transmitter dps.be (-1: not modelled, DPCD is plain storage). It
+     * locks clock recovery on TPS1 once the source drives voltage swing
+     * need_vs (one level more per adjust request), channel EQ on
+     * TPS2/3/4 once pre-emphasis reaches need_pe, never CR at LINK_BW
+     * fail_rate; the PHY state comes from the DMCUB's TransmitterControl
+     * (ENABLE: symbol clock, lanes; SETUP_VSEMPH: the lane set) */
+    struct {
+        int be;
+        unsigned need_vs, need_pe;
+        uint32_t fail_rate;
+        int phy_on, cr, eq;
+        uint32_t symclk_10khz, lanes;
+        uint8_t vs, pe;
+        unsigned vsemph, adjust_reqs, tps1_sets, lane_mismatch, evals;
+        uint8_t eq_pattern;          /* the last EQ pattern the source asked for in DPCD */
+        uint32_t trained_rate, trained_lanes;
+    } dps;
     uint8_t  edid[256];
     /* DMCUB: the firmware's view (boot checks, mailbox, GPINT) */
     struct {
@@ -805,6 +827,10 @@ static void make_sink(void)
     S.dpcd[0x001] = 0x1e;   /* HBR3 */
     S.dpcd[0x002] = 0x84;   /* 4 lanes, enhanced framing */
     S.dpcd[0x600] = 0x01;   /* D0 */
+    memset(S.dpcd_ext, 0, sizeof(S.dpcd_ext));
+    memset(S.dpcd_lttpr, 0, sizeof(S.dpcd_lttpr));
+    memset(&S.dps, 0, sizeof(S.dps));
+    S.dps.be = -1;
     memset(e, 0, sizeof(S.edid));
     memcpy(e, "\x00\xff\xff\xff\xff\xff\xff\x00", 8);
     e[8] = 0x48; e[9] = 0x8E;             /* "RDN": R=18 D=4 N=14 -> 0 10010 00100 01110 */
@@ -955,6 +981,23 @@ static void dmub_inbox(uint32_t wptr)
             if (sub == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && len == 60) {
                 memcpy(S.dmub.tx, c + 4, 16);
                 S.dmub.tx_cmds++;
+                /* the DP sink's view of its transmitter */
+                if (S.dps.be >= 0 && c[4] == (uint8_t)S.dps.be) {
+                    if (c[5] == RD_ATOM_TX_ENABLE) {
+                        S.dps.phy_on = 1;
+                        S.dps.lanes = c[7];
+                        S.dps.symclk_10khz = (uint32_t)c[8] | (uint32_t)c[9] << 8 | (uint32_t)c[10] << 16 |
+                                             (uint32_t)c[11] << 24;
+                        S.dps.cr = S.dps.eq = 0;
+                    } else if (c[5] == RD_ATOM_TX_DISABLE) {
+                        S.dps.phy_on = 0;
+                        S.dps.cr = S.dps.eq = 0;
+                    } else if (c[5] == RD_ATOM_TX_SETUP_VSEMPH) {
+                        S.dps.vs = c[6] & 3;
+                        S.dps.pe = (c[6] >> 3) & 3;
+                        S.dps.vsemph++;
+                    }
+                }
                 /* what the table does to the back end of the PHY */
                 if (c[4] < 5 && (c[5] == RD_ATOM_TX_ENABLE || c[5] == RD_ATOM_TX_DISABLE)) {
                     uint32_t *en = &S.reg[DCN_B2 + regDIG0_DIG_BE_EN_CNTL + RD_CLONE_DIGFE_STRIDE * c[4]];
@@ -1015,6 +1058,89 @@ static void i2c_go(uint32_t ctl)
                                                : DC_I2C_SW_STATUS__DC_I2C_SW_DONE_MASK;
 }
 
+/* the sparse DPCD address space the sink answers */
+static uint8_t *dpcd_at(uint32_t a)
+{
+    if (a < sizeof(S.dpcd))
+        return &S.dpcd[a];
+    if (a >= 0x2200 && a < 0x2200 + sizeof(S.dpcd_ext))
+        return &S.dpcd_ext[a - 0x2200];
+    if (a >= 0xf0000 && a < 0xf0000 + sizeof(S.dpcd_lttpr))
+        return &S.dpcd_lttpr[a - 0xf0000];
+    return NULL;
+}
+
+#define DPR(reg, n) (DCN_B2 + reg + (regDP1_DP_LINK_CNTL - regDP0_DP_LINK_CNTL) * (n))
+#define DIGN(reg, n) (DCN_B2 + reg + RD_CLONE_DIGFE_STRIDE * (n))
+
+/* the sink's lane status and adjust requests (DPCD 0x202..0x207) for what
+ * the source drives now */
+static void dp_sink_eval(void)
+{
+    uint8_t *d = S.dpcd, adj, nib;
+    uint32_t be, lanes = d[0x101] & 0x1f, rate = d[0x100], pat = d[0x102] & 0xf, sel, i;
+    int alive, done;
+    if (S.dps.be < 0)
+        return;
+    be = (uint32_t)S.dps.be;
+    S.dps.evals++;
+    sel = S.reg[DPR(regDP0_DP_DPHY_TRAINING_PATTERN_SEL, be)] & 3;
+    done = (S.reg[DPR(regDP0_DP_LINK_CNTL, be)] & DP0_DP_LINK_CNTL__DP_LINK_TRAINING_COMPLETE_MASK) != 0;
+    alive = S.dps.phy_on && lanes && S.dps.lanes >= lanes && S.dps.symclk_10khz == rate * 2700 && d[0x600] == 1 &&
+            (S.reg[DIGN(regDIG0_DIG_BE_EN_CNTL, be)] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK) &&
+            !(S.reg[DIGN(regDIG0_DIG_BE_CNTL, be)] & DIG0_DIG_BE_CNTL__DIG_MODE_MASK);
+    adj = (uint8_t)(S.dps.vs | S.dps.pe << 2);
+    if (pat && (RD_DP_LANE_VS(d[0x103]) != S.dps.vs || RD_DP_LANE_PE(d[0x103]) != S.dps.pe))
+        S.dps.lane_mismatch++;   /* DPCD lane set and PHY disagree */
+    if (!alive) {
+        S.dps.cr = S.dps.eq = 0;
+    } else if (pat == RD_DPCD_TRAINING_PATTERN_1) {
+        S.dps.eq = 0;
+        S.dps.cr = sel == 0 && !done && rate != S.dps.fail_rate && S.dps.vs >= S.dps.need_vs;
+        if (!S.dps.cr)
+            adj = (uint8_t)((S.dps.vs < 3 ? S.dps.vs + 1 : 3) | S.dps.pe << 2);
+    } else if (pat == RD_DPCD_TRAINING_PATTERN_2 || pat == RD_DPCD_TRAINING_PATTERN_3 ||
+               pat == RD_DPCD_TRAINING_PATTERN_4) {
+        uint32_t want = pat == RD_DPCD_TRAINING_PATTERN_2 ? 1 : pat == RD_DPCD_TRAINING_PATTERN_3 ? 2 : 3;
+        S.dps.eq = S.dps.cr && sel == want && !done && S.dps.pe >= S.dps.need_pe;
+        if (S.dps.cr && !S.dps.eq)
+            adj = (uint8_t)(S.dps.vs | (S.dps.pe < S.dps.need_pe ? S.dps.pe + 1 : S.dps.pe) << 2);
+    }
+    /* pattern 0 (idle / video): the lock holds while the link stays up */
+    if (adj != (uint8_t)(S.dps.vs | S.dps.pe << 2))
+        S.dps.adjust_reqs++;
+    nib = (uint8_t)((S.dps.cr ? RD_DP_LANE_CR_DONE : 0) |
+                    (S.dps.cr && S.dps.eq ? RD_DP_LANE_CHANNEL_EQ_DONE | RD_DP_LANE_SYMBOL_LOCKED : 0));
+    d[0x202] = d[0x203] = 0;
+    for (i = 0; i < 4; i++)
+        if (i < lanes)
+            d[0x202 + i / 2] |= (uint8_t)(nib << (4 * (i % 2)));
+    d[0x204] = S.dps.cr && S.dps.eq ? RD_DP_INTERLANE_ALIGN_DONE : 0;
+    d[0x206] = d[0x207] = (uint8_t)(adj | adj << 4);
+    if (S.dps.cr && S.dps.eq && pat) {
+        S.dps.trained_rate = rate;
+        S.dps.trained_lanes = lanes;
+    }
+}
+
+/* DPCD writes the link layer reacts to */
+static void dp_sink_written(uint32_t addr, uint32_t len)
+{
+    if (S.dps.be < 0)
+        return;
+    if (addr <= 0x101 && addr + len > 0x100)
+        S.dps.cr = S.dps.eq = 0;            /* new rate / lane count: lock lost */
+    if (addr <= 0x600 && addr + len > 0x600 && S.dpcd[0x600] != 1)
+        S.dps.cr = S.dps.eq = 0;            /* D3 */
+    if (addr <= 0x102 && addr + len > 0x102) {
+        uint8_t p = S.dpcd[0x102] & 0xf;
+        if (p == RD_DPCD_TRAINING_PATTERN_1)
+            S.dps.tps1_sets++;
+        else if (p)
+            S.dps.eq_pattern = p;
+    }
+}
+
 /* AUX_SW_GO on engine n: decode the request FIFO, answer like the sink */
 static void aux_go(uint32_t n)
 {
@@ -1052,15 +1178,23 @@ static void aux_go(uint32_t n)
     if (wr < 3 || wr > 20) { S.aux_bad++; S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK; return; }
     switch (action) {
     case RD_AUX_DP_READ:
-        for (i = 0; i < len && addr + i < sizeof(S.dpcd); i++)
-            S.aux_rx[1 + i] = S.dpcd[addr + i];
+        if (addr <= 0x207 && addr + len > 0x200)
+            dp_sink_eval();
+        for (i = 0; i < len && (addr + i < sizeof(S.dpcd) || S.dps.be >= 0); i++) {
+            uint8_t *b = dpcd_at(addr + i);
+            S.aux_rx[1 + i] = b ? *b : 0;
+        }
         S.aux_nrx = 1 + i;
         break;
     case RD_AUX_DP_WRITE:
         if (wr != 4 + len) { S.aux_bad++; }
-        for (i = 0; i < len && addr + i < sizeof(S.dpcd); i++)
-            S.dpcd[addr + i] = S.aux_tx[4 + i];
+        for (i = 0; i < len && (addr + i < sizeof(S.dpcd) || S.dps.be >= 0); i++) {
+            uint8_t *b = dpcd_at(addr + i);
+            if (b)
+                *b = S.aux_tx[4 + i];
+        }
         S.aux_nrx = 1;
+        dp_sink_written(addr, len);
         break;
     case RD_AUX_I2C_WRITE:
     case RD_AUX_I2C_WRITE_MOT:
@@ -2455,6 +2589,23 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         dmub_inbox(v);
         return;
     }
+    /* DP stream encoder / DIG FIFO status bits follow their controls
+     * (only while the DP sink is modelled) */
+    if (S.dps.be >= 0) {
+        for (uint32_t n = 0; n < 5; n++) {
+            if (dw == DPR(regDP0_DP_VID_STREAM_CNTL, n)) {
+                *R(dw) = (v & ~DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_STATUS_MASK) |
+                         ((v & DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE_MASK)
+                              ? DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_STATUS_MASK : 0);
+                return;
+            }
+            if (dw == DIGN(regDIG0_DIG_FIFO_CTRL0, n)) {
+                *R(dw) = (v & ~DIG0_DIG_FIFO_CTRL0__DIG_FIFO_RESET_DONE_MASK) |
+                         ((v & DIG0_DIG_FIFO_CTRL0__DIG_FIFO_RESET_MASK) ? DIG0_DIG_FIFO_CTRL0__DIG_FIFO_RESET_DONE_MASK : 0);
+                return;
+            }
+        }
+    }
     /* DP AUX engines (DCN segment 2) */
     if (dw == DCN_B2 + regDC_I2C_DATA) {
         uint32_t idx = (v & DC_I2C_DATA__DC_I2C_INDEX_MASK) >> DC_I2C_DATA__DC_I2C_INDEX__SHIFT;
@@ -2693,6 +2844,17 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
     for (uint32_t n = 0; n < RD_AUX_ENGINES; n++)
         if ((S.hpd_model & (1u << n)) && dw == HPDR(regHPD0_DC_HPD_INT_STATUS, n))
             hpd_filter_eval(n);
+    /* DIG_SYMCLK_FE_ON: an enabled back end takes the front end's symbols */
+    if (S.dps.be >= 0)
+        for (uint32_t n = 0; n < 5; n++)
+            if (dw == DIGN(regDIG0_DIG_FE_CNTL, n)) {
+                uint32_t on = 0;
+                for (uint32_t b = 0; b < 5; b++)
+                    if ((S.reg[DIGN(regDIG0_DIG_BE_EN_CNTL, b)] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK) &&
+                        (S.reg[DIGN(regDIG0_DIG_BE_CNTL, b)] & (1u << (n + DIG0_DIG_BE_CNTL__DIG_FE_SOURCE_SELECT__SHIFT))))
+                        on = DIG0_DIG_FE_CNTL__DIG_SYMCLK_FE_ON_MASK;
+                return (S.reg[dw] & ~DIG0_DIG_FE_CNTL__DIG_SYMCLK_FE_ON_MASK) | on;
+            }
     for (uint32_t n = 0; n < RD_AUX_ENGINES; n++) {
         if (dw == AUXR(regDP_AUX0_AUX_SW_STATUS, n))
             return S.aux_status;
@@ -4145,6 +4307,239 @@ static void test_gamma(rdna3_dev *dev, const rdna3_dcn *dc)
     ogam.pwr_stuck = 0;
 #undef OG
 #undef OGAM_CRC
+}
+
+/* DP SST on the boot head: the HDMI head of the DCN tests turned into a
+ * DP one (DIG_MODE 0, the synthetic sink of make_sink cabled to UNIPHY B,
+ * the GOP's link at HBR2 x4). Sink capabilities, link settings,
+ * dp_verify_link_cap with a sink that fails clock recovery at HBR3, the mode
+ * set through the DP path (DP DTO, training, MSA, M/N, unblank), a mode
+ * whose training fails (the old one comes back, trained again), and
+ * perform_link_training_with_retries with and without fallback. */
+static void test_dp_link(rdna3_dev *dev, rdna3_dmub *dm)
+{
+    static rdna3_dcn dc;
+    static rdna3_dcn_modeset ms;
+    static rdna3_dp_link dp, dp2;
+    static uint8_t dpcd_save[0x800];
+    rdna3_display_path own;
+    rdna3_dp_link_settings st, mx, cur;
+    rdna3_mode m, up, big;
+    const uint32_t be_cntl = S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)];
+    uint32_t otg, dto[3], m_vid, runs, i;
+
+    memcpy(dpcd_save, S.dpcd, sizeof(S.dpcd));
+    S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] = be_cntl & ~DIG0_DIG_BE_CNTL__DIG_MODE_MASK;
+    memset(&S.dps, 0, sizeof(S.dps));
+    S.dps.be = 1;
+    S.dps.need_vs = 2;                      /* two swing requests */
+    S.dps.need_pe = 1;                      /* one pre-emphasis request */
+    S.dps.fail_rate = RD_DP_LINK_RATE_HIGH3;
+    /* the GOP's link: HBR2 x4, trained, video on */
+    S.dps.phy_on = 1;
+    S.dps.lanes = 4;
+    S.dps.symclk_10khz = RD_DP_LINK_RATE_HIGH2 * 2700;
+    S.dps.cr = S.dps.eq = 1;
+    S.dpcd[0x100] = RD_DP_LINK_RATE_HIGH2;
+    S.dpcd[0x101] = 0x84;
+    S.dpcd[0x002] = 0xc4;                   /* 4 lanes, TPS3, enhanced framing */
+    S.dpcd[0x003] = 0x81;                   /* TPS4, 0.5 % downspread */
+    S.dpcd[0x00e] = 0x00;                   /* 100 us CR / 400 us EQ */
+    S.dpcd[0x200] = 0x01;                   /* one sink */
+    S.dpcd[0x400] = 0x00; S.dpcd[0x401] = 0x12; S.dpcd[0x402] = 0x34;   /* synthetic OUI */
+    S.reg[DPR(regDP0_DP_VID_STREAM_CNTL, 2)] = DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE_MASK |
+                                               DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_STATUS_MASK;
+    S.reg[DIGN(regDIG0_DIG_FIFO_CTRL0, 2)] = DIG0_DIG_FIFO_CTRL0__DIG_FIFO_ENABLE_MASK;
+    CHECK(dcn32_read_state(dev, &dc) == 1 && dc.head[0].dig_mode == 0 && dc.head[0].dig_be == 1 &&
+          dc.head[0].dig_fe == 2 && dc.head[0].h_active == 2560);
+    otg = dc.head[0].otg;
+    dto[0] = S.reg[DCN_B1 + regDP_DTO0_PHASE + 4 * otg];
+    dto[1] = S.reg[DCN_B1 + regDP_DTO0_MODULO + 4 * otg];
+    dto[2] = S.reg[DCN_B1 + regOTG0_PIXEL_RATE_CNTL + 4 * otg];
+    memset(&own, 0, sizeof(own));
+    own.transmitter = 1; own.hpd = 0; own.ddc_line = 0;
+    own.encoder_objid = 0x211e; own.connector_objid = 0x3113;   /* DP connector */
+    CHECK(edid_dmt(1920, 1080, 60, &m) == 0);
+    /* without a link the DP head stays refused */
+    CHECK(dcn32_modeset_plan_dp(dev, &dc, 0, &own, NULL, 241500, &m, NULL, &ms) == RD_MODESET_NOT_TMDS);
+
+    /* dc_bandwidth_in_kbps_from_timing, dp_link_bandwidth_kbps */
+    CHECK(dcn32_dp_stream_kbps(148500, 8) == 3564000);
+    st.lane_count = 4; st.link_rate = RD_DP_LINK_RATE_HIGH2; st.link_spread = 0;
+    CHECK(dcn32_dp_link_kbps_settings(&st) == 17280000);
+    st.lane_count = 1; st.link_rate = RD_DP_LINK_RATE_LOW;
+    CHECK(dcn32_dp_link_kbps_settings(&st) == 1296000);
+
+    /* retrieve_link_cap + dp_get_max_link_cap */
+    dcn32_dp_link_init(&dp, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 0);
+    CHECK(dcn32_modeset_plan_dp(dev, &dc, 0, &own, &dp, 241500, &m, NULL, &ms) == RD_MODESET_DP_LINK);
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && dp.caps_valid && dp.dpcd_caps.dpcd_rev == 0x14 &&
+          dp.dpcd_caps.sink_count == 1 && dp.dpcd_caps.sink_dev_id == 0x1234);
+    CHECK(dp.reported_link_cap.link_rate == RD_DP_LINK_RATE_HIGH3 && dp.reported_link_cap.lane_count == 4 &&
+          dp.reported_link_cap.link_spread == RD_DP_LINK_SPREAD_05_DOWNSPREAD_30KHZ);
+    CHECK(dp.max_link_cap.link_rate == RD_DP_LINK_RATE_HIGH3 && dp.max_link_cap.lane_count == 4);
+    /* the VBIOS encoder caps: HBR2 without the HBR3 bit */
+    dcn32_dp_link_init(&dp2, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, RD_ATOM_ENC_CAP_HBR2, 0);
+    CHECK(dcn32_dp_read_caps(&dp2) == RDNA3_OK && dp2.max_link_cap.link_rate == RD_DP_LINK_RATE_HIGH2);
+    /* an LTTPR (1 repeater, HBR x2): transparent mode, the count echoed, its limits */
+    S.dpcd_lttpr[0] = 0x14; S.dpcd_lttpr[1] = RD_DP_LINK_RATE_HIGH; S.dpcd_lttpr[2] = 0x80; S.dpcd_lttpr[4] = 2;
+    dcn32_dp_link_init(&dp2, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 0);
+    CHECK(dcn32_dp_read_caps(&dp2) == RDNA3_OK && dp2.max_link_cap.link_rate == RD_DP_LINK_RATE_HIGH &&
+          dp2.max_link_cap.lane_count == 2 && S.dpcd_lttpr[3] == RD_DP_PHY_REPEATER_MODE_TRANSPARENT &&
+          S.dpcd_lttpr[0xa] == 0x80);
+    memset(S.dpcd_lttpr, 0, sizeof(S.dpcd_lttpr));
+    /* the sink in D3: wake_up_aux_channel retries, then the caps */
+    S.dpcd[0x600] = RD_DP_SET_POWER_D3;
+    S.dpcd_lttpr[0] = 0;
+    dcn32_dp_link_init(&dp2, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 0);
+    dp2.lttpr_aware = 0;
+    CHECK(dcn32_dp_read_caps(&dp2) == RDNA3_OK);
+    S.dpcd[0x600] = RD_DP_SET_POWER_D0;
+
+    /* link_decide_link_settings: the smallest setting that carries the mode */
+    CHECK(dcn32_dp_decide_link_settings(&dp, 3564000, &st) == RDNA3_OK && st.link_rate == RD_DP_LINK_RATE_LOW &&
+          st.lane_count == 4);
+    CHECK(dcn32_dp_decide_link_settings(&dp, 5796000, &st) == RDNA3_OK && st.link_rate == RD_DP_LINK_RATE_HIGH &&
+          st.lane_count == 4);
+    CHECK(dcn32_dp_decide_link_settings(&dp, 1000000, &st) == RDNA3_OK && st.link_rate == RD_DP_LINK_RATE_LOW &&
+          st.lane_count == 1);
+    CHECK(dcn32_dp_decide_link_settings(&dp, 30000000, &st) == RDNA3_EINVAL);
+    /* decide_fallback_link_setting */
+    mx.lane_count = 4; mx.link_rate = RD_DP_LINK_RATE_HIGH3; mx.link_spread = 0;
+    cur = mx;
+    CHECK(dcn32_dp_fallback_link_setting(&dp, &mx, &cur, RD_LT_CR_FAIL_LANE0) == 1 &&
+          cur.link_rate == RD_DP_LINK_RATE_HIGH2 && cur.lane_count == 4);
+    CHECK(dcn32_dp_fallback_link_setting(&dp, &mx, &cur, RD_LT_EQ_FAIL_EQ) == 1 &&
+          cur.link_rate == RD_DP_LINK_RATE_HIGH2 && cur.lane_count == 2);
+    cur.lane_count = 4; cur.link_rate = RD_DP_LINK_RATE_LOW;
+    CHECK(dcn32_dp_fallback_link_setting(&dp, &mx, &cur, RD_LT_CR_FAIL_LANE1) == 1 && cur.lane_count == 1 &&
+          cur.link_rate == RD_DP_LINK_RATE_HIGH3);
+    cur.lane_count = 1; cur.link_rate = RD_DP_LINK_RATE_LOW;
+    CHECK(dcn32_dp_fallback_link_setting(&dp, &mx, &cur, RD_LT_CR_FAIL_LANE0) == 0);
+    cur.lane_count = 2; cur.link_rate = RD_DP_LINK_RATE_HIGH;
+    CHECK(dcn32_dp_fallback_link_setting(&dp, &mx, &cur, RD_LT_EQ_FAIL_CR) == 1 &&
+          cur.link_rate == RD_DP_LINK_RATE_LOW && mx.link_rate == RD_DP_LINK_RATE_LOW && cur.lane_count == 4);
+
+    /* dp_verify_link_cap_with_retries: HBR3 x4 does not lock (the sink
+     * asks for more swing until the max), the fallback HBR2 x4 trains
+     * after two swing requests and one pre-emphasis request, with TPS4.
+     * The failure at HBR3 counts (fail_count), so both verify attempts run
+     * and the result is "not clean", with HBR2 x4 as the verified cap,
+     * as in DC */
+    S.dmub.nseq = 0;
+    CHECK(dcn32_dp_verify_link_cap(&dp, RD_DP_LINK_TRAINING_MAX_VERIFY_RETRY) == 0 && dp.verified &&
+          dp.verified_link_cap.link_rate == RD_DP_LINK_RATE_HIGH2 && dp.verified_link_cap.lane_count == 4);
+    CHECK(dp.lt_fallbacks == 2 && dp.lt_runs == 4 && S.dps.trained_rate == RD_DP_LINK_RATE_HIGH2 &&
+          S.dps.trained_lanes == 4);
+    /* per attempt: HBR3 VS 0->1->2->3; HBR2 VS 0->1->2, PE 0->1 */
+    CHECK(S.dps.vs == 2 && S.dps.pe == 1 && S.dps.lane_mismatch == 0 && S.dps.eq_pattern == RD_DPCD_TRAINING_PATTERN_4 &&
+          S.dps.tps1_sets == 4 && S.dps.adjust_reqs == 2 * (3 + 3));
+    CHECK(S.dpcd[0x107] == 0x10 && S.dpcd[0x108] == 1 && S.dpcd[0x102] == 0 && S.dpcd[0x101] == 0x84);
+    /* dp_disable_link_phy: the sink in D3, the transmitter off */
+    CHECK(!S.dps.phy_on && S.dpcd[0x600] == RD_DP_SET_POWER_D3 &&
+          !(S.reg[DIGN(regDIG0_DIG_BE_EN_CNTL, 1)] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK));
+    CHECK(S.dmub.seq[0] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && S.dmub.seq_tx_action[0] == RD_ATOM_TX_ENABLE &&
+          S.dmub.seq_tx_action[1] == RD_ATOM_TX_SETUP_VSEMPH);
+
+    /* the mode set: 2560x1440 -> 1920x1080 on the DP head */
+    big = m;
+    big.pixel_khz = 800000;                 /* 19.2 Gbps: beyond the verified HBR2 x4 */
+    CHECK(dcn32_modeset_plan_dp(dev, &dc, 0, &own, &dp, 241500, &big, NULL, &ms) == RD_MODESET_LINK_BW);
+    CHECK(dcn32_modeset_plan_dp(dev, &dc, 0, &own, &dp, 241500, &m, NULL, &ms) == RD_MODESET_OK && ms.dp == &dp &&
+          ms.dp_cur.h_active == 2560 && ms.dp_cur.pixel_khz == 241500 && ms.dp_want.h_total == 2200);
+    if (!dp.dprefclk_khz)
+        dp.dprefclk_khz = 600000;
+    S.dcn_frames = 1;
+    S.dmub.nseq = 0;
+    runs = dp.lt_runs;
+    CHECK(dcn32_modeset_apply(dev, dm, &dc, NULL, &ms, FB_START + 0x8000000, 1920, FB_START, 2560, 50) == RDNA3_OK);
+    /* dcn31_program_pix_clk: the DP DTO at 148.5 MHz from DPREFCLK, source 1 (8b/10b) */
+    CHECK(S.reg[DCN_B1 + regDP_DTO0_PHASE + 4 * otg] == 148500000u &&
+          S.reg[DCN_B1 + regDP_DTO0_MODULO + 4 * otg] == dp.dprefclk_khz * 1000u &&
+          (S.reg[DCN_B1 + regOTG0_PIXEL_RATE_CNTL + 4 * otg] & OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE_MASK) &&
+          ((S.reg[DCN_B1 + regOTG0_PIXEL_RATE_CNTL + 4 * otg] & OTG0_PIXEL_RATE_CNTL__PIPE0_DTO_SRC_SEL_MASK) >>
+           OTG0_PIXEL_RATE_CNTL__PIPE0_DTO_SRC_SEL__SHIFT) == 1);
+    /* no VBIOS pixel clock or encoder command on DP: transmitter only */
+    for (i = 0; i < S.dmub.nseq && i < 16; i++)
+        CHECK(S.dmub.seq[i] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL);
+    /* trained once at the smallest setting the verified cap gives: RBR x4 */
+    CHECK(dp.lt_runs == runs + 1 && S.dpcd[0x100] == RD_DP_LINK_RATE_LOW && S.dpcd[0x101] == 0x84 && S.dps.cr &&
+          S.dps.eq && S.dps.trained_rate == RD_DP_LINK_RATE_LOW && S.dpcd[0x600] == RD_DP_SET_POWER_D0 &&
+          S.dps.symclk_10khz == RD_DP_LINK_RATE_LOW * 2700 && S.dps.lanes == 4);
+    CHECK((S.reg[DPR(regDP0_DP_CONFIG, 1)] & DP0_DP_CONFIG__DP_UDI_LANES_MASK) == 3 &&
+          (S.reg[DPR(regDP0_DP_LINK_CNTL, 1)] & DP0_DP_LINK_CNTL__DP_LINK_TRAINING_COMPLETE_MASK));
+    /* the MSA of 1080p (CEA/DMT: htotal 2200, sync 44, back porch 148) */
+    CHECK(S.reg[DPR(regDP0_DP_MSA_TIMING_PARAM1, 2)] == (2200u << 16 | 1125u) &&
+          S.reg[DPR(regDP0_DP_MSA_TIMING_PARAM2, 2)] == ((44u + 148u) << 16 | 41u) &&
+          S.reg[DPR(regDP0_DP_MSA_TIMING_PARAM3, 2)] == (44u << 16 | 5u) &&
+          S.reg[DPR(regDP0_DP_MSA_TIMING_PARAM4, 2)] == (1920u << 16 | 1080u));
+    CHECK((S.reg[DPR(regDP0_DP_PIXEL_FORMAT, 2)] & DP0_DP_PIXEL_FORMAT__DP_COMPONENT_DEPTH_MASK) ==
+          1u << DP0_DP_PIXEL_FORMAT__DP_COMPONENT_DEPTH__SHIFT);
+    /* M / N = 148.5 MHz / 162 MHz */
+    m_vid = (uint32_t)(0x8000ull * 148500 / (RD_DP_LINK_RATE_LOW * 27000));
+    CHECK(S.reg[DPR(regDP0_DP_VID_M, 2)] == m_vid && S.reg[DPR(regDP0_DP_VID_N, 2)] == 0x8000 &&
+          (S.reg[DPR(regDP0_DP_VID_TIMING, 2)] & DP0_DP_VID_TIMING__DP_VID_M_N_GEN_EN_MASK) &&
+          (S.reg[DPR(regDP0_DP_VID_STREAM_CNTL, 2)] & DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE_MASK) &&
+          !(S.reg[DPR(regDP0_DP_STEER_FIFO, 2)] & DP0_DP_STEER_FIFO__DP_STEER_FIFO_RESET_MASK) &&
+          (S.reg[DIGN(regDIG0_DIG_FIFO_CTRL0, 2)] & DIG0_DIG_FIFO_CTRL0__DIG_FIFO_ENABLE_MASK));
+    CHECK((S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] & (1u << (2 + DIG0_DIG_BE_CNTL__DIG_FE_SOURCE_SELECT__SHIFT))) &&
+          !(S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] & DIG0_DIG_BE_CNTL__DIG_MODE_MASK) &&
+          (S.reg[DIGN(regDIG0_DIG_BE_EN_CNTL, 1)] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK));
+    CHECK(dc.head[0].width == 1920 && S.reg[OTG(regOTG0_OTG_H_TOTAL, otg)] == 2199 &&
+          !(S.reg[HUBP(regHUBP0_DCHUBP_CNTL, dc.head[0].pipe)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK));
+    CHECK(dcn32_dp_link_ok(&dp));
+
+    /* back to 1440p (HBR x4) with a sink that never locks at HBR: four
+     * attempts fail, the 1080p timing comes back, trained again at RBR */
+    memset(&up, 0, sizeof(up));
+    up.h_active = 2560; up.v_active = 1440; up.h_total = 2720; up.v_total = 1481;
+    up.h_front = 48; up.h_sync = 32; up.v_front = 3; up.v_sync = 5; up.pixel_khz = 241500;
+    up.h_sync_pos = 1;
+    CHECK(dcn32_read_state(dev, &dc) == 1 && dc.head[0].h_active == 1920);
+    CHECK(dcn32_modeset_plan_dp(dev, &dc, 0, &own, &dp, 148500, &up, NULL, &ms) == RD_MODESET_OK);
+    S.dps.fail_rate = RD_DP_LINK_RATE_HIGH;
+    runs = dp.lt_runs;
+    CHECK(dcn32_modeset_apply(dev, dm, &dc, NULL, &ms, FB_START, 2560, FB_START + 0x8000000, 1920, 50) == RDNA3_EIO);
+    CHECK(dp.lt_runs == runs + RD_DP_LINK_TRAINING_ATTEMPTS + 1 && dc.head[0].width == 1920 &&
+          S.dps.trained_rate == RD_DP_LINK_RATE_LOW && S.dps.cr && S.dps.eq &&
+          S.reg[OTG(regOTG0_OTG_H_TOTAL, otg)] == 2199 && S.reg[DCN_B1 + regDP_DTO0_PHASE + 4 * otg] == 148500000u);
+
+    /* perform_link_training_with_retries with fallback: HBR3 x4 -> HBR2 x4 */
+    S.dps.fail_rate = RD_DP_LINK_RATE_HIGH3;
+    st.lane_count = 4; st.link_rate = RD_DP_LINK_RATE_HIGH3; st.link_spread = RD_DP_LINK_SPREAD_05_DOWNSPREAD_30KHZ;
+    runs = dp.lt_fallbacks;
+    CHECK(dcn32_dp_link_training_with_retries(&dp, &st, 1, RD_DP_LINK_TRAINING_ATTEMPTS, 1, 3564000) == 1 &&
+          dp.cur_link_settings.link_rate == RD_DP_LINK_RATE_HIGH2 && dp.lt_fallbacks == runs + 1 &&
+          S.dps.trained_rate == RD_DP_LINK_RATE_HIGH2);
+    /* without fallback: every attempt at HBR3 */
+    runs = dp.lt_runs;
+    CHECK(dcn32_dp_link_training_with_retries(&dp, &st, 1, RD_DP_LINK_TRAINING_ATTEMPTS, 0, 3564000) == 0 &&
+          dp.lt_runs == runs + RD_DP_LINK_TRAINING_ATTEMPTS && dp.last_result == RD_LT_CR_FAIL_LANE0);
+    /* a fallback below what the stream needs stops at once */
+    runs = dp.lt_runs;
+    CHECK(dcn32_dp_link_training_with_retries(&dp, &st, 1, RD_DP_LINK_TRAINING_ATTEMPTS, 1, 20000000) == 0 &&
+          dp.lt_runs == runs + 1);
+
+    /* and back to the boot timing over HBR x4 (the link up again first:
+     * the calls above left the transmitter off: no DIG on the head) */
+    S.dps.fail_rate = 0;
+    CHECK(dcn32_read_state(dev, &dc) == 1 && dc.head[0].dig_be < 0);
+    st.lane_count = 4; st.link_rate = RD_DP_LINK_RATE_LOW;
+    dcn32_dp_enable_link_phy(&dp, &st);
+    CHECK(dcn32_read_state(dev, &dc) == 1 && dc.head[0].dig_mode == 0);
+    CHECK(dcn32_modeset_plan_dp(dev, &dc, 0, &own, &dp, 148500, &up, NULL, &ms) == RD_MODESET_OK);
+    CHECK(dcn32_modeset_apply(dev, dm, &dc, NULL, &ms, FB_START, 2560, FB_START + 0x8000000, 1920, 50) == RDNA3_OK &&
+          dc.head[0].width == 2560 && S.dps.trained_rate == RD_DP_LINK_RATE_HIGH && S.dpcd[0x101] == 0x84);
+    S.dcn_frames = 0;
+
+    /* the HDMI head again for the tests that follow */
+    S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] = be_cntl;
+    S.reg[DCN_B1 + regDP_DTO0_PHASE + 4 * otg] = dto[0];
+    S.reg[DCN_B1 + regDP_DTO0_MODULO + 4 * otg] = dto[1];
+    S.reg[DCN_B1 + regOTG0_PIXEL_RATE_CNTL + 4 * otg] = dto[2];
+    memcpy(S.dpcd, dpcd_save, sizeof(S.dpcd));
+    S.dps.be = -1;
+    CHECK(dcn32_read_state(dev, &dc) == 1 && dc.head[0].dig_mode == 3 && dc.head[0].h_active == 2560);
 }
 
 static void run(const char *fwdir)
@@ -6539,6 +6934,7 @@ static void run(const char *fwdir)
                 }
             }
             test_dcn_state(&dev, &dm);
+            test_dp_link(&dev, &dm);
             S.dcn_pg = 0;
         }
         /* attach (rdna3dmub=3): no reset, no load, the running firmware's

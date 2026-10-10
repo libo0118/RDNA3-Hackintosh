@@ -1309,52 +1309,52 @@ Display: modeset	display/dc/dio/dcn32/dcn32_dio_stream_encoder.c	enc32_stream_en
 Display: modeset	display/dc/dio/dcn32/dcn32_dio_stream_encoder.c	enc32_stream_encoder_dvi_set_stream_attribute
 Display: modeset	display/dc/dio/dcn32/dcn32_dio_stream_encoder.c	enc32_stream_encoder_hdmi_set_stream_attribute
 Display: modeset	display/dc/dio/dcn32/dcn32_dio_stream_encoder.c	is_two_pixels_per_containter
-Display: modeset	display/dc/link/protocols/link_dp_training.c	configure_lttpr_mode_non_transparent
-Display: modeset	display/dc/link/protocols/link_dp_training.c	configure_lttpr_mode_transparent
-Display: modeset	display/dc/link/protocols/link_dp_training.c	decide_cr_training_pattern
-Display: modeset	display/dc/link/protocols/link_dp_training.c	decide_eq_training_pattern
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_check_dpcd_reqeust_status
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_check_interlane_aligned
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_check_link_loss_status
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_decide_lane_settings
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_decide_lttpr_mode
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_decide_training_settings
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_get_cr_failure
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_get_eq_aux_rd_interval
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_get_lane_status_and_lane_adjust
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_get_lttpr_mode_override
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_get_nibble_at_index
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_hw_to_dpcd_lane_settings
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_initialize_scrambling_data_symbols
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_is_ch_eq_done
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_is_cr_done
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_is_interlane_aligned
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_is_max_vs_reached
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_is_symbol_locked
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_log_training_result
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_perform_link_training
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_set_hw_test_pattern
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_set_hw_training_pattern
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_transition_to_video_idle
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_translate_training_aux_read_interval
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dp_wait_for_training_aux_rd_interval
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dpcd_configure_channel_coding
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dpcd_configure_lttpr_mode
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dpcd_exit_training_mode
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dpcd_set_lane_settings
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dpcd_set_link_settings
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dpcd_set_lt_pattern_and_lane_settings
-Display: modeset	display/dc/link/protocols/link_dp_training.c	dpcd_set_training_pattern
-Display: modeset	display/dc/link/protocols/link_dp_training.c	get_dpcd_link_rate
-Display: modeset	display/dc/link/protocols/link_dp_training.c	get_max_pre_emphasis_for_voltage_swing
-Display: modeset	display/dc/link/protocols/link_dp_training.c	is_repeater
-Display: modeset	display/dc/link/protocols/link_dp_training.c	maximize_lane_settings
-Display: modeset	display/dc/link/protocols/link_dp_training.c	override_lane_settings
-Display: modeset	display/dc/link/protocols/link_dp_training.c	override_training_settings
-Display: modeset	display/dc/link/protocols/link_dp_training.c	perform_link_training_with_retries
-Display: modeset	display/dc/link/protocols/link_dp_training.c	perform_post_lt_adj_req_sequence
-Display: modeset	display/dc/link/protocols/link_dp_training.c	repeater_training_done
-Display: modeset	display/dc/link/protocols/link_dp_training.c	start_clock_recovery_pattern_early
+Display: DP link	display/dc/link/protocols/link_dp_training.c	configure_lttpr_mode_non_transparent
+Display: DP link	display/dc/link/protocols/link_dp_training.c	configure_lttpr_mode_transparent
+Display: DP link	display/dc/link/protocols/link_dp_training.c	decide_cr_training_pattern
+Display: DP link	display/dc/link/protocols/link_dp_training.c	decide_eq_training_pattern
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_check_dpcd_reqeust_status
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_check_interlane_aligned
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_check_link_loss_status
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_decide_lane_settings
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_decide_lttpr_mode
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_decide_training_settings
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_get_cr_failure
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_get_eq_aux_rd_interval
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_get_lane_status_and_lane_adjust
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_get_lttpr_mode_override
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_get_nibble_at_index
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_hw_to_dpcd_lane_settings
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_initialize_scrambling_data_symbols
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_is_ch_eq_done
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_is_cr_done
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_is_interlane_aligned
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_is_max_vs_reached
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_is_symbol_locked
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_log_training_result
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_perform_link_training
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_set_hw_test_pattern
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_set_hw_training_pattern
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_transition_to_video_idle
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_translate_training_aux_read_interval
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dp_wait_for_training_aux_rd_interval
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dpcd_configure_channel_coding
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dpcd_configure_lttpr_mode
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dpcd_exit_training_mode
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dpcd_set_lane_settings
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dpcd_set_link_settings
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dpcd_set_lt_pattern_and_lane_settings
+Display: DP link	display/dc/link/protocols/link_dp_training.c	dpcd_set_training_pattern
+Display: DP link	display/dc/link/protocols/link_dp_training.c	get_dpcd_link_rate
+Display: DP link	display/dc/link/protocols/link_dp_training.c	get_max_pre_emphasis_for_voltage_swing
+Display: DP link	display/dc/link/protocols/link_dp_training.c	is_repeater
+Display: DP link	display/dc/link/protocols/link_dp_training.c	maximize_lane_settings
+Display: DP link	display/dc/link/protocols/link_dp_training.c	override_lane_settings
+Display: DP link	display/dc/link/protocols/link_dp_training.c	override_training_settings
+Display: DP link	display/dc/link/protocols/link_dp_training.c	perform_link_training_with_retries
+Display: DP link	display/dc/link/protocols/link_dp_training.c	perform_post_lt_adj_req_sequence
+Display: DP link	display/dc/link/protocols/link_dp_training.c	repeater_training_done
+Display: DP link	display/dc/link/protocols/link_dp_training.c	start_clock_recovery_pattern_early
 Display: modeset	display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c	dcn32_are_clock_states_equal
 Display: modeset	display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c	dcn32_auto_dpm_test_log
 Display: modeset	display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c	dcn32_build_wm_range_table
@@ -1562,3 +1562,125 @@ Display: modeset	display/dc/hubbub/dcn30/dcn30_hubbub.c	hubbub3_get_dcc_compress
 Display: modeset	display/dc/hubbub/dcn30/dcn30_hubbub.c	hubbub3_init_dchub_sys_ctx
 Display: modeset	display/dc/hubbub/dcn30/dcn30_hubbub.c	hubbub3_init_watermarks
 Display: modeset	display/dc/hubbub/dcn30/dcn30_hubbub.c	hubbub3_program_watermarks
+Display: DP link	display/dc/link/protocols/link_dp_training_8b_10b.c	decide_8b_10b_training_settings
+Display: DP link	display/dc/link/protocols/link_dp_training_8b_10b.c	dp_decide_8b_10b_lttpr_mode
+Display: DP link	display/dc/link/protocols/link_dp_training_8b_10b.c	dp_perform_8b_10b_link_training
+Display: DP link	display/dc/link/protocols/link_dp_training_8b_10b.c	get_cr_training_aux_rd_interval
+Display: DP link	display/dc/link/protocols/link_dp_training_8b_10b.c	get_eq_training_aux_rd_interval
+Display: DP link	display/dc/link/protocols/link_dp_training_8b_10b.c	perform_8b_10b_channel_equalization_sequence
+Display: DP link	display/dc/link/protocols/link_dp_training_8b_10b.c	perform_8b_10b_clock_recovery_sequence
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	apply_usbc_combo_phy_reset_wa
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	decide_dp_link_settings
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	decide_edp_link_settings_with_dsc
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	decide_fallback_link_setting
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	decide_fallback_link_setting_max_bw_policy
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	decide_mst_link_settings
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	detect_dp_sink_caps
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	detect_edp_sink_caps
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_get_max_link_cap
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_get_max_link_enc_cap
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_get_verified_link_cap
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_is_128b_132b_signal
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_is_fec_supported
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_is_lttpr_present
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_is_sink_present
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_overwrite_extended_receiver_cap
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_parse_lttpr_repeater_count
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_retrieve_lttpr_cap
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_should_enable_fec
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_verify_link_cap
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dp_verify_link_cap_with_retries
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dpcd_read_sink_ext_caps
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dpcd_set_source_specific_data
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	dpcd_write_cable_id_to_dprx
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	edp_decide_link_settings
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	get_active_converter_info
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	get_cable_max_link_rate
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	get_clock_source_id
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	get_link_rate_from_max_link_bw
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	get_lttpr_max_link_rate
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	get_usbc_cable_id
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	increase_edp_link_rate
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	increase_lane_count
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	increase_link_rate
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	intersect_cable_id
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	intersect_frl_link_bw_support
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	is_dp_active_dongle
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	is_dp_branch_device
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	link_bw_kbps_from_raw_frl_link_rate_data
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	link_decide_link_settings
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	link_dp_get_encoding_format
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	mst_decide_link_encoding_format
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	reached_minimum_lane_count
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	reached_minimum_link_rate
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	read_dp_device_vendor_id
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	read_is_mst_supported
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	reduce_lane_count
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	reduce_link_rate
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	retrieve_cable_id
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	retrieve_link_cap
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	translate_dpcd_max_bpc
+Display: DP link	display/dc/link/protocols/link_dp_capability.c	wake_up_aux_channel
+Display: DP link	display/dc/link/protocols/link_dp_phy.c	dp_disable_link_phy
+Display: DP link	display/dc/link/protocols/link_dp_phy.c	dp_enable_link_phy
+Display: DP link	display/dc/link/protocols/link_dp_phy.c	dp_set_drive_settings
+Display: DP link	display/dc/link/protocols/link_dp_phy.c	dp_set_fec_enable
+Display: DP link	display/dc/link/protocols/link_dp_phy.c	dp_set_fec_ready
+Display: DP link	display/dc/link/protocols/link_dp_phy.c	dp_set_hw_lane_settings
+Display: DP link	display/dc/link/protocols/link_dp_phy.c	dpcd_write_rx_power_ctrl
+Display: DP link	display/dc/link/protocols/link_dp_phy.c	is_immediate_downstream
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	can_use_dio_link_hwss
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	disable_dio_audio_packet
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	disable_dio_link_output
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	enable_dio_audio_packet
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	enable_dio_dp_link_output
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	get_dio_link_hwss
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	reset_dio_stream_encoder
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	set_dio_dp_lane_settings
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	set_dio_dp_link_test_pattern
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	set_dio_throttled_vcp_size
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	setup_dio_audio_output
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	setup_dio_stream_attribute
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	setup_dio_stream_encoder
+Display: DP link	display/dc/link/hwss/link_hwss_dio.c	update_dio_stream_allocation_table
+Display: DP link	display/dc/link/link_validation.c	dp_active_dongle_validate_timing
+Display: DP link	display/dc/link/link_validation.c	dp_link_bandwidth_kbps
+Display: DP link	display/dc/link/link_validation.c	dp_validate_mode_timing
+Display: DP link	display/dc/link/link_validation.c	get_tmds_output_pixel_clock_100hz
+Display: DP link	display/dc/link/link_validation.c	link_validate_dpia_bandwidth
+Display: DP link	display/dc/link/link_validation.c	link_validate_mode_timing
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	dcn10_stream_encoder_construct
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_dig_connect_to_otg
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_dig_source_otg
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_reset_hdmi_stream_attribute
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_audio_mute_control
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_audio_setup
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_disable_dp_audio
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_dp_audio_disable
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_dp_audio_enable
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_dp_audio_setup
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_enable_audio_clock
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_enable_dp_audio
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_hdmi_audio_disable
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_hdmi_audio_setup
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_setup_dp_audio
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_se_setup_hdmi_audio
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_setup_stereo_sync
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_dp_blank
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_dp_get_pixel_format
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_dp_set_stream_attribute
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_dp_unblank
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_dvi_set_stream_attribute
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_hdmi_set_stream_attribute
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_send_immediate_sdp_message
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_set_avmute
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_set_stream_attribute_helper
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_set_throttled_vcp_size
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_stop_dp_info_packets
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_stop_hdmi_info_packets
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_update_dp_info_packets
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_stream_encoder_update_hdmi_info_packets
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_update_generic_info_packet
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	enc1_update_hdmi_info_packet
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	get_audio_clock_info
+Display: DP link	display/dc/dio/dcn10/dcn10_stream_encoder.c	speakers_to_channels

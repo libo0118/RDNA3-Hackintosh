@@ -373,6 +373,26 @@ of its own size (look `mode-d<D>-<W>x<H>-<Hz>hz`), then the smaller modes.
 | faster mode `now WxH 72.00 Hz`, picture right, the look's `DISPCLK` above the pixel clock x 1.015 | pass | hw-verified (`modeset2`), then `rdna3dispclk` into the profile |
 | faster mode set, then `modeset: ... underflows / does not run: back to` | clocks fine, DLG not (rescaled GOP values) | the look's DLG line + serial `modeset:` lines; port the full `dml32_rq_dlg_get_dlg_reg` for that mode |
 
+### DP link (`dplink`)
+
+`dplink` = `modeset` + `rdna3dplink=1`. A DP SST head (DIG_MODE 0, the GOP
+lit a native DP monitor) is offered modes and switched like a TMDS head,
+through `hw/dcn32_dp.c`: link down (stream blank, `SET_POWER` D3,
+TransmitterControl DISABLE), the DP DTO at the new pixel clock, the link
+cap verified once (training at the sink's maximum, falling back), then the
+link up at the smallest setting the mode needs. Serial / log lines start
+with `dp:`; ioreg `RDNA3,Head<n>,DPLink` sums the link up.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no `dp:` lines, the DP head offers only `current` | the boot-arg is missing, the head is not DP SST (`DCN: head n ... mode 0`?), the VBIOS path has no DDC line for the transmitter (`RDNA3,DisplayPath<n>`), or the sink gave no caps (`dp: ... gives no capabilities`) | `RDNA3,Connector<n>,DPCD`; a DP++ adaptor makes the head TMDS (mode 2/3): the `modeset` step covers it |
+| every mode `refused (8)` | no link setting of the (verified) link cap carries the mode | `dp: AUX n: DPCD ..., max link ...`; the VBIOS encoder caps (`RDNA3,DisplayPath<n>` HBR2/HBR3) limit it too |
+| `dp: link training HBR3x4 CR failed lane0 VS=3` then a pass at HBR2 | the fallback works: the cable / sink does not do HBR3 | pass; `RDNA3,Head<n>,DPLink` names the verified cap |
+| every training `CR failed lane0 VS=0`, no VS change | the sink never saw the pattern: the PHY is not running at the link rate (TransmitterControl ENABLE through the DMCUB failed: `dp: TransmitterControl action 1 ... failed`), wrong transmitter, or `DP_DPHY_TRAINING_PATTERN_SEL` not reaching the PHY | the DMUB lines of the log; the head's `DIG_BE_CNTL` / `DIG_BE_EN_CNTL` in the look |
+| CR done, `EQ failed` at every rate and lane count | pre-emphasis requests not applied: SETUP_VSEMPH's lane set (TransmitterControl v1.7 mode field) is ignored by the VBIOS table | the `lane status` / `adjust` debug lines; compare with the GOP's DPCD 0x103..0x106 |
+| trained, `dp: DIG f -> UNIPHY b ... trained`, monitor black or "no signal" | stream side: M/N, MSA or the DP DTO (DPREFCLK) | look: `DP_DTOn_PHASE / MODULO` (phase = pixel clock in Hz, modulo = DPREFCLK in Hz), `DP_VID_M`, `DP_VID_STREAM_CNTL` status; `dp: DIG n: SYMCLK_FE_ON stays off` = the FE is not connected to the BE |
+| `modeset: the DP link failed (-5): back to ...` and the old mode trains | the new mode's link setting does not train (see above) | record the rate / lanes; the old mode back is the expected recovery |
+
 ### Idle power (`rdna3pmexp=1`)
 
 Triage prints one line per variant (10 s each): baseline, GFXOFF allowed,

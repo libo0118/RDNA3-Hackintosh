@@ -13,6 +13,7 @@ HW      := hw/rdna3_hw.c hw/psp13.c hw/smu13.c hw/gmc11.c hw/mmhub302.c hw/ih60.
 HW      += hw/dchpd.c
 HW      += hw/dcn32_gamma.c
 HW      += hw/dcn32_state.c
+HW      += hw/dcn32_dp.c
 UAPI    := uapi/rdna3_drm.c
 COMMON_H := $(wildcard common/*.h) $(wildcard hw/*.h) $(wildcard uapi/*.h)
 

@@ -59,6 +59,11 @@ gamma rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdn
 # PMFW's DAL mailbox, SetHardMinByFreq) + line buffer and DLG/TTU for the
 # scaled modes (rdna3scaledlg: card run 20's underflow on pipe 1 at 960x540)
 modeset2 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1
+# DP SST mode set (hw/dcn32_dp.c): the modeset step + rdna3dplink=1, so a
+# monitor on native DisplayPort (no DP-to-HDMI/DVI adaptor) gets its EDID
+# modes and the switches too; the driver trains the link itself (sink
+# caps, link cap verified with fallback, 8b/10b training, MSA, unblank)
+dplink rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dplink=1
 # no rdna3 boot-arg at all: the kexts' default profile (rdna3_bootargs.h),
 # what an installed driver runs; the report tests it like big2 without the
 # power experiment, soak and hang test

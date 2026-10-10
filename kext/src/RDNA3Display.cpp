@@ -36,6 +36,7 @@ extern "C" {
 #include "dcn32_mode.h"
 #include "dcn32_clone.h"
 #include "dcn32_modeset.h"
+#include "dcn32_dp.h"
 #include "dcn32_gamma.h"
 }
 #include "rdna3k_abi.h"
@@ -749,6 +750,8 @@ void RDNA3Accel::displayFree()
         if (fModeTab[i]) IOFree(fModeTab[i], sizeof(rdna3_mode) * RD3K_MAX_MODES);
         fModeTab[i] = nullptr;
         fModeCount[i] = 0;
+        if (fDpLink[i]) IOFree(fDpLink[i], sizeof(rdna3_dp_link));
+        fDpLink[i] = nullptr;
     }
     if (fDispDev) IOFree(fDispDev, sizeof(rdna3_dev));
     if (fDispLock) IOLockFree(fDispLock);
@@ -955,6 +958,50 @@ const rdna3_dcn_clk_limits *RDNA3Accel::displayClkLimits()
     return fClkLim;
 }
 
+/* rdna3dplink=1: the link of a DP SST head (hw/dcn32_dp.c). The sink's
+ * capabilities are read again on every call (AUX side band, the link is
+ * not touched); the link cap a training verified (dp_verify_link_cap on the
+ * first mode set) is kept until the sink reports other capabilities.
+ * nullptr without the boot-arg, for a head that is not DP SST, or when the
+ * sink does not answer: such a head stays refused (RD_MODESET_NOT_TMDS).
+ * Called with fDispLock held. */
+rdna3_dp_link *RDNA3Accel::displayDpLink(uint32_t head, const rdna3_display_path *p)
+{
+    if (!rd3_arg("rdna3dplink", 0) || !fDcn || !fDispDev || head >= 4 || head >= fDcn->nheads || !p ||
+        p->ddc_line < 0)
+        return nullptr;
+    const rdna3_dcn_head *h = &fDcn->head[head];
+    if (h->dig_mode != 0 || h->dig_fe < 0 || h->dig_be < 0)
+        return nullptr;
+    rdna3_dp_link *l = fDpLink[head];
+    if (!l) {
+        l = (rdna3_dp_link *)IOMalloc(sizeof(rdna3_dp_link));
+        if (!l)
+            return nullptr;
+        bzero(l, sizeof(*l));
+        fDpLink[head] = l;
+    }
+    if (!l->d || l->aux != (uint32_t)p->ddc_line || l->be != (uint32_t)h->dig_be || l->fe != (uint32_t)h->dig_fe ||
+        l->otg != h->otg)
+        dcn32_dp_link_init(l, fDispDev, fDisplayDm, (uint32_t)p->ddc_line, (uint32_t)h->dig_be, (uint32_t)h->dig_fe,
+                           h->otg, p->hpd, (uint8_t)p->connector_objid, (uint8_t)p->encoder_objid, p->encoder_caps, 0);
+    l->dm = fDisplayDm;
+    uint8_t rx[16];
+    memcpy(rx, l->dpcd_caps.rx, sizeof(rx));
+    uint32_t oui = l->dpcd_caps.sink_dev_id;
+    int had = l->caps_valid;
+    int r = dcn32_dp_read_caps(l);
+    if (r) {
+        LOG("display: head %u: DP sink on AUX %u gives no capabilities (%d)", head, l->aux, r);
+        return nullptr;
+    }
+    if (had && (memcmp(rx, l->dpcd_caps.rx, sizeof(rx)) || oui != l->dpcd_caps.sink_dev_id)) {
+        l->verified = 0;
+        LOG("display: head %u: another DP sink: its link cap is verified again on the next mode set", head);
+    }
+    return l;
+}
+
 /* rdna3DisplayModes: the sink's EDID timings the head can switch to
  * (dcn32_modeset_plan says yes), the running one flagged CURRENT. The list
  * is kept: rdna3DisplaySetMode names a mode by its index in it. */
@@ -992,10 +1039,11 @@ IOReturn RDNA3Accel::displayModes(RD3KDisplayModes *r)
         uint32_t cur = head_pclk_khz(h, ed, fDispRefresh[r->head]), n = 0;
         int k = dcn32_match_head_mode(h, 0, ed);
         const rdna3_dcn_clk_limits *lim = displayClkLimits();
+        rdna3_dp_link *dpl = displayDpLink(r->head, p);   /* rdna3dplink=1 and a DP SST head */
         for (uint32_t i = 0; i < ed->nmodes && n < RD3K_MAX_MODES; i++) {
             const rdna3_mode *m = &ed->mode[i];
             int why = (int)i == k ? RD_MODESET_OK
-                    : p ? dcn32_modeset_plan_clk(fDispDev, fDcn, r->head, p, cur, m, lim, ms) : RD_MODESET_BAD_HEAD;
+                    : p ? dcn32_modeset_plan_dp(fDispDev, fDcn, r->head, p, dpl, cur, m, lim, ms) : RD_MODESET_BAD_HEAD;
             LOG("display: head %u mode %ux%u %u.%03u Hz %u kHz: %s (%d)", r->head, m->h_active, m->v_active,
                 m->refresh_mhz / 1000, m->refresh_mhz % 1000, m->pixel_khz,
                 (int)i == k ? "current" : why ? "refused" : "offered", why);
@@ -1069,8 +1117,10 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     /* the running pixel clock: what the last mode set left, else the
      * refresh measured at start */
     uint32_t cur = (uint32_t)((uint64_t)h->h_total * h->v_total * fDispRefresh[m->head] / 1000000ull);
-    int r = p ? dcn32_modeset_plan_clk(fDispDev, fDcn, m->head, p, cur, want, displayClkLimits(), ms)
+    rdna3_dp_link *dpl = p ? displayDpLink(m->head, p) : nullptr;   /* rdna3dplink=1: DP SST heads */
+    int r = p ? dcn32_modeset_plan_dp(fDispDev, fDcn, m->head, p, dpl, cur, want, displayClkLimits(), ms)
               : RD_MODESET_BAD_HEAD;
+    bool dpHead = r == RD_MODESET_OK && ms->dp;
     if (r == RD_MODESET_OK)
         r = dcn32_modeset_apply(fDispDev, dm, fDcn, fScale, ms, fDispDev->fb_start + m->vramOffset, m->pitch / 4,
                                 fDispDev->fb_start + m->oldVramOffset, m->oldPitch / 4, 200);
@@ -1082,7 +1132,18 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     }
     rdna3_dcn_clocks ck;
     dcn32_clk_read(fDispDev, &ck);   /* raised or not: the report sees them */
+    char dpval[128] = "";
+    if (dpHead)
+        snprintf(dpval, sizeof(dpval), "verified 0x%x x%u, running 0x%x x%u, last training %d, %u trainings, %u fallbacks",
+                 dpl->verified_link_cap.link_rate, dpl->verified_link_cap.lane_count, dpl->cur_link_settings.link_rate,
+                 dpl->cur_link_settings.lane_count, dpl->last_result, dpl->lt_runs, dpl->lt_fallbacks);
     IOLockUnlock(fDispLock);
+    if (dpHead) {
+        char key[32];
+        snprintf(key, sizeof(key), "RDNA3,Head%u,DPLink", m->head);
+        setProperty(key, dpval);
+        LOG("display: head %u DP link: %s", m->head, dpval);
+    }
     {
         char val[128];
         snprintf(val, sizeof(val), "VCO %u DISPCLK %u DPPCLK %u DPREFCLK %u DCFCLK %u DTBCLK %u kHz",

@@ -27,6 +27,15 @@
  * checks (underflow, CRC, picture); dcn32_modeset_apply puts the old timing
  * back when the new one does not run.
  *
+ * A DP SST head (DIG_MODE 0) goes through the same path when the caller
+ * hands a DP link (dcn32_modeset_plan_dp, hw/dcn32_dp.h, boot-arg
+ * rdna3dplink=1 in the kext): the link and the stream are taken down as
+ * link_set_dpms_off does, the pixel clock is the DP DTO
+ * (dcn31_program_pix_clk) instead of the PHY PLL, the link cap is verified
+ * once (dp_verify_link_cap: training with fallback), and link_set_dpms_on
+ * brings the link back: link settings for the mode, training, MSA,
+ * stream encoder, unblank. Without a link a DP head stays refused.
+ *
  * SPDX-License-Identifier: MIT
  */
 #ifndef RDNA3_DCN32_MODESET_H
@@ -35,6 +44,7 @@
 #include "dcn32.h"
 #include "dcn32_clk.h"
 #include "dcn32_mode.h"
+#include "dcn32_dp.h"
 #include "dmub32.h"
 #include "vbios.h"
 
@@ -65,18 +75,24 @@ typedef struct rdna3_dcn_modeset {
     rdna3_modeset_regs cur, want;     /* running now (read back), the target */
     /* dcn32_modeset_plan_clk: what apply raises first (0 = enough) */
     uint32_t raise_dispclk_khz, raise_dppclk_khz, pmfw;
+    /* DP SST head (dcn32_modeset_plan_dp): its link, the running and the
+     * new timing as modes (the MSA and the link settings come from them) */
+    rdna3_dp_link *dp;
+    rdna3_mode dp_cur, dp_want;
 } rdna3_dcn_modeset;
 
 /* why a mode is refused for a mode set (0 = can try) */
 enum {
     RD_MODESET_OK = 0,
-    RD_MODESET_NOT_TMDS = 1,     /* DP head: the link would need training */
+    RD_MODESET_NOT_TMDS = 1,     /* neither DVI / HDMI nor (with a DP link) DP SST */
     RD_MODESET_NO_TIMING = 2,
     RD_MODESET_INTERLACED = 3,
     RD_MODESET_CLOCKS = 4,       /* DISPCLK / DPPCLK below the pixel rate */
     RD_MODESET_TMDS_CLOCK = 5,   /* above 340 MHz (HDMI 1.4 TMDS, no scrambling) */
     RD_MODESET_SIZE = 6,
     RD_MODESET_BAD_HEAD = 7,
+    RD_MODESET_LINK_BW = 8,      /* DP: no link setting of the (verified) link cap carries it */
+    RD_MODESET_DP_LINK = 9,      /* DP: no sink capabilities read, or the link is not this head's */
 };
 
 /* Read head 'head' of 'dc' (running at 'cur_pclk_khz', from the EDID match
@@ -95,8 +111,19 @@ int  dcn32_modeset_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const 
 int  dcn32_modeset_plan_clk(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
                             uint32_t cur_pclk_khz, const rdna3_mode *m, const rdna3_dcn_clk_limits *lim,
                             rdna3_dcn_modeset *ms);
+/* The same for a head that may be DP SST: with 'dp' (dcn32_dp_link_init
+ * for this head's AUX engine, DIG back / front end and OTG, then
+ * dcn32_dp_read_caps) a DIG_MODE 0 head is planned too: the mode must fit
+ * a link setting of the link cap (verified, else the max one), and a head
+ * whose stream encoder runs two pixels per cycle needs even horizontal
+ * timings. 'dp' NULL = dcn32_modeset_plan_clk. */
+int  dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
+                           rdna3_dp_link *dp, uint32_t cur_pclk_khz, const rdna3_mode *m,
+                           const rdna3_dcn_clk_limits *lim, rdna3_dcn_modeset *ms);
 
 /* Program the plan with the surface at MC 'mc' (pitch_px pixels per row,
+ * DP: the link is trained in it; a failed training counts as a mode that
+ * does not run: the old timing comes back, trained again;
  * the new active size). After 'settle_ms' the OTG must count frames and
  * the HUBP report no underflow, else the old timing (and 'old_mc' /
  * 'old_pitch_px') goes back and RDNA3_EIO is returned. 'dc' and 'sc' are
