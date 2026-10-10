@@ -42,6 +42,10 @@ big rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3
 # cap, display sleep/wake, scaled modes switched by the report, a 2 min
 # soak, the hang test last (DMA only since card run 19)
 big2 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3pmexp=1 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3soak=2 rdna3hangtest=1
+# Metal only (after build_metal.sh): the desktop through the accelerator so
+# MetalPluginName is published, then the report's DMA/GFX, Vulkan and
+# mtlprobe; no modes, soak, power experiment or hang test (~6 min)
+metal rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1
 # the GFX hang and its recovery alone: in card run 19 it froze the whole
 # host. Nothing else runs; every recovery step is logged before it runs
 hanggfx rdna3lvl=8 rdna3msi=1 rdna3hangtest=2
