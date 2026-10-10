@@ -24,6 +24,11 @@ Legend: **[sim]** can be finished and verified in the simulator now;
 | B1-B4 clone onto a 2nd TMDS monitor | `bf056d5` | step 9b (`rdna3dmub=1 rdna3mirror=1`), needs 5b |
 | B7 HPD interrupts | `ab2665b` | unplug/plug: `display: HPDn ...` (with `rdna3msi=1`) |
 | C1 MES scheduler, C2 teardown order | `98702fd` | step 8c (`rdna3mes=1`): `RDNA3,MESResult = 0` |
+| CI fix (MES test state across the two sim runs) | `d9adaa7` | - |
+| B6 extended desktop on the clone | `cb15c8b` | step 9c (`rdna3mirror=2`): two displays in System Settings |
+| D2 PRIME + fence fds | `e5e2b21` | - (host tests) |
+| A1 EDID fetched at framebuffer start | `ba761b9` | step 9: monitor name instead of "Unknown" |
+| `rdna3vm step 8c / 9b / 9c` | `3f743e5` | - |
 
 Still open: A1 (monitor name), A3 (DMCUB on the card), B5 (bandwidth /
 watermarks for real modesets), B6 (one framebuffer per head, mode
