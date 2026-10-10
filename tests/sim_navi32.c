@@ -203,6 +203,9 @@ typedef struct sim {
     int dcn_pg;
     unsigned dcn_gated_drops, dcn_pg_no_request;
     unsigned hpd_irqs;
+    /* lit OTGs count frames while time passes; with OTG_CRC_EN their CRC
+     * is a function of what they scan out (surface address + timing) */
+    int dcn_frames;
     uint32_t i2c_off, i2c_seg;
     /* recovery: SQ_CMD kills, RLC safe mode, GRBM soft resets, mode-1 resets,
      * page-fault IVs */
@@ -2224,7 +2227,35 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
 }
 
 static void sim_udelay(void *c, uint32_t us) { (void)c; S.now_us += us; }
-static void sim_msleep(void *c, uint32_t ms) { (void)c; S.now_us += 1000ull * ms; }
+static void dcn_tick(uint32_t ms)
+{
+    for (uint32_t o = 0; o < RD_DCN_MAX_PIPES; o++) {
+        uint32_t *fc = &S.reg[OTG(regOTG0_OTG_STATUS_FRAME_COUNT, o)];
+        if (!(S.reg[OTG(regOTG0_OTG_CONTROL, o)] & OTG0_OTG_CONTROL__OTG_MASTER_EN_MASK))
+            continue;
+        *fc = (*fc + (ms + 15) / 16) & OTG0_OTG_STATUS_FRAME_COUNT__OTG_FRAME_COUNT_MASK;
+        if (!(S.reg[OTG(regOTG0_OTG_CRC_CNTL, o)] & OTG0_OTG_CRC_CNTL__OTG_CRC_EN_MASK))
+            continue;
+        for (uint32_t p = 0; p < RD_DCN_MAX_PIPES; p++) {
+            uint32_t cntl = S.reg[HUBP(regHUBP0_DCHUBP_CNTL, p)];
+            uint32_t crc;
+            if ((cntl & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) ||
+                ((cntl & HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL_MASK) >> HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL__SHIFT) != o)
+                continue;
+            crc = (S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, p)] * 2654435761u) ^
+                  S.reg[OTG(regOTG0_OTG_H_TOTAL, o)];
+            S.reg[OTG(regOTG0_OTG_CRC0_DATA_RG, o)] = (crc & 0xffff) | ((crc >> 16) << 16);
+            S.reg[OTG(regOTG0_OTG_CRC0_DATA_B, o)] = (crc ^ 0xa5a5) & 0xffff;
+        }
+    }
+}
+static void sim_msleep(void *c, uint32_t ms)
+{
+    (void)c;
+    S.now_us += 1000ull * ms;
+    if (S.dcn_frames)
+        dcn_tick(ms);
+}
 static void sim_wmb(void *c) { (void)c; }
 static void sim_vlog(void *c, int lvl, const char *fmt, va_list ap)
 {
@@ -3855,6 +3886,23 @@ static void run(const char *fwdir)
             CHECK(dcn32_read_state(&dev, &dc2) == 2 && dc2.head[0].pipe == 0 && dc2.head[0].otg == 1 &&
                   dc2.head[0].dig_fe == 3 && dc2.head[0].dig_be == 3 && dc2.head[0].dig_mode == 3 &&
                   dc2.head[0].h_total == dc2.head[1].h_total && dc2.head[0].address == dc2.head[1].address);
+            /* the check: the clone OTG counts frames and shows the boot
+             * head's picture (same CRC); a different surface differs */
+            {
+                rdna3_clone_check ck;
+                uint32_t crc0 = S.reg[OTG(regOTG0_OTG_CRC_CNTL, 2)];
+                S.dcn_frames = 1;
+                CHECK(dcn32_clone_verify(&dev, &cl, 50, &ck) == RDNA3_OK && ck.running && ck.crc_match &&
+                      ck.frames_dst == 4 && ck.frames_src == 4);
+                CHECK(S.reg[OTG(regOTG0_OTG_CRC_CNTL, 2)] == crc0);   /* restored */
+                S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, 0)] ^= 0x100000;
+                CHECK(dcn32_clone_verify(&dev, &cl, 50, &ck) == RDNA3_EIO && ck.running && !ck.crc_match);
+                S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, 0)] ^= 0x100000;
+                S.reg[OTG(regOTG0_OTG_CONTROL, 1)] &= ~1u;            /* clone OTG stopped */
+                CHECK(dcn32_clone_verify(&dev, &cl, 50, &ck) == RDNA3_EIO && !ck.running);
+                S.reg[OTG(regOTG0_OTG_CONTROL, 1)] |= 1u;
+                S.dcn_frames = 0;
+            }
             /* extend (rdna3mirror=2): the clone head flips to a surface of
              * its own, the boot head keeps the GOP's */
             {

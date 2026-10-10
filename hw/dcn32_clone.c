@@ -459,6 +459,46 @@ fail:
     return ret;
 }
 
+static void crc_read(rdna3_dev *d, uint32_t otg, uint32_t crc[3])
+{
+    uint32_t rg = RI(d, regOTG0_OTG_CRC0_DATA_RG, otg, OTG_S), b = RI(d, regOTG0_OTG_CRC0_DATA_B, otg, OTG_S);
+    crc[0] = GET(rg, OTG0_OTG_CRC0_DATA_RG, CRC0_R_CR);
+    crc[1] = GET(rg, OTG0_OTG_CRC0_DATA_RG, CRC0_G_Y);
+    crc[2] = GET(b, OTG0_OTG_CRC0_DATA_B, CRC0_B_CB);
+}
+
+int dcn32_clone_verify(rdna3_dev *d, const rdna3_dcn_clone *c, uint32_t wait_ms, rdna3_clone_check *k)
+{
+    const uint32_t fmask = OTG0_OTG_STATUS_FRAME_COUNT__OTG_FRAME_COUNT_MASK;
+    uint32_t crc_on = SET(SET(0u, OTG0_OTG_CRC_CNTL, OTG_CRC_CONT_EN, 1), OTG0_OTG_CRC_CNTL, OTG_CRC_EN, 1);
+    uint32_t saved_src = RI(d, regOTG0_OTG_CRC_CNTL, c->src_otg, OTG_S);
+    uint32_t saved_dst = RI(d, regOTG0_OTG_CRC_CNTL, c->dst_otg, OTG_S);
+    uint32_t f0s = RI(d, regOTG0_OTG_STATUS_FRAME_COUNT, c->src_otg, OTG_S) & fmask;
+    uint32_t f0d = RI(d, regOTG0_OTG_STATUS_FRAME_COUNT, c->dst_otg, OTG_S) & fmask;
+    uint32_t i;
+    /* optc1_configure_crc: clear, then continuous whole-frame CRC */
+    WI(d, regOTG0_OTG_CRC_CNTL, c->src_otg, OTG_S, 0);
+    WI(d, regOTG0_OTG_CRC_CNTL, c->dst_otg, OTG_S, 0);
+    WI(d, regOTG0_OTG_CRC_CNTL, c->src_otg, OTG_S, crc_on);
+    WI(d, regOTG0_OTG_CRC_CNTL, c->dst_otg, OTG_S, crc_on);
+    d->os.msleep(d->os.ctx, wait_ms);
+    k->frames_src = ((RI(d, regOTG0_OTG_STATUS_FRAME_COUNT, c->src_otg, OTG_S) & fmask) - f0s) & fmask;
+    k->frames_dst = ((RI(d, regOTG0_OTG_STATUS_FRAME_COUNT, c->dst_otg, OTG_S) & fmask) - f0d) & fmask;
+    crc_read(d, c->src_otg, k->crc_src);
+    crc_read(d, c->dst_otg, k->crc_dst);
+    WI(d, regOTG0_OTG_CRC_CNTL, c->src_otg, OTG_S, saved_src);
+    WI(d, regOTG0_OTG_CRC_CNTL, c->dst_otg, OTG_S, saved_dst);
+    k->running = k->frames_dst > 0;
+    k->crc_match = 1;
+    for (i = 0; i < 3; i++)
+        k->crc_match &= k->crc_src[i] == k->crc_dst[i];
+    RLOG(d, "clone: check over %u ms: frames boot %u clone %u, CRC boot %04x/%04x/%04x clone "
+         "%04x/%04x/%04x (%s)", wait_ms, k->frames_src, k->frames_dst, k->crc_src[0], k->crc_src[1],
+         k->crc_src[2], k->crc_dst[0], k->crc_dst[1], k->crc_dst[2],
+         !k->running ? "the clone OTG does not run" : k->crc_match ? "same picture" : "different picture");
+    return k->running && k->crc_match ? RDNA3_OK : RDNA3_EIO;
+}
+
 int dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
 {
     uint32_t v;

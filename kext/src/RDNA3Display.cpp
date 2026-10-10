@@ -353,6 +353,16 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm)
         if (ret == RDNA3_OK)
             ret = dcn32_clone_enable(fDispDev, dm, fMirror);
         if (ret == RDNA3_OK) {
+            /* does the new pipe make the boot head's picture? (frame
+             * counter + OTG CRC); a pass with a black monitor = PHY side */
+            rdna3_clone_check ck;
+            int vr = dcn32_clone_verify(fDispDev, fMirror, 100, &ck);
+            char chk[96];
+            snprintf(chk, sizeof(chk), "%s, %u frames in 100 ms, CRC %s",
+                     ck.running ? "running" : "NOT running", ck.frames_dst,
+                     ck.crc_match ? "same as the boot head" : "DIFFERENT");
+            setProperty("RDNA3,MirrorCheck", chk);
+            setNumber("RDNA3,MirrorCheckResult", (uint64_t)(int64_t)vr, 64);
             fMirrorOn = true;
             if (want == 2)
                 displayAddCloneHead();

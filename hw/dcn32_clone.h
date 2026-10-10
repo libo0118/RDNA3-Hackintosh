@@ -68,6 +68,18 @@ int  dcn32_clone_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head,
  * what it can. Logs every step. */
 int  dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c);
 
+/* Is the clone producing the picture? Over 'wait_ms' its OTG frame
+ * counter must move, and the OTG CRC (optc1_configure_crc, whole frame)
+ * of the clone must equal the boot head's: same surface, same timing,
+ * same colour pipeline. A clone that passes but stays black on the
+ * monitor points at the PHY / PLL side. Returns 0 when both hold. */
+typedef struct rdna3_clone_check {
+    uint32_t frames_src, frames_dst;          /* frames counted over the wait */
+    uint32_t crc_src[3], crc_dst[3];          /* R/Cr, G/Y, B/Cb */
+    int      running, crc_match;
+} rdna3_clone_check;
+int  dcn32_clone_verify(rdna3_dev *d, const rdna3_dcn_clone *c, uint32_t wait_ms, rdna3_clone_check *k);
+
 /* Undo: blank the HUBP, stop the OTG, transmitter DISABLE, take the MPCC
  * out of the tree, give the DET segments back. */
 int  dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c);
