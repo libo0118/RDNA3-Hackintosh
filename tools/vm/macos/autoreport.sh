@@ -122,6 +122,48 @@ base=rdna3-report-$label-$stamp
 partial() {
     curl -sf --max-time 10 -T "$extra" "$HOST/reports/$base-tests.txt" >/dev/null 2>&1
 }
+
+# progress on the desktop: a Terminal window in the logged-in user's
+# session follows /Users/Shared/rdna3-progress.log (one line per test and
+# its result), notifications at the start and the end. Nothing here is
+# needed for the report; without a logged-in user it stays silent.
+P=/Users/Shared/rdna3-progress.log
+win=
+as_user() {   # as_user command...: run in the console user's GUI session
+    u=$(stat -f %Su /dev/console 2>/dev/null)
+    uid=$(id -u "$u" 2>/dev/null)
+    [ -n "$uid" ] && [ "$u" != root ] && [ "$u" != loginwindow ] || return 1
+    launchctl asuser "$uid" sudo -u "$u" "$@" >/dev/null 2>&1
+}
+notify() {
+    as_user osascript -e "display notification \"$1\" with title \"RDNA3 test\"" &
+}
+prog() {
+    echo "$(date +%H:%M:%S)  $*" >> "$P"
+    if [ -z "$win" ]; then
+        printf '#!/bin/sh\nclear\necho "RDNA3 test progress (%s) - this window can be closed"\necho\nexec tail -n +1 -f %s\n' \
+            "$label" "$P" > /Users/Shared/rdna3-progress.command
+        chmod 755 /Users/Shared/rdna3-progress.command
+        as_user open -a Terminal /Users/Shared/rdna3-progress.command && win=1 &&
+            notify "Tests started: $(echo "$args" | tr ' ' '\n' | grep -c '^rdna3') rdna3 boot-args"
+    fi
+}
+hl=0
+hdr() {   # a test starts: its header in the results, a line in the window
+    echo "== $*"
+    hl=$(wc -l < "$extra" 2>/dev/null || echo 0)
+    prog "$(echo "$*" | sed 's/^rdna3_drminfo //') ..."
+    partial   # up before it runs: a test that freezes the VM still shows
+}
+done_() {   # done_ EXIT: the test's exit code and summary line
+    echo "[exit $1]"
+    partial
+    sum=$(tail -n +"$((hl + 1))" "$extra" 2>/dev/null |
+          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
+    if [ "$1" = 0 ]; then prog "    OK  ${sum}"; else prog "    FAIL (exit $1)  ${sum}"; fi
+}
+rm -f "$P"; touch "$P"; chmod 644 "$P"
+prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
 {
     echo "boot-args: $args"
     [ -n "$updated" ] && echo "== $updated"
@@ -152,24 +194,24 @@ partial() {
     if [ "${lvl:-0}" -ge 2 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
         for k in 1 2 3; do
             mkdir -p "$HOME/rdna3-scanout/$k"
-            echo "== rdna3_drminfo --scanout (look $k)"
+            hdr "rdna3_drminfo --scanout (look $k)"
             with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/$k" 2>&1
-            echo "[exit $?]"; partial
+            done_ $?
             [ $k = 3 ] || sleep 20
         done
         # display sleep (rdna3dpms=1): the heads must blank, then come back
         case " $args " in
             *" rdna3dpms=1 "*|*" rdna3dpms=2 "*)
-                echo "== display sleep: pmset displaysleepnow"
+                hdr "display sleep: pmset displaysleepnow"
                 pmset displaysleepnow 2>&1
                 sleep 8
                 for k in sleep wake; do
                     mkdir -p "$HOME/rdna3-scanout/$k"
-                    echo "== rdna3_drminfo --scanout (look $k)"
+                    hdr "rdna3_drminfo --scanout (look $k)"
                     with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/$k" 2>&1
-                    echo "[exit $?]"; partial
+                    done_ $?
                     if [ $k = sleep ]; then
-                        echo "== display wake: caffeinate -u"
+                        hdr "display wake: caffeinate -u"
                         caffeinate -u -t 3 2>&1
                         sleep 8
                     fi
@@ -180,55 +222,57 @@ partial() {
         case " $args " in
             *" rdna3modes=1 "*)
                 if [ -x "$D/bin/rdna3_modetest" ]; then
-                    echo "== rdna3_modetest list"
+                    hdr "rdna3_modetest list"
                     with_limit 30 "$D/bin/rdna3_modetest" list 2>&1
-                    echo "[exit $?]"; partial
-                    echo "== rdna3_modetest cycle"
+                    done_ $?
+                    hdr "rdna3_modetest cycle"
                     with_limit 150 "$D/bin/rdna3_modetest" cycle "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
-                    echo "[exit $?]"; partial
+                    done_ $?
                 fi ;;
         esac
     fi
     if [ "${lvl:-0}" -ge 7 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
-        echo "== rdna3_drminfo --dma-test"
+        hdr "rdna3_drminfo --dma-test"
         with_limit 60 "$D/bin/rdna3_drminfo" --dma-test 2>&1
-        echo "[exit $?]"; partial
+        done_ $?
     fi
     if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
-        echo "== rdna3_drminfo --gfx-test"
+        hdr "rdna3_drminfo --gfx-test"
         with_limit 60 "$D/bin/rdna3_drminfo" --gfx-test 2>&1
-        echo "[exit $?]"; partial
+        done_ $?
     fi
     # Vulkan: RADV (prepare --radv) straight through its ICD entry points,
     # no loader; libdrm_xnu talks to RDNA3Accel's user client
     if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_vktest" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then
-        echo "== rdna3_vktest"
+        hdr "rdna3_vktest"
         DYLD_LIBRARY_PATH="$D/bin" RADV_DEBUG=startup with_limit 90 "$D/bin/rdna3_vktest" \
             "$D/bin/libvulkan_radeon.dylib" 2>&1
-        echo "[exit $?]"; partial
+        done_ $?
     fi
     # Metal (build_metal.sh installed the plugin): devices and a compute
     # kernel through plugin -> translator -> RADV; the plugin's log after it
     if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/mtlprobe" ] && [ -d /Library/GPUBundles/RDNA3MTLDriver.bundle ]; then
         sync_metal "$D/bin"
-        echo "== mtlprobe (MetalPluginName: $(ioreg -r -c RDNA3Accelerator -w0 | grep -c MetalPluginName))"
+        hdr "mtlprobe (MetalPluginName: $(ioreg -r -c RDNA3Accelerator -w0 | grep -c MetalPluginName))"
         rm -f /tmp/rdna3-nvmtl.log
         NVMTL_LOG_PATH=/tmp/rdna3-nvmtl.log with_limit 90 "$D/bin/mtlprobe" 2>&1
-        echo "[exit $?]"; partial
+        done_ $?
         echo "== plugin log (last 60 lines)"
         tail -60 /tmp/rdna3-nvmtl.log 2>/dev/null
     elif [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/mtlprobe" ]; then
-        echo "== mtlprobe: plugin not installed (tools/build_metal.sh in the VM)"
+        hdr "mtlprobe: plugin not installed (tools/build_metal.sh in the VM)"
         with_limit 30 "$D/bin/mtlprobe" --list 2>&1
+        done_ $?
     fi
     # soak (rdna3soak=<minutes>): DMA + GFX jobs and the Vulkan test in a
     # loop; the PM trend in the serial log runs alongside
     soak=$(printf '%s\n' $args | sed -n 's/^rdna3soak=\([0-9]*\)$/\1/p' | head -1)
     if [ -n "$soak" ] && [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
-        echo "== soak for $soak min"; partial
+        hdr "soak for $soak min"
         end=$(( $(date +%s) + soak * 60 )); n=0; bad=0
         while [ "$(date +%s)" -lt "$end" ]; do
             n=$((n + 1))
+            [ $((n % 5)) = 1 ] && prog "    soak round $n, $bad failed so far"
             with_limit 30 "$D/bin/rdna3_drminfo" --dma-test --gfx-test >/dev/null 2>&1 || bad=$((bad + 1))
             if [ -x "$D/bin/rdna3_vktest" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then
                 DYLD_LIBRARY_PATH="$D/bin" with_limit 60 "$D/bin/rdna3_vktest" \
@@ -236,6 +280,8 @@ partial() {
             fi
         done
         echo "SOAK: $n rounds, $bad failed"
+        if [ "$bad" = 0 ]; then prog "    OK  SOAK: $n rounds"; else prog "    FAIL  SOAK: $n rounds, $bad failed"; fi
+        partial
     fi
     # last, it resets engines: a DMA job that never finishes, the kernel
     # must recover (rdna3hangtest=1); =2 also a GFX one, which froze the
@@ -243,17 +289,17 @@ partial() {
     case " $args " in
         *" rdna3hangtest=1 "*|*" rdna3hangtest=2 "*)
             if [ "${lvl:-0}" -ge 7 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
-                echo "== rdna3_drminfo --hang-test"; partial
+                hdr "rdna3_drminfo --hang-test"
                 with_limit 120 "$D/bin/rdna3_drminfo" --hang-test 2>&1
-                echo "[exit $?]"; partial
+                done_ $?
             fi ;;
     esac
     case " $args " in
         *" rdna3hangtest=2 "*)
             if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
-                echo "== rdna3_drminfo --hang-test-gfx"; partial
+                hdr "rdna3_drminfo --hang-test-gfx"
                 with_limit 120 "$D/bin/rdna3_drminfo" --hang-test-gfx 2>&1
-                echo "[exit $?]"; partial
+                done_ $?
             fi ;;
     esac
 } > "$extra" 2>&1
@@ -261,6 +307,7 @@ partial() {
 # the test results and pictures go up first: they matter most, and
 # collect.sh (log show, system_profiler on a GPU the hang test just reset)
 # can run out of time. The archive gets the same name.
+prog "tests done - sending the results, then the full report (up to 6 min)"
 curl -sf --max-time 30 -T "$extra" "$HOST/reports/$base-tests.txt" && echo "uploaded $base-tests.txt"
 for p in "$HOME"/rdna3-scanout/*/scanout-pipe*.ppm; do
     [ -f "$p" ] && curl -sf --max-time 30 -T "$p" \
@@ -270,4 +317,7 @@ done
 RDNA3_STAMP=$stamp with_limit 360 sh "$D/tools/macos/collect.sh" "$label"
 f="$HOME/$base.tar.gz"
 [ -f "$f" ] && curl -sf --max-time 60 -T "$f" "$HOST/reports/$base.tar.gz" && echo "uploaded $f"
+if [ -f "$f" ]; then prog "report sent - all done"; notify "All done, report sent"
+else prog "the full report did not finish (the test results were sent)"; notify "Done, without the full report"; fi
+case " $args " in *" rdna3vmauto=1 "*) prog "shutting down in 10 s"; sleep 10 ;; esac
 finish

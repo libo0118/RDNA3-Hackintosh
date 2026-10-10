@@ -200,6 +200,9 @@ Metal when the plugin is installed, the idle-power experiment, three looks at wh
 each monitor shows, display sleep and wake, a switch through scaled
 modes, a 2-minute soak, the hang test last), then shuts down. About 12
 minutes, nobody needs to watch the screens; both monitors connected.
+While it runs, a Terminal window on the macOS desktop shows each test and
+its result (OK / FAIL), with notifications at the start and the end
+(`/Users/Shared/rdna3-progress.log`); closing it changes nothing.
 You can also name steps yourself: `rdna3vm queue 5b 8c 9`.
 The [emergency exit](#emergency-exit) stops the VM **and** the rest of
 the queue. If the computer reboots on the way (amdgpu could not take the
