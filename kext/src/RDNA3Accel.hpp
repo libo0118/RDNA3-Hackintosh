@@ -194,6 +194,9 @@ private:
     int           fCloneHead   = -1;          /* rdna3mirror=2: fDcn head of the clone */
     IOService    *fHeadNub     = nullptr;     /* "RDNA3DisplayHead" for its framebuffer */
     void          displayAddCloneHead();
+    void          displayMirrorDisable(struct rdna3_dmub *dm);
+    bool          displayCloneSinkPresent();
+    struct rdna3_dmub *volatile fMirrorDm = nullptr;   /* the DMCUB the mirror uses (bring-up's) */
     struct thread_call *fHotplugCall = nullptr;
     volatile UInt32 fHotplugPending = 0;      /* bit n = HPD pin n changed */
     uint32_t      fHotplugEvents = 0;

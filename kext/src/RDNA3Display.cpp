@@ -321,6 +321,7 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm)
     PE_parse_boot_argn("rdna3mirror", &want, sizeof(want));
     if (!want)
         return;
+    fMirrorDm = dm;   /* hotplug lights it later, or switches it off */
     if (!fDcn || !fDispDev || !fDispLock || !fPaths || !fConnectors || !fDcn->nheads) {
         setProperty("RDNA3,Mirror", "failed: no boot head / connectors");
         return;
@@ -393,6 +394,30 @@ void RDNA3Accel::displayHotplugWork(void *owner, void *)
     a->setNumber("RDNA3,HotplugEvents", a->fHotplugEvents);
     a->setNumber("RDNA3,HotplugPins", pins);
     LOG("display: hotplug on pins 0x%x: %u connectors with a sink or DPCD", (unsigned)pins, a->fNConnectors);
+    /* rdna3mirror: the second monitor follows its cable */
+    if (rdna3_dmub *dm = a->fMirrorDm) {
+        if (a->fMirrorOn && !a->displayCloneSinkPresent()) {
+            LOG("display: the cloned monitor is gone: switching its pipe off");
+            a->displayMirrorDisable(dm);
+        } else if (!a->fMirrorOn) {
+            a->displayMirror(dm);
+        }
+    }
+}
+
+/* the connector the clone drives still has a sink (HPD) */
+bool RDNA3Accel::displayCloneSinkPresent()
+{
+    if (!fMirror || !fPaths || !fConnectors)
+        return false;
+    for (uint32_t i = 0; i < fNPaths; i++) {
+        if (fPaths[i].transmitter != (int8_t)fMirror->dst_be || fPaths[i].ddc_line < 0)
+            continue;
+        for (uint32_t c = 0; c < fNConnectors; c++)
+            if (fConnectors[c].aux == (uint32_t)fPaths[i].ddc_line)
+                return fConnectors[c].hpd != 0;
+    }
+    return false;
 }
 
 /* rdna3mirror=2: the clone becomes head <n> of fDcn (the boot heads keep
@@ -437,7 +462,16 @@ void RDNA3Accel::displayAddCloneHead()
     fCloneHead = -1;
 }
 
+/* the bring-up is going (its DMCUB with it): no hotplug may use it */
 void RDNA3Accel::displayMirrorOff(rdna3_dmub *dm)
+{
+    fMirrorDm = nullptr;
+    if (fHotplugCall)
+        thread_call_cancel_wait(fHotplugCall);
+    displayMirrorDisable(dm);
+}
+
+void RDNA3Accel::displayMirrorDisable(rdna3_dmub *dm)
 {
     if (!fMirrorOn || !fMirror || !fDispLock)
         return;
