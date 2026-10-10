@@ -170,6 +170,12 @@ partial() {
     [ -n "$HOST" ] || return 0
     curl -sf --max-time 10 -T "$extra" "$HOST/reports/$base-tests.txt" >/dev/null 2>&1
 }
+# the last boot's results that never reached the host (no network after a
+# system sleep): up now, under their own names
+for pf in /var/db/rdna3-pending-*; do
+    [ -f "$pf" ] && [ -n "$HOST" ] || continue
+    curl -sf --max-time 60 -T "$pf" "$HOST/reports/${pf#/var/db/rdna3-pending-}" >/dev/null 2>&1 && rm -f "$pf"
+done
 
 # progress on the desktop: a Terminal window in the logged-in user's
 # session follows /Users/Shared/rdna3-progress.log (one line per test and
@@ -334,9 +340,24 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         case " $args " in
             *" rdna3gamma=1 "*)
                 if [ -x "$D/bin/rdna3_modetest" ]; then
+                    # card runs 26-28: no setGammaTable reached the framebuffer.
+                    # Which way does the table go: the accelerator's display
+                    # pipe transactions (empty = no plane, gamma/options only)?
+                    echo "== display pipe counters before"; sysctl debug 2>/dev/null | grep -E "rdna3accel_iop" || true
                     hdr "rdna3_modetest gamma"
                     with_limit 150 "$D/bin/rdna3_modetest" gamma "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
                     done_ $?
+                    echo "== display pipe counters after"; sysctl debug 2>/dev/null | grep -E "rdna3accel_iop" || true
+                    echo "== IOAcceleratorFamily2: display pipe transaction and gamma symbols"
+                    for k in /System/Library/Extensions/IOAcceleratorFamily2.kext/Contents/MacOS/IOAcceleratorFamily2 \
+                             /System/Library/Extensions/IOGraphicsFamily.kext/IOGraphicsFamily \
+                             /System/Library/Extensions/IOGraphicsFamily.kext/Contents/MacOS/IOGraphicsFamily; do
+                        [ -f "$k" ] || continue
+                        echo "-- $k"
+                        nm -g "$k" 2>/dev/null | grep -E -i "DisplayPipeTransaction|gamma|DisplayPipe.*Cap" | head -80
+                    done
+                    echo "== kernel log: gamma and empty transactions"
+                    with_limit 30 log show --last 5m --style compact --predicate 'eventMessage CONTAINS[c] "gamma" OR eventMessage CONTAINS "iop: empty"' 2>/dev/null | tail -40
                 fi ;;
         esac
     fi
@@ -408,6 +429,18 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                         sleep 60
                         caffeinate -u -t 2 2>&1
                         sleep 15
+                        # card run 28: the VM's vmxnet3 did not come back from
+                        # the S3 and nothing after it reached the host; the
+                        # interface down and up again, DHCP again
+                        if ! curl -sf --max-time 5 -o /dev/null "$HOST/rdna3-bundle.sha256"; then
+                            for i in $(ifconfig -l 2>/dev/null); do
+                                case $i in en*) ifconfig "$i" down; sleep 1; ifconfig "$i" up; ipconfig set "$i" DHCP 2>/dev/null ;; esac
+                            done
+                            sleep 10
+                            curl -sf --max-time 5 -o /dev/null "$HOST/rdna3-bundle.sha256" &&
+                                echo "network: back after the interface was restarted" ||
+                                echo "network: still no host after the wake (the results go up at the next boot)"
+                        fi
                         s1=$(sysctl -n kern.sleeptime 2>/dev/null)
                         echo "kern.sleeptime before: $s0"
                         echo "kern.sleeptime after:  $s1, waketime $(sysctl -n kern.waketime 2>/dev/null)"
@@ -476,7 +509,10 @@ fi
 # collect.sh (log show, system_profiler on a GPU the hang test just reset)
 # can run out of time. The archive gets the same name.
 prog "tests done - sending the results, then the full report (up to 6 min)"
-curl -sf --max-time 30 -T "$extra" "$HOST/reports/$base-tests.txt" && echo "uploaded $base-tests.txt"
+# what could not go up now (no network after a sleep) goes up at the next boot
+cp "$extra" "/var/db/rdna3-pending-$base-tests.txt" 2>/dev/null
+curl -sf --max-time 30 -T "$extra" "$HOST/reports/$base-tests.txt" && echo "uploaded $base-tests.txt" &&
+    rm -f "/var/db/rdna3-pending-$base-tests.txt"
 for p in "$HOME"/rdna3-scanout/*/scanout-pipe*.ppm; do
     [ -f "$p" ] && curl -sf --max-time 30 -T "$p" \
         "$HOST/reports/$base-scanout$(basename "$(dirname "$p")")-$(basename "$p" | sed 's/^scanout-//')"
@@ -484,7 +520,9 @@ done
 # collect.sh packs everything from ~/rdna3-*
 RDNA3_STAMP=$stamp with_limit 360 sh "$D/tools/macos/collect.sh" "$label"
 f="$HOME/$base.tar.gz"
-[ -f "$f" ] && curl -sf --max-time 60 -T "$f" "$HOST/reports/$base.tar.gz" && echo "uploaded $f"
+[ -f "$f" ] && cp "$f" "/var/db/rdna3-pending-$base.tar.gz" 2>/dev/null
+[ -f "$f" ] && curl -sf --max-time 60 -T "$f" "$HOST/reports/$base.tar.gz" && echo "uploaded $f" &&
+    rm -f "/var/db/rdna3-pending-$base.tar.gz"
 if [ -f "$f" ]; then prog "report sent - all done"; notify "All done, report sent"
 else prog "the full report did not finish (the test results were sent)"; notify "Done, without the full report"; fi
 case " $args " in *" rdna3vmauto=1 "*) prog "shutting down in 10 s"; sleep 10 ;; esac

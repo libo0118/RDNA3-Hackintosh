@@ -695,3 +695,22 @@ shows the queue.
   (drmHeldHere/drmHeldByMe).
 - `hotplug`: passed - DP-3 pulled, its pipe down; plugged back, EDID re-read
   and the pipe lit again; the framebuffer told; both pipes lit at the end.
+
+### Card run 28 (queue `gamma sleep hanggfx`, build 103)
+
+- `gamma`: the new framebuffer ran (IOFBGammaWidth 12 / IOFBGammaCount 256
+  in ioreg) and still no setGammaTable call. With the accelerator's
+  display pipe (rdna3acceliop=1) the tables probably come in display-pipe
+  transactions without a plane. Diagnostic build: the report shows the
+  pipe counters around the gamma test, IOAcceleratorFamily2's transaction
+  and gamma symbols and the first empty transactions dumped; step `gamma0`
+  runs the same test without the accelerator.
+- `sleep`: system sleep with the card powered off; the resume bring-up ran
+  to the end ("resume #1 done, rings back up", the reinit deadlock fixed),
+  head 0 restored and running, head 1 restored but its check says LOST
+  (routing). The tests after the wake ran (drminfo, vktest) but nothing
+  reached the host: the VM's vmxnet3 did not come back from S3. autoreport
+  now restarts the interface after the wake, and results that could not go
+  up are kept and sent at the next boot.
+- `hanggfx`: passed - GFX hang noticed, waves killed, GFX soft reset, the
+  next GFX job verified (this step froze the VM before the deadlock fix).

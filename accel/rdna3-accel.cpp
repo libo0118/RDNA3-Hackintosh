@@ -821,7 +821,20 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
 
     IOSurface *s  = txn->getPlaneIOSurface(0, 0);
     OSObject  *ro = txn->getPlaneResource(0, 0);
-    if (!s && !ro) { OSAddAtomic64(1, &gCntIopEmpty); return kIOReturnSuccess; }
+    if (!s && !ro) {
+        /* card runs 26-28: the gamma tables never reached the framebuffer;
+         * a transaction with no plane carries gamma/options only - the
+         * first ones dumped so the layout can be read off a report */
+        const SInt64 e = OSAddAtomic64(1, &gCntIopEmpty);
+        static SInt32 gIopEmptyDumps;
+        if (e < 4 && OSIncrementAtomic(&gIopEmptyDumps) < 4) {
+            const volatile uint32_t *w = (const volatile uint32_t *)txn;
+            for (unsigned o = 0; o < 48; o += 8)
+                ALOG("iop: empty #%lld +0x%03x: %08x %08x %08x %08x %08x %08x %08x %08x", (long long)e, o * 4,
+                     w[o], w[o + 1], w[o + 2], w[o + 3], w[o + 4], w[o + 5], w[o + 6], w[o + 7]);
+        }
+        return kIOReturnSuccess;
+    }
 
     const volatile unsigned int *src = nullptr; unsigned w = 0, h = 0, pitch = 0; bool fromRes = false;
     RD3Resource *res = OSDynamicCast(RD3Resource, ro);
