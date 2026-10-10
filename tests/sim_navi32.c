@@ -782,8 +782,9 @@ static void make_sink(void)
     e[108] = 0; e[109] = 0; e[110] = 0; e[111] = 0x10;
     e[126] = 1;                           /* one extension */
     e[127] = edid_sum(e);
-    e[128] = 0x02; e[129] = 0x03; e[130] = 0x04; e[131] = 0x00;
-    memcpy(e + 132, dtd_1080p, 18);
+    e[128] = 0x02; e[129] = 0x03; e[130] = 0x07; e[131] = 0x00;
+    e[132] = 0x42; e[133] = 0x84; e[134] = 97;   /* video data block: VIC 4 (native), VIC 97 */
+    memcpy(e + 135, dtd_1080p, 18);
     e[255] = edid_sum(e + 128);
     S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 0)] = HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK;
 }
@@ -3772,10 +3773,31 @@ static void run(const char *fwdir)
                 got1080++;   /* once: the standard timing merged into the CTA detailed one */
                 CHECK(m->pixel_khz == 148500 && m->h_total == 2200 && m->v_total == 1125);
             }
-            if (m->h_active == 640 && m->v_active == 480)
-                got480++;
+            if (m->h_active == 640 && m->v_active == 480) {
+                got480++;   /* established: the DMT timing */
+                CHECK(m->pixel_khz == 25175 && m->h_total == 800 && m->v_total == 525 &&
+                      m->origin == RD_MODE_FROM_DMT && !m->h_sync_pos);
+            }
+            if (m->h_active == 800 && m->v_active == 600)
+                CHECK(m->pixel_khz == 40000 && m->h_front == 40 && m->h_sync == 128 && m->v_total == 628);
+            if (m->h_active == 1280 && m->v_active == 720)
+                CHECK(m->origin == RD_MODE_FROM_CTA && m->pixel_khz == 74250 && m->h_total == 1650);
+            if (m->h_active == 3840)
+                CHECK(m->origin == RD_MODE_FROM_CTA && m->pixel_khz == 594000 && m->v_total == 2250 &&
+                      m->refresh_mhz == 60000);
+            CHECK(m->pixel_khz != 0);   /* every mode has a timing now */
         }
-        CHECK(got1440 == 1 && got1080 == 1 && got480 == 1 && e.nmodes >= 4);
+        CHECK(got1440 == 1 && got1080 == 1 && got480 == 1 && e.nmodes >= 6);
+        {
+            /* drm_cvt_mode reduced blanking: 1920x1200R and 2560x1440R */
+            rdna3_mode c;
+            CHECK(edid_cvt_rb(1920, 1200, 60, &c) == 0 && c.pixel_khz == 154000 && c.h_total == 2080 &&
+                  c.v_total == 1235 && c.h_front == 48 && c.h_sync == 32 && c.v_front == 3 && c.v_sync == 6 &&
+                  c.h_sync_pos && !c.v_sync_pos);
+            CHECK(edid_cvt_rb(2560, 1440, 60, &c) == 0 && c.pixel_khz == 241500 && c.v_total == 1481);
+            CHECK(edid_dmt(1366, 768, 60, &c) == 0 && c.pixel_khz == 85500 && c.h_total == 1792);
+            CHECK(edid_dmt(1366, 768, 75, &c) == -1);
+        }
         CHECK(edid_parse(S.edid, 100, &e) == -1);
         S.edid[5] = 0;
         CHECK(edid_parse(S.edid, 128, &e) == -1);

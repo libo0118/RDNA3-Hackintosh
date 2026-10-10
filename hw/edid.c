@@ -33,6 +33,154 @@ static void add_mode(rdna3_edid *e, const rdna3_mode *m)
         e->mode[e->nmodes++] = *m;
 }
 
+static void zero_mode(rdna3_mode *m)
+{
+    uint32_t i;
+    for (i = 0; i < sizeof(*m); i++)
+        ((uint8_t *)m)[i] = 0;
+}
+
+static uint32_t refresh_mhz(uint32_t pclk_khz, uint32_t ht, uint32_t vt, int interlaced)
+{
+    uint64_t num = (uint64_t)pclk_khz * 1000000ull * (interlaced ? 2 : 1);
+    uint64_t den = (uint64_t)ht * vt;
+    return den ? (uint32_t)(num / den) : 0;
+}
+
+/* a timing in drm_mode's terms (hdisplay, hsync_start, hsync_end, htotal) */
+static void set_timing(rdna3_mode *m, uint32_t pclk, uint32_t ha, uint32_t hss, uint32_t hse, uint32_t ht,
+                       uint32_t va, uint32_t vss, uint32_t vse, uint32_t vt, int hpos, int vpos)
+{
+    m->pixel_khz = pclk;
+    m->h_active = ha;
+    m->h_front = hss - ha;
+    m->h_sync = hse - hss;
+    m->h_total = ht;
+    m->v_active = va;
+    m->v_front = vss - va;
+    m->v_sync = vse - vss;
+    m->v_total = vt;
+    m->h_sync_pos = (uint8_t)hpos;
+    m->v_sync_pos = (uint8_t)vpos;
+    m->refresh_mhz = refresh_mhz(pclk, ht, vt, m->interlaced);
+}
+
+/* drm_edid.c drm_dmt_modes (VESA DMT 1.0 r13), the entries standard and
+ * established timings name on today's monitors; plus the two Apple
+ * established modes of edid_est_modes */
+static const struct dmt {
+    uint16_t ha, hss, hse, ht, va, vss, vse, vt;
+    uint32_t pclk;
+    uint8_t hz, hpos, vpos;
+} dmt[] = {
+    {  640,  656,  752,  800,  480,  490,  492,  525,  25175, 60, 0, 0 },
+    {  640,  664,  704,  832,  480,  489,  492,  520,  31500, 72, 0, 0 },
+    {  640,  656,  720,  840,  480,  481,  484,  500,  31500, 75, 0, 0 },
+    {  640,  704,  768,  864,  480,  483,  486,  525,  30240, 67, 0, 0 },   /* Apple */
+    {  720,  738,  846,  900,  400,  412,  414,  449,  28320, 70, 0, 1 },
+    {  800,  824,  896, 1024,  600,  601,  603,  625,  36000, 56, 1, 1 },
+    {  800,  840,  968, 1056,  600,  601,  605,  628,  40000, 60, 1, 1 },
+    {  800,  856,  976, 1040,  600,  637,  643,  666,  50000, 72, 1, 1 },
+    {  800,  816,  896, 1056,  600,  601,  604,  625,  49500, 75, 1, 1 },
+    {  832,  864,  928, 1152,  624,  625,  628,  667,  57284, 75, 0, 0 },   /* Apple */
+    { 1024, 1048, 1184, 1344,  768,  771,  777,  806,  65000, 60, 0, 0 },
+    { 1024, 1048, 1184, 1328,  768,  771,  777,  806,  75000, 70, 0, 0 },
+    { 1024, 1040, 1136, 1312,  768,  769,  772,  800,  78750, 75, 1, 1 },
+    { 1152, 1216, 1344, 1600,  864,  865,  868,  900, 108000, 75, 1, 1 },
+    { 1280, 1390, 1430, 1650,  720,  725,  730,  750,  74250, 60, 1, 1 },
+    { 1280, 1352, 1480, 1680,  800,  803,  809,  831,  83500, 60, 0, 1 },
+    { 1280, 1376, 1488, 1800,  960,  961,  964, 1000, 108000, 60, 1, 1 },
+    { 1280, 1328, 1440, 1688, 1024, 1025, 1028, 1066, 108000, 60, 1, 1 },
+    { 1280, 1296, 1440, 1688, 1024, 1025, 1028, 1066, 135000, 75, 1, 1 },
+    { 1360, 1424, 1536, 1792,  768,  771,  777,  795,  85500, 60, 1, 1 },
+    { 1366, 1436, 1579, 1792,  768,  771,  774,  798,  85500, 60, 1, 1 },
+    { 1400, 1488, 1632, 1864, 1050, 1053, 1057, 1089, 121750, 60, 0, 1 },
+    { 1440, 1520, 1672, 1904,  900,  903,  909,  934, 106500, 60, 0, 1 },
+    { 1600, 1624, 1704, 1800,  900,  901,  904, 1000, 108000, 60, 1, 1 },
+    { 1600, 1664, 1856, 2160, 1200, 1201, 1204, 1250, 162000, 60, 1, 1 },
+    { 1680, 1784, 1960, 2240, 1050, 1053, 1059, 1089, 146250, 60, 0, 1 },
+    { 1920, 2008, 2052, 2200, 1080, 1084, 1089, 1125, 148500, 60, 1, 1 },
+    { 1920, 1968, 2000, 2080, 1200, 1203, 1209, 1235, 154000, 60, 1, 0 },
+};
+
+int edid_dmt(uint32_t h, uint32_t v, uint32_t hz, rdna3_mode *m)
+{
+    uint32_t i;
+    for (i = 0; i < sizeof(dmt) / sizeof(dmt[0]); i++) {
+        const struct dmt *t = &dmt[i];
+        if (t->ha != h || t->va != v || t->hz != hz)
+            continue;
+        zero_mode(m);
+        set_timing(m, t->pclk, t->ha, t->hss, t->hse, t->ht, t->va, t->vss, t->vse, t->vt, t->hpos, t->vpos);
+        m->origin = RD_MODE_FROM_DMT;
+        return 0;
+    }
+    return -1;
+}
+
+int edid_cvt_rb(uint32_t h, uint32_t v, uint32_t hz, rdna3_mode *m)
+{
+    /* drm_cvt_mode(reduced = true, interlaced = false, margins = false) */
+    const uint64_t HV = 1000;           /* HV_FACTOR */
+    const uint32_t MIN_VBLANK = 460;    /* CVT_RB_MIN_VBLANK, us */
+    const uint32_t H_SYNC = 32, H_BLANK = 160, V_FPORCH = 3, MIN_V_BPORCH = 6;
+    uint32_t hd = h - h % 8, vsync, vbi, vt, ht, hse, hss;
+    uint64_t hperiod, clock;
+    if (!h || !v || !hz)
+        return -1;
+    /* the aspect ratio picks the vsync width */
+    if (v * 4 / 3 == h) vsync = 4;
+    else if (v * 16 / 9 == h) vsync = 5;
+    else if (v * 16 / 10 == h) vsync = 6;
+    else if (v * 5 / 4 == h || v * 15 / 9 == h) vsync = 7;
+    else vsync = 10;
+    hperiod = (HV * 1000000ull - (uint64_t)MIN_VBLANK * HV * hz) / ((uint64_t)v * hz);
+    if (!hperiod)
+        return -1;
+    vbi = (uint32_t)((uint64_t)MIN_VBLANK * HV / hperiod) + 1;
+    if (vbi < V_FPORCH + vsync + MIN_V_BPORCH)
+        vbi = V_FPORCH + vsync + MIN_V_BPORCH;
+    vt = v + vbi;
+    ht = hd + H_BLANK;
+    clock = (uint64_t)ht * HV * 1000 / hperiod;
+    clock -= clock % 250;               /* CVT_CLOCK_STEP */
+    hse = ht - H_BLANK / 2;
+    hss = hse - H_SYNC;
+    zero_mode(m);
+    set_timing(m, (uint32_t)clock, hd, hss, hse, ht, v, v + V_FPORCH, v + V_FPORCH + vsync, vt, 1, 0);
+    m->origin = RD_MODE_FROM_CVT;
+    return 0;
+}
+
+/* drm_edid.c edid_cea_modes_1: the progressive VICs a desktop uses */
+static const struct cta {
+    uint8_t vic, hz, pos;
+    uint16_t ha, hss, hse, ht, va, vss, vse, vt;
+    uint32_t pclk;
+} cta[] = {
+    {  1, 60, 0,  640,  656,  752,  800,  480,  490,  492,  525,  25175 },
+    {  2, 60, 0,  720,  736,  798,  858,  480,  489,  495,  525,  27000 },
+    {  3, 60, 0,  720,  736,  798,  858,  480,  489,  495,  525,  27000 },
+    {  4, 60, 1, 1280, 1390, 1430, 1650,  720,  725,  730,  750,  74250 },
+    { 16, 60, 1, 1920, 2008, 2052, 2200, 1080, 1084, 1089, 1125, 148500 },
+    { 17, 50, 0,  720,  732,  796,  864,  576,  581,  586,  625,  27000 },
+    { 18, 50, 0,  720,  732,  796,  864,  576,  581,  586,  625,  27000 },
+    { 19, 50, 1, 1280, 1720, 1760, 1980,  720,  725,  730,  750,  74250 },
+    { 31, 50, 1, 1920, 2448, 2492, 2640, 1080, 1084, 1089, 1125, 148500 },
+    { 32, 24, 1, 1920, 2558, 2602, 2750, 1080, 1084, 1089, 1125,  74250 },
+    { 33, 25, 1, 1920, 2448, 2492, 2640, 1080, 1084, 1089, 1125,  74250 },
+    { 34, 30, 1, 1920, 2008, 2052, 2200, 1080, 1084, 1089, 1125,  74250 },
+    { 63, 120, 1, 1920, 2008, 2052, 2200, 1080, 1084, 1089, 1125, 297000 },
+    { 64, 100, 1, 1920, 2448, 2492, 2640, 1080, 1084, 1089, 1125, 297000 },
+    { 93, 24, 1, 3840, 5116, 5204, 5500, 2160, 2168, 2178, 2250, 297000 },
+    { 94, 25, 1, 3840, 4896, 4984, 5280, 2160, 2168, 2178, 2250, 297000 },
+    { 95, 30, 1, 3840, 4016, 4104, 4400, 2160, 2168, 2178, 2250, 297000 },
+    { 96, 50, 1, 3840, 4896, 4984, 5280, 2160, 2168, 2178, 2250, 594000 },
+    { 97, 60, 1, 3840, 4016, 4104, 4400, 2160, 2168, 2178, 2250, 594000 },
+};
+
+static void cta_vic(rdna3_edid *e, uint8_t svd);
+
 /* 18-byte detailed timing descriptor */
 static int parse_dtd(const uint8_t *p, rdna3_mode *m)
 {
@@ -163,7 +311,20 @@ static void descriptor(rdna3_edid *e, const uint8_t *p, int first)
 static void cta_block(rdna3_edid *e, const uint8_t *b)
 {
     uint32_t off = b[2], i;
-    if (b[0] != 0x02 || off < 4 || off > 127 - 18)
+    if (b[0] != 0x02 || off < 4 || off > 127)
+        return;
+    /* data block collection: the video data block's short video
+     * descriptors (cea_db_tag 2) */
+    for (i = 4; i < off;) {
+        uint32_t tag = b[i] >> 5, n = b[i] & 0x1f, k;
+        if (i + 1 + n > off)
+            break;
+        if (tag == 2)
+            for (k = 0; k < n; k++)
+                cta_vic(e, b[i + 1 + k]);
+        i += 1 + n;
+    }
+    if (off > 127 - 18)
         return;
     for (i = off; i + 18 <= 127; i += 18) {
         rdna3_mode m;
@@ -220,5 +381,37 @@ int edid_parse(const uint8_t *d, uint32_t len, rdna3_edid *e)
     for (i = 1; i < blocks; i++)
         if (edid_block_valid(d + i * 128))
             cta_block(e, d + i * 128);
+
+    /* standard and established entries carry size and rate only: their
+     * timing from DMT, else CVT reduced blanking (drm_mode_std); the
+     * interlaced 1024x768@87 has neither and stays without one */
+    for (i = 0; i < e->nmodes; i++) {
+        rdna3_mode *m = &e->mode[i], t;
+        uint32_t hz = (m->refresh_mhz + 500) / 1000;
+        if (m->pixel_khz || m->interlaced)
+            continue;
+        if (edid_dmt(m->h_active, m->v_active, hz, &t) && edid_cvt_rb(m->h_active, m->v_active, hz, &t))
+            continue;
+        t.preferred = m->preferred;
+        *m = t;
+    }
     return 0;
+}
+
+static void cta_vic(rdna3_edid *e, uint8_t svd)
+{
+    /* CTA-861-F: 129-192 are VICs 1-64 with the native flag in bit 7 */
+    uint8_t vic = svd >= 129 && svd <= 192 ? (uint8_t)(svd & 0x7f) : svd;
+    uint32_t i;
+    for (i = 0; i < sizeof(cta) / sizeof(cta[0]); i++) {
+        const struct cta *c = &cta[i];
+        rdna3_mode m;
+        if (c->vic != vic)
+            continue;
+        zero_mode(&m);
+        set_timing(&m, c->pclk, c->ha, c->hss, c->hse, c->ht, c->va, c->vss, c->vse, c->vt, c->pos, c->pos);
+        m.origin = RD_MODE_FROM_CTA;
+        add_mode(e, &m);
+        return;
+    }
 }
