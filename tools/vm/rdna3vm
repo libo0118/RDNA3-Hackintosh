@@ -482,7 +482,7 @@ QUEUE=$WORK/queue
 # every swap refused (no head named). From now on ONE big step per round:
 # "big" = everything at once, the accelerator tries its head strategies
 # itself and logs which one worked
-PENDING_STEPS="modeset modeset2 gamma sleep hotplug"
+PENDING_STEPS="modeset2 gamma sleep hotplug"
 
 cmd_queue() {
     load_conf
