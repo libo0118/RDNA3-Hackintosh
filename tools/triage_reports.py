@@ -323,9 +323,11 @@ def tail_file(path, n, pattern=None):
 def summary(path, serial=None):
     """one line per area for the newest report: what a round's message to
     the user is made of"""
-    with tarfile.open(path) as tar:
-        log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt")
-        args = read_member(tar, "01-boot-args.txt")
+    log = args = ""
+    if os.path.exists(path):   # else only the tests file came (collect.sh did not finish)
+        with tarfile.open(path) as tar:
+            log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt")
+            args = read_member(tar, "01-boot-args.txt")
     tests = path[:-len(".tar.gz")] + "-tests.txt"
     txt = open(tests, errors="replace").read() if os.path.exists(tests) else ""
     if serial:   # the kernel log of the same boot has the whole PM trend
@@ -379,13 +381,26 @@ def main():
     show_all = "--all" in sys.argv
     load_linux_reference(d)
     failed = False
-    reports = sorted(glob.glob(os.path.join(d, "rdna3-report-*.tar.gz")), key=os.path.getmtime)
+    reports = glob.glob(os.path.join(d, "rdna3-report-*.tar.gz"))
+    # a tests file whose archive never came (collect.sh killed): its results
+    # still count, under the archive's would-be name
+    for t in glob.glob(os.path.join(d, "rdna3-report-*-tests.txt")):
+        p = t[:-len("-tests.txt")] + ".tar.gz"
+        if p not in reports:
+            reports.append(p)
+    reports.sort(key=lambda p: os.path.getmtime(p if os.path.exists(p) else p[:-len(".tar.gz")] + "-tests.txt"))
     if not reports:
         print("!! no rdna3-report-*.tar.gz: macOS never sent a report (did not boot far enough,")
         print("   no network to the host, or the VM was stopped before ~2 min) - read the serial log")
         failed = True
     for p in reports:
-        failed |= report(p, show_all)
+        if os.path.exists(p):
+            failed |= report(p, show_all)
+        else:
+            print("=" * 78)
+            print(os.path.basename(p)[:-len(".tar.gz")] + ": TESTS ONLY - the archive never came "
+                  "(collect.sh did not finish in time); the kernel log is in the serial log")
+            failed = True
         tests = p[:-len(".tar.gz")] + "-tests.txt"
         if os.path.exists(tests):
             txt = open(tests, errors="replace").read()

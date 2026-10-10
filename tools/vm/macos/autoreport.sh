@@ -242,15 +242,18 @@ extra="$HOME/rdna3-extra.txt"
     esac
 } > "$extra" 2>&1
 
-# collect.sh packs everything from ~/rdna3-*; put the extra file next to its logs
-with_limit 180 sh "$D/tools/macos/collect.sh" "$label"
-f=$(ls -t "$HOME"/rdna3-report-*.tar.gz 2>/dev/null | head -1)
-if [ -n "$f" ]; then
-    curl -sf --max-time 60 -T "$f" "$HOST/reports/$(basename "$f")" && echo "uploaded $f"
-    curl -sf --max-time 30 -T "$extra" "$HOST/reports/$(basename "$f" .tar.gz)-tests.txt" || true
-    for p in "$HOME"/rdna3-scanout/*/scanout-pipe*.ppm; do
-        [ -f "$p" ] && curl -sf --max-time 30 -T "$p" \
-            "$HOST/reports/$(basename "$f" .tar.gz)-scanout$(basename "$(dirname "$p")")-$(basename "$p" | sed 's/^scanout-//')"
-    done
-fi
+# the test results and pictures go up first: they matter most, and
+# collect.sh (log show, system_profiler on a GPU the hang test just reset)
+# can run out of time. The archive gets the same name.
+stamp=$(date +%Y%m%d-%H%M%S)
+base=rdna3-report-$label-$stamp
+curl -sf --max-time 30 -T "$extra" "$HOST/reports/$base-tests.txt" && echo "uploaded $base-tests.txt"
+for p in "$HOME"/rdna3-scanout/*/scanout-pipe*.ppm; do
+    [ -f "$p" ] && curl -sf --max-time 30 -T "$p" \
+        "$HOST/reports/$base-scanout$(basename "$(dirname "$p")")-$(basename "$p" | sed 's/^scanout-//')"
+done
+# collect.sh packs everything from ~/rdna3-*
+RDNA3_STAMP=$stamp with_limit 360 sh "$D/tools/macos/collect.sh" "$label"
+f="$HOME/$base.tar.gz"
+[ -f "$f" ] && curl -sf --max-time 60 -T "$f" "$HOST/reports/$base.tar.gz" && echo "uploaded $f"
 finish

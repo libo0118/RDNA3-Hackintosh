@@ -6,7 +6,7 @@
 # of the last boot when the current user cannot read it.
 set -u
 label=${1:-test}
-stamp=$(date +%Y%m%d-%H%M%S)
+stamp=${RDNA3_STAMP:-$(date +%Y%m%d-%H%M%S)}   # autoreport.sh names it before
 dir=$(mktemp -d "/tmp/rdna3-report-XXXXXX")
 out="$HOME/rdna3-report-$label-$stamp.tar.gz"
 root=$(cd "$(dirname "$0")/../.." && pwd)
