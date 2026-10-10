@@ -13,8 +13,9 @@
  *
  *   rdna3_vktest [--loopback] [path/to/libvulkan_radeon.{dylib,so}]
  *
- * --loopback: libdrm_xnu's in-process loopback backend executes SDMA only,
- * so only transfer-only families submit work (tools/radv_host.sh).
+ * --loopback: libdrm_xnu's in-process loopback backend executes SDMA only:
+ * the transfer queue is verified, GFX/compute jobs are only submitted and
+ * fenced (RDNA3_LB_GFX_NOP) (tools/radv_host.sh).
  * Exit status: 0 = every tested queue verified, 1 = a failure, 2 = setup.
  *
  * SPDX-License-Identifier: MIT
@@ -119,7 +120,7 @@ static void free_buf(struct ctx *c, struct buf *o)
 
 /* fill 'size' bytes of a device buffer with 'pat' on queue family 'qf',
  * copy into a host buffer, check */
-static int fill_copy(struct ctx *c, uint32_t qf, VkDeviceSize size, uint32_t pat)
+static int fill_copy(struct ctx *c, uint32_t qf, VkDeviceSize size, uint32_t pat, int verify)
 {
     DFN(c->dev, vkGetDeviceQueue);
     DFN(c->dev, vkCreateCommandPool);
@@ -200,7 +201,9 @@ static int fill_copy(struct ctx *c, uint32_t qf, VkDeviceSize size, uint32_t pat
         printf("FAIL vkMapMemory -> %d (%s)\n", r, vkr(r));
         goto out;
     }
-    {
+    if (!verify) {
+        ret = 0;
+    } else {
         const uint32_t *w = (const uint32_t *)p;
         size_t n = (size_t)size / 4, bad = 0, first = n;
         for (size_t i = 0; i < n; i++)
@@ -238,6 +241,8 @@ int main(int argc, char **argv)
 #endif
     /* RADV exposes its SDMA transfer queue only on request: test it too */
     setenv("RADV_EXPERIMENTAL", "transfer_queue", 0);
+    if (loopback)
+        setenv("RDNA3_LB_GFX_NOP", "1", 1);
     void *h = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
     if (!h) {
         printf("FAIL dlopen %s: %s\n", lib, dlerror());
@@ -329,18 +334,18 @@ int main(int argc, char **argv)
             printf("queue family %u: sparse binding only, no copies to test\n", i);
             continue;
         }
-        if (loopback && !transfer_only) {
-            printf("queue family %u (%s): skipped (the loopback executes SDMA only)\n", i, what);
-            continue;
-        }
+        /* the loopback executes SDMA only: GFX/compute jobs are submitted
+         * and fenced (RDNA3_LB_GFX_NOP) but nothing runs, so only the
+         * submission path is checked there */
+        int verify = !(loopback && !transfer_only);
         /* 64 KiB: RADV's compute-shader fill/copy on GFX/compute queues;
          * 256 B: CP DMA (SDMA either way on a transfer queue) */
         static const VkDeviceSize sizes[2] = { 64 * 1024, 256 };
         for (int s = 0; s < 2; s++) {
             uint32_t pat = 0xc0de0000u | (i << 8) | (uint32_t)s;
-            int fr = fill_copy(&c, i, sizes[s], pat);
-            printf("%s queue family %u (%s): fill + copy of %llu bytes\n", fr ? "FAIL" : "PASS", i, what,
-                   (unsigned long long)sizes[s]);
+            int fr = fill_copy(&c, i, sizes[s], pat, verify);
+            printf("%s queue family %u (%s): fill + copy of %llu bytes%s\n", fr ? "FAIL" : "PASS", i, what,
+                   (unsigned long long)sizes[s], verify ? "" : " (submitted and fenced, not executed: loopback)");
             failed |= fr != 0;
             tested++;
             if (fr)

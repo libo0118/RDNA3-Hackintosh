@@ -60,6 +60,13 @@ uapi/. Before them, each of these failed in turn: no physical device
 (`ac_drm_query_gpu_info`), `vkCreateDevice`, `vkMapMemory` - all three
 would have failed on the card the same way.
 
+The loopback cannot run shaders, so with `RDNA3_LB_GFX_NOP=1` (rdna3_vktest
+`--loopback` sets it) GFX and compute jobs are accepted and fenced without
+running; their PM4 framing is still walked (every packet inside its IB,
+every chained `INDIRECT_BUFFER` on mapped VA). Result: all six submits
+(general, compute, transfer x 64 KiB / 256 B) pass; the transfer queue's
+data is verified. `RDNA3_LB_TRACE=1` prints packet counts per job.
+
 ## rdna3_vktest
 
 `userspace/rdna3_vktest.c` loads the ICD directly (the VM has no Vulkan

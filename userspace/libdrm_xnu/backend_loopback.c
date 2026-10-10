@@ -149,12 +149,79 @@ static int lb_run_ib(struct lb_vm *vm, const uint32_t *ib, uint32_t ndw)
     }
     return 0;
 }
+/* GFX/compute jobs are not executed, but their PM4 framing is: every
+ * packet must fit in its IB, and every INDIRECT_BUFFER (RADV chains its
+ * command streams) must point at mapped memory of this VM, walked to a
+ * small depth. Catches broken packets and missing VA mappings on the host. */
+static int lb_pm4_walk(struct lb_vm *vm, uint64_t va, uint32_t ndw, int depth, uint32_t *npkt)
+{
+    const uint32_t *ib = (const uint32_t *)lb_va(vm, va, 4ull * ndw);
+    uint32_t p = 0;
+    if (!ib)
+        return -RD_EFAULT;
+    if (depth > 8)
+        return 0;
+    while (p < ndw) {
+        uint32_t h = ib[p], type = h >> 30, len;
+        if (type == 2 || h == 0xffff1000u) {               /* filler, 1-dword NOP (PKT3_NOP_PAD) */
+            p++;
+            continue;
+        }
+        len = ((h >> 16) & 0x3fff) + 2;                    /* type 0 / 3 */
+        if (type == 1 || p + len > ndw) {
+            fprintf(stderr, "loopback: PM4 dword %u of %u at 0x%llx: header 0x%08x\n", p, ndw,
+                    (unsigned long long)va, h);
+            if (getenv("RDNA3_LB_TRACE")) {
+                uint32_t q;
+                for (q = 0; q < ndw; q++)
+                    fprintf(stderr, "  [%3u] 0x%08x\n", q, ib[q]);
+            }
+            return -RD_EINVAL;
+        }
+        if (type == 3 && ((h >> 8) & 0xff) == 0x3f && len >= 4) {   /* INDIRECT_BUFFER */
+            uint64_t cva = (ib[p + 1] & ~3u) | ((uint64_t)(ib[p + 2] & 0xffff) << 32);
+            uint32_t cdw = ib[p + 3] & 0xfffff;
+            int r;
+            if (cva >> 47)                                 /* canonical high half */
+                cva |= 0xffff000000000000ull;
+            r = cdw ? lb_pm4_walk(vm, cva, cdw, depth + 1, npkt) : 0;
+            if (r)
+                return r;
+        }
+        (*npkt)++;
+        p += len;
+    }
+    return 0;
+}
+
 static int lb_submit(void *c, void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
                      const rdna3_cs_job *job, uint64_t *seq)
 {
     struct lb_vm *vm = (struct lb_vm *)p;
     uint32_t i;
     (void)c;
+    /* RDNA3_LB_GFX_NOP=1: GFX/compute jobs are accepted and complete without
+     * running (there is no shader core here), so a client's whole CS path -
+     * chunks, BO lists, syncobjs, fences - can be exercised on the host */
+    if ((ip == AMDGPU_HW_IP_GFX || ip == AMDGPU_HW_IP_COMPUTE) && !ring && getenv("RDNA3_LB_GFX_NOP")) {
+        uint32_t npkt = 0;
+        for (i = 0; i < n; i++) {
+            int r = lb_pm4_walk(vm, ibs[i].va, ibs[i].length_dw, 0, &npkt);
+            if (r) {
+                fprintf(stderr, "loopback: %s IB %u at 0x%llx (%u dw): bad PM4 framing or unmapped VA (%d)\n",
+                        ip == AMDGPU_HW_IP_GFX ? "GFX" : "compute", i, (unsigned long long)ibs[i].va,
+                        ibs[i].length_dw, r);
+                return r;
+            }
+        }
+        if (getenv("RDNA3_LB_TRACE"))
+            fprintf(stderr, "loopback: %s job, %u IB(s), %u PM4 packets\n",
+                    ip == AMDGPU_HW_IP_GFX ? "GFX" : "compute", n, npkt);
+        *seq = ++g_seq;
+        if (job->uf_bo)
+            memcpy((uint8_t *)job->uf_bo->backing + job->uf_offset, seq, 8);
+        return 0;
+    }
     if (ip != AMDGPU_HW_IP_DMA || ring)
         return -RD_EINVAL;
     for (i = 0; i < n; i++) {
@@ -215,6 +282,10 @@ static void dev_init(void)
     rdna3_drm_device_init(&g_dev, &ops, &disc, 0x747E, 0xC8, 0, 16ull << 30, 256ull << 20, 8ull << 30);
     rdna3_drm_device_set_enumeration_only(&g_dev, 1);
     rdna3_drm_device_set_ring_ready(&g_dev, AMDGPU_HW_IP_DMA, 1);   /* software SDMA */
+    if (getenv("RDNA3_LB_GFX_NOP")) {   /* GFX/compute jobs accepted, not run (lb_submit) */
+        rdna3_drm_device_set_ring_ready(&g_dev, AMDGPU_HW_IP_GFX, 1);
+        rdna3_drm_device_set_ring_ready(&g_dev, AMDGPU_HW_IP_COMPUTE, 1);
+    }
     /* placeholder until read from a real Navi 32 (RDNA3,GBAddrConfig in ioreg) */
     g_dev.gb_addr_config = 0x00000545;
     g_dev.gc_base0 = 0x1260;
