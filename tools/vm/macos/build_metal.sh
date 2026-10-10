@@ -36,8 +36,11 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo --version
 
 say "sources from the host (rdna3vm window serves the checkout)"
+# the translator's cargo build survives a re-run (minutes saved)
+[ -d "$W/src/build/metal/xlate-target" ] && rm -rf "$W/xlate-target" && mv "$W/src/build/metal/xlate-target" "$W/"
 rm -rf "$W/src" && mkdir -p "$W/src"
 curl -sf "$HOST/rdna3-src.tar.gz" | tar -xz -C "$W/src"
+[ -d "$W/xlate-target" ] && mkdir -p "$W/src/build/metal" && mv "$W/xlate-target" "$W/src/build/metal/"
 [ -f "$W/src/metal/Makefile" ] || { echo "no sources at $HOST/rdna3-src.tar.gz (update rdna3vm: git pull, then rdna3vm window)"; exit 1; }
 
 say "plugin + translator"

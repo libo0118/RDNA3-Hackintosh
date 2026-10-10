@@ -24,3 +24,10 @@
 10 2026-10-10 vm RDNA3Accelerator starts (IOGraphicsAccelerator2::start -> 1), WindowServer allocates its surfaces in VRAM through it; the display pipe gate is still closed (black desktop, cursor only)
 10a 2026-10-10 vm macOS desktop composited through RDNA3Accelerator: display pipe over the scanout, WindowServer frames flipped to VRAM surfaces and painted live on head 0, no WindowServer crash (rdna3accelfb=4 rdna3acceliop=1)
 9s 2026-10-10 vm scanout read-back (rdna3_drminfo --scanout): both pipes lit at 1920x1080, the macOS login screen in the pictures; the second pipe scanned the first one's surface at times (swap routing)
+8w 2026-10-10 vm rdna3_vktest 12/12: a triangle drawn through a render pass and read back, buffer -> image -> image -> buffer copies on GFX and SDMA (tiled), a timeline semaphore
+8s 2026-10-10 vm soak 2 min: 283 rounds of DMA/GFX jobs and the Vulkan test, 0 failed
+8h 2026-10-10 vm DMA hang noticed after 10 s, SDMA0 soft reset, the next DMA job verified on a new connection
+8i 2026-10-10 vm idle GFXCLK cap at 500 MHz: 14-15 W idle (52 W before, Linux 12 W), lifted on the next submit
+9d 2026-10-10 vm display sleep/wake: both pipes blanked (HUBP blank) and lit again
+9m 2026-10-10 vm scaled modes 1600x900 and 960x540 on both heads through the DPP scaler on the native timing, back to native; pipe 1 flags an underflow at 960x540
+10m 2026-10-10 vm Metal lists the card through RDNA3MTLDriver: "AMD Radeon RX 7800 XT (RDNA3MTL over ... (RADV NAVI32))", families Common1-3, Mac2, Metal3; shader translation not yet

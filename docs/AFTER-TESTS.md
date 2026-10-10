@@ -510,3 +510,16 @@ to disk). The GFX hang is now its own step (`hanggfx`, `rdna3hangtest=2`);
 `big2`'s hang test is DMA only. Every recovery step is logged with 100 ms
 for the log to drain before it runs, and the host fsyncs the serial log
 every 2 s, so the next attempt shows the step that takes the bus down.
+
+### Card run 20 (step `big2`, CI build 97, Metal plugin installed)
+
+Everything but Metal passed: three looks and display sleep/wake (both pipes
+blanked, lit again), four scaled-mode switches and back to native (pipe 1
+flags UNDERFLOW at 960x540, picture intact: watermarks for the scaled
+source are not programmed), DMA/GFX jobs, rdna3_vktest 12/12 (triangle,
+GFX and SDMA image copies, timeline semaphore), soak 283 rounds 0 failed,
+DMA hang recovered, idle 14 W. Metal lists the card ("AMD Radeon RX 7800 XT
+(RDNA3MTL over ...)", families up to Metal3); newLibraryWithSource failed in
+the plugin: no air-runtime/libLLVM.dylib in the bundle and no air-opt. The
+plugin now falls back to Apple's libLLVM in GPUCompiler.framework (the
+plugin's GL path already uses its C API).

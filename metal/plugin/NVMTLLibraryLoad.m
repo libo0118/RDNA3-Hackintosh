@@ -413,6 +413,30 @@ static void nvmtl_llvm_diagnostic(void *diagnostic, void *context) {
     char *message = nvLLVMGetDiagInfoDescription(diagnostic);
     if (message) { nvlog("library: bitcode reader: %s", message); nvLLVMDisposeMessage(message); }
 }
+/* RDNA3MTL: the AMD install ships no air-runtime/libLLVM.dylib and no
+ * air-opt. macOS has Apple's own LLVM, which reads AIR by definition, in
+ * GPUCompiler.framework (NVMTLGL.m already uses its C API): the newest
+ * numbered version there that dlopens. */
+static void *rdna3mtl_system_llvm(void) {
+    static const char *base = "/System/Library/PrivateFrameworks/GPUCompiler.framework/Versions";
+    char best[64] = "", path[PATH_MAX];
+    DIR *dh = opendir(base);
+    struct dirent *de;
+    while (dh && (de = readdir(dh)))
+        if (de->d_name[0] >= '0' && de->d_name[0] <= '9' && strlen(de->d_name) < sizeof best &&
+            (!best[0] || strtoul(de->d_name, NULL, 10) > strtoul(best, NULL, 10)))
+            strlcpy(best, de->d_name, sizeof best);
+    if (dh) closedir(dh);
+    const char *tries[] = { best, "Current", "A", "32023" };
+    for (unsigned i = 0; i < sizeof tries / sizeof *tries; i++) {
+        if (!tries[i][0]) continue;
+        snprintf(path, sizeof path, "%s/%s/Libraries/libLLVM.dylib", base, tries[i]);
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (h) { nvlog("library: bitcode reader from the system: %s", path); return h; }
+        nvlog("library: no %s (%s)", path, dlerror());
+    }
+    return NULL;
+}
 static BOOL nvmtl_bitcode_reader_ready(void) {
     static dispatch_once_t once; static BOOL ready;
     dispatch_once(&once, ^{
@@ -421,7 +445,8 @@ static BOOL nvmtl_bitcode_reader_ready(void) {
         NSString *path = [[@(info.dli_fname) stringByDeletingLastPathComponent]
                          stringByAppendingPathComponent:@"air-runtime/libLLVM.dylib"];
         void *library = dlopen(path.fileSystemRepresentation, RTLD_NOW | RTLD_LOCAL);
-        if (!library) { nvlog("library: in-memory bitcode reader unavailable: %s", dlerror()); return; }
+        if (!library) { nvlog("library: no bundled bitcode reader: %s", dlerror()); library = rdna3mtl_system_llvm(); }
+        if (!library) { nvlog("library: in-memory bitcode reader unavailable"); return; }
 #define NV_LLVM_LOAD(name) do { nv##name = (void *)dlsym(library, #name); if (!nv##name) { nvlog("library: bitcode reader missing " #name); return; } } while (0)
         NV_LLVM_LOAD(LLVMContextCreate);
         NV_LLVM_LOAD(LLVMContextDispose);
