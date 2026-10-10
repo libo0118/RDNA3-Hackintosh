@@ -123,10 +123,17 @@ import os, struct, sys, time
 card, dbg, out = sys.argv[1:4]
 def rd(p, n=None, binary=False):
     try:
-        with open(p, 'rb') as f:
-            d = f.read() if n is None else f.read(n)
+        if n is not None:              # debugfs u32 files want exactly n bytes, unbuffered
+            fd = os.open(p, os.O_RDONLY)
+            try:
+                d = os.read(fd, n)
+            finally:
+                os.close(fd)
+        else:
+            with open(p, 'rb') as f:
+                d = f.read()
         return d if binary else d.decode(errors='replace').strip()
-    except OSError as e:
+    except OSError:
         return None
 lines = []
 for i in range(40):                      # 20 s
@@ -147,7 +154,9 @@ if dbg and os.path.exists(dbg + '/amdgpu_gfxoff_residency'):
         time.sleep(5)
         r = rd(dbg + '/amdgpu_gfxoff_residency', 4, True)
         with open(dbg + '/amdgpu_gfxoff_residency', 'wb') as f: f.write(struct.pack('<I', 0))
-        open(out + '/gfxoff-residency.txt', 'w').write('residency (x0.01 %%): %d\n' % struct.unpack('<I', r)[0])
+        open(out + '/gfxoff-residency.txt', 'w').write(
+            'residency (x0.01 %%): %d\n' % struct.unpack('<I', r)[0] if r and len(r) == 4
+            else 'residency: not readable on this card/kernel\n')
     except OSError as e:
         open(out + '/gfxoff-residency.txt', 'w').write('failed: %s\n' % e)
 for n in ('amdgpu_gfxoff_count', 'amdgpu_gfxoff_entrycount'):
