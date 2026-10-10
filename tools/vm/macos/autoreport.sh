@@ -61,8 +61,32 @@ if [ "${1:-}" = --sync-metal ]; then
     exit 0
 fi
 
+# the progress window as soon as somebody is logged in, with the time the
+# tests start: the 90 s pause after boot (the desktop and the driver
+# settle first) looked like nothing was happening
+early_window() {
+    w=0
+    while [ $w -lt 60 ]; do
+        u=$(stat -f %Su /dev/console 2>/dev/null)
+        [ -n "$u" ] && [ "$u" != root ] && [ "$u" != loginwindow ] && break
+        sleep 2; w=$((w + 2))
+    done
+    uid=$(id -u "$u" 2>/dev/null)
+    [ -n "$uid" ] && [ "$u" != root ] && [ "$u" != loginwindow ] || return 0
+    P=/Users/Shared/rdna3-progress.log
+    echo "$(date +%H:%M:%S)  macOS is up; the tests start at $(date -v+$((90 - w))S +%H:%M:%S) (the desktop settles first)" > "$P"
+    chmod 644 "$P"
+    printf '#!/bin/sh\nclear\necho "RDNA3 test progress - this window can be closed"\necho\nexec tail -n +1 -F %s\n' \
+        "$P" > /Users/Shared/rdna3-progress.command
+    chmod 755 /Users/Shared/rdna3-progress.command
+    launchctl asuser "$uid" sudo -u "$u" open -a Terminal /Users/Shared/rdna3-progress.command >/dev/null 2>&1 &&
+        touch /tmp/rdna3-progress.win
+}
+
 if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ]; then
-    sleep 90
+    rm -f /tmp/rdna3-progress.win
+    early_window
+    sleep $((90 - ${w:-0}))
     # newest report scripts from the host (rdna3vm start_share); a new
     # autoreport.sh takes over right away
     for f in collect.sh ioreg_discovery.sh autoreport.sh; do
@@ -143,7 +167,7 @@ partial() {
 # its result), notifications at the start and the end. Nothing here is
 # needed for the report; without a logged-in user it stays silent.
 P=/Users/Shared/rdna3-progress.log
-win=
+win=$([ -f /tmp/rdna3-progress.win ] && echo 1)
 as_user() {   # as_user command...: run in the console user's GUI session
     u=$(stat -f %Su /dev/console 2>/dev/null)
     uid=$(id -u "$u" 2>/dev/null)
@@ -156,7 +180,7 @@ notify() {
 prog() {
     echo "$(date +%H:%M:%S)  $*" >> "$P"
     if [ -z "$win" ]; then
-        printf '#!/bin/sh\nclear\necho "RDNA3 test progress (%s) - this window can be closed"\necho\nexec tail -n +1 -f %s\n' \
+        printf '#!/bin/sh\nclear\necho "RDNA3 test progress (%s) - this window can be closed"\necho\nexec tail -n +1 -F %s\n' \
             "$label" "$P" > /Users/Shared/rdna3-progress.command
         chmod 755 /Users/Shared/rdna3-progress.command
         as_user open -a Terminal /Users/Shared/rdna3-progress.command && win=1 &&
@@ -177,7 +201,8 @@ done_() {   # done_ EXIT: the test's exit code and summary line
           grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
     if [ "$1" = 0 ]; then prog "    OK  ${sum}"; else prog "    FAIL (exit $1)  ${sum}"; fi
 }
-rm -f "$P"; touch "$P"; chmod 644 "$P"
+[ -n "$win" ] || { rm -f "$P"; touch "$P"; chmod 644 "$P"; }
+[ -n "$win" ] && notify "Tests started: $(echo "$args" | tr ' ' '\n' | grep -c '^rdna3') rdna3 boot-args"
 prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
 {
     echo "boot-args: $args"
