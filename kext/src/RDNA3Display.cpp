@@ -25,6 +25,7 @@
 extern "C" {
 #include "rdna3_hw.h"
 #include "dcn32.h"
+#include "dcn32_clk.h"
 #include "dcaux.h"
 #include "edid.h"
 #include "vbios.h"
@@ -307,6 +308,17 @@ void RDNA3Accel::displayPublishRoutes()
             setNumber(key, (uint64_t)aux);
         }
         LOG("display: head %u route %s, AUX/DDC %d", i, val, aux);
+    }
+    /* the display clocks the GOP left (dcn32_dump_clk_registers): what a
+     * second head has to fit into */
+    {
+        rdna3_dcn_clocks ck;
+        char val[128];
+        dcn32_clk_read(fDispDev, &ck);
+        snprintf(val, sizeof(val), "VCO %u DISPCLK %u DPPCLK %u DPREFCLK %u DCFCLK %u DTBCLK %u kHz",
+                 ck.vco_khz, ck.dispclk_khz, ck.dppclk_khz, ck.dprefclk_khz, ck.dcfclk_khz, ck.dtbclk_khz);
+        setProperty("RDNA3,DCNClocks", val);
+        LOG("display: clocks %s", val);
     }
 }
 

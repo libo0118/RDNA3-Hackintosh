@@ -202,6 +202,8 @@ typedef struct sim {
      * the HUBP/DPP of a gated pipe are lost, as on the chip */
     int dcn_pg;
     unsigned dcn_gated_drops, dcn_pg_no_request;
+    /* DAL mailbox of the PMFW (dcn32_clk_mgr_smu_msg.c) */
+    unsigned dal_msgs, dal_displays, dal_hard_min[16];
     unsigned hpd_irqs;
     /* lit OTGs count frames while time passes; with OTG_CRC_EN their CRC
      * is a function of what they scan out (surface address + timing) */
@@ -1939,6 +1941,22 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     if (dw == MP1(66)) {
         S.smu_msgs++;
         smu_msg(v);
+        return;
+    }
+    if (dw == RD_DAL_MSG_REG) {
+        uint32_t arg = S.reg[RD_DAL_ARG_REG];
+        S.dal_msgs++;
+        S.reg[RD_DAL_RESP_REG] = RD_DALSMC_RESULT_OK;
+        if (v == RD_DALSMC_MSG_NumOfDisplays)
+            S.dal_displays = arg;
+        else if (v == RD_DALSMC_MSG_SetHardMinByFreq && (arg >> 16) < 16) {
+            S.dal_hard_min[arg >> 16] = arg & 0xffff;
+            S.reg[RD_DAL_ARG_REG] = (arg & 0xffff) * 1000;
+        } else if (v == RD_DALSMC_MSG_ReturnHardMinStatus)
+            S.reg[RD_DAL_ARG_REG] = 0x3f;
+        else
+            S.reg[RD_DAL_RESP_REG] = 0xfe;   /* DALSMC_Result_UnknownCmd */
+        *R(dw) = v;
         return;
     }
     /* DMCUB */
@@ -3799,6 +3817,15 @@ static void run(const char *fwdir)
             S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] = 3u << 4;
             S.reg[DCN_B1 + regOTG_PIXEL_RATE_DIV] = 5u << 6;
             S.reg[DCN_B1 + regOTG0_PIXEL_RATE_CNTL + 4 * 2] = OTG0_PIXEL_RATE_CNTL__DPDTO0_ENABLE_STATUS_MASK;
+            /* the GOP's display clocks: VCO 43 x 100 MHz; DISPCLK, DPPCLK and
+             * DPREFCLK /6 (DID 0x18), DCFCLK /4 (0x10), DTBCLK /9 (0x24) */
+            S.reg[RD_CLK1_CLK_PLL_REQ] = 43;
+            S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x18;
+            S.reg[RD_CLK1_CLK0_DFS_CNTL + 3] = 0x18;
+            S.reg[RD_CLK1_CLK0_DFS_CNTL + 6] = 0x18;
+            S.reg[RD_CLK1_CLK0_DFS_CNTL + 9] = 0x10;
+            S.reg[RD_CLK1_CLK0_DFS_CNTL + 12] = 0x24;
+            S.reg[RD_DAL_RESP_REG] = RD_DALSMC_RESULT_OK;   /* the PMFW's idle state */
 
             /* the ATOM tests above ran the VBIOS CRTC tables: light OTG 2
              * again (DIG route as the DCN test set it) */
@@ -3818,7 +3845,14 @@ static void run(const char *fwdir)
             path.transmitter = 1;           /* the GOP's own PHY */
             CHECK(dcn32_clone_plan(&dev, &dc2, 0, &path, 148500, &cl) == RDNA3_EBUSY);
             path.transmitter = 3;
+            /* DISPCLK at /128 (33.6 MHz) cannot carry 148.5 MHz */
+            S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x7f;
+            CHECK(dcn32_clone_plan(&dev, &dc2, 0, &path, 148500, &cl) == RDNA3_EBUSY);
+            S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x18;
             CHECK(dcn32_clone_plan(&dev, &dc2, 0, &path, 148500, &cl) == RDNA3_OK);
+            CHECK(cl.clk.vco_khz == 4300000 && cl.clk.dispclk_khz == 716666 && cl.clk.dppclk_khz == 716666 &&
+                  cl.clk.dprefclk_khz == 716666 && cl.clk.dcfclk_khz == 1075000 && cl.clk.dtbclk_khz == 477777 &&
+                  cl.displays == 2);
             CHECK(cl.src_pipe == 1 && cl.src_otg == 2 && cl.src_opp == 2 && cl.src_mpcc == 1 &&
                   cl.src_fe == 2 && cl.src_be == 1);
             /* OTG 0 is taken: the stale DIGA back end still sources it */
@@ -3828,7 +3862,9 @@ static void run(const char *fwdir)
             /* no DMCUB, no picture */
             CHECK(dcn32_clone_enable(&dev, NULL, &cl) == RDNA3_ENODEV);
             S.dmub.nseq = 0;
+            S.dal_displays = 0;
             CHECK(dcn32_clone_enable(&dev, &dm, &cl) == RDNA3_OK);
+            CHECK(S.dal_displays == 2);
             CHECK(S.dcn_gated_drops == 0 && S.dcn_pg_no_request == 0 && S.dmub.bad_cmds == 0);
             CHECK(S.reg[DCN_B2 + regDOMAIN0_PG_STATUS] == 0 &&
                   !(S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL] & DC_IP_REQUEST_CNTL__IP_REQUEST_EN_MASK));
@@ -3920,8 +3956,10 @@ static void run(const char *fwdir)
                 off.dst_mpcc = 0; off.dst_fe = 3; off.dst_be = 3; off.pll = 3; off.hpd = 2;
                 off.connector_id = 0x0c; off.dig_mode = 3; off.pclk_khz = 148500;
                 off.det_src = 8; off.det_dst = 0; off.det_src_new = 4; off.det_dst_new = 4;
+                off.displays = 2;
                 S.dmub.nseq = 0;
                 CHECK(dcn32_clone_disable(&dev, &dm, &off) == RDNA3_OK);
+                CHECK(S.dal_displays == 1);
             }
             CHECK(S.dmub.nseq == 2 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE &&
                   S.dmub.seq[1] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.pixclk[0] == 0 && S.dmub.pixclk[2] == 0);
@@ -3933,6 +3971,16 @@ static void run(const char *fwdir)
                   S.reg[DCN_B2 + regDOMAIN0_PG_STATUS] == 2u << DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT &&
                   S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL] == 0xf);
             CHECK(S.dcn_gated_drops == 0 && S.dcn_pg_no_request == 0);   /* blanked before the gate */
+            /* dcn32_smu_set_hard_min_by_freq with the status wait */
+            {
+                uint32_t got = 0;
+                CHECK(dcn32_smu_set_hard_min(&dev, RD_PPCLK_DCFCLK, 1200, 0x503900, &got) == RDNA3_OK &&
+                      S.dal_hard_min[RD_PPCLK_DCFCLK] == 1200 && got == 1200000);
+                CHECK(dcn32_smu_send(&dev, 0x7f, 0, NULL) == RDNA3_EIO);
+                CHECK(dcn32_dentist_divider(0x08) == 8 && dcn32_dentist_divider(0x40) == 64 &&
+                      dcn32_dentist_divider(0x60) == 128 && dcn32_dentist_divider(0x7f) == 512 &&
+                      dcn32_dentist_divider(0) == 8);
+            }
             S.dcn_pg = 0;
         }
         /* attach (rdna3dmub=3): no reset, no load, the running firmware's

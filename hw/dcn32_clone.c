@@ -211,6 +211,16 @@ int dcn32_clone_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head,
         c->det_dst_new = c->det_src / 2;
         c->det_src_new = c->det_src - c->det_dst_new;
     }
+    /* B5 subset: the clocks are shared, the GOP sized them for its head */
+    dcn32_clk_read(d, &c->clk);
+    RLOG(d, "clone: DCN clocks VCO %u DISPCLK %u DPPCLK %u DPREFCLK %u DCFCLK %u DTBCLK %u kHz",
+         c->clk.vco_khz, c->clk.dispclk_khz, c->clk.dppclk_khz, c->clk.dprefclk_khz,
+         c->clk.dcfclk_khz, c->clk.dtbclk_khz);
+    if (dcn32_clk_fits(&c->clk, pclk_khz)) {
+        RERR(d, "clone: DISPCLK/DPPCLK below the %u kHz pixel rate", pclk_khz);
+        return RDNA3_EBUSY;
+    }
+    c->displays = dc->nheads + 1;
     RLOG(d, "clone: head %u (pipe %u otg %u opp %u mpcc %u DIG FE %d BE %d mode %u) -> pipe %u "
          "otg %u opp %u DIG FE %u BE %u PLL %u HPD %d enc 0x%x conn 0x%x, %u kHz, DET %u/%u -> %u/%u",
          head, c->src_pipe, c->src_otg, c->src_opp, c->src_mpcc, c->src_fe, c->src_be, c->dig_mode,
@@ -452,6 +462,9 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
          RI(d, regDOMAIN0_PG_STATUS, c->dst_pipe, PG_S), RI(d, regDCHUBBUB_DET0_CTRL, c->dst_pipe, DET_S),
          RI(d, regOTG0_PIXEL_RATE_CNTL, c->dst_otg, PRC_S),
          RI(d, regOTG0_PHYPLL_PIXEL_RATE_CNTL, c->dst_otg, PRC_S));
+    /* dcn32_update_clocks -> dcn30_smu_set_num_of_displays; advisory */
+    if (c->displays)
+        dcn32_smu_num_displays(d, c->displays);
     return RDNA3_OK;
 
 fail:
@@ -538,6 +551,8 @@ int dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
     v = RI(d, regDPPCLK_DTO_CTRL, 0, 0);
     WI(d, regDPPCLK_DTO_CTRL, 0, 0, v & ~(3u << (4 * c->dst_pipe)));
     pipe_power(d, c->dst_pipe, 0);
+    if (c->displays > 1)
+        dcn32_smu_num_displays(d, c->displays - 1);
     RLOG(d, "clone: pipe %u off (transmitter %u: %d)", c->dst_pipe, c->dst_be, ret);
     return ret;
 }

@@ -32,6 +32,7 @@
 #define RDNA3_DCN32_CLONE_H
 
 #include "dcn32.h"
+#include "dcn32_clk.h"
 #include "dmub32.h"
 #include "vbios.h"
 
@@ -54,18 +55,22 @@ typedef struct rdna3_dcn_clone {
     uint32_t pclk_khz;            /* pixel clock of the mode */
     /* DET segments (64 KiB) before / after the split */
     uint32_t det_src, det_dst, det_src_new, det_dst_new;
+    rdna3_dcn_clocks clk;         /* display clocks the GOP left (dcn32_clk_read) */
+    uint32_t displays;            /* lit heads with the clone, for the PMFW */
 } rdna3_dcn_clone;
 
 /* Pick free instances for showing lit head 'head' of 'dc' on the connector
  * 'dst' (a VBIOS display path) at 'pclk_khz'. Reads only. RDNA3_EINVAL for
  * a DP source or destination or a bad head, RDNA3_EBUSY when no pipe, OTG
- * or DIG is free, or the destination transmitter is already lit. */
+ * or DIG is free, the destination transmitter is already lit, or DISPCLK /
+ * DPPCLK are below the pixel rate (dcn32_clk_fits). */
 int  dcn32_clone_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head,
                       const rdna3_display_path *dst, uint32_t pclk_khz, rdna3_dcn_clone *c);
 
 /* Program the plan; 'dm' is the running DMCUB (dmub32_hw_init). Returns
  * 0, or the first error (power gate, DET or DMCUB command) after undoing
- * what it can. Logs every step. */
+ * what it can. Logs every step. When lit, the PMFW is told the display
+ * count (dcn30_smu_set_num_of_displays, as dcn32_update_clocks does). */
 int  dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c);
 
 /* Is the clone producing the picture? Over 'wait_ms' its OTG frame
