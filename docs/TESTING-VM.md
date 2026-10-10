@@ -164,6 +164,12 @@ steps:
 | `10` | accelerator (WindowServer) | risky; send the reports from 0–9 first |
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
+
+Step 9 in the VM: OpenCore sets the largest GOP mode (`OC_RESOLUTION`), so
+the desktop comes up at the monitor's native mode; only the monitor the GOP
+lit shows a picture. EDID comes over AUX for DisplayPort sinks and over the
+DDC (I2C engine) for HDMI and DP->HDMI adaptors. Read the framebuffer lines
+from the report (`20-log-rdna3.txt`); `tools/triage_reports.py` checks them.
 The VM will then not shut down by itself. Shut down macOS normally (Apple menu → Shut Down)
 or with the power button. The report is sent anyway.
 

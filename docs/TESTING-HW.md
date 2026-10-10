@@ -60,7 +60,7 @@ it together with a description of the symptom. Module details are in `STAGE1`–
 | 7b | same as 7 | from a terminal: `build/userspace/rdna3_drminfo --dma-test` | `DMA job results verified (WRITE_LINEAR + CONST_FILL)` | medium |
 | 8 | `rdna3lvl=8 rdna3msi=1` | GFX 11: RLC, RS64, GFX ring, KIQ, KCQ | `RDNA3,GFXResult = 0`, `RDNA3,KIQResult = 0`, `RDNA3,KCQResult = 0` | medium |
 | 8b | same as 8 | `build/userspace/rdna3_drminfo --gfx-test` | `GFX job results verified (PM4 WRITE_DATA)` | medium |
-| 9 | same as 8 + `rdna3fb=1` | our framebuffer instead of IONDRV on the GOP mode | desktop unchanged, `RDNA3FB: ... EDID ... from AUX` in the log and the monitor name in System Settings → Displays | **the screen may go dark** |
+| 9 | same as 8 + `rdna3fb=1` | our framebuffer instead of IONDRV on the GOP mode (the monitor the GOP lit; a second one stays dark until 9b) | desktop unchanged at the GOP resolution, `RDNA3-fb: started`, `RDNA3FB: head 0 EDID ... bytes from connector AUXn` in `20-log-rdna3.txt` (the serial log interleaves lines), `RDNA3,Head0,Route` names the connector, the monitor name in System Settings → Displays | **the screen may go dark** |
 | 10 | same as 9 + `rdna3accel=1` | IOAcceleratorFamily2 accelerator | `ioreg -c RDNA3Accelerator`, `populateAccelConfig ... what the FAMILY pre-filled` in the log | high: WindowServer |
 | 11 | same as 10 | `vulkaninfo --summary` with RADV from `/Library/GPUBundles/rdna3mtl` | device `AMD Radeon RX 7800 XT (RADV NAVI32)` | medium |
 | 12 | same as 10, then `sudo sysctl -w debug.rdna3accelfb=1` | Metal plugin for processes listed in `rdna3mtl-allow.txt` | `mtlprobe` sees the AMD device | high |

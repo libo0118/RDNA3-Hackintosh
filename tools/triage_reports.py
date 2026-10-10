@@ -172,6 +172,25 @@ def report(path, show_all):
             print("   info %-20s = %s" % (key, hex(v) if isinstance(v, int) and key in (
                 "SOSVersion", "SMUDriverIF", "DMUBVersion", "GBAddrConfig", "LastFaultAddr",
                 "LastFaultStatus") else v))
+    # displays (step 2+): connectors with an EDID, what each head drives
+    for key in sorted(k for k in props if re.match(r"(Connector\d+,(Monitor|EDIDSource|Type)|Head\d+,Route)$", k)):
+        print("   info %-20s = %s" % (key, props[key]))
+    for l in log.splitlines():
+        if "refresh" in l and "display: head" in l:
+            print("   info " + l[l.find("display:"):][:110])
+    # step 9: our framebuffer (rdna3fb=1) took the head and has the EDID
+    if "rdna3fb=1" in args:
+        fb_started = "RDNA3-fb: started" in log
+        fb_edid = re.search(r"RDNA3FB: head \d+ EDID \d+ bytes", log)
+        print("   %s %-20s %s" % ("PASS" if fb_started else "FAIL", "framebuffer",
+                                 "started" if fb_started else "no 'RDNA3-fb: started' in the log"))
+        print("   %s %-20s %s" % ("PASS" if fb_edid else "FAIL", "framebuffer EDID",
+                                 fb_edid.group(0) if fb_edid else
+                                 "never handed to IOGraphics (see the RDNA3FB lines below)"))
+        for l in log.splitlines():
+            if "RDNA3FB:" in l and not fb_edid:
+                print("     " + l[l.find("RDNA3FB:"):][:140])
+        failed = failed or not fb_started or not fb_edid
     errs = [l for l in log.splitlines() if "ERROR" in l or "failed" in l or "timeout" in l]
     if errs:
         print("   kext errors (%d):" % len(errs))
