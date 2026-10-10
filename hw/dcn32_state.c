@@ -106,28 +106,33 @@ typedef char rd_state_regs_fit[(sizeof(rd_clone_otg) + sizeof(rd_clone_odm) + si
  * SDPIF and arbiter / watermark setup (hubbub32_init, hubbub32_program_
  * watermarks), the CRB split (hubbub32_program_compbuf_size) and the DCCG
  * globals of dccg2_init / dcn32_init_hw; offsets from dcn_3_2_0_offset.h */
-static const struct { uint16_t seg, off; } kGlobal[] = {
-    { 2, 0x046f }, { 2, 0x0470 }, { 2, 0x0471 },      /* DCHUBBUB_SDPIF_CFG0..2 */
-    { 2, 0x0475 }, { 2, 0x0476 }, { 2, 0x0477 },      /* DCN_VM_FB_LOCATION_BASE/TOP, DCN_VM_FB_OFFSET */
-    { 2, 0x0478 }, { 2, 0x0479 }, { 2, 0x047a },      /* DCN_VM_AGP_BOT/TOP/BASE */
-    { 2, 0x0484 },                                    /* SDPIF_REQUEST_RATE_LIMIT */
-    { 2, 0x04ba },                                    /* DCHUBBUB_COMPBUF_CTRL (before the DETs) */
-    { 2, 0x04f9 }, { 2, 0x04fa }, { 2, 0x04fc }, { 2, 0x04fd },   /* ARB_DF_REQ_OUTSTAND, SAT_LEVEL, DRAM_STATE, USR_RETRAINING */
-    { 2, 0x04fe }, { 2, 0x04ff }, { 2, 0x0500 }, { 2, 0x0501 }, { 2, 0x0502 }, { 2, 0x0503 }, { 2, 0x0504 },
-    { 2, 0x0505 }, { 2, 0x0506 },                     /* watermark set A */
-    { 2, 0x0507 }, { 2, 0x0508 }, { 2, 0x0509 }, { 2, 0x050a }, { 2, 0x050b }, { 2, 0x050c }, { 2, 0x050d },
-    { 2, 0x050e }, { 2, 0x050f },                     /* set B */
-    { 2, 0x0510 }, { 2, 0x0511 }, { 2, 0x0512 }, { 2, 0x0513 }, { 2, 0x0514 }, { 2, 0x0515 }, { 2, 0x0516 },
-    { 2, 0x0517 }, { 2, 0x0518 },                     /* set C */
-    { 2, 0x0519 }, { 2, 0x051a }, { 2, 0x051b }, { 2, 0x051c }, { 2, 0x051d }, { 2, 0x051e }, { 2, 0x051f },
-    { 2, 0x0520 }, { 2, 0x0521 },                     /* set D */
-    { 2, 0x0523 }, { 2, 0x0524 }, { 2, 0x0525 },      /* ARB_MALL_CNTL, ARB_TIMEOUT_ENABLE, GLOBAL_TIMER_CNTL */
-    { 2, 0x0533 }, { 2, 0x0534 },                     /* DCHUBBUB_CLOCK_CNTL, DCFCLK_CNTL */
-    { 1, 0x0074 }, { 1, 0x007c }, { 1, 0x0049 }, { 1, 0x0069 },   /* DCCG_GATE_DISABLE_CNTL, 2, 4, 5 */
-    { 1, 0x0050 }, { 1, 0x007f }, { 1, 0x007b }, { 1, 0x0070 },   /* FGCG_REP, DISP_CNTL, us / ms time base */
-    { 1, 0x0058 }, { 1, 0x004a }, { 1, 0x0068 },      /* DPREFCLK_CNTL, DPSTREAMCLK_CNTL, DTBCLK_P_CNTL */
-    { 1, 0x00a0 }, { 1, 0x00a1 }, { 1, 0x00a2 }, { 1, 0x00a3 }, { 1, 0x00a4 },   /* SYMCLKA..E_CLOCK_ENABLE */
+#define CFG ~0u
+static const struct { uint16_t seg, off; uint32_t mask; } kGlobal[] = {
+    /* mask: the configuration bits (status, request and clear bits are
+     * left to the hardware) */
+    { 2, 0x046f, 0x7e00e000u }, { 2, 0x0470, CFG }, { 2, 0x0471, CFG },   /* DCHUBBUB_SDPIF_CFG0..2 */
+    { 2, 0x0475, CFG }, { 2, 0x0476, CFG }, { 2, 0x0477, CFG },   /* DCN_VM_FB_LOCATION_BASE/TOP, FB_OFFSET */
+    { 2, 0x0478, CFG }, { 2, 0x0479, CFG }, { 2, 0x047a, CFG },   /* DCN_VM_AGP_BOT/TOP/BASE */
+    { 2, 0x0484, CFG },                               /* SDPIF_REQUEST_RATE_LIMIT */
+    { 2, 0x04ba, 0x0001001fu },                       /* DCHUBBUB_COMPBUF_CTRL (before the DETs) */
+    { 2, 0x04f9, CFG }, { 2, 0x04fa, CFG }, { 2, 0x04fc, CFG },   /* ARB_DF_REQ_OUTSTAND, SAT_LEVEL, DRAM_STATE */
+    { 2, 0x04fd, 0x00000f00u },                       /* ARB_USR_RETRAINING_CNTL: the force bits */
+    { 2, 0x04fe, CFG }, { 2, 0x04ff, CFG }, { 2, 0x0500, CFG }, { 2, 0x0501, CFG }, { 2, 0x0502, CFG },
+    { 2, 0x0503, CFG }, { 2, 0x0504, CFG }, { 2, 0x0505, CFG }, { 2, 0x0506, CFG },   /* watermark set A */
+    { 2, 0x0507, CFG }, { 2, 0x0508, CFG }, { 2, 0x0509, CFG }, { 2, 0x050a, CFG }, { 2, 0x050b, CFG },
+    { 2, 0x050c, CFG }, { 2, 0x050d, CFG }, { 2, 0x050e, CFG }, { 2, 0x050f, CFG },   /* set B */
+    { 2, 0x0510, CFG }, { 2, 0x0511, CFG }, { 2, 0x0512, CFG }, { 2, 0x0513, CFG }, { 2, 0x0514, CFG },
+    { 2, 0x0515, CFG }, { 2, 0x0516, CFG }, { 2, 0x0517, CFG }, { 2, 0x0518, CFG },   /* set C */
+    { 2, 0x0519, CFG }, { 2, 0x051a, CFG }, { 2, 0x051b, CFG }, { 2, 0x051c, CFG }, { 2, 0x051d, CFG },
+    { 2, 0x051e, CFG }, { 2, 0x051f, CFG }, { 2, 0x0520, CFG }, { 2, 0x0521, CFG },   /* set D */
+    { 2, 0x0523, 0x00000001u }, { 2, 0x0524, CFG }, { 2, 0x0525, CFG },   /* ARB_MALL_CNTL, TIMEOUT_ENABLE, GLOBAL_TIMER */
+    { 2, 0x0533, CFG }, { 2, 0x0534, CFG },           /* DCHUBBUB_CLOCK_CNTL, DCFCLK_CNTL */
+    { 1, 0x0074, CFG }, { 1, 0x007c, CFG }, { 1, 0x0049, CFG }, { 1, 0x0069, CFG },   /* DCCG_GATE_DISABLE_CNTL, 2, 4, 5 */
+    { 1, 0x0050, CFG }, { 1, 0x007f, CFG }, { 1, 0x007b, CFG }, { 1, 0x0070, CFG },   /* FGCG_REP, DISP_CNTL, us / ms time base */
+    { 1, 0x0058, CFG }, { 1, 0x004a, CFG }, { 1, 0x0068, CFG },   /* DPREFCLK_CNTL, DPSTREAMCLK_CNTL, DTBCLK_P_CNTL */
+    { 1, 0x00a0, CFG }, { 1, 0x00a1, CFG }, { 1, 0x00a2, CFG }, { 1, 0x00a3, CFG }, { 1, 0x00a4, CFG },   /* SYMCLKA..E_CLOCK_ENABLE */
 };
+#undef CFG
 #define NGLOBAL (sizeof(kGlobal) / sizeof(kGlobal[0]))
 typedef char rd_state_globals_fit[NGLOBAL <= RD_DCN_STATE_GLOBALS ? 1 : -1];
 #define G_FB_BASE 3          /* index of DCN_VM_FB_LOCATION_BASE */
@@ -314,7 +319,8 @@ int dcn32_state_check(rdna3_dev *d, const rdna3_dcn_state *st, uint32_t head, ui
     k->routed = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_VTG_SEL) == GET(h->hubp_cntl, HUBP0_DCHUBP_CNTL, HUBP_VTG_SEL) &&
                 RI(d, regMPCC0_MPCC_TOP_SEL, h->mpcc, MPCC_S) == h->mpcc_top &&
                 RI(d, regMPC_OUT0_MUX, h->opp, MUX_S) == h->mpc_out_mux &&
-                (h->be >= NDIG || (RI(d, regDIG0_DIG_FE_CNTL, h->fe, DIG_S) == h->dig_fe_cntl &&
+                (h->be >= NDIG || (GET(RI(d, regDIG0_DIG_FE_CNTL, h->fe, DIG_S), DIG0_DIG_FE_CNTL, DIG_SOURCE_SELECT) ==
+                                   GET(h->dig_fe_cntl, DIG0_DIG_FE_CNTL, DIG_SOURCE_SELECT) &&
                                    (RI(d, regDIG0_DIG_BE_CNTL, h->be, DIG_S) &
                                     (DIG0_DIG_BE_CNTL__DIG_MODE_MASK | DIG0_DIG_BE_CNTL__DIG_FE_SOURCE_SELECT_MASK)) ==
                                    (h->dig_be_cntl &
@@ -340,15 +346,23 @@ int dcn32_state_check(rdna3_dev *d, const rdna3_dcn_state *st, uint32_t head, ui
 
 int dcn32_state_restore_global(rdna3_dev *d, const rdna3_dcn_state *st)
 {
-    uint32_t k;
+    uint32_t k, v, m;
     int n = 0;
     if (!st || st->nglobal != NGLOBAL)
         return 0;
-    for (k = 0; k < NGLOBAL; k++)
-        if (rd(d, kGlobal[k].seg, kGlobal[k].off) != st->global[k]) {
-            wr(d, kGlobal[k].seg, kGlobal[k].off, st->global[k]);
+    /* only after a reset or a power loss (the system aperture is gone):
+     * a sleep that kept it leaves what the driver set since the snapshot */
+    if (rd(d, kGlobal[G_FB_BASE].seg, kGlobal[G_FB_BASE].off) == st->global[G_FB_BASE] &&
+        rd(d, kGlobal[G_FB_TOP].seg, kGlobal[G_FB_TOP].off) == st->global[G_FB_TOP])
+        return 0;
+    for (k = 0; k < NGLOBAL; k++) {
+        v = rd(d, kGlobal[k].seg, kGlobal[k].off);
+        m = kGlobal[k].mask;
+        if ((v & m) != (st->global[k] & m)) {
+            wr(d, kGlobal[k].seg, kGlobal[k].off, (v & ~m) | (st->global[k] & m));
             n++;
         }
+    }
     if (n)
         RLOG(d, "state: %d global DCHUBBUB / DCCG registers put back", n);
     return n;

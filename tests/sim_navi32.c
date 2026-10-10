@@ -2525,7 +2525,7 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     static rdna3_dcn_clone cl;
     rdna3_display_path own, other;
     rdna3_dcn_state_check k;
-    uint32_t ctl, i;
+    uint32_t ctl, i, wm;
     uint8_t bring_up[4], bring_up_tx[4];
 
     memset(&st, 0, sizeof(st));   /* run() goes twice */
@@ -2595,6 +2595,8 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     /* 2. system sleep without a power loss: both streams down
      * (amdgpu_dm_commit_zero_streams), then the snapshot back */
     S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 0)] |= HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ_MASK;
+    wm = S.reg[DCN_B2 + 0x04fe];
+    S.reg[DCN_B2 + 0x04fe] = 0x1234;   /* a watermark set after the snapshot: the sleep keeps it */
     memcpy(st_snap, S.reg, sizeof(st_snap));
     S.dmub.nseq = 0;
     CHECK(dcn32_state_head_off(dev, dm, &dc, &st, 0) == RDNA3_OK && dcn32_state_head_off(dev, dm, &dc, &st, 1) == RDNA3_OK);
@@ -2616,6 +2618,7 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     S.dcn_frames = 1;
     CHECK(dcn32_state_check(dev, &st, 1, 50, &k) == 0 && k.frames > 0 && !k.blanked && k.dig_on);
     S.dcn_frames = 0;
+    S.reg[DCN_B2 + 0x04fe] = wm;
 
     /* 3. a power loss (mode-1 reset, S3): both heads and the global state
      * wiped; the restore repeats the clone's bring-up per head */

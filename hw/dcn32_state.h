@@ -40,8 +40,8 @@
  * Not covered (see docs/DRIVER-PLAN.md, D4): the display clocks after a
  * power loss (dcn32_init_clocks / dcn32_update_clocks through the PMFW:
  * restore refuses when DISPCLK / DPPCLK no longer carry the pixel rate),
- * the gamma LUT RAM (only the mode is kept; a RAM LUT goes to bypass and
- * dcn32_state_check says so), VPG infoframe contents (infoframes off, as
+ * the gamma LUT RAM (only the mode is kept; after a power loss a RAM LUT
+ * goes to bypass and the restore logs it), VPG infoframe contents (infoframes off, as
  * the clone and the mode set leave them), DP heads.
  *
  * SPDX-License-Identifier: MIT
