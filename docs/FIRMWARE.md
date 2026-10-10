@@ -38,3 +38,8 @@ Consequences for the project:
    order, PSP registers) exclusively from the open amdgpu code.
    Reverse engineering in this project applies only to macOS interfaces
    (Stage 6), never to AMD firmware.
+5. The installer (`package/make_pkg.sh`, [INSTALL-OPENCORE](INSTALL-OPENCORE.md))
+   ships no firmware: `package/firmware.sh` downloads the files above from
+   a pinned linux-firmware tag at install time (SHA-256 checked) into
+   `/Library/Application Support/RDNA3/firmware`, with `LICENSE.amdgpu`.
+   `make_pkg.sh --fw` can bundle them for the builder's own use.

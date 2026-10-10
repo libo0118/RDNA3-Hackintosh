@@ -1,0 +1,258 @@
+# Installing on a bare-metal Hackintosh (OpenCore)
+
+How to install the driver for real use on a Hackintosh with an
+**RX 7800 XT (Navi 32, `1002:747E`)** and OpenCore, without the VM test
+harness. The procedure for testing it (reports, ladder steps) is the last
+section of [TESTING-HW](TESTING-HW.md#bare-metal-with-the-installer-no-vm-harness).
+
+> **Status:** everything here follows the configuration that works in the
+> test VM (macOS 15 with the card passed through, `tools/vm/rdna3vm`). A
+> bare-metal machine has not run it yet. Prepare the way back (section 8)
+> **before** the first boot.
+
+Requirements: macOS **15 Sequoia** (x86_64), OpenCore, the RX 7800 XT,
+SSH or a second machine to read a report if the screen stays dark.
+
+## 1. Get the installer
+
+**From CI:** the `build` workflow's artifact **`RDNA3-pkg`** holds
+`RDNA3-Hackintosh-<version>-<commit>.pkg` and the same files as a
+`.tar.gz` with `install.sh`. It contains the three kexts and the report
+tools, **not** the Metal plugin or RADV (other CI jobs build those).
+
+**Built yourself** (a Mac with the Xcode command line tools):
+
+```sh
+make kext && make -C fb && make -C accel && make -C userspace && make -C userspace probes
+package/make_pkg.sh                       # -> build/pkg/RDNA3-Hackintosh-*.pkg + .tar.gz
+# with the Metal plugin and RADV from CI artifacts (zips or unpacked):
+package/make_pkg.sh --from build --from RDNA3MTL.zip --from radv-macos-logs.zip
+```
+
+**Firmware.** The AMD microcode is not part of the package
+([FIRMWARE](FIRMWARE.md)). The installer downloads the 12 files the kext
+loads from linux-firmware (tag pinned in `package/firmware.sh`, SHA-256 and
+header checked) into `/Library/Application Support/RDNA3/firmware`, where
+the kext reads them, together with `LICENSE.amdgpu`. Without the firmware the
+installer installs nothing. Offline: unpack the `.tar.gz` and run
+`sudo sh firmware.sh --from <linux-firmware>/amdgpu` first (or
+`sudo ./install.sh --fw <linux-firmware>/amdgpu`), or build your own package
+with `package/make_pkg.sh --fw <linux-firmware>/amdgpu` (the firmware
+license allows that with `LICENSE.amdgpu`; keep such a package to yourself).
+
+**Install:** double-click the `.pkg` (unsigned: right-click → Open, or
+`sudo installer -pkg RDNA3-Hackintosh-*.pkg -target /`), or
+`sudo ./install.sh` in the unpacked `.tar.gz`. Both run the same
+preinstall/postinstall scripts.
+
+## 2. What gets installed
+
+| Path | What |
+|---|---|
+| `/Library/Extensions/RDNA3Accel.kext` | core: PCI, bring-up, display engine, amdgpu UAPI (`IOPCIFamily` only) |
+| `/Library/Extensions/RDNA3Framebuffer.kext` | `IOFramebuffer` per display head (links `IOGraphicsFamily`) |
+| `/Library/Extensions/RDNA3Accelerator.kext` | `IOAccelerator` for WindowServer and Metal (links `IOAcceleratorFamily2`, `IOGraphicsFamily`, `IOSurface`) |
+| `/Library/GPUBundles/rdna3mtl/` | `libdrm.2.dylib`, `libdrm_amdgpu.1.dylib`, `amdgpu.ids`; RADV `libvulkan_radeon.dylib` + `radeon_icd.x86_64.json`, the AIR translator (when the package has them) |
+| `/Library/GPUBundles/RDNA3MTLDriver.bundle`, `rdna3mtl-allow.txt` | Metal plugin (when the package has it) |
+| `/Library/Application Support/RDNA3/firmware/` | AMD firmware + `LICENSE.amdgpu` (downloaded at install) |
+| `/Library/Application Support/RDNA3/OpenCore/` | the core kext's copy for `EFI/OC/Kexts` and `Kernel-Add.plist` (the entries below) |
+| `/Library/Application Support/RDNA3/` | `oc_install.sh`, `autoreport.sh`, `tools/macos/collect.sh`, `bin/` (test tools), `firmware.sh`, `uninstall.sh`, `VERSION`, licenses |
+
+The postinstall script ad-hoc signs the kexts (kernelmanagerd refuses
+unsigned ones), sets `root:wheel`, and hands them to kernelmanagerd
+(`kmutil load -p`), which asks for approval and rebuilds the Auxiliary
+Kernel Collection for the next boot. It prints warnings into
+`/var/log/install.log` (SIP on, `amfi=0x80` missing, a conflicting kext loaded).
+
+## 3. Kernel → Add
+
+Which kext loads from where (their `OSBundleLibraries`):
+
+| Kext | Links | Loaded by |
+|---|---|---|
+| `RDNA3Accel` | `IOPCIFamily`, KPIs | **OpenCore** (recommended) or the Auxiliary KC |
+| `RDNA3Framebuffer` | `IOGraphicsFamily`, `IOPCIFamily` | the Auxiliary KC (`/Library/Extensions`) only |
+| `RDNA3Accelerator` | `IOAcceleratorFamily2`, `IOGraphicsFamily`, `IOSurface` | the Auxiliary KC only |
+
+`IOGraphicsFamily` and `IOAcceleratorFamily2` exist only in Apple's System
+kernel collection, so OpenCore cannot link the framebuffer or the
+accelerator ([STAGE1](STAGE1.md#loading)). None of the three links another;
+the framebuffer and the accelerator wait for the `RDNA3Accel` service at
+start, so the core loading first (from OpenCore) is the natural order. No
+Lilu dependency: the entry can go anywhere in `Kernel/Add`.
+
+The tested configuration (the VM) injects the core with OpenCore and loads
+the other two from `/Library/Extensions`. The `.pkg` installs all three
+there; with the OpenCore entry the injected core wins and its copy only
+logs "a prelinked copy … is already present". Without the entry all three
+load from the Auxiliary KC, which should work with the settings of section
+4 but has not been tried.
+
+The easy way (copies the kext, adds the entry, backs up `config.plist`):
+
+```sh
+sudo diskutil mount disk0s1          # your EFI partition: diskutil list
+sudo "/Library/Application Support/RDNA3/oc_install.sh" --efi /Volumes/EFI
+```
+
+By hand: copy `/Library/Application Support/RDNA3/OpenCore/RDNA3Accel.kext`
+to `EFI/OC/Kexts/` and paste this into `Kernel → Add` (generated from the
+kexts' `Info.plist` by `package/oc_snippet.py --kexts build`; the installed
+`OpenCore/Kernel-Add.plist` holds the same, plus the other two disabled):
+
+```xml
+			<dict>
+				<key>Arch</key>
+				<string>x86_64</string>
+				<key>BundlePath</key>
+				<string>RDNA3Accel.kext</string>
+				<key>Comment</key>
+				<string>RDNA3-Hackintosh io.github.voten641.RDNA3Accel 0.1.0</string>
+				<key>Enabled</key>
+				<true/>
+				<key>ExecutablePath</key>
+				<string>Contents/MacOS/RDNA3Accel</string>
+				<key>MaxKernel</key>
+				<string>24.99.99</string>
+				<key>MinKernel</key>
+				<string>24.0.0</string>
+				<key>PlistPath</key>
+				<string>Contents/Info.plist</string>
+			</dict>
+```
+
+**MinKernel / MaxKernel:** `24.0.0` – `24.99.99` = macOS 15 (Darwin 24).
+CI builds the kexts with the `macos-15` runner's SDK and
+`-mmacosx-version-min=11.0`, but only Sequoia has run them, the
+accelerator's class layouts are per release (macOS 26 Tahoe needs the
+`make -C accel NM_TAHOE=1` build, which the package does not ship), and the
+userspace tools need 15.0. The `.pkg` refuses other macOS versions.
+
+**After every update** run `oc_install.sh` again: the EFI copy of the core
+must be the same build as the framebuffer in `/Library/Extensions`
+(a report says `framebuffer older than the core` otherwise).
+
+## 4. Security settings (unsigned kexts)
+
+The kexts are ad-hoc signed, not by a Developer ID. What the VM runs with:
+
+| Setting | Value | Why |
+|---|---|---|
+| `NVRAM → Add → 7C436110-… → csr-active-config` | `EF0F0000` (SIP off, 0x0FEF) | ad-hoc signed kexts in the Auxiliary KC; NullMoth reports `430A0000` (0x0A43) working, untested here |
+| `NVRAM → Delete → 7C436110-…` | lists `csr-active-config` and `boot-args` | otherwise OpenCore does not overwrite the stored values |
+| `Misc → Security → SecureBootModel` | `Disabled` | the tested setting |
+| boot-arg `amfi=0x80` | set | without it kernelmanagerd called the ad-hoc framebuffer an "invalid codeful kernel extension" and kept an old copy |
+
+Then, once per new build: System Settings → Privacy & Security → **Allow**
+next to the blocked system software, and restart. Until then the
+framebuffer and the accelerator do not load (the core from OpenCore does).
+
+The Metal plugin is loaded only into the processes listed in
+`/Library/GPUBundles/rdna3mtl-allow.txt` (test tools for now). NullMoth
+also uses `amfi_get_out_of_my_way=0x1` so WindowServer accepts an unsigned
+bundle; not needed for the default profile, and it weakens the system's
+code-signing checks further.
+
+## 5. Devices, BIOS, OpenCore UEFI
+
+* **DeviceProperties:** none needed. Remove any `device-id` spoof for the
+  card: the kexts match `IOPCIPrimaryMatch 0x747e1002` against the ids in
+  the IORegistry, so a spoofed id hides the card from them.
+* **BIOS:** CSM off, Above 4G Decoding on. Trouble with Resizable BAR:
+  disable it or set `Booter → Quirks → ResizeAppleGpuBars = -1`.
+* **`UEFI → Output → Resolution`:** `Max` (what the VM uses). The
+  framebuffer starts on the mode the GOP left on head 0, so this is the
+  boot resolution of the desktop.
+* **Do not block `IONDRVSupport`** (`Kernel → Block`): it drives the GOP
+  picture when our framebuffer declines (`-rdna3off`, a failed start).
+
+## 6. What to remove
+
+* **WhateverGreen:** it has no RDNA3 support and was never run together with
+  these kexts; with the RX 7800 XT as the only GPU remove it. At the very
+  least drop `-radvesa`, `-wegnoegpu` (hides the card) and `agdpmod=`.
+* **Other kexts that touch `1002:747E`:** RadeonSensor / SMCRadeonGPU
+  (read the SMU behind our back), fake-id attempts with Apple's
+  `AMDRadeonX6000*` (a `device-id` spoof in `DeviceProperties`), NootRX or
+  forks of it. Only one driver may own the card.
+* **Earlier copies** from `package/install.sh` or the VM's `setup.sh`: the
+  `.pkg` replaces them (same paths).
+
+## 7. Boot-args
+
+**None are needed.** Without `rdna3lvl` the kexts run their default
+profile (`common/rdna3_bootargs.h`, the configuration verified on the
+card): every bring-up level, MSI, DMCUB, the framebuffer with the
+accelerator's display pipe, the second monitor as an extended desktop,
+PMFW DPM, the idle GFXCLK cap, display sleep and the scaled mode list.
+Useful but optional: `-v keepsyms=1` (readable boot log and panics).
+
+The profile's values (a boot-arg always wins; `rdna3profile=0` drops them
+all, `rdna3profile=1` adds them to an explicit `rdna3lvl`):
+`rdna3lvl=8 rdna3msi=1 rdna3dmub=1 rdna3fb=1 rdna3mirror=2 rdna3accel=1
+rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1`.
+
+Opt-in features and switches (step names from `tools/ladder-steps.txt`,
+what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
+
+| Boot-arg | What |
+|---|---|
+| `-rdna3off` | everything off (all three kexts decline): the emergency switch |
+| `rdna3lvl=0`…`8` | a test-ladder level instead of the profile (`oc_install.sh --step N` sets a whole step) |
+| `rdna3modeset=1` | own display timings: the monitor's EDID modes through `hw/dcn32_modeset.c` (step `modeset`) |
+| `rdna3mes=1` | MES scheduler pipe (step 8c) |
+| `rdna3gfxoff=1` | GFXOFF: the GFX block powers off when idle (step 8o) |
+| `rdna3socg=1` | HDP/ATHUB clock gating (`hw/soc21_cg.c`) |
+| `rdna3cg=0` | GFX clock gating off (on by default since card run 8) |
+| `rdna3sleep=1` | lift the idle-sleep block (no suspend/resume yet: the picture is gone after a sleep) |
+| `rdna3mirror=1` | the second monitor mirrors the first instead of extending the desktop (step 9b) |
+| `rdna3dmub=3` | attach to the DMCUB the GOP left running instead of restarting it (step 5c) |
+| `rdna3dpms=2` | display sleep also takes the link down |
+| `rdna3accelfb=3` | accelerator display pipe without the aperture gate (step 10s) |
+| `rdna3pstate=0`…`3` | p-state handling of the cloned head (steps 9bp/9bu/9bpu; default 1) |
+| `rdna3dmubwait=0` | DAL SMU without waiting for DMCUB answers (step 9bw) |
+| `rdna3pm=0`/`1` | boot clocks only / the safe PMFW feature set (profile: 2, the amdgpu set) |
+| `rdna3pmmask=<hex>` | the PMFW feature mask to allow (debug) |
+| `rdna3pmexp=1` | the idle-power experiment, six variants in one boot (test only) |
+| `rdna3reset=0`/`2` | mode-1 reset before init never / always (default 1: only when the PSP is stuck) |
+| `rdna3post=0` | do not post an unposted card through the VBIOS |
+| `rdna3doorbell=0` | no doorbell BAR: rings keep their write-pointer registers |
+| `rdna3cursor=0` | no hardware cursor |
+| `rdna3enum=1` | report the GPU as working for enumeration only; submissions fail (debug) |
+| `rdna3soak=<min>`, `rdna3hangtest=1`/`2` | read by the report script only: soak loop, hang/recovery test |
+
+## 8. The way back
+
+Prepare **one** of these before the first boot:
+
+1. **A USB stick with a copy of your EFI** in which `RDNA3Accel.kext` has
+   `Enabled = false` and the boot-args carry `-rdna3off`; boot it from the
+   firmware's boot menu. This always works, even when the internal
+   `config.plist` is the problem.
+2. **`-rdna3off` in `config.plist`**: `oc_install.sh --efi /Volumes/EFI --off`
+   writes it (with a backup `config.plist.rdna3-<date>`; restore a backup to
+   undo). `sudo nvram boot-args=…` does not help when OpenCore sets
+   boot-args from `config.plist` at every boot.
+3. **From Recovery**, when macOS no longer starts: remove the kexts from
+   the Data volume,
+   `rm -rf "/Volumes/Macintosh HD - Data/Library/Extensions/RDNA3"*.kext`;
+   if they still load, also move away
+   `/Volumes/Macintosh HD - Data/Library/KernelCollections/AuxiliaryKernelExtensions.kc`
+   (macOS rebuilds it). The OpenCore-injected core still loads: disable it
+   in the EFI (`diskutil mount disk0s1`, then option 1 or 2).
+
+Safe Mode (Shift in the picker) skips the Auxiliary KC (framebuffer,
+accelerator) but not the core that OpenCore injects.
+
+**Uninstall:** `sudo "/Library/Application Support/RDNA3/uninstall.sh"`
+(`--keep-firmware` keeps the firmware), then remove the OpenCore entry and
+`EFI/OC/Kexts/RDNA3Accel.kext`, and restart.
+
+## Licenses
+
+The kexts' core and `common/`, `hw/` are MIT. The accelerator, the
+framebuffer and the Metal plugin derive from NullMoth and are under
+PolyForm Noncommercial 1.0.0, the AIR translator under LGPL-3.0-or-later
+(see `NOTICE`; the texts are installed in `/Library/Application Support/RDNA3`).
+The AMD firmware is under `LICENSE.amdgpu` and is downloaded from
+linux-firmware at install time, not distributed by this project.
