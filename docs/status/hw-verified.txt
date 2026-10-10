@@ -22,3 +22,4 @@
 8v 2026-10-10 vm Vulkan on the card under macOS: RADV (built in the VM) via libdrm_xnu, rdna3_vktest 8/8 - compute-shader and CP DMA fill/copy on the general and compute queues, SDMA on the transfer queue, host-pointer import (USERPTR) and OPAQUE_FD re-import
 8u 2026-10-10 vm UCLK/FCLK DPM left to the PMFW (rdna3pm=2): UCLK 96 MHz, idle 77 W -> 52 W; 9cu (two heads) 54 W
 10 2026-10-10 vm RDNA3Accelerator starts (IOGraphicsAccelerator2::start -> 1), WindowServer allocates its surfaces in VRAM through it; the display pipe gate is still closed (black desktop, cursor only)
+10a 2026-10-10 vm macOS desktop composited through RDNA3Accelerator: display pipe over the scanout, WindowServer frames flipped to VRAM surfaces and painted live on head 0, no WindowServer crash (rdna3accelfb=4 rdna3acceliop=1)

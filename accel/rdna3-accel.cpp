@@ -93,7 +93,7 @@ static int gRd3Scanout = 0;
  * publishes (before WindowServer opens it) - the VM run has no shell to type
  * them in once the desktop is black */
 static int gBootAccelFb = 0, gBootIop = 0;
-static volatile SInt32 gBootGatesQueued = 0;
+static volatile UInt32 gBootGatesQueued = 0;   /* bit i: head i's gates queued */
 static void rd3AccelBootGates(void *, void *);
 extern "C" {
 struct thread_call *thread_call_allocate(void (*func)(void *, void *), void *param0);
@@ -281,9 +281,11 @@ public:
                  "and WindowServer composites it only after a WindowServer restart", idx);
         else
             ALOG("  to register it:  sudo sysctl -w debug.rdna3accelfb=1   (2 = re-run the family's own sweep)");
-        if (gBootAccelFb && idx == 0 && OSCompareAndSwap(0, 1, &gBootGatesQueued)) {
+        /* every head that publishes (the extended desktop's head 1 comes after
+         * the clone, well after head 0) gets the same treatment */
+        if (gBootAccelFb && idx < kRd3MaxFB && !(OSBitOrAtomic(1u << idx, &gBootGatesQueued) & (1u << idx))) {
             struct thread_call *tc = thread_call_allocate(rd3AccelBootGates, nullptr);
-            if (tc) { thread_call_enter(tc); ALOG("  boot-args rdna3accelfb=%d rdna3acceliop=%d: applying them now", gBootAccelFb, gBootIop); }
+            if (tc) { thread_call_enter(tc); ALOG("  boot-args rdna3accelfb=%d rdna3acceliop=%d: applying them now for head %u", gBootAccelFb, gBootIop, idx); }
             else ALOG("  boot-arg rdna3accelfb=%d: no thread call - use the sysctl", gBootAccelFb);
         }
         return true;
@@ -918,7 +920,7 @@ static int rdna3acceliop_sysctl SYSCTL_HANDLER_ARGS
 /* the boot-arg presets, on a thread call queued by fbPublished */
 static void rd3AccelBootGates(void *, void *)
 {
-    if (gBootIop)
+    if (gBootIop && !gRd3Iop)
         rd3AccelSetIop(1);
     ALOG("boot-arg rdna3accelfb=%d: as if `sysctl -w debug.rdna3accelfb=%d` was typed", gBootAccelFb, gBootAccelFb);
     RDNA3Accelerator::triggerFromSysctl(gBootAccelFb);

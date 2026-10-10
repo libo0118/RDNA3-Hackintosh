@@ -420,3 +420,11 @@ cursor. Next: 10a (`rdna3accelfb=4`, aperture open); the report now carries
 the WindowServer crash reports (`23-windowserver-crash.txt`). The Metal
 plugin (RDNA3MTLDriver.bundle, Stage 6) is not installed in the VM yet.
 
+### Card run 14 (step 10a): the desktop through the accelerator
+
+With the aperture gate open (`rdna3accelfb=4`): `getApertureMemoryDescriptor
+-> over BAR1`, `SWAP PROBE 3 ... HAS CONTENT`, `rd3AccelFlipTo: FLIPPED`,
+`FRONT SURFACE ... A LIVE WRITER IS PAINTING` - the user saw the desktop on
+the GOP's monitor; no WindowServer crash in this boot (the .ips reports in
+it were from run 13). Next: 10m, both heads; boot gates now apply per head.
+
