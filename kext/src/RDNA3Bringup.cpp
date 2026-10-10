@@ -114,6 +114,10 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
             fPmExpWanted = pmexp != 0;
             uint32_t idlecap = rd3_arg("rdna3idlecap", 0);
             fIdleCapWanted = idlecap != 0;
+            /* PM control from userspace: off unless asked for (not in
+             * the default profile); rdna3baco=1 only with rdna3pmctl */
+            fPmCtl = rd3_arg("rdna3pmctl", 0);
+            fBacoWanted = rd3_arg("rdna3baco", 0) != 0;
         }
         fMsi = msi != 0;
         fDoorbells = db != 0;
@@ -221,6 +225,8 @@ void RDNA3Bringup::stopAndFree()
     if (fSos.data)
         IOFree(fSos.data, fSos.len);
     if (fSmu) IOFree(fSmu, sizeof(*fSmu));
+    if (fUserOdTable) IOFree(fUserOdTable, sizeof(*fUserOdTable));
+    fUserOdTable = nullptr;
     if (fDmub) IOFree(fDmub, sizeof(*fDmub));
     fDmub = nullptr;
     if (fRom) IOFree(fRom, RD_VBIOS_MAX_LEN);
@@ -1030,6 +1036,16 @@ void RDNA3Bringup::pmInit()
         publishString("RDNA3,PM", "failed: no memory");
         return;
     }
+    /* a re-init (reset, resume): the user's overdrive settings survive it
+     * like amdgpu's user_overdrive_table */
+    if (fPmCtl && fSmu->od_valid && fSmu->user_od) {
+        if (!fUserOdTable)
+            fUserOdTable = (OverDriveTableExternal_t *)IOMalloc(sizeof(*fUserOdTable));
+        if (fUserOdTable) {
+            memcpy(fUserOdTable, &fSmu->od_user, sizeof(*fUserOdTable));
+            fUserOd = true;
+        }
+    }
     bzero(fSmu, sizeof(*fSmu));
 
     /* the VBIOS: boot-up clocks and the PMFW BoardTable */
@@ -1096,6 +1112,7 @@ void RDNA3Bringup::pmInit()
         return;
     }
     fPmUp = true;
+    pmCtlInit(vb);
     publishString("RDNA3,PM", fSmu->dpm_running ? "dpm running" : "features enabled, dpm off");
     publish("RDNA3,PMFeaturesAllowed", fSmu->allowed);
     publish("RDNA3,PMFeaturesRunning", fSmu->enabled);
@@ -1555,6 +1572,186 @@ int RDNA3Bringup::sensor(uint32_t type, uint32_t *value)
     }
 }
 
+/* -------------------------- PM control -------------------------- */
+
+uint32_t RDNA3Bringup::pmctlGates(bool admin) const
+{
+    uint32_t g = 0;
+    if (fPmCtl >= 1)
+        g |= RD_PMCTL_GATE_WRITE;
+    if (fPmCtl >= 2)
+        g |= RD_PMCTL_GATE_OD;
+    if (fBacoWanted && fPmCtl >= 1)
+        g |= RD_PMCTL_GATE_BACO;
+    if (admin)
+        g |= RD_PMCTL_GATE_ADMIN;
+    return g;
+}
+
+/* smu_late_init after smu13_pm_init: the queries (no message the default
+ * profile does not send), then with rdna3pmctl the overdrive tables
+ * (smu_set_default_od_settings) and, after a re-init, the user's settings
+ * again (smu_restore_dpm_user_profile) */
+void RDNA3Bringup::pmCtlInit(const rdna3_vbios *vb)
+{
+    int r = smu13_pm_query(fDev, fSmu, vb, fPmCtl >= 2);
+    publish("RDNA3,PMQueryResult", (uint64_t)(int64_t)r);
+    if (fPmCtl >= 1) {
+        int in_suspend = 0;
+        if (fReinit && fUserOd && fUserOdTable) {
+            memcpy(&fSmu->od_user, fUserOdTable, sizeof(fSmu->od_user));
+            fSmu->user_od = 1;
+            in_suspend = 1;
+        }
+        r = smu13_set_default_od_settings(fDev, fSmu, in_suspend);
+        publish("RDNA3,PMODResult", (uint64_t)(int64_t)r);
+        if (fReinit) {
+            /* smu_restore_dpm_user_profile: power limit, fan, overdrive */
+            if (fUserPowerLimit && smu13_set_ppt_limit(fDev, fSmu, fUserPowerLimit))
+                BLOG("PM: restoring the power limit (%u W) failed", fUserPowerLimit);
+            if (fUserFanMode != RD_FAN_CTRL_AUTO) {
+                smu13_set_fan_control_mode(fDev, fSmu, fUserFanMode);
+                if (fUserFanMode == RD_FAN_CTRL_MANUAL && fUserFanPwm)
+                    smu13_set_fan_speed_pwm(fDev, fSmu, fUserFanPwm);
+                if (fUserFanMode == RD_FAN_CTRL_MANUAL && fUserFanRpm)
+                    smu13_set_fan_speed_rpm(fDev, fSmu, fUserFanRpm);
+            }
+            if (!r && fSmu->user_od && smu13_restore_user_od_settings(fDev, fSmu))
+                BLOG("PM: Failed to upload customized OD settings");
+        }
+    }
+    pmCtlPublish();
+    BLOG("PM control: rdna3pmctl=%u%s, power limit %u W (%u..%u W), OD %s, BACO support 0x%x",
+         fPmCtl, fBacoWanted ? " rdna3baco=1" : "", fSmu->current_power_limit, fSmu->power_limit_min,
+         fSmu->power_limit_max, fSmu->od_enabled ? "enabled" : "off",
+         (unsigned)smu13_get_bamaco_support(fDev, fSmu));
+}
+
+/* what the PM control knows, in the IORegistry (RDNA3,PM*) */
+void RDNA3Bringup::pmCtlPublish()
+{
+    rdna3_temp_range tr;
+    publish("RDNA3,PMCtl", fPmCtl);
+    publish("RDNA3,PMBACOAllowed", fBacoWanted ? 1 : 0);
+    publish("RDNA3,PMPowerLimitW", fSmu->current_power_limit);
+    publish("RDNA3,PMPowerLimitDefaultW", fSmu->power_limit_default);
+    publish("RDNA3,PMPowerLimitMinW", fSmu->power_limit_min);
+    publish("RDNA3,PMPowerLimitMaxW", fSmu->power_limit_max);
+    publish("RDNA3,PMFanControl", fSmu->no_fan ? 0 : 1);
+    publish("RDNA3,PMFanMode", smu13_get_fan_control_mode(fDev, fSmu));
+    publish("RDNA3,PMODEnabled", fSmu->od_enabled ? 1 : 0);
+    publish("RDNA3,PMODFeatures", fSmu->pptable.SkuTable.OverDriveLimitsBasicMax.FeatureCtrlMask);
+    publish("RDNA3,PMODPptPercentMax", (uint64_t)(int64_t)fSmu->od_ppt_pct_max);
+    publish("RDNA3,PMODPptPercentMin", (uint64_t)(int64_t)fSmu->od_ppt_pct_min);
+    publish("RDNA3,PMGfxClkStandardMHz", fSmu->pstate_gfx.standard);
+    publish("RDNA3,PMGfxClkPeakMHz", fSmu->pstate_gfx.peak);
+    publish("RDNA3,PMUniqueID", fSmu->unique_id);
+    publish("RDNA3,PMProfile", fSmu->power_profile_mode);
+    publish("RDNA3,PMWorkloadMask", fSmu->workload_mask);
+    if (smu13_get_thermal_temperature_range(fSmu, &tr) == RDNA3_OK) {
+        publish("RDNA3,PMTempLimitMem", fSmu->pptable.SkuTable.TemperatureLimit[TEMP_MEM]);
+        publish("RDNA3,PMTempEmergencyHotspot", (uint64_t)(tr.hotspot_emergency_max / 1000));
+        publish("RDNA3,PMShutdownTempC", (uint64_t)tr.software_shutdown_temp);
+    }
+    if (fSmu->od_valid) {
+        const OverDriveTable_t *od = &fSmu->od.OverDriveTable;
+        publish("RDNA3,PMODGfxClkMinMHz", (uint64_t)(int64_t)od->GfxclkFmin);
+        publish("RDNA3,PMODGfxClkMaxMHz", (uint64_t)(int64_t)od->GfxclkFmax);
+        publish("RDNA3,PMODUclkMinMHz", od->UclkFmin);
+        publish("RDNA3,PMODUclkMaxMHz", od->UclkFmax);
+        publish("RDNA3,PMODVddGfxOffsetmV", (uint64_t)(int64_t)od->VoltageOffsetPerZoneBoundary[0]);
+        publish("RDNA3,PMODPptPercent", (uint64_t)(int64_t)od->Ppt);
+        publish("RDNA3,PMODFanMode", od->FanMode);
+        publish("RDNA3,PMODFanTargetTempC", od->FanTargetTemperature);
+        publish("RDNA3,PMODFanZeroRPM", od->FanZeroRpmEnable);
+        publish("RDNA3,PMODUser", fSmu->user_od ? 1 : 0);
+    }
+}
+
+/* the settings smu_restore_dpm_user_profile brings back after a re-init */
+void RDNA3Bringup::pmCtlRemember(const rdna3_pmctl_req *rq)
+{
+    switch (rq->op) {
+    case RD_PMCTL_POWER_LIMIT:
+        fUserPowerLimit = fSmu->current_power_limit;
+        break;
+    case RD_PMCTL_FAN_MODE:
+        fUserFanMode = (uint32_t)rq->a[0];
+        if (fUserFanMode != RD_FAN_CTRL_MANUAL)
+            fUserFanPwm = fUserFanRpm = 0;
+        break;
+    case RD_PMCTL_FAN_PWM:   /* PWM and RPM cannot co-exist */
+        fUserFanPwm = (uint32_t)rq->a[0];
+        fUserFanRpm = 0;
+        break;
+    case RD_PMCTL_FAN_RPM:
+        fUserFanRpm = (uint32_t)rq->a[0];
+        fUserFanPwm = 0;
+        break;
+    default:
+        break;
+    }
+    fUserOd = fSmu->od_valid && fSmu->user_od;
+}
+
+/* rdna3baco=1: the chip through BACO and back, then levels 4-8 again like
+ * after a mode-1 reset. A test of smu_v13_0_baco_enter / _exit on the card;
+ * no suspend path uses BACO. DRM lock held. */
+int RDNA3Bringup::bacoCycle()
+{
+    int support = smu13_get_bamaco_support(fDev, fSmu);
+    if (!(support & RD_BACO_SUPPORT)) {
+        BLOG("BACO: not supported (0x%x)", (unsigned)support);
+        return RDNA3_EOPNOTSUPP;
+    }
+    forceFences();
+    bool ok = gpuReset(true);
+    fOwner->displayAfterReset(true);   /* the display went with the chip */
+    publish("RDNA3,Resets", fResetCount);
+    return ok ? RDNA3_OK : RDNA3_EIO;
+}
+
+int RDNA3Bringup::pmctl(const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp, bool admin)
+{
+    uint32_t gates = pmctlGates(admin);
+    int r;
+
+    if (!fPmUp || !fFinished || !fSmu || !fDev) {
+        bzero(rp, sizeof(*rp));
+        rp->op = rq->op;
+        rp->info.gates = gates;
+        rp->err = RDNA3_ENODEV;
+        return rp->err;
+    }
+    if (rq->op == RD_PMCTL_BACO_CYCLE && rq->abi == RDNA3_PMCTL_ABI) {
+        if (!(gates & RD_PMCTL_GATE_BACO))
+            r = RDNA3_EOPNOTSUPP;
+        else if (!(gates & RD_PMCTL_GATE_ADMIN))
+            r = RDNA3_EPERM;
+        else
+            r = bacoCycle();
+        BLOG("PM control: BACO cycle -> %d", r);
+        bzero(rp, sizeof(*rp));
+        rp->op = rq->op;
+        if (fPmUp)
+            smu13_pmctl_info(fDev, fSmu, gates, &rp->info);
+        rp->err = r;
+        return r;
+    }
+    r = smu13_pmctl(fDev, fSmu, rq, rp, gates);
+    if (rq->op != RD_PMCTL_INFO) {
+        BLOG("PM control: op %u (%u args: %d %d %d %d) -> %d", rq->op, rq->nargs,
+             rq->nargs > 0 ? rq->a[0] : 0, rq->nargs > 1 ? rq->a[1] : 0,
+             rq->nargs > 2 ? rq->a[2] : 0, rq->nargs > 3 ? rq->a[3] : 0, r);
+        if (r == RDNA3_OK) {
+            pmCtlRemember(rq);
+            pmCtlPublish();
+        }
+    }
+    fMetricsAt = mach_absolute_time();   /* the reply just read the metrics */
+    return r;
+}
+
 /* amdgpu_fence_driver_force_completion on every kernel ring: the last
  * emitted seq lands, waiters wake up (and see the guilty flag) */
 void RDNA3Bringup::forceFences()
@@ -1670,14 +1867,19 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
  * on MP1 13.0.10, soc21_asic_reset -> amdgpu_device_mode1_reset): the PMFW
  * resets the chip, the PSP bootloader comes back, levels 4-8 run again.
  * VRAM normally survives; the magic word says so. */
-bool RDNA3Bringup::gpuReset()
+bool RDNA3Bringup::gpuReset(bool baco)
 {
     uint32_t magic = 0, i;
     bool ok;
 
-    fGpuResets++;
-    HLOG("GPU reset #%llu: mode-1 through the PMFW, then bring-up from level 4",
-         (unsigned long long)fGpuResets);
+    if (baco) {
+        HLOG("BACO cycle #%u: enter + exit through the PMFW, then bring-up from level 4",
+             fBacoCycles + 1);
+    } else {
+        fGpuResets++;
+        HLOG("GPU reset #%llu: mode-1 through the PMFW, then bring-up from level 4",
+             (unsigned long long)fGpuResets);
+    }
     if (fIntr)
         fIntr->disable();
     for (uint32_t id = 1; id < 16; id++)
@@ -1690,7 +1892,22 @@ bool RDNA3Bringup::gpuReset()
 
     /* soc21_asic_mode1_reset: no bus mastering across the reset */
     fPci->setBusMasterEnable(false);
-    smu13_mode1_reset(fDev);
+    if (baco) {
+        /* amdgpu_device_baco_enter / _exit (smu_v13_0_baco_enter / _exit,
+         * BACO_SEQ_BACO, no runtime-PM audio path) */
+        int r = smu13_baco_enter(fDev, fSmu, 0, RD_BACO_SEQ_BACO);
+        HLOG("BACO enter -> %d", r);
+        if (r == RDNA3_OK) {
+            IOSleep(100);
+            r = smu13_baco_exit(fDev, fSmu, 0);
+            HLOG("BACO exit -> %d", r);
+        }
+        fBacoCycles++;
+        publish("RDNA3,PMBACOCycles", fBacoCycles);
+        publish("RDNA3,PMBACOResult", (uint64_t)(int64_t)r);
+    } else {
+        smu13_mode1_reset(fDev);
+    }
     if (psp13_wait_for_bootloader(fPsp) != RDNA3_OK)
         BLOG("GPU reset: the PSP bootloader did not come back");
     for (i = 0; i < fDev->usec_timeout; i++) {
@@ -1721,7 +1938,9 @@ bool RDNA3Bringup::gpuReset()
     fResetCount++;
     if (fIntr)
         fIntr->enable();
-    BLOG("GPU reset #%llu %s", (unsigned long long)fGpuResets, ok ? "done, rings back up" : "FAILED");
+    BLOG("%s #%llu %s", baco ? "BACO cycle" : "GPU reset",
+         baco ? (unsigned long long)fBacoCycles : (unsigned long long)fGpuResets,
+         ok ? "done, rings back up" : "FAILED");
     publish("RDNA3,VRAMLost", fVramLostCount);
     return ok;
 }

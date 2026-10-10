@@ -4,6 +4,7 @@
 #   include/ + pkgconfig/ so Mesa's meson finds them as "libdrm" / "libdrm_amdgpu"
 #   rdna3_drminfo       - Stage 4 smoke test against the kext
 #   rdna3_modetest      - list / switch display modes (CoreGraphics) for the report
+#   rdna3_pmctl         - fan, power limit, overdrive, profiles (RDNA3Accel selector 1)
 #   rdna3_vktest        - Vulkan test against RADV's ICD entry points (needs
 #                         Vulkan-Headers: cloned into build/ if not given)
 #   mtlprobe            - Metal devices + a compute kernel through the plugin
@@ -24,7 +25,8 @@ AMD_SRC   := $(wildcard $(LIBDRM)/amdgpu/*.c)
 AMD_OBJS  := $(patsubst $(LIBDRM)/amdgpu/%.c,$(BUILD)/obj/amdgpu_%.o,$(AMD_SRC))
 
 .PHONY: all install clean loopback probes
-all: $(BUILD)/libdrm.dylib $(BUILD)/libdrm_amdgpu.dylib $(BUILD)/rdna3_drminfo $(BUILD)/rdna3_modetest install
+all: $(BUILD)/libdrm.dylib $(BUILD)/libdrm_amdgpu.dylib $(BUILD)/rdna3_drminfo $(BUILD)/rdna3_modetest \
+     $(BUILD)/rdna3_pmctl install
 # separate from all: a failure here must not cost the kext artifact (CI)
 probes: $(BUILD)/rdna3_vktest $(BUILD)/mtlprobe
 
@@ -66,6 +68,9 @@ $(BUILD)/libdrm_amdgpu.dylib: $(AMD_OBJS) $(BUILD)/libdrm.dylib
 $(BUILD)/rdna3_drminfo: rdna3_drminfo.c $(BUILD)/libdrm.dylib
 	$(CC) -O2 -g $(ARCH) $(WARN) -I$(XNU) -I../uapi -I../common -I../third_party/amd \
 	  -o $@ $< -L$(BUILD) -ldrm -Wl,-rpath,@executable_path $(LIBS)
+
+$(BUILD)/rdna3_pmctl: rdna3_pmctl.c ../common/rdna3_pmctl.h | $(BUILD)/obj
+	$(CC) -O2 -g $(ARCH) $(WARN) -I../common -o $@ $< $(LIBS)
 
 $(BUILD)/rdna3_modetest: rdna3_modetest.c | $(BUILD)/obj
 	$(CC) -O2 -g $(ARCH) $(WARN) -o $@ $< -framework CoreGraphics -framework CoreFoundation

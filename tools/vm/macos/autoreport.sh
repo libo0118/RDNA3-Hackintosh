@@ -229,7 +229,7 @@ done_() {   # done_ EXIT: the test's exit code and summary line
     echo "[exit $1]"
     partial
     sum=$(tail -n +"$((hl + 1))" "$extra" 2>/dev/null |
-          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
+          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|PMCTL:|BACO:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
     if [ "$1" = 0 ]; then prog "    OK  ${sum}"; else prog "    FAIL (exit $1)  ${sum}"; fi
 }
 [ -n "$win" ] || { rm -f "$P"; touch "$P"; chmod 644 "$P"; }
@@ -397,6 +397,35 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             done_ $?
         fi ;;
     esac
+    # power management (rdna3_pmctl): what the SMU reports on every level
+    # with PM; step pmctl (rdna3pmctl=1/2) sets each knob once and back;
+    # step baco (rdna3baco=1) cycles the chip through BACO, then the DMA/GFX
+    # tests again
+    if [ "${lvl:-0}" -ge 5 ] && [ -x "$D/bin/rdna3_pmctl" ]; then
+        hdr "rdna3_pmctl info"
+        with_limit 30 "$D/bin/rdna3_pmctl" info 2>&1
+        done_ $?
+        case " $args " in
+        *" rdna3pmctl=1 "*|*" rdna3pmctl=2 "*)
+            hdr "rdna3_pmctl selftest"
+            with_limit 120 "$D/bin/rdna3_pmctl" selftest 2>&1
+            done_ $?
+            hdr "rdna3_pmctl profiles"
+            with_limit 30 "$D/bin/rdna3_pmctl" profiles 2>&1
+            done_ $? ;;
+        esac
+        case " $args " in
+        *" rdna3baco=1 "*)
+            hdr "rdna3_pmctl baco-cycle"
+            with_limit 120 "$D/bin/rdna3_pmctl" baco-cycle 2>&1
+            done_ $?
+            if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
+                hdr "rdna3_drminfo --dma-test --gfx-test (after BACO)"
+                with_limit 60 "$D/bin/rdna3_drminfo" --dma-test --gfx-test 2>&1
+                done_ $?
+            fi ;;
+        esac
+    fi
     # Vulkan: RADV (prepare --radv) straight through its ICD entry points,
     # no loader; libdrm_xnu talks to RDNA3Accel's user client
     if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_vktest" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then

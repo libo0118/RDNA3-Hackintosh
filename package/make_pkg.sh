@@ -107,7 +107,7 @@ python3 "$P/oc_snippet.py" --kexts "$R/Library/Extensions" --all --plist > "$A/O
 # Metal plugin look (/Library/GPUBundles/rdna3mtl), linked into bin for the
 # tools' @executable_path rpath
 mkdir -p "$M"
-for t in rdna3_drminfo rdna3_modetest rdna3_vktest mtlprobe; do
+for t in rdna3_drminfo rdna3_modetest rdna3_pmctl rdna3_vktest mtlprobe; do
     f=$(find_part f "$t") && { cp "$f" "$A/bin/$t"; parts+=("$t"); }
 done
 lib() {   # lib INSTALLED-NAME FOUND-NAME...
