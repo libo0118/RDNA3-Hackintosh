@@ -215,6 +215,12 @@ typedef struct sim {
     unsigned dcn_gated_drops, dcn_pg_no_request;
     /* DAL mailbox of the PMFW (dcn32_clk_mgr_smu_msg.c) */
     unsigned dal_msgs, dal_displays, dal_hard_min[16];
+    /* DISPCLK / DPPCLK DPM levels (GetDpmFreqByIndex); SetHardMinByFreq on
+     * them moves the CLK1 DFS divider (unless dal_ignore_hard_min) and is
+     * logged in order with the DMCUB's VBIOS command count and OTG 2's
+     * H_TOTAL at that moment */
+    unsigned dal_dpm_n, dal_dpm[8], dal_ignore_hard_min;
+    unsigned dal_norder, dal_order[8], dal_order_nseq[8], dal_order_htotal[8];
     /* the PMFW stops answering once the DMCUB ran this many VBIOS commands
      * (0 = never), as it did on the card after the clone */
     unsigned smu_wedge_at;
@@ -2108,8 +2114,30 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         if (v == RD_DALSMC_MSG_NumOfDisplays)
             S.dal_displays = arg;
         else if (v == RD_DALSMC_MSG_SetHardMinByFreq && (arg >> 16) < 16) {
-            S.dal_hard_min[arg >> 16] = arg & 0xffff;
+            uint32_t clk = arg >> 16;
+            S.dal_hard_min[clk] = arg & 0xffff;
             S.reg[RD_DAL_ARG_REG] = (arg & 0xffff) * 1000;
+            if (S.dal_norder < 8) {
+                S.dal_order[S.dal_norder] = clk;
+                S.dal_order_nseq[S.dal_norder] = S.dmub.nseq;
+                S.dal_order_htotal[S.dal_norder++] = S.reg[OTG(regOTG0_OTG_H_TOTAL, 2)];
+            }
+            /* the PMFW's DFS: the slowest divider that reaches the minimum */
+            if ((clk == RD_PPCLK_DISPCLK || clk == RD_PPCLK_DPPCLK) && !S.dal_ignore_hard_min) {
+                uint32_t vco = (S.reg[RD_CLK1_CLK_PLL_REQ] & 0x1ff) * 100000u, did;
+                if (!vco)
+                    vco = RD_DCN32_VCO_DEFAULT_KHZ;
+                for (did = 0x7f; did >= 0x08; did--)
+                    if (4ull * vco / dcn32_dentist_divider(did) >= (arg & 0xffff) * 1000ull)
+                        break;
+                S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE * (clk == RD_PPCLK_DPPCLK)] = did;
+            }
+        } else if (v == RD_DALSMC_MSG_GetSmuVersion) {
+            S.reg[RD_DAL_ARG_REG] = 0x00505c00;   /* 80.92 */
+        } else if (v == RD_DALSMC_MSG_GetDpmFreqByIndex && ((arg >> 16) == RD_PPCLK_DISPCLK ||
+                                                             (arg >> 16) == RD_PPCLK_DPPCLK)) {
+            S.reg[RD_DAL_ARG_REG] = (arg & 0xff) == 0xff ? S.dal_dpm_n
+                                  : (arg & 0xff) < S.dal_dpm_n ? S.dal_dpm[arg & 0xff] : 0;
         } else if (v == RD_DALSMC_MSG_ReturnHardMinStatus)
             S.reg[RD_DAL_ARG_REG] = 0x3f;
         else
@@ -3938,6 +3966,65 @@ static void run(const char *fwdir)
             CHECK(S.reg[HUBP(regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, 1)] == vp0);
             CHECK((S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_PITCH, 1)] & 0x3fff) == (pitch0 & 0x3fff) && !sc.saved[1]);
             CHECK(dc.head[0].width == 2560 && dc.head[0].height == 1440);
+            /* rdna3scaledlg: the scaled plane also gets the line buffer and
+             * the scale-dependent DLG/TTU (dml32), the GOP's come back with
+             * the native size; without it (above) they stay untouched */
+            {
+                static rdna3_dcn_scale sc2;
+                rdna3_scanout_info si;
+                const uint32_t dfs1 = S.reg[RD_CLK1_CLK0_DFS_CNTL + 3], pll = S.reg[RD_CLK1_CLK_PLL_REQ];
+                const uint32_t dtoc = S.reg[DCN_B1 + regDPPCLK_DTO_CTRL];
+                CHECK(DSC(regDSCL0_LB_MEMORY_CTRL) == 0 && DSC(regDSCL0_LB_DATA_FORMAT) == 0);
+                memset(&sc2, 0, sizeof(sc2));
+                sc2.dlg = 1;
+                /* the GOP's 1:1 plane: LB as after reset, DLG of DML for 1440p */
+                DSC(regDSCL0_LB_DATA_FORMAT) = 0x10;
+                DSC(regDSCL0_LB_MEMORY_CTRL) = 0x3f00;
+                S.reg[HUBP(regHUBPREQ0_DST_AFTER_SCALER, 1)] = 1110;
+                S.reg[HUBP(regHUBPREQ0_DST_DIMENSIONS, 1)] = 1125u << 8;   /* refcyc_per_htotal 1125 */
+                S.reg[HUBP(regHUBPREQ0_PER_LINE_DELIVERY, 1)] = 1060;
+                S.reg[HUBP(regHUBPREQ0_PER_LINE_DELIVERY_PRE, 1)] = 1000;
+                S.reg[HUBP(regHUBPREQ0_DCN_SURF0_TTU_CNTL0, 1)] = 0x10000 | (8u << 24);
+                S.reg[HUBP(regHUBPREQ0_DCN_SURF0_TTU_CNTL1, 1)] = 0x8000;
+                /* DPPCLK 165.4 MHz (VCO 4.3 GHz / 26), no DTO on pipe 1 */
+                S.reg[RD_CLK1_CLK_PLL_REQ] = 43;
+                S.reg[RD_CLK1_CLK0_DFS_CNTL + 3] = 0x54;
+                S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] = 0;
+                CHECK(dcn32_set_source(&dev, &dc, &sc2, 0, FB_START + 0x2000000, 1280, 720, 1280) == RDNA3_OK);
+                /* LB: 970 / ceil(1280 / 6) = 4 lines >= 2 taps -> config 1, 31 partitions */
+                CHECK(DSC(regDSCL0_LB_MEMORY_CTRL) == (1u | 31u << 8) && DSC(regDSCL0_LB_DATA_FORMAT) == 0);
+                /* 1 / HRatio = 2: twice the time per 256-byte request */
+                CHECK(S.reg[HUBP(regHUBPREQ0_DCN_SURF0_TTU_CNTL0, 1)] == (0x20000u | (8u << 24)) &&
+                      S.reg[HUBP(regHUBPREQ0_DCN_SURF0_TTU_CNTL1, 1)] == 0x10000);
+                /* line delivery: 1280 / 0.5 = 2560 pixel times, as before */
+                CHECK(S.reg[HUBP(regHUBPREQ0_PER_LINE_DELIVERY, 1)] == 1060 &&
+                      S.reg[HUBP(regHUBPREQ0_PER_LINE_DELIVERY_PRE, 1)] == 1000);
+                /* + ceil(34 x 100 MHz / 165.4 MHz) = 21: 1131 = line 1 + 6 */
+                CHECK(S.reg[HUBP(regHUBPREQ0_DST_AFTER_SCALER, 1)] == (6u | 1u << 16));
+                CHECK(dcn32_scanout_info(&dev, 1, &si) == RDNA3_OK && si.dscl_mode == 1 &&
+                      si.lb_memory_ctrl == (1u | 31u << 8) && si.dlg_req_delivery == 0x20000 &&
+                      si.dlg_line_delivery == 1060 && si.dppclk_khz == 165384 && si.dlg_after_scaler == (6u | 1u << 16));
+                /* 1366 wide: the swath rounds up to 1408 pixels */
+                CHECK(dcn32_set_source(&dev, &dc, &sc2, 0, FB_START + 0x2000000, 1366, 768, 1408) == RDNA3_OK);
+                CHECK((S.reg[HUBP(regHUBPREQ0_DCN_SURF0_TTU_CNTL0, 1)] & 0x7fffff) == 122820 &&
+                      S.reg[HUBP(regHUBPREQ0_DCN_SURF0_TTU_CNTL1, 1)] == 61410 &&
+                      S.reg[HUBP(regHUBPREQ0_PER_LINE_DELIVERY, 1)] == 1093 &&
+                      S.reg[HUBP(regHUBPREQ0_PER_LINE_DELIVERY_PRE, 1)] == 1031);
+                /* native: the GOP's values again */
+                CHECK(dcn32_set_source(&dev, &dc, &sc2, 0, FB_START + 0x6000000, 2560, 1440, 2624) == RDNA3_OK);
+                CHECK(DSC(regDSCL0_LB_MEMORY_CTRL) == 0x3f00 && DSC(regDSCL0_LB_DATA_FORMAT) == 0x10 &&
+                      S.reg[HUBP(regHUBPREQ0_DST_AFTER_SCALER, 1)] == 1110 &&
+                      S.reg[HUBP(regHUBPREQ0_DCN_SURF0_TTU_CNTL0, 1)] == (0x10000u | (8u << 24)) &&
+                      S.reg[HUBP(regHUBPREQ0_PER_LINE_DELIVERY, 1)] == 1060 && !sc2.saved[1] && !sc2.bw_saved[1]);
+                /* the report clears the sticky underflow to see if it comes back */
+                CHECK(dcn32_clear_underflow(&dev, 1) == RDNA3_OK &&
+                      (S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & HUBP0_DCHUBP_CNTL__HUBP_UNDERFLOW_CLEAR_MASK));
+                S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] &= ~HUBP0_DCHUBP_CNTL__HUBP_UNDERFLOW_CLEAR_MASK;
+                CHECK(dcn32_clear_underflow(&dev, 4) == RDNA3_EINVAL);
+                S.reg[RD_CLK1_CLK0_DFS_CNTL + 3] = dfs1;
+                S.reg[RD_CLK1_CLK_PLL_REQ] = pll;
+                S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] = dtoc;
+            }
             /* the OTG CRC over the active area, as dc_stream_configure_crc */
             dcn32_crc_enable(&dev, &dc, 0, 1);
             CHECK(S.reg[OTG(regOTG0_OTG_CRC0_WINDOWA_X_CONTROL, 2)] == 2560u << 16 &&
@@ -4815,6 +4902,84 @@ static void run(const char *fwdir)
                     S.dcn_frames = 1;
                     CHECK(dcn32_modeset_apply(&dev, &dm, &dc2, &sc, &ms, FB_START, 2560, FB_START + 0x8000000, 1920, 50) ==
                           RDNA3_OK && dc2.head[0].width == 2560 && S.reg[OTG(regOTG0_OTG_H_TOTAL, 2)] == 2719);
+                    S.dcn_frames = 0;
+                }
+                /* rdna3dispclk: 1920x1080 at 72 Hz (208.65 MHz) over DISPCLK
+                 * and DPPCLK at 165.4 MHz (pipe 1's DTO at half of it) */
+                {
+                    rdna3_dcn_clk_limits lim, low;
+                    rdna3_mode fast;
+                    const uint32_t dfs0 = S.reg[RD_CLK1_CLK0_DFS_CNTL], dfs1 = S.reg[RD_CLK1_CLK0_DFS_CNTL + 3];
+                    const uint32_t dto = S.reg[DCN_B1 + regDPPCLK0_DTO_PARAM + 1], dtoc = S.reg[DCN_B1 + regDPPCLK_DTO_CTRL];
+                    memset(&fast, 0, sizeof(fast));
+                    fast.h_active = 1920; fast.v_active = 1080; fast.h_total = 2592; fast.v_total = 1118;
+                    fast.h_front = 136; fast.h_sync = 208; fast.v_front = 3; fast.v_sync = 5;
+                    fast.pixel_khz = 208650; fast.refresh_mhz = 72000; fast.v_sync_pos = 1;
+                    S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x54;
+                    S.reg[RD_CLK1_CLK0_DFS_CNTL + 3] = 0x54;
+                    CHECK((S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] & 0x10) && (dto & 0xff) == 0x32 && (dto >> 16) == 0x64);
+                    /* without the boot-arg: refused as before */
+                    CHECK(dcn32_modeset_plan(&dev, &dc2, 0, &own, 241500, &fast, &ms) == RD_MODESET_CLOCKS);
+                    CHECK(dcn32_modeset_plan_clk(&dev, &dc2, 0, &own, 241500, &fast, NULL, &ms) == RD_MODESET_CLOCKS);
+                    /* the PMFW's DPM levels through the DAL mailbox (dcn32_init_clocks) */
+                    S.dal_dpm_n = 4;
+                    S.dal_dpm[0] = 358; S.dal_dpm[1] = 716; S.dal_dpm[2] = 1075; S.dal_dpm[3] = 1433;
+                    CHECK(dcn32_clk_limits_read(&dev, &lim) == RDNA3_OK && lim.pmfw == 0x00505c00 &&
+                          lim.dispclk_levels == 4 && lim.dispclk_max_khz == 1433000 && lim.dppclk_max_khz == 1433000);
+                    /* DML 3.2: x 1.005 x 1.01 -> 17.2 GHz / 81, x 1.005 -> / 82 */
+                    CHECK(dcn32_required_dispclk(208650, 4300000, lim.dispclk_max_khz) == 212345 &&
+                          dcn32_required_dppclk(208650, 4300000) == 209756);
+                    /* the ramping margin goes first when the limit is short */
+                    CHECK(dcn32_required_dispclk(208650, 4300000, 211000) == 4300000u * 4 / 82 &&
+                          dcn32_required_dispclk(208650, 4300000, 200000) == 0);
+                    low = lim;
+                    low.dispclk_max_khz = 200000;
+                    CHECK(dcn32_modeset_plan_clk(&dev, &dc2, 0, &own, 241500, &fast, &low, &ms) == RD_MODESET_CLOCKS);
+                    CHECK(dcn32_modeset_plan_clk(&dev, &dc2, 0, &own, 241500, &fast, &lim, &ms) == RD_MODESET_OK);
+                    CHECK(ms.raise_dispclk_khz == 212345 && ms.raise_dppclk_khz == 209756 && ms.pmfw == 0x00505c00 &&
+                          ms.want.h_total == 2591);
+                    /* the PMFW does not move the DFS: refused, the stream untouched */
+                    S.dal_ignore_hard_min = 1;
+                    S.dal_norder = 0;
+                    S.dmub.nseq = 0;
+                    CHECK(dcn32_modeset_apply(&dev, &dm, &dc2, &sc, &ms, FB_START + 0x8000000, 1920, FB_START, 2560, 50) ==
+                          RDNA3_EBUSY);
+                    CHECK(S.dmub.nseq == 0 && S.reg[OTG(regOTG0_OTG_H_TOTAL, 2)] == 2719 && dc2.head[0].width == 2560);
+                    S.dal_ignore_hard_min = 0;
+                    /* DPPCLK's hard min, then DISPCLK's, both before the first
+                     * VBIOS command and the timing; the DTO of pipe 1 after */
+                    S.dal_norder = 0;
+                    S.dmub.nseq = 0;
+                    S.dcn_frames = 1;
+                    CHECK(dcn32_modeset_apply(&dev, &dm, &dc2, &sc, &ms, FB_START + 0x8000000, 1920, FB_START, 2560, 50) ==
+                          RDNA3_OK);
+                    CHECK(S.dal_norder == 2 && S.dal_order[0] == RD_PPCLK_DPPCLK && S.dal_order[1] == RD_PPCLK_DISPCLK &&
+                          S.dal_order_nseq[0] == 0 && S.dal_order_nseq[1] == 0 &&
+                          S.dal_order_htotal[0] == 2719 && S.dal_order_htotal[1] == 2719);
+                    CHECK(S.dal_hard_min[RD_PPCLK_DPPCLK] == 209 && S.dal_hard_min[RD_PPCLK_DISPCLK] == 212);
+                    /* the DFS: 17.2 GHz / 80 = 215 MHz, / 82 = 209.8 MHz */
+                    CHECK(S.reg[RD_CLK1_CLK0_DFS_CNTL] == 0x48 && S.reg[RD_CLK1_CLK0_DFS_CNTL + 3] == 0x49);
+                    /* dccg2_update_dpp_dto: ceil(255 x 209756 / 209756) */
+                    CHECK(S.reg[DCN_B1 + regDPPCLK0_DTO_PARAM + 1] == (255u | 255u << 16) &&
+                          (S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] & 0x10));
+                    CHECK(S.dmub.nseq == 4 && S.reg[OTG(regOTG0_OTG_H_TOTAL, 2)] == 2591 && dc2.head[0].width == 1920);
+                    /* back to 1440p at the GOP's clocks: nothing to raise */
+                    S.reg[RD_CLK1_CLK0_DFS_CNTL] = dfs0;
+                    S.reg[RD_CLK1_CLK0_DFS_CNTL + 3] = dfs1;
+                    S.reg[DCN_B1 + regDPPCLK0_DTO_PARAM + 1] = dto;
+                    S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] = dtoc;
+                    {
+                        rdna3_mode up;
+                        memset(&up, 0, sizeof(up));
+                        up.h_active = 2560; up.v_active = 1440; up.h_total = 2720; up.v_total = 1481;
+                        up.h_front = 48; up.h_sync = 32; up.v_front = 3; up.v_sync = 5; up.pixel_khz = 241500;
+                        up.h_sync_pos = up.v_sync_pos = 1;
+                        S.dal_norder = 0;
+                        CHECK(dcn32_modeset_plan_clk(&dev, &dc2, 0, &own, 208650, &up, &lim, &ms) == RD_MODESET_OK &&
+                              !ms.raise_dispclk_khz && !ms.raise_dppclk_khz);
+                        CHECK(dcn32_modeset_apply(&dev, &dm, &dc2, &sc, &ms, FB_START, 2560, FB_START + 0x8000000, 1920,
+                                                  50) == RDNA3_OK && S.dal_norder == 0 && dc2.head[0].width == 2560);
+                    }
                     S.dcn_frames = 0;
                 }
             }

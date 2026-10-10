@@ -340,6 +340,28 @@ The report's `hotplug window` section has `RDNA3,HPDState` (`HPD1 1 HPD2 0 ...`,
 | `GAMMA: FAIL - the picture in VRAM darkened` | WindowServer applied the table in the compositor (software gamma), so the OGAM is not proven | fb log: was `setGammaTable` called at all; IOFramebuffer gamma properties (`IOFBGammaWidth` / `IOFBGammaCount`) |
 | `GAMMA: PASS`, but colours / Night Shift look wrong on the monitor | curve mapping: OGAM input taken as the encoded pixel value (DPP colour management in bypass, as the GOP leaves it); pixel value 0 always maps to 0 (start slope from the origin) | photo of the screen; same boot with the ColorSync profile set to sRGB; check the DPP's degamma / gamut remap (`CM_DGAM_*`, `CM_GAMUT_REMAP_*`) left by the GOP |
 
+### Mode set and scaled modes (`modeset`, `modeset2`)
+
+Every `rdna3_drminfo --scanout` look prints per powered pipe: `DET n x 64
+KiB (compbuf m), DISPCLK .. kHz, DPPCLK .. kHz (pipe), DSCL mode, LB, mem
+pwr, DLG after scaler y/x req .. line ..`. It reads the sticky underflow,
+clears it, and the second look 2 s later says `UNDERFLOW again within 2 s`
+(steady) or `no underflow in the 2 s after clearing it` (it came from a
+switch). `rdna3_modetest cycle` first tries each display's fastest timing
+of its own size (look `mode-d<D>-<W>x<H>-<Hz>hz`), then the smaller modes.
+`modeset2` = `modeset` + `rdna3dispclk=1` + `rdna3scaledlg=1`.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `UNDERFLOW again` at a scaled mode with `modeset`, not with `modeset2` | the 1:1 LB / DLG (card run 20, pipe 1 at 960x540) | verified: hw-verified, then `rdna3scaledlg` into the default profile |
+| `UNDERFLOW again` with `modeset2` too, its pipe shows DSCL mode 1, LB `0x00001f01`, req delivery x (native / source width) | not the DLG. Compare the pipes: `DET` (the clone gets the smaller half, `dcn32_clone_plan`), `mem pwr` (LB_Gx force bits; the clone does not copy DSCL_MEM_PWR_CTRL), `DPPCLK (pipe)` below the pixel clock (DTO) | the differing one: equal DET split (`dcn32_determine_det_override`), copy DSCL_MEM_PWR_CTRL / `dpp1_power_on_dscl`, or `dcn32_clk_raise`'s DTO for the scaled pipe |
+| `no underflow in the 2 s after clearing it` after a switch | transient while the scaler / viewport latched | picture fine: record, no fix needed |
+| `modeset2`: `rdna3_modetest list` has no faster mode of the native size | the plan refused it (log `display: head N mode ... refused (4)`) or the limits read failed | `RDNA3,DCNClockLimits` (0 kHz = `GetDpmFreqByIndex` over the DAL mailbox failed; log `DAL SMU: PMFW ...`); a mode above the max is refused by design |
+| `DCN clocks: asked DISPCLK .. the PMFW set ..`, mode set `-16` | the PMFW acked SetHardMinByFreq but did not move the DFS (DCN DPM off: `RD_SMU_FEATURES_SAFE` drops `FEATURE_DPM_DCN` unless SCPM runs it) | `PMFeaturesRunning` bit DPM_DCN; port the DCN DPM enable (`smu_v13_0_0` allowed mask) behind its own boot-arg |
+| `DAL SMU message 0x9(...)`: no answer, PMFW mailbox dead afterwards | the DAL mailbox wedged as NumOfDisplays did in card runs 1-6 | drop `rdna3dispclk`; the serial log shows the first DAL message that hung |
+| faster mode `now WxH 72.00 Hz`, picture right, the look's `DISPCLK` above the pixel clock x 1.015 | pass | hw-verified (`modeset2`), then `rdna3dispclk` into the profile |
+| faster mode set, then `modeset: ... underflows / does not run: back to` | clocks fine, DLG not (rescaled GOP values) | the look's DLG line + serial `modeset:` lines; port the full `dml32_rq_dlg_get_dlg_reg` for that mode |
+
 ### Idle power (`rdna3pmexp=1`)
 
 Triage prints one line per variant (10 s each): baseline, GFXOFF allowed,

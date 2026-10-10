@@ -253,6 +253,9 @@ private:
     uint32_t      fModeCount[4] = {};
     struct rdna3_dmub *volatile fDisplayDm = nullptr;   /* the bring-up's DMCUB once it runs */
     struct rdna3_dcn_scale *fScale = nullptr;
+    /* rdna3dispclk=1: the PMFW's DISPCLK / DPPCLK limits, read once */
+    struct rdna3_dcn_clk_limits *fClkLim = nullptr;
+    const struct rdna3_dcn_clk_limits *displayClkLimits();
     uint32_t      fFwVer[32] = {}, fFwFeat[32] = {};
     uint8_t      *fVbiosCopy = nullptr;
     uint32_t      fVbiosCopyLen = 0;

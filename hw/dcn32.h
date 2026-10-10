@@ -74,6 +74,16 @@ typedef struct rdna3_scanout_info {
     uint32_t flip_pending;      /* SURFACE_FLIP_PENDING */
     uint64_t address;           /* PRIMARY_SURFACE_ADDRESS (requested) */
     uint64_t inuse;             /* SURFACE_EARLIEST_INUSE (being scanned) */
+    /* what decides whether the pipe keeps up (underflow at scaled modes,
+     * card run 20): its DET and the shared compressed buffer (64 KiB
+     * segments, current), the clocks (global DISPCLK, this pipe's DPPCLK
+     * through its DTO), the scaler (DSCL_MODE, LB_MEMORY_CTRL,
+     * DSCL_MEM_PWR_CTRL) and the DLG it was given (DST_AFTER_SCALER,
+     * REFCYC_PER_REQ_DELIVERY, REFCYC_PER_LINE_DELIVERY_L) */
+    uint32_t det_segs, compbuf_segs;
+    uint32_t dispclk_khz, dppclk_khz;
+    uint32_t dscl_mode, lb_memory_ctrl, dscl_mem_pwr;
+    uint32_t dlg_after_scaler, dlg_req_delivery, dlg_line_delivery;
 } rdna3_scanout_info;
 
 /* Read pipe 'pipe' (0..3). Reads only; a power-gated pipe returns with
@@ -93,10 +103,17 @@ int  dcn32_scanout_sample(rdna3_dev *d, const rdna3_scanout_info *s, uint32_t ou
  * the GOP left are saved on the first scaled source and put back when the
  * native size comes back. */
 #define RD_SCALE_REGS 22
+#define RD_SCALE_BW_REGS 8
 typedef struct rdna3_dcn_scale {
     int      saved[RD_DCN_MAX_PIPES];
     uint32_t native_w[RD_DCN_MAX_PIPES], native_h[RD_DCN_MAX_PIPES];
     uint32_t reg[RD_DCN_MAX_PIPES][RD_SCALE_REGS];
+    /* rdna3scaledlg=1: a scaled source also gets the line buffer and the
+     * DLG/TTU a scaled plane needs (dcn32_set_source); the GOP's values
+     * are saved alongside and come back with the native size */
+    uint32_t dlg;
+    int      bw_saved[RD_DCN_MAX_PIPES];
+    uint32_t bw_reg[RD_DCN_MAX_PIPES][RD_SCALE_BW_REGS];
 } rdna3_dcn_scale;
 
 /* Show the w x h surface at MC address 'mc' (pitch_px pixels per row) on
@@ -105,9 +122,26 @@ typedef struct rdna3_dcn_scale {
  * coefficients, ratio src/dst, init (ratio + taps + 1) / 2), all under the
  * OTG master update lock (optc3_lock / optc1_unlock) so they latch in one
  * frame. w x h == native restores the saved bypass state. Upscaling only,
- * down to 1/4 of the native size. */
+ * down to 1/4 of the native size.
+ * With sc->dlg the scaled plane gets what amdgpu programs for it besides
+ * the ratios (the GOP's DLG/TTU were computed for a 1:1 plane):
+ * dpp1_dscl_set_lb with dpp1_dscl_find_lb_memory_config /
+ * dscl32_calc_lb_num_partitions (LB_MEMORY_CTRL, LB_DATA_FORMAT), and of
+ * dml32_rq_dlg_get_dlg_reg the fields that depend on the scale:
+ * refcyc_per_req_delivery(_pre)_l x 1 / HRatio (fewer 256-byte requests per
+ * line, dml32_CalculatePixelDeliveryTimes), refcyc_per_line_delivery
+ * (_pre)_l x the 64-pixel rounding of the narrower swath, and
+ * refcyc_x_after_scaler + (DPPCLKDelaySCL - DPPCLKDelaySCLLBOnly) DPPCLK
+ * cycles when the GOP bypassed the scaler (dml32_CalculatePrefetchSchedule
+ * DSTXAfterScaler). VInitPreFill, the prefetch source lines and so
+ * VRATIO_PREFETCH / DST_Y_PREFETCH do not change for an upscale with 2
+ * taps (floor((vratio + 3) / 2) = 1 as for 1:1). */
 int  dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t i, uint64_t mc,
                       uint32_t w, uint32_t h, uint32_t pitch_px);
+
+/* hubp2_clear_underflow: HUBP_UNDERFLOW_CLEAR on pipe 'pipe' (the status
+ * is sticky: the report clears it to see whether it comes back) */
+int  dcn32_clear_underflow(rdna3_dev *d, uint32_t pipe);
 
 /* Display sleep without turning the link off: hubp2_set_blank_regs
  * (wait for HUBP_NO_OUTSTANDING_REQ, then HUBP_BLANK_EN + HUBP_TTU_DISABLE);

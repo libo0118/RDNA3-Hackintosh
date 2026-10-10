@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 19.3%   ported 22.5%   (268 / 313 / 1391)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 19.3%   ported 22.9%   (268 / 318 / 1391)</text>
 <g><title>GFX 11: works 30%, ported 30% (73+0 of 243); verified by step(s) 8</title>
 <rect x="1.0" y="53.0" width="9.9" height="10.1" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="10.9" y="53.0" width="9.9" height="10.1" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -250,7 +250,7 @@
 <text x="5.0" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">GFX 11</text>
 <text x="5.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">30% / 30%</text>
 </g>
-<g><title>Display: modeset: works 0%, ported 8% (0+12 of 154); verified by step(s) modeset</title>
+<g><title>Display: modeset: works 0%, ported 11% (0+17 of 154); verified by step(s) modeset</title>
 <rect x="1.0" y="236.6" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="10.9" y="236.6" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="20.9" y="236.6" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
@@ -263,11 +263,11 @@
 <rect x="90.5" y="236.6" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="100.5" y="236.6" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="110.4" y="236.6" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="120.4" y="236.6" width="9.9" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="130.3" y="236.6" width="9.9" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="1.0" y="247.0" width="9.9" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="10.9" y="247.0" width="9.9" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="20.9" y="247.0" width="9.9" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="120.4" y="236.6" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="130.3" y="236.6" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="1.0" y="247.0" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="10.9" y="247.0" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="20.9" y="247.0" width="9.9" height="10.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="30.8" y="247.0" width="9.9" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="40.8" y="247.0" width="9.9" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="50.7" y="247.0" width="9.9" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -407,7 +407,7 @@
 <rect x="130.3" y="340.6" width="9.9" height="10.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="0.0" y="235.6" width="141.3" height="116.4" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="5.0" y="250.6" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Display: modeset</text>
-<text x="5.0" y="264.6" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 8%</text>
+<text x="5.0" y="264.6" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 11%</text>
 </g>
 <g><title>SMU 13 power: works 16%, ported 16% (23+0 of 141); verified by step(s) 5</title>
 <rect x="142.3" y="53.0" width="9.3" height="10.5" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>

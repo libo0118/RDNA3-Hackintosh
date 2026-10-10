@@ -5,7 +5,9 @@
  * optc1_program_global_sync, optc1_set_vtg_params, optc32_disable_crtc,
  * optc32_enable_crtc, hubp2_program_deadline, dml32_rq_dlg_get_dlg_reg,
  * dml32_CalculateVUpdateAndDynamicMetadataParameters and the VStartup /
- * MIN_DST_Y_NEXT_START part of dml32 ModeSupportAndSystemConfiguration.
+ * MIN_DST_Y_NEXT_START part of dml32 ModeSupportAndSystemConfiguration;
+ * with clock limits, dml32_CalculateRequiredDispclk / dml32_CalculateDPPCLK
+ * and the raise half of dcn32_update_clocks (hw/dcn32_clk.c).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -137,6 +139,13 @@ static void write_regs(rdna3_dev *d, uint32_t pipe, uint32_t otg, uint32_t opp, 
 int dcn32_modeset_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
                        uint32_t cur_pclk_khz, const rdna3_mode *m, rdna3_dcn_modeset *ms)
 {
+    return dcn32_modeset_plan_clk(d, dc, head, path, cur_pclk_khz, m, NULL, ms);
+}
+
+int dcn32_modeset_plan_clk(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
+                           uint32_t cur_pclk_khz, const rdna3_mode *m, const rdna3_dcn_clk_limits *lim,
+                           rdna3_dcn_modeset *ms)
+{
     const rdna3_dcn_head *h;
     rdna3_otg_timing t;
     rdna3_modeset_regs *c, *w;
@@ -175,8 +184,20 @@ int dcn32_modeset_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
     ms->encoder_id = (uint8_t)path->encoder_objid;
     ms->connector_id = (uint8_t)path->connector_objid;
     dcn32_clk_read(d, &ms->clk);
-    if (dcn32_clk_fits(&ms->clk, m->pixel_khz))
+    if (lim && lim->dispclk_max_khz && lim->dppclk_max_khz) {
+        /* dcn32_update_clocks: what DML 3.2 asks, raised before the timing */
+        uint32_t disp = dcn32_required_dispclk(m->pixel_khz, ms->clk.vco_khz, lim->dispclk_max_khz);
+        uint32_t dpp = dcn32_required_dppclk(m->pixel_khz, ms->clk.vco_khz);
+        if (!disp || dpp > lim->dppclk_max_khz)
+            return RD_MODESET_CLOCKS;
+        ms->pmfw = lim->pmfw;
+        if (ms->clk.dispclk_khz < disp)
+            ms->raise_dispclk_khz = disp;
+        if (dcn32_pipe_dppclk(d, &ms->clk, h->pipe) < dpp)
+            ms->raise_dppclk_khz = dpp;
+    } else if (dcn32_clk_fits(&ms->clk, m->pixel_khz)) {
         return RD_MODESET_CLOCKS;
+    }
 
     c = &ms->cur;
     w = &ms->want;
@@ -318,6 +339,9 @@ int dcn32_modeset_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
          head, ms->pipe, ms->otg, ms->opp, ms->fe, ms->be, ms->dig_mode, c->h_active, c->v_active,
          cur_pclk_khz, m->h_active, m->v_active, m->pixel_khz, m->h_total, m->v_total, old_vstartup,
          vstartup, (unsigned long long)refclk_khz, (unsigned long long)r_old, (unsigned long long)r_new);
+    if (ms->raise_dispclk_khz || ms->raise_dppclk_khz)
+        RLOG(d, "modeset: needs DISPCLK %u kHz (runs %u) DPPCLK %u kHz (pipe %u runs %u)", ms->raise_dispclk_khz,
+             ms->clk.dispclk_khz, ms->raise_dppclk_khz, ms->pipe, dcn32_pipe_dppclk(d, &ms->clk, ms->pipe));
     return RD_MODESET_OK;
 }
 
@@ -431,6 +455,7 @@ static void update_head(rdna3_dcn *dc, rdna3_dcn_scale *sc, const rdna3_dcn_mode
     dc->requested[ms->pipe] = mc;
     if (sc) {
         sc->saved[ms->pipe] = 0;   /* the bypass state is the one just written */
+        sc->bw_saved[ms->pipe] = 0;
         sc->native_w[ms->pipe] = r->h_active;
         sc->native_h[ms->pipe] = r->v_active;
     }
@@ -449,6 +474,16 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     if (!dc || ms->head >= dc->nheads || pitch_px < ms->want.h_active || (mc & 0xff) || mc < d->fb_start ||
         mc - d->fb_start + (uint64_t)pitch_px * 4 * ms->want.v_active > d->vram_size)
         return RDNA3_EINVAL;
+    /* dcn32_update_clocks(safe_to_lower = false) before the new timing:
+     * the faster clocks first, nothing touched when they do not come */
+    if (ms->raise_dispclk_khz || ms->raise_dppclk_khz) {
+        ret = dcn32_clk_raise(d, ms->pmfw, ms->pipe, ms->raise_dispclk_khz, ms->raise_dppclk_khz, NULL);
+        if (ret) {
+            RERR(d, "modeset: head %u: DISPCLK %u / DPPCLK %u kHz not set (%d): stays at %ux%u", ms->head,
+                 ms->raise_dispclk_khz, ms->raise_dppclk_khz, ret, ms->cur.h_active, ms->cur.v_active);
+            return RDNA3_EBUSY;
+        }
+    }
     /* a scaled source first goes back to the GOP's bypass state */
     if (sc && sc->saved[ms->pipe])
         dcn32_set_source(d, dc, sc, ms->head, old_mc, sc->native_w[ms->pipe], sc->native_h[ms->pipe], old_pitch_px);

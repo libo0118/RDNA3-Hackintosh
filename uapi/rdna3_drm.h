@@ -96,7 +96,18 @@ struct rd_xnu_scanout {
     uint32_t underflow;                            /* HUBP_UNDERFLOW_STATUS (sticky) */
     uint32_t crc_valid, crc_rg, crc_b;             /* OTG CRC0 of the frame sent (row0 0 only) */
     uint8_t  rgb[RD_XNU_SCANOUT_W * RD_XNU_SCANOUT_ROWS * 3];
+    /* what the pipe has to keep up with (rdna3_scanout_info): DET and
+     * compressed buffer (64 KiB segments), DISPCLK and the pipe's DPPCLK,
+     * DSCL_MODE / LB_MEMORY_CTRL / DSCL_MEM_PWR_CTRL, DLG DST_AFTER_SCALER /
+     * REFCYC_PER_REQ_DELIVERY / REFCYC_PER_LINE_DELIVERY_L */
+    uint32_t det_segs, compbuf_segs, dispclk_khz, dppclk_khz;
+    uint32_t dscl_mode, lb_memory_ctrl, dscl_mem_pwr;
+    uint32_t dlg_after_scaler, dlg_req_delivery, dlg_line_delivery;
+    uint32_t flags;                                /* in (row0 0): RD_XNU_SCANOUT_* */
 };
+/* after the read, clear the sticky HUBP underflow status (hubp2_clear_underflow):
+ * a later look shows whether it comes back */
+#define RD_XNU_SCANOUT_CLEAR_UNDERFLOW 1u
 
 /* We advertise the amdgpu DRM version RADV/libdrm expect from Linux 6.x */
 #define RD_DRM_MAJOR 3

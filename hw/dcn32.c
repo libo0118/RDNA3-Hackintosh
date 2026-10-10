@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 #include "dcn32.h"
+#include "dcn32_clk.h"
 #include "gen/dcn_3_2_1.h"
 #include "gen/dcn_3_2_0_dig.h"
 #include "gen/dcn_3_2_0_pipe.h"
 #include "gen/dcn_3_2_0_scale.h"
 #include "gen/dcn_3_2_0_crc.h"
+#include "gen/dcn_3_2_0_mode.h"
+#include "gen/dcn_3_2_0_bw.h"
 
 #define HUBP_STRIDE (regHUBP1_DCHUBP_CNTL - regHUBP0_DCHUBP_CNTL)    /* 0xdc */
 #define OTG_STRIDE  (regOTG1_OTG_CONTROL - regOTG0_OTG_CONTROL)      /* 0x80 */
@@ -209,6 +212,109 @@ static void otg_lock(rdna3_dev *d, uint32_t otg, int lock)
         d->os.udelay(d->os.ctx, 1);
 }
 
+/* rdna3scaledlg: the registers a scaled plane needs besides the ratios,
+ * saved with the GOP's bypass state (DSCL ones at DPP_STRIDE, HUBPREQ
+ * ones at HUBP_STRIDE); DST_DIMENSIONS is read only (refcyc_per_htotal) */
+enum { BW_LB_FMT, BW_LB_MEM, BW_AFTER, BW_LINE, BW_LINE_PRE, BW_REQ, BW_REQ_PRE, BW_DST_DIM, BW_N };
+typedef char rd_scale_bw_fit[(BW_N <= RD_SCALE_BW_REGS) ? 1 : -1];
+static const uint32_t kBw[BW_N] = {
+    regDSCL0_LB_DATA_FORMAT, regDSCL0_LB_MEMORY_CTRL, regHUBPREQ0_DST_AFTER_SCALER,
+    regHUBPREQ0_PER_LINE_DELIVERY, regHUBPREQ0_PER_LINE_DELIVERY_PRE, regHUBPREQ0_DCN_SURF0_TTU_CNTL0,
+    regHUBPREQ0_DCN_SURF0_TTU_CNTL1, regHUBPREQ0_DST_DIMENSIONS,
+};
+
+/* dcn3_2_ip: dppclk_delay_scl 50, dppclk_delay_scl_lb_only 16 */
+#define RD_DCN32_DPPCLK_DELAY_SCL         50u
+#define RD_DCN32_DPPCLK_DELAY_SCL_LB_ONLY 16u
+#define RD_DCN32_DCHUB_REFCLK_KHZ         100000u
+/* dcn32_dpp_cap.max_lb_partitions */
+#define RD_DCN32_MAX_LB_PARTITIONS 31u
+
+static uint32_t bw_off(rdna3_dev *d, uint32_t k, uint32_t p)
+{
+    return k <= BW_LB_MEM ? dscl_off(d, kBw[k], p) : hubp_off(d, kBw[k], p);
+}
+
+/* dscl32_calc_lb_num_partitions (scaler on: memory 970 / 1290 / 970 + 1290
+ * + 484 entries of 6 pixels, no alpha) + dpp1_dscl_find_lb_memory_config:
+ * the first configuration that holds 'vtaps' lines (ceil(vratio) = 1) */
+static uint32_t lb_memory_config(uint32_t line, uint32_t vtaps)
+{
+    uint32_t mls = (line + 5) / 6;
+    if (!mls)
+        mls = 1;
+    if (970 / mls >= vtaps)
+        return 1;   /* LB_MEMORY_CONFIG_1 */
+    if (1290 / mls >= vtaps)
+        return 2;   /* LB_MEMORY_CONFIG_2 */
+    return 0;       /* LB_MEMORY_CONFIG_0: all of it */
+}
+
+static uint32_t ceil64(uint32_t x) { return (x + 63) & ~63u; }
+
+/* the line buffer and DLG/TTU for a w x h source over nw x nh (see dcn32.h) */
+static void scale_bw(rdna3_dev *d, rdna3_dcn_scale *sc, uint32_t p, uint32_t w, uint32_t nw)
+{
+    const uint32_t *g = sc->bw_reg[p];
+    uint32_t cfg, x, y, htot, v, k;
+    uint64_t num, den;
+
+    /* dpp1_dscl_set_lb, float format: INTERLEAVE_EN 0, ALPHA_EN =
+     * per_pixel_alpha (off for a primary plane) */
+    cfg = lb_memory_config(w < nw ? w : nw, 2);
+    rdna3_wreg(d, bw_off(d, BW_LB_FMT, p), 0);
+    rdna3_wreg(d, bw_off(d, BW_LB_MEM, p),
+               cfg << DSCL0_LB_MEMORY_CTRL__MEMORY_CONFIG__SHIFT |
+               RD_DCN32_MAX_LB_PARTITIONS << DSCL0_LB_MEMORY_CTRL__LB_MAX_PARTITIONS__SHIFT);
+    /* refcyc_per_req_delivery(_pre)_l: 64 / (HRatio x pclk), HRatio = w / nw */
+    for (k = BW_REQ; k <= BW_REQ_PRE; k++) {
+        v = GET(g[k], HUBPREQ0_DCN_SURF0_TTU_CNTL0, REFCYC_PER_REQ_DELIVERY);
+        v = (uint32_t)(((uint64_t)v * nw + w / 2) / w);
+        if (v > HUBPREQ0_DCN_SURF0_TTU_CNTL0__REFCYC_PER_REQ_DELIVERY_MASK)
+            v = HUBPREQ0_DCN_SURF0_TTU_CNTL0__REFCYC_PER_REQ_DELIVERY_MASK;
+        rdna3_wreg(d, bw_off(d, k, p), SET(g[k], HUBPREQ0_DCN_SURF0_TTU_CNTL0, REFCYC_PER_REQ_DELIVERY, v));
+    }
+    /* refcyc_per_line_delivery(_pre)_l: swath_width_ub / HRatio / pclk */
+    num = (uint64_t)ceil64(w) * nw;
+    den = (uint64_t)w * ceil64(nw);
+    for (k = BW_LINE; k <= BW_LINE_PRE; k++) {
+        v = GET(g[k], HUBPREQ0_PER_LINE_DELIVERY, REFCYC_PER_LINE_DELIVERY_L);
+        v = (uint32_t)((v * num + den / 2) / den);
+        if (v > HUBPREQ0_PER_LINE_DELIVERY__REFCYC_PER_LINE_DELIVERY_L_MASK)
+            v = HUBPREQ0_PER_LINE_DELIVERY__REFCYC_PER_LINE_DELIVERY_L_MASK;
+        rdna3_wreg(d, bw_off(d, k, p), SET(g[k], HUBPREQ0_PER_LINE_DELIVERY, REFCYC_PER_LINE_DELIVERY_L, v));
+    }
+    /* DSTXAfterScaler: the scaler's pipeline instead of the LB-only one,
+     * DPPCLK cycles in refclk cycles (= pixels x ref_freq_to_pix_freq) */
+    x = GET(g[BW_AFTER], HUBPREQ0_DST_AFTER_SCALER, REFCYC_X_AFTER_SCALER);
+    y = GET(g[BW_AFTER], HUBPREQ0_DST_AFTER_SCALER, DST_Y_AFTER_SCALER);
+    if (!GET(sc->reg[p][5], DSCL0_SCL_MODE, DSCL_MODE)) {   /* kDscl[5]: the GOP's SCL_MODE */
+        rdna3_dcn_clocks c;
+        uint32_t dpp;
+        dcn32_clk_read(d, &c);
+        dpp = dcn32_pipe_dppclk(d, &c, p);
+        if (dpp)
+            x += (uint32_t)(((uint64_t)(RD_DCN32_DPPCLK_DELAY_SCL - RD_DCN32_DPPCLK_DELAY_SCL_LB_ONLY) *
+                             RD_DCN32_DCHUB_REFCLK_KHZ + dpp - 1) / dpp);
+        htot = GET(g[BW_DST_DIM], HUBPREQ0_DST_DIMENSIONS, REFCYC_PER_HTOTAL) >> 8;
+        while (htot && x >= htot && y < 7) {
+            x -= htot;
+            y++;
+        }
+    }
+    rdna3_wreg(d, bw_off(d, BW_AFTER, p),
+               SET(SET(g[BW_AFTER], HUBPREQ0_DST_AFTER_SCALER, REFCYC_X_AFTER_SCALER, x),
+                   HUBPREQ0_DST_AFTER_SCALER, DST_Y_AFTER_SCALER, y));
+    RLOG(d, "DCN: pipe %u scaled plane %u of %u: LB config %u, req delivery 0x%x -> 0x%x, line delivery %u -> %u, "
+         "after scaler %u/%u -> %u/%u", p, w, nw, cfg,
+         GET(g[BW_REQ], HUBPREQ0_DCN_SURF0_TTU_CNTL0, REFCYC_PER_REQ_DELIVERY),
+         GET(rdna3_rreg(d, bw_off(d, BW_REQ, p)), HUBPREQ0_DCN_SURF0_TTU_CNTL0, REFCYC_PER_REQ_DELIVERY),
+         GET(g[BW_LINE], HUBPREQ0_PER_LINE_DELIVERY, REFCYC_PER_LINE_DELIVERY_L),
+         GET(rdna3_rreg(d, bw_off(d, BW_LINE, p)), HUBPREQ0_PER_LINE_DELIVERY, REFCYC_PER_LINE_DELIVERY_L),
+         GET(g[BW_AFTER], HUBPREQ0_DST_AFTER_SCALER, DST_Y_AFTER_SCALER),
+         GET(g[BW_AFTER], HUBPREQ0_DST_AFTER_SCALER, REFCYC_X_AFTER_SCALER), y, x);
+}
+
 int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t i, uint64_t mc,
                      uint32_t w, uint32_t h, uint32_t pitch_px)
 {
@@ -234,6 +340,12 @@ int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t 
         for (k = 0; k < N_HUBP; k++)
             sc->reg[p][N_DSCL + k] = rdna3_rreg(d, hubp_off(d, kHubp[k], p));
         sc->saved[p] = 1;
+        sc->bw_saved[p] = 0;
+        if (sc->dlg) {
+            for (k = 0; k < BW_N; k++)
+                sc->bw_reg[p][k] = rdna3_rreg(d, bw_off(d, k, p));
+            sc->bw_saved[p] = 1;
+        }
     }
     otg_lock(d, hd->otg, 1);
     if (w == nw && h == nh) {
@@ -242,7 +354,10 @@ int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t 
                 rdna3_wreg(d, dscl_off(d, kDscl[k], p), sc->reg[p][k]);
             for (k = 0; k < N_HUBP; k++)
                 rdna3_wreg(d, hubp_off(d, kHubp[k], p), sc->reg[p][N_DSCL + k]);
+            for (k = 0; sc->bw_saved[p] && k < BW_DST_DIM; k++)
+                rdna3_wreg(d, bw_off(d, k, p), sc->bw_reg[p][k]);
             sc->saved[p] = 0;
+            sc->bw_saved[p] = 0;
         }
         v = RH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p);
         WH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
@@ -282,6 +397,9 @@ int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t 
         WH(d, regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, p, w | h << 16);
         v = RH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p);
         WH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
+        /* rdna3scaledlg: line buffer and DLG/TTU for the scaled plane */
+        if (sc->bw_saved[p])
+            scale_bw(d, sc, p, w, nw);
     }
     /* hubp2_program_surface_flip_and_addr: HIGH first, the LOW write latches */
     WH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, p, (uint32_t)(mc >> 32) & 0xffff);
@@ -355,6 +473,42 @@ int dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s)
                  ((uint64_t)(RH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, pipe) & 0xffff) << 32);
     s->inuse = RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, pipe) |
                ((uint64_t)(RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH, pipe) & 0xffff) << 32);
+    /* what the pipe has to keep up with: DET / compbuf, clocks, scaler, DLG */
+    {
+        rdna3_dcn_clocks c;
+        uint32_t seg = regDCHUBBUB_DET0_CTRL_BASE_IDX;
+        s->det_segs = GET(rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, seg, regDCHUBBUB_DET0_CTRL +
+                                                           (regDCHUBBUB_DET1_CTRL - regDCHUBBUB_DET0_CTRL) * pipe)),
+                          DCHUBBUB_DET0_CTRL, DET0_SIZE_CURRENT);
+        s->compbuf_segs = GET(rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, regDCHUBBUB_COMPBUF_CTRL_BASE_IDX,
+                                                             regDCHUBBUB_COMPBUF_CTRL)),
+                              DCHUBBUB_COMPBUF_CTRL, COMPBUF_SIZE_CURRENT);
+        dcn32_clk_read(d, &c);
+        s->dispclk_khz = c.dispclk_khz;
+        s->dppclk_khz = dcn32_pipe_dppclk(d, &c, pipe);
+        s->dscl_mode = GET(RD(d, regDSCL0_SCL_MODE, pipe), DSCL0_SCL_MODE, DSCL_MODE);
+        s->lb_memory_ctrl = RD(d, regDSCL0_LB_MEMORY_CTRL, pipe);
+        s->dscl_mem_pwr = RD(d, regDSCL0_DSCL_MEM_PWR_CTRL, pipe);
+        s->dlg_after_scaler = RH(d, regHUBPREQ0_DST_AFTER_SCALER, pipe);
+        s->dlg_req_delivery = GET(RH(d, regHUBPREQ0_DCN_SURF0_TTU_CNTL0, pipe), HUBPREQ0_DCN_SURF0_TTU_CNTL0,
+                                  REFCYC_PER_REQ_DELIVERY);
+        s->dlg_line_delivery = GET(RH(d, regHUBPREQ0_PER_LINE_DELIVERY, pipe), HUBPREQ0_PER_LINE_DELIVERY,
+                                   REFCYC_PER_LINE_DELIVERY_L);
+    }
+    return RDNA3_OK;
+}
+
+int dcn32_clear_underflow(rdna3_dev *d, uint32_t pipe)
+{
+    uint32_t v;
+    if (pipe >= RD_DCN_MAX_PIPES)
+        return RDNA3_EINVAL;
+    if (GET(rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, regDOMAIN0_PG_STATUS_BASE_IDX,
+                                           regDOMAIN0_PG_STATUS + PG_STRIDE * pipe)),
+            DOMAIN0_PG_STATUS, DOMAIN_PGFSM_PWR_STATUS))
+        return RDNA3_ENODEV;
+    v = RH(d, regHUBP0_DCHUBP_CNTL, pipe);
+    WH(d, regHUBP0_DCHUBP_CNTL, pipe, SET(v, HUBP0_DCHUBP_CNTL, HUBP_UNDERFLOW_CLEAR, 1));
     return RDNA3_OK;
 }
 

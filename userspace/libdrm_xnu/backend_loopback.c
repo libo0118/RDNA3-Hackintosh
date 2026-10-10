@@ -58,6 +58,8 @@ static int lb_scanout(void *c, struct rd_xnu_scanout *s)
     s->width = s->pitch_px = 1920;
     s->height = 1080;
     s->address = s->inuse = 0x8000000000ull;
+    s->det_segs = 18;
+    s->dispclk_khz = s->dppclk_khz = 165384;
     s->out_w = RD_XNU_SCANOUT_W;
     s->out_h = 1080 * RD_XNU_SCANOUT_W / 1920;
     s->nrows = s->row0 < s->out_h ? s->out_h - s->row0 : 0;

@@ -442,9 +442,9 @@ launch() {   # launch "rdna3 args" stay(0/1)
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 metal modeset hotplug gamma default hanggfx"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 metal modeset modeset2 hotplug gamma default hanggfx"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 metal modeset hotplug gamma default hanggfx off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 metal modeset modeset2 hotplug gamma default hanggfx off)"
     launch "$a" "$stay"
 }
 
@@ -482,7 +482,7 @@ QUEUE=$WORK/queue
 # every swap refused (no head named). From now on ONE big step per round:
 # "big" = everything at once, the accelerator tries its head strategies
 # itself and logs which one worked
-PENDING_STEPS="modeset hotplug gamma"
+PENDING_STEPS="modeset modeset2 gamma hotplug"
 
 cmd_queue() {
     load_conf

@@ -233,7 +233,9 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 done ;;
         esac
         # scaled modes (rdna3modes=1): each display through two smaller
-        # modes, a look at the pipes after each switch, then native again
+        # modes (first to the fastest timing of its own size, if any: the
+        # DISPCLK raise), a look at the pipes after each switch with underflow,
+        # DET and clocks per pipe, then native again
         case " $args " in
             *" rdna3modes=1 "*)
                 if [ -x "$D/bin/rdna3_modetest" ]; then
@@ -241,7 +243,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                     with_limit 30 "$D/bin/rdna3_modetest" list 2>&1
                     done_ $?
                     hdr "rdna3_modetest cycle"
-                    with_limit 150 "$D/bin/rdna3_modetest" cycle "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
+                    with_limit 240 "$D/bin/rdna3_modetest" cycle "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
                     done_ $?
                 fi ;;
         esac

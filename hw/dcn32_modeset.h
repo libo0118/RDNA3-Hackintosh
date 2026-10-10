@@ -63,6 +63,8 @@ typedef struct rdna3_dcn_modeset {
     uint8_t  encoder_id, connector_id;
     rdna3_dcn_clocks clk;
     rdna3_modeset_regs cur, want;     /* running now (read back), the target */
+    /* dcn32_modeset_plan_clk: what apply raises first (0 = enough) */
+    uint32_t raise_dispclk_khz, raise_dppclk_khz, pmfw;
 } rdna3_dcn_modeset;
 
 /* why a mode is refused for a mode set (0 = can try) */
@@ -83,12 +85,25 @@ enum {
  * only. Returns RD_MODESET_*. */
 int  dcn32_modeset_plan(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
                         uint32_t cur_pclk_khz, const rdna3_mode *m, rdna3_dcn_modeset *ms);
+/* The same, and with 'lim' (the PMFW's display clock limits,
+ * dcn32_clk_limits_read; NULL or no limits = the plan above) a mode faster
+ * than DISPCLK / DPPCLK run now is planned with the clocks DML 3.2 asks
+ * for it (dcn32_required_dispclk / _dppclk: pixel clock + downspread +
+ * ramping margin, DFS granularity) when they fit under the limits;
+ * dcn32_modeset_apply raises them (dcn32_clk_raise) before it touches the
+ * stream. RD_MODESET_CLOCKS when they do not fit. */
+int  dcn32_modeset_plan_clk(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
+                            uint32_t cur_pclk_khz, const rdna3_mode *m, const rdna3_dcn_clk_limits *lim,
+                            rdna3_dcn_modeset *ms);
 
 /* Program the plan with the surface at MC 'mc' (pitch_px pixels per row,
  * the new active size). After 'settle_ms' the OTG must count frames and
  * the HUBP report no underflow, else the old timing (and 'old_mc' /
  * 'old_pitch_px') goes back and RDNA3_EIO is returned. 'dc' and 'sc' are
- * updated to the new timing on success (the scaler's native size too). */
+ * updated to the new timing on success (the scaler's native size too).
+ * A plan with clocks to raise raises them first (they stay up when the old
+ * timing comes back); RDNA3_EBUSY, stream untouched, when the PMFW does
+ * not set them. */
 int  dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_scale *sc,
                          const rdna3_dcn_modeset *ms, uint64_t mc, uint32_t pitch_px,
                          uint64_t old_mc, uint32_t old_pitch_px, uint32_t settle_ms);
