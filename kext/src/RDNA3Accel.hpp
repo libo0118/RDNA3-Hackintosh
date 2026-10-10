@@ -124,6 +124,9 @@ public:
      * connectors are probed again on a thread call */
     void displayHotplug(uint32_t pin, int connected);
     void displayShutdown();
+    /* D4 (RDNA3Resume.cpp): a GPU recovery happened (chipReset: the mode-1
+     * reset, else a GFX / SDMA soft reset); DRM lock held */
+    void displayAfterReset(bool chipReset);
 
     /* Stage 7: requests from the accelerator kext (RDNA3Platform.cpp) */
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
@@ -247,6 +250,26 @@ private:
     uint32_t      fVbiosCopyLen = 0;
     struct drm_amdgpu_info_vbios fVbiosInfo = {};
     IOReturn      displayCursor(struct RD3KDisplayCursor *c);
+    /* D4: display state snapshot, standby on any head, sleep / wake
+     * (RDNA3Resume.cpp, hw/dcn32_state.c) */
+    struct rdna3_dcn_state *fDispState = nullptr;
+    bool          fHeadBlank[4] = {};         /* the framebuffer's last power request */
+    bool          fHeadLinkDown[4] = {};      /* rdna3dpms=2: monitor in standby */
+    volatile bool fDispAsleep = false;        /* system sleep until the wake work ran */
+    bool          fShuttingDown = false;
+    uint32_t      fSleeps = 0, fWakes = 0;
+    struct thread_call *fWakeCall = nullptr;
+    static void   displayWakeWork(void *owner, void *);
+    const struct rdna3_display_path *displayHeadPath(uint32_t head);
+    uint32_t      displayHeadPclk(uint32_t head, const struct rdna3_display_path *p);
+    void          displayStateSave(uint32_t head);   /* fDispLock held */
+    void          displayStateSaveAll();
+    void          displayStateFree();
+    void          displayNoteBlank(uint32_t head, bool blank);
+    int           displayHeadDpms(uint32_t head, bool blank);   /* fDispLock held */
+    uint32_t      displayStateRestore(const char *why, bool restore);   /* fDispLock held */
+    void          displayWillSleep();
+    void          displayDidWake();
     IOReturn      displayEdid(struct RD3KDisplayEdid *e);
     void          displayProbeConnectors();
     void          displayPublishRoutes();

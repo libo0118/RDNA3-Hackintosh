@@ -1576,6 +1576,7 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
         IOLockWakeup(fLock, &fFenceEvent, false);
         IOLockUnlock(fLock);
         BLOG("hang: SDMA0 soft reset done, the DMA ring runs again");
+        fOwner->displayAfterReset(false);   /* D4: DCN untouched? */
         return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
     }
 
@@ -1601,8 +1602,12 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
                 cgStart("after soft reset");
         }
     }
-    if (!ok)
+    if (ok)
+        fOwner->displayAfterReset(false);   /* D4: DCN untouched? */
+    if (!ok) {
         ok = gpuReset();
+        fOwner->displayAfterReset(true);    /* D4: the display went with the chip */
+    }
     publish("RDNA3,GPUResets", fGpuResets);
     publish("RDNA3,Resets", fResetCount);
     return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
@@ -1662,6 +1667,82 @@ bool RDNA3Bringup::gpuReset()
         fIntr->enable();
     BLOG("GPU reset #%llu %s", (unsigned long long)fGpuResets, ok ? "done, rings back up" : "FAILED");
     publish("RDNA3,VRAMLost", fVramLostCount);
+    return ok;
+}
+
+/* D4 (RDNA3Resume.cpp): after a system wake, does the PSP sOS still run?
+ * 1 yes, 0 no (the card lost its power), -1 unknown */
+int RDNA3Bringup::sosAlive()
+{
+    if (!fPsp || !fPsp->d)
+        return -1;
+    return psp13_is_sos_alive(fPsp) ? 1 : 0;
+}
+
+/* D4 (rdna3resume=1, from RDNA3Resume.cpp): amdgpu_device_resume for a GPU
+ * that lost its power in the sleep: amdgpu_device_need_post ->
+ * amdgpu_device_asic_init (postIfNeeded), then
+ * amdgpu_device_ip_resume, which here is the whole hwInit() again, as
+ * gpuReset() runs it after the mode-1 reset. VRAM did not survive: the
+ * clients see VRAM lost. Under the DRM lock. */
+bool RDNA3Bringup::resumeAfterPowerLoss()
+{
+    uint32_t magic = 0;
+    uint64_t fbStart = fDev ? fDev->fb_start : 0;
+    bool ok;
+
+    if (!fFinished || !fDev || !fPsp)
+        return false;
+    fResumes++;
+    BLOG("resume #%u: the GPU lost its power in the sleep: post, then bring-up from level 4", fResumes);
+    IOSleep(100);
+    if (fIntr)
+        fIntr->disable();
+    forceFences();
+    memset(fGdsKnown, 0, sizeof(fGdsKnown));
+    for (uint32_t id = 1; id < 16; id++)
+        if (fVmByVmid[id])
+            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = true;
+    fPci->setBusMasterEnable(false);
+    /* as run(): in a VM the wake comes with a bus reset (QEMU resets the
+     * devices on an S3 wake), which leaves the PSP stuck */
+    resetIfPspStuck();
+    if (!postIfNeeded()) {
+        BLOG("resume: ASIC_Init failed");
+        publish("RDNA3,ResumeResult", 1);
+        return false;
+    }
+    if (psp13_wait_for_bootloader(fPsp) != RDNA3_OK)
+        BLOG("resume: the PSP bootloader is not ready");
+    if (rdna3_read_fb_location(fDev) != RDNA3_OK || fDev->fb_start != fbStart) {
+        BLOG("resume: the FB location moved (0x%llx -> 0x%llx): every MC address is stale, giving up",
+             (unsigned long long)fbStart, (unsigned long long)fDev->fb_start);
+        publish("RDNA3,ResumeResult", 2);
+        return false;
+    }
+    if (fResetMagic != UINT64_MAX) {
+        rdna3_vram_read(fDev, fResetMagic, &magic, 4);
+        if (magic != kResetMagic) {
+            fVramLostCount++;
+            BLOG("resume: VRAM content lost (0x%08x), clients see VRAMLOST", magic);
+        }
+    }
+    rdna3_vram_alloc_init(fDev, fAllocLo, fAllocHi);
+    fDev->doorbell_ok = 0;
+    if (fSdma) fSdma->ready = 0;
+    if (fGfx) fGfx->ready = 0;
+    if (fKiq) { fKiq->rb.ready = 0; fKiq->mapped = 0; }
+    if (fKcq) { fKcq->rb.ready = 0; fKcq->mapped = 0; }
+    fReinit = true;
+    ok = hwInit();
+    fReinit = false;
+    fResetCount++;
+    if (fIntr)
+        fIntr->enable();
+    publish("RDNA3,Resumes", fResumes);
+    publish("RDNA3,ResumeResult", ok ? 0 : 3);
+    publish("RDNA3,VRAMLost", fVramLostCount);
+    BLOG("resume #%u %s", fResumes, ok ? "done, rings back up" : "FAILED");
     return ok;
 }
 

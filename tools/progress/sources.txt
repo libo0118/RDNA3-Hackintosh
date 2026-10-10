@@ -41,3 +41,6 @@ Display: modeset     | display/dc/dio/dcn32/dcn32_dio_stream_encoder.c
 Display: modeset     | display/dc/link/protocols/link_dp_training.c
 Display: modeset     | display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c
 Display: modeset     | display/dc/clk_mgr/dcn32/dcn32_clk_mgr_smu_msg.c
+Display: modeset     | display/dc/link/link_dpms.c
+Display: modeset     | display/dc/dio/dcn10/dcn10_link_encoder.c
+Display: modeset     | display/dc/hubbub/dcn30/dcn30_hubbub.c

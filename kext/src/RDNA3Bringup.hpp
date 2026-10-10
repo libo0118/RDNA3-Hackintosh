@@ -123,8 +123,16 @@ public:
      * without a submission, lifted at the next one (2 s stats tick, DRM
      * lock held) */
     void     idleCapTick();
+    /* D4, after a system wake (RDNA3Resume.cpp): the PSP sOS still runs (1),
+     * not (0: the card lost its power), unknown (-1); and
+     * amdgpu_device_resume for a card that lost it: post, then levels 4-8
+     * again (hwInit), as gpuReset after its mode-1 reset. DRM lock held. */
+    bool     finished() const { return fFinished; }
+    int      sosAlive();
+    bool     resumeAfterPowerLoss();
 
 private:
+    uint32_t         fResumes = 0;          /* D4: resumes after a power loss */
     static void threadMain(void *arg, int wait_result);
     void run();
     bool loadFirmware(const char *name, RDNA3Firmware *out);

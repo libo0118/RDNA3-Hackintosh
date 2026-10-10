@@ -119,14 +119,21 @@ bool RDNA3Accel::start(IOService *provider)
     return true;
 }
 
-IOReturn RDNA3Accel::setPowerState(unsigned long, IOService *)
+IOReturn RDNA3Accel::setPowerState(unsigned long state, IOService *)
 {
+    /* D4: system sleep and wake (RDNA3Resume.cpp); the wake work runs on
+     * a thread call */
+    if (state == 0)
+        displayWillSleep();
+    else
+        displayDidWake();
     return kIOPMAckImplied;
 }
 
 void RDNA3Accel::systemWillShutdown(IOOptionBits specifier)
 {
     LOG("system %s: display back to the boot head", specifier == kIOMessageSystemWillRestart ? "restart" : "power off");
+    fShuttingDown = true;   /* D4: the power-off is no sleep */
     displayShutdown();
     super::systemWillShutdown(specifier);
 }
@@ -139,6 +146,7 @@ void RDNA3Accel::stop(IOService *provider)
         fPmJoined = false;
     }
     statsStop();
+    displayStateFree();   /* D4: the wake work first */
     if (fSleepAssertion) {
         if (IOPMrootDomain *root = getPMRootDomain())
             root->releasePMAssertion(fSleepAssertion);
