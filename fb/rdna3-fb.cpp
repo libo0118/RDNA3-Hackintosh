@@ -126,6 +126,8 @@ class RDNA3Framebuffer : public IOFramebuffer {
 
     const OSSymbol *fSymInfo = nullptr, *fSymFlip = nullptr, *fSymStatus = nullptr;
     const OSSymbol *fSymBlank = nullptr;
+    int      fPowerOn = 1;                 /* what the core was last told */
+    void     powerBlank(bool on, const char *why);
     const OSSymbol *fSymCursor = nullptr, *fSymEdid = nullptr;
     struct RD3KDisplayEdid fEdid = {};
     bool     fEdidAsked = false;
@@ -804,15 +806,7 @@ IOReturn RDNA3Framebuffer::setAttribute(IOSelect attribute, uintptr_t value)
     if (attribute == kIOWindowServerActiveAttribute)
         return kIOReturnSuccess;
     if (attribute == kIOPowerAttribute) {
-        /* display sleep: the core blanks the head (rdna3dpms=1; it answers
-         * unsupported otherwise and nothing changes) */
-        if (fCore && fSymBlank) {
-            IOReturn b = fCore->callPlatformFunction(fSymBlank, false, (void *)(uintptr_t)fHead,
-                                                     (void *)(uintptr_t)(value ? 0 : 1), nullptr, nullptr);
-            if (b != kIOReturnUnsupported)
-                FBLOG("power %lu: head %u %s (0x%x)", (unsigned long)value, fHead,
-                      value ? "unblanked" : "blanked", (unsigned)b);
-        }
+        powerBlank(value != 0, "power attribute");
         if (value)
             handleEvent(kIOFBNotifyDidPowerOn);
         else
@@ -869,9 +863,25 @@ IOReturn RDNA3Framebuffer::setAttributeForConnection(IOIndex idx, IOSelect attri
     }
 }
 
+/* display sleep: the core blanks the head (rdna3dpms=1; it answers
+ * unsupported otherwise and nothing changes). Both the power attribute and
+ * the power state lead here; the core's blank is idempotent. */
+void RDNA3Framebuffer::powerBlank(bool on, const char *why)
+{
+    if (!fCore || !fSymBlank || fPowerOn == (int)on)
+        return;
+    IOReturn b = fCore->callPlatformFunction(fSymBlank, false, (void *)(uintptr_t)fHead,
+                                             (void *)(uintptr_t)(on ? 0 : 1), nullptr, nullptr);
+    if (b == kIOReturnUnsupported)
+        return;
+    fPowerOn = on;
+    FBLOG("%s: head %u %s (0x%x)", why, fHead, on ? "unblanked" : "blanked", (unsigned)b);
+}
+
 IOReturn RDNA3Framebuffer::setPowerState(unsigned long ordinal, IOService *)
 {
     FBLOG("setPowerState %lu", ordinal);
+    powerBlank(ordinal != 0, "power state");
     handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
     return kIOPMAckImplied;
 }
