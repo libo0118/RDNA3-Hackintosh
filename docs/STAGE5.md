@@ -76,9 +76,14 @@ ACO-compiled dispatch) and a 256-byte one (CP DMA), checked on the CPU. The
 `radv-macos` CI job builds it next to RADV; `rdna3vm prepare --radv` puts
 both in the VM bundle and the report runs it from step 8 on.
 
+In the macOS VM (2026-10-10, `tools/vm/macos/build_radv.sh`, no card):
+RADV builds with 0 missing symbols and `rdna3_vktest --loopback` passes
+8/8 there too, interop included. On Linux RADV on the real card the same
+test passes 8/8 (tools/linux/card_dump.sh).
+
 ## Next
 
-1. `rdna3_vktest` on the card (step 8 with `prepare --radv`).
+1. `rdna3_vktest` on the card (step 8 with RADV in the VM bundle).
 2. WSI: macOS has no KMS; images for display go through IOSurface,
    and the Metal plugin (Stage 6) owns presentation.
 3. Synchronization: `vk_drm_syncobj` on our syncobjs; real fences
