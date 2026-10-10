@@ -14,6 +14,8 @@
 #define mmMM_INDEX                      0x0000
 #define mmMM_DATA                       0x0001
 #define mmMM_INDEX_HI                   0x0006
+/* nbio_v4_3_get_memsize: RCC_DEV0_EPF0_RCC_CONFIG_MEMSIZE (all ones while
+ * the chip is in reset, as amdgpu_device_mode1_reset polls it) */
 #define mmRCC_CONFIG_MEMSIZE            0x0de3
 #define mmMP0_SMN_C2PMSG_33_FIXED       0x16061
 #define mmDRIVER_SCRATCH_0              0x0094

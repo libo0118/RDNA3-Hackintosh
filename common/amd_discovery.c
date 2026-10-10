@@ -41,6 +41,7 @@ static int in_bounds(size_t len, size_t off, size_t n)
     return off <= len && n <= len - off;
 }
 
+/* amdgpu_discovery_calculate_checksum */
 uint16_t amd_disc_checksum(const uint8_t *p, size_t n)
 {
     uint16_t sum = 0;
@@ -71,7 +72,7 @@ amd_disc_status amd_discovery_parse(const uint8_t *bin, size_t len,
     /* ---- binary header ---- */
     if (!in_bounds(len, 0, BHDR_V1_TABLES))
         return AMD_DISC_E_TRUNCATED;
-    if (rd32(bin) != AMD_DISC_BINARY_SIGNATURE)
+    if (rd32(bin) != AMD_DISC_BINARY_SIGNATURE)   /* amdgpu_discovery_verify_binary_signature */
         return AMD_DISC_E_BIN_SIGNATURE;
 
     out->bin_version_major = rd16(bin + 4);
@@ -81,6 +82,7 @@ amd_disc_status amd_discovery_parse(const uint8_t *bin, size_t len,
 
     if (bin_size < BHDR_V1_TABLES || bin_size > len)
         return AMD_DISC_E_TRUNCATED;
+    /* amdgpu_discovery_verify_checksum */
     if (amd_disc_checksum(bin + BHDR_CHECKSUM_END, bin_size - BHDR_CHECKSUM_END)
         != rd16(bin + 8))
         return AMD_DISC_E_BIN_CHECKSUM;

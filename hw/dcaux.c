@@ -128,7 +128,7 @@ static int aux_acquire(rdna3_dev *d, uint32_t n)
         WA(d, regDP_AUX0_AUX_DPHY_RX_CONTROL0, n, SET(v, DP_AUX0_AUX_DPHY_RX_CONTROL0, AUX_RX_RECEIVE_WINDOW, 0));
     }
     v = RA(d, regDP_AUX0_AUX_ARB_CONTROL, n);
-    if (GET(v, DP_AUX0_AUX_ARB_CONTROL, AUX_REG_RW_CNTL_STATUS) == DMCU_CAN_ACCESS_AUX)
+    if (GET(v, DP_AUX0_AUX_ARB_CONTROL, AUX_REG_RW_CNTL_STATUS) == DMCU_CAN_ACCESS_AUX)   /* is_engine_available */
         return RD_AUX_ERR_ACQUIRE;
     v = RA(d, regDP_AUX0_AUX_CONTROL, n);
     if (!GET(v, DP_AUX0_AUX_CONTROL, AUX_EN)) {
@@ -177,6 +177,8 @@ static int wait_sw_done(rdna3_dev *d, uint32_t n, int want)
     return RD_AUX_ERR_TIMEOUT;
 }
 
+/* dce_aux_transfer_raw: acquire, submit_channel_request, get_channel_status,
+ * read_channel_reply, release_engine */
 int dcaux_transfer(rdna3_dev *d, uint32_t n, uint32_t action, uint32_t address, uint8_t *buf,
                    uint32_t len, uint32_t *reply)
 {

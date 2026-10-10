@@ -48,6 +48,7 @@
 
 #define MTYPE_UC 3   /* navi10_enum.h */
 
+/* mmhub_v3_0_setup_vm_pt_regs */
 void mmhub302_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd)
 {
     WMM_OFF(d, regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32, CTX_ADDR_DISTANCE * vmid, (uint32_t)pd);
@@ -55,6 +56,7 @@ void mmhub302_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd)
             (uint32_t)(pd >> 32));
 }
 
+/* mmhub_v3_0_init_gart_aperture_regs */
 static void init_gart_aperture_regs(rdna3_dev *d, rdna3_gmc *g)
 {
     uint64_t pt_base = rdna3_vram_pa(d, g->gart_table) | RD_PTE_VALID;
@@ -66,6 +68,7 @@ static void init_gart_aperture_regs(rdna3_dev *d, rdna3_gmc *g)
     WMM(d, regMMVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32, (uint32_t)(g->gart_end >> 44));
 }
 
+/* mmhub_v3_0_init_system_aperture_regs */
 static void init_system_aperture_regs(rdna3_dev *d, rdna3_gmc *g)
 {
     uint64_t value;
@@ -90,6 +93,7 @@ static void init_system_aperture_regs(rdna3_dev *d, rdna3_gmc *g)
     WMM(d, regMMVM_L2_PROTECTION_FAULT_CNTL2, tmp);
 }
 
+/* mmhub_v3_0_init_tlb_regs */
 static void init_tlb_regs(rdna3_dev *d)
 {
     uint32_t tmp = RMM(d, regMMMC_VM_MX_L1_TLB_CNTL);
@@ -102,6 +106,7 @@ static void init_tlb_regs(rdna3_dev *d)
     WMM(d, regMMMC_VM_MX_L1_TLB_CNTL, tmp);
 }
 
+/* mmhub_v3_0_init_cache_regs */
 static void init_cache_regs(rdna3_dev *d)
 {
     uint32_t tmp = RMM(d, regMMVM_L2_CNTL);
@@ -134,6 +139,7 @@ static void init_cache_regs(rdna3_dev *d)
     WMM(d, regMMVM_L2_CNTL5, tmp);
 }
 
+/* mmhub_v3_0_enable_system_domain */
 static void enable_system_domain(rdna3_dev *d)
 {
     uint32_t tmp = RMM(d, regMMVM_CONTEXT0_CNTL);
@@ -143,6 +149,7 @@ static void enable_system_domain(rdna3_dev *d)
     WMM(d, regMMVM_CONTEXT0_CNTL, tmp);
 }
 
+/* mmhub_v3_0_disable_identity_aperture */
 static void disable_identity_aperture(rdna3_dev *d)
 {
     WMM(d, regMMVM_L2_CONTEXT1_IDENTITY_APERTURE_LOW_ADDR_LO32, 0xFFFFFFFF);
@@ -153,6 +160,7 @@ static void disable_identity_aperture(rdna3_dev *d)
     WMM(d, regMMVM_L2_CONTEXT_IDENTITY_PHYSICAL_OFFSET_HI32, 0);
 }
 
+/* mmhub_v3_0_setup_vmid_config */
 static void setup_vmid_config(rdna3_dev *d, rdna3_gmc *g)
 {
     uint32_t i, tmp = 0;
@@ -180,6 +188,7 @@ static void setup_vmid_config(rdna3_dev *d, rdna3_gmc *g)
     g->mm_vm_cntx_cntl = tmp;
 }
 
+/* mmhub_v3_0_program_invalidation */
 static void program_invalidation(rdna3_dev *d)
 {
     uint32_t i;
@@ -189,6 +198,7 @@ static void program_invalidation(rdna3_dev *d)
     }
 }
 
+/* mmhub_v3_0_gart_enable */
 int mmhub302_gart_enable(rdna3_dev *d, rdna3_gmc *g)
 {
     init_gart_aperture_regs(d, g);
@@ -203,6 +213,7 @@ int mmhub302_gart_enable(rdna3_dev *d, rdna3_gmc *g)
     return RDNA3_OK;
 }
 
+/* mmhub_v3_0_gart_disable */
 void mmhub302_gart_disable(rdna3_dev *d)
 {
     uint32_t i, tmp;
@@ -218,6 +229,7 @@ void mmhub302_gart_disable(rdna3_dev *d)
     WMM(d, regMMVM_L2_CNTL3, 0);
 }
 
+/* mmhub_v3_0_set_fault_enable_default */
 void mmhub302_set_fault_enable_default(rdna3_dev *d, int value)
 {
     uint32_t tmp = RMM(d, regMMVM_L2_PROTECTION_FAULT_CNTL);
@@ -249,6 +261,7 @@ int mmhub302_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
     uint32_t req = 0, i, tmp = 0;
     int ok = 0;
 
+    /* mmhub_v3_0_get_invalidate_req */
     req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG0_REQ, PER_VMID_INVALIDATE_REQ, 1u << vmid);
     req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG0_REQ, FLUSH_TYPE, flush_type);
     req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG0_REQ, INVALIDATE_L2_PTES, 1);

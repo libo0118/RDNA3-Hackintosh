@@ -61,6 +61,7 @@ int gmc11_init(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_size)
     g->gart_start &= ~(FOUR_GB - 1);
     g->gart_end = g->gart_start + g->gart_size - 1;
 
+    /* amdgpu_gmc_set_agp_default */
     /* AGP aperture unused (amdgpu_gmc_agp_location would place it in a
      * free hole; disabled keeps the system aperture == FB) */
     g->agp_start = 0xFFFFFFFFFFFFull;
@@ -121,6 +122,7 @@ void gfxhub303_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd)
             (uint32_t)(pd >> 32));
 }
 
+/* gfxhub_v3_0_3_init_gart_aperture_regs */
 static void init_gart_aperture_regs(rdna3_dev *d, rdna3_gmc *g)
 {
     /* amdgpu_gmc_pd_addr(gart.bo): VRAM physical address | VALID */
@@ -133,6 +135,7 @@ static void init_gart_aperture_regs(rdna3_dev *d, rdna3_gmc *g)
     WGC(d, regGCVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32, (uint32_t)(g->gart_end >> 44));
 }
 
+/* gfxhub_v3_0_3_init_system_aperture_regs */
 static void init_system_aperture_regs(rdna3_dev *d, rdna3_gmc *g)
 {
     uint64_t value;
@@ -158,6 +161,7 @@ static void init_system_aperture_regs(rdna3_dev *d, rdna3_gmc *g)
     WGC(d, regGCVM_L2_PROTECTION_FAULT_CNTL2, tmp);
 }
 
+/* gfxhub_v3_0_3_init_tlb_regs */
 static void init_tlb_regs(rdna3_dev *d)
 {
     uint32_t tmp = RGC(d, regGCMC_VM_MX_L1_TLB_CNTL);
@@ -170,6 +174,7 @@ static void init_tlb_regs(rdna3_dev *d)
     WGC(d, regGCMC_VM_MX_L1_TLB_CNTL, tmp);
 }
 
+/* gfxhub_v3_0_3_init_cache_regs */
 static void init_cache_regs(rdna3_dev *d)
 {
     uint32_t tmp = RGC(d, regGCVM_L2_CNTL);
@@ -202,6 +207,7 @@ static void init_cache_regs(rdna3_dev *d)
     WGC(d, regGCVM_L2_CNTL5, tmp);
 }
 
+/* gfxhub_v3_0_3_enable_system_domain */
 static void enable_system_domain(rdna3_dev *d)
 {
     uint32_t tmp = RGC(d, regGCVM_CONTEXT0_CNTL);
@@ -211,6 +217,7 @@ static void enable_system_domain(rdna3_dev *d)
     WGC(d, regGCVM_CONTEXT0_CNTL, tmp);
 }
 
+/* gfxhub_v3_0_3_disable_identity_aperture */
 static void disable_identity_aperture(rdna3_dev *d)
 {
     WGC(d, regGCVM_L2_CONTEXT1_IDENTITY_APERTURE_LOW_ADDR_LO32, 0xFFFFFFFF);
@@ -221,6 +228,7 @@ static void disable_identity_aperture(rdna3_dev *d)
     WGC(d, regGCVM_L2_CONTEXT_IDENTITY_PHYSICAL_OFFSET_HI32, 0);
 }
 
+/* gfxhub_v3_0_3_setup_vmid_config */
 static void setup_vmid_config(rdna3_dev *d, rdna3_gmc *g)
 {
     uint32_t i, tmp = 0;
@@ -249,6 +257,7 @@ static void setup_vmid_config(rdna3_dev *d, rdna3_gmc *g)
     g->vm_cntx_cntl = tmp;
 }
 
+/* gfxhub_v3_0_3_program_invalidation */
 static void program_invalidation(rdna3_dev *d)
 {
     uint32_t i;
@@ -272,6 +281,7 @@ int gfxhub303_gart_enable(rdna3_dev *d, rdna3_gmc *g)
     return RDNA3_OK;
 }
 
+/* gfxhub_v3_0_3_set_fault_enable_default */
 void gfxhub303_set_fault_enable_default(rdna3_dev *d, int value)
 {
     uint32_t tmp = RGC(d, regGCVM_L2_PROTECTION_FAULT_CNTL);

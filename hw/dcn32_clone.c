@@ -479,6 +479,7 @@ int dcn32_clone_enable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
            rd(d, regDIG0_TMDS_CNTL_BASE_IDX, tmds_be[i] + DIG_S * (uint32_t)c->src_be));
     v = RI(d, regDIG0_DIG_BE_CNTL, c->dst_be, DIG_S);
     v = SET(v, DIG0_DIG_BE_CNTL, DIG_MODE, c->dig_mode);
+        /* dcn10_link_encoder_connect_dig_be_to_fe (one front end per back end) */
     v = SET(v, DIG0_DIG_BE_CNTL, DIG_FE_SOURCE_SELECT, 1u << c->dst_fe);
     WI(d, regDIG0_DIG_BE_CNTL, c->dst_be, DIG_S, v);
     ret = vbios_transmitter(dm, c, RD_ATOM_TX_INIT);

@@ -9,6 +9,8 @@
 #include "smu13.h"
 #include "navi3x_regs.h"
 
+/* smu_v13_0_set_smu_mailbox_registers / smu_v13_0_0_set_smu_mailbox_registers
+ * (the debug mailbox 53/75/54 is in smu13_mode1_reset) */
 #define MSG(d)  SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_66)
 #define ARG(d)  SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_82)
 #define RESP(d) SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_90)
@@ -60,6 +62,8 @@ int smu13_send_msg(rdna3_dev *d, uint32_t msg, uint32_t param, uint32_t *out)
     return ret;
 }
 
+/* smu_v13_0_check_fw_version (after the TestMessage): an if_version
+ * mismatch only warns */
 int smu13_hello(rdna3_dev *d, uint32_t *smu_version, uint32_t *if_version)
 {
     uint32_t v = 0;
@@ -168,6 +172,7 @@ static int setup_pptable(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios)
     }
     rdna3_hdp_invalidate(d);
     rdna3_vram_read(d, s->driver_table, hdr, sizeof(hdr));
+    /* smu_v13_0_0_store_powerplay_table: the smc_pptable part */
     rdna3_vram_read(d, s->driver_table + RD_SMU_PP_SMC_PPTABLE_OFF, &s->pptable,
                     sizeof(s->pptable));
 
@@ -296,6 +301,7 @@ int smu13_get_dpm_table(rdna3_dev *d, uint32_t ppclk, rdna3_smu_dpm *t)
         v = RD_SMU_DPM_MAX_LEVELS;
     t->count = v;
     for (i = 0; i < t->count; i++) {
+        /* smu_v13_0_get_dpm_freq_by_index */
         ret = smu13_send_msg(d, PPSMC_MSG_GetDpmFreqByIndex, (ppclk << 16) | i, &v);
         if (ret)
             return ret;
@@ -321,6 +327,7 @@ int smu13_set_soft_freq_range(rdna3_dev *d, const rdna3_smu *s, uint32_t ppclk, 
     return ret;
 }
 
+/* smu_v13_0_get_current_power_limit (a desktop card: always AC) */
 int smu13_get_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t *watts)
 {
     int ret;
@@ -332,6 +339,7 @@ int smu13_get_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t *watts)
     return ret;
 }
 
+/* smu_v13_0_set_power_limit, within the limits of smu_v13_0_0_init_ppt_limits */
 int smu13_set_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t watts)
 {
     const SkuTable_t *sku = &s->pptable.SkuTable;
@@ -358,7 +366,8 @@ int smu13_gfx_off(rdna3_dev *d, int allow)
     return smu13_send_msg(d, allow ? PPSMC_MSG_AllowGfxOff : PPSMC_MSG_DisallowGfxOff, 0, NULL);
 }
 
-/* SetHardMinByFreq to the table's top level: the clock stays there */
+/* SetHardMinByFreq to the table's top level: the clock stays there
+ * (smu_v13_0_set_hard_freq_limited_range with min = top, max = 0) */
 static int pin_to_top(rdna3_dev *d, uint32_t ppclk, const rdna3_smu_dpm *t, const char *name)
 {
     uint32_t mhz;
@@ -454,7 +463,7 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
     ret = get_enabled_mask(d, &s->enabled);
     if (ret)
         return ret;
-    s->dpm_running = (s->enabled & RD_SMU_FEATURES_DPM) != 0;
+    s->dpm_running = (s->enabled & RD_SMU_FEATURES_DPM) != 0;   /* smu_v13_0_0_is_dpm_running */
     RLOG(d, "SMU: features allowed 0x%016llx running 0x%016llx, dpm %s",
          (unsigned long long)s->allowed, (unsigned long long)s->enabled,
          s->dpm_running ? "running" : "disabled");
@@ -562,6 +571,7 @@ uint32_t smu13_metric_temp_hotspot_c(const rdna3_smu *s) { return M(s)->AvgTempe
 uint32_t smu13_metric_temp_mem_c(const rdna3_smu *s)     { return M(s)->AvgTemperature[TEMP_MEM]; }
 uint32_t smu13_metric_power_w(const rdna3_smu *s)        { return M(s)->AverageSocketPower; }
 uint32_t smu13_metric_gfx_activity(const rdna3_smu *s)   { return M(s)->AverageGfxActivity; }
+/* smu_v13_0_0_get_fan_speed_rpm: METRICS_CURR_FANSPEED */
 uint32_t smu13_metric_fan_rpm(const rdna3_smu *s)        { return M(s)->AvgFanRpm; }
 uint32_t smu13_metric_vddgfx_mv(const rdna3_smu *s)      { return M(s)->AvgVoltage[SVI_PLANE_GFX]; }
 void smu13_metric_detail(const rdna3_smu *s, rdna3_pm_detail *o)

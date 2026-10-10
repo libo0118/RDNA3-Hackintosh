@@ -31,6 +31,7 @@ static void select_se_sh(rdna3_dev *d, uint32_t se, uint32_t sh)
     WR(d, regGRBM_GFX_INDEX, v);
 }
 
+/* gfx_v11_0_get_sa_active_bitmap */
 static uint32_t sa_active_bitmap(rdna3_dev *d, const rdna3_gfx_cu_info *ci)
 {
     uint32_t dis = GETF(RR(d, regCC_GC_SA_UNIT_DISABLE), CC_GC_SA_UNIT_DISABLE, SA_DISABLE);
@@ -38,6 +39,7 @@ static uint32_t sa_active_bitmap(rdna3_dev *d, const rdna3_gfx_cu_info *ci)
     return bitmask(ci->max_sa_per_se * ci->max_se) & ~(dis | udis);
 }
 
+/* gfx_v11_0_get_rb_active_bitmap */
 static uint32_t rb_active_bitmap(rdna3_dev *d, const rdna3_gfx_cu_info *ci)
 {
     uint32_t dis = GETF(RR(d, regCC_RB_BACKEND_DISABLE), CC_RB_BACKEND_DISABLE, BACKEND_DISABLE);
@@ -83,6 +85,7 @@ int gfx11_get_cu_info(rdna3_dev *d, rdna3_gfx_cu_info *ci)
             if (!((ci->sa_active >> (i * ci->max_sa_per_se + j)) & 1))
                 continue;
             select_se_sh(d, i, j);
+            /* gfx_v11_0_get_cu_active_bitmap_per_sh */
             wgp = wgp_active_bitmap(d, ci);
             for (k = 0; k < 16; k++)
                 if (wgp & (1u << k))

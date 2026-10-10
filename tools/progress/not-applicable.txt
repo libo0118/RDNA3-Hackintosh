@@ -29,6 +29,9 @@ amdgpu_ring_ib_on_emit_(ce|cntl|de)  software ring muxer for GFX9 mid-command-bu
 enable_link_(edp|lvds)|link_blank_all_edp_displays|setup_panel_mode|dcn10_psr_.*  eDP / LVDS panels and PSR: a desktop card has no built-in panel
 dmub_dcn32_skip_dmub_panel_power_sequence|dmub_srv_set_skip_panel_power_sequence|dmub_dcn32_backdoor_load_zfb_mode  built-in panel power / zero-frame-buffer (APU) DMCUB modes
 mpc3_(program_shaper|program_shaper_lut|program_shaper_luta_settings|program_shaper_lutb_settings|configure_shaper_lut|get_shaper_current|power_on_shaper_3dlut|program_3dlut|select_3dlut_ram|select_3dlut_ram_mask|set3dlut_ram10|set3dlut_ram12|set_3dlut_mode|read_mpcc_state|set_rmu_mux|get_rmu_mux_status)|mpcc3_(acquire|release)_rmu|get3dlut_config  DCN 3.0 code path: DCN 3.2 uses its own mpc32_* / mpc1_* (dcn32_mpc_funcs)
+mmhub_v3_0_set_clockgating|ih_v6_0_set_clockgating_state  clock gating the card's cg_flags do not enable (soc21_common_early_init: no MC / IH flags for GC 11.0.3), a no-op here
+gfx_v11_0_update_(sram_fgcg|perf_clk)  no-op on GC 11.0.3: soc21_common_early_init sets neither AMD_CG_SUPPORT_GFX_FGCG nor GFX_PERF_CLK
+psp_v13_0_wait_for_(bootloader_steady_state|vmbx_ready)  PSP 13.0.6 / 13.0.14 (MI300) only; MP0 13.0.10 polls the bootloader with psp_v13_0_wait_for_bootloader
 AMDGPU_INFO_FW_(UVD|VCE|DMCU|GFX_CE|VPE|GMC|CAP)  firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP)
 AMDGPU_INFO_SENSOR_VDDNB  northbridge voltage: APUs only
 AMDGPU_INFO_SENSOR_GPU_INPUT_POWER  input power: amdgpu does not report it for SMU 13.0.0 / 13.0.10 (smu_v13_0_0_read_sensor: -EOPNOTSUPP; this card answers average power)

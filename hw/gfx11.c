@@ -164,7 +164,8 @@ int gfx11_gfxhub_enable(rdna3_dev *d, rdna3_gmc *g)
     return gfxhub303_flush_tlb(d, 0, 0);
 }
 
-/* golden_settings_gc_11_0 via soc15_program_register_sequence */
+/* gfx_v11_0_init_golden_registers: golden_settings_gc_11_0 via
+ * soc15_program_register_sequence */
 static void golden_registers(rdna3_dev *d)
 {
     uint32_t and_mask = 0x20000000, or_mask = 0x20000000;
@@ -275,8 +276,8 @@ void gfx11_write(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t v)
     r->wptr++;
 }
 
-/* gfx_v11_0_ring_set_wptr_gfx / _compute: poll slot, then the doorbell
- * (dwords) or, gfx only, CP_RB0_WPTR */
+/* gfx_v11_0_ring_set_wptr_gfx / _compute (mes_v11_0_ring_set_wptr for the MES
+ * pipes): poll slot, then the doorbell (dwords) or, gfx only, CP_RB0_WPTR */
 void gfx11_commit(rdna3_dev *d, rdna3_gfx_ring *r)
 {
     rdna3_vram_write(d, r->wb + RD_GFX_WB_WPTR, &r->wptr, 8);
@@ -293,6 +294,7 @@ void gfx11_commit(rdna3_dev *d, rdna3_gfx_ring *r)
     WG(d, regCP_RB0_WPTR_HI, (uint32_t)(r->wptr >> 32));
 }
 
+/* gfx_v11_0_cp_gfx_enable */
 void gfx11_cp_gfx_enable(rdna3_dev *d, int enable)
 {
     uint32_t i, tmp = RG(d, regCP_ME_CNTL);
@@ -420,7 +422,7 @@ int gfx11_ring_test(rdna3_dev *d, rdna3_gfx_ring *r)
 
 uint32_t gfx11_ring_space(rdna3_dev *d, rdna3_gfx_ring *r)
 {
-    /* gfx11 rptr is 32 bit (gfx_v11_0_ring_get_rptr_gfx) */
+    /* gfx11 rptr is 32 bit (gfx_v11_0_ring_get_rptr_gfx, gfx_v11_0_ring_get_rptr_compute) */
     uint32_t rptr = wb_read32(d, r, RD_GFX_WB_RPTR) & r->buf_mask;
     uint32_t used = ((uint32_t)r->wptr - rptr) & r->buf_mask;
     return r->buf_mask - used;   /* one slot stays empty: full != empty */
@@ -506,6 +508,7 @@ void gfx11_emit_hdp_flush(rdna3_dev *d, rdna3_gfx_ring *r)
                : r->kind == RD_RING_KIQ ? BIF_BX_PF_GPU_HDP_FLUSH_DONE__CP9_MASK
                : BIF_BX_PF_GPU_HDP_FLUSH_DONE__CP2_MASK << r->pipe;
     gfx11_emit_wait_reg_mem(d, r, r->kind == RD_RING_GFX ? 1 : 0, 0, 1,
+                            /* nbio_v4_3_get_hdp_flush_req_offset, nbio_v4_3_get_hdp_flush_done_offset */
                             SOC15_OFF(d, NBIO, 0, regBIF_BX_PF0_GPU_HDP_FLUSH_REQ),
                             SOC15_OFF(d, NBIO, 0, regBIF_BX_PF0_GPU_HDP_FLUSH_DONE), m, m, 0x20);
 }
@@ -609,6 +612,8 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
     return seq;
 }
 
+/* amdgpu_fence_emit_polling: the next sequence number through the ring's
+ * emit_fence (with the EOP interrupt once the ring has one) */
 uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r)
 {
     uint64_t addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_FENCE);
@@ -643,16 +648,18 @@ void gfx11_emit_user_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t addr, uint6
     gfx11_write(d, r, 0);
 }
 
+/* gfx_v11_0_set_eop_interrupt_state: the gfx or the compute EOP source of the ring */
 void gfx11_set_eop_interrupt(rdna3_dev *d, rdna3_gfx_ring *r, int enable)
 {
     uint32_t tmp;
     if (r->kind == RD_RING_GFX) {   /* gfx_v11_0_set_gfx_eop_interrupt_state, me 0 pipe 0 */
-        tmp = RG(d, regCP_INT_CNTL_RING0);
+        tmp = RG(d, regCP_INT_CNTL_RING0);   /* gfx_v11_0_get_cpg_int_cntl(0, 0) */
         tmp = REG_SET_FIELD(tmp, CP_INT_CNTL_RING0, TIME_STAMP_INT_ENABLE, enable ? 1 : 0);
         tmp = REG_SET_FIELD(tmp, CP_INT_CNTL_RING0, GENERIC0_INT_ENABLE, enable ? 1 : 0);
         WG(d, regCP_INT_CNTL_RING0, tmp);
     } else {                        /* gfx_v11_0_set_compute_eop_interrupt_state, me 1 */
-        uint32_t reg = OFF(d, regCP_ME1_PIPE0_INT_CNTL) + r->pipe;   /* PIPE0..3 are consecutive */
+        /* gfx_v11_0_get_cpc_int_cntl(1, pipe): PIPE0..3 are consecutive */
+        uint32_t reg = OFF(d, regCP_ME1_PIPE0_INT_CNTL) + r->pipe;
         tmp = rdna3_rreg(d, reg);
         tmp = REG_SET_FIELD(tmp, CP_ME1_PIPE0_INT_CNTL, TIME_STAMP_INT_ENABLE, enable ? 1 : 0);
         tmp = REG_SET_FIELD(tmp, CP_ME1_PIPE0_INT_CNTL, GENERIC0_INT_ENABLE, enable ? 1 : 0);
@@ -661,11 +668,13 @@ void gfx11_set_eop_interrupt(rdna3_dev *d, rdna3_gfx_ring *r, int enable)
     r->fence_irq = enable;
 }
 
+/* amdgpu_fence_read: the ring's fence writeback slot */
 int gfx11_fence_passed(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq)
 {
     return (int32_t)(wb_read32(d, r, RD_GFX_WB_FENCE) - seq) >= 0;
 }
 
+/* amdgpu_fence_wait_polling */
 int gfx11_wait_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq)
 {
     uint32_t i;
@@ -730,7 +739,7 @@ int gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs6
         cp_set_doorbell_range(d);     /* gfx_v11_0_cp_resume */
     }
 
-    /* gfx_v11_0_rlc_resume (PSP): init_csb + enable SRM */
+    /* gfx_v11_0_rlc_resume (PSP): gfx_v11_0_init_csb + gfx_v11_0_rlc_enable_srm */
     {
         uint32_t n = gfx11_csb_fill(g_csb, 1024);
         rdna3_vram_write(d, r->csb, g_csb, 4ull * n);
@@ -755,7 +764,7 @@ int gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs6
     }
     cp_gfx_resume(d, r);
     cp_gfx_start(d, r);
-    ret = gfx11_ring_test(d, r);
+    ret = gfx11_ring_test(d, r);   /* amdgpu_ring_test_helper: ready only when it passed */
     if (ret)
         return ret;
     r->ready = 1;
@@ -822,6 +831,8 @@ int gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs6
 
 static uint32_t g_mqd[RD_MQD_DWORDS];   /* staging, bring-up is single threaded */
 
+/* gfx_v11_0_compute_ring_init / amdgpu_gfx_kiq_init_ring (doorbell, me/pipe/queue,
+ * 1024 dw ring) with the queue's EOP buffer zeroed (amdgpu_gfx_kiq_init) */
 int gfx11_mec_ring_init(rdna3_dev *d, rdna3_mec_ring *r, int kiq, uint32_t pipe, uint32_t queue,
                         uint32_t doorbell_assignment, uint32_t ring_size)
 {
@@ -879,7 +890,7 @@ static void cp_compute_enable(rdna3_dev *d, int enable)
     d->os.udelay(d->os.ctx, 50);
 }
 
-/* gfx_v11_0_compute_mqd_init (amdgpu_ring_to_mqd_prop: kernel queue,
+/* amdgpu_ring_init_mqd -> gfx_v11_0_compute_mqd_init (amdgpu_ring_to_mqd_prop: kernel queue,
  * doorbell, hqd_active only for the KIQ, default priorities) */
 static void compute_mqd_init(rdna3_dev *d, rdna3_mec_ring *r)
 {
@@ -1198,7 +1209,7 @@ int gfx11_kiq_start(rdna3_dev *d, rdna3_mec_ring *kiq)
     tmp |= (kiq->me << 5) | (kiq->pipe << 3) | kiq->queue;
     WG(d, regRLC_CP_SCHEDULERS, tmp);
     WG(d, regRLC_CP_SCHEDULERS, tmp | 0x80);
-    /* gfx_v11_0_kiq_init_queue */
+    /* gfx_v11_0_kiq_resume -> gfx_v11_0_kiq_init_queue */
     compute_mqd_init(d, kiq);
     ret = kiq_init_register(d, kiq);
     if (ret)
@@ -1326,6 +1337,7 @@ static int mes_set_hw_resources(rdna3_dev *d, rdna3_mes *m)
     return gfx11_mes_submit(d, m, p, 50);
 }
 
+/* mes_v11_0_query_sched_status */
 static int mes_query_sched_status(rdna3_dev *d, rdna3_mes *m)
 {
     uint32_t p[RD_MES_API_DWORDS], i;
@@ -1409,6 +1421,7 @@ void gfx11_mes_sched_stop(rdna3_dev *d, rdna3_mes *m)
 static void kiq_map_kcq(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq)
 {
     rdna3_gfx_ring *k = &kiq->rb;
+        /* amdgpu_queue_mask_bit_to_set_resource_bit */
     uint64_t mask = 1ull << ((kcq->me - 1) * 32 + kcq->pipe * 8 + kcq->queue);
     uint64_t mqd = rdna3_vram_mc(d, kcq->mqd), wptr = rdna3_vram_mc(d, kcq->rb.wb + RD_GFX_WB_WPTR);
     gfx11_write(d, k, PACKET3(PACKET3_SET_RESOURCES, 6));
@@ -1509,7 +1522,7 @@ int gfx11_kgq_start(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_gfx_ring *r)
     r->doorbell = RD_DB_INDEX(RD_DB_GFX_RING0);
     rdna3_vram_fill(d, r->ring, 0, r->ring_size);
     rdna3_vram_write(d, r->wb + RD_GFX_WB_RPTR, zero, sizeof(zero));   /* rptr + wptr poll */
-    gfx_mqd_init(d, r);
+    gfx_mqd_init(d, r);   /* gfx_v11_0_kgq_init_queue (a fresh MQD) */
     kiq_map_kgq(d, kiq, r);
     ret = kiq_ring_test(d, kiq);   /* amdgpu_gfx_enable_kgq */
     if (ret) {
@@ -1800,6 +1813,7 @@ static void rlc_safe_mode(rdna3_dev *d, int enter)
     RERR(d, "GFX: RLC did not %s safe mode", enter ? "enter" : "leave");
 }
 
+/* gfx_v11_0_ring_soft_recovery */
 void gfx11_kill_waves(rdna3_dev *d, uint32_t vmid)
 {
     uint32_t v = 0;

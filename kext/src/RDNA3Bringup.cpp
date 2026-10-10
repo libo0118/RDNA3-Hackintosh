@@ -439,7 +439,7 @@ void RDNA3Bringup::resetIfPspStuck()
 
 /* amdgpu_device_init: "Post card if necessary". amdgpu_device_need_post
  * (BIOS scratch 7) -> amdgpu_device_asic_init for GC 11: wait for the PSP
- * bootloader, then amdgpu_atomfirmware_asic_init. In a passthrough VM whose
+ * bootloader (amdgpu_psp_wait_for_bootloader), then amdgpu_atomfirmware_asic_init. In a passthrough VM whose
  * UEFI did not run the card's option ROM the GPU is not posted: the FB
  * location reads 0. boot-arg rdna3post=0 skips it. */
 bool RDNA3Bringup::postIfNeeded()
@@ -1637,7 +1637,8 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
     return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
 }
 
-/* amdgpu_device_gpu_recover with the mode-1 method (soc21): the PMFW
+/* amdgpu_device_gpu_recover with the mode-1 method (soc21_asic_reset_method
+ * on MP1 13.0.10, soc21_asic_reset -> amdgpu_device_mode1_reset): the PMFW
  * resets the chip, the PSP bootloader comes back, levels 4-8 run again.
  * VRAM normally survives; the magic word says so. */
 bool RDNA3Bringup::gpuReset()
