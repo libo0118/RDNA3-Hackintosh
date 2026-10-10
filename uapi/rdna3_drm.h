@@ -63,6 +63,23 @@ struct rd_xnu_syncobj_fence {
 };
 #define RD_XNU_FENCE_GET 0
 #define RD_XNU_FENCE_SET 1
+/* private: PRIME without file descriptors in the kernel. EXPORT gives a
+ * device-wide random token for a BO (the same one while it stays
+ * exported); IMPORT turns a token into a handle of the calling file (the
+ * handle it already has for that BO, as PRIME does). libdrm_xnu carries
+ * the token in an unlinked file sized like the BO, which is the "dma-buf
+ * fd" (holding the fd is the capability; libdrm reads the size with
+ * lseek). An export lives while its exporter's file is open or another
+ * file still holds the BO. Userptr BOs are not exported (-EPERM, as
+ * amdgpu_gem_prime_export). */
+#define RD_NR_XNU_BO_EXPORT        0xF1
+#define RD_NR_XNU_BO_IMPORT        0xF2
+struct rd_xnu_bo_share {
+    uint32_t handle, pad;          /* EXPORT: in; IMPORT: out */
+    uint64_t token;                /* EXPORT: out; IMPORT: in */
+    uint64_t size;                 /* out */
+};
+#define RD_MAX_EXPORTS 1024
 
 /* We advertise the amdgpu DRM version RADV/libdrm expect from Linux 6.x */
 #define RD_DRM_MAJOR 3
@@ -188,6 +205,9 @@ typedef struct rdna3_drm_ops {
     /* AMDGPU_INFO_GPUVM_FAULT: the last page fault of this VM (addr, hub
      * L2_PROTECTION_FAULT_STATUS, AMDGPU_VMHUB_TYPE_*); optional */
     int   (*vm_fault_info)(void *ctx, void *vm, uint64_t *addr, uint32_t *status, uint32_t *vmhub);
+    /* 64 random bits for BO export tokens; optional (a counter mixed with
+     * the GPU clock otherwise, guessable) */
+    uint64_t (*random64)(void *ctx);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -208,6 +228,9 @@ typedef struct rdna3_drm_device {
     struct { rdna3_bo *bo; rdna3_fence fence; } uf_pending[RD_MAX_UF_PENDING];
     /* on-chip allocations, one bit per byte / entry / counter */
     uint64_t gds_map[RD_GDS_SIZE / 64], gws_map[RD_GWS_SIZE / 64], oa_map[1];
+    /* exported BOs (RD_NR_XNU_BO_EXPORT): each entry holds a reference */
+    struct { uint64_t token; rdna3_bo *bo; const struct rdna3_drm_file *owner; } exports[RD_MAX_EXPORTS];
+    uint64_t export_ctr;
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {

@@ -133,10 +133,10 @@ To do: `hdp_v6_0_flush_hdp`, `hdp_v6_0_get_clockgating_state`, `hdp_v6_0_update_
 |---|---:|---:|---:|---:|---:|---|
 | amdgpu ioctls | 15 | 15 | 21 | 71% | 71% | 7, 8 |
 | CS chunks | 9 | 9 | 10 | 90% | 90% | 7, 8 |
-| DRM core ioctls | 15 | 15 | 17 | 88% | 88% | 7, 8 |
+| DRM core ioctls | 17 | 17 | 19 | 89% | 89% | 7, 8 |
 | INFO firmware / sensors | 10 | 10 | 39 | 26% | 26% | 5, 7 |
 | INFO queries | 21 | 21 | 30 | 70% | 70% | 7 |
-| **Total** | 70 | 70 | 117 | 59.8% | 59.8% | |
+| **Total** | 72 | 72 | 119 | 60.5% | 60.5% | |
 
 <details><summary>amdgpu ioctls: 15 ported, 6 to do</summary>
 
@@ -154,9 +154,9 @@ To do: `AMDGPU_CHUNK_ID_CP_GFX_SHADOW`
 
 </details>
 
-<details><summary>DRM core ioctls: 15 ported, 2 to do</summary>
+<details><summary>DRM core ioctls: 17 ported, 2 to do</summary>
 
-Ported: `DRM_IOCTL_GEM_CLOSE`, `DRM_IOCTL_GET_CAP`, `DRM_IOCTL_SET_CLIENT_CAP`, `DRM_IOCTL_SYNCOBJ_CREATE`, `DRM_IOCTL_SYNCOBJ_DESTROY`, `DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE`, `DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD`, `DRM_IOCTL_SYNCOBJ_QUERY`, `DRM_IOCTL_SYNCOBJ_RESET`, `DRM_IOCTL_SYNCOBJ_SIGNAL`, `DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL`, `DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT`, `DRM_IOCTL_SYNCOBJ_TRANSFER`, `DRM_IOCTL_SYNCOBJ_WAIT`, `DRM_IOCTL_VERSION`
+Ported: `DRM_IOCTL_GEM_CLOSE`, `DRM_IOCTL_GET_CAP`, `DRM_IOCTL_SET_CLIENT_CAP`, `DRM_IOCTL_SYNCOBJ_CREATE`, `DRM_IOCTL_SYNCOBJ_DESTROY`, `DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE`, `DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD`, `DRM_IOCTL_SYNCOBJ_QUERY`, `DRM_IOCTL_SYNCOBJ_RESET`, `DRM_IOCTL_SYNCOBJ_SIGNAL`, `DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL`, `DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT`, `DRM_IOCTL_SYNCOBJ_TRANSFER`, `DRM_IOCTL_SYNCOBJ_WAIT`, `DRM_IOCTL_VERSION`, `DRM_IOCTL_XNU_BO_EXPORT`, `DRM_IOCTL_XNU_BO_IMPORT`
 
 To do: `DRM_IOCTL_PRIME_FD_TO_HANDLE`, `DRM_IOCTL_PRIME_HANDLE_TO_FD`
 

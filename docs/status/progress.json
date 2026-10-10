@@ -1448,11 +1448,11 @@
   ]
  },
  "uapi": {
-  "works": 70,
-  "ported": 70,
-  "total": 117,
-  "works_pct": 59.8,
-  "ported_pct": 59.8,
+  "works": 72,
+  "ported": 72,
+  "total": 119,
+  "works_pct": 60.5,
+  "ported_pct": 60.5,
   "groups": [
    {
     "name": "amdgpu ioctls",
@@ -1493,7 +1493,7 @@
      "7",
      "8"
     ],
-    "works": 15,
+    "works": 17,
     "ported": 0,
     "todo": 2,
     "items": {
@@ -1513,7 +1513,9 @@
      "DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT": "works",
      "DRM_IOCTL_SYNCOBJ_TRANSFER": "works",
      "DRM_IOCTL_SYNCOBJ_WAIT": "works",
-     "DRM_IOCTL_VERSION": "works"
+     "DRM_IOCTL_VERSION": "works",
+     "DRM_IOCTL_XNU_BO_EXPORT": "works",
+     "DRM_IOCTL_XNU_BO_IMPORT": "works"
     }
    },
    {

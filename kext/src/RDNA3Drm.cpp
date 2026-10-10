@@ -21,6 +21,8 @@
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IODMACommand.h>
 #include <pexpert/pexpert.h>
+#include <libkern/libkern.h>
+#include <mach/mach_time.h>
 
 #include <libkern/copyio.h>   /* copyin/copyout (kpi.libkern) */
 
@@ -294,6 +296,14 @@ void RDNA3Accel::drmRingReady(uint32_t ip, uint32_t mask)
     LOG("HW IP %u ring mask 0x%x ready for command submission", ip, mask);
 }
 
+/* BO export tokens (RD_NR_XNU_BO_EXPORT): libkern's random() (seeded
+ * from the kernel's entropy at boot) mixed with the timebase - only KPI
+ * symbols, so the kext keeps loading on every macOS */
+static uint64_t drmRandom64(void *)
+{
+    return (((uint64_t)random() << 32) | (uint32_t)random()) ^ (mach_absolute_time() * 0x9E3779B97F4A7C15ull);
+}
+
 bool RDNA3Accel::drmInit(const amd_discovery *disc)
 {
     rdna3_drm_ops ops = {};
@@ -315,6 +325,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.bo_userptr = drmBoUserptr;
     ops.sensor = drmSensor;
     ops.vm_fault_info = drmVmFaultInfo;
+    ops.random64 = drmRandom64;
     ops.gpu_clock = drmGpuClock;   /* AMDGPU_INFO_TIMESTAMP: SMUIO GOLDEN_TSC */
 
     fDrmLock = IOLockAlloc();

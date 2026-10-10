@@ -305,7 +305,13 @@ static void uf_reap(rdna3_drm_device *dev, int all)
 
 void rdna3_drm_device_fini(rdna3_drm_device *dev)
 {
+    uint32_t i;
     uf_reap(dev, 1);
+    for (i = 0; i < RD_MAX_EXPORTS; i++)
+        if (dev->exports[i].bo) {
+            bo_put_dev(dev, dev->exports[i].bo);
+            zero(&dev->exports[i], sizeof(dev->exports[i]));
+        }
 }
 
 static void va_release(rdna3_drm_file *f, rdna3_va *m)
@@ -317,6 +323,23 @@ static void va_release(rdna3_drm_file *f, rdna3_va *m)
         bo_put(f, m->bo);
     m->bo = NULL;
     m->handle = 0;
+}
+
+/* exports nobody can reach any more: the exporter's file is gone (or
+ * 'closing' is going) and no file holds the BO, only the export itself */
+static void exports_gc(rdna3_drm_device *dev, const rdna3_drm_file *closing)
+{
+    uint32_t i;
+    for (i = 0; i < RD_MAX_EXPORTS; i++) {
+        if (!dev->exports[i].bo)
+            continue;
+        if (closing && dev->exports[i].owner == closing)
+            dev->exports[i].owner = NULL;
+        if (!dev->exports[i].owner && dev->exports[i].bo->refcnt == 1) {
+            bo_put_dev(dev, dev->exports[i].bo);
+            zero(&dev->exports[i], sizeof(dev->exports[i]));
+        }
+    }
 }
 
 void rdna3_drm_file_close(rdna3_drm_file *f)
@@ -346,6 +369,7 @@ void rdna3_drm_file_close(rdna3_drm_file *f)
     f->bos = NULL;
     f->syncobjs = NULL;
     f->vas = NULL;
+    exports_gc(f->dev, f);
 }
 
 rdna3_bo *rdna3_drm_bo_lookup(rdna3_drm_file *f, uint32_t handle)
@@ -425,6 +449,90 @@ static int gem_close(rdna3_drm_file *f, struct drm_gem_close *c)
         if (f->vas[i].handle == c->handle)
             va_release(f, &f->vas[i]);   /* amdgpu_gem_object_close drops the bo_va */
     bo_put(f, bo);
+    exports_gc(f->dev, NULL);
+    return 0;
+}
+
+/* ----------------------- PRIME (BO sharing) ----------------------- */
+
+static uint64_t export_token(rdna3_drm_device *dev)
+{
+    uint64_t t = 0, z;
+    uint32_t i;
+    for (;;) {
+        if (dev->ops.random64) {
+            t = dev->ops.random64(dev->ops.ctx);
+        } else {   /* splitmix64 of a counter and the clock */
+            z = ++dev->export_ctr + (dev->ops.gpu_clock ? dev->ops.gpu_clock(dev->ops.ctx) : 0) +
+                0x9E3779B97F4A7C15ull;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            t = z ^ (z >> 31);
+        }
+        if (!t)
+            continue;
+        for (i = 0; i < RD_MAX_EXPORTS; i++)
+            if (dev->exports[i].bo && dev->exports[i].token == t)
+                break;
+        if (i == RD_MAX_EXPORTS)
+            return t;
+    }
+}
+
+/* amdgpu_gem_prime_export, without the dma-buf */
+static int bo_export(rdna3_drm_file *f, struct rd_xnu_bo_share *x)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_bo *bo = rdna3_drm_bo_lookup(f, x->handle);
+    uint32_t i, free_slot = RD_MAX_EXPORTS;
+    if (!bo || bo_onchip(bo))
+        return -RD_EINVAL;
+    if (bo->userptr)
+        return -RD_EPERM;
+    for (i = 0; i < RD_MAX_EXPORTS; i++) {
+        if (dev->exports[i].bo == bo) {
+            x->token = dev->exports[i].token;
+            x->size = bo->size;
+            if (!dev->exports[i].owner)
+                dev->exports[i].owner = f;
+            return 0;
+        }
+        if (!dev->exports[i].bo && free_slot == RD_MAX_EXPORTS)
+            free_slot = i;
+    }
+    if (free_slot == RD_MAX_EXPORTS)
+        return -RD_ENOSPC;
+    dev->exports[free_slot].token = export_token(dev);
+    dev->exports[free_slot].bo = bo;
+    dev->exports[free_slot].owner = f;
+    bo->refcnt++;
+    x->token = dev->exports[free_slot].token;
+    x->size = bo->size;
+    return 0;
+}
+
+/* drm_gem_prime_fd_to_handle: the handle this file already has, or a new one */
+static int bo_import(rdna3_drm_file *f, struct rd_xnu_bo_share *x)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_bo *bo = NULL;
+    uint32_t i;
+    int r;
+    for (i = 0; i < RD_MAX_EXPORTS && !bo; i++)
+        if (dev->exports[i].bo && dev->exports[i].token == x->token)
+            bo = dev->exports[i].bo;
+    if (!x->token || !bo)
+        return -RD_ENOENT;
+    x->size = bo->size;
+    for (i = 0; i < RD_MAX_HANDLES; i++)
+        if (f->bos[i] == bo) {
+            x->handle = i + 1;
+            return 0;
+        }
+    r = handle_alloc(f, bo, &x->handle);
+    if (r)
+        return r;
+    bo->refcnt++;
     return 0;
 }
 
@@ -1626,9 +1734,13 @@ int rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
         return gem_userptr(f, (struct drm_amdgpu_gem_userptr *)data);
     case RD_NR_SYNCOBJ_TRANSFER: NEED(struct drm_syncobj_transfer);
         return syncobj_transfer(f, (struct drm_syncobj_transfer *)data);
+    case RD_NR_XNU_BO_EXPORT: NEED(struct rd_xnu_bo_share);
+        return bo_export(f, (struct rd_xnu_bo_share *)data);
+    case RD_NR_XNU_BO_IMPORT: NEED(struct rd_xnu_bo_share);
+        return bo_import(f, (struct rd_xnu_bo_share *)data);
     case RD_NR_XNU_SYNCOBJ_FENCE: NEED(struct rd_xnu_syncobj_fence);
         return syncobj_fence(f, (struct rd_xnu_syncobj_fence *)data);
-    case RD_NR_PRIME_HANDLE_TO_FD:               /* TODO(stage4): IOSurface sharing */
+    case RD_NR_PRIME_HANDLE_TO_FD:               /* libdrm_xnu: RD_NR_XNU_BO_EXPORT/IMPORT */
     case RD_NR_PRIME_FD_TO_HANDLE:
     case RD_NR_SYNCOBJ_HANDLE_TO_FD:             /* fds are the libdrm_xnu layer's (drm_xnu.c) */
     case RD_NR_SYNCOBJ_FD_TO_HANDLE:
@@ -1652,6 +1764,8 @@ const char *rdna3_drm_ioctl_name(uint32_t nr)
     case RD_NR_SYNCOBJ_SIGNAL: return "SYNCOBJ_SIGNAL";
     case RD_NR_SYNCOBJ_TRANSFER: return "SYNCOBJ_TRANSFER";
     case RD_NR_XNU_SYNCOBJ_FENCE: return "XNU_SYNCOBJ_FENCE";
+    case RD_NR_XNU_BO_EXPORT: return "XNU_BO_EXPORT";
+    case RD_NR_XNU_BO_IMPORT: return "XNU_BO_IMPORT";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR): return "AMDGPU_GEM_USERPTR";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE): return "AMDGPU_GEM_CREATE";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP): return "AMDGPU_GEM_MMAP";

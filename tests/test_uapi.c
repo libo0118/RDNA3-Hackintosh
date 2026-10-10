@@ -230,7 +230,7 @@ int main(void)
     static rdna3_drm_file file;
     rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
                           h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL, NULL,
-                          NULL, NULL, NULL };
+                          NULL, NULL, NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -789,6 +789,45 @@ int main(void)
     {
         uint32_t tiny = 0;
         CHECK(rdna3_drm_ioctl(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), &tiny, 4) == -RD_EINVAL);
+    }
+
+    /* PRIME: the export holds the BO while its exporter's file is open or
+     * another file has it; then the token is dead and the BO freed */
+    {
+        static rdna3_drm_file f1, f2;
+        struct rd_xnu_bo_share x, y;
+        struct drm_gem_close cl;
+        uint32_t h = 0, live0 = live_bos;
+        uint64_t tok;
+        CHECK(rdna3_drm_file_open(&dev, &f1) == 0 && rdna3_drm_file_open(&dev, &f2) == 0);
+        CHECK(onchip_create(&f1, AMDGPU_GEM_DOMAIN_GTT, 65536, 4096, 0, &h) == 0 && h);
+        memset(&x, 0, sizeof(x));
+        x.handle = h;
+        CHECK(IOCTL(&f1, RD_NR_XNU_BO_EXPORT, x) == 0 && x.token && x.size == 65536);
+        tok = x.token;
+        CHECK(IOCTL(&f1, RD_NR_XNU_BO_EXPORT, x) == 0 && x.token == tok);   /* stable */
+        memset(&y, 0, sizeof(y));
+        y.token = tok + 1;
+        CHECK(IOCTL(&f2, RD_NR_XNU_BO_IMPORT, y) == -RD_ENOENT);
+        y.token = tok;
+        CHECK(IOCTL(&f2, RD_NR_XNU_BO_IMPORT, y) == 0 && y.handle && y.size == 65536);
+        CHECK(rdna3_drm_bo_lookup(&f2, y.handle) == rdna3_drm_bo_lookup(&f1, h));
+        x.handle = 999;
+        CHECK(IOCTL(&f1, RD_NR_XNU_BO_EXPORT, x) == -RD_EINVAL);
+        /* the exporter goes, the importer keeps the BO and the token */
+        cl.handle = h; cl.pad = 0;
+        CHECK(IOCTL(&f1, RD_NR_GEM_CLOSE, cl) == 0);
+        rdna3_drm_file_close(&f1);
+        CHECK(live_bos == live0 + 1);
+        y.handle = 0;
+        CHECK(IOCTL(&f2, RD_NR_XNU_BO_IMPORT, y) == 0 && y.handle);   /* the same handle again */
+        /* the importer goes too: dead token, BO freed */
+        rdna3_drm_file_close(&f2);
+        CHECK(live_bos == live0);
+        CHECK(rdna3_drm_file_open(&dev, &f1) == 0);
+        y.token = tok;
+        CHECK(IOCTL(&f1, RD_NR_XNU_BO_IMPORT, y) == -RD_ENOENT);
+        rdna3_drm_file_close(&f1);
     }
 
     rdna3_drm_file_close(f);

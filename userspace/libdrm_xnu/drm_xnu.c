@@ -54,6 +54,30 @@ struct xnu_syncobj_destroy { uint32_t handle, pad; };
 #define XNU_NR_SYNCOBJ_TRANSFER      0xCC
 #define XNU_SYNCOBJ_EXPORT_SYNC_FILE 1u
 #define XNU_SYNCOBJ_IMPORT_SYNC_FILE 1u
+/* PRIME "dma-buf fds" (DRM_IOCTL_PRIME_HANDLE_TO_FD / FD_TO_HANDLE): an
+ * unlinked file whose length is the BO's size (libdrm_amdgpu reads it with
+ * lseek(SEEK_END)) and whose first bytes carry the device-wide export
+ * token of RD_NR_XNU_BO_EXPORT. Passing the fd passes the capability. */
+#define XNU_DMABUF_MAGIC "RD3BUF01"
+struct xnu_dmabuf { char magic[8]; uint32_t version, pad; uint64_t token, size; };
+struct xnu_bo_share { uint32_t handle, pad; uint64_t token, size; };
+struct xnu_prime_handle { uint32_t handle, flags; int32_t fd; };
+#define XNU_NR_PRIME_HANDLE_TO_FD    0x2d
+#define XNU_NR_PRIME_FD_TO_HANDLE    0x2e
+#define XNU_NR_BO_EXPORT             0xF1   /* RD_NR_XNU_BO_EXPORT */
+#define XNU_NR_BO_IMPORT             0xF2
+#define XNU_DRM_CLOEXEC              02000000   /* Linux O_CLOEXEC, as drm.h DRM_CLOEXEC */
+/* DRM_AMDGPU_FENCE_TO_HANDLE with an fd result: the kext makes a syncobj
+ * (AMDGPU_FENCE_TO_HANDLE_GET_SYNCOBJ), the fd is made here */
+#define XNU_NR_AMDGPU_FENCE_TO_HANDLE (0x40 + 0x14)
+struct xnu_fence_to_handle {
+    uint32_t ctx_id, ip_type, ip_instance, ring;
+    uint64_t seq_no;
+    uint32_t what, pad;
+};
+#define XNU_FENCE_TO_HANDLE_GET_SYNCOBJ    0
+#define XNU_FENCE_TO_HANDLE_GET_SYNCOBJ_FD 1
+#define XNU_FENCE_TO_HANDLE_GET_SYNC_FILE_FD 2
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static int g_trace = -1;
 
@@ -316,6 +340,87 @@ static int syncobj_fd_to_handle(int ci, struct xnu_syncobj_handle *a)
     return 0;
 }
 
+static int prime_handle_to_fd(int ci, struct xnu_prime_handle *a)
+{
+    struct xnu_bo_share x;
+    struct xnu_dmabuf b;
+    const char *tmp = getenv("TMPDIR");
+    char path[1024];
+    int fd, err;
+    memset(&x, 0, sizeof(x));
+    x.handle = a->handle;
+    err = be()->ioctl(g_conns[ci].conn, XNU_NR_BO_EXPORT, &x, sizeof(x));
+    if (err)
+        return err;
+    memset(&b, 0, sizeof(b));
+    memcpy(b.magic, XNU_DMABUF_MAGIC, 8);
+    b.version = 1;
+    b.token = x.token;
+    b.size = x.size;
+    snprintf(path, sizeof(path), "%s/rdna3-dmabuf.XXXXXX", tmp && *tmp ? tmp : "/tmp");
+    fd = mkstemp(path);
+    if (fd < 0)
+        return errno ? errno : EMFILE;
+    unlink(path);
+    if (pwrite(fd, &b, sizeof(b), 0) != (ssize_t)sizeof(b) ||
+        (x.size > sizeof(b) && ftruncate(fd, (off_t)x.size) != 0)) {
+        err = errno ? errno : EIO;
+        close(fd);
+        return err;
+    }
+    if (a->flags & (XNU_DRM_CLOEXEC | O_CLOEXEC))
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+    a->fd = fd;
+    return 0;
+}
+
+static int prime_fd_to_handle(int ci, struct xnu_prime_handle *a)
+{
+    struct xnu_bo_share x;
+    struct xnu_dmabuf b;
+    struct stat st;
+    int err;
+    if (fstat(a->fd, &st) || !S_ISREG(st.st_mode) || st.st_size < (off_t)sizeof(b) ||
+        pread(a->fd, &b, sizeof(b), 0) != (ssize_t)sizeof(b) ||
+        memcmp(b.magic, XNU_DMABUF_MAGIC, 8) || b.version != 1)
+        return EBADF;
+    memset(&x, 0, sizeof(x));
+    x.token = b.token;
+    err = be()->ioctl(g_conns[ci].conn, XNU_NR_BO_IMPORT, &x, sizeof(x));
+    if (err)
+        return err;
+    a->handle = x.handle;
+    return 0;
+}
+
+static int fence_to_fd(int ci, struct xnu_fence_to_handle *a)
+{
+    uint32_t what = a->what, handle;
+    int err, fd = -1;
+    a->what = XNU_FENCE_TO_HANDLE_GET_SYNCOBJ;
+    err = be()->ioctl(g_conns[ci].conn, XNU_NR_AMDGPU_FENCE_TO_HANDLE, a, sizeof(*a));
+    a->what = what;
+    if (err)
+        return err;
+    handle = *(uint32_t *)a;                  /* out.handle overlays the input */
+    if (what == XNU_FENCE_TO_HANDLE_GET_SYNC_FILE_FD) {
+        struct xnu_syncobj_destroy d = { handle, 0 };
+        err = sync_file_export(ci, handle, &fd);
+        be()->ioctl(g_conns[ci].conn, XNU_NR_SYNCOBJ_DESTROY, &d, sizeof(d));
+    } else {
+        struct xnu_syncobj_handle h;
+        memset(&h, 0, sizeof(h));
+        h.handle = handle;                    /* opaque: the fd is this syncobj */
+        err = syncobj_handle_to_fd(ci, &h);
+        fd = h.fd;
+    }
+    if (err)
+        return err;
+    memset(a, 0, sizeof(*a));
+    *(uint32_t *)a = (uint32_t)fd;
+    return 0;
+}
+
 /* The UAPI (uapi/rdna3_drm.h) answers with Linux errno numbers, as amdgpu
  * does, since that is what RADV and libdrm compare against (-ETIME on a
  * syncobj wait, -ECANCELED for a guilty context). On macOS a few of them
@@ -343,6 +448,14 @@ int drm_xnu_ioctl_nr(int fd, uint32_t nr, void *arg, uint32_t size)
         err = syncobj_handle_to_fd(ci, (struct xnu_syncobj_handle *)arg);
     else if (nr == XNU_NR_SYNCOBJ_FD_TO_HANDLE && size >= sizeof(struct xnu_syncobj_handle))
         err = syncobj_fd_to_handle(ci, (struct xnu_syncobj_handle *)arg);
+    else if (nr == XNU_NR_AMDGPU_FENCE_TO_HANDLE && size >= sizeof(struct xnu_fence_to_handle) &&
+             (((struct xnu_fence_to_handle *)arg)->what == XNU_FENCE_TO_HANDLE_GET_SYNCOBJ_FD ||
+              ((struct xnu_fence_to_handle *)arg)->what == XNU_FENCE_TO_HANDLE_GET_SYNC_FILE_FD))
+        err = fence_to_fd(ci, (struct xnu_fence_to_handle *)arg);
+    else if (nr == XNU_NR_PRIME_HANDLE_TO_FD && size >= sizeof(struct xnu_prime_handle))
+        err = prime_handle_to_fd(ci, (struct xnu_prime_handle *)arg);
+    else if (nr == XNU_NR_PRIME_FD_TO_HANDLE && size >= sizeof(struct xnu_prime_handle))
+        err = prime_fd_to_handle(ci, (struct xnu_prime_handle *)arg);
     else
         err = be()->ioctl(g_conns[ci].conn, nr, arg, size);
     if (trace())

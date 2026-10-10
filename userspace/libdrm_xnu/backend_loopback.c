@@ -9,6 +9,7 @@
 #include "rdna3_drm.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -181,12 +182,25 @@ static int lb_wait(void *c, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
     return lb_signaled(c, ip, ring, seq) ? 0 : -RD_ETIME;
 }
 
+static uint64_t lb_random64(void *c)
+{
+    uint64_t v = 0;
+    FILE *f = fopen("/dev/urandom", "rb");
+    (void)c;
+    if (f) {
+        if (fread(&v, sizeof(v), 1, f) != 1)
+            v = 0;
+        fclose(f);
+    }
+    return v;
+}
+
 static void dev_init(void)
 {
     rdna3_drm_ops ops = { NULL, lb_zalloc, lb_free, lb_bo_alloc, lb_bo_free, lb_copyin, lb_copyout, NULL, NULL,
                           lb_vm_create, lb_vm_destroy, lb_vm_map, lb_vm_unmap,
                           lb_submit, lb_signaled, lb_wait, NULL,
-                          lb_bo_userptr, lb_sensor, NULL };
+                          lb_bo_userptr, lb_sensor, NULL, lb_random64 };
     amd_discovery disc;
     if (g_dev_ready)
         return;

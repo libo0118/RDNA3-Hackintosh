@@ -130,6 +130,48 @@ int main(void)
         CHECK(amdgpu_va_range_free(vah) == 0);
         CHECK(amdgpu_bo_free(ubo) == 0);
     }
+    /* PRIME: a dma-buf fd carries the BO to another connection (another
+     * process in real life): same size through lseek, a handle there; the
+     * export dies with the last holder; userptr BOs are not exported */
+    {
+        struct amdgpu_bo_alloc_request req = { 256 << 10, 4096, AMDGPU_GEM_DOMAIN_VRAM, 0 };
+        static uint8_t upages[4096] __attribute__((aligned(4096)));
+        amdgpu_bo_handle bo = NULL, same = NULL, ubo = NULL;
+        struct amdgpu_bo_import_result imp;
+        uint32_t dmafd = 0, h2 = 0, h3 = 0;
+        int fd2 = drm_xnu_open("/dev/dri/renderD128", 0), fd3;
+        CHECK(fd2 >= 0);
+        CHECK(amdgpu_bo_alloc(dev, &req, &bo) == 0);
+        CHECK(amdgpu_bo_export(bo, amdgpu_bo_handle_type_dma_buf_fd, &dmafd) == 0);
+        CHECK(lseek((int)dmafd, 0, SEEK_END) == (off_t)(256 << 10));
+        CHECK(drmPrimeFDToHandle(fd2, (int)dmafd, &h2) == 0 && h2);
+        CHECK(drmPrimeFDToHandle(fd2, (int)dmafd, &h3) == 0 && h3 == h2);   /* one handle per file */
+        memset(&imp, 0, sizeof(imp));
+        CHECK(amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, dmafd, &imp) == 0);
+        same = imp.buf_handle;
+        CHECK(same == bo && imp.alloc_size == (256 << 10));               /* libdrm's own dedupe */
+        CHECK(amdgpu_bo_free(same) == 0);
+        CHECK(drmPrimeFDToHandle(fd2, 12345, &h3) != 0);                    /* not ours */
+        CHECK(amdgpu_create_bo_from_user_mem(dev, upages, sizeof(upages), &ubo) == 0);
+        {
+            uint32_t ufd = 0;
+            CHECK(amdgpu_bo_export(ubo, amdgpu_bo_handle_type_dma_buf_fd, &ufd) != 0 && errno == EPERM);
+        }
+        CHECK(amdgpu_bo_free(ubo) == 0);
+        /* the exporter frees its BO: the importer keeps it, the token too */
+        CHECK(amdgpu_bo_free(bo) == 0);
+        fd3 = drm_xnu_open("/dev/dri/renderD128", 0);
+        CHECK(fd3 >= 0 && drmPrimeFDToHandle(fd3, (int)dmafd, &h3) == 0 && h3);
+        CHECK(drm_xnu_close(fd3) == 0);
+        /* the importers go; the exporter's file still holds the export (as
+         * the dma-buf fd would on Linux): importable until that file closes */
+        CHECK(drmCloseBufferHandle(fd2, h2) == 0);
+        CHECK(drm_xnu_close(fd2) == 0);
+        fd3 = drm_xnu_open("/dev/dri/renderD128", 0);
+        CHECK(fd3 >= 0 && drmPrimeFDToHandle(fd3, (int)dmafd, &h3) == 0);
+        CHECK(drm_xnu_close(fd3) == 0);
+        close((int)dmafd);
+    }
     /* CS on the (software) DMA ring through libdrm_amdgpu, like RADV's
      * winsys: raw submit with chunks, then the fence query */
     {
@@ -178,6 +220,19 @@ int main(void)
         CHECK(amdgpu_cs_query_fence_status(&fence, AMDGPU_TIMEOUT_INFINITE, 0, &expired) == 0 &&
               expired);
         CHECK(amdgpu_cs_syncobj_wait(dev, &so, 1, INT64_MAX, 0, NULL) == 0);
+        /* FENCE_TO_HANDLE with fds (libdrm_xnu makes them): a sync_file
+         * and an opaque syncobj fd of the CS fence */
+        {
+            uint32_t sfd = 0, ofd = 0, hs = 0;
+            CHECK(amdgpu_cs_fence_to_handle(dev, &fence, AMDGPU_FENCE_TO_HANDLE_GET_SYNC_FILE_FD, &sfd) == 0);
+            CHECK(amdgpu_cs_create_syncobj2(dev, 0, &hs) == 0);
+            CHECK(amdgpu_cs_syncobj_import_sync_file(dev, hs, (int)sfd) == 0);
+            CHECK(amdgpu_cs_syncobj_wait(dev, &hs, 1, INT64_MAX, 0, NULL) == 0);
+            CHECK(amdgpu_cs_fence_to_handle(dev, &fence, AMDGPU_FENCE_TO_HANDLE_GET_SYNCOBJ_FD, &ofd) == 0);
+            CHECK(ofd != sfd && amdgpu_cs_import_syncobj(dev, (int)ofd, &hs) == 0);
+            CHECK(amdgpu_cs_syncobj_wait(dev, &hs, 1, INT64_MAX, 0, NULL) == 0);
+            close((int)sfd); close((int)ofd);
+        }
         /* the out fence as a sync_file, imported over another connection
          * and in a forked child (a different process, same device) */
         {
