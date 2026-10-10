@@ -93,6 +93,11 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
             fCgWanted = cg != 0;
             PE_parse_boot_argn("rdna3gfxoff", &go, sizeof(go));
             fGfxOffWanted = go != 0;
+            /* HDP + ATHUB gating (soc21_cg.c), with the GFX one; opt-in
+             * until a card run shows the watts: rdna3socg=1 */
+            uint32_t socg = 0;
+            PE_parse_boot_argn("rdna3socg", &socg, sizeof(socg));
+            fSocCgWanted = socg != 0;
         }
         fMsi = msi != 0;
         fDoorbells = db != 0;
@@ -168,6 +173,8 @@ void RDNA3Bringup::stopAndFree()
     }
     if (fCgWanted && fGfx && fGfx->ready && fDev)
         gfx11_set_clock_gating(fDev, 0, RD_GFX_CG_GC_11_0_3);
+    if (fCgWanted && fSocCgWanted && fDev)
+        soc21_set_clock_gating(fDev, 0);
     if (fKcq && fKcq->rb.ready && fDev)
         gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
     if (fGfx && fGfx->async && fGfx->ready && fDev) {
@@ -1118,6 +1125,12 @@ void RDNA3Bringup::cgStart(const char *why)
     int r = gfx11_set_clock_gating(fDev, 1, RD_GFX_CG_GC_11_0_3);
     BLOG("GFX clock gating (%s): %d", why, r);
     publish("RDNA3,GfxCGResult", (uint64_t)(int64_t)r);
+    if (fSocCgWanted) {
+        /* amdgpu_device_set_cg_state(GATE) also reaches soc21_common and gmc_v11_0 */
+        int s = soc21_set_clock_gating(fDev, 1);
+        publish("RDNA3,SocCGResult", (uint64_t)(int64_t)s);
+        publish("RDNA3,SocCGState", soc21_clock_gating_state(fDev));
+    }
 }
 
 void RDNA3Bringup::mesStart(const char *why)

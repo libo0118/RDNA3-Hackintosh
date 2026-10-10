@@ -332,15 +332,25 @@ def main():
                       "'rdna3vm approve' (System Settings -> Privacy & Security -> Allow)")
             if "== rdna3_drminfo --scanout" in txt:
                 # what the panels showed: per pipe the HUBP state, how much
-                # of the picture is not black, whether it changed in 2 s
-                sc = txt[txt.index("== rdna3_drminfo --scanout"):]
+                # of the picture is not black, whether it changed in 2 s;
+                # one block per look (20 s apart), and whether two lit pipes
+                # scan the same surface (a mirrored picture)
                 print("   screens (what each display pipe scanned out):")
-                for l in sc.splitlines()[1:]:
-                    if l.startswith("=="):
-                        break
-                    if l.startswith(("pipe", "  picture", "[exit")) and "power-gated off" not in l:
-                        print("     " + l[:160])
-            for ppm in sorted(glob.glob(p[:-len(".tar.gz")] + "-scanout-pipe*.ppm")):
+                for blk in txt.split("== rdna3_drminfo --scanout")[1:]:
+                    look = re.match(r"\s*\(look (\d+)\)", blk)
+                    addrs = []
+                    print("     look %s:" % (look.group(1) if look else "1"))
+                    for l in blk.splitlines()[1:]:
+                        if l.startswith("=="):
+                            break
+                        if l.startswith(("pipe", "  picture", "[exit")) and "power-gated off" not in l:
+                            print("       " + l[:160])
+                        m = re.match(r"pipe (\d+): LIT .* in use (0x[0-9a-f]+)", l)
+                        if m:
+                            addrs.append(m.group(2))
+                    if len(addrs) > 1 and len(set(addrs)) < len(addrs):
+                        print("       !! two lit pipes scan the same surface: both monitors show one picture")
+            for ppm in sorted(glob.glob(p[:-len(".tar.gz")] + "-scanout*-pipe*.ppm")):
                 try:
                     print("     picture: " + ppm_to_png(ppm))
                 except (OSError, ValueError) as e:

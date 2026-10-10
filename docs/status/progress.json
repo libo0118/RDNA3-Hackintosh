@@ -1,10 +1,10 @@
 {
  "amdgpu": {
-  "works": 251,
-  "ported": 276,
+  "works": 257,
+  "ported": 282,
   "total": 1328,
-  "works_pct": 18.9,
-  "ported_pct": 20.8,
+  "works_pct": 19.4,
+  "ported_pct": 21.2,
   "groups": [
    {
     "name": "PSP 13",
@@ -295,9 +295,9 @@
      "6",
      "7"
     ],
-    "works": 25,
+    "works": 27,
     "ported": 0,
-    "todo": 104,
+    "todo": 102,
     "items": {
      "amdgpu_gmc_agp_addr": "todo",
      "amdgpu_gmc_agp_location": "works",
@@ -393,7 +393,7 @@
      "gmc_v11_0_mc_init": "todo",
      "gmc_v11_0_process_interrupt": "works",
      "gmc_v11_0_resume": "todo",
-     "gmc_v11_0_set_clockgating_state": "todo",
+     "gmc_v11_0_set_clockgating_state": "works",
      "gmc_v11_0_set_gfxhub_funcs": "todo",
      "gmc_v11_0_set_gmc_funcs": "todo",
      "gmc_v11_0_set_irq_funcs": "todo",
@@ -422,7 +422,7 @@
      "mmhub_v3_0_init_system_aperture_regs": "todo",
      "mmhub_v3_0_init_tlb_regs": "todo",
      "mmhub_v3_0_program_invalidation": "todo",
-     "mmhub_v3_0_set_clockgating": "todo",
+     "mmhub_v3_0_set_clockgating": "works",
      "mmhub_v3_0_set_fault_enable_default": "todo",
      "mmhub_v3_0_setup_vm_pt_regs": "todo",
      "mmhub_v3_0_setup_vmid_config": "todo",
@@ -436,9 +436,9 @@
      "6",
      "6b"
     ],
-    "works": 10,
+    "works": 11,
     "ported": 0,
-    "todo": 27,
+    "todo": 26,
     "items": {
      "amdgpu_ih_decode_iv_helper": "works",
      "amdgpu_ih_decode_iv_ts_helper": "todo",
@@ -463,7 +463,7 @@
      "ih_v6_0_rb_cntl": "todo",
      "ih_v6_0_resume": "todo",
      "ih_v6_0_self_irq": "todo",
-     "ih_v6_0_set_clockgating_state": "todo",
+     "ih_v6_0_set_clockgating_state": "works",
      "ih_v6_0_set_interrupt_funcs": "todo",
      "ih_v6_0_set_powergating_state": "todo",
      "ih_v6_0_set_rptr": "works",
@@ -485,13 +485,13 @@
      "1",
      "4"
     ],
-    "works": 14,
+    "works": 17,
     "ported": 0,
-    "todo": 51,
+    "todo": 48,
     "items": {
      "hdp_v6_0_flush_hdp": "todo",
-     "hdp_v6_0_get_clockgating_state": "todo",
-     "hdp_v6_0_update_clock_gating": "todo",
+     "hdp_v6_0_get_clockgating_state": "works",
+     "hdp_v6_0_update_clock_gating": "works",
      "nbio_v4_3_enable_doorbell_aperture": "works",
      "nbio_v4_3_enable_doorbell_selfring_aperture": "works",
      "nbio_v4_3_gc_doorbell_init": "works",
@@ -528,7 +528,7 @@
      "soc21_common_is_idle": "todo",
      "soc21_common_late_init": "todo",
      "soc21_common_resume": "todo",
-     "soc21_common_set_clockgating_state": "todo",
+     "soc21_common_set_clockgating_state": "works",
      "soc21_common_set_powergating_state": "todo",
      "soc21_common_soft_reset": "todo",
      "soc21_common_suspend": "todo",
@@ -1693,6 +1693,7 @@
   "8v",
   "9",
   "9b",
-  "9c"
+  "9c",
+  "9s"
  ]
 }

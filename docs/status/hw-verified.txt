@@ -23,3 +23,4 @@
 8u 2026-10-10 vm UCLK/FCLK DPM left to the PMFW (rdna3pm=2): UCLK 96 MHz, idle 77 W -> 52 W; 9cu (two heads) 54 W
 10 2026-10-10 vm RDNA3Accelerator starts (IOGraphicsAccelerator2::start -> 1), WindowServer allocates its surfaces in VRAM through it; the display pipe gate is still closed (black desktop, cursor only)
 10a 2026-10-10 vm macOS desktop composited through RDNA3Accelerator: display pipe over the scanout, WindowServer frames flipped to VRAM surfaces and painted live on head 0, no WindowServer crash (rdna3accelfb=4 rdna3acceliop=1)
+9s 2026-10-10 vm scanout read-back (rdna3_drminfo --scanout): both pipes lit at 1920x1080, the macOS login screen in the pictures; the second pipe scanned the first one's surface at times (swap routing)

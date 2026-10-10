@@ -117,12 +117,17 @@ extra="$HOME/rdna3-extra.txt"
     # what each display pipe really scans out (the panels, without anybody
     # looking): HUBP state + a 320-wide picture per lit pipe, uploaded next
     # to the report; the host's triage turns them into PNGs
+    # three looks 20 s apart: card run 17's second monitor switched
+    # between its own picture and the first one's
     rm -rf "$HOME/rdna3-scanout"
     if [ "${lvl:-0}" -ge 2 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
-        mkdir -p "$HOME/rdna3-scanout"
-        echo "== rdna3_drminfo --scanout"
-        with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout" 2>&1
-        echo "[exit $?]"
+        for k in 1 2 3; do
+            mkdir -p "$HOME/rdna3-scanout/$k"
+            echo "== rdna3_drminfo --scanout (look $k)"
+            with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/$k" 2>&1
+            echo "[exit $?]"
+            [ $k = 3 ] || sleep 20
+        done
     fi
     if [ "${lvl:-0}" -ge 7 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
         echo "== rdna3_drminfo --dma-test"
@@ -150,8 +155,9 @@ f=$(ls -t "$HOME"/rdna3-report-*.tar.gz 2>/dev/null | head -1)
 if [ -n "$f" ]; then
     curl -sf --max-time 60 -T "$f" "$HOST/reports/$(basename "$f")" && echo "uploaded $f"
     curl -sf --max-time 30 -T "$extra" "$HOST/reports/$(basename "$f" .tar.gz)-tests.txt" || true
-    for p in "$HOME"/rdna3-scanout/scanout-pipe*.ppm; do
-        [ -f "$p" ] && curl -sf --max-time 30 -T "$p" "$HOST/reports/$(basename "$f" .tar.gz)-$(basename "$p")"
+    for p in "$HOME"/rdna3-scanout/*/scanout-pipe*.ppm; do
+        [ -f "$p" ] && curl -sf --max-time 30 -T "$p" \
+            "$HOST/reports/$(basename "$f" .tar.gz)-scanout$(basename "$(dirname "$p")")-$(basename "$p" | sed 's/^scanout-//')"
     done
 fi
 finish

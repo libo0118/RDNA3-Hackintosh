@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 18.9%   ported 20.8%   (251 / 276 / 1328)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 19.4%   ported 21.2%   (257 / 282 / 1328)</text>
 <g><title>GFX 11: works 30%, ported 30% (73+0 of 243); verified by step(s) 8</title>
 <rect x="1.0" y="53.0" width="9.7" height="10.7" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="10.7" y="53.0" width="9.7" height="10.7" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -555,7 +555,7 @@
 <text x="153.0" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">SMU 13 power</text>
 <text x="153.0" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">16% / 16%</text>
 </g>
-<g><title>GMC / GPUVM: works 19%, ported 19% (25+0 of 129); verified by step(s) 6, 7</title>
+<g><title>GMC / GPUVM: works 21%, ported 21% (27+0 of 129); verified by step(s) 6, 7</title>
 <rect x="149.0" y="159.5" width="9.7" height="10.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="158.7" y="159.5" width="9.7" height="10.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="168.4" y="159.5" width="9.7" height="10.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -581,8 +581,8 @@
 <rect x="217.1" y="170.2" width="9.7" height="10.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="226.8" y="170.2" width="9.7" height="10.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="236.6" y="170.2" width="9.7" height="10.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="246.3" y="170.2" width="9.7" height="10.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="256.0" y="170.2" width="9.7" height="10.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="246.3" y="170.2" width="9.7" height="10.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="256.0" y="170.2" width="9.7" height="10.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="265.8" y="170.2" width="9.7" height="10.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="275.5" y="170.2" width="9.7" height="10.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="285.2" y="170.2" width="9.7" height="10.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -687,7 +687,7 @@
 <rect x="284.5" y="244.4" width="10.4" height="10.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="148.0" y="158.5" width="148.0" height="97.5" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="153.0" y="173.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">GMC / GPUVM</text>
-<text x="153.0" y="187.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">19% / 19%</text>
+<text x="153.0" y="187.5" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">21% / 21%</text>
 </g>
 <g><title>Discovery / VBIOS: works 41%, ported 41% (52+0 of 127); verified by step(s) 2</title>
 <rect x="149.0" y="257.0" width="9.7" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1105,7 +1105,7 @@
 <text x="301.0" y="178.8" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">DMCUB</text>
 <text x="301.0" y="192.8" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">7% / 7%</text>
 </g>
-<g><title>SoC / NBIO / HDP: works 22%, ported 22% (14+0 of 65); verified by step(s) 1, 4</title>
+<g><title>SoC / NBIO / HDP: works 26%, ported 26% (17+0 of 65); verified by step(s) 1, 4</title>
 <rect x="297.0" y="262.4" width="9.8" height="9.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="306.7" y="262.4" width="9.8" height="9.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="316.5" y="262.4" width="9.8" height="9.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1120,9 +1120,9 @@
 <rect x="326.3" y="272.2" width="9.8" height="9.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="336.1" y="272.2" width="9.8" height="9.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="345.8" y="272.2" width="9.8" height="9.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="355.6" y="272.2" width="9.8" height="9.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="365.4" y="272.2" width="9.8" height="9.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="297.0" y="282.1" width="11.2" height="9.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="355.6" y="272.2" width="9.8" height="9.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="365.4" y="272.2" width="9.8" height="9.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="297.0" y="282.1" width="11.2" height="9.8" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="308.1" y="282.1" width="11.2" height="9.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="319.3" y="282.1" width="11.2" height="9.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="330.5" y="282.1" width="11.2" height="9.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -1173,7 +1173,7 @@
 <rect x="364.0" y="341.2" width="11.2" height="9.8" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="296.0" y="261.4" width="80.2" height="90.6" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="301.0" y="276.4" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">SoC / NBI…</text>
-<text x="301.0" y="290.4" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">22% / 22%</text>
+<text x="301.0" y="290.4" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">26% / 26%</text>
 </g>
 <g><title>Rings / fences: works 10%, ported 10% (6+0 of 61); verified by step(s) 7, 8</title>
 <rect x="377.2" y="164.8" width="8.6" height="10.7" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1353,7 +1353,7 @@
 <text x="381.2" y="288.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">MES que…</text>
 <text x="381.2" y="302.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 30%</text>
 </g>
-<g><title>IH interrupts: works 27%, ported 27% (10+0 of 37); verified by step(s) 6, 6b</title>
+<g><title>IH interrupts: works 30%, ported 30% (11+0 of 37); verified by step(s) 6, 6b</title>
 <rect x="443.7" y="274.0" width="10.1" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="453.7" y="274.0" width="10.1" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="463.8" y="274.0" width="10.1" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1364,7 +1364,7 @@
 <rect x="463.8" y="283.6" width="10.1" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="473.9" y="283.6" width="10.1" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="483.9" y="283.6" width="10.1" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="443.7" y="293.2" width="10.1" height="9.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="443.7" y="293.2" width="10.1" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="453.7" y="293.2" width="10.1" height="9.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="463.8" y="293.2" width="10.1" height="9.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="473.9" y="293.2" width="10.1" height="9.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -1393,7 +1393,7 @@
 <rect x="481.4" y="341.4" width="12.6" height="9.6" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="442.7" y="273.0" width="52.3" height="79.0" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="447.7" y="288.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">IH in…</text>
-<text x="447.7" y="302.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">27% / 27%</text>
+<text x="447.7" y="302.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">30% / 30%</text>
 </g>
 <text x="509.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu UAPI (ioctls, INFO, CS chunks)</text>
 <text x="509.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 60.8%   ported 60.8%   (73 / 73 / 120)</text>

@@ -94,6 +94,10 @@ public:
     void _pure335() APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::_pure335"); }
     bool copyFromBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::copyFromBuffer"); return false; }
     bool copyToBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::copyToBuffer"); return false; }
+    void free() APPLE_KEXT_OVERRIDE {
+        rd3AccelSurfaceGone(this);   /* its swap -> head answer goes with it */
+        IOAccelLegacySurface::free();
+    }
     void submitSwapCopy(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2) APPLE_KEXT_OVERRIDE {
         (void)a0;
         rd3AccelSwapProbe(a1, a2);

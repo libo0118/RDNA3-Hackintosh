@@ -47,6 +47,9 @@
 #include "gen/gc_11_0_0_sdma.h"
 #include "gfx11.h"
 #include "dcn32.h"
+#include "soc21_cg.h"
+#include "gen/athub_3_0_0_cg.h"
+#include "gen/hdp_6_0_0_cg.h"
 #include "doorbell.h"
 #include "gen/nbio_4_3_0_doorbell.h"
 #include "gen/dcn_3_2_1.h"
@@ -2326,6 +2329,7 @@ static void make_discovery(amd_discovery *disc)
     disc->ips[disc->num_ips - 1].base[5] = NBIO_B5;
     IP(AMD_HWID_SMUIO, 13, 0, 6, SMUIO_B0, 0x16A00, 0x440000);
     IP(AMD_HWID_HDP, 6, 0, 0, 0xF20, 0, 0);
+    IP(AMD_HWID_ATHUB, 3, 0, 0, 0xC00, 0, 0);
     IP(AMD_HWID_MMHUB, 3, 0, 2, MM_BASE0, 0, 0);
     IP(AMD_HWID_OSSSYS, 6, 0, 0, OSS_BASE0, 0, 0);
     IP(AMD_HWID_SDMA0, 6, 0, 3, GC_BASE0, 0xA000, 0x1C000);
@@ -3269,6 +3273,28 @@ static void run(const char *fwdir)
                                   (ov0 & ~(RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGCG_OVERRIDE_MASK | RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGLS_OVERRIDE_MASK)) &&
                                   !(S.reg[GCR(regRLC_CGCG_CGLS_CTRL)] & (RLC_CGCG_CGLS_CTRL__CGCG_EN_MASK | RLC_CGCG_CGLS_CTRL__CGLS_EN_MASK)) &&
                                   !(S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__GFX_IDLE_INT_ENABLE_MASK));
+                        }
+                        /* soc21_common/gmc_v11_0 set_clockgating_state for GC 11.0.3:
+                         * HDP SRAM shutdown + ATHUB MGCG/LS; the GPU still runs jobs */
+                        {
+                            const uint32_t hclk = 0xF20 + regHDP_CLK_CNTL, hpwr = 0xF20 + regHDP_MEM_POWER_CTRL,
+                                           ath = 0xC00 + regATHUB_MISC_CNTL;
+                            S.reg[hclk] = 0x00000101u;
+                            S.reg[hpwr] = HDP_MEM_POWER_CTRL__ATOMIC_MEM_POWER_LS_EN_MASK | 0x40000000u;
+                            S.reg[ath] = 0x00000001u;
+                            CHECK(soc21_clock_gating_state(&dev) == 0);
+                            CHECK(soc21_set_clock_gating(&dev, 1) == RDNA3_OK);
+                            CHECK(S.reg[hpwr] == (0x40000000u | HDP_MEM_POWER_CTRL__ATOMIC_MEM_POWER_SD_EN_MASK |
+                                                  HDP_MEM_POWER_CTRL__RC_MEM_POWER_SD_EN_MASK |
+                                                  HDP_MEM_POWER_CTRL__ATOMIC_MEM_POWER_CTRL_EN_MASK |
+                                                  HDP_MEM_POWER_CTRL__RC_MEM_POWER_CTRL_EN_MASK));
+                            CHECK(S.reg[hclk] == 0x00000101u);   /* override released again */
+                            CHECK(S.reg[ath] == (0x1u | ATHUB_MISC_CNTL__CG_ENABLE_MASK | ATHUB_MISC_CNTL__CG_MEM_LS_ENABLE_MASK));
+                            CHECK(soc21_clock_gating_state(&dev) ==
+                                  (RD_SOC_CG_HDP_SD | RD_SOC_CG_ATHUB_MGCG | RD_SOC_CG_ATHUB_LS));
+                            CHECK(soc21_set_clock_gating(&dev, 0) == RDNA3_OK);
+                            CHECK(S.reg[hpwr] == 0x40000000u && S.reg[ath] == 0x1u && soc21_clock_gating_state(&dev) == 0);
+                            CHECK(soc21_set_clock_gating(&dev, 1) == RDNA3_OK);
                         }
                         S.reg[scratch] = 0;
                         seq = gfx11_submit_job(&dev, &gr, 8, 5, gpuvm_pd_addr(&dev, &vm), jobs, 1);

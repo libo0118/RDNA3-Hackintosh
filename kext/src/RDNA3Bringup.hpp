@@ -39,6 +39,7 @@ extern "C" {
 #include "sdma60.h"
 #include "gpuvm.h"
 #include "gfx11.h"
+#include "soc21_cg.h"
 #include "doorbell.h"
 #include "smu13.h"
 #include "dmub32.h"
@@ -146,6 +147,7 @@ private:
     struct rdna3_mes *fMes = nullptr;  /* level 8 + rdna3mes=1: MES scheduler pipe (C1) */
     bool             fMesWanted = false;
     bool             fCgWanted = false;   /* GFX clock gating, default on (rdna3cg=0: off) */
+    bool             fSocCgWanted = false; /* HDP + ATHUB gating (rdna3socg=1) */
     /* GFXOFF (rdna3gfxoff=1, step 8o): amdgpu_gfx_off_ctrl. The GFX may
      * power off while nothing holds it; every DRM ioctl and the PM trend
      * read hold it on, the last release allows GFXOFF again 100 ms later

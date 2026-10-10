@@ -32,6 +32,8 @@ static bool               rd3AccelFlipTo(IOAccelResource2 *res, IOService *fb, u
 static bool               rd3AccelCopyToScanout(IOAccelResource2 *res, IOService *fb, unsigned head);
 void                      rd3AccelSwapProbe(IOAccelResource2 *a1, IOAccelResource2 *a2);
 void                      rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource2 *a2);
+void                      rd3AccelSurfaceGone(const void *surf);
+void                      rd3AccelResourceGone(const void *res);
 bool                      rd3AccelResHasContent(IOAccelResource2 *res);
 static void               rd3AccelWriteStamp(int index, unsigned int value);
 /* Navi 3x display devices (data/amdgpu.ids); the core kext must also claim the card */
@@ -674,6 +676,7 @@ void *RD3Resource::getApertureMemoryDescriptor(unsigned long long *a0)
 void RD3Resource::free()
 {
     if (fApDesc) { fApDesc->release(); fApDesc = nullptr; }
+    rd3AccelResourceGone(this);
     OSAddAtomic64(1, &gCntResFree);
     IOAccelResource2::free();
 }
@@ -1822,14 +1825,49 @@ static bool rd3AccelFlipTo(IOAccelResource2 *res, IOService *fb, unsigned head)
  * for, tried in order, the first that answers wins and is logged once per
  * head (card run 15: two heads piped, every swap refused):
  *   1. one head piped: that head
- *   2. an argument IS a head's display-pipe framebuffer resource
- *   3. an argument shares that resource's vidmem
- *   4. the surface was seen before: the head it got then
+ *   2. the surface was seen before: the head it got then
+ *   3. an argument IS a head's display-pipe framebuffer resource (a1, the
+ *      destination, before a2)
+ *   4. an argument shares that resource's vidmem
  *   5. a new surface: the next piped head nobody has claimed yet, in head
- *      order (WindowServer makes one swap surface per display, in order) */
-static const void *gSurfHead[8];
+ *      order (WindowServer makes one swap surface per display, in order)
+ * Card run 17 (pictures of both pipes): the second monitor showed the first
+ * one's frame now and then. WindowServer re-creates its pipe resources
+ * (initFramebufferResource ran five times per head) and swap surfaces; a
+ * freed resource's address came back for the other display and matched the
+ * stale pointer. Freed surfaces and resources now leave the tables, a known
+ * surface keeps its head, and every change of the answer is logged. */
+static const void *volatile gSurfHead[8];
 static unsigned    gSurfHeadIdx[8];
 static unsigned    gSwapHow[kRd3MaxFB];
+static unsigned long long gHeadSrcPhys[kRd3MaxFB];   /* what each head showed last */
+static unsigned    gSwapCount, gRouteLogs;
+#define RD3ROUTELOG(...) do { if (gRouteLogs < 200) { gRouteLogs++; ALOG(__VA_ARGS__); } } while (0)
+
+void rd3AccelSurfaceGone(const void *surf)
+{
+    for (unsigned i = 0; i < 8; i++)
+        if (gSurfHead[i] == surf) {
+            RD3ROUTELOG("swap: surface %p (head %u) freed", surf, gSurfHeadIdx[i]);
+            gSurfHead[i] = nullptr;
+        }
+}
+
+void rd3AccelResourceGone(const void *res)
+{
+    for (unsigned h = 0; h < kRd3MaxFB; h++)
+        if (gHeadFbRes[h] == res) {
+            RD3ROUTELOG("swap: head %u's pipe resource %p freed", h, res);
+            gHeadFbRes[h] = nullptr;
+        }
+}
+
+static unsigned long long rd3res_phys(IOAccelResource2 *r)
+{
+    RD3VidMemory *m = rd3res_vidmem(r);
+    return m ? m->fPhys : 0;
+}
+
 void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource2 *a2)
 {
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
@@ -1837,21 +1875,24 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     IOAccelResource2 *src = rd3AccelResHasContent(a2) ? a2 : rd3AccelResHasContent(a1) ? a1 : nullptr;
     if (!src) return;
     const unsigned piped = gRd3HeadsPiped;
+    const unsigned n = ++gSwapCount;
     unsigned head = kRd3MaxFB, how = 0;
     if (piped && !(piped & (piped - 1))) {
         for (head = 0; !(piped & (1u << head)); head++) ;
         how = 1;
     }
-    for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++)
-        if (gHeadFbRes[h] && (gHeadFbRes[h] == a1 || gHeadFbRes[h] == a2)) { head = h; how = 2; }
-    for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++) {
-        RD3VidMemory *hv = rd3res_vidmem(gHeadFbRes[h]);
-        if (hv && (hv == rd3res_vidmem(a1) || hv == rd3res_vidmem(a2))) { head = h; how = 3; }
-    }
     unsigned slot = 8;
     for (unsigned i = 0; i < 8; i++)
         if (gSurfHead[i] == surf) slot = i;
-    if (how == 0 && slot < 8) { head = gSurfHeadIdx[slot]; how = 4; }
+    if (how == 0 && slot < 8 && (piped & (1u << gSurfHeadIdx[slot]))) { head = gSurfHeadIdx[slot]; how = 2; }
+    for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++)
+        if (gHeadFbRes[h] && gHeadFbRes[h] == a1) { head = h; how = 3; }
+    for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++)
+        if (gHeadFbRes[h] && gHeadFbRes[h] == a2) { head = h; how = 3; }
+    for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++) {
+        RD3VidMemory *hv = rd3res_vidmem(gHeadFbRes[h]);
+        if (hv && (hv == rd3res_vidmem(a1) || hv == rd3res_vidmem(a2))) { head = h; how = 4; }
+    }
     if (how == 0) {
         unsigned claimed = 0;
         for (unsigned i = 0; i < 8; i++)
@@ -1864,16 +1905,33 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
                    surf, a1, a2, piped, gHeadFbRes[0], gHeadFbRes[1], gHeadFbRes[2], gHeadFbRes[3]);
         return;
     }
-    if (slot == 8)   /* remember the surface -> head answer */
+    if (slot == 8) {   /* remember the surface -> head answer */
         for (unsigned i = 0; i < 8; i++)
             if (!gSurfHead[i]) { gSurfHead[i] = surf; gSurfHeadIdx[i] = head; break; }
+    } else if (gSurfHeadIdx[slot] != head) {
+        RD3ROUTELOG("swap #%u: surface %p moves from head %u to head %u", n, surf, gSurfHeadIdx[slot], head);
+        gSurfHeadIdx[slot] = head;
+    }
+    static const char *const kHow[6] = { "?", "only head piped", "surface seen before",
+                                         "argument is the pipe resource",
+                                         "argument shares the pipe vidmem",
+                                         "new surface -> next unclaimed head" };
     if (gSwapHow[head] != how) {
         gSwapHow[head] = how;
-        static const char *const kHow[6] = { "?", "only head piped", "argument is the pipe resource",
-                                             "argument shares the pipe vidmem", "surface seen before",
-                                             "new surface -> next unclaimed head" };
         ALOG("swap: surface %p -> head %u (%s; a1 %p a2 %p src %s)", surf, head, kHow[how], a1, a2,
              src == a2 ? "a2" : "a1");
+    }
+    /* the frame each head shows: a change, or one head taking the other's
+     * frame, is what made the panels swap pictures */
+    const unsigned long long phys = rd3res_phys(src);
+    if (phys != gHeadSrcPhys[head]) {
+        for (unsigned h = 0; h < kRd3MaxFB; h++)
+            if (h != head && phys && gHeadSrcPhys[h] == phys)
+                RD3ROUTELOG("swap #%u: head %u now gets head %u's frame (phys 0x%llx, surface %p, %s)",
+                            n, head, h, phys, surf, kHow[how]);
+        RD3ROUTELOG("swap #%u: head %u frame phys 0x%llx -> 0x%llx (surface %p, %s, a1 %p a2 %p)",
+                    n, head, gHeadSrcPhys[head], phys, surf, kHow[how], a1, a2);
+        gHeadSrcPhys[head] = phys;
     }
     IOService *fb = a->fFBs[head];
     if (!rd3AccelFlipTo(src, fb, head))
