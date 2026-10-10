@@ -217,6 +217,14 @@ uint32_t smu13_metric_gfx_activity(const rdna3_smu *s);   /* % */
 uint32_t smu13_metric_fan_rpm(const rdna3_smu *s);
 uint32_t smu13_metric_vddgfx_mv(const rdna3_smu *s);
 uint32_t smu13_metric_throttlers(const rdna3_smu *s);     /* bit i = ThrottlingPercentage[i] != 0 */
+/* what decides idle power: the GFX clock before/after deep sleep, memory
+ * clock after deep sleep, PCIe and UCLK activity (smu_v13_0_0_get_gpu_metrics) */
+typedef struct rdna3_pm_detail {
+    uint32_t gfx_activity, uclk_activity, pcie_busy;
+    uint32_t gfxclk_target, gfxclk_pre_ds, gfxclk_post_ds, memclk_post_ds, fclk_post_ds;
+    uint32_t socclk, dcefclk, socket_w, board_w, vddgfx_mv;
+} rdna3_pm_detail;
+void     smu13_metric_detail(const rdna3_smu *s, rdna3_pm_detail *o);
 
 /* smu_v13_0_set_single_dpm_table for one PPCLK_* clock */
 int smu13_get_dpm_table(rdna3_dev *d, uint32_t ppclk, rdna3_smu_dpm *t);

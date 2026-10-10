@@ -1,10 +1,10 @@
 {
  "amdgpu": {
-  "works": 257,
-  "ported": 282,
+  "works": 258,
+  "ported": 283,
   "total": 1328,
   "works_pct": 19.4,
-  "ported_pct": 21.2,
+  "ported_pct": 21.3,
   "groups": [
    {
     "name": "PSP 13",
@@ -142,9 +142,9 @@
     "steps": [
      "5"
     ],
-    "works": 22,
+    "works": 23,
     "ported": 0,
-    "todo": 119,
+    "todo": 118,
     "items": {
      "convert_to_vddc": "todo",
      "smu_v13_0_0_allocate_dpm_context": "todo",
@@ -160,7 +160,7 @@
      "smu_v13_0_0_get_ecc_info": "todo",
      "smu_v13_0_0_get_fan_speed_pwm": "todo",
      "smu_v13_0_0_get_fan_speed_rpm": "todo",
-     "smu_v13_0_0_get_gpu_metrics": "todo",
+     "smu_v13_0_0_get_gpu_metrics": "works",
      "smu_v13_0_0_get_od_setting_limits": "todo",
      "smu_v13_0_0_get_overdrive_table": "todo",
      "smu_v13_0_0_get_power_limit": "todo",

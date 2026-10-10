@@ -98,6 +98,9 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
             uint32_t socg = 0;
             PE_parse_boot_argn("rdna3socg", &socg, sizeof(socg));
             fSocCgWanted = socg != 0;
+            uint32_t pmexp = 0;
+            PE_parse_boot_argn("rdna3pmexp", &pmexp, sizeof(pmexp));
+            fPmExpWanted = pmexp != 0;
         }
         fMsi = msi != 0;
         fDoorbells = db != 0;
@@ -1287,6 +1290,83 @@ bool RDNA3Bringup::stats(uint32_t v[8])
     v[5] = smu13_metric_gfxclk_mhz(fSmu);
     v[6] = smu13_metric_uclk_mhz(fSmu);
     v[7] = smu13_metric_power_w(fSmu);
+    return true;
+}
+
+/* Idle power (card runs 8-17): the PMFW reports 100 % GFX activity and
+ * keeps GFXCLK near 2.7 GHz (52 W) where Linux idles at 40 MHz / 12 W.
+ * Instead of one hypothesis per card run, try them in one boot, each for
+ * 10 s (5 ticks, the first one settling), and log what the PMFW reports:
+ *   0 baseline, no GC register reads (the trend's reads wake GC)
+ *   1 + AllowGfxOff (amdgpu_gfx_off_ctrl(true))
+ *   2 + SetWorkloadMask POWER_SAVING (smu_v13_0_0_set_power_profile_mode)
+ *   3 + HDP/ATHUB clock gating (soc21_set_clock_gating)
+ *   4 + GFXCLK soft max at the lowest level: the floor at a low clock
+ *   5 everything back as configured */
+bool RDNA3Bringup::pmExperimentTick()
+{
+    static const char *const kName[6] = { "baseline, no GC reads", "+ GFXOFF allowed",
+                                          "+ workload POWER_SAVING", "+ HDP/ATHUB clock gating",
+                                          "+ GFXCLK soft max lowest", "restored" };
+    enum { kTicks = 5, kPhases = 6 };
+    rdna3_pm_detail p;
+    if (!fPmExpWanted || !fFinished || !fPmUp || !fSmu || !fDev || fPmExpPhase >= kPhases)
+        return false;
+    if (fPmExpTick % kTicks == 0) {
+        int r = RDNA3_OK;
+        switch (fPmExpPhase) {
+        case 1:
+            r = smu13_gfx_off(fDev, 1);
+            fGfxOffOn = r == RDNA3_OK;
+            break;
+        case 2:
+            r = smu13_set_workload(fDev, WORKLOAD_PPLIB_POWER_SAVING_BIT);
+            break;
+        case 3:
+            r = soc21_set_clock_gating(fDev, 1);
+            break;
+        case 4:
+            if (fSmu->gfx.count)
+                r = smu13_set_soft_freq_range(fDev, fSmu, PPCLK_GFXCLK, 0, fSmu->gfx.level[0]);
+            break;
+        case 5:
+            if (fSmu->gfx.count)
+                r = smu13_set_soft_freq_range(fDev, fSmu, PPCLK_GFXCLK, fSmu->gfx.level[0],
+                                              fSmu->gfx.level[fSmu->gfx.count - 1]);
+            smu13_set_workload(fDev, WORKLOAD_PPLIB_DEFAULT_BIT);
+            if (!fSocCgWanted)
+                soc21_set_clock_gating(fDev, 0);
+            if (!fGfxOffWanted && fGfxOffOn) {
+                smu13_gfx_off(fDev, 0);
+                fGfxOffOn = false;
+            }
+            break;
+        default:
+            break;
+        }
+        BLOG("PM experiment %u (%s): started (%d)", fPmExpPhase, kName[fPmExpPhase], r);
+        bzero(fPmExpSum, sizeof(fPmExpSum));
+        fPmExpSamples = 0;
+    } else {
+        smu13_metric_detail(fSmu, &p);
+        fPmExpSum[0] += p.gfx_activity;
+        fPmExpSum[1] += p.gfxclk_target;
+        fPmExpSum[2] += p.gfxclk_pre_ds;
+        fPmExpSum[3] += p.gfxclk_post_ds;
+        fPmExpSum[4] += p.memclk_post_ds;
+        fPmExpSum[5] += p.socket_w;
+        fPmExpSum[6] += p.pcie_busy;
+        fPmExpSum[7] += p.uclk_activity;
+        fPmExpSamples++;
+    }
+    if (++fPmExpTick % kTicks == 0) {
+        uint32_t n = fPmExpSamples ? fPmExpSamples : 1;
+        BLOG("PM experiment %u (%s): activity %llu%%, gfxclk target %llu pre-DS %llu post-DS %llu MHz, "
+             "memclk post-DS %llu MHz, %llu W, PCIe busy %llu, UCLK activity %llu%%",
+             fPmExpPhase, kName[fPmExpPhase], fPmExpSum[0] / n, fPmExpSum[1] / n, fPmExpSum[2] / n,
+             fPmExpSum[3] / n, fPmExpSum[4] / n, fPmExpSum[5] / n, fPmExpSum[6] / n, fPmExpSum[7] / n);
+        fPmExpPhase++;
+    }
     return true;
 }
 

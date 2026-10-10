@@ -115,6 +115,10 @@ public:
     void     gfxOffRelease();
     /* which GC block is busy (GRBM / CP status), next to the PM trend */
     void     logBusy();
+    /* rdna3pmexp=1: idle-power variants one after the other, 10 s each,
+     * from the 2 s stats tick (DRM lock held); true while it runs (the
+     * caller then leaves the GC registers alone) */
+    bool     pmExperimentTick();
 
 private:
     static void threadMain(void *arg, int wait_result);
@@ -148,6 +152,9 @@ private:
     bool             fMesWanted = false;
     bool             fCgWanted = false;   /* GFX clock gating, default on (rdna3cg=0: off) */
     bool             fSocCgWanted = false; /* HDP + ATHUB gating (rdna3socg=1) */
+    bool             fPmExpWanted = false; /* rdna3pmexp=1 */
+    uint32_t         fPmExpTick = 0, fPmExpPhase = 0, fPmExpSamples = 0;
+    uint64_t         fPmExpSum[8] = {};
     /* GFXOFF (rdna3gfxoff=1, step 8o): amdgpu_gfx_off_ctrl. The GFX may
      * power off while nothing holds it; every DRM ioctl and the PM trend
      * read hold it on, the last release allows GFXOFF again 100 ms later

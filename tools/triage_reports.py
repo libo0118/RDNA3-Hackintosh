@@ -225,6 +225,16 @@ def report(path, show_all):
         last = [l for l in log.splitlines() if pat in l]
         if last:
             print("   info " + last[-1][last[-1].find("PM:"):][:150])
+    # rdna3pmexp=1: one line per idle-power variant (10 s each)
+    exp = [l[l.find("PM experiment"):] for l in log.splitlines() if "PM experiment" in l and "activity" in l]
+    if exp:
+        print("   idle-power experiment (activity, GFX clock, watts per variant):")
+        for l in exp:
+            print("     " + l[:200])
+    for l in log.splitlines():
+        if "soc21 CG" in l or "SocCG" in l:
+            print("   info " + l[l.find("soc21"):][:120] if "soc21" in l else "   info " + l[:120])
+            break
     # step 9: our framebuffer (rdna3fb=1) took the head and has the EDID
     if "rdna3fb=1" in args:
         fb_started = "RDNA3-fb: started" in log

@@ -564,6 +564,23 @@ uint32_t smu13_metric_power_w(const rdna3_smu *s)        { return M(s)->AverageS
 uint32_t smu13_metric_gfx_activity(const rdna3_smu *s)   { return M(s)->AverageGfxActivity; }
 uint32_t smu13_metric_fan_rpm(const rdna3_smu *s)        { return M(s)->AvgFanRpm; }
 uint32_t smu13_metric_vddgfx_mv(const rdna3_smu *s)      { return M(s)->AvgVoltage[SVI_PLANE_GFX]; }
+void smu13_metric_detail(const rdna3_smu *s, rdna3_pm_detail *o)
+{
+    o->gfx_activity = M(s)->AverageGfxActivity;
+    o->uclk_activity = M(s)->AverageUclkActivity;
+    o->pcie_busy = M(s)->PCIeBusy;
+    o->gfxclk_target = M(s)->AverageGfxclkFrequencyTarget;
+    o->gfxclk_pre_ds = M(s)->AverageGfxclkFrequencyPreDs;
+    o->gfxclk_post_ds = M(s)->AverageGfxclkFrequencyPostDs;
+    o->memclk_post_ds = M(s)->AverageMemclkFrequencyPostDs;
+    o->fclk_post_ds = M(s)->AverageFclkFrequencyPostDs;
+    o->socclk = M(s)->CurrClock[PPCLK_SOCCLK];
+    o->dcefclk = M(s)->CurrClock[PPCLK_DCFCLK];
+    o->socket_w = M(s)->AverageSocketPower;
+    o->board_w = M(s)->AverageTotalBoardPower;
+    o->vddgfx_mv = M(s)->AvgVoltage[SVI_PLANE_GFX];
+}
+
 uint32_t smu13_metric_throttlers(const rdna3_smu *s)
 {
     /* smu_v13_0_get_throttler_status */
