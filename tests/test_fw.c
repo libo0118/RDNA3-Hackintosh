@@ -200,6 +200,17 @@ static void real(const char *dir)
     CHECK(amd_ucode_plan_find(&plan, AMD_UCODE_IMU_I) != NULL);
     printf("test_fw: real firmware in %s: %u ucodes, %u KiB\n", dir, plan.count,
            plan.total_aligned / 1024);
+    {
+        /* AMDGPU_INFO_FW_VERSION as amdgpu reports it for these files */
+        uint32_t ver[32], feat[32];
+        amd_fw_versions(blobs, &s, ver, feat);
+        CHECK(ver[0x04] && ver[0x05] && ver[0x08] && ver[0x07] && ver[0x0b]);   /* ME PFP MEC RLC SDMA */
+        CHECK(ver[0x0c] && ver[0x1b] && ver[0x14]);   /* SOS IMU DMCUB; MES: 0 in the header, runtime */
+        CHECK(ver[0x06] == 0 && ver[0x01] == 0);                                /* no CE, no VCE */
+        printf("test_fw: versions ME 0x%x/%u PFP 0x%x/%u MEC 0x%x/%u RLC 0x%x/%u SDMA 0x%x/%u MES 0x%x/%u "
+               "SOS 0x%x IMU 0x%x DMCUB 0x%x\n", ver[4], feat[4], ver[5], feat[5], ver[8], feat[8], ver[7],
+               feat[7], ver[0xb], feat[0xb], ver[0x1a], feat[0x1a], ver[0xc], ver[0x1b], ver[0x14]);
+    }
     for (i = 0; i < AMD_BLOB_COUNT; i++)
         free((void *)blobs[i].data);
     free(sos);

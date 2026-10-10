@@ -148,9 +148,13 @@ def collect_uapi(passed):
 
     kext = "".join(p.read_text(errors="ignore") for p in (ROOT / "kext/src").glob("*.cpp"))
 
+    fwc = set(re.findall(r"AMDGPU_INFO_FW_[A-Z0-9_]+", (ROOT / "common/amd_fw.c").read_text()))
+
     def plain(n):
         if n.startswith("AMDGPU_INFO_FW_") and n != "AMDGPU_INFO_FW_VERSION":     # answered from dev->fw_version[], set by the kext
-            return re.search(r"fw_(?:version|feature)\[\s*" + n + r"\s*\]", src + kext) is not None
+            if n in fwc and "amd_fw_versions(" in kext:   # from the firmware headers (amd_fw_versions)
+                return True
+            return re.search(r"(?:fw_version|fw_feature|ver|feat)\[\s*" + n + r"\s*\]", src + kext) is not None
         if n in handled:
             return handled[n]
         return n in srcwords

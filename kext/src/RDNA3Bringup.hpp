@@ -160,6 +160,7 @@ private:
     bool             fIdleCapWanted = false, fIdleCapped = false;   /* rdna3idlecap=1 */
     uint64_t         fLastSubmit = 0;      /* mach_absolute_time */
     uint32_t         fIdleCaps = 0;
+    uint32_t         fSmuVersion = 0;      /* smu_cmn_get_smc_version */
     void             idleCapLift();
     uint32_t         fPmExpTick = 0, fPmExpPhase = 0, fPmExpSamples = 0;
     uint64_t         fPmExpSum[8] = {};

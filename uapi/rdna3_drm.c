@@ -1507,7 +1507,11 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         struct drm_amdgpu_info_firmware fw;
         uint32_t t = in->query_fw.fw_type;
         zero(&fw, sizeof(fw));
-        if (t < 32) {
+        /* amdgpu_firmware_info: MEC index 1 is MEC2 (none on GFX11, 0),
+         * SDMA by instance (two on Navi 32, one firmware) */
+        if ((t == AMDGPU_INFO_FW_GFX_MEC || t == AMDGPU_INFO_FW_SDMA) && in->query_fw.index > 1)
+            return -RD_EINVAL;
+        if (t < 32 && !(t == AMDGPU_INFO_FW_GFX_MEC && in->query_fw.index == 1)) {
             fw.ver = dev->fw_version[t];
             fw.feature = dev->fw_feature[t];
         }

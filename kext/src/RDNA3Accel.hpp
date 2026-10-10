@@ -105,6 +105,8 @@ public:
     void  drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t minMclkKhz, uint32_t maxMclkKhz);
     RDNA3Bringup *bringup() const { return fBringup; }
     IOLock       *drmLock() const { return fDrmLock; }
+    /* AMDGPU_INFO_FW_VERSION table from the bring-up (amd_fw_versions) */
+    void          drmSetFirmware(const uint32_t ver[32], const uint32_t feature[32]);
 
     /* Stage 3: VRAM below this offset holds the firmware's scanout(s);
      * the bring-up and GEM heaps start above it (RDNA3Display.cpp) */
@@ -232,6 +234,7 @@ private:
     /* scaled modes from the framebuffer (rdna3DisplaySetSource) */
     IOReturn      displaySetSource(struct RD3KDisplaySource *s);
     struct rdna3_dcn_scale *fScale = nullptr;
+    uint32_t      fFwVer[32] = {}, fFwFeat[32] = {};
     IOReturn      displayCursor(struct RD3KDisplayCursor *c);
     IOReturn      displayEdid(struct RD3KDisplayEdid *e);
     void          displayProbeConnectors();

@@ -167,6 +167,14 @@ const char *amd_fw_status_str(amd_fw_status s);
 extern const char *const amd_navi32_fw_names[AMD_BLOB_COUNT];
 extern const char *const amd_navi32_sos_name;
 
+/* AMDGPU_INFO_FW_VERSION (amdgpu_firmware_info): version and feature of
+ * each firmware, by AMDGPU_INFO_FW_* index (< 32), from the blobs' headers
+ * the way amdgpu's init_microcode functions keep them; sos may be NULL.
+ * Entries without a source stay 0. Runtime versions (SMC from the PMFW,
+ * MES from CP_MES_GP3_LO) are the caller's. */
+void amd_fw_versions(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT], const amd_psp_sos *sos,
+                     uint32_t ver[32], uint32_t feature[32]);
+
 #ifdef __cplusplus
 }
 #endif

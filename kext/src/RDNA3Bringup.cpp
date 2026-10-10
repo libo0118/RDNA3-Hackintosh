@@ -582,6 +582,28 @@ void RDNA3Bringup::run()
     if (!hwInit())
         return;
 
+    /* AMDGPU_INFO_FW_VERSION (amdgpu_firmware_info): the headers' versions,
+     * the PMFW's own (smu_cmn_get_smc_version) and the running MES pipes' */
+    {
+        uint32_t ver[32], feat[32];
+        amd_fw_versions(fBlobRefs, fPsp ? &fPsp->sos : nullptr, ver, feat);
+        if (fSmuVersion)
+            ver[AMDGPU_INFO_FW_SMC] = fSmuVersion;
+        if (fMes && fMes->sched_version) {
+            ver[AMDGPU_INFO_FW_MES] = fMes->sched_version & 0xfff;
+            feat[AMDGPU_INFO_FW_MES] = (fMes->sched_version >> 12) & 0xfff;
+        }
+        if (fMes && fMes->kiq_version) {
+            ver[AMDGPU_INFO_FW_MES_KIQ] = fMes->kiq_version & 0xfff;
+            feat[AMDGPU_INFO_FW_MES_KIQ] = (fMes->kiq_version >> 12) & 0xfff;
+        }
+        fOwner->drmSetFirmware(ver, feat);
+        BLOG("firmware versions: ME 0x%x PFP 0x%x MEC 0x%x RLC 0x%x SDMA 0x%x SMC 0x%x SOS 0x%x MES 0x%x",
+             ver[AMDGPU_INFO_FW_GFX_ME], ver[AMDGPU_INFO_FW_GFX_PFP], ver[AMDGPU_INFO_FW_GFX_MEC],
+             ver[AMDGPU_INFO_FW_GFX_RLC], ver[AMDGPU_INFO_FW_SDMA], ver[AMDGPU_INFO_FW_SMC],
+             ver[AMDGPU_INFO_FW_SOS], ver[AMDGPU_INFO_FW_MES]);
+    }
+
     if (fPmUp)
         pmPublishMetrics();
 
@@ -633,6 +655,7 @@ bool RDNA3Bringup::hwInit()
     if (fLevel >= 5) {
         uint32_t smuv = 0, ifv = 0;
         ret = smu13_hello(fDev, &smuv, &ifv);
+        fSmuVersion = smuv;
         publish("RDNA3,SMUVersion", smuv);
         publish("RDNA3,SMUDriverIF", ifv);
         publishString("RDNA3,Stage2", ret ? "failed: SMU" : "PSP + SMU up");

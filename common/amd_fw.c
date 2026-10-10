@@ -8,6 +8,7 @@
 #include "amd_fw.h"
 #include "amdgpu_ucode_hdr.h"
 #include "psp_gfx_if.h"
+#include "amdgpu_drm.h"
 
 #define OFF(type, field) ((uint32_t)offsetof(struct type, field))
 
@@ -443,3 +444,74 @@ const char *const amd_navi32_fw_names[AMD_BLOB_COUNT] = {
     [AMD_BLOB_VCN]   = "vcn_4_0_0.bin",
 };
 const char *const amd_navi32_sos_name = "psp_13_0_10_sos.bin";
+
+/* ---------------- AMDGPU_INFO_FW_VERSION ---------------- */
+
+void amd_fw_versions(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT], const amd_psp_sos *sos,
+                     uint32_t ver[32], uint32_t feature[32])
+{
+    /* blob -> fw_type; feature at +32 (ucode_feature_version right after
+     * the common header in gfx v1/v2, rlc v2, sdma v1/v2 headers) */
+    static const struct { uint8_t blob, type, has_feature; } map[] = {
+        { AMD_BLOB_ME, AMDGPU_INFO_FW_GFX_ME, 1 },   { AMD_BLOB_PFP, AMDGPU_INFO_FW_GFX_PFP, 1 },
+        { AMD_BLOB_MEC, AMDGPU_INFO_FW_GFX_MEC, 1 }, { AMD_BLOB_RLC, AMDGPU_INFO_FW_GFX_RLC, 1 },
+        { AMD_BLOB_SDMA, AMDGPU_INFO_FW_SDMA, 1 },   { AMD_BLOB_IMU, AMDGPU_INFO_FW_IMU, 0 },
+        { AMD_BLOB_DMCUB, AMDGPU_INFO_FW_DMCUB, 0 }, { AMD_BLOB_VCN, AMDGPU_INFO_FW_VCN, 0 },
+        { AMD_BLOB_SMC, AMDGPU_INFO_FW_SMC, 0 },
+    };
+    unsigned i;
+    zero(ver, 32 * sizeof(uint32_t));
+    zero(feature, 32 * sizeof(uint32_t));
+    for (i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        blob b = { blobs[map[i].blob].data, blobs[map[i].blob].len };
+        common_hdr h;
+        uint32_t f = 0;
+        if (!b.p || read_common(&b, &h) != AMD_FW_OK)
+            continue;
+        ver[map[i].type] = h.ucode_version;
+        if (map[i].has_feature && rd32(&b, sizeof(struct common_firmware_header), &f))
+            feature[map[i].type] = f;
+    }
+    /* rlc v2.1+: the save/restore lists; v2.3+: RLCP / RLCV */
+    {
+        blob b = { blobs[AMD_BLOB_RLC].data, blobs[AMD_BLOB_RLC].len };
+        common_hdr h;
+        if (b.p && read_common(&b, &h) == AMD_FW_OK && h.hv_major == 2) {
+            if (h.hv_minor >= 1) {
+                rd32(&b, OFF(rlc_firmware_header_v2_1, save_restore_list_cntl_ucode_ver), &ver[AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_CNTL]);
+                rd32(&b, OFF(rlc_firmware_header_v2_1, save_restore_list_cntl_feature_ver), &feature[AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_CNTL]);
+                rd32(&b, OFF(rlc_firmware_header_v2_1, save_restore_list_gpm_ucode_ver), &ver[AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_GPM_MEM]);
+                rd32(&b, OFF(rlc_firmware_header_v2_1, save_restore_list_gpm_feature_ver), &feature[AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_GPM_MEM]);
+                rd32(&b, OFF(rlc_firmware_header_v2_1, save_restore_list_srm_ucode_ver), &ver[AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_SRM_MEM]);
+                rd32(&b, OFF(rlc_firmware_header_v2_1, save_restore_list_srm_feature_ver), &feature[AMDGPU_INFO_FW_GFX_RLC_RESTORE_LIST_SRM_MEM]);
+            }
+            if (h.hv_minor >= 3) {
+                rd32(&b, OFF(rlc_firmware_header_v2_3, rlcp_ucode_version), &ver[AMDGPU_INFO_FW_GFX_RLCP]);
+                rd32(&b, OFF(rlc_firmware_header_v2_3, rlcp_ucode_feature_version), &feature[AMDGPU_INFO_FW_GFX_RLCP]);
+                rd32(&b, OFF(rlc_firmware_header_v2_3, rlcv_ucode_version), &ver[AMDGPU_INFO_FW_GFX_RLCV]);
+                rd32(&b, OFF(rlc_firmware_header_v2_3, rlcv_ucode_feature_version), &feature[AMDGPU_INFO_FW_GFX_RLCV]);
+            }
+        }
+    }
+    /* mes_firmware_header_v1_0.mes_ucode_version: version (bits 11:0) and
+     * feature (23:12) as amdgpu splits the running firmware's word; the
+     * linux-firmware Navi 32 files carry 0 here, so the caller overrides it
+     * with CP_MES_GP3_LO once the pipe runs (amdgpu reports that one) */
+    {
+        static const struct { uint8_t blob, type; } mes[] = { { AMD_BLOB_MES, AMDGPU_INFO_FW_MES },
+                                                              { AMD_BLOB_MES1, AMDGPU_INFO_FW_MES_KIQ } };
+        for (i = 0; i < 2; i++) {
+            blob b = { blobs[mes[i].blob].data, blobs[mes[i].blob].len };
+            uint32_t v;
+            if (b.p && rd32(&b, OFF(mes_firmware_header_v1_0, mes_ucode_version), &v)) {
+                ver[mes[i].type] = v & 0xfff;
+                feature[mes[i].type] = (v >> 12) & 0xfff;
+            }
+        }
+    }
+    /* psp_init_sos_base_fw: version and feature both the SOS bin's */
+    if (sos) {
+        ver[AMDGPU_INFO_FW_SOS] = feature[AMDGPU_INFO_FW_SOS] = sos->bin[AMD_PSP_BIN_SOS].fw_version;
+        ver[AMDGPU_INFO_FW_TOC] = feature[AMDGPU_INFO_FW_TOC] = sos->bin[AMD_PSP_BIN_TOC].fw_version;
+    }
+}

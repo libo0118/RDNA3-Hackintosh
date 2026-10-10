@@ -820,6 +820,24 @@ int main(void)
         CHECK(ci.bo_size == 4096 && ci.domains == AMDGPU_GEM_DOMAIN_GTT);
     }
 
+    /* AMDGPU_INFO_FW_VERSION: the table the kext fills, MEC2 empty, bad indexes refused */
+    {
+        struct drm_amdgpu_info in;
+        struct drm_amdgpu_info_firmware fw;
+        dev.fw_version[AMDGPU_INFO_FW_GFX_MEC] = 0xae6;
+        dev.fw_feature[AMDGPU_INFO_FW_GFX_MEC] = 29;
+        memset(&in, 0, sizeof(in));
+        in.return_pointer = (uint64_t)(uintptr_t)&fw;
+        in.return_size = sizeof(fw);
+        in.query = AMDGPU_INFO_FW_VERSION;
+        in.query_fw.fw_type = AMDGPU_INFO_FW_GFX_MEC;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && fw.ver == 0xae6 && fw.feature == 29);
+        in.query_fw.index = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && fw.ver == 0);
+        in.query_fw.index = 2;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+    }
+
     /* XNU_SCANOUT: unsupported without the op, else the op fills it */
     {
         static struct rd_xnu_scanout so;

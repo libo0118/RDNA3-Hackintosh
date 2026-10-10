@@ -328,6 +328,18 @@ void RDNA3Accel::statsStop()
     }
 }
 
+void RDNA3Accel::drmSetFirmware(const uint32_t ver[32], const uint32_t feature[32])
+{
+    memcpy(fFwVer, ver, sizeof(fFwVer));
+    memcpy(fFwFeat, feature, sizeof(fFwFeat));
+    if (fDrm && fDrmLock) {
+        IOLockLock(fDrmLock);
+        memcpy(fDrm->fw_version, fFwVer, sizeof(fFwVer));
+        memcpy(fDrm->fw_feature, fFwFeat, sizeof(fFwFeat));
+        IOLockUnlock(fDrmLock);
+    }
+}
+
 int RDNA3Accel::drmSensor(void *ctx, uint32_t type, uint32_t *value)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
@@ -449,6 +461,8 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     }
     rdna3_drm_device_init(fDrm, &ops, disc, fPci->configRead16(kIOPCIConfigDeviceID), rev,
                           revId, fVramSize, visible > fVramSize ? fVramSize : visible, gtt);
+    memcpy(fDrm->fw_version, fFwVer, sizeof(fFwVer));
+    memcpy(fDrm->fw_feature, fFwFeat, sizeof(fFwFeat));
     /* GB_ADDR_CONFIG (gfx_v11_0 get_gb_addr_config): read once, cache.
      * Only at rdna3lvl>=3, the level that already reads GC registers. */
     if (fLevel >= 3 && fDrm->gc_base0 && fMmio) {
