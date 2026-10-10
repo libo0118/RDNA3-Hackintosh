@@ -12,6 +12,7 @@
 #   rdna3vm queue                                 go on with a queue a host reboot interrupted
 #   rdna3vm approve                               allow a new framebuffer build in macOS (once per build)
 #   rdna3vm reports                               what came back
+#   rdna3vm update                                git pull + the newest CI artifact + prepare
 #
 # Everything lives in $RDNA3VM_DIR (default ~/rdna3-vm).
 set -euo pipefail
@@ -742,6 +743,67 @@ cmd__passthrough() {
     chown -R --reference="$WORK" "$WORK/reports" 2>/dev/null || true
 }
 
+# ------------------------------------------------------------------ update
+# rdna3vm update: git pull in this checkout, download the newest successful
+# build.yml artifact (RDNA3Accel-kext) of the current branch over the old
+# ~/Downloads/RDNA3Accel-kext.zip, then prepare with it. GitHub access: the
+# gh CLI if it is logged in, else a token (Actions: read) in $GITHUB_TOKEN or
+# ~/.config/rdna3vm/github-token.
+cmd_update() {
+    say "git pull ($ROOT)"
+    git -C "$ROOT" pull --ff-only || die "git pull failed (local changes?)"
+    # the pull may have replaced this very script: go on in the new one
+    exec bash "$ROOT/tools/vm/rdna3vm" _update "$@"
+}
+
+gh_api() {   # gh_api PATH [OUTFILE]: GitHub REST GET, JSON to stdout or a file
+    local path=$1 out=${2:-} tok=${GITHUB_TOKEN:-}
+    if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+        if [ -n "$out" ]; then gh api "$path" > "$out"; else gh api "$path"; fi
+        return
+    fi
+    [ -n "$tok" ] || tok=$(cat "$HOME/.config/rdna3vm/github-token" 2>/dev/null || true)
+    [ -n "$tok" ] || die "no GitHub access: run 'gh auth login', or put a token with Actions: read in ~/.config/rdna3vm/github-token"
+    curl -fsSL -H "Authorization: Bearer $tok" -H "Accept: application/vnd.github+json" \
+        ${out:+-o "$out"} "https://api.github.com/$path"
+}
+
+cmd__update() {
+    local remote slug branch zip=$HOME/Downloads/RDNA3Accel-kext.zip runs run_id run_no sha art tmp
+    remote=$(git -C "$ROOT" remote get-url origin)
+    slug=$(printf '%s\n' "$remote" | sed -E 's#^.*github\.com[:/]+##; s#\.git$##')
+    branch=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)
+    say "newest successful build of $slug ($branch)"
+    runs=$(gh_api "repos/$slug/actions/workflows/build.yml/runs?branch=$branch&status=success&per_page=1") ||
+        die "cannot list the workflow runs"
+    read -r run_id run_no sha < <(printf '%s' "$runs" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["workflow_runs"]
+print(*(r[0]["id"], r[0]["run_number"], r[0]["head_sha"]) if r else ("", "", ""))')
+    [ -n "$run_id" ] || die "no successful build.yml run on $branch"
+    ok "build #$run_no, commit ${sha:0:7} (checkout: $(git -C "$ROOT" rev-parse --short HEAD))"
+    if [ "$(cat "$WORK/artifact-run" 2>/dev/null)" = "$run_id" ] && [ -f "$zip" ]; then
+        ok "already downloaded: $zip"
+    else
+        art=$(gh_api "repos/$slug/actions/runs/$run_id/artifacts" | python3 -c '
+import json, sys
+a = [x for x in json.load(sys.stdin)["artifacts"] if x["name"] == "RDNA3Accel-kext" and not x["expired"]]
+print(a[0]["id"] if a else "")')
+        [ -n "$art" ] || die "build #$run_no has no RDNA3Accel-kext artifact"
+        mkdir -p "$(dirname "$zip")" "$WORK"
+        tmp=$zip.part
+        gh_api "repos/$slug/actions/artifacts/$art/zip" "$tmp" || die "download failed"
+        python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).testzip()' "$tmp" ||
+            die "the download is not a valid zip"
+        mv "$tmp" "$zip"
+        echo "$run_id" > "$WORK/artifact-run"
+        ok "$zip (build #$run_no)"
+    fi
+    cmd_prepare --artifact "$zip"
+    echo
+    echo "Updated to build #$run_no. A new framebuffer/accelerator build needs 'rdna3vm approve' once."
+}
+
 cmd_reports() {
     ls -lt "$WORK/reports" | head -30
     echo
@@ -758,6 +820,8 @@ case "${1:-}" in
     approve) shift; cmd_approve "$@" ;;
     _queue) shift; cmd__queue "$@" ;;
     reports) shift; cmd_reports "$@" ;;
+    update) shift; cmd_update "$@" ;;
+    _update) shift; cmd__update "$@" ;;
     _oc) shift; cmd__oc "$@" ;;
     _passthrough) shift; cmd__passthrough "$@" ;;
     *) sed -n '2,15p' "$SELF"; exit 1 ;;

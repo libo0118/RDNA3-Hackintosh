@@ -278,6 +278,12 @@ prints PASS / FAIL per step. What happens with the reports next is in
 
 ## New driver version
 
+`rdna3vm update` does steps 1-2 in one go: `git pull` in the checkout, the
+newest successful CI build's artifact over `~/Downloads/RDNA3Accel-kext.zip`,
+then `prepare`. It needs GitHub access once: `gh auth login` (GitHub CLI), or
+a token with *Actions: read* for the repository in
+`~/.config/rdna3vm/github-token`. By hand:
+
 1. Download the new artifact (step C, item 1).
 2. Run `rdna3vm prepare --artifact ~/Downloads/RDNA3Accel-kext.zip`.
 3. Run `rdna3vm window` and in the macOS Terminal paste the same
