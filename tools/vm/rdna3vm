@@ -417,9 +417,9 @@ launch() {   # launch "rdna3 args" stay(0/1)
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s off)"
     launch "$a" "$stay"
 }
 
@@ -445,11 +445,10 @@ cmd_args() {
 
 # the steps still waiting, one per line; the first is the one running
 QUEUE=$WORK/queue
-# 8: RLC/CP power status in the PM trend, and rdna3_vktest when the bundle
-# has RADV; 8u / 9cu: UCLK/FCLK left to the PMFW (rdna3pm=2) as on Linux,
-# where they idle at 96/601 MHz with both monitors (watch 9cu for flicker);
-# 10: first accelerator start (needs 'approve')
-PENDING_STEPS="8 8u 9cu 10"
+# card run 11: Vulkan 8/8 on the card, UCLK free = -25 W, accelerator up but
+# its display pipe gated (black desktop). 10s: the gates opened by boot-args
+# (rdna3accelfb=3 rdna3acceliop=1) so WindowServer's frames reach the panel
+PENDING_STEPS="10s"
 
 cmd_queue() {
     load_conf

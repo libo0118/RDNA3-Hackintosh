@@ -88,6 +88,7 @@ it together with a description of the symptom. Module details are in `STAGE1`–
 | 9cu | same as 9c + `rdna3pm=2` | extended desktop with UCLK/FCLK DPM free (the clone forces the DCN p-state allow) | as 9c, plus lower `PM:` watts; **watch both screens for flicker** | either screen may flicker or go dark |
 | 9d | 9b or 9c, then unplug and replug the second monitor's cable (needs `rdna3msi=1`) | the clone follows the cable through the HPD interrupt | log `the cloned monitor is gone: switching its pipe off`, then `mirror: ...` again on replug | medium |
 | 10 | same as 9 + `rdna3accel=1` | IOAcceleratorFamily2 accelerator | `ioreg -c RDNA3Accelerator`, `populateAccelConfig ... what the FAMILY pre-filled` in the log | high: WindowServer |
+| 10s | same as 10 + `rdna3accelfb=3 rdna3acceliop=1 rdna3pm=2` | the accelerator's display machine gets head 0 and its pipe scans out what WindowServer composites (the sysctls `debug.rdna3accelfb=3` / `debug.rdna3accel_iop=1`, set from boot-args when the framebuffer publishes) | the desktop on head 0, log `boot-arg rdna3accelfb=3`, `iop: ... transaction hooks OPEN`, `debug.rdna3accel_iop_ok` counting | high: WindowServer may hang or show a black desktop |
 | 11 | same as 10 | `vulkaninfo --summary` with RADV from `/Library/GPUBundles/rdna3mtl` | device `AMD Radeon RX 7800 XT (RADV NAVI32)` | medium |
 | 12 | same as 10, then `sudo sysctl -w debug.rdna3accelfb=1` | Metal plugin for processes listed in `rdna3mtl-allow.txt` | `mtlprobe` sees the AMD device | high |
 

@@ -387,3 +387,17 @@ names the last phase if the machine hangs. Use it as ground truth:
   ours), so the PMFW's busy reading comes from the RLC/GFX state, not work.
 - `rdna3_vktest` on Linux RADV: ALL PASSED 8/8 (the test itself is right).
 
+### Card run 11 (build #90, 2026-10-10)
+
+- Step 8: `rdna3_vktest` ALL PASSED 8/8 on the card (RADV built in the VM).
+- 8u / 9cu (`rdna3pm=2`): UCLK 96 MHz, 52-54 W instead of 77 W; the user
+  reported no flicker on 9cu.
+- Step 10: the accelerator starts; WindowServer picks it, makes three
+  1920x1080 surfaces in VRAM, but `RD3DisplayPipe::initFramebufferResource:
+  scanout gate CLOSED` - nothing reaches the panel: first head off, second
+  black with the hardware cursor. Next: step 10s opens the gates from
+  boot-args (`rdna3accelfb=3 rdna3acceliop=1`).
+- PM trend: `RLC_GPM_STAT 0x00940016` (GFX power/clock on) at every sample,
+  activity 100 %. The sample itself reads GC registers (which wakes the
+  clock), so it does not prove CGCG never engages; still open.
+

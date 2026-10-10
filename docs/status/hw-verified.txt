@@ -19,3 +19,6 @@
 9c 2026-10-10 vm extended desktop: second RDNA3Framebuffer on the cloned head, macOS lists two C24F390 displays, mirror off
 8g 2026-10-10 vm GFX clock gating (CGCG/CGLS/MGCG/repeater FGCG): idle ~200 W -> ~75 W, hotspot 78 -> 55 C, DMA/GFX tests pass
 8o 2026-10-10 vm GFXOFF allowed (AllowGfxOff 0), DMA/GFX tests pass; no power change: the PMFW still counts the GFX busy
+8v 2026-10-10 vm Vulkan on the card under macOS: RADV (built in the VM) via libdrm_xnu, rdna3_vktest 8/8 - compute-shader and CP DMA fill/copy on the general and compute queues, SDMA on the transfer queue, host-pointer import (USERPTR) and OPAQUE_FD re-import
+8u 2026-10-10 vm UCLK/FCLK DPM left to the PMFW (rdna3pm=2): UCLK 96 MHz, idle 77 W -> 52 W; 9cu (two heads) 54 W
+10 2026-10-10 vm RDNA3Accelerator starts (IOGraphicsAccelerator2::start -> 1), WindowServer allocates its surfaces in VRAM through it; the display pipe gate is still closed (black desktop, cursor only)
