@@ -483,3 +483,18 @@ own picture and the first one's. WindowServer re-creates pipe resources and
 swap surfaces; the router matched stale pointers. Fixed in `2bcd676`
 (surface keeps its head, freed objects leave the tables, route changes
 logged); the report now looks three times, 20 s apart.
+
+### Card run 18 (step `big2`, CI build 95, Metal plugin installed)
+
+Every part ran (serial log: scanout looks, modetest, DMA/GFX, vktest,
+mtlprobe reaching `MTLCompilerService`, soak, hang test), the VM shut down
+by itself, but no report reached the host: the tests file was uploaded only
+after collect.sh's archive, and collect.sh did not finish. Fixed in
+`93cd123` (tests file and pictures first, collect.sh 360 s, `rdna3vm
+result` shows the upload server's log). Power from the serial log:
+baseline 47 W at 2.7 GHz, GFXOFF / POWER_SAVING / HDP+ATHUB CG change
+nothing (48-56 W), GFXCLK soft max 500 MHz gives 21 W, the idle cap holds
+15 W at 539 MHz (Linux: 12 W); activity reads 100 % throughout. Hang test:
+the DMA hang was detected and SDMA0 soft-reset, but the follow-up jobs ran
+on the guilty client's connection and got -ECANCELED, so the GFX hang never
+ran; each job now has its own connection.

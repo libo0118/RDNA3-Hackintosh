@@ -321,11 +321,19 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--gfx-test"))
             fails += job_test(fd, 1, 0);
         else if (!strcmp(argv[a], "--hang-test")) {
-            /* each hang, then the same engine must work again */
-            int f = job_test(fd, 0, 1);
-            f += job_test(fd, 0, 0);
-            f += job_test(fd, 1, 1);
-            f += job_test(fd, 1, 0);
+            /* each hang, then the same engine must work again. The hung
+             * job's client is guilty from then on (amdgpu_cs_submit returns
+             * -ECANCELED for it, as for a guilty amdgpu context), so every
+             * job runs on its own connection, like a new Vulkan device
+             * after VK_ERROR_DEVICE_LOST */
+            int f = 0;
+            for (int e = 0; e < 2; e++)
+                for (int h = 1; h >= 0; h--) {
+                    int jfd = drm_xnu_open(DRM_XNU_RENDER_NODE, 0);
+                    if (jfd < 0) { perror("open RDNA3Accel"); f++; continue; }
+                    f += job_test(jfd, e, h);
+                    drm_xnu_close(jfd);
+                }
             printf("HANG TEST: %s\n", f ? "FAILED" : "PASSED (both engines recovered and ran the next job)");
             fails += f;
         }
