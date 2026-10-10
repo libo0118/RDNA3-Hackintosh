@@ -104,6 +104,7 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     setNumber("RDNA3,DisplayReserveEnd", fDispReserveEnd, 64);
     displayReadVbios();
     displayProbeConnectors();
+    displayPublishRoutes();
     return true;
 }
 
@@ -181,6 +182,19 @@ static const rdna3_display_path *path_for_aux(const rdna3_display_path *p, uint3
         if (p[i].ddc_line >= 0 && (uint32_t)p[i].ddc_line == aux)
             return &p[i];
     return nullptr;
+}
+
+/* the AUX engine / DDC line of the connector a head drives: the head's DIG
+ * back end is the transmitter (dcn32_otg_dig), the VBIOS path with that
+ * transmitter names the DDC line; -1 when the route is unknown */
+static int head_aux(const rdna3_dcn_head *h, const rdna3_display_path *p, uint32_t n)
+{
+    if (!h || h->dig_be < 0 || !p)
+        return -1;
+    for (uint32_t i = 0; i < n; i++)
+        if (p[i].transmitter == h->dig_be && p[i].ddc_line >= 0)
+            return p[i].ddc_line;
+    return -1;
 }
 
 /* DP AUX engines 0-4: HPD sense, DPCD, EDID (over AUX, or the DDC for
@@ -262,6 +276,35 @@ void RDNA3Accel::displayProbeConnectors()
     }
 }
 
+/* RDNA3,Head<n>,Route: what the head drives, from the DIG routing */
+void RDNA3Accel::displayPublishRoutes()
+{
+    if (!fDcn)
+        return;
+    for (uint32_t i = 0; i < fDcn->nheads && i < RD_DCN_MAX_PIPES; i++) {
+        const rdna3_dcn_head *h = &fDcn->head[i];
+        char key[48], val[96];
+        int aux = head_aux(h, fPaths, fNPaths);
+        const rdna3_display_path *p = aux >= 0 ? path_for_aux(fPaths, fNPaths, (uint32_t)aux) : nullptr;
+        snprintf(key, sizeof(key), "RDNA3,Head%u,Route", i);
+        if (h->dig_be < 0)
+            snprintf(val, sizeof(val), "OTG%u -> no enabled DIG", h->otg);
+        else if (p)
+            snprintf(val, sizeof(val), "OTG%u -> DIG%c -> UNIPHY%c (mode %u) -> %s-%u DDC%d",
+                     h->otg, 'A' + h->dig_fe, 'A' + h->dig_be, h->dig_mode,
+                     vbios_connector_name(p->connector), p->connector_enum, aux + 1);
+        else
+            snprintf(val, sizeof(val), "OTG%u -> DIG%c -> UNIPHY%c (mode %u) -> no VBIOS path",
+                     h->otg, 'A' + h->dig_fe, 'A' + h->dig_be, h->dig_mode);
+        setProperty(key, val);
+        if (aux >= 0) {
+            snprintf(key, sizeof(key), "RDNA3,Head%u,AUX", i);
+            setNumber(key, (uint64_t)aux);
+        }
+        LOG("display: head %u route %s, AUX/DDC %d", i, val, aux);
+    }
+}
+
 IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
 {
     if (!e || e->version != RD3K_DISPLAY_ABI_VERSION) {
@@ -280,10 +323,19 @@ IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
     if (e->head != 0)
         return kIOReturnNotFound;
     int best = -1, bestScore = -1;
+    /* the connector the head's DIG route leads to wins outright */
+    int routed = fDcn->nheads ? head_aux(&fDcn->head[0], fPaths, fNPaths) : -1;
+    for (uint32_t i = 0; routed >= 0 && i < fNConnectors; i++)
+        if (fConnectors[i].aux == (uint32_t)routed && fConnectors[i].edid_len > 0) {
+            best = (int)i;
+            bestScore = 3;
+        }
     for (uint32_t i = 0; i < fNConnectors; i++) {
         const rdna3_connector *c = &fConnectors[i];
         rdna3_edid ed;
         int score = 0;
+        if (bestScore == 3)
+            break;
         if (c->edid_len <= 0 || !(c->hpd || c->dp))
             continue;
         if (fDcn->nheads && edid_parse(c->edid, (uint32_t)c->edid_len, &ed) == 0) {

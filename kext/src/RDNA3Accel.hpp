@@ -190,6 +190,7 @@ private:
     IOReturn      displayCursor(struct RD3KDisplayCursor *c);
     IOReturn      displayEdid(struct RD3KDisplayEdid *e);
     void          displayProbeConnectors();
+    void          displayPublishRoutes();
     void          displayReadVbios();
     static uint32_t dispMmioRd(void *ctx, uint64_t off);
     static void     dispMmioWr(void *ctx, uint64_t off, uint32_t v);

@@ -5,6 +5,7 @@
  */
 #include "dcn32.h"
 #include "gen/dcn_3_2_1.h"
+#include "gen/dcn_3_2_0_dig.h"
 
 #define HUBP_STRIDE (regHUBP1_DCHUBP_CNTL - regHUBP0_DCHUBP_CNTL)    /* 0xdc */
 #define OTG_STRIDE  (regOTG1_OTG_CONTROL - regOTG0_OTG_CONTROL)      /* 0x80 */
@@ -56,6 +57,39 @@ static void read_timing(rdna3_dev *d, uint32_t o, rdna3_dcn_head *h)
     h->v_sync_neg = GET(RO(d, regOTG0_OTG_V_SYNC_A_CNTL, o), OTG0_OTG_V_SYNC_A_CNTL, OTG_V_SYNC_A_POL);
 }
 
+#define DIG_STRIDE (regDIG1_DIG_FE_CNTL - regDIG0_DIG_FE_CNTL)          /* 0x100 */
+#define RDIG(d, reg, n) \
+    rdna3_rreg((d), rdna3_reg_offset((d), HWIP_DCE, 0, reg##_BASE_IDX, reg) + DIG_STRIDE * (n))
+#define RD_DCN_MAX_DIGS 5   /* DIGA..DIGE, UNIPHY A..E (link_enc_regs[] of dcn32) */
+
+int dcn32_otg_dig(rdna3_dev *d, uint32_t otg, int *fe, uint32_t *mode)
+{
+    uint32_t be;
+    for (be = 0; be < RD_DCN_MAX_DIGS; be++) {
+        uint32_t en = RDIG(d, regDIG0_DIG_BE_EN_CNTL, be), cntl, src, f;
+        if (en == 0xffffffffu || !GET(en, DIG0_DIG_BE_EN_CNTL, DIG_ENABLE))
+            continue;
+        cntl = RDIG(d, regDIG0_DIG_BE_CNTL, be);
+        /* dcn10_get_dig_frontend: one-hot DIG_FE_SOURCE_SELECT -> ENGINE_ID_DIGx */
+        src = GET(cntl, DIG0_DIG_BE_CNTL, DIG_FE_SOURCE_SELECT);
+        if (!src || (src & (src - 1)))
+            continue;
+        for (f = 0; !(src & (1u << f)); f++)
+            ;
+        if (f >= RD_DCN_MAX_DIGS)
+            continue;
+        /* enc1_dig_source_otg */
+        if (GET(RDIG(d, regDIG0_DIG_FE_CNTL, f), DIG0_DIG_FE_CNTL, DIG_SOURCE_SELECT) != otg)
+            continue;
+        if (fe)
+            *fe = (int)f;
+        if (mode)
+            *mode = GET(cntl, DIG0_DIG_BE_CNTL, DIG_MODE);   /* dcn10_get_dig_mode */
+        return (int)be;
+    }
+    return -1;
+}
+
 int dcn32_read_state(rdna3_dev *d, rdna3_dcn *dc)
 {
     uint32_t p;
@@ -87,10 +121,14 @@ int dcn32_read_state(rdna3_dev *d, rdna3_dcn *dc)
         h->address = RH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, p) |
                      ((uint64_t)(RH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, p) & 0xffff) << 32);
         read_timing(d, otg, h);
+        h->dig_fe = -1;
+        h->dig_mode = 0;
+        h->dig_be = dcn32_otg_dig(d, otg, &h->dig_fe, &h->dig_mode);
         dc->requested[p] = h->address;
         RLOG(d, "DCN: head %u: pipe %u otg %u %ux%u pitch %u fmt %u sw %u dcc %u at MC 0x%llx, "
-             "total %ux%u", dc->nheads, p, otg, h->width, h->height, h->pitch_px, h->format,
-             h->sw_mode, h->dcc, (unsigned long long)h->address, h->h_total, h->v_total);
+             "total %ux%u, DIG FE %d BE %d mode %u", dc->nheads, p, otg, h->width, h->height,
+             h->pitch_px, h->format, h->sw_mode, h->dcc, (unsigned long long)h->address, h->h_total,
+             h->v_total, h->dig_fe, h->dig_be, h->dig_mode);
         dc->nheads++;
     }
     return (int)dc->nheads;

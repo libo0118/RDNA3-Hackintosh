@@ -56,6 +56,7 @@
 #include "gen/gc_11_0_0_mes.h"
 #include "gen/dcn_3_2_0_gpio.h"
 #include "gen/dcn_3_2_0_i2c.h"
+#include "gen/dcn_3_2_0_dig.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
@@ -3108,9 +3109,22 @@ static void run(const char *fwdir)
         S.reg[OTG(regOTG0_OTG_V_SYNC_A_CNTL, 2)] = 1;   /* negative */
         S.reg[OTG(regOTG0_OTG_STATUS_FRAME_COUNT, 2)] = 1234;
         S.reg[OTG(regOTG0_OTG_STATUS_POSITION, 2)] = 777;
+        /* the GOP's route: OTG 2 -> DIGC front end -> DIGB back end
+         * (UNIPHY B) in HDMI mode; DIGA's back end is lit too but fed by
+         * DIGA, which sources OTG 0 */
+#define DIGR(reg, n) (DCN_B2 + reg + (regDIG1_DIG_FE_CNTL - regDIG0_DIG_FE_CNTL) * (n))
+        S.reg[DIGR(regDIG0_DIG_FE_CNTL, 2)] = 2;
+        S.reg[DIGR(regDIG0_DIG_BE_CNTL, 1)] = (1u << 2) << DIG0_DIG_BE_CNTL__DIG_FE_SOURCE_SELECT__SHIFT |
+                                              3u << DIG0_DIG_BE_CNTL__DIG_MODE__SHIFT;
+        S.reg[DIGR(regDIG0_DIG_BE_EN_CNTL, 1)] = DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK;
+        S.reg[DIGR(regDIG0_DIG_FE_CNTL, 0)] = 0;
+        S.reg[DIGR(regDIG0_DIG_BE_CNTL, 0)] = 1u << DIG0_DIG_BE_CNTL__DIG_FE_SOURCE_SELECT__SHIFT;
+        S.reg[DIGR(regDIG0_DIG_BE_EN_CNTL, 0)] = DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK;
 
         CHECK(dcn32_read_state(&dev, &dc) == 1);
         CHECK(dc.head[0].pipe == 1 && dc.head[0].otg == 2);
+        CHECK(dc.head[0].dig_be == 1 && dc.head[0].dig_fe == 2 && dc.head[0].dig_mode == 3);
+        CHECK(dcn32_otg_dig(&dev, 0, NULL, NULL) == 0 && dcn32_otg_dig(&dev, 3, NULL, NULL) == -1);
         CHECK(dc.head[0].width == 2560 && dc.head[0].height == 1440 && dc.head[0].pitch_px == 2560);
         CHECK(dc.head[0].address == gop && dcn32_head_usable(&dev, &dc.head[0]));
         CHECK(dc.head[0].h_total == 2720 && dc.head[0].h_active == 2560 && dc.head[0].h_front == 48 &&

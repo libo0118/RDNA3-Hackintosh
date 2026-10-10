@@ -8,6 +8,9 @@
   defaults to `true`). Never `full: true` without asking.
 - Hardware changes are ports of named amdgpu functions and are reproduced in
   `tests/sim_navi32.c` first; `make test` must pass before pushing.
+- Kext code can be type-checked on Linux without CI:
+  `MACOS_SDK=<MacOSX11.3.sdk> tools/kext_check.sh` (SDK from
+  github.com/phracker/MacOSX-SDKs releases); run it before pushing kext changes.
 - **When the user sends hardware-test reports** (`rdna3-report-*.tar.gz`,
   `serial-*.log`, `host-*.log`, `*-tests.txt`): follow
   [docs/AFTER-TESTS.md](docs/AFTER-TESTS.md) step by step.

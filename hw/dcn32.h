@@ -45,6 +45,11 @@ typedef struct rdna3_dcn_head {
     uint32_t h_total, v_total, h_active, v_active;
     uint32_t h_front, h_sync, v_front, v_sync;
     uint32_t h_sync_neg, v_sync_neg;
+    /* what drives the OTG (dcn10_get_dig_frontend, enc1_dig_source_otg,
+     * dcn10_get_dig_mode): -1 when no enabled DIG back end is fed by it */
+    int      dig_fe;            /* stream encoder / DIG front end, 0 = DIGA */
+    int      dig_be;            /* DIG back end = transmitter, 0 = UNIPHY A */
+    uint32_t dig_mode;          /* DIG_MODE: 0 DP, 1 LVDS, 2 DVI, 3 HDMI, 5 DP MST */
 } rdna3_dcn_head;
 
 typedef struct rdna3_dcn {
@@ -63,6 +68,11 @@ int  dcn32_read_state(rdna3_dev *d, rdna3_dcn *dc);
 
 /* A head CPU drawing can take over: 32 bpp linear, no DCC, surface in VRAM. */
 int  dcn32_head_usable(rdna3_dev *d, const rdna3_dcn_head *h);
+
+/* The DIG back end (transmitter) whose front end sources OTG 'otg': amdgpu's
+ * seamless-boot read-back. Returns the back end, or -1; *fe and *mode may be
+ * NULL. */
+int  dcn32_otg_dig(rdna3_dev *d, uint32_t otg, int *fe, uint32_t *mode);
 
 /* Flip head 'i' to the surface at MC address 'mc' with 'pitch_px' pixels
  * per row (same width/height as the mode). 'immediate' = no vsync wait
