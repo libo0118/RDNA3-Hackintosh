@@ -20,6 +20,14 @@ userq rdna3lvl=8 rdna3msi=1 rdna3mes=1 rdna3userq=1
 8g rdna3lvl=8 rdna3msi=1 rdna3cg=1
 8o rdna3lvl=8 rdna3msi=1 rdna3gfxoff=1
 8u rdna3lvl=8 rdna3msi=1 rdna3pm=2
+# PM control from userspace (rdna3_pmctl, common/rdna3_pmctl.h): fan,
+# power limit, overdrive, profiles, clock levels, DF C-states; the report's
+# selftest sets each knob once and back
+pmctl rdna3lvl=8 rdna3msi=1 rdna3pm=2 rdna3pmctl=2
+# BACO (smu_v13_0_baco_enter / _exit) through rdna3_pmctl baco-cycle: the
+# chip off and on again, levels 4-8 brought up again, the DMA/GFX tests
+# after it; only after step pmctl passed
+baco rdna3lvl=8 rdna3msi=1 rdna3pm=2 rdna3pmctl=1 rdna3baco=1
 9 rdna3lvl=8 rdna3msi=1 rdna3fb=1
 9b rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=1
 9bw rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=1 rdna3dmubwait=0

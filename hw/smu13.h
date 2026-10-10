@@ -22,6 +22,7 @@
 #include "rdna3_hw.h"
 #include "vbios.h"
 #include "gen/smu13_driver_if_v13_0_0.h"
+#include "rdna3_pmctl.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -135,6 +136,12 @@ int smu13_check_fw_status(rdna3_dev *d);
 #define RD_SMU_PP_PLATFORM_CAPS_OFF 18
 #define RD_SMU_PP_THERMAL_CTRL_OFF  22
 #define RD_SMU_PP_SHUTDOWN_TEMP_OFF 29
+/* struct smu_13_0_0_overdrive_table overdrive_table at 211: max[] and min[]
+ * (uint32 per SMU_13_0_0_ODSETTING_*) */
+#define RD_SMU_PP_OD_TABLE_OFF      211
+#define RD_SMU_PP_OD_MAX_OFF        (RD_SMU_PP_OD_TABLE_OFF + 44)
+#define RD_SMU_PP_OD_MIN_OFF        (RD_SMU_PP_OD_MAX_OFF + 64 * 4)
+#define RD_SMU_13_0_0_ODSETTING_POWERPERCENTAGE 4
 #define RD_SMU_PP_PLATFORM_CAP_POWERPLAY   0x1
 #define RD_SMU_PP_PLATFORM_CAP_HARDWAREDC  0x4
 #define RD_SMU_PP_PLATFORM_CAP_BACO        0x8
@@ -178,6 +185,25 @@ typedef struct rdna3_smu {
 
     SmuMetricsExternal_t metrics;      /* last smu13_read_metrics */
     int      metrics_valid;
+
+    /* ---- PM control (smu13_pm_query and the functions below) ---- */
+    uint64_t supported;                /* smu_feature.supported: running after setup */
+    int32_t  od_ppt_pct_max, od_ppt_pct_min;   /* powerplay_table OD POWERPERCENTAGE */
+    int      od_enabled;               /* smu->od_enabled */
+    int      od_valid;                 /* od / od_boot / od_user read from the PMFW */
+    int      user_od;                  /* smu->user_dpm_profile.user_od */
+    uint32_t od_feature_mask;          /* adev->pm.od_feature_mask (RD_OD_OPS_SUPPORT_*) */
+    OverDriveTableExternal_t od, od_boot, od_user;   /* overdrive_table, boot_, user_ */
+    uint32_t current_power_limit;      /* smu->current_power_limit */
+    uint32_t power_limit_default, power_limit_min, power_limit_max;
+    uint32_t power_profile_mode, workload_mask;
+    int      dc_controlled_by_gpio, no_fan;
+    int      baco_platform, maco_support;   /* smu_baco_context */
+    int      baco_state;               /* RD_SMU_BACO_STATE_* */
+    uint32_t bios_scratch_reg;         /* firmware_info bios_scratch_reg_startaddr */
+    uint32_t df_cstate;                /* last SetExternalClientDfCstateAllow, ~0 = none */
+    uint64_t unique_id;                /* adev->unique_id */
+    struct { uint32_t min, peak, standard; } pstate_gfx, pstate_uclk, pstate_soc, pstate_fclk;
 } rdna3_smu;
 
 /* Allocates the driver and tool tables in VRAM (needs rdna3_vram_alloc_init
@@ -249,6 +275,103 @@ int smu13_gfx_off(rdna3_dev *d, int allow);
 #define RD_DEBUGSMC_MSG_Mode1Reset   2
 #define RD_SMU_MODE1_RESET_WAIT_MS   500
 int smu13_mode1_reset(rdna3_dev *d);
+
+/* ---- PM control: fan, power limit, overdrive, clocks / profiles, BACO ----
+ * Ports of smu_v13_0.c / smu_v13_0_0_ppt.c (v6.12; the zero RPM overdrive
+ * controls are v6.14's). Units and return values as in amdgpu. Userspace
+ * reaches them through smu13_pmctl (common/rdna3_pmctl.h). */
+
+/* smu_cmn.h */
+#define RD_FDO_PWM_MODE_STATIC      1
+#define RD_FDO_PWM_MODE_STATIC_RPM  5
+/* enum smu_baco_state / enum smu_baco_seq (amdgpu_smu.h) */
+#define RD_SMU_BACO_STATE_ENTER 0
+#define RD_SMU_BACO_STATE_EXIT  1
+#define RD_SMU_BACO_STATE_NONE  2
+#define RD_BACO_SEQ_BACO        0
+#define RD_BACO_SEQ_MSR         1
+#define RD_BACO_SEQ_BAMACO      2
+#define RD_BACO_SEQ_ULPS        3
+/* amdgpu_dpm.h */
+#define RD_BACO_SUPPORT  (1u << 0)
+#define RD_MACO_SUPPORT  (1u << 1)
+/* smu_v13_0.h */
+#define RD_CTF_OFFSET_EDGE     5
+#define RD_CTF_OFFSET_HOTSPOT  5
+#define RD_CTF_OFFSET_MEM      5
+/* smu_v13_0_0_ppt.c */
+#define RD_SMU_13_0_0_BUSY_THRESHOLD 15
+/* the PMFW 13.0.10 version from which smu_v13_0_0_set_power_profile_mode
+ * adds the POWER_SAVING workload to every profile */
+#define RD_SMU_13_0_10_PROFILE_POWERSAVING_FW 0x00504500
+
+/* smu_late_init's queries on what smu13_pm_init set up, with no message
+ * the default profile does not send already: smu_v13_0_0_check_powerplay_table's
+ * BACO / OD / fan bits, populate_umd_state_clk, get_power_limit (GetPptLimit),
+ * get_unique_id (metrics table). 'od_wanted' is amdgpu's od_enabled
+ * (ppfeaturemask PP_OVERDRIVE_MASK; rdna3pmctl=2). 'vbios' (may be NULL)
+ * gives the BIOS scratch registers BACO exit clears. */
+int  smu13_pm_query(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, int od_wanted);
+
+/* fan (smu_v13_0.c, smu_v13_0_0_ppt.c); the THM block must be in the
+ * discovery table */
+uint32_t smu13_get_fan_control_mode(rdna3_dev *d, rdna3_smu *s);
+int  smu13_set_fan_control_mode(rdna3_dev *d, rdna3_smu *s, uint32_t mode);
+int  smu13_set_fan_speed_pwm(rdna3_dev *d, rdna3_smu *s, uint32_t speed);
+int  smu13_set_fan_speed_rpm(rdna3_dev *d, rdna3_smu *s, uint32_t speed);
+int  smu13_get_fan_speed_pwm(rdna3_dev *d, rdna3_smu *s, uint32_t *speed);
+int  smu13_get_fan_speed_rpm(rdna3_dev *d, rdna3_smu *s, uint32_t *speed);
+
+/* power limit: smu_v13_0_0_get_power_limit, and smu_set_power_limit's
+ * range check + smu_v13_0_0_set_power_limit (above the message limit
+ * through the OD table's Ppt percentage, od_enabled only) */
+int  smu13_get_power_limits(rdna3_dev *d, rdna3_smu *s, uint32_t *current_w, uint32_t *default_w,
+                            uint32_t *max_w, uint32_t *min_w);
+int  smu13_set_ppt_limit(rdna3_dev *d, rdna3_smu *s, uint32_t watts);
+
+/* overdrive (OverDriveTable_t through TABLE_OVERDRIVE) */
+int  smu13_is_od_feature_supported(const rdna3_smu *s, int od_feature_bit);
+void smu13_get_od_setting_limits(const rdna3_smu *s, int od_setting, int32_t *min, int32_t *max);
+int  smu13_get_overdrive_table(rdna3_dev *d, rdna3_smu *s, OverDriveTableExternal_t *t);
+int  smu13_upload_overdrive_table(rdna3_dev *d, rdna3_smu *s, OverDriveTableExternal_t *t);
+int  smu13_set_default_od_settings(rdna3_dev *d, rdna3_smu *s, int in_suspend);
+int  smu13_restore_user_od_settings(rdna3_dev *d, rdna3_smu *s);
+/* type = RD_PP_OD_*, input/size as amdgpu's sysfs parser hands them */
+int  smu13_od_edit_dpm_table(rdna3_dev *d, rdna3_smu *s, uint32_t type, const long *input,
+                             uint32_t size);
+
+/* clocks / profiles */
+int  smu13_get_dpm_ultimate_freq(const rdna3_smu *s, uint32_t ppclk, uint32_t *min, uint32_t *max);
+int  smu13_force_clk_levels(rdna3_dev *d, rdna3_smu *s, uint32_t ppclk, uint32_t mask);
+/* the clock now, from the metrics table (PPCLK_*, MHz) */
+int  smu13_get_current_clk_freq_by_table(rdna3_dev *d, rdna3_smu *s, uint32_t ppclk, uint32_t *value);
+void smu13_populate_umd_state_clk(rdna3_smu *s);
+/* input[size] = PP_SMC_POWER_PROFILE_*; CUSTOM: size 9, input[0..8] */
+int  smu13_set_power_profile_mode(rdna3_dev *d, rdna3_smu *s, const long *input, uint32_t size);
+int  smu13_get_power_profile_coeff(rdna3_dev *d, rdna3_smu *s, uint32_t workload_bit,
+                                   rdna3_pmctl_coeff *out);
+int  smu13_get_thermal_temperature_range(const rdna3_smu *s, rdna3_temp_range *range);
+void smu13_get_unique_id(rdna3_dev *d, rdna3_smu *s);
+int  smu13_get_gpu_metrics(rdna3_dev *d, rdna3_smu *s, rdna3_gpu_metrics *m);
+uint64_t smu13_indep_throttler_status(uint32_t throttler_status);
+int  smu13_set_df_cstate(rdna3_dev *d, rdna3_smu *s, uint32_t state);
+
+/* BACO (smu_v13_0.c). Not used by any suspend path: the kext reaches it
+ * only through RD_PMCTL_BACO_CYCLE behind rdna3baco=1. 'runpm_audio' is
+ * amdgpu's in_runpm && smu_cmn_is_audio_func_enabled (ArmD3 sequence). */
+int  smu13_get_bamaco_support(rdna3_dev *d, rdna3_smu *s);
+int  smu13_baco_get_state(const rdna3_smu *s);
+int  smu13_baco_set_state(rdna3_dev *d, rdna3_smu *s, int state, uint32_t seq);
+int  smu13_baco_set_armd3_sequence(rdna3_dev *d, rdna3_smu *s, uint32_t seq);
+int  smu13_baco_enter(rdna3_dev *d, rdna3_smu *s, int runpm_audio, uint32_t seq);
+int  smu13_baco_exit(rdna3_dev *d, rdna3_smu *s, int runpm_audio);
+
+/* RD_PMCTL_* request -> reply (reply.info always filled). 'gates' are the
+ * RD_PMCTL_GATE_* the caller may use. RD_PMCTL_BACO_CYCLE needs the OS
+ * (re-init after the exit) and is RDNA3_EOPNOTSUPP here. */
+int  smu13_pmctl(rdna3_dev *d, rdna3_smu *s, const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp,
+                 uint32_t gates);
+void smu13_pmctl_info(rdna3_dev *d, rdna3_smu *s, uint32_t gates, rdna3_pmctl_info *o);
 
 /* smu_hw_fini for a driver unload: on 13.0.10 the PMFW handles the DPM
  * features itself (smu_disable_dpms returns early), the driver only sends

@@ -66,6 +66,18 @@ ITEM_STEPS = [
                 r"|amdgpu_ring_patch_cond_exec|gfx_v11_0_get_gfx_shadow_info"), ["gfxshadow"]),
     (re.compile(r"gfx_v11_0_gfx_mqd_set_priority|sdma_v6_0_mqd_init"
                 r"|gfx_v11_0_get_gfx_shadow_info_nocheck"), ["userq"]),
+    # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
+    (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
+    (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"
+                r"|smu_v13_0_set_fan_(static_mode|speed_pwm|speed_rpm)"
+                r"|smu_v13_0_0_(get_fan_speed_pwm|get_power_limit|set_power_limit"
+                r"|get_overdrive_table|upload_overdrive_table|set_default_od_settings"
+                r"|get_od_setting_limits|is_od_feature_supported|od_edit_dpm_table"
+                r"|od_restore_table_single|restore_user_od_settings|set_supported_od_feature_mask"
+                r"|force_clk_levels|get_dpm_ultimate_freq|populate_umd_state_clk"
+                r"|get_power_profile_mode|get_thermal_temperature_range|get_unique_id"
+                r"|get_current_clk_freq_by_table"
+                r"|set_df_cstate)"), ["pmctl"]),
 ]
 
 GREEN, YELLOW, GRAY = "#2ea043", "#d29922", "#6e7681"
