@@ -660,3 +660,21 @@ which SIGKILLed the passthrough, left the device locked (no vfio-pci for
 amdgpu's release (the kernel log, 30 s at most, killing every process
 that still holds /dev/dri or /dev/kfd) before vfio-pci may bind, and gives
 up rather than bind early.
+
+### Card run 26 (queue `gamma sleep hotplug`, build 101)
+
+The host held (detach waited for amdgpu's release). Step `gamma` FAILED:
+no `gamma` line from the framebuffer or the core at all - IOFramebuffer
+never called setGammaTable, because the framebuffer did not publish
+IOFBGammaWidth / IOFBGammaCount. Pipe 1's CRC moved once and stayed (the
+cursor; the picture did not change), pipe 0's never moved. The framebuffer
+now publishes 12-bit x 256 with rdna3gamma=1 and logs the first call. The
+result was collected in the pause between two steps (queue still running,
+`sleep hotplug` left): `rdna3vm result` now says so, `rdna3vm queue status`
+shows the queue.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| GAMMA: FAIL, no "first setGammaTable" line in the fb log | IOFramebuffer does not hand gamma down | check IOFBGammaWidth/IOFBGammaCount on RDNA3Framebuffer in ioreg |
+| "first setGammaTable" logged, no "gamma ... -> 0x0" | the core refused (rdna3gamma=1? DCN head?) | core log `display: gamma` |
+| the call reaches the core, the CRC does not move | OGAM not reaching the pipe (MPCC routing, memory power, MODE_CURRENT) | `RDNA3,Head<n>,Gamma` state |

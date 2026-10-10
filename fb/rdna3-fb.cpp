@@ -422,6 +422,15 @@ bool RDNA3Framebuffer::start(IOService *provider)
     setProperty("IOFBMemorySize", (unsigned long long)fBytes, 64);
     setProperty("RDNA3,Mode", fDcn ? "dcn" : "console");
     setProperty("RDNA3,FBSource", FB_COMMIT);
+    /* IOFramebuffer hands gamma tables to setGammaTable only when the
+     * framebuffer names their format (card run 26: no call without these,
+     * the table went nowhere): 256 entries of 12 bits per channel, what the
+     * core resamples onto the MPCC OGAM curve */
+    if (fDcn && bootArgOn("rdna3gamma")) {
+        setProperty(kIOFBGammaWidthKey, 12ull, 32);
+        setProperty(kIOFBGammaCountKey, 256ull, 32);
+        setProperty("IOFBGammaHeaderSize", 0ull, 32);
+    }
     setName("RDNA3Framebuffer");
 
     if (!super::start(provider)) {
@@ -1222,9 +1231,14 @@ void RDNA3Framebuffer::hotplugPoll(bool first)
  * IOFramebuffer stays success when the core does not do gamma. */
 IOReturn RDNA3Framebuffer::gammaToCore(UInt32 channels, UInt32 count, UInt32 width, const void *data)
 {
+    if (!fGammaCalls)
+        FBLOG("head %u: first setGammaTable: %u channel(s) x %u entries of %u bits%s", fHead, (unsigned)channels,
+              (unsigned)count, (unsigned)width, fGammaOff ? " (core said unsupported)" : !fDcn ? " (no DCN head)" : "");
     if (fGammaOff || !fDcn || !fCore || !data || (channels != 1 && channels != 3) || count < 2 || !width ||
-        width > 16)
+        width > 16) {
+        fGammaCalls++;
         return kIOReturnSuccess;
+    }
     if (!fSymGamma)
         fSymGamma = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_GAMMA);
     if (!fGamma)

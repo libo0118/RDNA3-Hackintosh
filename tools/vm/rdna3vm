@@ -487,6 +487,17 @@ PENDING_STEPS="gamma sleep hotplug"
 cmd_queue() {
     load_conf
     local n
+    if [ "${1:-}" = status ]; then
+        if [ -n "$(systemctl list-units --no-legend --state=active 'rdna3vm-queue-*' 2>/dev/null)" ]; then
+            say "queue running; left after the current step: $(tr '\n' ' ' < "$QUEUE" 2>/dev/null)"
+        else
+            say "no queue running$([ -s "$QUEUE" ] && echo "; left: $(tr '\n' ' ' < "$QUEUE")")"
+        fi
+        { sudo -n journalctl --no-pager -q -o short --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null ||
+          journalctl --no-pager -q -o short --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null; } |
+            grep -E "== (queue|the VM|giving)" | tail -n 8
+        return 0
+    fi
     if [ $# -gt 0 ]; then
         [ "$1" = pending ] && set -- $PENDING_STEPS
         for n in "$@"; do step_args "$n" >/dev/null || die "unknown step $n"; done
@@ -935,6 +946,12 @@ cmd_result() {
     local out=${RDNA3VM_RESULT:-$HOME/Downloads/rdna3-result.tar.gz} tmp f
     local -a sel
     [ -d "$WORK/reports" ] || die "no $WORK/reports yet"
+    # between two steps the host desktop is back for a minute: the queue
+    # is not done yet (card runs 25, 26 were collected in that pause)
+    if [ -n "$(systemctl list-units --no-legend --state=active 'rdna3vm-queue-*' 2>/dev/null)" ]; then
+        say "!! the queue is still running (left: $(tr '\n' ' ' < "$QUEUE" 2>/dev/null)) - the desktop is only back between two steps"
+        echo "   wait for 'queue done' (rdna3vm queue status) and run 'rdna3vm result' then; collecting what is there so far"
+    fi
     if [ -f "$RUN_MARK" ]; then
         mapfile -t sel < <(find "$WORK/reports" -maxdepth 1 -type f -newer "$RUN_MARK" -printf '%P\n' | sort)
     else
