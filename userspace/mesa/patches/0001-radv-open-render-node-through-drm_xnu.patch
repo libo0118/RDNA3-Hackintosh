@@ -1,5 +1,44 @@
+diff --git a/src/amd/vulkan/radv_device.c b/src/amd/vulkan/radv_device.c
+index c01cbff..eabcf0c 100644
+--- a/src/amd/vulkan/radv_device.c
++++ b/src/amd/vulkan/radv_device.c
+@@ -43,6 +43,16 @@
+ 
+ #include "aco_interface.h"
+ 
++#if defined(__APPLE__) || defined(RADV_DRM_XNU)
++/* macOS: the render node is RDNA3Accel's IOUserClient (libdrm_xnu) */
++#include "drm_xnu.h"
++#define radv_drm_open(path, flags) drm_xnu_open(path, flags)
++#define radv_drm_close(fd)         drm_xnu_close(fd)
++#else
++#define radv_drm_open(path, flags) open(path, flags)
++#define radv_drm_close(fd)         close(fd)
++#endif
++
+ static bool
+ radv_trap_handler_enabled()
+ {
+@@ -1353,7 +1363,7 @@ radv_create_winsys(struct radv_device *device)
+ 
+       const char *path = drm_device->nodes[DRM_NODE_RENDER];
+ 
+-      fd = open(path, O_RDWR | O_CLOEXEC);
++      fd = radv_drm_open(path, O_RDWR | O_CLOEXEC);
+       drmFreeDevice(&drm_device);
+       if (fd < 0)
+          return VK_ERROR_INITIALIZATION_FAILED;
+@@ -1366,7 +1376,7 @@ radv_create_winsys(struct radv_device *device)
+                                       &device->ws);
+ 
+    if (fd != -1)
+-      close(fd);
++      radv_drm_close(fd);
+ 
+    return result;
+ #endif
 diff --git a/src/amd/vulkan/radv_physical_device.c b/src/amd/vulkan/radv_physical_device.c
-index 5edb325..0cc4293 100644
+index 5edb325..a2685b9 100644
 --- a/src/amd/vulkan/radv_physical_device.c
 +++ b/src/amd/vulkan/radv_physical_device.c
 @@ -17,6 +17,20 @@
@@ -94,3 +133,21 @@ index 5edb325..0cc4293 100644
     return result;
  #endif
  }
+@@ -3237,7 +3251,7 @@ radv_create_drm_device_locked(struct radv_physical_device *pdev)
+ 
+       const char *path = drm_device->nodes[DRM_NODE_RENDER];
+ 
+-      fd = open(path, O_RDWR | O_CLOEXEC);
++      fd = radv_drm_open(path, O_RDWR | O_CLOEXEC);
+       drmFreeDevice(&drm_device);
+       if (fd < 0)
+          return;
+@@ -3248,7 +3262,7 @@ radv_create_drm_device_locked(struct radv_physical_device *pdev)
+ 
+    r = ac_drm_device_initialize(fd, is_virtio, &drm_major, &drm_minor, &dev);
+    if (fd != -1)
+-      close(fd);
++      radv_drm_close(fd);
+    if (r)
+       return;
+ 
