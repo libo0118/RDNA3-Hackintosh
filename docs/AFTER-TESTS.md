@@ -428,3 +428,15 @@ With the aperture gate open (`rdna3accelfb=4`): `getApertureMemoryDescriptor
 the GOP's monitor; no WindowServer crash in this boot (the .ips reports in
 it were from run 13). Next: 10m, both heads; boot gates now apply per head.
 
+### Card run 15 (step 10m): two heads piped, swaps refused
+
+Both framebuffers got a display pipe (`heads piped 0x3`), WindowServer
+composited (`swap a2 ... HAS CONTENT`), but the legacy swap path
+(`RD3Surface::submitSwapCopy`) names no display, and with two heads the
+flip/copy refused (`no way to tell whose surface this is`); WindowServer
+never used `performTransaction` (which knows the pipe). Both screens black
+with the cursor. Fix: `rd3AccelSwapToPanel` resolves the head (only head
+piped / argument is the pipe resource / shares its vidmem / surface seen
+before / next unclaimed head) and logs `swap: surface ... -> head N (how)`.
+From now on one step per round: `big`.
+

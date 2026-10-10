@@ -417,9 +417,9 @@ launch() {   # launch "rdna3 args" stay(0/1)
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big off)"
     launch "$a" "$stay"
 }
 
@@ -453,8 +453,11 @@ QUEUE=$WORK/queue
 # Run 13 (10s): pipe up over the scanout, frames empty, aperture gate closed,
 # WindowServer restarting in a loop; 10a also opens the aperture (=4).
 # Run 14 (10a): the desktop on head 0 through the accelerator. 10m: both
-# heads (extended desktop + accelerator)
-PENDING_STEPS="10m"
+# heads (extended desktop + accelerator). Run 15 (10m): both heads piped,
+# every swap refused (no head named). From now on ONE big step per round:
+# "big" = everything at once, the accelerator tries its head strategies
+# itself and logs which one worked
+PENDING_STEPS="big"
 
 cmd_queue() {
     load_conf

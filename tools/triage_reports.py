@@ -241,9 +241,21 @@ def report(path, show_all):
                                  started.group(0) if started else "no 'IOGraphicsAccelerator2::start' in the log"))
         for l in log.splitlines():
             if "RDNA3Accelerator:" in l and ("NOT starting" in l or "never claimed" in l or
-                                             "populateAccelConfig" in l or "refus" in l):
+                                             "filled: AccelCaps" in l):
                 print("     " + l[l.find("RDNA3Accelerator:"):][:140])
         failed = failed or not same or not (started and started.group(1) == "1")
+        # the desktop through the accelerator: which head each swap went to,
+        # by which strategy, and whether frames reached the panels
+        shown = set()
+        for l in log.splitlines():
+            for key in ("swap: surface", "FLIPPED", "COPIED THE COMPOSITED", "matched no head",
+                        "refused", "LIVE WRITER", "iop: K6", "boot-arg rdna3accelfb"):
+                if key in l:
+                    t = l[l.find("RDNA3Accelerator:"):][:150]
+                    k = re.sub(r"0x[0-9a-f]+|#\d+|sample \d+", "", t)
+                    if k not in shown:
+                        shown.add(k)
+                        print("     " + t)
     errs = [l for l in log.splitlines() if "ERROR" in l or "failed" in l or "timeout" in l]
     if errs:
         print("   kext errors (%d):" % len(errs))

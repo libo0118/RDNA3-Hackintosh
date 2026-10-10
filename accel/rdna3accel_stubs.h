@@ -97,9 +97,7 @@ public:
     void submitSwapCopy(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2) APPLE_KEXT_OVERRIDE {
         (void)a0;
         rd3AccelSwapProbe(a1, a2);
-        IOAccelResource2 *src = rd3AccelResHasContent(a2) ? a2
-                              : rd3AccelResHasContent(a1) ? a1 : nullptr;
-        if (src && !rd3AccelFlipTo(src)) rd3AccelCopyToScanout(src);
+        rd3AccelSwapToPanel(this, a1, a2);
     }
     void shapeSurface(unsigned int a0, unsigned short a1, unsigned short a2) APPLE_KEXT_OVERRIDE {
         const unsigned w = a1, h = a2;

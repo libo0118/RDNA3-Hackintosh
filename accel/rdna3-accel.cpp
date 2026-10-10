@@ -28,9 +28,10 @@ class RD3MemoryMap;
 static unsigned long long rd3AccelGpuVaAlloc(IOAccelMemoryMap *map,
                                            unsigned long long len, unsigned long long align);
 static void               rd3AccelGpuVaFree(IOAccelMemoryMap *map);
-static bool               rd3AccelFlipTo(IOAccelResource2 *res);
-static bool               rd3AccelCopyToScanout(IOAccelResource2 *res);
+static bool               rd3AccelFlipTo(IOAccelResource2 *res, IOService *fb, unsigned head);
+static bool               rd3AccelCopyToScanout(IOAccelResource2 *res, IOService *fb, unsigned head);
 void                      rd3AccelSwapProbe(IOAccelResource2 *a1, IOAccelResource2 *a2);
+void                      rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource2 *a2);
 bool                      rd3AccelResHasContent(IOAccelResource2 *res);
 static void               rd3AccelWriteStamp(int index, unsigned int value);
 /* Navi 3x display devices (data/amdgpu.ids); the core kext must also claim the card */
@@ -576,6 +577,9 @@ public:
 OSDefineMetaClassAndStructors(RDNA3Accelerator, IOGraphicsAccelerator2)
 RDNA3Accelerator *RDNA3Accelerator::gAccel = nullptr;
 
+/* the display pipe's framebuffer resource of each head (initFramebufferResource):
+ * a legacy surface swap names no head, its arguments may be this resource */
+static IOAccelResource2 *volatile gHeadFbRes[kRd3MaxFB];
 IOAccelMemory *RD3DisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)
 {
     if (!gRd3Scanout) {
@@ -610,6 +614,8 @@ IOAccelMemory *RD3DisplayPipe::initFramebufferResource(unsigned int index, IOAcc
         if (o) o->release();
         return nullptr;
     }
+    if (head < kRd3MaxFB)
+        gHeadFbRes[head] = res;   /* the swap path finds its head by this resource */
     m->fScanout = true;
     m->fPhys    = r.phys;
     m->fBytes   = r.actualSize;
@@ -1725,13 +1731,12 @@ static unsigned rd3FlipWhy = 0;
 
 #define RD3SCANOUT_COPY_MAX 120
 static unsigned rd3ScanoutCopies = 0;
-static bool rd3AccelCopyToScanout(IOAccelResource2 *res)
+static bool rd3AccelCopyToScanout(IOAccelResource2 *res, IOService *fb, unsigned head)
 {
     if (rd3ScanoutCopies >= RD3SCANOUT_COPY_MAX) return false;
     if (!res) return false;
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
-    if (!a || !a->fFB) { RD3FLIPWHY("copyToScanout: no accelerator/framebuffer"); return false; }
-    if (gRd3HeadsPiped & (gRd3HeadsPiped - 1)) { RD3FLIPWHY("copyToScanout: refused -- heads piped 0x%x, no way to tell whose frame this is", gRd3HeadsPiped); return false; }
+    if (!a || !fb) { RD3FLIPWHY("copyToScanout: no accelerator/framebuffer for head %u", head); return false; }
     RD3VidMemory *vm = rd3res_vidmem(res);
     if (!vm || !vm->fKva) { RD3FLIPWHY("copyToScanout: source has no kva"); return false; }
 
@@ -1744,7 +1749,7 @@ static bool rd3AccelCopyToScanout(IOAccelResource2 *res)
     struct RD3KVramRequest q;
     for (unsigned i = 0; i < sizeof q; i++) ((volatile unsigned char *)&q)[i] = 0;
     q.version = RD3K_VRAM_ABI_VERSION;
-    IOReturn ret = a->askFramebufferForScanout(&q);
+    IOReturn ret = a->askFramebufferForScanout(&q, fb);
     if (ret != kIOReturnSuccess || !q.kva || !q.pitch) {
         RD3FLIPWHY("copyToScanout: framebuffer would not describe its scanout (0x%x kva %p pitch %u)",
                   (unsigned)ret, q.kva, q.pitch);
@@ -1764,20 +1769,19 @@ static bool rd3AccelCopyToScanout(IOAccelResource2 *res)
     }
     rd3ScanoutCopies++;
     if (rd3ScanoutCopies <= 3 || rd3ScanoutCopies == RD3SCANOUT_COPY_MAX)
-        ALOG("*** COPIED THE COMPOSITED FRAME ONTO THE PANEL *** #%u: %ux%u, %u rows x %u bytes, "
+        ALOG("*** COPIED THE COMPOSITED FRAME ONTO THE PANEL *** (head %u) #%u: %ux%u, %u rows x %u bytes, "
              "src kva %p pitch %u -> scanout kva %p phys 0x%llx pitch %u%s",
-             rd3ScanoutCopies, w, h, rows, rowb, vm->fKva, pitch, q.kva,
+             head, rd3ScanoutCopies, w, h, rows, rowb, vm->fKva, pitch, q.kva,
              (unsigned long long)q.phys, q.pitch,
              rd3ScanoutCopies == RD3SCANOUT_COPY_MAX ? "  [CAP REACHED -- stopping, panel keeps this frame]" : "");
     return true;
 }
 
-static bool rd3AccelFlipTo(IOAccelResource2 *res)
+static bool rd3AccelFlipTo(IOAccelResource2 *res, IOService *fb, unsigned head)
 {
     if (!res) { RD3FLIPWHY("rd3AccelFlipTo: no resource"); return false; }
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
-    if (!a || !a->fFB) { RD3FLIPWHY("rd3AccelFlipTo: accel %p fFB %p", a, a ? a->fFB : nullptr); return false; }
-    if (gRd3HeadsPiped & (gRd3HeadsPiped - 1)) { RD3FLIPWHY("rd3AccelFlipTo: refused -- heads piped 0x%x, no way to tell whose surface this is", gRd3HeadsPiped); return false; }
+    if (!a || !fb) { RD3FLIPWHY("rd3AccelFlipTo: accel %p fb %p (head %u)", a, fb, head); return false; }
     RD3VidMemory *vm = rd3res_vidmem(res);
     if (!vm || !vm->fRmHandle) {
         RD3FLIPWHY("rd3AccelFlipTo: vm %p fRmHandle %p -- the composited surface has no RM memory to flip to",
@@ -1801,17 +1805,79 @@ static bool rd3AccelFlipTo(IOAccelResource2 *res)
 
     const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_FLIP_FN);
     if (!sym) { RD3FLIPWHY("rd3AccelFlipTo: OSSymbol allocation failed"); return false; }
-    IOReturn rr = a->fFB->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr);
+    IOReturn rr = fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr);
     sym->release();
     if (rr != kIOReturnSuccess) {
         RD3FLIPWHY("rd3AccelFlipTo: framebuffer refused the flip (0x%x, flipResult %d) for %ux%u pitch %u kapiMemory %p",
                   (unsigned)rr, f.flipResult, w, h, pitch, vm->fRmHandle);
         return false;
     }
-    RD3FLIPWHY("rd3AccelFlipTo: *** FLIPPED *** to %ux%u pitch %u kapiMemory %p (flipResult %d)",
-              w, h, pitch, vm->fRmHandle, f.flipResult);
+    RD3FLIPWHY("rd3AccelFlipTo: *** FLIPPED *** head %u to %ux%u pitch %u kapiMemory %p (flipResult %d)",
+              head, w, h, pitch, vm->fRmHandle, f.flipResult);
     rd3AccelSampleFront(vm, w, h, pitch);
     return true;
+}
+
+/* A legacy surface swap (submitSwapCopy) names no display. Which head it is
+ * for, tried in order, the first that answers wins and is logged once per
+ * head (card run 15: two heads piped, every swap refused):
+ *   1. one head piped: that head
+ *   2. an argument IS a head's display-pipe framebuffer resource
+ *   3. an argument shares that resource's vidmem
+ *   4. the surface was seen before: the head it got then
+ *   5. a new surface: the next piped head nobody has claimed yet, in head
+ *      order (WindowServer makes one swap surface per display, in order) */
+static const void *gSurfHead[8];
+static unsigned    gSurfHeadIdx[8];
+static unsigned    gSwapHow[kRd3MaxFB];
+void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource2 *a2)
+{
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    if (!a) return;
+    IOAccelResource2 *src = rd3AccelResHasContent(a2) ? a2 : rd3AccelResHasContent(a1) ? a1 : nullptr;
+    if (!src) return;
+    const unsigned piped = gRd3HeadsPiped;
+    unsigned head = kRd3MaxFB, how = 0;
+    if (piped && !(piped & (piped - 1))) {
+        for (head = 0; !(piped & (1u << head)); head++) ;
+        how = 1;
+    }
+    for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++)
+        if (gHeadFbRes[h] && (gHeadFbRes[h] == a1 || gHeadFbRes[h] == a2)) { head = h; how = 2; }
+    for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++) {
+        RD3VidMemory *hv = rd3res_vidmem(gHeadFbRes[h]);
+        if (hv && (hv == rd3res_vidmem(a1) || hv == rd3res_vidmem(a2))) { head = h; how = 3; }
+    }
+    unsigned slot = 8;
+    for (unsigned i = 0; i < 8; i++)
+        if (gSurfHead[i] == surf) slot = i;
+    if (how == 0 && slot < 8) { head = gSurfHeadIdx[slot]; how = 4; }
+    if (how == 0) {
+        unsigned claimed = 0;
+        for (unsigned i = 0; i < 8; i++)
+            if (gSurfHead[i]) claimed |= 1u << gSurfHeadIdx[i];
+        for (unsigned h = 0; h < kRd3MaxFB && how == 0; h++)
+            if ((piped & (1u << h)) && !(claimed & (1u << h))) { head = h; how = 5; }
+    }
+    if (how == 0 || head >= kRd3MaxFB || !a->fFBs[head]) {
+        RD3FLIPWHY("swap: surface %p (a1 %p a2 %p) matched no head (piped 0x%x, pipe resources %p %p %p %p)",
+                   surf, a1, a2, piped, gHeadFbRes[0], gHeadFbRes[1], gHeadFbRes[2], gHeadFbRes[3]);
+        return;
+    }
+    if (slot == 8)   /* remember the surface -> head answer */
+        for (unsigned i = 0; i < 8; i++)
+            if (!gSurfHead[i]) { gSurfHead[i] = surf; gSurfHeadIdx[i] = head; break; }
+    if (gSwapHow[head] != how) {
+        gSwapHow[head] = how;
+        static const char *const kHow[6] = { "?", "only head piped", "argument is the pipe resource",
+                                             "argument shares the pipe vidmem", "surface seen before",
+                                             "new surface -> next unclaimed head" };
+        ALOG("swap: surface %p -> head %u (%s; a1 %p a2 %p src %s)", surf, head, kHow[how], a1, a2,
+             src == a2 ? "a2" : "a1");
+    }
+    IOService *fb = a->fFBs[head];
+    if (!rd3AccelFlipTo(src, fb, head))
+        rd3AccelCopyToScanout(src, fb, head);
 }
 
 IOReturn RDNA3Accelerator::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
