@@ -165,8 +165,11 @@ steps:
 | `9b` | the second monitor with the same picture (`rdna3dmub=1 rdna3mirror=1`) | only after step 5b passed; **either screen may go dark** |
 | `9c` | the second monitor as its own display (`rdna3mirror=2`) | after 9b; **either screen may go dark** |
 | `10` | accelerator (WindowServer) | risky; send the reports from 0–9 first |
+| `hotplug` | a monitor unplugged and plugged back while macOS runs (`rdna3hotplug=1`) | **stay at the machine**: when the progress window says *unplug and replug the second monitor now*, pull the second monitor's cable, wait about 10 seconds, put it back; the second screen goes dark and comes back, macOS drops that display and adds it again |
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
+
+Step `hotplug` is the one step that needs you at the screens: about two minutes after the desktop appears, the progress window and a notification say *unplug and replug the second monitor now*. You have two minutes from then: pull the second monitor's cable (the one the GOP did not light at boot), wait about 10 seconds, plug it back in. The report records what the driver saw (`RDNA3,HPDState` over time, the hotplug lines of the log) and takes a picture of both pipes afterwards. If you miss the window, the report says `HOTPLUG: 0 HPD change(s)`; run the step again.
 
 ### A new framebuffer build: allow it once
 
