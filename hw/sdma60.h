@@ -16,6 +16,7 @@
 #define RDNA3_SDMA60_H
 
 #include "rdna3_hw.h"
+#include "amd_mqd.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -94,6 +95,16 @@ int  sdma60_wait_fence(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq);
 /* copy 'bytes' (<= 1 GiB) between MC addresses and wait for it */
 int  sdma60_copy_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src_mc, uint64_t dst_mc,
                       uint32_t bytes);
+
+/* ---- user queues (amdgpu_userq through the MES) ----
+ * sdma_v6_0_mqd_init (adev->mqds[AMDGPU_HW_IP_DMA].init_mqd): a zeroed
+ * struct v11_sdma_mqd (CPU view) for the MES to map on an SDMA queue.
+ * Reads SDMA0_QUEUE0_IB_CNTL, so the GFX must be powered. 0 */
+int  sdma60_mqd_init(rdna3_dev *d, uint32_t *mqd, const amd_mqd_prop *p);
+/* sdma_v6_0_sw_init for SDMA 6.0.3: user queues from firmware 25 on */
+int  sdma60_userq_supported(uint32_t fw_version);
+/* sdma_v6_0_set_userq_trap_interrupts: TRAP_ENABLE on every instance */
+void sdma60_set_userq_trap_interrupts(rdna3_dev *d, uint32_t num_instances, int enable);
 
 #ifdef __cplusplus
 }

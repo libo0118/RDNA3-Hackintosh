@@ -202,6 +202,7 @@ what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
 | `rdna3lvl=0`…`8` | a test-ladder level instead of the profile (`oc_install.sh --step N` sets a whole step) |
 | `rdna3modeset=1` | own display timings: the monitor's EDID modes through `hw/dcn32_modeset.c` (step `modeset`) |
 | `rdna3mes=1` | MES scheduler pipe (step 8c) |
+| `rdna3userq=1` | user queues (DRM_AMDGPU_USERQ, amdgpu's `user_queue=1`) through the MES; turns `rdna3mes` on, kernel VMs keep VMIDs 1-7 (step userq) |
 | `rdna3gfxoff=1` | GFXOFF: the GFX block powers off when idle (step 8o) |
 | `rdna3socg=1` | HDP/ATHUB clock gating (`hw/soc21_cg.c`) |
 | `rdna3cg=0` | GFX clock gating off (on by default since card run 8) |

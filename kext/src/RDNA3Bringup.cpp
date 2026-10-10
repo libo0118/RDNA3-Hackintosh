@@ -87,6 +87,16 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
         PE_parse_boot_argn("rdna3mes", &mes, sizeof(mes));
         fMesWanted = mes != 0;
         {
+            /* user queues (amdgpu.user_queue=1), off by default like
+             * amdgpu's: they need the MES scheduler, so rdna3userq=1 brings
+             * it up too, and VMIDs 8-15 then belong to the MES */
+            uint32_t uq = 0;
+            PE_parse_boot_argn("rdna3userq", &uq, sizeof(uq));
+            fUserqWanted = uq != 0;
+            if (fUserqWanted)
+                fMesWanted = true;
+        }
+        {
             /* on by default since card run 8: ~200 W -> ~75 W idle, hotspot
              * 78 -> 55 C, DMA/GFX tests still pass; rdna3cg=0 turns it off */
             uint32_t cg = 1, go = 0;
@@ -616,6 +626,7 @@ void RDNA3Bringup::run()
             feat[AMDGPU_INFO_FW_MES_KIQ] = (fMes->kiq_version >> 12) & 0xfff;
         }
         fOwner->drmSetFirmware(ver, feat, ta);
+        userqStart(ver);
         BLOG("firmware versions: ME 0x%x PFP 0x%x MEC 0x%x RLC 0x%x SDMA 0x%x SMC 0x%x SOS 0x%x MES 0x%x "
              "ASD 0x%x", ver[AMDGPU_INFO_FW_GFX_ME], ver[AMDGPU_INFO_FW_GFX_PFP], ver[AMDGPU_INFO_FW_GFX_MEC],
              ver[AMDGPU_INFO_FW_GFX_RLC], ver[AMDGPU_INFO_FW_SDMA], ver[AMDGPU_INFO_FW_SMC],
@@ -1212,6 +1223,12 @@ void RDNA3Bringup::mesStart(const char *why)
     publish("RDNA3,MESLegacyQueueMap", fMes->legacy_queue_map ? 1 : 0);
     BLOG("MES: scheduler %s %s (%d), firmware sched 0x%x kiq 0x%x", why, ret ? "FAILED" : "up", ret,
          fMes->sched_version, fMes->kiq_version);
+    if (fUserqMask && !ret) {
+        /* amdgpu's user queue resume is not ported: a restarted scheduler has
+         * forgotten the queues it had, their clients have to make new ones */
+        userqIrqs();
+        BLOG("user queues: the scheduler restarted (%s), queues mapped before are gone", why);
+    }
 }
 
 void RDNA3Bringup::pmPublishMetrics()
@@ -1241,6 +1258,7 @@ void RDNA3Bringup::pmPublishMetrics()
 struct RDNA3Vm {
     rdna3_vm vm;
     uint32_t vmid;
+    uint32_t pasid;      /* the process id the MES knows this VM's user queues by */
     bool     live;       /* page tables exist */
     bool     guilty;     /* a job of this VM hung or page-faulted: no more submissions */
     uint32_t resetSeen, vramLostSeen;   /* fResetCount / fVramLostCount when created */
@@ -1789,8 +1807,12 @@ void *RDNA3Bringup::vmCreate()
     v->vramLostSeen = fVramLostCount;
     if (!fVmReady)
         return v;
-    /* one VMID per open file for now (amdgpu hands VMIDs out per job) */
-    for (uint32_t id = 1; id < 16; id++) {
+    /* one VMID per open file for now (amdgpu hands VMIDs out per job); with
+     * user queues VMIDs 8-15 are the MES's (SET_HW_RESOURCES vmid masks,
+     * amdgpu's first_kfd_vmid) */
+    fNextPasid = fNextPasid % 0xfffe + 1;
+    v->pasid = fNextPasid;
+    for (uint32_t id = 1; id < (fUserqWanted ? 8u : 16u); id++) {
         if (!(fVmidUsed & (1u << id))) {
             if (gpuvm_vm_init(fDev, &v->vm, fPtPool) != RDNA3_OK)
                 break;
@@ -1873,6 +1895,8 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
     if (r)
         return -RD_ENOMEM;
     vmFlush(v->vmid);
+    if (fUserqMask)
+        userqFlushMesVmids();
     v->gfxFlush = v->compFlush = true;
     return 0;
 }
@@ -1900,7 +1924,143 @@ void RDNA3Bringup::vmUnmap(void *p, uint64_t va, uint64_t size)
         return;
     gpuvm_unmap(fDev, &v->vm, va, size / 4096);
     vmFlush(v->vmid);
+    if (fUserqMask)
+        userqFlushMesVmids();
     v->gfxFlush = v->compFlush = true;
+}
+
+/* ---------------------------- user queues ---------------------------- */
+
+/* Ported from gfx_v11_0_set_userq_eop_interrupts and
+ * sdma_v6_0_set_userq_trap_interrupts: the interrupts that carry user queue
+ * fences (both SDMA 6.0 instances) */
+void RDNA3Bringup::userqIrqs()
+{
+    gfx11_set_userq_eop_interrupts(fDev, fUserqMask, 1);
+    if (fUserqMask & (1u << AMDGPU_HW_IP_DMA))
+        sdma60_set_userq_trap_interrupts(fDev, 2, 1);
+}
+
+/* the user queue gates of gfx_v11_0's gpu_early_init and sdma_v6_0_sw_init:
+ * the IPs whose firmware runs them get userq_mes_funcs, the UAPI learns of
+ * them (amdgpu_userq_get_supported_ip_mask) */
+void RDNA3Bringup::userqStart(const uint32_t ver[32])
+{
+    uint32_t mask = 0;
+    if (!fUserqWanted)
+        return;
+    if (!fMes || !fMes->ready || !fDev->doorbell_ok || !fDoorbell || !fGmc || !fGmc->gfxhub_enabled) {
+        BLOG("user queues: rdna3userq=1, but the MES scheduler or the doorbells are not up (level 8 needed)");
+        publish("RDNA3,UserQueues", 0);
+        return;
+    }
+    if (gfx11_userq_supported(ver[AMDGPU_INFO_FW_GFX_ME], ver[AMDGPU_INFO_FW_GFX_PFP],
+                              ver[AMDGPU_INFO_FW_GFX_MEC], fMes->sched_version & RD_MES_VERSION_MASK))
+        mask |= (1u << AMDGPU_HW_IP_GFX) | (1u << AMDGPU_HW_IP_COMPUTE);
+    if (sdma60_userq_supported(ver[AMDGPU_INFO_FW_SDMA]))
+        mask |= 1u << AMDGPU_HW_IP_DMA;
+    fUserqMask = mask;
+    userqIrqs();
+    publish("RDNA3,UserQueues", mask);
+    BLOG("user queues: IP mask 0x%x (ME %u PFP %u MEC %u MES %u SDMA %u), doorbell BAR %llu KiB", mask,
+         ver[AMDGPU_INFO_FW_GFX_ME], ver[AMDGPU_INFO_FW_GFX_PFP], ver[AMDGPU_INFO_FW_GFX_MEC],
+         fMes->sched_version & RD_MES_VERSION_MASK, ver[AMDGPU_INFO_FW_SDMA],
+         (unsigned long long)(fDoorbell->getLength() >> 10));
+    if (mask)
+        fOwner->drmUserqReady(mask, fDoorbell->getLength());
+}
+
+/* what amdgpu's TLB flush by PASID achieves: the MES gives a process one of
+ * VMIDs 8-15, which the kext does not learn, so a changed VM flushes them all */
+void RDNA3Bringup::userqFlushMesVmids()
+{
+    for (uint32_t id = 8; id < 16; id++)
+        vmFlush(id);
+}
+
+int RDNA3Bringup::userqMqdInit(uint32_t ip, void *mqd, const amd_mqd_prop *p)
+{
+    int r;
+    if (!fUserqMask || !(fUserqMask & (1u << ip)))
+        return -RD_EINVAL;
+    if (ip == AMDGPU_HW_IP_GFX)
+        r = gfx11_gfx_mqd_init(fDev, (uint32_t *)mqd, p);
+    else if (ip == AMDGPU_HW_IP_COMPUTE)
+        r = gfx11_compute_mqd_init(fDev, (uint32_t *)mqd, p);
+    else
+        r = sdma60_mqd_init(fDev, (uint32_t *)mqd, p);
+    return r ? -RD_EINVAL : 0;
+}
+
+int RDNA3Bringup::userqAdd(void *p, amd_mes_add_queue *in)
+{
+    RDNA3Vm *v = (RDNA3Vm *)p;
+    int r;
+    if (!fUserqMask || !fMes || !fMes->ready || !fGmc || !v || !v->live || !fVmReady)
+        return -RD_EINVAL;
+    in->process_id = v->pasid;                                   /* vm->pasid */
+    in->page_table_base_addr = gpuvm_pd_addr(fDev, &v->vm);      /* amdgpu_gmc_pd_addr */
+    rdna3_hdp_flush(fDev);   /* the MQD and contexts were written through BAR0 */
+    r = gfx11_mes_add_hw_queue(fDev, fMes, in, fGmc->vm_cntx_cntl);
+    BLOG("user queue: ADD_QUEUE type %u doorbell 0x%x PASID %u: %d", in->queue_type, in->doorbell_offset,
+         in->process_id, r);
+    return r == RDNA3_OK ? 0 : r == RDNA3_ETIME ? -RD_ETIME : -RD_EINVAL;
+}
+
+int RDNA3Bringup::userqRemove(const amd_mes_remove_queue *in)
+{
+    int r;
+    if (!fMes || !fMes->ready)
+        return -RD_EINVAL;
+    r = gfx11_mes_remove_hw_queue(fDev, fMes, in);
+    BLOG("user queue: REMOVE_QUEUE doorbell 0x%x: %d", in->doorbell_offset, r);
+    return r == RDNA3_OK ? 0 : r == RDNA3_ETIME ? -RD_ETIME : -RD_EINVAL;
+}
+
+/* amdgpu_bo_gpu_offset after amdgpu_ttm_alloc_gart: VRAM by its MC
+ * address, a one-page GTT BO through a GART slot it keeps while it lives */
+int RDNA3Bringup::gpuAddr(rdna3_bo *bo, uint64_t *mc)
+{
+    const uint64_t winPages = 4096;   /* copyVramToPages' window, then the user fence slots */
+    if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
+        *mc = rdna3_vram_mc(fDev, bo->vram_offset);
+        return 0;
+    }
+    RDNA3Gtt *gt = (RDNA3Gtt *)bo->backing;
+    if (bo->placement != AMDGPU_GEM_DOMAIN_GTT || !gt || gt->npages != 1)
+        return -RD_EINVAL;
+    if (!fGmc || !fGmc->mmhub_enabled || fGmc->gart_size < (winPages + kUfSlots + kUqSlots) * 4096)
+        return -RD_ENODEV;
+    uint64_t base = fGmc->gart_size - (winPages + kUfSlots + kUqSlots) * 4096;
+    if (gt->gartSlot) {
+        *mc = fGmc->gart_start + base + (gt->gartSlot - 1) * 4096ull;
+        return 0;
+    }
+    uint32_t i;
+    for (i = 0; i < kUqSlots && fUqSlot[i]; i++)
+        ;
+    if (i == kUqSlots)
+        return -RD_ENOSPC;
+    const uint64_t flags = RD_PTE_VALID | RD_PTE_SYSTEM | RD_PTE_SNOOPED | RD_PTE_READABLE |
+                           RD_PTE_WRITEABLE | RD_PTE_MTYPE_NV10(RD_MTYPE_UC);
+    if (gmc11_gart_map(fDev, fGmc, base + i * 4096ull, gt->pages[0], 1, flags) != RDNA3_OK)
+        return -RD_ENOMEM;
+    vmFlush(0);
+    fUqSlot[i] = true;
+    gt->gartSlot = i + 1;
+    *mc = fGmc->gart_start + base + i * 4096ull;
+    return 0;
+}
+
+void RDNA3Bringup::gartRelease(uint32_t slot)
+{
+    const uint64_t winPages = 4096;
+    if (!slot || slot > kUqSlots || !fGmc || fGmc->gart_size < (winPages + kUfSlots + kUqSlots) * 4096)
+        return;
+    uint64_t base = fGmc->gart_size - (winPages + kUfSlots + kUqSlots) * 4096;
+    gmc11_gart_unmap(fDev, fGmc, base + (slot - 1) * 4096ull, 1);
+    vmFlush(0);
+    fUqSlot[slot - 1] = false;
 }
 
 /* --------------------------- submission --------------------------- */
@@ -2110,6 +2270,33 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
     }
 }
 
+/* a user queue fence wait (RDNA3Accel::drmUserqWait, DRM lock dropped):
+ * until the next interrupt, 5 ms at most, or 'absNs'; polls the IH ring
+ * without MSI */
+void RDNA3Bringup::waitInterrupt(uint64_t absNs)
+{
+    uint64_t now, ns = 5ull * 1000 * 1000, deadline;
+    absolutetime_to_nanoseconds(mach_continuous_time(), &now);
+    if (absNs != UINT64_MAX) {
+        if (absNs <= now)
+            return;
+        if (absNs - now < ns)
+            ns = absNs - now;
+    }
+    if (fIrqLive) {
+        clock_interval_to_deadline((uint32_t)(ns / 1000) + 1, kMicrosecondScale, &deadline);
+        IOLockLock(fLock);
+        IOLockSleepDeadline(fLock, &fFenceEvent, deadline, THREAD_UNINT);
+        IOLockUnlock(fLock);
+        return;
+    }
+    if (fIh && fIh->enabled && IOLockTryLock(fIhLock)) {
+        ih60_process(fDev, fIh, ivCallback, this);
+        IOLockUnlock(fIhLock);
+    }
+    IOSleep(1);
+}
+
 /* ---------------------------- interrupts ---------------------------- */
 
 bool RDNA3Bringup::irqFilter(OSObject *, IOFilterInterruptEventSource *)
@@ -2156,6 +2343,13 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
                 b->fOwner->displayHotplug((uint32_t)pin, dchpd_irq_ack(b->fDev, (uint32_t)pin));
             return;
         }
+    }
+    if (b->fUserqMask && ih60_iv_userq_doorbell(iv)) {
+        /* gfx_v11_0_eop_irq / sdma_v6_0_process_fence_irq for a user queue:
+         * the fence value is in its seq64 slot, the waiters (woken after
+         * every interrupt) read it there */
+        b->fIrqUserq++;
+        return;
     }
     switch (ih60_iv_fence(iv)) {
     case RD_IH_FENCE_GFX:   b->fIrqFenceGfx++; break;

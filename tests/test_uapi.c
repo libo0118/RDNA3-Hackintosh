@@ -267,7 +267,8 @@ int main(void)
     static rdna3_drm_file file;
     rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
                           h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL, NULL,
-                          NULL, NULL, NULL, NULL, NULL, NULL };
+                          NULL, NULL, NULL, NULL, NULL, NULL,
+                          NULL, NULL, NULL, NULL, NULL, NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -1056,6 +1057,119 @@ int main(void)
         y.token = tok;
         CHECK(IOCTL(&f1, RD_NR_XNU_BO_IMPORT, y) == -RD_ENOENT);
         rdna3_drm_file_close(&f1);
+    }
+
+    /* user queues (amdgpu_userq_ioctl and friends) on a device whose OS has
+     * not turned them on: amdgpu without userq_funcs. The end-to-end path
+     * runs in sim_navi32 on the simulated MES. */
+    {
+        union drm_amdgpu_userq u;
+        struct drm_amdgpu_userq_signal sg;
+        struct drm_amdgpu_userq_wait w;
+        struct drm_amdgpu_userq_mqd_compute_gfx11 mc;
+        struct drm_amdgpu_info_uq_metadata meta;
+        union drm_amdgpu_gem_create gc;
+        struct drm_amdgpu_info_device di;
+        struct drm_amdgpu_info in;
+        uint32_t h = 0, s = 0;
+        CHECK(strcmp(rdna3_drm_ioctl_name(RD_NR_AMDGPU(DRM_AMDGPU_USERQ)), "AMDGPU_USERQ") == 0);
+        memset(&mc, 0, sizeof(mc));
+        memset(&u, 0, sizeof(u));
+        u.in.op = AMDGPU_USERQ_OP_CREATE;
+        u.in.ip_type = AMDGPU_HW_IP_COMPUTE;
+        u.in.queue_va = 0x100000;
+        u.in.queue_size = 4096;
+        u.in.rptr_va = 0x200000;
+        u.in.wptr_va = 0x201000;
+        u.in.mqd = (uint64_t)(uintptr_t)&mc;
+        u.in.mqd_size = sizeof(mc);
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), u) == -RD_EINVAL);   /* no IP has user queues */
+        u.in.op = 7;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), u) == -RD_EINVAL);
+        memset(&u, 0, sizeof(u));
+        u.in.op = AMDGPU_USERQ_OP_FREE;
+        u.in.queue_id = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), u) == -RD_EINVAL);   /* no such queue */
+        u.in.flags = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), u) == -RD_EINVAL);   /* FREE takes the id only */
+        /* doorbell BOs exist only with user queues */
+        memset(&gc, 0, sizeof(gc));
+        gc.in.bo_size = 4096;
+        gc.in.domains = AMDGPU_GEM_DOMAIN_DOORBELL;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gc) == -RD_EOPNOTSUPP);
+        /* SIGNAL / WAIT: the handles are checked first, then the queue */
+        {
+            struct drm_syncobj_create c;
+            memset(&c, 0, sizeof(c));
+            CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, c) == 0);
+            s = c.handle;
+        }
+        memset(&sg, 0, sizeof(sg));
+        sg.queue_id = 1;
+        h = 9999;
+        sg.syncobj_handles = (uint64_t)(uintptr_t)&h;
+        sg.num_syncobj_handles = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_SIGNAL), sg) == -RD_ENOENT);   /* bad syncobj */
+        sg.syncobj_handles = (uint64_t)(uintptr_t)&s;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_SIGNAL), sg) == -RD_ENOENT);   /* no queue 1 */
+        sg.bo_read_handles = (uint64_t)(uintptr_t)&h;
+        sg.num_bo_read_handles = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_SIGNAL), sg) == -RD_ENOENT);   /* bad BO */
+        memset(&w, 0, sizeof(w));
+        w.waitq_id = 1;
+        w.syncobj_handles = (uint64_t)(uintptr_t)&s;
+        w.num_syncobj_handles = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT), w) == -RD_ETIME);   /* nothing submitted */
+        {
+            struct drm_syncobj_array a;
+            memset(&a, 0, sizeof(a));
+            a.handles = (uint64_t)(uintptr_t)&s;
+            a.count_handles = 1;
+            CHECK(IOCTL(f, RD_NR_SYNCOBJ_SIGNAL, a) == 0);
+        }
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT), w) == 0 && w.num_fences == 1);   /* counted */
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT), w) == -RD_EINVAL);   /* no wait queue 1 */
+        /* AMDGPU_INFO_UQ_FW_AREAS: the gfx shadow and CSA, also without user queues */
+        memset(&meta, 0, sizeof(meta));
+        memset(&in, 0, sizeof(in));
+        in.return_pointer = (uint64_t)(uintptr_t)&meta;
+        in.return_size = sizeof(meta);
+        in.query = AMDGPU_INFO_UQ_FW_AREAS;
+        in.query_hw_ip.type = AMDGPU_HW_IP_GFX;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && meta.gfx.shadow_size == 73728 &&
+              meta.gfx.shadow_alignment == 256 && meta.gfx.csa_size == 484 && meta.gfx.csa_alignment == 256);
+        in.query_hw_ip.type = AMDGPU_HW_IP_DMA;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.userq_ip_mask == 0);
+        /* turned on, but the OS hooks are missing: still no queue */
+        rdna3_drm_device_set_userq(&dev, 7, 2u << 20);
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.userq_ip_mask == 7);
+        memset(&gc, 0, sizeof(gc));
+        gc.in.bo_size = 8192;
+        gc.in.domains = AMDGPU_GEM_DOMAIN_DOORBELL;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gc) == 0 && gc.out.handle);
+        CHECK(rdna3_drm_bo_lookup(f, gc.out.handle)->vram_offset == RD_DOORBELL_KERNEL_SIZE &&
+              rdna3_drm_bo_lookup(f, gc.out.handle)->size == 8192);
+        u.in.op = AMDGPU_USERQ_OP_CREATE;
+        u.in.flags = 0;
+        u.in.ip_type = AMDGPU_HW_IP_COMPUTE;
+        u.in.queue_va = 0x100000;
+        u.in.queue_size = 4096;
+        u.in.rptr_va = 0x200000;
+        u.in.wptr_va = 0x201000;
+        u.in.doorbell_handle = gc.out.handle;
+        u.in.mqd = (uint64_t)(uintptr_t)&mc;
+        u.in.mqd_size = sizeof(mc);
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), u) == -RD_EINVAL);
+        {
+            struct drm_gem_close cl = { gc.out.handle, 0 };
+            CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == 0);
+        }
+        gc.in.bo_size = 4096;
+        gc.in.domains = AMDGPU_GEM_DOMAIN_DOORBELL;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gc) == 0 &&
+              rdna3_drm_bo_lookup(f, gc.out.handle)->vram_offset == RD_DOORBELL_KERNEL_SIZE);   /* reused */
+        rdna3_drm_device_set_userq(&dev, 0, 0);
     }
 
     rdna3_drm_file_close(f);

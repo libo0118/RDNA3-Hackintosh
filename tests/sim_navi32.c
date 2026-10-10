@@ -34,6 +34,7 @@
 #include "dcn32_mode.h"
 #include "gfx11_info.h"
 #include "xfer.h"
+#include "rdna3_drm.h"
 #include "gen/gc_11_0_0_harvest.h"
 #include "gen/gc_11_0_0_gds.h"
 #include "gen/gc_11_0_0_sdma_reset.h"
@@ -177,6 +178,26 @@ typedef struct sim {
         uint32_t hw[64];
         int hang;
     } mes_sched;
+    /* user queues the MES scheduler took (ADD_QUEUE, mes_v11_api_def.h): the
+     * queue's MQD, doorbell and process; the process gets a VMID from the
+     * GFXHUB mask of SET_HW_RESOURCES and its page tables are loaded into
+     * that context. A doorbell runs the queue's ring through the process VM
+     * up to the doorbell's wptr. A RELEASE_MEM that interrupts (INT_SEL 2)
+     * makes the firmware write the queue's rptr to the MQD's fence address
+     * and raise the end-of-pipe IV with the doorbell in src_data[0]; an SDMA
+     * queue does that at a FENCE packet (SDMA_FENCE IV, doorbell << 2). The
+     * rptr goes to the queue's rptr address after every run. */
+    struct sim_uq {
+        int used;
+        uint32_t type, doorbell, process_id, vmid, me, pipe, queue;
+        uint64_t mqd, wptr_addr, gang_ctx, proc_ctx, pd, fence_addr;
+        uint64_t rptr;               /* dwords (bytes for SDMA), never wraps */
+        uint32_t queue_size_dw;      /* ADD_QUEUE gds_size */
+        unsigned runs, eops;
+    } uq[8];
+    unsigned uq_adds, uq_removes, uq_bad, uq_faults, uq_runs, uq_eops;
+    int cp_cur_uq;                   /* 1 + index of the user queue cp_exec runs, 0 = a kernel ring */
+    uint64_t cp_uq_pos;              /* ring position after the queue's current packet */
     /* gfx queue mapped by the KIQ from its v11_gfx_mqd (ENGINE_SEL 4); the
      * RS64 gfx firmware fetches through CP_GFX_HQD_* then. rs64_needs_mqd
      * models the card: a register-programmed RB0 without an MQD makes the
@@ -1084,6 +1105,7 @@ static void sim_mode1_reset(void)
     uint32_t fbb = *R(MM_BASE0 + regMMMC_VM_FB_LOCATION_BASE), fbt = *R(MM_BASE0 + regMMMC_VM_FB_LOCATION_TOP);
     memset(S.reg, 0, sizeof(S.reg));
     memset(S.hqd, 0, sizeof(S.hqd));
+    memset(S.uq, 0, sizeof(S.uq));   /* the MES forgets its queues */
     memset(&S.smu, 0, sizeof(S.smu));
     S.nsmn = 0;
     *smn_slot(SMN_ROM_OFFSET_CTRL, 1) = ROM_STRAP;
@@ -1222,6 +1244,17 @@ static uint8_t *vm_ptr(uint32_t vmid, uint64_t va, uint64_t len)
     return S.vram + (e & 0x0000FFFFFFFFF000ull) + (va & 4095);
 }
 
+/* memory a CP packet names: MC addresses on the kernel rings, VAs of the
+ * process VM on a user queue (the MES runs it in the process's VMID) */
+static uint8_t *cp_mem(uint64_t a, uint64_t len)
+{
+    if (S.cp_cur_uq)
+        return vm_ptr(S.uq[S.cp_cur_uq - 1].vmid, a, len);
+    return mc_ptr(a, len);
+}
+
+static void uq_eop(void);
+
 /* run packets [rptr, end) of buffer 'buf' (index mask 'mask'); returns new rptr */
 static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint64_t end, int in_ib)
 {
@@ -1229,6 +1262,8 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
     while ((rptr & mask) != (end & mask)) {
         uint32_t h = PK(0), type = h >> 30, op = (h >> 8) & 0xff, cnt = (h >> 16) & 0x3fff;
         S.cp_pkts++;
+        if (S.cp_cur_uq && !in_ib)
+            S.cp_uq_pos = rptr + (type == 3 ? 2 + cnt : 1);
         if (type != 3) { S.cp_bad++; rptr++; continue; }
         switch (op) {
         case PACKET3_SET_UCONFIG_REG:
@@ -1314,7 +1349,7 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
                 if (dst == 0) {
                     sim_wr(NULL, 4ull * (PK(2) + i), PK(4 + i));
                 } else if (dst == 5) {
-                    uint8_t *p = mc_ptr((PK(2) | ((uint64_t)PK(3) << 32)) + 4ull * i, 4);
+                    uint8_t *p = cp_mem((PK(2) | ((uint64_t)PK(3) << 32)) + 4ull * i, 4);
                     if (p) memcpy(p, &PK(4 + i), 4); else S.cp_bad++;
                 } else {
                     S.cp_bad++;
@@ -1338,6 +1373,8 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
         case PACKET3_INDIRECT_BUFFER: {
             uint64_t va = PK(1) | ((uint64_t)PK(2) << 32);
             uint32_t ndw = PK(3) & 0xfffff, vmid = (PK(3) >> 24) & 0xf, i;   /* bit 23 = VALID */
+            if (S.cp_cur_uq)
+                vmid = S.uq[S.cp_cur_uq - 1].vmid;   /* a user queue's IBs run in its VMID */
             static uint32_t ib[4096];
             if (in_ib || ndw > 4096) { S.cp_bad++; break; }
             for (i = 0; i < ndw; i++) {
@@ -1370,11 +1407,13 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
         case PACKET3_RELEASE_MEM: {
             uint64_t a = PK(3) | ((uint64_t)PK(4) << 32);
             uint32_t sel = (PK(2) >> 29) & 7;   /* DATA_SEL 1: 32 bits, 2: 64 bits */
-            uint8_t *p = mc_ptr(a, sel == 2 ? 8 : 4);
+            uint8_t *p = cp_mem(a, sel == 2 ? 8 : 4);
             if (p && sel == 1) memcpy(p, &PK(5), 4);
             else if (p && sel == 2 && !(a & 7)) { memcpy(p, &PK(5), 4); memcpy(p + 4, &PK(6), 4); }
             else S.cp_bad++;
-            if (((PK(2) >> 24) & 7) == 2) {
+            if (((PK(2) >> 24) & 7) == 2 && S.cp_cur_uq) {
+                uq_eop();
+            } else if (((PK(2) >> 24) & 7) == 2) {
                 /* EOP interrupt: gated per engine, ring_id = queue<<4 | me<<2 | pipe */
                 uint32_t en = S.cp_cur_me == 0
                     ? S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE_MASK
@@ -1391,6 +1430,210 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
     }
 #undef PK
     return rptr;
+}
+
+/* ---- MES user queues ---- */
+
+static uint64_t q64(const uint32_t *f, unsigned i) { return f[i] | ((uint64_t)f[i + 1] << 32); }
+
+/* ADD_QUEUE: the MQD has to describe the queue the frame names (its own
+ * address, the doorbell), the process gets a VMID of the GFXHUB mask and
+ * the page tables of the frame; a rejected frame gets no status fence */
+static int uq_add(const uint32_t *f)
+{
+    uint32_t type = f[27], db = f[18], pid = f[1], vmid = 0, taken = 0, slot = 8, ngfx = 0, i;
+    uint64_t mqd = q64(f, 19), gang = q64(f, 14), pd = q64(f, 2);
+    uint32_t dist = regGCVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 - regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32;
+    const uint32_t *m = (const uint32_t *)mc_ptr(mqd, type == 2 ? 512 : 2048);
+    struct sim_uq *u;
+    if (!S.mes_sched.hw_rsrc || type > 2 || !pid || !gang || (gang & 4095) || !q64(f, 10) || !m || !(pd & 1))
+        return 0;
+    if (type == 1 && (m[0] != 0xC0310800u || m[128] != (uint32_t)mqd ||
+                      !(m[143] & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK) ||
+                      ((m[143] & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) != db))
+        return 0;
+    if (type == 0 && (m[128] != (uint32_t)mqd || m[130] != 1 ||
+                      !(m[143] & CP_RB_DOORBELL_CONTROL__DOORBELL_EN_MASK) ||
+                      ((m[143] & CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) != db))
+        return 0;
+    if (type == 2 && (!(m[17] & SDMA0_QUEUE0_DOORBELL__ENABLE_MASK) ||
+                      ((m[19] & SDMA0_QUEUE0_DOORBELL_OFFSET__OFFSET_MASK) >> 2) != db))
+        return 0;
+    for (i = 0; i < 8; i++) {
+        if (!S.uq[i].used) {
+            if (slot == 8)
+                slot = i;
+            continue;
+        }
+        if (S.uq[i].doorbell == db)
+            return 0;                               /* that doorbell is mapped already */
+        if (S.uq[i].process_id == pid)
+            vmid = S.uq[i].vmid;
+        else
+            taken |= 1u << S.uq[i].vmid;
+        ngfx += S.uq[i].type == type;
+    }
+    for (i = 1; !vmid && i < 16; i++)
+        if ((S.mes_sched.hw[2] & (1u << i)) && !(taken & (1u << i)))
+            vmid = i;
+    if (!vmid || slot == 8)
+        return 0;
+    u = &S.uq[slot];
+    memset(u, 0, sizeof(*u));
+    u->used = 1;
+    u->type = type;
+    u->doorbell = db;
+    u->process_id = pid;
+    u->vmid = vmid;
+    u->mqd = mqd;
+    u->pd = pd;
+    u->gang_ctx = gang;
+    u->proc_ctx = q64(f, 10);
+    u->wptr_addr = q64(f, 21);
+    u->queue_size_dw = f[29];
+    if (type == 0) {           /* the gfx pipe's queues past the kernel's (gfx_hqd_mask) */
+        u->me = 0; u->pipe = 0; u->queue = 1 + ngfx;
+        u->fence_addr = q64(m, 510);
+    } else if (type == 1) {    /* queues 2-3 of the MEC1 pipes (compute_hqd_mask 0xc) */
+        u->me = 1; u->pipe = slot % 4; u->queue = 2 + (slot / 4) % 2;
+        u->fence_addr = q64(m, 446);
+    } else {                   /* SDMA0 queues past the kernel's (sdma_hqd_mask 0xfc) */
+        u->me = 0; u->pipe = 0; u->queue = 2 + ngfx;
+        u->fence_addr = q64(m, 43);
+    }
+    S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 + dist * vmid] = (uint32_t)pd;
+    S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32 + dist * vmid] = (uint32_t)(pd >> 32);
+    S.uq_adds++;
+    return 1;
+}
+
+/* REMOVE_QUEUE: by doorbell, with the gang context it was added with */
+static int uq_remove(const uint32_t *f)
+{
+    for (uint32_t i = 0; i < 8; i++)
+        if (S.uq[i].used && S.uq[i].doorbell == f[1] && S.uq[i].gang_ctx == q64(f, 2)) {
+            memset(&S.uq[i], 0, sizeof(S.uq[i]));
+            S.uq_removes++;
+            return 1;
+        }
+    return 0;
+}
+
+/* a gfx / compute user queue interrupts: rptr to the fence address, EOP IV */
+static void uq_eop(void)
+{
+    struct sim_uq *u = &S.uq[S.cp_cur_uq - 1];
+    uint8_t *fa = mc_ptr(u->fence_addr, 8);
+    uint32_t en = u->me == 0
+        ? S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE_MASK
+        : S.reg[GCR(regCP_ME1_PIPE0_INT_CNTL) + u->pipe] & CP_ME1_PIPE0_INT_CNTL__TIME_STAMP_INT_ENABLE_MASK;
+    u->eops++;
+    S.uq_eops++;
+    if (fa)
+        memcpy(fa, &S.cp_uq_pos, 8);
+    else
+        S.uq_faults++;
+    if (en)
+        ih_push_iv(RD_IH_CLIENT_GRBM_CP, RD_IH_SRC_CP_EOP, (u->queue << 4) | (u->me << 2) | u->pipe,
+                   u->vmid, u->process_id, u->doorbell, 0);
+}
+
+static int uq_rd(const struct sim_uq *u, uint64_t va, uint32_t *v)
+{
+    uint8_t *p = vm_ptr(u->vmid, va, 4);
+    if (!p)
+        return 0;
+    memcpy(v, p, 4);
+    return 1;
+}
+
+static int uq_wr(const struct sim_uq *u, uint64_t va, const void *v, uint32_t len)
+{
+    uint8_t *p = vm_ptr(u->vmid, va, len);
+    if (!p)
+        return 0;
+    memcpy(p, v, len);
+    return 1;
+}
+
+/* an SDMA user queue: NOP, WRITE_LINEAR, FENCE (+ the user fence), TRAP */
+static void uq_run_sdma(struct sim_uq *u, const uint32_t *m, uint64_t wptr)
+{
+    uint64_t base = q64(m, 1) << 8, rwb = ((uint64_t)m[7] << 32) | m[8];
+    uint32_t size = 4u << ((m[0] & SDMA0_QUEUE0_RB_CNTL__RB_SIZE_MASK) >> SDMA0_QUEUE0_RB_CNTL__RB_SIZE__SHIFT);
+#define URD(k, v) uq_rd(u, base + ((u->rptr + 4ull * (k)) & (size - 1)), (v))
+    while ((u->rptr & (size - 1)) != (wptr & (size - 1))) {
+        uint32_t h, op, n, a0, a1, cnt, v, k;
+        if (!URD(0, &h)) { S.uq_faults++; break; }
+        op = h & 0xff;
+        if (op == SDMA_OP_NOP) {
+            n = 1 + ((h >> 16) & 0x3fff);
+        } else if (op == SDMA_OP_WRITE && ((h >> 8) & 0xff) == 0) {
+            if (!URD(1, &a0) || !URD(2, &a1) || !URD(3, &cnt)) { S.uq_faults++; break; }
+            cnt = (cnt & 0xfffff) + 1;
+            for (k = 0; k < cnt; k++)
+                if (!URD(4 + k, &v) || !uq_wr(u, (a0 | ((uint64_t)a1 << 32)) + 4ull * k, &v, 4))
+                    S.uq_faults++;
+            n = 4 + cnt;
+        } else if (op == SDMA_OP_FENCE) {
+            uint64_t pos = u->rptr + 16;
+            uint8_t *fa = mc_ptr(u->fence_addr, 8);
+            if (!URD(1, &a0) || !URD(2, &a1) || !URD(3, &v) || !uq_wr(u, a0 | ((uint64_t)a1 << 32), &v, 4))
+                S.uq_faults++;
+            if (fa)
+                memcpy(fa, &pos, 8);
+            else
+                S.uq_faults++;
+            u->eops++;
+            S.uq_eops++;
+            if (S.reg[GC_BASE0 + regSDMA0_CNTL] & SDMA0_CNTL__TRAP_ENABLE_MASK)
+                ih_push_iv(RD_IH_CLIENT_GFX, RD_IH_SRC_SDMA_FENCE, u->queue, u->vmid, u->process_id,
+                           u->doorbell << 2, 0);
+            n = 4;
+        } else if (op == SDMA_OP_TRAP) {
+            if (S.reg[GC_BASE0 + regSDMA0_CNTL] & SDMA0_CNTL__TRAP_ENABLE_MASK)
+                ih_push(RD_IH_CLIENT_GFX, RD_IH_SRC_SDMA_TRAP, u->queue);
+            n = 2;
+        } else {
+            S.uq_faults++;
+            break;
+        }
+        u->rptr += 4ull * n;
+    }
+#undef URD
+    if (!uq_wr(u, rwb, &u->rptr, 8))
+        S.uq_faults++;
+}
+
+/* a doorbell of a MES-mapped user queue: run it up to 'wptr' */
+static void uq_run(uint32_t i, uint64_t wptr)
+{
+    static uint32_t ring[65536];
+    struct sim_uq *u = &S.uq[i];
+    const uint32_t *m = (const uint32_t *)mc_ptr(u->mqd, u->type == 2 ? 512 : 2048);
+    uint64_t base, rwb;
+    uint32_t ndw, k;
+    u->runs++;
+    S.uq_runs++;
+    if (!m) { S.uq_faults++; return; }
+    if (u->type == 2) {
+        uq_run_sdma(u, m, wptr);
+        return;
+    }
+    ndw = u->type == 0 ? 2u << ((m[145] & CP_GFX_HQD_CNTL__RB_BUFSZ_MASK) >> CP_GFX_HQD_CNTL__RB_BUFSZ__SHIFT)
+                       : 2u << ((m[145] & CP_HQD_PQ_CONTROL__QUEUE_SIZE_MASK) >> CP_HQD_PQ_CONTROL__QUEUE_SIZE__SHIFT);
+    base = q64(m, 136) << 8;
+    rwb = m[139] | ((uint64_t)(m[140] & 0xffff) << 32);
+    if (ndw > 65536) { S.uq_faults++; return; }
+    for (k = 0; k < ndw; k++)          /* the ring, through the process VM */
+        if (!uq_rd(u, base + 4ull * k, &ring[k])) { S.uq_faults++; return; }
+    S.cp_cur_uq = (int)i + 1;
+    S.cp_cur_me = u->me; S.cp_cur_pipe = u->pipe; S.cp_cur_queue = u->queue;
+    u->rptr = cp_exec(ring, ndw - 1, u->rptr, wptr, 0);
+    S.cp_cur_uq = 0;
+    S.cp_cur_me = 0; S.cp_cur_pipe = 0; S.cp_cur_queue = 0;
+    if (!uq_wr(u, rwb & ~7ull, &u->rptr, 8))
+        S.uq_faults++;
 }
 
 /* the MES scheduler firmware: MESAPI frames (mes_v11_api_def.h) */
@@ -1417,6 +1660,12 @@ static uint64_t mes_api_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, 
                 S.mes_sched.before_rsrc++;
             S.mes_sched.queries++;
             st = 2;
+        } else if (op == RD_MES_SCH_API_ADD_QUEUE) {
+            if (!uq_add(f)) { S.uq_bad++; continue; }
+            st = RD_MES_ADD_QUEUE_STATUS_DW;
+        } else if (op == RD_MES_SCH_API_REMOVE_QUEUE) {
+            if (!uq_remove(f)) { S.uq_bad++; continue; }
+            st = RD_MES_REMOVE_QUEUE_STATUS_DW;
         } else {
             S.mes_sched.bad++;
             continue;
@@ -1510,6 +1759,11 @@ static void sim_doorbell(void *ctx, uint32_t index, uint64_t v)
             return;
         }
     }
+    for (uint32_t i = 0; i < 8; i++)
+        if (S.uq[i].used && S.uq[i].doorbell == index) {
+            uq_run(i, v);
+            return;
+        }
     S.db_unclaimed++;
 }
 
@@ -2838,6 +3092,874 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     CHECK(dcn32_read_state(dev, &dc) == 1 && dc.head[0].pipe == 1);
 }
 
+/* ---- user queues through the MES (mes_userqueue.c with the gfx_v11_0 /
+ * sdma_v6_0 MQDs and mes_v11_0 ADD_QUEUE / REMOVE_QUEUE) ---- */
+
+struct uq_iv_seen { unsigned n; uint32_t db[8], client[8], src[8], ring[8], vmid[8], pasid[8]; };
+static void uq_iv_cb(void *ctx, const rdna3_iv *iv)
+{
+    struct uq_iv_seen *s = (struct uq_iv_seen *)ctx;
+    if (s->n < 8) {
+        s->db[s->n] = ih60_iv_userq_doorbell(iv);
+        s->client[s->n] = iv->client_id;
+        s->src[s->n] = iv->src_id;
+        s->ring[s->n] = iv->ring_id;
+        s->vmid[s->n] = iv->vmid;
+        s->pasid[s->n] = iv->pasid;
+    }
+    s->n++;
+}
+
+/* PM4 for a user queue: WRITE_DATA of 'v' to VA 'a', then a RELEASE_MEM
+ * that writes 'fv' to VA 'fa' and interrupts (INT_SEL 2); 13 dwords */
+static uint32_t uq_pm4(uint32_t *q, uint64_t a, uint32_t v, uint64_t fa, uint32_t fv)
+{
+    uint32_t n = 0;
+    q[n++] = PACKET3(PACKET3_WRITE_DATA, 3);
+    q[n++] = WRITE_DATA_DST_SEL(5) | WR_CONFIRM;
+    q[n++] = (uint32_t)a;
+    q[n++] = (uint32_t)(a >> 32);
+    q[n++] = v;
+    q[n++] = PACKET3(PACKET3_RELEASE_MEM, 6);
+    q[n++] = 0x14;                          /* CACHE_FLUSH_AND_INV_TS_EVENT */
+    q[n++] = (1u << 29) | (2u << 24);       /* DATA_SEL 1 (32 bit), INT_SEL 2 */
+    q[n++] = (uint32_t)fa;
+    q[n++] = (uint32_t)(fa >> 32);
+    q[n++] = fv;
+    q[n++] = 0;
+    q[n++] = 0;
+    return n;
+}
+
+static void test_userq_hw(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
+{
+    static rdna3_pt_pool pool;
+    static rdna3_vm vm;
+    static rdna3_ih ih;
+    static uint32_t mqd[512];
+    const uint64_t va = 0x0000600000000000ull;
+    /* pages of one VRAM chunk; 0-7 are also mapped at 'va' in the process VM */
+    enum { P_RING_C, P_RING_G, P_RING_S, P_WP_C, P_WP_G, P_WP_S, P_DST, P_EOP,
+           P_FENCE, P_MQD_C, P_MQD_G, P_MQD_S, P_CTX_C, P_CTX_G = P_CTX_C + 2, P_CTX_S = P_CTX_G + 2,
+           P_END = P_CTX_S + 2 };
+    uint64_t chunk = rdna3_vram_alloc(dev, P_END * 4096ull, 4096, "uq-test");
+    const uint32_t dbc = 0x1810, dbg = 0x1812, dbs = 0x1820;   /* dword indices in BAR2 */
+    uint32_t sav[6], q[64], n, v, ver0 = mes->sched_version, failed_at_start = mes->failed, i;
+    uint64_t pd, w, got;
+    struct uq_iv_seen seen;
+    amd_mqd_prop pr;
+    amd_mes_add_queue in;
+    amd_mes_remove_queue rm;
+#define PG(i_) (chunk + (uint64_t)(i_) * 4096)
+#define MC(i_) rdna3_vram_mc(dev, PG(i_))
+#define VA(i_) (va + (uint64_t)(i_) * 4096)
+    CHECK(chunk != UINT64_MAX);
+    rdna3_vram_fill(dev, chunk, 0, P_END * 4096ull);
+    memset(&pool, 0, sizeof(pool));
+    memset(&vm, 0, sizeof(vm));
+    CHECK(gpuvm_pool_init(dev, &pool, 16) == RDNA3_OK && gpuvm_vm_init(dev, &vm, &pool) == RDNA3_OK);
+    CHECK(gpuvm_map_linear(dev, &vm, va, rdna3_vram_pa(dev, chunk), 8,
+                           gpuvm_pte_flags((1u << 1) | (1u << 2) | (1u << 3), 0)) == RDNA3_OK);
+    pd = gpuvm_pd_addr(dev, &vm);
+    CHECK(ih60_init(dev, &ih, 4096, gmc->dummy_page_pa, 0) == RDNA3_OK);
+    memset(&S.uq, 0, sizeof(S.uq));
+    S.uq_adds = S.uq_removes = S.uq_bad = S.uq_faults = S.uq_runs = S.uq_eops = 0;
+    mes->sched_version = 0x0000207a;          /* API version 2, firmware 122 */
+
+    /* the gates of gfx_v11_0_gpu_early_init / sdma_v6_0_sw_init */
+    CHECK(gfx11_userq_supported(2390, 2530, 2600, 120) && !gfx11_userq_supported(2389, 2530, 2600, 120) &&
+          !gfx11_userq_supported(2390, 2530, 2600, 119) && !gfx11_userq_supported(2390, 2529, 2600, 120) &&
+          !gfx11_userq_supported(2390, 2530, 2599, 120));
+    CHECK(sdma60_userq_supported(25) && !sdma60_userq_supported(24));
+
+    /* the EOP interrupts of every pipe a user queue may land on, the SDMA traps */
+    sav[0] = S.reg[GCR(regCP_INT_CNTL_RING0)];
+    for (i = 0; i < 4; i++)
+        sav[1 + i] = S.reg[GCR(regCP_ME1_PIPE0_INT_CNTL) + i];
+    sav[5] = S.reg[GC_BASE0 + regSDMA0_CNTL];
+    gfx11_set_userq_eop_interrupts(dev, 3, 1);
+    sdma60_set_userq_trap_interrupts(dev, 2, 1);
+    CHECK(S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__TIME_STAMP_INT_ENABLE_MASK);
+    for (i = 0; i < 4; i++)
+        CHECK(S.reg[GCR(regCP_ME1_PIPE0_INT_CNTL) + i] & CP_ME1_PIPE0_INT_CNTL__TIME_STAMP_INT_ENABLE_MASK);
+    CHECK(S.reg[GC_BASE0 + regSDMA0_CNTL] & SDMA0_CNTL__TRAP_ENABLE_MASK);
+    CHECK(S.reg[GC_BASE0 + regSDMA0_CNTL + 0x600] & SDMA0_CNTL__TRAP_ENABLE_MASK);
+
+    /* compute: gfx_v11_0_compute_mqd_init from mes_userq_mqd_create's props */
+    memset(&pr, 0, sizeof(pr));
+    pr.mqd_gpu_addr = MC(P_MQD_C);
+    pr.hqd_base_gpu_addr = VA(P_RING_C);
+    pr.rptr_gpu_addr = VA(P_WP_C) + 8;
+    pr.wptr_gpu_addr = VA(P_WP_C);
+    pr.queue_size = 4096;
+    pr.use_doorbell = 1;
+    pr.doorbell_index = dbc;
+    pr.eop_gpu_addr = VA(P_EOP);
+    pr.hqd_pipe_priority = AMD_GFX_PIPE_PRIO_NORMAL;
+    pr.hqd_queue_priority = AMD_GFX_QUEUE_PRIORITY_MINIMUM;
+    pr.fence_address = MC(P_FENCE);
+    memset(mqd, 0, sizeof(mqd));
+    CHECK(gfx11_compute_mqd_init(dev, mqd, &pr) == RDNA3_OK);
+    CHECK(mqd[0] == 0xC0310800u && mqd[128] == (uint32_t)MC(P_MQD_C) && mqd[129] == (uint32_t)(MC(P_MQD_C) >> 32));
+    CHECK(mqd[136] == (uint32_t)(VA(P_RING_C) >> 8) && mqd[137] == (uint32_t)(VA(P_RING_C) >> 40));
+    CHECK((mqd[145] & CP_HQD_PQ_CONTROL__QUEUE_SIZE_MASK) == 9 && (mqd[145] & CP_HQD_PQ_CONTROL__KMD_QUEUE_MASK) &&
+          (mqd[145] & CP_HQD_PQ_CONTROL__UNORD_DISPATCH_MASK) && !(mqd[145] & CP_HQD_PQ_CONTROL__TMZ_MASK));
+    CHECK(((mqd[143] & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == dbc &&
+          (mqd[143] & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK));
+    CHECK(mqd[165] == (uint32_t)(VA(P_EOP) >> 8) && mqd[130] == 0 && mqd[133] == 1 && mqd[134] == 0);
+    CHECK(mqd[139] == (uint32_t)(VA(P_WP_C) + 8) && mqd[141] == (uint32_t)VA(P_WP_C) && mqd[140] == 0x6000);
+    CHECK(mqd[446] == (uint32_t)MC(P_FENCE) && mqd[447] == (uint32_t)(MC(P_FENCE) >> 32));
+    rdna3_vram_write(dev, PG(P_MQD_C), mqd, 2048);
+
+    /* ADD_QUEUE: the process gets VMID 8, the first of the GFXHUB mask */
+    memset(&in, 0, sizeof(in));
+    in.process_id = 42;
+    in.page_table_base_addr = pd;
+    in.process_va_end = (1ull << 36) - 1;
+    in.process_quantum = 100000;
+    in.gang_quantum = 10000;
+    in.process_context_addr = MC(P_CTX_C);
+    in.gang_context_addr = MC(P_CTX_C) + 4096;
+    in.inprocess_gang_priority = AMD_MES_PRIORITY_LEVEL_NORMAL;
+    in.gang_global_priority_level = AMD_MES_PRIORITY_LEVEL_NORMAL;
+    in.doorbell_offset = dbc;
+    in.mqd_addr = MC(P_MQD_C);
+    in.wptr_addr = VA(P_WP_C);
+    in.wptr_mc_addr = MC(P_WP_C);
+    in.queue_type = 1;
+    in.queue_size = 1024;
+    CHECK(gfx11_mes_add_hw_queue(dev, mes, &in, gmc->vm_cntx_cntl) == RDNA3_OK);
+    CHECK(S.uq_adds == 1 && S.uq[0].used && S.uq[0].vmid == 8 && S.uq[0].type == 1 && S.uq[0].me == 1);
+    CHECK(S.uq[0].wptr_addr == MC(P_WP_C) && S.uq[0].queue_size_dw == 1024 && S.uq[0].pd == pd);
+    CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 +
+                8 * (regGCVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 - regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32)] ==
+          (uint32_t)pd);
+    /* the client writes its ring and wptr, rings the doorbell; the work
+     * lands through its VM, the fence slot gets the rptr, the EOP IV names
+     * the doorbell */
+    n = uq_pm4(q, VA(P_DST), 0xC0DE0001, VA(P_DST) + 4, 0x77);
+    rdna3_vram_write(dev, PG(P_RING_C), q, 4ull * n);
+    w = n;
+    rdna3_vram_write(dev, PG(P_WP_C), &w, 8);
+    rdna3_hdp_flush(dev);
+    rdna3_doorbell_wr64(dev, dbc, w);
+    rdna3_vram_read(dev, PG(P_DST), &v, 4);
+    CHECK(v == 0xC0DE0001 && S.uq_runs == 1 && S.uq_eops == 1 && S.uq_faults == 0);
+    rdna3_vram_read(dev, PG(P_DST) + 4, &v, 4);
+    CHECK(v == 0x77);
+    rdna3_vram_read(dev, PG(P_FENCE), &got, 8);
+    CHECK(got == n);
+    rdna3_vram_read(dev, PG(P_WP_C) + 8, &got, 8);
+    CHECK(got == n);
+    memset(&seen, 0, sizeof(seen));
+    CHECK(ih60_process(dev, &ih, uq_iv_cb, &seen) == 1);
+    CHECK(seen.n == 1 && seen.db[0] == dbc && seen.client[0] == RD_IH_CLIENT_GRBM_CP &&
+          seen.src[0] == RD_IH_SRC_CP_EOP && seen.vmid[0] == 8 && seen.pasid[0] == 42);
+    CHECK(((seen.ring[0] >> 2) & 3) == 1);   /* MEC1 */
+    /* more work on the same queue: the rptr runs on */
+    n = uq_pm4(q, VA(P_DST) + 8, 0xC0DE0002, VA(P_DST) + 12, 0x78);
+    rdna3_vram_write(dev, PG(P_RING_C) + 4ull * w, q, 4ull * n);
+    w += n;
+    rdna3_vram_write(dev, PG(P_WP_C), &w, 8);
+    rdna3_hdp_flush(dev);
+    rdna3_doorbell_wr64(dev, dbc, w);
+    rdna3_vram_read(dev, PG(P_FENCE), &got, 8);
+    CHECK(got == w && w == 26);
+    rdna3_vram_read(dev, PG(P_DST) + 8, &v, 4);
+    CHECK(v == 0xC0DE0002);
+
+    /* gfx: gfx_v11_0_gfx_mqd_init with the shadow / CSA / fence the user
+     * queue adds; the same process keeps its VMID */
+    memset(&pr, 0, sizeof(pr));
+    pr.mqd_gpu_addr = MC(P_MQD_G);
+    pr.hqd_base_gpu_addr = VA(P_RING_G);
+    pr.rptr_gpu_addr = VA(P_WP_G) + 8;
+    pr.wptr_gpu_addr = VA(P_WP_G);
+    pr.queue_size = 4096;
+    pr.use_doorbell = 1;
+    pr.doorbell_index = dbg;
+    pr.shadow_addr = 0x0000700000000000ull;
+    pr.csa_addr = 0x0000700000100000ull;
+    pr.fence_address = MC(P_FENCE) + 8;
+    memset(mqd, 0, sizeof(mqd));
+    CHECK(gfx11_gfx_mqd_init(dev, mqd, &pr) == RDNA3_OK);
+    CHECK(mqd[0] == 0 && mqd[1] == 0x7000 && mqd[4] == 0x00100000 && mqd[5] == 0x7000);
+    CHECK(mqd[510] == (uint32_t)(MC(P_FENCE) + 8) && mqd[128] == (uint32_t)MC(P_MQD_G) && mqd[130] == 1);
+    CHECK(((mqd[143] & CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == dbg &&
+          (mqd[143] & CP_RB_DOORBELL_CONTROL__DOORBELL_EN_MASK));
+    CHECK((mqd[145] & CP_GFX_HQD_CNTL__RB_BUFSZ_MASK) == 9 &&
+          ((mqd[145] & CP_GFX_HQD_CNTL__RB_BLKSZ_MASK) >> CP_GFX_HQD_CNTL__RB_BLKSZ__SHIFT) == 7 &&
+          !(mqd[145] & CP_GFX_HQD_CNTL__TMZ_MATCH_MASK));
+    CHECK(mqd[134] == 0 && (mqd[135] & CP_GFX_HQD_QUANTUM__QUANTUM_EN_MASK) &&
+          (mqd[162] & CP_GFX_MQD_CONTROL__PRIV_STATE_MASK) && mqd[136] == (uint32_t)(VA(P_RING_G) >> 8));
+    rdna3_vram_write(dev, PG(P_MQD_G), mqd, 2048);
+    {   /* a secure high-priority queue: TMZ_MATCH and priority level 1 */
+        static uint32_t m2[512];
+        amd_mqd_prop p2 = pr;
+        p2.tmz_queue = 1;
+        p2.hqd_pipe_priority = AMD_GFX_PIPE_PRIO_HIGH;
+        memset(m2, 0, sizeof(m2));
+        CHECK(gfx11_gfx_mqd_init(dev, m2, &p2) == RDNA3_OK);
+        CHECK((m2[145] & CP_GFX_HQD_CNTL__TMZ_MATCH_MASK) && (m2[134] & CP_GFX_HQD_QUEUE_PRIORITY__PRIORITY_LEVEL_MASK));
+    }
+    in.doorbell_offset = dbg;
+    in.mqd_addr = MC(P_MQD_G);
+    in.wptr_addr = VA(P_WP_G);
+    in.wptr_mc_addr = MC(P_WP_G);
+    in.process_context_addr = MC(P_CTX_G);
+    in.gang_context_addr = MC(P_CTX_G) + 4096;
+    in.queue_type = 0;
+    CHECK(gfx11_mes_add_hw_queue(dev, mes, &in, gmc->vm_cntx_cntl) == RDNA3_OK);
+    CHECK(S.uq_adds == 2 && S.uq[1].vmid == 8 && S.uq[1].me == 0 && S.uq[1].queue == 1);
+    n = uq_pm4(q, VA(P_DST) + 16, 0xC0DE0003, VA(P_DST) + 20, 0x79);
+    rdna3_vram_write(dev, PG(P_RING_G), q, 4ull * n);
+    w = n;
+    rdna3_vram_write(dev, PG(P_WP_G), &w, 8);
+    rdna3_hdp_flush(dev);
+    rdna3_doorbell_wr64(dev, dbg, w);
+    rdna3_vram_read(dev, PG(P_DST) + 16, &v, 4);
+    CHECK(v == 0xC0DE0003 && S.uq_faults == 0);
+    rdna3_vram_read(dev, PG(P_FENCE) + 8, &got, 8);
+    CHECK(got == n);
+    memset(&seen, 0, sizeof(seen));
+    CHECK(ih60_process(dev, &ih, uq_iv_cb, &seen) == 2);   /* the second compute run, then gfx */
+    CHECK(seen.db[0] == dbc && seen.db[1] == dbg && seen.ring[1] == ((1u << 4) | 0));
+
+    /* SDMA: sdma_v6_0_mqd_init; another process, VMID 9 */
+    memset(&pr, 0, sizeof(pr));
+    pr.mqd_gpu_addr = MC(P_MQD_S);
+    pr.hqd_base_gpu_addr = VA(P_RING_S);
+    pr.rptr_gpu_addr = VA(P_WP_S) + 8;
+    pr.wptr_gpu_addr = VA(P_WP_S);
+    pr.queue_size = 4096;
+    pr.use_doorbell = 1;
+    pr.doorbell_index = dbs;
+    pr.csa_addr = 0x0000700000200000ull;
+    pr.fence_address = MC(P_FENCE) + 16;
+    S.reg[GC_BASE0 + regSDMA0_QUEUE0_IB_CNTL] = 0x00000101;
+    memset(mqd, 0, sizeof(mqd));
+    CHECK(sdma60_mqd_init(dev, mqd, &pr) == RDNA3_OK);
+    CHECK(((mqd[0] & SDMA0_QUEUE0_RB_CNTL__RB_SIZE_MASK) >> SDMA0_QUEUE0_RB_CNTL__RB_SIZE__SHIFT) == 10 &&
+          (mqd[0] & SDMA0_QUEUE0_RB_CNTL__RPTR_WRITEBACK_ENABLE_MASK) &&
+          (mqd[0] & SDMA0_QUEUE0_RB_CNTL__F32_WPTR_POLL_ENABLE_MASK));
+    CHECK(mqd[1] == (uint32_t)(VA(P_RING_S) >> 8) && mqd[2] == (uint32_t)(VA(P_RING_S) >> 40));
+    CHECK(mqd[8] == (uint32_t)(VA(P_WP_S) + 8) && mqd[7] == 0x6000 && mqd[27] == (uint32_t)VA(P_WP_S));
+    CHECK(mqd[9] == 0x101 && mqd[19] == dbs << 2 && (mqd[17] & SDMA0_QUEUE0_DOORBELL__ENABLE_MASK));
+    CHECK(mqd[20] == 0x00200000 && mqd[21] == 0x7000 && mqd[28] == 0x4000 && mqd[25] == 0xf);
+    CHECK(mqd[43] == (uint32_t)(MC(P_FENCE) + 16) && mqd[44] == (uint32_t)((MC(P_FENCE) + 16) >> 32));
+    rdna3_vram_write(dev, PG(P_MQD_S), mqd, 512);
+    in.process_id = 43;
+    in.doorbell_offset = dbs;
+    in.mqd_addr = MC(P_MQD_S);
+    in.wptr_addr = VA(P_WP_S);
+    in.wptr_mc_addr = MC(P_WP_S);
+    in.process_context_addr = MC(P_CTX_S);
+    in.gang_context_addr = MC(P_CTX_S) + 4096;
+    in.queue_type = 2;
+    CHECK(gfx11_mes_add_hw_queue(dev, mes, &in, gmc->vm_cntx_cntl) == RDNA3_OK);
+    CHECK(S.uq_adds == 3 && S.uq[2].vmid == 9 && S.uq[2].type == 2);
+    n = 0;
+    q[n++] = SDMA_PKT_HEADER_OP(SDMA_OP_WRITE);
+    q[n++] = (uint32_t)(VA(P_DST) + 24);
+    q[n++] = (uint32_t)((VA(P_DST) + 24) >> 32);
+    q[n++] = 0;                               /* one dword */
+    q[n++] = 0xC0DE0004;
+    q[n++] = SDMA_PKT_HEADER_OP(SDMA_OP_FENCE);
+    q[n++] = (uint32_t)(VA(P_DST) + 28);
+    q[n++] = (uint32_t)((VA(P_DST) + 28) >> 32);
+    q[n++] = 0x7a;
+    rdna3_vram_write(dev, PG(P_RING_S), q, 4ull * n);
+    w = 4ull * n;                             /* SDMA counts bytes */
+    rdna3_vram_write(dev, PG(P_WP_S), &w, 8);
+    rdna3_hdp_flush(dev);
+    rdna3_doorbell_wr64(dev, dbs, w);
+    rdna3_vram_read(dev, PG(P_DST) + 24, &v, 4);
+    CHECK(v == 0xC0DE0004 && S.uq_faults == 0);
+    rdna3_vram_read(dev, PG(P_DST) + 28, &v, 4);
+    CHECK(v == 0x7a);
+    rdna3_vram_read(dev, PG(P_FENCE) + 16, &got, 8);
+    CHECK(got == w);
+    rdna3_vram_read(dev, PG(P_WP_S) + 8, &got, 8);
+    CHECK(got == w);
+    memset(&seen, 0, sizeof(seen));
+    CHECK(ih60_process(dev, &ih, uq_iv_cb, &seen) == 1);
+    CHECK(seen.db[0] == dbs && seen.client[0] == RD_IH_CLIENT_GFX && seen.src[0] == RD_IH_SRC_SDMA_FENCE &&
+          seen.vmid[0] == 9 && seen.pasid[0] == 43);
+
+    /* what the scheduler refuses: no status fence, the submit times out */
+    {
+        uint32_t failed0 = mes->failed, bad0 = S.uq_bad;
+        in.queue_type = 3;
+        CHECK(gfx11_mes_add_hw_queue(dev, mes, &in, gmc->vm_cntx_cntl) == RDNA3_EINVAL);   /* no frame */
+        in.queue_type = 2;
+        CHECK(gfx11_mes_add_hw_queue(dev, mes, &in, gmc->vm_cntx_cntl) == RDNA3_ETIME);    /* doorbell taken */
+        in.doorbell_offset = dbs + 2;                                                    /* not the MQD's */
+        CHECK(gfx11_mes_add_hw_queue(dev, mes, &in, gmc->vm_cntx_cntl) == RDNA3_ETIME);
+        rm.doorbell_offset = dbs;
+        rm.gang_context_addr = MC(P_CTX_C) + 4096;                                       /* not its gang */
+        CHECK(gfx11_mes_remove_hw_queue(dev, mes, &rm) == RDNA3_ETIME);
+        CHECK(mes->failed == failed0 + 3 && S.uq_bad == bad0 + 3 && S.uq_adds == 3 && S.uq_removes == 0);
+    }
+    /* REMOVE_QUEUE: the doorbells reach nothing any more */
+    rm.doorbell_offset = dbc;
+    rm.gang_context_addr = MC(P_CTX_C) + 4096;
+    CHECK(gfx11_mes_remove_hw_queue(dev, mes, &rm) == RDNA3_OK);
+    rm.doorbell_offset = dbg;
+    rm.gang_context_addr = MC(P_CTX_G) + 4096;
+    CHECK(gfx11_mes_remove_hw_queue(dev, mes, &rm) == RDNA3_OK);
+    rm.doorbell_offset = dbs;
+    rm.gang_context_addr = MC(P_CTX_S) + 4096;
+    CHECK(gfx11_mes_remove_hw_queue(dev, mes, &rm) == RDNA3_OK);
+    CHECK(S.uq_removes == 3 && !S.uq[0].used && !S.uq[1].used && !S.uq[2].used);
+    {
+        uint32_t un0 = S.db_unclaimed;
+        rdna3_doorbell_wr64(dev, dbc, 40);
+        CHECK(S.db_unclaimed == un0 + 1);
+    }
+    /* before MES API version 2 the frame carries the wptr's VA */
+    mes->sched_version = 0x0000007a;
+    in.process_id = 42;
+    in.doorbell_offset = dbc;
+    in.mqd_addr = MC(P_MQD_C);
+    in.wptr_addr = VA(P_WP_C);
+    in.wptr_mc_addr = MC(P_WP_C);
+    in.process_context_addr = MC(P_CTX_C);
+    in.gang_context_addr = MC(P_CTX_C) + 4096;
+    in.queue_type = 1;
+    CHECK(gfx11_mes_add_hw_queue(dev, mes, &in, gmc->vm_cntx_cntl) == RDNA3_OK);
+    CHECK(S.uq[0].used && S.uq[0].wptr_addr == VA(P_WP_C));
+    rm.doorbell_offset = dbc;
+    rm.gang_context_addr = MC(P_CTX_C) + 4096;
+    CHECK(gfx11_mes_remove_hw_queue(dev, mes, &rm) == RDNA3_OK);
+    /* a scheduler that is not up takes nothing */
+    mes->ready = 0;
+    CHECK(gfx11_mes_add_hw_queue(dev, mes, &in, gmc->vm_cntx_cntl) == RDNA3_EINVAL &&
+          gfx11_mes_remove_hw_queue(dev, mes, &rm) == RDNA3_EINVAL);
+    mes->ready = 1;
+    CHECK(S.uq_faults == 0 && S.cp_bad == 0);
+
+    mes->sched_version = ver0;
+    mes->failed = failed_at_start;   /* the refusals above were on purpose */
+    S.reg[GCR(regCP_INT_CNTL_RING0)] = sav[0];
+    for (i = 0; i < 4; i++)
+        S.reg[GCR(regCP_ME1_PIPE0_INT_CNTL) + i] = sav[1 + i];
+    S.reg[GC_BASE0 + regSDMA0_CNTL] = sav[5];
+    ih60_disable(dev, &ih);
+    gpuvm_vm_fini(dev, &vm);
+#undef PG
+#undef MC
+#undef VA
+}
+
+/* ---- user queues end to end: uapi/rdna3_drm.c (amdgpu_userq*) on the
+ * simulated MES, with the OS hooks the kext provides ---- */
+
+static struct {
+    rdna3_dev *dev;
+    rdna3_mes *mes;
+    rdna3_gmc *gmc;
+    uint64_t heap, heap_next, heap_end;    /* VRAM BOs: bump allocated */
+    rdna3_pt_pool pool;
+    struct uq_vm { int used; rdna3_vm vm; uint32_t pasid; } vms[4];
+    unsigned waits, adds, removes;
+} UQ;
+
+static void *uqo_zalloc(void *c, size_t n) { (void)c; return calloc(1, n); }
+static void uqo_free(void *c, void *p, size_t n) { (void)c; (void)n; free(p); }
+static int uqo_copyin(void *c, void *d, uint64_t u, size_t n) { (void)c; memcpy(d, (void *)(uintptr_t)u, n); return 0; }
+static int uqo_copyout(void *c, uint64_t u, const void *src, size_t n) { (void)c; memcpy((void *)(uintptr_t)u, src, n); return 0; }
+static int uqo_bo_alloc(void *c, rdna3_bo *bo)
+{
+    uint64_t a = bo->alignment > 4096 ? bo->alignment : 4096, off = (UQ.heap_next + a - 1) & ~(a - 1);
+    (void)c;
+    if (off + bo->size > UQ.heap_end)
+        return -RD_ENOMEM;
+    bo->placement = AMDGPU_GEM_DOMAIN_VRAM;   /* everything in VRAM here */
+    bo->vram_offset = off;
+    UQ.heap_next = off + bo->size;
+    rdna3_vram_fill(UQ.dev, off, 0, bo->size);
+    return 0;
+}
+static void uqo_bo_free(void *c, rdna3_bo *bo) { (void)c; (void)bo; }
+static void *uqo_vm_create(void *c)
+{
+    (void)c;
+    for (uint32_t i = 0; i < 4; i++)
+        if (!UQ.vms[i].used) {
+            memset(&UQ.vms[i].vm, 0, sizeof(UQ.vms[i].vm));
+            if (gpuvm_vm_init(UQ.dev, &UQ.vms[i].vm, &UQ.pool) != RDNA3_OK)
+                return NULL;
+            UQ.vms[i].used = 1;
+            UQ.vms[i].pasid = 100 + i;
+            return &UQ.vms[i];
+        }
+    return NULL;
+}
+static void uqo_vm_destroy(void *c, void *vm)
+{
+    (void)c;
+    gpuvm_vm_fini(UQ.dev, &((struct uq_vm *)vm)->vm);
+    ((struct uq_vm *)vm)->used = 0;
+}
+static int uqo_vm_map(void *c, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off, uint64_t size, uint32_t flags)
+{
+    (void)c;
+    return gpuvm_map_linear(UQ.dev, &((struct uq_vm *)vm)->vm, va, rdna3_vram_pa(UQ.dev, bo->vram_offset + off),
+                            size / 4096, gpuvm_pte_flags(flags, 0)) == RDNA3_OK ? 0 : -RD_ENOMEM;
+}
+static void uqo_vm_unmap(void *c, void *vm, uint64_t va, uint64_t size)
+{
+    (void)c;
+    gpuvm_unmap(UQ.dev, &((struct uq_vm *)vm)->vm, va, size / 4096);
+}
+static void *uqo_bo_kmap(void *c, rdna3_bo *bo)
+{
+    (void)c;
+    return bo->placement == AMDGPU_GEM_DOMAIN_VRAM ? (void *)(S.vram + bo->vram_offset) : NULL;
+}
+static int uqo_bo_gpu_addr(void *c, rdna3_bo *bo, uint64_t *mc)
+{
+    (void)c;
+    if (bo->placement != AMDGPU_GEM_DOMAIN_VRAM)
+        return -RD_EINVAL;
+    *mc = rdna3_vram_mc(UQ.dev, bo->vram_offset);
+    return 0;
+}
+static int uqo_mqd_init(void *c, uint32_t ip, void *mqd, const amd_mqd_prop *p)
+{
+    (void)c;
+    if (ip == AMDGPU_HW_IP_GFX)
+        return gfx11_gfx_mqd_init(UQ.dev, (uint32_t *)mqd, p) ? -RD_EINVAL : 0;
+    if (ip == AMDGPU_HW_IP_COMPUTE)
+        return gfx11_compute_mqd_init(UQ.dev, (uint32_t *)mqd, p) ? -RD_EINVAL : 0;
+    return sdma60_mqd_init(UQ.dev, (uint32_t *)mqd, p) ? -RD_EINVAL : 0;
+}
+static int uqo_add(void *c, void *vm, amd_mes_add_queue *in)
+{
+    int r;
+    (void)c;
+    in->process_id = ((struct uq_vm *)vm)->pasid;
+    in->page_table_base_addr = gpuvm_pd_addr(UQ.dev, &((struct uq_vm *)vm)->vm);
+    r = gfx11_mes_add_hw_queue(UQ.dev, UQ.mes, in, UQ.gmc->vm_cntx_cntl);
+    UQ.adds += !r;
+    return r == RDNA3_OK ? 0 : r == RDNA3_ETIME ? -RD_ETIME : -RD_EINVAL;
+}
+static int uqo_remove(void *c, const amd_mes_remove_queue *in)
+{
+    int r = gfx11_mes_remove_hw_queue(UQ.dev, UQ.mes, in);
+    (void)c;
+    UQ.removes += !r;
+    return r == RDNA3_OK ? 0 : r == RDNA3_ETIME ? -RD_ETIME : -RD_EINVAL;
+}
+/* the GPU here runs at the doorbell: whatever is not done now never is */
+static int uqo_wait(void *c, int (*done)(void *), void *arg, uint64_t abs_ns)
+{
+    (void)c; (void)abs_ns;
+    UQ.waits++;
+    return done(arg) ? 0 : -RD_ETIME;
+}
+static uint64_t uqo_now(void *c) { (void)c; return S.now_us * 1000; }
+static int uqo_privileged(void *c) { (void)c; return 0; }
+
+#define UQ_IOCTL(f_, nr_, a_) rdna3_drm_ioctl((f_), (nr_), &(a_), sizeof(a_))
+
+static uint32_t uq_gem(rdna3_drm_file *f, uint64_t size, uint32_t dom)
+{
+    union drm_amdgpu_gem_create gc;
+    memset(&gc, 0, sizeof(gc));
+    gc.in.bo_size = size;
+    gc.in.alignment = 4096;
+    gc.in.domains = dom;
+    return UQ_IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gc) ? 0 : gc.out.handle;
+}
+
+static int uq_va(rdna3_drm_file *f, uint32_t h, uint64_t va, uint64_t size)
+{
+    struct drm_amdgpu_gem_va a;
+    memset(&a, 0, sizeof(a));
+    a.handle = h;
+    a.operation = AMDGPU_VA_OP_MAP;
+    a.flags = AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE | AMDGPU_VM_PAGE_EXECUTABLE;
+    a.va_address = va;
+    a.map_size = size;
+    return UQ_IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), a);
+}
+
+static int uq_create(rdna3_drm_file *f, uint32_t ip, uint32_t db, uint32_t dboff, uint64_t qva, uint64_t qsize,
+                     uint64_t rptr, uint64_t wptr, const void *mqd, uint64_t mqd_size, uint32_t flags, uint32_t *qid)
+{
+    union drm_amdgpu_userq u;
+    int r;
+    memset(&u, 0, sizeof(u));
+    u.in.op = AMDGPU_USERQ_OP_CREATE;
+    u.in.ip_type = ip;
+    u.in.doorbell_handle = db;
+    u.in.doorbell_offset = dboff;
+    u.in.queue_va = qva;
+    u.in.queue_size = qsize;
+    u.in.rptr_va = rptr;
+    u.in.wptr_va = wptr;
+    u.in.mqd = (uint64_t)(uintptr_t)mqd;
+    u.in.mqd_size = mqd_size;
+    u.in.flags = flags;
+    r = UQ_IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), u);
+    if (!r && qid)
+        *qid = u.out.queue_id;
+    return r;
+}
+
+static int uq_free(rdna3_drm_file *f, uint32_t qid)
+{
+    union drm_amdgpu_userq u;
+    memset(&u, 0, sizeof(u));
+    u.in.op = AMDGPU_USERQ_OP_FREE;
+    u.in.queue_id = qid;
+    return UQ_IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), u);
+}
+
+static int uq_signal(rdna3_drm_file *f, uint32_t qid, const uint32_t *sobjs, uint16_t n)
+{
+    struct drm_amdgpu_userq_signal sg;
+    memset(&sg, 0, sizeof(sg));
+    sg.queue_id = qid;
+    sg.syncobj_handles = (uint64_t)(uintptr_t)sobjs;
+    sg.num_syncobj_handles = n;
+    return UQ_IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_SIGNAL), sg);
+}
+
+static uint32_t uq_sobj(rdna3_drm_file *f)
+{
+    struct drm_syncobj_create c;
+    memset(&c, 0, sizeof(c));
+    return UQ_IOCTL(f, RD_NR_SYNCOBJ_CREATE, c) ? 0 : c.handle;
+}
+
+static int uq_sobj_wait(rdna3_drm_file *f, uint32_t h, int64_t timeout)
+{
+    struct drm_syncobj_wait w;
+    memset(&w, 0, sizeof(w));
+    w.handles = (uint64_t)(uintptr_t)&h;
+    w.count_handles = 1;
+    w.timeout_nsec = timeout;
+    return UQ_IOCTL(f, RD_NR_SYNCOBJ_WAIT, w);
+}
+
+/* the client's side: packets at the ring's tail, the wptr, the doorbell */
+static void uq_submit(rdna3_drm_file *f, uint32_t ring, uint32_t wp, const uint32_t *pk, uint32_t n,
+                      uint64_t *wptr, uint32_t unit, uint32_t doorbell, int ring_it)
+{
+    rdna3_bo *r = rdna3_drm_bo_lookup(f, ring), *w = rdna3_drm_bo_lookup(f, wp);
+    rdna3_vram_write(UQ.dev, r->vram_offset + *wptr * unit, pk, 4ull * n);
+    *wptr += unit == 4 ? n : 4ull * n;
+    rdna3_vram_write(UQ.dev, w->vram_offset, wptr, 8);
+    rdna3_hdp_flush(UQ.dev);
+    if (ring_it)
+        rdna3_doorbell_wr64(UQ.dev, doorbell, *wptr);
+}
+
+static void test_userq_uapi(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
+{
+    static rdna3_drm_device dd;
+    static rdna3_drm_file f1, f2;
+    rdna3_drm_ops ops;
+    amd_discovery disc;
+    const uint64_t va = 0x0000500000000000ull;
+    uint32_t hdb, hring, hwp, hrp, heop, hdst, hring2, hwp2, hrp2, hshadow, hcsa, hring3, hwp3, hrp3, hbig;
+    uint32_t qc = 0, qg = 0, qs = 0, s1, s2, s3, pk[32], n, dbbase, v, adds0, removes0, ver0 = mes->sched_version;
+    uint64_t wc = 0, wg = 0, ws = 0, got;
+    struct drm_amdgpu_userq_mqd_compute_gfx11 mc;
+    struct drm_amdgpu_userq_mqd_gfx11 mg;
+    struct drm_amdgpu_userq_mqd_sdma_gfx11 ms;
+    uint32_t i;
+
+    memset(&UQ, 0, sizeof(UQ));
+    UQ.dev = dev;
+    UQ.mes = mes;
+    UQ.gmc = gmc;
+    UQ.heap = rdna3_vram_alloc(dev, 2u << 20, 65536, "uq-uapi-heap");
+    UQ.heap_next = UQ.heap;
+    UQ.heap_end = UQ.heap + (2u << 20);
+    CHECK(UQ.heap != UINT64_MAX && gpuvm_pool_init(dev, &UQ.pool, 64) == RDNA3_OK);
+    memset(&S.uq, 0, sizeof(S.uq));
+    S.uq_bad = 0;
+    mes->sched_version = 0x0000207a;
+    memset(&ops, 0, sizeof(ops));
+    ops.zalloc = uqo_zalloc; ops.free = uqo_free; ops.bo_alloc = uqo_bo_alloc; ops.bo_free = uqo_bo_free;
+    ops.copyin = uqo_copyin; ops.copyout = uqo_copyout;
+    ops.vm_create = uqo_vm_create; ops.vm_destroy = uqo_vm_destroy; ops.vm_map = uqo_vm_map; ops.vm_unmap = uqo_vm_unmap;
+    ops.privileged = uqo_privileged;
+    ops.bo_kmap = uqo_bo_kmap; ops.bo_gpu_addr = uqo_bo_gpu_addr; ops.userq_mqd_init = uqo_mqd_init;
+    ops.userq_add_hw_queue = uqo_add; ops.userq_remove_hw_queue = uqo_remove; ops.userq_wait = uqo_wait;
+    ops.now_ns = uqo_now;
+    make_discovery(&disc);
+    rdna3_drm_device_init(&dd, &ops, &disc, 0x747E, 0xC8, 0, 16ull << 30, 256ull << 20, 8ull << 30);
+    CHECK(rdna3_drm_file_open(&dd, &f1) == 0);
+
+    /* no user queues until the OS says so: no doorbell BOs, no queues */
+    CHECK(uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_DOORBELL) == 0);
+    {
+        union drm_amdgpu_gem_create gc;
+        memset(&gc, 0, sizeof(gc));
+        gc.in.bo_size = 4096;
+        gc.in.domains = AMDGPU_GEM_DOMAIN_DOORBELL;
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gc) == -RD_EOPNOTSUPP);
+    }
+    rdna3_drm_device_set_userq(&dd, (1u << AMDGPU_HW_IP_GFX) | (1u << AMDGPU_HW_IP_COMPUTE) | (1u << AMDGPU_HW_IP_DMA),
+                               2u << 20);
+    {   /* DEV_INFO and AMDGPU_INFO_UQ_FW_AREAS */
+        struct drm_amdgpu_info in;
+        struct drm_amdgpu_info_device di;
+        struct drm_amdgpu_info_uq_metadata meta;
+        memset(&in, 0, sizeof(in));
+        in.return_pointer = (uint64_t)(uintptr_t)&di;
+        in.return_size = sizeof(di);
+        in.query = AMDGPU_INFO_DEV_INFO;
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && di.userq_ip_mask == 7);
+        memset(&meta, 0xff, sizeof(meta));
+        in.return_pointer = (uint64_t)(uintptr_t)&meta;
+        in.return_size = sizeof(meta);
+        in.query = AMDGPU_INFO_UQ_FW_AREAS;
+        in.query_hw_ip.type = AMDGPU_HW_IP_GFX;
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0);
+        CHECK(meta.gfx.shadow_size == 73728 && meta.gfx.shadow_alignment == 256 && meta.gfx.csa_size == 484 &&
+              meta.gfx.csa_alignment == 256);
+        in.query_hw_ip.type = AMDGPU_HW_IP_COMPUTE;
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+    }
+
+    /* the client's objects: a doorbell page, ring / wptr / rptr / EOP / dst */
+    hdb = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_DOORBELL);
+    CHECK(hdb && rdna3_drm_bo_lookup(&f1, hdb)->vram_offset == RD_DOORBELL_KERNEL_SIZE);
+    dbbase = (uint32_t)(rdna3_drm_bo_lookup(&f1, hdb)->vram_offset / 4);
+    {
+        union drm_amdgpu_gem_mmap mm;
+        memset(&mm, 0, sizeof(mm));
+        mm.in.handle = hdb;
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP), mm) == 0 &&
+              rdna3_drm_bo_by_mmap_offset(&f1, mm.out.addr_ptr) == rdna3_drm_bo_lookup(&f1, hdb));
+        CHECK(uq_va(&f1, hdb, va + 0x900000, 4096) == 0);   /* recorded only */
+    }
+    hring = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    hwp = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    hrp = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    heop = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    hdst = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    hbig = uq_gem(&f1, 8192, AMDGPU_GEM_DOMAIN_VRAM);
+    CHECK(hring && hwp && hrp && heop && hdst && hbig);
+    CHECK(uq_va(&f1, hring, va, 4096) == 0 && uq_va(&f1, hwp, va + 0x1000, 4096) == 0 &&
+          uq_va(&f1, hrp, va + 0x2000, 4096) == 0 && uq_va(&f1, heop, va + 0x3000, 4096) == 0 &&
+          uq_va(&f1, hdst, va + 0x4000, 4096) == 0 && uq_va(&f1, hbig, va + 0x10000, 8192) == 0);
+    memset(&mc, 0, sizeof(mc));
+    mc.eop_va = va + 0x3000;
+
+    /* what amdgpu_userq_ioctl refuses */
+    adds0 = UQ.adds;
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_COMPUTE, hdb, 0, va, 4096, va + 0x2000, va + 0x1000, &mc, sizeof(mc),
+                    1u << 3, NULL) == -RD_EINVAL);                                  /* unknown flag */
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_VCN_ENC, hdb, 0, va, 4096, va + 0x2000, va + 0x1000, &mc, sizeof(mc),
+                    0, NULL) == -RD_EINVAL);
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_DMA, hdb, 0, va, 4096, va + 0x2000, va + 0x1000, &ms, sizeof(ms),
+                    AMDGPU_USERQ_CREATE_FLAGS_QUEUE_SECURE, NULL) == -RD_EINVAL);   /* no TMZ for SDMA */
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_COMPUTE, hdb, 0, va, 4096, va + 0x2000, va + 0x1000, &mc, sizeof(mc),
+                    AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_HIGH, NULL) == -RD_EACCES);
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_COMPUTE, hdb, 0, 0, 4096, va + 0x2000, va + 0x1000, &mc, sizeof(mc),
+                    0, NULL) == -RD_EINVAL);
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_COMPUTE, hdb, 0, va + 0x800000, 4096, va + 0x2000, va + 0x1000, &mc,
+                    sizeof(mc), 0, NULL) == -RD_EINVAL);                            /* queue not mapped */
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_COMPUTE, hdb, 0, va, 8192, va + 0x2000, va + 0x1000, &mc, sizeof(mc),
+                    0, NULL) == -RD_EINVAL);                                        /* past its mapping */
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_COMPUTE, hring, 0, va, 4096, va + 0x2000, va + 0x1000, &mc, sizeof(mc),
+                    0, NULL) == -RD_EINVAL);                                        /* not a doorbell BO */
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_COMPUTE, hdb, 512, va, 4096, va + 0x2000, va + 0x1000, &mc, sizeof(mc),
+                    0, NULL) == -RD_EINVAL);                                        /* outside the doorbell BO */
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_COMPUTE, hdb, 0, va, 4096, va + 0x2000, va + 0x1000, &mc, 4,
+                    0, NULL) == -RD_EINVAL);                                        /* MQD size */
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_COMPUTE, hdb, 0, va, 4096, va + 0x2000, va + 0x10000, &mc, sizeof(mc),
+                    0, NULL) == -RD_EINVAL);                                        /* wptr BO > 1 page */
+    CHECK(UQ.adds == adds0 && rdna3_drm_bo_lookup(&f1, hdb)->refcnt == 2 && rdna3_drm_bo_lookup(&f1, hbig)->refcnt == 2);
+    for (i = 0; i < RD_MAX_FENCE_DRV; i++)
+        CHECK(!dd.fence_drv || !dd.fence_drv[i].refcnt);
+
+    /* a compute queue: MQD, ADD_QUEUE in the client's process, seq64 in its VM */
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_COMPUTE, hdb, 0, va, 4096, va + 0x2000, va + 0x1000, &mc, sizeof(mc),
+                    AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_NORMAL_HIGH, &qc) == 0 && qc == 1);
+    CHECK(UQ.adds == adds0 + 1 && S.uq[0].used && S.uq[0].type == 1 && S.uq[0].doorbell == dbbase);
+    CHECK(S.uq[0].process_id == 100 && S.uq[0].vmid == 8 && S.uq[0].queue_size_dw == 1024);
+    CHECK(S.uq[0].wptr_addr == rdna3_vram_mc(dev, rdna3_drm_bo_lookup(&f1, hwp)->vram_offset));
+    CHECK(dd.seq64_bo && S.uq[0].fence_addr >= dd.seq64_gpu_addr && S.uq[0].fence_addr < dd.seq64_gpu_addr + RD_SEQ64_SIZE);
+    CHECK(f1.seq64_mapped && rdna3_drm_bo_lookup(&f1, hdb)->refcnt == 3 && rdna3_drm_bo_lookup(&f1, hwp)->refcnt == 3);
+
+    /* a signal before the work ran: the fence waits for the queue's rptr */
+    s1 = uq_sobj(&f1);
+    n = uq_pm4(pk, va + 0x4000, 0xFEED0001, va + 0x4004, 0x11);
+    uq_submit(&f1, hring, hwp, pk, n, &wc, 4, dbbase, 0);
+    CHECK(uq_signal(&f1, qc, &s1, 1) == 0);
+    {
+        struct rd_xnu_syncobj_fence x;
+        memset(&x, 0, sizeof(x));
+        x.handle = s1;
+        CHECK(UQ_IOCTL(&f1, RD_NR_XNU_SYNCOBJ_FENCE, x) == 0 && x.ip == RD_USERQ_FENCE_IP && x.seq == 13 &&
+              !x.signaled);
+    }
+    CHECK(uq_sobj_wait(&f1, s1, 0) == -RD_ETIME);
+    CHECK(uq_sobj_wait(&f1, s1, 1000000) == -RD_ETIME && UQ.waits == 1);
+    /* the doorbell: the queue runs, the firmware writes the rptr to the
+     * seq64 slot, the syncobj signals */
+    rdna3_doorbell_wr64(dev, dbbase, wc);
+    CHECK(S.uq_faults == 0);
+    rdna3_vram_read(dev, rdna3_drm_bo_lookup(&f1, hdst)->vram_offset, &v, 4);
+    CHECK(v == 0xFEED0001);
+    CHECK(uq_sobj_wait(&f1, s1, 1000000) == 0);
+    /* the slot reads the same through the client's VM (seq64 mapped there) */
+    {
+        uint8_t *p = vm_ptr(8, RD_SEQ64_VA + (S.uq[0].fence_addr - dd.seq64_gpu_addr), 8);
+        CHECK(p && (memcpy(&got, p, 8), got == 13));
+    }
+
+    /* a gfx queue of the same client on the next doorbell */
+    hring2 = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    hwp2 = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    hrp2 = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    hshadow = uq_gem(&f1, 73728, AMDGPU_GEM_DOMAIN_VRAM);
+    hcsa = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    CHECK(uq_va(&f1, hring2, va + 0x20000, 4096) == 0 && uq_va(&f1, hwp2, va + 0x21000, 4096) == 0 &&
+          uq_va(&f1, hrp2, va + 0x22000, 4096) == 0 && uq_va(&f1, hshadow, va + 0x40000, 73728) == 0 &&
+          uq_va(&f1, hcsa, va + 0x60000, 4096) == 0);
+    memset(&mg, 0, sizeof(mg));
+    mg.shadow_va = va + 0x40000;
+    mg.csa_va = va + 0x60000;
+    CHECK(uq_create(&f1, AMDGPU_HW_IP_GFX, hdb, 1, va + 0x20000, 4096, va + 0x22000, va + 0x21000, &mg, sizeof(mg),
+                    0, &qg) == 0 && qg == 2);
+    CHECK(S.uq[1].used && S.uq[1].type == 0 && S.uq[1].doorbell == dbbase + 2 && S.uq[1].vmid == 8);
+    {
+        const uint32_t *m = (const uint32_t *)mc_ptr(S.uq[1].mqd, 2048);
+        CHECK(m && m[0] == (uint32_t)(va + 0x40000) && m[4] == (uint32_t)(va + 0x60000) &&
+              q64(m, 510) == S.uq[1].fence_addr);
+    }
+
+    /* USERQ_WAIT: compute work the gfx queue has to wait for comes back as
+     * (seq64 VA, value); the gfx queue holds the compute fence driver */
+    s2 = uq_sobj(&f1);
+    n = uq_pm4(pk, va + 0x4008, 0xFEED0002, va + 0x400c, 0x12);
+    uq_submit(&f1, hring, hwp, pk, n, &wc, 4, dbbase, 0);
+    CHECK(uq_signal(&f1, qc, &s2, 1) == 0 && wc == 26);
+    {
+        struct drm_amdgpu_userq_wait w;
+        struct drm_amdgpu_userq_fence_info fi[4];
+        rdna3_userq_fence_drv *fc = NULL;
+        uint32_t hs[2] = { s2, s1 };
+        memset(&w, 0, sizeof(w));
+        w.waitq_id = qg;
+        w.syncobj_handles = (uint64_t)(uintptr_t)hs;
+        w.num_syncobj_handles = 2;
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT), w) == 0 && w.num_fences == 2);
+        w.num_fences = 1;
+        w.out_fences = (uint64_t)(uintptr_t)fi;
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT), w) == -RD_EINVAL);   /* too small */
+        w.num_fences = 4;
+        memset(fi, 0, sizeof(fi));
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT), w) == 0);
+        /* s1 signaled: one pair, the compute queue's slot at 26 */
+        CHECK(w.num_fences == 1 && fi[0].value == 26 && fi[0].va >= RD_SEQ64_VA &&
+              fi[0].va - RD_SEQ64_VA == S.uq[0].fence_addr - dd.seq64_gpu_addr);
+        for (i = 0; i < RD_MAX_FENCE_DRV; i++)
+            if (dd.fence_drv[i].refcnt && dd.fence_drv[i].va == fi[0].va)
+                fc = &dd.fence_drv[i];
+        CHECK(fc && fc->refcnt == 2 && f1.userqs[qg - 1].nxa == 1);
+        w.waitq_id = 9;
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT), w) == -RD_EINVAL);
+        /* the gfx queue signals: the reference moves onto its fence and
+         * goes once that fence signals */
+        s3 = uq_sobj(&f1);
+        n = uq_pm4(pk, va + 0x4010, 0xFEED0003, va + 0x4014, 0x13);
+        uq_submit(&f1, hring2, hwp2, pk, n, &wg, 4, dbbase + 2, 0);
+        CHECK(uq_signal(&f1, qg, &s3, 1) == 0 && f1.userqs[qg - 1].nxa == 0 && fc->refcnt == 2);
+        rdna3_doorbell_wr64(dev, dbbase, wc);        /* compute first */
+        CHECK(uq_sobj_wait(&f1, s2, 1000000) == 0);
+        rdna3_doorbell_wr64(dev, dbbase + 2, wg);    /* then gfx */
+        rdna3_vram_read(dev, rdna3_drm_bo_lookup(&f1, hdst)->vram_offset + 0x10, &v, 4);
+        CHECK(v == 0xFEED0003 && S.uq_faults == 0);
+        CHECK(uq_sobj_wait(&f1, s3, 1000000) == 0 && fc->refcnt == 1);
+    }
+
+    /* an SDMA queue in a second client: its own process and VMID */
+    CHECK(rdna3_drm_file_open(&dd, &f2) == 0);
+    {
+        uint32_t hdb2 = uq_gem(&f2, 4096, AMDGPU_GEM_DOMAIN_DOORBELL);
+        uint32_t hd2 = uq_gem(&f2, 4096, AMDGPU_GEM_DOMAIN_VRAM), s4;
+        hring3 = uq_gem(&f2, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+        hwp3 = uq_gem(&f2, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+        hrp3 = uq_gem(&f2, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+        CHECK(hdb2 && rdna3_drm_bo_lookup(&f2, hdb2)->vram_offset == RD_DOORBELL_KERNEL_SIZE + 4096);
+        CHECK(uq_va(&f2, hring3, va, 4096) == 0 && uq_va(&f2, hwp3, va + 0x1000, 4096) == 0 &&
+              uq_va(&f2, hrp3, va + 0x2000, 4096) == 0 && uq_va(&f2, hd2, va + 0x4000, 4096) == 0);
+        memset(&ms, 0, sizeof(ms));
+        ms.csa_va = va + 0x8000;
+        CHECK(uq_create(&f2, AMDGPU_HW_IP_DMA, hdb2, 3, va, 4096, va + 0x2000, va + 0x1000, &ms, sizeof(ms), 0,
+                        &qs) == 0 && qs == 1);
+        CHECK(S.uq[2].used && S.uq[2].type == 2 && S.uq[2].vmid == 9 && S.uq[2].process_id == 101 &&
+              S.uq[2].doorbell == dbbase + 1024 + 6);
+        s4 = uq_sobj(&f2);
+        n = 0;
+        pk[n++] = SDMA_PKT_HEADER_OP(SDMA_OP_WRITE);
+        pk[n++] = (uint32_t)(va + 0x4000);
+        pk[n++] = (uint32_t)((va + 0x4000) >> 32);
+        pk[n++] = 0;
+        pk[n++] = 0xFEED0004;
+        pk[n++] = SDMA_PKT_HEADER_OP(SDMA_OP_FENCE);
+        pk[n++] = (uint32_t)(va + 0x4004);
+        pk[n++] = (uint32_t)((va + 0x4004) >> 32);
+        pk[n++] = 0x14;
+        uq_submit(&f2, hring3, hwp3, pk, n, &ws, 1, dbbase + 1024 + 6, 0);
+        CHECK(uq_signal(&f2, qs, &s4, 1) == 0 && uq_sobj_wait(&f2, s4, 1000000) == -RD_ETIME);
+        rdna3_doorbell_wr64(dev, dbbase + 1024 + 6, ws);
+        rdna3_vram_read(dev, rdna3_drm_bo_lookup(&f2, hd2)->vram_offset, &v, 4);
+        CHECK(v == 0xFEED0004 && S.uq_faults == 0 && uq_sobj_wait(&f2, s4, 1000000) == 0);
+        /* the other client's queue ids are not this one's */
+        CHECK(uq_signal(&f2, qg, &s4, 1) == -RD_ENOENT);
+    }
+
+    /* USERQ_FREE: REMOVE_QUEUE, its doorbell reaches nothing any more;
+     * a signal on it fails, the fences it made count as signaled */
+    removes0 = UQ.removes;
+    {
+        union drm_amdgpu_userq u;
+        memset(&u, 0, sizeof(u));
+        u.in.op = AMDGPU_USERQ_OP_FREE;
+        u.in.queue_id = qc;
+        u.in.ip_type = 1;
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), u) == -RD_EINVAL);   /* FREE takes only the id */
+    }
+    n = uq_pm4(pk, va + 0x4020, 0xFEED0005, va + 0x4024, 0x15);
+    uq_submit(&f1, hring, hwp, pk, n, &wc, 4, dbbase, 0);
+    CHECK(uq_signal(&f1, qc, &s1, 1) == 0 && uq_sobj_wait(&f1, s1, 0) == -RD_ETIME);
+    CHECK(uq_free(&f1, qc) == 0 && UQ.removes == removes0 + 1 && !S.uq[0].used);
+    CHECK(uq_free(&f1, qc) == -RD_EINVAL && uq_signal(&f1, qc, &s1, 1) == -RD_ENOENT);
+    CHECK(uq_sobj_wait(&f1, s1, 0) == 0);   /* its driver is gone: cancelled */
+    {
+        uint32_t un0 = S.db_unclaimed;
+        rdna3_doorbell_wr64(dev, dbbase, wc);
+        CHECK(S.db_unclaimed == un0 + 1);
+    }
+    CHECK(rdna3_drm_bo_lookup(&f1, hdb)->refcnt == 3 && rdna3_drm_bo_lookup(&f1, hwp)->refcnt == 2);
+
+    /* a closing client takes its queues with it */
+    rdna3_drm_file_close(&f1);
+    CHECK(UQ.removes == removes0 + 2 && !S.uq[1].used && S.uq[2].used);
+    rdna3_drm_file_close(&f2);
+    CHECK(UQ.removes == removes0 + 3 && !S.uq[2].used);
+    for (i = 0; i < RD_MAX_FENCE_DRV; i++)
+        CHECK(!dd.fence_drv[i].refcnt);
+    for (i = 0; i < RD_SEQ64_SLOTS / 8; i++)
+        CHECK(!dd.seq64_used[i]);
+    for (i = 0; i < RD_MAX_DOORBELL_PAGES / 8; i++)
+        CHECK(!dd.doorbell_used[i]);
+    CHECK(!UQ.vms[0].used && !UQ.vms[1].used);
+    rdna3_drm_device_fini(&dd);
+    CHECK(!dd.seq64_bo); CHECK(S.uq_bad == 0); CHECK(S.cp_bad == 0);
+    mes->sched_version = ver0;
+}
+
 /* ---------------------------- test ---------------------------- */
 
 /* output gamma (hw/dcn32_gamma.c) on the two heads the clone test leaves:
@@ -3726,6 +4848,9 @@ static void run(const char *fwdir)
                         CHECK(hw[54] == 0x447 && hw[55] == 50);
                         CHECK(mes.sched_version == 0x4a && mes.legacy_queue_map && mes.seq == 2 && mes.failed == 0);
                         CHECK(S.cp_bad == 0 && S.db_unclaimed == 0);
+                        /* D: user queues through the scheduler */
+                        test_userq_hw(&dev, &mes, &gmc);
+                        test_userq_uapi(&dev, &mes, &gmc);
                         /* C2: the KIQ restart of a soft reset (mes_v11_0_kiq_hw_init)
                          * resets both MES pipes: the scheduler is gone and has to
                          * be started again, as the kext does after a soft reset */

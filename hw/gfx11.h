@@ -22,6 +22,7 @@
 
 #include "rdna3_hw.h"
 #include "gmc11.h"
+#include "amd_mqd.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -302,6 +303,38 @@ int  gfx11_mes_sched_start(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mes *m);
 int  gfx11_mes_submit(rdna3_dev *d, rdna3_mes *m, uint32_t *pkt, uint32_t status_dw);
 /* mes_v11_0_kiq_hw_fini for the scheduler pipe: dequeue its HQD */
 void gfx11_mes_sched_stop(rdna3_dev *d, rdna3_mes *m);
+
+/* ---- user queues (amdgpu_userq through the MES, mes_userqueue.c) ----
+ * The kernel builds the queue's MQD (gfx_v11_0_gfx_mqd_init /
+ * gfx_v11_0_compute_mqd_init, adev->mqds[ip].init_mqd) on a zeroed buffer
+ * and hands it to the MES scheduler with ADD_QUEUE; the scheduler picks an
+ * HQD and a VMID (from SET_HW_RESOURCES' masks) and runs the queue from its
+ * doorbell. REMOVE_QUEUE takes it off again. */
+#define RD_MES_SCH_API_ADD_QUEUE    2
+#define RD_MES_SCH_API_REMOVE_QUEUE 3
+/* MESAPI__ADD_QUEUE / MESAPI__REMOVE_QUEUE dword offsets (mes_v11_api_def.h, pack(4)) */
+#define RD_MES_ADD_QUEUE_STATUS_DW    37
+#define RD_MES_REMOVE_QUEUE_STATUS_DW 5
+/* AMDGPU_MES_API_VERSION_*: ADD_QUEUE takes the wptr's GART address from
+ * API version 2 on */
+#define RD_MES_API_VERSION_SHIFT    12
+#define RD_MES_API_VERSION_MASK     0x00fff000
+
+/* fill a zeroed MQD (CPU view) for a user queue; 0 */
+int  gfx11_gfx_mqd_init(rdna3_dev *d, uint32_t *mqd, const amd_mqd_prop *p);
+int  gfx11_compute_mqd_init(rdna3_dev *d, uint32_t *mqd, const amd_mqd_prop *p);
+/* gfx_v11_0's gpu_early_init for GC 11.0.3: GFX and compute user queues with
+ * ME >= 2390, PFP >= 2530, MEC >= 2600 and MES scheduler >= 120 */
+int  gfx11_userq_supported(uint32_t me_ver, uint32_t pfp_ver, uint32_t mec_ver, uint32_t mes_ver);
+/* mes_v11_0_add_hw_queue / mes_v11_0_remove_hw_queue: one MESAPI frame,
+ * answered through its API status fence. 'vm_cntx_cntl' is the GFXHUB's
+ * VM_CONTEXT1_CNTL (hub->vm_cntx_cntl). 0, RDNA3_EINVAL, RDNA3_ETIME */
+int  gfx11_mes_add_hw_queue(rdna3_dev *d, rdna3_mes *m, const amd_mes_add_queue *in,
+                            uint32_t vm_cntx_cntl);
+int  gfx11_mes_remove_hw_queue(rdna3_dev *d, rdna3_mes *m, const amd_mes_remove_queue *in);
+/* gfx_v11_0_set_userq_eop_interrupts: EOP interrupts of the pipes user
+ * queues of 'ip_mask' (1 << AMDGPU_HW_IP_GFX / _COMPUTE) run on */
+void gfx11_set_userq_eop_interrupts(rdna3_dev *d, uint32_t ip_mask, int enable);
 
 /* amdgpu_gfx_kiq_acquire / amdgpu_gfx_compute_queue_acquire for one MEC
  * with 4 pipes x 4 queues: the KIQ is pipe 1 queue 0, KCQ0 pipe 0 queue 0 */

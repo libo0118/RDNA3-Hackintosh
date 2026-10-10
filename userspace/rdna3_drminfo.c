@@ -14,6 +14,11 @@
  *                              notice within its 10 s cap, recover (SDMA soft
  *                              reset / GFX soft recovery or reset) and run the
  *                              next DMA and GFX jobs correctly. Run it last.
+ *   rdna3_drminfo --userq-test  (rdna3userq=1) a compute user queue through the
+ *                              MES: the client writes its ring and wptr in GTT
+ *                              BOs, rings its own doorbell (a doorbell BO in
+ *                              BAR2) and waits for the fence USERQ_SIGNAL put
+ *                              into a syncobj; then USERQ_WAIT and USERQ_FREE.
  *   rdna3_drminfo --scanout DIR  (root) what each display pipe scans out right
  *                              now: HUBP state and a 320-wide picture of it,
  *                              DIR/scanout-pipe<N>.ppm - the report's proof of
@@ -154,6 +159,153 @@ static int job_test(int fd, int gfx, int hang)
                "(want 5a5a5a5a), +0xC100: %08x (want 0)\n", p[0x8000 / 4], p[0x8000 / 4 + 1],
                p[0xC000 / 4], p[0xC000 / 4 + 63], p[0xC000 / 4 + 64]);
     drm_xnu_munmap(p, 64 << 10);
+    return bad != 0;
+}
+
+/* a BO of 'dom', mapped for the CPU and at 'gva' in the GPU VM (a doorbell
+ * BO only for the CPU: the GPU never reaches doorbells through a VM) */
+static void *uq_bo(int fd, uint32_t size, uint32_t dom, uint64_t gva, uint32_t *handle)
+{
+    union drm_amdgpu_gem_create c;
+    union drm_amdgpu_gem_mmap m;
+    struct drm_amdgpu_gem_va va;
+    void *p;
+    memset(&c, 0, sizeof(c));
+    c.in.bo_size = size;
+    c.in.alignment = 4096;
+    c.in.domains = dom;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), c)) { perror("GEM_CREATE"); return NULL; }
+    *handle = c.out.handle;
+    memset(&m, 0, sizeof(m));
+    m.in.handle = c.out.handle;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP), m)) { perror("GEM_MMAP"); return NULL; }
+    p = drm_xnu_mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)m.out.addr_ptr);
+    if (p == MAP_FAILED) { perror("mmap"); return NULL; }
+    memset(p, 0, dom == AMDGPU_GEM_DOMAIN_DOORBELL ? 0 : size);
+    if (!gva)
+        return p;
+    memset(&va, 0, sizeof(va));
+    va.handle = c.out.handle;
+    va.operation = AMDGPU_VA_OP_MAP;
+    va.flags = AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE | AMDGPU_VM_PAGE_EXECUTABLE;
+    va.va_address = gva;
+    va.map_size = size;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va)) { perror("GEM_VA"); return NULL; }
+    return p;
+}
+
+/* --userq-test: DRM_AMDGPU_USERQ / _SIGNAL / _WAIT with a compute queue */
+static int userq_test(int fd)
+{
+    const uint64_t gva = 0x400000;   /* ring, wptr/rptr, EOP, dst: a page each */
+    struct drm_amdgpu_info in;
+    struct drm_amdgpu_info_device di;
+    struct { uint32_t shadow_size, shadow_alignment, csa_size, csa_alignment; } meta;   /* uq metadata, gfx */
+    struct drm_amdgpu_userq_mqd_compute_gfx11 mqd;
+    struct drm_amdgpu_userq_signal sg;
+    struct drm_amdgpu_userq_wait uw;
+    struct drm_syncobj_create sc;
+    struct drm_syncobj_wait sw;
+    union drm_amdgpu_userq uq;
+    struct timespec ts;
+    uint32_t hdb, hring, hwp, heop, hdst, n = 0;
+    volatile uint64_t *db, *wp;
+    volatile uint32_t *dst;
+    uint32_t *ring;
+    int bad = 0, r;
+
+    memset(&in, 0, sizeof(in));
+    memset(&di, 0, sizeof(di));
+    in.return_pointer = (uint64_t)(uintptr_t)&di;
+    in.return_size = sizeof(di);
+    in.query = AMDGPU_INFO_DEV_INFO;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in)) { perror("AMDGPU_INFO"); return 1; }
+    memset(&meta, 0, sizeof(meta));
+    in.return_pointer = (uint64_t)(uintptr_t)&meta;
+    in.return_size = sizeof(meta);
+    in.query = AMDGPU_INFO_UQ_FW_AREAS;
+    in.query_hw_ip.type = AMDGPU_HW_IP_GFX;
+    r = IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in);
+    printf("user queues: IP mask 0x%x, gfx shadow %u (align %u), CSA %u (align %u)%s\n", di.userq_ip_mask,
+           meta.shadow_size, meta.shadow_alignment, meta.csa_size, meta.csa_alignment,
+           r ? " - UQ_FW_AREAS FAILED" : "");
+    if (!(di.userq_ip_mask & (1u << AMDGPU_HW_IP_COMPUTE))) {
+        printf("USERQ TEST: no compute user queues (boot-arg rdna3userq=1, the MES and its firmware >= 120 "
+               "needed; see RDNA3,UserQueues)\n");
+        return 1;
+    }
+    db = uq_bo(fd, 4096, AMDGPU_GEM_DOMAIN_DOORBELL, 0, &hdb);
+    ring = uq_bo(fd, 4096, AMDGPU_GEM_DOMAIN_GTT, gva, &hring);
+    wp = uq_bo(fd, 4096, AMDGPU_GEM_DOMAIN_GTT, gva + 0x1000, &hwp);   /* wptr @0, rptr @8 */
+    if (!uq_bo(fd, 4096, AMDGPU_GEM_DOMAIN_GTT, gva + 0x2000, &heop))
+        return 1;
+    dst = uq_bo(fd, 4096, AMDGPU_GEM_DOMAIN_GTT, gva + 0x3000, &hdst);
+    if (!db || !ring || !wp || !dst)
+        return 1;
+    memset(&mqd, 0, sizeof(mqd));
+    mqd.eop_va = gva + 0x2000;
+    memset(&uq, 0, sizeof(uq));
+    uq.in.op = AMDGPU_USERQ_OP_CREATE;
+    uq.in.ip_type = AMDGPU_HW_IP_COMPUTE;
+    uq.in.doorbell_handle = hdb;
+    uq.in.doorbell_offset = 0;
+    uq.in.queue_va = gva;
+    uq.in.queue_size = 4096;
+    uq.in.wptr_va = gva + 0x1000;
+    uq.in.rptr_va = gva + 0x1008;
+    uq.in.mqd = (uint64_t)(uintptr_t)&mqd;
+    uq.in.mqd_size = sizeof(mqd);
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), uq)) { perror("USERQ CREATE"); return 1; }
+    printf("compute user queue %u created\n", uq.out.queue_id);
+
+    /* WRITE_DATA of two dwords, then a RELEASE_MEM that interrupts: the
+     * firmware writes the queue's rptr to its fence slot */
+    ring[n++] = (3u << 30) | (0x37u << 8) | ((3u + 2 - 1) << 16);
+    ring[n++] = (5u << 8) | (1u << 20);
+    ring[n++] = (uint32_t)(gva + 0x3000); ring[n++] = 0;
+    ring[n++] = 0xC0FFEE11; ring[n++] = 0xC0FFEE12;
+    ring[n++] = (3u << 30) | (0x49u << 8) | (6u << 16);
+    ring[n++] = 0x14 | (5u << 8);            /* CACHE_FLUSH_AND_INV_TS_EVENT, EVENT_INDEX 5 */
+    ring[n++] = (1u << 29) | (2u << 24);     /* DATA_SEL 1, INT_SEL 2 */
+    ring[n++] = (uint32_t)(gva + 0x3010); ring[n++] = 0;
+    ring[n++] = 0xC0FFEE13; ring[n++] = 0; ring[n++] = 0;
+    wp[0] = n;
+    __sync_synchronize();
+    memset(&sc, 0, sizeof(sc));
+    if (IOCTL(fd, RD_NR_SYNCOBJ_CREATE, sc)) { perror("SYNCOBJ_CREATE"); return 1; }
+    memset(&sg, 0, sizeof(sg));
+    sg.queue_id = uq.out.queue_id;
+    sg.syncobj_handles = (uint64_t)(uintptr_t)&sc.handle;
+    sg.num_syncobj_handles = 1;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_SIGNAL), sg)) { perror("USERQ_SIGNAL"); return 1; }
+    db[0] = n;                               /* the doorbell: 64-bit wptr */
+    __sync_synchronize();
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    memset(&sw, 0, sizeof(sw));
+    sw.handles = (uint64_t)(uintptr_t)&sc.handle;
+    sw.count_handles = 1;
+    sw.timeout_nsec = (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec + 2000000000ll;
+    r = IOCTL(fd, RD_NR_SYNCOBJ_WAIT, sw);
+    bad += dst[0] != 0xC0FFEE11 || dst[1] != 0xC0FFEE12 || dst[4] != 0xC0FFEE13;
+    printf("user queue fence %s; dst %08x %08x .. %08x (want c0ffee11 c0ffee12 .. c0ffee13), rptr %llu of %u\n",
+           r ? "did NOT signal within 2 s" : "signaled", dst[0], dst[1], dst[4],
+           (unsigned long long)wp[1], n);
+    bad += r != 0;
+    memset(&uw, 0, sizeof(uw));
+    uw.waitq_id = uq.out.queue_id;
+    uw.syncobj_handles = (uint64_t)(uintptr_t)&sc.handle;
+    uw.num_syncobj_handles = 1;
+    r = IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT), uw);
+    printf("USERQ_WAIT: %d, %u fence(s)\n", r, uw.num_fences);
+    bad += r != 0;
+    memset(&uq, 0, sizeof(uq));
+    uq.in.op = AMDGPU_USERQ_OP_FREE;
+    uq.in.queue_id = sg.queue_id;
+    r = IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), uq);
+    printf("USERQ FREE: %d\n", r);
+    bad += r != 0;
+    printf("USERQ TEST: %s\n", bad ? "FAILED" : "PASSED (a compute user queue ran through the MES)");
     return bad != 0;
 }
 
@@ -335,6 +487,8 @@ int main(int argc, char **argv)
             fails += job_test(fd, 0, 0);
         else if (!strcmp(argv[a], "--gfx-test"))
             fails += job_test(fd, 1, 0);
+        else if (!strcmp(argv[a], "--userq-test"))
+            fails += userq_test(fd);
         else if (!strcmp(argv[a], "--hang-test") || !strcmp(argv[a], "--hang-test-gfx")) {
             /* each hang, then the same engine must work again. The hung
              * job's client is guilty from then on (amdgpu_cs_submit returns

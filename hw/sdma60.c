@@ -8,6 +8,7 @@
 #include "gen/gc_11_0_0_sdma.h"
 #include "gen/gc_11_0_0_sdma_reset.h"
 #include "gen/gc_11_0_0_reset.h"
+#include "gen/gc_11_0_0_userq.h"
 
 #define REG_FIELD_SHIFT(reg, field) reg##__##field##__SHIFT
 #define REG_FIELD_MASK(reg, field)  reg##__##field##_MASK
@@ -382,4 +383,77 @@ int sdma60_copy_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint64_t ds
     seq = sdma60_emit_fence(d, r);
     sdma60_commit(d, r);
     return sdma60_wait_fence(d, r, seq);
+}
+
+/* --------------------------- user queues --------------------------- */
+
+/* struct v11_sdma_mqd dword offsets (v11_structs.h) */
+#define SMQD_RB_CNTL               0
+#define SMQD_RB_BASE               1
+#define SMQD_RB_BASE_HI            2
+#define SMQD_RB_RPTR_ADDR_HI       7
+#define SMQD_RB_RPTR_ADDR_LO       8
+#define SMQD_IB_CNTL               9
+#define SMQD_SKIP_CNTL             15
+#define SMQD_CONTEXT_STATUS        16
+#define SMQD_DOORBELL              17
+#define SMQD_DOORBELL_LOG          18
+#define SMQD_DOORBELL_OFFSET       19
+#define SMQD_CSA_ADDR_LO           20
+#define SMQD_CSA_ADDR_HI           21
+#define SMQD_DUMMY_REG             25
+#define SMQD_RB_WPTR_POLL_ADDR_HI  26
+#define SMQD_RB_WPTR_POLL_ADDR_LO  27
+#define SMQD_RB_AQL_CNTL           28
+#define SMQD_F32_DBG0              43
+#define SMQD_F32_DBG1              44
+
+/* Ported from sdma_v6_0_mqd_init */
+int sdma60_mqd_init(rdna3_dev *d, uint32_t *m, const amd_mqd_prop *p)
+{
+    uint64_t wb_gpu_addr;
+
+    m[SMQD_RB_CNTL] = order_base_2(p->queue_size / 4) << SDMA0_QUEUE0_RB_CNTL__RB_SIZE__SHIFT |
+                      1u << SDMA0_QUEUE0_RB_CNTL__RPTR_WRITEBACK_ENABLE__SHIFT |
+                      4u << SDMA0_QUEUE0_RB_CNTL__RPTR_WRITEBACK_TIMER__SHIFT |
+                      1u << SDMA0_QUEUE0_RB_CNTL__F32_WPTR_POLL_ENABLE__SHIFT;
+    m[SMQD_RB_BASE] = (uint32_t)(p->hqd_base_gpu_addr >> 8);
+    m[SMQD_RB_BASE_HI] = (uint32_t)(p->hqd_base_gpu_addr >> 40);
+    wb_gpu_addr = p->wptr_gpu_addr;
+    m[SMQD_RB_WPTR_POLL_ADDR_LO] = (uint32_t)wb_gpu_addr;
+    m[SMQD_RB_WPTR_POLL_ADDR_HI] = (uint32_t)(wb_gpu_addr >> 32);
+    wb_gpu_addr = p->rptr_gpu_addr;
+    m[SMQD_RB_RPTR_ADDR_LO] = (uint32_t)wb_gpu_addr;
+    m[SMQD_RB_RPTR_ADDR_HI] = (uint32_t)(wb_gpu_addr >> 32);
+    m[SMQD_IB_CNTL] = RS(d, 0, regSDMA0_QUEUE0_IB_CNTL);
+    m[SMQD_DOORBELL_OFFSET] = p->doorbell_index << SDMA0_QUEUE0_DOORBELL_OFFSET__OFFSET__SHIFT;
+    m[SMQD_DOORBELL] = REG_SET_FIELD(0u, SDMA0_QUEUE0_DOORBELL, ENABLE, 1);
+    m[SMQD_SKIP_CNTL] = 0;
+    m[SMQD_CONTEXT_STATUS] = 0;
+    m[SMQD_DOORBELL_LOG] = 0;
+    m[SMQD_RB_AQL_CNTL] = regSDMA0_QUEUE0_RB_AQL_CNTL_DEFAULT;
+    m[SMQD_DUMMY_REG] = regSDMA0_QUEUE0_DUMMY_REG_DEFAULT;
+    m[SMQD_CSA_ADDR_LO] = (uint32_t)p->csa_addr;
+    m[SMQD_CSA_ADDR_HI] = (uint32_t)(p->csa_addr >> 32);
+    m[SMQD_F32_DBG0] = (uint32_t)p->fence_address;
+    m[SMQD_F32_DBG1] = (uint32_t)(p->fence_address >> 32);
+    return RDNA3_OK;
+}
+
+/* the user queue gate of sdma_v6_0_sw_init (IP_VERSION(6, 0, 3): fw_version >= 25) */
+int sdma60_userq_supported(uint32_t fw_version)
+{
+    return fw_version >= 25;
+}
+
+/* Ported from sdma_v6_0_set_userq_trap_interrupts: the trap interrupt of
+ * every instance (sdma_v6_0_set_trap_irq_state), as amdgpu_irq_get does */
+void sdma60_set_userq_trap_interrupts(rdna3_dev *d, uint32_t num_instances, int enable)
+{
+    uint32_t i, tmp;
+    for (i = 0; i < num_instances; i++) {
+        tmp = RS(d, i, regSDMA0_CNTL);
+        tmp = REG_SET_FIELD(tmp, SDMA0_CNTL, TRAP_ENABLE, enable ? 1 : 0);
+        WS(d, i, regSDMA0_CNTL, tmp);
+    }
 }

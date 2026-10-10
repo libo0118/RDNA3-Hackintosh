@@ -173,6 +173,16 @@ void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4
     di->enabled_rb_pipes_mask = rb_mask;
 }
 
+void rdna3_drm_device_set_userq(rdna3_drm_device *dev, uint32_t ip_mask, uint64_t doorbell_size)
+{
+    dev->userq_ip_mask = ip_mask;
+    /* DEV_INFO: dev_info->userq_ip_mask = amdgpu_userq_get_supported_ip_mask() */
+    dev->dev_info.userq_ip_mask = ip_mask;
+    if (doorbell_size > (uint64_t)RD_MAX_DOORBELL_PAGES * 4096)
+        doorbell_size = (uint64_t)RD_MAX_DOORBELL_PAGES * 4096;
+    dev->doorbell_size = ip_mask ? doorbell_size : 0;
+}
+
 void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_t mask)
 {
     if (ip >= AMDGPU_HW_IP_NUM)
@@ -259,10 +269,26 @@ static int bo_onchip(const rdna3_bo *bo)
     return (bo->placement & RD_ONCHIP_DOMAINS) != 0;
 }
 
+static void doorbell_pages_set(rdna3_drm_device *dev, uint64_t first, uint64_t n, int on)
+{
+    uint64_t i;
+    for (i = first; i < first + n && i < RD_MAX_DOORBELL_PAGES; i++) {
+        if (on)
+            dev->doorbell_used[i / 8] |= (uint8_t)(1u << (i % 8));
+        else
+            dev->doorbell_used[i / 8] &= (uint8_t)~(1u << (i % 8));
+    }
+}
+
 static void bo_put_dev(rdna3_drm_device *dev, rdna3_bo *bo)
 {
     if (--bo->refcnt)
         return;
+    if (bo->placement == AMDGPU_GEM_DOMAIN_DOORBELL) {   /* pages of the doorbell BAR */
+        doorbell_pages_set(dev, bo->vram_offset / 4096, bo->size / 4096, 0);
+        dev->ops.free(dev->ops.ctx, bo, sizeof(*bo));
+        return;
+    }
     if (bo_onchip(bo)) {   /* no backing: the range goes back */
         uint32_t total;
         onchip_set(onchip_map(dev, bo->placement, &total), (uint32_t)bo->vram_offset,
@@ -298,6 +324,9 @@ static void bo_list_release(rdna3_drm_file *f, uint32_t i)
 static int fence_done(rdna3_drm_device *dev, const rdna3_fence *fe);
 
 static void exports_gc(rdna3_drm_device *dev, const struct rdna3_drm_file *closing);
+static void userq_mgr_fini(struct rdna3_drm_file *f);
+static void seq64_unmap(struct rdna3_drm_file *f);
+static void seq64_fini(rdna3_drm_device *dev);
 
 /* user fence BOs whose job finished can go (amdgpu_job_free drops uf_bo) */
 static void uf_reap(rdna3_drm_device *dev, int all)
@@ -317,6 +346,14 @@ void rdna3_drm_device_fini(rdna3_drm_device *dev)
 {
     uint32_t i;
     uf_reap(dev, 1);
+    /* the fence drivers the files left (parked references), then seq64 */
+    if (dev->fence_drv)
+        dev->ops.free(dev->ops.ctx, dev->fence_drv, sizeof(*dev->fence_drv) * RD_MAX_FENCE_DRV);
+    if (dev->uq_deferred)
+        dev->ops.free(dev->ops.ctx, dev->uq_deferred, sizeof(*dev->uq_deferred) * RD_USERQ_DEFERRED);
+    dev->fence_drv = NULL;
+    dev->uq_deferred = NULL;
+    seq64_fini(dev);
     for (i = 0; i < RD_MAX_EXPORTS; i++)
         if (dev->exports[i].bo) {
             bo_put_dev(dev, dev->exports[i].bo);
@@ -327,7 +364,7 @@ void rdna3_drm_device_fini(rdna3_drm_device *dev)
 static void va_release(rdna3_drm_file *f, rdna3_va *m)
 {
     rdna3_drm_ops *ops = &f->dev->ops;
-    if (f->vm && ops->vm_unmap)
+    if (f->vm && ops->vm_unmap && !(m->bo && m->bo->placement == AMDGPU_GEM_DOMAIN_DOORBELL))
         ops->vm_unmap(ops->ctx, f->vm, m->va, m->size);
     if (m->bo)
         bo_put(f, m->bo);
@@ -364,6 +401,7 @@ void rdna3_drm_file_close(rdna3_drm_file *f)
         }
     f->next_file = NULL;
     f->id = 0;
+    userq_mgr_fini(f);   /* amdgpu_driver_postclose_kms: amdgpu_userq_mgr_fini */
     uf_reap(f->dev, 0);
     for (i = 0; i < RD_MAX_BO_LISTS; i++)
         bo_list_release(f, i);
@@ -371,6 +409,7 @@ void rdna3_drm_file_close(rdna3_drm_file *f)
         for (i = 0; i < f->nvas; i++)
             if (f->vas[i].handle)
                 va_release(f, &f->vas[i]);
+    seq64_unmap(f);
     if (f->vm && ops->vm_destroy)
         ops->vm_destroy(ops->ctx, f->vm);
     f->vm = NULL;
@@ -559,8 +598,14 @@ static int bo_import(rdna3_drm_file *f, struct rd_xnu_bo_share *x)
  * signals it (SYNCOBJ_OUT / FENCE_TO_HANDLE) and is signaled once that
  * fence passes. Timeline points are tracked as a single value. */
 
+static rdna3_userq_fence_drv *fdrv_find(rdna3_drm_device *dev, uint32_t ctx);
+static int userq_fence_done(rdna3_drm_device *dev, const rdna3_fence *fe);
+static int userq_fence_wait(rdna3_drm_device *dev, const rdna3_fence *fe, uint64_t abs_ns);
+
 static int fence_done(rdna3_drm_device *dev, const rdna3_fence *fe)
 {
+    if (fe->ip == RD_USERQ_FENCE_IP)
+        return userq_fence_done(dev, fe);
     if (!dev->ops.fence_signaled)
         return 1;
     return dev->ops.fence_signaled(dev->ops.ctx, fe->ip, fe->ring, fe->seq);
@@ -568,6 +613,8 @@ static int fence_done(rdna3_drm_device *dev, const rdna3_fence *fe)
 
 static int fence_wait_abs(rdna3_drm_device *dev, const rdna3_fence *fe, uint64_t abs_ns)
 {
+    if (fe->ip == RD_USERQ_FENCE_IP)
+        return userq_fence_wait(dev, fe, abs_ns);
     if (fence_done(dev, fe))
         return 0;
     if (!abs_ns || !dev->ops.fence_wait)
@@ -719,9 +766,21 @@ static int syncobj_fence(rdna3_drm_file *f, struct rd_xnu_syncobj_fence *x)
         s->has_fence = 0;
         return 0;
     }
-    if (x->seq && (!ring_ok(f->dev, x->ip, x->ring) ||
-                   !seq_submitted(f->dev, x->ip, x->ring, x->seq)))
+    if (x->seq && x->ip == RD_USERQ_FENCE_IP) {
+        /* a user queue fence: a context this device made, a value its
+         * queue signaled; a context that is gone has signaled */
+        rdna3_userq_fence_drv *fd = fdrv_find(f->dev, x->ring);
+        if (!x->ring || x->ring > f->dev->next_fence_ctx || (fd && x->seq > fd->last_seq))
+            return -RD_EINVAL;
+        if (!fd) {
+            s->signaled = 1;
+            s->has_fence = 0;
+            return 0;
+        }
+    } else if (x->seq && (!ring_ok(f->dev, x->ip, x->ring) ||
+                          !seq_submitted(f->dev, x->ip, x->ring, x->seq))) {
         return -RD_EINVAL;
+    }
     s->signaled = 0;
     s->has_fence = x->seq != 0;
     s->fence.ip = x->ip;
@@ -1162,6 +1221,52 @@ static int fence_to_handle(rdna3_drm_file *f, union drm_amdgpu_fence_to_handle *
 
 static int gem_create_onchip(rdna3_drm_file *f, union drm_amdgpu_gem_create *a);
 
+/* amdgpu_gem_create_ioctl for AMDGPU_GEM_DOMAIN_DOORBELL: pages of the
+ * doorbell BAR past the kernel's doorbells (the TTM doorbell manager), for
+ * the user queues' doorbells. Without user queues there are none. */
+static int gem_create_doorbell(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
+{
+    rdna3_drm_device *dev = f->dev;
+    uint64_t pages = (a->in.bo_size + 4095) / 4096, total = dev->doorbell_size / 4096, p, i;
+    rdna3_bo *bo;
+    uint32_t handle = 0;
+    int r;
+    if (!dev->doorbell_size)
+        return -RD_EOPNOTSUPP;
+    if (total > RD_MAX_DOORBELL_PAGES)
+        total = RD_MAX_DOORBELL_PAGES;
+    for (p = RD_DOORBELL_KERNEL_SIZE / 4096; p + pages <= total; p++) {
+        for (i = 0; i < pages && !(dev->doorbell_used[(p + i) / 8] & (1u << ((p + i) % 8))); i++)
+            ;
+        if (i == pages)
+            break;
+        p += i;   /* past the busy page */
+    }
+    if (p + pages > total)
+        return -RD_ENOMEM;
+    bo = (rdna3_bo *)dev->ops.zalloc(dev->ops.ctx, sizeof(*bo));
+    if (!bo)
+        return -RD_ENOMEM;
+    doorbell_pages_set(dev, p, pages, 1);
+    bo->refcnt = 1;
+    bo->size = pages * 4096;
+    bo->alignment = 4096;
+    bo->domains = AMDGPU_GEM_DOMAIN_DOORBELL;
+    bo->placement = AMDGPU_GEM_DOMAIN_DOORBELL;
+    bo->flags = a->in.domain_flags;
+    bo->vram_offset = p * 4096;   /* byte offset in the doorbell BAR */
+    bo->mmap_offset = dev->next_mmap_offset;
+    dev->next_mmap_offset += bo->size + 4096;
+    r = handle_alloc(f, bo, &handle);
+    if (r) {
+        bo_put(f, bo);
+        return r;
+    }
+    zero(a, sizeof(*a));
+    a->out.handle = handle;
+    return 0;
+}
+
 static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
 {
     rdna3_drm_device *dev = f->dev;
@@ -1176,7 +1281,7 @@ static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
     if (dom & ~(uint32_t)AMDGPU_GEM_DOMAIN_MASK)
         return -RD_EINVAL;
     if (dom & AMDGPU_GEM_DOMAIN_DOORBELL)
-        return -RD_EOPNOTSUPP; /* TODO(stage4): doorbell BOs (user queues) */
+        return gem_create_doorbell(f, a);
     if (dom & RD_ONCHIP_DOMAINS)
         return gem_create_onchip(f, a);
 
@@ -1344,7 +1449,9 @@ static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
                 return -RD_ENOSPC;
             f->nvas++;
         }
-        if (f->vm && ops->vm_map) {
+        /* a doorbell BO is only recorded: the GPU never reaches doorbells
+         * through a VM, the client writes them through its CPU mapping */
+        if (f->vm && ops->vm_map && bo->placement != AMDGPU_GEM_DOMAIN_DOORBELL) {
             int r = ops->vm_map(ops->ctx, f->vm, bo, va->va_address, va->offset_in_bo,
                                 va->map_size, va->flags);
             if (r)
@@ -1569,6 +1676,1116 @@ static int proc_options_ioctl(struct drm_amdgpu_proc_options *o)
     return -RD_EINVAL;
 }
 
+/* --------------------------- user queues --------------------------- */
+/* amdgpu_userq.c, amdgpu_userq_fence.c, mes_userqueue.c and amdgpu_seq64.c
+ * (Linux 6.16) on this driver's objects. What amdgpu does with TTM, dma_fence
+ * and drm_exec is done in place here: everything is resident (no eviction
+ * fences, no restore worker), kernel objects are CPU-visible VRAM BOs, a
+ * fence is a value (see rdna3_userq in rdna3_drm.h), and implicit sync
+ * through BO reservations does not exist in this driver (the BO lists of
+ * USERQ_SIGNAL / USERQ_WAIT are looked up, nothing is attached to them). */
+
+#define GMC_HOLE_MASK   0x0000ffffffffffffull   /* AMDGPU_GMC_HOLE_MASK */
+#define VM_MAX_PFN      (1ull << 36)            /* adev->vm_manager.max_pfn, 48-bit VM */
+#define USERQ_PROC_CTX_SZ 4096u                 /* AMDGPU_USERQ_PROC_CTX_SZ */
+#define USERQ_GANG_CTX_SZ 4096u                 /* AMDGPU_USERQ_GANG_CTX_SZ */
+#define FENCE_STUB_IP   0xffffffffu             /* dma_fence_get_stub(): signaled */
+#define BO_INVALID_OFFSET 0x7fffffffffffffffull /* AMDGPU_BO_INVALID_OFFSET (LONG_MAX) */
+
+static rdna3_userq_fence_drv *fdrv_find(rdna3_drm_device *dev, uint32_t ctx)
+{
+    uint32_t i;
+    if (!dev->fence_drv || !ctx)
+        return NULL;
+    for (i = 0; i < RD_MAX_FENCE_DRV; i++)
+        if (dev->fence_drv[i].refcnt && dev->fence_drv[i].context == ctx)
+            return &dev->fence_drv[i];
+    return NULL;
+}
+
+/* the mapping of this file's VM that holds 'addr' (amdgpu_vm_bo_lookup_mapping) */
+static rdna3_va *va_lookup(rdna3_drm_file *f, uint64_t addr)
+{
+    uint32_t i;
+    addr &= GMC_HOLE_MASK;
+    for (i = 0; i < f->nvas; i++) {
+        rdna3_va *m = &f->vas[i];
+        uint64_t start = m->va & GMC_HOLE_MASK;
+        if (m->handle && m->bo && addr >= start && addr - start < m->size)
+            return m;
+    }
+    return NULL;
+}
+
+/* ---- seq64 ---- */
+
+/* Ported from amdgpu_seq64_init: the slots' BO, created with the first
+ * fence driver (amdgpu: at device init, 2 MiB in GTT) */
+static int seq64_init(rdna3_drm_device *dev)
+{
+    rdna3_drm_ops *ops = &dev->ops;
+    rdna3_bo *bo;
+    void *cpu;
+    uint64_t mc = 0;
+    int r;
+    if (dev->seq64_bo)
+        return 0;
+    if (!ops->bo_kmap || !ops->bo_gpu_addr)
+        return -RD_ENODEV;
+    bo = (rdna3_bo *)ops->zalloc(ops->ctx, sizeof(*bo));
+    if (!bo)
+        return -RD_ENOMEM;
+    bo->refcnt = 1;
+    bo->size = RD_SEQ64_SIZE;
+    bo->alignment = 4096;
+    bo->domains = bo->placement = AMDGPU_GEM_DOMAIN_VRAM;
+    bo->flags = AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED | AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
+    r = ops->bo_alloc(ops->ctx, bo);
+    if (r) {
+        ops->free(ops->ctx, bo, sizeof(*bo));
+        return r;
+    }
+    dev->vram_usage += bo->size;
+    cpu = ops->bo_kmap(ops->ctx, bo);
+    r = ops->bo_gpu_addr(ops->ctx, bo, &mc);
+    if (!cpu || r) {
+        bo_put_dev(dev, bo);
+        return r ? r : -RD_ENOMEM;
+    }
+    zero(cpu, RD_SEQ64_SIZE);
+    zero(dev->seq64_used, sizeof(dev->seq64_used));
+    dev->seq64_bo = bo;
+    dev->seq64_cpu = (volatile uint64_t *)cpu;
+    dev->seq64_gpu_addr = mc;
+    return 0;
+}
+
+/* Ported from amdgpu_seq64_fini */
+static void seq64_fini(rdna3_drm_device *dev)
+{
+    if (dev->seq64_bo)
+        bo_put_dev(dev, dev->seq64_bo);
+    dev->seq64_bo = NULL;
+    dev->seq64_cpu = NULL;
+}
+
+/* Ported from amdgpu_seq64_alloc */
+static int seq64_alloc(rdna3_drm_device *dev, uint64_t *va, uint64_t *gpu_addr,
+                       volatile uint64_t **cpu_addr)
+{
+    uint32_t bit;
+    for (bit = 0; bit < RD_SEQ64_SLOTS; bit++)
+        if (!(dev->seq64_used[bit / 8] & (1u << (bit % 8))))
+            break;
+    if (bit >= RD_SEQ64_SLOTS)
+        return -RD_ENOSPC;
+    dev->seq64_used[bit / 8] |= (uint8_t)(1u << (bit % 8));
+    *va = bit * 8ull + RD_SEQ64_VA;
+    *gpu_addr = bit * 8ull + dev->seq64_gpu_addr;
+    *cpu_addr = dev->seq64_cpu + bit;
+    return 0;
+}
+
+/* Ported from amdgpu_seq64_free */
+static void seq64_free(rdna3_drm_device *dev, uint64_t va)
+{
+    uint64_t bit = (va - RD_SEQ64_VA) / 8;
+    if (bit < RD_SEQ64_SLOTS)
+        dev->seq64_used[bit / 8] &= (uint8_t)~(1u << (bit % 8));
+}
+
+/* Ported from amdgpu_seq64_map: read-only, uncached, at the reserved VA */
+static int seq64_map(rdna3_drm_file *f)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    int r;
+    if (f->seq64_mapped)
+        return 0;
+    if (!f->dev->seq64_bo)
+        return -RD_EINVAL;
+    if (f->vm && ops->vm_map) {
+        r = ops->vm_map(ops->ctx, f->vm, f->dev->seq64_bo, RD_SEQ64_VA & GMC_HOLE_MASK, 0,
+                        RD_SEQ64_SIZE, AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_MTYPE_UC);
+        if (r)
+            return r;
+    }
+    f->seq64_mapped = 1;
+    return 0;
+}
+
+/* Ported from amdgpu_seq64_unmap */
+static void seq64_unmap(rdna3_drm_file *f)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    if (!f->seq64_mapped)
+        return;
+    if (f->vm && ops->vm_unmap)
+        ops->vm_unmap(ops->ctx, f->vm, RD_SEQ64_VA & GMC_HOLE_MASK, RD_SEQ64_SIZE);
+    f->seq64_mapped = 0;
+}
+
+/* ---- fence drivers ---- */
+
+static int userq_tables(rdna3_drm_device *dev)
+{
+    rdna3_drm_ops *ops = &dev->ops;
+    if (!dev->fence_drv)
+        dev->fence_drv = (rdna3_userq_fence_drv *)ops->zalloc(ops->ctx,
+                                                              sizeof(*dev->fence_drv) * RD_MAX_FENCE_DRV);
+    if (!dev->uq_deferred)
+        dev->uq_deferred = ops->zalloc(ops->ctx, sizeof(*dev->uq_deferred) * RD_USERQ_DEFERRED);
+    return dev->fence_drv && dev->uq_deferred ? 0 : -RD_ENOMEM;
+}
+
+/* Ported from amdgpu_userq_fence_read */
+static uint64_t userq_fence_read(const rdna3_userq_fence_drv *fd)
+{
+    return *fd->cpu_addr;
+}
+
+static void userq_fence_driver_put(rdna3_drm_device *dev, uint32_t ctx);
+
+/* Ported from amdgpu_userq_fence_driver_get */
+static void userq_fence_driver_get(rdna3_userq_fence_drv *fd)
+{
+    fd->refcnt++;
+}
+
+/* Ported from amdgpu_userq_fence_driver_process: the fences up to the rptr
+ * have signaled; the fence drivers their queue waited on are let go
+ * (amdgpu: from the EOP interrupt; here whenever a fence is looked at) */
+static void userq_fence_driver_process(rdna3_drm_device *dev, rdna3_userq_fence_drv *fd)
+{
+    uint64_t rptr;
+    uint32_t i, ctx;
+    if (!fd || !dev->uq_deferred)
+        return;
+    rptr = userq_fence_read(fd);
+    ctx = fd->context;
+    for (i = 0; i < RD_USERQ_DEFERRED; i++)
+        if (dev->uq_deferred[i].owner == ctx && dev->uq_deferred[i].seq <= rptr) {
+            uint32_t ref = dev->uq_deferred[i].ref;
+            zero(&dev->uq_deferred[i], sizeof(dev->uq_deferred[i]));
+            userq_fence_driver_put(dev, ref);
+        }
+}
+
+/* Ported from amdgpu_userq_fence_driver_destroy: the driver's pending
+ * fences signal (-ECANCELED), what they held goes, the slot is free again */
+static void userq_fence_driver_destroy(rdna3_drm_device *dev, rdna3_userq_fence_drv *fd)
+{
+    uint32_t ctx = fd->context, i;
+    uint64_t va = fd->va;
+    zero(fd, sizeof(*fd));
+    seq64_free(dev, va);
+    for (i = 0; dev->uq_deferred && i < RD_USERQ_DEFERRED; i++)
+        if (dev->uq_deferred[i].owner == ctx) {
+            uint32_t ref = dev->uq_deferred[i].ref;
+            zero(&dev->uq_deferred[i], sizeof(dev->uq_deferred[i]));
+            userq_fence_driver_put(dev, ref);
+        }
+}
+
+/* Ported from amdgpu_userq_fence_driver_put */
+static void userq_fence_driver_put(rdna3_drm_device *dev, uint32_t ctx)
+{
+    rdna3_userq_fence_drv *fd = fdrv_find(dev, ctx);
+    if (fd && !--fd->refcnt)
+        userq_fence_driver_destroy(dev, fd);
+}
+
+/* Ported from amdgpu_userq_fence_driver_alloc: a seq64 slot, a fence
+ * context, the doorbell as its key (adev->userq_xa) */
+static int userq_fence_driver_alloc(rdna3_drm_device *dev, rdna3_userq *q)
+{
+    rdna3_userq_fence_drv *fd = NULL;
+    uint32_t i;
+    int r = userq_tables(dev);
+    if (!r)
+        r = seq64_init(dev);
+    if (r)
+        return r;
+    for (i = 0; i < RD_MAX_FENCE_DRV && !fd; i++)
+        if (!dev->fence_drv[i].refcnt)
+            fd = &dev->fence_drv[i];
+    if (!fd)
+        return -RD_ENOMEM;
+    r = seq64_alloc(dev, &fd->va, &fd->gpu_addr, &fd->cpu_addr);
+    if (r)
+        return r;
+    *fd->cpu_addr = 0;
+    fd->refcnt = 1;
+    if (!++dev->next_fence_ctx)
+        ++dev->next_fence_ctx;
+    fd->context = dev->next_fence_ctx;
+    fd->doorbell_index = q->doorbell_index;
+    fd->last_seq = 0;
+    q->fence_ctx = fd->context;
+    return 0;
+}
+
+/* Ported from amdgpu_userq_walk_and_drop_fence_drv */
+static void userq_walk_and_drop_fence_drv(rdna3_drm_device *dev, rdna3_userq *q)
+{
+    uint32_t i, n = q->nxa;
+    q->nxa = 0;
+    for (i = 0; i < n; i++)
+        userq_fence_driver_put(dev, q->fence_drv_xa[i]);
+}
+
+/* Ported from amdgpu_userq_fence_driver_free */
+static void userq_fence_driver_free(rdna3_drm_device *dev, rdna3_userq *q)
+{
+    userq_walk_and_drop_fence_drv(dev, q);
+    /* Drop the fence_drv reference held by user queue */
+    userq_fence_driver_put(dev, q->fence_ctx);
+    q->fence_ctx = 0;
+}
+
+/* Ported from amdgpu_userq_fence_signaled: rptr >= wptr. A context that is
+ * gone signaled when its driver died. */
+static int userq_fence_done(rdna3_drm_device *dev, const rdna3_fence *fe)
+{
+    rdna3_userq_fence_drv *fd = fdrv_find(dev, fe->ring);
+    if (!fd)
+        return 1;
+    if (userq_fence_read(fd) < fe->seq)
+        return 0;
+    userq_fence_driver_process(dev, fd);
+    return 1;
+}
+
+struct userq_wait_arg {
+    rdna3_drm_device *dev;
+    rdna3_fence fe;
+};
+
+static int userq_wait_done(void *arg)
+{
+    struct userq_wait_arg *a = (struct userq_wait_arg *)arg;
+    return userq_fence_done(a->dev, &a->fe);
+}
+
+/* dma_fence_wait on a user queue fence: the OS sleeps until the slot gets
+ * there (EOP interrupt) or the deadline passes */
+static int userq_fence_wait(rdna3_drm_device *dev, const rdna3_fence *fe, uint64_t abs_ns)
+{
+    struct userq_wait_arg a;
+    if (userq_fence_done(dev, fe))
+        return 0;
+    if (!abs_ns || !dev->ops.userq_wait)
+        return -RD_ETIME;
+    a.dev = dev;
+    a.fe = *fe;
+    return dev->ops.userq_wait(dev->ops.ctx, userq_wait_done, &a, abs_ns);
+}
+
+/* Ported from amdgpu_userq_fence_create: a fence for 'seq' on the queue's
+ * driver. The drivers the queue waited on (its fence_drv_xa) stay
+ * referenced until this fence signals (fence_drv_array). */
+static int userq_fence_create(rdna3_drm_device *dev, rdna3_userq *q, uint64_t seq, rdna3_fence *out)
+{
+    rdna3_userq_fence_drv *fd = fdrv_find(dev, q->fence_ctx);
+    uint32_t i, j, kept = 0;
+    if (!fd)
+        return -RD_EINVAL;
+    out->ip = RD_USERQ_FENCE_IP;
+    out->ring = fd->context;
+    out->seq = seq;
+    if (seq > fd->last_seq)
+        fd->last_seq = seq;
+    if (!q->nxa)
+        return 0;
+    if (userq_fence_read(fd) >= seq) {   /* the hardware already processed the job */
+        userq_walk_and_drop_fence_drv(dev, q);
+        return 0;
+    }
+    for (i = 0, j = 0; i < q->nxa; i++) {
+        while (j < RD_USERQ_DEFERRED && dev->uq_deferred[j].owner)
+            j++;
+        if (j == RD_USERQ_DEFERRED) {     /* no room (amdgpu: no array): it stays in the xa */
+            q->fence_drv_xa[kept++] = q->fence_drv_xa[i];
+            continue;
+        }
+        dev->uq_deferred[j].owner = fd->context;
+        dev->uq_deferred[j].ref = q->fence_drv_xa[i];
+        dev->uq_deferred[j].seq = seq;
+    }
+    q->nxa = kept;
+    return 0;
+}
+
+/* ---- queue objects ---- */
+
+/* Ported from amdgpu_userq_find (a queue being built or torn down is out of reach) */
+static rdna3_userq *userq_find(rdna3_drm_file *f, uint32_t qid)
+{
+    if (!f->userqs || !qid || qid >= RD_MAX_USERQ || f->userqs[qid - 1].used != 1)
+        return NULL;
+    return &f->userqs[qid - 1];
+}
+
+/* Ported from amdgpu_userq_get_supported_ip_mask */
+static uint32_t userq_get_supported_ip_mask(const rdna3_drm_device *dev)
+{
+    return dev->userq_ip_mask;
+}
+
+/* Ported from amdgpu_userq_create_object: a zeroed kernel BO the GPU reads
+ * in VMID 0 (amdgpu: GTT bound to GART; here CPU-visible VRAM, where this
+ * driver keeps the kernel queues' MQDs too) */
+static int userq_create_object(rdna3_drm_device *dev, rdna3_userq_obj *o, uint32_t size)
+{
+    rdna3_drm_ops *ops = &dev->ops;
+    rdna3_bo *bo = (rdna3_bo *)ops->zalloc(ops->ctx, sizeof(*bo));
+    int r;
+    if (!bo)
+        return -RD_ENOMEM;
+    bo->refcnt = 1;
+    bo->size = ((uint64_t)size + 4095) & ~4095ull;
+    bo->alignment = 4096;
+    bo->domains = bo->placement = AMDGPU_GEM_DOMAIN_VRAM;
+    bo->flags = AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS | AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
+    r = ops->bo_alloc(ops->ctx, bo);
+    if (r) {
+        ops->free(ops->ctx, bo, sizeof(*bo));
+        return r;
+    }
+    dev->vram_usage += bo->size;
+    o->obj = bo;
+    o->cpu_ptr = ops->bo_kmap(ops->ctx, bo);
+    r = ops->bo_gpu_addr(ops->ctx, bo, &o->gpu_addr);
+    if (!o->cpu_ptr || r) {
+        bo_put_dev(dev, bo);
+        zero(o, sizeof(*o));
+        return r ? r : -RD_ENOMEM;
+    }
+    zero(o->cpu_ptr, (size_t)bo->size);
+    return 0;
+}
+
+/* Ported from amdgpu_userq_destroy_object */
+static void userq_destroy_object(rdna3_drm_device *dev, rdna3_userq_obj *o)
+{
+    if (o->obj)
+        bo_put_dev(dev, o->obj);
+    zero(o, sizeof(*o));
+}
+
+/* Ported from amdgpu_doorbell_index_on_bar: dword index of doorbell
+ * 'doorbell_index' (of 'db_size' bytes) of a doorbell BO */
+static uint32_t doorbell_index_on_bar(const rdna3_bo *db_bo, uint32_t doorbell_index, uint32_t db_size)
+{
+    return (uint32_t)(db_bo->vram_offset / 4) + doorbell_index * ((db_size + 3) / 4);
+}
+
+/* Ported from amdgpu_userq_get_doorbell_index: the queue holds its
+ * doorbell BO (amdgpu pins it in the doorbell domain, which only a doorbell
+ * BO passes). Unlike amdgpu 6.16 the doorbell has to lie inside the BO, or
+ * a client could ring another's queues. */
+static int userq_get_doorbell_index(rdna3_drm_file *f, rdna3_userq *q, uint32_t handle,
+                                    uint32_t offset, uint32_t *index)
+{
+    rdna3_bo *bo = rdna3_drm_bo_lookup(f, handle);
+    uint32_t db_size;
+    if (!bo || bo->placement != AMDGPU_GEM_DOMAIN_DOORBELL)
+        return -RD_EINVAL;
+    switch (q->queue_type) {
+    case AMDGPU_HW_IP_GFX:
+    case AMDGPU_HW_IP_COMPUTE:
+    case AMDGPU_HW_IP_DMA:
+        db_size = 8;
+        break;
+    default:                 /* VCN_ENC / VPE: not on this card's user queues */
+        return -RD_EINVAL;
+    }
+    if ((uint64_t)offset * db_size + db_size > bo->size)
+        return -RD_EINVAL;
+    bo->refcnt++;
+    q->db_obj = bo;
+    *index = doorbell_index_on_bar(bo, offset, db_size);
+    return 0;
+}
+
+/* Ported from amdgpu_userq_priority_permit: HIGH needs CAP_SYS_NICE or the
+ * DRM master (the OS's stand-in, ops.privileged) */
+static int userq_priority_permit(rdna3_drm_device *dev, int32_t priority)
+{
+    if (priority < AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_HIGH)
+        return 0;
+    if (caller_privileged(dev))
+        return 0;
+    return -RD_EACCES;
+}
+
+/* Ported from amdgpu_userq_input_va_validate (Linux 6.18): [addr, addr +
+ * expected_size) lies in one mapping of the VM, counted in GPU pages */
+static int userq_input_va_validate(rdna3_drm_file *f, uint64_t addr, uint64_t expected_size)
+{
+    uint64_t user_addr = (addr & GMC_HOLE_MASK) >> 12, size = expected_size >> 12, start, last;
+    rdna3_va *m = va_lookup(f, addr);
+    if (!m)
+        return -RD_EINVAL;
+    start = (m->va & GMC_HOLE_MASK) >> 12;
+    last = start + m->size / 4096 - 1;
+    if (user_addr >= start && last - user_addr + 1 >= size)
+        return 0;
+    return -RD_EINVAL;
+}
+
+/* ---- mes_userqueue.c ---- */
+
+/* Ported from convert_to_mes_priority */
+static uint32_t convert_to_mes_priority(int32_t priority)
+{
+    switch (priority) {
+    case AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_NORMAL_LOW:
+    default:
+        return AMD_MES_PRIORITY_LEVEL_NORMAL;
+    case AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_LOW:
+        return AMD_MES_PRIORITY_LEVEL_LOW;
+    case AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_NORMAL_HIGH:
+        return AMD_MES_PRIORITY_LEVEL_MEDIUM;
+    case AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_HIGH:
+        return AMD_MES_PRIORITY_LEVEL_HIGH;
+    }
+}
+
+/* Ported from mes_userq_map: the MES takes the queue (ADD_QUEUE) */
+static int mes_userq_map(rdna3_drm_file *f, rdna3_userq *q)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    amd_mes_add_queue in;
+    zero(&in, sizeof(in));
+    in.process_va_start = 0;
+    in.process_va_end = VM_MAX_PFN - 1;
+    /* set process quantum to 10 ms and gang quantum to 1 ms as default */
+    in.process_quantum = 100000;
+    in.gang_quantum = 10000;
+    in.paging = 0;
+    in.process_context_addr = q->fw_obj.gpu_addr;
+    in.gang_context_addr = q->fw_obj.gpu_addr + USERQ_PROC_CTX_SZ;
+    in.inprocess_gang_priority = AMD_MES_PRIORITY_LEVEL_NORMAL;
+    in.gang_global_priority_level = convert_to_mes_priority(q->priority);
+    in.queue_type = q->queue_type;
+    in.mqd_addr = q->mqd.gpu_addr;
+    in.wptr_addr = q->prop.wptr_gpu_addr;
+    in.queue_size = q->prop.queue_size >> 2;
+    in.doorbell_offset = q->prop.doorbell_index;
+    in.wptr_mc_addr = q->wptr_obj.gpu_addr;
+    /* process_id (vm->pasid) and page_table_base_addr (amdgpu_gmc_pd_addr)
+     * belong to the VM: the OS fills them */
+    return ops->userq_add_hw_queue(ops->ctx, f->vm, &in);
+}
+
+/* Ported from mes_userq_unmap: the MES lets go of it (REMOVE_QUEUE) */
+static int mes_userq_unmap(rdna3_drm_file *f, rdna3_userq *q)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    amd_mes_remove_queue in;
+    zero(&in, sizeof(in));
+    in.doorbell_offset = q->doorbell_index;
+    in.gang_context_addr = q->fw_obj.gpu_addr + USERQ_PROC_CTX_SZ;
+    return ops->userq_remove_hw_queue(ops->ctx, &in);
+}
+
+/* Ported from mes_userq_create_ctx_space: a page each of process and gang
+ * context for the firmware */
+static int mes_userq_create_ctx_space(rdna3_drm_device *dev, rdna3_userq *q)
+{
+    return userq_create_object(dev, &q->fw_obj, USERQ_PROC_CTX_SZ + USERQ_GANG_CTX_SZ);
+}
+
+/* Ported from mes_userq_map_gtt_bo_to_gart (the reference amdgpu takes is
+ * the queue's here, dropped with the MQD) */
+static int mes_userq_map_gtt_bo_to_gart(rdna3_drm_device *dev, rdna3_bo *bo, uint64_t *mc)
+{
+    int r;
+    if (bo->placement != AMDGPU_GEM_DOMAIN_VRAM && bo->placement != AMDGPU_GEM_DOMAIN_GTT)
+        return -RD_EINVAL;
+    r = dev->ops.bo_gpu_addr(dev->ops.ctx, bo, mc);
+    if (r)
+        return r;
+    bo->refcnt++;
+    return 0;
+}
+
+/* Ported from mes_userq_create_wptr_mapping: the firmware polls the wptr
+ * through GART, so its BO (one page at most) gets bound there. As in
+ * amdgpu, the MES sees the BO's first qword. */
+static int mes_userq_create_wptr_mapping(rdna3_drm_file *f, rdna3_userq *q, uint64_t wptr)
+{
+    rdna3_va *m = va_lookup(f, wptr & GMC_HOLE_MASK);
+    int r;
+    if (!m)
+        return -RD_EINVAL;
+    if (m->bo->size > 4096)
+        return -RD_EINVAL;   /* "Requested GART mapping for wptr bo larger than one page" */
+    r = mes_userq_map_gtt_bo_to_gart(f->dev, m->bo, &q->wptr_obj.gpu_addr);
+    if (r)
+        return r;
+    q->wptr_obj.obj = m->bo;
+    return 0;
+}
+
+/* Ported from mes_userq_mqd_create */
+static int mes_userq_mqd_create(rdna3_drm_file *f, const struct drm_amdgpu_userq_in *in, rdna3_userq *q)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_drm_ops *ops = &dev->ops;
+    amd_mqd_prop *p = &q->prop;
+    rdna3_userq_fence_drv *fd = fdrv_find(dev, q->fence_ctx);
+    uint32_t mqd_size = q->queue_type == AMDGPU_HW_IP_DMA ? AMD_V11_SDMA_MQD_SIZE
+                      : q->queue_type == AMDGPU_HW_IP_GFX ? AMD_V11_GFX_MQD_SIZE
+                                                          : AMD_V11_COMPUTE_MQD_SIZE;
+    int r;
+
+    if (!in->wptr_va || !in->rptr_va || !in->queue_va || in->queue_size == 0 || !fd)
+        return -RD_EINVAL;   /* "Invalid MQD parameters for userqueue" */
+    r = userq_create_object(dev, &q->mqd, mqd_size);
+    if (r)
+        return r;
+    /* Initialize the MQD BO with user given values */
+    zero(p, sizeof(*p));
+    p->wptr_gpu_addr = in->wptr_va;
+    p->rptr_gpu_addr = in->rptr_va;
+    p->queue_size = (uint32_t)in->queue_size;
+    p->hqd_base_gpu_addr = in->queue_va;
+    p->mqd_gpu_addr = q->mqd.gpu_addr;
+    p->use_doorbell = 1;
+    p->doorbell_index = q->doorbell_index;
+    p->fence_address = fd->gpu_addr;
+
+    if (q->queue_type == AMDGPU_HW_IP_COMPUTE) {
+        struct drm_amdgpu_userq_mqd_compute_gfx11 c;
+        if (in->mqd_size != sizeof(c)) {
+            r = -RD_EINVAL;   /* "Invalid compute IP MQD size" */
+            goto free_mqd;
+        }
+        if (ops->copyin(ops->ctx, &c, in->mqd, sizeof(c))) {
+            r = -RD_ENOMEM;   /* memdup_user failed */
+            goto free_mqd;
+        }
+        p->eop_gpu_addr = c.eop_va;
+        p->hqd_pipe_priority = AMD_GFX_PIPE_PRIO_NORMAL;
+        p->hqd_queue_priority = AMD_GFX_QUEUE_PRIORITY_MINIMUM;
+        p->hqd_active = 0;
+        p->tmz_queue = (in->flags & AMDGPU_USERQ_CREATE_FLAGS_QUEUE_SECURE) ? 1 : 0;
+    } else if (q->queue_type == AMDGPU_HW_IP_GFX) {
+        struct drm_amdgpu_userq_mqd_gfx11 g;
+        if (in->mqd_size != sizeof(g) || !in->mqd) {
+            r = -RD_EINVAL;   /* "Invalid GFX MQD" */
+            goto free_mqd;
+        }
+        if (ops->copyin(ops->ctx, &g, in->mqd, sizeof(g))) {
+            r = -RD_ENOMEM;
+            goto free_mqd;
+        }
+        p->shadow_addr = g.shadow_va;
+        p->csa_addr = g.csa_va;
+        p->tmz_queue = (in->flags & AMDGPU_USERQ_CREATE_FLAGS_QUEUE_SECURE) ? 1 : 0;
+    } else if (q->queue_type == AMDGPU_HW_IP_DMA) {
+        struct drm_amdgpu_userq_mqd_sdma_gfx11 s;
+        if (in->mqd_size != sizeof(s) || !in->mqd) {
+            r = -RD_EINVAL;   /* "Invalid SDMA MQD" */
+            goto free_mqd;
+        }
+        if (ops->copyin(ops->ctx, &s, in->mqd, sizeof(s))) {
+            r = -RD_ENOMEM;
+            goto free_mqd;
+        }
+        p->csa_addr = s.csa_va;
+    }
+
+    r = ops->userq_mqd_init(ops->ctx, q->queue_type, q->mqd.cpu_ptr, p);
+    if (r)
+        goto free_mqd;
+    /* Create BO for FW operations */
+    r = mes_userq_create_ctx_space(dev, q);
+    if (r)
+        goto free_mqd;
+    /* FW expects WPTR BOs to be mapped into GART */
+    r = mes_userq_create_wptr_mapping(f, q, p->wptr_gpu_addr);
+    if (r)
+        goto free_ctx;
+    return 0;
+
+free_ctx:
+    userq_destroy_object(dev, &q->fw_obj);
+free_mqd:
+    userq_destroy_object(dev, &q->mqd);
+    return r;
+}
+
+/* Ported from mes_userq_mqd_destroy */
+static void mes_userq_mqd_destroy(rdna3_drm_device *dev, rdna3_userq *q)
+{
+    userq_destroy_object(dev, &q->fw_obj);
+    userq_destroy_object(dev, &q->mqd);
+    if (q->wptr_obj.obj)
+        bo_put_dev(dev, q->wptr_obj.obj);
+    zero(&q->wptr_obj, sizeof(q->wptr_obj));
+}
+
+/* ---- amdgpu_userq.c ---- */
+
+/* Ported from amdgpu_userq_unmap_helper */
+static int userq_unmap_helper(rdna3_drm_file *f, rdna3_userq *q)
+{
+    int r = 0;
+    if (q->state == RD_USERQ_STATE_MAPPED) {
+        r = mes_userq_unmap(f, q);
+        q->state = r ? RD_USERQ_STATE_HUNG : RD_USERQ_STATE_UNMAPPED;
+    }
+    return r;
+}
+
+/* Ported from amdgpu_userq_map_helper */
+static int userq_map_helper(rdna3_drm_file *f, rdna3_userq *q)
+{
+    int r = 0;
+    if (q->state == RD_USERQ_STATE_UNMAPPED) {
+        r = mes_userq_map(f, q);
+        q->state = r ? RD_USERQ_STATE_HUNG : RD_USERQ_STATE_MAPPED;
+    }
+    return r;
+}
+
+/* Ported from amdgpu_userq_wait_for_last_fence: up to 100 ms for the last
+ * signaled work (the OS lock may be dropped meanwhile; the caller has taken
+ * the queue out of reach) */
+static void userq_wait_for_last_fence(rdna3_drm_device *dev, const rdna3_userq *q)
+{
+    rdna3_fence fe = q->last_fence;
+    if (fe.ip != RD_USERQ_FENCE_IP || userq_fence_done(dev, &fe) || !dev->ops.now_ns)
+        return;
+    userq_fence_wait(dev, &fe, dev->ops.now_ns(dev->ops.ctx) + 100ull * 1000 * 1000);
+}
+
+/* Ported from amdgpu_userq_cleanup (it also lets go of the doorbell BO,
+ * which amdgpu's file-close path never drops) */
+static void userq_cleanup(rdna3_drm_file *f, rdna3_userq *q)
+{
+    mes_userq_mqd_destroy(f->dev, q);
+    userq_fence_driver_free(f->dev, q);
+    if (q->db_obj)
+        bo_put_dev(f->dev, q->db_obj);
+    zero(q, sizeof(*q));
+}
+
+/* Ported from amdgpu_userq_mgr_init: the queue table, with the first queue */
+static int userq_mgr_init(rdna3_drm_file *f)
+{
+    if (!f->userqs)
+        f->userqs = (rdna3_userq *)f->dev->ops.zalloc(f->dev->ops.ctx, sizeof(rdna3_userq) * RD_MAX_USERQ);
+    return f->userqs ? 0 : -RD_ENOMEM;
+}
+
+/* Ported from amdgpu_userq_mgr_fini: every queue of a closing file. The
+ * 100 ms wait for the last fence is left out: it would drop the OS lock in
+ * the middle of the file's teardown; REMOVE_QUEUE preempts the queue anyway. */
+static void userq_mgr_fini(rdna3_drm_file *f)
+{
+    uint32_t i;
+    if (!f->userqs)
+        return;
+    for (i = 0; i < RD_MAX_USERQ; i++) {
+        rdna3_userq *q = &f->userqs[i];
+        if (!q->used)
+            continue;
+        q->used = 2;   /* out of reach of userq_find */
+        userq_unmap_helper(f, q);
+        userq_cleanup(f, q);
+    }
+    f->dev->ops.free(f->dev->ops.ctx, f->userqs, sizeof(rdna3_userq) * RD_MAX_USERQ);
+    f->userqs = NULL;
+}
+
+/* Ported from amdgpu_userq_destroy */
+static int userq_destroy(rdna3_drm_file *f, uint32_t queue_id)
+{
+    rdna3_userq *q = userq_find(f, queue_id);
+    int r;
+    if (!q)
+        return -RD_EINVAL;   /* "Invalid queue id to destroy" */
+    q->used = 2;             /* the wait may drop the OS lock: nobody else finds it */
+    userq_wait_for_last_fence(f->dev, q);
+    r = userq_unmap_helper(f, q);
+    userq_cleanup(f, q);     /* drops the doorbell BO after the unmap, not before */
+    return r;
+}
+
+/* Ported from amdgpu_userq_create */
+static int userq_create(rdna3_drm_file *f, union drm_amdgpu_userq *args)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_drm_ops *ops = &dev->ops;
+    rdna3_userq *q = NULL;
+    uint32_t qid, index = 0;
+    int32_t priority = (int32_t)((args->in.flags & AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_MASK) >>
+                                 AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_SHIFT);
+    int r;
+
+    r = userq_priority_permit(dev, priority);
+    if (r)
+        return r;
+    /* uq_funcs = adev->userq_funcs[ip_type] */
+    if (!(userq_get_supported_ip_mask(dev) & (1u << args->in.ip_type)) || !ops->userq_mqd_init ||
+        !ops->userq_add_hw_queue || !ops->userq_remove_hw_queue || !ops->bo_kmap || !ops->bo_gpu_addr)
+        return -RD_EINVAL;   /* "Usermode queue is not supported for this IP" */
+    r = userq_mgr_init(f);
+    if (r)
+        return r;
+    /* Validate the userq virtual address (Linux 6.18) */
+    if (userq_input_va_validate(f, args->in.queue_va, args->in.queue_size) ||
+        userq_input_va_validate(f, args->in.rptr_va, 4096) ||
+        userq_input_va_validate(f, args->in.wptr_va, 4096))
+        return -RD_EINVAL;
+    /* idr_alloc(1, AMDGPU_MAX_USERQ_COUNT): taken before anything is built,
+     * the slot stays out of reach until the queue is complete */
+    for (qid = 1; qid < RD_MAX_USERQ && f->userqs[qid - 1].used; qid++)
+        ;
+    if (qid == RD_MAX_USERQ)
+        return -RD_ENOMEM;   /* "Failed to allocate a queue id" */
+    q = &f->userqs[qid - 1];
+    zero(q, sizeof(*q));
+    q->used = 2;
+    q->doorbell_handle = args->in.doorbell_handle;
+    q->queue_type = args->in.ip_type;
+    q->priority = priority;
+    q->state = RD_USERQ_STATE_UNMAPPED;
+
+    /* Convert relative doorbell offset into absolute doorbell index */
+    r = userq_get_doorbell_index(f, q, args->in.doorbell_handle, args->in.doorbell_offset, &index);
+    if (r)
+        goto fail;           /* "Failed to get doorbell for queue" */
+    q->doorbell_index = index;
+    r = userq_fence_driver_alloc(dev, q);
+    if (r)
+        goto fail_db;        /* "Failed to alloc fence driver" */
+    r = mes_userq_mqd_create(f, &args->in, q);
+    if (r)
+        goto fail_fence;     /* "Failed to create Queue" */
+    /* the fence VAs the client waits on live in its VM (amdgpu maps seq64
+     * into every VM at open) */
+    r = seq64_map(f);
+    if (r)
+        goto fail_mqd;
+    r = userq_map_helper(f, q);
+    if (r)
+        goto fail_mqd;       /* "Failed to map Queue" */
+    q->used = 1;
+    zero(&args->out, sizeof(args->out));
+    args->out.queue_id = qid;
+    return 0;
+
+fail_mqd:
+    mes_userq_mqd_destroy(dev, q);
+fail_fence:
+    userq_fence_driver_free(dev, q);
+fail_db:
+    bo_put_dev(dev, q->db_obj);
+fail:
+    zero(q, sizeof(*q));
+    return r;
+}
+
+/* Ported from amdgpu_userq_ioctl, with amdgpu_userq_input_args_validate
+ * (Linux 6.18) in front of it */
+static int userq_ioctl(rdna3_drm_file *f, union drm_amdgpu_userq *args)
+{
+    const struct drm_amdgpu_userq_in *in = &args->in;
+    switch (in->op) {
+    case AMDGPU_USERQ_OP_CREATE:
+        if (in->flags & ~(uint32_t)(AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_MASK |
+                                    AMDGPU_USERQ_CREATE_FLAGS_QUEUE_SECURE))
+            return -RD_EINVAL;
+        /* Usermode queues are only supported for GFX, compute and SDMA */
+        if (in->ip_type != AMDGPU_HW_IP_GFX && in->ip_type != AMDGPU_HW_IP_DMA &&
+            in->ip_type != AMDGPU_HW_IP_COMPUTE)
+            return -RD_EINVAL;
+        /* secure queues need TMZ, which this driver does not enable
+         * (amdgpu_is_tmz), except on GFX / compute */
+        if ((in->flags & AMDGPU_USERQ_CREATE_FLAGS_QUEUE_SECURE) && in->ip_type != AMDGPU_HW_IP_GFX &&
+            in->ip_type != AMDGPU_HW_IP_COMPUTE)
+            return -RD_EINVAL;
+        if (in->queue_va == BO_INVALID_OFFSET || in->queue_va == 0 || in->queue_size == 0)
+            return -RD_EINVAL;
+        if (!in->wptr_va || !in->rptr_va)
+            return -RD_EINVAL;
+        return userq_create(f, args);
+    case AMDGPU_USERQ_OP_FREE:
+        if (in->ip_type || in->doorbell_handle || in->doorbell_offset || in->flags || in->queue_va ||
+            in->queue_size || in->rptr_va || in->wptr_va || in->mqd || in->mqd_size)
+            return -RD_EINVAL;
+        return userq_destroy(f, in->queue_id);
+    default:
+        return -RD_EINVAL;
+    }
+}
+
+/* ---- amdgpu_userq_fence.c: the ioctls ---- */
+
+/* Ported from amdgpu_userq_fence_read_wptr: the wptr the client wrote,
+ * read like amdgpu does from the first qword of the BO the wptr VA
+ * belongs to */
+static int userq_fence_read_wptr(rdna3_drm_file *f, rdna3_userq *q, uint64_t *wptr)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    rdna3_va *m = va_lookup(f, q->prop.wptr_gpu_addr);
+    const uint8_t *p;
+    if (!m)
+        return -RD_EINVAL;   /* "Failed to lookup amdgpu_bo_va_mapping" */
+    p = (const uint8_t *)ops->bo_kmap(ops->ctx, m->bo);
+    if (!p)
+        return -RD_EINVAL;   /* "Failed mapping the userqueue wptr bo" */
+    copy(wptr, p, 8);
+    return 0;
+}
+
+/* the BO handles of a signal / wait: every one has to exist */
+static int userq_bo_handles(rdna3_drm_file *f, uint64_t ptr, uint32_t n)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    uint32_t i, h;
+    for (i = 0; i < n; i++) {
+        if (ops->copyin(ops->ctx, &h, ptr + 4ull * i, 4))
+            return -RD_EFAULT;
+        if (!rdna3_drm_bo_lookup(f, h))
+            return -RD_ENOENT;
+    }
+    return 0;
+}
+
+/* Ported from amdgpu_userq_signal_ioctl: a fence for the queue's current
+ * wptr goes into the syncobjs (drm_syncobj_replace_fence) */
+static int userq_signal_ioctl(rdna3_drm_file *f, struct drm_amdgpu_userq_signal *a)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_drm_ops *ops = &dev->ops;
+    uint32_t i, h, n = a->num_syncobj_handles;
+    rdna3_userq *q;
+    rdna3_fence fe;
+    uint64_t wptr = 0;
+    int r;
+
+    for (i = 0; i < n; i++) {
+        if (ops->copyin(ops->ctx, &h, a->syncobj_handles + 4ull * i, 4))
+            return -RD_EFAULT;
+        if (!sobj(f, h))
+            return -RD_ENOENT;
+    }
+    r = userq_bo_handles(f, a->bo_read_handles, a->num_bo_read_handles);
+    if (!r)
+        r = userq_bo_handles(f, a->bo_write_handles, a->num_bo_write_handles);
+    if (r)
+        return r;
+    /* Retrieve the user queue */
+    q = userq_find(f, a->queue_id);
+    if (!q)
+        return -RD_ENOENT;
+    r = userq_fence_read_wptr(f, q, &wptr);
+    if (r)
+        return r;
+    /* Create a new fence */
+    r = userq_fence_create(dev, q, wptr, &fe);
+    if (r)
+        return r;
+    q->last_fence = fe;
+    /* Add the created fence to syncobj/BO's */
+    for (i = 0; i < n; i++) {
+        rdna3_syncobj *s;
+        if (ops->copyin(ops->ctx, &h, a->syncobj_handles + 4ull * i, 4))
+            return -RD_EFAULT;
+        s = sobj(f, h);
+        if (!s)
+            continue;
+        s->signaled = 0;
+        s->has_fence = 1;
+        s->fence = fe;
+    }
+    return 0;
+}
+
+/* drm_syncobj_find_fence(..., DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT): the
+ * syncobj's fence for 'point', a signaled stub once it passed; -ENOENT
+ * without the syncobj. Nothing submitted for it yet is -ETIME at once:
+ * Linux waits for a submission, which nothing can make while this ioctl
+ * runs. */
+static int userq_find_fence(rdna3_drm_file *f, uint32_t h, uint64_t point, rdna3_fence *fe)
+{
+    rdna3_syncobj *s = sobj(f, h);
+    if (!s)
+        return -RD_ENOENT;
+    if (point && s->point < point)
+        return -RD_ETIME;
+    if (sobj_signaled(f->dev, s)) {
+        fe->ip = FENCE_STUB_IP;
+        fe->ring = 0;
+        fe->seq = 0;
+        return 0;
+    }
+    if (!s->has_fence)
+        return -RD_ETIME;
+    *fe = s->fence;
+    return 0;
+}
+
+/* the syncobj fences of a wait in amdgpu's order (timeline points, then
+ * syncobjs): counted when 'out' is NULL, else stored (at most 'max') */
+static int userq_wait_fences(rdna3_drm_file *f, const struct drm_amdgpu_userq_wait *w, rdna3_fence *out,
+                             uint32_t max, uint32_t *count)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    uint32_t i, h, pt, n = 0;
+    rdna3_fence fe;
+    int r;
+    for (i = 0; i < w->num_syncobj_timeline_handles; i++) {
+        /* amdgpu reads the points as 32-bit values */
+        if (ops->copyin(ops->ctx, &h, w->syncobj_timeline_handles + 4ull * i, 4) ||
+            ops->copyin(ops->ctx, &pt, w->syncobj_timeline_points + 4ull * i, 4))
+            return -RD_EFAULT;
+        r = userq_find_fence(f, h, pt, &fe);
+        if (r)
+            return r;
+        if (out && n >= max)
+            return -RD_EINVAL;
+        if (out)
+            out[n] = fe;
+        n++;
+    }
+    for (i = 0; i < w->num_syncobj_handles; i++) {
+        if (ops->copyin(ops->ctx, &h, w->syncobj_handles + 4ull * i, 4))
+            return -RD_EFAULT;
+        r = userq_find_fence(f, h, 0, &fe);
+        if (r)
+            return r;
+        if (out && n >= max)
+            return -RD_EINVAL;
+        if (out)
+            out[n] = fe;
+        n++;
+    }
+    *count = n;
+    return 0;
+}
+
+/* dma_fence_dedup_array: one fence per context, the latest */
+static uint32_t fence_dedup(rdna3_fence *fe, uint32_t n)
+{
+    uint32_t i, j, k = 0;
+    for (i = 0; i < n; i++) {
+        for (j = 0; j < k; j++)
+            if (fe[j].ip == fe[i].ip && fe[j].ring == fe[i].ring) {
+                if (fe[i].seq > fe[j].seq)
+                    fe[j].seq = fe[i].seq;
+                break;
+            }
+        if (j == k)
+            fe[k++] = fe[i];
+    }
+    return k;
+}
+
+/* Ported from amdgpu_userq_wait_ioctl: num_fences 0 counts the fences
+ * behind the syncobjs; otherwise kernel ring fences are waited for here and
+ * each user queue fence comes back as (va, value) for the waiting queue to
+ * wait on, its fence driver referenced by that queue */
+static int userq_wait_ioctl(rdna3_drm_file *f, struct drm_amdgpu_userq_wait *w)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_drm_ops *ops = &dev->ops;
+    struct drm_amdgpu_userq_fence_info info;
+    rdna3_fence *fences;
+    rdna3_userq *waitq;
+    uint32_t i, n = 0, cnt = 0, alloc;
+    int r;
+
+    r = userq_bo_handles(f, w->bo_read_handles, w->num_bo_read_handles);
+    if (!r)
+        r = userq_bo_handles(f, w->bo_write_handles, w->num_bo_write_handles);
+    if (!r)
+        r = userq_wait_fences(f, w, NULL, 0, &n);
+    if (r)
+        return r;
+    if (!w->num_fences) {
+        /* the BOs carry no fences here: only the syncobjs count */
+        w->num_fences = (uint16_t)n;
+        return 0;
+    }
+    if (n > w->num_fences)
+        return -RD_EINVAL;
+    if (!n) {
+        w->num_fences = 0;
+        return userq_find(f, w->waitq_id) ? 0 : -RD_EINVAL;
+    }
+    alloc = n;
+    fences = (rdna3_fence *)ops->zalloc(ops->ctx, sizeof(*fences) * alloc);
+    if (!fences)
+        return -RD_ENOMEM;
+    r = userq_wait_fences(f, w, fences, n, &n);
+    if (r)
+        goto out;
+    /* Keep only the latest fences to reduce the number of values given
+     * back to userspace */
+    n = fence_dedup(fences, n);
+    if (!userq_find(f, w->waitq_id)) {
+        r = -RD_EINVAL;
+        goto out;
+    }
+    for (i = 0; i < n; i++) {
+        rdna3_userq_fence_drv *fd;
+        if (fences[i].ip == FENCE_STUB_IP)
+            continue;
+        if (fences[i].ip != RD_USERQ_FENCE_IP) {
+            /* Just waiting on other driver fences should be good for now
+             * (the OS lock may be dropped: the queue is looked up again) */
+            r = fence_wait_abs(dev, &fences[i], ~0ull);
+            if (r)
+                goto out;
+            continue;
+        }
+        fd = fdrv_find(dev, fences[i].ring);
+        if (!fd || userq_fence_read(fd) >= fences[i].seq)
+            continue;    /* signaled (or its driver is gone): nothing to wait on */
+        waitq = userq_find(f, w->waitq_id);
+        if (!waitq) {
+            r = -RD_EINVAL;
+            goto out;
+        }
+        /* the queue keeps the fence driver until its next fence signals */
+        if (waitq->nxa == RD_USERQ_WAIT_REFS) {
+            r = -RD_EBUSY;   /* xa_alloc: no free index */
+            goto out;
+        }
+        userq_fence_driver_get(fd);
+        waitq->fence_drv_xa[waitq->nxa++] = fd->context;
+        /* Store drm syncobj's gpu va address and value */
+        info.va = fd->va;
+        info.value = fences[i].seq;
+        if (ops->copyout(ops->ctx, w->out_fences + sizeof(info) * cnt, &info, sizeof(info))) {
+            r = -RD_EFAULT;
+            goto out;
+        }
+        cnt++;
+    }
+    w->num_fences = (uint16_t)cnt;
+    r = 0;
+out:
+    ops->free(ops->ctx, fences, sizeof(*fences) * alloc);
+    return r;
+}
+
+/* Ported from amdgpu_userq_metadata_info_gfx (amdgpu_kms.c) with the sizes
+ * of gfx_v11_0_get_gfx_shadow_info_nocheck */
+static void userq_metadata_info_gfx(struct drm_amdgpu_info_uq_metadata_gfx *meta)
+{
+    meta->shadow_size = AMD_GFX11_SHADOW_SIZE;
+    meta->shadow_alignment = AMD_GFX11_SHADOW_ALIGNMENT;
+    meta->csa_size = AMD_GFX11_FWWORKAREA_SIZE;
+    meta->csa_alignment = AMD_GFX11_FWWORKAREA_ALIGNMENT;
+}
+
 /* ------------------------------ info ------------------------------ */
 
 static int info_out(rdna3_drm_file *f, struct drm_amdgpu_info *in, const void *p, size_t n)
@@ -1733,6 +2950,19 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         /* amdgpu_info_ioctl: UVD handles are counted before Polaris only,
          * later ASICs have unlimited ones (-ENODATA); other IPs -EINVAL */
         return in->query_hw_ip.type == AMDGPU_HW_IP_UVD ? -RD_ENODATA : -RD_EINVAL;
+    case AMDGPU_INFO_UQ_FW_AREAS: {
+        /* amdgpu_info_ioctl: the firmware areas a user queue of that IP
+         * needs (shadow and CSA), GFX only */
+        struct drm_amdgpu_info_uq_metadata meta;
+        zero(&meta, sizeof(meta));
+        switch (in->query_hw_ip.type) {
+        case AMDGPU_HW_IP_GFX:
+            userq_metadata_info_gfx(&meta.gfx);
+            return info_out(f, in, &meta, sizeof(meta));
+        default:
+            return -RD_EINVAL;
+        }
+    }
     case AMDGPU_INFO_GDS_CONFIG: {   /* amdgpu_kms.c: the compute fields only */
         struct drm_amdgpu_info_gds g;
         zero(&g, sizeof(g));
@@ -1890,6 +3120,12 @@ static int drm_ioctl_dispatch(rdna3_drm_file *f, uint32_t nr, void *data, uint32
         return sched_ioctl(f, (union drm_amdgpu_sched *)data);
     case RD_NR_AMDGPU(DRM_AMDGPU_PROC_OPTIONS): NEED(struct drm_amdgpu_proc_options);
         return proc_options_ioctl((struct drm_amdgpu_proc_options *)data);
+    case RD_NR_AMDGPU(DRM_AMDGPU_USERQ): NEED(union drm_amdgpu_userq);
+        return userq_ioctl(f, (union drm_amdgpu_userq *)data);
+    case RD_NR_AMDGPU(DRM_AMDGPU_USERQ_SIGNAL): NEED(struct drm_amdgpu_userq_signal);
+        return userq_signal_ioctl(f, (struct drm_amdgpu_userq_signal *)data);
+    case RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT): NEED(struct drm_amdgpu_userq_wait);
+        return userq_wait_ioctl(f, (struct drm_amdgpu_userq_wait *)data);
     case RD_NR_XNU_FILE_ID: NEED(struct rd_xnu_file_id);
         ((struct rd_xnu_file_id *)data)->id = f->id;
         ((struct rd_xnu_file_id *)data)->pad = 0;
@@ -1936,6 +3172,9 @@ const char *rdna3_drm_ioctl_name(uint32_t nr)
     case RD_NR_AMDGPU(DRM_AMDGPU_INFO): return "AMDGPU_INFO";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA): return "AMDGPU_GEM_VA";
     case RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS): return "AMDGPU_WAIT_CS";
+    case RD_NR_AMDGPU(DRM_AMDGPU_USERQ): return "AMDGPU_USERQ";
+    case RD_NR_AMDGPU(DRM_AMDGPU_USERQ_SIGNAL): return "AMDGPU_USERQ_SIGNAL";
+    case RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT): return "AMDGPU_USERQ_WAIT";
     default: return "?";
     }
 }

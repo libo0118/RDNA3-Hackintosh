@@ -50,6 +50,9 @@ amdgpu_gfx_kfd_sch_ctrl  KFD (ROCm compute on Linux)
 amdgpu_gfx_(enforce_isolation_handler|enforce_isolation_ring_begin_use|enforce_isolation_ring_end_use|get_enforce_isolation|set_enforce_isolation)|amdgpu_gfx_(cleaner_shader_init|cleaner_shader_sw_init|cleaner_shader_sw_fini|run_cleaner_shader|run_cleaner_shader_job|set_run_cleaner_shader)  process isolation / cleaner shader switched through Linux sysfs
 gfx_v11_0_read_wave_(data|sgprs|vgprs)|wave_read_(ind|regs)|gpu_recover_get  Linux debugfs dumps
 amdgpu_fence_(get_driver_name|get_timeline_name|slab_init|slab_fini|enable_signaling|release|free)|amdgpu_job_fence_(enable_signaling|free|get_timeline_name|release)|to_amdgpu_fence  Linux dma_fence object glue
+amdgpu_userq_fence_(slab_init|slab_fini|alloc|free|release|cleanup|get_driver_name|get_timeline_name)|to_amdgpu_userq_fence  Linux dma_fence object glue
+amdgpu_userq_(start|stop)_sched_for_enforce_isolation  process isolation / cleaner shader switched through Linux sysfs
+amdgpu_userq_(ensure_ev_fence|evict|evict_all|restore_all|restore_worker|validate_bos|validate_vm_bo|wait_for_signal)  eviction fences and the restore worker: this driver never evicts a BO (everything stays resident)
 .*_set_[a-z0-9_]*funcs  Linux IP-block function-table wiring
 (dcn|dce|dal|dmub|dccg|hubbub|hubp)[a-z0-9_]*_(construct|destruct|destroy)|dccg32_create|dmub_srv_create  Linux Display Core object constructors / destructors
 dsc_optc_config_log|log_vcp_x_y|dp_log_training_result|dcn32_auto_dpm_test_log|dce_aux_log_payload|mes_v11_0_get_(misc_)?op_string|psp_gfx_cmd_name  debug logging

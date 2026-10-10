@@ -47,6 +47,7 @@ AMDGPU_STEPS = {
     "PSP 13": ["4"], "SMU 13 power": ["5"], "GMC / GPUVM": ["6", "7"],
     "IH interrupts": ["6", "6b"], "SoC / NBIO / HDP": ["1", "4"], "SDMA 6": ["7"],
     "GFX 11": ["8"], "Rings / fences": ["7", "8"], "MES queues": ["mes"],
+    "User queues": ["userq"],
     "Discovery / VBIOS": ["2"], "DMCUB": ["5b"], "Display: OTG / AUX": ["2", "9"],
     "Display: modeset": ["modeset"],
     "Display: hotplug": ["hotplug"],

@@ -100,6 +100,18 @@ public:
     /* MSI: called on the work loop for every interrupt */
     void  handleInterrupt();
 
+    /* user queues (boot-arg rdna3userq=1 with the MES scheduler, amdgpu's
+     * user_queue=1): a queue's MQD (adev->mqds[ip].init_mqd), MES ADD_QUEUE /
+     * REMOVE_QUEUE in the process of a VM, a BO's VMID 0 address (a one-page
+     * GTT BO is bound to a GART slot, amdgpu_ttm_alloc_gart), a sleep until
+     * the next interrupt or 'absNs' (5 ms at most). DRM lock held. */
+    int   userqMqdInit(uint32_t ip, void *mqd, const amd_mqd_prop *p);
+    int   userqAdd(void *vm, amd_mes_add_queue *in);
+    int   userqRemove(const amd_mes_remove_queue *in);
+    int   gpuAddr(rdna3_bo *bo, uint64_t *mc);
+    void  gartRelease(uint32_t slot);
+    void  waitInterrupt(uint64_t absNs);
+
     /* AMDGPU_CTX_QUERY2_FLAGS_* of a VM: reset since it was made, VRAM
      * lost, guilty (one of its jobs hung or page-faulted) */
     uint32_t vmQuery(void *vm);
@@ -163,6 +175,17 @@ private:
     rdna3_mec_ring  *fKcq  = nullptr;  /* level 8: the first kernel compute queue */
     struct rdna3_mes *fMes = nullptr;  /* level 8 + rdna3mes=1: MES scheduler pipe (C1) */
     bool             fMesWanted = false;
+    /* user queues: rdna3userq=1 (needs the MES, so it turns rdna3mes on);
+     * the IPs that got them, the PASIDs the VMs' processes have for the MES,
+     * GART slots of user queue wptr BOs (under the user fence slots) */
+    bool             fUserqWanted = false;
+    uint32_t         fUserqMask = 0;
+    uint32_t         fNextPasid = 0;
+    static const uint32_t kUqSlots = 64;
+    bool             fUqSlot[kUqSlots] = {};
+    void             userqStart(const uint32_t ver[32]);
+    void             userqIrqs();
+    void             userqFlushMesVmids();
     bool             fCgWanted = false;   /* GFX clock gating, default on (rdna3cg=0: off) */
     bool             fSocCgWanted = false; /* HDP + ATHUB gating (rdna3socg=1) */
     bool             fPmExpWanted = false; /* rdna3pmexp=1 */
@@ -254,6 +277,7 @@ private:
     int           fFenceEvent = 0;          /* IOLockSleep event on fLock */
     volatile uint64_t fIrqCount = 0, fIvCount = 0;
     volatile uint64_t fIrqFenceGfx = 0, fIrqFenceSdma = 0, fIrqFenceComp = 0, fIrqOther = 0;
+    volatile uint64_t fIrqUserq = 0;        /* user queue fences (EOP / SDMA fence with a doorbell) */
     bool          setupInterrupt();
     void          teardownInterrupt();
     static bool   irqFilter(OSObject *owner, IOFilterInterruptEventSource *src);

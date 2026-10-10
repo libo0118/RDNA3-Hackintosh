@@ -251,3 +251,15 @@ uint32_t ih60_iv_fence(const rdna3_iv *iv)
         return RD_IH_FENCE_SDMA0;
     return 0;
 }
+
+/* the user queue halves of gfx_v11_0_eop_irq and sdma_v6_0_process_fence_irq
+ * (adev->enable_mes && doorbell_offset): the doorbell that names the queue's
+ * fence driver; the SDMA reports it in SDMA0_QUEUE0_DOORBELL_OFFSET units */
+uint32_t ih60_iv_userq_doorbell(const rdna3_iv *iv)
+{
+    if (iv->client_id == RD_IH_CLIENT_GRBM_CP && iv->src_id == RD_IH_SRC_CP_EOP)
+        return iv->src_data[0];
+    if (iv->client_id == RD_IH_CLIENT_GFX && iv->src_id == RD_IH_SRC_SDMA_FENCE)
+        return iv->src_data[0] >> 2;   /* SDMA0_QUEUE0_DOORBELL_OFFSET__OFFSET__SHIFT */
+    return 0;
+}
