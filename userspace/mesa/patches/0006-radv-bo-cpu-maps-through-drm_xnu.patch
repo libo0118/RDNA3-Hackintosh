@@ -1,0 +1,67 @@
+diff --git a/src/amd/vulkan/winsys/amdgpu/radv_amdgpu_bo.c b/src/amd/vulkan/winsys/amdgpu/radv_amdgpu_bo.c
+index 63ff7fa..eeb5f6a 100644
+--- a/src/amd/vulkan/winsys/amdgpu/radv_amdgpu_bo.c
++++ b/src/amd/vulkan/winsys/amdgpu/radv_amdgpu_bo.c
+@@ -28,6 +28,20 @@
+ #include "util/u_math.h"
+ #include "util/u_memory.h"
+ 
++#if defined(__APPLE__) || defined(RADV_DRM_XNU)
++/* libdrm_xnu (RDNA3-Hackintosh): the DRM fd is not a kernel file; BO CPU
++ * mappings come from the driver through drm_xnu_mmap, which cannot place
++ * them at a fixed address */
++#include "drm_xnu.h"
++#define radv_bo_mmap(addr, len, prot, flags, fd, off) drm_xnu_mmap(addr, len, prot, flags, fd, off)
++#define radv_bo_munmap(addr, len)                    drm_xnu_munmap(addr, len)
++#define RADV_BO_MMAP_FIXED                           0
++#else
++#define radv_bo_mmap(addr, len, prot, flags, fd, off) mmap(addr, len, prot, flags, fd, off)
++#define radv_bo_munmap(addr, len)                    munmap(addr, len)
++#define RADV_BO_MMAP_FIXED                           1
++#endif
++
+ static void radv_amdgpu_winsys_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo *_bo);
+ 
+ static int
+@@ -378,7 +392,7 @@ radv_amdgpu_winsys_bo_destroy(struct radeon_winsys *_ws, struct radeon_winsys_bo
+    }
+ 
+    if (bo->cpu_map)
+-      munmap(bo->cpu_map, bo->base.size);
++      radv_bo_munmap(bo->cpu_map, bo->base.size);
+ 
+    if (ws->debug_all_bos)
+       radv_amdgpu_global_bo_list_del(ws, bo);
+@@ -737,8 +751,12 @@ radv_amdgpu_winsys_bo_map(struct radeon_winsys *_ws, struct radeon_winsys_bo *_b
+    if (ret)
+       return NULL;
+ 
+-   void *data = mmap(fixed_addr, bo->base.size, PROT_READ | PROT_WRITE, MAP_SHARED | (use_fixed_addr ? MAP_FIXED : 0),
+-                     radv_amdgpu_winsys(_ws)->fd, args.out.addr_ptr);
++   if (use_fixed_addr && !RADV_BO_MMAP_FIXED)
++      return NULL;
++
++   void *data = radv_bo_mmap(fixed_addr, bo->base.size, PROT_READ | PROT_WRITE,
++                             MAP_SHARED | (use_fixed_addr ? MAP_FIXED : 0), radv_amdgpu_winsys(_ws)->fd,
++                             args.out.addr_ptr);
+    if (data == MAP_FAILED)
+       return NULL;
+ 
+@@ -756,7 +774,7 @@ radv_amdgpu_winsys_bo_unmap(struct radeon_winsys *_ws, struct radeon_winsys_bo *
+       return;
+ 
+    assert(bo->cpu_map);
+-   if (replace) {
++   if (replace && RADV_BO_MMAP_FIXED) {
+       (void)mmap(bo->cpu_map, bo->base.size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    } else {
+ #if HAVE_AMDGPU_VIRTIO
+@@ -765,7 +783,7 @@ radv_amdgpu_winsys_bo_unmap(struct radeon_winsys *_ws, struct radeon_winsys_bo *
+          ac_drm_bo_cpu_unmap(ws->dev, bo->bo);
+       else
+ #endif
+-         munmap(bo->cpu_map, bo->base.size);
++         radv_bo_munmap(bo->cpu_map, bo->base.size);
+    }
+    bo->cpu_map = NULL;
+ }

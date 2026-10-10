@@ -18,11 +18,12 @@ applies `userspace/mesa/patches/*.patch` and builds with
 
 | Patch | Purpose |
 |---|---|
-| `0001-radv-open-render-node-through-drm_xnu` | RADV opens and closes the render node through `drm_xnu` instead of `open(2)` |
+| `0001-radv-open-render-node-through-drm_xnu` | RADV opens and closes the render node through `drm_xnu` instead of `open(2)` (physical device, its ac_drm device, and the winsys at `vkCreateDevice`), and does not `stat` it (no `/dev/dri` on macOS) |
 | `0002-addrlib-apple-branches-are-for-the-kernel-driver` | the `__APPLE__` branches in addrlib are for Apple's kernel driver (NDA header, `__umoddi3`, `IOPanic`); we do not want them in userspace |
 | `0003-radv-darwin-weak-entrypoints-via-dynamic-lookup` | weak, undefined `wsi_*` symbols and optional entrypoints: ld64 on macOS requires `-undefined dynamic_lookup` |
 | `0004-darwin-use-libdrm_xnu-as-libdrm` | on macOS `dep_libdrm` = our libdrm: `HAVE_LIBDRM`, `vk_drm_syncobj.c`, `u_sync_provider.c` and `wsi_common_drm.c` build as on Linux (without this, `vk_drm_syncobj_*` did not exist and dlopen would fail) |
 | `0005-os_drm-ioctls-through-libdrm-on-drm_xnu` | `util/os_drm.h` (used by `ac_linux_drm.c` for every amdgpu query, CS, BO and VA call) calls `ioctl(2)` on the fd directly, bypassing libdrm; a drm_xnu fd is no kernel file, so RADV failed `ac_drm_query_gpu_info` and found no device (found with `tools/radv_host.sh`). On drm_xnu it goes through `drmIoctl` |
+| `0006-radv-bo-cpu-maps-through-drm_xnu` | RADV maps BOs with `mmap(2)` on the DRM fd after `GEM_MMAP` (not through libdrm), so `vkMapMemory` failed on drm_xnu; maps and unmaps go through `drm_xnu_mmap` / `drm_xnu_munmap` (placed maps at a fixed address are refused there) |
 
 `libvulkan_radeon.dylib` builds and links in CI. After linking, the script
 reads `nm -m`: a "dynamically looked up" symbol has no owner. Weak ones
