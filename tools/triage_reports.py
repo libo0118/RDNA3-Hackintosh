@@ -405,7 +405,7 @@ def main():
                     for l in blk.splitlines()[1:]:
                         if l.startswith("=="):
                             break
-                        if l.startswith(("pipe", "  picture", "  UNDERFLOW", "[exit")) and "power-gated off" not in l:
+                        if l.startswith(("pipe", "  picture", "  UNDERFLOW", "  OTG CRC", "[exit")) and "power-gated off" not in l:
                             print("       " + l[:160])
                         m = re.match(r"pipe (\d+): LIT .* in use (0x[0-9a-f]+)", l)
                         if m:

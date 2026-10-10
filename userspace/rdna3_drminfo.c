@@ -203,6 +203,8 @@ static int scanout_dump(int fd, const char *dir)
                (unsigned long long)s.inuse, s.flip_pending ? " flip pending" : "");
         if (s.underflow)
             printf("  UNDERFLOW status %u: the pipe ran out of data (bandwidth / watermarks)\n", s.underflow);
+        if (s.crc_valid)
+            printf("  OTG CRC %04x/%04x/%04x (what leaves the pipe)\n", s.crc_rg & 0xffff, s.crc_rg >> 16, s.crc_b);
         if (!s.lit)
             continue;
         lit++;

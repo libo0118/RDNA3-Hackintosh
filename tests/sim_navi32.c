@@ -51,6 +51,7 @@
 #include "gen/athub_3_0_0_cg.h"
 #include "gen/hdp_6_0_0_cg.h"
 #include "gen/dcn_3_2_0_scale.h"
+#include "gen/dcn_3_2_0_crc.h"
 #include "doorbell.h"
 #include "gen/nbio_4_3_0_doorbell.h"
 #include "gen/dcn_3_2_1.h"
@@ -3673,6 +3674,12 @@ static void run(const char *fwdir)
             CHECK(S.reg[HUBP(regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, 1)] == vp0);
             CHECK((S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_PITCH, 1)] & 0x3fff) == (pitch0 & 0x3fff) && !sc.saved[1]);
             CHECK(dc.head[0].width == 2560 && dc.head[0].height == 1440);
+            /* the OTG CRC over the active area, as dc_stream_configure_crc */
+            dcn32_crc_enable(&dev, &dc, 0, 1);
+            CHECK(S.reg[OTG(regOTG0_OTG_CRC0_WINDOWA_X_CONTROL, 2)] == 2560u << 16 &&
+                  S.reg[OTG(regOTG0_OTG_CRC0_WINDOWB_Y_CONTROL, 2)] == 1440u << 16);
+            CHECK(S.reg[OTG(regOTG0_OTG_CRC_CNTL, 2)] & OTG0_OTG_CRC_CNTL__OTG_CRC_EN_MASK);
+            dcn32_crc_enable(&dev, &dc, 0, 0);
 #undef DSC
         }
         /* hardware cursor: HUBP pipe 1 + DPP 1 */

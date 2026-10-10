@@ -93,7 +93,8 @@ struct rd_xnu_scanout {
     uint32_t width, height, pitch_px, flip_pending;
     uint32_t out_w, out_h, nrows, blanked;         /* blanked: HUBP_BLANK_EN */
     uint64_t address, inuse;                       /* MC addresses */
-    uint32_t underflow, pad2;                      /* HUBP_UNDERFLOW_STATUS (sticky) */
+    uint32_t underflow;                            /* HUBP_UNDERFLOW_STATUS (sticky) */
+    uint32_t crc_valid, crc_rg, crc_b;             /* OTG CRC0 of the frame sent (row0 0 only) */
     uint8_t  rgb[RD_XNU_SCANOUT_W * RD_XNU_SCANOUT_ROWS * 3];
 };
 

@@ -153,6 +153,10 @@ int      dcn32_in_vblank(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i);
 
 /* OTG CRC over the whole frame (optc1_configure_crc, continuous) */
 void dcn32_crc_enable(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i, int enable);
+/* optc1_configure_crc on OTG 'otg' as dc_stream_configure_crc sets it up:
+ * windows A and B = the whole active area (read from the OTG), union of
+ * both, continuous. Without the windows the CRC stays 0 (card runs 9b-17). */
+void dcn32_otg_crc_config(rdna3_dev *d, uint32_t otg, int enable);
 /* R/Cr, G/Y, B/Cb of the last frame; returns RDNA3_ENODEV when CRC is off */
 int  dcn32_crc_read(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i, uint32_t *r, uint32_t *g,
                     uint32_t *b);

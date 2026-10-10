@@ -296,6 +296,32 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
         return -RD_EPERM;
     if (!a->fDispDev || !a->fDispLock)
         return -RD_ENODEV;
+    /* the OTG CRC of what leaves the pipe (after the scaler and the blank),
+     * on the first call of a picture: windows over the active area, two
+     * frames to settle (nothing borrowed while the lock is dropped) */
+    if (row0 == 0) {
+        IOLockLock(a->fDispLock);
+        r = dcn32_scanout_info(a->fDispDev, pipe, &si);
+        IOLockUnlock(a->fDispLock);
+        if (r == RDNA3_OK && (si.lit || si.blanked)) {
+            uint32_t rr = 0, gg = 0, bb = 0;
+            rdna3_dcn one;
+            bzero(&one, sizeof(one));
+            one.nheads = 1;
+            one.head[0].otg = si.otg;
+            IOLockLock(a->fDispLock);
+            dcn32_crc_enable(a->fDispDev, &one, 0, 1);
+            IOLockUnlock(a->fDispLock);
+            IOSleep(40);
+            IOLockLock(a->fDispLock);
+            if (dcn32_crc_read(a->fDispDev, &one, 0, &rr, &gg, &bb) == RDNA3_OK) {
+                s->crc_valid = 1;
+                s->crc_rg = rr | gg << 16;
+                s->crc_b = bb;
+            }
+            IOLockUnlock(a->fDispLock);
+        }
+    }
     IOLockLock(a->fDispLock);
     /* the display's register device has no BAR0 view of its own: lend it
      * the DRM's for this read only */

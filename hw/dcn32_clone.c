@@ -544,17 +544,15 @@ static void crc_read(rdna3_dev *d, uint32_t otg, uint32_t crc[3])
 int dcn32_clone_verify(rdna3_dev *d, const rdna3_dcn_clone *c, uint32_t wait_ms, rdna3_clone_check *k)
 {
     const uint32_t fmask = OTG0_OTG_STATUS_FRAME_COUNT__OTG_FRAME_COUNT_MASK;
-    uint32_t crc_on = SET(SET(0u, OTG0_OTG_CRC_CNTL, OTG_CRC_CONT_EN, 1), OTG0_OTG_CRC_CNTL, OTG_CRC_EN, 1);
     uint32_t saved_src = RI(d, regOTG0_OTG_CRC_CNTL, c->src_otg, OTG_S);
     uint32_t saved_dst = RI(d, regOTG0_OTG_CRC_CNTL, c->dst_otg, OTG_S);
     uint32_t f0s = RI(d, regOTG0_OTG_STATUS_FRAME_COUNT, c->src_otg, OTG_S) & fmask;
     uint32_t f0d = RI(d, regOTG0_OTG_STATUS_FRAME_COUNT, c->dst_otg, OTG_S) & fmask;
     uint32_t i;
-    /* optc1_configure_crc: clear, then continuous whole-frame CRC */
-    WI(d, regOTG0_OTG_CRC_CNTL, c->src_otg, OTG_S, 0);
-    WI(d, regOTG0_OTG_CRC_CNTL, c->dst_otg, OTG_S, 0);
-    WI(d, regOTG0_OTG_CRC_CNTL, c->src_otg, OTG_S, crc_on);
-    WI(d, regOTG0_OTG_CRC_CNTL, c->dst_otg, OTG_S, crc_on);
+    /* optc1_configure_crc as dc_stream_configure_crc: windows over the
+     * active area, continuous */
+    dcn32_otg_crc_config(d, c->src_otg, 1);
+    dcn32_otg_crc_config(d, c->dst_otg, 1);
     d->os.msleep(d->os.ctx, wait_ms);
     k->frames_src = ((RI(d, regOTG0_OTG_STATUS_FRAME_COUNT, c->src_otg, OTG_S) & fmask) - f0s) & fmask;
     k->frames_dst = ((RI(d, regOTG0_OTG_STATUS_FRAME_COUNT, c->dst_otg, OTG_S) & fmask) - f0d) & fmask;

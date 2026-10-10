@@ -8,6 +8,7 @@
 #include "gen/dcn_3_2_0_dig.h"
 #include "gen/dcn_3_2_0_pipe.h"
 #include "gen/dcn_3_2_0_scale.h"
+#include "gen/dcn_3_2_0_crc.h"
 
 #define HUBP_STRIDE (regHUBP1_DCHUBP_CNTL - regHUBP0_DCHUBP_CNTL)    /* 0xdc */
 #define OTG_STRIDE  (regOTG1_OTG_CONTROL - regOTG0_OTG_CONTROL)      /* 0x80 */
@@ -539,19 +540,30 @@ int dcn32_in_vblank(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i)
     return (int)GET(RO(d, regOTG0_OTG_STATUS, dc->head[i].otg), OTG0_OTG_STATUS, OTG_V_BLANK);
 }
 
-void dcn32_crc_enable(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i, int enable)
+void dcn32_otg_crc_config(rdna3_dev *d, uint32_t o, int enable)
 {
-    uint32_t o, v;
-    if (i >= dc->nheads)
-        return;
-    o = dc->head[i].otg;
-    /* optc1_configure_crc: clear, then whole-frame continuous CRC */
+    rdna3_dcn_head t;
+    uint32_t v, xw, yw;
     WO(d, regOTG0_OTG_CRC_CNTL, o, 0);
     if (!enable)
         return;
+    read_timing(d, o, &t);
+    xw = SET(0u, OTG0_OTG_CRC0_WINDOWA_X_CONTROL, OTG_CRC0_WINDOWA_X_END, t.h_active);
+    yw = SET(0u, OTG0_OTG_CRC0_WINDOWA_Y_CONTROL, OTG_CRC0_WINDOWA_Y_END, t.v_active);
+    WO(d, regOTG0_OTG_CRC0_WINDOWA_X_CONTROL, o, xw);
+    WO(d, regOTG0_OTG_CRC0_WINDOWA_Y_CONTROL, o, yw);
+    WO(d, regOTG0_OTG_CRC0_WINDOWB_X_CONTROL, o, xw);   /* same field layout */
+    WO(d, regOTG0_OTG_CRC0_WINDOWB_Y_CONTROL, o, yw);
     v = SET(0u, OTG0_OTG_CRC_CNTL, OTG_CRC_CONT_EN, 1);
+    v = SET(v, OTG0_OTG_CRC_CNTL, OTG_CRC0_SELECT, 0);   /* UNION_WINDOW_A_B */
     v = SET(v, OTG0_OTG_CRC_CNTL, OTG_CRC_EN, 1);
     WO(d, regOTG0_OTG_CRC_CNTL, o, v);
+}
+
+void dcn32_crc_enable(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i, int enable)
+{
+    if (i < dc->nheads)
+        dcn32_otg_crc_config(d, dc->head[i].otg, enable);
 }
 
 int dcn32_crc_read(rdna3_dev *d, const rdna3_dcn *dc, uint32_t i, uint32_t *r, uint32_t *g,
