@@ -395,21 +395,23 @@ int dmub32_hw_init(rdna3_dmub *dm, const uint8_t *vbios, uint32_t vbios_len, int
 
 /* ---- inbox1 ring (dmub_rb_*, dmub_srv_fb_cmd_queue/execute, wait_for_idle) ---- */
 
+static uint32_t rb_size(const rdna3_dmub *dm) { return dm->rb_size ? dm->rb_size : RD_DMUB_RB_SIZE; }
+
 static int rb_full(const rdna3_dmub *dm)
 {
     uint32_t count = dm->inbox1_wptr >= dm->inbox1_rptr
                          ? dm->inbox1_wptr - dm->inbox1_rptr
-                         : RD_DMUB_RB_SIZE - (dm->inbox1_rptr - dm->inbox1_wptr);
-    return count == RD_DMUB_RB_SIZE - RD_DMUB_RB_CMD_SIZE;
+                         : rb_size(dm) - (dm->inbox1_rptr - dm->inbox1_wptr);
+    return count == rb_size(dm) - RD_DMUB_RB_CMD_SIZE;
 }
 
 static int update_rptr(rdna3_dmub *dm)
 {
     uint32_t rptr = RR(dm->d, regDMCUB_INBOX1_RPTR);
-    if (rptr > RD_DMUB_RB_SIZE)
+    if (rptr > rb_size(dm))
         return RDNA3_EIO;
     if (dm->inbox1_rptr > rptr)
-        dm->reported += (rptr + RD_DMUB_RB_SIZE - dm->inbox1_rptr) / RD_DMUB_RB_CMD_SIZE;
+        dm->reported += (rptr + rb_size(dm) - dm->inbox1_rptr) / RD_DMUB_RB_CMD_SIZE;
     else
         dm->reported += (rptr - dm->inbox1_rptr) / RD_DMUB_RB_CMD_SIZE;
     dm->inbox1_rptr = rptr;
@@ -420,21 +422,28 @@ int dmub32_cmd_execute(rdna3_dmub *dm, uint8_t cmd[RD_DMUB_RB_CMD_SIZE], int rep
                        uint32_t timeout_us)
 {
     rdna3_dev *d = dm->d;
-    uint64_t mb = win_off(dm, RD_DMUB_WIN_MAILBOX);
-    uint32_t slot, i;
-    int ret;
+    uint64_t mb = dm->attached ? dm->inbox_vram : win_off(dm, RD_DMUB_WIN_MAILBOX);
+    uint32_t slot, i, w[RD_DMUB_RB_CMD_SIZE / 4];
+    int ret, bar;
 
     if (!dm->hw_init)
         return RDNA3_EIO;
     if ((ret = update_rptr(dm)) != RDNA3_OK)
         return ret;
-    if (dm->inbox1_wptr > RD_DMUB_RB_SIZE)
+    if (dm->inbox1_wptr > rb_size(dm))
         return RDNA3_EIO;
     if (rb_full(dm))
         return RDNA3_EBUSY;
     slot = dm->inbox1_wptr;
-    rdna3_vram_write(d, mb + slot, cmd, RD_DMUB_RB_CMD_SIZE);
-    dm->inbox1_wptr = (dm->inbox1_wptr + RD_DMUB_RB_CMD_SIZE) % RD_DMUB_RB_SIZE;
+    bar = rdna3_vram_cpu(d, mb + slot, RD_DMUB_RB_CMD_SIZE) != NULL;
+    if (bar) {
+        rdna3_vram_write(d, mb + slot, cmd, RD_DMUB_RB_CMD_SIZE);
+    } else {
+        for (i = 0; i < RD_DMUB_RB_CMD_SIZE / 4; i++)
+            w[i] = rd32le(cmd + 4 * i);
+        rdna3_vram_mm_write(d, mb + slot, w, RD_DMUB_RB_CMD_SIZE / 4);
+    }
+    dm->inbox1_wptr = (dm->inbox1_wptr + RD_DMUB_RB_CMD_SIZE) % rb_size(dm);
     dm->submitted++;
     /* the DMCUB reads the ring from VRAM: make the BAR writes land first */
     rdna3_hdp_flush(d);
@@ -453,8 +462,99 @@ int dmub32_cmd_execute(rdna3_dmub *dm, uint8_t cmd[RD_DMUB_RB_CMD_SIZE], int rep
              rd32le(cmd), dm->inbox1_rptr, dm->inbox1_wptr, RR(d, regDMCUB_SCRATCH0));
         return RDNA3_ETIME;
     }
-    if (reply)
+    if (reply && bar) {
         rdna3_vram_read(d, mb + slot, cmd, RD_DMUB_RB_CMD_SIZE);
+    } else if (reply) {
+        rdna3_vram_mm_read(d, mb + slot, w, RD_DMUB_RB_CMD_SIZE / 4);
+        for (i = 0; i < RD_DMUB_RB_CMD_SIZE; i++)
+            cmd[i] = (uint8_t)(w[i / 4] >> (8 * (i % 4)));
+    }
+    return RDNA3_OK;
+}
+
+#define AMASK ((uint32_t)DMCUB_REGION3_CW0_BASE_ADDRESS__DMCUB_REGION3_CW0_BASE_ADDRESS_MASK)
+int dmub32_attach(rdna3_dmub *dm, rdna3_dev *d)
+{
+    static const struct { uint32_t off, off_hi, base, top; } cw[8] = {
+        { regDMCUB_REGION3_CW0_OFFSET, regDMCUB_REGION3_CW0_OFFSET_HIGH, regDMCUB_REGION3_CW0_BASE_ADDRESS, regDMCUB_REGION3_CW0_TOP_ADDRESS },
+        { regDMCUB_REGION3_CW1_OFFSET, regDMCUB_REGION3_CW1_OFFSET_HIGH, regDMCUB_REGION3_CW1_BASE_ADDRESS, regDMCUB_REGION3_CW1_TOP_ADDRESS },
+        { regDMCUB_REGION3_CW2_OFFSET, regDMCUB_REGION3_CW2_OFFSET_HIGH, regDMCUB_REGION3_CW2_BASE_ADDRESS, regDMCUB_REGION3_CW2_TOP_ADDRESS },
+        { regDMCUB_REGION3_CW3_OFFSET, regDMCUB_REGION3_CW3_OFFSET_HIGH, regDMCUB_REGION3_CW3_BASE_ADDRESS, regDMCUB_REGION3_CW3_TOP_ADDRESS },
+        { regDMCUB_REGION3_CW4_OFFSET, regDMCUB_REGION3_CW4_OFFSET_HIGH, regDMCUB_REGION3_CW4_BASE_ADDRESS, regDMCUB_REGION3_CW4_TOP_ADDRESS },
+        { regDMCUB_REGION3_CW5_OFFSET, regDMCUB_REGION3_CW5_OFFSET_HIGH, regDMCUB_REGION3_CW5_BASE_ADDRESS, regDMCUB_REGION3_CW5_TOP_ADDRESS },
+        { regDMCUB_REGION3_CW6_OFFSET, regDMCUB_REGION3_CW6_OFFSET_HIGH, regDMCUB_REGION3_CW6_BASE_ADDRESS, regDMCUB_REGION3_CW6_TOP_ADDRESS },
+        { regDMCUB_REGION3_CW7_OFFSET, regDMCUB_REGION3_CW7_OFFSET_HIGH, regDMCUB_REGION3_CW7_BASE_ADDRESS, regDMCUB_REGION3_CW7_TOP_ADDRESS },
+    };
+    const uint32_t seg = regDMCUB_INBOX1_BASE_ADDRESS_BASE_IDX;   /* all DMCUB registers: segment 2 */
+    uint32_t inbox, size, i, n;
+    for (i = 0; i < sizeof(*dm); i++)
+        ((uint8_t *)dm)[i] = 0;
+    dm->d = d;
+    if (!dmub32_is_supported(d) || !GET(RR(d, regDMCUB_CNTL), DMCUB_CNTL, DMCUB_ENABLE) ||
+        GET(RR(d, regDMCUB_CNTL2), DMCUB_CNTL2, DMCUB_SOFT_RESET)) {
+        RERR(d, "DMUB attach: no running DMCUB (CNTL 0x%08x CNTL2 0x%08x)", RR(d, regDMCUB_CNTL),
+             RR(d, regDMCUB_CNTL2));
+        return RDNA3_ENODEV;
+    }
+    inbox = RR(d, regDMCUB_INBOX1_BASE_ADDRESS);
+    size = RR(d, regDMCUB_INBOX1_SIZE);
+    dm->boot_status = RR(d, regDMCUB_SCRATCH0);
+    if (!size || size % RD_DMUB_RB_CMD_SIZE || size > (1u << 20)) {
+        RERR(d, "DMUB attach: inbox1 at 0x%08x has size 0x%x", inbox, size);
+        return RDNA3_EINVAL;
+    }
+    for (n = 0; n < 8; n++) {
+        uint32_t base = rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, (int)seg, cw[n].base));
+        uint32_t top = rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, (int)seg, cw[n].top));
+        uint64_t off;
+        if (!(top & DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_ENABLE_MASK))
+            continue;
+        /* BASE and TOP keep the low 29 bits of the DMCUB address (the
+         * 0x6n000000 window bases written by dmub_dcn32_setup_windows are
+         * truncated): compare in that space */
+        base &= DMCUB_REGION3_CW0_BASE_ADDRESS__DMCUB_REGION3_CW0_BASE_ADDRESS_MASK;
+        top &= DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_TOP_ADDRESS_MASK;
+        if ((inbox & AMASK) < base || (inbox & AMASK) + size - 1 > top)
+            continue;
+        off = rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, (int)seg, cw[n].off)) |
+              ((uint64_t)rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, (int)seg, cw[n].off_hi)) << 32);
+        /* dmub_dcn32_setup_windows writes MC addresses for CW3-CW6; only
+         * the backdoor CW0/CW1 are translated (MC - fb_base + fb_offset) */
+        if (off >= d->fb_start && off - d->fb_start < d->vram_size)
+            off -= d->fb_start;
+        else if (off >= d->fb_offset && off - d->fb_offset < d->vram_size)
+            off -= d->fb_offset;
+        else
+            off = UINT64_MAX;
+        if (off == UINT64_MAX || off + ((inbox & AMASK) - base) + size > d->vram_size) {
+            RERR(d, "DMUB attach: window CW%u is not in VRAM", n);
+            return RDNA3_EINVAL;
+        }
+        dm->inbox_vram = off + ((inbox & AMASK) - base);
+        break;
+    }
+    if (n == 8) {
+        RERR(d, "DMUB attach: inbox1 at 0x%08x is behind no enabled code window", inbox);
+        return RDNA3_EINVAL;
+    }
+    dm->rb_size = size;
+    dm->inbox1_rptr = RR(d, regDMCUB_INBOX1_RPTR);
+    dm->inbox1_wptr = RR(d, regDMCUB_INBOX1_WPTR);
+    for (i = 0; i < 100000 && dm->inbox1_rptr != dm->inbox1_wptr; i++) {
+        udelay(d, 1);
+        dm->inbox1_rptr = RR(d, regDMCUB_INBOX1_RPTR);
+    }
+    if (dm->inbox1_rptr != dm->inbox1_wptr || dm->inbox1_wptr >= size) {
+        RERR(d, "DMUB attach: inbox1 busy (rptr 0x%x wptr 0x%x size 0x%x)", dm->inbox1_rptr,
+             dm->inbox1_wptr, size);
+        return RDNA3_EBUSY;
+    }
+    dm->inbox1_last_wptr = dm->inbox1_wptr;
+    dm->attached = 1;
+    dm->hw_init = 1;
+    RLOG(d, "DMUB attach: the GOP's firmware (SCRATCH0 0x%08x), inbox1 0x%08x+0x%x = VRAM 0x%llx "
+         "behind CW%u, wptr 0x%x", dm->boot_status, inbox, size, (unsigned long long)dm->inbox_vram, n,
+         dm->inbox1_wptr);
     return RDNA3_OK;
 }
 

@@ -3881,6 +3881,25 @@ static void run(const char *fwdir)
             CHECK(S.dcn_gated_drops == 0 && S.dcn_pg_no_request == 0);   /* blanked before the gate */
             S.dcn_pg = 0;
         }
+        /* attach (rdna3dmub=3): no reset, no load, the running firmware's
+         * own inbox1 found behind its code window; commands go through */
+        {
+            static rdna3_dmub dm2;
+            uint32_t w[4] = { 0x11111111, 0x22222222, 0x33333333, 0x44444444 }, r[4] = { 0 };
+            unsigned cmds0 = S.dmub.cmds, boots0 = S.dmub.boots;
+            CHECK(dmub32_attach(&dm2, &dev) == RDNA3_OK && dm2.attached && dm2.hw_init);
+            CHECK(dm2.inbox_vram == dm.fb_off + dm.region[RD_DMUB_WIN_MAILBOX].base &&
+                  dm2.rb_size == RD_DMUB_RB_SIZE && dm2.inbox1_wptr == dm.inbox1_wptr);
+            CHECK(dmub32_query_caps(&dm2) == RDNA3_OK && S.dmub.cmds == cmds0 + 1 && S.dmub.boots == boots0);
+            /* the inbox beyond the BAR goes through MM_INDEX / MM_DATA */
+            rdna3_vram_mm_write(&dev, VRAM_SIZE - 4096, w, 4);
+            rdna3_vram_mm_read(&dev, VRAM_SIZE - 4096, r, 4);
+            CHECK(memcmp(w, r, sizeof(w)) == 0);
+            /* nothing running: refused */
+            S.reg[DMR(regDMCUB_CNTL2)] |= DMCUB_CNTL2__DMCUB_SOFT_RESET_MASK;
+            CHECK(dmub32_attach(&dm2, &dev) == RDNA3_ENODEV);
+            S.reg[DMR(regDMCUB_CNTL2)] &= ~DMCUB_CNTL2__DMCUB_SOFT_RESET_MASK;
+        }
         /* unload */
         dmub32_hw_reset(&dm);
         CHECK(!dmub32_is_hw_init(&dev) && !S.dmub.running && S.dmub.stops == 3);

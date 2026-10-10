@@ -122,6 +122,11 @@ typedef struct rdna3_dmub {
     /* state */
     int      sw_init, hw_init, psp_loaded;
     uint32_t inbox1_wptr, inbox1_rptr, inbox1_last_wptr;
+    /* attached to the firmware the GOP left running (dmub32_attach): its
+     * inbox1 in VRAM, its size; written through MM_INDEX when beyond the BAR */
+    int      attached;
+    uint64_t inbox_vram;
+    uint32_t rb_size;
     uint32_t submitted, reported;
     uint32_t boot_status;           /* SCRATCH0 after the auto-load wait */
     uint32_t feature_caps[4];       /* QUERY_FEATURE_CAPS reply (raw) */
@@ -144,6 +149,15 @@ int  dmub32_is_hw_init(rdna3_dev *d);
  * psp_loaded: the PSP already put the image in CW0 (no backdoor load). */
 int  dmub32_hw_init(rdna3_dmub *dm, const uint8_t *vbios, uint32_t vbios_len, int psp_loaded,
                     uint32_t timeout_us);
+
+/* No reset, no load: use the DMCUB firmware the VBIOS / UEFI GOP left
+ * running, through the inbox1 ring it set up (INBOX1_BASE_ADDRESS inside
+ * one of its code windows, translated back to VRAM as
+ * dmub_dcn32_translate_addr did). What the PHY side of a modeset needs
+ * when our own DMCUB load does not come up. RDNA3_ENODEV: not running,
+ * RDNA3_EINVAL: the inbox is not behind an enabled window, RDNA3_EBUSY:
+ * it does not drain. */
+int  dmub32_attach(rdna3_dmub *dm, rdna3_dev *d);
 
 /* dmub_srv_hw_reset (also what unload does) */
 /* CNTL/SEC_CNTL/scratch, the PSP-programmed CW0/CW1 and the fault

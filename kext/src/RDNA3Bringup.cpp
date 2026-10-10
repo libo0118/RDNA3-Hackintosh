@@ -486,6 +486,12 @@ void RDNA3Bringup::run()
             blobs[i].len = fBlobs[i].len;
         }
     }
+    /* rdna3dmub=3 attaches to the DMCUB the GOP left running: the PSP
+     * must not load (and restart) it underneath */
+    if (fDmubMode == 3) {
+        blobs[AMD_BLOB_DMCUB].data = nullptr;
+        blobs[AMD_BLOB_DMCUB].len = 0;
+    }
     fst = amd_ucode_plan_build(blobs, fPlan);
     if (fst != AMD_FW_OK) {
         BLOG("firmware plan: %s", amd_fw_status_str(fst));
@@ -938,6 +944,23 @@ void RDNA3Bringup::dmubInit()
         fDmub = (rdna3_dmub *)IOMalloc(sizeof(*fDmub));
     if (!fDmub) {
         publishString("RDNA3,DMUB", "failed: no memory");
+        return;
+    }
+    if (fDmubMode == 3) {
+        /* the GOP's firmware, as it runs: its inbox, no reset, no load */
+        ret = dmub32_attach(fDmub, fDev);
+        publish("RDNA3,DMUBResult", (uint64_t)(int64_t)ret);
+        publish("RDNA3,DMUBBootStatus", fDmub->boot_status);
+        if (ret != RDNA3_OK) {
+            publishString("RDNA3,DMUB", "failed: attach");
+            return;
+        }
+        ret = dmub32_query_caps(fDmub);
+        publish("RDNA3,DMUBCapsResult", (uint64_t)(int64_t)ret);
+        if (ret == RDNA3_OK)
+            publish("RDNA3,DMUBCaps", fDmub->feature_caps[0]);
+        publishString("RDNA3,DMUB", ret == RDNA3_OK ? "attached, mailbox up" : "attached, mailbox silent");
+        BLOG("DMUB: attached to the GOP's firmware, boot status 0x%x, caps query %d", fDmub->boot_status, ret);
         return;
     }
     if (!fw->data) {

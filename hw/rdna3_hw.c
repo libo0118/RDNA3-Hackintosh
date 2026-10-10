@@ -326,6 +326,20 @@ void rdna3_vram_mm_read(rdna3_dev *d, uint64_t pos, uint32_t *dst, uint32_t dwor
     }
 }
 
+void rdna3_vram_mm_write(rdna3_dev *d, uint64_t pos, const uint32_t *src, uint32_t dwords)
+{
+    uint32_t hi = ~0u, i;
+    for (i = 0; i < dwords; i++, pos += 4) {
+        uint32_t tmp = (uint32_t)(pos >> 31);
+        mmio_wr(d, mmMM_INDEX, (uint32_t)pos | 0x80000000u);
+        if (tmp != hi) {
+            mmio_wr(d, mmMM_INDEX_HI, tmp);
+            hi = tmp;
+        }
+        mmio_wr(d, mmMM_DATA, src[i]);
+    }
+}
+
 /* ----------------------------- doorbells ----------------------------- */
 
 void rdna3_doorbell_wr64(rdna3_dev *d, uint32_t index, uint64_t v)

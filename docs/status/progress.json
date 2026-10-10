@@ -1,7 +1,7 @@
 {
  "amdgpu": {
   "works": 220,
-  "ported": 255,
+  "ported": 256,
   "total": 1291,
   "works_pct": 17.0,
   "ported_pct": 19.8,
@@ -1151,8 +1151,8 @@
      "5b"
     ],
     "works": 0,
-    "ported": 4,
-    "todo": 66,
+    "ported": 5,
+    "todo": 65,
     "items": {
      "dmub_align": "todo",
      "dmub_dcn32_backdoor_load": "todo",
@@ -1185,7 +1185,7 @@
      "dmub_dcn32_setup_mailbox": "todo",
      "dmub_dcn32_setup_out_mailbox": "todo",
      "dmub_dcn32_setup_outbox0": "todo",
-     "dmub_dcn32_setup_windows": "todo",
+     "dmub_dcn32_setup_windows": "ported",
      "dmub_dcn32_skip_dmub_panel_power_sequence": "todo",
      "dmub_dcn32_translate_addr": "ported",
      "dmub_flush_buffer_mem": "todo",

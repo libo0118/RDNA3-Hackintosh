@@ -170,6 +170,8 @@ void rdna3_vram_read(rdna3_dev *d, uint64_t off, void *dst, uint64_t len);
 void rdna3_vram_fill(rdna3_dev *d, uint64_t off, uint8_t v, uint64_t len);
 /* Indirect access through MM_INDEX/MM_DATA (works for all of VRAM). */
 void rdna3_vram_mm_read(rdna3_dev *d, uint64_t off, uint32_t *dst, uint32_t dwords);
+/* the write direction of amdgpu_device_mm_access: VRAM beyond the BAR */
+void rdna3_vram_mm_write(rdna3_dev *d, uint64_t off, const uint32_t *src, uint32_t dwords);
 
 /* ---- doorbells (WDOORBELL64) ---- */
 void rdna3_doorbell_wr64(rdna3_dev *d, uint32_t index, uint64_t v);
