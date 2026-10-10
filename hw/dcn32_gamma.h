@@ -62,7 +62,7 @@ typedef struct rdna3_gamma_pwl {
     uint32_t lut[3][RD_GAMMA_HW_POINTS];    /* the PWL points (6e12m) */
     uint32_t num;              /* points written: hw_points_num */
     int      rgb_equal;        /* is_rgb_equal: one pass with WRITE_COLOR_MASK 7 */
-    int      linear;           /* __is_lut_linear (+-1): the identity, bypass does the same */
+    int      linear;           /* __is_lut_linear (one 12-bit step): the identity, bypass does the same */
 } rdna3_gamma_pwl;
 
 /* 'channels' (1 = the same table for R, G and B, or 3 = R, G, B one after

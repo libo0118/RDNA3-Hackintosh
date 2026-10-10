@@ -146,13 +146,18 @@ static fixpt table_at(const uint16_t *t, uint32_t n, uint32_t x)
     return fix_from_fraction((int64_t)(t[idx] * (X_ONE - rem) + t[idx + 1] * rem), (int64_t)X_ONE * 65535);
 }
 
-/* __is_lut_linear: every entry within +-1 of i * 0xffff / (size - 1) */
+/* __is_lut_linear: every entry within +-1 of i * 0xffff / (size - 1).
+ * The tables macOS hands down have 12 bits (IOFBGammaWidth 12), scaled to
+ * 16: its identity is off by up to half a 12-bit step (card run 30: the
+ * restored ColorSync identity stayed on the PWL instead of the bypass), so
+ * the tolerance is one 12-bit step. */
+#define LINEAR_TOLERANCE 16
 static int table_linear(const uint16_t *t, uint32_t n)
 {
     uint32_t i;
     for (i = 0; i < n; i++) {
         int64_t delta = (int64_t)t[i] - (int64_t)((uint64_t)i * 0xffffu / (n - 1));
-        if (delta < -1 || delta > 1)
+        if (delta < -LINEAR_TOLERANCE || delta > LINEAR_TOLERANCE)
             return 0;
     }
     return 1;

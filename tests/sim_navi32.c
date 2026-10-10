@@ -2878,6 +2878,16 @@ static void test_gamma(rdna3_dev *dev, const rdna3_dcn *dc)
     /* arr_curve_points: offsets 0, 8, 24, ... 152, 154; segments 3, 4 x 9, 1 */
     CHECK(pw.region[0] == 0x40083000u && pw.region[1] == 0x40284018u && pw.region[4] == 0x40884078u &&
           pw.region[5] == 0x009A1098u && pw.region[6] == 0 && pw.region[16] == 0);
+    /* macOS's identity as the framebuffer scales it: 12-bit entries to 16
+     * bits (card run 30) - still the identity, the bypass */
+    {
+        static uint16_t id12[256];
+        for (i = 0; i < 256; i++)
+            id12[i] = (uint16_t)(((i * 4095u + 127) / 255 * 65535u + 2047) / 4095);
+        CHECK(dcn32_gamma_build(id12, 1, 256, &pc) == RDNA3_OK && pc.linear);
+        id12[128] = (uint16_t)(id12[128] + 40);   /* a real curve is not */
+        CHECK(dcn32_gamma_build(id12, 1, 256, &pc) == RDNA3_OK && !pc.linear);
+    }
     CHECK(dcn32_gamma_build(chan, 3, 2, &pc) == RDNA3_OK && !pc.linear && !pc.rgb_equal);
     /* slopes 1, 1/3 (1/3 = 2^-2 * 1.333: 29 << 12 | 0x555), 1023 (= 2^9 * 1.998: 40 << 12 | 0xff8) */
     CHECK(pc.start_slope[0] == 0x1F000 && pc.start_slope[1] == 0x1D555 && pc.start_slope[2] == 0x28FF8);
