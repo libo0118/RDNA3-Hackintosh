@@ -409,6 +409,23 @@ void RDNA3Accel::statsTick(void *owner, void *)
     }
 }
 
+int RDNA3Accel::pmCtl(const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp, bool admin)
+{
+    int r;
+    if (!fDrmLock)
+        return -RD_ENODEV;
+    IOLockLock(fDrmLock);
+    if (fBringup) {
+        r = fBringup->pmctl(rq, rp, admin);
+    } else {
+        bzero(rp, sizeof(*rp));
+        rp->op = rq->op;
+        rp->err = r = RDNA3_ENODEV;
+    }
+    IOLockUnlock(fDrmLock);
+    return r;
+}
+
 void RDNA3Accel::statsStart()
 {
     fStatsStop = false;

@@ -46,6 +46,7 @@ extern "C" {
 #include "amd_discovery.h"
 #include "rdna3_drm.h"
 #include "range_alloc.h"
+#include "rdna3_pmctl.h"
 }
 
 class RDNA3Bringup;
@@ -109,6 +110,9 @@ public:
     static uint64_t drmGpuClock(void *ctx);
     void  drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t minMclkKhz, uint32_t maxMclkKhz);
     RDNA3Bringup *bringup() const { return fBringup; }
+    /* PM control from RDNA3UserClient (common/rdna3_pmctl.h): takes the
+     * DRM lock; 'admin' = the calling task is an administrator */
+    int   pmCtl(const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp, bool admin);
     IOLock       *drmLock() const { return fDrmLock; }
     /* hwInit() again (GPU reset from recover(), resume after a power
      * loss) runs with fDrmLock held by its caller: the drm* setters it

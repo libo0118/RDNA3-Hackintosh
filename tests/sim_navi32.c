@@ -78,6 +78,7 @@
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
+#include "gen/thm_13_0_2_fan.h"
 #include "psp_gfx_if.h"
 #include "amdgpu_ucode_hdr.h"
 
@@ -105,6 +106,8 @@ static int failures;
 #define NBIO_B2    0xD20u
 #define NBIO_B5    0x04040000u /* beyond the BAR: reached through the RSMU window */
 #define SMUIO_B0   0x16800u
+#define THM_BASE   0x16600u   /* THM 13.0.2 segment 0 */
+#define THMR(reg)  (THM_BASE + reg)
 #define ROM_STRAP  1u          /* REGS_ROM_OFFSET_CTRL.ROM_OFFSET */
 #define SMN_ROM_OFFSET_CTRL ((NBIO_B5 + regREGS_ROM_OFFSET_CTRL) * 4u)
 #define VBIOS_LEN  8192u
@@ -309,6 +312,20 @@ typedef struct sim {
         uint32_t last_pcie_arg, workload, ppt_limit;
         uint32_t gfxoff, gfxoff_msgs;   /* AllowGfxOff / DisallowGfxOff */
         PPTable_t pptable;    /* as written by the driver */
+        /* PM control: the overdrive settings the PMFW runs with, what it
+         * accepted / refused, activity monitor coefficients per workload,
+         * feature switches, DF C-state, BACO */
+        int od_init;
+        OverDriveTable_t od;
+        unsigned od_uploads, od_rejects, coeff_writes, coeff_rejects, feature_msgs;
+        uint32_t od_last_mask;
+        DpmActivityMonitorCoeffIntExternal_t coeff[WORKLOAD_PPLIB_COUNT];
+        uint32_t df_cstate, df_msgs;
+        int baco;             /* in BACO: only ExitBaco is answered */
+        unsigned baco_enters, baco_exits, armd3_msgs, msgs_in_baco;
+        uint32_t baco_seq, armd3_seq;
+        int sim_throttle;     /* metrics report PPT0 + hotspot throttling */
+        uint32_t soft_min[PPCLK_COUNT], soft_max[PPCLK_COUNT];   /* last SetSoftMin/MaxByFreq */
     } smu;
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
     unsigned sdma_ibs, sdma_ib_fault;   /* INDIRECT packets run, ones the GFXHUB could not translate */
@@ -612,6 +629,179 @@ static void make_vbios(void)
     make_vbios_cmd_tables();
 }
 
+/* OverDriveLimitsMin / OverDriveLimitsBasicMax of the SKU: GFXCLK / UCLK
+ * limits, voltage offset, PPT, fan curve and zero RPM (PP_OD_FEATURE_*) */
+#define SIM_OD_FEATURES ((1u << PP_OD_FEATURE_GFX_VF_CURVE_BIT) | (1u << PP_OD_FEATURE_PPT_BIT) | \
+                         (1u << PP_OD_FEATURE_FAN_CURVE_BIT) | (1u << PP_OD_FEATURE_GFXCLK_BIT) | \
+                         (1u << PP_OD_FEATURE_UCLK_BIT) | (1u << PP_OD_FEATURE_ZERO_FAN_BIT))
+static void sim_od_limits(OverDriveLimits_t *lo, OverDriveLimits_t *up)
+{
+    memset(lo, 0, sizeof(*lo));
+    memset(up, 0, sizeof(*up));
+    lo->FeatureCtrlMask = up->FeatureCtrlMask = SIM_OD_FEATURES;
+    lo->VoltageOffsetPerZoneBoundary = -150; up->VoltageOffsetPerZoneBoundary = 0;
+    lo->GfxclkFmin = 500;  up->GfxclkFmin = 2500;
+    lo->GfxclkFmax = 500;  up->GfxclkFmax = 3000;
+    lo->UclkFmin = 97;     up->UclkFmin = 1250;
+    lo->UclkFmax = 97;     up->UclkFmax = 1350;
+    lo->Ppt = -10;         up->Ppt = 15;
+    lo->FanLinearPwmPoints = 15;  up->FanLinearPwmPoints = 100;
+    lo->FanLinearTempPoints = 25; up->FanLinearTempPoints = 100;
+    lo->FanMinimumPwm = 15;       up->FanMinimumPwm = 100;
+    lo->AcousticTargetRpmThreshold = 500; up->AcousticTargetRpmThreshold = 3300;
+    lo->AcousticLimitRpmThreshold = 500;  up->AcousticLimitRpmThreshold = 3300;
+    lo->FanTargetTemperature = 25;        up->FanTargetTemperature = 110;
+    lo->FanZeroRpmEnable = 0;             up->FanZeroRpmEnable = 1;
+    lo->FanZeroRpmStopTemp = 25;          up->FanZeroRpmStopTemp = 100;
+}
+
+/* the PMFW's overdrive settings at boot, and per-workload activity
+ * monitor coefficients (made up, but distinct per workload) */
+static void sim_smu_pm_defaults(void)
+{
+    static const uint8_t temps[NUM_OD_FAN_MAX_POINTS] = { 25, 45, 65, 80, 95, 100 };
+    static const uint8_t pwms[NUM_OD_FAN_MAX_POINTS] = { 20, 30, 45, 60, 80, 100 };
+    unsigned i;
+    if (S.smu.od_init)
+        return;
+    S.smu.od_init = 1;
+    memset(&S.smu.od, 0, sizeof(S.smu.od));
+    S.smu.od.GfxclkFmin = 500;  S.smu.od.GfxclkFmax = 2600;
+    S.smu.od.UclkFmin = 97;     S.smu.od.UclkFmax = 1250;
+    for (i = 0; i < NUM_OD_FAN_MAX_POINTS; i++) {
+        S.smu.od.FanLinearTempPoints[i] = temps[i];
+        S.smu.od.FanLinearPwmPoints[i] = pwms[i];
+    }
+    S.smu.od.FanMinimumPwm = 20;
+    S.smu.od.AcousticTargetRpmThreshold = 1450;
+    S.smu.od.AcousticLimitRpmThreshold = 2200;
+    S.smu.od.FanTargetTemperature = 85;
+    S.smu.od.FanZeroRpmEnable = 1;
+    S.smu.od.FanZeroRpmStopTemp = 50;
+    S.smu.od.FanMode = FAN_MODE_AUTO;
+    S.smu.od.MaxOpTemp = 110;
+    for (i = 0; i < WORKLOAD_PPLIB_COUNT; i++) {
+        DpmActivityMonitorCoeffInt_t *a = &S.smu.coeff[i].DpmActivityMonitorCoeffInt;
+        memset(&S.smu.coeff[i], 0, sizeof(S.smu.coeff[i]));
+        a->Gfx_FPS = (uint8_t)(10 + i);
+        a->Gfx_MinActiveFreqType = 1;
+        a->Gfx_MinActiveFreq = (uint16_t)(500 + 100 * i);
+        a->Gfx_BoosterFreq = (uint16_t)(1000 + 100 * i);
+        a->Gfx_PD_Data_limit_c = 0x10000u * (i + 1);
+        a->Fclk_FPS = (uint8_t)(20 + i);
+        a->Fclk_MinActiveFreq = (uint16_t)(800 + i);
+    }
+    S.smu.df_cstate = ~0u;
+}
+
+/* what the PMFW checks on an OverDriveTable upload: every group named in
+ * FeatureCtrlMask must be a feature the SKU allows and lie within the
+ * OverDriveLimitsMin / BasicMax of the PPTable; then only those groups
+ * are taken. Returns 0 when refused. */
+static int sim_od_accept(const OverDriveTable_t *t)
+{
+    OverDriveLimits_t lo, up;
+    uint32_t m = t->FeatureCtrlMask;
+    int i;
+    sim_od_limits(&lo, &up);
+    if (m & ~up.FeatureCtrlMask)
+        return 0;
+#define IN(v, f) ((v) >= lo.f && (v) <= up.f)
+    if (m & (1u << PP_OD_FEATURE_GFXCLK_BIT))
+        if (!IN(t->GfxclkFmin, GfxclkFmin) || !IN(t->GfxclkFmax, GfxclkFmax) || t->GfxclkFmin > t->GfxclkFmax)
+            return 0;
+    if (m & (1u << PP_OD_FEATURE_UCLK_BIT))
+        if (!IN(t->UclkFmin, UclkFmin) || !IN(t->UclkFmax, UclkFmax) || t->UclkFmin > t->UclkFmax)
+            return 0;
+    if (m & (1u << PP_OD_FEATURE_GFX_VF_CURVE_BIT))
+        for (i = 0; i < PP_NUM_OD_VF_CURVE_POINTS; i++)
+            if (!IN(t->VoltageOffsetPerZoneBoundary[i], VoltageOffsetPerZoneBoundary))
+                return 0;
+    if (m & (1u << PP_OD_FEATURE_PPT_BIT))
+        if (!IN(t->Ppt, Ppt))
+            return 0;
+    if (m & (1u << PP_OD_FEATURE_FAN_CURVE_BIT)) {
+        if (t->FanMode > FAN_MODE_MANUAL_LINEAR)
+            return 0;
+        for (i = 0; i < NUM_OD_FAN_MAX_POINTS - 1; i++)
+            if (!IN(t->FanLinearTempPoints[i], FanLinearTempPoints) ||
+                !IN(t->FanLinearPwmPoints[i], FanLinearPwmPoints))
+                return 0;
+        if (!IN(t->FanMinimumPwm, FanMinimumPwm) || !IN(t->AcousticLimitRpmThreshold, AcousticLimitRpmThreshold) ||
+            !IN(t->AcousticTargetRpmThreshold, AcousticTargetRpmThreshold) ||
+            !IN(t->FanTargetTemperature, FanTargetTemperature))
+            return 0;
+    }
+    if (m & (1u << PP_OD_FEATURE_ZERO_FAN_BIT))
+        if (!IN(t->FanZeroRpmEnable, FanZeroRpmEnable) || !IN(t->FanZeroRpmStopTemp, FanZeroRpmStopTemp))
+            return 0;
+#undef IN
+    if (m & (1u << PP_OD_FEATURE_GFXCLK_BIT)) {
+        S.smu.od.GfxclkFmin = t->GfxclkFmin; S.smu.od.GfxclkFmax = t->GfxclkFmax;
+    }
+    if (m & (1u << PP_OD_FEATURE_UCLK_BIT)) {
+        S.smu.od.UclkFmin = t->UclkFmin; S.smu.od.UclkFmax = t->UclkFmax;
+    }
+    if (m & (1u << PP_OD_FEATURE_GFX_VF_CURVE_BIT))
+        memcpy(S.smu.od.VoltageOffsetPerZoneBoundary, t->VoltageOffsetPerZoneBoundary,
+               sizeof(t->VoltageOffsetPerZoneBoundary));
+    if (m & (1u << PP_OD_FEATURE_PPT_BIT))
+        S.smu.od.Ppt = t->Ppt;
+    if (m & (1u << PP_OD_FEATURE_FAN_CURVE_BIT)) {
+        memcpy(S.smu.od.FanLinearTempPoints, t->FanLinearTempPoints, sizeof(t->FanLinearTempPoints));
+        memcpy(S.smu.od.FanLinearPwmPoints, t->FanLinearPwmPoints, sizeof(t->FanLinearPwmPoints));
+        S.smu.od.FanMinimumPwm = t->FanMinimumPwm;
+        S.smu.od.AcousticLimitRpmThreshold = t->AcousticLimitRpmThreshold;
+        S.smu.od.AcousticTargetRpmThreshold = t->AcousticTargetRpmThreshold;
+        S.smu.od.FanTargetTemperature = t->FanTargetTemperature;
+        S.smu.od.FanMode = t->FanMode;
+    }
+    if (m & (1u << PP_OD_FEATURE_ZERO_FAN_BIT)) {
+        S.smu.od.FanZeroRpmEnable = t->FanZeroRpmEnable;
+        S.smu.od.FanZeroRpmStopTemp = t->FanZeroRpmStopTemp;
+    }
+    S.smu.od_last_mask = m;
+    return 1;
+}
+
+/* the fan the PMFW drives: in its own (auto) control the OD fan curve at
+ * the hotspot temperature when the user set one, else 30 % / 900 rpm; with
+ * fan control stopped the THM FDO static duty or static RPM */
+static void sim_fan(uint32_t *pct, uint32_t *rpm)
+{
+    const uint32_t max_rpm = 3300, hotspot = 60;
+    *pct = 30; *rpm = 900;
+    if (S.smu.enabled & RD_SMU_FEATURE(FEATURE_FAN_CONTROL_BIT)) {
+        if (S.smu.od_init && S.smu.od.FanMode == FAN_MODE_MANUAL_LINEAR) {
+            unsigned i;
+            for (i = 0; i < NUM_OD_FAN_MAX_POINTS - 1; i++)
+                if (S.smu.od.FanLinearTempPoints[i] >= hotspot)
+                    break;
+            *pct = S.smu.od.FanLinearPwmPoints[i < NUM_OD_FAN_MAX_POINTS - 1 ? i : NUM_OD_FAN_MAX_POINTS - 2];
+            *rpm = *pct * max_rpm / 100;
+        }
+        return;
+    }
+    switch ((*R(THMR(regCG_FDO_CTRL2)) & CG_FDO_CTRL2__FDO_PWM_MODE_MASK) >> CG_FDO_CTRL2__FDO_PWM_MODE__SHIFT) {
+    case RD_FDO_PWM_MODE_STATIC: {
+        uint32_t duty100 = *R(THMR(regCG_FDO_CTRL1)) & CG_FDO_CTRL1__FMAX_DUTY100_MASK;
+        uint32_t duty = *R(THMR(regCG_FDO_CTRL0)) & CG_FDO_CTRL0__FDO_STATIC_DUTY_MASK;
+        *pct = duty100 ? duty * 100 / duty100 : 0;
+        *rpm = *pct * max_rpm / 100;
+        break;
+    }
+    case RD_FDO_PWM_MODE_STATIC_RPM: {
+        uint32_t period = (*R(THMR(regCG_TACH_CTRL)) & CG_TACH_CTRL__TARGET_PERIOD_MASK) >>
+                          CG_TACH_CTRL__TARGET_PERIOD__SHIFT;
+        *rpm = period ? 60u * 2500u * 10000u / (8u * period) : 0;
+        *pct = *rpm * 100 / max_rpm;
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 /* the "combo" powerplay table the PMFW hands out: driver portion + PPTable_t
  * whose BoardTable is a placeholder the driver must replace from the VBIOS */
 static void make_combo_pptable(uint8_t *out)
@@ -638,6 +828,13 @@ static void make_combo_pptable(uint8_t *out)
     pp->SkuTable.PcieGenSpeed[2] = 3; pp->SkuTable.PcieLaneCount[2] = 6; pp->SkuTable.LclkFreq[2] = 1200;
     pp->SkuTable.FanMaximumRpm = 3300;
     pp->SkuTable.DriverReportedClocks.GameClockAc = 2124;
+    pp->SkuTable.DriverReportedClocks.BaseClockAc = 1295;
+    pp->SkuTable.FanAbnormalTempLimitOffset = 10;
+    pp->SkuTable.FeaturesToRun[0] = 1u << FEATURE_FAN_CONTROL_BIT;
+    sim_od_limits(&pp->SkuTable.OverDriveLimitsMin, &pp->SkuTable.OverDriveLimitsBasicMax);
+    /* overdrive_table.max/min[SMU_13_0_0_ODSETTING_POWERPERCENTAGE]: +15 / -10 % */
+    put32(out + RD_SMU_PP_OD_MAX_OFF + 4 * RD_SMU_13_0_0_ODSETTING_POWERPERCENTAGE, 15);
+    put32(out + RD_SMU_PP_OD_MIN_OFF + 4 * RD_SMU_13_0_0_ODSETTING_POWERPERCENTAGE, 10);
     pp->BoardTable.Version = PMFW_BOARD_PLACEHOLDER;
 }
 
@@ -653,8 +850,33 @@ static void make_metrics(SmuMetricsExternal_t *m)
     m->SmuMetrics.AvgTemperature[TEMP_MEM] = 50;
     m->SmuMetrics.AverageSocketPower = 150;
     m->SmuMetrics.AverageGfxActivity = 12;
-    m->SmuMetrics.AvgFanRpm = 900;
+    {
+        uint32_t pct, rpm;
+        sim_fan(&pct, &rpm);
+        m->SmuMetrics.AvgFanRpm = (uint16_t)rpm;
+        m->SmuMetrics.AvgFanPwm = (uint8_t)pct;
+    }
     m->SmuMetrics.AvgVoltage[SVI_PLANE_GFX] = 850;
+    m->SmuMetrics.AvgVoltage[SVI_PLANE_SOC] = 750;
+    m->SmuMetrics.CurrClock[PPCLK_SOCCLK] = 900;
+    m->SmuMetrics.CurrClock[PPCLK_FCLK] = 1000;
+    m->SmuMetrics.AvgVoltage[SVI_PLANE_VMEMP] = 1250;
+    m->SmuMetrics.AvgTemperature[TEMP_VR_GFX] = 55;
+    m->SmuMetrics.AvgTemperature[TEMP_VR_MEM0] = 48;
+    m->SmuMetrics.AvgTemperature[TEMP_VR_MEM1] = 52;
+    m->SmuMetrics.AverageGfxclkFrequencyPostDs = 40;
+    m->SmuMetrics.AverageMemclkFrequencyPostDs = 96;
+    m->SmuMetrics.AverageMemclkFrequencyPreDs = 1218;
+    m->SmuMetrics.AverageUclkActivity = 3;
+    m->SmuMetrics.EnergyAccumulator = 0x12345678u;
+    m->SmuMetrics.PcieRate = 4;     /* Gen4 */
+    m->SmuMetrics.PcieWidth = 16;
+    m->SmuMetrics.PublicSerialNumberLower = 0x5678EF01u;
+    m->SmuMetrics.PublicSerialNumberUpper = 0x1234ABCDu;
+    if (S.smu.sim_throttle) {
+        m->SmuMetrics.ThrottlingPercentage[THROTTLER_PPT0_BIT] = 20;
+        m->SmuMetrics.ThrottlingPercentage[THROTTLER_TEMP_HOTSPOT_BIT] = 5;
+    }
 }
 
 /* DPM levels per PPCLK (MHz); gfxclk is fine grained (two end points) */
@@ -706,6 +928,13 @@ static void smu_msg(uint32_t v)
     int fine;
     unsigned n;
 
+    sim_smu_pm_defaults();
+    /* BACO: the chip is off, the PMFW only takes the way out */
+    if (S.smu.baco && v != PPSMC_MSG_ExitBaco) {
+        S.smu.msgs_in_baco++;
+        *R(MP1(90)) = PPSMC_Result_CmdRejectedPrereq;
+        return;
+    }
     switch (v) {
     case PPSMC_MSG_TestMessage:        *R(MP1(82)) = arg + 1; break;
     case PPSMC_MSG_GetSmuVersion:      *R(MP1(82)) = 0x00526100; break;
@@ -729,12 +958,50 @@ static void smu_msg(uint32_t v)
             memcpy(tbl, &m, sizeof(m));
             break;
         }
+        case TABLE_OVERDRIVE: {
+            OverDriveTableExternal_t o;
+            memset(&o, 0, sizeof(o));
+            o.OverDriveTable = S.smu.od;
+            o.OverDriveTable.FeatureCtrlMask = 0;
+            memcpy(tbl, &o, sizeof(o));
+            break;
+        }
+        case TABLE_ACTIVITY_MONITOR_COEFF:
+            if ((arg >> 16) >= WORKLOAD_PPLIB_COUNT) { resp = PPSMC_Result_Failed; break; }
+            memcpy(tbl, &S.smu.coeff[arg >> 16], sizeof(S.smu.coeff[0]));
+            break;
         default: resp = PPSMC_Result_Failed;
         }
         break;
     case PPSMC_MSG_TransferTableDram2Smu:
         S.smu.xfers++;
         if (!tbl) { S.smu.bad_addr++; resp = PPSMC_Result_Failed; break; }
+        if ((arg & 0xffff) == TABLE_OVERDRIVE) {
+            OverDriveTableExternal_t o;
+            if (S.pending_writes)
+                S.smu.unflushed++;
+            memcpy(&o, tbl, sizeof(o));
+            if (sim_od_accept(&o.OverDriveTable)) {
+                S.smu.od_uploads++;
+            } else {
+                S.smu.od_rejects++;
+                resp = PPSMC_Result_Failed;
+            }
+            break;
+        }
+        if ((arg & 0xffff) == TABLE_ACTIVITY_MONITOR_COEFF) {
+            /* only the CUSTOM workload's coefficients can be changed */
+            if (S.pending_writes)
+                S.smu.unflushed++;
+            if ((arg >> 16) != WORKLOAD_PPLIB_CUSTOM_BIT) {
+                S.smu.coeff_rejects++;
+                resp = PPSMC_Result_Failed;
+                break;
+            }
+            memcpy(&S.smu.coeff[WORKLOAD_PPLIB_CUSTOM_BIT], tbl, sizeof(S.smu.coeff[0]));
+            S.smu.coeff_writes++;
+            break;
+        }
         if ((arg & 0xffff) != TABLE_PPTABLE) { resp = PPSMC_Result_Failed; break; }
         if (S.smu.scpm) { S.smu.scpm_violations++; resp = PPSMC_Result_CmdRejectedPrereq; break; }
         if (S.pending_writes)
@@ -760,6 +1027,40 @@ static void smu_msg(uint32_t v)
         S.smu.enabled = S.smu.scpm ? (SIM_SMU_SUPPORTED & ~RD_SMU_FEATURE(FEATURE_GFXOFF_BIT))
                                    : (((uint64_t)S.smu.allowed_hi << 32) | S.smu.allowed_lo) &
                                          SIM_SMU_SUPPORTED;
+        /* fan control: the PMFW programs the FDO's 100 % duty */
+        if (S.smu.enabled & RD_SMU_FEATURE(FEATURE_FAN_CONTROL_BIT))
+            *R(THMR(regCG_FDO_CTRL1)) = (*R(THMR(regCG_FDO_CTRL1)) & ~CG_FDO_CTRL1__FMAX_DUTY100_MASK) | 200u;
+        break;
+    case PPSMC_MSG_EnableSmuFeaturesLow:
+    case PPSMC_MSG_EnableSmuFeaturesHigh:
+    case PPSMC_MSG_DisableSmuFeaturesLow:
+    case PPSMC_MSG_DisableSmuFeaturesHigh: {
+        int high = v == PPSMC_MSG_EnableSmuFeaturesHigh || v == PPSMC_MSG_DisableSmuFeaturesHigh;
+        uint64_t m = (uint64_t)arg << (high ? 32 : 0);
+        S.smu.feature_msgs++;
+        if (v == PPSMC_MSG_EnableSmuFeaturesLow || v == PPSMC_MSG_EnableSmuFeaturesHigh) {
+            if (m & ~SIM_SMU_SUPPORTED) { resp = PPSMC_Result_CmdRejectedPrereq; break; }
+            S.smu.enabled |= m;
+        } else {
+            S.smu.enabled &= ~m;
+        }
+        break;
+    }
+    case PPSMC_MSG_SetExternalClientDfCstateAllow:
+        if (arg > 1) { resp = PPSMC_Result_Failed; break; }
+        S.smu.df_cstate = arg; S.smu.df_msgs++;
+        break;
+    case PPSMC_MSG_EnterBaco:
+        if (arg != RD_BACO_SEQ_BACO && arg != RD_BACO_SEQ_BAMACO) { resp = PPSMC_Result_Failed; break; }
+        if (!(S.smu.enabled & RD_SMU_FEATURE(FEATURE_BACO_BIT))) { resp = PPSMC_Result_CmdRejectedPrereq; break; }
+        S.smu.baco = 1; S.smu.baco_seq = arg; S.smu.baco_enters++;
+        break;
+    case PPSMC_MSG_ExitBaco:
+        if (!S.smu.baco) { resp = PPSMC_Result_CmdRejectedPrereq; break; }
+        S.smu.baco = 0; S.smu.baco_exits++;
+        break;
+    case PPSMC_MSG_ArmD3:
+        S.smu.armd3_seq = arg; S.smu.armd3_msgs++;
         break;
     case PPSMC_MSG_SetHardMinByFreq:
         if (!sim_dpm_enabled(arg >> 16) || (arg >> 16) >= PPCLK_COUNT) {
@@ -795,9 +1096,19 @@ static void smu_msg(uint32_t v)
     case PPSMC_MSG_SetSoftMaxByFreq:
         if (!sim_dpm_enabled(arg >> 16)) { resp = PPSMC_Result_CmdRejectedPrereq; break; }
         S.smu.soft_limits++;
+        if ((arg >> 16) < PPCLK_COUNT) {
+            if (v == PPSMC_MSG_SetSoftMinByFreq)
+                S.smu.soft_min[arg >> 16] = arg & 0xffff;
+            else
+                S.smu.soft_max[arg >> 16] = arg & 0xffff;
+        }
         break;
     case PPSMC_MSG_GetPptLimit: *R(MP1(82)) = S.smu.ppt_limit ? S.smu.ppt_limit : 263; break;
-    case PPSMC_MSG_SetPptLimit: S.smu.ppt_limit = arg; break;
+    case PPSMC_MSG_SetPptLimit:
+        /* the PMFW takes nothing above the PPTable's message limit */
+        if (arg > 280) { resp = PPSMC_Result_CmdRejectedPrereq; break; }
+        S.smu.ppt_limit = arg;
+        break;
     case PPSMC_MSG_SetWorkloadMask: S.smu.workload = arg; break;
     case PPSMC_MSG_AllowGfxOff:     S.smu.gfxoff = 1; S.smu.gfxoff_msgs++; break;
     case PPSMC_MSG_DisallowGfxOff:  S.smu.gfxoff = 0; S.smu.gfxoff_msgs++; break;
@@ -2964,7 +3275,8 @@ static void make_discovery(amd_discovery *disc)
     e->num_base = e->num_base_kept = 3; e->base[0] = b0; e->base[1] = b1; e->base[2] = b2; } while (0)
     IP(AMD_HWID_GC, 11, 0, 3, GC_BASE0, 0xA000, 0x1C000);
     IP(AMD_HWID_MP0, 13, 0, 7, MP0_BASE, 0, 0);
-    IP(AMD_HWID_MP1, 13, 0, 7, MP1_BASE, 0, 0);
+    IP(AMD_HWID_MP1, 13, 0, 10, MP1_BASE, 0, 0);
+    IP(AMD_HWID_THM, 13, 0, 2, THM_BASE, 0, 0);
     IP(AMD_HWID_NBIF, 4, 3, 0, NBIO_B0, NBIO_B1, NBIO_B2);
     disc->ips[disc->num_ips - 1].num_base = disc->ips[disc->num_ips - 1].num_base_kept = 6;
     disc->ips[disc->num_ips - 1].base[5] = NBIO_B5;
@@ -4542,6 +4854,368 @@ static void test_dp_link(rdna3_dev *dev, rdna3_dmub *dm)
     CHECK(dcn32_read_state(dev, &dc) == 1 && dc.head[0].dig_mode == 3 && dc.head[0].h_active == 2560);
 }
 
+/* PM control (stage 3 F): fan, power limit, overdrive, clocks / profiles,
+ * DF C-states, BACO and the userspace dispatcher with its gates, against
+ * the PMFW model (overdrive validation, activity monitor table, FDO
+ * registers, BACO state) */
+static void pmctl_req(rdna3_pmctl_req *rq, uint32_t op, uint32_t n, const int32_t *a)
+{
+    uint32_t i;
+    memset(rq, 0, sizeof(*rq));
+    rq->abi = RDNA3_PMCTL_ABI;
+    rq->op = op;
+    rq->nargs = n;
+    for (i = 0; i < n; i++)
+        rq->a[i] = a[i];
+}
+
+static void test_pm_control(rdna3_dev *dev, const rdna3_vbios *vb)
+{
+    static rdna3_smu smu;
+    static rdna3_pmctl_reply rp;
+    rdna3_pmctl_req rq;
+    rdna3_temp_range tr;
+    rdna3_gpu_metrics gm;
+    rdna3_pmctl_coeff co;
+    long in[16];
+    uint32_t v = 0, n0;
+    const uint32_t all = RD_PMCTL_GATE_WRITE | RD_PMCTL_GATE_OD | RD_PMCTL_GATE_ADMIN;
+    const uint64_t fan_bit = RD_SMU_FEATURE(FEATURE_FAN_CONTROL_BIT);
+
+    /* a PMFW straight after boot */
+    S.smu.od_init = 0; S.smu.ppt_limit = 0; S.smu.od_uploads = S.smu.od_rejects = 0;
+    S.smu.coeff_writes = S.smu.coeff_rejects = S.smu.feature_msgs = 0;
+    S.smu.scpm = 0; S.smu.pptable_written = 0; S.smu.btc = 0;
+    CHECK(smu13_pm_init(dev, &smu, vb, RD_SMU_FEATURES_SAFE, 3, 6, 0) == RDNA3_OK);
+    CHECK(smu.od_ppt_pct_max == 15 && smu.od_ppt_pct_min == 10);
+    CHECK(smu.supported == smu.enabled && smu.baco_state == RD_SMU_BACO_STATE_NONE);
+
+    /* late-init queries: no overdrive table, no feature switch, no limit set */
+    CHECK(smu13_pm_query(dev, &smu, vb, 0) == RDNA3_OK);
+    CHECK(smu.baco_platform && smu.maco_support && !smu.dc_controlled_by_gpio && !smu.no_fan);
+    CHECK(!smu.od_enabled && !smu.od_valid && smu.bios_scratch_reg == SIM_BIOS_SCRATCH);
+    CHECK(smu.current_power_limit == 263 && smu.power_limit_default == 263);
+    CHECK(smu.power_limit_max == 280 && smu.power_limit_min == 263 * 90 / 100);
+    CHECK(smu.unique_id == 0x1234ABCD5678EF01ull);
+    CHECK(smu.pstate_gfx.min == 500 && smu.pstate_gfx.peak == 2124 && smu.pstate_gfx.standard == 1295);
+    CHECK(smu.pstate_uclk.peak == 96 && smu.pstate_uclk.standard == 96 && smu.pstate_soc.standard == 600);
+    CHECK(S.smu.od_uploads == 0 && S.smu.feature_msgs == 0 && S.smu.ppt_limit == 0);
+    /* amdgpu.ppfeaturemask with PP_OVERDRIVE_MASK: the PPT may go 15 % over the message limit */
+    CHECK(smu13_pm_query(dev, &smu, vb, 1) == RDNA3_OK && smu.od_enabled);
+    CHECK(smu.power_limit_max == 280 * 115 / 100);
+
+    /* smu_v13_0_0_get_thermal_temperature_range */
+    CHECK(smu13_get_thermal_temperature_range(&smu, &tr) == RDNA3_OK);
+    CHECK(tr.min == -273150 && tr.max == 100000 && tr.edge_emergency_max == 105000);
+    CHECK(tr.hotspot_crit_max == 110000 && tr.hotspot_emergency_max == 115000);
+    CHECK(tr.mem_crit_max == 105000 && tr.mem_emergency_max == 110000);
+    CHECK(tr.software_shutdown_temp == 118 && tr.software_shutdown_temp_offset == 10);
+
+    /* smu_v13_0_0_get_gpu_metrics: idle (activity <= 15 %) reports the post-DS clocks */
+    CHECK(smu13_get_gpu_metrics(dev, &smu, &gm) == RDNA3_OK);
+    CHECK(gm.average_gfxclk_frequency == 40 && gm.current_gfxclk == 40 && gm.average_uclk_frequency == 96);
+    CHECK(gm.temperature_hotspot == 60 && gm.temperature_vrgfx == 55 && gm.temperature_vrmem == 52);
+    CHECK(gm.pcie_link_speed == 160 && gm.pcie_link_width == 16 && gm.voltage_soc == 750 &&
+          gm.voltage_mem == 1250 && gm.energy_accumulator == 0x12345678u);
+    CHECK(gm.current_fan_speed == 900 && gm.throttle_status == 0 && gm.indep_throttle_status == 0);
+    /* smu_v13_0_0_get_current_clk_freq_by_table */
+    CHECK(smu13_get_current_clk_freq_by_table(dev, &smu, PPCLK_GFXCLK, &v) == RDNA3_OK && v == 40);
+    CHECK(smu13_get_current_clk_freq_by_table(dev, &smu, PPCLK_UCLK, &v) == RDNA3_OK && v == 96);
+    CHECK(smu13_get_current_clk_freq_by_table(dev, &smu, PPCLK_SOCCLK, &v) == RDNA3_OK && v == 900);
+    CHECK(smu13_get_current_clk_freq_by_table(dev, &smu, PPCLK_COUNT, &v) == RDNA3_EINVAL);
+    S.smu.sim_throttle = 1;
+    CHECK(smu13_get_gpu_metrics(dev, &smu, &gm) == RDNA3_OK);
+    CHECK(gm.throttle_status == ((1u << THROTTLER_PPT0_BIT) | (1u << THROTTLER_TEMP_HOTSPOT_BIT)));
+    CHECK(gm.indep_throttle_status == ((1ull << 0) | (1ull << 36)));
+    S.smu.sim_throttle = 0;
+
+    /* fan: PMFW control, then manual through the THM FDO */
+    CHECK(smu13_get_fan_control_mode(dev, &smu) == RD_FAN_CTRL_AUTO);
+    CHECK(smu13_get_fan_speed_pwm(dev, &smu, &v) == RDNA3_OK && v == 30 * 255 / 100);
+    CHECK(smu13_get_fan_speed_rpm(dev, &smu, &v) == RDNA3_OK && v == 900);
+    CHECK(smu13_set_fan_control_mode(dev, &smu, RD_FAN_CTRL_MANUAL) == RDNA3_OK);
+    CHECK(!(S.smu.enabled & fan_bit) && S.smu.feature_msgs == 2);
+    CHECK(smu13_get_fan_control_mode(dev, &smu) == RD_FAN_CTRL_MANUAL);
+    CHECK(smu13_set_fan_speed_pwm(dev, &smu, 128) == RDNA3_OK);
+    CHECK((S.reg[THMR(regCG_FDO_CTRL0)] & CG_FDO_CTRL0__FDO_STATIC_DUTY_MASK) == 128 * 200 / 255);
+    CHECK(((S.reg[THMR(regCG_FDO_CTRL2)] & CG_FDO_CTRL2__FDO_PWM_MODE_MASK) >>
+           CG_FDO_CTRL2__FDO_PWM_MODE__SHIFT) == RD_FDO_PWM_MODE_STATIC);
+    CHECK((S.reg[THMR(regCG_FDO_CTRL2)] & CG_FDO_CTRL2__TMIN_MASK) == 0);
+    CHECK(smu13_get_fan_speed_pwm(dev, &smu, &v) == RDNA3_OK && v == 50 * 255 / 100);
+    CHECK(smu13_get_fan_speed_rpm(dev, &smu, &v) == RDNA3_OK && v == 1650);
+    CHECK(smu13_set_fan_speed_rpm(dev, &smu, 0) == RDNA3_EINVAL);
+    CHECK(smu13_set_fan_speed_rpm(dev, &smu, 2000) == RDNA3_OK);
+    CHECK(((S.reg[THMR(regCG_TACH_CTRL)] & CG_TACH_CTRL__TARGET_PERIOD_MASK) >>
+           CG_TACH_CTRL__TARGET_PERIOD__SHIFT) == 60u * 2500u * 10000u / (8u * 2000u));
+    CHECK(smu13_get_fan_speed_rpm(dev, &smu, &v) == RDNA3_OK && v == 2000);
+    CHECK(smu13_set_fan_control_mode(dev, &smu, RD_FAN_CTRL_NONE) == RDNA3_OK);   /* full speed */
+    CHECK(smu13_get_fan_speed_pwm(dev, &smu, &v) == RDNA3_OK && v == 255);
+    dev->ipver[HWIP_THM].present = 0;
+    CHECK(smu13_set_fan_speed_pwm(dev, &smu, 100) == RDNA3_ENODEV);
+    dev->ipver[HWIP_THM].present = 1;
+    CHECK(smu13_set_fan_control_mode(dev, &smu, RD_FAN_CTRL_AUTO) == RDNA3_OK && (S.smu.enabled & fan_bit));
+    CHECK(smu13_get_fan_speed_rpm(dev, &smu, &v) == RDNA3_OK && v == 900);
+
+    /* power limit within the PPTable's limits (no OD) */
+    CHECK(smu13_pm_query(dev, &smu, vb, 0) == RDNA3_OK);
+    CHECK(smu13_set_ppt_limit(dev, &smu, 281) == RDNA3_EINVAL);
+    CHECK(smu13_set_ppt_limit(dev, &smu, 200) == RDNA3_EINVAL);    /* under 90 % */
+    CHECK(smu13_set_ppt_limit(dev, &smu, 250) == RDNA3_OK && S.smu.ppt_limit == 250 &&
+          smu.current_power_limit == 250);
+    /* with OD: above 280 W through the OD table's Ppt percentage */
+    CHECK(smu13_pm_query(dev, &smu, vb, 1) == RDNA3_OK && smu.current_power_limit == 250);
+    CHECK(smu13_set_default_od_settings(dev, &smu, 0) == RDNA3_OK && smu.od_valid && !smu.user_od);
+    CHECK(smu.od_feature_mask == 0x3fff && smu.od_boot.OverDriveTable.GfxclkFmax == 2600 &&
+          smu.od.OverDriveTable.FanZeroRpmStopTemp == 50);
+    CHECK(smu13_set_ppt_limit(dev, &smu, 300) == RDNA3_OK);
+    CHECK(S.smu.ppt_limit == 280 && S.smu.od.Ppt == 300 * 100 / 280 - 100 && smu.current_power_limit == 300);
+    CHECK(S.smu.od_uploads == 1 && (S.smu.od_last_mask & (1u << PP_OD_FEATURE_PPT_BIT)));
+    CHECK(smu13_set_ppt_limit(dev, &smu, 250) == RDNA3_OK);   /* back under: Ppt 0 first */
+    CHECK(S.smu.od.Ppt == 0 && S.smu.ppt_limit == 250 && S.smu.od_uploads == 2);
+    CHECK(S.smu.unflushed == 0);
+
+    /* overdrive: GFXCLK / UCLK limits, voltage offset, commit */
+    in[0] = 0; in[1] = 600; in[2] = 1; in[3] = 2800;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_SCLK_VDDC_TABLE, in, 4) == RDNA3_OK);
+    CHECK(smu.od.OverDriveTable.GfxclkFmin == 600 && smu.od.OverDriveTable.GfxclkFmax == 2800);
+    in[0] = 0; in[1] = 100; in[2] = 1; in[3] = 1300;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_MCLK_VDDC_TABLE, in, 4) == RDNA3_OK);
+    in[0] = -50;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_VDDGFX_OFFSET, in, 1) == RDNA3_OK);
+    n0 = S.smu.od_uploads;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_COMMIT_DPM_TABLE, NULL, 0) == RDNA3_OK);
+    CHECK(S.smu.od_uploads == n0 + 1 && S.smu.od.GfxclkFmin == 600 && S.smu.od.GfxclkFmax == 2800);
+    CHECK(S.smu.od.UclkFmin == 100 && S.smu.od.UclkFmax == 1300 &&
+          S.smu.od.VoltageOffsetPerZoneBoundary[5] == -50);
+    /* as in amdgpu the PPT bit of the power limit uploads is still set */
+    CHECK(S.smu.od_last_mask == ((1u << PP_OD_FEATURE_GFXCLK_BIT) | (1u << PP_OD_FEATURE_UCLK_BIT) |
+                                 (1u << PP_OD_FEATURE_GFX_VF_CURVE_BIT) | (1u << PP_OD_FEATURE_PPT_BIT)));
+    CHECK(smu.od.OverDriveTable.FeatureCtrlMask == 0 && smu.user_od);
+    /* nothing changed since: no upload */
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_COMMIT_DPM_TABLE, NULL, 0) == RDNA3_OK &&
+          S.smu.od_uploads == n0 + 1);
+    /* the driver's own range checks */
+    in[0] = 1; in[1] = 3100;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_SCLK_VDDC_TABLE, in, 2) == RDNA3_EINVAL);
+    in[0] = 0; in[1] = 2500; in[2] = 1; in[3] = 2000;    /* min above max */
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_SCLK_VDDC_TABLE, in, 4) == RDNA3_EINVAL);
+    in[0] = 0; in[1] = 600; in[2] = 1;                   /* odd count */
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_SCLK_VDDC_TABLE, in, 3) == RDNA3_EINVAL);
+    in[0] = 0; in[1] = 600; in[2] = 1; in[3] = 2800;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_SCLK_VDDC_TABLE, in, 4) == RDNA3_OK);
+    in[0] = -200;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_VDDGFX_OFFSET, in, 1) == RDNA3_EINVAL);
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, 99, in, 1) == RDNA3_EOPNOTSUPP);
+    /* the PMFW's own check: a value past the PPTable limits is refused */
+    smu.od.OverDriveTable.GfxclkFmax = 3500;
+    smu.od.OverDriveTable.FeatureCtrlMask = 1u << PP_OD_FEATURE_GFXCLK_BIT;
+    CHECK(smu13_upload_overdrive_table(dev, &smu, &smu.od) != RDNA3_OK && S.smu.od_rejects == 1 &&
+          S.smu.od.GfxclkFmax == 2800);
+    smu.od.OverDriveTable.GfxclkFmax = 2800;
+    smu.od.OverDriveTable.FeatureCtrlMask = 0;
+
+    /* fan curve (the PMFW leaves its auto curve), acoustic, target, zero RPM */
+    in[0] = 2; in[1] = 60; in[2] = 70;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_CURVE, in, 3) == RDNA3_OK);
+    CHECK(smu.od.OverDriveTable.FanMode == FAN_MODE_MANUAL_LINEAR);
+    in[0] = 5;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_CURVE, in, 3) == RDNA3_EINVAL);
+    in[0] = 1; in[1] = 120;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_CURVE, in, 3) == RDNA3_EINVAL);
+    in[0] = 2500;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_ACOUSTIC_LIMIT, in, 1) == RDNA3_OK);
+    in[0] = 90;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_TARGET_TEMPERATURE, in, 1) == RDNA3_OK);
+    CHECK(smu.od.OverDriveTable.FanMode == FAN_MODE_AUTO);   /* as amdgpu: these go back to auto */
+    in[0] = 2; in[1] = 60; in[2] = 70;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_CURVE, in, 3) == RDNA3_OK);
+    in[0] = 0;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_ZERO_RPM_ENABLE, in, 1) == RDNA3_OK);
+    in[0] = 60;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_ZERO_RPM_STOP_TEMP, in, 1) == RDNA3_OK);
+    in[0] = 2;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_ZERO_RPM_ENABLE, in, 1) == RDNA3_EINVAL);
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_COMMIT_DPM_TABLE, NULL, 0) == RDNA3_OK);
+    CHECK(S.smu.od.FanMode == FAN_MODE_MANUAL_LINEAR && S.smu.od.FanLinearPwmPoints[2] == 70 &&
+          S.smu.od.AcousticLimitRpmThreshold == 2500 && S.smu.od.FanTargetTemperature == 90);
+    CHECK(S.smu.od.FanZeroRpmEnable == 0 && S.smu.od.FanZeroRpmStopTemp == 60);
+    CHECK(smu13_get_fan_speed_rpm(dev, &smu, &v) == RDNA3_OK && v == 70 * 3300 / 100);
+    /* restore one setting: the fan curve back to the boot one, auto again */
+    in[0] = RD_PP_OD_EDIT_FAN_CURVE;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_RESTORE_DEFAULT_TABLE, in, 1) == RDNA3_OK);
+    CHECK(S.smu.od.FanMode == FAN_MODE_AUTO && S.smu.od.FanLinearPwmPoints[2] == 45);
+    CHECK(smu13_get_fan_speed_rpm(dev, &smu, &v) == RDNA3_OK && v == 900);
+
+    /* resume / re-init: the PMFW lost the OD settings, the user's come back */
+    S.smu.od_init = 0;
+    CHECK(smu13_set_default_od_settings(dev, &smu, 1) == RDNA3_OK && smu.user_od);
+    CHECK(smu.od.OverDriveTable.GfxclkFmax == 2600 && smu.od_user.OverDriveTable.GfxclkFmax == 2800);
+    CHECK(smu13_restore_user_od_settings(dev, &smu) == RDNA3_OK);
+    CHECK(S.smu.od.GfxclkFmax == 2800 && S.smu.od.UclkFmax == 1300 &&
+          S.smu.od.VoltageOffsetPerZoneBoundary[0] == -50 && S.smu.od.AcousticLimitRpmThreshold == 2500);
+    CHECK(smu.od_user.OverDriveTable.FeatureCtrlMask == 0 && smu.od.OverDriveTable.GfxclkFmax == 2800);
+    /* restore everything: the driver's tables are the boot ones again. As
+     * in amdgpu the upload carries the FeatureCtrlMask of the edits since
+     * the last commit (none here), so the PMFW keeps what it runs */
+    n0 = S.smu.od_uploads;
+    CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_RESTORE_DEFAULT_TABLE, NULL, 0) == RDNA3_OK);
+    CHECK(S.smu.od_uploads == n0 + 1 && S.smu.od_last_mask == 0);
+    CHECK(smu.od.OverDriveTable.GfxclkFmax == 2600 && !smu.user_od);
+
+    /* clocks: pp_dpm_* masks */
+    CHECK(smu13_force_clk_levels(dev, &smu, PPCLK_SOCCLK, 0x6) == RDNA3_OK &&
+          S.smu.soft_min[PPCLK_SOCCLK] == 900 && S.smu.soft_max[PPCLK_SOCCLK] == 1200);
+    CHECK(smu13_force_clk_levels(dev, &smu, PPCLK_GFXCLK, 0x4) == RDNA3_OK &&   /* fine grained: 2 -> 1 */
+          S.smu.soft_min[PPCLK_GFXCLK] == 2124 && S.smu.soft_max[PPCLK_GFXCLK] == 2124);
+    CHECK(smu13_force_clk_levels(dev, &smu, PPCLK_SOCCLK, 0x8) == RDNA3_EINVAL);
+    n0 = S.smu.soft_limits;
+    CHECK(smu13_force_clk_levels(dev, &smu, PPCLK_UCLK, 0x1) == RDNA3_OK && S.smu.soft_limits == n0);
+    CHECK(smu13_get_dpm_ultimate_freq(&smu, PPCLK_SOCCLK, &v, NULL) == RDNA3_OK && v == 600);
+    CHECK(smu13_get_dpm_ultimate_freq(&smu, PPCLK_VCLK_0, &v, NULL) == RDNA3_EINVAL);
+
+    /* profiles: 13.0.10 PMFW >= 80.69 adds POWER_SAVING to the mask */
+    in[0] = RD_PP_SMC_POWER_PROFILE_COMPUTE;
+    CHECK(smu13_set_power_profile_mode(dev, &smu, in, 0) == RDNA3_OK);
+    CHECK(S.smu.workload == ((1u << WORKLOAD_PPLIB_COMPUTE_BIT) | (1u << WORKLOAD_PPLIB_POWER_SAVING_BIT)));
+    CHECK(smu.workload_mask == (1u << WORKLOAD_PPLIB_COMPUTE_BIT) &&
+          smu.power_profile_mode == RD_PP_SMC_POWER_PROFILE_COMPUTE);
+    in[0] = 0; in[1] = 60; in[2] = 1; in[3] = 1500; in[4] = 0; in[5] = 2000; in[6] = 100; in[7] = 200;
+    in[8] = 300; in[9] = RD_PP_SMC_POWER_PROFILE_CUSTOM;
+    CHECK(smu13_set_power_profile_mode(dev, &smu, in, 9) == RDNA3_OK && S.smu.coeff_writes == 1);
+    CHECK(S.smu.coeff[WORKLOAD_PPLIB_CUSTOM_BIT].DpmActivityMonitorCoeffInt.Gfx_FPS == 60 &&
+          S.smu.coeff[WORKLOAD_PPLIB_CUSTOM_BIT].DpmActivityMonitorCoeffInt.Gfx_MinActiveFreq == 1500 &&
+          S.smu.coeff[WORKLOAD_PPLIB_CUSTOM_BIT].DpmActivityMonitorCoeffInt.Gfx_PD_Data_error_rate_coeff == 300);
+    CHECK(S.smu.coeff[WORKLOAD_PPLIB_CUSTOM_BIT].DpmActivityMonitorCoeffInt.Fclk_FPS == 26);   /* untouched */
+    CHECK(S.smu.workload == ((1u << WORKLOAD_PPLIB_CUSTOM_BIT) | (1u << WORKLOAD_PPLIB_POWER_SAVING_BIT)));
+    in[3] = RD_PP_SMC_POWER_PROFILE_CUSTOM;
+    CHECK(smu13_set_power_profile_mode(dev, &smu, in, 3) == RDNA3_EINVAL);   /* custom needs 9 */
+    in[0] = RD_PP_SMC_POWER_PROFILE_CAPPED;
+    CHECK(smu13_set_power_profile_mode(dev, &smu, in, 0) == RDNA3_EINVAL);   /* no workload on 13.0.0 */
+    in[0] = 12;
+    CHECK(smu13_set_power_profile_mode(dev, &smu, in, 0) == RDNA3_EINVAL);
+    CHECK(smu13_get_power_profile_coeff(dev, &smu, WORKLOAD_PPLIB_VIDEO_BIT, &co) == RDNA3_OK &&
+          co.gfx[0] == 13 && co.gfx[2] == 800 && co.fclk[2] == 803);
+    CHECK(smu13_get_power_profile_coeff(dev, &smu, 9, &co) == RDNA3_EINVAL);
+
+    /* DF C-states */
+    CHECK(smu13_set_df_cstate(dev, &smu, 0) == RDNA3_OK && S.smu.df_cstate == 0 && smu.df_cstate == 0);
+    CHECK(smu13_set_df_cstate(dev, &smu, 1) == RDNA3_OK && S.smu.df_cstate == 1);
+
+    /* the userspace path and its gates */
+    pmctl_req(&rq, RD_PMCTL_INFO, 0, NULL);
+    CHECK(smu13_pmctl(dev, &smu, &rq, &rp, 0) == RDNA3_OK && rp.err == 0 && rp.info.gates == 0);
+    CHECK(rp.info.fan_mode == RD_FAN_CTRL_AUTO && rp.info.fan_rpm == 900 && rp.info.fan_max_rpm == 3300);
+    CHECK(rp.info.power_current == 250 && rp.info.power_max == 322 && rp.info.od_valid &&
+          rp.info.od_feature_ctrl == SIM_OD_FEATURES && rp.info.od_lim_max[RD_OD_SET_GFXCLK_FMAX] == 3000);
+    CHECK(rp.info.gfxclk_max == 2124 && rp.info.socclk_max == 1200 && rp.info.gfxclk_standard == 1295);
+    CHECK(rp.info.socclk_levels == 3 && rp.info.socclk_lv[1] == 900 && rp.info.socclk_cur == 900 &&
+          rp.info.fclk_cur == 1000 && rp.info.gfxclk_lv[1] == 2124);
+    CHECK(rp.info.thermal.hotspot_crit_max == 110000 && rp.info.unique_id == 0x1234ABCD5678EF01ull);
+    CHECK(rp.info.baco_support == (RD_BACO_SUPPORT | RD_MACO_SUPPORT) && rp.info.df_cstate == 1);
+    CHECK(rp.info.metrics.temperature_edge == 45 && rp.info.workload_mask == (1u << WORKLOAD_PPLIB_CUSTOM_BIT));
+    {
+        int32_t a[10] = { RD_FAN_CTRL_MANUAL };
+        n0 = S.smu.feature_msgs;
+        pmctl_req(&rq, RD_PMCTL_FAN_MODE, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, 0) == RDNA3_EOPNOTSUPP);         /* no rdna3pmctl */
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, RD_PMCTL_GATE_WRITE) == RDNA3_EPERM);   /* no admin */
+        CHECK(S.smu.feature_msgs == n0 && (S.smu.enabled & fan_bit));
+        a[0] = 255;
+        pmctl_req(&rq, RD_PMCTL_FAN_PWM, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_EINVAL);   /* manual mode first */
+        a[0] = RD_FAN_CTRL_MANUAL;
+        pmctl_req(&rq, RD_PMCTL_FAN_MODE, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && rp.info.fan_mode == RD_FAN_CTRL_MANUAL);
+        a[0] = 255;
+        pmctl_req(&rq, RD_PMCTL_FAN_PWM, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && rp.info.fan_pwm == 255);
+        a[0] = 1800;
+        pmctl_req(&rq, RD_PMCTL_FAN_RPM, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && rp.info.fan_rpm == 1800);
+        a[0] = RD_FAN_CTRL_AUTO;
+        pmctl_req(&rq, RD_PMCTL_FAN_MODE, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && rp.info.fan_rpm == 900);
+        a[0] = 260;
+        pmctl_req(&rq, RD_PMCTL_POWER_LIMIT, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && rp.info.power_current == 260);
+        /* overdrive needs rdna3pmctl=2 */
+        a[0] = RD_PP_OD_EDIT_FAN_CURVE; a[1] = 1; a[2] = 50; a[3] = 55;
+        pmctl_req(&rq, RD_PMCTL_OD_EDIT, 4, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, RD_PMCTL_GATE_WRITE | RD_PMCTL_GATE_ADMIN) ==
+              RDNA3_EOPNOTSUPP);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK);
+        pmctl_req(&rq, RD_PMCTL_OD_EDIT, 2, a);                         /* too few inputs */
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_EINVAL);
+        a[0] = RD_PP_OD_COMMIT_DPM_TABLE;
+        pmctl_req(&rq, RD_PMCTL_OD_EDIT, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK);
+        CHECK(rp.info.od_fan_curve_pwm[1] == 55 && rp.info.od_fan_curve_temp[1] == 50 &&
+              rp.info.od_fan_mode == FAN_MODE_MANUAL_LINEAR && rp.info.user_od && S.smu.od.FanLinearPwmPoints[1] == 55);
+        a[0] = RD_PP_SMC_POWER_PROFILE_FULLSCREEN3D;
+        pmctl_req(&rq, RD_PMCTL_PROFILE, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK &&
+              rp.info.power_profile_mode == RD_PP_SMC_POWER_PROFILE_FULLSCREEN3D &&
+              S.smu.workload == ((1u << WORKLOAD_PPLIB_FULL_SCREEN_3D_BIT) | (1u << WORKLOAD_PPLIB_POWER_SAVING_BIT)));
+        a[0] = RD_PP_SMC_POWER_PROFILE_CUSTOM; a[1] = 1; a[2] = 30; a[3] = 0; a[4] = 1000; a[5] = 0;
+        a[6] = 1500; a[7] = 1; a[8] = 2; a[9] = 3;
+        pmctl_req(&rq, RD_PMCTL_PROFILE, 10, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK &&
+              S.smu.coeff[WORKLOAD_PPLIB_CUSTOM_BIT].DpmActivityMonitorCoeffInt.Fclk_FPS == 30 &&
+              S.smu.coeff[WORKLOAD_PPLIB_CUSTOM_BIT].DpmActivityMonitorCoeffInt.Fclk_BoosterFreq == 1500);
+        a[0] = WORKLOAD_PPLIB_CUSTOM_BIT;
+        pmctl_req(&rq, RD_PMCTL_PROFILE_COEFF, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, 0) == RDNA3_EOPNOTSUPP);   /* a new table: gated */
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && rp.coeff.fclk[0] == 30 &&
+              rp.coeff.gfx[0] == 60);
+        a[0] = RD_PP_SOCCLK; a[1] = 0x1;
+        pmctl_req(&rq, RD_PMCTL_FORCE_LEVELS, 2, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && S.smu.soft_max[PPCLK_SOCCLK] == 600);
+        a[0] = 7;
+        pmctl_req(&rq, RD_PMCTL_FORCE_LEVELS, 2, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_EINVAL);
+        a[0] = 2;
+        pmctl_req(&rq, RD_PMCTL_DF_CSTATE, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_EINVAL);
+        a[0] = 0;
+        pmctl_req(&rq, RD_PMCTL_DF_CSTATE, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && rp.info.df_cstate == 0);
+        pmctl_req(&rq, RD_PMCTL_BACO_CYCLE, 0, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all | RD_PMCTL_GATE_BACO) == RDNA3_EOPNOTSUPP);
+        pmctl_req(&rq, RD_PMCTL_INFO, 0, a);
+        rq.abi = 7;
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_EINVAL);
+        CHECK(S.smu.unflushed == 0 && S.smu.bad_addr == 0);
+    }
+
+    /* BACO: never on a suspend path, only reached through the boot-arg */
+    CHECK(smu13_get_bamaco_support(dev, &smu) == (int)(RD_BACO_SUPPORT | RD_MACO_SUPPORT));
+    S.reg[SIM_BIOS_SCRATCH + 6] = 0x55; S.reg[SIM_BIOS_SCRATCH + 7] = 0x77;
+    CHECK(smu13_baco_enter(dev, &smu, 0, RD_BACO_SEQ_BACO) == RDNA3_OK);
+    CHECK(S.smu.baco && S.smu.baco_seq == RD_BACO_SEQ_BACO && smu13_baco_get_state(&smu) == RD_SMU_BACO_STATE_ENTER);
+    n0 = S.smu.msgs_in_baco;
+    CHECK(smu13_get_bamaco_support(dev, &smu) == (int)(RD_BACO_SUPPORT | RD_MACO_SUPPORT) &&
+          S.smu.msgs_in_baco == n0);    /* already in BACO: no message */
+    CHECK(smu13_send_msg(dev, PPSMC_MSG_TestMessage, 1, NULL) != RDNA3_OK && S.smu.msgs_in_baco == n0 + 1);
+    CHECK(smu13_baco_enter(dev, &smu, 0, RD_BACO_SEQ_BACO) == RDNA3_OK && S.smu.baco_enters == 1);
+    CHECK(smu13_baco_exit(dev, &smu, 0) == RDNA3_OK && !S.smu.baco && S.smu.baco_exits == 1);
+    CHECK(smu13_baco_get_state(&smu) == RD_SMU_BACO_STATE_EXIT);
+    CHECK(S.reg[SIM_BIOS_SCRATCH + 6] == 0 && S.reg[SIM_BIOS_SCRATCH + 7] == 0);
+    CHECK(smu13_baco_exit(dev, &smu, 0) == RDNA3_OK && S.smu.baco_exits == 1);   /* same state */
+    /* runtime PM with audio: the ArmD3 sequence instead */
+    CHECK(smu13_baco_enter(dev, &smu, 1, RD_BACO_SEQ_BAMACO) == RDNA3_OK && S.smu.armd3_seq == RD_BACO_SEQ_BAMACO &&
+          S.smu.baco_enters == 1 && smu.baco_state == RD_SMU_BACO_STATE_ENTER);
+    CHECK(smu13_baco_exit(dev, &smu, 1) == RDNA3_OK && S.smu.armd3_seq == RD_BACO_SEQ_ULPS &&
+          smu.baco_state == RD_SMU_BACO_STATE_EXIT && S.smu.armd3_msgs == 2);
+    /* the BACO feature stopped: no BACO, and the PMFW refuses to enter */
+    S.smu.enabled &= ~RD_SMU_FEATURE(FEATURE_BACO_BIT);
+    CHECK(smu13_get_bamaco_support(dev, &smu) == 0);
+    CHECK(smu13_baco_enter(dev, &smu, 0, RD_BACO_SEQ_BACO) != RDNA3_OK && !S.smu.baco &&
+          smu.baco_state == RD_SMU_BACO_STATE_EXIT);
+    S.smu.enabled |= RD_SMU_FEATURE(FEATURE_BACO_BIT);
+    smu.baco_platform = 0;
+    CHECK(smu13_get_bamaco_support(dev, &smu) == 0);
+}
+
 static void run(const char *fwdir)
 {
     static amd_ucode_plan plan;
@@ -4757,6 +5431,8 @@ static void run(const char *fwdir)
         CHECK(!smu.board_table_appended && S.smu.bad_board &&
               smu.pptable.BoardTable.Version == PMFW_BOARD_PLACEHOLDER);
         CHECK(smu.gfx.count == 2 && smu.uclk.count == 1 && smu.uclk.level[0] == 0);
+
+        test_pm_control(&dev, &vb);
     }
 
     /* GMC: GART in VRAM, GFXHUB VMID0 + contexts, TLB flush */

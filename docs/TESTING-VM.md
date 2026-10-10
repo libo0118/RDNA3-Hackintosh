@@ -163,6 +163,8 @@ steps:
 | `9` | our framebuffer instead of the UEFI image | the image should stay unchanged; **it may go dark** |
 | `8c` | MES scheduler (`rdna3mes=1`) | low risk, the kernel rings stay on the KIQ |
 | `userq` | user queues through the MES (`rdna3userq=1`, + user queue test) | low risk; after 8c |
+| `pmctl` | power management from userspace (`rdna3pmctl=2`): fan, power limit, overdrive, profiles; the report sets each once and back | the fan may change speed for a few seconds |
+| `baco` | the chip through BACO and back (`rdna3baco=1`), then the GPU is brought up again | **risky**: only after `pmctl` passed; the screens go dark during the cycle, a failed one needs a reboot |
 | `9b` | the second monitor with the same picture (`rdna3dmub=1 rdna3mirror=1`) | only after step 5b passed; **either screen may go dark** |
 | `9c` | the second monitor as its own display (`rdna3mirror=2`) | after 9b; **either screen may go dark** |
 | `10` | accelerator (WindowServer) | risky; send the reports from 0–9 first |

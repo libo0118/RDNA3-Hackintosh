@@ -66,6 +66,8 @@ void RDNA3UserClient::stop(IOService *provider)
 IOReturn RDNA3UserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
                                          IOExternalMethodDispatch *, OSObject *, void *)
 {
+    if (selector == kSelPm && fOpen)
+        return pmMethod(args);
     if (selector != kSelIoctl || !fOpen)
         return kIOReturnBadArgument;
     if (args->scalarInputCount < 1 || args->scalarOutputCount < 1)
@@ -107,5 +109,30 @@ IOReturn RDNA3UserClient::clientMemoryForType(UInt32 type, IOOptionBits *options
     if (!md)
         return kIOReturnNotFound;
     *memory = md;   /* retained; IOUserClient releases it */
+    return kIOReturnSuccess;
+}
+
+/* kSelPm: one rdna3_pmctl_req in, one rdna3_pmctl_reply out. Reads are for
+ * everyone who may open the device; the request carries whether this
+ * caller is an administrator (the writes need one). */
+IOReturn RDNA3UserClient::pmMethod(IOExternalMethodArguments *args)
+{
+    rdna3_pmctl_req rq;
+    if (args->structureInputDescriptor || args->structureOutputDescriptor ||
+        args->structureInputSize != sizeof(rq) ||
+        args->structureOutputSize < sizeof(rdna3_pmctl_reply) || args->scalarOutputCount < 1)
+        return kIOReturnBadArgument;
+    memcpy(&rq, args->structureInput, sizeof(rq));
+    rdna3_pmctl_reply *rp = (rdna3_pmctl_reply *)IOMalloc(sizeof(*rp));
+    if (!rp)
+        return kIOReturnNoMemory;
+    bzero(rp, sizeof(*rp));
+    bool admin = clientHasPrivilege(fTask, kIOClientPrivilegeAdministrator) == kIOReturnSuccess;
+    int ret = fAccel->pmCtl(&rq, rp, admin);
+    memcpy(args->structureOutput, rp, sizeof(*rp));
+    args->structureOutputSize = sizeof(*rp);
+    IOFree(rp, sizeof(*rp));
+    args->scalarOutput[0] = (uint64_t)(ret < 0 ? -ret : 0);
+    args->scalarOutputCount = 1;
     return kIOReturnSuccess;
 }

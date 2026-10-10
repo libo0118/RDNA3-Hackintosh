@@ -244,6 +244,26 @@ from the firmware (`dcn_3_2_0_dmcub.bin`).
 | queue created, `dst` stays 0 | the queue never ran: doorbell index (BO offset / 4 + offset * 2), the doorbell write did not reach BAR2, or the wptr poll address (GART slot of the wptr BO) | `RDNA3,LastFaultVMID` 8-15 is the queue's process faulting: the VM flush of VMIDs 8-15 |
 | `dst` right, fence `did NOT signal` | the firmware did not write the rptr to the MQD's fence address, or no EOP interrupt reached the waiter | the fence slot is in the seq64 BO (VRAM); the model in `tests/sim_navi32.c` (`uq_eop`) is an assumption until this step passes |
 
+### Step pmctl (`rdna3pmctl=2`): power management from userspace
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `rdna3_pmctl info`: `IOConnectCallMethod: 0x...` | the kext predates selector 1, or the user client did not open | rebuild; `RDNA3,PMCtl` must be in the IORegistry |
+| `RDNA3,PMODResult` not 0, log `SMU: Failed to get overdrive table` | TransferTableSmu2Dram(TABLE_OVERDRIVE) refused | the OverDriveTable_t size vs `smu13_driver_if_v13_0_0.h` of the PMFW's driver interface (`RDNA3,SMUDriverIF`) |
+| selftest `FAIL power limit`, `GetPptLimit` unchanged | SetPptLimit refused or THROTTLERS not running | `RDNA3,PMFeaturesRunning` bit 24; the limits `RDNA3,PMPowerLimitMinW/MaxW` |
+| `fan pwm 128` ok but `info` shows the old speed | the PMFW keeps its own fan control on 13.0.10 even with FAN_CONTROL stopped (the reason amdgpu moved to the OD fan curve) | expected; the OD fan curve check is what counts |
+| `OD ... -> -5 (EIO)` | the PMFW refused the OverDriveTable (a value past its limits, a feature it does not have) | compare the values with `OD_RANGE` of `rdna3_pmctl info` and `RDNA3,PMODFeatures`; the PMFW model's checks in `tests/sim_navi32.c` (`sim_od_accept`) |
+| `profile COMPUTE` mask wrong | PMFW older than 80.69 does not get POWER_SAVING added | `RDNA3,SMUVersion` |
+
+### Step baco (`rdna3baco=1`): BACO cycle
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `BACO: not supported` | platform caps without BACO, or FEATURE_BACO not running | `rdna3_pmctl info` BACO support; `RDNA3,PMFeaturesRunning` bit 20 |
+| `BACO enter -> -5` | EnterBaco refused | log the PMFW version; amdgpu only uses BACO for runtime PM |
+| enter ok, `BACO exit -> -62` (timeout) | the PMFW does not answer while the chip is off, or the exit needs the PCI config space saved / restored around it | reboot; next try: save/restore config space as in `resetIfPspStuck` |
+| exit ok, the GPU does not come back (`GPU reset ... FAILED` style lines, `PSP bootloader did not come back`) | the re-init after BACO differs from the one after a mode-1 reset | compare the `PSP:` lines with a mode-1 recovery (step hanggfx) |
+
 ### Hotplug (any step from 6b with `rdna3msi=1`)
 
 Unplug and plug a monitor cable while macOS runs: the log shows `HPD: hotplug interrupts enabled`, then `display: HPDn disconnected` / `connected` and `hotplug on pins ...`; `RDNA3,HotplugEvents` counts them.

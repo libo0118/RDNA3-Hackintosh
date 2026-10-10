@@ -119,6 +119,11 @@ public:
     int      vmFaultInfo(void *vm, uint64_t *addr, uint32_t *status, uint32_t *vmhub);
     /* AMDGPU_INFO_SENSOR from the SMU metrics (re-read at most every 100 ms) */
     int      sensor(uint32_t type, uint32_t *value);
+    /* power-management control for userspace (common/rdna3_pmctl.h):
+     * fan, power limit, overdrive, profiles, clock levels, DF C-states,
+     * BACO. Reads always; writes need rdna3pmctl=1 (overdrive 2), BACO
+     * rdna3baco=1, and an administrator ('admin'). DRM lock held. */
+    int      pmctl(const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp, bool admin);
     /* PerformanceStatistics: activity %, edge / hotspot / memory C, fan
      * rpm, gfx / memory clock MHz, power W; under the DRM lock */
     bool     stats(uint32_t v[8]);
@@ -217,6 +222,21 @@ private:
     uint64_t         fMetricsAt = 0;         /* mach_absolute_time of the last metrics read */
     void             pmInit();
     void             pmPublishMetrics();
+    /* PM control (rdna3pmctl=0 off / 1 writes / 2 + overdrive, rdna3baco=1):
+     * the user's settings amdgpu's smu_restore_dpm_user_profile puts back
+     * after a re-init (power limit, fan mode and speed, overdrive) */
+    uint32_t         fPmCtl = 0;
+    bool             fBacoWanted = false;
+    uint32_t         fBacoCycles = 0;
+    uint32_t         fUserPowerLimit = 0, fUserFanMode = RD_FAN_CTRL_AUTO;
+    uint32_t         fUserFanPwm = 0, fUserFanRpm = 0;
+    bool             fUserOd = false;
+    OverDriveTableExternal_t *fUserOdTable = nullptr;
+    uint32_t         pmctlGates(bool admin) const;
+    void             pmCtlInit(const rdna3_vbios *vb);
+    void             pmCtlRemember(const rdna3_pmctl_req *rq);
+    void             pmCtlPublish();
+    int              bacoCycle();
     /* DMCUB (level 5, rdna3dmub=1): dm_dmub_hw_init on the PSP-loaded image */
     uint32_t         fDmubMode = 0;
     rdna3_dmub      *fDmub = nullptr;
@@ -234,7 +254,9 @@ private:
     RDNA3Vm         *fVmByVmid[16] = {};
     bool             hwInit();
     int              recover(uint32_t ip, uint32_t ring, uint64_t seq);
-    bool             gpuReset();
+    /* 'baco': the chip goes through BACO (enter + exit, rdna3baco=1)
+     * instead of the mode-1 reset; the same re-init follows */
+    bool             gpuReset(bool baco = false);
     void             markGuilty(uint32_t vmid, const char *why);
     void             forceFences();
     bool             fDoorbells = true;     /* boot-arg rdna3doorbell */

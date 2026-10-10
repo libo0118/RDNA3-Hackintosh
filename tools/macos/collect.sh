@@ -54,6 +54,8 @@ fi
 # userspace view, when the tools are built (rdna3lvl>=2)
 info="$root/build/userspace/rdna3_drminfo"
 [ -x "$info" ] && run 31-drminfo.txt "$info"
+pm="$root/build/userspace/rdna3_pmctl"
+[ -x "$pm" ] && run 33-pmctl.txt "$pm" info
 vki="$root/build/mesa/vulkaninfo.log"
 [ -f "$vki" ] && cp "$vki" "$dir/32-vulkaninfo-ci.log"
 
