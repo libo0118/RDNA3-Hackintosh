@@ -31,7 +31,7 @@ Legend: **[sim]** can be finished and verified in the simulator now;
 | clone check (frame counter + OTG CRC) | `a54bc5b` | `RDNA3,MirrorCheck` running, same CRC |
 | PerformanceStatistics from the SMU | `c3db924` | `ioreg` shows temperature, fan, clocks |
 | `rdna3vm queue`, `package/oc_install.sh` | `3127016`, `8786936` | - |
-| B5 subset: DCN clock read-back, DAL mailbox | this batch | `RDNA3,DCNClocks`; step 9b log `DAL SMU: 2 display(s)` |
+| B5 subset: DCN clock read-back, DAL mailbox | `e8f4261` | `RDNA3,DCNClocks`; step 9b log `DAL SMU: 2 display(s)` |
 | `rdna3vm step 8c / 9b / 9c` | `3f743e5` | - |
 
 Still open: A1 (monitor name), A3 (DMCUB on the card), B5 (bandwidth /
