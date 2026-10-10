@@ -213,6 +213,16 @@ from the firmware (`dcn_3_2_0_dmcub.bin`).
 | `command … not consumed` | inbox/regions | `RDNA3,DMUBBootStatus`, `dmub_dcn32_setup_windows` |
 | screen black, log fine | expected risk | record; keep `rdna3dmub` off until modeset work (§4) |
 
+### Hotplug (any step from 6b with `rdna3msi=1`)
+
+Unplug and plug a monitor cable while macOS runs: the log shows `HPD: hotplug interrupts enabled`, then `display: HPDn disconnected` / `connected` and `hotplug on pins ...`; `RDNA3,HotplugEvents` counts them.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no `display: HPDn` line on unplug | DCN interrupts do not reach the IH (`DC_HPD_INT_EN` set but no IV) | `RDNA3,IHEarlyIVs`, MSI counters; read `HPDn_DC_HPD_INT_STATUS` (bit 0 latched?) |
+| many `HPDn` lines for one unplug | polarity / ack order (`hpd_ack` in irq_service_dcn32.c) | send the log; check `DC_HPD_INT_POLARITY` after the ack |
+| `connected` but the connector has no EDID afterwards | re-probe too early (sink not ready) | delay the re-probe (amdgpu waits through `dc_link_detect` retries) |
+
 ### Step 9b (`rdna3dmub=1 rdna3mirror=1`): second monitor (clone)
 
 | Symptom | Likely cause | Action |

@@ -55,6 +55,22 @@ enum {
 /* DC_HPD_INT_STATUS.DC_HPD_SENSE of pin 'n' (enables the pin first) */
 int  dcaux_hpd_sense(rdna3_dev *d, uint32_t n);
 
+/* HPD interrupts (irq_service_dcn32.c): long pulses of pin 'n' arrive on
+ * IH client DCE, src DCN_1_0__SRCID__DC_HPD1_INT with the pin in
+ * src_data[0] (DCN_1_0__CTXID__DC_HPDn_INT = n, DP short pulses n + 6). */
+#define RD_IH_CLIENT_DCE      0x04
+#define RD_IH_SRC_DC_HPD1_INT 0x2a
+#define RD_HPD_PINS           6     /* context ids; DCN 3.2 wires HPD1..5 */
+
+/* dc_interrupt_set(DC_IRQ_SOURCE_HPDn): polarity set to catch the next
+ * change of the current sense, then DC_HPD_INT_EN */
+void dchpd_irq_set(rdna3_dev *d, uint32_t n, int enable);
+/* to_dal_irq_source_dcn32: the pin an IV reports, or -1; *rx = DP short pulse */
+int  dchpd_iv_pin(uint32_t client_id, uint32_t src_id, uint32_t ctx, int *rx);
+/* hpd_ack: DC_HPD_INT_ACK, then the polarity flipped to the opposite of
+ * DC_HPD_SENSE_DELAYED. Returns the (delayed) sense: 1 connected. */
+int  dchpd_irq_ack(rdna3_dev *d, uint32_t n);
+
 /* One raw transaction on engine 'n': 'action' RD_AUX_*, 20-bit 'address',
  * 'len' bytes (<= 16; 0 = address-only). Writes send buf, reads fill it.
  * Returns the bytes transferred (reads: received) or RD_AUX_ERR_*; *reply

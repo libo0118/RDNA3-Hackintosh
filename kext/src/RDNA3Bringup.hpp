@@ -200,6 +200,7 @@ private:
     /* interrupts (rdna3msi=1) */
     bool          fMsi = false;             /* asked for */
     volatile bool fIrqLive = false;         /* handler registered and verified */
+    bool          fHpdIrq = false;          /* DCN HPD interrupts enabled (B7) */
     IOWorkLoop   *fWorkLoop = nullptr;
     IOFilterInterruptEventSource *fIntr = nullptr;
     int           fFenceEvent = 0;          /* IOLockSleep event on fLock */

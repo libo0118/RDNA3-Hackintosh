@@ -195,6 +195,7 @@ typedef struct sim {
      * the HUBP/DPP of a gated pipe are lost, as on the chip */
     int dcn_pg;
     unsigned dcn_gated_drops, dcn_pg_no_request;
+    unsigned hpd_irqs;
     uint32_t i2c_off, i2c_seg;
     /* recovery: SQ_CMD kills, RLC safe mode, GRBM soft resets, mode-1 resets,
      * page-fault IVs */
@@ -753,6 +754,33 @@ static void make_sink(void)
     memcpy(e + 132, dtd_1080p, 18);
     e[255] = edid_sum(e + 128);
     S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 0)] = HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK;
+}
+
+/* HPD pin n changes: the interrupt fires on the change when the new
+ * (delayed) sense equals DC_HPD_INT_POLARITY with DC_HPD_INT_EN set, and
+ * stays latched until acked (edge: amdgpu acks before flipping the
+ * polarity, which a level source would turn into a storm) */
+static void ih_push_iv(uint32_t client, uint32_t src, uint32_t ring_id, uint32_t vmid,
+                       uint32_t pasid, uint32_t sd0, uint32_t sd1);
+static void hpd_eval(uint32_t n)
+{
+    uint32_t *st = &S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, n)];
+    uint32_t ctl = S.reg[HPDR(regHPD0_DC_HPD_INT_CONTROL, n)];
+    uint32_t sense = (*st & HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED_MASK) ? 1 : 0;
+    uint32_t pol = (ctl & HPD0_DC_HPD_INT_CONTROL__DC_HPD_INT_POLARITY_MASK) ? 1 : 0;
+    if (!(ctl & HPD0_DC_HPD_INT_CONTROL__DC_HPD_INT_EN_MASK) || sense != pol ||
+        (*st & HPD0_DC_HPD_INT_STATUS__DC_HPD_INT_STATUS_MASK))
+        return;
+    *st |= HPD0_DC_HPD_INT_STATUS__DC_HPD_INT_STATUS_MASK;
+    S.hpd_irqs++;
+    ih_push_iv(RD_IH_CLIENT_DCE, RD_IH_SRC_DC_HPD1_INT, 0, 0, 0, n, 0);
+}
+static void hpd_plug(uint32_t n, int on)
+{
+    uint32_t m = HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK | HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED_MASK;
+    uint32_t *st = &S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, n)];
+    *st = on ? (*st | m) : (*st & ~m);
+    hpd_eval(n);
 }
 
 /* ---- DMCUB model ---- */
@@ -1724,6 +1752,15 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             return;
         }
     }
+    /* HPD interrupt control: ACK clears the latched status (self-clearing
+     * bit), then the level condition is checked again */
+    for (uint32_t n = 0; n < RD_AUX_ENGINES; n++)
+        if (dw == HPDR(regHPD0_DC_HPD_INT_CONTROL, n)) {
+            if (v & HPD0_DC_HPD_INT_CONTROL__DC_HPD_INT_ACK_MASK)
+                S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, n)] &= ~HPD0_DC_HPD_INT_STATUS__DC_HPD_INT_STATUS_MASK;
+            *R(dw) = v & ~HPD0_DC_HPD_INT_CONTROL__DC_HPD_INT_ACK_MASK;
+            return;
+        }
     /* DCN power domains, DET segments */
     if (dw >= DCN_B2 + regDOMAIN0_PG_CONFIG && dw < DCN_B2 + regDOMAIN0_PG_CONFIG + 4 * 2 &&
         !((dw - DCN_B2 - regDOMAIN0_PG_CONFIG) & 1)) {
@@ -2548,6 +2585,43 @@ static void run(const char *fwdir)
             S.reg[OSS_BASE0 + regIH_RB_WPTR] = wptr;
             CHECK(ih60_process(&dev, &ih, sim_iv_cb, &seen) == 4064 / 32);
             CHECK(ih.overflows == 1 && ih.rptr == 64);
+
+            /* HPD hotplug through the IH (irq_service_dcn32): pin 2 has a
+             * monitor, pin 3 none; enabling raises nothing, unplug and plug
+             * raise one IV each, and the ack re-arms for the next change */
+            {
+                uint32_t pin, sense_before = S.hpd_irqs;
+                int rx = 0;
+                struct sim_seen hs = { 0, 0, 0, 0, 0, 0 };
+                ih60_process(&dev, &ih, NULL, NULL);
+                hpd_plug(2, 1);
+                hpd_plug(3, 0);
+                dchpd_irq_set(&dev, 2, 1);
+                dchpd_irq_set(&dev, 3, 1);
+                CHECK(S.hpd_irqs == sense_before);
+                hpd_plug(2, 0);                        /* unplug */
+                hpd_plug(2, 0);                        /* still latched: no second IV */
+                CHECK(S.hpd_irqs == sense_before + 1);
+                CHECK(ih60_process(&dev, &ih, sim_iv_cb, &hs) == 1 && hs.client == RD_IH_CLIENT_DCE &&
+                      hs.src == RD_IH_SRC_DC_HPD1_INT);
+                CHECK(dchpd_iv_pin(RD_IH_CLIENT_DCE, RD_IH_SRC_DC_HPD1_INT, 2, &rx) == 2 && !rx);
+                CHECK(dchpd_iv_pin(RD_IH_CLIENT_DCE, RD_IH_SRC_DC_HPD1_INT, 8, &rx) == 2 && rx);
+                CHECK(dchpd_iv_pin(RD_IH_CLIENT_GFX, RD_IH_SRC_DC_HPD1_INT, 2, &rx) == -1);
+                CHECK(dchpd_irq_ack(&dev, 2) == 0);     /* disconnected, now waits for a plug */
+                CHECK(S.hpd_irqs == sense_before + 1);  /* no storm after the ack */
+                hpd_plug(2, 1);
+                CHECK(S.hpd_irqs == sense_before + 2 && dchpd_irq_ack(&dev, 2) == 1);
+                hpd_plug(3, 1);
+                CHECK(S.hpd_irqs == sense_before + 3 && dchpd_irq_ack(&dev, 3) == 1);
+                pin = (uint32_t)S.hpd_irqs;
+                dchpd_irq_set(&dev, 3, 0);
+                hpd_plug(3, 0);
+                CHECK(S.hpd_irqs == pin);                /* disabled */
+                dchpd_irq_set(&dev, 2, 0);
+                ih60_process(&dev, &ih, NULL, NULL);
+                S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] = 0;
+                S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 3)] = 0;
+            }
             ih60_disable(&dev, &ih);
             CHECK(!ih.enabled && !(S.reg[OSS_BASE0 + regIH_RB_CNTL] & IH_RB_CNTL__RB_ENABLE_MASK));
         }

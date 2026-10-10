@@ -33,6 +33,47 @@
 #define AUX_MAX_RETRIES     7
 #define AUX_DEFER_DELAY_US  400
 
+void dchpd_irq_set(rdna3_dev *d, uint32_t n, int enable)
+{
+    uint32_t v, sense;
+    if (!d->ipver[HWIP_DCE].present || n >= RD_AUX_ENGINES)   /* HPD0..4 on DCN 3.2 */
+        return;
+    v = RHPD(d, regHPD0_DC_HPD_INT_CONTROL, n);
+    if (enable) {
+        /* interrupt when the sense becomes the polarity: wait for the
+         * opposite of what the pin reads now, as hpd_ack leaves it */
+        sense = GET(RHPD(d, regHPD0_DC_HPD_INT_STATUS, n), HPD0_DC_HPD_INT_STATUS, DC_HPD_SENSE_DELAYED);
+        v = SET(v, HPD0_DC_HPD_INT_CONTROL, DC_HPD_INT_POLARITY, sense ? 0 : 1);
+        WHPD(d, regHPD0_DC_HPD_INT_CONTROL, n, v);
+    }
+    v = SET(v, HPD0_DC_HPD_INT_CONTROL, DC_HPD_INT_EN, enable ? 1 : 0);
+    WHPD(d, regHPD0_DC_HPD_INT_CONTROL, n, v);
+}
+
+int dchpd_iv_pin(uint32_t client_id, uint32_t src_id, uint32_t ctx, int *rx)
+{
+    if (client_id != RD_IH_CLIENT_DCE || src_id != RD_IH_SRC_DC_HPD1_INT || ctx >= 2 * RD_HPD_PINS)
+        return -1;
+    if (rx)
+        *rx = ctx >= RD_HPD_PINS;
+    return (int)(ctx % RD_HPD_PINS);
+}
+
+int dchpd_irq_ack(rdna3_dev *d, uint32_t n)
+{
+    uint32_t v, sense;
+    if (!d->ipver[HWIP_DCE].present || n >= RD_AUX_ENGINES)   /* HPD0..4 on DCN 3.2 */
+        return 0;
+    sense = GET(RHPD(d, regHPD0_DC_HPD_INT_STATUS, n), HPD0_DC_HPD_INT_STATUS, DC_HPD_SENSE_DELAYED);
+    /* dal_irq_service_ack_generic: the ACK bit of the ack register */
+    v = RHPD(d, regHPD0_DC_HPD_INT_CONTROL, n);
+    WHPD(d, regHPD0_DC_HPD_INT_CONTROL, n, SET(v, HPD0_DC_HPD_INT_CONTROL, DC_HPD_INT_ACK, 1));
+    v = RHPD(d, regHPD0_DC_HPD_INT_CONTROL, n);
+    v = SET(v, HPD0_DC_HPD_INT_CONTROL, DC_HPD_INT_ACK, 0);
+    WHPD(d, regHPD0_DC_HPD_INT_CONTROL, n, SET(v, HPD0_DC_HPD_INT_CONTROL, DC_HPD_INT_POLARITY, sense ? 0 : 1));
+    return sense ? 1 : 0;
+}
+
 int dcaux_hpd_sense(rdna3_dev *d, uint32_t n)
 {
     uint32_t v;

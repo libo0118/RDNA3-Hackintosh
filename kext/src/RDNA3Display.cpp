@@ -19,6 +19,8 @@
 
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
+#include <kern/thread_call.h>
+#include <libkern/OSAtomic.h>
 
 extern "C" {
 #include "rdna3_hw.h"
@@ -106,6 +108,7 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     displayReadVbios();
     displayProbeConnectors();
     displayPublishRoutes();
+    fHotplugCall = thread_call_allocate((thread_call_func_t)displayHotplugWork, this);
     return true;
 }
 
@@ -204,7 +207,8 @@ static int head_aux(const rdna3_dcn_head *h, const rdna3_display_path *p, uint32
  * IORegistry as RDNA3,Connector<n>,* and to the framebuffer (displayEdid). */
 void RDNA3Accel::displayProbeConnectors()
 {
-    fConnectors = (rdna3_connector *)IOMalloc(sizeof(rdna3_connector) * RD_AUX_ENGINES);
+    if (!fConnectors)   /* kept across hotplug re-probes */
+        fConnectors = (rdna3_connector *)IOMalloc(sizeof(rdna3_connector) * RD_AUX_ENGINES);
     if (!fConnectors)
         return;
     bzero(fConnectors, sizeof(rdna3_connector) * RD_AUX_ENGINES);
@@ -364,6 +368,31 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm)
     LOG("display: mirror: %s", val);
 }
 
+void RDNA3Accel::displayHotplug(uint32_t pin, int connected)
+{
+    OSBitOrAtomic(1u << pin, &fHotplugPending);
+    fHotplugEvents++;
+    LOG("display: HPD%u %s", pin + 1, connected ? "connected" : "disconnected");
+    if (fHotplugCall)
+        thread_call_enter(fHotplugCall);
+}
+
+/* handle_hpd_irq -> dc_link_detect: read the sinks again (DPCD, EDID over
+ * AUX or the DDC) and publish what changed */
+void RDNA3Accel::displayHotplugWork(void *owner, void *)
+{
+    RDNA3Accel *a = (RDNA3Accel *)owner;
+    UInt32 pins = OSBitAndAtomic(0, &a->fHotplugPending);
+    if (!a->fDispDev || !a->fDispLock)
+        return;
+    IOLockLock(a->fDispLock);
+    a->displayProbeConnectors();
+    IOLockUnlock(a->fDispLock);
+    a->setNumber("RDNA3,HotplugEvents", a->fHotplugEvents);
+    a->setNumber("RDNA3,HotplugPins", pins);
+    LOG("display: hotplug on pins 0x%x: %u connectors with a sink or DPCD", (unsigned)pins, a->fNConnectors);
+}
+
 void RDNA3Accel::displayMirrorOff(rdna3_dmub *dm)
 {
     if (!fMirrorOn || !fMirror || !fDispLock)
@@ -431,6 +460,11 @@ IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
 
 void RDNA3Accel::displayFree()
 {
+    if (fHotplugCall) {
+        thread_call_cancel_wait(fHotplugCall);
+        thread_call_free(fHotplugCall);
+        fHotplugCall = nullptr;
+    }
     if (fDcn && fDispDev && fDispLock) {
         for (uint32_t i = 0; i < fDcn->nheads && i < 4; i++)
             if (fDcnCrcOn[i])

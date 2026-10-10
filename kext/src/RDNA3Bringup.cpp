@@ -23,6 +23,7 @@ extern "C" {
 #include "smu13.h"
 #include "navi3x_regs.h"
 }
+#include "dcaux.h"
 
 /* kpi.mach; declared here to avoid depending on private headers */
 extern "C" kern_return_t kernel_thread_start(thread_continue_t continuation,
@@ -618,6 +619,15 @@ bool RDNA3Bringup::hwInit()
                 BLOG("MSI: not available, the IH ring stays polled");
             /* gmc_v11_0 late_init: page faults of both hubs raise IVs */
             gmc11_set_vm_fault_interrupts(fDev, 1);
+            /* amdgpu_dm_hpd_init: hotplug of every pin through the IH, only
+             * with an interrupt handler (the polled ring is drained by
+             * fence waits, too late for a re-probe) */
+            if (fIrqLive) {
+                for (uint32_t n = 0; n < RD_AUX_ENGINES; n++)
+                    dchpd_irq_set(fDev, n, 1);
+                fHpdIrq = true;
+                BLOG("HPD: hotplug interrupts enabled on %u pins", RD_AUX_ENGINES);
+            }
         }
         publishString("RDNA3,Stage2", ret ? "failed: IH" : "PSP + SMU + MMHUB GART + IH up");
         if (ret)
@@ -1594,6 +1604,16 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
         b->publish("RDNA3,LastFaultStatus", f.status);
         return;
     }
+    {
+        /* DCN hotplug (amdgpu_dm handle_hpd_irq): ack and re-arm here, the
+         * re-probe runs on the display side's thread call */
+        int rx = 0, pin = dchpd_iv_pin(iv->client_id, iv->src_id, iv->src_data[0], &rx);
+        if (pin >= 0) {
+            if (!rx && pin < RD_AUX_ENGINES)
+                b->fOwner->displayHotplug((uint32_t)pin, dchpd_irq_ack(b->fDev, (uint32_t)pin));
+            return;
+        }
+    }
     switch (ih60_iv_fence(iv)) {
     case RD_IH_FENCE_GFX:   b->fIrqFenceGfx++; break;
     case RD_IH_FENCE_SDMA0: b->fIrqFenceSdma++; break;
@@ -1645,6 +1665,10 @@ bool RDNA3Bringup::setupInterrupt()
 
 void RDNA3Bringup::teardownInterrupt()
 {
+    if (fHpdIrq && fDev)
+        for (uint32_t n = 0; n < RD_AUX_ENGINES; n++)
+            dchpd_irq_set(fDev, n, 0);
+    fHpdIrq = false;
     fIrqLive = false;
     if (fIntr) {
         fIntr->disable();

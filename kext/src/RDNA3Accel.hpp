@@ -108,6 +108,9 @@ public:
      * before the bring-up frees it (RDNA3Display.cpp) */
     void displayMirror(struct rdna3_dmub *dm);
     void displayMirrorOff(struct rdna3_dmub *dm);
+    /* B7: an HPD pin changed (bring-up work loop, after the ack); the
+     * connectors are probed again on a thread call */
+    void displayHotplug(uint32_t pin, int connected);
 
     /* Stage 7: requests from the accelerator kext (RDNA3Platform.cpp) */
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
@@ -187,6 +190,10 @@ private:
     uint64_t      fDispReserveEnd = 0;
     struct rdna3_dcn_clone *fMirror = nullptr;   /* hw/dcn32_clone.c plan, when lit */
     bool          fMirrorOn    = false;
+    struct thread_call *fHotplugCall = nullptr;
+    volatile UInt32 fHotplugPending = 0;      /* bit n = HPD pin n changed */
+    uint32_t      fHotplugEvents = 0;
+    static void   displayHotplugWork(void *owner, void *);
     bool          displayInit(const amd_discovery *disc);
     void          displayFree();
     void          displayMeasureRefresh();
