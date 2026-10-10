@@ -248,7 +248,7 @@ void RDNA3Accel::displayProbeConnectors()
                 /* the EDID mode the boot display is running, if it is this sink */
                 if (fDcn && fDcn->nheads) {
                     int k = dcn32_match_head_mode(&fDcn->head[0], 0, &e);
-                    if (k >= 0) {
+                    if (k >= 0 && !getProperty("RDNA3,Head0EdidMode")) {   /* the first match */
                         char val[64];
                         snprintf(val, sizeof(val), "%ux%u@%u.%03u%s on AUX%u", e.mode[k].h_active,
                                  e.mode[k].v_active, e.mode[k].refresh_mhz / 1000,

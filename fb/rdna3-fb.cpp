@@ -633,6 +633,9 @@ IOReturn RDNA3Framebuffer::getAttributeForConnection(IOIndex idx, IOSelect attri
     case kConnectionCheckEnable:               if (value) *value = 1; return kIOReturnSuccess;
     case kConnectionDisplayFlags:              if (value) *value = 1; return kIOReturnSuccess;
     case kConnectionSupportsHLDDCSense:
+        /* IOGraphics asks hasDDCConnect / getDDCBlock only when this
+         * succeeds: the EDID the core read over AUX or the DDC */
+        return fetchEdid() ? kIOReturnSuccess : kIOReturnUnsupported;
     case kConnectionSupportsAppleSense:
     case kConnectionSupportsLLDDCSense:
     case kConnectionDisplayParameterCount:
@@ -724,7 +727,7 @@ bool RDNA3Framebuffer::fetchEdid()
         fEdid.length = 0;
     fEdidAsked = true;
     if (fEdid.length)
-        IOLog("RDNA3FB: head %u EDID %u bytes from AUX%u\n", fHead, fEdid.length, fEdid.connector);
+        IOLog("RDNA3FB: head %u EDID %u bytes from connector AUX%u\n", fHead, fEdid.length, fEdid.connector);
     return fEdid.length > 0;
 }
 
