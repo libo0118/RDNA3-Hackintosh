@@ -260,10 +260,41 @@ static bool readFileFromDisk(const char *path, RDNA3Firmware *out)
     return ok;
 }
 
+/* Is there a root file system to open paths on? A vnode_open 0.7 s into
+ * boot panicked in namei ("Taking non-sleepable RW lock with preemption
+ * enabled", card run 6): wait for the BSD layer (the IOBSD resource) and
+ * a root vnode first. */
+static bool rootFsReady()
+{
+    static bool bsd = false;
+    if (!bsd) {
+        OSDictionary *m = IOService::resourceMatching("IOBSD");
+        if (m) {
+            IOService *r = IOService::waitForMatchingService(m, 1000ull * 1000 * 1000);
+            m->release();
+            if (r) {
+                r->release();
+                bsd = true;
+            }
+        }
+        if (!bsd)
+            return false;
+    }
+    vnode_t rv = vfs_rootvnode();
+    if (!rv)
+        return false;
+    vnode_put(rv);
+    return true;
+}
+
 bool RDNA3Bringup::loadFirmware(const char *name, RDNA3Firmware *out)
 {
     /* the root volume may not be mounted yet early in boot: retry ~2 min */
     for (int attempt = 0; attempt < 120 && !fAbort; attempt++) {
+        if (!rootFsReady()) {
+            IOSleep(1000);
+            continue;
+        }
         char path[256];
         for (unsigned d = 0; d < sizeof(kFwDirs) / sizeof(kFwDirs[0]); d++) {
             snprintf(path, sizeof(path), "%s%s", kFwDirs[d], name);
