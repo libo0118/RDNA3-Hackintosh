@@ -439,6 +439,8 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe)
     if (!want)
         return;
     fMirrorDm = dm;   /* hotplug lights it later, or switches it off */
+    if (fMirrorOn)
+        return;   /* a GPU reset / resume runs hwInit again: the clone is the restore's */
     if (!fDcn || !fDispDev || !fDispLock || !fPaths || !fConnectors || !fDcn->nheads) {
         setProperty("RDNA3,Mirror", "failed: no boot head / connectors");
         return;
@@ -878,8 +880,16 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
      * the monitor goes to standby (dcn32_clone_link) */
     if (fDispAsleep)
         r = RDNA3_OK;   /* D4: the wake work applies it */
-    else if (wanted == 2 && fMirrorOn && fMirror && fMirrorDm && fCloneHead >= 0 && (uint32_t)fCloneHead == head)
+    else if (wanted == 2 && fMirrorOn && fMirror && fMirrorDm && fCloneHead >= 0 && (uint32_t)fCloneHead == head) {
+        /* card run 29: the clone's standby did not mark the link down, so
+         * the snapshot before a system sleep caught it dark and the wake
+         * restored it dark (no signal). Snapshot first, then mark it. */
+        if (blank && !fHeadLinkDown[head])
+            displayStateSave(head);
         r = dcn32_clone_link(fDispDev, fMirrorDm, fMirror, blank ? 0 : 1);
+        if (r == RDNA3_OK && head < 4)
+            fHeadLinkDown[head] = blank;
+    }
     /* D4: the other TMDS heads too (dcn32_head_link); DP keeps the blank */
     else if (wanted != 2 || (r = displayHeadDpms(head, blank)) == RDNA3_EINVAL)
         r = dcn32_set_blank(fDispDev, fDcn, head, blank ? 1 : 0);

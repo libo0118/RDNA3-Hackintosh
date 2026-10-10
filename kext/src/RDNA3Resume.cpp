@@ -41,6 +41,7 @@ extern "C" {
 #include "rdna3_bootargs.h"
 #include "dcn32.h"
 #include "dcn32_state.h"
+#include "dcn32_clone.h"
 #include "dcn32_mode.h"
 #include "dcaux.h"
 #include "edid.h"
@@ -162,6 +163,22 @@ int RDNA3Accel::displayHeadDpms(uint32_t head, bool blank)
         displayStateRestore("back from standby", false);
     }
     return r;
+}
+
+/* the link of a head in standby up again (fDispLock held): the clone
+ * through its own path, the other TMDS heads through dcn32_head_link */
+void RDNA3Accel::displayLinkUp(uint32_t head)
+{
+    int r;
+    if (head >= 4 || !fHeadLinkDown[head])
+        return;
+    if (fMirrorOn && fMirror && fMirrorDm && fCloneHead >= 0 && (uint32_t)fCloneHead == head)
+        r = dcn32_clone_link(fDispDev, fMirrorDm, fMirror, 1);
+    else
+        r = displayHeadDpms(head, false);
+    if (r == RDNA3_OK)
+        fHeadLinkDown[head] = false;
+    LOG("display: head %u link back after the wake (%d)", head, r);
 }
 
 /* ------------------------------ restore ------------------------------ */
@@ -317,6 +334,13 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
                 if (!a->fHeadLinkDown[i])
                     dcn32_set_blank(a->fDispDev, a->fDcn, i, a->fHeadBlank[i] ? 1 : 0);
         }
+        /* a head whose link went down for the monitor's standby and that
+         * macOS unblanked while asleep: its link comes back now (the
+         * unblank itself was deferred) */
+        if (a->fDcn)
+            for (uint32_t i = 0; i < a->fDcn->nheads && i < 4; i++)
+                if (a->fHeadLinkDown[i] && !a->fHeadBlank[i])
+                    a->displayLinkUp(i);
         IOLockUnlock(a->fDispLock);
     }
     a->setNumber("RDNA3,WakeHeadsLost", lost);

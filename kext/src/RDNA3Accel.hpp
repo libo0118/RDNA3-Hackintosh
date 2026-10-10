@@ -286,7 +286,8 @@ private:
     void          displayStateSaveAll();
     void          displayStateFree();
     void          displayNoteBlank(uint32_t head, bool blank);
-    int           displayHeadDpms(uint32_t head, bool blank);   /* fDispLock held */
+    int           displayHeadDpms(uint32_t head, bool blank);
+    void          displayLinkUp(uint32_t head);   /* fDispLock held */
     uint32_t      displayStateRestore(const char *why, bool restore);   /* fDispLock held */
     void          displayWillSleep();
     void          displayDidWake();

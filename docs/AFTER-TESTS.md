@@ -730,3 +730,12 @@ shows the queue.
   head 0 restored and running, head 1 restored but its check says LOST
   (routing). Again no network after the wake: when nothing went up, the VM
   now restarts once and that boot only sends the waiting results.
+
+Second monitor after the system sleep: no signal. Cause: the clone's
+standby (rdna3dpms=2, dcn32_clone_link) did not mark its link down, so the
+snapshot before the system sleep caught the clone with its transmitter off
+and the wake restored exactly that. The clone path now snapshots the
+running head before the link goes down and marks it (fHeadLinkDown), the
+wake brings back the link of every head macOS unblanked while asleep
+(displayLinkUp), and hwInit's displayMirror leaves a lit clone alone on a
+reset or resume.
