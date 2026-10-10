@@ -299,6 +299,26 @@ void dmub32_log_regs(rdna3_dev *d, const char *when)
          "CW4 off 0x%08x base 0x%08x", when, RR(d, regDMCUB_INST_FETCH_FAULT_ADDR),
          RR(d, regDMCUB_DATA_WRITE_FAULT_ADDR), RR(d, regDMCUB_UNDEFINED_ADDRESS_FAULT_ADDR),
          RR(d, regDMCUB_REGION3_CW4_OFFSET), RR(d, regDMCUB_REGION3_CW4_BASE_ADDRESS));
+    RLOG(d, "DMUB state (%s): CW2 0x%08x%08x/0x%08x/0x%08x CW3 0x%08x%08x/0x%08x/0x%08x "
+         "CW4 0x%08x%08x/0x%08x/0x%08x", when,
+         RR(d, regDMCUB_REGION3_CW2_OFFSET_HIGH), RR(d, regDMCUB_REGION3_CW2_OFFSET),
+         RR(d, regDMCUB_REGION3_CW2_BASE_ADDRESS), RR(d, regDMCUB_REGION3_CW2_TOP_ADDRESS),
+         RR(d, regDMCUB_REGION3_CW3_OFFSET_HIGH), RR(d, regDMCUB_REGION3_CW3_OFFSET),
+         RR(d, regDMCUB_REGION3_CW3_BASE_ADDRESS), RR(d, regDMCUB_REGION3_CW3_TOP_ADDRESS),
+         RR(d, regDMCUB_REGION3_CW4_OFFSET_HIGH), RR(d, regDMCUB_REGION3_CW4_OFFSET),
+         RR(d, regDMCUB_REGION3_CW4_BASE_ADDRESS), RR(d, regDMCUB_REGION3_CW4_TOP_ADDRESS));
+    RLOG(d, "DMUB state (%s): CW5 0x%08x%08x/0x%08x/0x%08x CW6 0x%08x%08x/0x%08x/0x%08x "
+         "CW7 0x%08x%08x/0x%08x/0x%08x", when,
+         RR(d, regDMCUB_REGION3_CW5_OFFSET_HIGH), RR(d, regDMCUB_REGION3_CW5_OFFSET),
+         RR(d, regDMCUB_REGION3_CW5_BASE_ADDRESS), RR(d, regDMCUB_REGION3_CW5_TOP_ADDRESS),
+         RR(d, regDMCUB_REGION3_CW6_OFFSET_HIGH), RR(d, regDMCUB_REGION3_CW6_OFFSET),
+         RR(d, regDMCUB_REGION3_CW6_BASE_ADDRESS), RR(d, regDMCUB_REGION3_CW6_TOP_ADDRESS),
+         RR(d, regDMCUB_REGION3_CW7_OFFSET_HIGH), RR(d, regDMCUB_REGION3_CW7_OFFSET),
+         RR(d, regDMCUB_REGION3_CW7_BASE_ADDRESS), RR(d, regDMCUB_REGION3_CW7_TOP_ADDRESS));
+    RLOG(d, "DMUB state (%s): INBOX1 base 0x%08x size 0x%x rptr 0x%x wptr 0x%x, OUTBOX0 base 0x%08x "
+         "wptr 0x%x", when, RR(d, regDMCUB_INBOX1_BASE_ADDRESS), RR(d, regDMCUB_INBOX1_SIZE),
+         RR(d, regDMCUB_INBOX1_RPTR), RR(d, regDMCUB_INBOX1_WPTR), RR(d, regDMCUB_OUTBOX0_BASE_ADDRESS),
+         RR(d, regDMCUB_OUTBOX0_WPTR));
 }
 
 int dmub32_wait_boot(rdna3_dmub *dm, uint32_t timeout_us)

@@ -948,6 +948,7 @@ void RDNA3Bringup::dmubInit()
     }
     if (fDmubMode == 3) {
         /* the GOP's firmware, as it runs: its inbox, no reset, no load */
+        dmub32_log_regs(fDev, "before attach");
         ret = dmub32_attach(fDmub, fDev);
         publish("RDNA3,DMUBResult", (uint64_t)(int64_t)ret);
         publish("RDNA3,DMUBBootStatus", fDmub->boot_status);
