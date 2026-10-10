@@ -34,6 +34,7 @@ extern "C" {
 #include "atom.h"
 #include "dcn32_mode.h"
 #include "dcn32_clone.h"
+#include "dcn32_modeset.h"
 }
 #include "rdna3k_abi.h"
 
@@ -417,6 +418,7 @@ void RDNA3Accel::displayPublishRoutes()
 void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe)
 {
     uint32_t want = rd3_arg("rdna3mirror", 0);
+    fDisplayDm = dm;   /* mode sets drive the PHY through it too */
     if (!want)
         return;
     fMirrorDm = dm;   /* hotplug lights it later, or switches it off */
@@ -605,6 +607,7 @@ void RDNA3Accel::displayShutdown()
 void RDNA3Accel::displayMirrorOff(rdna3_dmub *dm)
 {
     fMirrorDm = nullptr;
+    fDisplayDm = nullptr;
     if (fHotplugCall)
         thread_call_cancel_wait(fHotplugCall);
     displayMirrorDisable(dm);
@@ -715,6 +718,11 @@ void RDNA3Accel::displayFree()
     fMirror = nullptr;
     if (fScale) IOFree(fScale, sizeof(rdna3_dcn_scale));
     fScale = nullptr;
+    for (uint32_t i = 0; i < 4; i++) {
+        if (fModeTab[i]) IOFree(fModeTab[i], sizeof(rdna3_mode) * RD3K_MAX_MODES);
+        fModeTab[i] = nullptr;
+        fModeCount[i] = 0;
+    }
     if (fDispDev) IOFree(fDispDev, sizeof(rdna3_dev));
     if (fDispLock) IOLockFree(fDispLock);
     fDcn = nullptr;
@@ -870,6 +878,141 @@ IOReturn RDNA3Accel::displaySetSource(RD3KDisplaySource *s)
     s->result = r;
     LOG("display: head %u source %ux%u pitch %u -> %d", s->head, s->width, s->height, s->pitch, r);
     return r ? kIOReturnBadArgument : kIOReturnSuccess;
+}
+
+/* the pixel clock head 'i' runs: its EDID mode, else the measured refresh */
+static uint32_t head_pclk_khz(const rdna3_dcn_head *h, const rdna3_edid *ed, uint32_t refresh_mhz)
+{
+    int k = ed ? dcn32_match_head_mode(h, 0, ed) : -1;
+    if (k >= 0)
+        return ed->mode[k].pixel_khz;
+    return (uint32_t)((uint64_t)h->h_total * h->v_total * refresh_mhz / 1000000ull);
+}
+
+/* rdna3DisplayModes: the sink's EDID timings the head can switch to
+ * (dcn32_modeset_plan says yes), the running one flagged CURRENT. The list
+ * is kept: rdna3DisplaySetMode names a mode by its index in it. */
+IOReturn RDNA3Accel::displayModes(RD3KDisplayModes *r)
+{
+    if (!r || r->version != RD3K_DISPLAY_ABI_VERSION)
+        return kIOReturnBadArgument;
+    r->count = 0;
+    if (!rd3_arg("rdna3modeset", 0))
+        return kIOReturnUnsupported;
+    if (!fDcn || !fDispDev || !fDispLock || r->head >= fDcn->nheads || r->head >= 4)
+        return kIOReturnNotReady;
+    RD3KDisplayEdid *e = (RD3KDisplayEdid *)IOMalloc(sizeof(RD3KDisplayEdid));
+    rdna3_edid *ed = (rdna3_edid *)IOMalloc(sizeof(rdna3_edid));
+    rdna3_dcn_modeset *ms = (rdna3_dcn_modeset *)IOMalloc(sizeof(rdna3_dcn_modeset));
+    if (!fModeTab[r->head])
+        fModeTab[r->head] = (rdna3_mode *)IOMalloc(sizeof(rdna3_mode) * RD3K_MAX_MODES);
+    IOReturn ret = kIOReturnNoMemory;
+    if (!e || !ed || !ms || !fModeTab[r->head])
+        goto out;
+    bzero(e, sizeof(*e));
+    e->version = RD3K_DISPLAY_ABI_VERSION;
+    e->head = r->head;
+    ret = displayEdid(e);
+    if (ret != kIOReturnSuccess || !e->length || edid_parse(e->data, e->length, ed)) {
+        LOG("display: modes for head %u: no EDID (0x%x)", r->head, ret);
+        ret = kIOReturnNotFound;
+        goto out;
+    }
+    {
+        IOLockLock(fDispLock);
+        const rdna3_dcn_head *h = &fDcn->head[r->head];
+        int aux = head_aux(h, fPaths, fNPaths);
+        const rdna3_display_path *p = aux >= 0 ? path_for_aux(fPaths, fNPaths, (uint32_t)aux) : nullptr;
+        uint32_t cur = head_pclk_khz(h, ed, fDispRefresh[r->head]), n = 0;
+        int k = dcn32_match_head_mode(h, 0, ed);
+        for (uint32_t i = 0; i < ed->nmodes && n < RD3K_MAX_MODES; i++) {
+            const rdna3_mode *m = &ed->mode[i];
+            int why = (int)i == k ? RD_MODESET_OK
+                    : p ? dcn32_modeset_plan(fDispDev, fDcn, r->head, p, cur, m, ms) : RD_MODESET_BAD_HEAD;
+            LOG("display: head %u mode %ux%u %u.%03u Hz %u kHz: %s (%d)", r->head, m->h_active, m->v_active,
+                m->refresh_mhz / 1000, m->refresh_mhz % 1000, m->pixel_khz,
+                (int)i == k ? "current" : why ? "refused" : "offered", why);
+            if (why)
+                continue;
+            RD3KDisplayTiming *t = &r->mode[n];
+            t->width = m->h_active;
+            t->height = m->v_active;
+            t->pclkKhz = m->pixel_khz;
+            t->refreshMilliHz = m->refresh_mhz;
+            t->hTotal = m->h_total;
+            t->vTotal = m->v_total;
+            t->hFront = m->h_front;
+            t->hSync = m->h_sync;
+            t->vFront = m->v_front;
+            t->vSync = m->v_sync;
+            t->hSyncNeg = m->h_sync_pos ? 0 : 1;
+            t->vSyncNeg = m->v_sync_pos ? 0 : 1;
+            t->flags = ((int)i == k ? RD3K_MODE_CURRENT : 0) | (m->preferred ? RD3K_MODE_PREFERRED : 0);
+            fModeTab[r->head][n++] = *m;
+        }
+        fModeCount[r->head] = n;
+        r->count = n;
+        IOLockUnlock(fDispLock);
+        ret = kIOReturnSuccess;
+    }
+out:
+    if (e) IOFree(e, sizeof(*e));
+    if (ed) IOFree(ed, sizeof(*ed));
+    if (ms) IOFree(ms, sizeof(*ms));
+    return ret;
+}
+
+IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
+{
+    if (!m || m->version != RD3K_DISPLAY_ABI_VERSION || (m->pitch & 255) || (m->oldPitch & 3))
+        return kIOReturnBadArgument;
+    if (!rd3_arg("rdna3modeset", 0))
+        return kIOReturnUnsupported;
+    if (!fDcn || !fDispDev || !fDispLock || m->head >= fDcn->nheads || m->head >= 4 || !fModeTab[m->head] ||
+        m->index >= fModeCount[m->head])
+        return kIOReturnNotReady;
+    rdna3_dmub *dm = fDisplayDm;
+    if (!dm) {
+        m->result = RDNA3_ENODEV;
+        LOG("display: mode set on head %u: no DMCUB (rdna3dmub=1) to drive the PHY", m->head);
+        return kIOReturnNotReady;
+    }
+    rdna3_dcn_modeset *ms = (rdna3_dcn_modeset *)IOMalloc(sizeof(rdna3_dcn_modeset));
+    if (!ms)
+        return kIOReturnNoMemory;
+    IOLockLock(fDispLock);
+    if (!fScale) {
+        fScale = (rdna3_dcn_scale *)IOMalloc(sizeof(rdna3_dcn_scale));
+        if (fScale)
+            bzero(fScale, sizeof(*fScale));
+    }
+    const rdna3_mode *want = &fModeTab[m->head][m->index];
+    const rdna3_dcn_head *h = &fDcn->head[m->head];
+    int aux = head_aux(h, fPaths, fNPaths);
+    const rdna3_display_path *p = aux >= 0 ? path_for_aux(fPaths, fNPaths, (uint32_t)aux) : nullptr;
+    /* the running pixel clock: what the last mode set left, else the
+     * refresh measured at start */
+    uint32_t cur = (uint32_t)((uint64_t)h->h_total * h->v_total * fDispRefresh[m->head] / 1000000ull);
+    int r = p ? dcn32_modeset_plan(fDispDev, fDcn, m->head, p, cur, want, ms) : RD_MODESET_BAD_HEAD;
+    if (r == RD_MODESET_OK)
+        r = dcn32_modeset_apply(fDispDev, dm, fDcn, fScale, ms, fDispDev->fb_start + m->vramOffset, m->pitch / 4,
+                                fDispDev->fb_start + m->oldVramOffset, m->oldPitch / 4, 200);
+    else
+        r = RDNA3_EINVAL;
+    if (r == RDNA3_OK)
+        fDispRefresh[m->head] = want->refresh_mhz;
+    IOLockUnlock(fDispLock);
+    IOFree(ms, sizeof(*ms));
+    m->result = r;
+    {
+        char key[32], val[64];
+        snprintf(key, sizeof(key), "RDNA3,Head%u,ModeSet", m->head);
+        snprintf(val, sizeof(val), "%ux%u %u kHz -> %d", want->h_active, want->v_active, want->pixel_khz, r);
+        setProperty(key, val);
+    }
+    LOG("display: head %u mode %ux%u@%u.%03u Hz (%u kHz) -> %d", m->head, want->h_active, want->v_active,
+        want->refresh_mhz / 1000, want->refresh_mhz % 1000, want->pixel_khz, r);
+    return r ? kIOReturnUnsupportedMode : kIOReturnSuccess;
 }
 
 IOReturn RDNA3Accel::displayStatus(RD3KDisplayStatus *s)

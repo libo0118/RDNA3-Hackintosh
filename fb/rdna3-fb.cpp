@@ -88,12 +88,20 @@ class RDNA3Framebuffer : public IOFramebuffer {
     bool         ownSurfaceInit();
     void         ownSurfaceFree();
 
-    /* modes: 0 = the native timing, 1.. = smaller surfaces the DPP scaler
-     * stretches over it (rdna3modes=1); mode id = kModeId + index */
-    struct FbMode { uint32_t w, h; };
-    static const uint32_t kMaxModes = 6;
+    /* modes: 0 = the timing the head ran at start; then the sink's other
+     * timings the core can switch to (rdna3modeset=1, RD3K_DISPLAY_FN_MODES:
+     * core = their index in the core's list); then smaller surfaces the DPP
+     * scaler stretches over the start timing (rdna3modes=1, core = -1).
+     * mode id = kModeId + index */
+    struct FbMode { uint32_t w, h; int core; struct RD3KDisplayTiming t; };
+    static const uint32_t kMaxModes = 6 + RD3K_MAX_MODES;
     FbMode   fModes[kMaxModes] = {};
     uint32_t fNModes = 1, fCurMode = 0;
+    int      fNativeCore = -1;             /* the start timing's index in the core's list */
+    uint32_t fNativeRefresh = 60000;
+    const OSSymbol *fSymModes = nullptr, *fSymMode = nullptr;
+    IOReturn setTiming(uint32_t idx);
+    bool     isTiming(uint32_t idx) const { return idx && fModes[idx].core >= 0; }
     /* the native mode's surface, while a scaled one is shown */
     uint64_t fNativePhys = 0, fNativeBytes = 0, fNativeVram = 0;
     uint32_t fNativePitch = 0;
@@ -104,6 +112,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
     void     scaledFree(struct RD3KVramRequest *v);
     IOReturn switchMode(uint32_t idx);
     uint32_t modePitch(uint32_t idx) const { return idx ? (fModes[idx].w * 4 + 255) & ~255u : fNativePitch; }
+    uint32_t modeRefresh(uint32_t idx) const { return isTiming(idx) ? fModes[idx].t.refreshMilliHz : fNativeRefresh; }
 
     /* the scanout (boot surface): CPU physical, size, geometry */
     uint64_t fPhys = 0, fBytes = 0, fBootVram = 0;
@@ -354,6 +363,8 @@ bool RDNA3Framebuffer::start(IOService *provider)
     fSymFlip = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_FLIP);
     fSymBlank = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_BLANK);
     fSymSource = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_SOURCE);
+    fSymModes = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_MODES);
+    fSymMode = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_MODE);
     fSymStatus = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_STATUS);
     fSymCursor = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_CURSOR);
     fSymEdid = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_EDID);
@@ -458,6 +469,8 @@ void RDNA3Framebuffer::free()
     OSSafeReleaseNULL(fSymFlip);
     OSSafeReleaseNULL(fSymBlank);
     OSSafeReleaseNULL(fSymSource);
+    OSSafeReleaseNULL(fSymModes);
+    OSSafeReleaseNULL(fSymMode);
     OSSafeReleaseNULL(fSymStatus);
     OSSafeReleaseNULL(fSymCursor);
     OSSafeReleaseNULL(fSymEdid);
@@ -562,20 +575,59 @@ void RDNA3Framebuffer::modesInit()
     uint32_t want = 0;
     fModes[0].w = fW;
     fModes[0].h = fH;
+    fModes[0].core = -1;
     fNModes = 1;
+    fNativeCore = -1;
     fNativePhys = fPhys;
     fNativeBytes = fBytes;
     fNativeVram = fBootVram;
     fNativePitch = fBootPitch;
+    fNativeRefresh = fRefreshMilliHz;
+    if (!fDcn)
+        return;
+    /* the sink's own timings (rdna3modeset=1): the core lists what it can
+     * drive on this head, the running one flagged */
+    if (fSymModes && fCore) {
+        struct RD3KDisplayModes *ml = (struct RD3KDisplayModes *)IOMalloc(sizeof(*ml));
+        if (ml) {
+            bzero(ml, sizeof(*ml));
+            ml->version = RD3K_DISPLAY_ABI_VERSION;
+            ml->head = fHead;
+            IOReturn r = fCore->callPlatformFunction(fSymModes, false, ml, nullptr, nullptr, nullptr);
+            for (uint32_t i = 0; r == kIOReturnSuccess && i < ml->count && i < RD3K_MAX_MODES; i++) {
+                const struct RD3KDisplayTiming *t = &ml->mode[i];
+                if (t->flags & RD3K_MODE_CURRENT) {
+                    fNativeCore = (int)i;
+                    fModes[0].t = *t;
+                    continue;
+                }
+                if (fNModes >= kMaxModes)
+                    break;
+                fModes[fNModes].w = t->width;
+                fModes[fNModes].h = t->height;
+                fModes[fNModes].core = (int)i;
+                fModes[fNModes].t = *t;
+                fNModes++;
+            }
+            FBLOG("modes from the core: %u timings (0x%x)%s", fNModes - 1, (unsigned)r,
+                  fNativeCore < 0 && fNModes > 1 ? ", the running one not among them: no switching" : "");
+            if (fNativeCore < 0)
+                fNModes = 1;   /* no way back to the start timing: offer none */
+            IOFree(ml, sizeof(*ml));
+        }
+    }
     want = rd3_arg("rdna3modes", want);
-    if (!want || !fDcn || !fSymSource)
+    if (!want || !fSymSource)
         return;
     static const uint32_t kNum[] = { 5, 3, 2, 1 }, kDen[] = { 6, 4, 3, 2 };
     for (uint32_t i = 0; i < 4 && fNModes < kMaxModes; i++) {
-        uint32_t w = (fW * kNum[i] / kDen[i]) & ~7u, h = ((uint64_t)w * fH / fW) & ~1u;
-        if (w >= 640 && h >= 360 && w < fW) {
+        uint32_t w = (fW * kNum[i] / kDen[i]) & ~7u, h = ((uint64_t)w * fH / fW) & ~1u, k, dup = 0;
+        for (k = 1; k < fNModes; k++)
+            dup |= fModes[k].w == w && fModes[k].h == h;   /* a real timing of that size wins */
+        if (w >= 640 && h >= 360 && w < fW && !dup) {
             fModes[fNModes].w = w;
             fModes[fNModes].h = h;
+            fModes[fNModes].core = -1;
             fNModes++;
         }
     }
@@ -586,7 +638,7 @@ void RDNA3Framebuffer::modesInit()
     si.maxHorizontalPixels = fW;
     si.maxVerticalPixels = fH;
     setProperty(kIOFBScalerInfoKey, &si, sizeof(si));
-    FBLOG("%u modes: native %ux%u + scaled %ux%u .. %ux%u", fNModes, fW, fH, fModes[1].w, fModes[1].h,
+    FBLOG("%u modes: native %ux%u + %ux%u .. %ux%u", fNModes, fW, fH, fModes[1].w, fModes[1].h,
           fModes[fNModes - 1].w, fModes[fNModes - 1].h);
 }
 
@@ -606,6 +658,22 @@ IOReturn RDNA3Framebuffer::switchMode(uint32_t idx)
     struct RD3KVramRequest nv;
     struct RD3KDisplaySource src;
     const uint32_t w = fModes[idx].w, h = fModes[idx].h, pitch = modePitch(idx);
+    /* timing <-> scaled goes through the start timing: the scaler works on
+     * that one only */
+    if (isTiming(idx) || isTiming(fCurMode)) {
+        if (fCurMode && !isTiming(fCurMode)) {
+            IOReturn r0 = switchMode(0);
+            if (r0 != kIOReturnSuccess)
+                return r0;
+        }
+        if (idx && !isTiming(idx)) {
+            IOReturn r0 = setTiming(0);
+            if (r0 != kIOReturnSuccess)
+                return r0;
+        } else {
+            return setTiming(idx);
+        }
+    }
     bzero(&nv, sizeof(nv));
     if (idx) {
         const OSSymbol *alloc = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_ALLOC);
@@ -662,6 +730,74 @@ IOReturn RDNA3Framebuffer::switchMode(uint32_t idx)
     return kIOReturnSuccess;
 }
 
+/* a real timing (or back to the start one, idx 0): a surface of the new
+ * size, the core switches the head's timing to it (rdna3DisplaySetMode)
+ * and puts the old one back itself when the new one does not run */
+IOReturn RDNA3Framebuffer::setTiming(uint32_t idx)
+{
+    struct RD3KVramRequest nv;
+    struct RD3KDisplayMode m;
+    const uint32_t w = fModes[idx].w, h = fModes[idx].h, pitch = modePitch(idx);
+    int core = idx ? fModes[idx].core : fNativeCore;
+    if (!fSymMode || !fCore || core < 0)
+        return kIOReturnUnsupportedMode;
+    bzero(&nv, sizeof(nv));
+    if (idx) {
+        const OSSymbol *alloc = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_ALLOC);
+        nv.version = RD3K_VRAM_ABI_VERSION;
+        nv.size = (unsigned long long)pitch * h;
+        IOReturn r = alloc ? fCore->callPlatformFunction(alloc, false, &nv, nullptr, nullptr, nullptr)
+                           : kIOReturnNoResources;
+        OSSafeReleaseNULL(alloc);
+        if (r != kIOReturnSuccess || !nv.phys) {
+            FBLOG("timing %ux%u: no VRAM for the surface (0x%x)", w, h, (unsigned)r);
+            return kIOReturnNoMemory;
+        }
+        if (nv.kva)
+            bzero(nv.kva, (size_t)nv.size);
+    }
+    bzero(&m, sizeof(m));
+    m.version = RD3K_DISPLAY_ABI_VERSION;
+    m.head = fHead;
+    m.index = (unsigned)core;
+    m.pitch = pitch;
+    m.vramOffset = idx ? nv.allocationCookie : fNativeVram;
+    m.oldPitch = fBootPitch;
+    m.oldVramOffset = fBootVram;
+    IOReturn r = fCore->callPlatformFunction(fSymMode, false, &m, nullptr, nullptr, nullptr);
+    if (r != kIOReturnSuccess) {
+        FBLOG("timing %ux%u: the core could not switch (0x%x, %d): the old one stays", w, h, (unsigned)r, m.result);
+        if (idx)
+            scaledFree(&nv);
+        return kIOReturnUnsupportedMode;
+    }
+    if (fScaledAlloc) {
+        scaledFree(&fScaledVram);
+        fScaledAlloc = false;
+    }
+    if (idx) {
+        fScaledVram = nv;
+        fScaledAlloc = true;
+        fPhys = nv.phys;
+        fBootVram = nv.allocationCookie;
+        fBytes = (uint64_t)pitch * h;
+    } else {
+        fPhys = fNativePhys;
+        fBootVram = fNativeVram;
+        fBytes = fNativeBytes;
+    }
+    fW = w;
+    fH = h;
+    fPitch = fBootPitch = pitch;
+    fRefreshMilliHz = modeRefresh(idx);
+    fFlipped = false;
+    fCurMode = idx;
+    OSSafeReleaseNULL(fScanMap);
+    FBLOG("mode %u: %ux%u at %u.%03u Hz, pitch %u at VRAM 0x%llx (own timing)", idx, w, h, fRefreshMilliHz / 1000,
+          fRefreshMilliHz % 1000, pitch, (unsigned long long)fBootVram);
+    return kIOReturnSuccess;
+}
+
 IOReturn RDNA3Framebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth)
 {
     uint32_t idx = (uint32_t)(mode - kModeId);
@@ -680,7 +816,7 @@ IOReturn RDNA3Framebuffer::getInformationForDisplayMode(IODisplayModeID mode, IO
     bzero(info, sizeof(*info));
     info->nominalWidth = fModes[idx].w;
     info->nominalHeight = fModes[idx].h;
-    info->refreshRate = (UInt32)(((UInt64)fRefreshMilliHz << 16) / 1000);
+    info->refreshRate = (UInt32)(((UInt64)modeRefresh(idx) << 16) / 1000);
     info->maxDepthIndex = 0;
     info->flags = kDisplayModeValidFlag | kDisplayModeSafeFlag | (idx ? 0 : kDisplayModeDefaultFlag);
     return kIOReturnSuccess;
@@ -693,10 +829,28 @@ IOReturn RDNA3Framebuffer::getTimingInfoForDisplayMode(IODisplayModeID mode, IOT
         return kIOReturnUnsupportedMode;
     bzero(info, sizeof(*info));
     info->appleTimingID = kIOTimingIDInvalid;
-    const RD3KDisplayHead &t = fInfo;
-    if (fDcn && t.hTotal > t.width && t.vTotal > t.height && fRefreshMilliHz) {
+    if (isTiming(idx)) {   /* a timing of its own, from the sink's EDID */
+        const struct RD3KDisplayTiming &m = fModes[idx].t;
         IODetailedTimingInformationV2 &d = info->detailedInfo.v2;
-        uint64_t pclk = (uint64_t)t.hTotal * t.vTotal * fRefreshMilliHz / 1000;
+        d.pixelClock = d.minPixelClock = d.maxPixelClock = (UInt64)m.pclkKhz * 1000;
+        d.horizontalActive = m.width;
+        d.horizontalBlanking = m.hTotal - m.width;
+        d.horizontalSyncOffset = m.hFront;
+        d.horizontalSyncPulseWidth = m.hSync;
+        d.verticalActive = m.height;
+        d.verticalBlanking = m.vTotal - m.height;
+        d.verticalSyncOffset = m.vFront;
+        d.verticalSyncPulseWidth = m.vSync;
+        d.horizontalSyncConfig = m.hSyncNeg ? 0 : 1;
+        d.verticalSyncConfig = m.vSyncNeg ? 0 : 1;
+        d.detailedTimingModeID = (UInt32)mode;
+        info->flags = kIODetailedTimingValid;
+        return kIOReturnSuccess;
+    }
+    const RD3KDisplayHead &t = fInfo;
+    if (fDcn && t.hTotal > t.width && t.vTotal > t.height && fNativeRefresh) {
+        IODetailedTimingInformationV2 &d = info->detailedInfo.v2;
+        uint64_t pclk = (uint64_t)t.hTotal * t.vTotal * fNativeRefresh / 1000;
         d.pixelClock = d.minPixelClock = d.maxPixelClock = pclk;
         d.horizontalActive = t.width;
         d.horizontalBlanking = t.hTotal - t.width;

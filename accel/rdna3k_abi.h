@@ -145,6 +145,36 @@ struct RD3KDisplaySource {
 /* display sleep: p1 = head, p2 = 1 blank / 0 unblank (HUBP blank, the
  * link stays up); kIOReturnUnsupported unless the core runs with rdna3dpms=1 */
 #define RD3K_DISPLAY_FN_BLANK    "rdna3DisplayBlank"
+/* real modes (rdna3modeset=1): the timings of the head's sink (EDID) the
+ * core can drive on it (dcn32_modeset_plan), and a switch to one of them
+ * (dcn32_modeset_apply) with the surface of the new size. index = the
+ * position in the last list returned for that head. */
+#define RD3K_DISPLAY_FN_MODES    "rdna3DisplayModes"
+#define RD3K_DISPLAY_FN_MODE     "rdna3DisplaySetMode"
+#define RD3K_MAX_MODES           24u
+#define RD3K_MODE_CURRENT        1u   /* the timing the head runs now */
+#define RD3K_MODE_PREFERRED      2u   /* the sink's preferred timing */
+struct RD3KDisplayTiming {
+    unsigned int width, height, pclkKhz, refreshMilliHz;
+    unsigned int hTotal, vTotal, hFront, hSync, vFront, vSync, hSyncNeg, vSyncNeg;
+    unsigned int flags;           /* RD3K_MODE_* */
+};
+struct RD3KDisplayModes {
+    unsigned int version;
+    unsigned int head;
+    unsigned int count;           /* out */
+    struct RD3KDisplayTiming mode[RD3K_MAX_MODES];
+};
+struct RD3KDisplayMode {
+    unsigned int       version;
+    unsigned int       head;
+    unsigned int       index;         /* into the head's last RD3KDisplayModes list */
+    unsigned int       pitch;         /* bytes, multiple of 256: the new surface */
+    unsigned long long vramOffset;
+    unsigned int       oldPitch;      /* the surface shown now, back on failure */
+    unsigned long long oldVramOffset;
+    int                result;        /* 0 or a negative RDNA3_E* code */
+};
 #define RD3K_DISPLAY_FN_CURSOR   "rdna3DisplayCursor"
 #define RD3K_CURSOR_OP_IMAGE     1u   /* vramOffset + size (64/128/256) */
 #define RD3K_CURSOR_OP_MOVE      2u   /* x, y (top-left, may be negative), visible */

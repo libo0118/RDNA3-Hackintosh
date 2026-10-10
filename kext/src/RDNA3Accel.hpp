@@ -235,6 +235,12 @@ private:
     IOReturn      displayBlank(uint32_t head, bool blank);
     /* scaled modes from the framebuffer (rdna3DisplaySetSource) */
     IOReturn      displaySetSource(struct RD3KDisplaySource *s);
+    /* real modes from the framebuffer (rdna3modeset=1, hw/dcn32_modeset.c) */
+    IOReturn      displayModes(struct RD3KDisplayModes *r);
+    IOReturn      displaySetMode(struct RD3KDisplayMode *m);
+    struct rdna3_mode *fModeTab[4] = {};      /* the last list per head (RD3K_MAX_MODES) */
+    uint32_t      fModeCount[4] = {};
+    struct rdna3_dmub *volatile fDisplayDm = nullptr;   /* the bring-up's DMCUB once it runs */
     struct rdna3_dcn_scale *fScale = nullptr;
     uint32_t      fFwVer[32] = {}, fFwFeat[32] = {};
     uint8_t      *fVbiosCopy = nullptr;
