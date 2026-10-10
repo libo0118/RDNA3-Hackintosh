@@ -325,6 +325,7 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
     s->powered = si.powered;
     s->lit = si.lit;
     s->blanked = si.blanked;
+    s->underflow = si.underflow;
     s->otg = si.otg;
     s->format = si.format;
     s->sw_mode = si.sw_mode;

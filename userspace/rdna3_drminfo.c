@@ -201,6 +201,8 @@ static int scanout_dump(int fd, const char *dir)
                s.width, s.height,
                s.pitch_px, s.format, s.sw_mode, s.dcc, (unsigned long long)s.address,
                (unsigned long long)s.inuse, s.flip_pending ? " flip pending" : "");
+        if (s.underflow)
+            printf("  UNDERFLOW status %u: the pipe ran out of data (bandwidth / watermarks)\n", s.underflow);
         if (!s.lit)
             continue;
         lit++;

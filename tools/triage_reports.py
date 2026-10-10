@@ -353,7 +353,7 @@ def main():
                     for l in blk.splitlines()[1:]:
                         if l.startswith("=="):
                             break
-                        if l.startswith(("pipe", "  picture", "[exit")) and "power-gated off" not in l:
+                        if l.startswith(("pipe", "  picture", "  UNDERFLOW", "[exit")) and "power-gated off" not in l:
                             print("       " + l[:160])
                         m = re.match(r"pipe (\d+): LIT .* in use (0x[0-9a-f]+)", l)
                         if m:
@@ -375,6 +375,11 @@ def main():
                     print("     picture: " + ppm_to_png(ppm))
                 except (OSError, ValueError) as e:
                     print("     picture: " + str(e))
+            m = re.search(r"^SOAK: (\d+) rounds, (\d+) failed", txt, re.M)
+            if m:
+                print("   %s soak: %s rounds of DMA/GFX/Vulkan tests, %s failed" %
+                      ("PASS" if m.group(2) == "0" else "FAIL", m.group(1), m.group(2)))
+                failed = failed or m.group(2) != "0"
             if "== rdna3_drminfo --hang-test" in txt:
                 ht = txt[txt.index("== rdna3_drminfo --hang-test"):]
                 print("   hang test (a DMA and a GFX job that never finish, then normal jobs):")

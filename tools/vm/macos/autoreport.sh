@@ -165,6 +165,22 @@ extra="$HOME/rdna3-extra.txt"
             "$D/bin/libvulkan_radeon.dylib" 2>&1
         echo "[exit $?]"
     fi
+    # soak (rdna3soak=<minutes>): DMA + GFX jobs and the Vulkan test in a
+    # loop; the PM trend in the serial log runs alongside
+    soak=$(printf '%s\n' $args | sed -n 's/^rdna3soak=\([0-9]*\)$/\1/p' | head -1)
+    if [ -n "$soak" ] && [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
+        echo "== soak for $soak min"
+        end=$(( $(date +%s) + soak * 60 )); n=0; bad=0
+        while [ "$(date +%s)" -lt "$end" ]; do
+            n=$((n + 1))
+            with_limit 30 "$D/bin/rdna3_drminfo" --dma-test --gfx-test >/dev/null 2>&1 || bad=$((bad + 1))
+            if [ -x "$D/bin/rdna3_vktest" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then
+                DYLD_LIBRARY_PATH="$D/bin" with_limit 60 "$D/bin/rdna3_vktest" \
+                    "$D/bin/libvulkan_radeon.dylib" >/dev/null 2>&1 || bad=$((bad + 1))
+            fi
+        done
+        echo "SOAK: $n rounds, $bad failed"
+    fi
     # last, it resets engines: a DMA and a GFX job that never finish, the
     # kernel must recover both (only when the step asks: rdna3hangtest=1)
     case " $args " in

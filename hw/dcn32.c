@@ -192,6 +192,7 @@ int dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s)
         return RDNA3_OK;
     s->otg = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_VTG_SEL);
     s->blanked = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN);
+    s->underflow = GET(cntl, HUBP0_DCHUBP_CNTL, HUBP_UNDERFLOW_STATUS);
     s->lit = !s->blanked && s->otg < RD_DCN_MAX_PIPES &&
              GET(RO(d, regOTG0_OTG_CONTROL, s->otg), OTG0_OTG_CONTROL, OTG_MASTER_EN);
     s->format = GET(RH(d, regHUBP0_DCSURF_SURFACE_CONFIG, pipe), HUBP0_DCSURF_SURFACE_CONFIG,

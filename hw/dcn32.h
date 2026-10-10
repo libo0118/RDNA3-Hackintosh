@@ -68,6 +68,7 @@ typedef struct rdna3_scanout_info {
     uint32_t powered;           /* DOMAIN<pipe> power-up (not power-gated) */
     uint32_t lit;               /* HUBP not blanked and its OTG master enabled */
     uint32_t blanked;           /* HUBP_BLANK_EN (dcn32_set_blank, display sleep) */
+    uint32_t underflow;         /* HUBP_UNDERFLOW_STATUS: the pipe ran out of data (sticky) */
     uint32_t otg, format, sw_mode, dcc;
     uint32_t width, height, pitch_px;
     uint32_t flip_pending;      /* SURFACE_FLIP_PENDING */
