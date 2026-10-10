@@ -13,6 +13,11 @@
  *
  *   rdna3_vktest [--loopback] [path/to/libvulkan_radeon.{dylib,so}]
  *
+ * Then on the general queue: a triangle drawn into a 64x64 image through a
+ * render pass (graphics pipeline from the SPIR-V below), buffer -> image ->
+ * image -> buffer copies of a pattern (optimal tiling), and a timeline
+ * semaphore signalled by a submit and waited for on the host.
+ *
  * --loopback: libdrm_xnu's in-process loopback backend executes SDMA only:
  * the transfer queue is verified, GFX/compute jobs are only submitted and
  * fenced (RDNA3_LB_GFX_NOP) (tools/radv_host.sh).
@@ -386,6 +391,471 @@ out:
     return ret;
 }
 
+/* ---- graphics: a triangle into an image ----
+ *
+ * vertex (glslangValidator -V):
+ *   #version 450
+ *   void main() {
+ *       const vec2 p[3] = vec2[3](vec2(-1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
+ *       gl_Position = vec4(p[gl_VertexIndex], 0.0, 1.0);
+ *   }
+ * fragment:
+ *   #version 450
+ *   layout(location = 0) out vec4 color;
+ *   void main() { color = vec4(1.0, 0.0, 0.0, 1.0); }
+ */
+static const uint32_t tri_vert_spv[] = {
+    0x07230203,0x00010000,0x0008000b,0x00000027,0x00000000,0x00020011,0x00000001,0x0006000b,
+    0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
+    0x0007000f,0x00000000,0x00000004,0x6e69616d,0x00000000,0x0000000d,0x0000001a,0x00030003,
+    0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,0x00000000,0x00060005,0x0000000b,
+    0x505f6c67,0x65567265,0x78657472,0x00000000,0x00060006,0x0000000b,0x00000000,0x505f6c67,
+    0x7469736f,0x006e6f69,0x00070006,0x0000000b,0x00000001,0x505f6c67,0x746e696f,0x657a6953,
+    0x00000000,0x00070006,0x0000000b,0x00000002,0x435f6c67,0x4470696c,0x61747369,0x0065636e,
+    0x00070006,0x0000000b,0x00000003,0x435f6c67,0x446c6c75,0x61747369,0x0065636e,0x00030005,
+    0x0000000d,0x00000000,0x00060005,0x0000001a,0x565f6c67,0x65747265,0x646e4978,0x00007865,
+    0x00050005,0x0000001d,0x65646e69,0x6c626178,0x00000065,0x00030047,0x0000000b,0x00000002,
+    0x00050048,0x0000000b,0x00000000,0x0000000b,0x00000000,0x00050048,0x0000000b,0x00000001,
+    0x0000000b,0x00000001,0x00050048,0x0000000b,0x00000002,0x0000000b,0x00000003,0x00050048,
+    0x0000000b,0x00000003,0x0000000b,0x00000004,0x00040047,0x0000001a,0x0000000b,0x0000002a,
+    0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,
+    0x00040017,0x00000007,0x00000006,0x00000004,0x00040015,0x00000008,0x00000020,0x00000000,
+    0x0004002b,0x00000008,0x00000009,0x00000001,0x0004001c,0x0000000a,0x00000006,0x00000009,
+    0x0006001e,0x0000000b,0x00000007,0x00000006,0x0000000a,0x0000000a,0x00040020,0x0000000c,
+    0x00000003,0x0000000b,0x0004003b,0x0000000c,0x0000000d,0x00000003,0x00040015,0x0000000e,
+    0x00000020,0x00000001,0x0004002b,0x0000000e,0x0000000f,0x00000000,0x00040017,0x00000010,
+    0x00000006,0x00000002,0x0004002b,0x00000008,0x00000011,0x00000003,0x0004001c,0x00000012,
+    0x00000010,0x00000011,0x0004002b,0x00000006,0x00000013,0xbf800000,0x0005002c,0x00000010,
+    0x00000014,0x00000013,0x00000013,0x0004002b,0x00000006,0x00000015,0x3f800000,0x0005002c,
+    0x00000010,0x00000016,0x00000013,0x00000015,0x0005002c,0x00000010,0x00000017,0x00000015,
+    0x00000015,0x0006002c,0x00000012,0x00000018,0x00000014,0x00000016,0x00000017,0x00040020,
+    0x00000019,0x00000001,0x0000000e,0x0004003b,0x00000019,0x0000001a,0x00000001,0x00040020,
+    0x0000001c,0x00000007,0x00000012,0x00040020,0x0000001e,0x00000007,0x00000010,0x0004002b,
+    0x00000006,0x00000021,0x00000000,0x00040020,0x00000025,0x00000003,0x00000007,0x00050036,
+    0x00000002,0x00000004,0x00000000,0x00000003,0x000200f8,0x00000005,0x0004003b,0x0000001c,
+    0x0000001d,0x00000007,0x0004003d,0x0000000e,0x0000001b,0x0000001a,0x0003003e,0x0000001d,
+    0x00000018,0x00050041,0x0000001e,0x0000001f,0x0000001d,0x0000001b,0x0004003d,0x00000010,
+    0x00000020,0x0000001f,0x00050051,0x00000006,0x00000022,0x00000020,0x00000000,0x00050051,
+    0x00000006,0x00000023,0x00000020,0x00000001,0x00070050,0x00000007,0x00000024,0x00000022,
+    0x00000023,0x00000021,0x00000015,0x00050041,0x00000025,0x00000026,0x0000000d,0x0000000f,
+    0x0003003e,0x00000026,0x00000024,0x000100fd,0x00010038
+};
+static const uint32_t tri_frag_spv[] = {
+    0x07230203,0x00010000,0x0008000b,0x0000000d,0x00000000,0x00020011,0x00000001,0x0006000b,
+    0x00000001,0x4c534c47,0x6474732e,0x3035342e,0x00000000,0x0003000e,0x00000000,0x00000001,
+    0x0006000f,0x00000004,0x00000004,0x6e69616d,0x00000000,0x00000009,0x00030010,0x00000004,
+    0x00000007,0x00030003,0x00000002,0x000001c2,0x00040005,0x00000004,0x6e69616d,0x00000000,
+    0x00040005,0x00000009,0x6f6c6f63,0x00000072,0x00040047,0x00000009,0x0000001e,0x00000000,
+    0x00020013,0x00000002,0x00030021,0x00000003,0x00000002,0x00030016,0x00000006,0x00000020,
+    0x00040017,0x00000007,0x00000006,0x00000004,0x00040020,0x00000008,0x00000003,0x00000007,
+    0x0004003b,0x00000008,0x00000009,0x00000003,0x0004002b,0x00000006,0x0000000a,0x3f800000,
+    0x0004002b,0x00000006,0x0000000b,0x00000000,0x0007002c,0x00000007,0x0000000c,0x0000000a,
+    0x0000000b,0x0000000b,0x0000000a,0x00050036,0x00000002,0x00000004,0x00000000,0x00000003,
+    0x000200f8,0x00000005,0x0003003e,0x00000009,0x0000000c,0x000100fd,0x00010038
+};
+
+#define IMG 64u
+#define RGBA(r, g, b, a) ((uint32_t)(r) | (uint32_t)(g) << 8 | (uint32_t)(b) << 16 | (uint32_t)(a) << 24)
+
+struct img { VkImage i; VkDeviceMemory m; VkImageView v; };
+
+static int make_img(struct ctx *c, struct img *o, VkImageUsageFlags usage, int view)
+{
+    DFN(c->dev, vkCreateImage);
+    DFN(c->dev, vkGetImageMemoryRequirements);
+    DFN(c->dev, vkAllocateMemory);
+    DFN(c->dev, vkBindImageMemory);
+    DFN(c->dev, vkCreateImageView);
+    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { IMG, IMG, 1 }, .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    VkMemoryRequirements mr;
+    CHECK(vkCreateImage(c->dev, &ii, NULL, &o->i));
+    vkGetImageMemoryRequirements(c->dev, o->i, &mr);
+    int t = find_type(&c->mp, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    if (t < 0) {
+        printf("FAIL no memory type for an image (bits 0x%x)\n", mr.memoryTypeBits);
+        return 2;
+    }
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size,
+        .memoryTypeIndex = (uint32_t)t };
+    CHECK(vkAllocateMemory(c->dev, &ai, NULL, &o->m));
+    CHECK(vkBindImageMemory(c->dev, o->i, o->m, 0));
+    if (view) {
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->i,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        CHECK(vkCreateImageView(c->dev, &vi, NULL, &o->v));
+    }
+    return 0;
+}
+
+static void free_img(struct ctx *c, struct img *o)
+{
+    DFN(c->dev, vkDestroyImageView);
+    DFN(c->dev, vkDestroyImage);
+    DFN(c->dev, vkFreeMemory);
+    if (o->v) vkDestroyImageView(c->dev, o->v, NULL);
+    if (o->i) vkDestroyImage(c->dev, o->i, NULL);
+    if (o->m) vkFreeMemory(c->dev, o->m, NULL);
+    memset(o, 0, sizeof(*o));
+}
+
+/* one primary command buffer on queue family qf, recorded by the caller
+ * between rec_begin and rec_submit (which waits for the fence) */
+struct rec { VkCommandPool pool; VkCommandBuffer cb; VkFence fence; VkQueue q; };
+
+static int rec_begin(struct ctx *c, struct rec *r, uint32_t qf)
+{
+    DFN(c->dev, vkGetDeviceQueue);
+    DFN(c->dev, vkCreateCommandPool);
+    DFN(c->dev, vkAllocateCommandBuffers);
+    DFN(c->dev, vkBeginCommandBuffer);
+    DFN(c->dev, vkCreateFence);
+    VkCommandPoolCreateInfo pi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = qf };
+    VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+    VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    memset(r, 0, sizeof(*r));
+    vkGetDeviceQueue(c->dev, qf, 0, &r->q);
+    CHECK(vkCreateCommandPool(c->dev, &pi, NULL, &r->pool));
+    cai.commandPool = r->pool;
+    CHECK(vkAllocateCommandBuffers(c->dev, &cai, &r->cb));
+    CHECK(vkCreateFence(c->dev, &fi, NULL, &r->fence));
+    CHECK(vkBeginCommandBuffer(r->cb, &bi));
+    return 0;
+}
+
+static int rec_submit(struct ctx *c, struct rec *r, const void *pnext, VkSemaphore signal)
+{
+    DFN(c->dev, vkEndCommandBuffer);
+    DFN(c->dev, vkQueueSubmit);
+    DFN(c->dev, vkWaitForFences);
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = pnext, .commandBufferCount = 1,
+        .pCommandBuffers = &r->cb, .signalSemaphoreCount = signal ? 1 : 0, .pSignalSemaphores = &signal };
+    VkResult res;
+    CHECK(vkEndCommandBuffer(r->cb));
+    if ((res = vkQueueSubmit(r->q, 1, &si, r->fence)) != VK_SUCCESS) {
+        printf("FAIL vkQueueSubmit -> %d (%s)\n", res, vkr(res));
+        return 1;
+    }
+    if ((res = vkWaitForFences(c->dev, 1, &r->fence, VK_TRUE, 5000000000ull)) != VK_SUCCESS) {
+        printf("FAIL fence not signalled in 5 s -> %d (%s)\n", res, vkr(res));
+        return 1;
+    }
+    return 0;
+}
+
+static void rec_free(struct ctx *c, struct rec *r)
+{
+    DFN(c->dev, vkDestroyFence);
+    DFN(c->dev, vkDestroyCommandPool);
+    if (r->fence) vkDestroyFence(c->dev, r->fence, NULL);
+    if (r->pool) vkDestroyCommandPool(c->dev, r->pool, NULL);
+    memset(r, 0, sizeof(*r));
+}
+
+static void img_barrier(struct ctx *c, VkCommandBuffer cb, VkImage i, VkImageLayout from, VkImageLayout to,
+                        VkAccessFlags src, VkAccessFlags dst, VkPipelineStageFlags ss, VkPipelineStageFlags ds)
+{
+    DFN(c->dev, vkCmdPipelineBarrier);
+    VkImageMemoryBarrier b = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = src,
+        .dstAccessMask = dst, .oldLayout = from, .newLayout = to,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = i, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(cb, ss, ds, 0, 0, NULL, 0, NULL, 1, &b);
+}
+
+/* map the 64x64 RGBA host buffer and compare pixels; NULL want = see 'fn' */
+static int check_pixels(struct ctx *c, struct buf *h, uint32_t (*fn)(uint32_t x, uint32_t y), const char *what)
+{
+    DFN(c->dev, vkMapMemory);
+    DFN(c->dev, vkUnmapMemory);
+    uint32_t *p, bad = 0, fx = 0, fy = 0, got = 0;
+    VkResult r = vkMapMemory(c->dev, h->m, 0, IMG * IMG * 4, 0, (void **)&p);
+    if (r != VK_SUCCESS) {
+        printf("FAIL vkMapMemory -> %d (%s)\n", r, vkr(r));
+        return 1;
+    }
+    for (uint32_t y = 0; y < IMG; y++)
+        for (uint32_t x = 0; x < IMG; x++)
+            if (p[y * IMG + x] != fn(x, y)) {
+                if (!bad) { fx = x; fy = y; got = p[y * IMG + x]; }
+                bad++;
+            }
+    vkUnmapMemory(c->dev, h->m);
+    if (bad)
+        printf("FAIL %s: %u of %u pixels wrong, first (%u,%u) = 0x%08x, want 0x%08x\n", what, bad, IMG * IMG,
+               fx, fy, got, fn(fx, fy));
+    return bad != 0;
+}
+
+/* the triangle covers pixels below the top-left/bottom-right diagonal; the
+ * diagonal itself depends on the rasterizer's tie rule: accept both */
+static uint32_t tri_px(uint32_t x, uint32_t y)
+{
+    return y > x ? RGBA(255, 0, 0, 255) : RGBA(0, 0, 255, 255);
+}
+
+static int draw_test(struct ctx *c, uint32_t qf, int verify)
+{
+    DFN(c->dev, vkCreateShaderModule);
+    DFN(c->dev, vkDestroyShaderModule);
+    DFN(c->dev, vkCreateRenderPass);
+    DFN(c->dev, vkDestroyRenderPass);
+    DFN(c->dev, vkCreateFramebuffer);
+    DFN(c->dev, vkDestroyFramebuffer);
+    DFN(c->dev, vkCreatePipelineLayout);
+    DFN(c->dev, vkDestroyPipelineLayout);
+    DFN(c->dev, vkCreateGraphicsPipelines);
+    DFN(c->dev, vkDestroyPipeline);
+    DFN(c->dev, vkCmdBeginRenderPass);
+    DFN(c->dev, vkCmdEndRenderPass);
+    DFN(c->dev, vkCmdBindPipeline);
+    DFN(c->dev, vkCmdDraw);
+    DFN(c->dev, vkCmdCopyImageToBuffer);
+    DFN(c->dev, vkCmdPipelineBarrier);
+    struct img im = { 0 };
+    struct buf hb = { 0 };
+    struct rec r = { 0 };
+    VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
+    VkRenderPass rp = VK_NULL_HANDLE;
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    VkPipelineLayout pl = VK_NULL_HANDLE;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    VkResult res;
+    int ret = 1;
+
+    if (make_img(c, &im, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 1) ||
+        make_buf(c, &hb, IMG * IMG * 4, 1) || host_buf_preset(c, &hb, IMG * IMG * 4))
+        goto out;
+    VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = sizeof(tri_vert_spv), .pCode = tri_vert_spv };
+    if ((res = vkCreateShaderModule(c->dev, &smi, NULL, &vs)) != VK_SUCCESS)
+        goto vkfail;
+    smi.codeSize = sizeof(tri_frag_spv);
+    smi.pCode = tri_frag_spv;
+    if ((res = vkCreateShaderModule(c->dev, &smi, NULL, &fs)) != VK_SUCCESS)
+        goto vkfail;
+    VkAttachmentDescription ad = { .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL };
+    VkAttachmentReference ar = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription sd = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+        .colorAttachmentCount = 1, .pColorAttachments = &ar };
+    VkSubpassDependency dep = { .srcSubpass = 0, .dstSubpass = VK_SUBPASS_EXTERNAL,
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, .dstStageMask = VK_PIPELINE_STAGE_TRANSFER_BIT,
+        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT };
+    VkRenderPassCreateInfo rpi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1,
+        .pAttachments = &ad, .subpassCount = 1, .pSubpasses = &sd, .dependencyCount = 1, .pDependencies = &dep };
+    if ((res = vkCreateRenderPass(c->dev, &rpi, NULL, &rp)) != VK_SUCCESS)
+        goto vkfail;
+    VkFramebufferCreateInfo fbi = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp,
+        .attachmentCount = 1, .pAttachments = &im.v, .width = IMG, .height = IMG, .layers = 1 };
+    VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    if ((res = vkCreateFramebuffer(c->dev, &fbi, NULL, &fb)) != VK_SUCCESS ||
+        (res = vkCreatePipelineLayout(c->dev, &pli, NULL, &pl)) != VK_SUCCESS)
+        goto vkfail;
+    VkPipelineShaderStageCreateInfo st[2] = {
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
+          .module = vs, .pName = "main" },
+        { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+          .module = fs, .pName = "main" } };
+    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+    VkViewport vp = { 0, 0, IMG, IMG, 0, 1 };
+    VkRect2D sc = { { 0, 0 }, { IMG, IMG } };
+    VkPipelineViewportStateCreateInfo vps = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+        .viewportCount = 1, .pViewports = &vp, .scissorCount = 1, .pScissors = &sc };
+    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE,
+        .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f };
+    VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+    VkPipelineColorBlendAttachmentState cba = { .colorWriteMask = 0xf };
+    VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .attachmentCount = 1, .pAttachments = &cba };
+    VkGraphicsPipelineCreateInfo gpi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 2, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+        .pViewportState = &vps, .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb,
+        .layout = pl, .renderPass = rp, .subpass = 0 };
+    if ((res = vkCreateGraphicsPipelines(c->dev, VK_NULL_HANDLE, 1, &gpi, NULL, &pipe)) != VK_SUCCESS)
+        goto vkfail;
+    if (rec_begin(c, &r, qf))
+        goto out;
+    VkClearValue clear = { .color = { .float32 = { 0.0f, 0.0f, 1.0f, 1.0f } } };
+    VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp,
+        .framebuffer = fb, .renderArea = sc, .clearValueCount = 1, .pClearValues = &clear };
+    vkCmdBeginRenderPass(r.cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(r.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdDraw(r.cb, 3, 1, 0, 0);
+    vkCmdEndRenderPass(r.cb);
+    VkBufferImageCopy bic = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .imageExtent = { IMG, IMG, 1 } };
+    vkCmdCopyImageToBuffer(r.cb, im.i, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, hb.b, 1, &bic);
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
+    vkCmdPipelineBarrier(r.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    if (rec_submit(c, &r, NULL, VK_NULL_HANDLE))
+        goto out;
+    if (!verify) {
+        ret = 0;
+        goto out;
+    }
+    {
+        /* the diagonal pixels may go either way: compare everything else */
+        DFN(c->dev, vkMapMemory);
+        DFN(c->dev, vkUnmapMemory);
+        uint32_t *p, bad = 0;
+        if ((res = vkMapMemory(c->dev, hb.m, 0, IMG * IMG * 4, 0, (void **)&p)) != VK_SUCCESS)
+            goto vkfail;
+        for (uint32_t y = 0; y < IMG; y++)
+            for (uint32_t x = 0; x < IMG; x++)
+                if (x != y && p[y * IMG + x] != tri_px(x, y)) {
+                    if (!bad)
+                        printf("FAIL triangle: pixel (%u,%u) = 0x%08x, want 0x%08x\n", x, y, p[y * IMG + x],
+                               tri_px(x, y));
+                    bad++;
+                }
+        vkUnmapMemory(c->dev, hb.m);
+        if (bad)
+            printf("FAIL triangle: %u of %u pixels wrong\n", bad, IMG * IMG - IMG);
+        ret = bad != 0;
+    }
+    goto out;
+vkfail:
+    printf("FAIL draw setup -> %d (%s)\n", res, vkr(res));
+out:
+    rec_free(c, &r);
+    if (pipe) vkDestroyPipeline(c->dev, pipe, NULL);
+    if (pl) vkDestroyPipelineLayout(c->dev, pl, NULL);
+    if (fb) vkDestroyFramebuffer(c->dev, fb, NULL);
+    if (rp) vkDestroyRenderPass(c->dev, rp, NULL);
+    if (fs) vkDestroyShaderModule(c->dev, fs, NULL);
+    if (vs) vkDestroyShaderModule(c->dev, vs, NULL);
+    free_img(c, &im);
+    free_buf(c, &hb);
+    return ret;
+}
+
+/* ---- images: buffer -> image -> image -> buffer of a pattern ---- */
+
+static uint32_t pat_px(uint32_t x, uint32_t y)
+{
+    return RGBA(x * 4, y * 4, (x ^ y) * 4, 0x80 + (x + y) % 64);
+}
+
+static int image_copy_test(struct ctx *c, uint32_t qf, int verify)
+{
+    DFN(c->dev, vkMapMemory);
+    DFN(c->dev, vkUnmapMemory);
+    DFN(c->dev, vkCmdCopyBufferToImage);
+    DFN(c->dev, vkCmdCopyImage);
+    DFN(c->dev, vkCmdCopyImageToBuffer);
+    DFN(c->dev, vkCmdPipelineBarrier);
+    const VkImageUsageFlags u = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    struct img a = { 0 }, b = { 0 };
+    struct buf src = { 0 }, dst = { 0 };
+    struct rec r = { 0 };
+    uint32_t *p;
+    VkResult res;
+    int ret = 1;
+    if (make_img(c, &a, u, 0) || make_img(c, &b, u, 0) || make_buf(c, &src, IMG * IMG * 4, 1) ||
+        make_buf(c, &dst, IMG * IMG * 4, 1) || host_buf_preset(c, &dst, IMG * IMG * 4))
+        goto out;
+    if ((res = vkMapMemory(c->dev, src.m, 0, IMG * IMG * 4, 0, (void **)&p)) != VK_SUCCESS) {
+        printf("FAIL vkMapMemory -> %d (%s)\n", res, vkr(res));
+        goto out;
+    }
+    for (uint32_t y = 0; y < IMG; y++)
+        for (uint32_t x = 0; x < IMG; x++)
+            p[y * IMG + x] = pat_px(x, y);
+    vkUnmapMemory(c->dev, src.m);
+    if (rec_begin(c, &r, qf))
+        goto out;
+    VkBufferImageCopy bic = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .imageExtent = { IMG, IMG, 1 } };
+    VkImageCopy ic = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .extent = { IMG, IMG, 1 } };
+    img_barrier(c, r.cb, a.i, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    img_barrier(c, r.cb, b.i, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vkCmdCopyBufferToImage(r.cb, src.b, a.i, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    img_barrier(c, r.cb, a.i, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vkCmdCopyImage(r.cb, a.i, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b.i, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
+    img_barrier(c, r.cb, b.i, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vkCmdCopyImageToBuffer(r.cb, b.i, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst.b, 1, &bic);
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
+    vkCmdPipelineBarrier(r.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    if (rec_submit(c, &r, NULL, VK_NULL_HANDLE))
+        goto out;
+    ret = verify ? check_pixels(c, &dst, pat_px, "image copies") : 0;
+out:
+    rec_free(c, &r);
+    free_img(c, &a);
+    free_img(c, &b);
+    free_buf(c, &src);
+    free_buf(c, &dst);
+    return ret;
+}
+
+/* ---- a timeline semaphore signalled by a submit, waited for on the host ---- */
+
+static int timeline_test(struct ctx *c, uint32_t qf)
+{
+    DFN(c->dev, vkCreateSemaphore);
+    DFN(c->dev, vkDestroySemaphore);
+    DFN(c->dev, vkWaitSemaphores);
+    DFN(c->dev, vkGetSemaphoreCounterValue);
+    VkSemaphoreTypeCreateInfo ti = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE, .initialValue = 1 };
+    VkSemaphoreCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &ti };
+    VkSemaphore sem = VK_NULL_HANDLE;
+    struct rec r = { 0 };
+    uint64_t sig = 7, now = 0;
+    VkResult res;
+    int ret = 1;
+    if (!vkWaitSemaphores || !vkGetSemaphoreCounterValue) {
+        printf("FAIL no vkWaitSemaphores\n");
+        return 1;
+    }
+    if ((res = vkCreateSemaphore(c->dev, &sci, NULL, &sem)) != VK_SUCCESS) {
+        printf("FAIL timeline semaphore -> %d (%s)\n", res, vkr(res));
+        return 1;
+    }
+    VkTimelineSemaphoreSubmitInfo tsi = { .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+        .signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = &sig };
+    if (rec_begin(c, &r, qf) || rec_submit(c, &r, &tsi, sem))
+        goto out;
+    VkSemaphoreWaitInfo wi = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
+        .pSemaphores = &sem, .pValues = &sig };
+    if ((res = vkWaitSemaphores(c->dev, &wi, 5000000000ull)) != VK_SUCCESS) {
+        printf("FAIL vkWaitSemaphores(7) -> %d (%s)\n", res, vkr(res));
+        goto out;
+    }
+    vkGetSemaphoreCounterValue(c->dev, sem, &now);
+    if (now != 7) {
+        printf("FAIL timeline value %llu, want 7\n", (unsigned long long)now);
+        goto out;
+    }
+    ret = 0;
+out:
+    rec_free(c, &r);
+    if (sem) vkDestroySemaphore(c->dev, sem, NULL);
+    return ret;
+}
+
 int main(int argc, char **argv)
 {
     const char *lib = NULL;
@@ -501,7 +971,10 @@ int main(int argc, char **argv)
         vkGetPhysicalDeviceProperties2(c.pd, &hp2);
     printf("  VK_EXT_external_memory_host: %s (alignment %llu), VK_KHR_external_memory_fd: %s\n",
            has_host ? "yes" : "NO", (unsigned long long)hostp.minImportedHostPointerAlignment, has_fd ? "yes" : "NO");
-    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = nq,
+    /* timeline semaphores are a Vulkan 1.2 feature to turn on */
+    VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+                                             .timelineSemaphore = VK_TRUE };
+    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f12, .queueCreateInfoCount = nq,
                                .pQueueCreateInfos = qci, .enabledExtensionCount = next,
                                .ppEnabledExtensionNames = ext };
     VkResult r = vkCreateDevice(c.pd, &dci, NULL, &c.dev);
@@ -556,6 +1029,45 @@ int main(int argc, char **argv)
         printf("%s OPAQUE_FD export + import: fill through one, copy out through the other\n", fr ? "FAIL" : "PASS");
         failed |= fr != 0;
         tested++;
+    }
+    /* graphics, images and timeline semaphores on the general queue (the
+     * loopback does not execute GFX: submitted and fenced only there) */
+    uint32_t gq = nq;
+    for (uint32_t i = 0; i < nq && gq == nq; i++)
+        if (qp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
+            gq = i;
+    if (!failed && gq < nq) {
+        const char *nx = loopback ? " (submitted and fenced, not executed: loopback)" : "";
+        int fr = draw_test(&c, gq, !loopback);
+        printf("%s draw: a triangle through a render pass into a 64x64 image, read back%s\n",
+               fr ? "FAIL" : "PASS", nx);
+        failed |= fr != 0;
+        tested++;
+        if (!fr) {
+            fr = image_copy_test(&c, gq, !loopback);
+            printf("%s images: buffer -> image -> image -> buffer of a 64x64 pattern (optimal tiling)%s\n",
+                   fr ? "FAIL" : "PASS", nx);
+            failed |= fr != 0;
+            tested++;
+        }
+        /* the same on a transfer queue: SDMA tiled copies, which the
+         * loopback's software SDMA (linear ops only) cannot run */
+        for (uint32_t i = 0; i < nq && !fr && !loopback; i++)
+            if (!(qp[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) &&
+                (qp[i].queueFlags & VK_QUEUE_TRANSFER_BIT)) {
+                fr = image_copy_test(&c, i, 1);
+                printf("%s images on queue family %u (transfer, SDMA tiled copies)\n", fr ? "FAIL" : "PASS", i);
+                failed |= fr != 0;
+                tested++;
+                break;
+            }
+        if (!fr) {
+            fr = timeline_test(&c, gq);
+            printf("%s timeline semaphore: signalled to 7 by a submit, waited for on the host\n",
+                   fr ? "FAIL" : "PASS");
+            failed |= fr != 0;
+            tested++;
+        }
     }
     DFN(c.dev, vkDestroyDevice);
     vkDestroyDevice(c.dev, NULL);

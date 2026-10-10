@@ -302,6 +302,9 @@ Unplug and plug a monitor cable while macOS runs: the log shows `HPD: hotplug in
 | `rdna3_vktest`: a queue `FAIL ... fence not signalled` | the compute meta shader (64 KiB) or CP DMA (256 B) never finished | which size failed tells shader vs CP DMA; `hang:` dump, `GRBM_STATUS` |
 | `rdna3_vktest`: words wrong | cache flush / VA mapping of the host buffer (GTT) | first wrong word index: page boundary = mapping, all = no flush |
 | `rdna3_vktest`: host pointer import FAIL | GEM_USERPTR (`gem_userptr` in uapi/, `RDNA3Gtt` wiring the user pages) | `LastFaultAddr`; compare with the loopback (`tools/radv_host.sh` passes it) |
+| `rdna3_vktest`: `draw` FAIL, pixels wrong | the graphics pipeline: all blue = the draw never wrote (PS export / CB), all 0x5a5a5a5a = the copy-out never ran, garbage = tiling/DCC of the image | first wrong pixel and its value; `hang:` dump if the fence timed out |
+| `rdna3_vktest`: `images` FAIL | image tiling (swizzle modes, optimal layout) on GFX (compute/CP copy) or, for the transfer-queue line, SDMA tiled copies | the pattern encodes x, y in R, G: the first wrong pixel's value shows where it came from |
+| `rdna3_vktest`: timeline semaphore FAIL | syncobj timeline UAPI (`SYNCOBJ_TIMELINE_SIGNAL/WAIT`, `QUERY`) | `DRM_XNU_TRACE=1`; the loopback passes it |
 | `rdna3_vktest`: OPAQUE_FD import FAIL | PRIME export/import tokens (`RD_NR_XNU_BO_EXPORT/IMPORT`), or an ioctl struct size mismatch (uapi/ zero-extends shorter structs like `drm_ioctl` since 2026-10-10) | `DRM_XNU_TRACE=1` shows the failing ioctl nr |
 
 ### Step 9 / 10 (`rdna3fb=1`, `rdna3accel=1`)
