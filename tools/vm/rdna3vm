@@ -417,9 +417,9 @@ launch() {   # launch "rdna3 args" stay(0/1)
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c 8u 9 9b 9c 9cu 9b3 9c3 10 10s 10a off)"
     launch "$a" "$stay"
 }
 
@@ -449,8 +449,10 @@ cmd_args() {
 QUEUE=$WORK/queue
 # card run 11: Vulkan 8/8 on the card, UCLK free = -25 W, accelerator up but
 # its display pipe gated (black desktop). 10s: the gates opened by boot-args
-# (rdna3accelfb=3 rdna3acceliop=1) so WindowServer's frames reach the panel
-PENDING_STEPS="10s"
+# (rdna3accelfb=3 rdna3acceliop=1) so WindowServer's frames reach the panel.
+# Run 13 (10s): pipe up over the scanout, frames empty, aperture gate closed,
+# WindowServer restarting in a loop; 10a also opens the aperture (=4)
+PENDING_STEPS="10a"
 
 cmd_queue() {
     load_conf

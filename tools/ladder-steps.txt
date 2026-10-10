@@ -30,5 +30,6 @@
 9b3 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=3 rdna3mirror=1
 9c3 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=3 rdna3mirror=2
 10 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3accel=1
+10a rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2
 10s rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3accel=1 rdna3accelfb=3 rdna3acceliop=1 rdna3pm=2
 off -rdna3off

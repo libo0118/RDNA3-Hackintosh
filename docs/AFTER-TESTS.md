@@ -409,3 +409,14 @@ after `rdna3vm approve` had already run, so nothing was waiting for
 approval yet. autoreport now opens Privacy & Security with a dialog right
 after it installs a new bundle on an interactive boot (approve / window).
 
+### Card run 13 (build #91, step 10s with the new accelerator)
+
+The boot-arg gates work: `iop ... hooks OPEN`, the display machine has head
+0's pipe (`initFramebufferResource ... over the LIVE SCANOUT`), WindowServer
+swaps frames - but every swapped frame is empty (`SWAP PROBE ... nonzero
+0/32400`), `getApertureMemoryDescriptor: aperture gate CLOSED`, and
+WindowServer restarts in a loop (PID 153, 299, ...): black screen, no
+cursor. Next: 10a (`rdna3accelfb=4`, aperture open); the report now carries
+the WindowServer crash reports (`23-windowserver-crash.txt`). The Metal
+plugin (RDNA3MTLDriver.bundle, Stage 6) is not installed in the VM yet.
+
