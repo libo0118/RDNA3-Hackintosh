@@ -1,106 +1,119 @@
-# Plan: the hardest and most important parts (order of execution)
+# Plan: what is left, where and how (2026-10-10)
 
-Starting point: commit `d333e25` on `stage1-kext`. Everything below can be
-written and checked without the card (simulator `tests/sim_navi32.c` + CI); the hardware
-will confirm it only at the first tests (`docs/STAGE3.md`).
+Starting point: commit `1b38786` on `stage1-kext`. Ladder steps 0-8 passed
+on the card in the VM (`docs/status/hw-verified.txt`). Step 9 runs (our
+framebuffer takes over the GOP head at 1920x1080, hardware cursor, EDID of
+both monitors over the DDC) but macOS still names the monitor "Unknown".
 
-Rules unchanged: port from amdgpu (MIT) with the name of the source function in
-a comment, each part with a test in the simulator, NullMoth code only for AMD,
-commits with `[skip ci]` and one CI run per batch of changes.
+Rules unchanged: port named amdgpu functions (MIT), reproduce the hardware
+behaviour in `tests/sim_navi32.c` first, `make test` before every push,
+commits with `[skip ci]`, one manual `build.yml` run (`full: "false"`) per
+batch, only when a card test needs the build.
 
-## 1. ✅ MSI interrupts and fences from IH (b1f8132)
-* `RDNA3Bringup`: its own `IOWorkLoop`, `IOFilterInterruptEventSource` on
-  the MSI index from `IOPCIDevice::getInterruptType`, action = `ih60_process`
-  → `ih60_iv_fence` → `IOLockWakeup`.
-* Enabling sources: `sdma60_set_trap_interrupt`, `gfx11_set_eop_interrupt`.
-* `fenceWait`: `IOLockSleepDeadline` instead of a loop, 5 ms margin for a lost
-  interrupt, without holding `fDrmLock` during sleep.
-* Gate `rdna3msi=1`; simulator: IV generation model for EOP and TRAP.
+Legend: **[sim]** can be finished and verified in the simulator now;
+**[card]** needs a run on the card to confirm; **[big]** several sessions.
 
-## 2. 🟡 Doorbells + KIQ/KCQ done (without MES); MES and more queues later
-* NBIO 4.3: doorbell aperture (`nbio_v4_3_enable_doorbell_aperture`,
-  SDMA/IH/VCN ranges), BAR2 mapping in the kext, `WDOORBELL64`.
-* GFX and SDMA rings through doorbell (like amdgpu), wptr in memory.
-* MES 11 (`mes_v11_0.c`, `amdgpu_mes.c`): loading through PSP is already there;
-  still to add: MES ring, `SET_HW_RESOURCES`, `ADD_QUEUE`/`REMOVE_QUEUE`,
-  MQD for gfx/compute/sdma queues. Alternative for a start: KIQ + MEC
-  (`gfx_v11_0_kiq_*`, `compute_mqd_init`, `MAP_QUEUES`), without MES.
-* UAPI: `AMDGPU_HW_IP_COMPUTE` in `rdna3_drm.c`, separate rings per file.
-* Simulator: KIQ/MES model (MAP_QUEUES packets, MQD → HQD).
+## A. Open findings from the card (first)
 
-## 3. 🟡 Display Core from amdgpu (the largest)
-Goal: modesetting, EDID, multiple monitors, hotplug, resolution change.
-* ✅ Step 1: DP AUX (DPCD, I2C-over-AUX), HPD sense, EDID + mode parser
-  (`hw/dcaux.c`, `hw/edid.c`), connector probe in the kext, `IODisplayEDID`
-  through the framebuffer.
-* ✅ Step 2: AtomBIOS interpreter (`hw/atom.c`), VBIOS object table
-  (connector → UNIPHY, DDC/AUX, HPD, encoder capabilities).
-* ✅ Step 3: DMCUB service (`hw/dmub32.c`, `rdna3dmub=1`): reset from STOP_FW,
-  windows, inbox1, QUERY_FEATURE_CAPS, VBIOS commands through DMCUB.
-* ✅ Step 4a (calculations, no register writes): `hw/dcn32_mode.c` —
-  OTG values from the EDID mode (`optc1_program_timing`), DP 8b/10b
-  bandwidth, mode filter, GOP mode recognition (`RDNA3,Head0EdidMode`,
-  `RDNA3,Connector<n>,ModesUsable`).
-  Next (needs the card): DML (watermarks, DLG/TTU, vstartup), pixel clock
-  (DCCG DTO), stream encoder MSA, HUBP/DPP sizes, DP training,
-  `DIGxEncoderControl`/`SetPixelClock` through DMCUB, modeset.
-* A `dm_services` layer for XNU (allocation, logs, clocks, registers, delay)
-  and building `drivers/gpu/drm/amd/display/dc` for DCN 3.2.1 as
-  a C library in the kext (MIT). First `dc_create` + reading state, then
-  `dc_commit_streams`.
-* DMCUB: loading `dcn_3_2_1_dmcub.bin` (`dmub_srv`); without it DC on
-  DCN 3.x does not work.
-* Link: AUX/I2C (EDID), DP training, HDMI; HPD through IH (DCN sources).
-* `RDNA3Framebuffer`: real mode list from EDID, `setDisplayMode`,
-  multiple heads (one instance per OTG), hotplug through connect interrupt.
-* Risk: size (~150k lines) and dependencies on `drm_*`; plan B is
-  our own mini-DC only for DP+HDMI SST on DCN 3.2.
+1. **macOS monitor name ("Unknown")** [card] - `fb/rdna3-fb.cpp`.
+   `1b38786` logs what IOGraphics asks (HLDDC sense, `hasDDCConnect`) and
+   what the core answers (`displayEdid`), and retries the EDID fetch. Next
+   run decides between: IOGraphics never asks (then set
+   `kConnectionSupportsHLDDCSense` from `start()`, publish `IODisplayEDID`
+   on the `IODisplayConnect` ourselves, or answer `getDDCBlock` with the
+   right block numbering) and the core refusing (fix `displayEdid`).
+2. **Head -> connector routing** [sim] - `hw/dcn32.c`, `kext/src/RDNA3Display.cpp`.
+   Today head 0 takes "the EDID that contains its mode". Port the read-back
+   amdgpu uses for seamless boot: `optc1_get_otg_active_size` /
+   `dcn10_get_dig_frontend` (`DIG_FE_CNTL.DIG_SOURCE_SELECT` = OTG),
+   `dcn10_get_dig_mode`, `DIG_BE_CNTL.DIG_FE_SOURCE_SELECT`, and the
+   transmitter (UNIPHY A-G) -> VBIOS path -> DDC line. Publish
+   `RDNA3,Head<n>,Connector`. Simulator: GOP state with OTG1 -> DIG2 ->
+   UNIPHYB.
+3. **DMCUB (step 5b)** [card] - `hw/dmub32.c`. CW0/CW1 are zero when we
+   start the PSP-loaded DMCUB. Pending test `rdna3lvl=5 rdna3dmub=1
+   rdna3pm=0`. If still zero: compare with `dm_dmub_hw_init` +
+   `dmub_srv_hw_init` for `DMUB_WINDOW_0_INST_CONST` when
+   `load_type == PSP` (amdgpu passes the inst_const region anyway and
+   programs CW0 itself only when `!psp_loaded`?) - re-read
+   `dmub_dcn32_backdoor_load` vs `dmub_dcn32_setup_windows`, try the
+   backdoor load (`rdna3dmub=2`) as the fallback already in the code.
+4. **Refresh rate read-back** [sim] - one run printed 63.741 Hz for a
+   1080p60 head. `optc1_get_hw_timing` + DCCG `OTG_PIXEL_RATE`/DTO read:
+   check `dcn32_head_refresh` against `dccg32_get_pixel_rate_div`
+   (`OTG_PIXEL_RATE_DIV`, `DTBCLK` vs `DPREFCLK`).
 
-## 4. 🟡 SMU 13.0.7: power management (bring-up done, sleep later)
-* ✅ `hw/vbios.c`: VBIOS through the SMUIO ROM window, ATOM tables; `hw/smu13.c`:
-  `smu_smc_hw_setup` — PPTable from PMFW (combo) + BoardTable from VBIOS,
-  `RunDcBtc`, `SetAllowedFeaturesMask`, `OverridePcieParameters`,
-  `EnableAllSmuFeatures`, DPM tables, PPT limit, workload, metrics
-  (`SMU_TABLE_SMU_METRICS`). Kext: level 5, `rdna3pm=0/1/2`,
-  `rdna3pmmask`; the simulator models PMFW (tables, features, DPM levels).
-* By default no UCLK/FCLK/DCN DPM and no GFXOFF — until Display Core
-  (see STAGE2 “PM without Display Core”).
-* Later: BACO/sleep, `IOPMPowerState` in the kext, wake-up, thermal
-  interrupts (THM) through IH.
+## B. Display: our own mode setting (light the second monitor) [big]
 
-## 5. ✅ Robustness: hang detection and GPU reset
-* ✅ Fence timeout (10 s) → dump of `GRBM_STATUS`/`CP_STAT`/`SDMA0_STATUS`
-  to the log, job VM marked “guilty”, `SQ_CMD` kills waves (soft recovery), GFX soft
-  reset (`gfx_v11_0_soft_reset` + ring 0/KIQ/KCQ from scratch), mode-1 reset
-  through PMFW and `hwInit()` from level 4; `VRAMLOST` based on a check word.
-* ✅ VM fault from IH (VMC/GFX source 0): address, VMID, L2 status, guilty
-  context, `AMDGPU_CTX_OP_QUERY_STATE2` and `-ECANCELED` as in amdgpu.
-* Remaining: single-queue reset through MES (`RESET_QUEUE`), once MES
-  is in; SDMA soft reset; `drop fDrmLock` while waiting.
+Goal: HDMI/TMDS SST on DCN 3.2 (both monitors here are TMDS; DP later),
+second head, mode change from macOS. Plan B of the old plan: a mini-DC,
+not the whole `amd/display/dc`.
 
-## 6. 🟡 UAPI for RADV for real
-* ✅ Timeline syncobj, `SYNCOBJ_TRANSFER`, syncobj-fd within a process
-  (`drm_xnu`), `AMDGPU_CTX` with priorities and reset state, `BO_LIST`,
-  CS chunks (user fence written by the ring, GDS/GWS/OA BOs from the BO list
-  switched per VMID), `AMDGPU_INFO`
-  with `SENSOR` (SMU metrics) and `GPUVM_FAULT`, `GEM_USERPTR` through
-  `IOMemoryDescriptor::withAddressRange`.
-* ✅ `vulkaninfo` on a macOS runner without the card: `libdrm_loopback.dylib`
-  in the `radv-macos` job (run with `full: true`).
-* ✅ syncobj sync_file between processes (file with the fence by value,
-  `RD_NR_XNU_SYNCOBJ_FENCE`); opaque fd stays within the process.
-* Remaining: PRIME/IOSurface (BO export/import, shared with the accelerator),
-  dEQP compute through loopback (needs
-  shader execution — only on the card).
+B1. **Register read-back and model** [sim] - generate DIG FE/BE, HDMI
+    stream encoder, DCCG (`OTG_PIXEL_RATE_CNTL`, `DPPCLK_DTO`,
+    `PHYASYMCLK`), OPP/MPC (`MPCC_*`, `OPP_PIPE_CONTROL`) headers with
+    `tools/gen_regs.py`; simulator gets a DCN pipe model (HUBP -> DPP ->
+    MPC -> OPP -> OTG -> DIG -> PHY) that knows what "lit" means.
+B2. **Timing + scanout on a free pipe** [sim] - `optc1_program_timing`
+    (done in `dcn32_mode.c` as values) applied: `optc32_enable_crtc`,
+    `optc1_program_global_sync`, `hubp2_program_surface_config` /
+    `hubp1_program_pixel_format`, `dpp` bypass, MPCC tree for one plane,
+    `opp_program_fmt` (8 bpc, no dither). Same order as
+    `dcn20_enable_stream_timing` + `dcn20_program_pipe`.
+B3. **Pixel clock** [sim] - DCN 3.2 drives the OTG pixel rate through
+    DCCG DTO (`dccg32_set_dtbclk_dto` / `dccg2_set_dpp_clk`), the PHY
+    symbol clock through the VBIOS `SetPixelClock` (v7) - run it with our
+    ATOM interpreter (`hw/atom.c`), or through DMCUB
+    (`dmub_cmd` `SET_PIXEL_CLOCK`) once 5b works.
+B4. **Encoder + transmitter** [sim, card] - `DIGxEncoderControl` (v5,
+    `ENCODER_CMD_STREAM_SETUP` HDMI) and `DIG1TransmitterControl` (v1.7,
+    `TRANSMITTER_CONTROL_ENABLE`) through the ATOM interpreter (amdgpu's
+    `bios_parser2` command tables), `enc32_stream_encoder_hdmi_set_stream_attribute`
+    (AVI infoframe off at first), `dcn32_unblank_stream`.
+B5. **Bandwidth** [sim] - minimum: request DISPCLK/DPPCLK from the SMU
+    (`smu_v13_0_set_hard_min_clk`), fixed watermarks/DLG from a 1080p60
+    table (DML later); `dcn32_prepare_bandwidth` subset.
+B6. **Framebuffer** [card] - `RDNA3Framebuffer`: one instance per head,
+    `getDisplayModeCount`/`getDisplayModes` from the EDID's usable modes,
+    `setDisplayMode` -> core modeset call (`RD3K_DISPLAY_FN_MODESET`),
+    `IOFBConnectInterrupt` on HPD.
+B7. **HPD interrupts** [sim] - DCN HPD IH sources (`DC_HPD1_INT`..),
+    `dce110_hpd_irq` enable/ack, re-probe EDID on change, notify the fb.
 
-## 7. WindowServer / Metal path
-* Accelerator: IOSurface surfaces in VRAM, composition through flips
-  (the skeleton from NullMoth is already there), `populateAccelConfig` for RDNA3.
-* Metal plugin: review of the NullMoth translator for AMD differences (formats,
-  limits, RDNA3 tiling), running simple Metal samples.
+Ladder: new step **9b** = second monitor lit by us, **9c** = mode change.
 
-## Order
-1 → 2 → 4 → 5 → 6 → 3 → 7. DC is the largest, but without hardware it is hard
-to verify, and the mode takeover from GOP (`RDNA3Framebuffer`) is enough for
-the first tests. Each item ends with a card moved on the board
-in Notion and an entry in `docs/ROADMAP.md`.
+## C. GPU core follow-ups
+
+C1. **MES scheduler pipe** [sim] - `mes_v11_0_hw_init`: map the MES ring
+    (pipe 0) through the KIQ, `SET_HW_RESOURCES`, `QUERY_SCHED_STATUS`;
+    `enable_legacy_queue_map` when the MES firmware >= 0x47 (log the
+    version from `CP_MES_GP3_LO`). Needed for user queues and queue resets.
+C2. **Teardown/reset on MES KIQ** [sim] - soft reset re-runs
+    `mes_v11_0_kiq_hw_init`; check `gfx11_mec_stop` order (KGQ unmap,
+    KCQ unmap, MES disable) against `gfx_v11_0_hw_fini`.
+C3. **SDMA soft reset, more KCQs, GFX pipe 1** [sim] - small.
+C4. **Clock gating / GFXOFF** [card] - only after display is stable.
+
+## D. Acceleration path (step 10)
+
+D1. **Step 10 smoke test** [card] - `rdna3accel=1`: the accelerator
+    attaches, WindowServer still composes; collect `ioreg -l` of
+    `IOAccelerator`, `IOSurface` usage.
+D2. **PRIME / IOSurface sharing** [sim] - BO export/import between the
+    accelerator and libdrm_xnu (`AMDGPU_GEM_OP`, dma-buf-like handles).
+D3. **Metal plugin** [big] - after D1.
+
+## E. Tooling and docs (cheap, keep current)
+
+E1. `tools/triage_reports.py`: step 9 checks (`RDNA3FB` EDID line,
+    `EDIDSource`, `Head0EdidMode`), the serial-log interleaving (read
+    `20-log-rdna3.txt` first).
+E2. `docs/TESTING-VM.md` / `TESTING-HW.md`: step 9 expectations (monitor
+    name, DDC EDID), steps 9b/9c.
+E3. `docs/AFTER-TESTS.md` rows for every new symptom.
+
+## Order for the next sessions
+
+A2 -> A4 -> E1/E2 -> B1 -> B2 -> B3 -> B4 -> B7 -> C1 -> C2, with A1/A3
+whenever a card report arrives. Each item: simulator test, `make test`,
+`tools/progress.py`, commit `[skip ci]`, Notion card updated.
