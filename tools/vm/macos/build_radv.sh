@@ -5,11 +5,13 @@
 #
 #   bash <(curl -s http://10.0.2.2:8000/tools/build_radv.sh)
 #
-# (not "curl | bash": Homebrew and sudo need the keyboard)
+# (not "curl | bash": sudo needs the keyboard)
 #
 # First run: installs the Xcode Command Line Tools (a macOS dialog: click
-# Install, then run the command again) and Homebrew (asks for your
-# password). Mesa itself takes 10-20 minutes.
+# Install, then run the command again), Python 3.12 from python.org if
+# there is no Python >= 3.10 (asks for your password), the build tools from
+# PyPI and glslang from source (no Homebrew: it dropped Intel Macs). Mesa
+# itself takes 10-20 minutes.
 set -euo pipefail
 HOST=http://10.0.2.2:8000
 D="/Library/Application Support/RDNA3VM"
@@ -21,20 +23,36 @@ if ! xcode-select -p >/dev/null 2>&1 || ! xcrun --find clang >/dev/null 2>&1; th
     xcode-select --install || true
     exit 1
 fi
-if ! command -v brew >/dev/null; then
-    for b in /usr/local/bin/brew /opt/homebrew/bin/brew; do [ -x "$b" ] && eval "$("$b" shellenv)" || true; done
+# no Homebrew: it no longer installs on Intel Macs (the VM is x86_64).
+# Python 3.12 from python.org, the build tools from PyPI into a venv,
+# glslangValidator built from source.
+T=$W/tools
+mkdir -p "$T"
+PY=""
+for p in python3.13 python3.12 python3.11 python3.10 /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12; do
+    command -v "$p" >/dev/null && "$p" -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null && PY=$(command -v "$p") && break
+done
+if [ -z "$PY" ]; then
+    say "installing Python 3.12 from python.org (asks for your password)"
+    curl -fL -o "$T/python.pkg" https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg
+    sudo installer -pkg "$T/python.pkg" -target /
+    PY=/Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
 fi
-if ! command -v brew >/dev/null; then
-    say "installing Homebrew (asks for your password)"
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-    eval "$(/usr/local/bin/brew shellenv)"
+say "build tools (meson, ninja, mako, pkgconf, cmake) into $T/venv"
+[ -x "$T/venv/bin/python3" ] || "$PY" -m venv "$T/venv"
+"$T/venv/bin/python3" -m pip install --quiet --upgrade pip
+"$T/venv/bin/python3" -m pip install --quiet meson ninja mako pyyaml packaging pkgconf cmake
+export PATH="$T/venv/bin:$T/bin:$PATH"
+export PKG_CONFIG="$T/venv/bin/pkgconf"
+if ! command -v glslangValidator >/dev/null; then
+    say "glslangValidator from source (2-3 minutes)"
+    rm -rf "$T/glslang"
+    git -c advice.detachedHead=false clone -q --depth 1 --branch 15.1.0 https://github.com/KhronosGroup/glslang.git "$T/glslang"
+    cmake -S "$T/glslang" -B "$T/glslang/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_OPT=OFF \
+        -DGLSLANG_TESTS=OFF -DCMAKE_INSTALL_PREFIX="$T" >/dev/null
+    ninja -C "$T/glslang/build" install >/dev/null
 fi
-say "build tools"
-brew install meson ninja glslang pkgconf python@3.12 >/dev/null
-PY=$(brew --prefix python@3.12)/bin/python3.12
-"$PY" -m pip install --quiet --break-system-packages mako pyyaml packaging
-# meson runs Mesa's generators with the first python3 on PATH: this one has mako
-export PATH="$(brew --prefix python@3.12)/libexec/bin:$(dirname "$PY"):$PATH"
+glslangValidator --version | head -1
 
 say "sources from the host (rdna3vm window serves the checkout)"
 rm -rf "$W/src" && mkdir -p "$W/src"

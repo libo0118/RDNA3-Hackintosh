@@ -301,8 +301,9 @@ bash <(curl -s http://10.0.2.2:8000/tools/build_radv.sh)
 ```
 
 The first run installs the Xcode Command Line Tools (click Install in the
-dialog, then run the command again) and Homebrew (asks for the password);
-Mesa takes 10-20 minutes. It ends with a loopback check and installs RADV
+dialog, then run the command again), Python 3.12 from python.org (asks for
+the password), the build tools from PyPI and glslang from source - no
+Homebrew, which no longer installs on Intel Macs; Mesa takes 10-20 minutes. It ends with a loopback check and installs RADV
 and `rdna3_vktest` where the report runs them.
 
 From step 8 on the report then has a `== rdna3_vktest` section: RADV creates
