@@ -168,6 +168,22 @@ steps:
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
 
+### Several steps in one go
+
+```sh
+rdna3vm queue pending
+```
+
+runs the steps still waiting for the card (`5b 5c 8c 9 9b3 9c3 9b 9c`)
+one after the other: each one boots macOS, sends its report and shuts
+down, the desktop comes back for a moment, then the next one starts
+(about 5 minutes a step, 40 in all; both monitors connected). You can
+also name the steps yourself: `rdna3vm queue 5b 8c 9`.
+The [emergency exit](#emergency-exit) stops the VM **and** the rest of
+the queue. If the computer reboots on the way (amdgpu could not take the
+card back), log in and run `rdna3vm queue` without steps: it goes on
+with what is left. Send all reports at the end (`rdna3vm reports`).
+
 Step 9 in the VM: OpenCore sets the largest GOP mode (`OC_RESOLUTION`), so
 the desktop comes up at the monitor's native mode; only the monitor the GOP
 lit shows a picture. EDID comes over AUX for DisplayPort sinks and over the

@@ -7,6 +7,8 @@
 #   rdna3vm window                                macOS in a window (install, setup)
 #   rdna3vm step N [--stay]                       ladder step N with the GPU passed through
 #   rdna3vm args "BOOT-ARGS" [--stay]             the same with your own rdna3* boot-args
+#   rdna3vm queue STEP... | pending               several steps one after the other, unattended
+#   rdna3vm queue                                 go on with a queue a host reboot interrupted
 #   rdna3vm reports                               what came back
 #
 # Everything lives in $RDNA3VM_DIR (default ~/rdna3-vm).
@@ -418,6 +420,54 @@ cmd_args() {
     launch "$1" "$stay"
 }
 
+# the steps still waiting, one per line; the first is the one running
+QUEUE=$WORK/queue
+PENDING_STEPS="5b 5c 8c 9 9b3 9c3 9b 9c"
+
+cmd_queue() {
+    load_conf
+    local n
+    if [ $# -gt 0 ]; then
+        [ "$1" = pending ] && set -- $PENDING_STEPS
+        for n in "$@"; do step_args "$n" >/dev/null || die "unknown step $n"; done
+        printf '%s\n' "$@" > "$QUEUE"
+    fi
+    [ -s "$QUEUE" ] || die "no queue: give steps, e.g. rdna3vm queue 5b 8c 9  (or: rdna3vm queue pending = $PENDING_STEPS)"
+    gpu_bdf >/dev/null || die "no 1002:747e card found"
+    sudo -v || die "sudo is needed"
+    say "Running the steps $(tr '\n' ' ' < "$QUEUE")one after the other"
+    echo "  Each step: the screen goes dark, macOS runs and shuts down, the desktop"
+    echo "  comes back for a moment, then the next step starts (~5 min a step)."
+    echo "  Emergency exit (both Ctrl, Esc x3 / short power-button press) stops the"
+    echo "  VM and the rest of the queue. If the host reboots, run 'rdna3vm queue'"
+    echo "  again to go on with what is left."
+    sleep 5
+    sudo systemd-run --unit="rdna3vm-queue-$(date +%H%M%S)" --collect --quiet \
+        --setenv=RDNA3VM_DIR="$WORK" bash "$SELF" _queue
+}
+
+cmd__queue() {
+    load_conf
+    local n a how
+    while [ -s "$QUEUE" ]; do
+        n=$(head -n1 "$QUEUE")
+        sed -i 1d "$QUEUE"
+        a=$(step_args "$n") || continue
+        echo "== queue: step $n ($a), left: $(tr '\n' ' ' < "$QUEUE")"
+        rm -f "$WORK/last-run"
+        RDNA3VM_BOOTARGS="$BASE_ARGS $DEBUG_ARGS $a rdna3vmauto=1" \
+            RDNA3VM_TIMEOUT="${AUTO_TIMEOUT_MIN:-8}" bash "$SELF" _passthrough || true
+        how=$(cat "$WORK/last-run" 2>/dev/null || echo unknown)
+        if [ "$how" = emergency ]; then
+            echo "== queue stopped by the emergency exit; left: $(tr '\n' ' ' < "$QUEUE")"
+            return 0
+        fi
+        # the desktop is back; give the card a moment before the next detach
+        sleep 20
+    done
+    echo "== queue done"
+}
+
 DM=0
 VT=
 DEVS=()
@@ -643,13 +693,15 @@ cmd__passthrough() {
     while kill -0 $qpid 2>/dev/null && kill -0 $pk 2>/dev/null && kill -0 $tm 2>/dev/null; do
         wait -n || true
     done
+    local how=done
     if kill -0 $qpid 2>/dev/null; then
-        kill -0 $pk 2>/dev/null || echo "== emergency exit (power button / Ctrl+Ctrl, Esc x3): stopping the VM"
-        kill -0 $tm 2>/dev/null || echo "== $limit min limit: stopping the VM"
+        kill -0 $pk 2>/dev/null || { echo "== emergency exit (power button / Ctrl+Ctrl, Esc x3): stopping the VM"; how=emergency; }
+        kill -0 $tm 2>/dev/null || { echo "== $limit min limit: stopping the VM"; how=timeout; }
         kill $qpid; sleep 3; kill -9 $qpid 2>/dev/null || true
     else
         echo "== the VM shut down by itself"
     fi
+    echo "$how" > "$WORK/last-run"
     wait $qpid 2>/dev/null || true
     kill $srv $inh $pk $tm 2>/dev/null || true
     chown -R --reference="$WORK" "$WORK/reports" 2>/dev/null || true
@@ -667,8 +719,10 @@ case "${1:-}" in
     window) shift; cmd_window "$@" ;;
     step) shift; cmd_step "$@" ;;
     args) shift; cmd_args "$@" ;;
+    queue) shift; cmd_queue "$@" ;;
+    _queue) shift; cmd__queue "$@" ;;
     reports) shift; cmd_reports "$@" ;;
     _oc) shift; cmd__oc "$@" ;;
     _passthrough) shift; cmd__passthrough "$@" ;;
-    *) sed -n '2,12p' "$SELF"; exit 1 ;;
+    *) sed -n '2,14p' "$SELF"; exit 1 ;;
 esac
