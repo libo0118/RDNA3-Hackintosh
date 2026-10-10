@@ -609,3 +609,15 @@ rebuilt for the next try.
 through the plugin (AIR read with GPUCompiler's libLLVM, translated to
 SPIR-V, RADV pipeline with the bindings sorted), 4096 words right, GPU time
 0.012 ms. Vulkan 12/12, DMA/GFX verified in the same boot.
+
+### Card run 23 (step `metal`, build 98): Metal render passes
+
+`METAL: ALL PASSED` with the rendered triangle (M3): vertex + fragment
+functions compiled from source, render pipeline, a draw into a 64x64
+texture blitted back, 2016 red pixels, 0 wrong off the edge. rdna3_vktest
+this time hit its own mutable-layout check (added after run 21) and died
+on the same RADV assert after 8 PASS: the VM's RADV was built before
+patches/0007. Not a driver failure; rebuild RADV in the VM
+(`build_radv.sh`, which applies every patch) to clear it. The check now
+runs last in rdna3_vktest, so a RADV without 0007 only loses that line,
+and triage reports "CRASHED after N PASS" instead of "not run".

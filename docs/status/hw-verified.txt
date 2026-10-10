@@ -32,3 +32,4 @@
 9m 2026-10-10 vm scaled modes 1600x900 and 960x540 on both heads through the DPP scaler on the native timing, back to native; pipe 1 flags an underflow at 960x540
 10m 2026-10-10 vm Metal lists the card through RDNA3MTLDriver: "AMD Radeon RX 7800 XT (RDNA3MTL over ... (RADV NAVI32))", families Common1-3, Mac2, Metal3; shader translation not yet
 11 2026-10-10 vm Metal compute on the card: mtlprobe compiles a kernel from source (Apple front end -> AIR read by GPUCompiler's libLLVM -> RDNA3MTL translator -> SPIR-V -> RADV), dispatches 4096 threads, all results right (METAL: ALL PASSED)
+11r 2026-10-10 vm Metal render on the card: mtlprobe compiles a vertex + fragment function, builds a render pipeline, draws a triangle into a 64x64 texture and blits it back - 2016 red pixels, 0 wrong off the edge (METAL: ALL PASSED)

@@ -1066,14 +1066,6 @@ int main(int argc, char **argv)
         failed |= fr != 0;
         tested++;
     }
-    if (!failed && has_mut) {
-        fflush(stdout);   /* an assert in the driver kills the process */
-        int fr = mutable_layout_test(&c);
-        printf("%s mutable descriptor layout, bindings out of order (the Metal plugin's layout)\n",
-               fr ? "FAIL" : "PASS");
-        failed |= fr != 0;
-        tested++;
-    }
     /* graphics, images and timeline semaphores on the general queue (the
      * loopback does not execute GFX: submitted and fenced only there) */
     uint32_t gq = nq;
@@ -1112,6 +1104,17 @@ int main(int argc, char **argv)
             failed |= fr != 0;
             tested++;
         }
+    }
+    /* last: a RADV without userspace/mesa/patches/0007 asserts here and
+     * the assert kills the process, so everything else has run by then */
+    if (!failed && has_mut) {
+        printf("mutable descriptor layout next: an abort here = RADV without patch 0007\n");
+        fflush(stdout);
+        int fr = mutable_layout_test(&c);
+        printf("%s mutable descriptor layout, bindings out of order (the Metal plugin's layout)\n",
+               fr ? "FAIL" : "PASS");
+        failed |= fr != 0;
+        tested++;
     }
     DFN(c.dev, vkDestroyDevice);
     vkDestroyDevice(c.dev, NULL);

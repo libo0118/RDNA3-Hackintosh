@@ -340,7 +340,14 @@ def summary(path, serial=None):
     out.append(("DMA/GFX jobs", "%d verified, %d wrong" % (len(re.findall(r"job results verified", txt)),
                                                          len(re.findall(r"job results WRONG", txt)))))
     vk = re.search(r"^(ALL PASSED.*|.*FAILED.*)$", txt[txt.find("== rdna3_vktest"):], re.M) if "== rdna3_vktest" in txt else None
-    out.append(("Vulkan", vk.group(1)[:80] if vk else "not run"))
+    if not vk and "== rdna3_vktest" in txt:   # no verdict: the test died (a driver assert)
+        sec = txt[txt.index("== rdna3_vktest"):]
+        sec = sec[:sec.find("\n== ", 1)] if "\n== " in sec[1:] else sec
+        dead = re.search(r"^(Assertion failed.*|.*Assertion .* failed.*)$", sec, re.M)
+        out.append(("Vulkan", "CRASHED after %d PASS: %s" % (len(re.findall(r"^PASS ", sec, re.M)),
+                                                             dead.group(0)[:80] if dead else "no verdict")))
+    else:
+        out.append(("Vulkan", vk.group(1)[:80] if vk else "not run"))
     mt = re.search(r"^METAL: .*$", txt, re.M)
     if not mt and "== mtlprobe" in txt:   # no verdict: the probe died (a driver assert)
         mt = re.search(r"^(Assertion failed.*|.*Assertion .* failed.*|\[exit [1-9]\d*\])$",
