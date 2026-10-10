@@ -87,6 +87,7 @@ test: $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test
 	$(BUILD)/test_uapi
 	$(BUILD)/test_range_alloc
 	$(BUILD)/test_libdrm_amdgpu
+	tests/test_oc_install.sh
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump
 

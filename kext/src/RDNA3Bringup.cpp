@@ -222,6 +222,7 @@ void RDNA3Bringup::publishString(const char *key, const char *s)
 static const char *kFwDirs[] = {
     "/Library/Extensions/RDNA3Accel.kext/Contents/Resources/",
     "/Library/Application Support/RDNA3VM/kexts/RDNA3Accel.kext/Contents/Resources/",
+    "/Library/Application Support/RDNA3/firmware/",     /* package/oc_install.sh */
 };
 
 static bool readFileFromDisk(const char *path, RDNA3Firmware *out)

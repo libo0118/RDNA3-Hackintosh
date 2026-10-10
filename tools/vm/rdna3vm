@@ -355,25 +355,9 @@ cmd_window() {
 }
 
 # ------------------------------------------------------- ladder / passthrough
-step_args() {
-    case "$1" in
-        0) echo "rdna3lvl=0" ;;
-        1|2|3|4|5|6) echo "rdna3lvl=$1" ;;
-        5b) echo "rdna3lvl=5 rdna3dmub=1" ;;
-        5c) echo "rdna3lvl=5 rdna3dmub=3" ;;
-        6b) echo "rdna3lvl=6 rdna3msi=1" ;;
-        7|7b) echo "rdna3lvl=7 rdna3msi=1" ;;
-        8|8b) echo "rdna3lvl=8 rdna3msi=1" ;;
-        8c) echo "rdna3lvl=8 rdna3msi=1 rdna3mes=1" ;;
-        9) echo "rdna3lvl=8 rdna3msi=1 rdna3fb=1" ;;
-        9b) echo "rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=1" ;;
-        9c) echo "rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2" ;;
-        9b3) echo "rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=3 rdna3mirror=1" ;;
-        9c3) echo "rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=3 rdna3mirror=2" ;;
-        10) echo "rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3accel=1" ;;
-        off) echo "-rdna3off" ;;
-        *) return 1 ;;
-    esac
+step_args() {   # the rdna3 boot-args of a ladder step (tools/ladder-steps.txt)
+    awk -v n="$1" '$1 == n { $1 = ""; sub(/^ +/, ""); print; f = 1 } END { exit !f }' \
+        "$ROOT/tools/ladder-steps.txt"
 }
 
 launch() {   # launch "rdna3 args" stay(0/1)

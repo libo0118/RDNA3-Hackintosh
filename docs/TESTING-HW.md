@@ -28,6 +28,23 @@ it together with a description of the symptom. Module details are in `STAGE1`–
 
    Firmware is not in the repository (`docs/FIRMWARE.md`). The installer
    rebuilds the Auxiliary Kernel Collection; a restart is required.
+
+   **Through OpenCore instead (recommended):** kernelmanagerd may refuse
+   ad-hoc signed kexts in the Auxiliary KC ("invalid codeful kernel
+   extension", seen in the VM). Then let OpenCore inject them:
+
+   ```sh
+   sudo diskutil mount disk0s1                   # your EFI partition (diskutil list)
+   sudo package/oc_install.sh --efi /Volumes/EFI --fw /path/to/linux-firmware/amdgpu
+   sudo package/oc_install.sh --efi /Volumes/EFI --step 2     # boot-args of a step
+   sudo package/oc_install.sh --efi /Volumes/EFI --off        # everything off again
+   ```
+
+   It copies the kexts to `EFI/OC/Kexts`, adds them to `Kernel/Add`, puts
+   the firmware in `/Library/Application Support/RDNA3/firmware`, and sets
+   the step's boot-args in `config.plist` (yours other than `rdna3*` stay;
+   a backup `config.plist.rdna3-<date>` is written first). With this route
+   skip step 5 below: `--step N` does it.
 5. **Set boot-args once per step**, for example:
 
    ```sh

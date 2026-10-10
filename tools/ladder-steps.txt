@@ -1,0 +1,25 @@
+# Ladder steps: <step> <rdna3 boot-args>. Read by tools/vm/rdna3vm (step,
+# queue) and package/oc_install.sh (--step); the table with what each step
+# checks is docs/TESTING-HW.md.
+0 rdna3lvl=0
+1 rdna3lvl=1
+2 rdna3lvl=2
+3 rdna3lvl=3
+4 rdna3lvl=4
+5 rdna3lvl=5
+5b rdna3lvl=5 rdna3dmub=1
+5c rdna3lvl=5 rdna3dmub=3
+6 rdna3lvl=6
+6b rdna3lvl=6 rdna3msi=1
+7 rdna3lvl=7 rdna3msi=1
+7b rdna3lvl=7 rdna3msi=1
+8 rdna3lvl=8 rdna3msi=1
+8b rdna3lvl=8 rdna3msi=1
+8c rdna3lvl=8 rdna3msi=1 rdna3mes=1
+9 rdna3lvl=8 rdna3msi=1 rdna3fb=1
+9b rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=1
+9c rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2
+9b3 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=3 rdna3mirror=1
+9c3 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=3 rdna3mirror=2
+10 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3accel=1
+off -rdna3off
