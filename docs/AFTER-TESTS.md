@@ -621,3 +621,18 @@ patches/0007. Not a driver failure; rebuild RADV in the VM
 (`build_radv.sh`, which applies every patch) to clear it. The check now
 runs last in rdna3_vktest, so a RADV without 0007 only loses that line,
 and triage reports "CRASHED after N PASS" instead of "not run".
+
+### Card run 24 (queue `modeset modeset2 gamma sleep hotplug`, build 101)
+
+Step `modeset` passed: each head offered 19 of its EDID timings (1080p72
+at 210 MHz refused: DISPCLK 165 MHz, step `modeset2` raises it), the cycle
+set 1680x1050@59.954 and 640x480@59.940 on both heads with their own
+timings ("own timing" in the fb log), the desktop in every picture, no
+underflow, back to native. The DLG reference clock the GOP's
+REF_FREQ_TO_PIX_FREQ implies is 24245 kHz, not 100 MHz: the scaling from
+the GOP's values absorbed it. Vulkan 13/13 (RADV rebuilt with 0007),
+Metal passed. The queue then stopped on the host: before `modeset2`
+vfio-pci did not take the card (`driver/unbind: No such file`): amdgpu was
+still probing it after the previous step's restore. `detach` now waits for
+udev, sets the override first and retries; the queue retries a step that
+did not start once; `rdna3vm result` adds the queue runner's journal.

@@ -33,3 +33,5 @@
 10m 2026-10-10 vm Metal lists the card through RDNA3MTLDriver: "AMD Radeon RX 7800 XT (RDNA3MTL over ... (RADV NAVI32))", families Common1-3, Mac2, Metal3; shader translation not yet
 11 2026-10-10 vm Metal compute on the card: mtlprobe compiles a kernel from source (Apple front end -> AIR read by GPUCompiler's libLLVM -> RDNA3MTL translator -> SPIR-V -> RADV), dispatches 4096 threads, all results right (METAL: ALL PASSED)
 11r 2026-10-10 vm Metal render on the card: mtlprobe compiles a vertex + fragment function, builds a render pipeline, draws a triangle into a 64x64 texture and blits it back - 2016 red pixels, 0 wrong off the edge (METAL: ALL PASSED)
+modeset 2026-10-10 vm real mode set on both TMDS heads: the monitor's own EDID timings (19 offered per head), 1680x1050@59.954 and 640x480@59.940 set through dcn32_modeset_apply (pixel clock via the DMCUB, OTG timing, DLG/TTU), the macOS desktop in the scanout pictures, no underflow, back to 1920x1080; 1080p72 (210 MHz) refused above DISPCLK 165 MHz
+8m 2026-10-10 vm rdna3_vktest 13/13 with the VM's RADV rebuilt with patches/0007: the mutable descriptor layout with bindings out of order

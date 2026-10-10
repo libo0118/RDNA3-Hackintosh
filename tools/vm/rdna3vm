@@ -509,7 +509,7 @@ cmd_queue() {
 
 cmd__queue() {
     load_conf
-    local n a how
+    local n a how retried=
     while [ -s "$QUEUE" ]; do
         n=$(head -n1 "$QUEUE")
         sed -i 1d "$QUEUE"
@@ -519,6 +519,15 @@ cmd__queue() {
         RDNA3VM_BOOTARGS="$BASE_ARGS $DEBUG_ARGS $a rdna3vmauto=1" \
             RDNA3VM_TIMEOUT="$(auto_limit "$a")" bash "$SELF" _passthrough || true
         how=$(cat "$WORK/last-run" 2>/dev/null || echo unknown)
+        # no last-run = the VM never started (the card not handed to
+        # vfio-pci, queue run 24): the same step once more after a pause
+        if [ "$how" = unknown ] && [ "${retried:-}" != "$n" ]; then
+            echo "== queue: step $n did not start, trying it once more in 30 s"
+            retried=$n
+            { printf '%s\n' "$n"; cat "$QUEUE"; } > "$QUEUE.new" && mv "$QUEUE.new" "$QUEUE"
+            sleep 30
+            continue
+        fi
         if [ "$how" = emergency ]; then
             echo "== queue stopped by the emergency exit; left: $(tr '\n' ' ' < "$QUEUE")"
             return 0
@@ -564,15 +573,35 @@ detach() {
     echo efi-framebuffer.0 > /sys/bus/platform/drivers/efi-framebuffer/unbind 2>/dev/null || true
     if command -v fuser >/dev/null; then fuser -k /dev/dri/* 2>/dev/null || true; sleep 1; fi
     modprobe vfio-pci
-    for d in "${DEVS[@]}"; do
-        drv=$(readlink -f /sys/bus/pci/devices/$d/driver 2>/dev/null || true)
-        [ -n "$drv" ] && [ "$(basename "$drv")" != vfio-pci ] && echo "$d" > "$drv/unbind"
-    done
-    resize_bar0
+    # right after the previous step's restore amdgpu may still be probing the
+    # card (queue run 24: no driver yet at the unbind, amdgpu bound it a
+    # moment later and vfio-pci never got it): let udev finish, set the
+    # override first so a late probe goes to vfio-pci, and try a few times
+    command -v udevadm >/dev/null && udevadm settle --timeout=30 2>/dev/null || true
     for d in "${DEVS[@]}"; do
         echo vfio-pci > /sys/bus/pci/devices/$d/driver_override
-        echo "$d" > /sys/bus/pci/drivers_probe
-        [ "$(basename "$(readlink -f /sys/bus/pci/devices/$d/driver)")" = vfio-pci ] || { echo "vfio-pci did not take $d"; return 1; }
+    done
+    local try ok
+    for try in 1 2 3 4 5; do
+        for d in "${DEVS[@]}"; do
+            if [ -e /sys/bus/pci/devices/$d/driver ]; then
+                drv=$(readlink -f /sys/bus/pci/devices/$d/driver)
+                [ "$(basename "$drv")" != vfio-pci ] && { echo "$d" > "$drv/unbind" || true; }
+            fi
+        done
+        resize_bar0   # no-op once BAR0 is small
+        ok=1
+        for d in "${DEVS[@]}"; do
+            [ -e /sys/bus/pci/devices/$d/driver ] || echo "$d" > /sys/bus/pci/drivers_probe 2>/dev/null || true
+            [ "$(basename "$(readlink -f /sys/bus/pci/devices/$d/driver 2>/dev/null)")" = vfio-pci ] || ok=0
+        done
+        [ $ok = 1 ] && break
+        echo "  vfio-pci did not take the card yet (try $try), waiting"
+        sleep 3
+        command -v udevadm >/dev/null && udevadm settle --timeout=10 2>/dev/null || true
+    done
+    for d in "${DEVS[@]}"; do
+        [ "$(basename "$(readlink -f /sys/bus/pci/devices/$d/driver 2>/dev/null)")" = vfio-pci ] || { echo "vfio-pci did not take $d"; return 1; }
         echo "  $d -> vfio-pci"
     done
 }
@@ -884,7 +913,11 @@ cmd_result() {
     [ -f "$WORK/artifact-run" ] && echo "artifact from CI run $(cat "$WORK/artifact-run")" >> "$tmp/rdna3-result/00-host.txt" 
     # what the VM sent (or did not): the upload server's log and the newest files
     { echo; echo "== share server log (last 40)"; tail -n 40 "$WORK/share.log" 2>/dev/null
-      echo; echo "== newest files in $WORK/reports"; ls -lt "$WORK/reports" 2>/dev/null | head -15; } \
+      echo; echo "== newest files in $WORK/reports"; ls -lt "$WORK/reports" 2>/dev/null | head -15
+      # the queue runner (a systemd unit): which steps ran, why it stopped
+      echo; echo "== queue runner (last 60 lines)"; echo "left in the queue: $(tr '\n' ' ' < "$QUEUE" 2>/dev/null)"
+      { sudo -n journalctl --no-pager -q -o short-iso --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null ||
+        journalctl --no-pager -q -o short-iso --since "-6h" -u 'rdna3vm-queue-*' 2>/dev/null; } | tail -n 60; } \
         >> "$tmp/rdna3-result/00-host.txt" || true   # set -e + pipefail: ls dies of SIGPIPE behind head
     python3 "$ROOT/tools/triage_reports.py" "$tmp/rdna3-result" > "$tmp/rdna3-result/00-triage.txt" 2>&1 || true
     mkdir -p "$(dirname "$out")"
