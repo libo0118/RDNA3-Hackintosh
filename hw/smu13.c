@@ -353,6 +353,11 @@ int smu13_set_workload(rdna3_dev *d, uint32_t workload_bit)
     return smu13_send_msg(d, PPSMC_MSG_SetWorkloadMask, 1u << workload_bit, NULL);
 }
 
+int smu13_gfx_off(rdna3_dev *d, int allow)
+{
+    return smu13_send_msg(d, allow ? PPSMC_MSG_AllowGfxOff : PPSMC_MSG_DisallowGfxOff, 0, NULL);
+}
+
 /* SetHardMinByFreq to the table's top level: the clock stays there */
 static int pin_to_top(rdna3_dev *d, uint32_t ppclk, const rdna3_smu_dpm *t, const char *name)
 {

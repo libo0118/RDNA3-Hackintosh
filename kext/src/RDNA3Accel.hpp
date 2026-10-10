@@ -104,6 +104,7 @@ public:
     static uint64_t drmGpuClock(void *ctx);
     void  drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t minMclkKhz, uint32_t maxMclkKhz);
     RDNA3Bringup *bringup() const { return fBringup; }
+    IOLock       *drmLock() const { return fDrmLock; }
 
     /* Stage 3: VRAM below this offset holds the firmware's scanout(s);
      * the bring-up and GEM heaps start above it (RDNA3Display.cpp) */

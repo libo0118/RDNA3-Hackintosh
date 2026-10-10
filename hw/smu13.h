@@ -228,6 +228,10 @@ int smu13_set_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t watts);
 int smu13_get_power_limit(rdna3_dev *d, rdna3_smu *s, uint32_t *watts);
 /* smu_v13_0_0_set_power_profile_mode: WORKLOAD_PPLIB_*_BIT */
 int smu13_set_workload(rdna3_dev *d, uint32_t workload_bit);
+/* smu_v13_0_gfx_off_control: AllowGfxOff / DisallowGfxOff. With it allowed
+ * the RLC powers the GFX off when idle; GC registers must not be touched
+ * then (doorbells wake it). Needs FEATURE_GFXOFF in the allowed mask. */
+int smu13_gfx_off(rdna3_dev *d, int allow);
 
 /* smu_v13_0_0_mode1_reset (13.0.10): DEBUGSMC_MSG_Mode1Reset, param 0 (no
  * RAS recovery) through the debug mailbox (C2PMSG_53/75/54, no response),

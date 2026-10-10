@@ -427,8 +427,9 @@ cmd_args() {
 
 # the steps still waiting, one per line; the first is the one running
 QUEUE=$WORK/queue
-# GFX clock gating is default now (card run 8): one regression pass
-PENDING_STEPS="8 9b 9c"
+# GFX clock gating is default now (card run 8): a regression pass, and
+# 8o: GFXOFF on top (rdna3gfxoff=1) for the rest of the idle power
+PENDING_STEPS="8 8o 9b 9c"
 
 cmd_queue() {
     load_conf

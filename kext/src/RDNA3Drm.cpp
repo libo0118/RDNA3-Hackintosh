@@ -532,7 +532,13 @@ int RDNA3Accel::drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t si
 {
     IOLockLock(fDrmLock);
     f->inflight++;
+    /* amdgpu_gfx_off_ctrl(false) around anything that may touch the GFX */
+    RDNA3Bringup *gb = fBringup;
+    if (gb)
+        gb->gfxOffHold();
     int r = rdna3_drm_ioctl(f, nr, data, size);
+    if (gb)
+        gb->gfxOffRelease();
     if (--f->inflight == 0)
         IOLockWakeup(fDrmLock, &f->inflight, false);
     IOLockUnlock(fDrmLock);

@@ -17,6 +17,7 @@
 8b rdna3lvl=8 rdna3msi=1
 8c rdna3lvl=8 rdna3msi=1 rdna3mes=1
 8g rdna3lvl=8 rdna3msi=1 rdna3cg=1
+8o rdna3lvl=8 rdna3msi=1 rdna3gfxoff=1
 9 rdna3lvl=8 rdna3msi=1 rdna3fb=1
 9b rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=1
 9bw rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=1 rdna3dmubwait=0

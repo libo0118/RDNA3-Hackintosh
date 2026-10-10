@@ -1,10 +1,10 @@
 {
  "amdgpu": {
-  "works": 249,
-  "ported": 274,
+  "works": 251,
+  "ported": 276,
   "total": 1328,
-  "works_pct": 18.8,
-  "ported_pct": 20.6,
+  "works_pct": 18.9,
+  "ported_pct": 20.8,
   "groups": [
    {
     "name": "PSP 13",
@@ -142,9 +142,9 @@
     "steps": [
      "5"
     ],
-    "works": 21,
+    "works": 22,
     "ported": 0,
-    "todo": 120,
+    "todo": 119,
     "items": {
      "convert_to_vddc": "todo",
      "smu_v13_0_0_allocate_dpm_context": "todo",
@@ -240,7 +240,7 @@
      "smu_v13_0_get_pptable_from_vbios": "todo",
      "smu_v13_0_get_throttler_status": "works",
      "smu_v13_0_get_vbios_bootup_values": "works",
-     "smu_v13_0_gfx_off_control": "todo",
+     "smu_v13_0_gfx_off_control": "works",
      "smu_v13_0_gfx_ulv_control": "todo",
      "smu_v13_0_gpo_control": "todo",
      "smu_v13_0_init_display_count": "todo",
@@ -627,9 +627,9 @@
     "steps": [
      "8"
     ],
-    "works": 72,
+    "works": 73,
     "ported": 0,
-    "todo": 171,
+    "todo": 170,
     "items": {
      "amdgpu_get_gfx_off_entrycount": "todo",
      "amdgpu_get_gfx_off_residency": "todo",
@@ -671,7 +671,7 @@
      "amdgpu_gfx_mes_enable_kcq": "todo",
      "amdgpu_gfx_mqd_sw_fini": "todo",
      "amdgpu_gfx_mqd_sw_init": "todo",
-     "amdgpu_gfx_off_ctrl": "todo",
+     "amdgpu_gfx_off_ctrl": "works",
      "amdgpu_gfx_parse_disable_cu": "todo",
      "amdgpu_gfx_poison_consumption_handler": "todo",
      "amdgpu_gfx_run_cleaner_shader": "todo",

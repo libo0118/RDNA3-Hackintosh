@@ -109,6 +109,9 @@ public:
     /* PerformanceStatistics: activity %, edge / hotspot / memory C, fan
      * rpm, gfx / memory clock MHz, power W; under the DRM lock */
     bool     stats(uint32_t v[8]);
+    /* amdgpu_gfx_off_ctrl(false / true); the caller holds the DRM lock */
+    void     gfxOffHold();
+    void     gfxOffRelease();
     /* which GC block is busy (GRBM / CP status), next to the PM trend */
     void     logBusy();
 
@@ -143,6 +146,14 @@ private:
     struct rdna3_mes *fMes = nullptr;  /* level 8 + rdna3mes=1: MES scheduler pipe (C1) */
     bool             fMesWanted = false;
     bool             fCgWanted = false;   /* GFX clock gating, default on (rdna3cg=0: off) */
+    /* GFXOFF (rdna3gfxoff=1, step 8o): amdgpu_gfx_off_ctrl. The GFX may
+     * power off while nothing holds it; every DRM ioctl and the PM trend
+     * read hold it on, the last release allows GFXOFF again 100 ms later
+     * (GFX_OFF_DELAY_ENABLE). Holds and the SMU mailbox: under the DRM lock. */
+    bool             fGfxOffWanted = false, fGfxOffOn = false, fGfxOffStop = false;
+    uint32_t         fGfxOffHolds = 1;    /* the bring-up holds it until done */
+    struct thread_call *fGfxOffCall = nullptr;
+    static void      gfxOffTick(void *owner, void *);
     void             cgStart(const char *why);
     void             mesStart(const char *why);
     IOMemoryMap     *fDoorbell = nullptr;   /* BAR2 */

@@ -88,9 +88,11 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
         {
             /* on by default since card run 8: ~200 W -> ~75 W idle, hotspot
              * 78 -> 55 C, DMA/GFX tests still pass; rdna3cg=0 turns it off */
-            uint32_t cg = 1;
+            uint32_t cg = 1, go = 0;
             PE_parse_boot_argn("rdna3cg", &cg, sizeof(cg));
             fCgWanted = cg != 0;
+            PE_parse_boot_argn("rdna3gfxoff", &go, sizeof(go));
+            fGfxOffWanted = go != 0;
         }
         fMsi = msi != 0;
         fDoorbells = db != 0;
@@ -150,7 +152,20 @@ void RDNA3Bringup::stopAndFree()
 
     /* 2. the engines, in gfx_v11_0_hw_fini order, while fDev, the BAR and
      *    the doorbells are still mapped */
-    /* amdgpu_device_ip_fini_early: clock gating off (UNGATE) first */
+    /* amdgpu_device_ip_fini_early: GFXOFF disallowed, clock gating off
+     * (UNGATE) first */
+    if (fGfxOffCall) {
+        IOLock *l = fOwner->drmLock();
+        fGfxOffStop = true;
+        thread_call_cancel_wait(fGfxOffCall);
+        if (l)
+            IOLockLock(l);
+        gfxOffHold();
+        if (l)
+            IOLockUnlock(l);
+        thread_call_free(fGfxOffCall);
+        fGfxOffCall = nullptr;
+    }
     if (fCgWanted && fGfx && fGfx->ready && fDev)
         gfx11_set_clock_gating(fDev, 0, RD_GFX_CG_GC_11_0_3);
     if (fKcq && fKcq->rb.ready && fDev)
@@ -875,6 +890,19 @@ bool RDNA3Bringup::hwInit()
         /* amdgpu_device_ip_late_init -> amdgpu_device_set_cg_state(GATE) */
         if (!ret && fCgWanted)
             cgStart("level 8");
+        /* ... and amdgpu_device_set_pg_state(GATE) -> amdgpu_gfx_off_ctrl:
+         * the bring-up's own hold goes, GFXOFF is allowed 100 ms later */
+        if (!ret && fGfxOffWanted && fPmUp && fSmu) {
+            fGfxOffCall = thread_call_allocate((thread_call_func_t)gfxOffTick, this);
+            if (fGfxOffCall) {
+                IOLock *l = fOwner->drmLock();
+                if (l)
+                    IOLockLock(l);
+                gfxOffRelease();
+                if (l)
+                    IOLockUnlock(l);
+            }
+        }
         if (!ret && fIrqLive)
             gfx11_set_eop_interrupt(fDev, fGfx, 1);
         if (!ret && fVmReady) {
@@ -910,6 +938,9 @@ void RDNA3Bringup::pmInit()
 {
     uint64_t allowed = fPmMask ? fPmMask
                      : (fPmMode >= 2 ? RD_SMU_FEATURES_AMDGPU : RD_SMU_FEATURES_SAFE);
+    /* GFXOFF wanted: the feature runs, AllowGfxOff comes after the GFX init */
+    if (fGfxOffWanted && !fPmMask)
+        allowed |= RD_SMU_FEATURE(FEATURE_GFXOFF_BIT);
     uint32_t gen = 3, width = 6;     /* Gen4 x16 unless the link says less */
     const rdna3_vbios *vb = nullptr;
     int ret;
@@ -1184,6 +1215,46 @@ int RDNA3Bringup::vmFaultInfo(void *p, uint64_t *addr, uint32_t *status, uint32_
     return 0;
 }
 
+void RDNA3Bringup::gfxOffHold()
+{
+    fGfxOffHolds++;
+    if (fGfxOffOn && fDev) {
+        int r = smu13_gfx_off(fDev, 0);
+        fGfxOffOn = false;
+        if (r)
+            BLOG("GFXOFF: DisallowGfxOff failed (%d)", r);
+    }
+}
+
+void RDNA3Bringup::gfxOffRelease()
+{
+    if (fGfxOffHolds && --fGfxOffHolds == 0 && fGfxOffCall && !fGfxOffStop) {
+        uint64_t dl;
+        clock_interval_to_deadline(100, kMillisecondScale, &dl);
+        thread_call_enter_delayed(fGfxOffCall, dl);
+    }
+}
+
+void RDNA3Bringup::gfxOffTick(void *owner, void *)
+{
+    RDNA3Bringup *b = (RDNA3Bringup *)owner;
+    IOLock *l = b->fOwner->drmLock();
+    if (!l)
+        return;
+    IOLockLock(l);
+    if (!b->fGfxOffStop && !b->fGfxOffHolds && !b->fGfxOffOn && b->fDev) {
+        static bool logged = false;
+        int r = smu13_gfx_off(b->fDev, 1);
+        b->fGfxOffOn = r == RDNA3_OK;
+        if (!logged || r) {
+            BLOG("GFXOFF: AllowGfxOff -> %d", r);
+            logged = true;
+        }
+        b->publish("RDNA3,GfxOffResult", (uint64_t)(int64_t)r);
+    }
+    IOLockUnlock(l);
+}
+
 bool RDNA3Bringup::stats(uint32_t v[8])
 {
     uint64_t now = mach_absolute_time(), ns = 0;
@@ -1211,6 +1282,10 @@ void RDNA3Bringup::logBusy()
     rdna3_gfx_status st;
     if (!fFinished || !fDev)
         return;
+    if (fGfxOffOn) {
+        BLOG("PM: GFX is off (GFXOFF), GC registers not read");
+        return;
+    }
     gfx11_read_status(fDev, fGfx, &st);
     BLOG("PM: GRBM_STATUS 0x%08x STATUS2 0x%08x SE0 0x%08x CP_STAT 0x%08x CPC 0x%08x CPF 0x%08x "
          "ME_CNTL 0x%08x RLC_SAFE_MODE 0x%x SDMA0 0x%08x", st.grbm_status, st.grbm_status2,

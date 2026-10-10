@@ -236,6 +236,7 @@ typedef struct sim {
         uint32_t hard_min[PPCLK_COUNT];
         unsigned unflushed, bad_addr, pcie_overrides, soft_limits, xfers;
         uint32_t last_pcie_arg, workload, ppt_limit;
+        uint32_t gfxoff, gfxoff_msgs;   /* AllowGfxOff / DisallowGfxOff */
         PPTable_t pptable;    /* as written by the driver */
     } smu;
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
@@ -720,6 +721,8 @@ static void smu_msg(uint32_t v)
     case PPSMC_MSG_GetPptLimit: *R(MP1(82)) = S.smu.ppt_limit ? S.smu.ppt_limit : 263; break;
     case PPSMC_MSG_SetPptLimit: S.smu.ppt_limit = arg; break;
     case PPSMC_MSG_SetWorkloadMask: S.smu.workload = arg; break;
+    case PPSMC_MSG_AllowGfxOff:     S.smu.gfxoff = 1; S.smu.gfxoff_msgs++; break;
+    case PPSMC_MSG_DisallowGfxOff:  S.smu.gfxoff = 0; S.smu.gfxoff_msgs++; break;
     case PPSMC_MSG_NotifyPowerSource: break;
     case PPSMC_MSG_PrepareMp1ForUnload: S.smu.unload = 1; break;
     default: resp = PPSMC_Result_UnknownCmd;
@@ -2568,6 +2571,9 @@ static void run(const char *fwdir)
         CHECK(S.smu.pcie_overrides == 0 && smu.pcie_levels == 3);
         CHECK(smu.ppt_limit_w == 263);
         CHECK(S.smu.workload == (1u << WORKLOAD_PPLIB_DEFAULT_BIT));
+        /* smu_v13_0_gfx_off_control */
+        CHECK(smu13_gfx_off(&dev, 1) == RDNA3_OK && S.smu.gfxoff == 1);
+        CHECK(smu13_gfx_off(&dev, 0) == RDNA3_OK && S.smu.gfxoff == 0 && S.smu.gfxoff_msgs >= 2);
 
         CHECK(smu13_read_metrics(&dev, &smu) == RDNA3_OK && smu.metrics_valid);
         CHECK(smu13_metric_gfxclk_mhz(&smu) == 2050 && smu13_metric_uclk_mhz(&smu) == 96);
