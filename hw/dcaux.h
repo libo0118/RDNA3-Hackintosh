@@ -76,6 +76,22 @@ int  dcaux_i2c_xfer(rdna3_dev *d, uint32_t n, uint32_t dev7, const uint8_t *wbuf
  * a bad header or checksum. */
 int  dcaux_read_edid(rdna3_dev *d, uint32_t n, uint8_t *edid, uint32_t cap);
 
+/* Hardware I2C engine on DDC line n+1 (dce_i2c_hw.c, DCN 3.x): the DDC of
+ * HDMI/DVI sinks and of DP++ adaptors (the AUX engine then reports
+ * NON_AUX_MODE). One command of up to 4 payloads, each a write or a read
+ * on a 7-bit address; all but the last keep the bus (MOT). Returns 0 or
+ * RD_AUX_ERR_* (NACK: no device; TIMEOUT; ACQUIRE: owned by HW/DMCU). */
+typedef struct rd_i2c_payload {
+    uint8_t  addr7;
+    int      write;
+    uint8_t *data;
+    uint32_t len;
+} rd_i2c_payload;
+int  dcddc_i2c_cmd(rdna3_dev *d, uint32_t n, rd_i2c_payload *p, uint32_t np);
+
+/* EDID over the DDC (E-DDC segment pointer for blocks 2-3), checksummed */
+int  dcddc_read_edid(rdna3_dev *d, uint32_t n, uint8_t *edid, uint32_t cap);
+
 /* what one probe of all engines found */
 typedef struct rdna3_connector {
     uint32_t aux;               /* engine / HPD pin index */
@@ -83,6 +99,7 @@ typedef struct rdna3_connector {
     int      dp;                /* DPCD answered */
     uint8_t  dpcd_rev, max_link_rate, max_lane_count;   /* DPCD 0x000..0x002 */
     int      edid_len;          /* 0 = none */
+    int      edid_ddc;          /* read over the DDC (TMDS sink) instead of AUX */
     uint8_t  edid[RD_EDID_MAX];
 } rdna3_connector;
 

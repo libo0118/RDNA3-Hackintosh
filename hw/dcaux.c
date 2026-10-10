@@ -8,6 +8,7 @@
 #include "dcaux.h"
 #include "gen/dcn_3_2_1_aux.h"
 #include "gen/dcn_3_2_0_gpio.h"
+#include "gen/dcn_3_2_0_i2c.h"
 
 #define AUX_STRIDE (regDP_AUX1_AUX_CONTROL - regDP_AUX0_AUX_CONTROL)
 #define HPD_STRIDE (regHPD1_DC_HPD_CONTROL - regHPD0_DC_HPD_CONTROL)
@@ -376,6 +377,289 @@ int dcaux_read_edid(rdna3_dev *d, uint32_t n, uint8_t *edid, uint32_t cap)
     return (int)(blocks * RD_EDID_BLOCK);
 }
 
+/* ---------------- hardware I2C engine (dce_i2c_hw.c, dcn2 construct) ---------------- */
+
+#define RI(d, reg) rdna3_reg_offset((d), HWIP_DCE, 0, reg##_BASE_IDX, reg)
+#define I2C_SETUP(d, n)  (RI(d, regDC_I2C_DDC1_SETUP) + (regDC_I2C_DDC2_SETUP - regDC_I2C_DDC1_SETUP) * (n))
+#define I2C_SPEED(d, n)  (RI(d, regDC_I2C_DDC1_SPEED) + (regDC_I2C_DDC2_SPEED - regDC_I2C_DDC1_SPEED) * (n))
+#define I2C_HWST(d, n)   (RI(d, regDC_I2C_DDC1_HW_STATUS) + (regDC_I2C_DDC2_HW_STATUS - regDC_I2C_DDC1_HW_STATUS) * (n))
+#define I2C_STATUS_IDLE       0
+#define I2C_STATUS_USED_BY_SW 1
+#define I2C_STATUS_USED_BY_HW 2
+#define I2C_RW_CNTL_DMCU_ONLY 2
+#define I2C_SETUP_TIME_LIMIT_DCN 3
+#define I2C_SEND_RESET_LENGTH_9  9
+#define I2C_HW_BUFFER_SIZE       538     /* I2C_HW_BUFFER_SIZE_DCE100 */
+#define I2C_SPEED_KHZ            100     /* dc->caps.i2c_speed_in_khz (dcn32) */
+#define I2C_TIMEOUT_CLOCKS       32      /* TRANSACTION_TIMEOUT_IN_I2C_CLOCKS */
+
+typedef struct {
+    uint32_t n, transaction_count, buffer_used_bytes, buffer_used_write;
+} i2c_hw;
+
+static uint32_t rmw(rdna3_dev *d, uint32_t reg, uint32_t mask, uint32_t val)
+{
+    uint32_t v = (rdna3_rreg(d, reg) & ~mask) | (val & mask);
+    rdna3_wreg(d, reg, v);
+    return v;
+}
+#define FV(reg, field, x) (((uint32_t)(x) << reg##__##field##__SHIFT) & (uint32_t)reg##__##field##_MASK)
+#define FM(reg, field)    ((uint32_t)reg##__##field##_MASK)
+
+static int i2c_engine_available(rdna3_dev *d, uint32_t n)
+{
+    if (GET(rdna3_rreg(d, I2C_HWST(d, n)), DC_I2C_DDC1_HW_STATUS, DC_I2C_DDC1_HW_STATUS) ==
+        I2C_STATUS_USED_BY_HW)
+        return 0;
+    return GET(rdna3_rreg(d, RI(d, regDC_I2C_ARBITRATION)), DC_I2C_ARBITRATION,
+               DC_I2C_REG_RW_CNTL_STATUS) != I2C_RW_CNTL_DMCU_ONLY;
+}
+
+static int i2c_hw_busy(rdna3_dev *d, uint32_t n)
+{
+    if (GET(rdna3_rreg(d, RI(d, regDC_I2C_SW_STATUS)), DC_I2C_SW_STATUS, DC_I2C_SW_STATUS) ==
+        I2C_STATUS_IDLE)
+        return 0;
+    return !i2c_engine_available(d, n);
+}
+
+/* set_speed: prescale from the microsecond time base (or the 100 MHz crystal) */
+static void i2c_set_speed(rdna3_dev *d, uint32_t n, uint32_t khz)
+{
+    uint32_t tb = rdna3_rreg(d, RI(d, regMICROSECOND_TIME_BASE_DIV));
+    uint32_t xtal_div = GET(tb, MICROSECOND_TIME_BASE_DIV, XTAL_REF_DIV);
+    uint32_t base_div = GET(tb, MICROSECOND_TIME_BASE_DIV, MICROSECOND_TIME_BASE_DIV);
+    uint32_t ref = base_div ? base_div * 1000 : 100000, prescale;
+    if (!xtal_div)
+        xtal_div = 2;
+    prescale = (ref / xtal_div) / khz;
+    rmw(d, I2C_SPEED(d, n),
+        FM(DC_I2C_DDC1_SPEED, DC_I2C_DDC1_PRESCALE) | FM(DC_I2C_DDC1_SPEED, DC_I2C_DDC1_THRESHOLD) |
+            FM(DC_I2C_DDC1_SPEED, DC_I2C_DDC1_START_STOP_TIMING_CNTL),
+        FV(DC_I2C_DDC1_SPEED, DC_I2C_DDC1_PRESCALE, prescale) |
+            FV(DC_I2C_DDC1_SPEED, DC_I2C_DDC1_THRESHOLD, 2) |
+            FV(DC_I2C_DDC1_SPEED, DC_I2C_DDC1_START_STOP_TIMING_CNTL, khz > 50 ? 2 : 1));
+}
+
+/* hw_ddc.c set_config GPIO_DDC_CONFIG_TYPE_MODE_I2C: pull-downs on, pad in I2C mode */
+static void ddc_pad_i2c(rdna3_dev *d, uint32_t n)
+{
+    uint32_t reg = ddc_mask_reg(d, n), v = rdna3_rreg(d, reg);
+    if (!GET(v, DC_GPIO_DDC1_MASK, DC_GPIO_DDC1DATA_PD_EN) || !GET(v, DC_GPIO_DDC1_MASK, DC_GPIO_DDC1CLK_PD_EN)) {
+        v = SET(v, DC_GPIO_DDC1_MASK, DC_GPIO_DDC1DATA_PD_EN, 1);
+        v = SET(v, DC_GPIO_DDC1_MASK, DC_GPIO_DDC1CLK_PD_EN, 1);
+        rdna3_wreg(d, reg, v);
+    }
+    if (GET(v, DC_GPIO_DDC1_MASK, AUX_PAD1_MODE)) {
+        d->os.udelay(d->os.ctx, 2000);   /* let the pins de-assert first */
+        (void)ddc_pad_aux(d, n, 0);
+    }
+}
+
+/* acquire_i2c_hw_engine + setup_engine */
+static int i2c_acquire(rdna3_dev *d, i2c_hw *e)
+{
+    uint32_t n = e->n;
+    if (!i2c_engine_available(d, n))
+        return RD_AUX_ERR_ACQUIRE;
+    ddc_pad_i2c(d, n);
+    rmw(d, RI(d, regDC_I2C_ARBITRATION), FM(DC_I2C_ARBITRATION, DC_I2C_SW_USE_I2C_REG_REQ),
+        FV(DC_I2C_ARBITRATION, DC_I2C_SW_USE_I2C_REG_REQ, 1));
+    i2c_set_speed(d, n, I2C_SPEED_KHZ);
+    rmw(d, RI(d, regDC_I2C_CONTROL),
+        FM(DC_I2C_CONTROL, DC_I2C_GO) | FM(DC_I2C_CONTROL, DC_I2C_SOFT_RESET) |
+            FM(DC_I2C_CONTROL, DC_I2C_SEND_RESET) | FM(DC_I2C_CONTROL, DC_I2C_SW_STATUS_RESET) |
+            FM(DC_I2C_CONTROL, DC_I2C_TRANSACTION_COUNT) | FM(DC_I2C_CONTROL, DC_I2C_DDC_SELECT),
+        FV(DC_I2C_CONTROL, DC_I2C_SW_STATUS_RESET, 1) | FV(DC_I2C_CONTROL, DC_I2C_DDC_SELECT, n));
+    rmw(d, I2C_SETUP(d, n),
+        FM(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_TIME_LIMIT) | FM(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_SEND_RESET_LENGTH) |
+            FM(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_ENABLE),
+        FV(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_TIME_LIMIT, I2C_SETUP_TIME_LIMIT_DCN) |
+            FV(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_SEND_RESET_LENGTH, I2C_SEND_RESET_LENGTH_9) |
+            FV(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_ENABLE, 1));
+    rmw(d, RI(d, regDC_I2C_ARBITRATION), FM(DC_I2C_ARBITRATION, DC_I2C_NO_QUEUED_SW_GO), 0);
+    e->transaction_count = e->buffer_used_bytes = e->buffer_used_write = 0;
+    return 0;
+}
+
+/* release_engine (engine_keep_power_up_count 1: the line stays enabled) */
+static void i2c_release(rdna3_dev *d, i2c_hw *e)
+{
+    uint32_t st = GET(rdna3_rreg(d, RI(d, regDC_I2C_SW_STATUS)), DC_I2C_SW_STATUS, DC_I2C_SW_STATUS);
+    if (st == I2C_STATUS_USED_BY_SW)
+        rmw(d, RI(d, regDC_I2C_CONTROL), FM(DC_I2C_CONTROL, DC_I2C_SOFT_RESET) | FM(DC_I2C_CONTROL, DC_I2C_SW_STATUS_RESET),
+            FV(DC_I2C_CONTROL, DC_I2C_SOFT_RESET, 1) | FV(DC_I2C_CONTROL, DC_I2C_SW_STATUS_RESET, 1));
+    else
+        rmw(d, RI(d, regDC_I2C_CONTROL), FM(DC_I2C_CONTROL, DC_I2C_SW_STATUS_RESET),
+            FV(DC_I2C_CONTROL, DC_I2C_SW_STATUS_RESET, 1));
+    i2c_set_speed(d, e->n, I2C_SPEED_KHZ);   /* i2c_speed_in_khz_hdcp */
+    rmw(d, RI(d, regDC_I2C_ARBITRATION),
+        FM(DC_I2C_ARBITRATION, DC_I2C_SW_DONE_USING_I2C_REG) | FM(DC_I2C_ARBITRATION, DC_I2C_SW_USE_I2C_REG_REQ),
+        FV(DC_I2C_ARBITRATION, DC_I2C_SW_DONE_USING_I2C_REG, 1));
+}
+
+/* process_transaction: queue one payload; 1 when it closes the batch */
+static int i2c_queue(rdna3_dev *d, i2c_hw *e, const rd_i2c_payload *p, int mot)
+{
+    int rd = !p->write;
+    int last = e->transaction_count == 3 || (p->write && !mot) || rd;
+    uint32_t reg = RI(d, regDC_I2C_TRANSACTION0) + e->transaction_count, data, i;
+    uint8_t addr = (uint8_t)((p->addr7 << 1) | (rd ? 1 : 0));
+    rmw(d, reg,
+        FM(DC_I2C_TRANSACTION0, DC_I2C_STOP_ON_NACK0) | FM(DC_I2C_TRANSACTION0, DC_I2C_START0) |
+            FM(DC_I2C_TRANSACTION0, DC_I2C_RW0) | FM(DC_I2C_TRANSACTION0, DC_I2C_COUNT0) |
+            FM(DC_I2C_TRANSACTION0, DC_I2C_STOP0),
+        FV(DC_I2C_TRANSACTION0, DC_I2C_STOP_ON_NACK0, 1) | FV(DC_I2C_TRANSACTION0, DC_I2C_START0, 1) |
+            FV(DC_I2C_TRANSACTION0, DC_I2C_RW0, rd) | FV(DC_I2C_TRANSACTION0, DC_I2C_COUNT0, p->len) |
+            FV(DC_I2C_TRANSACTION0, DC_I2C_STOP0, last));
+    if (e->transaction_count == 0) {
+        data = FV(DC_I2C_DATA, DC_I2C_DATA, addr) | FV(DC_I2C_DATA, DC_I2C_INDEX_WRITE, 1);
+        e->buffer_used_write = 0;
+    } else {
+        data = FV(DC_I2C_DATA, DC_I2C_DATA, addr);
+    }
+    rdna3_wreg(d, RI(d, regDC_I2C_DATA), data);
+    e->buffer_used_write++;
+    if (p->write)
+        for (i = 0; i < p->len; i++) {
+            data = SET(data, DC_I2C_DATA, DC_I2C_INDEX_WRITE, 0);
+            data = SET(data, DC_I2C_DATA, DC_I2C_DATA, p->data[i]);
+            rdna3_wreg(d, RI(d, regDC_I2C_DATA), data);
+            e->buffer_used_write++;
+        }
+    e->transaction_count++;
+    e->buffer_used_bytes += (p->write ? 0 : p->len) + 1;
+    return last;
+}
+
+/* reset_hw_engine + execute_transaction */
+static void i2c_go(rdna3_dev *d, i2c_hw *e)
+{
+    rmw(d, RI(d, regDC_I2C_CONTROL), FM(DC_I2C_CONTROL, DC_I2C_SW_STATUS_RESET),
+        FV(DC_I2C_CONTROL, DC_I2C_SW_STATUS_RESET, 1));
+    rmw(d, I2C_SETUP(d, e->n),
+        FM(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_DATA_DRIVE_EN) | FM(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_CLK_DRIVE_EN) |
+            FM(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_DATA_DRIVE_SEL) |
+            FM(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_INTRA_TRANSACTION_DELAY) |
+            FM(DC_I2C_DDC1_SETUP, DC_I2C_DDC1_INTRA_BYTE_DELAY), 0);
+    rmw(d, RI(d, regDC_I2C_CONTROL),
+        FM(DC_I2C_CONTROL, DC_I2C_SOFT_RESET) | FM(DC_I2C_CONTROL, DC_I2C_SW_STATUS_RESET) |
+            FM(DC_I2C_CONTROL, DC_I2C_SEND_RESET) | FM(DC_I2C_CONTROL, DC_I2C_GO) |
+            FM(DC_I2C_CONTROL, DC_I2C_TRANSACTION_COUNT),
+        FV(DC_I2C_CONTROL, DC_I2C_TRANSACTION_COUNT, e->transaction_count - 1));
+    rmw(d, RI(d, regDC_I2C_CONTROL), FM(DC_I2C_CONTROL, DC_I2C_GO), FV(DC_I2C_CONTROL, DC_I2C_GO, 1));
+    e->transaction_count = 0;
+    e->buffer_used_bytes = 0;
+}
+
+/* get_channel_status polled while USED_BY_SW */
+static int i2c_wait(rdna3_dev *d, uint32_t timeout_us)
+{
+    uint32_t i, v = 0;
+    for (i = 0; i <= timeout_us; i++) {
+        v = rdna3_rreg(d, RI(d, regDC_I2C_SW_STATUS));
+        if (GET(v, DC_I2C_SW_STATUS, DC_I2C_SW_STATUS) != I2C_STATUS_USED_BY_SW)
+            break;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    if (GET(v, DC_I2C_SW_STATUS, DC_I2C_SW_STATUS) == I2C_STATUS_USED_BY_SW)
+        return RD_AUX_ERR_TIMEOUT;
+    if (v & DC_I2C_SW_STATUS__DC_I2C_SW_STOPPED_ON_NACK_MASK)
+        return RD_AUX_ERR_NACK;
+    if (v & DC_I2C_SW_STATUS__DC_I2C_SW_TIMEOUT_MASK)
+        return RD_AUX_ERR_TIMEOUT;
+    if (v & DC_I2C_SW_STATUS__DC_I2C_SW_ABORTED_MASK)
+        return RD_AUX_ERR_INVALID_REPLY;
+    return 0;
+}
+
+/* dce_i2c_submit_command_hw */
+int dcddc_i2c_cmd(rdna3_dev *d, uint32_t n, rd_i2c_payload *p, uint32_t np)
+{
+    i2c_hw e = { n, 0, 0, 0 };
+    uint32_t k, i;
+    int r = 0;
+    if (!d->ipver[HWIP_DCE].present || n >= RD_AUX_ENGINES || !np || np > 4)
+        return RDNA3_EINVAL;
+    r = i2c_acquire(d, &e);
+    if (r)
+        return r;
+    for (k = 0; k < np && !r; k++) {
+        int mot = k != np - 1;
+        uint32_t timeout;
+        if (p[k].len >= I2C_HW_BUFFER_SIZE - e.buffer_used_bytes) {
+            r = RDNA3_EINVAL;
+            break;
+        }
+        /* get_transaction_timeout_hw, before the request is queued */
+        timeout = (1000 * I2C_TIMEOUT_CLOCKS / I2C_SPEED_KHZ) *
+                  (1 + ((p[k].len + 1) << 3) + 1 + (e.buffer_used_bytes << 3) + (e.transaction_count << 1));
+        if (i2c_hw_busy(d, n)) {
+            r = RD_AUX_ERR_ACQUIRE;
+            break;
+        }
+        if (!i2c_queue(d, &e, &p[k], mot))
+            continue;
+        if (i2c_hw_busy(d, n)) {
+            r = RD_AUX_ERR_ACQUIRE;
+            break;
+        }
+        i2c_go(d, &e);
+        r = i2c_wait(d, timeout);
+        if (!r && !p[k].write) {
+            /* process_channel_reply: the read data follows what was written */
+            rdna3_wreg(d, RI(d, regDC_I2C_DATA),
+                       FV(DC_I2C_DATA, DC_I2C_INDEX, e.buffer_used_write) |
+                           FV(DC_I2C_DATA, DC_I2C_DATA_RW, 1) | FV(DC_I2C_DATA, DC_I2C_INDEX_WRITE, 1));
+            for (i = 0; i < p[k].len; i++)
+                p[k].data[i] = (uint8_t)GET(rdna3_rreg(d, RI(d, regDC_I2C_DATA)), DC_I2C_DATA, DC_I2C_DATA);
+        }
+    }
+    i2c_release(d, &e);
+    return r;
+}
+
+int dcddc_read_edid(rdna3_dev *d, uint32_t n, uint8_t *edid, uint32_t cap)
+{
+    static const uint8_t hdr[8] = { 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00 };
+    uint32_t blocks = 1, b, i, sum;
+    if (cap < RD_EDID_BLOCK)
+        return RDNA3_EINVAL;
+    for (b = 0; b < blocks; b++) {
+        uint8_t seg = (uint8_t)(b / 2), off = (uint8_t)((b & 1) * RD_EDID_BLOCK);
+        rd_i2c_payload p[3];
+        uint32_t np = 0;
+        int r;
+        if (seg)
+            p[np++] = (rd_i2c_payload){ 0x30, 1, &seg, 1 };
+        p[np++] = (rd_i2c_payload){ 0x50, 1, &off, 1 };
+        p[np++] = (rd_i2c_payload){ 0x50, 0, edid + b * RD_EDID_BLOCK, RD_EDID_BLOCK };
+        r = dcddc_i2c_cmd(d, n, p, np);
+        if (r)
+            return b ? (int)(b * RD_EDID_BLOCK) : r;
+        for (i = 0, sum = 0; i < RD_EDID_BLOCK; i++)
+            sum += edid[b * RD_EDID_BLOCK + i];
+        if (!b) {
+            for (i = 0; i < 8; i++)
+                if (edid[i] != hdr[i])
+                    return RDNA3_EINVAL;
+            if (sum & 0xff) {
+                RERR(d, "DDC%u: EDID base block checksum wrong", n + 1);
+                return RDNA3_EINVAL;
+            }
+            blocks = 1u + edid[126];
+            if (blocks > cap / RD_EDID_BLOCK)
+                blocks = cap / RD_EDID_BLOCK;
+            if (blocks > RD_EDID_MAX / RD_EDID_BLOCK)
+                blocks = RD_EDID_MAX / RD_EDID_BLOCK;
+        } else if (sum & 0xff) {
+            RERR(d, "DDC%u: EDID extension %u checksum wrong, dropped", n + 1, b);
+            return (int)(b * RD_EDID_BLOCK);
+        }
+    }
+    return (int)(blocks * RD_EDID_BLOCK);
+}
+
 int dcaux_probe(rdna3_dev *d, rdna3_connector *out, uint32_t max)
 {
     uint32_t n, found = 0;
@@ -384,43 +668,45 @@ int dcaux_probe(rdna3_dev *d, rdna3_connector *out, uint32_t max)
     for (n = 0; n < RD_AUX_ENGINES && found < max; n++) {
         rdna3_connector *c = &out[found];
         uint8_t dpcd[16];
-        int r;
+        uint32_t aux_status;
+        int r, pad_was_aux = ddc_pad_aux(d, n, 1);
         unsigned i;
         for (i = 0; i < sizeof(*c); i++)
             ((uint8_t *)c)[i] = 0;
-        int pad_was_aux = ddc_pad_aux(d, n, 1);
         c->aux = n;
         c->hpd = dcaux_hpd_sense(d, n);
         r = dcaux_dpcd_read(d, n, 0x000, dpcd, 16);
+        aux_status = RA(d, regDP_AUX0_AUX_SW_STATUS, n);
         if (r == 16 && dpcd[0]) {
             c->dp = 1;
             c->dpcd_rev = dpcd[0];
             c->max_link_rate = dpcd[1];
             c->max_lane_count = dpcd[2] & 0x1f;
+            r = dcaux_read_edid(d, n, c->edid, sizeof(c->edid));
+            c->edid_len = r > 0 ? r : 0;
+            if (c->hpd && r <= 0)
+                RERR(d, "AUX%u: DisplayPort sink, EDID over I2C-over-AUX failed (%d)", n, r);
+        } else {
+            /* no DPCD: an HDMI/DVI sink, or a DP++ adaptor (NON_AUX_MODE);
+             * its EDID is on the DDC, through the I2C engine */
+            (void)pad_was_aux;
+            if (c->hpd) {
+                r = dcddc_read_edid(d, n, c->edid, sizeof(c->edid));
+                c->edid_len = r > 0 ? r : 0;
+                c->edid_ddc = r > 0;
+                if (r <= 0)
+                    RERR(d, "AUX%u/DDC%u: HPD high, no DPCD (AUX_SW_STATUS 0x%08x) and no EDID on "
+                         "the DDC (%d), DDC%u_MASK 0x%08x, I2C SW_STATUS 0x%08x", n, n + 1,
+                         aux_status, r, n + 1, rdna3_rreg(d, ddc_mask_reg(d, n)),
+                         rdna3_rreg(d, RI(d, regDC_I2C_SW_STATUS)));
+            } else {
+                (void)ddc_pad_aux(d, n, 0);   /* nothing there: back to I2C mode */
+            }
         }
-        if (c->hpd && !c->dp) {
-            /* a sink is plugged but DPCD does not answer: what the engine saw
-             * (an HDMI sink has no DPCD; a DP one should) */
-            uint32_t reply = 0xff;
-            int r1 = dcaux_transfer(d, n, RD_AUX_DP_READ, 0x000, dpcd, 1, &reply);
-            RERR(d, "AUX%u: HPD high, DPCD read %d (reply 0x%x): CONTROL 0x%08x ARB 0x%08x "
-                 "SW_STATUS 0x%08x SW_CONTROL 0x%08x DPHY_TX 0x%08x RX0 0x%08x RX1 0x%08x "
-                 "DDC%u_MASK 0x%08x", n, r1,
-                 reply, RA(d, regDP_AUX0_AUX_CONTROL, n), RA(d, regDP_AUX0_AUX_ARB_CONTROL, n),
-                 RA(d, regDP_AUX0_AUX_SW_STATUS, n), RA(d, regDP_AUX0_AUX_SW_CONTROL, n),
-                 RA(d, regDP_AUX0_AUX_DPHY_TX_CONTROL, n), RA(d, regDP_AUX0_AUX_DPHY_RX_CONTROL0, n),
-                 RA(d, regDP_AUX0_AUX_DPHY_RX_CONTROL1, n), n + 1, rdna3_rreg(d, ddc_mask_reg(d, n)));
-        }
-        r = dcaux_read_edid(d, n, c->edid, sizeof(c->edid));
-        if (c->hpd && r <= 0)
-            RERR(d, "AUX%u: HPD high, EDID over I2C-over-AUX failed (%d)", n, r);
-        c->edid_len = r > 0 ? r : 0;
-        /* no DisplayPort sink: give the pad back its I2C mode (HDMI/DVI DDC) */
-        if (!c->dp && !pad_was_aux)
-            (void)ddc_pad_aux(d, n, 0);
         if (c->hpd || c->dp || c->edid_len) {
-            RLOG(d, "AUX%u: HPD %d, %s, EDID %d bytes", n, c->hpd,
-                 c->dp ? "DisplayPort sink" : "no DPCD", c->edid_len);
+            RLOG(d, "AUX%u: HPD %d, %s, EDID %d bytes%s", n, c->hpd,
+                 c->dp ? "DisplayPort sink" : "no DPCD", c->edid_len,
+                 c->edid_ddc ? " (DDC, TMDS sink)" : "");
             found++;
         }
     }

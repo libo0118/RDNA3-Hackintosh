@@ -55,6 +55,7 @@
 #include "gen/gc_11_0_0_rs64.h"
 #include "gen/gc_11_0_0_mes.h"
 #include "gen/dcn_3_2_0_gpio.h"
+#include "gen/dcn_3_2_0_i2c.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
@@ -165,6 +166,12 @@ typedef struct sim {
     uint8_t  aux_tx[20], aux_rx[20];
     uint32_t aux_ptr, aux_nrx, aux_status, aux_arb;
     unsigned aux_gos, aux_bad, aux_non_aux;
+    /* HW I2C engine: a TMDS sink (HDMI, or a DP++ adaptor) on DDC line
+     * i2c_sink+1 answers 0x50 (EDID) and 0x30 (segment) with S.edid */
+    int i2c_sink;              /* engine index, -1 = none */
+    uint8_t i2c_buf[538], ddc_seg, ddc_off;
+    uint32_t i2c_wi, i2c_ri;
+    unsigned i2c_gos, i2c_nacks;
     uint8_t  dpcd[0x800];
     uint8_t  edid[256];
     /* DMCUB: the firmware's view (boot checks, mailbox, GPINT) */
@@ -806,6 +813,41 @@ static void dmub_inbox(uint32_t wptr)
     S.reg[DMR(regDMCUB_INBOX1_RPTR)] = rptr;
 }
 
+/* DC_I2C_CONTROL.GO: run TRANSACTION0..count-1 from the data buffer */
+static void i2c_go(uint32_t ctl)
+{
+    uint32_t count = ((ctl & DC_I2C_CONTROL__DC_I2C_TRANSACTION_COUNT_MASK) >>
+                      DC_I2C_CONTROL__DC_I2C_TRANSACTION_COUNT__SHIFT) + 1;
+    uint32_t line = (ctl & DC_I2C_CONTROL__DC_I2C_DDC_SELECT_MASK) >> DC_I2C_CONTROL__DC_I2C_DDC_SELECT__SHIFT;
+    uint32_t pad = S.reg[DCN_B2 + regDC_GPIO_DDC1_MASK + (regDC_GPIO_DDC2_MASK - regDC_GPIO_DDC1_MASK) * line];
+    uint32_t setup = S.reg[DCN_B2 + regDC_I2C_DDC1_SETUP + (regDC_I2C_DDC2_SETUP - regDC_I2C_DDC1_SETUP) * line];
+    int sink = (int)line == S.i2c_sink && !(pad & DC_GPIO_DDC1_MASK__AUX_PAD1_MODE_MASK) &&
+               (setup & DC_I2C_DDC1_SETUP__DC_I2C_DDC1_ENABLE_MASK);
+    uint32_t pos = 0, t, i, nack = 0;
+    S.i2c_gos++;
+    for (t = 0; t < count && !nack; t++) {
+        uint32_t tr = S.reg[DCN_B2 + regDC_I2C_TRANSACTION0 + t];
+        uint32_t cnt = (tr & DC_I2C_TRANSACTION0__DC_I2C_COUNT0_MASK) >> DC_I2C_TRANSACTION0__DC_I2C_COUNT0__SHIFT;
+        int rd = (tr & DC_I2C_TRANSACTION0__DC_I2C_RW0_MASK) != 0;
+        uint32_t dev = S.i2c_buf[pos++ % sizeof(S.i2c_buf)] >> 1;
+        if (!sink || (dev != 0x50 && dev != 0x30)) { nack = 1; break; }
+        for (i = 0; i < cnt; i++, pos++) {
+            uint8_t *b = &S.i2c_buf[pos % sizeof(S.i2c_buf)];
+            if (!rd) {
+                if (dev == 0x30) S.ddc_seg = *b; else S.ddc_off = *b;
+            } else {
+                uint32_t o = S.ddc_seg * 256u + S.ddc_off++;
+                *b = o < sizeof(S.edid) ? S.edid[o] : 0xff;
+            }
+        }
+        if (tr & DC_I2C_TRANSACTION0__DC_I2C_STOP0_MASK)
+            S.ddc_seg = 0;   /* the segment pointer resets at STOP */
+    }
+    S.i2c_nacks += nack;
+    S.reg[DCN_B2 + regDC_I2C_SW_STATUS] = nack ? DC_I2C_SW_STATUS__DC_I2C_SW_STOPPED_ON_NACK_MASK
+                                               : DC_I2C_SW_STATUS__DC_I2C_SW_DONE_MASK;
+}
+
 /* AUX_SW_GO on engine n: decode the request FIFO, answer like the sink */
 static void aux_go(uint32_t n)
 {
@@ -827,6 +869,11 @@ static void aux_go(uint32_t n)
     if (((S.reg[AUXR(regDP_AUX0_AUX_CONTROL, n)] & DP_AUX0_AUX_CONTROL__AUX_HPD_SEL_MASK) >>
          DP_AUX0_AUX_CONTROL__AUX_HPD_SEL__SHIFT) != n) {
         /* mode detection on another connector's HPD pin (the card: HPD_SEL 0) */
+        S.aux_non_aux++;
+        S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK | DP_AUX0_AUX_SW_STATUS__AUX_SW_NON_AUX_MODE_MASK;
+        return;
+    }
+    if ((int)n == S.i2c_sink) {   /* a TMDS sink: the mode detection sees no AUX */
         S.aux_non_aux++;
         S.aux_status = DP_AUX0_AUX_SW_STATUS__AUX_SW_DONE_MASK | DP_AUX0_AUX_SW_STATUS__AUX_SW_NON_AUX_MODE_MASK;
         return;
@@ -1757,6 +1804,41 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         return;
     }
     /* DP AUX engines (DCN segment 2) */
+    if (dw == DCN_B2 + regDC_I2C_DATA) {
+        uint32_t idx = (v & DC_I2C_DATA__DC_I2C_INDEX_MASK) >> DC_I2C_DATA__DC_I2C_INDEX__SHIFT;
+        if (v & DC_I2C_DATA__DC_I2C_DATA_RW_MASK) {
+            if (v & DC_I2C_DATA__DC_I2C_INDEX_WRITE_MASK)
+                S.i2c_ri = idx;
+        } else {
+            if (v & DC_I2C_DATA__DC_I2C_INDEX_WRITE_MASK)
+                S.i2c_wi = idx;
+            S.i2c_buf[S.i2c_wi++ % sizeof(S.i2c_buf)] =
+                (uint8_t)((v & DC_I2C_DATA__DC_I2C_DATA_MASK) >> DC_I2C_DATA__DC_I2C_DATA__SHIFT);
+        }
+        *R(dw) = v;
+        return;
+    }
+    if (dw == DCN_B2 + regDC_I2C_CONTROL) {
+        if (v & DC_I2C_CONTROL__DC_I2C_SW_STATUS_RESET_MASK)
+            S.reg[DCN_B2 + regDC_I2C_SW_STATUS] = 0;
+        *R(dw) = v & ~(DC_I2C_CONTROL__DC_I2C_GO_MASK | DC_I2C_CONTROL__DC_I2C_SW_STATUS_RESET_MASK |
+                       DC_I2C_CONTROL__DC_I2C_SOFT_RESET_MASK);
+        if (v & DC_I2C_CONTROL__DC_I2C_GO_MASK)
+            i2c_go(v);
+        return;
+    }
+    if (dw == DCN_B2 + regDC_I2C_ARBITRATION) {
+        uint32_t st = (S.reg[dw] & DC_I2C_ARBITRATION__DC_I2C_REG_RW_CNTL_STATUS_MASK) >>
+                      DC_I2C_ARBITRATION__DC_I2C_REG_RW_CNTL_STATUS__SHIFT;
+        if (v & DC_I2C_ARBITRATION__DC_I2C_SW_USE_I2C_REG_REQ_MASK)
+            st = 1;
+        if (v & DC_I2C_ARBITRATION__DC_I2C_SW_DONE_USING_I2C_REG_MASK)
+            st = 0;
+        *R(dw) = (v & ~(DC_I2C_ARBITRATION__DC_I2C_REG_RW_CNTL_STATUS_MASK |
+                        DC_I2C_ARBITRATION__DC_I2C_SW_DONE_USING_I2C_REG_MASK)) |
+                 (st << DC_I2C_ARBITRATION__DC_I2C_REG_RW_CNTL_STATUS__SHIFT);
+        return;
+    }
     for (uint32_t n = 0; n < RD_AUX_ENGINES; n++) {
         if (dw == AUXR(regDP_AUX0_AUX_ARB_CONTROL, n)) {
             uint32_t st = 0;
@@ -1919,6 +2001,10 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
     if (dw == mmMM_DATA) {
         uint32_t *w = mm_word();
         return w ? *w : 0;
+    }
+    if (dw == DCN_B2 + regDC_I2C_DATA) {
+        uint32_t b = S.i2c_buf[S.i2c_ri++ % sizeof(S.i2c_buf)];
+        return (S.reg[dw] & ~DC_I2C_DATA__DC_I2C_DATA_MASK) | (b << DC_I2C_DATA__DC_I2C_DATA__SHIFT);
     }
     for (uint32_t n = 0; n < RD_AUX_ENGINES; n++) {
         if (dw == AUXR(regDP_AUX0_AUX_SW_STATUS, n))
@@ -2119,6 +2205,7 @@ static void run(const char *fwdir)
     int ret;
 
     memset(&S, 0, sizeof(S));
+    S.i2c_sink = -1;
     S.verbose = getenv("SIM_VERBOSE") != NULL;
     S.vram = calloc(1, BAR_LEN);
     *R(MP0(35)) = 0x80000000u;  /* bootloader ready */
@@ -3205,6 +3292,23 @@ static void run(const char *fwdir)
         CHECK(S.aux_non_aux == 0);
         CHECK(((S.reg[AUXR(regDP_AUX0_AUX_CONTROL, 2)] & DP_AUX0_AUX_CONTROL__AUX_HPD_SEL_MASK) >>
                DP_AUX0_AUX_CONTROL__AUX_HPD_SEL__SHIFT) == 2);
+        /* a TMDS sink (the card: HDMI, and a DP->HDMI adaptor on DP-3) on
+         * engine 2: AUX says NON_AUX_MODE, the EDID comes over the DDC
+         * through the HW I2C engine, its pad back in I2C mode */
+        S.i2c_sink = 2;
+        S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] = HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK;
+        memset(edid, 0, sizeof(edid));
+        CHECK(dcddc_read_edid(&dev, 2, edid, sizeof(edid)) == 256 && memcmp(edid, S.edid, 256) == 0);
+        CHECK(dcddc_read_edid(&dev, 1, edid, sizeof(edid)) == RD_AUX_ERR_NACK);
+        CHECK(dcaux_probe(&dev, conn, RD_AUX_ENGINES) == 2);
+        CHECK(conn[1].aux == 2 && conn[1].hpd && !conn[1].dp && conn[1].edid_ddc && conn[1].edid_len == 256);
+        CHECK(memcmp(conn[1].edid, S.edid, 256) == 0 && conn[0].dp && !conn[0].edid_ddc);
+        CHECK(!(S.reg[DCN_B2 + regDC_GPIO_DDC3_MASK] & DC_GPIO_DDC1_MASK__AUX_PAD1_MODE_MASK));
+        CHECK(((S.reg[DCN_B2 + regDC_I2C_ARBITRATION] & DC_I2C_ARBITRATION__DC_I2C_REG_RW_CNTL_STATUS_MASK)
+               >> DC_I2C_ARBITRATION__DC_I2C_REG_RW_CNTL_STATUS__SHIFT) == 0);   /* released */
+        CHECK(S.i2c_gos >= 4);
+        S.i2c_sink = -1;
+        S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] = 0;
         CHECK(conn[0].aux == 0 && conn[0].hpd && conn[0].dp && conn[0].dpcd_rev == 0x14 &&
               conn[0].max_link_rate == 0x1e && conn[0].max_lane_count == 4 && conn[0].edid_len == 256);
         CHECK(S.aux_bad == 0);

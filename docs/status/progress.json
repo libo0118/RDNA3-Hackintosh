@@ -1,7 +1,7 @@
 {
  "amdgpu": {
   "works": 219,
-  "ported": 241,
+  "ported": 242,
   "total": 1291,
   "works_pct": 17.0,
   "ported_pct": 18.7,
@@ -1233,8 +1233,8 @@
      "9"
     ],
     "works": 0,
-    "ported": 11,
-    "todo": 68,
+    "ported": 12,
+    "todo": 67,
     "items": {
      "acquire": "ported",
      "acquire_engine": "ported",
@@ -1313,7 +1313,7 @@
      "optc32_setup_manual_trigger": "todo",
      "optc32_wait_odm_doublebuffer_pending_clear": "todo",
      "read_channel_reply": "ported",
-     "release_engine": "todo",
+     "release_engine": "ported",
      "submit_channel_request": "ported"
     }
    },

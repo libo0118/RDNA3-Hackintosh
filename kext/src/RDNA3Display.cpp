@@ -183,7 +183,8 @@ static const rdna3_display_path *path_for_aux(const rdna3_display_path *p, uint3
     return nullptr;
 }
 
-/* DP AUX engines 0-4: HPD sense, DPCD, EDID. Read-only on the display
+/* DP AUX engines 0-4: HPD sense, DPCD, EDID (over AUX, or the DDC for
+ * HDMI / DP++ sinks). Read-only on the display
  * state (the AUX channel is a side band); what it finds goes into the
  * IORegistry as RDNA3,Connector<n>,* and to the framebuffer (displayEdid). */
 void RDNA3Accel::displayProbeConnectors()
@@ -221,6 +222,8 @@ void RDNA3Accel::displayProbeConnectors()
                 setProperty(key, d);
                 d->release();
             }
+            snprintf(key, sizeof(key), "RDNA3,Connector%u,EDIDSource", i);
+            setProperty(key, c->edid_ddc ? "DDC" : "AUX");
             if (edid_parse(c->edid, (uint32_t)c->edid_len, &e) == 0) {
                 snprintf(key, sizeof(key), "RDNA3,Connector%u,Monitor", i);
                 setProperty(key, e.name[0] ? e.name : e.manufacturer);
@@ -267,20 +270,36 @@ IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
         return kIOReturnNotReady;
     e->length = 0;
     e->connector = ~0u;
-    /* head -> connector: the first connected sink with an EDID, for head 0 */
+    /* head -> connector, until the OTG -> DIG -> PHY routing is read back:
+     * the sink whose EDID has the mode head 0 is scanning out (its preferred
+     * mode first), else the first connected sink with an EDID */
     if (e->head != 0)
         return kIOReturnNotFound;
+    int best = -1, bestScore = -1;
     for (uint32_t i = 0; i < fNConnectors; i++) {
         const rdna3_connector *c = &fConnectors[i];
-        if (c->edid_len > 0 && (c->hpd || c->dp)) {
-            uint32_t n = (uint32_t)c->edid_len < RD3K_EDID_MAX ? (uint32_t)c->edid_len : RD3K_EDID_MAX;
-            memcpy(e->data, c->edid, n);
-            e->length = n;
-            e->connector = c->aux;
-            return kIOReturnSuccess;
+        rdna3_edid ed;
+        int score = 0;
+        if (c->edid_len <= 0 || !(c->hpd || c->dp))
+            continue;
+        if (fDcn->nheads && edid_parse(c->edid, (uint32_t)c->edid_len, &ed) == 0) {
+            int k = dcn32_match_head_mode(&fDcn->head[0], 0, &ed);
+            if (k >= 0)
+                score = ed.mode[k].preferred ? 2 : 1;
+        }
+        if (score > bestScore) {
+            best = (int)i;
+            bestScore = score;
         }
     }
-    return kIOReturnNotFound;
+    if (best < 0)
+        return kIOReturnNotFound;
+    const rdna3_connector *c = &fConnectors[best];
+    uint32_t n = (uint32_t)c->edid_len < RD3K_EDID_MAX ? (uint32_t)c->edid_len : RD3K_EDID_MAX;
+    memcpy(e->data, c->edid, n);
+    e->length = n;
+    e->connector = c->aux;
+    return kIOReturnSuccess;
 }
 
 void RDNA3Accel::displayFree()
