@@ -85,4 +85,11 @@
 #define CP_HQD_IQ_TIMER__PROCESSING_IQ_MASK                      0x40000000L
 #define CP_HQD_IQ_TIMER__ACTIVE_MASK                             0x80000000L
 
+/* CP_MES_GP3_LO */
+#define regCP_MES_GP3_LO                                         0x2849
+#define regCP_MES_GP3_LO_BASE_IDX                                1
+#define regCP_MES_GP3_LO_DEFAULT                                 0x00000000
+#define CP_MES_GP3_LO__DATA__SHIFT                               0x0
+#define CP_MES_GP3_LO__DATA_MASK                                 0xFFFFFFFFL
+
 #endif /* GC_11_0_0_MES_H */

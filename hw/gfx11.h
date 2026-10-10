@@ -247,6 +247,45 @@ int  gfx11_mes_from_fw(const void *mes, uint32_t mes_len, const void *mes1, uint
                        uint64_t uc_start[2]);
 int  gfx11_mes_kiq_ring_init(rdna3_dev *d, rdna3_mec_ring *r, const uint64_t uc_start[2]);
 
+/* The MES scheduler pipe (me 3 pipe 0), mes_v11_0_hw_init with
+ * enable_mes_kiq: its MQD is mapped by the KIQ (MAP_QUEUES me 2,
+ * ENGINE_SEL 5), then it takes MESAPI frames of 64 dwords
+ * (mes_v11_api_def.h, pack(4)): SET_HW_RESOURCES, QUERY_SCHEDULER_STATUS.
+ * Each submission is followed by a status query whose fence the firmware
+ * writes (mes_v11_0_submit_pkt_and_poll_completion). Needed for user
+ * queues and queue resets; the kernel rings stay on the KIQ mapping. */
+#define RD_DB_MES_RING0       0x00B
+#define RD_MES_API_DWORDS     64
+#define RD_MES_DB_START_DW    0x800   /* amdgpu: first MES doorbell page (aggregated doorbells) */
+#define RD_MES_VERSION_MASK   0xfff
+#define RD_MES_LEGACY_MAP_VER 0x47    /* enable_legacy_queue_map from this firmware on */
+/* writeback page: scheduler context, query fence, API status, ring fence */
+#define RD_MES_WB_SCH_CTX     0
+#define RD_MES_WB_QUERY_FENCE 32
+#define RD_MES_WB_STATUS      64
+#define RD_MES_WB_FENCE       96
+/* MESAPI opcodes (enum MES_SCH_API_OPCODE) */
+#define RD_MES_SCH_API_SET_HW_RSRC            0
+#define RD_MES_SCH_API_QUERY_SCHEDULER_STATUS 11
+#define RD_MES_API_HEADER(op) (1u /* MES_API_TYPE_SCHEDULER */ | ((uint32_t)(op) << 4) | \
+                               ((uint32_t)RD_MES_API_DWORDS << 12))
+typedef struct rdna3_mes {
+    rdna3_mec_ring ring;      /* me 3 pipe 0 queue 0, doorbell MES_RING0 */
+    uint64_t wb;              /* VRAM page, RD_MES_WB_* */
+    uint64_t seq;
+    uint32_t sched_version, kiq_version;   /* CP_MES_GP3_LO of pipe 0 / 1 */
+    int      ready, legacy_queue_map;
+    uint32_t submitted, failed;
+} rdna3_mes;
+int  gfx11_mes_sched_init(rdna3_dev *d, rdna3_mes *m);
+/* mes_v11_0_queue_init(SCHED) + set_hw_resources + query_sched_status */
+int  gfx11_mes_sched_start(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mes *m);
+/* one 64-dword MESAPI frame; 'status_dw' = dword offset of its
+ * struct MES_API_STATUS. 0, RDNA3_ETIME (no fence / status 0) */
+int  gfx11_mes_submit(rdna3_dev *d, rdna3_mes *m, uint32_t *pkt, uint32_t status_dw);
+/* mes_v11_0_kiq_hw_fini for the scheduler pipe: dequeue its HQD */
+void gfx11_mes_sched_stop(rdna3_dev *d, rdna3_mes *m);
+
 /* amdgpu_gfx_kiq_acquire / amdgpu_gfx_compute_queue_acquire for one MEC
  * with 4 pipes x 4 queues: the KIQ is pipe 1 queue 0, KCQ0 pipe 0 queue 0 */
 #define RD_KIQ_PIPE  1
@@ -261,7 +300,10 @@ int  gfx11_kiq_start(rdna3_dev *d, rdna3_mec_ring *kiq);
  * MAP_QUEUES on the KIQ, then the KCQ ring test */
 int  gfx11_kcq_start(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq);
 /* amdgpu_gfx_disable_kcq (UNMAP_QUEUES) + cp_compute_enable(false) */
-void gfx11_mec_stop(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq);
+/* gfx_v11_0_hw_fini order: KCQ unmapped by the KIQ, then
+ * amdgpu_mes_kiq_hw_fini (the scheduler pipe 'mes' dequeued when given,
+ * both MES pipes halted), then the MEC halts (gfx_v11_0_cp_enable(false)) */
+void gfx11_mec_stop(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq, struct rdna3_mes *mes);
 /* compute job: VM flush, ACQUIRE_MEM, HDP flush, IBs, fence (no PFP, no
  * frame control); returns the fence seq, 0 on error */
 uint32_t gfx11_submit_compute_job(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t ctx, uint32_t vmid,

@@ -135,6 +135,9 @@ private:
     rdna3_gfx_ring  *fGfx  = nullptr;  /* level 8 */
     rdna3_mec_ring  *fKiq  = nullptr;  /* level 8, with doorbells */
     rdna3_mec_ring  *fKcq  = nullptr;  /* level 8: the first kernel compute queue */
+    struct rdna3_mes *fMes = nullptr;  /* level 8 + rdna3mes=1: MES scheduler pipe (C1) */
+    bool             fMesWanted = false;
+    void             mesStart(const char *why);
     IOMemoryMap     *fDoorbell = nullptr;   /* BAR2 */
     /* power management (level 5, rdna3pm) */
     uint32_t         fPmMode = 1;

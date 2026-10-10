@@ -74,7 +74,7 @@ typedef struct rdna3_ipver {
 
 /* VRAM allocator: first-fit over a list of free ranges, no holes reuse
  * needed for bring-up (allocations live as long as the device). */
-#define RDNA3_VRAM_MAX_ALLOCS 64
+#define RDNA3_VRAM_MAX_ALLOCS 128
 typedef struct rdna3_vram_alloc {
     uint64_t offset, size;   /* offset from start of VRAM */
     const char *tag;

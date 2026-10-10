@@ -73,7 +73,7 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
     fLevel = level;
     fVramSize = vramSize;
     {
-        uint32_t msi = 0, db = 1, pm = 1, dmub = 0;
+        uint32_t msi = 0, db = 1, pm = 1, dmub = 0, mes = 0;
         uint64_t pmmask = 0;
         PE_parse_boot_argn("rdna3dmub", &dmub, sizeof(dmub));
         fDmubMode = dmub;
@@ -81,6 +81,8 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
         PE_parse_boot_argn("rdna3doorbell", &db, sizeof(db));
         PE_parse_boot_argn("rdna3pm", &pm, sizeof(pm));
         PE_parse_boot_argn("rdna3pmmask", &pmmask, sizeof(pmmask));
+        PE_parse_boot_argn("rdna3mes", &mes, sizeof(mes));
+        fMesWanted = mes != 0;
         fMsi = msi != 0;
         fDoorbells = db != 0;
         fPmMode = pm;
@@ -162,7 +164,9 @@ void RDNA3Bringup::stopAndFree()
         gfx11_kgq_stop(fDev, fKiq, fGfx);   /* unmapped while the KIQ still runs */
     }
     if (fKiq && fDev)
-        gfx11_mec_stop(fDev, fKiq, fKcq);
+        gfx11_mec_stop(fDev, fKiq, fKcq, fMes);   /* gfx_v11_0_hw_fini order */
+    if (fMes) IOFree(fMes, sizeof(*fMes));
+    fMes = nullptr;
     if (fKcq) IOFree(fKcq, sizeof(*fKcq));
     if (fKiq) IOFree(fKiq, sizeof(*fKiq));
     fKcq = nullptr; fKiq = nullptr;
@@ -791,6 +795,10 @@ bool RDNA3Bringup::hwInit()
             ret = RDNA3_ENODEV;   /* async queue never mapped (no KIQ) */
         publish("RDNA3,GFXResult", (uint64_t)(int64_t)ret);
         publish("RDNA3,GFXAsync", fGfx->async ? 1 : 0);
+        /* mes_v11_0_hw_init comes after GFX in soc21's IP order: the
+         * kernel queues are mapped by the KIQ already (step 8c, opt-in) */
+        if (!ret && fMesWanted && fKiq && fKiq->rb.ready && fKiq->me == 3)
+            mesStart("level 8");
         if (!ret && fIrqLive)
             gfx11_set_eop_interrupt(fDev, fGfx, 1);
         if (!ret && fVmReady) {
@@ -974,6 +982,28 @@ void RDNA3Bringup::dmubInit()
     publishString("RDNA3,DMUB", ret == RDNA3_OK ? "running, mailbox up" : "running, mailbox silent");
     BLOG("DMUB: firmware 0x%08x, boot status 0x%x, %s, caps 0x%08x", fDmub->fw_version,
          fDmub->boot_status, pspLoaded ? "PSP-loaded" : "backdoor", fDmub->feature_caps[0]);
+}
+
+/* mes_v11_0_hw_init: the scheduler pipe mapped by the KIQ, SET_HW_RESOURCES,
+ * QUERY_SCHEDULER_STATUS; the firmware version decides the legacy queue map */
+void RDNA3Bringup::mesStart(const char *why)
+{
+    int ret = RDNA3_OK;
+    if (!fMes) {
+        fMes = (rdna3_mes *)IOMalloc(sizeof(*fMes));
+        if (!fMes)
+            return;
+        bzero(fMes, sizeof(*fMes));
+        ret = gfx11_mes_sched_init(fDev, fMes);
+    }
+    if (!ret)
+        ret = gfx11_mes_sched_start(fDev, fKiq, fMes);
+    publish("RDNA3,MESResult", (uint64_t)(int64_t)ret);
+    publish("RDNA3,MESSchedVersion", fMes->sched_version);
+    publish("RDNA3,MESKiqVersion", fMes->kiq_version);
+    publish("RDNA3,MESLegacyQueueMap", fMes->legacy_queue_map ? 1 : 0);
+    BLOG("MES: scheduler %s %s (%d), firmware sched 0x%x kiq 0x%x", why, ret ? "FAILED" : "up", ret,
+         fMes->sched_version, fMes->kiq_version);
 }
 
 void RDNA3Bringup::pmPublishMetrics()
@@ -1169,6 +1199,9 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
                     fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = true;
             fResetCount++;
             BLOG("hang: GFX soft reset done (%u resets so far)", fResetCount);
+            /* the KIQ restart reset both MES pipes: the scheduler again */
+            if (fMes && fMes->ring.rb.ring_size)
+                mesStart("after soft reset");
         }
     }
     if (!ok)

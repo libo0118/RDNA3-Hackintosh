@@ -1,10 +1,10 @@
 {
  "amdgpu": {
-  "works": 219,
-  "ported": 247,
+  "works": 220,
+  "ported": 255,
   "total": 1291,
   "works_pct": 17.0,
-  "ported_pct": 19.1,
+  "ported_pct": 19.8,
   "groups": [
    {
     "name": "PSP 13",
@@ -627,9 +627,9 @@
     "steps": [
      "8"
     ],
-    "works": 64,
+    "works": 65,
     "ported": 0,
-    "todo": 179,
+    "todo": 178,
     "items": {
      "amdgpu_get_gfx_off_entrycount": "todo",
      "amdgpu_get_gfx_off_residency": "todo",
@@ -708,7 +708,7 @@
      "gfx_v11_0_cp_compute_enable": "works",
      "gfx_v11_0_cp_compute_load_microcode": "todo",
      "gfx_v11_0_cp_compute_load_microcode_rs64": "todo",
-     "gfx_v11_0_cp_enable": "todo",
+     "gfx_v11_0_cp_enable": "works",
      "gfx_v11_0_cp_gfx_enable": "todo",
      "gfx_v11_0_cp_gfx_load_me_microcode": "todo",
      "gfx_v11_0_cp_gfx_load_me_microcode_rs64": "todo",
@@ -955,8 +955,8 @@
      "mes"
     ],
     "works": 0,
-    "ported": 7,
-    "todo": 40,
+    "ported": 14,
+    "todo": 33,
     "items": {
      "convert_to_mes_queue_type": "todo",
      "mes_v11_0_add_hw_queue": "todo",
@@ -970,10 +970,10 @@
      "mes_v11_0_get_misc_op_string": "todo",
      "mes_v11_0_get_op_string": "todo",
      "mes_v11_0_hw_fini": "todo",
-     "mes_v11_0_hw_init": "todo",
+     "mes_v11_0_hw_init": "ported",
      "mes_v11_0_kiq_clear": "todo",
-     "mes_v11_0_kiq_dequeue": "todo",
-     "mes_v11_0_kiq_enable_queue": "todo",
+     "mes_v11_0_kiq_dequeue": "ported",
+     "mes_v11_0_kiq_enable_queue": "ported",
      "mes_v11_0_kiq_hw_fini": "ported",
      "mes_v11_0_kiq_hw_init": "ported",
      "mes_v11_0_kiq_ring_init": "ported",
@@ -985,7 +985,7 @@
      "mes_v11_0_mqd_init": "ported",
      "mes_v11_0_mqd_sw_init": "todo",
      "mes_v11_0_query_sched_status": "todo",
-     "mes_v11_0_queue_init": "todo",
+     "mes_v11_0_queue_init": "ported",
      "mes_v11_0_queue_init_register": "ported",
      "mes_v11_0_remove_hw_queue": "todo",
      "mes_v11_0_reset_hw_queue": "todo",
@@ -995,11 +995,11 @@
      "mes_v11_0_resume_gang": "todo",
      "mes_v11_0_ring_get_rptr": "todo",
      "mes_v11_0_ring_get_wptr": "todo",
-     "mes_v11_0_ring_init": "todo",
+     "mes_v11_0_ring_init": "ported",
      "mes_v11_0_ring_set_wptr": "todo",
-     "mes_v11_0_set_hw_resources": "todo",
+     "mes_v11_0_set_hw_resources": "ported",
      "mes_v11_0_set_hw_resources_1": "todo",
-     "mes_v11_0_submit_pkt_and_poll_completion": "todo",
+     "mes_v11_0_submit_pkt_and_poll_completion": "ported",
      "mes_v11_0_suspend": "todo",
      "mes_v11_0_suspend_gang": "todo",
      "mes_v11_0_sw_fini": "todo",

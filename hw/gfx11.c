@@ -1212,6 +1212,197 @@ int gfx11_kiq_start(rdna3_dev *d, rdna3_mec_ring *kiq)
     return RDNA3_OK;
 }
 
+/* ---------------------------- MES scheduler ---------------------------- */
+
+int gfx11_mes_sched_init(rdna3_dev *d, rdna3_mes *m)
+{
+    /* mes_v11_0_ring_init: me 3 pipe 0, doorbell MES_RING0 */
+    int ret = gfx11_mec_ring_init(d, &m->ring, 0, 0, 0, RD_DB_MES_RING0, 0);   /* 1024 dw */
+    if (ret)
+        return ret;
+    m->ring.me = 3;
+    m->wb = m->ring.rb.wb + 256;   /* the ring's writeback page holds the MES slots too */
+    rdna3_vram_fill(d, m->wb, 0, 256);
+    m->seq = 0;
+    m->ready = 0;
+    m->submitted = m->failed = 0;
+    return RDNA3_OK;
+}
+
+/* gfx_v11_0_kiq_map_queues for AMDGPU_RING_TYPE_MES: me 2, ENGINE_SEL 5 */
+static void kiq_map_mes(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *r)
+{
+    rdna3_gfx_ring *k = &kiq->rb;
+    uint64_t mqd = rdna3_vram_mc(d, r->mqd), wptr = rdna3_vram_mc(d, r->rb.wb + RD_GFX_WB_WPTR);
+    gfx11_write(d, k, PACKET3(PACKET3_MAP_QUEUES, 5));
+    gfx11_write(d, k, (0u << 4) /* QUEUE_SEL */ | (0u << 8) /* VMID */ | (r->queue << 13) |
+                      (r->pipe << 16) | (2u << 18) /* me 2 */ | (0u << 21) /* normal */ |
+                      (0u << 24) | (5u << 26) /* ENGINE_SEL MES */ | (1u << 29) /* NUM_QUEUES */);
+    gfx11_write(d, k, r->rb.doorbell << 2);
+    gfx11_write(d, k, (uint32_t)mqd);
+    gfx11_write(d, k, (uint32_t)(mqd >> 32));
+    gfx11_write(d, k, (uint32_t)wptr);
+    gfx11_write(d, k, (uint32_t)(wptr >> 32));
+    gfx11_commit(d, k);
+}
+
+static void put64(uint32_t *p, uint64_t v)
+{
+    p[0] = (uint32_t)v;
+    p[1] = (uint32_t)(v >> 32);
+}
+
+int gfx11_mes_submit(rdna3_dev *d, rdna3_mes *m, uint32_t *pkt, uint32_t status_dw)
+{
+    rdna3_gfx_ring *rb = &m->ring.rb;
+    uint32_t q[RD_MES_API_DWORDS], i, timeout = 210000;   /* 2.1 s in 10 us steps */
+    uint64_t zero = 0, fence = 0, status = 0, seq;
+    if (!rb->ring_size || status_dw + 4 > RD_MES_API_DWORDS)
+        return RDNA3_EINVAL;
+    rdna3_vram_write(d, m->wb + RD_MES_WB_STATUS, &zero, 8);
+    seq = ++m->seq;
+    put64(pkt + status_dw, rdna3_vram_mc(d, m->wb + RD_MES_WB_STATUS));
+    put64(pkt + status_dw + 2, 1);
+    for (i = 0; i < RD_MES_API_DWORDS; i++)
+        gfx11_write(d, rb, pkt[i]);
+    /* union MESAPI__QUERY_MES_STATUS: header, mes_healthy, api_status at dw 2 */
+    for (i = 0; i < RD_MES_API_DWORDS; i++)
+        q[i] = 0;
+    q[0] = RD_MES_API_HEADER(RD_MES_SCH_API_QUERY_SCHEDULER_STATUS);
+    put64(q + 2, rdna3_vram_mc(d, m->wb + RD_MES_WB_FENCE));
+    put64(q + 4, seq);
+    for (i = 0; i < RD_MES_API_DWORDS; i++)
+        gfx11_write(d, rb, q[i]);
+    gfx11_commit(d, rb);
+    m->submitted++;
+    for (i = 0; i < timeout; i++) {
+        rdna3_vram_read(d, m->wb + RD_MES_WB_FENCE, &fence, 8);
+        if (fence >= seq)
+            break;
+        d->os.udelay(d->os.ctx, 10);
+    }
+    rdna3_vram_read(d, m->wb + RD_MES_WB_STATUS, &status, 8);
+    if (fence < seq || !status) {
+        m->failed++;
+        RERR(d, "MES: no answer to opcode %u (fence %llu of %llu, status %llu)", (pkt[0] >> 4) & 0xff,
+             (unsigned long long)fence, (unsigned long long)seq, (unsigned long long)status);
+        return RDNA3_ETIME;
+    }
+    return RDNA3_OK;
+}
+
+/* mes_v11_0_set_hw_resources with amdgpu_mes_init's masks */
+static int mes_set_hw_resources(rdna3_dev *d, rdna3_mes *m)
+{
+    uint32_t p[RD_MES_API_DWORDS], i;
+    for (i = 0; i < RD_MES_API_DWORDS; i++)
+        p[i] = 0;
+    p[0] = RD_MES_API_HEADER(RD_MES_SCH_API_SET_HW_RSRC);
+    p[1] = 0xffffff00;          /* vmid_mask_mmhub: VMIDs 8-23 for user queues */
+    p[2] = 0xffffff00;          /* vmid_mask_gfxhub */
+    p[3] = 0x1000;              /* gds_size (gfx_v11_0_set_gds_init) */
+    p[4] = 0;                   /* paging_vmid */
+    for (i = 0; i < 4; i++)
+        p[5 + i] = 0xc;         /* compute_hqd_mask: queues 2-3 of the first MEC's pipes */
+    p[13] = 0xfffffffe;         /* gfx_hqd_mask[0]: all but the kernel gfx queue */
+    p[15] = 0xfc;               /* sdma_hqd_mask[0..1], two SDMA 6.0 engines */
+    p[16] = 0xfc;
+    for (i = 0; i < 5; i++)
+        p[17 + i] = RD_MES_DB_START_DW + i * 2;   /* aggregated_doorbells[prio] */
+    put64(p + 22, rdna3_vram_mc(d, m->wb + RD_MES_WB_SCH_CTX));
+    put64(p + 24, rdna3_vram_mc(d, m->wb + RD_MES_WB_QUERY_FENCE));
+    for (i = 0; i < 5; i++) {
+        p[26 + i] = d->reg_base[HWIP_GC][0][i];
+        p[34 + i] = d->reg_base[HWIP_MMHUB][0][i];
+        p[42 + i] = d->reg_base[HWIP_OSSSYS][0][i];
+    }
+    /* api_status at 50; disable_reset, use_different_vmid_compute,
+     * disable_mes_log, enable_level_process_quantum_check,
+     * enable_reg_active_poll */
+    p[54] = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 6) | (1u << 10);
+    p[55] = 50;                 /* oversubscription_timer */
+    return gfx11_mes_submit(d, m, p, 50);
+}
+
+static int mes_query_sched_status(rdna3_dev *d, rdna3_mes *m)
+{
+    uint32_t p[RD_MES_API_DWORDS], i;
+    for (i = 0; i < RD_MES_API_DWORDS; i++)
+        p[i] = 0;
+    p[0] = RD_MES_API_HEADER(RD_MES_SCH_API_QUERY_SCHEDULER_STATUS);
+    return gfx11_mes_submit(d, m, p, 2);
+}
+
+int gfx11_mes_sched_start(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mes *m)
+{
+    uint8_t zero[64] = { 0 };
+    int ret;
+    if (!kiq || !kiq->rb.ready || kiq->me != 3 || !m->ring.rb.ring_size)
+        return RDNA3_EINVAL;
+    m->ready = 0;
+    m->ring.rb.wptr = 0;
+    rdna3_vram_fill(d, m->ring.rb.ring, 0, m->ring.rb.ring_size);
+    rdna3_vram_write(d, m->ring.rb.wb, zero, sizeof(zero));
+    rdna3_vram_fill(d, m->wb, 0, 256);
+    /* mes_v11_0_queue_init(AMDGPU_MES_SCHED_PIPE) */
+    mes_mqd_init(d, &m->ring);
+    kiq_map_mes(d, kiq, &m->ring);
+    ret = kiq_ring_test(d, kiq);   /* mes_v11_0_kiq_enable_queue */
+    if (ret) {
+        RERR(d, "MES: the KIQ did not process MAP_QUEUES for the scheduler pipe");
+        return ret;
+    }
+    m->ring.mapped = 1;
+    grbm_select(d, 3, 0, 0, 0);
+    m->sched_version = RG(d, regCP_MES_GP3_LO);
+    grbm_select(d, 3, 1, 0, 0);
+    m->kiq_version = RG(d, regCP_MES_GP3_LO);
+    grbm_select(d, 0, 0, 0, 0);
+    m->legacy_queue_map = (m->sched_version & RD_MES_VERSION_MASK) >= RD_MES_LEGACY_MAP_VER;
+    ret = mes_set_hw_resources(d, m);
+    if (!ret)
+        ret = mes_query_sched_status(d, m);
+    if (ret) {
+        RERR(d, "MES: scheduler pipe mapped but silent (firmware 0x%x)", m->sched_version);
+        gfx11_mes_sched_stop(d, m);
+        return ret;
+    }
+    m->ready = 1;
+    m->ring.rb.ready = 1;
+    RLOG(d, "MES: scheduler pipe up, firmware sched 0x%x kiq 0x%x%s, doorbell 0x%x", m->sched_version,
+         m->kiq_version, m->legacy_queue_map ? " (legacy queue map)" : "", m->ring.rb.doorbell);
+    return RDNA3_OK;
+}
+
+/* mes_v11_0_kiq_dequeue */
+void gfx11_mes_sched_stop(rdna3_dev *d, rdna3_mes *m)
+{
+    uint32_t i, v;
+    if (!m->ring.mapped)
+        return;
+    grbm_select(d, 3, m->ring.pipe, 0, 0);
+    if (RG(d, regCP_HQD_ACTIVE) & 1) {
+        WG(d, regCP_HQD_DEQUEUE_REQUEST, 1);
+        for (i = 0; i < d->usec_timeout; i++) {
+            if (!(RG(d, regCP_HQD_ACTIVE) & 1))
+                break;
+            d->os.udelay(d->os.ctx, 1);
+        }
+    }
+    v = RG(d, regCP_HQD_PQ_DOORBELL_CONTROL);
+    v = REG_SET_FIELD(v, CP_HQD_PQ_DOORBELL_CONTROL, DOORBELL_EN, 0);
+    v = REG_SET_FIELD(v, CP_HQD_PQ_DOORBELL_CONTROL, DOORBELL_HIT, 1);
+    WG(d, regCP_HQD_PQ_DOORBELL_CONTROL, v);
+    WG(d, regCP_HQD_PQ_DOORBELL_CONTROL, 0);
+    WG(d, regCP_HQD_PQ_WPTR_LO, 0);
+    WG(d, regCP_HQD_PQ_WPTR_HI, 0);
+    WG(d, regCP_HQD_PQ_RPTR, 0);
+    grbm_select(d, 0, 0, 0, 0);
+    m->ring.mapped = 0;
+    m->ready = 0;
+    m->ring.rb.ready = 0;
+}
+
 /* gfx11_kiq_set_resources + gfx11_kiq_map_queues (amdgpu_gfx_enable_kcq) */
 static void kiq_map_kcq(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq)
 {
@@ -1377,7 +1568,7 @@ int gfx11_kcq_start(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq)
     return RDNA3_OK;
 }
 
-void gfx11_mec_stop(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq)
+void gfx11_mec_stop(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq, struct rdna3_mes *mes)
 {
     if (kiq && kiq->rb.ready && kcq && kcq->mapped) {
         /* gfx11_kiq_unmap_queues(RESET_QUEUES) */
@@ -1393,9 +1584,13 @@ void gfx11_mec_stop(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq)
         kcq->mapped = 0;
         kcq->rb.ready = 0;
     }
+    if (kiq && kiq->me == 3) {
+        /* mes_v11_0_kiq_hw_fini */
+        if (mes)
+            gfx11_mes_sched_stop(d, mes);
+        mes_disable(d);
+    }
     cp_compute_enable(d, 0);
-    if (kiq && kiq->me == 3)
-        mes_disable(d);   /* mes_v11_0_kiq_hw_fini */
     if (kiq) {
         kiq->rb.ready = 0;
         kiq->mapped = 0;
