@@ -854,7 +854,7 @@ cmd_result() {
     # what the VM sent (or did not): the upload server's log and the newest files
     { echo; echo "== share server log (last 40)"; tail -n 40 "$WORK/share.log" 2>/dev/null
       echo; echo "== newest files in $WORK/reports"; ls -lt "$WORK/reports" 2>/dev/null | head -15; } \
-        >> "$tmp/rdna3-result/00-host.txt" 
+        >> "$tmp/rdna3-result/00-host.txt" || true   # set -e + pipefail: ls dies of SIGPIPE behind head
     python3 "$ROOT/tools/triage_reports.py" "$tmp/rdna3-result" > "$tmp/rdna3-result/00-triage.txt" 2>&1 || true
     mkdir -p "$(dirname "$out")"
     tar -czf "$out.tmp" -C "$tmp" rdna3-result && mv -f "$out.tmp" "$out"
