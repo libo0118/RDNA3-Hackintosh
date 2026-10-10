@@ -18,7 +18,9 @@ starting with the **Radeon RX 7800 XT (Navi 32, PCI `1002:747E`)**.
 "Ported" includes "works" (e.g. 30% works + 20% unverified = 50% ported).
 \* amdgpu kernel functions: percentage of the functions in the amdgpu source files the project ports from
 (listed in [tools/progress/sources.txt](tools/progress/sources.txt), Linux v6.12), not of all of amdgpu;
-the total grows as files are added. A block turns green when the ladder steps that exercise it passed on
+the total grows as files are added. Both measures leave out what does not apply - not on the RX 7800 XT,
+or of no use on macOS - with the reason for each
+([tools/progress/not-applicable.txt](tools/progress/not-applicable.txt)). A block turns green when the ladder steps that exercise it passed on
 the card ([docs/status/hw-verified.txt](docs/status/hw-verified.txt)). Per-function lists:
 [docs/status/STATUS.md](docs/status/STATUS.md).</sub>
 

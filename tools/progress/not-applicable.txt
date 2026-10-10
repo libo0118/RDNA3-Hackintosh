@@ -1,0 +1,58 @@
+# Items tools/progress.py leaves out of its totals (amdgpu kernel functions
+# and UAPI items alike): what the RX 7800 XT (Navi 32: discrete, DCN 3.2,
+# GDDR6 without ECC, no APU or datacenter features, DP + HDMI outputs, no
+# USB-C) does not have, and what has no use on macOS (Linux-only
+# interfaces, debug dumps and logs). An item that the driver names as
+# ported still counts.
+#
+# One rule per line: a regex matching the whole name, two or more spaces,
+# then the reason shown in docs/status/STATUS.md.
+
+# ---- not on this card
+.*(ecc|poison|bad_mem|bad_page).*  ECC / RAS: the card's GDDR6 has no ECC
+gmc_v11_0_set_umc_funcs|nbio_v4_3_process_err_event_athub_irq  RAS error handling (UMC / ATHUB), not on this card
+smu_v13_0_0_i2c_(control_init|control_fini|func|xfer)  SMU I2C bus for the RAS EEPROM, not on this card
+amdgpu_gfx_.*compute_partition|psp_spatial_partition|amdgpu_gfx_is_master_xcc  compute partitions / XCCs: Instinct (MI300) only
+amdgpu_gmc_get_nps_memranges|amdgpu_discovery_(get_nps_info|verify_npsinfo)  memory partitions (NPS): Instinct (MI300) only
+psp_load_p2s_table|psp_v13_0_is_aux_sos_load_required  PSP 13.0.6 (MI300) only
+amdgpu_gmc_(init_pdb0|pdb0_alloc)  PDB0 for XGMI hives: not on a single Navi 32
+amdgpu_gmc_tmz_set  TMZ: not supported on this card (host log "Trusted Memory Zone (TMZ) feature not supported")
+psp_(rap|securedisplay)_(initialize|invoke|terminate)  optional TAs the card's firmware does not carry (host log: "optional ... ta ucode is not available")
+psp_v13_0_(load|read)_usbc_pd_fw  USB-C PD firmware: the card has no USB-C port
+.*usb4.*  USB4 bandwidth allocation: the card has no USB-C / USB4 port
+.*wbrf.*  Wi-Fi band RF mitigation (WBRF): ACPI on AMD laptops
+smu_v13_0_0_enable_mgpu_fan_boost  fan boost for multi-GPU systems
+soc21_set_(uvd|vce)_clocks  UVD / VCE: Navi 32 has VCN instead
+amdgpu_discovery_set_(isp|vpe|umsch_mm)_ip_blocks  ISP, VPE, UMSCH: APU blocks, not on Navi 32
+amdgpu_discovery_read_binary_from_sysmem  discovery table from ACPI system memory: APUs
+amdgpu_ring_ib_on_emit_(ce|cntl|de)  software ring muxer for GFX9 mid-command-buffer preemption
+enable_link_(edp|lvds)|link_blank_all_edp_displays|setup_panel_mode|dcn10_psr_.*  eDP / LVDS panels and PSR: a desktop card has no built-in panel
+dmub_dcn32_skip_dmub_panel_power_sequence|dmub_srv_set_skip_panel_power_sequence|dmub_dcn32_backdoor_load_zfb_mode  built-in panel power / zero-frame-buffer (APU) DMCUB modes
+mpc3_(program_shaper|program_shaper_lut|program_shaper_luta_settings|program_shaper_lutb_settings|configure_shaper_lut|get_shaper_current|power_on_shaper_3dlut|program_3dlut|select_3dlut_ram|select_3dlut_ram_mask|set3dlut_ram10|set3dlut_ram12|set_3dlut_mode|read_mpcc_state|set_rmu_mux|get_rmu_mux_status)|mpcc3_(acquire|release)_rmu|get3dlut_config  DCN 3.0 code path: DCN 3.2 uses its own mpc32_* / mpc1_* (dcn32_mpc_funcs)
+AMDGPU_INFO_FW_(UVD|VCE|DMCU|GFX_CE|VPE|GMC|CAP)  firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP)
+AMDGPU_INFO_SENSOR_VDDNB  northbridge voltage: APUs only
+AMDGPU_INFO_VCE_CLOCK_TABLE  VCE: Navi 32 has VCN instead
+AMDGPU_INFO_RAS_ENABLED_FEATURES  RAS: not on this card
+
+# ---- no use on macOS
+.*_get_clockgating_state  clock-gating state for Linux sysfs / debugfs
+amdgpu_(get|set)_gfx_off_(entrycount|residency|status)  GFXOFF statistics for Linux sysfs
+.*_attr_is_visible|amdgpu_psp_vbflash_(read|write|status)|psp_v13_0_(exec_spi_cmd|update_spirom|vbflash_status)|psp_wait_for_spirom_update  VBIOS flashing through Linux sysfs
+psp_get_fw_attestation_records_addr  firmware attestation records for Linux sysfs
+die_kobj_release|ip_[a-z_]*_release|amdgpu_ucode_sys_visible  Linux kobject / sysfs
+amdgpu_discovery_read_binary_from_file  discovery table from a file (Linux module option)
+amdgpu_atomfirmware_gpu_virtualization_supported|gfx_v11_0_init_rlcg_reg_access_ctrl|amdgpu_kiq_(rreg|wreg)  SR-IOV virtual functions (Linux host virtualization)
+amdgpu_gfx_kfd_sch_ctrl  KFD (ROCm compute on Linux)
+amdgpu_gfx_(enforce_isolation_handler|enforce_isolation_ring_begin_use|enforce_isolation_ring_end_use|get_enforce_isolation|set_enforce_isolation)|amdgpu_gfx_(cleaner_shader_init|cleaner_shader_sw_init|cleaner_shader_sw_fini|run_cleaner_shader|run_cleaner_shader_job|set_run_cleaner_shader)  process isolation / cleaner shader switched through Linux sysfs
+gfx_v11_0_read_wave_(data|sgprs|vgprs)|wave_read_(ind|regs)|gpu_recover_get  Linux debugfs dumps
+amdgpu_fence_(get_driver_name|get_timeline_name|slab_init|slab_fini|enable_signaling|release|free)|amdgpu_job_fence_(enable_signaling|free|get_timeline_name|release)|to_amdgpu_fence  Linux dma_fence object glue
+.*_set_[a-z0-9_]*funcs  Linux IP-block function-table wiring
+(dcn|dce|dal|dmub|dccg|hubbub|hubp)[a-z0-9_]*_(construct|destruct|destroy)|dccg32_create|dmub_srv_create  Linux Display Core object constructors / destructors
+dsc_optc_config_log|log_vcp_x_y|dp_log_training_result|dcn32_auto_dpm_test_log|dce_aux_log_payload|mes_v11_0_get_(misc_)?op_string|psp_gfx_cmd_name  debug logging
+set_dp_phy_pattern_.*|dp_set_hw_test_pattern|disable_prbs_(mode|symbols)|program_pattern_symbols|optc1_set_test_pattern  DisplayPort compliance test patterns (certification equipment)
+enable_link_virtual  Linux virtual display connector
+optc1_(enable|disable|program)_stereo|optc1_is_stereo_left_eye  stereo 3D output: macOS has no stereo display path
+mpc3_(set|disable)_dwb_mux|mpc3_is_dwb_idle  display writeback: macOS does not use it
+DRM_IOCTL_PRIME_(FD_TO_HANDLE|HANDLE_TO_FD)  Linux dma-buf; macOS shares buffers through DRM_IOCTL_XNU_BO_EXPORT / IMPORT
+AMDGPU_INFO_CRTC_FROM_ID  Linux KMS CRTC ids; macOS drives displays through IOFramebuffer
+DRM_AMDGPU_GEM_LIST_HANDLES  CRIU checkpoint / restore (Linux)

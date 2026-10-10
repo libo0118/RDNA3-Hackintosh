@@ -21,6 +21,10 @@ Two measures, each item in one of three states:
   uapi/rdna3_drm.c (libdrm_xnu for fds, the kext's ops.sensor for
   sensors) handles it instead of rejecting it; a firmware sub-query counts
   once the kext fills its version.
+
+Items that do not apply - not on the RX 7800 XT, or of no use on macOS -
+are left out of the totals and listed with their reason
+(tools/progress/not-applicable.txt); one the driver ports still counts.
 """
 import json
 import re
@@ -33,6 +37,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "docs" / "status"
 INDEX = ROOT / "tools" / "progress" / "amdgpu-index.tsv"
 VERIFIED = OUT / "hw-verified.txt"
+NOT_APPLICABLE = ROOT / "tools" / "progress" / "not-applicable.txt"
 DRIVER_DIRS = ["hw", "kext", "uapi", "common", "fb", "accel", "userspace/libdrm_xnu"]
 DRIVER_EXT = {".c", ".h", ".cpp", ".hpp", ".m", ".mm"}
 
@@ -78,13 +83,41 @@ def driver_words():
     return words
 
 
+def not_applicable():
+    """[(compiled regex, reason)] from tools/progress/not-applicable.txt"""
+    rules = []
+    if NOT_APPLICABLE.exists():
+        for line in NOT_APPLICABLE.read_text().splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            pat, _, why = re.split(r"(\s{2,})", line.strip(), maxsplit=1)
+            rules.append((re.compile(pat), why.strip()))
+    return rules
+
+
+NA_RULES = not_applicable()
+
+
+def na_reason(item):
+    for rx, why in NA_RULES:
+        if rx.fullmatch(item):
+            return why
+    return None
+
+
 def group_entry(name, steps, works_ok, items):
-    """items: [(item, ported_bool)]"""
-    state = {}
+    """items: [(item, ported_bool)]; an item that does not apply and is not
+    ported is left out of the counts (listed under "na")"""
+    state, na = {}, {}
     for item, ported in items:
+        why = None if ported else na_reason(item)
+        if why:
+            na[item] = why
+            continue
         state[item] = ("works" if works_ok else "ported") if ported else "todo"
     count = {k: sum(1 for v in state.values() if v == k) for k in ("works", "ported", "todo")}
-    return {"name": name, "steps": steps, **count, "items": dict(sorted(state.items()))}
+    return {"name": name, "steps": steps, **count, "items": dict(sorted(state.items())),
+            "na": dict(sorted(na.items()))}
 
 
 def summarize(groups):
@@ -93,6 +126,7 @@ def summarize(groups):
     total = works + ported + sum(g["todo"] for g in groups)
     pct = lambda n: round(100.0 * n / total, 1) if total else 0.0
     return {"works": works, "ported": works + ported, "total": total,
+            "not_applicable": sum(len(g["na"]) for g in groups),
             "works_pct": pct(works), "ported_pct": pct(works + ported), "groups": groups}
 
 
@@ -317,7 +351,11 @@ def badge(name, data):
 
 def markdown(amdgpu, uapi, passed):
     def table(title, col, data):
-        rows = [f"## {title}", "", f"| {col} | Works | Ported | Total | Works % | Ported % | Verified by step |",
+        rows = [f"## {title}", "",
+                f'{data["not_applicable"]} items that do not apply (not on the RX 7800 XT, or of no use on macOS) '
+                "are left out of the totals; each group lists them with the reason "
+                "(`tools/progress/not-applicable.txt`).", "",
+                f"| {col} | Works | Ported | Total | Works % | Ported % | Verified by step |",
                 "|---|---:|---:|---:|---:|---:|---|"]
         for g in sorted(data["groups"], key=lambda g: g["name"].lower()):
             n = g["works"] + g["ported"] + g["todo"]
@@ -330,11 +368,20 @@ def markdown(amdgpu, uapi, passed):
         for g in sorted(data["groups"], key=lambda g: g["name"].lower()):
             todo = [k for k, v in g["items"].items() if v == "todo"]
             done = [k for k, v in g["items"].items() if v != "todo"]
-            rows.append(f'<details><summary>{g["name"]}: {len(done)} ported, {len(todo)} to do</summary>\n')
+            na_txt = f', {len(g["na"])} do not apply' if g["na"] else ""
+            rows.append(f'<details><summary>{g["name"]}: {len(done)} ported, {len(todo)} to do{na_txt}</summary>\n')
             if done:
                 rows.append("Ported: " + ", ".join(f"`{k}`" for k in done) + "\n")
             if todo:
                 rows.append("To do: " + ", ".join(f"`{k}`" for k in todo) + "\n")
+            if g["na"]:
+                by = {}
+                for k, why in g["na"].items():
+                    by.setdefault(why, []).append(k)
+                rows.append("Not counted (does not apply):\n")
+                for why, ks in by.items():
+                    rows.append(f"- {why}: " + ", ".join(f"`{k}`" for k in ks))
+                rows.append("")
             rows.append("</details>\n")
         return rows
 
