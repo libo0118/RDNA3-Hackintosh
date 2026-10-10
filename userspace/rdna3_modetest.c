@@ -10,6 +10,14 @@
  *                                    modes; after each switch DRMINFO --scanout
  *                                    DIR/mode-d<D>-<W>x<H> looks at the pipes;
  *                                    then all back to native
+ *   rdna3_modetest gamma DRMINFO DIR the output gamma (rdna3gamma=1): every display
+ *                                    gets a dark table, an identity table, then
+ *                                    its ColorSync settings back; DRMINFO
+ *                                    --scanout DIR/gamma-<step> reads each pipe's
+ *                                    OTG CRC (taken after the gamma, unlike the
+ *                                    picture, which is VRAM). PASS when the CRC
+ *                                    moves with the dark table and comes back
+ *                                    after the restore
  *
  * Exit 0 when the switch was accepted (CGDisplaySetDisplayMode == 0 and the
  * display reports the new size), 1 otherwise.
@@ -186,6 +194,150 @@ static int cycle(const char *drminfo, const char *dir)
     return bad ? 1 : 0;
 }
 
+#define GAMMA_N 256
+
+/* what DRMINFO --scanout DIR/gamma-<name> says about each pipe: lit, the
+ * OTG CRC (after the gamma) and the mean colour of the picture (VRAM,
+ * before the gamma). Its output is passed through. */
+struct pipe_look { int lit, valid, pic; unsigned r, g, b, mean; };
+static int look(const char *drminfo, const char *dir, const char *name, struct pipe_look pl[4])
+{
+    char cmd[1024], line[512];
+    int pipe = -1;
+    FILE *f;
+    memset(pl, 0, sizeof(*pl) * 4);
+    printf("== rdna3_drminfo --scanout (look gamma-%s)\n", name);
+    fflush(stdout);
+    snprintf(cmd, sizeof(cmd), "mkdir -p '%s/gamma-%s' && '%s' --scanout '%s/gamma-%s' 2>&1", dir, name, drminfo,
+             dir, name);
+    f = popen(cmd, "r");
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned p, a, b, c, w, h, nb;
+        fputs(line, stdout);
+        if (sscanf(line, "pipe %u:", &p) == 1 && p < 4) {
+            pipe = (int)p;
+            pl[p].lit = strstr(line, " LIT ") != NULL;
+        } else if (pipe >= 0 && sscanf(line, "  OTG CRC %x/%x/%x", &a, &b, &c) == 3) {
+            pl[pipe].valid = 1;
+            pl[pipe].r = a;
+            pl[pipe].g = b;
+            pl[pipe].b = c;
+        } else if (pipe >= 0 && sscanf(line, "  picture %ux%u: %u%% not black, mean rgb %u %u %u", &w, &h, &nb, &a, &b,
+                                       &c) == 6) {
+            pl[pipe].pic = 1;
+            pl[pipe].mean = a + b + c;
+        }
+    }
+    fflush(stdout);
+    return pclose(f) == 0 ? 0 : -1;
+}
+
+static int crc_eq(const struct pipe_look *a, const struct pipe_look *b)
+{
+    return a->valid && b->valid && a->r == b->r && a->g == b->g && a->b == b->b;
+}
+
+static void set_all(const CGDirectDisplayID *ids, uint32_t n, const CGGammaValue *t, int *bad)
+{
+    for (uint32_t i = 0; i < n; i++)
+        if (CGSetDisplayTransferByTable(ids[i], GAMMA_N, t, t, t) != kCGErrorSuccess) {
+            printf("display %u: CGSetDisplayTransferByTable refused the table\n", i);
+            *bad = 1;
+        }
+    sleep(2);   /* WindowServer hands it to IOFramebuffer::setGammaTable */
+}
+
+/* every display through a dark table (a quarter of the range), the
+ * identity, and back to its ColorSync settings, with the pipes' CRCs after
+ * each. The screen may change on its own (a blinking text cursor): two
+ * looks before, and up to three after the restore, each compared with both. */
+static int gamma_test(const char *drminfo, const char *dir)
+{
+    CGDirectDisplayID ids[MAX_DISPLAYS];
+    static CGGammaValue save[3][GAMMA_N], dark[GAMMA_N], ident[GAMMA_N];
+    uint32_t saved = 0, n = displays(ids), i, k;
+    struct pipe_look base[2][4], drk[4], idn[4], rest[4];
+    int bad = 0, pipes = 0, stable = 1, moved = 0, back = 0, soft = 0, ok[4] = { 0 };
+    char name[32];
+
+    for (i = 0; i < GAMMA_N; i++) {
+        ident[i] = (CGGammaValue)i / (GAMMA_N - 1);
+        dark[i] = ident[i] / 4;
+    }
+    printf("%u display(s)\n", n);
+    for (i = 0; i < n; i++) {
+        float worst = 0;
+        if (CGGetDisplayTransferByTable(ids[i], GAMMA_N, save[0], save[1], save[2], &saved) != kCGErrorSuccess)
+            saved = 0;
+        for (k = 0; saved > 1 && k < 3 * saved; k++) {
+            float d = save[k / saved][k % saved] - (float)(k % saved) / (float)(saved - 1);
+            if (d < 0)
+                d = -d;
+            if (d > worst)
+                worst = d;
+        }
+        printf("display %u: id 0x%x, ColorSync table of %u entries, %s (largest step from the identity %.4f)\n", i,
+               ids[i], saved, saved ? (worst < 0.002f ? "identity" : "a curve") : "not readable", (double)worst);
+    }
+    if (!n || look(drminfo, dir, "before", base[0]) || look(drminfo, dir, "before2", base[1])) {
+        printf("GAMMA: FAIL - no display, or rdna3_drminfo --scanout failed\n");
+        return 1;
+    }
+    set_all(ids, n, dark, &bad);
+    look(drminfo, dir, "dark", drk);
+    set_all(ids, n, ident, &bad);
+    look(drminfo, dir, "identity", idn);
+    CGDisplayRestoreColorSyncSettings();
+    sleep(2);
+    for (k = 0; k < 3; k++) {
+        int all = 1;
+        snprintf(name, sizeof(name), k ? "restored%u" : "restored", k + 1);
+        look(drminfo, dir, name, rest);
+        for (i = 0; i < 4; i++) {
+            ok[i] |= crc_eq(&rest[i], &base[0][i]) || crc_eq(&rest[i], &base[1][i]);
+            all &= ok[i] || !base[0][i].lit || !base[0][i].valid;
+        }
+        if (all)
+            break;
+    }
+
+    for (i = 0; i < 4; i++) {
+        const struct pipe_look *b = &base[0][i];
+        if (!b->lit || !b->valid)
+            continue;
+        pipes++;
+        stable &= crc_eq(b, &base[1][i]);
+        moved += !crc_eq(&drk[i], b) && !crc_eq(&drk[i], &base[1][i]);
+        back += ok[i];
+        /* the table in the compositor instead of the OGAM: the picture in
+         * VRAM darkens too */
+        soft += b->pic && drk[i].pic && drk[i].mean * 10 < b->mean * 7;
+        printf("== gamma pipe %u: CRC %04x/%04x/%04x, dark %04x/%04x/%04x, identity %04x/%04x/%04x, "
+               "restored %04x/%04x/%04x (%s); picture mean %u -> %u with the dark table\n", i, b->r, b->g, b->b,
+               drk[i].r, drk[i].g, drk[i].b, idn[i].r, idn[i].g, idn[i].b, rest[i].r, rest[i].g, rest[i].b,
+               ok[i] ? "back" : "NOT back", b->mean, drk[i].mean);
+    }
+    printf("CRC before %s\n", stable ? "stable" : "NOT stable (the screen changed between the two looks)");
+    if (bad || !pipes) {
+        printf("GAMMA: FAIL - %s\n", bad ? "CGSetDisplayTransferByTable refused a table" : "no lit pipe with an OTG CRC");
+        return 1;
+    }
+    if (soft) {
+        printf("GAMMA: FAIL - the picture in VRAM darkened: the compositor applied the table, not the OGAM\n");
+        return 1;
+    }
+    if (moved == pipes && back == pipes) {
+        printf("GAMMA: PASS - %d pipe(s): the CRC moved with the dark table and came back after the restore\n", pipes);
+        return 0;
+    }
+    printf("GAMMA: FAIL - %d of %d pipe(s) moved with the dark table, %d came back (%s)\n", moved, pipes, back,
+           moved < pipes ? "no gamma reaches the pipe: rdna3gamma=1? fb/core log 'gamma'"
+                         : "the restore did not reach the pipe");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && !strcmp(argv[1], "list"))
@@ -196,6 +348,8 @@ int main(int argc, char **argv)
         return native();
     if (argc >= 4 && !strcmp(argv[1], "cycle"))
         return cycle(argv[2], argv[3]);
-    fprintf(stderr, "usage: rdna3_modetest list | set DISPLAY W H | native | cycle DRMINFO DIR\n");
+    if (argc >= 4 && !strcmp(argv[1], "gamma"))
+        return gamma_test(argv[2], argv[3]);
+    fprintf(stderr, "usage: rdna3_modetest list | set DISPLAY W H | native | cycle DRMINFO DIR | gamma DRMINFO DIR\n");
     return 2;
 }
