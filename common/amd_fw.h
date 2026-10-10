@@ -206,6 +206,17 @@ extern const char *const amd_navi32_ta_name;   /* optional: only versions come f
 void amd_fw_versions(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT], const amd_psp_sos *sos,
                      uint32_t ver[32], uint32_t feature[32]);
 
+/* gfx_v11_0_check_fw_cp_gfx_shadow (adev->gfx.cp_gfx_shadow): may the
+ * kernel gfx ring shadow its state for mid-command-buffer preemption
+ * (SET_Q_PREEMPTION_MODE, AMDGPU_CHUNK_ID_CP_GFX_SHADOW)? GC 11.0.0/2/3
+ * with ME >= 1505, PFP >= 1600 and MEC >= 512 - and, in amdgpu, only
+ * under SR-IOV (a bare-metal card answers 0 whatever its firmware).
+ * gc_ip_version is AMD_IP_VERSION(major, minor, rev); me / pfp / mec are
+ * the headers' ucode_version (adev->gfx.*_fw_version, AMDGPU_INFO_FW_GFX_*). */
+#define AMD_IP_VERSION(maj, min, rev) (((uint32_t)(maj) << 16) | ((uint32_t)(min) << 8) | (uint32_t)(rev))
+int amd_gfx11_check_fw_cp_gfx_shadow(uint32_t gc_ip_version, uint32_t me, uint32_t pfp,
+                                     uint32_t mec, int sriov_vf);
+
 #ifdef __cplusplus
 }
 #endif

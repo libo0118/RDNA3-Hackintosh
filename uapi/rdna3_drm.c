@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "rdna3_drm.h"
+#include "amd_fw.h"
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -132,6 +133,7 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
         dev->ip_ver_minor[AMDGPU_HW_IP_GFX] = ip->minor;
         dev->ip_ver_major[AMDGPU_HW_IP_COMPUTE] = ip->major;
         dev->ip_ver_minor[AMDGPU_HW_IP_COMPUTE] = ip->minor;
+        dev->gc_ip_version = AMD_IP_VERSION(ip->major, ip->minor, ip->revision);
     }
     ip = amd_discovery_find(disc, AMD_HWID_SDMA0, 0);
     if (ip) {
@@ -977,8 +979,23 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
             have_bo_handles = 1;
             break;
         }
-        case AMDGPU_CHUNK_ID_CP_GFX_SHADOW:
+        case AMDGPU_CHUNK_ID_CP_GFX_SHADOW: {
+            /* amdgpu_cs_p2_shadow: only the flags are checked; the VAs
+             * (0 = no shadowing) go to the job as they are, the last
+             * chunk wins. A short chunk reads as zeros. */
+            struct drm_amdgpu_cs_chunk_cp_gfx_shadow sh;
+            zero(&sh, sizeof(sh));
+            if (ops->copyin(ops->ctx, &sh, ch.chunk_data,
+                            MIN((uint64_t)ch.length_dw * 4, sizeof(sh))))
+                return -RD_EFAULT;
+            if (sh.flags & ~(uint64_t)AMDGPU_CS_CHUNK_CP_GFX_SHADOW_FLAGS_INIT_SHADOW)
+                return -RD_EINVAL;
+            job.shadow_va = sh.shadow_va;
+            job.csa_va = sh.csa_va;
+            job.gds_va = sh.gds_va;
+            job.init_shadow = (sh.flags & AMDGPU_CS_CHUNK_CP_GFX_SHADOW_FLAGS_INIT_SHADOW) ? 1 : 0;
             break;
+        }
         default:
             return -RD_EINVAL;
         }
@@ -1664,8 +1681,27 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         mi.gtt.max_allocation = dev->gtt_size * 3 / 4;
         return info_out(f, in, &mi, sizeof(mi));
     }
-    case AMDGPU_INFO_DEV_INFO:
-        return info_out(f, in, &dev->dev_info, sizeof(dev->dev_info));
+    case AMDGPU_INFO_DEV_INFO: {
+        /* amdgpu_info_ioctl -> amdgpu_gfx_get_gfx_shadow_info ->
+         * gfx_v11_0_get_gfx_shadow_info: the shadow and CSA sizes only with
+         * adev->gfx.cp_gfx_shadow (gfx_v11_0_check_fw_cp_gfx_shadow; not a
+         * VF here, so never on this card), else they stay 0 */
+        struct drm_amdgpu_info_device di;
+        copy(&di, &dev->dev_info, sizeof(di));
+        if (amd_gfx11_check_fw_cp_gfx_shadow(dev->gc_ip_version,
+                                             dev->fw_version[AMDGPU_INFO_FW_GFX_ME],
+                                             dev->fw_version[AMDGPU_INFO_FW_GFX_PFP],
+                                             dev->fw_version[AMDGPU_INFO_FW_GFX_MEC],
+                                             (int)dev->sriov_vf)) {
+            di.shadow_size = RD_MQD_SHADOW_BASE_SIZE;
+            di.shadow_alignment = RD_MQD_SHADOW_BASE_ALIGNMENT;
+            di.csa_size = RD_MQD_FWWORKAREA_SIZE;
+            di.csa_alignment = RD_MQD_FWWORKAREA_ALIGNMENT;
+        } else {
+            di.shadow_size = di.shadow_alignment = di.csa_size = di.csa_alignment = 0;
+        }
+        return info_out(f, in, &di, sizeof(di));
+    }
     case AMDGPU_INFO_VRAM_LOST_COUNTER:
     case AMDGPU_INFO_NUM_EVICTIONS:
     case AMDGPU_INFO_NUM_VRAM_CPU_PAGE_FAULTS:

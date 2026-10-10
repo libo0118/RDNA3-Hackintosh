@@ -888,6 +888,17 @@ bool RDNA3Bringup::hwInit()
         bzero(fGfx, sizeof(*fGfx));
         /* amdgpu_async_gfx_ring (default 1): the KIQ maps the gfx queue */
         fGfx->async = fDev->doorbell_ok;
+        /* gfx_v11_0_check_fw_cp_gfx_shadow on the CP firmware headers (the
+         * AMDGPU_INFO_FW_GFX_* versions the UAPI answers DEV_INFO from); not
+         * a VF, so off - as amdgpu leaves it on bare metal */
+        {
+            uint32_t fv[32], ff[32];
+            const rdna3_ipver *gc = &fDev->ipver[HWIP_GC];
+            amd_fw_versions(fBlobRefs, nullptr, fv, ff);
+            fGfx->cp_gfx_shadow = amd_gfx11_check_fw_cp_gfx_shadow(
+                AMD_IP_VERSION(gc->major, gc->minor, gc->rev), fv[AMDGPU_INFO_FW_GFX_ME],
+                fv[AMDGPU_INFO_FW_GFX_PFP], fv[AMDGPU_INFO_FW_GFX_MEC], /* amdgpu_sriov_vf */ 0);
+        }
         ret = gfx11_rs64_from_fw(fBlobs[AMD_BLOB_PFP].data, fBlobs[AMD_BLOB_PFP].len,
                                  fBlobs[AMD_BLOB_ME].data, fBlobs[AMD_BLOB_ME].len,
                                  fBlobs[AMD_BLOB_MEC].data, fBlobs[AMD_BLOB_MEC].len, &rs64);
@@ -1987,6 +1998,12 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, const rdna3_ib *ibs, uint3
     x.gds_base = want[0]; x.gds_size = want[1];
     x.gws_base = want[2]; x.gws_size = want[3];
     x.oa_base = want[4]; x.oa_size = want[5];
+    /* AMDGPU_CHUNK_ID_CP_GFX_SHADOW: amdgpu_ib_schedule hands them to
+     * gfx_v11_0_ring_emit_gfx_shadow, which only a cp_gfx_shadow ring uses */
+    x.shadow_va = job->shadow_va;
+    x.csa_va = job->csa_va;
+    x.gds_va = job->gds_va;
+    x.init_shadow = job->init_shadow ? 1 : 0;
     if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready) {
         for (uint32_t i = 0; i < n; i++)
             sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);

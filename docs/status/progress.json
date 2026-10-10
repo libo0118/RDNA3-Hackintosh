@@ -1,11 +1,11 @@
 {
  "amdgpu": {
-  "works": 450,
-  "ported": 478,
+  "works": 455,
+  "ported": 483,
   "total": 1291,
   "not_applicable": 207,
-  "works_pct": 34.9,
-  "ported_pct": 37.0,
+  "works_pct": 35.2,
+  "ported_pct": 37.4,
   "groups": [
    {
     "name": "PSP 13",
@@ -640,9 +640,9 @@
     "steps": [
      "8"
     ],
-    "works": 91,
+    "works": 96,
     "ported": 0,
-    "todo": 113,
+    "todo": 108,
     "items": {
      "amdgpu_gfx_bit_to_me_queue": "todo",
      "amdgpu_gfx_compute_queue_acquire": "works",
@@ -681,7 +681,7 @@
      "gfx11_kiq_unmap_queues": "works",
      "gfx_v11_0_bad_op_irq": "todo",
      "gfx_v11_0_calc_toc_total_size": "todo",
-     "gfx_v11_0_check_fw_cp_gfx_shadow": "todo",
+     "gfx_v11_0_check_fw_cp_gfx_shadow": "works",
      "gfx_v11_0_check_soft_reset": "todo",
      "gfx_v11_0_compute_mqd_init": "works",
      "gfx_v11_0_compute_ring_init": "works",
@@ -722,7 +722,7 @@
      "gfx_v11_0_get_csb_size": "works",
      "gfx_v11_0_get_cu_active_bitmap_per_sh": "works",
      "gfx_v11_0_get_cu_info": "works",
-     "gfx_v11_0_get_gfx_shadow_info": "todo",
+     "gfx_v11_0_get_gfx_shadow_info": "works",
      "gfx_v11_0_get_gpu_clock_counter": "works",
      "gfx_v11_0_get_rb_active_bitmap": "works",
      "gfx_v11_0_get_sa_active_bitmap": "works",
@@ -775,11 +775,11 @@
      "gfx_v11_0_ring_emit_fence_kiq": "todo",
      "gfx_v11_0_ring_emit_frame_cntl": "works",
      "gfx_v11_0_ring_emit_gds_switch": "works",
-     "gfx_v11_0_ring_emit_gfx_shadow": "todo",
+     "gfx_v11_0_ring_emit_gfx_shadow": "works",
      "gfx_v11_0_ring_emit_hdp_flush": "works",
      "gfx_v11_0_ring_emit_ib_compute": "works",
      "gfx_v11_0_ring_emit_ib_gfx": "works",
-     "gfx_v11_0_ring_emit_init_cond_exec": "todo",
+     "gfx_v11_0_ring_emit_init_cond_exec": "works",
      "gfx_v11_0_ring_emit_pipeline_sync": "todo",
      "gfx_v11_0_ring_emit_reg_wait": "todo",
      "gfx_v11_0_ring_emit_reg_write_reg_wait": "works",
@@ -791,7 +791,7 @@
      "gfx_v11_0_ring_get_wptr_compute": "todo",
      "gfx_v11_0_ring_get_wptr_gfx": "todo",
      "gfx_v11_0_ring_invalidate_tlbs": "todo",
-     "gfx_v11_0_ring_preempt_ib": "todo",
+     "gfx_v11_0_ring_preempt_ib": "works",
      "gfx_v11_0_ring_set_wptr_compute": "works",
      "gfx_v11_0_ring_set_wptr_gfx": "works",
      "gfx_v11_0_ring_soft_recovery": "works",
@@ -1708,12 +1708,12 @@
   ]
  },
  "uapi": {
-  "works": 100,
-  "ported": 100,
+  "works": 101,
+  "ported": 101,
   "total": 105,
   "not_applicable": 15,
-  "works_pct": 95.2,
-  "ported_pct": 95.2,
+  "works_pct": 96.2,
+  "ported_pct": 96.2,
   "groups": [
    {
     "name": "amdgpu ioctls",
@@ -1886,12 +1886,12 @@
      "7",
      "8"
     ],
-    "works": 9,
+    "works": 10,
     "ported": 0,
-    "todo": 1,
+    "todo": 0,
     "items": {
      "AMDGPU_CHUNK_ID_BO_HANDLES": "works",
-     "AMDGPU_CHUNK_ID_CP_GFX_SHADOW": "todo",
+     "AMDGPU_CHUNK_ID_CP_GFX_SHADOW": "works",
      "AMDGPU_CHUNK_ID_DEPENDENCIES": "works",
      "AMDGPU_CHUNK_ID_FENCE": "works",
      "AMDGPU_CHUNK_ID_IB": "works",
