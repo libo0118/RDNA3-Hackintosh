@@ -535,3 +535,10 @@ layout has binding 640 before 480..607. Reproduced by rdna3_vktest on the
 host loopback; fixed in Mesa (patches/0007) and worked around in the
 plugin (its bindings sorted by number), so the VM's RADV need not be
 rebuilt for the next try.
+
+### Card run 22 (step `metal`): Metal compute passes
+
+`METAL: ALL PASSED`: the kernel compiled from source ran on the card
+through the plugin (AIR read with GPUCompiler's libLLVM, translated to
+SPIR-V, RADV pipeline with the bindings sorted), 4096 words right, GPU time
+0.012 ms. Vulkan 12/12, DMA/GFX verified in the same boot.
