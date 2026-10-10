@@ -3084,6 +3084,8 @@ static void run(const char *fwdir)
                         static rdna3_mes mes;
                         struct hqd *hm = &S.mes_hqd[0];
                         const uint32_t *hw = S.mes_sched.hw;
+                        memset(&mes, 0, sizeof(mes));   /* run() goes twice */
+                        memset(&S.mes_sched, 0, sizeof(S.mes_sched));
                         S.reg[GCR(regCP_MES_GP3_LO)] = 0x0000004a;
                         CHECK(gfx11_mes_sched_start(&dev, &kiq, &mes) == RDNA3_EINVAL);   /* no ring yet */
                         CHECK(gfx11_mes_sched_init(&dev, &mes) == RDNA3_OK && mes.ring.me == 3 && mes.ring.pipe == 0);
