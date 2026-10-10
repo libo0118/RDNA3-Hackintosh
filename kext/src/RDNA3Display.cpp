@@ -389,23 +389,39 @@ void RDNA3Accel::displayFree()
     fDispLock = nullptr;
 }
 
-/* refresh = frames counted over ~250 ms of wall time (no pixel clock read
- * from DCCG needed); exact enough for IOFramebuffer's timing info */
+/* refresh = whole frames between two frame-counter edges over ~400 ms of
+ * wall time (no pixel clock read from DCCG needed). Counting frames in a
+ * fixed sleep instead quantises to 1/window (16 frames in a 251 ms VM sleep
+ * read as 63.7 Hz on the card); edge to edge the error is the polling step. */
+static bool waitFrameEdge(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint32_t *frame, uint64_t *t)
+{
+    uint32_t f0 = dcn32_frame_count(d, dc, i), f;
+    for (uint32_t k = 0; k < 2500; k++) {          /* 50 ms: three frames at 60 Hz */
+        f = dcn32_frame_count(d, dc, i);
+        if (f != f0) {
+            clock_get_uptime(t);
+            *frame = f;
+            return true;
+        }
+        IODelay(20);
+    }
+    return false;
+}
+
 void RDNA3Accel::displayMeasureRefresh()
 {
-    uint32_t f0[4], f1[4], i;
-    uint64_t t0, t1, ns;
-    for (i = 0; i < fDcn->nheads && i < 4; i++)
-        f0[i] = dcn32_frame_count(fDispDev, fDcn, i);
-    clock_get_uptime(&t0);
-    IOSleep(250);
-    for (i = 0; i < fDcn->nheads && i < 4; i++)
-        f1[i] = dcn32_frame_count(fDispDev, fDcn, i);
-    clock_get_uptime(&t1);
-    absolutetime_to_nanoseconds(t1 - t0, &ns);
-    for (i = 0; i < fDcn->nheads && i < 4; i++) {
-        uint64_t frames = (f1[i] - f0[i]) & 0xffffff;
-        uint64_t mhz = ns ? frames * 1000000000000ull / ns : 0;
+    for (uint32_t i = 0; i < fDcn->nheads && i < 4; i++) {
+        uint32_t f0, f1;
+        uint64_t t0, t1, ns, mhz = 0;
+        fDispRefresh[i] = 0;
+        if (!waitFrameEdge(fDispDev, fDcn, i, &f0, &t0))
+            continue;
+        IOSleep(400);
+        if (!waitFrameEdge(fDispDev, fDcn, i, &f1, &t1))
+            continue;
+        absolutetime_to_nanoseconds(t1 - t0, &ns);
+        uint64_t frames = (f1 - f0) & 0xffffff;
+        mhz = ns ? frames * 1000000000000ull / ns : 0;
         /* round to the nearest common rate when within 0.5 % */
         static const uint32_t common[] = { 23976, 24000, 25000, 29970, 30000, 50000, 59940,
                                            60000, 72000, 75000, 90000, 100000, 119880, 120000,
@@ -414,6 +430,8 @@ void RDNA3Accel::displayMeasureRefresh()
             if (mhz * 1000 > (uint64_t)common[k] * 995 && mhz * 1000 < (uint64_t)common[k] * 1005)
                 mhz = common[k];
         fDispRefresh[i] = mhz > 1000 && mhz < 1000000 ? (uint32_t)mhz : 0;
+        LOG("display: head %u refresh %llu.%03llu Hz (%llu frames in %llu us)", i, mhz / 1000,
+            mhz % 1000, frames, ns / 1000);
     }
     fDispMeasured = true;
 }
