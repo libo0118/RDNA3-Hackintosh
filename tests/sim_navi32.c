@@ -345,6 +345,7 @@ typedef struct sim {
         uint32_t unload_arg, gpo;
         int all_enabled;      /* EnableAllSmuFeatures done */
     } smu;
+    unsigned vm_huge_walks;              /* translations through a PDE_PTE (huge) entry */
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
     unsigned sdma_ibs, sdma_ib_fault;   /* INDIRECT packets run, ones the GFXHUB could not translate */
     int      sdma_hang;              /* the engine stopped consuming its ring */
@@ -946,6 +947,17 @@ static int sim_dpm_enabled(uint32_t clk)
         return (S.smu.enabled & RD_SMU_FEATURE(FEATURE_MM_DPM_BIT)) != 0;
     default: return 0;
     }
+}
+
+/* system pages for gpuvm_map: pairs swapped (scattered) / in order */
+static uint64_t test_scatter_pa(void *ctx, uint64_t i)
+{
+    return *(const uint64_t *)ctx + (i ^ 1) * 4096;
+}
+
+static uint64_t test_contig_pa(void *ctx, uint64_t i)
+{
+    return *(const uint64_t *)ctx + i * 4096;
 }
 
 /* amdgpu_asic_update_umd_stable_pstate stand-in: counts enter / exit */
@@ -1769,6 +1781,15 @@ static uint8_t *vm_ptr(uint32_t vmid, uint64_t va, uint64_t len)
         if (!(e & 1) || t + 4096 > BAR_LEN)
             return NULL;
         memcpy(&e, S.vram + t + 8 * ((va >> shift[l]) & 511), 8);
+        /* a valid PDE with PDE_PTE (bit 54) maps a 1 GiB / 2 MiB page */
+        if (l < 3 && (e & 1) && (e & (1ull << 54))) {
+            uint64_t size = 1ull << shift[l];
+            uint64_t pa = (e & 0x0000FFFFFFFFF000ull & ~(size - 1)) | (va & (size - 1));
+            S.vm_huge_walks++;
+            if (pa + len > BAR_LEN)
+                return NULL;
+            return S.vram + pa;
+        }
     }
     if (!(e & 1) || (e & 0x0000FFFFFFFFF000ull) + 4096 > BAR_LEN)
         return NULL;
@@ -2751,6 +2772,15 @@ static uint8_t *mm_vm_ptr(uint32_t vmid, uint64_t va, uint64_t len)
         if (!(e & 1) || t + 4096 > BAR_LEN)
             return NULL;
         memcpy(&e, S.vram + t + 8 * ((va >> shift[l]) & 511), 8);
+        /* a valid PDE with PDE_PTE (bit 54) maps a 1 GiB / 2 MiB page */
+        if (l < 3 && (e & 1) && (e & (1ull << 54))) {
+            uint64_t size = 1ull << shift[l];
+            uint64_t pa = (e & 0x0000FFFFFFFFF000ull & ~(size - 1)) | (va & (size - 1));
+            S.vm_huge_walks++;
+            if (pa + len > BAR_LEN)
+                return NULL;
+            return S.vram + pa;
+        }
     }
     if (!(e & 1) || (e & 0x0000FFFFFFFFF000ull) + 4096 > BAR_LEN)
         return NULL;
@@ -7431,6 +7461,86 @@ static void run(const char *fwdir)
             gpuvm_vm_fini(&dev, &vm);
             CHECK(pool.nfree == 64);
 
+            /* rdna3amdgpu=1: amdgpu_vm_pt_clear values, amdgpu_vm_ptes_update
+             * with fragments and huge PDEs, unmapping with EXECUTABLE */
+            {
+                const uint64_t hva = 0x0000200000000000ull;   /* 1 GiB aligned */
+                uint64_t hoff = rdna3_vram_alloc(&dev, 4ull << 20, 2ull << 20, "test-huge-pages");
+                uint64_t hpa = rdna3_vram_pa(&dev, hoff), pdb1, pdb0, ptb, sys = 0x7000000000ull;
+                uint32_t dist = regGCVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 -
+                                regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32;
+                unsigned walks = S.vm_huge_walks, t0;
+                CHECK(hoff != UINT64_MAX && hoff + (4ull << 20) <= BAR_LEN && !(hpa & ((2ull << 20) - 1)));
+                dev.amdgpu_exact = 1;
+                CHECK(gpuvm_vm_init(&dev, &vm, &pool) == RDNA3_OK && vm.tables == 1);
+                rdna3_vram_read(&dev, vm.root + 8 * 511, &e, 8);
+                CHECK(e == RD_PDE_PTE);                    /* a PD's cleared entry */
+                /* 4 MiB, 4 MiB aligned in VA: fragment 10, two 2 MiB PDEs in the PDB0 */
+                CHECK(gpuvm_map_linear(&dev, &vm, hva, hpa, 1024, vpte) == RDNA3_OK);
+                CHECK(vm.tables == 3);                      /* root, PDB1, PDB0: no PTB */
+                rdna3_vram_read(&dev, vm.root + 8ull * ((hva >> 39) & 511), &e, 8);
+                pdb1 = (e & 0x0000FFFFFFFFF000ull) - rdna3_vram_pa(&dev, 0);
+                rdna3_vram_read(&dev, pdb1 + 8ull * ((hva >> 30) & 511), &e, 8);
+                pdb0 = (e & 0x0000FFFFFFFFF000ull) - rdna3_vram_pa(&dev, 0);
+                rdna3_vram_read(&dev, pdb0 + 8ull * (((hva >> 21) & 511) + 1), &e, 8);
+                CHECK((e & RD_PTE_VALID) && (e & RD_PDE_PTE) && (e & RD_PTE_FRAG(31)) == RD_PTE_FRAG(10) &&
+                      (e & 0x0000FFFFFFFFF000ull) == hpa + (2ull << 20) && (e >> 48 & 7) == RD_MTYPE_UC);
+                rdna3_vram_read(&dev, pdb0 + 8ull * 2, &e, 8);
+                CHECK(e == RD_PDE_PTE);
+                CHECK(gpuvm_lookup(&dev, &vm, hva + 0x200123) == hpa + 0x200123);
+                /* the walker of the GFXHUB through the huge entry (VMID 9) */
+                S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 + dist * 9] =
+                    (uint32_t)gpuvm_pd_addr(&dev, &vm);
+                S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32 + dist * 9] =
+                    (uint32_t)(gpuvm_pd_addr(&dev, &vm) >> 32);
+                CHECK(vm_ptr(9, hva + 0x300010, 4) == S.vram + hpa + 0x300010 && S.vm_huge_walks == walks + 1);
+                /* one page right after: a PTB, its neighbours cleared to EXECUTABLE */
+                CHECK(gpuvm_map_linear(&dev, &vm, hva + (4ull << 20) + 4096, hpa, 1, vpte) == RDNA3_OK);
+                CHECK(vm.tables == 4);
+                rdna3_vram_read(&dev, pdb0 + 8ull * 2, &e, 8);
+                ptb = (e & 0x0000FFFFFFFFF000ull) - rdna3_vram_pa(&dev, 0);
+                CHECK((e & RD_PTE_VALID) && !(e & RD_PDE_PTE));
+                rdna3_vram_read(&dev, ptb + 8, &e, 8);
+                CHECK((e & RD_PTE_VALID) && !(e & RD_PTE_FRAG(31)) && (e & 0x0000FFFFFFFFF000ull) == hpa);
+                rdna3_vram_read(&dev, ptb, &e, 8);
+                CHECK(e == RD_PTE_EXECUTABLE);
+                /* 64 KiB aligned 16 pages: fragment 4 in every PTE */
+                CHECK(gpuvm_map_linear(&dev, &vm, hva + (4ull << 20) + 0x10000, hpa + 0x10000, 16, vpte) == RDNA3_OK);
+                rdna3_vram_read(&dev, ptb + 8 * 16 + 8 * 15, &e, 8);
+                CHECK((e & RD_PTE_FRAG(31)) == RD_PTE_FRAG(4) && (e & 0x0000FFFFFFFFF000ull) == hpa + 0x10000 + 15 * 4096);
+                /* system pages: scattered ones get 4 KiB PTEs, a contiguous run
+                 * is mapped like VRAM (fragment) */
+                CHECK(gpuvm_map(&dev, &vm, hva + (4ull << 20) + 0x20000, 4, test_scatter_pa, &sys,
+                                gpuvm_pte_flags(6, 1)) == RDNA3_OK);
+                rdna3_vram_read(&dev, ptb + 8 * 32, &e, 8);
+                CHECK((e & 0x0000FFFFFFFFF000ull) == sys + 4096 && !(e & RD_PTE_FRAG(31)) && (e & RD_PTE_SYSTEM));
+                CHECK(gpuvm_map(&dev, &vm, hva + (4ull << 20) + 0x30000, 16, test_contig_pa, &sys,
+                                gpuvm_pte_flags(6, 1)) == RDNA3_OK);
+                rdna3_vram_read(&dev, ptb + 8 * 48 + 8 * 3, &e, 8);
+                CHECK((e & 0x0000FFFFFFFFF000ull) == sys + 3 * 4096 && (e & RD_PTE_FRAG(31)) == RD_PTE_FRAG(4));
+                /* unmapping the 4 MiB: invalid huge entries (PDE_PTE | FRAG) */
+                gpuvm_unmap(&dev, &vm, hva, 1024);
+                rdna3_vram_read(&dev, pdb0 + 8ull * (hva >> 21 & 511), &e, 8);
+                CHECK(!(e & RD_PTE_VALID) && (e & RD_PDE_PTE) && (e & RD_PTE_FRAG(31)) == RD_PTE_FRAG(10));
+                CHECK(gpuvm_lookup(&dev, &vm, hva + 0x1000) == 0 && vm_ptr(9, hva, 4) == NULL);
+                /* unmapping one page: EXECUTABLE */
+                gpuvm_unmap(&dev, &vm, hva + (4ull << 20) + 4096, 1);
+                rdna3_vram_read(&dev, ptb + 8, &e, 8);
+                CHECK(e == RD_PTE_EXECUTABLE);
+                /* a 2 MiB huge mapping over the PTB frees it */
+                t0 = vm.tables;
+                CHECK(gpuvm_map_linear(&dev, &vm, hva + (4ull << 20), hpa, 512, vpte) == RDNA3_OK);
+                CHECK(vm.tables == t0 - 1);
+                rdna3_vram_read(&dev, pdb0 + 8ull * 2, &e, 8);
+                CHECK((e & RD_PTE_VALID) && (e & RD_PDE_PTE) && (e & RD_PTE_FRAG(31)) == RD_PTE_FRAG(9));
+                CHECK(gpuvm_lookup(&dev, &vm, hva + (4ull << 20) + 0x1234) == hpa + 0x1234);
+                gpuvm_vm_fini(&dev, &vm);
+                CHECK(vm.tables == 0 && pool.nfree == 64);
+                S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 + dist * 9] = 0;
+                S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32 + dist * 9] = 0;
+                dev.amdgpu_exact = 0;
+            }
+
             /* a GFX job in VMID 5 (amdgpu_ib_schedule order): VM flush from
              * the ring, ACQUIRE_MEM, HDP flush, CONTEXT_CONTROL, framed IBs
              * fetched through the page tables, fence */
@@ -9367,6 +9477,33 @@ static void run(const char *fwdir)
         CHECK(psp13_hdcp_invoke(&p4, 1) == RDNA3_EINVAL);
         dev.amdgpu_exact = 0;
         free(ta_file);
+    }
+
+    /* rdna3amdgpu=1: GMC as gmc_v11_0 - GART placed HIGH (host log
+     * 0x7FFF00000000), the engines amdgpu_gmc_allocate_vm_inv_eng gives the
+     * card's rings (host log), gfxhub / mmhub gart_disable at hw_fini */
+    {
+        static rdna3_gmc g2;
+        static const uint32_t hubs[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0 };
+        static const uint32_t want[15] = { 0, 1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 0, 1, 4, 14 };
+        uint32_t eng[15];
+        rdna3_vram_alloc_init(&dev, 16u << 20, BAR_LEN);
+        dev.amdgpu_exact = 1;
+        CHECK(gmc11_init(&dev, &g2, 0) == RDNA3_OK && g2.gart_start == 0x00007FFF00000000ull &&
+              g2.gart_end == 0x00007FFF1FFFFFFFull);
+        CHECK(gmc11_allocate_vm_inv_eng(hubs, NULL, 15, 1, eng) == RDNA3_OK &&
+              !memcmp(eng, want, sizeof(want)));
+        CHECK(gmc11_allocate_vm_inv_eng(hubs, NULL, 15, 0, eng) == RDNA3_OK && eng[3] == 5);
+        CHECK(gfxhub303_get_mc_fb_offset(&dev) == ((uint64_t)S.reg[GC_BASE0 + regGCMC_VM_FB_OFFSET] << 24));
+        S.reg[GC_BASE0 + regGCVM_CONTEXT1_CNTL] = 1;
+        S.reg[GC_BASE0 + regGCVM_L2_CNTL] |= 1;
+        S.reg[MM_BASE0 + regMMVM_L2_CNTL] |= MMVM_L2_CNTL__ENABLE_L2_CACHE_MASK;
+        gfxhub303_gart_disable(&dev);
+        CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT1_CNTL] == 0 && !(S.reg[GC_BASE0 + regGCVM_L2_CNTL] & 1) &&
+              !(S.reg[GC_BASE0 + regGCMC_VM_MX_L1_TLB_CNTL] & 0x41) && S.reg[GC_BASE0 + regGCVM_L2_CNTL3] == 0);
+        gmc11_hw_fini(&dev);
+        CHECK(!(S.reg[MM_BASE0 + regMMVM_L2_CNTL] & MMVM_L2_CNTL__ENABLE_L2_CACHE_MASK));
+        dev.amdgpu_exact = 0;
     }
 
     printf("sim_navi32: %s firmware, %u bootloader cmds, %u LOAD_IP_FW, TMR %u KiB, "

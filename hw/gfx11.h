@@ -107,6 +107,9 @@ typedef struct rdna3_gfx_ring {
     int      set_q_mode_ptr_valid;
     uint32_t set_q_mode_ptr;
     uint64_t set_q_mode_token;
+    /* ring->vm_inv_eng (amdgpu_gmc_allocate_vm_inv_eng); 0 =
+     * RD_GFX_VM_INV_ENG, which every ring uses by default */
+    uint32_t vm_inv_eng;
 } rdna3_gfx_ring;
 
 /* one IB of a job (VA in the job's VMID) */

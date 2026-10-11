@@ -498,7 +498,7 @@ void gfx11_emit_wait_reg_mem(rdna3_dev *d, rdna3_gfx_ring *r, int eng_sel, int m
 void gfx11_emit_vm_flush(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid, uint64_t pd_addr)
 {
     rdna3_vm_flush_regs f;
-    gfxhub303_flush_regs(d, vmid, RD_GFX_VM_INV_ENG, &f);
+    gfxhub303_flush_regs(d, vmid, r->vm_inv_eng ? r->vm_inv_eng : RD_GFX_VM_INV_ENG, &f);
     gfx11_emit_wreg(d, r, f.pt_lo, (uint32_t)pd_addr);
     gfx11_emit_wreg(d, r, f.pt_hi, (uint32_t)(pd_addr >> 32));
     /* gfx_v11_0_ring_emit_reg_write_reg_wait: write req, wait for the ack

@@ -250,6 +250,9 @@ void RDNA3Bringup::stopAndFree()
     }
     if (fIh && fIh->enabled && fDev)
         ih60_disable(fDev, fIh);
+    /* gfx_v11_0_hw_fini's gfxhub_v3_0_3_gart_disable with rdna3amdgpu=1 */
+    if (fAmdgpuExact && fGfx && fDev && fGmc)
+        gfxhub303_gart_disable(fDev);
     /* smu_hw_fini with rdna3amdgpu=1: the thermal alert off (no UNLOAD on
      * a card with display hardware) */
     if (fAmdgpuExact && fPmUp && fSmu && fDev)
@@ -262,6 +265,10 @@ void RDNA3Bringup::stopAndFree()
         else
             psp13_ring_stop(fPsp);
     }
+    /* gmc_v11_0_hw_fini with rdna3amdgpu=1: VM fault interrupts off, MMHUB
+     * GART off */
+    if (fAmdgpuExact && fGmc && fDev)
+        gmc11_hw_fini(fDev);
 
     /* 3. memory: mappings, firmware, state; fDev last. The firmware images
      * go like amdgpu_ucode_release in psp_sw_fini (sOS, TA) and
@@ -1028,6 +1035,19 @@ bool RDNA3Bringup::hwInit()
                 if (!kr)
                     kr = gfx11_kcq_start(fDev, fKiq, fKcq);
                 publish("RDNA3,KCQResult", (uint64_t)(int64_t)kr);
+                if (!kr && fAmdgpuExact) {
+                    /* gmc_v11_0_late_init -> amdgpu_gmc_allocate_vm_inv_eng over
+                     * amdgpu's rings on this card: gfx_0.0.0, comp_1.x.y (8),
+                     * sdma0/1, vcn_unified_0/1, jpeg_dec, mes_kiq; the first
+                     * compute ring (ours) gets engine 1, gfx keeps 0 */
+                    static const uint32_t hubs[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0 };
+                    uint32_t eng[15];
+                    if (gmc11_allocate_vm_inv_eng(hubs, nullptr, 15, fMesWanted, eng) == RDNA3_OK) {
+                        fGfx->vm_inv_eng = eng[0];
+                        fKcq->rb.vm_inv_eng = eng[1];
+                        publish("RDNA3,KCQVmInvEng", eng[1]);
+                    }
+                }
                 if (!kr && fIrqLive)
                     gfx11_set_eop_interrupt(fDev, &fKcq->rb, 1);
                 if (kr)

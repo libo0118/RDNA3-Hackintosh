@@ -103,6 +103,11 @@ ITEM_STEPS = [
                 r"|smu_(enable_umd_pstate|force_performance_level|adjust_power_state_dynamic"
                 r"|swctf_delayed_work_handler|reset_mp1_state)"
                 r"|soc21_update_umd_stable_pstate|gfx_v11_0_update_perf_clk"), ["amdgpu"]),
+    (re.compile(r"amdgpu_vm_pt_(add_list|alloc|ancestor|clear|continue_dfs|create|descendant|entries_mask"
+                r"|first_dfs|free_list|next|next_dfs|num_entries|parent|sibling|size|start)"
+                r"|amdgpu_vm_pte_(fragment|update_flags|update_noretry_flags)|amdgpu_vm_ptes_update"
+                r"|amdgpu_gmc_set_pte_pde|amdgpu_gmc_allocate_vm_inv_eng|gmc_v11_0_late_init"
+                r"|gfxhub_v3_0_3_(gart_disable|get_mc_fb_offset)|gmc_v11_0_(gart_disable|hw_fini)"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"
