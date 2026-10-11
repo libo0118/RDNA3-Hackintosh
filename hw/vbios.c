@@ -674,3 +674,17 @@ void vbios_strings(const rdna3_vbios *v, rdna3_vbios_strings *s)
             s->version = rd32(t + 4);
     }
 }
+
+/* get_disp_caps_v4_1 .. get_disp_caps_v4_5 (bios_parser2.c) */
+int vbios_dce_info_caps(const rdna3_vbios *v, uint8_t *dce_caps)
+{
+    uint16_t sz;
+    uint8_t frev, crev;
+    const uint8_t *t;
+    *dce_caps = 0;
+    t = vbios_data_table(v, RD_ATOM_DT_DCE_INFO, &sz, &frev, &crev);
+    if (!t || sz < 8 || frev != 4 || crev < 1 || crev > 5)
+        return RDNA3_ENOENT;
+    *dce_caps = (uint8_t)rd32(t + 4);
+    return RDNA3_OK;
+}

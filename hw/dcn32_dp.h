@@ -142,7 +142,11 @@ extern "C" {
 #define RD_DPCD_PHY_REPEATER_MODE       0xf0003
 #define RD_DPCD_PHY_REPEATER_EXTENDED_WAIT_TIMEOUT 0xf0005
 #define RD_DPCD_TOTAL_LTTPR_CNT         0xf000a
+#define RD_DPCD_TRAINING_PATTERN_SET_PHY_REPEATER1 0xf0010
+#define RD_DPCD_TRAINING_LANE0_SET_PHY_REPEATER1 0xf0011
 #define RD_DPCD_TRAINING_AUX_RD_INTERVAL_PHY_REPEATER1 0xf0020
+#define RD_DPCD_LANE0_1_STATUS_PHY_REPEATER1 0xf0030
+#define RD_DPCD_ADJUST_REQUEST_LANE0_1_PHY_REPEATER1 0xf0033
 #define RD_DPCD_REPEATER_CONFIGURATION_AND_STATUS_SIZE 0x50
 /* DP 2.0 (drm_dp.h, dc_dp_types.h) */
 #define RD_DPCD_SINK_VIDEO_FALLBACK_FORMATS 0x00020
@@ -313,6 +317,7 @@ typedef struct rdna3_mst_alloc_table {
 } rdna3_mst_alloc_table;
 
 struct rdna3_mst_mgr;
+struct rdna3_audio_stream;
 
 /* struct dc_link_settings (no link rate set: eDP only) */
 typedef struct rdna3_dp_link_settings {
@@ -403,6 +408,9 @@ typedef struct rdna3_dp_link {
     uint32_t enc_caps;              /* VBIOS encoder caps (RD_ATOM_ENC_CAP_*): link encoder features */
     uint32_t dprefclk_khz;          /* DP DTO reference (dcn32_clk_read) */
     int      lttpr_aware;           /* dc->caps.vbios_lttpr_aware && extended_aux_timeout_support */
+    int      vbios_lttpr_enable;    /* dc->caps.vbios_lttpr_enable: dce_info display_caps
+                                     * DCE_INFO_CAPS_LTTPR_SUPPORT_ENABLE (vbios_dce_info_caps);
+                                     * 8b/10b trains LTTPRs non-transparent, hop by hop */
     uint16_t chip_id;               /* PCI device id: dpcd_set_source_specific_data (asic_id.chip_id) */
     int      keep_receiver_powered; /* wa_flags.dp_keep_receiver_powered (dp_wa_power_up_0010FA) */
     uint8_t  dpcd_sink_ext_caps;    /* DP_SOURCE_SINK_CAP (dpcd_read_sink_ext_caps) */
@@ -464,6 +472,11 @@ typedef struct rdna3_dp_link {
      * bandwidth check in the setting's encoding:
      * perform_link_training_with_retries); NULL otherwise */
     const rdna3_mode *lt_mode;
+    /* rdna3audio: the stream's audio (hw/dcn32_audio.h): set up with the
+     * stream (DIO or HPO as the link setting decides), on after the
+     * unblank (dce110_enable_audio_stream), off before the blank of
+     * link_set_dpms_off and the endpoint with the back end; NULL none */
+    struct rdna3_audio_stream *audio;
 } rdna3_dp_link;
 
 /* Fill the static part of 'l' (no hardware access). */
@@ -478,6 +491,14 @@ uint32_t dcn32_dp_encoding(const rdna3_dp_link_settings *s);
 /* dc_link_get_highest_encoding_format: RD_DC_LINK_ENCODING_* of the link
  * (the verified link cap's encoding; HDMI TMDS behind a DP-HDMI converter) */
 uint32_t dcn32_dp_highest_encoding(const rdna3_dp_link *l);
+/* mst_decide_link_encoding_format: RD_DP_*_ENCODING of the setting MST
+ * streams use (the verified link cap) */
+uint32_t dcn32_dp_mst_decide_link_encoding_format(const rdna3_dp_link *l);
+/* dp_decide_lttpr_mode: RD_LTTPR_MODE_* the setting's encoding trains in */
+int dcn32_dp_decide_lttpr_mode(const rdna3_dp_link *l, const rdna3_dp_link_settings *s);
+/* dp_get_max_link_enc_cap: the DIO link encoder's limits (VBIOS encoder
+ * caps record); 0 when 'max_link_enc_cap' is NULL */
+int dcn32_dp_get_max_link_enc_cap(const rdna3_dp_link *l, rdna3_dp_link_settings *max_link_enc_cap);
 /* dp_is_128b_132b_signal for the link's running (or next) stream */
 int  dcn32_dp_is_128b_132b_signal(const rdna3_dp_link *l);
 /* dp_link_bandwidth_kbps (8b/10b, FEC off) */

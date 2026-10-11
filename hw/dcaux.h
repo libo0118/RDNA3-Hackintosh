@@ -137,6 +137,13 @@ int  dcaux_probe(rdna3_dev *d, rdna3_connector *out, uint32_t max);
  * when it saw HPD, DPCD or an EDID, else 0 */
 int  dcaux_probe_one(rdna3_dev *d, uint32_t n, rdna3_connector *c);
 
+/* dp_is_sink_present (dm_helpers_is_dp_sink_present): DDC line n+1's pins
+ * as GPIO inputs in I2C pad mode; a native DP sink or a passive DP-HDMI
+ * dongle holds the clock pin low (3 retries 1 ms apart). Returns 1 when
+ * the clock pin reads 0; 'dp_connector' when there is no DDC. The pins'
+ * MASK / A / EN and the pad modes are restored. *clock_pin: the last read. */
+int  dcaux_dp_is_sink_present(rdna3_dev *d, uint32_t n, int dp_connector, uint32_t *clock_pin);
+
 #ifdef __cplusplus
 }
 #endif

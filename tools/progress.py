@@ -57,6 +57,7 @@ AMDGPU_STEPS = {
     "Display: ODM": ["odm"],
     "Display: hotplug": ["hotplug"],
     "Display: color": ["gamma"],
+    "Display: audio": ["audio"],
     "VCN / JPEG video": ["vcn"],
 }
 UAPI_STEPS = {
@@ -139,6 +140,19 @@ ITEM_STEPS = [
     # ODM combine (rdna3odm, step odm) in the modeset / OTG groups
     (re.compile(r"dcn32_update_odm|get_odm_config|dcn32_update_dsc_on_stream|optc32_set_odm_(combine|bypass)"),
      ["odm"]),
+    # display audio (rdna3audio, step audio): the stream encoders' AFMT / DP
+    # SDP / HPO audio, the link hwss audio hooks, the audio DTBCLK DTO, the
+    # PMFW's PME workaround, in the DP link / DSC / UHBR / modeset groups
+    (re.compile(r"enc1_se_\w+|enc3_(se_\w+|audio_mute_control)|get_audio_clock_info|speakers_to_channels"
+                r"|(setup|enable|disable)_(dio|hpo_dp)_audio_(output|packet)|dcn31_hpo_dp_stream_enc_audio_\w+"
+                r"|hpo_dp_is_gsp_enabled|dccg31_set_audio_dtbclk_dto|dcn32_enable_pme_wa|dcn32_smu_set_pme_workaround"),
+     ["audio"]),
+    # output pixel formats (rdna3fmt, step fmt): the OPP's formatter and
+    # pattern generator
+    (re.compile(r"opp1_(program_fmt|program_bit_depth_reduction|set_truncation|set_spatial_dither|set_clamping"
+                r"|set_dyn_expansion|set_pixel_encoding|program_clamping_and_pixel_encoding)"
+                r"|opp2_(set_disp_pattern_generator|program_dpg_dimensions|dpg_set_blank_color|dpg_is_blanked"
+                r"|dpg_is_pending)"), ["fmt"]),
     # ported and checked in the simulator, but no ladder step drives them
     # yet (nothing in the kext calls them): they stay "ported"
     (re.compile(r"optc1_(setup_vertical_interrupt[12]|validate_timing|is_two_pixels_per_container"

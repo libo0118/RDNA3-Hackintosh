@@ -58,11 +58,30 @@ typedef struct rdna3_edid {
     } audio_modes[16];
     uint8_t  speaker_flags;         /* speaker allocation, DEFAULT_SPEAKER_LOCATION (5) without one */
     uint32_t panel_id;              /* edid_extract_panel_id */
+    /* DRM's update_display_info colour part (drm_parse_cea_ext,
+     * drm_parse_hdmi_deep_color_info, the EDID 1.4 input / feature bits),
+     * what amdgpu_dm's output format choice reads (rdna3fmt):
+     * display_info.color_formats (RD_COLOR_FORMAT_*), display_info.bpc
+     * (0 = not given), the HDMI VSDB's RGB 4:4:4 deep color modes
+     * (edid_hdmi_rgb444_dc_modes: RD_EDID_HDMI_DC_*) and whether they
+     * hold for YCbCr 4:4:4 too (DC_Y444) */
+    uint8_t  color_formats, bpc, hdmi_dc_modes, hdmi_dc_y444;
+    uint8_t  cta_ext3, hdmi_dc_bpc;  /* parse state: the CTA byte 3, the VSDB's bpc */
     /* apply_edid_quirks (panel_patch) */
     uint8_t  quirk_disable_fams, quirk_remove_sink_ext_caps, quirk_disable_colorimetry;
 } rdna3_edid;
 
 #define RD_EDID_MAX_AUDIO 16        /* DC_MAX_AUDIO_DESC_COUNT */
+/* DRM_COLOR_FORMAT_* */
+#define RD_COLOR_FORMAT_RGB444   (1u << 0)
+#define RD_COLOR_FORMAT_YCBCR444 (1u << 1)
+#define RD_COLOR_FORMAT_YCBCR422 (1u << 2)
+#define RD_COLOR_FORMAT_YCBCR420 (1u << 3)
+/* DRM_EDID_HDMI_DC_*: the HDMI VSDB's byte 6 */
+#define RD_EDID_HDMI_DC_48 (1u << 6)
+#define RD_EDID_HDMI_DC_36 (1u << 5)
+#define RD_EDID_HDMI_DC_30 (1u << 4)
+#define RD_EDID_HDMI_DC_Y444 (1u << 3)
 #define RD_EDID_DEFAULT_SPEAKER_LOCATION 5
 
 /* drm_edid_encode_panel_id ('A'..'Z' x 3, product code) */
