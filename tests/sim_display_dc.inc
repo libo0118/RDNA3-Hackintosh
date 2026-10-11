@@ -12,6 +12,8 @@
 #include "dcn32_otg.h"
 #include "gen/dcn_3_2_0_otg.h"
 #include "gen/dcn_3_2_0_dmub_diag.h"
+#include "dcn32_color.h"
+#include "gen/dcn_3_2_0_color.h"
 
 #define ODMR_K(reg, n) (DCN_B2 + reg + (regODM1_OPTC_INPUT_CLOCK_CONTROL - regODM0_OPTC_INPUT_CLOCK_CONTROL) * (n))
 #define SK_FRAME_US 16667u    /* the modelled OTGs run at 60 Hz */
@@ -121,6 +123,14 @@ static int sk_rd(uint32_t dw, uint32_t *out)
 static int sk_wr(uint32_t dw, uint32_t v)
 {
     uint32_t o;
+    /* the MPCC gamut remap: the selected set becomes the current one */
+    for (o = 0; o < RD_DCN_MAX_PIPES; o++)
+        if (dw == DCN_B3 + regMPCC_OGAM0_MPCC_GAMUT_REMAP_MODE +
+                      (regMPCC_OGAM1_MPCC_GAMUT_REMAP_MODE - regMPCC_OGAM0_MPCC_GAMUT_REMAP_MODE) * o) {
+            uint32_t m = v & MPCC_OGAM0_MPCC_GAMUT_REMAP_MODE__MPCC_GAMUT_REMAP_MODE_MASK;
+            S.reg[dw] = m | (m << MPCC_OGAM0_MPCC_GAMUT_REMAP_MODE__MPCC_GAMUT_REMAP_MODE_CURRENT__SHIFT);
+            return 1;
+        }
     if (SK.otg_model)
         for (o = 0; o < RD_DCN_MAX_PIPES; o++) {
             if (dw == OTG(regOTG0_OTG_VERTICAL_INTERRUPT0_CONTROL, o)) {
@@ -534,8 +544,118 @@ static void test_dc_dmub(rdna3_dev *dev, rdna3_dmub *dm)
     SK.dmub_model = 0;
 }
 
+#define GAMUT_K(reg, n) (DCN_B3 + reg + (regMPCC_OGAM1_MPCC_GAMUT_REMAP_MODE - regMPCC_OGAM0_MPCC_GAMUT_REMAP_MODE) * (n))
+#define OCSC_K(reg, n)  (DCN_B3 + reg + (regMPC_OUT1_CSC_MODE - regMPC_OUT0_CSC_MODE) * (n))
+#define MUX_K(reg, n)   (DCN_B3 + reg + (regMPC_OUT1_MUX - regMPC_OUT0_MUX) * (n))
+#define MPCC_K(reg, n)  (DCN_B3 + reg + (regMPCC1_MPCC_TOP_SEL - regMPCC0_MPCC_TOP_SEL) * (n))
+
+static void test_dc_color(rdna3_dev *dev)
+{
+    rd_fixpt m[12];
+    uint16_t r[12];
+    rdna3_denorm_clamp cl;
+    const uint16_t *t;
+    uint32_t k, save[64], n = 0;
+    /* the registers touched, saved and put back at the end */
+    const uint32_t regs[] = {
+        OCSC_K(regMPC_OUT0_CSC_MODE, 2), MUX_K(regMPC_OUT0_DENORM_CONTROL, 2), MUX_K(regMPC_OUT0_DENORM_CLAMP_G_Y, 2),
+        MUX_K(regMPC_OUT0_DENORM_CLAMP_B_CB, 2), GAMUT_K(regMPCC_OGAM0_MPCC_GAMUT_REMAP_MODE, 3),
+        MPCC_K(regMPCC0_MPCC_TOP_SEL, 3), MPCC_K(regMPCC0_MPCC_BOT_SEL, 3), MPCC_K(regMPCC0_MPCC_OPP_ID, 3),
+        MPCC_K(regMPCC0_MPCC_UPDATE_LOCK_SEL, 3), MUX_K(regMPC_OUT0_MUX, 3), MUX_K(regMPC_OUT0_MUX, 1),
+        DCN_B3 + regMPC_OUT_CSC_COEF_FORMAT,
+    };
+    for (k = 0; k < sizeof(regs) / sizeof(regs[0]); k++)
+        save[n++] = S.reg[regs[k]];
+
+    /* find_color_matrix: the 709 full-range table; none past the end */
+    t = dcn32_find_color_matrix(RD_COLOR_SPACE_YCBCR709_TYPE);
+    CHECK(t && t[0] == 0xE04 && t[1] == 0xF345 && t[11] == 0x1004);
+    CHECK(!dcn32_find_color_matrix(99));
+
+    /* mpc3_set_ocsc_default on OPP 2, set A: the six coefficient registers */
+    S.reg[DCN_B3 + regMPC_OUT_CSC_COEF_FORMAT] = 0xf;
+    CHECK(dcn32_mpc_set_ocsc_default(dev, 2, RD_COLOR_SPACE_YCBCR709_TYPE, RD_MPC_OUTPUT_CSC_COEF_A) == RDNA3_OK);
+    CHECK(S.reg[DCN_B3 + regMPC_OUT_CSC_COEF_FORMAT] == 0 && S.reg[OCSC_K(regMPC_OUT0_CSC_MODE, 2)] == 1);
+    CHECK(S.reg[OCSC_K(regMPC_OUT0_CSC_C11_C12_A, 2)] == (0xE04u | 0xF345u << 16) &&
+          S.reg[OCSC_K(regMPC_OUT0_CSC_C33_C34_A, 2)] == (0xE04u | 0x1004u << 16));
+    /* set B with limited-range RGB through mpc3_set_output_csc */
+    CHECK(dcn32_mpc_set_output_csc(dev, 2, dcn32_find_color_matrix(RD_COLOR_SPACE_RGB_LIMITED_TYPE),
+                                   RD_MPC_OUTPUT_CSC_COEF_B) == RDNA3_OK);
+    CHECK(S.reg[OCSC_K(regMPC_OUT0_CSC_MODE, 2)] == 2 && S.reg[OCSC_K(regMPC_OUT0_CSC_C11_C12_B, 2)] == 0x1B67 &&
+          S.reg[OCSC_K(regMPC_OUT0_CSC_C33_C34_B, 2)] == (0x1B67u | 0x201u << 16));
+    CHECK(dcn32_mpc_set_output_csc(dev, 2, NULL, RD_MPC_OUTPUT_CSC_COEF_A) == RDNA3_EINVAL);
+    CHECK(dcn32_mpc_set_output_csc(dev, 2, NULL, RD_MPC_OUTPUT_CSC_DISABLE) == RDNA3_OK &&
+          S.reg[OCSC_K(regMPC_OUT0_CSC_MODE, 2)] == 0);
+
+    /* mpc3_set_denorm: 10 bpc = mode 4; 16 bpc = bypass; the clamps */
+    dcn32_mpc_set_denorm(dev, 2, RD_COLOR_DEPTH_101010);
+    CHECK(((S.reg[MUX_K(regMPC_OUT0_DENORM_CONTROL, 2)] & MPC_OUT0_DENORM_CONTROL__MPC_OUT_DENORM_MODE_MASK) >>
+           MPC_OUT0_DENORM_CONTROL__MPC_OUT_DENORM_MODE__SHIFT) == 4);
+    dcn32_mpc_set_denorm(dev, 2, RD_COLOR_DEPTH_161616);
+    CHECK(!(S.reg[MUX_K(regMPC_OUT0_DENORM_CONTROL, 2)] & MPC_OUT0_DENORM_CONTROL__MPC_OUT_DENORM_MODE_MASK));
+    memset(&cl, 0, sizeof(cl));
+    cl.clamp_max_r_cr = 0x3c0; cl.clamp_min_r_cr = 0x40; cl.clamp_max_g_y = 0x3ac; cl.clamp_min_g_y = 0x40;
+    cl.clamp_max_b_cb = 0x3c0; cl.clamp_min_b_cb = 0x40;
+    dcn32_mpc_set_denorm_clamp(dev, 2, &cl);
+    k = S.reg[MUX_K(regMPC_OUT0_DENORM_CLAMP_G_Y, 2)];
+    CHECK(((k & MPC_OUT0_DENORM_CLAMP_G_Y__MPC_OUT_DENORM_CLAMP_MAX_G_Y_MASK) >>
+           MPC_OUT0_DENORM_CLAMP_G_Y__MPC_OUT_DENORM_CLAMP_MAX_G_Y__SHIFT) == 0x3ac &&
+          ((k & MPC_OUT0_DENORM_CLAMP_G_Y__MPC_OUT_DENORM_CLAMP_MIN_G_Y_MASK) >>
+           MPC_OUT0_DENORM_CLAMP_G_Y__MPC_OUT_DENORM_CLAMP_MIN_G_Y__SHIFT) == 0x40);
+
+    /* convert_float_matrix: 1.0 = 0x2000, -1.0 = 0xE000 (S2.13 two's
+     * complement with the sign bit), 3.5 clamped to 3.0, 0.5 = 0x1000 */
+    memset(m, 0, sizeof(m));
+    m[0] = dc_fixpt_from_int(1);
+    m[1] = dc_fixpt_from_int(-1);
+    m[2] = dc_fixpt_from_fraction(7, 2);
+    m[3] = dc_fixpt_from_fraction(1, 2);
+    m[4] = dc_fixpt_from_fraction(-7, 2);
+    dcn32_convert_float_matrix(r, m, 12);
+    CHECK(r[0] == 0x2000 && r[1] == 0xE000 && r[2] == 0x6000 && r[3] == 0x1000 && r[4] == 0xA000 && r[5] == 0);
+
+    /* mpc3_set_gamut_remap on MPCC 3: identity into set A (after bypass),
+     * the next one into set B, then A again, bypass */
+    memset(m, 0, sizeof(m));
+    m[0] = m[5] = m[10] = dc_fixpt_from_int(1);
+    S.reg[GAMUT_K(regMPCC_OGAM0_MPCC_GAMUT_REMAP_MODE, 3)] = 0;
+    dcn32_mpc_set_gamut_remap(dev, 3, m);
+    CHECK((S.reg[GAMUT_K(regMPCC_OGAM0_MPCC_GAMUT_REMAP_MODE, 3)] & 3) == 1 &&
+          S.reg[GAMUT_K(regMPCC_OGAM0_MPC_GAMUT_REMAP_C11_C12_A, 3)] == 0x2000 &&
+          S.reg[GAMUT_K(regMPCC_OGAM0_MPC_GAMUT_REMAP_C11_C12_A, 3) + 2] == (0x2000u << 16) &&
+          S.reg[GAMUT_K(regMPCC_OGAM0_MPC_GAMUT_REMAP_C33_C34_A, 3)] == 0x2000);
+    m[0] = dc_fixpt_from_fraction(1, 2);
+    dcn32_mpc_set_gamut_remap(dev, 3, m);
+    CHECK((S.reg[GAMUT_K(regMPCC_OGAM0_MPCC_GAMUT_REMAP_MODE, 3)] & 3) == 2 &&
+          S.reg[GAMUT_K(regMPCC_OGAM0_MPC_GAMUT_REMAP_C11_C12_B, 3)] == 0x1000);
+    dcn32_mpc_set_gamut_remap(dev, 3, m);
+    CHECK((S.reg[GAMUT_K(regMPCC_OGAM0_MPCC_GAMUT_REMAP_MODE, 3)] & 3) == 1);
+    dcn32_mpc_set_gamut_remap(dev, 3, NULL);
+    CHECK((S.reg[GAMUT_K(regMPCC_OGAM0_MPCC_GAMUT_REMAP_MODE, 3)] & 3) == 0);
+
+    /* mpc3_mpc_init_single_inst on MPCC 3 routed to OPP 1: out of the
+     * tree, OPP 1's output mux off, OPP 3's rate control off */
+    S.reg[MPCC_K(regMPCC0_MPCC_TOP_SEL, 3)] = 3;
+    S.reg[MPCC_K(regMPCC0_MPCC_BOT_SEL, 3)] = 0xf;
+    S.reg[MPCC_K(regMPCC0_MPCC_OPP_ID, 3)] = 1;
+    S.reg[MUX_K(regMPC_OUT0_MUX, 1)] = 3;
+    S.reg[MUX_K(regMPC_OUT0_MUX, 3)] = 0xf | 5u << MPC_OUT0_MUX__MPC_OUT_FLOW_CONTROL_COUNT__SHIFT;
+    dcn32_mpc_init_single_inst(dev, 3);
+    CHECK(S.reg[MPCC_K(regMPCC0_MPCC_TOP_SEL, 3)] == 0xf && S.reg[MPCC_K(regMPCC0_MPCC_OPP_ID, 3)] == 0xf &&
+          S.reg[MPCC_K(regMPCC0_MPCC_UPDATE_LOCK_SEL, 3)] == 0xf &&
+          (S.reg[MUX_K(regMPC_OUT0_MUX, 1)] & MPC_OUT0_MUX__MPC_OUT_MUX_MASK) == 0xf &&
+          (S.reg[MUX_K(regMPC_OUT0_MUX, 3)] & MPC_OUT0_MUX__MPC_OUT_RATE_CONTROL_DISABLE_MASK) &&
+          !(S.reg[MUX_K(regMPC_OUT0_MUX, 3)] & MPC_OUT0_MUX__MPC_OUT_FLOW_CONTROL_COUNT_MASK));
+
+    n = 0;
+    for (k = 0; k < sizeof(regs) / sizeof(regs[0]); k++)
+        S.reg[regs[k]] = save[n++];
+}
+
 static void test_dc_k(rdna3_dev *dev, rdna3_dmub *dm)
 {
+    test_dc_color(dev);
+
     test_dc_otg(dev);
     test_dc_dmub(dev, dm);
     printf("sim_navi32: display core K tests ran (%u GPINTs, %u inbox0 commands)\n", SK.gpints, SK.inbox0_cmds);

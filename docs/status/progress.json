@@ -1,11 +1,11 @@
 {
  "amdgpu": {
   "works": 464,
-  "ported": 938,
+  "ported": 945,
   "total": 1604,
   "not_applicable": 367,
   "works_pct": 28.9,
-  "ported_pct": 58.5,
+  "ported_pct": 58.9,
   "groups": [
    {
     "name": "PSP 13",
@@ -1863,8 +1863,8 @@
      "gamma"
     ],
     "works": 0,
-    "ported": 12,
-    "todo": 8,
+    "ported": 19,
+    "todo": 1,
     "items": {
      "cm3_helper_convert_to_custom_float": "ported",
      "cm3_helper_translate_curve_to_degamma_hw_format": "todo",
@@ -1873,19 +1873,19 @@
      "is_rgb_equal": "ported",
      "mpc3_configure_ogam_lut": "ported",
      "mpc3_get_ogam_current": "ported",
-     "mpc3_mpc_init_single_inst": "todo",
+     "mpc3_mpc_init_single_inst": "ported",
      "mpc3_ogam_get_reg_field": "ported",
      "mpc3_power_on_ogam_lut": "ported",
      "mpc3_program_luta": "ported",
      "mpc3_program_lutb": "ported",
      "mpc3_program_ogam_pwl": "ported",
-     "mpc3_set_denorm": "todo",
-     "mpc3_set_denorm_clamp": "todo",
-     "mpc3_set_gamut_remap": "todo",
-     "mpc3_set_ocsc_default": "todo",
-     "mpc3_set_output_csc": "todo",
+     "mpc3_set_denorm": "ported",
+     "mpc3_set_denorm_clamp": "ported",
+     "mpc3_set_gamut_remap": "ported",
+     "mpc3_set_ocsc_default": "ported",
+     "mpc3_set_output_csc": "ported",
      "mpc3_set_output_gamma": "ported",
-     "program_gamut_remap": "todo"
+     "program_gamut_remap": "ported"
     },
     "na": {
      "dcn30_mpc_construct": "Linux Display Core object constructors / destructors",
