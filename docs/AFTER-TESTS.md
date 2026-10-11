@@ -455,6 +455,7 @@ with `dp:`; ioreg `RDNA3,Head<n>,DPLink` sums the link up.
 | `modeset: the DP link failed (-5): back to ...` and the old mode trains | the new mode's link setting does not train (see above) | record the rate / lanes; the old mode back is the expected recovery |
 | modes `refused (10)` on a DP-to-HDMI / DVI / VGA converter | `link_validate_mode_timing`: the converter's TMDS clock (DPCD 0x081 x 2.5 MHz), its max bpc, or its DFP capability extension (DPCD 0x0a3..: max pixel rate, active size, RGB 8 bpc) is below the mode | `RDNA3,Connector<n>,DPCD` 0x005 / 0x080-0x083; expected for a mode above the converter |
 | the monitor reacts differently since the stage 4 item K build (other OSD, FreeSync menu) | `retrieve_link_cap` now writes AMD's source OUI (00-00-1A), the device id and DCN 3.2's minimum h blank to DPCD 0x300 / 0x303 / 0x340 as amdgpu does, and the AUX reply timeout is 3.2 ms during the LTTPR probe | expected (Linux does the same); report anything that stopped working |
+| a repeater (dock, active cable, retimer) between card and monitor: `dp: AUX n: LTTPR mode at the max link: non-transparent (VBIOS LTTPR support enabled)`, training fails | DC's non-transparent 8b/10b training hop by hop (`dp_perform_8b_10b_link_training`: each repeater with TPS4 at its own AUX_RD_INTERVAL, `repeater_training_done`, then the sink; the VBIOS's `DCE_INFO_CAPS_LTTPR_SUPPORT_ENABLE` decides it as in `dp_decide_8b_10b_lttpr_mode`) | the `dp: LTTPR r lane status ...` debug lines; compare with the Linux dump's link training log; without the repeater the sink trains as before |
 
 ### DSC and FEC (`dsc`)
 
@@ -539,7 +540,52 @@ functions to these steps).
 | `SCDC ... (-n)` ACQUIRE | the DDC engine owned by the DMCUB/HW | note; the SCDC write is skipped, which only matters above 340 MHz |
 | hdmi20: 4K60 not in `rdna3_modetest list` | `HDMI 6G 0` (no ATOM_ENCODER_CAP_RECORD_HDMI6Gbps for the connector), the EDID's max TMDS below 594 MHz, or DISPCLK limits (`RD_MODESET_CLOCKS` in `display: head n mode ... refused (4)`) | the refusal code in the mode list log: 5 = TMDS limit, 4 = clocks |
 | hdmi20: "no signal" at 4K60, old mode back | scrambling not matched by the sink (`scrambler 0x00`), or the PHY PLL at 594 MHz | SCDC values in the log; `HDMICHARCLK` / PHY registers in the look; retry with a certified cable |
-| audio device appears but silent | not ported yet: the AFMT / azalia audio path is still off (only the audio info frame line is set) | expected |
+| audio device appears but silent | without `rdna3audio=1` the azalia endpoint is never enabled (only the audio info frame line is set) | run step `audio` |
+
+### Display audio (`audio`)
+
+`audio` = `hdmi` + `rdna3dplink=1 rdna3audio=1`. The first mode list logs
+`display: head n audio: "NAME", m modes, speakers 0x.., latency v/a ms`
+(the EDID's SADs and speaker allocation, `dcn32_audio_info_from_edid`), the
+first switch `audio: n azalia endpoints, straps 0x.. (HDMI audio native)`
+(`dcn32_audio_pool_init`), every switch `display: head n audio: endpoint e,
+HDMI|DP (DIO)|DP (HPO), on|off, m modes, speakers 0x.., DTO source d, c
+channels at P kHz pixel clock, hot plug 0x.., PME p`; ioreg
+`RDNA3,Head<n>,Audio` keeps the last one. Pass: `on`, `m modes` > 0, the
+picture switches as in `hdmi`; with an HDA driver attached to the card's
+audio function, System Settings > Sound > Output lists the monitor by its
+EDID name and a test sound plays. Without such a driver the card side
+alone passes the step (`on` and `hot plug 0x8.......`: bit 31 =
+AUDIO_ENABLED of the endpoint, set by `dce_aud_az_enable`); then mark
+`audio` passed (the ITEM_STEPS rules
+map the enc / AFMT / APG / audio DTO functions to it).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no `display: head n audio:` line at the switch | `rdna3audio` not set, a DVI sink (no HDMI VSDB), no audio data block in the EDID (`0 modes`), or `HDMI audio off` in the straps line | the mode list log's `audio modes` count; the straps value (`DC_PINSTRAPS_AUDIO` bit 1 = HDMI audio) |
+| `no free azalia endpoint` | fewer endpoints than streams (`n azalia endpoints`, `PORT_CONNECTIVITY` of the pins) | the count in the log; compare with the Linux dump's `/proc/asound/cards` |
+| `on`, macOS lists no output | no HDA driver for the card's audio function, or it sees no presence / ELD | `ioreg -l | grep -i hda`; the hot plug value (bit 31 AUDIO_ENABLED, bit 0 CLOCK_GATING_DISABLE); compare the ELD with Linux `cat /proc/asound/card*/eld*` |
+| listed, no sound | the audio DTO / ACR (`DTO source`, pixel clock) does not match the stream, or the stream muted | the look's `DCCG_AUDIO_DTO0_PHASE/MODULE` (HDMI: module = pixel clock in 100 Hz, phase 24 MHz), `AFMT_AUDIO_PACKET_CONTROL`, `HDMI_ACR_PACKET_CONTROL`; reproduce with `test_dc_audio_streams` |
+| DP: `DP (HPO)`, no sound | 128b/132b audio through APG with HBR audio off (`config.disable_hbr_audio_dp2`) | `APGn_APG_CONTROL`, `HPO_DP_STREAM_ENCn_DP_SYM32_ENC_SDP_AUDIO_CONTROL0` in the look |
+| `RDNA3,Head<n>,DPSinkPresent` = `0 (... clock pin 1)` on a DP connector | the DP++ adaptor or cable in front of an HDMI / DVI monitor, as DC's `dp_is_sink_present` (DDC clock pin as GPIO input) tells DP from TMDS at detection | information only (the head runs TMDS; HDMI audio through a passive adaptor follows the straps' `hdmi_audio_on_dongle`) |
+| picture lost at the switch with `rdna3audio=3` | the PMFW's BACO audio PME message (`DALSMC_MSG_BacoAudioD3PME`) | run with `rdna3audio=1`, report the PME value |
+
+### Output pixel formats (`fmt`)
+
+`fmt` = `hdmi` + `rdna3fmt=1` (`=3`: max 8 bpc, `=5`: YCbCr 4:2:2 forced).
+Every HDMI switch logs and sets `RDNA3,Head<n>,Format` = `ENC N bpc,
+colour space c, sink bpc b formats 0x..` (amdgpu_dm's choice for the
+mode: `dcn32_output_format`). Pass: the switches of `rdna3_modetest
+cycle` as in `hdmi` with the right colours (no cast, no extra banding)
+and, where the sink offers it, `YCbCr 4:4:4` and more than 8 bpc in the
+property (the monitor's info menu agrees). Then mark `fmt` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| pink / green picture after a switch | the output CSC (RGB -> YCbCr matrix, `dcn32_program_output_csc`) or the AVI infoframe's colour fields do not match the encoding | the look's `MPCC_OGAM` / OCSC registers and `FMT_CONTROL.FMT_PIXEL_ENCODING`; reproduce with `test_dc_fmt_modeset` |
+| "no signal" at 10 / 12 bpc | the deep colour TMDS clock (pixel clock x 1.25 / 1.5) or `PHYPLLx_PIXCLK_RESYNC_CNTL` | the log's pixel clock line; retry with `rdna3fmt=3` (8 bpc) to split encoding from depth |
+| banding at 8 bpc | dither off (`FMT_BIT_DEPTH_CONTROL` should have spatial dither on) | the look's `FMT_BIT_DEPTH_CONTROL` |
+| `RGB 8 bpc` although the TV takes YCbCr | the EDID's CTA byte 3 / HDMI VSDB deep colour bits (`color_formats`, `bpc` in the property) | the EDID in the report; `edid_parse` |
 
 ### Cursor through MALL (`cursormall`)
 

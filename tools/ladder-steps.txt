@@ -166,3 +166,15 @@ hdmi20 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rd
 # transmitter disabled again once the OTG stopped (SYMCLK work-around);
 # after every switch the DIO FIFOs are resynced to DISPCLK
 dcseq rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3dcseq=1
+# display audio (hw/dcn32_audio.c, stage 4 item N): the hdmi step +
+# rdna3dplink=1 + rdna3audio=1: every mode switch on an HDMI head (and on a
+# DP head, through the DP link) pairs the stream with an azalia endpoint,
+# hands it the EDID's audio modes and speakers (ELD), runs the audio DTO,
+# the ACR / audio infoframe (HDMI) or audio SDP (DP) and enables the
+# endpoint, as DC's link_set_dpms_on does
+audio rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3hdmi=1 rdna3dplink=1 rdna3audio=1
+# output pixel formats (hw/dcn32_opp.c, stage 4 item N): the hdmi step +
+# rdna3fmt=1: an HDMI head switches in amdgpu's format - YCbCr 4:4:4 when
+# the sink takes it, 10 / 12 bpc when its EDID allows (the deep colour PHY
+# clock), the OPP formatter's dither, the DPG blank around the switch
+fmt rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3hdmi=1 rdna3fmt=1
