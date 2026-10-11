@@ -822,10 +822,24 @@ static void rd3AccelIopHome(IOService *fb, unsigned head);
  * Weak imports, called like signalTransactionInterrupt below: the immediate
  * base IOAccelLegacyDisplayPipe if it overrides the method, else
  * IOAccelDisplayPipe's - and neither symbol can keep the kext from loading
- * (unresolved weak symbols bind to gOSKextUnresolved). */
+ * (unresolved weak symbols bind to gOSKextUnresolved).
+ * Card run 34: from the Auxiliary KC neither symbol exists on 24H32, yet
+ * the OSKextSymbolIsResolved test passed and the call jumped into kernel
+ * data (NX page fault in IOAccelDisplayPipe::event_interrupt_gated). A
+ * candidate now also has to lie inside IOAcceleratorFamily2's image, next
+ * to signalTransactionInterrupt, which the kext imports strongly. */
 extern "C" {
 IOReturn _ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2(void *pipe, IOAccelDisplayPipeTransaction2 *txn) __attribute__((weak_import));
 IOReturn _ZN18IOAccelDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2(void *pipe, IOAccelDisplayPipeTransaction2 *txn) __attribute__((weak_import));
+void _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(void *pipe, void *arg);
+}
+static bool rd3InAccelFamily(const void *f)
+{
+    const uintptr_t a = (uintptr_t)f;
+    const uintptr_t b = (uintptr_t)&_ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv;
+    if (!a || f == gOSKextUnresolved || f == (const void *)&gOSKextUnresolved)
+        return false;
+    return (a > b ? a - b : b - a) < (1u << 20);   /* the family is ~420 KiB */
 }
 static int    gIopGammaBase = -1;   /* rdna3gamma, read on first use */
 static SInt64 gCntIopEmptyBase, gCntIopEmptyBaseErr;
@@ -840,7 +854,7 @@ static IOReturn rd3AccelIopGammaToBase(void *pipe, IOAccelDisplayPipeTransaction
     if (!gIopGammaBase)
         return kIOReturnSuccess;
     /* OSKextSymbolIsResolved, with the cast a function pointer needs in C++ */
-#define RD3_WEAK_RESOLVED(f) ((const void *)&(f) != gOSKextUnresolved)
+#define RD3_WEAK_RESOLVED(f) ((const void *)&(f) != gOSKextUnresolved && rd3InAccelFamily((const void *)&(f)))
     if (RD3_WEAK_RESOLVED(_ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2)) {
         fn = _ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2;
         which = "IOAccelLegacyDisplayPipe";
@@ -851,7 +865,10 @@ static IOReturn rd3AccelIopGammaToBase(void *pipe, IOAccelDisplayPipeTransaction
     static SInt32 gIopBaseLogs;
     if (!fn) {
         if (OSIncrementAtomic(&gIopBaseLogs) < 2)
-            ALOG("iop: rdna3gamma=1 but IOAcceleratorFamily2 exports no performTransaction: plane-less transaction answered as before");
+            ALOG("iop: rdna3gamma=1 but IOAcceleratorFamily2 exports no performTransaction (weak 0x%llx / 0x%llx, unresolved 0x%llx): plane-less transaction answered as before",
+                 (unsigned long long)(uintptr_t)&_ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2,
+                 (unsigned long long)(uintptr_t)&_ZN18IOAccelDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2,
+                 (unsigned long long)(uintptr_t)gOSKextUnresolved);
         return kIOReturnSuccess;
     }
     const IOReturn r = fn(pipe, txn);

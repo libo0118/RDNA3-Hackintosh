@@ -1287,3 +1287,23 @@ Settings. That is expected for them, not a display regression.
   display power, GMC, IH, SDMA, KIQ / KCQ / GFX ring tests, MES up, VCN
   rings) came up. `VCN1: decode IB test failed (-62)` as in run 33
   (diagnostic). Run `big4` again.
+
+### Card run 35 (step big4, build c5aab01)
+
+- The MES fix held: no `ring full` / `MES ring buffer is full` in the
+  serial log; the boot reached the Apple progress bar and WindowServer.
+- **Kernel panic** ~17 s into the desktop: NX page fault at a kernel data
+  address called from `IOAccelDisplayPipe::event_interrupt_gated`, right
+  after the first plane-less display-pipe transaction (`iop: empty #0`).
+  With `rdna3gamma=1` the accelerator hands such a transaction to the base
+  class's `performTransaction` through weak imports; on 24H32 neither
+  `IOAccelLegacyDisplayPipe::` nor `IOAccelDisplayPipe::performTransaction`
+  is exported, the Auxiliary KC bound them to a kernel data address and
+  the `gOSKextUnresolved` test let the call through. A weak candidate must
+  now also lie inside IOAcceleratorFamily2 (within 1 MiB of the strongly
+  imported `signalTransactionInterrupt`); otherwise the transaction is
+  answered as before and the log names the rejected addresses
+  (`iop: rdna3gamma=1 but IOAcceleratorFamily2 exports no
+  performTransaction (weak 0x... / 0x..., unresolved 0x...)`). The gamma
+  test then fails without a panic: gamma through the accelerator needs
+  another route. Run `big4` again.
