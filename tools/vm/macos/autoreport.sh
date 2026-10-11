@@ -160,6 +160,12 @@ case " $args " in
     *) args="$args rdna3lvl=8 rdna3msi=1 rdna3dmub=1 rdna3fb=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1" ;;
 esac
 lvl=$(echo "$args" | sed -n 's/.*rdna3lvl=\([0-9]*\).*/\1/p')
+# no idle system sleep while the tests run: with rdna3resume=1 QEMU lets
+# the guest suspend, and macOS (a MacBookPro SMBIOS) slept on its own a
+# minute after the display sleep, twice, so the report never got past the
+# display wake (card run 36). -i blocks idle sleep only: the display sleep
+# and the system sleep test's pmset sleepnow still work
+caffeinate -i -w $$ >/dev/null 2>&1 &
 
 extra="$HOME/rdna3-extra.txt"
 # the report's name, fixed now: after every test the results so far go up

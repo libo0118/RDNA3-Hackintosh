@@ -1307,3 +1307,27 @@ Settings. That is expected for them, not a display regression.
   performTransaction (weak 0x... / 0x..., unresolved 0x...)`). The gamma
   test then fails without a panic: gamma through the accelerator needs
   another route. Run `big4` again.
+
+### Card run 36 (step big4, build 7e883c9)
+
+- Both earlier blockers held: no MES `ring full`, no panic; macOS reached
+  the desktop on both monitors and the report started (tests file only,
+  the archive did not come). Looks 1-3: both pipes lit 1920x1080, pictures
+  not black. Display sleep: both pipes blanked, monitors in standby.
+- **The report stopped at the display wake** and the VM ran into the
+  25 min limit. Serial: right after `pmset displaysleepnow` macOS put the
+  whole system to sleep by itself (`display: system sleep #1`), woke
+  (`wake #1: ... the card kept its power`, both heads `restored (0),
+  running`), then slept again a minute later (`system sleep #2`) and the
+  report never went on. `big4` is the first step that lets the guest
+  suspend (QEMU `ICH9-LPC.disable_s3=0` for `rdna3resume=1`), and with the
+  MacBookPro SMBIOS macOS idle-sleeps a minute after the displays. The
+  report now holds `caffeinate -i` while it runs (idle sleep only; the
+  display sleep and the planned `pmset sleepnow` still work).
+- VCN: `VCN0: encode IB test failed (-62)` and `VCN1: decode IB test
+  failed (-62)` at the bring-up and again after wake #1: with the
+  diagnostic order of run 33 both instances fail whichever IB runs first,
+  so it is not the encode path alone (fences alone pass). Next: compare
+  the DPG IB path with `vcn_v4_0_dec_ring_test_ib` / `enc_ring_test_ib`.
+- Not reached: userq, pmctl, VCN tests from userspace, Vulkan, the planned
+  system sleep, BACO. Run `big4` again.
