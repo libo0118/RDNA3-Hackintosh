@@ -99,7 +99,7 @@ ITEM_STEPS = [
                 r"|smu_v13_0_(ack_ac_dc_interrupt|allow_ih_interrupt|deep_sleep_control|disable_pmfw_state"
                 r"|enable_thermal_alert|disable_thermal_alert|irq_process|notify_display_change"
                 r"|process_pending_interrupt|register_irq_handler|set_irq_state|set_performance_level"
-                r"|update_pcie_parameters|gfx_ulv_control|gpo_control)"
+                r"|update_pcie_parameters|gfx_ulv_control|gpo_control|set_power_source)"
                 r"|smu_(enable_umd_pstate|force_performance_level|adjust_power_state_dynamic"
                 r"|swctf_delayed_work_handler|reset_mp1_state)"
                 r"|soc21_update_umd_stable_pstate|gfx_v11_0_update_perf_clk"), ["amdgpu"]),

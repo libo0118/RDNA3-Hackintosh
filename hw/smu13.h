@@ -433,6 +433,9 @@ int smu13_is_mode1_reset_supported(const rdna3_smu *s);
 /* smu_v13_0_notify_display_change: DALNotPresent when no display core
  * drives the DCN ('dc_present' = amdgpu_device_has_dc_support) */
 int smu13_notify_display_change(rdna3_dev *d, int dc_present);
+/* smu_v13_0_set_power_source: NotifyPowerSource AC (0) / DC (1); smu13_pm_query
+ * sends AC like smu_late_init's smu_set_ac_dc with rdna3amdgpu=1 */
+int smu13_set_power_source(rdna3_dev *d, int dc);
 /* smu_v13_0_update_pcie_parameters with PP_PCIE_DPM on: every level of the
  * pcie_table clamped to the link caps and sent (OverridePcieParameters) */
 int smu13_update_pcie_parameters(rdna3_dev *d, rdna3_smu *s, uint32_t pcie_gen_cap,

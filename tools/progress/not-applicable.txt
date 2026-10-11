@@ -39,6 +39,22 @@ AMDGPU_INFO_SENSOR_VDDNB  northbridge voltage: APUs only
 AMDGPU_INFO_SENSOR_GPU_INPUT_POWER  input power: amdgpu does not report it for SMU 13.0.0 / 13.0.10 (smu_v13_0_0_read_sensor: -EOPNOTSUPP; this card answers average power)
 AMDGPU_INFO_VCE_CLOCK_TABLE  VCE: Navi 32 has VCN instead
 AMDGPU_INFO_RAS_ENABLED_FEATURES  RAS: not on this card
+psp_boot_config_(get|set)  GECC boot config for RAS (psp_ras_initialize, with ATOM_FIRMWARE_CAP_DYNAMIC_BOOT_CFG_ENABLE): no RAS, and the card's VBIOS capability 0x104001 lacks that bit
+psp_err_warn  quiets one MP0 13.0.2 (Aldebaran) response; on 13.0.10 it is always "warn", which psp13's command path does
+psp_gpu_reset  PSP mode-1 reset: psp_v13_0 has no mode1_reset callback (a no-op), and soc21 takes the SMU mode-1 reset on PMFW 78.41+ (smu_v13_0_0_is_mode1_reset_supported)
+psp_init_asd_microcode  separate ASD firmware file of PSP 10 / 11 / 12; MP0 13.0.10 carries the ASD in its TA file (psp_init_ta_microcode)
+psp_init_toc_microcode  TOC firmware file of the APUs' PSP 13.0.1 / 3 / 5 / 8 / 11 (psp_v13_0_init_microcode); not MP0 13.0.10
+psp_load_fw_list  firmware reload after a mode-2 reset (smu_v13_0_10.c); soc21 picks mode-1 for MP1 13.0.10 unless the amdgpu.reset_method=3 module option asks
+psp_memory_training_(init|fini)|psp_v13_0_memory_training(_send_msg)?  two-stage memory training: only with ATOM_FIRMWARE_CAP_ENABLE_2STAGE_BIST_TRAINING (0x400) in the VBIOS, which the card's 0x104001 lacks
+psp_v13_0_fatal_error_recovery_quirk  RAS fatal error recovery (amdgpu_ras): not on this card
+parse_ta_v1_microcode  TA file header v1: the card's psp_13_0_10_ta.bin is v2 (parse_ta_v2_microcode)
+psp_set_(clockgating|powergating)_state  IP-block callbacks that only return 0
+smu_v13_0_0_(tables_init|allocate_dpm_context|init_smc_tables)|smu_v13_0_(init|fini)_(smc_tables|power)  kzalloc / kfree of the SMU table, DPM and power contexts (smu_sw_init / sw_fini): rdna3_smu holds them as members
+convert_to_vddc|smu_v13_0_(get_gfx_vdd|get_current_pcie_link_(speed|width)(_level)?|get_dpm_ultimate_freq|get_max_sustainable_clocks?(_by_dc)?|init_max_sustainable_clocks|setup_pptable|get_pptable_from_(firmware|vbios)|set_pptable_v2_[01]|set_azalia_d3_pme|wait_for_event|wait_for_reset_complete|mode1_reset|od_edit_dpm_table|set_default_dpm_tables|set_gfx_power_up_by_imu|init_display_count|set_min_deep_sleep_dcefclk|display_clock_voltage_request|get_boot_freq_by_index)  smu_v13_0.c helpers smu_v13_0_0_ppt.c (MP1 13.0.0 / 13.0.10) does not use: they serve Aldebaran and SMU 13.0.4 / 5 / 6 / 7, 13.0.0 has its own (get_boot_freq_by_index only for a clock whose DPM is off, which smu_v13_0_set_single_dpm_table never asks)
+smu_v13_0_init_pptable_microcode  returns at once on MP1 13.0.0 / 13.0.7 / 13.0.10 (the PSP hands the PMFW its PPTable)
+smu_v13_0_load_microcode  the driver loading the PMFW itself (smu_start_smc_engine without PSP loading, MP1 < 11.0); the PSP loads it here
+smu_v13_0_enable_uclk_shadow  UCLK shadow for WBRF (Wi-Fi band RF mitigation, ACPI on AMD laptops)
+smu_v13_0_0_(mode2_reset|enable_gfx_features)  mode-2 reset of MP1 13.0.10: soc21 uses it only with the amdgpu.reset_method=3 module option; this driver resets with mode-1 / BACO
 
 # ---- no use on macOS
 .*_get_clockgating_state  clock-gating state for Linux sysfs / debugfs
@@ -47,7 +63,7 @@ amdgpu_(get|set)_gfx_off_(entrycount|residency|status)  GFXOFF statistics for Li
 psp_get_fw_attestation_records_addr  firmware attestation records for Linux sysfs
 die_kobj_release|ip_[a-z_]*_release|amdgpu_ucode_sys_visible  Linux kobject / sysfs
 amdgpu_discovery_read_binary_from_file  discovery table from a file (Linux module option)
-amdgpu_atomfirmware_gpu_virtualization_supported|gfx_v11_0_init_rlcg_reg_access_ctrl|amdgpu_kiq_(rreg|wreg)  SR-IOV virtual functions (Linux host virtualization)
+amdgpu_atomfirmware_gpu_virtualization_supported|gfx_v11_0_init_rlcg_reg_access_ctrl|amdgpu_kiq_(rreg|wreg)|psp_init_cap_microcode|psp_skip_tmr|psp_reg_program|psp_prep_reg_prog_cmd_buf  SR-IOV virtual functions (Linux host virtualization)
 amdgpu_gfx_kfd_sch_ctrl  KFD (ROCm compute on Linux)
 amdgpu_gfx_(enforce_isolation_handler|enforce_isolation_ring_begin_use|enforce_isolation_ring_end_use|get_enforce_isolation|set_enforce_isolation)|amdgpu_gfx_(cleaner_shader_init|cleaner_shader_sw_init|cleaner_shader_sw_fini|run_cleaner_shader|run_cleaner_shader_job|set_run_cleaner_shader)  process isolation / cleaner shader switched through Linux sysfs
 gfx_v11_0_read_wave_(data|sgprs|vgprs)|wave_read_(ind|regs)|gpu_recover_get  Linux debugfs dumps

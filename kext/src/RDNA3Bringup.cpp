@@ -263,7 +263,9 @@ void RDNA3Bringup::stopAndFree()
             psp13_ring_stop(fPsp);
     }
 
-    /* 3. memory: mappings, firmware, state; fDev last */
+    /* 3. memory: mappings, firmware, state; fDev last. The firmware images
+     * go like amdgpu_ucode_release in psp_sw_fini (sOS, TA) and
+     * smu_v13_0_fini_microcode (the SMC image among the blobs) */
     OSSafeReleaseNULL(fVram);
     OSSafeReleaseNULL(fDoorbell);
     for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)

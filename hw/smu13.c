@@ -470,7 +470,8 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
             return ret;
         }
     }
-    /* smu_system_features_control(true) */
+    /* smu_system_features_control(true) -> smu_v13_0_0_system_features_control
+     * -> smu_v13_0_system_features_control */
     ret = smu13_send_msg(d, PPSMC_MSG_EnableAllSmuFeatures, 0, NULL);
     if (ret) {
         RERR(d, "SMU: EnableAllSmuFeatures failed");
@@ -588,7 +589,9 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
 
 int smu13_mode1_reset(rdna3_dev *d)
 {
-    /* __smu_cmn_send_debug_msg: param, message, response = 0; the PMFW
+    /* smu_v13_0_0_set_mode1_reset_param: param 0, the RAS fatal error
+     * flag (1 << 16) needs RAS, which this card does not have.
+     * __smu_cmn_send_debug_msg: param, message, response = 0; the PMFW
      * takes the whole chip through reset, so nothing answers */
     rdna3_wreg(d, SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_53), 0);
     rdna3_wreg(d, SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_75), RD_DEBUGSMC_MSG_Mode1Reset);
@@ -779,6 +782,14 @@ int smu13_pm_query(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, int od_
     }
 
     smu13_populate_umd_state_clk(s);
+    /* smu_late_init -> smu_set_ac_dc (rdna3amdgpu=1): a desktop runs on
+     * AC; nothing when the board's GPIO controls AC/DC */
+    if (d->amdgpu_exact && !s->dc_controlled_by_gpio) {
+        if (smu13_set_power_source(d, 0) == RDNA3_OK)
+            s->ac_power = 1;
+        else
+            RERR(d, "SMU: Failed to switch to AC mode!");
+    }
     /* smu_get_asic_power_limits */
     if (smu13_get_power_limits(d, s, &cur, &def, &max, &min) == RDNA3_OK) {
         s->current_power_limit = cur;
@@ -2226,6 +2237,12 @@ int smu13_is_mode1_reset_supported(const rdna3_smu *s)
     return s->version >= 0x004e2900u;
 }
 
+/* Ported from smu_v13_0_set_power_source (CMN2ASIC_MAPPING_PWR: AC 0, DC 1) */
+int smu13_set_power_source(rdna3_dev *d, int dc)
+{
+    return smu13_send_msg(d, PPSMC_MSG_NotifyPowerSource, dc ? POWER_SOURCE_DC : POWER_SOURCE_AC, NULL);
+}
+
 int smu13_notify_display_change(rdna3_dev *d, int dc_present)
 {
     if (!dc_present)
@@ -2271,6 +2288,7 @@ int smu13_update_pcie_parameters(rdna3_dev *d, rdna3_smu *s, uint32_t pcie_gen_c
 
 /* the deep sleep features the 13.0.0 feature map has (no DS_MP0CLK /
  * DS_MP1CLK there) */
+/* Ported from smu_v13_0_deep_sleep_control */
 int smu13_deep_sleep_control(rdna3_dev *d, rdna3_smu *s, int enable)
 {
     static const int ds[] = { FEATURE_DS_GFXCLK_BIT, FEATURE_DS_UCLK_BIT, FEATURE_DS_FCLK_BIT,
@@ -2289,6 +2307,7 @@ int smu13_deep_sleep_control(rdna3_dev *d, rdna3_smu *s, int enable)
     return ret;
 }
 
+/* Ported from smu_v13_0_gfx_ulv_control */
 int smu13_gfx_ulv_control(rdna3_dev *d, rdna3_smu *s, int enable)
 {
     if (feature_supported(s, FEATURE_GFX_ULV_BIT))
@@ -2296,6 +2315,7 @@ int smu13_gfx_ulv_control(rdna3_dev *d, rdna3_smu *s, int enable)
     return RDNA3_OK;
 }
 
+/* Ported from smu_v13_0_gpo_control */
 int smu13_gpo_control(rdna3_dev *d, int enable)
 {
     int ret = smu13_send_msg(d, PPSMC_MSG_SetGpoAllow, enable ? 1 : 0, NULL);
@@ -2546,6 +2566,7 @@ int smu13_enable_thermal_alert(rdna3_dev *d, rdna3_smu *s)
     return smu_v13_0_process_pending_interrupt(d, s);
 }
 
+/* Ported from smu_v13_0_disable_thermal_alert */
 int smu13_disable_thermal_alert(rdna3_dev *d, rdna3_smu *s)
 {
     return smu13_set_irq_state(d, s, 0);

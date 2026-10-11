@@ -471,6 +471,7 @@ amd_fw_status amd_ucode_plan_build(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT],
            AMD_UCODE_CP_MES1_DATA, GFX_FW_TYPE_MES_KIQ_STACK, "CP_MES1", "CP_MES1_DATA", 0);
     do_imu(&bd);
     do_rlc(&bd);
+    /* smu_v13_0_init_microcode: smu_13_0_10.bin as AMDGPU_UCODE_ID_SMC for the PSP */
     do_default(&bd, AMD_BLOB_SMC, AMD_UCODE_SMC, GFX_FW_TYPE_SMU, "SMC", 1);
     do_default(&bd, AMD_BLOB_VCN, AMD_UCODE_VCN, GFX_FW_TYPE_VCN, "VCN", 0);
     do_dmcub(&bd);

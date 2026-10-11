@@ -25,8 +25,8 @@ uint32_t soc21_clock_gating_state(rdna3_dev *d);
 
 /* soc21_update_umd_stable_pstate (amdgpu_asic_update_umd_stable_pstate)
  * around the UMD profile levels: RLC safe mode entered / left; the
- * update_perfmon_mgcg after it (gfx_v11_0_update_perf_clk) does nothing
- * without AMD_CG_SUPPORT_GFX_PERF_CLK, which GC 11.0.3 does not set.
+ * perfmon MGCG update after it does nothing without
+ * AMD_CG_SUPPORT_GFX_PERF_CLK, which GC 11.0.3 does not set.
  * 'ctx' is the rdna3_dev (rdna3_umd_pstate_fn). */
 void soc21_update_umd_stable_pstate(void *ctx, int enter);
 
