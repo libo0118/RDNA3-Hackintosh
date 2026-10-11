@@ -543,6 +543,7 @@ does something else than amdgpu to amdgpu's own code (stage 4 item J;
 | `GMC: failed to write reg ... wait reg ...`, a VM map or unmap stalls for seconds | the TLB invalidation through the KIQ (`gmc_v11_0_flush_gpu_tlb` -> `amdgpu_gmc_fw_reg_write_reg_wait`) did not finish: the KIQ (MES pipe 1) does not run the WAIT_REG_MEM write-and-wait | the KIQ lines; compare with step `default` (MMIO invalidation) |
 | VM faults whose PASID is 0 or another process's | the IH LUT (`IH_VMID_n_LUT`) not written by the job's PASID mapping (`gmc_v11_0_emit_pasid_mapping`) | `RDNA3,LastFaultVMID`; send the log |
 | `GPU reset ... FAILED` where step `default` recovers | the suspend amdgpu does before a full reset (GFX hw_fini, `psp_suspend`, IH and GMC off) left something the bring-up does not expect | the `hang:` lines; boot without the boot-arg |
+| with `rdna3mes=1` too: `MES: failed to reg_write_reg_wait`, `failed to map legacy queue`, `ring reset failed` | the MES firmware refuses a MISC / legacy-queue frame (TLB invalidations go through the MES once it runs; a hung GFX or compute ring is reset through it first) | `RDNA3,MESSchedVersion`, the `MES:` and `hang:` lines; boot without `rdna3mes=1` to separate the two |
 | black screen or no picture after the driver unloads | `gmc_v11_0_hw_fini` / `gfxhub_v3_0_3_gart_disable` at unload switch the hubs off as amdgpu does | expected only at unload; reboot |
 | everything as in step `default` | pass | `amdgpu <date> vm` into `docs/status/hw-verified.txt`, regenerate |
 

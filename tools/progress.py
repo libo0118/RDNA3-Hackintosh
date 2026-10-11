@@ -130,6 +130,11 @@ ITEM_STEPS = [
     # rings / fences with rdna3amdgpu=1: the fences drained at unload, the
     # interrupt off while fences are forced, the MES ring-full check
     (re.compile(r"amdgpu_fence_driver_(hw_fini|isr_toggle)|amdgpu_fence_wait_empty|amdgpu_ring_undo"), ["amdgpu"]),
+    # MES with rdna3amdgpu=1 (and rdna3mes=1): misc ops, legacy queue frames,
+    # gang suspend / resume, the queue resets
+    (re.compile(r"mes_v11_0_(misc_op|map_legacy_queue|unmap_legacy_queue|reset_legacy_queue|suspend_gang"
+                r"|resume_gang|suspend|resume|ring_get_rptr|ring_get_wptr)|amdgpu_gfx_mqd_sw_init"
+                r"|gfx_v11_0_reset_(kcq|kgq)"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

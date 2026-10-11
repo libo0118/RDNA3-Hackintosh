@@ -1691,6 +1691,10 @@ void RDNA3Bringup::mesStart(const char *why)
     }
     if (!ret)
         ret = gfx11_mes_sched_start(fDev, fKiq, fMes);
+    /* rdna3amdgpu=1, after a reset or a wake: mes_v11_0_resume is
+     * mes_v11_0_hw_init (the start above) + amdgpu_mes_resume */
+    if (!ret && fAmdgpuExact && fReinit)
+        gfx11_mes_resume(fDev, fMes);
     publish("RDNA3,MESResult", (uint64_t)(int64_t)ret);
     publish("RDNA3,MESSchedVersion", fMes->sched_version);
     publish("RDNA3,MESKiqVersion", fMes->kiq_version);
@@ -2317,6 +2321,34 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
         return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
     }
 
+    /* rdna3amdgpu=1 with the MES scheduler: amdgpu_job_timedout's per ring
+     * reset (amdgpu_ring_reset -> gfx_v11_0_reset_kgq / _reset_kcq), then the
+     * ring's fences forced (amdgpu_fence_driver_force_completion) */
+    if (fAmdgpuExact && r && fMes && fMes->ready) {
+        int rr;
+        HLOG("%s ring reset through the MES", ip == AMDGPU_HW_IP_GFX ? "GFX" : "compute");
+        rr = ip == AMDGPU_HW_IP_GFX ? gfx11_reset_kgq(fDev, fGfx, fMes, vmid)
+                                    : gfx11_reset_kcq(fDev, fKcq, fMes, vmid);
+        if (rr == RDNA3_OK) {
+            fResetCount++;   /* gpu_reset_counter */
+            gfx11_force_fence_completion(fDev, r);
+            for (uint32_t id = 1; id < 16; id++)
+                if (fVmByVmid[id]) {
+                    if (ip == AMDGPU_HW_IP_GFX)
+                        fVmByVmid[id]->gfxFlush = true;
+                    else
+                        fVmByVmid[id]->compFlush = true;
+                }
+            IOLockLock(fLock);
+            IOLockWakeup(fLock, &fFenceEvent, false);
+            IOLockUnlock(fLock);
+            BLOG("hang: ring reset done, the ring runs again");
+            publish("RDNA3,Resets", fResetCount);
+            return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
+        }
+        HLOG("ring reset failed (%d): the full recovery next", rr);
+    }
+
     /* the engine needs a reset; pending fences complete first so every
      * waiter returns (guilty contexts see -ECANCELED afterwards) */
     HLOG("forcing the pending fences");
@@ -2386,6 +2418,9 @@ bool RDNA3Bringup::gpuReset(bool baco)
     /* amdgpu_device_pre_asic_reset -> amdgpu_device_ip_suspend: the video
      * block suspended while the chip still runs (vcnStart resumes it) */
     vcnSuspend();
+    /* rdna3amdgpu=1: mes_v11_0_suspend (amdgpu_mes_suspend: every gang) */
+    if (fAmdgpuExact && fMes && fMes->ready && fDev)
+        gfx11_mes_suspend(fDev, fMes);
     /* amdgpu_device_ip_suspend before a full reset: sdma_v6_0_suspend
      * (rdna3amdgpu=1) */
     if (fAmdgpuExact && fSdma && fDev)
@@ -2617,6 +2652,21 @@ void RDNA3Bringup::vmFlush(uint32_t vmid)
      * the GFXHUB, then the MMHUB: with the KIQ running the invalidation goes
      * through it (amdgpu_gmc_fw_reg_write_reg_wait, "necessary ... for
      * GFXOFF to function properly under bare metal"); MMIO before that */
+    if (fAmdgpuExact && fDev && fMes && fMes->ready) {
+        /* the MES runs: amdgpu_gmc_fw_reg_write_reg_wait goes through
+         * amdgpu_mes_reg_write_reg_wait (MISC WRM_REG_WR_WAIT); the KIQ
+         * belongs to the MES now */
+        rdna3_vm_flush_regs f;
+        if (fGmc && fGmc->gfxhub_enabled) {
+            rdna3_hdp_flush(fDev);
+            gfxhub303_flush_regs(fDev, vmid, 17, &f);
+            gfx11_mes_reg_write_reg_wait(fDev, fMes, f.req, f.ack, f.req_val, 1u << vmid);
+        }
+        rdna3_hdp_flush(fDev);
+        mmhub302_flush_regs(fDev, vmid, 17, &f);
+        gfx11_mes_reg_write_reg_wait(fDev, fMes, f.req, f.ack, f.req_val, 1u << vmid);
+        return;
+    }
     if (fAmdgpuExact && fDev && fKiq && fKiq->rb.ready) {
         rdna3_vm_flush_regs f;
         if (fGmc && fGmc->gfxhub_enabled) {   /* adev->gfx.is_poweron */

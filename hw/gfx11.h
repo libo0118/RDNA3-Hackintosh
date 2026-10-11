@@ -114,6 +114,8 @@ typedef struct rdna3_gfx_ring {
      * fetch size (align_mask 0xff) with gfx_v11_ring_insert_nop, and
      * amdgpu_ring_alloc reserves the padding */
     int      amdgpu_pad;
+    /* the gfx ring's mqd_backup (async, rdna3amdgpu=1; 0 = none) */
+    uint64_t mqd_backup;
 } rdna3_gfx_ring;
 
 /* one IB of a job (VA in the job's VMID) */
@@ -313,6 +315,9 @@ typedef struct rdna3_mec_ring {
      * AMDGPU_GFX_PIPE_PRIO_HIGH, AMDGPU_GFX_QUEUE_PRIORITY_MAXIMUM and
      * allow_tunneling. Set before gfx11_kcq_start; 0 = normal priority */
     int      high_prio;
+    /* amdgpu_gfx_mqd_sw_init's mqd_backup (rdna3amdgpu=1; 0 = none): a
+     * copy of the MQD taken after its init, restored by a queue reset */
+    uint64_t mqd_backup;
 } rdna3_mec_ring;
 
 /* GC 11 always runs MES with the KIQ on its pipe 1 (amdgpu_discovery:
@@ -543,6 +548,60 @@ int  gfx11_ring_test_ib(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ib);
  * 5 ms apart. gmc_v11_0_flush_gpu_tlb uses it once the KIQ runs */
 int  gfx11_kiq_reg_write_reg_wait(rdna3_dev *d, rdna3_mec_ring *kiq, uint32_t reg0, uint32_t reg1,
                                   uint32_t ref, uint32_t mask);
+
+/* ---- MES API (mes_v11_0.c / amdgpu_mes.c) ---- */
+#define RD_MES_SCH_API_SUSPEND 6
+#define RD_MES_SCH_API_RESUME  7
+#define RD_MES_SCH_API_RESET   8
+#define RD_MES_SCH_API_MISC    14
+#define RD_MES_WB_READ_VAL     128   /* adev->mes.read_val_gpu_addr */
+/* enum mes_misc_opcode */
+enum { RD_MES_MISC_OP_WRITE_REG, RD_MES_MISC_OP_READ_REG, RD_MES_MISC_OP_WRM_REG_WAIT,
+       RD_MES_MISC_OP_WRM_REG_WR_WAIT, RD_MES_MISC_OP_SET_SHADER_DEBUGGER };
+typedef struct rdna3_mes_misc {
+    uint32_t op;                 /* RD_MES_MISC_OP_* */
+    uint32_t reg0, reg1;         /* read / write: reg0; WRM: reg0 (write), reg1 (wait) */
+    uint32_t value;              /* write value */
+    uint32_t ref, mask;          /* WRM */
+    uint64_t buffer_addr;        /* read: where the MES writes the value */
+} rdna3_mes_misc;
+/* mes_v11_0_misc_op (no SET_SHADER_DEBUGGER: the KFD debugger) */
+int  gfx11_mes_misc_op(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_misc *in);
+/* amdgpu_mes_reg_write_reg_wait / amdgpu_mes_rreg / amdgpu_mes_wreg */
+int  gfx11_mes_reg_write_reg_wait(rdna3_dev *d, rdna3_mes *m, uint32_t reg0, uint32_t reg1,
+                                  uint32_t ref, uint32_t mask);
+int  gfx11_mes_rreg(rdna3_dev *d, rdna3_mes *m, uint32_t reg, uint32_t *val);
+int  gfx11_mes_wreg(rdna3_dev *d, rdna3_mes *m, uint32_t reg, uint32_t val);
+/* a kernel queue the MES maps, unmaps or resets (mes_*_legacy_queue_input;
+ * queue_type is AMDGPU_RING_TYPE_GFX 0 / _COMPUTE 1) */
+typedef struct rdna3_mes_legacy_queue {
+    uint32_t queue_type, doorbell_offset, me, pipe, queue, vmid;
+    uint64_t mqd_addr, wptr_addr;   /* MC */
+} rdna3_mes_legacy_queue;
+#define RD_PREEMPT_QUEUES_NO_UNMAP 3   /* enum amdgpu_unmap_queues_action */
+int  gfx11_mes_map_legacy_queue(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_legacy_queue *q);
+int  gfx11_mes_unmap_legacy_queue(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_legacy_queue *q,
+                                  uint32_t action, uint64_t tf_addr, uint64_t tf_data);
+/* mes_v11_0_reset_legacy_queue through the scheduler (use_mmio false) */
+int  gfx11_mes_reset_legacy_queue(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_legacy_queue *q);
+/* mes_v11_0_suspend_gang / mes_v11_0_resume_gang */
+int  gfx11_mes_suspend_gang(rdna3_dev *d, rdna3_mes *m, int all, uint64_t gang_ctx,
+                            uint64_t fence_addr, uint32_t fence_value);
+int  gfx11_mes_resume_gang(rdna3_dev *d, rdna3_mes *m, int all, uint64_t gang_ctx);
+/* amdgpu_mes_suspend / amdgpu_mes_resume: every gang, when the firmware
+ * supports it (amdgpu_mes_suspend_resume_all_supported: GC 11, MES >= 0x63);
+ * mes_v11_0_suspend / _resume around them */
+int  gfx11_mes_suspend(rdna3_dev *d, rdna3_mes *m);
+int  gfx11_mes_resume(rdna3_dev *d, rdna3_mes *m);
+/* mes_v11_0_ring_get_rptr: the ring's rptr writeback */
+uint64_t gfx11_ring_get_rptr(rdna3_dev *d, rdna3_gfx_ring *r);
+/* gfx_v11_0_reset_kcq / gfx_v11_0_reset_kgq (amdgpu_ring_reset): the queue
+ * dequeued (KCQ by MMIO, the gfx queue by the MES), its MQD restored from
+ * the backup and the ring cleared (kcq / kgq_init_queue(reset)), mapped
+ * again by the MES (amdgpu_mes_map_legacy_queue), ring test. Needs the MES
+ * scheduler running; RDNA3_ENODEV without it */
+int  gfx11_reset_kcq(rdna3_dev *d, rdna3_mec_ring *kcq, rdna3_mes *m, uint32_t vmid);
+int  gfx11_reset_kgq(rdna3_dev *d, rdna3_gfx_ring *r, rdna3_mes *m, uint32_t vmid);
 
 #ifdef __cplusplus
 }

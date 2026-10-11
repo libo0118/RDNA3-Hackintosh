@@ -198,6 +198,7 @@ typedef struct sim {
      * 64-dword MESAPI frames and writes their API status fences */
     struct {
         unsigned maps, frames, hw_rsrc, queries, bad, before_rsrc;
+        unsigned legacy_maps, legacy_unmaps, resets, misc, misc_stuck, suspends, resumes;
         uint32_t hw[64];
         int hang;
     } mes_sched;
@@ -1857,6 +1858,9 @@ static uint8_t *cp_mem(uint64_t a, uint64_t len)
 }
 
 static void uq_eop(void);
+static int gfx_hqd_map(uint64_t mqd, uint32_t db);
+static uint32_t mes_legacy_frame(uint32_t op, const uint32_t *f);
+static uint32_t mes_misc_frame(const uint32_t *f);
 
 /* run packets [rptr, end) of buffer 'buf' (index mask 'mask'); returns new rptr */
 static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint64_t end, int in_ib)
@@ -1894,18 +1898,7 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
             uint64_t mqd = PK(3) | ((uint64_t)PK(4) << 32);
             if (S.cp_cur_me == 1) { S.mec_kiq_sched_ignored++; return rptr; }
             if (cnt == 5 && S.cp_cur_me == 3 && me == 0 && eng == 4) {
-                const uint32_t *m = (const uint32_t *)mc_ptr(mqd, 4 * RD_MQD_DWORDS);
-                uint32_t i2, dc;
-                if (!m || q || pipe || (m[128] & ~0xfffffffcu) || m[128] != (uint32_t)mqd) { S.cp_bad++; break; }
-                for (i2 = 0; i2 < sizeof(gfx_mqd_map) / sizeof(gfx_mqd_map[0]); i2++)
-                    S.reg[GC_BASE0 + gfx_mqd_map[i2].reg] = m[gfx_mqd_map[i2].mqd];
-                dc = S.reg[GCR(regCP_RB_DOORBELL_CONTROL)] & ~CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK;
-                S.reg[GCR(regCP_RB_DOORBELL_CONTROL)] = dc | CP_RB_DOORBELL_CONTROL__DOORBELL_EN_MASK |
-                    ((db << CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET__SHIFT) & CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK);
-                S.reg[GCR(regCP_GFX_HQD_ACTIVE)] = 1;
-                S.gfx_mapped = 1;
-                S.cp_rptr = 0;
-                S.kgq_maps++;
+                if (q || pipe || !gfx_hqd_map(mqd, db)) { S.cp_bad++; break; }
                 break;
             }
             if (cnt == 5 && S.cp_cur_me == 3 && me == 2 && eng == 5) {
@@ -2312,6 +2305,23 @@ static uint64_t mes_api_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, 
                 S.mes_sched.before_rsrc++;
             S.mes_sched.queries++;
             st = 2;
+        } else if (op == RD_MES_SCH_API_ADD_QUEUE && (f[36] & (1u << 13))) {
+            if (!(st = mes_legacy_frame(op, f))) { S.mes_sched.bad++; continue; }
+        } else if (op == RD_MES_SCH_API_REMOVE_QUEUE && (f[4] & ((1u << 2) | (1u << 3)))) {
+            if (!(st = mes_legacy_frame(op, f))) { S.mes_sched.bad++; continue; }
+        } else if (op == RD_MES_SCH_API_RESET) {
+            if (!(st = mes_legacy_frame(op, f))) { S.mes_sched.bad++; continue; }
+        } else if (op == RD_MES_SCH_API_SUSPEND) {
+            uint8_t *fp = q64(f, 4) ? mc_ptr(q64(f, 4), 4) : NULL;
+            if (fp)
+                memcpy(fp, &f[6], 4);
+            S.mes_sched.suspends += f[1] & 1;
+            st = 7;
+        } else if (op == RD_MES_SCH_API_RESUME) {
+            S.mes_sched.resumes += f[1] & 1;
+            st = 4;
+        } else if (op == RD_MES_SCH_API_MISC) {
+            if (!(st = mes_misc_frame(f))) { S.mes_sched.bad++; continue; }
         } else if (op == RD_MES_SCH_API_ADD_QUEUE) {
             if (!uq_add(f)) { S.uq_bad++; continue; }
             st = RD_MES_ADD_QUEUE_STATUS_DW;
@@ -2331,6 +2341,120 @@ static uint64_t mes_api_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, 
             S.mes_sched.bad++;
     }
     return rptr;
+}
+
+/* MAP_QUEUES of the gfx queue (ME0 pipe 0 queue 0): the gfx HQD from the
+ * v11_gfx_mqd, the doorbell routed to it */
+static int gfx_hqd_map(uint64_t mqd, uint32_t db)
+{
+    const uint32_t *m = (const uint32_t *)mc_ptr(mqd, 4 * RD_MQD_DWORDS);
+    uint32_t i2, dc;
+    if (!m || (m[128] & ~0xfffffffcu) || m[128] != (uint32_t)mqd)
+        return 0;
+    for (i2 = 0; i2 < sizeof(gfx_mqd_map) / sizeof(gfx_mqd_map[0]); i2++)
+        S.reg[GC_BASE0 + gfx_mqd_map[i2].reg] = m[gfx_mqd_map[i2].mqd];
+    dc = S.reg[GCR(regCP_RB_DOORBELL_CONTROL)] & ~CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK;
+    S.reg[GCR(regCP_RB_DOORBELL_CONTROL)] = dc | CP_RB_DOORBELL_CONTROL__DOORBELL_EN_MASK |
+        ((db << CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET__SHIFT) & CP_RB_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK);
+    S.reg[GCR(regCP_GFX_HQD_ACTIVE)] = 1;
+    S.gfx_mapped = 1;
+    S.cp_rptr = 0;
+    S.kgq_maps++;
+    return 1;
+}
+
+/* the MES scheduler's legacy (kernel) queue frames: ADD_QUEUE with
+ * map_legacy_kq, REMOVE_QUEUE with unmap / preempt, RESET of a legacy
+ * queue; returns the api_status dword, 0 for a rejected frame */
+static uint32_t mes_legacy_frame(uint32_t op, const uint32_t *f)
+{
+    if (op == RD_MES_SCH_API_ADD_QUEUE) {   /* map_legacy_kq */
+        uint32_t pipe = f[48], q = f[49], db = f[18], type = f[27];
+        uint64_t mqd = q64(f, 19);
+        if (type == 1) {
+            if (pipe > 3 || q > 3 || !hqd_load_mqd(&S.hqd[pipe][q], mqd, db))
+                return 0;
+            S.hqd[pipe][q].mapped_by_kiq = 1;
+        } else if (type != 0 || pipe || q || !gfx_hqd_map(mqd, db)) {
+            return 0;
+        }
+        S.mes_sched.legacy_maps++;
+        return RD_MES_ADD_QUEUE_STATUS_DW;
+    }
+    if (op == RD_MES_SCH_API_REMOVE_QUEUE) {
+        uint32_t pipe = f[9], q = f[10];
+        if (f[4] & (1u << 2)) {             /* preempt_legacy_gfx_queue: trail fence */
+            uint8_t *tf = mc_ptr(q64(f, 11), 4);
+            if (!tf)
+                return 0;
+            memcpy(tf, &f[13], 4);
+        } else if (f[14] == 1) {            /* unmap a compute queue */
+            if (pipe > 3 || q > 3 || !HQD(&S.hqd[pipe][q], regCP_HQD_ACTIVE))
+                return 0;
+            HQD(&S.hqd[pipe][q], regCP_HQD_ACTIVE) = 0;
+            S.hqd[pipe][q].mapped_by_kiq = 0;
+        } else {
+            S.reg[GCR(regCP_GFX_HQD_ACTIVE)] = 0;
+            S.gfx_mapped = 0;
+        }
+        S.mes_sched.legacy_unmaps++;
+        return RD_MES_REMOVE_QUEUE_STATUS_DW;
+    }
+    /* RD_MES_SCH_API_RESET */
+    if (f[1] & (1u << 3)) {                 /* reset_legacy_gfx */
+        S.reg[GCR(regCP_GFX_HQD_ACTIVE)] = 0;
+        S.gfx_mapped = 0;
+    } else if (f[1] & 1u) {                 /* reset_queue_only: the queue of that doorbell */
+        int found = 0;
+        for (uint32_t p2 = 0; p2 < 4; p2++)
+            for (uint32_t q2 = 0; q2 < 4; q2++) {
+                struct hqd *hq = &S.hqd[p2][q2];
+                uint32_t dc = HQD(hq, regCP_HQD_PQ_DOORBELL_CONTROL);
+                if (((dc & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == f[4]) {
+                    HQD(hq, regCP_HQD_ACTIVE) = 0;
+                    found = 1;
+                }
+            }
+        if (!found)
+            return 0;
+    } else {
+        return 0;
+    }
+    S.mes_sched.resets++;
+    return 24;
+}
+
+/* MISC (opcode at 1, data from 6): register write / read and the
+ * write-then-wait of a TLB invalidation */
+static uint32_t mes_misc_frame(const uint32_t *f)
+{
+    uint32_t v;
+    S.mes_sched.misc++;
+    switch (f[1]) {
+    case 0:                                 /* WRITE_REG */
+        sim_wr(NULL, 4ull * f[6], f[7]);
+        return 2;
+    case 3: {                               /* READ_REG */
+        uint8_t *p = mc_ptr(q64(f, 7), 4);
+        if (!p)
+            return 0;
+        v = sim_rd(NULL, 4ull * f[6]);
+        memcpy(p, &v, 4);
+        return 2;
+    }
+    case 4:                                 /* WAIT_REG_MEM */
+        if (f[6] == 1) {                    /* WR_WAIT_WR_REG */
+            sim_wr(NULL, 4ull * f[9], f[7]);
+            v = sim_rd(NULL, 4ull * f[10]);
+        } else {
+            v = sim_rd(NULL, 4ull * f[9]);
+        }
+        if ((v & f[8]) != (f[7] & f[8]))
+            S.mes_sched.misc_stuck++;
+        return 2;
+    default:
+        return 0;
+    }
 }
 
 /* a mapped MEC queue runs its PQ up to the doorbell value (dwords) */
@@ -4473,6 +4597,101 @@ static uint32_t uq_pm4(uint32_t *q, uint64_t a, uint32_t v, uint64_t fa, uint32_
     q[n++] = 0;
     q[n++] = 0;
     return n;
+}
+
+/* rdna3amdgpu=1 MES ports: misc ops (register write / read, the TLB
+ * invalidation's write-and-wait), the legacy queue frames, the gang
+ * suspend / resume and the KCQ / KGQ resets through the scheduler */
+static void test_mes_amdgpu(rdna3_dev *dev, rdna3_mes *mes, rdna3_mec_ring *kcq, rdna3_gfx_ring *gr)
+{
+    struct hqd *hc = &S.hqd[kcq->pipe][kcq->queue];
+    rdna3_mes_legacy_queue q;
+    rdna3_vm_flush_regs f;
+    rdna3_mes_misc bad = { RD_MES_MISC_OP_SET_SHADER_DEBUGGER, 0, 0, 0, 0, 0, 0 };
+    uint32_t v = 0, t0 = S.tlb_flushes, scratch = GCR(regSCRATCH_REG0), sv = mes->sched_version;
+    uint64_t tf = rdna3_vram_alloc(dev, 4096, 4096, "mes-test");
+
+    CHECK(mes->ready && tf != UINT64_MAX);
+    dev->amdgpu_exact = 1;
+    /* amdgpu_mes_wreg / amdgpu_mes_rreg / amdgpu_mes_reg_write_reg_wait */
+    CHECK(gfx11_mes_wreg(dev, mes, scratch, 0x1234ABCD) == RDNA3_OK && S.reg[scratch] == 0x1234ABCD);
+    S.reg[scratch] = 0x55AA55AA;
+    CHECK(gfx11_mes_rreg(dev, mes, scratch, &v) == RDNA3_OK && v == 0x55AA55AA);
+    gfxhub303_flush_regs(dev, 6, 17, &f);
+    CHECK(gfx11_mes_reg_write_reg_wait(dev, mes, f.req, f.ack, f.req_val, 1u << 6) == RDNA3_OK);
+    CHECK(S.tlb_flushes == t0 + 1 && S.mes_sched.misc == 3 && S.mes_sched.misc_stuck == 0);
+    CHECK(gfx11_mes_misc_op(dev, mes, &bad) == RDNA3_EINVAL);
+
+    /* amdgpu_mes_suspend / _resume: only from MES 0x63 on */
+    CHECK(gfx11_mes_suspend(dev, mes) == RDNA3_OK && S.mes_sched.suspends == 0);
+    mes->sched_version = (sv & ~0xfffu) | 0x63;
+    CHECK(gfx11_mes_suspend(dev, mes) == RDNA3_OK && gfx11_mes_resume(dev, mes) == RDNA3_OK);
+    CHECK(S.mes_sched.suspends == 1 && S.mes_sched.resumes == 1);
+    mes->sched_version = sv;
+    CHECK(gfx11_mes_suspend_gang(dev, mes, 0, 0x1000, rdna3_vram_mc(dev, tf), 0x77) == RDNA3_OK);
+    rdna3_vram_read(dev, tf, &v, 4);
+    CHECK(v == 0x77 && S.mes_sched.suspends == 1);
+
+    /* the KCQ unmapped and mapped again by the scheduler (legacy queue map) */
+    q.queue_type = 1;
+    q.doorbell_offset = kcq->rb.doorbell;
+    q.me = 1; q.pipe = kcq->pipe; q.queue = kcq->queue; q.vmid = 0;
+    q.mqd_addr = rdna3_vram_mc(dev, kcq->mqd);
+    q.wptr_addr = rdna3_vram_mc(dev, kcq->rb.wb + RD_GFX_WB_WPTR);
+    CHECK(gfx11_mes_unmap_legacy_queue(dev, mes, &q, 1 /* RESET_QUEUES */, 0, 0) == RDNA3_OK &&
+          HQD(hc, regCP_HQD_ACTIVE) == 0);
+    CHECK(gfx11_mes_map_legacy_queue(dev, mes, &q) == RDNA3_OK && HQD(hc, regCP_HQD_ACTIVE) == 1);
+    kcq->rb.wptr = 0;   /* a freshly mapped queue starts at its MQD's wptr 0 */
+    CHECK(gfx11_ring_test(dev, &kcq->rb) == RDNA3_OK);
+    CHECK(gfx11_mes_unmap_legacy_queue(dev, mes, &q, RD_PREEMPT_QUEUES_NO_UNMAP, rdna3_vram_mc(dev, tf) + 8,
+                                       0xFEED) == RDNA3_OK);
+    rdna3_vram_read(dev, tf + 8, &v, 4);
+    CHECK(v == 0xFEED && HQD(hc, regCP_HQD_ACTIVE) == 1);
+    CHECK(S.mes_sched.legacy_maps == 1 && S.mes_sched.legacy_unmaps == 2);
+
+    /* gfx_v11_0_reset_kcq: MMIO dequeue, MQD from the backup, ring cleared,
+     * mapped by the MES, ring test */
+    kcq->mqd_backup = rdna3_vram_alloc(dev, 4096, 4096, "kcq-backup-test");
+    {
+        uint32_t m[RD_MQD_DWORDS];
+        rdna3_vram_read(dev, kcq->mqd, m, sizeof(m));
+        rdna3_vram_write(dev, kcq->mqd_backup, m, sizeof(m));
+        m[0] = 0;   /* a corrupt MQD the reset has to restore */
+        rdna3_vram_write(dev, kcq->mqd, m, sizeof(m));
+    }
+    CHECK(gfx11_reset_kcq(dev, kcq, mes, 5) == RDNA3_OK && kcq->rb.ready && HQD(hc, regCP_HQD_ACTIVE) == 1);
+    CHECK(S.mes_sched.legacy_maps == 2 && !S.rlc_safe && S.reg[GCR(regGRBM_GFX_CNTL)] == 0);
+    CHECK(gfx11_ring_get_rptr(dev, &kcq->rb) == kcq->rb.wptr);
+    kcq->mqd_backup = 0;
+    CHECK(gfx11_reset_kcq(dev, kcq, NULL, 5) == RDNA3_ENODEV);
+
+    /* the gfx queue through the MES: reset (reset_legacy_gfx) and map; the
+     * kernel ring here runs on RB0, so a scratch MQD stands in and the RB0
+     * doorbell / poll registers the HQD map shares are put back after */
+    {
+        uint32_t keep[3] = { S.reg[GCR(regCP_RB_DOORBELL_CONTROL)], S.reg[GCR(regCP_RB_WPTR_POLL_ADDR_LO)],
+                             S.reg[GCR(regCP_RB_WPTR_POLL_ADDR_HI)] };
+        uint32_t m[RD_MQD_DWORDS], kgq0 = S.kgq_maps;
+        uint64_t mqd = rdna3_vram_alloc(dev, 4096, 4096, "mes-test-gfx-mqd");
+        memset(m, 0, sizeof(m));
+        m[128] = (uint32_t)rdna3_vram_mc(dev, mqd);
+        m[129] = (uint32_t)(rdna3_vram_mc(dev, mqd) >> 32);
+        rdna3_vram_write(dev, mqd, m, sizeof(m));
+        q.queue_type = 0; q.me = 0; q.pipe = 0; q.queue = 0; q.vmid = 3;
+        q.doorbell_offset = RD_DB_INDEX(RD_DB_GFX_RING0);
+        q.mqd_addr = rdna3_vram_mc(dev, mqd);
+        CHECK(gfx11_mes_map_legacy_queue(dev, mes, &q) == RDNA3_OK && S.reg[GCR(regCP_GFX_HQD_ACTIVE)] == 1);
+        CHECK(gfx11_mes_reset_legacy_queue(dev, mes, &q) == RDNA3_OK && S.reg[GCR(regCP_GFX_HQD_ACTIVE)] == 0);
+        CHECK(S.mes_sched.resets == 1 && S.mes_sched.legacy_maps == 3);
+        S.reg[GCR(regCP_RB_DOORBELL_CONTROL)] = keep[0];
+        S.reg[GCR(regCP_RB_WPTR_POLL_ADDR_LO)] = keep[1];
+        S.reg[GCR(regCP_RB_WPTR_POLL_ADDR_HI)] = keep[2];
+        S.gfx_mapped = 0;
+        S.kgq_maps = kgq0;
+    }
+    CHECK(gfx11_reset_kgq(dev, gr, mes, 3) == RDNA3_EINVAL);   /* RB0 ring: no queue to reset */
+    CHECK(S.mes_sched.bad == 0 && S.cp_bad == 0);
+    dev->amdgpu_exact = 0;
 }
 
 /* rdna3amdgpu=1 GFX 11 ports: gfx_v11_0_sw_init's queue topology, the
@@ -8181,6 +8400,7 @@ static void run(const char *fwdir)
                         /* D: user queues through the scheduler */
                         test_userq_hw(&dev, &mes, &gmc);
                         test_userq_uapi(&dev, &mes, &gmc);
+                        test_mes_amdgpu(&dev, &mes, &kcq, &gr);
                         /* C2: the KIQ restart of a soft reset (mes_v11_0_kiq_hw_init)
                          * resets both MES pipes: the scheduler is gone and has to
                          * be started again, as the kext does after a soft reset */
