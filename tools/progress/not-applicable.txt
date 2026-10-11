@@ -160,7 +160,7 @@ dccg32_otg_(add|drop)_pixel  the divider-127 pixel add/drop of dcn32_update_cloc
 write_i2c|write_i2c_retimer_setting|write_i2c_default_retimer_setting|write_i2c_redriver_setting|get_ext_hdmi_settings  external HDMI retimer / redriver settings from the VBIOS integrated system info table, which only APUs carry
 update_psp_stream_config  PSP display stream config for HDCP / secure display: no HDCP or securedisplay TA on macOS
 is_master_pipe_for_link  DC pipe_ctx topology check (OTG master of an ODM / MPC tree): the port drives one pipe per stream
-can_use_dio_link_hwss|get_dio_link_hwss  Linux link hwss function-table selection (the port calls the DIO link functions directly)
+can_use_(dio|hpo_dp)_link_hwss|get_(dio|hpo_dp)_link_hwss  Linux link hwss function-table selection (the port calls the DIO / HPO link functions directly)
 dp_get_lttpr_mode_override  debug override (dc->debug.lttpr_mode_override)
 dal_hw_hpd_get_pin  Linux GPIO object accessor (the port reads the HPD registers directly)
 dm_helpers_dp_mst_clear_payload_allocation_table|dm_helpers_dp_mst_update_branch_bandwidth|dm_helpers_dp_update_branch_info|dm_set_dcn_clocks|dm_set_phyd32clk|dm_helpers_smu_timeout|dm_helpers_is_fullscreen|dm_helpers_is_hdr_on  empty stubs in amdgpu_dm (only a TODO in Linux v6.12)
@@ -178,3 +178,15 @@ dcn32_check_native_scaling  only feeds dcn32_auto_dpm_test_log, the debug log be
 dcn32_set_hard_min_memclk|dcn32_set_hard_max_memclk|dcn32_get_memclk_states_from_smu|dcn32_set_max_memclk|dcn32_set_min_memclk  clk_mgr hooks reached only from dc_lock_memory_clock_frequency, dc_unlock_memory_clock_frequency and dc_enable_dcmode_clk_limit, which no Linux v6.12 code calls
 dp_check_dpcd_reqeust_status  aborts link training only for USB4 DPIA endpoints (DISPLAY_ENDPOINT_USB4_DPIA); DCN 3.2.0 has no DPIA
 start_clock_recovery_pattern_early  runs only with dc->work_arounds.lt_early_cr_pattern, which Linux v6.12 never sets (not in dcn32_resource.c, dc.c or amdgpu_dm)
+enc1_se_(audio_setup|setup_hdmi_audio|setup_dp_audio|audio_mute_control|dp_audio_setup|dp_audio_enable|hdmi_audio_setup)  DCN 1.0 stream encoder audio: dcn32_str_enc_funcs uses enc3_se_* / enc3_audio_mute_control (AFMT3), only enc1_se_dp_audio_disable / enc1_se_hdmi_audio_disable stay shared
+afmt3_construct|apg31_construct|dce_audio_create|dce60_audio_create|dccg31_create|hpo_dp_link_encoder3[12]_construct|opp1_destroy  Linux Display Core object constructors / destructors
+dce60_aud_wall_dto_setup  DCE 6 (Southern Islands, CONFIG_DRM_AMD_DC_SI) audio only
+opp1_program_stereo  stereo 3D output: macOS has no stereo display path
+dccg31_(update_dpp_dto|get_dccg_ref_freq|set_dpstreamclk|set_dtbclk_dto|otg_add_pixel|otg_drop_pixel)  DCN 3.1 versions: dccg32_funcs uses dccg2_update_dpp_dto and the dccg32_* versions
+dccg31_(enable|disable)_dpstreamclk  reached only from dccg31_set_dpstreamclk (replaced by dccg32_set_dpstreamclk) and dccg31_init's root_clock_optimization.bits.dpstream branch, off on DCN 3.2
+dccg31_(set_dispclk_change_mode|enable_dscclk|disable_dscclk)  not in dccg32_funcs (DCN 3.1 only)
+dccg31_(enable|disable)_symclk32_le  dccg32_funcs hooks no Linux v6.12 code calls (the VBIOS TransmitterControl of the HPO link output selects SYMCLK32_LE)
+dccg31_set_physymclk  dccg32_funcs hook reached only from dccg31_init's root_clock_optimization.bits.physymclk branch, off on DCN 3.2
+dcn3[12]_hpo_dp_link_enc_is_in_alt_mode  USB-C DP alt mode: the card has no USB-C port
+intersect_cable_id  merges the DPRX cable id with the USB-C cable id (get_usbc_cable_id, DP_IS_USB_C links only): the card has no USB-C port
+cm3_helper_translate_curve_to_degamma_hw_format  no caller in Linux v6.12

@@ -346,7 +346,8 @@ static void dp_get_max_link_cap(rdna3_dp_link *l, rdna3_dp_link_settings *max)
 {
     uint32_t cable_max_link_rate;
     int is_uhbr13_5_supported = 1;
-    dcn10_link_encoder_get_max_link_cap(l, max);
+    /* link_enc->funcs->get_max_link_cap (= dp_get_max_link_enc_cap) */
+    (void)dcn32_dp_get_max_link_enc_cap(l, max);
     if (l->reported_link_cap.lane_count < max->lane_count)
         max->lane_count = l->reported_link_cap.lane_count;
     if (l->reported_link_cap.link_rate < max->link_rate)
@@ -377,6 +378,16 @@ static void dp_get_max_link_cap(rdna3_dp_link *l, rdna3_dp_link_settings *max)
         max->link_rate = RD_DP_LINK_RATE_UHBR10;
     if (dcn32_dp_encoding(max) == RD_DP_128b_132b_ENCODING && !l->uhbr_policy)
         max->link_rate = RD_DP_LINK_RATE_HIGH3;
+}
+
+/* dp_get_max_link_enc_cap: the link encoder's get_max_link_cap (a link
+ * always has its DIO link encoder here) */
+int dcn32_dp_get_max_link_enc_cap(const rdna3_dp_link *l, rdna3_dp_link_settings *max_link_enc_cap)
+{
+    if (!max_link_enc_cap)
+        return 0;
+    dcn10_link_encoder_get_max_link_cap(l, max_link_enc_cap);
+    return 1;
 }
 
 void dcn32_dp_link_init(rdna3_dp_link *l, rdna3_dev *d, rdna3_dmub *dm, uint32_t aux, uint32_t be, uint32_t fe,
@@ -815,6 +826,11 @@ int dcn32_dp_read_caps(rdna3_dp_link *l)
          (c->max_down_spread & RD_DP_MAX_DOWNSPREAD_0_5) ? " SSC" : "", c->sink_dev_id,
          dp_parse_lttpr_repeater_count(c->lttpr.phy_repeater_cnt), rate_name(l->max_link_cap.link_rate),
          l->max_link_cap.lane_count);
+    if (dp_is_lttpr_present(l))
+        RLOG(l->d, "dp: AUX %u: LTTPR mode at the max link: %s (VBIOS LTTPR support %s)", l->aux,
+             dcn32_dp_decide_lttpr_mode(l, &l->max_link_cap) == RD_LTTPR_MODE_NON_TRANSPARENT ? "non-transparent"
+                                                                                               : "transparent",
+             l->vbios_lttpr_enable ? "enabled" : "not enabled");
     if (c->channel_coding_cap & RD_DP_CAP_ANSI_128B132B)
         RLOG(l->d, "dp: AUX %u: 128b/132b: rates %02x (%s), cable id %02x, LTTPR rates %02x, UHBR %s", l->aux,
              c->dp_128b_132b_supported_link_rates, rate_name(l->reported_link_cap.link_rate), c->cable_id,
@@ -904,6 +920,14 @@ uint32_t dcn32_dp_highest_encoding(const rdna3_dp_link *l)
     if (e == RD_DP_128b_132b_ENCODING)
         return RD_DC_LINK_ENCODING_DP_128b_132b;
     return RD_DC_LINK_ENCODING_UNSPECIFIED;
+}
+
+/* mst_decide_link_encoding_format: the encoding of the setting MST
+ * streams use, decide_mst_link_settings = the verified link cap (no
+ * preferred_link_setting in this port) */
+uint32_t dcn32_dp_mst_decide_link_encoding_format(const rdna3_dp_link *l)
+{
+    return dcn32_dp_encoding(verified_cap(l));
 }
 
 /* dp_is_128b_132b_signal: the stream holds the HPO encoders */
@@ -1643,6 +1667,23 @@ static void disable_hpo_dp_link_output(rdna3_dp_link *l)
     dcn32_hpo_le_disable_output(l->dm, l->d, l->hpo_le, l->be, l->hpd, 0 /* ATOM_TRANSMITTER_DIGMODE_V6_DP */);
 }
 
+/* enable_dio_dp_link_output (link_hwss_dio.c): the DIO link encoder's
+ * enable_dp_output for an SST signal, enable_dp_mst_output for MST */
+static void enable_dio_dp_link_output(rdna3_dp_link *l, const rdna3_dp_link_settings *s)
+{
+    if (!l->mst)
+        dcn10_link_encoder_enable_dp_output(l, s);
+    else
+        dcn10_link_encoder_enable_dp_mst_output(l, s);
+}
+
+/* disable_dio_link_output (link_hwss_dio.c): the link encoder's
+ * disable_output (dcn10_link_encoder_disable_output) */
+static void disable_dio_link_output(rdna3_dp_link *l)
+{
+    dcn10_link_encoder_disable_output(l);
+}
+
 /* dp_enable_link_phy: dce110_enable_dp_link_output -> the link hwss of the
  * setting (get_temp_dp_link_res: the HPO link encoder for 128b/132b) (the
  * pixel clock is already the DP DTO; no DMCU on DCN 3.2) */
@@ -1651,10 +1692,8 @@ void dcn32_dp_enable_link_phy(rdna3_dp_link *l, const rdna3_dp_link_settings *s)
     l->cur_link_settings = *s;
     if (dcn32_dp_encoding(s) == RD_DP_128b_132b_ENCODING)
         enable_hpo_dp_link_output(l, s);
-    else if (l->mst)
-        dcn10_link_encoder_enable_dp_mst_output(l, s);
     else
-        dcn10_link_encoder_enable_dp_output(l, s);
+        enable_dio_dp_link_output(l, s);
     dpcd_write_rx_power_ctrl(l, 1);
 }
 
@@ -1669,9 +1708,15 @@ void dcn32_dp_disable_link_phy(rdna3_dp_link *l)
     if (dcn32_dp_encoding(&l->cur_link_settings) == RD_DP_128b_132b_ENCODING)
         disable_hpo_dp_link_output(l);
     else
-        dcn10_link_encoder_disable_output(l);
+        disable_dio_link_output(l);
     for (i = 0; i < sizeof(l->cur_link_settings); i++)
         ((uint8_t *)&l->cur_link_settings)[i] = 0;
+}
+
+/* is_repeater: a non-transparent LTTPR hop ('offset' = repeater id, DPRX = 0) */
+static int is_repeater(const rdna3_dp_lt_settings *lt, uint32_t offset)
+{
+    return lt->lttpr_mode == RD_LTTPR_MODE_NON_TRANSPARENT && offset != 0;
 }
 
 /* is_immediate_downstream: 'offset' (DPRX = 0) is the hop next to the source */
@@ -1680,15 +1725,15 @@ static int is_immediate_downstream(const rdna3_dp_link *l, uint32_t offset)
     return dp_parse_lttpr_repeater_count(l->dpcd_caps.lttpr.phy_repeater_cnt) == offset;
 }
 
-/* dp_set_hw_lane_settings for the DPRX (offset 0): with a non-transparent
- * LTTPR in between the PHY's settings belong to the first hop and stay;
- * set_dio_dp_lane_settings, or set_hpo_dp_lane_settings (the TX FFE preset
- * of lane 0) */
-static void dp_set_hw_lane_settings(rdna3_dp_link *l, const rdna3_dp_lt_settings *lt)
+/* dp_set_hw_lane_settings: with non-transparent LTTPRs the PHY's settings
+ * belong to the hop next to the source (is_immediate_downstream) and stay
+ * while the hops further down train; set_dio_dp_lane_settings, or
+ * set_hpo_dp_lane_settings (the TX FFE preset of lane 0) */
+static void dp_set_hw_lane_settings(rdna3_dp_link *l, const rdna3_dp_lt_settings *lt, uint32_t offset)
 {
     uint32_t i;
     /* (no EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN retimer on this card's paths) */
-    if (lt->lttpr_mode == RD_LTTPR_MODE_NON_TRANSPARENT && !is_immediate_downstream(l, 0))
+    if (lt->lttpr_mode == RD_LTTPR_MODE_NON_TRANSPARENT && !is_immediate_downstream(l, offset))
         return;
     if (dcn32_dp_encoding(&lt->link_settings) == RD_DP_128b_132b_ENCODING)
         dcn32_hpo_le_set_ffe(l->dm, l->hpo_le, l->be, lt->link_settings.lane_count, lt->link_settings.link_rate,
@@ -1855,23 +1900,36 @@ static int dp_is_symbol_locked(uint32_t n, const uint8_t *st) { return lanes_hav
  * skip_fallback_on_link_loss) */
 static int dp_is_interlane_aligned(uint8_t align) { return (align & RD_DP_INTERLANE_ALIGN_DONE) != 0; }
 
-/* dp_get_lane_status_and_lane_adjust (DPRX) */
+/* dp_get_lane_status_and_lane_adjust: the DPRX's lane status, or a
+ * non-transparent repeater's (its adjust request 3 bytes after the status) */
 static int dp_get_lane_status_and_lane_adjust(rdna3_dp_link *l, const rdna3_dp_lt_settings *lt, uint8_t *ln_status,
-                                              uint8_t *ln_align, uint8_t *ln_adjust)
+                                              uint8_t *ln_align, uint8_t *ln_adjust, uint32_t offset)
 {
-    uint8_t b[6] = { 0 };
+    uint32_t lane01_status_address = RD_DPCD_LANE0_1_STATUS;
+    uint8_t b[6] = { 0 }, lane_adjust_offset = 4;
     uint32_t lane;
-    int status = core_link_read_dpcd(l, RD_DPCD_LANE0_1_STATUS, b, sizeof(b));
+    int status;
+    if (is_repeater(lt, offset)) {
+        lane01_status_address = RD_DPCD_LANE0_1_STATUS_PHY_REPEATER1 +
+                                RD_DPCD_REPEATER_CONFIGURATION_AND_STATUS_SIZE * (offset - 1);
+        lane_adjust_offset = 3;
+    }
+    status = core_link_read_dpcd(l, lane01_status_address, b, sizeof(b));
     if (status != RDNA3_OK) {
-        RDBG(l->d, "dp: failed to read lane status: keep the current status and adjust");
+        RDBG(l->d, "dp: failed to read lane status at 0x%x: keep the current status and adjust",
+             lane01_status_address);
         return status;
     }
     for (lane = 0; lane < lt->link_settings.lane_count; lane++) {
         ln_status[lane] = dp_get_nibble_at_index(&b[0], lane);
-        ln_adjust[lane] = dp_get_nibble_at_index(&b[4], lane);
+        ln_adjust[lane] = dp_get_nibble_at_index(&b[lane_adjust_offset], lane);
     }
     *ln_align = b[2];
-    RDBG(l->d, "dp: lane status %02x %02x align %02x adjust %02x %02x", b[0], b[1], b[2], b[4], b[5]);
+    if (is_repeater(lt, offset))
+        RDBG(l->d, "dp: LTTPR %u lane status %02x %02x align %02x adjust %02x %02x", offset, b[0], b[1], b[2],
+             b[lane_adjust_offset], b[lane_adjust_offset + 1]);
+    else
+        RDBG(l->d, "dp: lane status %02x %02x align %02x adjust %02x %02x", b[0], b[1], b[2], b[4], b[5]);
     return RDNA3_OK;
 }
 
@@ -1910,13 +1968,10 @@ static uint32_t get_cr_training_aux_rd_interval(rdna3_dp_link *l)
     return us;
 }
 
-/* get_eq_training_aux_rd_interval (dp_translate_training_aux_read_interval) */
-static uint32_t get_eq_training_aux_rd_interval(rdna3_dp_link *l)
+/* dp_translate_training_aux_read_interval */
+static uint32_t dp_translate_training_aux_read_interval(uint32_t dpcd_aux_read_interval)
 {
-    uint8_t v = 0;
-    if (l->dpcd_caps.dpcd_rev >= 0x12)
-        core_link_read_dpcd(l, RD_DPCD_TRAINING_AUX_RD_INTERVAL, &v, 1);
-    switch (v & 0x7f) {
+    switch (dpcd_aux_read_interval) {
     case 1: return 4000;
     case 2: return 8000;
     case 3: return 12000;
@@ -1925,6 +1980,24 @@ static uint32_t get_eq_training_aux_rd_interval(rdna3_dp_link *l)
     case 6: return 64000;
     default: return 400;
     }
+}
+
+/* get_eq_training_aux_rd_interval */
+static uint32_t get_eq_training_aux_rd_interval(rdna3_dp_link *l)
+{
+    uint8_t v = 0;
+    if (l->dpcd_caps.dpcd_rev >= 0x12)
+        core_link_read_dpcd(l, RD_DPCD_TRAINING_AUX_RD_INTERVAL, &v, 1);
+    return dp_translate_training_aux_read_interval(v & 0x7fu);
+}
+
+/* dp_get_eq_aux_rd_interval: a repeater's own interval (read by
+ * configure_lttpr_mode_non_transparent), else the DPRX's */
+static uint32_t dp_get_eq_aux_rd_interval(const rdna3_dp_link *l, const rdna3_dp_lt_settings *lt, uint32_t offset)
+{
+    if (is_repeater(lt, offset))
+        return dp_translate_training_aux_read_interval(l->dpcd_caps.lttpr.aux_rd_interval[offset - 1]);
+    return lt->eq_pattern_time;
 }
 
 /* decide_cr_training_pattern */
@@ -1945,14 +2018,22 @@ static uint32_t decide_eq_training_pattern(const rdna3_dp_link *l, const rdna3_d
     return RD_DP_TRAINING_PATTERN_SEQUENCE_2;
 }
 
-/* dp_decide_8b_10b_lttpr_mode: LTTPR-aware VBIOS, non-transparent not forced;
- * dp_decide_lttpr_mode for the 8b/10b links this port trains */
-
+/* dp_decide_8b_10b_lttpr_mode: an LTTPR-aware VBIOS (implicit on DCN 3.2)
+ * picks non-transparent when its DCE_INFO_CAPS_LTTPR_SUPPORT_ENABLE is
+ * set, transparent otherwise (lttpr_aware 0: the port's unaware mode,
+ * no LTTPR handling) */
 static int dp_decide_8b_10b_lttpr_mode(const rdna3_dp_link *l)
 {
     if (!dp_is_lttpr_present(l))
         return RD_LTTPR_MODE_NON_LTTPR;
-    return l->lttpr_aware ? RD_LTTPR_MODE_TRANSPARENT : RD_LTTPR_MODE_NON_LTTPR;
+    if (!l->lttpr_aware)
+        return RD_LTTPR_MODE_NON_LTTPR;
+    if (l->vbios_lttpr_enable) {
+        RDBG(l->d, "dp: chose LTTPR_MODE_NON_TRANSPARENT (VBIOS DCE_INFO_CAPS_LTTPR_SUPPORT_ENABLE)");
+        return RD_LTTPR_MODE_NON_TRANSPARENT;
+    }
+    RDBG(l->d, "dp: chose LTTPR_MODE_TRANSPARENT (VBIOS LTTPR support not enabled)");
+    return RD_LTTPR_MODE_TRANSPARENT;
 }
 
 /* decide_8b_10b_training_settings (+ override_training_settings without
@@ -2009,6 +2090,17 @@ static void decide_128b_132b_training_settings(rdna3_dp_link *l, const rdna3_dp_
     lt->disallow_per_lane_settings = 1;
     lt->lttpr_mode = dp_decide_128b_132b_lttpr_mode(l);
     dp_hw_to_dpcd_lane_settings(lt, lt->hw_lane_settings, lt->dpcd_lane_settings);
+}
+
+/* dp_decide_lttpr_mode: the LTTPR mode a setting's encoding trains in */
+int dcn32_dp_decide_lttpr_mode(const rdna3_dp_link *l, const rdna3_dp_link_settings *s)
+{
+    uint32_t encoding = dcn32_dp_encoding(s);
+    if (encoding == RD_DP_8b_10b_ENCODING)
+        return dp_decide_8b_10b_lttpr_mode(l);
+    if (encoding == RD_DP_128b_132b_ENCODING)
+        return dp_decide_128b_132b_lttpr_mode(l);
+    return RD_LTTPR_MODE_NON_LTTPR;
 }
 
 /* dp_decide_training_settings */
@@ -2121,30 +2213,48 @@ static void dpcd_set_link_settings(rdna3_dp_link *l, const rdna3_dp_lt_settings 
          lt->link_settings.lane_count, lt->enhanced_framing, lt->link_settings.link_spread);
 }
 
-/* dpcd_set_lane_settings */
-static void dpcd_set_lane_settings(rdna3_dp_link *l, const rdna3_dp_lt_settings *lt)
+/* dpcd_set_lane_settings: the DPRX's or a non-transparent repeater's */
+static void dpcd_set_lane_settings(rdna3_dp_link *l, const rdna3_dp_lt_settings *lt, uint32_t offset)
 {
-    core_link_write_dpcd(l, RD_DPCD_TRAINING_LANE0_SET, lt->dpcd_lane_settings, lt->link_settings.lane_count);
+    uint32_t lane0_set_address = RD_DPCD_TRAINING_LANE0_SET;
+    if (is_repeater(lt, offset))
+        lane0_set_address = RD_DPCD_TRAINING_LANE0_SET_PHY_REPEATER1 +
+                            RD_DPCD_REPEATER_CONFIGURATION_AND_STATUS_SIZE * (offset - 1);
+    core_link_write_dpcd(l, lane0_set_address, lt->dpcd_lane_settings, lt->link_settings.lane_count);
+}
+
+/* repeater_training_done: the repeater's training pattern back to video idle */
+static void repeater_training_done(rdna3_dp_link *l, uint32_t offset)
+{
+    dpcd_write1(l, RD_DPCD_TRAINING_PATTERN_SET_PHY_REPEATER1 +
+                       RD_DPCD_REPEATER_CONFIGURATION_AND_STATUS_SIZE * (offset - 1),
+                dp_training_pattern_to_dpcd_training_pattern(RD_DP_TRAINING_PATTERN_VIDEOIDLE));
+    RDBG(l->d, "dp: repeater_training_done LTTPR %u", offset);
 }
 
 /* dpcd_set_lt_pattern_and_lane_settings: pattern + lanes in one burst (the
- * whole 5 bytes on 128b/132b) */
-static void dpcd_set_lt_pattern_and_lane_settings(rdna3_dp_link *l, const rdna3_dp_lt_settings *lt, uint32_t p)
+ * whole 5 bytes on 128b/132b), at the DPRX or a non-transparent repeater */
+static void dpcd_set_lt_pattern_and_lane_settings(rdna3_dp_link *l, const rdna3_dp_lt_settings *lt, uint32_t p,
+                                                  uint32_t offset)
 {
     uint8_t buf[5] = { 0 };
-    uint32_t lane;
+    uint32_t lane, dpcd_base_lt_offset = RD_DPCD_TRAINING_PATTERN_SET;
+    if (is_repeater(lt, offset))
+        dpcd_base_lt_offset = RD_DPCD_TRAINING_PATTERN_SET_PHY_REPEATER1 +
+                              RD_DPCD_REPEATER_CONFIGURATION_AND_STATUS_SIZE * (offset - 1);
     buf[0] = (uint8_t)(dp_training_pattern_to_dpcd_training_pattern(p) |
                        (dp_initialize_scrambling_data_symbols(p) ? RD_DP_SCRAMBLING_DISABLE : 0));
     for (lane = 0; lane < lt->link_settings.lane_count; lane++)
         buf[1 + lane] = lt->dpcd_lane_settings[lane];
     if (dcn32_dp_encoding(&lt->link_settings) == RD_DP_128b_132b_ENCODING)
-        core_link_write_dpcd(l, RD_DPCD_TRAINING_PATTERN_SET, buf, sizeof(buf));
+        core_link_write_dpcd(l, dpcd_base_lt_offset, buf, sizeof(buf));
     else
-        core_link_write_dpcd(l, RD_DPCD_TRAINING_PATTERN_SET, buf, 1 + lt->link_settings.lane_count);
+        core_link_write_dpcd(l, dpcd_base_lt_offset, buf, 1 + lt->link_settings.lane_count);
 }
 
-/* perform_8b_10b_clock_recovery_sequence (DPRX) */
-static int perform_8b_10b_clock_recovery_sequence(rdna3_dp_link *l, rdna3_dp_lt_settings *lt)
+/* perform_8b_10b_clock_recovery_sequence ('offset': the DPRX or a
+ * non-transparent repeater) */
+static int perform_8b_10b_clock_recovery_sequence(rdna3_dp_link *l, rdna3_dp_lt_settings *lt, uint32_t offset)
 {
     uint32_t retries_cr = 0, retry_count = 0, lane_count = lt->link_settings.lane_count;
     uint8_t st[4] = { 0 }, adj[4] = { 0 }, align = 0;
@@ -2152,16 +2262,16 @@ static int perform_8b_10b_clock_recovery_sequence(rdna3_dp_link *l, rdna3_dp_lt_
     dp_set_hw_training_pattern(l, lt->pattern_for_cr);
     while (retries_cr < RD_DP_LINK_TRAINING_MAX_RETRY_COUNT && retry_count < RD_DP_LINK_TRAINING_MAX_CR_RETRY) {
         /* 1. lane settings on the PHY */
-        dp_set_hw_lane_settings(l, lt);
+        dp_set_hw_lane_settings(l, lt, offset);
         /* 2. the receiver's DPCD: a 5-byte burst the first time */
         if (!retry_count)
-            dpcd_set_lt_pattern_and_lane_settings(l, lt, lt->pattern_for_cr);
+            dpcd_set_lt_pattern_and_lane_settings(l, lt, lt->pattern_for_cr, offset);
         else
-            dpcd_set_lane_settings(l, lt);
+            dpcd_set_lane_settings(l, lt, offset);
         /* 3. wait for the receiver to lock on */
         dp_wait_for_training_aux_rd_interval(l, lt->cr_pattern_time);
         /* 4. lane status and the drive settings the sink asks for */
-        dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj);
+        dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj, offset);
         /* 5. CR done */
         if (dp_is_cr_done(lane_count, st)) {
             RDBG(l->d, "dp: clock recovery OK");
@@ -2185,23 +2295,25 @@ static int perform_8b_10b_clock_recovery_sequence(rdna3_dp_link *l, rdna3_dp_lt_
     return dp_get_cr_failure(lane_count, st);
 }
 
-/* perform_8b_10b_channel_equalization_sequence (DPRX) */
-static int perform_8b_10b_channel_equalization_sequence(rdna3_dp_link *l, rdna3_dp_lt_settings *lt)
+/* perform_8b_10b_channel_equalization_sequence ('offset': the DPRX or a
+ * non-transparent repeater; repeaters train EQ with TPS4) */
+static int perform_8b_10b_channel_equalization_sequence(rdna3_dp_link *l, rdna3_dp_lt_settings *lt, uint32_t offset)
 {
     uint32_t retries, lane_count = lt->link_settings.lane_count;
     uint8_t st[4] = { 0 }, adj[4] = { 0 }, align = 0;
     uint32_t p = lt->pattern_for_eq;
 
+    if (is_repeater(lt, offset) && dcn32_dp_encoding(&lt->link_settings) == RD_DP_8b_10b_ENCODING)
+        p = RD_DP_TRAINING_PATTERN_SEQUENCE_4;
     dp_set_hw_training_pattern(l, p);
     for (retries = 0; retries <= RD_DP_LINK_TRAINING_MAX_RETRY_COUNT; retries++) {
-        dp_set_hw_lane_settings(l, lt);
+        dp_set_hw_lane_settings(l, lt, offset);
         if (!retries)
-            dpcd_set_lt_pattern_and_lane_settings(l, lt, p);
+            dpcd_set_lt_pattern_and_lane_settings(l, lt, p, offset);
         else
-            dpcd_set_lane_settings(l, lt);
-        /* dp_get_eq_aux_rd_interval (DPRX) */
-        dp_wait_for_training_aux_rd_interval(l, lt->eq_pattern_time);
-        dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj);
+            dpcd_set_lane_settings(l, lt, offset);
+        dp_wait_for_training_aux_rd_interval(l, dp_get_eq_aux_rd_interval(l, lt, offset));
+        dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj, offset);
         if (!dp_is_cr_done(lane_count, st))
             return (st[0] & RD_DP_LANE_CR_DONE) ? RD_LT_EQ_FAIL_CR_PARTIAL : RD_LT_EQ_FAIL_CR;
         if (dp_is_ch_eq_done(lane_count, st) && dp_is_symbol_locked(lane_count, st) &&
@@ -2212,17 +2324,44 @@ static int perform_8b_10b_channel_equalization_sequence(rdna3_dp_link *l, rdna3_
     return RD_LT_EQ_FAIL_EQ;
 }
 
-/* dp_perform_8b_10b_link_training (no non-transparent LTTPR hops) */
+/* dp_perform_8b_10b_link_training: each non-transparent repeater from the
+ * one next to the source down (repeater_training_done after each), then
+ * the DPRX (lt_early_cr_pattern is not set on DCN 3.2) */
 static int dp_perform_8b_10b_link_training(rdna3_dp_link *l, rdna3_dp_lt_settings *lt)
 {
-    int status;
+    int status = RD_LT_SUCCESS;
+    uint32_t repeater_cnt, repeater_id, lane;
     /* 1. link rate, lane count, spread */
     dpcd_set_link_settings(l, lt);
-    status = perform_8b_10b_clock_recovery_sequence(l, lt);
+    if (lt->lttpr_mode == RD_LTTPR_MODE_NON_TRANSPARENT) {
+        /* 2. train each hop (its training-done is cleared as well) */
+        repeater_cnt = dp_parse_lttpr_repeater_count(l->dpcd_caps.lttpr.phy_repeater_cnt);
+        for (repeater_id = repeater_cnt; repeater_id > 0 && status == RD_LT_SUCCESS; repeater_id--) {
+            status = perform_8b_10b_clock_recovery_sequence(l, lt, repeater_id);
+            if (status != RD_LT_SUCCESS) {
+                repeater_training_done(l, repeater_id);
+                break;
+            }
+            status = perform_8b_10b_channel_equalization_sequence(l, lt, repeater_id);
+            if (status == RD_LT_SUCCESS)
+                RDBG(l->d, "dp: LTTPR %u channel EQ done", repeater_id);
+            repeater_training_done(l, repeater_id);
+            if (status != RD_LT_SUCCESS)
+                break;
+            for (lane = 0; lane < RD_DP_LANE_COUNT_DP_MAX; lane++) {
+                lt->dpcd_lane_settings[lane] = 0;
+                lt->hw_lane_settings[lane].voltage_swing = 0;
+                lt->hw_lane_settings[lane].pre_emphasis = 0;
+            }
+        }
+    }
     if (status == RD_LT_SUCCESS) {
-        status = perform_8b_10b_channel_equalization_sequence(l, lt);
-        if (status == RD_LT_SUCCESS)
-            RDBG(l->d, "dp: channel EQ done");
+        status = perform_8b_10b_clock_recovery_sequence(l, lt, 0);
+        if (status == RD_LT_SUCCESS) {
+            status = perform_8b_10b_channel_equalization_sequence(l, lt, 0);
+            if (status == RD_LT_SUCCESS)
+                RDBG(l->d, "dp: channel EQ done");
+        }
     }
     return status;
 }
@@ -2260,18 +2399,18 @@ static int dp_perform_128b_132b_channel_eq_done_sequence(rdna3_dp_link *l, rdna3
     dpcd_set_training_pattern(l, lt->pattern_for_cr);
     /* the TX FFE preset asked for, then 128b/132b_TPS2 */
     aux_rd_interval = dpcd_128b_132b_get_aux_rd_interval(l);
-    dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj);
+    dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj, 0);
     dp_decide_lane_settings(lt, adj);
-    dp_set_hw_lane_settings(l, lt);
+    dp_set_hw_lane_settings(l, lt, 0);
     dp_set_hw_training_pattern(l, lt->pattern_for_eq);
     loop_count = 1;
     /* TRAINING_PATTERN_SET 02h and the presets in one AUX transaction */
-    dpcd_set_lt_pattern_and_lane_settings(l, lt, lt->pattern_for_eq);
+    dpcd_set_lt_pattern_and_lane_settings(l, lt, lt->pattern_for_eq, 0);
     /* channel EQ done */
     while (result == RD_LT_SUCCESS) {
         dp_wait_for_training_aux_rd_interval(l, aux_rd_interval);
         wait_time += aux_rd_interval;
-        status = dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj);
+        status = dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj, 0);
         dp_decide_lane_settings(lt, adj);
         aux_rd_interval = dpcd_128b_132b_get_aux_rd_interval(l);
         if (status != RDNA3_OK) {
@@ -2283,7 +2422,7 @@ static int dp_perform_128b_132b_channel_eq_done_sequence(rdna3_dp_link *l, rdna3
         } else if (align & RD_DP_128B132B_LT_FAILED) {
             result = RD_LT_128b_132b_LT_FAILED;
         } else {
-            dp_set_hw_lane_settings(l, lt);
+            dp_set_hw_lane_settings(l, lt, 0);
             dpcd_128b_132b_set_lane_settings(l, lt);
         }
         loop_count++;
@@ -2301,7 +2440,7 @@ static int dp_perform_128b_132b_channel_eq_done_sequence(rdna3_dp_link *l, rdna3
         } else {
             dp_wait_for_training_aux_rd_interval(l, lt->eq_pattern_time);
             wait_time += lt->eq_pattern_time;
-            status = dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj);
+            status = dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj, 0);
         }
     }
     return result;
@@ -2320,7 +2459,7 @@ static int dp_perform_128b_132b_cds_done_sequence(rdna3_dp_link *l, rdna3_dp_lt_
     while (result == RD_LT_SUCCESS) {
         dp_wait_for_training_aux_rd_interval(l, lt->cds_pattern_time);
         wait_time += lt->cds_pattern_time;
-        status = dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj);
+        status = dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj, 0);
         if (status != RDNA3_OK)
             result = RD_LT_ABORT;
         else if (dp_is_symbol_locked(lt->link_settings.lane_count, st) &&
@@ -2380,7 +2519,7 @@ static int perform_post_lt_adj_req_sequence(rdna3_dp_link *l, rdna3_dp_lt_settin
     for (n = 0; n < 6; n++) {                    /* POST_LT_ADJ_REQ_LIMIT */
         changed = 0;
         for (t = 0; t < 200; t++) {              /* POST_LT_ADJ_REQ_TIMEOUT */
-            dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj);
+            dp_get_lane_status_and_lane_adjust(l, lt, st, &align, adj, 0);
             if (!(align & RD_DP_POST_LT_ADJ_REQ_IN_PROGRESS))
                 return 1;
             if (!dp_is_cr_done(lane_count, st))
@@ -2398,9 +2537,9 @@ static int perform_post_lt_adj_req_sequence(rdna3_dp_link *l, rdna3_dp_lt_settin
             if (changed) {
                 dp_decide_lane_settings(lt, adj);
                 /* dp_set_drive_settings */
-                dp_set_hw_lane_settings(l, lt);
+                dp_set_hw_lane_settings(l, lt, 0);
                 dp_hw_to_dpcd_lane_settings(lt, lt->hw_lane_settings, lt->dpcd_lane_settings);
-                dpcd_set_lane_settings(l, lt);
+                dpcd_set_lane_settings(l, lt, 0);
                 break;
             }
             l->d->os.msleep(l->d->os.ctx, 1);

@@ -10,6 +10,11 @@
  *     ("no physical connection": DC stops counting there)
  *   - the APGs 0..3: APG_RESET_DONE follows APG_RESET
  *   - the DPGs: DPG_DOUBLE_BUFFER_PENDING stays 0 (the update is taken at once)
+ *   - the DDC GPIO pins of dp_is_sink_present: DC_GPIO_DDCn_Y reads the
+ *     clock line's level (SA.ddc_clk_level[n]: 0 = a DP sink or a passive
+ *     DP-HDMI dongle holds it low), sampled only when the pin is a GPIO
+ *     input (MASK 1, EN 0) on a pad in I2C mode (AUX_PAD1_MODE 0,
+ *     DDC_PADn_I2CMODE 1, AUXn_PAD_RXSEL 1); other reads count as bad
  *
  * SPDX-License-Identifier: MIT
  */
@@ -18,6 +23,8 @@
 #include "gen/dcn_3_2_0_audio.h"
 #include "gen/dcn_3_2_0_fmt.h"
 #include "gen/dcn_3_2_0_color.h"
+#include "gen/dcn_3_2_0_ddcgpio.h"
+#include "gen/dcn_3_2_0_gpio.h"
 
 #define SEGB(i) ((i) == 1 ? DCN_B1 : (i) == 2 ? DCN_B2 : DCN_B3)
 #define AREG(reg) (SEGB(reg##_BASE_IDX) + (reg))
@@ -26,14 +33,33 @@
 #define FE_ST (regDIG1_AFMT_CNTL - regDIG0_AFMT_CNTL)
 #define FMT_ST (regFMT1_FMT_CONTROL - regFMT0_FMT_CONTROL)
 
+#define DDC_ST (regDC_GPIO_DDC2_MASK - regDC_GPIO_DDC1_MASK)
+
 static struct {
     uint32_t az[8][256];
     unsigned az_writes;
+    uint32_t ddc_clk_level[5];
+    unsigned ddc_y_reads, ddc_y_bad;
 } SA;
 
 static int au_rd(uint32_t dw, uint32_t *out)
 {
     uint32_t n;
+    for (n = 0; n < 5; n++)
+        if (dw == AREG(regDC_GPIO_DDC1_Y) + DDC_ST * n) {
+            uint32_t mask = S.reg[AREG(regDC_GPIO_DDC1_MASK) + DDC_ST * n];
+            uint32_t en = S.reg[AREG(regDC_GPIO_DDC1_EN) + DDC_ST * n];
+            int input = (mask & DC_GPIO_DDC1_MASK__DC_GPIO_DDC1CLK_MASK_MASK) &&
+                        !(en & DC_GPIO_DDC1_EN__DC_GPIO_DDC1CLK_EN_MASK) &&
+                        !(mask & DC_GPIO_DDC1_MASK__AUX_PAD1_MODE_MASK) &&
+                        (S.reg[AREG(regDC_GPIO_AUX_CTRL_5)] & (DC_GPIO_AUX_CTRL_5__DDC_PAD1_I2CMODE_MASK << n)) &&
+                        ((S.reg[AREG(regPHY_AUX_CNTL)] >> (PHY_AUX_CNTL__AUX1_PAD_RXSEL__SHIFT + 2 * n)) & 3) == 1;
+            SA.ddc_y_reads++;
+            if (!input)
+                SA.ddc_y_bad++;
+            *out = input && SA.ddc_clk_level[n] ? DC_GPIO_DDC1_Y__DC_GPIO_DDC1CLK_Y_MASK : 0;
+            return 1;
+        }
     for (n = 0; n < 8; n++)
         if (dw == AREG(regAZF0ENDPOINT0_AZALIA_F0_CODEC_ENDPOINT_DATA) + AZ_ST * n) {
             *out = SA.az[n][S.reg[AREG(regAZF0ENDPOINT0_AZALIA_F0_CODEC_ENDPOINT_INDEX) + AZ_ST * n] & 0xff];
@@ -729,4 +755,42 @@ static int au_dp_dio_on(uint32_t fe)
            !(S.reg[AREG(regAPG0_APG_CONTROL2)] & APG0_APG_CONTROL2__APG_ENABLE_MASK) &&
            dp_au.out.dp_link_info.encoding == RD_DP_8b_10b_ENCODING && afmt(regAFMT0_AFMT_AUDIO_SRC_CONTROL, fe) == 0 &&
            (SA.az[0][RD_AZ_HOT_PLUG_CONTROL] & RD_AZ_HPC_AUDIO_ENABLED);
+}
+
+/* dp_is_sink_present (dcaux_dp_is_sink_present): the DDC clock pin read
+ * as a GPIO input on a pad in I2C mode, 3 retries; everything put back */
+static void test_dc_dp_sink_present(rdna3_dev *dev)
+{
+    const uint32_t mreg = AREG(regDC_GPIO_DDC1_MASK) + DDC_ST * 1, areg = AREG(regDC_GPIO_DDC1_A) + DDC_ST * 1;
+    const uint32_t ereg = AREG(regDC_GPIO_DDC1_EN) + DDC_ST * 1;
+    const uint32_t c5 = AREG(regDC_GPIO_AUX_CTRL_5), pa = AREG(regPHY_AUX_CNTL);
+    uint32_t save[5], clk = 9;
+    save[0] = S.reg[mreg]; save[1] = S.reg[areg]; save[2] = S.reg[ereg]; save[3] = S.reg[c5]; save[4] = S.reg[pa];
+    /* DDC2 in AUX mode, the pins driven by the HW, output enables set */
+    S.reg[mreg] = DC_GPIO_DDC1_MASK__AUX_PAD1_MODE_MASK;
+    S.reg[areg] = 0;
+    S.reg[ereg] = DC_GPIO_DDC1_EN__DC_GPIO_DDC1CLK_EN_MASK | DC_GPIO_DDC1_EN__DC_GPIO_DDC1DATA_EN_MASK;
+    S.reg[c5] = 0x5;
+    S.reg[pa] = 0x2u << (PHY_AUX_CNTL__AUX1_PAD_RXSEL__SHIFT + 2);
+    SA.ddc_y_reads = SA.ddc_y_bad = 0;
+    /* a DP sink: the clock line low, one read */
+    SA.ddc_clk_level[1] = 0;
+    CHECK(dcaux_dp_is_sink_present(dev, 1, 1, &clk) == 1 && clk == 0 && SA.ddc_y_reads == 1 && SA.ddc_y_bad == 0);
+    /* restored: the pin fields, the pad back in AUX mode, I2CMODE / RXSEL;
+     * the pull-downs stay on as DC leaves them */
+    CHECK(S.reg[mreg] == (DC_GPIO_DDC1_MASK__AUX_PAD1_MODE_MASK | DC_GPIO_DDC1_MASK__DC_GPIO_DDC1CLK_PD_EN_MASK |
+                          DC_GPIO_DDC1_MASK__DC_GPIO_DDC1DATA_PD_EN_MASK) &&
+          S.reg[areg] == 0 &&
+          S.reg[ereg] == (DC_GPIO_DDC1_EN__DC_GPIO_DDC1CLK_EN_MASK | DC_GPIO_DDC1_EN__DC_GPIO_DDC1DATA_EN_MASK) &&
+          S.reg[c5] == 0x5 && S.reg[pa] == 0x2u << (PHY_AUX_CNTL__AUX1_PAD_RXSEL__SHIFT + 2));
+    /* a TMDS sink on a DP connector (or nothing with a pull-up): the clock
+     * line high on all four reads -> no DP sink */
+    SA.ddc_clk_level[1] = 1;
+    SA.ddc_y_reads = 0;
+    CHECK(dcaux_dp_is_sink_present(dev, 1, 1, &clk) == 0 && clk == 1 && SA.ddc_y_reads == 4 && SA.ddc_y_bad == 0);
+    /* an engine without a DDC: what the connector says */
+    CHECK(dcaux_dp_is_sink_present(dev, RD_AUX_ENGINES, 1, NULL) == 1 &&
+          dcaux_dp_is_sink_present(dev, RD_AUX_ENGINES, 0, NULL) == 0);
+    SA.ddc_clk_level[1] = 0;
+    S.reg[mreg] = save[0]; S.reg[areg] = save[1]; S.reg[ereg] = save[2]; S.reg[c5] = save[3]; S.reg[pa] = save[4];
 }

@@ -83,3 +83,6 @@ Display: UHBR        | display/dc/link/protocols/link_dp_training_128b_132b.c
 Display: UHBR        | display/dc/dccg/dcn31/dcn31_dccg.c
 Display: ODM         | display/dc/opp/dcn10/dcn10_opp.c
 Display: ODM         | display/dc/opp/dcn20/dcn20_opp.c
+Display: audio       | display/dc/dce/dce_audio.c
+Display: audio       | display/dc/dcn30/dcn30_afmt.c
+Display: audio       | display/dc/dcn31/dcn31_apg.c

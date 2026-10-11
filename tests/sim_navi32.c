@@ -257,7 +257,8 @@ typedef struct sim {
     unsigned scdc_writes;
     uint8_t  dpcd[0x800];
     uint8_t  dpcd_ext[0x20];     /* 0x2200.. extended receiver caps */
-    uint8_t  dpcd_lttpr[0x10];   /* 0xf0000.. LTTPR caps (zero: no repeater) */
+    uint8_t  dpcd_lttpr[0x40];   /* 0xf0000.. LTTPR caps (zero: no repeater), repeater 1's
+                                  * training fields 0xf0010.. (lttpr_eval) */
     /* the DP sink's link layer (dp_sink_eval): the sink is cabled to
      * transmitter dps.be (-1: not modelled, DPCD is plain storage). It
      * locks clock recovery on TPS1 once the source drives voltage swing
@@ -284,6 +285,15 @@ typedef struct sim {
         unsigned need_ffe, lt_failed, eq128_evals;
         uint8_t vc_id, vc_start, vc_slots;
         unsigned payload_updates;
+        /* one LTTPR in non-transparent mode (DPCD 0xf0003 = 0x55,
+         * lttpr_eval): it trains on what the source drives like the sink,
+         * CR on TPS1 at rpt_need_vs, EQ only on TPS4 at rpt_need_pe; the
+         * sink behind it then trains on the repeater's output, driven at
+         * the DPCD lane set the source writes (0x103..) */
+        int rpt_cr, rpt_eq;
+        unsigned rpt_need_vs, rpt_need_pe, rpt_evals, rpt_done, rpt_tps1_sets;
+        uint8_t rpt_eq_pattern;
+        uint32_t rpt_trained_rate, rpt_trained_lanes;
     } dps;
     uint8_t  edid[256];
     /* the video packet generators (VPG n = DIG front end n): the generic
@@ -2118,11 +2128,60 @@ static void dp_sink_eval128(void)
     }
 }
 
+/* a non-transparent LTTPR: repeater 1 (DPCD 0xf0010 pattern, 0xf0011..
+ * lane set, 0xf0030.. lane status, 0xf0033.. adjust request) */
+static int lttpr_non_transparent(void)
+{
+    return S.dpcd_lttpr[2] == 0x80 && S.dpcd_lttpr[3] == RD_DP_PHY_REPEATER_MODE_NON_TRANSPARENT;
+}
+
+static void lttpr_eval(void)
+{
+    uint8_t *r = S.dpcd_lttpr, adj, nib;
+    uint32_t be, lanes = S.dpcd[0x101] & 0x1f, rate = S.dpcd[0x100], pat = r[0x10] & 0xf, sel, i;
+    int alive;
+    if (S.dps.be < 0)
+        return;
+    be = (uint32_t)S.dps.be;
+    S.dps.rpt_evals++;
+    sel = S.reg[DPR(regDP0_DP_DPHY_TRAINING_PATTERN_SEL, be)] & 3;
+    alive = lttpr_non_transparent() && S.dps.phy_on && lanes && S.dps.lanes >= lanes &&
+            S.dps.symclk_10khz == rate * 2700 && S.dpcd[0x600] == 1;
+    adj = (uint8_t)(S.dps.vs | S.dps.pe << 2);
+    if (!alive) {
+        S.dps.rpt_cr = S.dps.rpt_eq = 0;
+    } else if (pat == RD_DPCD_TRAINING_PATTERN_1) {
+        S.dps.rpt_eq = 0;
+        S.dps.rpt_cr = sel == 0 && S.dps.vs >= S.dps.rpt_need_vs && RD_DP_LANE_VS(r[0x11]) == S.dps.vs;
+        if (!S.dps.rpt_cr)
+            adj = (uint8_t)((S.dps.vs < 3 ? S.dps.vs + 1 : 3) | S.dps.pe << 2);
+    } else if (pat == RD_DPCD_TRAINING_PATTERN_4) {
+        S.dps.rpt_eq = S.dps.rpt_cr && sel == 3 && S.dps.pe >= S.dps.rpt_need_pe;
+        if (S.dps.rpt_cr && !S.dps.rpt_eq)
+            adj = (uint8_t)(S.dps.vs | (S.dps.pe < S.dps.rpt_need_pe ? S.dps.pe + 1 : S.dps.pe) << 2);
+    } else if (pat) {
+        S.dps.rpt_eq = 0;   /* a repeater trains EQ with TPS4 only */
+    }
+    nib = (uint8_t)((S.dps.rpt_cr ? RD_DP_LANE_CR_DONE : 0) |
+                    (S.dps.rpt_cr && S.dps.rpt_eq ? RD_DP_LANE_CHANNEL_EQ_DONE | RD_DP_LANE_SYMBOL_LOCKED : 0));
+    r[0x30] = r[0x31] = 0;
+    for (i = 0; i < 4; i++)
+        if (i < lanes)
+            r[0x30 + i / 2] |= (uint8_t)(nib << (4 * (i % 2)));
+    r[0x32] = S.dps.rpt_cr && S.dps.rpt_eq ? RD_DP_INTERLANE_ALIGN_DONE : 0;
+    r[0x33] = r[0x34] = (uint8_t)(adj | adj << 4);
+    if (S.dps.rpt_cr && S.dps.rpt_eq && pat) {
+        S.dps.rpt_trained_rate = rate;
+        S.dps.rpt_trained_lanes = lanes;
+    }
+}
+
 /* the sink's lane status and adjust requests (DPCD 0x202..0x207) for what
- * the source drives now */
+ * the source drives now (behind a non-transparent LTTPR: what the trained
+ * repeater drives, at the DPCD lane set, with the pattern of 0x102) */
 static void dp_sink_eval(void)
 {
-    uint8_t *d = S.dpcd, adj, nib;
+    uint8_t *d = S.dpcd, adj, nib, vs = S.dps.vs, pe = S.dps.pe;
     uint32_t be, lanes = d[0x101] & 0x1f, rate = d[0x100], pat = d[0x102] & 0xf, sel, i;
     int alive, done;
     if (S.dps.be < 0)
@@ -2141,25 +2200,34 @@ static void dp_sink_eval(void)
              (S.mst.on && (S.dpcd[0x111] & 1) &&
               ((S.reg[DIGN(regDIG0_DIG_BE_CNTL, be)] & DIG0_DIG_BE_CNTL__DIG_MODE_MASK) >>
                DIG0_DIG_BE_CNTL__DIG_MODE__SHIFT) == 5));
-    adj = (uint8_t)(S.dps.vs | S.dps.pe << 2);
-    if (pat && (RD_DP_LANE_VS(d[0x103]) != S.dps.vs || RD_DP_LANE_PE(d[0x103]) != S.dps.pe))
+    if (lttpr_non_transparent()) {
+        /* the repeater drives the sink: its own lock, the DPCD lane set, the
+         * pattern the sink was asked for */
+        alive = alive && S.dps.rpt_cr && S.dps.rpt_eq;
+        vs = RD_DP_LANE_VS(d[0x103]);
+        pe = RD_DP_LANE_PE(d[0x103]);
+        sel = pat == RD_DPCD_TRAINING_PATTERN_1 ? 0 : pat == RD_DPCD_TRAINING_PATTERN_2 ? 1 :
+              pat == RD_DPCD_TRAINING_PATTERN_3 ? 2 : 3;
+    } else if (pat && (RD_DP_LANE_VS(d[0x103]) != S.dps.vs || RD_DP_LANE_PE(d[0x103]) != S.dps.pe)) {
         S.dps.lane_mismatch++;   /* DPCD lane set and PHY disagree */
+    }
+    adj = (uint8_t)(vs | pe << 2);
     if (!alive) {
         S.dps.cr = S.dps.eq = 0;
     } else if (pat == RD_DPCD_TRAINING_PATTERN_1) {
         S.dps.eq = 0;
-        S.dps.cr = sel == 0 && !done && rate != S.dps.fail_rate && S.dps.vs >= S.dps.need_vs;
+        S.dps.cr = sel == 0 && !done && rate != S.dps.fail_rate && vs >= S.dps.need_vs;
         if (!S.dps.cr)
-            adj = (uint8_t)((S.dps.vs < 3 ? S.dps.vs + 1 : 3) | S.dps.pe << 2);
+            adj = (uint8_t)((vs < 3 ? vs + 1 : 3) | pe << 2);
     } else if (pat == RD_DPCD_TRAINING_PATTERN_2 || pat == RD_DPCD_TRAINING_PATTERN_3 ||
                pat == RD_DPCD_TRAINING_PATTERN_4) {
         uint32_t want = pat == RD_DPCD_TRAINING_PATTERN_2 ? 1 : pat == RD_DPCD_TRAINING_PATTERN_3 ? 2 : 3;
-        S.dps.eq = S.dps.cr && sel == want && !done && S.dps.pe >= S.dps.need_pe;
+        S.dps.eq = S.dps.cr && sel == want && !done && pe >= S.dps.need_pe;
         if (S.dps.cr && !S.dps.eq)
-            adj = (uint8_t)(S.dps.vs | (S.dps.pe < S.dps.need_pe ? S.dps.pe + 1 : S.dps.pe) << 2);
+            adj = (uint8_t)(vs | (pe < S.dps.need_pe ? pe + 1 : pe) << 2);
     }
     /* pattern 0 (idle / video): the lock holds while the link stays up */
-    if (adj != (uint8_t)(S.dps.vs | S.dps.pe << 2))
+    if (adj != (uint8_t)(vs | pe << 2))
         S.dps.adjust_reqs++;
     nib = (uint8_t)((S.dps.cr ? RD_DP_LANE_CR_DONE : 0) |
                     (S.dps.cr && S.dps.eq ? RD_DP_LANE_CHANNEL_EQ_DONE | RD_DP_LANE_SYMBOL_LOCKED : 0));
@@ -2207,6 +2275,16 @@ static void dp_sink_written(uint32_t addr, uint32_t len)
         else if (p)
             S.dps.eq_pattern = p;
     }
+    /* repeater 1's TRAINING_PATTERN_SET (0 after training: repeater_training_done) */
+    if (addr <= 0xf0010 && addr + len > 0xf0010) {
+        uint8_t p = S.dpcd_lttpr[0x10] & 0xf;
+        if (p == RD_DPCD_TRAINING_PATTERN_1)
+            S.dps.rpt_tps1_sets++;
+        else if (p)
+            S.dps.rpt_eq_pattern = p;
+        else
+            S.dps.rpt_done++;
+    }
 }
 
 /* AUX_SW_GO on engine n: decode the request FIFO, answer like the sink */
@@ -2248,6 +2326,8 @@ static void aux_go(uint32_t n)
     case RD_AUX_DP_READ:
         if (addr <= 0x207 && addr + len > 0x200)
             dp_sink_eval();
+        if (addr <= 0xf0035 && addr + len > 0xf0030)
+            lttpr_eval();
         for (i = 0; i < len && (addr + i < sizeof(S.dpcd) || S.dps.be >= 0); i++) {
             uint8_t *b = dpcd_at(addr + i);
             S.aux_rx[1 + i] = b ? *b : 0;
@@ -7940,6 +8020,56 @@ static void test_dp_link(rdna3_dev *dev, rdna3_dmub *dm)
     CHECK(S.dmub.seq[0] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && S.dmub.seq_tx_action[0] == RD_ATOM_TX_ENABLE &&
           S.dmub.seq_tx_action[1] == RD_ATOM_TX_SETUP_VSEMPH);
 
+    /* dp_decide_8b_10b_lttpr_mode with the VBIOS's DCE_INFO_CAPS_LTTPR_
+     * SUPPORT_ENABLE: one LTTPR, trained non-transparent hop by hop
+     * (dp_perform_8b_10b_link_training): the repeater first - CR at VS 1,
+     * EQ with TPS4 at PE 1 at its own AUX_RD_INTERVAL, repeater_training_
+     * done - then the sink behind it from zeroed lane settings: VS 2 / PE 1
+     * in DPCD only, the PHY keeps the repeater's VS 1 / PE 1 */
+    {
+        static rdna3_dp_link dp3;
+        static uint8_t dpcd_lt[0x800];
+        rdna3_dp_link_settings hbr2;
+        __typeof__(S.dps) dps_save = S.dps;
+        memcpy(dpcd_lt, S.dpcd, sizeof(S.dpcd));
+        memset(&hbr2, 0, sizeof(hbr2));
+        hbr2.link_rate = RD_DP_LINK_RATE_HIGH2;
+        hbr2.lane_count = 4;
+        hbr2.link_spread = RD_DP_LINK_SPREAD_05_DOWNSPREAD_30KHZ;
+        S.dpcd_lttpr[0] = 0x14; S.dpcd_lttpr[1] = RD_DP_LINK_RATE_HIGH3; S.dpcd_lttpr[2] = 0x80;
+        S.dpcd_lttpr[4] = 4;
+        S.dpcd_lttpr[0x20] = 0x01;                  /* the repeater's AUX_RD_INTERVAL: 4 ms */
+        S.dps.rpt_need_vs = 1;
+        S.dps.rpt_need_pe = 1;
+        dcn32_dp_link_init(&dp3, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 0);
+        dp3.vbios_lttpr_enable = 1;
+        CHECK(dcn32_dp_read_caps(&dp3) == RDNA3_OK && dp3.max_link_cap.link_rate == RD_DP_LINK_RATE_HIGH3 &&
+              S.dpcd_lttpr[3] == RD_DP_PHY_REPEATER_MODE_TRANSPARENT);
+        S.dps.trained_rate = S.dps.rpt_trained_rate = 0;
+        S.dps.lane_mismatch = 0;
+        CHECK(dcn32_dp_link_training_with_retries(&dp3, &hbr2, 0, 1, 0, 0) == 1 && dp3.last_result == RD_LT_SUCCESS);
+        CHECK(S.dpcd_lttpr[3] == RD_DP_PHY_REPEATER_MODE_NON_TRANSPARENT && dp3.dpcd_caps.lttpr.aux_rd_interval[0] == 1 &&
+              S.dps.rpt_trained_rate == RD_DP_LINK_RATE_HIGH2 && S.dps.rpt_trained_lanes == 4 &&
+              S.dps.rpt_eq_pattern == RD_DPCD_TRAINING_PATTERN_4 && S.dps.rpt_done == 1 && S.dps.rpt_tps1_sets == 1 &&
+              S.dpcd_lttpr[0x10] == 0);
+        CHECK(S.dps.trained_rate == RD_DP_LINK_RATE_HIGH2 && S.dps.trained_lanes == 4 && S.dps.vs == 1 &&
+              S.dps.pe == 1 && RD_DP_LANE_VS(S.dpcd[0x103]) == 2 && RD_DP_LANE_PE(S.dpcd[0x103]) == 1);
+        dcn32_dp_disable_link_phy(&dp3);
+        /* without the VBIOS cap: transparent, no hop addressed, the PHY and
+         * the DPCD lane set agree again */
+        S.dps.rpt_evals = S.dps.rpt_done = 0;
+        S.dps.trained_rate = 0;
+        dcn32_dp_link_init(&dp3, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 0);
+        CHECK(dcn32_dp_read_caps(&dp3) == RDNA3_OK);
+        CHECK(dcn32_dp_link_training_with_retries(&dp3, &hbr2, 0, 1, 0, 0) == 1);
+        CHECK(S.dpcd_lttpr[3] == RD_DP_PHY_REPEATER_MODE_TRANSPARENT && S.dps.rpt_evals == 0 && S.dps.rpt_done == 0 &&
+              S.dps.trained_rate == RD_DP_LINK_RATE_HIGH2 && S.dps.lane_mismatch == 0 && S.dps.vs == 2 && S.dps.pe == 1);
+        dcn32_dp_disable_link_phy(&dp3);
+        memset(S.dpcd_lttpr, 0, sizeof(S.dpcd_lttpr));
+        memcpy(S.dpcd, dpcd_lt, sizeof(S.dpcd));
+        S.dps = dps_save;
+    }
+
     /* the mode set: 2560x1440 -> 1920x1080 on the DP head */
     big = m;
     big.pixel_khz = 800000;                 /* 19.2 Gbps: beyond the verified HBR2 x4 */
@@ -11883,6 +12013,7 @@ static void run(const char *fwdir)
                 test_dc_audio_streams(&dev);
                 test_dc_fmt_units(&dev);
                 test_dc_fmt_modeset(&dev, &dm, &dc2, &sc, &own);
+                test_dc_dp_sink_present(&dev);
             }
             test_dcn_state(&dev, &dm);
             test_dp_link(&dev, &dm);

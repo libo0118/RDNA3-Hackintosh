@@ -210,6 +210,15 @@ int vbios_display_paths(const rdna3_vbios *v, rdna3_display_path *out, unsigned 
 
 const char *vbios_connector_name(uint8_t connector);
 
+/* bios_parser_get_lttpr_caps / bios_parser_get_lttpr_interop
+ * (get_disp_caps_v4_1 .. v4_5): the low byte of the dce_info table's
+ * display_caps (atom_display_controller_info_v4_x, right after the
+ * header), as DC reads it into a uint8_t. RDNA3_ENOENT without the table
+ * or for another revision than 4.1..4.5. */
+#define RD_DCE_INFO_CAPS_LTTPR_SUPPORT_ENABLE          0x20
+#define RD_DCE_INFO_CAPS_VBIOS_LTTPR_TRANSPARENT_ENABLE 0x40
+int vbios_dce_info_caps(const rdna3_vbios *v, uint8_t *dce_caps);
+
 #ifdef __cplusplus
 }
 #endif

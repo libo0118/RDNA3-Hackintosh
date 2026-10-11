@@ -9,6 +9,7 @@
 #include "gen/dcn_3_2_1_aux.h"
 #include "gen/dcn_3_2_0_gpio.h"
 #include "gen/dcn_3_2_0_i2c.h"
+#include "gen/dcn_3_2_0_ddcgpio.h"
 
 #define AUX_STRIDE (regDP_AUX1_AUX_CONTROL - regDP_AUX0_AUX_CONTROL)
 #define HPD_STRIDE (regHPD1_DC_HPD_CONTROL - regHPD0_DC_HPD_CONTROL)
@@ -829,4 +830,112 @@ int dcaux_probe(rdna3_dev *d, rdna3_connector *out, uint32_t max)
         if (dcaux_probe_one(d, n, &out[found]))
             found++;
     return (int)found;
+}
+
+/* ---- dp_is_sink_present (link_dp_capability.c) ---- */
+
+/* the MASK / A / EN fields of one pin of DDC line n+1 (hw_gpio.c
+ * store_registers / restore_registers) */
+typedef struct ddc_gpio_store {
+    uint32_t mask, a, en;
+} ddc_gpio_store;
+
+#define DDC_GPIO_A(d, n)  (ddc_mask_reg(d, n) + (regDC_GPIO_DDC1_A - regDC_GPIO_DDC1_MASK))
+#define DDC_GPIO_EN(d, n) (ddc_mask_reg(d, n) + (regDC_GPIO_DDC1_EN - regDC_GPIO_DDC1_MASK))
+#define DDC_GPIO_Y(d, n)  (ddc_mask_reg(d, n) + (regDC_GPIO_DDC1_Y - regDC_GPIO_DDC1_MASK))
+
+static void ddc_gpio_field(rdna3_dev *d, uint32_t reg, uint32_t m, uint32_t x)
+{
+    uint32_t v = rdna3_rreg(d, reg);
+    rdna3_wreg(d, reg, (v & ~m) | (x ? m : 0));
+}
+
+/* dal_hw_gpio_open: store_registers, then dal_hw_gpio_config_mode
+ * (GPIO_MODE_INPUT: output enable off, the pin masked from the HW) */
+static void dal_hw_gpio_open(rdna3_dev *d, uint32_t n, uint32_t mask_m, uint32_t a_m, uint32_t en_m,
+                             ddc_gpio_store *s)
+{
+    s->mask = rdna3_rreg(d, ddc_mask_reg(d, n)) & mask_m;
+    s->a = rdna3_rreg(d, DDC_GPIO_A(d, n)) & a_m;
+    s->en = rdna3_rreg(d, DDC_GPIO_EN(d, n)) & en_m;
+    ddc_gpio_field(d, DDC_GPIO_EN(d, n), en_m, 0);
+    ddc_gpio_field(d, ddc_mask_reg(d, n), mask_m, 1);
+}
+
+/* dal_hw_gpio_close: restore_registers */
+static void dal_hw_gpio_close(rdna3_dev *d, uint32_t n, uint32_t mask_m, uint32_t a_m, uint32_t en_m,
+                              const ddc_gpio_store *s)
+{
+    ddc_gpio_field(d, ddc_mask_reg(d, n), mask_m, s->mask);
+    ddc_gpio_field(d, DDC_GPIO_A(d, n), a_m, s->a);
+    ddc_gpio_field(d, DDC_GPIO_EN(d, n), en_m, s->en);
+}
+
+#define DDC_CLK_PIN                                                                                  \
+    (uint32_t)DC_GPIO_DDC1_MASK__DC_GPIO_DDC1CLK_MASK_MASK, (uint32_t)DC_GPIO_DDC1_A__DC_GPIO_DDC1CLK_A_MASK, \
+        (uint32_t)DC_GPIO_DDC1_EN__DC_GPIO_DDC1CLK_EN_MASK
+#define DDC_DATA_PIN                                                                                   \
+    (uint32_t)DC_GPIO_DDC1_MASK__DC_GPIO_DDC1DATA_MASK_MASK, (uint32_t)DC_GPIO_DDC1_A__DC_GPIO_DDC1DATA_A_MASK, \
+        (uint32_t)DC_GPIO_DDC1_EN__DC_GPIO_DDC1DATA_EN_MASK
+
+int dcaux_dp_is_sink_present(rdna3_dev *d, uint32_t n, int dp_connector, uint32_t *clock_pin_out)
+{
+    ddc_gpio_store sd, sc;
+    uint32_t v, clock_pin = 0, retry = 0, i2cmode_m, rxsel_m, ctrl5, phy_aux;
+    int aux_pad_mode;
+    if (!d->ipver[HWIP_DCE].present || n >= RD_AUX_ENGINES)
+        return dp_connector;   /* no DDC: what the connector id says */
+    /* dal_ddc_open(ddc, GPIO_MODE_INPUT, GPIO_DDC_CONFIG_TYPE_MODE_I2C):
+     * dal_gpio_open_ex on the data pin, then on the clock pin */
+    dal_hw_gpio_open(d, n, DDC_DATA_PIN, &sd);
+    dal_hw_gpio_open(d, n, DDC_CLK_PIN, &sc);
+    /* hw_ddc.c set_config, GPIO_DDC_CONFIG_TYPE_MODE_I2C with
+     * GPIO_CONFIG_TYPE_I2C_AUX_DUAL_MODE (GPIO_MODE_INPUT): the internal
+     * pull-downs on, 3 ms to discharge the plug-in transient */
+    v = rdna3_rreg(d, ddc_mask_reg(d, n));
+    aux_pad_mode = GET(v, DC_GPIO_DDC1_MASK, AUX_PAD1_MODE) != 0;
+    if (!GET(v, DC_GPIO_DDC1_MASK, DC_GPIO_DDC1DATA_PD_EN) || !GET(v, DC_GPIO_DDC1_MASK, DC_GPIO_DDC1CLK_PD_EN)) {
+        v = SET(v, DC_GPIO_DDC1_MASK, DC_GPIO_DDC1DATA_PD_EN, 1);
+        v = SET(v, DC_GPIO_DDC1_MASK, DC_GPIO_DDC1CLK_PD_EN, 1);
+        rdna3_wreg(d, ddc_mask_reg(d, n), v);
+        d->os.msleep(d->os.ctx, 3);
+    }
+    if (aux_pad_mode) {
+        /* the pins de-assert before the pad goes to I2C mode
+         * (data_en_bit_present / clock_en_bit_present: the stored EN) */
+        if (sd.en || sc.en)
+            d->os.msleep(d->os.ctx, 2);
+        (void)ddc_pad_aux(d, n, 0);
+    }
+    /* DDC_REG_LIST_DCN2: DC_GPIO_AUX_CTRL_5.DDC_PADn_I2CMODE = 1 and
+     * PHY_AUX_CNTL.AUXn_PAD_RXSEL = 1 (DC_IO_aux_rxsel = 2'b01) */
+    i2cmode_m = (uint32_t)DC_GPIO_AUX_CTRL_5__DDC_PAD1_I2CMODE_MASK << n;
+    rxsel_m = (uint32_t)PHY_AUX_CNTL__AUX1_PAD_RXSEL_MASK << (2 * n);
+    ctrl5 = rdna3_rreg(d, RI(d, regDC_GPIO_AUX_CTRL_5));
+    phy_aux = rdna3_rreg(d, RI(d, regPHY_AUX_CNTL));
+    rdna3_wreg(d, RI(d, regDC_GPIO_AUX_CTRL_5), ctrl5 | i2cmode_m);
+    rdna3_wreg(d, RI(d, regPHY_AUX_CNTL),
+               (phy_aux & ~rxsel_m) | ((1u << PHY_AUX_CNTL__AUX1_PAD_RXSEL__SHIFT) << (2 * n)));
+    /* a DP sink (or a passive DP-HDMI dongle) holds the clock pin at zero;
+     * a short pulse on the pin after a plug / unplug: 3 retries 1 ms apart */
+    do {
+        clock_pin = GET(rdna3_rreg(d, DDC_GPIO_Y(d, n)), DC_GPIO_DDC1_Y, DC_GPIO_DDC1CLK_Y);
+        if (clock_pin)
+            d->os.msleep(d->os.ctx, 1);
+        else
+            break;
+    } while (retry++ < 3);
+    /* dal_ddc_close: the clock pin, then the data pin */
+    dal_hw_gpio_close(d, n, DDC_CLK_PIN, &sc);
+    dal_hw_gpio_close(d, n, DDC_DATA_PIN, &sd);
+    /* DC leaves the pad in I2C mode until the next dal_ddc_open; this
+     * port's AUX acquire only sets AUX_PAD1_MODE, so the pad modes it
+     * relies on are put back as they were */
+    rdna3_wreg(d, RI(d, regDC_GPIO_AUX_CTRL_5), ctrl5);
+    rdna3_wreg(d, RI(d, regPHY_AUX_CNTL), phy_aux);
+    if (aux_pad_mode)
+        (void)ddc_pad_aux(d, n, 1);
+    if (clock_pin_out)
+        *clock_pin_out = clock_pin;
+    return !clock_pin;
 }

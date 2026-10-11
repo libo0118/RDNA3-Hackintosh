@@ -278,8 +278,9 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
             !dp->stream_dsc)
             return RD_MODESET_DP_LINK;
         if (dp->mst) {
-            /* MST over a 128b/132b link: no HPO MST in this port */
-            if (dcn32_dp_highest_encoding(dp) == RD_DC_LINK_ENCODING_DP_128b_132b)
+            /* MST over a 128b/132b link (mst_decide_link_encoding_format):
+             * no HPO MST in this port */
+            if (dcn32_dp_mst_decide_link_encoding_format(dp) == RD_DP_128b_132b_ENCODING)
                 return RD_MODESET_DP_LINK;
             /* dm_dp_mst_is_port_support_mode + the PBN / time slots */
             req = dcn32_dp_mode_kbps(m, 8, 0);
