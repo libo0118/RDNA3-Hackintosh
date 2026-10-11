@@ -1536,6 +1536,13 @@ int gfx11_mes_submit(rdna3_dev *d, rdna3_mes *m, uint32_t *pkt, uint32_t status_
             break;
         d->os.udelay(d->os.ctx, 10);
     }
+    /* the answered QUERY_SCHEDULER_STATUS was the last thing committed:
+     * everything up to wptr ran. The MES scheduler pipe writes no rptr
+     * report (card run 34), so this is what frees its ring */
+    if (fence >= seq) {
+        rb->done_wptr = rb->wptr;
+        rb->done_valid = 1;
+    }
     rdna3_vram_read(d, m->wb + RD_MES_WB_STATUS, &status, 8);
     if (fence < seq || !status) {
         m->failed++;

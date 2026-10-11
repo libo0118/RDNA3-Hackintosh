@@ -5692,6 +5692,15 @@ static void test_mes_amdgpu(rdna3_dev *dev, rdna3_mes *mes, rdna3_mec_ring *kcq,
     gfxhub303_flush_regs(dev, 6, 17, &f);
     CHECK(gfx11_mes_reg_write_reg_wait(dev, mes, f.req, f.ack, f.req_val, 1u << 6) == RDNA3_OK);
     CHECK(S.tlb_flushes == t0 + 1 && S.mes_sched.misc == 3 && S.mes_sched.misc_stuck == 0);
+    /* card run 34 (big4: rdna3amdgpu=1 with rdna3mes=1): the MES scheduler
+     * pipe writes no rptr report either; each API call takes 2 x 64 dwords,
+     * so its 4 KiB ring "filled up" after seven TLB flushes. The answered
+     * QUERY_SCHEDULER_STATUS fence frees it, as the KIQ's fences do. */
+    S.mes_kiq_no_rptr_report = 1;
+    for (int kk = 0; kk < 24; kk++)
+        CHECK(gfx11_mes_reg_write_reg_wait(dev, mes, f.req, f.ack, f.req_val, 1u << 6) == RDNA3_OK);
+    CHECK(S.tlb_flushes == t0 + 25 && S.mes_sched.misc == 27 && S.mes_sched.misc_stuck == 0);
+    S.mes_kiq_no_rptr_report = 0;
     CHECK(gfx11_mes_misc_op(dev, mes, &bad) == RDNA3_EINVAL);
 
     /* amdgpu_mes_suspend / _resume: only from MES 0x63 on */

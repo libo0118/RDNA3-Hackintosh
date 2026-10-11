@@ -1270,3 +1270,20 @@ Settings. That is expected for them, not a display regression.
   looked full after four flushes. The ring space now also counts from the
   last completed KIQ fence. The report archive did not arrive in time
   (collect.sh slowed by the 5 s waits): run the step again.
+
+### Card run 34 (step big4, build 0977b02)
+
+- **Boot stalled** (the user stopped it after ~1.5 min, no report): the
+  serial log had 142 `GFX: ring full (rptr 0x0, wptr 0x380)` / `MES ring
+  buffer is full.` / `MES: failed to reg_write_reg_wait` from the moment
+  WindowServer started. With `rdna3amdgpu=1` and `rdna3mes=1` together the
+  TLB flushes go through the MES scheduler ring
+  (`amdgpu_mes_reg_write_reg_wait`), and the MES scheduler pipe, like the
+  KIQ in run 33, writes no rptr report: each API call takes 2 x 64 dwords,
+  so the 4 KiB ring looked full after seven calls and every later flush
+  waited out its timeout. The ring space now also counts from the last
+  answered QUERY_SCHEDULER_STATUS fence; the simulator reproduces it.
+  Everything before (PSP, SMU, DMCUB with `rdna3dmubreset=1`, the clone,
+  display power, GMC, IH, SDMA, KIQ / KCQ / GFX ring tests, MES up, VCN
+  rings) came up. `VCN1: decode IB test failed (-62)` as in run 33
+  (diagnostic). Run `big4` again.
