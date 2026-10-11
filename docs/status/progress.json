@@ -1,11 +1,11 @@
 {
  "amdgpu": {
-  "works": 506,
-  "ported": 1240,
+  "works": 507,
+  "ported": 1241,
   "total": 1379,
   "not_applicable": 592,
-  "works_pct": 36.7,
-  "ported_pct": 89.9,
+  "works_pct": 36.8,
+  "ported_pct": 90.0,
   "groups": [
    {
     "name": "PSP 13",
@@ -897,9 +897,9 @@
      "7",
      "8"
     ],
-    "works": 17,
+    "works": 18,
     "ported": 9,
-    "todo": 1,
+    "todo": 0,
     "items": {
      "amdgpu_fence_count_emitted": "ported",
      "amdgpu_fence_driver_force_completion": "works",
@@ -923,7 +923,7 @@
      "amdgpu_ring_init": "works",
      "amdgpu_ring_init_mqd": "works",
      "amdgpu_ring_insert_nop": "ported",
-     "amdgpu_ring_max_ibs": "todo",
+     "amdgpu_ring_max_ibs": "works",
      "amdgpu_ring_soft_recovery": "works",
      "amdgpu_ring_test_helper": "works",
      "amdgpu_ring_to_mqd_prop": "works",

@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 36.7%   ported 89.9%   (506 / 1240 / 1379)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 36.8%   ported 90.0%   (507 / 1241 / 1379)</text>
 <g><title>Display: modeset: works 25%, ported 64% (41+64 of 163); verified by step(s) modeset</title>
 <rect x="1.0" y="53.0" width="9.9" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="10.9" y="53.0" width="9.9" height="10.4" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1384,7 +1384,7 @@
 <text x="392.1" y="255.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">MES qu…</text>
 <text x="392.1" y="269.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 100%</text>
 </g>
-<g><title>Rings / fences: works 63%, ported 96% (17+9 of 27); verified by step(s) 7, 8</title>
+<g><title>Rings / fences: works 67%, ported 100% (18+9 of 27); verified by step(s) 7, 8</title>
 <rect x="449.0" y="241.3" width="9.0" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="458.0" y="241.3" width="9.0" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="467.0" y="241.3" width="9.0" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1402,7 +1402,7 @@
 <rect x="485.0" y="261.2" width="9.0" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="449.0" y="271.2" width="11.3" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="460.2" y="271.2" width="11.3" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="471.5" y="271.2" width="11.3" height="10.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="471.5" y="271.2" width="11.3" height="10.0" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="482.7" y="271.2" width="11.3" height="10.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="449.0" y="281.2" width="11.3" height="10.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="460.2" y="281.2" width="11.3" height="10.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
@@ -1411,10 +1411,10 @@
 <rect x="449.0" y="291.1" width="11.3" height="10.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="460.2" y="291.1" width="11.3" height="10.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="471.5" y="291.1" width="11.3" height="10.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="482.7" y="291.1" width="11.3" height="10.0" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="482.7" y="291.1" width="11.3" height="10.0" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="448.0" y="240.3" width="47.0" height="61.9" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="453.0" y="255.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">Ring…</text>
-<text x="453.0" y="269.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">63% / 96%</text>
+<text x="453.0" y="269.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">67% / 100%</text>
 </g>
 <g><title>IH interrupts: works 67%, ported 100% (14+7 of 21); verified by step(s) 6, 6b</title>
 <rect x="388.1" y="303.1" width="8.7" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
