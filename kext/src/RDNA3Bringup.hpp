@@ -146,8 +146,15 @@ public:
      * amdgpu_device_resume for a card that lost it: post, then levels 4-8
      * again (hwInit), as gpuReset after its mode-1 reset. DRM lock held. */
     bool     finished() const { return fFinished; }
+    bool     vcnWanted() const { return fVcnWanted; }
     int      sosAlive();
     bool     resumeAfterPowerLoss();
+    /* VCN / JPEG across a system sleep (rdna3vcn): amdgpu_device_ip_suspend's
+     * jpeg_v4_0_suspend + vcn_v4_0_suspend before it (the VCPU BOs copied
+     * to system memory), and after a wake that kept the card's power their
+     * resume (a power loss resumes them in hwInit's vcnStart). DRM lock held. */
+    void     vcnSuspend();
+    void     vcnResume();
 
 private:
     uint32_t         fResumes = 0;          /* D4: resumes after a power loss */
@@ -215,12 +222,16 @@ private:
     /* VCN 4.0 + JPEG 4.0 (rdna3vcn=1, off by default): the video rings for
      * VCN_ENC / VCN_JPEG CS; powered on demand, gated 1 s after the last
      * job (amdgpu_vcn_idle_work_handler) from fVcnIdleCall under the DRM lock */
-    bool             fVcnWanted = false, fVcnStop = false;
+    /* rdna3vcn=1 static power gating, =2 DPG as amdgpu runs it (indirect
+     * SRAM through the PSP), =3 DPG with the SRAM written through the LMA */
+    bool             fVcnWanted = false, fVcnStop = false, fVcnSuspended = false;
+    uint32_t         fVcnMode = 0;
     rdna3_vcn       *fVcn = nullptr;
     uint32_t         fVcnHangs = 0;
     struct thread_call *fVcnIdleCall = nullptr;
     volatile uint64_t fIrqVcn = 0, fIrqJpeg = 0;
     void             vcnStart();
+    void             vcnFreeSaved();
     void             vcnIdleSchedule();
     int              vcnHang(uint32_t ip, uint32_t ring, uint64_t seq);
     static void      vcnIdleTick(void *owner, void *);

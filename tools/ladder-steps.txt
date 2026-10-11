@@ -21,6 +21,12 @@ userq rdna3lvl=8 rdna3msi=1 rdna3mes=1 rdna3userq=1
 # the JPEG decoder up after GFX, ring + IB tests, the video IPs in the UAPI;
 # the report runs rdna3_drminfo --vcn-test
 vcn rdna3lvl=8 rdna3msi=1 rdna3vcn=1
+# VCN dynamic power gating (hw/vcn40.c, stage 4 item I): rdna3vcn=2 runs
+# DPG as amdgpu does on this card (vcn_v4_0_start_dpg_mode, the DPG SRAM
+# image loaded by the PSP: LOAD_IP_FW VCN0_RAM / VCN1_RAM); the report runs
+# rdna3_drminfo --vcn-test as in step vcn. rdna3vcn=3 (by hand, rdna3vm
+# args) is DPG with the SRAM written through the LMA, without the PSP
+vcn2 rdna3lvl=8 rdna3msi=1 rdna3vcn=2
 8g rdna3lvl=8 rdna3msi=1 rdna3cg=1
 8o rdna3lvl=8 rdna3msi=1 rdna3gfxoff=1
 8u rdna3lvl=8 rdna3msi=1 rdna3pm=2
@@ -94,6 +100,11 @@ hotplug rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 r
 # a power loss detected and, if so, the GPU posted and brought up again;
 # the scanout and the DMA/GFX tests before and after
 sleep rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=2 rdna3resume=1
+# the video block through the system sleep of step sleep (stage 4 item I):
+# rdna3vcn=2 on top; --vcn-test before the sleep and again after the wake
+# (jpeg/vcn_v4_0_suspend before it, the VCPU BOs copied to system memory;
+# after it vcn/jpeg_v4_0_resume, in hwInit after a power loss)
+vcnsleep rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=2 rdna3resume=1 rdna3vcn=2
 # gamma without the accelerator: does IOFramebuffer hand the table to
 # setGammaTable when no display pipe takes the frames (card runs 26-28)
 gamma0 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3pm=2 rdna3idlecap=1 rdna3gamma=1 rdna3accel=0

@@ -138,7 +138,7 @@ typedef struct sim {
     /* sOS */
     uint64_t ring_mc;
     uint32_t rptr_dw;
-    uint32_t ip_fw_types[64];
+    uint32_t ip_fw_types[256];
     unsigned nipfw;
     int tmr_setup, toc_loaded, autoload, autoload_after_rlc_g, smu_loaded;
     int tmr_after_smu;
@@ -354,6 +354,12 @@ typedef struct sim {
         uint32_t last_ib_inst, last_ib_vmid;
         uint32_t jregs[0x200], jext, jrptr, jpeg_ib_vmid, jpeg_vmid;
         unsigned jext_writes, jpeg_cmds, jpeg_ibs, jpeg_fences, jpeg_traps, jpeg_bad, jpeg_ib_faults;
+        /* DPG: the SRAM images the PSP loaded (VCN0_RAM / VCN1_RAM), the
+         * LMA writes, the pause handshake */
+        uint32_t fw_size[2];         /* the image LOAD_IP_FW VCN / VCN1 placed */
+        uint32_t sram[2][64][2], sram_n[2];
+        unsigned sram_loads[2], sram_bad, lma_writes, lma_bad, static_pg_in_dpg;
+        unsigned pause_reqs, unpause_reqs, pause_bad, down_in_dpg;
     } vcn;
 } sim;
 
@@ -1138,7 +1144,19 @@ static void smu_msg(uint32_t v)
     case PPSMC_MSG_PowerDownVcn:
         if ((arg >> 16) > 1 || (arg & 0xffff)) { resp = PPSMC_Result_Failed; break; }
         S.vcn.smu_on[arg >> 16] = v == PPSMC_MSG_PowerUpVcn;
-        if (v == PPSMC_MSG_PowerUpVcn) S.vcn.vcn_up_msgs++; else S.vcn.vcn_down_msgs++;
+        if (v == PPSMC_MSG_PowerUpVcn) {
+            S.vcn.vcn_up_msgs++;
+        } else {
+            /* the instance loses its power: the VCPU and its state go; in
+             * DPG mode (or paused) the driver must have left it first */
+            uint32_t vi = arg >> 16;
+            if ((S.reg[VCNR(vi, regUVD_POWER_STATUS)] & UVD_POWER_STATUS__UVD_PG_MODE_MASK) ||
+                (S.reg[VCNR(vi, regUVD_DPG_PAUSE)] & UVD_DPG_PAUSE__NJ_PAUSE_DPG_REQ_MASK))
+                S.vcn.down_in_dpg++;
+            S.vcn.vcn_down_msgs++;
+            S.vcn.booted[vi] = 0;
+            S.reg[VCNR(vi, regUVD_STATUS)] = 0;
+        }
         break;
     case PPSMC_MSG_PowerUpJpeg:
     case PPSMC_MSG_PowerDownJpeg:
@@ -1698,6 +1716,7 @@ static void ih_push_iv(uint32_t client, uint32_t src, uint32_t ring_id, uint32_t
  * state packets, RELEASE_MEM fence writes, WRITE_DATA, WAIT_REG_MEM, the
  * job framing packets and INDIRECT_BUFFER through the VMID's page tables */
 static void sim_wr(void *ctx, uint64_t off, uint32_t v);
+static uint32_t vcn_dpg_sram_load(uint32_t inst, uint64_t mc, uint32_t size);
 static uint32_t sim_rd(void *ctx, uint64_t off);
 static void cp_run(uint32_t wptr_dw);
 static void sdma_run(uint32_t wptr_bytes);
@@ -2467,11 +2486,14 @@ static void psp_exec(uint64_t cmd_mc, uint64_t fence_mc, uint32_t fence_val)
                       ((uint64_t)cmd->cmd.cmd_load_ip_fw.fw_phy_addr_hi << 32);
         if (!mc_ptr(mc, cmd->cmd.cmd_load_ip_fw.fw_size) || (mc & 4095))
             cmd->resp.status = 0xFFFF0002;
-        if (S.nipfw < 64)
+        if (S.nipfw < 256)
             S.ip_fw_types[S.nipfw++] = t;
+        if (t == GFX_FW_TYPE_VCN0_RAM || t == GFX_FW_TYPE_VCN1_RAM)
+            cmd->resp.status = vcn_dpg_sram_load(t == GFX_FW_TYPE_VCN1_RAM, mc, cmd->cmd.cmd_load_ip_fw.fw_size);
         if (t == GFX_FW_TYPE_VCN || t == GFX_FW_TYPE_VCN1) {
             /* psp: the image now lives in the TMR, answered in fw_addr */
             uint32_t vi = t == GFX_FW_TYPE_VCN1;
+            S.vcn.fw_size[vi] = cmd->cmd.cmd_load_ip_fw.fw_size;
             S.vcn.tmr_fw[vi] = S.tmr_mc + VCN_TMR_FW_OFF(vi);
             cmd->resp.fw_addr_lo = (uint32_t)S.vcn.tmr_fw[vi];
             cmd->resp.fw_addr_hi = (uint32_t)(S.vcn.tmr_fw[vi] >> 32);
@@ -2877,6 +2899,54 @@ static void vcn_pgfsm(uint32_t inst, uint32_t cfg)
     S.reg[VCNR(inst, regUVD_PGFSM_STATUS)] = st;
 }
 
+/* a DPG register write (SRAM image or LMA): 'off' is the internal offset
+ * SOC15_DPG_MODE_OFFSET made (the AON window from 0x30000 bytes, the VID
+ * window from 0), back to instance 'inst''s register. With 'psp' the
+ * windows the PSP owns, written as 0 by the driver, get the image it put
+ * in the TMR (cache window 0 and its size) and the stack it keeps after it
+ * (window 1). 1 = an offset outside the instance. */
+#define VCN_TMR_STACK_OFF 0x80000ull
+static int vcn_dpg_apply(uint32_t inst, uint32_t off, uint32_t val, int psp)
+{
+    uint32_t reg = off >= (VCN_AON_IP_ADDRESS_2_0 >> 2) ? off - (VCN_AON_IP_ADDRESS_2_0 >> 2)
+                                                         : off + ((VCN_VID_SOC_ADDRESS_2_0 - VCN_AON_SOC_ADDRESS_2_0) >> 2);
+    if (reg >= 0x800)
+        return 1;
+    if (psp && !val) {
+        uint64_t stack = S.vcn.tmr_fw[inst] + VCN_TMR_STACK_OFF;
+        if (reg == regUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW) val = (uint32_t)S.vcn.tmr_fw[inst];
+        if (reg == regUVD_LMI_VCPU_CACHE_64BIT_BAR_HIGH) val = (uint32_t)(S.vcn.tmr_fw[inst] >> 32);
+        if (reg == regUVD_VCPU_CACHE_SIZE0) val = (S.vcn.fw_size[inst] + 8 + 4095u) & ~4095u;
+        if (reg == regUVD_LMI_VCPU_CACHE1_64BIT_BAR_LOW) val = (uint32_t)stack;
+        if (reg == regUVD_LMI_VCPU_CACHE1_64BIT_BAR_HIGH) val = (uint32_t)(stack >> 32);
+    }
+    sim_wr(NULL, 4ull * VCNR(inst, reg), val);
+    return 0;
+}
+
+/* LOAD_IP_FW GFX_FW_TYPE_VCN0_RAM / VCN1_RAM: the DPG SRAM image of an
+ * instance, (offset, value) pairs the tiles take as they power up in DPG
+ * mode; the model applies them at once. Returns the PSP status. */
+static uint32_t vcn_dpg_sram_load(uint32_t inst, uint64_t mc, uint32_t size)
+{
+    const uint32_t *p = (const uint32_t *)mc_ptr(mc, size ? size : 1);
+    uint32_t k;
+    S.vcn.sram_loads[inst]++;
+    if (!p || !size || (size & 7) || size > sizeof(S.vcn.sram[0]) || !S.vcn.smu_on[inst] ||
+        !(S.reg[VCNR(inst, regUVD_POWER_STATUS)] & UVD_POWER_STATUS__UVD_PG_MODE_MASK)) {
+        S.vcn.sram_bad++;
+        return 0xFFFF0003;
+    }
+    S.vcn.sram_n[inst] = size / 8;
+    for (k = 0; k < size / 8; k++) {
+        S.vcn.sram[inst][k][0] = p[2 * k];
+        S.vcn.sram[inst][k][1] = p[2 * k + 1];
+        if (vcn_dpg_apply(inst, p[2 * k], p[2 * k + 1], 1))
+            S.vcn.sram_bad++;
+    }
+    return 0;
+}
+
 /* a register write the VCN model takes; 0 = plain register */
 static int vcn_wr(uint32_t dw, uint32_t v)
 {
@@ -2892,9 +2962,48 @@ static int vcn_wr(uint32_t dw, uint32_t v)
         S.vcn.regs_while_off++;
     switch (reg) {
     case regUVD_PGFSM_CONFIG:
+        /* DPG: the tiles are the hardware's; only JPEG's UVDJ is static */
+        if ((S.reg[VCNR(i, regUVD_POWER_STATUS)] & UVD_POWER_STATUS__UVD_PG_MODE_MASK) &&
+            (v & ~(uint32_t)UVD_PGFSM_CONFIG__UVDJ_PWR_CONFIG_MASK))
+            S.vcn.static_pg_in_dpg++;
         S.reg[dw] = v;
         vcn_pgfsm((uint32_t)i, v);
         return 1;
+    case regUVD_DPG_LMA_CTL: {
+        /* a DPG register write through the LMA (WREG32_SOC15_DPG_MODE,
+         * indirect off): LMA_DATA to the internal offset */
+        uint32_t addr = (v & UVD_DPG_LMA_CTL__READ_WRITE_ADDR_MASK) >> UVD_DPG_LMA_CTL__READ_WRITE_ADDR__SHIFT;
+        S.reg[dw] = v;
+        if (!(v & UVD_DPG_LMA_CTL__READ_WRITE_MASK))
+            return 1;
+        S.vcn.lma_writes++;
+        if (!(S.reg[VCNR(i, regUVD_POWER_STATUS)] & UVD_POWER_STATUS__UVD_PG_MODE_MASK) ||
+            vcn_dpg_apply((uint32_t)i, addr, S.reg[VCNR(i, regUVD_DPG_LMA_DATA)], 0))
+            S.vcn.lma_bad++;
+        return 1;
+    }
+    case regUVD_DPG_PAUSE: {
+        /* vcn_v4_0_pause_dpg_mode's handshake: REQ is acknowledged, the
+         * tiles held on (POWER_STATUS 2) until the request goes; idle in
+         * DPG they read as gated (1) */
+        uint32_t ps = VCNR(i, regUVD_POWER_STATUS);
+        S.reg[dw] = v & ~(uint32_t)UVD_DPG_PAUSE__NJ_PAUSE_DPG_ACK_MASK;
+        if (!(S.reg[ps] & UVD_POWER_STATUS__UVD_PG_MODE_MASK) || !S.vcn.smu_on[i]) {
+            S.vcn.pause_bad++;
+            return 1;
+        }
+        if (v & UVD_DPG_PAUSE__NJ_PAUSE_DPG_REQ_MASK) {
+            if ((S.reg[ps] & UVD_POWER_STATUS__UVD_POWER_STATUS_MASK) != 1)
+                S.vcn.pause_bad++;   /* amdgpu waits for 1 before asking */
+            S.reg[dw] |= UVD_DPG_PAUSE__NJ_PAUSE_DPG_ACK_MASK;
+            S.reg[ps] = (S.reg[ps] & ~(uint32_t)UVD_POWER_STATUS__UVD_POWER_STATUS_MASK) | 2;
+            S.vcn.pause_reqs++;
+        } else {
+            S.reg[ps] = (S.reg[ps] & ~(uint32_t)UVD_POWER_STATUS__UVD_POWER_STATUS_MASK) | 1;
+            S.vcn.unpause_reqs++;
+        }
+        return 1;
+    }
     case regUVD_VCPU_CNTL: {
         uint64_t win = S.reg[VCNR(i, regUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW)] |
                        ((uint64_t)S.reg[VCNR(i, regUVD_LMI_VCPU_CACHE_64BIT_BAR_HIGH)] << 32);
@@ -5741,8 +5850,8 @@ static void test_vcn(rdna3_dev *dev, rdna3_psp *psp, const amd_ucode_plan *plan0
 
     /* early / sw init: two instances from discovery, the header, vcpu_bo, fw_shared */
     memset(v, 0, sizeof(*v));
-    CHECK(vcn40_early_init(dev, v, NULL, 0, 0x545, 1) == RDNA3_ENOENT);
-    CHECK(vcn40_early_init(dev, v, blobs[AMD_BLOB_VCN].data, blobs[AMD_BLOB_VCN].len, 0x545, 1) == RDNA3_OK);
+    CHECK(vcn40_early_init(dev, v, NULL, 0, 0x545, 1, RD_VCN_PG_STATIC) == RDNA3_ENOENT);
+    CHECK(vcn40_early_init(dev, v, blobs[AMD_BLOB_VCN].data, blobs[AMD_BLOB_VCN].len, 0x545, 1, RD_VCN_PG_STATIC) == RDNA3_OK);
     CHECK(v->num_vcn_inst == 2 && v->harvest_config == 0 && v->num_enc_rings == 1);
     CHECK(v->fw_version == ((const struct common_firmware_header *)blobs[AMD_BLOB_VCN].data)->ucode_version);
     if (v->fw_version == 0x09118022)   /* vcn_4_0_0.bin of the card: ENC 1.24 DEC 9 VEP 0 Revision 34 */
@@ -5853,11 +5962,11 @@ static void test_vcn(rdna3_dev *dev, rdna3_psp *psp, const amd_ucode_plan *plan0
     {
         rdna3_vm_flush_regs fr = { 0x100, 0x101, 0x102, 0x103, 1u << 5 };
         unsigned w0 = S.vcn.reg_writes, r0 = S.vcn.reg_waits;
-        vcn40_ring_begin_use(dev, v);
+        vcn40_ring_begin_use(dev, v, &v->ring_enc[0]);
         CHECK(vcn40_ring_alloc(dev, &v->ring_enc[0], 16) == RDNA3_OK);
         vcn40_enc_ring_emit_vm_flush(dev, &v->ring_enc[0], &fr, 0x123456001ull);
         vcn40_ring_commit(dev, &v->ring_enc[0]);
-        vcn40_ring_end_use(dev, v);
+        vcn40_ring_end_use(dev, v, &v->ring_enc[0]);
         CHECK(S.vcn.reg_writes == w0 + 3 && S.vcn.reg_waits == r0 + 2 && S.vcn.bad == 0);
     }
 
@@ -5874,9 +5983,9 @@ static void test_vcn(rdna3_dev *dev, rdna3_psp *psp, const amd_ucode_plan *plan0
     }
 
     /* idle work: nothing pending -> both blocks gated, the PMFW told */
-    vcn40_ring_begin_use(dev, v);
+    vcn40_ring_begin_use(dev, v, &v->ring_enc[0]);
     CHECK(vcn40_idle_work_handler(dev, v) == 0);   /* a submission in flight */
-    vcn40_ring_end_use(dev, v);
+    vcn40_ring_end_use(dev, v, &v->ring_enc[0]);
     CHECK(vcn40_idle_work_handler(dev, v) == 1 && v->cur_state == RD_PG_STATE_GATE && v->vcn_gated);
     CHECK(S.vcn.vcn_down_msgs == 2 && !S.vcn.smu_on[0] && !S.vcn.smu_on[1]);
     for (i = 0; i < 2; i++)
@@ -6258,6 +6367,277 @@ static void test_vcn_uapi(rdna3_dev *dev, rdna3_gmc *gmc, rdna3_vcn *v)
     }
     rdna3_drm_file_close(&f1);
     rdna3_drm_device_fini(&dd);
+}
+
+/* ---- VCN power loss, DPG (rdna3vcn=2/3), suspend / resume ---- */
+
+/* the card loses its power (an S3 that cuts the slot, a mode-1 reset): the
+ * video block's registers back to their reset values, the PMFW's power
+ * state gone; with 'vram' the contents of its VRAM blocks too */
+static void sim_vcn_power_loss(const rdna3_vcn *v, int vram)
+{
+    static const uint32_t regs[] = {
+        regUVD_POWER_STATUS, regUVD_DPG_PAUSE, regUVD_STATUS, regVCN_RB_ENABLE, regUVD_RB_BASE_LO,
+        regUVD_RB_BASE_HI, regUVD_RB_SIZE, regUVD_RB_RPTR, regUVD_RB_WPTR, regUVD_MASTINT_EN, regVCN_RB1_DB_CTRL,
+        regUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW, regUVD_LMI_VCPU_CACHE_64BIT_BAR_HIGH, regUVD_VCPU_CACHE_SIZE0,
+        regUVD_LMI_VCPU_CACHE1_64BIT_BAR_LOW, regUVD_LMI_VCPU_CACHE2_64BIT_BAR_LOW, regUVD_LMI_VCPU_NC0_64BIT_BAR_LOW,
+        regUVD_LMI_VCPU_NC0_64BIT_BAR_HIGH, regUVD_GFX10_ADDR_CONFIG, regUVD_LMI_CTRL, regUVD_LMI_CTRL2,
+        regUVD_DPG_LMA_CTL, regUVD_DPG_LMA_DATA, regUVD_JRBC_RB_CNTL, regUVD_JRBC_RB_SIZE, regUVD_JRBC_RB_RPTR,
+        regUVD_JRBC_RB_WPTR, regJPEG_SYS_INT_EN, regVCN_JPEG_DB_CTRL, regUVD_JPEG_PITCH,
+    };
+    uint32_t i, k;
+    for (i = 0; i < 2; i++) {
+        for (k = 0; k < sizeof(regs) / sizeof(regs[0]); k++)
+            S.reg[VCNR(i, regs[k])] = 0;
+        S.reg[VCNR(i, regUVD_PGFSM_STATUS)] = 0x2AAAAAAAu;            /* every tile off */
+        S.reg[VCNR(i, regUVD_VCPU_CNTL)] = UVD_VCPU_CNTL__BLK_RST_MASK;
+        S.vcn.booted[i] = 0;
+        S.vcn.smu_on[i] = 0;
+        S.vcn.rptr[i] = 0;
+    }
+    S.vcn.jpeg_smu_on = 0;
+    S.vcn.jrptr = 0;
+    if (!vram)
+        return;
+    for (i = 0; i < 2; i++) {
+        memset(S.vram + v->vcpu_bo[i], 0xA5, vcn40_vcpu_bo_size());
+        memset(S.vram + v->ring_enc[i].ring, 0xA5, v->ring_enc[i].ring_size);
+        memset(S.vram + v->ring_enc[i].wb, 0xA5, 4096);
+        if (v->dpg_sram[i])
+            memset(S.vram + v->dpg_sram[i], 0xA5, RD_VCN_DPG_SRAM_SIZE);
+    }
+    memset(S.vram + v->jpeg.ring, 0xA5, v->jpeg.ring_size);
+    memset(S.vram + v->jpeg.wb, 0xA5, 4096);
+}
+
+/* a system sleep that cuts the card's power, as the kext runs it
+ * (setPowerState(0) -> vcnSuspend: amdgpu_device_ip_suspend's reverse IP
+ * order, JPEG then VCN; the wake -> hwInit -> vcnStart: early init, then
+ * vcn_v4_0_resume and jpeg_v4_0_resume): the VCPU BO comes back from the
+ * copy, the rings run on, their fences continue */
+static void vcn_s3_cycle(rdna3_dev *dev, rdna3_vcn *v, const amd_fw_blob_ref *blobs)
+{
+    static uint8_t save[2][RD_VCN_STACK_SIZE + RD_VCN_CONTEXT_SIZE + RD_VCN_FW_SHARED_SIZE];
+    uint32_t i, seq0[2], jseq0, mark, flags, sus0 = v->suspends, res0 = v->resumes, rb0 = v->restored_bos;
+    unsigned bb0 = S.vcn.bad_boots;
+    uint8_t fs[RD_VCN4_FWS_SIZE];
+    const uint32_t fws_off = RD_VCN_STACK_SIZE + RD_VCN_CONTEXT_SIZE;
+
+    CHECK(vcn40_vcpu_bo_size() == sizeof(save[0]));
+    for (i = 0; i < 2; i++) {
+        CHECK(vcn40_unified_ring_test_ib(dev, v, &v->ring_enc[i]) == RDNA3_OK);
+        seq0[i] = v->ring_enc[i].fence_seq;
+        /* what the firmware keeps in its stack and context */
+        mark = 0x5A0C0000u | i;
+        rdna3_vram_write(dev, v->vcpu_bo[i] + 256, &mark, 4);
+        rdna3_vram_write(dev, v->vcpu_bo[i] + RD_VCN_STACK_SIZE + 512, &mark, 4);
+    }
+    CHECK(jpeg40_dec_ring_test_ib(dev, v) == RDNA3_OK);
+    jseq0 = v->jpeg.fence_seq;
+
+    /* suspend: JPEG, then VCN; without the OS's buffers amdgpu_vcn_suspend fails */
+    CHECK(jpeg40_suspend(dev, v) == RDNA3_OK && !v->jpeg.ready && v->jpeg_cur_state == RD_PG_STATE_GATE);
+    CHECK(vcn40_suspend(dev, v) == RDNA3_ENOMEM && v->cur_state == RD_PG_STATE_GATE);
+    v->saved_bo[0] = save[0];
+    v->saved_bo[1] = save[1];
+    CHECK(vcn40_suspend(dev, v) == RDNA3_OK && v->suspends == sus0 + 1);
+    CHECK(v->saved_bo_valid[0] && v->saved_bo_valid[1] && !v->ring_enc[0].ready && !v->ring_enc[1].ready);
+    CHECK(!S.vcn.smu_on[0] && !S.vcn.smu_on[1] && !S.vcn.jpeg_smu_on && S.vcn.down_in_dpg == 0);
+    for (i = 0; i < 2; i++) {
+        memcpy(&flags, save[i] + fws_off, 4);
+        memcpy(&mark, save[i] + 256, 4);
+        CHECK(flags == (RD_FW_SHARED_FLAG_0_UNIFIED_QUEUE | RD_VCN_SMU_DPM_INTERFACE_FLAG) &&
+              save[i][fws_off + RD_VCN4_FWS_SQ_IS_ENABLED] == 1 && mark == (0x5A0C0000u | i));
+        CHECK(save[i][fws_off + RD_VCN4_FWS_SQ_QUEUE_MODE] & RD_FW_QUEUE_DPG_HOLD_OFF);   /* vcn_v4_0_stop */
+    }
+
+    /* the power goes: registers, PMFW state and VRAM contents */
+    sim_vcn_power_loss(v, 1);
+
+    /* the wake: early init (the sw state kept), VCN, then JPEG */
+    CHECK(vcn40_early_init(dev, v, blobs[AMD_BLOB_VCN].data, blobs[AMD_BLOB_VCN].len, 0x545, 1, v->pg_mode) ==
+          RDNA3_OK);
+    CHECK(v->sw_ready && v->cur_state == RD_PG_STATE_GATE && v->vcn_gated);
+    CHECK(vcn40_resume(dev, v) == RDNA3_OK && v->resumes == res0 + 1 && v->restored_bos == rb0 + 2);
+    CHECK(!v->saved_bo_valid[0] && !v->saved_bo_valid[1] && v->ring_enc[0].ready && v->ring_enc[1].ready);
+    for (i = 0; i < 2; i++) {
+        rdna3_vram_read(dev, v->fw_shared[i], fs, sizeof(fs));
+        memcpy(&flags, fs, 4);
+        CHECK(flags == (RD_FW_SHARED_FLAG_0_UNIFIED_QUEUE | RD_VCN_SMU_DPM_INTERFACE_FLAG) &&
+              fs[RD_VCN4_FWS_SQ_IS_ENABLED] == 1 && fs[RD_VCN4_FWS_SQ_QUEUE_MODE] == 0);
+        rdna3_vram_read(dev, v->vcpu_bo[i] + RD_VCN_STACK_SIZE + 512, &mark, 4);
+        CHECK(mark == (0x5A0C0000u | i));
+        CHECK(vcn40_fence_passed(dev, &v->ring_enc[i], seq0[i]));
+    }
+    CHECK(S.vcn.bad_fw_shared == 0 && S.vcn.regs_while_off == 0);
+    CHECK(jpeg40_resume(dev, v) == RDNA3_OK && v->jpeg.ready && vcn40_fence_passed(dev, &v->jpeg, jseq0));
+    for (i = 0; i < 2; i++) {
+        CHECK(vcn40_unified_ring_test_ib(dev, v, &v->ring_enc[i]) == RDNA3_OK);
+        CHECK(v->ring_enc[i].fence_seq > seq0[i]);
+    }
+    CHECK(jpeg40_dec_ring_test_ib(dev, v) == RDNA3_OK && v->jpeg.fence_seq == jseq0 + 1);
+    CHECK(S.vcn.bad == 0 && S.vcn.jpeg_bad == 0 && S.vcn.bad_boots == bb0 && S.vcn.static_pg_in_dpg == 0);
+
+    /* a GPU reset whose suspend never ran: no copy, the BO cleared and
+     * fw_shared set up again, the rings run */
+    CHECK(jpeg40_hw_fini(dev, v) == RDNA3_OK && vcn40_hw_fini(dev, v) == RDNA3_OK);
+    sim_vcn_power_loss(v, 1);
+    CHECK(vcn40_early_init(dev, v, blobs[AMD_BLOB_VCN].data, blobs[AMD_BLOB_VCN].len, 0x545, 1, v->pg_mode) ==
+          RDNA3_OK);
+    CHECK(vcn40_resume(dev, v) == RDNA3_OK && v->restored_bos == rb0 + 2);
+    rdna3_vram_read(dev, v->vcpu_bo[1] + RD_VCN_STACK_SIZE + 512, &mark, 4);
+    CHECK(mark == 0);
+    CHECK(jpeg40_resume(dev, v) == RDNA3_OK);
+    for (i = 0; i < 2; i++)
+        CHECK(vcn40_unified_ring_test_ib(dev, v, &v->ring_enc[i]) == RDNA3_OK);
+    CHECK(S.vcn.bad_fw_shared == 0 && S.vcn.bad == 0);
+    v->saved_bo[0] = v->saved_bo[1] = NULL;
+}
+
+/* rdna3vcn=2 / =3: the driver reloaded with dynamic power gating as amdgpu
+ * runs it on this card (soc21: VCN | VCN_DPG | JPEG), the DPG pause
+ * handshake (VCN 3's from begin_use / the idle work; the VCN 4 firmware
+ * pauses itself), the LMA path without the PSP, suspend / resume */
+static void test_vcn_dpg(rdna3_dev *dev, rdna3_psp *psp, const amd_fw_blob_ref *blobs, rdna3_vcn *v)
+{
+    uint64_t tmr[2] = { v->tmr_mc[0], v->tmr_mc[1] }, fws0 = v->fw_shared[0], buf, vcpu_mc;
+    uint32_t i, flags = 1, seq, pk[4] = { 8, 0x08000001, 0, 0 };
+    uint32_t fw_size0 = (((const struct common_firmware_header *)blobs[AMD_BLOB_VCN].data)->ucode_size_bytes + 8 +
+                         4095u) & ~4095u;
+    unsigned boots0, loads0, lma0, pauses0, bb0 = S.vcn.bad_boots;
+    uint8_t en = 1;
+    rdna3_vcn_ib ib;
+
+    /* driver stop (amdgpu_device_fini: hw_fini, then sw_fini, JPEG first) */
+    CHECK(jpeg40_hw_fini(dev, v) == RDNA3_OK && vcn40_hw_fini(dev, v) == RDNA3_OK);
+    CHECK(v->cur_state == RD_PG_STATE_GATE && v->jpeg_cur_state == RD_PG_STATE_GATE);
+    CHECK(jpeg40_sw_fini(dev, v) == RDNA3_OK && vcn40_sw_fini(dev, v) == RDNA3_OK && !v->sw_ready);
+    rdna3_vram_read(dev, fws0, &flags, 4);
+    rdna3_vram_read(dev, fws0 + RD_VCN4_FWS_SQ_IS_ENABLED, &en, 1);
+    CHECK(flags == 0 && en == 0);   /* present_flag_0 and sq.is_enabled cleared */
+    sim_vcn_power_loss(v, 0);
+
+    /* rdna3vcn=2: the flags as soc21 sets them, indirect SRAM through the PSP */
+    CHECK(vcn40_early_init(dev, v, blobs[AMD_BLOB_VCN].data, blobs[AMD_BLOB_VCN].len, 0x545, 1, RD_VCN_PG_DPG) ==
+          RDNA3_OK);
+    CHECK(v->pg_flags == (RD_PG_VCN | RD_PG_VCN_DPG | RD_PG_JPEG) && v->using_unified_queue && !v->ras_supported);
+    v->psp = psp;
+    CHECK(jpeg40_early_init(dev, v) == RDNA3_OK);
+    CHECK(vcn40_sw_init(dev, v, tmr) == RDNA3_OK && jpeg40_sw_init(dev, v) == RDNA3_OK);
+    CHECK(v->indirect_sram && v->dpg_sram[0] && v->dpg_sram[1] && !(v->dpg_sram[0] & 4095) &&
+          !(v->dpg_sram[1] & 4095));
+    boots0 = S.vcn.boots;
+    CHECK(vcn40_hw_init(dev, v) == RDNA3_OK);
+    CHECK(v->ring_enc[0].ready && v->ring_enc[1].ready && v->cur_state == RD_PG_STATE_UNGATE);
+    CHECK(S.vcn.sram_loads[0] == 1 && S.vcn.sram_loads[1] == 1 && S.vcn.sram_bad == 0 && S.vcn.lma_writes == 0);
+    CHECK(v->sram_uploads == 2 && v->sram_upload_errs == 0 && v->dpg_starts == 2 && v->last_err == 0);
+    CHECK(S.vcn.boots == boots0 + 2 && S.vcn.bad_boots == bb0 && S.vcn.bad_fw_shared == 0 &&
+          S.vcn.regs_while_off == 0 && S.vcn.static_pg_in_dpg == 0);
+    vcpu_mc = rdna3_vram_mc(dev, v->vcpu_bo[1]);
+    for (i = 0; i < 2; i++) {
+        uint8_t fs[RD_VCN4_FWS_SIZE];
+        /* the image: 7 + mc_resume's 17 + 3 writes, VCPU_CNTL (reset) first */
+        CHECK(S.vcn.sram_n[i] == 27 && v->dpg_sram_curr[i] == 54);
+        CHECK(S.vcn.sram[i][0][0] == regUVD_VCPU_CNTL - 0xC0 &&
+              S.vcn.sram[i][0][1] == (0xFFu << UVD_VCPU_CNTL__PRB_TIMEOUT_VAL__SHIFT | UVD_VCPU_CNTL__CLK_EN_MASK |
+                                      UVD_VCPU_CNTL__BLK_RST_MASK));
+        CHECK(S.reg[VCNR(i, regUVD_VCPU_CNTL)] == (0xFFu << UVD_VCPU_CNTL__PRB_TIMEOUT_VAL__SHIFT |
+                                                    UVD_VCPU_CNTL__CLK_EN_MASK));
+        CHECK(S.reg[VCNR(i, regUVD_LMI_CTRL)] ==
+              (UVD_LMI_CTRL__WRITE_CLEAN_TIMER_EN_MASK | UVD_LMI_CTRL__REQ_MODE_MASK | UVD_LMI_CTRL__CRC_RESET_MASK |
+               UVD_LMI_CTRL__MASK_MC_URGENT_MASK | UVD_LMI_CTRL__DATA_COHERENCY_EN_MASK |
+               UVD_LMI_CTRL__VCPU_DATA_COHERENCY_EN_MASK | (8u << UVD_LMI_CTRL__WRITE_CLEAN_TIMER__SHIFT) | 0x00100000u));
+        CHECK(S.reg[VCNR(i, regUVD_LMI_CTRL2)] == 0x1fu << UVD_LMI_CTRL2__RE_OFLD_MIF_WR_REQ_NUM__SHIFT);
+        /* windows 0/1 filled in by the PSP, 2 and the non-cached one as written */
+        CHECK(S.reg[VCNR(i, regUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW)] == (uint32_t)tmr[i] &&
+              S.reg[VCNR(i, regUVD_VCPU_CACHE_SIZE0)] == fw_size0);
+        CHECK(S.reg[VCNR(i, regUVD_LMI_VCPU_CACHE1_64BIT_BAR_LOW)] == (uint32_t)(tmr[i] + VCN_TMR_STACK_OFF) &&
+              S.reg[VCNR(i, regUVD_VCPU_CACHE_SIZE1)] == RD_VCN_STACK_SIZE);
+        CHECK(S.reg[VCNR(i, regUVD_LMI_VCPU_NC0_64BIT_BAR_LOW)] == (uint32_t)rdna3_vram_mc(dev, v->fw_shared[i]) &&
+              S.reg[VCNR(i, regUVD_VCPU_NONCACHE_SIZE0)] == 4096 && S.reg[VCNR(i, regUVD_VCPU_CACHE_SIZE2)] ==
+              RD_VCN_CONTEXT_SIZE);
+        CHECK(S.reg[VCNR(i, regUVD_GFX10_ADDR_CONFIG)] == 0x545 &&
+              (S.reg[VCNR(i, regUVD_MASTINT_EN)] & UVD_MASTINT_EN__VCPU_EN_MASK));
+        CHECK((S.reg[VCNR(i, regUVD_POWER_STATUS)] & (UVD_POWER_STATUS__UVD_PG_MODE_MASK |
+                                                      UVD_POWER_STATUS__UVD_PG_EN_MASK |
+                                                      UVD_POWER_STATUS__UVD_POWER_STATUS_MASK)) ==
+              (UVD_POWER_STATUS__UVD_PG_MODE_MASK | UVD_POWER_STATUS__UVD_PG_EN_MASK | 1));
+        CHECK(S.reg[VCNR(i, regVCN_RB1_DB_CTRL)] == (v->ring_enc[i].doorbell_index << 2 | VCN_RB1_DB_CTRL__EN_MASK) &&
+              S.reg[VCNR(i, regUVD_RB_BASE_LO)] == (uint32_t)v->ring_enc[i].gpu_addr);
+        CHECK((S.reg[VCNR(i, regUVD_PGFSM_STATUS)] & 0x3F3FFFFF) == 0x2A2AAAAA);   /* no static PG */
+        rdna3_vram_read(dev, v->fw_shared[i], fs, sizeof(fs));
+        CHECK(fs[RD_VCN4_FWS_SQ_QUEUE_MODE] == 0);
+    }
+    CHECK(S.reg[VCNR(1, regUVD_LMI_VCPU_CACHE2_64BIT_BAR_LOW)] == (uint32_t)(vcpu_mc + RD_VCN_STACK_SIZE));
+
+    /* the IB tests under DPG; JPEG (static UVDJ, jpeg_v4_0_start unchanged) beside it */
+    for (i = 0; i < 2; i++)
+        CHECK(vcn40_unified_ring_test_ib(dev, v, &v->ring_enc[i]) == RDNA3_OK);
+    CHECK(jpeg40_hw_init(dev, v) == RDNA3_OK && jpeg40_dec_ring_test_ib(dev, v) == RDNA3_OK);
+    CHECK(S.vcn.static_pg_in_dpg == 0 && S.vcn.bad == 0 && S.vcn.jpeg_bad == 0 && S.vcn.pause_reqs == 0);
+
+    /* idle: vcn_v4_0_stop_dpg_mode on both (no pause request on VCN 4),
+     * PG_MODE off before the PMFW powers them down; JPEG runs on */
+    CHECK(vcn40_idle_work_handler(dev, v) == 1 && v->cur_state == RD_PG_STATE_GATE && v->dpg_stops == 2);
+    CHECK(S.vcn.down_in_dpg == 0 && !S.vcn.smu_on[0] && !S.vcn.smu_on[1] && S.vcn.pause_reqs == 0);
+    for (i = 0; i < 2; i++)
+        CHECK(!(S.reg[VCNR(i, regUVD_POWER_STATUS)] & UVD_POWER_STATUS__UVD_PG_MODE_MASK) &&
+              (S.reg[VCNR(i, regUVD_POWER_STATUS)] & UVD_POWER_STATUS__UVD_POWER_STATUS_MASK) == 1);
+    CHECK(jpeg40_dec_ring_test_ib(dev, v) == RDNA3_OK && v->cur_state == RD_PG_STATE_GATE);
+
+    /* the next job: DPG start again, one more SRAM upload per instance */
+    buf = rdna3_vram_alloc(dev, 4096, 4096, "vcn-dpg-job");
+    rdna3_vram_write(dev, buf, pk, sizeof(pk));
+    rdna3_hdp_flush(dev);
+    ib.va = rdna3_vram_mc(dev, buf);
+    ib.length_dw = 4;
+    ib.kdata = NULL;
+    seq = vcn40_submit(dev, v, 1, 0, &ib, 1, 0);
+    CHECK(seq && vcn40_wait_fence(dev, &v->ring_enc[1], seq) == RDNA3_OK && v->cur_state == RD_PG_STATE_UNGATE);
+    CHECK(S.vcn.sram_loads[0] == 2 && S.vcn.sram_loads[1] == 2 && S.vcn.sram_bad == 0 && S.vcn.boots == boots0 + 4);
+
+    /* VCN 3's DPG pause from begin_use and the idle work (amdgpu skips it
+     * for the unified queue): request, ACK, tiles held (2); unpause */
+    pauses0 = S.vcn.pause_reqs;
+    v->using_unified_queue = 0;
+    vcn40_ring_begin_use(dev, v, &v->ring_enc[0]);
+    CHECK(v->pause_state[0].fw_based == RD_VCN_DPG_STATE_PAUSE && v->dpg_enc_submission_cnt[0] == 1);
+    CHECK(S.vcn.pause_reqs == pauses0 + 1 && S.vcn.pause_bad == 0 &&
+          (S.reg[VCNR(0, regUVD_DPG_PAUSE)] & UVD_DPG_PAUSE__NJ_PAUSE_DPG_ACK_MASK) &&
+          (S.reg[VCNR(0, regUVD_POWER_STATUS)] & UVD_POWER_STATUS__UVD_POWER_STATUS_MASK) == 2);
+    vcn40_ring_end_use(dev, v, &v->ring_enc[0]);
+    CHECK(v->dpg_enc_submission_cnt[0] == 0 && v->dpg_pauses == 1);
+    CHECK(vcn40_idle_work_handler(dev, v) == 1 && v->cur_state == RD_PG_STATE_GATE);
+    CHECK(v->pause_state[0].fw_based == RD_VCN_DPG_STATE_UNPAUSE && S.vcn.unpause_reqs == 1 && v->dpg_unpauses == 1 &&
+          !(S.reg[VCNR(0, regUVD_DPG_PAUSE)] & UVD_DPG_PAUSE__NJ_PAUSE_DPG_REQ_MASK) && S.vcn.down_in_dpg == 0);
+    /* gated while still paused: vcn_v4_0_stop_dpg_mode unpauses first */
+    vcn40_ring_begin_use(dev, v, &v->ring_enc[1]);
+    vcn40_ring_end_use(dev, v, &v->ring_enc[1]);
+    CHECK(v->pause_state[1].fw_based == RD_VCN_DPG_STATE_PAUSE && S.vcn.pause_reqs == pauses0 + 2);
+    CHECK(vcn40_set_powergating_state(dev, v, RD_PG_STATE_GATE) == RDNA3_OK);
+    CHECK(v->pause_state[1].fw_based == RD_VCN_DPG_STATE_UNPAUSE && S.vcn.unpause_reqs == 2 &&
+          S.vcn.down_in_dpg == 0 && S.vcn.pause_bad == 0);
+    v->using_unified_queue = 1;
+
+    /* rdna3vcn=3 (indirect_sram off): the same writes through the LMA, no PSP */
+    loads0 = S.vcn.sram_loads[0] + S.vcn.sram_loads[1];
+    lma0 = S.vcn.lma_writes;
+    v->indirect_sram = 0;
+    CHECK(vcn40_set_powergating_state(dev, v, RD_PG_STATE_UNGATE) == RDNA3_OK);
+    CHECK(S.vcn.lma_writes == lma0 + 2 * 27 && S.vcn.lma_bad == 0 && S.vcn.sram_loads[0] + S.vcn.sram_loads[1] == loads0);
+    CHECK(S.vcn.boots == boots0 + 8 && S.vcn.bad_boots == bb0);   /* + the start for the pause test */
+    CHECK(S.reg[VCNR(1, regUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW)] == (uint32_t)tmr[1] &&
+          S.reg[VCNR(1, regUVD_LMI_VCPU_CACHE1_64BIT_BAR_LOW)] == (uint32_t)vcpu_mc &&
+          S.reg[VCNR(1, regUVD_VCPU_CACHE_SIZE0)] == fw_size0);
+    for (i = 0; i < 2; i++)
+        CHECK(vcn40_enc_ring_test_ring(dev, v, &v->ring_enc[i]) == RDNA3_OK);
+    CHECK(vcn40_set_powergating_state(dev, v, RD_PG_STATE_GATE) == RDNA3_OK && S.vcn.down_in_dpg == 0);
+    v->indirect_sram = 1;
+
+    /* a sleep that loses the power, in DPG */
+    vcn_s3_cycle(dev, v, blobs);
+    CHECK(S.vcn.sram_bad == 0 && S.vcn.pause_bad == 0 && S.vcn.down_in_dpg == 0 && v->sram_upload_errs == 0);
+    CHECK(vcn40_idle_work_handler(dev, v) == 1 && jpeg40_idle_work_handler(dev, v) == 1);
 }
 
 static void run(const char *fwdir)
@@ -7431,6 +7811,9 @@ static void run(const char *fwdir)
             static rdna3_vcn vcn;
             test_vcn(&dev, &psp, &plan, blobs, &gmc, &vcn);
             test_vcn_uapi(&dev, &gmc, &vcn);
+            /* rdna3vcn=1 through a sleep that cuts the power, then =2 / =3 */
+            vcn_s3_cycle(&dev, &vcn, blobs);
+            test_vcn_dpg(&dev, &psp, blobs, &vcn);
         }
     }
 

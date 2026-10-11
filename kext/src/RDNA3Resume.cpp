@@ -344,6 +344,14 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
         IOLockUnlock(a->fDispLock);
     }
     a->setNumber("RDNA3,WakeHeadsLost", lost);
+    /* VCN / JPEG (rdna3vcn): amdgpu_device_ip_resume_phase2 when the card
+     * kept its power; after a power loss resumeAfterPowerLoss's hwInit
+     * resumed them already (vcnStart), or they wait for the next bring-up */
+    if (a->fBringup && a->fBringup->finished() && a->fBringup->vcnWanted() && a->fDrmLock) {
+        IOLockLock(a->fDrmLock);
+        a->fBringup->vcnResume();
+        IOLockUnlock(a->fDrmLock);
+    }
     if (a->fBringup)
         a->statsStart();
 }

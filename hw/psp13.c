@@ -450,6 +450,28 @@ int psp13_load_ip_fw(rdna3_psp *psp, const amd_ucode *u, uint64_t mc)
     return ret;
 }
 
+/* psp_execute_ip_fw_load() / psp_prep_load_ip_fw_cmd_buf() with the
+ * fw_type psp_get_fw_type gives AMDGPU_UCODE_ID_VCN0_RAM / VCN1_RAM: the
+ * buffer is the caller's (amdgpu_vcn_psp_update_sram), nothing is placed
+ * in the TMR */
+int psp13_load_ip_fw_buf(rdna3_psp *psp, uint32_t fw_type, uint64_t mc, uint32_t size)
+{
+    struct psp_gfx_cmd_resp cmd;
+    int ret;
+
+    bzero_local(&cmd, sizeof(cmd));
+    cmd.cmd_id = GFX_CMD_ID_LOAD_IP_FW;
+    cmd.cmd.cmd_load_ip_fw.fw_phy_addr_lo = (uint32_t)mc;
+    cmd.cmd.cmd_load_ip_fw.fw_phy_addr_hi = (uint32_t)(mc >> 32);
+    cmd.cmd.cmd_load_ip_fw.fw_size = size;
+    cmd.cmd.cmd_load_ip_fw.fw_type = (enum psp_gfx_fw_type)fw_type;
+    ret = psp13_cmd_submit(psp, &cmd);
+    if (ret || psp->last_resp_status)
+        RLOG(psp->d, "PSP: LOAD_IP_FW type %u, %u bytes -> %s (status 0x%x)", fw_type, size,
+             ret ? "FAILED" : "ok", psp->last_resp_status);
+    return ret;
+}
+
 /* --------------------------- hw_init --------------------------- */
 
 int psp13_hw_init(rdna3_psp *psp, const amd_ucode_plan *plan,

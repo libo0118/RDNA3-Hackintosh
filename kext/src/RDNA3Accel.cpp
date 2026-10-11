@@ -123,10 +123,25 @@ IOReturn RDNA3Accel::setPowerState(unsigned long state, IOService *)
 {
     /* D4: system sleep and wake (RDNA3Resume.cpp); the wake work runs on
      * a thread call */
-    if (state == 0)
+    bool vcn = fBringup && fBringup->finished() && fBringup->vcnWanted() && fDrmLock;
+    if (state == 0) {
         displayWillSleep();
-    else
-        displayDidWake();
+        /* amdgpu_device_suspend: the display first (phase 1), then the
+         * other IPs in reverse order, JPEG and VCN among them (rdna3vcn) */
+        if (vcn) {
+            IOLockLock(fDrmLock);
+            fBringup->vcnSuspend();
+            IOLockUnlock(fDrmLock);
+        }
+    } else if (fDispAsleep) {
+        displayDidWake();   /* the wake work resumes VCN / JPEG at its end */
+    } else if (vcn) {
+        /* no display wake work: VCN / JPEG straight away (vcnResume does
+         * nothing when the PSP sOS is gone, i.e. the card lost its power) */
+        IOLockLock(fDrmLock);
+        fBringup->vcnResume();
+        IOLockUnlock(fDrmLock);
+    }
     return kIOPMAckImplied;
 }
 
