@@ -203,6 +203,7 @@ what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
 | `rdna3modeset=1` | own display timings: the monitor's EDID modes through `hw/dcn32_modeset.c` (step `modeset`) |
 | `rdna3mes=1` | MES scheduler pipe (step 8c) |
 | `rdna3userq=1` | user queues (DRM_AMDGPU_USERQ, amdgpu's `user_queue=1`) through the MES; turns `rdna3mes` on, kernel VMs keep VMIDs 1-7 (step userq) |
+| `rdna3vcn=1` | the video engines: VCN 4.0 (two instances) and JPEG 4.0 for VCN_ENC / VCN_JPEG command submission and VIDEO_CAPS; the PSP also loads `vcn_4_0_0.bin` for VCN1 (step vcn) |
 | `rdna3gfxoff=1` | GFXOFF: the GFX block powers off when idle (step 8o) |
 | `rdna3socg=1` | HDP/ATHUB clock gating (`hw/soc21_cg.c`) |
 | `rdna3cg=0` | GFX clock gating off (on by default since card run 8) |

@@ -365,7 +365,7 @@ def summary(path, serial=None):
                     "%d lit%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
                                       ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "")))
     for pat, name in ((r"^MODES: .*$", "scaled modes"), (r"^GAMMA: .*$", "gamma"), (r"^SOAK: .*$", "soak"),
-                      (r"^HANG TEST: .*$", "hang test")):
+                      (r"^HANG TEST: .*$", "hang test"), (r"^VCN TEST: .*$", "video (VCN)")):
         m = re.search(pat, txt, re.M)
         if m:
             out.append((name, m.group(0)[:100]))
