@@ -127,6 +127,9 @@ typedef struct rdna3_dev {
      * 0 (default) keeps the verified behaviour; set by the OS layer right
      * after rdna3_dev_init. */
     int      amdgpu_exact;
+    /* with amdgpu_exact: a display core drives the DCN
+     * (amdgpu_device_has_dc_support; smu_v13_0_notify_display_change) */
+    int      amdgpu_dc;
 } rdna3_dev;
 
 /* ---- logging ---- */

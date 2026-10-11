@@ -100,6 +100,8 @@ public:
 
     /* MSI: called on the work loop for every interrupt */
     void  handleInterrupt();
+    /* amdgpu_pci_shutdown with rdna3amdgpu=1 (DRM lock held) */
+    void  pmShutdown();
 
     /* user queues (boot-arg rdna3userq=1 with the MES scheduler, amdgpu's
      * user_queue=1): a queue's MQD (adev->mqds[ip].init_mqd), MES ADD_QUEUE /
@@ -191,6 +193,20 @@ private:
     /* rdna3amdgpu=1: amdgpu's own sequence where the verified default
      * differs (rdna3_dev.amdgpu_exact); ladder step amdgpu */
     bool             fAmdgpuExact = false;
+    /* rdna3amdgpu=1: the SMU's thermal / MP1 IVs (smu_v13_0_irq_process).
+     * The hardware CTF is handled in the IV callback; whatever needs the
+     * PMFW mailbox runs from fSmuIrqCall under the DRM lock (50 ms later
+     * for the software CTF check, AMDGPU_SWCTF_EXTRA_DELAY) */
+    struct thread_call *fSmuIrqCall = nullptr;
+    struct SmuIv { uint32_t client, src, ctx; };
+    static const uint32_t kSmuIvMax = 8;
+    SmuIv            fSmuIrqQ[kSmuIvMax] = {};
+    uint32_t         fSmuIrqN = 0;           /* under fIhLock */
+    bool             fSmuIrqStop = false;
+    uint64_t         fSmuIrqs = 0;
+    void             smuIrq(const rdna3_iv *iv);
+    static void      smuIrqTick(void *owner, void *);
+    void             overTemp(const char *why);
     /* user queues: rdna3userq=1 (needs the MES, so it turns rdna3mes on);
      * the IPs that got them, the PASIDs the VMs' processes have for the MES,
      * GART slots of user queue wptr BOs (under the user fence slots) */

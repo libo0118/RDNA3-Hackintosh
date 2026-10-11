@@ -2209,6 +2209,15 @@ static void rlc_safe_mode(rdna3_dev *d, int enter)
     RERR(d, "GFX: RLC did not %s safe mode", enter ? "enter" : "leave");
 }
 
+/* Ported from amdgpu_gfx_rlc_enter_safe_mode / amdgpu_gfx_rlc_exit_safe_mode
+ * (GC 11.0.3 has CGCG and MGCG, so the RLC is always asked) */
+void gfx11_rlc_safe_mode(rdna3_dev *d, int enter)
+{
+    if (!(RG(d, regRLC_CNTL) & RLC_CNTL__RLC_ENABLE_F32_MASK))
+        return;
+    rlc_safe_mode(d, enter);
+}
+
 /* gfx_v11_0_ring_soft_recovery */
 void gfx11_kill_waves(rdna3_dev *d, uint32_t vmid)
 {

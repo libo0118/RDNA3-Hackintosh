@@ -15,6 +15,7 @@
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
 #include <kern/thread_call.h>
+#include <IOKit/pwr_mgt/RootDomain.h>
 #include <kern/clock.h>
 #include <mach/mach_time.h>
 #include <pexpert/pexpert.h>
@@ -185,6 +186,12 @@ void RDNA3Bringup::stopAndFree()
     if (fDmub)
         fOwner->displayMirrorOff(fDmub);
     teardownInterrupt();   /* no handler may touch fIh / the rings past here */
+    if (fSmuIrqCall) {
+        fSmuIrqStop = true;
+        thread_call_cancel_wait(fSmuIrqCall);
+        thread_call_free(fSmuIrqCall);
+        fSmuIrqCall = nullptr;
+    }
 
     /* 2. the engines, in gfx_v11_0_hw_fini order, while fDev, the BAR and
      *    the doorbells are still mapped */
@@ -243,6 +250,10 @@ void RDNA3Bringup::stopAndFree()
     }
     if (fIh && fIh->enabled && fDev)
         ih60_disable(fDev, fIh);
+    /* smu_hw_fini with rdna3amdgpu=1: the thermal alert off (no UNLOAD on
+     * a card with display hardware) */
+    if (fAmdgpuExact && fPmUp && fSmu && fDev)
+        smu13_pm_fini(fDev, fSmu);
     /* psp_hw_fini with rdna3amdgpu=1 (TAs, ASD, DESTROY_TMR, ring
      * destroy); the verified default only stops the ring */
     if (fPsp && fPsp->ring_created) {
@@ -577,6 +588,8 @@ void RDNA3Bringup::run()
     rdna3_dev_init(fDev, &os, fMmio->getLength());
     fDev->vram_size = fVramSize;
     fDev->amdgpu_exact = fAmdgpuExact ? 1 : 0;
+    /* amdgpu_device_has_dc_support: the display side drives the DCN */
+    fDev->amdgpu_dc = fDmubMode ? 1 : 0;
     publish("RDNA3,AmdgpuExact", fAmdgpuExact ? 1 : 0);
     if (rdna3_dev_set_discovery(fDev, fDisc) != RDNA3_OK || !mapVram()) {
         publishString("RDNA3,Stage2", "failed: device setup");
@@ -1413,6 +1426,16 @@ void RDNA3Bringup::pmInit()
         return;
     }
     fPmUp = true;
+    if (fAmdgpuExact) {
+        /* smu_v13_0_register_irq_handler: the IVs reach smuIrq */
+        if (!fSmuIrqCall)
+            fSmuIrqCall = thread_call_allocate((thread_call_func_t)smuIrqTick, this);
+        publish("RDNA3,PMThermalAlert", fSmu->irq_enabled ? 1 : 0);
+        publish("RDNA3,PMPcieLevels", fSmu->pcie_levels);
+        BLOG("PM: rdna3amdgpu=1: %u PCIe levels sent, thermal alert at %u C, %s",
+             fSmu->pcie_levels, fSmu->software_shutdown_temp,
+             fDev->amdgpu_dc ? "display core present" : "DALNotPresent sent");
+    }
     pmCtlInit(vb);
     publishString("RDNA3,PM", fSmu->dpm_running ? "dpm running" : "features enabled, dpm off");
     publish("RDNA3,PMFeaturesAllowed", fSmu->allowed);
@@ -2218,6 +2241,9 @@ bool RDNA3Bringup::gpuReset(bool baco)
         publish("RDNA3,PMBACOCycles", fBacoCycles);
         publish("RDNA3,PMBACOResult", (uint64_t)(int64_t)r);
     } else {
+        /* amdgpu_device_mode1_reset: SMU mode-1 when the PMFW supports it */
+        if (fAmdgpuExact && fSmu && fPmUp)
+            HLOG("mode-1 reset: PMFW support %s", smu13_is_mode1_reset_supported(fSmu) ? "yes" : "no");
         smu13_mode1_reset(fDev);
     }
     if (psp13_wait_for_bootloader(fPsp) != RDNA3_OK)
@@ -2889,6 +2915,10 @@ void RDNA3Bringup::irqAction(OSObject *owner, IOInterruptEventSource *, int)
 void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
 {
     RDNA3Bringup *b = (RDNA3Bringup *)ctx;
+    if (b->fAmdgpuExact && b->fPmUp && b->fSmu && smu13_iv_is_smu(iv->client_id, iv->src_id)) {
+        b->smuIrq(iv);
+        return;
+    }
     if (gmc11_iv_is_vm_fault(iv)) {
         /* gmc_v11_0_process_interrupt: no retry faults on a dGPU, the wave
          * is gone; the VM that owns the VMID is guilty from now on */
@@ -2944,6 +2974,99 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
     case RD_IH_FENCE_COMPUTE0: b->fIrqFenceComp++; break;
     default:                b->fIrqOther++; break;
     }
+}
+
+/* smu_v13_0_irq_process from the IV callback (fIhLock held): the hardware
+ * CTF right away, the rest from fSmuIrqCall under the DRM lock, because
+ * it may use the PMFW mailbox */
+void RDNA3Bringup::smuIrq(const rdna3_iv *iv)
+{
+    uint64_t deadline;
+    uint32_t delay = 0;
+    fSmuIrqs++;
+    if (iv->client_id == RD_IH_CLIENT_ROM_SMUIO) {
+        if (smu13_irq_process(fDev, fSmu, iv->client_id, iv->src_id, 0) == RD_SMU_IRQ_HWCTF)
+            overTemp("GPU HW CTF");
+        return;
+    }
+    if (fSmuIrqN < kSmuIvMax) {
+        fSmuIrqQ[fSmuIrqN].client = iv->client_id;
+        fSmuIrqQ[fSmuIrqN].src = iv->src_id;
+        fSmuIrqQ[fSmuIrqN].ctx = iv->src_data[0];
+        fSmuIrqN++;
+    }
+    if (!fSmuIrqCall || fSmuIrqStop)
+        return;
+    if (iv->client_id == RD_IH_CLIENT_THM && iv->src_id == RD_THM_SRCID_DIG_THERM_L2H)
+        delay = 50;   /* AMDGPU_SWCTF_EXTRA_DELAY */
+    clock_interval_to_deadline(delay, kMillisecondScale, &deadline);
+    thread_call_enter_delayed(fSmuIrqCall, deadline);
+}
+
+void RDNA3Bringup::smuIrqTick(void *owner, void *)
+{
+    RDNA3Bringup *b = (RDNA3Bringup *)owner;
+    IOLock *l = b->fOwner->drmLock();
+    SmuIv q[kSmuIvMax];
+    uint32_t n, i, hot = 0;
+    bool swctf = false;
+    if (!l || !b->fIhLock)
+        return;
+    IOLockLock(l);
+    IOLockLock(b->fIhLock);
+    n = b->fSmuIrqN;
+    for (i = 0; i < n; i++)
+        q[i] = b->fSmuIrqQ[i];
+    b->fSmuIrqN = 0;
+    IOLockUnlock(b->fIhLock);
+    for (i = 0; i < n && !b->fSmuIrqStop && b->fPmUp && b->fSmu; i++) {
+        int r = smu13_irq_process(b->fDev, b->fSmu, q[i].client, q[i].src, q[i].ctx);
+        if (r == RD_SMU_IRQ_SWCTF)
+            swctf = true;
+        else if (r == RD_SMU_IRQ_THROTTLE)
+            b->publish("RDNA3,PMThrottleInterrupts", b->fSmu->throttle_int_counter);
+    }
+    /* smu_swctf_delayed_work_handler */
+    if (swctf && !b->fSmuIrqStop && b->fPmUp && b->fSmu &&
+        smu13_swctf_check(b->fDev, b->fSmu, &hot))
+        b->overTemp("GPU SW CTF");
+    b->publish("RDNA3,PMSmuInterrupts", b->fSmuIrqs);
+    IOLockUnlock(l);
+}
+
+/* orderly_poweroff(true) on a critical temperature: the system's thermal
+ * emergency */
+void RDNA3Bringup::overTemp(const char *why)
+{
+    BLOG("%s: asking the system to power down (thermal emergency)", why);
+    if (IOPMrootDomain *root = fOwner->getPMRootDomain())
+        root->receivePowerNotification(kIOPMOverTemp);
+}
+
+/* amdgpu_pci_shutdown: mp1_state UNLOAD through amdgpu_device_ip_suspend,
+ * i.e. the SMC block's smu_smc_hw_cleanup (thermal alert off) and
+ * smu_v13_0_0_set_mp1_state (PrepareMp1ForUnload 0x55); nothing in a
+ * passthrough VM (amdgpu_passthrough: the CPUID hypervisor bit). The
+ * other blocks are not suspended first: the power goes next. */
+void RDNA3Bringup::pmShutdown()
+{
+    uint32_t ecx = 0;
+    if (!fAmdgpuExact || !fPmUp || !fSmu || !fDev)
+        return;
+#if defined(__x86_64__)
+    {
+        uint32_t eax = 1, ebx = 0, edx = 0;
+        __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    }
+#endif
+    if (ecx & (1u << 31)) {
+        BLOG("shutdown: under a hypervisor, MP1 state left as is");
+        return;
+    }
+    if (fSmu->irq_enabled)
+        smu13_disable_thermal_alert(fDev, fSmu);
+    int r = smu13_set_mp1_state(fDev, fSmu, RD_PP_MP1_STATE_UNLOAD);
+    BLOG("shutdown: MP1 state UNLOAD (PrepareMp1ForUnload 0x55) -> %d", r);
 }
 
 void RDNA3Bringup::handleInterrupt()

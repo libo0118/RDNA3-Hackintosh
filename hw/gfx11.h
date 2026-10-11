@@ -247,6 +247,9 @@ int  gfx11_is_idle(rdna3_dev *d);
 /* gfx_v10_0_ring_soft_recovery: SQ_CMD KILL broadcast to the waves of 'vmid'
  * inside RLC safe mode; the job's fence may then land */
 void gfx11_kill_waves(rdna3_dev *d, uint32_t vmid);
+/* amdgpu_gfx_rlc_enter_safe_mode / amdgpu_gfx_rlc_exit_safe_mode: nothing
+ * while the RLC is not running (gfx_v11_0_is_rlc_enabled) */
+void gfx11_rlc_safe_mode(rdna3_dev *d, int enter);
 /* amdgpu_fence_driver_force_completion: the last emitted seq lands in the
  * fence slot so every waiter returns (used right before a reset) */
 void gfx11_force_fence_completion(rdna3_dev *d, rdna3_gfx_ring *r);

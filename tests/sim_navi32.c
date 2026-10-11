@@ -338,6 +338,12 @@ typedef struct sim {
         uint32_t baco_seq, armd3_seq;
         int sim_throttle;     /* metrics report PPT0 + hotspot throttling */
         uint32_t soft_min[PPCLK_COUNT], soft_max[PPCLK_COUNT];   /* last SetSoftMin/MaxByFreq */
+        /* stage 4: OverridePcieParameters after EnableAllSmuFeatures, the
+         * PrepareMp1ForUnload argument, DALNotPresent, SetGpoAllow,
+         * AllowIHHostInterrupt, ReenableAcDcInterrupt */
+        unsigned pcie_after_enable, dal_not_present, gpo_msgs, ih_allow, acdc_reenable;
+        uint32_t unload_arg, gpo;
+        int all_enabled;      /* EnableAllSmuFeatures done */
     } smu;
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
     unsigned sdma_ibs, sdma_ib_fault;   /* INDIRECT packets run, ones the GFXHUB could not translate */
@@ -915,13 +921,16 @@ static void make_metrics(SmuMetricsExternal_t *m)
 static unsigned sim_dpm_levels(uint32_t clk, const uint32_t **lv, int *fine)
 {
     static const uint32_t gfx[] = { 500, 2124 }, uclk[] = { 96, 500, 1000, 1218 },
-                          soc[] = { 600, 900, 1200 }, fclk[] = { 1000, 1800 };
+                          soc[] = { 600, 900, 1200 }, fclk[] = { 1000, 1800 },
+                          vclk[] = { 500, 1300, 2600 }, dclk[] = { 400, 1100, 2200 };
     *fine = 0;
     switch (clk) {
     case PPCLK_GFXCLK: *lv = gfx; *fine = 1; return 2;
     case PPCLK_UCLK:   *lv = uclk; return 4;
     case PPCLK_SOCCLK: *lv = soc; return 3;
     case PPCLK_FCLK:   *lv = fclk; return 2;
+    case PPCLK_VCLK_0: case PPCLK_VCLK_1: *lv = vclk; return 3;
+    case PPCLK_DCLK_0: case PPCLK_DCLK_1: *lv = dclk; return 3;
     default: *lv = NULL; return 0;
     }
 }
@@ -933,8 +942,16 @@ static int sim_dpm_enabled(uint32_t clk)
     case PPCLK_UCLK:   return (S.smu.enabled & RD_SMU_FEATURE(FEATURE_DPM_UCLK_BIT)) != 0;
     case PPCLK_SOCCLK: return (S.smu.enabled & RD_SMU_FEATURE(FEATURE_DPM_SOCCLK_BIT)) != 0;
     case PPCLK_FCLK:   return (S.smu.enabled & RD_SMU_FEATURE(FEATURE_DPM_FCLK_BIT)) != 0;
+    case PPCLK_VCLK_0: case PPCLK_VCLK_1: case PPCLK_DCLK_0: case PPCLK_DCLK_1:
+        return (S.smu.enabled & RD_SMU_FEATURE(FEATURE_MM_DPM_BIT)) != 0;
     default: return 0;
     }
+}
+
+/* amdgpu_asic_update_umd_stable_pstate stand-in: counts enter / exit */
+static void test_umd_pstate(void *ctx, int enter)
+{
+    *(int *)ctx += enter ? 1 : -1;
 }
 
 /* MM_INDEX/MM_INDEX_HI/MM_DATA: VRAM through the indirect window
@@ -1062,6 +1079,7 @@ static void smu_msg(uint32_t v)
         /* fan control: the PMFW programs the FDO's 100 % duty */
         if (S.smu.enabled & RD_SMU_FEATURE(FEATURE_FAN_CONTROL_BIT))
             *R(THMR(regCG_FDO_CTRL1)) = (*R(THMR(regCG_FDO_CTRL1)) & ~CG_FDO_CTRL1__FMAX_DUTY100_MASK) | 200u;
+        S.smu.all_enabled = 1;
         break;
     case PPSMC_MSG_EnableSmuFeaturesLow:
     case PPSMC_MSG_EnableSmuFeaturesHigh:
@@ -1106,6 +1124,8 @@ static void smu_msg(uint32_t v)
     case PPSMC_MSG_GetRunningSmuFeaturesHigh: *R(MP1(82)) = (uint32_t)(S.smu.enabled >> 32); break;
     case PPSMC_MSG_OverridePcieParameters:
         S.smu.pcie_overrides++;
+        if (S.smu.all_enabled)
+            S.smu.pcie_after_enable++;
         S.smu.last_pcie_arg = arg;
         break;
     case PPSMC_MSG_GetDpmFreqByIndex:
@@ -1145,7 +1165,11 @@ static void smu_msg(uint32_t v)
     case PPSMC_MSG_AllowGfxOff:     S.smu.gfxoff = 1; S.smu.gfxoff_msgs++; break;
     case PPSMC_MSG_DisallowGfxOff:  S.smu.gfxoff = 0; S.smu.gfxoff_msgs++; break;
     case PPSMC_MSG_NotifyPowerSource: break;
-    case PPSMC_MSG_PrepareMp1ForUnload: S.smu.unload = 1; break;
+    case PPSMC_MSG_PrepareMp1ForUnload: S.smu.unload = 1; S.smu.unload_arg = arg; break;
+    case PPSMC_MSG_DALNotPresent:   S.smu.dal_not_present++; break;
+    case PPSMC_MSG_SetGpoAllow:     S.smu.gpo = arg; S.smu.gpo_msgs++; break;
+    case PPSMC_MSG_AllowIHHostInterrupt: S.smu.ih_allow++; break;
+    case PPSMC_MSG_ReenableAcDcInterrupt: S.smu.acdc_reenable++; break;
     case PPSMC_MSG_PowerUpVcn:
     case PPSMC_MSG_PowerDownVcn:
         if ((arg >> 16) > 1 || (arg & 0xffff)) { resp = PPSMC_Result_Failed; break; }
@@ -5833,6 +5857,18 @@ static void test_pm_control(rdna3_dev *dev, const rdna3_vbios *vb)
         a[0] = 0;
         pmctl_req(&rq, RD_PMCTL_DF_CSTATE, 1, a);
         CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && rp.info.df_cstate == 0);
+        /* power_dpm_force_performance_level */
+        a[0] = (int32_t)RD_DPM_FORCED_LEVEL_LOW;
+        pmctl_req(&rq, RD_PMCTL_PERF_LEVEL, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, 0) == RDNA3_EOPNOTSUPP);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && smu.dpm_level == RD_DPM_FORCED_LEVEL_LOW &&
+              S.smu.soft_max[PPCLK_GFXCLK] == 500 && S.smu.soft_min[PPCLK_GFXCLK] == 500);
+        a[0] = (int32_t)RD_DPM_FORCED_LEVEL_AUTO;
+        pmctl_req(&rq, RD_PMCTL_PERF_LEVEL, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK && S.smu.soft_max[PPCLK_GFXCLK] == 2124);
+        a[0] = 0;
+        pmctl_req(&rq, RD_PMCTL_PERF_LEVEL, 1, a);
+        CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_EINVAL);
         pmctl_req(&rq, RD_PMCTL_BACO_CYCLE, 0, a);
         CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all | RD_PMCTL_GATE_BACO) == RDNA3_EOPNOTSUPP);
         pmctl_req(&rq, RD_PMCTL_INFO, 0, a);
@@ -6894,7 +6930,113 @@ static void run(const char *fwdir)
         CHECK(smu.fclk.count == 2 && smu.fclk.level[1] == 1800);
         CHECK(S.smu.pcie_overrides == 3 && S.smu.last_pcie_arg == ((2u << 16) | (2u << 8) | 4));
         CHECK(smu13_read_metrics(&dev, &smu) == RDNA3_OK && smu13_metric_uclk_mhz(&smu) == 1218);
-        CHECK(smu13_pm_fini(&dev, &smu) == RDNA3_OK && S.smu.unload);
+        CHECK(smu13_pm_fini(&dev, &smu) == RDNA3_OK && S.smu.unload && S.smu.unload_arg == 0);
+
+        /* rdna3amdgpu=1: smu_smc_hw_setup's own order, the allowed mask of
+         * smu_v13_0_0_get_allowed_feature_mask, the pcie_table sent whole,
+         * the thermal / MP1 interrupts, the performance levels, MP1 state */
+        {
+            uint64_t am = smu13_get_allowed_feature_mask(0x00526100u, RD_PP_FEATURE_MASK_DEFAULT, 0);
+            uint32_t thm, hot = 0, *fl;
+            int umd = 0;
+            CHECK(am == ~RD_SMU_FEATURE(FEATURE_ATHUB_MMHUB_PG_BIT));
+            CHECK(!(smu13_get_allowed_feature_mask(0x004e3900u, RD_PP_FEATURE_MASK_DEFAULT, 0) &
+                    RD_SMU_FEATURE(FEATURE_GFXOFF_BIT)));
+            CHECK(smu13_get_allowed_feature_mask(0x00526100u, RD_PP_FEATURE_MASK_DEFAULT & ~RD_PP_PCIE_DPM_MASK, 1) ==
+                  ~(RD_SMU_FEATURE(FEATURE_DPM_LINK_BIT) | RD_SMU_FEATURE(FEATURE_DS_LCLK_BIT)));
+            CHECK(smu13_is_mode1_reset_supported(&smu));
+            dev.amdgpu_exact = 1;
+            dev.amdgpu_dc = 0;
+            S.smu.all_enabled = 0;
+            S.smu.pcie_overrides = S.smu.pcie_after_enable = S.smu.dal_not_present = 0;
+            S.smu.unload = 0;
+            *R(THMR(0x000b)) = 0x07000000u;     /* masked, trigger mask set */
+            *R(MP1_BASE + 0x02c3) = 1;          /* MP1_SMN_IH_SW_INT_CTRL.INT_MASK */
+            /* Gen4 x16: the verified profile sends nothing, amdgpu all three levels */
+            CHECK(smu13_pm_init(&dev, &smu, &vb, RD_SMU_FEATURES_AMDGPU, 3, 6, 0) == RDNA3_OK);
+            CHECK(smu.allowed == am && (smu.enabled & RD_SMU_FEATURE(FEATURE_GFXOFF_BIT)));
+            CHECK(S.smu.pcie_overrides == 3 && S.smu.pcie_after_enable == 3 &&
+                  S.smu.last_pcie_arg == ((2u << 16) | (3u << 8) | 6));
+            CHECK(smu.pcie_levels == 3 && smu.pcie_gen[0] == 2 && smu.pcie_lane[2] == 6);
+            CHECK(smu.vdclk_valid && smu.vclk.count == 3 && smu.vclk.level[2] == 2600 &&
+                  smu.dclk.level[0] == 400);
+            thm = *R(THMR(0x000b));
+            CHECK(smu.irq_enabled && (thm & 0xff) == 118 && ((thm >> 8) & 0xff) == 0 &&
+                  !(thm & 0x07000000u) && (thm & 0x10000000u) && (thm >> 29) == 5);
+            CHECK(*R(THMR(0x000a)) == 0x38);
+            CHECK((*R(MP1_BASE + 0x02c2) & 0x1ff) == 0xFE && !(*R(MP1_BASE + 0x02c3) & 1));
+            CHECK(S.smu.dal_not_present == 1 && S.smu.ih_allow == 0 && !smu.dc_controlled_by_gpio);
+
+            /* the IVs smu_v13_0_register_irq_handler adds */
+            CHECK(smu13_iv_is_smu(RD_IH_CLIENT_THM, RD_THM_SRCID_DIG_THERM_L2H) &&
+                  smu13_iv_is_smu(RD_IH_CLIENT_ROM_SMUIO, RD_SMUIO_SRCID_GPIO19) &&
+                  smu13_iv_is_smu(RD_IH_CLIENT_MP1, RD_SMU_IH_INTERRUPT_ID_TO_DRIVER) &&
+                  !smu13_iv_is_smu(RD_IH_CLIENT_MP1, 0) && !smu13_iv_is_smu(RD_IH_CLIENT_THM, 2));
+            CHECK(smu13_irq_process(&dev, &smu, RD_IH_CLIENT_THM, RD_THM_SRCID_DIG_THERM_L2H, 0) ==
+                  RD_SMU_IRQ_SWCTF);
+            CHECK(smu13_swctf_check(&dev, &smu, &hot) == 0 && hot == 60);   /* 60 C < 118 C */
+            CHECK(smu13_irq_process(&dev, &smu, RD_IH_CLIENT_THM, RD_THM_SRCID_DIG_THERM_H2L, 0) ==
+                  RD_SMU_IRQ_UNDER);
+            CHECK(smu13_irq_process(&dev, &smu, RD_IH_CLIENT_ROM_SMUIO, RD_SMUIO_SRCID_GPIO19, 0) ==
+                  RD_SMU_IRQ_HWCTF);
+            CHECK(smu13_irq_process(&dev, &smu, RD_IH_CLIENT_MP1, RD_SMU_IH_INTERRUPT_ID_TO_DRIVER,
+                                    RD_SMU_IH_CTX_FAN_ABNORMAL) == RD_SMU_IRQ_NONE);
+            CHECK((*R(THMR(0x000b)) & 0xff) == 128 && (*R(MP1_BASE + 0x02c3) & 0x100));
+            CHECK(smu13_irq_process(&dev, &smu, RD_IH_CLIENT_MP1, RD_SMU_IH_INTERRUPT_ID_TO_DRIVER,
+                                    RD_SMU_IH_CTX_FAN_RECOVERY) == RD_SMU_IRQ_NONE);
+            CHECK((*R(THMR(0x000b)) & 0xff) == 118);
+            CHECK(smu13_irq_process(&dev, &smu, RD_IH_CLIENT_MP1, RD_SMU_IH_INTERRUPT_ID_TO_DRIVER,
+                                    RD_SMU_IH_CTX_AC) == RD_SMU_IRQ_NONE &&
+                  S.smu.acdc_reenable == 1 && smu.ac_power == 1);
+            CHECK(smu13_irq_process(&dev, &smu, RD_IH_CLIENT_MP1, RD_SMU_IH_INTERRUPT_ID_TO_DRIVER,
+                                    RD_SMU_IH_CTX_THERMAL_THROTTLING) == RD_SMU_IRQ_THROTTLE &&
+                  smu.throttle_int_counter == 1);
+
+            /* power_dpm_force_performance_level */
+            S.smu.gpo_msgs = 0;
+            CHECK(smu13_force_performance_level(&dev, &smu, RD_DPM_FORCED_LEVEL_HIGH, NULL, NULL) == RDNA3_OK);
+            CHECK(smu.dpm_level == RD_DPM_FORCED_LEVEL_HIGH && S.smu.gpo_msgs == 0);
+            CHECK(S.smu.soft_min[PPCLK_GFXCLK] == smu.gfx.level[smu.gfx.count - 1] &&
+                  S.smu.soft_max[PPCLK_GFXCLK] == smu.gfx.level[smu.gfx.count - 1]);
+            CHECK(S.smu.soft_min[PPCLK_UCLK] == 1218 && S.smu.soft_min[PPCLK_FCLK] == 1800 &&
+                  S.smu.soft_min[PPCLK_SOCCLK] == 1200);
+            CHECK(S.smu.soft_min[PPCLK_VCLK_0] == 2600 && S.smu.soft_max[PPCLK_VCLK_1] == 2600 &&
+                  S.smu.soft_min[PPCLK_DCLK_1] == 2200);
+            CHECK(smu13_force_performance_level(&dev, &smu, RD_DPM_FORCED_LEVEL_PROFILE_PEAK,
+                                                test_umd_pstate, &umd) == RDNA3_OK);
+            CHECK(umd == 1 && S.smu.gpo_msgs == 1 && S.smu.gpo == 0 &&
+                  smu.saved_dpm_level == RD_DPM_FORCED_LEVEL_HIGH);
+            CHECK(!(smu.enabled & RD_SMU_FEATURE(FEATURE_DS_GFXCLK_BIT)) &&
+                  !(smu.enabled & RD_SMU_FEATURE(FEATURE_GFX_ULV_BIT)));
+            CHECK(S.smu.soft_min[PPCLK_GFXCLK] == smu.pstate_gfx.peak && smu.pstate_gfx.peak == 2124);
+            CHECK(smu13_force_performance_level(&dev, &smu, RD_DPM_FORCED_LEVEL_PROFILE_EXIT,
+                                                test_umd_pstate, &umd) == RDNA3_OK);
+            CHECK(umd == 0 && smu.dpm_level == RD_DPM_FORCED_LEVEL_HIGH && S.smu.gpo == 1 &&
+                  (smu.enabled & RD_SMU_FEATURE(FEATURE_DS_GFXCLK_BIT)) &&
+                  (smu.enabled & RD_SMU_FEATURE(FEATURE_GFX_ULV_BIT)));
+            CHECK(smu13_force_performance_level(&dev, &smu, RD_DPM_FORCED_LEVEL_AUTO, NULL, NULL) == RDNA3_OK);
+            CHECK(S.smu.soft_min[PPCLK_GFXCLK] == 500 && S.smu.soft_min[PPCLK_UCLK] == 96 &&
+                  S.smu.soft_max[PPCLK_UCLK] == 1218 && S.smu.soft_min[PPCLK_DCLK_0] == 400);
+            CHECK(smu13_set_performance_level(&dev, &smu, 0x400) == RDNA3_EINVAL);
+
+            /* smu_hw_fini: alert off, no UNLOAD on a card with display
+             * hardware; PrepareMp1ForUnload(0x55) for the shutdown */
+            CHECK(smu13_pm_fini(&dev, &smu) == RDNA3_OK && !S.smu.unload && !smu.irq_enabled);
+            CHECK((*R(THMR(0x000b)) & 0x03000000u) == 0x03000000u && *R(THMR(0x000a)) == 0 &&
+                  (*R(MP1_BASE + 0x02c3) & 1));
+            CHECK(smu13_set_mp1_state(&dev, &smu, RD_PP_MP1_STATE_SHUTDOWN) == RDNA3_OK && !S.smu.unload);
+            CHECK(smu13_set_mp1_state(&dev, &smu, RD_PP_MP1_STATE_UNLOAD) == RDNA3_OK &&
+                  S.smu.unload && S.smu.unload_arg == 0x55);
+            CHECK(smu13_check_fw_status(&dev) == RDNA3_OK);
+            smu.baco_state = RD_SMU_BACO_STATE_EXIT;   /* after a BACO exit the PMFW state goes too */
+            CHECK(smu13_set_mp1_state(&dev, &smu, RD_PP_MP1_STATE_UNLOAD) == RDNA3_OK);
+            CHECK(smu13_check_fw_status(&dev) != RDNA3_OK);
+            fl = smn_slot(RD_SMN_MP1_FIRMWARE_FLAGS, 1);
+            if (fl)
+                *fl = MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK;
+            S.smu.unload = 0;
+            dev.amdgpu_exact = 0;
+        }
 
         /* SCPM (consumer Navi 32): the PSP runtime database 1 MiB below the
          * top of VRAM says so; the PSP gave the PMFW its PPTable, so neither

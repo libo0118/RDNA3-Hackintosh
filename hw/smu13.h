@@ -89,6 +89,7 @@ extern "C" {
 #define PPSMC_MSG_SetGpoAllow           0x41
 #define PPSMC_MSG_AllowIHHostInterrupt  0x4C
 #define PPSMC_MSG_EnableUCLKShadow      0x51
+#define PPSMC_MSG_DALNotPresent         0x4E
 
 int smu13_send_msg(rdna3_dev *d, uint32_t msg, uint32_t param, uint32_t *out);
 /* Waits for PMFW to be up (response register non-zero), then
@@ -204,6 +205,17 @@ typedef struct rdna3_smu {
     uint32_t df_cstate;                /* last SetExternalClientDfCstateAllow, ~0 = none */
     uint64_t unique_id;                /* adev->unique_id */
     struct { uint32_t min, peak, standard; } pstate_gfx, pstate_uclk, pstate_soc, pstate_fclk;
+
+    /* stage 4 item J (smu_v13_0_0_set_default_dpm_table's VCLK / DCLK and
+     * PCIe tables, the forced performance level, the thermal interrupts) */
+    rdna3_smu_dpm vclk, dclk;
+    struct { uint32_t min, peak, standard; } pstate_vclk, pstate_dclk;
+    int      vdclk_valid;              /* vclk / dclk read from the PMFW */
+    uint32_t pcie_gen[NUM_LINK_LEVELS], pcie_lane[NUM_LINK_LEVELS];   /* pcie_table */
+    uint32_t dpm_level, saved_dpm_level;   /* smu_dpm_context, RD_DPM_FORCED_LEVEL_* */
+    int      irq_enabled;              /* smu_v13_0_set_irq_state(ENABLE) */
+    uint64_t throttle_int_counter;     /* SMU_IH_INTERRUPT_CONTEXT_ID_THERMAL_THROTTLING */
+    int      ac_power;                 /* adev->pm.ac_power (AC/DC context ids) */
 } rdna3_smu;
 
 /* Allocates the driver and tool tables in VRAM (needs rdna3_vram_alloc_init
@@ -223,6 +235,14 @@ typedef struct rdna3_smu {
  * back unchanged, which amdgpu only does with SCPM. */
 int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t allowed,
                   uint32_t pcie_gen_cap, uint32_t pcie_width_cap, int scpm);
+/* With d->amdgpu_exact (rdna3amdgpu=1) smu13_pm_init follows
+ * smu_smc_hw_setup's own order: 'allowed' == RD_SMU_FEATURES_AMDGPU becomes
+ * smu_v13_0_0_get_allowed_feature_mask with the default ppfeaturemask
+ * (GFXOFF allowed from PMFW 78.58), no OverridePcieParameters before
+ * EnableAllSmuFeatures, and after the DPM tables (VCLK / DCLK included)
+ * smu_v13_0_update_pcie_parameters on every level of the pcie_table,
+ * smu_v13_0_enable_thermal_alert and smu_v13_0_notify_display_change
+ * (d->amdgpu_dc). */
 
 /* smu_cmn_update_table: VRAM driver table <-> PMFW table 'table_id' */
 int smu13_table_read(rdna3_dev *d, rdna3_smu *s, uint32_t table_id, uint32_t arg, void *dst,
@@ -375,8 +395,100 @@ void smu13_pmctl_info(rdna3_dev *d, rdna3_smu *s, uint32_t gates, rdna3_pmctl_in
 
 /* smu_hw_fini for a driver unload: on 13.0.10 the PMFW handles the DPM
  * features itself (smu_disable_dpms returns early), the driver only sends
- * PrepareMp1ForUnload (smu_reset_mp1_state). */
+ * PrepareMp1ForUnload (smu_reset_mp1_state). With rdna3amdgpu=1 exactly
+ * amdgpu's: the thermal alert off, and no UNLOAD (smu_reset_mp1_state sends
+ * it only on a 13.0.10 without display hardware). */
 int smu13_pm_fini(rdna3_dev *d, rdna3_smu *s);
+
+/* ---- stage 4 item J ---- */
+
+/* enum pp_mp1_state (kgd_pp_interface.h) */
+#define RD_PP_MP1_STATE_NONE     0
+#define RD_PP_MP1_STATE_SHUTDOWN 1
+#define RD_PP_MP1_STATE_UNLOAD   2
+#define RD_PP_MP1_STATE_RESET    3
+/* smu_v13_0_0_set_mp1_state: UNLOAD sends PrepareMp1ForUnload(0x55), then
+ * after a BACO exit smu_v13_0_disable_pmfw_state; every other state is
+ * ignored on 13.0.0 / 13.0.10 */
+int smu13_set_mp1_state(rdna3_dev *d, rdna3_smu *s, int mp1_state);
+/* smu_v13_0_disable_pmfw_state: MP1_FIRMWARE_FLAGS cleared through SMN */
+int smu13_disable_pmfw_state(rdna3_dev *d);
+
+/* amdgpu_pp_feature_mask default and the bits smu_v13_0_0_get_allowed_feature_mask reads */
+#define RD_PP_FEATURE_MASK_DEFAULT 0xfff7bfffu
+#define RD_PP_SCLK_DPM_MASK        0x1u
+#define RD_PP_MCLK_DPM_MASK        0x2u
+#define RD_PP_PCIE_DPM_MASK        0x4u
+#define RD_PP_SCLK_DEEP_SLEEP_MASK 0x8u
+#define RD_PP_ULV_MASK             0x100u
+#define RD_PP_SOCCLK_DPM_MASK      0x1000u
+#define RD_PP_GFXOFF_MASK          0x8000u
+/* smu_v13_0_0_get_allowed_feature_mask: 'athub_mmhub_pg' = soc21's
+ * pg_flags have both AMD_PG_SUPPORT_ATHUB and _MMHUB (not on GC 11.0.3) */
+uint64_t smu13_get_allowed_feature_mask(uint32_t smc_fw_version, uint32_t pp_feature,
+                                        int athub_mmhub_pg);
+/* smu_v13_0_0_is_mode1_reset_supported: PMFW 78.41 and later (the cached
+ * smu_cmn_get_smc_version) */
+int smu13_is_mode1_reset_supported(const rdna3_smu *s);
+/* smu_v13_0_notify_display_change: DALNotPresent when no display core
+ * drives the DCN ('dc_present' = amdgpu_device_has_dc_support) */
+int smu13_notify_display_change(rdna3_dev *d, int dc_present);
+/* smu_v13_0_update_pcie_parameters with PP_PCIE_DPM on: every level of the
+ * pcie_table clamped to the link caps and sent (OverridePcieParameters) */
+int smu13_update_pcie_parameters(rdna3_dev *d, rdna3_smu *s, uint32_t pcie_gen_cap,
+                                 uint32_t pcie_width_cap);
+/* smu_v13_0_deep_sleep_control / _gfx_ulv_control / _gpo_control */
+int smu13_deep_sleep_control(rdna3_dev *d, rdna3_smu *s, int enable);
+int smu13_gfx_ulv_control(rdna3_dev *d, rdna3_smu *s, int enable);
+int smu13_gpo_control(rdna3_dev *d, int enable);
+
+/* smu_v13_0_set_performance_level: soft min / max of every DPM clock for
+ * the level (VCLK / DCLK per VCN instance) */
+int smu13_set_performance_level(rdna3_dev *d, rdna3_smu *s, uint32_t level);
+/* smu_force_performance_level (power_dpm_force_performance_level):
+ * smu_enable_umd_pstate around the UMD profile levels (GPO, GFX ULV and
+ * deep sleep off; 'umd_pstate' = amdgpu_asic_update_umd_stable_pstate,
+ * soc21: RLC safe mode, called with enter 1 / 0; may be NULL), then the
+ * level when it changed (smu_adjust_power_state_dynamic) */
+typedef void (*rdna3_umd_pstate_fn)(void *ctx, int enter);
+int smu13_force_performance_level(rdna3_dev *d, rdna3_smu *s, uint32_t level,
+                                  rdna3_umd_pstate_fn umd_pstate, void *ctx);
+
+/* ---- thermal / MP1 interrupts (smu_v13_0_register_irq_handler) ---- */
+#define RD_IH_CLIENT_THM          0x0f   /* SOC21_IH_CLIENTID_THM */
+#define RD_IH_CLIENT_ROM_SMUIO    0x16   /* SOC21_IH_CLIENTID_ROM_SMUIO */
+#define RD_IH_CLIENT_MP1          0x1f   /* SOC21_IH_CLIENTID_MP1 */
+#define RD_THM_SRCID_DIG_THERM_L2H 0     /* THM_11_0__SRCID__THM_DIG_THERM_L2H */
+#define RD_THM_SRCID_DIG_THERM_H2L 1
+#define RD_SMUIO_SRCID_GPIO19     83     /* SMUIO_11_0__SRCID__SMUIO_GPIO19: hardware CTF */
+#define RD_SMU_IH_INTERRUPT_ID_TO_DRIVER 0xFE
+#define RD_SMU_IH_CTX_AC                0x3
+#define RD_SMU_IH_CTX_DC                0x4
+#define RD_SMU_IH_CTX_THERMAL_THROTTLING 0x7
+#define RD_SMU_IH_CTX_FAN_ABNORMAL      0x8
+#define RD_SMU_IH_CTX_FAN_RECOVERY      0x9
+/* smu_v13_0_set_irq_state: the THM high / low alert at the thermal range
+ * (DIG_THERM_INTH = software shutdown temperature) and the MP1 software
+ * interrupt (ID 0xFE) enabled or masked */
+int smu13_set_irq_state(rdna3_dev *d, rdna3_smu *s, int enable);
+/* smu_v13_0_enable_thermal_alert / _disable_thermal_alert (with
+ * smu_v13_0_process_pending_interrupt: AllowIHHostInterrupt only when the
+ * board's DC is GPIO controlled and ACDC runs) */
+int smu13_enable_thermal_alert(rdna3_dev *d, rdna3_smu *s);
+int smu13_disable_thermal_alert(rdna3_dev *d, rdna3_smu *s);
+/* the IV is one smu_v13_0_register_irq_handler added */
+int smu13_iv_is_smu(uint32_t client_id, uint32_t src_id);
+/* smu_v13_0_irq_process: what the IV asks the OS to do */
+#define RD_SMU_IRQ_NONE     0
+#define RD_SMU_IRQ_SWCTF    1   /* check the hotspot in 50 ms (smu_swctf_delayed_work_handler) */
+#define RD_SMU_IRQ_HWCTF    2   /* hardware CTF: shut the system down now */
+#define RD_SMU_IRQ_UNDER    3   /* under the temperature range */
+#define RD_SMU_IRQ_THROTTLE 4
+int smu13_irq_process(rdna3_dev *d, rdna3_smu *s, uint32_t client_id, uint32_t src_id,
+                      uint32_t ctxid);
+/* smu_swctf_delayed_work_handler: 1 = the hotspot is at or above the
+ * software shutdown temperature (or unreadable), shut down */
+int smu13_swctf_check(rdna3_dev *d, rdna3_smu *s, uint32_t *hotspot_c);
 
 #ifdef __cplusplus
 }

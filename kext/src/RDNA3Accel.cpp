@@ -150,6 +150,11 @@ void RDNA3Accel::systemWillShutdown(IOOptionBits specifier)
     LOG("system %s: display back to the boot head", specifier == kIOMessageSystemWillRestart ? "restart" : "power off");
     fShuttingDown = true;   /* D4: the power-off is no sleep */
     displayShutdown();
+    if (fBringup && fDrmLock) {
+        IOLockLock(fDrmLock);
+        fBringup->pmShutdown();   /* rdna3amdgpu=1 only */
+        IOLockUnlock(fDrmLock);
+    }
     super::systemWillShutdown(specifier);
 }
 

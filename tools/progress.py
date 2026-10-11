@@ -95,6 +95,14 @@ ITEM_STEPS = [
                 r"|psp_hw_fini|psp_suspend|psp_rl_load|psp_prep_ta_(invoke|load|unload)_cmd_buf"
                 r"|psp_prep_tmr_unload_cmd_buf|psp_ta_(free_shared_buf|init_shared_buf|invoke|load|unload)"
                 r"|psp_tmr_(terminate|unload)|psp_v13_0_ring_destroy"), ["amdgpu"]),
+    (re.compile(r"smu_v13_0_0_(get_allowed_feature_mask|is_mode1_reset_supported|set_mp1_state)"
+                r"|smu_v13_0_(ack_ac_dc_interrupt|allow_ih_interrupt|deep_sleep_control|disable_pmfw_state"
+                r"|enable_thermal_alert|disable_thermal_alert|irq_process|notify_display_change"
+                r"|process_pending_interrupt|register_irq_handler|set_irq_state|set_performance_level"
+                r"|update_pcie_parameters|gfx_ulv_control|gpo_control)"
+                r"|smu_(enable_umd_pstate|force_performance_level|adjust_power_state_dynamic"
+                r"|swctf_delayed_work_handler|reset_mp1_state)"
+                r"|soc21_update_umd_stable_pstate|gfx_v11_0_update_perf_clk"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

@@ -24,6 +24,9 @@
  *   rdna3_pmctl levels sclk|mclk|socclk|fclk <mask>   pp_dpm_* "echo <levels>"
  *   rdna3_pmctl dfcstate allow|disallow
  *   rdna3_pmctl baco-cycle             BACO enter + exit, GPU up again (rdna3baco=1)
+ *   rdna3_pmctl perflevel auto|low|high|manual|profile_standard|profile_min_sclk|
+ *                         profile_min_mclk|profile_peak|profile_exit
+ *                                      power_dpm_force_performance_level
  *   rdna3_pmctl selftest               the card test of ladder step pmctl: every
  *                                      write once and back, ends with
  *                                      "PMCTL: ALL PASSED" or "PMCTL: FAILED"
@@ -354,7 +357,9 @@ static int usage(void)
                     "       od sclk MIN MAX | od mclk MIN MAX | od vddgfx MV | od fan-curve I C PCT |\n"
                     "       od acoustic-limit|acoustic-target|fan-target-temp|fan-min-pwm|zero-rpm|zero-rpm-stop V |\n"
                     "       od restore [what] | profile N|NAME [9 custom values] | profiles |\n"
-                    "       levels sclk|mclk|socclk|fclk MASK | dfcstate allow|disallow | baco-cycle | selftest]\n");
+                    "       levels sclk|mclk|socclk|fclk MASK | dfcstate allow|disallow | baco-cycle |\n"
+                    "       perflevel auto|low|high|manual|profile_standard|profile_min_sclk|profile_min_mclk|\n"
+                    "                 profile_peak|profile_exit | selftest]\n");
     return 2;
 }
 
@@ -446,6 +451,18 @@ int main(int argc, char **argv)
     } else if (!strcmp(cmd, "dfcstate") && argc >= 3) {
         a[0] = !strcmp(argv[2], "allow");
         r = pm_call(RD_PMCTL_DF_CSTATE, 1, a, &rp);
+    } else if (!strcmp(cmd, "perflevel") && argc >= 3) {
+        /* amdgpu_set_power_dpm_force_performance_level's names */
+        static const char *const lv[] = { "auto", "manual", "low", "high", "profile_standard",
+                                          "profile_min_sclk", "profile_min_mclk", "profile_peak",
+                                          "profile_exit" };
+        a[0] = 0;
+        for (i = 0; i < (int)(sizeof(lv) / sizeof(lv[0])); i++)
+            if (!strcmp(argv[2], lv[i]))
+                a[0] = (int32_t)(1u << i);
+        if (!a[0])
+            return usage();
+        r = pm_call(RD_PMCTL_PERF_LEVEL, 1, a, &rp);
     } else if (!strcmp(cmd, "baco-cycle")) {
         r = pm_call(RD_PMCTL_BACO_CYCLE, 0, NULL, &rp);
         printf("BACO: %s\n", r ? "FAILED" : "cycle done, GPU up again");

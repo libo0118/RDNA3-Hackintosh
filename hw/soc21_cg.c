@@ -18,6 +18,7 @@
  */
 #include "rdna3_hw.h"
 #include "soc21_cg.h"
+#include "gfx11.h"
 #include "gen/athub_3_0_0_cg.h"
 #include "gen/hdp_6_0_0_cg.h"
 
@@ -122,4 +123,11 @@ uint32_t soc21_clock_gating_state(rdna3_dev *d)
             f |= RD_SOC_CG_ATHUB_LS;
     }
     return f;
+}
+
+/* Ported from soc21_update_umd_stable_pstate */
+void soc21_update_umd_stable_pstate(void *ctx, int enter)
+{
+    rdna3_dev *d = (rdna3_dev *)ctx;
+    gfx11_rlc_safe_mode(d, enter);   /* amdgpu_gfx_rlc_enter_safe_mode / _exit_safe_mode */
 }
