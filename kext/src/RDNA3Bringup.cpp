@@ -1468,8 +1468,14 @@ void RDNA3Bringup::dmubInit()
     }
     pspLoaded = amd_ucode_plan_find(fPlan, AMD_UCODE_DMCUB) != nullptr;
     ret = dmub32_sw_init(fDmub, fDev, (const uint8_t *)fw->data, (uint32_t)fw->len, fVbios.len);
+    /* rdna3dmubreset=1 (step dmubreset): amdgpu's dmub_dcn32_reset instead
+     * of the stop + reset verified on the card (hw/dmub32.c) */
+    if (ret == RDNA3_OK)
+        fDmub->amd_reset = rd3_arg("rdna3dmubreset", 0) ? 1 : 0;
     if (ret == RDNA3_OK)
         ret = dmub32_hw_init(fDmub, fVbios.data, fVbios.len, pspLoaded, 100000);
+    if (fDmub->amd_reset)
+        publish("RDNA3,DMUBAmdReset", (uint64_t)(fDmub->reset_acked | fDmub->reset_stopped << 1));
     if (ret == RDNA3_ETIME) {
         /* amdgpu only warns here ("Wait for DMUB auto-load failed"); see
          * whether the firmware comes up late */

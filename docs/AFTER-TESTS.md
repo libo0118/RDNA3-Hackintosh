@@ -453,6 +453,8 @@ with `dp:`; ioreg `RDNA3,Head<n>,DPLink` sums the link up.
 | CR done, `EQ failed` at every rate and lane count | pre-emphasis requests not applied: SETUP_VSEMPH's lane set (TransmitterControl v1.7 mode field) is ignored by the VBIOS table | the `lane status` / `adjust` debug lines; compare with the GOP's DPCD 0x103..0x106 |
 | trained, `dp: DIG f -> UNIPHY b ... trained`, monitor black or "no signal" | stream side: M/N, MSA or the DP DTO (DPREFCLK) | look: `DP_DTOn_PHASE / MODULO` (phase = pixel clock in Hz, modulo = DPREFCLK in Hz), `DP_VID_M`, `DP_VID_STREAM_CNTL` status; `dp: DIG n: SYMCLK_FE_ON stays off` = the FE is not connected to the BE |
 | `modeset: the DP link failed (-5): back to ...` and the old mode trains | the new mode's link setting does not train (see above) | record the rate / lanes; the old mode back is the expected recovery |
+| modes `refused (10)` on a DP-to-HDMI / DVI / VGA converter | `link_validate_mode_timing`: the converter's TMDS clock (DPCD 0x081 x 2.5 MHz), its max bpc, or its DFP capability extension (DPCD 0x0a3..: max pixel rate, active size, RGB 8 bpc) is below the mode | `RDNA3,Connector<n>,DPCD` 0x005 / 0x080-0x083; expected for a mode above the converter |
+| the monitor reacts differently since the stage 4 item K build (other OSD, FreeSync menu) | `retrieve_link_cap` now writes AMD's source OUI (00-00-1A), the device id and DCN 3.2's minimum h blank to DPCD 0x300 / 0x303 / 0x340 as amdgpu does, and the AUX reply timeout is 3.2 ms during the LTTPR probe | expected (Linux does the same); report anything that stopped working |
 
 ### DSC and FEC (`dsc`)
 
@@ -475,7 +477,100 @@ enabled).
 | `dsc: DSC n power up: PGFSM status ..` | DOMAIN16+n did not ungate | look: `DOMAIN16..19_PG_STATUS`, `DC_IP_REQUEST_CNTL` |
 | `modeset: ... underflows / does not run: back to` only at DSC modes | the DLG rescale of the GOP's values at the compressed mode | as for `modeset2`: the look's DLG line; full DML for that mode |
 
+### Timing generator read-back (`otg`)
+
+`otg` = `9c` + `rdna3otg=1`. At display start `dcn32_otg_check`
+(hw/dcn32_otg.c) runs DC's optc functions on every head the GOP lit and
+publishes `RDNA3,Head<n>,OTGCheck`. Pass: `0: ...`, the active size equal
+to the head's, `counter moving`, `vblank 1 vactive 1`, `vline0 ... latched`
+with the line read within a few lines of the one aimed at, `underflow 0`,
+`ODM 1`. Then mark `otg` passed: the optc functions the check reads count
+as working (tools/progress.py ITEM_STEPS).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no `OTGCheck` property | the boot-arg is missing, or no head was lit at display start (`RDNA3,DisplayHeads 0`) | the boot-args line of the report |
+| `-19` (RDNA3_ENODEV) / `0x0` size | the OTG reads as off (OTG_MASTER_EN 0) | the look's `OTG_CONTROL`; the head list in `20-log-rdna3.txt` |
+| active size differs from the head's | OTG_H/V_BLANK_START_END read differently by `optc1_get_otg_active_size` than by `read_timing` (dcn32.c) | both register values from the look; fix whichever subtraction is off |
+| `counter STOPPED` | two OTG_STATUS_POSITION reads were equal: the OTG is not counting (or the read is cached) | `RDNA3,Head<n>,...` frame counter from `rdna3_drminfo --scanout`; the OTG clock (`OTG_CLOCK_CONTROL`) |
+| `vblank 0` or `vactive 0` | OTG_STATUS never showed the state within 100 ms | the look's `OTG_STATUS`; the V_BLANK bits' layout (OTG_V_BLANK / OTG_V_ACTIVE_DISP) |
+| `vline0 ... NOT latched` | OTG_VERTICAL_INTERRUPT0_STATUS did not set within 60 ms with the line inside the range | the line aimed at vs `OTG_V_TOTAL`; the look's `OTG_VERTICAL_INTERRUPT0_CONTROL` (OUTPUT_POLARITY, INT_TYPE) |
+| `underflow 1` | OPTC_UNDERFLOW_OCCURRED_STATUS is sticky: an underflow at any time since boot | compare with the HUBP underflow of `rdna3_drminfo --scanout`; not a failure of this step |
+
+### amdgpu's DMCUB reset (`dmubreset`)
+
+`dmubreset` = `9c` + `rdna3dmubreset=1`: the DMCUB is stopped and reset by
+the exact `dmub_dcn32_reset` (hw/dmub32.c) before its windows are set up.
+ioreg `RDNA3,DMUBAmdReset`: bit 0 = STOP_FW acked (GPINT status cleared by
+the firmware), bit 1 = the firmware answered 0xDEADDEAD in SCRATCH7. The
+log has `DMUB diag (after the amdgpu reset)`: SCRATCH0-16, fault
+addresses, inbox / outbox pointers, and up to 16 `DMUB trace:` entries.
+Pass: `RDNA3,DMUB = running, mailbox up`, the clone and the extended
+desktop as in 9c. Then mark `dmubreset` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `RDNA3,DMUBAmdReset = 0` or `2`, DMUB running anyway | the firmware acks later than 30 register reads (amdgpu forces the reset then) | harmless if the boot and the clone pass; note the value: the verified path waits up to 1 s |
+| `DMUB: auto-load timed out` after the amdgpu reset | DMUIF_SOFT_RESET left set, or the forced reset caught the firmware mid PHY sequence | the `DMUB diag` lines (soft-reset 1? fault addresses?), `MMHUBBUB_SOFT_RESET` in the look; step 5b's path (no boot-arg) still works |
+| DMUB running, second monitor dark | the clone's VBIOS commands after the reset: as step 9b's triage | `clone:` lines, `RDNA3,MirrorResult` |
+
+### DC's HDMI stream (`hdmi`, `hdmi20`)
+
+`hdmi` = `modeset` + `rdna3hdmi=1`, `hdmi20` = `modeset2` + `rdna3hdmi=3`.
+Every TMDS mode set then also runs the HDMI half of DC's stream setup
+(hw/dcn32_hdmi.c, called from `program()` in hw/dcn32_modeset.c). The log
+has, per mode list, `display: head n HDMI: sink HDMI|DVI, SCDC s, LTE
+scramble l, max TMDS M MHz, HDMI 6G g, a audio modes` (the EDID's HDMI
+VSDB / HF-VSDB, the VBIOS encoder cap), and per switch `modeset: head n:
+HDMI_CONTROL 0x..., SCDC TMDS_CONFIG ...`; ioreg `RDNA3,Head<n>,HDMI`
+keeps the last one. Pass for `hdmi`: the switches of `rdna3_modetest
+cycle` pass as in `modeset` with the picture right (no over/underscan, no
+colour cast, no "no signal" after the switch back). Pass for `hdmi20`:
+additionally a mode above 340 MHz (4K60) was offered, set, and
+`RDNA3,Head<n>,HDMI` shows HDMI_CONTROL bits 1 and 2 (scrambler, 1/4
+clock channel) with `SCDC TMDS_CONFIG 0x03 scrambler 0x01`. Then mark the
+step passed (the ITEM_STEPS rules map the ported enc / SCDC / validation
+functions to these steps).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| picture overscanned / underscanned or colours washed out after a switch | the AVI infoframe (`set_avi_info_frame`: VIC, aspect, S = underscan, Q default) read differently by the TV | the mode's timing against the CTA VIC table (`edid_match_vic`); reproduce the packet with `dcn32_hdmi_build_info_frames` in tests/sim_display_dc.inc and compare byte by byte with CTA-861 |
+| `SCDC ... (-n)` with n = NACK on an HDMI 1.4 monitor | no SCDC at I2C 0x54: expected, DC ignores the error | nothing; on an HDMI 2.0 sink check the DDC line (`hc->ddc`, the VBIOS path) |
+| `SCDC ... (-n)` ACQUIRE | the DDC engine owned by the DMCUB/HW | note; the SCDC write is skipped, which only matters above 340 MHz |
+| hdmi20: 4K60 not in `rdna3_modetest list` | `HDMI 6G 0` (no ATOM_ENCODER_CAP_RECORD_HDMI6Gbps for the connector), the EDID's max TMDS below 594 MHz, or DISPCLK limits (`RD_MODESET_CLOCKS` in `display: head n mode ... refused (4)`) | the refusal code in the mode list log: 5 = TMDS limit, 4 = clocks |
+| hdmi20: "no signal" at 4K60, old mode back | scrambling not matched by the sink (`scrambler 0x00`), or the PHY PLL at 594 MHz | SCDC values in the log; `HDMICHARCLK` / PHY registers in the look; retry with a certified cable |
+| audio device appears but silent | not ported yet: the AFMT / azalia audio path is still off (only the audio info frame line is set) | expected |
+
+### Cursor through MALL (`cursormall`)
+
+`cursormall` = `9c` + `rdna3cursormall=1`. Pass: the pointer is drawn and
+moves on both monitors as in 9c, and the look has
+`HUBPn_DCHUBP_MALL_CONFIG` with bit 2 (USE_MALL_FOR_CURSOR) on the lit
+pipes. Then mark `cursormall` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| pointer garbled, flickering or missing only with the boot-arg | the MALL (Infinity Cache) does not serve display reads in this configuration (no MALL allocation from the PMFW / DCHUBBUB) | the look's `DCHUBBUB_ARB_MALL_CNTL`; keep the boot-arg off, report |
+| bit 2 not set | the framebuffer never set an image (software cursor: `rdna3cursor=0` or no VRAM) | fb log `hardware cursor: ...` |
+
+### DC's sequence extras (`dcseq`)
+
+
+`dcseq` = `modeset2` + `rdna3dcseq=1`. Pass: the switches of
+`rdna3_modetest cycle` as in `modeset2` (pictures, no underflow, back to
+native) with `modeset: head n: DIO FIFO resync (DISPCLK divider 0x..)`
+after each. Then mark `dcseq` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| HDMI head: `SYMCLK on with TX off (... kHz) failed` | the VBIOS SetPixelClock refused the running clock with the transmitter off | the DMUB lines; the switch still goes on (DC ignores it too); report the value |
+| picture shifts / flickers once right after a switch, then settles | the DIO FIFO resync with a divider the DENTIST was still ramping to | `DENTIST_DISPCLK_CNTL` in the look (WDIVIDER = RDIVIDER?); compare without the boot-arg |
+| `modeset: ... does not run` only with the boot-arg | the second TransmitterControl DISABLE after the OTG stopped left the PHY off for the new timing | the DMUB sequence in the log (DISABLE, PIXCLK, DISABLE, PIXCLK, ENCODER, ENABLE expected) |
+
 ### DP MST (`mst`)
+
+
+
 
 `mst` = `dplink` + `rdna3mst=1`; needs an MST hub (or a daisy-chain
 monitor) on the card's native DP output with at least one monitor behind

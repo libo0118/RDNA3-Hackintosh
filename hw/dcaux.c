@@ -165,10 +165,75 @@ static void aux_release(rdna3_dev *d, uint32_t n)
     WA(d, regDP_AUX0_AUX_ARB_CONTROL, n, v);
 }
 
+/* dce_aux_configure_timeout's polling_timeout_period per engine (us);
+ * 0 = AUX_TIMEOUT_US. Shared by all devices: one card per system here. */
+static uint32_t aux_poll_us[RD_AUX_ENGINES];
+
+#define TIME_OUT_INCREMENT        1016
+#define TIME_OUT_MULTIPLIER_8     8
+#define TIME_OUT_MULTIPLIER_16    16
+#define TIME_OUT_MULTIPLIER_32    32
+#define TIME_OUT_MULTIPLIER_64    64
+#define MAX_TIMEOUT_LENGTH        127
+#define DEFAULT_AUX_ENGINE_MULT   0
+#define DEFAULT_AUX_ENGINE_LENGTH 69
+#define SW_AUX_TIMEOUT_PERIOD_MULTIPLIER 6
+
+uint32_t dcaux_configure_timeout(rdna3_dev *d, uint32_t n, uint32_t timeout_in_us)
+{
+    uint32_t multiplier = 0, length = 0, prev_length, prev_mult, prev_timeout_val, v;
+
+    if (n >= RD_AUX_ENGINES)
+        return 0;
+    /* 1-Update polling timeout period */
+    aux_poll_us[n] = timeout_in_us * SW_AUX_TIMEOUT_PERIOD_MULTIPLIER;
+    /* 2-Update aux timeout period length and multiplier */
+    if (timeout_in_us == 0) {
+        multiplier = DEFAULT_AUX_ENGINE_MULT;
+        length = DEFAULT_AUX_ENGINE_LENGTH;
+    } else if (timeout_in_us <= TIME_OUT_INCREMENT) {
+        multiplier = 0;
+        length = timeout_in_us / TIME_OUT_MULTIPLIER_8;
+        if (timeout_in_us % TIME_OUT_MULTIPLIER_8 != 0)
+            length++;
+    } else if (timeout_in_us <= 2 * TIME_OUT_INCREMENT) {
+        multiplier = 1;
+        length = timeout_in_us / TIME_OUT_MULTIPLIER_16;
+        if (timeout_in_us % TIME_OUT_MULTIPLIER_16 != 0)
+            length++;
+    } else if (timeout_in_us <= 4 * TIME_OUT_INCREMENT) {
+        multiplier = 2;
+        length = timeout_in_us / TIME_OUT_MULTIPLIER_32;
+        if (timeout_in_us % TIME_OUT_MULTIPLIER_32 != 0)
+            length++;
+    } else {
+        multiplier = 3;
+        length = timeout_in_us / TIME_OUT_MULTIPLIER_64;
+        if (timeout_in_us % TIME_OUT_MULTIPLIER_64 != 0)
+            length++;
+    }
+    length = length < MAX_TIMEOUT_LENGTH ? length : MAX_TIMEOUT_LENGTH;
+    v = RA(d, regDP_AUX0_AUX_DPHY_RX_CONTROL1, n);
+    prev_length = GET(v, DP_AUX0_AUX_DPHY_RX_CONTROL1, AUX_RX_TIMEOUT_LEN);
+    prev_mult = GET(v, DP_AUX0_AUX_DPHY_RX_CONTROL1, AUX_RX_TIMEOUT_LEN_MUL);
+    switch (prev_mult) {
+    case 0: prev_timeout_val = prev_length * TIME_OUT_MULTIPLIER_8; break;
+    case 1: prev_timeout_val = prev_length * TIME_OUT_MULTIPLIER_16; break;
+    case 2: prev_timeout_val = prev_length * TIME_OUT_MULTIPLIER_32; break;
+    case 3: prev_timeout_val = prev_length * TIME_OUT_MULTIPLIER_64; break;
+    default: prev_timeout_val = DEFAULT_AUX_ENGINE_LENGTH * TIME_OUT_MULTIPLIER_8; break;
+    }
+    v = SET(v, DP_AUX0_AUX_DPHY_RX_CONTROL1, AUX_RX_TIMEOUT_LEN, length);
+    v = SET(v, DP_AUX0_AUX_DPHY_RX_CONTROL1, AUX_RX_TIMEOUT_LEN_MUL, multiplier);
+    WA(d, regDP_AUX0_AUX_DPHY_RX_CONTROL1, n, v);
+    return prev_timeout_val;
+}
+
 static int wait_sw_done(rdna3_dev *d, uint32_t n, int want)
 {
-    uint32_t i;
-    for (i = 0; i < AUX_TIMEOUT_US / 10; i++) {
+    uint32_t i, poll = n < RD_AUX_ENGINES && aux_poll_us[n] ? aux_poll_us[n] : AUX_TIMEOUT_US;
+    for (i = 0; i < poll / 10; i++) {
+
         uint32_t v = RA(d, regDP_AUX0_AUX_SW_STATUS, n);
         if ((GET(v, DP_AUX0_AUX_SW_STATUS, AUX_SW_DONE) != 0) == (want != 0))
             return RD_AUX_OK;
@@ -344,6 +409,8 @@ int dcaux_dpcd_write(rdna3_dev *d, uint32_t n, uint32_t address, const uint8_t *
     return (int)done;
 }
 
+/* the transaction actions are i2caux_action_from_payload's: I2C write / read,
+ * with MOT on every chunk but the last */
 int dcaux_i2c_xfer(rdna3_dev *d, uint32_t n, uint32_t dev7, const uint8_t *wbuf, uint32_t wlen,
                    uint8_t *rbuf, uint32_t rlen)
 {

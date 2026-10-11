@@ -118,3 +118,32 @@ vcnsleep rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 
 # gamma without the accelerator: does IOFramebuffer hand the table to
 # setGammaTable when no display pipe takes the frames (card runs 26-28)
 gamma0 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3pm=2 rdna3idlecap=1 rdna3gamma=1 rdna3accel=0
+# timing generator functions (hw/dcn32_otg.c, stage 4 item K): the 9c step
+# + rdna3otg=1: at display start every lit head's OTG is read through DC's
+# optc functions (scan position, active size, vblank / active states, the
+# vertical interrupt 0 latched mid-frame, underflow, ODM segments)
+otg rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3otg=1
+# amdgpu's exact DMCUB reset (dmub_dcn32_reset, stage 4 item K): the 9c step
+# + rdna3dmubreset=1: STOP_FW with amdgpu's 30-read waits, DMUIF_SOFT_RESET
+# set and released, the DMCUB's diagnostic registers and trace in the log;
+# the clone and the extended desktop must still come up through it
+dmubreset rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3dmubreset=1
+# the hardware cursor as DCN 3.2 programs it (hubp32_cursor_set_attributes):
+# the 9c step + rdna3cursormall=1: the 256 x 256 cursor image is read
+# through MALL (DCHUBP_MALL_CONFIG.USE_MALL_FOR_CURSOR, over 16 KiB)
+cursormall rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3cursormall=1
+# DC's HDMI stream (hw/dcn32_hdmi.c, stage 4 item K): the modeset step +
+# rdna3hdmi=1: each switch on an HDMI / DVI head also runs what DC adds to
+# the VBIOS's stream setup: AV mute around it, the HDMI engine's stream
+# attributes, the AVI (and HDMI VIC vendor) infoframe, SCDC over the DDC
+hdmi rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3hdmi=1
+# HDMI 2.0 rates: the modeset2 step (DISPCLK raised) + rdna3hdmi=3: modes
+# above a 340 MHz TMDS clock (4K60 on an HDMI 2.0 monitor) are offered:
+# scrambler and 1/4 clock channel on, the monitor told through SCDC
+hdmi20 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3hdmi=3
+# DC's sequence extras around a mode switch (hw/dcn32_hwseq.c): the
+# modeset2 step + rdna3dcseq=1: on an HDMI head the pixel clock is set
+# again after the transmitter goes off while the OTG still runs, and the
+# transmitter disabled again once the OTG stopped (SYMCLK work-around);
+# after every switch the DIO FIFOs are resynced to DISPCLK
+dcseq rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3dcseq=1

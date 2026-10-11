@@ -88,7 +88,7 @@ ITEM_STEPS = [
                 r"|enable_phy_bypass_mode|enc1_configure_encoder|enc32_(dp_set_odm_combine|enable_fifo"
                 r"|reset_fifo|set_dig_input_mode|stream_encoder_dp_unblank)|link_encoder_disable"
                 r"|link_transmitter_control|set_dp_phy_pattern_passthrough_mode"
-                r"|set_link_training_complete|setup_panel_mode"), ["dplink"]),
+                r"|set_link_training_complete|setup_panel_mode|get_frontend_source|dce_aux_configure_timeout|enable_stream_features"), ["dplink"]),
     # FEC and DSC (rdna3dsc) in files of the modeset / DP link groups
     (re.compile(r"dcn32_dsc_pg_(control|status)|dcn32_update_dsc_pg|enc32_dp_set_dsc_config|dp_set_dsc_on_rx"
                 r"|link_set_dsc_(enable|on_stream|pps_packet)|dp_is_fec_supported|dp_should_enable_fec"
@@ -100,6 +100,42 @@ ITEM_STEPS = [
                 r"|fill_stream_allocation_row_info|decide_mst_link_settings|read_is_mst_supported"
                 r"|set_dio_throttled_vcp_size|update_dio_stream_allocation_table"
                 r"|enc1_stream_encoder_set_throttled_vcp_size"), ["mst"]),
+    # stage 4 item K, Display Core pieces in verified groups: the OTG
+    # read-back of step otg (rdna3otg=1), amdgpu's DMCUB reset and its
+    # diagnostics in step dmubreset (rdna3dmubreset=1)
+    (re.compile(r"optc1_(get_position|is_counter_moving|get_crtc_scanoutpos|get_otg_active_size|wait_for_state"
+                r"|setup_vertical_interrupt0|is_optc_underflow_occurred)"
+                r"|optc32_(get_double_buffer_pending|get_odm_combine_segments)"), ["otg"]),
+    (re.compile(r"dmub_dcn32_(reset|set_gpint|is_gpint_acked|get_gpint_response|get_diagnostic_data)"
+                r"|dmub_srv_(get_diagnostic_data|get_outbox0_msg)"), ["dmubreset"]),
+    # DC's HDMI stream (rdna3hdmi=1, step hdmi): stream attributes, AV mute,
+    # infoframes, SCDC, the link encoder's output validation, the EDID caps
+    (re.compile(r"enc32_stream_encoder_(hdmi|dvi)_set_stream_attribute|enc1_stream_encoder_set_stream_attribute_helper"
+                r"|enc1_stream_encoder_set_avmute|enc1_reset_hdmi_stream_attribute|set_avmute"
+                r"|enc3_(update_hdmi_info_packet|stream_encoder_update_hdmi_info_packets|stream_encoder_stop_hdmi_info_packets)"
+                r"|dcn10_link_encoder_validate_(output_with_stream|dvi_output|hdmi_output|dp_output)"
+                r"|get_tmds_output_pixel_clock_100hz|dm_helpers_parse_edid_caps|apply_edid_quirks|edid_extract_panel_id"),
+     ["hdmi"]),
+    # the cursor image through MALL (rdna3cursormall=1, step cursormall)
+    (re.compile(r"hubp32_cursor_set_attributes"), ["cursormall"]),
+    # DC's sequence extras around a mode switch (rdna3dcseq=1, step dcseq)
+    (re.compile(r"apply_symclk_on_tx_off_wa|dcn32_resync_fifo_dccg_dio|dccg32_trigger_dio_fifo_resync"), ["dcseq"]),
+    # the hard-min status wait with DC's delay accounting (the DISPCLK raise of step modeset2)
+    (re.compile(r"dcn32_smu_(send_msg_with_param_delay|wait_for_response_delay|get_hard_min_status)"), ["modeset2"]),
+    # ported and checked in the simulator, but no ladder step drives them
+    # yet (nothing in the kext calls them): they stay "ported"
+    (re.compile(r"optc1_(setup_vertical_interrupt[12]|validate_timing|is_two_pixels_per_container"
+                r"|enable_optc_clock|set_static_screen_control|enable_reset_trigger|enable_crtc_reset"
+                r"|did_triggered_reset_occur|disable_reset_trigger|clear_optc_underflow)"
+                r"|optc3_(tg_init|set_timing_double_buffer|lock_doublebuffer_enable|lock_doublebuffer_disable"
+                r"|triplebuffer_lock|set_drr_trigger_window|set_vtotal_change_limit|set_vtotal_min_max|set_out_mux)"
+                r"|optc32_(set_drr|setup_manual_trigger|set_h_timing_div_manual_mode|set_odm_combine)|is_two_pixels_per_containter"
+                r"|dmub_dcn32_(get_gpint_dataout|send_inbox0_cmd|clear_inbox0_ack_register|read_inbox0_ack_register"
+                r"|get_current_time)"
+                r"|dmub_srv_(send_gpint_command|get_gpint_response|get_gpint_dataout|send_inbox0_cmd"
+                r"|clear_inbox0_ack|wait_for_inbox0_ack|set_power_state|get_fw_boot_status)"
+                r"|dcn32_(calculate_dccg_k1_k2_values|is_dp_dig_pixel_rate_div_policy|enable_power_gating_plane"
+                r"|are_clock_states_equal|get_dispclk_from_dentist)|hubp32_init|is_h_timing_divisible_by_2"), ["none"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

@@ -39,10 +39,14 @@ extern "C" {
 #include "dcn32_dp.h"
 #include "dp_mst.h"
 #include "dcn32_gamma.h"
+#include "dcn32_otg.h"
+#include "dcn32_hwseq.h"
 }
 #include "rdna3k_abi.h"
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
+
+static void displayOtgCheck(IOService *svc, rdna3_dev *d, const rdna3_dcn *dc);
 
 static void dispUdelay(void *, uint32_t us) { IODelay(us); }
 static void dispMsleep(void *, uint32_t ms) { IOSleep(ms); }
@@ -117,9 +121,34 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     displayProbeConnectors();
     displayPublishRoutes();
     displayStateSaveAll();   /* D4: what a reset or a sleep must bring back */
+    displayOtgCheck(this, fDispDev, fDcn);   /* rdna3otg=1: step otg */
+
     fHotplugCall = thread_call_allocate((thread_call_func_t)displayHotplugWork, this);
     hotplugInit();   /* rdna3hotplug=1: RDNA3Hotplug.cpp polls and handles */
     return true;
+}
+
+/* rdna3otg=1 (step otg): the timing generator functions of hw/dcn32_otg.c
+ * on every lit head - position, active size, vblank / active states, the
+ * vertical interrupt 0 latched mid-frame (its registers put back),
+ * underflow, double buffering, ODM segments. Reads only, apart from the
+ * vertical interrupt position, which nothing else uses. */
+static void displayOtgCheck(IOService *svc, rdna3_dev *d, const rdna3_dcn *dc)
+{
+    if (!rd3_arg("rdna3otg", 0) || !d || !dc)
+        return;
+    for (uint32_t i = 0; i < dc->nheads && i < RD_DCN_MAX_PIPES; i++) {
+        rdna3_otg_check c;
+        char key[40], val[200];
+        int r = dcn32_otg_check(d, dc->head[i].otg, &c);
+        snprintf(key, sizeof(key), "RDNA3,Head%u,OTGCheck", i);
+        snprintf(val, sizeof(val), "%d: %ux%u (head %ux%u), counter %s, vblank %d vactive %d, vline0 line %u %s "
+                 "(read %u), underflow %d, db pending %d, ODM %d", r, c.width, c.height, dc->head[i].h_active,
+                 dc->head[i].v_active, c.moving ? "moving" : "STOPPED", c.vblank_seen, c.vactive_seen, c.vline0_line,
+                 c.vline0_seen ? "latched" : "NOT latched", c.vline0_at, c.underflow, c.db_pending, c.odm_segments);
+        svc->setProperty(key, val);
+        LOG("display: head %u OTG %u check %s", i, dc->head[i].otg, val);
+    }
 }
 
 #define RD_ATOM_SCRATCH_BYTES (20u * 1024u)   /* amdgpu's minimum FB scratch */
@@ -753,6 +782,8 @@ void RDNA3Accel::displayFree()
         fModeCount[i] = 0;
         if (fDpLink[i]) IOFree(fDpLink[i], sizeof(rdna3_dp_link));
         fDpLink[i] = nullptr;
+        if (fHdmiCfg[i]) IOFree(fHdmiCfg[i], sizeof(rdna3_hdmi_cfg));
+        fHdmiCfg[i] = nullptr;
         if (fMstMgr[i]) IOFree(fMstMgr[i], sizeof(rdna3_mst_mgr));
         fMstMgr[i] = nullptr;
     }
@@ -992,6 +1023,8 @@ rdna3_dp_link *RDNA3Accel::displayDpLink(uint32_t head, const rdna3_display_path
         dcn32_dp_link_init(l, fDispDev, fDisplayDm, (uint32_t)p->ddc_line, (uint32_t)h->dig_be, (uint32_t)h->dig_fe,
                            h->otg, p->hpd, (uint8_t)p->connector_objid, (uint8_t)p->encoder_objid, p->encoder_caps, 0);
         l->mst_port = -1;
+        /* dpcd_set_source_specific_data names the ASIC (asic_id.chip_id) */
+        l->chip_id = fPci ? fPci->configRead16(kIOPCIConfigDeviceID) : 0;
     }
     l->dm = fDisplayDm;
     l->fec_policy = l->dsc_policy = rd3_arg("rdna3dsc", 0) ? 1 : 0;
@@ -1107,6 +1140,28 @@ int RDNA3Accel::displayMstRevert(uint32_t head, rdna3_dp_link *l, const rdna3_mo
     return r;
 }
 
+/* rdna3hdmi (steps hdmi, hdmi20): the HDMI half of DC's TMDS stream on a
+ * DVI / HDMI head (hw/dcn32_hdmi.c through dcn32_modeset_plan_hdmi): bit 0
+ * the stream attributes, AVI / vendor infoframes, AV mute and SCDC as
+ * link_set_dpms_off / _on run them; bit 1 (rdna3hdmi=3) also modes above a
+ * 340 MHz TMDS clock (scrambling, validated as the link encoder does: the
+ * VBIOS's HDMI 6G cap, the EDID's max TMDS clock). The sink's caps come
+ * from its EDID (dm_helpers_parse_edid_caps). */
+static bool hdmi_cfg(const rdna3_dcn_head *h, const rdna3_display_path *p, const rdna3_edid *ed, rdna3_hdmi_cfg *hc)
+{
+    uint32_t a = rd3_arg("rdna3hdmi", 0);
+    if (!(a & 1) || !p || !ed || (h->dig_mode != 2 && h->dig_mode != 3))
+        return false;
+    bzero(hc, sizeof(*hc));
+    hc->flags = RD_HDMI_STREAM | ((a & 2) ? RD_HDMI_20 : 0);
+    hc->ddc = p->ddc_line;
+    hc->enc_caps = p->encoder_caps;
+    hc->hdmi_sink = ed->hdmi;
+    hc->lte_340_scramble = ed->lte_340_scramble;
+    hc->max_tmds_clk_mhz = ed->max_tmds_clk_mhz;
+    return true;
+}
+
 /* rdna3DisplayModes: the sink's EDID timings the head can switch to
  * (dcn32_modeset_plan says yes), the running one flagged CURRENT. The list
  * is kept: rdna3DisplaySetMode names a mode by its index in it. */
@@ -1160,10 +1215,26 @@ IOReturn RDNA3Accel::displayModes(RD3KDisplayModes *r)
         int k = dcn32_match_head_mode(h, 0, ed);
         const rdna3_dcn_clk_limits *lim = displayClkLimits();
         rdna3_dp_link *dpl = displayDpLink(r->head, p);   /* rdna3dplink=1 and a DP head */
+        rdna3_hdmi_cfg hcfg;
+        const rdna3_hdmi_cfg *hc = !dpl && hdmi_cfg(h, p, ed, &hcfg) ? &hcfg : nullptr;   /* rdna3hdmi */
+        if (hc && !fHdmiCfg[r->head])
+            fHdmiCfg[r->head] = (rdna3_hdmi_cfg *)IOMalloc(sizeof(rdna3_hdmi_cfg));
+        if (fHdmiCfg[r->head]) {
+            if (hc)
+                *fHdmiCfg[r->head] = *hc;
+            else
+                bzero(fHdmiCfg[r->head], sizeof(rdna3_hdmi_cfg));
+        }
+        if (hc)
+            LOG("display: head %u HDMI: sink %s, SCDC %d, LTE scramble %d, max TMDS %u MHz, HDMI 6G %d, %u audio modes",
+                r->head, hc->hdmi_sink ? "HDMI" : "DVI", ed->scdc_present, hc->lte_340_scramble, hc->max_tmds_clk_mhz,
+                (hc->enc_caps & RD_ATOM_ENC_CAP_HDMI6G) ? 1 : 0, ed->audio_mode_count);
         for (uint32_t i = 0; i < ed->nmodes && n < RD3K_MAX_MODES; i++) {
             const rdna3_mode *m = &ed->mode[i];
             int why = (int)i == k ? RD_MODESET_OK
-                    : p ? dcn32_modeset_plan_dp(fDispDev, fDcn, r->head, p, dpl, cur, m, lim, ms) : RD_MODESET_BAD_HEAD;
+                    : !p ? RD_MODESET_BAD_HEAD
+                    : hc ? dcn32_modeset_plan_hdmi(fDispDev, fDcn, r->head, p, hc, cur, m, lim, ms)
+                         : dcn32_modeset_plan_dp(fDispDev, fDcn, r->head, p, dpl, cur, m, lim, ms);
             LOG("display: head %u mode %ux%u %u.%03u Hz %u kHz: %s (%d)", r->head, m->h_active, m->v_active,
                 m->refresh_mhz / 1000, m->refresh_mhz % 1000, m->pixel_khz,
                 (int)i == k ? "current" : why ? "refused" : "offered", why);
@@ -1244,8 +1315,14 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     bool takeover = false;
     if (dpl && !dpl->mst && rd3_arg("rdna3mst", 0) && (dpl->dpcd_caps.mstm_cap & RD_DP_MST_CAP) && cur)
         takeover = displayMstTakeover(m->head, dpl, &curMode) == RDNA3_OK;
-    int r = p ? dcn32_modeset_plan_dp(fDispDev, fDcn, m->head, p, dpl, cur, want, displayClkLimits(), ms)
-              : RD_MODESET_BAD_HEAD;
+    /* rdna3hdmi: the HDMI caps the mode list was made with */
+    const rdna3_hdmi_cfg *hc = !dpl && fHdmiCfg[m->head] && (fHdmiCfg[m->head]->flags & RD_HDMI_STREAM) &&
+                                       rd3_arg("rdna3hdmi", 0)
+                                   ? fHdmiCfg[m->head]
+                                   : nullptr;
+    int r = !p ? RD_MODESET_BAD_HEAD
+          : hc ? dcn32_modeset_plan_hdmi(fDispDev, fDcn, m->head, p, hc, cur, want, displayClkLimits(), ms)
+               : dcn32_modeset_plan_dp(fDispDev, fDcn, m->head, p, dpl, cur, want, displayClkLimits(), ms);
     if (r != RD_MODESET_OK && takeover) {
         /* the port cannot carry the mode: the SST stream back, the mode as SST */
         LOG("display: head %u: %ux%u refused as MST stream (%d): back to SST", m->head, want->h_active,
@@ -1255,6 +1332,10 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
         r = dcn32_modeset_plan_dp(fDispDev, fDcn, m->head, p, dpl, cur, want, displayClkLimits(), ms);
     }
     bool dpHead = r == RD_MODESET_OK && ms->dp;
+    /* rdna3dcseq=1 (step dcseq): DC's SYMCLK work-around on HDMI and the DIO
+     * FIFO resync after the switch (hw/dcn32_hwseq.c) */
+    if (r == RD_MODESET_OK)
+        ms->dc_seq = rd3_arg("rdna3dcseq", 0) ? 1 : 0;
     if (r == RD_MODESET_OK)
         r = dcn32_modeset_apply(fDispDev, dm, fDcn, fScale, ms, fDispDev->fb_start + m->vramOffset, m->pitch / 4,
                                 fDispDev->fb_start + m->oldVramOffset, m->oldPitch / 4, 200);
@@ -1268,6 +1349,18 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     if (r == RDNA3_OK) {
         fDispRefresh[m->head] = want->refresh_mhz;
         displayStateSave(m->head);   /* D4 */
+    }
+    char hdmival[128] = "";
+    if (hc && ms->hdmi.flags) {
+        /* what the HDMI engine and the sink's SCDC say now (step hdmi / hdmi20) */
+        rdna3_scdc_state scdc;
+        int sr = hc->ddc >= 0 ? dcn32_hdmi_read_scdc(fDispDev, (uint32_t)hc->ddc, &scdc) : RDNA3_ENODEV;
+        if (hc->ddc < 0)
+            bzero(&scdc, sizeof(scdc));
+        snprintf(hdmival, sizeof(hdmival),
+                 "HDMI_CONTROL 0x%08x, SCDC TMDS_CONFIG 0x%02x scrambler 0x%02x flags 0x%02x%02x (%d), %u kHz",
+                 dcn32_enc_hdmi_control(fDispDev, ms->fe), scdc.tmds_config, scdc.scrambler_status,
+                 scdc.status_flags[1], scdc.status_flags[0], sr, want->pixel_khz);
     }
     rdna3_dcn_clocks ck;
     dcn32_clk_read(fDispDev, &ck);   /* raised or not: the report sees them */
@@ -1291,9 +1384,16 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
             snprintf(mstval, sizeof(mstval), "SST");
     }
     IOLockUnlock(fDispLock);
+    if (hdmival[0]) {
+        char key[32];
+        snprintf(key, sizeof(key), "RDNA3,Head%u,HDMI", m->head);
+        setProperty(key, hdmival);
+        LOG("display: head %u HDMI: %s", m->head, hdmival);
+    }
     if (dpHead) {
         char key[32];
         snprintf(key, sizeof(key), "RDNA3,Head%u,DPLink", m->head);
+
         setProperty(key, dpval);
         LOG("display: head %u DP link: %s", m->head, dpval);
         snprintf(key, sizeof(key), "RDNA3,Head%u,DSC", m->head);
@@ -1366,6 +1466,10 @@ IOReturn RDNA3Accel::displayCursor(RD3KDisplayCursor *c)
     IOLockLock(fDispLock);
     if (c->op == RD3K_CURSOR_OP_IMAGE) {
         r = dcn32_cursor_set_image(fDispDev, fDcn, c->head, fDispDev->fb_start + c->vramOffset, c->size);
+        /* rdna3cursormall=1 (step cursormall): hubp32_cursor_set_attributes'
+         * MALL selection on top (a 256 x 256 cursor reads through MALL) */
+        if (r == RDNA3_OK && rd3_arg("rdna3cursormall", 0))
+            dcn32_hubp32_cursor_mall(fDispDev, fDcn->head[c->head].pipe, c->size, c->size, RD_DCN_CURSOR_MODE_PREMULT);
         if (r == RDNA3_OK)
             displayStateSave(c->head);   /* D4 */
     }

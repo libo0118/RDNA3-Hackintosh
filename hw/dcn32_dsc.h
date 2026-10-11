@@ -281,11 +281,19 @@ void dcn32_dsc_enable(rdna3_dev *d, uint32_t inst, uint32_t opp_pipe);     /* ds
 void dcn32_dsc_disable(rdna3_dev *d, uint32_t inst);                       /* dsc2_disable */
 void dcn32_dsc_disconnect(rdna3_dev *d, uint32_t inst);                    /* dsc2_disconnect */
 void dcn32_dsc_read_state(rdna3_dev *d, uint32_t inst, rdna3_dsc_state *s);/* dsc2_read_state */
+/* dsc2_wait_disconnect_pending_clear (DC: post_unlock_reset_opp, before
+ * dsc_disable on a seamless update) */
+int  dcn32_dsc_wait_disconnect_pending_clear(rdna3_dev *d, uint32_t inst);
 /* optc3_set_dsc_config on OTG 'otg' */
 void dcn32_optc_set_dsc_config(rdna3_dev *d, uint32_t otg, uint32_t dsc_mode, uint32_t bytes_per_pixel,
                                uint32_t slice_width);
 /* enc32_dp_set_dsc_config on DIG front end 'fe' */
 void dcn32_enc_dp_set_dsc_config(rdna3_dev *d, uint32_t fe, uint32_t dsc_mode);
+/* vpg3_update_generic_info_packet for the other packets of a VPG (the
+ * HDMI infoframes): header hb[0..3] and sb[0..31] into generic packet
+ * 'index', taken at once or at the next frame */
+void dcn32_vpg_update_generic_info_packet(rdna3_dev *d, uint32_t vpg, uint32_t index, const uint8_t *hb,
+                                          const uint8_t *sb, int immediate_update);
 /* enc3_dp_set_dsc_pps_info_packet (VPG n = DIG front end n); pps NULL with !enable */
 void dcn32_enc_dp_set_dsc_pps_info_packet(rdna3_dev *d, uint32_t fe, int enable, const uint8_t *pps,
                                           int immediate_update);

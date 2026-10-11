@@ -292,6 +292,9 @@ private:
     /* rdna3dplink=1: the DP SST link per head (hw/dcn32_dp.c) for mode sets */
     struct rdna3_dp_link *fDpLink[4] = {};
     struct rdna3_dp_link *displayDpLink(uint32_t head, const struct rdna3_display_path *p);
+    /* rdna3hdmi=1 / 3: DC's HDMI stream on TMDS heads (hw/dcn32_hdmi.c), the
+     * sink's HDMI caps from the EDID of the last mode list */
+    struct rdna3_hdmi_cfg *fHdmiCfg[4] = {};
     /* rdna3dsc=1: FEC + DSC policies on those links. rdna3mst=1: an MST
      * capable sink (hub, daisy chain) on such a head is taken over at the
      * next mode set: the topology probed, its sinks' EDIDs read, the head's

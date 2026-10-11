@@ -65,3 +65,53 @@ mpc3_(set|disable)_dwb_mux|mpc3_is_dwb_idle  display writeback: macOS does not u
 DRM_IOCTL_PRIME_(FD_TO_HANDLE|HANDLE_TO_FD)  Linux dma-buf; macOS shares buffers through DRM_IOCTL_XNU_BO_EXPORT / IMPORT
 AMDGPU_INFO_CRTC_FROM_ID  Linux KMS CRTC ids; macOS drives displays through IOFramebuffer
 DRM_AMDGPU_GEM_LIST_HANDLES  CRIU checkpoint / restore (Linux)
+
+# ---- Display Core: code DCN 3.2.0 never reaches (checked against Linux
+# v6.12: dcn32_resource.c, dcn32_tg_funcs, dcn32_str_enc_funcs,
+# dcn32_link_enc_funcs, dcn32_mpc_funcs, dmub_srv_hw_setup's DCN32 case)
+dmub_srv_dcn32_regs_init|dmub_srv_hw_setup  DMUB service register-offset and function tables per ASIC: the port calls the DCN 3.2 functions with the generated register offsets
+dcn(10|30|32)_timing_generator_init|vpg3_construct|dsc2_construct|dal_hw_hpd_init  Linux Display Core object constructors
+dmub_srv_send_reg_inbox0_cmd|dmub_srv_is_hw_pwr_up|dmub_srv_wait_for_hw_pwr_up|dmub_srv_should_detect  DMCUB hooks of DCN 3.5 (IPS power-up, register inbox0, detection request): dmub_srv_hw_setup sets none of them for DCN 3.2
+dmub_srv_get_fw_boot_option  DCN 3.2 has no get_fw_boot_option hook (dmub_srv_hw_setup): the answer is always 0
+dmub_dcn32_configure_dmub_in_system_memory  DMCUB windows in system memory: amdgpu_dm never sets fw_in_system_memory, every window is in VRAM
+dmub_dcn32_(get_outbox1_wptr|set_outbox1_rptr)|dce_aux_transfer_dmub_raw|dm_helper_dmub_aux_transfer_sync|dm_helpers_dmub_outbox_interrupt_control|dm_helpers_dmub_set_config_sync  DMUB outbox1 notifications (AUX through the DMCUB, USB4 DPIA): dc_is_dmub_outbox_supported is false on DCN 3.2 (no DPIA, debug.enable_dmub_aux_for_legacy_ddc off)
+optc1_(blank_crtc|set_blank|unblank_crtc|is_blanked|set_blank_data_double_buffer|program_blank_color|enable_crtc|lock|tg_init|set_timing_double_buffer|program_manual_trigger|setup_manual_trigger|set_drr)  DCN 1.0 timing generator functions: DCN 3.2's dcn32_tg_funcs uses the optc2 / optc3 / optc32 versions (blank through the OPP pattern generator)
+optc1_set_early_control  an empty function in DC ("asic design change, do not need this control")
+optc3_(set_odm_bypass|set_odm_combine|wait_drr_doublebuffer_pending_clear)  DCN 3.0 versions: dcn32_tg_funcs uses optc32_set_odm_bypass / optc32_set_odm_combine and has no DRR double-buffer wait
+dcn10_link_encoder_enable_tmds_output_with_clk_pattern_wa  DCN 2.0 link encoder only (dcn20_link_enc_funcs); DCN 3.2 enables TMDS with dcn10_link_encoder_enable_tmds_output
+hpd_initialize  called only from dcn10_link_encoder_construct; dcn32_link_encoder_construct does not select DIG_HPD
+dcn20_link_encoder_(enable_dp_output|get_max_link_cap|is_in_alt_mode)|enc2_hw_init|update_cfg_data  DCN 2.0 link encoder functions (USB-C DPCS config): DCN 3.2 uses dcn32_link_encoder_* and enc32_hw_init
+enc1_stream_encoder_(dp_unblank|dvi_set_stream_attribute|send_immediate_sdp_message|stop_hdmi_info_packets|update_dp_info_packets|update_hdmi_info_packets)|enc1_update_(generic_info_packet|hdmi_info_packet)  DCN 1.0 stream encoder functions: dcn32_str_enc_funcs uses the enc3 / enc32 versions (infoframes through the VPG)
+enc3_(dp_set_dsc_config|dp_set_odm_combine|stream_encoder_dvi_set_stream_attribute)  DCN 3.0 stream encoder functions: dcn32_str_enc_funcs uses the enc32 versions
+enc1_setup_stereo_sync  stereo 3D output: macOS has no stereo display path
+enc3_read_state|enc32_read_state|link_enc2_read_state  hardware state read for dcn10_log_hw_state (the Linux debugfs DTN log)
+dsc_config_log|dsc_log_pps|dm_dtn_log_begin|dm_dtn_log_end|log_dsc_params  debug logging
+dsc_override_rc_params|dc_dsc_policy_set_enable_dsc_when_not_needed  DSC overrides set from Linux debugfs (rc_params_ovrd, dsc_clock_en)
+dc_dsc_policy_set_max_target_bpp_limit|dc_dsc_policy_set_disable_dsc_stream_overhead|dc_set_disable_128b_132b_stream_overhead  DSC policy setters with no caller in amdgpu (left for other display managers)
+dsc2_validate_stream  dsc_validate_stream has no caller in Linux v6.12
+mpc3_mpc_init|mpc3_set_mpc_mem_lp_mode|mpc3_get_gamut_remap|read_gamut_remap  DCN 3.0 MPC functions outside dcn32_mpc_funcs (DCN 3.2 has mpc32_mpc_init, no gamut remap read-back)
+mpc3_init_mpcc  initialises DC's software MPCC tree object (no register access)
+hubbub3_(program_watermarks|init_watermarks|force_wm_propagate_to_pipes)|convert_and_clamp  DCN 3.0 watermark functions: hubbub32_funcs uses the hubbub32 versions
+hubbub3_(dcc_support_swizzle|get_dcc_compression_cap)|hubbub3_det_request_size|hubbub3_get_blk256_size  DCC scanout capability queries for Linux DRM format modifiers: the macOS framebuffer scans out linear surfaces without DCC
+dccg32_otg_(add|drop)_pixel  the divider-127 pixel add/drop of dcn32_update_clocks_update_dentist skips encoders without get_fifo_cal_average_level, which DCN 3.2's DIO stream encoder lacks
+write_i2c|write_i2c_retimer_setting|write_i2c_default_retimer_setting|write_i2c_redriver_setting|get_ext_hdmi_settings  external HDMI retimer / redriver settings from the VBIOS integrated system info table, which only APUs carry
+update_psp_stream_config  PSP display stream config for HDCP / secure display: no HDCP or securedisplay TA on macOS
+is_master_pipe_for_link  DC pipe_ctx topology check (OTG master of an ODM / MPC tree): the port drives one pipe per stream
+can_use_dio_link_hwss|get_dio_link_hwss  Linux link hwss function-table selection (the port calls the DIO link functions directly)
+dp_get_lttpr_mode_override  debug override (dc->debug.lttpr_mode_override)
+dal_hw_hpd_get_pin  Linux GPIO object accessor (the port reads the HPD registers directly)
+dm_helpers_dp_mst_clear_payload_allocation_table|dm_helpers_dp_mst_update_branch_bandwidth|dm_helpers_dp_update_branch_info|dm_set_dcn_clocks|dm_set_phyd32clk|dm_helpers_smu_timeout|dm_helpers_is_fullscreen|dm_helpers_is_hdr_on  empty stubs in amdgpu_dm (only a TODO in Linux v6.12)
+dm_helpers_init_panel_settings|dm_helpers_override_panel_settings  eDP panel power sequence and eDP DSC settings: a desktop card has no built-in panel
+dm_helpers_enable_periodic_detection  idle-workqueue detection of DCN 3.5 IPS (headless APUs)
+dm_helpers_dp_handle_test_pattern_request  DisplayPort compliance test patterns (certification equipment)
+dm_helpers_allocate_gpu_mem|dm_helpers_free_gpu_mem  Linux buffer allocation for DC (the port allocates VRAM with rdna3_vram_alloc)
+amdgpu_dm_encoder_destroy|amdgpu_dm_initialize_dp_connector|amdgpu_dm_mst_connector_(early_unregister|late_register)|dm_dp_add_mst_connector|dm_dp_aux_transfer|dm_dp_create_fake_mst_encoders|dm_dp_mst_atomic_check|dm_dp_mst_connector_destroy|dm_dp_mst_detect|dm_dp_mst_get_modes|dm_handle_mst_down_rep_msg_ready|dm_mst_atomic_best_encoder|find_crtc_index_in_state_by_stream|dm_helpers_dp_mst_poll_pending_down_reply  Linux DRM connector / encoder / atomic-state glue of the MST topology manager (hw/dp_mst.c drives the topology itself)
+dp_overwrite_extended_receiver_cap  re-reads the base receiver caps for dc_link_overwrite_extended_receiver_cap, which nothing in amdgpu calls
+optc3_program_blank_color  OTG_BLANK_DATA_COLOR does not exist on DCN 3.2.0 (not in dcn_3_2_0_offset.h): DCN 3.2 blanks through the OPP pattern generator
+optc32_wait_odm_doublebuffer_pending_clear  waits on OTG_H_TIMING_DIV_MODE_DB_UPDATE_PENDING, a field DCN 3.2.0's OTG_DOUBLE_BUFFER_CONTROL does not have (mask 0: the wait returns at once)
+dmub_dcn32_set_outbox0_rptr  set_outbox0_rptr has no caller in Linux v6.12 (the driver keeps the trace ring's read pointer itself)
+link_disable_hpd|dcn10_link_encoder_disable_hpd  reached only through dc_link_disable_hpd, which amdgpu calls from debugfs alone (amdgpu_dm_debugfs.c trigger_hotplug); the driver never turns an HPD pin off
+dcn32_check_native_scaling  only feeds dcn32_auto_dpm_test_log, the debug log behind dc->config.enable_auto_dpm_test_logs
+dcn32_set_hard_min_memclk|dcn32_set_hard_max_memclk|dcn32_get_memclk_states_from_smu|dcn32_set_max_memclk|dcn32_set_min_memclk  clk_mgr hooks reached only from dc_lock_memory_clock_frequency, dc_unlock_memory_clock_frequency and dc_enable_dcmode_clk_limit, which no Linux v6.12 code calls
+dp_check_dpcd_reqeust_status  aborts link training only for USB4 DPIA endpoints (DISPLAY_ENDPOINT_USB4_DPIA); DCN 3.2.0 has no DPIA
+start_clock_recovery_pattern_early  runs only with dc->work_arounds.lt_early_cr_pattern, which Linux v6.12 never sets (not in dcn32_resource.c, dc.c or amdgpu_dm)

@@ -78,6 +78,49 @@ int dcn32_smu_send(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out)
     return RDNA3_OK;
 }
 
+/* dcn32_smu_wait_for_response_delay: dal_wait adding up the time it waited */
+static uint32_t dal_wait_delay(rdna3_dev *d, uint32_t *total_delay_us)
+{
+    uint32_t r = 0, n;
+    *total_delay_us = 0;
+    for (n = 0; n <= 200000; n++) {
+        r = rdna3_rreg(d, RD_DAL_RESP_REG);
+        if (r)
+            break;
+        udelay(d, 10);
+        *total_delay_us += 10;
+    }
+    return r;
+}
+
+/* dcn32_smu_send_msg_with_param_delay: 1 when the PMFW answered OK; the
+ * time spent (2 s added when it did not) */
+static int dcn32_smu_send_delay(rdna3_dev *d, uint32_t msg, uint32_t arg, uint32_t *out, uint32_t *total_delay_us)
+{
+    uint32_t delay1_us, delay2_us;
+    *total_delay_us = 0;
+    dal_wait_delay(d, &delay1_us);
+    rdna3_wreg(d, RD_DAL_RESP_REG, 0);
+    rdna3_wreg(d, RD_DAL_ARG_REG, arg);
+    rdna3_wreg(d, RD_DAL_MSG_REG, msg);
+    if (dal_wait_delay(d, &delay2_us) == RD_DALSMC_RESULT_OK) {
+        if (out)
+            *out = rdna3_rreg(d, RD_DAL_ARG_REG);
+        *total_delay_us = delay1_us + delay2_us;
+        return 1;
+    }
+    *total_delay_us = delay1_us + 2000000;
+    return 0;
+}
+
+/* dcn32_smu_get_hard_min_status: the clocks whose hard minimum is in place */
+static uint32_t dcn32_smu_get_hard_min_status(rdna3_dev *d, int *no_timeout, uint32_t *total_delay_us)
+{
+    uint32_t response = 0;
+    *no_timeout = dcn32_smu_send_delay(d, RD_DALSMC_MSG_ReturnHardMinStatus, 0, &response, total_delay_us);
+    return response;
+}
+
 int dcn32_smu_num_displays(rdna3_dev *d, uint32_t n)
 {
     RLOG(d, "DAL SMU: %u display(s)", n);
@@ -87,7 +130,8 @@ int dcn32_smu_num_displays(rdna3_dev *d, uint32_t n)
 int dcn32_smu_set_hard_min(rdna3_dev *d, uint32_t ppclk, uint32_t mhz, uint32_t pmfw,
                            uint32_t *got_khz)
 {
-    uint32_t resp = 0, check = RD_CHECK_HARD_MIN_CLK_DPREFCLK, waited = 0;
+    uint32_t resp = 0, check = RD_CHECK_HARD_MIN_CLK_DPREFCLK, total_delay_us = 0, read_delay_us, bits = 0;
+    int no_timeout = 0;
     int r = dcn32_smu_send(d, RD_DALSMC_MSG_SetHardMinByFreq, (ppclk << 16) | (mhz & 0xffff), &resp);
     if (got_khz)
         *got_khz = resp;
@@ -107,17 +151,19 @@ int dcn32_smu_set_hard_min(rdna3_dev *d, uint32_t ppclk, uint32_t mhz, uint32_t 
     else
         return RDNA3_OK;
     for (;;) {
-        uint32_t bits = 0;
-        if (dcn32_smu_send(d, RD_DALSMC_MSG_ReturnHardMinStatus, 0, &bits) == RDNA3_OK &&
-            (bits & check) == check)
+        bits = dcn32_smu_get_hard_min_status(d, &no_timeout, &read_delay_us);
+        total_delay_us += read_delay_us;
+        if ((bits & check) == check)
             break;
-        if (waited >= 2000) {
-            RERR(d, "DAL SMU: hard min %u MHz on clock %u not confirmed (status 0x%x)", mhz, ppclk, bits);
+        if (total_delay_us >= 2000000) {
+            RERR(d, "DAL SMU: hard min %u MHz on clock %u not confirmed (status 0x%x, answered %d)", mhz, ppclk,
+                 bits, no_timeout);
             return RDNA3_ETIME;
         }
         d->os.msleep(d->os.ctx, 1);
-        waited++;
+        total_delay_us += 1000;
     }
+
     RLOG(d, "DAL SMU: hard min clock %u = %u MHz, PMFW set %u kHz", ppclk, mhz, resp);
     return RDNA3_OK;
 }
@@ -171,6 +217,8 @@ int dcn32_clk_limits_read(rdna3_dev *d, rdna3_dcn_clk_limits *l)
     int r;
     l->pmfw = 0;
     l->dispclk_levels = l->dppclk_levels = l->dispclk_max_khz = l->dppclk_max_khz = 0;
+    /* dcn32_clk_mgr_construct: smu_present when GetSmuVersion answers
+     * (dcn32_is_smu_present); the limits need it */
     r = dcn32_smu_send(d, RD_DALSMC_MSG_GetSmuVersion, 0, &l->pmfw);
     if (!r)
         r = single_clock(d, RD_PPCLK_DISPCLK, &l->dispclk_levels, &l->dispclk_max_khz);

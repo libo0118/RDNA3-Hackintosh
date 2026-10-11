@@ -14,6 +14,9 @@
 #include "gen/dcn_3_2_0_dp.h"
 #include "gen/dcn_3_2_0_pipe.h"
 #include "dcn32_dp_mst.h"
+#include "dcn32_hdmi.h"
+#include "dcn32_dsc.h"
+#include "gen/dcn_3_2_0_dpsec.h"
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -312,13 +315,81 @@ void dcn32_dp_link_init(rdna3_dp_link *l, rdna3_dev *d, rdna3_dmub *dm, uint32_t
     l->lttpr_aware = 1;
 }
 
-/* get_active_converter_info (no dongle caps, no branch device name): the
- * branch / converter type from DOWNSTREAMPORT_PRESENT and, from DPCD 1.1,
- * the detailed caps of downstream port 0 */
+/* is_dp_active_dongle: a VGA / DVI / HDMI converter */
+int dcn32_dp_is_active_dongle(const rdna3_dp_link *l)
+{
+    return l->dpcd_caps.dongle_type >= RD_DONGLE_DP_VGA && l->dpcd_caps.dongle_type <= RD_DONGLE_DP_HDMI;
+}
+
+/* is_dp_branch_device */
+int dcn32_dp_is_branch_device(const rdna3_dp_link *l)
+{
+    return l->dpcd_caps.is_branch_dev;
+}
+
+/* translate_dpcd_max_bpc (enum dpcd_downstream_port_max_bpc, 2 bits) */
+static uint32_t translate_dpcd_max_bpc(uint32_t bpc)
+{
+    switch (bpc) {
+    case 0: return 8;
+    case 1: return 10;
+    case 2: return 12;
+    case 3: return 16;
+    default: return 0;   /* -1 in DC: never reached with 2 bits */
+    }
+}
+
+/* link_bw_kbps_from_raw_frl_link_rate_data */
+static uint32_t link_bw_kbps_from_raw_frl_link_rate_data(uint8_t bw)
+{
+    switch (bw) {
+    case 1: return 9000000;
+    case 2: return 18000000;
+    case 3: return 24000000;
+    case 4: return 32000000;
+    case 5: return 40000000;
+    case 6: return 48000000;
+    default: return 0;
+    }
+}
+
+/* intersect_frl_link_bw_support: the PCON's post FRL training bandwidth
+ * (HDMI_ENCODED_LINK_BW, valid with FRL_MODE) when it reports one */
+static uint32_t intersect_frl_link_bw_support(uint32_t max_supported_frl_bw_in_kbps, uint8_t hdmi_encoded_link_bw)
+{
+    uint32_t bw = max_supported_frl_bw_in_kbps;
+    if (hdmi_encoded_link_bw & 0x01) {             /* FRL_MODE */
+        if (hdmi_encoded_link_bw & 0x40)
+            bw = 48000000;
+        else if (hdmi_encoded_link_bw & 0x20)
+            bw = 40000000;
+        else if (hdmi_encoded_link_bw & 0x10)
+            bw = 32000000;
+        else if (hdmi_encoded_link_bw & 0x08)
+            bw = 24000000;
+        else if (hdmi_encoded_link_bw & 0x04)
+            bw = 18000000;
+        else if (hdmi_encoded_link_bw & 0x02)
+            bw = 9000000;
+    }
+    return bw;
+}
+
+/* get_active_converter_info: the branch / converter type from
+ * DOWNSTREAMPORT_PRESENT and, from DPCD 1.1, the detailed caps of
+ * downstream port 0 (a DP-to-HDMI converter's TMDS clock, bpc, 4:2:x
+ * pass-through, FRL bandwidth: dc->caps.dp_hdmi21_pcon_support is set on
+ * DCN 3.2), the branch revisions, and from DPCD 1.4 the DFP capability
+ * extension */
 static void get_active_converter_info(rdna3_dp_link *l, uint8_t data)
 {
     rdna3_dp_caps *c = &l->dpcd_caps;
-    uint8_t det[16] = { 0 };
+    rdna3_dp_dongle_caps *dg = &c->dongle_caps;
+    uint8_t det[16] = { 0 }, rev[3] = { 0 };
+    uint32_t i;
+
+    for (i = 0; i < sizeof(*dg); i++)
+        ((uint8_t *)dg)[i] = 0;
     if (!(data & 1)) {                     /* PORT_PRESENT */
         c->dongle_type = RD_DONGLE_NONE;
         c->is_branch_dev = 0;
@@ -335,13 +406,135 @@ static void get_active_converter_info(rdna3_dp_link *l, uint8_t data)
         case 0: c->dongle_type = RD_DONGLE_NONE; break;      /* DP: as DONGLE_NONE */
         case 1: c->dongle_type = RD_DONGLE_DP_VGA; break;
         case 2: c->dongle_type = RD_DONGLE_DP_DVI; break;
-        case 3: case 5: c->dongle_type = RD_DONGLE_DP_HDMI; break;
+        case 3: case 5:
+            /* DP++ active converters as HDMI (DP 1.4) */
+            c->dongle_type = RD_DONGLE_DP_HDMI;
+            dg->dongle_type = c->dongle_type;
+            if (data & 0x10) {             /* DETAILED_CAPS */
+                uint8_t hdmi_caps = det[3], color = det[2], post = 0;
+                dg->dp_hdmi_max_pixel_clk_in_khz = det[1] * 2500u;
+                dg->is_dp_hdmi_s3d_converter = hdmi_caps & 1;            /* FRAME_SEQ_TO_FRAME_PACK */
+                if ((det[0] & 7) == 3) {   /* YCbCr caps only for HDMI */
+                    dg->is_dp_hdmi_ycbcr422_pass_through = (hdmi_caps >> 1) & 1;
+                    dg->is_dp_hdmi_ycbcr420_pass_through = (hdmi_caps >> 2) & 1;
+                    dg->is_dp_hdmi_ycbcr422_converter = (hdmi_caps >> 3) & 1;
+                    dg->is_dp_hdmi_ycbcr420_converter = (hdmi_caps >> 4) & 1;
+                }
+                dg->dp_hdmi_max_bpc = translate_dpcd_max_bpc(color & 3);   /* MAX_BITS_PER_COLOR_COMPONENT */
+                dg->dp_hdmi_frl_max_link_bw_in_kbps = link_bw_kbps_from_raw_frl_link_rate_data((uint8_t)((color >> 2) & 7));
+                if (core_link_read_dpcd(l, RD_DPCD_PCON_HDMI_POST_FRL_STATUS, &post, 1) == RDNA3_OK)
+                    dg->dp_hdmi_frl_max_link_bw_in_kbps =
+                        intersect_frl_link_bw_support(dg->dp_hdmi_frl_max_link_bw_in_kbps, post);
+                if (dg->dp_hdmi_frl_max_link_bw_in_kbps > 0)
+                    dg->extended_cap_valid = 1;
+                if (dg->dp_hdmi_max_pixel_clk_in_khz != 0)
+                    dg->extended_cap_valid = 1;
+            }
+            break;
         default: break;
         }
     }
+    core_link_read_dpcd(l, RD_DPCD_BRANCH_REVISION_START, rev, sizeof(rev));
+    c->branch_hw_revision = rev[0];
+    c->branch_fw_revision[0] = rev[1];
+    c->branch_fw_revision[1] = rev[2];
+    if (c->dpcd_rev >= 0x14 && c->dongle_type != RD_DONGLE_NONE) {
+        uint8_t x[12] = { 0 };
+        core_link_read_dpcd(l, RD_DPCD_DFP_CAPABILITY_EXTENSION_SUPPORT, x, sizeof(x));
+        dg->dfp_cap_ext.supported = x[0];
+        dg->dfp_cap_ext.max_pixel_rate_in_mps = x[1] + ((uint32_t)x[2] << 8);
+        dg->dfp_cap_ext.max_video_h_active_width = x[3] + ((uint32_t)x[4] << 8);
+        dg->dfp_cap_ext.max_video_v_active_height = x[5] + ((uint32_t)x[6] << 8);
+        dg->dfp_cap_ext.encoding_format_caps = x[7];
+        dg->dfp_cap_ext.rgb_color_depth_caps = x[8];
+        dg->dfp_cap_ext.ycbcr444_color_depth_caps = x[9];
+        dg->dfp_cap_ext.ycbcr422_color_depth_caps = x[10];
+        dg->dfp_cap_ext.ycbcr420_color_depth_caps = x[11];
+    }
 }
 
-/* retrieve_link_cap (subset) + dp_get_max_link_cap */
+/* read_dp_device_vendor_id: the branch OUI and device name (DPCD 0x500) */
+static void read_dp_device_vendor_id(rdna3_dp_link *l)
+{
+    uint8_t id[9] = { 0 };
+    uint32_t i;
+    core_link_read_dpcd(l, RD_DPCD_BRANCH_OUI, id, sizeof(id));
+    l->dpcd_caps.branch_dev_id = ((uint32_t)id[0] << 16) + ((uint32_t)id[1] << 8) + id[2];
+    for (i = 0; i < 6; i++)
+        l->dpcd_caps.branch_dev_name[i] = id[3 + i];
+}
+
+/* dp_wa_power_up_0010FA: a sink reporting DPCD rev 0 gets D0 and a re-read;
+ * the 0010FA / 0080E1 / 00E04C VGA converters keep their receiver powered */
+static void dp_wa_power_up_0010FA(rdna3_dp_link *l, uint8_t *dpcd_data, uint32_t length)
+{
+    int retry = 0;
+    if (!l->dpcd_caps.dpcd_rev) {
+        do {
+            dpcd_write1(l, RD_DPCD_SET_POWER, RD_DP_SET_POWER_D0);   /* dpcd_write_rx_power_ctrl(true) */
+            core_link_read_dpcd(l, RD_DPCD_REV, dpcd_data, length);
+            l->dpcd_caps.dpcd_rev = dpcd_data[RD_DPCD_REV];
+        } while (retry++ < 4 && !l->dpcd_caps.dpcd_rev);
+    }
+    if (l->dpcd_caps.dongle_type == RD_DONGLE_DP_VGA) {
+        switch (l->dpcd_caps.branch_dev_id) {
+        case 0x0010fa:   /* DP_BRANCH_DEVICE_ID_0010FA */
+        case 0x0080e1:   /* DP_BRANCH_DEVICE_ID_0080E1 */
+        case 0x00e04c:   /* DP_BRANCH_DEVICE_ID_00E04C */
+            l->keep_receiver_powered = 1;
+            break;
+        default:
+            l->keep_receiver_powered = 0;
+            break;
+        }
+    } else {
+        l->keep_receiver_powered = 0;
+    }
+}
+
+/* dpcd_read_sink_ext_caps: DP_SOURCE_SINK_CAP and, from eDP's general cap
+ * 2, panel luminance control */
+static int dpcd_read_sink_ext_caps(rdna3_dp_link *l)
+{
+    uint8_t dpcd_data = 0, edp_general_cap2 = 0;
+    if (core_link_read_dpcd(l, RD_DPCD_SOURCE_SINK_CAP, &dpcd_data, 1) != RDNA3_OK)
+        return 0;
+    l->dpcd_sink_ext_caps = dpcd_data;
+    if (core_link_read_dpcd(l, RD_DPCD_EDP_GENERAL_CAP_2, &edp_general_cap2, 1) != RDNA3_OK)
+        return 0;
+    l->dpcd_caps.panel_luminance_control = (edp_general_cap2 & 0x10) != 0;   /* DP_EDP_PANEL_LUMINANCE_CONTROL_CAPABLE */
+    return 1;
+}
+
+/* try_to_configure_aux_timeout -> dce_aux_configure_timeout (DCN 3.2 has
+
+ * extended_aux_timeout_support; the connector is a PHY endpoint) */
+static void try_to_configure_aux_timeout(rdna3_dp_link *l, uint32_t timeout_us)
+{
+    dcaux_configure_timeout(l->d, l->aux, timeout_us);
+}
+
+/* dpcd_set_source_specific_data (no vendor signature override): the AMD
+ * IEEE OUI 00-00-1A unless the sink holds it already, the device id (PCI
+ * id, dce_version DCN_VERSION_3_2), DCN 3.2's minimum h blank (80) */
+static void dpcd_set_source_specific_data(rdna3_dp_link *l)
+{
+    uint8_t sig[3] = { 0 }, id[9] = { 0 }, hblank = 80;   /* dc->caps.min_horizontal_blanking_period */
+    core_link_read_dpcd(l, RD_DPCD_SOURCE_OUI, sig, sizeof(sig));
+    if (!(sig[0] == 0x00 && sig[1] == 0x00 && sig[2] == 0x1a)) {
+        sig[0] = 0x00;
+        sig[1] = 0x00;
+        sig[2] = 0x1a;
+        core_link_write_dpcd(l, RD_DPCD_SOURCE_OUI, sig, sizeof(sig));
+    }
+    id[0] = (uint8_t)l->chip_id;          /* device_id_byte1 */
+    id[1] = (uint8_t)(l->chip_id >> 8);   /* device_id_byte2; zero[4] */
+    id[6] = 26;                           /* dce_version: DCN_VERSION_3_2 */
+    core_link_write_dpcd(l, RD_DPCD_SOURCE_OUI + 3, id, sizeof(id));
+    core_link_write_dpcd(l, RD_DPCD_SOURCE_MINIMUM_HBLANK_SUPPORTED, &hblank, 1);
+}
+
+/* retrieve_link_cap (subset; detect_dp_sink_caps is this) + dp_get_max_link_cap */
 int dcn32_dp_read_caps(rdna3_dp_link *l)
 {
     uint8_t dpcd[16], ext[16], b;
@@ -352,6 +545,8 @@ int dcn32_dp_read_caps(rdna3_dp_link *l)
     l->caps_valid = 0;
     for (i = 0; i < 16; i++)
         dpcd[i] = 0;
+    /* the LTTPR timeout (3.2 ms) first: DP link layer CTS 4.2.1.1 */
+    try_to_configure_aux_timeout(l, RD_LINK_AUX_DEFAULT_LTTPR_TIMEOUT_PERIOD);
     status = dp_retrieve_lttpr_cap(l);
     if (status != RDNA3_OK) {
         status = wake_up_aux_channel(l);
@@ -365,8 +560,9 @@ int dcn32_dp_read_caps(rdna3_dp_link *l)
         /* echo TOTAL_LTTPR_CNT back downstream */
         core_link_write_dpcd(l, RD_DPCD_TOTAL_LTTPR_CNT, &c->lttpr.phy_repeater_cnt, 1);
     }
-    /* the source OUI (source specific data) is not written: the
-     * sink keeps what the GOP gave it */
+    dpcd_set_source_specific_data(l);
+    /* the sink may configure itself for the vendor: 30 ms before more */
+    l->d->os.msleep(l->d->os.ctx, 30);
     for (i = 0; i < 3; i++) {
         status = core_link_read_dpcd(l, RD_DPCD_REV, dpcd, sizeof(dpcd));
         if (status == RDNA3_OK)
@@ -376,6 +572,8 @@ int dcn32_dp_read_caps(rdna3_dp_link *l)
         RERR(l->d, "dp: AUX %u: read receiver caps dpcd data failed (%d)", l->aux, status);
         return RDNA3_EIO;
     }
+    if (!dp_is_lttpr_present(l))
+        try_to_configure_aux_timeout(l, RD_LINK_AUX_DEFAULT_TIMEOUT_PERIOD);
     c->ext_receiver_cap_field_present = (dpcd[RD_DPCD_TRAINING_AUX_RD_INTERVAL] & 0x80) != 0;
     if (c->ext_receiver_cap_field_present) {
         for (i = 0; i < 3; i++) {
@@ -400,10 +598,17 @@ int dcn32_dp_read_caps(rdna3_dp_link *l)
             if (core_link_read_dpcd(l, RD_DPCD_DPRX_FEATURE_ENUMERATION_LIST, &b, 1) == RDNA3_OK)
                 break;
         c->dprx_feature = b;
+        /* AdaptiveSyncCapability */
+        b = 0;
+        for (i = 0; i < 3; i++)
+            if (core_link_read_dpcd(l, RD_DPCD_DPRX_FEATURE_ENUMERATION_LIST_CONT_1, &b, 1) == RDNA3_OK)
+                break;
+        c->adaptive_sync_caps = b;
     }
     /* a sink cannot report MAX_LANE_COUNT 0 */
     if (!(dpcd[RD_DPCD_MAX_LANE_COUNT] & RD_DP_LANE_COUNT_MASK))
         return RDNA3_EIO;
+    read_dp_device_vendor_id(l);
     c->allow_invalid_msa_timing_param = (dpcd[RD_DPCD_DOWN_STREAM_PORT_COUNT] >> 6) & 1;
     c->max_ln_count = dpcd[RD_DPCD_MAX_LANE_COUNT];
     c->max_down_spread = dpcd[RD_DPCD_MAX_DOWNSPREAD];
@@ -412,12 +617,42 @@ int dcn32_dp_read_caps(rdna3_dp_link *l)
     l->reported_link_cap.link_rate = get_link_rate_from_max_link_bw(dpcd[RD_DPCD_MAX_LINK_RATE]);
     l->reported_link_cap.link_spread = (c->max_down_spread & RD_DP_MAX_DOWNSPREAD_0_5)
                                            ? RD_DP_LINK_SPREAD_05_DOWNSPREAD_30KHZ : RD_DP_LINK_SPREAD_DISABLED;
+    get_active_converter_info(l, dpcd[RD_DPCD_DOWNSTREAMPORT_PRESENT]);
+    dp_wa_power_up_0010FA(l, dpcd, sizeof(dpcd));
+    /* dpcd_read_sink_ext_caps (0 when it fails) */
+    if (!dpcd_read_sink_ext_caps(l))
+        l->dpcd_sink_ext_caps = 0;
     b = 0;
     core_link_read_dpcd(l, RD_DPCD_SINK_COUNT, &b, 1);
     c->sink_count = b;
-    core_link_read_dpcd(l, RD_DPCD_SINK_OUI, oui, sizeof(oui));
+    {
+        /* the sink's IEEE OUI and device id string, HW / FW revision */
+        uint8_t sid[9] = { 0 }, rev[3] = { 0 };
+        core_link_read_dpcd(l, RD_DPCD_SINK_OUI, sid, sizeof(sid));
+        for (i = 0; i < 3; i++)
+            oui[i] = sid[i];
+        for (i = 0; i < 6; i++)
+            c->sink_dev_id_str[i] = sid[3 + i];
+        core_link_read_dpcd(l, RD_DPCD_SINK_HW_REVISION_START, rev, sizeof(rev));
+        c->sink_hw_revision = rev[0];
+        c->sink_fw_revision[0] = rev[1];
+        c->sink_fw_revision[1] = rev[2];
+    }
     c->sink_dev_id = ((uint32_t)oui[0] << 16) | ((uint32_t)oui[1] << 8) | oui[2];
-    get_active_converter_info(l, dpcd[RD_DPCD_DOWNSTREAMPORT_PRESENT]);
+    {
+        /* quirk for Retina panels: wrong DP_MAX_LINK_RATE (the 16,1 models
+         * share the device id: the firmware revision decides) */
+        static const uint8_t str_mbp_2018[6] = { 101, 68, 21, 103, 98, 97 };
+        static const uint8_t fw_2018[2] = { 7, 4 }, fw_2018_vega[2] = { 8, 4 };
+        int k, same = 1;
+        for (k = 0; k < 6; k++)
+            if (c->sink_dev_id_str[k] != str_mbp_2018[k])
+                same = 0;
+        if (c->sink_dev_id == 0x0010fa && same &&
+            ((c->sink_fw_revision[0] == fw_2018[0] && c->sink_fw_revision[1] == fw_2018[1]) ||
+             (c->sink_fw_revision[0] == fw_2018_vega[0] && c->sink_fw_revision[1] == fw_2018_vega[1])))
+            l->reported_link_cap.link_rate = RD_DP_LINK_RATE_RBR2;
+    }
     /* DSC and FEC sink caps from DPCD 1.4 */
     c->fec_cap = 0;
     for (i = 0; i < RD_DSC_DPCD_BASIC; i++)
@@ -815,7 +1050,8 @@ static void dp_set_fec_enable(rdna3_dp_link *l, int enable)
     }
 }
 
-/* dcn10_link_encoder_connect_dig_be_to_fe */
+/* dcn10_link_encoder_connect_dig_be_to_fe; get_frontend_source: DIG n is
+ * bit n of DIG_FE_SOURCE_SELECT (DCN10_DIG_FE_SOURCE_SELECT_DIGA..) */
 static void dcn10_link_encoder_connect_dig_be_to_fe(rdna3_dp_link *l, int connect)
 {
     uint32_t v = RI(l->d, regDIG0_DIG_BE_CNTL, l->be, DIG_S);
@@ -993,6 +1229,112 @@ static void enc32_stream_encoder_dp_unblank(rdna3_dp_link *l, uint32_t pixel_khz
     UPDATE(l->d, regDP0_DP_VID_STREAM_CNTL, l->fe, DP_S, DP0_DP_VID_STREAM_CNTL, DP_VID_STREAM_ENABLE, 1);
 }
 
+/* ---- DP secondary data packets (dcn10 / dcn30 stream encoder) ---- */
+
+/* enc1_stream_encoder_stop_dp_info_packets: every GSP, the MPG and the
+ * master enable off (REG_SET of 0); the master back on when something
+ * else in the register (the audio packets) still runs */
+static void enc1_stream_encoder_stop_dp_info_packets(rdna3_dp_link *l)
+{
+    uint32_t v;
+    WI(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, 0);
+    v = RI(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S);
+    if (v)
+        UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_STREAM_ENABLE, 1);
+}
+
+void dcn32_enc_update_dp_info_packets_sdp_line_num(rdna3_dp_link *l, const rdna3_dp_info_frames *f)
+{
+    if (f->adaptive_sync.valid && f->adaptive_sync_line_num_valid) {
+        /* 00: REFER_TO_DP_SOF, 01: REFER_TO_OTG_SOF */
+        UPDATE(l->d, regDP0_DP_SEC_CNTL1, l->fe, DP_S, DP0_DP_SEC_CNTL1, DP_SEC_GSP5_LINE_REFERENCE, 1);
+        UPDATE(l->d, regDP0_DP_SEC_CNTL5, l->fe, DP_S, DP0_DP_SEC_CNTL5, DP_SEC_GSP5_LINE_NUM,
+               f->adaptive_sync_line_num);
+    }
+}
+
+static void vpg_packet(rdna3_dp_link *l, uint32_t index, const rdna3_info_packet *p)
+{
+    uint8_t hb[4];
+    hb[0] = p->hb0;
+    hb[1] = p->hb1;
+    hb[2] = p->hb2;
+    hb[3] = p->hb3;
+    dcn32_vpg_update_generic_info_packet(l->d, l->fe, index, hb, p->sb, 1);
+}
+
+void dcn32_enc_update_dp_info_packets(rdna3_dp_link *l, const rdna3_dp_info_frames *f)
+{
+    uint32_t v;
+    /* VSC in packets 0 and 1 (DC writes packet 1 twice: PSR-SU's TODO) */
+    if (f->vsc.valid)
+        vpg_packet(l, 0, &f->vsc);
+    if (f->vsc.valid)
+        vpg_packet(l, 1, &f->vsc);
+    if (f->vsc.valid)
+        vpg_packet(l, 1, &f->vsc);
+    if (f->spd.valid)
+        vpg_packet(l, 2, &f->spd);
+    if (f->hdrsmd.valid)
+        vpg_packet(l, 3, &f->hdrsmd);
+    /* packet 4 is for immediate SDP messages */
+    if (f->adaptive_sync.valid)
+        vpg_packet(l, 5, &f->adaptive_sync);
+    /* transmission from the next frame */
+    UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_GSP0_ENABLE, f->vsc.valid ? 1 : 0);
+    UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_GSP2_ENABLE, f->spd.valid ? 1 : 0);
+    UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_GSP3_ENABLE, f->hdrsmd.valid ? 1 : 0);
+    UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_GSP5_ENABLE, f->adaptive_sync.valid ? 1 : 0);
+    /* the master enable with any packet (shared with the audio info frame) */
+    v = RI(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S);
+    if (v)
+        UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_STREAM_ENABLE, 1);
+    /* dynamic metadata transmission needs it too */
+    if (GET(RI(l->d, regDP0_DP_SEC_METADATA_TRANSMISSION, l->fe, DP_S), DP0_DP_SEC_METADATA_TRANSMISSION,
+            DP_SEC_METADATA_PACKET_ENABLE))
+        UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_STREAM_ENABLE, 1);
+}
+
+int dcn32_enc_dp_get_pixel_format(rdna3_dp_link *l, uint32_t *encoding, uint32_t *depth)
+{
+    uint32_t v, hw_encoding, hw_depth;
+    if (!l || !encoding || !depth)
+        return 0;
+    v = RI(l->d, regDP0_DP_PIXEL_FORMAT, l->fe, DP_S);
+    hw_encoding = GET(v, DP0_DP_PIXEL_FORMAT, DP_PIXEL_ENCODING);
+    hw_depth = GET(v, DP0_DP_PIXEL_FORMAT, DP_COMPONENT_DEPTH);
+    switch (hw_depth) {
+    case 0: *depth = RD_COLOR_DEPTH_666; break;     /* DP_COMPONENT_PIXEL_DEPTH_6BPC */
+    case 1: *depth = RD_COLOR_DEPTH_888; break;
+    case 2: *depth = RD_COLOR_DEPTH_101010; break;
+    case 3: *depth = RD_COLOR_DEPTH_121212; break;
+    case 4: *depth = RD_COLOR_DEPTH_161616; break;
+    default: *depth = RD_COLOR_DEPTH_UNDEFINED; break;
+    }
+    switch (hw_encoding) {
+    case 0: *encoding = RD_PIXEL_ENCODING_RGB; break;        /* DP_PIXEL_ENCODING_TYPE_RGB444 */
+    case 1: *encoding = RD_PIXEL_ENCODING_YCBCR422; break;
+    case 2: case 3: *encoding = RD_PIXEL_ENCODING_YCBCR444; break;   /* YCbCr 4:4:4, Y only */
+    case 4: *encoding = RD_PIXEL_ENCODING_YCBCR420; break;
+    default: *encoding = 0; break;                               /* PIXEL_ENCODING_UNDEFINED */
+    }
+    return 1;
+}
+
+/* enable_stream_features (SST): DP_DOWNSPREAD_CTRL's MSA_TIMING_PAR_IGNORE
+ * as the stream wants it (ignore_msa_timing_param: FreeSync only, so off);
+ * MST: dm_helpers_mst_enable_stream_features, the same on the link's DPCD
+ * (amdgpu's TODO: no virtual DPCD) */
+static void enable_stream_features(rdna3_dp_link *l)
+{
+    uint8_t old_downspread = 0, new_downspread;
+    if (core_link_read_dpcd(l, RD_DPCD_DOWNSPREAD_CTRL, &old_downspread, 1) != RDNA3_OK && l->mst)
+        return;
+    new_downspread = (uint8_t)((old_downspread & ~0x80u) | (l->ignore_msa_timing_param ? 0x80u : 0));
+    if (new_downspread != old_downspread)
+        core_link_write_dpcd(l, RD_DPCD_DOWNSPREAD_CTRL, &new_downspread, 1);
+}
+
 /* dcn20_blank_stream (DP 8b/10b) */
 static void dcn20_blank_stream(rdna3_dp_link *l)
 {
@@ -1080,7 +1422,9 @@ void dcn32_dp_enable_link_phy(rdna3_dp_link *l, const rdna3_dp_link_settings *s)
 void dcn32_dp_disable_link_phy(rdna3_dp_link *l)
 {
     uint32_t i;
-    dpcd_write_rx_power_ctrl(l, 0);
+    if (!l->keep_receiver_powered)
+        dpcd_write_rx_power_ctrl(l, 0);
+
     dcn10_link_encoder_disable_output(l);
     for (i = 0; i < sizeof(l->cur_link_settings); i++)
         ((uint8_t *)&l->cur_link_settings)[i] = 0;
@@ -1304,7 +1648,9 @@ static uint32_t decide_eq_training_pattern(const rdna3_dp_link *l)
     return RD_DP_TRAINING_PATTERN_SEQUENCE_2;
 }
 
-/* dp_decide_8b_10b_lttpr_mode: LTTPR-aware VBIOS, non-transparent not forced */
+/* dp_decide_8b_10b_lttpr_mode: LTTPR-aware VBIOS, non-transparent not forced;
+ * dp_decide_lttpr_mode for the 8b/10b links this port trains */
+
 static int dp_decide_8b_10b_lttpr_mode(const rdna3_dp_link *l)
 {
     if (!dp_is_lttpr_present(l))
@@ -1900,9 +2246,11 @@ void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l)
     if (!l->mst) {
         /* disable_link -> disable_link_dp -> dp_disable_link_phy */
         disable_link(l);
-        /* dcn20_disable_stream -> reset_dio_stream_encoder */
+        /* dce110_disable_stream: the DP info packets off, reset_dio_stream_encoder */
+        enc1_stream_encoder_stop_dp_info_packets(l);
         reset_dio_stream_encoder(l);
     } else {
+        enc1_stream_encoder_stop_dp_info_packets(l);
         reset_dio_stream_encoder(l);
         disable_link(l);
     }
@@ -1911,12 +2259,16 @@ void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l)
     l->stream_dsc = 0;
 }
 
-/* enable_link_dp: training with retries (the requested symbol clock is the
- * link rate: DCN 3.2 clk_mgr has no notification), FEC on after it; the
- * source OUI is not written */
+/* enable_link_dp: the source OUI again ("during mode switch we do
+ * DP_SET_POWER off then on, and OUI is lost", 30 ms after it for a sink
+ * with extended caps), training with retries (the requested symbol clock
+ * is the link rate: DCN 3.2 clk_mgr has no notification), FEC on after it */
 static int enable_link_dp(rdna3_dp_link *l, const rdna3_dp_link_settings *s, int do_fallback, uint32_t req)
 {
     int skip_video_pattern = s->link_rate != RD_DP_LINK_RATE_LOW, status;
+    dpcd_set_source_specific_data(l);
+    if (l->dpcd_sink_ext_caps)
+        l->d->os.msleep(l->d->os.ctx, 30);
     status = dcn32_dp_link_training_with_retries(l, s, skip_video_pattern, RD_DP_LINK_TRAINING_ATTEMPTS, do_fallback,
                                                  req) ? RDNA3_OK : RDNA3_EIO;
     dp_set_fec_enable(l, 1);
@@ -1984,8 +2336,18 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
     /* the second setup: the transmitter command may have left another DIG_MODE */
     dcn10_link_encoder_setup(l);
     /* dcn20_enable_stream: link_hwss->setup_stream_encoder (the pixel rate
-     * divider and the early control stay as they are on DCN 3.2) */
+     * divider and the early control stay as they are on DCN 3.2), then
+     * dcn30_update_info_frame: no VSC (RGB, no PSR), SPD (no FreeSync), HDR
+     * or adaptive sync packet in this driver's streams */
     setup_dio_stream_encoder(l);
+    {
+        rdna3_dp_info_frames f;
+        uint32_t k;
+        for (k = 0; k < sizeof(f); k++)
+            ((uint8_t *)&f)[k] = 0;
+        dcn32_enc_update_dp_info_packets_sdp_line_num(l, &f);
+        dcn32_enc_update_dp_info_packets(l, &f);
+    }
     /* the PPS SDP ("info frames") */
     if (l->stream_dsc) {
         dp_set_dsc_on_rx(l, 1);
@@ -1995,9 +2357,107 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
         status = RDNA3_EIO;
     dcn32_unblank_stream(l, m->pixel_khz, l->cur_link_settings.link_rate ? l->cur_link_settings.link_rate
                                                                          : s.link_rate);
+    enable_stream_features(l);
     RLOG(l->d, "dp: DIG %u -> UNIPHY %u%s: %ux%u %u kHz on %s x%u%s%s: %s", l->fe, l->be, l->mst ? " (MST)" : "",
          m->h_active, m->v_active, m->pixel_khz, rate_name(l->cur_link_settings.link_rate),
          l->cur_link_settings.lane_count, l->fec_state == RD_FEC_ENABLED ? ", FEC" : "",
          l->stream_dsc ? ", DSC" : "", status == RDNA3_OK ? "trained" : "NOT trained");
     return status;
+}
+
+/* ---- link_validation.c ---- */
+
+/* dp_active_dongle_validate_timing (no 3D) for a stream of 'enc'
+ * (RD_PIXEL_ENCODING_*) at 'depth' (RD_COLOR_DEPTH_*) */
+static int dp_active_dongle_validate_timing(const rdna3_dp_link *l, const rdna3_mode *m, uint32_t enc, uint32_t depth)
+{
+    const rdna3_dp_caps *c = &l->dpcd_caps;
+    const rdna3_dp_dongle_caps *dg = &c->dongle_caps;
+    rdna3_crtc_format f;
+    uint8_t dc = 0;
+
+    switch (c->dongle_type) {
+    case RD_DONGLE_DP_VGA:
+    case RD_DONGLE_DP_DVI:
+        return enc == RD_PIXEL_ENCODING_RGB;
+    default:
+        break;
+    }
+    if (c->dongle_type == RD_DONGLE_DP_HDMI && dg->extended_cap_valid) {
+        switch (enc) {
+        case RD_PIXEL_ENCODING_RGB:
+        case RD_PIXEL_ENCODING_YCBCR444:
+            break;
+        case RD_PIXEL_ENCODING_YCBCR422:
+            if (!dg->is_dp_hdmi_ycbcr422_pass_through)
+                return 0;
+            break;
+        case RD_PIXEL_ENCODING_YCBCR420:
+            if (!dg->is_dp_hdmi_ycbcr420_pass_through)
+                return 0;
+            break;
+        default:
+            return 0;
+        }
+        switch (depth) {
+        case RD_COLOR_DEPTH_666:
+        case RD_COLOR_DEPTH_888:
+            break;
+        case RD_COLOR_DEPTH_101010:
+            if (dg->dp_hdmi_max_bpc < 10)
+                return 0;
+            break;
+        case RD_COLOR_DEPTH_121212:
+            if (dg->dp_hdmi_max_bpc < 12)
+                return 0;
+            break;
+        default:
+            return 0;   /* 14 / 16 bpc not supported */
+        }
+        if (dg->dp_hdmi_frl_max_link_bw_in_kbps > 0) {
+            /* DP to HDMI FRL converter: the output timing without DSC */
+            if (dcn32_dp_mode_kbps(m, depth == RD_COLOR_DEPTH_121212 ? 12 : depth == RD_COLOR_DEPTH_101010 ? 10 : 8,
+                                   NULL) > dg->dp_hdmi_frl_max_link_bw_in_kbps)
+                return 0;
+        } else {
+            /* DP to HDMI TMDS converter */
+            f.pixel_encoding = enc;
+            f.color_depth = depth;
+            f.dsc = 0;
+            f.dsc_ycbcr422_simple = 0;
+            if (dcn32_tmds_output_pixel_clock_100hz(m->pixel_khz * 10, &f) > dg->dp_hdmi_max_pixel_clk_in_khz * 10)
+                return 0;
+        }
+    }
+    /* the DFP capability extension, unless the sink has 128b/132b or DSC pass-through */
+    if (!(c->channel_coding_cap & 0x02) && !(c->dsc_basic[0] & 0x02) && dg->dfp_cap_ext.supported) {
+        if (dg->dfp_cap_ext.max_pixel_rate_in_mps < m->pixel_khz / 1000)
+            return 0;
+        if (dg->dfp_cap_ext.max_video_h_active_width < m->h_active)
+            return 0;
+        if (dg->dfp_cap_ext.max_video_v_active_height < m->v_active)
+            return 0;
+        if (!(dg->dfp_cap_ext.encoding_format_caps & 0x01))   /* support_rgb (DC checks it for every encoding) */
+            return 0;
+        switch (enc) {
+        case RD_PIXEL_ENCODING_RGB: dc = dg->dfp_cap_ext.rgb_color_depth_caps; break;
+        case RD_PIXEL_ENCODING_YCBCR444: dc = dg->dfp_cap_ext.ycbcr444_color_depth_caps; break;
+        case RD_PIXEL_ENCODING_YCBCR422: dc = dg->dfp_cap_ext.ycbcr422_color_depth_caps; break;
+        case RD_PIXEL_ENCODING_YCBCR420: dc = dg->dfp_cap_ext.ycbcr420_color_depth_caps; break;
+        default: break;
+        }
+        if ((depth == RD_COLOR_DEPTH_666 && enc == RD_PIXEL_ENCODING_RGB && !(dc & 0x01)) ||
+            (depth == RD_COLOR_DEPTH_888 && !(dc & 0x02)) || (depth == RD_COLOR_DEPTH_101010 && !(dc & 0x04)) ||
+            (depth == RD_COLOR_DEPTH_121212 && !(dc & 0x08)) || (depth == RD_COLOR_DEPTH_161616 && !(dc & 0x10)))
+            return 0;
+    }
+    return 1;
+}
+
+/* link_validate_mode_timing: no passive dongle on a DP connector
+ * (dongle_max_pix_clk 0), the active dongle; the bandwidth half
+ * (dp_validate_mode_timing) is the caller's link setting decision */
+int dcn32_dp_validate_mode_timing(const rdna3_dp_link *l, const rdna3_mode *m)
+{
+    return dp_active_dongle_validate_timing(l, m, RD_PIXEL_ENCODING_RGB, RD_COLOR_DEPTH_888);
 }

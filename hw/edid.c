@@ -307,6 +307,29 @@ static void descriptor(rdna3_edid *e, const uint8_t *p, int first)
     }
 }
 
+/* a vendor-specific data block (cea_db_tag 3): the HDMI VSDB
+ * (drm_parse_hdmi_vsdb_video: Max_TMDS_Clock in byte 7, x 5 MHz) and the
+ * HDMI Forum VSDB (drm_parse_hdmi_forum_scds: Max_TMDS_Character_Rate in
+ * byte 5 x 5 MHz, SCDC_Present and LTE_340Mcsc_Scramble in byte 6) */
+static void cta_vsdb(rdna3_edid *e, const uint8_t *db, uint32_t n)
+{
+    uint32_t oui;
+    if (n < 3)
+        return;
+    oui = (uint32_t)db[3] << 16 | (uint32_t)db[2] << 8 | db[1];
+    if (oui == 0x000c03) {
+        e->hdmi = 1;
+        if (n >= 7 && db[7] && !e->max_tmds_clk_mhz)
+            e->max_tmds_clk_mhz = db[7] * 5u;
+    } else if (oui == 0xc45dd8 && n >= 6) {
+        if (db[5] && db[5] * 5u > 340)
+            e->max_tmds_clk_mhz = db[5] * 5u;
+        e->scdc_present = (db[6] & 0x80) ? 1 : 0;
+        /* scrambling below 340 Mcsc only with SCDC (drm: scdc.scrambling.low_rates) */
+        e->lte_340_scramble = (db[6] & 0x80) && (db[6] & 0x08) ? 1 : 0;
+    }
+}
+
 /* CTA-861 extension: detailed timings after the data block collection */
 static void cta_block(rdna3_edid *e, const uint8_t *b)
 {
@@ -314,7 +337,9 @@ static void cta_block(rdna3_edid *e, const uint8_t *b)
     if (b[0] != 0x02 || off < 4 || off > 127)
         return;
     /* data block collection: the video data block's short video
-     * descriptors (cea_db_tag 2) */
+     * descriptors (cea_db_tag 2), the audio data block's short audio
+     * descriptors (tag 1: drm_edid_to_sad), the speaker allocation
+     * (tag 4: drm_edid_to_speaker_allocation), vendor blocks (tag 3) */
     for (i = 4; i < off;) {
         uint32_t tag = b[i] >> 5, n = b[i] & 0x1f, k;
         if (i + 1 + n > off)
@@ -322,6 +347,19 @@ static void cta_block(rdna3_edid *e, const uint8_t *b)
         if (tag == 2)
             for (k = 0; k < n; k++)
                 cta_vic(e, b[i + 1 + k]);
+        if (tag == 1)
+            for (k = 0; k + 3 <= n && e->audio_mode_count < RD_EDID_MAX_AUDIO; k += 3) {
+                const uint8_t *sad = b + i + 1 + k;
+                e->audio_modes[e->audio_mode_count].format_code = (sad[0] >> 3) & 0xf;
+                e->audio_modes[e->audio_mode_count].channel_count = (uint8_t)((sad[0] & 7) + 1);
+                e->audio_modes[e->audio_mode_count].sample_rate = sad[1];
+                e->audio_modes[e->audio_mode_count].sample_size = sad[2];
+                e->audio_mode_count++;
+            }
+        if (tag == 4 && n >= 1)
+            e->speaker_flags = b[i + 1];
+        if (tag == 3)
+            cta_vsdb(e, b + i, n);
         i += 1 + n;
     }
     if (off > 127 - 18)
@@ -381,6 +419,33 @@ int edid_parse(const uint8_t *d, uint32_t len, rdna3_edid *e)
     for (i = 1; i < blocks; i++)
         if (edid_block_valid(d + i * 128))
             cta_block(e, d + i * 128);
+    /* dm_helpers_parse_edid_caps: the speaker allocation defaults when the
+     * sink has audio but no allocation block; edid_extract_panel_id and
+     * apply_edid_quirks */
+    if (e->audio_mode_count && !e->speaker_flags)
+        e->speaker_flags = RD_EDID_DEFAULT_SPEAKER_LOCATION;
+    e->panel_id = (uint32_t)d[8] << 24 | (uint32_t)d[9] << 16 | (uint32_t)(d[10] | (d[11] << 8));
+    switch (e->panel_id) {
+    /* monitors that do not work well with FAMS */
+    case RD_EDID_PANEL_ID('S', 'A', 'M', 0x0E5E):
+    case RD_EDID_PANEL_ID('S', 'A', 'M', 0x7053):
+    case RD_EDID_PANEL_ID('S', 'A', 'M', 0x71AC):
+        e->quirk_disable_fams = 1;
+        break;
+    /* monitors that do not clear DPCD 0x317 when FreeSync is unsupported */
+    case RD_EDID_PANEL_ID('A', 'U', 'O', 0xA7AB):
+    case RD_EDID_PANEL_ID('A', 'U', 'O', 0xE69B):
+    case RD_EDID_PANEL_ID('B', 'O', 'E', 0x092A):
+    case RD_EDID_PANEL_ID('L', 'G', 'D', 0x06D1):
+    case RD_EDID_PANEL_ID('M', 'S', 'F', 0x1003):
+        e->quirk_remove_sink_ext_caps = 1;
+        break;
+    case RD_EDID_PANEL_ID('S', 'D', 'C', 0x4154):
+        e->quirk_disable_colorimetry = 1;   /* no VSC */
+        break;
+    default:
+        break;
+    }
 
     /* standard and established entries carry size and rate only: their
      * timing from DMT, else CVT reduced blanking (drm_mode_std); the
@@ -398,8 +463,32 @@ int edid_parse(const uint8_t *d, uint32_t len, rdna3_edid *e)
     return 0;
 }
 
+uint32_t edid_match_vic(const rdna3_mode *m)
+{
+    uint32_t i;
+    if (!m || !m->pixel_khz || m->interlaced)
+        return 0;
+    for (i = 0; i < sizeof(cta) / sizeof(cta[0]); i++) {
+        const struct cta *c = &cta[i];
+        uint32_t clk = c->pclk;
+        if (c->ha != m->h_active || c->va != m->v_active || c->ht != m->h_total || c->vt != m->v_total ||
+            (uint32_t)(c->hse - c->hss) != m->h_sync || (uint32_t)(c->vse - c->vss) != m->v_sync ||
+            (uint32_t)(c->hss - c->ha) != m->h_front ||
+            (uint32_t)(c->vss - c->va) != m->v_front)
+            continue;
+        /* the 1000/1001 variant of the same VIC counts too */
+        if ((uint64_t)m->pixel_khz * 1000 > (uint64_t)clk * 995 && (uint64_t)m->pixel_khz * 1000 < (uint64_t)clk * 1005)
+            return c->vic;
+        clk = (uint32_t)((uint64_t)clk * 1000 / 1001);
+        if ((uint64_t)m->pixel_khz * 1000 > (uint64_t)clk * 995 && (uint64_t)m->pixel_khz * 1000 < (uint64_t)clk * 1005)
+            return c->vic;
+    }
+    return 0;
+}
+
 static void cta_vic(rdna3_edid *e, uint8_t svd)
 {
+
     /* CTA-861-F: 129-192 are VICs 1-64 with the native flag in bit 7 */
     uint8_t vic = svd >= 129 && svd <= 192 ? (uint8_t)(svd & 0x7f) : svd;
     uint32_t i;

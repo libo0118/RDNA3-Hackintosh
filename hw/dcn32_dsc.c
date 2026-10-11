@@ -1426,6 +1426,14 @@ void dcn32_dsc_disconnect(rdna3_dev *d, uint32_t inst)
     UPDATE(d, regDSCRM0_DSCRM_DSC_FORWARD_CONFIG, inst, DSCRM_S, DSCRM0_DSCRM_DSC_FORWARD_CONFIG, DSCRM_DSC_FORWARD_EN, 0);
 }
 
+/* dsc2_wait_disconnect_pending_clear: the double-buffered disconnect taken
+ * (REG_WAIT 2 us x 50000): RDNA3_OK or RDNA3_ETIME */
+int dcn32_dsc_wait_disconnect_pending_clear(rdna3_dev *d, uint32_t inst)
+{
+    return rdna3_wait_reg(d, AI(d, regDSCRM0_DSCRM_DSC_FORWARD_CONFIG, inst, DSCRM_S), 0,
+                          DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_DOUBLE_BUFFER_REG_UPDATE_PENDING_MASK, 0, 100000);
+}
+
 /* dsc2_read_state */
 void dcn32_dsc_read_state(rdna3_dev *d, uint32_t inst, rdna3_dsc_state *s)
 {
@@ -1489,6 +1497,12 @@ static void vpg3_update_generic_info_packet(rdna3_dev *d, uint32_t vpg, uint32_t
         v = RI(d, regVPG0_VPG_GSP_FRAME_UPDATE_CTRL, vpg, VPG_S);
         WI(d, regVPG0_VPG_GSP_FRAME_UPDATE_CTRL, vpg, VPG_S, v | (1u << index));       /* VPG_GENERICn_FRAME_UPDATE */
     }
+}
+
+void dcn32_vpg_update_generic_info_packet(rdna3_dev *d, uint32_t vpg, uint32_t index, const uint8_t *hb,
+                                          const uint8_t *sb, int immediate_update)
+{
+    vpg3_update_generic_info_packet(d, vpg, index, hb, sb, immediate_update);
 }
 
 /* enc3_dp_set_dsc_pps_info_packet: the PPS in GSP 11..14 (4 x 32 bytes),

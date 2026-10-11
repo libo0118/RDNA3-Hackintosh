@@ -7,6 +7,7 @@
  */
 #include "dmub32.h"
 #include "gen/dcn_3_2_1_dmcub.h"
+#include "gen/dcn_3_2_0_dmub_diag.h"
 
 #define PSP_HEADER_BYTES_256   0x100
 #define PSP_FOOTER_BYTES_256   0x100
@@ -60,7 +61,7 @@ static int meta_from_blob(const uint8_t *blob, uint32_t size, uint32_t meta_offs
     return 1;
 }
 
-/* dmub_srv_get_fw_meta_info_from_raw_fw: the legacy region at the end of
+/* dmub_srv_get_fw_meta_info_from_raw_fw / dmub_get_fw_meta_info: the legacy region at the end of
  * BSS, else the combined one at the end of the instruction image behind a
  * 256- or 512-byte PSP footer, 16-byte alignment slack */
 static void find_meta(rdna3_dmub *dm)
@@ -115,7 +116,9 @@ int dmub32_sw_init(rdna3_dmub *dm, rdna3_dev *d, const uint8_t *fw, uint32_t fw_
         RERR(d, "DMUB: no firmware meta info, using default region sizes");
     dm->vbios_size = vbios_size;
 
-    /* dmub_srv_calc_region_info: every window in FB (VRAM) on DCN32 */
+    /* dmub_srv_calc_region_info: every window in FB (VRAM) on DCN32, so
+     * dmub_srv_calc_regions_for_memory_type(FB) lays them all out; the CPU /
+     * GPU address of each (dmub_srv_calc_mem_info) is win_off / win_mc */
     sizes[RD_DMUB_WIN_INST_CONST] = dm->inst_const_size;
     sizes[RD_DMUB_WIN_STACK] = DMUB_STACK_SIZE + DMUB_CONTEXT_SIZE;
     sizes[RD_DMUB_WIN_BSS_DATA] = dm->bss_data_size;
@@ -153,24 +156,94 @@ static uint64_t win_mc(const rdna3_dmub *dm, unsigned w) { return rdna3_vram_mc(
 
 /* ---- hardware (dmub_dcn32.c) ---- */
 
-/* dmub_dcn32_is_supported */
+/* dmub_dcn32_is_supported (dmub_srv_has_hw_support) */
 int dmub32_is_supported(rdna3_dev *d)
 {
     return GET(RR(d, regCC_DC_PIPE_DIS), CC_DC_PIPE_DIS, DC_DMCUB_ENABLE) != 0;
 }
 
-/* dmub_dcn32_is_hw_init */
+/* dmub_dcn32_is_hw_init (dmub_srv_is_hw_init) */
 int dmub32_is_hw_init(rdna3_dev *d)
 {
     return GET(RR(d, regDMCUB_CNTL), DMCUB_CNTL, DMCUB_ENABLE) &&
            (RR(d, regDMCUB_SCRATCH0) & RD_DMUB_BOOT_DAL_FW);
 }
 
-static void dcn32_reset(rdna3_dev *d)
+/* ---- GPINT (dmub_dcn32.c) ---- */
+
+/* dmub_dcn32_set_gpint */
+static void dmub_dcn32_set_gpint(rdna3_dev *d, uint32_t reg)
 {
+    WR(d, regDMCUB_GPINT_DATAIN1, reg);
+}
+
+/* dmub_dcn32_is_gpint_acked: the firmware cleared the status field */
+static int dmub_dcn32_is_gpint_acked(rdna3_dev *d, uint32_t reg)
+{
+    return RR(d, regDMCUB_GPINT_DATAIN1) == (reg & 0x0fffffffu);
+}
+
+/* dmub_dcn32_get_gpint_response */
+static uint32_t dmub_dcn32_get_gpint_response(rdna3_dev *d)
+{
+    return RR(d, regDMCUB_SCRATCH7);
+}
+
+/* dmub_dcn32_reset, as amdgpu runs it (rdna3dmubreset=1): STOP_FW, 30
+ * reads for its ack and 30 for its answer ("each register check will be
+ * greater than 1us, so don't bother using udelay"), then the reset forced
+ * whether or not the firmware stopped, DMUIF held in reset until
+ * dmub_dcn32_reset_release */
+static void dmub_dcn32_reset(rdna3_dmub *dm)
+{
+    rdna3_dev *d = dm->d;
+    const uint32_t timeout = 30;
+    uint32_t cmd = RD_DMUB_GPINT(RD_DMUB_GPINT_STOP_FW, 0), i;
+
+    if (GET(RR(d, regDMCUB_CNTL2), DMCUB_CNTL2, DMCUB_SOFT_RESET) == 0) {
+        dm->reset_acked = dm->reset_stopped = 0;
+        dmub_dcn32_set_gpint(d, cmd);
+        for (i = 0; i < timeout; ++i)
+            if (dmub_dcn32_is_gpint_acked(d, cmd)) {
+                dm->reset_acked = 1;
+                break;
+            }
+        for (i = 0; i < timeout; ++i)
+            if (dmub_dcn32_get_gpint_response(d) == RD_DMUB_GPINT_STOP_FW_RESPONSE) {
+                dm->reset_stopped = 1;
+                break;
+            }
+        /* force the reset in case it timed out: the DMCUB is likely hung */
+    }
+    UPD(d, DMCUB_CNTL2, DMCUB_SOFT_RESET, 1);
+    UPD(d, DMCUB_CNTL, DMCUB_ENABLE, 0);
+    UPD(d, MMHUBBUB_SOFT_RESET, DMUIF_SOFT_RESET, 1);
+    WR(d, regDMCUB_INBOX1_RPTR, 0);
+    WR(d, regDMCUB_INBOX1_WPTR, 0);
+    WR(d, regDMCUB_OUTBOX1_RPTR, 0);
+    WR(d, regDMCUB_OUTBOX1_WPTR, 0);
+    WR(d, regDMCUB_OUTBOX0_RPTR, 0);
+    WR(d, regDMCUB_OUTBOX0_WPTR, 0);
+    WR(d, regDMCUB_SCRATCH0, 0);
+    /* clear the GPINT command manually so we do not reset again */
+    dmub_dcn32_set_gpint(d, 0);
+    RLOG(d, "DMUB: amdgpu reset (rdna3dmubreset=1): STOP_FW %s, %s", dm->reset_acked ? "acked" : "not acked",
+         dm->reset_stopped ? "firmware stopped" : "no stop answer: reset forced");
+}
+
+/* the stop + reset verified on the card (step 5b): up to 1 s for the stop,
+ * the windows CW2-CW7 closed, DMUIF left alone; with dm->amd_reset
+ * amdgpu's dmub_dcn32_reset instead */
+static void dcn32_reset(rdna3_dmub *dm)
+{
+    rdna3_dev *d = dm->d;
     const uint32_t timeout_us = 1000000;
     uint32_t i = 0, enabled, in_reset;
 
+    if (dm->amd_reset) {
+        dmub_dcn32_reset(dm);
+        return;
+    }
     enabled = GET(RR(d, regDMCUB_CNTL), DMCUB_CNTL, DMCUB_ENABLE);
     in_reset = GET(RR(d, regDMCUB_CNTL2), DMCUB_CNTL2, DMCUB_SOFT_RESET);
     if (enabled && in_reset == 0) {
@@ -345,7 +418,7 @@ int dmub32_wait_boot(rdna3_dmub *dm, uint32_t timeout_us)
 
 void dmub32_hw_reset(rdna3_dmub *dm)
 {
-    dcn32_reset(dm->d);
+    dcn32_reset(dm);
     dm->inbox1_wptr = dm->inbox1_rptr = dm->inbox1_last_wptr = 0;
     dm->submitted = dm->reported = 0;
     dm->hw_init = 0;
@@ -379,10 +452,12 @@ int dmub32_hw_init(rdna3_dmub *dm, const uint8_t *vbios, uint32_t vbios_len, int
     rdna3_vram_fill(d, win_off(dm, RD_DMUB_WIN_TRACEBUFF), 0, win_size(dm, RD_DMUB_WIN_TRACEBUFF));
     rdna3_vram_fill(d, win_off(dm, RD_DMUB_WIN_FW_STATE), 0, win_size(dm, RD_DMUB_WIN_FW_STATE));
     rdna3_vram_fill(d, win_off(dm, RD_DMUB_WIN_SHARED_STATE), 0, win_size(dm, RD_DMUB_WIN_SHARED_STATE));
+    /* dmub_flush_buffer_mem: the CPU writes must reach VRAM before the
+     * DMCUB reads them (an HDP flush here instead of the read-back) */
     rdna3_hdp_flush(d);
 
     /* dmub_srv_hw_init */
-    dcn32_reset(d);
+    dcn32_reset(dm);
     dm->inbox1_last_wptr = 0;
     if (!psp_loaded)
         dcn32_backdoor_load(dm);
@@ -402,6 +477,8 @@ int dmub32_hw_init(rdna3_dmub *dm, const uint8_t *vbios, uint32_t vbios_len, int
     WR(d, regDMCUB_SCRATCH14, 0);
     dcn32_reset_release(d, 0);
     dm->hw_init = 1;
+    dm->power_state = RD_DMUB_POWER_STATE_D0;
+    dm->outbox0_rptr = 0;
 
     /* dmub_srv_wait_for_auto_load */
     for (i = 0; i <= timeout_us; i += 100) {
@@ -418,6 +495,15 @@ int dmub32_hw_init(rdna3_dmub *dm, const uint8_t *vbios, uint32_t vbios_len, int
         return RDNA3_ETIME;
     }
     RLOG(d, "DMUB: firmware 0x%08x running, boot status 0x%x", dm->fw_version, st);
+    if (dm->amd_reset) {
+        rdna3_dmub_trace_entry e;
+        uint32_t n = 0;
+        dmub32_log_diagnostic(dm, "after the amdgpu reset");
+        while (n < 16 && dmub32_trace_read(dm, &e)) {
+            RLOG(d, "DMUB trace: code 0x%x tick %u params 0x%x 0x%x", e.trace_code, e.tick_count, e.param0, e.param1);
+            n++;
+        }
+    }
     return RDNA3_OK;
 }
 
@@ -458,6 +544,9 @@ int dmub32_cmd_execute(rdna3_dmub *dm, uint8_t cmd[RD_DMUB_RB_CMD_SIZE], int rep
 
     if (!dm->hw_init)
         return RDNA3_EIO;
+    /* dmub_srv_cmd_queue: nothing for a DMCUB put to D3 */
+    if (dm->power_state == RD_DMUB_POWER_STATE_D3)
+        return RDNA3_EBUSY;
     if ((ret = update_rptr(dm)) != RDNA3_OK)
         return ret;
     if (dm->inbox1_wptr > rb_size(dm))
@@ -583,6 +672,7 @@ int dmub32_attach(rdna3_dmub *dm, rdna3_dev *d)
     dm->inbox1_last_wptr = dm->inbox1_wptr;
     dm->attached = 1;
     dm->hw_init = 1;
+    dm->power_state = RD_DMUB_POWER_STATE_D0;
     RLOG(d, "DMUB attach: the GOP's firmware (SCRATCH0 0x%08x), inbox1 0x%08x+0x%x = VRAM 0x%llx "
          "behind CW%u, wptr 0x%x", dm->boot_status, inbox, size, (unsigned long long)dm->inbox_vram, n,
          dm->inbox1_wptr);
@@ -694,3 +784,202 @@ uint32_t dmub32_trace_wptr(rdna3_dmub *dm)
 {
     return RR(dm->d, regDMCUB_OUTBOX0_WPTR);
 }
+
+/* dmub_srv_get_outbox0_msg -> dmub_rb_out_trace_buffer_front */
+int dmub32_trace_read(rdna3_dmub *dm, rdna3_dmub_trace_entry *e)
+{
+    uint32_t cap, w[4];
+    uint64_t base;
+    if (!dm->sw_init || dm->attached)
+        return 0;
+    /* outbox0_rb: base = trace buffer + TRACE_BUFFER_ENTRY_OFFSET, capacity
+     * = its size - dmub_align(TRACE_BUFFER_ENTRY_OFFSET, 64) */
+    cap = win_size(dm, RD_DMUB_WIN_TRACEBUFF) - align_up(RD_DMUB_TRACE_ENTRY_OFFSET, 64);
+    base = win_off(dm, RD_DMUB_WIN_TRACEBUFF) + RD_DMUB_TRACE_ENTRY_OFFSET;
+    if (dmub32_trace_wptr(dm) == dm->outbox0_rptr || !cap)
+        return 0;
+    if (dm->outbox0_rptr + sizeof(w) > cap)
+        dm->outbox0_rptr = 0;
+    if (rdna3_vram_cpu(dm->d, base + dm->outbox0_rptr, sizeof(w)))
+        rdna3_vram_read(dm->d, base + dm->outbox0_rptr, w, sizeof(w));
+    else
+        rdna3_vram_mm_read(dm->d, base + dm->outbox0_rptr, w, 4);
+    e->trace_code = w[0];
+    e->tick_count = w[1];
+    e->param0 = w[2];
+    e->param1 = w[3];
+    dm->outbox0_rptr = (dm->outbox0_rptr + (uint32_t)sizeof(w)) % cap;
+    return 1;
+}
+
+/* dmub_srv_send_gpint_command */
+int dmub32_send_gpint(rdna3_dmub *dm, uint32_t command, uint16_t param, uint32_t timeout_us)
+{
+    uint32_t reg = RD_DMUB_GPINT(command, param), i;
+    if (!dm->sw_init && !dm->attached)
+        return RDNA3_EINVAL;
+    dmub_dcn32_set_gpint(dm->d, reg);
+    for (i = 0; i < timeout_us; ++i) {
+        udelay(dm->d, 1);
+        if (dmub_dcn32_is_gpint_acked(dm->d, reg))
+            return RDNA3_OK;
+    }
+    return RDNA3_ETIME;
+}
+
+/* dmub_srv_get_gpint_response */
+uint32_t dmub32_gpint_response(rdna3_dmub *dm)
+{
+    return dmub_dcn32_get_gpint_response(dm->d);
+}
+
+/* dmub_srv_get_gpint_dataout -> dmub_dcn32_get_gpint_dataout */
+uint32_t dmub32_gpint_dataout(rdna3_dmub *dm)
+{
+    rdna3_dev *d = dm->d;
+    uint32_t dataout = RR(d, regDMCUB_GPINT_DATAOUT);
+    UPD(d, DMCUB_INTERRUPT_ENABLE, DMCUB_GPINT_IH_INT_EN, 0);
+    WR(d, regDMCUB_GPINT_DATAOUT, 0);
+    UPD(d, DMCUB_INTERRUPT_ACK, DMCUB_GPINT_IH_INT_ACK, 1);
+    UPD(d, DMCUB_INTERRUPT_ACK, DMCUB_GPINT_IH_INT_ACK, 0);
+    UPD(d, DMCUB_INTERRUPT_ENABLE, DMCUB_GPINT_IH_INT_EN, 1);
+    return dataout;
+}
+
+/* dmub_srv_send_inbox0_cmd -> dmub_dcn32_send_inbox0_cmd */
+int dmub32_inbox0_cmd(rdna3_dmub *dm, uint32_t data)
+{
+    if (!dm->hw_init)
+        return RDNA3_EINVAL;
+    WR(dm->d, regDMCUB_INBOX0_WPTR, data);
+    return RDNA3_OK;
+}
+
+/* dmub_srv_clear_inbox0_ack -> dmub_dcn32_clear_inbox0_ack_register */
+int dmub32_inbox0_clear_ack(rdna3_dmub *dm)
+{
+    if (!dm->hw_init)
+        return RDNA3_EINVAL;
+    WR(dm->d, regDMCUB_SCRATCH17, 0);
+    return RDNA3_OK;
+}
+
+/* dmub_srv_wait_for_inbox0_ack -> dmub_dcn32_read_inbox0_ack_register */
+int dmub32_inbox0_wait_ack(rdna3_dmub *dm, uint32_t timeout_us)
+{
+    uint32_t i;
+    if (!dm->hw_init)
+        return RDNA3_EINVAL;
+    for (i = 0; i <= timeout_us; i++) {
+        if (RR(dm->d, regDMCUB_SCRATCH17))
+            return RDNA3_OK;
+        udelay(dm->d, 1);
+    }
+    return RDNA3_ETIME;
+}
+
+/* union dmub_inbox0_cmd_lock_hw: command 0-7, client 8-9, lock 23,
+ * should_release 24 (the DRIVER-client lock DC's SubVP pipe lock sends) */
+uint32_t dmub32_inbox0_hw_lock_word(int lock)
+{
+    return RD_DMUB_INBOX0_CMD_HW_LOCK | (RD_DMUB_HW_LOCK_CLIENT_DRIVER << 8) | ((lock ? 1u : 0u) << 23) |
+           ((lock ? 0u : 1u) << 24);
+}
+
+/* dmub_hw_lock_mgr_inbox0_cmd: clear the ack, send, wait for the ack
+ * (dc_dmub_srv_wait_for_inbox0_ack: 100 ms) */
+int dmub32_hw_lock_inbox0(rdna3_dmub *dm, int lock)
+{
+    int r = dmub32_inbox0_clear_ack(dm);
+    if (!r)
+        r = dmub32_inbox0_cmd(dm, dmub32_inbox0_hw_lock_word(lock));
+    if (!r)
+        r = dmub32_inbox0_wait_ack(dm, 100000);
+    return r;
+}
+
+/* dmub_srv_set_power_state */
+void dmub32_set_power_state(rdna3_dmub *dm, uint32_t state)
+{
+    if (!dm || !dm->hw_init)
+        return;
+    dm->power_state = state;
+}
+
+/* dmub_dcn32_get_current_time */
+uint32_t dmub32_current_time(rdna3_dev *d)
+{
+    return RR(d, regDMCUB_TIMER_CURRENT);
+}
+
+/* dmub_srv_get_fw_boot_status -> dmub_dcn32_get_fw_boot_status */
+uint32_t dmub32_fw_boot_status(rdna3_dev *d)
+{
+    return RR(d, regDMCUB_SCRATCH0);
+}
+
+/* dmub_srv_get_diagnostic_data -> dmub_dcn32_get_diagnostic_data */
+int dmub32_get_diagnostic_data(rdna3_dmub *dm, rdna3_dmub_diag *g)
+{
+    static const uint32_t scr[17] = {
+        regDMCUB_SCRATCH0, regDMCUB_SCRATCH1, regDMCUB_SCRATCH2, regDMCUB_SCRATCH3, regDMCUB_SCRATCH4,
+        regDMCUB_SCRATCH5, regDMCUB_SCRATCH6, regDMCUB_SCRATCH7, regDMCUB_SCRATCH8, regDMCUB_SCRATCH9,
+        regDMCUB_SCRATCH10, regDMCUB_SCRATCH11, regDMCUB_SCRATCH12, regDMCUB_SCRATCH13, regDMCUB_SCRATCH14,
+        regDMCUB_SCRATCH15, regDMCUB_SCRATCH16,
+    };
+    rdna3_dev *d;
+    uint32_t i, v;
+    if (!dm || !g)
+        return 0;
+    d = dm->d;
+    for (i = 0; i < sizeof(*g); i++)
+        ((uint8_t *)g)[i] = 0;
+    g->dmcub_version = dm->fw_version;
+    for (i = 0; i < 17; i++)   /* every DMCUB_SCRATCHn is in segment 2 */
+        g->scratch[i] = rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, regDMCUB_SCRATCH0_BASE_IDX, scr[i]));
+    g->undefined_address_fault_addr = RR(d, regDMCUB_UNDEFINED_ADDRESS_FAULT_ADDR);
+    g->inst_fetch_fault_addr = RR(d, regDMCUB_INST_FETCH_FAULT_ADDR);
+    g->data_write_fault_addr = RR(d, regDMCUB_DATA_WRITE_FAULT_ADDR);
+    g->inbox1_rptr = RR(d, regDMCUB_INBOX1_RPTR);
+    g->inbox1_wptr = RR(d, regDMCUB_INBOX1_WPTR);
+    g->inbox1_size = RR(d, regDMCUB_INBOX1_SIZE);
+    g->inbox0_rptr = RR(d, regDMCUB_INBOX0_RPTR);
+    g->inbox0_wptr = RR(d, regDMCUB_INBOX0_WPTR);
+    g->inbox0_size = RR(d, regDMCUB_INBOX0_SIZE);
+    g->outbox1_rptr = RR(d, regDMCUB_OUTBOX1_RPTR);
+    g->outbox1_wptr = RR(d, regDMCUB_OUTBOX1_WPTR);
+    g->outbox1_size = RR(d, regDMCUB_OUTBOX1_SIZE);
+    v = RR(d, regDMCUB_CNTL);
+    g->is_dmcub_enabled = (uint8_t)GET(v, DMCUB_CNTL, DMCUB_ENABLE);
+    g->is_traceport_en = (uint8_t)GET(v, DMCUB_CNTL, DMCUB_TRACEPORT_EN);
+    g->is_dmcub_soft_reset = (uint8_t)GET(RR(d, regDMCUB_CNTL2), DMCUB_CNTL2, DMCUB_SOFT_RESET);
+    g->is_dmcub_secure_reset = (uint8_t)GET(RR(d, regDMCUB_SEC_CNTL), DMCUB_SEC_CNTL, DMCUB_SEC_RESET_STATUS);
+    g->is_cw0_enabled = (uint8_t)GET(RR(d, regDMCUB_REGION3_CW0_TOP_ADDRESS), DMCUB_REGION3_CW0_TOP_ADDRESS,
+                                     DMCUB_REGION3_CW0_ENABLE);
+    g->is_cw6_enabled = (uint8_t)GET(RR(d, regDMCUB_REGION3_CW6_TOP_ADDRESS), DMCUB_REGION3_CW6_TOP_ADDRESS,
+                                     DMCUB_REGION3_CW6_ENABLE);
+    g->gpint_datain0 = RR(d, regDMCUB_GPINT_DATAIN0);
+    return 1;
+}
+
+/* dc_dmub_srv_log_diagnostic_data */
+void dmub32_log_diagnostic(rdna3_dmub *dm, const char *when)
+{
+    rdna3_dmub_diag g;
+    if (!dmub32_get_diagnostic_data(dm, &g))
+        return;
+    RLOG(dm->d, "DMUB diag (%s): fw 0x%08x enabled %u soft-reset %u sec-reset %u traceport %u CW0 %u CW6 %u",
+         when, g.dmcub_version, g.is_dmcub_enabled, g.is_dmcub_soft_reset, g.is_dmcub_secure_reset,
+         g.is_traceport_en, g.is_cw0_enabled, g.is_cw6_enabled);
+    RLOG(dm->d, "DMUB diag (%s): scratch 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x", when,
+         g.scratch[0], g.scratch[1], g.scratch[2], g.scratch[3], g.scratch[4], g.scratch[5], g.scratch[6],
+         g.scratch[7], g.scratch[8]);
+    RLOG(dm->d, "DMUB diag (%s): scratch 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x 0x%08x", when,
+         g.scratch[9], g.scratch[10], g.scratch[11], g.scratch[12], g.scratch[13], g.scratch[14], g.scratch[15],
+         g.scratch[16]);
+    RLOG(dm->d, "DMUB diag (%s): faults undef 0x%08x fetch 0x%08x write 0x%08x; inbox1 %u/%u/%u inbox0 %u/%u/%u "
+         "outbox1 %u/%u/%u, GPINT_DATAIN0 0x%08x", when, g.undefined_address_fault_addr, g.inst_fetch_fault_addr,
+         g.data_write_fault_addr, g.inbox1_rptr, g.inbox1_wptr, g.inbox1_size, g.inbox0_rptr, g.inbox0_wptr,
+         g.inbox0_size, g.outbox1_rptr, g.outbox1_wptr, g.outbox1_size, g.gpint_datain0);
+}
+

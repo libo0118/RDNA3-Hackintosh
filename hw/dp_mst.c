@@ -1049,6 +1049,9 @@ int dp_mst_probe(rdna3_mst_mgr *mgr)
     return n;
 }
 
+/* drm_dp_mst_topology_mgr_set_mst, what amdgpu_dm's
+ * dm_helpers_dp_mst_start_top_mgr (on) / dm_helpers_dp_mst_stop_top_mgr
+ * (off) call */
 int dp_mst_set_mst(rdna3_mst_mgr *mgr, int on)
 {
     int i;
@@ -1337,7 +1340,8 @@ static int drm_dp_dpcd_write_payload(rdna3_mst_mgr *mgr, int id, uint8_t start_s
     return RDNA3_OK;
 }
 
-/* drm_dp_check_act_status: ACT handled within 3 s (200 us polls) */
+/* drm_dp_check_act_status: ACT handled within 3 s (200 us polls); DC's
+ * poll_for_allocation_change_trigger polls the same status bit */
 int dp_mst_check_act_status(rdna3_mst_mgr *mgr)
 {
     uint32_t waited_us = 0;
