@@ -3385,7 +3385,7 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
     case AMDGPU_INFO_MAX_IBS: {
         uint32_t max_ibs[AMDGPU_HW_IP_NUM];
         uint32_t i;
-        /* what the CS ioctl takes (amdgpu answers amdgpu_ring_max_ibs; more
+        /* what the CS ioctl takes (amdgpu answers per-ring maximums; more
          * than RD_MAX_CS_IBS would be refused, so RADV splits by this) */
         for (i = 0; i < AMDGPU_HW_IP_NUM; i++)
             max_ibs[i] = RD_MAX_CS_IBS;
