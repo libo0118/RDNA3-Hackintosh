@@ -60,3 +60,14 @@ Display: DP link     | display/dc/link/protocols/link_dp_phy.c
 Display: DP link     | display/dc/link/hwss/link_hwss_dio.c
 Display: DP link     | display/dc/link/link_validation.c
 Display: DP link     | display/dc/dio/dcn10/dcn10_stream_encoder.c
+Display: DSC         | display/dc/dsc/dc_dsc.c
+Display: DSC         | display/dc/dsc/dcn20/dcn20_dsc.c
+Display: DSC         | display/dc/dsc/rc_calc.c
+Display: DSC         | display/dc/dsc/rc_calc_dpi.c
+Display: DSC         | display/dc/dml/dsc/rc_calc_fpu.c
+Display: DSC         | display/dc/dcn30/dcn30_vpg.c
+Display: DSC         | display/dc/optc/dcn30/dcn30_optc.c
+Display: DSC         | display/dc/dio/dcn20/dcn20_link_encoder.c
+Display: DSC         | display/dc/dio/dcn30/dcn30_dio_stream_encoder.c
+Display: MST         | display/amdgpu_dm/amdgpu_dm_helpers.c
+Display: MST         | display/amdgpu_dm/amdgpu_dm_mst_types.c

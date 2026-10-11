@@ -35,6 +35,10 @@
  * once (dp_verify_link_cap: training with fallback), and link_set_dpms_on
  * brings the link back: link settings for the mode, training, MSA,
  * stream encoder, unblank. Without a link a DP head stays refused.
+ * The link may carry the stream with DSC (dp->dsc_policy: the DSC engine,
+ * the PPS and DSC in the sink go with the link, hw/dcn32_dsc.h) or as an
+ * MST stream (dp->mst: DIG_MODE 5, the VC payload and the ACT,
+ * hw/dcn32_dp_mst.h).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -79,6 +83,11 @@ typedef struct rdna3_dcn_modeset {
      * new timing as modes (the MSA and the link settings come from them) */
     rdna3_dp_link *dp;
     rdna3_mode dp_cur, dp_want;
+    /* DP: the stream's DSC (rdna3dsc: apply_dsc_policy_for_stream) for the
+     * new and the running timing; MST: the new stream's PBN and time slots */
+    int      dp_want_dsc, dp_cur_dsc;
+    rdna3_dsc_config dp_want_dsc_cfg, dp_cur_dsc_cfg;
+    uint32_t dp_mst_pbn, dp_mst_slots;
 } rdna3_dcn_modeset;
 
 /* why a mode is refused for a mode set (0 = can try) */
@@ -116,10 +125,18 @@ int  dcn32_modeset_plan_clk(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, co
  * dcn32_dp_read_caps) a DIG_MODE 0 head is planned too: the mode must fit
  * a link setting of the link cap (verified, else the max one), and a head
  * whose stream encoder runs two pixels per cycle needs even horizontal
- * timings. 'dp' NULL = dcn32_modeset_plan_clk. */
+ * timings. With dp->dsc_policy (rdna3dsc) a mode the link cannot carry
+ * gets DSC when the sink decodes it (dcn32_dp_decide_dsc); with dp->mst
+ * (rdna3mst: dp->mgr, dp->mst_port) the head is an MST stream (DIG_MODE 5,
+ * or a DIG_MODE 0 head taken over): the mode must fit the port's PBN and
+ * the 63 time slots. 'dp' NULL = dcn32_modeset_plan_clk. */
 int  dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
                            rdna3_dp_link *dp, uint32_t cur_pclk_khz, const rdna3_mode *m,
                            const rdna3_dcn_clk_limits *lim, rdna3_dcn_modeset *ms);
+
+/* The running timing of head 'h' at 'pclk_khz' as a mode (the one
+ * dcn32_modeset_apply puts back when the new one does not run). */
+void dcn32_modeset_head_mode(const rdna3_dcn_head *h, uint32_t pclk_khz, rdna3_mode *m);
 
 /* Program the plan with the surface at MC 'mc' (pitch_px pixels per row,
  * DP: the link is trained in it; a failed training counts as a mode that

@@ -75,6 +75,10 @@
 #include "dcn32_state.h"
 #include "dcn32_dp.h"
 #include "gen/dcn_3_2_0_dp.h"
+#include "gen/dcn_3_2_0_dsc.h"
+#include "dcn32_dsc.h"
+#include "dp_mst.h"
+#include "dcn32_dp_mst.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
 #include "navi3x_regs.h"
@@ -249,6 +253,45 @@ typedef struct sim {
         uint32_t trained_rate, trained_lanes;
     } dps;
     uint8_t  edid[256];
+    /* the video packet generators (VPG n = DIG front end n): the generic
+     * packet memory the driver writes through ACCESS_CTRL / DATA (9 dwords
+     * per packet: header + 32 bytes) */
+    struct {
+        uint32_t mem[15 * 9];
+        uint32_t idx, writes;
+    } vpg[5];
+    /* MST branch on AUX 0 (mst.on): a hub with input port 0 and output
+     * ports 1 and 2, each with an SST sink (synthetic EDIDs); its DPCD is
+     * S.dpcd plus the sideband windows (DOWN_REQ 0x1000, DOWN_REP 0x1400)
+     * and the ESI bytes (0x2002..); the VC payload ID table it keeps from
+     * DPCD 0x1c0..0x1c2, the ACT it handles when the source updates its
+     * stream allocation table; the link layer is the one of S.dps */
+    struct {
+        int on;
+        uint8_t down_req[0x200], down_rep[0x200], esi[0x10];
+        uint32_t req_written;               /* bytes of the current DOWN_REQ chunk written */
+        uint8_t req[256];                   /* the request body being assembled */
+        uint32_t req_len;
+        uint8_t rep[512];                   /* the reply body; sent in 48-byte chunks */
+        uint32_t rep_len, rep_off;
+        int rep_pending;
+        uint8_t guid[16];
+        struct {
+            int connected;
+            uint8_t edid[256];
+            uint8_t dpcd[0x20];
+            uint16_t full_pbn;
+            uint8_t vcpi;                   /* ALLOCATE_PAYLOAD */
+            uint16_t pbn;
+            unsigned allocs;
+        } port[3];
+        uint8_t slot_vcpi[64];              /* VC payload ID table: owner of each time slot */
+        uint8_t act_slot_vcpi[64];          /* the table the last ACT made current */
+        unsigned msgs, hdr_crc_errors, body_crc_errors, link_addr, enum_path, alloc_payload, clear_table;
+        unsigned remote_dpcd, remote_i2c, naks, table_updates, acts, act_mismatch, table_resets;
+        uint8_t last_alloc_order;           /* 1: ALLOCATE_PAYLOAD came after the table update and ACT */
+        uint8_t esi0, pts;                  /* DEVICE_SERVICE_IRQ_VECTOR_ESI0, PAYLOAD_TABLE_UPDATE_STATUS (W1C) */
+    } mst;
     /* DMCUB: the firmware's view (boot checks, mailbox, GPINT) */
     struct {
         int running, psp_loaded, hang;
@@ -1142,6 +1185,7 @@ static void make_sink(void)
     memset(S.dpcd_lttpr, 0, sizeof(S.dpcd_lttpr));
     memset(&S.dps, 0, sizeof(S.dps));
     S.dps.be = -1;
+    S.mst.on = 0;
     memset(e, 0, sizeof(S.edid));
     memcpy(e, "\x00\xff\xff\xff\xff\xff\xff\x00", 8);
     e[8] = 0x48; e[9] = 0x8E;             /* "RDN": R=18 D=4 N=14 -> 0 10010 00100 01110 */
@@ -1374,6 +1418,14 @@ static uint8_t *dpcd_at(uint32_t a)
 {
     if (a < sizeof(S.dpcd))
         return &S.dpcd[a];
+    if (S.mst.on) {
+        if (a >= 0x1000 && a < 0x1200)
+            return &S.mst.down_req[a - 0x1000];
+        if (a >= 0x1400 && a < 0x1600)
+            return &S.mst.down_rep[a - 0x1400];
+        if (a >= 0x2000 && a < 0x2010)
+            return &S.mst.esi[a - 0x2000];
+    }
     if (a >= 0x2200 && a < 0x2200 + sizeof(S.dpcd_ext))
         return &S.dpcd_ext[a - 0x2200];
     if (a >= 0xf0000 && a < 0xf0000 + sizeof(S.dpcd_lttpr))
@@ -1383,6 +1435,392 @@ static uint8_t *dpcd_at(uint32_t a)
 
 #define DPR(reg, n) (DCN_B2 + reg + (regDP1_DP_LINK_CNTL - regDP0_DP_LINK_CNTL) * (n))
 #define DIGN(reg, n) (DCN_B2 + reg + RD_CLONE_DIGFE_STRIDE * (n))
+
+/* ---- MST branch device behind AUX 0 (S.mst) ---- */
+
+/* the sideband CRCs as the branch checks them (DP 1.2 2.11.3.1.2 / .3):
+ * header CRC-4, x^4 + x + 1, over the header nibbles; body CRC-8,
+ * x^8 + x^7 + x^6 + x^4 + x^2 + 1, over the body bytes (bitwise, MSB first) */
+static uint8_t hub_crc4(const uint8_t *d, uint32_t nibbles)
+{
+    uint32_t r = 0, i, b;
+    for (i = 0; i < nibbles; i++) {
+        uint32_t nib = (d[i / 2] >> ((i & 1) ? 0 : 4)) & 0xf;
+        for (b = 0; b < 4; b++) {
+            r = (r << 1) | ((nib >> (3 - b)) & 1);
+            if (r & 0x10)
+                r ^= 0x13;
+        }
+    }
+    for (b = 0; b < 4; b++) {
+        r <<= 1;
+        if (r & 0x10)
+            r ^= 0x13;
+    }
+    return (uint8_t)(r & 0xf);
+}
+
+static uint8_t hub_crc8(const uint8_t *d, uint32_t n)
+{
+    uint32_t r = 0, i, b;
+    for (i = 0; i < n; i++)
+        for (b = 0; b < 8; b++) {
+            r = (r << 1) | ((d[i] >> (7 - b)) & 1);
+            if (r & 0x100)
+                r ^= 0x1d5;
+        }
+    for (b = 0; b < 8; b++) {
+        r <<= 1;
+        if (r & 0x100)
+            r ^= 0x1d5;
+    }
+    return (uint8_t)r;
+}
+
+/* the next chunk of the pending reply into DOWN_REP, DOWN_REP_MSG_RDY set */
+static void hub_post_chunk(void)
+{
+    uint32_t left = S.mst.rep_len - S.mst.rep_off, n = left < 44 ? left : 44;
+    uint8_t *c = S.mst.down_rep;
+    if (!S.mst.rep_pending || !left)
+        return;
+    memset(c, 0, 48);
+    c[0] = 0x10;                                  /* LCT 1, LCR 0 */
+    c[1] = (uint8_t)(n + 1);                      /* not broadcast, no path msg */
+    c[2] = (uint8_t)((S.mst.rep_off == 0 ? 0x80 : 0) | (S.mst.rep_off + n == S.mst.rep_len ? 0x40 : 0));
+    c[2] |= hub_crc4(c, 5);
+    memcpy(c + 3, S.mst.rep + S.mst.rep_off, n);
+    c[3 + n] = hub_crc8(c + 3, n);
+    S.mst.rep_off += n;
+    S.mst.esi0 |= 0x10;                           /* DOWN_REP_MSG_RDY */
+    S.mst.esi[3] = S.mst.esi0;
+}
+
+static void hub_reply(const uint8_t *body, uint32_t len)
+{
+    memcpy(S.mst.rep, body, len);
+    S.mst.rep_len = len;
+    S.mst.rep_off = 0;
+    S.mst.rep_pending = 1;
+    hub_post_chunk();
+}
+
+static void hub_nak(uint8_t req, uint8_t reason)
+{
+    uint8_t b[19] = { 0 };
+    b[0] = (uint8_t)(0x80 | req);
+    memcpy(b + 1, S.mst.guid, 16);
+    b[17] = reason;
+    S.mst.naks++;
+    hub_reply(b, sizeof(b));
+}
+
+/* a whole request: reply as the branch would */
+static void hub_request(void)
+{
+    uint8_t *q = S.mst.req, b[300];
+    uint32_t n = 0, p, i;
+    S.mst.msgs++;
+    switch (q[0] & 0x7f) {
+    case 0x01:   /* LINK_ADDRESS */
+        S.mst.link_addr++;
+        b[n++] = 0x01;
+        memcpy(b + n, S.mst.guid, 16);
+        n += 16;
+        b[n++] = 3;
+        b[n++] = 0x80 | 0x10 | 0;                 /* input port 0, source */
+        b[n++] = 0x40;                            /* ddps */
+        for (p = 1; p < 3; p++) {
+            int c = S.mst.port[p].connected;
+            b[n++] = (uint8_t)((c ? 3 : 0) << 4 | p);   /* SST sink */
+            b[n++] = (uint8_t)(c ? 0x40 : 0);
+            b[n++] = 0x14;                        /* DPCD 1.4 */
+            for (i = 0; i < 16; i++)
+                b[n++] = (uint8_t)(0xa0 + p * 16 + i);
+            b[n++] = 0x11;                        /* one SDP stream, one sink */
+        }
+        hub_reply(b, n);
+        break;
+    case 0x10:   /* ENUM_PATH_RESOURCES */
+        S.mst.enum_path++;
+        p = q[1] >> 4;
+        if (p < 1 || p > 2) {
+            hub_nak(0x10, 0x03);
+            break;
+        }
+        b[n++] = 0x10;
+        b[n++] = (uint8_t)(p << 4 | 1);           /* FEC capable */
+        b[n++] = (uint8_t)(S.mst.port[p].full_pbn >> 8);
+        b[n++] = (uint8_t)S.mst.port[p].full_pbn;
+        b[n++] = (uint8_t)(S.mst.port[p].full_pbn >> 8);
+        b[n++] = (uint8_t)S.mst.port[p].full_pbn;
+        hub_reply(b, n);
+        break;
+    case 0x14:   /* CLEAR_PAYLOAD_ID_TABLE */
+        S.mst.clear_table++;
+        memset(S.mst.slot_vcpi, 0, sizeof(S.mst.slot_vcpi));
+        b[n++] = 0x14;
+        hub_reply(b, n);
+        break;
+    case 0x11: { /* ALLOCATE_PAYLOAD */
+        uint8_t vcpi = q[2] & 0x7f;
+        uint16_t pbn = (uint16_t)(q[3] << 8 | q[4]);
+        int in_table = 0;
+        S.mst.alloc_payload++;
+        p = q[1] >> 4;
+        if (p < 1 || p > 2) {
+            hub_nak(0x11, 0x03);
+            break;
+        }
+        for (i = 0; i < 64; i++)
+            if (S.mst.act_slot_vcpi[i] == vcpi)
+                in_table = 1;
+        /* allocation after the payload ID table update and its ACT; a
+         * release (PBN 0) any time */
+        S.mst.last_alloc_order = (uint8_t)(pbn == 0 || in_table);
+        S.mst.port[p].vcpi = pbn ? vcpi : 0;
+        S.mst.port[p].pbn = pbn;
+        S.mst.port[p].allocs++;
+        b[n++] = 0x11;
+        b[n++] = (uint8_t)(p << 4);
+        b[n++] = vcpi;
+        b[n++] = (uint8_t)(pbn >> 8);
+        b[n++] = (uint8_t)pbn;
+        hub_reply(b, n);
+        break;
+    }
+    case 0x20: { /* REMOTE_DPCD_READ */
+        uint32_t a = (uint32_t)(q[1] & 0xf) << 16 | (uint32_t)q[2] << 8 | q[3], len = q[4];
+        S.mst.remote_dpcd++;
+        p = q[1] >> 4;
+        if (p < 1 || p > 2 || !S.mst.port[p].connected) {
+            hub_nak(0x20, 0x03);
+            break;
+        }
+        b[n++] = 0x20;
+        b[n++] = (uint8_t)p;
+        b[n++] = (uint8_t)len;
+        for (i = 0; i < len; i++)
+            b[n++] = a + i < sizeof(S.mst.port[p].dpcd) ? S.mst.port[p].dpcd[a + i] : 0;
+        hub_reply(b, n);
+        break;
+    }
+    case 0x22: { /* REMOTE_I2C_READ: writes set the EDID segment / offset */
+        uint32_t nt = q[1] & 3, k = 2, t, seg = 0, off = 0, len;
+        S.mst.remote_i2c++;
+        p = q[1] >> 4;
+        if (p < 1 || p > 2 || !S.mst.port[p].connected) {
+            hub_nak(0x22, 0x03);
+            break;
+        }
+        for (t = 0; t < nt; t++) {
+            uint32_t dev = q[k] & 0x7f, nb = q[k + 1];
+            if (dev == 0x30 && nb)
+                seg = q[k + 2];
+            if (dev == 0x50 && nb)
+                off = q[k + 2];
+            k += 2 + nb + 1;
+        }
+        len = q[k + 1];
+        if ((q[k] & 0x7f) != 0x50) {
+            hub_nak(0x22, 0x05);
+            break;
+        }
+        b[n++] = 0x22;
+        b[n++] = (uint8_t)p;
+        b[n++] = (uint8_t)len;
+        for (i = 0; i < len; i++) {
+            uint32_t o = seg * 256 + off + i;
+            b[n++] = o < sizeof(S.mst.port[p].edid) ? S.mst.port[p].edid[o] : 0xff;
+        }
+        hub_reply(b, n);
+        break;
+    }
+    default:
+        hub_nak(q[0] & 0x7f, 0x05);   /* not supported */
+    }
+}
+
+/* DOWN_REQ bytes written: a whole chunk is checked (header and body CRC)
+ * and appended; the last one runs the request */
+static void hub_down_req_written(uint32_t off, uint32_t len)
+{
+    uint8_t *c = S.mst.down_req;
+    uint32_t hdrlen, body;
+    if (off == 0)
+        S.mst.req_written = 0;
+    if (off + len > S.mst.req_written)
+        S.mst.req_written = off + len;
+    if (S.mst.req_written < 3)
+        return;
+    hdrlen = 3 + ((c[0] >> 4) / 2u);
+    body = c[hdrlen - 2] & 0x3f;
+    if (S.mst.req_written < hdrlen + body)
+        return;
+    S.mst.req_written = 0;
+    if (hub_crc4(c, hdrlen * 2 - 1) != (c[hdrlen - 1] & 0xf)) {
+        S.mst.hdr_crc_errors++;
+        return;
+    }
+    if (!body || hub_crc8(c + hdrlen, body - 1) != c[hdrlen + body - 1]) {
+        S.mst.body_crc_errors++;
+        return;
+    }
+    if (c[hdrlen - 1] & 0x80)                      /* SOMT */
+        S.mst.req_len = 0;
+    if (S.mst.req_len + body - 1 <= sizeof(S.mst.req)) {
+        memcpy(S.mst.req + S.mst.req_len, c + hdrlen, body - 1);
+        S.mst.req_len += body - 1;
+    }
+    if (c[hdrlen - 1] & 0x40)                      /* EOMT */
+        hub_request();
+}
+
+/* VC payload ID table write (DPCD 0x1c0..0x1c2): id 0 / start 0 / 0x3f
+ * resets it; a count of 0 frees the id's slots (the later ones move up);
+ * else the id gets 'count' slots from 'start' */
+static void hub_payload_table_written(void)
+{
+    uint8_t id = S.dpcd[0x1c0] & 0x7f, start = S.dpcd[0x1c1] & 0x3f, count = S.dpcd[0x1c2] & 0x3f;
+    uint32_t i, k;
+    S.mst.table_updates++;
+    if (id == 0 && start == 0 && count == 0x3f) {
+        memset(S.mst.slot_vcpi, 0, sizeof(S.mst.slot_vcpi));
+        S.mst.table_resets++;
+    } else if (count == 0) {
+        for (i = 1, k = 1; i < 64; i++)
+            if (S.mst.slot_vcpi[i] != id)
+                S.mst.slot_vcpi[k++] = S.mst.slot_vcpi[i];
+        for (; k < 64; k++)
+            S.mst.slot_vcpi[k] = 0;
+    } else {
+        for (i = start; i < start + count && i < 64; i++)
+            S.mst.slot_vcpi[i] = id;
+    }
+    S.mst.pts = (uint8_t)((S.mst.pts | 0x01) & ~0x02);   /* TABLE_UPDATED, ACT not yet handled */
+    S.dpcd[0x2c0] = S.mst.pts;
+}
+
+/* the source's ACT (DP_MSE_SAT_UPDATE 1 on the link's DIG): the branch makes
+ * its new payload table current when MST is on and the link is trained;
+ * the source's stream allocation (DP_MSE_SAT rows) must match it, VC by VC
+ * in time slot order */
+static void hub_act(uint32_t sat0, uint32_t sat1)
+{
+    uint32_t rows[4] = { (sat0 >> 8) & 0x3f, (sat0 >> 24) & 0x3f, (sat1 >> 8) & 0x3f, (sat1 >> 24) & 0x3f };
+    uint32_t counts[4] = { 0, 0, 0, 0 }, nc = 0, i, last = 0;
+    if (!S.mst.on || !(S.dpcd[0x111] & 1) || !S.dps.cr || !S.dps.eq)
+        return;
+    for (i = 1; i < 64; i++) {
+        uint8_t v = S.mst.slot_vcpi[i];
+        if (!v)
+            continue;
+        if (v != last) {
+            if (nc == 4)
+                break;
+            nc++;
+            last = v;
+        }
+        counts[nc - 1]++;
+    }
+    for (i = 0; i < 4; i++)
+        if (counts[i] != rows[i])
+            S.mst.act_mismatch++;
+    memcpy(S.mst.act_slot_vcpi, S.mst.slot_vcpi, sizeof(S.mst.slot_vcpi));
+    S.mst.acts++;
+    S.mst.pts |= 0x02;                            /* ACT_HANDLED */
+    S.dpcd[0x2c0] = S.mst.pts;
+}
+
+/* DPCD writes the branch reacts to */
+static void hub_written(uint32_t addr, uint32_t len)
+{
+    if (addr >= 0x1000 && addr < 0x1200)
+        hub_down_req_written(addr - 0x1000, len);
+    if (addr <= 0x2003 && addr + len > 0x2003) {   /* ESI0: write 1 to clear */
+        uint8_t ack = S.mst.esi[3];
+        S.mst.esi0 = (uint8_t)(S.mst.esi0 & ~ack);
+        S.mst.esi[3] = S.mst.esi0;
+        if ((ack & 0x10) && S.mst.rep_pending) {
+            if (S.mst.rep_off < S.mst.rep_len)
+                hub_post_chunk();
+            else
+                S.mst.rep_pending = 0;
+        }
+    }
+    if (addr <= 0x2c0 && addr + len > 0x2c0) {     /* PAYLOAD_TABLE_UPDATE_STATUS: W1C */
+        S.mst.pts = (uint8_t)(S.mst.pts & ~S.dpcd[0x2c0]);
+        S.dpcd[0x2c0] = S.mst.pts;
+    }
+    if (addr <= 0x1c2 && addr + len > 0x1c2)
+        hub_payload_table_written();
+    if (addr <= 0x111 && addr + len > 0x111 && !(S.dpcd[0x111] & 1)) {
+        /* out of MST mode: the payloads are gone */
+        memset(S.mst.slot_vcpi, 0, sizeof(S.mst.slot_vcpi));
+        memset(S.mst.act_slot_vcpi, 0, sizeof(S.mst.act_slot_vcpi));
+    }
+}
+
+/* a synthetic EDID: 'name' (13 characters at most), one detailed timing */
+static void make_edid(uint8_t *e, const char *name, uint16_t product, const uint8_t *dtd)
+{
+    uint32_t i;
+    memset(e, 0, 256);
+    memcpy(e, "\x00\xff\xff\xff\xff\xff\xff\x00", 8);
+    e[8] = 0x48; e[9] = 0x8E;                     /* "RDN" */
+    e[10] = (uint8_t)product; e[11] = (uint8_t)(product >> 8);
+    e[16] = 1; e[17] = 34;
+    e[18] = 1; e[19] = 4;
+    e[20] = 0x80 | 0x05;
+    e[21] = 60; e[22] = 34;
+    e[23] = 0x78;
+    e[24] = 0x0a;
+    for (i = 38; i < 54; i++)
+        e[i] = 0x01;
+    memcpy(e + 54, dtd, 18);
+    e[72] = 0; e[73] = 0; e[74] = 0; e[75] = 0xFC; e[76] = 0;
+    memset(e + 77, ' ', 13);
+    for (i = 0; name[i] && i < 13; i++)
+        e[77 + i] = (uint8_t)name[i];
+    if (i < 13)
+        e[77 + i] = '\n';
+    e[90] = 0; e[91] = 0; e[92] = 0; e[93] = 0x10;
+    e[108] = 0; e[109] = 0; e[110] = 0; e[111] = 0x10;
+    e[127] = edid_sum(e);
+}
+
+/* the hub: its own DPCD (MST capable, HBR2 x4), two sinks */
+static void make_mst_hub(void)
+{
+    static const uint8_t dtd_1080p[18] = { 0x02, 0x3A, 0x80, 0x18, 0x71, 0x38, 0x2D, 0x40, 0x58, 0x2C,
+                                           0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E };
+    static const uint8_t dtd_1440p[18] = { 0x56, 0x5E, 0x00, 0xA0, 0xA0, 0xA0, 0x29, 0x50, 0x30, 0x20,
+                                           0x35, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E };
+    uint32_t i;
+    memset(&S.mst, 0, sizeof(S.mst));
+    S.mst.on = 1;
+    for (i = 0; i < 16; i++)
+        S.mst.guid[i] = (uint8_t)(0x40 + i);
+    S.dpcd[0x000] = 0x14;
+    S.dpcd[0x001] = RD_DP_LINK_RATE_HIGH2;
+    S.dpcd[0x002] = 0xc4;
+    S.dpcd[0x003] = 0x81;
+    S.dpcd[0x005] = 0x01;                         /* a branch, DP downstream */
+    S.dpcd[0x007] = 0x02;                         /* two downstream ports */
+    S.dpcd[0x021] = 0x01;                         /* MST_CAP */
+    S.dpcd[0x080] = 0x00;                         /* downstream port 0: DP */
+    S.mst.port[1].connected = 1;
+    S.mst.port[1].full_pbn = 2560;                /* an HBR2 x4 sink link */
+    S.mst.port[2].connected = 1;
+    S.mst.port[2].full_pbn = 1280;                /* HBR2 x2 */
+    for (i = 1; i < 3; i++) {
+        S.mst.port[i].dpcd[0] = 0x14;
+        S.mst.port[i].dpcd[1] = RD_DP_LINK_RATE_HIGH2;
+        S.mst.port[i].dpcd[2] = (uint8_t)(i == 1 ? 0x84 : 0x82);
+    }
+    make_edid(S.mst.port[1].edid, "RDNA3 MST A", 0x7801, dtd_1080p);
+    make_edid(S.mst.port[2].edid, "RDNA3 MST B", 0x7802, dtd_1440p);
+}
 
 /* the sink's lane status and adjust requests (DPCD 0x202..0x207) for what
  * the source drives now */
@@ -1399,7 +1837,10 @@ static void dp_sink_eval(void)
     done = (S.reg[DPR(regDP0_DP_LINK_CNTL, be)] & DP0_DP_LINK_CNTL__DP_LINK_TRAINING_COMPLETE_MASK) != 0;
     alive = S.dps.phy_on && lanes && S.dps.lanes >= lanes && S.dps.symclk_10khz == rate * 2700 && d[0x600] == 1 &&
             (S.reg[DIGN(regDIG0_DIG_BE_EN_CNTL, be)] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK) &&
-            !(S.reg[DIGN(regDIG0_DIG_BE_CNTL, be)] & DIG0_DIG_BE_CNTL__DIG_MODE_MASK);
+            (!(S.reg[DIGN(regDIG0_DIG_BE_CNTL, be)] & DIG0_DIG_BE_CNTL__DIG_MODE_MASK) ||
+             (S.mst.on && (S.dpcd[0x111] & 1) &&
+              ((S.reg[DIGN(regDIG0_DIG_BE_CNTL, be)] & DIG0_DIG_BE_CNTL__DIG_MODE_MASK) >>
+               DIG0_DIG_BE_CNTL__DIG_MODE__SHIFT) == 5));
     adj = (uint8_t)(S.dps.vs | S.dps.pe << 2);
     if (pat && (RD_DP_LANE_VS(d[0x103]) != S.dps.vs || RD_DP_LANE_PE(d[0x103]) != S.dps.pe))
         S.dps.lane_mismatch++;   /* DPCD lane set and PHY disagree */
@@ -1437,6 +1878,8 @@ static void dp_sink_eval(void)
 /* DPCD writes the link layer reacts to */
 static void dp_sink_written(uint32_t addr, uint32_t len)
 {
+    if (S.mst.on)
+        hub_written(addr, len);
     if (S.dps.be < 0)
         return;
     if (addr <= 0x101 && addr + len > 0x100)
@@ -2570,6 +3013,53 @@ static uint32_t ogam_crc(uint32_t n)
     return h;
 }
 
+/* DSC power domains, the VPG packet memory, the MST ACT, the FEC status */
+#define VPGR(reg, n) (DCN_B2 + reg + (regVPG1_VPG_GENERIC_PACKET_ACCESS_CTRL - regVPG0_VPG_GENERIC_PACKET_ACCESS_CTRL) * (n))
+static int dscmst_wr(uint32_t dw, uint32_t v)
+{
+    uint32_t n;
+    if (dw >= DCN_B2 + regDOMAIN16_PG_CONFIG && dw < DCN_B2 + regDOMAIN16_PG_CONFIG + 8 &&
+        !((dw - DCN_B2 - regDOMAIN16_PG_CONFIG) & 1)) {
+        uint32_t gate = (v & DOMAIN16_PG_CONFIG__DOMAIN_POWER_GATE_MASK) ? 2u : 0u;
+        *R(dw) = v;
+        if (!(S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL] & DC_IP_REQUEST_CNTL__IP_REQUEST_EN_MASK))
+            S.dcn_pg_no_request++;
+        else
+            S.reg[dw + 1] = gate << DOMAIN16_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT;
+        return 1;
+    }
+    for (n = 0; n < 5; n++) {
+        if (dw == VPGR(regVPG0_VPG_GENERIC_PACKET_ACCESS_CTRL, n)) {
+            S.vpg[n].idx = v & VPG0_VPG_GENERIC_PACKET_ACCESS_CTRL__VPG_GENERIC_DATA_INDEX_MASK;
+            *R(dw) = v;
+            return 1;
+        }
+        if (dw == VPGR(regVPG0_VPG_GENERIC_PACKET_DATA, n)) {
+            if (S.vpg[n].idx < 15 * 9)
+                S.vpg[n].mem[S.vpg[n].idx] = v;
+            S.vpg[n].idx++;
+            S.vpg[n].writes++;
+            *R(dw) = v;
+            return 1;
+        }
+        if (dw == DPR(regDP0_DP_MSE_SAT_UPDATE, n)) {
+            /* the update with trigger completes at once, no keepout left */
+            *R(dw) = v & ~(DP0_DP_MSE_SAT_UPDATE__DP_MSE_SAT_UPDATE_MASK | DP0_DP_MSE_SAT_UPDATE__DP_MSE_16_MTP_KEEPOUT_MASK);
+            if ((v & DP0_DP_MSE_SAT_UPDATE__DP_MSE_SAT_UPDATE_MASK) == 1 && (int)n == S.dps.be)
+                hub_act(S.reg[DPR(regDP0_DP_MSE_SAT0, n)], S.reg[DPR(regDP0_DP_MSE_SAT1, n)]);
+            return 1;
+        }
+        if (dw == DPR(regDP0_DP_DPHY_CNTL, n)) {
+            /* FEC active once enabled with the sink FEC-ready */
+            *R(dw) = (v & ~DP0_DP_DPHY_CNTL__DPHY_FEC_ACTIVE_STATUS_MASK) |
+                     (((v & DP0_DP_DPHY_CNTL__DPHY_FEC_EN_MASK) && (S.dpcd[0x120] & 1))
+                          ? DP0_DP_DPHY_CNTL__DPHY_FEC_ACTIVE_STATUS_MASK : 0);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void sim_wr(void *ctx, uint64_t off, uint32_t v)
 {
     uint32_t dw = (uint32_t)(off / 4);
@@ -2709,6 +3199,8 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         S.mes_hqd[0].mapped_by_kiq = 0;
     }
     if (ogam_wr(dw, v))
+        return;
+    if (dscmst_wr(dw, v))
         return;
     /* DCN power domains, DET segments */
     if (dw >= DCN_B2 + regDOMAIN0_PG_CONFIG && dw < DCN_B2 + regDOMAIN0_PG_CONFIG + 4 * 2 &&
@@ -4628,6 +5120,563 @@ static void test_gamma(rdna3_dev *dev, const rdna3_dcn *dc)
  * set through the DP path (DP DTO, training, MSA, M/N, unblank), a mode
  * whose training fails (the old one comes back, trained again), and
  * perform_link_training_with_retries with and without fallback. */
+/* ---- DSC: a reference PPS, written from DC's rate control description
+ * (rc_calc_fpu.c, in double precision as DC runs it), the DRM rate control
+ * formulas and the PPS layout of the DSC 1.2 spec; separate from
+ * hw/dcn32_dsc.c (which computes on exact rationals). The QP rows are DC's
+ * qp_tables.h rows for the target bpps used below. ---- */
+static const struct ref_qp_row {
+    int bpc;
+    double bpp;
+    int min[15], max[15];
+} ref_qp_rows[] = {
+    { 8, 11.5, { 0, 0, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 5, 7, 10 }, { 2, 4, 5, 6, 7, 7, 7, 8, 8, 9, 9, 9, 9, 10, 11 } },
+    { 8, 12.0, { 0, 0, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 5, 7, 10 }, { 2, 3, 4, 5, 6, 6, 7, 8, 8, 9, 9, 9, 9, 10, 11 } },
+    { 8, 16.0, { 0, 0, 0, 0, 1, 1, 1, 2, 2, 3, 4, 4, 5, 6, 7 }, { 0, 1, 1, 2, 2, 3, 3, 4, 5, 5, 5, 6, 6, 7, 8 } },
+    { 10, 11.5, { 0, 3, 5, 5, 7, 7, 7, 7, 7, 7, 9, 9, 9, 11, 14 }, { 5, 7, 9, 10, 11, 11, 11, 12, 12, 13, 13, 13, 13, 14, 15 } },
+    { 10, 16.0, { 0, 2, 3, 4, 4, 5, 5, 6, 6, 6, 7, 8, 8, 10, 11 }, { 2, 4, 5, 6, 6, 7, 7, 8, 9, 9, 9, 10, 10, 11, 12 } },
+};
+
+static int ref_round(double x) { return x < 0 ? (int)(x - 0.5) : (int)(x + 0.5); }
+static int ref_med3(int a, int b, int c)
+{
+    /* DC's median3 as written (the third compare swaps b and c) */
+    int t;
+    if (a > b) { t = a; a = b; b = t; }
+    if (b > c) { t = b; b = c; c = t; }
+    if (a > b) { t = b; b = c; c = t; }
+    return b;
+}
+static unsigned long ref_div_up(unsigned long a, unsigned long b) { return (a + b - 1) / b; }
+
+/* the PPS of RGB w x h, 'sh_n' x 'sv_n' slices, bpp_x16, bpc, DSC 1.2,
+ * line buffer 'lb', block prediction on. 0, or -1 for a QP row this table
+ * does not have. */
+static int ref_dsc_pps(uint32_t w, uint32_t h, uint32_t sh_n, uint32_t sv_n, uint32_t bpp_x16, int bpc, int lb,
+                       uint8_t *p)
+{
+    double bpp = bpp_x16 / 16.0, row = 6.0 + (int)((bpp - 6.0) * 2) / 2.0;
+    const struct ref_qp_row *q = 0;
+    int sw = (int)(w / sh_n), sh = (int)(h / sv_n), ixd, pad, init_off, flbo, fmin, fmax, incr, ofs[15], i, mux;
+    unsigned long gpl, chunk, extra, slice_bits, isv, sdi, fofs, fscale, nfl, sbo, sii, rbs, hrd, dec;
+    for (i = 0; i < (int)(sizeof(ref_qp_rows) / sizeof(ref_qp_rows[0])); i++)
+        if (ref_qp_rows[i].bpc == bpc && ref_qp_rows[i].bpp == row)
+            q = &ref_qp_rows[i];
+    if (!q)
+        return -1;
+    incr = bpc == 8 ? 11 : bpc == 10 ? 15 : 19;
+    init_off = bpp >= 12 ? 2048 : bpp <= 8 ? 6144
+             : (bpp > 8 && bpp <= 10) ? 6144 - ref_round((bpp - 8) * (512 / 2)) : 5632 - ref_round((bpp - 10) * (3584 / 2));
+    flbo = ref_med3(0, 12 + (int)(0.09 * (34 < sh - 8 ? 34 : sh - 8)), (int)(((3 * bpc + 2) * 3) - (3 * bpp)));
+    ixd = ref_round(8192.0 / 2.0 / bpp / 1.0);
+    pad = (sw % 3) ? (3 - sw % 3) * (ixd / sw) : 0;
+    if (3 * bpp >= ((ixd + 2) / 3) * 3 && (ixd + pad) % 3 == 1)
+        ixd++;
+    fmin = bpc == 8 ? 3 : bpc == 10 ? 7 : 11;
+    fmax = bpc == 8 ? 12 : bpc == 10 ? 16 : 20;
+    /* get_ofs_set, RGB */
+    ofs[0] = bpp <= 6 ? 0 : (bpp >= 8 && bpp <= 12) ? 2 : bpp >= 15 ? 10 : (bpp > 6 && bpp < 8) ? ref_round(bpp - 6) : 2 + ref_round((bpp - 12) * (8 / 3.0));
+    ofs[1] = bpp <= 6 ? -2 : (bpp >= 8 && bpp <= 12) ? 0 : bpp >= 15 ? 8 : (bpp > 6 && bpp < 8) ? -2 + ref_round(bpp - 6) : ref_round((bpp - 12) * (8 / 3.0));
+    ofs[2] = bpp <= 6 ? -2 : (bpp >= 8 && bpp <= 12) ? 0 : bpp >= 15 ? 6 : (bpp > 6 && bpp < 8) ? -2 + ref_round(bpp - 6) : ref_round((bpp - 12) * 2.0);
+    ofs[3] = bpp <= 6 ? -4 : (bpp >= 8 && bpp <= 12) ? -2 : bpp >= 15 ? 4 : (bpp > 6 && bpp < 8) ? -4 + ref_round(bpp - 6) : -2 + ref_round((bpp - 12) * 2.0);
+    ofs[4] = bpp <= 6 ? -6 : (bpp >= 8 && bpp <= 12) ? -4 : bpp >= 15 ? 2 : (bpp > 6 && bpp < 8) ? -6 + ref_round(bpp - 6) : -4 + ref_round((bpp - 12) * 2.0);
+    ofs[5] = bpp <= 12 ? -6 : bpp >= 15 ? 0 : -6 + ref_round((bpp - 12) * 2.0);
+    ofs[6] = bpp <= 12 ? -8 : bpp >= 15 ? -2 : -8 + ref_round((bpp - 12) * 2.0);
+    ofs[7] = bpp <= 12 ? -8 : bpp >= 15 ? -4 : -8 + ref_round((bpp - 12) * (4 / 3.0));
+    ofs[8] = bpp <= 12 ? -8 : bpp >= 15 ? -6 : -8 + ref_round((bpp - 12) * (2 / 3.0));
+    ofs[9] = bpp <= 12 ? -10 : bpp >= 15 ? -8 : -10 + ref_round((bpp - 12) * (2 / 3.0));
+    ofs[10] = -10;
+    ofs[11] = bpp <= 6 ? -12 : bpp >= 8 ? -10 : -12 + ref_round(bpp - 6);
+    ofs[12] = ofs[13] = ofs[14] = -12;
+    /* drm_dsc_compute_rc_parameters */
+    isv = 8 * 8192 / (8192 - init_off);
+    gpl = ref_div_up(sw, 3);
+    chunk = ref_div_up((unsigned long)sw * bpp_x16, 128);
+    mux = bpc <= 10 ? 48 : 64;
+    extra = 3 * (mux + (4 * bpc + 4) - 2);
+    slice_bits = 8 * chunk * sh;
+    while (extra > 0 && (slice_bits - extra) % mux)
+        extra--;
+    if (gpl < isv - 8)
+        isv = gpl + 8;
+    sdi = isv > 8 ? gpl / (isv - 8) : 4095;
+    fofs = 8192 - ((unsigned long)ixd * bpp_x16 + 8) / 16 + extra;
+    fscale = 8 * 8192 / (8192 - fofs);
+    nfl = sh > 1 ? ref_div_up((unsigned long)flbo << 11, sh - 1) : 0;
+    sbo = ref_div_up((8192 - init_off + extra) << 11, gpl * sh);
+    sii = fscale > 9 ? fofs * 2048 / ((nfl + sbo) * (fscale - 9)) : 0;
+    rbs = 8192 - init_off + ref_div_up((unsigned long)ixd * bpp_x16, 16) + gpl * flbo;
+    hrd = ref_div_up(rbs * 16, bpp_x16);
+    dec = hrd - ixd;
+    /* the PPS (DSC 1.2, table 4-1) */
+    memset(p, 0, 128);
+    p[0] = 0x12;
+    p[3] = (uint8_t)(bpc << 4 | lb);
+    p[4] = (uint8_t)(0x20 | 0x10 | (bpp_x16 >> 8));
+    p[5] = (uint8_t)bpp_x16;
+    p[6] = (uint8_t)(h >> 8); p[7] = (uint8_t)h;
+    p[8] = (uint8_t)(w >> 8); p[9] = (uint8_t)w;
+    p[10] = (uint8_t)(sh >> 8); p[11] = (uint8_t)sh;
+    p[12] = (uint8_t)(sw >> 8); p[13] = (uint8_t)sw;
+    p[14] = (uint8_t)(chunk >> 8); p[15] = (uint8_t)chunk;
+    p[16] = (uint8_t)(ixd >> 8); p[17] = (uint8_t)ixd;
+    p[18] = (uint8_t)(dec >> 8); p[19] = (uint8_t)dec;
+    p[21] = (uint8_t)isv;
+    p[22] = (uint8_t)(sii >> 8); p[23] = (uint8_t)sii;
+    p[24] = (uint8_t)(sdi >> 8); p[25] = (uint8_t)sdi;
+    p[27] = (uint8_t)flbo;
+    p[28] = (uint8_t)(nfl >> 8); p[29] = (uint8_t)nfl;
+    p[30] = (uint8_t)(sbo >> 8); p[31] = (uint8_t)sbo;
+    p[32] = (uint8_t)(init_off >> 8); p[33] = (uint8_t)init_off;
+    p[34] = (uint8_t)(fofs >> 8); p[35] = (uint8_t)fofs;
+    p[36] = (uint8_t)fmin; p[37] = (uint8_t)fmax;
+    p[38] = 8192 >> 8; p[39] = 0;
+    p[40] = 6; p[41] = (uint8_t)incr; p[42] = (uint8_t)incr; p[43] = 0x33;
+    {
+        static const int th[14] = { 896, 1792, 2688, 3584, 4480, 5376, 6272, 6720, 7168, 7616, 7744, 7872, 8000, 8064 };
+        for (i = 0; i < 14; i++)
+            p[44 + i] = (uint8_t)(th[i] / 64);
+    }
+    for (i = 0; i < 15; i++) {
+        uint32_t v = (uint32_t)q->min[i] << 11 | (uint32_t)q->max[i] << 6 | (uint32_t)(ofs[i] & 0x3f);
+        p[58 + 2 * i] = (uint8_t)(v >> 8);
+        p[59 + 2 * i] = (uint8_t)v;
+    }
+    return 0;
+}
+
+/* a sink's DSC caps: DSC 1.2, 48 kB buffer, 1 / 2 / 4 / 8 slices, 9-bit
+ * line buffer, block prediction, RGB, 8 and 10 bpc, 600 MP/s per slice,
+ * slices up to 2560 pixels, 1/16 bpp steps */
+static const uint8_t ref_dsc_caps[16] = { 0x01, 0x21, 0x00, 0x2f, 0x2b, 0x00, 0x01, 0, 0, 0x01, 0x06, 0x66, 8, 0, 0, 0 };
+
+/* the DSC policy and the PPS without hardware: the sink caps parsed, the
+ * standard modes of the task (3840x2160@144 10 bpc on HBR3 x4 with FEC,
+ * 7680x4320@60), a fixed 12 bpp config, each PPS against the reference
+ * (and the 12 bpp one against the VESA DSC 1.2 recommended values DRM
+ * carries) */
+static void test_dsc_pps(void)
+{
+    rdna3_dsc_dec_caps caps;
+    rdna3_dsc_timing t;
+    rdna3_dsc_config cfg;
+    rdna3_dsc_hw_config hc;
+    rdna3_dsc_bw_range range;
+    rdna3_dp_link_settings hbr3 = { 4, RD_DP_LINK_RATE_HIGH3, 0 };
+    uint8_t pps[128], ref[128];
+    uint32_t link_fec;
+    rdna3_mode m;
+    static const uint8_t vesa_12bpp_8bpc_min[15] = { 0, 0, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 5, 7, 10 };
+    int i;
+
+    /* dc_dsc_parse_dsc_dpcd */
+    CHECK(dcn32_dsc_parse_dsc_dpcd(ref_dsc_caps, (const uint8_t *)"\0\0\0", &caps) == 1 && caps.is_dsc_supported &&
+          caps.dsc_version == 0x21 && caps.rc_buffer_size == 48 * 1024 && caps.lb_bit_depth == 9 &&
+          caps.is_block_pred_supported && caps.throughput_mode_0_mps == 600 && caps.throughput_mode_1_mps == 600 &&
+          caps.max_slice_width == 2560 && caps.bpp_increment_div == 16 && caps.is_dp &&
+          caps.branch_overall_throughput_0_mps == 0);
+    {
+        uint8_t bad[16];
+        memcpy(bad, ref_dsc_caps, 16);
+        bad[0] = 0;
+        CHECK(dcn32_dsc_parse_dsc_dpcd(bad, 0, &caps) == 0 && !caps.is_dsc_supported);
+        memcpy(bad, ref_dsc_caps, 16);
+        bad[0xf] = 7;   /* no such bpp increment */
+        CHECK(dcn32_dsc_parse_dsc_dpcd(bad, 0, &caps) == 0);
+        bad[0xf] = 0;
+        bad[0x2] = 0x10;   /* granular throughput delta: +4 MP/s */
+        CHECK(dcn32_dsc_parse_dsc_dpcd(bad, (const uint8_t *)"\x02\x01\x10", &caps) == 1 &&
+              caps.throughput_mode_0_mps == 604 && caps.branch_overall_throughput_0_mps == 700 &&
+              caps.branch_overall_throughput_1_mps == 680 && caps.branch_max_line_width == 5120);
+    }
+    dcn32_dsc_parse_dsc_dpcd(ref_dsc_caps, (const uint8_t *)"\0\0\0", &caps);
+
+    /* the link: HBR3 x4 with FEC (97 % of 8b/10b) */
+    {
+        static rdna3_dp_link l;
+        memset(&l, 0, sizeof(l));
+        l.fec_policy = 1;
+        l.dpcd_caps.fec_cap = 1;
+        link_fec = dcn32_dp_link_bw_kbps(&l, &hbr3);
+        CHECK(link_fec == 25142400 && dcn32_dp_link_kbps_settings(&hbr3) == 25920000);
+        l.fec_policy = 0;
+        CHECK(dcn32_dp_link_bw_kbps(&l, &hbr3) == 25920000);
+    }
+
+    /* 3840x2160@144 (CVT-RB, 1332.25 MHz) 10 bpc: 40 Gbps, DSC to fill the
+     * link: two engines' caps (no single slice above 1188 MHz), 600 MP/s
+     * per slice -> 4 slices of 960, the policy's 16 bpp cap, slice height
+     * 108 (2160 / 108 = 20) */
+    CHECK(edid_cvt_rb(3840, 2160, 144, &m) == 0 && m.pixel_khz == 1332250);
+    dcn32_dp_dsc_timing(&m, 10, &t);
+    CHECK(dcn32_dsc_timing_kbps(&t) == 39967500);
+    CHECK(dcn32_dsc_compute_config(&caps, 0, link_fec, &t, &cfg) == 1 && cfg.num_slices_h == 4 &&
+          cfg.num_slices_v == 20 && cfg.bits_per_pixel == 256 && cfg.linebuf_depth == 9 && cfg.version_minor == 2 &&
+          cfg.block_pred_enable && cfg.is_dp);
+    t.dsc = 1;
+    t.dsc_cfg = cfg;
+    CHECK(dcn32_dsc_timing_kbps(&t) <= link_fec && dcn32_dsc_timing_kbps(&t) > 21000000);
+    t.dsc = 0;
+    hc.pic_width = 3840; hc.pic_height = 2160; hc.pixel_encoding = RD_PIXEL_ENCODING_RGB; hc.bpc = 10; hc.is_odm = 0;
+    hc.dc_dsc_cfg = cfg;
+    CHECK(dcn32_dsc_get_packed_pps(&hc, pps) == 1 && ref_dsc_pps(3840, 2160, 4, 20, 256, 10, 9, ref) == 0 &&
+          memcmp(pps, ref, 128) == 0);
+    /* no DSC when the link carries the mode (enable_dsc_when_not_needed off) */
+    CHECK(dcn32_dsc_compute_config(&caps, 0, 50000000, &t, &cfg) == 0 && cfg.num_slices_h == 0);
+    /* the bandwidth range: 8 .. 16 bpp */
+    CHECK(dcn32_dsc_compute_bandwidth_range(8 * 16, 16 * 16, &caps, &t, &range) == 1 && range.stream_kbps == 39967500 &&
+          range.min_target_bpp_x16 == 128 && range.max_target_bpp_x16 == 256 && range.min_kbps < range.max_kbps);
+
+    /* 7680x4320@60 (CVT-RB, 2090 MHz) 10 bpc on the same link: 4 slices of
+     * 1920 (2090 / 4 MP/s per slice), 11.875 bpp to fill the link */
+    CHECK(edid_cvt_rb(7680, 4320, 60, &m) == 0 && m.pixel_khz == 2090000);
+    dcn32_dp_dsc_timing(&m, 10, &t);
+    CHECK(dcn32_dsc_compute_config(&caps, 0, link_fec, &t, &cfg) == 1 && cfg.num_slices_h == 4 &&
+          cfg.num_slices_v == 40 && cfg.bits_per_pixel == 190);
+    hc.pic_width = 7680; hc.pic_height = 4320; hc.bpc = 10; hc.dc_dsc_cfg = cfg;
+    CHECK(dcn32_dsc_get_packed_pps(&hc, pps) == 1 && ref_dsc_pps(7680, 4320, 4, 40, 190, 10, 9, ref) == 0 &&
+          memcmp(pps, ref, 128) == 0);
+    /* the same at 8 bpc: a 9 bpc line buffer, its own rate control */
+    dcn32_dp_dsc_timing(&m, 8, &t);
+    CHECK(dcn32_dsc_compute_config(&caps, 0, link_fec, &t, &cfg) == 1 && cfg.bits_per_pixel == 190);
+    hc.bpc = 8; hc.dc_dsc_cfg = cfg;
+    CHECK(dcn32_dsc_get_packed_pps(&hc, pps) == 1 && ref_dsc_pps(7680, 4320, 4, 40, 190, 8, 9, ref) == 0 &&
+          memcmp(pps, ref, 128) == 0);
+    /* a sink of 8 bpc only cannot take the 10 bpc stream */
+    caps.color_depth = RD_DSC_DEPTH_8_BPC;
+    dcn32_dp_dsc_timing(&m, 10, &t);
+    CHECK(dcn32_dsc_compute_config(&caps, 0, link_fec, &t, &cfg) == 0);
+    dcn32_dsc_parse_dsc_dpcd(ref_dsc_caps, (const uint8_t *)"\0\0\0", &caps);
+
+    /* 1920x1080 at 12 bpp, 8 bpc, 2 x 10 slices: the VESA DSC 1.2
+     * recommended rate control values (DRM's rc_parameters_1_2_444 12 bpp
+     * 8 bpc): initial xmit delay 341, first line BPG offset 15, initial
+     * offset 2048, flatness QP 3 / 12, QP increment limits 11, the min QPs */
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.num_slices_h = 2; cfg.num_slices_v = 10; cfg.bits_per_pixel = 192; cfg.linebuf_depth = 9;
+    cfg.version_minor = 2; cfg.block_pred_enable = 1; cfg.is_dp = 1;
+    hc.pic_width = 1920; hc.pic_height = 1080; hc.bpc = 8; hc.dc_dsc_cfg = cfg;
+    CHECK(dcn32_dsc_get_packed_pps(&hc, pps) == 1 && ref_dsc_pps(1920, 1080, 2, 10, 192, 8, 9, ref) == 0 &&
+          memcmp(pps, ref, 128) == 0);
+    CHECK(((pps[16] << 8) | pps[17]) == 341 && pps[27] == 15 && ((pps[32] << 8) | pps[33]) == 2048 && pps[36] == 3 &&
+          pps[37] == 12 && pps[41] == 11 && pps[42] == 11 && ((pps[38] << 8) | pps[39]) == 8192 && pps[44] == 14 &&
+          pps[57] == 126);
+    for (i = 0; i < 15; i++)
+        CHECK((pps[58 + 2 * i] >> 3) == vesa_12bpp_8bpc_min[i]);
+    /* parameters DSC cannot take */
+    cfg.bits_per_pixel = 95;
+    hc.dc_dsc_cfg = cfg;
+    CHECK(dcn32_dsc_get_packed_pps(&hc, pps) == 0);
+    cfg.bits_per_pixel = 192; cfg.num_slices_v = 7;   /* 1080 / 7 is not whole */
+    hc.dc_dsc_cfg = cfg;
+    CHECK(dcn32_dsc_get_packed_pps(&hc, pps) == 0);
+}
+
+/* the PPS the source sends: GSP 11..14 of the stream encoder's VPG */
+static void vpg_pps(uint32_t fe, uint8_t *pps)
+{
+    uint32_t k, i;
+    for (k = 0; k < 4; k++)
+        for (i = 0; i < 8; i++) {
+            uint32_t v = S.vpg[fe].mem[(11 + k) * 9 + 1 + i];
+            pps[32 * k + 4 * i] = (uint8_t)v;
+            pps[32 * k + 4 * i + 1] = (uint8_t)(v >> 8);
+            pps[32 * k + 4 * i + 2] = (uint8_t)(v >> 16);
+            pps[32 * k + 4 * i + 3] = (uint8_t)(v >> 24);
+        }
+}
+
+#define DSCR(reg, n) (DCN_B2 + reg + (regDSC_TOP1_DSC_TOP_CONTROL - regDSC_TOP0_DSC_TOP_CONTROL) * (n))
+#define ODMR(reg, n) (DCN_B2 + reg + (regODM1_OPTC_DATA_FORMAT_CONTROL - regODM0_OPTC_DATA_FORMAT_CONTROL) * (n))
+
+/* DSC through the mode set (rdna3dsc): the DP head of test_dp_link (now
+ * 2560x1440 on HBR x4) cabled to a DSC + FEC sink on RBR x4 (5.03 Gbps with
+ * FEC): 1920x1080 fits uncompressed, 2560x1440 (5.8 Gbps) only with DSC */
+static void test_dp_dsc(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_display_path *own)
+{
+    static rdna3_dcn_modeset ms;
+    static rdna3_dp_link dp;
+    rdna3_mode m, up;
+    uint8_t pps[128], ref[128], sent[128];
+    uint32_t otg = dc->head[0].otg, pipe = dc->head[0].pipe, fe = (uint32_t)dc->head[0].dig_fe, v, opp;
+
+    memset(&up, 0, sizeof(up));
+    up.h_active = 2560; up.v_active = 1440; up.h_total = 2720; up.v_total = 1481;
+    up.h_front = 48; up.h_sync = 32; up.v_front = 3; up.v_sync = 5; up.pixel_khz = 241500; up.h_sync_pos = 1;
+    CHECK(edid_dmt(1920, 1080, 60, &m) == 0);
+    /* the sink: RBR x4, DSC 1.2 and FEC */
+    S.dpcd[0x001] = RD_DP_LINK_RATE_LOW;
+    S.dpcd[0x002] = 0xc4;
+    memcpy(&S.dpcd[0x060], ref_dsc_caps, 16);
+    S.dpcd[0x090] = 0x01;
+    S.dps.fail_rate = 0;
+    dcn32_dp_link_init(&dp, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 600000);
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && dp.max_link_cap.link_rate == RD_DP_LINK_RATE_LOW &&
+          dp.dpcd_caps.fec_cap == 1 && dp.dpcd_caps.dsc_basic[0] == 1 && dp.dpcd_caps.dongle_type == RD_DONGLE_NONE);
+    /* without rdna3dsc: 2560x1440 does not fit RBR x4 */
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].h_active == 2560);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &up, NULL, &ms) == RD_MODESET_LINK_BW);
+    /* rdna3dsc: FEC and DSC policies on; the DSC power domain gated as
+     * after boot */
+    dp.fec_policy = dp.dsc_policy = 1;
+    S.reg[DCN_B2 + regDOMAIN16_PG_STATUS + 2 * pipe] = 2u << DOMAIN16_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT;
+    S.reg[DCN_B2 + regDOMAIN16_PG_CONFIG + 2 * pipe] = DOMAIN16_PG_CONFIG__DOMAIN_POWER_GATE_MASK;
+    /* 1920x1080 first: no DSC, FEC on (the link verified at RBR x4 with FEC ready) */
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &m, NULL, &ms) == RD_MODESET_OK && !ms.dp_want_dsc);
+    S.dcn_frames = 1;
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START + 0x8000000, 1920, FB_START, 2560, 50) == RDNA3_OK);
+    CHECK(dp.verified && dp.verified_link_cap.link_rate == RD_DP_LINK_RATE_LOW && S.dps.trained_rate == RD_DP_LINK_RATE_LOW &&
+          S.dpcd[0x120] == RD_DP_FEC_READY && dp.fec_state == RD_FEC_ENABLED &&
+          (S.reg[DPR(regDP0_DP_DPHY_CNTL, 1)] & DP0_DP_DPHY_CNTL__DPHY_FEC_EN_MASK) &&
+          (S.reg[DPR(regDP0_DP_DPHY_CNTL, 1)] & DP0_DP_DPHY_CNTL__DPHY_FEC_ACTIVE_STATUS_MASK) && !dp.stream_dsc &&
+          S.dpcd[0x160] == 0 && !(S.reg[ODMR(regODM0_OPTC_DATA_FORMAT_CONTROL, otg)] & ODM0_OPTC_DATA_FORMAT_CONTROL__OPTC_DSC_MODE_MASK));
+    CHECK(dcn32_dp_link_bw_kbps(&dp, &dp.verified_link_cap) == 5028480);
+
+    /* 2560x1440: apply_dsc_policy_for_stream picks DSC: one slice (241.5 MP/s),
+     * the 16 bpp cap; slice height 120 (108 does not divide 1440) */
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].h_active == 1920);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 148500, &up, NULL, &ms) == RD_MODESET_OK && ms.dp_want_dsc &&
+          ms.dp_want_dsc_cfg.num_slices_h == 1 && ms.dp_want_dsc_cfg.num_slices_v == 12 &&
+          ms.dp_want_dsc_cfg.bits_per_pixel == 256);
+    S.dpcd[0x160] = 0;
+    memset(S.vpg, 0, sizeof(S.vpg));
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 2560, FB_START + 0x8000000, 1920, 50) == RDNA3_OK &&
+          dc->head[0].width == 2560 && dp.stream_dsc);
+    /* the DSC engine: powered, clocked, fed by the head's OPP, its PPS */
+    opp = (S.reg[ODMR(regODM0_OPTC_DATA_SOURCE_SELECT, otg)] & ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG0_SRC_SEL_MASK) >>
+          ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG0_SRC_SEL__SHIFT;
+    CHECK(!(S.reg[DCN_B2 + regDOMAIN16_PG_STATUS + 2 * pipe] & DOMAIN16_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS_MASK));
+    CHECK((S.reg[DSCR(regDSC_TOP0_DSC_TOP_CONTROL, pipe)] & DSC_TOP0_DSC_TOP_CONTROL__DSC_CLOCK_EN_MASK));
+    v = S.reg[DCN_B2 + regDSCRM0_DSCRM_DSC_FORWARD_CONFIG + pipe];
+    CHECK((v & DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_FORWARD_EN_MASK) &&
+          ((v & DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_OPP_PIPE_SOURCE_MASK) >>
+           DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_OPP_PIPE_SOURCE__SHIFT) == (opp < 4 ? opp : otg));
+    v = S.reg[DSCR(regDSCC0_DSCC_PPS_CONFIG3, pipe)];
+    CHECK((v & 0xffff) == 2560 && (v >> 16) == 120);
+    v = S.reg[DSCR(regDSCC0_DSCC_PPS_CONFIG1, pipe)];
+    CHECK((v & DSCC0_DSCC_PPS_CONFIG1__BITS_PER_PIXEL_MASK) == 256 && (v & DSCC0_DSCC_PPS_CONFIG1__CONVERT_RGB_MASK) &&
+          (v >> 16) == 5120);
+    CHECK((S.reg[DSCR(regDSCC0_DSCC_CONFIG0, pipe)] & DSCC0_DSCC_CONFIG0__NUMBER_OF_SLICES_PER_LINE_MASK) == 0 &&
+          (S.reg[DSCR(regDSCC0_DSCC_CONFIG0, pipe)] >> 16) == 11);
+    /* the OPTC and the stream encoder in DSC mode; bytes per pixel u3.28 = 2 */
+    CHECK(((S.reg[ODMR(regODM0_OPTC_DATA_FORMAT_CONTROL, otg)] & ODM0_OPTC_DATA_FORMAT_CONTROL__OPTC_DSC_MODE_MASK) >>
+           ODM0_OPTC_DATA_FORMAT_CONTROL__OPTC_DSC_MODE__SHIFT) == RD_OPTC_DSC_ENABLED_444 &&
+          S.reg[ODMR(regODM0_OPTC_BYTES_PER_PIXEL, otg)] == 0x20000000u &&
+          (S.reg[ODMR(regODM0_OPTC_WIDTH_CONTROL, otg)] >> 16) == 2560 &&
+          (S.reg[DPR(regDP0_DP_DSC_CNTL, fe)] & DP0_DP_DSC_CNTL__DP_DSC_MODE_MASK));
+    /* the sink: DSC decoding on, FEC; the PPS SDP every frame (GSP 11, 128
+     * bytes) carrying what dsc2_get_packed_pps gives and the reference */
+    CHECK(S.dpcd[0x160] == 1 && dp.fec_state == RD_FEC_ENABLED && S.dps.trained_rate == RD_DP_LINK_RATE_LOW &&
+          S.dps.trained_lanes == 4);
+    CHECK((S.reg[DPR(regDP0_DP_GSP11_CNTL, fe)] & DP0_DP_GSP11_CNTL__DP_SEC_GSP11_ENABLE_MASK) &&
+          (S.reg[DPR(regDP0_DP_SEC_CNTL2, fe)] & DP0_DP_SEC_CNTL2__DP_SEC_GSP11_PPS_MASK) &&
+          (S.reg[DPR(regDP0_DP_SEC_CNTL, fe)] & DP0_DP_SEC_CNTL__DP_SEC_STREAM_ENABLE_MASK) &&
+          S.vpg[fe].writes == 4 * 9 && S.vpg[fe].mem[11 * 9] == 0x007f1000u);
+    vpg_pps(fe, sent);
+    {
+        rdna3_dsc_hw_config hc;
+        hc.pic_width = 2560; hc.pic_height = 1440; hc.pixel_encoding = RD_PIXEL_ENCODING_RGB; hc.bpc = 8;
+        hc.is_odm = 0; hc.dc_dsc_cfg = ms.dp_want_dsc_cfg;
+        CHECK(dcn32_dsc_get_packed_pps(&hc, pps) == 1 && memcmp(sent, pps, 128) == 0 && memcmp(dp.pps, pps, 128) == 0);
+        CHECK(ref_dsc_pps(2560, 1440, 1, 12, 256, 8, 9, ref) == 0 && memcmp(sent, ref, 128) == 0);
+    }
+    /* M/N stays the pixel clock's: 241.5 MHz over RBR */
+    CHECK(S.reg[DPR(regDP0_DP_VID_M, fe)] == (uint32_t)(0x8000ull * 241500 / (RD_DP_LINK_RATE_LOW * 27000)));
+
+    /* back to 1920x1080: DSC off in the RX, the OPTC, the encoder; the engine
+     * disconnected, unclocked and gated again; FEC stays on */
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].h_active == 2560);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &m, NULL, &ms) == RD_MODESET_OK && !ms.dp_want_dsc &&
+          ms.dp_cur_dsc);
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START + 0x8000000, 1920, FB_START, 2560, 50) == RDNA3_OK);
+    CHECK(!dp.stream_dsc && S.dpcd[0x160] == 0 &&
+          !(S.reg[ODMR(regODM0_OPTC_DATA_FORMAT_CONTROL, otg)] & ODM0_OPTC_DATA_FORMAT_CONTROL__OPTC_DSC_MODE_MASK) &&
+          !(S.reg[DPR(regDP0_DP_DSC_CNTL, fe)] & DP0_DP_DSC_CNTL__DP_DSC_MODE_MASK) &&
+          !(S.reg[DPR(regDP0_DP_GSP11_CNTL, fe)] & DP0_DP_GSP11_CNTL__DP_SEC_GSP11_ENABLE_MASK) &&
+          !(S.reg[DSCR(regDSC_TOP0_DSC_TOP_CONTROL, pipe)] & DSC_TOP0_DSC_TOP_CONTROL__DSC_CLOCK_EN_MASK) &&
+          !(S.reg[DCN_B2 + regDSCRM0_DSCRM_DSC_FORWARD_CONFIG + pipe] & DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_FORWARD_EN_MASK) &&
+          (S.reg[DCN_B2 + regDOMAIN16_PG_STATUS + 2 * pipe] & DOMAIN16_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS_MASK) &&
+          dp.fec_state == RD_FEC_ENABLED && dc->head[0].width == 1920);
+    /* a sink without DSC: 2560x1440 is refused again */
+    S.dpcd[0x060] = 0;
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK);
+    CHECK(dcn32_read_state(dev, dc) == 1);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 148500, &up, NULL, &ms) == RD_MODESET_LINK_BW);
+
+    /* rdna3dsc off, the sink back to HBR3 x4 (trains at HBR2) without DSC /
+     * FEC (a new sink: its link cap verified again), the head at 2560x1440
+     * as test_dp_link left it; FEC goes off with the old link */
+    dp.fec_policy = dp.dsc_policy = 0;
+    memset(&S.dpcd[0x060], 0, 16);
+    S.dpcd[0x090] = 0;
+    S.dpcd[0x001] = RD_DP_LINK_RATE_HIGH3;
+    S.dps.fail_rate = RD_DP_LINK_RATE_HIGH3;
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && !dp.dpcd_caps.fec_cap);
+    dp.verified = 0;
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].h_active == 1920);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 148500, &up, NULL, &ms) == RD_MODESET_OK && !ms.dp_want_dsc);
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 2560, FB_START + 0x8000000, 1920, 50) == RDNA3_OK &&
+          dc->head[0].width == 2560 && dp.fec_state == RD_FEC_NOT_READY && S.dpcd[0x120] == 0 &&
+          dp.verified_link_cap.link_rate == RD_DP_LINK_RATE_HIGH2 &&
+          !(S.reg[DPR(regDP0_DP_DPHY_CNTL, 1)] & DP0_DP_DPHY_CNTL__DPHY_FEC_EN_MASK));
+    S.dps.fail_rate = 0;
+    S.dcn_frames = 0;
+}
+
+/* DP MST (rdna3mst): the DP head of test_dp_link turned to a hub (input
+ * port 0, SST sinks "RDNA3 MST A" 1080p on port 1 and "RDNA3 MST B" 1440p on
+ * port 2): topology, EDIDs and a remote DPCD read over sideband messages,
+ * then the head's stream taken over as an MST stream (the payload table,
+ * ACT, ALLOCATE_PAYLOAD, the VC rate), a mode change on it, a move to the
+ * other port, and back to SST */
+static void test_dp_mst(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_display_path *own)
+{
+    static rdna3_dcn_modeset ms;
+    static rdna3_dp_link dp;
+    static rdna3_mst_mgr mgr;
+    static rdna3_edid ed;
+    rdna3_mode m, up, big;
+    uint8_t buf[16];
+    uint32_t otg = dc->head[0].otg, fe = (uint32_t)dc->head[0].dig_fe, i, x, y, sat0;
+    int pa = -1, pb = -1, n;
+
+    /* drm_dp_calc_pbn_mode: the DRM selftest vectors */
+    CHECK(drm_dp_calc_pbn_mode(154000, 30 << 4) == 689 && drm_dp_calc_pbn_mode(234000, 30 << 4) == 1047 &&
+          drm_dp_calc_pbn_mode(297000, 24 << 4) == 1063 && drm_dp_calc_pbn_mode(148500, 24 << 4) == 532);
+
+    memset(&up, 0, sizeof(up));
+    up.h_active = 2560; up.v_active = 1440; up.h_total = 2720; up.v_total = 1481;
+    up.h_front = 48; up.h_sync = 32; up.v_front = 3; up.v_sync = 5; up.pixel_khz = 241500; up.h_sync_pos = 1;
+    CHECK(edid_dmt(1920, 1080, 60, &m) == 0);
+    /* the hub (the GOP's SST stream goes on through it) */
+    make_mst_hub();
+    S.dps.fail_rate = 0;
+    dcn32_dp_link_init(&dp, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 600000);
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && (dp.dpcd_caps.mstm_cap & 1) && dp.dpcd_caps.is_branch_dev &&
+          dp.dpcd_caps.dongle_type == RD_DONGLE_NONE);
+    CHECK(dp_mst_read_mst_cap(dev, 0, dp.dpcd_caps.dpcd_rev) == RD_DRM_DP_MST);
+
+    /* drm_dp_mst_topology_mgr_set_mst + the probe: MSTM_CTRL, the payload
+     * table reset, CLEAR_PAYLOAD_ID_TABLE (broadcast), LINK_ADDRESS (a
+     * two-chunk reply), ENUM_PATH_RESOURCES of both output ports */
+    dp_mst_mgr_init(&mgr, dev, 0);
+    CHECK(dp_mst_set_mst(&mgr, 1) == RDNA3_OK && mgr.mst_state && S.dpcd[0x111] == 0x07 && S.mst.table_resets == 1);
+    CHECK(S.mst.clear_table == 1 && S.mst.link_addr == 1 && S.mst.enum_path == 2 && S.mst.hdr_crc_errors == 0 &&
+          S.mst.body_crc_errors == 0 && mgr.bad_replies == 0 && mgr.naks == 0 && mgr.timeouts == 0);
+    for (i = 0; i < RD_MST_MAX_PORTS; i++) {
+        if (!mgr.port[i].used)
+            continue;
+        if (mgr.port[i].port_num == 1)
+            pa = (int)i;
+        if (mgr.port[i].port_num == 2)
+            pb = (int)i;
+    }
+    CHECK(pa >= 0 && pb >= 0 && mgr.port[pa].pdt == RD_DP_PEER_DEVICE_SST_SINK && mgr.port[pa].ddps &&
+          mgr.port[pa].full_pbn == 2560 && mgr.port[pb].full_pbn == 1280 && mgr.port[pa].fec_capable &&
+          mgr.port[pa].mstb < 0 && memcmp(mgr.mstb[0].guid, S.mst.guid, 16) == 0);
+    CHECK(dp_mst_first_sink_port(&mgr) == pa);
+    /* the EDIDs (REMOTE_I2C_READ, 128 bytes: three-chunk replies) */
+    CHECK(dp_mst_read_edid(&mgr, pa) == 128 && edid_parse(mgr.port[pa].edid, 128, &ed) == 0 &&
+          strcmp(ed.name, "RDNA3 MST A") == 0 && ed.mode[0].h_active == 1920);
+    CHECK(dp_mst_read_edid(&mgr, pb) == 128 && edid_parse(mgr.port[pb].edid, 128, &ed) == 0 &&
+          strcmp(ed.name, "RDNA3 MST B") == 0 && ed.mode[0].h_active == 2560 && S.mst.remote_i2c == 2);
+    /* REMOTE_DPCD_READ of the sink behind port 2 */
+    CHECK(dp_mst_dpcd_read(&mgr, pb, 0, buf, 3) == 3 && buf[0] == 0x14 && buf[1] == RD_DP_LINK_RATE_HIGH2 &&
+          buf[2] == 0x82 && S.mst.remote_dpcd == 1);
+
+    /* the head as an MST stream to port 2 (1440p): the PBN of 241.5 MHz
+     * 24 bpp is 864 (with the 0.6 % margin), 40 PBN per slot on HBR2 x4 ->
+     * 22 slots */
+    dp.mst = 1;
+    dp.mgr = &mgr;
+    dp.mst_port = pb;
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].dig_mode == 0 && dc->head[0].h_active == 2560);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &up, NULL, &ms) == RD_MODESET_OK &&
+          ms.dp_mst_pbn == 864 && ms.dp_mst_slots == 22);
+    /* more than port 2's 1280 PBN: refused there */
+    big = up;
+    big.pixel_khz = 400000;
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &big, NULL, &ms) == RD_MODESET_LINK_BW);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &up, NULL, &ms) == RD_MODESET_OK);
+    S.dcn_frames = 1;
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 2560, FB_START + 0x8000000, 2560, 50) == RDNA3_OK);
+    /* MST on in the hub and the link trained in it (max link cap, no
+     * verify training), DIG_MODE 5 */
+    CHECK((S.dpcd[0x111] & 1) && dp.verified && dp.verified_link_cap.link_rate == RD_DP_LINK_RATE_HIGH2 &&
+          S.dps.trained_rate == RD_DP_LINK_RATE_HIGH2 && S.dps.trained_lanes == 4 && dp.link_active &&
+          ((S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] & DIG0_DIG_BE_CNTL__DIG_MODE_MASK) >> DIG0_DIG_BE_CNTL__DIG_MODE__SHIFT) == 5);
+    /* the payload: VCPI 1 on slots 1..22 in the hub's table, the source's
+     * SAT row 0 = DIG 2 x 22 slots, the ACT handled, ALLOCATE_PAYLOAD with
+     * PBN 864 after it */
+    for (i = 1, n = 0; i < 64; i++)
+        n += S.mst.act_slot_vcpi[i] == 1;
+    CHECK(n == 22 && S.mst.act_slot_vcpi[1] == 1 && S.mst.act_slot_vcpi[22] == 1 && S.mst.act_slot_vcpi[23] == 0);
+    sat0 = S.reg[DPR(regDP0_DP_MSE_SAT0, 1)];
+    CHECK((sat0 & DP0_DP_MSE_SAT0__DP_MSE_SAT_SRC0_MASK) == fe &&
+          ((sat0 & DP0_DP_MSE_SAT0__DP_MSE_SAT_SLOT_COUNT0_MASK) >> DP0_DP_MSE_SAT0__DP_MSE_SAT_SLOT_COUNT0__SHIFT) == 22 &&
+          (sat0 & DP0_DP_MSE_SAT0__DP_MSE_SAT_SLOT_COUNT1_MASK) == 0);
+    CHECK(S.mst.acts >= 1 && S.mst.act_mismatch == 0 && dp.mst_act && S.mst.port[2].vcpi == 1 &&
+          S.mst.port[2].pbn == 864 && S.mst.last_alloc_order == 1 && dp.mst_alloc.stream_count == 1 &&
+          dp.mst_alloc.a[0].fe == (int)fe && dp.mst_alloc.a[0].slot_count == 22);
+    /* VC rate: the PBN of 5796 Mbps without the margin (858.67) over 40 PBN
+     * per slot = 21.47 slots */
+    x = (S.reg[DPR(regDP0_DP_MSE_RATE_CNTL, fe)] & DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X_MASK) >>
+        DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X__SHIFT;
+    y = S.reg[DPR(regDP0_DP_MSE_RATE_CNTL, fe)] & DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_Y_MASK;
+    CHECK(x == 21 && y > (1u << 26) * 46 / 100 && y < (1u << 26) * 47 / 100);
+    CHECK((S.reg[DPR(regDP0_DP_VID_STREAM_CNTL, fe)] & DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE_MASK) &&
+          dc->head[0].width == 2560 && mgr.payload_count == 1 && mgr.port[pb].vc_start_slot == 1);
+
+    /* 1920x1080 on the same port: the payload released (VC rate 0, the
+     * table entry removed with an ACT, ALLOCATE_PAYLOAD PBN 0, MST_EN off
+     * with the link) and allocated again: 532 PBN -> 14 slots */
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].dig_mode == 5);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &m, NULL, &ms) == RD_MODESET_OK && ms.dp_mst_slots == 14);
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START + 0x8000000, 1920, FB_START, 2560, 50) == RDNA3_OK);
+    for (i = 1, n = 0; i < 64; i++)
+        n += S.mst.act_slot_vcpi[i] != 0;
+    CHECK(n == 14 && S.mst.act_slot_vcpi[1] == 1 && S.mst.port[2].pbn == 532 && S.mst.port[2].allocs == 3 &&
+          S.mst.act_mismatch == 0 && dp.mst_alloc.stream_count == 1 && dp.mst_alloc.a[0].slot_count == 14 &&
+          dc->head[0].width == 1920 && (S.dpcd[0x111] & 1));
+
+    /* the stream moved to port 1: link_set_dpms_off on port 2 (the link
+     * goes with its last payload), port 2's connector without a stream
+     * (drm_dp_atomic_release_time_slots: VCPI 1 free again), on to port 1 */
+    dcn32_dp_link_set_dpms_off(&dp);
+    CHECK(!(S.dpcd[0x111] & 1) && !dp.link_active && dp.mst_alloc.stream_count == 0 && S.mst.port[2].pbn == 0 &&
+          mgr.payload_count == 0 && S.mst.act_slot_vcpi[1] == 0 && mgr.port[pb].vcpi == 1);
+    dp_mst_release_time_slots(&mgr, pb);
+    CHECK(mgr.payload_mask == 0 && mgr.port[pb].vcpi == 0);
+    dp.mst_port = pa;
+    CHECK(dcn32_dp_link_set_dpms_on(&dp, &m, 0) == RDNA3_OK && S.mst.port[1].pbn == 532 && S.mst.port[1].vcpi == 1 &&
+          S.mst.act_slot_vcpi[1] == 1 && S.mst.act_slot_vcpi[14] == 1 && S.mst.act_slot_vcpi[15] == 0 &&
+          dp.link_active && (S.dpcd[0x111] & 1));
+    /* 2560x1440 on port 1 through the mode set (2560 PBN there) */
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].dig_mode == 5 && dc->head[0].h_active == 1920);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 148500, &up, NULL, &ms) == RD_MODESET_OK && ms.dp_mst_slots == 22);
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 2560, FB_START + 0x8000000, 1920, 50) == RDNA3_OK &&
+          dc->head[0].width == 2560 && S.mst.port[1].pbn == 864 && S.mst.act_mismatch == 0);
+    /* an MST head is not planned as SST */
+    dp.mst = 0;
+    CHECK(dcn32_read_state(dev, dc) == 1);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &up, NULL, &ms) == RD_MODESET_DP_LINK);
+    dp.mst = 1;
+
+    /* back to SST (the kext's fallback): the stream off, MST off in the
+     * manager and the hub, the stream on again as SST */
+    dcn32_dp_link_set_dpms_off(&dp);
+    CHECK(dp_mst_set_mst(&mgr, 0) == RDNA3_OK && S.dpcd[0x111] == 0 && !mgr.mst_state);
+    dp.mst = 0;
+    dp.mgr = 0;
+    dp.mst_port = -1;
+    CHECK(dcn32_dp_link_set_dpms_on(&dp, &up, 0) == RDNA3_OK);
+    CHECK(((S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] & DIG0_DIG_BE_CNTL__DIG_MODE_MASK) >> DIG0_DIG_BE_CNTL__DIG_MODE__SHIFT) == 0 &&
+          S.dps.trained_rate == RD_DP_LINK_RATE_HIGH && dcn32_dp_link_ok(&dp));
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].dig_mode == 0 && dc->head[0].h_active == 2560);
+    S.mst.on = 0;
+    S.dcn_frames = 0;
+}
+
 static void test_dp_link(rdna3_dev *dev, rdna3_dmub *dm)
 {
     static rdna3_dcn dc;
@@ -4843,6 +5892,11 @@ static void test_dp_link(rdna3_dev *dev, rdna3_dmub *dm)
     CHECK(dcn32_modeset_apply(dev, dm, &dc, NULL, &ms, FB_START, 2560, FB_START + 0x8000000, 1920, 50) == RDNA3_OK &&
           dc.head[0].width == 2560 && S.dps.trained_rate == RD_DP_LINK_RATE_HIGH && S.dpcd[0x101] == 0x84);
     S.dcn_frames = 0;
+
+    /* DSC and MST on this head */
+    test_dsc_pps();
+    test_dp_dsc(dev, dm, &dc, &own);
+    test_dp_mst(dev, dm, &dc, &own);
 
     /* the HDMI head again for the tests that follow */
     S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] = be_cntl;
