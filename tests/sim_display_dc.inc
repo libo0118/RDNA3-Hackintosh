@@ -1067,7 +1067,7 @@ static void test_dc_hwseq(rdna3_dev *dev)
 {
     rdna3_mode m;
     rdna3_dc_clocks a, b;
-    uint32_t k1, k2, i, save[10];
+    uint32_t k1, k2, i, save[10], status[8];
     static const uint32_t pg[8] = { regDOMAIN0_PG_CONFIG, regDOMAIN1_PG_CONFIG, regDOMAIN2_PG_CONFIG, regDOMAIN3_PG_CONFIG,
                                     regDOMAIN16_PG_CONFIG, regDOMAIN17_PG_CONFIG, regDOMAIN18_PG_CONFIG, regDOMAIN19_PG_CONFIG };
 
@@ -1103,6 +1103,7 @@ static void test_dc_hwseq(rdna3_dev *dev)
     /* dcn32_enable_power_gating_plane inside an IP request */
     for (i = 0; i < 8; i++) {
         save[i] = S.reg[DCN_B2 + pg[i]];
+        status[i] = S.reg[DCN_B2 + pg[i] + 1];   /* the model's PG status follows the gate */
         S.reg[DCN_B2 + pg[i]] = DOMAIN0_PG_CONFIG__DOMAIN_POWER_FORCEON_MASK | DOMAIN0_PG_CONFIG__DOMAIN_POWER_GATE_MASK;
     }
     save[8] = S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL];
@@ -1115,6 +1116,7 @@ static void test_dc_hwseq(rdna3_dev *dev)
     for (i = 0; i < 8; i++) {
         CHECK(S.reg[DCN_B2 + pg[i]] & DOMAIN0_PG_CONFIG__DOMAIN_POWER_FORCEON_MASK);
         S.reg[DCN_B2 + pg[i]] = save[i];
+        S.reg[DCN_B2 + pg[i] + 1] = status[i];
     }
     S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL] = save[8];
 
@@ -1123,6 +1125,19 @@ static void test_dc_hwseq(rdna3_dev *dev)
     dcn32_hubp_init(dev, 1);
     CHECK(S.reg[DCN_B2 + regHUBP1_HUBPREQ_DEBUG_DB] == 0x100);
     S.reg[DCN_B2 + regHUBP1_HUBPREQ_DEBUG_DB] = save[9];
+
+    /* hubp32_cursor_set_attributes' MALL selection: over 16 KiB */
+    save[9] = S.reg[DCN_B2 + regHUBP1_DCHUBP_MALL_CONFIG];
+    S.reg[DCN_B2 + regHUBP1_DCHUBP_MALL_CONFIG] = 1;   /* USE_MALL_SEL kept */
+    CHECK(dcn32_hubp32_cursor_mall(dev, 1, 256, 256, RD_DCN_CURSOR_MODE_PREMULT) == 1 &&
+          S.reg[DCN_B2 + regHUBP1_DCHUBP_MALL_CONFIG] == (1u | HUBP0_DCHUBP_MALL_CONFIG__USE_MALL_FOR_CURSOR_MASK));
+    CHECK(dcn32_hubp32_cursor_mall(dev, 1, 64, 64, RD_DCN_CURSOR_MODE_PREMULT) == 0 &&
+          S.reg[DCN_B2 + regHUBP1_DCHUBP_MALL_CONFIG] == 1u);
+    CHECK(dcn32_hubp32_cursor_mall(dev, 1, 33, 64, RD_DCN_CURSOR_MODE_PREMULT) == 0 &&   /* 64 x 64 x 4 */
+          dcn32_hubp32_cursor_mall(dev, 1, 128, 128, 0) == 0 &&                            /* mono: 8 KiB */
+          dcn32_hubp32_cursor_mall(dev, 1, 256, 256, 0) == 1 &&                            /* mono: 32 KiB */
+          dcn32_hubp32_cursor_mall(dev, 1, 32, 32, 4) == 0);                               /* 64 x 32 x 8 */
+    S.reg[DCN_B2 + regHUBP1_DCHUBP_MALL_CONFIG] = save[9];
 
     /* dcn32_are_clock_states_equal */
     memset(&a, 0, sizeof(a));

@@ -111,6 +111,30 @@ void dcn32_enable_power_gating_plane(rdna3_dev *d, int enable)
         W(d, regDC_IP_REQUEST_CNTL, 0);
 }
 
+#define HUBP_MALL_S (regHUBP1_DCHUBP_MALL_CONFIG - regHUBP0_DCHUBP_MALL_CONFIG)
+
+int dcn32_hubp32_cursor_mall(rdna3_dev *d, uint32_t pipe, uint32_t width, uint32_t height, uint32_t mode)
+{
+    /* round the cursor width up to the next multiple of 64 */
+    uint32_t cursor_size = ((width + 63) / 64) * 64 * height, a, v, use;
+    switch (mode) {
+    case 0:                 /* CURSOR_MODE_MONO */
+        cursor_size /= 2;
+        break;
+    case 1: case 2: case 3: /* 1BIT_AND, PRE_MULTIPLIED_ALPHA, UN_PRE_MULTIPLIED_ALPHA */
+        cursor_size *= 4;
+        break;
+    default:                /* 64-bit FP */
+        cursor_size *= 8;
+        break;
+    }
+    use = cursor_size > 16384 ? 1 : 0;
+    a = A(d, regHUBP0_DCHUBP_MALL_CONFIG) + HUBP_MALL_S * pipe;
+    v = rdna3_rreg(d, a);
+    rdna3_wreg(d, a, SET(v, HUBP0_DCHUBP_MALL_CONFIG, USE_MALL_FOR_CURSOR, use));
+    return (int)use;
+}
+
 void dcn32_hubp_init(rdna3_dev *d, uint32_t inst)
 {
     rdna3_wreg(d, A(d, regHUBP0_HUBPREQ_DEBUG_DB) + HUBP_DB_S * inst, 1u << 8);

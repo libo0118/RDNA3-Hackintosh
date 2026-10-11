@@ -59,6 +59,13 @@ uint32_t dcn32_calculate_dccg_k1_k2_values(uint32_t signal, const rdna3_mode *m,
  * POWER_FORCEON cleared (enable) or set, inside an IP request */
 void dcn32_enable_power_gating_plane(rdna3_dev *d, int enable);
 
+/* hubp32_cursor_set_attributes, the part DCN 3.2 adds to the hubp2 one
+ * (dcn32_cursor_set_image in hw/dcn32.c): DCHUBP_MALL_CONFIG.USE_MALL_FOR_CURSOR
+ * when the image is over 16 KiB (width rounded up to 64; mono / 2, the
+ * 32-bit colour modes x 4, 64-bit FP x 8). 'mode' = CURSOR_MODE_*. Returns
+ * the bit written. */
+int  dcn32_hubp32_cursor_mall(rdna3_dev *d, uint32_t pipe, uint32_t width, uint32_t height, uint32_t mode);
+
 /* hubp32_init: HUBPREQ_DEBUG_DB = 1 << 8 on HUBP 'inst' */
 void dcn32_hubp_init(rdna3_dev *d, uint32_t inst);
 

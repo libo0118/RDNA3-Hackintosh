@@ -541,7 +541,20 @@ functions to these steps).
 | hdmi20: "no signal" at 4K60, old mode back | scrambling not matched by the sink (`scrambler 0x00`), or the PHY PLL at 594 MHz | SCDC values in the log; `HDMICHARCLK` / PHY registers in the look; retry with a certified cable |
 | audio device appears but silent | not ported yet: the AFMT / azalia audio path is still off (only the audio info frame line is set) | expected |
 
+### Cursor through MALL (`cursormall`)
+
+`cursormall` = `9c` + `rdna3cursormall=1`. Pass: the pointer is drawn and
+moves on both monitors as in 9c, and the look has
+`HUBPn_DCHUBP_MALL_CONFIG` with bit 2 (USE_MALL_FOR_CURSOR) on the lit
+pipes. Then mark `cursormall` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| pointer garbled, flickering or missing only with the boot-arg | the MALL (Infinity Cache) does not serve display reads in this configuration (no MALL allocation from the PMFW / DCHUBBUB) | the look's `DCHUBBUB_ARB_MALL_CNTL`; keep the boot-arg off, report |
+| bit 2 not set | the framebuffer never set an image (software cursor: `rdna3cursor=0` or no VRAM) | fb log `hardware cursor: ...` |
+
 ### DC's sequence extras (`dcseq`)
+
 
 `dcseq` = `modeset2` + `rdna3dcseq=1`. Pass: the switches of
 `rdna3_modetest cycle` as in `modeset2` (pictures, no underflow, back to

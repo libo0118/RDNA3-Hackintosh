@@ -40,6 +40,7 @@ extern "C" {
 #include "dp_mst.h"
 #include "dcn32_gamma.h"
 #include "dcn32_otg.h"
+#include "dcn32_hwseq.h"
 }
 #include "rdna3k_abi.h"
 
@@ -1465,6 +1466,10 @@ IOReturn RDNA3Accel::displayCursor(RD3KDisplayCursor *c)
     IOLockLock(fDispLock);
     if (c->op == RD3K_CURSOR_OP_IMAGE) {
         r = dcn32_cursor_set_image(fDispDev, fDcn, c->head, fDispDev->fb_start + c->vramOffset, c->size);
+        /* rdna3cursormall=1 (step cursormall): hubp32_cursor_set_attributes'
+         * MALL selection on top (a 256 x 256 cursor reads through MALL) */
+        if (r == RDNA3_OK && rd3_arg("rdna3cursormall", 0))
+            dcn32_hubp32_cursor_mall(fDispDev, fDcn->head[c->head].pipe, c->size, c->size, RD_DCN_CURSOR_MODE_PREMULT);
         if (r == RDNA3_OK)
             displayStateSave(c->head);   /* D4 */
     }

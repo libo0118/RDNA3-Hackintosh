@@ -116,6 +116,8 @@ ITEM_STEPS = [
                 r"|dcn10_link_encoder_validate_(output_with_stream|dvi_output|hdmi_output|dp_output)"
                 r"|get_tmds_output_pixel_clock_100hz|dm_helpers_parse_edid_caps|apply_edid_quirks|edid_extract_panel_id"),
      ["hdmi"]),
+    # the cursor image through MALL (rdna3cursormall=1, step cursormall)
+    (re.compile(r"hubp32_cursor_set_attributes"), ["cursormall"]),
     # DC's sequence extras around a mode switch (rdna3dcseq=1, step dcseq)
     (re.compile(r"apply_symclk_on_tx_off_wa|dcn32_resync_fifo_dccg_dio|dccg32_trigger_dio_fifo_resync"), ["dcseq"]),
     # the hard-min status wait with DC's delay accounting (the DISPCLK raise of step modeset2)

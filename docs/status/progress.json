@@ -1,11 +1,11 @@
 {
  "amdgpu": {
   "works": 467,
-  "ported": 992,
+  "ported": 993,
   "total": 1594,
   "not_applicable": 377,
   "works_pct": 29.3,
-  "ported_pct": 62.2,
+  "ported_pct": 62.3,
   "groups": [
    {
     "name": "PSP 13",
@@ -1426,8 +1426,8 @@
      "modeset"
     ],
     "works": 41,
-    "ported": 63,
-    "todo": 59,
+    "ported": 64,
+    "todo": 58,
     "items": {
      "allocate_mst_payload": "ported",
      "apply_symclk_on_tx_off_wa": "ported",
@@ -1557,7 +1557,7 @@
      "get_pbn_per_slot": "ported",
      "hubbub3_force_pstate_change_control": "works",
      "hubbub3_init_dchub_sys_ctx": "works",
-     "hubp32_cursor_set_attributes": "todo",
+     "hubp32_cursor_set_attributes": "ported",
      "hubp32_init": "ported",
      "hubp32_phantom_hubp_post_enable": "todo",
      "hubp32_prepare_subvp_buffering": "todo",
