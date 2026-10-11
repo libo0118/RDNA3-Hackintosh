@@ -31,7 +31,7 @@ Legend: **card** = verified on the card (`docs/status/hw-verified.txt`),
 | Vulkan (RADV) | compute + transfer 8/8 (`rdna3_vktest`) | - | graphics pipeline (draw), images/formats, WSI (present), CTS subset |
 | Accelerator / WindowServer | desktop composited (CPU) into VRAM surfaces, flipped on head 0; two-head routing logged | - | screens proven on both heads (pictures since `944d983`), gates on by default, GPU blits, IOSurface <-> BO |
 | Metal | - | plugin + translator build in CI | everything on the card: device found, shader compile, compute, render, CAMetalLayer present, WindowServer on Metal |
-| Video (VCN 4.0) | - | - | decode/encode, VideoToolbox plugin (optional) |
+| Video (VCN 4.0) | - | VCN 4.0 + JPEG 4.0 rings, VIDEO_CAPS and CS behind `rdna3vcn=1` (`hw/vcn40.c`, step vcn, simulator only) | verified on the card; DPG power gating; suspend/resume; decode/encode from Mesa (RADV video / radeonsi VA); VideoToolbox plugin (optional) |
 | Packaging | OpenCore in the VM | `package/oc_install.sh` | bare metal guide, installer, release builds, Tahoe (26) layout |
 
 ## Work items

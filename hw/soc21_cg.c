@@ -4,7 +4,8 @@
  *
  * amdgpu_device_set_cg_state(GATE) walks every IP's set_clockgating_state;
  * for GC 11.0.3 soc21_common_early_init sets cg_flags = GFX (CGCG, CGLS,
- * MGCG, REPEATER_FGCG; done in gfx11.c), VCN/JPEG MGCG (no VCN here),
+ * MGCG, REPEATER_FGCG; done in gfx11.c), VCN/JPEG MGCG (hw/vcn40.c: the
+ * firmware gates VCN itself, JPEG_CGC_CTRL in jpeg40 start/stop),
  * HDP_SD, ATHUB_MGCG and ATHUB_LS. No MC (MMHUB), IH or BIF flags, so the
  * MMHUB 3.0, IH 6.0 and NBIO 4.3 clock-gating paths are no-ops on this card
  * and are not ported (tools/progress/not-applicable.txt).

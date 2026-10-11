@@ -2059,3 +2059,27 @@ out:
     smu13_pmctl_info(d, s, gates, &rp->info);
     return ret;
 }
+
+/* ---- VCN / JPEG power (declared in vcn40.h, used by its start/stop) ---- */
+
+/* Ported from smu_v13_0_set_vcn_enable: PowerUpVcn / PowerDownVcn for every
+ * instance that is not harvested, the instance in the upper half */
+int smu13_set_vcn_enable(rdna3_dev *d, uint32_t num_inst, uint32_t harvest_config, int enable)
+{
+    uint32_t i;
+    int ret = RDNA3_OK;
+    for (i = 0; i < num_inst; i++) {
+        if (harvest_config & (1u << i))
+            continue;
+        ret = smu13_send_msg(d, enable ? PPSMC_MSG_PowerUpVcn : PPSMC_MSG_PowerDownVcn, i << 16, NULL);
+        if (ret)
+            return ret;
+    }
+    return ret;
+}
+
+/* Ported from smu_v13_0_set_jpeg_enable */
+int smu13_set_jpeg_enable(rdna3_dev *d, int enable)
+{
+    return smu13_send_msg(d, enable ? PPSMC_MSG_PowerUpJpeg : PPSMC_MSG_PowerDownJpeg, 0, NULL);
+}

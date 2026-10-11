@@ -206,7 +206,14 @@ typedef struct rdna3_ib {
     uint64_t va;              /* GPU VA in the submitting file's VM */
     uint32_t length_dw;
     uint32_t flags;           /* AMDGPU_IB_FLAG_* */
+    /* a parse_cs ring (VCN_JPEG): the checked copy of the IB the engine
+     * must run instead of 'va' (amdgpu_cs_patch_ibs copies it into a
+     * kernel IB); valid during ops.submit only. NULL for other rings. */
+    const uint32_t *kdata;
 } rdna3_ib;
+
+/* VCN 4.0: two instances at most, one unified ring each */
+#define RD_VCN_MAX_INST 2
 
 /* ---- user queues (amdgpu_userq.c, amdgpu_userq_fence.c, mes_userqueue.c) ----
  * A user queue is a ring in the client's VM that the MES scheduler runs
@@ -409,6 +416,12 @@ typedef struct rdna3_drm_device {
     rdna3_userq_fence_drv *fence_drv;
     struct { uint32_t owner, ref; uint64_t seq; } *uq_deferred;
     uint32_t next_fence_ctx;
+    /* VCN 4.0 / JPEG 4.0 (rdna3_drm_device_set_vcn): vcn_num_inst 0 = the
+     * video block is not up and the video IPs answer as without it */
+    uint32_t vcn_ip_version;      /* UVD_HWIP: AMD_IP_VERSION(4, 0, 0) */
+    uint32_t vcn_num_inst, vcn_harvest;
+    uint32_t vcn_inst_ready;      /* instances whose unified ring runs (hw rings of VCN_ENC) */
+    uint32_t jpeg_ready;
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {
@@ -435,6 +448,11 @@ typedef struct rdna3_drm_file {
      * zalloc'ed with the first one) and whether seq64 is in its VM */
     rdna3_userq *userqs;
     uint32_t seq64_mapped;
+    /* the VCN_ENC entity of each context (amdgpu_ctx_init_entity pins it
+     * to one instance): instance + 1, 0 = none yet; and its job count
+     * (entity->fence_seq, vcn_v4_0_limit_sched) */
+    uint8_t  vcn_entity[RD_MAX_CTX];
+    uint32_t vcn_entity_jobs[RD_MAX_CTX];
 } rdna3_drm_file;
 
 /* Fill dev_info and sizes for a Navi 3x from discovery + PCI identity. */
@@ -478,6 +496,17 @@ void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4
  * the doorbell BAR's length; doorbell BOs come from it after the kernel's
  * RD_DOORBELL_KERNEL_SIZE. ip_mask 0 turns user queues off for new queues. */
 void rdna3_drm_device_set_userq(rdna3_drm_device *dev, uint32_t ip_mask, uint64_t doorbell_size);
+
+/* the VCN 4.0 block is up (kext: rdna3vcn=1): 'num_inst' instances
+ * (harvest_config: AMDGPU_VCN_HARVEST_VCNn), the unified rings of the
+ * instances in 'inst_ready' run, the JPEG ring if 'jpeg_ready'. HW_IP_INFO /
+ * HW_IP_COUNT answer for VCN_DEC / VCN_ENC / VCN_JPEG as amdgpu_kms.c does,
+ * VIDEO_CAPS from soc21_query_video_codecs, CS reaches ops.submit for
+ * VCN_ENC (ring = the VCN instance the context's entity runs on) and
+ * VCN_JPEG (rdna3_ib.kdata set). Not called: the answers stay as they were
+ * without the video block. */
+void rdna3_drm_device_set_vcn(rdna3_drm_device *dev, uint32_t ip_version, uint32_t num_inst,
+                              uint32_t harvest_config, uint32_t inst_ready, int jpeg_ready);
 
 /* the priority a context's jobs run at: its override when DRM_AMDGPU_SCHED
  * set one, else the one it was created with (amdgpu_ctx_priority_override's

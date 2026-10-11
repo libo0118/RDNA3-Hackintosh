@@ -426,6 +426,15 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             fi ;;
         esac
     fi
+    # video (step vcn): HW_IP_INFO / VIDEO_CAPS and a job on each video ring
+    case " $args " in
+    *" rdna3vcn=1 "*)
+        if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
+            hdr "rdna3_drminfo --vcn-test"
+            with_limit 60 "$D/bin/rdna3_drminfo" --vcn-test 2>&1
+            done_ $?
+        fi ;;
+    esac
     # Vulkan: RADV (prepare --radv) straight through its ICD entry points,
     # no loader; libdrm_xnu talks to RDNA3Accel's user client
     if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_vktest" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then

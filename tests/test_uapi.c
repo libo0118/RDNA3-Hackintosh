@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "rdna3_drm.h"
+#include "amd_fw.h"
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { \
@@ -1241,6 +1242,65 @@ int main(void)
 
     rdna3_drm_file_close(f);
     CHECK(live_bos == 0 && vm_live == 0);
+
+    /* the video IPs (VCN 4.0 / JPEG 4.0): without the block (rdna3vcn=0)
+     * the answers stay what they were; once the kext reports it up they
+     * follow amdgpu_kms.c (the CS side runs in sim_navi32) */
+    {
+        static rdna3_drm_device vd;
+        static rdna3_drm_file vf;
+        struct drm_amdgpu_info in;
+        struct drm_amdgpu_info_hw_ip ip;
+        struct drm_amdgpu_info_video_caps caps;
+        uint32_t n, t;
+        rdna3_drm_device_init(&vd, &ops, &disc, 0x747E, 0xC8, 0x0, 16ull << 30, 256ull << 20, 8ull << 30);
+        CHECK(rdna3_drm_file_open(&vd, &vf) == 0);
+        memset(&in, 0, sizeof(in));
+        for (t = AMDGPU_HW_IP_VCN_DEC; t <= AMDGPU_HW_IP_VCN_JPEG; t++) {
+            in.query = AMDGPU_INFO_HW_IP_INFO;
+            in.query_hw_ip.type = t;
+            in.return_pointer = (uint64_t)(uintptr_t)&ip;
+            in.return_size = sizeof(ip);
+            memset(&ip, 0xff, sizeof(ip));
+            CHECK(IOCTL(&vf, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && ip.available_rings == 0 &&
+                  ip.hw_ip_version_major == 0 && ip.ib_start_alignment == 32);
+            in.query = AMDGPU_INFO_HW_IP_COUNT;
+            in.return_pointer = (uint64_t)(uintptr_t)&n;
+            in.return_size = 4;
+            CHECK(IOCTL(&vf, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && n == 0);
+        }
+        in.query = AMDGPU_INFO_VIDEO_CAPS;
+        in.video_cap.type = AMDGPU_INFO_VIDEO_CAPS_ENCODE;
+        in.return_pointer = (uint64_t)(uintptr_t)&caps;
+        in.return_size = sizeof(caps);
+        CHECK(IOCTL(&vf, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 &&
+              !caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC].valid);
+        CHECK(vd.accel_working == 0);
+        rdna3_drm_device_set_vcn(&vd, AMD_IP_VERSION(4, 0, 0), 2, 0, 1, 0);   /* VCN0 up, JPEG not */
+        CHECK(IOCTL(&vf, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 &&
+              caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_AV1].valid &&
+              caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_HEVC].max_height == 4352);
+        in.query = AMDGPU_INFO_HW_IP_INFO;
+        in.query_hw_ip.type = AMDGPU_HW_IP_VCN_ENC;
+        in.return_pointer = (uint64_t)(uintptr_t)&ip;
+        in.return_size = sizeof(ip);
+        CHECK(IOCTL(&vf, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && ip.available_rings == 1 &&
+              ip.hw_ip_version_major == 4 && ip.ip_discovery_version == 0x040000 && ip.ib_size_alignment == 4);
+        in.query_hw_ip.type = AMDGPU_HW_IP_VCN_JPEG;
+        CHECK(IOCTL(&vf, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && ip.available_rings == 0 &&
+              ip.hw_ip_version_major == 4 && ip.ib_size_alignment == 64);
+        in.query = AMDGPU_INFO_HW_IP_COUNT;
+        in.return_pointer = (uint64_t)(uintptr_t)&n;
+        in.return_size = 4;
+        in.query_hw_ip.type = AMDGPU_HW_IP_VCN_DEC;
+        CHECK(IOCTL(&vf, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && n == 2);
+        in.query_hw_ip.type = AMDGPU_HW_IP_VCN_JPEG;
+        CHECK(IOCTL(&vf, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && n == 1);
+        CHECK(vd.accel_working == 1 && vd.ready_rings[AMDGPU_HW_IP_VCN_ENC] == 1 &&
+              vd.ready_rings[AMDGPU_HW_IP_VCN_JPEG] == 0);
+        rdna3_drm_file_close(&vf);
+        rdna3_drm_device_fini(&vd);
+    }
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);
         return 1;

@@ -107,6 +107,10 @@ public:
     /* the MES runs and rdna3userq=1: user queues for the IPs of 'ipMask'
      * (1 << AMDGPU_HW_IP_*), doorbell BOs from BAR2 */
     void  drmUserqReady(uint32_t ipMask, uint64_t doorbellSize);
+    /* the VCN 4.0 block is up (rdna3vcn=1): the video IPs' INFO answers and
+     * CS to VCN_ENC (instances in 'instReady') and VCN_JPEG */
+    void  drmVcnReady(uint32_t ipVersion, uint32_t numInst, uint32_t harvest, uint32_t instReady,
+                      bool jpegReady);
     static uint64_t drmGpuClock(void *ctx);
     void  drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t minMclkKhz, uint32_t maxMclkKhz);
     RDNA3Bringup *bringup() const { return fBringup; }

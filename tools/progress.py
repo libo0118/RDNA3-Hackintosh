@@ -53,6 +53,7 @@ AMDGPU_STEPS = {
     "Display: DP link": ["dplink"],
     "Display: hotplug": ["hotplug"],
     "Display: color": ["gamma"],
+    "VCN / JPEG video": ["vcn"],
 }
 UAPI_STEPS = {
     "amdgpu ioctls": ["7", "8"], "DRM core ioctls": ["7", "8"], "INFO queries": ["7"],
@@ -62,6 +63,12 @@ UAPI_STEPS = {
 # (regex over the item name -> steps) before they count as working
 ITEM_STEPS = [
     (re.compile(r"DRM_AMDGPU_USERQ(_SIGNAL|_WAIT)?|AMDGPU_INFO_UQ_FW_AREAS"), ["userq"]),
+    # the video block's parts of verified groups (SMU power messages, the
+    # NBIO doorbell range, the codec tables, the generic ring helpers the
+    # VCN / JPEG rings use)
+    (re.compile(r"smu_v13_0_set_(vcn|jpeg)_enable|nbio_v4_3_vcn_doorbell_range|soc21_query_video_codecs"
+                r"|amdgpu_fence_count_emitted|amdgpu_ib_ring_tests|amdgpu_ring_commit"
+                r"|amdgpu_ring_emit_reg_write_reg_wait_helper|amdgpu_ring_insert_nop"), ["vcn"]),
     # amdgpu enables CP gfx shadowing only on SR-IOV VFs: no step can run it
     (re.compile(r"AMDGPU_CHUNK_ID_CP_GFX_SHADOW|gfx_v11_0_ring_emit_(gfx_shadow|init_cond_exec)"
                 r"|amdgpu_ring_patch_cond_exec|gfx_v11_0_get_gfx_shadow_info"), ["gfxshadow"]),

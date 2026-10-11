@@ -480,6 +480,31 @@ amd_fw_status amd_ucode_plan_build(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT],
     return AMD_FW_OK;
 }
 
+/* Ported from amdgpu_vcn_setup_ucode (PSP load): AMDGPU_UCODE_ID_VCN + i
+ * for every instance, the same image (vcn_4_0_0.bin serves both on VCN
+ * 4.0.0). amd_ucode_plan_build has instance 0 already; this adds VCN1. */
+amd_fw_status amd_vcn_setup_ucode(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT], uint32_t num_vcn_inst,
+                                  amd_ucode_plan *plan)
+{
+    builder bd;
+    const amd_ucode *v0;
+    if (!blobs || !plan)
+        return AMD_FW_E_ARGS;
+    v0 = amd_ucode_plan_find(plan, AMD_UCODE_VCN);
+    if (!v0)
+        return AMD_FW_E_MISSING;
+    if (num_vcn_inst < 2 || amd_ucode_plan_find(plan, AMD_UCODE_VCN1))
+        return AMD_FW_OK;   /* currently only support 2 FW instances */
+    bd.plan = plan;
+    bd.blobs = blobs;
+    bd.err = AMD_FW_OK;
+    add(&bd, AMD_UCODE_VCN1, GFX_FW_TYPE_VCN1, v0->blob, v0->offset, v0->size, "VCN1");
+    if (bd.err != AMD_FW_OK)
+        return bd.err;
+    sort_by_id(plan);
+    return AMD_FW_OK;
+}
+
 const amd_ucode *amd_ucode_plan_find(const amd_ucode_plan *plan, uint16_t ucode_id)
 {
     uint32_t i;

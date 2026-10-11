@@ -47,6 +47,7 @@ extern "C" {
 #include "rdna3_drm.h"
 #include "amd_fw.h"
 #include "atom.h"
+#include "vcn40.h"
 }
 
 class RDNA3Accel;
@@ -211,6 +212,18 @@ private:
     static void      gfxOffTick(void *owner, void *);
     void             cgStart(const char *why);
     void             mesStart(const char *why);
+    /* VCN 4.0 + JPEG 4.0 (rdna3vcn=1, off by default): the video rings for
+     * VCN_ENC / VCN_JPEG CS; powered on demand, gated 1 s after the last
+     * job (amdgpu_vcn_idle_work_handler) from fVcnIdleCall under the DRM lock */
+    bool             fVcnWanted = false, fVcnStop = false;
+    rdna3_vcn       *fVcn = nullptr;
+    uint32_t         fVcnHangs = 0;
+    struct thread_call *fVcnIdleCall = nullptr;
+    volatile uint64_t fIrqVcn = 0, fIrqJpeg = 0;
+    void             vcnStart();
+    void             vcnIdleSchedule();
+    int              vcnHang(uint32_t ip, uint32_t ring, uint64_t seq);
+    static void      vcnIdleTick(void *owner, void *);
     IOMemoryMap     *fDoorbell = nullptr;   /* BAR2 */
     /* power management (level 5, rdna3pm) */
     uint32_t         fPmMode = 1;
@@ -278,10 +291,10 @@ private:
      * 16 MiB transfer window (amdgpu_ttm_alloc_gart for uf_bo). A slot is
      * remapped only once its last job's fence passed. */
     static const uint32_t kUfSlots = 64;
-    struct UfSlot { uint64_t pa; uint64_t seq; uint32_t ip; bool used; };
+    struct UfSlot { uint64_t pa; uint64_t seq; uint32_t ip, ring; bool used; };
     UfSlot        fUfSlot[kUfSlots] = {};
     int           ufAddr(const rdna3_cs_job *job, uint64_t *mc, int *slot);
-    int           submitRing(RDNA3Vm *v, uint32_t ip, const rdna3_ib *ibs, uint32_t n,
+    int           submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
                              const rdna3_cs_job *job, uint64_t ufMc, uint64_t *seq);
     /* GDS / GWS / OA partition each VMID has (amdgpu_vmid gds_base...):
      * a job whose partition differs switches it from the ring. Unknown

@@ -48,6 +48,10 @@ typedef struct rdna3_psp {
     uint32_t last_resp_status;
     uint32_t last_tmr_size_from_toc;
     int      ring_created;
+    /* psp_cmd_submit_buf: ucode->tmr_mc_addr_lo/hi, where LOAD_IP_FW put
+     * each image in the TMR (resp.fw_addr), by AMDGPU_UCODE_ID_* (the VCN
+     * firmware is started from there) */
+    uint64_t ucode_tmr_mc[64];
 } rdna3_psp;
 
 /* Allocates PSP buffers in VRAM and parses the SOS container. */

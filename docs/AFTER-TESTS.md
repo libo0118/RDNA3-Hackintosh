@@ -264,6 +264,28 @@ from the firmware (`dcn_3_2_0_dmcub.bin`).
 | enter ok, `BACO exit -> -62` (timeout) | the PMFW does not answer while the chip is off, or the exit needs the PCI config space saved / restored around it | reboot; next try: save/restore config space as in `resetIfPspStuck` |
 | exit ok, the GPU does not come back (`GPU reset ... FAILED` style lines, `PSP bootloader did not come back`) | the re-init after BACO differs from the one after a mode-1 reset | compare the `PSP:` lines with a mode-1 recovery (step hanggfx) |
 
+### Step vcn (`rdna3vcn=1`): VCN 4.0 + JPEG 4.0
+
+Inputs: `RDNA3,VCN`, `RDNA3,VCNResult`, `RDNA3,VCN0IBTest`, `RDNA3,VCN1IBTest`,
+`RDNA3,JPEGResult`, `RDNA3,VCNTmrMC0/1`, `RDNA3,VCNFirmware`, `RDNA3,VCNGated`,
+`RDNA3,IRQFenceVCN/JPEG`, the `VCN` / `JPEG` log lines and the report's
+`rdna3_drminfo --vcn-test` section. Linux on the card (dmesg): two instances,
+`Found VCN firmware Version ENC: 1.24 DEC: 9 VEP: 0 Revision: 34`, rings
+`vcn_unified_0`, `vcn_unified_1`, `jpeg_dec`.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| step 4 now fails at `LOAD_IP_FW VCN1` | the PSP refuses the second instance's image (`amd_vcn_setup_ucode`, GFX_FW_TYPE_VCN1) | compare the ucode list with `amdgpu_vcn_setup_ucode` / `psp_get_fw_type`; send the PSP lines |
+| `VCN: the PSP did not load vcn_4_0_0.bin for every instance`, `RDNA3,VCNTmrMC1 = 0` | the LOAD_IP_FW answer carried no `fw_addr` (the TMR address cache window 0 needs) | `psp13_load_ip_fw` / `ucode_tmr_mc`; amdgpu takes it from `resp.fw_addr_lo/hi` |
+| `VCN[n] is not responding, giving up!!!` (UVD_STATUS in the line), `RDNA3,VCNResult = -62` | the VCPU did not boot: PMFW did not power the instance (`PowerUpVcn` failed in the log), PGFSM status never reached the power-on pattern, or cache window 0 is not on the firmware | `RDNA3,VCNTmrMC0/1`; `smu13_set_vcn_enable`; `vcn40_disable_static_power_gating` / `vcn40_mc_resume` against `vcn_v4_0.c`; amdgpu runs the DPG path on this card (`vcn_v4_0_start_dpg_mode`, not ported yet) - if the static path never boots, that is the next port |
+| ring test timeout (`VCN0: ring test timeout (rptr ...)`) | the VCPU booted but does not fetch: doorbell not routed (S2A entry 4/5, `nbio43_vcn_doorbell_range`), `VCN_RB1_DB_CTRL`, or the fw_shared unified-queue flags | boot with `rdna3doorbell=0` (the ring then uses `UVD_RB_WPTR`) to tell doorbell from ring setup |
+| `encode IB test failed` / `decode IB test failed`, ring test fine | the IB's checksum / engine-info packages, or the message buffer address (VMID 0 MC address in VRAM) | `amdgpu_vcn_unified_ring_ib_header` vs `hw/vcn40.c`; the model in `tests/sim_navi32.c` checks the checksum |
+| `JPEG: ring test timeout (pitch 0x...)` | JPEG power (`PowerUpJpeg`, UVDJ PGFSM), JRBC ring registers, or VCN_JPEG_DB_CTRL | `jpeg40_start` vs `jpeg_v4_0_start` |
+| `--vcn-test`: `AMDGPU_CS failed` | the UAPI refused the IB (`amdgpu_cs_patch_ibs`: not inside one mapping; JPEG: a packet outside `jpeg_v2_dec_ring_parse_cs`'s set) | `uapi/rdna3_drm.c` `cs_patch_ibs` |
+| `--vcn-test`: fence did NOT signal | the job did not run in the client's VMID: MMHUB page tables (`RDNA3,LastFaultVMID`, an MMHUB fault in the log), or the trap / fence | `RDNA3,IRQFenceVCN` counts traps; a hang gates the block (`RDNA3,VCNHangs`) |
+| `RDNA3,VCNGated` stays 0 | the idle work never ran or found work pending | `vcnIdleTick`; jobs still emitted (`fence_count_emitted`) |
+| DMA/GFX tests fail only with `rdna3vcn=1` | the VCN bring-up broke a shared block (MMHUB, IH, doorbells) | send the report; run step 8 again without it |
+
 ### Hotplug (any step from 6b with `rdna3msi=1`)
 
 Unplug and plug a monitor cable while macOS runs: the log shows `HPD: hotplug interrupts enabled`, then `display: HPDn disconnected` / `connected` and `hotplug on pins ...`; `RDNA3,HotplugEvents` counts them.

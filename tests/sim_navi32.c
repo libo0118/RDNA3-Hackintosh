@@ -81,6 +81,8 @@
 #include "gen/thm_13_0_2_fan.h"
 #include "psp_gfx_if.h"
 #include "amdgpu_ucode_hdr.h"
+#include "vcn40.h"
+#include "gen/vcn_4_0_0.h"
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { \
@@ -114,6 +116,10 @@ static int failures;
 #define DCN_B2     0x34C0u   /* DCN segment 2 (dcn_3_2_1 DCN_BASE__INST0_SEG2) */
 #define DCN_B3     0x9000u   /* DCN segment 3: MPC */
 #define DCN_B1     0xC0u     /* DCN segment 1: DCCG */
+/* VCN 4.0 register segment 1 of instance i (discovery on the card) */
+#define VCN_B1(i)  ((i) ? 0x12000u : 0x7E00u)
+#define VCNR(i, reg) (VCN_B1(i) + (reg))
+#define VCN_TMR_FW_OFF(i) (0x100000ull * (1 + (i)))
 #define HUBP(reg, n) (DCN_B2 + reg + (regHUBP1_DCHUBP_CNTL - regHUBP0_DCHUBP_CNTL) * (n))
 #define OTG(reg, n)  (DCN_B2 + reg + (regOTG1_OTG_CONTROL - regOTG0_OTG_CONTROL) * (n))
 
@@ -335,6 +341,20 @@ typedef struct sim {
     uint8_t  sysmem[1u << 20];       /* system RAM at SYS_PHYS, reached through GART */
     unsigned gart_unmapped;      /* INACTIVE_WGPS per SE/SA (CC_GC_SHADER_ARRAY_CONFIG) */
     unsigned sdma_resets, sdma_resets_unfrozen;
+    /* VCN 4.0 / JPEG 4.0 (see the model above sim_wr) */
+    struct {
+        int smu_on[2], jpeg_smu_on;
+        unsigned vcn_up_msgs, vcn_down_msgs, jpeg_up_msgs, jpeg_down_msgs, regs_while_off;
+        uint64_t tmr_fw[2];          /* where LOAD_IP_FW VCN / VCN1 put the image */
+        int booted[2];
+        unsigned boots, bad_boots, rb_enables, bad_fw_shared, dbs, db_unrouted;
+        uint32_t rptr[2];
+        unsigned cmds, ibs, bad, fences, traps, ends, reg_writes, reg_waits, ib_faults;
+        unsigned enc_init, enc_close, dec_create, dec_destroy, checksum_bad;
+        uint32_t last_ib_inst, last_ib_vmid;
+        uint32_t jregs[0x200], jext, jrptr, jpeg_ib_vmid, jpeg_vmid;
+        unsigned jext_writes, jpeg_cmds, jpeg_ibs, jpeg_fences, jpeg_traps, jpeg_bad, jpeg_ib_faults;
+    } vcn;
 } sim;
 
 static sim S;
@@ -1114,6 +1134,17 @@ static void smu_msg(uint32_t v)
     case PPSMC_MSG_DisallowGfxOff:  S.smu.gfxoff = 0; S.smu.gfxoff_msgs++; break;
     case PPSMC_MSG_NotifyPowerSource: break;
     case PPSMC_MSG_PrepareMp1ForUnload: S.smu.unload = 1; break;
+    case PPSMC_MSG_PowerUpVcn:
+    case PPSMC_MSG_PowerDownVcn:
+        if ((arg >> 16) > 1 || (arg & 0xffff)) { resp = PPSMC_Result_Failed; break; }
+        S.vcn.smu_on[arg >> 16] = v == PPSMC_MSG_PowerUpVcn;
+        if (v == PPSMC_MSG_PowerUpVcn) S.vcn.vcn_up_msgs++; else S.vcn.vcn_down_msgs++;
+        break;
+    case PPSMC_MSG_PowerUpJpeg:
+    case PPSMC_MSG_PowerDownJpeg:
+        S.vcn.jpeg_smu_on = v == PPSMC_MSG_PowerUpJpeg;
+        if (v == PPSMC_MSG_PowerUpJpeg) S.vcn.jpeg_up_msgs++; else S.vcn.jpeg_down_msgs++;
+        break;
     default: resp = PPSMC_Result_UnknownCmd;
     }
     *R(MP1(90)) = resp;
@@ -2438,6 +2469,13 @@ static void psp_exec(uint64_t cmd_mc, uint64_t fence_mc, uint32_t fence_val)
             cmd->resp.status = 0xFFFF0002;
         if (S.nipfw < 64)
             S.ip_fw_types[S.nipfw++] = t;
+        if (t == GFX_FW_TYPE_VCN || t == GFX_FW_TYPE_VCN1) {
+            /* psp: the image now lives in the TMR, answered in fw_addr */
+            uint32_t vi = t == GFX_FW_TYPE_VCN1;
+            S.vcn.tmr_fw[vi] = S.tmr_mc + VCN_TMR_FW_OFF(vi);
+            cmd->resp.fw_addr_lo = (uint32_t)S.vcn.tmr_fw[vi];
+            cmd->resp.fw_addr_hi = (uint32_t)(S.vcn.tmr_fw[vi] >> 32);
+        }
         if (t == GFX_FW_TYPE_DMUB) {
             /* the PSP puts the image behind CW0 and opens the window */
             S.dmub.psp_loaded = 1;
@@ -2570,6 +2608,422 @@ static uint32_t ogam_crc(uint32_t n)
     return h;
 }
 
+/* ---- VCN 4.0 (two instances) and JPEG 4.0 ----
+ * Registers at the card's discovery bases (segment 1: 0x7E00 / 0x12000).
+ * The PMFW powers an instance up and down (PowerUpVcn / PowerDownVcn,
+ * PowerUpJpeg / PowerDownJpeg); writes to an instance's VCPU / ring
+ * registers while it is powered down are counted as errors. UVD_PGFSM_CONFIG
+ * moves the tiles' UVD_PGFSM_STATUS (1: on -> 0, 2: off -> 2). The VCPU
+ * boots (UVD_STATUS bit 1) when BLK_RST is released with the clock on and
+ * cache window 0 on the image the PSP placed in the TMR. Enabling RB1 checks
+ * the fw_shared page behind the non-cached window (unified queue flag,
+ * sq.is_enabled, the ring-reset handshake). The unified ring runs on the
+ * doorbell (VCN_RB1_DB_CTRL) or UVD_RB_WPTR: IB (in VMID 0 by MC address,
+ * other VMIDs through the MMHUB page tables), FENCE (32-bit write), TRAP
+ * (IV client VCN / VCN1, src 119), END, NOP, REG_WRITE / REG_WAIT. IBs are
+ * unified-queue packages: the single-queue checksum is verified, engine
+ * info names encode or decode; encode session init / close and decode
+ * create / destroy messages (through the decode buffer's message address)
+ * are counted. The JRBC runs PACKETJ pairs: internal register writes
+ * (GPCOM_CMD 8 writes GPCOM_DATA0 to the RB_MEM_WR address, the pitch
+ * register reaches UVD_JPEG_PITCH), TYPE2 runs the IB (in the IB VMID),
+ * TYPE7 raises the JPEG decode IV (src 153). */
+
+static uint8_t *mm_vm_ptr(uint32_t vmid, uint64_t va, uint64_t len)
+{
+    static const uint32_t shift[4] = { 39, 30, 21, 12 };
+    uint32_t dist = regMMVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 - regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32;
+    uint64_t e;
+    if (!vmid)
+        return mc_ptr(va, len);
+    e = S.reg[MM_BASE0 + regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 + dist * vmid] |
+        ((uint64_t)S.reg[MM_BASE0 + regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32 + dist * vmid] << 32);
+    va &= 0x0000FFFFFFFFFFFFull;
+    if ((va & 4095) + len > 4096)
+        return NULL;
+    for (int l = 0; l < 4; l++) {
+        uint64_t t = e & 0x0000FFFFFFFFF000ull;
+        if (!(e & 1) || t + 4096 > BAR_LEN)
+            return NULL;
+        memcpy(&e, S.vram + t + 8 * ((va >> shift[l]) & 511), 8);
+    }
+    if (!(e & 1) || (e & 0x0000FFFFFFFFF000ull) + 4096 > BAR_LEN)
+        return NULL;
+    return S.vram + (e & 0x0000FFFFFFFFF000ull) + (va & 4095);
+}
+
+static int vcn_rd32(uint32_t vmid, uint64_t va, uint32_t *v)
+{
+    uint8_t *p = mm_vm_ptr(vmid, va, 4);
+    if (!p)
+        return -1;
+    memcpy(v, p, 4);
+    return 0;
+}
+
+/* the instance of a VCN register, -1 for none */
+static int vcn_inst_of(uint32_t dw, uint32_t *reg)
+{
+    for (int i = 0; i < 2; i++)
+        if (dw >= VCN_B1(i) && dw < VCN_B1(i) + 0x800) {
+            *reg = dw - VCN_B1(i);
+            return i;
+        }
+    return -1;
+}
+
+static void vcn_run_ib(uint32_t inst, uint32_t vmid, uint64_t va, uint32_t ndw)
+{
+    uint32_t i = 0, sz, id, engine = 0, w[8];
+    S.vcn.ibs++;
+    while (i + 1 < ndw) {
+        if (vcn_rd32(vmid, va + 4ull * i, &sz) || vcn_rd32(vmid, va + 4ull * (i + 1), &id)) {
+            S.vcn.ib_faults++;
+            return;
+        }
+        if (sz < 8 || (sz & 3))
+            break;
+        if (id == 0x30000002) {   /* single queue checksum over the packages that follow */
+            uint32_t sum = 0, want, n, k, x;
+            if (vcn_rd32(vmid, va + 4ull * (i + 2), &want) || vcn_rd32(vmid, va + 4ull * (i + 3), &n)) {
+                S.vcn.ib_faults++;
+                return;
+            }
+            for (k = 0; k < n; k++) {
+                if (vcn_rd32(vmid, va + 4ull * (i + 4 + k), &x)) {
+                    S.vcn.ib_faults++;
+                    return;
+                }
+                sum += x;
+            }
+            if (sum != want)
+                S.vcn.checksum_bad++;
+        } else if (id == 0x30000001) {   /* engine info */
+            if (vcn_rd32(vmid, va + 4ull * (i + 2), &engine)) {
+                S.vcn.ib_faults++;
+                return;
+            }
+        }
+        if (engine == 2 && sz == 8) {   /* an encode op package */
+            if (id == 0x08000001) S.vcn.enc_init++;
+            if (id == 0x08000002) S.vcn.enc_close++;
+        }
+        if (engine == 3 && id == 0x00000001) {   /* the decode buffer: a message */
+            uint32_t flag, hi, lo, k;
+            uint64_t msg;
+            if (vcn_rd32(vmid, va + 4ull * (i + 2), &flag) || vcn_rd32(vmid, va + 4ull * (i + 3), &hi) ||
+                vcn_rd32(vmid, va + 4ull * (i + 4), &lo)) {
+                S.vcn.ib_faults++;
+                return;
+            }
+            msg = ((uint64_t)hi << 32) | lo;
+            if (flag & 1) {
+                for (k = 0; k < 8; k++)
+                    if (vcn_rd32(vmid, msg + 4ull * k, &w[k])) {
+                        S.vcn.ib_faults++;
+                        return;
+                    }
+                if (w[0] == 0x28 && w[3] == 0) S.vcn.dec_create++;
+                if (w[0] == 0x28 && w[3] == 2) S.vcn.dec_destroy++;
+            }
+        }
+        i += sz / 4;
+    }
+    S.vcn.last_ib_inst = inst;
+    S.vcn.last_ib_vmid = vmid;
+}
+
+static void vcn_run(uint32_t inst, uint32_t wptr)
+{
+    uint64_t base = S.reg[VCNR(inst, regUVD_RB_BASE_LO)] | ((uint64_t)S.reg[VCNR(inst, regUVD_RB_BASE_HI)] << 32);
+    uint32_t size = S.reg[VCNR(inst, regUVD_RB_SIZE)], mask, *ring, guard = 0;
+    if (!S.vcn.booted[inst] || !(S.reg[VCNR(inst, regVCN_RB_ENABLE)] & VCN_RB_ENABLE__RB1_EN_MASK) ||
+        !size || (size & (size - 1)) || !(ring = (uint32_t *)mc_ptr(base, 4ull * size))) {
+        S.vcn.bad++;
+        return;
+    }
+    mask = size - 1;
+    wptr &= mask;
+#define VPK(k) ring[(S.vcn.rptr[inst] + (k)) & mask]
+    while ((S.vcn.rptr[inst] & mask) != wptr && guard++ < 100000) {
+        uint32_t cmd = VPK(0), n = 1;
+        S.vcn.cmds++;
+        switch (cmd) {
+        case VCN_ENC_CMD_NO_OP: break;
+        case VCN_ENC_CMD_END:   S.vcn.ends++; break;
+        case VCN_ENC_CMD_IB:
+            vcn_run_ib(inst, VPK(1), VPK(2) | ((uint64_t)VPK(3) << 32), VPK(4));
+            n = 5;
+            break;
+        case VCN_ENC_CMD_FENCE: {
+            uint8_t *p = mc_ptr(VPK(1) | ((uint64_t)VPK(2) << 32), 4);
+            uint32_t seq = VPK(3);
+            if (p) memcpy(p, &seq, 4); else S.vcn.bad++;
+            S.vcn.fences++;
+            n = 4;
+            break;
+        }
+        case VCN_ENC_CMD_TRAP:
+            S.vcn.traps++;
+            ih_push(inst ? RD_IH_CLIENTID_VCN1 : RD_IH_CLIENTID_VCN, VCN_4_0__SRCID__UVD_ENC_GENERAL_PURPOSE, 0);
+            break;
+        case VCN_ENC_CMD_REG_WRITE: S.vcn.reg_writes++; n = 3; break;
+        case VCN_ENC_CMD_REG_WAIT:  S.vcn.reg_waits++; n = 4; break;
+        default: S.vcn.bad++; break;
+        }
+        S.vcn.rptr[inst] = (S.vcn.rptr[inst] + n) & mask;
+    }
+#undef VPK
+    S.reg[VCNR(inst, regUVD_RB_RPTR)] = S.vcn.rptr[inst];
+}
+
+static void jpeg_exec(const uint32_t *pk, uint32_t ndw, uint32_t vmid_ib_unused, int in_ib);
+
+static void jpeg_ib(void)
+{
+    uint64_t va = S.vcn.jregs[mmUVD_LMI_JRBC_IB_64BIT_BAR_LOW_INTERNAL_OFFSET - 0x4000] |
+                  ((uint64_t)S.vcn.jregs[mmUVD_LMI_JRBC_IB_64BIT_BAR_HIGH_INTERNAL_OFFSET - 0x4000] << 32);
+    uint32_t n = S.vcn.jregs[mmUVD_JRBC_IB_SIZE_INTERNAL_OFFSET - 0x4000];
+    uint32_t vmid = S.vcn.jregs[mmUVD_LMI_JRBC_IB_VMID_INTERNAL_OFFSET - 0x4000] & 0xf, buf[512], k;
+    S.vcn.jpeg_ibs++;
+    S.vcn.jpeg_ib_vmid = vmid;
+    S.vcn.jpeg_vmid = S.vcn.jregs[mmUVD_LMI_JPEG_VMID_INTERNAL_OFFSET - 0x4000] & 0xf;
+    if (n > 512) {
+        S.vcn.jpeg_bad++;
+        return;
+    }
+    for (k = 0; k < n; k++)
+        if (vcn_rd32(vmid, va + 4ull * k, &buf[k])) {
+            S.vcn.jpeg_ib_faults++;
+            return;
+        }
+    jpeg_exec(buf, n, vmid, 1);
+}
+
+static void jpeg_exec(const uint32_t *pk, uint32_t ndw, uint32_t vmid_ib_unused, int in_ib)
+{
+    (void)vmid_ib_unused;
+    for (uint32_t i = 0; i + 1 < ndw; i += 2) {
+        uint32_t h = pk[i], v = pk[i + 1];
+        uint32_t reg = h & 0x3FFFF, type = (h >> 28) & 0xF;
+        S.vcn.jpeg_cmds++;
+        switch (type) {
+        case PACKETJ_TYPE0:
+            if (reg == mmUVD_JRBC_EXTERNAL_REG_INTERNAL_OFFSET) {
+                S.vcn.jext = v;
+            } else if (reg == JRBC_DEC_EXTERNAL_REG_WRITE_ADDR) {
+                S.vcn.jext_writes++;   /* 0x68e04 framing, 0x3fbc: the IH trigger */
+            } else if (reg >= 0x4000 && reg < 0x4200) {
+                S.vcn.jregs[reg - 0x4000] = v;
+                if (reg == mmUVD_JPEG_PITCH_INTERNAL_OFFSET)
+                    S.reg[VCNR(0, regUVD_JPEG_PITCH)] = v;
+                if (reg == mmUVD_JPEG_GPCOM_CMD_INTERNAL_OFFSET && v == 0x8) {
+                    uint64_t a = S.vcn.jregs[mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_LOW_INTERNAL_OFFSET - 0x4000] |
+                                 ((uint64_t)S.vcn.jregs[mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_HIGH_INTERNAL_OFFSET - 0x4000] << 32);
+                    uint8_t *p = mc_ptr(a, 4);
+                    uint32_t seq = S.vcn.jregs[mmUVD_JPEG_GPCOM_DATA0_INTERNAL_OFFSET - 0x4000];
+                    if (p) memcpy(p, &seq, 4); else S.vcn.jpeg_bad++;
+                    S.vcn.jpeg_fences++;
+                }
+            } else {
+                S.vcn.jpeg_bad++;
+            }
+            break;
+        case PACKETJ_TYPE2:
+            if (in_ib) S.vcn.jpeg_bad++;
+            else jpeg_ib();
+            break;
+        case PACKETJ_TYPE3: case PACKETJ_TYPE4: case PACKETJ_TYPE6:
+            break;
+        case PACKETJ_TYPE7:
+            S.vcn.jpeg_traps++;
+            ih_push(RD_IH_CLIENTID_VCN, VCN_4_0__SRCID__JPEG_DECODE, 0);
+            break;
+        default:
+            S.vcn.jpeg_bad++;
+        }
+    }
+}
+
+static void jpeg_run(uint32_t wptr)
+{
+    uint64_t base = S.reg[VCNR(0, regUVD_LMI_JRBC_RB_64BIT_BAR_LOW)] |
+                    ((uint64_t)S.reg[VCNR(0, regUVD_LMI_JRBC_RB_64BIT_BAR_HIGH)] << 32);
+    uint32_t size = S.reg[VCNR(0, regUVD_JRBC_RB_SIZE)], mask, *ring;
+    if (!S.vcn.jpeg_smu_on || !size || (size & (size - 1)) || !(ring = (uint32_t *)mc_ptr(base, 4ull * size)) ||
+        (S.reg[VCNR(0, regUVD_JRBC_RB_CNTL)] & 1) /* NO_FETCH */) {
+        S.vcn.jpeg_bad++;
+        return;
+    }
+    mask = size - 1;
+    wptr &= mask;
+    while ((S.vcn.jrptr & mask) != wptr) {
+        uint32_t two[2] = { ring[S.vcn.jrptr & mask], ring[(S.vcn.jrptr + 1) & mask] };
+        jpeg_exec(two, 2, 0, 0);
+        S.vcn.jrptr = (S.vcn.jrptr + 2) & mask;
+    }
+    S.reg[VCNR(0, regUVD_JRBC_RB_RPTR)] = S.vcn.jrptr;
+}
+
+/* PGFSM: per two-bit tile field, 1 powers on (status 0), 2 off (status 2) */
+static void vcn_pgfsm(uint32_t inst, uint32_t cfg)
+{
+    uint32_t st = S.reg[VCNR(inst, regUVD_PGFSM_STATUS)];
+    for (uint32_t sh = 0; sh < 30; sh += 2) {
+        uint32_t f = (cfg >> sh) & 3;
+        if (f == 1) st &= ~(3u << sh);
+        if (f == 2) st = (st & ~(3u << sh)) | (2u << sh);
+    }
+    S.reg[VCNR(inst, regUVD_PGFSM_STATUS)] = st;
+}
+
+/* a register write the VCN model takes; 0 = plain register */
+static int vcn_wr(uint32_t dw, uint32_t v)
+{
+    uint32_t reg;
+    int i = vcn_inst_of(dw, &reg);
+    if (i < 0)
+        return 0;
+    if (!S.vcn.smu_on[i] && (reg == regUVD_VCPU_CNTL || reg == regUVD_RB_BASE_LO || reg == regUVD_RB_SIZE ||
+                             reg == regVCN_RB_ENABLE || reg == regUVD_MASTINT_EN))
+        S.vcn.regs_while_off++;
+    if (i == 0 && !S.vcn.jpeg_smu_on && (reg == regUVD_JRBC_RB_CNTL || reg == regUVD_LMI_JRBC_RB_64BIT_BAR_LOW ||
+                                         reg == regUVD_JRBC_RB_SIZE || reg == regJPEG_SYS_INT_EN))
+        S.vcn.regs_while_off++;
+    switch (reg) {
+    case regUVD_PGFSM_CONFIG:
+        S.reg[dw] = v;
+        vcn_pgfsm((uint32_t)i, v);
+        return 1;
+    case regUVD_VCPU_CNTL: {
+        uint64_t win = S.reg[VCNR(i, regUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW)] |
+                       ((uint64_t)S.reg[VCNR(i, regUVD_LMI_VCPU_CACHE_64BIT_BAR_HIGH)] << 32);
+        S.reg[dw] = v;
+        if (v & UVD_VCPU_CNTL__BLK_RST_MASK) {
+            S.vcn.booted[i] = 0;
+        } else if ((v & UVD_VCPU_CNTL__CLK_EN_MASK) && !S.vcn.booted[i]) {
+            if (win != S.vcn.tmr_fw[i] || !S.vcn.tmr_fw[i] || !S.reg[VCNR(i, regUVD_VCPU_CACHE_SIZE0)] ||
+                !S.vcn.smu_on[i]) {
+                S.vcn.bad_boots++;
+            } else {
+                S.vcn.booted[i] = 1;
+                S.vcn.boots++;
+                S.reg[VCNR(i, regUVD_STATUS)] |= 2;   /* VCPU_REPORT: up */
+            }
+        }
+        return 1;
+    }
+    case regVCN_RB_ENABLE: {
+        uint32_t was = S.reg[dw];
+        S.reg[dw] = v;
+        if ((v & VCN_RB_ENABLE__RB1_EN_MASK) && !(was & VCN_RB_ENABLE__RB1_EN_MASK)) {
+            uint64_t nc = S.reg[VCNR(i, regUVD_LMI_VCPU_NC0_64BIT_BAR_LOW)] |
+                          ((uint64_t)S.reg[VCNR(i, regUVD_LMI_VCPU_NC0_64BIT_BAR_HIGH)] << 32);
+            uint8_t *fs = mc_ptr(nc, RD_VCN4_FWS_SIZE);
+            uint32_t flags = 0;
+            if (fs) memcpy(&flags, fs, 4);
+            if (!fs || !(flags & RD_FW_SHARED_FLAG_0_UNIFIED_QUEUE) || fs[RD_VCN4_FWS_SQ_IS_ENABLED] != 1 ||
+                !(fs[RD_VCN4_FWS_SQ_QUEUE_MODE] & RD_FW_QUEUE_RING_RESET))
+                S.vcn.bad_fw_shared++;
+            S.vcn.rb_enables++;
+            S.vcn.rptr[i] = S.reg[VCNR(i, regUVD_RB_RPTR)];
+        }
+        return 1;
+    }
+    case regUVD_RB_RPTR:
+        S.reg[dw] = v;
+        S.vcn.rptr[i] = v;
+        return 1;
+    case regUVD_RB_WPTR:
+        S.reg[dw] = v;
+        if (S.vcn.booted[i] && (S.reg[VCNR(i, regVCN_RB_ENABLE)] & VCN_RB_ENABLE__RB1_EN_MASK))
+            vcn_run((uint32_t)i, v);
+        return 1;
+    default:
+        break;
+    }
+    if (i == 0) {
+        switch (reg) {
+        case regUVD_JRBC_RB_RPTR:
+            S.reg[dw] = v;
+            S.vcn.jrptr = v;
+            return 1;
+        case regUVD_JRBC_RB_WPTR:
+            S.reg[dw] = v;
+            if (S.vcn.jpeg_smu_on && !(S.reg[VCNR(0, regUVD_JRBC_RB_CNTL)] & 1))
+                jpeg_run(v);
+            return 1;
+        default:
+            break;
+        }
+    }
+    return 0;
+}
+
+/* a register read the VCN model answers; 0 = plain register */
+static int vcn_rd(uint32_t dw, uint32_t *out)
+{
+    uint32_t reg;
+    int i = vcn_inst_of(dw, &reg);
+    if (i < 0)
+        return 0;
+    if (reg == regUVD_LMI_STATUS) {   /* the memory interface is always clean */
+        *out = ~0u;
+        return 1;
+    }
+    if (i == 0 && reg == regUVD_JRBC_STATUS) {
+        *out = (S.reg[dw] & ~(uint32_t)UVD_JRBC_STATUS__RB_JOB_DONE_MASK) | UVD_JRBC_STATUS__RB_JOB_DONE_MASK;
+        return 1;
+    }
+    return 0;
+}
+
+/* 32-bit doorbells: the VCN unified rings and the JPEG ring, inside the
+ * S2A range NBIO routes to VCN (entries 4 / 5) */
+static int vcn_db_routed(uint32_t index, uint32_t inst)
+{
+    uint32_t e = smn_val(inst ? regS2A_DOORBELL_ENTRY_5_CTRL : regS2A_DOORBELL_ENTRY_4_CTRL);
+    uint32_t off = (e & S2A_DOORBELL_ENTRY_4_CTRL__S2A_DOORBELL_PORT4_RANGE_OFFSET_MASK) >>
+                   S2A_DOORBELL_ENTRY_4_CTRL__S2A_DOORBELL_PORT4_RANGE_OFFSET__SHIFT;
+    uint32_t sz = (e & S2A_DOORBELL_ENTRY_4_CTRL__S2A_DOORBELL_PORT4_RANGE_SIZE_MASK) >>
+                  S2A_DOORBELL_ENTRY_4_CTRL__S2A_DOORBELL_PORT4_RANGE_SIZE__SHIFT;
+    return (e & S2A_DOORBELL_ENTRY_4_CTRL__S2A_DOORBELL_PORT4_ENABLE_MASK) && index >= off && index < off + sz;
+}
+
+static void sim_doorbell32(void *ctx, uint32_t index, uint32_t v)
+{
+    (void)ctx;
+    S.db_writes++;
+    S.db_last_index = index;
+    if (S.pending_writes)
+        S.unflushed_doorbells++;
+    for (uint32_t i = 0; i < 2; i++) {
+        uint32_t c = S.reg[VCNR(i, regVCN_RB1_DB_CTRL)];
+        if ((c & VCN_RB1_DB_CTRL__EN_MASK) &&
+            ((c & VCN_RB1_DB_CTRL__OFFSET_MASK) >> VCN_RB1_DB_CTRL__OFFSET__SHIFT) == index) {
+            if (!vcn_db_routed(index, i))
+                S.vcn.db_unrouted++;
+            if (S.vcn.booted[i] && (S.reg[VCNR(i, regVCN_RB_ENABLE)] & VCN_RB_ENABLE__RB1_EN_MASK))
+                vcn_run(i, v);
+            S.vcn.dbs++;
+            return;
+        }
+    }
+    {
+        uint32_t c = S.reg[VCNR(0, regVCN_JPEG_DB_CTRL)];
+        if ((c & VCN_JPEG_DB_CTRL__EN_MASK) &&
+            ((c & VCN_JPEG_DB_CTRL__OFFSET_MASK) >> VCN_JPEG_DB_CTRL__OFFSET__SHIFT) == index) {
+            if (!vcn_db_routed(index, 0))
+                S.vcn.db_unrouted++;
+            if (S.vcn.jpeg_smu_on && !(S.reg[VCNR(0, regUVD_JRBC_RB_CNTL)] & 1))
+                jpeg_run(v);
+            S.vcn.dbs++;
+            return;
+        }
+    }
+    S.db_unclaimed++;
+}
+
 static void sim_wr(void *ctx, uint64_t off, uint32_t v)
 {
     uint32_t dw = (uint32_t)(off / 4);
@@ -2582,6 +3036,8 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             *w = v;
         return;
     }
+    if (vcn_wr(dw, v))
+        return;
     /* RSMU index/data: the indirect window to registers beyond the BAR */
     if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_INDEX) {
         S.smn_index = v;
@@ -3148,6 +3604,11 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
         uint32_t *w = mm_word();
         return w ? *w : 0;
     }
+    {
+        uint32_t vv;
+        if (vcn_rd(dw, &vv))
+            return vv;
+    }
     if (dw == DCN_B2 + regDC_I2C_DATA) {
         uint32_t b = S.i2c_buf[S.i2c_ri++ % sizeof(S.i2c_buf)];
         return (S.reg[dw] & ~DC_I2C_DATA__DC_I2C_DATA_MASK) | (b << DC_I2C_DATA__DC_I2C_DATA__SHIFT);
@@ -3289,6 +3750,12 @@ static void make_discovery(amd_discovery *disc)
     IP(AMD_HWID_DMU, 3, 2, 1, 0x12, 0xC0, DCN_B2);
     disc->ips[disc->num_ips - 1].num_base = disc->ips[disc->num_ips - 1].num_base_kept = 4;
     disc->ips[disc->num_ips - 1].base[3] = DCN_B3;
+    /* VCN 4.0.0: two instances (the card's bases; instance 1 reports 4.0.1) */
+    IP(AMD_HWID_VCN, 4, 0, 0, 0x7800, VCN_B1(0), 0);
+    disc->ips[disc->num_ips - 1].num_base = disc->ips[disc->num_ips - 1].num_base_kept = 2;
+    IP(AMD_HWID_VCN, 4, 0, 1, 0x7B00, VCN_B1(1), 0);
+    disc->ips[disc->num_ips - 1].num_base = disc->ips[disc->num_ips - 1].num_base_kept = 2;
+    disc->ips[disc->num_ips - 1].instance = 1;
     disc->num_dies = 1;
 }
 
@@ -5216,6 +5683,583 @@ static void test_pm_control(rdna3_dev *dev, const rdna3_vbios *vb)
     CHECK(smu13_get_bamaco_support(dev, &smu) == 0);
 }
 
+/* ---- VCN 4.0 / JPEG 4.0 (vcn40.c) against the model above sim_wr ---- */
+
+struct vcn_iv_seen { unsigned vcn[2], jpeg, other; };
+static rdna3_vcn *g_vcn;
+static void vcn_iv_cb(void *ctx, const rdna3_iv *iv)
+{
+    struct vcn_iv_seen *s = (struct vcn_iv_seen *)ctx;
+    uint32_t inst = 9;
+    if (vcn40_process_interrupt(g_vcn, iv->client_id, iv->src_id, &inst) && inst < 2)
+        s->vcn[inst]++;
+    else if (jpeg40_process_interrupt(g_vcn, iv->client_id, iv->src_id))
+        s->jpeg++;
+    else
+        s->other++;
+}
+
+static void test_vcn(rdna3_dev *dev, rdna3_psp *psp, const amd_ucode_plan *plan0, const amd_fw_blob_ref *blobs,
+                     rdna3_gmc *gmc, rdna3_vcn *v)
+{
+    static amd_ucode_plan plan;
+    static rdna3_ih ih;
+    const amd_ucode *u0, *u1;
+    uint64_t stage, tmr[2], buf, vcpu_mc;
+    uint32_t i, seq = 0, flags = 0, k, dbu0 = S.db_unclaimed;
+    uint8_t fs[RD_VCN4_FWS_SIZE];
+    struct vcn_iv_seen seen;
+    rdna3_vcn_ib ib;
+
+    /* amdgpu_vcn_setup_ucode: VCN1 (same image) joins the plan for rdna3vcn=1 */
+    memcpy(&plan, plan0, sizeof(plan));
+    u0 = amd_ucode_plan_find(&plan, AMD_UCODE_VCN);
+    CHECK(u0 && u0->psp_type == GFX_FW_TYPE_VCN && !amd_ucode_plan_find(&plan, AMD_UCODE_VCN1));
+    CHECK(amd_vcn_setup_ucode(blobs, 1, &plan) == AMD_FW_OK && plan.count == plan0->count);
+    CHECK(amd_vcn_setup_ucode(blobs, 2, &plan) == AMD_FW_OK && plan.count == plan0->count + 1);
+    CHECK(amd_vcn_setup_ucode(blobs, 2, &plan) == AMD_FW_OK && plan.count == plan0->count + 1);
+    u0 = amd_ucode_plan_find(&plan, AMD_UCODE_VCN);
+    u1 = amd_ucode_plan_find(&plan, AMD_UCODE_VCN1);
+    CHECK(u0 && u1 && u1 == u0 + 1 && u1->psp_type == GFX_FW_TYPE_VCN1 && u1->blob == AMD_BLOB_VCN &&
+          u1->offset == u0->offset && u1->size == u0->size);
+    CHECK(plan.total_aligned == plan0->total_aligned + ((u0->size + 4095u) & ~4095u));
+    for (i = 1; i < plan.count; i++)
+        CHECK(plan.ucode[i - 1].ucode_id < plan.ucode[i].ucode_id);
+    /* the PSP loads VCN1 too and answers where both images are in the TMR */
+    stage = rdna3_vram_alloc(dev, (u1->size + 4095u) & ~4095u, 4096, "vcn1-stage");
+    rdna3_vram_write(dev, stage, blobs[AMD_BLOB_VCN].data + u1->offset, u1->size);
+    rdna3_hdp_flush(dev);
+    CHECK(psp13_load_ip_fw(psp, u1, rdna3_vram_mc(dev, stage)) == RDNA3_OK);
+    tmr[0] = psp->ucode_tmr_mc[AMD_UCODE_VCN];
+    tmr[1] = psp->ucode_tmr_mc[AMD_UCODE_VCN1];
+    CHECK(tmr[0] && tmr[1] && tmr[0] != tmr[1] && tmr[0] == S.vcn.tmr_fw[0] && tmr[1] == S.vcn.tmr_fw[1]);
+    CHECK(psp->ucode_tmr_mc[AMD_UCODE_SMC] == 0);   /* only the VCN images are placed by the model */
+
+    CHECK(ih60_init(dev, &ih, 4096, gmc->dummy_page_pa, 0) == RDNA3_OK);
+    memset(&seen, 0, sizeof(seen));
+    g_vcn = v;
+
+    /* early / sw init: two instances from discovery, the header, vcpu_bo, fw_shared */
+    memset(v, 0, sizeof(*v));
+    CHECK(vcn40_early_init(dev, v, NULL, 0, 0x545, 1) == RDNA3_ENOENT);
+    CHECK(vcn40_early_init(dev, v, blobs[AMD_BLOB_VCN].data, blobs[AMD_BLOB_VCN].len, 0x545, 1) == RDNA3_OK);
+    CHECK(v->num_vcn_inst == 2 && v->harvest_config == 0 && v->num_enc_rings == 1);
+    CHECK(v->fw_version == ((const struct common_firmware_header *)blobs[AMD_BLOB_VCN].data)->ucode_version);
+    if (v->fw_version == 0x09118022)   /* vcn_4_0_0.bin of the card: ENC 1.24 DEC 9 VEP 0 Revision 34 */
+        CHECK(v->enc_major == 1 && v->enc_minor == 24 && v->dec_ver == 9 && v->vep == 0 && v->fw_rev == 34);
+    CHECK(v->cg_flags == (RD_CG_VCN_MGCG | RD_CG_JPEG_MGCG) && v->pg_flags == (RD_PG_VCN | RD_PG_JPEG));
+    CHECK(v->cur_state == RD_PG_STATE_GATE && v->vcn_gated && v->jpeg_gated);
+    CHECK(jpeg40_early_init(dev, v) == RDNA3_OK && v->jpeg_present);
+    CHECK(vcn40_sw_init(dev, v, tmr) == RDNA3_OK && jpeg40_sw_init(dev, v) == RDNA3_OK);
+    for (i = 0; i < 2; i++) {
+        CHECK(v->fw_shared[i] == v->vcpu_bo[i] + RD_VCN_STACK_SIZE + RD_VCN_CONTEXT_SIZE);
+        rdna3_vram_read(dev, v->fw_shared[i], fs, sizeof(fs));
+        memcpy(&flags, fs, 4);
+        CHECK(flags == (RD_FW_SHARED_FLAG_0_UNIFIED_QUEUE | RD_VCN_SMU_DPM_INTERFACE_FLAG) &&
+              fs[RD_VCN4_FWS_SQ_IS_ENABLED] == 1 && fs[RD_VCN4_FWS_SMU_DPM_INTERFACE] == RD_VCN_SMU_DPM_INTERFACE_DGPU);
+        CHECK(v->ring_enc[i].doorbell_index == (RD_DB_VCN0_1 << 1) + 2 + 8 * i && v->ring_enc[i].use_doorbell);
+    }
+    CHECK(v->jpeg.doorbell_index == (RD_DB_VCN0_1 << 1) + 1);
+    CHECK(S.vcn.vcn_up_msgs == 0 && !S.vcn.smu_on[0] && !S.vcn.smu_on[1]);   /* still gated */
+
+    /* hw init: doorbell ranges, the ring tests power the block up */
+    for (i = 0; i < 2; i++) {
+        S.reg[VCNR(i, regUVD_PGFSM_STATUS)] = 0x2AAAAAAAu;   /* every tile off at reset */
+        S.reg[VCNR(i, regUVD_VCPU_CNTL)] = UVD_VCPU_CNTL__BLK_RST_MASK;   /* the VCPU held in reset */
+    }
+    CHECK(vcn40_hw_init(dev, v) == RDNA3_OK);
+    CHECK(v->ring_enc[0].ready && v->ring_enc[1].ready && v->cur_state == RD_PG_STATE_UNGATE && !v->vcn_gated);
+    CHECK(S.vcn.vcn_up_msgs == 2 && S.vcn.smu_on[0] && S.vcn.smu_on[1] && S.vcn.regs_while_off == 0);
+    CHECK(S.vcn.boots == 2 && S.vcn.bad_boots == 0 && S.vcn.rb_enables == 2 && S.vcn.bad_fw_shared == 0);
+    vcpu_mc = rdna3_vram_mc(dev, v->vcpu_bo[1]);
+    for (i = 0; i < 2; i++) {
+        uint32_t s2a = smn_val(i ? regS2A_DOORBELL_ENTRY_5_CTRL : regS2A_DOORBELL_ENTRY_4_CTRL);
+        CHECK((S.reg[VCNR(i, regUVD_PGFSM_STATUS)] & 0x3F3FFFFF) == RD_UVD_PGFSM_STATUS__UVDM_UVDU_UVDLM_PWR_ON_3_0);
+        CHECK((S.reg[VCNR(i, regUVD_POWER_STATUS)] & 0x103) == (UVD_POWER_STATUS__UVD_PG_EN_MASK | 2));
+        CHECK(S.reg[VCNR(i, regUVD_STATUS)] == RD_UVD_STATUS__IDLE);   /* booted, busy bit cleared */
+        CHECK(S.reg[VCNR(i, regUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW)] == (uint32_t)tmr[i] &&
+              S.reg[VCNR(i, regUVD_VCPU_CACHE_SIZE0)] == ((((const struct common_firmware_header *)
+                                                              blobs[AMD_BLOB_VCN].data)->ucode_size_bytes + 8 + 4095u) & ~4095u));
+        CHECK(S.reg[VCNR(i, regUVD_VCPU_CACHE_SIZE1)] == RD_VCN_STACK_SIZE &&
+              S.reg[VCNR(i, regUVD_VCPU_CACHE_SIZE2)] == RD_VCN_CONTEXT_SIZE &&
+              S.reg[VCNR(i, regUVD_VCPU_NONCACHE_SIZE0)] == 4096);
+        CHECK(S.reg[VCNR(i, regUVD_LMI_VCPU_NC0_64BIT_BAR_LOW)] == (uint32_t)rdna3_vram_mc(dev, v->fw_shared[i]));
+        CHECK(S.reg[VCNR(i, regUVD_GFX10_ADDR_CONFIG)] == 0x545);
+        CHECK(S.reg[VCNR(i, regUVD_MASTINT_EN)] & UVD_MASTINT_EN__VCPU_EN_MASK);
+        CHECK(S.reg[VCNR(i, regVCN_RB1_DB_CTRL)] == (v->ring_enc[i].doorbell_index << 2 | VCN_RB1_DB_CTRL__EN_MASK));
+        CHECK(S.reg[VCNR(i, regUVD_RB_BASE_LO)] == (uint32_t)v->ring_enc[i].gpu_addr &&
+              S.reg[VCNR(i, regUVD_RB_SIZE)] == RD_VCN_RING_SIZE / 4);
+        CHECK(s2a & S2A_DOORBELL_ENTRY_4_CTRL__S2A_DOORBELL_PORT4_ENABLE_MASK);
+        CHECK(((s2a & S2A_DOORBELL_ENTRY_4_CTRL__S2A_DOORBELL_PORT4_RANGE_OFFSET_MASK) >>
+               S2A_DOORBELL_ENTRY_4_CTRL__S2A_DOORBELL_PORT4_RANGE_OFFSET__SHIFT) == (RD_DB_VCN0_1 << 1) + 8 * i);
+        CHECK(((s2a & S2A_DOORBELL_ENTRY_4_CTRL__S2A_DOORBELL_PORT4_AWID_MASK) >>
+               S2A_DOORBELL_ENTRY_4_CTRL__S2A_DOORBELL_PORT4_AWID__SHIFT) == (i ? 7u : 4u));
+        rdna3_vram_read(dev, v->fw_shared[i], fs, sizeof(fs));
+        CHECK(fs[RD_VCN4_FWS_SQ_QUEUE_MODE] == 0);   /* the ring-reset handshake is over */
+    }
+    CHECK(S.reg[VCNR(1, regUVD_LMI_VCPU_CACHE1_64BIT_BAR_LOW)] == (uint32_t)vcpu_mc &&
+          S.reg[VCNR(1, regUVD_LMI_VCPU_CACHE2_64BIT_BAR_LOW)] == (uint32_t)(vcpu_mc + RD_VCN_STACK_SIZE));
+    CHECK(S.vcn.dbs >= 2 && S.vcn.db_unrouted == 0 && S.db_unclaimed == dbu0 && S.vcn.ends == 2 && S.vcn.bad == 0);
+
+    /* the IB tests: encode session create / destroy, decode create / destroy
+     * messages behind the unified-queue checksum and engine info */
+    for (i = 0; i < 2; i++)
+        CHECK(vcn40_unified_ring_test_ib(dev, v, &v->ring_enc[i]) == RDNA3_OK);
+    CHECK(S.vcn.enc_init == 2 && S.vcn.enc_close == 2 && S.vcn.dec_create == 2 && S.vcn.dec_destroy == 2);
+    CHECK(S.vcn.checksum_bad == 0 && S.vcn.ib_faults == 0 && S.vcn.bad == 0 && S.vcn.ibs == 8);
+    CHECK(S.vcn.fences == 8 && S.vcn.traps == 8 && S.unflushed_doorbells == 0);
+    ih60_process(dev, &ih, vcn_iv_cb, &seen);
+    CHECK(seen.vcn[0] == 4 && seen.vcn[1] == 4 && seen.jpeg == 0 && seen.other == 0 && v->irqs == 8);
+
+    /* JPEG: VCN_JPEG_DB_CTRL, ring test through the pitch register, IB test
+     * from the checked-copy pool (VMID 0), the decode trap */
+    S.reg[VCNR(0, regUVD_PGFSM_STATUS)] |= 2u << UVD_PGFSM_STATUS__UVDJ_PWR_STATUS__SHIFT;
+    CHECK(jpeg40_hw_init(dev, v) == RDNA3_OK && v->jpeg.ready && v->jpeg_cur_state == RD_PG_STATE_UNGATE);
+    CHECK(S.vcn.jpeg_up_msgs == 1 && S.vcn.jpeg_smu_on && S.vcn.regs_while_off == 0);
+    CHECK(S.reg[VCNR(0, regVCN_JPEG_DB_CTRL)] == (v->jpeg.doorbell_index << 2 | VCN_JPEG_DB_CTRL__EN_MASK));
+    CHECK((S.reg[VCNR(0, regUVD_PGFSM_STATUS)] & UVD_PGFSM_STATUS__UVDJ_PWR_STATUS_MASK) == 0);
+    CHECK(S.reg[VCNR(0, regUVD_JRBC_RB_CNTL)] == 2 && S.reg[VCNR(0, regUVD_JRBC_RB_SIZE)] == RD_JPEG_RING_SIZE / 4);
+    CHECK(S.reg[VCNR(0, regJPEG_SYS_INT_EN)] & JPEG_SYS_INT_EN__DJRBC_MASK);
+    CHECK(S.reg[VCNR(0, regJPEG_DEC_GFX10_ADDR_CONFIG)] == 0x545);
+    CHECK(S.reg[VCNR(0, regUVD_JPEG_PITCH)] == 0xABADCAFE && S.vcn.jpeg_bad == 0);
+    CHECK(jpeg40_dec_ring_test_ib(dev, v) == RDNA3_OK && S.reg[VCNR(0, regUVD_JPEG_PITCH)] == 0xDEADBEEF);
+    CHECK(S.vcn.jpeg_ibs == 1 && S.vcn.jpeg_ib_vmid == 0 && S.vcn.jpeg_fences == 1 && S.vcn.jpeg_traps == 1 &&
+          S.vcn.jpeg_bad == 0 && S.vcn.jpeg_ib_faults == 0);
+    ih60_process(dev, &ih, vcn_iv_cb, &seen);
+    CHECK(seen.jpeg == 1 && v->jpeg_irqs == 1 && seen.other == 0);
+
+    /* jobs in VMID 0 across the ring wrap (64-dword fetch padding), a user
+     * fence, the vm-flush / register packets */
+    buf = rdna3_vram_alloc(dev, 8192, 4096, "vcn-job-test");
+    {
+        uint32_t pk[4] = { 8, 0x08000001, 0, 0 };   /* an encode op package outside a session */
+        rdna3_vram_write(dev, buf, pk, sizeof(pk));
+        rdna3_hdp_flush(dev);
+    }
+    ib.va = rdna3_vram_mc(dev, buf);
+    ib.length_dw = 4;
+    ib.kdata = NULL;
+    for (k = 0; k < 40; k++) {
+        seq = vcn40_submit(dev, v, 1, 0, &ib, 1, k == 39 ? rdna3_vram_mc(dev, buf + 4096) : 0);
+        CHECK(seq && vcn40_wait_fence(dev, &v->ring_enc[1], seq) == RDNA3_OK);
+    }
+    CHECK(seq == v->ring_enc[1].fence_seq && S.vcn.bad == 0 && S.vcn.last_ib_inst == 1);
+    {
+        uint32_t uf = 0;
+        rdna3_vram_read(dev, buf + 4096, &uf, 4);
+        CHECK(uf == seq);
+    }
+    CHECK(vcn40_submit(dev, v, 2, 0, &ib, 1, 0) == 0);   /* no third instance */
+    {
+        rdna3_vm_flush_regs fr = { 0x100, 0x101, 0x102, 0x103, 1u << 5 };
+        unsigned w0 = S.vcn.reg_writes, r0 = S.vcn.reg_waits;
+        vcn40_ring_begin_use(dev, v);
+        CHECK(vcn40_ring_alloc(dev, &v->ring_enc[0], 16) == RDNA3_OK);
+        vcn40_enc_ring_emit_vm_flush(dev, &v->ring_enc[0], &fr, 0x123456001ull);
+        vcn40_ring_commit(dev, &v->ring_enc[0]);
+        vcn40_ring_end_use(dev, v);
+        CHECK(S.vcn.reg_writes == w0 + 3 && S.vcn.reg_waits == r0 + 2 && S.vcn.bad == 0);
+    }
+
+    /* clock gating: VCN_MGCG leaves UVD_CGC_* to the firmware; JPEG's MGCG
+     * toggles JPEG_DEC_MODE */
+    {
+        uint32_t cgc = S.reg[VCNR(0, regUVD_CGC_CTRL)];
+        CHECK(vcn40_set_clockgating_state(dev, v, 1) == RDNA3_OK && S.reg[VCNR(0, regUVD_CGC_CTRL)] == cgc);
+        CHECK(jpeg40_set_clockgating_state(dev, v, 0) == RDNA3_OK &&
+              !(S.reg[VCNR(0, regJPEG_CGC_CTRL)] & JPEG_CGC_CTRL__JPEG_DEC_MODE_MASK) &&
+              (S.reg[VCNR(0, regJPEG_CGC_CTRL)] & JPEG_CGC_CTRL__DYN_CLOCK_MODE_MASK));
+        CHECK(vcn40_is_idle(dev, v) && jpeg40_is_idle(dev, v) && vcn40_wait_for_idle(dev, v) == RDNA3_OK &&
+              jpeg40_wait_for_idle(dev, v) == RDNA3_OK);
+    }
+
+    /* idle work: nothing pending -> both blocks gated, the PMFW told */
+    vcn40_ring_begin_use(dev, v);
+    CHECK(vcn40_idle_work_handler(dev, v) == 0);   /* a submission in flight */
+    vcn40_ring_end_use(dev, v);
+    CHECK(vcn40_idle_work_handler(dev, v) == 1 && v->cur_state == RD_PG_STATE_GATE && v->vcn_gated);
+    CHECK(S.vcn.vcn_down_msgs == 2 && !S.vcn.smu_on[0] && !S.vcn.smu_on[1]);
+    for (i = 0; i < 2; i++)
+        CHECK((S.reg[VCNR(i, regUVD_PGFSM_STATUS)] & 0x3F3FFFFF) == 0x2A2AAAAA &&
+              S.reg[VCNR(i, regUVD_STATUS)] == 0 && (S.reg[VCNR(i, regUVD_VCPU_CNTL)] & UVD_VCPU_CNTL__BLK_RST_MASK));
+    CHECK(jpeg40_idle_work_handler(dev, v) == 1 && v->jpeg_cur_state == RD_PG_STATE_GATE && !S.vcn.jpeg_smu_on &&
+          S.vcn.jpeg_down_msgs == 1 &&
+          (S.reg[VCNR(0, regUVD_PGFSM_STATUS)] & UVD_PGFSM_STATUS__UVDJ_PWR_STATUS_MASK) ==
+              (2u << UVD_PGFSM_STATUS__UVDJ_PWR_STATUS__SHIFT));
+    CHECK(S.vcn.regs_while_off == 0);
+    /* the next job powers everything up again; the ring continues */
+    seq = vcn40_submit(dev, v, 0, 0, &ib, 1, 0);
+    CHECK(seq && vcn40_wait_fence(dev, &v->ring_enc[0], seq) == RDNA3_OK);
+    CHECK(S.vcn.boots == 4 && S.vcn.vcn_up_msgs == 4 && v->cur_state == RD_PG_STATE_UNGATE && S.vcn.bad == 0);
+    ih60_process(dev, &ih, vcn_iv_cb, &seen);
+    CHECK(seen.other == 0 && v->bad_irqs == 0);
+    /* a VCPU that does not boot (window 0 not on the TMR image): start gives up */
+    CHECK(vcn40_idle_work_handler(dev, v) == 1 && v->cur_state == RD_PG_STATE_GATE);
+    {
+        uint64_t keep = v->tmr_mc[1];
+        v->tmr_mc[1] = 0x1000;
+        CHECK(vcn40_set_powergating_state(dev, v, RD_PG_STATE_UNGATE) == RDNA3_ETIME);
+        CHECK(v->cur_state == RD_PG_STATE_GATE && S.vcn.bad_boots > 0);
+        v->tmr_mc[1] = keep;
+        S.vcn.booted[0] = 0;   /* the model's VCPU 0 restarts with the next start */
+        CHECK(vcn40_set_powergating_state(dev, v, RD_PG_STATE_UNGATE) == RDNA3_OK);
+        CHECK(vcn40_hw_fini(dev, v) == RDNA3_OK && v->cur_state == RD_PG_STATE_GATE && !v->ring_enc[0].ready);
+        CHECK(jpeg40_hw_fini(dev, v) == RDNA3_OK && !v->jpeg.ready);
+        /* back up for the UAPI test */
+        CHECK(vcn40_hw_init(dev, v) == RDNA3_OK && jpeg40_hw_init(dev, v) == RDNA3_OK);
+    }
+    ih60_process(dev, &ih, vcn_iv_cb, &seen);
+    ih60_disable(dev, &ih);
+}
+
+/* ---- the video IPs through uapi/rdna3_drm.c (HW_IP_INFO / COUNT,
+ * VIDEO_CAPS, CS with amdgpu_cs_patch_ibs' checks) on the model ---- */
+
+static rdna3_vcn *VV;
+static uint32_t vcno_last_ip, vcno_last_ring, vcno_submits;
+static int vcno_submit(void *c, void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
+                       const rdna3_cs_job *job, uint64_t *seq)
+{
+    rdna3_vcn_ib vib[8];
+    uint32_t i, s = 0;
+    const uint32_t vmid = 5;
+    (void)c; (void)job;
+    if (n > 8)
+        return -RD_EINVAL;
+    /* the kext: the file's VMID on both hubs; VCN walks the MMHUB */
+    mmhub302_setup_vm_pt_regs(UQ.dev, vmid, gpuvm_pd_addr(UQ.dev, &((struct uq_vm *)vm)->vm));
+    for (i = 0; i < n; i++) {
+        vib[i].va = ibs[i].va;
+        vib[i].length_dw = ibs[i].length_dw;
+        vib[i].kdata = ibs[i].kdata;
+    }
+    vcno_last_ip = ip;
+    vcno_last_ring = ring;
+    vcno_submits++;
+    if (ip == AMDGPU_HW_IP_VCN_ENC)
+        s = vcn40_submit(UQ.dev, VV, ring, vmid, vib, n, 0);
+    else if (ip == AMDGPU_HW_IP_VCN_JPEG)
+        s = jpeg40_submit(UQ.dev, VV, vmid, vib, n, 0);
+    if (!s)
+        return -RD_EIO;
+    *seq = s;
+    return 0;
+}
+static int vcno_signaled(void *c, uint32_t ip, uint32_t ring, uint64_t seq)
+{
+    (void)c;
+    if (ip == AMDGPU_HW_IP_VCN_ENC && ring < 2)
+        return vcn40_fence_passed(UQ.dev, &VV->ring_enc[ring], (uint32_t)seq);
+    if (ip == AMDGPU_HW_IP_VCN_JPEG)
+        return vcn40_fence_passed(UQ.dev, &VV->jpeg, (uint32_t)seq);
+    return 1;
+}
+static int vcno_wait(void *c, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t abs_ns)
+{
+    (void)abs_ns;
+    return vcno_signaled(c, ip, ring, seq) ? 0 : -RD_ETIME;
+}
+
+/* an encode IB the way radeonsi lays it out: checksum, engine info,
+ * session info (message buffer), session init (the standard), op */
+static uint32_t vcn_enc_ib(uint32_t *ib, uint64_t msg_va, uint32_t standard, uint32_t op)
+{
+    uint32_t n = 0, slot, i, sum = 0, pack;
+    ib[n++] = 0x10; ib[n++] = 0x30000002; slot = n++; ib[n++] = 0;
+    ib[n++] = 0x10; ib[n++] = 0x30000001; ib[n++] = 2; ib[n++] = 0;
+    ib[n++] = 0x18; ib[n++] = 0x1; ib[n++] = 7; ib[n++] = (uint32_t)(msg_va >> 32); ib[n++] = (uint32_t)msg_va; ib[n++] = 0;
+    ib[n++] = 0x10; ib[n++] = 0x3; ib[n++] = standard; ib[n++] = 0;
+    ib[n++] = 0x8; ib[n++] = op;
+    pack = n - 4;
+    ib[slot + 1] = pack;
+    ib[7] = pack * 4;
+    for (i = 0; i < pack; i++)
+        sum += ib[4 + i];
+    ib[slot] = sum;
+    return n;
+}
+
+/* a decode IB: checksum, engine info, the decode buffer naming 'msg_va' */
+static uint32_t vcn_dec_ib(uint32_t *ib, uint64_t msg_va)
+{
+    uint32_t n = 0, slot, i, sum = 0, pack = RD_VCN_DECODE_BUFFER_DW + 4 + 2;
+    ib[n++] = 0x10; ib[n++] = 0x30000002; slot = n++; ib[n++] = pack;
+    ib[n++] = 0x10; ib[n++] = 0x30000001; ib[n++] = 3; ib[n++] = pack * 4;
+    ib[n++] = RD_VCN_DECODE_BUFFER_DW * 4 + 8; ib[n++] = RD_VCN_IB_FLAG_DECODE_BUFFER;
+    for (i = 0; i < RD_VCN_DECODE_BUFFER_DW; i++)
+        ib[n + i] = 0;
+    ib[n] = RD_VCN_CMD_FLAG_MSG_BUFFER;
+    ib[n + 1] = (uint32_t)(msg_va >> 32);
+    ib[n + 2] = (uint32_t)msg_va;
+    n += RD_VCN_DECODE_BUFFER_DW;
+    for (i = 0; i < pack; i++)
+        sum += ib[4 + i];
+    ib[slot] = sum;
+    return n;
+}
+
+/* a decode create message (amdgpu_vcn_dec_get_create_msg's layout) for 'codec' */
+static void vcn_dec_create_msg(uint32_t *msg, uint32_t codec, uint32_t len)
+{
+    memset(msg, 0, 64);
+    msg[0] = 0x28; msg[1] = len; msg[2] = 1; msg[3] = 0; msg[4] = 1; msg[5] = 0;
+    msg[6] = 1; msg[7] = 0x28; msg[8] = 0x10; msg[9] = 0;
+    msg[10] = codec; msg[12] = 0x780; msg[13] = 0x440;
+}
+
+static int vcn_cs(rdna3_drm_file *f, uint32_t ctx, uint32_t ip, uint32_t ring, uint64_t va, uint32_t ndw,
+                  uint64_t *handle)
+{
+    struct drm_amdgpu_cs_chunk_ib cib;
+    struct drm_amdgpu_cs_chunk ch;
+    uint64_t chp;
+    union drm_amdgpu_cs cs;
+    int r;
+    memset(&cib, 0, sizeof(cib));
+    cib.ip_type = ip;
+    cib.ring = ring;
+    cib.va_start = va;
+    cib.ib_bytes = ndw * 4;
+    ch.chunk_id = AMDGPU_CHUNK_ID_IB;
+    ch.length_dw = sizeof(cib) / 4;
+    ch.chunk_data = (uint64_t)(uintptr_t)&cib;
+    chp = (uint64_t)(uintptr_t)&ch;
+    memset(&cs, 0, sizeof(cs));
+    cs.in.ctx_id = ctx;
+    cs.in.num_chunks = 1;
+    cs.in.chunks = (uint64_t)(uintptr_t)&chp;
+    r = UQ_IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CS), cs);
+    if (!r && handle)
+        *handle = cs.out.handle;
+    return r;
+}
+
+static int vcn_info(rdna3_drm_file *f, uint32_t query, uint32_t type, void *out, uint32_t size)
+{
+    struct drm_amdgpu_info in;
+    memset(&in, 0, sizeof(in));
+    in.return_pointer = (uint64_t)(uintptr_t)out;
+    in.return_size = size;
+    in.query = query;
+    if (query == AMDGPU_INFO_VIDEO_CAPS)
+        in.video_cap.type = type;
+    else
+        in.query_hw_ip.type = type;
+    return UQ_IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in);
+}
+
+static int vcn_wait_cs(rdna3_drm_file *f, uint32_t ctx, uint32_t ip, uint64_t h, uint64_t *status)
+{
+    union drm_amdgpu_wait_cs w;
+    int r;
+    memset(&w, 0, sizeof(w));
+    w.in.handle = h;
+    w.in.ip_type = ip;
+    w.in.ctx_id = ctx;
+    w.in.timeout = ~0ull;
+    r = UQ_IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w);
+    *status = w.out.status;
+    return r;
+}
+
+static uint32_t vcn_ctx(rdna3_drm_file *f)
+{
+    union drm_amdgpu_ctx c;
+    memset(&c, 0, sizeof(c));
+    c.in.op = AMDGPU_CTX_OP_ALLOC_CTX;
+    return UQ_IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) ? 0 : c.out.alloc.ctx_id;
+}
+
+static void test_vcn_uapi(rdna3_dev *dev, rdna3_gmc *gmc, rdna3_vcn *v)
+{
+    static rdna3_drm_device dd;
+    static rdna3_drm_file f1;
+    rdna3_drm_ops ops;
+    amd_discovery disc;
+    const uint64_t va = 0x0000400000000000ull;
+    struct drm_amdgpu_info_hw_ip ip;
+    struct drm_amdgpu_info_video_caps caps;
+    uint32_t n, hib, hmsg, hj, ib[96], c1, c2, c3, c4, t;
+    uint8_t *ibp, *msgp, *jp;
+    uint64_t h, st;
+    unsigned init0, dec0;
+
+    memset(&UQ, 0, sizeof(UQ));
+    UQ.dev = dev;
+    UQ.gmc = gmc;
+    UQ.heap = rdna3_vram_alloc(dev, 1u << 20, 65536, "vcn-uapi-heap");
+    UQ.heap_next = UQ.heap;
+    UQ.heap_end = UQ.heap + (1u << 20);
+    CHECK(UQ.heap != UINT64_MAX && gpuvm_pool_init(dev, &UQ.pool, 64) == RDNA3_OK);
+    VV = v;
+    memset(&ops, 0, sizeof(ops));
+    ops.zalloc = uqo_zalloc; ops.free = uqo_free; ops.bo_alloc = uqo_bo_alloc; ops.bo_free = uqo_bo_free;
+    ops.copyin = uqo_copyin; ops.copyout = uqo_copyout;
+    ops.vm_create = uqo_vm_create; ops.vm_destroy = uqo_vm_destroy; ops.vm_map = uqo_vm_map; ops.vm_unmap = uqo_vm_unmap;
+    ops.bo_kmap = uqo_bo_kmap;
+    ops.submit = vcno_submit; ops.fence_signaled = vcno_signaled; ops.fence_wait = vcno_wait;
+    make_discovery(&disc);
+    rdna3_drm_device_init(&dd, &ops, &disc, 0x747E, 0xC8, 0, 16ull << 30, 256ull << 20, 8ull << 30);
+    CHECK(rdna3_drm_file_open(&dd, &f1) == 0);
+
+    /* without the video block (rdna3vcn=0) nothing changes */
+    for (t = AMDGPU_HW_IP_UVD; t <= AMDGPU_HW_IP_VCN_JPEG; t++) {
+        memset(&ip, 0xff, sizeof(ip));
+        CHECK(vcn_info(&f1, AMDGPU_INFO_HW_IP_INFO, t, &ip, sizeof(ip)) == 0);
+        CHECK(ip.available_rings == 0 && ip.hw_ip_version_major == 0 && ip.ip_discovery_version == 0 &&
+              ip.ib_start_alignment == 32 && ip.ib_size_alignment == 32);
+        n = 7;
+        CHECK(vcn_info(&f1, AMDGPU_INFO_HW_IP_COUNT, t, &n, 4) == 0 && n == 0);
+    }
+    memset(&caps, 0xff, sizeof(caps));
+    CHECK(vcn_info(&f1, AMDGPU_INFO_VIDEO_CAPS, AMDGPU_INFO_VIDEO_CAPS_DECODE, &caps, sizeof(caps)) == 0);
+    for (t = 0; t < AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_COUNT; t++)
+        CHECK(caps.codec_info[t].valid == 0 && caps.codec_info[t].max_width == 0);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_VIDEO_CAPS, 7, &caps, sizeof(caps)) == 0);
+    CHECK(vcn_cs(&f1, 0, AMDGPU_HW_IP_VCN_ENC, 0, va, 16, NULL) == -RD_EINVAL);
+
+    /* the block is up: amdgpu_kms.c's answers */
+    rdna3_drm_device_set_vcn(&dd, AMD_IP_VERSION(4, 0, 0), 2, 0, 3, 1);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_HW_IP_INFO, AMDGPU_HW_IP_VCN_DEC, &ip, sizeof(ip)) == 0);
+    CHECK(ip.hw_ip_version_major == 4 && ip.hw_ip_version_minor == 0 && ip.ip_discovery_version == 0x040000 &&
+          ip.available_rings == 0 && ip.ib_start_alignment == 256 && ip.ib_size_alignment == 64);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_HW_IP_INFO, AMDGPU_HW_IP_VCN_ENC, &ip, sizeof(ip)) == 0);
+    CHECK(ip.hw_ip_version_major == 4 && ip.ip_discovery_version == 0x040000 && ip.available_rings == 1 &&
+          ip.ib_start_alignment == 256 && ip.ib_size_alignment == 4);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_HW_IP_INFO, AMDGPU_HW_IP_VCN_JPEG, &ip, sizeof(ip)) == 0);
+    CHECK(ip.hw_ip_version_major == 4 && ip.ip_discovery_version == 0x040000 && ip.available_rings == 1 &&
+          ip.ib_start_alignment == 256 && ip.ib_size_alignment == 64);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_HW_IP_INFO, AMDGPU_HW_IP_UVD, &ip, sizeof(ip)) == 0 && ip.available_rings == 0 &&
+          ip.hw_ip_version_major == 0);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_HW_IP_COUNT, AMDGPU_HW_IP_VCN_DEC, &n, 4) == 0 && n == 2);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_HW_IP_COUNT, AMDGPU_HW_IP_VCN_ENC, &n, 4) == 0 && n == 2);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_HW_IP_COUNT, AMDGPU_HW_IP_VCN_JPEG, &n, 4) == 0 && n == 1);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_HW_IP_COUNT, AMDGPU_HW_IP_UVD, &n, 4) == 0 && n == 0);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_VIDEO_CAPS, AMDGPU_INFO_VIDEO_CAPS_DECODE, &caps, sizeof(caps)) == 0);
+    CHECK(caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC].valid &&
+          caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC].max_width == 4096 &&
+          caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC].max_level == 52);
+    CHECK(caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_HEVC].max_pixels_per_frame == 8192u * 4352u &&
+          caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_HEVC].max_level == 186);
+    CHECK(caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_JPEG].max_width == 16384 &&
+          caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_VP9].valid &&
+          caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_AV1].valid &&
+          !caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG2].valid &&
+          !caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_VC1].valid);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_VIDEO_CAPS, AMDGPU_INFO_VIDEO_CAPS_ENCODE, &caps, sizeof(caps)) == 0);
+    CHECK(caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC].valid &&
+          caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_HEVC].valid &&
+          caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_AV1].valid &&
+          !caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_JPEG].valid &&
+          !caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_VP9].valid &&
+          caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC].max_level == 0);
+    CHECK(vcn_info(&f1, AMDGPU_INFO_VIDEO_CAPS, 7, &caps, sizeof(caps)) == -RD_EINVAL);
+    /* VCN0 harvested: VCN1's tables (no AV1 encode or decode) */
+    dd.vcn_harvest = 1;
+    CHECK(vcn_info(&f1, AMDGPU_INFO_VIDEO_CAPS, AMDGPU_INFO_VIDEO_CAPS_DECODE, &caps, sizeof(caps)) == 0 &&
+          !caps.codec_info[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_AV1].valid);
+    dd.vcn_harvest = 3;
+    CHECK(vcn_info(&f1, AMDGPU_INFO_VIDEO_CAPS, AMDGPU_INFO_VIDEO_CAPS_DECODE, &caps, sizeof(caps)) == -RD_EINVAL);
+    dd.vcn_harvest = 0;
+
+    /* the client's IB and message BOs */
+    hib = uq_gem(&f1, 8192, AMDGPU_GEM_DOMAIN_VRAM);
+    hmsg = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    hj = uq_gem(&f1, 4096, AMDGPU_GEM_DOMAIN_VRAM);
+    CHECK(hib && hmsg && hj && uq_va(&f1, hib, va, 8192) == 0 && uq_va(&f1, hmsg, va + 0x10000, 4096) == 0 &&
+          uq_va(&f1, hj, va + 0x20000, 4096) == 0);
+    ibp = S.vram + rdna3_drm_bo_lookup(&f1, hib)->vram_offset;
+    msgp = S.vram + rdna3_drm_bo_lookup(&f1, hmsg)->vram_offset;
+    jp = S.vram + rdna3_drm_bo_lookup(&f1, hj)->vram_offset;
+
+    /* a context's first job: the entity goes to VCN1 (VCN0 starts with a
+     * score of one), an H264 session stays there, fences by context */
+    c1 = vcn_ctx(&f1);
+    init0 = S.vcn.enc_init;
+    n = vcn_enc_ib(ib, va + 0x10000, 1, 0x08000001);
+    memcpy(ibp, ib, 4ull * n);
+    CHECK(vcn_cs(&f1, c1, AMDGPU_HW_IP_VCN_ENC, 1, va, n, NULL) == -RD_EINVAL);   /* one ring only */
+    CHECK(vcn_cs(&f1, c1, AMDGPU_HW_IP_VCN_ENC, 0, va, n, &h) == 0 && vcno_last_ring == 1 && h);
+    CHECK(S.vcn.enc_init == init0 + 1 && S.vcn.last_ib_inst == 1 && S.vcn.last_ib_vmid == 5 &&
+          S.vcn.checksum_bad == 0 && S.vcn.ib_faults == 0);
+    CHECK(vcn_wait_cs(&f1, c1, AMDGPU_HW_IP_VCN_ENC, h, &st) == 0 && st == 0);
+    CHECK(f1.vcn_entity[c1] == 2 && f1.vcn_entity_jobs[c1] == 1);
+    /* AV1 encode in a context's first job: limit_sched moves it to VCN0 */
+    c2 = vcn_ctx(&f1);
+    n = vcn_enc_ib(ib, va + 0x10000, 2, 0x08000001);
+    memcpy(ibp, ib, 4ull * n);
+    CHECK(vcn_cs(&f1, c2, AMDGPU_HW_IP_VCN_ENC, 0, va, n, &h) == 0 && vcno_last_ring == 0 && f1.vcn_entity[c2] == 1);
+    CHECK(S.vcn.last_ib_inst == 0 && vcn_wait_cs(&f1, c2, AMDGPU_HW_IP_VCN_ENC, h, &st) == 0 && st == 0);
+    CHECK(vcn_cs(&f1, c2, AMDGPU_HW_IP_VCN_ENC, 0, va, n, &h) == 0 && vcno_last_ring == 0);   /* VCN0 takes anything */
+    /* ... but not once the VCN1 entity ran a job */
+    n = vcn_enc_ib(ib, va + 0x10000, 2, 0x08000001);
+    memcpy(ibp, ib, 4ull * n);
+    CHECK(vcn_cs(&f1, c1, AMDGPU_HW_IP_VCN_ENC, 0, va, n, NULL) == -RD_EINVAL && f1.vcn_entity[c1] == 2);
+    /* decode: H264 stays on VCN1, AV1 (0x13) goes to VCN0 */
+    c3 = vcn_ctx(&f1);
+    dec0 = S.vcn.dec_create;
+    vcn_dec_create_msg((uint32_t *)msgp, 0x7, 0x38);
+    n = vcn_dec_ib(ib, va + 0x10000);
+    memcpy(ibp, ib, 4ull * n);
+    CHECK(vcn_cs(&f1, c3, AMDGPU_HW_IP_VCN_ENC, 0, va, n, &h) == 0 && vcno_last_ring == 1 &&
+          S.vcn.dec_create == dec0 + 1);
+    c4 = vcn_ctx(&f1);
+    vcn_dec_create_msg((uint32_t *)msgp, 0x13, 0x38);
+    CHECK(vcn_cs(&f1, c4, AMDGPU_HW_IP_VCN_ENC, 0, va, n, &h) == 0 && vcno_last_ring == 0 &&
+          S.vcn.dec_create == dec0 + 2 && f1.vcn_entity[c4] == 1);
+    /* vcn_v4_0_dec_msg's checks (on a new VCN1 entity) */
+    {
+        uint32_t c5 = vcn_ctx(&f1), c6 = vcn_ctx(&f1), c7 = vcn_ctx(&f1);
+        vcn_dec_create_msg((uint32_t *)msgp, 0x13, 0x2000);   /* longer than its BO */
+        CHECK(vcn_cs(&f1, c5, AMDGPU_HW_IP_VCN_ENC, 0, va, n, NULL) == -RD_EINVAL);
+        vcn_dec_create_msg((uint32_t *)msgp, 0x13, 0x38);
+        n = vcn_dec_ib(ib, va + 0x10004);                      /* not 8-byte aligned */
+        memcpy(ibp, ib, 4ull * n);
+        CHECK(vcn_cs(&f1, c6, AMDGPU_HW_IP_VCN_ENC, 0, va, n, NULL) == -RD_EINVAL);
+        n = vcn_dec_ib(ib, va + 0x50000);                      /* not mapped */
+        memcpy(ibp, ib, 4ull * n);
+        CHECK(vcn_cs(&f1, c7, AMDGPU_HW_IP_VCN_ENC, 0, va, n, NULL) == -RD_EINVAL);
+    }
+    /* amdgpu_cs_patch_ibs: the IB inside one mapping */
+    CHECK(vcn_cs(&f1, c2, AMDGPU_HW_IP_VCN_ENC, 0, va + 0x40000, 16, NULL) == -RD_EINVAL);
+    CHECK(vcn_cs(&f1, c2, AMDGPU_HW_IP_VCN_ENC, 0, va + 8192 - 16, 8, NULL) == -RD_EINVAL);
+    /* a freed context's entity is gone with it */
+    {
+        union drm_amdgpu_ctx c;
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_FREE_CTX;
+        c.in.ctx_id = c1;
+        CHECK(UQ_IOCTL(&f1, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 && f1.vcn_entity[c1] == 0 &&
+              f1.vcn_entity_jobs[c1] == 0);
+    }
+
+    /* JPEG: the checked copy runs (pitch register), bad packets are refused */
+    {
+        uint32_t jib[16], i, before = S.vcn.jpeg_ibs;
+        jib[0] = PACKETJ(regUVD_JPEG_PITCH_INTERNAL_OFFSET, 0, 0, PACKETJ_TYPE0);
+        jib[1] = 0x1234ABCD;
+        for (i = 2; i < 16; i += 2) {
+            jib[i] = PACKETJ(0, 0, 0, PACKETJ_TYPE6);
+            jib[i + 1] = 0;
+        }
+        memcpy(jp, jib, sizeof(jib));
+        CHECK(vcn_cs(&f1, c2, AMDGPU_HW_IP_VCN_JPEG, 0, va + 0x20000, 16, &h) == 0 &&
+              vcno_last_ip == AMDGPU_HW_IP_VCN_JPEG);
+        CHECK(vcn_wait_cs(&f1, c2, AMDGPU_HW_IP_VCN_JPEG, h, &st) == 0 && st == 0);
+        CHECK(S.reg[VCNR(0, regUVD_JPEG_PITCH)] == 0x1234ABCD && S.vcn.jpeg_ibs == before + 1 &&
+              S.vcn.jpeg_ib_vmid == 0 && S.vcn.jpeg_vmid == 5 && S.vcn.jpeg_bad == 0);
+        jib[2] = PACKETJ(0, 0, 0, PACKETJ_TYPE7);              /* a trap from userspace */
+        memcpy(jp, jib, sizeof(jib));
+        CHECK(vcn_cs(&f1, c2, AMDGPU_HW_IP_VCN_JPEG, 0, va + 0x20000, 16, NULL) == -RD_EINVAL);
+        jib[2] = PACKETJ(0x1000, 0, 0, PACKETJ_TYPE0);         /* outside the JPEG registers */
+        memcpy(jp, jib, sizeof(jib));
+        CHECK(vcn_cs(&f1, c2, AMDGPU_HW_IP_VCN_JPEG, 0, va + 0x20000, 16, NULL) == -RD_EINVAL);
+        CHECK(S.vcn.jpeg_ibs == before + 1);
+    }
+    rdna3_drm_file_close(&f1);
+    rdna3_drm_device_fini(&dd);
+}
+
 static void run(const char *fwdir)
 {
     static amd_ucode_plan plan;
@@ -5226,7 +6270,7 @@ static void run(const char *fwdir)
     amd_fw_blob_ref blobs[AMD_BLOB_COUNT];
     amd_discovery disc;
     rdna3_os os = { NULL, sim_udelay, sim_msleep, sim_vlog, sim_wmb, sim_rd, sim_wr,
-                     sim_vram_written, sim_doorbell };
+                     sim_vram_written, sim_doorbell, sim_doorbell32 };
     const uint8_t *sos = NULL;
     size_t sos_len = 0;
     uint32_t smu_ver = 0, ifv = 0;
@@ -6382,6 +7426,12 @@ static void run(const char *fwdir)
             (void)fences;
         }
 
+        /* VCN 4.0 / JPEG 4.0 (rdna3vcn=1): bring-up, rings, power gating, UAPI */
+        {
+            static rdna3_vcn vcn;
+            test_vcn(&dev, &psp, &plan, blobs, &gmc, &vcn);
+            test_vcn_uapi(&dev, &gmc, &vcn);
+        }
     }
 
     /* DCN 3.2: the GOP left 2560x1440 linear ARGB8888 on pipe 1 -> OTG 2,
