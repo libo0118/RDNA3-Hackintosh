@@ -24,6 +24,7 @@
 #include "gen/dcn_3_2_0_dsc.h"
 #include "dcn32_dp_mst.h"
 #include "dcn32_hwseq.h"
+#include "dcn32_audio.h"
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -178,19 +179,38 @@ void dcn32_modeset_head_mode(const rdna3_dcn_head *h, uint32_t pclk_khz, rdna3_m
  * the HDMI 1.4 limit; with one dcn10_link_encoder_validate_output_with_stream
  * for an RGB 8 bpc stream (phy_pix_clk = get_tmds_output_pixel_clock_100hz),
  * above 340 MHz only with RD_HDMI_20 */
-static int tmds_mode_ok(const rdna3_dcn_head *h, const rdna3_hdmi_cfg *hc, const rdna3_mode *m)
+static int tmds_fmt_ok(const rdna3_hdmi_cfg *hc, uint32_t sig, const rdna3_mode *m, const rdna3_crtc_format *f)
 {
     rdna3_link_enc_features ft;
-    rdna3_crtc_format f = { RD_PIXEL_ENCODING_RGB, RD_COLOR_DEPTH_888, 0, 0 };
-    uint32_t sig = h->dig_mode == 3 ? RD_SIGNAL_HDMI_TYPE_A : RD_SIGNAL_DVI_SINGLE_LINK, phy;
-
-    if (!hc || !(hc->flags & RD_HDMI_STREAM))
-        return m->pixel_khz <= 340000;
-    phy = dcn32_tmds_output_pixel_clock_100hz(m->pixel_khz * 10, &f) / 10;
+    uint32_t phy = dcn32_tmds_output_pixel_clock_100hz(m->pixel_khz * 10, f) / 10;
     if (phy > 340000 && !(hc->flags & RD_HDMI_20))
         return 0;
     dcn32_link_enc_features(hc->enc_caps, &ft);
-    return dcn32_link_enc_validate_output(&ft, sig, sig, &f, m->pixel_khz, phy, hc->max_tmds_clk_mhz);
+    return dcn32_link_enc_validate_output(&ft, sig, sig, f, m->pixel_khz, phy, hc->max_tmds_clk_mhz);
+}
+
+static int tmds_mode_ok(const rdna3_dcn_head *h, const rdna3_hdmi_cfg *hc, const rdna3_mode *m, rdna3_crtc_format *f,
+                        uint32_t *cs)
+{
+    uint32_t sig = h->dig_mode == 3 ? RD_SIGNAL_HDMI_TYPE_A : RD_SIGNAL_DVI_SINGLE_LINK;
+    int bpc;
+
+    f->pixel_encoding = RD_PIXEL_ENCODING_RGB;
+    f->color_depth = RD_COLOR_DEPTH_888;
+    f->dsc = f->dsc_ycbcr422_simple = 0;
+    *cs = RD_CS_SRGB;
+    if (!hc || !(hc->flags & RD_HDMI_STREAM))
+        return m->pixel_khz <= 340000;
+    if (!(hc->flags & RD_HDMI_FMT))
+        return tmds_fmt_ok(hc, sig, m, f);
+    /* rdna3fmt: create_validate_stream_for_sink - amdgpu_dm's format at the
+     * connector's max bpc, 2 bpc less while dc_validate_stream refuses it */
+    for (bpc = hc->max_bpc ? (int)hc->max_bpc : 16; bpc >= 6; bpc -= 2) {
+        *cs = dcn32_output_format(&hc->color, m, sig, (uint32_t)bpc, hc->force_yuv422, f);
+        if (tmds_fmt_ok(hc, sig, m, f))
+            return 1;
+    }
+    return 0;
 }
 
 static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
@@ -236,7 +256,7 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
         return RD_MODESET_NO_TIMING;
     if (m->interlaced)
         return RD_MODESET_INTERLACED;
-    if (h->dig_mode != 0 && h->dig_mode != 5 && !tmds_mode_ok(h, hc, m))
+    if (h->dig_mode != 0 && h->dig_mode != 5 && !tmds_mode_ok(h, hc, m, &ms->fmt_want, &ms->cs_want))
         return RD_MODESET_TMDS_CLOCK;
     if (h->dig_mode == 0 || h->dig_mode == 5) {
         rdna3_dp_link_settings ls;
@@ -342,6 +362,14 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
         ms->hdmi = *hc;
         ms->tmds_want = *m;
         dcn32_modeset_head_mode(h, cur_pclk_khz, &ms->tmds_cur);
+        /* rdna3fmt: the running format (the GOP's RGB 8 bpc until a mode set changed it) */
+        ms->fmt_cur = hc->running;
+        ms->cs_cur = hc->running_cs;
+        if (!ms->fmt_cur.pixel_encoding || !ms->fmt_cur.color_depth) {
+            ms->fmt_cur.pixel_encoding = RD_PIXEL_ENCODING_RGB;
+            ms->fmt_cur.color_depth = RD_COLOR_DEPTH_888;
+            ms->cs_cur = RD_CS_SRGB;
+        }
     }
 
     /* dml32_CalculateRequiredDispclk / DPPCLK after the ODM split */
@@ -527,10 +555,11 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
 
 /* get_clock_source_id: a TMDS stream's pixel clock comes from the PHY PLL of
  * its transmitter (CLOCK_SOURCE_COMBO_PHY_PLL0 + n = ATOM_COMBOPHY_PLL0 + n) */
-static int vbios_pclk(rdna3_dmub *dm, const rdna3_dcn_modeset *ms, uint32_t khz)
+static int vbios_pclk(rdna3_dmub *dm, const rdna3_dcn_modeset *ms, uint32_t khz, uint8_t deep_color_ratio)
 {
     rdna3_pixclk_v1_7 p = { 0 };
     p.pixclk_100hz = khz * 10;
+    p.deep_color_ratio = deep_color_ratio;
     p.pll_id = (uint8_t)(RD_ATOM_COMBOPHY_PLL0 + ms->be);
     p.encoderobjid = ms->encoder_id;
     p.encoder_mode = ms->dig_mode == 2 ? RD_ATOM_ENCODER_MODE_DVI : RD_ATOM_ENCODER_MODE_HDMI;
@@ -566,22 +595,53 @@ static int vbios_stream(rdna3_dmub *dm, const rdna3_dcn_modeset *ms, uint32_t kh
 
 /* one direction of the switch: stream down (running at 'running_khz'),
  * timing 'r' (mode 'tm'), stream up */
+/* transmitter_color_depth_to_atom: PIXEL_CLOCK_V7_DEEPCOLOR_RATIO_* */
+static uint8_t deep_color_ratio(uint32_t color_depth)
+{
+    return color_depth == RD_COLOR_DEPTH_101010 ? 1 : color_depth == RD_COLOR_DEPTH_121212 ? 2
+         : color_depth == RD_COLOR_DEPTH_161616 ? 3 : 0;
+}
+
 static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_modeset *ms,
                    const rdna3_modeset_regs *r, const rdna3_mode *tm, uint64_t mc, uint32_t pitch_px,
-                   uint32_t running_khz)
+                   uint32_t running_khz, int want)
 {
     int symclk_on_tx_off = 0;
-    /* rdna3hdmi: DC's HDMI stream (an RGB 8 bpc stream, phy_pix_clk = the pixel clock) */
-    const rdna3_crtc_format fmt = { RD_PIXEL_ENCODING_RGB, RD_COLOR_DEPTH_888, 0, 0 };
     int dc_tmds = (ms->hdmi.flags & RD_HDMI_STREAM) != 0, hdmi = dc_tmds && ms->dig_mode == 3;
+    /* rdna3hdmi: DC's HDMI stream, RGB 8 bpc (phy_pix_clk = the pixel clock);
+     * rdna3fmt (RD_HDMI_FMT): amdgpu_dm's format of this direction, its
+     * TMDS clock (get_tmds_output_pixel_clock_100hz), the PHY PLL at the
+     * deep color clock (dcn3_get_pix_clk_dividers + the deep color ratio) */
+    const int fmtx = dc_tmds && (ms->hdmi.flags & RD_HDMI_FMT) != 0;
+    const rdna3_crtc_format rgb = { RD_PIXEL_ENCODING_RGB, RD_COLOR_DEPTH_888, 0, 0 };
+    const rdna3_crtc_format fmt = fmtx ? (want ? ms->fmt_want : ms->fmt_cur) : rgb;
+    const rdna3_crtc_format ofmt = fmtx ? (want ? ms->fmt_cur : ms->fmt_want) : rgb;
+    const uint32_t cs = fmtx ? (want ? ms->cs_want : ms->cs_cur) : RD_CS_SRGB;
+    const uint32_t ocs = fmtx ? (want ? ms->cs_cur : ms->cs_want) : RD_CS_SRGB;
+    const rdna3_modeset_regs *ro = want ? &ms->cur : &ms->want;
+    const uint32_t phy = fmtx ? dcn32_tmds_output_pixel_clock_100hz(r->pclk_khz * 10, &fmt) / 10 : r->pclk_khz;
+    const uint32_t pll_cd = dcn32_pix_clk_color_depth(&fmt), opll_cd = dcn32_pix_clk_color_depth(&ofmt);
+    const uint32_t pll = fmtx && hdmi ? dcn32_hdmi_pll_clk_khz(r->pclk_khz, pll_cd) : r->pclk_khz;
+    const uint32_t opll = fmtx && hdmi ? dcn32_hdmi_pll_clk_khz(running_khz, opll_cd) : running_khz;
+    rdna3_audio_stream *au = hdmi ? ms->audio : NULL;
     uint32_t v;
     int ret, ret2;
 
-    /* link_set_dpms_off: set_avmute (dcn30_set_avmute: two frames), blank */
+    /* link_set_dpms_off: set_avmute (dcn30_set_avmute: two frames), the
+     * audio stream off (rdna3audio), blank */
     if (hdmi)
         dcn32_enc_set_avmute(d, ms->fe, 1, (int)ms->otg);
+    if (au)
+        dcn32_audio_disable_stream(au);
     /* hubp2_set_blank, dcn10_link_encoder_disable_output */
     dcn32_set_blank(d, dc, ms->head, 1);
+    if (fmtx) {
+        /* dcn20_blank_pixel_data: the DPG's black of the running color
+         * space; dcn20_wait_for_blank_complete */
+        dcn32_blank_pixel_data(d, ms->opp, 1, ocs, ofmt.color_depth, ro->h_active, ro->v_active);
+        if (!dcn32_wait_for_blank_complete(d, ms->opp))
+            RLOG(d, "modeset: head %u: OPP %u: DPG blank not complete", ms->head, ms->opp);
+    }
     if (hdmi) {
         /* the sink back to HDMI 1.4 rates ("vbios only handles 165Mhz"),
          * then dce110_disable_stream's info packets off and attribute reset */
@@ -596,7 +656,7 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
      * pixel clock again (SYMCLK_ON_TX_OFF) */
     if (ms->dc_seq && ms->dig_mode == 3 && running_khz &&
         GET(RI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S), OTG0_OTG_CONTROL, OTG_MASTER_EN)) {
-        ret2 = vbios_pclk(dm, ms, running_khz);
+        ret2 = vbios_pclk(dm, ms, opll, fmtx && hdmi ? deep_color_ratio(opll_cd) : 0);
         if (ret2)
             RERR(d, "modeset: head %u: SYMCLK on with TX off (%u kHz) failed (%d)", ms->head, running_khz, ret2);
         else
@@ -617,11 +677,38 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
         if (ret2 && !ret)
             ret = ret2;
     }
-    /* dcn31_program_pix_clk */
-    ret2 = vbios_pclk(dm, ms, r->pclk_khz);
+    /* the back end's audio endpoint off (dcn20_reset_back_end_for_pipe) */
+    if (au)
+        dcn32_audio_reset_back_end(au);
+    /* dcn31_program_pix_clk (rdna3fmt: the deep color PLL clock and ratio,
+     * dce112_program_pixel_clk_resync) */
+    ret2 = vbios_pclk(dm, ms, pll, fmtx && hdmi ? deep_color_ratio(pll_cd) : 0);
     if (ret2 && !ret)
         ret = ret2;
+    if (fmtx && hdmi)
+        dcn32_program_pixel_clk_resync(d, ms->be, RD_SIGNAL_HDMI_TYPE_A, pll_cd, 0);
     write_regs(d, ms->pipe, ms->otg, ms->opp, r);
+    if (au) {
+        /* dce110_setup_audio_dto, then dce110_apply_single_controller_ctx_to_hw's
+         * build_audio_output, setup_audio_output, az_configure */
+        dcn32_audio_build_output(au, tm, &fmt, r->pclk_khz, NULL, NULL, 0, 0);
+        dcn32_audio_setup_dto(au);
+        dcn32_audio_setup_output(au);
+    }
+    if (fmtx) {
+        /* dcn20_program_output_csc (+ the MPC denorm), then the OPP:
+         * opp_program_fmt with build_pipe_hw_param's bit depth reduction
+         * and clamping, opp_set_dyn_expansion; the DPG at the new size */
+        rdna3_bit_depth_params bd;
+        rdna3_clamping_params cl;
+        uint32_t sig = hdmi ? RD_SIGNAL_HDMI_TYPE_A : RD_SIGNAL_DVI_SINGLE_LINK;
+        dcn32_program_output_csc(d, ms->opp, cs, fmt.color_depth);
+        dcn32_build_bit_depth_params(RD_DITHER_OPTION_DEFAULT, fmt.color_depth, fmt.pixel_encoding, &bd);
+        dcn32_build_clamping_params(fmt.color_depth, fmt.pixel_encoding, &cl);
+        dcn32_opp_program_fmt(d, ms->opp, &bd, &cl);
+        dcn32_opp_set_dyn_expansion(d, ms->opp, fmt.color_depth, sig);
+        dcn32_opp_program_dpg_dimensions(d, ms->opp, r->h_active, r->v_active);
+    }
     /* hubp2_program_surface_config's pitch and the address (HIGH first) */
     v = RI(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, ms->pipe, HUBP_S);
     WI(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, ms->pipe, HUBP_S, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
@@ -629,12 +716,12 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
     WI(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, ms->pipe, HUBP_S, (uint32_t)mc);
     /* the DIG front end for the new clock; no infoframes (the GOP's AVI
      * frame named its own mode) */
-    ret2 = vbios_stream(dm, ms, r->pclk_khz);
+    ret2 = vbios_stream(dm, ms, phy);
     if (ret2 && !ret)
         ret = ret2;
     if (hdmi) {
         /* enc32_stream_encoder_hdmi_set_stream_attribute's register half */
-        dcn32_enc_hdmi_set_stream_attribute(d, ms->fe, &fmt, r->pclk_khz, ms->hdmi.lte_340_scramble);
+        dcn32_enc_hdmi_set_stream_attribute(d, ms->fe, &fmt, phy, ms->hdmi.lte_340_scramble);
     } else {
         if (dc_tmds)
             dcn32_enc_dvi_set_stream_attribute(d, ms->fe, &fmt);
@@ -651,9 +738,9 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
     /* enable_link_hdmi: write_scdc_data, dcn10_link_encoder_enable_tmds_output,
      * read_scdc_data */
     if (hdmi && ms->hdmi.ddc >= 0 &&
-        (ret2 = dcn32_hdmi_write_scdc(d, (uint32_t)ms->hdmi.ddc, r->pclk_khz, ms->hdmi.lte_340_scramble)) != 0)
-        RLOG(d, "modeset: head %u: SCDC write for %u kHz failed (%d)", ms->head, r->pclk_khz, ret2);
-    ret2 = vbios_tx(dm, ms, RD_ATOM_TX_ENABLE, r->pclk_khz);
+        (ret2 = dcn32_hdmi_write_scdc(d, (uint32_t)ms->hdmi.ddc, phy, ms->hdmi.lte_340_scramble)) != 0)
+        RLOG(d, "modeset: head %u: SCDC write for %u kHz failed (%d)", ms->head, phy, ret2);
+    ret2 = vbios_tx(dm, ms, RD_ATOM_TX_ENABLE, phy);
     if (ret2 && !ret)
         ret = ret2;
     if (hdmi) {
@@ -673,8 +760,12 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
     /* clear the sticky underflow bit for the check, then unblank */
     v = RI(d, regHUBP0_DCHUBP_CNTL, ms->pipe, HUBP_S);
     WI(d, regHUBP0_DCHUBP_CNTL, ms->pipe, HUBP_S, SET(v, HUBP0_DCHUBP_CNTL, HUBP_UNDERFLOW_CLEAR, 1));
+    if (fmtx)
+        dcn32_blank_pixel_data(d, ms->opp, 0, cs, fmt.color_depth, r->h_active, r->v_active);
     dcn32_set_blank(d, dc, ms->head, 0);
-    /* link_set_dpms_on: AV mute off */
+    /* link_set_dpms_on: the audio stream (dce110_enable_audio_stream), AV mute off */
+    if (au)
+        dcn32_audio_enable_stream(au);
     if (hdmi)
         dcn32_enc_set_avmute(d, ms->fe, 0, -1);
     return ret;
@@ -857,7 +948,7 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
         dcn32_set_source(d, dc, sc, ms->head, old_mc, sc->native_w[ms->pipe], sc->native_h[ms->pipe], old_pitch_px);
     ret = ms->dp ? program_dp(d, dc, ms, &ms->want, &ms->dp_want, ms->dp_want_dsc, &ms->dp_want_dsc_cfg, mc, pitch_px,
                               ms->odm_want)
-                 : program(d, dm, dc, ms, &ms->want, &ms->tmds_want, mc, pitch_px, ms->cur.pclk_khz);
+                 : program(d, dm, dc, ms, &ms->want, &ms->tmds_want, mc, pitch_px, ms->cur.pclk_khz, 1);
     /* dce110_apply_ctx_to_hw: dcn32_resync_fifo_dccg_dio after the stream */
     if (ms->dc_seq)
         RLOG(d, "modeset: head %u: DIO FIFO resync (DISPCLK divider 0x%x)", ms->head, dcn32_resync_fifo_dccg_dio(d));
@@ -881,7 +972,7 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
             program_dp(d, dc, ms, &ms->cur, &ms->dp_cur, ms->dp_cur_dsc, &ms->dp_cur_dsc_cfg, old_mc, old_pitch_px,
                        ms->odm_cur);
         else
-            program(d, dm, dc, ms, &ms->cur, &ms->tmds_cur, old_mc, old_pitch_px, ms->want.pclk_khz);
+            program(d, dm, dc, ms, &ms->cur, &ms->tmds_cur, old_mc, old_pitch_px, ms->want.pclk_khz, 0);
         if (ms->dc_seq)
             dcn32_resync_fifo_dccg_dio(d);
 

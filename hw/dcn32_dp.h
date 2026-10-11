@@ -313,6 +313,7 @@ typedef struct rdna3_mst_alloc_table {
 } rdna3_mst_alloc_table;
 
 struct rdna3_mst_mgr;
+struct rdna3_audio_stream;
 
 /* struct dc_link_settings (no link rate set: eDP only) */
 typedef struct rdna3_dp_link_settings {
@@ -464,6 +465,11 @@ typedef struct rdna3_dp_link {
      * bandwidth check in the setting's encoding:
      * perform_link_training_with_retries); NULL otherwise */
     const rdna3_mode *lt_mode;
+    /* rdna3audio: the stream's audio (hw/dcn32_audio.h): set up with the
+     * stream (DIO or HPO as the link setting decides), on after the
+     * unblank (dce110_enable_audio_stream), off before the blank of
+     * link_set_dpms_off and the endpoint with the back end; NULL none */
+    struct rdna3_audio_stream *audio;
 } rdna3_dp_link;
 
 /* Fill the static part of 'l' (no hardware access). */

@@ -8,6 +8,8 @@
 #include "dcn32_hpo.h"
 #include "dcn32_hwseq.h"
 #include "gen/dcn_3_2_0_hpo.h"
+#include "gen/dcn_3_2_0_audio.h"
+#include "gen/dcn_3_2_0_fmt.h"
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -674,10 +676,18 @@ void dcn32_dccg_set_dpstreamclk(rdna3_dev *d, uint32_t src, uint32_t otg, uint32
     WN(d, DPSTREAMCLK_CNTL, 0, 0, v);
 }
 
+/* get_phy_mux_symclk: the PHYD32CLK remap of Yellow Carp B0 only (C -> F,
+ * D -> G); Navi 32 keeps the source */
+static uint32_t get_phy_mux_symclk(uint32_t src)
+{
+    return src;
+}
+
 /* dccg31_enable_symclk32_se: SYMCLK32_SE<hpo> from PHYD32CLK<phy> */
 void dcn32_dccg_enable_symclk32_se(rdna3_dev *d, uint32_t hpo_se, uint32_t phyd32clk)
 {
     uint32_t v;
+    phyd32clk = get_phy_mux_symclk(phyd32clk);
     if (hpo_se >= 4)
         return;
     v = RN(d, SYMCLK32_SE_CNTL, 0, 0);
@@ -696,4 +706,60 @@ void dcn32_dccg_disable_symclk32_se(rdna3_dev *d, uint32_t hpo_se)
     v = RN(d, SYMCLK32_SE_CNTL, 0, 0);
     v &= ~((SYMCLK32_SE_CNTL__SYMCLK32_SE0_SRC_SEL_MASK | SYMCLK32_SE_CNTL__SYMCLK32_SE0_EN_MASK) << (4 * hpo_se));
     WN(d, SYMCLK32_SE_CNTL, 0, 0, v);
+}
+
+/* dccg31_set_symclk32_le_root_clock_gating: the SYMCLK32_LE gates, only
+ * with debug.root_clock_optimization.bits.symclk32_le (off in DCN 3.2's
+ * debug defaults: 'rco' 0, nothing written) */
+static void dccg31_set_symclk32_le_root_clock_gating(rdna3_dev *d, uint32_t hpo_le, int enable, int rco)
+{
+    uint32_t m;
+    if (!rco)
+        return;
+    switch (hpo_le) {
+    case 0:
+        m = DCCG_GATE_DISABLE_CNTL3__SYMCLK32_LE0_GATE_DISABLE_MASK | DCCG_GATE_DISABLE_CNTL3__SYMCLK32_ROOT_LE0_GATE_DISABLE_MASK;
+        break;
+    case 1:
+        m = DCCG_GATE_DISABLE_CNTL3__SYMCLK32_LE1_GATE_DISABLE_MASK | DCCG_GATE_DISABLE_CNTL3__SYMCLK32_ROOT_LE1_GATE_DISABLE_MASK;
+        break;
+    default:
+        return;
+    }
+    WN(d, DCCG_GATE_DISABLE_CNTL3, 0, 0, (RN(d, DCCG_GATE_DISABLE_CNTL3, 0, 0) & ~m) | (enable ? m : 0));
+}
+
+/* dccg31_init (dccg32_funcs.dccg_init, from dcn32_init_hw): the HPO stream
+ * encoders back on REFCLK ("PHY disabled and SYMCLK32 for HPO SE sourced
+ * from PHYD32CLK will cause DCN to hang"); the SYMCLK32_LE root clock
+ * gating (rco off on DCN 3.2); the DPSTREAMCLK and PHYSYMCLK branches only
+ * run with root_clock_optimization's dpstream / physymclk bits, which DCN
+ * 3.2 leaves off */
+void dcn32_dccg_init(rdna3_dev *d)
+{
+    uint32_t i;
+    for (i = 0; i < RD_HPO_DP_STREAM_ENCS; i++)
+        dcn32_dccg_disable_symclk32_se(d, i);
+    dccg31_set_symclk32_le_root_clock_gating(d, 0, 0, 0);
+    dccg31_set_symclk32_le_root_clock_gating(d, 1, 0, 0);
+}
+
+/* dccg31_set_audio_dtbclk_dto: the audio DTO from DTBCLK (phase / modulo =
+ * the requested audio clock / the DTBCLK reference), else DTO select 3
+ * (no audio DTO) */
+void dcn32_dccg_set_audio_dtbclk_dto(rdna3_dev *d, uint32_t ref_dtbclk_khz, uint32_t req_audio_dtbclk_khz)
+{
+    uint32_t v;
+    if (ref_dtbclk_khz && req_audio_dtbclk_khz) {
+        uint32_t modulo = ref_dtbclk_khz * 1000;
+        uint32_t phase = (uint32_t)(((uint64_t)modulo * req_audio_dtbclk_khz + ref_dtbclk_khz - 1) / ref_dtbclk_khz);
+        WN(d, DCCG_AUDIO_DTBCLK_DTO_MODULO, 0, 0, modulo);
+        WN(d, DCCG_AUDIO_DTBCLK_DTO_PHASE, 0, 0, phase);
+        v = SET(RN(d, DCCG_AUDIO_DTO_SOURCE, 0, 0), DCCG_AUDIO_DTO_SOURCE, DCCG_AUDIO_DTO_SEL, 4);
+    } else {
+        WN(d, DCCG_AUDIO_DTBCLK_DTO_PHASE, 0, 0, 0);
+        WN(d, DCCG_AUDIO_DTBCLK_DTO_MODULO, 0, 0, 0);
+        v = SET(RN(d, DCCG_AUDIO_DTO_SOURCE, 0, 0), DCCG_AUDIO_DTO_SOURCE, DCCG_AUDIO_DTO_SEL, 3);
+    }
+    WN(d, DCCG_AUDIO_DTO_SOURCE, 0, 0, v);
 }

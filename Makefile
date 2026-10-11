@@ -18,6 +18,7 @@ HW      += hw/vcn40.c
 HW      += hw/dcn32_dsc.c hw/dp_mst.c hw/dcn32_dp_mst.c
 HW      += hw/dcn32_otg.c hw/dcn32_color.c hw/dcn32_hdmi.c hw/dcn32_hwseq.c
 HW      += hw/dcn32_hpo.c hw/dcn32_odm.c
+HW      += hw/dcn32_audio.c hw/dcn32_opp.c
 UAPI    := uapi/rdna3_drm.c
 COMMON_H := $(wildcard common/*.h) $(wildcard hw/*.h) $(wildcard uapi/*.h)
 
@@ -40,7 +41,7 @@ $(BUILD)/test_fw: tests/test_fw.c $(COMMON) $(COMMON_H) | $(BUILD)
 $(BUILD)/amd_fw_dump: tools/amd_fw_dump.c $(COMMON) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(INC) -o $@ tools/amd_fw_dump.c $(COMMON)
 
-$(BUILD)/sim_navi32: tests/sim_navi32.c tests/sim_display_dc.inc $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
+$(BUILD)/sim_navi32: tests/sim_navi32.c tests/sim_display_dc.inc tests/sim_display_hpo.inc tests/sim_display_audio.inc $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/sim_navi32.c $(COMMON) $(HW) $(UAPI)
 
 $(BUILD)/test_uapi: tests/test_uapi.c $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)

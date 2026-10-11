@@ -21,6 +21,7 @@
 #include "dcn32_otg.h"
 #include "dcn32_hwseq.h"
 #include "gen/dcn_3_2_0_hpo.h"
+#include "dcn32_audio.h"
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -3040,6 +3041,9 @@ static void dce110_disable_stream_hpo(rdna3_dp_link *l)
 void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l)
 {
     int hpo = l->hpo_active;
+    /* dce110_disable_audio_stream (rdna3audio) before the blank */
+    if (l->audio)
+        dcn32_audio_disable_stream(l->audio);
     /* the stream encoder's pixel mode the boot left (dio_se_pix_per_cycle) */
     if (!l->pix_per_cycle)
         l->pix_per_cycle = GET(RI(l->d, regDIG0_DIG_FIFO_CTRL0, l->fe, DIG_S), DIG0_DIG_FIFO_CTRL0,
@@ -3073,6 +3077,9 @@ void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l)
     if (hpo)
         dcn32_otg_set_out_mux(l->d, l->otg, 0 /* OUT_MUX_DIO */);
     l->hpo_active = 0;
+    /* dcn20_reset_back_end_for_pipe: the endpoint off */
+    if (l->audio)
+        dcn32_audio_reset_back_end(l->audio);
 }
 
 /* enable_link_dp: the source OUI again ("during mode switch we do
@@ -3224,6 +3231,26 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
                                           l->stream_dsc, 0);
     else
         enc2_stream_encoder_dp_set_stream_attribute(l, m);
+    /* rdna3audio: build_audio_output for the stream on this link setting,
+     * dce110_setup_audio_dto, setup_audio_output (DIO or HPO) and
+     * az_configure, as dce110_apply_single_controller_ctx_to_hw before
+     * link_set_dpms_on */
+    if (l->audio) {
+        rdna3_audio_stream *au = l->audio;
+        const rdna3_crtc_format rgb = { RD_PIXEL_ENCODING_RGB, RD_COLOR_DEPTH_888, 0, 0 };
+        au->d = l->d;
+        au->signal = l->mst ? RD_SIGNAL_DISPLAY_PORT_MST : RD_SIGNAL_DISPLAY_PORT;
+        au->fe = l->fe;
+        au->otg = l->otg;
+        au->hpo = hpo;
+        au->hpo_se = l->hpo_se;
+        au->dprefclk_khz = l->dprefclk_khz;
+        au->enabled = 0;
+        dcn32_audio_build_output(au, m, &rgb, m->pixel_khz / odm_cnt(l), cfg, &s, dcn32_dp_link_bw_kbps(l, &s),
+                                 dp_is_fec_supported(l));
+        dcn32_audio_setup_dto(au);
+        dcn32_audio_setup_output(au);
+    }
     /* DSC before the DIG FE and BE are connected (before the training), so
      * the bandwidth sent to the BE stays what the link carries */
     if (l->stream_dsc)
@@ -3288,6 +3315,9 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
         dcn32_unblank_stream(l, m->pixel_khz, l->cur_link_settings.link_rate ? l->cur_link_settings.link_rate
                                                                              : s.link_rate);
     enable_stream_features(l);
+    /* dce110_enable_audio_stream (rdna3audio) */
+    if (l->audio)
+        dcn32_audio_enable_stream(l->audio);
     RLOG(l->d, "dp: %s %u -> UNIPHY %u%s: %ux%u %u kHz on %s x%u%s%s%s: %s", hpo ? "HPO" : "DIG",
          hpo ? l->hpo_se : l->fe, l->be, l->mst ? " (MST)" : "", m->h_active, m->v_active, m->pixel_khz,
          rate_name(l->cur_link_settings.link_rate), l->cur_link_settings.lane_count,

@@ -41,6 +41,7 @@ CSRC   += ../hw/vcn40.c
 CSRC   += ../hw/dcn32_dsc.c ../hw/dp_mst.c ../hw/dcn32_dp_mst.c
 CSRC   += ../hw/dcn32_otg.c ../hw/dcn32_color.c ../hw/dcn32_hdmi.c ../hw/dcn32_hwseq.c
 CSRC   += ../hw/dcn32_hpo.c ../hw/dcn32_odm.c
+CSRC   += ../hw/dcn32_audio.c ../hw/dcn32_opp.c
 HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../hw/gen/*.h ../uapi/*.h ../third_party/amd/*.h ../accel/rdna3k_abi.h)
 OBJS   := $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(CXXSRC))) \
           $(patsubst %.c,$(OBJDIR)/%.o,$(notdir $(CSRC)))

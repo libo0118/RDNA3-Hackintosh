@@ -64,6 +64,7 @@
 #include "dcn32_odm.h"
 #include "dmub32.h"
 #include "dcn32_hdmi.h"
+#include "dcn32_opp.h"
 #include "vbios.h"
 
 #ifdef __cplusplus
@@ -73,6 +74,9 @@ extern "C" {
 /* the HDMI half of DC's TMDS stream (rdna3hdmi) */
 #define RD_HDMI_STREAM 0x1   /* stream attributes, infoframes, AV mute, SCDC: as DC */
 #define RD_HDMI_20     0x2   /* TMDS character rates above 340 MHz (HDMI 2.0 scrambling) */
+#define RD_HDMI_FMT    0x4   /* rdna3fmt: amdgpu_dm's output format (YCbCr 4:4:4, deep color), the OPP's
+                              * formatter, the MPC's output CSC, the DPG blank (hw/dcn32_opp.h) */
+struct rdna3_audio_stream;
 typedef struct rdna3_hdmi_cfg {
     uint32_t flags;              /* RD_HDMI_* */
     int32_t  ddc;                /* the connector's DDC line (SCDC), -1 none */
@@ -80,6 +84,15 @@ typedef struct rdna3_hdmi_cfg {
     uint8_t  hdmi_sink;          /* the EDID has an HDMI VSDB (edid_caps.edid_hdmi) */
     uint8_t  lte_340_scramble;   /* HF-VSDB: timing.flags.LTE_340MCSC_SCRAMBLE */
     uint32_t max_tmds_clk_mhz;   /* the EDID's max TMDS clock, 0 unknown */
+    /* RD_HDMI_FMT: the sink's colour caps, the connector's max bpc (16 =
+     * amdgpu's default: the EDID's), YCbCr 4:2:2 forced (this port's
+     * switch), and the format the last mode set left running (zero: the
+     * GOP's RGB 8 bpc) */
+    rdna3_sink_color_caps color;
+    uint32_t max_bpc;
+    int      force_yuv422;
+    rdna3_crtc_format running;
+    uint32_t running_cs;
 } rdna3_hdmi_cfg;
 
 /* everything one timing needs, as register values */
@@ -124,6 +137,16 @@ typedef struct rdna3_dcn_modeset {
      * the new and the running timing as modes (the AVI infoframe) */
     rdna3_hdmi_cfg hdmi;
     rdna3_mode tmds_cur, tmds_want;
+    /* RD_HDMI_FMT: the output format and color space (RD_CS_*) of the new
+     * and of the running timing */
+    rdna3_crtc_format fmt_want, fmt_cur;
+    uint32_t cs_want, cs_cur;
+    /* rdna3audio (the caller sets it after the plan): the stream's audio
+     * (hw/dcn32_audio.h) on an HDMI head with the HDMI configuration:
+     * dce110_disable_audio_stream before the blank, the endpoint off with
+     * the back end, then the DTO, setup_audio_output, az_configure and
+     * dce110_enable_audio_stream around the new stream; NULL none */
+    struct rdna3_audio_stream *audio;
     /* rdna3dcseq (the caller sets it after the plan): DC's sequence around
      * the switch as dcn32_hwseq has it: apply_symclk_on_tx_off_wa on an
      * HDMI head (the pixel clock again after TransmitterControl DISABLE

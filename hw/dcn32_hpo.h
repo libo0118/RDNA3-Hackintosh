@@ -22,7 +22,10 @@
  *   dccg/dcn32/dcn32_dccg.c   dccg32_set_dtbclk_dto, dccg32_set_dtbclk_p_src,
  *                       dccg32_set_dpstreamclk, dccg32_set_pixel_rate_div,
  *                       dccg32_get_pixel_rate_div
- *   dccg/dcn31/dcn31_dccg.c   dccg31_enable_symclk32_se, dccg31_disable_symclk32_se
+ *   dccg/dcn31/dcn31_dccg.c   dccg31_enable_symclk32_se (get_phy_mux_symclk),
+ *                       dccg31_disable_symclk32_se, dccg31_init (with
+ *                       dccg31_set_symclk32_le_root_clock_gating),
+ *                       dccg31_set_audio_dtbclk_dto (hw/dcn32_audio.c)
  *                       (root clock optimization is off on DCN 3.2: no gate
  *                       writes)
  *
@@ -142,6 +145,12 @@ void dcn32_dccg_set_dtbclk_p_src(rdna3_dev *d, uint32_t src, uint32_t otg);
 void dcn32_dccg_set_dpstreamclk(rdna3_dev *d, uint32_t src, uint32_t otg, uint32_t hpo_se);
 void dcn32_dccg_enable_symclk32_se(rdna3_dev *d, uint32_t hpo_se, uint32_t phyd32clk);
 void dcn32_dccg_disable_symclk32_se(rdna3_dev *d, uint32_t hpo_se);
+/* dccg31_init (dccg32_funcs.dccg_init): the HPO stream encoders' SYMCLK32
+ * back on REFCLK */
+void dcn32_dccg_init(rdna3_dev *d);
+/* dccg31_set_audio_dtbclk_dto: the audio DTO from DTBCLK ('req' kHz of the
+ * 'ref' kHz reference); 0 / 0 = off (DCCG_AUDIO_DTO_SEL 3, no audio DTO) */
+void dcn32_dccg_set_audio_dtbclk_dto(rdna3_dev *d, uint32_t ref_dtbclk_khz, uint32_t req_audio_dtbclk_khz);
 /* dccg32_set_pixel_rate_div / _get (RD_PIXEL_RATE_DIV_*, dcn32_hwseq.h) */
 void dcn32_dccg_set_pixel_rate_div(rdna3_dev *d, uint32_t otg, uint32_t k1, uint32_t k2);
 void dcn32_dccg_get_pixel_rate_div(rdna3_dev *d, uint32_t otg, uint32_t *k1, uint32_t *k2);

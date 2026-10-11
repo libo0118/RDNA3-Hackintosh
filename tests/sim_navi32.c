@@ -4257,6 +4257,7 @@ static void sim_doorbell32(void *ctx, uint32_t index, uint32_t v)
 
 #include "sim_display_dc.inc"
 #include "sim_display_hpo.inc"
+#include "sim_display_audio.inc"
 
 static void sim_wr(void *ctx, uint64_t off, uint32_t v)
 {
@@ -4267,6 +4268,8 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     if (sk_wr(dw, v))
         return;
     if (hpo_wr(dw, v))
+        return;
+    if (au_wr(dw, v))
         return;
     if (dw == mmMM_DATA) {
         uint32_t *w = mm_word();
@@ -4858,6 +4861,8 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
         if (sk_rd(dw, &kv))
             return kv;
         if (hpo_rd(dw, &kv))
+            return kv;
+        if (au_rd(dw, &kv))
             return kv;
     }
     if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_DATA) {
@@ -7502,8 +7507,10 @@ static void test_dp_uhbr(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rd
     S.dal_hard_min[RD_PPCLK_DTBCLK] = 0;
     acts = SH.acts;
     upd = S.dps.payload_updates;
+    au_dp_attach(&dp, dev);   /* rdna3audio: the stream's audio with it */
     CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 3840, FB_START + 0x8000000, 2560, 50) == RDNA3_OK &&
           dc->head[0].width == 3840);
+    CHECK(au_dp_hpo_on(0));
     CHECK(S.dal_hard_min[RD_PPCLK_DTBCLK] == 600 && dp.dtbclk_khz == 600000);
     CHECK(dp.verified && dp.verified_link_cap.link_rate == RD_DP_LINK_RATE_UHBR13_5 && S.dps.lt_failed > 0 &&
           dp.lt_fallbacks > 0);
@@ -7589,6 +7596,13 @@ static void test_dp_uhbr(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rd
           ((v & OTG0_PIXEL_RATE_CNTL__PIPE0_DTO_SRC_SEL_MASK) >> OTG0_PIXEL_RATE_CNTL__PIPE0_DTO_SRC_SEL__SHIFT) == 1 &&
           S.reg[DCN_B2 + regDTBCLK_DTO0_PHASE + otg] == 0 && S.reg[DCN_B1 + regOTG_PIXEL_RATE_DIV] == div0);
     CHECK(S.reg[DPR(regDP0_DP_VID_M, fe)] == (uint32_t)(0x8000ull * 148500 / (RD_DP_LINK_RATE_LOW * 27000)));
+    /* the audio moved with the stream: off on the HPO, on through DP_SEC */
+    CHECK(au_dp_dio_on(fe));
+    dcn32_dp_link_set_dpms_off(&dp);
+    CHECK(!dp_au.enabled && !(S.reg[DPR(regDP0_DP_SEC_CNTL, fe)] & DP0_DP_SEC_CNTL__DP_SEC_ASP_ENABLE_MASK) &&
+          !(SA.az[0][RD_AZ_HOT_PLUG_CONTROL] & RD_AZ_HPC_AUDIO_ENABLED));
+    dp.audio = NULL;
+    CHECK(dcn32_dp_link_set_dpms_on(&dp, &m, 0) == RDNA3_OK);
 
     /* the sink back to an 8b/10b one for the tests that follow */
     S.dpcd[0x006] = RD_DP_CAP_ANSI_8B10B;
@@ -11864,6 +11878,11 @@ static void run(const char *fwdir)
                 }
                 /* rdna3hdmi: DC's HDMI stream on the same head */
                 test_dc_hdmi(&dev, &dm, &dc2, &sc, &own);
+                /* rdna3audio / rdna3fmt (stage 4 item N) */
+                test_dc_audio_units(&dev);
+                test_dc_audio_streams(&dev);
+                test_dc_fmt_units(&dev);
+                test_dc_fmt_modeset(&dev, &dm, &dc2, &sc, &own);
             }
             test_dcn_state(&dev, &dm);
             test_dp_link(&dev, &dm);

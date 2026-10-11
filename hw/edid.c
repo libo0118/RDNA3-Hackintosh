@@ -321,6 +321,29 @@ static void cta_vsdb(rdna3_edid *e, const uint8_t *db, uint32_t n)
         e->hdmi = 1;
         if (n >= 7 && db[7] && !e->max_tmds_clk_mhz)
             e->max_tmds_clk_mhz = db[7] * 5u;
+        /* drm_parse_hdmi_deep_color_info: HDMI supports at least 8 bpc;
+         * DC_30 / 36 / 48 raise it (the highest wins), DC_Y444 extends them
+         * to YCbCr 4:4:4 */
+        e->hdmi_dc_bpc = 8;
+        if (n >= 6) {
+            uint32_t dc_bpc = 0;
+            if (db[6] & RD_EDID_HDMI_DC_30) {
+                dc_bpc = 10;
+                e->hdmi_dc_modes |= RD_EDID_HDMI_DC_30;
+            }
+            if (db[6] & RD_EDID_HDMI_DC_36) {
+                dc_bpc = 12;
+                e->hdmi_dc_modes |= RD_EDID_HDMI_DC_36;
+            }
+            if (db[6] & RD_EDID_HDMI_DC_48) {
+                dc_bpc = 16;
+                e->hdmi_dc_modes |= RD_EDID_HDMI_DC_48;
+            }
+            if (dc_bpc) {
+                e->hdmi_dc_bpc = (uint8_t)dc_bpc;
+                e->hdmi_dc_y444 = (db[6] & RD_EDID_HDMI_DC_Y444) ? 1 : 0;
+            }
+        }
     } else if (oui == 0xc45dd8 && n >= 6) {
         if (db[5] && db[5] * 5u > 340)
             e->max_tmds_clk_mhz = db[5] * 5u;
@@ -336,6 +359,8 @@ static void cta_block(rdna3_edid *e, const uint8_t *b)
     uint32_t off = b[2], i;
     if (b[0] != 0x02 || off < 4 || off > 127)
         return;
+    /* drm_parse_cea_ext: the YCbCr support bits of byte 3 */
+    e->cta_ext3 = (uint8_t)(b[3] | 0x80u);   /* bit 7 (underscan) kept as "a CTA block was seen" */
     /* data block collection: the video data block's short video
      * descriptors (cea_db_tag 2), the audio data block's short audio
      * descriptors (tag 1: drm_edid_to_sad), the speaker allocation
@@ -419,6 +444,33 @@ int edid_parse(const uint8_t *d, uint32_t len, rdna3_edid *e)
     for (i = 1; i < blocks; i++)
         if (edid_block_valid(d + i * 128))
             cta_block(e, d + i * 128);
+    /* update_display_info, the colour part (EDID 1.3+ digital sinks):
+     * drm_parse_cea_ext (RGB plus the CTA block's YCbCr 4:4:4 / 4:2:2 bits,
+     * the HDMI VSDB's deep color bpc), DFP 1.x sinks without one at 8 bpc,
+     * EDID 1.4's colour bit depth (which overrides) and feature support */
+    if (e->version == 1 && e->revision >= 3 && e->digital) {
+        e->color_formats |= RD_COLOR_FORMAT_RGB444;
+        if (e->cta_ext3) {
+            e->color_formats = RD_COLOR_FORMAT_RGB444;
+            if (e->cta_ext3 & 0x20)
+                e->color_formats |= RD_COLOR_FORMAT_YCBCR444;
+            if (e->cta_ext3 & 0x10)
+                e->color_formats |= RD_COLOR_FORMAT_YCBCR422;
+        }
+        if (e->hdmi_dc_bpc)
+            e->bpc = e->hdmi_dc_bpc;
+        if (!e->bpc && e->revision == 3 && (d[20] & 0x01))
+            e->bpc = 8;
+        if (e->revision >= 4) {
+            static const uint8_t depth[8] = { 0, 6, 8, 10, 12, 14, 16, 0 };
+            e->bpc = depth[(d[20] >> 4) & 7];
+            e->color_formats |= RD_COLOR_FORMAT_RGB444;
+            if (d[24] & 0x08)
+                e->color_formats |= RD_COLOR_FORMAT_YCBCR444;
+            if (d[24] & 0x10)
+                e->color_formats |= RD_COLOR_FORMAT_YCBCR422;
+        }
+    }
     /* dm_helpers_parse_edid_caps: the speaker allocation defaults when the
      * sink has audio but no allocation block; edid_extract_panel_id and
      * apply_edid_quirks */
