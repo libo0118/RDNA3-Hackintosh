@@ -443,6 +443,8 @@ int psp13_load_ip_fw(rdna3_psp *psp, const amd_ucode *u, uint64_t mc)
     cmd.cmd.cmd_load_ip_fw.fw_size = u->size;
     cmd.cmd.cmd_load_ip_fw.fw_type = (enum psp_gfx_fw_type)u->psp_type;
     ret = psp13_cmd_submit(psp, &cmd);
+    if (!ret && u->ucode_id < 64)
+        psp->ucode_tmr_mc[u->ucode_id] = cmd.resp.fw_addr_lo | ((uint64_t)cmd.resp.fw_addr_hi << 32);
     RLOG(psp->d, "PSP: LOAD_IP_FW %-22s %6u bytes -> %s (status 0x%x)", u->name, u->size,
          ret ? "FAILED" : "ok", psp->last_resp_status);
     return ret;

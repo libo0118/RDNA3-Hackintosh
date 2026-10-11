@@ -356,6 +356,18 @@ void rdna3_doorbell_wr64(rdna3_dev *d, uint32_t index, uint64_t v)
         *(volatile uint64_t *)(d->doorbell_cpu + (uint64_t)index * 4) = v;
 }
 
+void rdna3_doorbell_wr32(rdna3_dev *d, uint32_t index, uint32_t v)
+{
+    if (d->os.wmb)
+        d->os.wmb(d->os.ctx);
+    if (d->os.doorbell_wr32) {
+        d->os.doorbell_wr32(d->os.ctx, index, v);
+        return;
+    }
+    if (d->doorbell_cpu && (uint64_t)index * 4 + 4 <= d->doorbell_len)
+        *(volatile uint32_t *)(d->doorbell_cpu + (uint64_t)index * 4) = v;
+}
+
 /* ---------------------------- NBIO / HDP ---------------------------- */
 
 /* nbio_v4_3_remap_hdp_registers */

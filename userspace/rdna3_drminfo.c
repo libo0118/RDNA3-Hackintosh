@@ -19,6 +19,11 @@
  *                              BOs, rings its own doorbell (a doorbell BO in
  *                              BAR2) and waits for the fence USERQ_SIGNAL put
  *                              into a syncobj; then USERQ_WAIT and USERQ_FREE.
+ *   rdna3_drminfo --vcn-test   (rdna3vcn=1) the video IPs: HW_IP_INFO / COUNT of
+ *                              VCN_DEC / VCN_ENC / VCN_JPEG, FW_VCN, VIDEO_CAPS,
+ *                              then an encode session create + close and a decode
+ *                              create + destroy message on the unified ring and a
+ *                              JPEG register write, each waited for.
  *   rdna3_drminfo --scanout DIR  (root) what each display pipe scans out right
  *                              now: HUBP state and a 320-wide picture of it,
  *                              DIR/scanout-pipe<N>.ppm - the report's proof of
@@ -414,6 +419,214 @@ static int scanout_dump(int fd, const char *dir)
     return 0;
 }
 
+/* --vcn-test: the video IPs the way Mesa sees them (HW_IP_INFO / COUNT,
+ * FW_VCN, VIDEO_CAPS), then one job per ring: an encode session create +
+ * close and a decode create + destroy message on the unified ring
+ * (amdgpu_vcn_unified_ring_test_ib's IBs, from a client BO in its VM) and
+ * a JPEG IB that writes the pitch register; each must signal its fence */
+static const char *const vcn_codec_names[AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_COUNT] = {
+    "MPEG2", "MPEG4", "VC1", "H264", "HEVC", "JPEG", "VP9", "AV1" };
+
+static int vcn_info(int fd, uint32_t query, uint32_t type, void *out, uint32_t size)
+{
+    struct drm_amdgpu_info in;
+    memset(&in, 0, sizeof(in));
+    in.return_pointer = (uint64_t)(uintptr_t)out;
+    in.return_size = size;
+    in.query = query;
+    if (query == AMDGPU_INFO_VIDEO_CAPS)
+        in.video_cap.type = type;
+    else if (query == AMDGPU_INFO_FW_VERSION)
+        in.query_fw.fw_type = type;
+    else
+        in.query_hw_ip.type = type;
+    return IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in);
+}
+
+static int vcn_job(int fd, uint32_t ctx, uint32_t ip, uint64_t va, uint32_t ndw, const char *what)
+{
+    struct drm_amdgpu_cs_chunk ch;
+    struct drm_amdgpu_cs_chunk_ib ib;
+    union drm_amdgpu_cs cs;
+    union drm_amdgpu_wait_cs w;
+    struct timespec ts;
+    uint64_t chunk_ptr;
+
+    memset(&ib, 0, sizeof(ib));
+    ib.va_start = va;
+    ib.ib_bytes = ndw * 4;
+    ib.ip_type = ip;
+    ch.chunk_id = AMDGPU_CHUNK_ID_IB;
+    ch.length_dw = sizeof(ib) / 4;
+    ch.chunk_data = (uint64_t)(uintptr_t)&ib;
+    chunk_ptr = (uint64_t)(uintptr_t)&ch;
+    memset(&cs, 0, sizeof(cs));
+    cs.in.ctx_id = ctx;
+    cs.in.num_chunks = 1;
+    cs.in.chunks = (uint64_t)(uintptr_t)&chunk_ptr;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_CS), cs)) {
+        printf("  %s: AMDGPU_CS failed\n", what);
+        return 1;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    memset(&w, 0, sizeof(w));
+    w.in.handle = cs.out.handle;
+    w.in.ip_type = ip;
+    w.in.ctx_id = ctx;
+    w.in.timeout = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec + 2000000000ull;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) || w.out.status) {
+        printf("  %s: fence %llu did NOT signal within 2 s\n", what, (unsigned long long)cs.out.handle);
+        return 1;
+    }
+    printf("  %s: fence %llu signalled\n", what, (unsigned long long)cs.out.handle);
+    return 0;
+}
+
+/* amdgpu_vcn_unified_ring_ib_header + _checksum around 'n' dwords at p+8 */
+static uint32_t vcn_unified(uint32_t *p, uint32_t pack, int enc)
+{
+    uint32_t i, sum = 0;
+    p[0] = 0x10; p[1] = 0x30000002; p[3] = pack;
+    p[4] = 0x10; p[5] = 0x30000001; p[6] = enc ? 2 : 3; p[7] = pack * 4;
+    for (i = 0; i < pack; i++)
+        sum += p[4 + i];
+    p[2] = sum;
+    return 8;
+}
+
+static int vcn_test(int fd)
+{
+    struct drm_amdgpu_info_hw_ip ip;
+    struct drm_amdgpu_info_video_caps caps;
+    struct drm_amdgpu_info_firmware fw;
+    union drm_amdgpu_gem_create c;
+    union drm_amdgpu_gem_mmap m;
+    struct drm_amdgpu_gem_va va;
+    union drm_amdgpu_ctx cx;
+    static const char *const ipn[] = { "VCN_DEC", "VCN_ENC", "VCN_JPEG" };
+    const uint32_t ips[] = { AMDGPU_HW_IP_VCN_DEC, AMDGPU_HW_IP_VCN_ENC, AMDGPU_HW_IP_VCN_JPEG };
+    uint64_t gva = 0x200000;
+    uint32_t *p, n, i, k, count, enc_rings = 0, jpeg_rings = 0;
+    int bad = 0;
+
+    printf("VCN test:\n");
+    for (i = 0; i < 3; i++) {
+        memset(&ip, 0, sizeof(ip));
+        count = 0;
+        if (vcn_info(fd, AMDGPU_INFO_HW_IP_INFO, ips[i], &ip, sizeof(ip)) ||
+            vcn_info(fd, AMDGPU_INFO_HW_IP_COUNT, ips[i], &count, 4)) {
+            printf("  %s: INFO failed\n", ipn[i]);
+            return 1;
+        }
+        printf("  %s: IP %u.%u (discovery 0x%06x), rings 0x%x, %u instance(s), IB align %u/%u\n", ipn[i],
+               ip.hw_ip_version_major, ip.hw_ip_version_minor, ip.ip_discovery_version, ip.available_rings, count,
+               ip.ib_start_alignment, ip.ib_size_alignment);
+        if (ips[i] == AMDGPU_HW_IP_VCN_ENC)
+            enc_rings = ip.available_rings;
+        if (ips[i] == AMDGPU_HW_IP_VCN_JPEG)
+            jpeg_rings = ip.available_rings;
+    }
+    memset(&fw, 0, sizeof(fw));
+    if (!vcn_info(fd, AMDGPU_INFO_FW_VERSION, AMDGPU_INFO_FW_VCN, &fw, sizeof(fw)))
+        printf("  firmware VCN 0x%08x (ENC %u.%u DEC %u Revision %u)\n", fw.ver, (fw.ver >> 20) & 0xf,
+               (fw.ver >> 12) & 0xff, (fw.ver >> 24) & 0xf, fw.ver & 0xfff);
+    for (k = 0; k < 2; k++) {
+        memset(&caps, 0, sizeof(caps));
+        if (vcn_info(fd, AMDGPU_INFO_VIDEO_CAPS, k ? AMDGPU_INFO_VIDEO_CAPS_ENCODE : AMDGPU_INFO_VIDEO_CAPS_DECODE,
+                     &caps, sizeof(caps))) {
+            printf("  VIDEO_CAPS %s failed\n", k ? "encode" : "decode");
+            bad++;
+            continue;
+        }
+        printf("  VIDEO_CAPS %s:", k ? "encode" : "decode");
+        for (i = 0; i < AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_COUNT; i++)
+            if (caps.codec_info[i].valid)
+                printf(" %s %ux%u L%u", vcn_codec_names[i], caps.codec_info[i].max_width,
+                       caps.codec_info[i].max_height, caps.codec_info[i].max_level);
+        printf("\n");
+    }
+    if (!enc_rings && !jpeg_rings) {
+        printf("VCN TEST: FAILED (no VCN_ENC / VCN_JPEG ring: boot with rdna3vcn=1)\n");
+        return 1;
+    }
+
+    /* the client's 64 KiB: IBs at 0, 4K, 8K, 12K; encode session buffer at
+     * 16K (128 KiB in amdgpu, the firmware only needs it mapped); decode
+     * message at 48K */
+    memset(&c, 0, sizeof(c));
+    c.in.bo_size = 256 << 10;
+    c.in.alignment = 4096;
+    c.in.domains = AMDGPU_GEM_DOMAIN_VRAM;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), c)) { perror("GEM_CREATE"); return 1; }
+    memset(&m, 0, sizeof(m));
+    m.in.handle = c.out.handle;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP), m)) { perror("GEM_MMAP"); return 1; }
+    p = drm_xnu_mmap(NULL, 256 << 10, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)m.out.addr_ptr);
+    if (p == MAP_FAILED) { perror("mmap"); return 1; }
+    memset(&va, 0, sizeof(va));
+    va.handle = c.out.handle;
+    va.operation = AMDGPU_VA_OP_MAP;
+    va.flags = AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE | AMDGPU_VM_PAGE_EXECUTABLE;
+    va.va_address = gva;
+    va.map_size = 256 << 10;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va)) { perror("GEM_VA"); return 1; }
+    memset(p, 0, 256 << 10);
+    memset(&cx, 0, sizeof(cx));
+    cx.in.op = AMDGPU_CTX_OP_ALLOC_CTX;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_CTX), cx)) { perror("CTX"); return 1; }
+
+    if (enc_rings) {
+        /* amdgpu_vcn_enc_get_create_msg / _destroy_msg: session info, task
+         * info, op initialize / close session */
+        for (k = 0; k < 2; k++) {
+            uint32_t *q = p + k * 1024;
+            uint64_t sbuf = gva + 0x4000;
+            n = vcn_unified(q, 0x11, 1);
+            q[n++] = 0x18; q[n++] = 0x1; q[n++] = 1; q[n++] = (uint32_t)(sbuf >> 32); q[n++] = (uint32_t)sbuf;
+            q[n++] = 0;
+            q[n++] = 0x14; q[n++] = 0x2; q[n++] = 0x1c; q[n++] = 0; q[n++] = 0;
+            q[n++] = 0x8; q[n++] = k ? 0x08000002 : 0x08000001;
+            vcn_unified(q, 0x11, 1);   /* the checksum over the packages written above */
+            bad += vcn_job(fd, cx.out.alloc.ctx_id, AMDGPU_HW_IP_VCN_ENC, gva + k * 4096, 24,
+                           k ? "encode session close" : "encode session create");
+        }
+        /* amdgpu_vcn_dec_get_create_msg / _destroy_msg through the decode
+         * buffer (amdgpu_vcn_dec_sw_send_msg) */
+        for (k = 0; k < 2; k++) {
+            uint32_t *q = p + (2 + k) * 1024, *msg = p + 0xC000 / 4;
+            uint64_t mva = gva + 0xC000;
+            memset(msg, 0, 4096);
+            msg[0] = 0x28; msg[1] = k ? 0x18 : 0x38; msg[2] = k ? 0 : 1; msg[3] = k ? 2 : 0; msg[4] = 1;
+            if (!k) {
+                msg[6] = 1; msg[7] = 0x28; msg[8] = 0x10; msg[10] = 0x7; msg[12] = 0x780; msg[13] = 0x440;
+            }
+            n = 8;
+            q[n++] = 33 * 4 + 8; q[n++] = 1;        /* AMDGPU_VCN_IB_FLAG_DECODE_BUFFER */
+            q[n++] = 1;                              /* valid_buf_flag: MSG_BUFFER */
+            q[n++] = (uint32_t)(mva >> 32); q[n++] = (uint32_t)mva;
+            n += 30;
+            vcn_unified(q, 33 + 4 + 2, 0);
+            bad += vcn_job(fd, cx.out.alloc.ctx_id, AMDGPU_HW_IP_VCN_ENC, gva + (2 + k) * 4096, 72,
+                           k ? "decode destroy message" : "decode create message (H264 1920x1088)");
+        }
+    }
+    if (jpeg_rings) {
+        /* amdgpu_jpeg_dec_set_reg from userspace: PACKETJ TYPE0 to the pitch
+         * register, then NOPs (jpeg_v2_dec_ring_parse_cs accepts both) */
+        uint32_t *q = p + 4 * 1024;
+        q[0] = 0x401f;          /* PACKETJ(regUVD_JPEG_PITCH_INTERNAL_OFFSET, 0, 0, TYPE0) */
+        q[1] = 0xDEADBEEF;
+        for (i = 2; i < 16; i += 2) {
+            q[i] = 0x60000000;  /* PACKETJ(0, 0, 0, TYPE6): NOP */
+            q[i + 1] = 0;
+        }
+        bad += vcn_job(fd, cx.out.alloc.ctx_id, AMDGPU_HW_IP_VCN_JPEG, gva + 4 * 4096, 16, "JPEG pitch write");
+    }
+    drm_xnu_munmap(p, 256 << 10);
+    printf("VCN TEST: %s\n", bad ? "FAILED" : "PASSED (video rings run jobs from a client VM)");
+    return bad != 0;
+}
+
 int main(int argc, char **argv)
 {
     struct drm_version v;
@@ -489,6 +702,8 @@ int main(int argc, char **argv)
             fails += job_test(fd, 1, 0);
         else if (!strcmp(argv[a], "--userq-test"))
             fails += userq_test(fd);
+        else if (!strcmp(argv[a], "--vcn-test"))
+            fails += vcn_test(fd);
         else if (!strcmp(argv[a], "--hang-test") || !strcmp(argv[a], "--hang-test-gfx")) {
             /* each hang, then the same engine must work again. The hung
              * job's client is guilty from then on (amdgpu_cs_submit returns

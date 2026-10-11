@@ -114,6 +114,11 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
             fPmExpWanted = pmexp != 0;
             uint32_t idlecap = rd3_arg("rdna3idlecap", 0);
             fIdleCapWanted = idlecap != 0;
+            /* VCN 4.0 + JPEG 4.0 (stage 4 item G): opt-in, not part of the
+             * verified profile; rdna3vcn=1 also loads VCN1's firmware */
+            uint32_t vcn = 0;
+            PE_parse_boot_argn("rdna3vcn", &vcn, sizeof(vcn));
+            fVcnWanted = vcn != 0;
         }
         fMsi = msi != 0;
         fDoorbells = db != 0;
@@ -187,6 +192,18 @@ void RDNA3Bringup::stopAndFree()
         thread_call_free(fGfxOffCall);
         fGfxOffCall = nullptr;
     }
+    /* vcn_v4_0_hw_fini / jpeg_v4_0_hw_fini: gate the video block, the PMFW
+     * powers it down */
+    if (fVcnIdleCall) {
+        fVcnStop = true;
+        thread_call_cancel_wait(fVcnIdleCall);
+        thread_call_free(fVcnIdleCall);
+        fVcnIdleCall = nullptr;
+    }
+    if (fVcn && fDev && fVcn->sw_ready) {
+        vcn40_hw_fini(fDev, fVcn);
+        jpeg40_hw_fini(fDev, fVcn);
+    }
     if (fCgWanted && fGfx && fGfx->ready && fDev)
         gfx11_set_clock_gating(fDev, 0, RD_GFX_CG_GC_11_0_3);
     if (fCgWanted && fSocCgWanted && fDev)
@@ -221,6 +238,8 @@ void RDNA3Bringup::stopAndFree()
     if (fSos.data)
         IOFree(fSos.data, fSos.len);
     if (fSmu) IOFree(fSmu, sizeof(*fSmu));
+    if (fVcn) IOFree(fVcn, sizeof(*fVcn));
+    fVcn = nullptr;
     if (fDmub) IOFree(fDmub, sizeof(*fDmub));
     fDmub = nullptr;
     if (fRom) IOFree(fRom, RD_VBIOS_MAX_LEN);
@@ -587,6 +606,15 @@ void RDNA3Bringup::run()
         publishString("RDNA3,Stage2", "failed: firmware set incomplete");
         return;
     }
+    if (fVcnWanted) {
+        /* amdgpu_vcn_setup_ucode: one VCN ucode per instance (VCN1 too) */
+        uint32_t n = 0;
+        for (uint32_t i = 0; i < RD_VCN_MAX_INST; i++)
+            if (fDev->reg_base[HWIP_VCN][i][1])
+                n = i + 1;
+        fst = blobs[AMD_BLOB_VCN].data ? amd_vcn_setup_ucode(blobs, n, fPlan) : AMD_FW_E_MISSING;
+        BLOG("VCN: %u instance(s) in discovery, VCN firmware plan: %s", n, amd_fw_status_str(fst));
+    }
     BLOG("firmware plan: %u ucodes, %u KiB", fPlan->count, fPlan->total_aligned / 1024);
     for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)
         fBlobRefs[i] = blobs[i];
@@ -645,6 +673,10 @@ void RDNA3Bringup::run()
         publish("RDNA3,IRQFenceSDMA", fIrqFenceSdma);
         publish("RDNA3,IRQFenceCompute", fIrqFenceComp);
         publish("RDNA3,IRQOther", fIrqOther);
+        if (fVcn) {
+            publish("RDNA3,IRQFenceVCN", fIrqVcn);
+            publish("RDNA3,IRQFenceJPEG", fIrqJpeg);
+        }
     }
 }
 
@@ -1000,10 +1032,154 @@ bool RDNA3Bringup::hwInit()
         publishString("RDNA3,Stage2", ret ? "failed: GFX" : "GFX ring 0 up, ring test passed");
     }
 
+    /* stage 4 item G: VCN 4.0 + JPEG 4.0 after GFX, as in soc21's IP order */
+    if (fLevel >= 8 && fVcnWanted)
+        vcnStart();
+
     publish("RDNA3,GPUResets", fGpuResets);
     publish("RDNA3,VRAMLost", fVramLostCount);
     return true;
 }
+
+/* ------------------------- VCN 4.0 / JPEG 4.0 ------------------------- */
+
+/* vcn_v4_0 / jpeg_v4_0 early, sw and hw init, then the IB tests
+ * (amdgpu_ib_ring_tests: a ring whose IB test fails is not used). Runs at
+ * the end of hwInit (again after a GPU reset; VRAM blocks are kept). */
+void RDNA3Bringup::vcnStart()
+{
+    int r, rj = RDNA3_ENODEV;
+    uint32_t ready = 0, i, gb = 0;
+    uint64_t tmr[RD_VCN_MAX_INST];
+
+    publishString("RDNA3,VCN", "starting");
+    if (!fGmc || !fGmc->mmhub_enabled || !fIh || !fVmReady) {
+        BLOG("VCN: needs the GMC, IH and the VM pool (level 6+)");
+        publishString("RDNA3,VCN", "skipped: no GMC/IH");
+        return;
+    }
+    if (!fVcn) {
+        fVcn = (rdna3_vcn *)IOMalloc(sizeof(*fVcn));
+        if (!fVcn) {
+            publishString("RDNA3,VCN", "failed: no memory");
+            return;
+        }
+        bzero(fVcn, sizeof(*fVcn));
+    }
+    /* adev->gfx.config.gb_addr_config (GC 11.0.3 regGB_ADDR_CONFIG) */
+    if (fDev->reg_base[HWIP_GC][0][0])
+        gb = rdna3_rreg(fDev, fDev->reg_base[HWIP_GC][0][0] + 0x13de);
+    tmr[0] = fPsp->ucode_tmr_mc[AMD_UCODE_VCN];
+    tmr[1] = fPsp->ucode_tmr_mc[AMD_UCODE_VCN1];
+    r = vcn40_early_init(fDev, fVcn, fBlobs[AMD_BLOB_VCN].data, fBlobs[AMD_BLOB_VCN].len, gb, fPmUp ? 1 : 0);
+    publish("RDNA3,VCNFirmware", fVcn->fw_version);
+    publish("RDNA3,VCNInstances", fVcn->num_vcn_inst);
+    publish("RDNA3,VCNTmrMC0", tmr[0]);
+    publish("RDNA3,VCNTmrMC1", tmr[1]);
+    if (!r && (!tmr[0] || (fVcn->num_vcn_inst > 1 && !tmr[1]))) {
+        BLOG("VCN: the PSP did not load vcn_4_0_0.bin for every instance (TMR 0x%llx / 0x%llx)",
+             (unsigned long long)tmr[0], (unsigned long long)tmr[1]);
+        r = RDNA3_ENOENT;
+    }
+    if (!r)
+        r = jpeg40_early_init(fDev, fVcn);
+    if (!r)
+        r = vcn40_sw_init(fDev, fVcn, tmr);
+    if (!r)
+        r = jpeg40_sw_init(fDev, fVcn);
+    if (!r)
+        r = vcn40_hw_init(fDev, fVcn);
+    publish("RDNA3,VCNResult", (uint64_t)(int64_t)r);
+    if (!r) {
+        for (i = 0; i < fVcn->num_vcn_inst; i++) {
+            int t = vcn40_unified_ring_test_ib(fDev, fVcn, &fVcn->ring_enc[i]);
+            publish(i ? "RDNA3,VCN1IBTest" : "RDNA3,VCN0IBTest", (uint64_t)(int64_t)t);
+            if (t)
+                fVcn->ring_enc[i].ready = 0;
+            else
+                ready |= 1u << i;
+        }
+        rj = jpeg40_hw_init(fDev, fVcn);
+        if (!rj) {
+            rj = jpeg40_dec_ring_test_ib(fDev, fVcn);
+            if (rj)
+                fVcn->jpeg.ready = 0;
+        }
+    }
+    publish("RDNA3,JPEGResult", (uint64_t)(int64_t)rj);
+    publish("RDNA3,VCNStarts", fVcn->starts);
+    BLOG("VCN: firmware 0x%08x, %u instance(s), unified rings ready 0x%x, JPEG %s (%d / %d)", fVcn->fw_version,
+         fVcn->num_vcn_inst, ready, rj ? "off" : "ready", r, rj);
+    if (ready || !rj) {
+        const rdna3_ipver *vv = &fDev->ipver[HWIP_VCN];
+        fOwner->drmVcnReady(AMD_IP_VERSION(vv->major, vv->minor, vv->rev), fVcn->num_vcn_inst,
+                            fVcn->harvest_config, ready, !rj);
+        publishString("RDNA3,VCN", ready == 3 && !rj ? "VCN0 VCN1 JPEG up" : "partly up");
+    } else {
+        publishString("RDNA3,VCN", "failed");
+    }
+    if (!fVcnIdleCall)
+        fVcnIdleCall = thread_call_allocate((thread_call_func_t)vcnIdleTick, this);
+    vcnIdleSchedule();   /* amdgpu_vcn_ring_end_use after the tests: gate in 1 s */
+}
+
+void RDNA3Bringup::vcnIdleSchedule()
+{
+    uint64_t deadline;
+    if (!fVcnIdleCall || fVcnStop)
+        return;
+    clock_interval_to_deadline(RD_VCN_IDLE_TIMEOUT_MS, kMillisecondScale, &deadline);
+    thread_call_enter_delayed(fVcnIdleCall, deadline);
+}
+
+/* amdgpu_vcn_idle_work_handler / amdgpu_jpeg_idle_work_handler: gate what
+ * has nothing left to do, look again in 1 s otherwise */
+void RDNA3Bringup::vcnIdleTick(void *owner, void *)
+{
+    RDNA3Bringup *b = (RDNA3Bringup *)owner;
+    IOLock *l = b->fOwner->drmLock();
+    if (!l)
+        return;
+    IOLockLock(l);
+    if (!b->fVcnStop && b->fVcn && b->fDev) {
+        int vg = vcn40_idle_work_handler(b->fDev, b->fVcn);
+        int jg = jpeg40_idle_work_handler(b->fDev, b->fVcn);
+        b->publish("RDNA3,VCNGated", b->fVcn->cur_state == RD_PG_STATE_GATE ? 1 : 0);
+        b->publish("RDNA3,VCNStarts", b->fVcn->starts);
+        if (!vg || !jg)
+            b->vcnIdleSchedule();
+    }
+    IOLockUnlock(l);
+}
+
+/* a VCN or JPEG job that never ends: amdgpu would reset the GPU; here the
+ * video block is stopped, its pending fences complete and its rings stay
+ * off until the next bring-up (the rest of the GPU keeps running) */
+int RDNA3Bringup::vcnHang(uint32_t ip, uint32_t ring, uint64_t seq)
+{
+    uint32_t i;
+    BLOG("hang: %s ring %u, fence %llu not signalled within 10 s: video block off",
+         ip == AMDGPU_HW_IP_VCN_JPEG ? "JPEG" : "VCN", ring, (unsigned long long)seq);
+    for (i = 0; i < RD_VCN_MAX_INST; i++)
+        if (fVcn->ring_enc[i].ring_size) {
+            fVcn->ring_enc[i].ready = 0;
+            rdna3_vram_write(fDev, fVcn->ring_enc[i].wb + RD_VCN_WB_FENCE, &fVcn->ring_enc[i].fence_seq, 4);
+        }
+    if (fVcn->jpeg.ring_size) {
+        fVcn->jpeg.ready = 0;
+        rdna3_vram_write(fDev, fVcn->jpeg.wb + RD_VCN_WB_FENCE, &fVcn->jpeg.fence_seq, 4);
+    }
+    vcn40_set_powergating_state(fDev, fVcn, RD_PG_STATE_GATE);
+    jpeg40_set_powergating_state(fDev, fVcn, RD_PG_STATE_GATE);
+    fVcnHangs++;
+    publish("RDNA3,VCNHangs", fVcnHangs);
+    publishString("RDNA3,VCN", "off after a hang");
+    IOLockLock(fLock);
+    IOLockWakeup(fLock, &fFenceEvent, false);
+    IOLockUnlock(fLock);
+    return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
+}
+
 
 /* -------------------------- power management -------------------------- */
 
@@ -1567,6 +1743,11 @@ void RDNA3Bringup::forceFences()
         gfx11_force_fence_completion(fDev, &fKiq->rb);
     if (fSdma && fSdma->wb != UINT64_MAX)
         rdna3_vram_write(fDev, fSdma->wb + RD_SDMA_WB_FENCE, &fSdma->fence_seq, 4);
+    for (uint32_t i = 0; fVcn && i < RD_VCN_MAX_INST; i++)
+        if (fVcn->ring_enc[i].ring_size)
+            rdna3_vram_write(fDev, fVcn->ring_enc[i].wb + RD_VCN_WB_FENCE, &fVcn->ring_enc[i].fence_seq, 4);
+    if (fVcn && fVcn->jpeg.ring_size)
+        rdna3_vram_write(fDev, fVcn->jpeg.wb + RD_VCN_WB_FENCE, &fVcn->jpeg.fence_seq, 4);
     IOLockLock(fLock);
     IOLockWakeup(fLock, &fFenceEvent, false);
     IOLockUnlock(fLock);
@@ -1588,6 +1769,8 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
     rdna3_gfx_status st;
     bool ok = false;
 
+    if ((ip == AMDGPU_HW_IP_VCN_ENC || ip == AMDGPU_HW_IP_VCN_JPEG) && fVcn)
+        return vcnHang(ip, ring, seq);
     /* whatever runs next re-programs its GDS partition (amdgpu_vmid_reset) */
     memset(fGdsKnown, 0, sizeof(fGdsKnown));
     HLOG("%s ring %u, fence %llu not signalled within 10 s",
@@ -2100,7 +2283,7 @@ int RDNA3Bringup::ufAddr(const rdna3_cs_job *job, uint64_t *mc, int *slot)
             *mc = fGmc->gart_start + base + i * 4096ull + ufOff;
             return 0;
         }
-        if (idle < 0 && (!fUfSlot[i].used || fenceSignaled(fUfSlot[i].ip, 0, fUfSlot[i].seq)))
+        if (idle < 0 && (!fUfSlot[i].used || fenceSignaled(fUfSlot[i].ip, fUfSlot[i].ring, fUfSlot[i].seq)))
             idle = (int)i;
     }
     if (idle < 0)
@@ -2124,7 +2307,7 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
     RDNA3Vm *v = (RDNA3Vm *)p;
     uint64_t ufMc = 0;
     int ufSlot = -1;
-    if (!v || !v->live || ring != 0)
+    if (!v || !v->live || (ring != 0 && !(ip == AMDGPU_HW_IP_VCN_ENC && ring < RD_VCN_MAX_INST)))
         return -RD_EINVAL;   /* record-only VM: the IB VA means nothing to the GPU */
     if (v->guilty)
         return -RD_ECANCELED;   /* amdgpu_cs_submit on a guilty context */
@@ -2136,17 +2319,39 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
         if (r)
             return r;
     }
-    int r = submitRing(v, ip, ibs, n, job, ufMc, seq);
+    int r = submitRing(v, ip, ring, ibs, n, job, ufMc, seq);
     if (!r && ufSlot >= 0) {
         fUfSlot[ufSlot].ip = ip;
+        fUfSlot[ufSlot].ring = ring;
         fUfSlot[ufSlot].seq = *seq;
     }
     return r;
 }
 
-int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, const rdna3_ib *ibs, uint32_t n,
+int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
                              const rdna3_cs_job *job, uint64_t ufMc, uint64_t *seq)
 {
+    /* VCN_ENC (ring = the VCN instance of the context's entity) and
+     * VCN_JPEG (the checked copies): amdgpu_ib_schedule on the video rings;
+     * the VM's page tables are on the MMHUB since vmCreate */
+    if ((ip == AMDGPU_HW_IP_VCN_ENC || ip == AMDGPU_HW_IP_VCN_JPEG) && fVcn) {
+        rdna3_vcn_ib vib[RD_MAX_CS_IBS];
+        uint32_t s;
+        if (n > RD_MAX_CS_IBS)
+            return -RD_EINVAL;
+        for (uint32_t i = 0; i < n; i++) {
+            vib[i].va = ibs[i].va;
+            vib[i].length_dw = ibs[i].length_dw;
+            vib[i].kdata = ibs[i].kdata;
+        }
+        s = ip == AMDGPU_HW_IP_VCN_ENC ? vcn40_submit(fDev, fVcn, ring, v->vmid, vib, n, ufMc)
+                                        : jpeg40_submit(fDev, fVcn, v->vmid, vib, n, ufMc);
+        vcnIdleSchedule();
+        if (!s)
+            return -RD_EIO;
+        *seq = s;
+        return 0;
+    }
     /* GFX and compute: user fence, and the GDS switch when the VMID's
      * partition is not the job's (amdgpu_vm_flush gds_switch_needed); the
      * DMA ring has no GDS */
@@ -2221,6 +2426,10 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, const rdna3_ib *ibs, uint3
 
 int RDNA3Bringup::fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq)
 {
+    if (ip == AMDGPU_HW_IP_VCN_ENC && fVcn && ring < RD_VCN_MAX_INST && fVcn->ring_enc[ring].ring_size)
+        return vcn40_fence_passed(fDev, &fVcn->ring_enc[ring], (uint32_t)seq);
+    if (ip == AMDGPU_HW_IP_VCN_JPEG && fVcn && ring == 0 && fVcn->jpeg.ring_size)
+        return vcn40_fence_passed(fDev, &fVcn->jpeg, (uint32_t)seq);
     if (ring != 0)
         return 1;
     if (ip == AMDGPU_HW_IP_DMA && fSdma)
@@ -2367,6 +2576,19 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
          * every interrupt) read it there */
         b->fIrqUserq++;
         return;
+    }
+    if (b->fVcn) {
+        /* vcn_v4_0_process_interrupt / jpeg_v4_0_process_interrupt: the
+         * waiters read the fences after every interrupt */
+        uint32_t inst = 0;
+        if (vcn40_process_interrupt(b->fVcn, iv->client_id, iv->src_id, &inst)) {
+            b->fIrqVcn++;
+            return;
+        }
+        if (jpeg40_process_interrupt(b->fVcn, iv->client_id, iv->src_id)) {
+            b->fIrqJpeg++;
+            return;
+        }
     }
     switch (ih60_iv_fence(iv)) {
     case RD_IH_FENCE_GFX:   b->fIrqFenceGfx++; break;

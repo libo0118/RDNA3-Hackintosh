@@ -63,6 +63,9 @@ typedef struct rdna3_os {
     /* optional: 64-bit doorbell write (dword index into the doorbell BAR);
      * when NULL, rdna3_doorbell_wr64 writes through d->doorbell_cpu */
     void     (*doorbell_wr)(void *ctx, uint32_t index, uint64_t val);
+    /* optional: 32-bit doorbell write (VCN / JPEG rings); when NULL,
+     * rdna3_doorbell_wr32 writes through d->doorbell_cpu */
+    void     (*doorbell_wr32)(void *ctx, uint32_t index, uint32_t val);
 } rdna3_os;
 
 enum { RDNA3_LOG_ERR = 0, RDNA3_LOG_INFO = 1, RDNA3_LOG_DBG = 2 };
@@ -176,6 +179,8 @@ void rdna3_vram_mm_write(rdna3_dev *d, uint64_t off, const uint32_t *src, uint32
 
 /* ---- doorbells (WDOORBELL64) ---- */
 void rdna3_doorbell_wr64(rdna3_dev *d, uint32_t index, uint64_t v);
+/* WDOORBELL32: the VCN and JPEG rings' 32-bit doorbells */
+void rdna3_doorbell_wr32(rdna3_dev *d, uint32_t index, uint32_t v);
 
 /* ---- NBIO / HDP ---- */
 void rdna3_nbio_remap_hdp(rdna3_dev *d);

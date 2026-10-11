@@ -60,3 +60,7 @@ Display: DP link     | display/dc/link/protocols/link_dp_phy.c
 Display: DP link     | display/dc/link/hwss/link_hwss_dio.c
 Display: DP link     | display/dc/link/link_validation.c
 Display: DP link     | display/dc/dio/dcn10/dcn10_stream_encoder.c
+VCN / JPEG video     | amdgpu/amdgpu_vcn.c
+VCN / JPEG video     | amdgpu/vcn_v4_0.c
+VCN / JPEG video     | amdgpu/amdgpu_jpeg.c
+VCN / JPEG video     | amdgpu/jpeg_v4_0.c

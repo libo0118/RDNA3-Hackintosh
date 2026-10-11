@@ -734,6 +734,8 @@ static int syncobj_transfer(rdna3_drm_file *f, struct drm_syncobj_transfer *t)
 
 static int ring_ok(rdna3_drm_device *dev, uint32_t ip, uint32_t ring)
 {
+    if (ip == AMDGPU_HW_IP_VCN_ENC && ring < RD_VCN_MAX_INST && (dev->vcn_inst_ready & (1u << ring)))
+        return 1;   /* the VCN instance a context's VCN_ENC entity runs on */
     return ip < AMDGPU_HW_IP_NUM && ring < 4 && (dev->ready_rings[ip] & (1u << ring));
 }
 
@@ -880,6 +882,352 @@ static int bo_list_ioctl(rdna3_drm_file *f, union drm_amdgpu_bo_list *l)
     return 0;
 }
 
+/* ------------------------- VCN 4.0 / JPEG 4.0 ------------------------- */
+
+static rdna3_va *va_lookup(rdna3_drm_file *f, uint64_t addr);
+
+/* soc15d.h / jpeg_v2_0.h: the JRBC packets jpeg_v2_dec_ring_parse_cs allows */
+#define RD_PACKETJ_TYPE0          0
+#define RD_PACKETJ_TYPE3          3
+#define RD_PACKETJ_TYPE6          6
+#define RD_PACKETJ_CONDITION_CHECK0 0
+#define RD_PACKETJ_CONDITION_CHECK3 3
+#define RD_CP_PACKETJ_NOP         0x60000000u
+#define RD_JPEG_REG_RANGE_START   0x4000
+#define RD_JPEG_REG_RANGE_END     0x41c2
+/* vcn_v4_0.c */
+#define RD_RDECODE_MSG_CREATE                   0x00000000
+#define RD_RDECODE_MESSAGE_CREATE               0x00000001
+#define RD_RADEON_VCN_ENGINE_TYPE_ENCODE        0x00000002
+#define RD_RADEON_VCN_ENGINE_TYPE_DECODE        0x00000003
+#define RD_RADEON_VCN_ENGINE_INFO               0x30000001
+#define RD_RADEON_VCN_ENGINE_INFO_MAX_OFFSET    16
+#define RD_RENCODE_ENCODE_STANDARD_AV1          2
+#define RD_RENCODE_IB_PARAM_SESSION_INIT        0x00000003
+#define RD_RENCODE_IB_PARAM_SESSION_INIT_MAX_OFFSET 64
+#define RD_AMDGPU_VCN_HARVEST_VCN0              (1u << 0)
+
+void rdna3_drm_device_set_vcn(rdna3_drm_device *dev, uint32_t ip_version, uint32_t num_inst,
+                              uint32_t harvest_config, uint32_t inst_ready, int jpeg_ready)
+{
+    dev->vcn_ip_version = ip_version;
+    dev->vcn_num_inst = num_inst > RD_VCN_MAX_INST ? RD_VCN_MAX_INST : num_inst;
+    dev->vcn_harvest = harvest_config;
+    dev->vcn_inst_ready = inst_ready & ((1u << dev->vcn_num_inst) - 1) & ~harvest_config;
+    dev->jpeg_ready = jpeg_ready ? 1 : 0;
+    /* the IP blocks vcn_v4_0_ip_block / jpeg_v4_0_ip_block: 4.0 */
+    dev->ip_ver_major[AMDGPU_HW_IP_VCN_DEC] = dev->ip_ver_major[AMDGPU_HW_IP_VCN_ENC] = 4;
+    dev->ip_ver_minor[AMDGPU_HW_IP_VCN_DEC] = dev->ip_ver_minor[AMDGPU_HW_IP_VCN_ENC] = 0;
+    dev->ip_ver_major[AMDGPU_HW_IP_VCN_JPEG] = 4;
+    dev->ip_ver_minor[AMDGPU_HW_IP_VCN_JPEG] = 0;
+    /* one VCN_ENC ring for userspace (amdgpu_ctx_num_entities), whichever
+     * instance runs it; the JPEG ring */
+    if (dev->vcn_inst_ready)
+        rdna3_drm_device_set_ring_ready(dev, AMDGPU_HW_IP_VCN_ENC, 1);
+    if (dev->jpeg_ready)
+        rdna3_drm_device_set_ring_ready(dev, AMDGPU_HW_IP_VCN_JPEG, 1);
+}
+
+static int vcn_up(const rdna3_drm_device *dev, uint32_t ip)
+{
+    return dev->vcn_num_inst &&
+           (ip == AMDGPU_HW_IP_VCN_DEC || ip == AMDGPU_HW_IP_VCN_ENC || ip == AMDGPU_HW_IP_VCN_JPEG);
+}
+
+/* the hardware ring a (context, ip, ring) fence lives on: a VCN_ENC
+ * context's entity runs on one VCN instance (amdgpu_ctx_init_entity) */
+static uint32_t entity_ring(const rdna3_drm_file *f, uint32_t ctx, uint32_t ip, uint32_t ring)
+{
+    if (ip == AMDGPU_HW_IP_VCN_ENC && ring == 0 && ctx < RD_MAX_CTX && f->vcn_entity[ctx])
+        return f->vcn_entity[ctx] - 1u;
+    return ring;
+}
+
+/* drm_sched_pick_best over the VCN_ENC schedulers (amdgpu_ctx_init_entity
+ * pins a video entity to one): the lowest score wins, VCN0 starts with
+ * one (vcn_v4_0_sw_init: "scheduled after other instances"); a job still
+ * running on an instance counts as its load */
+static uint32_t vcn_pick_best(rdna3_drm_file *f)
+{
+    rdna3_drm_device *dev = f->dev;
+    uint32_t i, best = 0, best_score = ~0u;
+    for (i = 0; i < dev->vcn_num_inst; i++) {
+        uint32_t score;
+        rdna3_fence fe;
+        if (!(dev->vcn_inst_ready & (1u << i)))
+            continue;
+        fe.ip = AMDGPU_HW_IP_VCN_ENC;
+        fe.ring = i;
+        fe.seq = dev->last_seq[AMDGPU_HW_IP_VCN_ENC][i];
+        score = (i == 0 ? 1u : 0u) + ((fe.seq && !fence_done(dev, &fe)) ? 1u : 0u);
+        if (score < best_score) {
+            best_score = score;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* Ported from vcn_v4_0_limit_sched: the create message must be in the
+ * first IB of the entity, which then moves to VCN0 for good */
+static int vcn_v4_0_limit_sched(rdna3_drm_file *f, uint32_t ctx, uint32_t *inst)
+{
+    if (ctx < RD_MAX_CTX && f->vcn_entity_jobs[ctx])
+        return -RD_EINVAL;
+    /* if VCN0 is harvested, we can't support AV1 */
+    if (f->dev->vcn_harvest & RD_AMDGPU_VCN_HARVEST_VCN0)
+        return -RD_EINVAL;
+    *inst = 0;   /* drm_sched_entity_modify_sched(VCN_ENC prio 0 scheds, 1) */
+    if (ctx < RD_MAX_CTX)
+        f->vcn_entity[ctx] = 1;
+    return 0;
+}
+
+/* amdgpu_cs_find_mapping + amdgpu_bo_kmap: the CPU view of [addr, addr + 4)
+ * and where its mapping ends (VA); NULL when unmapped or not CPU visible */
+static const uint8_t *cs_map(rdna3_drm_file *f, uint64_t addr, uint64_t *start, uint64_t *end)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    rdna3_va *m = va_lookup(f, addr);
+    uint8_t *p;
+    if (!m || !ops->bo_kmap)
+        return NULL;
+    p = (uint8_t *)ops->bo_kmap(ops->ctx, m->bo);
+    if (!p)
+        return NULL;
+    *start = m->va & 0x0000ffffffffffffull;
+    *end = *start + m->size;
+    return p + m->offset;
+}
+
+/* Ported from vcn_v4_0_dec_msg: a decode create message that names a codec
+ * other than H264 / HEVC / VP9 (create[0] 0x7 / 0x10 / 0x11) needs VCN0 */
+static int vcn_v4_0_dec_msg(rdna3_drm_file *f, uint32_t ctx, uint32_t *inst, uint64_t addr)
+{
+    uint64_t start, end;
+    const uint8_t *ptr;
+    uint32_t msg[6], num_buffers, i;
+    int r = 0;
+
+    addr &= 0x0000ffffffffffffull;   /* AMDGPU_GMC_HOLE_MASK */
+    ptr = cs_map(f, addr, &start, &end);
+    if (!ptr)
+        return -RD_EINVAL;           /* Can't find BO for addr */
+    if (addr & 0x7)
+        return -RD_EINVAL;           /* VCN messages must be 8 byte aligned */
+    if (end - addr < sizeof(msg))
+        return -RD_EINVAL;
+    copy(msg, ptr + (addr - start), sizeof(msg));
+    /* Check length */
+    if (msg[1] > end - addr)
+        return -RD_EINVAL;
+    if (msg[3] != RD_RDECODE_MSG_CREATE)
+        return 0;
+    num_buffers = msg[2];
+    for (i = 0; i < num_buffers; ++i) {
+        uint64_t at = addr + 24 + 16ull * i;
+        uint32_t ent[4], offset, size, create0;
+        if (at + 16 > end)
+            return -RD_EINVAL;
+        copy(ent, ptr + (at - start), sizeof(ent));
+        if (ent[0] != RD_RDECODE_MESSAGE_CREATE)
+            continue;
+        offset = ent[1];
+        size = ent[2];
+        if (offset + size > end)
+            return -RD_EINVAL;
+        if (addr + offset + 4 > end)
+            return -RD_EINVAL;
+        copy(&create0, ptr + (addr + offset - start), 4);
+        /* H264, HEVC and VP9 can run on any instance */
+        if (create0 == 0x7 || create0 == 0x10 || create0 == 0x11)
+            continue;
+        r = vcn_v4_0_limit_sched(f, ctx, inst);
+        if (r)
+            return r;
+    }
+    return r;
+}
+
+/* Ported from vcn_v4_0_enc_find_ib_param: the offset of package 'id' within
+ * the first max_offset dwords, -1 if absent */
+static int vcn_v4_0_enc_find_ib_param(const uint32_t *ib, uint32_t length_dw, uint32_t id, int max_offset)
+{
+    uint32_t i;
+    for (i = 0; i < length_dw && (int)i < max_offset && ib[i] >= 8; i += ib[i] / 4) {
+        if (i + 1 < length_dw && ib[i + 1] == id)
+            return (int)i;
+    }
+    return -1;
+}
+
+/* Ported from vcn_v4_0_ring_patch_cs_in_place: on VCN1, AV1 encode sessions
+ * and decode sessions of other codecs than H264 / HEVC / VP9 go to VCN0 */
+static int vcn_v4_0_ring_patch_cs_in_place(rdna3_drm_file *f, uint32_t ctx, uint32_t *inst, const uint32_t *ib,
+                                           uint32_t length_dw)
+{
+    int idx;
+    uint32_t val;
+    /* The first instance can decode anything */
+    if (!*inst)
+        return 0;
+    /* RADEON_VCN_ENGINE_INFO is at the top of ib block */
+    idx = vcn_v4_0_enc_find_ib_param(ib, length_dw, RD_RADEON_VCN_ENGINE_INFO, RD_RADEON_VCN_ENGINE_INFO_MAX_OFFSET);
+    if (idx < 0)   /* engine info is missing */
+        return 0;
+    if ((uint32_t)idx + 2 >= length_dw)
+        return 0;
+    val = ib[idx + 2];   /* RADEON_VCN_ENGINE_TYPE */
+    if (val == RD_RADEON_VCN_ENGINE_TYPE_DECODE) {
+        uint64_t addr;
+        if ((uint32_t)idx + 9 > length_dw)
+            return 0;
+        /* struct amdgpu_vcn_decode_buffer at idx + 6 */
+        if (!(ib[idx + 6] & 0x1))
+            return 0;
+        addr = ((uint64_t)ib[idx + 7]) << 32 | ib[idx + 8];
+        return vcn_v4_0_dec_msg(f, ctx, inst, addr);
+    } else if (val == RD_RADEON_VCN_ENGINE_TYPE_ENCODE) {
+        idx = vcn_v4_0_enc_find_ib_param(ib, length_dw, RD_RENCODE_IB_PARAM_SESSION_INIT,
+                                         RD_RENCODE_IB_PARAM_SESSION_INIT_MAX_OFFSET);
+        if (idx >= 0 && (uint32_t)idx + 2 < length_dw && ib[idx + 2] == RD_RENCODE_ENCODE_STANDARD_AV1)
+            return vcn_v4_0_limit_sched(f, ctx, inst);
+    }
+    return 0;
+}
+
+/* Ported from jpeg_v2_dec_ring_parse_cs: JPEG register writes and NOPs only */
+static int jpeg_v2_dec_ring_parse_cs(const uint32_t *ib, uint32_t length_dw)
+{
+    uint32_t i, reg, res, cond, type;
+    for (i = 0; i < length_dw; i += 2) {
+        reg = ib[i] & 0x3FFFF;
+        res = (ib[i] >> 18) & 0x3F;
+        cond = (ib[i] >> 24) & 0xF;
+        type = (ib[i] >> 28) & 0xF;
+        if (res)   /* only support 0 at the moment */
+            return -RD_EINVAL;
+        switch (type) {
+        case RD_PACKETJ_TYPE0:
+            if (cond != RD_PACKETJ_CONDITION_CHECK0 || reg < RD_JPEG_REG_RANGE_START || reg > RD_JPEG_REG_RANGE_END)
+                return -RD_EINVAL;
+            break;
+        case RD_PACKETJ_TYPE3:
+            if (cond != RD_PACKETJ_CONDITION_CHECK3 || reg < RD_JPEG_REG_RANGE_START || reg > RD_JPEG_REG_RANGE_END)
+                return -RD_EINVAL;
+            break;
+        case RD_PACKETJ_TYPE6:
+            if (ib[i] == RD_CP_PACKETJ_NOP)
+                continue;
+            return -RD_EINVAL;
+        default:
+            return -RD_EINVAL;   /* Unknown packet type */
+        }
+    }
+    return 0;
+}
+
+/* Ported from amdgpu_cs_patch_ibs for the video rings: the IB must sit in
+ * one mapping of the VM; VCN_ENC (patch_cs_in_place) may move the entity
+ * to VCN0, VCN_JPEG (parse_cs) runs a checked copy ('copies' gets the
+ * zalloc'ed buffers, freed by the caller) */
+static int cs_patch_ibs(rdna3_drm_file *f, uint32_t ctx, uint32_t ip, uint32_t *inst, rdna3_ib *ibs,
+                        uint32_t nibs, uint32_t **copies)
+{
+    rdna3_drm_ops *ops = &f->dev->ops;
+    uint32_t i;
+    int r;
+    for (i = 0; i < nibs; i++) {
+        uint64_t va = ibs[i].va & 0x0000ffffffffffffull, start, end;
+        const uint8_t *kptr = cs_map(f, va, &start, &end);
+        uint64_t bytes = 4ull * ibs[i].length_dw;
+        rdna3_va *m = va_lookup(f, va);
+        if (!m)
+            return -RD_EINVAL;   /* IB va_start is invalid */
+        if (va + bytes > (m->va & 0x0000ffffffffffffull) + m->size)
+            return -RD_EINVAL;   /* IB va_start+ib_bytes is invalid */
+        if (ip == AMDGPU_HW_IP_VCN_JPEG) {
+            if (!kptr)
+                return -RD_EINVAL;
+            copies[i] = (uint32_t *)ops->zalloc(ops->ctx, (size_t)bytes);
+            if (!copies[i])
+                return -RD_ENOMEM;
+            copy(copies[i], kptr + (va - start), (size_t)bytes);
+            r = jpeg_v2_dec_ring_parse_cs(copies[i], ibs[i].length_dw);
+            if (r)
+                return r;
+            ibs[i].kdata = copies[i];
+        } else if (*inst) {
+            /* the in-place check reads the user's IB */
+            uint32_t n = ibs[i].length_dw < 128 ? ibs[i].length_dw : 128, head[128];
+            if (!kptr)
+                return -RD_EINVAL;
+            copy(head, kptr + (va - start), 4ull * n);
+            r = vcn_v4_0_ring_patch_cs_in_place(f, ctx, inst, head, n);
+            if (r)
+                return r;
+        }
+    }
+    return 0;
+}
+
+/* soc21.c: vcn_4_0_0_video_codecs_{encode,decode}_array_vcn{0,1}
+ * (codec_info_build: type, width, height, pixels = width * height, level) */
+typedef struct { uint32_t type, w, h, level; } rd_codec;
+static const rd_codec vcn_4_0_0_video_codecs_encode_array_vcn0[] = {
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC, 4096, 4096, 0 },
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_HEVC, 8192, 4352, 0 },
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_AV1, 8192, 4352, 0 },
+};
+static const rd_codec vcn_4_0_0_video_codecs_encode_array_vcn1[] = {
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC, 4096, 4096, 0 },
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_HEVC, 8192, 4352, 0 },
+};
+static const rd_codec vcn_4_0_0_video_codecs_decode_array_vcn0[] = {
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC, 4096, 4096, 52 },
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_HEVC, 8192, 4352, 186 },
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_JPEG, 16384, 16384, 0 },
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_VP9, 8192, 4352, 0 },
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_AV1, 8192, 4352, 0 },
+};
+static const rd_codec vcn_4_0_0_video_codecs_decode_array_vcn1[] = {
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_MPEG4_AVC, 4096, 4096, 52 },
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_HEVC, 8192, 4352, 186 },
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_JPEG, 16384, 16384, 0 },
+    { AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_VP9, 8192, 4352, 0 },
+};
+#define RD_N(a) ((uint32_t)(sizeof(a) / sizeof((a)[0])))
+
+/* Ported from soc21_query_video_codecs (VCN 4.0.0 / 4.0.2 / 4.0.4 / 4.0.5,
+ * not a VF): VCN1's tables when VCN0 is harvested */
+static int soc21_query_video_codecs(const rdna3_drm_device *dev, int encode, const rd_codec **codecs,
+                                    uint32_t *count)
+{
+    uint32_t i, harvested = 0;
+    for (i = 0; i < 8; i++)
+        harvested += (dev->vcn_harvest >> i) & 1;
+    if (dev->vcn_num_inst == harvested)
+        return -RD_EINVAL;
+    switch (dev->vcn_ip_version) {
+    case AMD_IP_VERSION(4, 0, 0):
+    case AMD_IP_VERSION(4, 0, 2):
+    case AMD_IP_VERSION(4, 0, 4):
+    case AMD_IP_VERSION(4, 0, 5):
+        if (dev->vcn_harvest & RD_AMDGPU_VCN_HARVEST_VCN0) {
+            *codecs = encode ? vcn_4_0_0_video_codecs_encode_array_vcn1 : vcn_4_0_0_video_codecs_decode_array_vcn1;
+            *count = encode ? RD_N(vcn_4_0_0_video_codecs_encode_array_vcn1)
+                            : RD_N(vcn_4_0_0_video_codecs_decode_array_vcn1);
+        } else {
+            *codecs = encode ? vcn_4_0_0_video_codecs_encode_array_vcn0 : vcn_4_0_0_video_codecs_decode_array_vcn0;
+            *count = encode ? RD_N(vcn_4_0_0_video_codecs_encode_array_vcn0)
+                            : RD_N(vcn_4_0_0_video_codecs_decode_array_vcn0);
+        }
+        return 0;
+    default:
+        return -RD_EINVAL;
+    }
+}
+
 static int uf_bo_ok(const rdna3_bo *bo, uint64_t offset)
 {
     return bo && bo->size == 4096 && !bo->userptr && offset <= 4096 - 8 && !(offset & 7);
@@ -901,6 +1249,8 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
     uint32_t uf_handle = 0, uf_slot = RD_MAX_UF_PENDING;
     uint32_t onchip[3] = { 0, 0, 0 };   /* BO_HANDLES chunk: GDS / GWS / OA handles */
     int have_bo_handles = 0;
+    uint32_t *copies[RD_MAX_CS_IBS];    /* VCN_JPEG: the checked IB copies */
+    uint32_t ctx = cs->in.ctx_id, hw_ring;
     int r;
 
     if (!ops->submit)
@@ -932,7 +1282,7 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
                 return -RD_EINVAL;
             if (nibs && (ib.ip_type != ip || ib.ring != ring))
                 return -RD_EINVAL;   /* one ring per submission, like amdgpu */
-            if (!ring_ok(dev, ib.ip_type, ib.ring))
+            if (!ring_ok(dev, ib.ip_type, ib.ring) || (ib.ip_type == AMDGPU_HW_IP_VCN_ENC && ib.ring))
                 return dev->enumeration_only ? -RD_ENODEV : -RD_EINVAL;  /* faked ring */
             if (ib.flags & (AMDGPU_IB_FLAG_PREAMBLE | AMDGPU_IB_FLAG_CE))
                 continue;            /* no CE on GFX11; preambles can be dropped */
@@ -941,6 +1291,7 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
             ibs[nibs].va = ib.va_start;
             ibs[nibs].length_dw = ib.ib_bytes / 4;
             ibs[nibs].flags = ib.flags;
+            ibs[nibs].kdata = NULL;
             nibs++;
             break;
         }
@@ -955,8 +1306,8 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
                 if (!dep.handle || !ring_ok(dev, dep.ip_type, dep.ring))
                     continue;
                 fe.ip = dep.ip_type;
-                fe.ring = dep.ring;
-                fe.seq = dep_seq(dev, dep.ip_type, dep.ring, dep.handle);
+                fe.ring = entity_ring(f, dep.ctx_id, dep.ip_type, dep.ring);
+                fe.seq = dep_seq(dev, dep.ip_type, fe.ring, dep.handle);
                 /* same ring: in-order execution already covers it */
                 if (ch.chunk_id == AMDGPU_CHUNK_ID_DEPENDENCIES && !fence_done(dev, &fe) &&
                     (r = fence_wait_abs(dev, &fe, ~0ull)) != 0)
@@ -1115,9 +1466,33 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
         }
     }
 
-    r = ops->submit(ops->ctx, f->vm, ip, ring, ibs, nibs, &job, &seq);
-    if (r)
-        return r;
+    /* the video rings: the context's VCN_ENC entity picks its instance on
+     * first use (amdgpu_ctx_init_entity), amdgpu_cs_patch_ibs checks the
+     * IBs (and may move the entity to VCN0), JPEG runs checked copies */
+    hw_ring = ring;
+    if (ip == AMDGPU_HW_IP_VCN_ENC || ip == AMDGPU_HW_IP_VCN_JPEG) {
+        zero(copies, sizeof(copies));
+        if (ip == AMDGPU_HW_IP_VCN_ENC) {
+            if (ctx < RD_MAX_CTX && !f->vcn_entity[ctx])
+                f->vcn_entity[ctx] = (uint8_t)(vcn_pick_best(f) + 1);
+            hw_ring = entity_ring(f, ctx, ip, ring);
+        }
+        r = cs_patch_ibs(f, ctx, ip, &hw_ring, ibs, nibs, copies);
+        if (!r)
+            r = ops->submit(ops->ctx, f->vm, ip, hw_ring, ibs, nibs, &job, &seq);
+        for (i = 0; i < nibs; i++)
+            if (copies[i])
+                ops->free(ops->ctx, copies[i], 4ull * ibs[i].length_dw);
+        if (r)
+            return r;
+        if (ip == AMDGPU_HW_IP_VCN_ENC && ctx < RD_MAX_CTX)
+            f->vcn_entity_jobs[ctx]++;
+        ring = hw_ring;
+    } else {
+        r = ops->submit(ops->ctx, f->vm, ip, ring, ibs, nibs, &job, &seq);
+        if (r)
+            return r;
+    }
     dev->last_seq[ip][ring] = seq;
     if (job.uf_bo) {
         job.uf_bo->refcnt++;
@@ -1152,7 +1527,7 @@ static int wait_cs(rdna3_drm_file *f, union drm_amdgpu_wait_cs *w)
     if (!ring_ok(dev, w->in.ip_type, w->in.ring))
         return -RD_EINVAL;
     fe.ip = w->in.ip_type;
-    fe.ring = w->in.ring;
+    fe.ring = entity_ring(f, w->in.ctx_id, w->in.ip_type, w->in.ring);
     fe.seq = dep_seq(dev, fe.ip, fe.ring, w->in.handle);
     zero(&w->out, sizeof(w->out));
     if (!fe.seq)
@@ -1178,7 +1553,7 @@ static int wait_fences(rdna3_drm_file *f, union drm_amdgpu_wait_fences *w)
         if (!ring_ok(dev, af.ip_type, af.ring))
             return -RD_EINVAL;
         fe.ip = af.ip_type;
-        fe.ring = af.ring;
+        fe.ring = entity_ring(f, af.ctx_id, af.ip_type, af.ring);
         fe.seq = af.seq_no;
         if (!seq_submitted(dev, fe.ip, fe.ring, fe.seq))
             return -RD_EINVAL;
@@ -1197,7 +1572,7 @@ static int wait_fences(rdna3_drm_file *f, union drm_amdgpu_wait_fences *w)
         if (dev->ops.copyin(dev->ops.ctx, &af, w->in.fences, sizeof(af)))
             return -RD_EFAULT;
         fe.ip = af.ip_type;
-        fe.ring = af.ring;
+        fe.ring = entity_ring(f, af.ctx_id, af.ip_type, af.ring);
         fe.seq = af.seq_no;
         if (!fence_wait_abs(dev, &fe, timeout)) {
             done = 1;
@@ -1225,7 +1600,7 @@ static int fence_to_handle(rdna3_drm_file *f, union drm_amdgpu_fence_to_handle *
         return r;
     s = sobj(f, c.handle);
     s->fence.ip = h->in.fence.ip_type;
-    s->fence.ring = h->in.fence.ring;
+    s->fence.ring = entity_ring(f, h->in.fence.ctx_id, h->in.fence.ip_type, h->in.fence.ring);
     s->fence.seq = dep_seq(f->dev, s->fence.ip, s->fence.ring, h->in.fence.seq_no);
     s->has_fence = s->fence.seq != 0;
     s->signaled = !s->has_fence;
@@ -1600,6 +1975,8 @@ static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
                 f->ctx_used[i] = 1;
                 f->ctx_init_prio[i] = (int16_t)prio;
                 f->ctx_override_prio[i] = AMDGPU_CTX_PRIORITY_UNSET;
+                f->vcn_entity[i] = 0;
+                f->vcn_entity_jobs[i] = 0;
                 zero(c, sizeof(*c));
                 c->out.alloc.ctx_id = i;
                 return 0;
@@ -1609,6 +1986,8 @@ static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
         if (!id || id >= RD_MAX_CTX || !f->ctx_used[id])
             return -RD_EINVAL;
         f->ctx_used[id] = 0;
+        f->vcn_entity[id] = 0;
+        f->vcn_entity_jobs[id] = 0;
         return 0;
     case AMDGPU_CTX_OP_QUERY_STATE:
     case AMDGPU_CTX_OP_QUERY_STATE2: {
@@ -2825,6 +3204,21 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         if (t >= AMDGPU_HW_IP_NUM || in->query_hw_ip.ip_instance)
             return -RD_EINVAL;
         zero(&ip, sizeof(ip));
+        if (vcn_up(dev, t)) {
+            /* amdgpu_hw_ip_info: VCN_DEC has no ring on VCN 4 (the unified
+             * ring is VCN_ENC's), one entity per IP (amdgpu_ctx_num_entities),
+             * ip_discovery_version from UVD_HWIP for VCN and JPEG alike */
+            uint32_t n = t == AMDGPU_HW_IP_VCN_ENC ? (dev->vcn_inst_ready ? 1 : 0)
+                       : t == AMDGPU_HW_IP_VCN_JPEG ? dev->jpeg_ready : 0;
+            ip.hw_ip_version_major = dev->ip_ver_major[t];
+            ip.hw_ip_version_minor = dev->ip_ver_minor[t];
+            ip.ip_discovery_version = dev->vcn_ip_version;
+            ip.capabilities_flags = 0;
+            ip.available_rings = (1u << n) - 1;
+            ip.ib_start_alignment = 256;
+            ip.ib_size_alignment = t == AMDGPU_HW_IP_VCN_ENC ? 4 : 64;
+            return info_out(f, in, &ip, sizeof(ip));
+        }
         ip.hw_ip_version_major = dev->ip_ver_major[t];
         ip.hw_ip_version_minor = dev->ip_ver_minor[t];
         ip.ib_start_alignment = 32;
@@ -2838,6 +3232,8 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         if (t >= AMDGPU_HW_IP_NUM)
             return -RD_EINVAL;
         n = dev->available_rings[t] ? 1 : 0;
+        if (vcn_up(dev, t))   /* amdgpu_info_ioctl: num_vcn_inst; JPEG: num_jpeg_inst * num_jpeg_rings */
+            n = t == AMDGPU_HW_IP_VCN_JPEG ? 1 : dev->vcn_num_inst;
         return info_out(f, in, &n, 4);
     }
     case AMDGPU_INFO_TIMESTAMP: {
@@ -2935,7 +3331,27 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
     }
     case AMDGPU_INFO_VIDEO_CAPS: {
         struct drm_amdgpu_info_video_caps caps;
-        zero(&caps, sizeof(caps));   /* no VCN yet */
+        const rd_codec *codecs;
+        uint32_t i, count;
+        zero(&caps, sizeof(caps));   /* without the VCN block: nothing valid */
+        if (!dev->vcn_num_inst)
+            return info_out(f, in, &caps, sizeof(caps));
+        /* amdgpu_info_ioctl: soc21_query_video_codecs by type */
+        if (in->video_cap.type != AMDGPU_INFO_VIDEO_CAPS_DECODE &&
+            in->video_cap.type != AMDGPU_INFO_VIDEO_CAPS_ENCODE)
+            return -RD_EINVAL;
+        if (soc21_query_video_codecs(dev, in->video_cap.type == AMDGPU_INFO_VIDEO_CAPS_ENCODE, &codecs, &count))
+            return -RD_EINVAL;
+        for (i = 0; i < count; i++) {
+            uint32_t idx = codecs[i].type;
+            if (idx >= AMDGPU_INFO_VIDEO_CAPS_CODEC_IDX_COUNT)
+                continue;
+            caps.codec_info[idx].valid = 1;
+            caps.codec_info[idx].max_width = codecs[i].w;
+            caps.codec_info[idx].max_height = codecs[i].h;
+            caps.codec_info[idx].max_pixels_per_frame = codecs[i].w * codecs[i].h;
+            caps.codec_info[idx].max_level = codecs[i].level;
+        }
         return info_out(f, in, &caps, sizeof(caps));
     }
     case AMDGPU_INFO_READ_MMR_REG: {

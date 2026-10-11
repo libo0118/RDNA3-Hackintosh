@@ -500,6 +500,23 @@ void RDNA3Accel::drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t
         IOLockUnlock(fDrmLock);
 }
 
+void RDNA3Accel::drmVcnReady(uint32_t ipVersion, uint32_t numInst, uint32_t harvest, uint32_t instReady,
+                             bool jpegReady)
+{
+    if (!fDrm || !fDrmLock)
+        return;
+    bool held = drmHeldByMe();
+    if (!held)
+        IOLockLock(fDrmLock);
+    rdna3_drm_device_set_vcn(fDrm, ipVersion, numInst, harvest, instReady, jpegReady ? 1 : 0);
+    if (!held)
+        IOLockUnlock(fDrmLock);
+    setProperty("RDNA3,VCNInstancesReady", instReady, 32);
+    LOG("VCN %u.%u.%u: %u instance(s), unified rings 0x%x, JPEG %s for command submission",
+        (ipVersion >> 16) & 0xff, (ipVersion >> 8) & 0xff, ipVersion & 0xff, numInst, instReady,
+        jpegReady ? "ready" : "off");
+}
+
 void RDNA3Accel::drmRingReady(uint32_t ip, uint32_t mask)
 {
     if (!fDrm || !fDrmLock)
@@ -571,6 +588,12 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
             ops.userq_wait = drmUserqWait;
             ops.now_ns = drmNowNs;
         }
+        /* rdna3vcn=1: amdgpu_cs_patch_ibs reads the video IBs (VCN create
+         * messages, the JPEG IB it copies) through the kernel's BO view */
+        uint32_t vcn = 0;
+        PE_parse_boot_argn("rdna3vcn", &vcn, sizeof(vcn));
+        if (vcn)
+            ops.bo_kmap = drmBoKmap;
     }
 
     fDrmLock = IOLockAlloc();

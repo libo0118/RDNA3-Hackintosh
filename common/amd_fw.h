@@ -163,6 +163,7 @@ enum {
     AMD_UCODE_STORAGE,
     AMD_UCODE_SMC,                    /* 52 */
     AMD_UCODE_VCN = 57,
+    AMD_UCODE_VCN1 = 58,
     AMD_UCODE_DMCUB = 63,
 };
 
@@ -190,6 +191,13 @@ amd_fw_status amd_ucode_plan_build(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT],
                                    amd_ucode_plan *plan);
 
 const amd_ucode *amd_ucode_plan_find(const amd_ucode_plan *plan, uint16_t ucode_id);
+
+/* amdgpu_vcn_setup_ucode: one VCN ucode per instance (the plan has
+ * instance 0; with two instances VCN1 / GFX_FW_TYPE_VCN1 is added, same
+ * image). Only when the VCN block is brought up (rdna3vcn=1): the default
+ * profile keeps the plan amd_ucode_plan_build made. */
+amd_fw_status amd_vcn_setup_ucode(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT], uint32_t num_vcn_inst,
+                                  amd_ucode_plan *plan);
 
 const char *amd_fw_status_str(amd_fw_status s);
 
