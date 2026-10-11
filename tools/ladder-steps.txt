@@ -118,3 +118,13 @@ vcnsleep rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 
 # gamma without the accelerator: does IOFramebuffer hand the table to
 # setGammaTable when no display pipe takes the frames (card runs 26-28)
 gamma0 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3pm=2 rdna3idlecap=1 rdna3gamma=1 rdna3accel=0
+# timing generator functions (hw/dcn32_otg.c, stage 4 item K): the 9c step
+# + rdna3otg=1: at display start every lit head's OTG is read through DC's
+# optc functions (scan position, active size, vblank / active states, the
+# vertical interrupt 0 latched mid-frame, underflow, ODM segments)
+otg rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3otg=1
+# amdgpu's exact DMCUB reset (dmub_dcn32_reset, stage 4 item K): the 9c step
+# + rdna3dmubreset=1: STOP_FW with amdgpu's 30-read waits, DMUIF_SOFT_RESET
+# set and released, the DMCUB's diagnostic registers and trace in the log;
+# the clone and the extended desktop must still come up through it
+dmubreset rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3dmubreset=1

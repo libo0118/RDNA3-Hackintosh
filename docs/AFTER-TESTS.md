@@ -475,7 +475,45 @@ enabled).
 | `dsc: DSC n power up: PGFSM status ..` | DOMAIN16+n did not ungate | look: `DOMAIN16..19_PG_STATUS`, `DC_IP_REQUEST_CNTL` |
 | `modeset: ... underflows / does not run: back to` only at DSC modes | the DLG rescale of the GOP's values at the compressed mode | as for `modeset2`: the look's DLG line; full DML for that mode |
 
+### Timing generator read-back (`otg`)
+
+`otg` = `9c` + `rdna3otg=1`. At display start `dcn32_otg_check`
+(hw/dcn32_otg.c) runs DC's optc functions on every head the GOP lit and
+publishes `RDNA3,Head<n>,OTGCheck`. Pass: `0: ...`, the active size equal
+to the head's, `counter moving`, `vblank 1 vactive 1`, `vline0 ... latched`
+with the line read within a few lines of the one aimed at, `underflow 0`,
+`ODM 1`. Then mark `otg` passed: the optc functions the check reads count
+as working (tools/progress.py ITEM_STEPS).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no `OTGCheck` property | the boot-arg is missing, or no head was lit at display start (`RDNA3,DisplayHeads 0`) | the boot-args line of the report |
+| `-19` (RDNA3_ENODEV) / `0x0` size | the OTG reads as off (OTG_MASTER_EN 0) | the look's `OTG_CONTROL`; the head list in `20-log-rdna3.txt` |
+| active size differs from the head's | OTG_H/V_BLANK_START_END read differently by `optc1_get_otg_active_size` than by `read_timing` (dcn32.c) | both register values from the look; fix whichever subtraction is off |
+| `counter STOPPED` | two OTG_STATUS_POSITION reads were equal: the OTG is not counting (or the read is cached) | `RDNA3,Head<n>,...` frame counter from `rdna3_drminfo --scanout`; the OTG clock (`OTG_CLOCK_CONTROL`) |
+| `vblank 0` or `vactive 0` | OTG_STATUS never showed the state within 100 ms | the look's `OTG_STATUS`; the V_BLANK bits' layout (OTG_V_BLANK / OTG_V_ACTIVE_DISP) |
+| `vline0 ... NOT latched` | OTG_VERTICAL_INTERRUPT0_STATUS did not set within 60 ms with the line inside the range | the line aimed at vs `OTG_V_TOTAL`; the look's `OTG_VERTICAL_INTERRUPT0_CONTROL` (OUTPUT_POLARITY, INT_TYPE) |
+| `underflow 1` | OPTC_UNDERFLOW_OCCURRED_STATUS is sticky: an underflow at any time since boot | compare with the HUBP underflow of `rdna3_drminfo --scanout`; not a failure of this step |
+
+### amdgpu's DMCUB reset (`dmubreset`)
+
+`dmubreset` = `9c` + `rdna3dmubreset=1`: the DMCUB is stopped and reset by
+the exact `dmub_dcn32_reset` (hw/dmub32.c) before its windows are set up.
+ioreg `RDNA3,DMUBAmdReset`: bit 0 = STOP_FW acked (GPINT status cleared by
+the firmware), bit 1 = the firmware answered 0xDEADDEAD in SCRATCH7. The
+log has `DMUB diag (after the amdgpu reset)`: SCRATCH0-16, fault
+addresses, inbox / outbox pointers, and up to 16 `DMUB trace:` entries.
+Pass: `RDNA3,DMUB = running, mailbox up`, the clone and the extended
+desktop as in 9c. Then mark `dmubreset` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `RDNA3,DMUBAmdReset = 0` or `2`, DMUB running anyway | the firmware acks later than 30 register reads (amdgpu forces the reset then) | harmless if the boot and the clone pass; note the value: the verified path waits up to 1 s |
+| `DMUB: auto-load timed out` after the amdgpu reset | DMUIF_SOFT_RESET left set, or the forced reset caught the firmware mid PHY sequence | the `DMUB diag` lines (soft-reset 1? fault addresses?), `MMHUBBUB_SOFT_RESET` in the look; step 5b's path (no boot-arg) still works |
+| DMUB running, second monitor dark | the clone's VBIOS commands after the reset: as step 9b's triage | `clone:` lines, `RDNA3,MirrorResult` |
+
 ### DP MST (`mst`)
+
 
 `mst` = `dplink` + `rdna3mst=1`; needs an MST hub (or a daisy-chain
 monitor) on the card's native DP output with at least one monitor behind

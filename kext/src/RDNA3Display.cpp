@@ -39,10 +39,13 @@ extern "C" {
 #include "dcn32_dp.h"
 #include "dp_mst.h"
 #include "dcn32_gamma.h"
+#include "dcn32_otg.h"
 }
 #include "rdna3k_abi.h"
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
+
+static void displayOtgCheck(IOService *svc, rdna3_dev *d, const rdna3_dcn *dc);
 
 static void dispUdelay(void *, uint32_t us) { IODelay(us); }
 static void dispMsleep(void *, uint32_t ms) { IOSleep(ms); }
@@ -117,9 +120,34 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     displayProbeConnectors();
     displayPublishRoutes();
     displayStateSaveAll();   /* D4: what a reset or a sleep must bring back */
+    displayOtgCheck(this, fDispDev, fDcn);   /* rdna3otg=1: step otg */
+
     fHotplugCall = thread_call_allocate((thread_call_func_t)displayHotplugWork, this);
     hotplugInit();   /* rdna3hotplug=1: RDNA3Hotplug.cpp polls and handles */
     return true;
+}
+
+/* rdna3otg=1 (step otg): the timing generator functions of hw/dcn32_otg.c
+ * on every lit head - position, active size, vblank / active states, the
+ * vertical interrupt 0 latched mid-frame (its registers put back),
+ * underflow, double buffering, ODM segments. Reads only, apart from the
+ * vertical interrupt position, which nothing else uses. */
+static void displayOtgCheck(IOService *svc, rdna3_dev *d, const rdna3_dcn *dc)
+{
+    if (!rd3_arg("rdna3otg", 0) || !d || !dc)
+        return;
+    for (uint32_t i = 0; i < dc->nheads && i < RD_DCN_MAX_PIPES; i++) {
+        rdna3_otg_check c;
+        char key[40], val[200];
+        int r = dcn32_otg_check(d, dc->head[i].otg, &c);
+        snprintf(key, sizeof(key), "RDNA3,Head%u,OTGCheck", i);
+        snprintf(val, sizeof(val), "%d: %ux%u (head %ux%u), counter %s, vblank %d vactive %d, vline0 line %u %s "
+                 "(read %u), underflow %d, db pending %d, ODM %d", r, c.width, c.height, dc->head[i].h_active,
+                 dc->head[i].v_active, c.moving ? "moving" : "STOPPED", c.vblank_seen, c.vactive_seen, c.vline0_line,
+                 c.vline0_seen ? "latched" : "NOT latched", c.vline0_at, c.underflow, c.db_pending, c.odm_segments);
+        svc->setProperty(key, val);
+        LOG("display: head %u OTG %u check %s", i, dc->head[i].otg, val);
+    }
 }
 
 #define RD_ATOM_SCRATCH_BYTES (20u * 1024u)   /* amdgpu's minimum FB scratch */

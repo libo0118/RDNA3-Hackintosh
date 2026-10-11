@@ -100,6 +100,26 @@ ITEM_STEPS = [
                 r"|fill_stream_allocation_row_info|decide_mst_link_settings|read_is_mst_supported"
                 r"|set_dio_throttled_vcp_size|update_dio_stream_allocation_table"
                 r"|enc1_stream_encoder_set_throttled_vcp_size"), ["mst"]),
+    # stage 4 item K, Display Core pieces in verified groups: the OTG
+    # read-back of step otg (rdna3otg=1), amdgpu's DMCUB reset and its
+    # diagnostics in step dmubreset (rdna3dmubreset=1)
+    (re.compile(r"optc1_(get_position|is_counter_moving|get_crtc_scanoutpos|get_otg_active_size|wait_for_state"
+                r"|setup_vertical_interrupt0|is_optc_underflow_occurred)"
+                r"|optc32_(get_double_buffer_pending|get_odm_combine_segments)"), ["otg"]),
+    (re.compile(r"dmub_dcn32_(reset|set_gpint|is_gpint_acked|get_gpint_response|get_diagnostic_data)"
+                r"|dmub_srv_(get_diagnostic_data|get_outbox0_msg)"), ["dmubreset"]),
+    # ported and checked in the simulator, but no ladder step drives them
+    # yet (nothing in the kext calls them): they stay "ported"
+    (re.compile(r"optc1_(setup_vertical_interrupt[12]|validate_timing|is_two_pixels_per_container"
+                r"|enable_optc_clock|set_static_screen_control|enable_reset_trigger|enable_crtc_reset"
+                r"|did_triggered_reset_occur|disable_reset_trigger|clear_optc_underflow)"
+                r"|optc3_(tg_init|set_timing_double_buffer|lock_doublebuffer_enable|lock_doublebuffer_disable"
+                r"|triplebuffer_lock|set_drr_trigger_window|set_vtotal_change_limit|set_vtotal_min_max|set_out_mux)"
+                r"|optc32_(set_drr|setup_manual_trigger|set_h_timing_div_manual_mode|set_odm_combine)|is_two_pixels_per_containter"
+                r"|dmub_dcn32_(get_gpint_dataout|send_inbox0_cmd|clear_inbox0_ack_register|read_inbox0_ack_register"
+                r"|get_current_time)"
+                r"|dmub_srv_(send_gpint_command|get_gpint_response|get_gpint_dataout|send_inbox0_cmd"
+                r"|clear_inbox0_ack|wait_for_inbox0_ack|set_power_state|get_fw_boot_status)"), ["none"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

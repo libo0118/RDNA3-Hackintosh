@@ -107,3 +107,6 @@ dm_helpers_dp_handle_test_pattern_request  DisplayPort compliance test patterns 
 dm_helpers_allocate_gpu_mem|dm_helpers_free_gpu_mem  Linux buffer allocation for DC (the port allocates VRAM with rdna3_vram_alloc)
 amdgpu_dm_encoder_destroy|amdgpu_dm_initialize_dp_connector|amdgpu_dm_mst_connector_(early_unregister|late_register)|dm_dp_add_mst_connector|dm_dp_aux_transfer|dm_dp_create_fake_mst_encoders|dm_dp_mst_atomic_check|dm_dp_mst_connector_destroy|dm_dp_mst_detect|dm_dp_mst_get_modes|dm_handle_mst_down_rep_msg_ready|dm_mst_atomic_best_encoder|find_crtc_index_in_state_by_stream|dm_helpers_dp_mst_poll_pending_down_reply  Linux DRM connector / encoder / atomic-state glue of the MST topology manager (hw/dp_mst.c drives the topology itself)
 dp_overwrite_extended_receiver_cap  re-reads the base receiver caps for dc_link_overwrite_extended_receiver_cap, which nothing in amdgpu calls
+optc3_program_blank_color  OTG_BLANK_DATA_COLOR does not exist on DCN 3.2.0 (not in dcn_3_2_0_offset.h): DCN 3.2 blanks through the OPP pattern generator
+optc32_wait_odm_doublebuffer_pending_clear  waits on OTG_H_TIMING_DIV_MODE_DB_UPDATE_PENDING, a field DCN 3.2.0's OTG_DOUBLE_BUFFER_CONTROL does not have (mask 0: the wait returns at once)
+dmub_dcn32_set_outbox0_rptr  set_outbox0_rptr has no caller in Linux v6.12 (the driver keeps the trace ring's read pointer itself)

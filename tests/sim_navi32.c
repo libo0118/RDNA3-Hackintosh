@@ -3623,11 +3623,15 @@ static void sim_doorbell32(void *ctx, uint32_t index, uint32_t v)
     S.db_unclaimed++;
 }
 
+#include "sim_display_dc.inc"
+
 static void sim_wr(void *ctx, uint64_t off, uint32_t v)
 {
     uint32_t dw = (uint32_t)(off / 4);
     (void)ctx;
     if (off >= MMIO_LEN)
+        return;
+    if (sk_wr(dw, v))
         return;
     if (dw == mmMM_DATA) {
         uint32_t *w = mm_word();
@@ -4197,6 +4201,11 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
     sim_tick();
     if (off >= MMIO_LEN)
         return ~0u;
+    {
+        uint32_t kv;
+        if (sk_rd(dw, &kv))
+            return kv;
+    }
     if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_DATA) {
         uint32_t *p = smn_slot(S.smn_index, 0);
         return p ? *p : 0;
@@ -10098,6 +10107,7 @@ static void run(const char *fwdir)
             }
             test_dcn_state(&dev, &dm);
             test_dp_link(&dev, &dm);
+            test_dc_k(&dev, &dm);
             S.dcn_pg = 0;
         }
         /* attach (rdna3dmub=3): no reset, no load, the running firmware's

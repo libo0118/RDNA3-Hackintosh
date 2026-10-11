@@ -130,6 +130,15 @@ typedef struct rdna3_dmub {
     uint32_t submitted, reported;
     uint32_t boot_status;           /* SCRATCH0 after the auto-load wait */
     uint32_t feature_caps[4];       /* QUERY_FEATURE_CAPS reply (raw) */
+    /* boot-arg rdna3dmubreset=1 (set by the caller after dmub32_sw_init):
+     * stop and reset the core with amdgpu's exact dmub_dcn32_reset
+     * (GPINT STOP_FW acked within 30 reads, DMUIF_SOFT_RESET set) instead
+     * of the sequence verified on the card (waits up to 1 s for the stop,
+     * closes the CW2-CW7 windows, leaves DMUIF out of reset) */
+    int      amd_reset;
+    uint32_t reset_acked, reset_stopped;   /* the last amdgpu reset: GPINT acked / STOP_FW answered */
+    uint32_t power_state;           /* RD_DMUB_POWER_STATE_* (dmub_srv_set_power_state) */
+    uint32_t outbox0_rptr;          /* the trace ring's read pointer (outbox0_rb.rptr) */
 } rdna3_dmub;
 
 /* dm_dmub_sw_init: parse the firmware blob (dcn_3_2_0_dmcub.bin), find
@@ -255,6 +264,70 @@ int  dmub32_encoder_control(rdna3_dmub *dm, const rdna3_dig_enc_v1_5 *p);
 
 /* the trace buffer (outbox0): entries the firmware logged since 'from' */
 uint32_t dmub32_trace_wptr(rdna3_dmub *dm);
+
+/* struct dmcub_trace_buf_entry */
+typedef struct rdna3_dmub_trace_entry {
+    uint32_t trace_code, tick_count, param0, param1;
+} rdna3_dmub_trace_entry;
+/* dmub_srv_get_outbox0_msg: the next entry of the trace ring (outbox0 =
+ * the trace window after its 16-byte header, capacity window - 64), 1 when
+ * there was one. The read pointer is the driver's own (amdgpu never writes
+ * DMCUB_OUTBOX0_RPTR). */
+int  dmub32_trace_read(rdna3_dmub *dm, rdna3_dmub_trace_entry *e);
+
+/* GPINT (dmub_dcn32_set_gpint / dmub_dcn32_is_gpint_acked /
+ * dmub_dcn32_get_gpint_response / dmub_dcn32_get_gpint_dataout):
+ * dmub_srv_send_gpint_command waits (<= timeout_us) until the firmware
+ * cleared the status bit of DATAIN1; the answer is SCRATCH7
+ * (dmub_srv_get_gpint_response) or GPINT_DATAOUT (dmub_srv_get_gpint_dataout,
+ * which also acks the GPINT interrupt). */
+#define RD_DMUB_GPINT_GET_FW_VERSION 1
+int      dmub32_send_gpint(rdna3_dmub *dm, uint32_t command, uint16_t param, uint32_t timeout_us);
+uint32_t dmub32_gpint_response(rdna3_dmub *dm);
+uint32_t dmub32_gpint_dataout(rdna3_dmub *dm);
+
+/* inbox0 (dmub_srv_send_inbox0_cmd, dmub_srv_clear_inbox0_ack,
+ * dmub_srv_wait_for_inbox0_ack): one 32-bit command in DMCUB_INBOX0_WPTR,
+ * acked in SCRATCH17. On DCN 3.2 DC sends the HW lock commands of SubVP
+ * this way (dmub_hw_lock_mgr_inbox0_cmd). RDNA3_EINVAL without a running
+ * DMCUB, RDNA3_ETIME when no ack comes. */
+int  dmub32_inbox0_cmd(rdna3_dmub *dm, uint32_t data);
+int  dmub32_inbox0_clear_ack(rdna3_dmub *dm);
+int  dmub32_inbox0_wait_ack(rdna3_dmub *dm, uint32_t timeout_us);
+/* union dmub_inbox0_cmd_lock_hw: command 1 (HW_LOCK), client, lock /
+ * release, and the dmub_hw_lock_mgr_inbox0_cmd sequence (clear, send, wait) */
+#define RD_DMUB_INBOX0_CMD_HW_LOCK 1
+#define RD_DMUB_HW_LOCK_CLIENT_DRIVER 0
+uint32_t dmub32_inbox0_hw_lock_word(int lock);
+int  dmub32_hw_lock_inbox0(rdna3_dmub *dm, int lock);
+
+/* enum dmub_srv_power_state_type; dmub_srv_set_power_state: no command
+ * goes to a DMCUB set to D3 (dmub_srv_cmd_queue answers POWER_STATE_D3) */
+#define RD_DMUB_POWER_STATE_UNDEFINED 0
+#define RD_DMUB_POWER_STATE_D0        1
+#define RD_DMUB_POWER_STATE_D3        8
+void dmub32_set_power_state(rdna3_dmub *dm, uint32_t state);
+
+/* struct dmub_diagnostic_data (dmub_dcn32_get_diagnostic_data /
+ * dmub_srv_get_diagnostic_data), logged with dmub32_log_diagnostic */
+typedef struct rdna3_dmub_diag {
+    uint32_t dmcub_version;
+    uint32_t scratch[17];
+    uint32_t undefined_address_fault_addr, inst_fetch_fault_addr, data_write_fault_addr;
+    uint32_t inbox1_rptr, inbox1_wptr, inbox1_size;
+    uint32_t inbox0_rptr, inbox0_wptr, inbox0_size;
+    uint32_t outbox1_rptr, outbox1_wptr, outbox1_size;
+    uint32_t gpint_datain0;
+    uint8_t  is_dmcub_enabled, is_dmcub_soft_reset, is_dmcub_secure_reset, is_traceport_en;
+    uint8_t  is_cw0_enabled, is_cw6_enabled;
+} rdna3_dmub_diag;
+int  dmub32_get_diagnostic_data(rdna3_dmub *dm, rdna3_dmub_diag *g);
+void dmub32_log_diagnostic(rdna3_dmub *dm, const char *when);
+/* dmub_dcn32_get_current_time: DMCUB_TIMER_CURRENT */
+uint32_t dmub32_current_time(rdna3_dev *d);
+/* dmub_srv_get_fw_boot_status: SCRATCH0 (union dmub_fw_boot_status) */
+uint32_t dmub32_fw_boot_status(rdna3_dev *d);
+
 
 #ifdef __cplusplus
 }
