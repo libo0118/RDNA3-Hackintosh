@@ -108,9 +108,24 @@ static int h_signaled(void *c, uint32_t ip, uint32_t ring, uint64_t seq)
 }
 /* runs "while the lock is dropped": what another thread could do meanwhile */
 static void (*h_during_wait)(void);
+/* a hung GPU (h_hang): no fence ever signals; a slice of a wait-any moves
+ * the fake clock 1 ms, a full wait (the caller's own deadline) is where the
+ * OS's 10 s cap and recovery would run */
+static int h_hang, h_full_waits;
+static uint64_t h_clock, h_slices;
+static uint64_t h_now(void *c) { (void)c; return h_clock; }
 static int h_wait(void *c, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t abs_ns)
 {
     (void)c; (void)ip; (void)ring;
+    if (h_hang) {
+        if (abs_ns == (uint64_t)INT64_MAX) {
+            h_full_waits++;
+        } else {
+            h_slices++;
+            h_clock = abs_ns;
+        }
+        return -RD_ETIME;
+    }
     if (h_during_wait) {
         void (*fn)(void) = h_during_wait;
         h_during_wait = NULL;
@@ -821,6 +836,29 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == -RD_ETIME);   /* poll only */
         sw.timeout_nsec = INT64_MAX;
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == 0 && ring_done == 3);
+        /* PR #2 follow-up review: wait-any on two fences of a hung GPU
+         * slices for 10 s, then waits on one fence with the full deadline,
+         * so the OS's hang cap and recovery run */
+        {
+            struct drm_syncobj_create c1, c2;
+            uint32_t two[2];
+            memset(&c1, 0, sizeof(c1)); memset(&c2, 0, sizeof(c2));
+            CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, c1) == 0 && IOCTL(f, RD_NR_SYNCOBJ_CREATE, c2) == 0);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, c1.handle, NULL) == 0 &&
+                  cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, c2.handle, NULL) == 0);
+            two[0] = c1.handle; two[1] = c2.handle;
+            h_hang = 1; h_clock = 5; h_slices = 0; h_full_waits = 0;
+            dev.ops.now_ns = h_now;
+            memset(&sw, 0, sizeof(sw));
+            sw.handles = (uint64_t)(uintptr_t)two; sw.count_handles = 2; sw.timeout_nsec = INT64_MAX;
+            CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == -RD_ETIME && h_full_waits == 1 &&
+                  h_slices >= 10000 && h_slices <= 10001);
+            h_hang = 0;
+            dev.ops.now_ns = NULL;
+            sw.timeout_nsec = INT64_MAX; sw.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
+            CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == 0);
+            sw.flags = 0; sw.count_handles = 1;
+        }
         /* the syncobj goes away while the wait sleeps (another thread, with
          * the OS lock dropped): the slot must stay free afterwards */
         memset(&sc, 0, sizeof(sc));

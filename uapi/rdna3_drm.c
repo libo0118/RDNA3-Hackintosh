@@ -730,6 +730,9 @@ static int syncobj_for_each(rdna3_drm_file *f, uint64_t handles_ptr, uint32_t co
     return 0;
 }
 
+/* how long wait-any slices before one full wait (the OS's hang cap, 10 s) */
+#define RD_WAIT_SLICE_LIMIT_NS (10ull * 1000 * 1000 * 1000)
+
 /* drm_syncobj_array_wait (SYNCOBJ_WAIT / TIMELINE_WAIT). WAIT_ALL: every
  * syncobj, in turn. Without it: the first one ready, its index in
  * first_signaled (vkWaitForFences with waitAll = false). A syncobj with no
@@ -742,6 +745,7 @@ static int syncobj_wait(rdna3_drm_file *f, uint64_t handles_ptr, uint32_t count,
 {
     rdna3_drm_device *dev = f->dev;
     int waited = 0;
+    uint64_t t0 = dev->ops.now_ns ? dev->ops.now_ns(dev->ops.ctx) : 0;
     *first = 0;
     if (flags & ~(uint32_t)(DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL | DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
                             DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE | DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE))
@@ -779,11 +783,15 @@ static int syncobj_wait(rdna3_drm_file *f, uint64_t handles_ptr, uint32_t count,
             return -RD_ETIME;
         /* one fence at a time: with several pending, short slices so a
          * later one that finishes first is seen; the fence by value, the
-         * syncobjs looked up again after the wait (the OS lock may drop) */
+         * syncobjs looked up again after the wait (the OS lock may drop).
+         * The OS caps each wait call at 10 s and recovers a hang there; a
+         * 1 ms slice never gets that far, so after 10 s of slices the wait
+         * goes on the first pending fence with the whole deadline (PR #2
+         * follow-up review: a hung GPU was never recovered) */
         until = abs_ns;
         if (pending > 1 && dev->ops.now_ns) {
             now = dev->ops.now_ns(dev->ops.ctx);
-            if (abs_ns > now && abs_ns - now > 1000000)
+            if (now - t0 < RD_WAIT_SLICE_LIMIT_NS && abs_ns > now && abs_ns - now > 1000000)
                 until = now + 1000000;
         }
         if (until == abs_ns)
