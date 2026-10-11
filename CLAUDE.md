@@ -4,8 +4,10 @@
   Working branch: `stage1-kext`.
 - Talk to the user in Polish; everything committed is English only.
 - CI runs on the owner's self-hosted runners (`[self-hosted, Linux]`,
-  `[self-hosted, macOS]`, both x86_64) and may be used freely for testing:
-  manual `build.yml` runs as often as needed, `full: true` included.
+  `[self-hosted, macOS]`, both x86_64) and may be used freely for testing.
+  Run `build.yml` with `full: "false"` (kext + host tests: all `rdna3vm
+  update` takes); `full: true` only when `metal/`, `userspace/` or the
+  translator changed.
 - Hardware changes are ports of named amdgpu functions and are reproduced in
   `tests/sim_navi32.c` first; `make test` must pass before pushing.
 - Kext code can be type-checked on Linux without CI:
