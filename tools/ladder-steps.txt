@@ -86,6 +86,14 @@ dplink rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rd
 # what an installed driver runs; the report tests it like big2 without the
 # power experiment, soak and hang test
 default
+# the default profile + rdna3amdgpu=1 (stage 4 item J): where the verified
+# profile differs from amdgpu, run amdgpu's own sequence - PMFW loaded after
+# SETUP_TMR, ASD / register list / HDCP / DTM TAs, smu_smc_hw_setup's order
+# (every PCIe level, thermal alert, DALNotPresent), page tables with
+# fragments and huge PDEs, GART placed high, the IH in system memory with
+# rptr doorbells and ring 1, compute VMIDs 8-15, hw_fini of SDMA / GMC /
+# PSP at unload; the report tests it like step default
+amdgpu rdna3amdgpu=1
 # the GFX hang and its recovery alone: in card run 19 it froze the whole
 # host. Nothing else runs; every recovery step is logged before it runs
 hanggfx rdna3lvl=8 rdna3msi=1 rdna3hangtest=2

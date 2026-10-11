@@ -519,6 +519,27 @@ by hand runs the same path.
 | `--vcn-test (after the wake)` fence did NOT signal, before the sleep fine | fw_shared / stack restored wrong (the copy came back over a different BO layout) or the ring write-back page | `RDNA3,VCNResumes`, the IB test results after the wake |
 | both `--vcn-test` pass, every head back | pass | `vcnsleep <date> vm` into `docs/status/hw-verified.txt`, regenerate |
 
+---
+
+### Step `amdgpu` (default profile + `rdna3amdgpu=1`): amdgpu's own sequence
+
+The boot-arg switches every place where the profile verified on the card
+does something else than amdgpu to amdgpu's own code (stage 4 item J;
+`rdna3_dev.amdgpu_exact`). Read the report like step `default` first;
+`RDNA3,AmdgpuExact = 1` says the boot-arg was seen. Then, area by area:
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `RDNA3,PSPResult` nonzero, `PSP: load ... SMC` failed or the PMFW never answers (`SMU: not ready`) | the PMFW loaded after SETUP_TMR (`psp_load_fw` order without centralized C-state management) is refused | the `PSP:` lines around `SETUP_TMR` and `LOAD_IP_FW SMU`; compare with step `default` (PMFW before the TMR) |
+| `PSP: load asd failed!`, `PSP: LOAD_TA hdcp/dtm ... status` nonzero, `load RL failed!` | the TA file (`psp_13_0_10_ta.bin`) missing from the bundle, or the PSP refuses a TA / the register list | the bring-up stops there (amdgpu does the same); the `PSP:` lines; boot without the boot-arg |
+| `SMU: OverridePcieParameters failed`, `Failed to enable thermal alert`, `Failed to notify display change` | `smu_smc_hw_setup`'s order refused by the PMFW (every PCIe level after EnableAllSmuFeatures, THM / MP1 interrupt registers, `DALNotPresent`) | `RDNA3,PMResult`; the `SMU:` lines with the message and response; `RDNA3,PMPcieLevels` |
+| `GPU SW CTF` / `GPU HW CTF` / `thermal emergency` in the log, the machine powers down | the THM alert fired: either a real over-temperature or `DIG_THERM_INTH` programmed wrong | `RDNA3,PMSmuInterrupts`, the hotspot in the report; if the card was cool, send the log (the IV's client / source) |
+| `IH: no system memory rings, back to VRAM` | the system pages or their GART binding failed | `RDNA3,IHSystemMemory = 0`; the rest of the step still runs on the VRAM ring |
+| `RDNA3,IHSystemMemory = 1` but fences time out, `RDNA3,IRQIVs` stays flat or IVs arrive late | IH writes into snooped system memory not seen, or the rptr doorbell not routed (`S2A_DOORBELL_ENTRY_1_CTRL`) and the ring fills up (`IH ring buffer overflow`) | `RDNA3,IRQIVs`, the overflow lines; compare with step `default` |
+| VM faults (`RDNA3,VMFaults` > 0) in the DMA/GFX/Vulkan tests that step `default` does not show | the page tables with fragments / huge PDEs (`amdgpu_vm_ptes_update`), or a compute VMID (8-15) handed to graphics | `RDNA3,LastFaultAddr` / `LastFaultVMID`; a VMID >= 8 there is a driver bug |
+| black screen or no picture after the driver unloads | `gmc_v11_0_hw_fini` / `gfxhub_v3_0_3_gart_disable` at unload switch the hubs off as amdgpu does | expected only at unload; reboot |
+| everything as in step `default` | pass | `amdgpu <date> vm` into `docs/status/hw-verified.txt`, regenerate |
+
 ## 4. When steps 0–8 pass: next work, in order
 
 1. Default `rdna3lvl` to the highest level that passed twice (boot-args stay
