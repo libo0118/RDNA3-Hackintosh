@@ -645,6 +645,62 @@ Then mark `odm` passed.
 | with DSC: garbage in one half | the second DSC engine (slices per segment, its OPP) | the two `dsc:` lines (W/2 wide, slices / 2), `DSCRM_DSC_FORWARD_CONFIG` of both engines |
 | the switch back leaves the second monitor / pipe dark | the ODM pipe was another head's | report: `dcn32_odm_acquire` should never take a head's pipe |
 
+### Display power (`mall`)
+
+`mall` = `modeset2` + `rdna3dpms=1 rdna3mall=1` (hw/dcn32_pstate.c).
+Lines: `pstate: PMFW 0x.., DCFCLK a..b MHz (n), UCLK 96..1218 MHz (4), FCLK
+.. (n), DTBCLK .., s states, c x 2-byte channels, latencies 400000 / ..`,
+`pstate: watermark range table at MC 0x.. to the PMFW: 0 (A 0/0 B 1/0 C
+2/1 D 3/2)`, `display power: init 0: ...`, then per update `pstate: state
+s: UCLK switches (vactive, prefetch mode 0) min .. kHz, FCLK switches,
+DCFCLK .. kHz deep sleep .., WM A urgent u p-state p fclk f sr x/y ns, C
+p-state .. ns (dummy d), MALL .. B (w ways), compbuf ..`, one `pstate: pipe
+p OTG o WxH .. kHz DET .. KiB: active margin m us, FCLK margin ..` per head
+and `display power: <why>: state s, UCLK switching at .. MHz (vactive) ...`;
+ioreg `RDNA3,DCNPowerInit`, `RDNA3,DCNPower`, `RDNA3,Head<n>,PState`. The
+Linux reference with two 1080p60 heads: state 0, UCLK 96 MHz, FCLK 601
+MHz, set A urgent 17.32 us, p-state 417.32 us, sr_enter 59.72 us. Read
+the `PM:` lines of the trend (uclk, W) against `big2`'s, and
+`rdna3_drminfo --scanout` for HUBP underflow. Pass: no flicker or black
+line for some minutes of idle and use, no underflow, UCLK at its low level
+at idle, `rdna3_modetest cycle` as in `modeset2`. Then mark `mall` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `the PMFW does not answer the DAL mailbox`, nothing else | GetSmuVersion over the DAL mailbox (0x1628A) unanswered | the step 5 lines; the feature stays off by itself |
+| `watermark range table ...: -n` | SetDalDramAddrHigh / Low or TransferTableDram2Smu refused (`DAL SMU message 0x8(0x2): answer ..`) | the DAL lines; the decision still runs, the PMFW keeps its own ranges: report |
+| `UCLK PINNED at max (unsupported ...)` with two 1080p / 1440p heads | the active margins negative: the DETs the GOP split leave too few lines | `RDNA3,Head<n>,PState` margins and DET; try `rdna3mall=2` (DC's DET split) |
+| `p-state allow forced and the switch needs vblank: UCLK stays pinned` | the mirror's `rdna3pstate` force with a head that only switches in vblank | expected (the force lets the PMFW switch at any time); `PM:` uclk stays high |
+| flicker / a black line now and then at idle, HUBP underflow | the UCLK switch outlasts a head's buffer: the set A p-state watermark (`p-state` in the `pstate: state` line, register `DCHUBBUB_ARB_UCLK_PSTATE_CHANGE_WATERMARK_A` = ns / 10) below the real latency, or the VBIOS latency (`latencies` line) wrong | compare the watermarks with the Linux reference; the look's `DCHUBBUB_ARB_*` and `DRAM_STATE_CNTL`; report with the `pstate:` lines |
+| flicker only after a second without movement | the idle CAB (`CAB_FOR_SS` fit, n ways) or MALL_SEL 2 | the DMCUB lines; `DCHUBP_MALL_CONFIG` of the pipes in the look; report |
+| black screen at display sleep / wake | the update at display sleep (`display power: display sleep`) | the lines around it; the step without `rdna3dpms` |
+| `not updated: a head's refresh rate is unknown` / `a head is not described` | a head the decision does not see (no measured refresh) | the `display: head n refresh` lines; nothing was changed: UCLK stays as the GOP / PMFW left it |
+| `not updated: the mirror's pipe is not a head` | `rdna3mirror=1` (clone without its own head) | expected; use `rdna3mirror=2` |
+| `not updated (..): no voltage state supports the heads` | DML found no state (bandwidth / prefetch) | the `pstate:` lines; report with the modes |
+
+### SubVP (`subvp`)
+
+`subvp` = `mall` + `rdna3subvp=1` with one monitor (`rdna3mirror=0`), its
+high-refresh mode set with `rdna3_modetest`. Lines: `subvp: phantom of
+pipe p (OTG o, WxH) on pipe q: n lines (vtotal t, back porch b, VSTARTUP
+v), MALL index 0`, `subvp: on, 1 phantom(s), 2 DMCUB lock commands: 0`,
+`display power: mode set: state s, UCLK switching at .. MHz (vactive +
+SubVP) ..., SubVP 1`; ioreg `RDNA3,Head<n>,PState` (`, SubVP main`). Pass:
+the high-refresh mode runs without flicker or tearing for a few minutes
+(move windows: every flip sends the new address to the firmware), UCLK at
+a low level in the `PM:` lines, no HUBP underflow; the switch back to 60
+Hz turns the phantom off (`subvp: phantom pipe q off`, `subvp: off (was
+on)`). Then mark `subvp` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no `subvp:` line, `UCLK PINNED` | the decision found no SubVP configuration (refresh / size not in DC's lists, scaled mode, no free pipe, no lower UCLK) | the `pstate:` lines: `SubVP lines`, margins; expected for 60 Hz 1080p/1440p (they switch in active) |
+| `subvp: DMCUB HW lock: -n` / `HANDLE_SUBVP_CMD: -n` | the DMCUB does not ack inbox0 or refused the command (firmware without SubVP, GECC on) | the DMUB lines and `RDNA3,DMUB*`; report the firmware version |
+| `subvp: phantom bring-up failed (-n): SubVP off` | the phantom pipe's power gate or DET did not settle | the look's `DOMAINq_PG_STATUS`, `DCHUBBUB_DETq_CTRL` |
+| flicker / tear at every UCLK switch, HUBP underflow on the main | the phantom's MALL region too short or the schedule wrong (phantom lines, VSTARTUP, prefetch lines in the command) | the `subvp: phantom` line; the look's phantom OTG `V_TOTAL` / `V_BLANK_START_END`, `DCHUBP_MALL_CONFIG` (1 on the phantom), `DCHUBP_VMPG_CONFIG` FORCE_ONE_ROW_FOR_FRAME on the main; report |
+| the picture freezes on the old frame after a flip | the firmware programs an old address: `dmub_dcn32_save_surf_addr` | DMCUB_SCRATCH9/12/15 in the look; report |
+| the switch back leaves a pipe powered / MALL_SEL 1 | `dcn32_disable_phantom_streams` | the look's phantom pipe registers; report |
+
 ### Idle power (`rdna3pmexp=1`)
 
 Triage prints one line per variant (10 s each): baseline, GFXOFF allowed,
