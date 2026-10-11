@@ -526,6 +526,7 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe)
             fMirrorOn = true;
             if (want == 2)
                 displayAddCloneHead();
+            displayPowerUpdate("mirror on");   /* item O (rdna3mall) */
             snprintf(val, sizeof(val), "%s-%u UNIPHY%c, pipe %u OTG %u DIG%c, %u kHz",
                      vbios_connector_name(p->connector), p->connector_enum, 'A' + fMirror->dst_be,
                      fMirror->dst_pipe, fMirror->dst_otg, 'A' + fMirror->dst_fe, fMirror->pclk_khz);
@@ -645,6 +646,13 @@ void RDNA3Accel::displayShutdown()
     if (fHotplugCall)
         thread_call_cancel_wait(fHotplugCall);
     hotplugStop();
+    /* item O: no phantom pipe or CAB left for the next driver, UCLK pinned */
+    fPowerStop = true;
+    if (fPowerOn && fDispLock) {
+        IOLockLock(fDispLock);
+        displayPowerQuiesce(true);
+        IOLockUnlock(fDispLock);
+    }
     if (!dm || !fMirrorOn || !fMirror || !fDispLock)
         return;
     IOLockLock(fDispLock);
@@ -660,6 +668,7 @@ void RDNA3Accel::displayShutdown()
 /* the bring-up is going (its DMCUB with it): no hotplug may use it */
 void RDNA3Accel::displayMirrorOff(rdna3_dmub *dm)
 {
+    displayPowerFree();   /* item O: SubVP / CAB off while the DMCUB runs */
     fMirrorDm = nullptr;
     fDisplayDm = nullptr;
     if (fHotplugCall)
@@ -682,8 +691,10 @@ void RDNA3Accel::displayMirrorDisable(rdna3_dmub *dm)
     if (fCloneHead >= 0 && (uint32_t)fCloneHead == fDcn->nheads - 1)
         fDcn->nheads--;
     fCloneHead = -1;
+    displayPowerQuiesce(false);   /* item O: no phantom across the clone's teardown */
     dcn32_clone_disable(fDispDev, dm, fMirror);
     fMirrorOn = false;
+    displayPowerUpdate("mirror off");
     IOLockUnlock(fDispLock);
 }
 
@@ -744,6 +755,7 @@ IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
 
 void RDNA3Accel::displayFree()
 {
+    displayPowerFree();
     hotplugFree();
     if (fHotplugCall) {
         thread_call_cancel_wait(fHotplugCall);
@@ -889,9 +901,12 @@ IOReturn RDNA3Accel::displayFlip(RD3KDisplayFlip *f)
         return kIOReturnNotReady;
     IOLockLock(fDispLock);
     int r = RDNA3_EINVAL;
-    if (f->head < fDcn->nheads && dcn32_head_usable(fDispDev, &fDcn->head[f->head]))
-        r = dcn32_flip(fDispDev, fDcn, f->head, fDispDev->fb_start + f->vramOffset, f->pitch / 4,
-                       (f->flags & RD3K_DISPLAY_FLIP_IMMEDIATE) != 0);
+    if (f->head < fDcn->nheads && dcn32_head_usable(fDispDev, &fDcn->head[f->head])) {
+        bool imm = (f->flags & RD3K_DISPLAY_FLIP_IMMEDIATE) != 0;
+        displayPowerFlip(f->head, fDispDev->fb_start + f->vramOffset, imm, 0);   /* item O */
+        r = dcn32_flip(fDispDev, fDcn, f->head, fDispDev->fb_start + f->vramOffset, f->pitch / 4, imm);
+        displayPowerFlip(f->head, fDispDev->fb_start + f->vramOffset, imm, 1);
+    }
     IOLockUnlock(fDispLock);
     f->result = r;
     return r ? kIOReturnBadArgument : kIOReturnSuccess;
@@ -930,6 +945,8 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
     /* D4: the other TMDS heads too (dcn32_head_link); DP keeps the blank */
     else if (wanted != 2 || (r = displayHeadDpms(head, blank)) == RDNA3_EINVAL)
         r = dcn32_set_blank(fDispDev, fDcn, head, blank ? 1 : 0);
+    if (r == RDNA3_OK && !fDispAsleep)
+        displayPowerUpdate(blank ? "display sleep" : "display wake");   /* item O: the CAB without requests */
     IOLockUnlock(fDispLock);
     LOG("display: head %u %s (%d)", head, blank ? "blanked (display sleep)" : "unblanked", r);
     return r ? kIOReturnError : kIOReturnSuccess;
@@ -1364,6 +1381,7 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     if (r == RDNA3_OK) {
         fDispRefresh[m->head] = want->refresh_mhz;
         displayStateSave(m->head);   /* D4 */
+        displayPowerUpdate("mode set");   /* item O (rdna3mall) */
     }
     char hdmival[128] = "";
     if (hc && ms->hdmi.flags) {

@@ -251,6 +251,7 @@ void RDNA3Accel::displayWillSleep()
     fDispAsleep = true;
     fSleeps++;
     /* dm_suspend: amdgpu_dm_commit_zero_streams before the power goes */
+    displayPowerSuspend();   /* item O: SubVP / CAB off before the streams */
     if (rd3_arg("rdna3resume", 0) && fDisplayDm && fDispState)
         for (uint32_t i = 0; i < fDcn->nheads && i < 4; i++)
             dcn32_state_head_off(fDispDev, fDisplayDm, fDcn, fDispState, i);
@@ -341,6 +342,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
             for (uint32_t i = 0; i < a->fDcn->nheads && i < 4; i++)
                 if (a->fHeadLinkDown[i] && !a->fHeadBlank[i])
                     a->displayLinkUp(i);
+        a->displayPowerWake(powerLost);   /* item O: after the heads are back */
         IOLockUnlock(a->fDispLock);
     }
     a->setNumber("RDNA3,WakeHeadsLost", lost);

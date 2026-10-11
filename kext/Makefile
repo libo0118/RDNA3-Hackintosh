@@ -33,6 +33,7 @@ CXXSRC := src/RDNA3Accel.cpp src/RDNA3Bringup.cpp src/RDNA3Drm.cpp src/RDNA3User
 CSRC   := ../common/amd_discovery.c ../common/amd_fw.c ../common/range_alloc.c \
           ../hw/rdna3_hw.c ../hw/psp13.c ../hw/smu13.c ../hw/gmc11.c ../hw/mmhub302.c ../hw/ih60.c ../hw/sdma60.c ../hw/gpuvm.c ../hw/gfx11.c ../hw/dcn32.c ../hw/doorbell.c ../hw/vbios.c ../hw/dcaux.c ../hw/edid.c ../hw/atom.c ../hw/dmub32.c ../hw/dcn32_mode.c ../hw/dcn32_clone.c ../hw/dcn32_modeset.c ../hw/dcn32_clk.c ../hw/gfx11_info.c ../hw/xfer.c ../hw/soc21_cg.c ../uapi/rdna3_drm.c src/kmod_info.c
 CXXSRC += src/RDNA3Hotplug.cpp
+CXXSRC += src/RDNA3DisplayPower.cpp
 CSRC   += ../hw/dchpd.c
 CSRC   += ../hw/dcn32_gamma.c
 CSRC   += ../hw/dcn32_state.c
@@ -41,6 +42,7 @@ CSRC   += ../hw/vcn40.c
 CSRC   += ../hw/dcn32_dsc.c ../hw/dp_mst.c ../hw/dcn32_dp_mst.c
 CSRC   += ../hw/dcn32_otg.c ../hw/dcn32_color.c ../hw/dcn32_hdmi.c ../hw/dcn32_hwseq.c
 CSRC   += ../hw/dcn32_hpo.c ../hw/dcn32_odm.c
+CSRC   += ../hw/dcn32_pstate.c ../hw/dcn32_subvp.c
 HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../hw/gen/*.h ../uapi/*.h ../third_party/amd/*.h ../accel/rdna3k_abi.h)
 OBJS   := $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(CXXSRC))) \
           $(patsubst %.c,$(OBJDIR)/%.o,$(notdir $(CSRC)))

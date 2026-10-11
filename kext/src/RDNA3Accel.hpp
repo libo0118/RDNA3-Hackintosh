@@ -145,6 +145,8 @@ public:
     /* 'probe': called from the bring-up, which owns the PMFW mailbox then:
      * the clone checks the PMFW answers after each DMCUB VBIOS command */
     void displayMirror(struct rdna3_dmub *dm, bool probe = false);
+    /* rdna3mall=1: display power after the DMCUB runs (RDNA3DisplayPower.cpp) */
+    void displayPowerInit(struct rdna3_dev *d, struct rdna3_dmub *dm, uint64_t wmTableOff);
     void displayMirrorOff(struct rdna3_dmub *dm);
     /* B7: an HPD pin changed (bring-up work loop, after the ack); the
      * connectors are probed again on a thread call */
@@ -298,6 +300,25 @@ private:
     /* rdna3dplink=1: the DP SST link per head (hw/dcn32_dp.c) for mode sets */
     struct rdna3_dp_link *fDpLink[4] = {};
     struct rdna3_dp_link *displayDpLink(uint32_t head, const struct rdna3_display_path *p);
+    /* item O: display power (rdna3mall=1, rdna3subvp=1; RDNA3DisplayPower.cpp) */
+    struct rdna3_dcn32_power *fPower = nullptr;
+    struct rdna3_subvp_state *fSubvp = nullptr;
+    struct rdna3_pstate_ctx  *fPowerCtx = nullptr;   /* the update's scratch */
+    struct rdna3_pstate_ctx  *fPowerCtxMin = nullptr;   /* the same without SubVP (minimal transition) */
+    bool          fPowerOn     = false;
+    volatile bool fPowerStop   = false;
+    struct thread_call *fPowerIdleCall = nullptr;
+    uint32_t      fPowerUpdates = 0, fPowerIdles = 0;
+    volatile uint32_t fPowerFlips = 0;
+    uint32_t      fPowerFlipsSeen = 0;
+    bool          displayPowerPclk(uint32_t *pclk, uint32_t *cursor);
+    void          displayPowerUpdate(const char *why);
+    void          displayPowerFlip(uint32_t head, uint64_t addr, bool immediate, int when);
+    void          displayPowerQuiesce(bool pin);
+    void          displayPowerSuspend();
+    void          displayPowerWake(bool powerLost);
+    void          displayPowerFree();
+    static void   displayPowerTick(void *owner, void *);
     /* rdna3hdmi=1 / 3: DC's HDMI stream on TMDS heads (hw/dcn32_hdmi.c), the
      * sink's HDMI caps from the EDID of the last mode list */
     struct rdna3_hdmi_cfg *fHdmiCfg[4] = {};
