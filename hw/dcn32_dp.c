@@ -15,6 +15,8 @@
 #include "gen/dcn_3_2_0_pipe.h"
 #include "dcn32_dp_mst.h"
 #include "dcn32_hdmi.h"
+#include "dcn32_dsc.h"
+#include "gen/dcn_3_2_0_dpsec.h"
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -490,7 +492,22 @@ static void dp_wa_power_up_0010FA(rdna3_dp_link *l, uint8_t *dpcd_data, uint32_t
     }
 }
 
+/* dpcd_read_sink_ext_caps: DP_SOURCE_SINK_CAP and, from eDP's general cap
+ * 2, panel luminance control */
+static int dpcd_read_sink_ext_caps(rdna3_dp_link *l)
+{
+    uint8_t dpcd_data = 0, edp_general_cap2 = 0;
+    if (core_link_read_dpcd(l, RD_DPCD_SOURCE_SINK_CAP, &dpcd_data, 1) != RDNA3_OK)
+        return 0;
+    l->dpcd_sink_ext_caps = dpcd_data;
+    if (core_link_read_dpcd(l, RD_DPCD_EDP_GENERAL_CAP_2, &edp_general_cap2, 1) != RDNA3_OK)
+        return 0;
+    l->dpcd_caps.panel_luminance_control = (edp_general_cap2 & 0x10) != 0;   /* DP_EDP_PANEL_LUMINANCE_CONTROL_CAPABLE */
+    return 1;
+}
+
 /* try_to_configure_aux_timeout -> dce_aux_configure_timeout (DCN 3.2 has
+
  * extended_aux_timeout_support; the connector is a PHY endpoint) */
 static void try_to_configure_aux_timeout(rdna3_dp_link *l, uint32_t timeout_us)
 {
@@ -602,6 +619,9 @@ int dcn32_dp_read_caps(rdna3_dp_link *l)
                                            ? RD_DP_LINK_SPREAD_05_DOWNSPREAD_30KHZ : RD_DP_LINK_SPREAD_DISABLED;
     get_active_converter_info(l, dpcd[RD_DPCD_DOWNSTREAMPORT_PRESENT]);
     dp_wa_power_up_0010FA(l, dpcd, sizeof(dpcd));
+    /* dpcd_read_sink_ext_caps (0 when it fails) */
+    if (!dpcd_read_sink_ext_caps(l))
+        l->dpcd_sink_ext_caps = 0;
     b = 0;
     core_link_read_dpcd(l, RD_DPCD_SINK_COUNT, &b, 1);
     c->sink_count = b;
@@ -1207,6 +1227,112 @@ static void enc32_stream_encoder_dp_unblank(rdna3_dp_link *l, uint32_t pixel_khz
     l->d->os.udelay(l->d->os.ctx, 100);
     /* video starts at the next DP frame */
     UPDATE(l->d, regDP0_DP_VID_STREAM_CNTL, l->fe, DP_S, DP0_DP_VID_STREAM_CNTL, DP_VID_STREAM_ENABLE, 1);
+}
+
+/* ---- DP secondary data packets (dcn10 / dcn30 stream encoder) ---- */
+
+/* enc1_stream_encoder_stop_dp_info_packets: every GSP, the MPG and the
+ * master enable off (REG_SET of 0); the master back on when something
+ * else in the register (the audio packets) still runs */
+static void enc1_stream_encoder_stop_dp_info_packets(rdna3_dp_link *l)
+{
+    uint32_t v;
+    WI(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, 0);
+    v = RI(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S);
+    if (v)
+        UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_STREAM_ENABLE, 1);
+}
+
+void dcn32_enc_update_dp_info_packets_sdp_line_num(rdna3_dp_link *l, const rdna3_dp_info_frames *f)
+{
+    if (f->adaptive_sync.valid && f->adaptive_sync_line_num_valid) {
+        /* 00: REFER_TO_DP_SOF, 01: REFER_TO_OTG_SOF */
+        UPDATE(l->d, regDP0_DP_SEC_CNTL1, l->fe, DP_S, DP0_DP_SEC_CNTL1, DP_SEC_GSP5_LINE_REFERENCE, 1);
+        UPDATE(l->d, regDP0_DP_SEC_CNTL5, l->fe, DP_S, DP0_DP_SEC_CNTL5, DP_SEC_GSP5_LINE_NUM,
+               f->adaptive_sync_line_num);
+    }
+}
+
+static void vpg_packet(rdna3_dp_link *l, uint32_t index, const rdna3_info_packet *p)
+{
+    uint8_t hb[4];
+    hb[0] = p->hb0;
+    hb[1] = p->hb1;
+    hb[2] = p->hb2;
+    hb[3] = p->hb3;
+    dcn32_vpg_update_generic_info_packet(l->d, l->fe, index, hb, p->sb, 1);
+}
+
+void dcn32_enc_update_dp_info_packets(rdna3_dp_link *l, const rdna3_dp_info_frames *f)
+{
+    uint32_t v;
+    /* VSC in packets 0 and 1 (DC writes packet 1 twice: PSR-SU's TODO) */
+    if (f->vsc.valid)
+        vpg_packet(l, 0, &f->vsc);
+    if (f->vsc.valid)
+        vpg_packet(l, 1, &f->vsc);
+    if (f->vsc.valid)
+        vpg_packet(l, 1, &f->vsc);
+    if (f->spd.valid)
+        vpg_packet(l, 2, &f->spd);
+    if (f->hdrsmd.valid)
+        vpg_packet(l, 3, &f->hdrsmd);
+    /* packet 4 is for immediate SDP messages */
+    if (f->adaptive_sync.valid)
+        vpg_packet(l, 5, &f->adaptive_sync);
+    /* transmission from the next frame */
+    UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_GSP0_ENABLE, f->vsc.valid ? 1 : 0);
+    UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_GSP2_ENABLE, f->spd.valid ? 1 : 0);
+    UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_GSP3_ENABLE, f->hdrsmd.valid ? 1 : 0);
+    UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_GSP5_ENABLE, f->adaptive_sync.valid ? 1 : 0);
+    /* the master enable with any packet (shared with the audio info frame) */
+    v = RI(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S);
+    if (v)
+        UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_STREAM_ENABLE, 1);
+    /* dynamic metadata transmission needs it too */
+    if (GET(RI(l->d, regDP0_DP_SEC_METADATA_TRANSMISSION, l->fe, DP_S), DP0_DP_SEC_METADATA_TRANSMISSION,
+            DP_SEC_METADATA_PACKET_ENABLE))
+        UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_STREAM_ENABLE, 1);
+}
+
+int dcn32_enc_dp_get_pixel_format(rdna3_dp_link *l, uint32_t *encoding, uint32_t *depth)
+{
+    uint32_t v, hw_encoding, hw_depth;
+    if (!l || !encoding || !depth)
+        return 0;
+    v = RI(l->d, regDP0_DP_PIXEL_FORMAT, l->fe, DP_S);
+    hw_encoding = GET(v, DP0_DP_PIXEL_FORMAT, DP_PIXEL_ENCODING);
+    hw_depth = GET(v, DP0_DP_PIXEL_FORMAT, DP_COMPONENT_DEPTH);
+    switch (hw_depth) {
+    case 0: *depth = RD_COLOR_DEPTH_666; break;     /* DP_COMPONENT_PIXEL_DEPTH_6BPC */
+    case 1: *depth = RD_COLOR_DEPTH_888; break;
+    case 2: *depth = RD_COLOR_DEPTH_101010; break;
+    case 3: *depth = RD_COLOR_DEPTH_121212; break;
+    case 4: *depth = RD_COLOR_DEPTH_161616; break;
+    default: *depth = RD_COLOR_DEPTH_UNDEFINED; break;
+    }
+    switch (hw_encoding) {
+    case 0: *encoding = RD_PIXEL_ENCODING_RGB; break;        /* DP_PIXEL_ENCODING_TYPE_RGB444 */
+    case 1: *encoding = RD_PIXEL_ENCODING_YCBCR422; break;
+    case 2: case 3: *encoding = RD_PIXEL_ENCODING_YCBCR444; break;   /* YCbCr 4:4:4, Y only */
+    case 4: *encoding = RD_PIXEL_ENCODING_YCBCR420; break;
+    default: *encoding = 0; break;                               /* PIXEL_ENCODING_UNDEFINED */
+    }
+    return 1;
+}
+
+/* enable_stream_features (SST): DP_DOWNSPREAD_CTRL's MSA_TIMING_PAR_IGNORE
+ * as the stream wants it (ignore_msa_timing_param: FreeSync only, so off);
+ * MST: dm_helpers_mst_enable_stream_features, the same on the link's DPCD
+ * (amdgpu's TODO: no virtual DPCD) */
+static void enable_stream_features(rdna3_dp_link *l)
+{
+    uint8_t old_downspread = 0, new_downspread;
+    if (core_link_read_dpcd(l, RD_DPCD_DOWNSPREAD_CTRL, &old_downspread, 1) != RDNA3_OK && l->mst)
+        return;
+    new_downspread = (uint8_t)((old_downspread & ~0x80u) | (l->ignore_msa_timing_param ? 0x80u : 0));
+    if (new_downspread != old_downspread)
+        core_link_write_dpcd(l, RD_DPCD_DOWNSPREAD_CTRL, &new_downspread, 1);
 }
 
 /* dcn20_blank_stream (DP 8b/10b) */
@@ -2120,9 +2246,11 @@ void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l)
     if (!l->mst) {
         /* disable_link -> disable_link_dp -> dp_disable_link_phy */
         disable_link(l);
-        /* dcn20_disable_stream -> reset_dio_stream_encoder */
+        /* dce110_disable_stream: the DP info packets off, reset_dio_stream_encoder */
+        enc1_stream_encoder_stop_dp_info_packets(l);
         reset_dio_stream_encoder(l);
     } else {
+        enc1_stream_encoder_stop_dp_info_packets(l);
         reset_dio_stream_encoder(l);
         disable_link(l);
     }
@@ -2131,12 +2259,16 @@ void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l)
     l->stream_dsc = 0;
 }
 
-/* enable_link_dp: training with retries (the requested symbol clock is the
- * link rate: DCN 3.2 clk_mgr has no notification), FEC on after it; the
- * source OUI is not written */
+/* enable_link_dp: the source OUI again ("during mode switch we do
+ * DP_SET_POWER off then on, and OUI is lost", 30 ms after it for a sink
+ * with extended caps), training with retries (the requested symbol clock
+ * is the link rate: DCN 3.2 clk_mgr has no notification), FEC on after it */
 static int enable_link_dp(rdna3_dp_link *l, const rdna3_dp_link_settings *s, int do_fallback, uint32_t req)
 {
     int skip_video_pattern = s->link_rate != RD_DP_LINK_RATE_LOW, status;
+    dpcd_set_source_specific_data(l);
+    if (l->dpcd_sink_ext_caps)
+        l->d->os.msleep(l->d->os.ctx, 30);
     status = dcn32_dp_link_training_with_retries(l, s, skip_video_pattern, RD_DP_LINK_TRAINING_ATTEMPTS, do_fallback,
                                                  req) ? RDNA3_OK : RDNA3_EIO;
     dp_set_fec_enable(l, 1);
@@ -2204,8 +2336,18 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
     /* the second setup: the transmitter command may have left another DIG_MODE */
     dcn10_link_encoder_setup(l);
     /* dcn20_enable_stream: link_hwss->setup_stream_encoder (the pixel rate
-     * divider and the early control stay as they are on DCN 3.2) */
+     * divider and the early control stay as they are on DCN 3.2), then
+     * dcn30_update_info_frame: no VSC (RGB, no PSR), SPD (no FreeSync), HDR
+     * or adaptive sync packet in this driver's streams */
     setup_dio_stream_encoder(l);
+    {
+        rdna3_dp_info_frames f;
+        uint32_t k;
+        for (k = 0; k < sizeof(f); k++)
+            ((uint8_t *)&f)[k] = 0;
+        dcn32_enc_update_dp_info_packets_sdp_line_num(l, &f);
+        dcn32_enc_update_dp_info_packets(l, &f);
+    }
     /* the PPS SDP ("info frames") */
     if (l->stream_dsc) {
         dp_set_dsc_on_rx(l, 1);
@@ -2215,6 +2357,7 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
         status = RDNA3_EIO;
     dcn32_unblank_stream(l, m->pixel_khz, l->cur_link_settings.link_rate ? l->cur_link_settings.link_rate
                                                                          : s.link_rate);
+    enable_stream_features(l);
     RLOG(l->d, "dp: DIG %u -> UNIPHY %u%s: %ux%u %u kHz on %s x%u%s%s: %s", l->fe, l->be, l->mst ? " (MST)" : "",
          m->h_active, m->v_active, m->pixel_khz, rate_name(l->cur_link_settings.link_rate),
          l->cur_link_settings.lane_count, l->fec_state == RD_FEC_ENABLED ? ", FEC" : "",

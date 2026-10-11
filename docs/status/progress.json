@@ -1,11 +1,11 @@
 {
  "amdgpu": {
   "works": 467,
-  "ported": 985,
+  "ported": 992,
   "total": 1594,
   "not_applicable": 377,
   "works_pct": 29.3,
-  "ported_pct": 61.8,
+  "ported_pct": 62.2,
   "groups": [
    {
     "name": "PSP 13",
@@ -1426,8 +1426,8 @@
      "modeset"
     ],
     "works": 41,
-    "ported": 62,
-    "todo": 60,
+    "ported": 63,
+    "todo": 59,
     "items": {
      "allocate_mst_payload": "ported",
      "apply_symclk_on_tx_off_wa": "ported",
@@ -1538,7 +1538,7 @@
      "enable_link_hdmi": "works",
      "enable_mst_on_sink": "ported",
      "enable_phy_bypass_mode": "ported",
-     "enable_stream_features": "todo",
+     "enable_stream_features": "ported",
      "enc1_configure_encoder": "ported",
      "enc32_dp_set_dsc_config": "ported",
      "enc32_dp_set_odm_combine": "ported",
@@ -1654,8 +1654,8 @@
      "dplink"
     ],
     "works": 0,
-    "ported": 112,
-    "todo": 33,
+    "ported": 115,
+    "todo": 30,
     "items": {
      "configure_lttpr_mode_non_transparent": "todo",
      "configure_lttpr_mode_transparent": "ported",
@@ -1718,7 +1718,7 @@
      "dpcd_configure_channel_coding": "ported",
      "dpcd_configure_lttpr_mode": "ported",
      "dpcd_exit_training_mode": "ported",
-     "dpcd_read_sink_ext_caps": "todo",
+     "dpcd_read_sink_ext_caps": "ported",
      "dpcd_set_lane_settings": "ported",
      "dpcd_set_link_settings": "ported",
      "dpcd_set_lt_pattern_and_lane_settings": "ported",
@@ -1744,13 +1744,13 @@
      "enc1_se_setup_dp_audio": "todo",
      "enc1_se_setup_hdmi_audio": "todo",
      "enc1_stream_encoder_dp_blank": "ported",
-     "enc1_stream_encoder_dp_get_pixel_format": "todo",
+     "enc1_stream_encoder_dp_get_pixel_format": "ported",
      "enc1_stream_encoder_dp_set_stream_attribute": "ported",
      "enc1_stream_encoder_hdmi_set_stream_attribute": "ported",
      "enc1_stream_encoder_set_avmute": "ported",
      "enc1_stream_encoder_set_stream_attribute_helper": "ported",
      "enc1_stream_encoder_set_throttled_vcp_size": "ported",
-     "enc1_stream_encoder_stop_dp_info_packets": "todo",
+     "enc1_stream_encoder_stop_dp_info_packets": "ported",
      "get_active_converter_info": "ported",
      "get_audio_clock_info": "todo",
      "get_cable_max_link_rate": "todo",
@@ -2039,8 +2039,8 @@
      "dsc"
     ],
     "works": 0,
-    "ported": 67,
-    "todo": 9,
+    "ported": 69,
+    "todo": 7,
     "items": {
      "_do_calc_rc_params": "ported",
      "apply_128b_132b_stream_overhead": "todo",
@@ -2092,8 +2092,8 @@
      "enc3_se_setup_hdmi_audio": "todo",
      "enc3_stream_encoder_hdmi_set_stream_attribute": "ported",
      "enc3_stream_encoder_stop_hdmi_info_packets": "ported",
-     "enc3_stream_encoder_update_dp_info_packets": "todo",
-     "enc3_stream_encoder_update_dp_info_packets_sdp_line_num": "todo",
+     "enc3_stream_encoder_update_dp_info_packets": "ported",
+     "enc3_stream_encoder_update_dp_info_packets_sdp_line_num": "ported",
      "enc3_stream_encoder_update_hdmi_info_packets": "ported",
      "enc3_update_hdmi_info_packet": "ported",
      "fit_num_slices_up": "ported",
@@ -2155,8 +2155,8 @@
      "mst"
     ],
     "works": 0,
-    "ported": 20,
-    "todo": 26,
+    "ported": 21,
+    "todo": 25,
     "items": {
      "apply_edid_quirks": "ported",
      "apply_synaptics_fifo_reset_wa": "todo",
@@ -2177,7 +2177,7 @@
      "dm_helpers_dp_write_dpcd": "ported",
      "dm_helpers_dp_write_dsc_enable": "ported",
      "dm_helpers_is_dp_sink_present": "todo",
-     "dm_helpers_mst_enable_stream_features": "todo",
+     "dm_helpers_mst_enable_stream_features": "ported",
      "dm_helpers_parse_edid_caps": "ported",
      "dm_helpers_read_local_edid": "ported",
      "dm_helpers_submit_i2c": "ported",

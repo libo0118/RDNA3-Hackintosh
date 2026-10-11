@@ -18,6 +18,7 @@
 #include "gen/dcn_3_2_0_hdmi.h"
 #include "dcn32_hwseq.h"
 #include "gen/dcn_3_2_0_hwseq.h"
+#include "gen/dcn_3_2_0_dpsec.h"
 
 
 #define ODMR_K(reg, n) (DCN_B2 + reg + (regODM1_OPTC_INPUT_CLOCK_CONTROL - regODM0_OPTC_INPUT_CLOCK_CONTROL) * (n))
@@ -978,6 +979,8 @@ static void test_dc_dp(rdna3_dev *dev, rdna3_dmub *dm)
     CHECK(((v & DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MASK) >> DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN__SHIFT) == 69 &&
           !(v & DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL_MASK));
     CHECK(!dcn32_dp_is_branch_device(&l) && !dcn32_dp_is_active_dongle(&l) && !l.keep_receiver_powered);
+    /* dpcd_read_sink_ext_caps */
+    CHECK(l.dpcd_sink_ext_caps == S.dpcd[0x317] && !l.dpcd_caps.panel_luminance_control);
 
     /* a DP-to-HDMI converter: 300 MHz TMDS, 10 bpc, 4:2:x pass-through */
     S.dpcd[0x005] = 0x01 | 2u << 1 | 0x10;    /* port present, DVI/HDMI/DP++, detailed caps */
@@ -1015,6 +1018,40 @@ static void test_dc_dp(rdna3_dev *dev, rdna3_dmub *dm)
     S.reg[AUXR(regDP_AUX0_AUX_DPHY_RX_CONTROL1, 0)] = rx1;
     dcaux_configure_timeout(dev, 0, 0);   /* the software poll back to its default */
     S.reg[AUXR(regDP_AUX0_AUX_DPHY_RX_CONTROL1, 0)] = rx1;
+
+    /* the DP secondary data packets: a VSC SDP through VPG packets 0 and 1,
+     * GSP0 and the master enable on; stopped again; the pixel format read */
+    {
+        static rdna3_dp_info_frames f;
+        const uint32_t sec = S.reg[DPR(regDP0_DP_SEC_CNTL, 2)], pf = S.reg[DPR(regDP0_DP_PIXEL_FORMAT, 2)];
+        uint32_t enc = 9, depth = 9;
+        memset(&f, 0, sizeof(f));
+        memset(S.vpg, 0, sizeof(S.vpg));
+        f.vsc.valid = 1;
+        f.vsc.hb1 = 0x07; f.vsc.hb2 = 0x05; f.vsc.hb3 = 0x13;   /* VSC rev 5 */
+        f.vsc.sb[16] = 0x11;
+        f.adaptive_sync_line_num_valid = 1;
+        f.adaptive_sync_line_num = 7;
+        dcn32_dp_link_init(&l, dev, dm, 0, 1, 2, 2, 0, 0x13, 0x1e, 0, 0);
+        S.reg[DPR(regDP0_DP_SEC_CNTL, 2)] = 0;
+        dcn32_enc_update_dp_info_packets_sdp_line_num(&l, &f);   /* no adaptive sync packet: nothing */
+        CHECK((S.reg[DPR(regDP0_DP_SEC_CNTL5, 2)] & DP0_DP_SEC_CNTL5__DP_SEC_GSP5_LINE_NUM_MASK) != 7);
+        dcn32_enc_update_dp_info_packets(&l, &f);
+        CHECK((S.reg[DPR(regDP0_DP_SEC_CNTL, 2)] & (DP0_DP_SEC_CNTL__DP_SEC_GSP0_ENABLE_MASK | DP0_DP_SEC_CNTL__DP_SEC_STREAM_ENABLE_MASK)) ==
+                  (DP0_DP_SEC_CNTL__DP_SEC_GSP0_ENABLE_MASK | DP0_DP_SEC_CNTL__DP_SEC_STREAM_ENABLE_MASK) &&
+              !(S.reg[DPR(regDP0_DP_SEC_CNTL, 2)] & DP0_DP_SEC_CNTL__DP_SEC_GSP2_ENABLE_MASK) &&
+              S.vpg[2].mem[0] == (0x07u << 8 | 0x05u << 16 | 0x13u << 24) && S.vpg[2].mem[9] == S.vpg[2].mem[0] &&
+              (S.vpg[2].mem[5] & 0xff) == 0x11 && S.vpg[2].writes == 3 * 9);
+        f.vsc.valid = 0;
+        dcn32_enc_update_dp_info_packets(&l, &f);
+        CHECK(S.reg[DPR(regDP0_DP_SEC_CNTL, 2)] == DP0_DP_SEC_CNTL__DP_SEC_STREAM_ENABLE_MASK);
+        S.reg[DPR(regDP0_DP_PIXEL_FORMAT, 2)] = 2u | 2u << DP0_DP_PIXEL_FORMAT__DP_COMPONENT_DEPTH__SHIFT;
+        CHECK(dcn32_enc_dp_get_pixel_format(&l, &enc, &depth) && enc == RD_PIXEL_ENCODING_YCBCR444 &&
+              depth == RD_COLOR_DEPTH_101010 && !dcn32_enc_dp_get_pixel_format(&l, NULL, &depth));
+        S.reg[DPR(regDP0_DP_SEC_CNTL, 2)] = sec;
+        S.reg[DPR(regDP0_DP_PIXEL_FORMAT, 2)] = pf;
+        memset(S.vpg, 0, sizeof(S.vpg));
+    }
 
     /* dsc2_wait_disconnect_pending_clear */
     v = S.reg[DCN_B2 + regDSCRM0_DSCRM_DSC_FORWARD_CONFIG + 1];

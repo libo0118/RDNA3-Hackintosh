@@ -55,6 +55,7 @@
 #include "dmub32.h"
 #include "edid.h"
 #include "dcn32_dsc.h"
+#include "dcn32_hdmi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -87,6 +88,8 @@ extern "C" {
 #define RD_DPCD_SINK_HW_REVISION_START  0x00409
 #define RD_DPCD_SOURCE_OUI              0x00300
 #define RD_DPCD_SOURCE_MINIMUM_HBLANK_SUPPORTED 0x00340
+#define RD_DPCD_SOURCE_SINK_CAP         0x00317
+#define RD_DPCD_EDP_GENERAL_CAP_2       0x00703
 #define RD_DPCD_BRANCH_OUI              0x00500
 #define RD_DPCD_BRANCH_REVISION_START   0x00509
 #define RD_DPCD_DFP_CAPABILITY_EXTENSION_SUPPORT 0x000a3
@@ -263,7 +266,15 @@ typedef struct rdna3_dp_caps {
     uint8_t  branch_dev_name[6], branch_hw_revision, branch_fw_revision[2];
     uint8_t  sink_dev_id_str[6], sink_hw_revision, sink_fw_revision[2];
     uint8_t  adaptive_sync_caps;    /* DP_DPRX_FEATURE_ENUMERATION_LIST_CONT_1 */
+    int      panel_luminance_control;   /* eDP general cap 2 (dpcd_read_sink_ext_caps) */
 } rdna3_dp_caps;
+
+/* struct encoder_info_frame, the DP part (dcn30_update_info_frame) */
+typedef struct rdna3_dp_info_frames {
+    rdna3_info_packet vsc, spd, hdrsmd, adaptive_sync;
+    int      adaptive_sync_line_num_valid;   /* sdp_line_num */
+    uint32_t adaptive_sync_line_num;
+} rdna3_dp_info_frames;
 
 /* struct link_training_settings (8b/10b) */
 typedef struct rdna3_dp_lt_settings {
@@ -292,6 +303,8 @@ typedef struct rdna3_dp_link {
     int      lttpr_aware;           /* dc->caps.vbios_lttpr_aware && extended_aux_timeout_support */
     uint16_t chip_id;               /* PCI device id: dpcd_set_source_specific_data (asic_id.chip_id) */
     int      keep_receiver_powered; /* wa_flags.dp_keep_receiver_powered (dp_wa_power_up_0010FA) */
+    uint8_t  dpcd_sink_ext_caps;    /* DP_SOURCE_SINK_CAP (dpcd_read_sink_ext_caps) */
+    int      ignore_msa_timing_param;   /* stream->ignore_msa_timing_param: FreeSync only, 0 */
     uint32_t pix_per_cycle;         /* dio_se_pix_per_cycle: 1, 2; 0 = take the boot state's */
     int      caps_valid, verified;
     rdna3_dp_caps dpcd_caps;
@@ -364,6 +377,18 @@ int  dcn32_dp_is_branch_device(const rdna3_dp_link *l);
  * connector). 1 = the converter carries it; the link bandwidth stays
  * with dcn32_dp_decide_link_settings (dp_validate_mode_timing). */
 int  dcn32_dp_validate_mode_timing(const rdna3_dp_link *l, const rdna3_mode *m);
+
+/* enc3_stream_encoder_update_dp_info_packets: VSC (GSP 0, 1), SPD (2), HDR
+ * static metadata (3), adaptive sync (5) through the stream encoder's VPG,
+ * their DP_SEC_CNTL enables and the master enable */
+void dcn32_enc_update_dp_info_packets(rdna3_dp_link *l, const rdna3_dp_info_frames *f);
+/* enc3_stream_encoder_update_dp_info_packets_sdp_line_num (adaptive sync) */
+void dcn32_enc_update_dp_info_packets_sdp_line_num(rdna3_dp_link *l, const rdna3_dp_info_frames *f);
+/* enc1_stream_encoder_dp_get_pixel_format: the DP stream encoder's pixel
+ * encoding (RD_PIXEL_ENCODING_*, 0 undefined) and component depth
+ * (RD_COLOR_DEPTH_*). 0 for a NULL argument. */
+int  dcn32_enc_dp_get_pixel_format(rdna3_dp_link *l, uint32_t *encoding, uint32_t *depth);
+
 
 
 /* link_decide_link_settings (decide_dp_link_settings) for 'req_kbps' over
