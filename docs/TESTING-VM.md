@@ -219,8 +219,11 @@ new kexts, and the **Allow** button appears in the same place.
 rdna3vm queue pending
 ```
 
-runs the step(s) still waiting for the card - since round 16 one big
-step (`big2`): macOS boots once and the report itself runs everything
+runs the step(s) still waiting for the card - since card run 34 one big
+step, `big3`: the default profile with every new feature the card can test
+without extra hardware (amdgpu's exact sequence, user queues, PM control,
+VCN, mode set, HDMI stream / format / audio endpoint, display power); before
+it `big2`: macOS boots once and the report itself runs everything
 (DMA/GFX/Vulkan tests - buffers, a triangle, images, timeline semaphores -,
 Metal when the plugin is installed, the idle-power experiment, three looks at what
 each monitor shows, display sleep and wake, a switch through scaled

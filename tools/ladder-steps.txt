@@ -190,3 +190,12 @@ audio rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdn
 # the sink takes it, 10 / 12 bpc when its EDID allows (the deep colour PHY
 # clock), the OPP formatter's dither, the DPG blank around the switch
 fmt rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3hdmi=1 rdna3fmt=1
+# big3 (after card run 33, the user asked for one step instead of many): the
+# default profile (no rdna3lvl) with everything new the card can test
+# without extra hardware, in one boot - amdgpu's exact sequence, the MES
+# with user queues, PM control (fan / power / OD / profiles), VCN in DPG,
+# the mode set with the DISPCLK raise, DC's HDMI stream with the output
+# format and audio endpoint, the OTG read-back, the cursor MALL bit, and
+# the display power (watermarks / MALL / p-state). The report runs each
+# feature's test; a failure is bisected with the feature's own step.
+big3 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3hdmi=1 rdna3fmt=1 rdna3audio=1 rdna3otg=1 rdna3cursormall=1 rdna3mall=1
