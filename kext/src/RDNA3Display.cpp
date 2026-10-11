@@ -1022,6 +1022,8 @@ rdna3_dp_link *RDNA3Accel::displayDpLink(uint32_t head, const rdna3_display_path
         dcn32_dp_link_init(l, fDispDev, fDisplayDm, (uint32_t)p->ddc_line, (uint32_t)h->dig_be, (uint32_t)h->dig_fe,
                            h->otg, p->hpd, (uint8_t)p->connector_objid, (uint8_t)p->encoder_objid, p->encoder_caps, 0);
         l->mst_port = -1;
+        /* dpcd_set_source_specific_data names the ASIC (asic_id.chip_id) */
+        l->chip_id = fPci ? fPci->configRead16(kIOPCIConfigDeviceID) : 0;
     }
     l->dm = fDisplayDm;
     l->fec_policy = l->dsc_policy = rd3_arg("rdna3dsc", 0) ? 1 : 0;

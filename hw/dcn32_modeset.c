@@ -245,6 +245,9 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
          * turn MST (the MST takeover of rdna3mst) */
         if (h->dig_mode == 5 && !dp->mst)
             return RD_MODESET_DP_LINK;
+        /* link_validate_mode_timing: an active converter's limits */
+        if (!dcn32_dp_validate_mode_timing(dp, m))
+            return RD_MODESET_DONGLE;
         opp = GET(RI(d, regODM0_OPTC_DATA_SOURCE_SELECT, h->otg, ODM_S), ODM0_OPTC_DATA_SOURCE_SELECT, OPTC_SEG0_SRC_SEL);
         dp->opp = opp < RD_DCN_MAX_PIPES ? opp : h->otg;
         dp->dsc_inst = h->pipe;   /* dcn20_acquire_dsc: the pipe's own DSC */

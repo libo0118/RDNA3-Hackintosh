@@ -1426,6 +1426,14 @@ void dcn32_dsc_disconnect(rdna3_dev *d, uint32_t inst)
     UPDATE(d, regDSCRM0_DSCRM_DSC_FORWARD_CONFIG, inst, DSCRM_S, DSCRM0_DSCRM_DSC_FORWARD_CONFIG, DSCRM_DSC_FORWARD_EN, 0);
 }
 
+/* dsc2_wait_disconnect_pending_clear: the double-buffered disconnect taken
+ * (REG_WAIT 2 us x 50000): RDNA3_OK or RDNA3_ETIME */
+int dcn32_dsc_wait_disconnect_pending_clear(rdna3_dev *d, uint32_t inst)
+{
+    return rdna3_wait_reg(d, AI(d, regDSCRM0_DSCRM_DSC_FORWARD_CONFIG, inst, DSCRM_S), 0,
+                          DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_DOUBLE_BUFFER_REG_UPDATE_PENDING_MASK, 0, 100000);
+}
+
 /* dsc2_read_state */
 void dcn32_dsc_read_state(rdna3_dev *d, uint32_t inst, rdna3_dsc_state *s)
 {

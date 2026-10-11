@@ -132,6 +132,7 @@ enum {
     RD_MODESET_BAD_HEAD = 7,
     RD_MODESET_LINK_BW = 8,      /* DP: no link setting of the (verified) link cap carries it */
     RD_MODESET_DP_LINK = 9,      /* DP: no sink capabilities read, or the link is not this head's */
+    RD_MODESET_DONGLE = 10,      /* DP: beyond the active converter (DP-to-HDMI TMDS / FRL, DFP caps) */
 };
 
 /* Read head 'head' of 'dc' (running at 'cur_pclk_khz', from the EDID match

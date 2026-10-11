@@ -453,6 +453,8 @@ with `dp:`; ioreg `RDNA3,Head<n>,DPLink` sums the link up.
 | CR done, `EQ failed` at every rate and lane count | pre-emphasis requests not applied: SETUP_VSEMPH's lane set (TransmitterControl v1.7 mode field) is ignored by the VBIOS table | the `lane status` / `adjust` debug lines; compare with the GOP's DPCD 0x103..0x106 |
 | trained, `dp: DIG f -> UNIPHY b ... trained`, monitor black or "no signal" | stream side: M/N, MSA or the DP DTO (DPREFCLK) | look: `DP_DTOn_PHASE / MODULO` (phase = pixel clock in Hz, modulo = DPREFCLK in Hz), `DP_VID_M`, `DP_VID_STREAM_CNTL` status; `dp: DIG n: SYMCLK_FE_ON stays off` = the FE is not connected to the BE |
 | `modeset: the DP link failed (-5): back to ...` and the old mode trains | the new mode's link setting does not train (see above) | record the rate / lanes; the old mode back is the expected recovery |
+| modes `refused (10)` on a DP-to-HDMI / DVI / VGA converter | `link_validate_mode_timing`: the converter's TMDS clock (DPCD 0x081 x 2.5 MHz), its max bpc, or its DFP capability extension (DPCD 0x0a3..: max pixel rate, active size, RGB 8 bpc) is below the mode | `RDNA3,Connector<n>,DPCD` 0x005 / 0x080-0x083; expected for a mode above the converter |
+| the monitor reacts differently since the stage 4 item K build (other OSD, FreeSync menu) | `retrieve_link_cap` now writes AMD's source OUI (00-00-1A), the device id and DCN 3.2's minimum h blank to DPCD 0x300 / 0x303 / 0x340 as amdgpu does, and the AUX reply timeout is 3.2 ms during the LTTPR probe | expected (Linux does the same); report anything that stopped working |
 
 ### DSC and FEC (`dsc`)
 

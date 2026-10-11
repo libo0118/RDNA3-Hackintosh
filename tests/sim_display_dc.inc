@@ -921,8 +921,97 @@ static void test_dc_hdmi(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc2, rdna3_d
     printf("sim_navi32: HDMI stream tests ran (%u SCDC writes)\n", S.scdc_writes);
 }
 
+/* ---- DP: the source specific data, AUX timeouts, the vendor ids, a
+ * DP-to-HDMI converter's caps and mode validation, the DSC disconnect wait ---- */
+static void test_dc_dp(rdna3_dev *dev, rdna3_dmub *dm)
+{
+    static rdna3_dp_link l;
+    static uint8_t dpcd_save[sizeof(S.dpcd)];
+    const uint32_t rx1 = S.reg[AUXR(regDP_AUX0_AUX_DPHY_RX_CONTROL1, 0)];
+    rdna3_mode m1080, m4k;
+    uint32_t v;
+
+    memcpy(dpcd_save, S.dpcd, sizeof(S.dpcd));
+    /* dce_aux_configure_timeout: 3.2 ms = 100 x 32 us, 552 us = 69 x 8 us */
+    CHECK(dcaux_configure_timeout(dev, 0, RD_LINK_AUX_DEFAULT_LTTPR_TIMEOUT_PERIOD) ==
+          ((rx1 & DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MASK) >> DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN__SHIFT) *
+              (8u << ((rx1 & DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL_MASK) >>
+                      DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL__SHIFT)));
+    v = S.reg[AUXR(regDP_AUX0_AUX_DPHY_RX_CONTROL1, 0)];
+    CHECK(((v & DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MASK) >> DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN__SHIFT) == 100 &&
+          ((v & DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL_MASK) >> DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL__SHIFT) == 2);
+    CHECK(dcaux_configure_timeout(dev, 0, 5000) == 3200 &&
+          ((S.reg[AUXR(regDP_AUX0_AUX_DPHY_RX_CONTROL1, 0)] & DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MASK) >>
+           DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN__SHIFT) == 79);   /* ceil(5000 / 64) */
+
+    /* retrieve_link_cap on the sim's DP sink: AMD's source OUI and device
+     * id, DCN 3.2's minimum h blank, the vendor ids, then the 552 us timeout */
+    S.dpcd[0x500] = 0x00; S.dpcd[0x501] = 0x1c; S.dpcd[0x502] = 0xf8;   /* synthetic branch OUI */
+    memcpy(&S.dpcd[0x503], "SIMBR1", 6);
+    memcpy(&S.dpcd[0x403], "SIMSNK", 6);
+    S.dpcd[0x409] = 0x21; S.dpcd[0x40a] = 3; S.dpcd[0x40b] = 7;
+    dcn32_dp_link_init(&l, dev, dm, 0, 1, 2, 2, 0, 0x13, 0x1e, 0, 0);
+    l.chip_id = 0x747e;
+    CHECK(dcn32_dp_read_caps(&l) == RDNA3_OK && l.caps_valid);
+    CHECK(S.dpcd[0x300] == 0x00 && S.dpcd[0x301] == 0x00 && S.dpcd[0x302] == 0x1a && S.dpcd[0x303] == 0x7e &&
+          S.dpcd[0x304] == 0x74 && S.dpcd[0x305] == 0 && S.dpcd[0x309] == 26 && S.dpcd[0x340] == 80);
+    CHECK(l.dpcd_caps.branch_dev_id == 0x001cf8 && !memcmp(l.dpcd_caps.branch_dev_name, "SIMBR1", 6) &&
+          !memcmp(l.dpcd_caps.sink_dev_id_str, "SIMSNK", 6) && l.dpcd_caps.sink_hw_revision == 0x21 &&
+          l.dpcd_caps.sink_fw_revision[0] == 3 && l.dpcd_caps.sink_fw_revision[1] == 7);
+    v = S.reg[AUXR(regDP_AUX0_AUX_DPHY_RX_CONTROL1, 0)];
+    CHECK(((v & DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MASK) >> DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN__SHIFT) == 69 &&
+          !(v & DP_AUX0_AUX_DPHY_RX_CONTROL1__AUX_RX_TIMEOUT_LEN_MUL_MASK));
+    CHECK(!dcn32_dp_is_branch_device(&l) && !dcn32_dp_is_active_dongle(&l) && !l.keep_receiver_powered);
+
+    /* a DP-to-HDMI converter: 300 MHz TMDS, 10 bpc, 4:2:x pass-through */
+    S.dpcd[0x005] = 0x01 | 2u << 1 | 0x10;    /* port present, DVI/HDMI/DP++, detailed caps */
+    S.dpcd[0x080] = 3;                        /* HDMI */
+    S.dpcd[0x081] = 120;                      /* x 2.5 MHz */
+    S.dpcd[0x082] = 0x01;                     /* 10 bpc, no FRL */
+    S.dpcd[0x083] = 0x06;
+    CHECK(dcn32_dp_read_caps(&l) == RDNA3_OK && dcn32_dp_is_branch_device(&l) && dcn32_dp_is_active_dongle(&l) &&
+          l.dpcd_caps.dongle_type == RD_DONGLE_DP_HDMI && l.dpcd_caps.dongle_caps.extended_cap_valid &&
+          l.dpcd_caps.dongle_caps.dp_hdmi_max_pixel_clk_in_khz == 300000 && l.dpcd_caps.dongle_caps.dp_hdmi_max_bpc == 10 &&
+          l.dpcd_caps.dongle_caps.is_dp_hdmi_ycbcr422_pass_through && l.dpcd_caps.dongle_caps.is_dp_hdmi_ycbcr420_pass_through);
+    CHECK(edid_dmt(1920, 1080, 60, &m1080) == 0);
+    memset(&m4k, 0, sizeof(m4k));
+    m4k.h_active = 3840; m4k.v_active = 2160; m4k.h_total = 4400; m4k.v_total = 2250;
+    m4k.h_front = 176; m4k.h_sync = 88; m4k.v_front = 8; m4k.v_sync = 10; m4k.pixel_khz = 594000;
+    CHECK(dcn32_dp_validate_mode_timing(&l, &m1080) && !dcn32_dp_validate_mode_timing(&l, &m4k));
+    /* the DFP capability extension caps the active size */
+    S.dpcd[0x081] = 240;                      /* 600 MHz: the TMDS limit off */
+    S.dpcd[0x0a3] = 1;
+    S.dpcd[0x0a4] = 0x58; S.dpcd[0x0a5] = 0x02;   /* 600 Mpix/s */
+    S.dpcd[0x0a6] = 0x80; S.dpcd[0x0a7] = 0x07;   /* 1920 wide */
+    S.dpcd[0x0a8] = 0x38; S.dpcd[0x0a9] = 0x04;   /* 1080 high */
+    S.dpcd[0x0aa] = 0x01; S.dpcd[0x0ab] = 0x02;   /* RGB, 8 bpc */
+    CHECK(dcn32_dp_read_caps(&l) == RDNA3_OK && l.dpcd_caps.dongle_caps.dfp_cap_ext.supported &&
+          l.dpcd_caps.dongle_caps.dfp_cap_ext.max_video_h_active_width == 1920 &&
+          dcn32_dp_validate_mode_timing(&l, &m1080) && !dcn32_dp_validate_mode_timing(&l, &m4k));
+    S.dpcd[0x0ab] = 0x04;                     /* 10 bpc only: RGB 8 bpc refused */
+    CHECK(dcn32_dp_read_caps(&l) == RDNA3_OK && !dcn32_dp_validate_mode_timing(&l, &m1080));
+    /* a 0010FA VGA converter keeps its receiver powered */
+    S.dpcd[0x005] = 0x01 | 1u << 1;
+    S.dpcd[0x080] = 1;
+    S.dpcd[0x500] = 0x00; S.dpcd[0x501] = 0x10; S.dpcd[0x502] = 0xfa;
+    CHECK(dcn32_dp_read_caps(&l) == RDNA3_OK && l.dpcd_caps.dongle_type == RD_DONGLE_DP_VGA && l.keep_receiver_powered);
+    memcpy(S.dpcd, dpcd_save, sizeof(S.dpcd));
+    S.reg[AUXR(regDP_AUX0_AUX_DPHY_RX_CONTROL1, 0)] = rx1;
+    dcaux_configure_timeout(dev, 0, 0);   /* the software poll back to its default */
+    S.reg[AUXR(regDP_AUX0_AUX_DPHY_RX_CONTROL1, 0)] = rx1;
+
+    /* dsc2_wait_disconnect_pending_clear */
+    v = S.reg[DCN_B2 + regDSCRM0_DSCRM_DSC_FORWARD_CONFIG + 1];
+    S.reg[DCN_B2 + regDSCRM0_DSCRM_DSC_FORWARD_CONFIG + 1] = v & ~DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_DOUBLE_BUFFER_REG_UPDATE_PENDING_MASK;
+    CHECK(dcn32_dsc_wait_disconnect_pending_clear(dev, 1) == RDNA3_OK);
+    S.reg[DCN_B2 + regDSCRM0_DSCRM_DSC_FORWARD_CONFIG + 1] |= DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_DOUBLE_BUFFER_REG_UPDATE_PENDING_MASK;
+    CHECK(dcn32_dsc_wait_disconnect_pending_clear(dev, 1) == RDNA3_ETIME);
+    S.reg[DCN_B2 + regDSCRM0_DSCRM_DSC_FORWARD_CONFIG + 1] = v;
+}
+
 static void test_dc_k(rdna3_dev *dev, rdna3_dmub *dm)
 {
+    test_dc_dp(dev, dm);
     test_dc_color(dev);
 
     test_dc_otg(dev);

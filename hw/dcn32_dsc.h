@@ -281,6 +281,9 @@ void dcn32_dsc_enable(rdna3_dev *d, uint32_t inst, uint32_t opp_pipe);     /* ds
 void dcn32_dsc_disable(rdna3_dev *d, uint32_t inst);                       /* dsc2_disable */
 void dcn32_dsc_disconnect(rdna3_dev *d, uint32_t inst);                    /* dsc2_disconnect */
 void dcn32_dsc_read_state(rdna3_dev *d, uint32_t inst, rdna3_dsc_state *s);/* dsc2_read_state */
+/* dsc2_wait_disconnect_pending_clear (DC: post_unlock_reset_opp, before
+ * dsc_disable on a seamless update) */
+int  dcn32_dsc_wait_disconnect_pending_clear(rdna3_dev *d, uint32_t inst);
 /* optc3_set_dsc_config on OTG 'otg' */
 void dcn32_optc_set_dsc_config(rdna3_dev *d, uint32_t otg, uint32_t dsc_mode, uint32_t bytes_per_pixel,
                                uint32_t slice_width);

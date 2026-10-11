@@ -110,3 +110,4 @@ dp_overwrite_extended_receiver_cap  re-reads the base receiver caps for dc_link_
 optc3_program_blank_color  OTG_BLANK_DATA_COLOR does not exist on DCN 3.2.0 (not in dcn_3_2_0_offset.h): DCN 3.2 blanks through the OPP pattern generator
 optc32_wait_odm_doublebuffer_pending_clear  waits on OTG_H_TIMING_DIV_MODE_DB_UPDATE_PENDING, a field DCN 3.2.0's OTG_DOUBLE_BUFFER_CONTROL does not have (mask 0: the wait returns at once)
 dmub_dcn32_set_outbox0_rptr  set_outbox0_rptr has no caller in Linux v6.12 (the driver keeps the trace ring's read pointer itself)
+link_disable_hpd|dcn10_link_encoder_disable_hpd  reached only through dc_link_disable_hpd, which amdgpu calls from debugfs alone (amdgpu_dm_debugfs.c trigger_hotplug); the driver never turns an HPD pin off

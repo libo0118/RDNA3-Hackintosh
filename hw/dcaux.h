@@ -71,6 +71,14 @@ int  dchpd_iv_pin(uint32_t client_id, uint32_t src_id, uint32_t ctx, int *rx);
  * DC_HPD_SENSE_DELAYED. Returns the (delayed) sense: 1 connected. */
 int  dchpd_irq_ack(rdna3_dev *d, uint32_t n);
 
+/* dce_aux_configure_timeout (DCN 3.2 has extended_aux_timeout_support):
+ * AUX_DPHY_RX_CONTROL1's reply timeout for 'timeout_in_us' (0 = the
+ * default 69 x 8 us) and the software poll of engine 'n' at
+ * SW_AUX_TIMEOUT_PERIOD_MULTIPLIER (6) times it. Returns the timeout the
+ * register held before (us). Until the first call an engine polls as
+ * before (AUX_TIMEOUT_US). */
+uint32_t dcaux_configure_timeout(rdna3_dev *d, uint32_t n, uint32_t timeout_in_us);
+
 /* One raw transaction on engine 'n': 'action' RD_AUX_*, 20-bit 'address',
  * 'len' bytes (<= 16; 0 = address-only). Writes send buf, reads fill it.
  * Returns the bytes transferred (reads: received) or RD_AUX_ERR_*; *reply

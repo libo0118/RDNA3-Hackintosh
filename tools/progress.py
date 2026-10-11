@@ -88,7 +88,7 @@ ITEM_STEPS = [
                 r"|enable_phy_bypass_mode|enc1_configure_encoder|enc32_(dp_set_odm_combine|enable_fifo"
                 r"|reset_fifo|set_dig_input_mode|stream_encoder_dp_unblank)|link_encoder_disable"
                 r"|link_transmitter_control|set_dp_phy_pattern_passthrough_mode"
-                r"|set_link_training_complete|setup_panel_mode|get_frontend_source"), ["dplink"]),
+                r"|set_link_training_complete|setup_panel_mode|get_frontend_source|dce_aux_configure_timeout"), ["dplink"]),
     # FEC and DSC (rdna3dsc) in files of the modeset / DP link groups
     (re.compile(r"dcn32_dsc_pg_(control|status)|dcn32_update_dsc_pg|enc32_dp_set_dsc_config|dp_set_dsc_on_rx"
                 r"|link_set_dsc_(enable|on_stream|pps_packet)|dp_is_fec_supported|dp_should_enable_fec"
