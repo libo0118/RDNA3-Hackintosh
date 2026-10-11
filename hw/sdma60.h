@@ -30,8 +30,14 @@ extern "C" {
 #define SDMA_OP_FENCE        5
 #define SDMA_OP_TRAP         6
 #define SDMA_OP_CONST_FILL   11
+#define SDMA_OP_POLL_REGMEM  8
+#define SDMA_OP_COND_EXE     9
+#define SDMA_OP_PTEPDE       12
+#define SDMA_OP_SRBM_WRITE   14
+#define SDMA_OP_GCR_REQ      17
 #define SDMA_SUBOP_COPY_LINEAR  0
 #define SDMA_SUBOP_WRITE_LINEAR 0
+#define SDMA_SUBOP_VM_INVALIDATION 4
 #define SDMA_PKT_HEADER_OP(x)        ((uint32_t)(x) & 0xff)
 #define SDMA_PKT_HEADER_SUB_OP(x)    (((uint32_t)(x) & 0xff) << 8)
 #define SDMA_PKT_FENCE_HEADER_MTYPE(x) (((uint32_t)(x) & 0x7) << 16)
@@ -52,12 +58,22 @@ typedef struct rdna3_sdma_ring {
     int      fence_irq;     /* each fence also raises an IH trap */
     int      use_doorbell;  /* wptr goes through the doorbell (d->doorbell_ok at start) */
     uint32_t doorbell;      /* RD_DB_INDEX(RD_DB_SDMA_ENGINEn) */
+    /* rdna3amdgpu=1: ring->vm_inv_eng (amdgpu_gmc_allocate_vm_inv_eng, 12
+     * for sdma0 on this card), commits padded to the fetch size (align_mask
+     * 0xf), and burst NOPs (amdgpu_sdma_init_microcode: firmware feature
+     * version >= 20) */
+    uint32_t vm_inv_eng;
+    int      amdgpu_pad;
+    int      burst_nop;
 } rdna3_sdma_ring;
 
 #define RD_SDMA_WB_RPTR  0
 #define RD_SDMA_WB_WPTR  8
 #define RD_SDMA_WB_FENCE 16
 #define RD_SDMA_WB_TEST  24
+/* ring->cond_exe_gpu_addr (1: run) and the IB test's writeback slot */
+#define RD_SDMA_WB_COND_EXE 32
+#define RD_SDMA_WB_IB_TEST  40
 
 /* sdma_v6_0_start() for one instance (unhalt + gfx_resume_instance), then
  * sdma_v6_0_ring_test_ring(). */
@@ -100,6 +116,45 @@ int  sdma60_wait_fence(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq);
 /* copy 'bytes' (<= 1 GiB) between MC addresses and wait for it */
 int  sdma60_copy_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src_mc, uint64_t dst_mc,
                       uint32_t bytes);
+
+/* ---- sdma_v6_0 ring functions amdgpu_ib_schedule uses (rdna3amdgpu=1) ---- */
+void sdma60_ring_insert_nop(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t count);
+void sdma60_emit_wreg(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t reg, uint32_t val);
+void sdma60_emit_reg_wait(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t reg, uint32_t val, uint32_t mask);
+void sdma60_emit_reg_write_reg_wait(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t reg0, uint32_t reg1,
+                                    uint32_t ref, uint32_t mask);
+/* the GFXHUB page directory of 'vmid' and its invalidation on r->vm_inv_eng */
+void sdma60_emit_vm_flush(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t pd_addr);
+void sdma60_emit_pipeline_sync(rdna3_dev *d, rdna3_sdma_ring *r);
+void sdma60_emit_hdp_flush(rdna3_dev *d, rdna3_sdma_ring *r);
+void sdma60_emit_mem_sync(rdna3_dev *d, rdna3_sdma_ring *r);
+uint32_t sdma60_ring_init_cond_exec(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t addr);
+/* amdgpu_ring_patch_cond_exec on an SDMA ring */
+void sdma60_ring_patch_cond_exec(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t offset);
+/* sdma_v6_0_ring_pad_ib: NOPs to an 8-dword multiple */
+void sdma60_ring_pad_ib(const rdna3_sdma_ring *r, uint32_t *ib, uint32_t *length_dw);
+/* the page-table packets of amdgpu_vm_sdma (into an IB being built) */
+void sdma60_vm_copy_pte(uint32_t *ib, uint32_t *length_dw, uint64_t pe, uint64_t src, uint32_t count);
+void sdma60_vm_write_pte(uint32_t *ib, uint32_t *length_dw, uint64_t pe, uint64_t value, uint32_t count,
+                         uint32_t incr);
+void sdma60_vm_set_pte_pde(uint32_t *ib, uint32_t *length_dw, uint64_t pe, uint64_t addr, uint32_t count,
+                           uint32_t incr, uint64_t flags);
+/* sdma_v6_0_ring_get_rptr / _get_wptr (dwords) */
+uint64_t sdma60_ring_get_rptr(rdna3_dev *d, rdna3_sdma_ring *r);
+uint64_t sdma60_ring_get_wptr(rdna3_dev *d, rdna3_sdma_ring *r);
+/* sdma_v6_0_is_idle / sdma_v6_0_wait_for_idle over 'num_instances' */
+int  sdma60_is_idle(rdna3_dev *d, uint32_t num_instances);
+int  sdma60_wait_for_idle(rdna3_dev *d);
+/* a DMA job in amdgpu_ib_schedule's order: memory sync (EMIT_MEM_SYNC),
+ * amdgpu_vm_flush under COND_EXE (pipeline sync, VM flush, PASID mapping,
+ * the flush's fence), the job's COND_EXE, HDP flush, IBs, user fence,
+ * fence. pd_addr 0: no flush; pasid 0: no mapping. Returns the fence */
+uint32_t sdma60_submit_job(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t pd_addr,
+                           uint32_t pasid, uint32_t pasid_reg, const uint64_t *ib_va,
+                           const uint32_t *ib_ndw, const uint32_t *ib_flags, uint32_t n,
+                           uint64_t uf_addr);
+/* sdma_v6_0_ring_test_ib: WRITE_LINEAR + 3 NOPs at VRAM offset 'ib' (VMID 0) */
+int  sdma60_ring_test_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t ib);
 
 /* ---- user queues (amdgpu_userq through the MES) ----
  * sdma_v6_0_mqd_init (adev->mqds[AMDGPU_HW_IP_DMA].init_mqd): a zeroed

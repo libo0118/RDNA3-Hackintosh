@@ -80,10 +80,10 @@ amdgpu_ring_generic_pad_ib  the GFX rings' pad_ib: amdgpu_ring_pad_ib runs only 
 gfx_v11_0_ring_emit_reg_wait  unused by the GFX rings: amdgpu_ring_emit_reg_wait comes from gmc_v11_0_emit_flush_gpu_tlb's invalidation semaphore (MMHUB only, gmc_v11_0_use_invalidate_semaphore) and from amdgpu_ring_emit_reg_write_reg_wait_helper, which rings with their own reg_write_reg_wait (all GFX rings) do not use
 gfx_v11_0_cp_gfx_switch_pipe  pipe switch for a second gfx ring (gfx ring 1 on pipe 1): GC 11.0.3 has me.num_pipe_per_me = 1; the PIPE_ID0 select is cp_gfx_resume's GRBM_GFX_CNTL write
 gfx_v11_0_tcp_harvest  empty in amdgpu v6.12 ("TODO: harvest feature to be added later")
-gfx_v11_0_(check_soft_reset|post_soft_reset)  IP-block soft reset of amdgpu_device_pre_asic_reset: amdgpu_device_ip_check_soft_reset and need_full_reset are true on SOC21 (soc21_need_full_reset), so amdgpu goes straight to a full reset
+gfx_v11_0_(check_soft_reset|post_soft_reset)|sdma_v6_0_check_soft_reset  IP-block soft reset of amdgpu_device_pre_asic_reset: amdgpu_device_ip_check_soft_reset and need_full_reset are true on SOC21 (soc21_need_full_reset), so amdgpu goes straight to a full reset
 # ---- no use on macOS
 amdgpu_gfx_parse_disable_cu|gfx_v11_0_set_user_wgp_inactive_bitmap_per_sh  amdgpu.disable_cu module option (Linux debug knob): unset, the masks are zero and set_user_wgp_inactive_bitmap_per_sh returns for a zero bitmap
-amdgpu_gfx_(kiq_fini|kiq_free_ring|mqd_sw_fini)|gfx_v11_0_(me_fini|mec_fini|pfp_fini|rlc_fini|sw_fini)|gmc_v11_0_(gart_fini|sw_fini)|amdgpu_ring_fini|mes_v11_0_sw_fini  sw_fini buffer-object frees: rings, MQDs, EOP, clear-state buffers and the GART table come from the bring-up's VRAM region, re-initialised as a whole (rdna3_vram_alloc_init) for a reset and dropped at unload; the firmware images go with the blobs; me / pfp / mec fw BOs exist only with load_type DIRECT
+amdgpu_gfx_(kiq_fini|kiq_free_ring|mqd_sw_fini)|gfx_v11_0_(me_fini|mec_fini|pfp_fini|rlc_fini|sw_fini)|gmc_v11_0_(gart_fini|sw_fini)|amdgpu_ring_fini|mes_v11_0_sw_fini|sdma_v6_0_sw_fini  sw_fini buffer-object frees: rings, MQDs, EOP, clear-state buffers and the GART table come from the bring-up's VRAM region, re-initialised as a whole (rdna3_vram_alloc_init) for a reset and dropped at unload; the firmware images go with the blobs; me / pfp / mec fw BOs exist only with load_type DIRECT
 ih_v6_0_sw_fini  amdgpu_irq_fini_sw: frees the Linux amdgpu_irq source tables (the IH rings themselves go in amdgpu_ih_ring_fini)
 gfx11_kiq_invalidate_tlbs|gfx_v11_0_ring_invalidate_tlbs|amdgpu_gmc_flush_gpu_tlb_pasid|gmc_v11_0_flush_gpu_tlb_pasid|gmc_v11_0_get_vmid_pasid_mapping_info  TLB flush by PASID: only amdgpu_vm_flush_compute_tlb (KFD compute VMs, ROCm on Linux) uses it; graphics VMs flush by VMID on their rings
 .*_get_clockgating_state|mmhub_v3_0_get_clockgating  clock-gating state for Linux sysfs / debugfs
@@ -112,3 +112,6 @@ mpc3_(set|disable)_dwb_mux|mpc3_is_dwb_idle  display writeback: macOS does not u
 DRM_IOCTL_PRIME_(FD_TO_HANDLE|HANDLE_TO_FD)  Linux dma-buf; macOS shares buffers through DRM_IOCTL_XNU_BO_EXPORT / IMPORT
 AMDGPU_INFO_CRTC_FROM_ID  Linux KMS CRTC ids; macOS drives displays through IOFramebuffer
 DRM_AMDGPU_GEM_LIST_HANDLES  CRIU checkpoint / restore (Linux)
+sdma_v6_0_(rlc_resume|set_clockgating_state|set_powergating_state|process_illegal_inst_irq)  empty in amdgpu v6.12 (each only returns 0)
+sdma_v6_0_load_microcode  SDMA firmware written by the driver through SDMA0_BROADCAST_UCODE_*: sdma_v6_0_start calls it only with load_type DIRECT; the PSP loads it on this card
+sdma_v6_0_ring_preempt_ib  ring->funcs->preempt_ib runs only from the GFX9 software ring muxer (amdgpu_ring_mux.c) and the amdgpu_preempt_ib debugfs file

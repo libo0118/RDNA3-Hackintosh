@@ -350,6 +350,9 @@ typedef struct sim {
     } smu;
     unsigned vm_huge_walks;              /* translations through a PDE_PTE (huge) entry */
     unsigned cp_mem_polls, cp_fault_ivs, cp_nop1;   /* WAIT_REG_MEM on memory, CP fault IVs, 1-dword NOPs */
+    /* SDMA packets of amdgpu's ring functions (rdna3amdgpu=1) */
+    unsigned sdma_srbm, sdma_hdp, sdma_polls, sdma_vm_inv, sdma_cond_skips, sdma_gcr, sdma_ptepde, sdma_stuck;
+    uint32_t sdma_last_inv_eng;
     int gfx_mutex_fw;                    /* the firmware holds CP_GFX_INDEX_MUTEX */
     uint32_t sh_mem[16][3];              /* per VMID: SH_MEM_CONFIG, SH_MEM_BASES, SPI_GDBG_PER_VMID_CNTL */
     unsigned ih_snooped, ih_ring1_ivs, ih_db_rptr, ih_db_unrouted;   /* IH in system memory (rdna3amdgpu=1) */
@@ -2595,9 +2598,20 @@ static uint8_t *sdma_vm_ptr(uint32_t vmid, uint64_t va, uint64_t len)
     return vm_ptr(vmid, va, len);
 }
 
+/* what an SDMA IB addresses: VMID 0 inside the system aperture (the FB)
+ * by MC address, else through the VMID's page tables */
+static uint8_t *sdma_ib_mem(uint32_t vmid, uint64_t a, uint64_t len)
+{
+    if (!vmid && mc_ptr(a, len))
+        return mc_ptr(a, len);
+    return sdma_vm_ptr(vmid, a, len);
+}
+
 static void sdma_run_ib(uint32_t vmid, uint64_t va, uint32_t ndw)
 {
-    const uint32_t *ib = (const uint32_t *)sdma_vm_ptr(vmid, va, 4ull * ndw);
+    /* VMID 0 inside the system aperture (the FB): the MC address itself */
+    const uint32_t *ib = (const uint32_t *)(!vmid && mc_ptr(va, 4ull * ndw) ? mc_ptr(va, 4ull * ndw)
+                                                                              : sdma_vm_ptr(vmid, va, 4ull * ndw));
     uint32_t i = 0;
     S.sdma_ibs++;
     if (!ib) {
@@ -2611,13 +2625,13 @@ static void sdma_run_ib(uint32_t vmid, uint64_t va, uint32_t ndw)
         } else if (op == SDMA_OP_WRITE && sub == 0) {
             uint64_t a = ib[i + 1] | ((uint64_t)ib[i + 2] << 32);
             uint32_t cnt = (ib[i + 3] & 0xfffff) + 1;
-            uint8_t *p = sdma_vm_ptr(vmid, a, 4ull * cnt);
+            uint8_t *p = sdma_ib_mem(vmid, a, 4ull * cnt);
             if (p) memcpy(p, &ib[i + 4], 4ull * cnt); else S.sdma_ib_fault++;
             n = 4 + cnt;
         } else if (op == SDMA_OP_CONST_FILL) {
             uint64_t a = ib[i + 1] | ((uint64_t)ib[i + 2] << 32);
             uint32_t val = ib[i + 3], len = ib[i + 4] + 1, k;
-            uint8_t *p = sdma_vm_ptr(vmid, a, len);
+            uint8_t *p = sdma_ib_mem(vmid, a, len);
             for (k = 0; p && k + 4 <= len; k += 4) memcpy(p + k, &val, 4);
             if (!p) S.sdma_ib_fault++;
             n = 5;
@@ -2703,6 +2717,55 @@ static void sdma_run(uint32_t wptr_bytes)
             if (S.reg[GC_BASE0 + regSDMA0_CNTL] & SDMA0_CNTL__TRAP_ENABLE_MASK)
                 ih_push(RD_IH_CLIENT_GFX, RD_IH_SRC_SDMA_TRAP, 0);
             n = 2;
+        } else if (op == SDMA_OP_SRBM_WRITE) {
+            sim_wr(NULL, 4ull * RD(1), RD(2));
+            S.sdma_srbm++;
+            n = 3;
+        } else if (op == SDMA_OP_POLL_REGMEM && sub == SDMA_SUBOP_VM_INVALIDATION) {
+            uint32_t eng = (h >> 16) & 0x1f, dist = regGCVM_INVALIDATE_ENG1_REQ - regGCVM_INVALIDATE_ENG0_REQ;
+            S.reg[GC_BASE0 + regGCVM_INVALIDATE_ENG0_REQ + eng * dist] = RD(1);
+            S.reg[GC_BASE0 + regGCVM_INVALIDATE_ENG0_ACK + eng * dist] = RD(3) & 0xffff;
+            S.sdma_vm_inv++;
+            S.sdma_last_inv_eng = eng;
+            n = 4;
+        } else if (op == SDMA_OP_POLL_REGMEM) {
+            uint32_t v = 0, ref = RD(3), msk = RD(4);
+            if (h & (1u << 26)) {               /* HDP flush: request, then poll done */
+                S.sdma_hdp++;
+                v = ref;
+            } else if (h & (1u << 31)) {        /* memory */
+                uint8_t *pm = mc_ptr((RD(1) & 0xfffffffcu) | ((uint64_t)RD(2) << 32), 4);
+                if (pm) memcpy(&v, pm, 4); else S.sdma_bad++;
+            } else {
+                v = sim_rd(NULL, RD(1));        /* register (byte address) */
+            }
+            S.sdma_polls++;
+            if ((v & msk) != (ref & msk))
+                S.sdma_stuck++;
+            n = 6;
+        } else if (op == SDMA_OP_COND_EXE) {
+            uint8_t *pc = mc_ptr(RD(1) | ((uint64_t)RD(2) << 32), 4);
+            uint32_t v = 0;
+            if (pc) memcpy(&v, pc, 4); else S.sdma_bad++;
+            n = 5;
+            if (!v) {
+                S.sdma_cond_skips++;
+                n += RD(4);
+            }
+        } else if (op == SDMA_OP_GCR_REQ) {
+            S.sdma_gcr++;
+            n = 5;
+        } else if (op == SDMA_OP_PTEPDE) {
+            uint64_t pe = RD(1) | ((uint64_t)RD(2) << 32), fl = RD(3) | ((uint64_t)RD(4) << 32);
+            uint64_t a = RD(5) | ((uint64_t)RD(6) << 32);
+            uint32_t incr = RD(7), cnt = RD(9) + 1, k;
+            for (k = 0; k < cnt; k++) {
+                uint64_t e = (a + (uint64_t)k * incr) | fl;
+                uint8_t *pp = mc_ptr(pe + 8ull * k, 8);
+                if (pp) memcpy(pp, &e, 8); else S.sdma_bad++;
+            }
+            S.sdma_ptepde++;
+            n = 10;
         } else {
             S.sdma_bad++;
             n = 1;
@@ -4599,6 +4662,94 @@ static uint32_t uq_pm4(uint32_t *q, uint64_t a, uint32_t v, uint64_t fa, uint32_
     return n;
 }
 
+/* rdna3amdgpu=1 SDMA 6 ports: amdgpu_ib_schedule on the DMA ring (padded,
+ * burst NOPs, COND_EXE, HDP flush, VM flush on the ring's engine, PASID
+ * mapping, memory sync), the IB test and amdgpu_vm_sdma's PTE packets */
+static void test_sdma_amdgpu(rdna3_dev *dev, rdna3_sdma_ring *sd)
+{
+    const uint32_t dist = regGCVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 - regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32;
+    uint64_t ib = rdna3_vram_alloc(dev, 4096, 4096, "sdma-ib-test");
+    uint64_t pt = rdna3_vram_alloc(dev, 4096, 4096, "sdma-pt-test"), va, e[16];
+    uint32_t buf[64], len = 0, ndw = 8, flags = 1u << 6, seq, i, zero = 0, one = 1;
+    uint32_t hdp0 = S.sdma_hdp, inv0 = S.sdma_vm_inv, gcr0 = S.sdma_gcr, polls0, skips0, srbm0, fault0;
+
+    CHECK(ib != UINT64_MAX && pt != UINT64_MAX);
+    dev->amdgpu_exact = 1;
+    sd->amdgpu_pad = 1;
+    sd->burst_nop = 1;
+    sd->vm_inv_eng = 12;
+    /* sdma_v6_0_ring_test_ib through amdgpu_ib_schedule (VMID 0) */
+    CHECK(sdma60_ring_test_ib(dev, sd, ib) == RDNA3_OK);
+    CHECK(S.sdma_hdp == hdp0 + 1 && (sd->wptr & 0xf) == 0 && S.sdma_bad == 0 && S.sdma_stuck == 0);
+    CHECK(sdma60_ring_test_ib(dev, sd, UINT64_MAX) == RDNA3_EINVAL);
+
+    /* a VMID job that flushes: GCR_REQ (EMIT_MEM_SYNC), pipeline sync, PD
+     * base and invalidation on engine 12, PASID mapping, the flush's fence;
+     * the IB itself faults (no page tables behind the fake PD) */
+    polls0 = S.sdma_polls;
+    srbm0 = S.sdma_srbm;
+    fault0 = S.sdma_ib_fault;
+    va = rdna3_vram_mc(dev, ib);
+    seq = sdma60_submit_job(dev, sd, 7, 0x0000000123456001ull, 0x8009, gmc11_pasid_mapping_reg(dev, 7, 0),
+                            &va, &ndw, &flags, 1, 0);
+    CHECK(seq == sd->fence_seq && sdma60_wait_fence(dev, sd, seq) == RDNA3_OK);
+    CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 + dist * 7] == 0x23456001u &&
+          S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32 + dist * 7] == 0x1u);
+    CHECK(S.sdma_vm_inv == inv0 + 1 && S.sdma_last_inv_eng == 12 && S.reg[OSS_BASE0 + 7] == 0x8009);
+    CHECK(S.sdma_gcr == gcr0 + 1 && S.sdma_srbm == srbm0 + 3 && S.sdma_polls == polls0 + 2 /* sync, hdp */);
+    CHECK(S.sdma_ib_fault == fault0 + 1 && S.sdma_stuck == 0 && S.sdma_bad == 0);
+    S.sdma_ib_fault = fault0;
+    S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 + dist * 7] = 0;
+    S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32 + dist * 7] = 0;
+    S.reg[OSS_BASE0 + 7] = 0;
+
+    /* COND_EXE: with the slot cleared (a preempted ring) the job is skipped */
+    skips0 = S.sdma_cond_skips;
+    rdna3_vram_write(dev, sd->wb + RD_SDMA_WB_COND_EXE, &zero, 4);
+    seq = sdma60_submit_job(dev, sd, 0, 0, 0, 0, &va, &ndw, &zero, 1, 0);
+    CHECK(seq && !sdma60_fence_passed(dev, sd, seq) && S.sdma_cond_skips == skips0 + 1);
+    rdna3_vram_write(dev, sd->wb + RD_SDMA_WB_COND_EXE, &one, 4);
+    rdna3_vram_write(dev, sd->wb + RD_SDMA_WB_FENCE, &sd->fence_seq, 4);   /* forced */
+
+    /* amdgpu_vm_sdma's packets: write_pte, set_pte_pde, copy_pte, padded */
+    for (i = 0; i < 16; i++)
+        e[i] = 0;
+    rdna3_vram_write(dev, pt, e, sizeof(e));
+    sdma60_vm_write_pte(buf, &len, rdna3_vram_mc(dev, pt), 0x1001, 2, 0x1000);
+    sdma60_vm_set_pte_pde(buf, &len, rdna3_vram_mc(dev, pt) + 16, 0x200000, 3, 0x1000, 0x7);
+    sdma60_vm_copy_pte(buf, &len, rdna3_vram_mc(dev, pt) + 64, rdna3_vram_mc(dev, pt), 5);
+    CHECK(len == 8 + 10 + 7);
+    sdma60_ring_pad_ib(sd, buf, &len);
+    CHECK(len == 32 && buf[25] == (SDMA_OP_NOP | (6u << 16)) && buf[26] == SDMA_OP_NOP);
+    for (i = 0; i < len; i++)
+        sdma60_write(dev, sd, buf[i]);
+    seq = sdma60_emit_fence(dev, sd);
+    sdma60_commit(dev, sd);
+    CHECK(sdma60_wait_fence(dev, sd, seq) == RDNA3_OK && S.sdma_bad == 0);
+    rdna3_vram_read(dev, pt, e, sizeof(e));
+    CHECK(e[0] == 0x1001 && e[1] == 0x2001 && e[2] == 0x200007 && e[3] == 0x201007 && e[4] == 0x202007);
+    CHECK(e[8] == e[0] && e[12] == e[4] && S.sdma_ptepde >= 1);
+    /* sdma_v6_0_ring_get_rptr / _get_wptr, is_idle / wait_for_idle */
+    CHECK(sdma60_ring_get_rptr(dev, sd) == sd->wptr && sdma60_ring_get_wptr(dev, sd) == sd->wptr);
+    S.reg[GC_BASE0 + regSDMA0_STATUS_REG] &= ~SDMA0_STATUS_REG__IDLE_MASK;
+    CHECK(!sdma60_is_idle(dev, 1));
+    S.reg[GC_BASE0 + regSDMA0_STATUS_REG] |= SDMA0_STATUS_REG__IDLE_MASK;
+    S.reg[GC_BASE0 + regSDMA0_STATUS_REG + 0x600] |= SDMA0_STATUS_REG__IDLE_MASK;
+    CHECK(sdma60_is_idle(dev, 2) && sdma60_wait_for_idle(dev) == RDNA3_OK);
+    /* the reg write / wait pair of a firmware-side flush */
+    polls0 = S.sdma_polls;
+    sdma60_emit_reg_write_reg_wait(dev, sd, GC_BASE0 + regSCRATCH_REG0, GC_BASE0 + regSCRATCH_REG0, 0x5, 0x5);
+    seq = sdma60_emit_fence(dev, sd);
+    sdma60_commit(dev, sd);
+    CHECK(sdma60_wait_fence(dev, sd, seq) == RDNA3_OK && S.reg[GC_BASE0 + regSCRATCH_REG0] == 0x5 &&
+          S.sdma_polls == polls0 + 2 && S.sdma_stuck == 0);
+
+    sd->amdgpu_pad = 0;
+    sd->burst_nop = 0;
+    sd->vm_inv_eng = 0;
+    dev->amdgpu_exact = 0;
+}
+
 /* rdna3amdgpu=1 MES ports: misc ops (register write / read, the TLB
  * invalidation's write-and-wait), the legacy queue frames, the gang
  * suspend / resume and the KCQ / KGQ resets through the scheduler */
@@ -4767,13 +4918,13 @@ static void test_gfx_amdgpu(rdna3_dev *dev, rdna3_gfx_ring *gr, rdna3_mec_ring *
     CHECK(gfx11_ring_get_wptr(dev, &kcq->rb) == kcq->rb.wptr);
     /* amdgpu_vm_need_pipeline_sync: both jobs flushed VMID 5 -> one memory
      * poll each, on a fence that had landed */
-    CHECK(S.cp_mem_polls == polls0 + 2 && S.cp_nop1 > nop0 && S.cp_bad == 0 && S.cp_wait_stuck == 0);
+    CHECK(S.cp_mem_polls == polls0 + 2 && S.cp_bad == 0 && S.cp_wait_stuck == 0);
     seq = gfx11_submit_compute_job(dev, kcq, 0x78, 0, 0, &job, 1);   /* VMID 0: no sync */
     CHECK(seq && gfx11_wait_fence(dev, &kcq->rb, seq) == RDNA3_OK && S.cp_mem_polls == polls0 + 2);
     gfx11_ring_insert_nop(dev, &kcq->rb, 1);
     gfx11_ring_insert_nop(dev, &kcq->rb, 5);
     gfx11_commit(dev, &kcq->rb);
-    CHECK((kcq->rb.wptr & 0xff) == 0 && S.cp_bad == 0);
+    CHECK((kcq->rb.wptr & 0xff) == 0 && S.cp_bad == 0 && S.cp_nop1 > nop0);
 
     /* gfx_v11_0_ring_test_ib on both rings (IB in VMID 0) */
     ibs0 = S.cp_ibs;
@@ -4874,9 +5025,23 @@ static void test_gfx_amdgpu(rdna3_dev *dev, rdna3_gfx_ring *gr, rdna3_mec_ring *
         seq = gfx11_submit_compute_job_ex(dev, kcq, 0x7a, 5, pd, &job, 1, &x);
         CHECK(seq && gfx11_wait_fence(dev, &kcq->rb, seq) == RDNA3_OK && S.reg[OSS_BASE0 + 5] == 0x8007);
         x.pasid = 0x8008;
+        /* amdgpu_vm_flush emits the mapping together with a VM flush */
         seq = gfx11_submit_job_ex(dev, gr, 0x7b, 5, 0, &job, 1, &x);
+        CHECK(seq && gfx11_wait_fence(dev, gr, seq) == RDNA3_OK && S.reg[OSS_BASE0 + 5] == 0x8007);
+        seq = gfx11_submit_job_ex(dev, gr, 0x7b, 5, pd, &job, 1, &x);
         CHECK(seq && gfx11_wait_fence(dev, gr, seq) == RDNA3_OK && S.reg[OSS_BASE0 + 5] == 0x8008);
         CHECK(gmc11_pasid_mapping_reg(dev, 3, 1) == OSS_BASE0 + 0x10 + 3 && S.cp_bad == 0);
+    }
+    /* amdgpu_ib_schedule: ACQUIRE_MEM only for AMDGPU_IB_FLAG_EMIT_MEM_SYNC, the
+     * frame's TMZ state follows each IB (AMDGPU_IB_FLAGS_SECURE) */
+    {
+        rdna3_gfx_ib two[2] = { { ibva, ndw, RD_GFX_IB_FLAG_EMIT_MEM_SYNC }, { ibva, ndw, RD_GFX_IB_FLAG_TMZ } };
+        uint32_t acq0 = S.cp_acquire, fb0 = S.cp_frame_begin, fe0 = S.cp_frame_end;
+        seq = gfx11_submit_job(dev, gr, 0x7c, 5, 0, two, 2);
+        CHECK(seq && gfx11_wait_fence(dev, gr, seq) == RDNA3_OK && S.cp_acquire == acq0 + 1 &&
+              S.cp_frame_begin == fb0 + 2 && S.cp_frame_end == fe0 + 2);
+        seq = gfx11_submit_job(dev, gr, 0x7c, 5, 0, &job, 1);
+        CHECK(seq && gfx11_wait_fence(dev, gr, seq) == RDNA3_OK && S.cp_acquire == acq0 + 1 && S.cp_bad == 0);
     }
     /* gmc_v11_0_get_vbios_fb_size / amdgpu_gmc_get_vbios_allocations */
     {
@@ -7814,6 +7979,7 @@ static void run(const char *fwdir)
             rdna3_vram_read(&dev, dst, out, 64);
             CHECK(out[0] == 0xabcdef01u && out[15] == 0xabcdef01u && out[16] == pat[16]);
             CHECK(S.sdma_bad == 0 && S.unflushed_doorbells == 0);
+            test_sdma_amdgpu(&dev, &sd);
             /* INDIRECT packet layout and 8-dword alignment */
             {
                 uint32_t pkt[6], start;

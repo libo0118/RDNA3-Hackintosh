@@ -952,9 +952,37 @@ bool RDNA3Bringup::hwInit()
                     gfxhub303_setup_vm_pt_regs(fDev, id, fVmPd[id]);
                     gfxhub303_flush_tlb(fDev, id, 0);
                 }
+        if (!ret && fAmdgpuExact) {
+            /* rdna3amdgpu=1: the DMA ring as amdgpu sets it up - padded to
+             * align_mask 0xf with burst NOPs when the firmware's feature
+             * version is >= 20 (amdgpu_sdma_init_microcode), and the VM
+             * invalidation engine amdgpu_gmc_allocate_vm_inv_eng gives sdma0
+             * (the same 15-ring table as the GFX stage uses) */
+            static const uint32_t hubs[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0 };
+            uint32_t ver[32], feat[32], eng[15];
+            amd_fw_versions(fBlobRefs, nullptr, ver, feat);
+            fSdma->amdgpu_pad = 1;
+            fSdma->burst_nop = feat[AMDGPU_INFO_FW_SDMA] >= 20;
+            if (gmc11_allocate_vm_inv_eng(hubs, nullptr, 15, fMesWanted, eng) == RDNA3_OK)
+                fSdma->vm_inv_eng = eng[9];
+            publish("RDNA3,SDMAVmInvEng", fSdma->vm_inv_eng);
+            publish("RDNA3,SDMABurstNop", (uint64_t)fSdma->burst_nop);
+        }
         if (!ret)
             ret = sdma60_start(fDev, fSdma, 0, 0);
         publish("RDNA3,SDMAResult", (uint64_t)(int64_t)ret);
+        if (!ret && fAmdgpuExact) {
+            /* amdgpu_ib_ring_tests -> sdma_v6_0_ring_test_ib; a ring whose
+             * IB test fails is not used */
+            if (fIbTestBuf == UINT64_MAX)
+                fIbTestBuf = rdna3_vram_alloc(fDev, 4096, 4096, "ib-test");
+            ret = sdma60_ring_test_ib(fDev, fSdma, fIbTestBuf);
+            publish("RDNA3,IBTestSDMA", (uint64_t)(int64_t)ret);
+            if (ret) {
+                BLOG("SDMA: IB test failed (%d): the ring is not used", ret);
+                fSdma->ready = 0;
+            }
+        }
         if (!ret) {
             const uint32_t len = 64 * 1024;
             uint64_t src = rdna3_vram_alloc(fDev, len, 4096, "sdma-selftest-src");
@@ -1744,6 +1772,7 @@ struct RDNA3Vm {
     uint32_t faultStatus, faultHub;
     bool     gfxFlush;   /* next GFX job re-points the VMID and flushes from the ring */
     bool     compFlush;  /* same for the next compute job (the hub is shared, the rings are not) */
+    bool     dmaFlush;   /* rdna3amdgpu=1: same for the next DMA job (amdgpu_vm_flush on the SDMA ring) */
 };
 
 
@@ -2311,6 +2340,10 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
         sdma60_soft_reset(fDev, fSdma) == RDNA3_OK) {
         fSdmaResets++;
         fResetCount++;
+        /* the ring starts over: the next DMA job of every VM flushes again */
+        for (uint32_t id = 1; id < 16; id++)
+            if (fVmByVmid[id])
+                fVmByVmid[id]->dmaFlush = true;
         publish("RDNA3,SDMAResets", fSdmaResets);
         publish("RDNA3,Resets", fResetCount);
         IOLockLock(fLock);
@@ -2367,7 +2400,7 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
         if (ok) {
             for (uint32_t id = 1; id < 16; id++)
                 if (fVmByVmid[id])
-                    fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = true;
+                    fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = fVmByVmid[id]->dmaFlush = true;
             fResetCount++;
             BLOG("hang: GFX soft reset done (%u resets so far)", fResetCount);
             /* the KIQ restart reset both MES pipes: the scheduler again */
@@ -2409,7 +2442,7 @@ bool RDNA3Bringup::gpuReset(bool baco)
         fIntr->disable();
     for (uint32_t id = 1; id < 16; id++)
         if (fVmByVmid[id])
-            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = true;
+            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = fVmByVmid[id]->dmaFlush = true;
     if (fKcq && fKcq->rb.ready)
         gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
     if (fGfx && fGfx->ready)
@@ -2534,7 +2567,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
     memset(fGdsKnown, 0, sizeof(fGdsKnown));
     for (uint32_t id = 1; id < 16; id++)
         if (fVmByVmid[id])
-            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = true;
+            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = fVmByVmid[id]->dmaFlush = true;
     fPci->setBusMasterEnable(false);
     /* as run(): in a VM the wake comes with a bus reset (QEMU resets the
      * devices on an S3 wake), which leaves the PSP stuck */
@@ -2616,7 +2649,7 @@ void *RDNA3Bringup::vmCreate()
             if (fGmc && fGmc->gfxhub_enabled)
                 gfxhub303_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
             vmFlush(id);
-            v->gfxFlush = v->compFlush = true;
+            v->gfxFlush = v->compFlush = v->dmaFlush = true;
             break;
         }
     }
@@ -2738,7 +2771,7 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
     vmFlush(v->vmid);
     if (fUserqMask)
         userqFlushMesVmids();
-    v->gfxFlush = v->compFlush = true;
+    v->gfxFlush = v->compFlush = v->dmaFlush = true;
     return 0;
 }
 
@@ -2767,7 +2800,7 @@ void RDNA3Bringup::vmUnmap(void *p, uint64_t va, uint64_t size)
     vmFlush(v->vmid);
     if (fUserqMask)
         userqFlushMesVmids();
-    v->gfxFlush = v->compFlush = true;
+    v->gfxFlush = v->compFlush = v->dmaFlush = true;
 }
 
 /* ---------------------------- user queues ---------------------------- */
@@ -3021,6 +3054,32 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
     if (fAmdgpuExact && v->vmid < 16 && v->pasid && fVmidPasid[v->vmid] != v->pasid) {
         x.pasid_mapping = 1;
         x.pasid = v->pasid;
+    }
+    if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready && fAmdgpuExact) {
+        /* rdna3amdgpu=1: amdgpu_ib_schedule on the DMA ring (sdma60_submit_job):
+         * amdgpu_vm_flush on the ring's own invalidation engine, the PASID
+         * mapping, COND_EXE, HDP flush, padded IBs, user fence, fence */
+        uint64_t va[RD_MAX_CS_IBS];
+        uint32_t ndw[RD_MAX_CS_IBS], fl[RD_MAX_CS_IBS];
+        if (n > RD_MAX_CS_IBS)
+            return -RD_EINVAL;
+        for (uint32_t i = 0; i < n; i++) {
+            va[i] = ibs[i].va;
+            ndw[i] = ibs[i].length_dw;
+            fl[i] = ibs[i].flags;
+        }
+        uint32_t s = sdma60_submit_job(fDev, fSdma, v->vmid, v->dmaFlush ? gpuvm_pd_addr(fDev, &v->vm) : 0,
+                                       x.pasid_mapping ? x.pasid : 0,
+                                       x.pasid_mapping ? gmc11_pasid_mapping_reg(fDev, v->vmid, 0) : 0,
+                                       va, ndw, fl, n, ufMc);
+        if (!s)
+            return -RD_EBUSY;
+        if (x.pasid_mapping)
+            fVmidPasid[v->vmid] = x.pasid;
+        fSdmaLastVmid = v->vmid;
+        v->dmaFlush = false;
+        *seq = s;
+        return 0;
     }
     if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready) {
         for (uint32_t i = 0; i < n; i++)

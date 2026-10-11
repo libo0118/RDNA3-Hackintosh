@@ -300,6 +300,8 @@ static void do_default(builder *bd, uint8_t which, uint16_t id, uint16_t type,
         add(bd, id, type, which, h.ucode_array_offset_bytes, h.ucode_size_bytes, name);
 }
 
+/* amdgpu_sdma_init_microcode (sdma_v6_0_early_init): one image for both
+ * instances, TH0 and TH1 as PSP ucode entries */
 static void do_sdma(builder *bd)
 {
     blob b; common_hdr h;

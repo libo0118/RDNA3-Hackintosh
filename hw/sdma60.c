@@ -9,6 +9,8 @@
 #include "gen/gc_11_0_0_sdma_reset.h"
 #include "gen/gc_11_0_0_reset.h"
 #include "gen/gc_11_0_0_userq.h"
+#include "gmc11.h"
+#include "navi3x_regs.h"
 
 #define REG_FIELD_SHIFT(reg, field) reg##__##field##__SHIFT
 #define REG_FIELD_MASK(reg, field)  reg##__##field##_MASK
@@ -63,7 +65,14 @@ void sdma60_write(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t v)
  * doorbell or the registers */
 void sdma60_commit(rdna3_dev *d, rdna3_sdma_ring *r)
 {
-    uint64_t w = r->wptr << 2;
+    uint64_t w;
+    if (r->amdgpu_pad) {
+        /* amdgpu_ring_commit: pad to match fetch size (align_mask 0xf) */
+        uint32_t count = (0x10 - ((uint32_t)r->wptr & 0xf)) & 0xf;
+        if (count)
+            sdma60_ring_insert_nop(d, r, count);
+    }
+    w = r->wptr << 2;
     rdna3_vram_write(d, r->wb + RD_SDMA_WB_WPTR, &w, 8);
     rdna3_hdp_flush(d);
     if (r->use_doorbell) {
@@ -98,9 +107,8 @@ void sdma60_emit_fill(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t v
 
 void sdma60_emit_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t va, uint32_t ndw)
 {
-    uint32_t pad = (2 - (uint32_t)r->wptr) & 7, i;
-    for (i = 0; i < pad; i++)   /* sdma_v6_0_ring_insert_nop (no burst NOP on SDMA 6) */
-        sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_NOP));
+    /* sdma_v6_0_ring_insert_nop (burst NOPs with r->burst_nop) */
+    sdma60_ring_insert_nop(d, r, (2 - (uint32_t)r->wptr) & 7);
     sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_INDIRECT) | SDMA_PKT_INDIRECT_HEADER_VMID(vmid));
     sdma60_write(d, r, (uint32_t)va & 0xffffffe0);   /* 32-byte aligned base */
     sdma60_write(d, r, (uint32_t)(va >> 32));
@@ -217,7 +225,13 @@ int sdma60_start(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t inst, uint32_t ring_
         return RDNA3_ENOMEM;
     rdna3_vram_fill(d, r->ring, 0, ring_size);
     rdna3_vram_write(d, r->wb, zero, sizeof(zero));
+    {
+        /* amdgpu_ring_init: "always set cond_exec_polling to CONTINUE" */
+        uint32_t one = 1;
+        rdna3_vram_write(d, r->wb + RD_SDMA_WB_COND_EXE, &one, 4);
+    }
     rdna3_hdp_flush(d);
+    /* sdma_v6_0_hw_init / sdma_v6_0_resume = sdma_v6_0_start */
     return sdma_program(d, r);
 }
 
@@ -502,4 +516,308 @@ void sdma60_hw_fini(rdna3_dev *d, uint32_t num_instances)
 {
     sdma60_ctxempty_int_enable(d, num_instances, 0);
     sdma_v6_0_enable(d, num_instances, 0);
+}
+
+/* ------------------- rdna3amdgpu=1: amdgpu's SDMA ring functions ------------------- */
+
+#define SDMA_POLL_HDP_FLUSH   (1u << 26)
+#define SDMA_POLL_FUNC(x)     ((uint32_t)(x) << 28)
+#define SDMA_POLL_MEM         (1u << 31)
+#define SDMA_POLL_DW5(retry, interval) (((uint32_t)(retry) << 16) | (uint32_t)(interval))
+
+/* Ported from sdma_v6_0_ring_insert_nop */
+void sdma60_ring_insert_nop(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t count)
+{
+    uint32_t i;
+    for (i = 0; i < count; i++)
+        if (r->burst_nop && i == 0)
+            sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_NOP) | SDMA_PKT_NOP_HEADER_COUNT(count - 1));
+        else
+            sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_NOP));
+}
+
+/* Ported from sdma_v6_0_ring_emit_wreg (SRBM_WRITE, all bytes) */
+void sdma60_emit_wreg(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t reg, uint32_t val)
+{
+    sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_SRBM_WRITE) | (0xfu << 28));
+    sdma60_write(d, r, reg);
+    sdma60_write(d, r, val);
+}
+
+/* Ported from sdma_v6_0_ring_emit_reg_wait */
+void sdma60_emit_reg_wait(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t reg, uint32_t val, uint32_t mask)
+{
+    sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_POLL_REGMEM) | SDMA_POLL_FUNC(3));   /* equal */
+    sdma60_write(d, r, reg << 2);
+    sdma60_write(d, r, 0);
+    sdma60_write(d, r, val);    /* reference */
+    sdma60_write(d, r, mask);   /* mask */
+    sdma60_write(d, r, SDMA_POLL_DW5(0xfff, 10));
+}
+
+/* Ported from sdma_v6_0_ring_emit_reg_write_reg_wait */
+void sdma60_emit_reg_write_reg_wait(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t reg0, uint32_t reg1,
+                                    uint32_t ref, uint32_t mask)
+{
+    sdma60_emit_wreg(d, r, reg0, ref);
+    /* wait for a cycle to reset vm_inv_eng*_ack */
+    sdma60_emit_reg_wait(d, r, reg0, 0, 0);
+    sdma60_emit_reg_wait(d, r, reg1, mask, mask);
+}
+
+/* Ported from sdma_v6_0_ring_emit_vm_flush (the ring's hub is the GFXHUB) */
+void sdma60_emit_vm_flush(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t pd_addr)
+{
+    rdna3_vm_flush_regs f;
+    gfxhub303_flush_regs(d, vmid, r->vm_inv_eng, &f);
+    /* Update the PD address for this VMID. */
+    sdma60_emit_wreg(d, r, f.pt_lo, (uint32_t)pd_addr);
+    sdma60_emit_wreg(d, r, f.pt_hi, (uint32_t)(pd_addr >> 32));
+    /* Trigger invalidation. */
+    sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_POLL_REGMEM) | SDMA_PKT_HEADER_SUB_OP(SDMA_SUBOP_VM_INVALIDATION) |
+                       ((r->vm_inv_eng & 0x1f) << 16) /* GFX_ENG_ID */ | (0x1fu << 24) /* MM_ENG_ID */);
+    sdma60_write(d, r, f.req_val);
+    sdma60_write(d, r, 0xFFFFFFFF);
+    sdma60_write(d, r, ((1u << vmid) & 0xffff) /* INVALIDATEACK */ | (0x1fu << 16) /* ADDRESSRANGEHI */);
+}
+
+/* Ported from sdma_v6_0_ring_emit_pipeline_sync */
+void sdma60_emit_pipeline_sync(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    uint32_t seq = r->fence_seq;   /* ring->fence_drv.sync_seq */
+    uint64_t addr = rdna3_vram_mc(d, r->wb + RD_SDMA_WB_FENCE);
+    /* wait for idle */
+    sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_POLL_REGMEM) | SDMA_POLL_FUNC(3) | SDMA_POLL_MEM);
+    sdma60_write(d, r, (uint32_t)addr & 0xfffffffc);
+    sdma60_write(d, r, (uint32_t)(addr >> 32));
+    sdma60_write(d, r, seq);           /* reference */
+    sdma60_write(d, r, 0xffffffff);    /* mask */
+    sdma60_write(d, r, SDMA_POLL_DW5(0xfff, 4));
+}
+
+/* Ported from sdma_v6_0_ring_emit_hdp_flush (nbio_v4_3 flush registers,
+ * ref_and_mask_sdma0 << ring->me) */
+void sdma60_emit_hdp_flush(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    uint32_t ref_and_mask = BIF_BX_PF_GPU_HDP_FLUSH_DONE__SDMA0_MASK << r->inst;
+    sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_POLL_REGMEM) | SDMA_POLL_HDP_FLUSH | SDMA_POLL_FUNC(3));
+    sdma60_write(d, r, SOC15_OFF(d, NBIO, 0, regBIF_BX_PF0_GPU_HDP_FLUSH_DONE) << 2);
+    sdma60_write(d, r, SOC15_OFF(d, NBIO, 0, regBIF_BX_PF0_GPU_HDP_FLUSH_REQ) << 2);
+    sdma60_write(d, r, ref_and_mask);   /* reference */
+    sdma60_write(d, r, ref_and_mask);   /* mask */
+    sdma60_write(d, r, SDMA_POLL_DW5(0xfff, 10));
+}
+
+/* Ported from sdma_v6_0_ring_emit_mem_sync: flush entire cache L0/L1/L2 */
+void sdma60_emit_mem_sync(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    const uint32_t gcr_cntl = (1u << 14) /* GL2_INV */ | (1u << 15) /* GL2_WB */ | (1u << 5) /* GLM_INV */ |
+                              (1u << 9) /* GL1_INV */ | (1u << 8) /* GLV_INV */ | (1u << 7) /* GLK_INV */ |
+                              (1u << 0) /* GLI_INV(1) */;
+    sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_GCR_REQ));
+    sdma60_write(d, r, 0);                                   /* BASE_VA_31_7 */
+    sdma60_write(d, r, ((gcr_cntl & 0xffff) << 16) | 0);    /* GCR_CONTROL_15_0, BASE_VA_47_32 */
+    sdma60_write(d, r, (0u << 7) | (gcr_cntl >> 16));        /* LIMIT_VA_31_7, GCR_CONTROL_18_16 */
+    sdma60_write(d, r, 0 | (0u << 24));                      /* LIMIT_VA_47_32, VMID */
+}
+
+/* Ported from sdma_v6_0_ring_init_cond_exec */
+uint32_t sdma60_ring_init_cond_exec(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t addr)
+{
+    uint32_t ret;
+    sdma60_write(d, r, SDMA_PKT_HEADER_OP(SDMA_OP_COND_EXE));
+    sdma60_write(d, r, (uint32_t)addr);
+    sdma60_write(d, r, (uint32_t)(addr >> 32));
+    sdma60_write(d, r, 1);
+    /* this is the offset we need patch later */
+    ret = (uint32_t)r->wptr & r->buf_mask;
+    /* insert dummy here and patch it later */
+    sdma60_write(d, r, 0);
+    return ret;
+}
+
+/* amdgpu_ring_patch_cond_exec */
+void sdma60_ring_patch_cond_exec(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t offset)
+{
+    uint32_t cur = ((uint32_t)r->wptr - 1) & r->buf_mask, v;
+    if (cur < offset)
+        cur += r->ring_size >> 2;
+    v = cur - offset;
+    rdna3_vram_write(d, r->ring + 4ull * (offset & r->buf_mask), &v, 4);
+}
+
+/* Ported from sdma_v6_0_ring_pad_ib */
+void sdma60_ring_pad_ib(const rdna3_sdma_ring *r, uint32_t *ib, uint32_t *length_dw)
+{
+    uint32_t pad_count = (0u - *length_dw) & 0x7, i;
+    for (i = 0; i < pad_count; i++)
+        if (r && r->burst_nop && i == 0)
+            ib[(*length_dw)++] = SDMA_PKT_HEADER_OP(SDMA_OP_NOP) | SDMA_PKT_NOP_HEADER_COUNT(pad_count - 1);
+        else
+            ib[(*length_dw)++] = SDMA_PKT_HEADER_OP(SDMA_OP_NOP);
+}
+
+/* Ported from sdma_v6_0_vm_copy_pte */
+void sdma60_vm_copy_pte(uint32_t *ib, uint32_t *length_dw, uint64_t pe, uint64_t src, uint32_t count)
+{
+    uint32_t bytes = count * 8;
+    ib[(*length_dw)++] = SDMA_PKT_HEADER_OP(SDMA_OP_COPY) | SDMA_PKT_HEADER_SUB_OP(SDMA_SUBOP_COPY_LINEAR);
+    ib[(*length_dw)++] = bytes - 1;
+    ib[(*length_dw)++] = 0; /* src/dst endian swap */
+    ib[(*length_dw)++] = (uint32_t)src;
+    ib[(*length_dw)++] = (uint32_t)(src >> 32);
+    ib[(*length_dw)++] = (uint32_t)pe;
+    ib[(*length_dw)++] = (uint32_t)(pe >> 32);
+}
+
+/* Ported from sdma_v6_0_vm_write_pte */
+void sdma60_vm_write_pte(uint32_t *ib, uint32_t *length_dw, uint64_t pe, uint64_t value, uint32_t count,
+                         uint32_t incr)
+{
+    uint32_t ndw = count * 2;
+    ib[(*length_dw)++] = SDMA_PKT_HEADER_OP(SDMA_OP_WRITE) | SDMA_PKT_HEADER_SUB_OP(SDMA_SUBOP_WRITE_LINEAR);
+    ib[(*length_dw)++] = (uint32_t)pe;
+    ib[(*length_dw)++] = (uint32_t)(pe >> 32);
+    ib[(*length_dw)++] = ndw - 1;
+    for (; ndw > 0; ndw -= 2) {
+        ib[(*length_dw)++] = (uint32_t)value;
+        ib[(*length_dw)++] = (uint32_t)(value >> 32);
+        value += incr;
+    }
+}
+
+/* Ported from sdma_v6_0_vm_set_pte_pde: for physically contiguous pages (vram) */
+void sdma60_vm_set_pte_pde(uint32_t *ib, uint32_t *length_dw, uint64_t pe, uint64_t addr, uint32_t count,
+                           uint32_t incr, uint64_t flags)
+{
+    ib[(*length_dw)++] = SDMA_PKT_HEADER_OP(SDMA_OP_PTEPDE);
+    ib[(*length_dw)++] = (uint32_t)pe;              /* dst addr */
+    ib[(*length_dw)++] = (uint32_t)(pe >> 32);
+    ib[(*length_dw)++] = (uint32_t)flags;           /* mask */
+    ib[(*length_dw)++] = (uint32_t)(flags >> 32);
+    ib[(*length_dw)++] = (uint32_t)addr;            /* value */
+    ib[(*length_dw)++] = (uint32_t)(addr >> 32);
+    ib[(*length_dw)++] = incr;                      /* increment size */
+    ib[(*length_dw)++] = 0;
+    ib[(*length_dw)++] = count - 1;                 /* number of entries */
+}
+
+/* Ported from sdma_v6_0_ring_get_rptr: the rptr writeback is in bytes */
+uint64_t sdma60_ring_get_rptr(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    uint64_t rptr = 0;
+    rdna3_vram_read(d, r->wb + RD_SDMA_WB_RPTR, &rptr, 8);
+    return rptr >> 2;
+}
+
+/* Ported from sdma_v6_0_ring_get_wptr: the poll slot (bytes) with a doorbell */
+uint64_t sdma60_ring_get_wptr(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    uint64_t wptr = 0;
+    if (r->use_doorbell)
+        rdna3_vram_read(d, r->wb + RD_SDMA_WB_WPTR, &wptr, 8);
+    return wptr >> 2;
+}
+
+/* Ported from sdma_v6_0_is_idle */
+int sdma60_is_idle(rdna3_dev *d, uint32_t num_instances)
+{
+    uint32_t i;
+    for (i = 0; i < num_instances; i++)
+        if (!(RS(d, i, regSDMA0_STATUS_REG) & SDMA0_STATUS_REG__IDLE_MASK))
+            return 0;
+    return 1;
+}
+
+/* Ported from sdma_v6_0_wait_for_idle (both instances) */
+int sdma60_wait_for_idle(rdna3_dev *d)
+{
+    uint32_t i;
+    for (i = 0; i < d->usec_timeout; i++) {
+        uint32_t sdma0 = RS(d, 0, regSDMA0_STATUS_REG), sdma1 = RS(d, 1, regSDMA0_STATUS_REG);
+        if (sdma0 & sdma1 & SDMA0_STATUS_REG__IDLE_MASK)
+            return RDNA3_OK;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    return RDNA3_ETIME;
+}
+
+/* free dwords in the ring (one slot stays empty) */
+static uint32_t ring_space(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    uint32_t rptr = (uint32_t)(sdma60_ring_get_rptr(d, r)) & r->buf_mask;
+    return r->buf_mask - (((uint32_t)r->wptr - rptr) & r->buf_mask);
+}
+
+/* amdgpu_ib_schedule on an SDMA ring (see sdma60.h) */
+uint32_t sdma60_submit_job(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t pd_addr,
+                           uint32_t pasid, uint32_t pasid_reg, const uint64_t *ib_va,
+                           const uint32_t *ib_ndw, const uint32_t *ib_flags, uint32_t n,
+                           uint64_t uf_addr)
+{
+    uint64_t cond_addr = rdna3_vram_mc(d, r->wb + RD_SDMA_WB_COND_EXE);
+    uint32_t i, seq, patch, cond_exec, ndw = 6 + 5 + 6 + 6 + 10 + 3 + 6 + 5 + 6 + 14 * n + 16 + 16;
+    int need_pipe = vmid && pd_addr;   /* amdgpu_vm_need_pipeline_sync */
+    if (!r->ready || !n)
+        return 0;
+    ndw = (ndw + 0xf) & ~0xfu;   /* amdgpu_ring_alloc */
+    for (i = 0; i < d->usec_timeout && ring_space(d, r) < ndw; i++)
+        d->os.udelay(d->os.ctx, 1);
+    if (ring_space(d, r) < ndw) {
+        RERR(d, "SDMA%u: ring full", r->inst);
+        return 0;
+    }
+    if (ib_flags[0] & (1u << 6))   /* AMDGPU_IB_FLAG_EMIT_MEM_SYNC */
+        sdma60_emit_mem_sync(d, r);
+    /* amdgpu_vm_flush (no GDS on the DMA ring) */
+    if (pd_addr || need_pipe) {
+        patch = sdma60_ring_init_cond_exec(d, r, cond_addr);
+        if (need_pipe)
+            sdma60_emit_pipeline_sync(d, r);
+        if (pd_addr)
+            sdma60_emit_vm_flush(d, r, vmid, pd_addr);
+        if (pasid)
+            sdma60_emit_wreg(d, r, pasid_reg, pasid);   /* gmc_v11_0_emit_pasid_mapping */
+        if (pd_addr || pasid)
+            (void)sdma60_emit_fence(d, r);
+        sdma60_ring_patch_cond_exec(d, r, patch);
+    }
+    cond_exec = sdma60_ring_init_cond_exec(d, r, cond_addr);
+    sdma60_emit_hdp_flush(d, r);   /* amdgpu_device_flush_hdp */
+    for (i = 0; i < n; i++)
+        sdma60_emit_ib(d, r, vmid, ib_va[i], ib_ndw[i]);
+    if (uf_addr)
+        sdma60_emit_fence64(d, r, uf_addr, (uint32_t)(r->fence_seq + 1));
+    seq = sdma60_emit_fence(d, r);
+    sdma60_ring_patch_cond_exec(d, r, cond_exec);
+    sdma60_commit(d, r);
+    return seq;
+}
+
+/* Ported from sdma_v6_0_ring_test_ib */
+int sdma60_ring_test_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t ib)
+{
+    uint64_t gpu_addr = rdna3_vram_mc(d, r->wb + RD_SDMA_WB_IB_TEST), va;
+    uint32_t tmp = 0xCAFEDEAD, p[8], ndw = 8, flags = 0, seq;
+    int ret;
+    if (!r->ready || ib == UINT64_MAX)
+        return RDNA3_EINVAL;
+    rdna3_vram_write(d, r->wb + RD_SDMA_WB_IB_TEST, &tmp, 4);
+    p[0] = SDMA_PKT_HEADER_OP(SDMA_OP_WRITE) | SDMA_PKT_HEADER_SUB_OP(SDMA_SUBOP_WRITE_LINEAR);
+    p[1] = (uint32_t)gpu_addr;
+    p[2] = (uint32_t)(gpu_addr >> 32);
+    p[3] = 0;   /* SDMA_PKT_WRITE_UNTILED_DW_3_COUNT(0) */
+    p[4] = 0xDEADBEEF;
+    p[5] = p[6] = p[7] = SDMA_PKT_HEADER_OP(SDMA_OP_NOP);
+    rdna3_vram_write(d, ib, p, sizeof(p));
+    rdna3_hdp_flush(d);
+    va = rdna3_vram_mc(d, ib);
+    seq = sdma60_submit_job(d, r, 0, 0, 0, 0, &va, &ndw, &flags, 1, 0);
+    if (!seq)
+        return RDNA3_EINVAL;
+    ret = sdma60_wait_fence(d, r, seq);
+    if (ret)
+        return ret;
+    rdna3_vram_read(d, r->wb + RD_SDMA_WB_IB_TEST, &tmp, 4);
+    return tmp == 0xDEADBEEF ? RDNA3_OK : RDNA3_EINVAL;
 }

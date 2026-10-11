@@ -713,6 +713,10 @@ void gfx11_emit_gfx_shadow(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t shadow_va, 
     r->set_q_mode_offs = offs;
 }
 
+static uint32_t submit_amdgpu(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
+                              uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n,
+                              const rdna3_gfx_job_ext *x);
+
 uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
                           uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n)
 {
@@ -754,18 +758,12 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
         return 0;
     if (r->cp_gfx_shadow)
         ndw += 2 * (22 + 5);   /* SET_Q_PREEMPTION_MODE + COND_EXEC, twice */
-    ndw += 7 + 5;              /* pipeline sync, PASID mapping */
+    if (d->amdgpu_exact)
+        return submit_amdgpu(d, r, ctx, vmid, pd_addr, ibs, n, x);
     if (ring_wait_space(d, r, ndw))
         return 0;
-    /* rdna3amdgpu=1: amdgpu_vm_need_pipeline_sync (a VMID job that flushes
-     * its VM or switches GDS) -> amdgpu_vm_flush's pipeline sync first */
-    if (d->amdgpu_exact && vmid && (pd_addr || (x && x->gds_switch)))
-        gfx11_emit_pipeline_sync(d, r);
     if (pd_addr)
         gfx11_emit_vm_flush(d, r, vmid, pd_addr);
-    /* amdgpu_gmc_emit_pasid_mapping -> gmc_v11_0_emit_pasid_mapping */
-    if (x && x->pasid_mapping)
-        gfx11_emit_wreg(d, r, gmc11_pasid_mapping_reg(d, vmid, 0), x->pasid);
     if (x && x->gds_switch)
         gfx11_emit_gds_switch(d, r, vmid, x->gds_base, x->gds_size, x->gws_base, x->gws_size,
                               x->oa_base, x->oa_size);
@@ -2124,17 +2122,15 @@ uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t
     rdna3_gfx_ring *r = &kcq->rb;
     /* vm flush 5+5+7, gds switch 20, mem sync 8, hdp 7, user fence 8,
      * fence 8, 4 per IB */
-    uint32_t i, seq, ndw = 17 + 20 + 8 + 7 + 8 + 8 + 4 * n + 7 + 5;
+    uint32_t i, seq, ndw = 17 + 20 + 8 + 7 + 8 + 8 + 4 * n;
     if (!r->ready || !n || n > RD_GFX_MAX_IBS || vmid > 15)
         return 0;
+    if (d->amdgpu_exact)
+        return submit_amdgpu(d, r, ctx, vmid, pd_addr, ibs, n, x);
     if (ring_wait_space(d, r, ndw))
         return 0;
-    if (d->amdgpu_exact && vmid && (pd_addr || (x && x->gds_switch)))
-        gfx11_emit_pipeline_sync(d, r);   /* amdgpu_vm_need_pipeline_sync */
     if (pd_addr)
         gfx11_emit_vm_flush(d, r, vmid, pd_addr);
-    if (x && x->pasid_mapping)   /* gmc_v11_0_emit_pasid_mapping */
-        gfx11_emit_wreg(d, r, gmc11_pasid_mapping_reg(d, vmid, 0), x->pasid);
     if (x && x->gds_switch)
         gfx11_emit_gds_switch(d, r, vmid, x->gds_base, x->gds_size, x->gws_base, x->gws_size,
                               x->oa_base, x->oa_size);
@@ -3492,4 +3488,94 @@ int gfx11_reset_kgq(rdna3_dev *d, rdna3_gfx_ring *r, rdna3_mes *m, uint32_t vmid
         r->last_ctx = 0;
     }
     return ret;
+}
+
+/* rdna3amdgpu=1: amdgpu_ib_schedule's order for the gfx ring and the KCQ:
+ * the memory sync only for an IB with AMDGPU_IB_FLAG_EMIT_MEM_SYNC, then
+ * amdgpu_vm_flush (COND_EXEC on the gfx ring; pipeline sync, VM flush,
+ * PASID mapping, GDS switch, a fence after a flush or mapping), the job's
+ * COND_EXEC (gfx), HDP flush, CONTEXT_CONTROL and frames with the TMZ state
+ * following each IB (gfx), the IBs, the user fence, the gfx shadow postfix
+ * and the second COND_EXEC (gfx), the fence */
+static uint32_t submit_amdgpu(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
+                              uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n,
+                              const rdna3_gfx_job_ext *x)
+{
+    int gfx = r->kind == RD_RING_GFX;
+    int gds = x && x->gds_switch, pasid = x && x->pasid_mapping;
+    /* amdgpu_vm_need_pipeline_sync */
+    int need_pipe = vmid && (pd_addr || gds);
+    uint64_t cond_addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_COND_EXE);
+    uint32_t i, seq, patch = 0, cond_exec = 0;
+    /* the ring's emit_frame_size, roughly: vm flush part 5+7+5+19+5+20+8+5,
+     * mem sync 8, COND_EXEC 5 twice, shadow 2 x 22, hdp 7, cntxcntl 3,
+     * frames 2 per IB + 2, user fence 8, fence 8, 4 per IB */
+    uint32_t ndw = 74 + 8 + 10 + 44 + 7 + 3 + 2 + 8 + 8 + 6 * n;
+    int ctx_switch = ctx != r->last_ctx, secure = 0;
+
+    if (ring_wait_space(d, r, ndw))
+        return 0;
+    if (ibs[0].flags & RD_GFX_IB_FLAG_EMIT_MEM_SYNC)
+        gfx11_emit_mem_sync(d, r);
+
+    /* amdgpu_vm_flush */
+    if (pd_addr || gds || need_pipe) {
+        if (gfx)
+            patch = gfx11_emit_init_cond_exec(d, r, cond_addr);
+        if (need_pipe)
+            gfx11_emit_pipeline_sync(d, r);
+        if (pd_addr)
+            gfx11_emit_vm_flush(d, r, vmid, pd_addr);
+        if (pasid)   /* amdgpu_gmc_emit_pasid_mapping -> gmc_v11_0_emit_pasid_mapping */
+            gfx11_emit_wreg(d, r, gmc11_pasid_mapping_reg(d, vmid, 0), x->pasid);
+        if (gds)
+            gfx11_emit_gds_switch(d, r, vmid, x->gds_base, x->gds_size, x->gws_base, x->gws_size,
+                                  x->oa_base, x->oa_size);
+        if (pd_addr || pasid)
+            (void)gfx11_emit_fence(d, r);   /* the flush's own fence (amdgpu_fence_emit) */
+        if (gfx)
+            gfx11_ring_patch_cond_exec(d, r, patch);
+    }
+
+    if (gfx) {
+        gfx11_emit_gfx_shadow(d, r, x ? x->shadow_va : 0, x ? x->csa_va : 0, x ? x->gds_va : 0,
+                              x ? x->init_shadow : 0, vmid);
+        cond_exec = gfx11_emit_init_cond_exec(d, r, cond_addr);
+    }
+    gfx11_emit_hdp_flush(d, r);   /* amdgpu_device_flush_hdp */
+    if (gfx) {
+        gfx11_emit_cntxcntl(d, r, ctx_switch);
+        secure = (ibs[0].flags & RD_GFX_IB_FLAG_TMZ) != 0;
+        gfx11_emit_frame_cntl(d, r, 1, secure);
+    }
+    for (i = 0; i < n; i++) {
+        if (gfx) {
+            if (secure != ((ibs[i].flags & RD_GFX_IB_FLAG_TMZ) != 0)) {
+                gfx11_emit_frame_cntl(d, r, 0, secure);
+                secure = !secure;
+                gfx11_emit_frame_cntl(d, r, 1, secure);
+            }
+            gfx11_emit_ib(d, r, vmid, ibs[i].va, ibs[i].ndw);
+        } else {   /* gfx_v11_0_ring_emit_ib_compute */
+            gfx11_write(d, r, PACKET3(PACKET3_INDIRECT_BUFFER, 2));
+            gfx11_write(d, r, (uint32_t)ibs[i].va & ~3u);
+            gfx11_write(d, r, (uint32_t)(ibs[i].va >> 32));
+            gfx11_write(d, r, INDIRECT_BUFFER_VALID | ibs[i].ndw | (vmid << 24));
+        }
+    }
+    if (gfx)
+        gfx11_emit_frame_cntl(d, r, 0, secure);
+    if (x && x->uf_addr)
+        gfx11_emit_user_fence(d, r, x->uf_addr, (uint32_t)(r->fence_seq + 1));
+    if (gfx) {
+        gfx11_emit_gfx_shadow(d, r, 0, 0, 0, 0, 0);
+        gfx11_emit_init_cond_exec(d, r, cond_addr);
+    }
+    seq = gfx11_emit_fence(d, r);
+    if (gfx)
+        gfx11_ring_patch_cond_exec(d, r, cond_exec);
+    gfx11_commit(d, r);
+    r->last_ctx = ctx;
+    r->last_vmid = vmid;
+    return seq;
 }

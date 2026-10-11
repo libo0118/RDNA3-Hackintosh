@@ -135,6 +135,13 @@ ITEM_STEPS = [
     (re.compile(r"mes_v11_0_(misc_op|map_legacy_queue|unmap_legacy_queue|reset_legacy_queue|suspend_gang"
                 r"|resume_gang|suspend|resume|ring_get_rptr|ring_get_wptr)|amdgpu_gfx_mqd_sw_init"
                 r"|gfx_v11_0_reset_(kcq|kgq)"), ["amdgpu"]),
+    # SDMA 6 with rdna3amdgpu=1: amdgpu_ib_schedule on the DMA ring (padded,
+    # burst NOPs, COND_EXE, HDP flush, VM flush on its own engine), the IB
+    # test, amdgpu_vm_sdma's PTE packets
+    (re.compile(r"sdma_v6_0_(ring_emit_hdp_flush|ring_emit_mem_sync|ring_emit_pipeline_sync|ring_emit_reg_wait"
+                r"|ring_emit_reg_write_reg_wait|ring_emit_vm_flush|ring_emit_wreg|ring_get_rptr|ring_get_wptr"
+                r"|ring_init_cond_exec|ring_pad_ib|ring_test_ib|vm_copy_pte|vm_set_pte_pde|vm_write_pte"
+                r"|is_idle|wait_for_idle)"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

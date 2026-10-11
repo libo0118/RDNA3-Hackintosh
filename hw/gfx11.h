@@ -125,7 +125,8 @@ typedef struct rdna3_gfx_ib {
     uint32_t flags;         /* AMDGPU_IB_FLAG_* (only TMZ is looked at) */
 } rdna3_gfx_ib;
 
-#define RD_GFX_IB_FLAG_TMZ (1u << 4)   /* AMDGPU_IB_FLAGS_SECURE */
+#define RD_GFX_IB_FLAG_TMZ (1u << 5)   /* AMDGPU_IB_FLAGS_SECURE (bit 4 is AMDGPU_IB_FLAG_RESET_GDS_MAX_WAVE_ID) */
+#define RD_GFX_IB_FLAG_EMIT_MEM_SYNC (1u << 6)   /* AMDGPU_IB_FLAG_EMIT_MEM_SYNC */
 /* adev->vm_manager.first_kfd_vmid (gmc_v11_0_sw_init): graphics VMIDs are
  * 1..7, 8..15 belong to compute (KFD / the MES) */
 #define RD_FIRST_KFD_VMID  8
