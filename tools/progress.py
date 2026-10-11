@@ -139,6 +139,35 @@ ITEM_STEPS = [
     # ODM combine (rdna3odm, step odm) in the modeset / OTG groups
     (re.compile(r"dcn32_update_odm|get_odm_config|dcn32_update_dsc_on_stream|optc32_set_odm_(combine|bypass)"),
      ["odm"]),
+    # display power (rdna3mall, step mall, item O): the PMFW's watermark
+    # range table, DC's p-state / FCLK / CAB messages, the watermark sets,
+    # MALL_SEL, the forced p-state disallow, the idle CAB, dcn32_hubbub.c
+    (re.compile(r"dcn32_(build_wm_range_table|notify_wm_ranges|smu_transfer_wm_table_dram_2_smu"
+                r"|calculate_cab_allocation|check_no_memory_request_for_cab|apply_idle_power_optimizations"
+                r"|smu_send_cab_for_uclk_message|update_mall_sel|smu_send_fclk_pstate_message|update_force_pstate"
+                r"|prepare_bandwidth|initialize_min_clocks|update_clocks_update_dtb_dto|clock_read_ss_info"
+                r"|interdependent_update_lock|program_outstanding_updates|get_memclk_states_from_smu"
+                r"|set_hard_max_memclk|init_crb|program_compbuf_size)"
+                r"|hubp32_(update_mall_sel|update_force_pstate_disallow|update_force_cursor_pstate_disallow)"
+                r"|hubbub32_(program_watermarks|program_(urgent|stutter|pstate|usr)_watermarks|init_watermarks"
+                r"|wm_read_state|force_wm_propagate_to_pipes|force_usr_retraining_allow|get_mall_en|set_request_limit)"
+                r"|convert_and_clamp"), ["mall"]),
+    # SubVP (rdna3subvp, step subvp): the phantom pipe, its OTG / HUBP /
+    # OPP pattern generator, the DMCUB's SubVP command, lock and flip
+    # address, the phantom plane's input color
+    (re.compile(r"dcn32_(enable_phantom_streams|disable_phantom_streams|blank_phantom|init_blank|commit_subvp_config"
+                r"|subvp_pipe_control_lock|subvp_pipe_control_lock_fast|apply_update_flags_for_phantom"
+                r"|is_pipe_topology_transition_seamless|program_mall_pipe_config|set_input_transfer_func"
+                r"|set_mcm_luts|set_mpc_shaper_3dlut)"
+                r"|hubp32_(phantom_hubp_post_enable|prepare_subvp_buffering)"
+                r"|optc32_(disable_phantom_otg|phantom_crtc_post_enable)"
+                r"|dmub_dcn32_save_surf_addr|dmub_srv_subvp_save_surf_addr|is_subvp_phantom_topology_transition_seamless"
+                r"|opp2_(set_disp_pattern_generator|dpg_set_blank_color|dpg_is_blanked|dpg_is_pending"
+                r"|program_dpg_dimensions)"), ["subvp"]),
+    # item O, ported and simulated, nothing in the kext reaches them: the
+    # PME workaround belongs to the audio path (dce110_enable_audio_stream),
+    # the phantom viewport follows a moving plane (macOS planes start at 0)
+    (re.compile(r"dcn32_(enable_pme_wa|smu_set_pme_workaround|update_phantom_vp_position)"), ["none"]),
     # ported and checked in the simulator, but no ladder step drives them
     # yet (nothing in the kext calls them): they stay "ported"
     (re.compile(r"optc1_(setup_vertical_interrupt[12]|validate_timing|is_two_pixels_per_container"

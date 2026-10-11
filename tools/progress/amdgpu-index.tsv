@@ -1562,6 +1562,23 @@ Display: modeset	display/dc/hubbub/dcn30/dcn30_hubbub.c	hubbub3_get_dcc_compress
 Display: modeset	display/dc/hubbub/dcn30/dcn30_hubbub.c	hubbub3_init_dchub_sys_ctx
 Display: modeset	display/dc/hubbub/dcn30/dcn30_hubbub.c	hubbub3_init_watermarks
 Display: modeset	display/dc/hubbub/dcn30/dcn30_hubbub.c	hubbub3_program_watermarks
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	convert_and_clamp
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	dcn32_init_crb
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	dcn32_program_compbuf_size
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	dcn32_program_det_size
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_construct
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_force_usr_retraining_allow
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_force_wm_propagate_to_pipes
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_get_mall_en
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_init
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_init_watermarks
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_program_pstate_watermarks
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_program_stutter_watermarks
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_program_urgent_watermarks
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_program_usr_watermarks
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_program_watermarks
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_set_request_limit
+Display: modeset	display/dc/hubbub/dcn32/dcn32_hubbub.c	hubbub32_wm_read_state
 Display: DP link	display/dc/link/protocols/link_dp_training_8b_10b.c	decide_8b_10b_training_settings
 Display: DP link	display/dc/link/protocols/link_dp_training_8b_10b.c	dp_decide_8b_10b_lttpr_mode
 Display: DP link	display/dc/link/protocols/link_dp_training_8b_10b.c	dp_perform_8b_10b_link_training
