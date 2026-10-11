@@ -1234,6 +1234,30 @@ void RDNA3Bringup::vcnResume()
     vcnStart();
 }
 
+/* amdgpu_pci_shutdown -> amdgpu_device_ip_suspend: the video block stops
+ * before the machine powers off (card run 31: with rdna3vcn=2 a VCN job
+ * still pending kept the idle tick running into the halt, which ended in a
+ * nested panic) */
+void RDNA3Bringup::vcnShutdown()
+{
+    IOLock *l = fOwner->drmLock();
+    if (!fVcn)
+        return;
+    fVcnStop = true;
+    if (fVcnIdleCall)
+        thread_call_cancel_wait(fVcnIdleCall);
+    if (l)
+        IOLockLock(l);
+    if (fDev && fVcn->sw_ready && !fVcnSuspended) {
+        jpeg40_hw_fini(fDev, fVcn);
+        vcn40_hw_fini(fDev, fVcn);
+        fVcnSuspended = true;
+    }
+    if (l)
+        IOLockUnlock(l);
+    BLOG("VCN: stopped for the power-off");
+}
+
 void RDNA3Bringup::vcnIdleSchedule()
 {
     uint64_t deadline;
@@ -2530,8 +2554,11 @@ int RDNA3Bringup::userqAdd(void *p, amd_mes_add_queue *in)
     in->page_table_base_addr = gpuvm_pd_addr(fDev, &v->vm);      /* amdgpu_gmc_pd_addr */
     rdna3_hdp_flush(fDev);   /* the MQD and contexts were written through BAR0 */
     r = gfx11_mes_add_hw_queue(fDev, fMes, in, fGmc->vm_cntx_cntl);
-    BLOG("user queue: ADD_QUEUE type %u doorbell 0x%x PASID %u: %d", in->queue_type, in->doorbell_offset,
-         in->process_id, r);
+    BLOG("user queue: ADD_QUEUE type %u doorbell 0x%x PASID %u: %d (PD 0x%llx, MQD 0x%llx, wptr VA 0x%llx "
+         "MC 0x%llx, process ctx 0x%llx, gang ctx 0x%llx)", in->queue_type, in->doorbell_offset, in->process_id, r,
+         (unsigned long long)in->page_table_base_addr, (unsigned long long)in->mqd_addr,
+         (unsigned long long)in->wptr_addr, (unsigned long long)in->wptr_mc_addr,
+         (unsigned long long)in->process_context_addr, (unsigned long long)in->gang_context_addr);
     return r == RDNA3_OK ? 0 : r == RDNA3_ETIME ? -RD_ETIME : -RD_EINVAL;
 }
 
@@ -2540,6 +2567,7 @@ int RDNA3Bringup::userqRemove(const amd_mes_remove_queue *in)
     int r;
     if (!fMes || !fMes->ready)
         return -RD_EINVAL;
+    gfx11_userq_hqd_dump(fDev);   /* diagnostic: the queue's HQD before it goes */
     r = gfx11_mes_remove_hw_queue(fDev, fMes, in);
     BLOG("user queue: REMOVE_QUEUE doorbell 0x%x: %d", in->doorbell_offset, r);
     return r == RDNA3_OK ? 0 : r == RDNA3_ETIME ? -RD_ETIME : -RD_EINVAL;

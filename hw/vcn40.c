@@ -1606,6 +1606,46 @@ static uint32_t dec_sw_send_msg(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r, u
     return submit_direct(d, v, r, rdna3_vram_mc(d, ib_off), ib_size_dw);
 }
 
+/* diagnostic (card run 31: the encode IB fence never came back while the
+ * ring test passed): a fence with no IB in front, so a report tells a fence
+ * the VCPU cannot write apart from an IB the firmware does not finish */
+static int fence_only_test(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
+{
+    uint32_t seq, i;
+    vcn40_ring_begin_use(d, v, r);
+    if (vcn40_ring_alloc(d, r, 5 + 1)) {
+        vcn40_ring_end_use(d, v, r);
+        return RDNA3_EIO;
+    }
+    seq = ++r->fence_seq;
+    r->emitted++;
+    vcn40_enc_ring_emit_fence(d, r, rdna3_vram_mc(d, r->wb + RD_VCN_WB_FENCE), seq);
+    vcn40_enc_ring_insert_end(d, r);
+    vcn40_ring_commit(d, r);
+    vcn40_ring_end_use(d, v, r);
+    for (i = 0; i < 100000; i++) {
+        if (vcn40_fence_passed(d, r, seq))
+            break;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    RLOG(d, "VCN%u: fence-only test %s (fence %u, read %u, rptr 0x%llx wptr 0x%llx, UVD_STATUS 0x%08x)", r->me,
+         vcn40_fence_passed(d, r, seq) ? "passed" : "FAILED", seq, wb_read32(d, r, RD_VCN_WB_FENCE),
+         (unsigned long long)vcn40_unified_ring_get_rptr(d, r), (unsigned long long)vcn40_unified_ring_get_wptr(d, r),
+         RV(d, r->me, regUVD_STATUS));
+    return vcn40_fence_passed(d, r, seq) ? RDNA3_OK : RDNA3_ETIME;
+}
+
+/* diagnostic: where the VCPU stopped after a failed IB test */
+static void ib_test_dump(rdna3_dev *d, rdna3_vcn_ring *r, uint64_t buf)
+{
+    uint32_t sess[4] = { 0 };
+    rdna3_vram_read(d, buf + 4 * 4096u, sess, sizeof(sess));
+    RERR(d, "VCN%u: after the IB test rptr 0x%llx wptr 0x%llx, UVD_STATUS 0x%08x UVD_POWER_STATUS 0x%08x, "
+         "session buffer %08x %08x %08x %08x", r->me, (unsigned long long)vcn40_unified_ring_get_rptr(d, r),
+         (unsigned long long)vcn40_unified_ring_get_wptr(d, r), RV(d, r->me, regUVD_STATUS),
+         RV(d, r->me, regUVD_POWER_STATUS), sess[0], sess[1], sess[2], sess[3]);
+}
+
 /* Ported from amdgpu_vcn_unified_ring_test_ib: amdgpu_vcn_enc_ring_test_ib
  * (create + destroy session) and amdgpu_vcn_dec_sw_ring_test_ib (create +
  * destroy message), the last fence waited for */
@@ -1623,6 +1663,7 @@ int vcn40_unified_ring_test_ib(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
         v->ib_test_buf = buf;
     }
     rdna3_vram_fill(d, buf, 0, 4 * 4096u);
+    fence_only_test(d, v, r);
     /* amdgpu_vcn_enc_ring_test_ib */
     seq = enc_session_msg(d, v, r, buf, 1, rdna3_vram_mc(d, buf + 4 * 4096u), 0x08000001);
     if (seq)
@@ -1630,6 +1671,7 @@ int vcn40_unified_ring_test_ib(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
     ret = seq ? vcn40_wait_fence(d, r, seq) : RDNA3_EIO;
     if (ret) {
         RERR(d, "VCN%u: encode IB test failed (%d)", r->me, ret);
+        ib_test_dump(d, r, buf);
         return ret;
     }
     /* amdgpu_vcn_dec_sw_ring_test_ib */
@@ -1645,8 +1687,10 @@ int vcn40_unified_ring_test_ib(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
     } else {
         ret = RDNA3_EIO;
     }
-    if (ret)
+    if (ret) {
         RERR(d, "VCN%u: decode IB test failed (%d)", r->me, ret);
+        ib_test_dump(d, r, buf);
+    }
     return ret;
 }
 

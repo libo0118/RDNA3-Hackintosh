@@ -7001,9 +7001,10 @@ static void test_vcn(rdna3_dev *dev, rdna3_psp *psp, const amd_ucode_plan *plan0
         CHECK(vcn40_unified_ring_test_ib(dev, v, &v->ring_enc[i]) == RDNA3_OK);
     CHECK(S.vcn.enc_init == 2 && S.vcn.enc_close == 2 && S.vcn.dec_create == 2 && S.vcn.dec_destroy == 2);
     CHECK(S.vcn.checksum_bad == 0 && S.vcn.ib_faults == 0 && S.vcn.bad == 0 && S.vcn.ibs == 8);
-    CHECK(S.vcn.fences == 8 && S.vcn.traps == 8 && S.unflushed_doorbells == 0);
+    /* + the diagnostic fence-only test in front of each instance's IB test */
+    CHECK(S.vcn.fences == 10 && S.vcn.traps == 10 && S.unflushed_doorbells == 0);
     ih60_process(dev, &ih, vcn_iv_cb, &seen);
-    CHECK(seen.vcn[0] == 4 && seen.vcn[1] == 4 && seen.jpeg == 0 && seen.other == 0 && v->irqs == 8);
+    CHECK(seen.vcn[0] == 5 && seen.vcn[1] == 5 && seen.jpeg == 0 && seen.other == 0 && v->irqs == 10);
 
     /* JPEG: VCN_JPEG_DB_CTRL, ring test through the pitch register, IB test
      * from the checked-copy pool (VMID 0), the decode trap */

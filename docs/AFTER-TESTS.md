@@ -1012,3 +1012,37 @@ log line with a non-zero result) means the base refused the transaction;
 resolved (the transaction is then answered as before). A refusal goes back
 to WindowServer as the base's error; booting without `rdna3gamma=1` brings
 back the old answer.
+
+### Card run 31 (steps userq, pmctl, vcn, vcn2; build 90734eb)
+
+These steps boot without `rdna3fb`, so macOS drives only the head the GOP
+lit, through its generic framebuffer: one monitor, named "Unknown" in
+Settings. That is expected for them, not a display regression.
+
+- **userq:** `ADD_QUEUE type 1 doorbell 0xc00 PASID 6: 0`, the compute user
+  queue never fetched (`rptr 0 of 14`, `dst` 0), no VM fault. Diagnostic
+  build: the ADD_QUEUE log line carries the PD, MQD, wptr (VA and GART MC),
+  process and gang context addresses, and `userq diag:` lines dump the
+  doorbell ranges and every active compute HQD of ME 1 before the
+  REMOVE_QUEUE (no active HQD = the MES never mapped the queue; an active
+  one with WPTR 0 = the wptr poll address; RPTR = WPTR > 0 = it ran but the
+  fence path failed).
+- **pmctl:** `rdna3_pmctl` was missing from the CI artifact and from the VM's
+  `bin/`, so the step tested nothing. Both fixed; run it again.
+- **vcn (`rdna3vcn=1`, static PG):** `VCN[0] is not responding, giving up!!!
+  (UVD_STATUS 0x00000004)`: the VCPU does not boot on the static path. Linux
+  runs DPG on this card; `vcn` stays as a comparison only.
+- **vcn2 (`rdna3vcn=2`, DPG):** the VCPUs boot, both unified ring tests and
+  the JPEG ring and IB tests pass, and `--vcn-test`'s JPEG job from a client
+  VM signals. Both encode IB tests time out (`fence 2 timeout (last 0)`), so
+  no VCN_ENC ring is offered (`--vcn-test` reported PASSED on JPEG alone; it
+  now fails without a VCN_ENC ring). Diagnostic build: a fence-only
+  submission before the IB test (`VCNn: fence-only test passed/FAILED`) tells
+  a fence the VCPU cannot write apart from an IB it does not finish, and a
+  failed IB test logs rptr / wptr, UVD_STATUS, UVD_POWER_STATUS and the
+  first session-buffer dwords.
+- **vcn2 power-off:** after `system power off` a nested panic ("Ticket lock
+  ... unexpectedly owned") left the VM on a black screen. The VCN idle tick
+  kept rescheduling itself (a fence never came back) into the halt; the
+  power-off now stops VCN / JPEG first (`amdgpu_pci_shutdown` ->
+  `amdgpu_device_ip_suspend`), log `VCN: stopped for the power-off`.

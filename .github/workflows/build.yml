@@ -103,7 +103,7 @@ jobs:
         run: |
           file build/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel
           make -C kext check
-      - name: Userspace (libdrm_xnu, rdna3_drminfo, rdna3_modetest)
+      - name: Userspace (libdrm_xnu, rdna3_drminfo, rdna3_modetest, rdna3_pmctl)
         run: make -C userspace
       - name: rdna3_vktest + mtlprobe (bundled into the VM's report bin)
         continue-on-error: true
@@ -119,6 +119,7 @@ jobs:
             build/RDNA3Framebuffer.kext
             build/userspace/rdna3_drminfo
             build/userspace/rdna3_modetest
+            build/userspace/rdna3_pmctl
             build/userspace/rdna3_vktest
             build/userspace/mtlprobe
             build/userspace/libdrm.dylib

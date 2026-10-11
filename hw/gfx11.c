@@ -1798,6 +1798,33 @@ int gfx11_mes_add_hw_queue(rdna3_dev *d, rdna3_mes *m, const amd_mes_add_queue *
     return gfx11_mes_submit(d, m, p, RD_MES_ADD_QUEUE_STATUS_DW);
 }
 
+/* diagnostic (card run 31: a compute user queue added by the MES never
+ * fetched, rptr 0): the doorbell ranges and every active compute HQD of ME 1
+ * (where the MES maps user compute queues), read with soc21_grbm_select as
+ * amdgpu's debugfs HQD dump does */
+void gfx11_userq_hqd_dump(rdna3_dev *d)
+{
+    uint32_t pipe, q, n = 0;
+    RLOG(d, "userq diag: CP_MEC_DOORBELL_RANGE 0x%x..0x%x, CP_RB_DOORBELL_RANGE 0x%x..0x%x",
+         RG(d, regCP_MEC_DOORBELL_RANGE_LOWER), RG(d, regCP_MEC_DOORBELL_RANGE_UPPER),
+         RG(d, regCP_RB_DOORBELL_RANGE_LOWER), RG(d, regCP_RB_DOORBELL_RANGE_UPPER));
+    for (pipe = 0; pipe < 4; pipe++)
+        for (q = 0; q < 8; q++) {
+            grbm_select(d, 1, pipe, q, 0);
+            if (RG(d, regCP_HQD_ACTIVE) & 1) {
+                RLOG(d, "userq diag: ME1 pipe %u queue %u active: VMID %u, DOORBELL_CONTROL 0x%08x, "
+                     "PQ_BASE 0x%08x, RPTR 0x%x, WPTR 0x%x_%08x, WPTR_POLL 0x%08x_%08x, PQ_CONTROL 0x%08x",
+                     pipe, q, RG(d, regCP_HQD_VMID) & 0xf, RG(d, regCP_HQD_PQ_DOORBELL_CONTROL),
+                     RG(d, regCP_HQD_PQ_BASE), RG(d, regCP_HQD_PQ_RPTR), RG(d, regCP_HQD_PQ_WPTR_HI),
+                     RG(d, regCP_HQD_PQ_WPTR_LO), RG(d, regCP_HQD_PQ_WPTR_POLL_ADDR_HI),
+                     RG(d, regCP_HQD_PQ_WPTR_POLL_ADDR), RG(d, regCP_HQD_PQ_CONTROL));
+                n++;
+            }
+        }
+    grbm_select(d, 0, 0, 0, 0);
+    RLOG(d, "userq diag: %u active compute HQD(s) on ME1", n);
+}
+
 /* Ported from mes_v11_0_remove_hw_queue */
 int gfx11_mes_remove_hw_queue(rdna3_dev *d, rdna3_mes *m, const amd_mes_remove_queue *in)
 {

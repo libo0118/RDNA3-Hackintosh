@@ -369,6 +369,7 @@ int  gfx11_userq_supported(uint32_t me_ver, uint32_t pfp_ver, uint32_t mec_ver, 
 int  gfx11_mes_add_hw_queue(rdna3_dev *d, rdna3_mes *m, const amd_mes_add_queue *in,
                             uint32_t vm_cntx_cntl);
 int  gfx11_mes_remove_hw_queue(rdna3_dev *d, rdna3_mes *m, const amd_mes_remove_queue *in);
+void gfx11_userq_hqd_dump(rdna3_dev *d);
 /* gfx_v11_0_set_userq_eop_interrupts: EOP interrupts of the pipes user
  * queues of 'ip_mask' (1 << AMDGPU_HW_IP_GFX / _COMPUTE) run on */
 void gfx11_set_userq_eop_interrupts(rdna3_dev *d, uint32_t ip_mask, int enable);
