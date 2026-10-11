@@ -136,6 +136,75 @@ ITEM_STEPS = [
                 r"|clear_inbox0_ack|wait_for_inbox0_ack|set_power_state|get_fw_boot_status)"
                 r"|dcn32_(calculate_dccg_k1_k2_values|is_dp_dig_pixel_rate_div_policy|enable_power_gating_plane"
                 r"|are_clock_states_equal|get_dispclk_from_dentist)|hubp32_init|is_h_timing_divisible_by_2"), ["none"]),
+    # stage 4 item J: amdgpu's own sequence where the verified profile
+    # differs, behind rdna3amdgpu=1 (ladder step amdgpu), and the ports
+    # that came with it into groups the card verified
+    (re.compile(r"acquire_psp_cmd_buf|release_psp_cmd_buf|psp_(asd|hdcp|dtm)_(initialize|invoke|terminate)"
+                r"|psp_check_pmfw_centralized_cstate_management|psp_early_init|psp_free_shared_bufs"
+                r"|psp_hw_fini|psp_suspend|psp_rl_load|psp_prep_ta_(invoke|load|unload)_cmd_buf"
+                r"|psp_prep_tmr_unload_cmd_buf|psp_ta_(free_shared_buf|init_shared_buf|invoke|load|unload)"
+                r"|psp_tmr_(terminate|unload)|psp_v13_0_ring_destroy"), ["amdgpu"]),
+    (re.compile(r"smu_v13_0_0_(get_allowed_feature_mask|is_mode1_reset_supported|set_mp1_state)"
+                r"|smu_v13_0_(ack_ac_dc_interrupt|allow_ih_interrupt|deep_sleep_control|disable_pmfw_state"
+                r"|enable_thermal_alert|disable_thermal_alert|irq_process|notify_display_change"
+                r"|process_pending_interrupt|register_irq_handler|set_irq_state|set_performance_level"
+                r"|update_pcie_parameters|gfx_ulv_control|gpo_control|set_power_source)"
+                r"|smu_(enable_umd_pstate|force_performance_level|adjust_power_state_dynamic"
+                r"|swctf_delayed_work_handler|reset_mp1_state)"
+                r"|soc21_update_umd_stable_pstate|gfx_v11_0_update_perf_clk"), ["amdgpu"]),
+    (re.compile(r"amdgpu_vm_pt_(add_list|alloc|ancestor|clear|continue_dfs|create|descendant|entries_mask"
+                r"|first_dfs|free_list|next|next_dfs|num_entries|parent|sibling|size|start)"
+                r"|amdgpu_vm_pte_(fragment|update_flags|update_noretry_flags)|amdgpu_vm_ptes_update"
+                r"|amdgpu_gmc_set_pte_pde|amdgpu_gmc_allocate_vm_inv_eng|gmc_v11_0_late_init"
+                r"|gfxhub_v3_0_3_(gart_disable|get_mc_fb_offset)|gmc_v11_0_(gart_disable|hw_fini)"), ["amdgpu"]),
+    (re.compile(r"ih_v6_0_(doorbell_rptr|init_register_offset|rb_cntl|self_irq|sw_init)|amdgpu_ih_ring_fini"
+                r"|nbio_v4_3_ih_doorbell_range|sdma_v6_0_(ctxempty_int_enable|hw_fini|suspend)"), ["amdgpu"]),
+    (re.compile(r"gfx_v11_0_init_compute_vmid|soc21_read_register|soc21_get_register_value"
+                r"|amdgpu_discovery_init|amdgpu_discovery_validate_ip"), ["amdgpu"]),
+    # GFX 11 with rdna3amdgpu=1: queue topology, padded commits, pipeline
+    # sync, CP fault interrupts, IB tests, the soft reset's index mutex
+    (re.compile(r"amdgpu_gfx_(bit_to_me_queue|get_num_kcq|graphics_queue_acquire|is_compute_multipipe_capable"
+                r"|is_graphics_multipipe_capable|is_high_priority_compute_queue|is_high_priority_graphics_queue"
+                r"|is_me_queue_enabled|is_mec_queue_enabled|me_queue_to_bit|mec_queue_to_bit)"
+                r"|amdgpu_queue_mask_bit_to_mec_queue|gfx_v11_ring_insert_nop"
+                r"|gfx_v11_0_(bad_op_irq|early_init|get_tcc_info|gfx_ring_init|gpu_early_init|handle_priv_fault"
+                r"|late_init|me_init|mec_init|priv_inst_irq|priv_reg_irq|request_gfx_index_mutex"
+                r"|ring_emit_fence_kiq|ring_emit_pipeline_sync|ring_get_wptr_compute|ring_get_wptr_gfx"
+                r"|ring_test_ib|select_me_pipe_q|set_bad_op_fault_state|set_priv_inst_fault_state"
+                r"|set_priv_reg_fault_state|suspend|sw_init|update_spm_vmid|wait_for_idle)"), ["amdgpu"]),
+    # GMC / IH / PSP with rdna3amdgpu=1: TLB flushes through the KIQ, PASID
+    # mappings, the stolen pre-OS framebuffer, suspend before a full reset
+    (re.compile(r"amdgpu_gmc_(flush_gpu_tlb|fw_reg_write_reg_wait|get_vbios_allocations)"
+                r"|gmc_v11_0_(emit_pasid_mapping|get_vbios_fb_size|suspend)|ih_v6_0_suspend"), ["amdgpu"]),
+    # rings / fences with rdna3amdgpu=1: the fences drained at unload, the
+    # interrupt off while fences are forced, the MES ring-full check
+    (re.compile(r"amdgpu_fence_driver_(hw_fini|isr_toggle)|amdgpu_fence_wait_empty|amdgpu_ring_undo"), ["amdgpu"]),
+    # MES with rdna3amdgpu=1 (and rdna3mes=1): misc ops, legacy queue frames,
+    # gang suspend / resume, the queue resets
+    (re.compile(r"mes_v11_0_(misc_op|map_legacy_queue|unmap_legacy_queue|reset_legacy_queue|suspend_gang"
+                r"|resume_gang|suspend|resume|ring_get_rptr|ring_get_wptr)|amdgpu_gfx_mqd_sw_init"
+                r"|gfx_v11_0_reset_(kcq|kgq)"), ["amdgpu"]),
+    # SDMA 6 with rdna3amdgpu=1: amdgpu_ib_schedule on the DMA ring (padded,
+    # burst NOPs, COND_EXE, HDP flush, VM flush on its own engine), the IB
+    # test, amdgpu_vm_sdma's PTE packets
+    (re.compile(r"sdma_v6_0_(ring_emit_hdp_flush|ring_emit_mem_sync|ring_emit_pipeline_sync|ring_emit_reg_wait"
+                r"|ring_emit_reg_write_reg_wait|ring_emit_vm_flush|ring_emit_wreg|ring_get_rptr|ring_get_wptr"
+                r"|ring_init_cond_exec|ring_pad_ib|ring_test_ib|vm_copy_pte|vm_set_pte_pde|vm_write_pte"
+                r"|is_idle|wait_for_idle)"), ["amdgpu"]),
+    # Discovery / VBIOS with rdna3amdgpu=1: VBIOS clocks / VRAM / scratch,
+    # firmware validation and names, the harvest / MALL / VCN tables
+    (re.compile(r"amdgpu_atomfirmware_(allocate_fb_scratch|allocate_fb_v2_1|allocate_fb_v2_2|get_clock_info"
+                r"|get_vram_info|dynamic_boot_config_supported|mem_training_supported)"
+                r"|convert_atom_mem_type_to_vram_type|amdgpu_ucode_(validate|request|ip_version_decode|hdr_version|name)"
+                r"|amdgpu_discovery_(harvest_ip|read_from_harvest_table|read_harvest_bit_per_ip|harvest_config_quirk"
+                r"|get_harvest_info|get_mall_info|get_vcn_info)"), ["amdgpu"]),
+    # SoC / NBIO with rdna3amdgpu=1: ASPM / LTR, init_registers, BIF
+    # clock gating, the doorbell apertures at late_init / hw_fini, resets
+    # on init / resume
+    (re.compile(r"nbio_v4_3_(init_registers|program_aspm|program_ltr|update_medium_grain_clock_gating"
+                r"|update_medium_grain_light_sleep)|soc21_(program_aspm|common_hw_fini|common_late_init"
+                r"|common_resume|common_suspend|need_reset_on_init|need_reset_on_resume)"
+                r"|amdgpu_device_should_use_aspm"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

@@ -182,6 +182,7 @@ steps:
 | `hdmi20` | step `modeset2` plus modes that need HDMI 2.0 speed (`rdna3hdmi=3`), e.g. 3840x2160 at 60 Hz | only with a 4K monitor/TV on an HDMI 2.0 (or newer) port and a "high speed" HDMI cable. **It may stay on "no signal"** until the step puts the old mode back. If the automatic run does not pick 4K60, run `rdna3_modetest set 0 3840 2160` once by hand |
 | `sleep` | monitor standby on every monitor, then a short system sleep: the display is saved, taken down and brought back (`rdna3dpms=2 rdna3resume=1`) | both monitors go to standby (no signal) and come back; then macOS sleeps for ~30 s and wakes by itself (the host wakes the VM after 90 s otherwise). **A screen may stay dark after the wake** |
 | `vcnsleep` | the `sleep` step with the video engines on (`rdna3vcn=2`): the video test runs before the system sleep and again after the wake | as `sleep`; after `sleep` and `vcn2` passed. **A screen may stay dark after the wake** |
+| `amdgpu` | the default profile, but the driver follows Linux amdgpu's own order where the tested one differs (`rdna3amdgpu=1`): firmware load order, power management setup, page tables, the interrupt ring in system memory | medium risk; after `default` passed. Looks like step `default`; if the screen stays on the boot picture and the report says PSP or SMU failed, boot once without it |
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
 

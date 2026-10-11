@@ -106,6 +106,51 @@ int vbios_fw_vram_reservation(const rdna3_vbios *v, uint64_t *start, uint64_t *s
  * of VRAM (IP discovery, memory training, PSP runtime data). 0 if absent. */
 uint64_t vbios_fw_reserved_fb_size(const rdna3_vbios *v);
 
+/* amdgpu_atomfirmware_allocate_fb_scratch (+ _allocate_fb_v2_1 / _v2_2):
+ * the size of the ATOM interpreter's FB scratch - vram_usagebyfirmware
+ * v2.1's used_by_driver_in_kb unless the block is the SR-IOV message
+ * reservation, else (and for v2.2 on bare metal) amdgpu's 20 KiB */
+uint32_t vbios_atom_scratch_bytes(const rdna3_vbios *v);
+
+/* amdgpu_atomfirmware_dynamic_boot_config_supported /
+ * amdgpu_atomfirmware_mem_training_supported on firmwareinfo's
+ * firmware_capability (rdna3_vbios_boot.firmware_capability) */
+#define RD_ATOM_FW_CAP_2STAGE_BIST_TRAINING  0x00000400u
+#define RD_ATOM_FW_CAP_DYNAMIC_BOOT_CFG      0x00020000u
+static inline int vbios_dynamic_boot_config_supported(uint32_t fw_cap)
+{
+    return (fw_cap & RD_ATOM_FW_CAP_DYNAMIC_BOOT_CFG) != 0;
+}
+static inline int vbios_mem_training_supported(uint32_t fw_cap)
+{
+    return (fw_cap & RD_ATOM_FW_CAP_2STAGE_BIST_TRAINING) != 0;
+}
+
+/* amdgpu_atomfirmware_get_clock_info: firmwareinfo's boot sclk / mclk
+ * (adev->clock.default_sclk / _mclk, 10 kHz), the system PLL reference
+ * (smu_info, then gfx_info's RLC timer / golden TSC reference on Navi+:
+ * soc21_get_xclk) and the memory PLL reference (umc_info). RDNA3_EINVAL
+ * when no table answered (amdgpu fails amdgpu_device_init there). */
+typedef struct rdna3_vbios_clocks {
+    uint32_t default_sclk, default_mclk;
+    uint32_t spll_ref, mpll_ref;
+} rdna3_vbios_clocks;
+int vbios_clock_info(const rdna3_vbios *v, rdna3_vbios_clocks *c);
+
+/* amdgpu_atomfirmware_get_vram_info for a dGPU before GC 12: vram_info
+ * v2.3 - v2.6 (the module the BIOS scratch register 4 names) or v3.0.
+ * 'module_id' = (BIOS_SCRATCH_4 & 0x00ff0000) >> 16. Type in
+ * AMDGPU_VRAM_TYPE_* (convert_atom_mem_type_to_vram_type), width in bits,
+ * vendor = the low nibble of the module's vendor id. */
+#define RD_VRAM_TYPE_UNKNOWN 0
+#define RD_VRAM_TYPE_GDDR5   5
+#define RD_VRAM_TYPE_HBM     6
+#define RD_VRAM_TYPE_GDDR6   9
+typedef struct rdna3_vbios_vram {
+    uint32_t type, width, vendor;
+} rdna3_vbios_vram;
+int vbios_vram_info(const rdna3_vbios *v, uint32_t module_id, rdna3_vbios_vram *out);
+
 /* ---- display object table (displayobjectinfo v1.4 / v1.5, bios_parser2) ----
  * One entry per display path: connector -> encoder (UNIPHY A..G), the DDC
  * line that feeds its AUX engine and the HPD pin. Which OTG drives a path

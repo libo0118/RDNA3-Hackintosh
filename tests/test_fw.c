@@ -267,8 +267,14 @@ static void real(const char *dir)
         CHECK(s.bin[i].size <= 0x100000); /* psp_copy_fw() limit: 1 MiB */
 
     memset(blobs, 0, sizeof(blobs));
-    for (i = 0; i < AMD_BLOB_COUNT; i++)
+    for (i = 0; i < AMD_BLOB_COUNT; i++) {
         blobs[i].data = slurp(dir, amd_navi32_fw_names[i], &blobs[i].len);
+        /* amdgpu_ucode_validate accepts every file of the set */
+        if (blobs[i].data)
+            CHECK(amd_ucode_validate(blobs[i].data, blobs[i].len) == AMD_FW_OK);
+    }
+    CHECK(amd_ucode_validate(sos, n) == AMD_FW_OK);
+    CHECK(amd_ucode_hdr_version(blobs[AMD_BLOB_PFP].data, blobs[AMD_BLOB_PFP].len, 2, 0));   /* rs64_enable */
     CHECK(amd_ucode_plan_build(blobs, &plan) == AMD_FW_OK);
     CHECK(amd_ucode_plan_find(&plan, AMD_UCODE_RLC_G) != NULL);
     CHECK(amd_ucode_plan_find(&plan, AMD_UCODE_SMC) != NULL);
@@ -320,8 +326,44 @@ static void real(const char *dir)
     }
 }
 
+/* amdgpu_ucode_validate / _hdr_version / _ip_version_decode / _name */
+static void ucode_helpers(void)
+{
+    uint8_t h[64];
+    char pre[32];
+    memset(h, 0, sizeof(h));
+    h[0] = sizeof(h);            /* size_bytes */
+    h[8] = 2; h[10] = 0;         /* header 2.0 */
+    CHECK(amd_ucode_validate(h, sizeof(h)) == AMD_FW_OK);
+    CHECK(amd_ucode_validate(h, sizeof(h) + 4) != AMD_FW_OK);
+    CHECK(amd_ucode_validate(h, 2) != AMD_FW_OK && amd_ucode_validate(NULL, 8) == AMD_FW_E_ARGS);
+    CHECK(amd_ucode_hdr_version(h, sizeof(h), 2, 0) && !amd_ucode_hdr_version(h, sizeof(h), 2, 1));
+    h[10] = 1;
+    CHECK(!amd_ucode_hdr_version(h, sizeof(h), 2, 0) && !amd_ucode_hdr_version(h, 4, 2, 1));
+    /* the Navi 32 file names start with the decoded prefixes */
+    CHECK(amd_ucode_ip_version_decode(AMD_UCODE_BLOCK_GC, 11, 0, 3, pre, sizeof(pre)) == 9 &&
+          strcmp(pre, "gc_11_0_3") == 0 && strncmp(amd_navi32_fw_names[AMD_BLOB_PFP], pre, 9) == 0);
+    CHECK(amd_ucode_ip_version_decode(AMD_UCODE_BLOCK_SDMA, 6, 0, 3, pre, sizeof(pre)) > 0 &&
+          strcmp(amd_navi32_fw_names[AMD_BLOB_SDMA], "sdma_6_0_3.bin") == 0 && strcmp(pre, "sdma_6_0_3") == 0);
+    CHECK(amd_ucode_ip_version_decode(AMD_UCODE_BLOCK_MP0, 13, 0, 10, pre, sizeof(pre)) == 11 &&
+          strncmp(amd_navi32_sos_name, pre, 11) == 0);
+    CHECK(amd_ucode_ip_version_decode(AMD_UCODE_BLOCK_MP1, 13, 0, 10, pre, sizeof(pre)) > 0 &&
+          strcmp(pre, "smu_13_0_10") == 0);
+    CHECK(amd_ucode_ip_version_decode(AMD_UCODE_BLOCK_VCN, 4, 0, 0, pre, sizeof(pre)) > 0 &&
+          strcmp(pre, "vcn_4_0_0") == 0);
+    CHECK(amd_ucode_ip_version_decode(99, 1, 0, 0, pre, sizeof(pre)) == -1);
+    CHECK(amd_ucode_ip_version_decode(AMD_UCODE_BLOCK_MP0, 13, 0, 10, pre, 6) == 11 && strcmp(pre, "psp_1") == 0);
+    CHECK(strcmp(amd_ucode_name(AMD_UCODE_SDMA_UCODE_TH0), "SDMA_CTX") == 0 &&
+          strcmp(amd_ucode_name(AMD_UCODE_CP_MES1), "CP_MES_KIQ") == 0 &&
+          strcmp(amd_ucode_name(AMD_UCODE_RLC_G), "RLC_G") == 0 &&
+          strcmp(amd_ucode_name(AMD_UCODE_SMC), "SMC") == 0 && strcmp(amd_ucode_name(AMD_UCODE_DMCUB), "DMCUB") == 0 &&
+          strcmp(amd_ucode_name(AMD_UCODE_CP_RS64_MEC_P3_STACK), "RS64_MEC_P3_STACK") == 0 &&
+          strcmp(amd_ucode_name(500), "UNKNOWN UCODE") == 0);
+}
+
 int main(int argc, char **argv)
 {
+    ucode_helpers();
     synthetic();
     shadow_check();
     ta_synthetic();

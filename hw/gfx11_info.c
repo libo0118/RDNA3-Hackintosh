@@ -6,6 +6,7 @@
  */
 #include "gfx11_info.h"
 #include "gen/gc_11_0_0_harvest.h"
+#include "gen/gc_11_0_0_irq.h"
 
 #define GETF(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define RR(d, reg) rdna3_rreg((d), rdna3_reg_offset((d), HWIP_GC, 0, reg##_BASE_IDX, reg))
@@ -96,4 +97,12 @@ int gfx11_get_cu_info(rdna3_dev *d, rdna3_gfx_cu_info *ci)
     }
     select_se_sh(d, 0xffffffffu, 0xffffffffu);
     return RDNA3_OK;
+}
+
+/* Ported from gfx_v11_0_get_tcc_info: TCCs are global (not instanced) */
+uint32_t gfx11_get_tcc_info(rdna3_dev *d)
+{
+    uint32_t tcc_disable = RR(d, regCGTS_TCC_DISABLE) | RR(d, regCGTS_USER_TCC_DISABLE);
+    return GETF(tcc_disable, CGTS_TCC_DISABLE, TCC_DISABLE) |
+           (GETF(tcc_disable, CGTS_TCC_DISABLE, HI_TCC_DISABLE) << 16);
 }

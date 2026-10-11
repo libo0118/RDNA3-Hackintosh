@@ -15,6 +15,7 @@
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
 #include <kern/thread_call.h>
+#include <IOKit/pwr_mgt/RootDomain.h>
 #include <kern/clock.h>
 #include <mach/mach_time.h>
 #include <pexpert/pexpert.h>
@@ -86,6 +87,9 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
         PE_parse_boot_argn("rdna3pmmask", &pmmask, sizeof(pmmask));
         PE_parse_boot_argn("rdna3mes", &mes, sizeof(mes));
         fMesWanted = mes != 0;
+        /* stage 4 item J: amdgpu's exact sequence where the verified
+         * profile differs; off by default (ladder step amdgpu) */
+        fAmdgpuExact = rd3_arg("rdna3amdgpu", 0) != 0;
         {
             /* user queues (amdgpu.user_queue=1), off by default like
              * amdgpu's: they need the MES scheduler, so rdna3userq=1 brings
@@ -182,9 +186,18 @@ void RDNA3Bringup::stopAndFree()
     if (fDmub)
         fOwner->displayMirrorOff(fDmub);
     teardownInterrupt();   /* no handler may touch fIh / the rings past here */
+    if (fSmuIrqCall) {
+        fSmuIrqStop = true;
+        thread_call_cancel_wait(fSmuIrqCall);
+        thread_call_free(fSmuIrqCall);
+        fSmuIrqCall = nullptr;
+    }
 
     /* 2. the engines, in gfx_v11_0_hw_fini order, while fDev, the BAR and
-     *    the doorbells are still mapped */
+     *    the doorbells are still mapped; with rdna3amdgpu=1
+     *    amdgpu_device_fini_hw's amdgpu_fence_driver_hw_fini comes first */
+    if (fAmdgpuExact)
+        fenceDriverHwFini();
     /* amdgpu_device_ip_fini_early: GFXOFF disallowed, clock gating off
      * (UNGATE) first */
     if (fGfxOffCall) {
@@ -224,6 +237,13 @@ void RDNA3Bringup::stopAndFree()
         soc21_set_clock_gating(fDev, 0);
     if (fKcq && fKcq->rb.ready && fDev)
         gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
+    /* gfx_v11_0_hw_fini: amdgpu_irq_put of the three CP fault sources
+     * (rdna3amdgpu=1, which enabled them) */
+    if (fAmdgpuExact && fGfx && fGfx->ready && fDev) {
+        gfx11_set_priv_reg_fault_state(fDev, 0);
+        gfx11_set_priv_inst_fault_state(fDev, 0);
+        gfx11_set_bad_op_fault_state(fDev, 0);
+    }
     if (fGfx && fGfx->async && fGfx->ready && fDev) {
         gfx11_set_eop_interrupt(fDev, fGfx, 0);
         gfx11_kgq_stop(fDev, fKiq, fGfx);   /* unmapped while the KIQ still runs */
@@ -236,14 +256,41 @@ void RDNA3Bringup::stopAndFree()
     }
     if (fSdma && fSdma->ready && fDev) {
         sdma60_set_trap_interrupt(fDev, fSdma, 0);
-        sdma60_stop(fDev, fSdma);
+        if (fAmdgpuExact)   /* sdma_v6_0_hw_fini: every instance */
+            sdma60_hw_fini(fDev, fDev->ipver[HWIP_SDMA1].present ? 2 : 1);
+        else
+            sdma60_stop(fDev, fSdma);
     }
     if (fIh && fIh->enabled && fDev)
         ih60_disable(fDev, fIh);
-    if (fPsp && fPsp->ring_created)
-        psp13_ring_stop(fPsp);
+    ihSysFree();
+    /* gfx_v11_0_hw_fini's gfxhub_v3_0_3_gart_disable with rdna3amdgpu=1 */
+    if (fAmdgpuExact && fGfx && fDev && fGmc)
+        gfxhub303_gart_disable(fDev);
+    /* smu_hw_fini with rdna3amdgpu=1: the thermal alert off (no UNLOAD on
+     * a card with display hardware) */
+    if (fAmdgpuExact && fPmUp && fSmu && fDev)
+        smu13_pm_fini(fDev, fSmu);
+    /* psp_hw_fini with rdna3amdgpu=1 (TAs, ASD, DESTROY_TMR, ring
+     * destroy); the verified default only stops the ring */
+    if (fPsp && fPsp->ring_created) {
+        if (fAmdgpuExact)
+            psp13_hw_fini(fPsp);
+        else
+            psp13_ring_stop(fPsp);
+    }
+    /* gmc_v11_0_hw_fini with rdna3amdgpu=1: VM fault interrupts off, MMHUB
+     * GART off */
+    if (fAmdgpuExact && fGmc && fDev)
+        gmc11_hw_fini(fDev);
+    /* ... and soc21_common_hw_fini last (IP block 0): doorbell apertures off */
+    if (fAmdgpuExact && fDev && fDev->doorbell_ok)
+        soc21_common_hw_fini(fDev);
 
-    /* 3. memory: mappings, firmware, state; fDev last */
+    /* 3. memory: mappings, firmware, state; fDev last. The firmware images
+     * go like amdgpu_ucode_release in psp_sw_fini (sOS, TA),
+     * smu_v13_0_fini_microcode (the SMC image among the blobs) and
+     * gfx_v11_0_free_microcode (PFP, ME, RLC, MEC) */
     OSSafeReleaseNULL(fVram);
     OSSafeReleaseNULL(fDoorbell);
     for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)
@@ -251,6 +298,9 @@ void RDNA3Bringup::stopAndFree()
             IOFree(fBlobs[i].data, fBlobs[i].len);
     if (fSos.data)
         IOFree(fSos.data, fSos.len);
+    if (fTa.data)
+        IOFree(fTa.data, fTa.len);
+    fTa.data = nullptr;
     if (fSmu) IOFree(fSmu, sizeof(*fSmu));
     if (fUserOdTable) IOFree(fUserOdTable, sizeof(*fUserOdTable));
     fUserOdTable = nullptr;
@@ -383,6 +433,15 @@ bool RDNA3Bringup::loadFirmware(const char *name, RDNA3Firmware *out, bool optio
             snprintf(path, sizeof(path), "%s%s", kFwDirs[d], name);
             if (readFileFromDisk(path, out)) {
                 BLOG("firmware %s: %u bytes (%s)", name, out->len, path);
+                /* rdna3amdgpu=1: amdgpu_ucode_request -> amdgpu_ucode_validate,
+                 * the header's size_bytes must be the file's size */
+                if (fAmdgpuExact && amd_ucode_validate((const uint8_t *)out->data, out->len) != AMD_FW_OK) {
+                    BLOG("firmware %s: \"%s\" failed to validate", name, path);
+                    IOFree(out->data, out->len);
+                    out->data = nullptr;
+                    out->len = 0;
+                    return false;
+                }
                 return true;
             }
         }
@@ -490,7 +549,7 @@ void RDNA3Bringup::resetIfPspStuck()
 bool RDNA3Bringup::postIfNeeded()
 {
     static const uint32_t kScratchBytes = 20u * 1024u;   /* amdgpu's minimum FB scratch */
-    uint32_t want = 1, *scratch = nullptr;
+    uint32_t want = 1, *scratch = nullptr, scratchBytes = kScratchBytes;
     rdna3_atom *atom = nullptr;
     rdna3_psp *bl = nullptr;
     int ret, need;
@@ -500,19 +559,28 @@ bool RDNA3Bringup::postIfNeeded()
     if (!fRom)
         fRom = (uint8_t *)IOMalloc(RD_VBIOS_MAX_LEN);
     atom = (rdna3_atom *)IOMalloc(sizeof(*atom));
-    scratch = (uint32_t *)IOMalloc(kScratchBytes);
     bl = (rdna3_psp *)IOMalloc(sizeof(*bl));
-    if (!fRom || !atom || !scratch || !bl) {
+    if (!fRom || !atom || !bl) {
         BLOG("post: no memory");
         ok = false;
         goto out;
     }
-    bzero(scratch, kScratchBytes);
     bzero(bl, sizeof(*bl));
     bl->d = fDev;
     ret = vbios_read(fDev, &fVbios, fRom, RD_VBIOS_MAX_LEN);
+    /* rdna3amdgpu=1: amdgpu_atomfirmware_allocate_fb_scratch sizes the
+     * interpreter's FB scratch from vram_usagebyfirmware */
+    if (ret == RDNA3_OK && fAmdgpuExact)
+        scratchBytes = vbios_atom_scratch_bytes(&fVbios);
+    scratch = (uint32_t *)IOMalloc(scratchBytes);
+    if (!scratch) {
+        BLOG("post: no memory");
+        ok = false;
+        goto out;
+    }
+    bzero(scratch, scratchBytes);
     if (ret == RDNA3_OK)
-        ret = atom_init(atom, fDev, &fVbios, scratch, kScratchBytes);
+        ret = atom_init(atom, fDev, &fVbios, scratch, scratchBytes);
     if (ret != RDNA3_OK) {
         /* no VBIOS: amdgpu fails here only when the GPU needs posting */
         BLOG("post: no VBIOS/ATOM context (%d), assuming posted", ret);
@@ -540,7 +608,7 @@ bool RDNA3Bringup::postIfNeeded()
     }
 out:
     if (bl) IOFree(bl, sizeof(*bl));
-    if (scratch) IOFree(scratch, kScratchBytes);
+    if (scratch) IOFree(scratch, scratchBytes);
     if (atom) IOFree(atom, sizeof(*atom));
     return ok;
 }
@@ -564,6 +632,10 @@ void RDNA3Bringup::run()
     publishString("RDNA3,Stage2", "starting");
     rdna3_dev_init(fDev, &os, fMmio->getLength());
     fDev->vram_size = fVramSize;
+    fDev->amdgpu_exact = fAmdgpuExact ? 1 : 0;
+    /* amdgpu_device_has_dc_support: the display side drives the DCN */
+    fDev->amdgpu_dc = fDmubMode ? 1 : 0;
+    publish("RDNA3,AmdgpuExact", fAmdgpuExact ? 1 : 0);
     if (rdna3_dev_set_discovery(fDev, fDisc) != RDNA3_OK || !mapVram()) {
         publishString("RDNA3,Stage2", "failed: device setup");
         return;
@@ -581,6 +653,15 @@ void RDNA3Bringup::run()
      * for user BOs; GPU-only buffers top-down below the firmware's block. */
     uint64_t lo = fOwner->displayReserveEnd() > kVramKernelLowStart ? fOwner->displayReserveEnd()
                                                                      : kVramKernelLowStart;
+    if (fAmdgpuExact) {
+        /* gmc_v11_0_sw_init -> amdgpu_gmc_get_vbios_allocations: the pre-OS
+         * scanout amdgpu keeps (stolen VGA + extended) stays out as well */
+        uint64_t vga = 0, ext = 0;
+        gmc11_get_vbios_allocations(fDev, fVramSize, &vga, &ext);
+        publish("RDNA3,VRAMStolenKB", (vga + ext) >> 10);
+        if (vga + ext > lo)
+            lo = (vga + ext + 0xFFFFF) & ~0xFFFFFull;
+    }
     uint64_t hi = lo + kVramKernelLowSize;
     if (hi > fDev->vram_cpu_len) {
         publishString("RDNA3,Stage2", "failed: boot scanout leaves no room in the BAR window");
@@ -600,6 +681,31 @@ void RDNA3Bringup::run()
     rdna3_vram_alloc_init(fDev, lo, hi);
 
     /* firmware */
+    if (fAmdgpuExact) {
+        /* amdgpu_ucode_ip_version_decode: the file names amdgpu would ask
+         * for from the discovered IP versions, against the fixed set */
+        static const struct { int block, hwip; } names[] = {
+            { AMD_UCODE_BLOCK_GC, HWIP_GC },   { AMD_UCODE_BLOCK_SDMA, HWIP_SDMA0 }, { AMD_UCODE_BLOCK_MP0, HWIP_MP0 },
+            { AMD_UCODE_BLOCK_MP1, HWIP_MP1 }, { AMD_UCODE_BLOCK_VCN, HWIP_VCN },
+        };
+        const char *files[5] = { amd_navi32_fw_names[AMD_BLOB_PFP], amd_navi32_fw_names[AMD_BLOB_SDMA],
+                                 amd_navi32_sos_name, amd_navi32_fw_names[AMD_BLOB_SMC],
+                                 amd_navi32_fw_names[AMD_BLOB_VCN] };
+        uint32_t bad = 0;
+        for (unsigned i = 0; i < 5; i++) {
+            const rdna3_ipver *v = &fDev->ipver[names[i].hwip];
+            char pre[32];
+            int n;
+            if (!v->present)
+                continue;
+            n = amd_ucode_ip_version_decode(names[i].block, v->major, v->minor, v->rev, pre, sizeof(pre));
+            if (n <= 0 || strncmp(files[i], pre, (size_t)n) != 0 || (files[i][n] != '_' && files[i][n] != '.')) {
+                BLOG("firmware: amdgpu would load %s* for this IP, the bundle has %s", pre, files[i]);
+                bad |= 1u << i;
+            }
+        }
+        publish("RDNA3,FirmwareNameMismatch", bad);
+    }
     if (!loadFirmware(amd_navi32_sos_name, &fSos)) {
         publishString("RDNA3,Stage2", "failed: no PSP firmware");
         return;
@@ -632,8 +738,32 @@ void RDNA3Bringup::run()
         BLOG("VCN: %u instance(s) in discovery, VCN firmware plan: %s", n, amd_fw_status_str(fst));
     }
     BLOG("firmware plan: %u ucodes, %u KiB", fPlan->count, fPlan->total_aligned / 1024);
+    /* psp_init_ta_microcode: with rdna3amdgpu=1 psp_load_fw starts ASD and
+     * the HDCP / DTM TAs from the TA file (optional, as for amdgpu) */
+    if (fAmdgpuExact && !fTa.data)
+        loadFirmware(amd_navi32_ta_name, &fTa, true);
     for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)
         fBlobRefs[i] = blobs[i];
+
+    /* rdna3amdgpu=1: amdgpu_device_init's reset on init - the sOS already
+     * runs (soc21_need_reset_on_init: the driver was not unloaded cleanly,
+     * a kext reload): amdgpu_asic_reset, mode 1 on MP1 13.0.10 with display
+     * hardware. After a cold boot the sOS is not up (Linux on the card does
+     * no reset here). */
+    if (fAmdgpuExact && soc21_need_reset_on_init(fDev)) {
+        uint32_t i;
+        BLOG("reset on init: the PSP sOS already runs, mode-1 reset first");
+        fPci->setBusMasterEnable(false);
+        int r = smu13_mode1_reset(fDev);
+        for (i = 0; i < fDev->usec_timeout; i++) {
+            if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu)
+                break;
+            IODelay(1);
+        }
+        publish("RDNA3,ResetOnInit", (uint64_t)(int64_t)r);
+        if (r)
+            BLOG("asic reset on init failed (%d)", r);
+    }
 
     if (!hwInit())
         return;
@@ -705,6 +835,22 @@ bool RDNA3Bringup::hwInit()
 {
     int ret;
 
+    /* rdna3amdgpu=1: soc21_common_hw_init - ASPM (soc21_program_aspm when
+     * amdgpu_device_should_use_aspm: amdgpu.aspm=-1, PCIe DPM on, the link's
+     * ASPM enabled), then nbio_v4_3_init_registers */
+    if (fAmdgpuExact) {
+        UInt8 cap = 0;
+        int linkAspm = 0, ltr = 0, did;
+        const amd_ip_entry *pcie = amd_discovery_find(fDisc, AMD_HWID_PCIE, 0);
+        if (fPci->findPCICapability(kIOPCIPCIExpressCapability, &cap) && cap) {
+            linkAspm = (fPci->configRead16(cap + 0x10) & 0x3) != 0;   /* Link Control: ASPM L0s / L1 */
+            ltr = (fPci->configRead16(cap + 0x28) & 0x400) != 0;      /* Device Control 2: LTR enable */
+        }
+        did = soc21_program_aspm(fDev, rd_should_use_aspm(-1, 1, linkAspm),
+                                 pcie ? RD_IP_VERSION(pcie->major, pcie->minor, pcie->revision) : 0, ltr);
+        publish("RDNA3,ASPMProgrammed", (uint64_t)did);
+        nbio43_init_registers(fDev);
+    }
     rdna3_nbio_remap_hdp(fDev);
     /* a known word in VRAM: after a reset it tells whether VRAM survived */
     fResetMagic = rdna3_vram_alloc(fDev, 4096, 4096, "reset-magic");
@@ -715,6 +861,12 @@ bool RDNA3Bringup::hwInit()
 
     /* PSP */
     ret = psp13_init(fPsp, fDev, fSos.data, fSos.len);
+    if (!ret && fTa.data && psp13_set_ta(fPsp, fTa.data, fTa.len) != RDNA3_OK)
+        BLOG("PSP: TA file unusable: no ASD / HDCP / DTM");
+    /* psp_hw_init -> psp_load_fw; after a reset or a wake hwInit runs this
+     * again as amdgpu_device_ip_resume -> psp_resume: psp_hw_start, the
+     * non-PSP firmware, ASD, RL and the TAs (the KM ring is allocated anew,
+     * the VRAM pool starts over) */
     if (!ret)
         ret = psp13_hw_init(fPsp, fPlan, fBlobRefs);
     publish("RDNA3,PSPResult", (uint64_t)(int64_t)ret);
@@ -806,7 +958,8 @@ bool RDNA3Bringup::hwInit()
             nbio43_doorbell_init(fDev);
         publish("RDNA3,Doorbells", fDev->doorbell_ok ? 1 : 0);
 
-        /* IH 6.0 ring 0, polled (no MSI registration yet) */
+        /* IH 6.0 ring 0, polled (no MSI registration yet): ih_v6_0_hw_init,
+         * which ih_v6_0_resume is after a reset or a wake */
         if (!fIh)
             fIh = (rdna3_ih *)IOMalloc(sizeof(*fIh));
         if (!fIh) {
@@ -814,7 +967,16 @@ bool RDNA3Bringup::hwInit()
             return false;
         }
         bzero(fIh, sizeof(*fIh));
-        ret = ih60_init(fDev, fIh, 0, fGmc->dummy_page_pa, fMsi ? 1 : 0);
+        if (fAmdgpuExact && ihSysAlloc()) {
+            /* ih_v6_0 as amdgpu: GTT rings, snooped, rptr doorbells, ring 1 */
+            const uint64_t ringPages = RD_IH_RING_SIZE / 4096 + 1;
+            ret = ih60_init_amdgpu(fDev, fIh, fIh1, fIhSys[0].md->getBytesNoCopy(), fGmc->gart_start,
+                                   fIhSys[1].md->getBytesNoCopy(), fGmc->gart_start + ringPages * 4096,
+                                   RD_IH_RING_SIZE, fGmc->dummy_page_pa, fMsi ? 1 : 0);
+            publish("RDNA3,IHSystemMemory", ret ? 0 : 1);
+        } else {
+            ret = ih60_init(fDev, fIh, 0, fGmc->dummy_page_pa, fMsi ? 1 : 0);
+        }
         publish("RDNA3,IHResult", (uint64_t)(int64_t)ret);
         if (!ret) {
             /* anything already queued (e.g. from firmware) is drained and counted */
@@ -872,9 +1034,37 @@ bool RDNA3Bringup::hwInit()
                     gfxhub303_setup_vm_pt_regs(fDev, id, fVmPd[id]);
                     gfxhub303_flush_tlb(fDev, id, 0);
                 }
+        if (!ret && fAmdgpuExact) {
+            /* rdna3amdgpu=1: the DMA ring as amdgpu sets it up - padded to
+             * align_mask 0xf with burst NOPs when the firmware's feature
+             * version is >= 20 (amdgpu_sdma_init_microcode), and the VM
+             * invalidation engine amdgpu_gmc_allocate_vm_inv_eng gives sdma0
+             * (the same 15-ring table as the GFX stage uses) */
+            static const uint32_t hubs[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0 };
+            uint32_t ver[32], feat[32], eng[15];
+            amd_fw_versions(fBlobRefs, nullptr, ver, feat);
+            fSdma->amdgpu_pad = 1;
+            fSdma->burst_nop = feat[AMDGPU_INFO_FW_SDMA] >= 20;
+            if (gmc11_allocate_vm_inv_eng(hubs, nullptr, 15, fMesWanted, eng) == RDNA3_OK)
+                fSdma->vm_inv_eng = eng[9];
+            publish("RDNA3,SDMAVmInvEng", fSdma->vm_inv_eng);
+            publish("RDNA3,SDMABurstNop", (uint64_t)fSdma->burst_nop);
+        }
         if (!ret)
             ret = sdma60_start(fDev, fSdma, 0, 0);
         publish("RDNA3,SDMAResult", (uint64_t)(int64_t)ret);
+        if (!ret && fAmdgpuExact) {
+            /* amdgpu_ib_ring_tests -> sdma_v6_0_ring_test_ib; a ring whose
+             * IB test fails is not used */
+            if (fIbTestBuf == UINT64_MAX)
+                fIbTestBuf = rdna3_vram_alloc(fDev, 4096, 4096, "ib-test");
+            ret = sdma60_ring_test_ib(fDev, fSdma, fIbTestBuf);
+            publish("RDNA3,IBTestSDMA", (uint64_t)(int64_t)ret);
+            if (ret) {
+                BLOG("SDMA: IB test failed (%d): the ring is not used", ret);
+                fSdma->ready = 0;
+            }
+        }
         if (!ret) {
             const uint32_t len = 64 * 1024;
             uint64_t src = rdna3_vram_alloc(fDev, len, 4096, "sdma-selftest-src");
@@ -947,6 +1137,28 @@ bool RDNA3Bringup::hwInit()
         bzero(fGfx, sizeof(*fGfx));
         /* amdgpu_async_gfx_ring (default 1): the KIQ maps the gfx queue */
         fGfx->async = fDev->doorbell_ok;
+        /* rdna3amdgpu=1: gfx_v11_0_early_init / sw_init's queue topology
+         * (amdgpu.num_kcq, async_gfx_ring, compute_multipipe defaults), the
+         * rings padded to their fetch size (amdgpu_ring_commit) and
+         * gfx_v11_0_rlc_init's update_spm_vmid(0xf) */
+        if (fAmdgpuExact) {
+            const rdna3_ipver *gcv = &fDev->ipver[HWIP_GC];
+            int tr = gfx11_sw_init_topo(&fGfxTopo, gcv->major, gcv->minor, gcv->rev, -1, 1, -1);
+            if (tr == RDNA3_OK) {
+                char names[128];
+                uint32_t n = 0;
+                for (uint32_t c = 0; c < fGfxTopo.num_compute_rings && n + 16 < sizeof(names); c++) {
+                    for (const char *q = fGfxTopo.compute[c].name; *q; q++)
+                        names[n++] = *q;
+                    names[n++] = ' ';
+                }
+                names[n ? n - 1 : 0] = 0;
+                publishString("RDNA3,ComputeRings", names);
+                publish("RDNA3,MaxHwContexts", fGfxTopo.max_hw_contexts);
+            }
+            fGfx->amdgpu_pad = 1;
+            gfx11_update_spm_vmid(fDev, 0xf);
+        }
         /* gfx_v11_0_check_fw_cp_gfx_shadow on the CP firmware headers (the
          * AMDGPU_INFO_FW_GFX_* versions the UAPI answers DEV_INFO from); not
          * a VF, so off - as amdgpu leaves it on bare metal */
@@ -961,6 +1173,8 @@ bool RDNA3Bringup::hwInit()
         ret = gfx11_rs64_from_fw(fBlobs[AMD_BLOB_PFP].data, fBlobs[AMD_BLOB_PFP].len,
                                  fBlobs[AMD_BLOB_ME].data, fBlobs[AMD_BLOB_ME].len,
                                  fBlobs[AMD_BLOB_MEC].data, fBlobs[AMD_BLOB_MEC].len, &rs64);
+        /* gfx_v11_0_hw_init; after a reset or a wake this is
+         * gfx_v11_0_resume, which is gfx_v11_0_hw_init again */
         if (!ret)
             ret = gfx11_hw_init(fDev, fGmc, fGfx, &rs64, 0);
         /* MEC: the KIQ and the first kernel compute queue (needs doorbells) */
@@ -987,12 +1201,33 @@ bool RDNA3Bringup::hwInit()
                 publish("RDNA3,KIQOnMES", fKiq->me == 3 ? 1 : 0);
                 if (!kr)
                     kr = gfx11_mec_ring_init(fDev, fKcq, 0, RD_KCQ0_PIPE, 0, RD_DB_MEC_RING0, 0);
+                if (!kr && fAmdgpuExact) {
+                    /* our KCQ is amdgpu's compute_ring[0] (comp_1.0.0): high
+                     * priority with eight KCQs (amdgpu_ring_to_mqd_prop) */
+                    fKcq->high_prio = fGfxTopo.num_compute_rings &&
+                                      fGfxTopo.compute[0].hw_prio == RD_GFX_PIPE_PRIO_HIGH;
+                    fKcq->rb.amdgpu_pad = 1;
+                    fKiq->rb.amdgpu_pad = 1;
+                }
                 if (!kr)
                     kr = gfx11_kiq_start(fDev, fKiq);
                 publish("RDNA3,KIQResult", (uint64_t)(int64_t)kr);
                 if (!kr)
                     kr = gfx11_kcq_start(fDev, fKiq, fKcq);
                 publish("RDNA3,KCQResult", (uint64_t)(int64_t)kr);
+                if (!kr && fAmdgpuExact) {
+                    /* gmc_v11_0_late_init -> amdgpu_gmc_allocate_vm_inv_eng over
+                     * amdgpu's rings on this card: gfx_0.0.0, comp_1.x.y (8),
+                     * sdma0/1, vcn_unified_0/1, jpeg_dec, mes_kiq; the first
+                     * compute ring (ours) gets engine 1, gfx keeps 0 */
+                    static const uint32_t hubs[15] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0 };
+                    uint32_t eng[15];
+                    if (gmc11_allocate_vm_inv_eng(hubs, nullptr, 15, fMesWanted, eng) == RDNA3_OK) {
+                        fGfx->vm_inv_eng = eng[0];
+                        fKcq->rb.vm_inv_eng = eng[1];
+                        publish("RDNA3,KCQVmInvEng", eng[1]);
+                    }
+                }
                 if (!kr && fIrqLive)
                     gfx11_set_eop_interrupt(fDev, &fKcq->rb, 1);
                 if (kr)
@@ -1014,7 +1249,8 @@ bool RDNA3Bringup::hwInit()
         /* amdgpu_device_ip_late_init -> amdgpu_device_set_cg_state(GATE) */
         if (!ret && fCgWanted)
             cgStart("level 8");
-        /* ... and amdgpu_device_set_pg_state(GATE) -> amdgpu_gfx_off_ctrl:
+        /* ... and amdgpu_device_set_pg_state(GATE) ->
+         * gfx_v11_0_set_powergating_state (GC 11.0.3) -> amdgpu_gfx_off_ctrl:
          * the bring-up's own hold goes, GFXOFF is allowed 100 ms later */
         if (!ret && fGfxOffWanted && fPmUp && fSmu) {
             fGfxOffCall = thread_call_allocate((thread_call_func_t)gfxOffTick, this);
@@ -1027,8 +1263,37 @@ bool RDNA3Bringup::hwInit()
                     IOLockUnlock(l);
             }
         }
+        /* the gfx ring's fence interrupt (amdgpu_fence_driver_hw_init's
+         * amdgpu_irq_get per ring, after the IP blocks are up) */
         if (!ret && fIrqLive)
             gfx11_set_eop_interrupt(fDev, fGfx, 1);
+        if (!ret && fAmdgpuExact) {
+            /* amdgpu_device_ip_late_init -> gfx_v11_0_late_init: the CP's
+             * privileged register / instruction and bad opcode interrupts */
+            if (fIrqLive) {
+                gfx11_late_init(fDev);
+                publish("RDNA3,CPFaultIrqs", 1);
+            }
+            /* amdgpu_ib_ring_tests -> gfx_v11_0_ring_test_ib on the gfx ring
+             * and the KCQ; a ring whose IB test fails is not used */
+            if (fIbTestBuf == UINT64_MAX)
+                fIbTestBuf = rdna3_vram_alloc(fDev, 4096, 4096, "ib-test");
+            int ib = gfx11_ring_test_ib(fDev, fGfx, fIbTestBuf);
+            publish("RDNA3,IBTestGFX", (uint64_t)(int64_t)ib);
+            if (ib) {
+                BLOG("GFX: IB test failed (%d): the ring is not used", ib);
+                fGfx->ready = 0;
+                ret = ib;
+            }
+            if (fKcq && fKcq->rb.ready) {
+                ib = gfx11_ring_test_ib(fDev, &fKcq->rb, fIbTestBuf);
+                publish("RDNA3,IBTestCOMP", (uint64_t)(int64_t)ib);
+                if (ib) {
+                    BLOG("KCQ: IB test failed (%d): the ring is not used", ib);
+                    fKcq->rb.ready = 0;
+                }
+            }
+        }
         if (!ret && fVmReady) {
             /* VMs opened before the GFXHUB came up get their context now
              * (gfxhub303_gart_enable reset VMID 1-15) */
@@ -1051,6 +1316,10 @@ bool RDNA3Bringup::hwInit()
     /* stage 4 item G: VCN 4.0 + JPEG 4.0 after GFX, as in soc21's IP order */
     if (fLevel >= 8 && fVcnWanted)
         vcnStart();
+
+    /* rdna3amdgpu=1: soc21_common_late_init - the selfring doorbell aperture */
+    if (fAmdgpuExact && fDev->doorbell_ok)
+        soc21_common_late_init(fDev);
 
     publish("RDNA3,GPUResets", fGpuResets);
     publish("RDNA3,VRAMLost", fVramLostCount);
@@ -1374,6 +1643,45 @@ void RDNA3Bringup::pmInit()
             fOwner->drmSetVbios(fVbios.data, fVbios.len, &vi);
             BLOG("VBIOS %s, P/N %s, version %s, %s", vs.name, vs.pn, vs.ver_str, vs.date);
         }
+        if (fAmdgpuExact) {
+            /* amdgpu_device_init: amdgpu_atomfirmware_get_clock_info
+             * (soc21_get_xclk = the spll reference), gmc_v11_0_sw_init:
+             * amdgpu_atomfirmware_get_vram_info (the module BIOS scratch 4
+             * names), amdgpu_ttm_reserve_tmr / psp_ras_initialize: the
+             * memory-training and dynamic-boot-config capabilities */
+            rdna3_vbios_clocks ck;
+            rdna3_vbios_vram vr;
+            rdna3_vbios_boot bt;
+            uint32_t xclk = 0, module = 0;
+            int cr = vbios_clock_info(&fVbios, &ck);
+            if (cr == RDNA3_OK) {
+                xclk = ck.spll_ref * 10;
+                publish("RDNA3,XclkKHz", xclk);
+            } else {
+                BLOG("VBIOS: amdgpu_atomfirmware_get_clock_info failed (%d)", cr);
+            }
+            if (vbios_bootup_values(fDev, &fVbios, &bt) == RDNA3_OK) {
+                const uint8_t *fwi = vbios_data_table(&fVbios, RD_ATOM_DT_FIRMWAREINFO, nullptr, nullptr, nullptr);
+                uint32_t scr = fwi ? (uint32_t)fwi[0x18] | ((uint32_t)fwi[0x19] << 8) |
+                                     ((uint32_t)fwi[0x1a] << 16) | ((uint32_t)fwi[0x1b] << 24) : 0;
+                if (scr)
+                    module = (rdna3_rreg(fDev, scr + 4) & 0x00ff0000) >> 16;
+                if (vbios_mem_training_supported(bt.firmware_capability))
+                    BLOG("VBIOS: two-stage memory training requested (cap 0x%x): not done by this driver",
+                         bt.firmware_capability);
+                if (vbios_dynamic_boot_config_supported(bt.firmware_capability))
+                    BLOG("VBIOS: dynamic boot config (GECC) present (cap 0x%x): no RAS here",
+                         bt.firmware_capability);
+            }
+            if (vbios_vram_info(&fVbios, module, &vr) == RDNA3_OK && vr.type) {
+                publish("RDNA3,VRAMType", vr.type);
+                publish("RDNA3,VRAMWidth", vr.width);
+                publish("RDNA3,VRAMVendor", vr.vendor);
+            } else {
+                vr.type = vr.width = 0;
+            }
+            fOwner->drmSetAsicInfo(xclk, vr.type, vr.width, 0);
+        }
     } else {
         BLOG("PM: VBIOS not readable (%d), going on with the PMFW's BoardTable", ret);
     }
@@ -1417,6 +1725,16 @@ void RDNA3Bringup::pmInit()
         return;
     }
     fPmUp = true;
+    if (fAmdgpuExact) {
+        /* smu_v13_0_register_irq_handler: the IVs reach smuIrq */
+        if (!fSmuIrqCall)
+            fSmuIrqCall = thread_call_allocate((thread_call_func_t)smuIrqTick, this);
+        publish("RDNA3,PMThermalAlert", fSmu->irq_enabled ? 1 : 0);
+        publish("RDNA3,PMPcieLevels", fSmu->pcie_levels);
+        BLOG("PM: rdna3amdgpu=1: %u PCIe levels sent, thermal alert at %u C, %s",
+             fSmu->pcie_levels, fSmu->software_shutdown_temp,
+             fDev->amdgpu_dc ? "display core present" : "DALNotPresent sent");
+    }
     pmCtlInit(vb);
     publishString("RDNA3,PM", fSmu->dpm_running ? "dpm running" : "features enabled, dpm off");
     publish("RDNA3,PMFeaturesAllowed", fSmu->allowed);
@@ -1556,6 +1874,10 @@ void RDNA3Bringup::mesStart(const char *why)
     }
     if (!ret)
         ret = gfx11_mes_sched_start(fDev, fKiq, fMes);
+    /* rdna3amdgpu=1, after a reset or a wake: mes_v11_0_resume is
+     * mes_v11_0_hw_init (the start above) + amdgpu_mes_resume */
+    if (!ret && fAmdgpuExact && fReinit)
+        gfx11_mes_resume(fDev, fMes);
     publish("RDNA3,MESResult", (uint64_t)(int64_t)ret);
     publish("RDNA3,MESSchedVersion", fMes->sched_version);
     publish("RDNA3,MESKiqVersion", fMes->kiq_version);
@@ -1605,6 +1927,7 @@ struct RDNA3Vm {
     uint32_t faultStatus, faultHub;
     bool     gfxFlush;   /* next GFX job re-points the VMID and flushes from the ring */
     bool     compFlush;  /* same for the next compute job (the hub is shared, the rings are not) */
+    bool     dmaFlush;   /* rdna3amdgpu=1: same for the next DMA job (amdgpu_vm_flush on the SDMA ring) */
 };
 
 
@@ -2085,6 +2408,40 @@ void RDNA3Bringup::forceFences()
     IOLockUnlock(fLock);
 }
 
+/* Ported from amdgpu_fence_driver_hw_fini (rdna3amdgpu=1, at unload): each
+ * ring waits for its last emitted fence (amdgpu_fence_wait_empty, bounded to
+ * 10 s here: amdgpu waits without a limit and relies on the job timeout);
+ * a ring that does not get there is forced. The fence interrupts are put
+ * afterwards with the engines' hw_fini. */
+void RDNA3Bringup::fenceDriverHwFini()
+{
+    struct { uint32_t ip, ring; uint64_t seq; bool live; } r[2 + 1 + RD_VCN_MAX_INST + 1];
+    uint32_t n = 0;
+    if (!fDev)
+        return;
+    r[n++] = { AMDGPU_HW_IP_GFX, 0, fGfx ? fGfx->fence_seq : 0, fGfx && fGfx->ready };
+    r[n++] = { AMDGPU_HW_IP_COMPUTE, 0, fKcq ? fKcq->rb.fence_seq : 0, fKcq && fKcq->rb.ready };
+    r[n++] = { AMDGPU_HW_IP_DMA, 0, fSdma ? fSdma->fence_seq : 0, fSdma && fSdma->ready };
+    for (uint32_t i = 0; i < RD_VCN_MAX_INST; i++)
+        r[n++] = { AMDGPU_HW_IP_VCN_ENC, i, fVcn ? fVcn->ring_enc[i].fence_seq : 0,
+                   fVcn && fVcn->ring_enc[i].ring_size != 0 };
+    r[n++] = { AMDGPU_HW_IP_VCN_JPEG, 0, fVcn ? fVcn->jpeg.fence_seq : 0, fVcn && fVcn->jpeg.ring_size != 0 };
+    for (uint32_t i = 0; i < n; i++) {
+        bool done = !r[i].live || !r[i].seq;   /* if (!seq) return 0 */
+        for (uint32_t ms = 0; !done && ms < 10000; ms++) {
+            done = fenceSignaled(r[i].ip, r[i].ring, r[i].seq) != 0;
+            if (!done)
+                IOSleep(1);
+        }
+        if (!done) {
+            BLOG("unload: ring %u.%u stuck at fence %llu: forced", r[i].ip, r[i].ring,
+                 (unsigned long long)r[i].seq);
+            forceFences();   /* amdgpu_fence_driver_force_completion */
+            break;
+        }
+    }
+}
+
 /* recovery steps can take the bus down with them (card run 19 froze the
  * whole VM host during a GFX recovery, its last lines lost): each step is
  * logged, then 100 ms for IOLog to reach the serial port before it runs */
@@ -2138,6 +2495,10 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
         sdma60_soft_reset(fDev, fSdma) == RDNA3_OK) {
         fSdmaResets++;
         fResetCount++;
+        /* the ring starts over: the next DMA job of every VM flushes again */
+        for (uint32_t id = 1; id < 16; id++)
+            if (fVmByVmid[id])
+                fVmByVmid[id]->dmaFlush = true;
         publish("RDNA3,SDMAResets", fSdmaResets);
         publish("RDNA3,Resets", fResetCount);
         IOLockLock(fLock);
@@ -2148,10 +2509,44 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
         return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
     }
 
+    /* rdna3amdgpu=1 with the MES scheduler: amdgpu_job_timedout's per ring
+     * reset (amdgpu_ring_reset -> gfx_v11_0_reset_kgq / _reset_kcq), then the
+     * ring's fences forced (amdgpu_fence_driver_force_completion) */
+    if (fAmdgpuExact && r && fMes && fMes->ready) {
+        int rr;
+        HLOG("%s ring reset through the MES", ip == AMDGPU_HW_IP_GFX ? "GFX" : "compute");
+        rr = ip == AMDGPU_HW_IP_GFX ? gfx11_reset_kgq(fDev, fGfx, fMes, vmid)
+                                    : gfx11_reset_kcq(fDev, fKcq, fMes, vmid);
+        if (rr == RDNA3_OK) {
+            fResetCount++;   /* gpu_reset_counter */
+            gfx11_force_fence_completion(fDev, r);
+            for (uint32_t id = 1; id < 16; id++)
+                if (fVmByVmid[id]) {
+                    if (ip == AMDGPU_HW_IP_GFX)
+                        fVmByVmid[id]->gfxFlush = true;
+                    else
+                        fVmByVmid[id]->compFlush = true;
+                }
+            IOLockLock(fLock);
+            IOLockWakeup(fLock, &fFenceEvent, false);
+            IOLockUnlock(fLock);
+            BLOG("hang: ring reset done, the ring runs again");
+            publish("RDNA3,Resets", fResetCount);
+            return fenceSignaled(ip, ring, seq) ? 0 : -RD_ETIME;
+        }
+        HLOG("ring reset failed (%d): the full recovery next", rr);
+    }
+
     /* the engine needs a reset; pending fences complete first so every
      * waiter returns (guilty contexts see -ECANCELED afterwards) */
     HLOG("forcing the pending fences");
+    /* amdgpu_device_pre_asic_reset (rdna3amdgpu=1): the interrupt off while
+     * the fences are forced (amdgpu_fence_driver_isr_toggle) */
+    if (fAmdgpuExact && fIntr)
+        fIntr->disable();
     forceFences();
+    if (fAmdgpuExact && fIntr && fIrqLive)
+        fIntr->enable();
     if (r && fGfx && fGfx->ready) {
         HLOG("GFX soft reset (GRBM_SOFT_RESET CP/GFX, KIQ/KCQ/GFX rings restart)");
         ok = gfx11_soft_reset(fDev, fGfx, fKiq, fKcq) == RDNA3_OK;
@@ -2160,7 +2555,7 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
         if (ok) {
             for (uint32_t id = 1; id < 16; id++)
                 if (fVmByVmid[id])
-                    fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = true;
+                    fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = fVmByVmid[id]->dmaFlush = true;
             fResetCount++;
             BLOG("hang: GFX soft reset done (%u resets so far)", fResetCount);
             /* the KIQ restart reset both MES pipes: the scheduler again */
@@ -2202,7 +2597,7 @@ bool RDNA3Bringup::gpuReset(bool baco)
         fIntr->disable();
     for (uint32_t id = 1; id < 16; id++)
         if (fVmByVmid[id])
-            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = true;
+            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = fVmByVmid[id]->dmaFlush = true;
     if (fKcq && fKcq->rb.ready)
         gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
     if (fGfx && fGfx->ready)
@@ -2211,8 +2606,34 @@ bool RDNA3Bringup::gpuReset(bool baco)
     /* amdgpu_device_pre_asic_reset -> amdgpu_device_ip_suspend: the video
      * block suspended while the chip still runs (vcnStart resumes it) */
     vcnSuspend();
+    /* rdna3amdgpu=1: mes_v11_0_suspend (amdgpu_mes_suspend: every gang) */
+    if (fAmdgpuExact && fMes && fMes->ready && fDev)
+        gfx11_mes_suspend(fDev, fMes);
+    /* amdgpu_device_ip_suspend before a full reset: sdma_v6_0_suspend
+     * (rdna3amdgpu=1) */
+    if (fAmdgpuExact && fSdma && fDev)
+        sdma60_hw_fini(fDev, fDev->ipver[HWIP_SDMA1].present ? 2 : 1);
+    /* ... and gfx_v11_0_suspend after it (reverse IP order) */
+    if (fAmdgpuExact)
+        gfxSuspend();
 
-    /* soc21_asic_mode1_reset: no bus mastering across the reset */
+    /* amdgpu_device_ip_suspend goes on in reverse IP order (rdna3amdgpu=1):
+     * psp_suspend, ih_v6_0_suspend (= ih_v6_0_hw_fini), gmc_v11_0_suspend
+     * (= gmc_v11_0_hw_fini) */
+    if (fAmdgpuExact) {
+        if (fPsp && fPsp->ring_created)
+            psp13_suspend(fPsp);
+        if (fIh && fIh->enabled && fDev)
+            ih60_disable(fDev, fIh);
+        if (fGmc && fDev)
+            gmc11_hw_fini(fDev);
+        /* soc21_common_suspend (= soc21_common_hw_fini), the first IP block */
+        if (fDev && fDev->doorbell_ok)
+            soc21_common_hw_fini(fDev);
+    }
+
+    /* soc21_need_full_reset is true on every GC 11: no IP soft reset first.
+     * soc21_asic_mode1_reset: no bus mastering across the reset */
     fPci->setBusMasterEnable(false);
     if (baco) {
         /* amdgpu_device_baco_enter / _exit (smu_v13_0_baco_enter / _exit,
@@ -2228,6 +2649,9 @@ bool RDNA3Bringup::gpuReset(bool baco)
         publish("RDNA3,PMBACOCycles", fBacoCycles);
         publish("RDNA3,PMBACOResult", (uint64_t)(int64_t)r);
     } else {
+        /* amdgpu_device_mode1_reset: SMU mode-1 when the PMFW supports it */
+        if (fAmdgpuExact && fSmu && fPmUp)
+            HLOG("mode-1 reset: PMFW support %s", smu13_is_mode1_reset_supported(fSmu) ? "yes" : "no");
         smu13_mode1_reset(fDev);
     }
     if (psp13_wait_for_bootloader(fPsp) != RDNA3_OK)
@@ -2258,6 +2682,9 @@ bool RDNA3Bringup::gpuReset(bool baco)
     fOwner->drmHeldHere(false);
     fReinit = false;
     fResetCount++;
+    /* gmc_v11_0_resume = gmc_v11_0_hw_init (in hwInit) + amdgpu_vmid_reset_all:
+     * no VMID keeps its PASID mapping */
+    memset(fVmidPasid, 0, sizeof(fVmidPasid));
     if (fIntr)
         fIntr->enable();
     BLOG("%s #%llu %s", baco ? "BACO cycle" : "GPU reset",
@@ -2299,7 +2726,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
     memset(fGdsKnown, 0, sizeof(fGdsKnown));
     for (uint32_t id = 1; id < 16; id++)
         if (fVmByVmid[id])
-            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = true;
+            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = fVmByVmid[id]->dmaFlush = true;
     fPci->setBusMasterEnable(false);
     /* as run(): in a VM the wake comes with a bus reset (QEMU resets the
      * devices on an S3 wake), which leaves the PSP stuck */
@@ -2323,6 +2750,14 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
             fVramLostCount++;
             BLOG("resume: VRAM content lost (0x%08x), clients see VRAMLOST", magic);
         }
+    }
+    /* rdna3amdgpu=1: soc21_common_resume - an aborted S3 with the TOS still
+     * running gets a reset first (soc21_need_reset_on_resume); this wake
+     * follows a completed sleep (amdgpu: suspend_complete), so it does not;
+     * soc21_common_hw_init is in hwInit below */
+    if (fAmdgpuExact && soc21_need_reset_on_resume(fDev, 1, 1)) {
+        BLOG("resume: S3 suspend aborted, resetting");
+        smu13_mode1_reset(fDev);
     }
     rdna3_vram_alloc_init(fDev, fAllocLo, fAllocHi);
     fDev->doorbell_ok = 0;
@@ -2364,7 +2799,9 @@ void *RDNA3Bringup::vmCreate()
      * amdgpu's first_kfd_vmid) */
     fNextPasid = fNextPasid % 0xfffe + 1;
     v->pasid = fNextPasid;
-    for (uint32_t id = 1; id < (fUserqWanted ? 8u : 16u); id++) {
+    /* rdna3amdgpu=1: amdgpu's GFXHUB id_mgr hands out VMIDs below
+     * first_kfd_vmid only (8..15 have the compute apertures) */
+    for (uint32_t id = 1; id < ((fUserqWanted || fAmdgpuExact) ? (uint32_t)RD_FIRST_KFD_VMID : 16u); id++) {
         if (!(fVmidUsed & (1u << id))) {
             if (gpuvm_vm_init(fDev, &v->vm, fPtPool) != RDNA3_OK)
                 break;
@@ -2379,7 +2816,7 @@ void *RDNA3Bringup::vmCreate()
             if (fGmc && fGmc->gfxhub_enabled)
                 gfxhub303_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
             vmFlush(id);
-            v->gfxFlush = v->compFlush = true;
+            v->gfxFlush = v->compFlush = v->dmaFlush = true;
             break;
         }
     }
@@ -2388,8 +2825,60 @@ void *RDNA3Bringup::vmCreate()
     return v;
 }
 
+/* gfx_v11_0_suspend = gfx_v11_0_hw_fini (rdna3amdgpu=1, before a full
+ * reset): the CP fault interrupts put, the KGQ and KCQ unmapped and the MES
+ * KIQ stopped (amdgpu_mes_kiq_hw_fini), the CP halted, the GFXHUB GART off.
+ * hwInit brings everything back (gfx_v11_0_resume = gfx_v11_0_hw_init). */
+void RDNA3Bringup::gfxSuspend()
+{
+    if (!fDev || !fGfx)
+        return;
+    gfx11_set_priv_reg_fault_state(fDev, 0);
+    gfx11_set_priv_inst_fault_state(fDev, 0);
+    gfx11_set_bad_op_fault_state(fDev, 0);
+    if (fGfx->async && fGfx->ready && fKiq && fKiq->rb.ready)
+        gfx11_kgq_stop(fDev, fKiq, fGfx);
+    if (fKiq)
+        gfx11_mec_stop(fDev, fKiq, fKcq, fMes);
+    gfx11_cp_gfx_enable(fDev, 0);
+    if (fGmc)
+        gfxhub303_gart_disable(fDev);
+    fGfx->ready = 0;
+}
+
 void RDNA3Bringup::vmFlush(uint32_t vmid)
 {
+    /* rdna3amdgpu=1: amdgpu_gmc_flush_gpu_tlb -> gmc_v11_0_flush_gpu_tlb for
+     * the GFXHUB, then the MMHUB: with the KIQ running the invalidation goes
+     * through it (amdgpu_gmc_fw_reg_write_reg_wait, "necessary ... for
+     * GFXOFF to function properly under bare metal"); MMIO before that */
+    if (fAmdgpuExact && fDev && fMes && fMes->ready) {
+        /* the MES runs: amdgpu_gmc_fw_reg_write_reg_wait goes through
+         * amdgpu_mes_reg_write_reg_wait (MISC WRM_REG_WR_WAIT); the KIQ
+         * belongs to the MES now */
+        rdna3_vm_flush_regs f;
+        if (fGmc && fGmc->gfxhub_enabled) {
+            rdna3_hdp_flush(fDev);
+            gfxhub303_flush_regs(fDev, vmid, 17, &f);
+            gfx11_mes_reg_write_reg_wait(fDev, fMes, f.req, f.ack, f.req_val, 1u << vmid);
+        }
+        rdna3_hdp_flush(fDev);
+        mmhub302_flush_regs(fDev, vmid, 17, &f);
+        gfx11_mes_reg_write_reg_wait(fDev, fMes, f.req, f.ack, f.req_val, 1u << vmid);
+        return;
+    }
+    if (fAmdgpuExact && fDev && fKiq && fKiq->rb.ready) {
+        rdna3_vm_flush_regs f;
+        if (fGmc && fGmc->gfxhub_enabled) {   /* adev->gfx.is_poweron */
+            rdna3_hdp_flush(fDev);
+            gfxhub303_flush_regs(fDev, vmid, 17, &f);
+            gfx11_kiq_reg_write_reg_wait(fDev, fKiq, f.req, f.ack, f.req_val, 1u << vmid);
+        }
+        rdna3_hdp_flush(fDev);
+        mmhub302_flush_regs(fDev, vmid, 17, &f);
+        gfx11_kiq_reg_write_reg_wait(fDev, fKiq, f.req, f.ack, f.req_val, 1u << vmid);
+        return;
+    }
     mmhub302_flush_tlb(fDev, vmid, 0);
     if (fGmc && fGmc->gfxhub_enabled)
         gfxhub303_flush_tlb(fDev, vmid, 0);
@@ -2449,7 +2938,7 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
     vmFlush(v->vmid);
     if (fUserqMask)
         userqFlushMesVmids();
-    v->gfxFlush = v->compFlush = true;
+    v->gfxFlush = v->compFlush = v->dmaFlush = true;
     return 0;
 }
 
@@ -2478,7 +2967,7 @@ void RDNA3Bringup::vmUnmap(void *p, uint64_t va, uint64_t size)
     vmFlush(v->vmid);
     if (fUserqMask)
         userqFlushMesVmids();
-    v->gfxFlush = v->compFlush = true;
+    v->gfxFlush = v->compFlush = v->dmaFlush = true;
 }
 
 /* ---------------------------- user queues ---------------------------- */
@@ -2731,6 +3220,38 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
     x.csa_va = job->csa_va;
     x.gds_va = job->gds_va;
     x.init_shadow = job->init_shadow ? 1 : 0;
+    /* rdna3amdgpu=1: amdgpu_vm_flush's pasid_mapping_needed (the VMID's IH
+     * LUT entry holds another PASID) */
+    if (fAmdgpuExact && v->vmid < 16 && v->pasid && fVmidPasid[v->vmid] != v->pasid) {
+        x.pasid_mapping = 1;
+        x.pasid = v->pasid;
+    }
+    if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready && fAmdgpuExact) {
+        /* rdna3amdgpu=1: amdgpu_ib_schedule on the DMA ring (sdma60_submit_job):
+         * amdgpu_vm_flush on the ring's own invalidation engine, the PASID
+         * mapping, COND_EXE, HDP flush, padded IBs, user fence, fence */
+        uint64_t va[RD_MAX_CS_IBS];
+        uint32_t ndw[RD_MAX_CS_IBS], fl[RD_MAX_CS_IBS];
+        if (n > RD_MAX_CS_IBS)
+            return -RD_EINVAL;
+        for (uint32_t i = 0; i < n; i++) {
+            va[i] = ibs[i].va;
+            ndw[i] = ibs[i].length_dw;
+            fl[i] = ibs[i].flags;
+        }
+        uint32_t s = sdma60_submit_job(fDev, fSdma, v->vmid, v->dmaFlush ? gpuvm_pd_addr(fDev, &v->vm) : 0,
+                                       x.pasid_mapping ? x.pasid : 0,
+                                       x.pasid_mapping ? gmc11_pasid_mapping_reg(fDev, v->vmid, 0) : 0,
+                                       va, ndw, fl, n, ufMc);
+        if (!s)
+            return -RD_EBUSY;
+        if (x.pasid_mapping)
+            fVmidPasid[v->vmid] = x.pasid;
+        fSdmaLastVmid = v->vmid;
+        v->dmaFlush = false;
+        *seq = s;
+        return 0;
+    }
     if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready) {
         for (uint32_t i = 0; i < n; i++)
             sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);
@@ -2757,6 +3278,8 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
                                          &x);
         if (!s)
             return -RD_EBUSY;
+        if (x.pasid_mapping)
+            fVmidPasid[v->vmid] = x.pasid;
         memcpy(fGds[v->vmid], want, sizeof(want));
         fGdsKnown[v->vmid] = true;
         v->gfxFlush = false;
@@ -2777,6 +3300,8 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
                                                  g, n, &x);
         if (!s)
             return -RD_EBUSY;
+        if (x.pasid_mapping)
+            fVmidPasid[v->vmid] = x.pasid;
         memcpy(fGds[v->vmid], want, sizeof(want));
         fGdsKnown[v->vmid] = true;
         v->compFlush = false;
@@ -2818,13 +3343,22 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
         *capHit = false;
     uint64_t start, now, capNs = 10ull * 1000 * 1000 * 1000;
     absolutetime_to_nanoseconds(mach_continuous_time(), &start);
+    uint32_t fbit = ip < 32 ? 1u << ip : 0;
     for (uint32_t spins = 0;; spins++) {
-        if (fenceSignaled(ip, ring, seq))
+        if (fenceSignaled(ip, ring, seq)) {
+            /* the job got through: a fault flag left from before is stale */
+            if (fSchedFault & fbit)
+                OSBitAndAtomic(~fbit, &fSchedFault);
             return 0;
+        }
         absolutetime_to_nanoseconds(mach_continuous_time(), &now);
         if (absNs != UINT64_MAX && now >= absNs)
             return -RD_ETIME;
-        if (now - start >= capNs) {
+        /* drm_sched_fault (rdna3amdgpu=1): a CP fault IV named this ring */
+        bool faulted = (fSchedFault & fbit) != 0;
+        if (faulted)
+            OSBitAndAtomic(~fbit, &fSchedFault);
+        if (faulted || now - start >= capNs) {
             if (capHit) {
                 *capHit = true;          /* the caller recovers under its lock */
                 return -RD_ETIME;
@@ -2832,6 +3366,8 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
             return recover(ip, ring, seq);   /* amdgpu_job_timedout */
         }
         if (fIrqLive) {
+            /* the 5 ms re-check covers a lost interrupt, as
+             * amdgpu_fence_schedule_fallback's timer (amdgpu_fence_fallback) */
             uint64_t ns = 5ull * 1000 * 1000, left = capNs - (now - start), deadline;
             if (absNs != UINT64_MAX && absNs - now < left)
                 left = absNs - now;
@@ -2903,6 +3439,28 @@ void RDNA3Bringup::irqAction(OSObject *owner, IOInterruptEventSource *, int)
 void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
 {
     RDNA3Bringup *b = (RDNA3Bringup *)ctx;
+    if (b->fAmdgpuExact && b->fPmUp && b->fSmu && smu13_iv_is_smu(iv->client_id, iv->src_id)) {
+        b->smuIrq(iv);
+        return;
+    }
+    if (b->fAmdgpuExact) {
+        int which = -1;
+        if (gfx11_handle_priv_fault(iv, b->fGfx, b->fKcq, &which)) {
+            /* gfx_v11_0_priv_reg_irq / _priv_inst_irq / _bad_op_irq */
+            static const char *const what[] = { "Illegal opcode in command stream",
+                                                "Illegal register access in command stream",
+                                                "Illegal instruction in command stream" };
+            uint32_t k = iv->src_id - RD_IH_SRC_CP_BAD_OPCODE;
+            b->fCpFaults++;
+            IOLog("RDNA3: %s (ring_id 0x%x)\n", what[k < 3 ? k : 0], iv->ring_id);
+            if (which >= 0) {
+                /* drm_sched_fault: the ring's timeout handler runs at the
+                 * next fence wait (handleInterrupt wakes the waiters) */
+                OSBitOrAtomic(1u << (which ? AMDGPU_HW_IP_COMPUTE : AMDGPU_HW_IP_GFX), &b->fSchedFault);
+            }
+            return;
+        }
+    }
     if (gmc11_iv_is_vm_fault(iv)) {
         /* gmc_v11_0_process_interrupt: no retry faults on a dGPU, the wave
          * is gone; the VM that owns the VMID is guilty from now on */
@@ -2960,6 +3518,174 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
     }
 }
 
+/* amdgpu_ih_ring_init(use_bus_addr false) for rings 0 and 1: system pages
+ * (44-bit DMA like the GTT BOs), each ring and its 8-byte wptr / rptr
+ * shadows bound to the GART from offset 0 with gart_pte_flags (MTYPE_UC,
+ * EXECUTABLE) + SYSTEM | SNOOPED (cached TT) */
+bool RDNA3Bringup::ihSysAlloc()
+{
+    const uint64_t ringPages = RD_IH_RING_SIZE / 4096 + 1;
+    const uint64_t flags = RD_PTE_VALID | RD_PTE_SYSTEM | RD_PTE_SNOOPED | RD_PTE_READABLE |
+                           RD_PTE_WRITEABLE | RD_PTE_EXECUTABLE | RD_PTE_MTYPE_NV10(RD_MTYPE_UC);
+    if (!fGmc || !fGmc->mmhub_enabled || fGmc->gart_size < 2 * ringPages * 4096)
+        return false;
+    if (!fIh1)
+        fIh1 = (rdna3_ih *)IOMalloc(sizeof(*fIh1));
+    if (!fIh1)
+        return false;
+    bzero(fIh1, sizeof(*fIh1));
+    for (uint32_t r = 0; r < 2; r++) {
+        IhSys *b = &fIhSys[r];
+        if (!b->md) {
+            b->md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIODirectionInOut,
+                                                                     ringPages * 4096, (1ull << 44) - 4096);
+            if (!b->md)
+                goto fail;
+            b->dma = IODMACommand::withSpecification(IODMACommand::OutputHost64, 44, 0,
+                                                     IODMACommand::kMapped, 0, 4096);
+            if (!b->dma || b->dma->setMemoryDescriptor(b->md, true) != kIOReturnSuccess)
+                goto fail;
+            uint64_t off = 0, page = 0;
+            while (page < ringPages) {
+                IODMACommand::Segment64 seg[8];
+                UInt32 n = 8;
+                if (b->dma->gen64IOVMSegments(&off, seg, &n) != kIOReturnSuccess || !n)
+                    goto fail;
+                for (UInt32 i = 0; i < n; i++)
+                    for (uint64_t x = 0; x < seg[i].fLength && page < ringPages; x += 4096)
+                        b->pages[page++] = seg[i].fIOVMAddr + x;
+            }
+        }
+        bzero(b->md->getBytesNoCopy(), (size_t)(ringPages * 4096));
+        for (uint64_t p = 0; p < ringPages; p++)
+            if (gmc11_gart_map(fDev, fGmc, (r * ringPages + p) * 4096, b->pages[p], 1, flags) != RDNA3_OK)
+                goto fail;
+    }
+    vmFlush(0);
+    return true;
+fail:
+    BLOG("IH: no system memory rings, back to VRAM");
+    ihSysFree();
+    return false;
+}
+
+/* amdgpu_ih_ring_fini for the GTT rings (unbound from the GART first) */
+void RDNA3Bringup::ihSysFree()
+{
+    const uint64_t ringPages = RD_IH_RING_SIZE / 4096 + 1;
+    if (fGmc && fDev && (fIhSys[0].md || fIhSys[1].md)) {
+        gmc11_gart_unmap(fDev, fGmc, 0, (uint32_t)(2 * ringPages));
+        vmFlush(0);
+    }
+    for (uint32_t r = 0; r < 2; r++) {
+        if (fIhSys[r].dma) {
+            fIhSys[r].dma->clearMemoryDescriptor(true);
+            fIhSys[r].dma->release();
+        }
+        OSSafeReleaseNULL(fIhSys[r].md);
+        fIhSys[r].dma = nullptr;
+    }
+    if (fIh1) {
+        IOFree(fIh1, sizeof(*fIh1));
+        fIh1 = nullptr;
+    }
+    if (fIh)
+        fIh->ih1 = nullptr;
+}
+
+/* smu_v13_0_irq_process from the IV callback (fIhLock held): the hardware
+ * CTF right away, the rest from fSmuIrqCall under the DRM lock, because
+ * it may use the PMFW mailbox */
+void RDNA3Bringup::smuIrq(const rdna3_iv *iv)
+{
+    uint64_t deadline;
+    uint32_t delay = 0;
+    fSmuIrqs++;
+    if (iv->client_id == RD_IH_CLIENT_ROM_SMUIO) {
+        if (smu13_irq_process(fDev, fSmu, iv->client_id, iv->src_id, 0) == RD_SMU_IRQ_HWCTF)
+            overTemp("GPU HW CTF");
+        return;
+    }
+    if (fSmuIrqN < kSmuIvMax) {
+        fSmuIrqQ[fSmuIrqN].client = iv->client_id;
+        fSmuIrqQ[fSmuIrqN].src = iv->src_id;
+        fSmuIrqQ[fSmuIrqN].ctx = iv->src_data[0];
+        fSmuIrqN++;
+    }
+    if (!fSmuIrqCall || fSmuIrqStop)
+        return;
+    if (iv->client_id == RD_IH_CLIENT_THM && iv->src_id == RD_THM_SRCID_DIG_THERM_L2H)
+        delay = 50;   /* AMDGPU_SWCTF_EXTRA_DELAY */
+    clock_interval_to_deadline(delay, kMillisecondScale, &deadline);
+    thread_call_enter_delayed(fSmuIrqCall, deadline);
+}
+
+void RDNA3Bringup::smuIrqTick(void *owner, void *)
+{
+    RDNA3Bringup *b = (RDNA3Bringup *)owner;
+    IOLock *l = b->fOwner->drmLock();
+    SmuIv q[kSmuIvMax];
+    uint32_t n, i, hot = 0;
+    bool swctf = false;
+    if (!l || !b->fIhLock)
+        return;
+    IOLockLock(l);
+    IOLockLock(b->fIhLock);
+    n = b->fSmuIrqN;
+    for (i = 0; i < n; i++)
+        q[i] = b->fSmuIrqQ[i];
+    b->fSmuIrqN = 0;
+    IOLockUnlock(b->fIhLock);
+    for (i = 0; i < n && !b->fSmuIrqStop && b->fPmUp && b->fSmu; i++) {
+        int r = smu13_irq_process(b->fDev, b->fSmu, q[i].client, q[i].src, q[i].ctx);
+        if (r == RD_SMU_IRQ_SWCTF)
+            swctf = true;
+        else if (r == RD_SMU_IRQ_THROTTLE)
+            b->publish("RDNA3,PMThrottleInterrupts", b->fSmu->throttle_int_counter);
+    }
+    /* smu_swctf_delayed_work_handler */
+    if (swctf && !b->fSmuIrqStop && b->fPmUp && b->fSmu &&
+        smu13_swctf_check(b->fDev, b->fSmu, &hot))
+        b->overTemp("GPU SW CTF");
+    b->publish("RDNA3,PMSmuInterrupts", b->fSmuIrqs);
+    IOLockUnlock(l);
+}
+
+/* orderly_poweroff(true) on a critical temperature: the system's thermal
+ * emergency */
+void RDNA3Bringup::overTemp(const char *why)
+{
+    BLOG("%s: asking the system to power down (thermal emergency)", why);
+    if (IOPMrootDomain *root = fOwner->getPMRootDomain())
+        root->receivePowerNotification(kIOPMOverTemp);
+}
+
+/* amdgpu_pci_shutdown: mp1_state UNLOAD through amdgpu_device_ip_suspend,
+ * i.e. the SMC block's smu_smc_hw_cleanup (thermal alert off) and
+ * smu_v13_0_0_set_mp1_state (PrepareMp1ForUnload 0x55); nothing in a
+ * passthrough VM (amdgpu_passthrough: the CPUID hypervisor bit). The
+ * other blocks are not suspended first: the power goes next. */
+void RDNA3Bringup::pmShutdown()
+{
+    uint32_t ecx = 0;
+    if (!fAmdgpuExact || !fPmUp || !fSmu || !fDev)
+        return;
+#if defined(__x86_64__)
+    {
+        uint32_t eax = 1, ebx = 0, edx = 0;
+        __asm__ volatile("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    }
+#endif
+    if (ecx & (1u << 31)) {
+        BLOG("shutdown: under a hypervisor, MP1 state left as is");
+        return;
+    }
+    if (fSmu->irq_enabled)
+        smu13_disable_thermal_alert(fDev, fSmu);
+    int r = smu13_set_mp1_state(fDev, fSmu, RD_PP_MP1_STATE_UNLOAD);
+    BLOG("shutdown: MP1 state UNLOAD (PrepareMp1ForUnload 0x55) -> %d", r);
+}
+
 void RDNA3Bringup::handleInterrupt()
 {
     if (!fIh || !fDev)
@@ -2967,6 +3693,8 @@ void RDNA3Bringup::handleInterrupt()
     IOLockLock(fIhLock);
     uint32_t n = ih60_process(fDev, fIh, ivCallback, this);
     IOLockUnlock(fIhLock);
+    /* amdgpu_fence_process for the rings: the waiters re-read their fence
+     * slots (fenceSignaled) once woken */
     IOLockLock(fLock);
     fIrqCount++;
     fIvCount += n;

@@ -9,6 +9,7 @@
 #include "smu13.h"
 #include "navi3x_regs.h"
 #include "gen/thm_13_0_2_fan.h"
+#include "soc21_cg.h"
 
 /* smu_v13_0_set_smu_mailbox_registers / smu_v13_0_0_set_smu_mailbox_registers
  * (the debug mailbox 53/75/54 is in smu13_mode1_reset) */
@@ -385,6 +386,9 @@ static int pin_to_top(rdna3_dev *d, uint32_t ppclk, const rdna3_smu_dpm *t, cons
     return smu13_send_msg(d, PPSMC_MSG_SetHardMinByFreq, (ppclk << 16) | (mhz & 0xffff), NULL);
 }
 
+static void pcie_table_init(rdna3_smu *s);
+static int vdclk_tables(rdna3_dev *d, rdna3_smu *s);
+
 int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t allowed,
                   uint32_t pcie_gen_cap, uint32_t pcie_width_cap, int scpm)
 {
@@ -449,19 +453,25 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
     if (ret)
         return ret;
     /* smu_feature_set_allowed_mask: "not needed and permitted" with SCPM */
+    if (d->amdgpu_exact && allowed == RD_SMU_FEATURES_AMDGPU)
+        allowed = smu13_get_allowed_feature_mask(s->version, RD_PP_FEATURE_MASK_DEFAULT, 0);
     s->allowed = allowed;
     if (!s->scpm) {
         ret = set_allowed_mask(d, allowed);
         if (ret)
             return ret;
     }
-    /* smu_update_pcie_parameters */
-    ret = update_pcie_parameters(d, s);
-    if (ret) {
-        RERR(d, "SMU: OverridePcieParameters failed");
-        return ret;
+    /* smu_update_pcie_parameters; amdgpu itself sends it after the DPM
+     * tables (below, rdna3amdgpu=1) */
+    if (!d->amdgpu_exact) {
+        ret = update_pcie_parameters(d, s);
+        if (ret) {
+            RERR(d, "SMU: OverridePcieParameters failed");
+            return ret;
+        }
     }
-    /* smu_system_features_control(true) */
+    /* smu_system_features_control(true) -> smu_v13_0_0_system_features_control
+     * -> smu_v13_0_system_features_control */
     ret = smu13_send_msg(d, PPSMC_MSG_EnableAllSmuFeatures, 0, NULL);
     if (ret) {
         RERR(d, "SMU: EnableAllSmuFeatures failed");
@@ -523,6 +533,33 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
          s->uclk.level[0], s->uclk.level[s->uclk.count ? s->uclk.count - 1 : 0], s->uclk.count,
          s->soc.level[0], s->soc.level[s->soc.count ? s->soc.count - 1 : 0], s->soc.count);
 
+    if (d->amdgpu_exact) {
+        /* the rest of smu_v13_0_0_set_default_dpm_table (VCLK / DCLK, the
+         * pcie_table), then smu_smc_hw_setup goes on: update_pcie_parameters,
+         * enable_thermal_alert, notify_display_change */
+        ret = vdclk_tables(d, s);
+        if (ret)
+            return ret;
+        pcie_table_init(s);
+        ret = smu13_update_pcie_parameters(d, s, s->pcie_gen_cap, s->pcie_width_cap);
+        if (ret) {
+            RERR(d, "SMU: OverridePcieParameters failed");
+            return ret;
+        }
+        /* smu_v13_0_0_check_powerplay_table (setup_pptable) */
+        s->dc_controlled_by_gpio = (s->platform_caps & RD_SMU_PP_PLATFORM_CAP_HARDWAREDC) != 0;
+        ret = smu13_enable_thermal_alert(d, s);
+        if (ret) {
+            RERR(d, "SMU: Failed to enable thermal alert!");
+            return ret;
+        }
+        ret = smu13_notify_display_change(d, d->amdgpu_dc);
+        if (ret) {
+            RERR(d, "SMU: Failed to notify display change!");
+            return ret;
+        }
+    }
+
     /* the PMFW runs UCLK/FCLK DPM although 'allowed' keeps them off
      * (SCPM ignores the allowed mask): hold them at the top level */
     if ((s->enabled & ~allowed & RD_SMU_FEATURE(FEATURE_DPM_UCLK_BIT)) && s->uclk.count) {
@@ -552,7 +589,9 @@ int smu13_pm_init(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, uint64_t
 
 int smu13_mode1_reset(rdna3_dev *d)
 {
-    /* __smu_cmn_send_debug_msg: param, message, response = 0; the PMFW
+    /* smu_v13_0_0_set_mode1_reset_param: param 0, the RAS fatal error
+     * flag (1 << 16) needs RAS, which this card does not have.
+     * __smu_cmn_send_debug_msg: param, message, response = 0; the PMFW
      * takes the whole chip through reset, so nothing answers */
     rdna3_wreg(d, SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_53), 0);
     rdna3_wreg(d, SOC15_OFF(d, MP1, 0, regMP1_SMN_C2PMSG_75), RD_DEBUGSMC_MSG_Mode1Reset);
@@ -563,7 +602,14 @@ int smu13_mode1_reset(rdna3_dev *d)
 
 int smu13_pm_fini(rdna3_dev *d, rdna3_smu *s)
 {
-    (void)s;
+    if (d->amdgpu_exact) {
+        /* smu_hw_fini -> smu_smc_hw_cleanup's disable_thermal_alert, then
+         * smu_reset_mp1_state: UNLOAD only on a 13.0.10 without display
+         * hardware, which the RX 7800 XT is not */
+        if (s->irq_enabled)
+            smu13_disable_thermal_alert(d, s);
+        return RDNA3_OK;
+    }
     return smu13_send_msg(d, PPSMC_MSG_PrepareMp1ForUnload, 0, NULL);
 }
 
@@ -736,6 +782,14 @@ int smu13_pm_query(rdna3_dev *d, rdna3_smu *s, const rdna3_vbios *vbios, int od_
     }
 
     smu13_populate_umd_state_clk(s);
+    /* smu_late_init -> smu_set_ac_dc (rdna3amdgpu=1): a desktop runs on
+     * AC; nothing when the board's GPIO controls AC/DC */
+    if (d->amdgpu_exact && !s->dc_controlled_by_gpio) {
+        if (smu13_set_power_source(d, 0) == RDNA3_OK)
+            s->ac_power = 1;
+        else
+            RERR(d, "SMU: Failed to switch to AC mode!");
+    }
     /* smu_get_asic_power_limits */
     if (smu13_get_power_limits(d, s, &cur, &def, &max, &min) == RDNA3_OK) {
         s->current_power_limit = cur;
@@ -2050,6 +2104,11 @@ int smu13_pmctl(rdna3_dev *d, rdna3_smu *s, const rdna3_pmctl_req *rq, rdna3_pmc
         if (n < 1 || in[0] < 0 || in[0] > 1) { ret = RDNA3_EINVAL; break; }
         ret = smu13_set_df_cstate(d, s, (uint32_t)in[0]);
         break;
+    case RD_PMCTL_PERF_LEVEL:
+        /* amdgpu_set_power_dpm_force_performance_level */
+        if (n < 1 || in[0] <= 0) { ret = RDNA3_EINVAL; break; }
+        ret = smu13_force_performance_level(d, s, (uint32_t)in[0], soc21_update_umd_stable_pstate, d);
+        break;
     default:   /* RD_PMCTL_BACO_CYCLE: the OS (re-init after the exit) */
         ret = RDNA3_EOPNOTSUPP;
         break;
@@ -2082,4 +2141,540 @@ int smu13_set_vcn_enable(rdna3_dev *d, uint32_t num_inst, uint32_t harvest_confi
 int smu13_set_jpeg_enable(rdna3_dev *d, int enable)
 {
     return smu13_send_msg(d, enable ? PPSMC_MSG_PowerUpJpeg : PPSMC_MSG_PowerDownJpeg, 0, NULL);
+}
+
+/* ======================================================================
+ * MP1 state, allowed features, PCIe levels, performance levels and the
+ * thermal / MP1 interrupts (smu_v13_0.c, smu_v13_0_0_ppt.c, amdgpu_smu.c)
+ * ====================================================================== */
+
+/* thm_13_0_2_offset.h / _sh_mask.h, mp_13_0_0_offset.h / _sh_mask.h */
+#define regTHM_THERMAL_INT_ENA                        0x000a
+#define regTHM_THERMAL_INT_ENA_BASE_IDX               0
+#define regTHM_THERMAL_INT_CTRL                       0x000b
+#define regTHM_THERMAL_INT_CTRL_BASE_IDX              0
+#define THM_THERMAL_INT_ENA__THERM_INTH_CLR__SHIFT    0x3
+#define THM_THERMAL_INT_ENA__THERM_INTL_CLR__SHIFT    0x4
+#define THM_THERMAL_INT_ENA__THERM_TRIGGER_CLR__SHIFT 0x5
+#define THM_THERMAL_INT_CTRL__DIG_THERM_INTH__SHIFT   0x0
+#define THM_THERMAL_INT_CTRL__DIG_THERM_INTH_MASK     0x000000FFu
+#define THM_THERMAL_INT_CTRL__DIG_THERM_INTL__SHIFT   0x8
+#define THM_THERMAL_INT_CTRL__DIG_THERM_INTL_MASK     0x0000FF00u
+#define THM_THERMAL_INT_CTRL__THERM_INTH_MASK__SHIFT  0x18
+#define THM_THERMAL_INT_CTRL__THERM_INTH_MASK_MASK    0x01000000u
+#define THM_THERMAL_INT_CTRL__THERM_INTL_MASK__SHIFT  0x19
+#define THM_THERMAL_INT_CTRL__THERM_INTL_MASK_MASK    0x02000000u
+#define THM_THERMAL_INT_CTRL__THERM_TRIGGER_MASK_MASK 0x04000000u
+#define THM_THERMAL_INT_CTRL__THERM_IH_HW_ENA__SHIFT  0x1c
+#define THM_THERMAL_INT_CTRL__THERM_IH_HW_ENA_MASK    0x10000000u
+#define THM_THERMAL_INT_CTRL__MAX_IH_CREDIT__SHIFT    0x1d
+#define THM_THERMAL_INT_CTRL__MAX_IH_CREDIT_MASK      0xE0000000u
+#define regMP1_SMN_IH_SW_INT                          0x02c2
+#define regMP1_SMN_IH_SW_INT_BASE_IDX                 0
+#define regMP1_SMN_IH_SW_INT_CTRL                     0x02c3
+#define regMP1_SMN_IH_SW_INT_CTRL_BASE_IDX            0
+#define MP1_SMN_IH_SW_INT__ID__SHIFT                  0x0
+#define MP1_SMN_IH_SW_INT__ID_MASK                    0x000000FFu
+#define MP1_SMN_IH_SW_INT__VALID__SHIFT               0x8
+#define MP1_SMN_IH_SW_INT__VALID_MASK                 0x00000100u
+#define MP1_SMN_IH_SW_INT_CTRL__INT_MASK__SHIFT       0x0
+#define MP1_SMN_IH_SW_INT_CTRL__INT_MASK_MASK         0x00000001u
+#define MP1_SMN_IH_SW_INT_CTRL__INT_ACK__SHIFT        0x8
+#define MP1_SMN_IH_SW_INT_CTRL__INT_ACK_MASK          0x00000100u
+#define MP1_REG(d, reg) rdna3_reg_offset((d), HWIP_MP1, 0, reg##_BASE_IDX, reg)
+#define SMU_THERMAL_MINIMUM_ALERT_TEMP 0
+#define SMU_THERMAL_MAXIMUM_ALERT_TEMP 255
+
+int smu13_disable_pmfw_state(rdna3_dev *d)
+{
+    rdna3_smn_wreg(d, RD_SMN_MP1_FIRMWARE_FLAGS, 0);
+    return rdna3_smn_rreg(d, RD_SMN_MP1_FIRMWARE_FLAGS) == 0 ? RDNA3_OK : RDNA3_EINVAL;
+}
+
+int smu13_set_mp1_state(rdna3_dev *d, rdna3_smu *s, int mp1_state)
+{
+    int ret;
+    switch (mp1_state) {
+    case RD_PP_MP1_STATE_UNLOAD:
+        ret = smu13_send_msg(d, PPSMC_MSG_PrepareMp1ForUnload, 0x55, NULL);
+        if (!ret && s && s->baco_state == RD_SMU_BACO_STATE_EXIT)
+            ret = smu13_disable_pmfw_state(d);
+        break;
+    default:   /* Ignore others */
+        ret = RDNA3_OK;
+    }
+    return ret;
+}
+
+uint64_t smu13_get_allowed_feature_mask(uint32_t smc_fw_version, uint32_t pp_feature,
+                                        int athub_mmhub_pg)
+{
+    uint64_t m = ~0ull;
+    if (!(pp_feature & RD_PP_SCLK_DPM_MASK))
+        m &= ~(RD_SMU_FEATURE(FEATURE_DPM_GFXCLK_BIT) | RD_SMU_FEATURE(FEATURE_GFX_IMU_BIT));
+    if (!athub_mmhub_pg)
+        m &= ~RD_SMU_FEATURE(FEATURE_ATHUB_MMHUB_PG_BIT);
+    if (!(pp_feature & RD_PP_SOCCLK_DPM_MASK))
+        m &= ~RD_SMU_FEATURE(FEATURE_DPM_SOCCLK_BIT);
+    /* PMFW 78.58 contains a critical fix for gfxoff feature */
+    if (smc_fw_version < 0x004e3a00u || !(pp_feature & RD_PP_GFXOFF_MASK))
+        m &= ~RD_SMU_FEATURE(FEATURE_GFXOFF_BIT);
+    if (!(pp_feature & RD_PP_MCLK_DPM_MASK))
+        m &= ~(RD_SMU_FEATURE(FEATURE_DPM_UCLK_BIT) | RD_SMU_FEATURE(FEATURE_VMEMP_SCALING_BIT) |
+               RD_SMU_FEATURE(FEATURE_VDDIO_MEM_SCALING_BIT));
+    if (!(pp_feature & RD_PP_SCLK_DEEP_SLEEP_MASK))
+        m &= ~RD_SMU_FEATURE(FEATURE_DS_GFXCLK_BIT);
+    if (!(pp_feature & RD_PP_PCIE_DPM_MASK))
+        m &= ~(RD_SMU_FEATURE(FEATURE_DPM_LINK_BIT) | RD_SMU_FEATURE(FEATURE_DS_LCLK_BIT));
+    if (!(pp_feature & RD_PP_ULV_MASK))
+        m &= ~RD_SMU_FEATURE(FEATURE_GFX_ULV_BIT);
+    return m;
+}
+
+int smu13_is_mode1_reset_supported(const rdna3_smu *s)
+{
+    /* PMFW support is available since 78.41 */
+    return s->version >= 0x004e2900u;
+}
+
+/* Ported from smu_v13_0_set_power_source (CMN2ASIC_MAPPING_PWR: AC 0, DC 1) */
+int smu13_set_power_source(rdna3_dev *d, int dc)
+{
+    return smu13_send_msg(d, PPSMC_MSG_NotifyPowerSource, dc ? POWER_SOURCE_DC : POWER_SOURCE_AC, NULL);
+}
+
+int smu13_notify_display_change(rdna3_dev *d, int dc_present)
+{
+    if (!dc_present)
+        return smu13_send_msg(d, PPSMC_MSG_DALNotPresent, 0, NULL);
+    return RDNA3_OK;
+}
+
+/* smu_v13_0_0_set_default_dpm_table's pcie_table: the SkuTable's link
+ * levels without the all-zero ones */
+static void pcie_table_init(rdna3_smu *s)
+{
+    const SkuTable_t *sku = &s->pptable.SkuTable;
+    uint32_t i, n = 0;
+    for (i = 0; i < NUM_LINK_LEVELS; i++) {
+        if (!sku->PcieGenSpeed[i] && !sku->PcieLaneCount[i] && !sku->LclkFreq[i])
+            continue;
+        s->pcie_gen[n] = sku->PcieGenSpeed[i];
+        s->pcie_lane[n] = sku->PcieLaneCount[i];
+        n++;
+    }
+    s->pcie_levels = n;
+}
+
+int smu13_update_pcie_parameters(rdna3_dev *d, rdna3_smu *s, uint32_t pcie_gen_cap,
+                                 uint32_t pcie_width_cap)
+{
+    uint32_t i, n = s->pcie_levels;
+    int ret;
+    for (i = 0; i < n; i++) {
+        if (s->pcie_gen[i] > pcie_gen_cap)
+            s->pcie_gen[i] = pcie_gen_cap;
+        if (s->pcie_lane[i] > pcie_width_cap)
+            s->pcie_lane[i] = pcie_width_cap;
+    }
+    for (i = 0; i < n; i++) {
+        uint32_t arg = (i << 16) | (s->pcie_gen[i] << 8) | s->pcie_lane[i];
+        ret = smu13_send_msg(d, PPSMC_MSG_OverridePcieParameters, arg, NULL);
+        if (ret)
+            return ret;
+    }
+    return RDNA3_OK;
+}
+
+/* the deep sleep features the 13.0.0 feature map has (no DS_MP0CLK /
+ * DS_MP1CLK there) */
+/* Ported from smu_v13_0_deep_sleep_control */
+int smu13_deep_sleep_control(rdna3_dev *d, rdna3_smu *s, int enable)
+{
+    static const int ds[] = { FEATURE_DS_GFXCLK_BIT, FEATURE_DS_UCLK_BIT, FEATURE_DS_FCLK_BIT,
+                              FEATURE_DS_SOCCLK_BIT, FEATURE_DS_LCLK_BIT, FEATURE_DS_VCN_BIT };
+    unsigned i;
+    int ret = RDNA3_OK;
+    for (i = 0; i < sizeof(ds) / sizeof(ds[0]); i++) {
+        if (!feature_supported(s, ds[i]))
+            continue;
+        ret = feature_set_enabled(d, s, ds[i], enable);
+        if (ret) {
+            RERR(d, "SMU: Failed to %s deep sleep feature %d", enable ? "enable" : "disable", ds[i]);
+            return ret;
+        }
+    }
+    return ret;
+}
+
+/* Ported from smu_v13_0_gfx_ulv_control */
+int smu13_gfx_ulv_control(rdna3_dev *d, rdna3_smu *s, int enable)
+{
+    if (feature_supported(s, FEATURE_GFX_ULV_BIT))
+        return feature_set_enabled(d, s, FEATURE_GFX_ULV_BIT, enable);
+    return RDNA3_OK;
+}
+
+/* Ported from smu_v13_0_gpo_control */
+int smu13_gpo_control(rdna3_dev *d, int enable)
+{
+    int ret = smu13_send_msg(d, PPSMC_MSG_SetGpoAllow, enable ? 1 : 0, NULL);
+    if (ret)
+        RERR(d, "SMU: SetGpoAllow %d failed!", enable);
+    return ret;
+}
+
+/* smu_v13_0_set_soft_freq_limited_range: nothing for a clock whose DPM is
+ * off (smu_cmn_clk_dpm_is_enabled) */
+static int soft_range(rdna3_dev *d, rdna3_smu *s, uint32_t ppclk, int bit, uint32_t min, uint32_t max)
+{
+    if (!feature_enabled(d, s, bit))
+        return RDNA3_OK;
+    return smu13_set_soft_freq_range(d, s, ppclk, min, max);
+}
+
+/* smu_v13_0_0_set_default_dpm_table's VCLK / DCLK tables (MM_DPM) and the
+ * values smu_v13_0_0_populate_umd_state_clk gives their pstates */
+static int vdclk_tables(rdna3_dev *d, rdna3_smu *s)
+{
+    int ret;
+    if (s->vdclk_valid)
+        return RDNA3_OK;
+    if (feature_enabled(d, s, FEATURE_MM_DPM_BIT)) {
+        ret = smu13_get_dpm_table(d, PPCLK_VCLK_0, &s->vclk);
+        if (!ret)
+            ret = smu13_get_dpm_table(d, PPCLK_DCLK_0, &s->dclk);
+        if (ret)
+            return ret;
+    } else {
+        s->vclk.count = s->dclk.count = 1;
+        s->vclk.level[0] = s->boot.vclk / 100;
+        s->dclk.level[0] = s->boot.dclk / 100;
+    }
+    s->pstate_vclk.min = s->vclk.level[0];
+    s->pstate_vclk.peak = s->vclk.level[s->vclk.count ? s->vclk.count - 1 : 0];
+    s->pstate_vclk.standard = s->vclk.level[0];
+    s->pstate_dclk.min = s->dclk.level[0];
+    s->pstate_dclk.peak = s->dclk.level[s->dclk.count ? s->dclk.count - 1 : 0];
+    s->pstate_dclk.standard = s->dclk.level[0];
+    s->vdclk_valid = 1;
+    return RDNA3_OK;
+}
+
+static uint32_t tmin(const rdna3_smu_dpm *t) { return t->count ? t->level[0] : 0; }
+static uint32_t tmax(const rdna3_smu_dpm *t) { return t->count ? t->level[t->count - 1] : 0; }
+
+/* two VCN instances, none harvested on Navi 32 (vcn_unified_0 / _1) */
+#define RD_SMU_NUM_VCN_INST 2
+
+int smu13_set_performance_level(rdna3_dev *d, rdna3_smu *s, uint32_t level)
+{
+    uint32_t smin = 0, smax = 0, mmin = 0, mmax = 0, socmin = 0, socmax = 0;
+    uint32_t vmin = 0, vmax = 0, dmin = 0, dmax = 0, fmin = 0, fmax = 0, i;
+    int ret = vdclk_tables(d, s);
+    if (ret)
+        return ret;
+    smu13_populate_umd_state_clk(s);
+    switch (level) {
+    case RD_DPM_FORCED_LEVEL_HIGH:
+        smin = smax = tmax(&s->gfx); mmin = mmax = tmax(&s->uclk); socmin = socmax = tmax(&s->soc);
+        vmin = vmax = tmax(&s->vclk); dmin = dmax = tmax(&s->dclk); fmin = fmax = tmax(&s->fclk);
+        break;
+    case RD_DPM_FORCED_LEVEL_LOW:
+        smin = smax = tmin(&s->gfx); mmin = mmax = tmin(&s->uclk); socmin = socmax = tmin(&s->soc);
+        vmin = vmax = tmin(&s->vclk); dmin = dmax = tmin(&s->dclk); fmin = fmax = tmin(&s->fclk);
+        break;
+    case RD_DPM_FORCED_LEVEL_AUTO:
+        smin = tmin(&s->gfx); smax = tmax(&s->gfx); mmin = tmin(&s->uclk); mmax = tmax(&s->uclk);
+        socmin = tmin(&s->soc); socmax = tmax(&s->soc); vmin = tmin(&s->vclk); vmax = tmax(&s->vclk);
+        dmin = tmin(&s->dclk); dmax = tmax(&s->dclk); fmin = tmin(&s->fclk); fmax = tmax(&s->fclk);
+        break;
+    case RD_DPM_FORCED_LEVEL_PROFILE_STANDARD:
+        smin = smax = s->pstate_gfx.standard; mmin = mmax = s->pstate_uclk.standard;
+        socmin = socmax = s->pstate_soc.standard; vmin = vmax = s->pstate_vclk.standard;
+        dmin = dmax = s->pstate_dclk.standard; fmin = fmax = s->pstate_fclk.standard;
+        break;
+    case RD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK:
+        smin = smax = s->pstate_gfx.min;
+        break;
+    case RD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK:
+        mmin = mmax = s->pstate_uclk.min;
+        break;
+    case RD_DPM_FORCED_LEVEL_PROFILE_PEAK:
+        smin = smax = s->pstate_gfx.peak; mmin = mmax = s->pstate_uclk.peak;
+        socmin = socmax = s->pstate_soc.peak; vmin = vmax = s->pstate_vclk.peak;
+        dmin = dmax = s->pstate_dclk.peak; fmin = fmax = s->pstate_fclk.peak;
+        break;
+    case RD_DPM_FORCED_LEVEL_MANUAL:
+    case RD_DPM_FORCED_LEVEL_PROFILE_EXIT:
+        return RDNA3_OK;
+    default:
+        RERR(d, "SMU: Invalid performance level %u", level);
+        return RDNA3_EINVAL;
+    }
+    if (smin && smax && (ret = soft_range(d, s, PPCLK_GFXCLK, FEATURE_DPM_GFXCLK_BIT, smin, smax)))
+        return ret;
+    if (mmin && mmax && (ret = soft_range(d, s, PPCLK_UCLK, FEATURE_DPM_UCLK_BIT, mmin, mmax)))
+        return ret;
+    if (socmin && socmax && (ret = soft_range(d, s, PPCLK_SOCCLK, FEATURE_DPM_SOCCLK_BIT, socmin, socmax)))
+        return ret;
+    for (i = 0; vmin && vmax && i < RD_SMU_NUM_VCN_INST; i++)
+        if ((ret = soft_range(d, s, i ? PPCLK_VCLK_1 : PPCLK_VCLK_0, FEATURE_MM_DPM_BIT, vmin, vmax)))
+            return ret;
+    for (i = 0; dmin && dmax && i < RD_SMU_NUM_VCN_INST; i++)
+        if ((ret = soft_range(d, s, i ? PPCLK_DCLK_1 : PPCLK_DCLK_0, FEATURE_MM_DPM_BIT, dmin, dmax)))
+            return ret;
+    if (fmin && fmax && (ret = soft_range(d, s, PPCLK_FCLK, FEATURE_DPM_FCLK_BIT, fmin, fmax)))
+        return ret;
+    return RDNA3_OK;
+}
+
+#define RD_UMD_PROFILE_MASK (RD_DPM_FORCED_LEVEL_PROFILE_STANDARD | RD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK | \
+                             RD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK | RD_DPM_FORCED_LEVEL_PROFILE_PEAK)
+
+/* Ported from smu_enable_umd_pstate */
+static void smu_enable_umd_pstate(rdna3_dev *d, rdna3_smu *s, uint32_t *level,
+                                  rdna3_umd_pstate_fn umd_pstate, void *ctx)
+{
+    if (!(s->dpm_level & RD_UMD_PROFILE_MASK)) {
+        /* enter umd pstate, save current level, disable gfx cg */
+        if (*level & RD_UMD_PROFILE_MASK) {
+            s->saved_dpm_level = s->dpm_level;
+            smu13_gpo_control(d, 0);
+            smu13_gfx_ulv_control(d, s, 0);
+            smu13_deep_sleep_control(d, s, 0);
+            if (umd_pstate)
+                umd_pstate(ctx, 1);
+        }
+    } else if (!(*level & RD_UMD_PROFILE_MASK)) {
+        /* exit umd pstate, restore level, enable gfx cg */
+        if (*level == RD_DPM_FORCED_LEVEL_PROFILE_EXIT)
+            *level = s->saved_dpm_level;
+        if (umd_pstate)
+            umd_pstate(ctx, 0);
+        smu13_deep_sleep_control(d, s, 1);
+        smu13_gfx_ulv_control(d, s, 1);
+        smu13_gpo_control(d, 1);
+    }
+}
+
+/* Ported from smu_adjust_power_state_dynamic (no display config / clock
+ * adjust callbacks on 13.0.0); workload_setting[i] is profile i */
+static int smu_adjust_power_state_dynamic(rdna3_dev *d, rdna3_smu *s, uint32_t level)
+{
+    int ret = RDNA3_OK, index = 0;
+    if (s->dpm_level != level) {
+        ret = smu13_set_performance_level(d, s, level);
+        if (ret) {
+            RERR(d, "SMU: Failed to set performance level!");
+            return ret;
+        }
+        s->dpm_level = level;   /* update the saved copy */
+    }
+    if (s->dpm_level != RD_DPM_FORCED_LEVEL_MANUAL &&
+        s->dpm_level != RD_DPM_FORCED_LEVEL_PERF_DETERMINISM) {
+        uint32_t m = s->workload_mask;
+        long workload;
+        while (m) {             /* fls */
+            index++;
+            m >>= 1;
+        }
+        index = index > 0 && index <= 7 ? index - 1 : 0;   /* WORKLOAD_POLICY_MAX */
+        workload = index;
+        if (s->power_profile_mode != (uint32_t)workload)
+            smu13_set_power_profile_mode(d, s, &workload, 0);   /* smu_bump_power_profile_mode */
+    }
+    return ret;
+}
+
+/* Ported from smu_force_performance_level */
+int smu13_force_performance_level(rdna3_dev *d, rdna3_smu *s, uint32_t level,
+                                  rdna3_umd_pstate_fn umd_pstate, void *ctx)
+{
+    if (!s->dpm_running)
+        return RDNA3_EOPNOTSUPP;
+    if (!s->dpm_level)
+        s->dpm_level = RD_DPM_FORCED_LEVEL_AUTO;   /* smu_dpm_ctx->dpm_level after smu_sw_init */
+    smu_enable_umd_pstate(d, s, &level, umd_pstate, ctx);
+    /* smu_handle_task(AMD_PP_TASK_READJUST_POWER_STATE) */
+    return smu_adjust_power_state_dynamic(d, s, level);
+}
+
+int smu13_set_irq_state(rdna3_dev *d, rdna3_smu *s, int enable)
+{
+    uint32_t val, low, high;
+    if (!enable) {
+        val = rdna3_rreg(d, THM_REG(d, regTHM_THERMAL_INT_CTRL));
+        val = RD_FIELD_SET(val, THM_THERMAL_INT_CTRL, THERM_INTH_MASK, 1);
+        val = RD_FIELD_SET(val, THM_THERMAL_INT_CTRL, THERM_INTL_MASK, 1);
+        rdna3_wreg(d, THM_REG(d, regTHM_THERMAL_INT_CTRL), val);
+        rdna3_wreg(d, THM_REG(d, regTHM_THERMAL_INT_ENA), 0);
+        val = rdna3_rreg(d, MP1_REG(d, regMP1_SMN_IH_SW_INT_CTRL));
+        val = RD_FIELD_SET(val, MP1_SMN_IH_SW_INT_CTRL, INT_MASK, 1);
+        rdna3_wreg(d, MP1_REG(d, regMP1_SMN_IH_SW_INT_CTRL), val);
+        s->irq_enabled = 0;
+        return RDNA3_OK;
+    }
+    /* smu->thermal_range: min_temp from smu_v13_0_0_get_thermal_temperature_range
+     * (-273150 m°C) becomes SMU_THERMAL_MINIMUM_ALERT_TEMP, max is the
+     * software shutdown temperature */
+    low = SMU_THERMAL_MINIMUM_ALERT_TEMP;
+    high = s->software_shutdown_temp < SMU_THERMAL_MAXIMUM_ALERT_TEMP ? s->software_shutdown_temp
+                                                                     : SMU_THERMAL_MAXIMUM_ALERT_TEMP;
+    val = rdna3_rreg(d, THM_REG(d, regTHM_THERMAL_INT_CTRL));
+    val = RD_FIELD_SET(val, THM_THERMAL_INT_CTRL, MAX_IH_CREDIT, 5);
+    val = RD_FIELD_SET(val, THM_THERMAL_INT_CTRL, THERM_IH_HW_ENA, 1);
+    val = RD_FIELD_SET(val, THM_THERMAL_INT_CTRL, THERM_INTH_MASK, 0);
+    val = RD_FIELD_SET(val, THM_THERMAL_INT_CTRL, THERM_INTL_MASK, 0);
+    val = RD_FIELD_SET(val, THM_THERMAL_INT_CTRL, DIG_THERM_INTH, high & 0xff);
+    val = RD_FIELD_SET(val, THM_THERMAL_INT_CTRL, DIG_THERM_INTL, low & 0xff);
+    val &= ~THM_THERMAL_INT_CTRL__THERM_TRIGGER_MASK_MASK;
+    rdna3_wreg(d, THM_REG(d, regTHM_THERMAL_INT_CTRL), val);
+    val = (1u << THM_THERMAL_INT_ENA__THERM_INTH_CLR__SHIFT) |
+          (1u << THM_THERMAL_INT_ENA__THERM_INTL_CLR__SHIFT) |
+          (1u << THM_THERMAL_INT_ENA__THERM_TRIGGER_CLR__SHIFT);
+    rdna3_wreg(d, THM_REG(d, regTHM_THERMAL_INT_ENA), val);
+    val = rdna3_rreg(d, MP1_REG(d, regMP1_SMN_IH_SW_INT));
+    val = RD_FIELD_SET(val, MP1_SMN_IH_SW_INT, ID, 0xFE);
+    val = RD_FIELD_SET(val, MP1_SMN_IH_SW_INT, VALID, 0);
+    rdna3_wreg(d, MP1_REG(d, regMP1_SMN_IH_SW_INT), val);
+    val = rdna3_rreg(d, MP1_REG(d, regMP1_SMN_IH_SW_INT_CTRL));
+    val = RD_FIELD_SET(val, MP1_SMN_IH_SW_INT_CTRL, INT_MASK, 0);
+    rdna3_wreg(d, MP1_REG(d, regMP1_SMN_IH_SW_INT_CTRL), val);
+    s->irq_enabled = 1;
+    return RDNA3_OK;
+}
+
+static int smu_v13_0_allow_ih_interrupt(rdna3_dev *d)
+{
+    return smu13_send_msg(d, PPSMC_MSG_AllowIHHostInterrupt, 0, NULL);
+}
+
+static int smu_v13_0_process_pending_interrupt(rdna3_dev *d, rdna3_smu *s)
+{
+    if (s->dc_controlled_by_gpio && feature_enabled(d, s, FEATURE_ACDC_BIT))
+        return smu_v13_0_allow_ih_interrupt(d);
+    return RDNA3_OK;
+}
+
+/* amdgpu_irq_get(irq_source) -> smu_v13_0_set_irq_state(ENABLE) */
+int smu13_enable_thermal_alert(rdna3_dev *d, rdna3_smu *s)
+{
+    int ret = smu13_set_irq_state(d, s, 1);
+    if (ret)
+        return ret;
+    return smu_v13_0_process_pending_interrupt(d, s);
+}
+
+/* Ported from smu_v13_0_disable_thermal_alert */
+int smu13_disable_thermal_alert(rdna3_dev *d, rdna3_smu *s)
+{
+    return smu13_set_irq_state(d, s, 0);
+}
+
+int smu13_iv_is_smu(uint32_t client_id, uint32_t src_id)
+{
+    return (client_id == RD_IH_CLIENT_THM &&
+            (src_id == RD_THM_SRCID_DIG_THERM_L2H || src_id == RD_THM_SRCID_DIG_THERM_H2L)) ||
+           (client_id == RD_IH_CLIENT_ROM_SMUIO && src_id == RD_SMUIO_SRCID_GPIO19) ||
+           (client_id == RD_IH_CLIENT_MP1 && src_id == RD_SMU_IH_INTERRUPT_ID_TO_DRIVER);
+}
+
+static int smu_v13_0_ack_ac_dc_interrupt(rdna3_dev *d)
+{
+    return smu13_send_msg(d, PPSMC_MSG_ReenableAcDcInterrupt, 0, NULL);
+}
+
+/* the soft CTF limit written back to DIG_THERM_INTH (FAN_ABNORMAL /
+ * FAN_RECOVERY) */
+static void thm_set_high(rdna3_dev *d, uint32_t high)
+{
+    uint32_t data = rdna3_rreg(d, THM_REG(d, regTHM_THERMAL_INT_CTRL));
+    data = RD_FIELD_SET(data, THM_THERMAL_INT_CTRL, DIG_THERM_INTH, high & 0xff);
+    data &= ~THM_THERMAL_INT_CTRL__THERM_TRIGGER_MASK_MASK;
+    rdna3_wreg(d, THM_REG(d, regTHM_THERMAL_INT_CTRL), data);
+}
+
+int smu13_irq_process(rdna3_dev *d, rdna3_smu *s, uint32_t client_id, uint32_t src_id,
+                      uint32_t ctxid)
+{
+    uint32_t data;
+    int32_t high;
+    if (client_id == RD_IH_CLIENT_THM) {
+        switch (src_id) {
+        case RD_THM_SRCID_DIG_THERM_L2H:
+            return RD_SMU_IRQ_SWCTF;   /* schedule_delayed_work(swctf_delayed_work, 50 ms) */
+        case RD_THM_SRCID_DIG_THERM_H2L:
+            RERR(d, "ERROR: GPU under temperature range detected");
+            break;
+        default:
+            RERR(d, "ERROR: GPU under temperature range unknown src id (%u)", src_id);
+            break;
+        }
+        return RD_SMU_IRQ_UNDER;
+    }
+    if (client_id == RD_IH_CLIENT_ROM_SMUIO) {
+        RERR(d, "ERROR: GPU HW Critical Temperature Fault(aka CTF) detected!");
+        /* SW CTF just occurred; try to orderly shut the system down */
+        RERR(d, "ERROR: System is going to shutdown due to GPU HW CTF!");
+        return RD_SMU_IRQ_HWCTF;
+    }
+    if (client_id != RD_IH_CLIENT_MP1 || src_id != RD_SMU_IH_INTERRUPT_ID_TO_DRIVER)
+        return RD_SMU_IRQ_NONE;
+    /* ACK SMUToHost interrupt */
+    data = rdna3_rreg(d, MP1_REG(d, regMP1_SMN_IH_SW_INT_CTRL));
+    data = RD_FIELD_SET(data, MP1_SMN_IH_SW_INT_CTRL, INT_ACK, 1);
+    rdna3_wreg(d, MP1_REG(d, regMP1_SMN_IH_SW_INT_CTRL), data);
+    switch (ctxid) {
+    case RD_SMU_IH_CTX_AC:
+        RDBG(d, "SMU: Switched to AC mode!");
+        smu_v13_0_ack_ac_dc_interrupt(d);
+        s->ac_power = 1;
+        break;
+    case RD_SMU_IH_CTX_DC:
+        RDBG(d, "SMU: Switched to DC mode!");
+        smu_v13_0_ack_ac_dc_interrupt(d);
+        s->ac_power = 0;
+        break;
+    case RD_SMU_IH_CTX_THERMAL_THROTTLING:
+        /* the throttler status is logged from the metrics by the OS */
+        s->throttle_int_counter++;
+        return RD_SMU_IRQ_THROTTLE;
+    case RD_SMU_IH_CTX_FAN_ABNORMAL:
+        high = (int32_t)s->software_shutdown_temp + s->pptable.SkuTable.FanAbnormalTempLimitOffset;
+        if (high > SMU_THERMAL_MAXIMUM_ALERT_TEMP)
+            high = SMU_THERMAL_MAXIMUM_ALERT_TEMP;
+        RERR(d, "Reduce soft CTF limit to %d (by an offset %d)", high,
+             (int)s->pptable.SkuTable.FanAbnormalTempLimitOffset);
+        thm_set_high(d, (uint32_t)high);
+        break;
+    case RD_SMU_IH_CTX_FAN_RECOVERY:
+        high = s->software_shutdown_temp < SMU_THERMAL_MAXIMUM_ALERT_TEMP ? s->software_shutdown_temp
+                                                                         : SMU_THERMAL_MAXIMUM_ALERT_TEMP;
+        RERR(d, "Recover soft CTF limit to %d", high);
+        thm_set_high(d, (uint32_t)high);
+        break;
+    default:
+        RDBG(d, "SMU: Unhandled context id %u from client:%u!", ctxid, client_id);
+        break;
+    }
+    return RD_SMU_IRQ_NONE;
+}
+
+/* Ported from smu_swctf_delayed_work_handler (the hotspot through
+ * smu_v13_0_0_read_sensor AMDGPU_PP_SENSOR_HOTSPOT_TEMP, the limit
+ * smu->thermal_range.software_shutdown_temp) */
+int smu13_swctf_check(rdna3_dev *d, rdna3_smu *s, uint32_t *hotspot_c)
+{
+    uint32_t t = 0;
+    int ok = smu13_read_metrics(d, s) == RDNA3_OK;
+    if (ok)
+        t = smu13_metric_temp_hotspot_c(s);
+    if (hotspot_c)
+        *hotspot_c = t;
+    if (ok && t < s->software_shutdown_temp)
+        return 0;
+    RERR(d, "ERROR: GPU over temperature range(SW CTF) detected!");
+    RERR(d, "ERROR: System is going to shutdown due to GPU SW CTF!");
+    return 1;
 }

@@ -122,6 +122,33 @@ amd_disc_status amd_discovery_parse(const uint8_t *bin, size_t len,
     if (amd_disc_checksum(ih, ihdr_len) != rd16(bin + tbl_off + 2))
         return AMD_DISC_E_TABLE_CHECKSUM;
 
+    /* amdgpu_discovery_init: the GC, harvest and VCN info tables, when
+     * present, must carry their id / signature and checksum (the MALL
+     * table's check is disabled there: "if (0 && offset)") */
+    {
+        size_t t = tables + TABLE_INFO_SIZE * AMD_DISC_TABLE_GC, o;
+        if (in_bounds(bin_size, t, TABLE_INFO_SIZE) && (o = rd16(bin + t)) != 0) {
+            if (!in_bounds(bin_size, o, 12) || rd32(bin + o) != AMD_DISC_GC_TABLE_ID ||
+                !in_bounds(bin_size, o, rd32(bin + o + 8)) ||
+                amd_disc_checksum(bin + o, rd32(bin + o + 8)) != rd16(bin + t + 2))
+                return AMD_DISC_E_GC_TABLE;
+        }
+        t = tables + TABLE_INFO_SIZE * AMD_DISC_TABLE_HARVEST_INFO;
+        if (in_bounds(bin_size, t, TABLE_INFO_SIZE) && (o = rd16(bin + t)) != 0) {
+            if (!in_bounds(bin_size, o, AMD_DISC_HARVEST_TABLE_SIZE) ||
+                rd32(bin + o) != AMD_DISC_HARVEST_SIGNATURE ||
+                amd_disc_checksum(bin + o, AMD_DISC_HARVEST_TABLE_SIZE) != rd16(bin + t + 2))
+                return AMD_DISC_E_HARVEST_TABLE;
+        }
+        t = tables + TABLE_INFO_SIZE * AMD_DISC_TABLE_VCN_INFO;
+        if (in_bounds(bin_size, t, TABLE_INFO_SIZE) && (o = rd16(bin + t)) != 0) {
+            if (!in_bounds(bin_size, o, 12) || rd32(bin + o) != AMD_DISC_VCN_INFO_TABLE_ID ||
+                !in_bounds(bin_size, o, rd32(bin + o + 8)) ||
+                amd_disc_checksum(bin + o, rd32(bin + o + 8)) != rd16(bin + t + 2))
+                return AMD_DISC_E_VCN_TABLE;
+        }
+    }
+
     ipd_ver = rd16(ih + IHDR_VERSION);
     out->ipd_version = ipd_ver;
     out->num_dies = rd16(ih + IHDR_NUM_DIES);
@@ -173,7 +200,10 @@ amd_disc_status amd_discovery_parse(const uint8_t *bin, size_t len,
             if (!in_bounds(bin_size, ip_off + IP_FIXED_SIZE, base_sz * nbase))
                 return AMD_DISC_E_TRUNCATED;
 
-            if (out->num_ips < AMD_DISC_MAX_IPS) {
+            /* amdgpu_discovery_validate_ip: such an entry is skipped */
+            if (ip[2] >= AMD_DISC_HWIP_MAX_INSTANCE || rd16(ip) >= AMD_DISC_HW_ID_MAX) {
+                out->num_ips_invalid++;
+            } else if (out->num_ips < AMD_DISC_MAX_IPS) {
                 amd_ip_entry *e = &out->ips[out->num_ips++];
                 e->hw_id    = rd16(ip);
                 e->die      = (uint8_t)i;
@@ -187,6 +217,12 @@ amd_disc_status amd_discovery_parse(const uint8_t *bin, size_t len,
                     e->variant      = ip[7] >> 4;
                 } else {
                     e->harvest      = ip[7] & 0x0f;
+                }
+                /* amdgpu_discovery_reg_base_init: VCN revision bits
+                 * [7:6] are the en/decode capability, not the revision */
+                if (e->hw_id == AMD_HWID_VCN) {
+                    e->vcn_config = e->revision & 0xc0;
+                    e->revision &= (uint8_t)~0xc0;
                 }
                 e->num_base_kept = nbase < AMD_DISC_MAX_BASES ? nbase
                                                               : AMD_DISC_MAX_BASES;
@@ -203,6 +239,214 @@ amd_disc_status amd_discovery_parse(const uint8_t *bin, size_t len,
         }
     }
     return AMD_DISC_OK;
+}
+
+/* table_list[idx].offset, 0 when absent or outside the binary */
+static size_t table_off(const uint8_t *bin, size_t len, int idx)
+{
+    size_t tables, t;
+    if (!in_bounds(len, 0, BHDR_V1_TABLES))
+        return 0;
+    tables = rd16(bin + 4) == 2 ? BHDR_V2_TABLES : BHDR_V1_TABLES;
+    t = tables + TABLE_INFO_SIZE * (size_t)idx;
+    if (!in_bounds(len, t, TABLE_INFO_SIZE))
+        return 0;
+    return rd16(bin + t);
+}
+
+#define IPV(maj, min, rev) (((uint32_t)(maj) << 16) | ((uint32_t)(min) << 8) | (uint32_t)(rev))
+
+static uint32_t ip_version_of(const amd_discovery *d, uint16_t hw_id, uint8_t inst)
+{
+    const amd_ip_entry *e = amd_discovery_find(d, hw_id, inst);
+    return e ? IPV(e->major, e->minor, e->revision) : 0;
+}
+
+/* amdgpu_discovery_read_harvest_bit_per_ip: variant 1 marks a harvested
+ * VCN / DMU (discovery tables of the Navi 1x boards amdgpu lists) */
+static void harvest_bits_per_ip(const amd_discovery *d, amd_disc_soc *s, uint32_t *vcn_harvest_count)
+{
+    uint32_t i;
+    for (i = 0; i < d->num_ips; i++) {
+        const amd_ip_entry *e = &d->ips[i];
+        if (e->variant != 1)
+            continue;
+        if (e->hw_id == AMD_HWID_VCN) {
+            (*vcn_harvest_count)++;
+            if (e->instance == 0) {
+                s->vcn_harvest_config |= AMD_DISC_VCN_HARVEST_VCN0;
+                s->vcn_inst_mask &= ~AMD_DISC_VCN_HARVEST_VCN0;
+                s->jpeg_inst_mask &= ~AMD_DISC_VCN_HARVEST_VCN0;
+            } else {
+                s->vcn_harvest_config |= AMD_DISC_VCN_HARVEST_VCN1;
+                s->vcn_inst_mask &= ~AMD_DISC_VCN_HARVEST_VCN1;
+                s->jpeg_inst_mask &= ~AMD_DISC_VCN_HARVEST_VCN1;
+            }
+        } else if (e->hw_id == AMD_HWID_DMU) {
+            s->harvest_ip_mask |= AMD_DISC_HARVEST_IP_DMU;
+        }
+    }
+}
+
+/* amdgpu_discovery_read_from_harvest_table */
+static void harvest_from_table(const uint8_t *bin, size_t len, amd_disc_soc *s,
+                               uint32_t *vcn_harvest_count, uint32_t *umc_harvest_count)
+{
+    size_t o = table_off(bin, len, AMD_DISC_TABLE_HARVEST_INFO);
+    uint32_t umc_harvest_config = 0, i;
+    if (!o || !in_bounds(len, o, AMD_DISC_HARVEST_TABLE_SIZE))
+        return;   /* "invalid harvest table offset" */
+    for (i = 0; i < 32; i++) {
+        uint16_t hw = rd16(bin + o + 8 + 4 * i);
+        uint8_t inst = bin[o + 8 + 4 * i + 2];
+        uint32_t bit = inst < 32 ? 1u << inst : 0;
+        if (hw == 0)
+            break;
+        switch (hw) {
+        case AMD_HWID_VCN:
+            (*vcn_harvest_count)++;
+            s->vcn_harvest_config |= bit;
+            s->jpeg_harvest_config |= bit;
+            s->vcn_inst_mask &= ~bit;
+            s->jpeg_inst_mask &= ~bit;
+            break;
+        case AMD_HWID_DMU:
+            s->harvest_ip_mask |= AMD_DISC_HARVEST_IP_DMU;
+            break;
+        case AMD_HWID_UMC:
+            umc_harvest_config |= bit;
+            (*umc_harvest_count)++;
+            break;
+        case AMD_HWID_GC:
+            s->xcc_mask &= ~bit;
+            break;
+        case AMD_HWID_SDMA0:
+            s->sdma_mask &= ~bit;
+            break;
+        default:
+            break;
+        }
+    }
+    /* adev->umc.node_inst_num = the UMC count of reg_base_init */
+    s->umc_active_mask = (s->num_umc >= 32 ? 0xffffffffu : (1u << s->num_umc) - 1) & ~umc_harvest_config;
+}
+
+amd_disc_status amd_discovery_soc_config(const uint8_t *bin, size_t len, const amd_discovery *d,
+                                         uint16_t pci_device, uint8_t pci_revision,
+                                         amd_disc_soc *s)
+{
+    uint32_t i, gc, vcn_harvest_count = 0, umc_harvest_count = 0;
+    size_t o;
+
+    if (!bin || !d || !s)
+        return AMD_DISC_E_ARGS;
+    zero(s, sizeof(*s));
+
+    /* amdgpu_discovery_reg_base_init: instance counts and masks */
+    for (i = 0; i < d->num_ips; i++) {
+        const amd_ip_entry *e = &d->ips[i];
+        uint32_t bit = e->instance < 32 ? 1u << e->instance : 0;
+        if (e->hw_id == AMD_HWID_VCN && s->num_vcn_inst < AMD_DISC_MAX_VCN_INSTANCES) {
+            s->vcn_config[s->num_vcn_inst] = e->vcn_config;
+            s->num_vcn_inst++;
+            s->vcn_inst_mask |= bit;
+            s->jpeg_inst_mask |= bit;
+        }
+        if ((e->hw_id == AMD_HWID_SDMA0 || e->hw_id == AMD_HWID_SDMA1 || e->hw_id == AMD_HWID_SDMA2 ||
+             e->hw_id == AMD_HWID_SDMA3) && s->num_sdma < AMD_DISC_MAX_SDMA_INSTANCES) {
+            s->num_sdma++;
+            s->sdma_mask |= bit;
+        }
+        if (e->hw_id == AMD_HWID_UMC)
+            s->num_umc++;
+        if (e->hw_id == AMD_HWID_GC)
+            s->xcc_mask |= bit;
+    }
+    s->umc_active_mask = s->num_umc >= 32 ? 0xffffffffu : (1u << s->num_umc) - 1;
+
+    /* amdgpu_discovery_harvest_ip */
+    gc = ip_version_of(d, AMD_HWID_GC, 0);
+    if (gc < IPV(10, 2, 0) && gc != IPV(9, 4, 3) && gc != IPV(9, 4, 4)) {
+        if ((pci_device == 0x731E && (pci_revision == 0xC6 || pci_revision == 0xC7)) ||
+            (pci_device == 0x7340 && pci_revision == 0xC9) ||
+            (pci_device == 0x7360 && pci_revision == 0xC7)) {
+            harvest_bits_per_ip(d, s, &vcn_harvest_count);
+            s->harvest_from_ip_bits = 1;
+        }
+    } else {
+        harvest_from_table(bin, len, s, &vcn_harvest_count, &umc_harvest_count);
+    }
+    /* amdgpu_discovery_harvest_config_quirk: Navy Flounder boards with a
+     * bad VCN harvest entry */
+    if (ip_version_of(d, AMD_HWID_VCN, 1) == IPV(3, 0, 1) && gc == IPV(10, 3, 2)) {
+        switch (pci_revision) {
+        case 0xC1: case 0xC2: case 0xC3: case 0xC5: case 0xC7: case 0xCF: case 0xDF:
+            s->vcn_harvest_config |= AMD_DISC_VCN_HARVEST_VCN1;
+            s->vcn_inst_mask &= ~AMD_DISC_VCN_HARVEST_VCN1;
+            break;
+        default:
+            break;
+        }
+    }
+    if (vcn_harvest_count == s->num_vcn_inst)
+        s->harvest_ip_mask |= AMD_DISC_HARVEST_IP_VCN | AMD_DISC_HARVEST_IP_JPEG;
+    if (umc_harvest_count < s->num_umc)
+        s->num_umc -= umc_harvest_count;
+
+    /* amdgpu_discovery_get_mall_info: mall_info_header (id, major, minor,
+     * size) then v1 { mall_size_per_m, m_s_present, m_half_use } or
+     * v2 { mall_size_per_umc } */
+    o = table_off(bin, len, AMD_DISC_TABLE_MALL_INFO);
+    if (o && in_bounds(len, o, 24)) {
+        uint32_t per = rd32(bin + o + 12), u;
+        switch (rd16(bin + o + 4)) {
+        case 1: {
+            uint32_t present = rd32(bin + o + 16), half = rd32(bin + o + 20);
+            uint64_t size = 0;
+            for (u = 0; u < s->num_umc && u < 32; u++) {
+                if (present & (1u << u))
+                    size += (uint64_t)per * 2;
+                else if (half & (1u << u))
+                    size += per / 2;
+                else
+                    size += per;
+            }
+            s->mall_size = size;
+            s->m_half_use = half;
+            break;
+        }
+        case 2:
+            s->mall_size = (uint64_t)per * s->num_umc;
+            break;
+        default:   /* "Unhandled MALL info table" */
+            break;
+        }
+    }
+
+    /* amdgpu_discovery_get_vcn_info: vcn_info_v1_0 { header, num_of_instances,
+     * instance_info[4] { instance_num, fuse_data, reserved[2] } } */
+    o = table_off(bin, len, AMD_DISC_TABLE_VCN_INFO);
+    if (o && s->num_vcn_inst <= 4 && in_bounds(len, o, 16 + 16 * 4) && rd16(bin + o + 4) == 1)
+        for (i = 0; i < s->num_vcn_inst; i++)
+            s->vcn_codec_disable_mask[i] = rd32(bin + o + 16 + 16 * i + 4);
+    return AMD_DISC_OK;
+}
+
+uint8_t amd_discovery_get_harvest_info(const amd_disc_soc *s, uint16_t hw_id, uint8_t inst)
+{
+    uint32_t bit = inst < 32 ? 1u << inst : 0;
+    switch (hw_id) {
+    case AMD_HWID_VCN:
+        return (bit & s->vcn_inst_mask) == 0;
+    case AMD_HWID_DMU:
+        return (s->harvest_ip_mask & AMD_DISC_HARVEST_IP_DMU) ? 1 : 0;
+    case AMD_HWID_GC:
+        return (bit & s->xcc_mask) == 0;
+    case AMD_HWID_SDMA0:
+        return (bit & s->sdma_mask) == 0;
+    default:   /* UMC: "TODO: It needs another parsing" */
+        return 0;
+    }
 }
 
 const amd_ip_entry *amd_discovery_find(const amd_discovery *d,
@@ -302,6 +546,9 @@ const char *amd_disc_status_str(amd_disc_status s)
     case AMD_DISC_E_TABLE_SIGNATURE: return "bad IP table signature";
     case AMD_DISC_E_TABLE_CHECKSUM:  return "IP table checksum mismatch";
     case AMD_DISC_E_BAD_DIE:         return "bad die list";
+    case AMD_DISC_E_GC_TABLE:        return "bad GC table id or checksum";
+    case AMD_DISC_E_HARVEST_TABLE:   return "bad harvest table signature or checksum";
+    case AMD_DISC_E_VCN_TABLE:       return "bad VCN info table id or checksum";
     }
     return "unknown";
 }

@@ -62,6 +62,161 @@ static amd_fw_status read_common(const blob *b, common_hdr *h)
     return AMD_FW_OK;
 }
 
+amd_fw_status amd_ucode_validate(const uint8_t *fw, size_t len)
+{
+    blob b = { fw, len };
+    uint32_t size;
+    if (!fw)
+        return AMD_FW_E_ARGS;
+    if (!rd32(&b, OFF(common_firmware_header, size_bytes), &size))
+        return AMD_FW_E_TRUNCATED;
+    return size == len ? AMD_FW_OK : AMD_FW_E_TRUNCATED;
+}
+
+int amd_ucode_hdr_version(const uint8_t *fw, size_t len, uint16_t maj, uint16_t min)
+{
+    blob b = { fw, len };
+    uint16_t a, c;
+    if (!fw || !rd16(&b, OFF(common_firmware_header, header_version_major), &a) ||
+        !rd16(&b, OFF(common_firmware_header, header_version_minor), &c))
+        return 0;
+    return a == maj && c == min;
+}
+
+static size_t put_str(char *buf, size_t len, size_t at, const char *s)
+{
+    while (*s) {
+        if (at + 1 < len)
+            buf[at] = *s;
+        at++;
+        s++;
+    }
+    return at;
+}
+
+static size_t put_uint(char *buf, size_t len, size_t at, unsigned v)
+{
+    char t[4];
+    int n = 0;
+    do {
+        t[n++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v && n < 3);
+    while (n--) {
+        if (at + 1 < len)
+            buf[at] = t[n];
+        at++;
+    }
+    return at;
+}
+
+int amd_ucode_ip_version_decode(int block, uint8_t maj, uint8_t min, uint8_t rev, char *buf, size_t len)
+{
+    const char *ip;
+    size_t n = 0;
+    switch (block) {
+    case AMD_UCODE_BLOCK_GC:   ip = "gc"; break;
+    case AMD_UCODE_BLOCK_SDMA: ip = "sdma"; break;
+    case AMD_UCODE_BLOCK_MP0:  ip = "psp"; break;
+    case AMD_UCODE_BLOCK_MP1:  ip = "smu"; break;
+    case AMD_UCODE_BLOCK_VCN:  ip = "vcn"; break;   /* UVD_HWIP */
+    default: return -1;                              /* amdgpu: BUG() */
+    }
+    if (!buf || !len)
+        return -1;
+    n = put_str(buf, len, n, ip);
+    n = put_str(buf, len, n, "_");
+    n = put_uint(buf, len, n, maj);
+    n = put_str(buf, len, n, "_");
+    n = put_uint(buf, len, n, min);
+    n = put_str(buf, len, n, "_");
+    n = put_uint(buf, len, n, rev);
+    buf[n < len ? n : len - 1] = 0;
+    return (int)n;
+}
+
+const char *amd_ucode_name(uint16_t ucode_id)
+{
+    static const char *const names[] = {
+    "CAP",                       /* 0 CAP */
+    "SDMA0",                     /* 1 SDMA0 */
+    "SDMA1",                     /* 2 SDMA1 */
+    "SDMA2",                     /* 3 SDMA2 */
+    "SDMA3",                     /* 4 SDMA3 */
+    "SDMA4",                     /* 5 SDMA4 */
+    "SDMA5",                     /* 6 SDMA5 */
+    "SDMA6",                     /* 7 SDMA6 */
+    "SDMA7",                     /* 8 SDMA7 */
+    "SDMA_CTX",                  /* 9 SDMA_UCODE_TH0 */
+    "SDMA_CTL",                  /* 10 SDMA_UCODE_TH1 */
+    "RS64_SDMA",                 /* 11 SDMA_RS64 */
+    "CP_CE",                     /* 12 CP_CE */
+    "CP_PFP",                    /* 13 CP_PFP */
+    "CP_ME",                     /* 14 CP_ME */
+    "RS64_PFP",                  /* 15 CP_RS64_PFP */
+    "RS64_ME",                   /* 16 CP_RS64_ME */
+    "RS64_MEC",                  /* 17 CP_RS64_MEC */
+    "RS64_PFP_P0_STACK",         /* 18 CP_RS64_PFP_P0_STACK */
+    "RS64_PFP_P1_STACK",         /* 19 CP_RS64_PFP_P1_STACK */
+    "RS64_ME_P0_STACK",          /* 20 CP_RS64_ME_P0_STACK */
+    "RS64_ME_P1_STACK",          /* 21 CP_RS64_ME_P1_STACK */
+    "RS64_MEC_P0_STACK",         /* 22 CP_RS64_MEC_P0_STACK */
+    "RS64_MEC_P1_STACK",         /* 23 CP_RS64_MEC_P1_STACK */
+    "RS64_MEC_P2_STACK",         /* 24 CP_RS64_MEC_P2_STACK */
+    "RS64_MEC_P3_STACK",         /* 25 CP_RS64_MEC_P3_STACK */
+    "CP_MEC1",                   /* 26 CP_MEC1 */
+    "CP_MEC1_JT",                /* 27 CP_MEC1_JT */
+    "CP_MEC2",                   /* 28 CP_MEC2 */
+    "CP_MEC2_JT",                /* 29 CP_MEC2_JT */
+    "CP_MES",                    /* 30 CP_MES */
+    "CP_MES_DATA",               /* 31 CP_MES_DATA */
+    "CP_MES_KIQ",                /* 32 CP_MES1 */
+    "CP_MES_KIQ_DATA",           /* 33 CP_MES1_DATA */
+    "IMU_I",                     /* 34 IMU_I */
+    "IMU_D",                     /* 35 IMU_D */
+    "GLOBAL_TAP_DELAYS",         /* 36 GLOBAL_TAP_DELAYS */
+    "SE0_TAP_DELAYS",            /* 37 SE0_TAP_DELAYS */
+    "SE1_TAP_DELAYS",            /* 38 SE1_TAP_DELAYS */
+    "SE2_TAP_DELAYS",            /* 39 SE2_TAP_DELAYS */
+    "SE3_TAP_DELAYS",            /* 40 SE3_TAP_DELAYS */
+    "RLC_RESTORE_LIST_CNTL",     /* 41 RLC_RESTORE_LIST_CNTL */
+    "RLC_RESTORE_LIST_GPM_MEM",  /* 42 RLC_RESTORE_LIST_GPM_MEM */
+    "RLC_RESTORE_LIST_SRM_MEM",  /* 43 RLC_RESTORE_LIST_SRM_MEM */
+    "RLC_IRAM",                  /* 44 RLC_IRAM */
+    "RLC_DRAM",                  /* 45 RLC_DRAM */
+    "RLC_IRAM_1",                /* 46 RLC_IRAM_1 (amdgpu after v6.12; AMD_UCODE_* follows it) */
+    "RLC_DRAM_1",                /* 47 RLC_DRAM_1 */
+    "RLC_P",                     /* 48 RLC_P */
+    "RLC_V",                     /* 49 RLC_V */
+    "RLC_G",                     /* 50 RLC_G */
+    "STORAGE",                   /* 51 STORAGE */
+    "SMC",                       /* 52 SMC */
+    "PPTABLE",                   /* 53 PPTABLE */
+    "UVD",                       /* 54 UVD */
+    "UVD1",                      /* 55 UVD1 */
+    "VCE",                       /* 56 VCE */
+    "VCN",                       /* 57 VCN */
+    "VCN1",                      /* 58 VCN1 */
+    "DMCU_ERAM",                 /* 59 DMCU_ERAM */
+    "DMCU_INTV",                 /* 60 DMCU_INTV */
+    "VCN0_RAM",                  /* 61 VCN0_RAM */
+    "VCN1_RAM",                  /* 62 VCN1_RAM */
+    "DMCUB",                     /* 63 DMCUB */
+    "VPE_CTX",                   /* 64 VPE_CTX */
+    "VPE_CTL",                   /* 65 VPE_CTL */
+    "VPE",                       /* 66 VPE */
+    "UMSCH_MM_UCODE",            /* 67 UMSCH_MM_UCODE */
+    "UMSCH_MM_DATA",             /* 68 UMSCH_MM_DATA */
+    "UMSCH_MM_CMD_BUFFER",       /* 69 UMSCH_MM_CMD_BUFFER */
+    "P2STABLE",                  /* 70 P2S_TABLE */
+    "JPEG",                      /* 71 JPEG_RAM */
+    "ISP",                       /* 72 ISP */
+    };
+    if (ucode_id < sizeof(names) / sizeof(names[0]) && names[ucode_id])
+        return names[ucode_id];
+    return "UNKNOWN UCODE";
+}
+
 static void zero(void *p, size_t n)
 {
     volatile uint8_t *q = (volatile uint8_t *)p;
@@ -111,7 +266,8 @@ amd_fw_status amd_psp_sos_parse(const uint8_t *fw, size_t len, amd_psp_sos *out)
                 out->bin[AMD_PSP_BIN_SPL] = (amd_psp_bin){ base + o, s, 0 };
         }
     } else if (h.hv_major == 2) {
-        /* psp_firmware_header_v2_0/v2_1: array of psp_fw_bin_desc */
+        /* psp_firmware_header_v2_0/v2_1: array of psp_fw_bin_desc, each one
+         * handed to parse_sos_bin_descriptor (type -> bin) */
         uint32_t descs = (h.hv_minor == 1) ? OFF(psp_firmware_header_v2_1, psp_fw_bin)
                                            : OFF(psp_firmware_header_v2_0, psp_fw_bin);
         if (!rd32(&b, OFF(psp_firmware_header_v2_0, psp_fw_bin_count), &count))
@@ -299,6 +455,8 @@ static void do_default(builder *bd, uint8_t which, uint16_t id, uint16_t type,
         add(bd, id, type, which, h.ucode_array_offset_bytes, h.ucode_size_bytes, name);
 }
 
+/* amdgpu_sdma_init_microcode (sdma_v6_0_early_init): one image for both
+ * instances, TH0 and TH1 as PSP ucode entries */
 static void do_sdma(builder *bd)
 {
     blob b; common_hdr h;
@@ -318,7 +476,9 @@ static void do_sdma(builder *bd)
         ctl_off, ctl_size, "SDMA_TH1");
 }
 
-/* RS64 CP (gfx_firmware_header_v2_0): ucode + N stacks sharing one data blob */
+/* RS64 CP (gfx_firmware_header_v2_0): ucode + N stacks sharing one data blob,
+ * as amdgpu_gfx_cp_init_microcode does for AMDGPU_UCODE_ID_CP_RS64_* and their
+ * P0..P3 stacks (fw_size = ucode_size_bytes / data_size_bytes) */
 static void do_rs64(builder *bd, uint8_t which, uint16_t id, uint16_t type,
                     uint16_t stack_id0, uint16_t stack_type0, unsigned nstacks,
                     const char *name, const char *const *stack_names)
@@ -328,7 +488,9 @@ static void do_rs64(builder *bd, uint8_t which, uint16_t id, uint16_t type,
     unsigned i;
     if (!get(bd, which, &b, &h, 1))
         return;
-    if (h.hv_major != 2) {
+    /* gfx_v11_0_init_microcode: rs64_enable = amdgpu_ucode_hdr_version(PFP,
+     * 2, 0); the F32 CP path (v1 headers) is not ported */
+    if (h.hv_major != 2 || (which == AMD_BLOB_PFP && !amd_ucode_hdr_version(b.p, b.len, 2, 0))) {
         bd->err = AMD_FW_E_VERSION;
         return;
     }
@@ -455,6 +617,8 @@ amd_fw_status amd_ucode_plan_build(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT],
     bd.err = AMD_FW_OK;
 
     do_sdma(&bd);
+    /* gfx_v11_0_init_microcode (rs64_enable: v2 PFP header): PFP, ME, RLC
+     * (amdgpu_gfx_rlc_init_microcode, do_rlc), MEC with their stacks */
     do_rs64(&bd, AMD_BLOB_PFP, AMD_UCODE_CP_RS64_PFP, GFX_FW_TYPE_RS64_PFP,
             AMD_UCODE_CP_RS64_PFP_P0_STACK, GFX_FW_TYPE_RS64_PFP_P0_STACK, 2,
             "RS64_PFP", pfp_stacks);
@@ -470,6 +634,7 @@ amd_fw_status amd_ucode_plan_build(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT],
            AMD_UCODE_CP_MES1_DATA, GFX_FW_TYPE_MES_KIQ_STACK, "CP_MES1", "CP_MES1_DATA", 0);
     do_imu(&bd);
     do_rlc(&bd);
+    /* smu_v13_0_init_microcode: smu_13_0_10.bin as AMDGPU_UCODE_ID_SMC for the PSP */
     do_default(&bd, AMD_BLOB_SMC, AMD_UCODE_SMC, GFX_FW_TYPE_SMU, "SMC", 1);
     do_default(&bd, AMD_BLOB_VCN, AMD_UCODE_VCN, GFX_FW_TYPE_VCN, "VCN", 0);
     do_dmcub(&bd);

@@ -46,12 +46,33 @@ typedef struct rdna3_ih {
     int      msi;
     uint32_t overflows;
     uint64_t processed;
+    /* rdna3amdgpu=1 (ih60_init_amdgpu): the ring in system memory through
+     * the GART like amdgpu's GTT ring (MC_SNOOP), its wptr / rptr shadows
+     * right after it, the rptr written by doorbell */
+    volatile uint32_t *sys;       /* CPU view of the ring (NULL: the ring is in VRAM) */
+    uint64_t gpu_addr;            /* ring MC (GART) address; wptr at + ring_size, rptr + 4 */
+    uint32_t ring_id;             /* 0, or 1 for amdgpu's ih1 */
+    int      use_doorbell;
+    uint32_t doorbell_index;
+    struct rdna3_ih *ih1;         /* ring 0: the page-fault ring 1 (dGPU) */
+    uint64_t self_irqs;           /* ih_v6_0_self_irq IVs that moved ring 1's wptr */
 } rdna3_ih;
 
 /* amdgpu_ih_ring_init + ih_v6_0_irq_init (ring 0); 'msi' = an MSI handler
  * will drain the ring (RPTR_REARM), otherwise it is polled */
 int  ih60_init(rdna3_dev *d, rdna3_ih *ih, uint32_t ring_size, uint64_t dummy_page_pa, int msi);
-/* ih_v6_0_irq_disable */
+/* With rdna3amdgpu=1, ih_v6_0_sw_init + hw_init as amdgpu runs them on a
+ * dGPU: ring 0 and ring 1 in system memory ('sys0' / 'sys1', ring_size + 8
+ * bytes each, mapped at MC 'mc0' / 'mc1' through the GART), MC_SNOOP and
+ * IH_REQ_NONSNOOP_EN 0, rptr doorbells (AMDGPU_NAVI10_DOORBELL_IH << 1 and
+ * the next one, nbio_v4_3_ih_doorbell_range) when d->doorbell_ok, retry
+ * page faults (client 0xa, source 0) redirected to ring 1, whose wptr the
+ * IH reports through a self IV on ring 0 (ih_v6_0_self_irq). ih60_process
+ * drains ring 1 too. */
+int  ih60_init_amdgpu(rdna3_dev *d, rdna3_ih *ih, rdna3_ih *ih1, volatile void *sys0, uint64_t mc0,
+                      volatile void *sys1, uint64_t mc1, uint32_t ring_size, uint64_t dummy_page_pa,
+                      int msi);
+/* ih_v6_0_irq_disable (both rings) */
 void ih60_disable(rdna3_dev *d, rdna3_ih *ih);
 /* amdgpu_ih_process: decode every IV between rptr and wptr, call 'cb' for
  * each, write the new rptr. Returns the number of IVs handled. */
@@ -67,6 +88,7 @@ uint32_t ih60_process(rdna3_dev *d, rdna3_ih *ih, rdna3_iv_cb cb, void *ctx);
 #define RD_IH_SRC_SDMA_TRAP       49
 #define RD_IH_CLIENT_VMC          0x12   /* MMHUB page faults (VMC_1_0__SRCID__VM_FAULT) */
 #define RD_IH_SRC_VM_FAULT        0      /* also UTCL2_1_0__SRCID__FAULT on client GFX */
+#define RD_IH_CLIENT_IH           0x00   /* SOC21_IH_CLIENTID_IH: self IVs */
 #define RD_IH_FENCE_GFX           1u
 #define RD_IH_FENCE_SDMA0         2u
 #define RD_IH_FENCE_COMPUTE0      3u   /* MEC1 pipe 0 queue 0 (the first KCQ) */

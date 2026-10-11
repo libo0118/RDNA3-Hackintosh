@@ -32,6 +32,10 @@ extern "C" {
 #define AMD_DISC_TABLE_SIGNATURE       0x53445049u /* "IPDS" */
 #define AMD_DISC_GC_TABLE_ID           0x4347u
 #define AMD_DISC_HARVEST_SIGNATURE     0x56524148u
+#define AMD_DISC_VCN_INFO_TABLE_ID     0x004E4356u
+#define AMD_DISC_HARVEST_TABLE_SIZE    136u   /* sizeof(struct harvest_table) */
+#define AMD_DISC_HWIP_MAX_INSTANCE     44u    /* HWIP_MAX_INSTANCE */
+#define AMD_DISC_HW_ID_MAX             300u   /* HW_ID_MAX */
 #define AMD_DISC_TMR_OFFSET            (64u << 10) /* from end of VRAM */
 #define AMD_DISC_TMR_SIZE              (10u << 10) /* bytes amdgpu reads */
 #define AMD_DISC_MAX_DIES              16u
@@ -80,6 +84,9 @@ typedef struct amd_ip_entry {
     uint8_t  variant;       /* table v3+, else 0 */
     uint8_t  sub_revision;  /* table v3+, else 0 */
     uint8_t  harvest;       /* table v1/v2 only, raw nibble */
+    uint8_t  vcn_config;    /* VCN: revision bits [7:6] (encode / decode
+                             * disabled), cleared from 'revision' as
+                             * amdgpu_discovery_reg_base_init does */
     uint8_t  num_base;      /* as reported by HW */
     uint8_t  num_base_kept; /* min(num_base, AMD_DISC_MAX_BASES) */
     /* Register segment bases, in DWORDs (like amdgpu's reg_offset[]).
@@ -112,6 +119,7 @@ typedef struct amd_discovery {
     uint8_t  base_addr_64_bit;
     uint32_t num_ips;           /* entries stored in ips[] */
     uint32_t num_ips_dropped;   /* entries that did not fit */
+    uint32_t num_ips_invalid;   /* skipped by amdgpu_discovery_validate_ip */
     uint8_t  has_gc_info;
     amd_gc_info gc;
     amd_ip_entry ips[AMD_DISC_MAX_IPS];
@@ -127,7 +135,53 @@ typedef enum amd_disc_status {
     AMD_DISC_E_TABLE_SIGNATURE,
     AMD_DISC_E_TABLE_CHECKSUM,
     AMD_DISC_E_BAD_DIE,
+    /* amdgpu_discovery_init's checks of the optional tables */
+    AMD_DISC_E_GC_TABLE,       /* GC table id or checksum */
+    AMD_DISC_E_HARVEST_TABLE,  /* harvest table signature or checksum */
+    AMD_DISC_E_VCN_TABLE,      /* VCN info table id or checksum */
 } amd_disc_status;
+
+/* What amdgpu derives from the binary beyond the IP list, for one ASIC:
+ * amdgpu_discovery_reg_base_init's instance counts and masks,
+ * amdgpu_discovery_harvest_ip (the harvest table, or the per-IP harvest
+ * bits on the Navi 1x boards that need them, then
+ * amdgpu_discovery_harvest_config_quirk), amdgpu_discovery_get_mall_info
+ * and amdgpu_discovery_get_vcn_info. */
+#define AMD_DISC_MAX_VCN_INSTANCES   4u    /* AMDGPU_MAX_VCN_INSTANCES */
+#define AMD_DISC_MAX_SDMA_INSTANCES  16u   /* AMDGPU_MAX_SDMA_INSTANCES */
+#define AMD_DISC_VCN_HARVEST_VCN0    (1u << 0)   /* AMDGPU_VCN_HARVEST_VCN0 */
+#define AMD_DISC_VCN_HARVEST_VCN1    (1u << 1)
+#define AMD_DISC_HARVEST_IP_VCN      0x1u  /* AMD_HARVEST_IP_VCN_MASK */
+#define AMD_DISC_HARVEST_IP_JPEG     0x2u
+#define AMD_DISC_HARVEST_IP_DMU      0x4u
+#define AMD_HWID_SDMA2  68
+#define AMD_HWID_SDMA3  69
+#define AMD_HWID_PCIE   70
+
+typedef struct amd_disc_soc {
+    uint32_t num_vcn_inst, vcn_inst_mask, jpeg_inst_mask;
+    uint8_t  vcn_config[AMD_DISC_MAX_VCN_INSTANCES];
+    uint32_t vcn_harvest_config, jpeg_harvest_config;
+    uint32_t vcn_codec_disable_mask[AMD_DISC_MAX_VCN_INSTANCES];
+    uint32_t num_sdma, sdma_mask;
+    uint32_t xcc_mask;
+    uint32_t num_umc, umc_active_mask;
+    uint32_t harvest_ip_mask;       /* AMD_DISC_HARVEST_IP_* */
+    uint64_t mall_size;             /* bytes; 0 without a MALL table */
+    uint32_t m_half_use;
+    uint8_t  harvest_from_ip_bits;  /* the Navi 1x path was taken */
+} amd_disc_soc;
+
+/* 'bin'/'len' the binary amd_discovery_parse accepted into 'd'; the PCI
+ * device id and revision select amdgpu's board quirks. Returns
+ * AMD_DISC_E_ARGS or AMD_DISC_OK; a MALL or VCN table of an unknown
+ * version leaves its fields 0 (amdgpu logs it and goes on). */
+amd_disc_status amd_discovery_soc_config(const uint8_t *bin, size_t len, const amd_discovery *d,
+                                         uint16_t pci_device, uint8_t pci_revision,
+                                         amd_disc_soc *out);
+/* amdgpu_discovery_get_harvest_info: 1 when instance 'inst' of 'hw_id' is
+ * harvested (VCN, DMU, GC, SDMA0; UMC is "TODO" in amdgpu and reads 0) */
+uint8_t amd_discovery_get_harvest_info(const amd_disc_soc *s, uint16_t hw_id, uint8_t inst);
 
 /* Byte-sum checksum used by every discovery table. */
 uint16_t amd_disc_checksum(const uint8_t *p, size_t n);

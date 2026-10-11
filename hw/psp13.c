@@ -35,6 +35,10 @@ int psp13_init(rdna3_psp *psp, rdna3_dev *d, const uint8_t *sos_fw, size_t sos_l
     psp->sos_fw = sos_fw;
     psp->sos_len = sos_len;
 
+    psp13_early_init(psp);
+    psp->asd.shared = psp->hdcp.shared = psp->dtm.shared = UINT64_MAX;
+
+    /* psp_v13_0_init_microcode -> psp_init_sos_microcode */
     st = amd_psp_sos_parse(sos_fw, sos_len, &psp->sos);
     if (st != AMD_FW_OK) {
         RERR(d, "PSP: SOS firmware: %s", amd_fw_status_str(st));
@@ -56,6 +60,60 @@ int psp13_init(rdna3_psp *psp, rdna3_dev *d, const uint8_t *sos_fw, size_t sos_l
     psp->tmr = UINT64_MAX;
     psp->fw_buf = UINT64_MAX;
     return RDNA3_OK;
+}
+
+/* Ported from psp_check_pmfw_centralized_cstate_management (bare metal):
+ * the PMFW manages DF C-states on these MP0 versions and is loaded before
+ * SETUP_TMR; MP0 13.0.10 is not one of them */
+int psp13_pmfw_centralized_cstate_management(const rdna3_ipver *v)
+{
+    if (v->major == 11)
+        return v->rev == 0 || v->rev == 4 || v->rev == 5 || v->rev == 7 || v->rev == 9 ||
+               v->rev == 11 || v->rev == 12 || v->rev == 13;
+    if (v->major == 13 && v->minor == 0)
+        return v->rev == 0 || v->rev == 2 || v->rev == 7;
+    return 0;
+}
+
+/* Ported from psp_early_init, the MP0 13.0.x cases (the psp_v13_0 callbacks
+ * are psp13.c itself): RLC autoload through the PSP, the TMR allocated by
+ * the driver (no boot-time TMR) on 13.0.0 / 13.0.7 / 13.0.10 */
+void psp13_early_init(rdna3_psp *psp)
+{
+    const rdna3_ipver *v = &psp->d->ipver[HWIP_MP0];
+    psp->autoload_supported = 1;
+    psp->boot_time_tmr = 1;
+    if (v->major == 13 && v->minor == 0) {
+        switch (v->rev) {
+        case 2:
+            psp->boot_time_tmr = 0;
+            psp->autoload_supported = 0;
+            break;
+        case 6: case 14:
+            psp->autoload_supported = 0;
+            break;
+        default:   /* 0, 1, 3, 4, 5, 7, 8, 10, 11 */
+            psp->boot_time_tmr = 0;
+            break;
+        }
+    }
+    psp->pmfw_centralized_cstate_management = psp13_pmfw_centralized_cstate_management(v);
+}
+
+/* Ported from acquire_psp_cmd_buf: psp->cmd zeroed for the next command */
+static struct psp_gfx_cmd_resp *acquire_psp_cmd_buf(rdna3_psp *psp)
+{
+    if (psp->cmd_busy)
+        RERR(psp->d, "PSP: command buffer taken twice");
+    psp->cmd_busy = 1;
+    bzero_local(&psp->cmd_buf, sizeof(psp->cmd_buf));
+    return &psp->cmd_buf;
+}
+
+/* Ported from release_psp_cmd_buf */
+static void release_psp_cmd_buf(rdna3_psp *psp)
+{
+    psp->cmd_busy = 0;
 }
 
 /* ------------------------- bootloader ------------------------- */
@@ -243,14 +301,27 @@ int psp13_ring_create(rdna3_psp *psp)
     return ret;
 }
 
-/* psp_v13_0_ring_stop() (bare metal) */
+/* psp_v13_0_ring_stop() (bare metal); amdgpu waits for the response flag
+ * alone (bit 31), the verified default for the status bits too */
 int psp13_ring_stop(rdna3_psp *psp)
 {
     rdna3_dev *d = psp->d;
     rdna3_wreg(d, C2P(psp, 64), GFX_CTRL_CMD_ID_DESTROY_RINGS);
     mdelay(d, 20);
     psp->ring_created = 0;
+    if (d->amdgpu_exact)
+        return rdna3_wait_reg(d, C2P(psp, 64), 0x80000000u, 0x80000000u, 0, 0);
     return rdna3_wait_reg(d, C2P(psp, 64), MBOX_TOS_RESP_FLAG, MBOX_TOS_RESP_MASK, 0, 0);
+}
+
+/* Ported from psp_v13_0_ring_destroy: stop, and the ring buffer is no
+ * longer the PSP's (amdgpu frees it; it stays in the bump allocator) */
+int psp13_ring_destroy(rdna3_psp *psp)
+{
+    int ret = psp13_ring_stop(psp);
+    if (ret)
+        RERR(psp->d, "PSP: fail to stop psp ring");
+    return ret;
 }
 
 /* psp_ring_cmd_submit() */
@@ -334,21 +405,22 @@ static int psp13_cmd_submit(rdna3_psp *psp, struct psp_gfx_cmd_resp *cmd)
 /* psp_load_toc(), psp_prep_load_toc_cmd_buf() */
 int psp13_load_toc(rdna3_psp *psp, uint32_t *tmr_size)
 {
-    struct psp_gfx_cmd_resp cmd;
+    struct psp_gfx_cmd_resp *cmd;
     const amd_psp_bin *toc = &psp->sos.bin[AMD_PSP_BIN_TOC];
     int ret;
 
     ret = psp13_copy_fw(psp, AMD_PSP_BIN_TOC);
     if (ret)
         return ret;
-    bzero_local(&cmd, sizeof(cmd));
-    cmd.cmd_id = GFX_CMD_ID_LOAD_TOC;
-    cmd.cmd.cmd_load_toc.toc_phy_addr_lo = (uint32_t)rdna3_vram_mc(psp->d, psp->fw_pri);
-    cmd.cmd.cmd_load_toc.toc_phy_addr_hi = (uint32_t)(rdna3_vram_mc(psp->d, psp->fw_pri) >> 32);
-    cmd.cmd.cmd_load_toc.toc_size = toc->size;
-    ret = psp13_cmd_submit(psp, &cmd);
+    cmd = acquire_psp_cmd_buf(psp);
+    cmd->cmd_id = GFX_CMD_ID_LOAD_TOC;
+    cmd->cmd.cmd_load_toc.toc_phy_addr_lo = (uint32_t)rdna3_vram_mc(psp->d, psp->fw_pri);
+    cmd->cmd.cmd_load_toc.toc_phy_addr_hi = (uint32_t)(rdna3_vram_mc(psp->d, psp->fw_pri) >> 32);
+    cmd->cmd.cmd_load_toc.toc_size = toc->size;
+    ret = psp13_cmd_submit(psp, cmd);
     if (!ret)
-        *tmr_size = cmd.resp.tmr_size;
+        *tmr_size = cmd->resp.tmr_size;
+    release_psp_cmd_buf(psp);
     return ret;
 }
 
@@ -378,30 +450,34 @@ int psp13_tmr_init(rdna3_psp *psp)
 /* psp_tmr_load(), psp_prep_tmr_cmd_buf() (bare metal: SETUP_TMR) */
 int psp13_tmr_load(rdna3_psp *psp)
 {
-    struct psp_gfx_cmd_resp cmd;
+    struct psp_gfx_cmd_resp *cmd = acquire_psp_cmd_buf(psp);
     uint64_t mc = rdna3_vram_mc(psp->d, psp->tmr);
     uint64_t pa = rdna3_vram_pa(psp->d, psp->tmr);
+    int ret;
 
-    bzero_local(&cmd, sizeof(cmd));
-    cmd.cmd_id = GFX_CMD_ID_SETUP_TMR;
-    cmd.cmd.cmd_setup_tmr.buf_phy_addr_lo = (uint32_t)mc;
-    cmd.cmd.cmd_setup_tmr.buf_phy_addr_hi = (uint32_t)(mc >> 32);
-    cmd.cmd.cmd_setup_tmr.buf_size = psp->tmr_size;
-    cmd.cmd.cmd_setup_tmr.bitfield.virt_phy_addr = 1;
-    cmd.cmd.cmd_setup_tmr.system_phy_addr_lo = (uint32_t)pa;
-    cmd.cmd.cmd_setup_tmr.system_phy_addr_hi = (uint32_t)(pa >> 32);
+    cmd->cmd_id = GFX_CMD_ID_SETUP_TMR;
+    cmd->cmd.cmd_setup_tmr.buf_phy_addr_lo = (uint32_t)mc;
+    cmd->cmd.cmd_setup_tmr.buf_phy_addr_hi = (uint32_t)(mc >> 32);
+    cmd->cmd.cmd_setup_tmr.buf_size = psp->tmr_size;
+    cmd->cmd.cmd_setup_tmr.bitfield.virt_phy_addr = 1;
+    cmd->cmd.cmd_setup_tmr.system_phy_addr_lo = (uint32_t)pa;
+    cmd->cmd.cmd_setup_tmr.system_phy_addr_hi = (uint32_t)(pa >> 32);
     RLOG(psp->d, "PSP: reserve 0x%x from MC 0x%llx for TMR", psp->tmr_size,
          (unsigned long long)mc);
-    return psp13_cmd_submit(psp, &cmd);
+    ret = psp13_cmd_submit(psp, cmd);
+    release_psp_cmd_buf(psp);
+    return ret;
 }
 
 /* psp_rlc_autoload_start() */
 int psp13_autoload_rlc(rdna3_psp *psp)
 {
-    struct psp_gfx_cmd_resp cmd;
-    bzero_local(&cmd, sizeof(cmd));
-    cmd.cmd_id = GFX_CMD_ID_AUTOLOAD_RLC;
-    return psp13_cmd_submit(psp, &cmd);
+    struct psp_gfx_cmd_resp *cmd = acquire_psp_cmd_buf(psp);
+    int ret;
+    cmd->cmd_id = GFX_CMD_ID_AUTOLOAD_RLC;
+    ret = psp13_cmd_submit(psp, cmd);
+    release_psp_cmd_buf(psp);
+    return ret;
 }
 
 /* ------------------------- IP firmware ------------------------- */
@@ -433,20 +509,23 @@ int psp13_stage_ucodes(rdna3_psp *psp, const amd_ucode_plan *plan,
  * (psp_get_fw_type) comes with the ucode from amd_ucode_plan_build() */
 int psp13_load_ip_fw(rdna3_psp *psp, const amd_ucode *u, uint64_t mc)
 {
-    struct psp_gfx_cmd_resp cmd;
+    struct psp_gfx_cmd_resp *cmd = acquire_psp_cmd_buf(psp);
     int ret;
 
-    bzero_local(&cmd, sizeof(cmd));
-    cmd.cmd_id = GFX_CMD_ID_LOAD_IP_FW;
-    cmd.cmd.cmd_load_ip_fw.fw_phy_addr_lo = (uint32_t)mc;
-    cmd.cmd.cmd_load_ip_fw.fw_phy_addr_hi = (uint32_t)(mc >> 32);
-    cmd.cmd.cmd_load_ip_fw.fw_size = u->size;
-    cmd.cmd.cmd_load_ip_fw.fw_type = (enum psp_gfx_fw_type)u->psp_type;
-    ret = psp13_cmd_submit(psp, &cmd);
+    cmd->cmd_id = GFX_CMD_ID_LOAD_IP_FW;
+    cmd->cmd.cmd_load_ip_fw.fw_phy_addr_lo = (uint32_t)mc;
+    cmd->cmd.cmd_load_ip_fw.fw_phy_addr_hi = (uint32_t)(mc >> 32);
+    cmd->cmd.cmd_load_ip_fw.fw_size = u->size;
+    cmd->cmd.cmd_load_ip_fw.fw_type = (enum psp_gfx_fw_type)u->psp_type;
+    ret = psp13_cmd_submit(psp, cmd);
     if (!ret && u->ucode_id < 64)
-        psp->ucode_tmr_mc[u->ucode_id] = cmd.resp.fw_addr_lo | ((uint64_t)cmd.resp.fw_addr_hi << 32);
+        psp->ucode_tmr_mc[u->ucode_id] = cmd->resp.fw_addr_lo | ((uint64_t)cmd->resp.fw_addr_hi << 32);
+    release_psp_cmd_buf(psp);
     RLOG(psp->d, "PSP: LOAD_IP_FW %-22s %6u bytes -> %s (status 0x%x)", u->name, u->size,
          ret ? "FAILED" : "ok", psp->last_resp_status);
+    /* psp_cmd_submit_buf's warning names the ucode as amdgpu_ucode_name does */
+    if (ret)
+        RERR(psp->d, "PSP: failed to load ucode %s(0x%X)", amd_ucode_name(u->ucode_id), u->ucode_id);
     return ret;
 }
 
@@ -456,29 +535,384 @@ int psp13_load_ip_fw(rdna3_psp *psp, const amd_ucode *u, uint64_t mc)
  * in the TMR */
 int psp13_load_ip_fw_buf(rdna3_psp *psp, uint32_t fw_type, uint64_t mc, uint32_t size)
 {
-    struct psp_gfx_cmd_resp cmd;
+    struct psp_gfx_cmd_resp *cmd = acquire_psp_cmd_buf(psp);
     int ret;
 
-    bzero_local(&cmd, sizeof(cmd));
-    cmd.cmd_id = GFX_CMD_ID_LOAD_IP_FW;
-    cmd.cmd.cmd_load_ip_fw.fw_phy_addr_lo = (uint32_t)mc;
-    cmd.cmd.cmd_load_ip_fw.fw_phy_addr_hi = (uint32_t)(mc >> 32);
-    cmd.cmd.cmd_load_ip_fw.fw_size = size;
-    cmd.cmd.cmd_load_ip_fw.fw_type = (enum psp_gfx_fw_type)fw_type;
-    ret = psp13_cmd_submit(psp, &cmd);
+    cmd->cmd_id = GFX_CMD_ID_LOAD_IP_FW;
+    cmd->cmd.cmd_load_ip_fw.fw_phy_addr_lo = (uint32_t)mc;
+    cmd->cmd.cmd_load_ip_fw.fw_phy_addr_hi = (uint32_t)(mc >> 32);
+    cmd->cmd.cmd_load_ip_fw.fw_size = size;
+    cmd->cmd.cmd_load_ip_fw.fw_type = (enum psp_gfx_fw_type)fw_type;
+    ret = psp13_cmd_submit(psp, cmd);
+    release_psp_cmd_buf(psp);
     if (ret || psp->last_resp_status)
         RLOG(psp->d, "PSP: LOAD_IP_FW type %u, %u bytes -> %s (status 0x%x)", fw_type, size,
              ret ? "FAILED" : "ok", psp->last_resp_status);
     return ret;
 }
 
+/* ----------------------------- TAs ----------------------------- */
+
+static void ta_ctx_bind(rdna3_psp *psp, rdna3_psp_ta_ctx *c, int ta)
+{
+    const amd_psp_bin *b = &psp->ta.bin[ta];
+    c->bin = (psp->ta_fw && b->size) ? psp->ta_fw + b->offset : 0;
+    c->bin_size = psp->ta_fw ? b->size : 0;
+}
+
+/* psp_init_ta_microcode (parse_ta_v2_microcode): the TA file's ASD, HDCP
+ * and DTM become their contexts' bin_desc */
+int psp13_set_ta(rdna3_psp *psp, const uint8_t *fw, size_t len)
+{
+    amd_fw_status st;
+    psp->ta_fw = 0;
+    psp->ta_len = 0;
+    if (fw) {
+        st = amd_psp_ta_parse(fw, len, &psp->ta);
+        if (st != AMD_FW_OK) {
+            RERR(psp->d, "PSP: TA firmware: %s", amd_fw_status_str(st));
+            return RDNA3_EINVAL;
+        }
+        psp->ta_fw = fw;
+        psp->ta_len = len;
+    }
+    ta_ctx_bind(psp, &psp->asd, AMD_TA_ASD);
+    ta_ctx_bind(psp, &psp->hdcp, AMD_TA_HDCP);
+    ta_ctx_bind(psp, &psp->dtm, AMD_TA_DTM);
+    return RDNA3_OK;
+}
+
+/* Ported from psp_ta_init_shared_buf: 16 KiB, 4 KiB aligned, CPU visible */
+static int psp_ta_init_shared_buf(rdna3_psp *psp, rdna3_psp_ta_ctx *c)
+{
+    c->shared = rdna3_vram_alloc(psp->d, c->shared_mem_size, 4096, "psp-ta-shared");
+    if (c->shared == UINT64_MAX)
+        return RDNA3_ENOMEM;
+    rdna3_vram_fill(psp->d, c->shared, 0, c->shared_mem_size);
+    rdna3_hdp_flush(psp->d);
+    c->shared_mc = rdna3_vram_mc(psp->d, c->shared);
+    return RDNA3_OK;
+}
+
+/* Ported from psp_ta_free_shared_buf: the bump allocator frees nothing, the
+ * buffer is forgotten (it comes back with the next rdna3_vram_alloc_init) */
+static void psp_ta_free_shared_buf(rdna3_psp_ta_ctx *c)
+{
+    c->shared = UINT64_MAX;
+    c->shared_mc = 0;
+}
+
+/* Ported from psp_free_shared_bufs: the TA buffers this driver allocates
+ * (HDCP, DTM); the TMR stays with the allocator */
+static void psp_free_shared_bufs(rdna3_psp *psp)
+{
+    psp_ta_free_shared_buf(&psp->hdcp);
+    psp_ta_free_shared_buf(&psp->dtm);
+}
+
+/* Ported from psp_prep_ta_load_cmd_buf */
+static void psp_prep_ta_load_cmd_buf(struct psp_gfx_cmd_resp *cmd, uint64_t ta_bin_mc,
+                                     const rdna3_psp_ta_ctx *c)
+{
+    cmd->cmd_id = (enum psp_gfx_cmd_id)c->ta_load_type;
+    cmd->cmd.cmd_load_ta.app_phy_addr_lo = (uint32_t)ta_bin_mc;
+    cmd->cmd.cmd_load_ta.app_phy_addr_hi = (uint32_t)(ta_bin_mc >> 32);
+    cmd->cmd.cmd_load_ta.app_len = c->bin_size;
+    cmd->cmd.cmd_load_ta.cmd_buf_phy_addr_lo = (uint32_t)c->shared_mc;
+    cmd->cmd.cmd_load_ta.cmd_buf_phy_addr_hi = (uint32_t)(c->shared_mc >> 32);
+    cmd->cmd.cmd_load_ta.cmd_buf_len = c->shared_mem_size;
+}
+
+/* Ported from psp_prep_ta_unload_cmd_buf */
+static void psp_prep_ta_unload_cmd_buf(struct psp_gfx_cmd_resp *cmd, uint32_t session_id)
+{
+    cmd->cmd_id = GFX_CMD_ID_UNLOAD_TA;
+    cmd->cmd.cmd_unload_ta.session_id = session_id;
+}
+
+/* Ported from psp_prep_ta_invoke_cmd_buf */
+static void psp_prep_ta_invoke_cmd_buf(struct psp_gfx_cmd_resp *cmd, uint32_t ta_cmd_id,
+                                       uint32_t session_id)
+{
+    cmd->cmd_id = GFX_CMD_ID_INVOKE_CMD;
+    cmd->cmd.cmd_invoke_cmd.session_id = session_id;
+    cmd->cmd.cmd_invoke_cmd.ta_cmd_id = ta_cmd_id;
+}
+
+/* Ported from psp_ta_load: the TA image through fw_pri (psp_copy_fw), the
+ * session id from the response */
+int psp13_ta_load(rdna3_psp *psp, rdna3_psp_ta_ctx *c)
+{
+    struct psp_gfx_cmd_resp *cmd;
+    int ret;
+
+    if (!c->bin || !c->bin_size || c->bin_size > PSP_1_MEG)
+        return RDNA3_EINVAL;
+    cmd = acquire_psp_cmd_buf(psp);
+    rdna3_vram_fill(psp->d, psp->fw_pri, 0, PSP_1_MEG);
+    rdna3_vram_write(psp->d, psp->fw_pri, c->bin, c->bin_size);
+    rdna3_hdp_flush(psp->d);
+    psp_prep_ta_load_cmd_buf(cmd, rdna3_vram_mc(psp->d, psp->fw_pri), c);
+    ret = psp13_cmd_submit(psp, cmd);
+    c->resp_status = cmd->resp.status;
+    if (!ret)
+        c->session_id = cmd->resp.session_id;
+    release_psp_cmd_buf(psp);
+    return ret;
+}
+
+/* Ported from psp_ta_unload */
+int psp13_ta_unload(rdna3_psp *psp, rdna3_psp_ta_ctx *c)
+{
+    struct psp_gfx_cmd_resp *cmd = acquire_psp_cmd_buf(psp);
+    int ret;
+    psp_prep_ta_unload_cmd_buf(cmd, c->session_id);
+    ret = psp13_cmd_submit(psp, cmd);
+    c->resp_status = cmd->resp.status;
+    release_psp_cmd_buf(psp);
+    return ret;
+}
+
+/* Ported from psp_ta_invoke */
+int psp13_ta_invoke(rdna3_psp *psp, uint32_t ta_cmd_id, rdna3_psp_ta_ctx *c)
+{
+    struct psp_gfx_cmd_resp *cmd = acquire_psp_cmd_buf(psp);
+    int ret;
+    psp_prep_ta_invoke_cmd_buf(cmd, ta_cmd_id, c->session_id);
+    ret = psp13_cmd_submit(psp, cmd);
+    c->resp_status = cmd->resp.status;
+    release_psp_cmd_buf(psp);
+    return ret;
+}
+
+/* Ported from psp_asd_initialize (bare metal; the card has display
+ * hardware, so MP0 13.0.10 does not bypass it) */
+int psp13_asd_initialize(rdna3_psp *psp)
+{
+    int ret;
+    if (!psp->asd.bin_size)
+        return RDNA3_OK;
+    psp->asd.shared_mc = 0;
+    psp->asd.shared_mem_size = PSP_ASD_SHARED_MEM_SIZE;
+    psp->asd.ta_load_type = GFX_CMD_ID_LOAD_ASD;
+    ret = psp13_ta_load(psp, &psp->asd);
+    if (!ret)
+        psp->asd.initialized = 1;
+    RLOG(psp->d, "PSP: LOAD_ASD %u bytes -> %s (session 0x%x, status 0x%x)", psp->asd.bin_size,
+         ret ? "FAILED" : "ok", psp->asd.session_id, psp->asd.resp_status);
+    return ret;
+}
+
+/* Ported from psp_asd_terminate */
+int psp13_asd_terminate(rdna3_psp *psp)
+{
+    int ret;
+    if (!psp->asd.initialized)
+        return RDNA3_OK;
+    ret = psp13_ta_unload(psp, &psp->asd);
+    if (!ret)
+        psp->asd.initialized = 0;
+    return ret;
+}
+
+static int ta_initialize(rdna3_psp *psp, rdna3_psp_ta_ctx *c, uint32_t size, const char *name)
+{
+    int ret;
+    if (!c->bin_size || !c->bin) {
+        RLOG(psp->d, "%s: optional %s ta ucode is not available", name, name);
+        return RDNA3_OK;
+    }
+    c->shared_mem_size = size;
+    c->ta_load_type = GFX_CMD_ID_LOAD_TA;
+    if (c->shared == UINT64_MAX) {
+        ret = psp_ta_init_shared_buf(psp, c);
+        if (ret)
+            return ret;
+    }
+    ret = psp13_ta_load(psp, c);
+    if (!ret)
+        c->initialized = 1;
+    RLOG(psp->d, "PSP: LOAD_TA %s %u bytes -> %s (session 0x%x, status 0x%x)", name, c->bin_size,
+         ret ? "FAILED" : "ok", c->session_id, c->resp_status);
+    return ret;
+}
+
+static int ta_terminate(rdna3_psp *psp, rdna3_psp_ta_ctx *c)
+{
+    int ret;
+    if (!c->initialized)
+        return RDNA3_OK;
+    ret = psp13_ta_unload(psp, c);
+    c->initialized = 0;
+    return ret;
+}
+
+/* Ported from psp_hdcp_initialize */
+int psp13_hdcp_initialize(rdna3_psp *psp)
+{
+    return ta_initialize(psp, &psp->hdcp, PSP_HDCP_SHARED_MEM_SIZE, "HDCP");
+}
+
+/* Ported from psp_hdcp_invoke */
+int psp13_hdcp_invoke(rdna3_psp *psp, uint32_t ta_cmd_id)
+{
+    if (!psp->hdcp.initialized)
+        return RDNA3_EINVAL;
+    return psp13_ta_invoke(psp, ta_cmd_id, &psp->hdcp);
+}
+
+/* Ported from psp_hdcp_terminate */
+int psp13_hdcp_terminate(rdna3_psp *psp)
+{
+    return ta_terminate(psp, &psp->hdcp);
+}
+
+/* Ported from psp_dtm_initialize */
+int psp13_dtm_initialize(rdna3_psp *psp)
+{
+    return ta_initialize(psp, &psp->dtm, PSP_DTM_SHARED_MEM_SIZE, "DTM");
+}
+
+/* Ported from psp_dtm_invoke */
+int psp13_dtm_invoke(rdna3_psp *psp, uint32_t ta_cmd_id)
+{
+    if (!psp->dtm.initialized)
+        return RDNA3_EINVAL;
+    return psp13_ta_invoke(psp, ta_cmd_id, &psp->dtm);
+}
+
+/* Ported from psp_dtm_terminate */
+int psp13_dtm_terminate(rdna3_psp *psp)
+{
+    return ta_terminate(psp, &psp->dtm);
+}
+
+/* Ported from psp_rl_load: the register list binary of the sOS file
+ * (PSP_FW_TYPE_PSP_RL) through fw_pri, LOAD_IP_FW GFX_FW_TYPE_REG_LIST */
+int psp13_rl_load(rdna3_psp *psp)
+{
+    const amd_psp_bin *rl = &psp->sos.bin[AMD_PSP_BIN_RL];
+    struct psp_gfx_cmd_resp *cmd;
+    uint64_t mc;
+    int ret;
+
+    if (!rl->size)   /* is_psp_fw_valid */
+        return RDNA3_OK;
+    ret = psp13_copy_fw(psp, AMD_PSP_BIN_RL);
+    if (ret)
+        return ret;
+    mc = rdna3_vram_mc(psp->d, psp->fw_pri);
+    cmd = acquire_psp_cmd_buf(psp);
+    cmd->cmd_id = GFX_CMD_ID_LOAD_IP_FW;
+    cmd->cmd.cmd_load_ip_fw.fw_phy_addr_lo = (uint32_t)mc;
+    cmd->cmd.cmd_load_ip_fw.fw_phy_addr_hi = (uint32_t)(mc >> 32);
+    cmd->cmd.cmd_load_ip_fw.fw_size = rl->size;
+    cmd->cmd.cmd_load_ip_fw.fw_type = GFX_FW_TYPE_REG_LIST;
+    ret = psp13_cmd_submit(psp, cmd);
+    release_psp_cmd_buf(psp);
+    psp->rl_loaded = !ret;
+    RLOG(psp->d, "PSP: LOAD_IP_FW REG_LIST %u bytes -> %s (status 0x%x)", rl->size,
+         ret ? "FAILED" : "ok", psp->last_resp_status);
+    return ret;
+}
+
+/* Ported from psp_prep_tmr_unload_cmd_buf (bare metal: DESTROY_TMR) */
+static void psp_prep_tmr_unload_cmd_buf(struct psp_gfx_cmd_resp *cmd)
+{
+    cmd->cmd_id = GFX_CMD_ID_DESTROY_TMR;
+}
+
+/* Ported from psp_tmr_unload */
+static int psp_tmr_unload(rdna3_psp *psp)
+{
+    struct psp_gfx_cmd_resp *cmd = acquire_psp_cmd_buf(psp);
+    int ret;
+    psp_prep_tmr_unload_cmd_buf(cmd);
+    RDBG(psp->d, "PSP: free PSP TMR buffer");
+    ret = psp13_cmd_submit(psp, cmd);
+    release_psp_cmd_buf(psp);
+    return ret;
+}
+
+/* Ported from psp_tmr_terminate */
+int psp13_tmr_terminate(rdna3_psp *psp)
+{
+    return psp_tmr_unload(psp);
+}
+
+/* Ported from psp_hw_fini: no RAS, RAP, secure display or XGMI TA runs
+ * on this card */
+int psp13_hw_fini(rdna3_psp *psp)
+{
+    if (psp->ta_fw) {
+        psp13_dtm_terminate(psp);
+        psp13_hdcp_terminate(psp);
+    }
+    psp13_asd_terminate(psp);
+    psp13_tmr_terminate(psp);
+    psp13_ring_destroy(psp);
+    psp_free_shared_bufs(psp);
+    return RDNA3_OK;
+}
+
+/* Ported from psp_suspend: the TAs, ASD and the TMR go, the ring stops */
+int psp13_suspend(rdna3_psp *psp)
+{
+    int ret;
+    if (psp->ta_fw) {
+        ret = psp13_hdcp_terminate(psp);
+        if (ret) {
+            RERR(psp->d, "PSP: Failed to terminate hdcp ta");
+            return ret;
+        }
+        ret = psp13_dtm_terminate(psp);
+        if (ret) {
+            RERR(psp->d, "PSP: Failed to terminate dtm ta");
+            return ret;
+        }
+    }
+    ret = psp13_asd_terminate(psp);
+    if (ret) {
+        RERR(psp->d, "PSP: Failed to terminate asd");
+        return ret;
+    }
+    ret = psp13_tmr_terminate(psp);
+    if (ret) {
+        RERR(psp->d, "PSP: Failed to terminate tmr");
+        return ret;
+    }
+    ret = psp13_ring_stop(psp);
+    if (ret)
+        RERR(psp->d, "PSP: ring stop failed");
+    return ret;
+}
+
 /* --------------------------- hw_init --------------------------- */
 
+/* psp_load_smu_fw (not in a BACO runtime suspend, not SR-IOV) */
+static int psp_load_smu_fw(rdna3_psp *psp, const amd_ucode_plan *plan, const uint64_t *mc)
+{
+    const amd_ucode *smc = amd_ucode_plan_find(plan, AMD_UCODE_SMC);
+    int ret;
+    if (!smc)
+        return RDNA3_OK;
+    ret = psp13_load_ip_fw(psp, smc, mc[smc - plan->ucode]);
+    if (ret)
+        RERR(psp->d, "PSP: load smu failed!");
+    return ret;
+}
+
+/* psp_hw_init -> amdgpu_ucode_init_bo (psp13_stage_ucodes) + psp_load_fw:
+ * psp_hw_start, psp_load_non_psp_fw, then (rdna3amdgpu=1) ASD, the RL and
+ * the TAs */
 int psp13_hw_init(rdna3_psp *psp, const amd_ucode_plan *plan,
                   const amd_fw_blob_ref blobs[AMD_BLOB_COUNT])
 {
     static uint64_t mc[AMD_UCODE_MAX];
-    const amd_ucode *smc;
+    rdna3_dev *d = psp->d;
+    /* the verified default loads the PMFW before SETUP_TMR, as amdgpu
+     * does where the PMFW manages DF C-states (not MP0 13.0.10) */
+    int centralized = d->amdgpu_exact ? psp->pmfw_centralized_cstate_management : 1;
     uint32_t i;
     int ret;
 
@@ -489,33 +923,42 @@ int psp13_hw_init(rdna3_psp *psp, const amd_ucode_plan *plan,
     ret = psp13_ring_create(psp);
     if (ret)
         return ret;
-    ret = psp13_tmr_init(psp);
-    if (ret)
-        return ret;
-    ret = psp13_stage_ucodes(psp, plan, blobs, mc);
-    if (ret)
-        return ret;
-
-    /* pmfw_centralized_cstate_management: PMFW before SETUP_TMR */
-    smc = amd_ucode_plan_find(plan, AMD_UCODE_SMC);
-    if (smc) {   /* psp_load_smu_fw() */
-        ret = psp13_load_ip_fw(psp, smc, mc[smc - plan->ucode]);
+    if (!psp->boot_time_tmr || psp->autoload_supported) {
+        ret = psp13_tmr_init(psp);
         if (ret)
             return ret;
     }
-    ret = psp13_tmr_load(psp);
+    ret = psp13_stage_ucodes(psp, plan, blobs, mc);
     if (ret)
         return ret;
+    /* "For ASICs with DF Cstate management centralized to PMFW, TMR setup
+     * should be performed after PMFW loaded and before other non-psp
+     * firmware loaded." */
+    if (centralized) {
+        ret = psp_load_smu_fw(psp, plan, mc);
+        if (ret)
+            return ret;
+    }
+    if (!psp->boot_time_tmr || !psp->autoload_supported) {
+        ret = psp13_tmr_load(psp);
+        if (ret)
+            return ret;
+    }
 
     /* psp_load_non_psp_fw() */
+    if (psp->autoload_supported && !centralized) {
+        ret = psp_load_smu_fw(psp, plan, mc);
+        if (ret)
+            return ret;
+    }
     for (i = 0; i < plan->count; i++) {
         const amd_ucode *u = &plan->ucode[i];
         if (u->ucode_id == AMD_UCODE_SMC)
-            continue; /* fw_load_skip_check(): already loaded */
+            continue; /* fw_load_skip_check(): autoload / centralized loaded it */
         ret = psp13_load_ip_fw(psp, u, mc[i]);
         if (ret)
             return ret;
-        if (u->ucode_id == AMD_UCODE_RLC_G) {
+        if (psp->autoload_supported && u->ucode_id == AMD_UCODE_RLC_G) {
             ret = psp13_autoload_rlc(psp);
             if (ret) {
                 RERR(psp->d, "PSP: failed to start RLC autoload");
@@ -524,5 +967,29 @@ int psp13_hw_init(rdna3_psp *psp, const amd_ucode_plan *plan,
             RLOG(psp->d, "PSP: RLC autoload started");
         }
     }
+    if (!d->amdgpu_exact)
+        return RDNA3_OK;
+
+    /* psp_load_fw, after psp_load_non_psp_fw */
+    ret = psp13_asd_initialize(psp);
+    if (ret) {
+        RERR(d, "PSP: load asd failed!");
+        goto failed;
+    }
+    ret = psp13_rl_load(psp);
+    if (ret) {
+        RERR(d, "PSP: load RL failed!");
+        goto failed;
+    }
+    if (psp->ta_fw) {
+        if (psp13_hdcp_initialize(psp))
+            RERR(d, "HDCP: Failed to initialize HDCP");
+        if (psp13_dtm_initialize(psp))
+            RERR(d, "DTM: Failed to initialize DTM");
+    }
     return RDNA3_OK;
+failed:
+    psp_free_shared_bufs(psp);
+    psp13_ring_destroy(psp);
+    return ret;
 }

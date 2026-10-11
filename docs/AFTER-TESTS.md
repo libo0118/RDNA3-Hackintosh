@@ -657,6 +657,37 @@ by hand runs the same path.
 | `--vcn-test (after the wake)` fence did NOT signal, before the sleep fine | fw_shared / stack restored wrong (the copy came back over a different BO layout) or the ring write-back page | `RDNA3,VCNResumes`, the IB test results after the wake |
 | both `--vcn-test` pass, every head back | pass | `vcnsleep <date> vm` into `docs/status/hw-verified.txt`, regenerate |
 
+---
+
+### Step `amdgpu` (default profile + `rdna3amdgpu=1`): amdgpu's own sequence
+
+The boot-arg switches every place where the profile verified on the card
+does something else than amdgpu to amdgpu's own code (stage 4 item J;
+`rdna3_dev.amdgpu_exact`). Read the report like step `default` first;
+`RDNA3,AmdgpuExact = 1` says the boot-arg was seen. Then, area by area:
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `RDNA3,PSPResult` nonzero, `PSP: load ... SMC` failed or the PMFW never answers (`SMU: not ready`) | the PMFW loaded after SETUP_TMR (`psp_load_fw` order without centralized C-state management) is refused | the `PSP:` lines around `SETUP_TMR` and `LOAD_IP_FW SMU`; compare with step `default` (PMFW before the TMR) |
+| `PSP: load asd failed!`, `PSP: LOAD_TA hdcp/dtm ... status` nonzero, `load RL failed!` | the TA file (`psp_13_0_10_ta.bin`) missing from the bundle, or the PSP refuses a TA / the register list | the bring-up stops there (amdgpu does the same); the `PSP:` lines; boot without the boot-arg |
+| `SMU: OverridePcieParameters failed`, `Failed to enable thermal alert`, `Failed to notify display change` | `smu_smc_hw_setup`'s order refused by the PMFW (every PCIe level after EnableAllSmuFeatures, THM / MP1 interrupt registers, `DALNotPresent`) | `RDNA3,PMResult`; the `SMU:` lines with the message and response; `RDNA3,PMPcieLevels` |
+| `GPU SW CTF` / `GPU HW CTF` / `thermal emergency` in the log, the machine powers down | the THM alert fired: either a real over-temperature or `DIG_THERM_INTH` programmed wrong | `RDNA3,PMSmuInterrupts`, the hotspot in the report; if the card was cool, send the log (the IV's client / source) |
+| `IH: no system memory rings, back to VRAM` | the system pages or their GART binding failed | `RDNA3,IHSystemMemory = 0`; the rest of the step still runs on the VRAM ring |
+| `RDNA3,IHSystemMemory = 1` but fences time out, `RDNA3,IRQIVs` stays flat or IVs arrive late | IH writes into snooped system memory not seen, or the rptr doorbell not routed (`S2A_DOORBELL_ENTRY_1_CTRL`) and the ring fills up (`IH ring buffer overflow`) | `RDNA3,IRQIVs`, the overflow lines; compare with step `default` |
+| VM faults (`RDNA3,VMFaults` > 0) in the DMA/GFX/Vulkan tests that step `default` does not show | the page tables with fragments / huge PDEs (`amdgpu_vm_ptes_update`), or a compute VMID (8-15) handed to graphics | `RDNA3,LastFaultAddr` / `LastFaultVMID`; a VMID >= 8 there is a driver bug |
+| `RDNA3,IBTestGFX` / `IBTestCOMP` nonzero, `GFX: IB test failed` / `KCQ: IB test failed` | an IB in VMID 0 (`gfx_v11_0_ring_test_ib`) not fetched, or the 256-dword NOP padding of the rings (`gfx_v11_ring_insert_nop`) not accepted by the CP | the `GFX:` status dump after it; compare `RDNA3,ComputeRings` (should read `comp_1.0.0 comp_1.1.0 ... comp_1.3.1`) |
+| `Illegal opcode / register access / instruction in command stream` in the log, `hang:` recovery right after | a CP fault interrupt (`RDNA3,CPFaultIrqs = 1`, gfx_v11_0_late_init) named the ring and recovery started at once (drm_sched_fault) | the job the client ran; if the line repeats without a client running, send the log (ring_id) |
+| compute jobs slower or GFX starved while a compute job runs | KCQ 0 now runs at amdgpu's high priority (pipe HIGH, queue 15, tunneling) | expected with this step; note it in the report |
+| `GMC: failed to write reg ... wait reg ...`, a VM map or unmap stalls for seconds | the TLB invalidation through the KIQ (`gmc_v11_0_flush_gpu_tlb` -> `amdgpu_gmc_fw_reg_write_reg_wait`) did not finish: the KIQ (MES pipe 1) does not run the WAIT_REG_MEM write-and-wait | the KIQ lines; compare with step `default` (MMIO invalidation) |
+| VM faults whose PASID is 0 or another process's | the IH LUT (`IH_VMID_n_LUT`) not written by the job's PASID mapping (`gmc_v11_0_emit_pasid_mapping`) | `RDNA3,LastFaultVMID`; send the log |
+| `GPU reset ... FAILED` where step `default` recovers | the suspend amdgpu does before a full reset (GFX hw_fini, `psp_suspend`, IH and GMC off) left something the bring-up does not expect | the `hang:` lines; boot without the boot-arg |
+| with `rdna3mes=1` too: `MES: failed to reg_write_reg_wait`, `failed to map legacy queue`, `ring reset failed` | the MES firmware refuses a MISC / legacy-queue frame (TLB invalidations go through the MES once it runs; a hung GFX or compute ring is reset through it first) | `RDNA3,MESSchedVersion`, the `MES:` and `hang:` lines; boot without `rdna3mes=1` to separate the two |
+| `RDNA3,IBTestSDMA` nonzero, `SDMA: IB test failed`, or DMA jobs (libdrm / Vulkan transfer) time out where step `default` runs them | the DMA ring as amdgpu drives it: 16-dword padding with burst NOPs (`RDNA3,SDMABurstNop`), COND_EXE on the ring's write-back slot, or the VM flush on the ring's own invalidation engine (`RDNA3,SDMAVmInvEng`, should read 12) not acked | the `SDMA` status dump after the hang; `RDNA3,SDMAResets`; send the log |
+| `firmware ...: failed to validate`, `RDNA3,FirmwareNameMismatch` nonzero, or `RDNA3,XclkKHz` / `VRAMType` / `VRAMWidth` / `MALLSizeMB` not 100000 / 9 / 256 / 64 | a firmware file whose header size is not the file size (amdgpu_ucode_validate), the bundle's file names not the ones the discovered IP versions give, or the VBIOS / discovery tables read differently from Linux (card dump: GDDR6, 16 channels, 100 MHz reference, MALL 16 MiB x 4 UMC) | reinstall the firmware; send the log and `ioreg` lines |
+| `reset on init: the PSP sOS already runs` and no picture afterwards, `RDNA3,ResetOnInit` nonzero, or `RDNA3,ASPMProgrammed = 1` with link errors / a hang in the first seconds | a kext reload found the sOS running and did amdgpu's mode-1 reset on init (expected only after a reload, never after a cold boot), or ASPM / LTR programmed because the link reports ASPM enabled (Linux on the card: "ASPM Disabled") | send the log; boot without the boot-arg to compare |
+| black screen or no picture after the driver unloads | `gmc_v11_0_hw_fini` / `gfxhub_v3_0_3_gart_disable` at unload switch the hubs off as amdgpu does | expected only at unload; reboot |
+| everything as in step `default` | pass | `amdgpu <date> vm` into `docs/status/hw-verified.txt`, regenerate |
+
 ## 4. When steps 0–8 pass: next work, in order
 
 1. Default `rdna3lvl` to the highest level that passed twice (boot-args stay

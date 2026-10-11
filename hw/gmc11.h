@@ -28,6 +28,12 @@ extern "C" {
 #define RD_PTE_READABLE    (1ull << 5)
 #define RD_PTE_WRITEABLE   (1ull << 6)
 #define RD_PTE_MTYPE_NV10(m) ((uint64_t)(m) << 48)
+#define RD_PTE_FRAG(x)     (((uint64_t)(x) & 0x1full) << 7)
+#define RD_PTE_PRT         (1ull << 51)
+#define RD_PDE_PTE         (1ull << 54)   /* a PDE that maps (huge page) */
+#define RD_PTE_TF          (1ull << 56)
+#define RD_VM_NORETRY_FLAGS    (RD_PTE_EXECUTABLE | RD_PDE_PTE | RD_PTE_TF)
+#define RD_VM_NORETRY_FLAGS_TF (RD_PTE_VALID | RD_PTE_SYSTEM | RD_PTE_PRT)
 #define RD_MTYPE_NC 0
 #define RD_MTYPE_UC 3
 
@@ -92,6 +98,20 @@ typedef struct rdna3_vm_flush_regs {
     uint32_t req_val;        /* get_invalidate_req(vmid, 0) */
 } rdna3_vm_flush_regs;
 void gfxhub303_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o);
+/* the same for the MMHUB (mmhub_v3_0: vm_inv_eng0_req / ack, get_invalidate_req) */
+void mmhub302_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o);
+/* gmc_v11_0_emit_pasid_mapping: the register a ring writes the job's PASID
+ * to, IH_VMID_0_LUT + vmid on the GFXHUB, IH_VMID_0_LUT_MM + vmid on the
+ * MMHUB (the IH fills an IV's PASID from it) */
+uint32_t gmc11_pasid_mapping_reg(rdna3_dev *d, uint32_t vmid, int mmhub);
+/* gmc_v11_0_get_vbios_fb_size: the pre-OS scanout (AMDGPU_VBIOS_VGA_ALLOCATION
+ * in VGA mode, else HUBP0's viewport height x pitch x 4) */
+#define RD_VBIOS_VGA_ALLOCATION (9u * 1024 * 1024)
+uint32_t gmc11_get_vbios_fb_size(rdna3_dev *d);
+/* amdgpu_gmc_get_vbios_allocations (display hardware, no VF): the stolen
+ * VGA and extended sizes amdgpu reserves at the bottom of VRAM */
+void gmc11_get_vbios_allocations(rdna3_dev *d, uint64_t real_vram_size, uint64_t *stolen_vga,
+                                 uint64_t *stolen_extended);
 /* program VMID n's page directory base (gfxhub_v3_0_3_setup_vm_pt_regs) */
 void gfxhub303_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd_addr);
 
@@ -103,6 +123,21 @@ int      mmhub302_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type);
 void     mmhub302_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd_addr);
 uint64_t mmhub302_get_fb_location(rdna3_dev *d);
 uint64_t mmhub302_get_mc_fb_offset(rdna3_dev *d);
+/* gfxhub_v3_0_3_gart_disable (gfx_v11_0_hw_fini), _get_mc_fb_offset */
+void     gfxhub303_gart_disable(rdna3_dev *d);
+uint64_t gfxhub303_get_mc_fb_offset(rdna3_dev *d);
+/* gmc_v11_0_gart_disable (MMHUB) / gmc_v11_0_hw_fini (VM fault interrupts
+ * off, then the GART) */
+void     gmc11_gart_disable(rdna3_dev *d);
+void     gmc11_hw_fini(rdna3_dev *d);
+/* amdgpu_gmc_allocate_vm_inv_eng: the invalidation engine of each ring
+ * (ring_hub[i] = RD_VMHUB_*, in amdgpu's ring order) */
+#define RD_VMHUB_GFX   0
+#define RD_VMHUB_MM    1
+#define RD_VMHUB_COUNT 2
+#define RD_VM_INV_ENG_NONE 0xffffffffu
+int      gmc11_allocate_vm_inv_eng(const uint32_t *ring_hub, const int *ring_is_mes, uint32_t n,
+                                   int enable_mes, uint32_t *eng);
 /* gmc_v11_0_gart_enable(): MMHUB GART + fault defaults + VMID0 flush */
 int      gmc11_gart_enable(rdna3_dev *d, rdna3_gmc *g);
 

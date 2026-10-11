@@ -112,6 +112,17 @@
 #define RD_OD_SET_FAN_ZERO_RPM_STOP_TEMP 12
 #define RD_OD_SET_COUNT                  13
 
+/* enum amd_dpm_forced_level (amd_shared.h) */
+#define RD_DPM_FORCED_LEVEL_AUTO             0x1u
+#define RD_DPM_FORCED_LEVEL_MANUAL           0x2u
+#define RD_DPM_FORCED_LEVEL_LOW              0x4u
+#define RD_DPM_FORCED_LEVEL_HIGH             0x8u
+#define RD_DPM_FORCED_LEVEL_PROFILE_STANDARD 0x10u
+#define RD_DPM_FORCED_LEVEL_PROFILE_MIN_SCLK 0x20u
+#define RD_DPM_FORCED_LEVEL_PROFILE_MIN_MCLK 0x40u
+#define RD_DPM_FORCED_LEVEL_PROFILE_PEAK     0x80u
+#define RD_DPM_FORCED_LEVEL_PROFILE_EXIT     0x100u
+#define RD_DPM_FORCED_LEVEL_PERF_DETERMINISM 0x200u
 enum rdna3_pmctl_op {
     RD_PMCTL_INFO = 0,       /* -> reply.info */
     RD_PMCTL_FAN_MODE,       /* a[0] = RD_FAN_CTRL_* (amdgpu pwm1_enable) */
@@ -125,6 +136,7 @@ enum rdna3_pmctl_op {
     RD_PMCTL_FORCE_LEVELS,   /* a[0] = RD_PP_*CLK, a[1] = level mask (pp_dpm_*) */
     RD_PMCTL_DF_CSTATE,      /* a[0] = 0 disallow, 1 allow */
     RD_PMCTL_BACO_CYCLE,     /* enter BACO, exit, bring the GPU up again */
+    RD_PMCTL_PERF_LEVEL,     /* a[0] = RD_DPM_FORCED_LEVEL_* (power_dpm_force_performance_level) */
     RD_PMCTL_OP_COUNT
 };
 

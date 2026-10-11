@@ -30,6 +30,8 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IODMACommand.h>
 
 extern "C" {
 #include "rdna3_hw.h"
@@ -100,6 +102,8 @@ public:
 
     /* MSI: called on the work loop for every interrupt */
     void  handleInterrupt();
+    /* amdgpu_pci_shutdown with rdna3amdgpu=1 (DRM lock held) */
+    void  pmShutdown();
 
     /* user queues (boot-arg rdna3userq=1 with the MES scheduler, amdgpu's
      * user_queue=1): a queue's MQD (adev->mqds[ip].init_mqd), MES ADD_QUEUE /
@@ -182,12 +186,53 @@ private:
     amd_ucode_plan *fPlan = nullptr;
     rdna3_gmc    *fGmc    = nullptr;   /* level 6 */
     rdna3_ih     *fIh     = nullptr;   /* level 6 */
+    /* rdna3amdgpu=1: IH rings 0 and 1 in system memory (amdgpu's GTT
+     * rings), mapped at the bottom of the GART */
+    struct IhSys {
+        IOBufferMemoryDescriptor *md;
+        IODMACommand             *dma;
+        uint64_t                  pages[RD_IH_RING_SIZE / 4096 + 1];
+    };
+    IhSys            fIhSys[2] = {};
+    rdna3_ih        *fIh1 = nullptr;
+    bool             ihSysAlloc();
+    void             ihSysFree();
     rdna3_sdma_ring *fSdma = nullptr;  /* level 7 */
     rdna3_gfx_ring  *fGfx  = nullptr;  /* level 8 */
     rdna3_mec_ring  *fKiq  = nullptr;  /* level 8, with doorbells */
     rdna3_mec_ring  *fKcq  = nullptr;  /* level 8: the first kernel compute queue */
     struct rdna3_mes *fMes = nullptr;  /* level 8 + rdna3mes=1: MES scheduler pipe (C1) */
     bool             fMesWanted = false;
+    /* rdna3amdgpu=1: amdgpu's own sequence where the verified default
+     * differs (rdna3_dev.amdgpu_exact); ladder step amdgpu */
+    bool             fAmdgpuExact = false;
+    /* rdna3amdgpu=1: gfx_v11_0_sw_init's queue topology (ring names, KCQ
+     * priority), the CP fault IVs of gfx_v11_0_late_init and
+     * drm_sched_fault: a ring whose job faulted (bit AMDGPU_HW_IP_GFX /
+     * _COMPUTE) is recovered by the next fence wait right away */
+    rdna3_gfx_topo   fGfxTopo = {};
+    /* rdna3amdgpu=1: the PASID each GFXHUB VMID's IH LUT entry holds
+     * (amdgpu_vmid id->pasid); 0 = none / unknown */
+    uint32_t         fVmidPasid[16] = {};
+    volatile uint32_t fSchedFault = 0;
+    uint64_t         fCpFaults = 0;
+    uint64_t         fIbTestBuf = UINT64_MAX;
+    void             gfxSuspend();
+    void             fenceDriverHwFini();
+    /* rdna3amdgpu=1: the SMU's thermal / MP1 IVs (smu_v13_0_irq_process).
+     * The hardware CTF is handled in the IV callback; whatever needs the
+     * PMFW mailbox runs from fSmuIrqCall under the DRM lock (50 ms later
+     * for the software CTF check, AMDGPU_SWCTF_EXTRA_DELAY) */
+    struct thread_call *fSmuIrqCall = nullptr;
+    struct SmuIv { uint32_t client, src, ctx; };
+    static const uint32_t kSmuIvMax = 8;
+    SmuIv            fSmuIrqQ[kSmuIvMax] = {};
+    uint32_t         fSmuIrqN = 0;           /* under fIhLock */
+    bool             fSmuIrqStop = false;
+    uint64_t         fSmuIrqs = 0;
+    void             smuIrq(const rdna3_iv *iv);
+    static void      smuIrqTick(void *owner, void *);
+    void             overTemp(const char *why);
     /* user queues: rdna3userq=1 (needs the MES, so it turns rdna3mes on);
      * the IPs that got them, the PASIDs the VMs' processes have for the MES,
      * GART slots of user queue wptr BOs (under the user fence slots) */
@@ -294,6 +339,7 @@ private:
     volatile bool fVmReady = false;
     void          vmFlush(uint32_t vmid);
     RDNA3Firmware fSos    = {};
+    RDNA3Firmware fTa     = {};   /* psp_13_0_10_ta.bin, kept with rdna3amdgpu=1 (ASD, HDCP, DTM) */
     RDNA3Firmware fBlobs[AMD_BLOB_COUNT] = {};
 
     /* firmware request rendezvous */

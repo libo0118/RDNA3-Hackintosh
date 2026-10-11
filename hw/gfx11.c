@@ -13,6 +13,7 @@
 #include "gen/gc_11_0_0_cg.h"
 #include "gen/gc_11_0_0_pm.h"
 #include "gen/gc_11_0_0_userq.h"
+#include "gen/gc_11_0_0_irq.h"
 #include "clearstate_defs.h"
 #include "clearstate_gfx11.h"
 #include "amdgpu_ucode_hdr.h"
@@ -39,10 +40,11 @@
     ((SH_MEM_ADDRESS_MODE_64 << SH_MEM_CONFIG__ADDRESS_MODE__SHIFT) | \
      (SH_MEM_ALIGNMENT_MODE_UNALIGNED << SH_MEM_CONFIG__ALIGNMENT_MODE__SHIFT) | \
      (3 << SH_MEM_CONFIG__INITIAL_INST_PREFETCH__SHIFT))
-#define SHARED_APERTURE_START  0x2000000000000000ull   /* gmc_v11_0_sw_init */
+#define SHARED_APERTURE_START  0x2000000000000000ull   /* gmc_v11_0_early_init */
 #define PRIVATE_APERTURE_START 0x1000000000000000ull
 #define CACHE_FLUSH_AND_INV_TS_EVENT 0x14
 #define MAX_HW_CONTEXTS 8
+#define GFX11_RING_NOP PACKET3(PACKET3_NOP, 0x3FFF)   /* ring->funcs->nop */
 
 /* clear-state staging (kernel stacks are small; bring-up is single threaded) */
 static uint32_t g_csb[1024];
@@ -188,11 +190,53 @@ static void init_gds_vmid(rdna3_dev *d)
     }
 }
 
+/* gc_11_0_0_offset.h / _sh_mask.h */
+#define regSPI_GDBG_PER_VMID_CNTL                0x1f72
+#define regSPI_GDBG_PER_VMID_CNTL_BASE_IDX       0
+#define SPI_GDBG_PER_VMID_CNTL__TRAP_EN__SHIFT   0x3
+#define SPI_GDBG_PER_VMID_CNTL__TRAP_EN_MASK     0x00000008u
+/* gfx_v11_0.c */
+#define LDS_APP_BASE           0x1
+#define SCRATCH_APP_BASE       0x2
+
+/* Ported from gfx_v11_0_init_compute_vmid (rdna3amdgpu=1): VMIDs
+ * first_kfd_vmid..15 get the compute apertures and the trap enabled
+ *   LDS:     0x60000000'00000000 - 0x60000001'00000000 (4GB)
+ *   Scratch: 0x60000001'00000000 - 0x60000002'00000000 (4GB)
+ *   GPUVM:   0x60010000'00000000 - 0x60020000'00000000 (1TB)
+ * and no GDS, GWS or OA */
+static void gfx_v11_0_init_compute_vmid(rdna3_dev *d)
+{
+    uint32_t i, data, sh_mem_bases;
+    sh_mem_bases = (LDS_APP_BASE << SH_MEM_BASES__SHARED_BASE__SHIFT) | SCRATCH_APP_BASE;
+    for (i = RD_FIRST_KFD_VMID; i < 16; i++) {
+        grbm_select(d, 0, 0, 0, i);
+        /* CP and shaders */
+        WG(d, regSH_MEM_CONFIG, DEFAULT_SH_MEM_CONFIG);
+        WG(d, regSH_MEM_BASES, sh_mem_bases);
+        /* Enable trap for each kfd vmid. */
+        data = RG(d, regSPI_GDBG_PER_VMID_CNTL);
+        data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, TRAP_EN, 1);
+        WG(d, regSPI_GDBG_PER_VMID_CNTL, data);
+    }
+    grbm_select(d, 0, 0, 0, 0);
+    /* Initialize all compute VMIDs to have no GDS, GWS, or OA acccess.
+     * These should be enabled by FW for target VMIDs. */
+    for (i = RD_FIRST_KFD_VMID; i < 16; i++) {
+        rdna3_wreg(d, OFF(d, regGDS_VMID0_BASE) + 2 * i, 0);
+        rdna3_wreg(d, OFF(d, regGDS_VMID0_SIZE) + 2 * i, 0);
+        rdna3_wreg(d, OFF(d, regGDS_GWS_VMID0) + i, 0);
+        rdna3_wreg(d, OFF(d, regGDS_OA_VMID0) + i, 0);
+    }
+}
+
 /* gfx_v11_0_constants_init, minus what discovery already gave us (RB/CU
- * info) and the compute VMID setup (with the compute queues) */
+ * info). The SH_MEM apertures go to the graphics VMIDs (id_mgr num_ids =
+ * first_kfd_vmid) and gfx_v11_0_init_compute_vmid sets up the rest with
+ * rdna3amdgpu=1; the verified default gives all 16 the graphics apertures */
 static void constants_init(rdna3_dev *d)
 {
-    uint32_t tmp, i;
+    uint32_t tmp, i, num_ids = d->amdgpu_exact ? RD_FIRST_KFD_VMID : 16;
 
     tmp = RG(d, regGRBM_CNTL);
     tmp = REG_SET_FIELD(tmp, GRBM_CNTL, READ_TIMEOUT, 0xff);
@@ -202,7 +246,7 @@ static void constants_init(rdna3_dev *d)
     tmp = REG_SET_FIELD(tmp, DB_RING_CONTROL, COUNTER_CONTROL, 1);
     WG(d, regDB_RING_CONTROL, tmp);
 
-    for (i = 0; i < 16; i++) {
+    for (i = 0; i < num_ids; i++) {
         grbm_select(d, 0, 0, 0, i);
         WG(d, regSH_MEM_CONFIG, DEFAULT_SH_MEM_CONFIG);
         if (i) {
@@ -212,6 +256,8 @@ static void constants_init(rdna3_dev *d)
         }
     }
     grbm_select(d, 0, 0, 0, 0);
+    if (d->amdgpu_exact)
+        gfx_v11_0_init_compute_vmid(d);
     init_gds_vmid(d);
 }
 
@@ -281,6 +327,13 @@ void gfx11_write(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t v)
  * pipes): poll slot, then the doorbell (dwords) or, gfx only, CP_RB0_WPTR */
 void gfx11_commit(rdna3_dev *d, rdna3_gfx_ring *r)
 {
+    if (r->amdgpu_pad) {
+        /* amdgpu_ring_commit: we pad to match fetch size */
+        uint32_t count = 0x100 - ((uint32_t)r->wptr & 0xff);
+        count &= 0xff;
+        if (count != 0)
+            gfx11_ring_insert_nop(d, r, count);
+    }
     rdna3_vram_write(d, r->wb + RD_GFX_WB_WPTR, &r->wptr, 8);
     rdna3_hdp_flush(d);
     if (r->use_doorbell) {
@@ -330,6 +383,7 @@ static void cp_gfx_resume(rdna3_dev *d, rdna3_gfx_ring *r)
 
     WG(d, regCP_RB_WPTR_DELAY, 0);
     WG(d, regCP_RB_VMID, 0);
+    /* gfx_v11_0_cp_gfx_switch_pipe(PIPE_ID0): init gfx ring 0 for pipe 0 */
     tmp = RG(d, regGRBM_GFX_CNTL);
     tmp = REG_SET_FIELD(tmp, GRBM_GFX_CNTL, PIPEID, 0);
     WG(d, regGRBM_GFX_CNTL, tmp);
@@ -444,6 +498,9 @@ uint32_t gfx11_ring_space(rdna3_dev *d, rdna3_gfx_ring *r)
 static int ring_wait_space(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t ndw)
 {
     uint32_t i;
+    /* align requested size with padding so unlock_commit can pad safely */
+    if (r->amdgpu_pad)
+        ndw = (ndw + 0xff) & ~0xffu;
     if (ndw > r->buf_mask)
         return RDNA3_EINVAL;
     for (i = 0; i < d->usec_timeout; i++) {
@@ -498,7 +555,7 @@ void gfx11_emit_wait_reg_mem(rdna3_dev *d, rdna3_gfx_ring *r, int eng_sel, int m
 void gfx11_emit_vm_flush(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid, uint64_t pd_addr)
 {
     rdna3_vm_flush_regs f;
-    gfxhub303_flush_regs(d, vmid, RD_GFX_VM_INV_ENG, &f);
+    gfxhub303_flush_regs(d, vmid, r->vm_inv_eng ? r->vm_inv_eng : RD_GFX_VM_INV_ENG, &f);
     gfx11_emit_wreg(d, r, f.pt_lo, (uint32_t)pd_addr);
     gfx11_emit_wreg(d, r, f.pt_hi, (uint32_t)(pd_addr >> 32));
     /* gfx_v11_0_ring_emit_reg_write_reg_wait: write req, wait for the ack
@@ -656,6 +713,10 @@ void gfx11_emit_gfx_shadow(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t shadow_va, 
     r->set_q_mode_offs = offs;
 }
 
+static uint32_t submit_amdgpu(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
+                              uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n,
+                              const rdna3_gfx_job_ext *x);
+
 uint32_t gfx11_submit_job(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
                           uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n)
 {
@@ -697,6 +758,8 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
         return 0;
     if (r->cp_gfx_shadow)
         ndw += 2 * (22 + 5);   /* SET_Q_PREEMPTION_MODE + COND_EXEC, twice */
+    if (d->amdgpu_exact)
+        return submit_amdgpu(d, r, ctx, vmid, pd_addr, ibs, n, x);
     if (ring_wait_space(d, r, ndw))
         return 0;
     if (pd_addr)
@@ -740,8 +803,10 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
     return seq;
 }
 
-/* amdgpu_fence_emit_polling: the next sequence number through the ring's
- * emit_fence (with the EOP interrupt once the ring has one) */
+/* amdgpu_fence_emit_polling / amdgpu_fence_emit: the next sequence number
+ * through the ring's emit_fence (with AMDGPU_FENCE_FLAG_INT, the EOP
+ * interrupt, once the ring has one); the fence is that number in the
+ * ring's writeback slot, there is no fence object */
 uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r)
 {
     uint64_t addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_FENCE);
@@ -847,7 +912,10 @@ int gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs6
     if (r->async && !d->doorbell_ok)
         r->async = 0;   /* the KIQ needs doorbells: RB0 registers instead */
     r->mqd = r->async ? rdna3_vram_alloc(d, 4096, 4096, "gfx-mqd") : 0;
-    if (r->ring == UINT64_MAX || r->wb == UINT64_MAX || r->csb == UINT64_MAX || r->mqd == UINT64_MAX)
+    /* amdgpu_gfx_mqd_sw_init's me.mqd_backup (rdna3amdgpu=1) */
+    r->mqd_backup = r->async && d->amdgpu_exact ? rdna3_vram_alloc(d, 4096, 4096, "gfx-mqd-backup") : 0;
+    if (r->ring == UINT64_MAX || r->wb == UINT64_MAX || r->csb == UINT64_MAX || r->mqd == UINT64_MAX ||
+        r->mqd_backup == UINT64_MAX)
         return RDNA3_ENOMEM;
     rdna3_vram_fill(d, r->ring, 0, ring_size);
     rdna3_vram_write(d, r->wb, zero, sizeof(zero));
@@ -966,7 +1034,9 @@ int gfx11_hw_init(rdna3_dev *d, rdna3_gmc *g, rdna3_gfx_ring *r, const rdna3_rs6
 static uint32_t g_mqd[RD_MQD_DWORDS];   /* staging, bring-up is single threaded */
 
 /* gfx_v11_0_compute_ring_init / amdgpu_gfx_kiq_init_ring (doorbell, me/pipe/queue,
- * 1024 dw ring) with the queue's EOP buffer zeroed (amdgpu_gfx_kiq_init) */
+ * 1024 dw ring) with the queue's EOP buffer zeroed (amdgpu_gfx_kiq_init); for
+ * the MES pipes this is mes_v11_0_allocate_eop_buf and mes_v11_0_mqd_sw_init
+ * (its mqd_backup is never read in amdgpu) */
 int gfx11_mec_ring_init(rdna3_dev *d, rdna3_mec_ring *r, int kiq, uint32_t pipe, uint32_t queue,
                         uint32_t doorbell_assignment, uint32_t ring_size)
 {
@@ -1003,6 +1073,14 @@ int gfx11_mec_ring_init(rdna3_dev *d, rdna3_mec_ring *r, int kiq, uint32_t pipe,
     rdna3_vram_write(d, rb->wb, zero, sizeof(zero));
     rdna3_vram_fill(d, r->mqd, 0, 4096);
     rdna3_vram_fill(d, r->eop, 0, RD_MEC_HPD_SIZE);
+    /* amdgpu_gfx_mqd_sw_init (rdna3amdgpu=1): the KCQ's MQD backup; the
+     * KIQ runs on the MES (enable_mes_kiq), no backup there */
+    r->mqd_backup = 0;
+    if (d->amdgpu_exact && !kiq) {
+        r->mqd_backup = rdna3_vram_alloc(d, 4096, 4096, "kcq-mqd-backup");
+        if (r->mqd_backup == UINT64_MAX)
+            return RDNA3_ENOMEM;
+    }
     return RDNA3_OK;
 }
 
@@ -1067,7 +1145,8 @@ static void compute_mqd_init(rdna3_dev *d, rdna3_mec_ring *r)
     tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, QUEUE_SIZE, order_base_2(rb->ring_size / 4) - 1);
     tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, RPTR_BLOCK_SIZE, order_base_2(4096 / 4) - 1);
     tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, UNORD_DISPATCH, 1);
-    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, TUNNEL_DISPATCH, 0);
+    /* prop->allow_tunneling: a high priority compute queue */
+    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, TUNNEL_DISPATCH, r->high_prio ? 1 : 0);
     tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, PRIV_STATE, 1);
     tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, KMD_QUEUE, 1);
     g_mqd[MQD_CP_HQD_PQ_CONTROL] = tmp;
@@ -1082,14 +1161,18 @@ static void compute_mqd_init(rdna3_dev *d, rdna3_mec_ring *r)
         REG_SET_FIELD(regCP_HQD_PERSISTENT_STATE_DEFAULT, CP_HQD_PERSISTENT_STATE, PRELOAD_SIZE, 0x55);
     g_mqd[MQD_CP_HQD_IB_CONTROL] =
         REG_SET_FIELD(regCP_HQD_IB_CONTROL_DEFAULT, CP_HQD_IB_CONTROL, MIN_IB_AVAIL_SIZE, 3);
-    g_mqd[MQD_CP_HQD_PIPE_PRIORITY] = 0;
-    g_mqd[MQD_CP_HQD_QUEUE_PRIORITY] = 0;
+    /* set static priority for a compute queue/ring (amdgpu_ring_to_mqd_prop) */
+    g_mqd[MQD_CP_HQD_PIPE_PRIORITY] = r->high_prio ? RD_GFX_PIPE_PRIO_HIGH : 0;
+    g_mqd[MQD_CP_HQD_QUEUE_PRIORITY] = r->high_prio ? RD_GFX_QUEUE_PRIORITY_MAXIMUM : 0;
     tmp = REG_SET_FIELD(0u, CP_HQD_QUANTUM, QUANTUM_EN, 1);
     tmp = REG_SET_FIELD(tmp, CP_HQD_QUANTUM, QUANTUM_SCALE, 1);
     tmp = REG_SET_FIELD(tmp, CP_HQD_QUANTUM, QUANTUM_DURATION, 1);
     g_mqd[MQD_CP_HQD_QUANTUM] = tmp;
     g_mqd[MQD_CP_HQD_ACTIVE] = rb->kind == RD_RING_KIQ ? 1 : 0;
     rdna3_vram_write(d, r->mqd, g_mqd, sizeof(g_mqd));
+    /* gfx_v11_0_kcq_init_queue: memcpy_fromio(mqd_backup, mqd) */
+    if (r->mqd_backup)
+        rdna3_vram_write(d, r->mqd_backup, g_mqd, sizeof(g_mqd));
     rdna3_hdp_flush(d);
 }
 
@@ -1145,7 +1228,8 @@ static int kiq_init_register(rdna3_dev *d, rdna3_mec_ring *r)
     return ret;
 }
 
-/* amdgpu_mes_init_microcode: mes_uc_start_addr of each pipe's firmware */
+/* mes_v11_0_early_init -> amdgpu_mes_init_microcode for both pipes:
+ * mes_uc_start_addr of each pipe's firmware */
 int gfx11_mes_from_fw(const void *mes, uint32_t mes_len, const void *mes1, uint32_t mes1_len,
                       uint64_t uc_start[2])
 {
@@ -1363,7 +1447,10 @@ int gfx11_kiq_start(rdna3_dev *d, rdna3_mec_ring *kiq)
 
 int gfx11_mes_sched_init(rdna3_dev *d, rdna3_mes *m)
 {
-    /* mes_v11_0_ring_init: me 3 pipe 0, doorbell MES_RING0 */
+    /* mes_v11_0_sw_init's scheduler pipe: mes_v11_0_ring_init (me 3 pipe 0,
+     * doorbell MES_RING0) with its EOP and MQD; amdgpu_mes_init's masks
+     * and writeback slots are in mes_set_hw_resources and m->wb; the KIQ
+     * pipe is gfx11_mes_kiq_ring_init */
     int ret = gfx11_mec_ring_init(d, &m->ring, 0, 0, 0, RD_DB_MES_RING0, 0);   /* 1024 dw */
     if (ret)
         return ret;
@@ -1407,6 +1494,16 @@ int gfx11_mes_submit(rdna3_dev *d, rdna3_mes *m, uint32_t *pkt, uint32_t status_
     if (!rb->ring_size || status_dw + 4 > RD_MES_API_DWORDS)
         return RDNA3_EINVAL;
     rdna3_vram_write(d, m->wb + RD_MES_WB_STATUS, &zero, 8);
+    /* rdna3amdgpu=1: amdgpu_ring_alloc + the wait for room
+     * (mes_v11_0_submit_pkt_and_poll_completion's error_undo path) */
+    if (d->amdgpu_exact) {
+        uint64_t wptr_old = rb->wptr;
+        if (ring_wait_space(d, rb, 2 * RD_MES_API_DWORDS)) {
+            RERR(d, "MES ring buffer is full.");
+            rb->wptr = wptr_old;   /* amdgpu_ring_undo */
+            return RDNA3_ETIME;
+        }
+    }
     seq = ++m->seq;
     put64(pkt + status_dw, rdna3_vram_mc(d, m->wb + RD_MES_WB_STATUS));
     put64(pkt + status_dw + 2, 1);
@@ -1501,6 +1598,7 @@ int gfx11_mes_sched_start(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mes *m)
         return ret;
     }
     m->ring.mapped = 1;
+    /* mes_v11_0_get_fw_version: CP_MES_GP3_LO of each pipe */
     grbm_select(d, 3, 0, 0, 0);
     m->sched_version = RG(d, regCP_MES_GP3_LO);
     grbm_select(d, 3, 1, 0, 0);
@@ -1910,6 +2008,9 @@ static void gfx_mqd_init(rdna3_dev *d, rdna3_gfx_ring *r)
     g_mqd[MQD_GFX_HQD_RPTR] = RG(d, regCP_GFX_HQD_RPTR);
     g_mqd[MQD_GFX_HQD_ACTIVE] = 1;
     rdna3_vram_write(d, r->mqd, g_mqd, sizeof(g_mqd));
+    /* gfx_v11_0_kgq_init_queue: memcpy_fromio(mqd_backup, mqd) */
+    if (r->mqd_backup)
+        rdna3_vram_write(d, r->mqd_backup, g_mqd, sizeof(g_mqd));
     rdna3_hdp_flush(d);
 }
 
@@ -2051,6 +2152,8 @@ uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t
     uint32_t i, seq, ndw = 17 + 20 + 8 + 7 + 8 + 8 + 4 * n;
     if (!r->ready || !n || n > RD_GFX_MAX_IBS || vmid > 15)
         return 0;
+    if (d->amdgpu_exact)
+        return submit_amdgpu(d, r, ctx, vmid, pd_addr, ibs, n, x);
     if (ring_wait_space(d, r, ndw))
         return 0;
     if (pd_addr)
@@ -2236,6 +2339,15 @@ static void rlc_safe_mode(rdna3_dev *d, int enter)
     RERR(d, "GFX: RLC did not %s safe mode", enter ? "enter" : "leave");
 }
 
+/* Ported from amdgpu_gfx_rlc_enter_safe_mode / amdgpu_gfx_rlc_exit_safe_mode
+ * (GC 11.0.3 has CGCG and MGCG, so the RLC is always asked) */
+void gfx11_rlc_safe_mode(rdna3_dev *d, int enter)
+{
+    if (!(RG(d, regRLC_CNTL) & RLC_CNTL__RLC_ENABLE_F32_MASK))
+        return;
+    rlc_safe_mode(d, enter);
+}
+
 /* gfx_v11_0_ring_soft_recovery */
 void gfx11_kill_waves(rdna3_dev *d, uint32_t vmid)
 {
@@ -2250,6 +2362,7 @@ void gfx11_kill_waves(rdna3_dev *d, uint32_t vmid)
     RLOG(d, "GFX: killed the waves of VMID %u (soft recovery)", vmid);
 }
 
+/* amdgpu_fence_driver_force_completion -> amdgpu_fence_write(ring, sync_seq) */
 void gfx11_force_fence_completion(rdna3_dev *d, rdna3_gfx_ring *r)
 {
     if (r->wb == UINT64_MAX)
@@ -2271,9 +2384,19 @@ int gfx11_soft_reset(rdna3_dev *d, rdna3_gfx_ring *r, struct rdna3_mec_ring *kiq
              CP_INT_CNTL__CNTX_EMPTY_INT_ENABLE_MASK | CP_INT_CNTL__GFX_IDLE_INT_ENABLE_MASK);
     WG(d, regCP_INT_CNTL, tmp);
 
-    /* dequeue every compute HQD (MEC1, 4 pipes x 4 queues) and the gfx HQD */
+    /* dequeue every compute HQD (MEC1, 4 pipes x 4 queues) and the gfx HQD;
+     * rdna3amdgpu=1 runs gfx_v11_0_soft_reset's own loop: soc21_grbm_select
+     * with me = 0 .. num_mec - 1 */
     for (pipe = 0; pipe < 4; pipe++)
         for (queue = 0; queue < 4; queue++) {
+            if (d->amdgpu_exact) {
+                for (i = 0; i < 2; i++) {
+                    grbm_select(d, i, pipe, queue, 0);
+                    WG(d, regCP_HQD_DEQUEUE_REQUEST, 0x2);
+                    WG(d, regSPI_COMPUTE_QUEUE_RESET, 0x1);
+                }
+                continue;
+            }
             grbm_select(d, 1, pipe, queue, 0);
             WG(d, regCP_HQD_DEQUEUE_REQUEST, 0x2);
             WG(d, regSPI_COMPUTE_QUEUE_RESET, 0x1);
@@ -2282,11 +2405,24 @@ int gfx11_soft_reset(rdna3_dev *d, rdna3_gfx_ring *r, struct rdna3_mec_ring *kiq
     WG(d, regCP_GFX_HQD_DEQUEUE_REQUEST, 0x1);
     grbm_select(d, 0, 0, 0, 0);
 
+    /* rdna3amdgpu=1: try to acquire the gfx mutex before access to
+     * CP_VMID_RESET (gfx_v11_0_request_gfx_index_mutex) */
+    if (d->amdgpu_exact && gfx11_request_gfx_index_mutex(d, 1)) {
+        RERR(d, "GFX: Failed to acquire the gfx mutex during soft reset");
+        rlc_safe_mode(d, 0);
+        return RDNA3_EINVAL;
+    }
     /* reset every VMID but 0; three reads give GFX_HQD_ACTIVE time to drop */
     WG(d, regCP_VMID_RESET, 0xfffffffe);
     (void)RG(d, regCP_VMID_RESET);
     (void)RG(d, regCP_VMID_RESET);
     (void)RG(d, regCP_VMID_RESET);
+    /* release the gfx mutex */
+    if (d->amdgpu_exact && gfx11_request_gfx_index_mutex(d, 0)) {
+        RERR(d, "GFX: Failed to release the gfx mutex during soft reset");
+        rlc_safe_mode(d, 0);
+        return RDNA3_EINVAL;
+    }
     for (i = 0; i < d->usec_timeout; i++) {
         if (!RG(d, regCP_HQD_ACTIVE) && !RG(d, regCP_GFX_HQD_ACTIVE))
             break;
@@ -2407,4 +2543,1066 @@ void gfx11_set_userq_eop_interrupts(rdna3_dev *d, uint32_t ip_mask, int enable)
             gfx11_set_eop_interrupt(d, &r, enable);
         }
     }
+}
+
+/* ------------------------- queue topology ------------------------- */
+
+static void bm_set(uint64_t *bm, uint32_t bit)
+{
+    if (bit < RD_MAX_QUEUES)
+        bm[bit / 64] |= 1ull << (bit % 64);
+}
+
+static int bm_test(const uint64_t *bm, uint32_t bit)
+{
+    return bit < RD_MAX_QUEUES && ((bm[bit / 64] >> (bit % 64)) & 1);
+}
+
+static uint32_t bm_weight(const uint64_t *bm)
+{
+    uint32_t i, n = 0;
+    for (i = 0; i < RD_MAX_QUEUES; i++)
+        n += (uint32_t)bm_test(bm, i);
+    return n;
+}
+
+/* sprintf(ring->name, "<prefix>_%d.%d.%d", me, pipe, queue) */
+static void ring_name(char *out, const char *prefix, uint32_t me, uint32_t pipe, uint32_t queue)
+{
+    const uint32_t v[3] = { me, pipe, queue };
+    uint32_t n = 0, i;
+    while (*prefix && n < 8)
+        out[n++] = *prefix++;
+    out[n++] = '_';
+    for (i = 0; i < 3; i++) {
+        char tmp[10];
+        uint32_t k = 0, x = v[i];
+        do {
+            tmp[k++] = (char)('0' + x % 10);
+            x /= 10;
+        } while (x && k < 3);
+        while (k && n < 15)
+            out[n++] = tmp[--k];
+        if (i < 2 && n < 15)
+            out[n++] = '.';
+    }
+    out[n] = 0;
+}
+
+/* Ported from amdgpu_gfx_get_num_kcq */
+int gfx11_get_num_kcq(int num_kcq)
+{
+    if (num_kcq == -1)
+        return 8;
+    if (num_kcq > 8 || num_kcq < 0)
+        return 8;   /* "set kernel compute queue number to 8 due to invalid parameter" */
+    return num_kcq;
+}
+
+/* Ported from amdgpu_gfx_mec_queue_to_bit */
+int gfx11_mec_queue_to_bit(const rdna3_gfx_topo *t, int mec, int pipe, int queue)
+{
+    int bit = 0;
+    bit += mec * (int)t->mec_pipes * (int)t->mec_queues;
+    bit += pipe * (int)t->mec_queues;
+    bit += queue;
+    return bit;
+}
+
+/* Ported from amdgpu_queue_mask_bit_to_mec_queue */
+void gfx11_queue_mask_bit_to_mec_queue(const rdna3_gfx_topo *t, int bit, int *mec, int *pipe,
+                                       int *queue)
+{
+    *queue = bit % (int)t->mec_queues;
+    *pipe = (bit / (int)t->mec_queues) % (int)t->mec_pipes;
+    *mec = (bit / (int)t->mec_queues) / (int)t->mec_pipes;
+}
+
+/* Ported from amdgpu_gfx_is_mec_queue_enabled (xcc 0) */
+int gfx11_is_mec_queue_enabled(const rdna3_gfx_topo *t, int mec, int pipe, int queue)
+{
+    return bm_test(t->mec_bitmap, (uint32_t)gfx11_mec_queue_to_bit(t, mec, pipe, queue));
+}
+
+/* Ported from amdgpu_gfx_me_queue_to_bit */
+int gfx11_me_queue_to_bit(const rdna3_gfx_topo *t, int me, int pipe, int queue)
+{
+    int bit = 0;
+    bit += me * (int)t->me_pipes * (int)t->me_queues;
+    bit += pipe * (int)t->me_queues;
+    bit += queue;
+    return bit;
+}
+
+/* Ported from amdgpu_gfx_bit_to_me_queue */
+void gfx11_bit_to_me_queue(const rdna3_gfx_topo *t, int bit, int *me, int *pipe, int *queue)
+{
+    *queue = bit % (int)t->me_queues;
+    *pipe = (bit / (int)t->me_queues) % (int)t->me_pipes;
+    *me = (bit / (int)t->me_queues) / (int)t->me_pipes;
+}
+
+/* Ported from amdgpu_gfx_is_me_queue_enabled */
+int gfx11_is_me_queue_enabled(const rdna3_gfx_topo *t, int me, int pipe, int queue)
+{
+    return bm_test(t->me_bitmap, (uint32_t)gfx11_me_queue_to_bit(t, me, pipe, queue));
+}
+
+/* Ported from amdgpu_gfx_is_compute_multipipe_capable (GC 11 > 9.0.0) */
+static int is_compute_multipipe_capable(const rdna3_gfx_topo *t)
+{
+    if (t->compute_multipipe != -1)
+        return t->compute_multipipe == 1;   /* "forcing compute pipe policy" */
+    if (t->gc_major > 9 || (t->gc_major == 9 && (t->gc_minor || t->gc_rev)))
+        return 1;
+    return t->num_mec > 1;
+}
+
+/* Ported from amdgpu_gfx_is_graphics_multipipe_capable */
+static int is_graphics_multipipe_capable(const rdna3_gfx_topo *t)
+{
+    return t->async_gfx_ring && t->me_pipes > 1;
+}
+
+/* Ported from amdgpu_gfx_is_high_priority_compute_queue: the first compute
+ * ring when there is more than one */
+int gfx11_is_high_priority_compute_queue(const rdna3_gfx_topo *t, uint32_t ring_id)
+{
+    return t->num_compute_rings > 1 && ring_id == 0;
+}
+
+/* Ported from amdgpu_gfx_is_high_priority_graphics_queue: pipe 1 queue 0
+ * with more than one gfx pipe */
+int gfx11_is_high_priority_graphics_queue(const rdna3_gfx_topo *t, uint32_t ring_id)
+{
+    const rdna3_gfx_ring_desc *r;
+    if (ring_id >= RD_MAX_GFX_RINGS)
+        return 0;
+    r = &t->gfx[ring_id];
+    if (is_graphics_multipipe_capable(t) && t->num_gfx_rings > 1 && r->pipe == 1 && r->queue == 0)
+        return (uint32_t)gfx11_me_queue_to_bit(t, (int)r->me, (int)r->pipe, (int)r->queue) == ring_id;
+    return 0;
+}
+
+/* Ported from amdgpu_gfx_graphics_queue_acquire */
+static void graphics_queue_acquire(rdna3_gfx_topo *t)
+{
+    uint32_t i, queue, pipe, max_queues_per_me = t->me_pipes * t->me_queues;
+    if (is_graphics_multipipe_capable(t)) {
+        /* policy: amdgpu owns the first queue per pipe at this stage */
+        for (i = 0; i < max_queues_per_me; i++) {
+            pipe = i % t->me_pipes;
+            queue = (i / t->me_pipes) % t->me_queues;
+            bm_set(t->me_bitmap, pipe * t->me_queues + queue);
+        }
+    } else {
+        for (i = 0; i < max_queues_per_me; ++i)
+            bm_set(t->me_bitmap, i);
+    }
+    /* update the number of active graphics rings */
+    t->num_gfx_rings = bm_weight(t->me_bitmap);
+}
+
+/* Ported from amdgpu_gfx_compute_queue_acquire (one XCC) */
+static void compute_queue_acquire(rdna3_gfx_topo *t)
+{
+    uint32_t i, queue, pipe, max_queues_per_mec = t->mec_pipes * t->mec_queues;
+    if (max_queues_per_mec > t->num_compute_rings)
+        max_queues_per_mec = t->num_compute_rings;
+    if (is_compute_multipipe_capable(t)) {
+        /* policy: make queues evenly cross all pipes on MEC1 only */
+        for (i = 0; i < max_queues_per_mec; i++) {
+            pipe = i % t->mec_pipes;
+            queue = (i / t->mec_pipes) % t->mec_queues;
+            bm_set(t->mec_bitmap, pipe * t->mec_queues + queue);
+        }
+    } else {
+        /* policy: amdgpu owns all queues in the given pipe */
+        for (i = 0; i < max_queues_per_mec; ++i)
+            bm_set(t->mec_bitmap, i);
+    }
+}
+
+/* Ported from gfx_v11_0_gfx_ring_init (the ring's identity; the ring
+ * itself is allocated by gfx11_hw_init) */
+static void gfx_ring_init(rdna3_gfx_topo *t, uint32_t ring_id, uint32_t me, uint32_t pipe,
+                          uint32_t queue)
+{
+    rdna3_gfx_ring_desc *r = &t->gfx[ring_id];
+    r->me = me;
+    r->pipe = pipe;
+    r->queue = queue;
+    /* doorbell_index.gfx_ring0 / gfx_ring1 (AMDGPU_NAVI10_DOORBELL_GFX_RING1 = 0x08C) */
+    r->doorbell_index = RD_DB_INDEX(ring_id ? RD_DB_GFX_RING0 + 1 : RD_DB_GFX_RING0);
+    r->eop_offset = 0;
+    ring_name(r->name, "gfx", me, pipe, queue);
+    r->irq_type = RD_CP_IRQ_GFX_ME0_PIPE0_EOP + pipe;
+    r->hw_prio = gfx11_is_high_priority_graphics_queue(t, ring_id) ? RD_GFX_PIPE_PRIO_HIGH
+                                                                   : RD_GFX_PIPE_PRIO_NORMAL;
+}
+
+/* Ported from gfx_v11_0_compute_ring_init (mec0 is me1) */
+static void compute_ring_init(rdna3_gfx_topo *t, uint32_t ring_id, uint32_t mec, uint32_t pipe,
+                              uint32_t queue)
+{
+    rdna3_gfx_ring_desc *r = &t->compute[ring_id];
+    r->me = mec + 1;
+    r->pipe = pipe;
+    r->queue = queue;
+    r->doorbell_index = RD_DB_INDEX(RD_DB_MEC_RING0 + ring_id);
+    r->eop_offset = ring_id * RD_GFX11_MEC_HPD_SIZE;
+    ring_name(r->name, "comp", r->me, pipe, queue);
+    r->irq_type = RD_CP_IRQ_COMPUTE_MEC1_PIPE0_EOP + (r->me - 1) * t->mec_pipes + pipe;
+    r->hw_prio = gfx11_is_high_priority_compute_queue(t, ring_id) ? RD_GFX_PIPE_PRIO_HIGH
+                                                                  : RD_GFX_PIPE_PRIO_NORMAL;
+}
+
+/* Ported from gfx_v11_0_gpu_early_init (adev->gfx.config) */
+static int gpu_early_init(rdna3_gfx_topo *t)
+{
+    if (t->gc_major != 11)
+        return RDNA3_EINVAL;
+    if (t->gc_minor == 0 && (t->gc_rev == 0 || t->gc_rev == 2 || t->gc_rev == 3)) {
+        /* 11.0.3 also sets adev->gfx.ras = &gfx_v11_0_3_ras */
+        t->max_hw_contexts = 8;
+        t->sc_prim_fifo_size_frontend = 0x20;
+        t->sc_prim_fifo_size_backend = 0x100;
+        t->sc_hiz_tile_fifo_size = 0;
+        t->sc_earlyz_tile_fifo_size = 0x4C0;
+        return RDNA3_OK;
+    }
+    if ((t->gc_minor == 0 && (t->gc_rev == 1 || t->gc_rev == 4)) ||
+        (t->gc_minor == 5 && t->gc_rev <= 2)) {
+        t->max_hw_contexts = 8;
+        t->sc_prim_fifo_size_frontend = 0x20;
+        t->sc_prim_fifo_size_backend = 0x100;
+        t->sc_hiz_tile_fifo_size = 0x80;
+        t->sc_earlyz_tile_fifo_size = 0x300;
+        return RDNA3_OK;
+    }
+    return RDNA3_EINVAL;   /* BUG() */
+}
+
+int gfx11_sw_init_topo(rdna3_gfx_topo *t, uint32_t gc_major, uint32_t gc_minor, uint32_t gc_rev,
+                       int num_kcq, int async_gfx_ring, int compute_multipipe)
+{
+    uint32_t i, j, k, ring_id = 0, n;
+    uint8_t *p = (uint8_t *)t;
+
+    for (n = 0; n < sizeof(*t); n++)
+        p[n] = 0;
+    t->gc_major = gc_major;
+    t->gc_minor = gc_minor;
+    t->gc_rev = gc_rev;
+    t->async_gfx_ring = async_gfx_ring;
+    t->compute_multipipe = compute_multipipe;
+
+    /* gfx_v11_0_early_init */
+    t->num_gfx_rings = RD_GFX11_NUM_GFX_RINGS;
+    n = (uint32_t)gfx11_get_num_kcq(num_kcq);
+    t->num_compute_rings = n < RD_MAX_COMPUTE_RINGS ? n : RD_MAX_COMPUTE_RINGS;
+
+    /* gfx_v11_0_sw_init */
+    t->num_me = 1;
+    t->me_pipes = 1;
+    t->me_queues = 1;
+    t->mec_pipes = 4;
+    if (gc_major == 11 && gc_minor == 0 && (gc_rev == 0 || gc_rev == 2 || gc_rev == 3)) {
+        t->num_mec = 2;
+        t->mec_queues = 4;
+    } else if (gc_major == 11 && ((gc_minor == 0 && (gc_rev == 1 || gc_rev == 4)) ||
+                                  (gc_minor == 5 && gc_rev <= 2))) {
+        t->num_mec = 1;
+        t->mec_queues = 4;
+    } else {
+        t->num_mec = 1;
+        t->mec_queues = 8;
+    }
+
+    /* gfx_v11_0_me_init: bitmap_zero + amdgpu_gfx_graphics_queue_acquire */
+    graphics_queue_acquire(t);
+    /* gfx_v11_0_mec_init: bitmap_zero + amdgpu_gfx_compute_queue_acquire;
+     * the HPD EOP buffer holds one GFX11_MEC_HPD_SIZE slot per compute ring */
+    compute_queue_acquire(t);
+    t->mec_hpd_size = t->num_compute_rings * RD_GFX11_MEC_HPD_SIZE;
+
+    /* set up the gfx ring */
+    for (i = 0; i < t->num_me; i++)
+        for (j = 0; j < t->me_queues; j++)
+            for (k = 0; k < t->me_pipes; k++) {
+                if (!gfx11_is_me_queue_enabled(t, (int)i, (int)k, (int)j))
+                    continue;
+                if (ring_id >= RD_MAX_GFX_RINGS)
+                    return RDNA3_EINVAL;
+                gfx_ring_init(t, ring_id, i, k, j);
+                ring_id++;
+            }
+
+    ring_id = 0;
+    /* set up the compute queues - allocate horizontally across pipes */
+    for (i = 0; i < t->num_mec; ++i)
+        for (j = 0; j < t->mec_queues; j++)
+            for (k = 0; k < t->mec_pipes; k++) {
+                if (!gfx11_is_mec_queue_enabled(t, (int)i, (int)k, (int)j))
+                    continue;
+                if (ring_id >= RD_MAX_COMPUTE_RINGS)
+                    return RDNA3_EINVAL;
+                compute_ring_init(t, ring_id, i, k, j);
+                ring_id++;
+            }
+
+    return gpu_early_init(t);
+}
+
+/* Ported from gfx_v11_0_select_me_pipe_q */
+void gfx11_select_me_pipe_q(rdna3_dev *d, uint32_t me, uint32_t pipe, uint32_t q, uint32_t vm)
+{
+    grbm_select(d, me, pipe, q, vm);
+}
+
+/* --------------------- rdna3amdgpu=1 ring helpers --------------------- */
+
+/* Ported from gfx_v11_ring_insert_nop */
+void gfx11_ring_insert_nop(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t num_nop)
+{
+    uint32_t i;
+    /* Header itself is a NOP packet */
+    if (num_nop == 1) {
+        gfx11_write(d, r, GFX11_RING_NOP);
+        return;
+    }
+    /* Max HW optimization till 0x3ffe, followed by remaining one NOP at a time */
+    gfx11_write(d, r, PACKET3(PACKET3_NOP, num_nop - 2 < 0x3ffe ? num_nop - 2 : 0x3ffe));
+    /* Header is at index 0, followed by num_nops - 1 NOP packet's */
+    for (i = 1; i < num_nop; i++)
+        gfx11_write(d, r, GFX11_RING_NOP);
+}
+
+/* Ported from gfx_v11_0_ring_emit_pipeline_sync */
+void gfx11_emit_pipeline_sync(rdna3_dev *d, rdna3_gfx_ring *r)
+{
+    int usepfp = r->kind == RD_RING_GFX;
+    uint32_t seq = r->fence_seq;   /* ring->fence_drv.sync_seq */
+    uint64_t addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_FENCE);
+    gfx11_emit_wait_reg_mem(d, r, usepfp, 1, 0, (uint32_t)addr, (uint32_t)(addr >> 32), seq,
+                            0xffffffff, 4);
+}
+
+/* Ported from gfx_v11_0_ring_emit_fence_kiq (AMDGPU_FENCE_FLAG_64BIT is a BUG) */
+void gfx11_emit_fence_kiq(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t addr, uint32_t seq, int irq)
+{
+    /* write fence seq to the "addr" */
+    gfx11_write(d, r, PACKET3(PACKET3_WRITE_DATA, 3));
+    gfx11_write(d, r, WRITE_DATA_ENGINE_SEL(0) | WRITE_DATA_DST_SEL(5) | WR_CONFIRM);
+    gfx11_write(d, r, (uint32_t)addr);
+    gfx11_write(d, r, (uint32_t)(addr >> 32));
+    gfx11_write(d, r, seq);
+    if (irq) {
+        /* set register to trigger INT */
+        gfx11_write(d, r, PACKET3(PACKET3_WRITE_DATA, 3));
+        gfx11_write(d, r, WRITE_DATA_ENGINE_SEL(0) | WRITE_DATA_DST_SEL(0) | WR_CONFIRM);
+        gfx11_write(d, r, OFF(d, regCPC_INT_STATUS));
+        gfx11_write(d, r, 0);
+        gfx11_write(d, r, 0x20000000);   /* src_id is 178 */
+    }
+}
+
+/* Ported from gfx_v11_0_ring_emit_reg_write_reg_wait */
+void gfx11_emit_reg_write_reg_wait(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t reg0, uint32_t reg1,
+                                   uint32_t ref, uint32_t mask)
+{
+    int usepfp = r->kind == RD_RING_GFX;
+    gfx11_emit_wait_reg_mem(d, r, usepfp, 0, 1, reg0, reg1, ref, mask, 0x20);
+}
+
+/* Ported from gfx_v11_0_ring_get_wptr_gfx / gfx_v11_0_ring_get_wptr_compute
+ * (mes_v11_0_ring_get_wptr is the compute one) */
+uint64_t gfx11_ring_get_wptr(rdna3_dev *d, rdna3_gfx_ring *r)
+{
+    uint64_t wptr = 0;
+    if (r->use_doorbell) {
+        rdna3_vram_read(d, r->wb + RD_GFX_WB_WPTR, &wptr, 8);
+    } else if (r->kind == RD_RING_GFX) {
+        wptr = RG(d, regCP_RB0_WPTR);
+        wptr += (uint64_t)RG(d, regCP_RB0_WPTR_HI) << 32;
+    } else {
+        RERR(d, "GFX: a compute ring without a doorbell has no wptr");   /* BUG() */
+    }
+    return wptr;
+}
+
+/* Ported from gfx_v11_0_wait_for_idle */
+int gfx11_wait_for_idle(rdna3_dev *d)
+{
+    uint32_t i;
+    for (i = 0; i < d->usec_timeout; i++) {
+        /* read MC_STATUS */
+        if (!(RG(d, regGRBM_STATUS) & GRBM_STATUS__GUI_ACTIVE_MASK))
+            return RDNA3_OK;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    return RDNA3_ETIME;
+}
+
+/* Ported from gfx_v11_0_request_gfx_index_mutex */
+int gfx11_request_gfx_index_mutex(rdna3_dev *d, int req)
+{
+    uint32_t i, tmp, val;
+    for (i = 0; i < d->usec_timeout; i++) {
+        /* Request with MeId=2, PipeId=0 */
+        tmp = REG_SET_FIELD(0u, CP_GFX_INDEX_MUTEX, REQUEST, req ? 1 : 0);
+        tmp = REG_SET_FIELD(tmp, CP_GFX_INDEX_MUTEX, CLIENTID, 4);
+        WG(d, regCP_GFX_INDEX_MUTEX, tmp);
+        val = RG(d, regCP_GFX_INDEX_MUTEX);
+        if (req) {
+            if (val == tmp)
+                break;
+        } else {
+            tmp = REG_SET_FIELD(tmp, CP_GFX_INDEX_MUTEX, REQUEST, 1);
+            /* unlocked or locked by firmware */
+            if (val != tmp)
+                break;
+        }
+        d->os.udelay(d->os.ctx, 1);
+    }
+    if (i >= d->usec_timeout)
+        return RDNA3_EINVAL;
+    return RDNA3_OK;
+}
+
+/* Ported from gfx_v11_0_update_spm_vmid (bare metal: no ring write) */
+void gfx11_update_spm_vmid(rdna3_dev *d, uint32_t vmid)
+{
+    uint32_t pre_data = RG(d, regRLC_SPM_MC_CNTL), data;
+    data = pre_data & ~(uint32_t)RLC_SPM_MC_CNTL__RLC_SPM_VMID_MASK;
+    data |= (vmid & RLC_SPM_MC_CNTL__RLC_SPM_VMID_MASK) << RLC_SPM_MC_CNTL__RLC_SPM_VMID__SHIFT;
+    if (pre_data != data)
+        WG(d, regRLC_SPM_MC_CNTL, data);
+}
+
+/* gfx_v11_0_get_cpg_int_cntl (me 0: pipes 0 and 1) */
+static uint32_t get_cpg_int_cntl(rdna3_dev *d, uint32_t me, uint32_t pipe)
+{
+    if (me != 0)
+        return 0;
+    switch (pipe) {
+    case 0: return OFF(d, regCP_INT_CNTL_RING0);
+    case 1: return OFF(d, regCP_INT_CNTL_RING1);
+    default: return 0;
+    }
+}
+
+/* gfx_v11_0_get_cpc_int_cntl: amdgpu controls only the first MEC */
+static uint32_t get_cpc_int_cntl(rdna3_dev *d, uint32_t me, uint32_t pipe)
+{
+    if (me != 1)
+        return 0;
+    switch (pipe) {
+    case 0: return OFF(d, regCP_ME1_PIPE0_INT_CNTL);
+    case 1: return OFF(d, regCP_ME1_PIPE1_INT_CNTL);
+    case 2: return OFF(d, regCP_ME1_PIPE2_INT_CNTL);
+    case 3: return OFF(d, regCP_ME1_PIPE3_INT_CNTL);
+    default: return 0;
+    }
+}
+
+/* the ME / MEC loops of the three fault-state functions over GC 11.0.3's
+ * gfx.me (1 ME, 1 pipe) and gfx.mec (2 MECs, 4 pipes); a zero mask skips
+ * that side */
+static void fault_state(rdna3_dev *d, uint32_t cpg_mask, uint32_t cpc_mask, int enable)
+{
+    uint32_t i, j, reg, v;
+    for (i = 0; i < 1; i++)
+        for (j = 0; j < 1; j++) {
+            reg = get_cpg_int_cntl(d, i, j);
+            if (reg && cpg_mask) {
+                v = rdna3_rreg(d, reg);
+                v = enable ? (v | cpg_mask) : (v & ~cpg_mask);
+                rdna3_wreg(d, reg, v);
+            }
+        }
+    for (i = 0; i < 2; i++)
+        for (j = 0; j < 4; j++) {
+            /* MECs start at 1 */
+            reg = get_cpc_int_cntl(d, i + 1, j);
+            if (reg && cpc_mask) {
+                v = rdna3_rreg(d, reg);
+                v = enable ? (v | cpc_mask) : (v & ~cpc_mask);
+                rdna3_wreg(d, reg, v);
+            }
+        }
+}
+
+/* Ported from gfx_v11_0_set_priv_reg_fault_state */
+void gfx11_set_priv_reg_fault_state(rdna3_dev *d, int enable)
+{
+    fault_state(d, CP_INT_CNTL_RING0__PRIV_REG_INT_ENABLE_MASK,
+                CP_ME1_PIPE0_INT_CNTL__PRIV_REG_INT_ENABLE_MASK, enable);
+}
+
+/* Ported from gfx_v11_0_set_priv_inst_fault_state (CPG only) */
+void gfx11_set_priv_inst_fault_state(rdna3_dev *d, int enable)
+{
+    fault_state(d, CP_INT_CNTL_RING0__PRIV_INSTR_INT_ENABLE_MASK, 0, enable);
+}
+
+/* Ported from gfx_v11_0_set_bad_op_fault_state */
+void gfx11_set_bad_op_fault_state(rdna3_dev *d, int enable)
+{
+    fault_state(d, CP_INT_CNTL_RING0__OPCODE_ERROR_INT_ENABLE_MASK,
+                CP_ME1_PIPE0_INT_CNTL__OPCODE_ERROR_INT_ENABLE_MASK, enable);
+}
+
+/* Ported from gfx_v11_0_late_init: amdgpu_irq_get of priv_reg_irq,
+ * priv_inst_irq and bad_op_irq (the first reference enables each) */
+void gfx11_late_init(rdna3_dev *d)
+{
+    gfx11_set_priv_reg_fault_state(d, 1);
+    gfx11_set_priv_inst_fault_state(d, 1);
+    gfx11_set_bad_op_fault_state(d, 1);
+}
+
+/* Ported from gfx_v11_0_priv_reg_irq / gfx_v11_0_priv_inst_irq /
+ * gfx_v11_0_bad_op_irq -> gfx_v11_0_handle_priv_fault */
+int gfx11_handle_priv_fault(const rdna3_iv *iv, const rdna3_gfx_ring *gfx,
+                            const rdna3_mec_ring *kcq, int *ring)
+{
+    uint32_t me_id, pipe_id, queue_id;
+    if (iv->client_id != RD_IH_CLIENT_GRBM_CP ||
+        (iv->src_id != RD_IH_SRC_CP_PRIV_REG && iv->src_id != RD_IH_SRC_CP_PRIV_INSTR &&
+         iv->src_id != RD_IH_SRC_CP_BAD_OPCODE))
+        return 0;
+    me_id = (iv->ring_id & 0x0c) >> 2;
+    pipe_id = (iv->ring_id & 0x03) >> 0;
+    queue_id = (iv->ring_id & 0x70) >> 4;
+    *ring = -1;
+    switch (me_id) {
+    case 0:
+        /* the kernel gfx ring is gfx_0.0.0 */
+        if (gfx && gfx->ready && pipe_id == 0 && queue_id == 0)
+            *ring = 0;
+        break;
+    case 1:
+    case 2:
+        if (kcq && kcq->rb.ready && kcq->me == me_id && kcq->pipe == pipe_id &&
+            kcq->queue == queue_id)
+            *ring = 1;
+        break;
+    default:   /* BUG() */
+        break;
+    }
+    return 1;
+}
+
+/* Ported from gfx_v11_0_ring_test_ib (the writeback slot is in the ring's
+ * writeback page, the IB the caller's VRAM buffer, run in VMID 0) */
+int gfx11_ring_test_ib(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ib)
+{
+    uint64_t gpu_addr;
+    uint32_t v = 0xCAFEDEAD, pk[5], seq;
+    rdna3_gfx_ib one;
+    int ret;
+
+    if (!r->ready || ib == UINT64_MAX)
+        return RDNA3_EINVAL;
+    gpu_addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_IB_TEST);
+    rdna3_vram_write(d, r->wb + RD_GFX_WB_IB_TEST, &v, 4);
+    pk[0] = PACKET3(PACKET3_WRITE_DATA, 3);
+    pk[1] = WRITE_DATA_DST_SEL(5) | WR_CONFIRM;
+    pk[2] = (uint32_t)gpu_addr;
+    pk[3] = (uint32_t)(gpu_addr >> 32);
+    pk[4] = 0xDEADBEEF;
+    rdna3_vram_write(d, ib, pk, sizeof(pk));
+    rdna3_hdp_flush(d);
+    one.va = rdna3_vram_mc(d, ib);
+    one.ndw = 5;
+    one.flags = 0;
+    /* amdgpu_ib_schedule on the ring, then dma_fence_wait_timeout */
+    seq = r->kind == RD_RING_GFX ? gfx11_submit_job(d, r, 0, 0, 0, &one, 1)
+                                 : gfx11_submit_compute_job(d, (rdna3_mec_ring *)r, 0, 0, 0, &one, 1);
+    if (!seq)
+        return RDNA3_EINVAL;
+    ret = gfx11_wait_fence(d, r, seq);
+    if (ret)
+        return ret;
+    rdna3_vram_read(d, r->wb + RD_GFX_WB_IB_TEST, &v, 4);
+    if (v == 0xDEADBEEF)
+        return RDNA3_OK;
+    RERR(d, "GFX: IB test: 0x%08x instead of 0xDEADBEEF", v);
+    return RDNA3_EINVAL;
+}
+
+/* amdgpu_fence_wait_polling on a KIQ fence for 'usec' */
+static int kiq_fence_wait(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq, uint32_t usec)
+{
+    uint32_t i;
+    for (i = 0; i < usec; i++) {
+        if ((int32_t)(wb_read32(d, r, RD_GFX_WB_FENCE) - seq) >= 0)
+            return 1;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    return 0;
+}
+
+/* Ported from amdgpu_gmc_fw_reg_write_reg_wait (KIQ path) */
+int gfx11_kiq_reg_write_reg_wait(rdna3_dev *d, rdna3_mec_ring *kiq, uint32_t reg0, uint32_t reg1,
+                                 uint32_t ref, uint32_t mask)
+{
+    rdna3_gfx_ring *r = &kiq->rb;
+    uint32_t seq, cnt = 0;
+    int ok;
+
+    if (!r->ready)
+        return RDNA3_ENODEV;
+    if (ring_wait_space(d, r, 32))   /* amdgpu_ring_alloc(ring, 32) */
+        goto failed_kiq;
+    gfx11_emit_reg_write_reg_wait(d, r, reg0, reg1, ref, mask);
+    /* amdgpu_fence_emit_polling(ring, &seq, MAX_KIQ_REG_WAIT) */
+    seq = ++r->fence_seq;
+    gfx11_emit_fence_kiq(d, r, rdna3_vram_mc(d, r->wb + RD_GFX_WB_FENCE), seq, 0);
+    gfx11_commit(d, r);
+    ok = kiq_fence_wait(d, r, seq, 5000);
+    while (!ok && cnt++ < 1000) {
+        d->os.msleep(d->os.ctx, 5);   /* MAX_KIQ_REG_BAILOUT_INTERVAL */
+        ok = kiq_fence_wait(d, r, seq, 5000);
+    }
+    if (ok)
+        return RDNA3_OK;
+failed_kiq:
+    RERR(d, "GMC: failed to write reg %x wait reg %x", reg0, reg1);
+    return RDNA3_ETIME;
+}
+
+/* ---------------------------- MES API ---------------------------- */
+
+static void mes_frame(uint32_t *p, uint32_t op)
+{
+    uint32_t i;
+    for (i = 0; i < RD_MES_API_DWORDS; i++)
+        p[i] = 0;
+    p[0] = RD_MES_API_HEADER(op);
+}
+
+/* Ported from mes_v11_0_misc_op (union MESAPI__MISC: opcode at 1,
+ * api_status at 2, the operation's data from 6) */
+int gfx11_mes_misc_op(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_misc *in)
+{
+    uint32_t p[RD_MES_API_DWORDS];
+    if (!m->ready)
+        return RDNA3_EINVAL;
+    mes_frame(p, RD_MES_SCH_API_MISC);
+    switch (in->op) {
+    case RD_MES_MISC_OP_READ_REG:
+        p[1] = 3;                      /* MESAPI_MISC__READ_REG */
+        p[6] = in->reg0;
+        put64(p + 7, in->buffer_addr);
+        break;
+    case RD_MES_MISC_OP_WRITE_REG:
+        p[1] = 0;                      /* MESAPI_MISC__WRITE_REG */
+        p[6] = in->reg0;
+        p[7] = in->value;
+        break;
+    case RD_MES_MISC_OP_WRM_REG_WAIT:
+        p[1] = 4;                      /* MESAPI_MISC__WAIT_REG_MEM */
+        p[6] = 0;                      /* WRM_OPERATION__WAIT_REG_MEM */
+        p[7] = in->ref;
+        p[8] = in->mask;
+        p[9] = in->reg0;
+        p[10] = 0;
+        break;
+    case RD_MES_MISC_OP_WRM_REG_WR_WAIT:
+        p[1] = 4;
+        p[6] = 1;                      /* WRM_OPERATION__WR_WAIT_WR_REG */
+        p[7] = in->ref;
+        p[8] = in->mask;
+        p[9] = in->reg0;
+        p[10] = in->reg1;
+        break;
+    default:
+        RERR(d, "MES: unsupported misc op (%u)", in->op);
+        return RDNA3_EINVAL;
+    }
+    return gfx11_mes_submit(d, m, p, 2);
+}
+
+/* Ported from amdgpu_mes_reg_write_reg_wait */
+int gfx11_mes_reg_write_reg_wait(rdna3_dev *d, rdna3_mes *m, uint32_t reg0, uint32_t reg1,
+                                 uint32_t ref, uint32_t mask)
+{
+    rdna3_mes_misc in = { RD_MES_MISC_OP_WRM_REG_WR_WAIT, reg0, reg1, 0, ref, mask, 0 };
+    int r = gfx11_mes_misc_op(d, m, &in);
+    if (r)
+        RERR(d, "MES: failed to reg_write_reg_wait");
+    return r;
+}
+
+/* Ported from amdgpu_mes_rreg (the value lands in the MES writeback page) */
+int gfx11_mes_rreg(rdna3_dev *d, rdna3_mes *m, uint32_t reg, uint32_t *val)
+{
+    rdna3_mes_misc in = { RD_MES_MISC_OP_READ_REG, reg, 0, 0, 0, 0, 0 };
+    int r;
+    *val = 0;
+    in.buffer_addr = rdna3_vram_mc(d, m->wb + RD_MES_WB_READ_VAL);
+    r = gfx11_mes_misc_op(d, m, &in);
+    if (r)
+        RERR(d, "MES: failed to read reg (0x%x)", reg);
+    else
+        rdna3_vram_read(d, m->wb + RD_MES_WB_READ_VAL, val, 4);
+    return r;
+}
+
+/* Ported from amdgpu_mes_wreg */
+int gfx11_mes_wreg(rdna3_dev *d, rdna3_mes *m, uint32_t reg, uint32_t val)
+{
+    rdna3_mes_misc in = { RD_MES_MISC_OP_WRITE_REG, reg, 0, val, 0, 0, 0 };
+    int r = gfx11_mes_misc_op(d, m, &in);
+    if (r)
+        RERR(d, "MES: failed to write reg (0x%x)", reg);
+    return r;
+}
+
+/* Ported from mes_v11_0_map_legacy_queue (ADD_QUEUE with map_legacy_kq;
+ * pipe_id at 48, queue_id at 49) */
+int gfx11_mes_map_legacy_queue(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_legacy_queue *q)
+{
+    uint32_t p[RD_MES_API_DWORDS];
+    int type = mes_queue_type(q->queue_type);
+    if (!m->ready || type < 0)
+        return RDNA3_EINVAL;
+    mes_frame(p, RD_MES_SCH_API_ADD_QUEUE);
+    p[48] = q->pipe;
+    p[49] = q->queue;
+    p[18] = q->doorbell_offset;
+    put64(p + 19, q->mqd_addr);
+    put64(p + 21, q->wptr_addr);
+    p[27] = (uint32_t)type;
+    p[36] = 1u << 13;                  /* map_legacy_kq */
+    if (gfx11_mes_submit(d, m, p, RD_MES_ADD_QUEUE_STATUS_DW)) {
+        RERR(d, "MES: failed to map legacy queue");
+        return RDNA3_ETIME;
+    }
+    return RDNA3_OK;
+}
+
+/* Ported from mes_v11_0_unmap_legacy_queue (REMOVE_QUEUE: flags at 4,
+ * pipe 9, queue 10, tf_addr 11, tf_data 13, queue_type 14) */
+int gfx11_mes_unmap_legacy_queue(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_legacy_queue *q,
+                                 uint32_t action, uint64_t tf_addr, uint64_t tf_data)
+{
+    uint32_t p[RD_MES_API_DWORDS];
+    int type = mes_queue_type(q->queue_type);
+    if (!m->ready || type < 0)
+        return RDNA3_EINVAL;
+    mes_frame(p, RD_MES_SCH_API_REMOVE_QUEUE);
+    p[1] = q->doorbell_offset;
+    put64(p + 2, 0);                   /* gang_context_addr */
+    p[9] = q->pipe;
+    p[10] = q->queue;
+    if (action == RD_PREEMPT_QUEUES_NO_UNMAP) {
+        p[4] = 1u << 2;                /* preempt_legacy_gfx_queue */
+        put64(p + 11, tf_addr);
+        p[13] = (uint32_t)tf_data;
+    } else {
+        p[4] = 1u << 3;                /* unmap_legacy_queue */
+        p[14] = (uint32_t)type;
+    }
+    if (gfx11_mes_submit(d, m, p, RD_MES_REMOVE_QUEUE_STATUS_DW)) {
+        RERR(d, "MES: failed to unmap legacy queue");
+        return RDNA3_ETIME;
+    }
+    return RDNA3_OK;
+}
+
+/* Ported from mes_v11_0_reset_legacy_queue, MES path (union MESAPI__RESET:
+ * flags at 1, doorbell 4, queue_type 7, the LP gfx queue from 8, api_status
+ * at 24) */
+int gfx11_mes_reset_legacy_queue(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_legacy_queue *q)
+{
+    uint32_t p[RD_MES_API_DWORDS];
+    int type = mes_queue_type(q->queue_type);
+    if (!m->ready || type < 0)
+        return RDNA3_EINVAL;
+    mes_frame(p, RD_MES_SCH_API_RESET);
+    p[7] = (uint32_t)type;
+    if (type == 0) {                   /* MES_QUEUE_TYPE_GFX */
+        p[1] = 1u << 3;                /* reset_legacy_gfx */
+        p[8] = q->pipe;
+        p[9] = q->queue;
+        put64(p + 11, q->mqd_addr);
+        p[13] = q->doorbell_offset;
+        put64(p + 14, q->wptr_addr);
+        p[10] = q->vmid;
+    } else {
+        p[1] = 1u << 0;                /* reset_queue_only */
+        p[4] = q->doorbell_offset;
+    }
+    if (gfx11_mes_submit(d, m, p, 24)) {
+        RERR(d, "MES: failed to reset legacy queue");
+        return RDNA3_ETIME;
+    }
+    return RDNA3_OK;
+}
+
+/* Ported from mes_v11_0_suspend_gang (union MESAPI__SUSPEND) */
+int gfx11_mes_suspend_gang(rdna3_dev *d, rdna3_mes *m, int all, uint64_t gang_ctx,
+                           uint64_t fence_addr, uint32_t fence_value)
+{
+    uint32_t p[RD_MES_API_DWORDS];
+    if (!m->ready)
+        return RDNA3_EINVAL;
+    mes_frame(p, RD_MES_SCH_API_SUSPEND);
+    p[1] = all ? 1u : 0;
+    put64(p + 2, gang_ctx);
+    put64(p + 4, fence_addr);
+    p[6] = fence_value;
+    return gfx11_mes_submit(d, m, p, 7);
+}
+
+/* Ported from mes_v11_0_resume_gang (union MESAPI__RESUME) */
+int gfx11_mes_resume_gang(rdna3_dev *d, rdna3_mes *m, int all, uint64_t gang_ctx)
+{
+    uint32_t p[RD_MES_API_DWORDS];
+    if (!m->ready)
+        return RDNA3_EINVAL;
+    mes_frame(p, RD_MES_SCH_API_RESUME);
+    p[1] = all ? 1u : 0;
+    put64(p + 2, gang_ctx);
+    return gfx11_mes_submit(d, m, p, 4);
+}
+
+/* amdgpu_mes_suspend_resume_all_supported for GC 11 */
+static int mes_suspend_resume_all_supported(rdna3_dev *d, const rdna3_mes *m)
+{
+    return d->ipver[HWIP_GC].major == 11 && (m->sched_version & RD_MES_VERSION_MASK) >= 0x63;
+}
+
+/* Ported from amdgpu_mes_suspend (mes_v11_0_suspend; mes_v11_0_hw_fini only
+ * frees the SR-IOV MES info buffer) */
+int gfx11_mes_suspend(rdna3_dev *d, rdna3_mes *m)
+{
+    int r;
+    if (!mes_suspend_resume_all_supported(d, m))
+        return RDNA3_OK;
+    r = gfx11_mes_suspend_gang(d, m, 1, 0, 0, 0);
+    if (r)
+        RERR(d, "MES: failed to suspend all gangs");
+    return r;
+}
+
+/* Ported from amdgpu_mes_resume (mes_v11_0_resume, after its hw_init) */
+int gfx11_mes_resume(rdna3_dev *d, rdna3_mes *m)
+{
+    int r;
+    if (!mes_suspend_resume_all_supported(d, m))
+        return RDNA3_OK;
+    r = gfx11_mes_resume_gang(d, m, 1, 0);
+    if (r)
+        RERR(d, "MES: failed to resume all gangs");
+    return r;
+}
+
+/* Ported from mes_v11_0_ring_get_rptr */
+uint64_t gfx11_ring_get_rptr(rdna3_dev *d, rdna3_gfx_ring *r)
+{
+    uint64_t v = 0;
+    rdna3_vram_read(d, r->wb + RD_GFX_WB_RPTR, &v, 8);
+    return v;
+}
+
+/* amdgpu_ring_clear_ring: the ring filled with ring->funcs->nop */
+static void ring_clear(rdna3_dev *d, rdna3_gfx_ring *r)
+{
+    uint32_t i, nop = GFX11_RING_NOP;
+    for (i = 0; i <= r->buf_mask; i++)
+        rdna3_vram_write(d, r->ring + 4ull * i, &nop, 4);
+}
+
+/* gfx_v11_0_kcq_init_queue / gfx_v11_0_kgq_init_queue with reset: the MQD
+ * from its backup (left as it is without one), wptr 0, the ring cleared */
+static void queue_init_reset(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t mqd, uint64_t backup)
+{
+    uint64_t zero = 0;
+    if (backup) {
+        rdna3_vram_read(d, backup, g_mqd, sizeof(g_mqd));
+        rdna3_vram_write(d, mqd, g_mqd, sizeof(g_mqd));
+    }
+    r->wptr = 0;
+    rdna3_vram_write(d, r->wb + RD_GFX_WB_WPTR, &zero, 8);
+    ring_clear(d, r);
+    rdna3_hdp_flush(d);
+}
+
+/* Ported from gfx_v11_0_reset_kcq */
+int gfx11_reset_kcq(rdna3_dev *d, rdna3_mec_ring *kcq, rdna3_mes *m, uint32_t vmid)
+{
+    rdna3_mes_legacy_queue q;
+    uint32_t i;
+    int r = RDNA3_OK;
+    (void)vmid;
+    if (!m || !m->ready || kcq->rb.kind != RD_RING_COMPUTE)
+        return RDNA3_ENODEV;
+    gfx11_rlc_safe_mode(d, 1);
+    grbm_select(d, kcq->me, kcq->pipe, kcq->queue, 0);
+    WG(d, regCP_HQD_DEQUEUE_REQUEST, 0x2);
+    WG(d, regSPI_COMPUTE_QUEUE_RESET, 0x1);
+    /* make sure dequeue is complete */
+    for (i = 0; i < d->usec_timeout; i++) {
+        if (!(RG(d, regCP_HQD_ACTIVE) & 1))
+            break;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    if (i >= d->usec_timeout)
+        r = RDNA3_ETIME;
+    grbm_select(d, 0, 0, 0, 0);
+    gfx11_rlc_safe_mode(d, 0);
+    if (r) {
+        RERR(d, "GFX: fail to wait on hqd deactivate");
+        return r;
+    }
+    kcq->rb.ready = 0;
+    queue_init_reset(d, &kcq->rb, kcq->mqd, kcq->mqd_backup);
+    q.queue_type = 1;
+    q.doorbell_offset = kcq->rb.doorbell;
+    q.me = kcq->me;
+    q.pipe = kcq->pipe;
+    q.queue = kcq->queue;
+    q.vmid = 0;
+    q.mqd_addr = rdna3_vram_mc(d, kcq->mqd);
+    q.wptr_addr = rdna3_vram_mc(d, kcq->rb.wb + RD_GFX_WB_WPTR);
+    r = gfx11_mes_map_legacy_queue(d, m, &q);
+    if (r) {
+        RERR(d, "GFX: failed to remap kcq");
+        return r;
+    }
+    kcq->mapped = 1;
+    r = gfx11_ring_test(d, &kcq->rb);   /* amdgpu_ring_test_ring */
+    if (!r)
+        kcq->rb.ready = 1;
+    return r;
+}
+
+/* Ported from gfx_v11_0_reset_kgq */
+int gfx11_reset_kgq(rdna3_dev *d, rdna3_gfx_ring *r, rdna3_mes *m, uint32_t vmid)
+{
+    rdna3_mes_legacy_queue q;
+    int ret;
+    if (!m || !m->ready)
+        return RDNA3_ENODEV;
+    if (!r->async || !r->mqd || r->kind != RD_RING_GFX)
+        return RDNA3_EINVAL;
+    q.queue_type = 0;
+    q.doorbell_offset = r->doorbell;
+    q.me = 0;
+    q.pipe = 0;
+    q.queue = 0;
+    q.vmid = vmid;
+    q.mqd_addr = rdna3_vram_mc(d, r->mqd);
+    q.wptr_addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_WPTR);
+    ret = gfx11_mes_reset_legacy_queue(d, m, &q);
+    if (ret)
+        return ret;
+    r->ready = 0;
+    queue_init_reset(d, r, r->mqd, r->mqd_backup);
+    shadow_state_reset(r);
+    ret = gfx11_mes_map_legacy_queue(d, m, &q);
+    if (ret) {
+        RERR(d, "GFX: failed to remap kgq");
+        return ret;
+    }
+    ret = gfx11_ring_test(d, r);   /* amdgpu_ring_test_ring */
+    if (!ret) {
+        r->ready = 1;
+        r->last_ctx = 0;
+    }
+    return ret;
+}
+
+/* rdna3amdgpu=1: amdgpu_ib_schedule's order for the gfx ring and the KCQ:
+ * the memory sync only for an IB with AMDGPU_IB_FLAG_EMIT_MEM_SYNC, then
+ * amdgpu_vm_flush (COND_EXEC on the gfx ring; pipeline sync, VM flush,
+ * PASID mapping, GDS switch, a fence after a flush or mapping), the job's
+ * COND_EXEC (gfx), HDP flush, CONTEXT_CONTROL and frames with the TMZ state
+ * following each IB (gfx), the IBs, the user fence, the gfx shadow postfix
+ * and the second COND_EXEC (gfx), the fence */
+static uint32_t submit_amdgpu(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
+                              uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n,
+                              const rdna3_gfx_job_ext *x)
+{
+    int gfx = r->kind == RD_RING_GFX;
+    int gds = x && x->gds_switch, pasid = x && x->pasid_mapping;
+    /* amdgpu_vm_need_pipeline_sync */
+    int need_pipe = vmid && (pd_addr || gds);
+    uint64_t cond_addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_COND_EXE);
+    uint32_t i, seq, patch = 0, cond_exec = 0;
+    /* the ring's emit_frame_size, roughly: vm flush part 5+7+5+19+5+20+8+5,
+     * mem sync 8, COND_EXEC 5 twice, shadow 2 x 22, hdp 7, cntxcntl 3,
+     * frames 2 per IB + 2, user fence 8, fence 8, 4 per IB */
+    uint32_t ndw = 74 + 8 + 10 + 44 + 7 + 3 + 2 + 8 + 8 + 6 * n;
+    int ctx_switch = ctx != r->last_ctx, secure = 0;
+
+    if (ring_wait_space(d, r, ndw))
+        return 0;
+    if (ibs[0].flags & RD_GFX_IB_FLAG_EMIT_MEM_SYNC)
+        gfx11_emit_mem_sync(d, r);
+
+    /* amdgpu_vm_flush */
+    if (pd_addr || gds || need_pipe) {
+        if (gfx)
+            patch = gfx11_emit_init_cond_exec(d, r, cond_addr);
+        if (need_pipe)
+            gfx11_emit_pipeline_sync(d, r);
+        if (pd_addr)
+            gfx11_emit_vm_flush(d, r, vmid, pd_addr);
+        if (pasid)   /* amdgpu_gmc_emit_pasid_mapping -> gmc_v11_0_emit_pasid_mapping */
+            gfx11_emit_wreg(d, r, gmc11_pasid_mapping_reg(d, vmid, 0), x->pasid);
+        if (gds)
+            gfx11_emit_gds_switch(d, r, vmid, x->gds_base, x->gds_size, x->gws_base, x->gws_size,
+                                  x->oa_base, x->oa_size);
+        if (pd_addr || pasid)
+            (void)gfx11_emit_fence(d, r);   /* the flush's own fence (amdgpu_fence_emit) */
+        if (gfx)
+            gfx11_ring_patch_cond_exec(d, r, patch);
+    }
+
+    if (gfx) {
+        gfx11_emit_gfx_shadow(d, r, x ? x->shadow_va : 0, x ? x->csa_va : 0, x ? x->gds_va : 0,
+                              x ? x->init_shadow : 0, vmid);
+        cond_exec = gfx11_emit_init_cond_exec(d, r, cond_addr);
+    }
+    gfx11_emit_hdp_flush(d, r);   /* amdgpu_device_flush_hdp */
+    if (gfx) {
+        gfx11_emit_cntxcntl(d, r, ctx_switch);
+        secure = (ibs[0].flags & RD_GFX_IB_FLAG_TMZ) != 0;
+        gfx11_emit_frame_cntl(d, r, 1, secure);
+    }
+    for (i = 0; i < n; i++) {
+        if (gfx) {
+            if (secure != ((ibs[i].flags & RD_GFX_IB_FLAG_TMZ) != 0)) {
+                gfx11_emit_frame_cntl(d, r, 0, secure);
+                secure = !secure;
+                gfx11_emit_frame_cntl(d, r, 1, secure);
+            }
+            gfx11_emit_ib(d, r, vmid, ibs[i].va, ibs[i].ndw);
+        } else {   /* gfx_v11_0_ring_emit_ib_compute */
+            gfx11_write(d, r, PACKET3(PACKET3_INDIRECT_BUFFER, 2));
+            gfx11_write(d, r, (uint32_t)ibs[i].va & ~3u);
+            gfx11_write(d, r, (uint32_t)(ibs[i].va >> 32));
+            gfx11_write(d, r, INDIRECT_BUFFER_VALID | ibs[i].ndw | (vmid << 24));
+        }
+    }
+    if (gfx)
+        gfx11_emit_frame_cntl(d, r, 0, secure);
+    if (x && x->uf_addr)
+        gfx11_emit_user_fence(d, r, x->uf_addr, (uint32_t)(r->fence_seq + 1));
+    if (gfx) {
+        gfx11_emit_gfx_shadow(d, r, 0, 0, 0, 0, 0);
+        gfx11_emit_init_cond_exec(d, r, cond_addr);
+    }
+    seq = gfx11_emit_fence(d, r);
+    if (gfx)
+        gfx11_ring_patch_cond_exec(d, r, cond_exec);
+    gfx11_commit(d, r);
+    r->last_ctx = ctx;
+    r->last_vmid = vmid;
+    return seq;
 }

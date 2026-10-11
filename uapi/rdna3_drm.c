@@ -120,7 +120,7 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
         di->gl1c_cache_size = gc->gl1c_size_per_instance * gc->gl1c_per_sa;
         di->gl2c_cache_size = gc->gl2c_per_gpu;
     }
-    di->mall_size = 64ull << 20;                 /* 64 MiB Infinity Cache; TODO MALL table */
+    di->mall_size = 64ull << 20;                 /* 64 MiB Infinity Cache (rdna3amdgpu=1: the MALL table) */
     di->pcie_gen = 4;
     di->pcie_num_lanes = 16;
 
@@ -173,6 +173,26 @@ void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4
     /* amdgpu_kms: enabled_rb_pipes_mask = backend_enable_mask; num_rb_pipes
      * stays max_backends_per_se * max_shader_engines */
     di->enabled_rb_pipes_mask = rb_mask;
+}
+
+void rdna3_drm_device_set_tcc_disabled(rdna3_drm_device *dev, uint64_t mask)
+{
+    /* amdgpu_info_ioctl: dev_info->tcc_disabled_mask = adev->gfx.config.tcc_disabled_mask */
+    dev->dev_info.tcc_disabled_mask = mask;
+}
+
+void rdna3_drm_device_set_asic_info(rdna3_drm_device *dev, uint32_t gpu_counter_freq_khz,
+                                    uint32_t vram_type, uint32_t vram_bit_width, uint64_t mall_size)
+{
+    struct drm_amdgpu_info_device *di = &dev->dev_info;
+    if (gpu_counter_freq_khz)
+        di->gpu_counter_freq = gpu_counter_freq_khz;
+    if (vram_type)
+        di->vram_type = vram_type;
+    if (vram_bit_width)
+        di->vram_bit_width = vram_bit_width;
+    if (mall_size)
+        di->mall_size = mall_size;
 }
 
 void rdna3_drm_device_set_userq(rdna3_drm_device *dev, uint32_t ip_mask, uint64_t doorbell_size)
@@ -3192,6 +3212,46 @@ static int info_out(rdna3_drm_file *f, struct drm_amdgpu_info *in, const void *p
     return f->dev->ops.copyout(f->dev->ops.ctx, in->return_pointer, p, len) ? -RD_EFAULT : 0;
 }
 
+/* soc21_allowed_read_registers (gc_11_0_0_offset.h; the SDMA0 / SDMA1 bases
+ * are GC's on SOC21): GRBM_STATUS, GRBM_STATUS2, GRBM_STATUS_SE0..3,
+ * SDMA0 / SDMA1_STATUS_REG, CP_STAT, CP_STALLED_STAT1..3, CP_CPF_BUSY_STAT,
+ * CP_CPF_STALLED_STAT1, CP_CPF_STATUS, CP_CPC_BUSY_STAT,
+ * CP_CPC_STALLED_STAT1, CP_CPC_STATUS, GB_ADDR_CONFIG; none GRBM indexed */
+static const uint32_t soc21_allowed_read_registers[] = {
+    0x0da4, 0x0da2, 0x0da5, 0x0da6, 0x0dae, 0x0daf, 0x0025, 0x0625, 0x0f40, 0x0f3d, 0x0f3e, 0x0f3c,
+    0x0e28, 0x0e29, 0x0e27, 0x0e25, 0x0e26, 0x0e24, 0x13de,
+};
+#define SOC21_REG_GB_ADDR_CONFIG 0x13de
+
+/* Ported from soc21_get_register_value (not GRBM indexed): GB_ADDR_CONFIG
+ * from gfx.config when known */
+static uint32_t soc21_get_register_value(rdna3_drm_device *dev, uint32_t reg_offset)
+{
+    if (reg_offset == dev->gc_base0 + SOC21_REG_GB_ADDR_CONFIG && dev->gb_addr_config)
+        return dev->gb_addr_config;
+    return dev->ops.read_reg ? dev->ops.read_reg(dev->ops.ctx, reg_offset) : 0;
+}
+
+/* Ported from soc21_read_register ('se_num' / 'sh_num' only matter for
+ * GRBM-indexed entries, of which the list has none) */
+static int soc21_read_register(rdna3_drm_device *dev, uint32_t se_num, uint32_t sh_num,
+                               uint32_t reg_offset, uint32_t *value)
+{
+    uint32_t i;
+    (void)se_num;
+    (void)sh_num;
+    *value = 0;
+    if (!dev->gc_base0)   /* !adev->reg_offset[GC_HWIP][0] */
+        return -RD_EINVAL;
+    for (i = 0; i < sizeof(soc21_allowed_read_registers) / sizeof(soc21_allowed_read_registers[0]); i++) {
+        if (reg_offset != dev->gc_base0 + soc21_allowed_read_registers[i])
+            continue;
+        *value = soc21_get_register_value(dev, reg_offset);
+        return 0;
+    }
+    return -RD_EINVAL;
+}
+
 static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
 {
     rdna3_drm_device *dev = f->dev;
@@ -3355,27 +3415,32 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         return info_out(f, in, &caps, sizeof(caps));
     }
     case AMDGPU_INFO_READ_MMR_REG: {
-        /* soc21_allowed_read_registers (GC 11.0.3 offsets, gc_11_0_3_offset.h) */
-        static const uint32_t allowed[] = {
-            0x0da4 /* GRBM_STATUS */, 0x0da2 /* GRBM_STATUS2 */, 0x0da5, 0x0da6, 0x0da7,
-            0x0da8 /* GRBM_STATUS_SE0..3 */, 0x0f40 /* CP_STAT */, 0x13de /* GB_ADDR_CONFIG */,
-        };
-        uint32_t n = in->read_mmr_reg.count, vals[64], i, k;
-        if (!n || n > 64 || (size_t)in->return_size < n * 4ull)
+        /* amdgpu_info_ioctl: SE / SH indices (all bits = broadcast), at most
+         * 128 registers, an offset outside soc21_allowed_read_registers is
+         * -EFAULT, min(return_size, count * 4) bytes copied out */
+        uint32_t se_num = (in->read_mmr_reg.instance >> AMDGPU_INFO_MMR_SE_INDEX_SHIFT) &
+                          AMDGPU_INFO_MMR_SE_INDEX_MASK;
+        uint32_t sh_num = (in->read_mmr_reg.instance >> AMDGPU_INFO_MMR_SH_INDEX_SHIFT) &
+                          AMDGPU_INFO_MMR_SH_INDEX_MASK;
+        uint32_t n = in->read_mmr_reg.count, regs[128], i;
+        size_t len;
+        if (se_num == AMDGPU_INFO_MMR_SE_INDEX_MASK)
+            se_num = 0xffffffff;
+        else if (se_num >= 4)            /* AMDGPU_GFX_MAX_SE */
             return -RD_EINVAL;
-        for (i = 0; i < n; i++) {
-            uint32_t reg = in->read_mmr_reg.dword_offset + i, rel = reg - dev->gc_base0;
-            int ok = 0;
-            for (k = 0; k < sizeof(allowed) / sizeof(allowed[0]); k++)
-                ok |= rel == allowed[k];
-            if (!ok)
-                return -RD_EINVAL;
-            if (rel == 0x13de)
-                vals[i] = dev->gb_addr_config;
-            else
-                vals[i] = dev->ops.read_reg ? dev->ops.read_reg(dev->ops.ctx, reg) : 0;
-        }
-        return info_out(f, in, vals, n * 4);
+        if (sh_num == AMDGPU_INFO_MMR_SH_INDEX_MASK)
+            sh_num = 0xffffffff;
+        else if (sh_num >= 2)            /* AMDGPU_GFX_MAX_SH_PER_SE */
+            return -RD_EINVAL;
+        if (n > 128)
+            return -RD_EINVAL;
+        for (i = 0; i < n; i++)
+            if (soc21_read_register(dev, se_num, sh_num, in->read_mmr_reg.dword_offset + i, &regs[i]))
+                return -RD_EFAULT;   /* "unallowed offset" */
+        len = MIN((size_t)in->return_size, (size_t)n * 4);
+        if (!len)
+            return 0;
+        return dev->ops.copyout(dev->ops.ctx, in->return_pointer, regs, len) ? -RD_EFAULT : 0;
     }
     case AMDGPU_INFO_SENSOR: {
         /* amdgpu_dpm_read_sensor through the OS (SMU metrics) */

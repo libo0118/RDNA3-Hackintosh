@@ -504,6 +504,18 @@ uint32_t RDNA3Accel::drmVmQuery(void *ctx, void *vm)
     return a->fBringup ? a->fBringup->vmQuery(vm) : 0;
 }
 
+void RDNA3Accel::drmSetAsicInfo(uint32_t xclkKhz, uint32_t vramType, uint32_t vramWidth, uint64_t mallSize)
+{
+    if (!fDrm || !fDrmLock)
+        return;
+    bool held = drmHeldByMe();
+    if (!held)
+        IOLockLock(fDrmLock);
+    rdna3_drm_device_set_asic_info(fDrm, xclkKhz, vramType, vramWidth, mallSize);
+    if (!held)
+        IOLockUnlock(fDrmLock);
+}
+
 void RDNA3Accel::drmSetClocks(uint32_t minSclkKhz, uint32_t maxSclkKhz, uint32_t minMclkKhz,
                               uint32_t maxMclkKhz)
 {
@@ -697,6 +709,17 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
             setProperty("RDNA3,ActiveSAMask", ci.sa_active, 32);
             LOG("GC: %u active CUs, RB mask 0x%x (%u RBs), SA mask 0x%x", ci.cu_active, ci.rb_active,
                 ci.num_rbs, ci.sa_active);
+        }
+        /* gfx_v11_0_constants_init: get_tcc_info after get_cu_info
+         * (rdna3amdgpu=1; DEV_INFO's tcc_disabled_mask stays 0 otherwise) */
+        uint32_t exact = 0;
+        if (PE_parse_boot_argn("rdna3amdgpu", &exact, sizeof(exact)) && exact) {
+            uint32_t tcc = gfx11_get_tcc_info(fDispDev);
+            rdna3_drm_device_set_tcc_disabled(fDrm, tcc);
+            setProperty("RDNA3,TCCDisabledMask", tcc, 32);
+            /* amdgpu_discovery_get_mall_info: gmc.mall_size for DEV_INFO */
+            if (fDiscSocOk && fDiscSoc.mall_size)
+                rdna3_drm_device_set_asic_info(fDrm, 0, 0, 0, fDiscSoc.mall_size);
         }
     }
 

@@ -129,6 +129,12 @@ public:
                                  const uint32_t ta[RD_TA_TYPES]);
     /* AMDGPU_INFO_VBIOS: a copy of the image and its strings */
     void          drmSetVbios(const uint8_t *image, uint32_t len, const struct drm_amdgpu_info_vbios *info);
+    /* rdna3amdgpu=1: DEV_INFO's xclk / VRAM type and width / MALL size
+     * from the VBIOS and the discovery binary (0 keeps a value) */
+    void          drmSetAsicInfo(uint32_t xclkKhz, uint32_t vramType, uint32_t vramWidth, uint64_t mallSize);
+    /* amdgpu_discovery_harvest_ip / _get_mall_info / _get_vcn_info, from
+     * the binary readDiscovery parsed; nullptr when it failed */
+    const amd_disc_soc *discSoc() const { return fDiscSocOk ? &fDiscSoc : nullptr; }
 
     /* Stage 3: VRAM below this offset holds the firmware's scanout(s);
      * the bring-up and GEM heaps start above it (RDNA3Display.cpp) */
@@ -358,6 +364,8 @@ private:
 
     /* level 3 */
     void      readGcStatus(const amd_discovery *disc);
+    amd_disc_soc fDiscSoc = {};
+    bool      fDiscSocOk = false;
 
     void      setNumber(const char *key, uint64_t val, unsigned bits = 32);
 };
