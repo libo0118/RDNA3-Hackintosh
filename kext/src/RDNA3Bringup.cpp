@@ -194,7 +194,10 @@ void RDNA3Bringup::stopAndFree()
     }
 
     /* 2. the engines, in gfx_v11_0_hw_fini order, while fDev, the BAR and
-     *    the doorbells are still mapped */
+     *    the doorbells are still mapped; with rdna3amdgpu=1
+     *    amdgpu_device_fini_hw's amdgpu_fence_driver_hw_fini comes first */
+    if (fAmdgpuExact)
+        fenceDriverHwFini();
     /* amdgpu_device_ip_fini_early: GFXOFF disallowed, clock gating off
      * (UNGATE) first */
     if (fGfxOffCall) {
@@ -1150,6 +1153,8 @@ bool RDNA3Bringup::hwInit()
                     IOLockUnlock(l);
             }
         }
+        /* the gfx ring's fence interrupt (amdgpu_fence_driver_hw_init's
+         * amdgpu_irq_get per ring, after the IP blocks are up) */
         if (!ret && fIrqLive)
             gfx11_set_eop_interrupt(fDev, fGfx, 1);
         if (!ret && fAmdgpuExact) {
@@ -2215,6 +2220,40 @@ void RDNA3Bringup::forceFences()
     IOLockUnlock(fLock);
 }
 
+/* Ported from amdgpu_fence_driver_hw_fini (rdna3amdgpu=1, at unload): each
+ * ring waits for its last emitted fence (amdgpu_fence_wait_empty, bounded to
+ * 10 s here: amdgpu waits without a limit and relies on the job timeout);
+ * a ring that does not get there is forced. The fence interrupts are put
+ * afterwards with the engines' hw_fini. */
+void RDNA3Bringup::fenceDriverHwFini()
+{
+    struct { uint32_t ip, ring; uint64_t seq; bool live; } r[2 + 1 + RD_VCN_MAX_INST + 1];
+    uint32_t n = 0;
+    if (!fDev)
+        return;
+    r[n++] = { AMDGPU_HW_IP_GFX, 0, fGfx ? fGfx->fence_seq : 0, fGfx && fGfx->ready };
+    r[n++] = { AMDGPU_HW_IP_COMPUTE, 0, fKcq ? fKcq->rb.fence_seq : 0, fKcq && fKcq->rb.ready };
+    r[n++] = { AMDGPU_HW_IP_DMA, 0, fSdma ? fSdma->fence_seq : 0, fSdma && fSdma->ready };
+    for (uint32_t i = 0; i < RD_VCN_MAX_INST; i++)
+        r[n++] = { AMDGPU_HW_IP_VCN_ENC, i, fVcn ? fVcn->ring_enc[i].fence_seq : 0,
+                   fVcn && fVcn->ring_enc[i].ring_size != 0 };
+    r[n++] = { AMDGPU_HW_IP_VCN_JPEG, 0, fVcn ? fVcn->jpeg.fence_seq : 0, fVcn && fVcn->jpeg.ring_size != 0 };
+    for (uint32_t i = 0; i < n; i++) {
+        bool done = !r[i].live || !r[i].seq;   /* if (!seq) return 0 */
+        for (uint32_t ms = 0; !done && ms < 10000; ms++) {
+            done = fenceSignaled(r[i].ip, r[i].ring, r[i].seq) != 0;
+            if (!done)
+                IOSleep(1);
+        }
+        if (!done) {
+            BLOG("unload: ring %u.%u stuck at fence %llu: forced", r[i].ip, r[i].ring,
+                 (unsigned long long)r[i].seq);
+            forceFences();   /* amdgpu_fence_driver_force_completion */
+            break;
+        }
+    }
+}
+
 /* recovery steps can take the bus down with them (card run 19 froze the
  * whole VM host during a GFX recovery, its last lines lost): each step is
  * logged, then 100 ms for IOLog to reach the serial port before it runs */
@@ -2281,7 +2320,13 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
     /* the engine needs a reset; pending fences complete first so every
      * waiter returns (guilty contexts see -ECANCELED afterwards) */
     HLOG("forcing the pending fences");
+    /* amdgpu_device_pre_asic_reset (rdna3amdgpu=1): the interrupt off while
+     * the fences are forced (amdgpu_fence_driver_isr_toggle) */
+    if (fAmdgpuExact && fIntr)
+        fIntr->disable();
     forceFences();
+    if (fAmdgpuExact && fIntr && fIrqLive)
+        fIntr->enable();
     if (r && fGfx && fGfx->ready) {
         HLOG("GFX soft reset (GRBM_SOFT_RESET CP/GFX, KIQ/KCQ/GFX rings restart)");
         ok = gfx11_soft_reset(fDev, fGfx, fKiq, fKcq) == RDNA3_OK;
@@ -3041,6 +3086,8 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
             return recover(ip, ring, seq);   /* amdgpu_job_timedout */
         }
         if (fIrqLive) {
+            /* the 5 ms re-check covers a lost interrupt, as
+             * amdgpu_fence_schedule_fallback's timer (amdgpu_fence_fallback) */
             uint64_t ns = 5ull * 1000 * 1000, left = capNs - (now - start), deadline;
             if (absNs != UINT64_MAX && absNs - now < left)
                 left = absNs - now;
@@ -3366,6 +3413,8 @@ void RDNA3Bringup::handleInterrupt()
     IOLockLock(fIhLock);
     uint32_t n = ih60_process(fDev, fIh, ivCallback, this);
     IOLockUnlock(fIhLock);
+    /* amdgpu_fence_process for the rings: the waiters re-read their fence
+     * slots (fenceSignaled) once woken */
     IOLockLock(fLock);
     fIrqCount++;
     fIvCount += n;

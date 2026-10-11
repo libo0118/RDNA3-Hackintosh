@@ -218,6 +218,7 @@ private:
     uint64_t         fCpFaults = 0;
     uint64_t         fIbTestBuf = UINT64_MAX;
     void             gfxSuspend();
+    void             fenceDriverHwFini();
     /* rdna3amdgpu=1: the SMU's thermal / MP1 IVs (smu_v13_0_irq_process).
      * The hardware CTF is handled in the IV callback; whatever needs the
      * PMFW mailbox runs from fSmuIrqCall under the DRM lock (50 ms later

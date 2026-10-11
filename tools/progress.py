@@ -127,6 +127,9 @@ ITEM_STEPS = [
     # mappings, the stolen pre-OS framebuffer, suspend before a full reset
     (re.compile(r"amdgpu_gmc_(flush_gpu_tlb|fw_reg_write_reg_wait|get_vbios_allocations)"
                 r"|gmc_v11_0_(emit_pasid_mapping|get_vbios_fb_size|suspend)|ih_v6_0_suspend"), ["amdgpu"]),
+    # rings / fences with rdna3amdgpu=1: the fences drained at unload, the
+    # interrupt off while fences are forced, the MES ring-full check
+    (re.compile(r"amdgpu_fence_driver_(hw_fini|isr_toggle)|amdgpu_fence_wait_empty|amdgpu_ring_undo"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

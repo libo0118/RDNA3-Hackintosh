@@ -25,7 +25,7 @@ smu_v13_0_0_enable_mgpu_fan_boost  fan boost for multi-GPU systems
 soc21_set_(uvd|vce)_clocks  UVD / VCE: Navi 32 has VCN instead
 amdgpu_discovery_set_(isp|vpe|umsch_mm)_ip_blocks  ISP, VPE, UMSCH: APU blocks, not on Navi 32
 amdgpu_discovery_read_binary_from_sysmem  discovery table from ACPI system memory: APUs
-amdgpu_ring_ib_on_emit_(ce|cntl|de)  software ring muxer for GFX9 mid-command-buffer preemption
+amdgpu_ring_ib_on_emit_(ce|cntl|de)|amdgpu_ring_ib_(begin|end)|amdgpu_fence_(last_unsignaled_time_us|update_start_timestamp)  software ring muxer for GFX9 mid-command-buffer preemption (is_sw_ring / amdgpu_ring_mux.c only)
 enable_link_(edp|lvds)|link_blank_all_edp_displays|setup_panel_mode|dcn10_psr_.*  eDP / LVDS panels and PSR: a desktop card has no built-in panel
 edp_decide_link_settings|decide_edp_link_settings_with_dsc|detect_edp_sink_caps|increase_edp_link_rate  eDP link rate sets (ILR): a desktop card has no built-in panel
 apply_usbc_combo_phy_reset_wa|get_usbc_cable_id|link_validate_dpia_bandwidth  USB-C combo PHY / DP tunnelling (DPIA): the card has no USB-C port
@@ -73,13 +73,14 @@ gfx_v11_cntl_pg|gfx_v11_cntl_power_gating  GFX power gating through RLC_PG_CNTL:
 gfx_v11_0_rlc_gc_fed_irq  RLC FED (fatal error) interrupt: dispatches RAS poison to the gfx / sdma ras_if, which amdgpu only creates with RAS (not on this card)
 gfx_v11_0_kiq_set_interrupt_state|gfx11_kiq_query_status  no caller in amdgpu v6.12: no irq source uses the KIQ GENERIC2 state function and kiq_pmf->kiq_query_status is never invoked
 gfx_v11_0_ring_emit_de_meta  MCBP preemption metadata: adev->gfx.mcbp is off on bare metal (amdgpu_device_set_mcbp enables it only with amdgpu.mcbp=1 or SR-IOV)
+amdgpu_ring_generic_pad_ib  the GFX rings' pad_ib: amdgpu_ring_pad_ib runs only on the buffer-funcs (SDMA) ring (TTM moves / fills, the Navi 1x SDMA TLB-flush workaround), and SDMA 6 pads with sdma_v6_0_ring_pad_ib
 gfx_v11_0_ring_emit_reg_wait  unused by the GFX rings: amdgpu_ring_emit_reg_wait comes from gmc_v11_0_emit_flush_gpu_tlb's invalidation semaphore (MMHUB only, gmc_v11_0_use_invalidate_semaphore) and from amdgpu_ring_emit_reg_write_reg_wait_helper, which rings with their own reg_write_reg_wait (all GFX rings) do not use
 gfx_v11_0_cp_gfx_switch_pipe  pipe switch for a second gfx ring (gfx ring 1 on pipe 1): GC 11.0.3 has me.num_pipe_per_me = 1; the PIPE_ID0 select is cp_gfx_resume's GRBM_GFX_CNTL write
 gfx_v11_0_tcp_harvest  empty in amdgpu v6.12 ("TODO: harvest feature to be added later")
 gfx_v11_0_(check_soft_reset|post_soft_reset)  IP-block soft reset of amdgpu_device_pre_asic_reset: amdgpu_device_ip_check_soft_reset and need_full_reset are true on SOC21 (soc21_need_full_reset), so amdgpu goes straight to a full reset
 # ---- no use on macOS
 amdgpu_gfx_parse_disable_cu|gfx_v11_0_set_user_wgp_inactive_bitmap_per_sh  amdgpu.disable_cu module option (Linux debug knob): unset, the masks are zero and set_user_wgp_inactive_bitmap_per_sh returns for a zero bitmap
-amdgpu_gfx_(kiq_fini|kiq_free_ring|mqd_sw_fini)|gfx_v11_0_(me_fini|mec_fini|pfp_fini|rlc_fini|sw_fini)|gmc_v11_0_(gart_fini|sw_fini)  sw_fini buffer-object frees: rings, MQDs, EOP, clear-state buffers and the GART table come from the bring-up's VRAM region, re-initialised as a whole (rdna3_vram_alloc_init) for a reset and dropped at unload; the firmware images go with the blobs; me / pfp / mec fw BOs exist only with load_type DIRECT
+amdgpu_gfx_(kiq_fini|kiq_free_ring|mqd_sw_fini)|gfx_v11_0_(me_fini|mec_fini|pfp_fini|rlc_fini|sw_fini)|gmc_v11_0_(gart_fini|sw_fini)|amdgpu_ring_fini  sw_fini buffer-object frees: rings, MQDs, EOP, clear-state buffers and the GART table come from the bring-up's VRAM region, re-initialised as a whole (rdna3_vram_alloc_init) for a reset and dropped at unload; the firmware images go with the blobs; me / pfp / mec fw BOs exist only with load_type DIRECT
 ih_v6_0_sw_fini  amdgpu_irq_fini_sw: frees the Linux amdgpu_irq source tables (the IH rings themselves go in amdgpu_ih_ring_fini)
 gfx11_kiq_invalidate_tlbs|gfx_v11_0_ring_invalidate_tlbs|amdgpu_gmc_flush_gpu_tlb_pasid|gmc_v11_0_flush_gpu_tlb_pasid|gmc_v11_0_get_vmid_pasid_mapping_info  TLB flush by PASID: only amdgpu_vm_flush_compute_tlb (KFD compute VMs, ROCm on Linux) uses it; graphics VMs flush by VMID on their rings
 .*_get_clockgating_state|mmhub_v3_0_get_clockgating  clock-gating state for Linux sysfs / debugfs
@@ -93,6 +94,8 @@ amdgpu_gfx_kfd_sch_ctrl|amdgpu_ih_decode_iv_ts_helper|amdgpu_ih_wait_on_checkpoi
 amdgpu_gfx_(enforce_isolation_handler|enforce_isolation_ring_begin_use|enforce_isolation_ring_end_use|get_enforce_isolation|set_enforce_isolation)|amdgpu_gfx_(cleaner_shader_init|cleaner_shader_sw_init|cleaner_shader_sw_fini|run_cleaner_shader|run_cleaner_shader_job|set_run_cleaner_shader)  process isolation / cleaner shader switched through Linux sysfs
 gfx_v11_0_read_wave_(data|sgprs|vgprs)|wave_read_(ind|regs)|gpu_recover_get  Linux debugfs dumps
 amdgpu_fence_(get_driver_name|get_timeline_name|slab_init|slab_fini|enable_signaling|release|free)|amdgpu_job_fence_(enable_signaling|free|get_timeline_name|release)|to_amdgpu_fence  Linux dma_fence object glue
+amdgpu_fence_driver_(sw_init|sw_fini|init_ring|start_ring|clear_job_fences|set_error)|amdgpu_fence_need_ring_interrupt_restore|amdgpu_ring_sched_ready  dma_fence / drm_sched bookkeeping: a ring's fences are the sequence number in its writeback slot (no fence array to allocate, attach, clear, fail or free; guilty contexts learn of a reset through AMDGPU_CTX_QUERY2), and no Linux GPU scheduler runs the rings; need_ring_interrupt_restore only differs in s0ix (APUs)
+amdgpu_ib_(get|free|pool_init|pool_fini)  kernel IB suballocator (amdgpu_sa pools): user IBs come from the clients' BOs and the only kernel IBs (the IB tests) use one fixed VRAM page
 amdgpu_userq_fence_(slab_init|slab_fini|alloc|free|release|cleanup|get_driver_name|get_timeline_name)|to_amdgpu_userq_fence  Linux dma_fence object glue
 amdgpu_userq_(start|stop)_sched_for_enforce_isolation  process isolation / cleaner shader switched through Linux sysfs
 amdgpu_userq_(ensure_ev_fence|evict|evict_all|restore_all|restore_worker|validate_bos|validate_vm_bo|wait_for_signal)  eviction fences and the restore worker: this driver never evicts a BO (everything stays resident)

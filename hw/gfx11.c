@@ -805,8 +805,10 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
     return seq;
 }
 
-/* amdgpu_fence_emit_polling: the next sequence number through the ring's
- * emit_fence (with the EOP interrupt once the ring has one) */
+/* amdgpu_fence_emit_polling / amdgpu_fence_emit: the next sequence number
+ * through the ring's emit_fence (with AMDGPU_FENCE_FLAG_INT, the EOP
+ * interrupt, once the ring has one); the fence is that number in the
+ * ring's writeback slot, there is no fence object */
 uint32_t gfx11_emit_fence(rdna3_dev *d, rdna3_gfx_ring *r)
 {
     uint64_t addr = rdna3_vram_mc(d, r->wb + RD_GFX_WB_FENCE);
@@ -1474,6 +1476,16 @@ int gfx11_mes_submit(rdna3_dev *d, rdna3_mes *m, uint32_t *pkt, uint32_t status_
     if (!rb->ring_size || status_dw + 4 > RD_MES_API_DWORDS)
         return RDNA3_EINVAL;
     rdna3_vram_write(d, m->wb + RD_MES_WB_STATUS, &zero, 8);
+    /* rdna3amdgpu=1: amdgpu_ring_alloc + the wait for room
+     * (mes_v11_0_submit_pkt_and_poll_completion's error_undo path) */
+    if (d->amdgpu_exact) {
+        uint64_t wptr_old = rb->wptr;
+        if (ring_wait_space(d, rb, 2 * RD_MES_API_DWORDS)) {
+            RERR(d, "MES ring buffer is full.");
+            rb->wptr = wptr_old;   /* amdgpu_ring_undo */
+            return RDNA3_ETIME;
+        }
+    }
     seq = ++m->seq;
     put64(pkt + status_dw, rdna3_vram_mc(d, m->wb + RD_MES_WB_STATUS));
     put64(pkt + status_dw + 2, 1);
@@ -2303,6 +2315,7 @@ void gfx11_kill_waves(rdna3_dev *d, uint32_t vmid)
     RLOG(d, "GFX: killed the waves of VMID %u (soft recovery)", vmid);
 }
 
+/* amdgpu_fence_driver_force_completion -> amdgpu_fence_write(ring, sync_seq) */
 void gfx11_force_fence_completion(rdna3_dev *d, rdna3_gfx_ring *r)
 {
     if (r->wb == UINT64_MAX)
