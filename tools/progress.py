@@ -69,6 +69,11 @@ ITEM_STEPS = [
     (re.compile(r"smu_v13_0_set_(vcn|jpeg)_enable|nbio_v4_3_vcn_doorbell_range|soc21_query_video_codecs"
                 r"|amdgpu_fence_count_emitted|amdgpu_ib_ring_tests|amdgpu_ring_commit"
                 r"|amdgpu_ring_emit_reg_write_reg_wait_helper|amdgpu_ring_insert_nop"), ["vcn"]),
+    # VCN dynamic power gating (rdna3vcn=2) and the video block across a
+    # system sleep (rdna3vcn=2 + rdna3resume=1)
+    (re.compile(r"vcn_v4_0_(start_dpg_mode|stop_dpg_mode|pause_dpg_mode|mc_resume_dpg_mode"
+                r"|disable_clock_gating_dpg_mode|enable_ras)|amdgpu_vcn_psp_update_sram"), ["vcn2"]),
+    (re.compile(r"(vcn_v4_0|jpeg_v4_0)_(suspend|resume)|amdgpu_(vcn|jpeg)_(suspend|resume)"), ["vcnsleep"]),
     # amdgpu enables CP gfx shadowing only on SR-IOV VFs: no step can run it
     (re.compile(r"AMDGPU_CHUNK_ID_CP_GFX_SHADOW|gfx_v11_0_ring_emit_(gfx_shadow|init_cond_exec)"
                 r"|amdgpu_ring_patch_cond_exec|gfx_v11_0_get_gfx_shadow_info"), ["gfxshadow"]),

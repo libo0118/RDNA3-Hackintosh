@@ -17,11 +17,21 @@
  *    in one VRAM block per instance (amdgpu's vcpu_bo);
  *  - rings, write-pointer shadow and fence slots in VRAM by MC address
  *    (VMID 0, MMHUB), like the SDMA ring;
- *  - the non-DPG start path (vcn_v4_0_start, static power gating through
- *    UVD_PGFSM_CONFIG). soc21 sets AMD_PG_SUPPORT_VCN_DPG for GC 11.0.3;
- *    dynamic power gating (the DPG start / stop, indirect SRAM through
- *    the PSP) is not ported yet, so the flag is masked like amdgpu's
- *    pg_mask module parameter would;
+ *  - two power-gating paths, chosen at early init (boot-arg rdna3vcn):
+ *    RD_VCN_PG_STATIC (rdna3vcn=1) masks AMD_PG_SUPPORT_VCN_DPG like
+ *    amdgpu's pg_mask module parameter would and runs the static path
+ *    (vcn_v4_0_start, UVD_PGFSM_CONFIG); RD_VCN_PG_DPG (rdna3vcn=2) keeps
+ *    the flag as soc21 sets it for GC 11.0.3 and runs what amdgpu runs on
+ *    this card: dynamic power gating (vcn_v4_0_start_dpg_mode) with the
+ *    register image written into the per-instance DPG SRAM buffer and
+ *    handed to the PSP (LOAD_IP_FW GFX_FW_TYPE_VCN0_RAM / VCN1_RAM,
+ *    amdgpu_vcn_psp_update_sram); RD_VCN_PG_DPG_DIRECT (rdna3vcn=3) is
+ *    DPG with adev->vcn.indirect_sram off (the same registers through
+ *    UVD_DPG_LMA_CTL / _DATA, no PSP);
+ *  - suspend / resume (vcn_v4_0_suspend / _resume, amdgpu_vcn_suspend /
+ *    _resume): the VCPU BO is copied into a buffer the OS provides
+ *    (saved_bo) and back, so the firmware's stack, context and fw_shared
+ *    survive a sleep that loses VRAM, and a GPU reset;
  *  - VCN and JPEG are powered on demand (begin_use ungates, the idle
  *    handler gates again) and the PMFW is told through PowerUpVcn /
  *    PowerDownVcn / PowerUpJpeg / PowerDownJpeg (smu_dpm_set_vcn_enable).
@@ -143,6 +153,26 @@ extern "C" {
 /* amd_powergating_state */
 enum { RD_PG_STATE_GATE = 0, RD_PG_STATE_UNGATE = 1 };
 
+/* the power-gating path (vcn40_early_init's pg_mode, boot-arg rdna3vcn - 1) */
+enum { RD_VCN_PG_STATIC = 0, RD_VCN_PG_DPG = 1, RD_VCN_PG_DPG_DIRECT = 2 };
+
+/* amdgpu_vcn_sw_init: dpg_sram_bo, 64 (offset, value) pairs */
+#define RD_VCN_DPG_SRAM_SIZE     (64 * 2 * 4)
+/* amdgpu_vcn.h / vcn_v4_0.c: the windows SOC15_DPG_MODE_OFFSET maps */
+#define VCN_VID_SOC_ADDRESS_2_0  0x1fb00
+#define VCN1_VID_SOC_ADDRESS_3_0 0x48300
+#define VCN_AON_SOC_ADDRESS_2_0  0x1f800
+#define VCN1_AON_SOC_ADDRESS_3_0 0x48000
+#define VCN_VID_IP_ADDRESS_2_0   0x0
+#define VCN_AON_IP_ADDRESS_2_0   0x30000
+/* amdgpu_vcn.h enum internal_dpg_state, struct dpg_pause_state */
+#define RD_VCN_DPG_STATE_UNPAUSE 0
+#define RD_VCN_DPG_STATE_PAUSE   1
+typedef struct rdna3_dpg_pause_state {
+    int fw_based;
+    int jpeg;
+} rdna3_dpg_pause_state;
+
 /* a VCN unified ring or the JPEG decode ring (struct amdgpu_ring) */
 typedef struct rdna3_vcn_ring {
     uint32_t me;            /* VCN instance (JPEG: 0) */
@@ -201,8 +231,24 @@ typedef struct rdna3_vcn {
     uint32_t jpeg_ib_seq[RD_JPEG_IB_SLOTS];
     uint32_t jpeg_ib_next;
     uint64_t ib_test_buf;             /* VRAM for the unified ring's IB tests */
+    /* dynamic power gating (pg_flags & RD_PG_VCN_DPG) */
+    int      pg_mode;                 /* RD_VCN_PG_* */
+    int      indirect_sram;           /* adev->vcn.indirect_sram */
+    int      using_unified_queue;     /* adev->vcn.using_unified_queue: VCN 4+ */
+    int      ras_supported;           /* amdgpu_ras_is_supported(VCN): not on Navi 32 */
+    void    *psp;                     /* rdna3_psp, for amdgpu_vcn_psp_update_sram */
+    uint64_t dpg_sram[RD_VCN_MAX_INST];       /* dpg_sram_bo (VRAM) */
+    uint32_t dpg_sram_curr[RD_VCN_MAX_INST];  /* dpg_sram_curr_addr, dwords from the start */
+    rdna3_dpg_pause_state pause_state[RD_VCN_MAX_INST];
+    uint32_t dpg_enc_submission_cnt[RD_VCN_MAX_INST];
+    /* amdgpu_vcn_suspend: the VCPU BO's copy, vcn40_vcpu_bo_size() bytes per
+     * instance in memory the OS allocated before vcn40_suspend */
+    void    *saved_bo[RD_VCN_MAX_INST];
+    int      saved_bo_valid[RD_VCN_MAX_INST];
     /* counters */
     uint32_t starts, stops, jpeg_starts, jpeg_stops, irqs, jpeg_irqs, bad_irqs;
+    uint32_t dpg_starts, dpg_stops, dpg_pauses, dpg_unpauses, sram_uploads, sram_upload_errs;
+    uint32_t suspends, resumes, restored_bos;
     int      last_err;
 } rdna3_vcn;
 
@@ -210,7 +256,7 @@ typedef struct rdna3_vcn {
 /* vcn_v4_0_early_init + amdgpu_vcn_early_init: instances from discovery,
  * the firmware header (vcn_4_0_0.bin, the PSP loaded the image) */
 int  vcn40_early_init(rdna3_dev *d, rdna3_vcn *v, const uint8_t *fw, size_t fw_len,
-                      uint32_t gb_addr_config, int dpm_enabled);
+                      uint32_t gb_addr_config, int dpm_enabled, int pg_mode);
 /* vcn_v4_0_sw_init: amdgpu_vcn_sw_init (vcpu_bo), amdgpu_vcn_resume, the
  * unified rings (amdgpu_ring_init), vcn_v4_0_fw_shared_init. tmr_mc: the
  * firmware's TMR address per instance (psp13 LOAD_IP_FW response) */
@@ -220,6 +266,19 @@ int  vcn40_sw_init(rdna3_dev *d, rdna3_vcn *v, const uint64_t tmr_mc[RD_VCN_MAX_
 int  vcn40_hw_init(rdna3_dev *d, rdna3_vcn *v);
 /* vcn_v4_0_hw_fini: gate the block */
 int  vcn40_hw_fini(rdna3_dev *d, rdna3_vcn *v);
+/* the size of one instance's VCPU BO (stack, context, fw_shared): what
+ * saved_bo[i] must hold */
+uint64_t vcn40_vcpu_bo_size(void);
+/* vcn_v4_0_suspend: hw_fini, then amdgpu_vcn_suspend (the VCPU BOs into
+ * saved_bo[], which the caller allocated; RDNA3_ENOMEM when one is missing) */
+int  vcn40_suspend(rdna3_dev *d, rdna3_vcn *v);
+/* vcn_v4_0_resume: amdgpu_vcn_resume (saved_bo[] back, or the BO cleared),
+ * then vcn_v4_0_hw_init. After it the caller may free saved_bo[]. */
+int  vcn40_resume(rdna3_dev *d, rdna3_vcn *v);
+/* vcn_v4_0_sw_fini + amdgpu_vcn_sw_fini (after hw_fini, at driver stop) */
+int  vcn40_sw_fini(rdna3_dev *d, rdna3_vcn *v);
+/* vcn_v4_0_pause_dpg_mode (DPG only) */
+int  vcn40_pause_dpg_mode(rdna3_dev *d, rdna3_vcn *v, uint32_t inst, const rdna3_dpg_pause_state *new_state);
 int  vcn40_set_powergating_state(rdna3_dev *d, rdna3_vcn *v, int state);
 int  vcn40_set_clockgating_state(rdna3_dev *d, rdna3_vcn *v, int gate);
 int  vcn40_is_idle(rdna3_dev *d, rdna3_vcn *v);
@@ -227,8 +286,8 @@ int  vcn40_wait_for_idle(rdna3_dev *d, rdna3_vcn *v);
 /* amdgpu_vcn_ring_begin_use / end_use around every submission, and the
  * idle work: gate when nothing is left (call RD_VCN_IDLE_TIMEOUT_MS after
  * the last end_use; returns 1 when it gated, 0 when work is still pending) */
-void vcn40_ring_begin_use(rdna3_dev *d, rdna3_vcn *v);
-void vcn40_ring_end_use(rdna3_dev *d, rdna3_vcn *v);
+void vcn40_ring_begin_use(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *ring);
+void vcn40_ring_end_use(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *ring);
 int  vcn40_idle_work_handler(rdna3_dev *d, rdna3_vcn *v);
 
 /* the unified ring (vcn_v4_0_unified_ring_vm_funcs) */
@@ -277,6 +336,10 @@ int  jpeg40_early_init(rdna3_dev *d, rdna3_vcn *v);
 int  jpeg40_sw_init(rdna3_dev *d, rdna3_vcn *v);
 int  jpeg40_hw_init(rdna3_dev *d, rdna3_vcn *v);
 int  jpeg40_hw_fini(rdna3_dev *d, rdna3_vcn *v);
+/* jpeg_v4_0_suspend / jpeg_v4_0_resume / jpeg_v4_0_sw_fini */
+int  jpeg40_suspend(rdna3_dev *d, rdna3_vcn *v);
+int  jpeg40_resume(rdna3_dev *d, rdna3_vcn *v);
+int  jpeg40_sw_fini(rdna3_dev *d, rdna3_vcn *v);
 int  jpeg40_set_powergating_state(rdna3_dev *d, rdna3_vcn *v, int state);
 int  jpeg40_set_clockgating_state(rdna3_dev *d, rdna3_vcn *v, int gate);
 int  jpeg40_is_idle(rdna3_dev *d, rdna3_vcn *v);

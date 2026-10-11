@@ -5,6 +5,8 @@
  */
 #include "vcn40.h"
 #include "doorbell.h"
+#include "psp13.h"
+#include "psp_gfx_if.h"
 #include "gen/vcn_4_0_0.h"
 
 #define REG_FIELD_SHIFT(reg, field) reg##__##field##__SHIFT
@@ -69,7 +71,7 @@ static uint32_t rd_le32(const uint8_t *p)
  * The header part of amdgpu_vcn_sw_init (fw_version and the naming
  * convention it logs) is done here too, so AMDGPU_INFO_FW_VCN has it. */
 int vcn40_early_init(rdna3_dev *d, rdna3_vcn *v, const uint8_t *fw, size_t fw_len,
-                     uint32_t gb_addr_config, int dpm_enabled)
+                     uint32_t gb_addr_config, int dpm_enabled, int pg_mode)
 {
     uint32_t i, fw_check, ver;
     int keep_sw = v->sw_ready;
@@ -92,9 +94,21 @@ int vcn40_early_init(rdna3_dev *d, rdna3_vcn *v, const uint8_t *fw, size_t fw_le
     v->harvest_config = 0;
     v->num_enc_rings = 1;   /* re-use enc ring as unified ring */
     /* soc21_common_early_init, GC 11.0.3: VCN_MGCG | JPEG_MGCG,
-     * PG VCN | VCN_DPG | JPEG; DPG masked until it is ported */
+     * PG VCN | VCN_DPG | JPEG; RD_VCN_PG_STATIC masks VCN_DPG (amdgpu's
+     * pg_mask), the DPG modes keep it */
     v->cg_flags = RD_CG_VCN_MGCG | RD_CG_JPEG_MGCG;
-    v->pg_flags = RD_PG_VCN | RD_PG_JPEG;
+    v->pg_mode = pg_mode;
+    v->pg_flags = RD_PG_VCN | RD_PG_JPEG | (pg_mode != RD_VCN_PG_STATIC ? RD_PG_VCN_DPG : 0);
+    /* amdgpu_vcn_sw_init: from VCN 4.0 on only the unified queue is used */
+    v->using_unified_queue = 1;
+    /* amdgpu_ras_is_supported(VCN): no RAS on the consumer Navi 32 */
+    v->ras_supported = 0;
+    for (i = 0; i < RD_VCN_MAX_INST; i++) {
+        /* a VCN out of reset is unpaused (a fresh amdgpu_vcn_inst) */
+        v->pause_state[i].fw_based = RD_VCN_DPG_STATE_UNPAUSE;
+        v->pause_state[i].jpeg = RD_VCN_DPG_STATE_UNPAUSE;
+        v->dpg_enc_submission_cnt[i] = 0;
+    }
     v->gb_addr_config = gb_addr_config;
     v->dpm_enabled = dpm_enabled;
     /* the block starts gated (also after a GPU reset: the PMFW powered it
@@ -166,17 +180,75 @@ static int ring_init(rdna3_dev *d, rdna3_vcn_ring *r, uint32_t size, uint32_t al
     return RDNA3_OK;
 }
 
+uint64_t vcn40_vcpu_bo_size(void)
+{
+    return RD_VCN_STACK_SIZE + RD_VCN_CONTEXT_SIZE + RD_VCN_FW_SHARED_SIZE;
+}
+
+/* Ported from amdgpu_vcn_resume (PSP load: the BO holds no image): the
+ * copy amdgpu_vcn_suspend made goes back, without one the BO is cleared.
+ * *restored: the instances that got their copy back. */
+static int vcn_resume_bo(rdna3_dev *d, rdna3_vcn *v, uint32_t *restored)
+{
+    const uint64_t size = vcn40_vcpu_bo_size();
+    uint32_t i;
+
+    *restored = 0;
+    for (i = 0; i < v->num_vcn_inst; ++i) {
+        if (v->harvest_config & (1u << i))
+            continue;
+        if (!v->vcpu_bo[i])
+            return RDNA3_EINVAL;
+        if (v->saved_bo[i] && v->saved_bo_valid[i]) {
+            rdna3_vram_write(d, v->vcpu_bo[i], v->saved_bo[i], size);
+            v->saved_bo_valid[i] = 0;   /* amdgpu frees the copy here; the OS does */
+            v->restored_bos++;
+            *restored |= 1u << i;
+        } else {
+            rdna3_vram_fill(d, v->vcpu_bo[i], 0, size);
+        }
+    }
+    rdna3_hdp_flush(d);
+    return RDNA3_OK;
+}
+
+/* Ported from amdgpu_vcn_suspend: every instance's VCPU BO into saved_bo
+ * (amdgpu allocates the copy there; here the OS did before) */
+static int vcn_suspend_bo(rdna3_dev *d, rdna3_vcn *v)
+{
+    const uint64_t size = vcn40_vcpu_bo_size();
+    uint32_t i;
+
+    rdna3_hdp_invalidate(d);
+    for (i = 0; i < v->num_vcn_inst; ++i) {
+        if (v->harvest_config & (1u << i))
+            continue;
+        if (!v->vcpu_bo[i])
+            return RDNA3_OK;
+        if (!v->saved_bo[i])
+            return RDNA3_ENOMEM;
+        rdna3_vram_read(d, v->vcpu_bo[i], v->saved_bo[i], size);
+        v->saved_bo_valid[i] = 1;
+    }
+    return RDNA3_OK;
+}
+
 /* Ported from vcn_v4_0_sw_init, with amdgpu_vcn_sw_init (vcpu_bo: stack,
- * context and fw_shared; the image itself is in the TMR) and
- * amdgpu_vcn_resume (no saved_bo: the block starts zeroed) */
+ * context and fw_shared, the image itself is in the TMR; with DPG and the
+ * PSP loading the firmware: indirect_sram and a dpg_sram_bo per instance)
+ * and amdgpu_vcn_resume (no saved_bo: the block starts zeroed) */
 int vcn40_sw_init(rdna3_dev *d, rdna3_vcn *v, const uint64_t tmr_mc[RD_VCN_MAX_INST])
 {
-    const uint64_t bo_size = RD_VCN_STACK_SIZE + RD_VCN_CONTEXT_SIZE + RD_VCN_FW_SHARED_SIZE;
-    uint32_t i;
+    const uint64_t bo_size = vcn40_vcpu_bo_size();
+    uint32_t i, restored;
     int r;
 
+    for (i = 0; i < RD_VCN_MAX_INST; i++)
+        v->dpg_enc_submission_cnt[i] = 0;
+    /* firmware.load_type == AMDGPU_FW_LOAD_PSP && pg_flags & VCN_DPG;
+     * RD_VCN_PG_DPG_DIRECT turns it off as amdgpu's Steam Deck quirk does */
+    v->indirect_sram = (v->pg_flags & RD_PG_VCN_DPG) && v->pg_mode != RD_VCN_PG_DPG_DIRECT;
     for (i = 0; i < v->num_vcn_inst; i++) {
-        rdna3_vcn_ring *ring = &v->ring_enc[i];
         if (v->harvest_config & (1u << i))
             continue;
         v->tmr_mc[i] = tmr_mc ? tmr_mc[i] : 0;
@@ -188,9 +260,24 @@ int vcn40_sw_init(rdna3_dev *d, rdna3_vcn *v, const uint64_t tmr_mc[RD_VCN_MAX_I
             }
         }
         v->fw_shared[i] = v->vcpu_bo[i] + bo_size - RD_VCN_FW_SHARED_SIZE;
-        /* amdgpu_vcn_resume */
-        rdna3_vram_fill(d, v->vcpu_bo[i], 0, bo_size);
+        if (v->indirect_sram && !v->dpg_sram[i]) {
+            v->dpg_sram[i] = rdna3_vram_alloc(d, RD_VCN_DPG_SRAM_SIZE, 4096, "vcn-dpg-sram");
+            if (v->dpg_sram[i] == UINT64_MAX) {
+                v->dpg_sram[i] = 0;
+                RERR(d, "VCN %u failed to allocate DPG bo", i);
+                return RDNA3_ENOMEM;
+            }
+        }
+    }
+    /* amdgpu_vcn_resume */
+    r = vcn_resume_bo(d, v, &restored);
+    if (r)
+        return r;
 
+    for (i = 0; i < v->num_vcn_inst; i++) {
+        rdna3_vcn_ring *ring = &v->ring_enc[i];
+        if (v->harvest_config & (1u << i))
+            continue;
         ring->me = i;
         ring->jpeg = 0;
         ring->use_doorbell = d->doorbell_ok;
@@ -238,6 +325,360 @@ static void vcn40_mc_resume(rdna3_dev *d, rdna3_vcn *v, uint32_t inst)
     WV(d, inst, regUVD_LMI_VCPU_NC0_64BIT_BAR_HIGH, (uint32_t)(fws >> 32));
     WV(d, inst, regUVD_VCPU_NONCACHE_OFFSET0, 0);
     WV(d, inst, regUVD_VCPU_NONCACHE_SIZE0, (uint32_t)GPU_PAGE_ALIGN(RD_VCN4_FWS_SIZE));
+}
+
+/* ---------------------- dynamic power gating (DPG) ---------------------- */
+
+/* SOC15_DPG_MODE_OFFSET(VCN, inst, reg): the register's offset inside the
+ * VCN as the DPG SRAM / LMA see it (the AON and VID windows of instance 0
+ * or 1 moved to their internal addresses), in dwords */
+static uint32_t soc15_dpg_mode_offset(rdna3_dev *d, uint32_t inst, uint32_t base_idx, uint32_t reg)
+{
+    uint32_t addr = (rdna3_reg_offset(d, HWIP_VCN, (int)inst, (int)base_idx, reg) << 2) & 0xFFFFF;
+    uint32_t internal_reg_offset;
+    int video_range = addr >= VCN_VID_SOC_ADDRESS_2_0 && addr < VCN_VID_SOC_ADDRESS_2_0 + 0x2600;
+    int video1_range = addr >= VCN1_VID_SOC_ADDRESS_3_0 && addr < VCN1_VID_SOC_ADDRESS_3_0 + 0x2600;
+    int aon_range = addr >= VCN_AON_SOC_ADDRESS_2_0 && addr < VCN_AON_SOC_ADDRESS_2_0 + 0x600;
+    int aon1_range = addr >= VCN1_AON_SOC_ADDRESS_3_0 && addr < VCN1_AON_SOC_ADDRESS_3_0 + 0x600;
+
+    if (video_range)
+        internal_reg_offset = addr - VCN_VID_SOC_ADDRESS_2_0 + VCN_VID_IP_ADDRESS_2_0;
+    else if (aon_range)
+        internal_reg_offset = addr - VCN_AON_SOC_ADDRESS_2_0 + VCN_AON_IP_ADDRESS_2_0;
+    else if (video1_range)
+        internal_reg_offset = addr - VCN1_VID_SOC_ADDRESS_3_0 + VCN_VID_IP_ADDRESS_2_0;
+    else if (aon1_range)
+        internal_reg_offset = addr - VCN1_AON_SOC_ADDRESS_3_0 + VCN_AON_IP_ADDRESS_2_0;
+    else
+        internal_reg_offset = addr;
+    return internal_reg_offset >> 2;
+}
+
+/* WREG32_SOC15_DPG_MODE: through UVD_DPG_LMA_DATA / _CTL, or (indirect)
+ * an (offset, value) pair appended to the instance's DPG SRAM image
+ * (dpg_sram_curr_addr++) for the PSP to load */
+static void wreg32_soc15_dpg_mode(rdna3_dev *d, rdna3_vcn *v, uint32_t inst, uint32_t offset, uint32_t value,
+                                  uint32_t mask_en, int indirect)
+{
+    if (!indirect) {
+        WV(d, inst, regUVD_DPG_LMA_DATA, value);
+        WV(d, inst, regUVD_DPG_LMA_CTL, (0x1u << UVD_DPG_LMA_CTL__READ_WRITE__SHIFT |
+                                        mask_en << UVD_DPG_LMA_CTL__MASK_EN__SHIFT |
+                                        offset << UVD_DPG_LMA_CTL__READ_WRITE_ADDR__SHIFT));
+    } else {
+        uint32_t pair[2];
+        if (v->dpg_sram_curr[inst] + 2 > RD_VCN_DPG_SRAM_SIZE / 4) {   /* past the 64-entry BO */
+            v->last_err = RDNA3_ENOMEM;
+            return;
+        }
+        pair[0] = offset;
+        pair[1] = value;
+        rdna3_vram_write(d, v->dpg_sram[inst] + 4ull * v->dpg_sram_curr[inst], pair, sizeof(pair));
+        v->dpg_sram_curr[inst] += 2;
+    }
+}
+
+/* WREG32_SOC15_DPG_MODE(i, SOC15_DPG_MODE_OFFSET(VCN, ioff, reg), ...); the
+ * register pasted here, not in a nested macro (see VOFF) */
+#define WDPG(d, v, i, ioff, reg, val, mask_en, ind) \
+    wreg32_soc15_dpg_mode((d), (v), (i), soc15_dpg_mode_offset((d), (ioff), reg##_BASE_IDX, reg), (val), \
+                          (mask_en), (ind))
+
+/* Ported from amdgpu_vcn_psp_update_sram: the DPG SRAM image to the PSP,
+ * LOAD_IP_FW with the ucode id AMDGPU_UCODE_ID_VCN0_RAM / VCN1_RAM
+ * (psp_get_fw_type: GFX_FW_TYPE_VCN0_RAM / GFX_FW_TYPE_VCN1_RAM), size =
+ * dpg_sram_curr_addr - dpg_sram_cpu_addr */
+static int vcn_psp_update_sram(rdna3_dev *d, rdna3_vcn *v, uint32_t inst_idx)
+{
+    uint32_t type = inst_idx ? GFX_FW_TYPE_VCN1_RAM : GFX_FW_TYPE_VCN0_RAM;
+    int r;
+    if (!v->psp)
+        return RDNA3_ENODEV;
+    rdna3_hdp_flush(d);
+    r = psp13_load_ip_fw_buf((rdna3_psp *)v->psp, type, rdna3_vram_mc(d, v->dpg_sram[inst_idx]),
+                             v->dpg_sram_curr[inst_idx] * 4);
+    v->sram_uploads++;
+    if (r || ((rdna3_psp *)v->psp)->last_resp_status) {
+        v->sram_upload_errs++;
+        RERR(d, "VCN%u: PSP load of the DPG SRAM failed (%d, status 0x%x)", inst_idx, r,
+             ((rdna3_psp *)v->psp)->last_resp_status);
+    }
+    return r;
+}
+
+/* Ported from vcn_v4_0_mc_resume_dpg_mode (firmware loaded by the PSP:
+ * with indirect SRAM the windows the PSP owns - the image and the stack -
+ * go in as 0 and the PSP fills them in) */
+static void vcn40_mc_resume_dpg_mode(rdna3_dev *d, rdna3_vcn *v, uint32_t inst_idx, int indirect)
+{
+    uint32_t size = (uint32_t)GPU_PAGE_ALIGN(v->fw_ucode_size + 8), offset;
+    uint64_t gpu_addr = rdna3_vram_mc(d, v->vcpu_bo[inst_idx]);
+    uint64_t fws = rdna3_vram_mc(d, v->fw_shared[inst_idx]);
+    uint32_t i = inst_idx;
+
+    /* cache window 0: fw */
+    if (!indirect) {
+        WDPG(d, v, i, i, regUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW, (uint32_t)v->tmr_mc[i], 0, indirect);
+        WDPG(d, v, i, i, regUVD_LMI_VCPU_CACHE_64BIT_BAR_HIGH, (uint32_t)(v->tmr_mc[i] >> 32), 0, indirect);
+        WDPG(d, v, i, i, regUVD_VCPU_CACHE_OFFSET0, 0, 0, indirect);
+    } else {
+        WDPG(d, v, i, i, regUVD_LMI_VCPU_CACHE_64BIT_BAR_LOW, 0, 0, indirect);
+        WDPG(d, v, i, i, regUVD_LMI_VCPU_CACHE_64BIT_BAR_HIGH, 0, 0, indirect);
+        WDPG(d, v, i, i, regUVD_VCPU_CACHE_OFFSET0, 0, 0, indirect);
+    }
+    offset = 0;
+
+    if (!indirect)
+        WDPG(d, v, i, i, regUVD_VCPU_CACHE_SIZE0, size, 0, indirect);
+    else
+        WDPG(d, v, i, i, regUVD_VCPU_CACHE_SIZE0, 0, 0, indirect);
+
+    /* cache window 1: stack */
+    if (!indirect) {
+        WDPG(d, v, i, i, regUVD_LMI_VCPU_CACHE1_64BIT_BAR_LOW, (uint32_t)(gpu_addr + offset), 0, indirect);
+        WDPG(d, v, i, i, regUVD_LMI_VCPU_CACHE1_64BIT_BAR_HIGH, (uint32_t)((gpu_addr + offset) >> 32), 0, indirect);
+        WDPG(d, v, i, i, regUVD_VCPU_CACHE_OFFSET1, 0, 0, indirect);
+    } else {
+        WDPG(d, v, i, i, regUVD_LMI_VCPU_CACHE1_64BIT_BAR_LOW, 0, 0, indirect);
+        WDPG(d, v, i, i, regUVD_LMI_VCPU_CACHE1_64BIT_BAR_HIGH, 0, 0, indirect);
+        WDPG(d, v, i, i, regUVD_VCPU_CACHE_OFFSET1, 0, 0, indirect);
+    }
+    WDPG(d, v, i, i, regUVD_VCPU_CACHE_SIZE1, RD_VCN_STACK_SIZE, 0, indirect);
+
+    /* cache window 2: context */
+    WDPG(d, v, i, i, regUVD_LMI_VCPU_CACHE2_64BIT_BAR_LOW, (uint32_t)(gpu_addr + offset + RD_VCN_STACK_SIZE), 0,
+         indirect);
+    WDPG(d, v, i, i, regUVD_LMI_VCPU_CACHE2_64BIT_BAR_HIGH, (uint32_t)((gpu_addr + offset + RD_VCN_STACK_SIZE) >> 32),
+         0, indirect);
+    WDPG(d, v, i, i, regUVD_VCPU_CACHE_OFFSET2, 0, 0, indirect);
+    WDPG(d, v, i, i, regUVD_VCPU_CACHE_SIZE2, RD_VCN_CONTEXT_SIZE, 0, indirect);
+
+    /* non-cache window */
+    WDPG(d, v, i, i, regUVD_LMI_VCPU_NC0_64BIT_BAR_LOW, (uint32_t)fws, 0, indirect);
+    WDPG(d, v, i, i, regUVD_LMI_VCPU_NC0_64BIT_BAR_HIGH, (uint32_t)(fws >> 32), 0, indirect);
+    WDPG(d, v, i, i, regUVD_VCPU_NONCACHE_OFFSET0, 0, 0, indirect);
+    WDPG(d, v, i, i, regUVD_VCPU_NONCACHE_SIZE0, (uint32_t)GPU_PAGE_ALIGN(RD_VCN4_FWS_SIZE), 0, indirect);
+
+    /* VCN global tiling registers (instance 0's offset, as amdgpu) */
+    WDPG(d, v, i, 0, regUVD_GFX10_ADDR_CONFIG, v->gb_addr_config, 0, indirect);
+}
+
+/* Ported from vcn_v4_0_disable_clock_gating_dpg_mode (a no-op with
+ * AMD_CG_SUPPORT_VCN_MGCG, as GC 11.0.3 has it) */
+static void vcn40_disable_clock_gating_dpg_mode(rdna3_dev *d, rdna3_vcn *v, uint8_t sram_sel, uint32_t inst_idx,
+                                                uint8_t indirect)
+{
+    uint32_t reg_data;
+
+    if (v->cg_flags & RD_CG_VCN_MGCG)
+        return;
+
+    /* enable sw clock gating control */
+    reg_data = 0u << UVD_CGC_CTRL__DYN_CLOCK_MODE__SHIFT;
+    reg_data |= 1u << UVD_CGC_CTRL__CLK_GATE_DLY_TIMER__SHIFT;
+    reg_data |= 4u << UVD_CGC_CTRL__CLK_OFF_DELAY__SHIFT;
+    reg_data &= ~(uint32_t)(UVD_CGC_CTRL__UDEC_RE_MODE_MASK | UVD_CGC_CTRL__UDEC_CM_MODE_MASK |
+                            UVD_CGC_CTRL__UDEC_IT_MODE_MASK | UVD_CGC_CTRL__UDEC_DB_MODE_MASK |
+                            UVD_CGC_CTRL__UDEC_MP_MODE_MASK | UVD_CGC_CTRL__SYS_MODE_MASK |
+                            UVD_CGC_CTRL__UDEC_MODE_MASK | UVD_CGC_CTRL__MPEG2_MODE_MASK |
+                            UVD_CGC_CTRL__REGS_MODE_MASK | UVD_CGC_CTRL__RBC_MODE_MASK |
+                            UVD_CGC_CTRL__LMI_MC_MODE_MASK | UVD_CGC_CTRL__LMI_UMC_MODE_MASK |
+                            UVD_CGC_CTRL__IDCT_MODE_MASK | UVD_CGC_CTRL__MPRD_MODE_MASK |
+                            UVD_CGC_CTRL__MPC_MODE_MASK | UVD_CGC_CTRL__LBSI_MODE_MASK |
+                            UVD_CGC_CTRL__LRBBM_MODE_MASK | UVD_CGC_CTRL__WCB_MODE_MASK |
+                            UVD_CGC_CTRL__VCPU_MODE_MASK);
+    WDPG(d, v, inst_idx, inst_idx, regUVD_CGC_CTRL, reg_data, sram_sel, indirect);
+
+    /* turn off clock gating */
+    WDPG(d, v, inst_idx, inst_idx, regUVD_CGC_GATE, 0, sram_sel, indirect);
+
+    /* turn on SUVD clock gating */
+    WDPG(d, v, inst_idx, inst_idx, regUVD_SUVD_CGC_GATE, 1, sram_sel, indirect);
+
+    /* turn on sw mode in UVD_SUVD_CGC_CTRL */
+    WDPG(d, v, inst_idx, inst_idx, regUVD_SUVD_CGC_CTRL, 0, sram_sel, indirect);
+}
+
+/* Ported from vcn_v4_0_enable_ras (amdgpu_ras_is_supported(VCN) is false
+ * on Navi 32: nothing written) */
+static void vcn40_enable_ras(rdna3_dev *d, rdna3_vcn *v, uint32_t inst_idx, int indirect)
+{
+    uint32_t tmp;
+
+    if (!v->ras_supported)
+        return;
+
+    tmp = VCN_RAS_CNTL__VCPU_VCODEC_REARM_MASK | VCN_RAS_CNTL__VCPU_VCODEC_IH_EN_MASK |
+          VCN_RAS_CNTL__VCPU_VCODEC_PMI_EN_MASK | VCN_RAS_CNTL__VCPU_VCODEC_STALL_EN_MASK;
+    WDPG(d, v, inst_idx, 0, regVCN_RAS_CNTL, tmp, 0, indirect);
+
+    tmp = UVD_SYS_INT_EN__RASCNTL_VCPU_VCODEC_EN_MASK;
+    WDPG(d, v, inst_idx, 0, regUVD_SYS_INT_EN, tmp, 0, indirect);
+}
+
+/* Ported from vcn_v4_0_start_dpg_mode */
+static int vcn40_start_dpg_mode(rdna3_dev *d, rdna3_vcn *v, uint32_t inst_idx, int indirect)
+{
+    rdna3_vcn_ring *ring;
+    uint32_t tmp;
+    uint8_t qm;
+
+    /* disable register anti-hang mechanism */
+    WV_P(d, inst_idx, regUVD_POWER_STATUS, 1, ~UVD_POWER_STATUS__UVD_POWER_STATUS_MASK);
+    /* enable dynamic power gating mode */
+    tmp = RV(d, inst_idx, regUVD_POWER_STATUS);
+    tmp |= UVD_POWER_STATUS__UVD_PG_MODE_MASK;
+    tmp |= UVD_POWER_STATUS__UVD_PG_EN_MASK;
+    WV(d, inst_idx, regUVD_POWER_STATUS, tmp);
+
+    if (indirect)
+        v->dpg_sram_curr[inst_idx] = 0;   /* dpg_sram_curr_addr = dpg_sram_cpu_addr */
+
+    /* enable clock gating */
+    vcn40_disable_clock_gating_dpg_mode(d, v, 0, inst_idx, (uint8_t)indirect);
+
+    /* enable VCPU clock */
+    tmp = 0xFFu << UVD_VCPU_CNTL__PRB_TIMEOUT_VAL__SHIFT;
+    tmp |= UVD_VCPU_CNTL__CLK_EN_MASK | UVD_VCPU_CNTL__BLK_RST_MASK;
+    WDPG(d, v, inst_idx, inst_idx, regUVD_VCPU_CNTL, tmp, 0, indirect);
+
+    /* disable master interupt */
+    WDPG(d, v, inst_idx, inst_idx, regUVD_MASTINT_EN, 0, 0, indirect);
+
+    /* setup regUVD_LMI_CTRL */
+    tmp = (UVD_LMI_CTRL__WRITE_CLEAN_TIMER_EN_MASK | UVD_LMI_CTRL__REQ_MODE_MASK | UVD_LMI_CTRL__CRC_RESET_MASK |
+           UVD_LMI_CTRL__MASK_MC_URGENT_MASK | UVD_LMI_CTRL__DATA_COHERENCY_EN_MASK |
+           UVD_LMI_CTRL__VCPU_DATA_COHERENCY_EN_MASK | (8u << UVD_LMI_CTRL__WRITE_CLEAN_TIMER__SHIFT) |
+           0x00100000u);
+    WDPG(d, v, inst_idx, inst_idx, regUVD_LMI_CTRL, tmp, 0, indirect);
+
+    WDPG(d, v, inst_idx, inst_idx, regUVD_MPC_CNTL, 0x2u << UVD_MPC_CNTL__REPLACEMENT_MODE__SHIFT, 0, indirect);
+
+    WDPG(d, v, inst_idx, inst_idx, regUVD_MPC_SET_MUXA0,
+         ((0x1u << UVD_MPC_SET_MUXA0__VARA_1__SHIFT) | (0x2u << UVD_MPC_SET_MUXA0__VARA_2__SHIFT) |
+          (0x3u << UVD_MPC_SET_MUXA0__VARA_3__SHIFT) | (0x4u << UVD_MPC_SET_MUXA0__VARA_4__SHIFT)), 0, indirect);
+
+    WDPG(d, v, inst_idx, inst_idx, regUVD_MPC_SET_MUXB0,
+         ((0x1u << UVD_MPC_SET_MUXB0__VARB_1__SHIFT) | (0x2u << UVD_MPC_SET_MUXB0__VARB_2__SHIFT) |
+          (0x3u << UVD_MPC_SET_MUXB0__VARB_3__SHIFT) | (0x4u << UVD_MPC_SET_MUXB0__VARB_4__SHIFT)), 0, indirect);
+
+    WDPG(d, v, inst_idx, inst_idx, regUVD_MPC_SET_MUX,
+         ((0x0u << UVD_MPC_SET_MUX__SET_0__SHIFT) | (0x1u << UVD_MPC_SET_MUX__SET_1__SHIFT) |
+          (0x2u << UVD_MPC_SET_MUX__SET_2__SHIFT)), 0, indirect);
+
+    vcn40_mc_resume_dpg_mode(d, v, inst_idx, indirect);
+
+    tmp = 0xFFu << UVD_VCPU_CNTL__PRB_TIMEOUT_VAL__SHIFT;
+    tmp |= UVD_VCPU_CNTL__CLK_EN_MASK;
+    WDPG(d, v, inst_idx, inst_idx, regUVD_VCPU_CNTL, tmp, 0, indirect);
+
+    /* enable LMI MC and UMC channels */
+    tmp = 0x1fu << UVD_LMI_CTRL2__RE_OFLD_MIF_WR_REQ_NUM__SHIFT;
+    WDPG(d, v, inst_idx, inst_idx, regUVD_LMI_CTRL2, tmp, 0, indirect);
+
+    vcn40_enable_ras(d, v, inst_idx, indirect);
+
+    /* enable master interrupt */
+    WDPG(d, v, inst_idx, inst_idx, regUVD_MASTINT_EN, UVD_MASTINT_EN__VCPU_EN_MASK, 0, indirect);
+
+    if (indirect)
+        vcn_psp_update_sram(d, v, inst_idx);   /* amdgpu ignores its result too */
+
+    ring = &v->ring_enc[inst_idx];
+
+    WV(d, inst_idx, regUVD_RB_BASE_LO, (uint32_t)ring->gpu_addr);
+    WV(d, inst_idx, regUVD_RB_BASE_HI, (uint32_t)(ring->gpu_addr >> 32));
+    WV(d, inst_idx, regUVD_RB_SIZE, ring->ring_size / 4);
+
+    tmp = RV(d, inst_idx, regVCN_RB_ENABLE);
+    tmp &= ~(uint32_t)VCN_RB_ENABLE__RB1_EN_MASK;
+    WV(d, inst_idx, regVCN_RB_ENABLE, tmp);
+    qm = fws_read8(d, v, inst_idx, RD_VCN4_FWS_SQ_QUEUE_MODE);
+    fws_write8(d, v, inst_idx, RD_VCN4_FWS_SQ_QUEUE_MODE, (uint8_t)(qm | RD_FW_QUEUE_RING_RESET));
+    rdna3_hdp_flush(d);
+    WV(d, inst_idx, regUVD_RB_RPTR, 0);
+    WV(d, inst_idx, regUVD_RB_WPTR, 0);
+
+    tmp = RV(d, inst_idx, regUVD_RB_RPTR);
+    WV(d, inst_idx, regUVD_RB_WPTR, tmp);
+    ring->wptr = RV(d, inst_idx, regUVD_RB_WPTR);
+    {
+        uint32_t w = (uint32_t)ring->wptr;
+        rdna3_vram_write(d, ring->wb + RD_VCN_WB_WPTR, &w, 4);
+    }
+
+    tmp = RV(d, inst_idx, regVCN_RB_ENABLE);
+    tmp |= VCN_RB_ENABLE__RB1_EN_MASK;
+    WV(d, inst_idx, regVCN_RB_ENABLE, tmp);
+    qm = fws_read8(d, v, inst_idx, RD_VCN4_FWS_SQ_QUEUE_MODE);
+    fws_write8(d, v, inst_idx, RD_VCN4_FWS_SQ_QUEUE_MODE,
+               (uint8_t)(qm & ~(RD_FW_QUEUE_RING_RESET | RD_FW_QUEUE_DPG_HOLD_OFF)));
+    rdna3_hdp_flush(d);
+
+    WV(d, inst_idx, regVCN_RB1_DB_CTRL, ring->doorbell_index << VCN_RB1_DB_CTRL__OFFSET__SHIFT |
+                                        VCN_RB1_DB_CTRL__EN_MASK);
+    v->dpg_starts++;
+    return RDNA3_OK;
+}
+
+/* Ported from vcn_v4_0_pause_dpg_mode */
+int vcn40_pause_dpg_mode(rdna3_dev *d, rdna3_vcn *v, uint32_t inst_idx, const rdna3_dpg_pause_state *new_state)
+{
+    uint32_t reg_data;
+    int ret_code;
+
+    /* pause/unpause if state is changed */
+    if (v->pause_state[inst_idx].fw_based != new_state->fw_based) {
+        RDBG(d, "VCN%u: dpg pause state changed %d -> %d", inst_idx, v->pause_state[inst_idx].fw_based,
+             new_state->fw_based);
+        reg_data = RV(d, inst_idx, regUVD_DPG_PAUSE) & ~(uint32_t)UVD_DPG_PAUSE__NJ_PAUSE_DPG_ACK_MASK;
+
+        if (new_state->fw_based == RD_VCN_DPG_STATE_PAUSE) {
+            ret_code = WAIT_V(d, inst_idx, regUVD_POWER_STATUS, 0x1, UVD_POWER_STATUS__UVD_POWER_STATUS_MASK);
+
+            if (!ret_code) {
+                /* pause DPG */
+                reg_data |= UVD_DPG_PAUSE__NJ_PAUSE_DPG_REQ_MASK;
+                WV(d, inst_idx, regUVD_DPG_PAUSE, reg_data);
+
+                /* wait for ACK */
+                WAIT_V(d, inst_idx, regUVD_DPG_PAUSE, UVD_DPG_PAUSE__NJ_PAUSE_DPG_ACK_MASK,
+                       UVD_DPG_PAUSE__NJ_PAUSE_DPG_ACK_MASK);
+
+                WAIT_V(d, inst_idx, regUVD_POWER_STATUS, RD_UVD_PGFSM_CONFIG__UVDM_UVDU_PWR_ON,
+                       UVD_POWER_STATUS__UVD_POWER_STATUS_MASK);
+                v->dpg_pauses++;
+            }
+        } else {
+            /* unpause dpg, no need to wait */
+            reg_data &= ~(uint32_t)UVD_DPG_PAUSE__NJ_PAUSE_DPG_REQ_MASK;
+            WV(d, inst_idx, regUVD_DPG_PAUSE, reg_data);
+            v->dpg_unpauses++;
+        }
+        v->pause_state[inst_idx].fw_based = new_state->fw_based;
+    }
+    return RDNA3_OK;
+}
+
+/* Ported from vcn_v4_0_stop_dpg_mode */
+static void vcn40_stop_dpg_mode(rdna3_dev *d, rdna3_vcn *v, uint32_t inst_idx)
+{
+    rdna3_dpg_pause_state state = { RD_VCN_DPG_STATE_UNPAUSE, RD_VCN_DPG_STATE_UNPAUSE };
+    uint32_t tmp;
+
+    vcn40_pause_dpg_mode(d, v, inst_idx, &state);
+    /* Wait for power status to be 1 */
+    WAIT_V(d, inst_idx, regUVD_POWER_STATUS, 1, UVD_POWER_STATUS__UVD_POWER_STATUS_MASK);
+
+    /* wait for read ptr to be equal to write ptr */
+    tmp = RV(d, inst_idx, regUVD_RB_WPTR);
+    WAIT_V(d, inst_idx, regUVD_RB_RPTR, tmp, 0xFFFFFFFF);
+
+    WAIT_V(d, inst_idx, regUVD_POWER_STATUS, 1, UVD_POWER_STATUS__UVD_POWER_STATUS_MASK);
+
+    /* disable dynamic power gating mode */
+    WV_P(d, inst_idx, regUVD_POWER_STATUS, 0, ~UVD_POWER_STATUS__UVD_PG_MODE_MASK);
+    v->dpg_stops++;
 }
 
 /* Ported from vcn_v4_0_disable_static_power_gating */
@@ -461,8 +902,7 @@ static int jpeg40_dpm_set_jpeg_enable(rdna3_dev *d, rdna3_vcn *v, int enable)
     return r;
 }
 
-/* Ported from vcn_v4_0_start (non-DPG path; the DPG start is a
- * todo, see vcn40.h) */
+/* Ported from vcn_v4_0_start (DPG: vcn_v4_0_start_dpg_mode per instance) */
 static int vcn40_start(rdna3_dev *d, rdna3_vcn *v)
 {
     uint32_t tmp, i, j, k, status = 0;
@@ -479,6 +919,11 @@ static int vcn40_start(rdna3_dev *d, rdna3_vcn *v)
         uint8_t qm;
         if (v->harvest_config & (1u << i))
             continue;
+
+        if (v->pg_flags & RD_PG_VCN_DPG) {
+            r = vcn40_start_dpg_mode(d, v, i, v->indirect_sram);
+            continue;
+        }
 
         /* disable VCN power gating */
         vcn40_disable_static_power_gating(d, v, i);
@@ -606,7 +1051,7 @@ static int vcn40_start(rdna3_dev *d, rdna3_vcn *v)
     return RDNA3_OK;
 }
 
-/* Ported from vcn_v4_0_stop (non-DPG path) */
+/* Ported from vcn_v4_0_stop (DPG: vcn_v4_0_stop_dpg_mode per instance) */
 static int vcn40_stop(rdna3_dev *d, rdna3_vcn *v)
 {
     uint32_t tmp, i;
@@ -619,6 +1064,11 @@ static int vcn40_stop(rdna3_dev *d, rdna3_vcn *v)
         qm = fws_read8(d, v, i, RD_VCN4_FWS_SQ_QUEUE_MODE);
         fws_write8(d, v, i, RD_VCN4_FWS_SQ_QUEUE_MODE, (uint8_t)(qm | RD_FW_QUEUE_DPG_HOLD_OFF));
         rdna3_hdp_flush(d);
+
+        if (v->pg_flags & RD_PG_VCN_DPG) {
+            vcn40_stop_dpg_mode(d, v, i);
+            continue;
+        }
 
         /* wait for vcn idle */
         r = WAIT_V(d, i, regUVD_STATUS, RD_UVD_STATUS__IDLE, 0x7);
@@ -737,25 +1187,6 @@ int vcn40_wait_for_idle(rdna3_dev *d, rdna3_vcn *v)
     return ret;
 }
 
-/* Ported from amdgpu_vcn_ring_begin_use (VCN 4: the firmware handles the
- * DPG pause itself, so only the power state) */
-void vcn40_ring_begin_use(rdna3_dev *d, rdna3_vcn *v)
-{
-    int r;
-    v->total_submission_cnt++;
-    r = vcn40_set_powergating_state(d, v, RD_PG_STATE_UNGATE);
-    if (r)
-        v->last_err = r;
-}
-
-/* Ported from amdgpu_vcn_ring_end_use (the OS schedules the idle work) */
-void vcn40_ring_end_use(rdna3_dev *d, rdna3_vcn *v)
-{
-    (void)d;
-    if (v->total_submission_cnt)
-        v->total_submission_cnt--;
-}
-
 /* amdgpu_fence_count_emitted: fences on the ring not signaled yet */
 static uint32_t fence_count_emitted(rdna3_dev *d, const rdna3_vcn_ring *r)
 {
@@ -766,14 +1197,60 @@ static uint32_t fence_count_emitted(rdna3_dev *d, const rdna3_vcn_ring *r)
     return r->fence_seq - done;
 }
 
+/* Ported from amdgpu_vcn_ring_begin_use. The DPG pause (pause_dpg_mode with
+ * fw_based PAUSE for an encode ring, or while encode work is pending) is
+ * for VCN 3 and older: from VCN 4 on (using_unified_queue) the firmware
+ * pauses itself, so on this card only the power state changes. */
+void vcn40_ring_begin_use(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *ring)
+{
+    int r;
+    v->total_submission_cnt++;
+    r = vcn40_set_powergating_state(d, v, RD_PG_STATE_UNGATE);
+    if (r)
+        v->last_err = r;
+
+    /* Only set DPG pause for VCN3 or below, VCN4 and above will be handled by FW */
+    if ((v->pg_flags & RD_PG_VCN_DPG) && !v->using_unified_queue && !r) {
+        rdna3_dpg_pause_state new_state = { RD_VCN_DPG_STATE_UNPAUSE, RD_VCN_DPG_STATE_UNPAUSE };
+        /* the unified ring is an AMDGPU_RING_TYPE_VCN_ENC ring */
+        v->dpg_enc_submission_cnt[ring->me]++;
+        new_state.fw_based = RD_VCN_DPG_STATE_PAUSE;
+        vcn40_pause_dpg_mode(d, v, ring->me, &new_state);
+    }
+}
+
+/* Ported from amdgpu_vcn_ring_end_use (the OS schedules the idle work) */
+void vcn40_ring_end_use(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *ring)
+{
+    (void)d;
+    /* Only set DPG pause for VCN3 or below, VCN4 and above will be handled by FW */
+    if ((v->pg_flags & RD_PG_VCN_DPG) && !v->using_unified_queue && v->dpg_enc_submission_cnt[ring->me])
+        v->dpg_enc_submission_cnt[ring->me]--;
+    if (v->total_submission_cnt)
+        v->total_submission_cnt--;
+}
+
 /* Ported from amdgpu_vcn_idle_work_handler */
 int vcn40_idle_work_handler(rdna3_dev *d, rdna3_vcn *v)
 {
-    uint32_t fences = 0, j;
+    uint32_t fences = 0, fence[RD_VCN_MAX_INST] = { 0 }, j;
     for (j = 0; j < v->num_vcn_inst; ++j) {
         if (v->harvest_config & (1u << j))
             continue;
-        fences += fence_count_emitted(d, &v->ring_enc[j]);
+        fence[j] += fence_count_emitted(d, &v->ring_enc[j]);
+
+        /* Only set DPG pause for VCN3 or below, VCN4 and above will be handled by FW */
+        /* (the work only runs after an end_use, with the block up) */
+        if ((v->pg_flags & RD_PG_VCN_DPG) && !v->using_unified_queue && v->cur_state == RD_PG_STATE_UNGATE) {
+            rdna3_dpg_pause_state new_state = { RD_VCN_DPG_STATE_UNPAUSE, RD_VCN_DPG_STATE_UNPAUSE };
+            if (fence[j] || v->dpg_enc_submission_cnt[j])
+                new_state.fw_based = RD_VCN_DPG_STATE_PAUSE;
+            else
+                new_state.fw_based = RD_VCN_DPG_STATE_UNPAUSE;
+            vcn40_pause_dpg_mode(d, v, j, &new_state);
+        }
+        /* + ring_dec's fences: VCN 4 has no decode ring */
+        fences += fence[j];
     }
     if (!fences && !v->total_submission_cnt) {
         int r = vcn40_set_powergating_state(d, v, RD_PG_STATE_GATE);
@@ -982,20 +1459,20 @@ int vcn40_enc_ring_test_ring(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
     uint32_t i;
     int ret;
 
-    vcn40_ring_begin_use(d, v);
+    vcn40_ring_begin_use(d, v, r);
     if (v->cur_state != RD_PG_STATE_UNGATE) {
-        vcn40_ring_end_use(d, v);
+        vcn40_ring_end_use(d, v, r);
         return v->last_err ? v->last_err : RDNA3_EIO;
     }
     ret = vcn40_ring_alloc(d, r, 16);
     if (ret) {
-        vcn40_ring_end_use(d, v);
+        vcn40_ring_end_use(d, v, r);
         return ret;
     }
     rptr = vcn40_unified_ring_get_rptr(d, r);
     vcn40_ring_write(d, r, VCN_ENC_CMD_END);
     vcn40_ring_commit(d, r);
-    vcn40_ring_end_use(d, v);
+    vcn40_ring_end_use(d, v, r);
     for (i = 0; i < d->usec_timeout; i++) {
         if (vcn40_unified_ring_get_rptr(d, r) != rptr)
             return RDNA3_OK;
@@ -1011,9 +1488,9 @@ int vcn40_enc_ring_test_ring(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
 static uint32_t submit_direct(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r, uint64_t ib_mc, uint32_t ndw)
 {
     uint32_t seq;
-    vcn40_ring_begin_use(d, v);
+    vcn40_ring_begin_use(d, v, r);
     if (vcn40_ring_alloc(d, r, 5 + 5 + 1)) {
-        vcn40_ring_end_use(d, v);
+        vcn40_ring_end_use(d, v, r);
         return 0;
     }
     vcn40_enc_ring_emit_ib(d, r, 0, ib_mc, ndw);
@@ -1022,7 +1499,7 @@ static uint32_t submit_direct(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r, uin
     vcn40_enc_ring_emit_fence(d, r, rdna3_vram_mc(d, r->wb + RD_VCN_WB_FENCE), seq);
     vcn40_enc_ring_insert_end(d, r);
     vcn40_ring_commit(d, r);
-    vcn40_ring_end_use(d, v);
+    vcn40_ring_end_use(d, v, r);
     return seq;
 }
 
@@ -1196,17 +1673,102 @@ int vcn40_hw_init(rdna3_dev *d, rdna3_vcn *v)
     return RDNA3_OK;
 }
 
-/* Ported from vcn_v4_0_hw_fini (bare metal) */
+/* Ported from vcn_v4_0_hw_fini (bare metal; the OS cancels the idle work) */
 int vcn40_hw_fini(rdna3_dev *d, rdna3_vcn *v)
 {
     uint32_t i;
+    int r = RDNA3_OK;
     for (i = 0; i < v->num_vcn_inst; ++i) {
         if (v->harvest_config & (1u << i))
             continue;
         v->ring_enc[i].ready = 0;
-        if (v->cur_state != RD_PG_STATE_GATE && RV(d, i, regUVD_STATUS))
-            return vcn40_set_powergating_state(d, v, RD_PG_STATE_GATE);
+        if ((v->pg_flags & RD_PG_VCN_DPG) || (v->cur_state != RD_PG_STATE_GATE && RV(d, i, regUVD_STATUS)))
+            r = vcn40_set_powergating_state(d, v, RD_PG_STATE_GATE);
     }
+    return r;
+}
+
+/* the ring's write-back page (wptr shadow, fence) is VRAM here: amdgpu's
+ * writeback slots are system memory and keep their values across a sleep.
+ * The last fence goes back so what had signalled still reads signalled
+ * (the pending fences were forced by then, as amdgpu's fence driver does
+ * at suspend). */
+static void ring_wb_resume(rdna3_dev *d, rdna3_vcn_ring *r)
+{
+    uint8_t z[64] = { 0 };
+    if (!r->ring_size)
+        return;
+    rdna3_vram_write(d, r->wb, z, sizeof(z));
+    rdna3_vram_write(d, r->wb + RD_VCN_WB_FENCE, &r->fence_seq, 4);
+    r->wptr = 0;
+}
+
+/* Ported from vcn_v4_0_suspend: vcn_v4_0_hw_fini, then amdgpu_vcn_suspend */
+int vcn40_suspend(rdna3_dev *d, rdna3_vcn *v)
+{
+    int r = vcn40_hw_fini(d, v);
+    if (r)
+        return r;
+    r = vcn_suspend_bo(d, v);
+    if (!r)
+        v->suspends++;
+    return r;
+}
+
+/* Ported from vcn_v4_0_resume: amdgpu_vcn_resume, then vcn_v4_0_hw_init.
+ * An instance whose BO was cleared (no copy: a GPU reset without a
+ * suspend before it) gets vcn_v4_0_fw_shared_init again, which amdgpu's
+ * resume leaves to the copy - without it the firmware would not find the
+ * unified queue. */
+int vcn40_resume(rdna3_dev *d, rdna3_vcn *v)
+{
+    uint32_t i, restored = 0;
+    int r;
+
+    if (!v->sw_ready)
+        return RDNA3_ENODEV;
+    r = vcn_resume_bo(d, v, &restored);
+    if (r)
+        return r;
+    for (i = 0; i < v->num_vcn_inst; ++i) {
+        if (v->harvest_config & (1u << i))
+            continue;
+        if (!(restored & (1u << i)))
+            fw_shared_init(d, v, i);
+        ring_wb_resume(d, &v->ring_enc[i]);
+    }
+    rdna3_hdp_flush(d);
+    v->resumes++;
+    return vcn40_hw_init(d, v);
+}
+
+/* Ported from vcn_v4_0_sw_fini and amdgpu_vcn_sw_fini (after hw_fini):
+ * fw_shared tells the firmware the queue is gone. amdgpu_vcn_suspend's
+ * copy in between is dropped: amdgpu_vcn_sw_fini frees it right away.
+ * The VRAM blocks stay with the device's allocator. */
+int vcn40_sw_fini(rdna3_dev *d, rdna3_vcn *v)
+{
+    uint32_t i, zero = 0;
+
+    if (!v->sw_ready)
+        return RDNA3_OK;
+    for (i = 0; i < v->num_vcn_inst; i++) {
+        if (v->harvest_config & (1u << i))
+            continue;
+        rdna3_vram_write(d, v->fw_shared[i] + RD_VCN4_FWS_PRESENT_FLAG_0, &zero, 4);
+        fws_write8(d, v, i, RD_VCN4_FWS_SQ_IS_ENABLED, 0);
+    }
+    rdna3_hdp_flush(d);
+    /* amdgpu_vcn_sw_fini */
+    for (i = 0; i < v->num_vcn_inst; ++i) {
+        if (v->harvest_config & (1u << i))
+            continue;
+        v->dpg_sram[i] = 0;
+        v->saved_bo_valid[i] = 0;
+        v->vcpu_bo[i] = 0;
+        v->ring_enc[i].ready = 0;   /* the ring is torn down */
+    }
+    v->sw_ready = 0;
     return RDNA3_OK;
 }
 
@@ -1218,9 +1780,9 @@ uint32_t vcn40_submit(rdna3_dev *d, rdna3_vcn *v, uint32_t inst, uint32_t vmid, 
     if (inst >= v->num_vcn_inst || !v->ring_enc[inst].ready || !n)
         return 0;
     r = &v->ring_enc[inst];
-    vcn40_ring_begin_use(d, v);   /* amdgpu_ring_alloc -> begin_use */
+    vcn40_ring_begin_use(d, v, r);   /* amdgpu_ring_alloc -> begin_use */
     if (v->cur_state != RD_PG_STATE_UNGATE || vcn40_ring_alloc(d, r, 5 * n + 5 + 5 + 1)) {
-        vcn40_ring_end_use(d, v);
+        vcn40_ring_end_use(d, v, r);
         return 0;
     }
     /* amdgpu_ib_schedule: the IBs, the user fence, the ring fence, END */
@@ -1233,7 +1795,7 @@ uint32_t vcn40_submit(rdna3_dev *d, rdna3_vcn *v, uint32_t inst, uint32_t vmid, 
     vcn40_enc_ring_emit_fence(d, r, rdna3_vram_mc(d, r->wb + RD_VCN_WB_FENCE), seq);
     vcn40_enc_ring_insert_end(d, r);
     vcn40_ring_commit(d, r);
-    vcn40_ring_end_use(d, v);
+    vcn40_ring_end_use(d, v, r);
     return seq;
 }
 
@@ -1788,6 +2350,37 @@ int jpeg40_hw_fini(rdna3_dev *d, rdna3_vcn *v)
     v->jpeg.ready = 0;
     if (v->jpeg_cur_state != RD_PG_STATE_GATE && RJ(d, regUVD_JRBC_STATUS))
         return jpeg40_set_powergating_state(d, v, RD_PG_STATE_GATE);
+    return RDNA3_OK;
+}
+
+/* Ported from jpeg_v4_0_suspend: jpeg_v4_0_hw_fini, then amdgpu_jpeg_suspend
+ * (which only cancels the idle work: the OS's) */
+int jpeg40_suspend(rdna3_dev *d, rdna3_vcn *v)
+{
+    return jpeg40_hw_fini(d, v);
+}
+
+/* Ported from jpeg_v4_0_resume: amdgpu_jpeg_resume (nothing to restore),
+ * then jpeg_v4_0_hw_init; the ring's write-back page and the IB pool's
+ * slots as in vcn40_resume */
+int jpeg40_resume(rdna3_dev *d, rdna3_vcn *v)
+{
+    uint32_t i;
+    if (!v->jpeg_present || !v->jpeg.ring_size)
+        return RDNA3_ENODEV;
+    ring_wb_resume(d, &v->jpeg);
+    for (i = 0; i < RD_JPEG_IB_SLOTS; i++)
+        v->jpeg_ib_seq[i] = v->jpeg.fence_seq;
+    rdna3_hdp_flush(d);
+    return jpeg40_hw_init(d, v);
+}
+
+/* Ported from jpeg_v4_0_sw_fini: amdgpu_jpeg_suspend, amdgpu_jpeg_sw_fini
+ * (no JPEG DPG SRAM on JPEG 4.0.0; the ring is torn down) */
+int jpeg40_sw_fini(rdna3_dev *d, rdna3_vcn *v)
+{
+    (void)d;
+    v->jpeg.ready = 0;
     return RDNA3_OK;
 }
 

@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 29.2%   ported 48.2%   (452 / 747 / 1550)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 29.2%   ported 49.4%   (452 / 765 / 1550)</text>
 <g><title>GFX 11: works 46%, ported 48% (93+4 of 204); verified by step(s) 8</title>
 <rect x="1.0" y="53.0" width="9.5" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="10.5" y="53.0" width="9.5" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1042,7 +1042,7 @@
 <text x="389.4" y="67.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">PSP 13</text>
 <text x="389.4" y="81.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">45% / 45%</text>
 </g>
-<g><title>VCN / JPEG video: works 0%, ported 71% (0+67 of 94); verified by step(s) vcn</title>
+<g><title>VCN / JPEG video: works 0%, ported 90% (0+85 of 94); verified by step(s) vcn</title>
 <rect x="256.2" y="135.3" width="9.0" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="265.2" y="135.3" width="9.0" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="274.2" y="135.3" width="9.0" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
@@ -1110,24 +1110,24 @@
 <rect x="256.2" y="193.3" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="266.1" y="193.3" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="276.0" y="193.3" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="285.9" y="193.3" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="295.9" y="193.3" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="305.8" y="193.3" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="315.7" y="193.3" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="325.6" y="193.3" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="335.5" y="193.3" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="345.5" y="193.3" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="256.2" y="202.9" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="266.1" y="202.9" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="276.0" y="202.9" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="285.9" y="202.9" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="295.9" y="202.9" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="305.8" y="202.9" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="315.7" y="202.9" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="325.6" y="202.9" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="335.5" y="202.9" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="345.5" y="202.9" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="256.2" y="212.6" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="285.9" y="193.3" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="295.9" y="193.3" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="305.8" y="193.3" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="315.7" y="193.3" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="325.6" y="193.3" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="335.5" y="193.3" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="345.5" y="193.3" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="256.2" y="202.9" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="266.1" y="202.9" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="276.0" y="202.9" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="285.9" y="202.9" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="295.9" y="202.9" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="305.8" y="202.9" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="315.7" y="202.9" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="325.6" y="202.9" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="335.5" y="202.9" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="345.5" y="202.9" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="256.2" y="212.6" width="9.9" height="9.7" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="266.1" y="212.6" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="276.0" y="212.6" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="285.9" y="212.6" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
@@ -1139,7 +1139,7 @@
 <rect x="345.5" y="212.6" width="9.9" height="9.7" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="255.2" y="134.3" width="101.2" height="89.0" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="260.2" y="149.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">VCN / JPEG v…</text>
-<text x="260.2" y="163.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 71%</text>
+<text x="260.2" y="163.3" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 90%</text>
 </g>
 <g><title>Display: OTG / AUX: works 35%, ported 35% (25+0 of 71); verified by step(s) 2, 9</title>
 <rect x="256.2" y="224.3" width="9.0" height="9.3" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>

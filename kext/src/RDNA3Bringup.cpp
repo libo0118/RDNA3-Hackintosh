@@ -119,10 +119,13 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
             fPmCtl = rd3_arg("rdna3pmctl", 0);
             fBacoWanted = rd3_arg("rdna3baco", 0) != 0;
             /* VCN 4.0 + JPEG 4.0 (stage 4 item G): opt-in, not part of the
-             * verified profile; rdna3vcn=1 also loads VCN1's firmware */
+             * verified profile; rdna3vcn=1 also loads VCN1's firmware.
+             * =1 static power gating, =2 dynamic (DPG, as amdgpu on this
+             * card), =3 DPG without the PSP's SRAM load (item I) */
             uint32_t vcn = 0;
             PE_parse_boot_argn("rdna3vcn", &vcn, sizeof(vcn));
             fVcnWanted = vcn != 0;
+            fVcnMode = vcn > 3 ? 1 : vcn;
         }
         fMsi = msi != 0;
         fDoorbells = db != 0;
@@ -204,10 +207,17 @@ void RDNA3Bringup::stopAndFree()
         thread_call_free(fVcnIdleCall);
         fVcnIdleCall = nullptr;
     }
+    /* amdgpu_device_ip_fini_early / amdgpu_device_ip_fini: hw_fini, then
+     * sw_fini, in reverse IP order (JPEG before VCN); sw_fini clears
+     * fw_shared while the BAR is still mapped */
     if (fVcn && fDev && fVcn->sw_ready) {
-        vcn40_hw_fini(fDev, fVcn);
         jpeg40_hw_fini(fDev, fVcn);
+        vcn40_hw_fini(fDev, fVcn);
+        jpeg40_sw_fini(fDev, fVcn);
+        vcn40_sw_fini(fDev, fVcn);
     }
+    if (fVcn)
+        vcnFreeSaved();
     if (fCgWanted && fGfx && fGfx->ready && fDev)
         gfx11_set_clock_gating(fDev, 0, RD_GFX_CG_GC_11_0_3);
     if (fCgWanted && fSocCgWanted && fDev)
@@ -1051,12 +1061,18 @@ bool RDNA3Bringup::hwInit()
 
 /* vcn_v4_0 / jpeg_v4_0 early, sw and hw init, then the IB tests
  * (amdgpu_ib_ring_tests: a ring whose IB test fails is not used). Runs at
- * the end of hwInit (again after a GPU reset; VRAM blocks are kept). */
+ * the end of hwInit; again after a GPU reset or a wake (VRAM blocks are
+ * kept), then as amdgpu_device_ip_resume: vcn_v4_0_resume (the VCPU BOs
+ * back from vcnSuspend's copy) and jpeg_v4_0_resume, VCN before JPEG,
+ * both after GFX. */
 void RDNA3Bringup::vcnStart()
 {
+    static const char *const modeName[] = { "static PG", "DPG, SRAM through the PSP", "DPG, SRAM through the LMA" };
     int r, rj = RDNA3_ENODEV;
     uint32_t ready = 0, i, gb = 0;
     uint64_t tmr[RD_VCN_MAX_INST];
+    int pgMode = fVcnMode == 2 ? RD_VCN_PG_DPG : fVcnMode == 3 ? RD_VCN_PG_DPG_DIRECT : RD_VCN_PG_STATIC;
+    bool resume;
 
     publishString("RDNA3,VCN", "starting");
     if (!fGmc || !fGmc->mmhub_enabled || !fIh || !fVmReady) {
@@ -1072,29 +1088,43 @@ void RDNA3Bringup::vcnStart()
         }
         bzero(fVcn, sizeof(*fVcn));
     }
+    resume = fVcn->sw_ready != 0;
     /* adev->gfx.config.gb_addr_config (GC 11.0.3 regGB_ADDR_CONFIG) */
     if (fDev->reg_base[HWIP_GC][0][0])
         gb = rdna3_rreg(fDev, fDev->reg_base[HWIP_GC][0][0] + 0x13de);
     tmr[0] = fPsp->ucode_tmr_mc[AMD_UCODE_VCN];
     tmr[1] = fPsp->ucode_tmr_mc[AMD_UCODE_VCN1];
-    r = vcn40_early_init(fDev, fVcn, fBlobs[AMD_BLOB_VCN].data, fBlobs[AMD_BLOB_VCN].len, gb, fPmUp ? 1 : 0);
+    r = vcn40_early_init(fDev, fVcn, fBlobs[AMD_BLOB_VCN].data, fBlobs[AMD_BLOB_VCN].len, gb, fPmUp ? 1 : 0, pgMode);
+    fVcn->psp = fPsp;   /* amdgpu_vcn_psp_update_sram */
     publish("RDNA3,VCNFirmware", fVcn->fw_version);
     publish("RDNA3,VCNInstances", fVcn->num_vcn_inst);
     publish("RDNA3,VCNTmrMC0", tmr[0]);
     publish("RDNA3,VCNTmrMC1", tmr[1]);
+    publishString("RDNA3,VCNPowerGating", modeName[pgMode]);
     if (!r && (!tmr[0] || (fVcn->num_vcn_inst > 1 && !tmr[1]))) {
         BLOG("VCN: the PSP did not load vcn_4_0_0.bin for every instance (TMR 0x%llx / 0x%llx)",
              (unsigned long long)tmr[0], (unsigned long long)tmr[1]);
         r = RDNA3_ENOENT;
     }
-    if (!r)
-        r = jpeg40_early_init(fDev, fVcn);
-    if (!r)
-        r = vcn40_sw_init(fDev, fVcn, tmr);
-    if (!r)
-        r = jpeg40_sw_init(fDev, fVcn);
-    if (!r)
-        r = vcn40_hw_init(fDev, fVcn);
+    if (resume) {
+        /* vcn_v4_0_resume: where the PSP put the images this time */
+        for (i = 0; i < RD_VCN_MAX_INST; i++)
+            fVcn->tmr_mc[i] = tmr[i];
+        if (!r)
+            r = vcn40_resume(fDev, fVcn);
+        BLOG("VCN: resume (%s): %d, %u VCPU BO(s) restored so far", modeName[pgMode], r, fVcn->restored_bos);
+    } else {
+        if (!r)
+            r = jpeg40_early_init(fDev, fVcn);
+        if (!r)
+            r = vcn40_sw_init(fDev, fVcn, tmr);
+        if (!r)
+            r = jpeg40_sw_init(fDev, fVcn);
+        if (!r)
+            r = vcn40_hw_init(fDev, fVcn);
+    }
+    vcnFreeSaved();   /* amdgpu_vcn_resume freed its copy */
+    fVcnSuspended = false;
     publish("RDNA3,VCNResult", (uint64_t)(int64_t)r);
     if (!r) {
         for (i = 0; i < fVcn->num_vcn_inst; i++) {
@@ -1105,7 +1135,7 @@ void RDNA3Bringup::vcnStart()
             else
                 ready |= 1u << i;
         }
-        rj = jpeg40_hw_init(fDev, fVcn);
+        rj = resume ? jpeg40_resume(fDev, fVcn) : jpeg40_hw_init(fDev, fVcn);
         if (!rj) {
             rj = jpeg40_dec_ring_test_ib(fDev, fVcn);
             if (rj)
@@ -1114,8 +1144,12 @@ void RDNA3Bringup::vcnStart()
     }
     publish("RDNA3,JPEGResult", (uint64_t)(int64_t)rj);
     publish("RDNA3,VCNStarts", fVcn->starts);
-    BLOG("VCN: firmware 0x%08x, %u instance(s), unified rings ready 0x%x, JPEG %s (%d / %d)", fVcn->fw_version,
-         fVcn->num_vcn_inst, ready, rj ? "off" : "ready", r, rj);
+    publish("RDNA3,VCNDPGStarts", fVcn->dpg_starts);
+    publish("RDNA3,VCNSRAMUploads", fVcn->sram_uploads);
+    publish("RDNA3,VCNSRAMUploadErrors", fVcn->sram_upload_errs);
+    publish("RDNA3,VCNResumes", fVcn->resumes);
+    BLOG("VCN: firmware 0x%08x, %u instance(s), %s, unified rings ready 0x%x, JPEG %s (%d / %d)", fVcn->fw_version,
+         fVcn->num_vcn_inst, modeName[pgMode], ready, rj ? "off" : "ready", r, rj);
     if (ready || !rj) {
         const rdna3_ipver *vv = &fDev->ipver[HWIP_VCN];
         fOwner->drmVcnReady(AMD_IP_VERSION(vv->major, vv->minor, vv->rev), fVcn->num_vcn_inst,
@@ -1127,6 +1161,77 @@ void RDNA3Bringup::vcnStart()
     if (!fVcnIdleCall)
         fVcnIdleCall = thread_call_allocate((thread_call_func_t)vcnIdleTick, this);
     vcnIdleSchedule();   /* amdgpu_vcn_ring_end_use after the tests: gate in 1 s */
+}
+
+/* the VCPU BO copies amdgpu_vcn_resume / amdgpu_vcn_sw_fini are done with */
+void RDNA3Bringup::vcnFreeSaved()
+{
+    uint64_t size = vcn40_vcpu_bo_size();
+    for (uint32_t i = 0; i < RD_VCN_MAX_INST; i++)
+        if (fVcn->saved_bo[i] && !fVcn->saved_bo_valid[i]) {
+            IOFree(fVcn->saved_bo[i], (vm_size_t)size);
+            fVcn->saved_bo[i] = nullptr;
+        }
+}
+
+/* amdgpu_device_ip_suspend for the video block (a system sleep, before a
+ * mode-1 reset / BACO): the idle work cancelled, the pending video fences
+ * given 100 ms and then forced (as amdgpu's fence driver at suspend),
+ * jpeg_v4_0_suspend, then vcn_v4_0_suspend with amdgpu_vcn_suspend's copy
+ * of each VCPU BO in system memory. DRM lock held. */
+void RDNA3Bringup::vcnSuspend()
+{
+    uint64_t size = vcn40_vcpu_bo_size();
+    uint32_t i;
+    int rv, rj, k;
+
+    if (!fVcn || !fDev || !fVcn->sw_ready || fVcnSuspended)
+        return;
+    fVcnSuspended = true;   /* vcnIdleTick leaves the block alone from here */
+    if (fVcnIdleCall)
+        thread_call_cancel(fVcnIdleCall);   /* no wait: the tick needs the DRM lock held here */
+    for (k = 0; k < 100; k++) {
+        bool busy = false;
+        for (i = 0; i < RD_VCN_MAX_INST; i++)
+            if (fVcn->ring_enc[i].ring_size &&
+                !vcn40_fence_passed(fDev, &fVcn->ring_enc[i], fVcn->ring_enc[i].fence_seq))
+                busy = true;
+        if (fVcn->jpeg.ring_size && !vcn40_fence_passed(fDev, &fVcn->jpeg, fVcn->jpeg.fence_seq))
+            busy = true;
+        if (!busy)
+            break;
+        IOSleep(1);
+    }
+    for (i = 0; i < RD_VCN_MAX_INST; i++)
+        if (fVcn->ring_enc[i].ring_size)
+            rdna3_vram_write(fDev, fVcn->ring_enc[i].wb + RD_VCN_WB_FENCE, &fVcn->ring_enc[i].fence_seq, 4);
+    if (fVcn->jpeg.ring_size)
+        rdna3_vram_write(fDev, fVcn->jpeg.wb + RD_VCN_WB_FENCE, &fVcn->jpeg.fence_seq, 4);
+    for (i = 0; i < fVcn->num_vcn_inst && i < RD_VCN_MAX_INST; i++)
+        if (!fVcn->saved_bo[i])
+            fVcn->saved_bo[i] = IOMalloc((vm_size_t)size);
+    rj = jpeg40_suspend(fDev, fVcn);
+    rv = vcn40_suspend(fDev, fVcn);
+    publish("RDNA3,VCNSuspends", fVcn->suspends);
+    publish("RDNA3,VCNSuspendResult", (uint64_t)(int64_t)rv);
+    BLOG("VCN: suspended (JPEG %d, VCN %d), VCPU BOs %s", rj, rv,
+         fVcn->saved_bo_valid[0] ? "saved to system memory" : "NOT saved (cleared at resume)");
+    IOLockLock(fLock);
+    IOLockWakeup(fLock, &fFenceEvent, false);
+    IOLockUnlock(fLock);
+}
+
+/* after a wake that kept the card's power (the PSP sOS still runs):
+ * amdgpu_device_ip_resume for VCN / JPEG. DRM lock held. */
+void RDNA3Bringup::vcnResume()
+{
+    if (!fVcnSuspended || !fVcn || !fDev || !fPsp)
+        return;
+    if (!psp13_is_sos_alive(fPsp)) {
+        BLOG("VCN: the card lost its power in the sleep: the video block waits for the next bring-up");
+        return;
+    }
+    vcnStart();
 }
 
 void RDNA3Bringup::vcnIdleSchedule()
@@ -1147,7 +1252,7 @@ void RDNA3Bringup::vcnIdleTick(void *owner, void *)
     if (!l)
         return;
     IOLockLock(l);
-    if (!b->fVcnStop && b->fVcn && b->fDev) {
+    if (!b->fVcnStop && !b->fVcnSuspended && b->fVcn && b->fDev) {
         int vg = vcn40_idle_work_handler(b->fDev, b->fVcn);
         int jg = jpeg40_idle_work_handler(b->fDev, b->fVcn);
         b->publish("RDNA3,VCNGated", b->fVcn->cur_state == RD_PG_STATE_GATE ? 1 : 0);
@@ -2072,6 +2177,10 @@ bool RDNA3Bringup::gpuReset(bool baco)
         gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
     if (fGfx && fGfx->ready)
         gfx11_set_eop_interrupt(fDev, fGfx, 0);
+
+    /* amdgpu_device_pre_asic_reset -> amdgpu_device_ip_suspend: the video
+     * block suspended while the chip still runs (vcnStart resumes it) */
+    vcnSuspend();
 
     /* soc21_asic_mode1_reset: no bus mastering across the reset */
     fPci->setBusMasterEnable(false);

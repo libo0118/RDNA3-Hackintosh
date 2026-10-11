@@ -426,9 +426,12 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             fi ;;
         esac
     fi
-    # video (step vcn): HW_IP_INFO / VIDEO_CAPS and a job on each video ring
+    # video (steps vcn, vcn2, vcnsleep): HW_IP_INFO / VIDEO_CAPS and a job
+    # on each video ring; the kext's power-gating path and DPG counters
     case " $args " in
-    *" rdna3vcn=1 "*)
+    *" rdna3vcn=1 "*|*" rdna3vcn=2 "*|*" rdna3vcn=3 "*)
+        ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null |
+            grep -E '"RDNA3,(VCN|VCNPowerGating|VCNResult|VCNDPGStarts|VCNSRAMUploads|VCNSRAMUploadErrors|VCNStarts|VCNGated)"'
         if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
             hdr "rdna3_drminfo --vcn-test"
             with_limit 60 "$D/bin/rdna3_drminfo" --vcn-test 2>&1
@@ -528,6 +531,18 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                     with_limit 60 "$D/bin/rdna3_drminfo" --dma-test --gfx-test 2>&1
                     done_ $?
                 fi
+                # the video block after the wake (step vcnsleep): suspended
+                # before the sleep, resumed after it (vcn_v4_0_resume)
+                case " $args " in
+                *" rdna3vcn="[123]" "*)
+                    if [ "${lvl:-0}" -ge 8 ]; then
+                        ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null |
+                            grep -E '"RDNA3,(VCN|VCNSuspends|VCNSuspendResult|VCNResumes|VCNResult|VCN0IBTest|VCN1IBTest|JPEGResult|VCNSRAMUploads)"'
+                        hdr "rdna3_drminfo --vcn-test (after the wake)"
+                        with_limit 60 "$D/bin/rdna3_drminfo" --vcn-test 2>&1
+                        done_ $?
+                    fi ;;
+                esac
             fi ;;
     esac
     # last, it resets engines: a DMA job that never finishes, the kernel

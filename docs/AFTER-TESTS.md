@@ -277,7 +277,7 @@ Inputs: `RDNA3,VCN`, `RDNA3,VCNResult`, `RDNA3,VCN0IBTest`, `RDNA3,VCN1IBTest`,
 |---|---|---|
 | step 4 now fails at `LOAD_IP_FW VCN1` | the PSP refuses the second instance's image (`amd_vcn_setup_ucode`, GFX_FW_TYPE_VCN1) | compare the ucode list with `amdgpu_vcn_setup_ucode` / `psp_get_fw_type`; send the PSP lines |
 | `VCN: the PSP did not load vcn_4_0_0.bin for every instance`, `RDNA3,VCNTmrMC1 = 0` | the LOAD_IP_FW answer carried no `fw_addr` (the TMR address cache window 0 needs) | `psp13_load_ip_fw` / `ucode_tmr_mc`; amdgpu takes it from `resp.fw_addr_lo/hi` |
-| `VCN[n] is not responding, giving up!!!` (UVD_STATUS in the line), `RDNA3,VCNResult = -62` | the VCPU did not boot: PMFW did not power the instance (`PowerUpVcn` failed in the log), PGFSM status never reached the power-on pattern, or cache window 0 is not on the firmware | `RDNA3,VCNTmrMC0/1`; `smu13_set_vcn_enable`; `vcn40_disable_static_power_gating` / `vcn40_mc_resume` against `vcn_v4_0.c`; amdgpu runs the DPG path on this card (`vcn_v4_0_start_dpg_mode`, not ported yet) - if the static path never boots, that is the next port |
+| `VCN[n] is not responding, giving up!!!` (UVD_STATUS in the line), `RDNA3,VCNResult = -62` | the VCPU did not boot: PMFW did not power the instance (`PowerUpVcn` failed in the log), PGFSM status never reached the power-on pattern, or cache window 0 is not on the firmware | `RDNA3,VCNTmrMC0/1`; `smu13_set_vcn_enable`; `vcn40_disable_static_power_gating` / `vcn40_mc_resume` against `vcn_v4_0.c`; amdgpu runs the DPG path on this card: if the static path never boots, run step vcn2 (`rdna3vcn=2`) |
 | ring test timeout (`VCN0: ring test timeout (rptr ...)`) | the VCPU booted but does not fetch: doorbell not routed (S2A entry 4/5, `nbio43_vcn_doorbell_range`), `VCN_RB1_DB_CTRL`, or the fw_shared unified-queue flags | boot with `rdna3doorbell=0` (the ring then uses `UVD_RB_WPTR`) to tell doorbell from ring setup |
 | `encode IB test failed` / `decode IB test failed`, ring test fine | the IB's checksum / engine-info packages, or the message buffer address (VMID 0 MC address in VRAM) | `amdgpu_vcn_unified_ring_ib_header` vs `hw/vcn40.c`; the model in `tests/sim_navi32.c` checks the checksum |
 | `JPEG: ring test timeout (pitch 0x...)` | JPEG power (`PowerUpJpeg`, UVDJ PGFSM), JRBC ring registers, or VCN_JPEG_DB_CTRL | `jpeg40_start` vs `jpeg_v4_0_start` |
@@ -285,6 +285,25 @@ Inputs: `RDNA3,VCN`, `RDNA3,VCNResult`, `RDNA3,VCN0IBTest`, `RDNA3,VCN1IBTest`,
 | `--vcn-test`: fence did NOT signal | the job did not run in the client's VMID: MMHUB page tables (`RDNA3,LastFaultVMID`, an MMHUB fault in the log), or the trap / fence | `RDNA3,IRQFenceVCN` counts traps; a hang gates the block (`RDNA3,VCNHangs`) |
 | `RDNA3,VCNGated` stays 0 | the idle work never ran or found work pending | `vcnIdleTick`; jobs still emitted (`fence_count_emitted`) |
 | DMA/GFX tests fail only with `rdna3vcn=1` | the VCN bring-up broke a shared block (MMHUB, IH, doorbells) | send the report; run step 8 again without it |
+| step vcn passes, `vcn2` fails | the DPG path (next table) | compare the two reports |
+
+### Step vcn2 (`rdna3vcn=2`; `rdna3vcn=3` by hand): VCN dynamic power gating
+
+Inputs: step vcn's, plus `RDNA3,VCNPowerGating`, `RDNA3,VCNDPGStarts`,
+`RDNA3,VCNSRAMUploads`, `RDNA3,VCNSRAMUploadErrors`, the `PSP: LOAD_IP_FW
+type 49` / `type 50` lines (logged only when the PSP answers with a status)
+and `VCN<n>: PSP load of the DPG SRAM failed`. Linux on the card runs this
+path (soc21 pg_flags VCN | VCN_DPG | JPEG, `adev->vcn.indirect_sram`); its
+`amdgpu_vcn_psp_update_sram` loads 27 (offset, value) pairs per instance
+(216 bytes), as `tests/sim_navi32.c` checks.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `VCN<n>: PSP load of the DPG SRAM failed (-62 ...)` or a nonzero status, `RDNA3,VCNSRAMUploadErrors > 0` | the PSP refuses GFX_FW_TYPE_VCN0_RAM / VCN1_RAM (size, alignment of `dpg_sram`, or VCN not powered: `PowerUpVcn` failed) | the PSP lines; try `rdna3vcn=3` (the same registers through UVD_DPG_LMA_CTL/DATA, no PSP) to tell PSP from register content |
+| SRAM loads fine, ring test timeout | the VCPU did not boot from the image: cache windows 0/1 (the PSP fills them, the image has 0), or `UVD_VCPU_CNTL` order | `rdna3vcn=3` writes window 0 with the TMR address itself: if it passes, the PSP did not fill the windows - compare with `vcn_v4_0_mc_resume_dpg_mode` |
+| `rdna3vcn=3` fails too, `rdna3vcn=1` passes | the DPG register image itself (`vcn40_start_dpg_mode` vs `vcn_v4_0_start_dpg_mode`), `UVD_POWER_STATUS` PG mode | send both reports; dump `UVD_POWER_STATUS`, `UVD_DPG_PAUSE` |
+| first jobs pass, later ones time out after an idle gate | `vcn_v4_0_stop_dpg_mode`'s waits (POWER_STATUS 1, RPTR = WPTR) or the restart (`RDNA3,VCNDPGStarts` grows, uploads too?) | `RDNA3,VCNGated`, the `VCN` log lines around the gate; `rdna3vcn=1` for comparison |
+| step passes | pass | `vcn2 <date> vm` into `docs/status/hw-verified.txt`, regenerate |
 
 ### Hotplug (any step from 6b with `rdna3msi=1`)
 
@@ -478,6 +497,27 @@ event), `wake #N: PCI ..., MEMSIZE ..., ASIC_Init ..., PSP sOS ...`,
 | DMA/GFX tests after the wake fail, ring tests passed | GPUVM page tables lost with VRAM (the pool is not saved; see `docs/DRIVER-PLAN.md`, D4) | expected after a power loss; a fresh process (new VM) passing = only old VMs are broken |
 
 ---
+
+### Step `vcnsleep` (`sleep` + `rdna3vcn=2`): the video block through a system sleep
+
+Step `sleep`'s table first. The video part: the report's `--vcn-test`
+before the sleep and `--vcn-test (after the wake)` with the VCN properties
+before it; `RDNA3,VCNSuspends`, `RDNA3,VCNSuspendResult`,
+`RDNA3,VCNResumes`, the log lines `VCN: suspended (JPEG 0, VCN 0), VCPU BOs
+saved to system memory` and `VCN: resume (...): 0`. Order as amdgpu: the
+display suspends first, then JPEG and VCN; on the wake VCN and JPEG come
+back after GFX (in the bring-up after a power loss, from the wake work
+when the card kept its power). Plain step `sleep` with any `rdna3vcn=` set
+by hand runs the same path.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `VCN: suspended (...)` missing in the log | setPowerState(0) came before the bring-up finished, or the block was not up | `RDNA3,VCN` before the sleep; the order of the `display: system sleep` and `VCN:` lines |
+| `VCNSuspendResult = -12` (ENOMEM), `VCPU BOs NOT saved` | the copy buffers (2 x 644 KiB) were not allocated | resume then clears the BOs and sets fw_shared up again: the rings may still work; send the log |
+| `VCN: the card lost its power in the sleep: the video block waits` and no `resume` line | power lost and `rdna3resume=1` missing / the GPU bring-up failed | step sleep's power-loss rows |
+| `VCN: resume (...): -62`, `RDNA3,VCNResult` nonzero after the wake | the VCPU did not boot again: the PSP lost the VCN images (TMR) in the sleep, PowerUpVcn refused | `RDNA3,VCNTmrMC0/1` after the wake (0 = the PSP did not load them again); compare with step vcn2 |
+| `--vcn-test (after the wake)` fence did NOT signal, before the sleep fine | fw_shared / stack restored wrong (the copy came back over a different BO layout) or the ring write-back page | `RDNA3,VCNResumes`, the IB test results after the wake |
+| both `--vcn-test` pass, every head back | pass | `vcnsleep <date> vm` into `docs/status/hw-verified.txt`, regenerate |
 
 ## 4. When steps 0–8 pass: next work, in order
 

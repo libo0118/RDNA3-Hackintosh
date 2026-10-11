@@ -89,6 +89,10 @@ int  psp13_stage_ucodes(rdna3_psp *psp, const amd_ucode_plan *plan,
                         const amd_fw_blob_ref blobs[AMD_BLOB_COUNT],
                         uint64_t mc_out[AMD_UCODE_MAX]);
 int  psp13_load_ip_fw(rdna3_psp *psp, const amd_ucode *u, uint64_t mc);
+/* psp_execute_ip_fw_load for an image that is not a ucode of the plan: the
+ * VCN DPG SRAM (amdgpu_vcn_psp_update_sram, fw_type GFX_FW_TYPE_VCN0_RAM /
+ * GFX_FW_TYPE_VCN1_RAM), 'size' bytes at MC 'mc' */
+int  psp13_load_ip_fw_buf(rdna3_psp *psp, uint32_t fw_type, uint64_t mc, uint32_t size);
 
 /* Full sequence of psp_hw_init() for an RDNA3 dGPU:
  *   bootloader (KDB, SPL, SYS, SOS) -> KM ring -> TOC/TMR alloc ->
