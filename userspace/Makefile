@@ -35,13 +35,15 @@ probes: $(BUILD)/rdna3_vktest $(BUILD)/mtlprobe
 # without the kext (CI). Same install name, so it drops in for libdrm.2.dylib.
 LB_INC  := -I$(XNU) -I../uapi -I../common -I../third_party/amd
 LB_OBJS := $(BUILD)/obj/drm_xnu.o $(BUILD)/obj/xf86drm_xnu.o $(BUILD)/obj/lb_backend_loopback.o \
-           $(BUILD)/obj/lb_rdna3_drm.o $(BUILD)/obj/lb_amd_discovery.o
+           $(BUILD)/obj/lb_rdna3_drm.o $(BUILD)/obj/lb_amd_discovery.o $(BUILD)/obj/lb_amd_fw.o
 loopback: $(BUILD)/libdrm_loopback.dylib
 $(BUILD)/obj/lb_backend_loopback.o: $(XNU)/backend_loopback.c | $(BUILD)/obj
 	$(CC) $(CFLAGS) $(WARN) $(LB_INC) -c $< -o $@
 $(BUILD)/obj/lb_rdna3_drm.o: ../uapi/rdna3_drm.c | $(BUILD)/obj
 	$(CC) $(CFLAGS) $(WARN) $(LB_INC) -c $< -o $@
 $(BUILD)/obj/lb_amd_discovery.o: ../common/amd_discovery.c | $(BUILD)/obj
+	$(CC) $(CFLAGS) $(WARN) $(LB_INC) -c $< -o $@
+$(BUILD)/obj/lb_amd_fw.o: ../common/amd_fw.c | $(BUILD)/obj
 	$(CC) $(CFLAGS) $(WARN) $(LB_INC) -c $< -o $@
 $(BUILD)/libdrm_loopback.dylib: $(LB_OBJS)
 	$(CC) $(ARCH) -dynamiclib -install_name @rpath/libdrm.2.dylib \

@@ -82,8 +82,17 @@ check: $(BUNDLE)
 	@echo "undefined symbols (must all come from the OSBundleLibraries in Info.plist):"
 	@nm -u $(BUNDLE)/Contents/MacOS/$(KEXT)
 	@# kextlibs can only resolve x86_64 KPIs on an Intel Mac / Hackintosh,
-	@# on Apple Silicon CI runners it reports everything as missing.
-	@if [ "$$(uname -m)" = x86_64 ]; then kextlibs -xml $(BUNDLE); fi
+	@# on Apple Silicon it reports everything as missing. On macOS 11+
+	@# without a KDK it can miss every KPI on Intel too: a report where not
+	@# one symbol resolved says nothing about the kext and does not fail.
+	@if [ "$$(uname -m)" = x86_64 ]; then \
+	  out=$$(kextlibs -xml $(BUNDLE) 2>&1) && { echo "$$out"; exit 0; }; echo "$$out"; \
+	  total=$$(nm -u $(BUNDLE)/Contents/MacOS/$(KEXT) | wc -l | tr -d ' '); \
+	  miss=$$(echo "$$out" | sed -n 's/^ *\([0-9][0-9]*\) symbols* not found.*/\1/p' | head -1); \
+	  if [ -n "$$miss" ] && [ "$$miss" = "$$total" ]; then \
+	    echo "kextlibs resolved none of the $$total symbols (no KPI visible on this host): not counted"; \
+	  else exit 1; fi; \
+	fi
 
 firmware: $(BUNDLE)
 	@test -n "$(FW_DIR)" || (echo "set FW_DIR=<linux-firmware>/amdgpu" && false)
