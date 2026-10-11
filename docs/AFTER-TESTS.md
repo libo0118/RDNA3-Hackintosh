@@ -592,6 +592,59 @@ time slots, `X.Y`, ACT handled.
 | everything passes, the monitor behind the hub stays black | the VC rate or the stream inside the MST link | `dp: MST Update Payload: ... X: .. Y: ..` (X.Y = PBN / PBN per slot), the look's `DP_MSE_RATE_CNTL`, `DIG_BE_CNTL` DIG_MODE 5 |
 | `refused as MST stream (8): back to SST` | the requested mode does not fit the chosen port's PBN | expected for big modes; the SST picture comes back and the mode is set as SST |
 
+### DP 2.1 UHBR (`uhbr`)
+
+`uhbr` = `dplink` + `modeset2`'s clocks + `rdna3uhbr=1`; needs a DP 2.1
+monitor on a DP80 (UHBR20) or DP54 (UHBR13.5) cable straight into the
+card, and a mode above HBR3 x4 (25.9 Gbps) in its EDID. Lines:
+`dp: AUX n: 128b/132b: rates rr (UHBRxx), cable id cc, LTTPR rates ll, UHBR
+on` (the caps: 0x2215 bits 0/1/2 = UHBR10/20/13.5), `dp: AUX n: ... max
+link UHBRxx x4`, the training `dp: 128b_132b chose LTTPR_MODE ..`,
+`dp: 128b/132b channel EQ done`, `dp: 128b/132b CDS done`, `dp: link
+training UHBRxx x4 pass` or the failures `LT_FAILED received` / `max loop
+count reached` / `channel EQ done timeout` / `CDS done timeout` (each
+followed by the max-bandwidth fallback), `DAL SMU: DTBCLK n levels up to
+.. kHz: reference .. kHz`, `dp: HPO 0 -> UNIPHY b: WxH .. kHz on UHBRxx x4:
+trained`, `dp: 128b/132b SST payload: n time slots, VC rate X.Y x.y,
+hblank min symbol width w, ACT handled`; ioreg `RDNA3,Head<n>,UHBR`.
+Pass: the mode above HBR3 runs with the picture right and goes back to
+the old mode cleanly. Then mark `uhbr` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| max link stays `HBR3` | no UHBR in the VBIOS encoder caps (`RDNA3,Connector<n>` encoder caps without 0x20/0x40/0x80), the sink without 128b/132b (DPCD 0x006 bit 1, 0x2215), the cable id (0x2217) naming a slower cable, or a repeater (LTTPR rates) | the caps line; DPCD 0x006 / 0x2215 / 0x2217 / 0xf0000.. in the report; try a certified DP80 cable |
+| every UHBR rate `LT_FAILED received` / `max loop count reached`, the cap falls back to HBR3 | the PHY did not lock at the UHBR rate: TransmitterControl for the HPO link encoder (digmode 5, hpo_instance), the FFE preset, the cable | the DMUB `VBIOS 0x4 ...` lines (symclk 100000 / 135000 / 200000 x 10 kHz, hpo_instance 0), the look's `DP_DPHY_SYM32_CONTROL` (DPHY_ENABLE, NUM_LANES, MODE) and `SYMCLK32_LE_CNTL`; DPCD 0x202..0x207 at the failure |
+| `channel EQ done timeout` / `CDS done timeout` | EQ / CDS interlane align never set (DPCD 0x204 bits 2 / 3) | the lane status lines before it; the aux read interval (DPCD 0x2216) |
+| `DTBCLK not set (..)`: stays at the old mode | the PMFW's DAL mailbox refused PPCLK_DTBCLK (12) | the `DAL SMU message 0x9(0xc....)` line; `RDNA3,DCNClocks` DTBCLK |
+| trained, monitor black | the stream: HPO stream encoder not mapped / not enabled, the DTBCLK DTO, DPSTREAMCLK, the payload (no ACT) or the VC rate | the look's `DP_STREAM_MAPPER_CONTROL0`, `DP_SYM32_ENC_CONTROL` / `VID_STREAM_CONTROL`, `OTG_PIXEL_RATE_CNTL` (DTBCLK_DTO_ENABLE, PIPE_DTO_SRC_SEL 2), `DTBCLK_DTO0_PHASE/MODULO`, `DPSTREAMCLK_CNTL`, `SYMCLK32_SE_CNTL`, `DP_DPHY_SYM32_SAT_VC0` / `VC_RATE_CNTL0`, DPCD 0x1c0..0x1c2 / 0x2c0 |
+| `ACT NOT handled` | the sink did not see the allocation change trigger (SAT_UPDATE) or lost the link | the look's `DP_DPHY_SYM32_STATUS` (SAT_UPDATE_PENDING), DPCD 0x2c0 |
+| picture torn / shifted horizontally | the hblank minimum symbol width or the VC rate X.Y | `hblank min symbol width w` vs the timing; the X.Y in the log |
+| MST hub on a UHBR link | MST over 128b/132b is not ported: `RD_MODESET_DP_LINK` | expected; run `mst` without `rdna3uhbr` |
+
+### ODM combine (`odm`)
+
+`odm` = `uhbr` + `rdna3dsc=1 rdna3odm=1`; needs an 8K monitor (or a mode
+whose pixel rate needs more DISPCLK than one pipe gets) on native DP.
+Lines: `modeset: head n: WxH on 8b/10b (DIO) | 128b/132b (HPO), ODM 2:1
+(runs 1:1), ODM pipe acquired`, `odm: OTG o: pipe p / OPP o + pipe q /
+OPP q / DSC q, DET a/b -> c/d`, `odm: pipe p + q on OTG o: slices w0 + w1
+of WxH, refcyc_h_blank_end ..`, with DSC `dsc: DSC p: (W/2)xH .. 2 x ..
+slices` for both engines and `dp: DSC p on OPP .. 2 ODM segment(s)`;
+ioreg `RDNA3,Head<n>,ODM`. Pass: the 8K mode runs with the whole picture
+(both halves, no seam), the cursor crosses the middle, and the switch
+back to a one-pipe mode turns the second pipe off (`odm: pipe q off`).
+Then mark `odm` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| 8K refused (6, size) | `rdna3odm` missing, or ODM not chosen | the boot-args; `modeset: ... ODM` line |
+| refused (11, ODM) | no free pipe (both heads plus a clone use them), the OTG not on its own OPP, no DET to split, or the DSC slices do not split over two segments | the `odm:` / `modeset:` lines; unplug the other monitors or turn `rdna3mirror` off |
+| left half right, right half black | the ODM pipe: power, its HUBP blanked, MPC tree or OPP not into the OTG | the look's `OPTC_DATA_SOURCE_SELECT` (2 segments, SEG1 = q), `MPC_OUT_MUX[q]`, `MPCC_TOP_SEL[q]`, `OPP_PIPE_CONTROL[q]`, `DCHUBP_CNTL[q]` (BLANK_EN, VTG_SEL), `DOMAINq_PG_STATUS` |
+| both halves show the left half / the halves swapped | the ODM pipe's viewport x (`HUBP_DCSURF_PRI_VIEWPORT_START` = W/2) | the look's viewport registers of both pipes |
+| a seam or a stripe in the middle, or underflow | `OPTC_WIDTH_CONTROL` segment width, `OPTC_MEMORY_CONFIG`, the second pipe's DLG (`refcyc_h_blank_end`), DET split | the `odm: ... refcyc_h_blank_end a / b` line; `DCHUBBUB_DET*_CTRL` |
+| with DSC: garbage in one half | the second DSC engine (slices per segment, its OPP) | the two `dsc:` lines (W/2 wide, slices / 2), `DSCRM_DSC_FORWARD_CONFIG` of both engines |
+| the switch back leaves the second monitor / pipe dark | the ODM pipe was another head's | report: `dcn32_odm_acquire` should never take a head's pipe |
+
 ### Idle power (`rdna3pmexp=1`)
 
 Triage prints one line per variant (10 s each): baseline, GFXOFF allowed,
