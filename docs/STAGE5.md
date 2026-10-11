@@ -37,7 +37,8 @@ debug dumps, and their symbols were not making it into the link.
 After building RADV, the `radv-macos` job swaps `libdrm.2.dylib` for
 `libdrm_loopback.dylib` (`make -C userspace loopback`: the same libdrm core on
 `uapi/rdna3_drm.c` in-process, loopback backend with software SDMA) and runs
-`vulkaninfo --summary` (loader and tools from brew). This is an end-to-end UAPI test
+`vulkaninfo --summary` (when the runner has a Vulkan loader, e.g. the LunarG
+SDK) and `rdna3_vktest --loopback`. This is an end-to-end UAPI test
 without the kext: `radv_physical_device` queries everything it needs
 (DEV_INFO, HW_IP_INFO, FW_VERSION, MEMORY, SENSOR, GPUVM_FAULT, syncobj).
 The log is in the artifact `radv-macos-logs/vulkaninfo.log`.

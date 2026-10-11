@@ -148,6 +148,11 @@ jobs:
         run: make -C metal plugin
       - name: AIR->SPIR-V translator (librdna3mtl_translate.dylib)
         run: |
+          # rustup into ~/.cargo on first use (no Homebrew on Intel Macs)
+          if ! command -v rustup >/dev/null && [ ! -x "$HOME/.cargo/bin/rustup" ]; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+          fi
+          export PATH="$HOME/.cargo/bin:$PATH"
           rustup target add x86_64-apple-darwin
           make -C metal translator CARGO_BUILD_TARGET=x86_64-apple-darwin || make -C metal translator
       - uses: actions/upload-artifact@v4
@@ -159,21 +164,38 @@ jobs:
 
   radv-macos:
     # Experimental: drives the Stage 5 port. Failures here are the to-do list.
-    # Builds x86_64 (-arch x86_64); the loopback vulkaninfo step needs an
-    # Intel Mac or an x86_64 vulkaninfo under Rosetta.
+    # Builds x86_64 (-arch x86_64).
     needs: changes
     if: needs.changes.outputs.radv == 'true'
     runs-on: [self-hosted, macOS]
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - name: Tools
+      - name: Tools (no Homebrew, it no longer installs on Intel Macs)
         run: |
-          brew install meson ninja glslang pkgconf || true
-          # a venv, not the runner machine's own Python
-          python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install mako pyyaml packaging
-          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          # As tools/vm/macos/build_radv.sh: Python 3.12 (through uv, Xcode's
+          # is 3.9) with the build tools from PyPI in a venv, glslang from
+          # source. Kept in the runner's tool cache, so only the first run
+          # downloads and builds them.
+          T="$RUNNER_TOOL_CACHE/rdna3-radv"
+          mkdir -p "$T"
+          export PATH="$HOME/.local/bin:$PATH"
+          command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
+          [ -x "$T/venv/bin/python3" ] || uv venv --python 3.12 "$T/venv"
+          uv pip install --python "$T/venv/bin/python3" --quiet meson ninja mako pyyaml packaging pkgconf cmake
+          export PATH="$T/venv/bin:$T/bin:$PATH"
+          if ! command -v glslangValidator >/dev/null; then
+            rm -rf "$T/glslang"
+            git -c advice.detachedHead=false clone -q --depth 1 --branch 15.1.0 \
+              https://github.com/KhronosGroup/glslang.git "$T/glslang"
+            cmake -S "$T/glslang" -B "$T/glslang/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_OPT=OFF \
+              -DGLSLANG_TESTS=OFF -DCMAKE_INSTALL_PREFIX="$T" >/dev/null
+            ninja -C "$T/glslang/build" install >/dev/null
+          fi
+          python3 --version; meson --version; glslangValidator --version | head -1
+          echo "$T/venv/bin" >> "$GITHUB_PATH"
+          echo "$T/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG=$T/venv/bin/pkgconf" >> "$GITHUB_ENV"
       - name: Build RADV against libdrm_xnu
         run: userspace/mesa/build_radv.sh build/mesa
       - name: rdna3_vktest (the VM runs it against the card from step 8)
@@ -184,14 +206,19 @@ jobs:
       - name: vulkaninfo on the in-process UAPI (loopback libdrm, no kext)
         if: always()
         run: |
-          brew install vulkan-loader vulkan-tools || true
           make -C userspace loopback
           cp build/userspace/libdrm_loopback.dylib build/userspace/prefix/lib/libdrm.2.dylib
           export VK_ICD_FILENAMES="$PWD/build/mesa/install/share/vulkan/icd.d/radeon_icd.x86_64.json"
           export VK_LOADER_DEBUG=error,warn
           export DRM_XNU_TRACE=1
-          vulkaninfo --summary 2>&1 | tee build/mesa/vulkaninfo.log | head -120
-          grep -q "RADV" build/mesa/vulkaninfo.log && echo "RADV enumerated through the loopback UAPI" || echo "vulkaninfo did not enumerate RADV (see log)"
+          # vulkaninfo needs the Vulkan loader (e.g. the LunarG SDK); without
+          # one, rdna3_vktest below loads RADV directly
+          if command -v vulkaninfo >/dev/null; then
+            vulkaninfo --summary 2>&1 | tee build/mesa/vulkaninfo.log | head -120
+            grep -q "RADV" build/mesa/vulkaninfo.log && echo "RADV enumerated through the loopback UAPI" || echo "vulkaninfo did not enumerate RADV (see log)"
+          else
+            echo "no vulkaninfo on this runner: skipped"
+          fi
           build/mesa/install/bin/rdna3_vktest --loopback build/mesa/install/lib/libvulkan_radeon.dylib 2>&1 \
             | tee build/mesa/vktest.log || true
       - name: Error summary
