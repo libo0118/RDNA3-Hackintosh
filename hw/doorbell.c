@@ -17,24 +17,37 @@
 #define WNB(d, reg, v) \
     rdna3_wreg((d), rdna3_reg_offset((d), HWIP_NBIO, 0, reg##_BASE_IDX, reg), (v))
 
+/* nbio_v4_3_enable_doorbell_aperture */
+void nbio43_enable_doorbell_aperture(rdna3_dev *d, int enable)
+{
+    uint32_t tmp = RNB(d, regRCC_DEV0_EPF0_RCC_DOORBELL_APER_EN);
+    tmp = REG_SET_FIELD(tmp, RCC_DEV0_EPF0_RCC_DOORBELL_APER_EN, BIF_DOORBELL_APER_EN, enable ? 1 : 0);
+    WNB(d, regRCC_DEV0_EPF0_RCC_DOORBELL_APER_EN, tmp);
+}
+
+/* nbio_v4_3_enable_doorbell_selfring_aperture */
+void nbio43_enable_doorbell_selfring_aperture(rdna3_dev *d, int enable)
+{
+    uint32_t tmp = 0;
+    if (enable) {
+        tmp = REG_SET_FIELD(tmp, BIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL, DOORBELL_SELFRING_GPA_APER_EN, 1);
+        tmp = REG_SET_FIELD(tmp, BIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL, DOORBELL_SELFRING_GPA_APER_MODE, 1);
+        tmp = REG_SET_FIELD(tmp, BIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL, DOORBELL_SELFRING_GPA_APER_SIZE, 0);
+        WNB(d, regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_BASE_LOW, (uint32_t)d->doorbell_bus);
+        WNB(d, regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_BASE_HIGH, (uint32_t)(d->doorbell_bus >> 32));
+    }
+    WNB(d, regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL, tmp);
+}
+
 int nbio43_doorbell_init(rdna3_dev *d)
 {
-    uint32_t tmp;
     if (!d->doorbell_len || (!d->doorbell_cpu && !d->os.doorbell_wr)) {
         d->doorbell_ok = 0;
         return RDNA3_ENODEV;
     }
-    /* nbio_v4_3_enable_doorbell_aperture */
-    tmp = RNB(d, regRCC_DEV0_EPF0_RCC_DOORBELL_APER_EN);
-    tmp = REG_SET_FIELD(tmp, RCC_DEV0_EPF0_RCC_DOORBELL_APER_EN, BIF_DOORBELL_APER_EN, 1);
-    WNB(d, regRCC_DEV0_EPF0_RCC_DOORBELL_APER_EN, tmp);
-    /* nbio_v4_3_enable_doorbell_selfring_aperture */
-    tmp = REG_SET_FIELD(0u, BIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL, DOORBELL_SELFRING_GPA_APER_EN, 1);
-    tmp = REG_SET_FIELD(tmp, BIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL, DOORBELL_SELFRING_GPA_APER_MODE, 1);
-    tmp = REG_SET_FIELD(tmp, BIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL, DOORBELL_SELFRING_GPA_APER_SIZE, 0);
-    WNB(d, regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_BASE_LOW, (uint32_t)d->doorbell_bus);
-    WNB(d, regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_BASE_HIGH, (uint32_t)(d->doorbell_bus >> 32));
-    WNB(d, regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL, tmp);
+    nbio43_enable_doorbell_aperture(d, 1);
+    if (!d->amdgpu_exact)
+        nbio43_enable_doorbell_selfring_aperture(d, 1);
     d->doorbell_ok = 1;
     RLOG(d, "doorbells: aperture %llu KiB at bus 0x%llx enabled",
          (unsigned long long)(d->doorbell_len / 1024), (unsigned long long)d->doorbell_bus);

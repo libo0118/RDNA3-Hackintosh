@@ -149,6 +149,13 @@ ITEM_STEPS = [
                 r"|convert_atom_mem_type_to_vram_type|amdgpu_ucode_(validate|request|ip_version_decode|hdr_version|name)"
                 r"|amdgpu_discovery_(harvest_ip|read_from_harvest_table|read_harvest_bit_per_ip|harvest_config_quirk"
                 r"|get_harvest_info|get_mall_info|get_vcn_info)"), ["amdgpu"]),
+    # SoC / NBIO with rdna3amdgpu=1: ASPM / LTR, init_registers, BIF
+    # clock gating, the doorbell apertures at late_init / hw_fini, resets
+    # on init / resume
+    (re.compile(r"nbio_v4_3_(init_registers|program_aspm|program_ltr|update_medium_grain_clock_gating"
+                r"|update_medium_grain_light_sleep)|soc21_(program_aspm|common_hw_fini|common_late_init"
+                r"|common_resume|common_suspend|need_reset_on_init|need_reset_on_resume)"
+                r"|amdgpu_device_should_use_aspm"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

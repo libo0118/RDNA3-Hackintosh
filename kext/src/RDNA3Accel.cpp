@@ -313,6 +313,7 @@ bool RDNA3Accel::waitForIfwi()
     return (msg & C2PMSG_33_IFWI_DONE) != 0;
 }
 
+/* soc21_get_config_memsize -> nbio_v4_3_get_memsize: RCC_CONFIG_MEMSIZE in MiB */
 bool RDNA3Accel::readVramSize()
 {
     uint32_t mb = rreg(mmRCC_CONFIG_MEMSIZE);

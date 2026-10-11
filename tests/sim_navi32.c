@@ -51,6 +51,7 @@
 #include "gfx11.h"
 #include "dcn32.h"
 #include "soc21_cg.h"
+#include "gen/nbio_4_3_0_soc.h"
 #include "gen/athub_3_0_0_cg.h"
 #include "gen/dcn_3_2_0_mode.h"
 #include "gen/hdp_6_0_0_cg.h"
@@ -4741,6 +4742,94 @@ static uint32_t uq_pm4(uint32_t *q, uint64_t a, uint32_t v, uint64_t fa, uint32_
     return n;
 }
 
+/* rdna3amdgpu=1 soc21 common / NBIO 4.3 ports: ASPM + LTR, init_registers,
+ * the BIF clock-gating ungate, the doorbell apertures across late_init /
+ * hw_fini, the reset-on-init / resume checks */
+#define NB(reg) rdna3_reg_offset(dev, HWIP_NBIO, 0, reg##_BASE_IDX, reg)
+static void test_soc_amdgpu(rdna3_dev *dev)
+{
+    uint32_t selfring = NB(regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL);
+    uint32_t aper = NB(regRCC_DEV0_EPF0_RCC_DOORBELL_APER_EN);
+
+    /* amdgpu_device_should_use_aspm */
+    CHECK(rd_should_use_aspm(-1, 1, 1) && !rd_should_use_aspm(-1, 1, 0) && !rd_should_use_aspm(-1, 0, 1));
+    CHECK(rd_should_use_aspm(1, 0, 0) && !rd_should_use_aspm(0, 1, 1) && !rd_should_use_aspm(2, 1, 1));
+
+    /* soc21_program_aspm: nothing without ASPM or on another PCIE IP */
+    CHECK(soc21_program_aspm(dev, 0, RD_IP_VERSION(7, 4, 0), 1) == 0);
+    CHECK(soc21_program_aspm(dev, 1, RD_IP_VERSION(6, 1, 0), 1) == 0);
+    CHECK(rdna3_rreg(dev, NB(regPCIE_LC_CNTL)) == 0 && rdna3_rreg(dev, NB(regBIF_CFG_DEV0_EPF0_PCIE_LTR_CAP)) == 0);
+    rdna3_wreg(dev, NB(regPCIE_LC_CNTL3), PCIE_LC_CNTL3__LC_DSC_DONT_ENTER_L23_AFTER_PME_ACK_MASK);
+    rdna3_wreg(dev, NB(regRCC_STRAP0_RCC_BIF_STRAP2), RCC_STRAP0_RCC_BIF_STRAP2__STRAP_LTR_IN_ASPML1_DIS_MASK | 1);
+    CHECK(soc21_program_aspm(dev, 1, RD_IP_VERSION(7, 4, 0), 1) == 1);
+    CHECK(rdna3_rreg(dev, NB(regPCIE_LC_CNTL)) == (0x9u << PCIE_LC_CNTL__LC_L1_INACTIVITY__SHIFT));
+    CHECK(rdna3_rreg(dev, NB(regPCIE_LC_CNTL3)) == 0);
+    CHECK(rdna3_rreg(dev, NB(regPCIE_LC_CNTL7)) == PCIE_LC_CNTL7__LC_NBIF_ASPM_INPUT_EN_MASK);
+    CHECK(rdna3_rreg(dev, NB(regRCC_STRAP0_RCC_BIF_STRAP3)) == (0x5DE0u | (0x10u << 16)));
+    CHECK(rdna3_rreg(dev, NB(regRCC_STRAP0_RCC_BIF_STRAP5)) == 0x10);
+    CHECK(rdna3_rreg(dev, NB(regRCC_STRAP0_RCC_BIF_STRAP2)) == 1);
+    CHECK(rdna3_rreg(dev, NB(regRCC_EP_DEV0_0_EP_PCIE_TX_LTR_CNTL)) == 0x35EB);
+    CHECK(rdna3_rreg(dev, NB(regBIF_CFG_DEV0_EPF0_DEVICE_CNTL2)) == BIF_CFG_DEV0_EPF0_DEVICE_CNTL2__LTR_EN_MASK);
+    CHECK(rdna3_rreg(dev, NB(regBIF_CFG_DEV0_EPF0_PCIE_LTR_CAP)) == 0x10011001);
+    CHECK(rdna3_rreg(dev, NB(regPSWUSP0_PCIE_LC_CNTL2)) ==
+          (PSWUSP0_PCIE_LC_CNTL2__LC_ALLOW_PDWN_IN_L1_MASK | PSWUSP0_PCIE_LC_CNTL2__LC_ALLOW_PDWN_IN_L23_MASK));
+    CHECK(rdna3_rreg(dev, NB(regPCIE_LC_CNTL4)) == PCIE_LC_CNTL4__LC_L1_POWERDOWN_MASK);
+    CHECK(rdna3_rreg(dev, NB(regPCIE_LC_RXRECOVER_RXSTANDBY_CNTL)) ==
+          PCIE_LC_RXRECOVER_RXSTANDBY_CNTL__LC_RX_L0S_STANDBY_EN_MASK);
+    /* no LTR path: LTR_EN off */
+    CHECK(soc21_program_aspm(dev, 1, RD_IP_VERSION(7, 6, 0), 0) == 1 &&
+          rdna3_rreg(dev, NB(regBIF_CFG_DEV0_EPF0_DEVICE_CNTL2)) == 0);
+
+    /* nbio_v4_3_init_registers */
+    rdna3_wreg(dev, NB(regRCC_DEV0_EPF2_STRAP2), 0xff);
+    nbio43_init_registers(dev);
+    CHECK(rdna3_rreg(dev, NB(regRCC_DEV0_EPF2_STRAP2)) == 0x7f);
+
+    /* soc21_common_set_clockgating_state: BIF MGCG / LS only ungate here */
+    dev->amdgpu_exact = 1;
+    rdna3_wreg(dev, NB(regCPM_CONTROL), 0xffffffffu);
+    rdna3_wreg(dev, NB(regPCIE_CNTL2), 0xffffffffu);
+    soc21_set_clock_gating(dev, 1);
+    CHECK(rdna3_rreg(dev, NB(regCPM_CONTROL)) == 0xffffffffu && rdna3_rreg(dev, NB(regPCIE_CNTL2)) == 0xffffffffu);
+    soc21_set_clock_gating(dev, 0);
+    CHECK(rdna3_rreg(dev, NB(regCPM_CONTROL)) ==
+          ~(uint32_t)(CPM_CONTROL__LCLK_DYN_GATE_ENABLE_MASK | CPM_CONTROL__TXCLK_DYN_GATE_ENABLE_MASK |
+                      CPM_CONTROL__TXCLK_LCNT_GATE_ENABLE_MASK | CPM_CONTROL__TXCLK_REGS_GATE_ENABLE_MASK |
+                      CPM_CONTROL__TXCLK_PRBS_GATE_ENABLE_MASK | CPM_CONTROL__REFCLK_REGS_GATE_ENABLE_MASK));
+    CHECK(rdna3_rreg(dev, NB(regPCIE_CNTL2)) == ~(uint32_t)PCIE_CNTL2__SLV_MEM_LS_EN_MASK);
+    nbio43_update_medium_grain_clock_gating(dev, 1, 1);
+    nbio43_update_medium_grain_light_sleep(dev, 1, 1);
+    CHECK(rdna3_rreg(dev, NB(regCPM_CONTROL)) == 0xffffffffu && rdna3_rreg(dev, NB(regPCIE_CNTL2)) == 0xffffffffu);
+    rdna3_wreg(dev, NB(regCPM_CONTROL), 0);
+    rdna3_wreg(dev, NB(regPCIE_CNTL2), 0);
+
+    /* the doorbell apertures: with amdgpu_exact hw_init leaves the selfring
+     * aperture to late_init; hw_fini closes both */
+    rdna3_wreg(dev, selfring, 0);
+    CHECK(nbio43_doorbell_init(dev) == RDNA3_OK && rdna3_rreg(dev, selfring) == 0 &&
+          (rdna3_rreg(dev, aper) & RCC_DEV0_EPF0_RCC_DOORBELL_APER_EN__BIF_DOORBELL_APER_EN_MASK));
+    soc21_common_late_init(dev);
+    CHECK(rdna3_rreg(dev, selfring) & BIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL__DOORBELL_SELFRING_GPA_APER_EN_MASK);
+    soc21_common_hw_fini(dev);
+    CHECK(rdna3_rreg(dev, selfring) == 0 &&
+          !(rdna3_rreg(dev, aper) & RCC_DEV0_EPF0_RCC_DOORBELL_APER_EN__BIF_DOORBELL_APER_EN_MASK));
+    dev->amdgpu_exact = 0;
+    CHECK(nbio43_doorbell_init(dev) == RDNA3_OK && rdna3_rreg(dev, selfring) != 0);
+
+    /* reset on init / on resume: the sOS sign of life */
+    {
+        uint32_t sol = S.reg[MP0(81)];
+        S.reg[MP0(81)] = 0;
+        CHECK(!soc21_need_reset_on_init(dev));
+        S.reg[MP0(81)] = 0x5a;
+        CHECK(soc21_need_reset_on_init(dev));
+        CHECK(!soc21_need_reset_on_resume(dev, 0, 0) && !soc21_need_reset_on_resume(dev, 1, 1));
+        CHECK(!soc21_need_reset_on_resume(dev, 1, 0));   /* stable: the TOS is not running */
+        S.reg[MP0(81)] = sol;
+    }
+}
+#undef NB
+
 /* rdna3amdgpu=1 SDMA 6 ports: amdgpu_ib_schedule on the DMA ring (padded,
  * burst NOPs, COND_EXE, HDP flush, VM flush on the ring's engine, PASID
  * mapping, memory sync), the IB test and amdgpu_vm_sdma's PTE packets */
@@ -7641,6 +7730,7 @@ static void run(const char *fwdir)
     CHECK(S.reg[NBIO_B2 + regRCC_DEV0_EPF0_RCC_DOORBELL_APER_EN] & RCC_DEV0_EPF0_RCC_DOORBELL_APER_EN__BIF_DOORBELL_APER_EN_MASK);
     CHECK(S.reg[NBIO_B2 + regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_BASE_LOW] == 0xF0000000u);
     CHECK(S.reg[NBIO_B2 + regBIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL] & BIF_BX_PF0_DOORBELL_SELFRING_GPA_APER_CNTL__DOORBELL_SELFRING_GPA_APER_EN_MASK);
+    test_soc_amdgpu(&dev);
     /* the TMR goes top-down out of the CPU-visible window, below the
      * firmware's reservation (amdgpu: NO_CPU_ACCESS kernel BO, TTM top-down) */
     rdna3_vram_alloc_top_init(&dev, VRAM_SIZE - (256ull << 20), VRAM_SIZE - (16ull << 20));

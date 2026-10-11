@@ -283,6 +283,9 @@ void RDNA3Bringup::stopAndFree()
      * GART off */
     if (fAmdgpuExact && fGmc && fDev)
         gmc11_hw_fini(fDev);
+    /* ... and soc21_common_hw_fini last (IP block 0): doorbell apertures off */
+    if (fAmdgpuExact && fDev && fDev->doorbell_ok)
+        soc21_common_hw_fini(fDev);
 
     /* 3. memory: mappings, firmware, state; fDev last. The firmware images
      * go like amdgpu_ucode_release in psp_sw_fini (sOS, TA),
@@ -742,6 +745,26 @@ void RDNA3Bringup::run()
     for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)
         fBlobRefs[i] = blobs[i];
 
+    /* rdna3amdgpu=1: amdgpu_device_init's reset on init - the sOS already
+     * runs (soc21_need_reset_on_init: the driver was not unloaded cleanly,
+     * a kext reload): amdgpu_asic_reset, mode 1 on MP1 13.0.10 with display
+     * hardware. After a cold boot the sOS is not up (Linux on the card does
+     * no reset here). */
+    if (fAmdgpuExact && soc21_need_reset_on_init(fDev)) {
+        uint32_t i;
+        BLOG("reset on init: the PSP sOS already runs, mode-1 reset first");
+        fPci->setBusMasterEnable(false);
+        int r = smu13_mode1_reset(fDev);
+        for (i = 0; i < fDev->usec_timeout; i++) {
+            if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu)
+                break;
+            IODelay(1);
+        }
+        publish("RDNA3,ResetOnInit", (uint64_t)(int64_t)r);
+        if (r)
+            BLOG("asic reset on init failed (%d)", r);
+    }
+
     if (!hwInit())
         return;
 
@@ -812,6 +835,22 @@ bool RDNA3Bringup::hwInit()
 {
     int ret;
 
+    /* rdna3amdgpu=1: soc21_common_hw_init - ASPM (soc21_program_aspm when
+     * amdgpu_device_should_use_aspm: amdgpu.aspm=-1, PCIe DPM on, the link's
+     * ASPM enabled), then nbio_v4_3_init_registers */
+    if (fAmdgpuExact) {
+        UInt8 cap = 0;
+        int linkAspm = 0, ltr = 0, did;
+        const amd_ip_entry *pcie = amd_discovery_find(fDisc, AMD_HWID_PCIE, 0);
+        if (fPci->findPCICapability(kIOPCIPCIExpressCapability, &cap) && cap) {
+            linkAspm = (fPci->configRead16(cap + 0x10) & 0x3) != 0;   /* Link Control: ASPM L0s / L1 */
+            ltr = (fPci->configRead16(cap + 0x28) & 0x400) != 0;      /* Device Control 2: LTR enable */
+        }
+        did = soc21_program_aspm(fDev, rd_should_use_aspm(-1, 1, linkAspm),
+                                 pcie ? RD_IP_VERSION(pcie->major, pcie->minor, pcie->revision) : 0, ltr);
+        publish("RDNA3,ASPMProgrammed", (uint64_t)did);
+        nbio43_init_registers(fDev);
+    }
     rdna3_nbio_remap_hdp(fDev);
     /* a known word in VRAM: after a reset it tells whether VRAM survived */
     fResetMagic = rdna3_vram_alloc(fDev, 4096, 4096, "reset-magic");
@@ -1277,6 +1316,10 @@ bool RDNA3Bringup::hwInit()
     /* stage 4 item G: VCN 4.0 + JPEG 4.0 after GFX, as in soc21's IP order */
     if (fLevel >= 8 && fVcnWanted)
         vcnStart();
+
+    /* rdna3amdgpu=1: soc21_common_late_init - the selfring doorbell aperture */
+    if (fAmdgpuExact && fDev->doorbell_ok)
+        soc21_common_late_init(fDev);
 
     publish("RDNA3,GPUResets", fGpuResets);
     publish("RDNA3,VRAMLost", fVramLostCount);
@@ -2554,9 +2597,13 @@ bool RDNA3Bringup::gpuReset(bool baco)
             ih60_disable(fDev, fIh);
         if (fGmc && fDev)
             gmc11_hw_fini(fDev);
+        /* soc21_common_suspend (= soc21_common_hw_fini), the first IP block */
+        if (fDev && fDev->doorbell_ok)
+            soc21_common_hw_fini(fDev);
     }
 
-    /* soc21_asic_mode1_reset: no bus mastering across the reset */
+    /* soc21_need_full_reset is true on every GC 11: no IP soft reset first.
+     * soc21_asic_mode1_reset: no bus mastering across the reset */
     fPci->setBusMasterEnable(false);
     if (baco) {
         /* amdgpu_device_baco_enter / _exit (smu_v13_0_baco_enter / _exit,
@@ -2673,6 +2720,14 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
             fVramLostCount++;
             BLOG("resume: VRAM content lost (0x%08x), clients see VRAMLOST", magic);
         }
+    }
+    /* rdna3amdgpu=1: soc21_common_resume - an aborted S3 with the TOS still
+     * running gets a reset first (soc21_need_reset_on_resume); this wake
+     * follows a completed sleep (amdgpu: suspend_complete), so it does not;
+     * soc21_common_hw_init is in hwInit below */
+    if (fAmdgpuExact && soc21_need_reset_on_resume(fDev, 1, 1)) {
+        BLOG("resume: S3 suspend aborted, resetting");
+        smu13_mode1_reset(fDev);
     }
     rdna3_vram_alloc_init(fDev, fAllocLo, fAllocHi);
     fDev->doorbell_ok = 0;

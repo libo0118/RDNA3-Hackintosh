@@ -37,6 +37,12 @@ extern "C" {
  * sets d->doorbell_ok. Without a doorbell BAR it returns RDNA3_ENODEV and
  * the rings keep writing their wptr registers. */
 int  nbio43_doorbell_init(rdna3_dev *d);
+/* nbio_v4_3_enable_doorbell_aperture / _enable_doorbell_selfring_aperture
+ * (the selfring aperture at d->doorbell_bus). With rdna3_dev.amdgpu_exact
+ * nbio43_doorbell_init leaves the selfring aperture to
+ * soc21_common_late_init, as amdgpu does. */
+void nbio43_enable_doorbell_aperture(rdna3_dev *d, int enable);
+void nbio43_enable_doorbell_selfring_aperture(rdna3_dev *d, int enable);
 /* nbio_v4_3_gc_doorbell_init (gfx_v11_0_hw_init) */
 void nbio43_gc_doorbell_init(rdna3_dev *d);
 /* nbio_v4_3_sdma_doorbell_range (instance 0 only on this NBIO) */

@@ -156,6 +156,7 @@ typedef enum amd_disc_status {
 #define AMD_DISC_HARVEST_IP_DMU      0x4u
 #define AMD_HWID_SDMA2  68
 #define AMD_HWID_SDMA3  69
+#define AMD_HWID_PCIE   70
 
 typedef struct amd_disc_soc {
     uint32_t num_vcn_inst, vcn_inst_mask, jpeg_inst_mask;
