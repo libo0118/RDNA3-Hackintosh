@@ -1502,6 +1502,8 @@ static void dmub_boot(void)
     S.reg[DMR(regDMCUB_SCRATCH0)] = RD_DMUB_BOOT_DAL_FW | RD_DMUB_BOOT_MAILBOX_RDY | RD_DMUB_BOOT_HW_PWR_INIT;
 }
 
+static int pst_dmub_cmd(uint8_t *c, uint32_t hdr);   /* sim_display_pstate.inc */
+
 static void dmub_inbox(uint32_t wptr)
 {
     uint32_t rptr = S.reg[DMR(regDMCUB_INBOX1_RPTR)];
@@ -1588,7 +1590,8 @@ static void dmub_inbox(uint32_t wptr)
             break;
         }
         default:
-            S.dmub.bad_cmds++;
+            if (!pst_dmub_cmd(c, hdr))
+                S.dmub.bad_cmds++;
         }
         rptr = (rptr + RD_DMUB_RB_CMD_SIZE) % RD_DMUB_RB_SIZE;
     }
@@ -4257,6 +4260,7 @@ static void sim_doorbell32(void *ctx, uint32_t index, uint32_t v)
 
 #include "sim_display_dc.inc"
 #include "sim_display_hpo.inc"
+#include "sim_display_pstate.inc"
 
 static void sim_wr(void *ctx, uint64_t off, uint32_t v)
 {
@@ -4267,6 +4271,8 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     if (sk_wr(dw, v))
         return;
     if (hpo_wr(dw, v))
+        return;
+    if (pst_wr(dw, v))
         return;
     if (dw == mmMM_DATA) {
         uint32_t *w = mm_word();
@@ -4858,6 +4864,8 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
         if (sk_rd(dw, &kv))
             return kv;
         if (hpo_rd(dw, &kv))
+            return kv;
+        if (pst_rd(dw, &kv))
             return kv;
     }
     if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_DATA) {
@@ -11868,6 +11876,7 @@ static void run(const char *fwdir)
             test_dcn_state(&dev, &dm);
             test_dp_link(&dev, &dm);
             test_dc_k(&dev, &dm);
+            test_dc_pstate(&dev, &dm);
             S.dcn_pg = 0;
         }
         /* attach (rdna3dmub=3): no reset, no load, the running firmware's

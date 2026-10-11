@@ -41,7 +41,7 @@ $(BUILD)/test_fw: tests/test_fw.c $(COMMON) $(COMMON_H) | $(BUILD)
 $(BUILD)/amd_fw_dump: tools/amd_fw_dump.c $(COMMON) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(INC) -o $@ tools/amd_fw_dump.c $(COMMON)
 
-$(BUILD)/sim_navi32: tests/sim_navi32.c tests/sim_display_dc.inc $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
+$(BUILD)/sim_navi32: tests/sim_navi32.c tests/sim_display_dc.inc tests/sim_display_hpo.inc tests/sim_display_pstate.inc $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/sim_navi32.c $(COMMON) $(HW) $(UAPI)
 
 $(BUILD)/test_uapi: tests/test_uapi.c $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
