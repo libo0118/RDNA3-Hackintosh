@@ -171,6 +171,8 @@ int dcn32_clk_limits_read(rdna3_dev *d, rdna3_dcn_clk_limits *l)
     int r;
     l->pmfw = 0;
     l->dispclk_levels = l->dppclk_levels = l->dispclk_max_khz = l->dppclk_max_khz = 0;
+    /* dcn32_clk_mgr_construct: smu_present when GetSmuVersion answers
+     * (dcn32_is_smu_present); the limits need it */
     r = dcn32_smu_send(d, RD_DALSMC_MSG_GetSmuVersion, 0, &l->pmfw);
     if (!r)
         r = single_clock(d, RD_PPCLK_DISPCLK, &l->dispclk_levels, &l->dispclk_max_khz);

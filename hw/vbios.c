@@ -279,6 +279,9 @@ static const uint8_t *gpio_pin(const rdna3_vbios *v, uint8_t gpio_id, int match_
     return NULL;
 }
 
+/* link_get_hpd_gpio + get_hpd_line: the HPD record's GPIO pin id, looked up
+ * in the GPIO pin LUT (get_gpio_pin_info), is the HPD pin whose DC_HPD_INT
+ * register / shift it names (HPD_SOURCEID1..6) */
 static int hpd_from_pin(const rdna3_vbios *v, uint8_t pin_id)
 {
     static const uint8_t shifts[6] = { 0x00, 0x08, 0x10, 0x18, 0x1a, 0x1c };

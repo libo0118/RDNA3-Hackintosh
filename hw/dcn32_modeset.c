@@ -279,7 +279,8 @@ int dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, cons
     c->h_active = h->h_active;
     c->v_active = h->v_active;
     /* the reference clock from the running ratio when the pixel clock is
-     * known, else DCN 3.2's 100 MHz and the clock from the ratio */
+     * known, else DCN 3.2's 100 MHz (dccg32_get_dccg_ref_freq: the
+     * xtalin) and the clock from the ratio */
     r_old = GET(c->ref_to_pix, HUBPREQ0_REF_FREQ_TO_PIX_FREQ, REF_FREQ_TO_PIX_FREQ);
     if (cur_pclk_khz && r_old)
         refclk_khz = udiv_round((uint64_t)r_old * cur_pclk_khz, 1u << 19);
@@ -432,6 +433,8 @@ int dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, cons
     return RD_MODESET_OK;
 }
 
+/* get_clock_source_id: a TMDS stream's pixel clock comes from the PHY PLL of
+ * its transmitter (CLOCK_SOURCE_COMBO_PHY_PLL0 + n = ATOM_COMBOPHY_PLL0 + n) */
 static int vbios_pclk(rdna3_dmub *dm, const rdna3_dcn_modeset *ms, uint32_t khz)
 {
     rdna3_pixclk_v1_7 p = { 0 };

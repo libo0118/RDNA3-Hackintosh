@@ -60,7 +60,7 @@ static int meta_from_blob(const uint8_t *blob, uint32_t size, uint32_t meta_offs
     return 1;
 }
 
-/* dmub_srv_get_fw_meta_info_from_raw_fw: the legacy region at the end of
+/* dmub_srv_get_fw_meta_info_from_raw_fw / dmub_get_fw_meta_info: the legacy region at the end of
  * BSS, else the combined one at the end of the instruction image behind a
  * 256- or 512-byte PSP footer, 16-byte alignment slack */
 static void find_meta(rdna3_dmub *dm)
@@ -115,7 +115,9 @@ int dmub32_sw_init(rdna3_dmub *dm, rdna3_dev *d, const uint8_t *fw, uint32_t fw_
         RERR(d, "DMUB: no firmware meta info, using default region sizes");
     dm->vbios_size = vbios_size;
 
-    /* dmub_srv_calc_region_info: every window in FB (VRAM) on DCN32 */
+    /* dmub_srv_calc_region_info: every window in FB (VRAM) on DCN32, so
+     * dmub_srv_calc_regions_for_memory_type(FB) lays them all out; the CPU /
+     * GPU address of each (dmub_srv_calc_mem_info) is win_off / win_mc */
     sizes[RD_DMUB_WIN_INST_CONST] = dm->inst_const_size;
     sizes[RD_DMUB_WIN_STACK] = DMUB_STACK_SIZE + DMUB_CONTEXT_SIZE;
     sizes[RD_DMUB_WIN_BSS_DATA] = dm->bss_data_size;
@@ -153,13 +155,13 @@ static uint64_t win_mc(const rdna3_dmub *dm, unsigned w) { return rdna3_vram_mc(
 
 /* ---- hardware (dmub_dcn32.c) ---- */
 
-/* dmub_dcn32_is_supported */
+/* dmub_dcn32_is_supported (dmub_srv_has_hw_support) */
 int dmub32_is_supported(rdna3_dev *d)
 {
     return GET(RR(d, regCC_DC_PIPE_DIS), CC_DC_PIPE_DIS, DC_DMCUB_ENABLE) != 0;
 }
 
-/* dmub_dcn32_is_hw_init */
+/* dmub_dcn32_is_hw_init (dmub_srv_is_hw_init) */
 int dmub32_is_hw_init(rdna3_dev *d)
 {
     return GET(RR(d, regDMCUB_CNTL), DMCUB_CNTL, DMCUB_ENABLE) &&
@@ -379,6 +381,8 @@ int dmub32_hw_init(rdna3_dmub *dm, const uint8_t *vbios, uint32_t vbios_len, int
     rdna3_vram_fill(d, win_off(dm, RD_DMUB_WIN_TRACEBUFF), 0, win_size(dm, RD_DMUB_WIN_TRACEBUFF));
     rdna3_vram_fill(d, win_off(dm, RD_DMUB_WIN_FW_STATE), 0, win_size(dm, RD_DMUB_WIN_FW_STATE));
     rdna3_vram_fill(d, win_off(dm, RD_DMUB_WIN_SHARED_STATE), 0, win_size(dm, RD_DMUB_WIN_SHARED_STATE));
+    /* dmub_flush_buffer_mem: the CPU writes must reach VRAM before the
+     * DMCUB reads them (an HDP flush here instead of the read-back) */
     rdna3_hdp_flush(d);
 
     /* dmub_srv_hw_init */

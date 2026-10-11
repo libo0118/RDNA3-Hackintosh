@@ -344,6 +344,8 @@ int dcaux_dpcd_write(rdna3_dev *d, uint32_t n, uint32_t address, const uint8_t *
     return (int)done;
 }
 
+/* the transaction actions are i2caux_action_from_payload's: I2C write / read,
+ * with MOT on every chunk but the last */
 int dcaux_i2c_xfer(rdna3_dev *d, uint32_t n, uint32_t dev7, const uint8_t *wbuf, uint32_t wlen,
                    uint8_t *rbuf, uint32_t rlen)
 {

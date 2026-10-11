@@ -341,7 +341,7 @@ static void get_active_converter_info(rdna3_dp_link *l, uint8_t data)
     }
 }
 
-/* retrieve_link_cap (subset) + dp_get_max_link_cap */
+/* retrieve_link_cap (subset; detect_dp_sink_caps is this) + dp_get_max_link_cap */
 int dcn32_dp_read_caps(rdna3_dp_link *l)
 {
     uint8_t dpcd[16], ext[16], b;
@@ -815,7 +815,8 @@ static void dp_set_fec_enable(rdna3_dp_link *l, int enable)
     }
 }
 
-/* dcn10_link_encoder_connect_dig_be_to_fe */
+/* dcn10_link_encoder_connect_dig_be_to_fe; get_frontend_source: DIG n is
+ * bit n of DIG_FE_SOURCE_SELECT (DCN10_DIG_FE_SOURCE_SELECT_DIGA..) */
 static void dcn10_link_encoder_connect_dig_be_to_fe(rdna3_dp_link *l, int connect)
 {
     uint32_t v = RI(l->d, regDIG0_DIG_BE_CNTL, l->be, DIG_S);
@@ -1304,7 +1305,9 @@ static uint32_t decide_eq_training_pattern(const rdna3_dp_link *l)
     return RD_DP_TRAINING_PATTERN_SEQUENCE_2;
 }
 
-/* dp_decide_8b_10b_lttpr_mode: LTTPR-aware VBIOS, non-transparent not forced */
+/* dp_decide_8b_10b_lttpr_mode: LTTPR-aware VBIOS, non-transparent not forced;
+ * dp_decide_lttpr_mode for the 8b/10b links this port trains */
+
 static int dp_decide_8b_10b_lttpr_mode(const rdna3_dp_link *l)
 {
     if (!dp_is_lttpr_present(l))

@@ -78,7 +78,9 @@ int  dchpd_irq_ack(rdna3_dev *d, uint32_t n);
 int  dcaux_transfer(rdna3_dev *d, uint32_t n, uint32_t action, uint32_t address, uint8_t *buf,
                     uint32_t len, uint32_t *reply);
 
-/* dce_aux_transfer_with_retries for native DPCD: any length, split in 16s */
+/* dce_aux_transfer_with_retries for native DPCD: any length, split in 16s
+ * (what amdgpu_dm's dm_helpers_dp_read_dpcd / dm_helpers_dp_write_dpcd do
+ * through the DRM AUX channel) */
 int  dcaux_dpcd_read(rdna3_dev *d, uint32_t n, uint32_t address, uint8_t *buf, uint32_t len);
 int  dcaux_dpcd_write(rdna3_dev *d, uint32_t n, uint32_t address, const uint8_t *buf, uint32_t len);
 
@@ -96,7 +98,8 @@ int  dcaux_read_edid(rdna3_dev *d, uint32_t n, uint8_t *edid, uint32_t cap);
  * HDMI/DVI sinks and of DP++ adaptors (the AUX engine then reports
  * NON_AUX_MODE). One command of up to 4 payloads, each a write or a read
  * on a 7-bit address; all but the last keep the bus (MOT). Returns 0 or
- * RD_AUX_ERR_* (NACK: no device; TIMEOUT; ACQUIRE: owned by HW/DMCU). */
+ * RD_AUX_ERR_* (NACK: no device; TIMEOUT; ACQUIRE: owned by HW/DMCU).
+ * dce_i2c_submit_command_hw, as amdgpu_dm's dm_helpers_submit_i2c reaches it. */
 typedef struct rd_i2c_payload {
     uint8_t  addr7;
     int      write;
