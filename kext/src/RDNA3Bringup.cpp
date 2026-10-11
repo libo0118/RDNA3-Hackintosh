@@ -3051,12 +3051,29 @@ int RDNA3Bringup::userqAdd(void *p, amd_mes_add_queue *in)
     return r == RDNA3_OK ? 0 : r == RDNA3_ETIME ? -RD_ETIME : -RD_EINVAL;
 }
 
+/* diagnostic (card run 33: the compute user queue ran - its HQD rptr
+ * reached the wptr - but its fence never signalled): the interrupts the
+ * kernel saw, and the last ones nobody claimed */
+void RDNA3Bringup::userqDiag()
+{
+    uint32_t n = fIvOtherN, i;
+    BLOG("userq diag: IRQs user queue %llu, other %llu, compute fence %llu", (unsigned long long)fIrqUserq,
+         (unsigned long long)fIrqOther, (unsigned long long)fIrqFenceComp);
+    for (i = n > 4 ? n - 4 : 0; i < n; i++) {
+        const rdna3_iv *iv = &fIvOther[i & 3];
+        BLOG("userq diag: unclaimed IV client %u src %u ring %u vmid %u pasid %u data %08x %08x %08x %08x",
+             iv->client_id, iv->src_id, iv->ring_id, iv->vmid, iv->pasid, iv->src_data[0], iv->src_data[1],
+             iv->src_data[2], iv->src_data[3]);
+    }
+}
+
 int RDNA3Bringup::userqRemove(const amd_mes_remove_queue *in)
 {
     int r;
     if (!fMes || !fMes->ready)
         return -RD_EINVAL;
     gfx11_userq_hqd_dump(fDev);   /* diagnostic: the queue's HQD before it goes */
+    userqDiag();
     r = gfx11_mes_remove_hw_queue(fDev, fMes, in);
     BLOG("user queue: REMOVE_QUEUE doorbell 0x%x: %d", in->doorbell_offset, r);
     return r == RDNA3_OK ? 0 : r == RDNA3_ETIME ? -RD_ETIME : -RD_EINVAL;
@@ -3514,7 +3531,11 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
     case RD_IH_FENCE_GFX:   b->fIrqFenceGfx++; break;
     case RD_IH_FENCE_SDMA0: b->fIrqFenceSdma++; break;
     case RD_IH_FENCE_COMPUTE0: b->fIrqFenceComp++; break;
-    default:                b->fIrqOther++; break;
+    default:
+        b->fIvOther[b->fIvOtherN & 3] = *iv;
+        b->fIvOtherN++;
+        b->fIrqOther++;
+        break;
     }
 }
 

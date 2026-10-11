@@ -1130,3 +1130,37 @@ Settings. That is expected for them, not a display regression.
   kept rescheduling itself (a fence never came back) into the halt; the
   power-off now stops VCN / JPEG first (`amdgpu_pci_shutdown` ->
   `amdgpu_device_ip_suspend`), log `VCN: stopped for the power-off`.
+
+### Card run 33 (steps userq, pmctl, vcn2, amdgpu; build 852bbef)
+
+- **userq:** the MES mapped the compute user queue (`userq diag: ME1 pipe 0
+  queue 2 active: VMID 8, DOORBELL_CONTROL 0xe0003000, PQ_BASE 0x00004000,
+  RPTR 0xe, WPTR 0x0_0000000e, WPTR_POLL ... 0x00401000`): the doorbell, the
+  wptr poll through the process VM and the fetch all work, the CP consumed
+  all 14 dwords. Yet `dst` stayed 0 and the fence did not signal, with no VM
+  fault. The test's RELEASE_MEM had no GL2 / GLM write-back, so its writes
+  could stay in the GPU caches: it now uses the GCR bits of
+  `gfx_v11_0_ring_emit_fence`. Diagnostic: before REMOVE_QUEUE the kext logs
+  the interrupt counters and the last unclaimed IVs (`userq diag: IRQs user
+  queue N ...`, `unclaimed IV client ...`): no CP EOP IV with the queue's
+  doorbell means the EOP interrupt never came (or is decoded differently).
+- **pmctl:** 22 of 25. Power limit, profiles, activity monitor tables, OD
+  sclk, OD restore all pass. Fails were the test's: on PMFW 80.92 the
+  FAN_CONTROL feature off is answered OK but the PMFW keeps the fan (mode
+  stays auto, PWM refused) - amdgpu uses the OD fan curve on these boards;
+  now reported as info. The fan curve point was 0 C / 5 %, below
+  OD_RANGE (25..100 C, 15..100 %) and rightly refused; it now uses the middle
+  of the range.
+- **vcn2:** `VCNn: fence-only test passed`: the VCPU writes fences. The first
+  encode IB never completes (rptr stays at its start, 0x80; wptr 0x100).
+  Diagnostic: instance 1 now runs the decode IB test first, instance 0 the
+  encode one first, and the whole session buffer is zeroed (the
+  `ffffffff` in the dump was never-written memory).
+- **amdgpu (`rdna3amdgpu=1` on the default profile):** everything passed
+  (displays, sleep / wake, mode switches, DMA, GFX, Vulkan, Metal), but the
+  log had 662 `GFX: ring full (rptr 0x0, wptr 0x700)` / `GMC: failed to write
+  reg ... wait reg ...`: the KIQ (on MES pipe 1) runs the TLB-flush packets
+  but writes no rptr report, and with amdgpu's 256-dword padding the ring
+  looked full after four flushes. The ring space now also counts from the
+  last completed KIQ fence. The report archive did not arrive in time
+  (collect.sh slowed by the 5 s waits): run the step again.

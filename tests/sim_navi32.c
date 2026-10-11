@@ -170,6 +170,7 @@ typedef struct sim {
     uint64_t sdma_rptr;         /* bytes */
     uint64_t cp_rptr;           /* dwords */
     unsigned cp_pkts, cp_bad, cp_while_halted, cp_clear_state, cp_ctx_regs;
+    int mes_kiq_no_rptr_report;   /* card run 33: the KIQ on MES pipe 1 never wrote its rptr report */
     unsigned cp_wait_stuck, cp_acquire, cp_pfp_sync, cp_frame_begin, cp_frame_end, cp_ibs;
     unsigned cp_ib_dw, cp_ib_fault, ring_tlb_flushes, hdp_engine_flushes;
     uint32_t cp_last_cntxcntl, cp_last_ib_vmid;
@@ -3147,7 +3148,7 @@ static void mec_run(uint32_t me, uint32_t pipe, uint32_t q, uint64_t wptr)
         h->rptr = cp_exec(ring, ndw - 1, h->rptr, wptr, 0);
     S.cp_cur_me = 0; S.cp_cur_pipe = 0; S.cp_cur_queue = 0;
     S.mec_runs++;
-    wb = mc_ptr(rwb, 4);
+    wb = (me == 3 && S.mes_kiq_no_rptr_report) ? NULL : mc_ptr(rwb, 4);
     if (wb) {
         uint32_t r32 = (uint32_t)(h->rptr & (ndw - 1));
         memcpy(wb, &r32, 4);
@@ -5840,6 +5841,15 @@ static void test_gfx_amdgpu(rdna3_dev *dev, rdna3_gfx_ring *gr, rdna3_mec_ring *
         CHECK(gfx11_kiq_reg_write_reg_wait(dev, kiq, f.req, f.ack, f.req_val, 1u << 5) == RDNA3_OK);
         CHECK(S.tlb_flushes == t0 + 1 && S.mm_tlb_flushes == m0 + 1 && kiq->rb.fence_seq == kseq + 2 &&
               S.cp_bad == 0 && S.cp_wait_stuck == 0 && (kiq->rb.wptr & 0xff) == 0);
+        /* card run 33: the KIQ on MES pipe 1 writes no rptr report; with
+         * 256-dword padding the ring "filled up" after four flushes. The
+         * completed KIQ fences free it instead. */
+        S.mes_kiq_no_rptr_report = 1;
+        gfxhub303_flush_regs(dev, 5, 17, &f);
+        for (int kk = 0; kk < 12; kk++)
+            CHECK(gfx11_kiq_reg_write_reg_wait(dev, kiq, f.req, f.ack, f.req_val, 1u << 5) == RDNA3_OK);
+        CHECK(S.tlb_flushes == t0 + 13 && kiq->rb.fence_seq == kseq + 14);
+        S.mes_kiq_no_rptr_report = 0;
         kiq->rb.amdgpu_pad = 0;
     }
     /* amdgpu_vm_flush's PASID mapping: IH_VMID_5_LUT gets the job's PASID */

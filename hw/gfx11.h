@@ -88,6 +88,11 @@ typedef struct rdna3_gfx_ring {
     uint32_t csb_dw;
     uint32_t ring_size, buf_mask;   /* bytes, dwords-1 */
     uint64_t wptr;          /* dwords */
+    /* KIQ: the wptr every submission before which has completed (its
+     * polled fence came back); the KIQ on MES pipe 1 writes no rptr report
+     * (card run 33), so the ring space also counts from here */
+    uint64_t done_wptr;
+    int      done_valid;
     uint32_t fence_seq;
     int      ready;
     uint64_t last_ctx;      /* amdgpu ring->current_ctx: context of the last job */

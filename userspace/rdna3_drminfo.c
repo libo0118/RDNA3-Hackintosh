@@ -270,7 +270,10 @@ static int userq_test(int fd)
     ring[n++] = (uint32_t)(gva + 0x3000); ring[n++] = 0;
     ring[n++] = 0xC0FFEE11; ring[n++] = 0xC0FFEE12;
     ring[n++] = (3u << 30) | (0x49u << 8) | (6u << 16);
-    ring[n++] = 0x14 | (5u << 8);            /* CACHE_FLUSH_AND_INV_TS_EVENT, EVENT_INDEX 5 */
+    /* CACHE_FLUSH_AND_INV_TS_EVENT, EVENT_INDEX 5, with the GL2 / GLM
+     * write-back gfx_v11_0_ring_emit_fence asks for (card run 33: without
+     * it the queue ran but its writes stayed in the GPU caches) */
+    ring[n++] = (1u << 22) | (1u << 21) | (1u << 13) | (1u << 12) | (3u << 25) | 0x14 | (5u << 8);
     ring[n++] = (1u << 29) | (2u << 24);     /* DATA_SEL 1, INT_SEL 2 */
     ring[n++] = (uint32_t)(gva + 0x3010); ring[n++] = 0;
     ring[n++] = 0xC0FFEE13; ring[n++] = 0; ring[n++] = 0;

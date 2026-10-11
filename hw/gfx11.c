@@ -491,6 +491,13 @@ uint32_t gfx11_ring_space(rdna3_dev *d, rdna3_gfx_ring *r)
     /* gfx11 rptr is 32 bit (gfx_v11_0_ring_get_rptr_gfx, gfx_v11_0_ring_get_rptr_compute) */
     uint32_t rptr = wb_read32(d, r, RD_GFX_WB_RPTR) & r->buf_mask;
     uint32_t used = ((uint32_t)r->wptr - rptr) & r->buf_mask;
+    if (r->done_valid) {
+        /* everything up to done_wptr ran: the KIQ's polled fences prove it
+         * even when its rptr report never comes */
+        uint32_t used_done = ((uint32_t)r->wptr - (uint32_t)r->done_wptr) & r->buf_mask;
+        if (used_done < used)
+            used = used_done;
+    }
     return r->buf_mask - used;   /* one slot stays empty: full != empty */
 }
 
@@ -1057,6 +1064,7 @@ int gfx11_mec_ring_init(rdna3_dev *d, rdna3_mec_ring *r, int kiq, uint32_t pipe,
     rb->ring_size = ring_size;
     rb->buf_mask = ring_size / 4 - 1;
     rb->wptr = 0;
+    rb->done_valid = 0;
     rb->fence_seq = 0;
     rb->ready = 0;
     rb->last_ctx = 0;
@@ -1315,6 +1323,7 @@ static void mes_mqd_init(rdna3_dev *d, rdna3_mec_ring *r)
     g_mqd[MQD_CP_HQD_EOP_BASE_ADDR_HI] = (uint32_t)(eop >> 32);
     g_mqd[MQD_CP_HQD_EOP_CONTROL] = tmp;
     rb->wptr = 0;
+    rb->done_valid = 0;
     g_mqd[MQD_CP_MQD_BASE_ADDR_LO] = (uint32_t)mqd & 0xfffffffc;
     g_mqd[MQD_CP_MQD_BASE_ADDR_HI] = (uint32_t)(mqd >> 32);
     g_mqd[MQD_CP_MQD_CONTROL] = REG_SET_FIELD(regCP_MQD_CONTROL_DEFAULT, CP_MQD_CONTROL, VMID, 0);
@@ -1412,6 +1421,7 @@ int gfx11_kiq_start(rdna3_dev *d, rdna3_mec_ring *kiq)
         mes_queue_init_register(d, kiq);
         kiq->mapped = 1;
         kiq->rb.wptr = 0;
+        kiq->rb.done_valid = 0;
         ret = kiq_ring_test(d, kiq);
         if (ret)
             return ret;
@@ -1434,6 +1444,7 @@ int gfx11_kiq_start(rdna3_dev *d, rdna3_mec_ring *kiq)
         RERR(d, "KIQ: the HQD would not dequeue");
     kiq->mapped = 1;
     kiq->rb.wptr = 0;
+    kiq->rb.done_valid = 0;
     ret = kiq_ring_test(d, kiq);
     if (ret)
         return ret;
@@ -3166,8 +3177,11 @@ int gfx11_kiq_reg_write_reg_wait(rdna3_dev *d, rdna3_mec_ring *kiq, uint32_t reg
         d->os.msleep(d->os.ctx, 5);   /* MAX_KIQ_REG_BAILOUT_INTERVAL */
         ok = kiq_fence_wait(d, r, seq, 5000);
     }
-    if (ok)
+    if (ok) {
+        r->done_wptr = r->wptr;   /* the fence was the last thing committed */
+        r->done_valid = 1;
         return RDNA3_OK;
+    }
 failed_kiq:
     RERR(d, "GMC: failed to write reg %x wait reg %x", reg0, reg1);
     return RDNA3_ETIME;

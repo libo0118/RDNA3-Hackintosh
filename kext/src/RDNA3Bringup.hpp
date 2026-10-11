@@ -280,6 +280,7 @@ private:
     void             vcnIdleSchedule();
 public:
     void             vcnShutdown();
+    void             userqDiag();
 private:
     int              vcnHang(uint32_t ip, uint32_t ring, uint64_t seq);
     static void      vcnIdleTick(void *owner, void *);
@@ -373,6 +374,9 @@ private:
     volatile uint64_t fIrqCount = 0, fIvCount = 0;
     volatile uint64_t fIrqFenceGfx = 0, fIrqFenceSdma = 0, fIrqFenceComp = 0, fIrqOther = 0;
     volatile uint64_t fIrqUserq = 0;        /* user queue fences (EOP / SDMA fence with a doorbell) */
+    /* diagnostic (card run 33): the last IVs nobody claimed */
+    rdna3_iv         fIvOther[4];
+    volatile uint32_t fIvOtherN = 0;
     bool          setupInterrupt();
     void          teardownInterrupt();
     static bool   irqFilter(OSObject *owner, IOFilterInterruptEventSource *src);

@@ -1646,35 +1646,26 @@ static void ib_test_dump(rdna3_dev *d, rdna3_vcn_ring *r, uint64_t buf)
          RV(d, r->me, regUVD_POWER_STATUS), sess[0], sess[1], sess[2], sess[3]);
 }
 
-/* Ported from amdgpu_vcn_unified_ring_test_ib: amdgpu_vcn_enc_ring_test_ib
- * (create + destroy session) and amdgpu_vcn_dec_sw_ring_test_ib (create +
- * destroy message), the last fence waited for */
-int vcn40_unified_ring_test_ib(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
+/* amdgpu_vcn_enc_ring_test_ib: create + close an encode session */
+static int enc_ib_test(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r, uint64_t buf)
 {
-    /* page 0-1: IBs, page 2: the encode session buffer (128 KiB + a page in
-     * amdgpu, the firmware only needs it mapped), page 3: decode message */
-    uint64_t buf = v->ib_test_buf;
-    uint32_t seq;
+    uint32_t seq = enc_session_msg(d, v, r, buf, 1, rdna3_vram_mc(d, buf + 4 * 4096u), 0x08000001);
     int ret;
-    if (!buf) {   /* once: kept across GPU resets */
-        buf = rdna3_vram_alloc(d, (128u << 10) + 4 * 4096u, 4096, "vcn-ib-test");
-        if (buf == UINT64_MAX)
-            return RDNA3_ENOMEM;
-        v->ib_test_buf = buf;
-    }
-    rdna3_vram_fill(d, buf, 0, 4 * 4096u);
-    fence_only_test(d, v, r);
-    /* amdgpu_vcn_enc_ring_test_ib */
-    seq = enc_session_msg(d, v, r, buf, 1, rdna3_vram_mc(d, buf + 4 * 4096u), 0x08000001);
     if (seq)
         seq = enc_session_msg(d, v, r, buf + 128, 1, rdna3_vram_mc(d, buf + 4 * 4096u), 0x08000002);
     ret = seq ? vcn40_wait_fence(d, r, seq) : RDNA3_EIO;
     if (ret) {
         RERR(d, "VCN%u: encode IB test failed (%d)", r->me, ret);
         ib_test_dump(d, r, buf);
-        return ret;
     }
-    /* amdgpu_vcn_dec_sw_ring_test_ib */
+    return ret;
+}
+
+/* amdgpu_vcn_dec_sw_ring_test_ib: create + destroy decode messages */
+static int dec_ib_test(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r, uint64_t buf)
+{
+    uint32_t seq;
+    int ret;
     dec_msg(d, buf + 3 * 4096u, 1, 1);
     seq = dec_sw_send_msg(d, v, r, buf + 4096, rdna3_vram_mc(d, buf + 3 * 4096u));
     if (seq) {
@@ -1691,6 +1682,37 @@ int vcn40_unified_ring_test_ib(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
         RERR(d, "VCN%u: decode IB test failed (%d)", r->me, ret);
         ib_test_dump(d, r, buf);
     }
+    return ret;
+}
+
+/* Ported from amdgpu_vcn_unified_ring_test_ib: amdgpu_vcn_enc_ring_test_ib
+ * (create + close session) and amdgpu_vcn_dec_sw_ring_test_ib (create +
+ * destroy message), the last fence waited for. Diagnostic (card run 33:
+ * both instances hung on the first encode IB): instance 1 runs the decode
+ * test first, so one report shows whether decode IBs run at all. */
+int vcn40_unified_ring_test_ib(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
+{
+    /* page 0-1: IBs, page 3: decode message, from page 4: the encode
+     * session buffer (128 KiB + a page in amdgpu) */
+    uint64_t buf = v->ib_test_buf;
+    int ret;
+    if (!buf) {   /* once: kept across GPU resets */
+        buf = rdna3_vram_alloc(d, (128u << 10) + 4 * 4096u, 4096, "vcn-ib-test");
+        if (buf == UINT64_MAX)
+            return RDNA3_ENOMEM;
+        v->ib_test_buf = buf;
+    }
+    rdna3_vram_fill(d, buf, 0, (128u << 10) + 4 * 4096u);
+    fence_only_test(d, v, r);
+    if (r->me == 1) {
+        ret = dec_ib_test(d, v, r, buf);
+        if (!ret)
+            ret = enc_ib_test(d, v, r, buf);
+        return ret;
+    }
+    ret = enc_ib_test(d, v, r, buf);
+    if (!ret)
+        ret = dec_ib_test(d, v, r, buf);
     return ret;
 }
 

@@ -271,16 +271,24 @@ static int selftest(void)
     T_CHECK(pm_call(RD_PMCTL_POWER_LIMIT, 1, a, &rp) == -22, "power limit %d W (above the range) refused", a[0]);
 
     printf("== fan\n");
+    /* card run 33: PMFW 80.92 (SMU 13.0.10) answers the FAN_CONTROL
+     * feature off with OK but keeps its own control, so the mode stays auto
+     * and the PWM is refused; amdgpu moved these boards to the OD fan curve
+     * (tested below). Reported, not counted. */
     a[0] = RD_FAN_CTRL_MANUAL;
     r = pm_call(RD_PMCTL_FAN_MODE, 1, a, &rp);
-    T_CHECK(r == 0 && rp.info.fan_mode == RD_FAN_CTRL_MANUAL, "fan manual -> %d (mode %u)", r, rp.info.fan_mode);
-    a[0] = 128;
-    r = pm_call(RD_PMCTL_FAN_PWM, 1, a, &rp);
-    T_CHECK(r == 0, "fan pwm 128 -> %d", r);
-    sleep(4);
-    pm_call(RD_PMCTL_INFO, 0, NULL, &rp);
-    printf("  info  after 4 s: pwm %u/255, %u rpm (the PMFW may keep its own control)\n", rp.info.fan_pwm,
-           rp.info.fan_rpm);
+    if (r == 0 && rp.info.fan_mode == RD_FAN_CTRL_MANUAL) {
+        T_CHECK(1, "fan manual -> %d (mode %u)", r, rp.info.fan_mode);
+        a[0] = 128;
+        r = pm_call(RD_PMCTL_FAN_PWM, 1, a, &rp);
+        T_CHECK(r == 0, "fan pwm 128 -> %d", r);
+        sleep(4);
+        pm_call(RD_PMCTL_INFO, 0, NULL, &rp);
+        printf("  info  after 4 s: pwm %u/255, %u rpm\n", rp.info.fan_pwm, rp.info.fan_rpm);
+    } else {
+        printf("  info  fan manual -> %d, mode stays %u: the PMFW keeps the fan (use the OD fan curve)\n", r,
+               rp.info.fan_mode);
+    }
     a[0] = RD_FAN_CTRL_AUTO;
     r = pm_call(RD_PMCTL_FAN_MODE, 1, a, &rp);
     T_CHECK(r == 0 && rp.info.fan_mode == RD_FAN_CTRL_AUTO, "fan auto -> %d (mode %u)", r, rp.info.fan_mode);
@@ -329,8 +337,11 @@ static int selftest(void)
             r = od_edit(RD_PP_OD_EDIT_FAN_ZERO_RPM_STOP_TEMP, 1, in, 1, &rp);
             printf("  info  OD zero rpm stop %d C -> %d %s (needs the zero-fan OD feature)\n", in[0], r,
                    errname(r));
-            in[0] = 2; in[1] = (int32_t)boot.info.od_fan_curve_temp[2];
-            in[2] = (int32_t)boot.info.od_fan_curve_pwm[2] + 5;
+            /* a point inside OD_RANGE (the auto curve reads all 0, below
+             * the limits, which smu_v13_0_0_od_edit_dpm_table refuses) */
+            in[0] = 2;
+            in[1] = (boot.info.od_lim_min[RD_OD_SET_FAN_CURVE_TEMP] + boot.info.od_lim_max[RD_OD_SET_FAN_CURVE_TEMP]) / 2;
+            in[2] = (boot.info.od_lim_min[RD_OD_SET_FAN_CURVE_PWM] + boot.info.od_lim_max[RD_OD_SET_FAN_CURVE_PWM]) / 2;
             r = od_edit(RD_PP_OD_EDIT_FAN_CURVE, 3, in, 1, &rp);
             T_CHECK(r == 0 && rp.info.od_fan_mode == 1 && rp.info.od_fan_curve_pwm[2] == (uint32_t)in[2],
                     "OD fan curve point 2: %d C %d %% -> %d", in[1], in[2], r);
