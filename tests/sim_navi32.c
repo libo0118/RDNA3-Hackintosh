@@ -438,6 +438,9 @@ static void put32(uint8_t *p, uint32_t v) { put16(p, (uint16_t)v); put16(p + 2, 
 #define VB_SMCDPM    0x400
 #define VB_SMUINFO   0x700
 #define VB_VRAMUSAGE 0x840
+#define VB_UMCINFO   0x1800
+#define VB_GFXINFO   0x1840
+#define VB_VRAMINFO  0x1900
 #define VB_BOARD_VERSION 0xB0A2Du
 #define PMFW_SKU_VERSION 0x12345u
 #define PMFW_BOARD_PLACEHOLDER 0xDEADu
@@ -674,8 +677,84 @@ static void make_vbios(void)
     put16(b + VB_VRAMUSAGE, 12); b[VB_VRAMUSAGE + 2] = 2; b[VB_VRAMUSAGE + 3] = 1;
     put32(b + VB_VRAMUSAGE + 4, (uint32_t)((VRAM_SIZE - (48ull << 20)) >> 10));
     put16(b + VB_VRAMUSAGE + 8, 48 * 1024);
+    /* core_refclk_10khz (smu_info v4_0 + 16): gfx_info's wins on Navi+ */
+    put32(b + VB_SMUINFO + 16, 2700);
+    /* umc_info v3.3: mem_refclk_10khz at 28 (the v3_1 layout amdgpu reads) */
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_UMC_INFO, VB_UMCINFO);
+    put16(b + VB_UMCINFO, 68); b[VB_UMCINFO + 2] = 3; b[VB_UMCINFO + 3] = 3;
+    put32(b + VB_UMCINFO + 28, 10000);
+    /* gfx_info v3.0: golden_tsc_count_lower_refclk at 40 */
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_GFX_INFO, VB_GFXINFO);
+    put16(b + VB_GFXINFO, 136); b[VB_GFXINFO + 2] = 3; b[VB_GFXINFO + 3] = 0;
+    put32(b + VB_GFXINFO + 40, 10000);
+    /* vram_info v3.0: GDDR6, 16 channels, module 0 vendor 0x31 */
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_VRAM_INFO, VB_VRAMINFO);
+    put16(b + VB_VRAMINFO, 128); b[VB_VRAMINFO + 2] = 3; b[VB_VRAMINFO + 3] = 0;
+    b[VB_VRAMINFO + 20] = 2; b[VB_VRAMINFO + 24] = 0x70; b[VB_VRAMINFO + 25] = 16; b[VB_VRAMINFO + 26] = 4;
+    b[VB_VRAMINFO + 64 + 3] = 0x31;
     make_vbios_display();
     make_vbios_cmd_tables();
+}
+
+/* rdna3amdgpu=1 VBIOS ports: amdgpu_atomfirmware_allocate_fb_scratch,
+ * _get_clock_info, _get_vram_info, the firmware capability checks */
+static void test_vbios_amdgpu(rdna3_vbios *vb, const rdna3_vbios_boot *boot)
+{
+    uint8_t *b = vb->data;
+    uint8_t save[128];
+    rdna3_vbios_clocks ck;
+    rdna3_vbios_vram vr;
+
+    /* v2.1 without a driver block: amdgpu's 20 KiB; with one: its size;
+     * the SR-IOV message reservation: the default again */
+    CHECK(vbios_atom_scratch_bytes(vb) == 20 * 1024);
+    put16(b + VB_VRAMUSAGE + 10, 64);
+    CHECK(vbios_atom_scratch_bytes(vb) == 64 * 1024);
+    put32(b + VB_VRAMUSAGE + 4, 0x80000000u | 0x100);
+    CHECK(vbios_atom_scratch_bytes(vb) == 20 * 1024);
+    put32(b + VB_VRAMUSAGE + 4, (uint32_t)((VRAM_SIZE - (48ull << 20)) >> 10));
+    put16(b + VB_VRAMUSAGE + 10, 0);
+    b[VB_VRAMUSAGE + 3] = 2;   /* v2.2: SR-IOV only */
+    CHECK(vbios_atom_scratch_bytes(vb) == 20 * 1024);
+    b[VB_VRAMUSAGE + 3] = 1;
+
+    /* clocks: firmwareinfo boot sclk / mclk, the RLC reference over smu_info's */
+    CHECK(vbios_clock_info(vb, &ck) == RDNA3_OK && ck.default_sclk == 50000 && ck.default_mclk == 9600 &&
+          ck.spll_ref == 10000 && ck.mpll_ref == 10000);
+    b[VB_GFXINFO + 2] = 2; b[VB_GFXINFO + 3] = 1;   /* gfx_info 2.1: amdgpu BUG()s */
+    CHECK(vbios_clock_info(vb, &ck) == RDNA3_EINVAL);
+    b[VB_GFXINFO + 3] = 2;                             /* 2.2: rlc_gpu_timer_refclk */
+    CHECK(vbios_clock_info(vb, &ck) == RDNA3_OK && ck.spll_ref == 10000);
+    b[VB_GFXINFO + 2] = 3; b[VB_GFXINFO + 3] = 0;
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_GFX_INFO, 0);
+    CHECK(vbios_clock_info(vb, &ck) == RDNA3_OK && ck.spll_ref == 2700);
+    put16(b + VB_DATA_DIR + 4 + 2 * RD_ATOM_DT_GFX_INFO, VB_GFXINFO);
+
+    /* capability bits: the card's 0x104001 has neither */
+    CHECK(!vbios_mem_training_supported(0x104001) && !vbios_dynamic_boot_config_supported(0x104001));
+    CHECK(vbios_mem_training_supported(0x400) && vbios_dynamic_boot_config_supported(0x20000));
+    (void)boot;
+
+    /* vram_info v3.0 (Navi 3x): 16 channels x 16 bit */
+    CHECK(vbios_vram_info(vb, 0, &vr) == RDNA3_OK && vr.type == RD_VRAM_TYPE_GDDR6 && vr.width == 256 &&
+          vr.vendor == 1);
+    /* v2.5 with two atom_vram_module_v11 (size 56): the module BIOS scratch 4 names */
+    memcpy(save, b + VB_VRAMINFO, sizeof(save));
+    memset(b + VB_VRAMINFO, 0, sizeof(save));
+    put16(b + VB_VRAMINFO, 24 + 2 * 56); b[VB_VRAMINFO + 2] = 2; b[VB_VRAMINFO + 3] = 5;
+    b[VB_VRAMINFO + 20] = 2;
+    put16(b + VB_VRAMINFO + 24 + 10, 56); b[VB_VRAMINFO + 24 + 13] = 0x50; b[VB_VRAMINFO + 24 + 14] = 4;
+    b[VB_VRAMINFO + 24 + 15] = 5; b[VB_VRAMINFO + 24 + 26] = 0x12;
+    put16(b + VB_VRAMINFO + 80 + 10, 56); b[VB_VRAMINFO + 80 + 13] = 0x61; b[VB_VRAMINFO + 80 + 14] = 8;
+    b[VB_VRAMINFO + 80 + 15] = 7; b[VB_VRAMINFO + 80 + 26] = 0x46;
+    CHECK(vbios_vram_info(vb, 0, &vr) == RDNA3_OK && vr.type == RD_VRAM_TYPE_GDDR5 && vr.width == 128 &&
+          vr.vendor == 2);
+    CHECK(vbios_vram_info(vb, 1, &vr) == RDNA3_OK && vr.type == RD_VRAM_TYPE_HBM && vr.width == 1024 &&
+          vr.vendor == 6);
+    CHECK(vbios_vram_info(vb, 9, &vr) == RDNA3_OK && vr.type == RD_VRAM_TYPE_GDDR5);   /* > num: 0 */
+    b[VB_VRAMINFO + 3] = 7;
+    CHECK(vbios_vram_info(vb, 0, &vr) == RDNA3_EINVAL);
+    memcpy(b + VB_VRAMINFO, save, sizeof(save));
 }
 
 /* OverDriveLimitsMin / OverDriveLimitsBasicMax of the SKU: GFXCLK / UCLK
@@ -7611,6 +7690,7 @@ static void run(const char *fwdir)
               boot.firmware_revision == 0x02000f && boot.pp_table_id == 0);
         CHECK(vbios_fw_vram_reservation(&vb, &rs, &rsz) == RDNA3_OK &&
               rs == VRAM_SIZE - (48ull << 20) && rsz == (48ull << 20));
+        test_vbios_amdgpu(&vb, &boot);
         CHECK(smu13_check_fw_status(&dev) == RDNA3_OK);
 
         /* the default (no Display Core) feature set on a Gen4 x16 link */

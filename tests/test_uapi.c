@@ -349,6 +349,15 @@ int main(void)
         memset(&di, 0, sizeof(di));
         CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.tcc_disabled_mask == 0x10007);
         rdna3_drm_device_set_tcc_disabled(&dev, 0);
+        /* VBIOS / discovery values (rdna3amdgpu=1); 0 keeps */
+        rdna3_drm_device_set_asic_info(&dev, 27000, AMDGPU_VRAM_TYPE_HBM, 4096, 96ull << 20);
+        memset(&di, 0, sizeof(di));
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.gpu_counter_freq == 27000 &&
+              di.vram_type == AMDGPU_VRAM_TYPE_HBM && di.vram_bit_width == 4096 && di.mall_size == (96ull << 20));
+        rdna3_drm_device_set_asic_info(&dev, 0, 0, 0, 0);
+        memset(&di, 0, sizeof(di));
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.gpu_counter_freq == 27000);
+        rdna3_drm_device_set_asic_info(&dev, 100000, AMDGPU_VRAM_TYPE_GDDR6, 256, 64ull << 20);
         /* clocks from DPM: 500..2124 MHz gfx, 96..1218 MHz uclk; 0 keeps */
         rdna3_drm_device_set_clocks(&dev, 500000, 2124000, 96000, 1218000);
         rdna3_drm_device_set_clocks(&dev, 0, 0, 0, 0);

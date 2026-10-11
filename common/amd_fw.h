@@ -187,6 +187,8 @@ typedef struct amd_ucode_plan {
 /* Build the ordered LOAD_IP_FW list. SMC is included (amdgpu loads it
  * from psp_hw_start() before TMR setup because Navi3x has
  * pmfw_centralized_cstate_management); the caller decides when. */
+/* Every ucode goes to the PSP: amdgpu_ucode_get_load_type gives
+ * AMDGPU_FW_LOAD_PSP for Navi 3x with the default fw_load_type (-1) */
 amd_fw_status amd_ucode_plan_build(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT],
                                    amd_ucode_plan *plan);
 
@@ -203,6 +205,22 @@ const char *amd_fw_status_str(amd_fw_status s);
 
 /* linux-firmware file names for Navi 32 (GC 11.0.3), index by enum amd_fw_blob */
 extern const char *const amd_navi32_fw_names[AMD_BLOB_COUNT];
+
+/* amdgpu_ucode_validate (amdgpu_ucode_request): a firmware file is used
+ * only when its common header's size_bytes is the file's size */
+amd_fw_status amd_ucode_validate(const uint8_t *fw, size_t len);
+/* amdgpu_ucode_hdr_version: header_version_major / _minor equal maj.min */
+int amd_ucode_hdr_version(const uint8_t *fw, size_t len, uint16_t maj, uint16_t min);
+/* amdgpu_ucode_ip_version_decode: the "<ip>_<maj>_<min>_<rev>" prefix of
+ * the firmware file names (gc_11_0_3, sdma_6_0_3, psp_13_0_10, smu_13_0_10,
+ * vcn_4_0_0). Every Navi 3x IP version is past amdgpu's legacy (chip-name)
+ * firmware names, so none applies. Returns the length, or -1 for a block
+ * amdgpu has no prefix for. */
+enum { AMD_UCODE_BLOCK_GC, AMD_UCODE_BLOCK_SDMA, AMD_UCODE_BLOCK_MP0, AMD_UCODE_BLOCK_MP1,
+       AMD_UCODE_BLOCK_VCN };
+int amd_ucode_ip_version_decode(int block, uint8_t maj, uint8_t min, uint8_t rev, char *buf, size_t len);
+/* amdgpu_ucode_name: AMDGPU_UCODE_ID_* -> amdgpu's name ("UNKNOWN UCODE") */
+const char *amd_ucode_name(uint16_t ucode_id);
 extern const char *const amd_navi32_sos_name;
 extern const char *const amd_navi32_ta_name;   /* optional: only versions come from it */
 

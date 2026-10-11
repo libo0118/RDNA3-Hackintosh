@@ -353,6 +353,8 @@ void RDNA3Accel::vramRead(uint64_t pos, uint32_t *buf, uint32_t dwords)
     }
 }
 
+/* amdgpu_discovery_read_binary_from_mem: after the IFWI's C2PMSG_33 bit
+ * (waitForIfwi), the binary at the top of VRAM (RCC_CONFIG_MEMSIZE - 64 KiB) */
 bool RDNA3Accel::readDiscovery(amd_discovery *disc)
 {
     const uint32_t size = AMD_DISC_TMR_SIZE;
@@ -388,6 +390,26 @@ bool RDNA3Accel::readDiscovery(amd_discovery *disc)
         amd_disc_status_str(st));
     if (st == AMD_DISC_OK)
         publishDiscovery(disc, (const uint8_t *)blob, disc->bin_size);
+    if (st == AMD_DISC_OK) {
+        /* amdgpu_discovery_set_ip_blocks' default case after reg_base_init:
+         * harvest_ip, get_mall_info, get_vcn_info */
+        uint16_t device = fPci->configRead16(kIOPCIConfigDeviceID);
+        uint8_t rev = fPci->configRead8(kIOPCIConfigRevisionID);
+        fDiscSocOk = amd_discovery_soc_config((const uint8_t *)blob, size, disc, device, rev, &fDiscSoc) ==
+                     AMD_DISC_OK;
+        if (fDiscSocOk) {
+            setNumber("RDNA3,NumUMC", fDiscSoc.num_umc);
+            setNumber("RDNA3,MALLSizeMB", fDiscSoc.mall_size >> 20);
+            setNumber("RDNA3,HarvestIPMask", fDiscSoc.harvest_ip_mask);
+            setNumber("RDNA3,VCNHarvestConfig", fDiscSoc.vcn_harvest_config);
+            LOG("discovery: %u UMC (active 0x%x), MALL %llu MiB, %u VCN (mask 0x%x, harvest 0x%x, "
+                "codec-disable 0x%x/0x%x), %u SDMA, harvested IPs 0x%x",
+                fDiscSoc.num_umc, fDiscSoc.umc_active_mask, (unsigned long long)(fDiscSoc.mall_size >> 20),
+                fDiscSoc.num_vcn_inst, fDiscSoc.vcn_inst_mask, fDiscSoc.vcn_harvest_config,
+                fDiscSoc.vcn_codec_disable_mask[0], fDiscSoc.vcn_codec_disable_mask[1], fDiscSoc.num_sdma,
+                fDiscSoc.harvest_ip_mask);
+        }
+    }
     IOFree(blob, size);
     return st == AMD_DISC_OK;
 }

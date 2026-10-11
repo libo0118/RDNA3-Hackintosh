@@ -40,6 +40,25 @@ static const struct fake_ip navi32[] = {
 };
 #define NIPS (sizeof(navi32) / sizeof(navi32[0]))
 
+/* the IP list build() writes (navi32 unless a test swaps it) */
+static const struct fake_ip *g_ips = navi32;
+static size_t g_nips = NIPS;
+
+/* a full Navi 32 for amd_discovery_soc_config: 4 UMC, 2 VCN (the second
+ * with encode disabled in revision bits [7:6]), SDMA0 + SDMA1 */
+static const struct fake_ip navi32_soc[] = {
+    { AMD_HWID_GC,    0, 11, 0, 3, 0x00, 1, { 0x1260 } },
+    { AMD_HWID_SDMA0, 0,  6, 0, 3, 0x00, 1, { 0x1260 } },
+    { AMD_HWID_SDMA1, 0,  6, 0, 3, 0x00, 1, { 0x1260 } },
+    { AMD_HWID_DMU,   0,  3, 2, 0, 0x00, 1, { 0x12 } },
+    { AMD_HWID_VCN,   0,  4, 0, 0, 0x00, 1, { 0x7800 } },
+    { AMD_HWID_VCN,   1,  4, 0, 0x81, 0x00, 1, { 0x7B00 } },
+    { AMD_HWID_UMC,   0,  8, 10, 0, 0x00, 1, { 0xC004000 } },
+    { AMD_HWID_UMC,   1,  8, 10, 0, 0x00, 1, { 0xC804000 } },
+    { AMD_HWID_UMC,   2,  8, 10, 0, 0x00, 1, { 0xD004000 } },
+    { AMD_HWID_UMC,   3,  8, 10, 0, 0x00, 1, { 0xD804000 } },
+};
+
 /* Returns total size. hdr_v: 1 or 2. ipd_v: 3 or 4 (4 => 64-bit bases). */
 static size_t build(uint8_t *b, size_t cap, int hdr_v, int ipd_v)
 {
@@ -60,9 +79,9 @@ static size_t build(uint8_t *b, size_t cap, int hdr_v, int ipd_v)
 
     /* die header */
     w16(b + die, 0);
-    w16(b + die + 2, (uint16_t)NIPS);
-    for (i = 0; i < NIPS; i++) {
-        const struct fake_ip *f = &navi32[i];
+    w16(b + die + 2, (uint16_t)g_nips);
+    for (i = 0; i < g_nips; i++) {
+        const struct fake_ip *f = &g_ips[i];
         w16(b + p, f->hw_id);
         b[p + 2] = f->inst; b[p + 3] = f->nbase;
         b[p + 4] = f->maj;  b[p + 5] = f->min; b[p + 6] = f->rev;
@@ -222,6 +241,76 @@ int main(void)
               d.num_ips == NIPS - 1);
     }
 
+    /* amdgpu_discovery_reg_base_init counts, _harvest_ip (harvest table),
+     * _get_mall_info, _get_vcn_info, _get_harvest_info */
+    {
+        uint8_t hvt[AMD_DISC_HARVEST_TABLE_SIZE], vcn[96], mall[48];
+        static amd_disc_soc sc;
+        const amd_ip_entry *v1;
+        memset(hvt, 0, sizeof(hvt)); memset(vcn, 0, sizeof(vcn)); memset(mall, 0, sizeof(mall));
+        w32(hvt, AMD_DISC_HARVEST_SIGNATURE);
+        w16(hvt + 8, AMD_HWID_VCN); hvt[10] = 1;      /* VCN1 harvested */
+        w16(hvt + 12, AMD_HWID_UMC); hvt[14] = 3;     /* UMC3 harvested */
+        w16(hvt + 16, AMD_HWID_DMU); hvt[18] = 0;     /* display harvested */
+        w32(vcn, AMD_DISC_VCN_INFO_TABLE_ID); w16(vcn + 4, 1); w32(vcn + 8, sizeof(vcn));
+        w32(vcn + 12, 2);
+        w32(vcn + 16 + 4, 0x5);                        /* VCN0: AV1 + HEVC disabled */
+        w32(vcn + 32 + 4, 0x2);
+        w32(mall, 0x4c4c414d); w16(mall + 4, 1); w32(mall + 8, sizeof(mall));
+        w32(mall + 12, 16u << 20);                     /* mall_size_per_m */
+        w32(mall + 20, 0x1);                           /* m_half_use: UMC0 */
+        g_ips = navi32_soc;
+        g_nips = sizeof(navi32_soc) / sizeof(navi32_soc[0]);
+        n = build(b, sizeof(b), 2, 4);
+        n = add_table(b, n, AMD_DISC_TABLE_HARVEST_INFO, hvt, sizeof(hvt));
+        n = add_table(b, n, AMD_DISC_TABLE_VCN_INFO, vcn, sizeof(vcn));
+        n = add_table(b, n, AMD_DISC_TABLE_MALL_INFO, mall, sizeof(mall));
+        CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_OK);
+        v1 = amd_discovery_find(&d, AMD_HWID_VCN, 1);
+        CHECK(v1 && v1->revision == 1 && v1->vcn_config == 0x80);
+        CHECK(amd_discovery_soc_config(b, n, &d, 0x747E, 0xC8, &sc) == AMD_DISC_OK);
+        CHECK(sc.num_vcn_inst == 2 && sc.vcn_config[0] == 0 && sc.vcn_config[1] == 0x80);
+        CHECK(sc.vcn_inst_mask == 0x1 && sc.jpeg_inst_mask == 0x1 && sc.vcn_harvest_config == 0x2 &&
+              sc.jpeg_harvest_config == 0x2);
+        CHECK(sc.num_sdma == 2 && sc.sdma_mask == 0x1 && sc.xcc_mask == 0x1);
+        CHECK(sc.num_umc == 3 && sc.umc_active_mask == 0x7);
+        CHECK(sc.harvest_ip_mask == AMD_DISC_HARVEST_IP_DMU && !sc.harvest_from_ip_bits);
+        /* UMC0 half (8 MiB) + UMC1 + UMC2 */
+        CHECK(sc.mall_size == (40ull << 20) && sc.m_half_use == 1);
+        CHECK(sc.vcn_codec_disable_mask[0] == 0x5 && sc.vcn_codec_disable_mask[1] == 0x2);
+        CHECK(amd_discovery_get_harvest_info(&sc, AMD_HWID_VCN, 1) == 1 &&
+              amd_discovery_get_harvest_info(&sc, AMD_HWID_VCN, 0) == 0 &&
+              amd_discovery_get_harvest_info(&sc, AMD_HWID_DMU, 0) == 1 &&
+              amd_discovery_get_harvest_info(&sc, AMD_HWID_SDMA0, 0) == 0 &&
+              amd_discovery_get_harvest_info(&sc, AMD_HWID_GC, 1) == 1 &&
+              amd_discovery_get_harvest_info(&sc, AMD_HWID_UMC, 3) == 0);
+        CHECK(amd_discovery_soc_config(NULL, n, &d, 0, 0, &sc) == AMD_DISC_E_ARGS);
+        /* the card: no harvest entries, MALL v1 16 MiB x 4 UMC = 64 MiB */
+        memset(hvt + 8, 0, sizeof(hvt) - 8);
+        memset(mall + 20, 0, 4);
+        n = build(b, sizeof(b), 2, 4);
+        n = add_table(b, n, AMD_DISC_TABLE_HARVEST_INFO, hvt, sizeof(hvt));
+        n = add_table(b, n, AMD_DISC_TABLE_MALL_INFO, mall, sizeof(mall));
+        CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_OK &&
+              amd_discovery_soc_config(b, n, &d, 0x747E, 0xC8, &sc) == AMD_DISC_OK);
+        CHECK(sc.num_umc == 4 && sc.umc_active_mask == 0xf && sc.mall_size == (64ull << 20) &&
+              sc.vcn_inst_mask == 0x3 && sc.harvest_ip_mask == 0 && sc.vcn_codec_disable_mask[0] == 0);
+        /* MALL v2: per-UMC size; an unknown version leaves it 0 */
+        w16(mall + 4, 2);
+        n = build(b, sizeof(b), 2, 4);
+        n = add_table(b, n, AMD_DISC_TABLE_MALL_INFO, mall, sizeof(mall));
+        CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_OK &&
+              amd_discovery_soc_config(b, n, &d, 0x747E, 0xC8, &sc) == AMD_DISC_OK &&
+              sc.mall_size == (64ull << 20));
+        w16(mall + 4, 3);
+        n = build(b, sizeof(b), 2, 4);
+        n = add_table(b, n, AMD_DISC_TABLE_MALL_INFO, mall, sizeof(mall));
+        CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_OK &&
+              amd_discovery_soc_config(b, n, &d, 0x747E, 0xC8, &sc) == AMD_DISC_OK && sc.mall_size == 0);
+        g_ips = navi32;
+        g_nips = NIPS;
+    }
+
     /* --- mutation fuzz: must never crash or read OOB (ASan) --- */
     srand(1234);
     for (i = 0; i < 200000; i++) {
@@ -248,7 +337,10 @@ int main(void)
                 }
             }
         }
-        (void)amd_discovery_parse(b, len, &d);
+        if (amd_discovery_parse(b, len, &d) == AMD_DISC_OK) {
+            static amd_disc_soc sc;
+            (void)amd_discovery_soc_config(b, len, &d, 0x731E, 0xC6, &sc);
+        }
     }
 
     if (failures) {

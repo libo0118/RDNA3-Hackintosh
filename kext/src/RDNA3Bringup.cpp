@@ -430,6 +430,15 @@ bool RDNA3Bringup::loadFirmware(const char *name, RDNA3Firmware *out, bool optio
             snprintf(path, sizeof(path), "%s%s", kFwDirs[d], name);
             if (readFileFromDisk(path, out)) {
                 BLOG("firmware %s: %u bytes (%s)", name, out->len, path);
+                /* rdna3amdgpu=1: amdgpu_ucode_request -> amdgpu_ucode_validate,
+                 * the header's size_bytes must be the file's size */
+                if (fAmdgpuExact && amd_ucode_validate((const uint8_t *)out->data, out->len) != AMD_FW_OK) {
+                    BLOG("firmware %s: \"%s\" failed to validate", name, path);
+                    IOFree(out->data, out->len);
+                    out->data = nullptr;
+                    out->len = 0;
+                    return false;
+                }
                 return true;
             }
         }
@@ -537,7 +546,7 @@ void RDNA3Bringup::resetIfPspStuck()
 bool RDNA3Bringup::postIfNeeded()
 {
     static const uint32_t kScratchBytes = 20u * 1024u;   /* amdgpu's minimum FB scratch */
-    uint32_t want = 1, *scratch = nullptr;
+    uint32_t want = 1, *scratch = nullptr, scratchBytes = kScratchBytes;
     rdna3_atom *atom = nullptr;
     rdna3_psp *bl = nullptr;
     int ret, need;
@@ -547,19 +556,28 @@ bool RDNA3Bringup::postIfNeeded()
     if (!fRom)
         fRom = (uint8_t *)IOMalloc(RD_VBIOS_MAX_LEN);
     atom = (rdna3_atom *)IOMalloc(sizeof(*atom));
-    scratch = (uint32_t *)IOMalloc(kScratchBytes);
     bl = (rdna3_psp *)IOMalloc(sizeof(*bl));
-    if (!fRom || !atom || !scratch || !bl) {
+    if (!fRom || !atom || !bl) {
         BLOG("post: no memory");
         ok = false;
         goto out;
     }
-    bzero(scratch, kScratchBytes);
     bzero(bl, sizeof(*bl));
     bl->d = fDev;
     ret = vbios_read(fDev, &fVbios, fRom, RD_VBIOS_MAX_LEN);
+    /* rdna3amdgpu=1: amdgpu_atomfirmware_allocate_fb_scratch sizes the
+     * interpreter's FB scratch from vram_usagebyfirmware */
+    if (ret == RDNA3_OK && fAmdgpuExact)
+        scratchBytes = vbios_atom_scratch_bytes(&fVbios);
+    scratch = (uint32_t *)IOMalloc(scratchBytes);
+    if (!scratch) {
+        BLOG("post: no memory");
+        ok = false;
+        goto out;
+    }
+    bzero(scratch, scratchBytes);
     if (ret == RDNA3_OK)
-        ret = atom_init(atom, fDev, &fVbios, scratch, kScratchBytes);
+        ret = atom_init(atom, fDev, &fVbios, scratch, scratchBytes);
     if (ret != RDNA3_OK) {
         /* no VBIOS: amdgpu fails here only when the GPU needs posting */
         BLOG("post: no VBIOS/ATOM context (%d), assuming posted", ret);
@@ -587,7 +605,7 @@ bool RDNA3Bringup::postIfNeeded()
     }
 out:
     if (bl) IOFree(bl, sizeof(*bl));
-    if (scratch) IOFree(scratch, kScratchBytes);
+    if (scratch) IOFree(scratch, scratchBytes);
     if (atom) IOFree(atom, sizeof(*atom));
     return ok;
 }
@@ -660,6 +678,31 @@ void RDNA3Bringup::run()
     rdna3_vram_alloc_init(fDev, lo, hi);
 
     /* firmware */
+    if (fAmdgpuExact) {
+        /* amdgpu_ucode_ip_version_decode: the file names amdgpu would ask
+         * for from the discovered IP versions, against the fixed set */
+        static const struct { int block, hwip; } names[] = {
+            { AMD_UCODE_BLOCK_GC, HWIP_GC },   { AMD_UCODE_BLOCK_SDMA, HWIP_SDMA0 }, { AMD_UCODE_BLOCK_MP0, HWIP_MP0 },
+            { AMD_UCODE_BLOCK_MP1, HWIP_MP1 }, { AMD_UCODE_BLOCK_VCN, HWIP_VCN },
+        };
+        const char *files[5] = { amd_navi32_fw_names[AMD_BLOB_PFP], amd_navi32_fw_names[AMD_BLOB_SDMA],
+                                 amd_navi32_sos_name, amd_navi32_fw_names[AMD_BLOB_SMC],
+                                 amd_navi32_fw_names[AMD_BLOB_VCN] };
+        uint32_t bad = 0;
+        for (unsigned i = 0; i < 5; i++) {
+            const rdna3_ipver *v = &fDev->ipver[names[i].hwip];
+            char pre[32];
+            int n;
+            if (!v->present)
+                continue;
+            n = amd_ucode_ip_version_decode(names[i].block, v->major, v->minor, v->rev, pre, sizeof(pre));
+            if (n <= 0 || strncmp(files[i], pre, (size_t)n) != 0 || (files[i][n] != '_' && files[i][n] != '.')) {
+                BLOG("firmware: amdgpu would load %s* for this IP, the bundle has %s", pre, files[i]);
+                bad |= 1u << i;
+            }
+        }
+        publish("RDNA3,FirmwareNameMismatch", bad);
+    }
     if (!loadFirmware(amd_navi32_sos_name, &fSos)) {
         publishString("RDNA3,Stage2", "failed: no PSP firmware");
         return;
@@ -1532,6 +1575,45 @@ void RDNA3Bringup::pmInit()
             vi.version = vs.version;
             fOwner->drmSetVbios(fVbios.data, fVbios.len, &vi);
             BLOG("VBIOS %s, P/N %s, version %s, %s", vs.name, vs.pn, vs.ver_str, vs.date);
+        }
+        if (fAmdgpuExact) {
+            /* amdgpu_device_init: amdgpu_atomfirmware_get_clock_info
+             * (soc21_get_xclk = the spll reference), gmc_v11_0_sw_init:
+             * amdgpu_atomfirmware_get_vram_info (the module BIOS scratch 4
+             * names), amdgpu_ttm_reserve_tmr / psp_ras_initialize: the
+             * memory-training and dynamic-boot-config capabilities */
+            rdna3_vbios_clocks ck;
+            rdna3_vbios_vram vr;
+            rdna3_vbios_boot bt;
+            uint32_t xclk = 0, module = 0;
+            int cr = vbios_clock_info(&fVbios, &ck);
+            if (cr == RDNA3_OK) {
+                xclk = ck.spll_ref * 10;
+                publish("RDNA3,XclkKHz", xclk);
+            } else {
+                BLOG("VBIOS: amdgpu_atomfirmware_get_clock_info failed (%d)", cr);
+            }
+            if (vbios_bootup_values(fDev, &fVbios, &bt) == RDNA3_OK) {
+                const uint8_t *fwi = vbios_data_table(&fVbios, RD_ATOM_DT_FIRMWAREINFO, nullptr, nullptr, nullptr);
+                uint32_t scr = fwi ? (uint32_t)fwi[0x18] | ((uint32_t)fwi[0x19] << 8) |
+                                     ((uint32_t)fwi[0x1a] << 16) | ((uint32_t)fwi[0x1b] << 24) : 0;
+                if (scr)
+                    module = (rdna3_rreg(fDev, scr + 4) & 0x00ff0000) >> 16;
+                if (vbios_mem_training_supported(bt.firmware_capability))
+                    BLOG("VBIOS: two-stage memory training requested (cap 0x%x): not done by this driver",
+                         bt.firmware_capability);
+                if (vbios_dynamic_boot_config_supported(bt.firmware_capability))
+                    BLOG("VBIOS: dynamic boot config (GECC) present (cap 0x%x): no RAS here",
+                         bt.firmware_capability);
+            }
+            if (vbios_vram_info(&fVbios, module, &vr) == RDNA3_OK && vr.type) {
+                publish("RDNA3,VRAMType", vr.type);
+                publish("RDNA3,VRAMWidth", vr.width);
+                publish("RDNA3,VRAMVendor", vr.vendor);
+            } else {
+                vr.type = vr.width = 0;
+            }
+            fOwner->drmSetAsicInfo(xclk, vr.type, vr.width, 0);
         }
     } else {
         BLOG("PM: VBIOS not readable (%d), going on with the PMFW's BoardTable", ret);

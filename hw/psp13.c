@@ -523,6 +523,9 @@ int psp13_load_ip_fw(rdna3_psp *psp, const amd_ucode *u, uint64_t mc)
     release_psp_cmd_buf(psp);
     RLOG(psp->d, "PSP: LOAD_IP_FW %-22s %6u bytes -> %s (status 0x%x)", u->name, u->size,
          ret ? "FAILED" : "ok", psp->last_resp_status);
+    /* psp_cmd_submit_buf's warning names the ucode as amdgpu_ucode_name does */
+    if (ret)
+        RERR(psp->d, "PSP: failed to load ucode %s(0x%X)", amd_ucode_name(u->ucode_id), u->ucode_id);
     return ret;
 }
 

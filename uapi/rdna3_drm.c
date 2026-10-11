@@ -120,7 +120,7 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
         di->gl1c_cache_size = gc->gl1c_size_per_instance * gc->gl1c_per_sa;
         di->gl2c_cache_size = gc->gl2c_per_gpu;
     }
-    di->mall_size = 64ull << 20;                 /* 64 MiB Infinity Cache; TODO MALL table */
+    di->mall_size = 64ull << 20;                 /* 64 MiB Infinity Cache (rdna3amdgpu=1: the MALL table) */
     di->pcie_gen = 4;
     di->pcie_num_lanes = 16;
 
@@ -179,6 +179,20 @@ void rdna3_drm_device_set_tcc_disabled(rdna3_drm_device *dev, uint64_t mask)
 {
     /* amdgpu_info_ioctl: dev_info->tcc_disabled_mask = adev->gfx.config.tcc_disabled_mask */
     dev->dev_info.tcc_disabled_mask = mask;
+}
+
+void rdna3_drm_device_set_asic_info(rdna3_drm_device *dev, uint32_t gpu_counter_freq_khz,
+                                    uint32_t vram_type, uint32_t vram_bit_width, uint64_t mall_size)
+{
+    struct drm_amdgpu_info_device *di = &dev->dev_info;
+    if (gpu_counter_freq_khz)
+        di->gpu_counter_freq = gpu_counter_freq_khz;
+    if (vram_type)
+        di->vram_type = vram_type;
+    if (vram_bit_width)
+        di->vram_bit_width = vram_bit_width;
+    if (mall_size)
+        di->mall_size = mall_size;
 }
 
 void rdna3_drm_device_set_userq(rdna3_drm_device *dev, uint32_t ip_mask, uint64_t doorbell_size)

@@ -241,6 +241,142 @@ uint64_t vbios_fw_reserved_fb_size(const rdna3_vbios *v)
     return (uint64_t)rd32(t + 84) << 10;
 }
 
+#define ATOM_VRAM_OPERATION_FLAGS_MASK  0xC0000000u
+#define ATOM_VRAM_OPERATION_FLAGS_SHIFT 30
+#define ATOM_VRAM_BLOCK_SRIOV_MSG_SHARE_RESERVATION 0x2u
+
+uint32_t vbios_atom_scratch_bytes(const rdna3_vbios *v)
+{
+    uint16_t sz;
+    uint8_t frev = 0, crev = 0;
+    const uint8_t *t = vbios_data_table(v, RD_ATOM_DT_VRAM_USAGEBYFIRMWARE, &sz, &frev, &crev);
+    uint32_t usage = 0;
+
+    if (t && frev == 2 && crev == 1 && sz >= 12) {
+        /* amdgpu_atomfirmware_allocate_fb_v2_1 */
+        uint32_t start = rd32(t + 4);
+        if ((start & ATOM_VRAM_OPERATION_FLAGS_MASK) !=
+            ATOM_VRAM_BLOCK_SRIOV_MSG_SHARE_RESERVATION << ATOM_VRAM_OPERATION_FLAGS_SHIFT)
+            usage = (uint32_t)rd16(t + 10) << 10;   /* used_by_driver_in_kb */
+    }
+    /* v2.2 (amdgpu_atomfirmware_allocate_fb_v2_2): reservations only for
+     * SR-IOV, the scratch keeps the default */
+    if (!usage)
+        usage = 20 * 1024;
+    return usage;
+}
+
+int vbios_clock_info(const rdna3_vbios *v, rdna3_vbios_clocks *c)
+{
+    uint16_t sz;
+    uint8_t frev, crev;
+    const uint8_t *t;
+    int ret = RDNA3_EINVAL;
+
+    c->default_sclk = c->default_mclk = c->spll_ref = c->mpll_ref = 0;
+    t = vbios_data_table(v, RD_ATOM_DT_FIRMWAREINFO, &sz, &frev, &crev);
+    if (t && sz >= 16) {
+        /* firmware_info v31.bootup_sclk_in10khz / bootup_mclk_in10khz */
+        c->default_sclk = rd32(t + 8);
+        c->default_mclk = rd32(t + 12);
+        ret = RDNA3_OK;
+    }
+    t = vbios_data_table(v, RD_ATOM_DT_SMU_INFO, &sz, &frev, &crev);
+    if (t && sz >= 20) {
+        /* core_refclk_10khz: offset 16 in smu_info v3_1 and v4_0 */
+        if (frev == 3 || frev == 4)
+            c->spll_ref = rd32(t + 16);
+        ret = RDNA3_OK;
+    }
+    t = vbios_data_table(v, RD_ATOM_DT_UMC_INFO, &sz, &frev, &crev);
+    if (t && sz >= 32) {
+        c->mpll_ref = rd32(t + 28);   /* umc_info v31.mem_refclk_10khz */
+        ret = RDNA3_OK;
+    }
+    /* asic_type >= CHIP_NAVI10: the RLC reference clock from gfx_info -
+     * golden_tsc_count_lower_refclk (v3.0, v2.6) or rlc_gpu_timer_refclk
+     * (v2.2+), both at offset 40; amdgpu BUG()s on older revisions */
+    t = vbios_data_table(v, RD_ATOM_DT_GFX_INFO, &sz, &frev, &crev);
+    if (t && sz >= 44) {
+        if (frev == 3 || (frev == 2 && crev >= 2)) {
+            c->spll_ref = rd32(t + 40);
+            ret = RDNA3_OK;
+        } else {
+            return RDNA3_EINVAL;
+        }
+    }
+    return ret;
+}
+
+/* convert_atom_mem_type_to_vram_type, dGPU half */
+static uint32_t atom_vram_type(uint8_t t)
+{
+    switch (t) {
+    case 0x50:                         /* ATOM_DGPU_VRAM_TYPE_GDDR5 */
+        return RD_VRAM_TYPE_GDDR5;
+    case 0x60: case 0x61: case 0x80:   /* HBM2, HBM2E, HBM3 */
+        return RD_VRAM_TYPE_HBM;
+    case 0x70:                         /* GDDR6 */
+        return RD_VRAM_TYPE_GDDR6;
+    default:
+        return RD_VRAM_TYPE_UNKNOWN;
+    }
+}
+
+int vbios_vram_info(const rdna3_vbios *v, uint32_t module_id, rdna3_vbios_vram *out)
+{
+    uint16_t sz;
+    uint8_t frev = 0, crev = 0;
+    const uint8_t *t = vbios_data_table(v, RD_ATOM_DT_VRAM_INFO, &sz, &frev, &crev);
+    const uint8_t *m, *end;
+    /* atom_vram_module_v9 / v10 / v11: vram_module_size, memory_type,
+     * channel_num, channel_width, vender_rev_id */
+    uint32_t o_size, o_type, o_num, o_width, o_vendor, i, num;
+
+    out->type = out->width = out->vendor = 0;
+    if (!t)
+        return RDNA3_OK;   /* amdgpu returns 0 with nothing filled in */
+    end = t + sz;
+    if (frev == 3) {
+        if (crev != 0 || sz < 64 + 4)
+            return RDNA3_EINVAL;
+        /* atom_vram_info_header_v3_0: memory_type 24, channel_num 25,
+         * vram_module[0] at 64 (dram_vendor_id at +3) */
+        out->vendor = t[64 + 3] & 0xF;
+        out->type = atom_vram_type(t[24]);
+        out->width = (uint32_t)t[25] * 16;
+        return RDNA3_OK;
+    }
+    if (frev != 2 || sz < 24)
+        return RDNA3_EINVAL;
+    switch (crev) {
+    case 3: case 6:   /* v2.3 / v2.6: atom_vram_module_v9 */
+    case 4:           /* v2.4: atom_vram_module_v10 (same leading layout) */
+        o_size = 20; o_type = 23; o_num = 24; o_width = 25; o_vendor = 28;
+        break;
+    case 5:           /* v2.5: atom_vram_module_v11 */
+        o_size = 10; o_type = 13; o_num = 14; o_width = 15; o_vendor = 26;
+        break;
+    default:
+        return RDNA3_EINVAL;
+    }
+    num = t[20];   /* vram_module_num */
+    if (module_id > num)
+        module_id = 0;
+    m = t + 24;
+    for (i = 0; i < module_id; i++) {
+        if (m + o_size + 2 > end || rd16(m + o_size) == 0)
+            return RDNA3_EINVAL;
+        m += rd16(m + o_size);
+    }
+    if (m + o_vendor + 1 > end)
+        return RDNA3_EINVAL;
+    out->type = atom_vram_type(m[o_type]);
+    out->width = (uint32_t)m[o_num] * (1u << (m[o_width] & 31));
+    out->vendor = m[o_vendor] & 0xF;
+    return RDNA3_OK;
+}
+
 /* ---- display object table: bios_parser2 get_bios_object / get_*_record ---- */
 
 #define ATOM_RECORD_END     0xFF

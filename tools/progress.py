@@ -142,6 +142,13 @@ ITEM_STEPS = [
                 r"|ring_emit_reg_write_reg_wait|ring_emit_vm_flush|ring_emit_wreg|ring_get_rptr|ring_get_wptr"
                 r"|ring_init_cond_exec|ring_pad_ib|ring_test_ib|vm_copy_pte|vm_set_pte_pde|vm_write_pte"
                 r"|is_idle|wait_for_idle)"), ["amdgpu"]),
+    # Discovery / VBIOS with rdna3amdgpu=1: VBIOS clocks / VRAM / scratch,
+    # firmware validation and names, the harvest / MALL / VCN tables
+    (re.compile(r"amdgpu_atomfirmware_(allocate_fb_scratch|allocate_fb_v2_1|allocate_fb_v2_2|get_clock_info"
+                r"|get_vram_info|dynamic_boot_config_supported|mem_training_supported)"
+                r"|convert_atom_mem_type_to_vram_type|amdgpu_ucode_(validate|request|ip_version_decode|hdr_version|name)"
+                r"|amdgpu_discovery_(harvest_ip|read_from_harvest_table|read_harvest_bit_per_ip|harvest_config_quirk"
+                r"|get_harvest_info|get_mall_info|get_vcn_info)"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

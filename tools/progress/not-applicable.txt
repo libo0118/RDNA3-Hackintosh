@@ -115,3 +115,11 @@ DRM_AMDGPU_GEM_LIST_HANDLES  CRIU checkpoint / restore (Linux)
 sdma_v6_0_(rlc_resume|set_clockgating_state|set_powergating_state|process_illegal_inst_irq)  empty in amdgpu v6.12 (each only returns 0)
 sdma_v6_0_load_microcode  SDMA firmware written by the driver through SDMA0_BROADCAST_UCODE_*: sdma_v6_0_start calls it only with load_type DIRECT; the PSP loads it on this card
 sdma_v6_0_ring_preempt_ib  ring->funcs->preempt_ib runs only from the GFX9 software ring muxer (amdgpu_ring_mux.c) and the amdgpu_preempt_ib debugfs file
+amdgpu_atom_asic_init  the legacy ATOM ASIC_Init call: amdgpu_device_asic_init takes amdgpu_atomfirmware_asic_init for GC >= 11.0.0 (ported in hw/atom.c)
+amdgpu_atom_destroy|amdgpu_discovery_fini|amdgpu_ucode_free_bo  kfree of the ATOM context and the discovery copy (with its sysfs tree), amdgpu_bo_free_kernel of the firmware buffer: the bring-up frees its own structures in stopAndFree
+amdgpu_atomfirmware_get_gfx_info  called only by gfx_v9_0_gpu_early_init (GC 9.x); GC 11 takes these values from the discovery GC table (amdgpu_discovery_get_gfx_info)
+amdgpu_discovery_init_soc_config  aqua_vanjaram_init_soc_config for GC 9.4.3 / 9.4.4 only
+amdgpu_discovery_set_(common|display|gc|gmc|ih|mes|mm|psp|sdma|smu)_ip_blocks|amdgpu_discovery_set_ip_blocks  Linux IP-block function-table wiring by IP version (amdgpu_device_ip_block_add): the bring-up drives the one ASIC in a fixed order, each block checking its discovered version
+amdgpu_ucode_is_valid  visibility of the Linux sysfs fw_version attributes (FW_ATTR)
+amdgpu_ucode_patch_jt  MEC jump table copied by the driver: amdgpu_ucode_init_bo does it only when load_type is not PSP
+amdgpu_ucode_legacy_naming  chip-name firmware files of the Vega / Raven / Navi 1x / Navi 2x / Aldebaran IP versions; no Navi 3x IP version is in its list
