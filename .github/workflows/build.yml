@@ -209,8 +209,9 @@ jobs:
           cargo test --release --target-dir "$XLATE_TARGET" --no-fail-fast $t
       - name: leaf_memcpy_interior_field (fails as imported, not counted)
         # Upstream's own failure: with METAL2VULKAN_NO_LEAF_MEMCPY set the
-        # module still translates, so the test's control does not fire.
-        # Shown here so a change in it is seen.
+        # module is refused, but as "unresolved external shader function:
+        # llvm.memcpy..." where the test expects "OpFunctionCall". Shown
+        # here so a change in it is seen.
         continue-on-error: true
         working-directory: metal/translator/translator
         run: cargo test --release --target-dir "$XLATE_TARGET" --test leaf_memcpy_interior_field
