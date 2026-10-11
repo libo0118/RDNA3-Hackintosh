@@ -12,7 +12,7 @@ userspace/mesa/build_radv.sh build/mesa     # on a Mac with Xcode, meson, ninja,
 `build_radv.sh` pins a Mesa commit (`MESA_COMMIT`, GitHub mirror),
 applies `userspace/mesa/patches/*.patch` and builds with
 `-Dvulkan-drivers=amd -Dllvm=disabled` (ACO, no LLVM). The CI job `radv-macos`
-(Intel runner) does the same; its error summary is the port's task list.
+(self-hosted macOS runner) does the same; its error summary is the port's task list.
 
 ## Patches
 

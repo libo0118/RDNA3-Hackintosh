@@ -1,9 +1,11 @@
 name: build
 
-# CI minutes on macOS cost 10x: kext + host tests run on every push, the
-# Metal plugin and RADV only when their sources change (or on a manual run
-# with "full"), docs-only pushes run nothing, and a newer push cancels an
-# older run of the same branch.
+# Runs on the owner's self-hosted runners (labels: self-hosted + Linux /
+# macOS). Kext + host tests run on every push, the Metal plugin and RADV
+# only when their sources change (or on a manual run with "full"),
+# docs-only pushes run nothing, and a newer push cancels an older run of
+# the same branch. No pull_request trigger: fork code never reaches the
+# self-hosted machines.
 on:
   push:
     paths-ignore:
@@ -28,7 +30,7 @@ concurrency:
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux]
     outputs:
       metal: ${{ steps.f.outputs.metal }}
       radv: ${{ steps.f.outputs.radv }}
@@ -58,7 +60,7 @@ jobs:
           echo "$changed" | grep -qE '^(userspace/|third_party/libdrm/)' && echo "radv=true" >> "$GITHUB_OUTPUT" || echo "radv=false" >> "$GITHUB_OUTPUT"
 
   host-tests:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux]
     steps:
       - uses: actions/checkout@v4
       - name: Fetch Navi 32 firmware for header tests (not redistributed)
@@ -80,7 +82,7 @@ jobs:
         run: python3 tools/progress.py --check
 
   kext:
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS]
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
@@ -139,7 +141,7 @@ jobs:
   metal:
     needs: changes
     if: needs.changes.outputs.metal == 'true'
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS]
     steps:
       - uses: actions/checkout@v4
       - name: Metal plugin (RDNA3MTLDriver.bundle)
@@ -157,16 +159,21 @@ jobs:
 
   radv-macos:
     # Experimental: drives the Stage 5 port. Failures here are the to-do list.
+    # Builds x86_64 (-arch x86_64); the loopback vulkaninfo step needs an
+    # Intel Mac or an x86_64 vulkaninfo under Rosetta.
     needs: changes
     if: needs.changes.outputs.radv == 'true'
-    runs-on: macos-15-intel
+    runs-on: [self-hosted, macOS]
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Tools
         run: |
           brew install meson ninja glslang pkgconf || true
-          python3 -m pip install --break-system-packages mako pyyaml packaging || python3 -m pip install mako pyyaml packaging
+          # a venv, not the runner machine's own Python
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install mako pyyaml packaging
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - name: Build RADV against libdrm_xnu
         run: userspace/mesa/build_radv.sh build/mesa
       - name: rdna3_vktest (the VM runs it against the card from step 8)

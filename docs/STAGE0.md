@@ -84,7 +84,7 @@ and write to the author. Template:
 ## 4. Build tools
 
 * A Mac with Xcode (full Xcode, not just the CLT, so that `Kernel.framework` is in the SDK).
-* We build the kext with `make kext`; CI does the same on `macos-15`, so the artifact
+* We build the kext with `make kext`; CI does the same on the self-hosted macOS runner, so the artifact
   from GitHub Actions is also fine for testing.
 * Linux is enough for work on portable code (`common/`, tests, tools).
 

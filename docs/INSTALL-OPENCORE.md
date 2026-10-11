@@ -123,7 +123,7 @@ kexts' `Info.plist` by `package/oc_snippet.py --kexts build`; the installed
 ```
 
 **MinKernel / MaxKernel:** `24.0.0` – `24.99.99` = macOS 15 (Darwin 24).
-CI builds the kexts with the `macos-15` runner's SDK and
+CI builds the kexts with the self-hosted macOS runner's SDK and
 `-mmacosx-version-min=11.0`, but only Sequoia has run them, the
 accelerator's class layouts are per release (macOS 26 Tahoe needs the
 `make -C accel NM_TAHOE=1` build, which the package does not ship), and the
