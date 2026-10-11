@@ -99,7 +99,11 @@ exactly what to run next. One round = one report batch → one fix → one retes
 4. For every step that passed: add `<step> <date> <vm|metal>` to
    `docs/status/hw-verified.txt` and run `python3 tools/progress.py`
    (the README map turns those blocks green). A step that fails again later
-   is removed from that file.
+   is removed from that file. A big step (`big3`, `big4`) runs many steps'
+   features in one boot: judge each feature's tests in its report by that
+   step's table in §3, and every step whose checks all pass goes in on its
+   own line with the note `(big4)`. A failing feature is bisected with its
+   own step (`rdna3vm step <name>`).
 5. Notion: create a card `HW test <date>` (Etap `0 Stanowisko/CI`) with the
    PASS/FAIL list; move cards of verified parts to `🟢 Działa na sprzęcie`,
    the failing part to `🔴 Zepsute / zablokowane`.

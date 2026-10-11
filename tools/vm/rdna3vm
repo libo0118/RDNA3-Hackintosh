@@ -408,6 +408,8 @@ auto_limit() {
     case " $1 " in *" rdna3userq=1 "*) m=$((m + 1)) ;; esac
     case " $1 " in *" rdna3pmctl=2 "*) m=$((m + 3)) ;; esac
     case " $1 " in *" rdna3vcn="*) m=$((m + 1)) ;; esac
+    # BACO and the DMA/GFX tests after it (step baco, big4)
+    case " $1 " in *" rdna3baco=1 "*) m=$((m + 3)) ;; esac
     # rdna3resume=1: a system sleep, and a restart to send the results when
     # the VM's network did not come back from it
     case " $1 " in *" rdna3resume=1 "*) m=$((m + 5)) ;; esac
@@ -451,9 +453,9 @@ launch() {   # launch "rdna3 args" stay(0/1)
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug gamma default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 big4 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug gamma default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug gamma default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 big4 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug gamma default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall off)"
     launch "$a" "$stay"
 }
 
@@ -490,8 +492,9 @@ QUEUE=$WORK/queue
 # heads (extended desktop + accelerator). Run 15 (10m): both heads piped,
 # every swap refused (no head named). From now on ONE big step per round:
 # "big" = everything at once, the accelerator tries its head strategies
-# itself and logs which one worked
-PENDING_STEPS="big3"
+# itself and logs which one worked. big4 replaces big3: big3 + everything
+# else the bench can test, in one boot
+PENDING_STEPS="big4"
 
 
 cmd_queue() {

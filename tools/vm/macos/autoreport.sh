@@ -399,8 +399,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     esac
     # power management (rdna3_pmctl): what the SMU reports on every level
     # with PM; step pmctl (rdna3pmctl=1/2) sets each knob once and back;
-    # step baco (rdna3baco=1) cycles the chip through BACO, then the DMA/GFX
-    # tests again
+    # BACO (rdna3baco=1) runs near the end, after the system sleep
     if [ "${lvl:-0}" -ge 5 ] && [ -x "$D/bin/rdna3_pmctl" ]; then
         hdr "rdna3_pmctl info"
         with_limit 30 "$D/bin/rdna3_pmctl" info 2>&1
@@ -413,17 +412,6 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             hdr "rdna3_pmctl profiles"
             with_limit 30 "$D/bin/rdna3_pmctl" profiles 2>&1
             done_ $? ;;
-        esac
-        case " $args " in
-        *" rdna3baco=1 "*)
-            hdr "rdna3_pmctl baco-cycle"
-            with_limit 120 "$D/bin/rdna3_pmctl" baco-cycle 2>&1
-            done_ $?
-            if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
-                hdr "rdna3_drminfo --dma-test --gfx-test (after BACO)"
-                with_limit 60 "$D/bin/rdna3_drminfo" --dma-test --gfx-test 2>&1
-                done_ $?
-            fi ;;
         esac
     fi
     # video (steps vcn, vcn2, vcnsleep): HW_IP_INFO / VIDEO_CAPS and a job
@@ -545,6 +533,22 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 esac
             fi ;;
     esac
+    # BACO (step baco, big4): the chip off and on again through the PMFW,
+    # then the DMA/GFX tests; it resets the whole chip, so it runs after
+    # every other test but the hang test (the results so far are already up)
+    if [ "${lvl:-0}" -ge 5 ] && [ -x "$D/bin/rdna3_pmctl" ]; then
+        case " $args " in
+        *" rdna3baco=1 "*)
+            hdr "rdna3_pmctl baco-cycle"
+            with_limit 120 "$D/bin/rdna3_pmctl" baco-cycle 2>&1
+            done_ $?
+            if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
+                hdr "rdna3_drminfo --dma-test --gfx-test (after BACO)"
+                with_limit 60 "$D/bin/rdna3_drminfo" --dma-test --gfx-test 2>&1
+                done_ $?
+            fi ;;
+        esac
+    fi
     # last, it resets engines: a DMA job that never finishes, the kernel
     # must recover (rdna3hangtest=1); =2 also a GFX one, which froze the
     # whole host in the VM once (card run 19) - a step of its own

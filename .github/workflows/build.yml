@@ -162,6 +162,59 @@ jobs:
             build/metal/RDNA3MTLDriver.bundle
             build/metal/librdna3mtl_translate.dylib
 
+  translator:
+    # The Metal translator's own tests (metal/translator/translator/tests),
+    # no GPU and no Mac needed: every test file whose fixtures are imported
+    # (the ones reading ../validation/ are not). They check each module with
+    # SPIRV-Tools, built here once and kept in the runner's tool cache.
+    needs: changes
+    if: needs.changes.outputs.metal == 'true'
+    runs-on: [self-hosted, Linux]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools (rustup, cmake / ninja from PyPI, SPIRV-Tools from source)
+        run: |
+          T="$RUNNER_TOOL_CACHE/rdna3-translator"
+          mkdir -p "$T"
+          if ! command -v cargo >/dev/null && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
+          fi
+          export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+          command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
+          [ -x "$T/venv/bin/python3" ] || uv venv --python 3.12 "$T/venv"
+          uv pip install --python "$T/venv/bin/python3" --quiet cmake ninja
+          export PATH="$T/venv/bin:$PATH"
+          if [ ! -x "$T/bin/spirv-val" ]; then
+            rm -rf "$T/spirv-tools"
+            git -c advice.detachedHead=false clone -q --depth 1 --branch vulkan-sdk-1.4.321.0 \
+              https://github.com/KhronosGroup/SPIRV-Tools.git "$T/spirv-tools"
+            git -c advice.detachedHead=false clone -q --depth 1 --branch vulkan-sdk-1.4.321.0 \
+              https://github.com/KhronosGroup/SPIRV-Headers.git "$T/spirv-tools/external/spirv-headers"
+            cmake -S "$T/spirv-tools" -B "$T/spirv-tools/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF -DCMAKE_INSTALL_PREFIX="$T" >/dev/null
+            ninja -C "$T/spirv-tools/build" install >/dev/null
+          fi
+          cargo --version; "$T/bin/spirv-val" --version | head -1
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "$T/bin" >> "$GITHUB_PATH"
+          echo "XLATE_TARGET=$T/target" >> "$GITHUB_ENV"
+      - name: Translator tests
+        working-directory: metal/translator/translator
+        run: |
+          t=""
+          for f in $(grep -L 'validation/' tests/*.rs); do
+            n=$(basename "$f" .rs)
+            [ "$n" = leaf_memcpy_interior_field ] || t="$t --test $n"
+          done
+          cargo test --release --target-dir "$XLATE_TARGET" --no-fail-fast $t
+      - name: leaf_memcpy_interior_field (fails as imported, not counted)
+        # Upstream's own failure: with METAL2VULKAN_NO_LEAF_MEMCPY set the
+        # module still translates, so the test's control does not fire.
+        # Shown here so a change in it is seen.
+        continue-on-error: true
+        working-directory: metal/translator/translator
+        run: cargo test --release --target-dir "$XLATE_TARGET" --test leaf_memcpy_interior_field
+
   radv-macos:
     # Experimental: drives the Stage 5 port. Failures here are the to-do list.
     # Builds x86_64 (-arch x86_64).

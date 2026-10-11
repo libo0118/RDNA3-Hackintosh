@@ -219,16 +219,29 @@ new kexts, and the **Allow** button appears in the same place.
 rdna3vm queue pending
 ```
 
-runs the step(s) still waiting for the card - since card run 34 one big
-step, `big3`: the default profile with every new feature the card can test
-without extra hardware (amdgpu's exact sequence, user queues, PM control,
-VCN, mode set, HDMI stream / format / audio endpoint, display power); before
-it `big2`: macOS boots once and the report itself runs everything
+runs the step(s) still waiting for the card - now one big step, `big4`:
+everything left that only the card can test, in one boot, about 25 minutes.
+It is `big3` (the default profile with amdgpu's exact sequence, user
+queues, PM control, VCN, mode set, HDMI stream / format / audio endpoint,
+display power) plus the output gamma, amdgpu's display-firmware reset, DC's
+extra steps around each mode switch, monitor standby and a short system
+sleep with the video engines on, and BACO last. What needs no card (builds,
+the simulator, the UAPI and RADV on the loopback, the Metal translator's
+tests) runs in CI on the self-hosted runners instead. Watch for: both
+monitors go to standby and come back, macOS sleeps ~30 s and wakes by
+itself, and at the very end BACO turns the chip off and on: **the screens
+may stay dark after it** - every result is already on the host by then, so
+just wait for the VM to stop (or use the [emergency exit](#emergency-exit)).
+Not in it (they need hardware or hands this bench does not have): `dplink`,
+`dsc`, `mst`, `uhbr`, `odm` (native DisplayPort monitors), `subvp` (a
+120 Hz+ monitor), `hdmi20` (a 4K HDMI 2.0 monitor), `hotplug` (someone at
+the cables); run them by name when you have that hardware. Before it,
+`big2`: macOS boots once and the report itself runs everything
 (DMA/GFX/Vulkan tests - buffers, a triangle, images, timeline semaphores -,
 Metal when the plugin is installed, the idle-power experiment, three looks at what
 each monitor shows, display sleep and wake, a switch through scaled
-modes, a 2-minute soak, the hang test last), then shuts down. About 12
-minutes, nobody needs to watch the screens; both monitors connected.
+modes, a 2-minute soak, the hang test last), then shuts down (about 12
+minutes). Nobody needs to watch the screens; both monitors connected.
 While it runs, a Terminal window on the macOS desktop shows each test and
 its result (OK / FAIL), with notifications at the start and the end
 (`/Users/Shared/rdna3-progress.log`); closing it changes nothing.
