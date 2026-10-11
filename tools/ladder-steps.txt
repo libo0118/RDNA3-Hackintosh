@@ -72,6 +72,16 @@ modeset2 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 
 # modes and the switches too; the driver trains the link itself (sink
 # caps, link cap verified with fallback, 8b/10b training, MSA, unblank)
 dplink rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dplink=1
+# DSC + FEC on the DP link (hw/dcn32_dsc.c): the dplink step + rdna3dsc=1,
+# DC's policies: FEC on a FEC capable monitor, and a mode the link cannot
+# carry uncompressed offered with DSC when the monitor decodes it (DSC caps
+# in its DPCD); the PPS goes to the monitor in an SDP every frame
+dsc rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dplink=1 rdna3dsc=1
+# DP MST (hw/dp_mst.c, hw/dcn32_dp_mst.c): the dplink step + rdna3mst=1: an
+# MST hub or a daisy chain on the native DP head is taken over at the first
+# mode switch: the topology probed, every sink's EDID read, the head's
+# stream sent as one MST stream to the first sink (rdna3mstport=N: port N)
+mst rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dplink=1 rdna3mst=1
 # no rdna3 boot-arg at all: the kexts' default profile (rdna3_bootargs.h),
 # what an installed driver runs; the report tests it like big2 without the
 # power experiment, soak and hang test

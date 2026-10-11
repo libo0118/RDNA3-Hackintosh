@@ -288,6 +288,14 @@ private:
     /* rdna3dplink=1: the DP SST link per head (hw/dcn32_dp.c) for mode sets */
     struct rdna3_dp_link *fDpLink[4] = {};
     struct rdna3_dp_link *displayDpLink(uint32_t head, const struct rdna3_display_path *p);
+    /* rdna3dsc=1: FEC + DSC policies on those links. rdna3mst=1: an MST
+     * capable sink (hub, daisy chain) on such a head is taken over at the
+     * next mode set: the topology probed, its sinks' EDIDs read, the head's
+     * stream sent as one MST stream to one sink (rdna3mstport=N or the
+     * first); back to SST when that does not run (hw/dp_mst.c) */
+    struct rdna3_mst_mgr *fMstMgr[4] = {};
+    int           displayMstTakeover(uint32_t head, struct rdna3_dp_link *l, const struct rdna3_mode *cur);
+    int           displayMstRevert(uint32_t head, struct rdna3_dp_link *l, const struct rdna3_mode *cur);
     uint32_t      fFwVer[32] = {}, fFwFeat[32] = {}, fTaVer[RD_TA_TYPES] = {};
     uint8_t      *fVbiosCopy = nullptr;
     uint32_t      fVbiosCopyLen = 0;

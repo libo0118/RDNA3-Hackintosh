@@ -413,6 +413,49 @@ with `dp:`; ioreg `RDNA3,Head<n>,DPLink` sums the link up.
 | trained, `dp: DIG f -> UNIPHY b ... trained`, monitor black or "no signal" | stream side: M/N, MSA or the DP DTO (DPREFCLK) | look: `DP_DTOn_PHASE / MODULO` (phase = pixel clock in Hz, modulo = DPREFCLK in Hz), `DP_VID_M`, `DP_VID_STREAM_CNTL` status; `dp: DIG n: SYMCLK_FE_ON stays off` = the FE is not connected to the BE |
 | `modeset: the DP link failed (-5): back to ...` and the old mode trains | the new mode's link setting does not train (see above) | record the rate / lanes; the old mode back is the expected recovery |
 
+### DSC and FEC (`dsc`)
+
+`dsc` = `dplink` + `rdna3dsc=1`. On a native DP monitor that decodes DSC
+(DPCD 0x060 bit 0) a mode the link cannot carry uncompressed is offered
+and set with DSC; FEC runs on a FEC capable monitor whatever the mode.
+Lines: `dp: AUX n: FEC .., DSC .. (rev .., slices .., ...)` (the caps),
+`modeset: head n: WxH needs DSC: a x b slices, c bpp`, `dsc: DSC n: ...`
+(the engine's config), `dp: DSC n on OPP .. -> OTG .. -> DIG ..`,
+`dp: AUX n: SST_DSC: DSC enable on the RX`, `dp: UNIPHY n: FEC enabled
+(active 1)`; ioreg `RDNA3,Head<n>,DSC` (slices, bpp, FEC state: 2 =
+enabled).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no mode needs DSC (`rdna3_modetest list` has the same modes as `dplink`) | the monitor's modes all fit the trained link uncompressed, or its DPCD has no DSC (`DSC no` in the `dp: AUX n: FEC ..` line, or no such line) | expected with such a monitor: test with a mode above the link (4K 120+ Hz on HBR3, or a cable / hub that limits the link) |
+| `FEC enabled (active 0)` | the PHY did not start FEC after the training (`DP_DPHY_CNTL` FEC_ACTIVE_STATUS) | look: `DP_DPHY_CNTL`, DPCD 0x120; the training lines before it |
+| DSC mode set, `trained`, monitor black or "no signal" | the monitor did not get or accept the PPS: GSP11 off, the PPS bytes, DSC not on in the RX (DPCD 0x160) | look: `DP_SEC_CNTL` / `DP_SEC_CNTL2` / `DP_GSP11_CNTL`, `DP_DSC_CNTL`, `OPTC_DATA_FORMAT_CONTROL` DSC mode, the `dsc: DSC n:` line (slice size, bpp) |
+| DSC mode set, picture garbled or shifted | rate control / slice config the encoder and the monitor disagree on, or the DSC engine not fed by the head's OPP | the `dsc:` line and the look's `DSCC_PPS_CONFIG*`, `DSCRM_DSC_FORWARD_CONFIG` (OPP source) |
+| `dsc: DSC n power up: PGFSM status ..` | DOMAIN16+n did not ungate | look: `DOMAIN16..19_PG_STATUS`, `DC_IP_REQUEST_CNTL` |
+| `modeset: ... underflows / does not run: back to` only at DSC modes | the DLG rescale of the GOP's values at the compressed mode | as for `modeset2`: the look's DLG line; full DML for that mode |
+
+### DP MST (`mst`)
+
+`mst` = `dplink` + `rdna3mst=1`; needs an MST hub (or a daisy-chain
+monitor) on the card's native DP output with at least one monitor behind
+it. At the first mode switch on that head the driver turns MST on in the
+hub, reads the topology and every monitor's EDID over sideband messages
+(`mst:` lines, ioreg `RDNA3,Head<n>,MSTPorts` = `port:peer type:full
+PBN:name` per output port), and sends the head's stream to one monitor
+(`rdna3mstport=N` picks port N; default the first). After that switch the
+mode list is that monitor's. ioreg `RDNA3,Head<n>,MST` = port, VCPI, PBN,
+time slots, `X.Y`, ACT handled.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no `mst:` lines | the hub's DPCD has no MST cap (`MST no` in the `dp: AUX n: FEC ..` line, or no such line), the boot-arg is missing, or no mode switch ran | `RDNA3,Connector<n>,DPCD` 0x021; run `rdna3_modetest` on that head |
+| `mst: timed out msg send` / `NAK reply` / `link address NAK` | sideband: the hub did not answer DOWN_REQ, or the request was malformed (the hub NAKs with a reason) | the serial `mst:` lines in order; `takeover failed (r, n messages, n NAKs, n timeouts, n bad replies)` then `back to DP SST`: the SST picture must come back |
+| ports listed, `EDID 0 bytes` | REMOTE_I2C_READ failed for that port | the port's `pdt` (3 = SST sink; 4 = legacy converter: not handled) |
+| `mst: failed to get ACT after 3000 ms` | the hub did not apply the payload table: SAT rows vs the hub's table, or MST_EN / the link not up | `dp: MST allocate: ... VCP v, s slots`, the look's `DP_MSE_SAT0`, DPCD 0x1c0..0x1c2 / 0x2c0 |
+| ACT handled, `ALLOCATE_PAYLOAD for port n failed` | the hub refused the PBN on its downstream link | `mst: enum path resources port n: full PBN ..`: the mode needs more than that port carries; pick a smaller mode |
+| everything passes, the monitor behind the hub stays black | the VC rate or the stream inside the MST link | `dp: MST Update Payload: ... X: .. Y: ..` (X.Y = PBN / PBN per slot), the look's `DP_MSE_RATE_CNTL`, `DIG_BE_CNTL` DIG_MODE 5 |
+| `refused as MST stream (8): back to SST` | the requested mode does not fit the chosen port's PBN | expected for big modes; the SST picture comes back and the mode is set as SST |
+
 ### Idle power (`rdna3pmexp=1`)
 
 Triage prints one line per variant (10 s each): baseline, GFXOFF allowed,
