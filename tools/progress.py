@@ -123,6 +123,10 @@ ITEM_STEPS = [
                 r"|ring_emit_fence_kiq|ring_emit_pipeline_sync|ring_get_wptr_compute|ring_get_wptr_gfx"
                 r"|ring_test_ib|select_me_pipe_q|set_bad_op_fault_state|set_priv_inst_fault_state"
                 r"|set_priv_reg_fault_state|suspend|sw_init|update_spm_vmid|wait_for_idle)"), ["amdgpu"]),
+    # GMC / IH / PSP with rdna3amdgpu=1: TLB flushes through the KIQ, PASID
+    # mappings, the stolen pre-OS framebuffer, suspend before a full reset
+    (re.compile(r"amdgpu_gmc_(flush_gpu_tlb|fw_reg_write_reg_wait|get_vbios_allocations)"
+                r"|gmc_v11_0_(emit_pasid_mapping|get_vbios_fb_size|suspend)|ih_v6_0_suspend"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

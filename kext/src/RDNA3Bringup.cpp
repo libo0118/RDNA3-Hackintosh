@@ -629,6 +629,15 @@ void RDNA3Bringup::run()
      * for user BOs; GPU-only buffers top-down below the firmware's block. */
     uint64_t lo = fOwner->displayReserveEnd() > kVramKernelLowStart ? fOwner->displayReserveEnd()
                                                                      : kVramKernelLowStart;
+    if (fAmdgpuExact) {
+        /* gmc_v11_0_sw_init -> amdgpu_gmc_get_vbios_allocations: the pre-OS
+         * scanout amdgpu keeps (stolen VGA + extended) stays out as well */
+        uint64_t vga = 0, ext = 0;
+        gmc11_get_vbios_allocations(fDev, fVramSize, &vga, &ext);
+        publish("RDNA3,VRAMStolenKB", (vga + ext) >> 10);
+        if (vga + ext > lo)
+            lo = (vga + ext + 0xFFFFF) & ~0xFFFFFull;
+    }
     uint64_t hi = lo + kVramKernelLowSize;
     if (hi > fDev->vram_cpu_len) {
         publishString("RDNA3,Stage2", "failed: boot scanout leaves no room in the BAR window");
@@ -769,6 +778,10 @@ bool RDNA3Bringup::hwInit()
     ret = psp13_init(fPsp, fDev, fSos.data, fSos.len);
     if (!ret && fTa.data && psp13_set_ta(fPsp, fTa.data, fTa.len) != RDNA3_OK)
         BLOG("PSP: TA file unusable: no ASD / HDCP / DTM");
+    /* psp_hw_init -> psp_load_fw; after a reset or a wake hwInit runs this
+     * again as amdgpu_device_ip_resume -> psp_resume: psp_hw_start, the
+     * non-PSP firmware, ASD, RL and the TAs (the KM ring is allocated anew,
+     * the VRAM pool starts over) */
     if (!ret)
         ret = psp13_hw_init(fPsp, fPlan, fBlobRefs);
     publish("RDNA3,PSPResult", (uint64_t)(int64_t)ret);
@@ -860,7 +873,8 @@ bool RDNA3Bringup::hwInit()
             nbio43_doorbell_init(fDev);
         publish("RDNA3,Doorbells", fDev->doorbell_ok ? 1 : 0);
 
-        /* IH 6.0 ring 0, polled (no MSI registration yet) */
+        /* IH 6.0 ring 0, polled (no MSI registration yet): ih_v6_0_hw_init,
+         * which ih_v6_0_resume is after a reset or a wake */
         if (!fIh)
             fIh = (rdna3_ih *)IOMalloc(sizeof(*fIh));
         if (!fIh) {
@@ -2335,6 +2349,18 @@ bool RDNA3Bringup::gpuReset(bool baco)
     if (fAmdgpuExact)
         gfxSuspend();
 
+    /* amdgpu_device_ip_suspend goes on in reverse IP order (rdna3amdgpu=1):
+     * psp_suspend, ih_v6_0_suspend (= ih_v6_0_hw_fini), gmc_v11_0_suspend
+     * (= gmc_v11_0_hw_fini) */
+    if (fAmdgpuExact) {
+        if (fPsp && fPsp->ring_created)
+            psp13_suspend(fPsp);
+        if (fIh && fIh->enabled && fDev)
+            ih60_disable(fDev, fIh);
+        if (fGmc && fDev)
+            gmc11_hw_fini(fDev);
+    }
+
     /* soc21_asic_mode1_reset: no bus mastering across the reset */
     fPci->setBusMasterEnable(false);
     if (baco) {
@@ -2384,6 +2410,9 @@ bool RDNA3Bringup::gpuReset(bool baco)
     fOwner->drmHeldHere(false);
     fReinit = false;
     fResetCount++;
+    /* gmc_v11_0_resume = gmc_v11_0_hw_init (in hwInit) + amdgpu_vmid_reset_all:
+     * no VMID keeps its PASID mapping */
+    memset(fVmidPasid, 0, sizeof(fVmidPasid));
     if (fIntr)
         fIntr->enable();
     BLOG("%s #%llu %s", baco ? "BACO cycle" : "GPU reset",
@@ -2539,6 +2568,22 @@ void RDNA3Bringup::gfxSuspend()
 
 void RDNA3Bringup::vmFlush(uint32_t vmid)
 {
+    /* rdna3amdgpu=1: amdgpu_gmc_flush_gpu_tlb -> gmc_v11_0_flush_gpu_tlb for
+     * the GFXHUB, then the MMHUB: with the KIQ running the invalidation goes
+     * through it (amdgpu_gmc_fw_reg_write_reg_wait, "necessary ... for
+     * GFXOFF to function properly under bare metal"); MMIO before that */
+    if (fAmdgpuExact && fDev && fKiq && fKiq->rb.ready) {
+        rdna3_vm_flush_regs f;
+        if (fGmc && fGmc->gfxhub_enabled) {   /* adev->gfx.is_poweron */
+            rdna3_hdp_flush(fDev);
+            gfxhub303_flush_regs(fDev, vmid, 17, &f);
+            gfx11_kiq_reg_write_reg_wait(fDev, fKiq, f.req, f.ack, f.req_val, 1u << vmid);
+        }
+        rdna3_hdp_flush(fDev);
+        mmhub302_flush_regs(fDev, vmid, 17, &f);
+        gfx11_kiq_reg_write_reg_wait(fDev, fKiq, f.req, f.ack, f.req_val, 1u << vmid);
+        return;
+    }
     mmhub302_flush_tlb(fDev, vmid, 0);
     if (fGmc && fGmc->gfxhub_enabled)
         gfxhub303_flush_tlb(fDev, vmid, 0);
@@ -2876,6 +2921,12 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
     x.csa_va = job->csa_va;
     x.gds_va = job->gds_va;
     x.init_shadow = job->init_shadow ? 1 : 0;
+    /* rdna3amdgpu=1: amdgpu_vm_flush's pasid_mapping_needed (the VMID's IH
+     * LUT entry holds another PASID) */
+    if (fAmdgpuExact && v->vmid < 16 && v->pasid && fVmidPasid[v->vmid] != v->pasid) {
+        x.pasid_mapping = 1;
+        x.pasid = v->pasid;
+    }
     if (ip == AMDGPU_HW_IP_DMA && fSdma && fSdma->ready) {
         for (uint32_t i = 0; i < n; i++)
             sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);
@@ -2902,6 +2953,8 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
                                          &x);
         if (!s)
             return -RD_EBUSY;
+        if (x.pasid_mapping)
+            fVmidPasid[v->vmid] = x.pasid;
         memcpy(fGds[v->vmid], want, sizeof(want));
         fGdsKnown[v->vmid] = true;
         v->gfxFlush = false;
@@ -2922,6 +2975,8 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
                                                  g, n, &x);
         if (!s)
             return -RD_EBUSY;
+        if (x.pasid_mapping)
+            fVmidPasid[v->vmid] = x.pasid;
         memcpy(fGds[v->vmid], want, sizeof(want));
         fGdsKnown[v->vmid] = true;
         v->compFlush = false;

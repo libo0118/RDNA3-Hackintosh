@@ -98,6 +98,20 @@ typedef struct rdna3_vm_flush_regs {
     uint32_t req_val;        /* get_invalidate_req(vmid, 0) */
 } rdna3_vm_flush_regs;
 void gfxhub303_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o);
+/* the same for the MMHUB (mmhub_v3_0: vm_inv_eng0_req / ack, get_invalidate_req) */
+void mmhub302_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o);
+/* gmc_v11_0_emit_pasid_mapping: the register a ring writes the job's PASID
+ * to, IH_VMID_0_LUT + vmid on the GFXHUB, IH_VMID_0_LUT_MM + vmid on the
+ * MMHUB (the IH fills an IV's PASID from it) */
+uint32_t gmc11_pasid_mapping_reg(rdna3_dev *d, uint32_t vmid, int mmhub);
+/* gmc_v11_0_get_vbios_fb_size: the pre-OS scanout (AMDGPU_VBIOS_VGA_ALLOCATION
+ * in VGA mode, else HUBP0's viewport height x pitch x 4) */
+#define RD_VBIOS_VGA_ALLOCATION (9u * 1024 * 1024)
+uint32_t gmc11_get_vbios_fb_size(rdna3_dev *d);
+/* amdgpu_gmc_get_vbios_allocations (display hardware, no VF): the stolen
+ * VGA and extended sizes amdgpu reserves at the bottom of VRAM */
+void gmc11_get_vbios_allocations(rdna3_dev *d, uint64_t real_vram_size, uint64_t *stolen_vga,
+                                 uint64_t *stolen_extended);
 /* program VMID n's page directory base (gfxhub_v3_0_3_setup_vm_pt_regs) */
 void gfxhub303_setup_vm_pt_regs(rdna3_dev *d, uint32_t vmid, uint64_t pd_addr);
 

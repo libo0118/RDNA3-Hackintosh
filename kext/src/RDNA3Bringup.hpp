@@ -211,6 +211,9 @@ private:
      * drm_sched_fault: a ring whose job faulted (bit AMDGPU_HW_IP_GFX /
      * _COMPUTE) is recovered by the next fence wait right away */
     rdna3_gfx_topo   fGfxTopo = {};
+    /* rdna3amdgpu=1: the PASID each GFXHUB VMID's IH LUT entry holds
+     * (amdgpu_vmid id->pasid); 0 = none / unknown */
+    uint32_t         fVmidPasid[16] = {};
     volatile uint32_t fSchedFault = 0;
     uint64_t         fCpFaults = 0;
     uint64_t         fIbTestBuf = UINT64_MAX;

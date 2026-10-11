@@ -210,6 +210,10 @@ typedef struct rdna3_gfx_job_ext {
      * init_shadow): used only on a ring with cp_gfx_shadow */
     uint64_t shadow_va, csa_va, gds_va;
     int      init_shadow;
+    /* amdgpu_vm_flush's pasid_mapping_needed (rdna3amdgpu=1): write the
+     * job's PASID to the VMID's IH LUT entry after the VM flush */
+    int      pasid_mapping;
+    uint32_t pasid;
 } rdna3_gfx_job_ext;
 uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint32_t vmid,
                              uint64_t pd_addr, const rdna3_gfx_ib *ibs, uint32_t n,
@@ -533,6 +537,12 @@ int  gfx11_handle_priv_fault(const rdna3_iv *iv, const rdna3_gfx_ring *gfx,
  * writes 0xDEADBEEF over 0xCAFEDEAD in the ring's writeback test slot;
  * waits for the fence. RDNA3_OK, RDNA3_ETIME, RDNA3_EINVAL */
 int  gfx11_ring_test_ib(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ib);
+/* amdgpu_gmc_fw_reg_write_reg_wait through the KIQ (no MES scheduler):
+ * reg_write_reg_wait and a polled gfx_v11_0_ring_emit_fence_kiq fence,
+ * waited MAX_KIQ_REG_WAIT (5 ms) and retried MAX_KIQ_REG_TRY (1000) times
+ * 5 ms apart. gmc_v11_0_flush_gpu_tlb uses it once the KIQ runs */
+int  gfx11_kiq_reg_write_reg_wait(rdna3_dev *d, rdna3_mec_ring *kiq, uint32_t reg0, uint32_t reg1,
+                                  uint32_t ref, uint32_t mask);
 
 #ifdef __cplusplus
 }

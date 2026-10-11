@@ -4627,6 +4627,57 @@ static void test_gfx_amdgpu(rdna3_dev *dev, rdna3_gfx_ring *gr, rdna3_mec_ring *
     S.gfx_mutex_fw = 0;
     CHECK(gfx11_soft_reset(dev, gr, kiq, kcq) == RDNA3_OK && gr->ready && kcq->rb.ready);
     kcq->high_prio = 0;
+
+    /* gmc_v11_0_flush_gpu_tlb through the KIQ (amdgpu_gmc_fw_reg_write_reg_wait):
+     * the GFXHUB and MMHUB engine 17 requests come from the KIQ ring, its
+     * polled fence lands */
+    {
+        rdna3_vm_flush_regs f;
+        uint32_t t0 = S.tlb_flushes, m0 = S.mm_tlb_flushes, kseq = kiq->rb.fence_seq;
+        kiq->rb.amdgpu_pad = 1;
+        gfxhub303_flush_regs(dev, 5, 17, &f);
+        CHECK(gfx11_kiq_reg_write_reg_wait(dev, kiq, f.req, f.ack, f.req_val, 1u << 5) == RDNA3_OK);
+        mmhub302_flush_regs(dev, 5, 17, &f);
+        CHECK(f.req == MM_BASE0 + regMMVM_INVALIDATE_ENG0_REQ + 17 * (regMMVM_INVALIDATE_ENG1_REQ - regMMVM_INVALIDATE_ENG0_REQ) &&
+              (f.req_val & 0xffff) == (1u << 5));
+        CHECK(gfx11_kiq_reg_write_reg_wait(dev, kiq, f.req, f.ack, f.req_val, 1u << 5) == RDNA3_OK);
+        CHECK(S.tlb_flushes == t0 + 1 && S.mm_tlb_flushes == m0 + 1 && kiq->rb.fence_seq == kseq + 2 &&
+              S.cp_bad == 0 && S.cp_wait_stuck == 0 && (kiq->rb.wptr & 0xff) == 0);
+        kiq->rb.amdgpu_pad = 0;
+    }
+    /* amdgpu_vm_flush's PASID mapping: IH_VMID_5_LUT gets the job's PASID */
+    {
+        rdna3_gfx_job_ext x;
+        memset(&x, 0, sizeof(x));
+        x.pasid_mapping = 1;
+        x.pasid = 0x8007;
+        S.reg[OSS_BASE0 + 5] = 0;
+        seq = gfx11_submit_compute_job_ex(dev, kcq, 0x7a, 5, pd, &job, 1, &x);
+        CHECK(seq && gfx11_wait_fence(dev, &kcq->rb, seq) == RDNA3_OK && S.reg[OSS_BASE0 + 5] == 0x8007);
+        x.pasid = 0x8008;
+        seq = gfx11_submit_job_ex(dev, gr, 0x7b, 5, 0, &job, 1, &x);
+        CHECK(seq && gfx11_wait_fence(dev, gr, seq) == RDNA3_OK && S.reg[OSS_BASE0 + 5] == 0x8008);
+        CHECK(gmc11_pasid_mapping_reg(dev, 3, 1) == OSS_BASE0 + 0x10 + 3 && S.cp_bad == 0);
+    }
+    /* gmc_v11_0_get_vbios_fb_size / amdgpu_gmc_get_vbios_allocations */
+    {
+        uint32_t vga = rdna3_reg_offset(dev, HWIP_DCE, 0, 1, 0x000c);
+        uint32_t vp = rdna3_reg_offset(dev, HWIP_DCE, 0, 2, 0x05ea), pi = rdna3_reg_offset(dev, HWIP_DCE, 0, 2, 0x0607);
+        uint32_t s0 = S.reg[vga], s1 = S.reg[vp], s2 = S.reg[pi];
+        uint64_t sv, se;
+        S.reg[vga] = 0;
+        S.reg[vp] = (1440u << 16) | 2560u;
+        S.reg[pi] = 2560;
+        CHECK(gmc11_get_vbios_fb_size(dev) == 1440u * 2560u * 4u);
+        gmc11_get_vbios_allocations(dev, 16ull << 30, &sv, &se);
+        CHECK(sv == RD_VBIOS_VGA_ALLOCATION && se == 1440ull * 2560 * 4 - RD_VBIOS_VGA_ALLOCATION);
+        gmc11_get_vbios_allocations(dev, 20ull << 20, &sv, &se);   /* leaves < 8 MiB */
+        CHECK(sv == 0 && se == 0);
+        S.reg[vga] = 1;   /* D1VGA_MODE_ENABLE */
+        gmc11_get_vbios_allocations(dev, 16ull << 30, &sv, &se);
+        CHECK(sv == RD_VBIOS_VGA_ALLOCATION && se == 0);
+        S.reg[vga] = s0; S.reg[vp] = s1; S.reg[pi] = s2;
+    }
     gr->amdgpu_pad = kcq->rb.amdgpu_pad = 0;
     dev->amdgpu_exact = 0;
 }

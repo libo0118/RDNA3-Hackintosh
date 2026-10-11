@@ -40,6 +40,10 @@
 
 /* ------------------------------ layout ------------------------------ */
 
+/* gmc_v11_0_mc_init's GART part (amdgpu_gart_size -1: 512 MiB) and
+ * gmc_v11_0_vram_gtt_location; the VRAM size (nbio get_memsize) and the BAR
+ * (aper_base / visible size) come from the OS layer; then gmc_v11_0_gart_init's
+ * table */
 int gmc11_init(rdna3_dev *d, rdna3_gmc *g, uint64_t gart_size)
 {
     uint64_t max_mc = RD_GMC_HOLE_START - 1;   /* min(mc_mask, HOLE_START - 1) */
@@ -494,4 +498,58 @@ int gmc11_allocate_vm_inv_eng(const uint32_t *ring_hub, const int *ring_is_mes, 
         engs[hub] &= ~(1u << e);
     }
     return RDNA3_OK;
+}
+
+/* ------------------- rdna3amdgpu=1: PASID LUT, stolen VRAM ------------------- */
+
+/* osssys_6_0_0_offset.h */
+#define regIH_VMID_0_LUT_OSS      0x0000
+#define regIH_VMID_0_LUT_MM_OSS   0x0010
+
+/* Ported from gmc_v11_0_emit_pasid_mapping (the register; the ring's
+ * emit_wreg writes it). MES queues are skipped there: the MES firmware
+ * manages IH_VMID_x_LUT for them */
+uint32_t gmc11_pasid_mapping_reg(rdna3_dev *d, uint32_t vmid, int mmhub)
+{
+    return rdna3_reg_offset(d, HWIP_OSSSYS, 0, 0, mmhub ? regIH_VMID_0_LUT_MM_OSS : regIH_VMID_0_LUT_OSS) +
+           vmid;
+}
+
+/* dcn_3_2_0_offset.h / _sh_mask.h */
+#define regD1VGA_CONTROL_DCN                     0x000c
+#define regD1VGA_CONTROL_DCN_BASE_IDX            1
+#define D1VGA_CONTROL__D1VGA_MODE_ENABLE_MASK_   0x00000001u
+#define regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_  0x05ea   /* BASE_IDX 2 */
+#define regHUBPREQ0_DCSURF_SURFACE_PITCH_        0x0607   /* BASE_IDX 2 */
+
+/* Ported from gmc_v11_0_get_vbios_fb_size */
+uint32_t gmc11_get_vbios_fb_size(rdna3_dev *d)
+{
+    uint32_t d1vga_control = rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, regD1VGA_CONTROL_DCN_BASE_IDX,
+                                                            regD1VGA_CONTROL_DCN));
+    uint32_t viewport, pitch;
+    if (d1vga_control & D1VGA_CONTROL__D1VGA_MODE_ENABLE_MASK_)
+        return RD_VBIOS_VGA_ALLOCATION;
+    viewport = rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, 2, regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION_));
+    pitch = rdna3_rreg(d, rdna3_reg_offset(d, HWIP_DCE, 0, 2, regHUBPREQ0_DCSURF_SURFACE_PITCH_));
+    /* PRI_VIEWPORT_HEIGHT (29:16) x PITCH (13:0) x 4 */
+    return ((viewport & 0x3FFF0000u) >> 16) * (pitch & 0x00003FFFu) * 4;
+}
+
+/* Ported from amdgpu_gmc_get_vbios_allocations for Navi 32 (not VEGA10 /
+ * RAVEN / RENOIR: keep_stolen_vga_memory false; display hardware; no VF) */
+void gmc11_get_vbios_allocations(rdna3_dev *d, uint64_t real_vram_size, uint64_t *stolen_vga,
+                                 uint64_t *stolen_extended)
+{
+    uint64_t size = gmc11_get_vbios_fb_size(d);
+    /* set to 0 if the pre-OS buffer uses up most of vram */
+    if (real_vram_size < size || real_vram_size - size < 8ull * 1024 * 1024)
+        size = 0;
+    if (size > RD_VBIOS_VGA_ALLOCATION) {
+        *stolen_vga = RD_VBIOS_VGA_ALLOCATION;
+        *stolen_extended = size - RD_VBIOS_VGA_ALLOCATION;
+    } else {
+        *stolen_vga = size;
+        *stolen_extended = 0;
+    }
 }

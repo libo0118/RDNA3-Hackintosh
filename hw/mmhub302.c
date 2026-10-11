@@ -252,16 +252,10 @@ void mmhub302_set_fault_enable_default(rdna3_dev *d, int value)
     WMM(d, regMMVM_L2_PROTECTION_FAULT_CNTL, tmp);
 }
 
-/* gmc_v11_0_flush_gpu_tlb() for AMDGPU_MMHUB0, MMIO path (before KIQ/MES):
- * semaphore acquire, request, ack, semaphore release, then the MMHUB
- * private invalidation through L2_BANK_SELECT_RESERVED_CID2 bit 25. */
-int mmhub302_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
+/* mmhub_v3_0_get_invalidate_req */
+static uint32_t mm_invalidate_req(uint32_t vmid, uint32_t flush_type)
 {
-    const uint32_t eng = 17;
-    uint32_t req = 0, i, tmp = 0;
-    int ok = 0;
-
-    /* mmhub_v3_0_get_invalidate_req */
+    uint32_t req = 0;
     req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG0_REQ, PER_VMID_INVALIDATE_REQ, 1u << vmid);
     req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG0_REQ, FLUSH_TYPE, flush_type);
     req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG0_REQ, INVALIDATE_L2_PTES, 1);
@@ -270,6 +264,30 @@ int mmhub302_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
     req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG0_REQ, INVALIDATE_L2_PDE2, 1);
     req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG0_REQ, INVALIDATE_L1_PTES, 1);
     req = REG_SET_FIELD(req, MMVM_INVALIDATE_ENG0_REQ, CLEAR_PROTECTION_FAULT_STATUS_ADDR, 0);
+    return req;
+}
+
+void mmhub302_flush_regs(rdna3_dev *d, uint32_t vmid, uint32_t eng, rdna3_vm_flush_regs *o)
+{
+    o->pt_lo = rdna3_reg_offset(d, HWIP_MMHUB, 0, regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32_BASE_IDX,
+                                regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32) + CTX_ADDR_DISTANCE * vmid;
+    o->pt_hi = rdna3_reg_offset(d, HWIP_MMHUB, 0, regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32_BASE_IDX,
+                                regMMVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32) + CTX_ADDR_DISTANCE * vmid;
+    o->req = rdna3_reg_offset(d, HWIP_MMHUB, 0, regMMVM_INVALIDATE_ENG0_REQ_BASE_IDX,
+                              regMMVM_INVALIDATE_ENG0_REQ) + ENG_DISTANCE * eng;
+    o->ack = rdna3_reg_offset(d, HWIP_MMHUB, 0, regMMVM_INVALIDATE_ENG0_ACK_BASE_IDX,
+                              regMMVM_INVALIDATE_ENG0_ACK) + ENG_DISTANCE * eng;
+    o->req_val = mm_invalidate_req(vmid, 0);
+}
+
+/* gmc_v11_0_flush_gpu_tlb() for AMDGPU_MMHUB0, MMIO path (before KIQ/MES):
+ * semaphore acquire, request, ack, semaphore release, then the MMHUB
+ * private invalidation through L2_BANK_SELECT_RESERVED_CID2 bit 25. */
+int mmhub302_flush_tlb(rdna3_dev *d, uint32_t vmid, uint32_t flush_type)
+{
+    const uint32_t eng = 17;
+    uint32_t req = mm_invalidate_req(vmid, flush_type), i, tmp = 0;
+    int ok = 0;
 
     rdna3_hdp_flush(d);
 

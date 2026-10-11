@@ -754,7 +754,7 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
         return 0;
     if (r->cp_gfx_shadow)
         ndw += 2 * (22 + 5);   /* SET_Q_PREEMPTION_MODE + COND_EXEC, twice */
-    ndw += 7;                  /* pipeline sync */
+    ndw += 7 + 5;              /* pipeline sync, PASID mapping */
     if (ring_wait_space(d, r, ndw))
         return 0;
     /* rdna3amdgpu=1: amdgpu_vm_need_pipeline_sync (a VMID job that flushes
@@ -763,6 +763,9 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
         gfx11_emit_pipeline_sync(d, r);
     if (pd_addr)
         gfx11_emit_vm_flush(d, r, vmid, pd_addr);
+    /* amdgpu_gmc_emit_pasid_mapping -> gmc_v11_0_emit_pasid_mapping */
+    if (x && x->pasid_mapping)
+        gfx11_emit_wreg(d, r, gmc11_pasid_mapping_reg(d, vmid, 0), x->pasid);
     if (x && x->gds_switch)
         gfx11_emit_gds_switch(d, r, vmid, x->gds_base, x->gds_size, x->gws_base, x->gws_size,
                               x->oa_base, x->oa_size);
@@ -2085,7 +2088,7 @@ uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t
     rdna3_gfx_ring *r = &kcq->rb;
     /* vm flush 5+5+7, gds switch 20, mem sync 8, hdp 7, user fence 8,
      * fence 8, 4 per IB */
-    uint32_t i, seq, ndw = 17 + 20 + 8 + 7 + 8 + 8 + 4 * n + 7;
+    uint32_t i, seq, ndw = 17 + 20 + 8 + 7 + 8 + 8 + 4 * n + 7 + 5;
     if (!r->ready || !n || n > RD_GFX_MAX_IBS || vmid > 15)
         return 0;
     if (ring_wait_space(d, r, ndw))
@@ -2094,6 +2097,8 @@ uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t
         gfx11_emit_pipeline_sync(d, r);   /* amdgpu_vm_need_pipeline_sync */
     if (pd_addr)
         gfx11_emit_vm_flush(d, r, vmid, pd_addr);
+    if (x && x->pasid_mapping)   /* gmc_v11_0_emit_pasid_mapping */
+        gfx11_emit_wreg(d, r, gmc11_pasid_mapping_reg(d, vmid, 0), x->pasid);
     if (x && x->gds_switch)
         gfx11_emit_gds_switch(d, r, vmid, x->gds_base, x->gds_size, x->gws_base, x->gws_size,
                               x->oa_base, x->oa_size);
@@ -3028,8 +3033,8 @@ int gfx11_handle_priv_fault(const rdna3_iv *iv, const rdna3_gfx_ring *gfx,
     return 1;
 }
 
-/* Ported from gfx_v11_0_ring_test_ib (amdgpu_device_wb_get slot: the
- * ring's writeback page; amdgpu_ib_get: 'ib' in VRAM, run in VMID 0) */
+/* Ported from gfx_v11_0_ring_test_ib (the writeback slot is in the ring's
+ * writeback page, the IB the caller's VRAM buffer, run in VMID 0) */
 int gfx11_ring_test_ib(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ib)
 {
     uint64_t gpu_addr;
@@ -3064,4 +3069,45 @@ int gfx11_ring_test_ib(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ib)
         return RDNA3_OK;
     RERR(d, "GFX: IB test: 0x%08x instead of 0xDEADBEEF", v);
     return RDNA3_EINVAL;
+}
+
+/* amdgpu_fence_wait_polling on a KIQ fence for 'usec' */
+static int kiq_fence_wait(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq, uint32_t usec)
+{
+    uint32_t i;
+    for (i = 0; i < usec; i++) {
+        if ((int32_t)(wb_read32(d, r, RD_GFX_WB_FENCE) - seq) >= 0)
+            return 1;
+        d->os.udelay(d->os.ctx, 1);
+    }
+    return 0;
+}
+
+/* Ported from amdgpu_gmc_fw_reg_write_reg_wait (KIQ path) */
+int gfx11_kiq_reg_write_reg_wait(rdna3_dev *d, rdna3_mec_ring *kiq, uint32_t reg0, uint32_t reg1,
+                                 uint32_t ref, uint32_t mask)
+{
+    rdna3_gfx_ring *r = &kiq->rb;
+    uint32_t seq, cnt = 0;
+    int ok;
+
+    if (!r->ready)
+        return RDNA3_ENODEV;
+    if (ring_wait_space(d, r, 32))   /* amdgpu_ring_alloc(ring, 32) */
+        goto failed_kiq;
+    gfx11_emit_reg_write_reg_wait(d, r, reg0, reg1, ref, mask);
+    /* amdgpu_fence_emit_polling(ring, &seq, MAX_KIQ_REG_WAIT) */
+    seq = ++r->fence_seq;
+    gfx11_emit_fence_kiq(d, r, rdna3_vram_mc(d, r->wb + RD_GFX_WB_FENCE), seq, 0);
+    gfx11_commit(d, r);
+    ok = kiq_fence_wait(d, r, seq, 5000);
+    while (!ok && cnt++ < 1000) {
+        d->os.msleep(d->os.ctx, 5);   /* MAX_KIQ_REG_BAILOUT_INTERVAL */
+        ok = kiq_fence_wait(d, r, seq, 5000);
+    }
+    if (ok)
+        return RDNA3_OK;
+failed_kiq:
+    RERR(d, "GMC: failed to write reg %x wait reg %x", reg0, reg1);
+    return RDNA3_ETIME;
 }
