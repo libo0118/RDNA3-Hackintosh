@@ -16,6 +16,9 @@
 #include "gen/dcn_3_2_0_color.h"
 #include "dcn32_hdmi.h"
 #include "gen/dcn_3_2_0_hdmi.h"
+#include "dcn32_hwseq.h"
+#include "gen/dcn_3_2_0_hwseq.h"
+
 
 #define ODMR_K(reg, n) (DCN_B2 + reg + (regODM1_OPTC_INPUT_CLOCK_CONTROL - regODM0_OPTC_INPUT_CLOCK_CONTROL) * (n))
 #define SK_FRAME_US 16667u    /* the modelled OTGs run at 60 Hz */
@@ -905,9 +908,22 @@ static void test_dc_hdmi(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc2, rdna3_d
     up.h_sync_pos = up.v_sync_pos = 1;
     hc.flags = RD_HDMI_STREAM;
     CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, &hc, 594000, &up, NULL, &ms) == RD_MODESET_OK);
+    /* with rdna3dcseq: apply_symclk_on_tx_off_wa (the running 594 MHz
+     * again after TX DISABLE, DISABLE again once the OTG stopped), then the
+     * DIO FIFO resync (DENTIST WDIVIDER = RDIVIDER) */
+    ms.dc_seq = 1;
+    S.dmub.nseq = 0;
+    S.reg[DCN_B1 + regDENTIST_DISPCLK_CNTL] = 0x18u | 0x1au << 8;
     CHECK(dcn32_modeset_apply(dev, dm, dc2, sc, &ms, FB_START, 2560, FB_START + 0x8000000, 3840, 50) == RDNA3_OK &&
           dc2->head[0].width == 2560 && S.scdc[0x20] == 1 &&
           !(S.reg[DIGK(regDIG0_HDMI_CONTROL, fe)] & DIG0_HDMI_CONTROL__HDMI_CLOCK_CHANNEL_RATE_MASK));
+    CHECK(S.dmub.nseq == 6 && S.dmub.seq[0] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL &&
+          S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE && S.dmub.seq[1] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK &&
+          S.dmub.seq[2] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && S.dmub.seq_tx_action[2] == RD_ATOM_TX_DISABLE &&
+          S.dmub.seq[3] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.seq[4] == RD_DMUB_VBIOS_DIGX_ENCODER_CONTROL &&
+          S.dmub.seq[5] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && S.dmub.seq_tx_action[5] == RD_ATOM_TX_ENABLE);
+    CHECK((S.reg[DCN_B1 + regDENTIST_DISPCLK_CNTL] & DENTIST_DISPCLK_CNTL__DENTIST_DISPCLK_WDIVIDER_MASK) == 0x1a);
+    S.reg[DCN_B1 + regDENTIST_DISPCLK_CNTL] = 0;
     dcn32_enc_stop_hdmi_info_packets(dev, fe);
     dcn32_enc_reset_hdmi_stream_attribute(dev, fe);
     CHECK(S.reg[DIGK(regDIG0_HDMI_GENERIC_PACKET_CONTROL0, fe)] == 0 &&
@@ -1009,8 +1025,80 @@ static void test_dc_dp(rdna3_dev *dev, rdna3_dmub *dm)
     S.reg[DCN_B2 + regDSCRM0_DSCRM_DSC_FORWARD_CONFIG + 1] = v;
 }
 
+/* ---- dcn32_hwseq.c ---- */
+static void test_dc_hwseq(rdna3_dev *dev)
+{
+    rdna3_mode m;
+    rdna3_dc_clocks a, b;
+    uint32_t k1, k2, i, save[10];
+    static const uint32_t pg[8] = { regDOMAIN0_PG_CONFIG, regDOMAIN1_PG_CONFIG, regDOMAIN2_PG_CONFIG, regDOMAIN3_PG_CONFIG,
+                                    regDOMAIN16_PG_CONFIG, regDOMAIN17_PG_CONFIG, regDOMAIN18_PG_CONFIG, regDOMAIN19_PG_CONFIG };
+
+    /* dcn32_calculate_dccg_k1_k2_values */
+    CHECK(edid_dmt(1920, 1080, 60, &m) == 0);
+    dcn32_calculate_dccg_k1_k2_values(RD_K12_SIGNAL_TMDS, &m, 0, 0, 1, &k1, &k2);
+    CHECK(k1 == RD_PIXEL_RATE_DIV_BY_1 && k2 == RD_PIXEL_RATE_DIV_BY_4);
+    dcn32_calculate_dccg_k1_k2_values(RD_K12_SIGNAL_TMDS, &m, 1, 0, 1, &k1, &k2);
+    CHECK(k2 == RD_PIXEL_RATE_DIV_BY_2);
+    /* DP: the DIG pixel rate div policy for an even h timing */
+    CHECK(dcn32_is_dp_dig_pixel_rate_div_policy(RD_K12_SIGNAL_DP, &m) &&
+          !dcn32_is_dp_dig_pixel_rate_div_policy(RD_K12_SIGNAL_TMDS, &m));
+    dcn32_calculate_dccg_k1_k2_values(RD_K12_SIGNAL_DP, &m, 0, 0, 1, &k1, &k2);
+    CHECK(k1 == RD_PIXEL_RATE_DIV_BY_1 && k2 == RD_PIXEL_RATE_DIV_BY_2);
+    m.h_sync = 45;
+    dcn32_calculate_dccg_k1_k2_values(RD_K12_SIGNAL_DP, &m, 0, 0, 1, &k1, &k2);
+    CHECK(k2 == RD_PIXEL_RATE_DIV_BY_4 && !dcn32_is_dp_dig_pixel_rate_div_policy(RD_K12_SIGNAL_DP, &m));
+    CHECK(dcn32_calculate_dccg_k1_k2_values(RD_K12_SIGNAL_DP, &m, 0, 0, 2, &k1, &k2) == 2 && k2 == RD_PIXEL_RATE_DIV_BY_2);
+    dcn32_calculate_dccg_k1_k2_values(RD_K12_SIGNAL_DP, &m, 0, 1, 1, &k1, &k2);
+    CHECK(k2 == RD_PIXEL_RATE_DIV_BY_2);
+    dcn32_calculate_dccg_k1_k2_values(RD_K12_SIGNAL_DP_128B_132B, &m, 0, 0, 1, &k1, &k2);
+    CHECK(k1 == RD_PIXEL_RATE_DIV_BY_1 && k2 == RD_PIXEL_RATE_DIV_BY_1);
+
+    /* dcn32_get_dispclk_from_dentist, dccg32_trigger_dio_fifo_resync */
+    save[0] = S.reg[DCN_B1 + regDENTIST_DISPCLK_CNTL];
+    S.reg[DCN_B1 + regDENTIST_DISPCLK_CNTL] = 0x18;          /* divider 6.0 */
+    CHECK(dcn32_get_dispclk_from_dentist(dev, 4300000) == 4u * 4300000 / 24);
+    CHECK(dcn32_dccg_trigger_dio_fifo_resync(dev) == 0 && S.reg[DCN_B1 + regDENTIST_DISPCLK_CNTL] == 0x18);
+    S.reg[DCN_B1 + regDENTIST_DISPCLK_CNTL] = 0x18 | 0x20u << 8;
+    CHECK(dcn32_resync_fifo_dccg_dio(dev) == 0x20 && S.reg[DCN_B1 + regDENTIST_DISPCLK_CNTL] == (0x20 | 0x20u << 8));
+    S.reg[DCN_B1 + regDENTIST_DISPCLK_CNTL] = save[0];
+
+    /* dcn32_enable_power_gating_plane inside an IP request */
+    for (i = 0; i < 8; i++) {
+        save[i] = S.reg[DCN_B2 + pg[i]];
+        S.reg[DCN_B2 + pg[i]] = DOMAIN0_PG_CONFIG__DOMAIN_POWER_FORCEON_MASK | DOMAIN0_PG_CONFIG__DOMAIN_POWER_GATE_MASK;
+    }
+    save[8] = S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL];
+    S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL] = 0;
+    dcn32_enable_power_gating_plane(dev, 1);
+    for (i = 0; i < 8; i++)
+        CHECK(S.reg[DCN_B2 + pg[i]] == DOMAIN0_PG_CONFIG__DOMAIN_POWER_GATE_MASK);
+    CHECK(S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL] == 0);
+    dcn32_enable_power_gating_plane(dev, 0);
+    for (i = 0; i < 8; i++) {
+        CHECK(S.reg[DCN_B2 + pg[i]] & DOMAIN0_PG_CONFIG__DOMAIN_POWER_FORCEON_MASK);
+        S.reg[DCN_B2 + pg[i]] = save[i];
+    }
+    S.reg[DCN_B2 + regDC_IP_REQUEST_CNTL] = save[8];
+
+    /* hubp32_init */
+    save[9] = S.reg[DCN_B2 + regHUBP1_HUBPREQ_DEBUG_DB];
+    dcn32_hubp_init(dev, 1);
+    CHECK(S.reg[DCN_B2 + regHUBP1_HUBPREQ_DEBUG_DB] == 0x100);
+    S.reg[DCN_B2 + regHUBP1_HUBPREQ_DEBUG_DB] = save[9];
+
+    /* dcn32_are_clock_states_equal */
+    memset(&a, 0, sizeof(a));
+    a.dispclk_khz = 716000; a.dppclk_khz = 358000; a.p_state_change_support = 1;
+    b = a;
+    CHECK(dcn32_are_clock_states_equal(&a, &b));
+    b.fclk_p_state_change_support = 1;
+    CHECK(!dcn32_are_clock_states_equal(&a, &b));
+}
+
 static void test_dc_k(rdna3_dev *dev, rdna3_dmub *dm)
 {
+    test_dc_hwseq(dev);
     test_dc_dp(dev, dm);
     test_dc_color(dev);
 

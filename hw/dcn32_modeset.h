@@ -117,6 +117,13 @@ typedef struct rdna3_dcn_modeset {
      * the new and the running timing as modes (the AVI infoframe) */
     rdna3_hdmi_cfg hdmi;
     rdna3_mode tmds_cur, tmds_want;
+    /* rdna3dcseq (the caller sets it after the plan): DC's sequence around
+     * the switch as dcn32_hwseq has it: apply_symclk_on_tx_off_wa on an
+     * HDMI head (the pixel clock again after TransmitterControl DISABLE
+     * while the OTG still runs, DISABLE again once it stopped:
+     * dcn20_reset_back_end_for_pipe), and dcn32_resync_fifo_dccg_dio after
+     * the stream is up */
+    int      dc_seq;
 } rdna3_dcn_modeset;
 
 /* why a mode is refused for a mode set (0 = can try) */

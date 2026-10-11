@@ -541,7 +541,21 @@ functions to these steps).
 | hdmi20: "no signal" at 4K60, old mode back | scrambling not matched by the sink (`scrambler 0x00`), or the PHY PLL at 594 MHz | SCDC values in the log; `HDMICHARCLK` / PHY registers in the look; retry with a certified cable |
 | audio device appears but silent | not ported yet: the AFMT / azalia audio path is still off (only the audio info frame line is set) | expected |
 
+### DC's sequence extras (`dcseq`)
+
+`dcseq` = `modeset2` + `rdna3dcseq=1`. Pass: the switches of
+`rdna3_modetest cycle` as in `modeset2` (pictures, no underflow, back to
+native) with `modeset: head n: DIO FIFO resync (DISPCLK divider 0x..)`
+after each. Then mark `dcseq` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| HDMI head: `SYMCLK on with TX off (... kHz) failed` | the VBIOS SetPixelClock refused the running clock with the transmitter off | the DMUB lines; the switch still goes on (DC ignores it too); report the value |
+| picture shifts / flickers once right after a switch, then settles | the DIO FIFO resync with a divider the DENTIST was still ramping to | `DENTIST_DISPCLK_CNTL` in the look (WDIVIDER = RDIVIDER?); compare without the boot-arg |
+| `modeset: ... does not run` only with the boot-arg | the second TransmitterControl DISABLE after the OTG stopped left the PHY off for the new timing | the DMUB sequence in the log (DISABLE, PIXCLK, DISABLE, PIXCLK, ENCODER, ENABLE expected) |
+
 ### DP MST (`mst`)
+
 
 
 

@@ -1331,6 +1331,10 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
         r = dcn32_modeset_plan_dp(fDispDev, fDcn, m->head, p, dpl, cur, want, displayClkLimits(), ms);
     }
     bool dpHead = r == RD_MODESET_OK && ms->dp;
+    /* rdna3dcseq=1 (step dcseq): DC's SYMCLK work-around on HDMI and the DIO
+     * FIFO resync after the switch (hw/dcn32_hwseq.c) */
+    if (r == RD_MODESET_OK)
+        ms->dc_seq = rd3_arg("rdna3dcseq", 0) ? 1 : 0;
     if (r == RD_MODESET_OK)
         r = dcn32_modeset_apply(fDispDev, dm, fDcn, fScale, ms, fDispDev->fb_start + m->vramOffset, m->pitch / 4,
                                 fDispDev->fb_start + m->oldVramOffset, m->oldPitch / 4, 200);

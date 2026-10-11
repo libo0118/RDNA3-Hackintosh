@@ -116,6 +116,10 @@ ITEM_STEPS = [
                 r"|dcn10_link_encoder_validate_(output_with_stream|dvi_output|hdmi_output|dp_output)"
                 r"|get_tmds_output_pixel_clock_100hz|dm_helpers_parse_edid_caps|apply_edid_quirks|edid_extract_panel_id"),
      ["hdmi"]),
+    # DC's sequence extras around a mode switch (rdna3dcseq=1, step dcseq)
+    (re.compile(r"apply_symclk_on_tx_off_wa|dcn32_resync_fifo_dccg_dio|dccg32_trigger_dio_fifo_resync"), ["dcseq"]),
+    # the hard-min status wait with DC's delay accounting (the DISPCLK raise of step modeset2)
+    (re.compile(r"dcn32_smu_(send_msg_with_param_delay|wait_for_response_delay|get_hard_min_status)"), ["modeset2"]),
     # ported and checked in the simulator, but no ladder step drives them
     # yet (nothing in the kext calls them): they stay "ported"
     (re.compile(r"optc1_(setup_vertical_interrupt[12]|validate_timing|is_two_pixels_per_container"
@@ -127,7 +131,9 @@ ITEM_STEPS = [
                 r"|dmub_dcn32_(get_gpint_dataout|send_inbox0_cmd|clear_inbox0_ack_register|read_inbox0_ack_register"
                 r"|get_current_time)"
                 r"|dmub_srv_(send_gpint_command|get_gpint_response|get_gpint_dataout|send_inbox0_cmd"
-                r"|clear_inbox0_ack|wait_for_inbox0_ack|set_power_state|get_fw_boot_status)"), ["none"]),
+                r"|clear_inbox0_ack|wait_for_inbox0_ack|set_power_state|get_fw_boot_status)"
+                r"|dcn32_(calculate_dccg_k1_k2_values|is_dp_dig_pixel_rate_div_policy|enable_power_gating_plane"
+                r"|are_clock_states_equal|get_dispclk_from_dentist)|hubp32_init|is_h_timing_divisible_by_2"), ["none"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

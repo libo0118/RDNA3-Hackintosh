@@ -111,3 +111,7 @@ optc3_program_blank_color  OTG_BLANK_DATA_COLOR does not exist on DCN 3.2.0 (not
 optc32_wait_odm_doublebuffer_pending_clear  waits on OTG_H_TIMING_DIV_MODE_DB_UPDATE_PENDING, a field DCN 3.2.0's OTG_DOUBLE_BUFFER_CONTROL does not have (mask 0: the wait returns at once)
 dmub_dcn32_set_outbox0_rptr  set_outbox0_rptr has no caller in Linux v6.12 (the driver keeps the trace ring's read pointer itself)
 link_disable_hpd|dcn10_link_encoder_disable_hpd  reached only through dc_link_disable_hpd, which amdgpu calls from debugfs alone (amdgpu_dm_debugfs.c trigger_hotplug); the driver never turns an HPD pin off
+dcn32_check_native_scaling  only feeds dcn32_auto_dpm_test_log, the debug log behind dc->config.enable_auto_dpm_test_logs
+dcn32_set_hard_min_memclk|dcn32_set_hard_max_memclk|dcn32_get_memclk_states_from_smu|dcn32_set_max_memclk|dcn32_set_min_memclk  clk_mgr hooks reached only from dc_lock_memory_clock_frequency, dc_unlock_memory_clock_frequency and dc_enable_dcmode_clk_limit, which no Linux v6.12 code calls
+dp_check_dpcd_reqeust_status  aborts link training only for USB4 DPIA endpoints (DISPLAY_ENDPOINT_USB4_DPIA); DCN 3.2.0 has no DPIA
+start_clock_recovery_pattern_early  runs only with dc->work_arounds.lt_early_cr_pattern, which Linux v6.12 never sets (not in dcn32_resource.c, dc.c or amdgpu_dm)
