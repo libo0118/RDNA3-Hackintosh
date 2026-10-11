@@ -133,7 +133,7 @@ nbio_v4_3_mc_access_enable  nbio funcs->mc_access_enable has no caller among the
 # v6.12: dcn32_resource.c, dcn32_tg_funcs, dcn32_str_enc_funcs,
 # dcn32_link_enc_funcs, dcn32_mpc_funcs, dmub_srv_hw_setup's DCN32 case)
 dmub_srv_dcn32_regs_init|dmub_srv_hw_setup  DMUB service register-offset and function tables per ASIC: the port calls the DCN 3.2 functions with the generated register offsets
-dcn(10|30|32)_timing_generator_init|vpg3_construct|dsc2_construct|dal_hw_hpd_init  Linux Display Core object constructors
+dcn(10|30|32)_timing_generator_init|vpg3_construct|dsc2_construct|dal_hw_hpd_init|hubbub32_construct  Linux Display Core object constructors
 dmub_srv_send_reg_inbox0_cmd|dmub_srv_is_hw_pwr_up|dmub_srv_wait_for_hw_pwr_up|dmub_srv_should_detect  DMCUB hooks of DCN 3.5 (IPS power-up, register inbox0, detection request): dmub_srv_hw_setup sets none of them for DCN 3.2
 dmub_srv_get_fw_boot_option  DCN 3.2 has no get_fw_boot_option hook (dmub_srv_hw_setup): the answer is always 0
 dmub_dcn32_configure_dmub_in_system_memory  DMCUB windows in system memory: amdgpu_dm never sets fw_in_system_memory, every window is in VRAM
@@ -154,7 +154,7 @@ dc_dsc_policy_set_max_target_bpp_limit|dc_dsc_policy_set_disable_dsc_stream_over
 dsc2_validate_stream  dsc_validate_stream has no caller in Linux v6.12
 mpc3_mpc_init|mpc3_set_mpc_mem_lp_mode|mpc3_get_gamut_remap|read_gamut_remap  DCN 3.0 MPC functions outside dcn32_mpc_funcs (DCN 3.2 has mpc32_mpc_init, no gamut remap read-back)
 mpc3_init_mpcc  initialises DC's software MPCC tree object (no register access)
-hubbub3_(program_watermarks|init_watermarks|force_wm_propagate_to_pipes)|convert_and_clamp  DCN 3.0 watermark functions: hubbub32_funcs uses the hubbub32 versions
+hubbub3_(program_watermarks|init_watermarks|force_wm_propagate_to_pipes)  DCN 3.0 watermark functions: hubbub32_funcs uses the hubbub32 versions
 hubbub3_(dcc_support_swizzle|get_dcc_compression_cap)|hubbub3_det_request_size|hubbub3_get_blk256_size  DCC scanout capability queries for Linux DRM format modifiers: the macOS framebuffer scans out linear surfaces without DCC
 dccg32_otg_(add|drop)_pixel  the divider-127 pixel add/drop of dcn32_update_clocks_update_dentist skips encoders without get_fifo_cal_average_level, which DCN 3.2's DIO stream encoder lacks
 write_i2c|write_i2c_retimer_setting|write_i2c_default_retimer_setting|write_i2c_redriver_setting|get_ext_hdmi_settings  external HDMI retimer / redriver settings from the VBIOS integrated system info table, which only APUs carry
@@ -175,7 +175,7 @@ optc32_wait_odm_doublebuffer_pending_clear  waits on OTG_H_TIMING_DIV_MODE_DB_UP
 dmub_dcn32_set_outbox0_rptr  set_outbox0_rptr has no caller in Linux v6.12 (the driver keeps the trace ring's read pointer itself)
 link_disable_hpd|dcn10_link_encoder_disable_hpd  reached only through dc_link_disable_hpd, which amdgpu calls from debugfs alone (amdgpu_dm_debugfs.c trigger_hotplug); the driver never turns an HPD pin off
 dcn32_check_native_scaling  only feeds dcn32_auto_dpm_test_log, the debug log behind dc->config.enable_auto_dpm_test_logs
-dcn32_set_hard_min_memclk|dcn32_set_hard_max_memclk|dcn32_get_memclk_states_from_smu|dcn32_set_max_memclk|dcn32_set_min_memclk  clk_mgr hooks reached only from dc_lock_memory_clock_frequency, dc_unlock_memory_clock_frequency and dc_enable_dcmode_clk_limit, which no Linux v6.12 code calls
+dcn32_set_hard_min_memclk|dcn32_set_max_memclk|dcn32_set_min_memclk  clk_mgr hooks reached only from dc_lock_memory_clock_frequency, dc_unlock_memory_clock_frequency and dc_enable_dcmode_clk_limit, which no Linux v6.12 code calls (dcn32_set_hard_max_memclk and dcn32_get_memclk_states_from_smu are dcn32_init_hw's)
 dp_check_dpcd_reqeust_status  aborts link training only for USB4 DPIA endpoints (DISPLAY_ENDPOINT_USB4_DPIA); DCN 3.2.0 has no DPIA
 start_clock_recovery_pattern_early  runs only with dc->work_arounds.lt_early_cr_pattern, which Linux v6.12 never sets (not in dcn32_resource.c, dc.c or amdgpu_dm)
 enc1_se_(audio_setup|setup_hdmi_audio|setup_dp_audio|audio_mute_control|dp_audio_setup|dp_audio_enable|hdmi_audio_setup)  DCN 1.0 stream encoder audio: dcn32_str_enc_funcs uses enc3_se_* / enc3_audio_mute_control (AFMT3), only enc1_se_dp_audio_disable / enc1_se_hdmi_audio_disable stay shared
@@ -190,3 +190,4 @@ dccg31_set_physymclk  dccg32_funcs hook reached only from dccg31_init's root_clo
 dcn3[12]_hpo_dp_link_enc_is_in_alt_mode  USB-C DP alt mode: the card has no USB-C port
 intersect_cable_id  merges the DPRX cable id with the USB-C cable id (get_usbc_cable_id, DP_IS_USB_C links only): the card has no USB-C port
 cm3_helper_translate_curve_to_degamma_hw_format  no caller in Linux v6.12
+dccg32_set_valid_pixel_rate  the DCCG hook set_valid_pixel_rate has no caller in Linux v6.12 (declared in dccg.h, set in dcn32_dccg.c, called nowhere)

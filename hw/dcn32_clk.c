@@ -148,6 +148,10 @@ int dcn32_smu_set_hard_min(rdna3_dev *d, uint32_t ppclk, uint32_t mhz, uint32_t 
         check |= RD_CHECK_HARD_MIN_CLK_DPPCLK;
     else if (ppclk == RD_PPCLK_DCFCLK)
         check |= RD_CHECK_HARD_MIN_CLK_DCFCLK;
+    else if (ppclk == RD_PPCLK_DTBCLK)
+        check |= RD_CHECK_HARD_MIN_CLK_DTBCLK;
+    else if (ppclk == 2 /* PPCLK_UCLK */)
+        check |= RD_CHECK_HARD_MIN_CLK_UCLK;
     else
         return RDNA3_OK;
     for (;;) {

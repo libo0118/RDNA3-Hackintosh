@@ -910,6 +910,16 @@ bool RDNA3Bringup::hwInit()
                     publish("RDNA3,DMUBWaitAckResult", (uint64_t)(int64_t)r);
                 }
                 fOwner->displayMirror(fDmub, true);   /* rdna3mirror=1: step 9b */
+                /* rdna3mall=1 (step mall): display power, item O. The
+                 * PMFW fetches the watermark range table from VRAM
+                 * (dcn32_notify_wm_ranges) */
+                if (rd3_arg("rdna3mall", 0)) {
+                    uint64_t wm = rdna3_vram_alloc(fDev, 4096, 4096, "dal-wm-table");
+                    if (wm != UINT64_MAX)
+                        fOwner->displayPowerInit(fDev, fDmub, wm);
+                    else
+                        BLOG("display power: no VRAM for the watermark range table");
+                }
                 /* does the PMFW still move a table to DRAM with the clone lit? */
                 if (fPmUp && fSmu) {
                     int m = smu13_read_metrics(fDev, fSmu);
