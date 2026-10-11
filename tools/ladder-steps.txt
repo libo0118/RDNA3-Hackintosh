@@ -92,6 +92,17 @@ dsc rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3
 # mode switch: the topology probed, every sink's EDID read, the head's
 # stream sent as one MST stream to the first sink (rdna3mstport=N: port N)
 mst rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dplink=1 rdna3mst=1
+# DP 2.1 UHBR (hw/dcn32_hpo.c, the 128b/132b part of hw/dcn32_dp.c): the
+# dplink step with modeset2's clocks + rdna3uhbr=1: a DP 2.1 monitor on a
+# DP80 / DP54 cable gets UHBR10 / 13.5 / 20 (VBIOS encoder caps, sink,
+# cable id); the link cap verified with the 128b/132b training and its
+# fallback, a mode above HBR3 x4 set through the HPO encoders (DTBCLK,
+# SST payload, VC rate)
+uhbr rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3dplink=1 rdna3uhbr=1
+# ODM combine 2:1 (hw/dcn32_odm.c): the uhbr step + rdna3dsc=1 rdna3odm=1:
+# an 8K mode (or a pixel rate one pipe's DISPCLK does not reach) runs on
+# two pipes, each with half the picture, the DSC slices split over both
+odm rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3dplink=1 rdna3uhbr=1 rdna3dsc=1 rdna3odm=1
 # no rdna3 boot-arg at all: the kexts' default profile (rdna3_bootargs.h),
 # what an installed driver runs; the report tests it like big2 without the
 # power experiment, soak and hang test

@@ -22,7 +22,8 @@
  *   dcn32_optc.c  optc32_set_drr (optc32_setup_manual_trigger),
  *                 optc32_get_double_buffer_pending,
  *                 optc32_get_odm_combine_segments,
- *                 optc32_set_h_timing_div_manual_mode, optc32_set_odm_combine
+ *                 optc32_set_h_timing_div_manual_mode, optc32_set_odm_combine,
+ *                 optc32_set_odm_bypass
  *
  * DRR without FW-assisted MCLK switching (no FAMS in this port): the
  * register paths of optc3_set_vtotal_min_max / optc32_setup_manual_trigger,
@@ -160,6 +161,10 @@ void dcn32_otg_set_h_timing_div_manual_mode(rdna3_dev *d, uint32_t otg, int manu
 /* optc32_set_odm_combine: 2 or 4 OPPs, each 'segment_width' pixels wide */
 int  dcn32_otg_set_odm_combine(rdna3_dev *d, uint32_t otg, const uint32_t *opp_id, uint32_t opp_cnt,
                                uint32_t segment_width);
+/* optc32_set_odm_bypass: OTG 'otg' from its own OPP alone (SEG1..3 0xf),
+ * H_TIMING_DIV_MODE as optc1_is_two_pixels_per_container says
+ * ('two_pix': a YCbCr 4:2:0 timing), no ODM memories */
+void dcn32_otg_set_odm_bypass(rdna3_dev *d, uint32_t otg, int two_pix);
 
 /* The ladder step "otg" (boot-arg rdna3otg=1): what the functions above
  * read on a lit head, without changing what it shows. The vertical

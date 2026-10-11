@@ -81,6 +81,8 @@
 #include "gen/dcn_3_2_0_dsc.h"
 #include "dcn32_dsc.h"
 #include "dp_mst.h"
+#include "dcn32_hpo.h"
+#include "gen/dcn_3_2_0_hpo.h"
 #include "dcn32_dp_mst.h"
 #include "gen/gc_11_0_3_gmc.h"
 #include "gen/mmhub_3_0_0.h"
@@ -273,6 +275,15 @@ typedef struct sim {
         unsigned vsemph, adjust_reqs, tps1_sets, lane_mismatch, evals;
         uint8_t eq_pattern;          /* the last EQ pattern the source asked for in DPCD */
         uint32_t trained_rate, trained_lanes;
+        /* 128b/132b (DPCD 0x108 = 2, dp_sink_eval128): the PHY driven by
+         * the HPO link encoder (TransmitterControl with the DP2 symbol
+         * clock: hpo), channel EQ on 128b/132b_TPS2 once the TX FFE preset
+         * is the one requested (need_ffe), CDS on TPS2_CDS; at fail_rate
+         * (a UHBR rate) LT_FAILED; the SST VC payload table (0x1c0..0x1c2) */
+        int hpo, eq128, cds128, trained128;
+        unsigned need_ffe, lt_failed, eq128_evals;
+        uint8_t vc_id, vc_start, vc_slots;
+        unsigned payload_updates;
     } dps;
     uint8_t  edid[256];
     /* the video packet generators (VPG n = DIG front end n): the generic
@@ -281,7 +292,7 @@ typedef struct sim {
     struct {
         uint32_t mem[15 * 9];
         uint32_t idx, writes;
-    } vpg[5];
+    } vpg[10];   /* 0..4 the DIG front ends', 6..9 the HPO stream encoders' */
     /* MST branch on AUX 0 (mst.on): a hub with input port 0 and output
      * ports 1 and 2, each with an SST sink (synthetic EDIDs); its DPCD is
      * S.dpcd plus the sideband windows (DOWN_REQ 0x1000, DOWN_REP 0x1400)
@@ -1530,10 +1541,27 @@ static void dmub_inbox(uint32_t wptr)
                         S.dps.lanes = c[7];
                         S.dps.symclk_10khz = (uint32_t)c[8] | (uint32_t)c[9] << 8 | (uint32_t)c[10] << 16 |
                                              (uint32_t)c[11] << 24;
+                        /* DIG mode DP_MST with a UHBR symbol clock: the HPO link encoder */
+                        S.dps.hpo = c[6] == 5 && S.dps.symclk_10khz >= 100000;
+                        /* the VBIOS table turns the HPO link encoder
+                         * (hpo_instance) on for the lanes: DPHY_ENABLE,
+                         * NUM_LANES (DC calls link_enable on FPGA only) */
+                        if (S.dps.hpo && c[15] < 2) {
+                            uint32_t *ctl = &S.reg[DCN_B2 + regDP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL +
+                                                   (regDP_LINK_ENC1_DP_LINK_ENC_CLOCK_CONTROL -
+                                                    regDP_LINK_ENC0_DP_LINK_ENC_CLOCK_CONTROL) * c[15]];
+                            *ctl = (*ctl & ~DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__NUM_LANES_MASK) |
+                                   DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__DPHY_ENABLE_MASK |
+                                   ((uint32_t)(c[7] == 1 ? 0 : c[7] == 2 ? 1 : 3)
+                                    << DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__NUM_LANES__SHIFT);
+                        }
                         S.dps.cr = S.dps.eq = 0;
+                        S.dps.eq128 = S.dps.cds128 = 0;
                     } else if (c[5] == RD_ATOM_TX_DISABLE) {
                         S.dps.phy_on = 0;
+                        S.dps.hpo = 0;
                         S.dps.cr = S.dps.eq = 0;
+                        S.dps.eq128 = S.dps.cds128 = 0;
                     } else if (c[5] == RD_ATOM_TX_SETUP_VSEMPH) {
                         S.dps.vs = c[6] & 3;
                         S.dps.pe = (c[6] >> 3) & 3;
@@ -1541,7 +1569,9 @@ static void dmub_inbox(uint32_t wptr)
                     }
                 }
                 /* what the table does to the back end of the PHY */
-                if (c[4] < 5 && (c[5] == RD_ATOM_TX_ENABLE || c[5] == RD_ATOM_TX_DISABLE)) {
+                if (c[4] < 5 && (c[5] == RD_ATOM_TX_ENABLE || c[5] == RD_ATOM_TX_DISABLE) &&
+                    !(c[5] == RD_ATOM_TX_ENABLE && c[6] == 5 &&
+                      ((uint32_t)c[8] | (uint32_t)c[9] << 8 | (uint32_t)c[10] << 16) >= 100000)) {
                     uint32_t *en = &S.reg[DCN_B2 + regDIG0_DIG_BE_EN_CNTL + RD_CLONE_DIGFE_STRIDE * c[4]];
                     if (c[5] == RD_ATOM_TX_ENABLE)
                         *en |= DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK;
@@ -2025,6 +2055,69 @@ static void make_mst_hub(void)
     make_edid(S.mst.port[2].edid, "RDNA3 MST B", 0x7802, dtd_1440p);
 }
 
+/* the 128b/132b link layer: what the HPO link encoder 0 sends (its DPHY
+ * enabled for the lane count, TP_SELECT) over the PHY TransmitterControl
+ * turned on at the DPCD's UHBR rate */
+static void dp_sink_eval128(void)
+{
+    uint8_t *d = S.dpcd, nib = 0, align = 0, adj;
+    uint32_t code = d[0x100], lanes = d[0x101] & 0x1f, pat = d[0x102] & 0xf, i, rate, ctl, tp, nl;
+    int alive;
+    rate = code == 1 ? RD_DP_LINK_RATE_UHBR10 : code == 4 ? RD_DP_LINK_RATE_UHBR13_5 :
+           code == 2 ? RD_DP_LINK_RATE_UHBR20 : 0;
+    ctl = S.reg[DCN_B2 + regDP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL];
+    /* what the DPHY sends: its MODE (training TPS1 / TPS2, video), or in
+     * test pattern mode the TP_SELECT */
+    tp = (ctl & DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__MODE_MASK) >> DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__MODE__SHIFT;
+    if (tp == RD_DP2_TEST_PATTERN &&
+        (S.reg[DCN_B2 + regDP_DPHY_SYM320_DP_DPHY_SYM32_TP_CONFIG] & DP_DPHY_SYM320_DP_DPHY_SYM32_TP_CONFIG__TP_SELECT0_MASK) ==
+            RD_DP_DPHY_TP_SELECT_TPS2)
+        tp = RD_DP2_LINK_TRAINING_TPS2;
+    nl = (ctl & DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__NUM_LANES_MASK) >> DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__NUM_LANES__SHIFT;
+    nl = nl == 0 ? 1 : nl == 1 ? 2 : 4;
+    alive = S.dps.phy_on && S.dps.hpo && rate && S.dps.symclk_10khz == rate * 100 && lanes && S.dps.lanes >= lanes &&
+            d[0x600] == 1 && (ctl & DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__DPHY_ENABLE_MASK) && nl == lanes;
+    S.dps.evals++;
+    if (!alive) {
+        S.dps.eq128 = S.dps.cds128 = 0;
+    } else if (pat == RD_DPCD_TRAINING_PATTERN_1) {
+        S.dps.eq128 = S.dps.cds128 = 0;
+    } else if (pat == 2) {   /* 128b/132b_TPS2 */
+        S.dps.eq128_evals++;
+        if (rate == S.dps.fail_rate) {
+            align |= RD_DP_128B132B_LT_FAILED;
+            S.dps.lt_failed++;
+            S.dps.eq128 = 0;
+        } else {
+            S.dps.eq128 = tp == RD_DP2_LINK_TRAINING_TPS2 && (d[0x103] & 0xf) == S.dps.need_ffe;
+        }
+        S.dps.cds128 = 0;
+    } else if (pat == 3) {   /* 128b/132b_TPS2_CDS (the PHY keeps sending TPS2) */
+        S.dps.cds128 = S.dps.eq128 && tp == RD_DP2_LINK_TRAINING_TPS2;
+    }
+    /* pattern 0 (video): the lock holds while the link stays up */
+    if (S.dps.eq128)
+        nib |= RD_DP_LANE_CHANNEL_EQ_DONE;
+    if (S.dps.cds128)
+        nib |= RD_DP_LANE_SYMBOL_LOCKED | RD_DP_LANE_CR_DONE;   /* trained: what dp_check_link_loss_status reads */
+    d[0x202] = d[0x203] = 0;
+    for (i = 0; i < 4; i++)
+        if (i < lanes)
+            d[0x202 + i / 2] |= (uint8_t)(nib << (4 * (i % 2)));
+    if (S.dps.eq128)
+        align |= RD_DP_128B132B_DPRX_EQ_INTERLANE_ALIGN_DONE;
+    if (S.dps.cds128)
+        align |= RD_DP_128B132B_DPRX_CDS_INTERLANE_ALIGN_DONE | RD_DP_INTERLANE_ALIGN_DONE;
+    d[0x204] = align;
+    adj = (uint8_t)(S.dps.need_ffe & 0xf);   /* TX_FFE_PRESET_VALUE per lane */
+    d[0x206] = d[0x207] = (uint8_t)(adj | adj << 4);
+    if (S.dps.cds128 && pat == 3) {
+        S.dps.trained_rate = rate;
+        S.dps.trained_lanes = lanes;
+        S.dps.trained128 = 1;
+    }
+}
+
 /* the sink's lane status and adjust requests (DPCD 0x202..0x207) for what
  * the source drives now */
 static void dp_sink_eval(void)
@@ -2034,6 +2127,10 @@ static void dp_sink_eval(void)
     int alive, done;
     if (S.dps.be < 0)
         return;
+    if ((d[0x108] & 3) == 2) {   /* MAIN_LINK_CHANNEL_CODING_SET 128b/132b */
+        dp_sink_eval128();
+        return;
+    }
     be = (uint32_t)S.dps.be;
     S.dps.evals++;
     sel = S.reg[DPR(regDP0_DP_DPHY_TRAINING_PATTERN_SEL, be)] & 3;
@@ -2085,8 +2182,22 @@ static void dp_sink_written(uint32_t addr, uint32_t len)
         hub_written(addr, len);
     if (S.dps.be < 0)
         return;
-    if (addr <= 0x101 && addr + len > 0x100)
+    if (addr <= 0x101 && addr + len > 0x100) {
         S.dps.cr = S.dps.eq = 0;            /* new rate / lane count: lock lost */
+        S.dps.eq128 = S.dps.cds128 = 0;
+    }
+    /* the SST VC payload table of a 128b/132b sink (the MST hub keeps its own) */
+    if (!S.mst.on) {
+        if (addr <= 0x2c0 && addr + len > 0x2c0)
+            S.dpcd[0x2c0] = 0;              /* write 1 to clear */
+        if (addr <= 0x1c2 && addr + len > 0x1c2) {
+            S.dps.vc_id = S.dpcd[0x1c0];
+            S.dps.vc_start = S.dpcd[0x1c1];
+            S.dps.vc_slots = S.dpcd[0x1c2];
+            S.dps.payload_updates++;
+            S.dpcd[0x2c0] |= RD_DP_VC_PAYLOAD_TABLE_UPDATED;
+        }
+    }
     if (addr <= 0x600 && addr + len > 0x600 && S.dpcd[0x600] != 1)
         S.dps.cr = S.dps.eq = 0;            /* D3 */
     if (addr <= 0x102 && addr + len > 0x102) {
@@ -4009,6 +4120,23 @@ static int dscmst_wr(uint32_t dw, uint32_t v)
             S.reg[dw + 1] = gate << DOMAIN16_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT;
         return 1;
     }
+    for (n = 6; n < 10; n++) {
+        uint32_t a = DCN_B2 + regVPG6_VPG_GENERIC_PACKET_ACCESS_CTRL +
+                     (regVPG7_VPG_GENERIC_PACKET_ACCESS_CTRL - regVPG6_VPG_GENERIC_PACKET_ACCESS_CTRL) * (n - 6);
+        if (dw == a) {
+            S.vpg[n].idx = v & VPG0_VPG_GENERIC_PACKET_ACCESS_CTRL__VPG_GENERIC_DATA_INDEX_MASK;
+            *R(dw) = v;
+            return 1;
+        }
+        if (dw == a + (regVPG6_VPG_GENERIC_PACKET_DATA - regVPG6_VPG_GENERIC_PACKET_ACCESS_CTRL)) {
+            if (S.vpg[n].idx < 15 * 9)
+                S.vpg[n].mem[S.vpg[n].idx] = v;
+            S.vpg[n].idx++;
+            S.vpg[n].writes++;
+            *R(dw) = v;
+            return 1;
+        }
+    }
     for (n = 0; n < 5; n++) {
         if (dw == VPGR(regVPG0_VPG_GENERIC_PACKET_ACCESS_CTRL, n)) {
             S.vpg[n].idx = v & VPG0_VPG_GENERIC_PACKET_ACCESS_CTRL__VPG_GENERIC_DATA_INDEX_MASK;
@@ -4128,6 +4256,7 @@ static void sim_doorbell32(void *ctx, uint32_t index, uint32_t v)
 }
 
 #include "sim_display_dc.inc"
+#include "sim_display_hpo.inc"
 
 static void sim_wr(void *ctx, uint64_t off, uint32_t v)
 {
@@ -4136,6 +4265,8 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     if (off >= MMIO_LEN)
         return;
     if (sk_wr(dw, v))
+        return;
+    if (hpo_wr(dw, v))
         return;
     if (dw == mmMM_DATA) {
         uint32_t *w = mm_word();
@@ -4434,6 +4565,9 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
             }
         } else if (v == RD_DALSMC_MSG_GetSmuVersion) {
             S.reg[RD_DAL_ARG_REG] = 0x00505c00;   /* 80.92 */
+        } else if (v == RD_DALSMC_MSG_GetDpmFreqByIndex && (arg >> 16) == RD_PPCLK_DTBCLK) {
+            /* DTBCLK: two discrete levels, 268 and 600 MHz */
+            S.reg[RD_DAL_ARG_REG] = (arg & 0xff) == 0xff ? 2 : (arg & 0xff) == 0 ? 268 : (arg & 0xff) == 1 ? 600 : 0;
         } else if (v == RD_DALSMC_MSG_GetDpmFreqByIndex && ((arg >> 16) == RD_PPCLK_DISPCLK ||
                                                              (arg >> 16) == RD_PPCLK_DPPCLK)) {
             S.reg[RD_DAL_ARG_REG] = (arg & 0xff) == 0xff ? S.dal_dpm_n
@@ -4722,6 +4856,8 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
     {
         uint32_t kv;
         if (sk_rd(dw, &kv))
+            return kv;
+        if (hpo_rd(dw, &kv))
             return kv;
     }
     if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_DATA) {
@@ -7288,6 +7424,383 @@ static void test_dp_mst(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rdn
     S.dcn_frames = 0;
 }
 
+/* DP 2.1 UHBR (rdna3uhbr): the DP head of test_dp_link on a sink with
+ * 128b/132b (UHBR10 / 13.5 / 20) that does not train at UHBR20 (LT_FAILED):
+ * the UHBR caps (the VBIOS encoder caps, the policy), the link cap verified
+ * with the 128b/132b training and the max-bandwidth fallback, a 3840x2160
+ * stream beyond HBR3 x4 on UHBR10 x4 through the HPO encoders (DTBCLK, the
+ * DTOs, SYMCLK32, the SST payload with its ACT, the VC rate), back to
+ * 8b/10b, and MST over a 128b/132b link refused */
+static void test_dp_uhbr(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_display_path *own)
+{
+    static rdna3_dcn_modeset ms;
+    static rdna3_dp_link dp;
+    const uint32_t caps = RD_ATOM_ENC_CAP_HBR2 | RD_ATOM_ENC_CAP_HBR3 | RD_ATOM_ENC_CAP_UHBR10 |
+                          RD_ATOM_ENC_CAP_UHBR13_5 | RD_ATOM_ENC_CAP_UHBR20;
+    const uint32_t dfs0 = S.reg[RD_CLK1_CLK0_DFS_CNTL], dfs1 = S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE];
+    const uint32_t div0 = S.reg[DCN_B1 + regOTG_PIXEL_RATE_DIV];
+    rdna3_mode m, uhd;
+    rdna3_dcn_clocks clk;
+    uint32_t otg = dc->head[0].otg, fe = (uint32_t)dc->head[0].dig_fe, v, slots, acts, upd;
+
+    /* 3840x2160 at 144 Hz (CVT-RB2-like): 1279.872 MHz, 30.7 Gbps at 8 bpc:
+     * beyond HBR3 x4, within UHBR10 x4 */
+    memset(&uhd, 0, sizeof(uhd));
+    uhd.h_active = 3840; uhd.v_active = 2160; uhd.h_total = 4000; uhd.v_total = 2222;
+    uhd.h_front = 8; uhd.h_sync = 32; uhd.v_front = 6; uhd.v_sync = 8; uhd.pixel_khz = 1279872; uhd.h_sync_pos = 1;
+    CHECK(edid_dmt(1920, 1080, 60, &m) == 0);
+    /* DISPCLK / DPPCLK for 1.07 GHz (the GOP's are lower) */
+    S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x0c;
+    S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE] = 0x0c;
+    dcn32_clk_read(dev, &clk);
+    CHECK(clk.dispclk_khz >= 1300000 && clk.dppclk_khz >= 1300000);
+
+    /* the sink: an SST DP 2.1 monitor, HBR3 x4 and 128b/132b UHBR10 / 13.5 / 20,
+     * no cable id; it locks 128b/132b EQ at FFE preset 3, never at UHBR20 */
+    S.dpcd[0x001] = RD_DP_LINK_RATE_HIGH3;
+    S.dpcd[0x005] = S.dpcd[0x007] = S.dpcd[0x021] = 0;
+    S.dpcd[0x006] = RD_DP_CAP_ANSI_8B10B | RD_DP_CAP_ANSI_128B132B;
+    S.dpcd[0x090] = 0;
+    memset(&S.dpcd[0x060], 0, 16);
+    S.dpcd_ext[0x15] = RD_DP_UHBR10 | RD_DP_UHBR13_5 | RD_DP_UHBR20;
+    S.dpcd_ext[0x17] = 0;
+    S.dps.fail_rate = RD_DP_LINK_RATE_UHBR20;
+    S.dps.need_ffe = 3;
+
+    /* no VBIOS encoder caps record: HBR2 / HBR3 only, whatever the policy */
+    dcn32_dp_link_init(&dp, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 600000);
+    dp.uhbr_policy = 1;
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && dp.dpcd_caps.dp_128b_132b_supported_link_rates == 7 &&
+          dp.reported_link_cap.link_rate == RD_DP_LINK_RATE_UHBR20 && dp.max_link_cap.link_rate == RD_DP_LINK_RATE_HIGH3);
+    /* the encoder caps with UHBR, rdna3uhbr off: HBR3 (debug.disable_uhbr) */
+    dcn32_dp_link_init(&dp, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, caps, 600000);
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && dp.max_link_cap.link_rate == RD_DP_LINK_RATE_HIGH3);
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].h_active == 2560 && dc->head[0].dig_mode == 0);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &uhd, NULL, &ms) == RD_MODESET_LINK_BW);
+    /* rdna3uhbr: UHBR20 x4; the 128b/132b stream overhead in the request */
+    dp.uhbr_policy = 1;
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && dp.max_link_cap.link_rate == RD_DP_LINK_RATE_UHBR20 &&
+          dp.max_link_cap.lane_count == 4 && dcn32_dp_highest_encoding(&dp) == RD_DC_LINK_ENCODING_DP_128b_132b);
+    /* apply_128b_132b_stream_overhead: 3840 x 24 bpp is 720 whole 128-bit
+     * symbols per line (no overhead); 3838 needs 719.625 -> 720 */
+    CHECK(dcn32_dp_stream_req_kbps(&dp, &uhd, 0) == dcn32_dp_mode_kbps(&uhd, 8, 0) &&
+          dcn32_dp_mode_kbps(&uhd, 8, 0) == 30716928);
+    {
+        rdna3_mode odd = uhd;
+        odd.h_active = 3838;
+        uint32_t k = dcn32_dp_stream_req_kbps(&dp, &odd, 0);
+        CHECK(k > 30716928u + 15000 && k < 30716928u + 17000 &&
+              dcn32_dp_mode_kbps_enc(&odd, 8, 0, RD_DC_LINK_ENCODING_DP_8b_10b) == 30716928u);
+    }
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &uhd, NULL, &ms) == RD_MODESET_OK && ms.dp_want_hpo &&
+          ms.odm_want == 1);
+
+    /* the mode set: DTBCLK at the PMFW's top level, the link cap verified
+     * (UHBR20 fails with LT_FAILED, the max-bandwidth fallback takes
+     * UHBR13.5 x4), the stream on the smallest setting: UHBR10 x4 */
+    S.dcn_frames = 1;
+    S.dal_hard_min[RD_PPCLK_DTBCLK] = 0;
+    acts = SH.acts;
+    upd = S.dps.payload_updates;
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 3840, FB_START + 0x8000000, 2560, 50) == RDNA3_OK &&
+          dc->head[0].width == 3840);
+    CHECK(S.dal_hard_min[RD_PPCLK_DTBCLK] == 600 && dp.dtbclk_khz == 600000);
+    CHECK(dp.verified && dp.verified_link_cap.link_rate == RD_DP_LINK_RATE_UHBR13_5 && S.dps.lt_failed > 0 &&
+          dp.lt_fallbacks > 0);
+    CHECK(dp.hpo_active && dp.cur_link_settings.link_rate == RD_DP_LINK_RATE_UHBR10 &&
+          dp.cur_link_settings.lane_count == 4 && dp.last_result == RD_LT_SUCCESS);
+    /* the sink: 128b/132b coding, UHBR10 (LINK_BW 1), x4, the FFE preset it
+     * asked for, CDS done */
+    CHECK(S.dps.trained128 && S.dps.trained_rate == RD_DP_LINK_RATE_UHBR10 && S.dps.trained_lanes == 4 &&
+          S.dpcd[0x108] == 2 && S.dpcd[0x100] == 1 && (S.dpcd[0x101] & 0x1f) == 4 && (S.dpcd[0x103] & 0xf) == 3 &&
+          S.dpcd[0x102] == 0 && S.dps.eq128 && S.dps.cds128);
+    /* the OTG out to the HPO; HPO stream encoder 0 on OTG 'otg', mapped to
+     * link encoder 0, video on; link encoder 0: DPHY on 4 lanes, video mode */
+    CHECK(((S.reg[OTG(regOTG0_OTG_CONTROL, otg)] & OTG0_OTG_CONTROL__OTG_OUT_MUX_MASK) >>
+           OTG0_OTG_CONTROL__OTG_OUT_MUX__SHIFT) == 1);
+    CHECK((S.reg[HPOR(regDP_SYM32_ENC0_DP_SYM32_ENC_CONTROL, 0)] & DP_SYM32_ENC0_DP_SYM32_ENC_CONTROL__DP_SYM32_ENC_ENABLE_MASK) &&
+          (S.reg[HPOR(regDP_SYM32_ENC0_DP_SYM32_ENC_VID_STREAM_CONTROL, 0)] &
+           DP_SYM32_ENC0_DP_SYM32_ENC_VID_STREAM_CONTROL__VID_STREAM_ENABLE_MASK) &&
+          (S.reg[HPOR(regDP_STREAM_ENC0_DP_STREAM_ENC_INPUT_MUX_CONTROL, 0)] & 7) == otg &&
+          (S.reg[DCN_B3 + regDP_STREAM_MAPPER_CONTROL0] & DP_STREAM_MAPPER_CONTROL0__DP_STREAM_LINK_TARGET_MASK) == 0);
+    v = S.reg[HPOR(regDP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL, 0)];
+    CHECK((v & DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__DPHY_ENABLE_MASK) &&
+          ((v & DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__NUM_LANES_MASK) >> DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__NUM_LANES__SHIFT) == 3 &&
+          ((v & DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__MODE_MASK) >> DP_DPHY_SYM320_DP_DPHY_SYM32_CONTROL__MODE__SHIFT) ==
+              RD_DP2_LINK_ACTIVE);
+    /* the PHY: TransmitterControl with the DP2 symbol clock (UHBR10: 100000 x 10 kHz) */
+    CHECK(S.dps.phy_on && S.dps.hpo && S.dps.symclk_10khz == 100000 && S.dps.lanes == 4);
+    /* DCCG: DTBCLK DTO 0 at pixel clock / 4 of the 600 MHz reference and the
+     * OTG on it (PIPE0_DTO_SRC_SEL 2), DTBCLK_P from DTBCLK0, DPSTREAMCLK 0
+     * from DTBCLK0, SYMCLK32_SE 0 from PHYD32CLKB (transmitter 1), K1 = K2 = 1 */
+    CHECK(S.reg[DCN_B2 + regDTBCLK_DTO0_PHASE + otg] == 1279872u / 4 * 1000 &&
+          S.reg[DCN_B2 + regDTBCLK_DTO0_MODULO + otg] == 600000u * 1000);
+    v = S.reg[PRCR(regOTG0_PIXEL_RATE_CNTL, otg)];
+    CHECK((v & OTG0_PIXEL_RATE_CNTL__DTBCLK_DTO0_ENABLE_MASK) &&
+          ((v & OTG0_PIXEL_RATE_CNTL__PIPE0_DTO_SRC_SEL_MASK) >> OTG0_PIXEL_RATE_CNTL__PIPE0_DTO_SRC_SEL__SHIFT) == 2);
+    v = S.reg[DCN_B1 + regDTBCLK_P_CNTL] >> (3 * otg);
+    CHECK((v & DTBCLK_P_CNTL__DTBCLK_P0_EN_MASK) && (v & DTBCLK_P_CNTL__DTBCLK_P0_SRC_SEL_MASK) == 2 /* dtbclk0 */);
+    v = S.reg[DCN_B1 + regDPSTREAMCLK_CNTL];
+    CHECK((v & DPSTREAMCLK_CNTL__DPSTREAMCLK0_EN_MASK) &&
+          (v & DPSTREAMCLK_CNTL__DPSTREAMCLK0_SRC_SEL_MASK) == otg);
+    v = S.reg[DCN_B1 + regSYMCLK32_SE_CNTL];
+    CHECK((v & SYMCLK32_SE_CNTL__SYMCLK32_SE0_EN_MASK) && (v & SYMCLK32_SE_CNTL__SYMCLK32_SE0_SRC_SEL_MASK) == RD_PHYD32CLKB);
+    CHECK(((S.reg[DCN_B1 + regOTG_PIXEL_RATE_DIV] >> (3 * otg)) & 7) == 0);
+    /* the SST payload: VC 1 from slot 0 with ceil(slots per MTP) slots in
+     * the sink and in the HPO link encoder's table, the ACT handled, the VC
+     * rate X.Y, the minimum h blank symbol width */
+    slots = S.dps.vc_slots;
+    CHECK(S.dps.payload_updates == upd + 1 && S.dps.vc_id == 1 && S.dps.vc_start == 0 && slots > 0 && slots <= 64 &&
+          slots == dp.sst_slots && SH.acts == acts + 1 && dp.sst_act &&
+          (S.dpcd[0x2c0] & (RD_DP_VC_PAYLOAD_TABLE_UPDATED | RD_DP_ACT_HANDLED)) ==
+              (RD_DP_VC_PAYLOAD_TABLE_UPDATED | RD_DP_ACT_HANDLED));
+    v = S.reg[HPOR(regDP_DPHY_SYM320_DP_DPHY_SYM32_SAT_VC0, 0)];
+    CHECK((v & DP_DPHY_SYM320_DP_DPHY_SYM32_SAT_VC0__SAT_SLOT_COUNT_MASK) >> DP_DPHY_SYM320_DP_DPHY_SYM32_SAT_VC0__SAT_SLOT_COUNT__SHIFT ==
+          slots && (v & DP_DPHY_SYM320_DP_DPHY_SYM32_SAT_VC0__SAT_STREAM_SOURCE_MASK) == 0);
+    /* 30.7 Gbps (no 128b/132b overhead: 720 symbols per line) of 38.56 Gbps: 51 of 64 slots */
+    CHECK(slots == 51 && dp.sst_vcp_x == 50 && dp.sst_vcp_y > 0 &&
+          (S.reg[HPOR(regDP_DPHY_SYM320_DP_DPHY_SYM32_VC_RATE_CNTL0, 0)] >> 25) == 50);
+    CHECK(dp.hblank_min_symbol_width > 0 &&
+          (S.reg[HPOR(regDP_SYM32_ENC0_DP_SYM32_ENC_HBLANK_CONTROL, 0)] &
+           DP_SYM32_ENC0_DP_SYM32_ENC_HBLANK_CONTROL__HBLANK_MINIMUM_SYMBOL_WIDTH_MASK) == dp.hblank_min_symbol_width);
+
+    /* MST over a 128b/132b link: not ported, refused */
+    dp.mst = 1;
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 1279872, &m, NULL, &ms) == RD_MODESET_DP_LINK);
+    dp.mst = 0;
+
+    /* back to 1920x1080: RBR x4 on 8b/10b (the smallest setting of the
+     * verified cap): the payload freed (0 slots), the HPO encoders, DTBCLK
+     * DTO, SYMCLK32 and DPSTREAMCLK off, the OTG back on the DIO and the
+     * DP DTO (SRC_SEL 1), the boot's pixel rate divider */
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 1279872, &m, NULL, &ms) == RD_MODESET_OK && !ms.dp_want_hpo);
+    upd = S.dps.payload_updates;
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START + 0x8000000, 1920, FB_START, 3840, 50) == RDNA3_OK &&
+          dc->head[0].width == 1920);
+    CHECK(!dp.hpo_active && S.dps.payload_updates == upd + 1 && S.dps.vc_slots == 0 &&
+          S.dpcd[0x108] == 1 && S.dps.trained_rate == RD_DP_LINK_RATE_LOW && S.dps.trained_lanes == 4);
+    CHECK(((S.reg[OTG(regOTG0_OTG_CONTROL, otg)] & OTG0_OTG_CONTROL__OTG_OUT_MUX_MASK) >>
+           OTG0_OTG_CONTROL__OTG_OUT_MUX__SHIFT) == 0 &&
+          !(S.reg[HPOR(regDP_SYM32_ENC0_DP_SYM32_ENC_CONTROL, 0)] & DP_SYM32_ENC0_DP_SYM32_ENC_CONTROL__DP_SYM32_ENC_ENABLE_MASK) &&
+          !(S.reg[DCN_B1 + regSYMCLK32_SE_CNTL] & SYMCLK32_SE_CNTL__SYMCLK32_SE0_EN_MASK) &&
+          !(S.reg[DCN_B1 + regDPSTREAMCLK_CNTL] & DPSTREAMCLK_CNTL__DPSTREAMCLK0_EN_MASK));
+    v = S.reg[PRCR(regOTG0_PIXEL_RATE_CNTL, otg)];
+    CHECK(!(v & OTG0_PIXEL_RATE_CNTL__DTBCLK_DTO0_ENABLE_MASK) &&
+          ((v & OTG0_PIXEL_RATE_CNTL__PIPE0_DTO_SRC_SEL_MASK) >> OTG0_PIXEL_RATE_CNTL__PIPE0_DTO_SRC_SEL__SHIFT) == 1 &&
+          S.reg[DCN_B2 + regDTBCLK_DTO0_PHASE + otg] == 0 && S.reg[DCN_B1 + regOTG_PIXEL_RATE_DIV] == div0);
+    CHECK(S.reg[DPR(regDP0_DP_VID_M, fe)] == (uint32_t)(0x8000ull * 148500 / (RD_DP_LINK_RATE_LOW * 27000)));
+
+    /* the sink back to an 8b/10b one for the tests that follow */
+    S.dpcd[0x006] = RD_DP_CAP_ANSI_8B10B;
+    memset(S.dpcd_ext, 0, sizeof(S.dpcd_ext));
+    S.dps.fail_rate = 0;
+    S.dps.need_ffe = 0;
+    S.reg[RD_CLK1_CLK0_DFS_CNTL] = dfs0;
+    S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE] = dfs1;
+    S.dcn_frames = 0;
+}
+
+/* ODM combine 2:1 (rdna3odm): a 7680x4320@30 stream with DSC on HBR2 x4:
+ * dml32_CalculateODMMode (wider than one DSC unit and than one pipe), a
+ * free pipe for the right half, both viewports, recouts, OPPBUFs, the DLG
+ * of the ODM pipe, the OPTC's ODM config and memories, the OPP clock, the
+ * MPC tree, the DSC slices split over the two DSC engines, the DP DTO at
+ * half the pixel clock with K2 / 2 and two pixels per cycle; the read-back
+ * state, a flip to both pipes; then back to one pipe */
+static void test_dp_odm(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_display_path *own)
+{
+    static rdna3_dcn_modeset ms;
+    static rdna3_dp_link dp;
+    const uint32_t dfs0 = S.reg[RD_CLK1_CLK0_DFS_CNTL], dfs1 = S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE];
+    rdna3_mode m8k, up;
+    uint32_t otg, pipe, opp, q, n, v, w, r, det0;
+    uint8_t sent[128], pps[128];
+
+    memset(&m8k, 0, sizeof(m8k));
+    m8k.h_active = 7680; m8k.v_active = 4320; m8k.h_total = 7840; m8k.v_total = 4400;
+    m8k.h_front = 48; m8k.h_sync = 32; m8k.v_front = 3; m8k.v_sync = 5; m8k.pixel_khz = 1034880; m8k.h_sync_pos = 1;
+    memset(&up, 0, sizeof(up));
+    up.h_active = 2560; up.v_active = 1440; up.h_total = 2720; up.v_total = 1481;
+    up.h_front = 48; up.h_sync = 32; up.v_front = 3; up.v_sync = 5; up.pixel_khz = 241500; up.h_sync_pos = 1;
+    S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x0c;
+    S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE] = 0x0c;
+    /* the sink: HBR2 x4 (16.8 Gbps with FEC: the 24.8 Gbps of 8K30 need DSC), DSC 1.2 (1 / 2 / 4 / 8 slices, 2560 wide) and FEC */
+    S.dpcd[0x001] = RD_DP_LINK_RATE_HIGH2;
+    S.dpcd[0x002] = 0xc4;
+    memcpy(&S.dpcd[0x060], ref_dsc_caps, 16);
+    S.dpcd[0x090] = 0x01;
+    S.dps.fail_rate = 0;
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].h_active == 1920 && dc->head[0].odm_cnt == 0);
+    otg = dc->head[0].otg;
+    pipe = dc->head[0].pipe;
+    opp = (S.reg[ODMR(regODM0_OPTC_DATA_SOURCE_SELECT, otg)] & ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG0_SRC_SEL_MASK) >>
+          ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG0_SRC_SEL__SHIFT;
+    CHECK(opp == otg);
+    /* the other pipes idle: gated, their MPCCs in no tree, no DET */
+    for (n = 0; n < RD_DCN_MAX_PIPES; n++) {
+        if (n == pipe)
+            continue;
+        S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL + RD_CLONE_MPCC_STRIDE * n] = 0xf;
+        S.reg[DCN_B3 + regMPC_OUT0_MUX + (regMPC_OUT1_MUX - regMPC_OUT0_MUX) * n] = 0xf;
+        S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + n] = 0;
+        S.reg[DCN_B2 + regDOMAIN0_PG_CONFIG + 2 * n] = DOMAIN0_PG_CONFIG__DOMAIN_POWER_GATE_MASK;
+        S.reg[DCN_B2 + regDOMAIN0_PG_STATUS + 2 * n] = 2u << DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT;
+        S.reg[DCN_B2 + regDOMAIN16_PG_CONFIG + 2 * n] = DOMAIN16_PG_CONFIG__DOMAIN_POWER_GATE_MASK;
+        S.reg[DCN_B2 + regDOMAIN16_PG_STATUS + 2 * n] = 2u << DOMAIN16_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT;
+    }
+    S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + pipe] = 18u | 18u << 8;
+    det0 = 18;
+    dcn32_dp_link_init(&dp, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 600000);
+    dp.fec_policy = dp.dsc_policy = 1;
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && dp.max_link_cap.link_rate == RD_DP_LINK_RATE_HIGH2);
+
+    /* dml32_CalculateODMMode: none for a 4K-class line within DISPCLK;
+     * 2:1 for a DSC line wider than 6016 or 5..8 slices; 2:1 when the
+     * pixel rate needs more than the state's DISPCLK and half of it fits;
+     * never for HDMI */
+    CHECK(dcn32_odm_mode(0, 3840, 594000, 1950000, 4300000, 0, 0) == 1);
+    CHECK(dcn32_odm_mode(0, 7680, 1034880, 1950000, 4300000, 1, 4) == 2);
+    CHECK(dcn32_odm_mode(0, 3840, 594000, 1950000, 4300000, 1, 6) == 2);
+    CHECK(dcn32_odm_mode(0, 3840, 2376000, 1950000, 4300000, 0, 0) == 2);
+    CHECK(dcn32_odm_mode(1, 3840, 2376000, 1950000, 4300000, 0, 0) == 1);
+    /* resource_get_odm_slice_dst_width */
+    CHECK(dcn32_odm_slice_dst_width(7680, 2, 0, 0) == 3840 && dcn32_odm_slice_dst_width(7681, 2, 1, 0) == 3841 &&
+          dcn32_odm_slice_dst_width(7682, 2, 0, 1) == 3842 && dcn32_odm_slice_dst_width(3842, 2, 0, 1) == 1922);
+
+    /* without rdna3odm: wider than one pipe, refused */
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 148500, &m8k, NULL, &ms) == RD_MODESET_SIZE);
+    /* rdna3odm: DSC 4 slices (2560 wide at most), ODM 2:1 on a free pipe */
+    dp.odm_policy = 1;
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 148500, &m8k, NULL, &ms) == RD_MODESET_OK && ms.dp_want_dsc &&
+          ms.dp_want_dsc_cfg.num_slices_h == 4 && ms.odm_want == 2 && ms.odm_cur == 1 && !ms.dp_want_hpo);
+    q = ms.odm.pipe;
+    CHECK(q != pipe && q != otg && q < RD_DCN_MAX_PIPES && ms.odm.opp == q && ms.odm.dsc == q &&
+          ms.odm.det_main_new == 9 && ms.odm.det_odm_new == 9);
+    S.dcn_frames = 1;
+    S.dpcd[0x160] = 0;
+    memset(S.vpg, 0, sizeof(S.vpg));
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 7680, FB_START + 0x10000000, 1920, 50) == RDNA3_OK);
+    CHECK(dc->head[0].width == 7680 && dc->head[0].odm_cnt == 2 && dc->head[0].odm_pipe == q &&
+          dc->head[0].odm_x == 3840 && dp.odm_opp_cnt == 2 && dp.stream_dsc);
+    /* the OPTC: two segments (OPP opp, OPP q) 3840 wide, four ODM memories,
+     * H timing / 2 */
+    v = S.reg[ODMR(regODM0_OPTC_DATA_SOURCE_SELECT, otg)];
+    CHECK(((v & ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_NUM_OF_INPUT_SEGMENT_MASK) >>
+           ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_NUM_OF_INPUT_SEGMENT__SHIFT) == 1 &&
+          ((v & ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG0_SRC_SEL_MASK) >> ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG0_SRC_SEL__SHIFT) == opp &&
+          ((v & ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG1_SRC_SEL_MASK) >> ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG1_SRC_SEL__SHIFT) == q);
+    CHECK((S.reg[ODMR(regODM0_OPTC_WIDTH_CONTROL, otg)] & ODM0_OPTC_WIDTH_CONTROL__OPTC_SEGMENT_WIDTH_MASK) == 3840 &&
+          S.reg[ODMR(regODM0_OPTC_MEMORY_CONFIG, otg)] == (3u << (2 * opp) | 3u << (2 * q)) &&
+          ((S.reg[OTG(regOTG0_OTG_H_TIMING_CNTL, otg)] & OTG0_OTG_H_TIMING_CNTL__OTG_H_TIMING_DIV_MODE_MASK) >>
+           OTG0_OTG_H_TIMING_CNTL__OTG_H_TIMING_DIV_MODE__SHIFT) == 1);
+    /* both pipes: the halves of the plane */
+    CHECK(S.reg[DCN_B2 + regHUBP0_DCSURF_PRI_VIEWPORT_START + RD_CLONE_HUBP_STRIDE * pipe] == 0 &&
+          S.reg[DCN_B2 + regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION + RD_CLONE_HUBP_STRIDE * pipe] == (3840u | 4320u << 16) &&
+          S.reg[DCN_B2 + regHUBP0_DCSURF_PRI_VIEWPORT_START + RD_CLONE_HUBP_STRIDE * q] == 3840 &&
+          S.reg[DCN_B2 + regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION + RD_CLONE_HUBP_STRIDE * q] == (3840u | 4320u << 16));
+    CHECK((S.reg[DCN_B2 + regDSCL0_RECOUT_SIZE + RD_CLONE_DPP_STRIDE * pipe] & 0xffff) == 3840 &&
+          (S.reg[DCN_B2 + regDSCL0_RECOUT_SIZE + RD_CLONE_DPP_STRIDE * q] & 0xffff) == 3840 &&
+          (S.reg[DCN_B2 + regDSCL0_MPC_SIZE + RD_CLONE_DPP_STRIDE * q] & 0xffff) == 3840 &&
+          S.reg[DCN_B2 + regDSCL0_RECOUT_START + RD_CLONE_DPP_STRIDE * q] == 0);
+    /* the ODM pipe: on the master OTG's VTG, unblanked, the same surface;
+     * its MPCC alone in OPP q's tree; OPP q clocked */
+    v = S.reg[DCN_B2 + regHUBP0_DCHUBP_CNTL + RD_CLONE_HUBP_STRIDE * q];
+    CHECK(((v & HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL_MASK) >> HUBP0_DCHUBP_CNTL__HUBP_VTG_SEL__SHIFT) == otg &&
+          !(v & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) &&
+          S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS + RD_CLONE_HUBP_STRIDE * q] == (uint32_t)FB_START &&
+          (S.reg[DCN_B2 + regHUBPREQ0_DCSURF_SURFACE_PITCH + RD_CLONE_HUBP_STRIDE * q] & 0x3fff) == 7679);
+    CHECK(S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL + RD_CLONE_MPCC_STRIDE * q] == q &&
+          S.reg[DCN_B3 + regMPCC0_MPCC_OPP_ID + RD_CLONE_MPCC_STRIDE * q] == q &&
+          (S.reg[DCN_B3 + regMPC_OUT0_MUX + (regMPC_OUT1_MUX - regMPC_OUT0_MUX) * q] & 0xf) == q &&
+          (S.reg[DCN_B2 + regOPP_PIPE0_OPP_PIPE_CONTROL + RD_CLONE_OPP_STRIDE * q] &
+           OPP_PIPE0_OPP_PIPE_CONTROL__OPP_PIPE_CLOCK_EN_MASK) &&
+          !(S.reg[DCN_B2 + regDOMAIN0_PG_STATUS + 2 * q] & DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS_MASK));
+    /* the DLG: refcyc_h_blank_end of the second half = (hblank_end + 3840) x ref/pix */
+    r = S.reg[DCN_B2 + regHUBPREQ0_REF_FREQ_TO_PIX_FREQ + RD_CLONE_HUBP_STRIDE * pipe] &
+        HUBPREQ0_REF_FREQ_TO_PIX_FREQ__REF_FREQ_TO_PIX_FREQ_MASK;
+    w = (S.reg[DCN_B2 + regHUBPREQ0_BLANK_OFFSET_0 + RD_CLONE_HUBP_STRIDE * q] &
+         HUBPREQ0_BLANK_OFFSET_0__REFCYC_H_BLANK_END_MASK) >> HUBPREQ0_BLANK_OFFSET_0__REFCYC_H_BLANK_END__SHIFT;
+    /* H_BLANK_END = h_total - h_front - h_active = 112 */
+    CHECK(r == (uint32_t)((100000ull << 19) / 1034880) && w == (uint32_t)(((uint64_t)r * (112 + 3840)) >> 19));
+    /* DET shared: 9 + 9 of the 18 segments */
+    CHECK((S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + pipe] & 0x1f) == 9 && (S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + q] & 0x1f) == 9);
+    /* DSC with ODM: each segment's engine on its OPP, 2 slices of 1920 on a
+     * 3840 wide picture, ICH reset at the end of each line; the OPTC at the
+     * segment's slice width; the PPS the whole picture (4 slices) */
+    for (n = 0; n < 2; n++) {
+        uint32_t e = n ? q : pipe, o = n ? q : opp;
+        v = S.reg[DCN_B2 + regDSCRM0_DSCRM_DSC_FORWARD_CONFIG + e];
+        CHECK((v & DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_FORWARD_EN_MASK) &&
+              ((v & DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_OPP_PIPE_SOURCE_MASK) >>
+               DSCRM0_DSCRM_DSC_FORWARD_CONFIG__DSCRM_DSC_OPP_PIPE_SOURCE__SHIFT) == o);
+        CHECK((S.reg[DSCR(regDSCC0_DSCC_PPS_CONFIG3, e)] & 0xffff) == 1920 &&
+              ((S.reg[DSCR(regDSCC0_DSCC_CONFIG0, e)] & DSCC0_DSCC_CONFIG0__NUMBER_OF_SLICES_PER_LINE_MASK) >> DSCC0_DSCC_CONFIG0__NUMBER_OF_SLICES_PER_LINE__SHIFT) == 1 &&
+              (S.reg[DSCR(regDSC_TOP0_DSC_TOP_CONTROL, e)] & DSC_TOP0_DSC_TOP_CONTROL__DSC_CLOCK_EN_MASK) &&
+              !(S.reg[DCN_B2 + regDOMAIN16_PG_STATUS + 2 * e] & DOMAIN16_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS_MASK));
+        CHECK(((S.reg[DSCR(regDSCC0_DSCC_CONFIG0, e)] & DSCC0_DSCC_CONFIG0__ICH_RESET_AT_END_OF_LINE_MASK) >>
+               DSCC0_DSCC_CONFIG0__ICH_RESET_AT_END_OF_LINE__SHIFT) == 0xf);
+    }
+    CHECK((S.reg[ODMR(regODM0_OPTC_DATA_FORMAT_CONTROL, otg)] & ODM0_OPTC_DATA_FORMAT_CONTROL__OPTC_DSC_MODE_MASK) &&
+          (S.reg[ODMR(regODM0_OPTC_WIDTH_CONTROL, otg)] >> 16) == 1920 && S.dpcd[0x160] == 1);
+    vpg_pps(2, sent);
+    {
+        rdna3_dsc_hw_config hc;
+        hc.pic_width = 7680; hc.pic_height = 4320; hc.pixel_encoding = RD_PIXEL_ENCODING_RGB; hc.bpc = 8;
+        hc.is_odm = 1; hc.dc_dsc_cfg = ms.dp_want_dsc_cfg;
+        CHECK(dcn32_dsc_get_packed_pps(&hc, pps) == 1 && memcmp(sent, pps, 128) == 0 && pps[6] == 0x10 &&
+              pps[7] == 0xe0 && pps[8] == 0x1e && pps[9] == 0x00 && pps[12] == 0x07 && pps[13] == 0x80);
+    }
+    /* the pixel clock: the DP DTO at half the rate, K2 / 2, two pixels per
+     * cycle in the stream encoder (M/N of half the rate, N x 2) */
+    CHECK(S.reg[DCN_B1 + regDP_DTO0_PHASE + 4 * otg] == 1034880u / 2 * 1000 &&
+          ((S.reg[DCN_B1 + regOTG_PIXEL_RATE_DIV] >> (3 * otg + 1)) & 3) == RD_PIXEL_RATE_DIV_BY_2 &&
+          (S.reg[DPR(regDP0_DP_PIXEL_FORMAT, 2)] & DP0_DP_PIXEL_FORMAT__DP_PIXEL_PER_CYCLE_PROCESSING_MODE_MASK) &&
+          (S.reg[DPR(regDP0_DP_VID_TIMING, 2)] & DP0_DP_VID_TIMING__DP_VID_N_MUL_MASK) &&
+          S.reg[DPR(regDP0_DP_VID_M, 2)] == (uint32_t)(0x8000ull * (1034880 / 2) / (RD_DP_LINK_RATE_HIGH2 * 27000)));
+    CHECK(S.dps.trained_rate == RD_DP_LINK_RATE_HIGH2 && dp.fec_state == RD_FEC_ENABLED);
+
+    /* the state read back: one head over both pipes; a flip reaches both */
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].odm_cnt == 2 && dc->head[0].odm_pipe == q &&
+          dc->head[0].width == 7680 && dc->head[0].odm_x == 3840);
+    CHECK(dcn32_flip(dev, dc, 0, FB_START + 0x4000000, 7680, 0) == RDNA3_OK &&
+          S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS + RD_CLONE_HUBP_STRIDE * q] == (uint32_t)(FB_START + 0x4000000) &&
+          S.reg[DCN_B2 + regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS + RD_CLONE_HUBP_STRIDE * pipe] == (uint32_t)(FB_START + 0x4000000));
+    CHECK(dcn32_flip(dev, dc, 0, FB_START, 7680, 0) == RDNA3_OK);
+    /* the cursor: shown by the pipe whose half it is over */
+    CHECK(dcn32_cursor_set_image(dev, dc, 0, FB_START + 0x20000000, 64) == RDNA3_OK &&
+          dcn32_cursor_set_position(dev, dc, 0, 5000, 100, 1) == RDNA3_OK && dc->cursor_on[q] && !dc->cursor_on[pipe]);
+    CHECK(dcn32_cursor_set_position(dev, dc, 0, 100, 100, 0) == RDNA3_OK && !dc->cursor_on[q] && !dc->cursor_on[pipe]);
+
+    /* back to 2560x1440 on one pipe: optc32_set_odm_bypass, the ODM pipe and
+     * its DSC engine off, the DET back */
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 1034880, &up, NULL, &ms) == RD_MODESET_OK && ms.odm_want == 1 &&
+          ms.odm_cur == 2 && ms.odm.pipe == q && ms.odm.det_main == det0);
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START + 0x10000000, 2560, FB_START, 7680, 50) == RDNA3_OK &&
+          dc->head[0].width == 2560 && dc->head[0].odm_cnt == 0 && dp.odm_opp_cnt == 1);
+    v = S.reg[ODMR(regODM0_OPTC_DATA_SOURCE_SELECT, otg)];
+    CHECK(((v & ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_NUM_OF_INPUT_SEGMENT_MASK) >>
+           ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_NUM_OF_INPUT_SEGMENT__SHIFT) == 0 &&
+          ((v & ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG1_SRC_SEL_MASK) >> ODM0_OPTC_DATA_SOURCE_SELECT__OPTC_SEG1_SRC_SEL__SHIFT) == 0xf &&
+          S.reg[ODMR(regODM0_OPTC_MEMORY_CONFIG, otg)] == 0 &&
+          !(S.reg[OTG(regOTG0_OTG_H_TIMING_CNTL, otg)] & OTG0_OTG_H_TIMING_CNTL__OTG_H_TIMING_DIV_MODE_MASK));
+    CHECK((S.reg[DCN_B3 + regMPC_OUT0_MUX + (regMPC_OUT1_MUX - regMPC_OUT0_MUX) * q] & 0xf) == 0xf &&
+          S.reg[DCN_B3 + regMPCC0_MPCC_TOP_SEL + RD_CLONE_MPCC_STRIDE * q] == 0xf &&
+          (S.reg[DCN_B2 + regDOMAIN0_PG_STATUS + 2 * q] & DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS_MASK) &&
+          (S.reg[DCN_B2 + regDOMAIN16_PG_STATUS + 2 * q] & DOMAIN16_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS_MASK) &&
+          !(S.reg[DSCR(regDSC_TOP0_DSC_TOP_CONTROL, q)] & DSC_TOP0_DSC_TOP_CONTROL__DSC_CLOCK_EN_MASK) &&
+          (S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + pipe] & 0x1f) == det0 &&
+          (S.reg[DCN_B2 + regDCHUBBUB_DET0_CTRL + q] & 0x1f) == 0 &&
+          S.reg[DCN_B2 + regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION + RD_CLONE_HUBP_STRIDE * pipe] == (2560u | 1440u << 16));
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].odm_cnt == 0 && dc->head[0].width == 2560);
+
+    dp.fec_policy = dp.dsc_policy = dp.odm_policy = 0;
+    memset(&S.dpcd[0x060], 0, 16);
+    S.dpcd[0x090] = 0;
+    S.reg[RD_CLK1_CLK0_DFS_CNTL] = dfs0;
+    S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE] = dfs1;
+    S.dcn_frames = 0;
+}
+
 static void test_dp_link(rdna3_dev *dev, rdna3_dmub *dm)
 {
     static rdna3_dcn dc;
@@ -7508,6 +8021,9 @@ static void test_dp_link(rdna3_dev *dev, rdna3_dmub *dm)
     test_dsc_pps();
     test_dp_dsc(dev, dm, &dc, &own);
     test_dp_mst(dev, dm, &dc, &own);
+    /* UHBR (128b/132b) and ODM combine on this head */
+    test_dp_uhbr(dev, dm, &dc, &own);
+    test_dp_odm(dev, dm, &dc, &own);
 
     /* the HDMI head again for the tests that follow */
     S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] = be_cntl;

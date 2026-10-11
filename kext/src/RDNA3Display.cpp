@@ -996,8 +996,12 @@ const rdna3_dcn_clk_limits *RDNA3Accel::displayClkLimits()
  * capabilities are read again on every call (AUX side band, the link is
  * not touched); the link cap a training verified (dp_verify_link_cap on the
  * first mode set) is kept until the sink reports other capabilities.
- * rdna3dsc=1 turns DC's FEC and DSC policies on for the link. A DIG_MODE 5
- * head is one this driver took over as MST (rdna3mst=1). nullptr without
+ * rdna3dsc=1 turns DC's FEC and DSC policies on for the link. rdna3uhbr=1
+ * lets the link take DP 2.1 UHBR rates (128b/132b through the HPO
+ * encoders; one stream: the HPO stream / link encoder 0, so one head at a
+ * time holds the policy, the first that asks). rdna3odm=1 turns the ODM
+ * combine policy on (2:1 for the 8K modes and pixel rates one pipe does not
+ * reach). A DIG_MODE 5 head is one this driver took over as MST (rdna3mst=1). nullptr without
  * the boot-arg, for a head that is not DP, or when the sink does not
  * answer: such a head stays refused (RD_MODESET_NOT_TMDS).
  * Called with fDispLock held. */
@@ -1028,6 +1032,17 @@ rdna3_dp_link *RDNA3Accel::displayDpLink(uint32_t head, const rdna3_display_path
     }
     l->dm = fDisplayDm;
     l->fec_policy = l->dsc_policy = rd3_arg("rdna3dsc", 0) ? 1 : 0;
+    l->odm_policy = rd3_arg("rdna3odm", 0) ? 1 : 0;
+    {
+        /* the HPO encoders serve one stream: UHBR for one DP head only */
+        int uhbr = rd3_arg("rdna3uhbr", 0) ? 1 : 0;
+        for (uint32_t j = 0; uhbr && j < 4; j++)
+            if (j != head && fDpLink[j] && fDpLink[j]->uhbr_policy)
+                uhbr = 0;
+        if (uhbr != l->uhbr_policy && l->caps_valid)
+            l->verified = 0;   /* another max link cap: verified again */
+        l->uhbr_policy = uhbr;
+    }
     uint8_t rx[16];
     memcpy(rx, l->dpcd_caps.rx, sizeof(rx));
     uint32_t oui = l->dpcd_caps.sink_dev_id;
@@ -1365,11 +1380,26 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     rdna3_dcn_clocks ck;
     dcn32_clk_read(fDispDev, &ck);   /* raised or not: the report sees them */
     char dpval[128] = "";
-    char dscval[96] = "", mstval[96] = "";
+    char dscval[96] = "", mstval[96] = "", uhbrval[160] = "", odmval[96] = "";
     if (dpHead) {
         snprintf(dpval, sizeof(dpval), "verified 0x%x x%u, running 0x%x x%u, last training %d, %u trainings, %u fallbacks",
                  dpl->verified_link_cap.link_rate, dpl->verified_link_cap.lane_count, dpl->cur_link_settings.link_rate,
                  dpl->cur_link_settings.lane_count, dpl->last_result, dpl->lt_runs, dpl->lt_fallbacks);
+        /* step uhbr: the 128b/132b side (rates in 10 Mbps: 1000 / 1350 / 2000) */
+        snprintf(uhbrval, sizeof(uhbrval),
+                 "%s, sink rates 0x%02x, cable id 0x%02x, max %s, running %s%s, DTBCLK %u kHz, %u slots, X.Y %u.%u, ACT %d, "
+                 "hblank sym %u",
+                 dpl->uhbr_policy ? "on" : "off", dpl->dpcd_caps.dp_128b_132b_supported_link_rates,
+                 dpl->dpcd_caps.cable_id, dcn32_dp_rate_name(dpl->max_link_cap.link_rate),
+                 dcn32_dp_rate_name(dpl->cur_link_settings.link_rate), dpl->hpo_active ? " (HPO)" : " (DIO)",
+                 dpl->dtbclk_khz, dpl->sst_slots, dpl->sst_vcp_x, dpl->sst_vcp_y, dpl->sst_act,
+                 dpl->hblank_min_symbol_width);
+        /* step odm: the segments and their OPPs */
+        if (dpl->odm_opp_cnt > 1)
+            snprintf(odmval, sizeof(odmval), "%u:1, OPP %u + %u, DSC %u + %u, pipe %u + %u", dpl->odm_opp_cnt,
+                     dpl->odm_opp[0], dpl->odm_opp[1], dpl->odm_dsc[0], dpl->odm_dsc[1], ms->pipe, ms->odm.pipe);
+        else
+            snprintf(odmval, sizeof(odmval), "%s, one pipe", dpl->odm_policy ? "on" : "off");
         if (dpl->stream_dsc)
             snprintf(dscval, sizeof(dscval), "%u x %u slices, %u.%04u bpp, FEC %d", dpl->dsc_cfg.num_slices_h,
                      dpl->dsc_cfg.num_slices_v, dpl->dsc_cfg.bits_per_pixel / 16,
@@ -1401,6 +1431,11 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
         snprintf(key, sizeof(key), "RDNA3,Head%u,MST", m->head);
         setProperty(key, mstval);
         LOG("display: head %u DSC: %s; MST: %s", m->head, dscval, mstval);
+        snprintf(key, sizeof(key), "RDNA3,Head%u,UHBR", m->head);
+        setProperty(key, uhbrval);
+        snprintf(key, sizeof(key), "RDNA3,Head%u,ODM", m->head);
+        setProperty(key, odmval);
+        LOG("display: head %u UHBR: %s; ODM: %s", m->head, uhbrval, odmval);
     }
     {
         char val[128];

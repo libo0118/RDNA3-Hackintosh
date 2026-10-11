@@ -28,7 +28,10 @@
  *   dio/dcn32, dcn30        enc32_dp_set_dsc_config, enc3_dp_set_dsc_pps_info_packet
  *   dcn30/dcn30_vpg.c       vpg3_update_generic_info_packet
  *
- * Single pipe only (no ODM combine: DC's opp_cnt is 1, is_odm false). DCN
+ * With ODM combine (hw/dcn32_odm.c) each segment's DSC engine gets its
+ * share (dcn32_update_dsc_on_stream: the picture and the slices divided by
+ * the segments, is_odm: ICH reset at the end of every line); the PPS is the
+ * whole picture's. DCN
  * 3.2 has no DSCCLK DTO in dccg32_funcs (set_dto_dscclk is NULL): DSCCLK is
  * DISPCLK / 3, so dml32's DSCCLK check (pixel rate / 3 within DISPCLK / 3
  * less the downspread) is the DISPCLK check the mode set already makes.
@@ -64,6 +67,10 @@ enum { RD_PIXEL_ENCODING_RGB = 1, RD_PIXEL_ENCODING_YCBCR422, RD_PIXEL_ENCODING_
 
 /* enum optc_dsc_mode */
 enum { RD_OPTC_DSC_DISABLED = 0, RD_OPTC_DSC_ENABLED_444, RD_OPTC_DSC_ENABLED_NATIVE_SUBSAMPLED };
+
+/* enum dc_link_encoding_format */
+enum { RD_DC_LINK_ENCODING_UNSPECIFIED = 0, RD_DC_LINK_ENCODING_DP_8b_10b, RD_DC_LINK_ENCODING_DP_128b_132b,
+       RD_DC_LINK_ENCODING_HDMI_TMDS, RD_DC_LINK_ENCODING_HDMI_FRL };
 
 /* enum dsc_pixel_format */
 enum { RD_DSC_PIXFMT_RGB = 0, RD_DSC_PIXFMT_YCBCR444, RD_DSC_PIXFMT_SIMPLE_YCBCR422, RD_DSC_PIXFMT_NATIVE_YCBCR422,
@@ -170,6 +177,9 @@ typedef struct rdna3_dsc_timing {
     uint32_t dsc_fixed_bits_per_pixel_x16;
     int      dsc;                     /* flags.DSC */
     rdna3_dsc_config dsc_cfg;
+    /* the link encoding dc_bandwidth_in_kbps_from_timing is asked for
+     * (RD_DC_LINK_ENCODING_*; 0 = unspecified, as 8b/10b) */
+    uint32_t link_encoding;
 } rdna3_dsc_timing;
 
 /* struct drm_dsc_config (field widths as DRM's) */
@@ -252,7 +262,8 @@ int  dcn32_dsc_compute_bandwidth_range(uint32_t min_bpp_x16, uint32_t max_bpp_x1
 /* dc_dsc_stream_bandwidth_in_kbps / dc_dsc_stream_bandwidth_overhead_in_kbps */
 uint32_t dcn32_dsc_stream_kbps(const rdna3_dsc_timing *timing, uint32_t bpp_x16, uint32_t num_slices_h, int is_dp);
 uint32_t dcn32_dsc_overhead_kbps(const rdna3_dsc_timing *timing, uint32_t num_slices_h, int is_dp);
-/* dc_bandwidth_in_kbps_from_timing (8b/10b; with flags.DSC the compressed rate) */
+/* dc_bandwidth_in_kbps_from_timing in t->link_encoding (128b/132b: the
+ * apply_128b_132b_stream_overhead padding); with flags.DSC the compressed rate */
 uint32_t dcn32_dsc_timing_kbps(const rdna3_dsc_timing *timing);
 /* dsc2_get_enc_caps */
 void dcn32_dsc_get_enc_caps(rdna3_dsc_enc_caps *caps, uint32_t pixel_clock_100hz);

@@ -61,6 +61,7 @@
 #include "dcn32_clk.h"
 #include "dcn32_mode.h"
 #include "dcn32_dp.h"
+#include "dcn32_odm.h"
 #include "dmub32.h"
 #include "dcn32_hdmi.h"
 #include "vbios.h"
@@ -113,6 +114,12 @@ typedef struct rdna3_dcn_modeset {
     int      dp_want_dsc, dp_cur_dsc;
     rdna3_dsc_config dp_want_dsc_cfg, dp_cur_dsc_cfg;
     uint32_t dp_mst_pbn, dp_mst_slots;
+    /* DP SST: the new stream on a 128b/132b link setting (rdna3uhbr: the
+     * HPO encoders, DTBCLK); the ODM combine of the new and the running
+     * timing (rdna3odm; 1 = one pipe) and the ODM pipe when either is 2 */
+    int      dp_want_hpo;
+    uint32_t odm_want, odm_cur;
+    rdna3_odm_pipe odm;
     /* TMDS with an HDMI configuration (dcn32_modeset_plan_hdmi): it, and
      * the new and the running timing as modes (the AVI infoframe) */
     rdna3_hdmi_cfg hdmi;
@@ -140,6 +147,8 @@ enum {
     RD_MODESET_LINK_BW = 8,      /* DP: no link setting of the (verified) link cap carries it */
     RD_MODESET_DP_LINK = 9,      /* DP: no sink capabilities read, or the link is not this head's */
     RD_MODESET_DONGLE = 10,      /* DP: beyond the active converter (DP-to-HDMI TMDS / FRL, DFP caps) */
+    RD_MODESET_ODM = 11,         /* DP: ODM combine needed, but no free pipe / DET to split, the OTG
+                                  * not on its own OPP, or no DSC slice split over the segments */
 };
 
 /* Read head 'head' of 'dc' (running at 'cur_pclk_khz', from the EDID match
@@ -167,7 +176,12 @@ int  dcn32_modeset_plan_clk(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, co
  * gets DSC when the sink decodes it (dcn32_dp_decide_dsc); with dp->mst
  * (rdna3mst: dp->mgr, dp->mst_port) the head is an MST stream (DIG_MODE 5,
  * or a DIG_MODE 0 head taken over): the mode must fit the port's PBN and
- * the 63 time slots. 'dp' NULL = dcn32_modeset_plan_clk. */
+ * the 63 time slots. With dp->uhbr_policy (rdna3uhbr) an SST stream may
+ * take a 128b/132b link setting (the HPO encoders, DTBCLK raised by the
+ * apply); with dp->odm_policy (rdna3odm) dml32_CalculateODMMode decides
+ * ODM combine 2:1 (and modes up to 7680 x 4320: wider than 4096 takes
+ * ODM), with a free pipe for the second half. 'dp' NULL =
+ * dcn32_modeset_plan_clk. */
 int  dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
                            rdna3_dp_link *dp, uint32_t cur_pclk_khz, const rdna3_mode *m,
                            const rdna3_dcn_clk_limits *lim, rdna3_dcn_modeset *ms);

@@ -39,11 +39,50 @@
  *        allocate_mst_payload, deallocate_mst_payload, disable_link_dp): hw/dcn32_dp_mst.c,
  *        the topology manager hw/dp_mst.c
  *
- * UHBR / 128b/132b (the HPO encoder, DTBCLK, DPSTREAMCLK)
- * is declared not supported and left out: dp_get_max_link_cap never goes
- * above HBR3. An LTTPR found in the chain is trained in transparent mode
- * (dp_decide_8b_10b_lttpr_mode with an LTTPR-aware VBIOS that does not force
- * non-transparent); per-repeater (non-transparent) training is left out.
+ * UHBR / 128b/132b (the link's uhbr_policy, rdna3uhbr=1): an SST stream
+ * whose link settings land on UHBR10 / 13.5 / 20 runs through the HPO
+ * encoders (hw/dcn32_hpo.c) instead of the DIG:
+ *
+ *   link_dp_capability.c   the 128b/132b caps (DP_128B132B_SUPPORTED_LINK_RATES,
+ *                          retrieve_cable_id, dpcd_write_cable_id_to_dprx,
+ *                          get_cable_max_link_rate, the LTTPR's 128b/132b
+ *                          rates), the UHBR rates in dp_get_max_link_cap,
+ *                          increase / reduce_link_rate,
+ *                          decide_fallback_link_setting_max_bw_policy,
+ *                          link_dp_get_encoding_format, dp_is_128b_132b_signal
+ *   link_validation.c      dp_link_bandwidth_kbps (128b/132b: 96.71 %)
+ *   dc_dsc.c               apply_128b_132b_stream_overhead (hw/dcn32_dsc.c)
+ *   link_dp_training_128b_132b.c  dp_perform_128b_132b_link_training, the
+ *                          channel EQ / CDS done sequences, the training
+ *                          settings, dp_decide_128b_132b_lttpr_mode
+ *   link_dp_training.c     the 128b/132b branches (TX FFE presets, the DPCD
+ *                          patterns, the intra-hop wait on exit,
+ *                          configure_lttpr_mode_non_transparent)
+ *   link_hwss_hpo_dp.c     the HPO link hwss (link output, test pattern, FFE,
+ *                          stream encoder setup / attribute, the VC payload,
+ *                          throttled VCP size, hblank min symbol width)
+ *   link_dpms.c            update_sst_payload,
+ *                          write_128b_132b_sst_payload_allocation_table,
+ *                          link_calculate_sst_avg_time_slots_per_mtp,
+ *                          poll_for_allocation_change_trigger, get_lane_status;
+ *                          the 128b/132b order of link_set_dpms_on / _off
+ *   dcn20/dce110 hwseq     dcn20_enable_stream_timing's DTBCLK DTO,
+ *                          dcn20_enable_stream / dce110_disable_stream's
+ *                          DPSTREAMCLK and SYMCLK32_SE, the HPO blank /
+ *                          unblank, optc3_set_out_mux
+ *
+ * Without uhbr_policy (DC's debug.disable_uhbr) dp_get_max_link_cap stays at
+ * HBR3 whatever the sink and the VBIOS encoder caps say, as before. The VBIOS
+ * encoder caps record decides which UHBR rates the board allows (no record:
+ * link_enc_feature, no UHBR). MST over 128b/132b is not ported.
+ *
+ * ODM combine (l->odm_opp_cnt 2, hw/dcn32_odm.c with rdna3odm=1): the
+ * stream's DSC on every segment's engine (dcn32_update_dsc_on_stream's
+ * split), the pixel rate divider (K2 / 2) and the DP DTO at the requested
+ * pixel clock / segments, dio_se_pix_per_cycle 2 (dcn32_unblank_stream).
+ * An LTTPR is trained transparent on 8b/10b (dp_decide_8b_10b_lttpr_mode
+ * with an LTTPR-aware VBIOS); on 128b/132b DC puts it in non-transparent
+ * mode and trains the DPRX end to end (the LTTPRs train themselves).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -103,6 +142,41 @@ extern "C" {
 #define RD_DPCD_PHY_REPEATER_MODE       0xf0003
 #define RD_DPCD_PHY_REPEATER_EXTENDED_WAIT_TIMEOUT 0xf0005
 #define RD_DPCD_TOTAL_LTTPR_CNT         0xf000a
+#define RD_DPCD_TRAINING_AUX_RD_INTERVAL_PHY_REPEATER1 0xf0020
+#define RD_DPCD_REPEATER_CONFIGURATION_AND_STATUS_SIZE 0x50
+/* DP 2.0 (drm_dp.h, dc_dp_types.h) */
+#define RD_DPCD_SINK_VIDEO_FALLBACK_FORMATS 0x00020
+#define RD_DPCD_FEC_CAPABILITY_1        0x00091
+#define RD_DPCD_CABLE_ATTRIBUTES_UPDATED_BY_DPTX 0x00110
+#define RD_DPCD_PAYLOAD_ALLOCATE_SET        0x1c0
+#define RD_DPCD_PAYLOAD_ALLOCATE_START_TIME_SLOT 0x001c1
+#define RD_DPCD_PAYLOAD_ALLOCATE_TIME_SLOT_COUNT 0x001c2
+#define RD_DPCD_SINK_STATUS             0x00205
+#define RD_DPCD_PAYLOAD_TABLE_UPDATE_STATUS 0x2c0
+#define RD_DPCD_128B132B_SUPPORTED_LINK_RATES 0x02215
+#define RD_DPCD_128B132B_TRAINING_AUX_RD_INTERVAL 0x02216
+#define RD_DPCD_CABLE_ATTRIBUTES_UPDATED_BY_DPRX 0x02217
+#define RD_DPCD_MAX_UNCOMPRESSED_PIXEL_RATE_CAP 0x0221c
+/* DP_MAIN_LINK_CHANNEL_CODING */
+#define RD_DP_CAP_ANSI_8B10B            (1u << 0)
+#define RD_DP_CAP_ANSI_128B132B         (1u << 1)
+/* DP_128B132B_SUPPORTED_LINK_RATES, the LTTPR's 128b/132b rates */
+#define RD_DP_UHBR10                    (1u << 0)
+#define RD_DP_UHBR20                    (1u << 1)
+#define RD_DP_UHBR13_5                  (1u << 2)
+/* union dp_cable_id: UHBR10_20_CAPABILITY 2 bits, UHBR13_5 1, CABLE_TYPE 3 */
+#define RD_DP_CABLE_UHBR10_20(c)        ((c) & 3u)
+#define RD_DP_CABLE_UHBR13_5(c)         (((c) >> 2) & 1u)
+#define RD_DP_CABLE_TYPE(c)             (((c) >> 3) & 7u)
+/* DP_SINK_STATUS */
+#define RD_DP_INTRA_HOP_AUX_REPLY_INDICATION (1u << 3)
+/* DP_LANE_ALIGN_STATUS_UPDATED, 128b/132b */
+#define RD_DP_128B132B_DPRX_EQ_INTERLANE_ALIGN_DONE  (1u << 2)
+#define RD_DP_128B132B_DPRX_CDS_INTERLANE_ALIGN_DONE (1u << 3)
+#define RD_DP_128B132B_LT_FAILED        (1u << 4)
+/* union payload_table_update_status */
+#define RD_DP_VC_PAYLOAD_TABLE_UPDATED  (1u << 0)
+#define RD_DP_ACT_HANDLED               (1u << 1)
 
 #define RD_DP_SET_POWER_D0              0x1
 #define RD_DP_SET_POWER_D3              0x2
@@ -144,6 +218,12 @@ extern "C" {
 #define RD_DP_LINK_RATE_HIGH2   0x14   /* HBR2 5.40 Gbps */
 #define RD_DP_LINK_RATE_RATE_8  0x19
 #define RD_DP_LINK_RATE_HIGH3   0x1e   /* HBR3 8.10 Gbps */
+/* the 128b/132b part, in 10 Mbps per lane */
+#define RD_DP_LINK_RATE_UHBR10  1000   /* UHBR10   10.0 Gbps */
+#define RD_DP_LINK_RATE_UHBR13_5 1350  /* UHBR13.5 13.5 Gbps */
+#define RD_DP_LINK_RATE_UHBR20  2000   /* UHBR20   20.0 Gbps */
+/* enum dp_link_encoding (what DP_MAIN_LINK_CHANNEL_CODING_SET takes) */
+enum { RD_DP_UNKNOWN_ENCODING = 0, RD_DP_8b_10b_ENCODING = 1, RD_DP_128b_132b_ENCODING = 2 };
 /* enum dc_link_spread */
 #define RD_DP_LINK_SPREAD_DISABLED       0x00
 #define RD_DP_LINK_SPREAD_05_DOWNSPREAD_30KHZ 0x10
@@ -160,14 +240,21 @@ extern "C" {
 #define RD_DP_LINK_TRAINING_RETRY_DELAY     50   /* ms */
 #define RD_DP_LINK_RATE_REF_FREQ_IN_KHZ     27000
 
-/* enum dc_dp_training_pattern (8b/10b) */
+/* enum dc_dp_training_pattern */
 enum {
     RD_DP_TRAINING_PATTERN_SEQUENCE_1 = 0,
     RD_DP_TRAINING_PATTERN_SEQUENCE_2,
     RD_DP_TRAINING_PATTERN_SEQUENCE_3,
     RD_DP_TRAINING_PATTERN_SEQUENCE_4,
     RD_DP_TRAINING_PATTERN_VIDEOIDLE,
+    RD_DP_128b_132b_TPS1,
+    RD_DP_128b_132b_TPS2,
+    RD_DP_128b_132b_TPS2_CDS,
 };
+/* enum dpcd_training_patterns, 128b/132b */
+#define RD_DPCD_128b_132b_TPS1          1
+#define RD_DPCD_128b_132b_TPS2          2
+#define RD_DPCD_128b_132b_TPS2_CDS      3
 
 /* enum link_training_result */
 enum {
@@ -181,6 +268,10 @@ enum {
     RD_LT_LQA_FAIL,
     RD_LT_LINK_LOSS,
     RD_LT_ABORT,
+    RD_LT_128b_132b_LT_FAILED,
+    RD_LT_128b_132b_MAX_LOOP_COUNT_REACHED,
+    RD_LT_128b_132b_CHANNEL_EQ_DONE_TIMEOUT,
+    RD_LT_128b_132b_CDS_DONE_TIMEOUT,
 };
 
 /* enum lttpr_mode */
@@ -230,15 +321,17 @@ typedef struct rdna3_dp_link_settings {
     uint32_t link_spread;     /* RD_DP_LINK_SPREAD_* */
 } rdna3_dp_link_settings;
 
-/* struct dc_lane_settings */
+/* struct dc_lane_settings (ffe_preset: union dc_dp_ffe_preset, 128b/132b) */
 typedef struct rdna3_dp_lane_settings {
     uint8_t voltage_swing, pre_emphasis, post_cursor2;
+    uint8_t ffe_preset;
 } rdna3_dp_lane_settings;
 
-/* struct dc_lttpr_caps (8b/10b part) */
+/* struct dc_lttpr_caps */
 typedef struct rdna3_dp_lttpr_caps {
     uint8_t revision, max_link_rate, phy_repeater_cnt, max_lane_count;
     uint8_t mode, max_ext_timeout, main_link_channel_coding, supported_128b_132b_rates;
+    uint8_t aux_rd_interval[7];     /* per repeater (non-transparent 8b/10b), & 0x7f */
 } rdna3_dp_lttpr_caps;
 
 /* struct dpcd_caps, the part this port uses */
@@ -267,6 +360,12 @@ typedef struct rdna3_dp_caps {
     uint8_t  sink_dev_id_str[6], sink_hw_revision, sink_fw_revision[2];
     uint8_t  adaptive_sync_caps;    /* DP_DPRX_FEATURE_ENUMERATION_LIST_CONT_1 */
     int      panel_luminance_control;   /* eDP general cap 2 (dpcd_read_sink_ext_caps) */
+    /* DP 2.0: the 128b/132b link rates (RD_DP_UHBR*), the sink's video
+     * fallback formats, FEC capability 1, the max uncompressed pixel rate,
+     * the cable attributes (union dp_cable_id) */
+    uint8_t  dp_128b_132b_supported_link_rates, fallback_formats, fec_cap1;
+    uint8_t  max_uncompressed_pixel_rate_cap[2];
+    uint8_t  cable_id;
 } rdna3_dp_caps;
 
 /* struct encoder_info_frame, the DP part (dcn30_update_info_frame) */
@@ -283,6 +382,9 @@ typedef struct rdna3_dp_lt_settings {
     uint8_t  dpcd_lane_settings[RD_DP_LANE_COUNT_DP_MAX];   /* union dpcd_training_lane */
     uint32_t cr_pattern_time, eq_pattern_time;              /* us */
     uint32_t pattern_for_cr, pattern_for_eq;
+    /* 128b/132b: the EQ wait / loop limits, the CDS pattern and its waits */
+    uint32_t eq_wait_time_limit, eq_loop_count_limit;
+    uint32_t pattern_for_cds, cds_pattern_time, cds_wait_time_limit;
     int      enhanced_framing, should_set_fec_ready;
     int      disallow_per_lane_settings, always_match_dpcd_with_hw_lane_settings;
     int      lttpr_mode;
@@ -334,6 +436,34 @@ typedef struct rdna3_dp_link {
     rdna3_mst_alloc_table mst_alloc;
     uint32_t mst_pbn, mst_slots, mst_vcp_x, mst_vcp_y;   /* the last payload (log, tests) */
     int      mst_act;               /* the last ACT handled */
+    /* UHBR (rdna3uhbr=1): uhbr_policy = !debug.disable_uhbr. The HPO
+     * resources of the link: stream encoder hpo_se (0..3, VPG 6 + n) and
+     * link encoder hpo_le (0..1); hpo_active = dp_is_128b_132b_signal for
+     * the running stream; the DTBCLK reference (get_dtb_ref_clk_frequency,
+     * kHz); cable_id_written (dprx_states); what the SST payload got */
+    int      uhbr_policy;
+    uint32_t hpo_se, hpo_le;
+    int      hpo_active;
+    uint32_t dtbclk_khz;
+    int      cable_id_written;
+    uint32_t sst_slots, sst_vcp_x, sst_vcp_y, hblank_min_symbol_width;
+    int      sst_act;
+    /* ODM combine of the stream (hw/dcn32_odm.c, rdna3odm=1: odm_policy =
+     * the "combine as needed" ODM policy, 0 = dm_odm_combine_policy_none):
+     * odm_opp_cnt segments (0 / 1: none), the OPP and the DSC engine of each
+     * segment (the first are l->opp and l->dsc_inst) */
+    int      odm_policy;
+    uint32_t odm_opp_cnt;
+    uint32_t odm_opp[4], odm_dsc[4];
+    /* the boot state's pixel mode while a 128b/132b or ODM stream changes
+     * it (dio_se_pix_per_cycle, the K1 / K2 pixel rate divider): put back
+     * for an 8b/10b single-pipe stream, whose divider this driver keeps */
+    int      boot_saved;
+    uint32_t boot_ppc, boot_k1, boot_k2;
+    /* the stream's timing while enable_link_dp trains (the fallback's
+     * bandwidth check in the setting's encoding:
+     * perform_link_training_with_retries); NULL otherwise */
+    const rdna3_mode *lt_mode;
 } rdna3_dp_link;
 
 /* Fill the static part of 'l' (no hardware access). */
@@ -343,6 +473,13 @@ void dcn32_dp_link_init(rdna3_dp_link *l, rdna3_dev *d, rdna3_dmub *dm, uint32_t
 
 /* dc_bandwidth_in_kbps_from_timing: RGB 4:4:4 at 'bpc' bits per component */
 uint32_t dcn32_dp_stream_kbps(uint32_t pixel_khz, uint32_t bpc);
+/* link_dp_get_encoding_format: RD_DP_*_ENCODING of a link setting */
+uint32_t dcn32_dp_encoding(const rdna3_dp_link_settings *s);
+/* dc_link_get_highest_encoding_format: RD_DC_LINK_ENCODING_* of the link
+ * (the verified link cap's encoding; HDMI TMDS behind a DP-HDMI converter) */
+uint32_t dcn32_dp_highest_encoding(const rdna3_dp_link *l);
+/* dp_is_128b_132b_signal for the link's running (or next) stream */
+int  dcn32_dp_is_128b_132b_signal(const rdna3_dp_link *l);
 /* dp_link_bandwidth_kbps (8b/10b, FEC off) */
 uint32_t dcn32_dp_link_kbps_settings(const rdna3_dp_link_settings *s);
 
@@ -360,7 +497,16 @@ const rdna3_dp_link_settings *dcn32_dp_link_cap(const rdna3_dp_link *l);
 void dcn32_dp_dsc_timing(const rdna3_mode *m, uint32_t bpc, rdna3_dsc_timing *t);
 int  dcn32_dp_sink_dsc_caps(const rdna3_dp_link *l, rdna3_dsc_dec_caps *caps);
 int  dcn32_dp_decide_dsc(const rdna3_dp_link *l, const rdna3_mode *m, uint32_t bpc, rdna3_dsc_config *cfg);
+/* the same for an ODM stream of 'opp_cnt' segments: the slices divisible
+ * by the segments (dc_dsc_config_options.dsc_force_odm_hslice_override) */
+int  dcn32_dp_decide_dsc_odm(const rdna3_dp_link *l, const rdna3_mode *m, uint32_t bpc, uint32_t opp_cnt,
+                             rdna3_dsc_config *cfg);
 uint32_t dcn32_dp_mode_kbps(const rdna3_mode *m, uint32_t bpc, const rdna3_dsc_config *cfg);
+/* the same in 'link_encoding' (RD_DC_LINK_ENCODING_*: the 128b/132b overhead) */
+uint32_t dcn32_dp_mode_kbps_enc(const rdna3_mode *m, uint32_t bpc, const rdna3_dsc_config *cfg, uint32_t link_encoding);
+/* what link_decide_link_settings asks of the link for mode 'm' (8 bpc): in
+ * the link's highest encoding (dcn32_dp_highest_encoding) */
+uint32_t dcn32_dp_stream_req_kbps(const rdna3_dp_link *l, const rdna3_mode *m, const rdna3_dsc_config *cfg);
 
 /* retrieve_link_cap (subset: LTTPR caps, wake-up, receiver caps, extended
  * caps, DPRX features, sink count / OUI, FEC cap) and dp_get_max_link_cap.
@@ -419,28 +565,54 @@ int  dcn32_dp_link_training_with_retries(rdna3_dp_link *l, const rdna3_dp_link_s
 void dcn32_dp_enable_link_phy(rdna3_dp_link *l, const rdna3_dp_link_settings *set);
 void dcn32_dp_disable_link_phy(rdna3_dp_link *l);
 
-/* dcn31_program_pix_clk for a DP signal: the DP DTO of OTG 'otg' at 'pixel_khz' */
+/* dcn31_program_pix_clk for a DP signal: the DP DTO of OTG 'otg' at
+ * 'pixel_khz' (the requested pixel clock: divided by the ODM segments),
+ * PIPE0_DTO_SRC_SEL 1 (8b/10b) or 2 (128b/132b: l->hpo_active) */
 void dcn32_dp_program_pix_clk(rdna3_dp_link *l, uint32_t pixel_khz);
 
-/* link_set_dpms_off (dcn20_blank_stream, deallocate_mst_payload for MST,
- * disable_link_dp, dcn20_disable_stream's reset_dio_stream_encoder, the
- * stream's DSC off: link_set_dsc_enable) */
+/* The stream resources DC's validation hands the pipe for mode 'm' (the
+ * link settings link_decide_link_settings picks; with a 128b/132b setting
+ * the HPO stream / link encoders: l->hpo_active). 0, or RDNA3_EINVAL when
+ * no setting carries the mode (l->stream_dsc / dsc_cfg set by the caller). */
+int  dcn32_dp_acquire_stream(rdna3_dp_link *l, const rdna3_mode *m);
+/* dcn20_enable_stream_timing's clock part for the stream acquired: the
+ * pixel rate divider (dcn32_calculate_dccg_k1_k2_values, for a 128b/132b
+ * or an ODM stream; an 8b/10b single pipe keeps what the boot set), the DP
+ * DTO (dcn31_program_pix_clk at the requested clock: / ODM segments), and
+ * for 128b/132b DTBCLK_P from DTBCLK0 and the DTBCLK DTO at the pixel
+ * clock / 4 from l->dtbclk_khz */
+void dcn32_dp_enable_stream_timing(rdna3_dp_link *l, const rdna3_mode *m);
+
+/* link_set_dpms_off (dce110_blank_stream, deallocate_mst_payload for MST
+ * or update_sst_payload for 128b/132b, disable_link_dp, dce110_disable_stream
+ * (reset_dio_stream_encoder, or the HPO encoders, SYMCLK32, DPSTREAMCLK and
+ * the DTBCLK DTO off), the stream's DSC off on every ODM segment:
+ * link_set_dsc_enable; a 128b/132b OTG back to the DIO) */
 void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l);
 
 /* link_set_dpms_on with mode 'm' (the OTG already runs it), DSC when
  * l->stream_dsc (l->dsc_cfg; set by the caller), MST to l->mst_port when
- * l->mst: dcn10_link_encoder_setup, setup_dio_stream_attribute (MSA),
- * link_set_dsc_enable, enable_link_dp / enable_link_dp_mst
- * (link_decide_link_settings + training with retries; with 'do_fallback'
- * the training falls back too; FEC), dcn20_enable_stream's stream encoder
- * setup, dp_set_dsc_on_rx + link_set_dsc_pps_packet, allocate_mst_payload,
- * dcn32_unblank_stream. 0, RDNA3_EINVAL (no link setting carries the mode),
- * RDNA3_EIO (training failed: an SST stream is still enabled as DC does,
- * the caller decides; an MST stream is not; or the MST payload failed). */
+ * l->mst, ODM segments l->odm_opp_cnt: link_decide_link_settings (in the
+ * link's highest encoding); a 128b/132b setting takes the HPO encoders
+ * (optc3_set_out_mux HPO, setup_hpo_dp_stream_attribute, dcn20_enable_stream's
+ * DTBCLK DTO / DPSTREAMCLK / SYMCLK32 / setup_hpo_dp_stream_encoder, the
+ * PPS through the HPO stream encoder, update_sst_payload, the HPO unblank),
+ * an 8b/10b one the DIO (dcn10_link_encoder_setup, setup_dio_stream_attribute,
+ * the stream encoder setup, allocate_mst_payload for MST,
+ * dcn32_unblank_stream: two pixels per cycle with ODM); between them
+ * link_set_dsc_enable, enable_link_dp / enable_link_dp_mst (training with
+ * retries; with 'do_fallback' the training falls back too; FEC on 8b/10b),
+ * dp_set_dsc_on_rx + link_set_dsc_pps_packet. 0, RDNA3_EINVAL (no link
+ * setting carries the mode; MST over a 128b/132b link), RDNA3_EIO (training
+ * failed: an SST stream is still enabled as DC does, the caller decides; an
+ * MST stream is not; or the MST payload failed). */
 int  dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fallback);
 
 /* the link status bits (DPCD 0x202..0x204) still hold: dp_check_link_loss_status */
 int  dcn32_dp_link_ok(rdna3_dp_link *l);
+
+/* a link rate's name (log, reports) */
+const char *dcn32_dp_rate_name(uint32_t link_rate);
 
 #ifdef __cplusplus
 }

@@ -17,6 +17,7 @@ HW      += hw/dcn32_dp.c
 HW      += hw/vcn40.c
 HW      += hw/dcn32_dsc.c hw/dp_mst.c hw/dcn32_dp_mst.c
 HW      += hw/dcn32_otg.c hw/dcn32_color.c hw/dcn32_hdmi.c hw/dcn32_hwseq.c
+HW      += hw/dcn32_hpo.c hw/dcn32_odm.c
 UAPI    := uapi/rdna3_drm.c
 COMMON_H := $(wildcard common/*.h) $(wildcard hw/*.h) $(wildcard uapi/*.h)
 
