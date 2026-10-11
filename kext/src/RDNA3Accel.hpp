@@ -301,6 +301,16 @@ private:
     /* rdna3hdmi=1 / 3: DC's HDMI stream on TMDS heads (hw/dcn32_hdmi.c), the
      * sink's HDMI caps from the EDID of the last mode list */
     struct rdna3_hdmi_cfg *fHdmiCfg[4] = {};
+    /* rdna3audio=1: the azalia endpoints (read_dce_straps, update_num_audio,
+     * the hw_init of dcn32_init_hw, once) and each head's audio stream: the
+     * EDID's audio info of the last mode list, the endpoint it holds */
+    struct rdna3_audio_pool *fAudioPool = nullptr;
+    struct rdna3_audio_stream *fAudio[4] = {};
+    /* rdna3uhbr=1: dcn32_init_hw's dccg_init (dccg31_init: the HPO stream
+     * encoders' SYMCLK32 from REFCLK), once before the first UHBR link */
+    bool          fDccgInit = false;
+    struct rdna3_audio_stream *displayAudio(uint32_t head, struct rdna3_dp_link *l, const struct rdna3_hdmi_cfg *hc,
+                                            uint32_t fe, uint32_t otg);
     /* rdna3dsc=1: FEC + DSC policies on those links. rdna3mst=1: an MST
      * capable sink (hub, daisy chain) on such a head is taken over at the
      * next mode set: the topology probed, its sinks' EDIDs read, the head's

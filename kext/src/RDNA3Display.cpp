@@ -37,6 +37,8 @@ extern "C" {
 #include "dcn32_clone.h"
 #include "dcn32_modeset.h"
 #include "dcn32_dp.h"
+#include "dcn32_audio.h"
+#include "dcn32_hpo.h"
 #include "dp_mst.h"
 #include "dcn32_gamma.h"
 #include "dcn32_otg.h"
@@ -784,6 +786,8 @@ void RDNA3Accel::displayFree()
         fDpLink[i] = nullptr;
         if (fHdmiCfg[i]) IOFree(fHdmiCfg[i], sizeof(rdna3_hdmi_cfg));
         fHdmiCfg[i] = nullptr;
+        if (fAudio[i]) IOFree(fAudio[i], sizeof(rdna3_audio_stream));
+        fAudio[i] = nullptr;
         if (fMstMgr[i]) IOFree(fMstMgr[i], sizeof(rdna3_mst_mgr));
         fMstMgr[i] = nullptr;
     }
@@ -1029,6 +1033,11 @@ rdna3_dp_link *RDNA3Accel::displayDpLink(uint32_t head, const rdna3_display_path
         l->mst_port = -1;
         /* dpcd_set_source_specific_data names the ASIC (asic_id.chip_id) */
         l->chip_id = fPci ? fPci->configRead16(kIOPCIConfigDeviceID) : 0;
+        /* dcn32_resource_construct: dc->caps.vbios_lttpr_enable from the
+         * dce_info table (bios_parser_get_lttpr_caps) */
+        uint8_t caps = 0;
+        if (fDispVbios && vbios_dce_info_caps(fDispVbios, &caps) == RDNA3_OK)
+            l->vbios_lttpr_enable = (caps & RD_DCE_INFO_CAPS_LTTPR_SUPPORT_ENABLE) ? 1 : 0;
     }
     l->dm = fDisplayDm;
     l->fec_policy = l->dsc_policy = rd3_arg("rdna3dsc", 0) ? 1 : 0;
@@ -1042,6 +1051,10 @@ rdna3_dp_link *RDNA3Accel::displayDpLink(uint32_t head, const rdna3_display_path
         if (uhbr != l->uhbr_policy && l->caps_valid)
             l->verified = 0;   /* another max link cap: verified again */
         l->uhbr_policy = uhbr;
+        if (uhbr && !fDccgInit) {
+            dcn32_dccg_init(fDispDev);
+            fDccgInit = true;
+        }
     }
     uint8_t rx[16];
     memcpy(rx, l->dpcd_caps.rx, sizeof(rx));
@@ -1174,7 +1187,63 @@ static bool hdmi_cfg(const rdna3_dcn_head *h, const rdna3_display_path *p, const
     hc->hdmi_sink = ed->hdmi;
     hc->lte_340_scramble = ed->lte_340_scramble;
     hc->max_tmds_clk_mhz = ed->max_tmds_clk_mhz;
+    /* rdna3fmt (step fmt): amdgpu_dm's output format on HDMI - YCbCr 4:4:4
+     * when the sink takes it, the deep colour the EDID allows (max bpc 16,
+     * amdgpu's default; bit 1: 8), the OPP formatter, dither and the deep
+     * colour PHY PLL with it; bit 2 forces YCbCr 4:2:2 (this port's switch) */
+    uint32_t f = rd3_arg("rdna3fmt", 0);
+    if (f & 1) {
+        hc->flags |= RD_HDMI_FMT;
+        dcn32_sink_color_caps(ed, &hc->color);
+        hc->max_bpc = (f & 2) ? 8 : 16;
+        hc->force_yuv422 = (f & 4) ? 1 : 0;
+    }
     return true;
+}
+
+/* rdna3audio (step audio): the head's audio stream for the next mode set,
+ * as DC's resource code pairs one with a stream (dc_resource.c: an audio
+ * capable signal, an audio_info with modes, find_first_free_audio); bit 1
+ * (rdna3audio=3) also sends the PMFW the BACO audio D3 PME message the DC
+ * clock manager's enable_pme_wa sends. nullptr without the boot-arg, for a
+ * DVI sink, with HDMI audio strapped off, or with no audio in the EDID.
+ * Called with fDispLock held. */
+rdna3_audio_stream *RDNA3Accel::displayAudio(uint32_t head, rdna3_dp_link *l, const rdna3_hdmi_cfg *hc, uint32_t fe,
+                                             uint32_t otg)
+{
+    uint32_t a = rd3_arg("rdna3audio", 0);
+    if (!(a & 1) || head >= 4 || !fAudio[head] || !fDispDev)
+        return nullptr;
+    if (!fAudioPool) {
+        fAudioPool = (rdna3_audio_pool *)IOMalloc(sizeof(rdna3_audio_pool));
+        if (!fAudioPool)
+            return nullptr;
+        dcn32_audio_pool_init(fDispDev, fAudioPool);
+    }
+    rdna3_audio_stream *au = fAudio[head];
+    uint32_t signal = l ? (l->mst ? RD_SIGNAL_DISPLAY_PORT_MST : RD_SIGNAL_DISPLAY_PORT)
+                    : hc && hc->hdmi_sink ? RD_SIGNAL_HDMI_TYPE_A : 0;
+    bool ok = signal && dcn32_audio_wanted(signal, &au->info) &&
+              (signal == RD_SIGNAL_HDMI_TYPE_A ? fAudioPool->hdmi_audio_native : fAudioPool->dp_audio);
+    if (!ok) {
+        if (au->az_inst >= 0 && !au->enabled) {
+            dcn32_audio_release(fAudioPool, au->az_inst);
+            au->az_inst = -1;
+        }
+        return nullptr;
+    }
+    if (au->az_inst < 0)
+        au->az_inst = dcn32_audio_acquire(fAudioPool, fe, nullptr);
+    if (au->az_inst < 0) {
+        LOG("display: head %u audio: no free azalia endpoint (%u)", head, fAudioPool->count);
+        return nullptr;
+    }
+    au->d = fDispDev;
+    au->signal = signal;
+    au->fe = fe;
+    au->otg = otg;
+    au->pme_wa = (a & 2) ? 1 : 0;
+    return au;
 }
 
 /* rdna3DisplayModes: the sink's EDID timings the head can switch to
@@ -1235,10 +1304,46 @@ IOReturn RDNA3Accel::displayModes(RD3KDisplayModes *r)
         if (hc && !fHdmiCfg[r->head])
             fHdmiCfg[r->head] = (rdna3_hdmi_cfg *)IOMalloc(sizeof(rdna3_hdmi_cfg));
         if (fHdmiCfg[r->head]) {
+            /* the format the last mode set left running stays (rdna3fmt) */
+            rdna3_crtc_format run = fHdmiCfg[r->head]->running;
+            uint32_t run_cs = fHdmiCfg[r->head]->running_cs;
             if (hc)
                 *fHdmiCfg[r->head] = *hc;
             else
                 bzero(fHdmiCfg[r->head], sizeof(rdna3_hdmi_cfg));
+            fHdmiCfg[r->head]->running = run;
+            fHdmiCfg[r->head]->running_cs = run_cs;
+        }
+        /* rdna3audio: the sink's audio (dc_stream_construct's audio_info) */
+        if (rd3_arg("rdna3audio", 0) & 1) {
+            if (!fAudio[r->head]) {
+                fAudio[r->head] = (rdna3_audio_stream *)IOMalloc(sizeof(rdna3_audio_stream));
+                if (fAudio[r->head]) {
+                    bzero(fAudio[r->head], sizeof(rdna3_audio_stream));
+                    fAudio[r->head]->az_inst = -1;
+                }
+            }
+            /* a TMDS head on a DP connector (a DP++ adaptor): DC's signal
+             * decision (link_detection.c: dm_helpers_is_dp_sink_present ->
+             * dp_is_sink_present) reads the DDC clock pin; DVI / HDMI
+             * through the adaptor when it is not held low. Reported only. */
+            if (p && p->connector == RD_ATOM_CONN_DISPLAYPORT && p->ddc_line >= 0 && !dpl &&
+                (h->dig_mode == 2 || h->dig_mode == 3)) {
+                uint32_t clk = 0;
+                int present = dcaux_dp_is_sink_present(fDispDev, (uint32_t)p->ddc_line, 1, &clk);
+                char key[40], val[64];
+                snprintf(key, sizeof(key), "RDNA3,Head%u,DPSinkPresent", r->head);
+                snprintf(val, sizeof(val), "%d (DDC%d clock pin %u)", present, p->ddc_line + 1, clk);
+                setProperty(key, val);
+                LOG("display: head %u: DP connector with a TMDS stream: dp_is_sink_present %s", r->head, val);
+            }
+            if (fAudio[r->head]) {
+                dcn32_audio_info_from_edid(ed, &fAudio[r->head]->info);
+                LOG("display: head %u audio: \"%s\", %u modes, speakers 0x%x, latency %u/%u ms", r->head,
+                    (const char *)fAudio[r->head]->info.display_name, fAudio[r->head]->info.mode_count,
+                    fAudio[r->head]->info.flags & 0x7f, fAudio[r->head]->info.video_latency,
+                    fAudio[r->head]->info.audio_latency);
+            }
         }
         if (hc)
             LOG("display: head %u HDMI: sink %s, SCDC %d, LTE scramble %d, max TMDS %u MHz, HDMI 6G %d, %u audio modes",
@@ -1335,9 +1440,15 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
                                        rd3_arg("rdna3hdmi", 0)
                                    ? fHdmiCfg[m->head]
                                    : nullptr;
+    /* rdna3audio: the DP link's audio stream (link_set_dpms_off / _on run it) */
+    if (dpl)
+        dpl->audio = displayAudio(m->head, dpl, nullptr, dpl->fe, dpl->otg);
     int r = !p ? RD_MODESET_BAD_HEAD
           : hc ? dcn32_modeset_plan_hdmi(fDispDev, fDcn, m->head, p, hc, cur, want, displayClkLimits(), ms)
                : dcn32_modeset_plan_dp(fDispDev, fDcn, m->head, p, dpl, cur, want, displayClkLimits(), ms);
+    /* rdna3audio: an HDMI stream's audio around the TMDS mode set */
+    if (r == RD_MODESET_OK && hc && ms->dig_mode == 3)
+        ms->audio = displayAudio(m->head, nullptr, hc, ms->fe, ms->otg);
     if (r != RD_MODESET_OK && takeover) {
         /* the port cannot carry the mode: the SST stream back, the mode as SST */
         LOG("display: head %u: %ux%u refused as MST stream (%d): back to SST", m->head, want->h_active,
@@ -1364,6 +1475,34 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     if (r == RDNA3_OK) {
         fDispRefresh[m->head] = want->refresh_mhz;
         displayStateSave(m->head);   /* D4 */
+        /* rdna3fmt: the format running from now on (the next set's "current") */
+        if (hc && (hc->flags & RD_HDMI_FMT) && fHdmiCfg[m->head]) {
+            fHdmiCfg[m->head]->running = ms->fmt_want;
+            fHdmiCfg[m->head]->running_cs = ms->cs_want;
+        }
+    }
+    /* steps audio / fmt: what the stream carries now */
+    char audval[160] = "", fmtval[96] = "";
+    {
+        const rdna3_audio_stream *au = ms->audio ? ms->audio : dpl ? dpl->audio : nullptr;
+        if (au && au->az_inst >= 0) {
+            const uint32_t pin = dcn32_aud_read(fDispDev, (uint32_t)au->az_inst, RD_AZ_HOT_PLUG_CONTROL);
+            snprintf(audval, sizeof(audval),
+                     "endpoint %d, %s, %s, %u modes, speakers 0x%x, DTO source %u, %u channels at %u kHz pixel clock, "
+                     "hot plug 0x%x, PME %d",
+                     au->az_inst, au->signal == RD_SIGNAL_HDMI_TYPE_A ? "HDMI" : au->hpo ? "DP (HPO)" : "DP (DIO)",
+                     au->enabled ? "on" : "off", au->info.mode_count, au->info.flags & 0x7f,
+                     au->out.pll_info.dto_source, dcn32_audio_speakers_to_channels(au->info.flags & 0x7f),
+                     au->out.crtc_info.requested_pixel_clock_100hz / 10, pin, au->pme_wa);
+        }
+        if (hc && (hc->flags & RD_HDMI_FMT) && r == RDNA3_OK) {
+            static const char *const enc[] = { "?", "RGB", "YCbCr 4:2:2", "YCbCr 4:4:4", "YCbCr 4:2:0" };
+            static const uint8_t bpc[] = { 0, 6, 8, 10, 12, 14, 16 };
+            uint32_t pe = ms->fmt_want.pixel_encoding, cd = ms->fmt_want.color_depth;
+            snprintf(fmtval, sizeof(fmtval), "%s %u bpc, colour space %u, sink bpc %u formats 0x%x",
+                     pe < 5 ? enc[pe] : "?", cd < 7 ? bpc[cd] : 0, ms->cs_want, hc->color.bpc,
+                     hc->color.color_formats);
+        }
     }
     char hdmival[128] = "";
     if (hc && ms->hdmi.flags) {
@@ -1419,6 +1558,18 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
         snprintf(key, sizeof(key), "RDNA3,Head%u,HDMI", m->head);
         setProperty(key, hdmival);
         LOG("display: head %u HDMI: %s", m->head, hdmival);
+    }
+    if (audval[0]) {
+        char key[32];
+        snprintf(key, sizeof(key), "RDNA3,Head%u,Audio", m->head);
+        setProperty(key, audval);
+        LOG("display: head %u audio: %s", m->head, audval);
+    }
+    if (fmtval[0]) {
+        char key[32];
+        snprintf(key, sizeof(key), "RDNA3,Head%u,Format", m->head);
+        setProperty(key, fmtval);
+        LOG("display: head %u format: %s", m->head, fmtval);
     }
     if (dpHead) {
         char key[32];
