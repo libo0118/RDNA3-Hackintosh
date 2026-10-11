@@ -23,9 +23,23 @@
  *   dcn10/dcn20/dcn32 stream encoders  MSA, blank, unblank (M/N, FIFOs)
  *   dce_clock_source.c     dcn31_program_pix_clk for DP: the DP DTO
  *
- * Scope: SST, 8b/10b (RBR, HBR, HBR2, HBR3), RGB 8 bpc, no DSC, no FEC (the
- * sink's FEC capability is read but FEC stays off: DC's FEC policy is not
- * ported), no MST. UHBR / 128b/132b (the HPO encoder, DTBCLK, DPSTREAMCLK)
+ * Scope: SST, 8b/10b (RBR, HBR, HBR2, HBR3), RGB 8 bpc. FEC, DSC and MST
+ * are off unless the link's policies turn them on (fec_policy / dsc_policy
+ * with rdna3dsc=1, mst with rdna3mst=1):
+ *
+ *   FEC  link_dp_phy.c dp_set_fec_ready / dp_set_fec_enable, link_dp_capability.c
+ *        dp_is_fec_supported / dp_should_enable_fec, dcn20_link_encoder.c
+ *        enc2_fec_set_ready / enc2_fec_set_enable / enc2_fec_is_active, and
+ *        dp_link_bandwidth_kbps's FEC efficiency (link_validation.c)
+ *   DSC  retrieve_link_cap's DSC / branch decoder caps, get_active_converter_info
+ *        (subset), and link_dpms.c link_set_dsc_on_stream, link_set_dsc_pps_packet,
+ *        link_set_dsc_enable, dp_set_dsc_on_rx (dm_helpers_dp_write_dsc_enable,
+ *        SST), in link_set_dpms_on / _off; the DSC block itself is hw/dcn32_dsc.c
+ *   MST  link_set_dpms_on / _off's MST branches (enable_link_dp_mst,
+ *        allocate_mst_payload, deallocate_mst_payload, disable_link_dp): hw/dcn32_dp_mst.c,
+ *        the topology manager hw/dp_mst.c
+ *
+ * UHBR / 128b/132b (the HPO encoder, DTBCLK, DPSTREAMCLK)
  * is declared not supported and left out: dp_get_max_link_cap never goes
  * above HBR3. An LTTPR found in the chain is trained in transparent mode
  * (dp_decide_8b_10b_lttpr_mode with an LTTPR-aware VBIOS that does not force
@@ -40,6 +54,8 @@
 #include "dcaux.h"
 #include "dmub32.h"
 #include "edid.h"
+#include "dcn32_dsc.h"
+#include "dcn32_hdmi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +71,9 @@ extern "C" {
 #define RD_DPCD_DOWN_STREAM_PORT_COUNT  0x00007
 #define RD_DPCD_TRAINING_AUX_RD_INTERVAL 0x0000e
 #define RD_DPCD_FEC_CAPABILITY          0x00090
+#define RD_DPCD_DOWNSTREAM_PORT_0       0x00080
+#define RD_DPCD_MSTM_CAP                0x00021
+#define RD_DPCD_MSTM_CTRL               0x00111
 #define RD_DPCD_LINK_BW_SET             0x00100
 #define RD_DPCD_LANE_COUNT_SET          0x00101
 #define RD_DPCD_TRAINING_PATTERN_SET    0x00102
@@ -66,6 +85,16 @@ extern "C" {
 #define RD_DPCD_LANE_ALIGN_STATUS_UPDATED 0x00204
 #define RD_DPCD_ADJUST_REQUEST_LANE0_1  0x00206
 #define RD_DPCD_SINK_OUI                0x00400
+#define RD_DPCD_SINK_HW_REVISION_START  0x00409
+#define RD_DPCD_SOURCE_OUI              0x00300
+#define RD_DPCD_SOURCE_MINIMUM_HBLANK_SUPPORTED 0x00340
+#define RD_DPCD_SOURCE_SINK_CAP         0x00317
+#define RD_DPCD_EDP_GENERAL_CAP_2       0x00703
+#define RD_DPCD_BRANCH_OUI              0x00500
+#define RD_DPCD_BRANCH_REVISION_START   0x00509
+#define RD_DPCD_DFP_CAPABILITY_EXTENSION_SUPPORT 0x000a3
+#define RD_DPCD_PCON_HDMI_POST_FRL_STATUS 0x03036
+#define RD_DPCD_DPRX_FEATURE_ENUMERATION_LIST_CONT_1 0x02214
 #define RD_DPCD_SET_POWER               0x00600
 #define RD_DPCD_DP13_DPCD_REV           0x02200
 #define RD_DPCD_DPRX_FEATURE_ENUMERATION_LIST 0x02210
@@ -157,6 +186,43 @@ enum {
 /* enum lttpr_mode */
 enum { RD_LTTPR_MODE_NON_LTTPR = 0, RD_LTTPR_MODE_TRANSPARENT, RD_LTTPR_MODE_NON_TRANSPARENT };
 
+/* enum dc_link_fec_state */
+enum { RD_FEC_NOT_READY = 0, RD_FEC_READY, RD_FEC_ENABLED };
+
+/* enum display_dongle_type (the ones get_active_converter_info sets) */
+enum { RD_DONGLE_NONE = 0, RD_DONGLE_DP_VGA, RD_DONGLE_DP_DVI, RD_DONGLE_DP_HDMI };
+
+/* struct dc_dongle_caps: a DP-to-HDMI converter's detailed caps (DPCD
+ * 0x080-0x083, DP_PCON_HDMI_POST_FRL_STATUS) and the DFP capability
+ * extension (DPCD 0x0a3-0x0ae, DP 2.0) */
+typedef struct rdna3_dp_dongle_caps {
+    int      dongle_type, extended_cap_valid;
+    int      is_dp_hdmi_s3d_converter, is_dp_hdmi_ycbcr422_pass_through, is_dp_hdmi_ycbcr420_pass_through;
+    int      is_dp_hdmi_ycbcr422_converter, is_dp_hdmi_ycbcr420_converter;
+    uint32_t dp_hdmi_max_bpc, dp_hdmi_max_pixel_clk_in_khz, dp_hdmi_frl_max_link_bw_in_kbps;
+    struct {
+        int      supported;
+        uint32_t max_pixel_rate_in_mps, max_video_h_active_width, max_video_v_active_height;
+        uint8_t  encoding_format_caps;   /* bit 0 RGB, 1 YCbCr444, 2 422, 3 420 */
+        uint8_t  rgb_color_depth_caps, ycbcr444_color_depth_caps, ycbcr422_color_depth_caps,
+                 ycbcr420_color_depth_caps;   /* bit 0 6 bpc, 1 8, 2 10, 3 12, 4 16 */
+    } dfp_cap_ext;
+} rdna3_dp_dongle_caps;
+
+/* LINK_AUX_DEFAULT_LTTPR_TIMEOUT_PERIOD / LINK_AUX_DEFAULT_TIMEOUT_PERIOD (us) */
+#define RD_LINK_AUX_DEFAULT_LTTPR_TIMEOUT_PERIOD 3200
+#define RD_LINK_AUX_DEFAULT_TIMEOUT_PERIOD       552
+
+/* struct link_mst_stream_allocation_table (DIO: the stream encoder is the
+ * DIG front end; at most 4 streams, DP_MSE_SAT0..1) */
+#define RD_MST_MAX_STREAMS 4
+typedef struct rdna3_mst_alloc_table {
+    uint32_t stream_count;
+    struct { int fe; uint32_t vcp_id, slot_count; } a[RD_MST_MAX_STREAMS];
+} rdna3_mst_alloc_table;
+
+struct rdna3_mst_mgr;
+
 /* struct dc_link_settings (no link rate set: eDP only) */
 typedef struct rdna3_dp_link_settings {
     uint32_t lane_count;      /* 1, 2, 4; 0 = unknown */
@@ -189,7 +255,26 @@ typedef struct rdna3_dp_caps {
     uint8_t  allow_invalid_msa_timing_param;
     uint32_t sink_dev_id;           /* IEEE OUI */
     rdna3_dp_lttpr_caps lttpr;
+    /* DPCD 1.4+: DSC basic caps (0x060..0x06f), DSC branch decoder caps
+     * (0x0a0..0x0a2, converters only), the branch / dongle type */
+    uint8_t  dsc_basic[RD_DSC_DPCD_BASIC], dsc_branch[RD_DSC_DPCD_BRANCH];
+    int      is_branch_dev, dongle_type;
+    uint8_t  mstm_cap;              /* DP_MSTM_CAP (0x021), DPCD 1.2+ */
+    rdna3_dp_dongle_caps dongle_caps;
+    /* read_dp_device_vendor_id, the sink id string and revisions */
+    uint32_t branch_dev_id;
+    uint8_t  branch_dev_name[6], branch_hw_revision, branch_fw_revision[2];
+    uint8_t  sink_dev_id_str[6], sink_hw_revision, sink_fw_revision[2];
+    uint8_t  adaptive_sync_caps;    /* DP_DPRX_FEATURE_ENUMERATION_LIST_CONT_1 */
+    int      panel_luminance_control;   /* eDP general cap 2 (dpcd_read_sink_ext_caps) */
 } rdna3_dp_caps;
+
+/* struct encoder_info_frame, the DP part (dcn30_update_info_frame) */
+typedef struct rdna3_dp_info_frames {
+    rdna3_info_packet vsc, spd, hdrsmd, adaptive_sync;
+    int      adaptive_sync_line_num_valid;   /* sdp_line_num */
+    uint32_t adaptive_sync_line_num;
+} rdna3_dp_info_frames;
 
 /* struct link_training_settings (8b/10b) */
 typedef struct rdna3_dp_lt_settings {
@@ -216,6 +301,10 @@ typedef struct rdna3_dp_link {
     uint32_t enc_caps;              /* VBIOS encoder caps (RD_ATOM_ENC_CAP_*): link encoder features */
     uint32_t dprefclk_khz;          /* DP DTO reference (dcn32_clk_read) */
     int      lttpr_aware;           /* dc->caps.vbios_lttpr_aware && extended_aux_timeout_support */
+    uint16_t chip_id;               /* PCI device id: dpcd_set_source_specific_data (asic_id.chip_id) */
+    int      keep_receiver_powered; /* wa_flags.dp_keep_receiver_powered (dp_wa_power_up_0010FA) */
+    uint8_t  dpcd_sink_ext_caps;    /* DP_SOURCE_SINK_CAP (dpcd_read_sink_ext_caps) */
+    int      ignore_msa_timing_param;   /* stream->ignore_msa_timing_param: FreeSync only, 0 */
     uint32_t pix_per_cycle;         /* dio_se_pix_per_cycle: 1, 2; 0 = take the boot state's */
     int      caps_valid, verified;
     rdna3_dp_caps dpcd_caps;
@@ -224,6 +313,27 @@ typedef struct rdna3_dp_link {
     /* what the last training did (log, tests, the kext's report) */
     int      last_result;
     uint32_t lt_runs, lt_fallbacks;
+    /* FEC / DSC (rdna3dsc=1): fec_policy = DC's dp_should_enable_fec (FEC on
+     * a capable sink, trained FEC-ready, enabled after training), dsc_policy
+     * = apply_dsc_policy_for_stream (DSC when the mode needs more than the
+     * link carries); the stream's timing.flags.DSC / dsc_cfg; the DSC
+     * engine (n = pipe n, dcn20_acquire_dsc) and the OPP it reads */
+    int      fec_policy, dsc_policy;
+    int      fec_state;             /* RD_FEC_* */
+    int      stream_dsc;
+    rdna3_dsc_config dsc_cfg;
+    uint32_t dsc_inst, opp;
+    uint8_t  pps[RD_DSC_PPS_BYTES]; /* stream->dsc_packed_pps */
+    /* MST (rdna3mst=1): the stream is SIGNAL_TYPE_DISPLAY_PORT_MST to output
+     * port 'mst_port' of 'mgr'; link_active (link_status.link_active) and
+     * the stream allocation table of the link (DC's mst_stream_alloc_table) */
+    int      mst;
+    struct rdna3_mst_mgr *mgr;
+    int      mst_port;
+    int      link_active;
+    rdna3_mst_alloc_table mst_alloc;
+    uint32_t mst_pbn, mst_slots, mst_vcp_x, mst_vcp_y;   /* the last payload (log, tests) */
+    int      mst_act;               /* the last ACT handled */
 } rdna3_dp_link;
 
 /* Fill the static part of 'l' (no hardware access). */
@@ -236,12 +346,50 @@ uint32_t dcn32_dp_stream_kbps(uint32_t pixel_khz, uint32_t bpc);
 /* dp_link_bandwidth_kbps (8b/10b, FEC off) */
 uint32_t dcn32_dp_link_kbps_settings(const rdna3_dp_link_settings *s);
 
+/* dp_link_bandwidth_kbps for this link: FEC efficiency when
+ * dp_should_enable_fec (the link's FEC policy and a FEC-capable sink) */
+uint32_t dcn32_dp_link_bw_kbps(const rdna3_dp_link *l, const rdna3_dp_link_settings *s);
+int  dcn32_dp_should_enable_fec(const rdna3_dp_link *l);
+/* dc_link_get_link_cap: the verified link cap (the max one until verified) */
+const rdna3_dp_link_settings *dcn32_dp_link_cap(const rdna3_dp_link *l);
+
+/* DSC (rdna3dsc=1): the dc_crtc_timing of a mode; update_dsc_caps (1 when
+ * the sink decodes DSC); apply_dsc_policy_for_stream (1 with *cfg when the
+ * mode needs DSC on this link); dc_bandwidth_in_kbps_from_timing of a mode
+ * with (cfg) or without (NULL) DSC */
+void dcn32_dp_dsc_timing(const rdna3_mode *m, uint32_t bpc, rdna3_dsc_timing *t);
+int  dcn32_dp_sink_dsc_caps(const rdna3_dp_link *l, rdna3_dsc_dec_caps *caps);
+int  dcn32_dp_decide_dsc(const rdna3_dp_link *l, const rdna3_mode *m, uint32_t bpc, rdna3_dsc_config *cfg);
+uint32_t dcn32_dp_mode_kbps(const rdna3_mode *m, uint32_t bpc, const rdna3_dsc_config *cfg);
+
 /* retrieve_link_cap (subset: LTTPR caps, wake-up, receiver caps, extended
  * caps, DPRX features, sink count / OUI, FEC cap) and dp_get_max_link_cap.
  * DPCD reads, plus the writes retrieve_link_cap does (LTTPR transparent
  * mode and its count echo when an LTTPR answers). 0 or RDNA3_ENODEV (no
  * sink on the AUX channel) / RDNA3_EIO. */
 int  dcn32_dp_read_caps(rdna3_dp_link *l);
+/* is_dp_active_dongle / is_dp_branch_device */
+int  dcn32_dp_is_active_dongle(const rdna3_dp_link *l);
+int  dcn32_dp_is_branch_device(const rdna3_dp_link *l);
+/* link_validate_mode_timing for an RGB 8 bpc stream of mode 'm' on the
+ * link (dp_active_dongle_validate_timing: a DP-to-HDMI converter's TMDS /
+ * FRL limits, the DFP capability extension; no passive dongle on a DP
+ * connector). 1 = the converter carries it; the link bandwidth stays
+ * with dcn32_dp_decide_link_settings (dp_validate_mode_timing). */
+int  dcn32_dp_validate_mode_timing(const rdna3_dp_link *l, const rdna3_mode *m);
+
+/* enc3_stream_encoder_update_dp_info_packets: VSC (GSP 0, 1), SPD (2), HDR
+ * static metadata (3), adaptive sync (5) through the stream encoder's VPG,
+ * their DP_SEC_CNTL enables and the master enable */
+void dcn32_enc_update_dp_info_packets(rdna3_dp_link *l, const rdna3_dp_info_frames *f);
+/* enc3_stream_encoder_update_dp_info_packets_sdp_line_num (adaptive sync) */
+void dcn32_enc_update_dp_info_packets_sdp_line_num(rdna3_dp_link *l, const rdna3_dp_info_frames *f);
+/* enc1_stream_encoder_dp_get_pixel_format: the DP stream encoder's pixel
+ * encoding (RD_PIXEL_ENCODING_*, 0 undefined) and component depth
+ * (RD_COLOR_DEPTH_*). 0 for a NULL argument. */
+int  dcn32_enc_dp_get_pixel_format(rdna3_dp_link *l, uint32_t *encoding, uint32_t *depth);
+
+
 
 /* link_decide_link_settings (decide_dp_link_settings) for 'req_kbps' over
  * the verified link cap (the max link cap until a training verified one).
@@ -274,17 +422,21 @@ void dcn32_dp_disable_link_phy(rdna3_dp_link *l);
 /* dcn31_program_pix_clk for a DP signal: the DP DTO of OTG 'otg' at 'pixel_khz' */
 void dcn32_dp_program_pix_clk(rdna3_dp_link *l, uint32_t pixel_khz);
 
-/* link_set_dpms_off for DP SST (dcn20_blank_stream, disable_link_dp,
- * dcn20_disable_stream's reset_dio_stream_encoder) */
+/* link_set_dpms_off (dcn20_blank_stream, deallocate_mst_payload for MST,
+ * disable_link_dp, dcn20_disable_stream's reset_dio_stream_encoder, the
+ * stream's DSC off: link_set_dsc_enable) */
 void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l);
 
-/* link_set_dpms_on for DP SST with mode 'm' (the OTG already runs it):
- * dcn10_link_encoder_setup, setup_dio_stream_attribute (MSA),
- * enable_link_dp (link_decide_link_settings + training with retries; with
- * 'do_fallback' the training falls back too), dcn20_enable_stream's
- * stream encoder setup, dcn32_unblank_stream. 0, RDNA3_EINVAL (no link
- * setting carries the mode), RDNA3_EIO (training failed: the stream is
- * still enabled as DC does, the caller decides). */
+/* link_set_dpms_on with mode 'm' (the OTG already runs it), DSC when
+ * l->stream_dsc (l->dsc_cfg; set by the caller), MST to l->mst_port when
+ * l->mst: dcn10_link_encoder_setup, setup_dio_stream_attribute (MSA),
+ * link_set_dsc_enable, enable_link_dp / enable_link_dp_mst
+ * (link_decide_link_settings + training with retries; with 'do_fallback'
+ * the training falls back too; FEC), dcn20_enable_stream's stream encoder
+ * setup, dp_set_dsc_on_rx + link_set_dsc_pps_packet, allocate_mst_payload,
+ * dcn32_unblank_stream. 0, RDNA3_EINVAL (no link setting carries the mode),
+ * RDNA3_EIO (training failed: an SST stream is still enabled as DC does,
+ * the caller decides; an MST stream is not; or the MST payload failed). */
 int  dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fallback);
 
 /* the link status bits (DPCD 0x202..0x204) still hold: dp_check_link_loss_status */

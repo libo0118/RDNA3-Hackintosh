@@ -168,9 +168,9 @@ DPREFCLK). The mode set takes the link down as `link_set_dpms_off` does,
 programs the timing, verifies the link cap once, and brings the link up as
 `link_set_dpms_on`; a training that fails puts the old timing back.
 
-Not ported: UHBR / 128b/132b (HPO encoder, DTBCLK), FEC and DSC, MST,
-non-transparent LTTPR training (an LTTPR is put in transparent mode), eDP,
-the source OUI write. The stream encoder keeps the pixels per cycle the GOP
+Not ported: UHBR / 128b/132b (HPO encoder, DTBCLK), non-transparent LTTPR
+training (an LTTPR is put in transparent mode), eDP, the source OUI write
+(FEC, DSC and MST: step 6 below). The stream encoder keeps the pixels per cycle the GOP
 chose (DC's `enable_dp_dig_pixel_rate_div_policy` would choose two on DCN
 3.2), and the DCCG pixel rate divider stays as the GOP set it.
 
@@ -179,6 +179,60 @@ Gate: `rdna3dplink=1` (default off, not in the default profile) with
 with a link layer: it locks clock recovery after a set number of
 voltage-swing requests, channel EQ after pre-emphasis requests, and fails
 clock recovery at HBR3 to exercise the fallback.
+
+## DSC, FEC and DP MST (step 6)
+
+On top of the DP SST mode set, two optional parts, each behind its own
+boot-arg and both needing `rdna3dplink=1`:
+
+**FEC and DSC** (`rdna3dsc=1`, ladder step `dsc`). `hw/dcn32_dsc.c` ports
+DC's DSC policy (`dc_dsc_parse_dsc_dpcd`, `dc_dsc_compute_config`,
+`setup_dsc_config`, `decide_dsc_target_bpp_x16`, `dsc2_get_enc_caps`,
+`dc_dsc_compute_bandwidth_range`), the PPS (`dsc2_get_packed_pps`:
+`dscc_compute_dsc_parameters`, `calc_rc_params` with DC's QP tables,
+`drm_dsc_compute_rc_parameters`, `drm_dsc_pps_payload_pack`; DC's floating
+point rate control is computed on exact rationals, equal to DC's double
+results for every bpp) and the hardware (`dsc2_set_config` /
+`dsc_write_to_registers`, `dsc2_enable` / `_disable` / `_disconnect`,
+`dcn32_dsc_pg_control` for DOMAIN16..19, `optc3_set_dsc_config`,
+`enc32_dp_set_dsc_config`, `enc3_dp_set_dsc_pps_info_packet` through VPG
+generic packets 11..14). `hw/dcn32_dp.c` reads the sink's FEC and DSC caps
+(DPCD 0x090, 0x060..0x06f, branch 0x0a0..0x0a2), follows
+`dp_should_enable_fec` (FEC ready before the training, FEC on after it, 97 %
+link efficiency), `apply_dsc_policy_for_stream` (DSC when the mode does not
+fit the link uncompressed) and `link_set_dsc_enable` / `dp_set_dsc_on_rx` /
+`link_set_dsc_pps_packet` in `link_set_dpms_on` / `_off`. One DSC engine per
+stream (the pipe's own, `dcn20_acquire_dsc`); DCN 3.2 has no DSCCLK DTO
+(DSCCLK = DISPCLK / 3). Not ported: ODM combine (modes wider than 4096, so
+no 8K), DSC over MST, YCbCr 4:2:2 / 4:2:0 DSC, eDP DSC.
+
+**MST** (`rdna3mst=1`, ladder step `mst`). `hw/dp_mst.c` ports the DRM MST
+helper parts a single stream needs: the sideband message layer (header CRC4,
+body CRC8, 48-byte chunks to DOWN_REQ, replies polled through the ESI
+registers), LINK_ADDRESS, ENUM_PATH_RESOURCES, CLEAR_PAYLOAD_ID_TABLE,
+ALLOCATE_PAYLOAD, REMOTE_DPCD_READ and REMOTE_I2C_READ (the sinks' EDIDs),
+the VC payload ID table (DPCD 0x1c0..0x1c2, 0x2c0), the ACT check, PBN and
+time slots (`drm_dp_calc_pbn_mode`, `drm_dp_atomic_find_time_slots`).
+`hw/dcn32_dp_mst.c` is the DC side: `allocate_mst_payload` /
+`deallocate_mst_payload`, the stream allocation table and the DIG's
+DP_MSE_SAT rows with the ACT trigger, DP_MSE_RATE (`slot X.Y`), DIG_MODE 5
+and TransmitterControl in DP MST mode. The kext takes an SST head with an
+MST capable sink over at the next mode switch: MST on, the topology probed,
+every sink's EDID read (`RDNA3,Head<n>,MSTPorts`), the head's stream sent
+to one sink (`rdna3mstport=N`, else the first); the modes offered are then
+that sink's. When the first MST stream does not run, the head goes back to
+SST. Not ported: more than one stream (a second head on the same link
+needs a second DIG front end on the same back end, a second payload and
+SAT row, and a pipe the clone path brings up for it), UP requests
+(connection status notifications: the topology is read once), DSC over MST,
+128b/132b MST.
+
+The simulator models a DSC + FEC sink (the PPS the source sends is checked
+against an independent double precision reference for 3840x2160@144 10 bpc
+on HBR3 x4, 7680x4320@60 and a 12 bpp 1080p config against the VESA
+values) and an MST hub with two sinks (synthetic EDIDs), which checks
+every sideband CRC, answers the messages, keeps the payload table and
+applies it at the ACT only when the source's SAT rows match it.
 
 ## Limitations (to do)
 

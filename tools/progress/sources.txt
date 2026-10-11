@@ -64,3 +64,14 @@ VCN / JPEG video     | amdgpu/amdgpu_vcn.c
 VCN / JPEG video     | amdgpu/vcn_v4_0.c
 VCN / JPEG video     | amdgpu/amdgpu_jpeg.c
 VCN / JPEG video     | amdgpu/jpeg_v4_0.c
+Display: DSC         | display/dc/dsc/dc_dsc.c
+Display: DSC         | display/dc/dsc/dcn20/dcn20_dsc.c
+Display: DSC         | display/dc/dsc/rc_calc.c
+Display: DSC         | display/dc/dsc/rc_calc_dpi.c
+Display: DSC         | display/dc/dml/dsc/rc_calc_fpu.c
+Display: DSC         | display/dc/dcn30/dcn30_vpg.c
+Display: DSC         | display/dc/optc/dcn30/dcn30_optc.c
+Display: DSC         | display/dc/dio/dcn20/dcn20_link_encoder.c
+Display: DSC         | display/dc/dio/dcn30/dcn30_dio_stream_encoder.c
+Display: MST         | display/amdgpu_dm/amdgpu_dm_helpers.c
+Display: MST         | display/amdgpu_dm/amdgpu_dm_mst_types.c

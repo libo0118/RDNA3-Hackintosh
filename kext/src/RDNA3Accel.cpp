@@ -149,6 +149,8 @@ void RDNA3Accel::systemWillShutdown(IOOptionBits specifier)
 {
     LOG("system %s: display back to the boot head", specifier == kIOMessageSystemWillRestart ? "restart" : "power off");
     fShuttingDown = true;   /* D4: the power-off is no sleep */
+    if (fBringup && fBringup->finished() && fBringup->vcnWanted())
+        fBringup->vcnShutdown();
     displayShutdown();
     if (fBringup && fDrmLock) {
         IOLockLock(fDrmLock);

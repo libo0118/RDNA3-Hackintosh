@@ -71,6 +71,14 @@ int  dchpd_iv_pin(uint32_t client_id, uint32_t src_id, uint32_t ctx, int *rx);
  * DC_HPD_SENSE_DELAYED. Returns the (delayed) sense: 1 connected. */
 int  dchpd_irq_ack(rdna3_dev *d, uint32_t n);
 
+/* dce_aux_configure_timeout (DCN 3.2 has extended_aux_timeout_support):
+ * AUX_DPHY_RX_CONTROL1's reply timeout for 'timeout_in_us' (0 = the
+ * default 69 x 8 us) and the software poll of engine 'n' at
+ * SW_AUX_TIMEOUT_PERIOD_MULTIPLIER (6) times it. Returns the timeout the
+ * register held before (us). Until the first call an engine polls as
+ * before (AUX_TIMEOUT_US). */
+uint32_t dcaux_configure_timeout(rdna3_dev *d, uint32_t n, uint32_t timeout_in_us);
+
 /* One raw transaction on engine 'n': 'action' RD_AUX_*, 20-bit 'address',
  * 'len' bytes (<= 16; 0 = address-only). Writes send buf, reads fill it.
  * Returns the bytes transferred (reads: received) or RD_AUX_ERR_*; *reply
@@ -78,7 +86,9 @@ int  dchpd_irq_ack(rdna3_dev *d, uint32_t n);
 int  dcaux_transfer(rdna3_dev *d, uint32_t n, uint32_t action, uint32_t address, uint8_t *buf,
                     uint32_t len, uint32_t *reply);
 
-/* dce_aux_transfer_with_retries for native DPCD: any length, split in 16s */
+/* dce_aux_transfer_with_retries for native DPCD: any length, split in 16s
+ * (what amdgpu_dm's dm_helpers_dp_read_dpcd / dm_helpers_dp_write_dpcd do
+ * through the DRM AUX channel) */
 int  dcaux_dpcd_read(rdna3_dev *d, uint32_t n, uint32_t address, uint8_t *buf, uint32_t len);
 int  dcaux_dpcd_write(rdna3_dev *d, uint32_t n, uint32_t address, const uint8_t *buf, uint32_t len);
 
@@ -96,7 +106,8 @@ int  dcaux_read_edid(rdna3_dev *d, uint32_t n, uint8_t *edid, uint32_t cap);
  * HDMI/DVI sinks and of DP++ adaptors (the AUX engine then reports
  * NON_AUX_MODE). One command of up to 4 payloads, each a write or a read
  * on a 7-bit address; all but the last keep the bus (MOT). Returns 0 or
- * RD_AUX_ERR_* (NACK: no device; TIMEOUT; ACQUIRE: owned by HW/DMCU). */
+ * RD_AUX_ERR_* (NACK: no device; TIMEOUT; ACQUIRE: owned by HW/DMCU).
+ * dce_i2c_submit_command_hw, as amdgpu_dm's dm_helpers_submit_i2c reaches it. */
 typedef struct rd_i2c_payload {
     uint8_t  addr7;
     int      write;

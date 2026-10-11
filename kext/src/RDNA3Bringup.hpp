@@ -278,6 +278,9 @@ private:
     void             vcnStart();
     void             vcnFreeSaved();
     void             vcnIdleSchedule();
+public:
+    void             vcnShutdown();
+private:
     int              vcnHang(uint32_t ip, uint32_t ring, uint64_t seq);
     static void      vcnIdleTick(void *owner, void *);
     IOMemoryMap     *fDoorbell = nullptr;   /* BAR2 */

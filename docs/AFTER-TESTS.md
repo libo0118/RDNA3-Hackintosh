@@ -453,6 +453,144 @@ with `dp:`; ioreg `RDNA3,Head<n>,DPLink` sums the link up.
 | CR done, `EQ failed` at every rate and lane count | pre-emphasis requests not applied: SETUP_VSEMPH's lane set (TransmitterControl v1.7 mode field) is ignored by the VBIOS table | the `lane status` / `adjust` debug lines; compare with the GOP's DPCD 0x103..0x106 |
 | trained, `dp: DIG f -> UNIPHY b ... trained`, monitor black or "no signal" | stream side: M/N, MSA or the DP DTO (DPREFCLK) | look: `DP_DTOn_PHASE / MODULO` (phase = pixel clock in Hz, modulo = DPREFCLK in Hz), `DP_VID_M`, `DP_VID_STREAM_CNTL` status; `dp: DIG n: SYMCLK_FE_ON stays off` = the FE is not connected to the BE |
 | `modeset: the DP link failed (-5): back to ...` and the old mode trains | the new mode's link setting does not train (see above) | record the rate / lanes; the old mode back is the expected recovery |
+| modes `refused (10)` on a DP-to-HDMI / DVI / VGA converter | `link_validate_mode_timing`: the converter's TMDS clock (DPCD 0x081 x 2.5 MHz), its max bpc, or its DFP capability extension (DPCD 0x0a3..: max pixel rate, active size, RGB 8 bpc) is below the mode | `RDNA3,Connector<n>,DPCD` 0x005 / 0x080-0x083; expected for a mode above the converter |
+| the monitor reacts differently since the stage 4 item K build (other OSD, FreeSync menu) | `retrieve_link_cap` now writes AMD's source OUI (00-00-1A), the device id and DCN 3.2's minimum h blank to DPCD 0x300 / 0x303 / 0x340 as amdgpu does, and the AUX reply timeout is 3.2 ms during the LTTPR probe | expected (Linux does the same); report anything that stopped working |
+
+### DSC and FEC (`dsc`)
+
+`dsc` = `dplink` + `rdna3dsc=1`. On a native DP monitor that decodes DSC
+(DPCD 0x060 bit 0) a mode the link cannot carry uncompressed is offered
+and set with DSC; FEC runs on a FEC capable monitor whatever the mode.
+Lines: `dp: AUX n: FEC .., DSC .. (rev .., slices .., ...)` (the caps),
+`modeset: head n: WxH needs DSC: a x b slices, c bpp`, `dsc: DSC n: ...`
+(the engine's config), `dp: DSC n on OPP .. -> OTG .. -> DIG ..`,
+`dp: AUX n: SST_DSC: DSC enable on the RX`, `dp: UNIPHY n: FEC enabled
+(active 1)`; ioreg `RDNA3,Head<n>,DSC` (slices, bpp, FEC state: 2 =
+enabled).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no mode needs DSC (`rdna3_modetest list` has the same modes as `dplink`) | the monitor's modes all fit the trained link uncompressed, or its DPCD has no DSC (`DSC no` in the `dp: AUX n: FEC ..` line, or no such line) | expected with such a monitor: test with a mode above the link (4K 120+ Hz on HBR3, or a cable / hub that limits the link) |
+| `FEC enabled (active 0)` | the PHY did not start FEC after the training (`DP_DPHY_CNTL` FEC_ACTIVE_STATUS) | look: `DP_DPHY_CNTL`, DPCD 0x120; the training lines before it |
+| DSC mode set, `trained`, monitor black or "no signal" | the monitor did not get or accept the PPS: GSP11 off, the PPS bytes, DSC not on in the RX (DPCD 0x160) | look: `DP_SEC_CNTL` / `DP_SEC_CNTL2` / `DP_GSP11_CNTL`, `DP_DSC_CNTL`, `OPTC_DATA_FORMAT_CONTROL` DSC mode, the `dsc: DSC n:` line (slice size, bpp) |
+| DSC mode set, picture garbled or shifted | rate control / slice config the encoder and the monitor disagree on, or the DSC engine not fed by the head's OPP | the `dsc:` line and the look's `DSCC_PPS_CONFIG*`, `DSCRM_DSC_FORWARD_CONFIG` (OPP source) |
+| `dsc: DSC n power up: PGFSM status ..` | DOMAIN16+n did not ungate | look: `DOMAIN16..19_PG_STATUS`, `DC_IP_REQUEST_CNTL` |
+| `modeset: ... underflows / does not run: back to` only at DSC modes | the DLG rescale of the GOP's values at the compressed mode | as for `modeset2`: the look's DLG line; full DML for that mode |
+
+### Timing generator read-back (`otg`)
+
+`otg` = `9c` + `rdna3otg=1`. At display start `dcn32_otg_check`
+(hw/dcn32_otg.c) runs DC's optc functions on every head the GOP lit and
+publishes `RDNA3,Head<n>,OTGCheck`. Pass: `0: ...`, the active size equal
+to the head's, `counter moving`, `vblank 1 vactive 1`, `vline0 ... latched`
+with the line read within a few lines of the one aimed at, `underflow 0`,
+`ODM 1`. Then mark `otg` passed: the optc functions the check reads count
+as working (tools/progress.py ITEM_STEPS).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no `OTGCheck` property | the boot-arg is missing, or no head was lit at display start (`RDNA3,DisplayHeads 0`) | the boot-args line of the report |
+| `-19` (RDNA3_ENODEV) / `0x0` size | the OTG reads as off (OTG_MASTER_EN 0) | the look's `OTG_CONTROL`; the head list in `20-log-rdna3.txt` |
+| active size differs from the head's | OTG_H/V_BLANK_START_END read differently by `optc1_get_otg_active_size` than by `read_timing` (dcn32.c) | both register values from the look; fix whichever subtraction is off |
+| `counter STOPPED` | two OTG_STATUS_POSITION reads were equal: the OTG is not counting (or the read is cached) | `RDNA3,Head<n>,...` frame counter from `rdna3_drminfo --scanout`; the OTG clock (`OTG_CLOCK_CONTROL`) |
+| `vblank 0` or `vactive 0` | OTG_STATUS never showed the state within 100 ms | the look's `OTG_STATUS`; the V_BLANK bits' layout (OTG_V_BLANK / OTG_V_ACTIVE_DISP) |
+| `vline0 ... NOT latched` | OTG_VERTICAL_INTERRUPT0_STATUS did not set within 60 ms with the line inside the range | the line aimed at vs `OTG_V_TOTAL`; the look's `OTG_VERTICAL_INTERRUPT0_CONTROL` (OUTPUT_POLARITY, INT_TYPE) |
+| `underflow 1` | OPTC_UNDERFLOW_OCCURRED_STATUS is sticky: an underflow at any time since boot | compare with the HUBP underflow of `rdna3_drminfo --scanout`; not a failure of this step |
+
+### amdgpu's DMCUB reset (`dmubreset`)
+
+`dmubreset` = `9c` + `rdna3dmubreset=1`: the DMCUB is stopped and reset by
+the exact `dmub_dcn32_reset` (hw/dmub32.c) before its windows are set up.
+ioreg `RDNA3,DMUBAmdReset`: bit 0 = STOP_FW acked (GPINT status cleared by
+the firmware), bit 1 = the firmware answered 0xDEADDEAD in SCRATCH7. The
+log has `DMUB diag (after the amdgpu reset)`: SCRATCH0-16, fault
+addresses, inbox / outbox pointers, and up to 16 `DMUB trace:` entries.
+Pass: `RDNA3,DMUB = running, mailbox up`, the clone and the extended
+desktop as in 9c. Then mark `dmubreset` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `RDNA3,DMUBAmdReset = 0` or `2`, DMUB running anyway | the firmware acks later than 30 register reads (amdgpu forces the reset then) | harmless if the boot and the clone pass; note the value: the verified path waits up to 1 s |
+| `DMUB: auto-load timed out` after the amdgpu reset | DMUIF_SOFT_RESET left set, or the forced reset caught the firmware mid PHY sequence | the `DMUB diag` lines (soft-reset 1? fault addresses?), `MMHUBBUB_SOFT_RESET` in the look; step 5b's path (no boot-arg) still works |
+| DMUB running, second monitor dark | the clone's VBIOS commands after the reset: as step 9b's triage | `clone:` lines, `RDNA3,MirrorResult` |
+
+### DC's HDMI stream (`hdmi`, `hdmi20`)
+
+`hdmi` = `modeset` + `rdna3hdmi=1`, `hdmi20` = `modeset2` + `rdna3hdmi=3`.
+Every TMDS mode set then also runs the HDMI half of DC's stream setup
+(hw/dcn32_hdmi.c, called from `program()` in hw/dcn32_modeset.c). The log
+has, per mode list, `display: head n HDMI: sink HDMI|DVI, SCDC s, LTE
+scramble l, max TMDS M MHz, HDMI 6G g, a audio modes` (the EDID's HDMI
+VSDB / HF-VSDB, the VBIOS encoder cap), and per switch `modeset: head n:
+HDMI_CONTROL 0x..., SCDC TMDS_CONFIG ...`; ioreg `RDNA3,Head<n>,HDMI`
+keeps the last one. Pass for `hdmi`: the switches of `rdna3_modetest
+cycle` pass as in `modeset` with the picture right (no over/underscan, no
+colour cast, no "no signal" after the switch back). Pass for `hdmi20`:
+additionally a mode above 340 MHz (4K60) was offered, set, and
+`RDNA3,Head<n>,HDMI` shows HDMI_CONTROL bits 1 and 2 (scrambler, 1/4
+clock channel) with `SCDC TMDS_CONFIG 0x03 scrambler 0x01`. Then mark the
+step passed (the ITEM_STEPS rules map the ported enc / SCDC / validation
+functions to these steps).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| picture overscanned / underscanned or colours washed out after a switch | the AVI infoframe (`set_avi_info_frame`: VIC, aspect, S = underscan, Q default) read differently by the TV | the mode's timing against the CTA VIC table (`edid_match_vic`); reproduce the packet with `dcn32_hdmi_build_info_frames` in tests/sim_display_dc.inc and compare byte by byte with CTA-861 |
+| `SCDC ... (-n)` with n = NACK on an HDMI 1.4 monitor | no SCDC at I2C 0x54: expected, DC ignores the error | nothing; on an HDMI 2.0 sink check the DDC line (`hc->ddc`, the VBIOS path) |
+| `SCDC ... (-n)` ACQUIRE | the DDC engine owned by the DMCUB/HW | note; the SCDC write is skipped, which only matters above 340 MHz |
+| hdmi20: 4K60 not in `rdna3_modetest list` | `HDMI 6G 0` (no ATOM_ENCODER_CAP_RECORD_HDMI6Gbps for the connector), the EDID's max TMDS below 594 MHz, or DISPCLK limits (`RD_MODESET_CLOCKS` in `display: head n mode ... refused (4)`) | the refusal code in the mode list log: 5 = TMDS limit, 4 = clocks |
+| hdmi20: "no signal" at 4K60, old mode back | scrambling not matched by the sink (`scrambler 0x00`), or the PHY PLL at 594 MHz | SCDC values in the log; `HDMICHARCLK` / PHY registers in the look; retry with a certified cable |
+| audio device appears but silent | not ported yet: the AFMT / azalia audio path is still off (only the audio info frame line is set) | expected |
+
+### Cursor through MALL (`cursormall`)
+
+`cursormall` = `9c` + `rdna3cursormall=1`. Pass: the pointer is drawn and
+moves on both monitors as in 9c, and the look has
+`HUBPn_DCHUBP_MALL_CONFIG` with bit 2 (USE_MALL_FOR_CURSOR) on the lit
+pipes. Then mark `cursormall` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| pointer garbled, flickering or missing only with the boot-arg | the MALL (Infinity Cache) does not serve display reads in this configuration (no MALL allocation from the PMFW / DCHUBBUB) | the look's `DCHUBBUB_ARB_MALL_CNTL`; keep the boot-arg off, report |
+| bit 2 not set | the framebuffer never set an image (software cursor: `rdna3cursor=0` or no VRAM) | fb log `hardware cursor: ...` |
+
+### DC's sequence extras (`dcseq`)
+
+
+`dcseq` = `modeset2` + `rdna3dcseq=1`. Pass: the switches of
+`rdna3_modetest cycle` as in `modeset2` (pictures, no underflow, back to
+native) with `modeset: head n: DIO FIFO resync (DISPCLK divider 0x..)`
+after each. Then mark `dcseq` passed.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| HDMI head: `SYMCLK on with TX off (... kHz) failed` | the VBIOS SetPixelClock refused the running clock with the transmitter off | the DMUB lines; the switch still goes on (DC ignores it too); report the value |
+| picture shifts / flickers once right after a switch, then settles | the DIO FIFO resync with a divider the DENTIST was still ramping to | `DENTIST_DISPCLK_CNTL` in the look (WDIVIDER = RDIVIDER?); compare without the boot-arg |
+| `modeset: ... does not run` only with the boot-arg | the second TransmitterControl DISABLE after the OTG stopped left the PHY off for the new timing | the DMUB sequence in the log (DISABLE, PIXCLK, DISABLE, PIXCLK, ENCODER, ENABLE expected) |
+
+### DP MST (`mst`)
+
+
+
+
+`mst` = `dplink` + `rdna3mst=1`; needs an MST hub (or a daisy-chain
+monitor) on the card's native DP output with at least one monitor behind
+it. At the first mode switch on that head the driver turns MST on in the
+hub, reads the topology and every monitor's EDID over sideband messages
+(`mst:` lines, ioreg `RDNA3,Head<n>,MSTPorts` = `port:peer type:full
+PBN:name` per output port), and sends the head's stream to one monitor
+(`rdna3mstport=N` picks port N; default the first). After that switch the
+mode list is that monitor's. ioreg `RDNA3,Head<n>,MST` = port, VCPI, PBN,
+time slots, `X.Y`, ACT handled.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| no `mst:` lines | the hub's DPCD has no MST cap (`MST no` in the `dp: AUX n: FEC ..` line, or no such line), the boot-arg is missing, or no mode switch ran | `RDNA3,Connector<n>,DPCD` 0x021; run `rdna3_modetest` on that head |
+| `mst: timed out msg send` / `NAK reply` / `link address NAK` | sideband: the hub did not answer DOWN_REQ, or the request was malformed (the hub NAKs with a reason) | the serial `mst:` lines in order; `takeover failed (r, n messages, n NAKs, n timeouts, n bad replies)` then `back to DP SST`: the SST picture must come back |
+| ports listed, `EDID 0 bytes` | REMOTE_I2C_READ failed for that port | the port's `pdt` (3 = SST sink; 4 = legacy converter: not handled) |
+| `mst: failed to get ACT after 3000 ms` | the hub did not apply the payload table: SAT rows vs the hub's table, or MST_EN / the link not up | `dp: MST allocate: ... VCP v, s slots`, the look's `DP_MSE_SAT0`, DPCD 0x1c0..0x1c2 / 0x2c0 |
+| ACT handled, `ALLOCATE_PAYLOAD for port n failed` | the hub refused the PBN on its downstream link | `mst: enum path resources port n: full PBN ..`: the mode needs more than that port carries; pick a smaller mode |
+| everything passes, the monitor behind the hub stays black | the VC rate or the stream inside the MST link | `dp: MST Update Payload: ... X: .. Y: ..` (X.Y = PBN / PBN per slot), the look's `DP_MSE_RATE_CNTL`, `DIG_BE_CNTL` DIG_MODE 5 |
+| `refused as MST stream (8): back to SST` | the requested mode does not fit the chosen port's PBN | expected for big modes; the SST picture comes back and the mode is set as SST |
 
 ### Idle power (`rdna3pmexp=1`)
 
@@ -905,3 +1043,37 @@ log line with a non-zero result) means the base refused the transaction;
 resolved (the transaction is then answered as before). A refusal goes back
 to WindowServer as the base's error; booting without `rdna3gamma=1` brings
 back the old answer.
+
+### Card run 31 (steps userq, pmctl, vcn, vcn2; build 90734eb)
+
+These steps boot without `rdna3fb`, so macOS drives only the head the GOP
+lit, through its generic framebuffer: one monitor, named "Unknown" in
+Settings. That is expected for them, not a display regression.
+
+- **userq:** `ADD_QUEUE type 1 doorbell 0xc00 PASID 6: 0`, the compute user
+  queue never fetched (`rptr 0 of 14`, `dst` 0), no VM fault. Diagnostic
+  build: the ADD_QUEUE log line carries the PD, MQD, wptr (VA and GART MC),
+  process and gang context addresses, and `userq diag:` lines dump the
+  doorbell ranges and every active compute HQD of ME 1 before the
+  REMOVE_QUEUE (no active HQD = the MES never mapped the queue; an active
+  one with WPTR 0 = the wptr poll address; RPTR = WPTR > 0 = it ran but the
+  fence path failed).
+- **pmctl:** `rdna3_pmctl` was missing from the CI artifact and from the VM's
+  `bin/`, so the step tested nothing. Both fixed; run it again.
+- **vcn (`rdna3vcn=1`, static PG):** `VCN[0] is not responding, giving up!!!
+  (UVD_STATUS 0x00000004)`: the VCPU does not boot on the static path. Linux
+  runs DPG on this card; `vcn` stays as a comparison only.
+- **vcn2 (`rdna3vcn=2`, DPG):** the VCPUs boot, both unified ring tests and
+  the JPEG ring and IB tests pass, and `--vcn-test`'s JPEG job from a client
+  VM signals. Both encode IB tests time out (`fence 2 timeout (last 0)`), so
+  no VCN_ENC ring is offered (`--vcn-test` reported PASSED on JPEG alone; it
+  now fails without a VCN_ENC ring). Diagnostic build: a fence-only
+  submission before the IB test (`VCNn: fence-only test passed/FAILED`) tells
+  a fence the VCPU cannot write apart from an IB it does not finish, and a
+  failed IB test logs rptr / wptr, UVD_STATUS, UVD_POWER_STATUS and the
+  first session-buffer dwords.
+- **vcn2 power-off:** after `system power off` a nested panic ("Ticket lock
+  ... unexpectedly owned") left the VM on a black screen. The VCN idle tick
+  kept rescheduling itself (a fence never came back) into the halt; the
+  power-off now stops VCN / JPEG first (`amdgpu_pci_shutdown` ->
+  `amdgpu_device_ip_suspend`), log `VCN: stopped for the power-off`.

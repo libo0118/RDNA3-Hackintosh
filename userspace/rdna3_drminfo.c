@@ -549,6 +549,16 @@ static int vcn_test(int fd)
         printf("VCN TEST: FAILED (no VCN_ENC / VCN_JPEG ring: boot with rdna3vcn=1)\n");
         return 1;
     }
+    /* a JPEG ring alone means the kernel's VCN IB tests failed: the test
+     * goes on with JPEG but cannot pass */
+    if (!enc_rings) {
+        printf("  VCN_ENC: no ring (the kernel's VCN IB tests failed: see the VCN lines of the log)\n");
+        bad++;
+    }
+    if (!jpeg_rings) {
+        printf("  VCN_JPEG: no ring\n");
+        bad++;
+    }
 
     /* the client's 64 KiB: IBs at 0, 4K, 8K, 12K; encode session buffer at
      * 16K (128 KiB in amdgpu, the firmware only needs it mapped); decode

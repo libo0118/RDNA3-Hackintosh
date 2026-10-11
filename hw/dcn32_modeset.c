@@ -21,6 +21,9 @@
 #include "gen/dcn_3_2_0_scale.h"
 #include "gen/dcn_3_2_0_mode.h"
 #include "gen/dcn_3_2_0_dp.h"
+#include "gen/dcn_3_2_0_dsc.h"
+#include "dcn32_dp_mst.h"
+#include "dcn32_hwseq.h"
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -153,7 +156,7 @@ int dcn32_modeset_plan_clk(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, con
 }
 
 /* the running timing of head 'h' at 'pclk_khz' as a mode (MSA, link settings) */
-static void head_mode(const rdna3_dcn_head *h, uint32_t pclk_khz, rdna3_mode *m)
+void dcn32_modeset_head_mode(const rdna3_dcn_head *h, uint32_t pclk_khz, rdna3_mode *m)
 {
     uint32_t i;
     for (i = 0; i < sizeof(*m); i++)
@@ -171,9 +174,46 @@ static void head_mode(const rdna3_dcn_head *h, uint32_t pclk_khz, rdna3_mode *m)
     m->pixel_khz = pclk_khz;
 }
 
+/* the TMDS rate check of a DVI / HDMI head: without an HDMI configuration
+ * the HDMI 1.4 limit; with one dcn10_link_encoder_validate_output_with_stream
+ * for an RGB 8 bpc stream (phy_pix_clk = get_tmds_output_pixel_clock_100hz),
+ * above 340 MHz only with RD_HDMI_20 */
+static int tmds_mode_ok(const rdna3_dcn_head *h, const rdna3_hdmi_cfg *hc, const rdna3_mode *m)
+{
+    rdna3_link_enc_features ft;
+    rdna3_crtc_format f = { RD_PIXEL_ENCODING_RGB, RD_COLOR_DEPTH_888, 0, 0 };
+    uint32_t sig = h->dig_mode == 3 ? RD_SIGNAL_HDMI_TYPE_A : RD_SIGNAL_DVI_SINGLE_LINK, phy;
+
+    if (!hc || !(hc->flags & RD_HDMI_STREAM))
+        return m->pixel_khz <= 340000;
+    phy = dcn32_tmds_output_pixel_clock_100hz(m->pixel_khz * 10, &f) / 10;
+    if (phy > 340000 && !(hc->flags & RD_HDMI_20))
+        return 0;
+    dcn32_link_enc_features(hc->enc_caps, &ft);
+    return dcn32_link_enc_validate_output(&ft, sig, sig, &f, m->pixel_khz, phy, hc->max_tmds_clk_mhz);
+}
+
+static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
+                       rdna3_dp_link *dp, const rdna3_hdmi_cfg *hc, uint32_t cur_pclk_khz, const rdna3_mode *m,
+                       const rdna3_dcn_clk_limits *lim, rdna3_dcn_modeset *ms);
+
 int dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
                           rdna3_dp_link *dp, uint32_t cur_pclk_khz, const rdna3_mode *m,
                           const rdna3_dcn_clk_limits *lim, rdna3_dcn_modeset *ms)
+{
+    return plan_common(d, dc, head, path, dp, NULL, cur_pclk_khz, m, lim, ms);
+}
+
+int dcn32_modeset_plan_hdmi(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
+                            const rdna3_hdmi_cfg *hc, uint32_t cur_pclk_khz, const rdna3_mode *m,
+                            const rdna3_dcn_clk_limits *lim, rdna3_dcn_modeset *ms)
+{
+    return plan_common(d, dc, head, path, NULL, hc, cur_pclk_khz, m, lim, ms);
+}
+
+static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
+                       rdna3_dp_link *dp, const rdna3_hdmi_cfg *hc, uint32_t cur_pclk_khz, const rdna3_mode *m,
+                       const rdna3_dcn_clk_limits *lim, rdna3_dcn_modeset *ms)
 {
     const rdna3_dcn_head *h;
     rdna3_otg_timing t;
@@ -188,22 +228,47 @@ int dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, cons
     h = &dc->head[head];
     for (i = 0; i < sizeof(*ms); i++)
         ((uint8_t *)ms)[i] = 0;
-    if (h->dig_fe < 0 || h->dig_be < 0 || (h->dig_mode != 2 && h->dig_mode != 3 && !(h->dig_mode == 0 && dp)))
+    if (h->dig_fe < 0 || h->dig_be < 0 ||
+        (h->dig_mode != 2 && h->dig_mode != 3 && !((h->dig_mode == 0 || h->dig_mode == 5) && dp)))
         return RD_MODESET_NOT_TMDS;
     if (!m->pixel_khz || !m->h_total || !m->v_total)
         return RD_MODESET_NO_TIMING;
     if (m->interlaced)
         return RD_MODESET_INTERLACED;
-    if (h->dig_mode != 0 && m->pixel_khz > 340000)
+    if (h->dig_mode != 0 && h->dig_mode != 5 && !tmds_mode_ok(h, hc, m))
         return RD_MODESET_TMDS_CLOCK;
-    if (h->dig_mode == 0) {
+    if (h->dig_mode == 0 || h->dig_mode == 5) {
         rdna3_dp_link_settings ls;
-        uint32_t ppc;
+        uint32_t ppc, opp, req;
         if (!dp->caps_valid || dp->be != (uint32_t)h->dig_be || dp->fe != (uint32_t)h->dig_fe || dp->otg != h->otg)
             return RD_MODESET_DP_LINK;
-        /* link_decide_link_settings over the link cap (dp_validate_mode_timing) */
-        if (dcn32_dp_decide_link_settings(dp, dcn32_dp_stream_kbps(m->pixel_khz, 8), &ls))
-            return RD_MODESET_LINK_BW;
+        /* an MST head (DIG_MODE 5) only with its MST link; an SST head may
+         * turn MST (the MST takeover of rdna3mst) */
+        if (h->dig_mode == 5 && !dp->mst)
+            return RD_MODESET_DP_LINK;
+        /* link_validate_mode_timing: an active converter's limits */
+        if (!dcn32_dp_validate_mode_timing(dp, m))
+            return RD_MODESET_DONGLE;
+        opp = GET(RI(d, regODM0_OPTC_DATA_SOURCE_SELECT, h->otg, ODM_S), ODM0_OPTC_DATA_SOURCE_SELECT, OPTC_SEG0_SRC_SEL);
+        dp->opp = opp < RD_DCN_MAX_PIPES ? opp : h->otg;
+        dp->dsc_inst = h->pipe;   /* dcn20_acquire_dsc: the pipe's own DSC */
+        /* DSC running that this driver did not set (the GOP's): not taken over */
+        if (GET(RI(d, regODM0_OPTC_DATA_FORMAT_CONTROL, h->otg, ODM_S), ODM0_OPTC_DATA_FORMAT_CONTROL, OPTC_DSC_MODE) &&
+            !dp->stream_dsc)
+            return RD_MODESET_DP_LINK;
+        if (dp->mst) {
+            /* dm_dp_mst_is_port_support_mode + the PBN / time slots */
+            req = dcn32_dp_mode_kbps(m, 8, 0);
+            if (dcn32_dp_mst_mode_fits(dp, req, m->pixel_khz, &ms->dp_mst_pbn, &ms->dp_mst_slots))
+                return RD_MODESET_LINK_BW;
+        } else {
+            /* apply_dsc_policy_for_stream (rdna3dsc), then link_decide_link_settings
+             * over the link cap (dp_validate_mode_timing) */
+            ms->dp_want_dsc = dcn32_dp_decide_dsc(dp, m, 8, &ms->dp_want_dsc_cfg);
+            req = dcn32_dp_mode_kbps(m, 8, ms->dp_want_dsc ? &ms->dp_want_dsc_cfg : 0);
+            if (dcn32_dp_decide_link_settings(dp, req, &ls))
+                return RD_MODESET_LINK_BW;
+        }
         /* the stream encoder's pixels per cycle stay as the boot set them:
          * two need is_h_timing_divisible_by_2 */
         ppc = dp->pix_per_cycle ? dp->pix_per_cycle
@@ -229,11 +294,16 @@ int dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, cons
     ms->encoder_id = (uint8_t)path->encoder_objid;
     ms->connector_id = (uint8_t)path->connector_objid;
     dcn32_clk_read(d, &ms->clk);
-    if (h->dig_mode == 0) {
+    if (h->dig_mode == 0 || h->dig_mode == 5) {
         ms->dp = dp;
         if (ms->clk.dprefclk_khz)
             dp->dprefclk_khz = ms->clk.dprefclk_khz;
+    } else if (hc && (hc->flags & RD_HDMI_STREAM)) {
+        ms->hdmi = *hc;
+        ms->tmds_want = *m;
+        dcn32_modeset_head_mode(h, cur_pclk_khz, &ms->tmds_cur);
     }
+
     if (lim && lim->dispclk_max_khz && lim->dppclk_max_khz) {
         /* dcn32_update_clocks: what DML 3.2 asks, raised before the timing */
         uint32_t disp = dcn32_required_dispclk(m->pixel_khz, ms->clk.vco_khz, lim->dispclk_max_khz);
@@ -255,7 +325,8 @@ int dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, cons
     c->h_active = h->h_active;
     c->v_active = h->v_active;
     /* the reference clock from the running ratio when the pixel clock is
-     * known, else DCN 3.2's 100 MHz and the clock from the ratio */
+     * known, else DCN 3.2's 100 MHz (dccg32_get_dccg_ref_freq: the
+     * xtalin) and the clock from the ratio */
     r_old = GET(c->ref_to_pix, HUBPREQ0_REF_FREQ_TO_PIX_FREQ, REF_FREQ_TO_PIX_FREQ);
     if (cur_pclk_khz && r_old)
         refclk_khz = udiv_round((uint64_t)r_old * cur_pclk_khz, 1u << 19);
@@ -284,8 +355,17 @@ int dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, cons
     if (dcn32_otg_timing(m, ms->dp != NULL, &t))
         return RD_MODESET_NO_TIMING;
     if (ms->dp) {
-        head_mode(h, cur_pclk_khz, &ms->dp_cur);
+        dcn32_modeset_head_mode(h, cur_pclk_khz, &ms->dp_cur);
         ms->dp_want = *m;
+        ms->dp_cur_dsc = ms->dp->stream_dsc;
+        ms->dp_cur_dsc_cfg = ms->dp->dsc_cfg;
+        if (ms->dp_want_dsc)
+            RLOG(d, "modeset: head %u: %ux%u needs DSC: %u x %u slices, %u.%04u bpp", head, m->h_active,
+                 m->v_active, ms->dp_want_dsc_cfg.num_slices_h, ms->dp_want_dsc_cfg.num_slices_v,
+                 ms->dp_want_dsc_cfg.bits_per_pixel / 16, (ms->dp_want_dsc_cfg.bits_per_pixel % 16) * 10000 / 16);
+        if (ms->dp->mst)
+            RLOG(d, "modeset: head %u: MST stream to port %d: PBN %u, %u time slots", head, ms->dp->mst_port,
+                 ms->dp_mst_pbn, ms->dp_mst_slots);
     }
     w->h_total = t.h_total;
     w->h_sync = FIELD(OTG0_OTG_H_SYNC_A, OTG_H_SYNC_A_START, t.h_sync_start) |
@@ -399,6 +479,8 @@ int dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, cons
     return RD_MODESET_OK;
 }
 
+/* get_clock_source_id: a TMDS stream's pixel clock comes from the PHY PLL of
+ * its transmitter (CLOCK_SOURCE_COMBO_PHY_PLL0 + n = ATOM_COMBOPHY_PLL0 + n) */
 static int vbios_pclk(rdna3_dmub *dm, const rdna3_dcn_modeset *ms, uint32_t khz)
 {
     rdna3_pixclk_v1_7 p = { 0 };
@@ -436,16 +518,44 @@ static int vbios_stream(rdna3_dmub *dm, const rdna3_dcn_modeset *ms, uint32_t kh
     return dmub32_encoder_control(dm, &e);
 }
 
-/* one direction of the switch: stream down, timing 'r', stream up */
+/* one direction of the switch: stream down (running at 'running_khz'),
+ * timing 'r' (mode 'tm'), stream up */
 static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_modeset *ms,
-                   const rdna3_modeset_regs *r, uint64_t mc, uint32_t pitch_px)
+                   const rdna3_modeset_regs *r, const rdna3_mode *tm, uint64_t mc, uint32_t pitch_px,
+                   uint32_t running_khz)
 {
+    int symclk_on_tx_off = 0;
+    /* rdna3hdmi: DC's HDMI stream (an RGB 8 bpc stream, phy_pix_clk = the pixel clock) */
+    const rdna3_crtc_format fmt = { RD_PIXEL_ENCODING_RGB, RD_COLOR_DEPTH_888, 0, 0 };
+    int dc_tmds = (ms->hdmi.flags & RD_HDMI_STREAM) != 0, hdmi = dc_tmds && ms->dig_mode == 3;
     uint32_t v;
     int ret, ret2;
 
+    /* link_set_dpms_off: set_avmute (dcn30_set_avmute: two frames), blank */
+    if (hdmi)
+        dcn32_enc_set_avmute(d, ms->fe, 1, (int)ms->otg);
     /* hubp2_set_blank, dcn10_link_encoder_disable_output */
     dcn32_set_blank(d, dc, ms->head, 1);
+    if (hdmi) {
+        /* the sink back to HDMI 1.4 rates ("vbios only handles 165Mhz"),
+         * then dce110_disable_stream's info packets off and attribute reset */
+        if (ms->hdmi.ddc >= 0 && (ret2 = dcn32_hdmi_write_scdc(d, (uint32_t)ms->hdmi.ddc, 165000, 0)) != 0)
+            RLOG(d, "modeset: head %u: SCDC write (legacy rates) failed (%d)", ms->head, ret2);
+        dcn32_enc_stop_hdmi_info_packets(d, ms->fe);
+        dcn32_enc_reset_hdmi_stream_attribute(d, ms->fe);
+    }
     ret = vbios_tx(dm, ms, RD_ATOM_TX_DISABLE, r->pclk_khz);
+    /* dcn32_disable_link_output -> apply_symclk_on_tx_off_wa: the OTG of an
+     * HDMI stream still runs on SYMCLK, which the PHY just stopped: the
+     * pixel clock again (SYMCLK_ON_TX_OFF) */
+    if (ms->dc_seq && ms->dig_mode == 3 && running_khz &&
+        GET(RI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S), OTG0_OTG_CONTROL, OTG_MASTER_EN)) {
+        ret2 = vbios_pclk(dm, ms, running_khz);
+        if (ret2)
+            RERR(d, "modeset: head %u: SYMCLK on with TX off (%u kHz) failed (%d)", ms->head, running_khz, ret2);
+        else
+            symclk_on_tx_off = 1;
+    }
     /* optc32_disable_crtc: OTG then VTG off, REG_WAIT(OTG_BUSY, 0, 1 us, 150000) */
     v = RI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S);
     WI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S, SET(v, OTG0_OTG_CONTROL, OTG_MASTER_EN, 0));
@@ -454,6 +564,13 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
     if (rdna3_wait_reg(d, AI(d, regOTG0_OTG_CLOCK_CONTROL, ms->otg, OTG_S), 0,
                        OTG0_OTG_CLOCK_CONTROL__OTG_BUSY_MASK, 0, 150000))
         RERR(d, "modeset: OTG %u stays busy after the disable", ms->otg);
+    /* dcn20_reset_back_end_for_pipe: no OTG on SYMCLK any more, the link
+     * output off again (SYMCLK_OFF_TX_OFF) */
+    if (symclk_on_tx_off) {
+        ret2 = vbios_tx(dm, ms, RD_ATOM_TX_DISABLE, running_khz);
+        if (ret2 && !ret)
+            ret = ret2;
+    }
     /* dcn31_program_pix_clk */
     ret2 = vbios_pclk(dm, ms, r->pclk_khz);
     if (ret2 && !ret)
@@ -469,23 +586,51 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
     ret2 = vbios_stream(dm, ms, r->pclk_khz);
     if (ret2 && !ret)
         ret = ret2;
-    WI(d, regDIG0_HDMI_INFOFRAME_CONTROL0, ms->fe, DIG_S, 0);
-    WI(d, regDIG0_HDMI_INFOFRAME_CONTROL1, ms->fe, DIG_S, 0);
-    WI(d, regDIG0_HDMI_GENERIC_PACKET_CONTROL0, ms->fe, DIG_S, 0);
+    if (hdmi) {
+        /* enc32_stream_encoder_hdmi_set_stream_attribute's register half */
+        dcn32_enc_hdmi_set_stream_attribute(d, ms->fe, &fmt, r->pclk_khz, ms->hdmi.lte_340_scramble);
+    } else {
+        if (dc_tmds)
+            dcn32_enc_dvi_set_stream_attribute(d, ms->fe, &fmt);
+        WI(d, regDIG0_HDMI_INFOFRAME_CONTROL0, ms->fe, DIG_S, 0);
+        WI(d, regDIG0_HDMI_INFOFRAME_CONTROL1, ms->fe, DIG_S, 0);
+        WI(d, regDIG0_HDMI_GENERIC_PACKET_CONTROL0, ms->fe, DIG_S, 0);
+    }
     /* optc32_enable_crtc: "VTG enable first is for HW workaround" */
     v = RI(d, regVTG0_CONTROL, ms->otg, VTG_S);
     WI(d, regVTG0_CONTROL, ms->otg, VTG_S, SET(v, VTG0_CONTROL, VTG0_ENABLE, 1));
     v = RI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S);
     WI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S,
        SET(SET(v, OTG0_OTG_CONTROL, OTG_DISABLE_POINT_CNTL, 2), OTG0_OTG_CONTROL, OTG_MASTER_EN, 1));
-    /* dcn10_link_encoder_enable_tmds_output */
+    /* enable_link_hdmi: write_scdc_data, dcn10_link_encoder_enable_tmds_output,
+     * read_scdc_data */
+    if (hdmi && ms->hdmi.ddc >= 0 &&
+        (ret2 = dcn32_hdmi_write_scdc(d, (uint32_t)ms->hdmi.ddc, r->pclk_khz, ms->hdmi.lte_340_scramble)) != 0)
+        RLOG(d, "modeset: head %u: SCDC write for %u kHz failed (%d)", ms->head, r->pclk_khz, ret2);
     ret2 = vbios_tx(dm, ms, RD_ATOM_TX_ENABLE, r->pclk_khz);
     if (ret2 && !ret)
         ret = ret2;
+    if (hdmi) {
+        rdna3_hdmi_info_frames f;   /* 280 bytes */
+        if (ms->hdmi.ddc >= 0) {
+            rdna3_scdc_state sc;
+            ret2 = dcn32_hdmi_read_scdc(d, (uint32_t)ms->hdmi.ddc, &sc);
+            RLOG(d, "modeset: head %u: HDMI_CONTROL 0x%x, SCDC TMDS_CONFIG 0x%x scrambler 0x%x flags 0x%x 0x%x (%d)",
+                 ms->head, dcn32_enc_hdmi_control(d, ms->fe), sc.tmds_config, sc.scrambler_status,
+                 sc.status_flags[0], sc.status_flags[1], ret2);
+        }
+        /* dce110_enable_stream -> dcn30_update_info_frame: the AVI / vendor
+         * infoframes resource_build_info_frame made for the stream */
+        dcn32_hdmi_build_info_frames(&f, tm, &fmt, ms->hdmi.hdmi_sink);
+        dcn32_enc_update_hdmi_info_packets(d, ms->fe, &f);
+    }
     /* clear the sticky underflow bit for the check, then unblank */
     v = RI(d, regHUBP0_DCHUBP_CNTL, ms->pipe, HUBP_S);
     WI(d, regHUBP0_DCHUBP_CNTL, ms->pipe, HUBP_S, SET(v, HUBP0_DCHUBP_CNTL, HUBP_UNDERFLOW_CLEAR, 1));
     dcn32_set_blank(d, dc, ms->head, 0);
+    /* link_set_dpms_on: AV mute off */
+    if (hdmi)
+        dcn32_enc_set_avmute(d, ms->fe, 0, -1);
     return ret;
 }
 
@@ -493,7 +638,7 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
  * (dcn31_program_pix_clk), the link cap verified once (detection's
  * dp_verify_link_cap_with_retries), OTG on, link_set_dpms_on */
 static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, const rdna3_modeset_regs *r,
-                      const rdna3_mode *m, uint64_t mc, uint32_t pitch_px)
+                      const rdna3_mode *m, int dsc, const rdna3_dsc_config *dsc_cfg, uint64_t mc, uint32_t pitch_px)
 {
     rdna3_dp_link *dp = ms->dp;
     uint32_t v;
@@ -517,9 +662,17 @@ static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, 
     WI(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, ms->pipe, HUBP_S, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
     WI(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, ms->pipe, HUBP_S, (uint32_t)(mc >> 32) & 0xffff);
     WI(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, ms->pipe, HUBP_S, (uint32_t)mc);
-    /* the link cap: what the sink trains at, falling back from its max */
-    if (!dp->verified)
-        dcn32_dp_verify_link_cap(dp, RD_DP_LINK_TRAINING_MAX_VERIFY_RETRY);
+    /* the link cap: what the sink trains at, falling back from its max
+     * (verify_link_capability; an MST link is not trained to verify it:
+     * verify_link_capability_non_destructive takes the max link cap) */
+    if (!dp->verified) {
+        if (dp->mst) {
+            dp->verified_link_cap = dp->max_link_cap;
+            dp->verified = 1;
+        } else {
+            dcn32_dp_verify_link_cap(dp, RD_DP_LINK_TRAINING_MAX_VERIFY_RETRY);
+        }
+    }
     /* optc32_enable_crtc */
     v = RI(d, regVTG0_CONTROL, ms->otg, VTG_S);
     WI(d, regVTG0_CONTROL, ms->otg, VTG_S, SET(v, VTG0_CONTROL, VTG0_ENABLE, 1));
@@ -528,7 +681,11 @@ static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, 
        SET(SET(v, OTG0_OTG_CONTROL, OTG_DISABLE_POINT_CNTL, 2), OTG0_OTG_CONTROL, OTG_MASTER_EN, 1));
     /* link_set_dpms_on (DC trains without fallback here: the verified
      * cap already fell back) */
+    dp->stream_dsc = dsc;
+    dp->dsc_cfg = *dsc_cfg;
     ret = dcn32_dp_link_set_dpms_on(dp, m, 0);
+    if (ret && dp->stream_dsc)
+        RERR(d, "modeset: head %u: the DSC stream did not come up (%d)", ms->head, ret);
     v = RI(d, regHUBP0_DCHUBP_CNTL, ms->pipe, HUBP_S);
     WI(d, regHUBP0_DCHUBP_CNTL, ms->pipe, HUBP_S, SET(v, HUBP0_DCHUBP_CNTL, HUBP_UNDERFLOW_CLEAR, 1));
     dcn32_set_blank(d, dc, ms->head, 0);
@@ -553,6 +710,8 @@ static void update_head(rdna3_dcn *dc, rdna3_dcn_scale *sc, const rdna3_dcn_mode
     h->pitch_px = pitch_px;
     h->address = mc;
     dc->requested[ms->pipe] = mc;
+    if (ms->dp)
+        h->dig_mode = ms->dp->mst ? 5 : 0;   /* an SST head taken over as MST runs DIG_MODE 5 */
     if (sc) {
         sc->saved[ms->pipe] = 0;   /* the bypass state is the one just written */
         sc->bw_saved[ms->pipe] = 0;
@@ -589,8 +748,11 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     /* a scaled source first goes back to the GOP's bypass state */
     if (sc && sc->saved[ms->pipe])
         dcn32_set_source(d, dc, sc, ms->head, old_mc, sc->native_w[ms->pipe], sc->native_h[ms->pipe], old_pitch_px);
-    ret = ms->dp ? program_dp(d, dc, ms, &ms->want, &ms->dp_want, mc, pitch_px)
-                 : program(d, dm, dc, ms, &ms->want, mc, pitch_px);
+    ret = ms->dp ? program_dp(d, dc, ms, &ms->want, &ms->dp_want, ms->dp_want_dsc, &ms->dp_want_dsc_cfg, mc, pitch_px)
+                 : program(d, dm, dc, ms, &ms->want, &ms->tmds_want, mc, pitch_px, ms->cur.pclk_khz);
+    /* dce110_apply_ctx_to_hw: dcn32_resync_fifo_dccg_dio after the stream */
+    if (ms->dc_seq)
+        RLOG(d, "modeset: head %u: DIO FIFO resync (DISPCLK divider 0x%x)", ms->head, dcn32_resync_fifo_dccg_dio(d));
     if (!ret) {
         f0 = RI(d, regOTG0_OTG_STATUS_FRAME_COUNT, ms->otg, OTG_S) & fmask;
         d->os.msleep(d->os.ctx, settle_ms);
@@ -608,9 +770,13 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     }
     if (ret) {
         if (ms->dp)
-            program_dp(d, dc, ms, &ms->cur, &ms->dp_cur, old_mc, old_pitch_px);
+            program_dp(d, dc, ms, &ms->cur, &ms->dp_cur, ms->dp_cur_dsc, &ms->dp_cur_dsc_cfg, old_mc, old_pitch_px);
         else
-            program(d, dm, dc, ms, &ms->cur, old_mc, old_pitch_px);
+            program(d, dm, dc, ms, &ms->cur, &ms->tmds_cur, old_mc, old_pitch_px, ms->want.pclk_khz);
+        if (ms->dc_seq)
+            dcn32_resync_fifo_dccg_dio(d);
+
+
         update_head(dc, sc, ms, &ms->cur, old_mc, old_pitch_px);
         return ret;
     }
