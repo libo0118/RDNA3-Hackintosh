@@ -111,7 +111,8 @@ amd_fw_status amd_psp_sos_parse(const uint8_t *fw, size_t len, amd_psp_sos *out)
                 out->bin[AMD_PSP_BIN_SPL] = (amd_psp_bin){ base + o, s, 0 };
         }
     } else if (h.hv_major == 2) {
-        /* psp_firmware_header_v2_0/v2_1: array of psp_fw_bin_desc */
+        /* psp_firmware_header_v2_0/v2_1: array of psp_fw_bin_desc, each one
+         * handed to parse_sos_bin_descriptor (type -> bin) */
         uint32_t descs = (h.hv_minor == 1) ? OFF(psp_firmware_header_v2_1, psp_fw_bin)
                                            : OFF(psp_firmware_header_v2_0, psp_fw_bin);
         if (!rd32(&b, OFF(psp_firmware_header_v2_0, psp_fw_bin_count), &count))

@@ -120,6 +120,13 @@ typedef struct rdna3_dev {
     int      doorbell_ok;
 
     uint32_t usec_timeout;      /* amdgpu default: 100000 */
+
+    /* boot-arg rdna3amdgpu=1: follow amdgpu's own sequence where the
+     * profile verified on the card does something else (the PMFW after
+     * SETUP_TMR, the IH ring in system memory, page-table fragments, ...).
+     * 0 (default) keeps the verified behaviour; set by the OS layer right
+     * after rdna3_dev_init. */
+    int      amdgpu_exact;
 } rdna3_dev;
 
 /* ---- logging ---- */

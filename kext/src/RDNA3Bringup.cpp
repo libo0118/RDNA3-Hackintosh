@@ -86,6 +86,9 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
         PE_parse_boot_argn("rdna3pmmask", &pmmask, sizeof(pmmask));
         PE_parse_boot_argn("rdna3mes", &mes, sizeof(mes));
         fMesWanted = mes != 0;
+        /* stage 4 item J: amdgpu's exact sequence where the verified
+         * profile differs; off by default (ladder step amdgpu) */
+        fAmdgpuExact = rd3_arg("rdna3amdgpu", 0) != 0;
         {
             /* user queues (amdgpu.user_queue=1), off by default like
              * amdgpu's: they need the MES scheduler, so rdna3userq=1 brings
@@ -240,8 +243,14 @@ void RDNA3Bringup::stopAndFree()
     }
     if (fIh && fIh->enabled && fDev)
         ih60_disable(fDev, fIh);
-    if (fPsp && fPsp->ring_created)
-        psp13_ring_stop(fPsp);
+    /* psp_hw_fini with rdna3amdgpu=1 (TAs, ASD, DESTROY_TMR, ring
+     * destroy); the verified default only stops the ring */
+    if (fPsp && fPsp->ring_created) {
+        if (fAmdgpuExact)
+            psp13_hw_fini(fPsp);
+        else
+            psp13_ring_stop(fPsp);
+    }
 
     /* 3. memory: mappings, firmware, state; fDev last */
     OSSafeReleaseNULL(fVram);
@@ -251,6 +260,9 @@ void RDNA3Bringup::stopAndFree()
             IOFree(fBlobs[i].data, fBlobs[i].len);
     if (fSos.data)
         IOFree(fSos.data, fSos.len);
+    if (fTa.data)
+        IOFree(fTa.data, fTa.len);
+    fTa.data = nullptr;
     if (fSmu) IOFree(fSmu, sizeof(*fSmu));
     if (fUserOdTable) IOFree(fUserOdTable, sizeof(*fUserOdTable));
     fUserOdTable = nullptr;
@@ -564,6 +576,8 @@ void RDNA3Bringup::run()
     publishString("RDNA3,Stage2", "starting");
     rdna3_dev_init(fDev, &os, fMmio->getLength());
     fDev->vram_size = fVramSize;
+    fDev->amdgpu_exact = fAmdgpuExact ? 1 : 0;
+    publish("RDNA3,AmdgpuExact", fAmdgpuExact ? 1 : 0);
     if (rdna3_dev_set_discovery(fDev, fDisc) != RDNA3_OK || !mapVram()) {
         publishString("RDNA3,Stage2", "failed: device setup");
         return;
@@ -632,6 +646,10 @@ void RDNA3Bringup::run()
         BLOG("VCN: %u instance(s) in discovery, VCN firmware plan: %s", n, amd_fw_status_str(fst));
     }
     BLOG("firmware plan: %u ucodes, %u KiB", fPlan->count, fPlan->total_aligned / 1024);
+    /* psp_init_ta_microcode: with rdna3amdgpu=1 psp_load_fw starts ASD and
+     * the HDCP / DTM TAs from the TA file (optional, as for amdgpu) */
+    if (fAmdgpuExact && !fTa.data)
+        loadFirmware(amd_navi32_ta_name, &fTa, true);
     for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)
         fBlobRefs[i] = blobs[i];
 
@@ -715,6 +733,8 @@ bool RDNA3Bringup::hwInit()
 
     /* PSP */
     ret = psp13_init(fPsp, fDev, fSos.data, fSos.len);
+    if (!ret && fTa.data && psp13_set_ta(fPsp, fTa.data, fTa.len) != RDNA3_OK)
+        BLOG("PSP: TA file unusable: no ASD / HDCP / DTM");
     if (!ret)
         ret = psp13_hw_init(fPsp, fPlan, fBlobRefs);
     publish("RDNA3,PSPResult", (uint64_t)(int64_t)ret);

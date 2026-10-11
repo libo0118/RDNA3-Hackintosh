@@ -87,6 +87,14 @@ ITEM_STEPS = [
                 r"|reset_fifo|set_dig_input_mode|stream_encoder_dp_unblank)|link_encoder_disable"
                 r"|link_transmitter_control|set_dp_phy_pattern_passthrough_mode"
                 r"|set_link_training_complete|setup_panel_mode"), ["dplink"]),
+    # stage 4 item J: amdgpu's own sequence where the verified profile
+    # differs, behind rdna3amdgpu=1 (ladder step amdgpu), and the ports
+    # that came with it into groups the card verified
+    (re.compile(r"acquire_psp_cmd_buf|release_psp_cmd_buf|psp_(asd|hdcp|dtm)_(initialize|invoke|terminate)"
+                r"|psp_check_pmfw_centralized_cstate_management|psp_early_init|psp_free_shared_bufs"
+                r"|psp_hw_fini|psp_suspend|psp_rl_load|psp_prep_ta_(invoke|load|unload)_cmd_buf"
+                r"|psp_prep_tmr_unload_cmd_buf|psp_ta_(free_shared_buf|init_shared_buf|invoke|load|unload)"
+                r"|psp_tmr_(terminate|unload)|psp_v13_0_ring_destroy"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

@@ -142,6 +142,12 @@ typedef struct sim {
     unsigned nipfw;
     int tmr_setup, toc_loaded, autoload, autoload_after_rlc_g, smu_loaded;
     int tmr_after_smu;
+    int smu_after_tmr;            /* LOAD_IP_FW SMU came after SETUP_TMR */
+    /* trusted applications (LOAD_TA / LOAD_ASD / INVOKE_CMD / UNLOAD_TA):
+     * live sessions, what was refused, DESTROY_TMR, the register list */
+    unsigned ta_loads, asd_loads, ta_unloads, ta_invokes, ta_bad, tmr_destroys, rl_loads, rl_before_tmr;
+    unsigned ring_destroys;
+    uint32_t ta_live[8], ta_next_session, ta_last_cmd, ta_last_len[8];
     int pending_writes;   /* CPU VRAM writes not yet flushed via HDP */
     int unflushed_doorbells;
     uint32_t smu_msgs;
@@ -1609,6 +1615,8 @@ static void sim_mode1_reset(void)
     *smn_slot(SMN_ROM_OFFSET_CTRL, 1) = ROM_STRAP;
     S.sos_alive = 0; S.sos_boot_at = 0; S.rptr_dw = 0; S.ring_mc = 0;
     S.smu_loaded = 0; S.tmr_setup = 0; S.toc_loaded = 0; S.autoload = 0;
+    S.smu_after_tmr = 0;
+    memset(S.ta_live, 0, sizeof(S.ta_live));   /* the sOS and its TAs are gone */
     S.cp_rptr = 0; S.sdma_rptr = 0; S.rlc_safe = 0;
     *R(MP0(35)) = 0x80000000u;
     *R(MP0(33)) = 0x80000000u;
@@ -2472,6 +2480,52 @@ static void psp_exec(uint64_t cmd_mc, uint64_t fence_mc, uint32_t fence_val)
         S.toc_loaded = 1;
         cmd->resp.tmr_size = 0x600000;
         break;
+    case GFX_CMD_ID_LOAD_TA:
+    case GFX_CMD_ID_LOAD_ASD: {
+        /* the image comes through fw_pri (4 KiB aligned); a TA has a 16 KiB
+         * shared buffer, ASD none; both need the TMR */
+        const struct psp_gfx_cmd_load_ta *t = &cmd->cmd.cmd_load_ta;
+        uint64_t app = t->app_phy_addr_lo | ((uint64_t)t->app_phy_addr_hi << 32);
+        uint64_t sh = t->cmd_buf_phy_addr_lo | ((uint64_t)t->cmd_buf_phy_addr_hi << 32);
+        int asd = cmd->cmd_id == GFX_CMD_ID_LOAD_ASD;
+        unsigned k;
+        if (!S.tmr_setup || !mc_ptr(app, t->app_len) || (app & 4095) || !t->app_len ||
+            (asd ? (t->cmd_buf_len != 0) : (t->cmd_buf_len != 0x4000 || (sh & 4095) || !mc_ptr(sh, 0x4000)))) {
+            S.ta_bad++;
+            cmd->resp.status = 0xFFFF0003;
+            break;
+        }
+        for (k = 0; k < 8 && S.ta_live[k]; k++)
+            ;
+        if (k == 8) { S.ta_bad++; cmd->resp.status = 0xFFFF0004; break; }
+        S.ta_live[k] = 0x100 + ++S.ta_next_session;
+        S.ta_last_len[k] = t->app_len;
+        cmd->resp.session_id = S.ta_live[k];
+        if (asd) S.asd_loads++; else S.ta_loads++;
+        break;
+    }
+    case GFX_CMD_ID_UNLOAD_TA:
+    case GFX_CMD_ID_INVOKE_CMD: {
+        uint32_t sid = cmd->cmd_id == GFX_CMD_ID_UNLOAD_TA ? cmd->cmd.cmd_unload_ta.session_id
+                                                           : cmd->cmd.cmd_invoke_cmd.session_id;
+        unsigned k;
+        for (k = 0; k < 8 && (!sid || S.ta_live[k] != sid); k++)
+            ;
+        if (k == 8) { S.ta_bad++; cmd->resp.status = 0xFFFF0005; break; }
+        if (cmd->cmd_id == GFX_CMD_ID_UNLOAD_TA) {
+            S.ta_live[k] = 0;
+            S.ta_unloads++;
+        } else {
+            S.ta_invokes++;
+            S.ta_last_cmd = cmd->cmd.cmd_invoke_cmd.ta_cmd_id;
+        }
+        break;
+    }
+    case GFX_CMD_ID_DESTROY_TMR:
+        if (!S.tmr_setup) { S.ta_bad++; cmd->resp.status = 0xFFFF0006; break; }
+        S.tmr_setup = 0;
+        S.tmr_destroys++;
+        break;
     case GFX_CMD_ID_SETUP_TMR:
         S.tmr_setup = 1;
         S.tmr_after_smu = S.smu_loaded;
@@ -2503,8 +2557,13 @@ static void psp_exec(uint64_t cmd_mc, uint64_t fence_mc, uint32_t fence_val)
             S.dmub.psp_loaded = 1;
             *R(DCN_B2 + regDMCUB_REGION3_CW0_TOP_ADDRESS) |= DMCUB_REGION3_CW0_TOP_ADDRESS__DMCUB_REGION3_CW0_ENABLE_MASK;
         }
+        if (t == GFX_FW_TYPE_REG_LIST) {
+            S.rl_loads++;
+            S.rl_before_tmr += !S.tmr_setup;
+        }
         if (t == GFX_FW_TYPE_SMU) {
             uint32_t *fl = smn_slot(RD_SMN_MP1_FIRMWARE_FLAGS, 1);
+            S.smu_after_tmr = S.tmr_setup;
             S.smu_loaded = 1;
             *R(MP1(90)) = 1; /* PMFW up, mailbox idle */
             if (fl) *fl = MP1_FIRMWARE_FLAGS__INTERRUPTS_ENABLED_MASK;
@@ -3220,6 +3279,9 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
                 *R(dw) = 0x80000000u;
         } else if (v == GFX_CTRL_CMD_ID_DESTROY_RINGS) {
             *R(dw) = 0x80000000u;
+            S.ring_mc = 0;
+            S.rptr_dw = 0;
+            S.ring_destroys++;
         }
         return;
     }
@@ -3844,7 +3906,7 @@ static void make_discovery(amd_discovery *disc)
     e->hw_id = hw; e->major = ma; e->minor = mi; e->revision = re; \
     e->num_base = e->num_base_kept = 3; e->base[0] = b0; e->base[1] = b1; e->base[2] = b2; } while (0)
     IP(AMD_HWID_GC, 11, 0, 3, GC_BASE0, 0xA000, 0x1C000);
-    IP(AMD_HWID_MP0, 13, 0, 7, MP0_BASE, 0, 0);
+    IP(AMD_HWID_MP0, 13, 0, 10, MP0_BASE, 0, 0);
     IP(AMD_HWID_MP1, 13, 0, 10, MP1_BASE, 0, 0);
     IP(AMD_HWID_THM, 13, 0, 2, THM_BASE, 0, 0);
     IP(AMD_HWID_NBIF, 4, 3, 0, NBIO_B0, NBIO_B1, NBIO_B2);
@@ -3888,20 +3950,36 @@ static uint8_t *slurp(const char *dir, const char *name, size_t *len)
 }
 
 /* minimal synthetic firmware: SOS v2 (sys, sos, kdb, toc) + one blob per IP */
-static uint8_t syn_sos[16384], syn_blob[AMD_BLOB_COUNT][8192];
+static uint8_t syn_sos[16384], syn_blob[AMD_BLOB_COUNT][8192], syn_ta[256 + 4096];
 
 static void w32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 
 static void synth(amd_fw_blob_ref blobs[AMD_BLOB_COUNT], const uint8_t **sos, size_t *sos_len)
 {
     unsigned i;
-    uint32_t types[4][3] = { { 2, 0, 1024 }, { 1, 1024, 2048 }, { 3, 3072, 512 }, { 4, 3584, 256 } };
+    /* SYS_DRV, SOS, KDB, TOC and the register list (PSP_FW_TYPE_PSP_RL) */
+    uint32_t types[5][3] = { { 2, 0, 1024 }, { 1, 1024, 2048 }, { 3, 3072, 512 }, { 4, 3584, 256 },
+                             { 6, 3840, 128 } };
+    /* the TA file: ASD, HDCP, DTM and RAS (ta_firmware_header_v2_0) */
+    uint32_t tas[4][3] = { { 1, 0, 1024 }, { 4, 1024, 512 }, { 5, 2048, 512 }, { 3, 3072, 256 } };
+    memset(syn_ta, 0x5A, sizeof(syn_ta));
+    memset(syn_ta, 0, 256);
+    w32(syn_ta + 0, 256 + 4096); w32(syn_ta + 4, 256);
+    syn_ta[8] = 2;
+    w32(syn_ta + 24, 256);
+    w32(syn_ta + 32, 4);
+    for (i = 0; i < 4; i++) {
+        w32(syn_ta + 36 + 16 * i, tas[i][0]);
+        w32(syn_ta + 40 + 16 * i, 0x21000000u + i);
+        w32(syn_ta + 44 + 16 * i, tas[i][1]);
+        w32(syn_ta + 48 + 16 * i, tas[i][2]);
+    }
     memset(syn_sos, 0xA5, sizeof(syn_sos));
     w32(syn_sos + 0, 256 + 4096); w32(syn_sos + 4, 256);
     syn_sos[8] = 2; syn_sos[9] = 0; syn_sos[10] = 0; syn_sos[11] = 0;
     w32(syn_sos + 24, 256);
-    w32(syn_sos + 32, 4);
-    for (i = 0; i < 4; i++) {
+    w32(syn_sos + 32, 5);
+    for (i = 0; i < 5; i++) {
         w32(syn_sos + 36 + 16 * i, types[i][0]);
         w32(syn_sos + 40 + 16 * i, 1);
         w32(syn_sos + 44 + 16 * i, types[i][1]);
@@ -9098,6 +9176,55 @@ static void run(const char *fwdir)
         CHECK(S.sos_alive && S.nipfw == ipfw0 + plan.count && S.smu_loaded);
         CHECK(smu13_check_fw_status(&dev) == RDNA3_OK);
         CHECK(smu13_hello(&dev, &smu_ver, &ifv) == RDNA3_OK);
+    }
+
+    /* rdna3amdgpu=1: psp_load_fw as amdgpu runs it on MP0 13.0.10 -
+     * psp_early_init's flags, SETUP_TMR before the PMFW (no centralized DF
+     * C-state management), then ASD, the register list and the HDCP / DTM
+     * TAs; psp_hw_fini takes them down again */
+    {
+        static rdna3_psp p4;
+        const uint8_t *ta = syn_ta;
+        size_t ta_len = sizeof(syn_ta);
+        uint8_t *ta_file = NULL;
+        uint32_t ipfw0;
+        if (fwdir) {
+            ta_file = slurp(fwdir, amd_navi32_ta_name, &ta_len);
+            ta = ta_file;
+        }
+        sim_mode1_reset();
+        CHECK(psp13_wait_for_bootloader(&psp) == RDNA3_OK);
+        rdna3_vram_alloc_init(&dev, 16u << 20, BAR_LEN);
+        dev.amdgpu_exact = 1;
+        CHECK(psp13_init(&p4, &dev, sos, sos_len) == RDNA3_OK);
+        CHECK(p4.autoload_supported && !p4.boot_time_tmr && !p4.pmfw_centralized_cstate_management);
+        CHECK(p4.sos.bin[AMD_PSP_BIN_RL].size != 0);   /* the 13.0.10 sOS carries a register list */
+        if (ta) {
+            CHECK(psp13_set_ta(&p4, ta, ta_len) == RDNA3_OK);
+            CHECK(p4.asd.bin_size && p4.hdcp.bin_size && p4.dtm.bin_size);
+        }
+        ipfw0 = S.nipfw;
+        CHECK(psp13_hw_init(&p4, &plan, blobs) == RDNA3_OK);
+        CHECK(S.smu_loaded && S.smu_after_tmr && !S.tmr_after_smu);
+        CHECK(S.ip_fw_types[ipfw0] == GFX_FW_TYPE_SMU);   /* first of psp_load_non_psp_fw */
+        CHECK(S.autoload && S.rl_loads == 1 && !S.rl_before_tmr && p4.rl_loaded);
+        CHECK(S.nipfw == ipfw0 + plan.count + 1);
+        CHECK(S.ip_fw_types[S.nipfw - 1] == GFX_FW_TYPE_REG_LIST);
+        if (ta) {
+            CHECK(S.asd_loads == 1 && p4.asd.initialized && S.ta_loads == 2 && S.ta_bad == 0);
+            CHECK(p4.hdcp.initialized && p4.dtm.initialized && p4.hdcp.session_id != p4.dtm.session_id);
+            CHECK(p4.hdcp.shared != UINT64_MAX && p4.hdcp.shared_mem_size == PSP_HDCP_SHARED_MEM_SIZE);
+            CHECK(psp13_hdcp_invoke(&p4, 7) == RDNA3_OK && S.ta_invokes == 1 && S.ta_last_cmd == 7);
+            CHECK(psp13_dtm_invoke(&p4, 3) == RDNA3_OK && S.ta_invokes == 2 && S.ta_last_cmd == 3);
+        }
+        CHECK(smu13_check_fw_status(&dev) == RDNA3_OK);
+        CHECK(smu13_hello(&dev, &smu_ver, &ifv) == RDNA3_OK);
+        CHECK(psp13_hw_fini(&p4) == RDNA3_OK);
+        CHECK(S.tmr_destroys == 1 && !S.tmr_setup && !p4.ring_created && S.ring_destroys >= 1);
+        CHECK(S.ta_unloads == (ta ? 3u : 0u) && S.ta_bad == 0 && !p4.asd.initialized);
+        CHECK(psp13_hdcp_invoke(&p4, 1) == RDNA3_EINVAL);
+        dev.amdgpu_exact = 0;
+        free(ta_file);
     }
 
     printf("sim_navi32: %s firmware, %u bootloader cmds, %u LOAD_IP_FW, TMR %u KiB, "

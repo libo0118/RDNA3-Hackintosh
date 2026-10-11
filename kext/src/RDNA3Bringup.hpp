@@ -188,6 +188,9 @@ private:
     rdna3_mec_ring  *fKcq  = nullptr;  /* level 8: the first kernel compute queue */
     struct rdna3_mes *fMes = nullptr;  /* level 8 + rdna3mes=1: MES scheduler pipe (C1) */
     bool             fMesWanted = false;
+    /* rdna3amdgpu=1: amdgpu's own sequence where the verified default
+     * differs (rdna3_dev.amdgpu_exact); ladder step amdgpu */
+    bool             fAmdgpuExact = false;
     /* user queues: rdna3userq=1 (needs the MES, so it turns rdna3mes on);
      * the IPs that got them, the PASIDs the VMs' processes have for the MES,
      * GART slots of user queue wptr BOs (under the user fence slots) */
@@ -291,6 +294,7 @@ private:
     volatile bool fVmReady = false;
     void          vmFlush(uint32_t vmid);
     RDNA3Firmware fSos    = {};
+    RDNA3Firmware fTa     = {};   /* psp_13_0_10_ta.bin, kept with rdna3amdgpu=1 (ASD, HDCP, DTM) */
     RDNA3Firmware fBlobs[AMD_BLOB_COUNT] = {};
 
     /* firmware request rendezvous */
