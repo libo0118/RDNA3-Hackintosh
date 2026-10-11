@@ -3,9 +3,9 @@
 - macOS driver for AMD RX 7800 XT (Navi 32), ported from Linux amdgpu.
   Working branch: `stage1-kext`.
 - Talk to the user in Polish; everything committed is English only.
-- CI minutes are scarce: commit with `[skip ci]`, verify with one manual
-  run of `build.yml` per batch with input `full: "false"` (the input
-  defaults to `true`). Never `full: true` without asking.
+- CI runs on the owner's self-hosted runners (`[self-hosted, Linux]`,
+  `[self-hosted, macOS]`, both x86_64) and may be used freely for testing:
+  manual `build.yml` runs as often as needed, `full: true` included.
 - Hardware changes are ports of named amdgpu functions and are reproduced in
   `tests/sim_navi32.c` first; `make test` must pass before pushing.
 - Kext code can be type-checked on Linux without CI:
