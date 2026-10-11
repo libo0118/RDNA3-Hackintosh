@@ -476,6 +476,22 @@ int dcn32_otg_set_odm_combine(rdna3_dev *d, uint32_t otg, const uint32_t *opp_id
     return RDNA3_OK;
 }
 
+/* optc32_set_odm_bypass */
+void dcn32_otg_set_odm_bypass(rdna3_dev *d, uint32_t otg, int two_pix)
+{
+    uint32_t v;
+    WM(d, regODM0_OPTC_DATA_SOURCE_SELECT, otg,
+       FLD(ODM0_OPTC_DATA_SOURCE_SELECT, OPTC_NUM_OF_INPUT_SEGMENT, 0) |
+       FLD(ODM0_OPTC_DATA_SOURCE_SELECT, OPTC_SEG0_SRC_SEL, otg) |
+       FLD(ODM0_OPTC_DATA_SOURCE_SELECT, OPTC_SEG1_SRC_SEL, 0xf) |
+       FLD(ODM0_OPTC_DATA_SOURCE_SELECT, OPTC_SEG2_SRC_SEL, 0xf) |
+       FLD(ODM0_OPTC_DATA_SOURCE_SELECT, OPTC_SEG3_SRC_SEL, 0xf));
+    /* enum h_timing_div_mode: H_TIMING_NO_DIV 0, H_TIMING_DIV_BY2 1 */
+    v = RO(d, regOTG0_OTG_H_TIMING_CNTL, otg);
+    WO(d, regOTG0_OTG_H_TIMING_CNTL, otg, SET(v, OTG0_OTG_H_TIMING_CNTL, OTG_H_TIMING_DIV_MODE, two_pix ? 1 : 0));
+    WM(d, regODM0_OPTC_MEMORY_CONFIG, otg, FLD(ODM0_OPTC_MEMORY_CONFIG, OPTC_MEM_SEL, 0));
+}
+
 /* ---- the "otg" ladder step ---- */
 
 int dcn32_otg_check(rdna3_dev *d, uint32_t otg, rdna3_otg_check *c)

@@ -212,6 +212,24 @@ static int single_clock(rdna3_dev *d, uint32_t ppclk, uint32_t *levels, uint32_t
     return RDNA3_OK;
 }
 
+int dcn32_clk_dtbclk_enable(rdna3_dev *d, uint32_t pmfw, uint32_t *ref_khz)
+{
+    uint32_t levels = 0, max_khz = 0, got = 0;
+    int r = single_clock(d, RD_PPCLK_DTBCLK, &levels, &max_khz);
+    *ref_khz = 0;
+    if (r)
+        return r;
+    if (!levels || !max_khz)
+        return RDNA3_ENODEV;
+    /* khz_to_mhz_ceil */
+    r = dcn32_smu_set_hard_min(d, RD_PPCLK_DTBCLK, (max_khz + 999) / 1000, pmfw, &got);
+    if (r)
+        return r;
+    *ref_khz = got ? got : max_khz;
+    RLOG(d, "DAL SMU: DTBCLK %u levels up to %u kHz: reference %u kHz", levels, max_khz, *ref_khz);
+    return RDNA3_OK;
+}
+
 int dcn32_clk_limits_read(rdna3_dev *d, rdna3_dcn_clk_limits *l)
 {
     int r;

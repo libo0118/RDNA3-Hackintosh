@@ -46,6 +46,7 @@ extern "C" {
 #define RD_PPCLK_DISPCLK 8
 #define RD_PPCLK_DPPCLK  9
 #define RD_PPCLK_DCFCLK  11
+#define RD_PPCLK_DTBCLK  12
 
 /* clock generator registers (dcn32_clk_mgr.c, DCN 3.2 set) */
 #define RD_CLK1_CLK_PLL_REQ    0x16E37u
@@ -127,6 +128,14 @@ uint32_t dcn32_pipe_dppclk(rdna3_dev *d, const rdna3_dcn_clocks *c, uint32_t pip
  * when the PMFW did not set them. */
 int  dcn32_clk_raise(rdna3_dev *d, uint32_t pmfw, uint32_t pipe, uint32_t dispclk_khz, uint32_t dppclk_khz,
                      rdna3_dcn_clocks *now);
+
+/* The DTBCLK a 128b/132b stream runs from (dcn32_update_clocks with
+ * dtbclk_en, DTBCLK's DPM table of dcn32_init_single_clock): the PMFW's
+ * top DTBCLK level as the hard minimum (SetHardMinByFreq(PPCLK_DTBCLK),
+ * MHz rounded up); the PMFW's answer in kHz ("DCCG requires KHz precision
+ * for DTBCLK") goes to 'ref_khz' (the level when it answers 0). 0 or the
+ * mailbox error. */
+int  dcn32_clk_dtbclk_enable(rdna3_dev *d, uint32_t pmfw, uint32_t *ref_khz);
 
 #ifdef __cplusplus
 }

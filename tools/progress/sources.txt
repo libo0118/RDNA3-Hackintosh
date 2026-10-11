@@ -75,3 +75,11 @@ Display: DSC         | display/dc/dio/dcn20/dcn20_link_encoder.c
 Display: DSC         | display/dc/dio/dcn30/dcn30_dio_stream_encoder.c
 Display: MST         | display/amdgpu_dm/amdgpu_dm_helpers.c
 Display: MST         | display/amdgpu_dm/amdgpu_dm_mst_types.c
+Display: UHBR        | display/dc/hpo/dcn31/dcn31_hpo_dp_stream_encoder.c
+Display: UHBR        | display/dc/hpo/dcn31/dcn31_hpo_dp_link_encoder.c
+Display: UHBR        | display/dc/hpo/dcn32/dcn32_hpo_dp_link_encoder.c
+Display: UHBR        | display/dc/link/hwss/link_hwss_hpo_dp.c
+Display: UHBR        | display/dc/link/protocols/link_dp_training_128b_132b.c
+Display: UHBR        | display/dc/dccg/dcn31/dcn31_dccg.c
+Display: ODM         | display/dc/opp/dcn10/dcn10_opp.c
+Display: ODM         | display/dc/opp/dcn20/dcn20_opp.c

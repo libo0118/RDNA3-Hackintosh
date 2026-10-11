@@ -53,6 +53,8 @@ AMDGPU_STEPS = {
     "Display: DP link": ["dplink"],
     "Display: DSC": ["dsc"],
     "Display: MST": ["mst"],
+    "Display: UHBR": ["uhbr"],
+    "Display: ODM": ["odm"],
     "Display: hotplug": ["hotplug"],
     "Display: color": ["gamma"],
     "VCN / JPEG video": ["vcn"],
@@ -122,19 +124,34 @@ ITEM_STEPS = [
     (re.compile(r"apply_symclk_on_tx_off_wa|dcn32_resync_fifo_dccg_dio|dccg32_trigger_dio_fifo_resync"), ["dcseq"]),
     # the hard-min status wait with DC's delay accounting (the DISPCLK raise of step modeset2)
     (re.compile(r"dcn32_smu_(send_msg_with_param_delay|wait_for_response_delay|get_hard_min_status)"), ["modeset2"]),
+    # DP 2.1 UHBR (rdna3uhbr, step uhbr): the 128b/132b parts of the
+    # modeset / DP link / DSC groups (the DCCG's DTBCLK / DPSTREAMCLK, the
+    # pixel rate divider, the OTG's HPO output, the SST payload, the UHBR
+    # caps, cable id, non-transparent LTTPR mode, the max-bandwidth fallback,
+    # the 128b/132b stream overhead)
+    (re.compile(r"dccg32_set_(dpstreamclk|dtbclk_dto|dtbclk_p_src)|dcn32_calculate_pix_rate_divider"
+                r"|dcn32_calculate_dccg_k1_k2_values|optc3_set_out_mux"
+                r"|get_lane_status|link_calculate_sst_avg_time_slots_per_mtp|update_sst_payload"
+                r"|write_128b_132b_sst_payload_allocation_table|poll_for_allocation_change_trigger"
+                r"|configure_lttpr_mode_non_transparent|decide_fallback_link_setting_max_bw_policy"
+                r"|dp_is_128b_132b_signal|dpcd_write_cable_id_to_dprx|get_cable_max_link_rate|retrieve_cable_id"
+                r"|is_immediate_downstream|apply_128b_132b_stream_overhead"), ["uhbr"]),
+    # ODM combine (rdna3odm, step odm) in the modeset / OTG groups
+    (re.compile(r"dcn32_update_odm|get_odm_config|dcn32_update_dsc_on_stream|optc32_set_odm_(combine|bypass)"),
+     ["odm"]),
     # ported and checked in the simulator, but no ladder step drives them
     # yet (nothing in the kext calls them): they stay "ported"
     (re.compile(r"optc1_(setup_vertical_interrupt[12]|validate_timing|is_two_pixels_per_container"
                 r"|enable_optc_clock|set_static_screen_control|enable_reset_trigger|enable_crtc_reset"
                 r"|did_triggered_reset_occur|disable_reset_trigger|clear_optc_underflow)"
                 r"|optc3_(tg_init|set_timing_double_buffer|lock_doublebuffer_enable|lock_doublebuffer_disable"
-                r"|triplebuffer_lock|set_drr_trigger_window|set_vtotal_change_limit|set_vtotal_min_max|set_out_mux)"
-                r"|optc32_(set_drr|setup_manual_trigger|set_h_timing_div_manual_mode|set_odm_combine)|is_two_pixels_per_containter"
+                r"|triplebuffer_lock|set_drr_trigger_window|set_vtotal_change_limit|set_vtotal_min_max)"
+                r"|optc32_(set_drr|setup_manual_trigger|set_h_timing_div_manual_mode)|is_two_pixels_per_containter"
                 r"|dmub_dcn32_(get_gpint_dataout|send_inbox0_cmd|clear_inbox0_ack_register|read_inbox0_ack_register"
                 r"|get_current_time)"
                 r"|dmub_srv_(send_gpint_command|get_gpint_response|get_gpint_dataout|send_inbox0_cmd"
                 r"|clear_inbox0_ack|wait_for_inbox0_ack|set_power_state|get_fw_boot_status)"
-                r"|dcn32_(calculate_dccg_k1_k2_values|is_dp_dig_pixel_rate_div_policy|enable_power_gating_plane"
+                r"|dcn32_(is_dp_dig_pixel_rate_div_policy|enable_power_gating_plane"
                 r"|are_clock_states_equal|get_dispclk_from_dentist)|hubp32_init|is_h_timing_divisible_by_2"), ["none"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),

@@ -119,6 +119,46 @@ int dcn32_read_state(rdna3_dev *d, rdna3_dcn *dc)
         if (otg >= RD_DCN_MAX_PIPES ||
             !GET(RO(d, regOTG0_OTG_CONTROL, otg), OTG0_OTG_CONTROL, OTG_MASTER_EN))
             continue;
+        {
+            /* a second pipe on a head's OTG: the ODM pipe of that head
+             * (get_odm_config), not a head of its own */
+            uint32_t k, x;
+            int odm = 0;
+            for (k = 0; k < dc->nheads && !odm; k++) {
+                rdna3_dcn_head *m = &dc->head[k];
+                if (m->otg != otg || m->odm_cnt > 1)
+                    continue;
+                x = GET(RH(d, regHUBP0_DCSURF_PRI_VIEWPORT_START, p), HUBP0_DCSURF_PRI_VIEWPORT_START,
+                        PRI_VIEWPORT_X_START);
+                m->odm_cnt = 2;
+                if (x == 0) {
+                    /* this pipe has the left half: it is the head's, the
+                     * one found first is the ODM pipe */
+                    uint32_t q = m->pipe;
+                    x = GET(RH(d, regHUBP0_DCSURF_PRI_VIEWPORT_START, q), HUBP0_DCSURF_PRI_VIEWPORT_START,
+                            PRI_VIEWPORT_X_START);
+                    m->pipe = p;
+                    m->odm_pipe = q;
+                    m->width = x + GET(RH(d, regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, q),
+                                       HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, PRI_VIEWPORT_WIDTH);
+                    dc->requested[p] = dc->requested[q];
+                } else {
+                    m->odm_pipe = p;
+                    m->width = x + GET(RH(d, regHUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, p),
+                                       HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION, PRI_VIEWPORT_WIDTH);
+                    dc->requested[p] = dc->requested[m->pipe];
+                }
+                m->odm_x = x;
+                RLOG(d, "DCN: head %u: pipe %u is its ODM pipe from x %u (%ux%u)", k, m->odm_pipe, x, m->width,
+                     m->height);
+                odm = 1;
+            }
+            if (odm)
+                continue;
+        }
+        h->odm_cnt = 0;
+        h->odm_pipe = 0;
+        h->odm_x = 0;
         h->pipe = p;
         h->otg = otg;
         h->format = GET(RH(d, regHUBP0_DCSURF_SURFACE_CONFIG, p), HUBP0_DCSURF_SURFACE_CONFIG,
@@ -331,6 +371,9 @@ int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t 
     }
     nw = sc->native_w[p];
     nh = sc->native_h[p];
+    /* the scaler is per pipe: an ODM head takes its native size only */
+    if (hd->odm_cnt > 1 && (w != nw || h != nh))
+        return RDNA3_EINVAL;
     if (!w || !h || w > nw || h > nh || w * 4 < nw || h * 4 < nh || pitch_px < w || pitch_px > 0x4000 ||
         (mc & 0xff) || mc < d->fb_start || mc - d->fb_start + (uint64_t)pitch_px * 4 * h > d->vram_size)
         return RDNA3_EINVAL;
@@ -361,6 +404,9 @@ int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t 
         }
         v = RH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p);
         WH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, p, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
+        if (hd->odm_cnt > 1)
+            WH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, hd->odm_pipe,
+               SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
     } else {
         hr = ((uint64_t)w << 24) / nw;
         vr = ((uint64_t)h << 24) / nh;
@@ -404,6 +450,11 @@ int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t 
     /* hubp2_program_surface_flip_and_addr: HIGH first, the LOW write latches */
     WH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, p, (uint32_t)(mc >> 32) & 0xffff);
     WH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, p, (uint32_t)mc);
+    if (hd->odm_cnt > 1) {
+        WH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, hd->odm_pipe, (uint32_t)(mc >> 32) & 0xffff);
+        WH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, hd->odm_pipe, (uint32_t)mc);
+        dc->requested[hd->odm_pipe] = mc;
+    }
     otg_lock(d, hd->otg, 0);
     hd->width = w;
     hd->height = h;
@@ -415,12 +466,23 @@ int dcn32_set_source(rdna3_dev *d, rdna3_dcn *dc, rdna3_dcn_scale *sc, uint32_t 
     return RDNA3_OK;
 }
 
+static void hubp_set_blank(rdna3_dev *d, uint32_t p, int blank);
+
 int dcn32_set_blank(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, int blank)
 {
-    uint32_t p, cntl, t;
     if (i >= dc->nheads)
         return RDNA3_EINVAL;
-    p = dc->head[i].pipe;
+    hubp_set_blank(d, dc->head[i].pipe, blank);
+    /* dcn20_blank_pixel_data walks the ODM pipes too */
+    if (dc->head[i].odm_cnt > 1)
+        hubp_set_blank(d, dc->head[i].odm_pipe, blank);
+    return RDNA3_OK;
+}
+
+/* hubp2_set_blank */
+static void hubp_set_blank(rdna3_dev *d, uint32_t p, int blank)
+{
+    uint32_t cntl, t;
     cntl = RH(d, regHUBP0_DCHUBP_CNTL, p);
     if (blank && cntl) {
         /* hubp2_set_blank_regs: REG_WAIT(HUBP_NO_OUTSTANDING_REQ, 1, 1 us, 100000) */
@@ -432,7 +494,6 @@ int dcn32_set_blank(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, int blank)
     cntl = SET(cntl, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN, blank ? 1 : 0);
     cntl = SET(cntl, HUBP0_DCHUBP_CNTL, HUBP_TTU_DISABLE, blank ? 1 : 0);
     WH(d, regHUBP0_DCHUBP_CNTL, p, cntl);
-    return RDNA3_OK;
 }
 
 int dcn32_scanout_info(rdna3_dev *d, uint32_t pipe, rdna3_scanout_info *s)
@@ -577,6 +638,24 @@ int dcn32_flip(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t mc, uint32_t pi
         WH(d, regHUBPREQ0_DCSURF_FLIP_CONTROL, p, fc);
     }
     dc->requested[p] = mc;
+    /* the ODM pipe scans the same surface (dcn20_update_plane_addr per pipe) */
+    if (h->odm_cnt > 1) {
+        uint32_t q = h->odm_pipe, qfc = RH(d, regHUBPREQ0_DCSURF_FLIP_CONTROL, q);
+        qfc = SET(qfc, HUBPREQ0_DCSURF_FLIP_CONTROL, SURFACE_FLIP_TYPE, immediate ? 1 : 0);
+        if (lock)
+            WH(d, regHUBPREQ0_DCSURF_FLIP_CONTROL, q, SET(qfc, HUBPREQ0_DCSURF_FLIP_CONTROL, SURFACE_UPDATE_LOCK, 1));
+        else
+            WH(d, regHUBPREQ0_DCSURF_FLIP_CONTROL, q, qfc);
+        if (lock) {
+            pitch_reg = RH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, q);
+            WH(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, q, SET(pitch_reg, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
+        }
+        WH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, q, (uint32_t)(mc >> 32) & 0xffff);
+        WH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, q, (uint32_t)mc);
+        if (lock)
+            WH(d, regHUBPREQ0_DCSURF_FLIP_CONTROL, q, qfc);
+        dc->requested[q] = mc;
+    }
     h->address = mc;
     return RDNA3_OK;
 }
@@ -592,15 +671,36 @@ int dcn32_flip_pending(rdna3_dev *d, rdna3_dcn *dc, uint32_t i)
         return 1;
     inuse = RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, p) |
             ((uint64_t)(RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH, p) & 0xffff) << 32);
-    return inuse != dc->requested[p];
+    if (inuse != dc->requested[p])
+        return 1;
+    if (dc->head[i].odm_cnt > 1) {
+        p = dc->head[i].odm_pipe;
+        if (GET(RH(d, regHUBPREQ0_DCSURF_FLIP_CONTROL, p), HUBPREQ0_DCSURF_FLIP_CONTROL, SURFACE_FLIP_PENDING))
+            return 1;
+        inuse = RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, p) |
+                ((uint64_t)(RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH, p) & 0xffff) << 32);
+        return inuse != dc->requested[p];
+    }
+    return 0;
 }
+
+static int cursor_image(rdna3_dev *d, rdna3_dcn *dc, uint32_t p, uint64_t mc, uint32_t size);
 
 int dcn32_cursor_set_image(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t mc, uint32_t size)
 {
-    uint32_t p, v, pitch, lpc;
+    int r;
     if (i >= dc->nheads)
         return RDNA3_EINVAL;
-    p = dc->head[i].pipe;
+    r = cursor_image(d, dc, dc->head[i].pipe, mc, size);
+    /* dcn10_set_cursor_attribute on every pipe of the stream */
+    if (!r && dc->head[i].odm_cnt > 1)
+        r = cursor_image(d, dc, dc->head[i].odm_pipe, mc, size);
+    return r;
+}
+
+static int cursor_image(rdna3_dev *d, rdna3_dcn *dc, uint32_t p, uint64_t mc, uint32_t size)
+{
+    uint32_t v, pitch, lpc;
     switch (size) {
     case 64:  pitch = 0; lpc = 3; break;   /* CURSOR_PITCH_64, LINE_PER_CHUNK_8 */
     case 128: pitch = 1; lpc = 2; break;   /* 128, 4 */
@@ -633,16 +733,32 @@ int dcn32_cursor_set_image(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t mc,
     return RDNA3_OK;
 }
 
+static int cursor_position(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_head *h, uint32_t p, int32_t x, int32_t y,
+                           int visible);
+
 int dcn32_cursor_set_position(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, int32_t x, int32_t y,
                               int visible)
 {
-    const rdna3_dcn_head *h;
-    uint32_t p, v, hx = 0, hy = 0, size;
-    int on;
+    int r;
     if (i >= dc->nheads)
         return RDNA3_EINVAL;
-    h = &dc->head[i];
-    p = h->pipe;
+    r = cursor_position(d, dc, &dc->head[i], dc->head[i].pipe, x, y, visible);
+    /* dcn10_set_cursor_position on the ODM pipe: the same position in the
+     * plane, shown where it falls into that pipe's viewport */
+    if (!r && dc->head[i].odm_cnt > 1)
+        r = cursor_position(d, dc, &dc->head[i], dc->head[i].odm_pipe, x, y, visible);
+    return r;
+}
+
+static int cursor_position(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_head *h, uint32_t p, int32_t x, int32_t y,
+                           int visible)
+{
+    uint32_t v, hx = 0, hy = 0, size;
+    /* the pipe's viewport (hubp2_cursor_set_position's visibility check) */
+    int32_t vx = h->odm_cnt > 1 && p == h->odm_pipe ? (int32_t)h->odm_x : 0;
+    int32_t vw = h->odm_cnt > 1 ? (p == h->odm_pipe ? (int32_t)(h->width - h->odm_x) : (int32_t)h->odm_x)
+                                : (int32_t)h->width;
+    int on;
     size = dc->cursor_size[p];
     if (!size)
         return RDNA3_EINVAL;   /* hubp2_cursor_set_position: no attributes yet */
@@ -652,7 +768,8 @@ int dcn32_cursor_set_position(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, int32_t x
      * overhang as hot spot (amdgpu_dm get_cursor_position) */
     if (x < 0) { hx = (uint32_t)(-x); x = 0; }
     if (y < 0) { hy = (uint32_t)(-y); y = 0; }
-    on = visible && hx < size && hy < size && (uint32_t)x < h->width && (uint32_t)y < h->height;
+    on = visible && hx < size && hy < size && (uint32_t)x < h->width && (uint32_t)y < h->height &&
+         x - (int32_t)hx - vx < vw && x - (int32_t)hx - vx + (int32_t)size > 0;
     if (hx > 255) hx = 255;
     if (hy > 255) hy = 255;
     if (on != dc->cursor_on[p]) {

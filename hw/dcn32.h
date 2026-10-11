@@ -50,6 +50,10 @@ typedef struct rdna3_dcn_head {
     int      dig_fe;            /* stream encoder / DIG front end, 0 = DIGA */
     int      dig_be;            /* DIG back end = transmitter, 0 = UNIPHY A */
     uint32_t dig_mode;          /* DIG_MODE: 0 DP, 1 LVDS, 2 DVI, 3 HDMI, 5 DP MST */
+    /* ODM combine 2:1 (hw/dcn32_odm.c): odm_cnt 2 when HUBP 'odm_pipe' on
+     * the same OTG scans the right part from viewport x 'odm_x'; the flips,
+     * the blank and the cursor go to both pipes. 0 / 1: one pipe. */
+    uint32_t odm_cnt, odm_pipe, odm_x;
 } rdna3_dcn_head;
 
 typedef struct rdna3_dcn {

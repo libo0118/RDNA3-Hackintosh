@@ -22,6 +22,7 @@
 #include "gen/dcn_3_2_0_dp.h"
 #include "gen/dcn_3_2_0_pipe.h"
 #include "gen/dcn_3_2_1.h"
+#include "gen/dcn_3_2_0_hpo.h"
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define FIELD(reg, field, x) (((uint32_t)(x) << reg##__##field##__SHIFT) & (uint32_t)reg##__##field##_MASK)
@@ -312,8 +313,29 @@ uint32_t dcn32_dsc_stream_kbps(const rdna3_dsc_timing *t, uint32_t bpp_x16, uint
     return (uint32_t)dc_fixpt_ceil(bw);
 }
 
-/* dc_bandwidth_in_kbps_from_timing for an 8b/10b link (no 128b/132b
- * overhead, no HDMI FRL) */
+/* apply_128b_132b_stream_overhead: an uncompressed 128b/132b stream pads
+ * each line to whole 4-lane 32-bit symbols:
+ * Symbols_per_HActive = HActive x bpp / (4 lanes x 32 bit), overhead =
+ * ceil(Symbols_per_HActive) / Symbols_per_HActive (disable_128b_132b_stream_overhead
+ * is false) */
+static uint32_t apply_128b_132b_stream_overhead(const rdna3_dsc_timing *t, uint32_t kbps)
+{
+    uint32_t total_kbps = kbps;
+    if (!t->dsc) {
+        rd_fixpt bpp, overhead_factor;
+        bpp = dc_fixpt_from_int(kbps);
+        bpp = dc_fixpt_div_int(bpp, t->pix_clk_100hz / 10);
+        overhead_factor = dc_fixpt_from_int(t->h_addressable);
+        overhead_factor = dc_fixpt_mul(overhead_factor, bpp);
+        overhead_factor = dc_fixpt_div_int(overhead_factor, 128);
+        overhead_factor = dc_fixpt_div(dc_fixpt_from_int(dc_fixpt_ceil(overhead_factor)), overhead_factor);
+        total_kbps = (uint32_t)dc_fixpt_ceil(dc_fixpt_mul_int(overhead_factor, total_kbps));
+    }
+    return total_kbps;
+}
+
+/* dc_bandwidth_in_kbps_from_timing (no HDMI FRL: the FRL bandwidth of a
+ * VIC-less timing is not used by this port) */
 uint32_t dcn32_dsc_timing_kbps(const rdna3_dsc_timing *t)
 {
     uint32_t bits_per_channel, kbps;
@@ -333,6 +355,8 @@ uint32_t dcn32_dsc_timing_kbps(const rdna3_dsc_timing *t)
         else if (t->pixel_encoding == RD_PIXEL_ENCODING_YCBCR422)
             kbps = kbps * 2 / 3;
     }
+    if (t->link_encoding == RD_DC_LINK_ENCODING_DP_128b_132b)
+        kbps = apply_128b_132b_stream_overhead(t, kbps);
     return kbps;
 }
 
@@ -1471,6 +1495,17 @@ void dcn32_enc_dp_set_dsc_config(rdna3_dev *d, uint32_t fe, uint32_t dsc_mode)
     UPDATE(d, regDP0_DP_DSC_CNTL, fe, DP_S, DP0_DP_DSC_CNTL, DP_DSC_MODE, dsc_mode == RD_OPTC_DSC_DISABLED ? 0 : 1);
 }
 
+/* the register distance from VPG 0 to VPG 'vpg': 0..4 the DIG front ends'
+ * (one stride), 6..9 the HPO DP stream encoders' (VPG[6 + n] -> HPO_DP[n],
+ * dcn32_hpo_dp_stream_encoder_create; their own stride) */
+static uint32_t vpg_delta(uint32_t vpg)
+{
+    if (vpg >= 6)
+        return (uint32_t)(regVPG6_VPG_GENERIC_PACKET_ACCESS_CTRL - regVPG0_VPG_GENERIC_PACKET_ACCESS_CTRL) +
+               (uint32_t)(regVPG7_VPG_GENERIC_PACKET_ACCESS_CTRL - regVPG6_VPG_GENERIC_PACKET_ACCESS_CTRL) * (vpg - 6);
+    return VPG_S * vpg;
+}
+
 /* vpg3_update_generic_info_packet: header + 32 payload bytes of packet
  * 'index' into the VPG's generic packet memory (9 dwords per packet) */
 static void vpg3_update_generic_info_packet(rdna3_dev *d, uint32_t vpg, uint32_t index, const uint8_t *hb,
@@ -1478,24 +1513,24 @@ static void vpg3_update_generic_info_packet(rdna3_dev *d, uint32_t vpg, uint32_t
 {
     uint32_t i, v;
     /* the hardware not reading the GSP memory */
-    rdna3_wait_reg(d, AI(d, regVPG0_VPG_GENERIC_STATUS, vpg, VPG_S), 0,
+    rdna3_wait_reg(d, AI(d, regVPG0_VPG_GENERIC_STATUS, 1, vpg_delta(vpg)), 0,
                    VPG0_VPG_GENERIC_STATUS__VPG_GENERIC_CONFLICT_OCCURED_MASK, 0, 500);
-    UPDATE(d, regVPG0_VPG_GENERIC_STATUS, vpg, VPG_S, VPG0_VPG_GENERIC_STATUS, VPG_GENERIC_CONFLICT_CLR, 1);
-    UPDATE(d, regVPG0_VPG_GENERIC_PACKET_ACCESS_CTRL, vpg, VPG_S, VPG0_VPG_GENERIC_PACKET_ACCESS_CTRL,
+    UPDATE(d, regVPG0_VPG_GENERIC_STATUS, 1, vpg_delta(vpg), VPG0_VPG_GENERIC_STATUS, VPG_GENERIC_CONFLICT_CLR, 1);
+    UPDATE(d, regVPG0_VPG_GENERIC_PACKET_ACCESS_CTRL, 1, vpg_delta(vpg), VPG0_VPG_GENERIC_PACKET_ACCESS_CTRL,
            VPG_GENERIC_DATA_INDEX, index * 9);
-    WI(d, regVPG0_VPG_GENERIC_PACKET_DATA, vpg, VPG_S,
+    WI(d, regVPG0_VPG_GENERIC_PACKET_DATA, 1, vpg_delta(vpg),
        (uint32_t)hb[0] | (uint32_t)hb[1] << 8 | (uint32_t)hb[2] << 16 | (uint32_t)hb[3] << 24);
     for (i = 0; i < 8; i++)
-        WI(d, regVPG0_VPG_GENERIC_PACKET_DATA, vpg, VPG_S,
+        WI(d, regVPG0_VPG_GENERIC_PACKET_DATA, 1, vpg_delta(vpg),
            (uint32_t)sb[4 * i] | (uint32_t)sb[4 * i + 1] << 8 | (uint32_t)sb[4 * i + 2] << 16 |
            (uint32_t)sb[4 * i + 3] << 24);
     /* the double-buffered packet taken at once or at the next frame */
     if (immediate_update) {
-        v = RI(d, regVPG0_VPG_GSP_IMMEDIATE_UPDATE_CTRL, vpg, VPG_S);
-        WI(d, regVPG0_VPG_GSP_IMMEDIATE_UPDATE_CTRL, vpg, VPG_S, v | (1u << index));   /* VPG_GENERICn_IMMEDIATE_UPDATE */
+        v = RI(d, regVPG0_VPG_GSP_IMMEDIATE_UPDATE_CTRL, 1, vpg_delta(vpg));
+        WI(d, regVPG0_VPG_GSP_IMMEDIATE_UPDATE_CTRL, 1, vpg_delta(vpg), v | (1u << index));   /* VPG_GENERICn_IMMEDIATE_UPDATE */
     } else {
-        v = RI(d, regVPG0_VPG_GSP_FRAME_UPDATE_CTRL, vpg, VPG_S);
-        WI(d, regVPG0_VPG_GSP_FRAME_UPDATE_CTRL, vpg, VPG_S, v | (1u << index));       /* VPG_GENERICn_FRAME_UPDATE */
+        v = RI(d, regVPG0_VPG_GSP_FRAME_UPDATE_CTRL, 1, vpg_delta(vpg));
+        WI(d, regVPG0_VPG_GSP_FRAME_UPDATE_CTRL, 1, vpg_delta(vpg), v | (1u << index));       /* VPG_GENERICn_FRAME_UPDATE */
     }
 }
 

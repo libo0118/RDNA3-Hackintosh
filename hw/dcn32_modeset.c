@@ -221,6 +221,7 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
     uint64_t refclk_khz, r_old, r_new;   /* ref/pix ratios in 2^19 units */
     uint32_t i, vblank, vfp, vstartup, upd_off, upd_w, rdy, old_vstartup, old_upd_w, old_rdy, v_init, vb_end;
     uint32_t pf_q, pf_old, margin_q, vratio, w_old;
+    uint32_t max_w = 4096, max_h = 2160, ppc = 1, odm_pclk;
     uint64_t tsetup_lines4;
 
     if (!dc || !ms || !m || !path || head >= dc->nheads)
@@ -239,7 +240,7 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
         return RD_MODESET_TMDS_CLOCK;
     if (h->dig_mode == 0 || h->dig_mode == 5) {
         rdna3_dp_link_settings ls;
-        uint32_t ppc, opp, req;
+        uint32_t opp, req;
         if (!dp->caps_valid || dp->be != (uint32_t)h->dig_be || dp->fe != (uint32_t)h->dig_fe || dp->otg != h->otg)
             return RD_MODESET_DP_LINK;
         /* an MST head (DIG_MODE 5) only with its MST link; an SST head may
@@ -257,6 +258,9 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
             !dp->stream_dsc)
             return RD_MODESET_DP_LINK;
         if (dp->mst) {
+            /* MST over a 128b/132b link: no HPO MST in this port */
+            if (dcn32_dp_highest_encoding(dp) == RD_DC_LINK_ENCODING_DP_128b_132b)
+                return RD_MODESET_DP_LINK;
             /* dm_dp_mst_is_port_support_mode + the PBN / time slots */
             req = dcn32_dp_mode_kbps(m, 8, 0);
             if (dcn32_dp_mst_mode_fits(dp, req, m->pixel_khz, &ms->dp_mst_pbn, &ms->dp_mst_slots))
@@ -265,19 +269,29 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
             /* apply_dsc_policy_for_stream (rdna3dsc), then link_decide_link_settings
              * over the link cap (dp_validate_mode_timing) */
             ms->dp_want_dsc = dcn32_dp_decide_dsc(dp, m, 8, &ms->dp_want_dsc_cfg);
-            req = dcn32_dp_mode_kbps(m, 8, ms->dp_want_dsc ? &ms->dp_want_dsc_cfg : 0);
+            /* link_decide_link_settings in the link's highest encoding
+             * (the 128b/132b stream overhead included) */
+            req = dcn32_dp_stream_req_kbps(dp, m, ms->dp_want_dsc ? &ms->dp_want_dsc_cfg : 0);
             if (dcn32_dp_decide_link_settings(dp, req, &ls))
                 return RD_MODESET_LINK_BW;
+            ms->dp_want_hpo = dcn32_dp_encoding(&ls) == RD_DP_128b_132b_ENCODING;
+            /* ODM combine (rdna3odm): the 8K modes */
+            if (dp->odm_policy) {
+                max_w = 7680;
+                max_h = 4320;
+            }
         }
-        /* the stream encoder's pixels per cycle stay as the boot set them:
-         * two need is_h_timing_divisible_by_2 */
+        /* the stream encoder's pixels per cycle stay as the boot set them
+         * (two with ODM): two need is_h_timing_divisible_by_2 */
         ppc = dp->pix_per_cycle ? dp->pix_per_cycle
                                 : (GET(RI(d, regDIG0_DIG_FIFO_CTRL0, (uint32_t)h->dig_fe, DIG_S), DIG0_DIG_FIFO_CTRL0,
                                        DIG_FIFO_OUTPUT_PIXEL_MODE) ? 2 : 1);
+        if (ms->dp_want_hpo)
+            ppc = 1;   /* the HPO stream encoder: no DIO pixel mode */
         if (ppc == 2 && ((m->h_total | m->h_active | m->h_front | m->h_sync) & 1))
             return RD_MODESET_SIZE;
     }
-    if (m->h_active < 320 || m->v_active < 200 || m->h_active > 4096 || m->v_active > 2160 ||
+    if (m->h_active < 320 || m->v_active < 200 || m->h_active > max_w || m->v_active > max_h ||
         m->v_total - m->v_active < 4)
         return RD_MODESET_SIZE;
     ms->head = head;
@@ -294,20 +308,48 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
     ms->encoder_id = (uint8_t)path->encoder_objid;
     ms->connector_id = (uint8_t)path->connector_objid;
     dcn32_clk_read(d, &ms->clk);
+    ms->odm_want = ms->odm_cur = 1;
     if (h->dig_mode == 0 || h->dig_mode == 5) {
         ms->dp = dp;
         if (ms->clk.dprefclk_khz)
             dp->dprefclk_khz = ms->clk.dprefclk_khz;
+        ms->odm_cur = dcn32_odm_get_config(d, h->otg, NULL) > 1 ? 2 : 1;
+        if (dp->odm_policy && !dp->mst) {
+            /* dml32_CalculateODMMode at the top DISPCLK state (the mode set
+             * raises DISPCLK rather than picking a voltage level); a line
+             * wider than one pipe takes always needs it */
+            uint32_t state = lim && lim->dispclk_max_khz ? lim->dispclk_max_khz : ms->clk.dispclk_khz;
+            ms->odm_want = dcn32_odm_mode(0, m->h_active, m->pixel_khz, state, ms->clk.vco_khz, ms->dp_want_dsc,
+                                          ms->dp_want_dsc ? ms->dp_want_dsc_cfg.num_slices_h : 0);
+            if (m->h_active > RD_DCN32_MAX_SINGLE_PIPE_WIDTH)
+                ms->odm_want = 2;
+        }
+        if (m->h_active > RD_DCN32_MAX_SINGLE_PIPE_WIDTH && ms->odm_want < 2)
+            return RD_MODESET_SIZE;
+        if (ms->odm_want > 1) {
+            /* optc32_set_odm_bypass / _combine: the OTG master on its own OPP;
+             * two pixels per cycle on the DIO; even horizontal timings */
+            if (ms->opp != ms->otg || ((m->h_total | m->h_active | m->h_front | m->h_sync) & 1))
+                return RD_MODESET_ODM;
+            /* the DSC slices split over the segments */
+            if (ms->dp_want_dsc && ms->dp_want_dsc_cfg.num_slices_h % ms->odm_want &&
+                !dcn32_dp_decide_dsc_odm(dp, m, 8, ms->odm_want, &ms->dp_want_dsc_cfg))
+                return RD_MODESET_ODM;
+        }
+        if ((ms->odm_want > 1 || ms->odm_cur > 1) && dcn32_odm_acquire(d, dc, h->pipe, ms->opp, h->otg, &ms->odm))
+            return RD_MODESET_ODM;
     } else if (hc && (hc->flags & RD_HDMI_STREAM)) {
         ms->hdmi = *hc;
         ms->tmds_want = *m;
         dcn32_modeset_head_mode(h, cur_pclk_khz, &ms->tmds_cur);
     }
 
+    /* dml32_CalculateRequiredDispclk / DPPCLK after the ODM split */
+    odm_pclk = m->pixel_khz / ms->odm_want;
     if (lim && lim->dispclk_max_khz && lim->dppclk_max_khz) {
         /* dcn32_update_clocks: what DML 3.2 asks, raised before the timing */
-        uint32_t disp = dcn32_required_dispclk(m->pixel_khz, ms->clk.vco_khz, lim->dispclk_max_khz);
-        uint32_t dpp = dcn32_required_dppclk(m->pixel_khz, ms->clk.vco_khz);
+        uint32_t disp = dcn32_required_dispclk(odm_pclk, ms->clk.vco_khz, lim->dispclk_max_khz);
+        uint32_t dpp = dcn32_required_dppclk(odm_pclk, ms->clk.vco_khz);
         if (!disp || dpp > lim->dppclk_max_khz)
             return RD_MODESET_CLOCKS;
         ms->pmfw = lim->pmfw;
@@ -315,7 +357,7 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
             ms->raise_dispclk_khz = disp;
         if (dcn32_pipe_dppclk(d, &ms->clk, h->pipe) < dpp)
             ms->raise_dppclk_khz = dpp;
-    } else if (dcn32_clk_fits(&ms->clk, m->pixel_khz)) {
+    } else if (dcn32_clk_fits(&ms->clk, odm_pclk)) {
         return RD_MODESET_CLOCKS;
     }
 
@@ -366,6 +408,10 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
         if (ms->dp->mst)
             RLOG(d, "modeset: head %u: MST stream to port %d: PBN %u, %u time slots", head, ms->dp->mst_port,
                  ms->dp_mst_pbn, ms->dp_mst_slots);
+        if (ms->dp_want_hpo || ms->odm_want > 1 || ms->odm_cur > 1)
+            RLOG(d, "modeset: head %u: %ux%u on %s, ODM %u:1 (runs %u:1)%s", head, m->h_active, m->v_active,
+                 ms->dp_want_hpo ? "128b/132b (HPO)" : "8b/10b (DIO)", ms->odm_want, ms->odm_cur,
+                 ms->odm_want > 1 || ms->odm_cur > 1 ? ", ODM pipe acquired" : "");
     }
     w->h_total = t.h_total;
     w->h_sync = FIELD(OTG0_OTG_H_SYNC_A, OTG_H_SYNC_A_START, t.h_sync_start) |
@@ -634,18 +680,23 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
     return ret;
 }
 
-/* the same for a DP SST head: link_set_dpms_off, the timing with the DP DTO
- * (dcn31_program_pix_clk), the link cap verified once (detection's
- * dp_verify_link_cap_with_retries), OTG on, link_set_dpms_on */
+/* the same for a DP SST head: link_set_dpms_off, the link cap verified once
+ * (detection's dp_verify_link_cap_with_retries), the stream's resources
+ * (link settings: 8b/10b DIO or 128b/132b HPO; ODM), the timing with the
+ * pixel rate divider, the DP DTO (dcn31_program_pix_clk) and the DTBCLK
+ * DTO, the ODM pipe and dcn32_update_odm, OTG on, link_set_dpms_on */
 static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, const rdna3_modeset_regs *r,
-                      const rdna3_mode *m, int dsc, const rdna3_dsc_config *dsc_cfg, uint64_t mc, uint32_t pitch_px)
+                      const rdna3_mode *m, int dsc, const rdna3_dsc_config *dsc_cfg, uint64_t mc, uint32_t pitch_px,
+                      uint32_t odm)
 {
     rdna3_dp_link *dp = ms->dp;
-    uint32_t v;
-    int ret;
+    uint32_t v, opp_inst[2];
+    int ret, odm_running = dcn32_odm_get_config(d, ms->otg, NULL) > 1;
 
-    /* hubp2_set_blank, link_set_dpms_off */
+    /* hubp2_set_blank (every pipe of the stream), link_set_dpms_off */
     dcn32_set_blank(d, dc, ms->head, 1);
+    if (odm_running)
+        dcn32_odm_pipe_blank(d, &ms->odm, 1);
     dcn32_dp_link_set_dpms_off(dp);
     /* optc32_disable_crtc */
     v = RI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S);
@@ -655,13 +706,13 @@ static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, 
     if (rdna3_wait_reg(d, AI(d, regOTG0_OTG_CLOCK_CONTROL, ms->otg, OTG_S), 0,
                        OTG0_OTG_CLOCK_CONTROL__OTG_BUSY_MASK, 0, 150000))
         RERR(d, "modeset: OTG %u stays busy after the disable", ms->otg);
-    /* dcn31_program_pix_clk: DP signals run on the DP DTO */
-    dcn32_dp_program_pix_clk(dp, r->pclk_khz);
-    write_regs(d, ms->pipe, ms->otg, ms->opp, r);
-    v = RI(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, ms->pipe, HUBP_S);
-    WI(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, ms->pipe, HUBP_S, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
-    WI(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, ms->pipe, HUBP_S, (uint32_t)(mc >> 32) & 0xffff);
-    WI(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, ms->pipe, HUBP_S, (uint32_t)mc);
+    /* a stream that leaves ODM: dcn32_update_odm (optc32_set_odm_bypass),
+     * then the ODM pipe's plane off */
+    if (odm_running && odm < 2) {
+        opp_inst[0] = ms->opp;
+        dcn32_update_odm(d, ms->otg, opp_inst, 1, m->h_active, RD_PIXEL_ENCODING_RGB);
+        dcn32_odm_pipe_disable(d, &ms->odm);
+    }
     /* the link cap: what the sink trains at, falling back from its max
      * (verify_link_capability; an MST link is not trained to verify it:
      * verify_link_capability_non_destructive takes the max link cap) */
@@ -673,6 +724,48 @@ static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, 
             dcn32_dp_verify_link_cap(dp, RD_DP_LINK_TRAINING_MAX_VERIFY_RETRY);
         }
     }
+    /* the stream's resources (validation): DSC, ODM segments, the link
+     * setting and with it the HPO encoders */
+    dp->stream_dsc = dsc;
+    dp->dsc_cfg = *dsc_cfg;
+    dp->odm_opp_cnt = odm;
+    dp->odm_opp[0] = ms->opp;
+    dp->odm_dsc[0] = dp->dsc_inst;
+    dp->odm_opp[1] = ms->odm.opp;
+    dp->odm_dsc[1] = ms->odm.dsc;
+    ret = dcn32_dp_acquire_stream(dp, m);
+    if (!ret && dp->hpo_active && !dp->dtbclk_khz) {
+        RERR(d, "modeset: head %u: a 128b/132b stream without a DTBCLK reference", ms->head);
+        ret = RDNA3_ENODEV;
+    }
+    if (ret) {
+        dp->odm_opp_cnt = 1;
+        dp->hpo_active = 0;
+        return ret;
+    }
+    /* dcn20_enable_stream_timing: the pixel rate divider, the DP DTO at the
+     * requested clock (/ ODM segments), the DTBCLK DTO (128b/132b) */
+    dcn32_dp_enable_stream_timing(dp, m);
+    write_regs(d, ms->pipe, ms->otg, ms->opp, r);
+    v = RI(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, ms->pipe, HUBP_S);
+    WI(d, regHUBPREQ0_DCSURF_SURFACE_PITCH, ms->pipe, HUBP_S, SET(v, HUBPREQ0_DCSURF_SURFACE_PITCH, PITCH, pitch_px - 1));
+    WI(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, ms->pipe, HUBP_S, (uint32_t)(mc >> 32) & 0xffff);
+    WI(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, ms->pipe, HUBP_S, (uint32_t)mc);
+    if (odm > 1) {
+        /* the ODM pipe's plane from the main one, then optc32_set_odm_combine
+         * and the ODM OPP (dcn20_enable_stream_timing / dcn32_update_odm) */
+        ret = dcn32_odm_pipe_enable(d, &ms->odm, m->h_active, m->v_active,
+                                    GET(r->h_blank, OTG0_OTG_H_BLANK_START_END, OTG_H_BLANK_END),
+                                    GET(r->ref_to_pix, HUBPREQ0_REF_FREQ_TO_PIX_FREQ, REF_FREQ_TO_PIX_FREQ));
+        if (ret) {
+            dcn32_odm_pipe_disable(d, &ms->odm);
+            dp->odm_opp_cnt = 1;
+            return ret;
+        }
+        opp_inst[0] = ms->opp;
+        opp_inst[1] = ms->odm.opp;
+        dcn32_update_odm(d, ms->otg, opp_inst, 2, m->h_active, RD_PIXEL_ENCODING_RGB);
+    }
     /* optc32_enable_crtc */
     v = RI(d, regVTG0_CONTROL, ms->otg, VTG_S);
     WI(d, regVTG0_CONTROL, ms->otg, VTG_S, SET(v, VTG0_CONTROL, VTG0_ENABLE, 1));
@@ -681,19 +774,19 @@ static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, 
        SET(SET(v, OTG0_OTG_CONTROL, OTG_DISABLE_POINT_CNTL, 2), OTG0_OTG_CONTROL, OTG_MASTER_EN, 1));
     /* link_set_dpms_on (DC trains without fallback here: the verified
      * cap already fell back) */
-    dp->stream_dsc = dsc;
-    dp->dsc_cfg = *dsc_cfg;
     ret = dcn32_dp_link_set_dpms_on(dp, m, 0);
     if (ret && dp->stream_dsc)
         RERR(d, "modeset: head %u: the DSC stream did not come up (%d)", ms->head, ret);
     v = RI(d, regHUBP0_DCHUBP_CNTL, ms->pipe, HUBP_S);
     WI(d, regHUBP0_DCHUBP_CNTL, ms->pipe, HUBP_S, SET(v, HUBP0_DCHUBP_CNTL, HUBP_UNDERFLOW_CLEAR, 1));
     dcn32_set_blank(d, dc, ms->head, 0);
+    if (odm > 1)
+        dcn32_odm_pipe_blank(d, &ms->odm, 0);
     return ret;
 }
 
 static void update_head(rdna3_dcn *dc, rdna3_dcn_scale *sc, const rdna3_dcn_modeset *ms,
-                        const rdna3_modeset_regs *r, uint64_t mc, uint32_t pitch_px)
+                        const rdna3_modeset_regs *r, uint64_t mc, uint32_t pitch_px, uint32_t odm)
 {
     rdna3_dcn_head *h = &dc->head[ms->head];
     uint32_t hb = r->h_blank, vb = r->v_blank;
@@ -712,6 +805,11 @@ static void update_head(rdna3_dcn *dc, rdna3_dcn_scale *sc, const rdna3_dcn_mode
     dc->requested[ms->pipe] = mc;
     if (ms->dp)
         h->dig_mode = ms->dp->mst ? 5 : 0;   /* an SST head taken over as MST runs DIG_MODE 5 */
+    h->odm_cnt = odm > 1 ? odm : 0;
+    h->odm_pipe = odm > 1 ? ms->odm.pipe : 0;
+    h->odm_x = odm > 1 ? dcn32_odm_slice_dst_width(r->h_active, odm, 0, 0) : 0;
+    if (odm > 1)
+        dc->requested[ms->odm.pipe] = mc;
     if (sc) {
         sc->saved[ms->pipe] = 0;   /* the bypass state is the one just written */
         sc->bw_saved[ms->pipe] = 0;
@@ -745,10 +843,20 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
             return RDNA3_EBUSY;
         }
     }
+    /* dcn32_update_clocks with dtbclk_en: a 128b/132b stream runs from DTBCLK */
+    if (ms->dp && ms->dp_want_hpo && !ms->dp->dtbclk_khz) {
+        ret = dcn32_clk_dtbclk_enable(d, ms->pmfw, &ms->dp->dtbclk_khz);
+        if (ret) {
+            RERR(d, "modeset: head %u: DTBCLK not set (%d): stays at %ux%u", ms->head, ret, ms->cur.h_active,
+                 ms->cur.v_active);
+            return RDNA3_EBUSY;
+        }
+    }
     /* a scaled source first goes back to the GOP's bypass state */
     if (sc && sc->saved[ms->pipe])
         dcn32_set_source(d, dc, sc, ms->head, old_mc, sc->native_w[ms->pipe], sc->native_h[ms->pipe], old_pitch_px);
-    ret = ms->dp ? program_dp(d, dc, ms, &ms->want, &ms->dp_want, ms->dp_want_dsc, &ms->dp_want_dsc_cfg, mc, pitch_px)
+    ret = ms->dp ? program_dp(d, dc, ms, &ms->want, &ms->dp_want, ms->dp_want_dsc, &ms->dp_want_dsc_cfg, mc, pitch_px,
+                              ms->odm_want)
                  : program(d, dm, dc, ms, &ms->want, &ms->tmds_want, mc, pitch_px, ms->cur.pclk_khz);
     /* dce110_apply_ctx_to_hw: dcn32_resync_fifo_dccg_dio after the stream */
     if (ms->dc_seq)
@@ -770,17 +878,18 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     }
     if (ret) {
         if (ms->dp)
-            program_dp(d, dc, ms, &ms->cur, &ms->dp_cur, ms->dp_cur_dsc, &ms->dp_cur_dsc_cfg, old_mc, old_pitch_px);
+            program_dp(d, dc, ms, &ms->cur, &ms->dp_cur, ms->dp_cur_dsc, &ms->dp_cur_dsc_cfg, old_mc, old_pitch_px,
+                       ms->odm_cur);
         else
             program(d, dm, dc, ms, &ms->cur, &ms->tmds_cur, old_mc, old_pitch_px, ms->want.pclk_khz);
         if (ms->dc_seq)
             dcn32_resync_fifo_dccg_dio(d);
 
 
-        update_head(dc, sc, ms, &ms->cur, old_mc, old_pitch_px);
+        update_head(dc, sc, ms, &ms->cur, old_mc, old_pitch_px, ms->dp ? ms->odm_cur : 1);
         return ret;
     }
-    update_head(dc, sc, ms, &ms->want, mc, pitch_px);
+    update_head(dc, sc, ms, &ms->want, mc, pitch_px, ms->dp ? ms->odm_want : 1);
     RLOG(d, "modeset: head %u runs %ux%u at %u kHz (frames %u in %u ms)", ms->head, ms->want.h_active,
          ms->want.v_active, ms->want.pclk_khz, (f1 - f0) & fmask, settle_ms);
     return RDNA3_OK;
