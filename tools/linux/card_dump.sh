@@ -35,7 +35,12 @@ want_regs=0
 [ "${1:-}" = --regs ] && { want_regs=1; shift; }
 out=${1:-$user_home/Downloads/rdna3-card-dump}
 progress=$out.progress
-rm -rf "$out" && mkdir -p "$out"/{pci,vbios,ip,pm,regs,display,vulkan,sys}
+# runs as root: only ever replace a directory an earlier dump made
+# (sudo ... card_dump.sh ~/Downloads deleted the whole folder - PR #2 review)
+if [ -e "$out" ] && [ ! -e "$out/.rdna3-card-dump" ] && ! { [ -d "$out/pci" ] && [ -d "$out/vbios" ]; }; then
+    echo "$out exists and is not an earlier card dump: give a new directory"; exit 1
+fi
+rm -rf "$out" && mkdir -p "$out"/{pci,vbios,ip,pm,regs,display,vulkan,sys} && : > "$out/.rdna3-card-dump"
 log() { printf '== %s\n' "$*"; printf '%s %s\n' "$(date +%T)" "$*" >> "$progress"; sync; }
 : > "$progress"
 run() { local f=$1; shift; { echo "\$ $*"; "$@"; echo "[exit $?]"; } > "$f" 2>&1; }

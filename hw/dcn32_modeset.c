@@ -23,6 +23,7 @@
 #include "gen/dcn_3_2_0_dp.h"
 #include "gen/dcn_3_2_0_dsc.h"
 #include "dcn32_dp_mst.h"
+#include "dcn32_otg.h"
 #include "dcn32_hwseq.h"
 #include "dcn32_audio.h"
 
@@ -256,6 +257,11 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
         return RD_MODESET_NO_TIMING;
     if (m->interlaced)
         return RD_MODESET_INTERLACED;
+    /* dcn20_validate_stream -> optc1_validate_timing, and
+     * drm_mode_validate_basic's sync inside the blanking */
+    if (!dcn32_otg_validate_timing(m) || m->h_total < m->h_active + m->h_front + m->h_sync ||
+        m->v_total < m->v_active + m->v_front + m->v_sync)
+        return RD_MODESET_NO_TIMING;
     if (h->dig_mode != 0 && h->dig_mode != 5 && !tmds_mode_ok(h, hc, m, &ms->fmt_want, &ms->cs_want))
         return RD_MODESET_TMDS_CLOCK;
     if (h->dig_mode == 0 || h->dig_mode == 5) {

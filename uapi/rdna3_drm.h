@@ -146,6 +146,7 @@ typedef struct rdna3_bo {
     uint32_t metadata_size;
     uint64_t tiling_info;
     uint8_t  userptr;         /* GEM_USERPTR: backing wraps the client's pages, no mmap */
+    uint8_t  userptr_ro;      /* AMDGPU_GEM_USERPTR_READONLY: never mapped writable */
     uint64_t user_addr;
 } rdna3_bo;
 

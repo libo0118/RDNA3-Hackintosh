@@ -198,6 +198,16 @@ static int parse_dtd(const uint8_t *p, rdna3_mode *m)
     vsw = (p[10] & 0x0f) | ((p[11] & 0x03) << 4);
     if (!ha || !va || !hb || !vb)
         return 0;
+    /* drm_mode_detailed: "Some EDIDs have bogus h/vsync_end values" -
+     * the sync end is pulled back into the blanking; then
+     * drm_mode_validate_basic refuses a sync that still does not fit
+     * (PR #2 review: the OTG got an underflowed blank start / back porch) */
+    if (hfp + hsw > hb)
+        hsw = hfp < hb ? hb - 1 - hfp : 0;
+    if (vfp + vsw > vb)
+        vsw = vfp < vb ? vb - 1 - vfp : 0;
+    if (hfp >= hb || vfp >= vb)
+        return 0;
     m->h_active = ha;
     m->v_active = va;
     m->h_total = ha + hb;

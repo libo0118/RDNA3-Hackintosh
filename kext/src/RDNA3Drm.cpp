@@ -96,7 +96,8 @@ int RDNA3Accel::drmBoUserptr(void *ctx, void *fileOs, rdna3_bo *bo, uint64_t uad
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
     task_t task = (task_t)fileOs;
-    IOOptionBits dir = (flags & AMDGPU_GEM_USERPTR_READONLY) ? kIODirectionIn : kIODirectionInOut;
+    /* READONLY: the GPU only reads the pages (memory -> device = Out) */
+    IOOptionBits dir = (flags & AMDGPU_GEM_USERPTR_READONLY) ? kIODirectionOut : kIODirectionInOut;
     IOMemoryDescriptor *md;
     if (!task)
         return -RD_EINVAL;
@@ -241,7 +242,12 @@ int RDNA3Accel::drmUserqWait(void *ctx, int (*done)(void *), void *arg, uint64_t
     uint64_t start = drmNowNs(ctx), now, until;
     if (!a->fBringup)
         return done(arg) ? 0 : -RD_ETIME;
-    until = absNs != UINT64_MAX && absNs - start < capNs ? absNs : start + capNs;
+    /* a deadline already gone is a poll (fenceWait's now >= absNs), not
+     * an unsigned wrap into the 10 s cap (PR #2 review) */
+    if (absNs != UINT64_MAX && absNs <= start)
+        until = start;
+    else
+        until = absNs != UINT64_MAX && absNs - start < capNs ? absNs : start + capNs;
     for (;;) {
         if (done(arg))
             return 0;

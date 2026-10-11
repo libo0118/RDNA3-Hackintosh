@@ -149,6 +149,9 @@ static int drm_dp_decode_sideband_msg_hdr(rdna3_mst_mgr *mgr, rdna3_mst_sb_hdr *
     hdr->broadcast = (buf[idx] >> 7) & 1;
     hdr->path_msg = (buf[idx] >> 6) & 1;
     hdr->msg_len = (uint8_t)(buf[idx] & 0x3f);
+    /* every chunk carries at least its body CRC: a 0 would append 0 - 1 bytes */
+    if (hdr->msg_len < 1)
+        return 0;
     idx++;
     hdr->somt = (buf[idx] >> 7) & 1;
     hdr->eomt = (buf[idx] >> 6) & 1;

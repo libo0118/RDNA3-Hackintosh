@@ -36,6 +36,7 @@ static int h_copyout(void *c, uint64_t u, const void *s, size_t n) { (void)c; me
 /* fake page tables: count what the uapi asks for */
 static int vm_live, vm_maps, vm_unmaps;
 static uint64_t vm_mapped;
+static uint32_t vm_last_flags;
 static int vm_dummy;
 static void *h_vm_create(void *c) { (void)c; vm_live++; return &vm_dummy; }
 static uint32_t h_query_flags;
@@ -68,9 +69,10 @@ static void h_vm_destroy(void *c, void *vm) { (void)c; (void)vm; vm_live--; }
 static int h_vm_map(void *c, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off, uint64_t size,
                     uint32_t flags)
 {
-    (void)c; (void)vm; (void)bo; (void)va; (void)off; (void)flags;
+    (void)c; (void)vm; (void)bo; (void)va; (void)off;
     if (va == 0xBAD000)
         return -RD_ENOMEM;
+    vm_last_flags = flags;
     vm_maps++;
     vm_mapped += size;
     return 0;
@@ -139,6 +141,7 @@ static struct drm_amdgpu_cs_chunk_fence g_uf;
 static int g_out_first;
 /* g_bl: an AMDGPU_CHUNK_ID_BO_HANDLES chunk; g_bl_handle: cs.in.bo_list_handle */
 static struct drm_amdgpu_bo_list_in *g_bl;
+static struct drm_amdgpu_cs_chunk_dep *g_dep;   /* a DEPENDENCIES chunk when set */
 static uint32_t g_bl_handle;
 /* g_shadow: an AMDGPU_CHUNK_ID_CP_GFX_SHADOW chunk of g_shadow_dw dwords */
 static struct drm_amdgpu_cs_chunk_cp_gfx_shadow *g_shadow;
@@ -177,6 +180,10 @@ static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip
     if (g_bl) {
         chunks[n].chunk_id = AMDGPU_CHUNK_ID_BO_HANDLES; chunks[n].length_dw = sizeof(*g_bl) / 4;
         chunks[n].chunk_data = (uint64_t)(uintptr_t)g_bl; n++;
+    }
+    if (g_dep) {
+        chunks[n].chunk_id = AMDGPU_CHUNK_ID_DEPENDENCIES; chunks[n].length_dw = sizeof(*g_dep) / 4;
+        chunks[n].chunk_data = (uint64_t)(uintptr_t)g_dep; n++;
     }
     if (g_shadow) {
         chunks[n].chunk_id = AMDGPU_CHUNK_ID_CP_GFX_SHADOW; chunks[n].length_dw = g_shadow_dw;
@@ -424,7 +431,16 @@ int main(void)
         /* unaligned offset */
         va.va_address = 0x300000; va.offset_in_bo = 0x800;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL);
-        va.offset_in_bo = 0;
+        /* PR #2 review: offset + size wrapping u64 must not pass as small
+         * (it mapped the VRAM below the BO) */
+        va.offset_in_bo = ~0ull - 4095; va.map_size = 2 * 4096;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL);
+        va.offset_in_bo = (1 << 20) + 4096; va.map_size = 4096;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL);
+        va.offset_in_bo = 0; va.va_address = ~0ull - 4095; va.map_size = 2 * 4096;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL);
+        va.va_address = 0x300000; va.map_size = 4096;
+        CHECK(vm_maps == 1);
         /* REPLACE drops what it overlaps */
         va.va_address = 0x200000; va.map_size = 2 * 4096;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
@@ -598,6 +614,19 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
         gc.handle = u.handle; gc.pad = 0;
         CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0 && live_bos == bos0);
+        /* PR #2 review: a READONLY userptr is mapped without WRITEABLE
+         * whatever the client asks (amdgpu_vm_bo_update) */
+        u.flags = AMDGPU_GEM_USERPTR_READONLY;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR), u) == 0 && u.handle != 0);
+        va.handle = u.handle; va.operation = AMDGPU_VA_OP_MAP;
+        va.flags = AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0 &&
+              (vm_last_flags & AMDGPU_VM_PAGE_READABLE) && !(vm_last_flags & AMDGPU_VM_PAGE_WRITEABLE));
+        va.operation = AMDGPU_VA_OP_UNMAP;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
+        va.flags = 0;
+        gc.handle = u.handle;
+        CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0 && live_bos == bos0);
         dev.ops.bo_userptr = NULL;
     }
     /* sensors and the GPUVM fault cache come from the OS */
@@ -630,7 +659,13 @@ int main(void)
         h = sc.handle;
         memset(&w, 0, sizeof(w));
         w.handles = (uint64_t)(uintptr_t)&h; w.count_handles = 1;
+        /* no fence: -EINVAL, -ETIME with WAIT_FOR_SUBMIT (drm_syncobj_array_wait) */
+        CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, w) == -RD_EINVAL);
+        w.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT;
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, w) == -RD_ETIME);
+        w.flags = 1u << 7;
+        CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, w) == -RD_EINVAL);
+        w.flags = 0;
         memset(&arr, 0, sizeof(arr));
         arr.handles = (uint64_t)(uintptr_t)&h; arr.count_handles = 1;
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_SIGNAL, arr) == 0);
@@ -641,7 +676,18 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, sc) == 0);
         h2 = sc.handle;
         w.handles = (uint64_t)(uintptr_t)&h2;
-        CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, w) == -RD_ETIME);
+        CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, w) == -RD_EINVAL);
+        /* PR #2 review: without WAIT_ALL the first ready one ends the wait
+         * and is named in first_signaled; with WAIT_ALL all must be */
+        {
+            uint32_t two[2] = { h2, h };
+            w.handles = (uint64_t)(uintptr_t)two; w.count_handles = 2;
+            w.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT;
+            CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, w) == 0 && w.first_signaled == 1);
+            w.flags |= DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
+            CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, w) == -RD_ETIME);
+            w.handles = (uint64_t)(uintptr_t)&h2; w.count_handles = 1; w.flags = 0;
+        }
         memset(&tr, 0, sizeof(tr));
         tr.src_handle = h; tr.dst_handle = h2;
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_TRANSFER, tr) == 0);
@@ -755,6 +801,22 @@ int main(void)
         fth.in.fence.ip_type = AMDGPU_HW_IP_DMA; fth.in.fence.seq_no = 3;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE), fth) == 0);
         so2 = fth.out.handle;
+        /* PR #2 review: a fence that was never submitted is -EINVAL on
+         * FENCE_TO_HANDLE and as a CS dependency, as amdgpu_ctx_get_fence
+         * (a wait on it ran into the hang cap and reset other clients) */
+        {
+            union drm_amdgpu_fence_to_handle bad = fth;
+            struct drm_amdgpu_cs_chunk_dep dep;
+            bad.in.fence.seq_no = 1000;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE), bad) == -RD_EINVAL);
+            memset(&dep, 0, sizeof(dep));
+            dep.ip_type = AMDGPU_HW_IP_DMA; dep.handle = 1000;
+            g_dep = &dep;
+            CHECK(cs_submit(f, 0x500000, 32, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            dep.handle = 2;
+            CHECK(cs_submit(f, 0x500000, 32, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
+            g_dep = NULL;
+        }
         sw.handles = (uint64_t)(uintptr_t)&so2; sw.timeout_nsec = 0;
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == -RD_ETIME);   /* poll only */
         sw.timeout_nsec = INT64_MAX;

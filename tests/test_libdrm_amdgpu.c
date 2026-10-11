@@ -96,7 +96,9 @@ int main(void)
         uint32_t a = 0, b = 0, c = 0;
         int sfd = -1, ofd = -1;
         CHECK(amdgpu_cs_create_syncobj2(dev, 0, &a) == 0 && amdgpu_cs_create_syncobj2(dev, 0, &b) == 0);
-        CHECK(amdgpu_cs_syncobj_wait(dev, &b, 1, 0, 0, NULL) == -ETIME);
+        /* no fence yet: -EINVAL as in DRM, -ETIME when waiting for a submit */
+        CHECK(amdgpu_cs_syncobj_wait(dev, &b, 1, 0, 0, NULL) == -EINVAL);
+        CHECK(amdgpu_cs_syncobj_wait(dev, &b, 1, 0, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, NULL) == -ETIME);
         CHECK(amdgpu_cs_syncobj_signal(dev, &a, 1) == 0);
         CHECK(amdgpu_cs_syncobj_export_sync_file(dev, a, &sfd) == 0 && sfd >= 0);
         CHECK(amdgpu_cs_syncobj_import_sync_file(dev, b, sfd) == 0);

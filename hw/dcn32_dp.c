@@ -1995,7 +1995,9 @@ static uint32_t get_eq_training_aux_rd_interval(rdna3_dp_link *l)
  * configure_lttpr_mode_non_transparent), else the DPRX's */
 static uint32_t dp_get_eq_aux_rd_interval(const rdna3_dp_link *l, const rdna3_dp_lt_settings *lt, uint32_t offset)
 {
-    if (is_repeater(lt, offset))
+    /* 8 LTTPRs is legal, the table holds 7 (as DC's): the 8th uses the
+     * DPRX's interval instead of reading past it (PR #2 review) */
+    if (is_repeater(lt, offset) && offset - 1 < sizeof(l->dpcd_caps.lttpr.aux_rd_interval))
         return dp_translate_training_aux_read_interval(l->dpcd_caps.lttpr.aux_rd_interval[offset - 1]);
     return lt->eq_pattern_time;
 }

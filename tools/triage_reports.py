@@ -339,10 +339,12 @@ def summary(path, serial=None):
     out.append(("boot-args", m.group(0)[:150] if m else "?"))
     out.append(("DMA/GFX jobs", "%d verified, %d wrong" % (len(re.findall(r"job results verified", txt)),
                                                          len(re.findall(r"job results WRONG", txt)))))
-    vk = re.search(r"^(ALL PASSED.*|.*FAILED.*)$", txt[txt.find("== rdna3_vktest"):], re.M) if "== rdna3_vktest" in txt else None
-    if not vk and "== rdna3_vktest" in txt:   # no verdict: the test died (a driver assert)
+    sec = ""
+    if "== rdna3_vktest" in txt:   # the vktest section only: a later FAILED (BACO's) is not its verdict
         sec = txt[txt.index("== rdna3_vktest"):]
         sec = sec[:sec.find("\n== ", 1)] if "\n== " in sec[1:] else sec
+    vk = re.search(r"^(ALL PASSED.*|NOTHING TESTED.*|.*FAILED.*)$", sec, re.M) if sec else None
+    if not vk and sec:   # no verdict: the test died (a driver assert)
         dead = re.search(r"^(Assertion failed.*|.*Assertion .* failed.*)$", sec, re.M)
         out.append(("Vulkan", "CRASHED after %d PASS: %s" % (len(re.findall(r"^PASS ", sec, re.M)),
                                                              dead.group(0)[:80] if dead else "no verdict")))

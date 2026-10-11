@@ -28,6 +28,9 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   changes:
     runs-on: [self-hosted, Linux]
@@ -128,15 +131,15 @@ jobs:
             build/userspace/libdrm_amdgpu.dylib
       # seconds: pkgbuild over the files above, no firmware inside
       # (package/make_pkg.sh; the Metal plugin and RADV are added locally)
+      # the package TESTING-HW.md has users install: a broken build fails
+      # the run (PR #2 review)
       - name: Installer (.pkg + tarball)
-        continue-on-error: true
         run: package/make_pkg.sh --out build/pkg
       - uses: actions/upload-artifact@v4
-        continue-on-error: true
         with:
           name: RDNA3-pkg
           path: build/pkg/
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   metal:
     needs: changes

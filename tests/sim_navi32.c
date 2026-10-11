@@ -335,6 +335,7 @@ typedef struct sim {
         unsigned remote_dpcd, remote_i2c, naks, table_updates, acts, act_mismatch, table_resets;
         uint8_t last_alloc_order;           /* 1: ALLOCATE_PAYLOAD came after the table update and ACT */
         uint8_t esi0, pts;                  /* DEVICE_SERVICE_IRQ_VECTOR_ESI0, PAYLOAD_TABLE_UPDATE_STATUS (W1C) */
+        int zero_chunk;                     /* the next follow-up chunk has msg_len 0 (a broken hub) */
     } mst;
     /* DMCUB: the firmware's view (boot checks, mailbox, GPINT) */
     struct {
@@ -1732,6 +1733,17 @@ static void hub_post_chunk(void)
     if (!S.mst.rep_pending || !left)
         return;
     memset(c, 0, 48);
+    if (S.mst.zero_chunk && S.mst.rep_off > 0) {
+        /* a follow-up chunk whose header says msg_len 0, header CRC right */
+        S.mst.zero_chunk = 0;
+        c[0] = 0x10;
+        c[1] = 0x00;
+        c[2] = 0x40;
+        c[2] |= hub_crc4(c, 5);
+        S.mst.esi0 |= 0x10;
+        S.mst.esi[3] = S.mst.esi0;
+        return;
+    }
     c[0] = 0x10;                                  /* LCT 1, LCR 0 */
     c[1] = (uint8_t)(n + 1);                      /* not broadcast, no path msg */
     c[2] = (uint8_t)((S.mst.rep_off == 0 ? 0x80 : 0) | (S.mst.rep_off + n == S.mst.rep_len ? 0x40 : 0));
@@ -5953,6 +5965,22 @@ static void test_gfx_amdgpu(rdna3_dev *dev, rdna3_gfx_ring *gr, rdna3_mec_ring *
         CHECK(S.tlb_flushes == t0 + 13 && kiq->rb.fence_seq == kseq + 14);
         S.mes_kiq_no_rptr_report = 0;
         kiq->rb.amdgpu_pad = 0;
+        /* PR #2 review: with the done mark, a stale rptr of 0 does not make
+         * the ring look emptier (wptr & mask 76, 200 dwords pending), and a
+         * whole ring pending is full, not empty */
+        {
+            uint64_t w0 = kiq->rb.wptr, dw0 = kiq->rb.done_wptr;
+            int dv0 = kiq->rb.done_valid;
+            kiq->rb.wptr = 4ull * (kiq->rb.buf_mask + 1) + 76;
+            kiq->rb.done_wptr = kiq->rb.wptr - 200;
+            kiq->rb.done_valid = 1;
+            CHECK(gfx11_ring_space(dev, &kiq->rb) == kiq->rb.buf_mask - 200);
+            kiq->rb.done_wptr = kiq->rb.wptr - (kiq->rb.buf_mask + 1);
+            CHECK(gfx11_ring_space(dev, &kiq->rb) == 0);
+            kiq->rb.wptr = w0;
+            kiq->rb.done_wptr = dw0;
+            kiq->rb.done_valid = dv0;
+        }
     }
     /* amdgpu_vm_flush's PASID mapping: IH_VMID_5_LUT gets the job's PASID */
     {
@@ -6076,8 +6104,18 @@ static void test_userq_hw(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
     CHECK(gfx11_compute_mqd_init(dev, mqd, &pr) == RDNA3_OK);
     CHECK(mqd[0] == 0xC0310800u && mqd[128] == (uint32_t)MC(P_MQD_C) && mqd[129] == (uint32_t)(MC(P_MQD_C) >> 32));
     CHECK(mqd[136] == (uint32_t)(VA(P_RING_C) >> 8) && mqd[137] == (uint32_t)(VA(P_RING_C) >> 40));
-    CHECK((mqd[145] & CP_HQD_PQ_CONTROL__QUEUE_SIZE_MASK) == 9 && (mqd[145] & CP_HQD_PQ_CONTROL__KMD_QUEUE_MASK) &&
+    /* a user queue: neither PRIV_STATE nor KMD_QUEUE (PR #2 review: it ran
+     * privileged PM4); kernel_queue sets both */
+    CHECK((mqd[145] & CP_HQD_PQ_CONTROL__QUEUE_SIZE_MASK) == 9 && !(mqd[145] & CP_HQD_PQ_CONTROL__KMD_QUEUE_MASK) &&
+          !(mqd[145] & CP_HQD_PQ_CONTROL__PRIV_STATE_MASK) &&
           (mqd[145] & CP_HQD_PQ_CONTROL__UNORD_DISPATCH_MASK) && !(mqd[145] & CP_HQD_PQ_CONTROL__TMZ_MASK));
+    {
+        static uint32_t km[512];
+        amd_mqd_prop kp = pr;
+        kp.kernel_queue = 1;
+        CHECK(gfx11_compute_mqd_init(dev, km, &kp) == RDNA3_OK && (km[145] & CP_HQD_PQ_CONTROL__KMD_QUEUE_MASK) &&
+              (km[145] & CP_HQD_PQ_CONTROL__PRIV_STATE_MASK));
+    }
     CHECK(((mqd[143] & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_OFFSET_MASK) >> 2) == dbc &&
           (mqd[143] & CP_HQD_PQ_DOORBELL_CONTROL__DOORBELL_EN_MASK));
     CHECK(mqd[165] == (uint32_t)(VA(P_EOP) >> 8) && mqd[130] == 0 && mqd[133] == 1 && mqd[134] == 0);
@@ -6163,7 +6201,7 @@ static void test_userq_hw(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
           (mqd[143] & CP_RB_DOORBELL_CONTROL__DOORBELL_EN_MASK));
     CHECK((mqd[145] & CP_GFX_HQD_CNTL__RB_BUFSZ_MASK) == 9 &&
           ((mqd[145] & CP_GFX_HQD_CNTL__RB_BLKSZ_MASK) >> CP_GFX_HQD_CNTL__RB_BLKSZ__SHIFT) == 7 &&
-          !(mqd[145] & CP_GFX_HQD_CNTL__TMZ_MATCH_MASK));
+          !(mqd[145] & CP_GFX_HQD_CNTL__TMZ_MATCH_MASK) && (mqd[145] & CP_GFX_HQD_CNTL__RB_NON_PRIV_MASK));
     CHECK(mqd[134] == 0 && (mqd[135] & CP_GFX_HQD_QUANTUM__QUANTUM_EN_MASK) &&
           (mqd[162] & CP_GFX_MQD_CONTROL__PRIV_STATE_MASK) && mqd[136] == (uint32_t)(VA(P_RING_G) >> 8));
     rdna3_vram_write(dev, PG(P_MQD_G), mqd, 2048);
@@ -6769,6 +6807,11 @@ static void test_userq_uapi(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
               uq_va(&f2, hrp3, va + 0x2000, 4096) == 0 && uq_va(&f2, hd2, va + 0x4000, 4096) == 0);
         memset(&ms, 0, sizeof(ms));
         ms.csa_va = va + 0x8000;
+        /* PR #2 review: the CSA (as the EOP / shadow) must be mapped
+         * (amdgpu_userq_input_va_validate in mes_userq_mqd_create) */
+        CHECK(uq_create(&f2, AMDGPU_HW_IP_DMA, hdb2, 3, va, 4096, va + 0x2000, va + 0x1000, &ms, sizeof(ms), 0,
+                        &qs) == -RD_EINVAL);
+        CHECK(uq_va(&f2, uq_gem(&f2, 4096, AMDGPU_GEM_DOMAIN_VRAM), va + 0x8000, 4096) == 0);
         CHECK(uq_create(&f2, AMDGPU_HW_IP_DMA, hdb2, 3, va, 4096, va + 0x2000, va + 0x1000, &ms, sizeof(ms), 0,
                         &qs) == 0 && qs == 1);
         CHECK(S.uq[2].used && S.uq[2].type == 2 && S.uq[2].vmid == 9 && S.uq[2].process_id == 101 &&
@@ -7439,6 +7482,15 @@ static void test_dp_mst(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rdn
           strcmp(ed.name, "RDNA3 MST A") == 0 && ed.mode[0].h_active == 1920);
     CHECK(dp_mst_read_edid(&mgr, pb) == 128 && edid_parse(mgr.port[pb].edid, 128, &ed) == 0 &&
           strcmp(ed.name, "RDNA3 MST B") == 0 && ed.mode[0].h_active == 2560 && S.mst.remote_i2c == 2);
+    /* card review: a follow-up chunk with msg_len 0 (drm_dp_decode_sideband_msg_hdr
+     * refuses it) is dropped, not appended as 0 - 1 bytes; the read fails
+     * cleanly and the next one works */
+    S.mst.zero_chunk = 1;
+    CHECK(dp_mst_read_edid(&mgr, pa) != 128 && S.mst.zero_chunk == 0);
+    S.mst.rep_pending = 0;
+    CHECK(dp_mst_read_edid(&mgr, pa) == 128 && edid_parse(mgr.port[pa].edid, 128, &ed) == 0 &&
+          strcmp(ed.name, "RDNA3 MST A") == 0);
+    S.mst.remote_i2c = 2;
     /* REMOTE_DPCD_READ of the sink behind port 2 */
     CHECK(dp_mst_dpcd_read(&mgr, pb, 0, buf, 3) == 3 && buf[0] == 0x14 && buf[1] == RD_DP_LINK_RATE_HIGH2 &&
           buf[2] == 0x82 && S.mst.remote_dpcd == 1);
@@ -11203,6 +11255,29 @@ static void run(const char *fwdir)
         S.edid[5] = 0;
         CHECK(edid_parse(S.edid, 128, &e) == -1);
         S.edid[5] = 0xff;
+        /* PR #2 review: a DTD whose sync runs past the blanking (drm's
+         * "bogus h/vsync_end") is pulled back inside it; one whose front
+         * porch alone passes the blanking is dropped */
+        {
+            static uint8_t bad[256];
+            uint8_t dtd[18] = { 0x02, 0x3A, 0x80, 0x18, 0x71, 0x38, 0x2D, 0x40, 0xF0, 0x2C,
+                                0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1E };
+            uint32_t q, seen = 0;
+            make_edid(bad, "BOGUS SYNC", 0x77, dtd);
+            CHECK(edid_parse(bad, 128, &e) == 0);
+            for (q = 0; q < e.nmodes; q++)
+                if (e.mode[q].preferred) {
+                    seen++;
+                    CHECK(e.mode[q].h_active == 1920 && e.mode[q].h_total == 2200 && e.mode[q].h_front == 240 &&
+                          e.mode[q].h_sync == 39 && e.mode[q].h_active + e.mode[q].h_front + e.mode[q].h_sync < e.mode[q].h_total);
+                }
+            CHECK(seen == 1);
+            dtd[11] = 0xC0;                       /* front porch 0x3F0: past the 280-pixel blanking */
+            make_edid(bad, "BOGUS PORCH", 0x78, dtd);
+            CHECK(edid_parse(bad, 128, &e) == 0);
+            for (q = 0; q < e.nmodes; q++)
+                CHECK(!e.mode[q].preferred);
+        }
         /* the probe finds the one sink; its pad stays in AUX mode, the
          * others go back to I2C */
         CHECK(dcaux_probe(&dev, conn, RD_AUX_ENGINES) == 1);

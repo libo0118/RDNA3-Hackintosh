@@ -60,15 +60,16 @@ uint32_t dcn32_dp_mst_pbn_divider(const rdna3_dp_link *l)
     return dcn32_dp_link_bw_kbps(l, dcn32_dp_link_cap(l)) / (8 * 1000 * 54);
 }
 
-/* kbps_from_pbn */
+/* kbps_from_pbn (DC computes in uint64_t: above ~10000 PBN, which UHBR
+ * hubs reach, a 32-bit product wraps - PR #2 review) */
 static uint32_t kbps_from_pbn(uint32_t pbn)
 {
-    uint32_t kbps = pbn;
+    uint64_t kbps = pbn;
     kbps *= (1000000 / PEAK_FACTOR_X1000);
     kbps *= 8;
     kbps *= 54;
     kbps /= 64;
-    return kbps;
+    return kbps > 0xffffffffull ? 0xffffffffu : (uint32_t)kbps;
 }
 
 int dcn32_dp_mst_mode_fits(rdna3_dp_link *l, uint32_t stream_kbps, uint32_t pixel_khz, uint32_t *pbn,

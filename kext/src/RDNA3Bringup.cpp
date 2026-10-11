@@ -2933,6 +2933,10 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
     if (!v || !v->live || !fVmReady)
         return 0;   /* record-only VM */
     uint64_t pages = size / 4096;
+    /* the UAPI checked offset + size against the BO; a VRAM mapping is
+     * checked again here, as the GTT one below is */
+    if (offset > bo->size || size > bo->size - offset)
+        return -RD_EINVAL;
     if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
         r = gpuvm_map_linear(fDev, &v->vm, va, rdna3_vram_pa(fDev, bo->vram_offset + offset), pages,
                              gpuvm_pte_flags(flags, 0));

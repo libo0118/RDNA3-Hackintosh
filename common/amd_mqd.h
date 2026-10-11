@@ -66,6 +66,7 @@ typedef struct amd_mqd_prop {
     uint64_t csa_addr;
     uint64_t fence_address;
     uint32_t tmz_queue;
+    uint32_t kernel_queue;          /* 0: a user queue, unprivileged (gfx_v11_0_*_mqd_init) */
 } amd_mqd_prop;
 
 typedef struct amd_mes_add_queue {

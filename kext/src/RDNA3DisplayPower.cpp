@@ -320,18 +320,29 @@ void RDNA3Accel::displayPowerFree()
         thread_call_free(fPowerIdleCall);
         fPowerIdleCall = nullptr;
     }
-    if (fPowerOn && fDispLock) {
+    /* the flag and the pointers change under fDispLock, which the flip
+     * path (displayPowerFlip) holds while it reads them; the memory is
+     * freed after (PR #2 review) */
+    rdna3_dcn32_power *power;
+    rdna3_subvp_state *subvp;
+    rdna3_pstate_ctx *ctx, *ctxMin;
+    if (fDispLock)
         IOLockLock(fDispLock);
+    if (fPowerOn)
         displayPowerQuiesce(true);
-        IOLockUnlock(fDispLock);
-    }
     fPowerOn = false;
-    if (fPower) IOFree(fPower, sizeof(rdna3_dcn32_power));
-    if (fSubvp) IOFree(fSubvp, sizeof(rdna3_subvp_state));
-    if (fPowerCtx) IOFree(fPowerCtx, sizeof(rdna3_pstate_ctx));
-    if (fPowerCtxMin) IOFree(fPowerCtxMin, sizeof(rdna3_pstate_ctx));
-    fPowerCtxMin = nullptr;
+    power = fPower;
+    subvp = fSubvp;
+    ctx = fPowerCtx;
+    ctxMin = fPowerCtxMin;
     fPower = nullptr;
     fSubvp = nullptr;
     fPowerCtx = nullptr;
+    fPowerCtxMin = nullptr;
+    if (fDispLock)
+        IOLockUnlock(fDispLock);
+    if (power) IOFree(power, sizeof(rdna3_dcn32_power));
+    if (subvp) IOFree(subvp, sizeof(rdna3_subvp_state));
+    if (ctx) IOFree(ctx, sizeof(rdna3_pstate_ctx));
+    if (ctxMin) IOFree(ctxMin, sizeof(rdna3_pstate_ctx));
 }

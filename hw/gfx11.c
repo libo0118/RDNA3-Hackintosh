@@ -492,11 +492,13 @@ uint32_t gfx11_ring_space(rdna3_dev *d, rdna3_gfx_ring *r)
     uint32_t rptr = wb_read32(d, r, RD_GFX_WB_RPTR) & r->buf_mask;
     uint32_t used = ((uint32_t)r->wptr - rptr) & r->buf_mask;
     if (r->done_valid) {
-        /* everything up to done_wptr ran: the KIQ's polled fences prove it
-         * even when its rptr report never comes */
-        uint32_t used_done = ((uint32_t)r->wptr - (uint32_t)r->done_wptr) & r->buf_mask;
-        if (used_done < used)
-            used = used_done;
+        /* everything up to done_wptr ran: the KIQ's polled fences and ring
+         * tests and the MES's answered status queries prove it. Those
+         * rings write no rptr report, so this alone counts, unmasked: a
+         * stale rptr of 0 must not make a full ring look emptier, nor a
+         * whole ring of pending dwords look empty (PR #2 review) */
+        uint64_t pend = r->wptr - r->done_wptr;
+        used = pend >= r->buf_mask ? r->buf_mask : (uint32_t)pend;
     }
     return r->buf_mask - used;   /* one slot stays empty: full != empty */
 }
@@ -1394,8 +1396,15 @@ static int kiq_ring_test(rdna3_dev *d, rdna3_mec_ring *kiq)
     gfx11_commit(d, &kiq->rb);
     for (i = 0; i < d->usec_timeout; i++) {
         v = rdna3_rreg(d, scratch);
-        if (v == 0xDEADBEEF)
+        if (v == 0xDEADBEEF) {
+            /* the test was the last thing committed: the maps before it
+             * ran too, and their dwords are free again (the KIQ writes no
+             * rptr report; without this, wptr = 768 of a padded 1 KiB ring
+             * left 255 dwords for good - PR #2 review) */
+            kiq->rb.done_wptr = kiq->rb.wptr;
+            kiq->rb.done_valid = 1;
             return RDNA3_OK;
+        }
         d->os.udelay(d->os.ctx, 1);
     }
     RERR(d, "KIQ: ring test timeout (SCRATCH_REG0 0x%08x, CP_STAT 0x%08x)", v, RG(d, regCP_STAT));
@@ -1505,9 +1514,11 @@ int gfx11_mes_submit(rdna3_dev *d, rdna3_mes *m, uint32_t *pkt, uint32_t status_
     if (!rb->ring_size || status_dw + 4 > RD_MES_API_DWORDS)
         return RDNA3_EINVAL;
     rdna3_vram_write(d, m->wb + RD_MES_WB_STATUS, &zero, 8);
-    /* rdna3amdgpu=1: amdgpu_ring_alloc + the wait for room
-     * (mes_v11_0_submit_pkt_and_poll_completion's error_undo path) */
-    if (d->amdgpu_exact) {
+    /* amdgpu_ring_alloc + the wait for room
+     * (mes_v11_0_submit_pkt_and_poll_completion's error_undo path); also
+     * without rdna3amdgpu=1, so a stalled MES never gets frames written
+     * over the ones it has not run (PR #2 review) */
+    {
         uint64_t wptr_old = rb->wptr;
         if (ring_wait_space(d, rb, 2 * RD_MES_API_DWORDS)) {
             RERR(d, "MES ring buffer is full.");
@@ -1733,6 +1744,8 @@ int gfx11_gfx_mqd_init(rdna3_dev *d, uint32_t *mqd, const amd_mqd_prop *p)
     tmp = REG_SET_FIELD(tmp, CP_GFX_HQD_CNTL, RB_BLKSZ, rb_bufsz - 2);
     if (p->tmz_queue)
         tmp = REG_SET_FIELD(tmp, CP_GFX_HQD_CNTL, TMZ_MATCH, 1);
+    if (!p->kernel_queue)
+        tmp = REG_SET_FIELD(tmp, CP_GFX_HQD_CNTL, RB_NON_PRIV, 1);
     mqd[MQD_GFX_HQD_CNTL] = tmp;
     /* set up cp_doorbell_control */
     tmp = regCP_RB_DOORBELL_CONTROL_DEFAULT;
@@ -1803,8 +1816,12 @@ int gfx11_compute_mqd_init(rdna3_dev *d, uint32_t *mqd, const amd_mqd_prop *p)
     tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, RPTR_BLOCK_SIZE, order_base_2(4096 / 4) - 1);
     tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, UNORD_DISPATCH, 1);
     tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, TUNNEL_DISPATCH, p->allow_tunneling ? 1 : 0);
-    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, PRIV_STATE, 1);
-    tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, KMD_QUEUE, 1);
+    /* "drm/amdgpu/gfx11: set MQD as appropriate for queue types": only a
+     * kernel queue runs privileged */
+    if (p->kernel_queue) {
+        tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, PRIV_STATE, 1);
+        tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, KMD_QUEUE, 1);
+    }
     if (p->tmz_queue)
         tmp = REG_SET_FIELD(tmp, CP_HQD_PQ_CONTROL, TMZ, 1);
     mqd[MQD_CP_HQD_PQ_CONTROL] = tmp;
