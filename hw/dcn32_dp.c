@@ -13,6 +13,7 @@
 #include "gen/dcn_3_2_0_dig.h"
 #include "gen/dcn_3_2_0_dp.h"
 #include "gen/dcn_3_2_0_pipe.h"
+#include "dcn32_dp_mst.h"
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -100,16 +101,48 @@ uint32_t dcn32_dp_stream_kbps(uint32_t pixel_khz, uint32_t bpc)
 }
 
 /* dp_link_bandwidth_kbps: 8b/10b, link rate in LINK_RATE_REF_FREQ_IN_KHZ
- * per DP byte per lane, DATA_EFFICIENCY_8b_10b_x10000 = 8000; FEC off
- * (the FEC policy is off in this port) */
-uint32_t dcn32_dp_link_kbps_settings(const rdna3_dp_link_settings *s)
+ * per DP byte per lane, DATA_EFFICIENCY_8b_10b_x10000 = 8000, times
+ * DATA_EFFICIENCY_8b_10b_FEC_EFFICIENCY_x100 = 97 % with FEC */
+static uint32_t dp_link_bandwidth_kbps(const rdna3_dp_link_settings *s, int fec)
 {
     uint32_t per_lane, eff;
     if (s->link_rate < RD_DP_LINK_RATE_LOW || s->link_rate > RD_DP_LINK_RATE_HIGH3)
         return 0;   /* link_dp_get_encoding_format: not 8b/10b */
     per_lane = s->link_rate * RD_DP_LINK_RATE_REF_FREQ_IN_KHZ * 10;   /* BITS_PER_DP_BYTE */
     eff = 8000;
+    if (fec) {
+        eff /= 100;
+        eff *= 97;
+    }
     return per_lane * s->lane_count / 10000 * eff;
+}
+
+uint32_t dcn32_dp_link_kbps_settings(const rdna3_dp_link_settings *s)
+{
+    return dp_link_bandwidth_kbps(s, 0);
+}
+
+/* dp_is_fec_supported: the DCN 3.2 link encoder has fec_supported */
+static int dp_is_fec_supported(const rdna3_dp_link *l)
+{
+    return (l->dpcd_caps.fec_cap & RD_DP_FEC_CAPABLE) != 0;
+}
+
+/* dp_should_enable_fec (no panel patch, not eDP), behind the link's FEC
+ * policy (off: FEC never, as before rdna3dsc) */
+int dcn32_dp_should_enable_fec(const rdna3_dp_link *l)
+{
+    if (!l->fec_policy)
+        return 0;
+    if (l->fec_state == RD_FEC_ENABLED)
+        return 1;
+    return dp_is_fec_supported(l);
+}
+
+/* dp_link_bandwidth_kbps for this link (FEC as dp_should_enable_fec says) */
+uint32_t dcn32_dp_link_bw_kbps(const rdna3_dp_link *l, const rdna3_dp_link_settings *s)
+{
+    return dp_link_bandwidth_kbps(s, dcn32_dp_should_enable_fec(l));
 }
 
 /* ---- capabilities (link_dp_capability.c) ---- */
@@ -279,6 +312,35 @@ void dcn32_dp_link_init(rdna3_dp_link *l, rdna3_dev *d, rdna3_dmub *dm, uint32_t
     l->lttpr_aware = 1;
 }
 
+/* get_active_converter_info (no dongle caps, no branch device name): the
+ * branch / converter type from DOWNSTREAMPORT_PRESENT and, from DPCD 1.1,
+ * the detailed caps of downstream port 0 */
+static void get_active_converter_info(rdna3_dp_link *l, uint8_t data)
+{
+    rdna3_dp_caps *c = &l->dpcd_caps;
+    uint8_t det[16] = { 0 };
+    if (!(data & 1)) {                     /* PORT_PRESENT */
+        c->dongle_type = RD_DONGLE_NONE;
+        c->is_branch_dev = 0;
+        return;
+    }
+    c->is_branch_dev = 1;
+    switch ((data >> 1) & 3) {             /* PORT_TYPE */
+    case 1: c->dongle_type = RD_DONGLE_DP_VGA; break;    /* DOWNSTREAM_VGA */
+    case 2: c->dongle_type = RD_DONGLE_DP_DVI; break;    /* DOWNSTREAM_DVI_HDMI_DP_PLUS_PLUS */
+    default: c->dongle_type = RD_DONGLE_NONE; break;
+    }
+    if (c->dpcd_rev >= 0x11 && core_link_read_dpcd(l, RD_DPCD_DOWNSTREAM_PORT_0, det, sizeof(det)) == RDNA3_OK) {
+        switch (det[0] & 7) {              /* DWN_STRM_PORTX_TYPE */
+        case 0: c->dongle_type = RD_DONGLE_NONE; break;      /* DP: as DONGLE_NONE */
+        case 1: c->dongle_type = RD_DONGLE_DP_VGA; break;
+        case 2: c->dongle_type = RD_DONGLE_DP_DVI; break;
+        case 3: case 5: c->dongle_type = RD_DONGLE_DP_HDMI; break;
+        default: break;
+        }
+    }
+}
+
 /* retrieve_link_cap (subset) + dp_get_max_link_cap */
 int dcn32_dp_read_caps(rdna3_dp_link *l)
 {
@@ -355,9 +417,23 @@ int dcn32_dp_read_caps(rdna3_dp_link *l)
     c->sink_count = b;
     core_link_read_dpcd(l, RD_DPCD_SINK_OUI, oui, sizeof(oui));
     c->sink_dev_id = ((uint32_t)oui[0] << 16) | ((uint32_t)oui[1] << 8) | oui[2];
+    get_active_converter_info(l, dpcd[RD_DPCD_DOWNSTREAMPORT_PRESENT]);
+    /* DSC and FEC sink caps from DPCD 1.4 */
     c->fec_cap = 0;
-    if (c->dpcd_rev >= 0x14)
+    for (i = 0; i < RD_DSC_DPCD_BASIC; i++)
+        c->dsc_basic[i] = 0;
+    for (i = 0; i < RD_DSC_DPCD_BRANCH; i++)
+        c->dsc_branch[i] = 0;
+    if (c->dpcd_rev >= 0x14) {
         core_link_read_dpcd(l, RD_DPCD_FEC_CAPABILITY, &c->fec_cap, 1);
+        core_link_read_dpcd(l, RD_DPCD_DSC_SUPPORT, c->dsc_basic, RD_DSC_DPCD_BASIC);
+        if (c->dongle_type != RD_DONGLE_NONE)
+            core_link_read_dpcd(l, RD_DPCD_DSC_BRANCH_OVERALL_THROUGHPUT_0, c->dsc_branch, RD_DSC_DPCD_BRANCH);
+    }
+    /* read_is_mst_supported (the cap byte kept: DP_MST_CAP bit 0) */
+    c->mstm_cap = 0;
+    if (c->dpcd_rev >= 0x12)
+        core_link_read_dpcd(l, RD_DPCD_MSTM_CAP, &c->mstm_cap, 1);
     /* 128b/132b (DP_128b_132b_SUPPORTED) is not supported by this port */
     dp_get_max_link_cap(l, &l->max_link_cap);
     l->caps_valid = 1;
@@ -368,6 +444,12 @@ int dcn32_dp_read_caps(rdna3_dp_link *l)
          (c->max_down_spread & RD_DP_MAX_DOWNSPREAD_0_5) ? " SSC" : "", c->sink_dev_id,
          dp_parse_lttpr_repeater_count(c->lttpr.phy_repeater_cnt), rate_name(l->max_link_cap.link_rate),
          l->max_link_cap.lane_count);
+    if (c->fec_cap || (c->dsc_basic[0] & RD_DP_DSC_DECOMPRESSION_IS_SUPPORTED) || c->mstm_cap || c->is_branch_dev)
+        RLOG(l->d, "dp: AUX %u: FEC %s, DSC %s (rev %02x, slices %02x, max slice width %u, bpc %02x), MST %s, branch %d (dongle %d)",
+             l->aux, (c->fec_cap & RD_DP_FEC_CAPABLE) ? "yes" : "no",
+             (c->dsc_basic[0] & RD_DP_DSC_DECOMPRESSION_IS_SUPPORTED) ? "yes" : "no", c->dsc_basic[1],
+             c->dsc_basic[4], c->dsc_basic[0xc] * 320u, c->dsc_basic[0xa], (c->mstm_cap & 1) ? "yes" : "no",
+             c->is_branch_dev, c->dongle_type);
     return RDNA3_OK;
 }
 
@@ -421,15 +503,20 @@ static const rdna3_dp_link_settings *verified_cap(const rdna3_dp_link *l)
     return l->verified ? &l->verified_link_cap : &l->max_link_cap;
 }
 
+const rdna3_dp_link_settings *dcn32_dp_link_cap(const rdna3_dp_link *l)
+{
+    return verified_cap(l);
+}
+
 /* decide_dp_link_settings: the smallest setting that carries req_bw */
 static int decide_dp_link_settings(const rdna3_dp_link *l, rdna3_dp_link_settings *out, uint32_t req_bw)
 {
     const rdna3_dp_link_settings *cap = verified_cap(l);
     rdna3_dp_link_settings cur = { 1, RD_DP_LINK_RATE_LOW, RD_DP_LINK_SPREAD_DISABLED };
-    if (req_bw > dcn32_dp_link_kbps_settings(cap))
+    if (req_bw > dcn32_dp_link_bw_kbps(l, cap))
         return 0;
     while (cur.link_rate && cur.link_rate <= cap->link_rate) {
-        if (req_bw <= dcn32_dp_link_kbps_settings(&cur)) {
+        if (req_bw <= dcn32_dp_link_bw_kbps(l, &cur)) {
             *out = cur;
             return 1;
         }
@@ -551,6 +638,16 @@ static void dcn10_link_encoder_enable_dp_output(rdna3_dp_link *l, const rdna3_dp
                              s->link_rate * RD_DP_LINK_RATE_REF_FREQ_IN_KHZ, 1);
 }
 
+/* dcn10_link_encoder_enable_dp_mst_output: TransmitterControl ENABLE with
+ * ATOM_TRANSMITTER_DIGMODE_V6_DP_MST, no engine (dig_encoder_sel_to_atom
+ * gives 0: the DIG FE is connected by connect_dig_be_to_fe) */
+static void dcn10_link_encoder_enable_dp_mst_output(rdna3_dp_link *l, const rdna3_dp_link_settings *s)
+{
+    enc1_configure_encoder(l, s);
+    link_transmitter_control(l, RD_ATOM_TX_ENABLE, 5, s->lane_count,
+                             s->link_rate * RD_DP_LINK_RATE_REF_FREQ_IN_KHZ, 0);
+}
+
 /* setup_panel_mode (DP_PANEL_MODE_DEFAULT) */
 static void setup_panel_mode(rdna3_dp_link *l)
 {
@@ -654,10 +751,68 @@ static void dcn10_link_encoder_dp_set_phy_pattern(rdna3_dp_link *l, uint32_t pat
         set_dp_phy_pattern_passthrough_mode(l);
 }
 
-/* dcn10_link_encoder_setup */
+/* dcn10_link_encoder_setup: DIG_MODE 0 = DP SST, 5 = DP MST */
 static void dcn10_link_encoder_setup(rdna3_dp_link *l)
 {
-    UPDATE(l->d, regDIG0_DIG_BE_CNTL, l->be, DIG_S, DIG0_DIG_BE_CNTL, DIG_MODE, 0);   /* DP SST */
+    UPDATE(l->d, regDIG0_DIG_BE_CNTL, l->be, DIG_S, DIG0_DIG_BE_CNTL, DIG_MODE, l->mst ? 5 : 0);
+}
+
+/* enc2_fec_set_enable */
+static void enc2_fec_set_enable(rdna3_dp_link *l, int enable)
+{
+    RDBG(l->d, "dp: %s FEC at link encoder %u", enable ? "enabling" : "disabling", l->be);
+    UPDATE(l->d, regDP0_DP_DPHY_CNTL, l->be, DP_S, DP0_DP_DPHY_CNTL, DPHY_FEC_EN, enable ? 1 : 0);
+}
+
+/* enc2_fec_set_ready */
+static void enc2_fec_set_ready(rdna3_dp_link *l, int ready)
+{
+    UPDATE(l->d, regDP0_DP_DPHY_CNTL, l->be, DP_S, DP0_DP_DPHY_CNTL, DPHY_FEC_READY_SHADOW, ready ? 1 : 0);
+}
+
+/* enc2_fec_is_active */
+static int enc2_fec_is_active(rdna3_dp_link *l)
+{
+    return GET(RI(l->d, regDP0_DP_DPHY_CNTL, l->be, DP_S), DP0_DP_DPHY_CNTL, DPHY_FEC_ACTIVE_STATUS) != 0;
+}
+
+/* dp_set_fec_ready: FEC is set ready before the training (the policy:
+ * always train with FEC when the sink supports it) */
+static int dp_set_fec_ready(rdna3_dp_link *l, int ready)
+{
+    uint8_t fec_config;
+    int status = RDNA3_OK;
+    if (ready && dcn32_dp_should_enable_fec(l)) {
+        fec_config = RD_DP_FEC_READY;
+        status = core_link_write_dpcd(l, RD_DPCD_FEC_CONFIGURATION, &fec_config, 1);
+        if (status == RDNA3_OK) {
+            enc2_fec_set_ready(l, 1);
+            l->fec_state = RD_FEC_READY;
+        }
+    } else if (l->fec_state == RD_FEC_READY) {
+        fec_config = 0;
+        core_link_write_dpcd(l, RD_DPCD_FEC_CONFIGURATION, &fec_config, 1);
+        enc2_fec_set_ready(l, 0);
+        l->fec_state = RD_FEC_NOT_READY;
+    }
+    return status;
+}
+
+/* dp_set_fec_enable: FEC may start 1000 LL codes after the training (6.2 us
+ * on one RBR lane: 7 us) */
+static void dp_set_fec_enable(rdna3_dp_link *l, int enable)
+{
+    if (enable && dcn32_dp_should_enable_fec(l)) {
+        if (l->fec_state == RD_FEC_READY) {
+            l->d->os.udelay(l->d->os.ctx, 7);
+            enc2_fec_set_enable(l, 1);
+            l->fec_state = RD_FEC_ENABLED;
+            RLOG(l->d, "dp: UNIPHY %u: FEC enabled (active %d)", l->be, enc2_fec_is_active(l));
+        }
+    } else if (l->fec_state == RD_FEC_ENABLED) {
+        enc2_fec_set_enable(l, 0);
+        l->fec_state = RD_FEC_READY;
+    }
 }
 
 /* dcn10_link_encoder_connect_dig_be_to_fe */
@@ -914,7 +1069,10 @@ static void dpcd_write_rx_power_ctrl(rdna3_dp_link *l, int on)
 void dcn32_dp_enable_link_phy(rdna3_dp_link *l, const rdna3_dp_link_settings *s)
 {
     l->cur_link_settings = *s;
-    dcn10_link_encoder_enable_dp_output(l, s);
+    if (l->mst)
+        dcn10_link_encoder_enable_dp_mst_output(l, s);
+    else
+        dcn10_link_encoder_enable_dp_output(l, s);
     dpcd_write_rx_power_ctrl(l, 1);
 }
 
@@ -1421,7 +1579,7 @@ static void dp_log_training_result(rdna3_dp_link *l, const rdna3_dp_lt_settings 
          lt->link_settings.link_spread ? "0.5% 30KHz" : "Disabled");
 }
 
-/* dp_perform_link_training (8b/10b; no FEC to make ready) */
+/* dp_perform_link_training (8b/10b) */
 int dcn32_dp_perform_link_training(rdna3_dp_link *l, const rdna3_dp_link_settings *s, int skip_video_pattern)
 {
     rdna3_dp_lt_settings lt;
@@ -1432,6 +1590,7 @@ int dcn32_dp_perform_link_training(rdna3_dp_link *l, const rdna3_dp_link_setting
     dpcd_exit_training_mode(l);
     /* configure the link before entering training mode */
     dpcd_configure_lttpr_mode(l, &lt);
+    dp_set_fec_ready(l, lt.should_set_fec_ready);
     dpcd_configure_channel_coding(l);
     status = dp_perform_8b_10b_link_training(l, &lt);
     /* exit training mode */
@@ -1482,7 +1641,7 @@ int dcn32_dp_link_training_with_retries(rdna3_dp_link *l, const rdna3_dp_link_se
             uint32_t link_bw;
             dcn32_dp_fallback_link_setting(l, &max, &cur, status);
             l->lt_fallbacks++;
-            link_bw = dcn32_dp_link_kbps_settings(&cur);
+            link_bw = dcn32_dp_link_bw_kbps(l, &cur);
             is_link_bw_low = req_kbps > link_bw;
             is_link_bw_min = cur.link_rate <= RD_DP_LINK_RATE_LOW && cur.lane_count <= 1;
             if (is_link_bw_low) {
@@ -1550,10 +1709,185 @@ int dcn32_dp_verify_link_cap(rdna3_dp_link *l, int attempts)
     return success;
 }
 
+
+/* ---- DSC on the link (link_dpms.c, amdgpu_dm.c, amdgpu_dm_helpers.c) ---- */
+
+/* the dc_crtc_timing of mode 'm' (RGB, 'bpc' per component, no borders) */
+void dcn32_dp_dsc_timing(const rdna3_mode *m, uint32_t bpc, rdna3_dsc_timing *t)
+{
+    uint32_t i;
+    for (i = 0; i < sizeof(*t); i++)
+        ((uint8_t *)t)[i] = 0;
+    t->h_addressable = m->h_active;
+    t->v_addressable = m->v_active;
+    t->h_total = m->h_total;
+    t->v_total = m->v_total;
+    t->pix_clk_100hz = m->pixel_khz * 10;
+    t->bpc = bpc;
+    t->pixel_encoding = RD_PIXEL_ENCODING_RGB;
+}
+
+/* update_dsc_caps: dc_dsc_parse_dsc_dpcd for a sink without a converter or
+ * behind a DP-HDMI converter (the branch decoder caps passed as read) */
+int dcn32_dp_sink_dsc_caps(const rdna3_dp_link *l, rdna3_dsc_dec_caps *caps)
+{
+    uint32_t i;
+    for (i = 0; i < sizeof(*caps); i++)
+        ((uint8_t *)caps)[i] = 0;
+    if (!l->caps_valid || (l->dpcd_caps.dongle_type != RD_DONGLE_NONE && l->dpcd_caps.dongle_type != RD_DONGLE_DP_HDMI))
+        return 0;
+    return dcn32_dsc_parse_dsc_dpcd(l->dpcd_caps.dsc_basic, l->dpcd_caps.dsc_branch, caps);
+}
+
+/* apply_dsc_policy_for_stream, SST sink without a converter: DSC (with the
+ * default options, no EDID DSC bpp limit) when dc_dsc_compute_config finds
+ * the mode needs more than dc_link_bandwidth_kbps of the link cap; behind
+ * the link's DSC policy (rdna3dsc=1) */
+int dcn32_dp_decide_dsc(const rdna3_dp_link *l, const rdna3_mode *m, uint32_t bpc, rdna3_dsc_config *cfg)
+{
+    rdna3_dsc_dec_caps caps;
+    rdna3_dsc_options o;
+    rdna3_dsc_timing t;
+    uint32_t i, link_bandwidth_kbps;
+    for (i = 0; i < sizeof(*cfg); i++)
+        ((uint8_t *)cfg)[i] = 0;
+    if (!l->dsc_policy || l->mst || l->dpcd_caps.dongle_type != RD_DONGLE_NONE || !dcn32_dp_sink_dsc_caps(l, &caps))
+        return 0;
+    dcn32_dsc_default_options(&o);
+    link_bandwidth_kbps = dcn32_dp_link_bw_kbps(l, verified_cap(l));
+    dcn32_dp_dsc_timing(m, bpc, &t);
+    return dcn32_dsc_compute_config(&caps, &o, link_bandwidth_kbps, &t, cfg);
+}
+
+/* dc_bandwidth_in_kbps_from_timing of mode 'm' (with flags.DSC when 'cfg') */
+uint32_t dcn32_dp_mode_kbps(const rdna3_mode *m, uint32_t bpc, const rdna3_dsc_config *cfg)
+{
+    rdna3_dsc_timing t;
+    dcn32_dp_dsc_timing(m, bpc, &t);
+    if (cfg) {
+        t.dsc = 1;
+        t.dsc_cfg = *cfg;
+    }
+    return dcn32_dsc_timing_kbps(&t);
+}
+
+/* dp_set_dsc_on_rx -> dm_helpers_dp_write_dsc_enable (SST: DP_DSC_ENABLE
+ * on the RX itself, no converter or a DP-HDMI one) */
+static int dp_set_dsc_on_rx(rdna3_dp_link *l, int enable)
+{
+    uint8_t enable_dsc = enable ? 0x01 : 0x00;   /* DSC_DECODING / DSC_DISABLE */
+    if (l->dpcd_caps.dongle_type != RD_DONGLE_NONE && l->dpcd_caps.dongle_type != RD_DONGLE_DP_HDMI)
+        return 0;
+    RLOG(l->d, "dp: AUX %u: SST_DSC: DSC %s on the RX", l->aux, enable ? "enable" : "disable");
+    return core_link_write_dpcd(l, RD_DPCD_DSC_ENABLE, &enable_dsc, 1) == RDNA3_OK;
+}
+
+static void dsc_hw_config(const rdna3_dp_link *l, const rdna3_mode *m, rdna3_dsc_hw_config *c)
+{
+    c->pic_width = m->h_active;
+    c->pic_height = m->v_active;
+    c->pixel_encoding = RD_PIXEL_ENCODING_RGB;
+    c->bpc = 8;
+    c->is_odm = 0;
+    c->dc_dsc_cfg = l->dsc_cfg;
+}
+
+/* link_set_dsc_on_stream: one pipe (opp_cnt 1); DCN 3.2 has no
+ * set_dto_dscclk / set_ref_dscclk. The stream can be unblanked only after
+ * DSC is on in the RX (dp_set_dsc_on_rx). */
+static void link_set_dsc_on_stream(rdna3_dp_link *l, const rdna3_mode *m, int enable)
+{
+    if (enable) {
+        rdna3_dsc_hw_config c;
+        rdna3_dsc_optc_config optc = { 0, 0, 0 };
+        uint32_t optc_dsc_mode;
+        dsc_hw_config(l, m, &c);
+        if (dcn32_dsc_set_config(l->d, l->dsc_inst, &c, &optc))
+            RERR(l->d, "dp: DSC %u: config refused", l->dsc_inst);
+        dcn32_dsc_enable(l->d, l->dsc_inst, l->opp);
+        optc_dsc_mode = optc.is_pixel_format_444 ? RD_OPTC_DSC_ENABLED_444 : RD_OPTC_DSC_ENABLED_NATIVE_SUBSAMPLED;
+        /* DSC in the stream encoder; the PPS SDP comes after the DIG FE is
+         * connected to the BE */
+        dcn32_enc_dp_set_dsc_config(l->d, l->fe, optc_dsc_mode);
+        /* DSC in the OPTC */
+        dcn32_optc_set_dsc_config(l->d, l->otg, optc_dsc_mode, optc.bytes_per_pixel, optc.slice_width);
+        RLOG(l->d, "dp: DSC %u on OPP %u -> OTG %u -> DIG %u: slice width %u, bytes/pixel 0x%08x", l->dsc_inst,
+             l->opp, l->otg, l->fe, optc.slice_width, optc.bytes_per_pixel);
+    } else {
+        dcn32_optc_set_dsc_config(l->d, l->otg, RD_OPTC_DSC_DISABLED, 0, 0);
+        dcn32_enc_dp_set_dsc_config(l->d, l->fe, RD_OPTC_DSC_DISABLED);
+        dcn32_enc_dp_set_dsc_pps_info_packet(l->d, l->fe, 0, 0, 1);
+        /* dsc_disconnect is double buffered: dsc_disable may run while the
+         * DSC is still connected, as in DC */
+        dcn32_dsc_disconnect(l->d, l->dsc_inst);
+        dcn32_dsc_disable(l->d, l->dsc_inst);
+    }
+}
+
+/* link_set_dsc_pps_packet */
+static int link_set_dsc_pps_packet(rdna3_dp_link *l, const rdna3_mode *m, int enable, int immediate_update)
+{
+    if (!l->stream_dsc)
+        return 0;
+    if (enable) {
+        rdna3_dsc_hw_config c;
+        dsc_hw_config(l, m, &c);
+        dcn32_dsc_get_packed_pps(&c, l->pps);
+        dcn32_enc_dp_set_dsc_pps_info_packet(l->d, l->fe, 1, l->pps, immediate_update);
+    } else {
+        uint32_t i;
+        for (i = 0; i < sizeof(l->pps); i++)
+            l->pps[i] = 0;
+        dcn32_enc_dp_set_dsc_pps_info_packet(l->d, l->fe, 0, 0, 1);
+    }
+    return 1;
+}
+
+/* link_set_dsc_enable, with dcn32_update_dsc_pg's power gate around it (the
+ * DSC ungated while the stream has it, gated once it is released) */
+static int link_set_dsc_enable(rdna3_dp_link *l, const rdna3_mode *m, int enable)
+{
+    if (!l->stream_dsc)
+        return 0;
+    if (enable) {
+        if (!dcn32_dsc_pg_status(l->d, l->dsc_inst))
+            dcn32_dsc_pg_control(l->d, l->dsc_inst, 1);
+        link_set_dsc_on_stream(l, m, 1);
+    } else {
+        dp_set_dsc_on_rx(l, 0);
+        link_set_dsc_on_stream(l, m, 0);
+        if (dcn32_dsc_pg_status(l->d, l->dsc_inst))
+            dcn32_dsc_pg_control(l->d, l->dsc_inst, 0);
+    }
+    return 1;
+}
+
 /* ---- dpms (link_dpms.c) ---- */
 
-/* link_set_dpms_off for DP SST 8b/10b: the link goes before the stream so
- * the receiver never sees TPS1 */
+/* disable_link_dp: an MST link stays up until its last payload goes; the
+ * sink back to SST after an MST link; FEC off */
+static void disable_link_dp(rdna3_dp_link *l)
+{
+    if (l->mst && l->mst_alloc.stream_count > 0)
+        return;
+    dcn32_dp_disable_link_phy(l);
+    if (l->mst)
+        dcn32_dp_mst_enable_on_sink(l, 0);
+    dp_set_fec_enable(l, 0);
+    dp_set_fec_ready(l, 0);
+}
+
+/* disable_link */
+static void disable_link(rdna3_dp_link *l)
+{
+    disable_link_dp(l);
+    if (!l->mst || l->mst_alloc.stream_count == 0)
+        l->link_active = 0;
+}
+
+/* link_set_dpms_off for DP 8b/10b. SST: the link goes before the stream so
+ * the receiver never sees TPS1; MST: the payload is deallocated first and
+ * the encoder stays video active until the link goes. DSC off at the end. */
 void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l)
 {
     /* the stream encoder's pixel mode the boot left (dio_se_pix_per_cycle) */
@@ -1561,23 +1895,63 @@ void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l)
         l->pix_per_cycle = GET(RI(l->d, regDIG0_DIG_FIFO_CTRL0, l->fe, DIG_S), DIG0_DIG_FIFO_CTRL0,
                                DIG_FIFO_OUTPUT_PIXEL_MODE) ? 2 : 1;
     dcn20_blank_stream(l);
-    /* disable_link -> disable_link_dp -> dp_disable_link_phy (FEC off: nothing to undo) */
-    dcn32_dp_disable_link_phy(l);
-    /* dcn20_disable_stream -> reset_dio_stream_encoder */
-    reset_dio_stream_encoder(l);
+    if (l->mst)
+        dcn32_dp_mst_deallocate_payload(l);
+    if (!l->mst) {
+        /* disable_link -> disable_link_dp -> dp_disable_link_phy */
+        disable_link(l);
+        /* dcn20_disable_stream -> reset_dio_stream_encoder */
+        reset_dio_stream_encoder(l);
+    } else {
+        reset_dio_stream_encoder(l);
+        disable_link(l);
+    }
+    if (l->stream_dsc)
+        link_set_dsc_enable(l, 0, 0);
+    l->stream_dsc = 0;
 }
 
-/* link_set_dpms_on for DP SST, with enable_link_dp and dcn20_enable_stream */
+/* enable_link_dp: training with retries (the requested symbol clock is the
+ * link rate: DCN 3.2 clk_mgr has no notification), FEC on after it; the
+ * source OUI is not written */
+static int enable_link_dp(rdna3_dp_link *l, const rdna3_dp_link_settings *s, int do_fallback, uint32_t req)
+{
+    int skip_video_pattern = s->link_rate != RD_DP_LINK_RATE_LOW, status;
+    status = dcn32_dp_link_training_with_retries(l, s, skip_video_pattern, RD_DP_LINK_TRAINING_ATTEMPTS, do_fallback,
+                                                 req) ? RDNA3_OK : RDNA3_EIO;
+    dp_set_fec_enable(l, 1);
+    return status;
+}
+
+/* enable_link_dp_mst: the link is trained once for every MST stream; MST_EN
+ * on in the sink before the training (the payload table clear and the
+ * pending down reply poll of dm_helpers are empty in amdgpu) */
+static int enable_link_dp_mst(rdna3_dp_link *l, const rdna3_dp_link_settings *s)
+{
+    if (l->link_active)
+        return RDNA3_OK;
+    dcn32_dp_mst_enable_on_sink(l, 1);
+    return enable_link_dp(l, s, 0, 0);
+}
+
+/* link_set_dpms_on for DP 8b/10b with mode 'm' (the OTG already runs it),
+ * the stream's DSC config in l->stream_dsc / l->dsc_cfg, MST to l->mst_port
+ * when l->mst: link_enc setup, stream attribute (MSA), DSC on the stream,
+ * enable_link (SST / MST), the second setup, dcn20_enable_stream, DSC on
+ * the RX and its PPS, the MST payload, dcn32_unblank_stream */
 int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fallback)
 {
     rdna3_dp_link_settings s;
-    uint32_t req = dcn32_dp_stream_kbps(m->pixel_khz, 8);
-    int trained, skip_video_pattern;
+    uint32_t req = dcn32_dp_mode_kbps(m, 8, l->stream_dsc ? &l->dsc_cfg : 0);
+    int status;
 
     if (!l->pix_per_cycle)
         l->pix_per_cycle = 1;
-    /* link_decide_link_settings (done at validation in DC) */
-    if (dcn32_dp_decide_link_settings(l, req, &s)) {
+    /* link_decide_link_settings (done at validation in DC): MST takes the
+     * verified link cap (decide_mst_link_settings) */
+    if (l->mst) {
+        s = *verified_cap(l);
+    } else if (dcn32_dp_decide_link_settings(l, req, &s)) {
         RERR(l->d, "dp: no link setting carries %u kbps (link cap %s x%u)", req, rate_name(verified_cap(l)->link_rate),
              verified_cap(l)->lane_count);
         return RDNA3_EINVAL;
@@ -1585,23 +1959,45 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
     dcn10_link_encoder_setup(l);
     /* setup_dio_stream_attribute (no stereo sync) */
     enc2_stream_encoder_dp_set_stream_attribute(l, m);
-    /* enable_link_dp: requested_sym_clk = link rate x 27 MHz (DCN 3.2
-     * clk_mgr has no link rate notification); the OUI is not written */
-    skip_video_pattern = s.link_rate != RD_DP_LINK_RATE_LOW;
-    trained = dcn32_dp_link_training_with_retries(l, &s, skip_video_pattern, RD_DP_LINK_TRAINING_ATTEMPTS,
-                                                  do_fallback, req);
-    if (!trained)
+    /* DSC before the DIG FE and BE are connected (before the training), so
+     * the bandwidth sent to the BE stays what the link carries */
+    if (l->stream_dsc)
+        link_set_dsc_enable(l, m, 1);
+    /* enable_link (a link still up is taken down first) */
+    if (l->link_active)
+        disable_link(l);
+    status = l->mst ? enable_link_dp_mst(l, &s) : enable_link_dp(l, &s, do_fallback, req);
+    if (l->mst)
+        l->d->os.msleep(l->d->os.ctx, 200);
+    if (status == RDNA3_OK) {
+        l->link_active = 1;
+    } else if (l->mst) {
+        /* MST displays cannot go on without a trained link */
+        RERR(l->d, "dp: MST link training failed at %s x%u: stream not enabled", rate_name(s.link_rate), s.lane_count);
+        if (!l->link_active)
+            disable_link(l);
+        return RDNA3_EIO;
+    } else {
         RERR(l->d, "dp: link training failed at %s x%u: enabling the stream anyway, as DC does",
              rate_name(s.link_rate), s.lane_count);
+    }
     /* the second setup: the transmitter command may have left another DIG_MODE */
     dcn10_link_encoder_setup(l);
     /* dcn20_enable_stream: link_hwss->setup_stream_encoder (the pixel rate
      * divider and the early control stay as they are on DCN 3.2) */
     setup_dio_stream_encoder(l);
+    /* the PPS SDP ("info frames") */
+    if (l->stream_dsc) {
+        dp_set_dsc_on_rx(l, 1);
+        link_set_dsc_pps_packet(l, m, 1, 1);
+    }
+    if (l->mst && dcn32_dp_mst_allocate_payload(l, m, req))
+        status = RDNA3_EIO;
     dcn32_unblank_stream(l, m->pixel_khz, l->cur_link_settings.link_rate ? l->cur_link_settings.link_rate
                                                                          : s.link_rate);
-    RLOG(l->d, "dp: DIG %u -> UNIPHY %u: %ux%u %u kHz on %s x%u: %s", l->fe, l->be, m->h_active, m->v_active,
-         m->pixel_khz, rate_name(l->cur_link_settings.link_rate), l->cur_link_settings.lane_count,
-         trained ? "trained" : "NOT trained");
-    return trained ? RDNA3_OK : RDNA3_EIO;
+    RLOG(l->d, "dp: DIG %u -> UNIPHY %u%s: %ux%u %u kHz on %s x%u%s%s: %s", l->fe, l->be, l->mst ? " (MST)" : "",
+         m->h_active, m->v_active, m->pixel_khz, rate_name(l->cur_link_settings.link_rate),
+         l->cur_link_settings.lane_count, l->fec_state == RD_FEC_ENABLED ? ", FEC" : "",
+         l->stream_dsc ? ", DSC" : "", status == RDNA3_OK ? "trained" : "NOT trained");
+    return status;
 }

@@ -51,6 +51,8 @@ AMDGPU_STEPS = {
     "Discovery / VBIOS": ["2"], "DMCUB": ["5b"], "Display: OTG / AUX": ["2", "9"],
     "Display: modeset": ["modeset"],
     "Display: DP link": ["dplink"],
+    "Display: DSC": ["dsc"],
+    "Display: MST": ["mst"],
     "Display: hotplug": ["hotplug"],
     "Display: color": ["gamma"],
     "VCN / JPEG video": ["vcn"],
@@ -82,11 +84,22 @@ ITEM_STEPS = [
     # the DP side of files the TMDS modeset step verified
     (re.compile(r"dcn10_link_encoder_(dp_set_lane_settings|dp_set_phy_pattern|enable_dp_output"
                 r"|get_max_link_cap|set_dp_phy_pattern_training_pattern)"
-                r"|dcn32_(disable_link_output|unblank_stream)|(enable|disable)_link_dp|disable_prbs_mode"
+                r"|dcn32_(disable_link_output|unblank_stream)|(enable|disable)_link_dp|enable_link|disable_prbs_mode"
                 r"|enable_phy_bypass_mode|enc1_configure_encoder|enc32_(dp_set_odm_combine|enable_fifo"
                 r"|reset_fifo|set_dig_input_mode|stream_encoder_dp_unblank)|link_encoder_disable"
                 r"|link_transmitter_control|set_dp_phy_pattern_passthrough_mode"
                 r"|set_link_training_complete|setup_panel_mode"), ["dplink"]),
+    # FEC and DSC (rdna3dsc) in files of the modeset / DP link groups
+    (re.compile(r"dcn32_dsc_pg_(control|status)|dcn32_update_dsc_pg|enc32_dp_set_dsc_config|dp_set_dsc_on_rx"
+                r"|link_set_dsc_(enable|on_stream|pps_packet)|dp_is_fec_supported|dp_should_enable_fec"
+                r"|dp_set_fec_(enable|ready)|get_active_converter_info"), ["dsc"]),
+    # DP MST (rdna3mst) in files of the modeset / DP link groups
+    (re.compile(r"(de)?allocate_mst_payload|enable_link_dp_mst|enable_mst_on_sink|get_pbn_(from_bw_in_kbps"
+                r"|from_timing|per_slot)|log_vcp_x_y|remove_stream_from_alloc_table|update_mst_stream_alloc_table"
+                r"|dcn10_link_encoder_(enable_dp_mst_output|update_mst_stream_allocation_table)"
+                r"|fill_stream_allocation_row_info|decide_mst_link_settings|read_is_mst_supported"
+                r"|set_dio_throttled_vcp_size|update_dio_stream_allocation_table"
+                r"|enc1_stream_encoder_set_throttled_vcp_size"), ["mst"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"
