@@ -139,6 +139,12 @@ int dcn32_otg_get_active_size(rdna3_dev *d, uint32_t otg, uint32_t *width, uint3
     return 1;
 }
 
+/* optc1_is_tg_enabled */
+int dcn32_otg_is_enabled(rdna3_dev *d, uint32_t otg)
+{
+    return GET(RO(d, regOTG0_OTG_CONTROL, otg), OTG0_OTG_CONTROL, OTG_MASTER_EN) == 1;
+}
+
 /* optc1_wait_for_state: REG_WAIT(OTG_STATUS, ..., 1, 1 us, 100000) */
 int dcn32_otg_wait_for_state(rdna3_dev *d, uint32_t otg, int state)
 {

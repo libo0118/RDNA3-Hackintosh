@@ -512,7 +512,35 @@ desktop as in 9c. Then mark `dmubreset` passed.
 | `DMUB: auto-load timed out` after the amdgpu reset | DMUIF_SOFT_RESET left set, or the forced reset caught the firmware mid PHY sequence | the `DMUB diag` lines (soft-reset 1? fault addresses?), `MMHUBBUB_SOFT_RESET` in the look; step 5b's path (no boot-arg) still works |
 | DMUB running, second monitor dark | the clone's VBIOS commands after the reset: as step 9b's triage | `clone:` lines, `RDNA3,MirrorResult` |
 
+### DC's HDMI stream (`hdmi`, `hdmi20`)
+
+`hdmi` = `modeset` + `rdna3hdmi=1`, `hdmi20` = `modeset2` + `rdna3hdmi=3`.
+Every TMDS mode set then also runs the HDMI half of DC's stream setup
+(hw/dcn32_hdmi.c, called from `program()` in hw/dcn32_modeset.c). The log
+has, per mode list, `display: head n HDMI: sink HDMI|DVI, SCDC s, LTE
+scramble l, max TMDS M MHz, HDMI 6G g, a audio modes` (the EDID's HDMI
+VSDB / HF-VSDB, the VBIOS encoder cap), and per switch `modeset: head n:
+HDMI_CONTROL 0x..., SCDC TMDS_CONFIG ...`; ioreg `RDNA3,Head<n>,HDMI`
+keeps the last one. Pass for `hdmi`: the switches of `rdna3_modetest
+cycle` pass as in `modeset` with the picture right (no over/underscan, no
+colour cast, no "no signal" after the switch back). Pass for `hdmi20`:
+additionally a mode above 340 MHz (4K60) was offered, set, and
+`RDNA3,Head<n>,HDMI` shows HDMI_CONTROL bits 1 and 2 (scrambler, 1/4
+clock channel) with `SCDC TMDS_CONFIG 0x03 scrambler 0x01`. Then mark the
+step passed (the ITEM_STEPS rules map the ported enc / SCDC / validation
+functions to these steps).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| picture overscanned / underscanned or colours washed out after a switch | the AVI infoframe (`set_avi_info_frame`: VIC, aspect, S = underscan, Q default) read differently by the TV | the mode's timing against the CTA VIC table (`edid_match_vic`); reproduce the packet with `dcn32_hdmi_build_info_frames` in tests/sim_display_dc.inc and compare byte by byte with CTA-861 |
+| `SCDC ... (-n)` with n = NACK on an HDMI 1.4 monitor | no SCDC at I2C 0x54: expected, DC ignores the error | nothing; on an HDMI 2.0 sink check the DDC line (`hc->ddc`, the VBIOS path) |
+| `SCDC ... (-n)` ACQUIRE | the DDC engine owned by the DMCUB/HW | note; the SCDC write is skipped, which only matters above 340 MHz |
+| hdmi20: 4K60 not in `rdna3_modetest list` | `HDMI 6G 0` (no ATOM_ENCODER_CAP_RECORD_HDMI6Gbps for the connector), the EDID's max TMDS below 594 MHz, or DISPCLK limits (`RD_MODESET_CLOCKS` in `display: head n mode ... refused (4)`) | the refusal code in the mode list log: 5 = TMDS limit, 4 = clocks |
+| hdmi20: "no signal" at 4K60, old mode back | scrambling not matched by the sink (`scrambler 0x00`), or the PHY PLL at 594 MHz | SCDC values in the log; `HDMICHARCLK` / PHY registers in the look; retry with a certified cable |
+| audio device appears but silent | not ported yet: the AFMT / azalia audio path is still off (only the audio info frame line is set) | expected |
+
 ### DP MST (`mst`)
+
 
 
 `mst` = `dplink` + `rdna3mst=1`; needs an MST hub (or a daisy-chain

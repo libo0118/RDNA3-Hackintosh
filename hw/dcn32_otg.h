@@ -101,6 +101,8 @@ void dcn32_otg_get_scanoutpos(rdna3_dev *d, uint32_t otg, uint32_t *v_blank_star
                               uint32_t *h_position, uint32_t *v_position);
 /* optc1_get_otg_active_size: 0 when the OTG is off */
 int  dcn32_otg_get_active_size(rdna3_dev *d, uint32_t otg, uint32_t *width, uint32_t *height);
+/* optc1_is_tg_enabled: OTG_MASTER_EN */
+int  dcn32_otg_is_enabled(rdna3_dev *d, uint32_t otg);
 /* optc1_wait_for_state: OTG_V_BLANK or OTG_V_ACTIVE_DISP within 100 ms */
 enum { RD_CRTC_STATE_VBLANK = 0, RD_CRTC_STATE_VACTIVE };
 int  dcn32_otg_wait_for_state(rdna3_dev *d, uint32_t otg, int state);

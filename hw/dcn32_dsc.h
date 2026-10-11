@@ -286,6 +286,11 @@ void dcn32_optc_set_dsc_config(rdna3_dev *d, uint32_t otg, uint32_t dsc_mode, ui
                                uint32_t slice_width);
 /* enc32_dp_set_dsc_config on DIG front end 'fe' */
 void dcn32_enc_dp_set_dsc_config(rdna3_dev *d, uint32_t fe, uint32_t dsc_mode);
+/* vpg3_update_generic_info_packet for the other packets of a VPG (the
+ * HDMI infoframes): header hb[0..3] and sb[0..31] into generic packet
+ * 'index', taken at once or at the next frame */
+void dcn32_vpg_update_generic_info_packet(rdna3_dev *d, uint32_t vpg, uint32_t index, const uint8_t *hb,
+                                          const uint8_t *sb, int immediate_update);
 /* enc3_dp_set_dsc_pps_info_packet (VPG n = DIG front end n); pps NULL with !enable */
 void dcn32_enc_dp_set_dsc_pps_info_packet(rdna3_dev *d, uint32_t fe, int enable, const uint8_t *pps,
                                           int immediate_update);

@@ -237,6 +237,12 @@ typedef struct sim {
     uint8_t i2c_buf[538], ddc_seg, ddc_off;
     uint32_t i2c_wi, i2c_ri;
     unsigned i2c_gos, i2c_nacks;
+    /* with scdc_on the sink also answers I2C 0x54 (HDMI 2.0 SCDC: a write
+     * is the offset then data, a read goes on from the offset); writing
+     * TMDS_CONFIG sets the scrambler status and the lock flags */
+    int scdc_on;
+    uint8_t scdc[256], scdc_off;
+    unsigned scdc_writes;
     uint8_t  dpcd[0x800];
     uint8_t  dpcd_ext[0x20];     /* 0x2200.. extended receiver caps */
     uint8_t  dpcd_lttpr[0x10];   /* 0xf0000.. LTTPR caps (zero: no repeater) */
@@ -1444,10 +1450,26 @@ static void i2c_go(uint32_t ctl)
         uint32_t cnt = (tr & DC_I2C_TRANSACTION0__DC_I2C_COUNT0_MASK) >> DC_I2C_TRANSACTION0__DC_I2C_COUNT0__SHIFT;
         int rd = (tr & DC_I2C_TRANSACTION0__DC_I2C_RW0_MASK) != 0;
         uint32_t dev = S.i2c_buf[pos++ % sizeof(S.i2c_buf)] >> 1;
-        if (!sink || (dev != 0x50 && dev != 0x30)) { nack = 1; break; }
+        if (!sink || (dev != 0x50 && dev != 0x30 && !(dev == 0x54 && S.scdc_on))) { nack = 1; break; }
         for (i = 0; i < cnt; i++, pos++) {
             uint8_t *b = &S.i2c_buf[pos % sizeof(S.i2c_buf)];
+            if (dev == 0x54) {
+                if (rd) {
+                    *b = S.scdc[S.scdc_off++];
+                } else if (i == 0) {
+                    S.scdc_off = *b;
+                } else {
+                    S.scdc_writes++;
+                    if (S.scdc_off == 0x20) {
+                        S.scdc[0x21] = *b & 1;      /* scrambling detected */
+                        S.scdc[0x40] = 0x0f;        /* clock detected, channels 0-2 locked */
+                    }
+                    S.scdc[S.scdc_off++] = *b;
+                }
+                continue;
+            }
             if (!rd) {
+
                 if (dev == 0x30) S.ddc_seg = *b; else S.ddc_off = *b;
             } else {
                 uint32_t o = S.ddc_seg * 256u + S.ddc_off++;
@@ -10104,6 +10126,8 @@ static void run(const char *fwdir)
                     }
                     S.dcn_frames = 0;
                 }
+                /* rdna3hdmi: DC's HDMI stream on the same head */
+                test_dc_hdmi(&dev, &dm, &dc2, &sc, &own);
             }
             test_dcn_state(&dev, &dm);
             test_dp_link(&dev, &dm);

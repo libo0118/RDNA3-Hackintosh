@@ -128,3 +128,12 @@ otg rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3otg=1
 # set and released, the DMCUB's diagnostic registers and trace in the log;
 # the clone and the extended desktop must still come up through it
 dmubreset rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3dmubreset=1
+# DC's HDMI stream (hw/dcn32_hdmi.c, stage 4 item K): the modeset step +
+# rdna3hdmi=1: each switch on an HDMI / DVI head also runs what DC adds to
+# the VBIOS's stream setup: AV mute around it, the HDMI engine's stream
+# attributes, the AVI (and HDMI VIC vendor) infoframe, SCDC over the DDC
+hdmi rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3hdmi=1
+# HDMI 2.0 rates: the modeset2 step (DISPCLK raised) + rdna3hdmi=3: modes
+# above a 340 MHz TMDS clock (4K60 on an HDMI 2.0 monitor) are offered:
+# scrambler and 1/4 clock channel on, the monitor told through SCDC
+hdmi20 rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3modes=1 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3hdmi=3

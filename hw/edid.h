@@ -45,7 +45,35 @@ typedef struct rdna3_edid {
     uint32_t nmodes;
     rdna3_mode mode[RD_EDID_MAX_MODES];
     uint32_t extensions;            /* blocks after the base block */
+    /* amdgpu_dm's dm_helpers_parse_edid_caps (struct dc_edid_caps) with
+     * DRM's CTA parsing (drm_parse_hdmi_vsdb_video, drm_parse_hdmi_forum_scds,
+     * drm_edid_to_sad, drm_edid_to_speaker_allocation): */
+    uint8_t  hdmi;                  /* an HDMI VSDB (IEEE OUI 00-0C-03): edid_hdmi */
+    uint8_t  scdc_present;          /* HF-VSDB: SCDC_Present */
+    uint8_t  lte_340_scramble;      /* HF-VSDB: LTE_340Mcsc_Scramble */
+    uint32_t max_tmds_clk_mhz;      /* HDMI VSDB Max_TMDS_Clock, HF-VSDB Max_TMDS_Character_Rate; 0 unknown */
+    uint32_t audio_mode_count;      /* short audio descriptors (<= RD_EDID_MAX_AUDIO) */
+    struct {
+        uint8_t format_code, channel_count, sample_rate, sample_size;
+    } audio_modes[16];
+    uint8_t  speaker_flags;         /* speaker allocation, DEFAULT_SPEAKER_LOCATION (5) without one */
+    uint32_t panel_id;              /* edid_extract_panel_id */
+    /* apply_edid_quirks (panel_patch) */
+    uint8_t  quirk_disable_fams, quirk_remove_sink_ext_caps, quirk_disable_colorimetry;
 } rdna3_edid;
+
+#define RD_EDID_MAX_AUDIO 16        /* DC_MAX_AUDIO_DESC_COUNT */
+#define RD_EDID_DEFAULT_SPEAKER_LOCATION 5
+
+/* drm_edid_encode_panel_id ('A'..'Z' x 3, product code) */
+#define RD_EDID_PANEL_ID(a, b, c, product) \
+    ((((uint32_t)(a) - '@') & 0x1f) << 26 | (((uint32_t)(b) - '@') & 0x1f) << 21 | \
+     (((uint32_t)(c) - '@') & 0x1f) << 16 | ((uint32_t)(product) & 0xffff))
+
+/* drm_match_cea_mode for the progressive CTA-861 timings this parser
+ * knows: the VIC of 'm' (same active size, totals, syncs, pixel clock
+ * within 0.5 %, either the 60 Hz or the 59.94 Hz variant), 0 = none */
+uint32_t edid_match_vic(const rdna3_mode *m);
 
 /* Validate the header and checksums, fill 'out'. Returns 0, or -1 for a bad
  * header / checksum / size. 'len' is a multiple of 128 (base + extensions). */

@@ -108,6 +108,14 @@ ITEM_STEPS = [
                 r"|optc32_(get_double_buffer_pending|get_odm_combine_segments)"), ["otg"]),
     (re.compile(r"dmub_dcn32_(reset|set_gpint|is_gpint_acked|get_gpint_response|get_diagnostic_data)"
                 r"|dmub_srv_(get_diagnostic_data|get_outbox0_msg)"), ["dmubreset"]),
+    # DC's HDMI stream (rdna3hdmi=1, step hdmi): stream attributes, AV mute,
+    # infoframes, SCDC, the link encoder's output validation, the EDID caps
+    (re.compile(r"enc32_stream_encoder_(hdmi|dvi)_set_stream_attribute|enc1_stream_encoder_set_stream_attribute_helper"
+                r"|enc1_stream_encoder_set_avmute|enc1_reset_hdmi_stream_attribute|set_avmute"
+                r"|enc3_(update_hdmi_info_packet|stream_encoder_update_hdmi_info_packets|stream_encoder_stop_hdmi_info_packets)"
+                r"|dcn10_link_encoder_validate_(output_with_stream|dvi_output|hdmi_output|dp_output)"
+                r"|get_tmds_output_pixel_clock_100hz|dm_helpers_parse_edid_caps|apply_edid_quirks|edid_extract_panel_id"),
+     ["hdmi"]),
     # ported and checked in the simulator, but no ladder step drives them
     # yet (nothing in the kext calls them): they stay "ported"
     (re.compile(r"optc1_(setup_vertical_interrupt[12]|validate_timing|is_two_pixels_per_container"

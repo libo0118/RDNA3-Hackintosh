@@ -40,6 +40,18 @@
  * MST stream (dp->mst: DIG_MODE 5, the VC payload and the ACT,
  * hw/dcn32_dp_mst.h).
  *
+ * A TMDS head planned with an HDMI configuration (dcn32_modeset_plan_hdmi,
+ * boot-arg rdna3hdmi in the kext) gets the rest of what DC does for an
+ * HDMI / DVI stream (hw/dcn32_hdmi.h): link_set_dpms_off's AV mute, the
+ * SCDC back to HDMI 1.4 rates, dce110_disable_stream's info packets off
+ * and HDMI attribute reset; then enc32_stream_encoder_hdmi_set_stream_attribute
+ * after the STREAM_SETUP, write_scdc_data before and read_scdc_data after
+ * the transmitter, the AVI / vendor infoframes (dcn30_update_info_frame),
+ * AV mute off. With RD_HDMI_20 the mode may need TMDS character rates
+ * above 340 MHz (scrambling, the 1/4 clock channel): validated as
+ * dcn10_link_encoder_validate_output_with_stream does (600 MHz, the
+ * VBIOS's HDMI 6G cap, the sink's EDID max TMDS clock).
+ *
  * SPDX-License-Identifier: MIT
  */
 #ifndef RDNA3_DCN32_MODESET_H
@@ -50,11 +62,24 @@
 #include "dcn32_mode.h"
 #include "dcn32_dp.h"
 #include "dmub32.h"
+#include "dcn32_hdmi.h"
 #include "vbios.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* the HDMI half of DC's TMDS stream (rdna3hdmi) */
+#define RD_HDMI_STREAM 0x1   /* stream attributes, infoframes, AV mute, SCDC: as DC */
+#define RD_HDMI_20     0x2   /* TMDS character rates above 340 MHz (HDMI 2.0 scrambling) */
+typedef struct rdna3_hdmi_cfg {
+    uint32_t flags;              /* RD_HDMI_* */
+    int32_t  ddc;                /* the connector's DDC line (SCDC), -1 none */
+    uint32_t enc_caps;           /* VBIOS encoder caps (RD_ATOM_ENC_CAP_HDMI6G: HDMI_6GB_EN) */
+    uint8_t  hdmi_sink;          /* the EDID has an HDMI VSDB (edid_caps.edid_hdmi) */
+    uint8_t  lte_340_scramble;   /* HF-VSDB: timing.flags.LTE_340MCSC_SCRAMBLE */
+    uint32_t max_tmds_clk_mhz;   /* the EDID's max TMDS clock, 0 unknown */
+} rdna3_hdmi_cfg;
 
 /* everything one timing needs, as register values */
 typedef struct rdna3_modeset_regs {
@@ -88,6 +113,10 @@ typedef struct rdna3_dcn_modeset {
     int      dp_want_dsc, dp_cur_dsc;
     rdna3_dsc_config dp_want_dsc_cfg, dp_cur_dsc_cfg;
     uint32_t dp_mst_pbn, dp_mst_slots;
+    /* TMDS with an HDMI configuration (dcn32_modeset_plan_hdmi): it, and
+     * the new and the running timing as modes (the AVI infoframe) */
+    rdna3_hdmi_cfg hdmi;
+    rdna3_mode tmds_cur, tmds_want;
 } rdna3_dcn_modeset;
 
 /* why a mode is refused for a mode set (0 = can try) */
@@ -97,7 +126,8 @@ enum {
     RD_MODESET_NO_TIMING = 2,
     RD_MODESET_INTERLACED = 3,
     RD_MODESET_CLOCKS = 4,       /* DISPCLK / DPPCLK below the pixel rate */
-    RD_MODESET_TMDS_CLOCK = 5,   /* above 340 MHz (HDMI 1.4 TMDS, no scrambling) */
+    RD_MODESET_TMDS_CLOCK = 5,   /* above 340 MHz (HDMI 1.4 TMDS, no scrambling), or what the
+                                  * link encoder refuses (dcn32_modeset_plan_hdmi) */
     RD_MODESET_SIZE = 6,
     RD_MODESET_BAD_HEAD = 7,
     RD_MODESET_LINK_BW = 8,      /* DP: no link setting of the (verified) link cap carries it */
@@ -134,7 +164,17 @@ int  dcn32_modeset_plan_dp(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, con
                            rdna3_dp_link *dp, uint32_t cur_pclk_khz, const rdna3_mode *m,
                            const rdna3_dcn_clk_limits *lim, rdna3_dcn_modeset *ms);
 
-/* The running timing of head 'h' at 'pclk_khz' as a mode (the one
+/* The same for a TMDS head with the HDMI configuration 'hc' (NULL or no
+ * RD_HDMI_STREAM = dcn32_modeset_plan_clk): the TMDS rate is validated as
+ * dcn10_link_encoder_validate_output_with_stream does it (RGB 8 bpc; above
+ * 340 MHz only with RD_HDMI_20), and dcn32_modeset_apply runs DC's HDMI
+ * stream setup (see above). */
+int  dcn32_modeset_plan_hdmi(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdna3_display_path *path,
+                             const rdna3_hdmi_cfg *hc, uint32_t cur_pclk_khz, const rdna3_mode *m,
+                             const rdna3_dcn_clk_limits *lim, rdna3_dcn_modeset *ms);
+
+/* The running timing of head 'h' at 'pclk_khz' as a mode
+ (the one
  * dcn32_modeset_apply puts back when the new one does not run). */
 void dcn32_modeset_head_mode(const rdna3_dcn_head *h, uint32_t pclk_khz, rdna3_mode *m);
 

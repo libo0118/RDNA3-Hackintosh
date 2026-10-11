@@ -1491,6 +1491,12 @@ static void vpg3_update_generic_info_packet(rdna3_dev *d, uint32_t vpg, uint32_t
     }
 }
 
+void dcn32_vpg_update_generic_info_packet(rdna3_dev *d, uint32_t vpg, uint32_t index, const uint8_t *hb,
+                                          const uint8_t *sb, int immediate_update)
+{
+    vpg3_update_generic_info_packet(d, vpg, index, hb, sb, immediate_update);
+}
+
 /* enc3_dp_set_dsc_pps_info_packet: the PPS in GSP 11..14 (4 x 32 bytes),
  * sent every frame at line 2, VBID[6] at line 3 */
 void dcn32_enc_dp_set_dsc_pps_info_packet(rdna3_dev *d, uint32_t fe, int enable, const uint8_t *pps,

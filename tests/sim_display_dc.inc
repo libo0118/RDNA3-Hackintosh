@@ -14,6 +14,8 @@
 #include "gen/dcn_3_2_0_dmub_diag.h"
 #include "dcn32_color.h"
 #include "gen/dcn_3_2_0_color.h"
+#include "dcn32_hdmi.h"
+#include "gen/dcn_3_2_0_hdmi.h"
 
 #define ODMR_K(reg, n) (DCN_B2 + reg + (regODM1_OPTC_INPUT_CLOCK_CONTROL - regODM0_OPTC_INPUT_CLOCK_CONTROL) * (n))
 #define SK_FRAME_US 16667u    /* the modelled OTGs run at 60 Hz */
@@ -650,6 +652,273 @@ static void test_dc_color(rdna3_dev *dev)
     n = 0;
     for (k = 0; k < sizeof(regs) / sizeof(regs[0]); k++)
         S.reg[regs[k]] = save[n++];
+}
+
+/* ---- HDMI: EDID caps, infoframes, link encoder validation, the HDMI
+ * stream of a TMDS mode set (rdna3hdmi) ---- */
+
+#define DIGK(reg, fe) (DCN_B2 + (reg) + (regDIG1_HDMI_CONTROL - regDIG0_HDMI_CONTROL) * (fe))
+
+/* a synthetic HDMI 2.0 sink: 1080p DTD; CTA block with VICs 16, 97, 95,
+ * one LPCM SAD, a speaker allocation, the HDMI VSDB (300 MHz) and the
+ * HDMI Forum VSDB (600 MHz, SCDC, LTE_340Mcsc_Scramble) */
+static void hdmi_test_edid(uint8_t *b, uint16_t mfg, uint16_t product)
+{
+    static const uint8_t hdr[8] = { 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00 };
+    static const uint8_t dtd_1080p[18] = { 0x02, 0x3A, 0x80, 0x18, 0x71, 0x38, 0x2D, 0x40, 0x58,
+                                           0x2C, 0x45, 0x00, 0xC4, 0x8E, 0x21, 0x00, 0x00, 0x1E };
+    static const uint8_t cta[] = {
+        0x43, 16, 97, 95,                                  /* video: VIC 16, 97, 95 */
+        0x23, 0x09, 0x07, 0x07,                            /* audio: LPCM 2 ch, 32-48 kHz, 16-24 bit */
+        0x83, 0x01, 0x00, 0x00,                            /* speaker allocation: FL/FR */
+        0x67, 0x03, 0x0C, 0x00, 0x10, 0x00, 0x00, 0x3C,    /* HDMI VSDB: 1.0.0.0, 300 MHz */
+        0x67, 0xD8, 0x5D, 0xC4, 0x01, 0x78, 0x88, 0x00,    /* HF-VSDB: 600 MHz, SCDC, LTE scramble */
+    };
+    uint32_t i, s;
+    memset(b, 0, 256);
+    memcpy(b, hdr, 8);
+    b[8] = (uint8_t)(mfg >> 8);
+    b[9] = (uint8_t)mfg;
+    b[10] = (uint8_t)product;
+    b[11] = (uint8_t)(product >> 8);
+    b[18] = 1;
+    b[19] = 4;
+    b[20] = 0x80;
+    b[24] = 0x02;
+    for (i = 38; i < 54; i++)
+        b[i] = 0x01;
+    memcpy(b + 54, dtd_1080p, 18);
+    b[75] = 0x10;   /* dummy descriptors */
+    b[93] = 0x10;
+    b[111] = 0x10;
+    b[126] = 1;
+    for (i = 0, s = 0; i < 127; i++)
+        s += b[i];
+    b[127] = (uint8_t)(0x100 - (s & 0xff));
+    b[128] = 0x02;
+    b[129] = 0x03;
+    b[130] = (uint8_t)(4 + sizeof(cta));
+    b[131] = 0x70;
+    memcpy(b + 132, cta, sizeof(cta));
+    for (i = 128, s = 0; i < 255; i++)
+        s += b[i];
+    b[255] = (uint8_t)(0x100 - (s & 0xff));
+}
+
+static uint8_t hdmi_sum(const rdna3_info_packet *p, uint32_t len)
+{
+    uint32_t i, s = p->hb0 + p->hb1 + p->hb2;
+    for (i = 0; i <= len; i++)
+        s += p->sb[i];
+    return (uint8_t)s;
+}
+
+/* the AVI header / PB1-4 the VPG holds in generic packet 0 of front end 'fe' */
+static int hdmi_vpg_avi(uint32_t fe, uint32_t vic, uint32_t m)
+{
+    uint32_t h = S.vpg[fe].mem[0], pb = S.vpg[fe].mem[1];
+    return h == (0x82u | 2u << 8 | 13u << 16) && ((pb >> 8) & 0xff) == 0x1e &&
+           ((pb >> 16) & 0xff) == (0x08u | m << 4) && (pb >> 24) == 0x80 && (S.vpg[fe].mem[2] & 0xff) == vic;
+}
+
+static void test_dc_hdmi(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc2, rdna3_dcn_scale *sc,
+                         const rdna3_display_path *own)
+{
+    static rdna3_edid e;
+    static rdna3_dcn_modeset ms;
+    static rdna3_hdmi_info_frames f;
+    uint8_t edid[256];
+    const rdna3_mode *m1080 = NULL, *m4k60 = NULL, *m4k30 = NULL;
+    rdna3_crtc_format rgb = { RD_PIXEL_ENCODING_RGB, RD_COLOR_DEPTH_888, 0, 0 }, fm;
+    rdna3_link_enc_features ft;
+    rdna3_hdmi_cfg hc;
+    rdna3_mode up;
+    uint32_t i, fe, ctl;
+    const int sink0 = S.i2c_sink;
+    static uint32_t dig_save[0x38];   /* the front end's AFMT .. AFMT_CNTL registers, restored at the end */
+
+    /* dm_helpers_parse_edid_caps with DRM's CTA parsing */
+    hdmi_test_edid(edid, 0x4D2D, 0x1234);   /* "SIM" */
+    CHECK(edid_parse(edid, 256, &e) == 0 && e.hdmi && e.scdc_present && e.lte_340_scramble &&
+          e.max_tmds_clk_mhz == 600 && e.audio_mode_count == 1 && e.audio_modes[0].format_code == 1 &&
+          e.audio_modes[0].channel_count == 2 && e.audio_modes[0].sample_rate == 7 && e.speaker_flags == 1 &&
+          e.panel_id == RD_EDID_PANEL_ID('S', 'I', 'M', 0x1234) && !e.quirk_disable_fams);
+    /* apply_edid_quirks */
+    hdmi_test_edid(edid, 0x4C2D, 0x0E5E);   /* SAM 0x0E5E */
+    CHECK(edid_parse(edid, 256, &e) == 0 && e.quirk_disable_fams && !e.quirk_remove_sink_ext_caps);
+    for (i = 0; i < e.nmodes; i++) {
+        const rdna3_mode *m = &e.mode[i];
+        if (m->h_active == 1920 && m->v_active == 1080 && m->origin == RD_MODE_FROM_DTD)
+            m1080 = m;
+        if (m->h_active == 3840 && m->pixel_khz == 594000)
+            m4k60 = m;
+        if (m->h_active == 3840 && m->pixel_khz == 297000 && m->h_total == 4400)
+            m4k30 = m;
+    }
+    CHECK(m1080 && m4k60 && m4k30 && m4k60->origin == RD_MODE_FROM_CTA);
+    if (!m1080 || !m4k60 || !m4k30)
+        return;
+    CHECK(edid_match_vic(m1080) == 16 && edid_match_vic(m4k60) == 97 && edid_match_vic(m4k30) == 95);
+
+    /* resource_build_info_frame: AVI v2 with VIC, bars, checksum */
+    dcn32_hdmi_build_info_frames(&f, m1080, &rgb, 1);
+    CHECK(f.avi.valid && f.avi.hb0 == 0x82 && f.avi.hb1 == 2 && f.avi.hb2 == 13 && f.avi.sb[1] == 0x1e &&
+          f.avi.sb[2] == 0x08 && f.avi.sb[3] == 0x80 && f.avi.sb[4] == 16 && f.avi.sb[5] == 0 &&
+          f.avi.sb[8] == (1126 & 0xff) && f.avi.sb[9] == (1126 >> 8) && f.avi.sb[12] == (2201 & 0xff) &&
+          f.avi.sb[13] == (2201 >> 8) && hdmi_sum(&f.avi, 13) == 0 && !f.vendor.valid && !f.spd.valid);
+    /* a CTA mode: its picture aspect (16:9) */
+    dcn32_hdmi_build_info_frames(&f, m4k60, &rgb, 1);
+    CHECK(f.avi.sb[2] == 0x28 && f.avi.sb[4] == 97 && !f.vendor.valid);
+    /* an HDMI VIC mode on an HDMI sink: AVI VIC 0, the HDMI VIC in the VSIF */
+    dcn32_hdmi_build_info_frames(&f, m4k30, &rgb, 1);
+    CHECK(f.avi.sb[4] == 0 && f.vendor.valid && f.vendor.hb0 == 0x81 && f.vendor.hb1 == 1 && f.vendor.hb2 == 5 &&
+          f.vendor.sb[1] == 0x03 && f.vendor.sb[2] == 0x0c && f.vendor.sb[3] == 0 && f.vendor.sb[4] == 0x20 &&
+          f.vendor.sb[5] == 1 && hdmi_sum(&f.vendor, 5) == 0);
+    dcn32_hdmi_build_info_frames(&f, m4k30, &rgb, 0);
+    CHECK(f.avi.sb[4] == 95 && !f.vendor.valid && hdmi_sum(&f.avi, 13) == 0);
+    /* YCbCr 4:4:4 above 27.03 MHz: Y = 2, BT.709 */
+    fm = rgb;
+    fm.pixel_encoding = RD_PIXEL_ENCODING_YCBCR444;
+    dcn32_hdmi_build_info_frames(&f, m1080, &fm, 1);
+    CHECK(f.avi.sb[1] == (0x40 | 0x1e) && f.avi.sb[2] == (0x80 | 0x08) && hdmi_sum(&f.avi, 13) == 0);
+
+    /* get_tmds_output_pixel_clock_100hz, dcn10_link_encoder_validate_output_with_stream */
+    fm = rgb;
+    fm.color_depth = RD_COLOR_DEPTH_101010;
+    CHECK(dcn32_tmds_output_pixel_clock_100hz(5940000, &fm) == 7425000);
+    fm.pixel_encoding = RD_PIXEL_ENCODING_YCBCR420;
+    CHECK(dcn32_tmds_output_pixel_clock_100hz(5940000, &fm) == 3712500);
+    dcn32_link_enc_features(RD_ATOM_ENC_CAP_HDMI6G, &ft);
+    CHECK(ft.max_hdmi_pixel_clock == 600000 && ft.max_hdmi_deep_color == RD_COLOR_DEPTH_121212 && ft.hdmi_6gb_en);
+    CHECK(dcn32_link_enc_validate_output(&ft, RD_SIGNAL_HDMI_TYPE_A, RD_SIGNAL_HDMI_TYPE_A, &rgb, 594000, 594000, 600));
+    CHECK(!dcn32_link_enc_validate_output(&ft, RD_SIGNAL_HDMI_TYPE_A, RD_SIGNAL_HDMI_TYPE_A, &rgb, 594000, 594000, 300));
+    CHECK(!dcn32_link_enc_validate_output(&ft, RD_SIGNAL_HDMI_TYPE_A, RD_SIGNAL_HDMI_TYPE_A, &rgb, 600001, 600001, 0));
+    CHECK(!dcn32_link_enc_validate_output(&ft, RD_SIGNAL_HDMI_TYPE_A, RD_SIGNAL_HDMI_TYPE_A, &rgb, 20000, 20000, 0));
+    fm = rgb;
+    fm.color_depth = RD_COLOR_DEPTH_161616;
+    CHECK(!dcn32_link_enc_validate_output(&ft, RD_SIGNAL_HDMI_TYPE_A, RD_SIGNAL_HDMI_TYPE_A, &fm, 148500, 297000, 0));
+    dcn32_link_enc_features(0, &ft);   /* no HDMI 6G record: below 300 MHz */
+    CHECK(!dcn32_link_enc_validate_output(&ft, RD_SIGNAL_HDMI_TYPE_A, RD_SIGNAL_HDMI_TYPE_A, &rgb, 300000, 300000, 0) &&
+          dcn32_link_enc_validate_output(&ft, RD_SIGNAL_HDMI_TYPE_A, RD_SIGNAL_HDMI_TYPE_A, &rgb, 297000, 297000, 0));
+    CHECK(dcn32_link_enc_validate_output(&ft, RD_SIGNAL_DVI_SINGLE_LINK, RD_SIGNAL_DVI_SINGLE_LINK, &rgb, 165000, 0, 0) &&
+          !dcn32_link_enc_validate_output(&ft, RD_SIGNAL_DVI_SINGLE_LINK, RD_SIGNAL_DVI_SINGLE_LINK, &rgb, 165001, 0, 0) &&
+          dcn32_link_enc_validate_output(&ft, RD_SIGNAL_DVI_DUAL_LINK, RD_SIGNAL_DVI_DUAL_LINK, &rgb, 330000, 0, 0));
+    fm = rgb;
+    fm.color_depth = RD_COLOR_DEPTH_101010;
+    CHECK(!dcn32_link_enc_validate_output(&ft, RD_SIGNAL_DVI_SINGLE_LINK, RD_SIGNAL_DVI_SINGLE_LINK, &fm, 100000, 0, 0));
+    fm.pixel_encoding = RD_PIXEL_ENCODING_YCBCR420;
+    CHECK(dcn32_link_enc_validate_output(&ft, RD_SIGNAL_DISPLAY_PORT, RD_SIGNAL_DISPLAY_PORT, &fm, 594000, 0, 0));
+
+    /* the plan on the lit HDMI head (DIGC, OTG 2, pipe 1, at 1440p) */
+    fe = (uint32_t)dc2->head[0].dig_fe;
+    for (i = 0; i < 0x38; i++)
+        dig_save[i] = S.reg[DIGK(regAFMT0_AFMT_INFOFRAME_CONTROL0 + i, fe)];
+    memset(&hc, 0, sizeof(hc));
+    hc.flags = RD_HDMI_STREAM;
+    hc.ddc = 0;
+    hc.enc_caps = RD_ATOM_ENC_CAP_HDMI6G;
+    hc.hdmi_sink = 1;
+    hc.lte_340_scramble = 1;
+    hc.max_tmds_clk_mhz = 600;
+    CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, &hc, 241500, m4k60, NULL, &ms) == RD_MODESET_TMDS_CLOCK);
+    CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, NULL, 241500, m4k60, NULL, &ms) == RD_MODESET_TMDS_CLOCK);
+    hc.flags = RD_HDMI_STREAM | RD_HDMI_20;
+    hc.enc_caps = 0;
+    CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, &hc, 241500, m4k60, NULL, &ms) == RD_MODESET_TMDS_CLOCK);
+    hc.enc_caps = RD_ATOM_ENC_CAP_HDMI6G;
+    hc.max_tmds_clk_mhz = 300;
+    CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, &hc, 241500, m4k60, NULL, &ms) == RD_MODESET_TMDS_CLOCK);
+    hc.max_tmds_clk_mhz = 600;
+    CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, &hc, 241500, m4k60, NULL, &ms) == RD_MODESET_OK &&
+          ms.hdmi.flags == (RD_HDMI_STREAM | RD_HDMI_20) && ms.tmds_want.pixel_khz == 594000 &&
+          ms.tmds_cur.h_active == 2560 && ms.tmds_cur.pixel_khz == 241500);
+    /* a DVI head (DIG_MODE 2) under the configuration: single link, 165 MHz */
+    dc2->head[0].dig_mode = 2;
+    CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, &hc, 241500, m1080, NULL, &ms) == RD_MODESET_OK);
+    dc2->head[0].dig_mode = 3;
+
+    /* the mode set to 1080p: DC's HDMI stream, SCDC on DDC1 (the sink's
+     * SCDC version 1: the source version is written; LTE scramble) */
+    S.i2c_sink = 0;
+    S.scdc_on = 1;
+    memset(S.scdc, 0, sizeof(S.scdc));
+    S.scdc[0x01] = 1;
+    S.scdc_writes = 0;
+    memset(S.vpg, 0, sizeof(S.vpg));
+    SK.otg_model = 1;
+    S.dcn_frames = 1;
+    S.dmub.nseq = 0;
+    S.reg[DIGK(regDIG0_HDMI_GC, fe)] = DIG0_HDMI_GC__HDMI_GC_AVMUTE_MASK;   /* left muted: AV mute goes off */
+    hc.flags = RD_HDMI_STREAM;
+    CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, &hc, 241500, m1080, NULL, &ms) == RD_MODESET_OK);
+    CHECK(dcn32_modeset_apply(dev, dm, dc2, sc, &ms, FB_START + 0x8000000, 1920, FB_START, 2560, 50) == RDNA3_OK);
+    CHECK(S.dmub.nseq == 4 && dc2->head[0].width == 1920);
+    ctl = S.reg[DIGK(regDIG0_HDMI_CONTROL, fe)];
+    CHECK((ctl & DIG0_HDMI_CONTROL__HDMI_PACKET_GEN_VERSION_MASK) && (ctl & DIG0_HDMI_CONTROL__HDMI_KEEPOUT_MODE_MASK) &&
+          (ctl & DIG0_HDMI_CONTROL__HDMI_NO_EXTRA_NULL_PACKET_FILLED_MASK) &&
+          (ctl & DIG0_HDMI_CONTROL__HDMI_DATA_SCRAMBLE_EN_MASK) && !(ctl & DIG0_HDMI_CONTROL__HDMI_CLOCK_CHANNEL_RATE_MASK) &&
+          !(ctl & DIG0_HDMI_CONTROL__HDMI_DEEP_COLOR_ENABLE_MASK) && !(ctl & DIG0_HDMI_CONTROL__HDMI_DEEP_COLOR_DEPTH_MASK));
+    CHECK(S.scdc[0x02] == 1 && S.scdc[0x20] == 1 && S.scdc_writes == 4);
+    CHECK((S.reg[DIGK(regDIG0_HDMI_VBI_PACKET_CONTROL, fe)] &
+           (DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_SEND_MASK | DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_CONT_MASK |
+            DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_NULL_SEND_MASK | DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_ACP_SEND_MASK)) ==
+          (DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_SEND_MASK | DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_GC_CONT_MASK |
+           DIG0_HDMI_VBI_PACKET_CONTROL__HDMI_NULL_SEND_MASK));
+    CHECK((S.reg[DIGK(regDIG0_HDMI_INFOFRAME_CONTROL0, fe)] & DIG0_HDMI_INFOFRAME_CONTROL0__HDMI_AUDIO_INFO_SEND_MASK) &&
+          ((S.reg[DIGK(regDIG0_HDMI_INFOFRAME_CONTROL1, fe)] & DIG0_HDMI_INFOFRAME_CONTROL1__HDMI_AUDIO_INFO_LINE_MASK) >>
+           DIG0_HDMI_INFOFRAME_CONTROL1__HDMI_AUDIO_INFO_LINE__SHIFT) == 2 &&
+          (S.reg[DCN_B2 + regAFMT0_AFMT_INFOFRAME_CONTROL0 + (regAFMT1_AFMT_INFOFRAME_CONTROL0 - regAFMT0_AFMT_INFOFRAME_CONTROL0) * fe] &
+           AFMT0_AFMT_INFOFRAME_CONTROL0__AFMT_AUDIO_INFO_UPDATE_MASK));
+    /* the AVI infoframe in generic packet 0, every frame on line 2; no vendor frame */
+    CHECK((S.reg[DIGK(regDIG0_HDMI_GENERIC_PACKET_CONTROL0, fe)] & 0xff) == 0x03 &&
+          (S.reg[DIGK(regDIG0_HDMI_GENERIC_PACKET_CONTROL1, fe)] & 0xffff) == 2 &&
+          (S.reg[DIGK(regDIG0_HDMI_DB_CONTROL, fe)] & DIG0_HDMI_DB_CONTROL__HDMI_DB_DISABLE_MASK) &&
+          (S.reg[DIGK(regDIG0_AFMT_CNTL, fe)] & DIG0_AFMT_CNTL__AFMT_AUDIO_CLOCK_EN_MASK) && hdmi_vpg_avi(fe, 16, 0) &&
+          !(S.reg[DIGK(regDIG0_HDMI_GC, fe)] & DIG0_HDMI_GC__HDMI_GC_AVMUTE_MASK));
+
+    /* 4K60 at 594 MHz (rdna3hdmi bit 1): scrambler, 1/4 clock channel,
+     * TMDS_CONFIG 3; the CTA mode's 16:9 in the AVI frame */
+    hc.flags = RD_HDMI_STREAM | RD_HDMI_20;
+    S.dmub.nseq = 0;
+    CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, &hc, 148500, m4k60, NULL, &ms) == RD_MODESET_OK);
+    CHECK(dcn32_modeset_apply(dev, dm, dc2, sc, &ms, FB_START + 0x8000000, 3840, FB_START, 1920, 50) == RDNA3_OK);
+    ctl = S.reg[DIGK(regDIG0_HDMI_CONTROL, fe)];
+    CHECK(S.dmub.nseq == 4 && dc2->head[0].width == 3840 && (ctl & DIG0_HDMI_CONTROL__HDMI_DATA_SCRAMBLE_EN_MASK) &&
+          (ctl & DIG0_HDMI_CONTROL__HDMI_CLOCK_CHANNEL_RATE_MASK) && S.scdc[0x20] == 3 && S.scdc[0x21] == 1 &&
+          hdmi_vpg_avi(fe, 97, 2));
+
+    /* a mode that does not run: the running one back, scrambling with it */
+    up = *m1080;
+    S.dcn_frames = 0;
+    CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, &hc, 594000, &up, NULL, &ms) == RD_MODESET_OK);
+    CHECK(dcn32_modeset_apply(dev, dm, dc2, sc, &ms, FB_START, 1920, FB_START + 0x8000000, 3840, 50) == RDNA3_EIO);
+    ctl = S.reg[DIGK(regDIG0_HDMI_CONTROL, fe)];
+    CHECK(dc2->head[0].width == 3840 && (ctl & DIG0_HDMI_CONTROL__HDMI_CLOCK_CHANNEL_RATE_MASK) && S.scdc[0x20] == 3 &&
+          hdmi_vpg_avi(fe, 97, 0));
+    S.dcn_frames = 1;
+
+    /* back to the GOP's 1440p as before the test, without the HDMI stream:
+     * the old path zeroes the packet controls */
+    memset(&up, 0, sizeof(up));
+    up.h_active = 2560; up.v_active = 1440; up.h_total = 2720; up.v_total = 1481;
+    up.h_front = 48; up.h_sync = 32; up.v_front = 3; up.v_sync = 5; up.pixel_khz = 241500;
+    up.h_sync_pos = up.v_sync_pos = 1;
+    hc.flags = RD_HDMI_STREAM;
+    CHECK(dcn32_modeset_plan_hdmi(dev, dc2, 0, own, &hc, 594000, &up, NULL, &ms) == RD_MODESET_OK);
+    CHECK(dcn32_modeset_apply(dev, dm, dc2, sc, &ms, FB_START, 2560, FB_START + 0x8000000, 3840, 50) == RDNA3_OK &&
+          dc2->head[0].width == 2560 && S.scdc[0x20] == 1 &&
+          !(S.reg[DIGK(regDIG0_HDMI_CONTROL, fe)] & DIG0_HDMI_CONTROL__HDMI_CLOCK_CHANNEL_RATE_MASK));
+    dcn32_enc_stop_hdmi_info_packets(dev, fe);
+    dcn32_enc_reset_hdmi_stream_attribute(dev, fe);
+    CHECK(S.reg[DIGK(regDIG0_HDMI_GENERIC_PACKET_CONTROL0, fe)] == 0 &&
+          !(S.reg[DIGK(regDIG0_HDMI_CONTROL, fe)] & DIG0_HDMI_CONTROL__HDMI_DATA_SCRAMBLE_EN_MASK));
+    for (i = 0; i < 0x38; i++)
+        S.reg[DIGK(regAFMT0_AFMT_INFOFRAME_CONTROL0 + i, fe)] = dig_save[i];
+    S.i2c_sink = sink0;
+    S.scdc_on = 0;
+    SK.otg_model = 0;
+    S.dcn_frames = 0;
+    printf("sim_navi32: HDMI stream tests ran (%u SCDC writes)\n", S.scdc_writes);
 }
 
 static void test_dc_k(rdna3_dev *dev, rdna3_dmub *dm)
