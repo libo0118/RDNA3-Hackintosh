@@ -58,6 +58,7 @@
 #include "gen/dcn_3_2_0_crc.h"
 #include "doorbell.h"
 #include "gen/nbio_4_3_0_doorbell.h"
+#include "gen/nbio_4_3_0_ih.h"
 #include "gen/dcn_3_2_1.h"
 #include "gen/gc_11_0_0_gfx.h"
 #include "gen/gc_11_0_0_reset.h"
@@ -346,6 +347,7 @@ typedef struct sim {
         int all_enabled;      /* EnableAllSmuFeatures done */
     } smu;
     unsigned vm_huge_walks;              /* translations through a PDE_PTE (huge) entry */
+    unsigned ih_snooped, ih_ring1_ivs, ih_db_rptr, ih_db_unrouted;   /* IH in system memory (rdna3amdgpu=1) */
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
     unsigned sdma_ibs, sdma_ib_fault;   /* INDIRECT packets run, ones the GFXHUB could not translate */
     int      sdma_hang;              /* the engine stopped consuming its ring */
@@ -1728,32 +1730,76 @@ static void ih_push(uint32_t client, uint32_t src, uint32_t ring_id)
 {
     ih_push_iv(client, src, ring_id, 0, 0, 0, 0);
 }
-static void ih_push_iv(uint32_t client, uint32_t src, uint32_t ring_id, uint32_t vmid,
-                       uint32_t pasid, uint32_t sd0, uint32_t sd1)
+/* the IH writes through MMHUB VMID 0: VRAM by MC address, or a GART page
+ * (system memory) */
+static uint8_t *ih_mem(uint64_t mc, uint64_t len)
 {
-    uint32_t cntl = S.reg[OSS_BASE0 + regIH_RB_CNTL];
-    uint64_t base = ((uint64_t)S.reg[OSS_BASE0 + regIH_RB_BASE] << 8) |
-                    ((uint64_t)S.reg[OSS_BASE0 + regIH_RB_BASE_HI] << 40);
+    uint8_t *p = mc_ptr(mc, len);
+    if (!p && (mc & 0xfff) + len <= 4096)
+        p = gart_page(mc);
+    return p;
+}
+
+/* ring 1 registers (osssys_6_0_0_offset.h) */
+#define SIM_IH_RB_CNTL_RING1   0x008c
+#define SIM_IH_RB_BASE_RING1   0x008d
+#define SIM_IH_RB_BASE_HI_RING1 0x008e
+#define SIM_IH_RB_RPTR_RING1   0x008f
+#define SIM_IH_RB_WPTR_RING1   0x0090
+#define SIM_IH_DOORBELL_RPTR_RING1 0x0093
+
+/* one IV into ring 0 or 1; returns the new wptr, ~0 when dropped */
+static uint32_t ih_ring_put(int ring, const uint32_t iv[8])
+{
+    uint32_t rcntl = ring ? SIM_IH_RB_CNTL_RING1 : regIH_RB_CNTL;
+    uint32_t cntl = S.reg[OSS_BASE0 + rcntl];
+    uint64_t base = ((uint64_t)S.reg[OSS_BASE0 + (ring ? SIM_IH_RB_BASE_RING1 : regIH_RB_BASE)] << 8) |
+                    ((uint64_t)S.reg[OSS_BASE0 + (ring ? SIM_IH_RB_BASE_HI_RING1 : regIH_RB_BASE_HI)] << 40);
     uint64_t wb = S.reg[OSS_BASE0 + regIH_RB_WPTR_ADDR_LO] |
                   ((uint64_t)S.reg[OSS_BASE0 + regIH_RB_WPTR_ADDR_HI] << 32);
     uint32_t size = 4u << ((cntl & IH_RB_CNTL__RB_SIZE_MASK) >> IH_RB_CNTL__RB_SIZE__SHIFT);
-    uint32_t wreg = S.reg[OSS_BASE0 + regIH_RB_WPTR], wptr = wreg & (size - 1);
-    uint32_t rptr = S.reg[OSS_BASE0 + regIH_RB_RPTR] & (size - 1);
-    uint32_t iv[8] = { client | (src << 8) | (ring_id << 16) | (vmid << 24), 0, 0, pasid, sd0, sd1, 0, 0 };
-    uint8_t *p = (cntl & IH_RB_CNTL__RB_ENABLE_MASK) ? mc_ptr(base + wptr, 32) : NULL;
+    uint32_t rw = ring ? SIM_IH_RB_WPTR_RING1 : regIH_RB_WPTR;
+    uint32_t wreg = S.reg[OSS_BASE0 + rw], wptr = wreg & (size - 1);
+    uint32_t rptr = S.reg[OSS_BASE0 + (ring ? SIM_IH_RB_RPTR_RING1 : regIH_RB_RPTR)] & (size - 1);
+    uint8_t *p = (cntl & IH_RB_CNTL__RB_ENABLE_MASK) ? ih_mem(base + wptr, 32) : NULL;
     if (!p) {
         S.ih_dropped++;
-        return;
+        return ~0u;
     }
+    if (cntl & IH_RB_CNTL__MC_SNOOP_MASK)
+        S.ih_snooped++;
     memcpy(p, iv, 32);
     wptr = (wptr + 32) & (size - 1);
     wreg = wptr | (wreg & IH_RB_WPTR__RB_OVERFLOW_MASK) | (wptr == rptr ? IH_RB_WPTR__RB_OVERFLOW_MASK : 0);
-    S.reg[OSS_BASE0 + regIH_RB_WPTR] = wreg;
-    if ((cntl & IH_RB_CNTL__WPTR_WRITEBACK_ENABLE_MASK) && mc_ptr(wb, 4))
-        memcpy(mc_ptr(wb, 4), &wreg, 4);
+    S.reg[OSS_BASE0 + rw] = wreg;
+    if (!ring && (cntl & IH_RB_CNTL__WPTR_WRITEBACK_ENABLE_MASK) && ih_mem(wb, 4))
+        memcpy(ih_mem(wb, 4), &wreg, 4);
     S.ih_ivs++;
-    if (cntl & IH_RB_CNTL__ENABLE_INTR_MASK)
+    if (!ring && (cntl & IH_RB_CNTL__ENABLE_INTR_MASK))
         S.ih_msi++;
+    return wptr;
+}
+
+static void ih_push_iv(uint32_t client, uint32_t src, uint32_t ring_id, uint32_t vmid,
+                       uint32_t pasid, uint32_t sd0, uint32_t sd1)
+{
+    uint32_t iv[8] = { client | (src << 8) | (ring_id << 16) | (vmid << 24), 0, 0, pasid, sd0, sd1, 0, 0 };
+    uint32_t cfg = S.reg[OSS_BASE0 + regIH_RING1_CLIENT_CFG_DATA];
+    /* IH_RING1_CLIENT_CFG: this client / source goes to ring 1, whose wptr
+     * the IH then reports with a self IV on ring 0 */
+    if ((S.reg[OSS_BASE0 + SIM_IH_RB_CNTL_RING1] & IH_RB_CNTL__RB_ENABLE_MASK) &&
+        (cfg & IH_RING1_CLIENT_CFG_DATA__SOURCE_ID_MATCH_ENABLE_MASK) &&
+        (cfg & IH_RING1_CLIENT_CFG_DATA__CLIENT_ID_MASK) == client &&
+        ((cfg & IH_RING1_CLIENT_CFG_DATA__SOURCE_ID_MASK) >> IH_RING1_CLIENT_CFG_DATA__SOURCE_ID__SHIFT) == src) {
+        uint32_t w1 = ih_ring_put(1, iv);
+        if (w1 != ~0u) {
+            uint32_t self[8] = { RD_IH_CLIENT_IH | (0u << 8) | (1u << 16), 0, 0, 0, w1, 0, 0, 0 };
+            S.ih_ring1_ivs++;
+            ih_ring_put(0, self);
+        }
+        return;
+    }
+    ih_ring_put(0, iv);
 }
 
 /* CP (ME/PFP) model for the kernel gfx ring: SET_UCONFIG_REG, the clear
@@ -3219,6 +3265,28 @@ static void sim_doorbell32(void *ctx, uint32_t index, uint32_t v)
     S.db_last_index = index;
     if (S.pending_writes)
         S.unflushed_doorbells++;
+    /* IH rptr doorbells (IH_DOORBELL_RPTR / _RING1), routed by S2A entry 1 */
+    for (uint32_t ring = 0; ring < 2; ring++) {
+        uint32_t c = S.reg[OSS_BASE0 + (ring ? SIM_IH_DOORBELL_RPTR_RING1 : regIH_DOORBELL_RPTR)];
+        if ((c & IH_DOORBELL_RPTR__ENABLE_MASK) && (c & IH_DOORBELL_RPTR__OFFSET_MASK) == index) {
+            uint32_t e = smn_val(regS2A_DOORBELL_ENTRY_1_CTRL);
+            uint32_t off = (e & S2A_DOORBELL_ENTRY_1_CTRL__S2A_DOORBELL_PORT1_RANGE_OFFSET_MASK) >>
+                           S2A_DOORBELL_ENTRY_1_CTRL__S2A_DOORBELL_PORT1_RANGE_OFFSET__SHIFT;
+            uint32_t sz = (e & S2A_DOORBELL_ENTRY_1_CTRL__S2A_DOORBELL_PORT1_RANGE_SIZE_MASK) >>
+                          S2A_DOORBELL_ENTRY_1_CTRL__S2A_DOORBELL_PORT1_RANGE_SIZE__SHIFT;
+            /* ring 1's doorbell (the next 64-bit slot) is outside the
+             * two-dword range nbio_v4_3_ih_doorbell_range opens; the
+             * model does not require it to be routed */
+            if (!ring && (!(e & S2A_DOORBELL_ENTRY_1_CTRL__S2A_DOORBELL_PORT1_ENABLE_MASK) || index < off ||
+                          index >= off + sz)) {
+                S.ih_db_unrouted++;
+                return;
+            }
+            S.reg[OSS_BASE0 + (ring ? SIM_IH_RB_RPTR_RING1 : regIH_RB_RPTR)] = v;
+            S.ih_db_rptr++;
+            return;
+        }
+    }
     for (uint32_t i = 0; i < 2; i++) {
         uint32_t c = S.reg[VCNR(i, regVCN_RB1_DB_CTRL)];
         if ((c & VCN_RB1_DB_CTRL__EN_MASK) &&
@@ -9501,6 +9569,70 @@ static void run(const char *fwdir)
         gfxhub303_gart_disable(&dev);
         CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT1_CNTL] == 0 && !(S.reg[GC_BASE0 + regGCVM_L2_CNTL] & 1) &&
               !(S.reg[GC_BASE0 + regGCMC_VM_MX_L1_TLB_CNTL] & 0x41) && S.reg[GC_BASE0 + regGCVM_L2_CNTL3] == 0);
+        /* IH as ih_v6_0 runs it: rings 0 and 1 in system memory through
+         * the GART, MC_SNOOP, rptr doorbells, page faults on ring 1 */
+        {
+            static rdna3_ih ih0, ih1;
+            const uint64_t pf = RD_PTE_VALID | RD_PTE_SYSTEM | RD_PTE_SNOOPED | RD_PTE_READABLE | RD_PTE_WRITEABLE;
+            struct sim_seen seen = { 0, 0, 0, 0, 0, 0 };
+            uint32_t k3, cntl, e1, bif;
+            int db_saved = dev.doorbell_ok;
+            CHECK(gmc11_gart_enable(&dev, &g2) == RDNA3_OK);
+            for (k3 = 0; k3 < 4; k3++)
+                CHECK(gmc11_gart_map(&dev, &g2, k3 * 4096ull, SYS_PHYS + 0x80000 + k3 * 4096ull, 1, pf) == RDNA3_OK);
+            dev.doorbell_ok = 1;
+            CHECK(ih60_init_amdgpu(&dev, &ih0, &ih1, S.sysmem + 0x80000, g2.gart_start, S.sysmem + 0x82000,
+                                   g2.gart_start + 0x2000, 4096, g2.dummy_page_pa, 1) == RDNA3_OK);
+            cntl = S.reg[OSS_BASE0 + regIH_RB_CNTL];
+            CHECK((cntl & IH_RB_CNTL__MC_SNOOP_MASK) && (cntl & IH_RB_CNTL__RPTR_REARM_MASK) &&
+                  ((cntl & IH_RB_CNTL__MC_SPACE_MASK) >> IH_RB_CNTL__MC_SPACE__SHIFT) == 4 &&
+                  (cntl & IH_RB_CNTL__ENABLE_INTR_MASK));
+            cntl = S.reg[OSS_BASE0 + SIM_IH_RB_CNTL_RING1];
+            CHECK((cntl & IH_RB_CNTL__RB_ENABLE_MASK) && (cntl & IH_RB_CNTL__RB_FULL_DRAIN_ENABLE_MASK) &&
+                  !(cntl & IH_RB_CNTL__WPTR_OVERFLOW_ENABLE_MASK) && !(cntl & IH_RB_CNTL__ENABLE_INTR_MASK));
+            bif = rdna3_rreg(&dev, rdna3_reg_offset(&dev, HWIP_NBIO, 0, regBIF_BX0_INTERRUPT_CNTL_BASE_IDX,
+                                                     regBIF_BX0_INTERRUPT_CNTL));
+            CHECK(!(bif & BIF_BX0_INTERRUPT_CNTL__IH_REQ_NONSNOOP_EN_MASK));
+            CHECK(S.reg[OSS_BASE0 + regIH_DOORBELL_RPTR] == (RD_DB_INDEX(RD_DB_IH) | IH_DOORBELL_RPTR__ENABLE_MASK));
+            CHECK(S.reg[OSS_BASE0 + SIM_IH_DOORBELL_RPTR_RING1] ==
+                  (RD_DB_INDEX(RD_DB_IH + 1) | IH_DOORBELL_RPTR__ENABLE_MASK));
+            e1 = smn_val(regS2A_DOORBELL_ENTRY_1_CTRL);
+            CHECK((e1 & S2A_DOORBELL_ENTRY_1_CTRL__S2A_DOORBELL_PORT1_ENABLE_MASK) &&
+                  ((e1 & S2A_DOORBELL_ENTRY_1_CTRL__S2A_DOORBELL_PORT1_RANGE_OFFSET_MASK) >>
+                   S2A_DOORBELL_ENTRY_1_CTRL__S2A_DOORBELL_PORT1_RANGE_OFFSET__SHIFT) == RD_DB_INDEX(RD_DB_IH) &&
+                  ((e1 & S2A_DOORBELL_ENTRY_1_CTRL__S2A_DOORBELL_PORT1_RANGE_SIZE_MASK) >>
+                   S2A_DOORBELL_ENTRY_1_CTRL__S2A_DOORBELL_PORT1_RANGE_SIZE__SHIFT) == 2);
+            CHECK(S.reg[OSS_BASE0 + regIH_RING1_CLIENT_CFG_DATA] ==
+                  (0xau | IH_RING1_CLIENT_CFG_DATA__SOURCE_ID_MATCH_ENABLE_MASK));
+            /* an end-of-pipe on ring 0, a GFX page fault redirected to ring 1 */
+            S.ih_snooped = S.ih_ring1_ivs = S.ih_db_rptr = S.ih_db_unrouted = 0;
+            ih_push(RD_IH_CLIENT_GRBM_CP, RD_IH_SRC_CP_EOP, 0);
+            ih_push_iv(RD_IH_CLIENT_GFX, RD_IH_SRC_VM_FAULT, 0, 3, 7, 0x11, 0x22);
+            CHECK(S.ih_snooped == 3 && S.ih_ring1_ivs == 1);
+            CHECK(ih60_process(&dev, &ih0, sim_iv_cb, &seen) == 3);
+            CHECK(seen.n == 2 && ih0.self_irqs == 1 && seen.client == RD_IH_CLIENT_GFX && seen.vmid == 3 &&
+                  seen.pasid == 7);
+            CHECK(S.reg[OSS_BASE0 + regIH_RB_RPTR] == 64 && S.reg[OSS_BASE0 + SIM_IH_RB_RPTR_RING1] == 32 &&
+                  S.ih_db_rptr == 2 && S.ih_db_unrouted == 0);
+            CHECK(ih60_process(&dev, &ih0, sim_iv_cb, &seen) == 0);
+            ih60_disable(&dev, &ih0);
+            CHECK(!ih0.enabled && !ih1.enabled && !(S.reg[OSS_BASE0 + regIH_RB_CNTL] & IH_RB_CNTL__RB_ENABLE_MASK) &&
+                  !(S.reg[OSS_BASE0 + SIM_IH_RB_CNTL_RING1] & IH_RB_CNTL__RB_ENABLE_MASK));
+            dev.doorbell_ok = db_saved;
+        }
+        /* sdma_v6_0_hw_fini: context-empty interrupts off, both instances
+         * stopped and halted */
+        for (uint32_t si = 0; si < 2; si++) {
+            S.reg[GC_BASE0 + regSDMA0_CNTL + si * 0x600] |= SDMA0_CNTL__CTXEMPTY_INT_ENABLE_MASK;
+            S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_CNTL + si * 0x600] |= SDMA0_QUEUE0_RB_CNTL__RB_ENABLE_MASK;
+            S.reg[GCR(regSDMA0_F32_CNTL) + si * 0x20] &= ~SDMA0_F32_CNTL__HALT_MASK;
+        }
+        sdma60_hw_fini(&dev, 2);
+        for (uint32_t si = 0; si < 2; si++) {
+            CHECK(!(S.reg[GC_BASE0 + regSDMA0_CNTL + si * 0x600] & SDMA0_CNTL__CTXEMPTY_INT_ENABLE_MASK));
+            CHECK(!(S.reg[GC_BASE0 + regSDMA0_QUEUE0_RB_CNTL + si * 0x600] & SDMA0_QUEUE0_RB_CNTL__RB_ENABLE_MASK));
+            CHECK(S.reg[GCR(regSDMA0_F32_CNTL) + si * 0x20] & SDMA0_F32_CNTL__HALT_MASK);
+        }
         gmc11_hw_fini(&dev);
         CHECK(!(S.reg[MM_BASE0 + regMMVM_L2_CNTL] & MMVM_L2_CNTL__ENABLE_L2_CACHE_MASK));
         dev.amdgpu_exact = 0;

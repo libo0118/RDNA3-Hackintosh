@@ -359,7 +359,8 @@ int sdma60_soft_reset(rdna3_dev *d, rdna3_sdma_ring *r)
     return (int)tmp;
 }
 
-/* sdma_v6_0_enable(false): sdma_v6_0_gfx_stop + halt (rlc_stop is empty) */
+/* sdma_v6_0_enable(false) for one instance: sdma_v6_0_gfx_stop + halt
+ * (sdma_v6_0_rlc_stop is empty) */
 void sdma60_stop(rdna3_dev *d, rdna3_sdma_ring *r)
 {
     uint32_t tmp = RS(d, r->inst, regSDMA0_QUEUE0_RB_CNTL);
@@ -456,4 +457,49 @@ void sdma60_set_userq_trap_interrupts(rdna3_dev *d, uint32_t num_instances, int 
         tmp = REG_SET_FIELD(tmp, SDMA0_CNTL, TRAP_ENABLE, enable ? 1 : 0);
         WS(d, i, regSDMA0_CNTL, tmp);
     }
+}
+
+/* Ported from sdma_v6_0_ctxempty_int_enable */
+void sdma60_ctxempty_int_enable(rdna3_dev *d, uint32_t num_instances, int enable)
+{
+    uint32_t i, f32_cntl;
+    for (i = 0; i < num_instances; i++) {
+        f32_cntl = RS(d, i, regSDMA0_CNTL);
+        f32_cntl = REG_SET_FIELD(f32_cntl, SDMA0_CNTL, CTXEMPTY_INT_ENABLE, enable ? 1 : 0);
+        WS(d, i, regSDMA0_CNTL, f32_cntl);
+    }
+}
+
+/* Ported from sdma_v6_0_gfx_stop */
+static void sdma_v6_0_gfx_stop(rdna3_dev *d, uint32_t num_instances)
+{
+    uint32_t i, rb_cntl, ib_cntl;
+    for (i = 0; i < num_instances; i++) {
+        rb_cntl = RS(d, i, regSDMA0_QUEUE0_RB_CNTL);
+        rb_cntl = REG_SET_FIELD(rb_cntl, SDMA0_QUEUE0_RB_CNTL, RB_ENABLE, 0);
+        WS(d, i, regSDMA0_QUEUE0_RB_CNTL, rb_cntl);
+        ib_cntl = RS(d, i, regSDMA0_QUEUE0_IB_CNTL);
+        ib_cntl = REG_SET_FIELD(ib_cntl, SDMA0_QUEUE0_IB_CNTL, IB_ENABLE, 0);
+        WS(d, i, regSDMA0_QUEUE0_IB_CNTL, ib_cntl);
+    }
+}
+
+/* Ported from sdma_v6_0_enable */
+static void sdma_v6_0_enable(rdna3_dev *d, uint32_t num_instances, int enable)
+{
+    uint32_t i, f32_cntl;
+    if (!enable)
+        sdma_v6_0_gfx_stop(d, num_instances);   /* sdma_v6_0_rlc_stop: nothing */
+    for (i = 0; i < num_instances; i++) {
+        f32_cntl = RS(d, i, regSDMA0_F32_CNTL);
+        f32_cntl = REG_SET_FIELD(f32_cntl, SDMA0_F32_CNTL, HALT, enable ? 0 : 1);
+        WS(d, i, regSDMA0_F32_CNTL, f32_cntl);
+    }
+}
+
+/* Ported from sdma_v6_0_hw_fini (= sdma_v6_0_suspend) */
+void sdma60_hw_fini(rdna3_dev *d, uint32_t num_instances)
+{
+    sdma60_ctxempty_int_enable(d, num_instances, 0);
+    sdma_v6_0_enable(d, num_instances, 0);
 }

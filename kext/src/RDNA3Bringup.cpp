@@ -246,10 +246,14 @@ void RDNA3Bringup::stopAndFree()
     }
     if (fSdma && fSdma->ready && fDev) {
         sdma60_set_trap_interrupt(fDev, fSdma, 0);
-        sdma60_stop(fDev, fSdma);
+        if (fAmdgpuExact)   /* sdma_v6_0_hw_fini: every instance */
+            sdma60_hw_fini(fDev, fDev->ipver[HWIP_SDMA1].present ? 2 : 1);
+        else
+            sdma60_stop(fDev, fSdma);
     }
     if (fIh && fIh->enabled && fDev)
         ih60_disable(fDev, fIh);
+    ihSysFree();
     /* gfx_v11_0_hw_fini's gfxhub_v3_0_3_gart_disable with rdna3amdgpu=1 */
     if (fAmdgpuExact && fGfx && fDev && fGmc)
         gfxhub303_gart_disable(fDev);
@@ -856,7 +860,16 @@ bool RDNA3Bringup::hwInit()
             return false;
         }
         bzero(fIh, sizeof(*fIh));
-        ret = ih60_init(fDev, fIh, 0, fGmc->dummy_page_pa, fMsi ? 1 : 0);
+        if (fAmdgpuExact && ihSysAlloc()) {
+            /* ih_v6_0 as amdgpu: GTT rings, snooped, rptr doorbells, ring 1 */
+            const uint64_t ringPages = RD_IH_RING_SIZE / 4096 + 1;
+            ret = ih60_init_amdgpu(fDev, fIh, fIh1, fIhSys[0].md->getBytesNoCopy(), fGmc->gart_start,
+                                   fIhSys[1].md->getBytesNoCopy(), fGmc->gart_start + ringPages * 4096,
+                                   RD_IH_RING_SIZE, fGmc->dummy_page_pa, fMsi ? 1 : 0);
+            publish("RDNA3,IHSystemMemory", ret ? 0 : 1);
+        } else {
+            ret = ih60_init(fDev, fIh, 0, fGmc->dummy_page_pa, fMsi ? 1 : 0);
+        }
         publish("RDNA3,IHResult", (uint64_t)(int64_t)ret);
         if (!ret) {
             /* anything already queued (e.g. from firmware) is drained and counted */
@@ -2246,6 +2259,10 @@ bool RDNA3Bringup::gpuReset(bool baco)
     /* amdgpu_device_pre_asic_reset -> amdgpu_device_ip_suspend: the video
      * block suspended while the chip still runs (vcnStart resumes it) */
     vcnSuspend();
+    /* amdgpu_device_ip_suspend before a full reset: sdma_v6_0_suspend
+     * (rdna3amdgpu=1) */
+    if (fAmdgpuExact && fSdma && fDev)
+        sdma60_hw_fini(fDev, fDev->ipver[HWIP_SDMA1].present ? 2 : 1);
 
     /* soc21_asic_mode1_reset: no bus mastering across the reset */
     fPci->setBusMasterEnable(false);
@@ -2996,6 +3013,81 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
     case RD_IH_FENCE_COMPUTE0: b->fIrqFenceComp++; break;
     default:                b->fIrqOther++; break;
     }
+}
+
+/* amdgpu_ih_ring_init(use_bus_addr false) for rings 0 and 1: system pages
+ * (44-bit DMA like the GTT BOs), each ring and its 8-byte wptr / rptr
+ * shadows bound to the GART from offset 0 with gart_pte_flags (MTYPE_UC,
+ * EXECUTABLE) + SYSTEM | SNOOPED (cached TT) */
+bool RDNA3Bringup::ihSysAlloc()
+{
+    const uint64_t ringPages = RD_IH_RING_SIZE / 4096 + 1;
+    const uint64_t flags = RD_PTE_VALID | RD_PTE_SYSTEM | RD_PTE_SNOOPED | RD_PTE_READABLE |
+                           RD_PTE_WRITEABLE | RD_PTE_EXECUTABLE | RD_PTE_MTYPE_NV10(RD_MTYPE_UC);
+    if (!fGmc || !fGmc->mmhub_enabled || fGmc->gart_size < 2 * ringPages * 4096)
+        return false;
+    if (!fIh1)
+        fIh1 = (rdna3_ih *)IOMalloc(sizeof(*fIh1));
+    if (!fIh1)
+        return false;
+    bzero(fIh1, sizeof(*fIh1));
+    for (uint32_t r = 0; r < 2; r++) {
+        IhSys *b = &fIhSys[r];
+        if (!b->md) {
+            b->md = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task, kIODirectionInOut,
+                                                                     ringPages * 4096, (1ull << 44) - 4096);
+            if (!b->md)
+                goto fail;
+            b->dma = IODMACommand::withSpecification(IODMACommand::OutputHost64, 44, 0,
+                                                     IODMACommand::kMapped, 0, 4096);
+            if (!b->dma || b->dma->setMemoryDescriptor(b->md, true) != kIOReturnSuccess)
+                goto fail;
+            uint64_t off = 0, page = 0;
+            while (page < ringPages) {
+                IODMACommand::Segment64 seg[8];
+                UInt32 n = 8;
+                if (b->dma->gen64IOVMSegments(&off, seg, &n) != kIOReturnSuccess || !n)
+                    goto fail;
+                for (UInt32 i = 0; i < n; i++)
+                    for (uint64_t x = 0; x < seg[i].fLength && page < ringPages; x += 4096)
+                        b->pages[page++] = seg[i].fIOVMAddr + x;
+            }
+        }
+        bzero(b->md->getBytesNoCopy(), (size_t)(ringPages * 4096));
+        for (uint64_t p = 0; p < ringPages; p++)
+            if (gmc11_gart_map(fDev, fGmc, (r * ringPages + p) * 4096, b->pages[p], 1, flags) != RDNA3_OK)
+                goto fail;
+    }
+    vmFlush(0);
+    return true;
+fail:
+    BLOG("IH: no system memory rings, back to VRAM");
+    ihSysFree();
+    return false;
+}
+
+/* amdgpu_ih_ring_fini for the GTT rings (unbound from the GART first) */
+void RDNA3Bringup::ihSysFree()
+{
+    const uint64_t ringPages = RD_IH_RING_SIZE / 4096 + 1;
+    if (fGmc && fDev && (fIhSys[0].md || fIhSys[1].md)) {
+        gmc11_gart_unmap(fDev, fGmc, 0, (uint32_t)(2 * ringPages));
+        vmFlush(0);
+    }
+    for (uint32_t r = 0; r < 2; r++) {
+        if (fIhSys[r].dma) {
+            fIhSys[r].dma->clearMemoryDescriptor(true);
+            fIhSys[r].dma->release();
+        }
+        OSSafeReleaseNULL(fIhSys[r].md);
+        fIhSys[r].dma = nullptr;
+    }
+    if (fIh1) {
+        IOFree(fIh1, sizeof(*fIh1));
+        fIh1 = nullptr;
+    }
+    if (fIh)
+        fIh->ih1 = nullptr;
 }
 
 /* smu_v13_0_irq_process from the IV callback (fIhLock held): the hardware

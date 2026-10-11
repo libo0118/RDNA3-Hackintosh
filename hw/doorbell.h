@@ -42,6 +42,8 @@ void nbio43_gc_doorbell_init(rdna3_dev *d);
 /* nbio_v4_3_sdma_doorbell_range (instance 0 only on this NBIO) */
 void nbio43_sdma_doorbell_range(rdna3_dev *d, uint32_t inst, int use, uint32_t index,
                                 uint32_t size);
+/* nbio_v4_3_ih_doorbell_range: S2A entry 1 (IH rings 0 and 1) */
+void nbio43_ih_doorbell_range(rdna3_dev *d, int use_doorbell, uint32_t doorbell_index);
 /* nbio_v4_3_vcn_doorbell_range: S2A entry 4 (VCN instance 0, also JPEG)
  * or 5 (instance 1), eight doorbells from 'doorbell_index' */
 void nbio43_vcn_doorbell_range(rdna3_dev *d, int use_doorbell, uint32_t doorbell_index, uint32_t inst);

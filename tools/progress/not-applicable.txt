@@ -31,7 +31,7 @@ edp_decide_link_settings|decide_edp_link_settings_with_dsc|detect_edp_sink_caps|
 apply_usbc_combo_phy_reset_wa|get_usbc_cable_id|link_validate_dpia_bandwidth  USB-C combo PHY / DP tunnelling (DPIA): the card has no USB-C port
 dmub_dcn32_skip_dmub_panel_power_sequence|dmub_srv_set_skip_panel_power_sequence|dmub_dcn32_backdoor_load_zfb_mode  built-in panel power / zero-frame-buffer (APU) DMCUB modes
 mpc3_(program_shaper|program_shaper_lut|program_shaper_luta_settings|program_shaper_lutb_settings|configure_shaper_lut|get_shaper_current|power_on_shaper_3dlut|program_3dlut|select_3dlut_ram|select_3dlut_ram_mask|set3dlut_ram10|set3dlut_ram12|set_3dlut_mode|read_mpcc_state|set_rmu_mux|get_rmu_mux_status)|mpcc3_(acquire|release)_rmu|get3dlut_config  DCN 3.0 code path: DCN 3.2 uses its own mpc32_* / mpc1_* (dcn32_mpc_funcs)
-mmhub_v3_0_set_clockgating|mmhub_v3_0_update_medium_grain_(clock_gating|light_sleep)|ih_v6_0_set_clockgating_state  clock gating the card's cg_flags do not enable (soc21_common_early_init: no MC / IH flags for GC 11.0.3), a no-op here
+mmhub_v3_0_set_clockgating|mmhub_v3_0_update_medium_grain_(clock_gating|light_sleep)|ih_v6_0_(set|update)_clockgating_state  clock gating the card's cg_flags do not enable (soc21_common_early_init: no MC / IH flags for GC 11.0.3), a no-op here
 gfx_v11_0_update_(sram_fgcg|perf_clk)  no-op on GC 11.0.3: soc21_common_early_init sets neither AMD_CG_SUPPORT_GFX_FGCG nor GFX_PERF_CLK
 psp_v13_0_wait_for_(bootloader_steady_state|vmbx_ready)  PSP 13.0.6 / 13.0.14 (MI300) only; MP0 13.0.10 polls the bootloader with psp_v13_0_wait_for_bootloader
 AMDGPU_INFO_FW_(UVD|VCE|DMCU|GFX_CE|VPE|GMC|CAP)  firmware of a block this card does not have (UVD, VCE, DMCU, CE, VPE, MC ucode, SR-IOV CAP)
@@ -63,6 +63,10 @@ amdgpu_vm_pt_free_work  deferred table free for unlocked (page-fault) VM updates
 amdgpu_vm_pt_map_tables  kmap of the page-table BOs for CPU updates: the table pool is always CPU-visible through the BAR
 gmc_v11_0_init_golden_registers  SR-IOV only (vm_contexts_disable); nothing on bare metal
 gmc_v11_0_(is_idle|wait_for_idle|soft_reset|set_powergating_state)  IP-block callbacks that only return true / 0
+ih_v6_0_(set_powergating_state|update_ih_mem_power_gating)  IH SRAM power gating: soc21_common_early_init sets no AMD_PG_SUPPORT_IH_SRAM_PG for GC 11.0.3
+ih_v6_0_(is_idle|wait_for_idle|soft_reset)  IP-block callbacks amdgpu leaves as "todo" stubs (true / -ETIMEDOUT / 0)
+ih_v6_0_irq_rearm  doorbell re-write for a lost rptr: SR-IOV only (ih_v6_0_set_rptr)
+amdgpu_ih_ring_write  software IH ring (ih_soft) for delegated retry faults; gmc_v11_0 runs with noretry
 # ---- no use on macOS
 .*_get_clockgating_state|mmhub_v3_0_get_clockgating  clock-gating state for Linux sysfs / debugfs
 amdgpu_(get|set)_gfx_off_(entrycount|residency|status)  GFXOFF statistics for Linux sysfs
@@ -71,14 +75,14 @@ psp_get_fw_attestation_records_addr  firmware attestation records for Linux sysf
 die_kobj_release|ip_[a-z_]*_release|amdgpu_ucode_sys_visible  Linux kobject / sysfs
 amdgpu_discovery_read_binary_from_file  discovery table from a file (Linux module option)
 amdgpu_atomfirmware_gpu_virtualization_supported|gfx_v11_0_init_rlcg_reg_access_ctrl|amdgpu_kiq_(rreg|wreg)|psp_init_cap_microcode|psp_skip_tmr|psp_reg_program|psp_prep_reg_prog_cmd_buf  SR-IOV virtual functions (Linux host virtualization)
-amdgpu_gfx_kfd_sch_ctrl  KFD (ROCm compute on Linux)
+amdgpu_gfx_kfd_sch_ctrl|amdgpu_ih_decode_iv_ts_helper|amdgpu_ih_wait_on_checkpoint_process_ts  KFD (ROCm compute on Linux)
 amdgpu_gfx_(enforce_isolation_handler|enforce_isolation_ring_begin_use|enforce_isolation_ring_end_use|get_enforce_isolation|set_enforce_isolation)|amdgpu_gfx_(cleaner_shader_init|cleaner_shader_sw_init|cleaner_shader_sw_fini|run_cleaner_shader|run_cleaner_shader_job|set_run_cleaner_shader)  process isolation / cleaner shader switched through Linux sysfs
 gfx_v11_0_read_wave_(data|sgprs|vgprs)|wave_read_(ind|regs)|gpu_recover_get  Linux debugfs dumps
 amdgpu_fence_(get_driver_name|get_timeline_name|slab_init|slab_fini|enable_signaling|release|free)|amdgpu_job_fence_(enable_signaling|free|get_timeline_name|release)|to_amdgpu_fence  Linux dma_fence object glue
 amdgpu_userq_fence_(slab_init|slab_fini|alloc|free|release|cleanup|get_driver_name|get_timeline_name)|to_amdgpu_userq_fence  Linux dma_fence object glue
 amdgpu_userq_(start|stop)_sched_for_enforce_isolation  process isolation / cleaner shader switched through Linux sysfs
 amdgpu_userq_(ensure_ev_fence|evict|evict_all|restore_all|restore_worker|validate_bos|validate_vm_bo|wait_for_signal)  eviction fences and the restore worker: this driver never evicts a BO (everything stays resident)
-.*_set_[a-z0-9_]*funcs  Linux IP-block function-table wiring
+.*_set_[a-z0-9_]*funcs|ih_v6_0_early_init  Linux IP-block function-table wiring
 (dcn|dce|dal|dmub|dccg|hubbub|hubp)[a-z0-9_]*_(construct|destruct|destroy)|dccg32_create|dmub_srv_create  Linux Display Core object constructors / destructors
 dsc_optc_config_log|log_vcp_x_y|dp_log_training_result|dcn32_auto_dpm_test_log|dce_aux_log_payload|mes_v11_0_get_(misc_)?op_string|psp_gfx_cmd_name  debug logging
 set_dp_phy_pattern_.*|dp_set_hw_test_pattern|disable_prbs_(mode|symbols)|program_pattern_symbols|optc1_set_test_pattern  DisplayPort compliance test patterns (certification equipment)

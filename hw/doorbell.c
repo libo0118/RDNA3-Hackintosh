@@ -85,3 +85,20 @@ void nbio43_vcn_doorbell_range(rdna3_dev *d, int use_doorbell, uint32_t doorbell
     else
         WNB(d, regS2A_DOORBELL_ENTRY_4_CTRL, r);
 }
+
+/* Ported from nbio_v4_3_ih_doorbell_range: S2A entry 1, two doorbells
+ * (rings 0 and 1) from 'doorbell_index' */
+void nbio43_ih_doorbell_range(rdna3_dev *d, int use_doorbell, uint32_t doorbell_index)
+{
+    uint32_t r = RNB(d, regS2A_DOORBELL_ENTRY_1_CTRL);
+    if (use_doorbell) {
+        r = REG_SET_FIELD(r, S2A_DOORBELL_ENTRY_1_CTRL, S2A_DOORBELL_PORT1_ENABLE, 0x1);
+        r = REG_SET_FIELD(r, S2A_DOORBELL_ENTRY_1_CTRL, S2A_DOORBELL_PORT1_AWID, 0x0);
+        r = REG_SET_FIELD(r, S2A_DOORBELL_ENTRY_1_CTRL, S2A_DOORBELL_PORT1_RANGE_OFFSET, doorbell_index);
+        r = REG_SET_FIELD(r, S2A_DOORBELL_ENTRY_1_CTRL, S2A_DOORBELL_PORT1_RANGE_SIZE, 2);
+        r = REG_SET_FIELD(r, S2A_DOORBELL_ENTRY_1_CTRL, S2A_DOORBELL_PORT1_AWADDR_31_28_VALUE, 0x0);
+    } else {
+        r = REG_SET_FIELD(r, S2A_DOORBELL_ENTRY_1_CTRL, S2A_DOORBELL_PORT1_RANGE_SIZE, 0);
+    }
+    WNB(d, regS2A_DOORBELL_ENTRY_1_CTRL, r);
+}

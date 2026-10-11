@@ -63,6 +63,11 @@ typedef struct rdna3_sdma_ring {
  * sdma_v6_0_ring_test_ring(). */
 int  sdma60_start(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t inst, uint32_t ring_size);
 void sdma60_stop(rdna3_dev *d, rdna3_sdma_ring *r);
+/* sdma_v6_0_ctxempty_int_enable / sdma_v6_0_hw_fini (and _suspend): context
+ * empty interrupts off, every instance's queue stopped and halted
+ * (rdna3amdgpu=1: at unload and before a GPU reset) */
+void sdma60_ctxempty_int_enable(rdna3_dev *d, uint32_t num_instances, int enable);
+void sdma60_hw_fini(rdna3_dev *d, uint32_t num_instances);
 /* sdma_v6_0_soft_reset (FREEZE, HALT + TH1_RESET, GRBM_SOFT_RESET.SDMAn),
  * then the queue again on the same ring: pending fences read as done,
  * numbering continues. The hang recovery for the DMA ring (no MES). */

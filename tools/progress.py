@@ -108,6 +108,8 @@ ITEM_STEPS = [
                 r"|amdgpu_vm_pte_(fragment|update_flags|update_noretry_flags)|amdgpu_vm_ptes_update"
                 r"|amdgpu_gmc_set_pte_pde|amdgpu_gmc_allocate_vm_inv_eng|gmc_v11_0_late_init"
                 r"|gfxhub_v3_0_3_(gart_disable|get_mc_fb_offset)|gmc_v11_0_(gart_disable|hw_fini)"), ["amdgpu"]),
+    (re.compile(r"ih_v6_0_(doorbell_rptr|init_register_offset|rb_cntl|self_irq|sw_init)|amdgpu_ih_ring_fini"
+                r"|nbio_v4_3_ih_doorbell_range|sdma_v6_0_(ctxempty_int_enable|hw_fini|suspend)"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"

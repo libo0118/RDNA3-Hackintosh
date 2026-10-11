@@ -30,6 +30,8 @@
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IODMACommand.h>
 
 extern "C" {
 #include "rdna3_hw.h"
@@ -184,6 +186,17 @@ private:
     amd_ucode_plan *fPlan = nullptr;
     rdna3_gmc    *fGmc    = nullptr;   /* level 6 */
     rdna3_ih     *fIh     = nullptr;   /* level 6 */
+    /* rdna3amdgpu=1: IH rings 0 and 1 in system memory (amdgpu's GTT
+     * rings), mapped at the bottom of the GART */
+    struct IhSys {
+        IOBufferMemoryDescriptor *md;
+        IODMACommand             *dma;
+        uint64_t                  pages[RD_IH_RING_SIZE / 4096 + 1];
+    };
+    IhSys            fIhSys[2] = {};
+    rdna3_ih        *fIh1 = nullptr;
+    bool             ihSysAlloc();
+    void             ihSysFree();
     rdna3_sdma_ring *fSdma = nullptr;  /* level 7 */
     rdna3_gfx_ring  *fGfx  = nullptr;  /* level 8 */
     rdna3_mec_ring  *fKiq  = nullptr;  /* level 8, with doorbells */
