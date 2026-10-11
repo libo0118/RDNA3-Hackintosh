@@ -36,6 +36,7 @@ DEBUG_ARGS="-v keepsyms=1 debug=0x100 serial=3 msgbuf=1048576 amfi=0x80"
 say()  { printf '\033[1m== %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mOK\033[0m  %s\n' "$*"; }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33mWARN\033[0m %s\n' "$*"; }
 die()  { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
 # the CPU model OSX-KVM's OpenCore-Boot.sh marks as required for Sequoia /
@@ -934,6 +935,27 @@ r = json.load(sys.stdin)["workflow_runs"]
 print(*(r[0]["id"], r[0]["run_number"], r[0]["head_sha"]) if r else ("", "", ""))')
     [ -n "$run_id" ] || die "no successful build.yml run on $branch"
     ok "build #$run_no, commit ${sha:0:7} (checkout: $(git -C "$ROOT" rev-parse --short HEAD))"
+    # card runs 31-32 tested the previous build: the update ran while the
+    # build of the pulled commit was still going. Wait for it instead.
+    local head newest
+    head=$(git -C "$ROOT" rev-parse HEAD)
+    if [ "$sha" != "$head" ]; then
+        newest=$(gh_api "repos/$slug/actions/workflows/build.yml/runs?branch=$branch&per_page=5" | python3 -c '
+import json, sys
+head = sys.argv[1]
+for r in json.load(sys.stdin)["workflow_runs"]:
+    if r["head_sha"] == head:
+        print(r["status"], r.get("conclusion") or "-", r["run_number"])
+        break' "$head") || newest=""
+        case "$newest" in
+        queued*|in_progress*|waiting*|requested*|pending*)
+            die "build #${newest##* } of the checked-out commit ${head:0:7} is still running: run 'rdna3vm update' again in a few minutes" ;;
+        "completed failure"*|"completed cancelled"*)
+            warn "build #${newest##* } of ${head:0:7} failed: using the last good build #$run_no (${sha:0:7})" ;;
+        "")
+            warn "no build of the checked-out commit ${head:0:7}: using build #$run_no (${sha:0:7})" ;;
+        esac
+    fi
     if [ "$(cat "$WORK/artifact-run" 2>/dev/null)" = "$run_id" ] && [ -f "$zip" ]; then
         ok "already downloaded: $zip"
     else
