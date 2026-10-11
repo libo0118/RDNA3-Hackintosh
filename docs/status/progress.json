@@ -1,11 +1,11 @@
 {
  "amdgpu": {
-  "works": 465,
-  "ported": 864,
-  "total": 1465,
-  "not_applicable": 322,
-  "works_pct": 31.7,
-  "ported_pct": 59.0,
+  "works": 466,
+  "ported": 870,
+  "total": 1464,
+  "not_applicable": 323,
+  "works_pct": 31.8,
+  "ported_pct": 59.4,
   "groups": [
    {
     "name": "PSP 13",
@@ -300,9 +300,9 @@
      "6",
      "7"
     ],
-    "works": 58,
+    "works": 59,
     "ported": 28,
-    "todo": 14,
+    "todo": 13,
     "items": {
      "amdgpu_gmc_agp_location": "works",
      "amdgpu_gmc_allocate_vm_inv_eng": "ported",
@@ -361,7 +361,7 @@
      "gfxhub_v3_0_3_set_fault_enable_default": "works",
      "gfxhub_v3_0_3_setup_vm_pt_regs": "works",
      "gfxhub_v3_0_3_setup_vmid_config": "works",
-     "gmc_v11_0_early_init": "todo",
+     "gmc_v11_0_early_init": "works",
      "gmc_v11_0_emit_flush_gpu_tlb": "works",
      "gmc_v11_0_emit_pasid_mapping": "todo",
      "gmc_v11_0_flush_gpu_tlb": "works",
@@ -495,8 +495,8 @@
      "4"
     ],
     "works": 28,
-    "ported": 4,
-    "todo": 28,
+    "ported": 6,
+    "todo": 25,
     "items": {
      "hdp_v6_0_flush_hdp": "works",
      "hdp_v6_0_get_clockgating_state": "works",
@@ -544,7 +544,7 @@
      "soc21_didt_rreg": "todo",
      "soc21_didt_wreg": "todo",
      "soc21_get_config_memsize": "todo",
-     "soc21_get_register_value": "todo",
+     "soc21_get_register_value": "ported",
      "soc21_get_xclk": "works",
      "soc21_grbm_select": "works",
      "soc21_init_doorbell_index": "works",
@@ -555,14 +555,14 @@
      "soc21_program_aspm": "todo",
      "soc21_query_video_codecs": "ported",
      "soc21_read_disabled_bios": "todo",
-     "soc21_read_indexed_register": "todo",
-     "soc21_read_register": "todo",
+     "soc21_read_register": "ported",
      "soc21_update_umd_stable_pstate": "ported"
     },
     "na": {
      "nbio_v4_3_get_clockgating_state": "clock-gating state for Linux sysfs / debugfs",
      "nbio_v4_3_process_err_event_athub_irq": "RAS error handling (UMC / ATHUB), not on this card",
      "soc21_common_get_clockgating_state": "clock-gating state for Linux sysfs / debugfs",
+     "soc21_read_indexed_register": "GRBM-indexed register reads: no entry of soc21_allowed_read_registers is grbm_indexed",
      "soc21_set_uvd_clocks": "UVD / VCE: Navi 32 has VCN instead",
      "soc21_set_vce_clocks": "UVD / VCE: Navi 32 has VCN instead"
     }
@@ -641,8 +641,8 @@
      "8"
     ],
     "works": 93,
-    "ported": 4,
-    "todo": 107,
+    "ported": 5,
+    "todo": 106,
     "items": {
      "amdgpu_gfx_bit_to_me_queue": "todo",
      "amdgpu_gfx_compute_queue_acquire": "works",
@@ -736,7 +736,7 @@
      "gfx_v11_0_handle_priv_fault": "todo",
      "gfx_v11_0_hw_fini": "works",
      "gfx_v11_0_hw_init": "works",
-     "gfx_v11_0_init_compute_vmid": "todo",
+     "gfx_v11_0_init_compute_vmid": "ported",
      "gfx_v11_0_init_csb": "works",
      "gfx_v11_0_init_gds_vmid": "works",
      "gfx_v11_0_init_golden_registers": "works",
@@ -1110,8 +1110,8 @@
      "2"
     ],
     "works": 67,
-    "ported": 0,
-    "todo": 44,
+    "ported": 2,
+    "todo": 42,
     "items": {
      "amdgpu_atom_asic_init": "todo",
      "amdgpu_atom_destroy": "todo",
@@ -1140,7 +1140,7 @@
      "amdgpu_discovery_get_vcn_info": "todo",
      "amdgpu_discovery_harvest_config_quirk": "todo",
      "amdgpu_discovery_harvest_ip": "todo",
-     "amdgpu_discovery_init": "todo",
+     "amdgpu_discovery_init": "ported",
      "amdgpu_discovery_init_soc_config": "todo",
      "amdgpu_discovery_read_binary_from_mem": "todo",
      "amdgpu_discovery_read_from_harvest_table": "todo",
@@ -1157,7 +1157,7 @@
      "amdgpu_discovery_set_psp_ip_blocks": "todo",
      "amdgpu_discovery_set_sdma_ip_blocks": "todo",
      "amdgpu_discovery_set_smu_ip_blocks": "todo",
-     "amdgpu_discovery_validate_ip": "todo",
+     "amdgpu_discovery_validate_ip": "ported",
      "amdgpu_discovery_verify_binary_signature": "works",
      "amdgpu_discovery_verify_checksum": "works",
      "amdgpu_ucode_create_bo": "works",

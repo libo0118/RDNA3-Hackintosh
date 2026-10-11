@@ -94,6 +94,26 @@ static size_t build(uint8_t *b, size_t cap, int hdr_v, int ipd_v)
     return p;
 }
 
+/* append an optional table (GC / harvest / VCN info) of 'len' bytes and
+ * fix table_list[idx], bin_size and the binary checksum; returns the size */
+static size_t add_table(uint8_t *b, size_t n, int idx, const uint8_t *t, size_t len)
+{
+    const size_t tables = (b[4] == 2) ? 16 : 12;
+    memcpy(b + n, t, len);
+    w16(b + tables + 8 * (size_t)idx, (uint16_t)n);
+    w16(b + tables + 8 * (size_t)idx + 2, amd_disc_checksum(t, len));
+    w16(b + tables + 8 * (size_t)idx + 4, (uint16_t)len);
+    n += len;
+    w16(b + 10, (uint16_t)n);
+    w16(b + 8, amd_disc_checksum(b + 10, n - 10));
+    return n;
+}
+
+static void fix_bin_checksum(uint8_t *b, size_t n)
+{
+    w16(b + 8, amd_disc_checksum(b + 10, n - 10));
+}
+
 static void check_navi32(const amd_discovery *d, int b64)
 {
     const amd_ip_entry *gc = amd_discovery_find(d, AMD_HWID_GC, 0);
@@ -155,6 +175,52 @@ int main(void)
     b[12 + 2] ^= 1;
     w16(b + 8, amd_disc_checksum(b + 10, n - 10));
     CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_E_TABLE_CHECKSUM);
+
+    /* amdgpu_discovery_init: the GC (id + checksum over its size), harvest
+     * (signature + checksum over sizeof(struct harvest_table)) and VCN info
+     * (id + checksum over size_bytes) tables; MALL is not checked */
+    {
+        uint8_t gc[132], hvt[AMD_DISC_HARVEST_TABLE_SIZE], vcn[96], mall[48];
+        size_t n0, n1, o;
+        memset(gc, 0, sizeof(gc)); memset(hvt, 0, sizeof(hvt)); memset(vcn, 0, sizeof(vcn));
+        memset(mall, 0xEE, sizeof(mall));
+        w32(gc, AMD_DISC_GC_TABLE_ID); w16(gc + 4, 1); w16(gc + 6, 2); w32(gc + 8, sizeof(gc));
+        w32(gc + 12, 3);                                   /* num_se */
+        w32(hvt, AMD_DISC_HARVEST_SIGNATURE); w32(hvt + 4, 1);
+        w32(vcn, AMD_DISC_VCN_INFO_TABLE_ID); w16(vcn + 4, 1); w32(vcn + 8, sizeof(vcn));
+        n = build(b, sizeof(b), 2, 4);
+        n = add_table(b, n, AMD_DISC_TABLE_GC, gc, sizeof(gc));
+        n = add_table(b, n, AMD_DISC_TABLE_HARVEST_INFO, hvt, sizeof(hvt));
+        n = add_table(b, n, AMD_DISC_TABLE_VCN_INFO, vcn, sizeof(vcn));
+        n0 = n;
+        n = add_table(b, n, AMD_DISC_TABLE_MALL_INFO, mall, sizeof(mall));   /* bad id: ignored */
+        CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_OK && d.has_gc_info && d.gc.num_se == 3);
+        /* a wrong checksum in each table, the binary checksum fixed up */
+        o = (size_t)(b[16 + 8 * AMD_DISC_TABLE_GC] | (b[16 + 8 * AMD_DISC_TABLE_GC + 1] << 8));
+        b[o + 20] ^= 1; fix_bin_checksum(b, n);
+        CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_E_GC_TABLE);
+        b[o + 20] ^= 1; b[o] ^= 1; fix_bin_checksum(b, n);       /* wrong table id */
+        CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_E_GC_TABLE);
+        b[o] ^= 1; fix_bin_checksum(b, n);
+        o = (size_t)(b[16 + 8 * AMD_DISC_TABLE_HARVEST_INFO] | (b[16 + 8 * AMD_DISC_TABLE_HARVEST_INFO + 1] << 8));
+        b[o + 100] ^= 4; fix_bin_checksum(b, n);
+        CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_E_HARVEST_TABLE);
+        b[o + 100] ^= 4; fix_bin_checksum(b, n);
+        o = (size_t)(b[16 + 8 * AMD_DISC_TABLE_VCN_INFO] | (b[16 + 8 * AMD_DISC_TABLE_VCN_INFO + 1] << 8));
+        b[o + 50] ^= 2; fix_bin_checksum(b, n);
+        CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_E_VCN_TABLE);
+        b[o + 50] ^= 2; fix_bin_checksum(b, n);
+        CHECK(amd_discovery_parse(b, n, &d) == AMD_DISC_OK);
+        (void)n0;
+        /* amdgpu_discovery_validate_ip: an instance number or hw id out of
+         * range drops that IP only */
+        n1 = build(b, sizeof(b), 1, 3);
+        b[12 + 48 + 80 + 4 + 2] = AMD_DISC_HWIP_MAX_INSTANCE;   /* first IP's instance */
+        w16(b + 12 + 2, amd_disc_checksum(b + 12 + 48, n1 - 12 - 48));
+        fix_bin_checksum(b, n1);
+        CHECK(amd_discovery_parse(b, n1, &d) == AMD_DISC_OK && d.num_ips_invalid == 1 &&
+              d.num_ips == NIPS - 1);
+    }
 
     /* --- mutation fuzz: must never crash or read OOB (ASan) --- */
     srand(1234);

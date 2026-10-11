@@ -39,7 +39,7 @@
     ((SH_MEM_ADDRESS_MODE_64 << SH_MEM_CONFIG__ADDRESS_MODE__SHIFT) | \
      (SH_MEM_ALIGNMENT_MODE_UNALIGNED << SH_MEM_CONFIG__ALIGNMENT_MODE__SHIFT) | \
      (3 << SH_MEM_CONFIG__INITIAL_INST_PREFETCH__SHIFT))
-#define SHARED_APERTURE_START  0x2000000000000000ull   /* gmc_v11_0_sw_init */
+#define SHARED_APERTURE_START  0x2000000000000000ull   /* gmc_v11_0_early_init */
 #define PRIVATE_APERTURE_START 0x1000000000000000ull
 #define CACHE_FLUSH_AND_INV_TS_EVENT 0x14
 #define MAX_HW_CONTEXTS 8
@@ -188,11 +188,53 @@ static void init_gds_vmid(rdna3_dev *d)
     }
 }
 
+/* gc_11_0_0_offset.h / _sh_mask.h */
+#define regSPI_GDBG_PER_VMID_CNTL                0x1f72
+#define regSPI_GDBG_PER_VMID_CNTL_BASE_IDX       0
+#define SPI_GDBG_PER_VMID_CNTL__TRAP_EN__SHIFT   0x3
+#define SPI_GDBG_PER_VMID_CNTL__TRAP_EN_MASK     0x00000008u
+/* gfx_v11_0.c */
+#define LDS_APP_BASE           0x1
+#define SCRATCH_APP_BASE       0x2
+
+/* Ported from gfx_v11_0_init_compute_vmid (rdna3amdgpu=1): VMIDs
+ * first_kfd_vmid..15 get the compute apertures and the trap enabled
+ *   LDS:     0x60000000'00000000 - 0x60000001'00000000 (4GB)
+ *   Scratch: 0x60000001'00000000 - 0x60000002'00000000 (4GB)
+ *   GPUVM:   0x60010000'00000000 - 0x60020000'00000000 (1TB)
+ * and no GDS, GWS or OA */
+static void gfx_v11_0_init_compute_vmid(rdna3_dev *d)
+{
+    uint32_t i, data, sh_mem_bases;
+    sh_mem_bases = (LDS_APP_BASE << SH_MEM_BASES__SHARED_BASE__SHIFT) | SCRATCH_APP_BASE;
+    for (i = RD_FIRST_KFD_VMID; i < 16; i++) {
+        grbm_select(d, 0, 0, 0, i);
+        /* CP and shaders */
+        WG(d, regSH_MEM_CONFIG, DEFAULT_SH_MEM_CONFIG);
+        WG(d, regSH_MEM_BASES, sh_mem_bases);
+        /* Enable trap for each kfd vmid. */
+        data = RG(d, regSPI_GDBG_PER_VMID_CNTL);
+        data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, TRAP_EN, 1);
+        WG(d, regSPI_GDBG_PER_VMID_CNTL, data);
+    }
+    grbm_select(d, 0, 0, 0, 0);
+    /* Initialize all compute VMIDs to have no GDS, GWS, or OA acccess.
+     * These should be enabled by FW for target VMIDs. */
+    for (i = RD_FIRST_KFD_VMID; i < 16; i++) {
+        rdna3_wreg(d, OFF(d, regGDS_VMID0_BASE) + 2 * i, 0);
+        rdna3_wreg(d, OFF(d, regGDS_VMID0_SIZE) + 2 * i, 0);
+        rdna3_wreg(d, OFF(d, regGDS_GWS_VMID0) + i, 0);
+        rdna3_wreg(d, OFF(d, regGDS_OA_VMID0) + i, 0);
+    }
+}
+
 /* gfx_v11_0_constants_init, minus what discovery already gave us (RB/CU
- * info) and the compute VMID setup (with the compute queues) */
+ * info). The SH_MEM apertures go to the graphics VMIDs (id_mgr num_ids =
+ * first_kfd_vmid) and gfx_v11_0_init_compute_vmid sets up the rest with
+ * rdna3amdgpu=1; the verified default gives all 16 the graphics apertures */
 static void constants_init(rdna3_dev *d)
 {
-    uint32_t tmp, i;
+    uint32_t tmp, i, num_ids = d->amdgpu_exact ? RD_FIRST_KFD_VMID : 16;
 
     tmp = RG(d, regGRBM_CNTL);
     tmp = REG_SET_FIELD(tmp, GRBM_CNTL, READ_TIMEOUT, 0xff);
@@ -202,7 +244,7 @@ static void constants_init(rdna3_dev *d)
     tmp = REG_SET_FIELD(tmp, DB_RING_CONTROL, COUNTER_CONTROL, 1);
     WG(d, regDB_RING_CONTROL, tmp);
 
-    for (i = 0; i < 16; i++) {
+    for (i = 0; i < num_ids; i++) {
         grbm_select(d, 0, 0, 0, i);
         WG(d, regSH_MEM_CONFIG, DEFAULT_SH_MEM_CONFIG);
         if (i) {
@@ -212,6 +254,8 @@ static void constants_init(rdna3_dev *d)
         }
     }
     grbm_select(d, 0, 0, 0, 0);
+    if (d->amdgpu_exact)
+        gfx_v11_0_init_compute_vmid(d);
     init_gds_vmid(d);
 }
 

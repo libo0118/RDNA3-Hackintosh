@@ -232,6 +232,12 @@ static int info_sensor(rdna3_drm_file *f, uint32_t type, uint32_t *out)
     return IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in);
 }
 
+static uint32_t h_read_reg(void *c, uint32_t dw)
+{
+    (void)c;
+    return 0xA0000000u + dw;
+}
+
 static int h_priv;
 static int h_privileged(void *c) { (void)c; return h_priv; }
 
@@ -1300,6 +1306,52 @@ int main(void)
               vd.ready_rings[AMDGPU_HW_IP_VCN_JPEG] == 0);
         rdna3_drm_file_close(&vf);
         rdna3_drm_device_fini(&vd);
+    }
+    /* AMDGPU_INFO_READ_MMR_REG: amdgpu_info_ioctl + soc21_read_register */
+    {
+        struct drm_amdgpu_info in;
+        uint32_t v[4];
+        dev.gc_base0 = 0x1260;
+        dev.gb_addr_config = 0x545;
+        dev.ops.read_reg = h_read_reg;
+        memset(&in, 0, sizeof(in));
+        in.query = AMDGPU_INFO_READ_MMR_REG;
+        in.return_pointer = (uint64_t)(uintptr_t)v;
+        in.return_size = sizeof(v);
+        in.read_mmr_reg.dword_offset = 0x1260 + 0x0da4;   /* GRBM_STATUS */
+        in.read_mmr_reg.count = 1;
+        in.read_mmr_reg.instance = 0xffffffff;
+        memset(v, 0, sizeof(v));
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && v[0] == 0xA0000000u + 0x1260 + 0x0da4);
+        in.read_mmr_reg.dword_offset = 0x1260 + 0x0dae;   /* GRBM_STATUS_SE2, SE3 */
+        in.read_mmr_reg.count = 2;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && v[1] == 0xA0000000u + 0x1260 + 0x0daf);
+        in.read_mmr_reg.dword_offset = 0x1260 + 0x0e24;   /* CP_CPC_STATUS .. CP_CPF_STALLED_STAT1 */
+        in.read_mmr_reg.count = 4;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && v[3] == 0xA0000000u + 0x1260 + 0x0e27);
+        in.read_mmr_reg.dword_offset = 0x1260 + 0x0625;   /* SDMA1_STATUS_REG */
+        in.read_mmr_reg.count = 1;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0);
+        in.read_mmr_reg.dword_offset = 0x1260 + 0x13de;   /* GB_ADDR_CONFIG from gfx.config */
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && v[0] == 0x545);
+        in.read_mmr_reg.dword_offset = 0x1260 + 0x0da7;   /* not in the list */
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EFAULT);
+        in.read_mmr_reg.dword_offset = 0x1260 + 0x0da4;
+        in.read_mmr_reg.count = 129;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+        in.read_mmr_reg.count = 1;
+        in.read_mmr_reg.instance = 4;                      /* SE 4 does not exist */
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+        in.read_mmr_reg.instance = (2u << 8) | 1;           /* SH 2 does not exist */
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == -RD_EINVAL);
+        in.read_mmr_reg.instance = (1u << 8) | 3;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0);
+        in.read_mmr_reg.count = 0;                          /* nothing read, nothing copied */
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0);
+        in.read_mmr_reg.count = 2;                          /* copies min(size, count * 4) */
+        in.return_size = 4;
+        v[1] = 0x12345678;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in) == 0 && v[1] == 0x12345678);
     }
     if (failures) {
         fprintf(stderr, "%d failure(s)\n", failures);

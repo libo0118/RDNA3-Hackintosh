@@ -120,6 +120,9 @@ typedef struct rdna3_gfx_ib {
 } rdna3_gfx_ib;
 
 #define RD_GFX_IB_FLAG_TMZ (1u << 4)   /* AMDGPU_IB_FLAGS_SECURE */
+/* adev->vm_manager.first_kfd_vmid (gmc_v11_0_sw_init): graphics VMIDs are
+ * 1..7, 8..15 belong to compute (KFD / the MES) */
+#define RD_FIRST_KFD_VMID  8
 #define RD_GFX_VM_INV_ENG  0           /* first free GFXHUB engine (eng 17 = MMIO/GART) */
 #define RD_GFX_MAX_IBS     16
 

@@ -2419,7 +2419,9 @@ void *RDNA3Bringup::vmCreate()
      * amdgpu's first_kfd_vmid) */
     fNextPasid = fNextPasid % 0xfffe + 1;
     v->pasid = fNextPasid;
-    for (uint32_t id = 1; id < (fUserqWanted ? 8u : 16u); id++) {
+    /* rdna3amdgpu=1: amdgpu's GFXHUB id_mgr hands out VMIDs below
+     * first_kfd_vmid only (8..15 have the compute apertures) */
+    for (uint32_t id = 1; id < ((fUserqWanted || fAmdgpuExact) ? (uint32_t)RD_FIRST_KFD_VMID : 16u); id++) {
         if (!(fVmidUsed & (1u << id))) {
             if (gpuvm_vm_init(fDev, &v->vm, fPtPool) != RDNA3_OK)
                 break;

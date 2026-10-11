@@ -122,6 +122,33 @@ amd_disc_status amd_discovery_parse(const uint8_t *bin, size_t len,
     if (amd_disc_checksum(ih, ihdr_len) != rd16(bin + tbl_off + 2))
         return AMD_DISC_E_TABLE_CHECKSUM;
 
+    /* amdgpu_discovery_init: the GC, harvest and VCN info tables, when
+     * present, must carry their id / signature and checksum (the MALL
+     * table's check is disabled there: "if (0 && offset)") */
+    {
+        size_t t = tables + TABLE_INFO_SIZE * AMD_DISC_TABLE_GC, o;
+        if (in_bounds(bin_size, t, TABLE_INFO_SIZE) && (o = rd16(bin + t)) != 0) {
+            if (!in_bounds(bin_size, o, 12) || rd32(bin + o) != AMD_DISC_GC_TABLE_ID ||
+                !in_bounds(bin_size, o, rd32(bin + o + 8)) ||
+                amd_disc_checksum(bin + o, rd32(bin + o + 8)) != rd16(bin + t + 2))
+                return AMD_DISC_E_GC_TABLE;
+        }
+        t = tables + TABLE_INFO_SIZE * AMD_DISC_TABLE_HARVEST_INFO;
+        if (in_bounds(bin_size, t, TABLE_INFO_SIZE) && (o = rd16(bin + t)) != 0) {
+            if (!in_bounds(bin_size, o, AMD_DISC_HARVEST_TABLE_SIZE) ||
+                rd32(bin + o) != AMD_DISC_HARVEST_SIGNATURE ||
+                amd_disc_checksum(bin + o, AMD_DISC_HARVEST_TABLE_SIZE) != rd16(bin + t + 2))
+                return AMD_DISC_E_HARVEST_TABLE;
+        }
+        t = tables + TABLE_INFO_SIZE * AMD_DISC_TABLE_VCN_INFO;
+        if (in_bounds(bin_size, t, TABLE_INFO_SIZE) && (o = rd16(bin + t)) != 0) {
+            if (!in_bounds(bin_size, o, 12) || rd32(bin + o) != AMD_DISC_VCN_INFO_TABLE_ID ||
+                !in_bounds(bin_size, o, rd32(bin + o + 8)) ||
+                amd_disc_checksum(bin + o, rd32(bin + o + 8)) != rd16(bin + t + 2))
+                return AMD_DISC_E_VCN_TABLE;
+        }
+    }
+
     ipd_ver = rd16(ih + IHDR_VERSION);
     out->ipd_version = ipd_ver;
     out->num_dies = rd16(ih + IHDR_NUM_DIES);
@@ -173,7 +200,10 @@ amd_disc_status amd_discovery_parse(const uint8_t *bin, size_t len,
             if (!in_bounds(bin_size, ip_off + IP_FIXED_SIZE, base_sz * nbase))
                 return AMD_DISC_E_TRUNCATED;
 
-            if (out->num_ips < AMD_DISC_MAX_IPS) {
+            /* amdgpu_discovery_validate_ip: such an entry is skipped */
+            if (ip[2] >= AMD_DISC_HWIP_MAX_INSTANCE || rd16(ip) >= AMD_DISC_HW_ID_MAX) {
+                out->num_ips_invalid++;
+            } else if (out->num_ips < AMD_DISC_MAX_IPS) {
                 amd_ip_entry *e = &out->ips[out->num_ips++];
                 e->hw_id    = rd16(ip);
                 e->die      = (uint8_t)i;
@@ -302,6 +332,9 @@ const char *amd_disc_status_str(amd_disc_status s)
     case AMD_DISC_E_TABLE_SIGNATURE: return "bad IP table signature";
     case AMD_DISC_E_TABLE_CHECKSUM:  return "IP table checksum mismatch";
     case AMD_DISC_E_BAD_DIE:         return "bad die list";
+    case AMD_DISC_E_GC_TABLE:        return "bad GC table id or checksum";
+    case AMD_DISC_E_HARVEST_TABLE:   return "bad harvest table signature or checksum";
+    case AMD_DISC_E_VCN_TABLE:       return "bad VCN info table id or checksum";
     }
     return "unknown";
 }

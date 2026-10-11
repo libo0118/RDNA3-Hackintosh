@@ -67,6 +67,7 @@ ih_v6_0_(set_powergating_state|update_ih_mem_power_gating)  IH SRAM power gating
 ih_v6_0_(is_idle|wait_for_idle|soft_reset)  IP-block callbacks amdgpu leaves as "todo" stubs (true / -ETIMEDOUT / 0)
 ih_v6_0_irq_rearm  doorbell re-write for a lost rptr: SR-IOV only (ih_v6_0_set_rptr)
 amdgpu_ih_ring_write  software IH ring (ih_soft) for delegated retry faults; gmc_v11_0 runs with noretry
+soc21_read_indexed_register  GRBM-indexed register reads: no entry of soc21_allowed_read_registers is grbm_indexed
 # ---- no use on macOS
 .*_get_clockgating_state|mmhub_v3_0_get_clockgating  clock-gating state for Linux sysfs / debugfs
 amdgpu_(get|set)_gfx_off_(entrycount|residency|status)  GFXOFF statistics for Linux sysfs

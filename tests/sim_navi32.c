@@ -347,6 +347,7 @@ typedef struct sim {
         int all_enabled;      /* EnableAllSmuFeatures done */
     } smu;
     unsigned vm_huge_walks;              /* translations through a PDE_PTE (huge) entry */
+    uint32_t sh_mem[16][3];              /* per VMID: SH_MEM_CONFIG, SH_MEM_BASES, SPI_GDBG_PER_VMID_CNTL */
     unsigned ih_snooped, ih_ring1_ivs, ih_db_rptr, ih_db_unrouted;   /* IH in system memory (rdna3amdgpu=1) */
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
     unsigned sdma_ibs, sdma_ib_fault;   /* INDIRECT packets run, ones the GFXHUB could not translate */
@@ -3337,6 +3338,14 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_DATA) {
         uint32_t *p = smn_slot(S.smn_index, 1);
         if (p) *p = v;
+        *R(dw) = v;
+        return;
+    }
+    /* SH_MEM_CONFIG / SH_MEM_BASES / SPI_GDBG_PER_VMID_CNTL: one copy per
+     * VMID, the one GRBM_GFX_CNTL.VMID selects */
+    if (dw == GCR(regSH_MEM_CONFIG) || dw == GCR(regSH_MEM_BASES) || dw == GC_BASE0 + 0x1f72) {
+        uint32_t vmid = (S.reg[GCR(regGRBM_GFX_CNTL)] & GRBM_GFX_CNTL__VMID_MASK) >> GRBM_GFX_CNTL__VMID__SHIFT;
+        S.sh_mem[vmid][dw == GCR(regSH_MEM_CONFIG) ? 0 : dw == GCR(regSH_MEM_BASES) ? 1 : 2] = v;
         *R(dw) = v;
         return;
     }
@@ -7462,6 +7471,9 @@ static void run(const char *fwdir)
             CHECK(gfx11_hw_init(&dev, &gmc, &gr, &rs, 8192) == RDNA3_ETIME);   /* autoload not done */
             S.reg[GCR(regRLC_RLCS_BOOTLOAD_STATUS)] = RLC_RLCS_BOOTLOAD_STATUS__BOOTLOAD_COMPLETE_MASK;
             CHECK(gfx11_hw_init(&dev, &gmc, &gr, &rs, 8192) == RDNA3_OK && gr.ready);
+            /* gfx_v11_0_constants_init (verified default): every VMID 1..15
+             * gets the graphics apertures */
+            CHECK(S.sh_mem[3][1] == 0x20001000u && S.sh_mem[12][1] == 0x20001000u && S.sh_mem[0][1] == 0);
             /* gfx_v11_0_cp_gfx_resume programs RB0_CNTL with BUFSZ/BLKSZ only;
              * KMD_QUEUE belongs to the MQD queues (the card stalled with the
              * CPG reading MC 0 when RB0 had it) */
@@ -8166,7 +8178,14 @@ static void run(const char *fwdir)
                 memset(&ga, 0, sizeof(ga));
                 ga.async = 1;
                 CHECK(gfx11_kgq_start(&dev, &kiq, &ga) == RDNA3_EINVAL);   /* no ring yet */
+                /* rdna3amdgpu=1: gfx_v11_0_init_compute_vmid for VMIDs 8..15 */
+                memset(S.sh_mem, 0, sizeof(S.sh_mem));
+                dev.amdgpu_exact = 1;
                 CHECK(gfx11_hw_init(&dev, &gmc, &ga, &rs, 8192) == RDNA3_OK && ga.async && !ga.ready);
+                dev.amdgpu_exact = 0;
+                CHECK(S.sh_mem[7][1] == 0x20001000u && !(S.sh_mem[7][2] & 0x8));
+                CHECK(S.sh_mem[8][1] == 0x00010002u && (S.sh_mem[8][2] & 0x8) && S.sh_mem[15][1] == 0x00010002u &&
+                      (S.sh_mem[15][2] & 0x8) && S.sh_mem[15][0] == S.sh_mem[1][0]);
                 CHECK(!(S.reg[GCR(regCP_ME_CNTL)] & (CP_ME_CNTL__PFP_HALT_MASK | CP_ME_CNTL__ME_HALT_MASK)));
                 CHECK(gfx11_kgq_start(&dev, &kiq, &ga) == RDNA3_OK && ga.ready);
                 CHECK(S.kgq_maps == 1 && S.gfx_mapped && S.reg[GCR(regCP_GFX_HQD_ACTIVE)] == 1);

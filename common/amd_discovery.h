@@ -32,6 +32,10 @@ extern "C" {
 #define AMD_DISC_TABLE_SIGNATURE       0x53445049u /* "IPDS" */
 #define AMD_DISC_GC_TABLE_ID           0x4347u
 #define AMD_DISC_HARVEST_SIGNATURE     0x56524148u
+#define AMD_DISC_VCN_INFO_TABLE_ID     0x004E4356u
+#define AMD_DISC_HARVEST_TABLE_SIZE    136u   /* sizeof(struct harvest_table) */
+#define AMD_DISC_HWIP_MAX_INSTANCE     44u    /* HWIP_MAX_INSTANCE */
+#define AMD_DISC_HW_ID_MAX             300u   /* HW_ID_MAX */
 #define AMD_DISC_TMR_OFFSET            (64u << 10) /* from end of VRAM */
 #define AMD_DISC_TMR_SIZE              (10u << 10) /* bytes amdgpu reads */
 #define AMD_DISC_MAX_DIES              16u
@@ -112,6 +116,7 @@ typedef struct amd_discovery {
     uint8_t  base_addr_64_bit;
     uint32_t num_ips;           /* entries stored in ips[] */
     uint32_t num_ips_dropped;   /* entries that did not fit */
+    uint32_t num_ips_invalid;   /* skipped by amdgpu_discovery_validate_ip */
     uint8_t  has_gc_info;
     amd_gc_info gc;
     amd_ip_entry ips[AMD_DISC_MAX_IPS];
@@ -127,6 +132,10 @@ typedef enum amd_disc_status {
     AMD_DISC_E_TABLE_SIGNATURE,
     AMD_DISC_E_TABLE_CHECKSUM,
     AMD_DISC_E_BAD_DIE,
+    /* amdgpu_discovery_init's checks of the optional tables */
+    AMD_DISC_E_GC_TABLE,       /* GC table id or checksum */
+    AMD_DISC_E_HARVEST_TABLE,  /* harvest table signature or checksum */
+    AMD_DISC_E_VCN_TABLE,      /* VCN info table id or checksum */
 } amd_disc_status;
 
 /* Byte-sum checksum used by every discovery table. */
