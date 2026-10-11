@@ -42,6 +42,8 @@ extern "C" {
 #define RD_CHECK_HARD_MIN_CLK_DPPCLK     0x2
 #define RD_CHECK_HARD_MIN_CLK_DPREFCLK   0x4
 #define RD_CHECK_HARD_MIN_CLK_DCFCLK     0x8
+#define RD_CHECK_HARD_MIN_CLK_DTBCLK     0x10
+#define RD_CHECK_HARD_MIN_CLK_UCLK       0x20
 /* PPCLK_e (smu13_driver_if_v13_0_0.h) */
 #define RD_PPCLK_DISPCLK 8
 #define RD_PPCLK_DPPCLK  9
