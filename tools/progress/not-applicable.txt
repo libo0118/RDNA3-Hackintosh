@@ -68,14 +68,26 @@ ih_v6_0_(is_idle|wait_for_idle|soft_reset)  IP-block callbacks amdgpu leaves as 
 ih_v6_0_irq_rearm  doorbell re-write for a lost rptr: SR-IOV only (ih_v6_0_set_rptr)
 amdgpu_ih_ring_write  software IH ring (ih_soft) for delegated retry faults; gmc_v11_0 runs with noretry
 soc21_read_indexed_register  GRBM-indexed register reads: no entry of soc21_allowed_read_registers is grbm_indexed
+gfx_v11_0_(calc_toc_total_size|config_(me|mec|pfp)_cache(_rs64)?|cp_compute_load_microcode(_rs64)?|cp_gfx_load_(me_|pfp_)?microcode(_rs64)?|disable_gpa_mode|init_toc_microcode|load_rlc_iram_dram_microcode|load_rlcg_microcode|load_rlcp_rlcv_microcode|parse_rlc_toc|rlc_autoload_buffer_(init|fini)|rlc_backdoor_autoload_[a-z_]+|rlc_load_microcode|select_cp_fw_arch|rlc_(start|stop|reset)|rlc_smu_handshake_cntl)  GC firmware load_type DIRECT / RLC_BACKDOOR_AUTO (the driver writes the CP / RLC images, RLC autoload TOC, and gfx_v11_0_rlc_resume's RLC stop / start around it): amdgpu loads GC 11.0.3's firmware through the PSP (AMDGPU_FW_LOAD_PSP), as psp13 does; rlc_reset has no caller and smu_handshake_cntl only runs from rlc_start
+gfx_v11_cntl_pg|gfx_v11_cntl_power_gating  GFX power gating through RLC_PG_CNTL: gfx_v11_0_set_powergating_state uses it for GC 11.0.1 / 11.0.4 / 11.5.x (APUs) only; GC 11.0.3 gates with GFXOFF (amdgpu_gfx_off_ctrl)
+gfx_v11_0_rlc_gc_fed_irq  RLC FED (fatal error) interrupt: dispatches RAS poison to the gfx / sdma ras_if, which amdgpu only creates with RAS (not on this card)
+gfx_v11_0_kiq_set_interrupt_state|gfx11_kiq_query_status  no caller in amdgpu v6.12: no irq source uses the KIQ GENERIC2 state function and kiq_pmf->kiq_query_status is never invoked
+gfx_v11_0_ring_emit_de_meta  MCBP preemption metadata: adev->gfx.mcbp is off on bare metal (amdgpu_device_set_mcbp enables it only with amdgpu.mcbp=1 or SR-IOV)
+gfx_v11_0_ring_emit_reg_wait  unused by the GFX rings: amdgpu_ring_emit_reg_wait comes from gmc_v11_0_emit_flush_gpu_tlb's invalidation semaphore (MMHUB only, gmc_v11_0_use_invalidate_semaphore) and from amdgpu_ring_emit_reg_write_reg_wait_helper, which rings with their own reg_write_reg_wait (all GFX rings) do not use
+gfx_v11_0_cp_gfx_switch_pipe  pipe switch for a second gfx ring (gfx ring 1 on pipe 1): GC 11.0.3 has me.num_pipe_per_me = 1; the PIPE_ID0 select is cp_gfx_resume's GRBM_GFX_CNTL write
+gfx_v11_0_tcp_harvest  empty in amdgpu v6.12 ("TODO: harvest feature to be added later")
+gfx_v11_0_(check_soft_reset|post_soft_reset)  IP-block soft reset of amdgpu_device_pre_asic_reset: amdgpu_device_ip_check_soft_reset and need_full_reset are true on SOC21 (soc21_need_full_reset), so amdgpu goes straight to a full reset
 # ---- no use on macOS
+amdgpu_gfx_parse_disable_cu|gfx_v11_0_set_user_wgp_inactive_bitmap_per_sh  amdgpu.disable_cu module option (Linux debug knob): unset, the masks are zero and set_user_wgp_inactive_bitmap_per_sh returns for a zero bitmap
+amdgpu_gfx_(kiq_fini|kiq_free_ring|mqd_sw_fini)|gfx_v11_0_(me_fini|mec_fini|pfp_fini|rlc_fini|sw_fini)  sw_fini buffer-object frees: rings, MQDs, EOP and clear-state buffers come from the bring-up's VRAM region, re-initialised as a whole (rdna3_vram_alloc_init) for a reset and dropped at unload; the firmware images go with the blobs; me / pfp / mec fw BOs exist only with load_type DIRECT
+gfx11_kiq_invalidate_tlbs|gfx_v11_0_ring_invalidate_tlbs|amdgpu_gmc_flush_gpu_tlb_pasid|gmc_v11_0_flush_gpu_tlb_pasid|gmc_v11_0_get_vmid_pasid_mapping_info  TLB flush by PASID: only amdgpu_vm_flush_compute_tlb (KFD compute VMs, ROCm on Linux) uses it; graphics VMs flush by VMID on their rings
 .*_get_clockgating_state|mmhub_v3_0_get_clockgating  clock-gating state for Linux sysfs / debugfs
 amdgpu_(get|set)_gfx_off_(entrycount|residency|status)  GFXOFF statistics for Linux sysfs
 .*_attr_is_visible|amdgpu_psp_vbflash_(read|write|status)|psp_v13_0_(exec_spi_cmd|update_spirom|vbflash_status)|psp_wait_for_spirom_update  VBIOS flashing through Linux sysfs
 psp_get_fw_attestation_records_addr  firmware attestation records for Linux sysfs
 die_kobj_release|ip_[a-z_]*_release|amdgpu_ucode_sys_visible  Linux kobject / sysfs
 amdgpu_discovery_read_binary_from_file  discovery table from a file (Linux module option)
-amdgpu_atomfirmware_gpu_virtualization_supported|gfx_v11_0_init_rlcg_reg_access_ctrl|amdgpu_kiq_(rreg|wreg)|psp_init_cap_microcode|psp_skip_tmr|psp_reg_program|psp_prep_reg_prog_cmd_buf  SR-IOV virtual functions (Linux host virtualization)
+amdgpu_atomfirmware_gpu_virtualization_supported|gfx_v11_0_init_rlcg_reg_access_ctrl|amdgpu_kiq_(rreg|wreg)|gfx_v11_0_ring_emit_rreg|psp_init_cap_microcode|psp_skip_tmr|psp_reg_program|psp_prep_reg_prog_cmd_buf  SR-IOV virtual functions (Linux host virtualization)
 amdgpu_gfx_kfd_sch_ctrl|amdgpu_ih_decode_iv_ts_helper|amdgpu_ih_wait_on_checkpoint_process_ts  KFD (ROCm compute on Linux)
 amdgpu_gfx_(enforce_isolation_handler|enforce_isolation_ring_begin_use|enforce_isolation_ring_end_use|get_enforce_isolation|set_enforce_isolation)|amdgpu_gfx_(cleaner_shader_init|cleaner_shader_sw_init|cleaner_shader_sw_fini|run_cleaner_shader|run_cleaner_shader_job|set_run_cleaner_shader)  process isolation / cleaner shader switched through Linux sysfs
 gfx_v11_0_read_wave_(data|sgprs|vgprs)|wave_read_(ind|regs)|gpu_recover_get  Linux debugfs dumps

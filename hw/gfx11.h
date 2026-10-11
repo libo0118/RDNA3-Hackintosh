@@ -110,6 +110,10 @@ typedef struct rdna3_gfx_ring {
     /* ring->vm_inv_eng (amdgpu_gmc_allocate_vm_inv_eng); 0 =
      * RD_GFX_VM_INV_ENG, which every ring uses by default */
     uint32_t vm_inv_eng;
+    /* rdna3amdgpu=1: amdgpu_ring_commit pads every commit to the ring's
+     * fetch size (align_mask 0xff) with gfx_v11_ring_insert_nop, and
+     * amdgpu_ring_alloc reserves the padding */
+    int      amdgpu_pad;
 } rdna3_gfx_ring;
 
 /* one IB of a job (VA in the job's VMID) */
@@ -132,6 +136,8 @@ typedef struct rdna3_gfx_ib {
 /* ring->cond_exe_gpu_addr: 1 = run (amdgpu_ring_init sets it; only
  * gfx_v11_0_ring_preempt_ib, not ported, would clear it) */
 #define RD_GFX_WB_COND_EXE 32
+/* amdgpu_device_wb_get slot of gfx_v11_0_ring_test_ib */
+#define RD_GFX_WB_IB_TEST 40
 
 /* parse the RS64 start addresses (returns RDNA3_EINVAL for a non-v2 header) */
 int  gfx11_rs64_from_fw(const void *pfp, uint32_t pfp_len, const void *me, uint32_t me_len,
@@ -298,6 +304,11 @@ typedef struct rdna3_mec_ring {
     uint64_t mqd, eop;      /* VRAM offsets */
     int      mapped;        /* HQD active (KIQ) / mapped by the KIQ (KCQ) */
     uint64_t mes_uc_start[2];   /* MES KIQ (me 3): scheduler / KIQ pipe start addresses */
+    /* amdgpu_ring_to_mqd_prop for a high priority compute queue
+     * (amdgpu_gfx_is_high_priority_compute_queue): the MQD gets
+     * AMDGPU_GFX_PIPE_PRIO_HIGH, AMDGPU_GFX_QUEUE_PRIORITY_MAXIMUM and
+     * allow_tunneling. Set before gfx11_kcq_start; 0 = normal priority */
+    int      high_prio;
 } rdna3_mec_ring;
 
 /* GC 11 always runs MES with the KIQ on its pipe 1 (amdgpu_discovery:
@@ -407,6 +418,121 @@ uint32_t gfx11_submit_compute_job(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t ct
 uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t ctx,
                                      uint32_t vmid, uint64_t pd_addr, const rdna3_gfx_ib *ibs,
                                      uint32_t n, const rdna3_gfx_job_ext *x);
+
+/* ---- queue topology (gfx_v11_0_early_init / sw_init) ----
+ * Which ME / MEC queues amdgpu owns and the kernel rings it builds on them,
+ * in the order amdgpu_ring_init sees them: for GC 11.0.3 gfx_0.0.0 and
+ * comp_1.0.0 comp_1.1.0 comp_1.2.0 comp_1.3.0 comp_1.0.1 .. comp_1.3.1
+ * (amdgpu_gfx_compute_queue_acquire spreads the eight KCQs over the four
+ * pipes of MEC1). Pure bookkeeping, no register access. */
+#define RD_GFX11_NUM_GFX_RINGS   1      /* GFX11_NUM_GFX_RINGS */
+#define RD_GFX11_MEC_HPD_SIZE    2048   /* GFX11_MEC_HPD_SIZE */
+#define RD_MAX_GFX_RINGS         2      /* AMDGPU_MAX_GFX_RINGS */
+#define RD_MAX_COMPUTE_RINGS     8      /* AMDGPU_MAX_COMPUTE_RINGS */
+#define RD_MAX_QUEUES            128    /* AMDGPU_MAX_QUEUES (queue bitmaps) */
+#define RD_GFX_PIPE_PRIO_NORMAL  1      /* AMDGPU_GFX_PIPE_PRIO_NORMAL */
+#define RD_GFX_PIPE_PRIO_HIGH    2      /* AMDGPU_GFX_PIPE_PRIO_HIGH */
+#define RD_GFX_QUEUE_PRIORITY_MAXIMUM 15
+/* enum amdgpu_cp_irq */
+#define RD_CP_IRQ_GFX_ME0_PIPE0_EOP       0
+#define RD_CP_IRQ_COMPUTE_MEC1_PIPE0_EOP  2
+
+typedef struct rdna3_gfx_ring_desc {
+    char     name[16];          /* ring->name */
+    uint32_t me, pipe, queue;
+    uint32_t doorbell_index;    /* ring->doorbell_index (assignment << 1) */
+    uint32_t eop_offset;        /* compute: into mec.hpd_eop_gpu_addr */
+    uint32_t irq_type;          /* AMDGPU_CP_IRQ_* of the EOP source */
+    uint32_t hw_prio;           /* RD_GFX_PIPE_PRIO_* */
+} rdna3_gfx_ring_desc;
+
+typedef struct rdna3_gfx_topo {
+    uint32_t gc_major, gc_minor, gc_rev;
+    int      async_gfx_ring;     /* amdgpu.async_gfx_ring (default 1) */
+    int      compute_multipipe;  /* amdgpu.compute_multipipe (default -1) */
+    uint32_t num_me, me_pipes, me_queues;      /* adev->gfx.me */
+    uint32_t num_mec, mec_pipes, mec_queues;   /* adev->gfx.mec */
+    uint64_t me_bitmap[RD_MAX_QUEUES / 64];    /* gfx.me.queue_bitmap */
+    uint64_t mec_bitmap[RD_MAX_QUEUES / 64];   /* gfx.mec_bitmap[0].queue_bitmap */
+    uint32_t num_gfx_rings, num_compute_rings;
+    uint32_t mec_hpd_size;                     /* gfx_v11_0_mec_init's HPD EOP buffer */
+    /* gfx_v11_0_gpu_early_init (adev->gfx.config) */
+    uint32_t max_hw_contexts, sc_prim_fifo_size_frontend, sc_prim_fifo_size_backend,
+             sc_hiz_tile_fifo_size, sc_earlyz_tile_fifo_size;
+    rdna3_gfx_ring_desc gfx[RD_MAX_GFX_RINGS], compute[RD_MAX_COMPUTE_RINGS];
+} rdna3_gfx_topo;
+
+/* amdgpu_gfx_get_num_kcq for the amdgpu.num_kcq option (-1 = default) */
+int  gfx11_get_num_kcq(int num_kcq);
+/* gfx_v11_0_early_init (ring counts) + gfx_v11_0_sw_init (ME / MEC queue
+ * counts, gfx_v11_0_me_init, gfx_v11_0_mec_init, the gfx and compute ring
+ * loops, gfx_v11_0_gpu_early_init) for GC major.minor.rev with the module
+ * options given; RDNA3_EINVAL for a GC it does not know */
+int  gfx11_sw_init_topo(rdna3_gfx_topo *t, uint32_t gc_major, uint32_t gc_minor, uint32_t gc_rev,
+                        int num_kcq, int async_gfx_ring, int compute_multipipe);
+int  gfx11_mec_queue_to_bit(const rdna3_gfx_topo *t, int mec, int pipe, int queue);
+void gfx11_queue_mask_bit_to_mec_queue(const rdna3_gfx_topo *t, int bit, int *mec, int *pipe,
+                                       int *queue);
+int  gfx11_is_mec_queue_enabled(const rdna3_gfx_topo *t, int mec, int pipe, int queue);
+int  gfx11_me_queue_to_bit(const rdna3_gfx_topo *t, int me, int pipe, int queue);
+void gfx11_bit_to_me_queue(const rdna3_gfx_topo *t, int bit, int *me, int *pipe, int *queue);
+int  gfx11_is_me_queue_enabled(const rdna3_gfx_topo *t, int me, int pipe, int queue);
+/* the compute / gfx ring with index 'ring_id' runs at high priority */
+int  gfx11_is_high_priority_compute_queue(const rdna3_gfx_topo *t, uint32_t ring_id);
+int  gfx11_is_high_priority_graphics_queue(const rdna3_gfx_topo *t, uint32_t ring_id);
+
+/* gfx_v11_0_select_me_pipe_q (soc21_grbm_select) */
+void gfx11_select_me_pipe_q(rdna3_dev *d, uint32_t me, uint32_t pipe, uint32_t q, uint32_t vm);
+
+/* ---- rdna3amdgpu=1 ports ---- */
+/* gfx_v11_ring_insert_nop: 'num_nop' dwords of NOP (ring->funcs->nop is
+ * PACKET3(NOP, 0x3FFF), a one-dword NOP) */
+void gfx11_ring_insert_nop(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t num_nop);
+/* gfx_v11_0_ring_emit_pipeline_sync: wait until the ring's fence slot
+ * reaches the last emitted fence (ring->fence_drv.sync_seq); the gfx ring
+ * waits from the PFP */
+void gfx11_emit_pipeline_sync(rdna3_dev *d, rdna3_gfx_ring *r);
+/* gfx_v11_0_ring_emit_fence_kiq: WRITE_DATA of the 32-bit 'seq' to 'addr';
+ * with 'irq' also CPC_INT_STATUS (src_id 178) */
+void gfx11_emit_fence_kiq(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t addr, uint32_t seq, int irq);
+/* gfx_v11_0_ring_emit_reg_write_reg_wait: write 'ref' to reg0, wait for
+ * reg1 & mask == ref & mask (from the PFP on the gfx ring) */
+void gfx11_emit_reg_write_reg_wait(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t reg0, uint32_t reg1,
+                                   uint32_t ref, uint32_t mask);
+/* gfx_v11_0_ring_get_wptr_gfx / _compute: the poll slot with a doorbell,
+ * CP_RB0_WPTR otherwise (gfx only) */
+uint64_t gfx11_ring_get_wptr(rdna3_dev *d, rdna3_gfx_ring *r);
+/* gfx_v11_0_wait_for_idle: GRBM_STATUS.GUI_ACTIVE clear within usec_timeout */
+int  gfx11_wait_for_idle(rdna3_dev *d);
+/* gfx_v11_0_request_gfx_index_mutex: CP_GFX_INDEX_MUTEX as client 4 (MeId
+ * 2 pipe 0); RDNA3_EINVAL when the firmware holds it past usec_timeout */
+int  gfx11_request_gfx_index_mutex(rdna3_dev *d, int req);
+/* gfx_v11_0_update_spm_vmid (RLC_SPM_MC_CNTL.RLC_SPM_VMID; the GFXOFF
+ * hold around it is the caller's, as amdgpu_gfx_off_ctrl) */
+void gfx11_update_spm_vmid(rdna3_dev *d, uint32_t vmid);
+/* gfx_v11_0_set_priv_reg_fault_state / _priv_inst_fault_state /
+ * _bad_op_fault_state over the CPG (ME0 pipe 0) and CPC (MEC1 pipes 0-3)
+ * interrupt controls gfx_v11_0_get_cpg_int_cntl / _get_cpc_int_cntl name;
+ * gfx_v11_0_late_init enables all three (amdgpu_irq_get), hw_fini puts them */
+void gfx11_set_priv_reg_fault_state(rdna3_dev *d, int enable);
+void gfx11_set_priv_inst_fault_state(rdna3_dev *d, int enable);
+void gfx11_set_bad_op_fault_state(rdna3_dev *d, int enable);
+void gfx11_late_init(rdna3_dev *d);
+#define RD_IH_SRC_CP_BAD_OPCODE   183   /* GFX_11_0_0__SRCID__CP_BAD_OPCODE_ERROR */
+#define RD_IH_SRC_CP_PRIV_REG     184   /* GFX_11_0_0__SRCID__CP_PRIV_REG_FAULT */
+#define RD_IH_SRC_CP_PRIV_INSTR   185   /* GFX_11_0_0__SRCID__CP_PRIV_INSTR_FAULT */
+/* gfx_v11_0_priv_reg_irq / _priv_inst_irq / _bad_op_irq ->
+ * gfx_v11_0_handle_priv_fault: an IV of client GRBM_CP with one of the three
+ * sources returns 1 and the ring it names (me from ring_id bits 3:2, pipe
+ * 1:0, queue 6:4); 'ring' gets 0 for the gfx ring (me 0), 1 for a compute
+ * ring (me 1/2), -1 when no ring of 'gfx' / 'kcq' matches (the caller then
+ * calls drm_sched_fault's equivalent for the match). 0 for other IVs. */
+int  gfx11_handle_priv_fault(const rdna3_iv *iv, const rdna3_gfx_ring *gfx,
+                             const rdna3_mec_ring *kcq, int *ring);
+/* gfx_v11_0_ring_test_ib: an IB in 'ib' (VRAM offset, 64 bytes, VMID 0)
+ * writes 0xDEADBEEF over 0xCAFEDEAD in the ring's writeback test slot;
+ * waits for the fence. RDNA3_OK, RDNA3_ETIME, RDNA3_EINVAL */
+int  gfx11_ring_test_ib(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ib);
 
 #ifdef __cplusplus
 }

@@ -65,6 +65,7 @@
 #include "gen/gc_11_0_0_cg.h"
 #include "gen/gc_11_0_0_rs64.h"
 #include "gen/gc_11_0_0_mes.h"
+#include "gen/gc_11_0_0_irq.h"
 #include "gen/dcn_3_2_0_gpio.h"
 #include "gen/dcn_3_2_0_i2c.h"
 #include "gen/dcn_3_2_0_dig.h"
@@ -347,6 +348,8 @@ typedef struct sim {
         int all_enabled;      /* EnableAllSmuFeatures done */
     } smu;
     unsigned vm_huge_walks;              /* translations through a PDE_PTE (huge) entry */
+    unsigned cp_mem_polls, cp_fault_ivs, cp_nop1;   /* WAIT_REG_MEM on memory, CP fault IVs, 1-dword NOPs */
+    int gfx_mutex_fw;                    /* the firmware holds CP_GFX_INDEX_MUTEX */
     uint32_t sh_mem[16][3];              /* per VMID: SH_MEM_CONFIG, SH_MEM_BASES, SPI_GDBG_PER_VMID_CNTL */
     unsigned ih_snooped, ih_ring1_ivs, ih_db_rptr, ih_db_unrouted;   /* IH in system memory (rdna3amdgpu=1) */
     unsigned sdma_pkts, sdma_bad, sdma_while_halted;
@@ -1685,7 +1688,8 @@ static struct hqd *hqd_sel(void)
 /* MAP_QUEUES: the firmware loads the HQD from the MQD in memory */
 static const struct { uint32_t mqd, reg; } mqd_map[] = {
     { 128, regCP_MQD_BASE_ADDR }, { 129, regCP_MQD_BASE_ADDR_HI }, { 130, regCP_HQD_ACTIVE },
-    { 131, regCP_HQD_VMID }, { 132, regCP_HQD_PERSISTENT_STATE }, { 136, regCP_HQD_PQ_BASE },
+    { 131, regCP_HQD_VMID }, { 132, regCP_HQD_PERSISTENT_STATE }, { 133, regCP_HQD_PIPE_PRIORITY },
+    { 134, regCP_HQD_QUEUE_PRIORITY }, { 136, regCP_HQD_PQ_BASE },
     { 137, regCP_HQD_PQ_BASE_HI }, { 138, regCP_HQD_PQ_RPTR }, { 139, regCP_HQD_PQ_RPTR_REPORT_ADDR },
     { 140, regCP_HQD_PQ_RPTR_REPORT_ADDR_HI }, { 141, regCP_HQD_PQ_WPTR_POLL_ADDR },
     { 142, regCP_HQD_PQ_WPTR_POLL_ADDR_HI }, { 143, regCP_HQD_PQ_DOORBELL_CONTROL },
@@ -1864,6 +1868,11 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
         if (S.cp_cur_uq && !in_ib)
             S.cp_uq_pos = rptr + (type == 3 ? 2 + cnt : 1);
         if (type != 3) { S.cp_bad++; rptr++; continue; }
+        if (op == PACKET3_NOP && cnt == 0x3FFF) {   /* ring->funcs->nop: one dword */
+            S.cp_nop1++;
+            rptr++;
+            continue;
+        }
         switch (op) {
         case PACKET3_SET_UCONFIG_REG:
             for (uint32_t i = 0; i < cnt; i++)
@@ -1978,7 +1987,15 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
         }
         case PACKET3_WAIT_REG_MEM: {
             uint32_t ctl = PK(1), ref = PK(4), mask_ = PK(5), v;
-            if (ctl & (1u << 4)) { S.cp_bad++; break; }   /* memory polls not modelled */
+            if (ctl & (1u << 4)) {                        /* poll memory (equal) */
+                uint8_t *mp = (ctl & (1u << 6)) ? NULL : cp_mem(PK(2) | ((uint64_t)PK(3) << 32), 4);
+                if (!mp) { S.cp_bad++; break; }
+                memcpy(&v, mp, 4);
+                S.cp_mem_polls++;
+                if ((v & mask_) != (ref & mask_))
+                    S.cp_wait_stuck++;
+                break;
+            }
             if (ctl & (1u << 6)) {                        /* write, then wait */
                 sim_wr(NULL, 4ull * PK(2), ref);
                 v = sim_rd(NULL, 4ull * PK(3));
@@ -1997,7 +2014,8 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
             static uint32_t ib[4096];
             if (in_ib || ndw > 4096) { S.cp_bad++; break; }
             for (i = 0; i < ndw; i++) {
-                uint8_t *p = vm_ptr(vmid, va + 4ull * i, 4);
+                /* VMID 0 (kernel IBs, amdgpu_ib_get): MC addresses */
+                uint8_t *p = (vmid || S.cp_cur_uq) ? vm_ptr(vmid, va + 4ull * i, 4) : mc_ptr(va + 4ull * i, 4);
                 if (!p) {
                     uint64_t fa = va + 4ull * i;
                     uint32_t cntl = S.reg[GC_BASE0 + regGCVM_CONTEXT0_CNTL +
@@ -2043,7 +2061,22 @@ static uint64_t cp_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, uint6
             }
             break;
         }
-        default: S.cp_bad++; break;
+        default: {
+            /* an opcode the CP does not know: CP_BAD_OPCODE_ERROR when the
+             * engine's OPCODE_ERROR_INT_ENABLE is set */
+            uint32_t en = S.cp_cur_me == 0
+                ? S.reg[GCR(regCP_INT_CNTL_RING0)] & CP_INT_CNTL_RING0__OPCODE_ERROR_INT_ENABLE_MASK
+                : S.cp_cur_me == 1
+                ? S.reg[GCR(regCP_ME1_PIPE0_INT_CNTL) + S.cp_cur_pipe] & CP_ME1_PIPE0_INT_CNTL__OPCODE_ERROR_INT_ENABLE_MASK
+                : 0;
+            S.cp_bad++;
+            if (en && !S.cp_cur_uq) {
+                S.cp_fault_ivs++;
+                ih_push(RD_IH_CLIENT_GRBM_CP, RD_IH_SRC_CP_BAD_OPCODE,
+                        (S.cp_cur_queue << 4) | (S.cp_cur_me << 2) | S.cp_cur_pipe);
+            }
+            break;
+        }
         }
         rptr += 2 + cnt;
     }
@@ -3898,6 +3931,9 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
     sim_tick();
     if (off >= MMIO_LEN)
         return ~0u;
+    /* CP_GFX_INDEX_MUTEX held by the firmware (client 2) */
+    if (dw == GCR(regCP_GFX_INDEX_MUTEX) && S.gfx_mutex_fw)
+        return 0x5;
     if (dw == NBIO_B1 + regBIF_BX_PF0_RSMU_DATA) {
         uint32_t *p = smn_slot(S.smn_index, 0);
         return p ? *p : 0;
@@ -4437,6 +4473,162 @@ static uint32_t uq_pm4(uint32_t *q, uint64_t a, uint32_t v, uint64_t fa, uint32_
     q[n++] = 0;
     q[n++] = 0;
     return n;
+}
+
+/* rdna3amdgpu=1 GFX 11 ports: gfx_v11_0_sw_init's queue topology, the
+ * padded commits, pipeline sync, KCQ priority, the soft reset's GFX index
+ * mutex, the CP fault interrupts and the IB tests */
+static void test_gfx_amdgpu(rdna3_dev *dev, rdna3_gfx_ring *gr, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq,
+                            uint64_t ibva, uint32_t ndw, uint64_t pd)
+{
+    static rdna3_gfx_topo t;
+    static const char *const comp[8] = { "comp_1.0.0", "comp_1.1.0", "comp_1.2.0", "comp_1.3.0",
+                                         "comp_1.0.1", "comp_1.1.1", "comp_1.2.1", "comp_1.3.1" };
+    struct hqd *hc = &S.hqd[RD_KCQ0_PIPE][0];
+    rdna3_gfx_ib job = { ibva, ndw, 0 };
+    rdna3_iv iv;
+    uint64_t ibt = rdna3_vram_alloc(dev, 4096, 4096, "ib-test");
+    uint32_t k, seq, polls0, ibs0, faults0, nop0;
+    int a, b, c, which;
+
+    /* gfx_v11_0_early_init + sw_init for GC 11.0.3: the rings of the host's dmesg */
+    CHECK(gfx11_sw_init_topo(&t, 11, 0, 3, -1, 1, -1) == RDNA3_OK);
+    CHECK(t.num_gfx_rings == 1 && t.num_compute_rings == 8 && t.num_mec == 2 && t.mec_pipes == 4 &&
+          t.mec_queues == 4 && t.me_bitmap[0] == 1 && t.mec_bitmap[0] == 0x3333 && t.mec_bitmap[1] == 0);
+    CHECK(!strcmp(t.gfx[0].name, "gfx_0.0.0") && t.gfx[0].doorbell_index == RD_DB_INDEX(RD_DB_GFX_RING0) &&
+          t.gfx[0].irq_type == RD_CP_IRQ_GFX_ME0_PIPE0_EOP && t.gfx[0].hw_prio == RD_GFX_PIPE_PRIO_NORMAL);
+    for (k = 0; k < 8; k++)
+        CHECK(!strcmp(t.compute[k].name, comp[k]) &&
+              t.compute[k].doorbell_index == RD_DB_INDEX(RD_DB_MEC_RING0 + k) &&
+              t.compute[k].eop_offset == k * RD_GFX11_MEC_HPD_SIZE && t.compute[k].me == 1 &&
+              t.compute[k].irq_type == RD_CP_IRQ_COMPUTE_MEC1_PIPE0_EOP + t.compute[k].pipe &&
+              t.compute[k].hw_prio == (k ? RD_GFX_PIPE_PRIO_NORMAL : RD_GFX_PIPE_PRIO_HIGH));
+    CHECK(gfx11_is_high_priority_compute_queue(&t, 0) && !gfx11_is_high_priority_compute_queue(&t, 1) &&
+          !gfx11_is_high_priority_graphics_queue(&t, 0));
+    CHECK(t.mec_hpd_size == 8 * RD_GFX11_MEC_HPD_SIZE && t.max_hw_contexts == 8 &&
+          t.sc_prim_fifo_size_frontend == 0x20 && t.sc_prim_fifo_size_backend == 0x100 &&
+          t.sc_hiz_tile_fifo_size == 0 && t.sc_earlyz_tile_fifo_size == 0x4C0);
+    CHECK(gfx11_mec_queue_to_bit(&t, 1, 2, 3) == 27);
+    gfx11_queue_mask_bit_to_mec_queue(&t, 27, &a, &b, &c);
+    CHECK(a == 1 && b == 2 && c == 3);
+    CHECK(gfx11_is_mec_queue_enabled(&t, 0, 3, 1) && !gfx11_is_mec_queue_enabled(&t, 0, 3, 2) &&
+          !gfx11_is_mec_queue_enabled(&t, 1, 0, 0));
+    gfx11_bit_to_me_queue(&t, 0, &a, &b, &c);
+    CHECK(a == 0 && b == 0 && c == 0 && gfx11_me_queue_to_bit(&t, 0, 0, 0) == 0 &&
+          gfx11_is_me_queue_enabled(&t, 0, 0, 0));
+    CHECK(gfx11_get_num_kcq(-1) == 8 && gfx11_get_num_kcq(9) == 8 && gfx11_get_num_kcq(-2) == 8 &&
+          gfx11_get_num_kcq(3) == 3);
+    /* amdgpu.num_kcq=1: one normal-priority ring; compute_multipipe=0: whole pipes */
+    CHECK(gfx11_sw_init_topo(&t, 11, 0, 3, 1, 1, -1) == RDNA3_OK && t.num_compute_rings == 1 &&
+          t.compute[0].hw_prio == RD_GFX_PIPE_PRIO_NORMAL && t.mec_bitmap[0] == 1);
+    CHECK(gfx11_sw_init_topo(&t, 11, 0, 3, -1, 1, 0) == RDNA3_OK && t.mec_bitmap[0] == 0xff &&
+          !strcmp(t.compute[1].name, "comp_1.1.0") && !strcmp(t.compute[2].name, "comp_1.0.1") &&
+          !strcmp(t.compute[7].name, "comp_1.1.3"));
+    CHECK(gfx11_sw_init_topo(&t, 11, 0, 1, -1, 1, -1) == RDNA3_OK && t.num_mec == 1 &&
+          t.sc_hiz_tile_fifo_size == 0x80 && t.sc_earlyz_tile_fifo_size == 0x300);
+    CHECK(gfx11_sw_init_topo(&t, 12, 0, 0, -1, 1, -1) == RDNA3_EINVAL && t.mec_queues == 8);
+
+    /* gfx_v11_0_select_me_pipe_q */
+    gfx11_select_me_pipe_q(dev, 1, 2, 3, 4);
+    CHECK(S.reg[GCR(regGRBM_GFX_CNTL)] == ((2u << GRBM_GFX_CNTL__PIPEID__SHIFT) | (1u << GRBM_GFX_CNTL__MEID__SHIFT) |
+                                           (4u << GRBM_GFX_CNTL__VMID__SHIFT) | (3u << GRBM_GFX_CNTL__QUEUEID__SHIFT)));
+    gfx11_select_me_pipe_q(dev, 0, 0, 0, 0);
+
+    dev->amdgpu_exact = 1;
+    /* amdgpu_ring_commit: every commit padded to 256 dwords with
+     * gfx_v11_ring_insert_nop; gfx_v11_0_ring_get_wptr_* */
+    gr->amdgpu_pad = kcq->rb.amdgpu_pad = 1;
+    nop0 = S.cp_nop1;
+    polls0 = S.cp_mem_polls;
+    seq = gfx11_submit_job(dev, gr, 0x77, 5, pd, &job, 1);
+    CHECK(seq && gfx11_wait_fence(dev, gr, seq) == RDNA3_OK && (gr->wptr & 0xff) == 0);
+    CHECK(gfx11_ring_get_wptr(dev, gr) == gr->wptr);
+    seq = gfx11_submit_compute_job(dev, kcq, 0x78, 5, pd, &job, 1);
+    CHECK(seq && gfx11_wait_fence(dev, &kcq->rb, seq) == RDNA3_OK && (kcq->rb.wptr & 0xff) == 0);
+    CHECK(gfx11_ring_get_wptr(dev, &kcq->rb) == kcq->rb.wptr);
+    /* amdgpu_vm_need_pipeline_sync: both jobs flushed VMID 5 -> one memory
+     * poll each, on a fence that had landed */
+    CHECK(S.cp_mem_polls == polls0 + 2 && S.cp_nop1 > nop0 && S.cp_bad == 0 && S.cp_wait_stuck == 0);
+    seq = gfx11_submit_compute_job(dev, kcq, 0x78, 0, 0, &job, 1);   /* VMID 0: no sync */
+    CHECK(seq && gfx11_wait_fence(dev, &kcq->rb, seq) == RDNA3_OK && S.cp_mem_polls == polls0 + 2);
+    gfx11_ring_insert_nop(dev, &kcq->rb, 1);
+    gfx11_ring_insert_nop(dev, &kcq->rb, 5);
+    gfx11_commit(dev, &kcq->rb);
+    CHECK((kcq->rb.wptr & 0xff) == 0 && S.cp_bad == 0);
+
+    /* gfx_v11_0_ring_test_ib on both rings (IB in VMID 0) */
+    ibs0 = S.cp_ibs;
+    CHECK(gfx11_ring_test_ib(dev, gr, ibt) == RDNA3_OK && gfx11_ring_test_ib(dev, &kcq->rb, ibt) == RDNA3_OK);
+    CHECK(S.cp_ibs == ibs0 + 2 && S.cp_bad == 0);
+    CHECK(gfx11_ring_test_ib(dev, gr, UINT64_MAX) == RDNA3_EINVAL);
+
+    /* gfx_v11_0_late_init: the CP fault sources on ME0 pipe 0 and MEC1 pipes 0-3 */
+    S.reg[GCR(regCP_INT_CNTL_RING1)] = 0;
+    gfx11_late_init(dev);
+    CHECK((S.reg[GCR(regCP_INT_CNTL_RING0)] & 0x01C00000u) == 0x01C00000u && S.reg[GCR(regCP_INT_CNTL_RING1)] == 0);
+    for (k = 0; k < 4; k++)
+        CHECK((S.reg[GCR(regCP_ME1_PIPE0_INT_CNTL) + k] & 0x01C00000u) == 0x01800000u);
+    /* a bad opcode on the KCQ raises CP_BAD_OPCODE_ERROR naming me 1 pipe 0 queue 0 */
+    faults0 = S.cp_fault_ivs;
+    gfx11_write(dev, &kcq->rb, PACKET3(0xFE, 0));
+    gfx11_write(dev, &kcq->rb, 0);
+    gfx11_commit(dev, &kcq->rb);
+    CHECK(S.cp_fault_ivs == faults0 + 1 && S.cp_bad == 1);
+    S.cp_bad = 0;
+    memset(&iv, 0, sizeof(iv));
+    iv.client_id = RD_IH_CLIENT_GRBM_CP;
+    iv.src_id = RD_IH_SRC_CP_BAD_OPCODE;
+    iv.ring_id = (0u << 4) | (1u << 2) | 0u;
+    CHECK(gfx11_handle_priv_fault(&iv, gr, kcq, &which) == 1 && which == 1);
+    iv.src_id = RD_IH_SRC_CP_PRIV_REG;
+    iv.ring_id = 0;
+    CHECK(gfx11_handle_priv_fault(&iv, gr, kcq, &which) == 1 && which == 0);
+    iv.src_id = RD_IH_SRC_CP_PRIV_INSTR;
+    iv.ring_id = (1u << 2) | 2u;   /* me 1 pipe 2: not ours */
+    CHECK(gfx11_handle_priv_fault(&iv, gr, kcq, &which) == 1 && which == -1);
+    iv.src_id = RD_IH_SRC_CP_EOP;
+    CHECK(gfx11_handle_priv_fault(&iv, gr, kcq, &which) == 0);
+    /* gfx_v11_0_hw_fini puts them */
+    gfx11_set_priv_reg_fault_state(dev, 0);
+    gfx11_set_priv_inst_fault_state(dev, 0);
+    gfx11_set_bad_op_fault_state(dev, 0);
+    CHECK(!(S.reg[GCR(regCP_INT_CNTL_RING0)] & 0x01C00000u) && !(S.reg[GCR(regCP_ME1_PIPE3_INT_CNTL)] & 0x01C00000u));
+
+    /* gfx_v11_0_update_spm_vmid, gfx_v11_0_get_tcc_info, wait_for_idle */
+    S.reg[GCR(regRLC_SPM_MC_CNTL)] = 0x30;
+    gfx11_update_spm_vmid(dev, 0xf);
+    CHECK(S.reg[GCR(regRLC_SPM_MC_CNTL)] == 0x3f);
+    S.reg[GCR(regCGTS_TCC_DISABLE)] = 0x00030100u;
+    S.reg[GCR(regCGTS_USER_TCC_DISABLE)] = 0x00040000u;
+    CHECK(gfx11_get_tcc_info(dev) == 0x00010007u);
+    S.reg[GCR(regCGTS_TCC_DISABLE)] = S.reg[GCR(regCGTS_USER_TCC_DISABLE)] = 0;
+    CHECK(gfx11_wait_for_idle(dev) == RDNA3_OK);
+
+    /* gfx_v11_0_request_gfx_index_mutex: granted, released; a firmware
+     * holding it makes the request time out */
+    CHECK(gfx11_request_gfx_index_mutex(dev, 1) == RDNA3_OK && S.reg[GCR(regCP_GFX_INDEX_MUTEX)] == 0x9);
+    CHECK(gfx11_request_gfx_index_mutex(dev, 0) == RDNA3_OK && S.reg[GCR(regCP_GFX_INDEX_MUTEX)] == 0x8);
+    S.gfx_mutex_fw = 1;
+    CHECK(gfx11_request_gfx_index_mutex(dev, 1) == RDNA3_EINVAL);
+    S.gfx_mutex_fw = 0;
+
+    /* gfx_v11_0_soft_reset with the mutex, then the KCQ comes back as
+     * amdgpu's high priority comp_1.0.0 (pipe HIGH, queue 15, tunneling) */
+    kcq->high_prio = 1;
+    CHECK(gfx11_soft_reset(dev, gr, kiq, kcq) == RDNA3_OK && gr->ready && kcq->rb.ready);
+    CHECK(S.reg[GCR(regCP_GFX_INDEX_MUTEX)] == 0x8 && S.reg[GCR(regGRBM_GFX_CNTL)] == 0);
+    CHECK(HQD(hc, regCP_HQD_PIPE_PRIORITY) == RD_GFX_PIPE_PRIO_HIGH &&
+          HQD(hc, regCP_HQD_QUEUE_PRIORITY) == RD_GFX_QUEUE_PRIORITY_MAXIMUM &&
+          (HQD(hc, regCP_HQD_PQ_CONTROL) & CP_HQD_PQ_CONTROL__TUNNEL_DISPATCH_MASK));
+    seq = gfx11_submit_compute_job(dev, kcq, 0x79, 5, pd, &job, 1);
+    CHECK(seq && gfx11_wait_fence(dev, &kcq->rb, seq) == RDNA3_OK && S.cp_bad == 0 && S.cp_wait_stuck == 0);
+    S.gfx_mutex_fw = 1;
+    CHECK(gfx11_soft_reset(dev, gr, kiq, kcq) == RDNA3_EINVAL && !S.rlc_safe);
+    S.gfx_mutex_fw = 0;
+    CHECK(gfx11_soft_reset(dev, gr, kiq, kcq) == RDNA3_OK && gr->ready && kcq->rb.ready);
+    kcq->high_prio = 0;
+    gr->amdgpu_pad = kcq->rb.amdgpu_pad = 0;
+    dev->amdgpu_exact = 0;
 }
 
 static void test_userq_hw(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
@@ -8003,6 +8195,9 @@ static void run(const char *fwdir)
                         CHECK(S.reg[GCR(regCP_VMID_RESET)] == 0 && S.reg[GCR(regGRBM_GFX_CNTL)] == 0);
                         CHECK(HQD(hk, regCP_HQD_ACTIVE) == 1 && HQD(hc, regCP_HQD_ACTIVE) == 1 && hc->mapped_by_kiq);
                         CHECK(S.cp_bad == 0 && S.mec_bad_queue == 0);
+                        CHECK(HQD(hc, regCP_HQD_PIPE_PRIORITY) == 0 && HQD(hc, regCP_HQD_QUEUE_PRIORITY) == 0 &&
+                              !(HQD(hc, regCP_HQD_PQ_CONTROL) & CP_HQD_PQ_CONTROL__TUNNEL_DISPATCH_MASK));
+                        test_gfx_amdgpu(&dev, &gr, &kiq, &kcq, ibva, n, gpuvm_pd_addr(&dev, &vm));
                         /* gfx_v11_0_update_gfx_clock_gating for GC 11.0.3, in RLC safe mode */
                         {
                             uint32_t ov0 = RLC_CGTT_MGCG_OVERRIDE__GFXIP_CGCG_OVERRIDE_MASK |

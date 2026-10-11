@@ -343,6 +343,12 @@ int main(void)
             bm[0][1] = 0x3ff; bm[2][1] = 0x3ff;
             rdna3_drm_device_set_cu_info(&dev, bm, 60, 0xfff);
         }
+        /* gfx_v11_0_get_tcc_info's mask (rdna3amdgpu=1) */
+        CHECK(di.tcc_disabled_mask == 0);
+        rdna3_drm_device_set_tcc_disabled(&dev, 0x10007);
+        memset(&di, 0, sizeof(di));
+        CHECK(info(f, AMDGPU_INFO_DEV_INFO, &di, sizeof(di)) == 0 && di.tcc_disabled_mask == 0x10007);
+        rdna3_drm_device_set_tcc_disabled(&dev, 0);
         /* clocks from DPM: 500..2124 MHz gfx, 96..1218 MHz uclk; 0 keeps */
         rdna3_drm_device_set_clocks(&dev, 500000, 2124000, 96000, 1218000);
         rdna3_drm_device_set_clocks(&dev, 0, 0, 0, 0);

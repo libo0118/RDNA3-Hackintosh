@@ -32,6 +32,11 @@ typedef struct rdna3_gfx_cu_info {
 } rdna3_gfx_cu_info;
 
 int gfx11_get_cu_info(rdna3_dev *d, rdna3_gfx_cu_info *ci);
+/* gfx_v11_0_get_tcc_info (gfx_v11_0_constants_init): the disabled GL2
+ * channels, CGTS_TCC_DISABLE | CGTS_USER_TCC_DISABLE, TCC_DISABLE in bits
+ * 15:0 and HI_TCC_DISABLE in 23:16 (adev->gfx.config.tcc_disabled_mask,
+ * AMDGPU_INFO_DEV_INFO's tcc_disabled_mask) */
+uint32_t gfx11_get_tcc_info(rdna3_dev *d);
 
 #ifdef __cplusplus
 }

@@ -234,6 +234,13 @@ void RDNA3Bringup::stopAndFree()
         soc21_set_clock_gating(fDev, 0);
     if (fKcq && fKcq->rb.ready && fDev)
         gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
+    /* gfx_v11_0_hw_fini: amdgpu_irq_put of the three CP fault sources
+     * (rdna3amdgpu=1, which enabled them) */
+    if (fAmdgpuExact && fGfx && fGfx->ready && fDev) {
+        gfx11_set_priv_reg_fault_state(fDev, 0);
+        gfx11_set_priv_inst_fault_state(fDev, 0);
+        gfx11_set_bad_op_fault_state(fDev, 0);
+    }
     if (fGfx && fGfx->async && fGfx->ready && fDev) {
         gfx11_set_eop_interrupt(fDev, fGfx, 0);
         gfx11_kgq_stop(fDev, fKiq, fGfx);   /* unmapped while the KIQ still runs */
@@ -275,8 +282,9 @@ void RDNA3Bringup::stopAndFree()
         gmc11_hw_fini(fDev);
 
     /* 3. memory: mappings, firmware, state; fDev last. The firmware images
-     * go like amdgpu_ucode_release in psp_sw_fini (sOS, TA) and
-     * smu_v13_0_fini_microcode (the SMC image among the blobs) */
+     * go like amdgpu_ucode_release in psp_sw_fini (sOS, TA),
+     * smu_v13_0_fini_microcode (the SMC image among the blobs) and
+     * gfx_v11_0_free_microcode (PFP, ME, RLC, MEC) */
     OSSafeReleaseNULL(fVram);
     OSSafeReleaseNULL(fDoorbell);
     for (unsigned i = 0; i < AMD_BLOB_COUNT; i++)
@@ -1002,6 +1010,28 @@ bool RDNA3Bringup::hwInit()
         bzero(fGfx, sizeof(*fGfx));
         /* amdgpu_async_gfx_ring (default 1): the KIQ maps the gfx queue */
         fGfx->async = fDev->doorbell_ok;
+        /* rdna3amdgpu=1: gfx_v11_0_early_init / sw_init's queue topology
+         * (amdgpu.num_kcq, async_gfx_ring, compute_multipipe defaults), the
+         * rings padded to their fetch size (amdgpu_ring_commit) and
+         * gfx_v11_0_rlc_init's update_spm_vmid(0xf) */
+        if (fAmdgpuExact) {
+            const rdna3_ipver *gcv = &fDev->ipver[HWIP_GC];
+            int tr = gfx11_sw_init_topo(&fGfxTopo, gcv->major, gcv->minor, gcv->rev, -1, 1, -1);
+            if (tr == RDNA3_OK) {
+                char names[128];
+                uint32_t n = 0;
+                for (uint32_t c = 0; c < fGfxTopo.num_compute_rings && n + 16 < sizeof(names); c++) {
+                    for (const char *q = fGfxTopo.compute[c].name; *q; q++)
+                        names[n++] = *q;
+                    names[n++] = ' ';
+                }
+                names[n ? n - 1 : 0] = 0;
+                publishString("RDNA3,ComputeRings", names);
+                publish("RDNA3,MaxHwContexts", fGfxTopo.max_hw_contexts);
+            }
+            fGfx->amdgpu_pad = 1;
+            gfx11_update_spm_vmid(fDev, 0xf);
+        }
         /* gfx_v11_0_check_fw_cp_gfx_shadow on the CP firmware headers (the
          * AMDGPU_INFO_FW_GFX_* versions the UAPI answers DEV_INFO from); not
          * a VF, so off - as amdgpu leaves it on bare metal */
@@ -1016,6 +1046,8 @@ bool RDNA3Bringup::hwInit()
         ret = gfx11_rs64_from_fw(fBlobs[AMD_BLOB_PFP].data, fBlobs[AMD_BLOB_PFP].len,
                                  fBlobs[AMD_BLOB_ME].data, fBlobs[AMD_BLOB_ME].len,
                                  fBlobs[AMD_BLOB_MEC].data, fBlobs[AMD_BLOB_MEC].len, &rs64);
+        /* gfx_v11_0_hw_init; after a reset or a wake this is
+         * gfx_v11_0_resume, which is gfx_v11_0_hw_init again */
         if (!ret)
             ret = gfx11_hw_init(fDev, fGmc, fGfx, &rs64, 0);
         /* MEC: the KIQ and the first kernel compute queue (needs doorbells) */
@@ -1042,6 +1074,14 @@ bool RDNA3Bringup::hwInit()
                 publish("RDNA3,KIQOnMES", fKiq->me == 3 ? 1 : 0);
                 if (!kr)
                     kr = gfx11_mec_ring_init(fDev, fKcq, 0, RD_KCQ0_PIPE, 0, RD_DB_MEC_RING0, 0);
+                if (!kr && fAmdgpuExact) {
+                    /* our KCQ is amdgpu's compute_ring[0] (comp_1.0.0): high
+                     * priority with eight KCQs (amdgpu_ring_to_mqd_prop) */
+                    fKcq->high_prio = fGfxTopo.num_compute_rings &&
+                                      fGfxTopo.compute[0].hw_prio == RD_GFX_PIPE_PRIO_HIGH;
+                    fKcq->rb.amdgpu_pad = 1;
+                    fKiq->rb.amdgpu_pad = 1;
+                }
                 if (!kr)
                     kr = gfx11_kiq_start(fDev, fKiq);
                 publish("RDNA3,KIQResult", (uint64_t)(int64_t)kr);
@@ -1082,7 +1122,8 @@ bool RDNA3Bringup::hwInit()
         /* amdgpu_device_ip_late_init -> amdgpu_device_set_cg_state(GATE) */
         if (!ret && fCgWanted)
             cgStart("level 8");
-        /* ... and amdgpu_device_set_pg_state(GATE) -> amdgpu_gfx_off_ctrl:
+        /* ... and amdgpu_device_set_pg_state(GATE) ->
+         * gfx_v11_0_set_powergating_state (GC 11.0.3) -> amdgpu_gfx_off_ctrl:
          * the bring-up's own hold goes, GFXOFF is allowed 100 ms later */
         if (!ret && fGfxOffWanted && fPmUp && fSmu) {
             fGfxOffCall = thread_call_allocate((thread_call_func_t)gfxOffTick, this);
@@ -1097,6 +1138,33 @@ bool RDNA3Bringup::hwInit()
         }
         if (!ret && fIrqLive)
             gfx11_set_eop_interrupt(fDev, fGfx, 1);
+        if (!ret && fAmdgpuExact) {
+            /* amdgpu_device_ip_late_init -> gfx_v11_0_late_init: the CP's
+             * privileged register / instruction and bad opcode interrupts */
+            if (fIrqLive) {
+                gfx11_late_init(fDev);
+                publish("RDNA3,CPFaultIrqs", 1);
+            }
+            /* amdgpu_ib_ring_tests -> gfx_v11_0_ring_test_ib on the gfx ring
+             * and the KCQ; a ring whose IB test fails is not used */
+            if (fIbTestBuf == UINT64_MAX)
+                fIbTestBuf = rdna3_vram_alloc(fDev, 4096, 4096, "ib-test");
+            int ib = gfx11_ring_test_ib(fDev, fGfx, fIbTestBuf);
+            publish("RDNA3,IBTestGFX", (uint64_t)(int64_t)ib);
+            if (ib) {
+                BLOG("GFX: IB test failed (%d): the ring is not used", ib);
+                fGfx->ready = 0;
+                ret = ib;
+            }
+            if (fKcq && fKcq->rb.ready) {
+                ib = gfx11_ring_test_ib(fDev, &fKcq->rb, fIbTestBuf);
+                publish("RDNA3,IBTestCOMP", (uint64_t)(int64_t)ib);
+                if (ib) {
+                    BLOG("KCQ: IB test failed (%d): the ring is not used", ib);
+                    fKcq->rb.ready = 0;
+                }
+            }
+        }
         if (!ret && fVmReady) {
             /* VMs opened before the GFXHUB came up get their context now
              * (gfxhub303_gart_enable reset VMID 1-15) */
@@ -2263,6 +2331,9 @@ bool RDNA3Bringup::gpuReset(bool baco)
      * (rdna3amdgpu=1) */
     if (fAmdgpuExact && fSdma && fDev)
         sdma60_hw_fini(fDev, fDev->ipver[HWIP_SDMA1].present ? 2 : 1);
+    /* ... and gfx_v11_0_suspend after it (reverse IP order) */
+    if (fAmdgpuExact)
+        gfxSuspend();
 
     /* soc21_asic_mode1_reset: no bus mastering across the reset */
     fPci->setBusMasterEnable(false);
@@ -2443,6 +2514,27 @@ void *RDNA3Bringup::vmCreate()
     if (!v->live)
         BLOG("VM: no VMID or page tables left, this client's VM is record-only");
     return v;
+}
+
+/* gfx_v11_0_suspend = gfx_v11_0_hw_fini (rdna3amdgpu=1, before a full
+ * reset): the CP fault interrupts put, the KGQ and KCQ unmapped and the MES
+ * KIQ stopped (amdgpu_mes_kiq_hw_fini), the CP halted, the GFXHUB GART off.
+ * hwInit brings everything back (gfx_v11_0_resume = gfx_v11_0_hw_init). */
+void RDNA3Bringup::gfxSuspend()
+{
+    if (!fDev || !fGfx)
+        return;
+    gfx11_set_priv_reg_fault_state(fDev, 0);
+    gfx11_set_priv_inst_fault_state(fDev, 0);
+    gfx11_set_bad_op_fault_state(fDev, 0);
+    if (fGfx->async && fGfx->ready && fKiq && fKiq->rb.ready)
+        gfx11_kgq_stop(fDev, fKiq, fGfx);
+    if (fKiq)
+        gfx11_mec_stop(fDev, fKiq, fKcq, fMes);
+    gfx11_cp_gfx_enable(fDev, 0);
+    if (fGmc)
+        gfxhub303_gart_disable(fDev);
+    fGfx->ready = 0;
 }
 
 void RDNA3Bringup::vmFlush(uint32_t vmid)
@@ -2871,13 +2963,22 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
         *capHit = false;
     uint64_t start, now, capNs = 10ull * 1000 * 1000 * 1000;
     absolutetime_to_nanoseconds(mach_continuous_time(), &start);
+    uint32_t fbit = ip < 32 ? 1u << ip : 0;
     for (uint32_t spins = 0;; spins++) {
-        if (fenceSignaled(ip, ring, seq))
+        if (fenceSignaled(ip, ring, seq)) {
+            /* the job got through: a fault flag left from before is stale */
+            if (fSchedFault & fbit)
+                OSBitAndAtomic(~fbit, &fSchedFault);
             return 0;
+        }
         absolutetime_to_nanoseconds(mach_continuous_time(), &now);
         if (absNs != UINT64_MAX && now >= absNs)
             return -RD_ETIME;
-        if (now - start >= capNs) {
+        /* drm_sched_fault (rdna3amdgpu=1): a CP fault IV named this ring */
+        bool faulted = (fSchedFault & fbit) != 0;
+        if (faulted)
+            OSBitAndAtomic(~fbit, &fSchedFault);
+        if (faulted || now - start >= capNs) {
             if (capHit) {
                 *capHit = true;          /* the caller recovers under its lock */
                 return -RD_ETIME;
@@ -2959,6 +3060,24 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
     if (b->fAmdgpuExact && b->fPmUp && b->fSmu && smu13_iv_is_smu(iv->client_id, iv->src_id)) {
         b->smuIrq(iv);
         return;
+    }
+    if (b->fAmdgpuExact) {
+        int which = -1;
+        if (gfx11_handle_priv_fault(iv, b->fGfx, b->fKcq, &which)) {
+            /* gfx_v11_0_priv_reg_irq / _priv_inst_irq / _bad_op_irq */
+            static const char *const what[] = { "Illegal opcode in command stream",
+                                                "Illegal register access in command stream",
+                                                "Illegal instruction in command stream" };
+            uint32_t k = iv->src_id - RD_IH_SRC_CP_BAD_OPCODE;
+            b->fCpFaults++;
+            IOLog("RDNA3: %s (ring_id 0x%x)\n", what[k < 3 ? k : 0], iv->ring_id);
+            if (which >= 0) {
+                /* drm_sched_fault: the ring's timeout handler runs at the
+                 * next fence wait (handleInterrupt wakes the waiters) */
+                OSBitOrAtomic(1u << (which ? AMDGPU_HW_IP_COMPUTE : AMDGPU_HW_IP_GFX), &b->fSchedFault);
+            }
+            return;
+        }
     }
     if (gmc11_iv_is_vm_fault(iv)) {
         /* gmc_v11_0_process_interrupt: no retry faults on a dGPU, the wave

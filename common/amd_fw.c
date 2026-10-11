@@ -319,7 +319,9 @@ static void do_sdma(builder *bd)
         ctl_off, ctl_size, "SDMA_TH1");
 }
 
-/* RS64 CP (gfx_firmware_header_v2_0): ucode + N stacks sharing one data blob */
+/* RS64 CP (gfx_firmware_header_v2_0): ucode + N stacks sharing one data blob,
+ * as amdgpu_gfx_cp_init_microcode does for AMDGPU_UCODE_ID_CP_RS64_* and their
+ * P0..P3 stacks (fw_size = ucode_size_bytes / data_size_bytes) */
 static void do_rs64(builder *bd, uint8_t which, uint16_t id, uint16_t type,
                     uint16_t stack_id0, uint16_t stack_type0, unsigned nstacks,
                     const char *name, const char *const *stack_names)
@@ -456,6 +458,8 @@ amd_fw_status amd_ucode_plan_build(const amd_fw_blob_ref blobs[AMD_BLOB_COUNT],
     bd.err = AMD_FW_OK;
 
     do_sdma(&bd);
+    /* gfx_v11_0_init_microcode (rs64_enable: v2 PFP header): PFP, ME, RLC
+     * (amdgpu_gfx_rlc_init_microcode, do_rlc), MEC with their stacks */
     do_rs64(&bd, AMD_BLOB_PFP, AMD_UCODE_CP_RS64_PFP, GFX_FW_TYPE_RS64_PFP,
             AMD_UCODE_CP_RS64_PFP_P0_STACK, GFX_FW_TYPE_RS64_PFP_P0_STACK, 2,
             "RS64_PFP", pfp_stacks);

@@ -698,6 +698,14 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
             LOG("GC: %u active CUs, RB mask 0x%x (%u RBs), SA mask 0x%x", ci.cu_active, ci.rb_active,
                 ci.num_rbs, ci.sa_active);
         }
+        /* gfx_v11_0_constants_init: get_tcc_info after get_cu_info
+         * (rdna3amdgpu=1; DEV_INFO's tcc_disabled_mask stays 0 otherwise) */
+        uint32_t exact = 0;
+        if (PE_parse_boot_argn("rdna3amdgpu", &exact, sizeof(exact)) && exact) {
+            uint32_t tcc = gfx11_get_tcc_info(fDispDev);
+            rdna3_drm_device_set_tcc_disabled(fDrm, tcc);
+            setProperty("RDNA3,TCCDisabledMask", tcc, 32);
+        }
     }
 
     uint32_t enumOnly = 0;

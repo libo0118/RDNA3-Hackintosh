@@ -206,6 +206,15 @@ private:
     /* rdna3amdgpu=1: amdgpu's own sequence where the verified default
      * differs (rdna3_dev.amdgpu_exact); ladder step amdgpu */
     bool             fAmdgpuExact = false;
+    /* rdna3amdgpu=1: gfx_v11_0_sw_init's queue topology (ring names, KCQ
+     * priority), the CP fault IVs of gfx_v11_0_late_init and
+     * drm_sched_fault: a ring whose job faulted (bit AMDGPU_HW_IP_GFX /
+     * _COMPUTE) is recovered by the next fence wait right away */
+    rdna3_gfx_topo   fGfxTopo = {};
+    volatile uint32_t fSchedFault = 0;
+    uint64_t         fCpFaults = 0;
+    uint64_t         fIbTestBuf = UINT64_MAX;
+    void             gfxSuspend();
     /* rdna3amdgpu=1: the SMU's thermal / MP1 IVs (smu_v13_0_irq_process).
      * The hardware CTF is handled in the IV callback; whatever needs the
      * PMFW mailbox runs from fSmuIrqCall under the DRM lock (50 ms later

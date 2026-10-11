@@ -175,6 +175,12 @@ void rdna3_drm_device_set_cu_info(rdna3_drm_device *dev, const uint32_t bitmap[4
     di->enabled_rb_pipes_mask = rb_mask;
 }
 
+void rdna3_drm_device_set_tcc_disabled(rdna3_drm_device *dev, uint64_t mask)
+{
+    /* amdgpu_info_ioctl: dev_info->tcc_disabled_mask = adev->gfx.config.tcc_disabled_mask */
+    dev->dev_info.tcc_disabled_mask = mask;
+}
+
 void rdna3_drm_device_set_userq(rdna3_drm_device *dev, uint32_t ip_mask, uint64_t doorbell_size)
 {
     dev->userq_ip_mask = ip_mask;

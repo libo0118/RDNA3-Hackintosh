@@ -112,6 +112,17 @@ ITEM_STEPS = [
                 r"|nbio_v4_3_ih_doorbell_range|sdma_v6_0_(ctxempty_int_enable|hw_fini|suspend)"), ["amdgpu"]),
     (re.compile(r"gfx_v11_0_init_compute_vmid|soc21_read_register|soc21_get_register_value"
                 r"|amdgpu_discovery_init|amdgpu_discovery_validate_ip"), ["amdgpu"]),
+    # GFX 11 with rdna3amdgpu=1: queue topology, padded commits, pipeline
+    # sync, CP fault interrupts, IB tests, the soft reset's index mutex
+    (re.compile(r"amdgpu_gfx_(bit_to_me_queue|get_num_kcq|graphics_queue_acquire|is_compute_multipipe_capable"
+                r"|is_graphics_multipipe_capable|is_high_priority_compute_queue|is_high_priority_graphics_queue"
+                r"|is_me_queue_enabled|is_mec_queue_enabled|me_queue_to_bit|mec_queue_to_bit)"
+                r"|amdgpu_queue_mask_bit_to_mec_queue|gfx_v11_ring_insert_nop"
+                r"|gfx_v11_0_(bad_op_irq|early_init|get_tcc_info|gfx_ring_init|gpu_early_init|handle_priv_fault"
+                r"|late_init|me_init|mec_init|priv_inst_irq|priv_reg_irq|request_gfx_index_mutex"
+                r"|ring_emit_fence_kiq|ring_emit_pipeline_sync|ring_get_wptr_compute|ring_get_wptr_gfx"
+                r"|ring_test_ib|select_me_pipe_q|set_bad_op_fault_state|set_priv_inst_fault_state"
+                r"|set_priv_reg_fault_state|suspend|sw_init|update_spm_vmid|wait_for_idle)"), ["amdgpu"]),
     # SMU 13 PM control (rdna3_pmctl) joined the verified step 5 group
     (re.compile(r"smu_v13_0_baco_\w+|smu_v13_0_get_bamaco_support"), ["baco"]),
     (re.compile(r"smu_v13_0_(get|set)_fan_control_mode|smu_v13_0_auto_fan_control"
