@@ -87,6 +87,8 @@ static void h_vm_unmap(void *c, void *vm, uint64_t va, uint64_t size)
 /* fake ring: submissions complete when fence_wait is called or when
  * 'ring_done' is advanced by hand */
 static uint64_t ring_next, ring_done;
+/* h_ring32: the ring answers 32-bit fence numbers, like the kext's rings */
+static int h_ring32;
 static uint32_t last_ip, last_ring, last_nibs;
 static rdna3_ib last_ibs[RD_MAX_CS_IBS];
 static void *last_vm;
@@ -99,11 +101,15 @@ static int h_submit(void *c, void *vm, uint32_t ip, uint32_t ring, const rdna3_i
     last_vm = vm; last_ip = ip; last_ring = ring; last_nibs = n;
     memcpy(last_ibs, ibs, sizeof(*ibs) * n);
     *seq = ++ring_next;
+    if (h_ring32)
+        *seq = (uint32_t)*seq;
     return 0;
 }
 static int h_signaled(void *c, uint32_t ip, uint32_t ring, uint64_t seq)
 {
     (void)c; (void)ip; (void)ring;
+    if (h_ring32)
+        return (int32_t)((uint32_t)ring_done - (uint32_t)seq) >= 0;
     return seq <= ring_done;
 }
 /* runs "while the lock is dropped": what another thread could do meanwhile */
@@ -133,6 +139,11 @@ static int h_wait(void *c, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t ab
     }
     if (abs_ns == 1)          /* "already expired" */
         return -RD_ETIME;
+    if (h_ring32) {
+        if ((int32_t)((uint32_t)seq - (uint32_t)ring_done) > 0)
+            ring_done += (uint32_t)((uint32_t)seq - (uint32_t)ring_done);
+        return 0;
+    }
     if (seq > ring_done)
         ring_done = seq;
     return 0;
@@ -1085,6 +1096,48 @@ int main(void)
                   !last_job.shadow_va && !last_job.init_shadow);
             ring_done = ring_next;
         }
+        /* PR #2 review: GEM_WAIT_IDLE is busy while a job may still run */
+        {
+            union drm_amdgpu_gem_wait_idle wi;
+            uint32_t hb = 0;
+            uint64_t s1 = 0, s2 = 0;
+            CHECK(onchip_create(f, AMDGPU_GEM_DOMAIN_GTT, 4096, 4096, 0, &hb) == 0);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0 && ring_done < ring_next);
+            memset(&wi, 0, sizeof(wi));
+            wi.in.handle = hb; wi.in.timeout = 1;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_WAIT_IDLE), wi) == 0 && wi.out.status == 1 &&
+                  wi.out.domain == AMDGPU_GEM_DOMAIN_GTT);
+            memset(&wi, 0, sizeof(wi));
+            wi.in.handle = hb; wi.in.timeout = (uint64_t)INT64_MAX - 1;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_WAIT_IDLE), wi) == 0 && wi.out.status == 0 &&
+                  ring_done == ring_next);
+            memset(&wi, 0, sizeof(wi));
+            wi.in.handle = hb; wi.in.timeout = 1;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_WAIT_IDLE), wi) == 0 && wi.out.status == 0);
+            wi.in.handle = 9999;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_WAIT_IDLE), wi) == -RD_ENOENT);
+            /* PR #2 review: the handles go on past the ring's 32-bit fence */
+            h_ring32 = 1;
+            ring_next = ring_done = 0xfffffffeull;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &s1) == 0);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &s2) == 0);
+            CHECK(s1 == 0xffffffffull && s2 == 0x100000000ull);
+            w.in.handle = s2; w.in.timeout = 1;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 1);
+            w.in.handle = s2; w.in.timeout = (uint64_t)INT64_MAX - 1;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 0);
+            w.in.handle = s1; w.in.timeout = 1;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 0);
+            w.in.handle = s2 + 1;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == -RD_EINVAL);   /* never submitted */
+            h_ring32 = 0;
+            ring_next = ring_done = s2;
+            {
+                struct drm_gem_close c2;
+                c2.handle = hb; c2.pad = 0;
+                CHECK(IOCTL(f, RD_NR_GEM_CLOSE, c2) == 0);
+            }
+        }
         /* WAIT_CS on ~0 = latest */
         w.in.handle = ~0ull; w.in.timeout = 1;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 0);
@@ -1253,6 +1306,27 @@ int main(void)
         CHECK(rdna3_drm_bo_lookup(&f2, y.handle) == rdna3_drm_bo_lookup(&f1, h));
         x.handle = 999;
         CHECK(IOCTL(&f1, RD_NR_XNU_BO_EXPORT, x) == -RD_EINVAL);
+        /* PR #2 review: one client cannot fill the device's export table */
+        {
+            uint32_t k, hk = 0, n_ok = 0;
+            int last = 0;
+            for (k = 0; k < RD_MAX_EXPORTS_PER_FILE; k++) {
+                if (onchip_create(&f1, AMDGPU_GEM_DOMAIN_GTT, 4096, 4096, 0, &hk) != 0)
+                    break;
+                memset(&x, 0, sizeof(x));
+                x.handle = hk;
+                last = IOCTL(&f1, RD_NR_XNU_BO_EXPORT, x);
+                n_ok += last == 0;
+            }
+            CHECK(n_ok == RD_MAX_EXPORTS_PER_FILE - 1 && last == -RD_ENOSPC);   /* the first one counts */
+            static rdna3_drm_file f3;   /* another client still can */
+            CHECK(rdna3_drm_file_open(&dev, &f3) == 0);
+            CHECK(onchip_create(&f3, AMDGPU_GEM_DOMAIN_GTT, 4096, 4096, 0, &hk) == 0);
+            memset(&x, 0, sizeof(x));
+            x.handle = hk;
+            CHECK(IOCTL(&f3, RD_NR_XNU_BO_EXPORT, x) == 0);
+            rdna3_drm_file_close(&f3);
+        }
         /* the exporter goes, the importer keeps the BO and the token */
         cl.handle = h; cl.pad = 0;
         CHECK(IOCTL(&f1, RD_NR_GEM_CLOSE, cl) == 0);

@@ -7,8 +7,11 @@
  * rdna3_drm_ioctl(). Struct layouts are the real ABI from
  * include/uapi/drm/amdgpu_drm.h and drm.h (third_party/amd).
  *
- * Status of each ioctl is tracked in docs/STAGE4.md. Anything that needs
- * the GPU to execute work (CS) returns -ENODEV until the rings exist.
+ * Status of each ioctl is tracked in docs/STAGE4.md. Work for the GPU (CS,
+ * user queues) goes to the OS layer's rings (rdna3_drm_ops.submit): CS is
+ * -ENODEV without one, and a ring the OS has not brought up is -EINVAL (as
+ * amdgpu for a ring that is not ready; -ENODEV on an enumeration-only
+ * device).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -81,6 +84,7 @@ struct rd_xnu_bo_share {
     uint64_t size;                 /* out */
 };
 #define RD_MAX_EXPORTS 1024
+#define RD_MAX_EXPORTS_PER_FILE (RD_MAX_EXPORTS / 4)   /* no client fills the device's table */
 /* private, root only: what display pipe 'pipe' scans out right now
  * (HUBP/OTG read back) and rows [row0, row0 + nrows) of it scaled to
  * out_w x out_h, RGB888 - the report's proof of what reaches each panel.
@@ -230,6 +234,10 @@ typedef struct rdna3_ib {
 #define RD_MAX_FENCE_DRV      256     /* fence drivers alive at once, device-wide */
 #define RD_USERQ_WAIT_REFS    64      /* fence drivers one queue may wait on (its fence_drv_xa) */
 #define RD_USERQ_DEFERRED     4096    /* references parked on not yet signaled fences */
+/* what one client may hold of the device-wide tables above: one queue's
+ * driver each plus room for the ones its own fences still reference */
+#define RD_FENCE_DRV_PER_FILE     (RD_MAX_FENCE_DRV / 2)
+#define RD_USERQ_DEFERRED_PER_FILE (RD_USERQ_DEFERRED / 4)
 /* amdgpu_seq64: one kernel BO of 64-bit slots, mapped read-only into every
  * user queue client's VM at AMDGPU_VA_RESERVED_SEQ64_START (sign-extended).
  * 64 KiB instead of the 2 MiB reservation: 8192 slots. */
@@ -260,6 +268,7 @@ typedef struct rdna3_userq_fence_drv {
     volatile uint64_t *cpu_addr;
     uint32_t doorbell_index;         /* adev->userq_xa key */
     uint64_t last_seq;               /* highest fence value created on it */
+    const struct rdna3_drm_file *owner;   /* the client that made it, NULL once it closed */
 } rdna3_userq_fence_drv;
 
 /* amdgpu_usermode_queue */
@@ -415,7 +424,7 @@ typedef struct rdna3_drm_device {
      * queue fences until they signal [RD_USERQ_DEFERRED] (zalloc'ed with the
      * first one); the next dma_fence context */
     rdna3_userq_fence_drv *fence_drv;
-    struct { uint32_t owner, ref; uint64_t seq; } *uq_deferred;
+    struct { uint32_t owner, ref; uint64_t seq; const struct rdna3_drm_file *file; } *uq_deferred;
     uint32_t next_fence_ctx;
     /* VCN 4.0 / JPEG 4.0 (rdna3_drm_device_set_vcn): vcn_num_inst 0 = the
      * video block is not up and the video IPs answer as without it */
