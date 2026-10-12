@@ -19,7 +19,9 @@ mkdir -p "$W"
 JOBS=$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 ARCH=()
 LIBEXT=so
+LOADER_OPTS=(-DBUILD_WSI_XCB_SUPPORT=OFF -DBUILD_WSI_XLIB_SUPPORT=OFF -DBUILD_WSI_WAYLAND_SUPPORT=OFF)
 if [ "$(uname -s)" = Darwin ]; then
+    LOADER_OPTS=()
     ARCH=(-DCMAKE_OSX_ARCHITECTURES=x86_64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0)
     LIBEXT=dylib
 fi
@@ -36,7 +38,7 @@ fetch() {
 say "Vulkan loader $LOADER_TAG"
 fetch "$LOADER_TAG" https://github.com/KhronosGroup/Vulkan-Loader.git "$W/loader"
 cmake -S "$W/loader" -B "$W/loader/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DUPDATE_DEPS=ON \
-    -DBUILD_TESTS=OFF "${ARCH[@]}" > "$W/loader-cmake.log"
+    -DBUILD_TESTS=OFF ${LOADER_OPTS[@]+"${LOADER_OPTS[@]}"} ${ARCH[@]+"${ARCH[@]}"} > "$W/loader-cmake.log"
 ninja -C "$W/loader/build" -j "$JOBS" > "$W/loader-ninja.log" || { tail -40 "$W/loader-ninja.log"; exit 1; }
 LOADER=$(find "$W/loader/build" -name "libvulkan.1.$LIBEXT" -o -name "libvulkan.$LIBEXT.1" | head -1)
 [ -n "$LOADER" ] || { echo "no loader library built" >&2; exit 1; }
@@ -48,7 +50,10 @@ if [ ! -f "$W/cts/.rdna3-fetched" ]; then
         { tail -40 "$W/fetch.log"; exit 1; }
     touch "$W/cts/.rdna3-fetched"
 fi
-cmake -S "$W/cts" -B "$W/cts/build" -G Ninja -DCMAKE_BUILD_TYPE=Release "${ARCH[@]}" > "$W/cts-cmake.log" ||
+# DEQP_TARGET: the platform (default: osx on macOS; vulkan_headless for a
+# Linux host run against the loopback RADV)
+cmake -S "$W/cts" -B "$W/cts/build" -G Ninja -DCMAKE_BUILD_TYPE=Release ${DEQP_TARGET:+-DDEQP_TARGET=$DEQP_TARGET} \
+    ${ARCH[@]+"${ARCH[@]}"} > "$W/cts-cmake.log" ||
     { tail -40 "$W/cts-cmake.log"; exit 1; }
 start=$(date +%s)
 ninja -C "$W/cts/build" -j "$JOBS" deqp-vk deqp-vk-data > "$W/cts-ninja.log" 2>&1 ||

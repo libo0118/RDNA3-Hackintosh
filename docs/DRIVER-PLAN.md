@@ -16,23 +16,25 @@ done; this file decides the order from here.
 Horizon: macOS 26 is the last x86_64 release; the work only pays while it
 is supported.
 
-## State per area
+## State per area (updated 2026-10-12)
 
 Legend: **card** = verified on the card (`docs/status/hw-verified.txt`),
-**sim** = simulator/host tests only, **-** = missing.
+**sim** = simulator/host tests only, **-** = missing. The amdgpu functions
+that apply to this card are all ported (`docs/status/STATUS.md`: 1483 of
+1483); what the table lists as sim waits for its card step.
 
 | Area | card | sim only | missing |
 |---|---|---|---|
-| Bring-up (PSP, SMU, GMC/GART, IH+MSI, SDMA, GFX, KIQ on MES, KCQ) | all | MES scheduler pipe | bare metal cold boot (only the VM so far) |
-| Recovery (hang, soft reset, mode-1 reset, VM faults) | - | all | a card run that provokes a hang |
-| Power | GFX CG, GFXOFF allowed, UCLK DPM free (52 W idle) | - | idle power: PMFW counts GFX 100 % busy; non-GFX clock gating; suspend/resume (S3); runtime idle |
-| Display | GOP takeover 1080p, cursor, EDID names, clone and extended desktop on a 2nd monitor | HPD interrupts, own timing values | own mode setting (other resolutions/refresh), mode list, hotplug to the framebuffer, DP link training, gamma LUT, DPMS blank, HDMI audio |
-| UAPI (amdgpu ioctls) | CS on DMA/GFX/compute, fences, BO mmap, USERPTR, PRIME | timeline/syncobj fds | IOSurface sharing with the accelerator |
-| Vulkan (RADV) | compute + transfer 8/8 (`rdna3_vktest`) | - | graphics pipeline (draw), images/formats, WSI (present), CTS subset |
-| Accelerator / WindowServer | desktop composited (CPU) into VRAM surfaces, flipped on head 0; two-head routing logged | - | screens proven on both heads (pictures since `944d983`), gates on by default, GPU blits, IOSurface <-> BO |
-| Metal | - | plugin + translator build in CI | everything on the card: device found, shader compile, compute, render, CAMetalLayer present, WindowServer on Metal |
-| Video (VCN 4.0) | - | VCN 4.0 + JPEG 4.0 rings, VIDEO_CAPS and CS behind `rdna3vcn=1` (`hw/vcn40.c`, step vcn, simulator only) | verified on the card; DPG power gating; suspend/resume; decode/encode from Mesa (RADV video / radeonsi VA); VideoToolbox plugin (optional) |
-| Packaging | OpenCore in the VM | `package/oc_install.sh` | bare metal guide, installer, release builds, Tahoe (26) layout |
+| Bring-up (PSP, SMU, GMC/GART, IH+MSI, SDMA, GFX, KIQ on MES, KCQ, MES scheduler pipe) | all | kernel queues mapped by the MES scheduler (`rdna3amdgpu=1`), user queues, amdgpu's exact sequence | bare metal cold boot (only the VM so far) |
+| Recovery | GFX and DMA hang recovery (`hanggfx`, `8h`) | mode-1 reset, VM faults, BACO | - |
+| Power | GFX CG, GFXOFF allowed, UCLK DPM free, idle GFXCLK cap (14-15 W) | non-GFX clock gating, S3 suspend/resume with VRAM eviction, PM control (fan, power, OD, profiles) | idle power down to Linux's ~12 W (the PMFW counts GFX busy) |
+| Display | GOP takeover, cursor, EDID names, extended desktop, own mode set with the DISPCLK raise, scaled modes, display sleep, hotplug | DP SST / MST / DSC (also over MST) / UHBR / ODM, HDMI 2.0 with scrambling, audio, output format, gamma, the display state across a reset and a sleep | the DP / DSC / MST / UHBR / 4K HDMI steps need such monitors on the bench |
+| UAPI (amdgpu ioctls) | CS on DMA/GFX/compute, fences, BO mmap, USERPTR, PRIME | user queues, timeline syncobj fds | IOSurface sharing with the accelerator (A3) |
+| Vulkan (RADV) | `rdna3_vktest` 13/13: compute, transfer, a triangle through a render pass, image copies, a timeline semaphore | the CTS subset in the report (V2, step `cts`) | WSI / present (V3) |
+| Accelerator / WindowServer | desktop composited through it on both heads, flipped zero-copy | swap copies by SDMA (A2, `rdna3accelsdma=1`) | gates on by default (A1), IOSurface <-> BO (A3) |
+| Metal | the card listed, a compute kernel and a render triangle right (`mtlprobe`) | - | CAMetalLayer present (M4), WindowServer on Metal (M5), apps (M6) |
+| Video (VCN 4.0) | - | VCN 4.0 + JPEG 4.0 rings, VIDEO_CAPS and CS, DPG power gating, suspend/resume | the card run (steps `vcn`, `vcn2`, `vcnsleep`); decode/encode from Mesa; VideoToolbox (optional) |
+| Packaging | OpenCore in the VM | `package/oc_install.sh`, the installer `.pkg` and tarball from CI | bare metal run of the guide, Tahoe (26) layout on a 26 VM (R4) |
 
 ## Work items
 
