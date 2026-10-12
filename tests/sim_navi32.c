@@ -5327,6 +5327,12 @@ static void st_wipe(uint32_t pipe, uint32_t otg, uint32_t opp, uint32_t mpcc, ui
     S.reg[DCN_B2 + regDOMAIN0_PG_STATUS + 2 * pipe] = 2u << DOMAIN0_PG_STATUS__DOMAIN_PGFSM_PWR_STATUS__SHIFT;
 }
 
+/* registers st_diff leaves out (a DP head: the HDMI / AFMT registers of
+ * its DIG front end and the TMDS ones of its back end, which DC does not
+ * program for DP) */
+static uint32_t st_ign[RD_DCN_STATE_REGS];
+static unsigned st_nign;
+
 /* registers of the DCN windows that differ from the snapshot, minus the
  * DC_IP request the power steps leave behind; the first ones printed */
 static unsigned st_diff(const char *when)
@@ -5342,6 +5348,11 @@ static unsigned st_diff(const char *when)
                     ign = HUBP0_DCHUBP_CNTL__HUBP_UNDERFLOW_CLEAR_MASK | HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ_MASK;
                 else if (i == DCN_B1 + regOTG0_PIXEL_RATE_CNTL + 4 * p)
                     ign = OTG0_PIXEL_RATE_CNTL__DPDTO0_ENABLE_STATUS_MASK;
+                else if (i == DCN_B2 + regDIG0_DIG_FE_CNTL + RD_CLONE_DIGFE_STRIDE * p)
+                    ign = DIG0_DIG_FE_CNTL__DIG_SYMCLK_FE_ON_MASK;   /* status: the model computes it on reads */
+            for (p = 0; p < st_nign; p++)
+                if (i == st_ign[p])
+                    ign = ~0u;
             if (((S.reg[i] ^ st_snap[i]) & ~ign) == 0 || i == DCN_B2 + regDC_IP_REQUEST_CNTL)
                 continue;
             if (n++ < 8)
@@ -5398,30 +5409,31 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     ctl = S.reg[OTG(regOTG0_OTG_CONTROL, 2)];
     S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] |= HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ_MASK;
     S.dmub.nseq = 0;
-    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 0) == RDNA3_OK);
+    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 0, NULL) == RDNA3_OK);
     CHECK(S.dmub.nseq == 1 && S.dmub.seq[0] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL &&
           S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE && S.dmub.tx[0] == 1 && S.dmub.tx[2] == 3 &&
           S.dmub.tx[8] == 1 && S.dmub.tx[9] == 1u << 2 && S.dmub.tx[10] == 0x0c);
     CHECK((S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) &&
           !(S.reg[DCN_B2 + regDIG0_DIG_BE_EN_CNTL + RD_CLONE_DIGFE_STRIDE] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK));
-    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 0) == RDNA3_OK && S.dmub.nseq == 1);   /* DIG off: no command */
+    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 0, NULL) == RDNA3_OK && S.dmub.nseq == 1);   /* DIG off: no command */
     /* a snapshot taken in standby keeps the DIG ids of the last one */
     dp = dc;
     dp.head[1].dig_fe = dp.head[1].dig_be = -1;
     CHECK(dcn32_state_save(dev, &dp, 1, &own, 241500, &st) == RDNA3_OK && st.head[1].tmds &&
           st.head[1].fe == 2 && st.head[1].be == 1);
-    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 1) == RDNA3_OK);
+    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 1, NULL) == RDNA3_OK);
     CHECK(S.dmub.nseq == 2 && S.dmub.seq_tx_action[1] == RD_ATOM_TX_ENABLE && S.dmub.tx[4] == (24150 & 0xff));
     CHECK(!(S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) &&
           (S.reg[DCN_B2 + regDIG0_DIG_BE_EN_CNTL + RD_CLONE_DIGFE_STRIDE] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK) &&
           S.reg[OTG(regOTG0_OTG_CONTROL, 2)] == ctl);
-    CHECK(dcn32_head_link(dev, NULL, &dc, &st, 1, 0) == RDNA3_ENODEV);
-    /* a DP head: refused (no link training), the caller keeps it blank */
+    CHECK(dcn32_head_link(dev, NULL, &dc, &st, 1, 0, NULL) == RDNA3_ENODEV);
+    /* a DP head without its link: refused, the caller keeps it blank
+     * (with its link: test_dp_state) */
     dp = dc;
     dp.head[1].dig_mode = 0;
     CHECK(dcn32_state_save(dev, &dp, 1, &own, 241500, &stdp) == RDNA3_OK && !stdp.head[1].tmds);
-    CHECK(dcn32_head_link(dev, dm, &dp, &stdp, 1, 0) == RDNA3_EINVAL);
-    CHECK(dcn32_state_restore(dev, dm, &dp, &stdp, 1, 0, 0) == RDNA3_EINVAL);
+    CHECK(dcn32_head_link(dev, dm, &dp, &stdp, 1, 0, NULL) == RDNA3_EINVAL);
+    CHECK(dcn32_state_restore(dev, dm, &dp, &stdp, 1, 0, 0, NULL) == RDNA3_EINVAL);
     CHECK(dcn32_state_save(dev, &dc, 1, &own, 241500, &st) == RDNA3_OK);
     memcpy(st_snap, S.reg, sizeof(st_snap));
 
@@ -5432,15 +5444,15 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     S.reg[DCN_B2 + 0x04fe] = 0x1234;   /* a watermark set after the snapshot: the sleep keeps it */
     memcpy(st_snap, S.reg, sizeof(st_snap));
     S.dmub.nseq = 0;
-    CHECK(dcn32_state_head_off(dev, dm, &dc, &st, 0) == RDNA3_OK && dcn32_state_head_off(dev, dm, &dc, &st, 1) == RDNA3_OK);
+    CHECK(dcn32_state_head_off(dev, dm, &dc, &st, 0, NULL) == RDNA3_OK && dcn32_state_head_off(dev, dm, &dc, &st, 1, NULL) == RDNA3_OK);
     CHECK(S.dmub.nseq == 4 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE &&
           S.dmub.seq[1] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.seq_tx_action[2] == RD_ATOM_TX_DISABLE &&
           S.dmub.seq[3] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.pixclk[0] == 0);
     CHECK(dcn32_read_state(dev, &dp) == 0);
     CHECK(dcn32_state_check(dev, &st, 1, 0, &k) == 1 && !k.otg_on && k.blanked && !k.dig_on && k.powered);
     S.dmub.nseq = 0;
-    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0) == RDNA3_OK &&
-          dcn32_state_restore(dev, dm, &dc, &st, 1, 0, 0) == RDNA3_OK);
+    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0, NULL) == RDNA3_OK &&
+          dcn32_state_restore(dev, dm, &dc, &st, 1, 0, 0, NULL) == RDNA3_OK);
     /* per head: pixel clock, stream setup, enable (the PHY kept its setup) */
     CHECK(S.dmub.nseq == 6);
     for (i = 0; i < 6; i += 3)
@@ -5465,7 +5477,7 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     /* the clocks can no longer carry the head and DISPCLK sits at divider
      * 127 (the OTG pixel drop dance is not ported): refused */
     S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x7f;
-    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0) == RDNA3_EBUSY);
+    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0, NULL) == RDNA3_EBUSY);
     /* the PMFW came back at a low boot clock: dcn32_update_clocks asks the
      * saved ones back through the DAL mailbox first */
     {
@@ -5475,10 +5487,10 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
         S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE] = 0x60;
         dcn32_clk_read(dev, &ck0);
         CHECK(dcn32_clk_fits(&ck0, st.head[0].pclk_khz) == RDNA3_EBUSY);
-        CHECK(dcn32_state_restore(dev, NULL, &dc, &st, 0, 0, 0) == RDNA3_ENODEV);   /* no DMCUB: before the clocks */
+        CHECK(dcn32_state_restore(dev, NULL, &dc, &st, 0, 0, 0, NULL) == RDNA3_ENODEV);   /* no DMCUB: before the clocks */
         CHECK(S.dal_msgs == msgs0);
         S.dmub.nseq = 0;
-        CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0) == RDNA3_OK);
+        CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0, NULL) == RDNA3_OK);
         dcn32_clk_read(dev, &ck0);
         CHECK(dcn32_clk_fits(&ck0, st.head[0].pclk_khz) == RDNA3_OK && S.dal_hard_min[RD_PPCLK_DISPCLK] &&
               S.dal_hard_min[RD_PPCLK_DPPCLK] && S.dal_msgs > msgs0);
@@ -5489,11 +5501,11 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     }
     S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x18;
     S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE] = 0x18;
-    CHECK(dcn32_state_restore(dev, NULL, &dc, &st, 0, 0, 0) == RDNA3_ENODEV);
+    CHECK(dcn32_state_restore(dev, NULL, &dc, &st, 0, 0, 0, NULL) == RDNA3_ENODEV);
     i = S.dcn_gated_drops;
     S.dmub.nseq = 0;
-    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0) == RDNA3_OK &&
-          dcn32_state_restore(dev, dm, &dc, &st, 1, 0, 0) == RDNA3_OK);
+    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0, NULL) == RDNA3_OK &&
+          dcn32_state_restore(dev, dm, &dc, &st, 1, 0, 0, NULL) == RDNA3_OK);
     CHECK(S.dcn_gated_drops == i && S.dcn_pg_no_request == 0);   /* powered before the writes */
     CHECK(S.dmub.nseq == 8);
     for (i = 0; i < 8; i++)
@@ -5514,11 +5526,11 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     /* restore into display sleep with the monitor in standby: no ENABLE */
     st_wipe(1, 2, 2, 1, 2, 1);
     S.dmub.nseq = 0;
-    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 1, 1, 1) == RDNA3_OK && S.dmub.nseq == 3 &&
+    CHECK(dcn32_state_restore(dev, dm, &dc, &st, 1, 1, 1, NULL) == RDNA3_OK && S.dmub.nseq == 3 &&
           S.dmub.seq_tx_action[2] == RD_ATOM_TX_INIT);
     CHECK((S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) &&
           (S.reg[OTG(regOTG0_OTG_CONTROL, 2)] & 1));
-    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 1) == RDNA3_OK && S.dmub.nseq == 4 &&
+    CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 1, NULL) == RDNA3_OK && S.dmub.nseq == 4 &&
           S.dmub.seq_tx_action[3] == RD_ATOM_TX_ENABLE);
 
     /* leave the GOP's single head, as the tests after this expect */
@@ -8076,6 +8088,135 @@ static void test_dp_odm(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rdn
     S.dcn_frames = 0;
 }
 
+/* TransmitterControl commands with action 'a' since S.dmub.nseq was reset */
+static unsigned st_tx_count(uint8_t a)
+{
+    unsigned i, n = 0;
+    for (i = 0; i < S.dmub.nseq && i < sizeof(S.dmub.seq) / sizeof(S.dmub.seq[0]); i++)
+        n += S.dmub.seq[i] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL && S.dmub.seq_tx_action[i] == a;
+    return n;
+}
+
+/* D4 for a DP SST head (dcn32_state with its rdna3_dp_link): the head of
+ * test_dp_link (2560x1440 over HBR2 x4) through a system sleep
+ * (amdgpu_dm_commit_zero_streams: link_set_dpms_off, the OTG off) and
+ * back (link_set_dpms_on: trained again), through a power loss that wipes
+ * the pipe, the DIG and the global part, through monitor standby and a
+ * restore into standby; refused without its link, for MST, for a link of
+ * another OTG */
+static void test_dp_state(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_display_path *own)
+{
+    static rdna3_dcn_state st;
+    static rdna3_dp_link dp, dp2;
+    rdna3_dcn_state_check k;
+    uint32_t pipe, otg, opp, mpcc, runs, hubp;
+
+    memset(&st, 0, sizeof(st));
+    S.dpcd[0x001] = RD_DP_LINK_RATE_HIGH2;
+    S.dpcd[0x002] = 0xc4;
+    S.dps.fail_rate = 0;
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].dig_mode == 0 && dc->head[0].h_active == 2560 &&
+          dc->head[0].dig_fe == 2 && dc->head[0].dig_be == 1 && dc->head[0].odm_cnt == 0);
+    otg = dc->head[0].otg;
+    pipe = dc->head[0].pipe;
+    /* the link as the kext makes it for a head no mode set of its own
+     * touched (displayDpLink): the sink's caps, its link cap not verified */
+    dcn32_dp_link_init(&dp, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 0);
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && !dp.verified);
+    /* the system context the bring-up set */
+    S.reg[DCN_B2 + 0x0475] = 0x80;
+    S.reg[DCN_B2 + 0x0476] = 0x83;
+    CHECK(dcn32_state_save(dev, dc, 0, own, 241500, &st) == RDNA3_OK && !st.head[0].tmds && st.head[0].dp &&
+          st.head[0].fe == 2 && st.head[0].be == 1 && st.head[0].otg == otg);
+    opp = st.head[0].opp;
+    mpcc = st.head[0].mpcc;
+    /* what DC does not program on a DP stream */
+    st_nign = 0;
+    for (runs = 0; runs < sizeof(rd_clone_digfe) / 2; runs++)
+        st_ign[st_nign++] = DCN_B2 + rd_clone_digfe[runs] + RD_CLONE_DIGFE_STRIDE * 2;
+    for (runs = regDIG0_TMDS_CNTL; runs <= regDIG0_TMDS_CTL2_3_GEN_CNTL && st_nign < RD_DCN_STATE_REGS; runs++)
+        st_ign[st_nign++] = DCN_B2 + runs + RD_CLONE_DIGFE_STRIDE * 1;
+    memcpy(st_snap, S.reg, sizeof(st_snap));
+
+    /* refused: no link, a link of another OTG, an MST link */
+    CHECK(dcn32_state_restore(dev, dm, dc, &st, 0, 0, 0, NULL) == RDNA3_EINVAL);
+    CHECK(dcn32_head_link(dev, dm, dc, &st, 0, 0, NULL) == RDNA3_EINVAL);
+    dp2 = dp;
+    dp2.otg = otg ^ 1;
+    CHECK(dcn32_state_restore(dev, dm, dc, &st, 0, 0, 0, &dp2) == RDNA3_EINVAL);
+    dp2 = dp;
+    dp2.mst = 1;
+    CHECK(dcn32_head_link(dev, dm, dc, &st, 0, 0, &dp2) == RDNA3_EINVAL);
+    CHECK(st_diff("dp refused") == 0);
+
+    /* 1. a system sleep: link down, OTG off; back trained */
+    S.reg[HUBP(regHUBP0_DCHUBP_CNTL, pipe)] |= HUBP0_DCHUBP_CNTL__HUBP_NO_OUTSTANDING_REQ_MASK;
+    memcpy(st_snap, S.reg, sizeof(st_snap));
+    CHECK(dcn32_state_head_off(dev, dm, dc, &st, 0, &dp) == RDNA3_OK && st.head[0].dp_held && !dp.link_active);
+    CHECK(dcn32_state_check(dev, &st, 0, 0, &k) == 1 && !k.otg_on && k.blanked && !k.dig_on && k.powered);
+    runs = dp.lt_runs;
+    S.dps.trained_rate = 0;
+    S.dmub.nseq = 0;
+    CHECK(dcn32_state_restore(dev, dm, dc, &st, 0, 0, 0, &dp) == RDNA3_OK && !st.head[0].dp_held);
+    CHECK(st_tx_count(RD_ATOM_TX_INIT) == 0 && st_tx_count(RD_ATOM_TX_ENABLE) > 0);   /* the PHY kept its setup */
+    /* the link cap verified first (HBR2 x4), the stream on HBR x4 as the
+     * GOP ran it */
+    CHECK(dp.verified && dp.verified_link_cap.link_rate == RD_DP_LINK_RATE_HIGH2 && dp.lt_runs > runs &&
+          S.dps.trained_rate == RD_DP_LINK_RATE_HIGH && S.dps.trained_lanes == 4 && dp.link_active &&
+          dcn32_dp_link_ok(&dp));
+    CHECK(st_diff("dp after sleep") == 0);
+    S.dcn_frames = 1;
+    CHECK(dcn32_state_check(dev, &st, 0, 50, &k) == 0 && k.frames > 0 && !k.blanked && k.dig_on);
+    S.dcn_frames = 0;
+
+    /* 2. a power loss: the pipe, the DIG and the global part wiped, the
+     * sink's link gone; the restore brings them back and trains again */
+    memcpy(st_snap, S.reg, sizeof(st_snap));
+    st_wipe(pipe, otg, opp, mpcc, 2, 1);
+    S.reg[DCN_B2 + 0x0475] = S.reg[DCN_B2 + 0x0476] = 0;
+    S.dps.phy_on = S.dps.cr = S.dps.eq = 0;
+    S.dps.trained_rate = 0;
+    CHECK(dcn32_state_check(dev, &st, 0, 0, &k) == 1 && !k.powered && !k.sys_ok && !k.routed);
+    runs = dp.lt_runs;
+    S.dmub.nseq = 0;
+    CHECK(dcn32_state_restore(dev, dm, dc, &st, 0, 0, 0, &dp) == RDNA3_OK);
+    CHECK(st_tx_count(RD_ATOM_TX_INIT) == 1);   /* dcn10_link_encoder_hw_init */
+    CHECK(dp.lt_runs > runs && S.dps.trained_rate == RD_DP_LINK_RATE_HIGH && dcn32_dp_link_ok(&dp));
+    CHECK(st_diff("dp after power loss") == 0);
+    S.dcn_frames = 1;
+    CHECK(dcn32_state_check(dev, &st, 0, 50, &k) == 0 && k.frames > 0 && !k.blanked && k.dig_on && k.routed);
+    S.dcn_frames = 0;
+
+    /* 3. monitor standby through the link: down with the OTG running, the
+     * hold kept across a snapshot of the same pipe, up trained again */
+    hubp = S.reg[OTG(regOTG0_OTG_CONTROL, otg)];
+    CHECK(dcn32_head_link(dev, dm, dc, &st, 0, 0, &dp) == RDNA3_OK && !dp.link_active && st.head[0].dp_held);
+    CHECK((S.reg[HUBP(regHUBP0_DCHUBP_CNTL, pipe)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) &&
+          S.reg[OTG(regOTG0_OTG_CONTROL, otg)] == hubp);
+    CHECK(dcn32_state_save(dev, dc, 0, own, 241500, &st) == RDNA3_OK && st.head[0].dp_held && st.head[0].dp);
+    runs = dp.lt_runs;
+    CHECK(dcn32_head_link(dev, dm, dc, &st, 0, 1, &dp) == RDNA3_OK && dp.lt_runs > runs && dp.link_active &&
+          !st.head[0].dp_held && !(S.reg[HUBP(regHUBP0_DCHUBP_CNTL, pipe)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK));
+
+    /* 4. a power loss in standby: restored dark (no training), up later */
+    memcpy(st_snap, S.reg, sizeof(st_snap));
+    CHECK(dcn32_head_link(dev, dm, dc, &st, 0, 0, &dp) == RDNA3_OK);
+    st_wipe(pipe, otg, opp, mpcc, 2, 1);
+    S.dps.phy_on = S.dps.cr = S.dps.eq = 0;
+    runs = dp.lt_runs;
+    CHECK(dcn32_state_restore(dev, dm, dc, &st, 0, 1, 1, &dp) == RDNA3_OK && dp.lt_runs == runs && !dp.link_active &&
+          st.head[0].dp_held);
+    CHECK((S.reg[HUBP(regHUBP0_DCHUBP_CNTL, pipe)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) &&
+          (S.reg[OTG(regOTG0_OTG_CONTROL, otg)] & OTG0_OTG_CONTROL__OTG_MASTER_EN_MASK));
+    CHECK(dcn32_head_link(dev, dm, dc, &st, 0, 1, &dp) == RDNA3_OK && dp.lt_runs > runs && dcn32_dp_link_ok(&dp));
+    CHECK(st_diff("dp back from standby") == 0);
+    S.dcn_frames = 1;
+    CHECK(dcn32_state_check(dev, &st, 0, 50, &k) == 0 && k.frames > 0 && !k.blanked && k.dig_on);
+    S.dcn_frames = 0;
+    st_nign = 0;
+    S.reg[DCN_B2 + 0x0475] = S.reg[DCN_B2 + 0x0476] = 0;
+}
+
 static void test_dp_link(rdna3_dev *dev, rdna3_dmub *dm)
 {
     static rdna3_dcn dc;
@@ -8349,6 +8490,8 @@ static void test_dp_link(rdna3_dev *dev, rdna3_dmub *dm)
     /* UHBR (128b/132b) and ODM combine on this head */
     test_dp_uhbr(dev, dm, &dc, &own);
     test_dp_odm(dev, dm, &dc, &own);
+    /* the head's state through a sleep, a power loss and standby */
+    test_dp_state(dev, dm, &dc, &own);
 
     /* the HDMI head again for the tests that follow */
     S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] = be_cntl;

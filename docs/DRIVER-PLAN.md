@@ -205,7 +205,12 @@ The S3 gap - what a full resume still lacks, in the order it will bite:
 5. **DMCUB.** `rdna3dmub=3` attaches to the GOP's firmware; after a power
    loss or a mode-1 reset that firmware is gone and the re-init now loads
    our own, as `rdna3dmub=1` does (`RDNA3,DMUBReloaded`).
-6. **DP heads.** Neither standby nor restore (no link training).
+6. **DP heads.** Done for DP SST on one pipe with `rdna3dplink=1`: the
+   sleep takes the link down (`link_set_dpms_off`), the restore brings
+   the stream resources back (the link cap verified for a new sink,
+   DTBCLK again for 128b/132b) and trains the link again
+   (`link_set_dpms_on`); monitor standby goes through the link too. DP MST
+   and ODM combined heads are still refused (blank only).
 7. **Ordering with macOS.** The wake work runs on a thread call after
    `setPowerState(1)`; framebuffer power requests that arrive earlier are
    recorded and applied afterwards. Nothing yet tells IOFramebuffer that

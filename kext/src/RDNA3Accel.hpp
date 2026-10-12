@@ -391,6 +391,7 @@ private:
     static void   displayWakeWork(void *owner, void *);
     const struct rdna3_display_path *displayHeadPath(uint32_t head);
     uint32_t      displayHeadPclk(uint32_t head, const struct rdna3_display_path *p);
+    struct rdna3_dp_link *displayStateDpLink(uint32_t head, bool sink);   /* fDispLock held */
     void          displayStateSave(uint32_t head);   /* fDispLock held */
     void          displayStateSaveAll();
     void          displayStateFree();

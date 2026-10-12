@@ -586,6 +586,11 @@ int  dcn32_dp_link_training_with_retries(rdna3_dp_link *l, const rdna3_dp_link_s
 void dcn32_dp_enable_link_phy(rdna3_dp_link *l, const rdna3_dp_link_settings *set);
 void dcn32_dp_disable_link_phy(rdna3_dp_link *l);
 
+/* dcn10_link_encoder_hw_init: TransmitterControl INIT on the link's
+ * transmitter (dcn32_init_hw after a power loss; the AUX engine is set up
+ * by each transaction, dcaux.c). 0 or the DMCUB error. */
+int  dcn32_dp_link_encoder_hw_init(rdna3_dp_link *l);
+
 /* dcn31_program_pix_clk for a DP signal: the DP DTO of OTG 'otg' at
  * 'pixel_khz' (the requested pixel clock: divided by the ODM segments),
  * PIPE0_DTO_SRC_SEL 1 (8b/10b) or 2 (128b/132b: l->hpo_active) */

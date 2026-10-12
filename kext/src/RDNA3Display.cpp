@@ -959,7 +959,7 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
         if (r == RDNA3_OK && head < 4)
             fHeadLinkDown[head] = blank;
     }
-    /* D4: the other TMDS heads too (dcn32_head_link); DP keeps the blank */
+    /* D4: the other heads too (dcn32_head_link: TMDS, DP through its link); the rest keeps the blank */
     else if (wanted != 2 || (r = displayHeadDpms(head, blank)) == RDNA3_EINVAL)
         r = dcn32_set_blank(fDispDev, fDcn, head, blank ? 1 : 0);
     if (r == RDNA3_OK && !fDispAsleep)

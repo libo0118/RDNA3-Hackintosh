@@ -88,6 +88,22 @@ uint32_t RDNA3Accel::displayHeadPclk(uint32_t head, const rdna3_display_path *p)
     return khz;
 }
 
+/* the DP link of a saved DP SST head for the state code (fDispLock held).
+ * With 'sink' (the link goes up: a restore, back from standby) the sink's
+ * capabilities are read again through displayDpLink (rdna3dplink=1; it
+ * makes the link of a head no mode set touched; another sink after the
+ * sleep: its link cap verified again); without, the link the mode set
+ * made (taking it down needs no sink). nullptr: TMDS, or no link. */
+rdna3_dp_link *RDNA3Accel::displayStateDpLink(uint32_t head, bool sink)
+{
+    if (!fDispState || head >= 4 || !fDispState->head[head].valid || !fDispState->head[head].dp)
+        return nullptr;
+    if (!sink)
+        return fDpLink[head];
+    const rdna3_display_path *p = displayHeadPath(head);
+    return p ? displayDpLink(head, p) : nullptr;
+}
+
 /* fDispLock held */
 void RDNA3Accel::displayStateSave(uint32_t head)
 {
@@ -137,8 +153,8 @@ void RDNA3Accel::displayNoteBlank(uint32_t head, bool blank)
 }
 
 /* rdna3dpms=2 on a head we did not light ourselves (fDispLock held):
- * RDNA3_EINVAL when it cannot (DP, no snapshot, no DMCUB): the caller
- * blanks the HUBP instead */
+ * RDNA3_EINVAL when it cannot (a DP head without its link, MST, no
+ * snapshot, no DMCUB): the caller blanks the HUBP instead */
 int RDNA3Accel::displayHeadDpms(uint32_t head, bool blank)
 {
     rdna3_dmub *dm = fDisplayDm;
@@ -148,7 +164,7 @@ int RDNA3Accel::displayHeadDpms(uint32_t head, bool blank)
         if (fHeadLinkDown[head])
             return RDNA3_OK;
         displayStateSave(head);   /* the head as it runs, for the way back */
-        int r = dcn32_head_link(fDispDev, dm, fDcn, fDispState, head, 0);
+        int r = dcn32_head_link(fDispDev, dm, fDcn, fDispState, head, 0, displayStateDpLink(head, false));
         if (r == RDNA3_OK) {
             fHeadLinkDown[head] = true;
             displayStateRestore("monitor standby", false);   /* RDNA3,Head<n>,State */
@@ -157,7 +173,7 @@ int RDNA3Accel::displayHeadDpms(uint32_t head, bool blank)
     }
     if (!fHeadLinkDown[head])
         return RDNA3_EINVAL;   /* the link never went down: a plain unblank */
-    int r = dcn32_head_link(fDispDev, dm, fDcn, fDispState, head, 1);
+    int r = dcn32_head_link(fDispDev, dm, fDcn, fDispState, head, 1, displayStateDpLink(head, true));
     if (r == RDNA3_OK) {
         fHeadLinkDown[head] = false;
         displayStateRestore("back from standby", false);
@@ -166,7 +182,7 @@ int RDNA3Accel::displayHeadDpms(uint32_t head, bool blank)
 }
 
 /* the link of a head in standby up again (fDispLock held): the clone
- * through its own path, the other TMDS heads through dcn32_head_link */
+ * through its own path, the other heads through dcn32_head_link */
 void RDNA3Accel::displayLinkUp(uint32_t head)
 {
     int r;
@@ -199,7 +215,7 @@ uint32_t RDNA3Accel::displayStateRestore(const char *why, bool restore)
             continue;
         if (r && restore) {
             int rr = dcn32_state_restore(fDispDev, fDisplayDm, fDcn, fDispState, i, fHeadBlank[i],
-                                         fHeadLinkDown[i]);
+                                         fHeadLinkDown[i], displayStateDpLink(i, !fHeadLinkDown[i]));
             if (!rr)
                 displayGammaReload(i);
             r = rr ? 1 : dcn32_state_check(fDispDev, fDispState, i, 50, &k);
@@ -256,7 +272,7 @@ void RDNA3Accel::displayWillSleep()
     displayPowerSuspend();   /* item O: SubVP / CAB off before the streams */
     if (rd3_arg("rdna3resume", 0) && fDisplayDm && fDispState)
         for (uint32_t i = 0; i < fDcn->nheads && i < 4; i++)
-            dcn32_state_head_off(fDispDev, fDisplayDm, fDcn, fDispState, i);
+            dcn32_state_head_off(fDispDev, fDisplayDm, fDcn, fDispState, i, displayStateDpLink(i, false));
     IOLockUnlock(fDispLock);
     statsStop();   /* no SMU traffic to a card that may lose power */
     setNumber("RDNA3,Sleeps", fSleeps);

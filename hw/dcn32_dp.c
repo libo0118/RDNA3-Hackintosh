@@ -1095,6 +1095,12 @@ static int link_transmitter_control(rdna3_dp_link *l, uint8_t action, uint8_t mo
     return r;
 }
 
+/* dcn10_link_encoder_hw_init: INIT, four lanes, no front end */
+int dcn32_dp_link_encoder_hw_init(rdna3_dp_link *l)
+{
+    return link_transmitter_control(l, RD_ATOM_TX_INIT, 0, 4, 0, 0);
+}
+
 /* enc1_configure_encoder */
 static void enc1_configure_encoder(rdna3_dp_link *l, const rdna3_dp_link_settings *s)
 {

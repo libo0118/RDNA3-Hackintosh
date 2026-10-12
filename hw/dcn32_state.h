@@ -30,19 +30,32 @@
  *   when the back end lost its setup, as init_hw does after a power loss)
  *   optc32_enable_crtc, TransmitterControl ENABLE, hubp2_set_blank(false)
  *
+ * A DP SST head on one pipe is restored with its rdna3_dp_link (the
+ * caller's, which knows the sink): the DIG and the PHY are the link's
+ * (dcn32_dp_link_set_dpms_off for the TransmitterControl DISABLE, the
+ * stream resources and dcn20_enable_stream_timing's clock part -
+ * dcn32_dp_acquire_stream, dcn32_dp_enable_stream_timing, DTBCLK again
+ * for a 128b/132b link - for the TMDS pixel clock, enc1_dig_connect_to_otg
+ * for the HDMI stream setup, and after optc32_enable_crtc
+ * dcn32_dp_link_set_dpms_on, which trains the link again, for the
+ * TransmitterControl ENABLE), as dc_commit_streams does on dm_resume. The
+ * stream's DSC configuration is kept in the snapshot while the link is
+ * down (link_set_dpms_off forgets it).
+ *
  * dcn32_head_link is link_set_dpms_off / link_set_dpms_on for a TMDS head:
  * hubp2_set_blank + dcn10_link_encoder_disable_output (TransmitterControl
  * DISABLE, skipped when the DIG is already off) and back with
  * dcn10_link_encoder_enable_tmds_output (TransmitterControl ENABLE) +
  * unblank; the OTG and the PHY PLL keep running, as on the clone
- * (dcn32_clone_link). DP heads are refused (the link would need training).
+ * (dcn32_clone_link). A DP head goes through its link the same way
+ * (dcn32_dp_link_set_dpms_off / _on: trained again).
  *
- * Not covered (see docs/DRIVER-PLAN.md, D4): the display clocks after a
- * power loss (dcn32_init_clocks / dcn32_update_clocks through the PMFW:
- * restore refuses when DISPCLK / DPPCLK no longer carry the pixel rate),
- * the gamma LUT RAM (only the mode is kept; after a power loss a RAM LUT
- * goes to bypass and the restore logs it), VPG infoframe contents (infoframes off, as
- * the clone and the mode set leave them), DP heads.
+ * Not covered (see docs/DRIVER-PLAN.md, D4): the gamma LUT RAM (only the
+ * mode is kept; after a power loss a RAM LUT goes to bypass and the restore
+ * logs it, the caller loads its table again), VPG infoframe contents
+ * (infoframes off, as the clone and the mode set leave them), DP MST heads
+ * and ODM combined heads (the second pipe has no snapshot): those are
+ * refused, the caller keeps them blank.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -52,6 +65,7 @@
 #include "dcn32.h"
 #include "dcn32_clk.h"
 #include "dmub32.h"
+#include "dcn32_dp.h"
 #include "vbios.h"
 
 #ifdef __cplusplus
@@ -64,6 +78,7 @@ extern "C" {
 typedef struct rdna3_dcn_head_state {
     int      valid;
     int      tmds;                    /* DIG mode DVI or HDMI: restore / link possible */
+    int      dp;                      /* DIG mode DP SST, one pipe: restore / link with its rdna3_dp_link */
     uint32_t pipe, otg, opp, mpcc;
     uint32_t fe, be, dig_mode;        /* DIG front end, back end (= transmitter), DIG_MODE */
     int      hpd;                     /* HPD n, 0-based; -1 none */
@@ -83,6 +98,10 @@ typedef struct rdna3_dcn_head_state {
     uint32_t pixel_rate_cntl, phypll_rate_cntl, dp_dto_phase, dp_dto_modulo;
     uint32_t pixel_rate_k, dppclk_dto, dppclk_dto_ctrl;
     uint32_t ogam_control;            /* MPCC_OGAM<mpcc>_MPCC_OGAM_CONTROL */
+    /* a DP head whose link this code took down: the stream's DSC as
+     * link_set_dpms_off found it (kept across snapshots of the same pipe) */
+    int      dp_held, dp_dsc;
+    rdna3_dsc_config dp_dsc_cfg;
     uint32_t nregs;
     uint32_t reg[RD_DCN_STATE_REGS];  /* the lists, in order (dcn32_state.c) */
 } rdna3_dcn_head_state;
@@ -132,22 +151,27 @@ int  dcn32_state_restore_global(rdna3_dev *d, const rdna3_dcn_state *st);
 
 /* Program head 'head' from its snapshot (dm: the running DMCUB). 'blank':
  * leave the HUBP blanked (display sleep), 'link_off': leave the
- * transmitter off (monitor standby). 'dc' gets the head entry back.
- * RDNA3_EINVAL: no snapshot or not TMDS (DP: the caller keeps it blank),
+ * transmitter off (monitor standby). 'dp': the head's DP link (a DP SST
+ * head; NULL for TMDS). 'dc' gets the head entry back. RDNA3_EINVAL: no
+ * snapshot, neither TMDS nor a DP head with its link (MST, ODM: the caller
+ * keeps it blank), or no DP link setting carries the mode any more;
  * RDNA3_ENODEV: no DMCUB, RDNA3_EBUSY: the display clocks no longer carry
- * the pixel rate, else the first failed VBIOS command / power step. */
+ * the pixel rate, RDNA3_EIO: the DP link did not train (the stream is on,
+ * as DC leaves it), else the first failed VBIOS command / power step. */
 int  dcn32_state_restore(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_state *st, uint32_t head,
-                         int blank, int link_off);
+                         int blank, int link_off, rdna3_dp_link *dp);
 
 /* Monitor standby on head 'head' (0: link down, 1: back up) from its
- * snapshot. RDNA3_EINVAL for a head without one or not TMDS. */
-int  dcn32_head_link(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_state *st, uint32_t head,
-                     int on);
+ * snapshot ('dp': a DP head's link, trained again on the way up).
+ * RDNA3_EINVAL for a head without one or neither TMDS nor DP with its link. */
+int  dcn32_head_link(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_state *st, uint32_t head,
+                     int on, rdna3_dp_link *dp);
 
 /* amdgpu_dm_commit_zero_streams for one head before a sleep: blank,
- * TransmitterControl DISABLE, optc32_disable_crtc. The snapshot must be
- * taken first. */
-int  dcn32_state_head_off(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_state *st, uint32_t head);
+ * TransmitterControl DISABLE (a DP head: dcn32_dp_link_set_dpms_off on
+ * 'dp'), optc32_disable_crtc. The snapshot must be taken first. */
+int  dcn32_state_head_off(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_state *st, uint32_t head,
+                          rdna3_dp_link *dp);
 
 #ifdef __cplusplus
 }

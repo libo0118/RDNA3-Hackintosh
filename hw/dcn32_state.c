@@ -14,6 +14,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "dcn32_state.h"
+#include "dcn32_modeset.h"
 #include "gen/dcn_3_2_1.h"
 #include "gen/dcn_3_2_0_dig.h"
 #include "gen/dcn_3_2_0_pipe.h"
@@ -183,9 +184,10 @@ int dcn32_state_save(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdn
 {
     const rdna3_dcn_head *g;
     rdna3_dcn_head_state *h;
-    uint32_t b, k, n, r, o_fe, o_be, o_mode;
-    int o_same, o_hpd;
+    uint32_t b, k, n, r, o_fe, o_be, o_mode, o_fe_cntl, o_be_cntl;
+    int o_same, o_hpd, o_held, o_dsc;
     uint8_t o_enc, o_conn;
+    rdna3_dsc_config o_dsc_cfg;
 
     if (!dc || !st || head >= dc->nheads || head >= RD_DCN_MAX_PIPES)
         return RDNA3_EINVAL;
@@ -200,6 +202,11 @@ int dcn32_state_save(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdn
     o_hpd = h->hpd;
     o_enc = h->encoder_id;
     o_conn = h->connector_id;
+    o_held = o_same && h->dp_held;
+    o_fe_cntl = h->dig_fe_cntl;
+    o_be_cntl = h->dig_be_cntl;
+    o_dsc = h->dp_dsc;
+    o_dsc_cfg = h->dp_dsc_cfg;
     for (k = 0; k < sizeof(*h); k++)
         ((uint8_t *)h)[k] = 0;
     h->pipe = g->pipe;
@@ -235,6 +242,13 @@ int dcn32_state_save(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdn
         h->hpd = -1;
     }
     h->tmds = h->be < NDIG && (h->dig_mode == 2 || h->dig_mode == 3) && h->connector_id;
+    h->dp = h->be < NDIG && h->dig_mode == 0 && g->odm_cnt < 2;
+    if (o_held) {
+        /* the link is still down from this code: its stream's DSC as it was */
+        h->dp_held = 1;
+        h->dp_dsc = o_dsc;
+        h->dp_dsc_cfg = o_dsc_cfg;
+    }
     /* the pixel clock: given, else from the DLG's ref/pix ratio */
     r = GET(RI(d, regHUBPREQ0_REF_FREQ_TO_PIX_FREQ, g->pipe, HUBP_S), HUBPREQ0_REF_FREQ_TO_PIX_FREQ,
             REF_FREQ_TO_PIX_FREQ);
@@ -256,7 +270,12 @@ int dcn32_state_save(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdn
     h->addr_hi = RI(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, h->pipe, HUBP_S);
     h->det = RI(d, regDCHUBBUB_DET0_CTRL, h->pipe, DET_S);
     h->pg_status = RI(d, regDOMAIN0_PG_STATUS, h->pipe, PG_S);
-    if (h->be < NDIG) {
+    if (o_held) {
+        /* link_set_dpms_off disconnected the DIG (reset_dio_stream_encoder):
+         * the routing as the link ran */
+        h->dig_fe_cntl = o_fe_cntl;
+        h->dig_be_cntl = o_be_cntl;
+    } else if (h->be < NDIG) {
         h->dig_fe_cntl = RI(d, regDIG0_DIG_FE_CNTL, h->fe, DIG_S);
         h->dig_be_cntl = RI(d, regDIG0_DIG_BE_CNTL, h->be, DIG_S);
     }
@@ -285,7 +304,8 @@ int dcn32_state_save(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const rdn
     RLOG(d, "state: head %u saved: pipe %u otg %u opp %u mpcc %u DIG %u/%u mode %u %ux%u %u kHz at MC 0x%llx, "
          "%u registers, %s", head, h->pipe, h->otg, h->opp, h->mpcc, h->fe, h->be, h->dig_mode, g->h_active,
          g->v_active, h->pclk_khz, (unsigned long long)g->address, n,
-         h->tmds ? "TMDS: restore and standby possible" : "not TMDS (or no VBIOS path): blank only");
+         h->tmds ? "TMDS: restore and standby possible"
+                 : h->dp ? "DP SST: restore and standby with its link" : "not TMDS / DP SST (or no VBIOS path): blank only");
     return RDNA3_OK;
 }
 
@@ -482,25 +502,80 @@ static int link_off(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_head_state *h)
     return vbios_tx(dm, h, RD_ATOM_TX_DISABLE);
 }
 
-int dcn32_head_link(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_state *st, uint32_t head, int on)
+/* a DP head's link: the one driving its DIG and OTG, SST */
+static int dp_link_for(rdna3_dev *d, const rdna3_dcn_head_state *h, const rdna3_dp_link *dp, uint32_t head)
 {
-    const rdna3_dcn_head_state *h;
+    if (!h->dp || !dp || !dp->d || dp->mst || dp->otg != h->otg || dp->fe != h->fe || dp->be != h->be) {
+        RERR(d, "state: head %u: %s: blank only", head,
+             !h->dp ? (h->be < NDIG && h->dig_mode == 5 ? "a DP MST head" : h->be < NDIG && h->dig_mode == 0
+                                                                                  ? "an ODM combined DP head"
+                                                                                  : "neither TMDS nor DP SST")
+                    : !dp || !dp->d ? "a DP head without its link"
+                    : dp->mst      ? "its DP link runs MST"
+                                   : "its DP link drives another DIG / OTG");
+        return RDNA3_EINVAL;
+    }
+    return RDNA3_OK;
+}
+
+/* link_set_dpms_off for a DP head: the stream's DSC goes into the snapshot
+ * first (the link forgets it), unless an earlier one is held there */
+static void dp_link_down(rdna3_dcn_head_state *h, rdna3_dp_link *dp, rdna3_dmub *dm)
+{
+    if (!h->dp_held) {
+        h->dp_dsc = dp->stream_dsc;
+        h->dp_dsc_cfg = dp->dsc_cfg;
+        h->dp_held = 1;
+    }
+    dp->dm = dm;
+    dcn32_dp_link_set_dpms_off(dp);
+}
+
+/* the stream's resources for link_set_dpms_on: DSC as held, one ODM
+ * segment (program_dp of dcn32_modeset.c) */
+static void dp_stream_back(const rdna3_dcn_head_state *h, rdna3_dp_link *dp, rdna3_dmub *dm)
+{
+    dp->dm = dm;
+    if (h->dp_held) {
+        dp->stream_dsc = h->dp_dsc;
+        dp->dsc_cfg = h->dp_dsc_cfg;
+    }
+    dp->odm_opp_cnt = 1;
+    dp->odm_opp[0] = h->opp;
+    dp->odm_dsc[0] = dp->dsc_inst;
+}
+
+int dcn32_head_link(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_state *st, uint32_t head, int on,
+                    rdna3_dp_link *dp)
+{
+    rdna3_dcn_head_state *h;
     uint32_t v;
     int ret = RDNA3_OK;
     if (!dc || !st || head >= dc->nheads || head >= RD_DCN_MAX_PIPES || !st->head[head].valid)
         return RDNA3_EINVAL;
     h = &st->head[head];
-    if (!h->tmds || h->pipe != dc->head[head].pipe)
-        return RDNA3_EINVAL;   /* DP: no link training here, the caller blanks */
+    if (h->pipe != dc->head[head].pipe || (!h->tmds && dp_link_for(d, h, dp, head)))
+        return RDNA3_EINVAL;   /* the caller blanks */
     if (!dm || !dm->hw_init)
         return RDNA3_ENODEV;
-    if (!on) {
+    if (!on && !h->tmds) {
+        hubp_blank(d, h->pipe);
+        dp_link_down(h, dp, dm);
+    } else if (!on) {
         ret = link_off(d, dm, h);
     } else {
-        /* enable_link_hdmi -> dcn10_link_encoder_enable_tmds_output, then
-         * the unblank (hubp2_set_blank(false)) */
-        if (!be_enabled(d, h->be))
+        if (!h->tmds) {
+            /* link_set_dpms_on on the running OTG: trained again */
+            rdna3_mode m;
+            dcn32_modeset_head_mode(&h->geo, h->pclk_khz, &m);
+            dp_stream_back(h, dp, dm);
+            ret = dcn32_dp_link_set_dpms_on(dp, &m, 0);
+            h->dp_held = 0;
+        } else if (!be_enabled(d, h->be)) {
+            /* enable_link_hdmi -> dcn10_link_encoder_enable_tmds_output */
             ret = vbios_tx(dm, h, RD_ATOM_TX_ENABLE);
+        }
+        /* the unblank (hubp2_set_blank(false)) */
         v = RI(d, regHUBP0_DCHUBP_CNTL, h->pipe, HUBP_S);
         v = SET(v, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN, 0);
         WI(d, regHUBP0_DCHUBP_CNTL, h->pipe, HUBP_S, SET(v, HUBP0_DCHUBP_CNTL, HUBP_TTU_DISABLE, 0));
@@ -509,34 +584,42 @@ int dcn32_head_link(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn
     return ret;
 }
 
-int dcn32_state_head_off(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_state *st, uint32_t head)
+int dcn32_state_head_off(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_state *st, uint32_t head,
+                         rdna3_dp_link *dp)
 {
-    const rdna3_dcn_head_state *h;
-    int ret = RDNA3_OK;
+    rdna3_dcn_head_state *h;
+    int ret = RDNA3_OK, isdp;
     if (!dc || !st || head >= dc->nheads || head >= RD_DCN_MAX_PIPES || !st->head[head].valid)
         return RDNA3_EINVAL;
     h = &st->head[head];
-    if (!h->tmds || !dm || !dm->hw_init) {
+    isdp = !h->tmds && dp_link_for(d, h, dp, head) == RDNA3_OK;
+    if ((!h->tmds && !isdp) || !dm || !dm->hw_init) {
         hubp_blank(d, h->pipe);   /* what can be done without the PHY commands */
-        return h->tmds ? RDNA3_ENODEV : RDNA3_EINVAL;
+        return h->tmds || isdp ? RDNA3_ENODEV : RDNA3_EINVAL;
     }
     /* dcn20_reset_back_end_for_pipe: link_set_dpms_off, disable_crtc,
-     * the pixel clock source powered down */
-    ret = link_off(d, dm, h);
+     * the pixel clock source powered down (a DP stream's is the DP DTO) */
+    if (isdp) {
+        hubp_blank(d, h->pipe);
+        dp_link_down(h, dp, dm);
+    } else {
+        ret = link_off(d, dm, h);
+    }
     otg_disable(d, h->otg);
-    if (!ret)
+    if (!ret && !isdp)
         ret = vbios_pclk(dm, h, 0);
     RLOG(d, "state: head %u off for the sleep (%d)", head, ret);
     return ret;
 }
 
 int dcn32_state_restore(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_state *st, uint32_t head,
-                        int blank, int link_off_wanted)
+                        int blank, int link_off_wanted, rdna3_dp_link *dp)
 {
     rdna3_dcn_head_state *h;
     rdna3_dcn_clocks ck;
+    rdna3_mode mode;
     uint32_t v, keep_be_mask, live_be, ogam, div, ctl;
-    int fresh, be_lost, ret = RDNA3_OK, r2;
+    int fresh, be_lost, ret = RDNA3_OK, r2, isdp, dp_stream = 0;
     const uint32_t prc_cfg = OTG0_PIXEL_RATE_CNTL__OTG0_PIXEL_RATE_SOURCE_MASK |
                              OTG0_PIXEL_RATE_CNTL__DTBCLK_DTO0_ENABLE_MASK |
                              OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE_MASK |
@@ -546,10 +629,14 @@ int dcn32_state_restore(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     if (!dc || !st || head >= dc->nheads || head >= RD_DCN_MAX_PIPES || !st->head[head].valid)
         return RDNA3_EINVAL;
     h = &st->head[head];
-    if (!h->tmds) {
-        RERR(d, "state: head %u is not a TMDS stream: no restore (DP needs link training)", head);
+    isdp = !h->tmds;
+    if (isdp && dp_link_for(d, h, dp, head))
+        return RDNA3_EINVAL;
+    if (isdp && !h->pclk_khz) {
+        RERR(d, "state: head %u: a DP head without its pixel clock: no restore", head);
         return RDNA3_EINVAL;
     }
+    dcn32_modeset_head_mode(&h->geo, h->pclk_khz, &mode);
     if (!dm || !dm->hw_init) {
         RERR(d, "state: head %u: no DMCUB to drive the PHY, no restore", head);
         return RDNA3_ENODEV;
@@ -586,13 +673,16 @@ int dcn32_state_restore(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     keep_be_mask = DIG0_DIG_BE_CNTL__DIG_MODE_MASK | DIG0_DIG_BE_CNTL__DIG_FE_SOURCE_SELECT_MASK;
     live_be = RI(d, regDIG0_DIG_BE_CNTL, h->be, DIG_S);
     be_lost = fresh || (live_be & keep_be_mask) != (h->dig_be_cntl & keep_be_mask);
-    RLOG(d, "state: head %u restore: pipe %u otg %u DIG %u/%u %u kHz%s%s", head, h->pipe, h->otg, h->fe, h->be,
-         h->pclk_khz, fresh ? ", pipe / system context lost" : "", be_lost ? ", PHY setup lost" : "");
+    RLOG(d, "state: head %u restore: pipe %u otg %u DIG %u/%u %s %u kHz%s%s", head, h->pipe, h->otg, h->fe, h->be,
+         isdp ? "DP" : "TMDS", h->pclk_khz, fresh ? ", pipe / system context lost" : "",
+         be_lost ? ", PHY setup lost" : "");
 
     /* 1. whatever still runs goes down first (link_set_dpms_off, disable_crtc) */
     if (!GET(RI(d, regDOMAIN0_PG_STATUS, h->pipe, PG_S), DOMAIN0_PG_STATUS, DOMAIN_PGFSM_PWR_STATUS))
         hubp_blank(d, h->pipe);
-    if (be_enabled(d, h->be))
+    if (isdp)
+        dp_link_down(h, dp, dm);   /* the link's own state too, wherever the power left it */
+    else if (be_enabled(d, h->be))
         ret = vbios_tx(dm, h, RD_ATOM_TX_DISABLE);
     otg_disable(d, h->otg);
 
@@ -619,9 +709,39 @@ int dcn32_state_restore(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     WI(d, regDPPCLK0_DTO_PARAM, h->pipe, DPPDTO_S, h->dppclk_dto);
     ctl = RI(d, regDPPCLK_DTO_CTRL, 0, 0);
     WI(d, regDPPCLK_DTO_CTRL, 0, 0, (ctl & ~(3u << (4 * h->pipe))) | (h->dppclk_dto_ctrl << (4 * h->pipe)));
-    r2 = vbios_pclk(dm, h, h->pclk_khz);
-    if (r2 && !ret)
-        ret = r2;
+    if (isdp) {
+        /* the stream's resources again (validation: the link setting, the
+         * HPO encoders for 128b/132b), DTBCLK for those (dcn32_update_clocks
+         * with dtbclk_en: the PMFW forgot it with the power), then the DP
+         * DTO / pixel rate divider of dcn20_enable_stream_timing */
+        dp_stream_back(h, dp, dm);
+        if (ck.dprefclk_khz)
+            dp->dprefclk_khz = ck.dprefclk_khz;   /* the DP DTO's reference, as dcn32_modeset_plan_dp */
+        if (!dp->verified)
+            dcn32_dp_verify_link_cap(dp, RD_DP_LINK_TRAINING_MAX_VERIFY_RETRY);   /* a new sink: as program_dp */
+        r2 = dcn32_dp_acquire_stream(dp, &mode);
+        if (!r2 && dp->hpo_active) {
+            uint32_t pmfw = 0;
+            r2 = dcn32_smu_send(d, RD_DALSMC_MSG_GetSmuVersion, 0, &pmfw);
+            if (!r2)
+                r2 = dcn32_clk_dtbclk_enable(d, pmfw, &dp->dtbclk_khz);
+            if (r2)
+                RERR(d, "state: head %u: DTBCLK for the 128b/132b link not set (%d)", head, r2);
+        }
+        if (r2) {
+            RERR(d, "state: head %u: the DP stream gets no link resources (%d): left blank", head, r2);
+            dp->hpo_active = 0;
+            if (!ret)
+                ret = r2;
+        } else {
+            dcn32_dp_enable_stream_timing(dp, &mode);
+            dp_stream = 1;
+        }
+    } else {
+        r2 = vbios_pclk(dm, h, h->pclk_khz);
+        if (r2 && !ret)
+            ret = r2;
+    }
     blk_write(d, h, B_OTG);
     WI(d, regOTG0_OTG_CONTROL, h->otg, OTG_S, SET(h->otg_control, OTG0_OTG_CONTROL, OTG_MASTER_EN, 0));
     blk_write(d, h, B_ODM);
@@ -655,7 +775,22 @@ int dcn32_state_restore(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
 
     /* 5. link_set_dpms_on: enc1_dig_connect_to_otg, STREAM_SETUP, the
      * front end's HDMI registers without infoframes (their VPG contents
-     * are not kept), the back end's TMDS setup and routing */
+     * are not kept), the back end's TMDS setup and routing; a DP stream
+     * only connects its front end here, its link does the rest in step 6 */
+    if (isdp) {
+        v = RI(d, regDIG0_DIG_FE_CNTL, h->fe, DIG_S);
+        WI(d, regDIG0_DIG_FE_CNTL, h->fe, DIG_S,
+           (v & ~DIG0_DIG_FE_CNTL__DIG_SOURCE_SELECT_MASK) | (h->dig_fe_cntl & DIG0_DIG_FE_CNTL__DIG_SOURCE_SELECT_MASK));
+        if (fresh) {
+            /* dcn10_link_encoder_hw_init, as init_hw after a power loss
+             * (link_set_dpms_off disconnected the back end: its routing
+             * says nothing here) */
+            r2 = dcn32_dp_link_encoder_hw_init(dp);
+            if (r2 && !ret)
+                ret = r2;
+        }
+        goto enable;
+    }
     WI(d, regDIG0_DIG_FE_CNTL, h->fe, DIG_S, h->dig_fe_cntl);
     r2 = vbios_stream(dm, h);
     if (r2 && !ret)
@@ -673,17 +808,26 @@ int dcn32_state_restore(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
             ret = r2;
     }
 
+enable:
     /* 6. optc32_enable_crtc: "VTG enable first is for HW workaround" */
     WI(d, regVTG0_CONTROL, h->otg, VTG_S, SET(h->vtg_control, VTG0_CONTROL, VTG0_ENABLE, 1));
     WI(d, regOTG0_OTG_CONTROL, h->otg, OTG_S, SET(h->otg_control, OTG0_OTG_CONTROL, OTG_MASTER_EN, 1));
-    if (!link_off_wanted) {
+    if (!link_off_wanted && isdp && dp_stream) {
+        /* link_set_dpms_on: the link trained again (without fallback, as
+         * program_dp: the verified link cap already fell back); a failed
+         * training leaves the SST stream on, as DC does */
+        r2 = dcn32_dp_link_set_dpms_on(dp, &mode, 0);
+        h->dp_held = 0;
+        if (r2 && !ret)
+            ret = r2;
+    } else if (!link_off_wanted && !isdp) {
         r2 = vbios_tx(dm, h, RD_ATOM_TX_ENABLE);   /* dcn10_link_encoder_enable_tmds_output */
         if (r2 && !ret)
             ret = r2;
     }
     v = RI(d, regHUBP0_DCHUBP_CNTL, h->pipe, HUBP_S);
     WI(d, regHUBP0_DCHUBP_CNTL, h->pipe, HUBP_S, SET(v, HUBP0_DCHUBP_CNTL, HUBP_UNDERFLOW_CLEAR, 1));
-    if (!blank && !link_off_wanted) {
+    if (!blank && !link_off_wanted && (!isdp || dp_stream)) {
         v = RI(d, regHUBP0_DCHUBP_CNTL, h->pipe, HUBP_S);
         v = SET(v, HUBP0_DCHUBP_CNTL, HUBP_BLANK_EN, 0);
         WI(d, regHUBP0_DCHUBP_CNTL, h->pipe, HUBP_S, SET(v, HUBP0_DCHUBP_CNTL, HUBP_TTU_DISABLE, 0));
