@@ -2594,16 +2594,50 @@ void RDNA3Bringup::vmFlushAllOnNextJob()
 
 /* the reset magic word in VRAM: gone = VRAM lost, which clients see as
  * AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST */
-void RDNA3Bringup::checkVramLost(const char *what)
+bool RDNA3Bringup::checkVramLost(const char *what)
 {
     uint32_t magic = 0;
     if (fResetMagic == UINT64_MAX)
-        return;
+        return false;
     rdna3_vram_read(fDev, fResetMagic, &magic, 4);
     if (magic != kResetMagic) {
         fVramLostCount++;
         BLOG("%s: VRAM content lost (0x%08x), clients see VRAMLOST", what, magic);
+        return true;
     }
+    return false;
+}
+
+/* VRAM went with the power (or the reset): every page table is garbage.
+ * amdgpu evicts them to GTT before a sleep and amdgpu_vm_validate brings
+ * them back; here the pool starts over, each live VM gets a new empty
+ * root on both hubs, and the DRM maps its clients' ranges again
+ * (takeVmReplay). Under the DRM lock, after hwInit. */
+void RDNA3Bringup::vmRebuildAfterVramLoss()
+{
+    uint32_t n = 0, bad = 0;
+    if (!fVmReady || !fPtPool || !fDev)
+        return;
+    gpuvm_pool_reset(fPtPool);
+    for (uint32_t id = 1; id < 16; id++) {
+        RDNA3Vm *v = fVmByVmid[id];
+        if (!v || !v->live)
+            continue;
+        if (gpuvm_vm_init(fDev, &v->vm, fPtPool) != RDNA3_OK) {
+            bad++;   /* stays live on an empty root: its jobs fault, it sees VRAMLOST */
+            continue;
+        }
+        v->vm.vmid = id;
+        fVmPd[id] = gpuvm_pd_addr(fDev, &v->vm);
+        mmhub302_setup_vm_pt_regs(fDev, id, fVmPd[id]);
+        if (fGmc && fGmc->gfxhub_enabled)
+            gfxhub303_setup_vm_pt_regs(fDev, id, fVmPd[id]);
+        vmFlush(id);
+        v->gfxFlush = v->compFlush = v->dmaFlush = true;
+        n++;
+    }
+    fVmReplay = true;
+    BLOG("VRAM lost: page tables rebuilt for %u VM(s)%s", n, bad ? ", some without a root" : "");
 }
 
 /* amdgpu_device_ip_resume after a full reset or a power loss: everything
@@ -2717,8 +2751,10 @@ bool RDNA3Bringup::gpuReset(bool baco)
             break;
         IODelay(1);
     }
-    checkVramLost("GPU reset");
+    bool vramLost = checkVramLost("GPU reset");
     ok = reinitFromLevel4();
+    if (ok && vramLost)
+        vmRebuildAfterVramLoss();
     if (fIntr)
         fIntr->enable();
     BLOG("%s #%llu %s", baco ? "BACO cycle" : "GPU reset",
@@ -2803,7 +2839,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
         publish("RDNA3,ResumeResult", 2);
         return false;
     }
-    checkVramLost("resume");
+    bool vramLost = checkVramLost("resume");
     /* rdna3amdgpu=1: soc21_common_resume - an aborted S3 with the TOS still
      * running gets a reset first (soc21_need_reset_on_resume); this wake
      * follows a completed sleep (amdgpu: suspend_complete), so it does not;
@@ -2813,6 +2849,8 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
         smu13_mode1_reset(fDev);
     }
     ok = reinitFromLevel4();
+    if (ok && vramLost)
+        vmRebuildAfterVramLoss();
     fSuspended = false;
     if (fIntr)
         fIntr->enable();

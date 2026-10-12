@@ -158,6 +158,9 @@ public:
      * the wake then always runs the resume (resumeAfterPowerLoss) */
     bool     systemSuspend();
     bool     suspended() const { return fSuspended; }
+    /* VRAM was lost and the live VMs have new, empty roots: the DRM maps
+     * every client's ranges again (rdna3_drm_device_vm_replay); true once */
+    bool     takeVmReplay() { bool r = fVmReplay; fVmReplay = false; return r; }
     /* VCN / JPEG across a system sleep (rdna3vcn): amdgpu_device_ip_suspend's
      * jpeg_v4_0_suspend + vcn_v4_0_suspend before it (the VCPU BOs copied
      * to system memory), and after a wake that kept the card's power their
@@ -328,6 +331,7 @@ private:
     uint64_t         fAllocLo = 0, fAllocHi = 0;
     bool             fReinit = false;        /* hwInit() runs again after a reset */
     bool             fSuspended = false;     /* systemSuspend ran, the resume has not */
+    bool             fVmReplay = false;      /* takeVmReplay */
     uint32_t         fSystemSuspends = 0;
     uint32_t         fResetCount = 0, fVramLostCount = 0;
     uint64_t         fGpuResets = 0, fSoftRecoveries = 0, fVmFaults = 0;
@@ -340,7 +344,8 @@ private:
     bool             gpuReset(bool baco = false);
     /* shared by gpuReset and resumeAfterPowerLoss */
     void             vmFlushAllOnNextJob();
-    void             checkVramLost(const char *what);
+    bool             checkVramLost(const char *what);
+    void             vmRebuildAfterVramLoss();
     bool             reinitFromLevel4();
     void             markGuilty(uint32_t vmid, const char *why);
     void             forceFences();

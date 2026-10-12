@@ -677,6 +677,17 @@ int main(void)
         va.flags = AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_PAGE_WRITEABLE;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0 &&
               (vm_last_flags & AMDGPU_VM_PAGE_READABLE) && !(vm_last_flags & AMDGPU_VM_PAGE_WRITEABLE));
+        /* VRAM lost (a power loss in the sleep): every mapping goes into
+         * the new tables again, with the same flags */
+        {
+            int maps0 = vm_maps;
+            uint64_t mapped0 = vm_mapped;
+            vm_last_flags = 0;
+            CHECK(rdna3_drm_device_vm_replay(&dev) == 0 && vm_maps == maps0 + 1 &&
+                  vm_mapped == mapped0 + va.map_size);
+            CHECK((vm_last_flags & AMDGPU_VM_PAGE_READABLE) && !(vm_last_flags & AMDGPU_VM_PAGE_WRITEABLE));
+            vm_mapped = mapped0;   /* the fake tables count a replay as new pages */
+        }
         va.operation = AMDGPU_VA_OP_UNMAP;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
         va.flags = 0;

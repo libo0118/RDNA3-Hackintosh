@@ -47,6 +47,8 @@ typedef struct rdna3_vm {
 typedef uint64_t (*rdna3_page_pa_fn)(void *ctx, uint64_t page_index);
 
 int  gpuvm_pool_init(rdna3_dev *d, rdna3_pt_pool *p, uint32_t npages);
+/* VRAM lost: all pages free again (the VMs' old tables are gone) */
+void gpuvm_pool_reset(rdna3_pt_pool *p);
 int  gpuvm_vm_init(rdna3_dev *d, rdna3_vm *vm, rdna3_pt_pool *p);
 void gpuvm_vm_fini(rdna3_dev *d, rdna3_vm *vm);
 /* map 'pages' 4 KiB pages at 'va'; page i lives at pa_fn(ctx, i) */

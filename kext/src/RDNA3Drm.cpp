@@ -373,6 +373,15 @@ int RDNA3Accel::drmFenceSignaled(void *ctx, uint32_t ip, uint32_t ring, uint64_t
     return a->fBringup ? a->fBringup->fenceSignaled(ip, ring, seq) : 1;
 }
 
+void RDNA3Accel::drmVmReplayIfNeeded()
+{
+    if (!fBringup || !fDrm || !fBringup->takeVmReplay())
+        return;
+    int failed = rdna3_drm_device_vm_replay(fDrm);
+    LOG("VRAM lost: the clients' GPUVM ranges mapped again%s", failed ? " (some failed)" : "");
+    setNumber("RDNA3,VMReplayFailures", (uint64_t)failed);
+}
+
 /* Called from rdna3_drm_ioctl, i.e. with fDrmLock held. The sleep runs
  * without it, so one client's wait (up to the 10 s cap) does not stall the
  * others; the UAPI holds no pointers across it (fences by value, syncobjs
@@ -390,6 +399,7 @@ int RDNA3Accel::drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq
     IOLockLock(a->fDrmLock);
     if (cap)
         r = a->fBringup->fenceSignaled(ip, ring, seq) ? 0 : a->fBringup->recoverHang(ip, ring, seq);
+    a->drmVmReplayIfNeeded();
     return r;
 }
 
@@ -452,6 +462,7 @@ int RDNA3Accel::pmCtl(const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp, bool adm
     IOLockLock(fDrmLock);
     if (fBringup) {
         r = fBringup->pmctl(rq, rp, admin);
+        drmVmReplayIfNeeded();   /* rdna3baco: the chip went through BACO */
     } else {
         bzero(rp, sizeof(*rp));
         rp->op = rq->op;

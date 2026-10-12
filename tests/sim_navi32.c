@@ -10193,6 +10193,15 @@ static void run(const char *fwdir)
             gpuvm_unmap(&dev, &vm, va + 4096, 1);
             CHECK(gpuvm_lookup(&dev, &vm, va + 4096) == 0 && gpuvm_lookup(&dev, &vm, va) == pa);
             CHECK(gpuvm_map_linear(&dev, &vm, va + 1, pa, 1, vpte) == RDNA3_EINVAL);
+            /* VRAM lost (a power loss in the sleep): the pool starts over,
+             * the VM gets a new empty root and its ranges mapped again */
+            rdna3_vram_fill(&dev, pool.base, 0xA5, 64ull * 4096);   /* what VRAM holds after the loss */
+            gpuvm_pool_reset(&pool);
+            CHECK(pool.nfree == 64 && gpuvm_vm_init(&dev, &vm, &pool) == RDNA3_OK && vm.tables == 1);
+            CHECK(gpuvm_lookup(&dev, &vm, va) == 0);
+            CHECK(gpuvm_map_linear(&dev, &vm, va, pa, 1024, vpte) == RDNA3_OK && vm.tables == 1 + 1 + 2 + 3);
+            CHECK(gpuvm_lookup(&dev, &vm, va + 1023ull * 4096) == pa + 1023ull * 4096 &&
+                  gpuvm_lookup(&dev, &vm, va + 1024ull * 4096) == 0);
             gpuvm_vm_fini(&dev, &vm);
             CHECK(vm.tables == 0 && pool.nfree == 64);
             gfxhub303_setup_vm_pt_regs(&dev, 3, 0x123456789000ull | 1);

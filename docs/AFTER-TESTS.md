@@ -797,7 +797,7 @@ kept its power (`resume #N: after amdgpu_device_suspend`).
 | heads `restored (-16)` after a power loss | DISPCLK / DPPCLK below the pixel rate: the clock manager (`dcn32_init_clocks`, `dcn32_update_clocks`) is not ported | `state: head N: DISPCLK ... no longer carry` line; port the hard minimums through `dcn32_smu_set_hard_min` (DAL mailbox) |
 | heads `restored (-19)` | no DMCUB after the resume (`rdna3dmub=3` attaches to the GOP's firmware, gone after a power loss) | `rdna3dmub=1`; `DMUB:` lines after `resume` |
 | restored, `running`, the picture black or garbage | VRAM did not survive (`VRAMLost`): the surfaces stay empty until WindowServer redraws | a picture a minute later; `sysctx 0` in the head state = the DCHUBBUB system aperture not restored |
-| DMA/GFX tests after the wake fail, ring tests passed | GPUVM page tables lost with VRAM (the pool is not saved; see `docs/DRIVER-PLAN.md`, D4) | expected after a power loss; a fresh process (new VM) passing = only old VMs are broken |
+| DMA/GFX tests after the wake fail, ring tests passed | GPUVM page tables lost with VRAM and not rebuilt: `VRAM lost: page tables rebuilt for N VM(s)` and `the clients' GPUVM ranges mapped again` must follow `resume #N` (`RDNA3,VMReplayFailures` 0) | a fresh process (new VM) passing = the old VMs' replay failed: the `VMReplayFailures` count and the client's mappings |
 
 ---
 

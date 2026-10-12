@@ -33,6 +33,17 @@ int gpuvm_pool_init(rdna3_dev *d, rdna3_pt_pool *p, uint32_t npages)
     return RDNA3_OK;
 }
 
+/* VRAM was lost: every table in the pool is garbage and no VM keeps its
+ * pages; the pool starts empty over the same VRAM range */
+void gpuvm_pool_reset(rdna3_pt_pool *p)
+{
+    uint32_t i;
+    p->nfree = p->npages;
+    p->hint = 0;
+    for (i = 0; i < RD_PT_POOL_MAX / 32; i++)
+        p->bitmap[i] = 0;
+}
+
 static uint64_t pool_get(rdna3_dev *d, rdna3_pt_pool *p)
 {
     uint32_t n, i;

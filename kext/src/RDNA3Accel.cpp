@@ -145,6 +145,7 @@ IOReturn RDNA3Accel::setPowerState(unsigned long state, IOService *)
         /* suspended with no display wake work (no heads): the resume here */
         IOLockLock(fDrmLock);
         bool ok = fBringup->resumeAfterPowerLoss();
+        drmVmReplayIfNeeded();
         IOLockUnlock(fDrmLock);
         LOG("wake: GPU resume after the suspend %s", ok ? "done" : "FAILED");
     } else if (vcn) {

@@ -210,6 +210,9 @@ private:
     static uint64_t drmNowNs(void *ctx);
     bool          drmInit(const amd_discovery *disc);
     void          drmFree();
+    /* after a reset or a resume that lost VRAM: the clients' GPUVM ranges
+     * into the rebuilt page tables (fDrmLock held) */
+    void          drmVmReplayIfNeeded();
     static void  *drmZalloc(void *ctx, size_t n);
     static void   drmFreeMem(void *ctx, void *p, size_t n);
     static int    drmBoAlloc(void *ctx, rdna3_bo *bo);

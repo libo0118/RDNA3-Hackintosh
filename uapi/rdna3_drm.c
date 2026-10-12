@@ -1961,9 +1961,22 @@ static int gem_mmap(rdna3_drm_file *f, union drm_amdgpu_gem_mmap *m)
     return 0;
 }
 
-static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
+/* one mapping into the GPU page tables (amdgpu_vm_bo_update); a doorbell
+ * BO is only recorded: the GPU never reaches doorbells through a VM, the
+ * client writes them through its CPU mapping */
+static int va_map_hw(rdna3_drm_file *f, rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size, uint64_t flags)
 {
     rdna3_drm_ops *ops = &f->dev->ops;
+    uint32_t vflags = (uint32_t)flags;
+    if (!f->vm || !ops->vm_map || bo->placement == AMDGPU_GEM_DOMAIN_DOORBELL)
+        return 0;
+    if (bo->userptr_ro)   /* a read-only userptr is never writable */
+        vflags &= ~(uint32_t)AMDGPU_VM_PAGE_WRITEABLE;
+    return ops->vm_map(ops->ctx, f->vm, bo, va, offset, size, vflags);
+}
+
+static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
+{
     uint32_t i;
     /* mappings are recorded always and written into the GPU page tables
      * when the OS layer provides vm_map (hw/gpuvm.c behind it) */
@@ -2006,15 +2019,8 @@ static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
                 return -RD_ENOSPC;
             f->nvas++;
         }
-        /* a doorbell BO is only recorded: the GPU never reaches doorbells
-         * through a VM, the client writes them through its CPU mapping */
-        if (f->vm && ops->vm_map && bo->placement != AMDGPU_GEM_DOMAIN_DOORBELL) {
-            /* amdgpu_vm_bo_update: a read-only userptr is never writable */
-            uint32_t vflags = (uint32_t)va->flags;
-            if (bo->userptr_ro)
-                vflags &= ~(uint32_t)AMDGPU_VM_PAGE_WRITEABLE;
-            int r = ops->vm_map(ops->ctx, f->vm, bo, va->va_address, va->offset_in_bo,
-                                va->map_size, vflags);
+        {
+            int r = va_map_hw(f, bo, va->va_address, va->offset_in_bo, va->map_size, va->flags);
             if (r)
                 return r;
         }
@@ -2433,6 +2439,33 @@ static void seq64_unmap(rdna3_drm_file *f)
     if (f->vm && ops->vm_unmap)
         ops->vm_unmap(ops->ctx, f->vm, RD_SEQ64_VA & GMC_HOLE_MASK, RD_SEQ64_SIZE);
     f->seq64_mapped = 0;
+}
+
+/* The OS lost VRAM and with it every page table, and gave each live VM a
+ * new, empty root: every client's mappings go into the tables again (what
+ * amdgpu gets from evicting the page tables to GTT before the sleep and
+ * amdgpu_vm_validate putting them back). The BO contents in VRAM stay lost;
+ * clients see that as VRAMLOST. Returns how many mappings failed. */
+int rdna3_drm_device_vm_replay(rdna3_drm_device *dev)
+{
+    rdna3_drm_ops *ops = &dev->ops;
+    rdna3_drm_file *f;
+    uint32_t i;
+    int failed = 0;
+    for (f = dev->files; f; f = f->next_file) {
+        if (!f->vm)
+            continue;
+        for (i = 0; f->vas && i < f->nvas; i++) {
+            rdna3_va *m = &f->vas[i];
+            if (m->handle && m->bo && va_map_hw(f, m->bo, m->va, m->offset, m->size, m->flags))
+                failed++;
+        }
+        if (f->seq64_mapped && dev->seq64_bo && ops->vm_map &&
+            ops->vm_map(ops->ctx, f->vm, dev->seq64_bo, RD_SEQ64_VA & GMC_HOLE_MASK, 0, RD_SEQ64_SIZE,
+                        AMDGPU_VM_PAGE_READABLE | AMDGPU_VM_MTYPE_UC))
+            failed++;
+    }
+    return failed;
 }
 
 /* ---- fence drivers ---- */

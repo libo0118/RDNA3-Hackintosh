@@ -494,6 +494,9 @@ void rdna3_drm_device_set_enumeration_only(rdna3_drm_device *dev, int on);
 /* the OS brought ring(s) 'mask' of HW IP 'ip' up: advertise them and let
  * CS reach ops.submit for them (also sets accel_working) */
 void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_t mask);
+/* VRAM (and every page table) was lost and each live VM has a new empty
+ * root: map every client's ranges again; returns the mappings that failed */
+int  rdna3_drm_device_vm_replay(rdna3_drm_device *dev);
 /* Harvesting read from the GC (gfx11_get_cu_info): replaces the "all CUs
  * and RBs active" defaults in DEV_INFO. 'bitmap' uses cu_info->bitmap[0]'s
  * 4x4 layout. */

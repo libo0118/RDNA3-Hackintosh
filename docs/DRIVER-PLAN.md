@@ -175,20 +175,20 @@ What exists (`hw/dcn32_state.c`, `kext/src/RDNA3Resume.cpp`):
 
 The S3 gap - what a full resume still lacks, in the order it will bite:
 
-1. **Suspend side.** Nothing of `amdgpu_device_suspend` /
-   `amdgpu_device_ip_suspend_phase1/2` runs: the rings are not stopped, the
-   PMFW gets no `PrepareMp1ForUnload` (`smu_v13_0_0` `set_mp1_state`), the
-   PSP ring is not destroyed, IH and interrupts stay on. On S3 the card
-   loses its power anyway; on a sleep where it keeps it (S0ix, a VM
-   without a device reset) the engines just stay as they were.
+1. **Suspend side.** Done (`a3b2ec6`, `rdna3resume=1`): `systemSuspend`
+   runs `amdgpu_fence_driver_hw_fini` and `amdgpu_device_ip_suspend_phase2`
+   (VCN/JPEG, MES, SDMA, GFX, PSP, IH, GMC, SoC); every wake then runs the
+   resume. `smu_suspend` has nothing to send on 13.0.7 (mp1_state NONE).
 2. **VRAM contents.** amdgpu evicts every VRAM BO to system memory before
    the sleep (`amdgpu_device_evict_resources`) and moves them back; here
    VRAM is simply lost: user BOs, the accelerator's and the framebuffer's
    surfaces (black until WindowServer redraws), and the **GPUVM page-table
    pool** - live VMs get their MMHUB/GFXHUB contexts back from `fVmPd` but
    the tables behind them are garbage, so old contexts fault (clients see
-   VRAM lost). Needs: eviction of the PT pool (or a rebuild from each VM's
-   mapping list) and of the scanout surfaces, through SDMA to GTT.
+   VRAM lost). Page tables: done - after a VRAM loss the pool starts over,
+   each live VM gets a new root and the UAPI maps every client's ranges
+   again (`rdna3_drm_device_vm_replay`). Still open: the BO contents and
+   the scanout surfaces (eviction through SDMA to GTT).
 3. **Display init.** `dcn32_init_hw` is not ported: the clock manager
    (`dcn32_init_clocks`, `dcn32_update_clocks`: DISPCLK / DPPCLK / DCFCLK
    hard minimums through the DAL mailbox) - the restore refuses a head the

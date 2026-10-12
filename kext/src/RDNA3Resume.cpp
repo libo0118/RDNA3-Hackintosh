@@ -318,6 +318,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
         if (resume && a->fBringup && a->fBringup->finished() && a->fDrmLock) {
             IOLockLock(a->fDrmLock);
             bool ok = a->fBringup->resumeAfterPowerLoss();
+            a->drmVmReplayIfNeeded();
             IOLockUnlock(a->fDrmLock);
             a->setNumber("RDNA3,WakeResumeResult", ok ? 1 : 0);
             LOG("wake: GPU bring-up after the %s %s", powerLost ? "power loss" : "suspend",
