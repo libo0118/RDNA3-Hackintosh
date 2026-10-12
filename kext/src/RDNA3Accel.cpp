@@ -136,6 +136,7 @@ IOReturn RDNA3Accel::setPowerState(unsigned long state, IOService *)
         if (s3) {
             IOLockLock(fDrmLock);
             if (fDrm) {   /* amdgpu_userq_suspend: no queue runs while its VRAM moves */
+                setNumber("RDNA3,SleepUserQueuesActive", (uint64_t)rdna3_drm_device_userq_active(fDrm));
                 int uf = rdna3_drm_device_userq_suspend(fDrm);
                 if (uf)
                     LOG("suspend: %d user queue(s) did not come off the scheduler", uf);

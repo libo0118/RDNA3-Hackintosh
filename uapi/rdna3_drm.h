@@ -507,6 +507,10 @@ void rdna3_drm_device_for_each_vram_bo(rdna3_drm_device *dev, void (*fn)(void *c
  * amdgpu_userq_pre_reset + _post_reset once a GPU reset restarted the MES
  * scheduler; each returns the queues that failed */
 int  rdna3_drm_device_userq_suspend(rdna3_drm_device *dev);
+/* amdgpu_userq_active: the user queues mapped on the scheduler, of one
+ * process / of all (device lock held) */
+int  rdna3_drm_file_userq_active(const rdna3_drm_file *f);
+int  rdna3_drm_device_userq_active(const rdna3_drm_device *dev);
 int  rdna3_drm_device_userq_resume(rdna3_drm_device *dev);
 int  rdna3_drm_device_userq_reset(rdna3_drm_device *dev, int vram_lost);
 /* Harvesting read from the GC (gfx11_get_cu_info): replaces the "all CUs

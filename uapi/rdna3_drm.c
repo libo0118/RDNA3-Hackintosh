@@ -3101,6 +3101,27 @@ int rdna3_drm_device_userq_suspend(rdna3_drm_device *dev)
     return failed;
 }
 
+/* Ported from amdgpu_userq_active: the queues of one process mapped on the
+ * scheduler now */
+int rdna3_drm_file_userq_active(const rdna3_drm_file *f)
+{
+    uint32_t i;
+    int n = 0;
+    for (i = 0; f && f->userqs && i < RD_MAX_USERQ; i++)
+        n += f->userqs[i].used == 1 && f->userqs[i].state == RD_USERQ_STATE_MAPPED;
+    return n;
+}
+
+/* amdgpu_userq_active over every process */
+int rdna3_drm_device_userq_active(const rdna3_drm_device *dev)
+{
+    const rdna3_drm_file *f;
+    int n = 0;
+    for (f = dev->files; f; f = f->next_file)
+        n += rdna3_drm_file_userq_active(f);
+    return n;
+}
+
 /* Ported from amdgpu_userq_resume: the queues back on the scheduler (their
  * MQDs and rings came back with the evicted VRAM) */
 int rdna3_drm_device_userq_resume(rdna3_drm_device *dev)

@@ -360,6 +360,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
                 int uf = rdna3_drm_device_userq_resume(a->fDrm);
                 if (uf)
                     LOG("wake: %d user queue(s) not back on the scheduler (hung)", uf);
+                a->setNumber("RDNA3,WakeUserQueuesActive", (uint64_t)rdna3_drm_device_userq_active(a->fDrm));
             }
             IOLockUnlock(a->fDrmLock);
             a->setNumber("RDNA3,WakeResumeResult", ok ? 1 : 0);

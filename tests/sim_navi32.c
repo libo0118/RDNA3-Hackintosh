@@ -6934,9 +6934,11 @@ static void test_userq_uapi(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
      * scheduler, then back; a job after the resume runs */
     {
         uint32_t a0 = UQ.adds, r0 = UQ.removes;
+        CHECK(rdna3_drm_device_userq_active(&dd) == 3 && rdna3_drm_file_userq_active(&f1) >= 1);
         CHECK(rdna3_drm_device_userq_suspend(&dd) == 0 && UQ.removes == r0 + 3 && uq_slot_db(dbbase) < 0 &&
               uq_slot_db(dbbase + 2) < 0 && uq_slot_db(dbbase + 1024 + 6) < 0);
         CHECK(rdna3_drm_device_userq_suspend(&dd) == 0 && UQ.removes == r0 + 3);   /* nothing mapped */
+        CHECK(rdna3_drm_device_userq_active(&dd) == 0);
         CHECK(rdna3_drm_device_userq_resume(&dd) == 0 && UQ.adds == a0 + 3 && uq_slot_db(dbbase) >= 0 &&
               uq_slot_db(dbbase + 2) >= 0 && uq_slot_db(dbbase + 1024 + 6) >= 0);
         n = uq_pm4(pk, va + 0x4030, 0xFEED0006, va + 0x4034, 0x16);
@@ -6952,12 +6954,13 @@ static void test_userq_uapi(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
         memset(&S.uq, 0, sizeof(S.uq));
         CHECK(rdna3_drm_device_userq_reset(&dd, 1) == 0 && UQ.adds == a0 + 6 && uq_slot_db(dbbase) < 0);
         CHECK(rdna3_drm_device_userq_resume(&dd) == 0 && UQ.adds == a0 + 6);   /* hung: not mapped */
+        CHECK(rdna3_drm_device_userq_active(&dd) == 0);
         /* back to mapped for the rest of the test */
         for (rdna3_drm_file *ff = dd.files; ff; ff = ff->next_file)
             for (i = 0; ff->userqs && i < RD_MAX_USERQ; i++)
                 if (ff->userqs[i].used == 1)
                     ff->userqs[i].state = RD_USERQ_STATE_UNMAPPED;
-        CHECK(rdna3_drm_device_userq_resume(&dd) == 0 && UQ.adds == a0 + 9);
+        CHECK(rdna3_drm_device_userq_resume(&dd) == 0 && UQ.adds == a0 + 9 && rdna3_drm_device_userq_active(&dd) == 3);
     }
 
     /* USERQ_FREE: REMOVE_QUEUE, its doorbell reaches nothing any more;

@@ -124,6 +124,11 @@ amdgpu_ucode_is_valid  visibility of the Linux sysfs fw_version attributes (FW_A
 amdgpu_ucode_patch_jt  MEC jump table copied by the driver: amdgpu_ucode_init_bo does it only when load_type is not PSP
 amdgpu_ucode_legacy_naming  chip-name firmware files of the Vega / Raven / Navi 1x / Navi 2x / Aldebaran IP versions; no Navi 3x IP version is in its list
 soc21_common_(is_idle|wait_for_idle|soft_reset|sw_fini)|soc21_pre_asic_init|soc21_read_disabled_bios  empty in amdgpu v6.12 (true / 0 / nothing / "todo" false)
+amdgpu_vcn_is_disabled_vcn|vcn_v4_0_init_ring_metadata  SR-IOV only: vcn_v4_0_early_init calls the first under amdgpu_sriov_vf, vcn_v4_0_start_sriov (MMSCH) both
+amdgpu_vcn_dec_(ring_test_ring|ring_test_ib|send_msg)|amdgpu_vcn_dec_sw_ring_test_ring  the separate decode rings of VCN 1.x-3.x: VCN 4.0 runs one unified ring (vcn_v4_0_unified_ring_vm_funcs: amdgpu_vcn_enc_ring_test_ring, amdgpu_vcn_unified_ring_test_ib)
+amdgpu_vcn_get_enc_ring_prio  drm_sched priority of the VCN 2.x / 3.x encode rings in their sw_init; vcn_v4_0 does not call it
+amdgpu_vcn_fwlog_init  VCN firmware log, only with the amdgpu.vcnfw_log debug option (off by default)
+amdgpu_jpeg_psp_update_sram  JPEG DPG SRAM loaded through the PSP: jpeg_v4_0 never calls it
 soc21_common_sw_init  adds the SR-IOV mailbox interrupt (xgpu_nv_mailbox_add_irq_id) only on a virtual function
 soc21_common_set_powergating_state  LSDMA memory power gating for LSDMA 6.0.0 / 6.0.2 only; the card's LSDMA is 6.0.3 (discovery dump)
 soc21_didt_(rreg|wreg)  the DIDT index / data pair is reached only through amdgpu_debugfs_regs_didt (Linux debugfs) and the KV / CI powerplay code
