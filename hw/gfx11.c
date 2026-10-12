@@ -795,7 +795,7 @@ uint32_t gfx11_submit_job_ex(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uint
         gfx11_emit_ib(d, r, vmid, ibs[i].va, ibs[i].ndw);
     gfx11_emit_frame_cntl(d, r, 0, secure);
     if (x && x->uf_addr)   /* the job's number: the fence emitted next */
-        gfx11_emit_user_fence(d, r, x->uf_addr, (uint32_t)(r->fence_seq + 1));
+        gfx11_emit_user_fence(d, r, x->uf_addr, rdna3_seq_widen(x->uf_seq_base, r->fence_seq + 1));
     /* amdgpu_ib_schedule: the postfix (shadowing off) and a second
      * COND_EXEC before the fence; the first COND_EXEC then covers
      * everything up to and including the fence */
@@ -2206,7 +2206,7 @@ uint32_t gfx11_submit_compute_job_ex(rdna3_dev *d, rdna3_mec_ring *kcq, uint64_t
         gfx11_write(d, r, INDIRECT_BUFFER_VALID | ibs[i].ndw | (vmid << 24));
     }
     if (x && x->uf_addr)
-        gfx11_emit_user_fence(d, r, x->uf_addr, (uint32_t)(r->fence_seq + 1));
+        gfx11_emit_user_fence(d, r, x->uf_addr, rdna3_seq_widen(x->uf_seq_base, r->fence_seq + 1));
     seq = gfx11_emit_fence(d, r);
     gfx11_commit(d, r);
     r->last_ctx = ctx;
@@ -3632,7 +3632,7 @@ static uint32_t submit_amdgpu(rdna3_dev *d, rdna3_gfx_ring *r, uint64_t ctx, uin
     if (gfx)
         gfx11_emit_frame_cntl(d, r, 0, secure);
     if (x && x->uf_addr)
-        gfx11_emit_user_fence(d, r, x->uf_addr, (uint32_t)(r->fence_seq + 1));
+        gfx11_emit_user_fence(d, r, x->uf_addr, rdna3_seq_widen(x->uf_seq_base, r->fence_seq + 1));
     if (gfx) {
         gfx11_emit_gfx_shadow(d, r, 0, 0, 0, 0, 0);
         gfx11_emit_init_cond_exec(d, r, cond_addr);

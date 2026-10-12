@@ -178,6 +178,12 @@ void rdna3_vram_alloc_top_init(rdna3_dev *d, uint64_t lo, uint64_t hi);
  * there is no top window */
 uint64_t rdna3_vram_alloc_top(rdna3_dev *d, uint64_t size, uint64_t align, const char *tag);
 static inline uint64_t rdna3_vram_mc(const rdna3_dev *d, uint64_t off) { return d->fb_start + off; }
+/* a ring's 32-bit fence number widened past 'base', the job number the UAPI
+ * last handed out on that ring (amdgpu's 64-bit job->uf_sequence) */
+static inline uint64_t rdna3_seq_widen(uint64_t base, uint32_t seq32)
+{
+    return base + (uint32_t)(seq32 - (uint32_t)base);
+}
 /* amdgpu_gmc_vram_pa: VRAM offset -> physical address (amdgpu_gmc_vram_mc2pa) */
 static inline uint64_t rdna3_vram_pa(const rdna3_dev *d, uint64_t off) { return d->fb_offset + off; }
 volatile uint8_t *rdna3_vram_cpu(rdna3_dev *d, uint64_t off, uint64_t len);

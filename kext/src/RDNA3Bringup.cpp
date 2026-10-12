@@ -3246,6 +3246,7 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
     const uint32_t want[6] = { job->gds_base, job->gds_size, job->gws_base, job->gws_size,
                                job->oa_base, job->oa_size };
     x.uf_addr = ufMc;
+    x.uf_seq_base = job->seq_base;
     x.gds_switch = !fGdsKnown[v->vmid] || memcmp(fGds[v->vmid], want, sizeof(want)) != 0;
     x.gds_base = want[0]; x.gds_size = want[1];
     x.gws_base = want[2]; x.gws_size = want[3];
@@ -3278,7 +3279,7 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
         uint32_t s = sdma60_submit_job(fDev, fSdma, v->vmid, v->dmaFlush ? gpuvm_pd_addr(fDev, &v->vm) : 0,
                                        x.pasid_mapping ? x.pasid : 0,
                                        x.pasid_mapping ? gmc11_pasid_mapping_reg(fDev, v->vmid, 0) : 0,
-                                       va, ndw, fl, n, ufMc);
+                                       va, ndw, fl, n, ufMc, job->seq_base);
         if (!s)
             return -RD_EBUSY;
         if (x.pasid_mapping)
@@ -3293,7 +3294,7 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
             sdma60_emit_ib(fDev, fSdma, v->vmid, ibs[i].va, ibs[i].length_dw);
         fSdmaLastVmid = v->vmid;
         if (ufMc)   /* amdgpu_ib_schedule: the user fence, then the ring fence */
-            sdma60_emit_fence64(fDev, fSdma, ufMc, (uint32_t)(fSdma->fence_seq + 1));
+            sdma60_emit_fence64(fDev, fSdma, ufMc, rdna3_seq_widen(job->seq_base, fSdma->fence_seq + 1));
         *seq = sdma60_emit_fence(fDev, fSdma);
         sdma60_commit(fDev, fSdma);
         return 0;

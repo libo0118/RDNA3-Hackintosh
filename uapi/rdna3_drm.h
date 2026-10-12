@@ -178,6 +178,9 @@ typedef struct rdna3_cs_job {
      * sequence number at 'uf_offset' in the one-page BO 'uf_bo' (NULL: none) */
     rdna3_bo *uf_bo;
     uint64_t uf_offset;
+    /* the ring's last handle: the user fence holds the ring's 32-bit fence
+     * widened past it, the same number the CS ioctl returns */
+    uint64_t seq_base;
     /* the GDS (bytes) / GWS (entries) / OA (counters) partitions of the
      * BO list's on-chip BOs; size 0: none (amdgpu_job_set_resources) */
     uint32_t gds_base, gds_size, gws_base, gws_size, oa_base, oa_size;

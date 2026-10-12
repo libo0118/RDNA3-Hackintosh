@@ -113,6 +113,8 @@ uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r);
  * high dword of 'seq' at MC address 'addr' (8-byte aligned) */
 void sdma60_emit_fence64(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t addr, uint64_t seq);
 int  sdma60_wait_fence(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq);
+/* sdma60_wait_fence with its own budget in microseconds */
+int  sdma60_wait_fence_us(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq, uint32_t usec);
 
 /* copy 'bytes' (<= 1 GiB) between MC addresses and wait for it */
 int  sdma60_copy_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src_mc, uint64_t dst_mc,
@@ -153,7 +155,7 @@ int  sdma60_wait_for_idle(rdna3_dev *d);
 uint32_t sdma60_submit_job(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t pd_addr,
                            uint32_t pasid, uint32_t pasid_reg, const uint64_t *ib_va,
                            const uint32_t *ib_ndw, const uint32_t *ib_flags, uint32_t n,
-                           uint64_t uf_addr);
+                           uint64_t uf_addr, uint64_t uf_seq_base);
 /* sdma_v6_0_ring_test_ib: WRITE_LINEAR + 3 NOPs at VRAM offset 'ib' (VMID 0) */
 int  sdma60_ring_test_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t ib);
 

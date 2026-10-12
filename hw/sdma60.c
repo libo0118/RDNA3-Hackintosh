@@ -161,8 +161,13 @@ void sdma60_set_trap_interrupt(rdna3_dev *d, rdna3_sdma_ring *r, int enable)
 
 int sdma60_wait_fence(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq)
 {
+    return sdma60_wait_fence_us(d, r, seq, d->usec_timeout);
+}
+
+int sdma60_wait_fence_us(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq, uint32_t usec)
+{
     uint32_t i, v = 0;
-    for (i = 0; i < d->usec_timeout; i++) {
+    for (i = 0; i < usec; i++) {
         v = wb_read32(d, r, RD_SDMA_WB_FENCE);
         if ((int32_t)(v - seq) >= 0)
             return RDNA3_OK;
@@ -404,12 +409,24 @@ int sdma60_copy_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint64_t ds
  * 0x3fffffe0): 'len' bytes at 'dst' set to 'value' in as many CONST_FILL
  * packets as it takes, then one fence; the clear amdgpu_gem_create_ioctl
  * gives every VRAM BO ("always clear VRAM") */
+static uint32_t ring_space(rdna3_dev *d, rdna3_sdma_ring *r);
+
 int sdma60_fill_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t value, uint64_t len)
 {
     const uint64_t max = 0x3fffffe0ull;
-    uint32_t seq;
+    uint32_t seq, i, ndw, usec;
     if (!r->ready || !len || (dst & 3) || (len & 3) || len > (1ull << 40))
         return RDNA3_EINVAL;
+    /* the fills and the fence must fit (amdgpu_ring_alloc), behind what
+     * the ring still holds */
+    ndw = 5 * (uint32_t)((len + max - 1) / max) + 16;
+    for (i = 0; i < d->usec_timeout && ring_space(d, r) < ndw; i++)
+        d->os.udelay(d->os.ctx, 1);
+    if (ring_space(d, r) < ndw)
+        return RDNA3_EBUSY;
+    /* the wait grows with the size: 1 KiB per microsecond is far below
+     * what the engine fills, and jobs queued before it count too */
+    usec = d->usec_timeout + (uint32_t)(len >> 10 < 60000000ull ? len >> 10 : 60000000ull);
     while (len) {
         uint32_t n = (uint32_t)(len < max ? len : max);
         sdma60_emit_fill(d, r, dst, value, n);
@@ -418,7 +435,7 @@ int sdma60_fill_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t va
     }
     seq = sdma60_emit_fence(d, r);
     sdma60_commit(d, r);
-    return sdma60_wait_fence(d, r, seq);
+    return sdma60_wait_fence_us(d, r, seq, usec);
 }
 
 /* --------------------------- user queues --------------------------- */
@@ -774,7 +791,7 @@ static uint32_t ring_space(rdna3_dev *d, rdna3_sdma_ring *r)
 uint32_t sdma60_submit_job(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t pd_addr,
                            uint32_t pasid, uint32_t pasid_reg, const uint64_t *ib_va,
                            const uint32_t *ib_ndw, const uint32_t *ib_flags, uint32_t n,
-                           uint64_t uf_addr)
+                           uint64_t uf_addr, uint64_t uf_seq_base)
 {
     uint64_t cond_addr = rdna3_vram_mc(d, r->wb + RD_SDMA_WB_COND_EXE);
     uint32_t i, seq, patch, cond_exec, ndw = 6 + 5 + 6 + 6 + 10 + 3 + 6 + 5 + 6 + 14 * n + 16 + 16;
@@ -808,7 +825,7 @@ uint32_t sdma60_submit_job(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint
     for (i = 0; i < n; i++)
         sdma60_emit_ib(d, r, vmid, ib_va[i], ib_ndw[i]);
     if (uf_addr)
-        sdma60_emit_fence64(d, r, uf_addr, (uint32_t)(r->fence_seq + 1));
+        sdma60_emit_fence64(d, r, uf_addr, rdna3_seq_widen(uf_seq_base, r->fence_seq + 1));
     seq = sdma60_emit_fence(d, r);
     sdma60_ring_patch_cond_exec(d, r, cond_exec);
     sdma60_commit(d, r);
@@ -833,7 +850,7 @@ int sdma60_ring_test_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t ib)
     rdna3_vram_write(d, ib, p, sizeof(p));
     rdna3_hdp_flush(d);
     va = rdna3_vram_mc(d, ib);
-    seq = sdma60_submit_job(d, r, 0, 0, 0, 0, &va, &ndw, &flags, 1, 0);
+    seq = sdma60_submit_job(d, r, 0, 0, 0, 0, &va, &ndw, &flags, 1, 0, 0);
     if (!seq)
         return RDNA3_EINVAL;
     ret = sdma60_wait_fence(d, r, seq);

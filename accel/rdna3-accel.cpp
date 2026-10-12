@@ -882,6 +882,14 @@ static void *const *rd3LegacyPipeVtable(void)
             "movq __ZTV24IOAccelLegacyDisplayPipe@GOTPCREL(%%rip), %0" : "=r"(vt));
     return vt;
 }
+/* __cxa_pure_virtual (libkern exports it), through the GOT like the vtable:
+ * a pure virtual slot holds it, and calling it panics */
+static const void *rd3PureVirtual(void)
+{
+    const void *p;
+    __asm__("movq ___cxa_pure_virtual@GOTPCREL(%%rip), %0" : "=r"(p));
+    return p;
+}
 /* the byte offset of performTransaction from a vtable's address point
  * (Itanium ABI: a virtual member pointer holds 1 + that offset) */
 static long rd3PerformTransactionSlot(void)
@@ -912,7 +920,8 @@ static IOReturn rd3AccelIopGammaToBase(void *pipe, IOAccelDisplayPipeTransaction
     /* the address point is 2 words in (offset to top, RTTI) */
     if (vtOk && slot >= 0 && !(slot & 7))
         fn = (PerformFn)vt[2 + slot / 8];
-    if ((const void *)fn == gOSKextUnresolved || (const void *)fn == (const void *)&gOSKextUnresolved)
+    if ((const void *)fn == gOSKextUnresolved || (const void *)fn == (const void *)&gOSKextUnresolved ||
+        (const void *)fn == rd3PureVirtual())   /* pure in the base on this release (PR #2 review) */
         fn = nullptr;
     static SInt32 gIopBaseLogs;
     if (!fn) {

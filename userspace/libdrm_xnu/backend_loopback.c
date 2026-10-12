@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 static rdna3_drm_device g_dev;
@@ -302,6 +303,14 @@ static uint64_t lb_random64(void *c)
     return v;
 }
 
+static uint64_t lb_now(void *c)
+{
+    struct timespec ts;
+    (void)c;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
 static void dev_init(void)
 {
     rdna3_drm_ops ops = { NULL, lb_zalloc, lb_free, lb_bo_alloc, lb_bo_free, lb_copyin, lb_copyout, NULL, NULL,
@@ -312,6 +321,7 @@ static void dev_init(void)
     amd_discovery disc;
     if (g_dev_ready)
         return;
+    ops.now_ns = lb_now;   /* wait-any slices its waits by it */
     memset(&disc, 0, sizeof(disc));
     disc.has_gc_info = 1;
     disc.gc.num_se = 3; disc.gc.num_sa_per_se = 2; disc.gc.num_wgp0_per_sa = 5;

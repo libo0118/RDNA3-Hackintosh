@@ -769,8 +769,8 @@ static int syncobj_wait(rdna3_drm_file *f, uint64_t handles_ptr, uint32_t count,
     if (flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL)
         return syncobj_for_each(f, handles_ptr, count, points_ptr, 2, abs_ns);
     for (;;) {
-        rdna3_fence fe = { 0, 0, 0 };
-        uint32_t i, h, pending = 0, fi = 0;
+        rdna3_fence fe = { 0, 0, 0 }, fk = { 0, 0, 0 };
+        uint32_t i, h, pending = 0, fi = 0, fki = 0, kernel = 0;
         uint64_t pt = 0, now, until;
         for (i = 0; i < count; i++) {
             rdna3_syncobj *s;
@@ -789,6 +789,11 @@ static int syncobj_wait(rdna3_drm_file *f, uint64_t handles_ptr, uint32_t count,
                 if (!pending) {
                     fe = s->fence;
                     fi = i;
+                }
+                if (!kernel && s->fence.ip != RD_USERQ_FENCE_IP) {
+                    fk = s->fence;
+                    fki = i;
+                    kernel = 1;
                 }
                 pending++;
             } else if (!(flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT)) {
@@ -810,8 +815,16 @@ static int syncobj_wait(rdna3_drm_file *f, uint64_t handles_ptr, uint32_t count,
             if (now - t0 < RD_WAIT_SLICE_LIMIT_NS && abs_ns > now && abs_ns - now > 1000000)
                 until = now + 1000000;
         }
-        if (until == abs_ns)
+        if (until == abs_ns) {
             waited = 1;
+            /* the full wait goes on a kernel ring's fence when there is
+             * one: the OS recovers a hung kernel ring at its cap, a user
+             * queue's wait only stops there (PR #2 review) */
+            if (kernel) {
+                fe = fk;
+                fi = fki;
+            }
+        }
         /* that fence signalled: done, even if its syncobj went away while
          * the lock was dropped (DRM holds the fence, not the syncobj) */
         if (!fence_wait_abs(dev, &fe, until)) {
@@ -1604,8 +1617,10 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
             hw_ring = entity_ring(f, ctx, ip, ring);
         }
         r = cs_patch_ibs(f, ctx, ip, &hw_ring, ibs, nibs, copies);
-        if (!r)
+        if (!r) {
+            job.seq_base = dev->last_seq[ip][hw_ring];
             r = ops->submit(ops->ctx, f->vm, ip, hw_ring, ibs, nibs, &job, &seq);
+        }
         for (i = 0; i < nibs; i++)
             if (copies[i])
                 ops->free(ops->ctx, copies[i], 4ull * ibs[i].length_dw);
@@ -1615,6 +1630,7 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
             f->vcn_entity_jobs[ctx]++;
         ring = hw_ring;
     } else {
+        job.seq_base = dev->last_seq[ip][ring];
         r = ops->submit(ops->ctx, f->vm, ip, ring, ibs, nibs, &job, &seq);
         if (r)
             return r;

@@ -5638,7 +5638,7 @@ static void test_sdma_amdgpu(rdna3_dev *dev, rdna3_sdma_ring *sd)
     fault0 = S.sdma_ib_fault;
     va = rdna3_vram_mc(dev, ib);
     seq = sdma60_submit_job(dev, sd, 7, 0x0000000123456001ull, 0x8009, gmc11_pasid_mapping_reg(dev, 7, 0),
-                            &va, &ndw, &flags, 1, 0);
+                            &va, &ndw, &flags, 1, 0, 0);
     CHECK(seq == sd->fence_seq && sdma60_wait_fence(dev, sd, seq) == RDNA3_OK);
     CHECK(S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32 + dist * 7] == 0x23456001u &&
           S.reg[GC_BASE0 + regGCVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32 + dist * 7] == 0x1u);
@@ -5653,7 +5653,7 @@ static void test_sdma_amdgpu(rdna3_dev *dev, rdna3_sdma_ring *sd)
     /* COND_EXE: with the slot cleared (a preempted ring) the job is skipped */
     skips0 = S.sdma_cond_skips;
     rdna3_vram_write(dev, sd->wb + RD_SDMA_WB_COND_EXE, &zero, 4);
-    seq = sdma60_submit_job(dev, sd, 0, 0, 0, 0, &va, &ndw, &zero, 1, 0);
+    seq = sdma60_submit_job(dev, sd, 0, 0, 0, 0, &va, &ndw, &zero, 1, 0, 0);
     CHECK(seq && !sdma60_fence_passed(dev, sd, seq) && S.sdma_cond_skips == skips0 + 1);
     rdna3_vram_write(dev, sd->wb + RD_SDMA_WB_COND_EXE, &one, 4);
     rdna3_vram_write(dev, sd->wb + RD_SDMA_WB_FENCE, &sd->fence_seq, 4);   /* forced */
@@ -10322,6 +10322,13 @@ static void run(const char *fwdir)
                     CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
                     rdna3_vram_read(&dev, dst + 64, &uf, 8);
                     CHECK(uf == seq && S.cp_bad == 0);
+                    /* the UAPI's handles go on past 2^32: the value is the
+                     * ring's fence widened past the last handle */
+                    x.uf_seq_base = (5ull << 32) | seq;
+                    seq = gfx11_submit_job_ex(&dev, &gr, 0xC0FFEE, 5, 0, jobs, 1, &x);
+                    CHECK(seq != 0 && gfx11_wait_fence(&dev, &gr, seq) == RDNA3_OK);
+                    rdna3_vram_read(&dev, dst + 64, &uf, 8);
+                    CHECK(uf == ((5ull << 32) | seq));
                     /* GDS switch (gfx_v11_0_ring_emit_gds_switch): VMID 5
                      * gets GDS bytes 0x100+0x200, GWS 4..11, OA 2..4; hw
                      * init left VMIDs 1-15 without any */

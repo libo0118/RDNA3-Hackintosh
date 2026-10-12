@@ -70,21 +70,34 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
         bo->vram_offset = off;
         bo->backing = nullptr;
         /* AMDGPU_GEM_CREATE_VRAM_CLEARED (the UAPI sets it on every VRAM
-         * BO, as amdgpu_gem_create_ioctl): through BAR0 when visible, else
-         * the SDMA ring; a BO that cannot be cleared is not handed out */
+         * BO, as amdgpu_gem_create_ioctl): by the SDMA ring when it runs
+         * (amdgpu_fill_buffer; a BAR bzero of a big BO would hold fDrmLock
+         * for long), else by the CPU through BAR0, moving the BO into the
+         * visible part if it has to; a BO that cannot be cleared is not
+         * handed out */
         if (bo->flags & AMDGPU_GEM_CREATE_VRAM_CLEARED) {
-            if (a->fVramMap && off + bo->size <= a->fVramMap->getLength()) {
-                bzero((void *)(a->fVramMap->getVirtualAddress() + off), (size_t)bo->size);
-            } else if (!a->fBringup || a->fBringup->clearVram(off, bo->size) != 0) {
-                /* no SDMA ring (yet): the visible part, which the CPU clears */
-                range_alloc_put(from, off, bo->size);
-                off = from != a->fVramHeap ? range_alloc_get(a->fVramHeap, bo->size, align) : RANGE_ALLOC_FAIL;
-                if (off == RANGE_ALLOC_FAIL || !a->fVramMap || off + bo->size > a->fVramMap->getLength()) {
-                    if (off != RANGE_ALLOC_FAIL)
-                        range_alloc_put(a->fVramHeap, off, bo->size);
-                    return -RD_ENOMEM;
+            int cr = a->fBringup ? a->fBringup->clearVram(off, bo->size) : RDNA3_ENODEV;
+            if (cr == RDNA3_ETIME) {
+                /* the fill may still land: the range is not reused */
+                LOG("VRAM clear of %llu KiB at 0x%llx timed out: range retired",
+                    (unsigned long long)(bo->size >> 10), (unsigned long long)off);
+                return -RD_ENOMEM;
+            }
+            if (cr != RDNA3_OK) {
+                bool visible = a->fVramMap && off + bo->size <= a->fVramMap->getLength();
+                if (!visible) {
+                    range_alloc_put(from, off, bo->size);
+                    off = from != a->fVramHeap ? range_alloc_get(a->fVramHeap, bo->size, align)
+                                               : RANGE_ALLOC_FAIL;
+                    if (off == RANGE_ALLOC_FAIL)
+                        return -RD_ENOMEM;
+                    from = a->fVramHeap;
+                    if (!a->fVramMap || off + bo->size > a->fVramMap->getLength()) {
+                        range_alloc_put(from, off, bo->size);
+                        return -RD_ENOMEM;
+                    }
+                    bo->vram_offset = off;
                 }
-                bo->vram_offset = off;
                 bzero((void *)(a->fVramMap->getVirtualAddress() + off), (size_t)bo->size);
             }
         }
@@ -602,6 +615,9 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.random64 = drmRandom64;
     ops.gpu_clock = drmGpuClock;   /* AMDGPU_INFO_TIMESTAMP: SMUIO GOLDEN_TSC */
     ops.privileged = drmPrivileged;
+    /* every profile: wait-any slices its waits by this clock (PR #2 review:
+     * with it only under rdna3userq=1, wait-any waited on the first fence) */
+    ops.now_ns = drmNowNs;
     {
         /* user queues: the hooks only with rdna3userq=1, so the default
          * profile has no path into them; the UAPI offers queues once the
@@ -616,7 +632,6 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
             ops.userq_add_hw_queue = drmUserqAdd;
             ops.userq_remove_hw_queue = drmUserqRemove;
             ops.userq_wait = drmUserqWait;
-            ops.now_ns = drmNowNs;
         }
         /* rdna3vcn=1: amdgpu_cs_patch_ibs reads the video IBs (VCN create
          * messages, the JPEG IB it copies) through the kernel's BO view */

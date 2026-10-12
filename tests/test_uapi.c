@@ -89,6 +89,10 @@ static void h_vm_unmap(void *c, void *vm, uint64_t va, uint64_t size)
 static uint64_t ring_next, ring_done;
 /* h_ring32: the ring answers 32-bit fence numbers, like the kext's rings */
 static int h_ring32;
+/* h_only: only the fence h_only_seq signals (another ring that is done
+ * while this one runs on); the others wait like a hung ring */
+static int h_only;
+static uint64_t h_only_seq;
 static uint32_t last_ip, last_ring, last_nibs;
 static rdna3_ib last_ibs[RD_MAX_CS_IBS];
 static void *last_vm;
@@ -108,6 +112,8 @@ static int h_submit(void *c, void *vm, uint32_t ip, uint32_t ring, const rdna3_i
 static int h_signaled(void *c, uint32_t ip, uint32_t ring, uint64_t seq)
 {
     (void)c; (void)ip; (void)ring;
+    if (h_only)
+        return seq == h_only_seq;
     if (h_ring32)
         return (int32_t)((uint32_t)ring_done - (uint32_t)seq) >= 0;
     return seq <= ring_done;
@@ -123,7 +129,9 @@ static uint64_t h_now(void *c) { (void)c; return h_clock; }
 static int h_wait(void *c, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t abs_ns)
 {
     (void)c; (void)ip; (void)ring;
-    if (h_hang) {
+    if (h_only && seq == h_only_seq)
+        return 0;
+    if (h_hang || h_only) {
         if (abs_ns == (uint64_t)INT64_MAX) {
             h_full_waits++;
         } else {
@@ -889,6 +897,26 @@ int main(void)
             dev.ops.now_ns = NULL;
             sw.timeout_nsec = INT64_MAX; sw.flags = DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
             CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == 0);
+            /* PR #2 review: the later fence that is done first ends the
+             * wait at once, with first_signaled pointing at it */
+            {
+                struct drm_syncobj_create c3, c4;
+                uint64_t sa = 0, sb = 0;
+                memset(&c3, 0, sizeof(c3)); memset(&c4, 0, sizeof(c4));
+                CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, c3) == 0 && IOCTL(f, RD_NR_SYNCOBJ_CREATE, c4) == 0);
+                CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, c3.handle, &sa) == 0 &&
+                      cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, c4.handle, &sb) == 0);
+                two[0] = c3.handle; two[1] = c4.handle;
+                h_only = 1; h_only_seq = sb; h_clock = 5; h_slices = 0; h_full_waits = 0;
+                dev.ops.now_ns = h_now;
+                memset(&sw, 0, sizeof(sw));
+                sw.handles = (uint64_t)(uintptr_t)two; sw.count_handles = 2; sw.timeout_nsec = INT64_MAX;
+                CHECK(IOCTL(f, RD_NR_SYNCOBJ_WAIT, sw) == 0 && sw.first_signaled == 1 &&
+                      h_full_waits == 0 && h_slices <= 1);
+                h_only = 0;
+                dev.ops.now_ns = NULL;
+                ring_done = ring_next;
+            }
             sw.flags = 0; sw.count_handles = 1;
         }
         /* the syncobj goes away while the wait sleeps (another thread, with
@@ -1116,12 +1144,23 @@ int main(void)
             CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_WAIT_IDLE), wi) == 0 && wi.out.status == 0);
             wi.in.handle = 9999;
             CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_WAIT_IDLE), wi) == -RD_ENOENT);
+            /* timeout 0: a look, no wait */
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0 && ring_done < ring_next);
+            memset(&wi, 0, sizeof(wi));
+            wi.in.handle = hb; wi.in.timeout = 0;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_WAIT_IDLE), wi) == 0 && wi.out.status == 1 &&
+                  ring_done < ring_next);
+            ring_done = ring_next;
+            memset(&wi, 0, sizeof(wi));
+            wi.in.handle = hb; wi.in.timeout = 0;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_WAIT_IDLE), wi) == 0 && wi.out.status == 0);
             /* PR #2 review: the handles go on past the ring's 32-bit fence */
             h_ring32 = 1;
             ring_next = ring_done = 0xfffffffeull;
             CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &s1) == 0);
             CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &s2) == 0);
             CHECK(s1 == 0xffffffffull && s2 == 0x100000000ull);
+            CHECK(last_job.seq_base == s1);   /* the user fence is widened past it */
             w.in.handle = s2; w.in.timeout = 1;
             CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 1);
             w.in.handle = s2; w.in.timeout = (uint64_t)INT64_MAX - 1;

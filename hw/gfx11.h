@@ -210,6 +210,7 @@ typedef struct rdna3_gfx_job_ext {
     /* != 0: the job's sequence number is written there (64-bit) right
      * before the ring fence, as amdgpu_ib_schedule does with uf_addr */
     uint64_t uf_addr;
+    uint64_t uf_seq_base;   /* the value written: rdna3_seq_widen(this, fence) */
     /* amdgpu_vm_flush's gds_switch_needed: program the VMID's GDS / GWS /
      * OA partition (bytes / entries / counters) before the IBs */
     int      gds_switch;

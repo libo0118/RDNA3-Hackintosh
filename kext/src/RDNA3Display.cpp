@@ -768,11 +768,13 @@ IOReturn RDNA3Accel::displayEdidLocked(RD3KDisplayEdid *e)
 void RDNA3Accel::displayFree()
 {
     displayPowerFree();
-    hotplugFree();
+    /* the HPD work first: a displayHotplugWork already queued reaches
+     * fHp through hotplugKick (PR #2 review) */
     if (fHotplugCall) {
         rd3_thread_call_drain_free(fHotplugCall);
         fHotplugCall = nullptr;
     }
+    hotplugFree();
     if (fDcn && fDispDev && fDispLock) {
         for (uint32_t i = 0; i < fDcn->nheads && i < 4; i++)
             if (fDcnCrcOn[i])
