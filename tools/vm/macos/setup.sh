@@ -17,6 +17,16 @@ mkdir -p "$D"
 curl -sf "$HOST/rdna3-bundle.tar.gz" | tar -xz -C "$D"
 
 echo "== kexts -> /Library/Extensions"
+# one accelerator per macOS: the Tahoe build on Darwin 25+ (macOS 26)
+if [ -d "$D/kexts/RDNA3AcceleratorTahoe.kext" ]; then
+    if [ "$(uname -r | cut -d. -f1)" -ge 25 ]; then
+        rm -rf "$D/kexts/RDNA3Accelerator.kext"
+        mv "$D/kexts/RDNA3AcceleratorTahoe.kext" "$D/kexts/RDNA3Accelerator.kext"
+        echo "   macOS $(sw_vers -productVersion): the accelerator's Tahoe build"
+    else
+        rm -rf "$D/kexts/RDNA3AcceleratorTahoe.kext"
+    fi
+fi
 for k in "$D"/kexts/*.kext; do
     n=$(basename "$k")
     rm -rf "/Library/Extensions/$n"

@@ -111,6 +111,17 @@ new=$([ -n "$HOST" ] && curl -sf --max-time 10 "$HOST/rdna3-bundle.sha256" | cut
 if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
     t=$(mktemp -d /tmp/rdna3b.XXXXXX)
     if curl -sf --max-time 120 "$HOST/rdna3-bundle.tar.gz" | tar -xz -C "$t" && [ -d "$t/kexts" ]; then
+        # one accelerator per macOS: the Tahoe build (RDNA3AcceleratorTahoe)
+        # under its own name's place on Darwin 25+, the other below
+        tahoe=$([ "$(uname -r | cut -d. -f1)" -ge 25 ] && echo 1 || echo 0)
+        if [ -d "$t/kexts/RDNA3AcceleratorTahoe.kext" ]; then
+            if [ "$tahoe" = 1 ]; then
+                rm -rf "$t/kexts/RDNA3Accelerator.kext"
+                mv "$t/kexts/RDNA3AcceleratorTahoe.kext" "$t/kexts/RDNA3Accelerator.kext"
+            else
+                rm -rf "$t/kexts/RDNA3AcceleratorTahoe.kext"
+            fi
+        fi
         for k in "$t"/kexts/*.kext; do
             n=$(basename "$k")
             rm -rf "/Library/Extensions/$n" "$D/kexts/$n"

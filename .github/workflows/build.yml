@@ -104,6 +104,10 @@ jobs:
           make -C accel
           make -C accel check
           make -C accel clean && make -C accel NM_TAHOE=1
+          # the macOS 26 build next to the other (rdna3vm: OpenCore injects
+          # each for its own kernel; the VM installs the one for its Darwin)
+          rm -rf build/RDNA3AcceleratorTahoe.kext
+          cp -R build/RDNA3Accelerator.kext build/RDNA3AcceleratorTahoe.kext
           make -C accel clean && make -C accel
       - name: Build RDNA3Framebuffer.kext (Stage 3)
         run: |
@@ -126,6 +130,7 @@ jobs:
           path: |
             build/RDNA3Accel.kext
             build/RDNA3Accelerator.kext
+            build/RDNA3AcceleratorTahoe.kext
             build/RDNA3Framebuffer.kext
             build/userspace/rdna3_drminfo
             build/userspace/rdna3_modetest

@@ -92,6 +92,14 @@ for k in RDNA3Accel RDNA3Framebuffer RDNA3Accelerator; do
     find "$R/Library/Extensions/$k.kext/Contents" -name '*.bin' -delete -o -name 'LICENSE.amdgpu' -delete
     parts+=("$k.kext")
 done
+# the accelerator's macOS 26 build (CI: RDNA3AcceleratorTahoe.kext): kept
+# aside, the postinstall puts it in place of the other on macOS 26
+if src=$(find_part d RDNA3AcceleratorTahoe.kext); then
+    mkdir -p "$A/kexts-tahoe"
+    cp -R "$src" "$A/kexts-tahoe/RDNA3Accelerator.kext"
+    rm -rf "$A/kexts-tahoe/RDNA3Accelerator.kext/Contents/_CodeSignature"
+    parts+=("RDNA3AcceleratorTahoe.kext")
+fi
 [ -n "$VER" ] || VER=$(python3 -c 'import plistlib, sys; print(plistlib.load(open(sys.argv[1], "rb")).get("CFBundleVersion", "0.1.0"))' \
                      "$R/Library/Extensions/RDNA3Accel.kext/Contents/Info.plist" 2>/dev/null || echo 0.1.0)
 SHA=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)

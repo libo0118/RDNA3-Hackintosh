@@ -20,6 +20,16 @@ say() { echo "RDNA3: $*"; }
 sh "$A/firmware.sh" --dest "$A/firmware" --check >/dev/null ||
     { say "the firmware in $A/firmware is incomplete (firmware.sh --check)"; exit 1; }
 
+# macOS 26 (Darwin 25): the accelerator's Tahoe build replaces the other
+# (its object layout is checked for one Darwin per build)
+pv=$(sed -n '/<key>ProductVersion<\/key>/{n;s/.*<string>\([0-9]*\).*/\1/p;}' \
+     "$DST/System/Library/CoreServices/SystemVersion.plist" 2>/dev/null)
+if [ -d "$A/kexts-tahoe/RDNA3Accelerator.kext" ] && [ "${pv:-0}" -ge 26 ] 2>/dev/null; then
+    rm -rf "$E/RDNA3Accelerator.kext"
+    cp -R "$A/kexts-tahoe/RDNA3Accelerator.kext" "$E/"
+    say "macOS $pv: the accelerator's Tahoe build"
+fi
+
 # CI artifacts are zips, which drop the x bit
 for f in "$E"/RDNA3*.kext/Contents/MacOS/* "$A"/bin/* "$A"/*.sh "$A"/package/*.sh \
          "$GB"/RDNA3MTLDriver.bundle/Contents/MacOS/* "$GB"/rdna3mtl/*.dylib; do

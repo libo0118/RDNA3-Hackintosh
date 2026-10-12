@@ -327,16 +327,28 @@ cmd__oc() {
     part=${OC_LOOP}p1
     [ -b "$part" ] || part=$OC_LOOP
     mount -t vfat "$part" "$mnt" || die "cannot mount OpenCore"
-    local rc=0 k n
+    local rc=0 k n exe
     if [ -n "$kdir" ]; then
         rm -rf "$mnt"/EFI/OC/Kexts/RDNA3*.kext
         for k in "$kdir"/RDNA3*.kext; do
             n=$(basename "$k" .kext)
-            [ -f "$k/Contents/MacOS/$n" ] || continue
+            # the executable (RDNA3AcceleratorTahoe.kext's is RDNA3Accelerator)
+            exe=$(sed -n 's/.*<key>CFBundleExecutable<\/key>[[:space:]]*<string>\([^<]*\)<.*/\1/p' \
+                  "$k/Contents/Info.plist" | head -1)
+            [ -n "$exe" ] || exe=$n
+            [ -f "$k/Contents/MacOS/$exe" ] || continue
             mkdir -p "$mnt/EFI/OC/Kexts/$n.kext/Contents/MacOS"
             cp "$k/Contents/Info.plist" "$mnt/EFI/OC/Kexts/$n.kext/Contents/" &&
-                cp "$k/Contents/MacOS/$n" "$mnt/EFI/OC/Kexts/$n.kext/Contents/MacOS/" || rc=1
-            set -- "$@" --kext "$n"
+                cp "$k/Contents/MacOS/$exe" "$mnt/EFI/OC/Kexts/$n.kext/Contents/MacOS/" || rc=1
+            # one accelerator per macOS: the Sequoia build up to Darwin 24,
+            # the Tahoe one from 25 (the same OpenCore boots either disk)
+            case "$n" in
+            RDNA3AcceleratorTahoe) set -- "$@" --kext "$n:$exe:25.0.0:" ;;
+            RDNA3Accelerator)
+                if [ -d "$kdir/RDNA3AcceleratorTahoe.kext" ]; then set -- "$@" --kext "$n:$exe::24.99.99"
+                else set -- "$@" --kext "$n:$exe::"; fi ;;
+            *) set -- "$@" --kext "$n:$exe::" ;;
+            esac
         done
     fi
     [ $rc = 0 ] && { $VMTOOL plist "$mnt/EFI/OC/config.plist" "$@" || rc=$?; }

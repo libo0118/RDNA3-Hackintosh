@@ -2,7 +2,7 @@
 """
 vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
 
-  vmtool.py plist CONFIG [--show] [--boot-args S] [--sip-off] [--timeout N] [--kext NAME]
+  vmtool.py plist CONFIG [--show] [--boot-args S] [--sip-off] [--timeout N] [--kext NAME[:EXEC[:MIN:MAX]]]
                   [--resolution WxH|Max]
       edit an OpenCore config.plist: boot-args and csr-active-config under
       NVRAM/Add (and listed under NVRAM/Delete so OpenCore really applies
@@ -100,30 +100,45 @@ KEXT_ENTRY = """<dict>
 				<key>Enabled</key>
 				<true/>
 				<key>ExecutablePath</key>
-				<string>Contents/MacOS/%(name)s</string>
+				<string>Contents/MacOS/%(exe)s</string>
 				<key>MaxKernel</key>
-				<string></string>
+				<string>%(maxk)s</string>
 				<key>MinKernel</key>
-				<string></string>
+				<string>%(mink)s</string>
 				<key>PlistPath</key>
 				<string>Contents/Info.plist</string>
 			</dict>"""
 
 
-def add_kext(text, name):
-    """Kernel/Add entry injecting EFI/OC/Kexts/NAME.kext (kept if present)"""
+def add_kext(text, spec):
+    """Kernel/Add entry injecting EFI/OC/Kexts/NAME.kext; spec is
+    NAME[:EXEC[:MIN:MAX]] (the executable when it is not NAME, the kernel
+    range: one build per macOS). An entry already there keeps its place and
+    gets the executable and the range"""
+    parts = spec.split(":")
+    name = parts[0]
+    v = {"name": name, "exe": parts[1] if len(parts) > 1 and parts[1] else name,
+         "mink": parts[2] if len(parts) > 2 else "", "maxk": parts[3] if len(parts) > 3 else ""}
     sec = _section(text, "Kernel")
     found = _value_after_key(text, "Add", *sec)
     if not found or not text.startswith("<array", found[1]):
         raise PlistEditError("no Kernel/Add array in config.plist")
     arr = text[found[1]:found[2]]
-    if "<string>%s.kext</string>" % name in arr:
-        return text
+    at = arr.find("<string>%s.kext</string>" % name)
+    if at >= 0:
+        start = found[1] + arr.rfind("<dict>", 0, at)
+        end = found[1] + arr.find("</dict>", at) + len("</dict>")
+        entry = text[start:end]
+        for key, val in (("ExecutablePath", "Contents/MacOS/" + v["exe"]), ("MinKernel", v["mink"]),
+                         ("MaxKernel", v["maxk"])):
+            entry = re.sub(r"(<key>%s</key>\s*)<string>[^<]*</string>" % key,
+                           lambda m: m.group(1) + "<string>%s</string>" % val, entry)
+        return text[:start] + entry + text[end:]
     if arr.endswith("/>"):                 # <array/>
-        entry = "<array>\n\t\t\t%s\n\t\t</array>" % (KEXT_ENTRY % {"name": name})
+        entry = "<array>\n\t\t\t%s\n\t\t</array>" % (KEXT_ENTRY % v)
         return text[:found[1]] + entry + text[found[2]:]
     close = found[1] + arr.rindex("</array>")
-    return text[:close] + "\t" + KEXT_ENTRY % {"name": name} + "\n\t\t" + text[close:]
+    return text[:close] + "\t" + KEXT_ENTRY % v + "\n\t\t" + text[close:]
 
 
 def cmd_plist(argv):

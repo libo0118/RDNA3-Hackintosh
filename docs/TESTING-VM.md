@@ -342,6 +342,18 @@ a token with *Actions: read* for the repository in
    `curl ... | sudo sh` command as in step D. Then `sudo shutdown -h now`.
 4. Go back to step E.
 
+### macOS 26 (Tahoe) on a second disk
+
+The same OpenCore boots either macOS disk: it injects the accelerator's
+Sequoia build up to Darwin 24 and its Tahoe build (`RDNA3AcceleratorTahoe`,
+from CI builds after 2026-10-12) from Darwin 25 on, and the VM installs the
+one for its own Darwin into the Auxiliary KC. To run a step on macOS 26:
+swap the disk file (`MACDISK` in `~/rdna3-vm/config`), `rdna3vm update`, the
+first time `rdna3vm window` + the setup command of step D, then
+`rdna3vm approve` and the steps as usual (`rdna3vm queue pending`). The
+report's `R4 macOS` line says which Darwin ran and whether the accelerator
+started there.
+
 ### With Vulkan (RADV)
 
 A build made with `full` or `radv` on also has the artifact
