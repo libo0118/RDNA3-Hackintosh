@@ -1787,10 +1787,17 @@ void RDNA3Bringup::dmubInit()
         ret = dmub32_attach(fDmub, fDev);
         publish("RDNA3,DMUBResult", (uint64_t)(int64_t)ret);
         publish("RDNA3,DMUBBootStatus", fDmub->boot_status);
-        if (ret != RDNA3_OK) {
+        if (ret != RDNA3_OK && fReinit) {
+            /* after a power loss or a mode-1 reset the GOP's firmware is
+             * gone: ours, as rdna3dmub=1 loads it (dm_dmub_hw_init) */
+            BLOG("DMUB: the GOP's firmware did not survive (%d): loading our own", ret);
+            publish("RDNA3,DMUBReloaded", 1);
+        } else if (ret != RDNA3_OK) {
             publishString("RDNA3,DMUB", "failed: attach");
             return;
         }
+    }
+    if (fDmubMode == 3 && fDmub->hw_init) {
         ret = dmub32_query_caps(fDmub);
         publish("RDNA3,DMUBCapsResult", (uint64_t)(int64_t)ret);
         if (ret == RDNA3_OK)

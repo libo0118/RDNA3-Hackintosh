@@ -202,8 +202,9 @@ The S3 gap - what a full resume still lacks, in the order it will bite:
    a power loss sets them to bypass; the table macOS last sent is loaded
    again now, `displayGammaReload`), the VPG infoframe contents (infoframes off, as after a mode set),
    HDMI audio.
-5. **DMCUB.** Only `rdna3dmub=1` (our own load through the PSP) survives a
-   power loss; `rdna3dmub=3` attaches to the GOP's firmware, which is gone.
+5. **DMCUB.** `rdna3dmub=3` attaches to the GOP's firmware; after a power
+   loss or a mode-1 reset that firmware is gone and the re-init now loads
+   our own, as `rdna3dmub=1` does (`RDNA3,DMUBReloaded`).
 6. **DP heads.** Neither standby nor restore (no link training).
 7. **Ordering with macOS.** The wake work runs on a thread call after
    `setPowerState(1)`; framebuffer power requests that arrive earlier are
