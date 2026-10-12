@@ -200,6 +200,8 @@ uint32_t RDNA3Accel::displayStateRestore(const char *why, bool restore)
         if (r && restore) {
             int rr = dcn32_state_restore(fDispDev, fDisplayDm, fDcn, fDispState, i, fHeadBlank[i],
                                          fHeadLinkDown[i]);
+            if (!rr)
+                displayGammaReload(i);
             r = rr ? 1 : dcn32_state_check(fDispDev, fDispState, i, 50, &k);
             snprintf(val, sizeof(val), "%s: restored (%d), %s, %u frames in 50 ms", why, rr,
                      r ? "still LOST" : "running", k.frames);

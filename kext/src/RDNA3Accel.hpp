@@ -398,7 +398,11 @@ private:
     static void     dispMmioWr(void *ctx, uint64_t off, uint32_t v);
     /* output gamma from the framebuffer (rdna3DisplayGamma, rdna3gamma=1) */
     IOReturn      displayGamma(struct RD3KDisplayGamma *g);
+    void          displayGammaReload(uint32_t head);   /* fDispLock held */
     uint32_t      fGammaCalls[4] = {};
+    /* the table each head shows (nullptr: bypass): the LUT RAMs do not
+     * survive a power loss, a restored head gets it again */
+    struct rdna3_gamma_pwl *fGammaTab[4] = {};
 
     /* level 0 */
     void      readConfigSpace();

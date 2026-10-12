@@ -802,6 +802,8 @@ void RDNA3Accel::displayFree()
     if (fClkLim) IOFree(fClkLim, sizeof(rdna3_dcn_clk_limits));
     fClkLim = nullptr;
     for (uint32_t i = 0; i < 4; i++) {
+        if (fGammaTab[i]) IOFree(fGammaTab[i], sizeof(rdna3_gamma_pwl));
+        fGammaTab[i] = nullptr;
         if (fModeTab[i]) IOFree(fModeTab[i], sizeof(rdna3_mode) * RD3K_MAX_MODES);
         fModeTab[i] = nullptr;
         fModeCount[i] = 0;
@@ -1702,6 +1704,19 @@ IOReturn RDNA3Accel::displayCursor(RD3KDisplayCursor *c)
  * mirror clone (rdna3mirror=1) shows this head's picture through an MPCC
  * of its own and gets the same table; an extended clone head is a head of
  * fDcn and asks for itself. */
+/* a restored head (power loss, mode-1 reset): the restore set the output
+ * gamma to bypass; the table macOS last sent goes back (and to a mirror
+ * clone of the head) */
+void RDNA3Accel::displayGammaReload(uint32_t head)
+{
+    if (head >= 4 || !fGammaTab[head] || !fDcn || head >= fDcn->nheads)
+        return;
+    int r = dcn32_gamma_set_head(fDispDev, fDcn, head, fGammaTab[head]);
+    if (r == RDNA3_OK && fMirrorOn && fMirror && fCloneHead < 0 && fMirror->src_otg == fDcn->head[head].otg)
+        r = dcn32_gamma_apply(fDispDev, fMirror->dst_otg, fMirror->dst_mpcc, fGammaTab[head]);
+    LOG("display: head %u gamma table loaded again after the restore (%d)", head, r);
+}
+
 IOReturn RDNA3Accel::displayGamma(RD3KDisplayGamma *g)
 {
     if (!g || g->version != RD3K_DISPLAY_ABI_VERSION || (g->channels != 0 && g->channels != 1 && g->channels != 3) ||
@@ -1732,6 +1747,18 @@ IOReturn RDNA3Accel::displayGamma(RD3KDisplayGamma *g)
         }
         if (dcn32_gamma_otg_mpccs(fDispDev, fDcn->head[g->head].otg, mpcc) > 0)
             dcn32_gamma_state(fDispDev, mpcc[0], &st);
+        /* kept for a restore after a power loss (amdgpu: the stream's
+         * out_transfer_func, programmed again by dc_commit_streams) */
+        if (r == RDNA3_OK) {
+            if (use && !fGammaTab[g->head])
+                fGammaTab[g->head] = (rdna3_gamma_pwl *)IOMalloc(sizeof(rdna3_gamma_pwl));
+            if (use && fGammaTab[g->head]) {
+                *fGammaTab[g->head] = *use;
+            } else if (!use && fGammaTab[g->head]) {
+                IOFree(fGammaTab[g->head], sizeof(rdna3_gamma_pwl));
+                fGammaTab[g->head] = nullptr;
+            }
+        }
         IOLockUnlock(fDispLock);
     }
     g->result = r;

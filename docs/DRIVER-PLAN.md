@@ -197,8 +197,8 @@ The S3 gap - what a full resume still lacks, in the order it will bite:
    links; the replay of the saved DCHUBBUB / DCCG globals stands in for
    `hubbub32_init`, `dccg32_init` and `hubbub3_init_dchub_sys_ctx`.
 4. **Lost display contents.** The gamma / degamma LUT RAMs (a restore after
-   a power loss sets them to bypass; the gamma code must load its table
-   again), the VPG infoframe contents (infoframes off, as after a mode set),
+   a power loss sets them to bypass; the table macOS last sent is loaded
+   again now, `displayGammaReload`), the VPG infoframe contents (infoframes off, as after a mode set),
    HDMI audio.
 5. **DMCUB.** Only `rdna3dmub=1` (our own load through the PSP) survives a
    power loss; `rdna3dmub=3` attaches to the GOP's firmware, which is gone.
