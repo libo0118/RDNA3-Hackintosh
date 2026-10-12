@@ -136,9 +136,13 @@ static void lb_vm_unmap(void *c, void *p, uint64_t va, uint64_t size)
         if (vm->m[i].size && vm->m[i].va == va && vm->m[i].size == size)
             vm->m[i].size = 0;
 }
+/* the GPU's 48-bit view: GEM_VA keeps the mappings with the hole masked
+ * off (AMDGPU_GMC_HOLE_MASK), an IB or a packet may name the canonical
+ * high-half address of the same page */
 static uint8_t *lb_va(struct lb_vm *vm, uint64_t va, uint64_t len)
 {
     unsigned i;
+    va &= 0x0000ffffffffffffull;
     for (i = 0; i < vm->n; i++)
         if (vm->m[i].size && va >= vm->m[i].va && va + len <= vm->m[i].va + vm->m[i].size)
             return vm->m[i].host + (va - vm->m[i].va);
@@ -223,8 +227,6 @@ static int lb_pm4_walk(struct lb_vm *vm, uint64_t va, uint32_t ndw, int depth, u
             uint64_t cva = (ib[p + 1] & ~3u) | ((uint64_t)(ib[p + 2] & 0xffff) << 32);
             uint32_t cdw = ib[p + 3] & 0xfffff;
             int r;
-            if (cva >> 47)                                 /* canonical high half */
-                cva |= 0xffff000000000000ull;
             r = cdw ? lb_pm4_walk(vm, cva, cdw, depth + 1, npkt) : 0;
             if (r)
                 return r;
