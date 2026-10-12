@@ -349,11 +349,16 @@ int  gfx11_mes_kiq_ring_init(rdna3_dev *d, rdna3_mec_ring *r, const uint64_t uc_
 #define RD_MES_DB_START_DW    0x800   /* amdgpu: first MES doorbell page (aggregated doorbells) */
 #define RD_MES_VERSION_MASK   0xfff
 #define RD_MES_LEGACY_MAP_VER 0x47    /* enable_legacy_queue_map from this firmware on */
-/* writeback page: scheduler context, query fence, API status, ring fence */
+/* writeback page: scheduler context, query fence, ring fence, and one API
+ * status slot per submission (amdgpu_device_wb_get in
+ * mes_v11_0_submit_pkt_and_poll_completion), used round robin so a late
+ * status of a frame that timed out never lands in a later frame's slot */
 #define RD_MES_WB_SCH_CTX     0
 #define RD_MES_WB_QUERY_FENCE 32
-#define RD_MES_WB_STATUS      64
 #define RD_MES_WB_FENCE       96
+#define RD_MES_WB_STATUS      256
+#define RD_MES_STATUS_SLOTS   32
+#define RD_MES_WB_SIZE        (RD_MES_WB_STATUS + 8 * RD_MES_STATUS_SLOTS)
 /* MESAPI opcodes (enum MES_SCH_API_OPCODE) */
 #define RD_MES_SCH_API_SET_HW_RSRC            0
 #define RD_MES_SCH_API_QUERY_SCHEDULER_STATUS 11

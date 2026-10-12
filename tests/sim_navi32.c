@@ -209,6 +209,9 @@ typedef struct sim {
         unsigned legacy_maps, legacy_unmaps, resets, misc, misc_stuck, suspends, resumes;
         uint32_t hw[64];
         int hang;
+        /* a frame swallowed while hung writes its status late: when the
+         * next frame runs (a firmware that catches up) */
+        uint64_t late_addr, late_val;
     } mes_sched;
     /* user queues the MES scheduler took (ADD_QUEUE, mes_v11_api_def.h): the
      * queue's MQD, doorbell and process; the process gets a VMID from the
@@ -3047,9 +3050,20 @@ static uint64_t mes_api_exec(const uint32_t *buf, uint64_t mask, uint64_t rptr, 
             f[i] = buf[(rptr + i) & mask];
         rptr += 64;
         S.mes_sched.frames++;
-        if (S.mes_sched.hang)
-            continue;
         op = (f[0] >> 4) & 0xff;
+        if (S.mes_sched.hang) {
+            if (op == RD_MES_SCH_API_QUERY_SCHEDULER_STATUS && !S.mes_sched.late_addr) {   /* api_status at dw 2 */
+                S.mes_sched.late_addr = q64(f, 2);
+                S.mes_sched.late_val = q64(f, 4);
+            }
+            continue;
+        }
+        if (S.mes_sched.late_addr) {
+            p = mc_ptr(S.mes_sched.late_addr, 8);
+            if (p)
+                memcpy(p, &S.mes_sched.late_val, 8);
+            S.mes_sched.late_addr = 0;
+        }
         if ((f[0] & 0xf) != 1 || ((f[0] >> 12) & 0xff) != 64) { S.mes_sched.bad++; continue; }
         if (op == RD_MES_SCH_API_SET_HW_RSRC) {
             memcpy(S.mes_sched.hw, f, sizeof(f));
@@ -10586,6 +10600,15 @@ static void run(const char *fwdir)
                         {
                             uint32_t pk[RD_MES_API_DWORDS] = { RD_MES_API_HEADER(RD_MES_SCH_API_QUERY_SCHEDULER_STATUS) };
                             CHECK(gfx11_mes_submit(&dev, &mes, pk, 2) == RDNA3_ETIME && mes.failed == 1);
+                            /* it catches up: the late status of the frame it
+                             * swallowed must not answer a frame it rejects
+                             * (one status slot per submission, PR #2 review) */
+                            S.mes_sched.hang = 0;
+                            memset(pk, 0, sizeof(pk));
+                            pk[0] = RD_MES_API_HEADER(0x3f);
+                            CHECK(gfx11_mes_submit(&dev, &mes, pk, 2) == RDNA3_ETIME && mes.failed == 2);
+                            CHECK(S.mes_sched.late_addr == 0);
+                            S.mes_sched.bad = 0;
                         }
                         S.mes_sched.hang = 0;
                         gfx11_mes_sched_stop(&dev, &mes);

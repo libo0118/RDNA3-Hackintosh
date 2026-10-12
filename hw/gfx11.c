@@ -1476,7 +1476,7 @@ int gfx11_mes_sched_init(rdna3_dev *d, rdna3_mes *m)
         return ret;
     m->ring.me = 3;
     m->wb = m->ring.rb.wb + 256;   /* the ring's writeback page holds the MES slots too */
-    rdna3_vram_fill(d, m->wb, 0, 256);
+    rdna3_vram_fill(d, m->wb, 0, RD_MES_WB_SIZE);
     m->seq = 0;
     m->ready = 0;
     m->submitted = m->failed = 0;
@@ -1510,10 +1510,9 @@ int gfx11_mes_submit(rdna3_dev *d, rdna3_mes *m, uint32_t *pkt, uint32_t status_
 {
     rdna3_gfx_ring *rb = &m->ring.rb;
     uint32_t q[RD_MES_API_DWORDS], i, timeout = 210000;   /* 2.1 s in 10 us steps */
-    uint64_t zero = 0, fence = 0, status = 0, seq;
+    uint64_t zero = 0, fence = 0, status = 0, seq, slot;
     if (!rb->ring_size || status_dw + 4 > RD_MES_API_DWORDS)
         return RDNA3_EINVAL;
-    rdna3_vram_write(d, m->wb + RD_MES_WB_STATUS, &zero, 8);
     /* amdgpu_ring_alloc + the wait for room
      * (mes_v11_0_submit_pkt_and_poll_completion's error_undo path); also
      * without rdna3amdgpu=1, so a stalled MES never gets frames written
@@ -1527,7 +1526,9 @@ int gfx11_mes_submit(rdna3_dev *d, rdna3_mes *m, uint32_t *pkt, uint32_t status_
         }
     }
     seq = ++m->seq;
-    put64(pkt + status_dw, rdna3_vram_mc(d, m->wb + RD_MES_WB_STATUS));
+    slot = m->wb + RD_MES_WB_STATUS + 8 * (seq % RD_MES_STATUS_SLOTS);
+    rdna3_vram_write(d, slot, &zero, 8);
+    put64(pkt + status_dw, rdna3_vram_mc(d, slot));
     put64(pkt + status_dw + 2, 1);
     for (i = 0; i < RD_MES_API_DWORDS; i++)
         gfx11_write(d, rb, pkt[i]);
@@ -1554,7 +1555,7 @@ int gfx11_mes_submit(rdna3_dev *d, rdna3_mes *m, uint32_t *pkt, uint32_t status_
         rb->done_wptr = rb->wptr;
         rb->done_valid = 1;
     }
-    rdna3_vram_read(d, m->wb + RD_MES_WB_STATUS, &status, 8);
+    rdna3_vram_read(d, slot, &status, 8);
     if (fence < seq || !status) {
         m->failed++;
         RERR(d, "MES: no answer to opcode %u (fence %llu of %llu, status %llu)", (pkt[0] >> 4) & 0xff,
@@ -1617,7 +1618,7 @@ int gfx11_mes_sched_start(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mes *m)
     m->ring.rb.wptr = 0;
     rdna3_vram_fill(d, m->ring.rb.ring, 0, m->ring.rb.ring_size);
     rdna3_vram_write(d, m->ring.rb.wb, zero, sizeof(zero));
-    rdna3_vram_fill(d, m->wb, 0, 256);
+    rdna3_vram_fill(d, m->wb, 0, RD_MES_WB_SIZE);
     /* mes_v11_0_queue_init(AMDGPU_MES_SCHED_PIPE) */
     mes_mqd_init(d, &m->ring);
     kiq_map_mes(d, kiq, &m->ring);
