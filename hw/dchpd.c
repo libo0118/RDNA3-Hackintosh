@@ -99,6 +99,20 @@ void dchpd_track_init(rdna3_hpd_track *t, rdna3_dev *d, uint32_t npins, uint32_t
     }
 }
 
+int dchpd_link_resume(rdna3_dev *d, const rdna3_display_path *p, uint32_t n, rdna3_hpd_track *t)
+{
+    uint32_t i;
+    int k = 0;
+    for (i = 0; p && i < n; i++)
+        if (p[i].hpd >= 0 && dchpd_program_filter(d, (uint32_t)p[i].hpd, p[i].connector, 1) == RDNA3_OK)
+            k++;
+    for (i = 0; t && i < RD_AUX_ENGINES; i++) {
+        t->count[i] = 0;
+        t->pend[i] = t->state[i];
+    }
+    return k;
+}
+
 uint32_t dchpd_track_poll(rdna3_hpd_track *t, rdna3_dev *d, uint32_t *raw_changed)
 {
     uint32_t n, changed = 0, raw = 0;

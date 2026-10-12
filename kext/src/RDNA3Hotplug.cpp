@@ -60,6 +60,8 @@ struct RDNA3HotplugState {
     uint64_t        lastPoll;                 /* mach absolute time */
     uint32_t        headGen[RD3K_MAX_HEADS];
     uint32_t        actions, clonesOn, clonesOff, bootReports, noEdid;
+    bool            suspended;                /* stopped for a system sleep */
+    uint32_t        resumes;
 };
 
 static uint64_t hpPollAbs()
@@ -117,6 +119,44 @@ void RDNA3Accel::hotplugStop()
     fHp->stop = true;
     if (fHp->call)
         rd3_thread_call_drain(fHp->call);
+}
+
+/* amdgpu_dm_irq_suspend for the looks: none while the card sleeps or comes
+ * back. After a power loss the HPD block is at its reset values (pins
+ * disabled, no filter) until link_resume, so a look would see every
+ * monitor unplugged and take the clone down in the middle of the resume. */
+void RDNA3Accel::hotplugSuspend()
+{
+    if (!fHp || fHp->stop)
+        return;   /* not running (or stopped for good: the bring-up went) */
+    if (fHotplugCall)
+        thread_call_cancel_wait(fHotplugCall);   /* an HPD interrupt's work */
+    hotplugStop();
+    fHp->suspended = true;
+}
+
+/* link_resume + amdgpu_dm_irq_resume_late: the HPD pins and filters again,
+ * the looks again once the longest connect filter has run; the tracker
+ * keeps the levels from before the sleep, so a monitor plugged or pulled
+ * while asleep counts as a hotplug then (dm_resume's detection of every
+ * connector). Called from the wake work after the display restore. */
+void RDNA3Accel::hotplugResume()
+{
+    uint64_t settle = 0;
+    if (!fHp || !fHp->suspended || !fHp->call || !fDispLock || !fDispDev)
+        return;
+    IOLockLock(fDispLock);
+    int n = dchpd_link_resume(fDispDev, fPaths, fNPaths, &fHp->track);
+    IOLockUnlock(fDispLock);
+    fHp->suspended = false;
+    fHp->stop = false;
+    fHp->resumes++;
+    setNumber("RDNA3,HotplugResumes", fHp->resumes);
+    LOG("hotplug: wake: %d HPD filter(s) programmed again (link_resume), looks again in %u ms", n,
+        RD_HPD_RESUME_SETTLE_MS);
+    clock_get_uptime(&fHp->lastPoll);
+    nanoseconds_to_absolutetime((uint64_t)RD_HPD_RESUME_SETTLE_MS * 1000000ull, &settle);
+    thread_call_enter_delayed(fHp->call, fHp->lastPoll + settle);
 }
 
 void RDNA3Accel::hotplugFree()

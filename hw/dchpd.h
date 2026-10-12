@@ -40,6 +40,7 @@ extern "C" {
 
 #define RD_HPD_POLL_MS            500
 #define RD_HPD_DEBOUNCE           2      /* equal polls before a new level counts */
+#define RD_HPD_RESUME_SETTLE_MS   600    /* after link_resume: the longest connect filter, and a margin */
 #define RD_HPD_EDID_TRIES         3      /* dm_helpers_read_local_edid: retry = 3 */
 #define RD_HPD_EDID_RETRY_MS      100
 
@@ -85,6 +86,15 @@ void     dchpd_track_init(rdna3_hpd_track *t, rdna3_dev *d, uint32_t npins, uint
  * *raw_changed (may be NULL) gets the pins whose sample differs from the
  * previous one, debounced or not */
 uint32_t dchpd_track_poll(rdna3_hpd_track *t, rdna3_dev *d, uint32_t *raw_changed);
+
+/* link_resume after a sleep (the HPD block may have lost its power):
+ * program_hpd_filter again for every path with an HPD pin, then the
+ * tracker 't' (may be NULL) carries on from the levels it had before the
+ * sleep with no look half counted, so a monitor plugged or pulled while
+ * asleep counts as a hotplug after the filter and the usual looks
+ * (dm_resume detects every connector). The caller polls again
+ * RD_HPD_RESUME_SETTLE_MS later. Returns the pins programmed. */
+int      dchpd_link_resume(rdna3_dev *d, const rdna3_display_path *p, uint32_t n, rdna3_hpd_track *t);
 
 /* dc_link_detect for the connector on AUX engine / DDC line 'aux': the sink
  * read again (dcaux_probe_one) and, while the pin senses a sink without an

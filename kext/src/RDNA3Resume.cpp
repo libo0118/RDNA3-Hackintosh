@@ -264,6 +264,7 @@ void RDNA3Accel::displayWillSleep()
 {
     if (!fDcn || !fDispLock || fShuttingDown)
         return;
+    hotplugSuspend();   /* amdgpu_dm_irq_suspend: no HPD looks until the wake work */
     displayStateSaveAll();
     IOLockLock(fDispLock);
     fDispAsleep = true;
@@ -376,6 +377,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
         IOLockUnlock(a->fDispLock);
     }
     a->setNumber("RDNA3,WakeHeadsLost", lost);
+    a->hotplugResume();   /* link_resume: the HPD filters again, then the looks */
     /* VCN / JPEG (rdna3vcn): amdgpu_device_ip_resume_phase2 when the card
      * kept its power; after a power loss resumeAfterPowerLoss's hwInit
      * resumed them already (vcnStart), or they wait for the next bring-up */

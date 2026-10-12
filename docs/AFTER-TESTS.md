@@ -788,7 +788,11 @@ suspend the VRAM clients use is copied to system memory
 (`suspend: N VRAM range(s), M MiB saved`, `RDNA3,EvictedMiB`); after a
 power loss it goes back before the display restore
 (`resume: N VRAM range(s) back from system memory`, then `every evicted
-VRAM range is back`: no VRAMLOST for the clients).
+VRAM range is back`: no VRAMLOST for the clients). With `rdna3hotplug=1`
+the HPD looks pause for the sleep and come back with
+`hotplug: wake: N HPD filter(s) programmed again (link_resume)`
+(`RDNA3,HotplugResumes`); a `hotplug:` unplug of a monitor that stayed
+connected right after a wake means the pins were looked at too early.
 
 | Symptom | Likely cause | Action |
 |---|---|---|

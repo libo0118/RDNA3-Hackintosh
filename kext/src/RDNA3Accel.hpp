@@ -303,6 +303,8 @@ private:
     struct RDNA3HotplugState *fHp = nullptr;
     void          hotplugInit();
     void          hotplugStop();
+    void          hotplugSuspend();   /* system sleep: no looks until hotplugResume */
+    void          hotplugResume();    /* the wake work, fDispLock not held */
     void          hotplugFree();
     bool          hotplugKick();
     void          hotplugHandle(uint32_t changed);

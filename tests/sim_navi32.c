@@ -1455,7 +1455,17 @@ static void hpd_filter_eval(uint32_t n)
 {
     uint32_t f = S.reg[HPDR(regHPD0_DC_HPD_TOGGLE_FILT_CNTL, n)];
     uint32_t *st = &S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, n)];
-    uint64_t delay = S.hpd_cable[n]
+    uint64_t delay;
+    if (!(S.reg[HPDR(regHPD0_DC_HPD_CONTROL, n)] & HPD0_DC_HPD_CONTROL__DC_HPD_EN_MASK)) {
+        /* a disabled pin (its reset state after a power loss): no delayed
+         * sense; the filter starts over when it is enabled */
+        S.hpd_delayed[n] = 0;
+        S.hpd_since[n] = S.now_us;
+        *st &= ~(HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK | HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_DELAYED_MASK);
+        *st |= S.hpd_cable[n] ? HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK : 0;
+        return;
+    }
+    delay = S.hpd_cable[n]
         ? 10000ull * ((f & HPD0_DC_HPD_TOGGLE_FILT_CNTL__DC_HPD_CONNECT_INT_DELAY_MASK) >>
                       HPD0_DC_HPD_TOGGLE_FILT_CNTL__DC_HPD_CONNECT_INT_DELAY__SHIFT)
         : 10000ull * ((f & HPD0_DC_HPD_TOGGLE_FILT_CNTL__DC_HPD_DISCONNECT_INT_DELAY_MASK) >>
@@ -11690,6 +11700,38 @@ static void run(const char *fwdir)
         t0 = S.now_us;
         CHECK(dchpd_detect(&dev, 2, &c, RD_HPD_EDID_TRIES) == RD_HPD_NO_SINK &&
               S.now_us - t0 < 1000ull * RD_HPD_EDID_RETRY_MS);
+        /* a power loss (S3): the HPD block at its reset values (pins
+         * disabled, no filter); pin 0's monitor reads unplugged and would
+         * count so after two looks */
+        memset(paths, 0, sizeof(paths));
+        paths[0].connector = RD_ATOM_CONN_DISPLAYPORT; paths[0].hpd = 0;
+        paths[1].connector = RD_ATOM_CONN_HDMI_A; paths[1].hpd = 2;
+        gen = t.generation;
+        S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] = 0;   /* the all-ones of the "device gone" look above */
+        for (uint32_t n = 0; n < 3; n += 2) {
+            S.reg[HPDR(regHPD0_DC_HPD_CONTROL, n)] = 0;
+            S.reg[HPDR(regHPD0_DC_HPD_TOGGLE_FILT_CNTL, n)] = 0;
+        }
+        sim_msleep(NULL, RD_HPD_POLL_MS);
+        CHECK(dchpd_sense_delayed(&dev, 0) == 0 && dchpd_track_poll(&t, &dev, NULL) == 0 && t.count[0] == 1);
+        /* link_resume: the pins and filters again, the half-counted look
+         * dropped; pin 2's monitor was plugged in during the sleep: one
+         * change after the filter and two looks (dm_resume's detection) */
+        hpd_cable(2, 1);
+        CHECK(dchpd_link_resume(&dev, paths, 2, &t) == 2 && t.count[0] == 0 &&
+              (S.reg[HPDR(regHPD0_DC_HPD_CONTROL, 0)] & HPD0_DC_HPD_CONTROL__DC_HPD_EN_MASK) &&
+              S.reg[HPDR(regHPD0_DC_HPD_TOGGLE_FILT_CNTL, 0)] == 8 &&
+              S.reg[HPDR(regHPD0_DC_HPD_TOGGLE_FILT_CNTL, 2)] == (50u | 10u << 20));
+        sim_msleep(NULL, RD_HPD_RESUME_SETTLE_MS);
+        CHECK(dchpd_track_poll(&t, &dev, NULL) == 0 && t.state[0] == 1);
+        sim_msleep(NULL, RD_HPD_POLL_MS);
+        CHECK(dchpd_track_poll(&t, &dev, NULL) == 1u << 2 && t.state[0] == 1 && t.state[2] == 1 &&
+              t.generation == gen + 1);
+        hpd_cable(2, 0);
+        sim_msleep(NULL, RD_HPD_POLL_MS);
+        CHECK(dchpd_track_poll(&t, &dev, NULL) == 0);
+        sim_msleep(NULL, RD_HPD_POLL_MS);
+        CHECK(dchpd_track_poll(&t, &dev, NULL) == 1u << 2 && t.state[2] == 0);
         /* routing: HDMI on UNIPHY B / DDC2 / HPD2, DP on UNIPHY D / DDC3 / HPD3 */
         memset(paths, 0, sizeof(paths));
         paths[0].connector = RD_ATOM_CONN_HDMI_A; paths[0].transmitter = 1; paths[0].ddc_line = 1; paths[0].hpd = 1;

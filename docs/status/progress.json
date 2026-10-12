@@ -1,11 +1,11 @@
 {
  "amdgpu": {
-  "works": 506,
-  "ported": 1445,
+  "works": 507,
+  "ported": 1446,
   "total": 1489,
   "not_applicable": 632,
   "works_pct": 34.0,
-  "ported_pct": 97.0,
+  "ported_pct": 97.1,
   "groups": [
    {
     "name": "PSP 13",
@@ -1425,9 +1425,9 @@
     "steps": [
      "modeset"
     ],
-    "works": 42,
+    "works": 43,
     "ported": 130,
-    "todo": 8,
+    "todo": 7,
     "items": {
      "allocate_mst_payload": "ported",
      "apply_symclk_on_tx_off_wa": "ported",
@@ -1590,7 +1590,7 @@
      "link_get_master_pipes_with_dpms_on": "todo",
      "link_increase_mst_payload": "todo",
      "link_reduce_mst_payload": "todo",
-     "link_resume": "todo",
+     "link_resume": "works",
      "link_set_all_streams_dpms_off_for_link": "todo",
      "link_set_dpms_off": "works",
      "link_set_dpms_on": "works",

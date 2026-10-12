@@ -215,3 +215,9 @@ The S3 gap - what a full resume still lacks, in the order it will bite:
    `setPowerState(1)`; framebuffer power requests that arrive earlier are
    recorded and applied afterwards. Nothing yet tells IOFramebuffer that
    its VRAM contents are gone.
+8. **Hotplug across the sleep.** Done: the HPD looks stop before the sleep
+   (`amdgpu_dm_irq_suspend`; after a power loss the pins read unplugged
+   until they are enabled again), the wake work programs the HPD pins and
+   filters again (`link_resume`) and the looks start after the longest
+   connect filter; a monitor plugged or pulled while asleep counts as a
+   hotplug then.
