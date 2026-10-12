@@ -2956,6 +2956,16 @@ int RDNA3Bringup::vmMap(void *p, rdna3_bo *bo, uint64_t va, uint64_t offset, uin
     return 0;
 }
 
+/* amdgpu_fill_buffer: a new VRAM BO the CPU cannot reach through BAR0 is
+ * cleared by the kernel SDMA ring (PR #2 review: it exposed the previous
+ * owner's data) */
+int RDNA3Bringup::clearVram(uint64_t vramOff, uint64_t len)
+{
+    if (!fSdma || !fSdma->ready)
+        return RDNA3_ENODEV;
+    return sdma60_fill_sync(fDev, fSdma, rdna3_vram_mc(fDev, vramOff), 0, len);
+}
+
 int RDNA3Bringup::copyVramToPages(uint64_t vramOff, const uint64_t *pages, uint64_t npages,
                                   uint64_t len)
 {

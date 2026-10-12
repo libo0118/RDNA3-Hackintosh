@@ -95,6 +95,7 @@ void sdma60_write(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t v);
 void sdma60_commit(rdna3_dev *d, rdna3_sdma_ring *r);
 void sdma60_emit_copy(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src_mc, uint64_t dst_mc,
                       uint32_t bytes);
+int  sdma60_fill_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst_mc, uint32_t value, uint64_t len);
 void sdma60_emit_fill(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst_mc, uint32_t value,
                       uint32_t bytes);
 /* sdma_v6_0_ring_emit_ib: NOP-pad so the 6-dword INDIRECT packet ends on

@@ -59,17 +59,27 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
         range_alloc *first = (bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) ? a->fVramHeapHi
                                                                            : a->fVramHeap;
         range_alloc *second = first == a->fVramHeap ? a->fVramHeapHi : a->fVramHeap;
+        range_alloc *from = first;
         uint64_t off = range_alloc_get(first, bo->size, align);
-        if (off == RANGE_ALLOC_FAIL && !(bo->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED))
+        if (off == RANGE_ALLOC_FAIL && !(bo->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED)) {
+            from = second;
             off = range_alloc_get(second, bo->size, align);
+        }
         if (off == RANGE_ALLOC_FAIL)
             return -RD_ENOMEM;
         bo->vram_offset = off;
         bo->backing = nullptr;
-        /* AMDGPU_GEM_CREATE_VRAM_CLEARED: clear through BAR0 when visible */
-        if ((bo->flags & AMDGPU_GEM_CREATE_VRAM_CLEARED) && a->fVramMap &&
-            off + bo->size <= a->fVramMap->getLength())
-            bzero((void *)(a->fVramMap->getVirtualAddress() + off), (size_t)bo->size);
+        /* AMDGPU_GEM_CREATE_VRAM_CLEARED (the UAPI sets it on every VRAM
+         * BO, as amdgpu_gem_create_ioctl): through BAR0 when visible, else
+         * the SDMA ring; a BO that cannot be cleared is not handed out */
+        if (bo->flags & AMDGPU_GEM_CREATE_VRAM_CLEARED) {
+            if (a->fVramMap && off + bo->size <= a->fVramMap->getLength()) {
+                bzero((void *)(a->fVramMap->getVirtualAddress() + off), (size_t)bo->size);
+            } else if (!a->fBringup || a->fBringup->clearVram(off, bo->size) != 0) {
+                range_alloc_put(from, off, bo->size);
+                return -RD_ENOMEM;
+            }
+        }
         return 0;
     }
     return a->gttAlloc(bo);

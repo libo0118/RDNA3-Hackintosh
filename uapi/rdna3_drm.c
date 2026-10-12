@@ -1790,6 +1790,9 @@ static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
     bo->alignment = MAX(a->in.alignment, 4096ull);
     bo->domains = dom;
     bo->flags = a->in.domain_flags;
+    /* amdgpu_gem_create_ioctl: every VRAM allocation is handed out cleared */
+    if (dom & AMDGPU_GEM_DOMAIN_VRAM)
+        bo->flags |= AMDGPU_GEM_CREATE_VRAM_CLEARED;
     /* prefer VRAM if asked; the OS layer may fall back to GTT */
     bo->placement = (dom & AMDGPU_GEM_DOMAIN_VRAM) ? AMDGPU_GEM_DOMAIN_VRAM
                                                    : AMDGPU_GEM_DOMAIN_GTT;

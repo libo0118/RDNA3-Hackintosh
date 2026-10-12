@@ -88,6 +88,7 @@ public:
      * under the DRM lock, which also serializes the DMA ring's submits).
      * RDNA3_ENODEV until GMC and SDMA are up (rdna3lvl>=7). */
     int   copyVramToPages(uint64_t vramOff, const uint64_t *pages, uint64_t npages, uint64_t len);
+    int   clearVram(uint64_t vramOff, uint64_t len);   /* SDMA CONST_FILL, 0 */
 
     /* command submission (DMA ring 0 = SDMA0 from rdna3lvl=7) */
     int   submit(void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,

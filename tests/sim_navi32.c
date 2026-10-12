@@ -9973,6 +9973,19 @@ static void run(const char *fwdir)
             CHECK(out[0] == 0x42 && out[1] == 0x12345678u);
             rdna3_vram_read(&dev, dst, out, 64);
             CHECK(out[0] == 0xabcdef01u && out[15] == 0xabcdef01u && out[16] == pat[16]);
+            /* PR #2 review (#11): a new VRAM BO is cleared through SDMA
+             * when the CPU cannot reach it (amdgpu_fill_buffer) */
+            {
+                uint64_t clr = rdna3_vram_alloc(&dev, 8192, 4096, "sdma-clear");
+                rdna3_vram_write(&dev, clr, pat, sizeof(pat));
+                rdna3_vram_write(&dev, clr + 4096, pat, sizeof(pat));
+                CHECK(sdma60_fill_sync(&dev, &sd, rdna3_vram_mc(&dev, clr), 0, 8192) == RDNA3_OK);
+                rdna3_vram_read(&dev, clr, out, sizeof(out));
+                CHECK(out[0] == 0 && out[255] == 0);
+                rdna3_vram_read(&dev, clr + 4096, out, sizeof(out));
+                CHECK(out[0] == 0 && out[255] == 0);
+                CHECK(sdma60_fill_sync(&dev, &sd, rdna3_vram_mc(&dev, clr), 0, 6) == RDNA3_EINVAL);
+            }
             CHECK(S.sdma_bad == 0 && S.unflushed_doorbells == 0);
             test_sdma_amdgpu(&dev, &sd);
             /* INDIRECT packet layout and 8-dword alignment */

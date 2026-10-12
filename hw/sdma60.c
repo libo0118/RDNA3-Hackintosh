@@ -400,6 +400,27 @@ int sdma60_copy_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint64_t ds
     return sdma60_wait_fence(d, r, seq);
 }
 
+/* amdgpu_fill_buffer on SDMA 6 (sdma_v6_0_buffer_funcs: fill_max_bytes
+ * 0x3fffffe0): 'len' bytes at 'dst' set to 'value' in as many CONST_FILL
+ * packets as it takes, then one fence; the clear amdgpu_gem_create_ioctl
+ * gives every VRAM BO ("always clear VRAM") */
+int sdma60_fill_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t value, uint64_t len)
+{
+    const uint64_t max = 0x3fffffe0ull;
+    uint32_t seq;
+    if (!r->ready || !len || (dst & 3) || (len & 3) || len > (1ull << 40))
+        return RDNA3_EINVAL;
+    while (len) {
+        uint32_t n = (uint32_t)(len < max ? len : max);
+        sdma60_emit_fill(d, r, dst, value, n);
+        dst += n;
+        len -= n;
+    }
+    seq = sdma60_emit_fence(d, r);
+    sdma60_commit(d, r);
+    return sdma60_wait_fence(d, r, seq);
+}
+
 /* --------------------------- user queues --------------------------- */
 
 /* struct v11_sdma_mqd dword offsets (v11_structs.h) */

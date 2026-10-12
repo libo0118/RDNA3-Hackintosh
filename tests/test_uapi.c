@@ -417,6 +417,8 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), c) == 0);
         h = c.out.handle;
         CHECK(h == 1);
+        /* amdgpu_gem_create_ioctl: VRAM is always handed out cleared */
+        CHECK(rdna3_drm_bo_lookup(f, h)->flags & AMDGPU_GEM_CREATE_VRAM_CLEARED);
         CHECK(info(f, AMDGPU_INFO_VRAM_USAGE, &vram, 8) == 0 && vram == (1 << 20));
 
         memset(&c, 0, sizeof(c));
