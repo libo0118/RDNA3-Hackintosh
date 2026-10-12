@@ -101,6 +101,19 @@ if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ]; then
     done
 fi
 
+# the framebuffer / accelerator macOS runs vs the ones installed in
+# /Library/Extensions (RDNA3SourceHash, written by fb/ and accel/Makefile):
+# a line per kext whose new build waits for the user's approval
+stale_kexts() {
+    for n in RDNA3Framebuffer:FBSource RDNA3Accelerator:AccelSource; do
+        k=${n%%:*}; key=${n#*:}
+        h=$(/usr/libexec/PlistBuddy -c "Print :RDNA3SourceHash" "/Library/Extensions/$k.kext/Contents/Info.plist" 2>/dev/null) ||
+            continue
+        r=$(ioreg -r -c "$k" -d 1 2>/dev/null | sed -n "s/.*\"RDNA3,$key\" = \"\([0-9a-f]*\)\".*/\1/p" | head -n 1)
+        [ -n "$r" ] && [ -n "$h" ] && [ "$r" != "$h" ] && echo "$k: running $r, installed $h (not approved yet)"
+    done
+}
+
 # a new build on the host (rdna3vm prepare): install its kexts like
 # setup.sh does. OpenCore injects RDNA3Accel itself, but the framebuffer
 # and the accelerator link IOGraphicsFamily, so they load from the
@@ -152,6 +165,18 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
                 echo "new kexts installed; the host runs this step again" > /tmp/rdna3-rerun.txt
                 curl -sf --max-time 10 -T /tmp/rdna3-rerun.txt "$HOST/reports/rerun-$(date +%Y%m%d-%H%M%S).txt" >/dev/null 2>&1 &&
                     finish
+            fi
+            # installed earlier, but macOS still runs the build approved
+            # before (card run 2026-10-12: the step ran on a framebuffer
+            # older than the core's display ABI, in console mode): tell
+            # the host to stop for 'rdna3vm approve' and stop here
+            if [ -z "$updated" ] && [ -n "$HOST" ]; then
+                stale=$(stale_kexts)
+                if [ -n "$stale" ]; then
+                    echo "$stale" > /tmp/rdna3-approve.txt
+                    curl -sf --max-time 10 -T /tmp/rdna3-approve.txt "$HOST/reports/approve-$(date +%Y%m%d-%H%M%S).txt" >/dev/null 2>&1 &&
+                        finish
+                fi
             fi ;;
         *)
             if [ -n "$updated" ]; then

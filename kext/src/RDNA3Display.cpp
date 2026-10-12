@@ -703,7 +703,7 @@ void RDNA3Accel::displayMirrorDisable(rdna3_dmub *dm)
 
 IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
 {
-    if (!e || e->version != RD3K_DISPLAY_ABI_VERSION) {
+    if (!e || !RD3K_DISPLAY_ABI_OK(e->version)) {
         LOG("display: EDID request with ABI %u (want %u)", e ? e->version : 0, RD3K_DISPLAY_ABI_VERSION);
         return kIOReturnBadArgument;
     }
@@ -873,7 +873,7 @@ void RDNA3Accel::displayMeasureRefresh()
 
 IOReturn RDNA3Accel::displayInfo(RD3KDisplayInfo *r)
 {
-    if (!r || r->version != RD3K_DISPLAY_ABI_VERSION)
+    if (!r || !RD3K_DISPLAY_ABI_OK(r->version))
         return kIOReturnBadArgument;
     if (!fDcn || !fDispDev)
         return kIOReturnNotReady;
@@ -913,7 +913,7 @@ IOReturn RDNA3Accel::displayInfo(RD3KDisplayInfo *r)
 
 IOReturn RDNA3Accel::displayFlip(RD3KDisplayFlip *f)
 {
-    if (!f || f->version != RD3K_DISPLAY_ABI_VERSION || (f->pitch & 3))
+    if (!f || !RD3K_DISPLAY_ABI_OK(f->version) || (f->pitch & 3))
         return kIOReturnBadArgument;
     if (!fDcn || !fDispDev)
         return kIOReturnNotReady;
@@ -972,7 +972,7 @@ IOReturn RDNA3Accel::displayBlank(uint32_t head, bool blank)
 
 IOReturn RDNA3Accel::displaySetSource(RD3KDisplaySource *s)
 {
-    if (!s || s->version != RD3K_DISPLAY_ABI_VERSION || (s->pitch & 255))
+    if (!s || !RD3K_DISPLAY_ABI_OK(s->version) || (s->pitch & 255))
         return kIOReturnBadArgument;
     if (!fDcn || !fDispDev || s->head >= fDcn->nheads)
         return kIOReturnNotReady;
@@ -1290,7 +1290,7 @@ rdna3_audio_stream *RDNA3Accel::displayAudio(uint32_t head, rdna3_dp_link *l, co
  * is kept: rdna3DisplaySetMode names a mode by its index in it. */
 IOReturn RDNA3Accel::displayModes(RD3KDisplayModes *r)
 {
-    if (!r || r->version != RD3K_DISPLAY_ABI_VERSION)
+    if (!r || !RD3K_DISPLAY_ABI_OK(r->version))
         return kIOReturnBadArgument;
     r->count = 0;
     if (!rd3_arg("rdna3modeset", 0))
@@ -1435,7 +1435,7 @@ out:
 
 IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
 {
-    if (!m || m->version != RD3K_DISPLAY_ABI_VERSION || (m->pitch & 255) || (m->oldPitch & 3))
+    if (!m || !RD3K_DISPLAY_ABI_OK(m->version) || (m->pitch & 255) || (m->oldPitch & 3))
         return kIOReturnBadArgument;
     if (!rd3_arg("rdna3modeset", 0))
         return kIOReturnUnsupported;
@@ -1650,7 +1650,7 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
 
 IOReturn RDNA3Accel::displayStatus(RD3KDisplayStatus *s)
 {
-    if (!s || s->version != RD3K_DISPLAY_ABI_VERSION)
+    if (!s || !RD3K_DISPLAY_ABI_OK(s->version))
         return kIOReturnBadArgument;
     if (!fDcn || !fDispDev || s->head >= fDcn->nheads)
         return kIOReturnNotReady;
@@ -1685,7 +1685,7 @@ IOReturn RDNA3Accel::displayCrc(uint32_t head, uint32_t *crc)
 
 IOReturn RDNA3Accel::displayCursor(RD3KDisplayCursor *c)
 {
-    if (!c || c->version != RD3K_DISPLAY_ABI_VERSION)
+    if (!c || !RD3K_DISPLAY_ABI_OK(c->version))
         return kIOReturnBadArgument;
     if (!fDcn || !fDispDev || c->head >= fDcn->nheads)
         return kIOReturnNotReady;
@@ -1729,7 +1729,7 @@ void RDNA3Accel::displayGammaReload(uint32_t head)
 
 IOReturn RDNA3Accel::displayGamma(RD3KDisplayGamma *g)
 {
-    if (!g || g->version != RD3K_DISPLAY_ABI_VERSION || (g->channels != 0 && g->channels != 1 && g->channels != 3) ||
+    if (!g || !RD3K_DISPLAY_ABI_OK(g->version) || (g->channels != 0 && g->channels != 1 && g->channels != 3) ||
         (g->channels && (g->count < 2 || g->count > RD3K_GAMMA_MAX)))
         return kIOReturnBadArgument;
     g->result = 0;

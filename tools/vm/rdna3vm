@@ -595,6 +595,16 @@ cmd__queue() {
                 continue
             fi
         fi
+        # the VM still ran the framebuffer/accelerator macOS approved
+        # before (autoreport: the installed build waits for "Allow"): a
+        # step now would test those (card run 2026-10-12). Stop, keep it.
+        if ls "$WORK"/reports/approve-*.txt >/dev/null 2>&1; then
+            echo "== queue: stopped before step $n: macOS runs an older framebuffer/accelerator ($(cat "$WORK"/reports/approve-*.txt | tr '\n' ';'))"
+            echo "== queue: run 'rdna3vm approve', then 'rdna3vm queue' goes on with: $n $(tr '\n' ' ' < "$QUEUE")"
+            rm -f "$WORK"/reports/approve-*.txt
+            { printf '%s\n' "$n"; cat "$QUEUE"; } > "$QUEUE.new" && cat "$QUEUE.new" > "$QUEUE"; rm -f "$QUEUE.new"
+            return 0
+        fi
         # no last-run = the VM never started (the card not handed to
         # vfio-pci, queue run 24): the same step once more after a pause
         if [ "$how" = unknown ] && [ "${retried:-}" != "$n" ]; then

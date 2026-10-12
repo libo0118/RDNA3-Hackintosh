@@ -352,7 +352,14 @@ bool RDNA3Framebuffer::readConsole()
               (unsigned long)v.v_height, (unsigned long)v.v_depth);
         return false;
     }
-    fPhys = (uint64_t)v.v_baseAddr;
+    /* the low bits are not address: IOGraphics hands the console over
+     * with bit 0 set (0x80000001 on the card's BAR), and a 32 bpp frame
+     * starts on a pixel. Taken as is, every pixel lands one byte off:
+     * alpha in blue, black shown blue (card run 2026-10-12, console mode). */
+    fPhys = (uint64_t)v.v_baseAddr & ~(uint64_t)3;
+    if (v.v_baseAddr & 3)
+        FBLOG("boot console base 0x%llx carries flag bits 0x%llx: using 0x%llx", (unsigned long long)v.v_baseAddr,
+              (unsigned long long)(v.v_baseAddr & 3), (unsigned long long)fPhys);
     fW = (uint32_t)v.v_width;
     fH = (uint32_t)v.v_height;
     fPitch = fBootPitch = (uint32_t)v.v_rowBytes;

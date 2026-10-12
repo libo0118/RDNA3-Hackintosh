@@ -527,6 +527,14 @@ def main():
             if "not approved to load" in txt:
                 print("   !! a new RDNA3Framebuffer/RDNA3Accelerator waits for approval in macOS: run "
                       "'rdna3vm approve' (System Settings -> Privacy & Security -> Allow)")
+                # the ones approved earlier ran instead: what this run says
+                # about the display, the accelerator and Metal on screen is
+                # about those (2026-10-12: an older framebuffer in console
+                # mode, every frame copied by the CPU)
+                print("   FAIL STALE KEXTS this run used the framebuffer/accelerator approved earlier, not "
+                      "this build's: display, accelerator and Metal-on-screen results do not count; "
+                      "'rdna3vm approve', then the step again")
+                failed = True
             if "== rdna3_drminfo --scanout" in txt:
                 # what the panels showed: per pipe the HUBP state, how much
                 # of the picture is not black, whether it changed in 2 s;

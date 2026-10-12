@@ -38,6 +38,9 @@ $(BUNDLE): $(OBJDIR)/rdna3-fb.o Info.plist
 	mkdir -p $@/Contents/MacOS
 	$(CXX) $(LDFLAGS) $< -o $@/Contents/MacOS/$(KEXT)
 	cp Info.plist $@/Contents/Info.plist
+	# the source hash also in the bundle: the VM compares it with the one
+	# the running kext publishes (a build macOS has not approved yet)
+	plutil -insert RDNA3SourceHash -string $(FB_SRC_HASH) $@/Contents/Info.plist
 	plutil -lint $@/Contents/Info.plist
 	@echo "built $@"
 

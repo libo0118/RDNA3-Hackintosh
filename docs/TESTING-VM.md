@@ -213,6 +213,14 @@ then **Not Now** at the restart question and Apple menu → Shut Down.
 minutes after the login the boot-time report script has installed the
 new kexts, and the **Allow** button appears in the same place.
 
+A queue that reaches a boot where macOS still runs the build allowed
+before stops by itself instead of testing it (`rdna3vm queue status`:
+`stopped before step ...: macOS runs an older framebuffer/accelerator`):
+`rdna3vm approve`, then `rdna3vm queue` goes on with the same step.
+Without that (builds before 2026-10-12) such a run shows the old
+framebuffer in its fallback console mode: everything redrawn about once a
+second, and before the fix of that mode black shown blue.
+
 ### Several steps in one go
 
 ```sh

@@ -86,6 +86,12 @@ struct RD3KFlipRequest {
 /* ---- display heads (answered by the core kext, asked by RDNA3Framebuffer):
  *      what the firmware left on screen, flips, frame counter ---- */
 #define RD3K_DISPLAY_ABI_VERSION 2u
+/* the core still answers a framebuffer built against version 1: a new
+ * RDNA3Framebuffer waits for the user's approval in macOS, and until then
+ * the one approved earlier runs against the new core. Version 2 only
+ * appended RD3KDisplayHotplug's 'hotplug' and 'lost' (not written for 1). */
+#define RD3K_DISPLAY_ABI_MIN     1u
+#define RD3K_DISPLAY_ABI_OK(v)   ((v) >= RD3K_DISPLAY_ABI_MIN && (v) <= RD3K_DISPLAY_ABI_VERSION)
 #define RD3K_DISPLAY_FN_INFO     "rdna3DisplayInfo"
 #define RD3K_DISPLAY_FN_FLIP     "rdna3DisplayFlip"
 #define RD3K_DISPLAY_FN_STATUS   "rdna3DisplayStatus"
