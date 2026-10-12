@@ -1554,7 +1554,10 @@ static uint32_t enc_session_msg(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r, u
     unified_ring_ib_checksum(ib, slot, 0x11);
     rdna3_vram_write(d, ib_off, ib, sizeof(ib));
     rdna3_hdp_flush(d);
-    return submit_direct(d, v, r, rdna3_vram_mc(d, ib_off), ib_size_dw);
+    /* amdgpu_job_submit_direct runs ib->length_dw, the packages written:
+     * the zero padding up to ib_size_dw is not part of the IB, and the VCPU
+     * stops at a zero-size package (card runs 33-36: every IB test hung) */
+    return submit_direct(d, v, r, rdna3_vram_mc(d, ib_off), len);
 }
 
 /* Ported from amdgpu_vcn_dec_get_create_msg / amdgpu_vcn_dec_get_destroy_msg */
@@ -1603,7 +1606,7 @@ static uint32_t dec_sw_send_msg(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r, u
     unified_ring_ib_checksum(ib, slot, ib_pack_in_dw);
     rdna3_vram_write(d, ib_off, ib, sizeof(ib));
     rdna3_hdp_flush(d);
-    return submit_direct(d, v, r, rdna3_vram_mc(d, ib_off), ib_size_dw);
+    return submit_direct(d, v, r, rdna3_vram_mc(d, ib_off), len);   /* ib->length_dw */
 }
 
 /* diagnostic (card run 31: the encode IB fence never came back while the
@@ -1687,9 +1690,10 @@ static int dec_ib_test(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r, uint64_t b
 
 /* Ported from amdgpu_vcn_unified_ring_test_ib: amdgpu_vcn_enc_ring_test_ib
  * (create + close session) and amdgpu_vcn_dec_sw_ring_test_ib (create +
- * destroy message), the last fence waited for. Diagnostic (card run 33:
- * both instances hung on the first encode IB): instance 1 runs the decode
- * test first, so one report shows whether decode IBs run at all. */
+ * destroy message), the last fence waited for. Card runs 33-36: whichever
+ * IB ran first hung on both instances - the IBs carried their zero padding
+ * (ib_size_dw instead of ib->length_dw). The fence-only test stays as a
+ * diagnostic in front. */
 int vcn40_unified_ring_test_ib(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
 {
     /* page 0-1: IBs, page 3: decode message, from page 4: the encode
@@ -1704,12 +1708,6 @@ int vcn40_unified_ring_test_ib(rdna3_dev *d, rdna3_vcn *v, rdna3_vcn_ring *r)
     }
     rdna3_vram_fill(d, buf, 0, (128u << 10) + 4 * 4096u);
     fence_only_test(d, v, r);
-    if (r->me == 1) {
-        ret = dec_ib_test(d, v, r, buf);
-        if (!ret)
-            ret = enc_ib_test(d, v, r, buf);
-        return ret;
-    }
     ret = enc_ib_test(d, v, r, buf);
     if (!ret)
         ret = dec_ib_test(d, v, r, buf);

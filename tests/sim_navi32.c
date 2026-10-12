@@ -450,6 +450,11 @@ typedef struct sim {
         uint32_t rptr[2];
         unsigned cmds, ibs, bad, fences, traps, ends, reg_writes, reg_waits, ib_faults;
         unsigned enc_init, enc_close, dec_create, dec_destroy, checksum_bad;
+        /* an IB package with a size below 8 (the zero padding behind the
+         * last package): the VCPU stops there and the ring stalls until
+         * the next VCPU boot (card runs 33-36: both IB tests timed out) */
+        unsigned ib_bad;
+        int stalled[2];
         uint32_t last_ib_inst, last_ib_vmid;
         uint32_t jregs[0x200], jext, jrptr, jpeg_ib_vmid, jpeg_vmid;
         unsigned jext_writes, jpeg_cmds, jpeg_ibs, jpeg_fences, jpeg_traps, jpeg_bad, jpeg_ib_faults;
@@ -3844,13 +3849,21 @@ static void vcn_run_ib(uint32_t inst, uint32_t vmid, uint64_t va, uint32_t ndw)
 {
     uint32_t i = 0, sz, id, engine = 0, w[8];
     S.vcn.ibs++;
-    while (i + 1 < ndw) {
-        if (vcn_rd32(vmid, va + 4ull * i, &sz) || vcn_rd32(vmid, va + 4ull * (i + 1), &id)) {
-            S.vcn.ib_faults++;
+    while (i < ndw) {
+        if (i + 1 >= ndw || vcn_rd32(vmid, va + 4ull * i, &sz) || vcn_rd32(vmid, va + 4ull * (i + 1), &id)) {
+            if (i + 1 >= ndw) {
+                S.vcn.ib_bad++;
+                S.vcn.stalled[inst] = 1;
+            } else {
+                S.vcn.ib_faults++;
+            }
             return;
         }
-        if (sz < 8 || (sz & 3))
-            break;
+        if (sz < 8 || (sz & 3) || i + sz / 4 > ndw) {
+            S.vcn.ib_bad++;
+            S.vcn.stalled[inst] = 1;
+            return;
+        }
         if (id == 0x30000002) {   /* single queue checksum over the packages that follow */
             uint32_t sum = 0, want, n, k, x;
             if (vcn_rd32(vmid, va + 4ull * (i + 2), &want) || vcn_rd32(vmid, va + 4ull * (i + 3), &n)) {
@@ -3913,7 +3926,7 @@ static void vcn_run(uint32_t inst, uint32_t wptr)
     mask = size - 1;
     wptr &= mask;
 #define VPK(k) ring[(S.vcn.rptr[inst] + (k)) & mask]
-    while ((S.vcn.rptr[inst] & mask) != wptr && guard++ < 100000) {
+    while ((S.vcn.rptr[inst] & mask) != wptr && guard++ < 100000 && !S.vcn.stalled[inst]) {
         uint32_t cmd = VPK(0), n = 1;
         S.vcn.cmds++;
         switch (cmd) {
@@ -4162,6 +4175,7 @@ static int vcn_wr(uint32_t dw, uint32_t v)
                 S.vcn.bad_boots++;
             } else {
                 S.vcn.booted[i] = 1;
+                S.vcn.stalled[i] = 0;
                 S.vcn.boots++;
                 S.reg[VCNR(i, regUVD_STATUS)] |= 2;   /* VCPU_REPORT: up */
             }
@@ -8801,7 +8815,7 @@ static void test_vcn(rdna3_dev *dev, rdna3_psp *psp, const amd_ucode_plan *plan0
         rdna3_hdp_flush(dev);
     }
     ib.va = rdna3_vram_mc(dev, buf);
-    ib.length_dw = 4;
+    ib.length_dw = 2;   /* the package only: a zero dword after it would stall the VCPU */
     ib.kdata = NULL;
     for (k = 0; k < 40; k++) {
         seq = vcn40_submit(dev, v, 1, 0, &ib, 1, k == 39 ? rdna3_vram_mc(dev, buf + 4096) : 0);
@@ -9445,7 +9459,7 @@ static void test_vcn_dpg(rdna3_dev *dev, rdna3_psp *psp, const amd_fw_blob_ref *
     rdna3_vram_write(dev, buf, pk, sizeof(pk));
     rdna3_hdp_flush(dev);
     ib.va = rdna3_vram_mc(dev, buf);
-    ib.length_dw = 4;
+    ib.length_dw = 2;
     ib.kdata = NULL;
     seq = vcn40_submit(dev, v, 1, 0, &ib, 1, 0);
     CHECK(seq && vcn40_wait_fence(dev, &v->ring_enc[1], seq) == RDNA3_OK && v->cur_state == RD_PG_STATE_UNGATE);

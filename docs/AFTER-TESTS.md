@@ -1327,7 +1327,10 @@ Settings. That is expected for them, not a display regression.
 - VCN: `VCN0: encode IB test failed (-62)` and `VCN1: decode IB test
   failed (-62)` at the bring-up and again after wake #1: with the
   diagnostic order of run 33 both instances fail whichever IB runs first,
-  so it is not the encode path alone (fences alone pass). Next: compare
-  the DPG IB path with `vcn_v4_0_dec_ring_test_ib` / `enc_ring_test_ib`.
+  so it is not the encode path alone (fences alone pass). Cause found in
+  the port: the IB tests submitted `ib_size_dw` dwords (the zero padding
+  included) where `amdgpu_job_submit_direct` runs `ib->length_dw`; the
+  VCPU stops at the zero-size package. The simulator now stalls the ring
+  on such a package and reproduces both messages; fixed in `hw/vcn40.c`.
 - Not reached: userq, pmctl, VCN tests from userspace, Vulkan, the planned
   system sleep, BACO. Run `big4` again.
