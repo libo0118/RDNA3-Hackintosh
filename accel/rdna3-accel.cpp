@@ -15,6 +15,7 @@
 #include "../common/rdna3_bootargs.h"
 #include <libkern/OSKextLib.h>
 #include <mach/kmod.h>
+#include <libkern/version.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IORangeAllocator.h>
 #include "IOAccelerator.h"
@@ -37,6 +38,7 @@ void                      rd3AccelSurfaceGone(const void *surf);
 void                      rd3AccelResourceGone(const void *res);
 bool                      rd3AccelResHasContent(IOAccelResource2 *res);
 static void               rd3AccelWriteStamp(int index, unsigned int value);
+static bool               rd3AccelLocksInit(void);
 /* Navi 3x display devices (data/amdgpu.ids); the core kext must also claim the card */
 static bool rd3SupportedDevice(unsigned dev)
 {
@@ -523,6 +525,21 @@ public:
         /* on in the default profile (no rdna3lvl, rdna3_bootargs.h); a test step
          * without rdna3accel=1 keeps it off (boot-loop guard) */
         if (!rd3_arg("rdna3accel", 0)) { ALOG("rdna3accel off: NOT starting (boot-loop guard)"); return false; }
+        /* the raw offsets into Apple's objects (re/, iofam/, +0x88 / +0x98 /
+         * +0xc8 ...) were measured on one Darwin release per build: macOS 15
+         * (Darwin 24), or macOS 26 (Darwin 25) for the NM_TAHOE build. On any
+         * other they would read and write the wrong fields */
+#ifdef NM_TAHOE
+        const int kVerifiedDarwin = 25;
+#else
+        const int kVerifiedDarwin = 24;
+#endif
+        if (version_major != kVerifiedDarwin && !rd3_arg("rdna3accelanyos", 0)) {
+            ALOG("Darwin %d, but this build's object offsets were verified on Darwin %d only: NOT starting "
+                 "(rdna3accelanyos=1 overrides)", version_major, kVerifiedDarwin);
+            return false;
+        }
+        if (!rd3AccelLocksInit()) { ALOG("no memory for the module's locks: NOT starting"); return false; }
         gBootAccelFb = (int)rd3_arg("rdna3accelfb", (uint32_t)gBootAccelFb);
         gBootIop = (int)rd3_arg("rdna3acceliop", (uint32_t)gBootIop);
         if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
@@ -581,9 +598,31 @@ public:
 OSDefineMetaClassAndStructors(RDNA3Accelerator, IOGraphicsAccelerator2)
 RDNA3Accelerator *RDNA3Accelerator::gAccel = nullptr;
 
+/* the module's global locks: made once, by start() before the family can
+ * call in, with a compare-and-swap so two makers never both publish one */
+static IOSimpleLock *rd3SimpleLockOnce(IOSimpleLock *volatile *p)
+{
+    if (!*p) {
+        IOSimpleLock *l = IOSimpleLockAlloc();
+        if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)p)) IOSimpleLockFree(l);
+    }
+    return *p;
+}
+static IOLock *rd3LockOnce(IOLock *volatile *p)
+{
+    if (!*p) {
+        IOLock *l = IOLockAlloc();
+        if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)p)) IOLockFree(l);
+    }
+    return *p;
+}
+
 /* the display pipe's framebuffer resource of each head (initFramebufferResource):
- * a legacy surface swap names no head, its arguments may be this resource */
+ * a legacy surface swap names no head, its arguments may be this resource.
+ * gHeadFbResLock: a resource leaves the table (RD3Resource::free) before it
+ * is freed, so one looked at under the lock is alive */
 static IOAccelResource2 *volatile gHeadFbRes[kRd3MaxFB];
+static IOSimpleLock *volatile gHeadFbResLock;
 IOAccelMemory *RD3DisplayPipe::initFramebufferResource(unsigned int index, IOAccelResource2 *res)
 {
     if (!gRd3Scanout) {
@@ -618,8 +657,11 @@ IOAccelMemory *RD3DisplayPipe::initFramebufferResource(unsigned int index, IOAcc
         if (o) o->release();
         return nullptr;
     }
-    if (head < kRd3MaxFB)
+    if (head < kRd3MaxFB && gHeadFbResLock) {
+        IOSimpleLockLock(gHeadFbResLock);
         gHeadFbRes[head] = res;   /* the swap path finds its head by this resource */
+        IOSimpleLockUnlock(gHeadFbResLock);
+    }
     m->fScanout = true;
     m->fPhys    = r.phys;
     m->fBytes   = r.actualSize;
@@ -819,27 +861,38 @@ static void rd3AccelIopHome(IOService *fb, unsigned head);
  * MPCC OGAM works. IOAcceleratorFamily2's own implementation presumably
  * hands such a transaction's gamma to the pipe's IOFramebuffer, so with
  * rdna3gamma=1 it gets the transaction instead of the "done" we answer.
- * Weak imports, called like signalTransactionInterrupt below: the immediate
- * base IOAccelLegacyDisplayPipe if it overrides the method, else
- * IOAccelDisplayPipe's - and neither symbol can keep the kext from loading
- * (unresolved weak symbols bind to gOSKextUnresolved).
- * Card run 34: from the Auxiliary KC neither symbol exists on 24H32, yet
- * the OSKextSymbolIsResolved test passed and the call jumped into kernel
- * data (NX page fault in IOAccelDisplayPipe::event_interrupt_gated). A
- * candidate now also has to lie inside IOAcceleratorFamily2's image, next
- * to signalTransactionInterrupt, which the kext imports strongly. */
+ * Card run 34: from the Auxiliary KC the weak imports of
+ * IOAccelLegacyDisplayPipe / IOAccelDisplayPipe::performTransaction passed
+ * the OSKextSymbolIsResolved test although neither symbol exists on 24H32,
+ * and the call jumped into kernel data (NX page fault in
+ * IOAccelDisplayPipe::event_interrupt_gated): ld -kext leaves a
+ * RIP-relative reference to an undefined symbol unrelocated (see
+ * gen_tahoe_fwd.py). So no symbol is named any more: the implementation
+ * is read from IOAccelLegacyDisplayPipe's exported vtable, loaded through
+ * the GOT (which the kernel linker fills) as a weak reference, at the
+ * slot our own override occupies - exactly the function the family itself
+ * would call for a plain IOAccelLegacyDisplayPipe. */
 extern "C" {
-IOReturn _ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2(void *pipe, IOAccelDisplayPipeTransaction2 *txn) __attribute__((weak_import));
-IOReturn _ZN18IOAccelDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2(void *pipe, IOAccelDisplayPipeTransaction2 *txn) __attribute__((weak_import));
 void _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(void *pipe, void *arg);
 }
-static bool rd3InAccelFamily(const void *f)
+static void *const *rd3LegacyPipeVtable(void)
 {
-    const uintptr_t a = (uintptr_t)f;
-    const uintptr_t b = (uintptr_t)&_ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv;
-    if (!a || f == gOSKextUnresolved || f == (const void *)&gOSKextUnresolved)
-        return false;
-    return (a > b ? a - b : b - a) < (1u << 20);   /* the family is ~420 KiB */
+    void *const *vt;
+    __asm__(".weak_reference __ZTV24IOAccelLegacyDisplayPipe\n\t"
+            "movq __ZTV24IOAccelLegacyDisplayPipe@GOTPCREL(%%rip), %0" : "=r"(vt));
+    return vt;
+}
+/* the byte offset of performTransaction from a vtable's address point
+ * (Itanium ABI: a virtual member pointer holds 1 + that offset) */
+static long rd3PerformTransactionSlot(void)
+{
+    IOReturn (IOAccelDisplayPipe::*pm)(IOAccelDisplayPipeTransaction2 *) = &IOAccelDisplayPipe::performTransaction;
+    struct { uintptr_t ptr; long adj; } raw;
+    static_assert(sizeof(pm) == sizeof(raw), "Itanium member function pointer");
+    memcpy(&raw, &pm, sizeof(raw));
+    if (!(raw.ptr & 1) || raw.adj)
+        return -1;
+    return (long)(raw.ptr - 1);
 }
 static int    gIopGammaBase = -1;   /* rdna3gamma, read on first use */
 static SInt64 gCntIopEmptyBase, gCntIopEmptyBaseErr;
@@ -847,28 +900,25 @@ static IOReturn rd3AccelIopGammaToBase(void *pipe, IOAccelDisplayPipeTransaction
 {
     typedef IOReturn (*PerformFn)(void *, IOAccelDisplayPipeTransaction2 *);
     PerformFn fn = nullptr;
-    const char *which = nullptr;
+    const char *which = "IOAccelLegacyDisplayPipe vtable";
     *handled = false;
     if (gIopGammaBase < 0)
         gIopGammaBase = rd3_arg("rdna3gamma", 0) ? 1 : 0;
     if (!gIopGammaBase)
         return kIOReturnSuccess;
-    /* OSKextSymbolIsResolved, with the cast a function pointer needs in C++ */
-#define RD3_WEAK_RESOLVED(f) ((const void *)&(f) != gOSKextUnresolved && rd3InAccelFamily((const void *)&(f)))
-    if (RD3_WEAK_RESOLVED(_ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2)) {
-        fn = _ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2;
-        which = "IOAccelLegacyDisplayPipe";
-    } else if (RD3_WEAK_RESOLVED(_ZN18IOAccelDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2)) {
-        fn = _ZN18IOAccelDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2;
-        which = "IOAccelDisplayPipe";
-    }
+    void *const *vt = rd3LegacyPipeVtable();
+    const long slot = rd3PerformTransactionSlot();
+    const bool vtOk = vt && (const void *)vt != gOSKextUnresolved && (const void *)vt != (const void *)&gOSKextUnresolved;
+    /* the address point is 2 words in (offset to top, RTTI) */
+    if (vtOk && slot >= 0 && !(slot & 7))
+        fn = (PerformFn)vt[2 + slot / 8];
+    if ((const void *)fn == gOSKextUnresolved || (const void *)fn == (const void *)&gOSKextUnresolved)
+        fn = nullptr;
     static SInt32 gIopBaseLogs;
     if (!fn) {
         if (OSIncrementAtomic(&gIopBaseLogs) < 2)
-            ALOG("iop: rdna3gamma=1 but IOAcceleratorFamily2 exports no performTransaction (weak 0x%llx / 0x%llx, unresolved 0x%llx): plane-less transaction answered as before",
-                 (unsigned long long)(uintptr_t)&_ZN24IOAccelLegacyDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2,
-                 (unsigned long long)(uintptr_t)&_ZN18IOAccelDisplayPipe18performTransactionEP30IOAccelDisplayPipeTransaction2,
-                 (unsigned long long)(uintptr_t)gOSKextUnresolved);
+            ALOG("iop: rdna3gamma=1 but IOAcceleratorFamily2 gives no performTransaction (vtable 0x%llx, slot %ld, unresolved 0x%llx): plane-less transaction answered as before",
+                 (unsigned long long)(uintptr_t)vt, slot, (unsigned long long)(uintptr_t)gOSKextUnresolved);
         return kIOReturnSuccess;
     }
     const IOReturn r = fn(pipe, txn);
@@ -1221,7 +1271,7 @@ static void rd3FamUnlock(RDNA3Accelerator *a)
 static unsigned gNVSVLockMiss;
 enum { kNVSVPend = 512 };
 static unsigned gNVSVPendId[kNVSVPend];
-static IOSimpleLock *gNVSVPendLock;
+static IOSimpleLock *volatile gNVSVPendLock;
 static bool rd3SVPend(unsigned id, int op)
 {
     if (!id) return op == 1 ? false : false;
@@ -1249,7 +1299,6 @@ static unsigned rd3AccelSurfDirty(void *cache, RD3Resource *res, unsigned plane)
     unsigned int fl = *(volatile unsigned int *)(r + 0xc);
     volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
     if (type != 0xc0 || (fl & 0x8000) || !valid || plane > 15) return RD3K_SS_NO_CACHE;
-    if (!gNVSVPendLock) gNVSVPendLock = IOSimpleLockAlloc();
     if (!rd3SVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1)) return RD3K_SS_NO_CACHE;
     _ZN20IOSurfaceDeviceCache10setCurrentEv(cache);
     valid[6] |= (unsigned short)(1u << plane);
@@ -1314,14 +1363,7 @@ static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsign
 static IOLock *volatile gNVSVStageLock;
 static IOBufferMemoryDescriptor *gNVSVStageBuf;
 static unsigned gNVSVStaged, gNVSVStageNoBuf, gNVSVStageBackoff;
-static IOLock *rd3SVStageLock(void)
-{
-    if (!gNVSVStageLock) {
-        IOLock *l = IOLockAlloc();
-        if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gNVSVStageLock)) IOLockFree(l);
-    }
-    return gNVSVStageLock;
-}
+static IOLock *rd3SVStageLock(void) { return rd3LockOnce(&gNVSVStageLock); }
 static IOBufferMemoryDescriptor *rd3SVStage(unsigned long long len)
 {
     if (gNVSVStageBuf && gNVSVStageBuf->getLength() >= len) return gNVSVStageBuf;
@@ -1439,7 +1481,7 @@ static unsigned gIopFlipLogs;
 static bool rd3AccelIopFlipNo(int why) { OSAddAtomic64(1, &gCntIopFlipNo[why & 7]); return false; }
 struct RD3IopFlipCache { IOSurface *s; RD3Resource *res; RD3VidMemory *vm; void *kmem; unsigned long long bytes; unsigned long long use; };
 static RD3IopFlipCache gIopFlipCache[8];
-static IOSimpleLock *gIopFlipCacheLock;
+static IOSimpleLock *volatile gIopFlipCacheLock;
 static unsigned long long gIopFlipCacheTick;
 static bool rd3AccelIopCacheGet(IOSurface *s, RD3Resource **res, RD3VidMemory **vm, void **kmem, unsigned long long *bytes)
 {
@@ -1459,8 +1501,7 @@ static bool rd3AccelIopCacheGet(IOSurface *s, RD3Resource **res, RD3VidMemory **
 }
 static void rd3AccelIopCachePut(IOSurface *s, RD3Resource *res, RD3VidMemory *vm, void *kmem, unsigned long long bytes)
 {
-    if (!gIopFlipCacheLock) { IOSimpleLock *l = IOSimpleLockAlloc(); if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gIopFlipCacheLock)) IOSimpleLockFree(l); }
-    if (!gIopFlipCacheLock) return;
+    if (!rd3SimpleLockOnce(&gIopFlipCacheLock)) return;
     IOSurface *drop = nullptr;
     ((OSObject *)s)->retain();
     IOSimpleLockLock(gIopFlipCacheLock);
@@ -1476,6 +1517,13 @@ static void rd3AccelIopCachePut(IOSurface *s, RD3Resource *res, RD3VidMemory *vm
     IOSimpleLockUnlock(gIopFlipCacheLock);
     if (drop) ((OSObject *)drop)->release();
 }
+/* every global lock, before the family can call into this module */
+static bool rd3AccelLocksInit(void)
+{
+    return rd3SimpleLockOnce(&gHeadFbResLock) && rd3SimpleLockOnce(&gNVSVPendLock) &&
+           rd3SimpleLockOnce(&gIopFlipCacheLock) && rd3LockOnce(&gNVSVStageLock);
+}
+
 extern "C" {
 void _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(void *pipe, void *arg);
 }
@@ -1945,11 +1993,18 @@ void rd3AccelSurfaceGone(const void *surf)
 
 void rd3AccelResourceGone(const void *res)
 {
+    unsigned gone = 0;
+    if (!gHeadFbResLock) return;   /* nothing was ever entered */
+    IOSimpleLockLock(gHeadFbResLock);
     for (unsigned h = 0; h < kRd3MaxFB; h++)
         if (gHeadFbRes[h] == res) {
-            RD3ROUTELOG("swap: head %u's pipe resource %p freed", h, res);
             gHeadFbRes[h] = nullptr;
+            gone |= 1u << h;
         }
+    IOSimpleLockUnlock(gHeadFbResLock);
+    for (unsigned h = 0; h < kRd3MaxFB; h++)
+        if (gone & (1u << h))
+            RD3ROUTELOG("swap: head %u's pipe resource %p freed", h, res);
 }
 
 static unsigned long long rd3res_phys(IOAccelResource2 *r)
@@ -1975,13 +2030,21 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     for (unsigned i = 0; i < 8; i++)
         if (gSurfHead[i] == surf) slot = i;
     if (how == 0 && slot < 8 && (piped & (1u << gSurfHeadIdx[slot]))) { head = gSurfHeadIdx[slot]; how = 2; }
-    for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++)
-        if (gHeadFbRes[h] && gHeadFbRes[h] == a1) { head = h; how = 3; }
-    for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++)
-        if (gHeadFbRes[h] && gHeadFbRes[h] == a2) { head = h; how = 3; }
-    for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++) {
-        RD3VidMemory *hv = rd3res_vidmem(gHeadFbRes[h]);
-        if (hv && (hv == rd3res_vidmem(a1) || hv == rd3res_vidmem(a2))) { head = h; how = 4; }
+    IOAccelResource2 *pipeRes[kRd3MaxFB] = {};
+    if (how == 0 && gHeadFbResLock) {
+        RD3VidMemory *v1 = rd3res_vidmem(a1), *v2 = rd3res_vidmem(a2);
+        IOSimpleLockLock(gHeadFbResLock);
+        for (unsigned h = 0; h < kRd3MaxFB; h++)
+            pipeRes[h] = gHeadFbRes[h];
+        for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++)
+            if (pipeRes[h] && pipeRes[h] == a1) { head = h; how = 3; }
+        for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++)
+            if (pipeRes[h] && pipeRes[h] == a2) { head = h; how = 3; }
+        for (unsigned h = 0; how == 0 && h < kRd3MaxFB; h++) {
+            RD3VidMemory *hv = rd3res_vidmem(pipeRes[h]);   /* alive: still in the table */
+            if (hv && (hv == v1 || hv == v2)) { head = h; how = 4; }
+        }
+        IOSimpleLockUnlock(gHeadFbResLock);
     }
     if (how == 0) {
         unsigned claimed = 0;
@@ -1992,7 +2055,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     }
     if (how == 0 || head >= kRd3MaxFB || !a->fFBs[head]) {
         RD3FLIPWHY("swap: surface %p (a1 %p a2 %p) matched no head (piped 0x%x, pipe resources %p %p %p %p)",
-                   surf, a1, a2, piped, gHeadFbRes[0], gHeadFbRes[1], gHeadFbRes[2], gHeadFbRes[3]);
+                   surf, a1, a2, piped, pipeRes[0], pipeRes[1], pipeRes[2], pipeRes[3]);
         return;
     }
     if (slot == 8) {   /* remember the surface -> head answer */

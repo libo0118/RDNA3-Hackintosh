@@ -455,8 +455,7 @@ void RDNA3Accel::statsStop()
 {
     fStatsStop = true;
     if (fStatsCall) {
-        thread_call_cancel_wait(fStatsCall);
-        thread_call_free(fStatsCall);
+        rd3_thread_call_drain_free(fStatsCall);
         fStatsCall = nullptr;
     }
 }

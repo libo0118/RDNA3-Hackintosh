@@ -127,7 +127,10 @@ CI builds the kexts with the self-hosted macOS runner's SDK and
 `-mmacosx-version-min=11.0`, but only Sequoia has run them, the
 accelerator's class layouts are per release (macOS 26 Tahoe needs the
 `make -C accel NM_TAHOE=1` build, which the package does not ship), and the
-userspace tools need 15.0. The `.pkg` refuses other macOS versions.
+userspace tools need 15.0. The `.pkg` refuses other macOS versions, and
+`RDNA3Accelerator` itself refuses to start on a Darwin release other than
+the one its build was verified on (24, or 25 for `NM_TAHOE=1`) unless
+`rdna3accelanyos=1` is set.
 
 **After every update** run `oc_install.sh` again: the EFI copy of the core
 must be the same build as the framebuffer in `/Library/Extensions`

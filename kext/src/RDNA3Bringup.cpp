@@ -188,8 +188,7 @@ void RDNA3Bringup::stopAndFree()
     teardownInterrupt();   /* no handler may touch fIh / the rings past here */
     if (fSmuIrqCall) {
         fSmuIrqStop = true;
-        thread_call_cancel_wait(fSmuIrqCall);
-        thread_call_free(fSmuIrqCall);
+        rd3_thread_call_drain_free(fSmuIrqCall);
         fSmuIrqCall = nullptr;
     }
 
@@ -203,21 +202,20 @@ void RDNA3Bringup::stopAndFree()
     if (fGfxOffCall) {
         IOLock *l = fOwner->drmLock();
         fGfxOffStop = true;
-        thread_call_cancel_wait(fGfxOffCall);
+        rd3_thread_call_drain(fGfxOffCall);
         if (l)
             IOLockLock(l);
         gfxOffHold();
         if (l)
             IOLockUnlock(l);
-        thread_call_free(fGfxOffCall);
+        rd3_thread_call_drain_free(fGfxOffCall);
         fGfxOffCall = nullptr;
     }
     /* vcn_v4_0_hw_fini / jpeg_v4_0_hw_fini: gate the video block, the PMFW
      * powers it down */
     if (fVcnIdleCall) {
         fVcnStop = true;
-        thread_call_cancel_wait(fVcnIdleCall);
-        thread_call_free(fVcnIdleCall);
+        rd3_thread_call_drain_free(fVcnIdleCall);
         fVcnIdleCall = nullptr;
     }
     /* amdgpu_device_ip_fini_early / amdgpu_device_ip_fini: hw_fini, then

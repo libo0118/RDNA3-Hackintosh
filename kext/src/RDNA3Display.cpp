@@ -706,10 +706,20 @@ IOReturn RDNA3Accel::displayEdid(RD3KDisplayEdid *e)
         LOG("display: EDID request with ABI %u (want %u)", e ? e->version : 0, RD3K_DISPLAY_ABI_VERSION);
         return kIOReturnBadArgument;
     }
-    if (!fDcn || !fDispDev) {
+    if (!fDcn || !fDispDev || !fDispLock) {
         LOG("display: EDID request before the display core is up");
         return kIOReturnNotReady;
     }
+    /* fConnectors is rebuilt from scratch by a hotplug re-probe */
+    IOLockLock(fDispLock);
+    IOReturn ret = displayEdidLocked(e);
+    IOLockUnlock(fDispLock);
+    return ret;
+}
+
+/* displayEdid with fDispLock held */
+IOReturn RDNA3Accel::displayEdidLocked(RD3KDisplayEdid *e)
+{
     e->length = 0;
     e->connector = ~0u;
     /* head -> connector, until the OTG -> DIG -> PHY routing is read back:
@@ -760,8 +770,7 @@ void RDNA3Accel::displayFree()
     displayPowerFree();
     hotplugFree();
     if (fHotplugCall) {
-        thread_call_cancel_wait(fHotplugCall);
-        thread_call_free(fHotplugCall);
+        rd3_thread_call_drain_free(fHotplugCall);
         fHotplugCall = nullptr;
     }
     if (fDcn && fDispDev && fDispLock) {

@@ -41,12 +41,32 @@
 #include <IOKit/IOService.h>
 #include <IOKit/IOLocks.h>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <kern/thread_call.h>
 
 extern "C" {
 #include "amd_discovery.h"
 #include "rdna3_drm.h"
 #include "range_alloc.h"
 #include "rdna3_pmctl.h"
+}
+
+/* Stopping a thread call whose function re-arms itself (or that a racing
+ * kick may enter once more): its stop flag is set first; a run that read
+ * the flag before that re-arms while thread_call_cancel_wait waits for it
+ * (and that wait returns false), so cancel again until nothing was queued.
+ * thread_call_free refuses a queued call, so the free retries the same way. */
+static inline void rd3_thread_call_drain(thread_call_t c)
+{
+    __sync_synchronize();   /* the stop flag before the cancel */
+    thread_call_cancel_wait(c);
+    while (thread_call_cancel_wait(c)) {
+    }
+}
+static inline void rd3_thread_call_drain_free(thread_call_t c)
+{
+    rd3_thread_call_drain(c);
+    while (!thread_call_free(c))
+        thread_call_cancel_wait(c);
 }
 
 class RDNA3Bringup;
@@ -367,6 +387,7 @@ private:
     void          displayWillSleep();
     void          displayDidWake();
     IOReturn      displayEdid(struct RD3KDisplayEdid *e);
+    IOReturn      displayEdidLocked(struct RD3KDisplayEdid *e);
     void          displayProbeConnectors();
     void          displayPublishRoutes();
     void          displayReadVbios();

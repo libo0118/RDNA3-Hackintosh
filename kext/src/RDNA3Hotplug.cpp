@@ -116,7 +116,7 @@ void RDNA3Accel::hotplugStop()
         return;
     fHp->stop = true;
     if (fHp->call)
-        thread_call_cancel_wait(fHp->call);
+        rd3_thread_call_drain(fHp->call);
 }
 
 void RDNA3Accel::hotplugFree()
@@ -125,7 +125,7 @@ void RDNA3Accel::hotplugFree()
         return;
     hotplugStop();
     if (fHp->call)
-        thread_call_free(fHp->call);
+        rd3_thread_call_drain_free(fHp->call);   /* a late hotplugKick */
     IOFree(fHp, sizeof(*fHp));
     fHp = nullptr;
 }

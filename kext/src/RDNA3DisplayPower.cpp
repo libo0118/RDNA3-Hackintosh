@@ -316,8 +316,7 @@ void RDNA3Accel::displayPowerFree()
 {
     fPowerStop = true;
     if (fPowerIdleCall) {
-        thread_call_cancel_wait(fPowerIdleCall);
-        thread_call_free(fPowerIdleCall);
+        rd3_thread_call_drain_free(fPowerIdleCall);
         fPowerIdleCall = nullptr;
     }
     /* the flag and the pointers change under fDispLock, which the flip
