@@ -209,7 +209,11 @@ def report(path, show_all):
                 "AtomCommandTables", "SCPM", "PMFeaturesRunning", "PSPStuckAtInit", "InitResetResult", "GFXHUBResult", "GFXAsync", "KIQOnMES", "Mirror", "MirrorResult", "MirrorCheck", "ExtendHead", "DMUB", "DMUBCapsResult", "IdleSleepBlocked", "DCNClocks", "CloneMetricsResult", "DMUBWaitAckResult", "GfxCGResult", "GfxOffResult", "HotplugEvents", "HotplugPins", "MESResult", "MESSchedVersion", "MESKiqVersion", "MESLegacyQueueMap", "NeedPost", "PostResult",
                 "Hotplug", "HPDState", "HotplugGeneration", "HotplugPolledEvents", "HotplugGlitches",
                 "HotplugLast", "HotplugClonesLit", "HotplugClonesOff", "HotplugBootHead", "HotplugNoEdid",
-                "LastFaultAddr", "LastFaultStatus", "DCNClockLimits"):
+                "LastFaultAddr", "LastFaultStatus", "DCNClockLimits",
+                "Wakes", "WakePowerLost", "WakeResumeResult", "WakeHeadsLost", "SystemSuspends",
+                "EvictedMiB", "EvictFailedMiB", "DisplayPictureLost", "HotplugResumes",
+                "KernelQueuesByMES", "KernelQueuesByMESFallback", "SleepUserQueuesActive",
+                "WakeUserQueuesActive", "DPLinkLosses"):
         if key in props:
             v = props[key]
             print("   info %-20s = %s" % (key, hex(v) if isinstance(v, int) and key in (
@@ -298,6 +302,34 @@ def report(path, show_all):
                     if k not in shown:
                         shown.add(k)
                         print("     " + t)
+    # system sleep (rdna3resume=1): what the wake brought back
+    if "rdna3resume=1" in args and props.get("Wakes", 0):
+        checks = [
+            ("WakeHeadsLost", props.get("WakeHeadsLost", 0) == 0,
+             "every head back after the wake", "head(s) still lost after the wake"),
+            ("DisplayPictureLost", props.get("DisplayPictureLost", 0) == 0,
+             "the picture in VRAM survived (eviction complete)",
+             "the picture was lost: the eviction did not bring everything back (EvictFailedMiB, "
+             "the suspend: / resume: VRAM lines); WindowServer was asked to redraw"),
+        ]
+        if "SleepUserQueuesActive" in props or "WakeUserQueuesActive" in props:
+            a, b = props.get("SleepUserQueuesActive", 0), props.get("WakeUserQueuesActive", 0)
+            checks.append(("user queues", a == b, "%d mapped before the sleep, %d after" % (a, b),
+                           "%d mapped before the sleep, only %d after (amdgpu_userq_resume)" % (a, b)))
+        for name, ok, good, bad in checks:
+            print("   %s %-20s %s" % ("PASS" if ok else "FAIL", name, good if ok else bad))
+            failed = failed or not ok
+        # HPD looks after the wake (rdna3hotplug=1): an unplug right after
+        # it, with nobody at the cables, means the pins were read too early
+        lines = log.splitlines()
+        wake_at = next((i for i, l in enumerate(lines) if "wake #" in l), None)
+        if wake_at is not None:
+            for l in lines[wake_at:]:
+                if "hotplug: HPD" in l and " disconnected on " in l:
+                    print("   WARN hotplug after the wake: " + l[l.find("hotplug:"):][:120])
+    if props.get("KernelQueuesByMESFallback", 0):
+        print("   WARN kernel queues      the MES scheduler refused the legacy map; the KIQ mapped them "
+              "(the MES: lines)")
     errs = [l for l in log.splitlines() if "ERROR" in l or "failed" in l or "timeout" in l]
     if errs:
         print("   kext errors (%d):" % len(errs))

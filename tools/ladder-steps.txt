@@ -210,4 +210,7 @@ big3 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=
 # 120 Hz+ monitor for subvp, a 4K HDMI 2.0 monitor for hdmi20) or a person
 # at the cables (hotplug), and the old diagnostic variants (5c, 7b, 8b,
 # 9b*/9c3, 10s, gamma0). A failure is bisected with the feature's own step.
-big4 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3hdmi=1 rdna3fmt=1 rdna3audio=1 rdna3otg=1 rdna3cursormall=1 rdna3mall=1 rdna3gamma=1 rdna3dmubreset=1 rdna3dcseq=1 rdna3dpms=2 rdna3resume=1 rdna3baco=1
+# rdna3hotplug=1 rides along without anyone at the cables: the HPD looks
+# pause for the system sleep and come back with link_resume, so a monitor
+# that reads unplugged right after the wake is a bug the report shows.
+big4 rdna3hotplug=1 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3hdmi=1 rdna3fmt=1 rdna3audio=1 rdna3otg=1 rdna3cursormall=1 rdna3mall=1 rdna3gamma=1 rdna3dmubreset=1 rdna3dcseq=1 rdna3dpms=2 rdna3resume=1 rdna3baco=1
