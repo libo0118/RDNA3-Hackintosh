@@ -5,9 +5,8 @@
  */
 #include "xfer.h"
 
-int rdna3_copy_vram_to_pages(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uint64_t vram_off,
-                             const uint64_t *pages, uint64_t npages, uint64_t len,
-                             uint64_t win_off, uint32_t win_pages)
+static int xfer(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uint64_t vram_off, const uint64_t *pages,
+                uint64_t npages, uint64_t len, uint64_t win_off, uint32_t win_pages, int to_vram)
 {
     uint64_t done = 0, page = 0;
     /* GTT pages as amdgpu maps them: system, snooped, read/write */
@@ -49,8 +48,8 @@ int rdna3_copy_vram_to_pages(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uin
         for (i = 0; ret == RDNA3_OK && (uint64_t)i * (1u << 22) < chunk; i++) {
             uint64_t off = (uint64_t)i * (1u << 22);
             uint32_t bytes = (uint32_t)(chunk - off < (1u << 22) ? chunk - off : (1u << 22));
-            ret = sdma60_copy_sync(d, r, rdna3_vram_mc(d, vram_off + done + off),
-                                   g->gart_start + win_off + off, bytes);
+            uint64_t vmc = rdna3_vram_mc(d, vram_off + done + off), gmc = g->gart_start + win_off + off;
+            ret = to_vram ? sdma60_copy_sync(d, r, gmc, vmc, bytes) : sdma60_copy_sync(d, r, vmc, gmc, bytes);
         }
         gmc11_gart_unmap(d, g, win_off, n);
         mmhub302_flush_tlb(d, 0, 0);
@@ -60,4 +59,18 @@ int rdna3_copy_vram_to_pages(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uin
         page += n;
     }
     return ret;
+}
+
+int rdna3_copy_vram_to_pages(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uint64_t vram_off,
+                             const uint64_t *pages, uint64_t npages, uint64_t len,
+                             uint64_t win_off, uint32_t win_pages)
+{
+    return xfer(d, g, r, vram_off, pages, npages, len, win_off, win_pages, 0);
+}
+
+int rdna3_copy_pages_to_vram(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uint64_t vram_off,
+                             const uint64_t *pages, uint64_t npages, uint64_t len,
+                             uint64_t win_off, uint32_t win_pages)
+{
+    return xfer(d, g, r, vram_off, pages, npages, len, win_off, win_pages, 1);
 }

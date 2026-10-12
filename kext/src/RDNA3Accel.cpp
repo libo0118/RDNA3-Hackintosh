@@ -132,6 +132,7 @@ IOReturn RDNA3Accel::setPowerState(unsigned long state, IOService *)
          * with rdna3resume=1 all of them (P4), else the video block only */
         if (s3) {
             IOLockLock(fDrmLock);
+            vramEvict();   /* amdgpu_device_evict_resources, while SDMA and the GART still run */
             fBringup->systemSuspend();
             IOLockUnlock(fDrmLock);
         } else if (vcn) {
@@ -146,6 +147,7 @@ IOReturn RDNA3Accel::setPowerState(unsigned long state, IOService *)
         IOLockLock(fDrmLock);
         bool ok = fBringup->resumeAfterPowerLoss();
         drmVmReplayIfNeeded();
+        vramRestore(ok && fBringup->lastResumeLostVram());
         IOLockUnlock(fDrmLock);
         LOG("wake: GPU resume after the suspend %s", ok ? "done" : "FAILED");
     } else if (vcn) {
@@ -182,6 +184,7 @@ void RDNA3Accel::stop(IOService *provider)
     }
     statsStop();
     displayStateFree();   /* D4: the wake work first */
+    vramEvictFree();      /* a sleep whose wake never came */
     if (fSleepAssertion) {
         if (IOPMrootDomain *root = getPMRootDomain())
             root->releasePMAssertion(fSleepAssertion);

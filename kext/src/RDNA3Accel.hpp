@@ -180,6 +180,17 @@ public:
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
                                           void *p3, void *p4) override;
 
+    /* amdgpu_device_evict_resources before a sleep (RDNA3Evict.cpp): the
+     * VRAM that holds clients' data copied to system memory, back after
+     * the resume when VRAM was lost; fDrmLock held */
+    void          vramEvict();
+    void          vramRestore(bool vramLost);
+    void          vramEvictFree();
+    void          platformForEachVram(void (*fn)(void *ctx, uint64_t off, uint64_t size), void *ctx);
+    struct RDNA3VramHandle *fVramHandles = nullptr;
+    struct RDNA3EvictRange *fEvict = nullptr;
+    uint32_t      fEvictN = 0, fEvictCap = 0;
+    bool          fEvictIncomplete = false;
 private:
     IOPCIDevice  *fPci      = nullptr;
     IOMemoryMap  *fMmioMap  = nullptr;

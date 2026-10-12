@@ -782,7 +782,12 @@ event), `wake #N: PCI ..., MEMSIZE ..., ASIC_Init ..., PSP sOS ...`,
 `rdna3resume=1` the sleep also runs `amdgpu_device_suspend`
 (`suspend #N: rings idle, then the IPs down in reverse order`,
 `RDNA3,SystemSuspends`), so every wake runs the resume, also when the card
-kept its power (`resume #N: after amdgpu_device_suspend`).
+kept its power (`resume #N: after amdgpu_device_suspend`). Before the
+suspend the VRAM clients use is copied to system memory
+(`suspend: N VRAM range(s), M MiB saved`, `RDNA3,EvictedMiB`); after a
+power loss it goes back before the display restore
+(`resume: N VRAM range(s) back from system memory`, then `every evicted
+VRAM range is back`: no VRAMLOST for the clients).
 
 | Symptom | Likely cause | Action |
 |---|---|---|
@@ -796,7 +801,7 @@ kept its power (`resume #N: after amdgpu_device_suspend`).
 | `RDNA3,Wake ... the card lost its power`, `WakeResumeResult 0` | `resumeAfterPowerLoss` stopped: `ResumeResult` 1 ASIC_Init, 2 FB location moved, 3 `hwInit` | serial `resume #1` and the `PSP` / `post` / `Stage2` lines after it; in the VM a wake brings a bus reset: `resetIfPspStuck` must log the mode-1 reset |
 | heads `restored (-16)` after a power loss | DISPCLK / DPPCLK below the pixel rate and the raise through the DAL mailbox failed (`state: head N: ... raising them failed`); a raise that worked logs `state: head N: clocks raised for ...` | the `DAL SMU: hard min` lines before it; divider 127 (`DCN clocks: DISPCLK at divider 127`) needs the OTG pixel drop of `dcn32_update_clocks_update_dentist` |
 | heads `restored (-19)` | no DMCUB after the resume (`rdna3dmub=3` attaches to the GOP's firmware, gone after a power loss) | `rdna3dmub=1`; `DMUB:` lines after `resume` |
-| restored, `running`, the picture black or garbage | VRAM did not survive (`VRAMLost`): the surfaces stay empty until WindowServer redraws | a picture a minute later; `sysctx 0` in the head state = the DCHUBBUB system aperture not restored |
+| restored, `running`, the picture black or garbage | VRAM did not survive and the eviction missed the surface (`EvictFailedMiB` > 0, `some NOT`), or the restore copy failed (`EvictRestoreFailures`) | the `suspend:` / `resume:` eviction lines; a picture a minute later (WindowServer redraws); `sysctx 0` in the head state = the DCHUBBUB system aperture not restored |
 | DMA/GFX tests after the wake fail, ring tests passed | GPUVM page tables lost with VRAM and not rebuilt: `VRAM lost: page tables rebuilt for N VM(s)` and `the clients' GPUVM ranges mapped again` must follow `resume #N` (`RDNA3,VMReplayFailures` 0) | a fresh process (new VM) passing = the old VMs' replay failed: the `VMReplayFailures` count and the client's mappings |
 
 ---

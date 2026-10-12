@@ -151,6 +151,7 @@ typedef struct rdna3_bo {
     uint64_t tiling_info;
     uint8_t  userptr;         /* GEM_USERPTR: backing wraps the client's pages, no mmap */
     uint8_t  userptr_ro;      /* AMDGPU_GEM_USERPTR_READONLY: never mapped writable */
+    uint32_t visit;           /* rdna3_drm_device_for_each_vram_bo: seen in this pass */
     uint64_t user_addr;
 } rdna3_bo;
 
@@ -429,6 +430,7 @@ typedef struct rdna3_drm_device {
     rdna3_userq_fence_drv *fence_drv;
     struct { uint32_t owner, ref; uint64_t seq; const struct rdna3_drm_file *file; } *uq_deferred;
     uint32_t next_fence_ctx;
+    uint32_t visit_gen;       /* rdna3_drm_device_for_each_vram_bo */
     /* VCN 4.0 / JPEG 4.0 (rdna3_drm_device_set_vcn): vcn_num_inst 0 = the
      * video block is not up and the video IPs answer as without it */
     uint32_t vcn_ip_version;      /* UVD_HWIP: AMD_IP_VERSION(4, 0, 0) */
@@ -497,6 +499,10 @@ void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_
 /* VRAM (and every page table) was lost and each live VM has a new empty
  * root: map every client's ranges again; returns the mappings that failed */
 int  rdna3_drm_device_vm_replay(rdna3_drm_device *dev);
+/* every live BO placed in VRAM, once each (a BO several clients hold, an
+ * export, the seq64 slots): amdgpu_device_evict_resources' list. The
+ * callback must not free BOs. */
+void rdna3_drm_device_for_each_vram_bo(rdna3_drm_device *dev, void (*fn)(void *ctx, rdna3_bo *bo), void *ctx);
 /* Harvesting read from the GC (gfx11_get_cu_info): replaces the "all CUs
  * and RBs active" defaults in DEV_INFO. 'bitmap' uses cu_info->bitmap[0]'s
  * 4x4 layout. */

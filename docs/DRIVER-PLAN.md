@@ -187,8 +187,10 @@ The S3 gap - what a full resume still lacks, in the order it will bite:
    the tables behind them are garbage, so old contexts fault (clients see
    VRAM lost). Page tables: done - after a VRAM loss the pool starts over,
    each live VM gets a new root and the UAPI maps every client's ranges
-   again (`rdna3_drm_device_vm_replay`). Still open: the BO contents and
-   the scanout surfaces (eviction through SDMA to GTT).
+   again (`rdna3_drm_device_vm_replay`). BO contents: done - every DRM BO
+   in VRAM, the seq64 slots, the accelerator's surfaces and the boot
+   scanout are copied to wired system pages through SDMA before the
+   suspend and back after a power loss (`kext/src/RDNA3Evict.cpp`).
 3. **Display init.** `dcn32_init_hw` is not ported: the clock manager's
    raise half runs in the restore now (DISPCLK / DPPCLK hard minimums
    through the DAL mailbox, back to the saved clocks; `restored (-16)` only

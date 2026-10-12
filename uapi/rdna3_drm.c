@@ -2468,6 +2468,28 @@ int rdna3_drm_device_vm_replay(rdna3_drm_device *dev)
     return failed;
 }
 
+static void vram_bo_visit(rdna3_drm_device *dev, rdna3_bo *bo, void (*fn)(void *, rdna3_bo *), void *ctx)
+{
+    if (!bo || bo->placement != AMDGPU_GEM_DOMAIN_VRAM || bo->visit == dev->visit_gen)
+        return;
+    bo->visit = dev->visit_gen;
+    fn(ctx, bo);
+}
+
+void rdna3_drm_device_for_each_vram_bo(rdna3_drm_device *dev, void (*fn)(void *ctx, rdna3_bo *bo), void *ctx)
+{
+    rdna3_drm_file *f;
+    uint32_t i;
+    if (!++dev->visit_gen)
+        ++dev->visit_gen;   /* 0 is what a new BO holds */
+    for (f = dev->files; f; f = f->next_file)
+        for (i = 0; f->bos && i < RD_MAX_HANDLES; i++)
+            vram_bo_visit(dev, f->bos[i], fn, ctx);
+    for (i = 0; i < RD_MAX_EXPORTS; i++)
+        vram_bo_visit(dev, dev->exports[i].bo, fn, ctx);
+    vram_bo_visit(dev, dev->seq64_bo, fn, ctx);
+}
+
 /* ---- fence drivers ---- */
 
 static int userq_tables(rdna3_drm_device *dev)

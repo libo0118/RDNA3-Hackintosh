@@ -321,6 +321,8 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
             IOLockLock(a->fDrmLock);
             bool ok = a->fBringup->resumeAfterPowerLoss();
             a->drmVmReplayIfNeeded();
+            /* the evicted VRAM back before the display restore shows it */
+            a->vramRestore(ok && a->fBringup->lastResumeLostVram());
             IOLockUnlock(a->fDrmLock);
             a->setNumber("RDNA3,WakeResumeResult", ok ? 1 : 0);
             LOG("wake: GPU bring-up after the %s %s", powerLost ? "power loss" : "suspend",

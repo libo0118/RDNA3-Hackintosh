@@ -88,6 +88,7 @@ public:
      * under the DRM lock, which also serializes the DMA ring's submits).
      * RDNA3_ENODEV until GMC and SDMA are up (rdna3lvl>=7). */
     int   copyVramToPages(uint64_t vramOff, const uint64_t *pages, uint64_t npages, uint64_t len);
+    int   copyPagesToVram(uint64_t vramOff, const uint64_t *pages, uint64_t npages, uint64_t len);
     int   clearVram(uint64_t vramOff, uint64_t len);   /* SDMA CONST_FILL, 0 */
 
     /* command submission (DMA ring 0 = SDMA0 from rdna3lvl=7) */
@@ -161,6 +162,10 @@ public:
     /* VRAM was lost and the live VMs have new, empty roots: the DRM maps
      * every client's ranges again (rdna3_drm_device_vm_replay); true once */
     bool     takeVmReplay() { bool r = fVmReplay; fVmReplay = false; return r; }
+    /* the last resume found VRAM lost; forgetVramLoss: every evicted range
+     * came back, the clients are not told (amdgpu_device_resume) */
+    bool     lastResumeLostVram() const { return fLastResumeVramLost; }
+    void     forgetVramLoss();
     /* VCN / JPEG across a system sleep (rdna3vcn): amdgpu_device_ip_suspend's
      * jpeg_v4_0_suspend + vcn_v4_0_suspend before it (the VCPU BOs copied
      * to system memory), and after a wake that kept the card's power their
@@ -332,6 +337,7 @@ private:
     bool             fReinit = false;        /* hwInit() runs again after a reset */
     bool             fSuspended = false;     /* systemSuspend ran, the resume has not */
     bool             fVmReplay = false;      /* takeVmReplay */
+    bool             fLastResumeVramLost = false;
     uint32_t         fSystemSuspends = 0;
     uint32_t         fResetCount = 0, fVramLostCount = 0;
     uint64_t         fGpuResets = 0, fSoftRecoveries = 0, fVmFaults = 0;

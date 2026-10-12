@@ -3465,6 +3465,18 @@ static void sdma_run(uint32_t wptr_bytes)
                     memcpy(q, ps + k, c);
                     k += c;
                 }
+            } else if (pd) {
+                /* source through GART (a page evicted to system memory
+                 * coming back), one page at a time */
+                uint32_t k = 0;
+                while (k < len) {
+                    uint32_t c = 4096 - (uint32_t)((s + k) & 0xfff);
+                    uint8_t *q = gart_page(s + k);
+                    if (c > len - k) c = len - k;
+                    if (!q) { S.sdma_bad++; break; }
+                    memcpy(pd + k, q, c);
+                    k += c;
+                }
             } else {
                 S.sdma_bad++;
             }
@@ -10143,6 +10155,18 @@ static void run(const char *fwdir)
                 CHECK(rdna3_copy_vram_to_pages(&dev, &gmc, &sd, src, pg, 3, 8192, win, 2) == RDNA3_EINVAL);
                 memcpy(&wpte, S.vram + gmc.gart_table + (win / 4096) * 8, 8);
                 CHECK(wpte == 0);                          /* nothing mapped on a refusal */
+                /* and back (a BO evicted before a sleep): the pages into a
+                 * VRAM range that lost its contents */
+                pg[1] &= ~0x10ull;
+                rdna3_vram_fill(&dev, xsrc, 0xA5, 3 * 4096);
+                CHECK(rdna3_copy_pages_to_vram(&dev, &gmc, &sd, xsrc, pg, 3, 3 * 4096 - 100, win, 2) == RDNA3_OK);
+                {
+                    uint32_t back[3 * 1024];
+                    rdna3_vram_read(&dev, xsrc, back, sizeof(back));
+                    CHECK(!memcmp(back, pat2, 3 * 4096 - 100) && ((uint8_t *)back)[3 * 4096 - 100] == 0xA5);
+                }
+                memcpy(&wpte, S.vram + gmc.gart_table + (win / 4096) * 8, 8);
+                CHECK(wpte == 0 && S.sdma_bad == 0);
             }
             sdma60_stop(&dev, &sd);
             CHECK(!sd.ready && (S.reg[0xA000 + regSDMA0_F32_CNTL] & SDMA0_F32_CNTL__HALT_MASK));

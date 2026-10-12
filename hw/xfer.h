@@ -29,6 +29,11 @@ extern "C" {
 int rdna3_copy_vram_to_pages(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uint64_t vram_off,
                              const uint64_t *pages, uint64_t npages, uint64_t len,
                              uint64_t win_off, uint32_t win_pages);
+/* the other way: the system pages back into VRAM (a BO evicted before a
+ * sleep, amdgpu_bo_restore / the TTM move back after the resume) */
+int rdna3_copy_pages_to_vram(rdna3_dev *d, rdna3_gmc *g, rdna3_sdma_ring *r, uint64_t vram_off,
+                             const uint64_t *pages, uint64_t npages, uint64_t len,
+                             uint64_t win_off, uint32_t win_pages);
 
 #ifdef __cplusplus
 }

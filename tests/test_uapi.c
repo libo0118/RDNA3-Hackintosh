@@ -16,6 +16,7 @@ static int failures;
     failures++; } } while (0)
 
 static unsigned live_bos;
+static void count_bo(void *ctx, rdna3_bo *bo) { (void)bo; (*(uint32_t *)ctx)++; }
 static void *h_zalloc(void *c, size_t n) { (void)c; return calloc(1, n); }
 static void h_free(void *c, void *p, size_t n) { (void)c; (void)n; free(p); }
 static int h_bo_alloc(void *c, rdna3_bo *bo)
@@ -446,6 +447,15 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), c) == 0);
         h2 = c.out.handle;
         CHECK(rdna3_drm_bo_lookup(f, h2)->placement == AMDGPU_GEM_DOMAIN_GTT);
+        /* the eviction list before a sleep: the VRAM BO once, not the GTT one */
+        {
+            uint32_t n = 0;
+            rdna3_drm_device_for_each_vram_bo(&dev, count_bo, &n);
+            CHECK(n == 1);
+            n = 0;
+            rdna3_drm_device_for_each_vram_bo(&dev, count_bo, &n);   /* a second pass sees it again */
+            CHECK(n == 1);
+        }
 
         memset(&m, 0, sizeof(m));
         m.in.handle = h;

@@ -46,7 +46,16 @@ static const uint64_t kAccelVaSize = 0x0000010000000000ull; /* 1 TiB */
 
 struct RDNA3VramHandle {
     uint64_t offset, size;
+    RDNA3VramHandle *prev, *next;   /* fVramHandles, under fDrmLock */
 };
+
+/* the accelerator's live VRAM allocations (the eviction list before a
+ * sleep); fDrmLock held */
+void RDNA3Accel::platformForEachVram(void (*fn)(void *ctx, uint64_t off, uint64_t size), void *ctx)
+{
+    for (RDNA3VramHandle *h = fVramHandles; h; h = h->next)
+        fn(ctx, h->offset, h->size);
+}
 
 bool RDNA3Accel::platformInit()
 {
@@ -91,8 +100,16 @@ IOReturn RDNA3Accel::platformVramAlloc(RD3KVramRequest *r)
         range_alloc_put(fVramHeap, off, size);
         off = RANGE_ALLOC_FAIL;
     }
-    if (off != RANGE_ALLOC_FAIL)
+    if (off != RANGE_ALLOC_FAIL) {
         fAccelVramBytes += size;
+        h->offset = off;
+        h->size = size;
+        h->prev = nullptr;
+        h->next = fVramHandles;
+        if (fVramHandles)
+            fVramHandles->prev = h;
+        fVramHandles = h;
+    }
     uint64_t total = fAccelVramBytes;
     IOLockUnlock(fDrmLock);
 
@@ -100,8 +117,6 @@ IOReturn RDNA3Accel::platformVramAlloc(RD3KVramRequest *r)
         IOFree(h, sizeof(*h));
         return kIOReturnNoSpace;
     }
-    h->offset = off;
-    h->size = size;
     bzero((void *)(fVramMap->getVirtualAddress() + off), (size_t)size);
 
     r->actualSize = size;
@@ -123,6 +138,12 @@ IOReturn RDNA3Accel::platformVramFree(RD3KVramRequest *r)
     IOLockLock(fDrmLock);
     range_alloc_put(fVramHeap, h->offset, h->size);
     fAccelVramBytes -= h->size;
+    if (h->prev)
+        h->prev->next = h->next;
+    else
+        fVramHandles = h->next;
+    if (h->next)
+        h->next->prev = h->prev;
     IOLockUnlock(fDrmLock);
     IOFree(h, sizeof(*h));
     r->handle = nullptr;

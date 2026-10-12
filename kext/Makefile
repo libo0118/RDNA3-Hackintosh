@@ -29,7 +29,7 @@ LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext \
             -lkmod -lkmodc++ -lcc_kext
 
 CXXSRC := src/RDNA3Accel.cpp src/RDNA3Bringup.cpp src/RDNA3Drm.cpp src/RDNA3UserClient.cpp \
-          src/RDNA3Platform.cpp src/RDNA3Display.cpp src/RDNA3Resume.cpp
+          src/RDNA3Platform.cpp src/RDNA3Display.cpp src/RDNA3Resume.cpp src/RDNA3Evict.cpp
 CSRC   := ../common/amd_discovery.c ../common/amd_fw.c ../common/range_alloc.c \
           ../hw/rdna3_hw.c ../hw/psp13.c ../hw/smu13.c ../hw/gmc11.c ../hw/mmhub302.c ../hw/ih60.c ../hw/sdma60.c ../hw/gpuvm.c ../hw/gfx11.c ../hw/dcn32.c ../hw/doorbell.c ../hw/vbios.c ../hw/dcaux.c ../hw/edid.c ../hw/atom.c ../hw/dmub32.c ../hw/dcn32_mode.c ../hw/dcn32_clone.c ../hw/dcn32_modeset.c ../hw/dcn32_clk.c ../hw/gfx11_info.c ../hw/xfer.c ../hw/soc21_cg.c ../uapi/rdna3_drm.c src/kmod_info.c
 CXXSRC += src/RDNA3Hotplug.cpp

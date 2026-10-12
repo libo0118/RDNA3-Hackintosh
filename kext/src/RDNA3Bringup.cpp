@@ -2786,6 +2786,16 @@ int RDNA3Bringup::sosAlive()
  * smu_disable_dpms leaves the features to the PMFW there, and mp1_state
  * stays NONE for a sleep. No ring takes work until the resume. Under the
  * DRM lock. */
+void RDNA3Bringup::forgetVramLoss()
+{
+    if (!fLastResumeVramLost || !fVramLostCount)
+        return;
+    fVramLostCount--;
+    fLastResumeVramLost = false;
+    BLOG("resume: every evicted VRAM range is back: the clients are not told VRAM was lost");
+    publish("RDNA3,VRAMLost", fVramLostCount);
+}
+
 bool RDNA3Bringup::systemSuspend()
 {
     if (!fFinished || !fDev || fSuspended)
@@ -2840,6 +2850,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
         return false;
     }
     bool vramLost = checkVramLost("resume");
+    fLastResumeVramLost = vramLost;
     /* rdna3amdgpu=1: soc21_common_resume - an aborted S3 with the TOS still
      * running gets a reset first (soc21_need_reset_on_resume); this wake
      * follows a completed sleep (amdgpu: suspend_complete), so it does not;
@@ -3045,6 +3056,16 @@ int RDNA3Bringup::copyVramToPages(uint64_t vramOff, const uint64_t *pages, uint6
         fGmc->gart_size < (uint64_t)winPages * 4096)
         return RDNA3_ENODEV;
     return rdna3_copy_vram_to_pages(fDev, fGmc, fSdma, vramOff, pages, npages, len,
+                                    fGmc->gart_size - (uint64_t)winPages * 4096, winPages);
+}
+
+int RDNA3Bringup::copyPagesToVram(uint64_t vramOff, const uint64_t *pages, uint64_t npages, uint64_t len)
+{
+    const uint32_t winPages = 4096;   /* copyVramToPages' window */
+    if (!fGmc || !fGmc->mmhub_enabled || !fSdma || !fSdma->ready ||
+        fGmc->gart_size < (uint64_t)winPages * 4096)
+        return RDNA3_ENODEV;
+    return rdna3_copy_pages_to_vram(fDev, fGmc, fSdma, vramOff, pages, npages, len,
                                     fGmc->gart_size - (uint64_t)winPages * 4096, winPages);
 }
 
