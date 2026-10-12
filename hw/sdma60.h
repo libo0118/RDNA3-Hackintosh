@@ -120,6 +120,12 @@ int  sdma60_wait_fence_us(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq, uint32
 int  sdma60_copy_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src_mc, uint64_t dst_mc,
                       uint32_t bytes);
 
+/* a 'rows' x 'row_bytes' rectangle between MC addresses with their own
+ * pitches (amdgpu_copy_buffer per row; one span when the pitches match),
+ * waited for. RDNA3_EINVAL for a row wider than a pitch */
+int  sdma60_copy_rect_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src_mc, uint32_t src_pitch, uint64_t dst_mc,
+                           uint32_t dst_pitch, uint32_t row_bytes, uint32_t rows);
+
 /* ---- sdma_v6_0 ring functions amdgpu_ib_schedule uses (rdna3amdgpu=1) ---- */
 void sdma60_ring_insert_nop(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t count);
 void sdma60_emit_wreg(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t reg, uint32_t val);

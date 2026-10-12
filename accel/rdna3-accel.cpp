@@ -99,6 +99,9 @@ static int gRd3Scanout = 0;
  * publishes (before WindowServer opens it) - the VM run has no shell to type
  * them in once the desktop is black */
 static int gBootAccelFb = 0, gBootIop = 0;
+/* boot-arg rdna3accelsdma=1 (A2): swap copies onto a scanout by SDMA in the
+ * core kext (rdna3CopyVram) instead of the CPU through the BAR */
+static int gBootSdmaCopy = 0;
 static volatile UInt32 gBootGatesQueued = 0;   /* bit i: head i's gates queued */
 static void rd3AccelBootGates(void *, void *);
 extern "C" {
@@ -542,6 +545,7 @@ public:
         if (!rd3AccelLocksInit()) { ALOG("no memory for the module's locks: NOT starting"); return false; }
         gBootAccelFb = (int)rd3_arg("rdna3accelfb", (uint32_t)gBootAccelFb);
         gBootIop = (int)rd3_arg("rdna3acceliop", (uint32_t)gBootIop);
+        gBootSdmaCopy = (int)rd3_arg("rdna3accelsdma", 0);
         if (IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider)) {
             unsigned waited = 0;
             while (pci->getProperty("rdna3-claimed") != kOSBooleanTrue && waited < 300) { IOSleep(100); waited++; }
@@ -1884,9 +1888,47 @@ static unsigned rd3FlipWhy = 0;
 
 #define RD3SCANOUT_COPY_MAX 120
 static unsigned rd3ScanoutCopies = 0;
+/* A2 (rdna3accelsdma=1): SDMA copies (no cap: the GPU does them), the
+ * failures in a row that send the swaps back to the CPU */
+static unsigned rd3SdmaCopies = 0, rd3SdmaFailRun = 0;
+static bool rd3SdmaCopyOff = false;
+
+static bool rd3AccelCopyBySdma(RD3VidMemory *vm, IOService *fb, unsigned head, const struct RD3KVramRequest *q,
+                               unsigned pitch, unsigned rowb, unsigned rows)
+{
+    struct RD3KCopyRequest c;
+    for (unsigned i = 0; i < sizeof c; i++) ((volatile unsigned char *)&c)[i] = 0;
+    c.version = RD3K_COPY_ABI_VERSION;
+    c.srcCookie = vm->fAllocationCookie;
+    c.dstCookie = q->allocationCookie;
+    c.srcPitch = pitch;
+    c.dstPitch = q->pitch;
+    c.rowBytes = rowb;
+    c.rows = rows;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_COPY_FN);
+    if (!sym) return false;
+    IOReturn ret = fb->callPlatformFunction(sym, false, &c, nullptr, nullptr, nullptr);
+    sym->release();
+    if (ret != kIOReturnSuccess) {
+        rd3SdmaFailRun++;
+        ALOG("swap copy by SDMA refused (0x%x, status %d) head %u: %u rows x %u bytes 0x%llx -> 0x%llx%s", (unsigned)ret,
+             c.status, head, rows, rowb, c.srcCookie, c.dstCookie,
+             rd3SdmaFailRun >= 3 ? " -- three in a row: the CPU copies from now on" : "");
+        if (rd3SdmaFailRun >= 3) rd3SdmaCopyOff = true;
+        return false;
+    }
+    rd3SdmaFailRun = 0;
+    rd3SdmaCopies++;
+    if (rd3SdmaCopies <= 3 || rd3SdmaCopies % 600 == 0)
+        ALOG("swap copy by SDMA (head %u) #%u: %u rows x %u bytes, 0x%llx pitch %u -> 0x%llx pitch %u in %llu us",
+             head, rd3SdmaCopies, rows, rowb, c.srcCookie, pitch, c.dstCookie, q->pitch, c.usec);
+    return true;
+}
+
 static bool rd3AccelCopyToScanout(IOAccelResource2 *res, IOService *fb, unsigned head)
 {
-    if (rd3ScanoutCopies >= RD3SCANOUT_COPY_MAX) return false;
+    const bool bySdma = gBootSdmaCopy && !rd3SdmaCopyOff;
+    if (!bySdma && rd3ScanoutCopies >= RD3SCANOUT_COPY_MAX) return false;
     if (!res) return false;
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     if (!a || !fb) { RD3FLIPWHY("copyToScanout: no accelerator/framebuffer for head %u", head); return false; }
@@ -1911,6 +1953,9 @@ static bool rd3AccelCopyToScanout(IOAccelResource2 *res, IOService *fb, unsigned
 
     const unsigned rows = (h < q.height) ? h : q.height;
     const unsigned rowb = ((pitch < q.pitch) ? pitch : q.pitch) & ~3u;
+    if (bySdma && rows && rowb && rd3AccelCopyBySdma(vm, fb, head, &q, pitch, rowb, rows))
+        return true;
+    if (rd3ScanoutCopies >= RD3SCANOUT_COPY_MAX) return false;
     const unsigned words = rowb / 4;
     const unsigned spr = pitch / 4, dpr = q.pitch / 4;
     const volatile unsigned int *s = (const volatile unsigned int *)vm->fKva;

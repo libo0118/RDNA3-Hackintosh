@@ -327,6 +327,18 @@ def report(path, show_all):
             for l in lines[wake_at:]:
                 if "hotplug: HPD" in l and " disconnected on " in l:
                     print("   WARN hotplug after the wake: " + l[l.find("hotplug:"):][:120])
+    # swap copies onto a scanout by SDMA (rdna3accelsdma=1, A2)
+    if "rdna3accelsdma=1" in args:
+        done = "swap copy by SDMA (head" in log
+        refused = log.count("swap copy by SDMA refused")
+        if refused:
+            print("   FAIL swap copy by SDMA  %d refused (the copy: lines of the core, the CPU took over after "
+                  "three in a row)" % refused)
+            failed = True
+        elif done:
+            print("   PASS swap copy by SDMA  the composited frames reach the scanout through SDMA")
+        else:
+            print("   INFO swap copy by SDMA  no copy was needed (every swap was a zero-copy flip)")
     if props.get("KernelQueuesByMESFallback", 0):
         print("   WARN kernel queues      the MES scheduler refused the legacy map; the KIQ mapped them "
               "(the MES: lines)")

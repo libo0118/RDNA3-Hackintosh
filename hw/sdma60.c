@@ -438,6 +438,76 @@ int sdma60_fill_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t dst, uint32_t va
     return sdma60_wait_fence_us(d, r, seq, usec);
 }
 
+/* amdgpu_copy_buffer for a pitched rectangle: each row (or, when both
+ * pitches are the same, the whole span at once) in COPY_LINEAR packets of
+ * at most sdma_v6_0_buffer_funcs' copy_max_bytes (0x400000), as many rows
+ * as the ring holds per batch, one fence per batch. The HDP is flushed
+ * first (amdgpu_ib_schedule's emit_hdp_flush): the source may have just
+ * been written by the CPU through the BAR. */
+int sdma60_copy_rect_sync(rdna3_dev *d, rdna3_sdma_ring *r, uint64_t src, uint32_t src_pitch, uint64_t dst,
+                          uint32_t dst_pitch, uint32_t row_bytes, uint32_t rows)
+{
+    const uint32_t max = 0x400000;
+    uint32_t seq = 0, i, y = 0, batch, usec;
+    int ret;
+    if (!r->ready || !row_bytes || !rows || row_bytes > src_pitch || row_bytes > dst_pitch)
+        return RDNA3_EINVAL;
+    /* one span: rows - 1 pitches and the last row */
+    if (src_pitch == dst_pitch) {
+        uint64_t len = (uint64_t)(rows - 1) * src_pitch + row_bytes;
+        usec = d->usec_timeout + (uint32_t)(len >> 10);
+        batch = (uint32_t)((len + max - 1) / max);
+        for (i = 0; i < d->usec_timeout && ring_space(d, r) < 7 * batch + 16; i++)
+            d->os.udelay(d->os.ctx, 1);
+        if (ring_space(d, r) < 7 * batch + 16)
+            return RDNA3_EBUSY;
+        sdma60_emit_hdp_flush(d, r);
+        while (len) {
+            uint32_t n = (uint32_t)(len < max ? len : max);
+            sdma60_emit_copy(d, r, src, dst, n);
+            src += n;
+            dst += n;
+            len -= n;
+        }
+        seq = sdma60_emit_fence(d, r);
+        sdma60_commit(d, r);
+        return sdma60_wait_fence_us(d, r, seq, usec);
+    }
+    /* row by row: a row of up to 4 MiB packets each */
+    while (y < rows) {
+        uint32_t per_row = (row_bytes + max - 1) / max, space;
+        for (i = 0; i < d->usec_timeout && ring_space(d, r) < 7 * per_row + 16; i++)
+            d->os.udelay(d->os.ctx, 1);
+        space = ring_space(d, r);
+        if (space < 7 * per_row + 16)
+            return RDNA3_EBUSY;
+        batch = (space - 16) / (7 * per_row);
+        if (batch > rows - y)
+            batch = rows - y;
+        if (y == 0)
+            sdma60_emit_hdp_flush(d, r);
+        for (i = 0; i < batch; i++, y++) {
+            uint64_t s = src + (uint64_t)y * src_pitch, t = dst + (uint64_t)y * dst_pitch;
+            uint32_t left = row_bytes;
+            while (left) {
+                uint32_t n = left < max ? left : max;
+                sdma60_emit_copy(d, r, s, t, n);
+                s += n;
+                t += n;
+                left -= n;
+            }
+        }
+        seq = sdma60_emit_fence(d, r);
+        sdma60_commit(d, r);
+        /* the wait grows with the bytes of the batch (1 KiB per microsecond) */
+        usec = d->usec_timeout + (uint32_t)(((uint64_t)batch * row_bytes) >> 10);
+        ret = sdma60_wait_fence_us(d, r, seq, usec);
+        if (ret)
+            return ret;
+    }
+    return RDNA3_OK;
+}
+
 /* --------------------------- user queues --------------------------- */
 
 /* struct v11_sdma_mqd dword offsets (v11_structs.h) */

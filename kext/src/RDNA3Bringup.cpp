@@ -3115,6 +3115,18 @@ int RDNA3Bringup::copyVramToPages(uint64_t vramOff, const uint64_t *pages, uint6
                                     fGmc->gart_size - (uint64_t)winPages * 4096, winPages);
 }
 
+int RDNA3Bringup::copyVramRect(uint64_t srcOff, uint32_t srcPitch, uint64_t dstOff, uint32_t dstPitch,
+                               uint32_t rowBytes, uint32_t rows)
+{
+    if (!fSdma || !fSdma->ready)
+        return RDNA3_ENODEV;
+    if (!rows || !rowBytes || srcOff + (uint64_t)(rows - 1) * srcPitch + rowBytes > fDev->vram_size ||
+        dstOff + (uint64_t)(rows - 1) * dstPitch + rowBytes > fDev->vram_size)
+        return RDNA3_EINVAL;
+    return sdma60_copy_rect_sync(fDev, fSdma, rdna3_vram_mc(fDev, srcOff), srcPitch, rdna3_vram_mc(fDev, dstOff),
+                                 dstPitch, rowBytes, rows);
+}
+
 int RDNA3Bringup::copyPagesToVram(uint64_t vramOff, const uint64_t *pages, uint64_t npages, uint64_t len)
 {
     const uint32_t winPages = 4096;   /* copyVramToPages' window */

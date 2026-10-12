@@ -1475,7 +1475,8 @@ IOReturn RDNA3Framebuffer::callPlatformFunction(const OSSymbol *fn, bool wait, v
     }
     /* VRAM, handles, CRC: the core kext answers */
     if (fCore && (fn->isEqualTo(RD3K_FN_DISPLAY_CRC) || fn->isEqualTo(RD3K_VRAM_FN_ALLOC) ||
-                  fn->isEqualTo(RD3K_VRAM_FN_FREE) || fn->isEqualTo(RD3K_GPUVA_FN_HANDLES))) {
+                  fn->isEqualTo(RD3K_VRAM_FN_FREE) || fn->isEqualTo(RD3K_GPUVA_FN_HANDLES) ||
+                  fn->isEqualTo(RD3K_COPY_FN))) {
         if (fn->isEqualTo(RD3K_FN_DISPLAY_CRC))
             p1 = (void *)(uintptr_t)fHead;
         return fCore->callPlatformFunction(fn, wait, p1, p2, p3, p4);

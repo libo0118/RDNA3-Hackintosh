@@ -161,6 +161,8 @@ standby (link off), display restore after a mode-1 GPU reset.
 
 | DSC over MST: the DM fairness, the DSC aux of the port, DSC enable through REMOTE_DPCD_WRITE, the Synaptics hub workarounds, a DSC stream update without a mode set (`link_update_dsc_config`, `link_increase/reduce_mst_payload`); `amdgpu_ring_max_ibs` in AMDGPU_INFO_MAX_IBS | (this batch) | `rdna3mst=1 rdna3dsc=1`; without `rdna3dsc` MST plans as before. The last 28 amdgpu functions: the port is at 100 % |
 
+| A2: swap copies onto a scanout by SDMA (`rdna3CopyVram`: HDP flush, COPY_LINEAR per row, one fence) instead of the CPU through the BAR, no 120-frame cap | (A2 batch) | `rdna3accelsdma=1`, step `accelsdma` and `big4`; three refusals in a row hand the swaps back to the CPU |
+
 DSC over MST needs an MST hub with a DSC monitor behind it on the card: a
 bench with one runs step `mst` with `rdna3dsc=1` and a mode beyond the
 port's bandwidth (4K60 on an HBR2 x2 port).

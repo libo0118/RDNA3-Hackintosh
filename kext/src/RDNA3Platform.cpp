@@ -14,6 +14,9 @@
  *                                    into a list of system pages (IOSurface
  *                                    page-off): SDMA0 through a GART window
  *                                    from rdna3lvl=7, else the CPU via BAR
+ *   rdna3CopyVram                    a pitched rectangle between two
+ *                                    VRAM allocations by SDMA0 (the
+ *                                    accelerator's swap copy, A2)
  *   rdna3SurfShare                   not offered (no RM-style cross-client
  *                                    handles on AMD; RADV shares by GEM)
  *   rdna3NewAccelClient              not offered: RADV opens RDNA3Accel
@@ -279,6 +282,30 @@ IOReturn RDNA3Accel::platformPageoff(RD3KSurfPageoff *q)
     return kIOReturnSuccess;
 }
 
+IOReturn RDNA3Accel::platformCopyVram(RD3KCopyRequest *q)
+{
+    if (!q || q->version != RD3K_COPY_ABI_VERSION)
+        return kIOReturnBadArgument;
+    if (!fBringup || !fDrmLock) {
+        q->status = RDNA3_ENODEV;
+        return kIOReturnNotReady;
+    }
+    uint64_t t0 = mach_absolute_time(), ns = 0;
+    /* the source was written through the write-combined BAR mapping:
+     * drained before the engine reads it (the HDP flush is the ring's) */
+    __asm__ volatile("mfence" ::: "memory");
+    IOLockLock(fDrmLock);
+    int r = fBringup->copyVramRect(q->srcCookie, q->srcPitch, q->dstCookie, q->dstPitch, q->rowBytes, q->rows);
+    IOLockUnlock(fDrmLock);
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    q->usec = ns / 1000;
+    q->status = r;
+    if (r != RDNA3_OK && fCopyVramFails++ < 8)
+        LOG("copy: %ux%u bytes 0x%llx (pitch %u) -> 0x%llx (pitch %u) by SDMA failed (%d)", q->rowBytes, q->rows,
+            q->srcCookie, q->srcPitch, q->dstCookie, q->dstPitch, r);
+    return r == RDNA3_OK ? kIOReturnSuccess : kIOReturnIOError;
+}
+
 IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
                                           void *p3, void *p4)
 {
@@ -331,6 +358,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return kIOReturnUnsupported;
         if (fn->isEqualTo(RD3K_SS_FN_PAGEOFF))
             return platformPageoff((RD3KSurfPageoff *)p1);
+        if (fn->isEqualTo(RD3K_COPY_FN))
+            return platformCopyVram((RD3KCopyRequest *)p1);
     }
     return IOService::callPlatformFunction(fn, wait, p1, p2, p3, p4);
 }

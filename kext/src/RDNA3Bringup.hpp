@@ -88,6 +88,9 @@ public:
      * under the DRM lock, which also serializes the DMA ring's submits).
      * RDNA3_ENODEV until GMC and SDMA are up (rdna3lvl>=7). */
     int   copyVramToPages(uint64_t vramOff, const uint64_t *pages, uint64_t npages, uint64_t len);
+    /* a pitched rectangle VRAM -> VRAM by SDMA0 (sdma60_copy_rect_sync) */
+    int   copyVramRect(uint64_t srcOff, uint32_t srcPitch, uint64_t dstOff, uint32_t dstPitch, uint32_t rowBytes,
+                       uint32_t rows);
     int   copyPagesToVram(uint64_t vramOff, const uint64_t *pages, uint64_t npages, uint64_t len);
     int   clearVram(uint64_t vramOff, uint64_t len);   /* SDMA CONST_FILL, 0 */
 

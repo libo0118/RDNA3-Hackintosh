@@ -10694,6 +10694,36 @@ static void run(const char *fwdir)
                 memcpy(&wpte, S.vram + gmc.gart_table + (win / 4096) * 8, 8);
                 CHECK(wpte == 0 && S.sdma_bad == 0);
             }
+            /* a pitched rectangle VRAM -> VRAM (the accelerator's swap copy
+             * onto a scanout of another pitch): 40 rows of 3000 bytes from
+             * pitch 3072 to pitch 4096, the row tails and the rows below
+             * untouched; then the same pitch as one span */
+            {
+                uint64_t rs = rdna3_vram_alloc(&dev, 64 * 4096, 4096, "rect-src");
+                uint64_t rd = rdna3_vram_alloc(&dev, 64 * 4096, 4096, "rect-dst");
+                static uint8_t rsrc[64 * 4096], rdst[64 * 4096];
+                uint32_t y, ok = 1, seqs = sd.fence_seq;
+                for (j = 0; j < sizeof(rsrc); j++)
+                    rsrc[j] = (uint8_t)(j * 7 + 3);
+                rdna3_vram_write(&dev, rs, rsrc, sizeof(rsrc));
+                rdna3_vram_fill(&dev, rd, 0xEE, sizeof(rdst));
+                CHECK(sdma60_copy_rect_sync(&dev, &sd, rdna3_vram_mc(&dev, rs), 3072, rdna3_vram_mc(&dev, rd), 4096,
+                                            3000, 40) == RDNA3_OK);
+                rdna3_vram_read(&dev, rd, rdst, sizeof(rdst));
+                for (y = 0; y < 40; y++)
+                    ok &= !memcmp(rdst + y * 4096, rsrc + y * 3072, 3000) && rdst[y * 4096 + 3000] == 0xEE &&
+                          rdst[y * 4096 + 4095] == 0xEE;
+                CHECK(ok && rdst[40 * 4096] == 0xEE && S.sdma_bad == 0 && sd.fence_seq == seqs + 1);
+                /* the same pitch: one span of 39 pitches and a row */
+                rdna3_vram_fill(&dev, rd, 0xEE, sizeof(rdst));
+                CHECK(sdma60_copy_rect_sync(&dev, &sd, rdna3_vram_mc(&dev, rs), 4096, rdna3_vram_mc(&dev, rd), 4096,
+                                            4000, 40) == RDNA3_OK);
+                rdna3_vram_read(&dev, rd, rdst, sizeof(rdst));
+                CHECK(!memcmp(rdst, rsrc, 39 * 4096 + 4000) && rdst[39 * 4096 + 4000] == 0xEE && S.sdma_bad == 0);
+                /* a row wider than a pitch is refused */
+                CHECK(sdma60_copy_rect_sync(&dev, &sd, rdna3_vram_mc(&dev, rs), 2048, rdna3_vram_mc(&dev, rd), 4096,
+                                            3000, 4) == RDNA3_EINVAL);
+            }
             sdma60_stop(&dev, &sd);
             CHECK(!sd.ready && (S.reg[0xA000 + regSDMA0_F32_CNTL] & SDMA0_F32_CNTL__HALT_MASK));
         }

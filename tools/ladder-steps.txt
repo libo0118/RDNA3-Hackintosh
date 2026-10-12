@@ -57,6 +57,8 @@ baco rdna3lvl=8 rdna3msi=1 rdna3pm=2 rdna3pmctl=1 rdna3baco=1
 # both monitors, the accelerator with its gates open (desktop composited
 # through it on both heads)
 big rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2
+# A2: big with the swap copies onto a scanout by SDMA in the core kext
+accelsdma rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3accelsdma=1
 # round 18: big + the idle-power experiment (60 s) then the idle GFXCLK
 # cap, display sleep/wake, scaled modes switched by the report, a 2 min
 # soak, the hang test last (DMA only since card run 19)
@@ -213,4 +215,6 @@ big3 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=
 # rdna3hotplug=1 rides along without anyone at the cables: the HPD looks
 # pause for the system sleep and come back with link_resume, so a monitor
 # that reads unplugged right after the wake is a bug the report shows.
-big4 rdna3hotplug=1 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3hdmi=1 rdna3fmt=1 rdna3audio=1 rdna3otg=1 rdna3cursormall=1 rdna3mall=1 rdna3gamma=1 rdna3dmubreset=1 rdna3dcseq=1 rdna3dpms=2 rdna3resume=1 rdna3baco=1
+# rdna3accelsdma=1 (A2): a swap the zero-copy flip cannot take is copied onto
+# the scanout by SDMA in the core kext, not by the CPU through the BAR.
+big4 rdna3accelsdma=1 rdna3hotplug=1 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3hdmi=1 rdna3fmt=1 rdna3audio=1 rdna3otg=1 rdna3cursormall=1 rdna3mall=1 rdna3gamma=1 rdna3dmubreset=1 rdna3dcseq=1 rdna3dpms=2 rdna3resume=1 rdna3baco=1

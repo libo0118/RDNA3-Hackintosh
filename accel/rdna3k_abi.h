@@ -242,6 +242,22 @@ struct RD3KDisplayGamma {
     int            result;        /* 0 or a negative RDNA3_E* code */
 };
 
+/* ---- copies (answered by the core kext, forwarded by the framebuffer):
+ *      a pitched rectangle between two VRAM allocations by SDMA, the
+ *      accelerator's swap copy onto a scanout (A2) ---- */
+#define RD3K_COPY_ABI_VERSION 1u
+#define RD3K_COPY_FN          "rdna3CopyVram"
+struct RD3KCopyRequest {
+    unsigned int       version;
+    unsigned int       flags;
+    unsigned long long srcCookie, dstCookie;   /* allocationCookie: VRAM offsets */
+    unsigned int       srcPitch, dstPitch;     /* bytes */
+    unsigned int       rowBytes, rows;
+    int                status;                 /* out: 0 or a negative RDNA3_E* code */
+    unsigned int       pad;
+    unsigned long long usec;                   /* out: the copy's time */
+};
+
 /* user clients: newUserClient types 'RD'xxxx go to the core kext */
 #define RD3K_UC_TYPE_BASE     0x52440000u
 #define RD3K_FN_NEW_CLIENT    "rdna3NewAccelClient"
