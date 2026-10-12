@@ -228,6 +228,22 @@ from the firmware (`dcn_3_2_0_dmcub.bin`).
 | 5c: attached, `mailbox silent` | the GOP firmware does not answer QUERY_FEATURE_CAPS | may still run VBIOS commands: try 9b3 |
 | screen black, log fine | expected risk | record; keep `rdna3dmub` off until modeset work (§4) |
 
+### Probes of `big4` (`rdna3probe=1 rdna3pmexp=1`): the card-only plan items
+
+These steps do not pass or fail the round: they are what the next round of
+each plan item (docs/DRIVER-PLAN.md) starts from. Triage prints one line per
+item in the SUMMARY; the full output is in the tests file under `== probe:`.
+
+| Line | Plan item | What it tells | Next |
+|---|---|---|---|
+| `P2 variant 0..5` (from `PM experiment` + `PM: RLC_STAT` in the kernel log) | P2 idle power | activity and watts per variant with the kernel queues on the MES (`rdna3amdgpu=1 rdna3mes=1`), and whether the RLC gated the GFX clock after each (`GPM_STAT` clk 0 / ls 1) | activity below 100 % with MES: make MES-mapped queues the default; still 100 % with GPM_STAT clk 0: the busy signal is not the clock - compare `RLC_PG_CNTL` / `CGCG_CGLS` with the Linux dump (`tools/linux/card_dump.sh --regs`) |
+| `R3 platform`, `R4 macOS` | R3 bare metal, R4 macOS 26 | VM or bare metal, the macOS / Darwin version, the card's state at load (`NeedPost`, `PostResult`, `PSPStuckAtInit`), whether the accelerator runs on this Darwin | bare metal only from a bare-metal boot (`package/oc_install.sh --step big4`); R4 only from a VM with macOS 26 and the NM_TAHOE build |
+| `V3 Vulkan WSI` | V3 present | the WSI extensions RADV offers; with a headless surface, a swapchain cleared and presented | `no present path`: RADV is built without WSI (`-Dplatforms=`): the next step is Mesa's WSI common with a headless or Metal-layer platform |
+| `A3 IOSurface` | A3 IOSurface <-> BO | an IOSurface as a Metal texture: CPU -> GPU and GPU -> CPU pixel counts | `newTextureWithDescriptor:iosurface: returned nil`: the plugin has no IOSurface textures (its log after the probe); counts wrong: the surface's backing is not the memory the GPU used |
+| `M4 CAMetalLayer`, `M4 on the screen` | M4 present | drawables, rendering, presents; magenta pixels in the scanout picture taken while the window showed | drawables NONE: the layer refused the plugin's device; presented 0 or no magenta on the screen: the drawable never reaches WindowServer's composition |
+| `M5 WindowServer` | M5 | which processes loaded the plugin, whether WindowServer did, system_profiler's Metal line, WindowServer's GPU messages | WindowServer does not load it (not on the allow list): an M5 step with WindowServer allowed is the next experiment |
+| `M6 apps`, `M6 Chess` / `Maps` | M6 apps | running, plugin loaded, crash report | a crash report: its first 40 lines in the tests file name the Metal call that failed |
+
 ### Step 8c (`rdna3mes=1`): MES scheduler pipe
 
 | Symptom | Likely cause | Action |

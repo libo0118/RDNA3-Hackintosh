@@ -221,4 +221,10 @@ big3 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=
 # that reads unplugged right after the wake is a bug the report shows.
 # rdna3accelsdma=1 (A2): a swap the zero-copy flip cannot take is copied onto
 # the scanout by SDMA in the core kext, not by the CPU through the BAR.
-big4 rdna3accelsdma=1 rdna3hotplug=1 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3hdmi=1 rdna3fmt=1 rdna3audio=1 rdna3otg=1 rdna3cursormall=1 rdna3mall=1 rdna3gamma=1 rdna3dmubreset=1 rdna3dcseq=1 rdna3dpms=2 rdna3resume=1 rdna3baco=1
+# rdna3probe=1 + rdna3pmexp=1: data for the plan items only the card can
+# answer - P2 (the PM experiment's variants with the RLC state after each,
+# now with the kernel queues on the MES), R3 / R4 (the platform), V3
+# (RADV's WSI), A3 (an IOSurface as a Metal texture), M4 (a CAMetalLayer
+# window and a picture of it), M5 (who loaded the plugin, WindowServer's
+# view), M6 (Chess and Maps on the plugin)
+big4 rdna3probe=1 rdna3pmexp=1 rdna3accelsdma=1 rdna3hotplug=1 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3hdmi=1 rdna3fmt=1 rdna3audio=1 rdna3otg=1 rdna3cursormall=1 rdna3mall=1 rdna3gamma=1 rdna3dmubreset=1 rdna3dcseq=1 rdna3dpms=2 rdna3resume=1 rdna3baco=1

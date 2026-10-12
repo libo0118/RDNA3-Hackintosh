@@ -86,7 +86,7 @@ $(BUILD)/rdna3_vktest: rdna3_vktest.c $(VULKAN_HEADERS)/vulkan/vulkan_core.h
 	$(CC) -O1 -g $(ARCH) -std=gnu11 $(WARN) -I$(VULKAN_HEADERS) -o $@ $<
 
 $(BUILD)/mtlprobe: mtlprobe.m | $(BUILD)/obj
-	$(CC) -O1 -g $(ARCH) -fobjc-arc $(WARN) -o $@ $< -framework Metal -framework Foundation
+	$(CC) -O1 -g $(ARCH) -fobjc-arc $(WARN) -o $@ $< -framework Metal -framework Foundation -framework IOSurface -framework QuartzCore -framework AppKit
 
 install: $(BUILD)/libdrm.dylib $(BUILD)/libdrm_amdgpu.dylib
 	mkdir -p $(PREFIX)/lib/pkgconfig $(PREFIX)/include/libdrm

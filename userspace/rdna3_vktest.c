@@ -12,6 +12,11 @@
  * packets.
  *
  *   rdna3_vktest [--loopback] [path/to/libvulkan_radeon.{dylib,so}]
+ *   rdna3_vktest --wsi [path]   window-system integration only (V3): the
+ *                               WSI extensions the ICD offers, and with
+ *                               VK_EXT_headless_surface a swapchain whose
+ *                               image is cleared and presented; last line
+ *                               "WSI: ..."
  *
  * Then on the general queue: a triangle drawn into a 64x64 image through a
  * render pass (graphics pipeline from the SPIR-V below), buffer -> image ->
@@ -888,12 +893,149 @@ static int mutable_layout_test(struct ctx *c)
     return 0;
 }
 
+/* ---- V3: what RADV offers for presenting (no window system here: a
+ * headless surface when it has one, the names of the others) ---- */
+static int has_ext(const VkExtensionProperties *ep, uint32_t n, const char *name)
+{
+    for (uint32_t i = 0; i < n; i++)
+        if (!strcmp(ep[i].extensionName, name))
+            return 1;
+    return 0;
+}
+
+static int wsi_test(void)
+{
+    static const char *const inst_wsi[] = { "VK_KHR_surface", "VK_EXT_headless_surface", "VK_EXT_metal_surface",
+                                            "VK_MVK_macos_surface", "VK_KHR_display", "VK_EXT_direct_mode_display",
+                                            "VK_KHR_get_surface_capabilities2" };
+    IFN(NULL, vkEnumerateInstanceExtensionProperties);
+    IFN(NULL, vkCreateInstance);
+    uint32_t n = 0, i;
+    VkExtensionProperties ie[256];
+    if (!vkEnumerateInstanceExtensionProperties) {
+        printf("WSI: FAILED no vkEnumerateInstanceExtensionProperties\n");
+        return 2;
+    }
+    vkEnumerateInstanceExtensionProperties(NULL, &n, NULL);
+    if (n > 256) n = 256;
+    vkEnumerateInstanceExtensionProperties(NULL, &n, ie);
+    printf("instance extensions (%u):", n);
+    for (i = 0; i < n; i++)
+        printf(" %s", ie[i].extensionName);
+    printf("\n");
+    for (i = 0; i < sizeof(inst_wsi) / sizeof(inst_wsi[0]); i++)
+        printf("  %-34s %s\n", inst_wsi[i], has_ext(ie, n, inst_wsi[i]) ? "yes" : "no");
+    int headless = has_ext(ie, n, "VK_EXT_headless_surface") && has_ext(ie, n, "VK_KHR_surface");
+    int metal = has_ext(ie, n, "VK_EXT_metal_surface");
+    const char *want[2] = { "VK_KHR_surface", "VK_EXT_headless_surface" };
+    VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "rdna3_vktest wsi",
+                              .apiVersion = VK_API_VERSION_1_3 };
+    VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
+                                 .enabledExtensionCount = headless ? 2 : 0, .ppEnabledExtensionNames = want };
+    struct ctx c = { 0 };
+    CHECK(vkCreateInstance(&ici, NULL, &c.inst));
+    IFN(c.inst, vkEnumeratePhysicalDevices);
+    IFN(c.inst, vkEnumerateDeviceExtensionProperties);
+    IFN(c.inst, vkCreateDevice);
+    gdpa = (PFN_vkGetDeviceProcAddr)gipa(c.inst, "vkGetDeviceProcAddr");
+    n = 1;
+    if (vkEnumeratePhysicalDevices(c.inst, &n, &c.pd) != VK_SUCCESS || !n) {
+        printf("WSI: FAILED no physical device\n");
+        return 2;
+    }
+    VkExtensionProperties de[512];
+    uint32_t nd = 0;
+    vkEnumerateDeviceExtensionProperties(c.pd, NULL, &nd, NULL);
+    if (nd > 512) nd = 512;
+    vkEnumerateDeviceExtensionProperties(c.pd, NULL, &nd, de);
+    int swapchain = has_ext(de, nd, "VK_KHR_swapchain");
+    printf("  %-34s %s\n  %-34s %s\n", "VK_KHR_swapchain (device)", swapchain ? "yes" : "no",
+           "VK_EXT_swapchain_maintenance1", has_ext(de, nd, "VK_EXT_swapchain_maintenance1") ? "yes" : "no");
+    if (!headless || !swapchain) {
+        printf("WSI: no present path to try: headless surface %s, swapchain %s, Metal surface %s\n",
+               headless ? "yes" : "no", swapchain ? "yes" : "no", metal ? "yes" : "no");
+        return 1;
+    }
+    /* a headless surface, a swapchain of 2, one image cleared and presented */
+    PFN_vkCreateHeadlessSurfaceEXT vkCreateHeadlessSurfaceEXT =
+        (PFN_vkCreateHeadlessSurfaceEXT)gipa(c.inst, "vkCreateHeadlessSurfaceEXT");
+    IFN(c.inst, vkGetPhysicalDeviceSurfaceSupportKHR);
+    IFN(c.inst, vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
+    IFN(c.inst, vkGetPhysicalDeviceSurfaceFormatsKHR);
+    VkHeadlessSurfaceCreateInfoEXT hci = { .sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT };
+    VkSurfaceKHR surf;
+    CHECK(vkCreateHeadlessSurfaceEXT(c.inst, &hci, NULL, &surf));
+    VkBool32 sup = VK_FALSE;
+    vkGetPhysicalDeviceSurfaceSupportKHR(c.pd, 0, surf, &sup);
+    VkSurfaceCapabilitiesKHR caps;
+    CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c.pd, surf, &caps));
+    VkSurfaceFormatKHR fm[32];
+    uint32_t nf = 32;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(c.pd, surf, &nf, fm);
+    printf("headless surface: queue family 0 %s, images %u..%u, %u format(s), first %d\n",
+           sup ? "can present" : "CANNOT present", caps.minImageCount, caps.maxImageCount, nf, nf ? (int)fm[0].format : -1);
+    if (!sup || !nf) {
+        printf("WSI: FAILED the headless surface takes no presents from queue family 0\n");
+        return 1;
+    }
+    const char *dext = "VK_KHR_swapchain";
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0,
+                                    .queueCount = 1, .pQueuePriorities = &prio };
+    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1,
+                               .pQueueCreateInfos = &qci, .enabledExtensionCount = 1, .ppEnabledExtensionNames = &dext };
+    CHECK(vkCreateDevice(c.pd, &dci, NULL, &c.dev));
+    DFN(c.dev, vkCreateSwapchainKHR);
+    DFN(c.dev, vkGetSwapchainImagesKHR);
+    DFN(c.dev, vkAcquireNextImageKHR);
+    DFN(c.dev, vkQueuePresentKHR);
+    DFN(c.dev, vkCreateFence);
+    DFN(c.dev, vkWaitForFences);
+    DFN(c.dev, vkCmdClearColorImage);
+    VkExtent2D ext = caps.currentExtent.width == 0xffffffffu ? (VkExtent2D){ 256, 256 } : caps.currentExtent;
+    VkSwapchainCreateInfoKHR sci = { .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = surf,
+        .minImageCount = caps.minImageCount > 2 ? caps.minImageCount : 2, .imageFormat = fm[0].format,
+        .imageColorSpace = fm[0].colorSpace, .imageExtent = ext, .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE };
+    VkSwapchainKHR sc;
+    CHECK(vkCreateSwapchainKHR(c.dev, &sci, NULL, &sc));
+    VkImage imgs[8];
+    uint32_t ni = 8, idx = 0;
+    CHECK(vkGetSwapchainImagesKHR(c.dev, sc, &ni, imgs));
+    VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence acq;
+    CHECK(vkCreateFence(c.dev, &fi, NULL, &acq));
+    CHECK(vkAcquireNextImageKHR(c.dev, sc, 5000000000ull, VK_NULL_HANDLE, acq, &idx));
+    CHECK(vkWaitForFences(c.dev, 1, &acq, VK_TRUE, 5000000000ull));
+    struct rec r;
+    if (rec_begin(&c, &r, 0))
+        return 2;
+    VkClearColorValue magenta = { .float32 = { 1.0f, 0.0f, 1.0f, 1.0f } };
+    VkImageSubresourceRange rng = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    img_barrier(&c, r.cb, imgs[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    vkCmdClearColorImage(r.cb, imgs[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &magenta, 1, &rng);
+    img_barrier(&c, r.cb, imgs[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    if (rec_submit(&c, &r, NULL, VK_NULL_HANDLE))
+        return 1;
+    VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .swapchainCount = 1, .pSwapchains = &sc,
+                            .pImageIndices = &idx };
+    VkResult pr = vkQueuePresentKHR(r.q, &pi);
+    printf("WSI: headless swapchain of %u %ux%u images, image %u cleared and presented -> %d (%s); "
+           "Metal surface %s\n", ni, ext.width, ext.height, idx, pr, vkr(pr), metal ? "offered" : "NOT offered");
+    return pr == VK_SUCCESS ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     const char *lib = NULL;
-    int loopback = 0, failed = 0, tested = 0;
+    int loopback = 0, failed = 0, tested = 0, wsi = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--loopback")) loopback = 1;
+        else if (!strcmp(argv[i], "--wsi")) wsi = 1;
         else lib = argv[i];
     }
     if (!lib)
@@ -923,6 +1065,8 @@ int main(int argc, char **argv)
         return 2;
     }
     printf("ICD %s, loader interface %u\n", lib, icdv);
+    if (wsi)
+        return wsi_test();
 
     struct ctx c = { 0 };
     IFN(NULL, vkEnumerateInstanceVersion);

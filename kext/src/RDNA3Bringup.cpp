@@ -2152,6 +2152,11 @@ bool RDNA3Bringup::pmExperimentTick()
              "memclk post-DS %llu MHz, %llu W, PCIe busy %llu, UCLK activity %llu%%",
              fPmExpPhase, kName[fPmExpPhase], fPmExpSum[0] / n, fPmExpSum[1] / n, fPmExpSum[2] / n,
              fPmExpSum[3] / n, fPmExpSum[4] / n, fPmExpSum[5] / n, fPmExpSum[6] / n, fPmExpSum[7] / n);
+        /* P2: the RLC's view at the end of the variant (GPM_STAT power /
+         * clock / LS, PG and CGCG state, CP busy) next to the PMFW's
+         * activity; read after the samples, so the read wakes nothing
+         * the variant measured */
+        logBusy();
         fPmExpPhase++;
     }
     return true;

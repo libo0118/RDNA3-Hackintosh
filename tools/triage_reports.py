@@ -146,6 +146,25 @@ def ppm_to_png(path):
     return out
 
 
+def count_color(path, rgb, tol=40):
+    """pixels of a P6 PPM within 'tol' of colour 'rgb' (each channel); the
+    total; None when it is no picture"""
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return None
+    m = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\s", data)
+    if not m:
+        return None
+    w, h = int(m.group(1)), int(m.group(2))
+    px = data[m.end():m.end() + w * h * 3]
+    hit = 0
+    for i in range(0, len(px) - 2, 3):
+        if abs(px[i] - rgb[0]) <= tol and abs(px[i + 1] - rgb[1]) <= tol and abs(px[i + 2] - rgb[2]) <= tol:
+            hit += 1
+    return hit, w * h
+
+
 def report(path, show_all):
     failed = False
     with tarfile.open(path) as tar:
@@ -422,6 +441,34 @@ def summary(path, serial=None):
             out.append(("  failed case", c[:90]))
     elif "== Vulkan CTS: no deqp-vk bundle" in txt:
         out.append(("Vulkan CTS", "not run: no deqp-vk bundle in the VM (rdna3vm cts)"))
+    # the card-only plan items (rdna3probe=1, step big4)
+    for pat, name in ((r"^PLATFORM: (.*)$", "R3 platform"), (r"^R4: (.*)$", "R4 macOS"), (r"^WSI: (.*)$", "V3 Vulkan WSI"),
+                      (r"^A3: ((?:PASSED|FAILED).*)$", "A3 IOSurface"), (r"^M4: ((?:PASSED|FAILED).*)$", "M4 CAMetalLayer"),
+                      (r"^M5: (.*)$", "M5 WindowServer"), (r"^M6: (.*)$", "M6 apps")):
+        m = re.search(pat, txt, re.M)
+        if m:
+            out.append((name, m.group(1)[:110]))
+    for m in re.finditer(r"^M6 (\S+): (.*)$", txt, re.M):
+        out.append(("  " + m.group(1), m.group(2)[:100]))
+    if "== rdna3_drminfo --scanout (look m4)" in txt:
+        pics = sorted(glob.glob(path[:-len(".tar.gz")] + "-scanoutm4-pipe*.ppm"))
+        seen = []
+        for ppm in pics:
+            c = count_color(ppm, (255, 0, 255))
+            if c:
+                seen.append("%s %d of %d" % (os.path.basename(ppm).split("-")[-1][:-4], c[0], c[1]))
+        out.append(("M4 on the screen", "magenta pixels: " + (", ".join(seen) if seen else "no picture")))
+    # P2: the PM experiment's variants, the RLC state after each
+    lines = log.splitlines()
+    for i, l in enumerate(lines):
+        m = re.search(r"PM experiment (\d) \(([^)]*)\): activity (\d+)%.*?(\d+) W", l)
+        if not m:
+            continue
+        rlc = next((x for x in lines[i + 1:i + 4] if "PM: RLC_STAT" in x), "")
+        g = re.search(r"GPM_STAT (0x[0-9a-f]+) \(pwr (\d) clk (\d) ls (\d)\)", rlc)
+        out.append(("P2 variant %s" % m.group(1), "%s: activity %s%%, %s W%s" % (
+            m.group(2)[:28], m.group(3), m.group(4),
+            ", GPM_STAT %s (pwr %s clk %s ls %s)" % g.groups() if g else "")))
     for pat, name in ((r"^MODES: .*$", "scaled modes"), (r"^GAMMA: .*$", "gamma"), (r"^SOAK: .*$", "soak"),
                       (r"^HANG TEST: .*$", "hang test"), (r"^VCN TEST: .*$", "video (VCN)")):
         m = re.search(pat, txt, re.M)

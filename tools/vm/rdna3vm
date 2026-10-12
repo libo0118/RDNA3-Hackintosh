@@ -437,6 +437,8 @@ auto_limit() {
     # rdna3cts=1: the CTS subset's time limits (tools/cts/patterns.txt: 41
     # min at most) and the bundle's download
     case " $1 " in *" rdna3cts=1 "*) m=$((m + 45)) ;; esac
+    # rdna3probe=1: V3 / A3 / M4 (15 s window) / M5 / M6 (two apps, 20 s each)
+    case " $1 " in *" rdna3probe=1 "*) m=$((m + 4)) ;; esac
     echo "$m"
 }
 

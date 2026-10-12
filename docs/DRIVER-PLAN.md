@@ -167,6 +167,8 @@ standby (link off), display restore after a mode-1 GPU reset.
 
 | V2: Vulkan CTS subset in the report (`tools/cts/patterns.txt`, ~2360 cases), `deqp-vk` + the Khronos loader built by build.yml with `cts` on the macOS runner | (V2 batch) | step `cts` after `rdna3vm cts` |
 
+| `big4` also collects data for the card-only items (`rdna3probe=1 rdna3pmexp=1`): P2 variants with the RLC state, R3 / R4 platform, V3 WSI (`rdna3_vktest --wsi`), A3 IOSurface textures and M4 CAMetalLayer (`mtlprobe --iosurface` / `--layer`), M5 WindowServer and the plugin, M6 Chess and Maps | (probes batch) | how to read them: docs/AFTER-TESTS.md, "Probes of big4"; the host already shows V3's answer: RADV built with `-Dplatforms=` offers no surface or swapchain |
+
 DSC over MST needs an MST hub with a DSC monitor behind it on the card: a
 bench with one runs step `mst` with `rdna3dsc=1` and a mode beyond the
 port's bandwidth (4K60 on an HBR2 x2 port).

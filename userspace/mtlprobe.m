@@ -9,6 +9,16 @@
  *                       then a triangle rendered into a texture, blitted
  *                       into a buffer and checked
  *   mtlprobe --list     the device list only
+ *   mtlprobe --iosurface
+ *                       A3: an IOSurface as a Metal texture
+ *                       (newTextureWithDescriptor:iosurface:plane:): what
+ *                       the CPU wrote read by the GPU, what the GPU cleared
+ *                       read by the CPU; last line "A3: ..."
+ *   mtlprobe --layer [s]
+ *                       M4: a window with a CAMetalLayer on the AMD device,
+ *                       for s seconds (default 12) a magenta frame drawn,
+ *                       read back and presented each 100 ms (run in the
+ *                       user's GUI session); last line "M4: ..."
  *
  * The plugin hands out a device only to allow-listed processes; "mtlprobe"
  * is allowed by name (metal/plugin/NVMTLDevice.m). Its own log goes to
@@ -21,7 +31,11 @@
  */
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <IOSurface/IOSurface.h>
+#import <QuartzCore/CAMetalLayer.h>
+#import <AppKit/AppKit.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define N 4096u
@@ -228,10 +242,185 @@ static int render(id<MTLDevice> d)
     return 0;
 }
 
+/* run 'cb' and wait up to 10 s; 0 when it completed */
+static int run_wait(id<MTLCommandBuffer> cb)
+{
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
+        (void)c;
+        dispatch_semaphore_signal(done);
+    }];
+    [cb commit];
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)))
+        return -1;
+    return cb.status == MTLCommandBufferStatusCompleted ? 0 : 1;
+}
+
+/* ---- A3: an IOSurface shared between the CPU and the GPU ---- */
+#define SURF 256u
+static uint32_t surf_px(uint32_t x, uint32_t y)
+{
+    return 0xff000000u | (x << 16) | (y << 8) | ((x ^ y) & 0xffu);
+}
+
+static int iosurface_test(id<MTLDevice> d)
+{
+    NSDictionary *props = @{ (id)kIOSurfaceWidth: @(SURF), (id)kIOSurfaceHeight: @(SURF),
+                             (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfacePixelFormat: @((uint32_t)'BGRA') };
+    IOSurfaceRef s = IOSurfaceCreate((__bridge CFDictionaryRef)props);
+    if (!s) {
+        printf("A3: FAILED IOSurfaceCreate\n");
+        return 1;
+    }
+    size_t bpr = IOSurfaceGetBytesPerRow(s);
+    printf("A3: IOSurface %u, %ux%u BGRA, %zu bytes per row\n", IOSurfaceGetID(s), SURF, SURF, bpr);
+    IOSurfaceLock(s, 0, NULL);
+    uint8_t *base = IOSurfaceGetBaseAddress(s);
+    for (uint32_t y = 0; y < SURF; y++)
+        for (uint32_t x = 0; x < SURF; x++)
+            ((uint32_t *)(void *)(base + y * bpr))[x] = surf_px(x, y);
+    IOSurfaceUnlock(s, 0, NULL);
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                  width:SURF height:SURF mipmapped:NO];
+    td.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    td.storageMode = MTLStorageModeManaged;
+    id<MTLTexture> t = [d newTextureWithDescriptor:td iosurface:s plane:0];
+    if (!t) {
+        printf("A3: FAILED newTextureWithDescriptor:iosurface:plane: returned nil (the plugin has no IOSurface "
+               "textures)\n");
+        CFRelease(s);
+        return 1;
+    }
+    printf("A3: texture %s, iosurface %s\n", NSStringFromClass([(NSObject *)t class]).UTF8String,
+           t.iosurface ? "kept" : "LOST");
+    id<MTLCommandQueue> q = [d newCommandQueue];
+    id<MTLBuffer> out = [d newBufferWithLength:SURF * SURF * 4 options:MTLResourceStorageModeShared];
+    memset(out.contents, 0x5a, SURF * SURF * 4);
+    /* the GPU reads what the CPU wrote */
+    id<MTLCommandBuffer> cb = [q commandBuffer];
+    id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+    [be copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+             sourceSize:MTLSizeMake(SURF, SURF, 1) toBuffer:out destinationOffset:0
+      destinationBytesPerRow:SURF * 4 destinationBytesPerImage:SURF * SURF * 4];
+    [be endEncoding];
+    int r = run_wait(cb);
+    uint32_t good_in = 0, good_out = 0;
+    const uint32_t *o = out.contents;
+    for (uint32_t y = 0; r == 0 && y < SURF; y++)
+        for (uint32_t x = 0; x < SURF; x++)
+            good_in += o[y * SURF + x] == surf_px(x, y);
+    printf("A3: CPU -> GPU: %s, %u of %u pixels right%s\n", r ? (r < 0 ? "NOT completed in 10 s" : "FAILED") : "done",
+           good_in, SURF * SURF, r == 0 && good_in == 0 && o[0] == 0x5a5a5a5au ? " (the blit wrote nothing)" : "");
+    /* the CPU reads what the GPU cleared (green) */
+    cb = [q commandBuffer];
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = t;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 1, 0, 1);
+    id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:pass];
+    [re endEncoding];
+    be = [cb blitCommandEncoder];
+    [be synchronizeResource:t];
+    [be endEncoding];
+    int r2 = run_wait(cb);
+    IOSurfaceLock(s, kIOSurfaceLockReadOnly, NULL);
+    base = IOSurfaceGetBaseAddress(s);
+    for (uint32_t y = 0; r2 == 0 && y < SURF; y++)
+        for (uint32_t x = 0; x < SURF; x++)
+            good_out += ((const uint32_t *)(const void *)(base + y * bpr))[x] == 0xff00ff00u;
+    uint32_t first = ((const uint32_t *)(const void *)base)[0];
+    IOSurfaceUnlock(s, kIOSurfaceLockReadOnly, NULL);
+    printf("A3: GPU -> CPU: %s, %u of %u pixels green, pixel 0 = 0x%08x\n",
+           r2 ? (r2 < 0 ? "NOT completed in 10 s" : "FAILED") : "done", good_out, SURF * SURF, first);
+    CFRelease(s);
+    int ok = good_in == SURF * SURF && good_out == SURF * SURF;
+    printf("A3: %s IOSurface texture, CPU -> GPU %u/%u, GPU -> CPU %u/%u\n", ok ? "PASSED" : "FAILED", good_in,
+           SURF * SURF, good_out, SURF * SURF);
+    return ok ? 0 : 1;
+}
+
+/* ---- M4: a CAMetalLayer on the screen ---- */
+static int layer_test(id<MTLDevice> d, double seconds)
+{
+    [NSApplication sharedApplication];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 480)
+                                              styleMask:NSWindowStyleMaskTitled
+                                                backing:NSBackingStoreBuffered
+                                                  defer:NO];
+    w.title = @"rdna3 M4 probe";
+    [w center];
+    CAMetalLayer *l = [CAMetalLayer layer];
+    l.device = d;
+    l.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    l.framebufferOnly = NO;
+    l.drawableSize = CGSizeMake(640, 480);
+    w.contentView.wantsLayer = YES;
+    w.contentView.layer = l;
+    [w makeKeyAndOrderFront:nil];
+    [NSApp activate];   /* macOS 14+: the build targets 15 */
+    printf("M4: window %ld on \"%s\" at %.0f,%.0f, layer device %s\n", (long)w.windowNumber,
+           w.screen ? w.screen.localizedName.UTF8String : "(no screen)", w.frame.origin.x, w.frame.origin.y,
+           l.device ? l.device.name.UTF8String : "(none: the layer refused the device)");
+    fflush(stdout);
+    id<MTLCommandQueue> q = [d newCommandQueue];
+    id<MTLBuffer> px = [d newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    __block int presented = 0;
+    int frames = 0, nodrawable = 0, completed = 0, magenta = 0;
+    NSDate *end = [NSDate dateWithTimeIntervalSinceNow:seconds];
+    while ([end timeIntervalSinceNow] > 0) {
+        @autoreleasepool {
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+            frames++;
+            id<CAMetalDrawable> dr = [l nextDrawable];
+            if (!dr) {
+                nodrawable++;
+                continue;
+            }
+            id<MTLCommandBuffer> cb = [q commandBuffer];
+            MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = dr.texture;
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 1, 1);
+            id<MTLRenderCommandEncoder> re = [cb renderCommandEncoderWithDescriptor:pass];
+            [re endEncoding];
+            *(uint32_t *)px.contents = 0;
+            id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+            [be copyFromTexture:dr.texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(320, 240, 0)
+                     sourceSize:MTLSizeMake(1, 1, 1) toBuffer:px destinationOffset:0 destinationBytesPerRow:4
+          destinationBytesPerImage:4];
+            [be endEncoding];
+            [dr addPresentedHandler:^(id<MTLDrawable> x) {
+                if (x.presentedTime > 0)
+                    presented++;
+            }];
+            [cb presentDrawable:dr];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (cb.status == MTLCommandBufferStatusCompleted)
+                completed++;
+            magenta += *(uint32_t *)px.contents == 0xffff00ffu;
+        }
+    }
+    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.3]];
+    printf("M4: %d frames: %d without a drawable, %d completed, %d read back magenta, %d presented on screen\n",
+           frames, nodrawable, completed, magenta, presented);
+    int ok = completed > 0 && magenta == completed && presented > 0;
+    printf("M4: %s CAMetalLayer: drawables %s, rendering %s, presents %s\n", ok ? "PASSED" : "FAILED",
+           frames > nodrawable ? "yes" : "NONE", magenta ? "right" : "WRONG", presented ? "shown" : "NEVER shown");
+    [w orderOut:nil];
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     @autoreleasepool {
         int list_only = argc > 1 && !strcmp(argv[1], "--list");
+        int surf = argc > 1 && !strcmp(argv[1], "--iosurface");
+        int layer = argc > 1 && !strcmp(argv[1], "--layer");
+        double secs = argc > 2 ? atof(argv[2]) : 12.0;
         NSArray<id<MTLDevice>> *all = MTLCopyAllDevices();
         id<MTLDevice> amd = nil, def = MTLCreateSystemDefaultDevice();
         printf("%lu Metal device(s); default: %s\n", (unsigned long)all.count,
@@ -245,11 +434,15 @@ int main(int argc, char **argv)
         if (list_only)
             return 0;
         if (!amd) {
-            printf("METAL: FAILED no AMD device among %lu (plugin not loaded or refused this process: see "
-                   "its log)\n", (unsigned long)all.count);
+            printf("%sFAILED no AMD device among %lu (plugin not loaded or refused this process: see "
+                   "its log)\n", surf ? "A3: " : layer ? "M4: " : "METAL: ", (unsigned long)all.count);
             return 2;
         }
         printf("== using \"%s\"\n", amd.name.UTF8String);
+        if (surf)
+            return iosurface_test(amd);
+        if (layer)
+            return layer_test(amd, secs > 0 ? secs : 12.0);
         if (compute(amd))
             return 1;
         if (render(amd))

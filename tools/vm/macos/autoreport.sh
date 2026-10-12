@@ -61,6 +61,10 @@ if [ "${1:-}" = --sync-metal ]; then
     exit 0
 fi
 
+# the Metal allow list as it was, should a report have died inside its M6
+# probe (which widens it for two apps)
+[ -f /var/db/rdna3-allow.bak ] && mv /var/db/rdna3-allow.bak /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null
+
 # the progress window as soon as somebody is logged in, with the time the
 # tests start: the 90 s pause after boot (the desktop and the driver
 # settle first) looked like nothing was happening
@@ -272,7 +276,7 @@ done_() {   # done_ EXIT: the test's exit code and summary line
     echo "[exit $1]"
     partial
     sum=$(tail -n +"$((hl + 1))" "$extra" 2>/dev/null |
-          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|PMCTL:|BACO:|CTS:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
+          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|PMCTL:|BACO:|CTS:|PLATFORM:|WSI:|A3:|M4:|M5:|M6:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
     if [ "$1" = 0 ]; then prog "    OK  ${sum}"; else prog "    FAIL (exit $1)  ${sum}"; fi
 }
 [ -n "$win" ] || { rm -f "$P"; touch "$P"; chmod 644 "$P"; }
@@ -510,6 +514,101 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         with_limit 30 "$D/bin/mtlprobe" --list 2>&1
         done_ $?
     fi
+    # the plan items only the card can answer (rdna3probe=1, step big4): what
+    # the next round of R3 / R4, V3, A3, M4, M5 and M6 starts from (P2 is
+    # the PM experiment, rdna3pmexp=1, in the kernel log)
+    case " $args " in
+    *" rdna3probe=1 "*)
+        hdr "probe: platform (R3 bare metal, R4 macOS 26)"
+        vm=$([ "$(sysctl -n kern.hv_vmm_present 2>/dev/null)" = 1 ] && echo "virtual machine" || echo "bare metal")
+        echo "PLATFORM: $(sw_vers -productName) $(sw_vers -productVersion) ($(sw_vers -buildVersion)), Darwin $(uname -r), $vm, $(sysctl -n hw.model) $(sysctl -n machdep.cpu.brand_string)"
+        ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null |
+            grep -E '"RDNA3,(NeedPost|PostResult|PSPStuckAtInit|PSPResult|SOSVersion|VBIOSResult|Commit)"' | sed 's/^ *//'
+        echo "kexts: $(kextstat 2>/dev/null | grep -o 'org\.[a-z0-9]*\.RDNA3[A-Za-z]*' | sort -u | tr '\n' ' ')"
+        if ioreg -r -c RDNA3Accelerator -w0 -d1 2>/dev/null | grep -q RDNA3Accelerator; then
+            echo "R4: the accelerator runs on Darwin $(uname -r | cut -d. -f1) ($(sw_vers -productVersion))"
+        else
+            echo "R4: the accelerator is not running on Darwin $(uname -r | cut -d. -f1) ($(sw_vers -productVersion)): its object layout is checked for one Darwin per build"
+        fi
+        done_ 0
+        if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_vktest" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then
+            hdr "probe: Vulkan WSI (V3)"
+            DYLD_LIBRARY_PATH="$D/bin" with_limit 60 "$D/bin/rdna3_vktest" --wsi "$D/bin/libvulkan_radeon.dylib" 2>&1
+            done_ $?
+        fi
+        if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/mtlprobe" ] && [ -d /Library/GPUBundles/RDNA3MTLDriver.bundle ]; then
+            sync_metal "$D/bin"
+            hdr "probe: IOSurface as a Metal texture (A3)"
+            rm -f /tmp/rdna3-nvmtl-a3.log
+            NVMTL_LOG_PATH=/tmp/rdna3-nvmtl-a3.log with_limit 60 "$D/bin/mtlprobe" --iosurface 2>&1
+            r=$?
+            echo "== plugin log (last 30 lines)"
+            tail -30 /tmp/rdna3-nvmtl-a3.log 2>/dev/null
+            done_ $r
+            # M4: the window in the user's session, a picture of the
+            # scanout while it shows (look m4: triage counts its magenta)
+            hdr "probe: CAMetalLayer on the screen (M4)"
+            rm -f /tmp/rdna3-nvmtl-m4.log /tmp/rdna3-m4.txt
+            ( NVMTL_LOG_PATH=/tmp/rdna3-nvmtl-m4.log with_limit 45 in_session "$D/bin/mtlprobe" --layer 15 \
+                > /tmp/rdna3-m4.txt 2>&1; echo "[mtlprobe exit $?]" >> /tmp/rdna3-m4.txt ) &
+            mp=$!
+            sleep 8
+            mkdir -p "$HOME/rdna3-scanout/m4"
+            echo "== rdna3_drminfo --scanout (look m4)"
+            with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/m4" 2>&1
+            wait $mp
+            cat /tmp/rdna3-m4.txt
+            echo "== plugin log (last 30 lines)"
+            tail -30 /tmp/rdna3-nvmtl-m4.log 2>/dev/null
+            grep -q '^M4: PASSED' /tmp/rdna3-m4.txt
+            done_ $?
+            # M5: who loaded the plugin, what macOS thinks of Metal on the
+            # card, what WindowServer says about its GPU
+            hdr "probe: WindowServer and the Metal plugin (M5)"
+            ioreg -r -c RDNA3Accelerator -w0 -d1 2>/dev/null | grep -E '"(MetalPluginName|MetalPluginClassName|IOGLBundleName)"' | sed 's/^ *//'
+            echo "allow list: $(grep -v '^#' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | tr '\n' ' ')"
+            ld=$(lsof -n 2>/dev/null | awk '/RDNA3MTLDriver/ { print $1 "(" $2 ")" }' | sort -u | tr '\n' ' ')
+            echo "processes with the plugin loaded: ${ld:-none}"
+            with_limit 60 system_profiler SPDisplaysDataType 2>/dev/null | grep -iE 'Chipset|Metal|VRAM|Vendor|Device ID|Resolution|Display Type|Main Display' | sed 's/^ *//'
+            echo "== WindowServer about Metal / the GPU (last 15 min)"
+            with_limit 90 log show --last 15m --style compact \
+                --predicate 'process == "WindowServer" AND (eventMessage CONTAINS[c] "metal" OR eventMessage CONTAINS[c] "MTL" OR eventMessage CONTAINS[c] "GPU" OR eventMessage CONTAINS[c] "accelerator")' \
+                2>/dev/null | tail -25
+            ws=$(echo "$ld" | grep -c WindowServer)
+            echo "M5: WindowServer $([ "$ws" -gt 0 ] && echo "LOADED" || echo "did not load") the plugin; $(grep -qx WindowServer /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null && echo "it is" || echo "not") on the allow list"
+            done_ 0
+            # M6: two system apps that draw with Metal, allowed for this run
+            # only (the allow list comes back afterwards, or at the next
+            # report if this one dies)
+            hdr "probe: Metal apps (M6)"
+            al=/Library/GPUBundles/rdna3mtl-allow.txt
+            [ -f "$al" ] && [ ! -f /var/db/rdna3-allow.bak ] && cp "$al" /var/db/rdna3-allow.bak
+            printf 'Chess\nMaps\n' >> "$al"
+            m6ok=0
+            for app in Chess Maps; do
+                touch "/tmp/rdna3-m6-$app"
+                in_session open -a "$app" 2>&1
+                sleep 15
+                run=$(pgrep -x "$app" >/dev/null && echo yes || echo NO)
+                pl=$(lsof -n -c "$app" 2>/dev/null | grep -c RDNA3MTLDriver)
+                mkdir -p "$HOME/rdna3-scanout/m6$app"
+                echo "== rdna3_drminfo --scanout (look m6$app)"
+                with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/m6$app" 2>&1 >/dev/null
+                pkill -x "$app" 2>/dev/null
+                sleep 2
+                cr=$(find /Library/Logs/DiagnosticReports /Users/*/Library/Logs/DiagnosticReports -name "$app*" \
+                     -newer "/tmp/rdna3-m6-$app" 2>/dev/null | head -1)
+                echo "M6 $app: running $run, plugin $([ "$pl" -gt 0 ] && echo loaded || echo "NOT loaded"), crash report: ${cr:-none}"
+                [ -n "$cr" ] && head -40 "$cr"
+                [ "$run" = yes ] && [ "$pl" -gt 0 ] && [ -z "$cr" ] && m6ok=$((m6ok + 1))
+            done
+            [ -f /var/db/rdna3-allow.bak ] && mv /var/db/rdna3-allow.bak "$al"
+            echo "M6: $m6ok of 2 apps ran on the plugin without a crash"
+            done_ 0
+        else
+            echo "== probe: A3 / M4 / M5 / M6 need the Metal plugin (tools/build_metal.sh in the VM) and level 8"
+        fi ;;
+    esac
     # soak (rdna3soak=<minutes>): DMA + GFX jobs and the Vulkan test in a
     # loop; the PM trend in the serial log runs alongside
     soak=$(printf '%s\n' $args | sed -n 's/^rdna3soak=\([0-9]*\)$/\1/p' | head -1)
