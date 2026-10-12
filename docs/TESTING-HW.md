@@ -119,13 +119,16 @@ it together with a description of the symptom. Module details are in `STAGE1`–
 | vcnsleep | step `sleep` + `rdna3vcn=2` | step sleep with the video block: `--vcn-test` before the sleep; on the sleep `jpeg_v4_0_suspend` + `vcn_v4_0_suspend` (the VCPU BOs - stack, context, fw_shared - copied to system memory); on the wake `vcn_v4_0_resume` + `jpeg_v4_0_resume` (the copy back, the rings started again, VCN before JPEG and after GFX): after a power loss inside the GPU bring-up, otherwise from the wake work; `--vcn-test` again after the wake | step sleep's checks, plus `RDNA3,VCNSuspends = 1`, `RDNA3,VCNSuspendResult = 0`, `RDNA3,VCNResumes = 1`, `RDNA3,VCNResult = 0`, the IB tests 0 after the wake, log `VCN: suspended ... saved to system memory`, `VCN: resume (...): 0`; report: `VCN TEST: PASSED` twice | high, as step sleep |
 | amdgpu | no rdna3 boot-arg but `rdna3amdgpu=1` (`rdna3vm step amdgpu`): the default profile with amdgpu's own sequence where the verified one differs | PSP: `psp_load_fw` order (SETUP_TMR before the PMFW, `psp_check_pmfw_centralized_cstate_management` false on 13.0.10), ASD, the register list (`psp_rl_load`), HDCP / DTM TAs, `psp_hw_fini` at unload; SMU: `smu_smc_hw_setup` order (`smu_v13_0_0_get_allowed_feature_mask`, every PCIe level after EnableAllSmuFeatures, `smu_v13_0_enable_thermal_alert`, `DALNotPresent` without the display core), AC source, `PrepareMp1ForUnload(0x55)` at shutdown; GPUVM: `amdgpu_vm_pt_clear` values, fragments and 2 MiB huge PDEs (`amdgpu_vm_ptes_update`), GART placed high, per-ring invalidation engines; IH: rings 0 and 1 in system memory through the GART (`MC_SNOOP`), rptr doorbells, page faults on ring 1; GFX: compute VMIDs 8-15 (`gfx_v11_0_init_compute_vmid`), graphics VMIDs 1-7; `sdma_v6_0_hw_fini` at unload and before a reset | `RDNA3,AmdgpuExact = 1`, `RDNA3,PSPResult = 0`, log `PSP: LOAD_ASD ... -> ok`, `PSP: LOAD_TA hdcp` / `dtm` ... `-> ok`, no `load RL failed`; `RDNA3,PMThermalAlert = 1`, `RDNA3,PMPcieLevels` (3 on this card), log `PM: rdna3amdgpu=1: ... PCIe levels sent`; `RDNA3,GARTStartMC = 0x7fff00000000`; `RDNA3,IHSystemMemory = 1`, log `IH: ring 0 + 1 in system memory`; `RDNA3,KCQVmInvEng = 1`; the report's DMA/GFX tests, Vulkan and the desktop as in step `default` | medium: a PSP or SMU refusal stops the bring-up at level 4/5 (boot without the boot-arg); the IH in system memory or the huge pages may show up as missing interrupts or VM faults |
 
-Sleep: from level 4 on the kext keeps macOS from idle sleep
-(`RDNA3,IdleSleepBlocked = 1`): there is no GPU suspend/resume yet, and
-after a sleep the firmware and the GOP's picture are gone. Do not put the
-machine to sleep by hand during tests; `rdna3sleep=1` lifts the block.
-`rdna3resume=1` (step `sleep`) is the first try at a resume: the display
-state is saved and restored, and a GPU that lost its power is posted and
-brought up again (see `docs/DRIVER-PLAN.md`, D4, for what is missing).
+Sleep: from level 4 on, without `rdna3resume=1`, the kext keeps macOS
+from idle sleep (`RDNA3,IdleSleepBlocked = 1`): without the resume the
+firmware and the GOP's picture are gone after a sleep. Do not put the
+machine to sleep by hand during such tests; `rdna3sleep=1` lifts the
+block. `rdna3resume=1` (step `sleep`, `big4`) is the suspend and resume:
+the clients' VRAM saved to system memory and the IPs suspended
+(`amdgpu_device_suspend`) before the sleep, the GPU posted and brought up
+again on the wake, the VRAM and the display state restored; the machine
+then idles to sleep like with any other GPU (see `docs/DRIVER-PLAN.md`,
+D4, for what is still missing).
 
 Sensors: once the SMU is up (level 6 and higher) `RDNA3Accel` publishes
 `PerformanceStatistics` every 2 s, with the keys AMD's macOS drivers use

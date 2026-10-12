@@ -73,13 +73,16 @@ bool RDNA3Accel::start(IOService *provider)
                 else if (ok && !platformInit())
                     LOG("accelerator interface not available");
                 if (ok && fLevel >= 4) {
-                    /* no suspend/resume yet: after a sleep the GPU has
-                     * lost the firmware and the GOP's display, and only a
-                     * modeset of our own could bring the picture back. Keep
-                     * the machine from idle sleep while the bring-up runs
-                     * (rdna3sleep=1 allows it, to test) */
+                    /* without rdna3resume=1 there is no suspend/resume:
+                     * after a sleep the GPU has lost the firmware and the
+                     * display. Keep the machine from idle sleep then
+                     * (rdna3sleep=1 allows it, to test). P5: with the
+                     * suspend / resume (RDNA3Resume.cpp, systemSuspend) the
+                     * machine idles to sleep like with any other GPU */
                     uint32_t sleepOk = 0;
                     PE_parse_boot_argn("rdna3sleep", &sleepOk, sizeof(sleepOk));
+                    if (rd3_arg("rdna3resume", 0))
+                        sleepOk = 1;
                     IOPMrootDomain *root = getPMRootDomain();
                     if (!sleepOk && root) {
                         fSleepAssertion = root->createPMAssertion(kIOPMDriverAssertionPreventSystemIdleSleepBit,
