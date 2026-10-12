@@ -26,6 +26,12 @@ if [ "$(uname -s)" = Darwin ]; then
     LIBEXT=dylib
 fi
 say() { printf '\n== %s\n' "$*"; }
+# python.org's Python on macOS has no CA store of its own (fetch_sources.py
+# downloads over HTTPS): certifi's when it is there
+if [ -z "${SSL_CERT_FILE:-}" ]; then
+    c=$(python3 -c 'import certifi; print(certifi.where())' 2>/dev/null || true)
+    [ -n "$c" ] && export SSL_CERT_FILE=$c
+fi
 
 # a shallow clone at TAG, kept while it is that tag
 fetch() {

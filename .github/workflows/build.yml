@@ -239,7 +239,7 @@ jobs:
           tools/ci/install_tools.sh uv
           export PATH="$HOME/.local/bin:$PATH"
           [ -x "$T/venv/bin/python3" ] || uv venv --python 3.12 "$T/venv"
-          uv pip install --python "$T/venv/bin/python3" --quiet cmake ninja
+          uv pip install --python "$T/venv/bin/python3" --quiet cmake ninja certifi
           echo "$T/venv/bin" >> "$GITHUB_PATH"
       - name: Build deqp-vk + the loader
         run: tools/ci/build_cts.sh build/cts-out "$RUNNER_TOOL_CACHE/rdna3-cts"
