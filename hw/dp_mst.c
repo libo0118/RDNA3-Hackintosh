@@ -926,7 +926,7 @@ static int drm_dp_mst_handle_link_address_port(rdna3_mst_mgr *mgr, int mstb, con
 static int drm_dp_send_link_address(rdna3_mst_mgr *mgr, int mstb)
 {
     rdna3_mst_sb_tx *txmsg = &mgr->tx;
-    rdna3_mst_reply reply;
+    rdna3_mst_link_addr *reply = &mgr->link_reply[mstb];
     uint32_t i, port_mask = 0;
     int ret, changed = 0;
     zero(txmsg, sizeof(*txmsg));
@@ -943,11 +943,11 @@ static int drm_dp_send_link_address(rdna3_mst_mgr *mgr, int mstb)
         ret = RDNA3_EIO;
         goto out;
     }
-    reply = txmsg->reply;   /* the ports below send their own messages */
-    RLOG(mgr->d, "mst: link address reply (lct %u): %u ports", mgr->mstb[mstb].lct, reply.link_addr.nports);
-    copy(mgr->mstb[mstb].guid, reply.link_addr.guid, 16);   /* drm_dp_check_mstb_guid: a GUID is kept as given */
-    for (i = 0; i < reply.link_addr.nports && i < 16; i++) {
-        const rdna3_mst_port_reply *pm = &reply.link_addr.ports[i];
+    *reply = txmsg->reply.link_addr;   /* the ports below send their own messages */
+    RLOG(mgr->d, "mst: link address reply (lct %u): %u ports", mgr->mstb[mstb].lct, reply->nports);
+    copy(mgr->mstb[mstb].guid, reply->guid, 16);   /* drm_dp_check_mstb_guid: a GUID is kept as given */
+    for (i = 0; i < reply->nports && i < 16; i++) {
+        const rdna3_mst_port_reply *pm = &reply->ports[i];
         RLOG(mgr->d, "mst:   port %u: input %d, pdt %u, mcs %d, ddps %d, ldps %d, sdp %u/%u", pm->port_number,
              pm->input_port, pm->peer_device_type, pm->mcs, pm->ddps, pm->legacy_device_plug_status,
              pm->num_sdp_streams, pm->num_sdp_stream_sinks);

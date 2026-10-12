@@ -119,10 +119,17 @@ typedef struct rdna3_mst_port_reply {
     uint8_t num_sdp_streams, num_sdp_stream_sinks;
 } rdna3_mst_port_reply;
 
+/* struct drm_dp_link_address_ack_reply */
+typedef struct rdna3_mst_link_addr {
+    uint8_t guid[16];
+    uint8_t nports;
+    rdna3_mst_port_reply ports[16];
+} rdna3_mst_link_addr;
+
 /* struct drm_dp_sideband_msg_reply_body (the replies this port parses) */
 typedef struct rdna3_mst_reply {
     uint8_t reply_type, req_type;
-    struct { uint8_t guid[16]; uint8_t nports; rdna3_mst_port_reply ports[16]; } link_addr;
+    rdna3_mst_link_addr link_addr;
     struct { uint8_t guid[16]; uint8_t reason, nak_data; } nak;
     struct { uint8_t port_number; int fec_capable; uint16_t full_payload_bw_number, avail_payload_bw_number; } path_resources;
     struct { uint8_t port_number, vcpi; uint16_t allocated_pbn; } allocate_payload;
@@ -182,6 +189,9 @@ typedef struct rdna3_mst_mgr {
     rdna3_mst_sb_rx  down_rep_recv;
     rdna3_mst_sb_tx  tx;
     int      tx_busy;
+    /* the LINK_ADDRESS ack being walked, per branch: the walk recurses into
+     * child branches, so it is kept here, not on the (kernel) stack */
+    rdna3_mst_link_addr link_reply[RD_MST_MAX_BRANCHES];
     uint8_t  sink_count;
     /* drm_dp_mst_topology_state */
     int      start_slot, total_avail_slots;
