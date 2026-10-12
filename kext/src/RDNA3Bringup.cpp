@@ -488,6 +488,33 @@ bool RDNA3Bringup::mapDoorbell()
     return true;
 }
 
+/* amdgpu_device_mode1_reset: bus mastering off, the PMFW's mode-1 reset,
+ * the PCI config written back (amdgpu_device_load_pci_state) BEFORE
+ * anything reads the BARs again, then MEMSIZE readable. The reset clears
+ * the card's config space; reading MEMSIZE through a BAR the card no
+ * longer decodes was the order here before, and a passthrough host does
+ * not survive every such access (card run 40: the host hung in the
+ * guest's second S3 suspend reset). Returns smu13_mode1_reset's result. */
+int RDNA3Bringup::mode1Reset()
+{
+    static const uint8_t kSaved[] = { 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x3C };
+    uint32_t cfg[sizeof(kSaved)], i;
+    uint16_t cmd = fPci->configRead16(kIOPCIConfigCommand);
+    for (i = 0; i < sizeof(kSaved); i++)
+        cfg[i] = fPci->configRead32(kSaved[i]);
+    fPci->setBusMasterEnable(false);
+    int r = smu13_mode1_reset(fDev);
+    for (i = 0; i < sizeof(kSaved); i++)
+        fPci->configWrite32(kSaved[i], cfg[i]);
+    fPci->configWrite16(kIOPCIConfigCommand, cmd);
+    for (i = 0; i < fDev->usec_timeout; i++) {
+        if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu)
+            break;
+        IODelay(1);
+    }
+    return r;
+}
+
 /* Passthrough: a PCI bus reset after the host's amdgpu leaves the PSP with
  * neither sOS alive nor the bootloader ready (C2PMSG_35 reads 0), and every
  * bootloader command times out. The only way back is what amdgpu's GPU
@@ -496,9 +523,7 @@ bool RDNA3Bringup::mapDoorbell()
  * rdna3reset=0: never, 1 (default): when stuck, 2: always. */
 void RDNA3Bringup::resetIfPspStuck()
 {
-    static const uint8_t kSaved[] = { 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x3C };
-    uint32_t mode = 1, cfg[sizeof(kSaved)], i;
-    uint16_t cmd;
+    uint32_t mode = 1;
     rdna3_psp *bl;
     int stuck, ret;
 
@@ -519,19 +544,7 @@ void RDNA3Bringup::resetIfPspStuck()
     }
     BLOG("PSP: %s: mode-1 reset before init (rdna3reset=0 skips it)",
          stuck ? "no sOS and the bootloader is not ready" : "rdna3reset=2");
-    cmd = fPci->configRead16(kIOPCIConfigCommand);
-    for (i = 0; i < sizeof(kSaved); i++)
-        cfg[i] = fPci->configRead32(kSaved[i]);
-    fPci->setBusMasterEnable(false);
-    smu13_mode1_reset(fDev);
-    for (i = 0; i < fDev->usec_timeout; i++) {
-        if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu)
-            break;
-        IODelay(1);
-    }
-    for (i = 0; i < sizeof(kSaved); i++)
-        fPci->configWrite32(kSaved[i], cfg[i]);
-    fPci->configWrite16(kIOPCIConfigCommand, cmd);
+    mode1Reset();
     ret = psp13_wait_for_bootloader(bl);
     psp13_log_state(bl, "after mode-1 reset");
     publish("RDNA3,InitResetResult", (uint64_t)(int64_t)ret);
@@ -749,15 +762,8 @@ void RDNA3Bringup::run()
      * hardware. After a cold boot the sOS is not up (Linux on the card does
      * no reset here). */
     if (fAmdgpuExact && soc21_need_reset_on_init(fDev)) {
-        uint32_t i;
         BLOG("reset on init: the PSP sOS already runs, mode-1 reset first");
-        fPci->setBusMasterEnable(false);
-        int r = smu13_mode1_reset(fDev);
-        for (i = 0; i < fDev->usec_timeout; i++) {
-            if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu)
-                break;
-            IODelay(1);
-        }
+        int r = mode1Reset();
         publish("RDNA3,ResetOnInit", (uint64_t)(int64_t)r);
         if (r)
             BLOG("asic reset on init failed (%d)", r);
@@ -2793,7 +2799,7 @@ bool RDNA3Bringup::gpuReset(bool baco)
         /* amdgpu_device_mode1_reset: SMU mode-1 when the PMFW supports it */
         if (fAmdgpuExact && fSmu && fPmUp)
             HLOG("mode-1 reset: PMFW support %s", smu13_is_mode1_reset_supported(fSmu) ? "yes" : "no");
-        smu13_mode1_reset(fDev);
+        mode1Reset();
     }
     if (psp13_wait_for_bootloader(fPsp) != RDNA3_OK)
         BLOG("GPU reset: the PSP bootloader did not come back");
@@ -2871,14 +2877,7 @@ bool RDNA3Bringup::systemSuspend()
      * with its TMR freed and LOAD_IP_FW SMC timed out; the next sleep lost
      * the card (config space all 1s) and the host hung taking it back */
     if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu) {
-        uint32_t i;
-        fPci->setBusMasterEnable(false);
-        int r = smu13_mode1_reset(fDev);
-        for (i = 0; i < fDev->usec_timeout; i++) {
-            if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu)
-                break;
-            IODelay(1);
-        }
+        int r = mode1Reset();
         BLOG("suspend #%u: mode-1 reset before the sleep (amdgpu_pmops_suspend_noirq) -> %d", fSystemSuspends, r);
         publish("RDNA3,SuspendResetResult", (uint64_t)(int64_t)r);
     }
@@ -2928,7 +2927,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
      * soc21_common_hw_init is in hwInit below */
     if (fAmdgpuExact && soc21_need_reset_on_resume(fDev, 1, 1)) {
         BLOG("resume: S3 suspend aborted, resetting");
-        smu13_mode1_reset(fDev);
+        mode1Reset();
     }
     ok = reinitFromLevel4();
     if (ok && vramLost)

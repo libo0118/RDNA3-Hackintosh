@@ -1441,3 +1441,22 @@ Settings. That is expected for them, not a display regression.
 - The run used the framebuffer of build 152 although 154 was installed
   and the queue did not stop: the report now prints the running and the
   installed hashes (`== running vs installed`).
+
+### Card run 40 (step big4, build 156)
+
+- Both monitors show the desktop, no flicker (the pipe marking fix);
+  mode switches clean (a blink, then the lower resolution); unplugging
+  HDMI no longer blanks the other monitor. After replugging HDMI it lit
+  but stayed black: open (the re-created display pipe gets no frames?).
+- System sleep #1 with the new suspend reset: `mode-1 reset before the
+  sleep -> 0`, the wake brought both monitors back (`resume #1 done`).
+- Later a kernel-ring fault (`[gfxhub] page fault ... vmid:0 at 0x0 from
+  client 10`, CP stuck, `CPF 0x94000003`), PTE writes to
+  `0x900000000000 ... outside the BAR`, and at sleep #2 the MES did not
+  answer; the suspend reset on that GPU took the host down (serial and host
+  log end mid-suspend). Our mode-1 resets read MEMSIZE through the BARs
+  before writing the PCI config back (or never wrote it back);
+  `amdgpu_device_mode1_reset` restores it first
+  (`amdgpu_device_load_pci_state`). All mode-1 resets now go through
+  `mode1Reset()` with amdgpu's order. Open: the vmid-0 fault and the
+  `0x900000000000` table after the first wake.

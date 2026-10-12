@@ -197,6 +197,7 @@ private:
     bool mapVram();
     bool postIfNeeded();
     void resetIfPspStuck();
+    int  mode1Reset();
     void publish(const char *key, uint64_t v);
     void publishString(const char *key, const char *s);
 
