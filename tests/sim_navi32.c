@@ -11095,6 +11095,8 @@ static void run(const char *fwdir)
             CHECK(S.reg[OSS_BASE0 + regIH_RB_WPTR] & IH_RB_WPTR__RB_OVERFLOW_MASK);
             CHECK(ih60_process(&dev, &ih2, NULL, NULL) > 0 && ih2.overflows == 1);
             sdma60_stop(&dev, &sd2);
+            static rdna3_mes mm;   /* the scheduler of the legacy queue map below */
+            uint32_t aseq0, lu0;
             /* the card's RS64 gfx firmware reads the queue's MQD: RB0 set up
              * through registers (amdgpu_async_gfx_ring=0) faults on MC 0 and
              * halts the CP; the KIQ-mapped queue (amdgpu's default) runs,
@@ -11142,12 +11144,69 @@ static void run(const char *fwdir)
                 CHECK(S.kgq_unmaps == 1 && !S.gfx_mapped && !ga.ready);
                 CHECK(S.reg[GCR(regCP_ME_CNTL)] & CP_ME_CNTL__ME_HALT_MASK);
                 CHECK(S.cp_bad == 0);
+                /* rdna3amdgpu=1 with MES 0x47 on (enable_legacy_queue_map):
+                 * mes_v11_0_kiq_hw_init starts the scheduler with the KIQ,
+                 * amdgpu_gfx_enable_kgq / amdgpu_gfx_mes_enable_kcq map the
+                 * gfx ring and the KCQ through it, amdgpu_gfx_disable_kgq /
+                 * _kcq (enable_mes) take them off through it */
+                memset(&mm, 0, sizeof(mm));
+                memset(&S.mes_sched, 0, sizeof(S.mes_sched));
+                S.reg[GCR(regCP_MES_GP3_LO)] = 0x0000004a;
+                CHECK(gfx11_mes_fw_sched_version(&dev) == 0x4a && S.reg[GCR(regGRBM_GFX_CNTL)] == 0);
+                CHECK(gfx11_mes_sched_init(&dev, &mm) == RDNA3_OK && gfx11_mes_sched_start(&dev, &kiq, &mm) == RDNA3_OK &&
+                      mm.legacy_queue_map);
+                gfx11_cp_gfx_enable(&dev, 1);   /* gfx_v11_0_cp_resume: the CPs run before the queues */
+                CHECK(gfx11_kgq_start_mes(&dev, &mm, &ga) == RDNA3_OK && ga.ready);
+                CHECK(S.mes_sched.legacy_maps == 1 && S.reg[GCR(regCP_GFX_HQD_ACTIVE)] == 1 &&
+                      S.reg[GCR(regCP_GFX_MQD_BASE_ADDR)] == (uint32_t)rdna3_vram_mc(&dev, ga.mqd));
+                aseq = gfx11_emit_fence(&dev, &ga);
+                gfx11_commit(&dev, &ga);
+                CHECK(gfx11_wait_fence(&dev, &ga, aseq) == RDNA3_OK);
+                gfx11_kgq_stop_mes(&dev, &mm, &ga);
+                CHECK(S.mes_sched.legacy_unmaps == 1 && !ga.ready && (S.reg[GCR(regCP_ME_CNTL)] & CP_ME_CNTL__ME_HALT_MASK));
+                CHECK(gfx11_kgq_start_mes(&dev, NULL, &ga) == RDNA3_EINVAL);
+                /* the KCQ: off the KIQ, then SET_RESOURCES for every queue
+                 * and the scheduler's map */
+                {
+                    rdna3_mes_legacy_queue lq;
+                    lq.queue_type = 1; lq.doorbell_offset = kcq.rb.doorbell; lq.me = kcq.me; lq.pipe = kcq.pipe;
+                    lq.queue = kcq.queue; lq.vmid = 0; lq.mqd_addr = rdna3_vram_mc(&dev, kcq.mqd);
+                    lq.wptr_addr = rdna3_vram_mc(&dev, kcq.rb.wb + RD_GFX_WB_WPTR);
+                    CHECK(gfx11_mes_unmap_legacy_queue(&dev, &mm, &lq, 1, 0, 0) == RDNA3_OK &&
+                          HQD(&S.hqd[RD_KCQ0_PIPE][0], regCP_HQD_ACTIVE) == 0);
+                }
+                kcq.rb.ready = 0;
+                mm.legacy_queue_map = 0;
+                CHECK(gfx11_kcq_start_mes(&dev, &kiq, &kcq, &mm) == RDNA3_EINVAL);   /* older firmware: the KIQ maps */
+                mm.legacy_queue_map = 1;
+                /* the scheduler does not answer the map: the KCQ stays
+                 * unmapped and the kext's fallback maps it through the KIQ */
+                S.mes_sched.hang = 1;
+                CHECK(gfx11_kcq_start_mes(&dev, &kiq, &kcq, &mm) == RDNA3_ETIME && !kcq.mapped && !kcq.rb.ready);
+                S.mes_sched.hang = 0;
+                (void)gfx11_kcq_unmap_mes(&dev, &mm, &kcq);   /* refused: nothing mapped */
+                S.mes_sched.bad = 0;
+                CHECK(gfx11_kcq_start(&dev, &kiq, &kcq) == RDNA3_OK && kcq.rb.ready && kcq.mapped &&
+                      HQD(&S.hqd[RD_KCQ0_PIPE][0], regCP_HQD_ACTIVE) == 1);
+                /* and through the scheduler again: off, then its map */
+                CHECK(gfx11_kcq_unmap_mes(&dev, &mm, &kcq) == RDNA3_OK && !kcq.mapped &&
+                      HQD(&S.hqd[RD_KCQ0_PIPE][0], regCP_HQD_ACTIVE) == 0);
+                CHECK(gfx11_kcq_start_mes(&dev, &kiq, &kcq, &mm) == RDNA3_OK && kcq.rb.ready && kcq.mapped);
+                CHECK(S.set_resources_mask == ~0ull && S.mes_sched.legacy_maps >= 2 &&
+                      HQD(&S.hqd[RD_KCQ0_PIPE][0], regCP_HQD_ACTIVE) == 1 && S.mes_sched.bad == 0);
+                CHECK(S.cp_bad == 0);
                 S.rs64_needs_mqd = 0;
             }
             gfx11_set_eop_interrupt(&dev, &gr, 0);
-            /* UNMAP_QUEUES through the KIQ, then the MEC halts */
-            gfx11_mec_stop(&dev, &kiq, &kcq, NULL);
-            CHECK(S.kiq_unmaps == 1 && !kcq.mapped && !kcq.rb.ready && !kiq.rb.ready);
+            /* rdna3amdgpu=1: the KCQ off through the scheduler (RESET_QUEUES),
+             * the scheduler pipe dequeued, then the MEC halts */
+            aseq0 = S.kiq_unmaps;
+            lu0 = S.mes_sched.legacy_unmaps;
+            dev.amdgpu_exact = 1;
+            gfx11_mec_stop(&dev, &kiq, &kcq, &mm);
+            dev.amdgpu_exact = 0;
+            CHECK(S.kiq_unmaps == aseq0 && S.mes_sched.legacy_unmaps == lu0 + 1 && !kcq.mapped && !kcq.rb.ready &&
+                  !kiq.rb.ready && !mm.ring.mapped);
             CHECK(HQD(&S.hqd[RD_KCQ0_PIPE][0], regCP_HQD_ACTIVE) == 0);
             CHECK(S.reg[GCR(regCP_MEC_RS64_CNTL)] & CP_MEC_RS64_CNTL__MEC_HALT_MASK);
             CHECK(S.mec_bad_queue == 0 && S.cp_bad == 0);

@@ -244,7 +244,7 @@ void RDNA3Bringup::stopAndFree()
     }
     if (fGfx && fGfx->async && fGfx->ready && fDev) {
         gfx11_set_eop_interrupt(fDev, fGfx, 0);
-        gfx11_kgq_stop(fDev, fKiq, fGfx);   /* unmapped while the KIQ still runs */
+        kgqStop();   /* unmapped while the KIQ / the scheduler still run */
     }
     if (fKiq && fDev)
         gfx11_mec_stop(fDev, fKiq, fKcq, fMes);
@@ -1197,11 +1197,11 @@ bool RDNA3Bringup::hwInit()
                 bzero(fKcq, sizeof(*fKcq));
                 /* GC 11: the KIQ is MES pipe 1 (amdgpu enable_mes_kiq);
                  * the MEC KIQ ignores MAP_QUEUES on the card */
-                uint64_t mesStart[2];
+                uint64_t mesFwStart[2];
                 if (gfx11_mes_from_fw(fBlobs[AMD_BLOB_MES].data, fBlobs[AMD_BLOB_MES].len,
                                       fBlobs[AMD_BLOB_MES1].data, fBlobs[AMD_BLOB_MES1].len,
-                                      mesStart) == RDNA3_OK) {
-                    kr = gfx11_mes_kiq_ring_init(fDev, fKiq, mesStart);
+                                      mesFwStart) == RDNA3_OK) {
+                    kr = gfx11_mes_kiq_ring_init(fDev, fKiq, mesFwStart);
                 } else {
                     BLOG("MES firmware headers unusable: MEC KIQ (scheduling will not work)");
                     kr = gfx11_mec_ring_init(fDev, fKiq, 1, RD_KIQ_PIPE, 0, RD_DB_KIQ, 0);
@@ -1220,8 +1220,28 @@ bool RDNA3Bringup::hwInit()
                 if (!kr)
                     kr = gfx11_kiq_start(fDev, fKiq);
                 publish("RDNA3,KIQResult", (uint64_t)(int64_t)kr);
-                if (!kr)
+                /* rdna3amdgpu=1: mes_v11_0_kiq_hw_init starts the scheduler
+                 * right after the KIQ when its firmware maps the kernel
+                 * queues (enable_legacy_queue_map, MES 0x47 on); the KCQ
+                 * and the gfx ring are then mapped by it */
+                if (!kr && fAmdgpuExact && fMesWanted && fKiq->me == 3 &&
+                    (gfx11_mes_fw_sched_version(fDev) & RD_MES_VERSION_MASK) >= RD_MES_LEGACY_MAP_VER)
+                    mesStart("with the KIQ (legacy queue map)");
+                bool mesMaps = !kr && fAmdgpuExact && fMes && fMes->ready && fMes->legacy_queue_map;
+                publish("RDNA3,KernelQueuesByMES", mesMaps ? 1 : 0);
+                if (!kr && mesMaps) {
+                    kr = gfx11_kcq_start_mes(fDev, fKiq, fKcq, fMes);
+                    if (kr) {
+                        /* not amdgpu, but the path verified on the card:
+                         * the queue off the scheduler, the KIQ maps it */
+                        BLOG("KCQ: the MES scheduler did not map it (%d): the KIQ maps it instead", kr);
+                        (void)gfx11_kcq_unmap_mes(fDev, fMes, fKcq);
+                        publish("RDNA3,KernelQueuesByMESFallback", 1);
+                        kr = gfx11_kcq_start(fDev, fKiq, fKcq);
+                    }
+                } else if (!kr) {
                     kr = gfx11_kcq_start(fDev, fKiq, fKcq);
+                }
                 publish("RDNA3,KCQResult", (uint64_t)(int64_t)kr);
                 if (!kr && fAmdgpuExact) {
                     /* gmc_v11_0_late_init -> amdgpu_gmc_allocate_vm_inv_eng over
@@ -1243,8 +1263,19 @@ bool RDNA3Bringup::hwInit()
             }
             /* gfx_v11_0_cp_async_gfx_ring_resume, after the KCQs as in
              * gfx_v11_0_cp_resume */
-            if (fGfx->async)
-                ret = (fKiq && fKiq->rb.ready) ? gfx11_kgq_start(fDev, fKiq, fGfx) : RDNA3_ENODEV;
+            if (fGfx->async) {
+                ret = RDNA3_ENODEV;
+                if (fAmdgpuExact && fMes && fMes->ready && fMes->legacy_queue_map) {
+                    ret = gfx11_kgq_start_mes(fDev, fMes, fGfx);   /* amdgpu_gfx_enable_kgq */
+                    if (ret) {
+                        BLOG("GFX: the MES scheduler did not map ring 0 (%d): the KIQ maps it instead", ret);
+                        (void)gfx11_kgq_unmap_mes(fDev, fMes, fGfx, 1 /* RESET_QUEUES */);
+                        publish("RDNA3,KernelQueuesByMESFallback", 1);
+                    }
+                }
+                if (ret)
+                    ret = (fKiq && fKiq->rb.ready) ? gfx11_kgq_start(fDev, fKiq, fGfx) : RDNA3_ENODEV;
+            }
         }
         if (!ret && !fGfx->ready)
             ret = RDNA3_ENODEV;   /* async queue never mapped (no KIQ) */
@@ -1252,7 +1283,7 @@ bool RDNA3Bringup::hwInit()
         publish("RDNA3,GFXAsync", fGfx->async ? 1 : 0);
         /* mes_v11_0_hw_init comes after GFX in soc21's IP order: the
          * kernel queues are mapped by the KIQ already (step 8c, opt-in) */
-        if (!ret && fMesWanted && fKiq && fKiq->rb.ready && fKiq->me == 3)
+        if (!ret && fMesWanted && fKiq && fKiq->rb.ready && fKiq->me == 3 && !(fMes && fMes->ready))
             mesStart("level 8");
         /* amdgpu_device_ip_late_init -> amdgpu_device_set_cg_state(GATE) */
         if (!ret && fCgWanted)
@@ -2936,6 +2967,16 @@ void *RDNA3Bringup::vmCreate()
  * reset): the CP fault interrupts put, the KGQ and KCQ unmapped and the MES
  * KIQ stopped (amdgpu_mes_kiq_hw_fini), the CP halted, the GFXHUB GART off.
  * hwInit brings everything back (gfx_v11_0_resume = gfx_v11_0_hw_init). */
+/* amdgpu_gfx_disable_kgq: with the MES scheduler running (rdna3amdgpu=1,
+ * enable_mes) the scheduler preempts the gfx queue, else the KIQ unmaps it */
+void RDNA3Bringup::kgqStop()
+{
+    if (fAmdgpuExact && fMes && fMes->ready)
+        gfx11_kgq_stop_mes(fDev, fMes, fGfx);
+    else
+        gfx11_kgq_stop(fDev, fKiq, fGfx);
+}
+
 void RDNA3Bringup::gfxSuspend()
 {
     if (!fDev || !fGfx)
@@ -2944,7 +2985,7 @@ void RDNA3Bringup::gfxSuspend()
     gfx11_set_priv_inst_fault_state(fDev, 0);
     gfx11_set_bad_op_fault_state(fDev, 0);
     if (fGfx->async && fGfx->ready && fKiq && fKiq->rb.ready)
-        gfx11_kgq_stop(fDev, fKiq, fGfx);
+        kgqStop();
     if (fKiq)
         gfx11_mec_stop(fDev, fKiq, fKcq, fMes);
     gfx11_cp_gfx_enable(fDev, 0);

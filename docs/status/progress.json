@@ -1,11 +1,11 @@
 {
  "amdgpu": {
-  "works": 507,
-  "ported": 1446,
+  "works": 508,
+  "ported": 1447,
   "total": 1489,
   "not_applicable": 632,
-  "works_pct": 34.0,
-  "ported_pct": 97.1,
+  "works_pct": 34.1,
+  "ported_pct": 97.2,
   "groups": [
    {
     "name": "PSP 13",
@@ -640,9 +640,9 @@
     "steps": [
      "8"
     ],
-    "works": 100,
+    "works": 101,
     "ported": 46,
-    "todo": 1,
+    "todo": 0,
     "items": {
      "amdgpu_gfx_bit_to_me_queue": "ported",
      "amdgpu_gfx_compute_queue_acquire": "works",
@@ -664,7 +664,7 @@
      "amdgpu_gfx_kiq_init_ring": "works",
      "amdgpu_gfx_me_queue_to_bit": "ported",
      "amdgpu_gfx_mec_queue_to_bit": "ported",
-     "amdgpu_gfx_mes_enable_kcq": "todo",
+     "amdgpu_gfx_mes_enable_kcq": "works",
      "amdgpu_gfx_mqd_sw_init": "ported",
      "amdgpu_gfx_off_ctrl": "works",
      "amdgpu_queue_mask_bit_to_mec_queue": "ported",

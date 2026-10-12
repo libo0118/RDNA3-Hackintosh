@@ -158,6 +158,7 @@ public:
     /* P4 (rdna3resume=1): amdgpu_device_suspend before a system sleep;
      * the wake then always runs the resume (resumeAfterPowerLoss) */
     bool     systemSuspend();
+    void     kgqStop();
     bool     suspended() const { return fSuspended; }
     /* VRAM was lost and the live VMs have new, empty roots: the DRM maps
      * every client's ranges again (rdna3_drm_device_vm_replay); true once */

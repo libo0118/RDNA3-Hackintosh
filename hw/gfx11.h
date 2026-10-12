@@ -595,6 +595,27 @@ typedef struct rdna3_mes_legacy_queue {
 int  gfx11_mes_map_legacy_queue(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_legacy_queue *q);
 int  gfx11_mes_unmap_legacy_queue(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_legacy_queue *q,
                                   uint32_t action, uint64_t tf_addr, uint64_t tf_data);
+/* mes_v11_0_get_fw_version: CP_MES_GP3_LO of the scheduler pipe, readable
+ * once the MES runs (after gfx11_kiq_start with the KIQ on MES pipe 1);
+ * from RD_MES_LEGACY_MAP_VER on, mes_v11_0_kiq_hw_init starts the scheduler
+ * right away and the kernel queues are mapped by it */
+uint32_t gfx11_mes_fw_sched_version(rdna3_dev *d);
+/* gfx_v11_0_kcq_resume + amdgpu_gfx_mes_enable_kcq (enable_legacy_queue_map):
+ * the MQD, SET_RESOURCES for all queues on the KIQ, the KCQ mapped by the
+ * MES scheduler (m->ready, m->legacy_queue_map), the ring test */
+int  gfx11_kcq_start_mes(rdna3_dev *d, rdna3_mec_ring *kiq, rdna3_mec_ring *kcq, rdna3_mes *m);
+/* gfx_v11_0_cp_async_gfx_ring_resume + amdgpu_gfx_enable_kgq with
+ * enable_legacy_queue_map: the gfx ring mapped by the MES scheduler */
+int  gfx11_kgq_start_mes(rdna3_dev *d, rdna3_mes *m, rdna3_gfx_ring *r);
+/* amdgpu_gfx_disable_kgq with enable_mes (PREEMPT_QUEUES by the MES), then
+ * the gfx CP halts; gfx11_mec_stop does the KCQ the same way (RESET_QUEUES)
+ * when d->amdgpu_exact and the scheduler runs */
+void gfx11_kgq_stop_mes(rdna3_dev *d, rdna3_mes *m, rdna3_gfx_ring *r);
+/* the scheduler's REMOVE_QUEUE (unmap_legacy_queue) for the gfx ring with
+ * 'action' (0 PREEMPT_QUEUES, 1 RESET_QUEUES) and for the KCQ (RESET_QUEUES),
+ * mapped or not: the queue not ready afterwards. 0 or the MES error. */
+int  gfx11_kgq_unmap_mes(rdna3_dev *d, rdna3_mes *m, rdna3_gfx_ring *r, uint32_t action);
+int  gfx11_kcq_unmap_mes(rdna3_dev *d, rdna3_mes *m, rdna3_mec_ring *kcq);
 /* mes_v11_0_reset_legacy_queue through the scheduler (use_mmio false) */
 int  gfx11_mes_reset_legacy_queue(rdna3_dev *d, rdna3_mes *m, const rdna3_mes_legacy_queue *q);
 /* mes_v11_0_suspend_gang / mes_v11_0_resume_gang */
