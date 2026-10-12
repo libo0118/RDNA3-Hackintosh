@@ -554,13 +554,30 @@ int dcn32_state_restore(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
         RERR(d, "state: head %u: no DMCUB to drive the PHY, no restore", head);
         return RDNA3_ENODEV;
     }
-    /* the clock manager part is not here: the clocks must still carry it */
+    /* dcn32_init_clocks / dcn32_update_clocks(safe_to_lower = false) after
+     * a power loss: the PMFW came back at its boot clocks; the ones the
+     * head ran at (or what its pixel rate needs) are asked back through
+     * the DAL mailbox before anything is programmed */
     dcn32_clk_read(d, &ck);
     if (dcn32_clk_fits(&ck, h->pclk_khz)) {
-        RERR(d, "state: head %u: DISPCLK %u / DPPCLK %u kHz no longer carry %u kHz (saved: %u / %u): "
-             "dcn32_update_clocks is not ported", head, ck.dispclk_khz, ck.dppclk_khz, h->pclk_khz,
-             st->clk.dispclk_khz, st->clk.dppclk_khz);
-        return RDNA3_EBUSY;
+        uint32_t pmfw = 0, disp, dpp;
+        int rr = dcn32_smu_send(d, RD_DALSMC_MSG_GetSmuVersion, 0, &pmfw);
+        disp = dcn32_required_dispclk(h->pclk_khz, ck.vco_khz, 0);
+        dpp = dcn32_required_dppclk(h->pclk_khz, ck.vco_khz);
+        if (st->clk.dispclk_khz > disp)
+            disp = st->clk.dispclk_khz;
+        if (st->clk.dppclk_khz > dpp)
+            dpp = st->clk.dppclk_khz;
+        if (!rr)
+            rr = dcn32_clk_raise(d, pmfw, h->pipe, disp, dpp, &ck);
+        if (rr || dcn32_clk_fits(&ck, h->pclk_khz)) {
+            RERR(d, "state: head %u: DISPCLK %u / DPPCLK %u kHz no longer carry %u kHz (saved: %u / %u), "
+                 "raising them failed (%d)", head, ck.dispclk_khz, ck.dppclk_khz, h->pclk_khz,
+                 st->clk.dispclk_khz, st->clk.dppclk_khz, rr);
+            return RDNA3_EBUSY;
+        }
+        RLOG(d, "state: head %u: clocks raised for %u kHz: DISPCLK %u / DPPCLK %u kHz", head, h->pclk_khz,
+             ck.dispclk_khz, ck.dppclk_khz);
     }
     /* the global part first; the pipe lost its power or the system
      * context: the LUT RAMs went with it */

@@ -189,10 +189,11 @@ The S3 gap - what a full resume still lacks, in the order it will bite:
    each live VM gets a new root and the UAPI maps every client's ranges
    again (`rdna3_drm_device_vm_replay`). Still open: the BO contents and
    the scanout surfaces (eviction through SDMA to GTT).
-3. **Display init.** `dcn32_init_hw` is not ported: the clock manager
-   (`dcn32_init_clocks`, `dcn32_update_clocks`: DISPCLK / DPPCLK / DCFCLK
-   hard minimums through the DAL mailbox) - the restore refuses a head the
-   clocks no longer carry (`restored (-16)`); DIO / PHY init of the unused
+3. **Display init.** `dcn32_init_hw` is not ported: the clock manager's
+   raise half runs in the restore now (DISPCLK / DPPCLK hard minimums
+   through the DAL mailbox, back to the saved clocks; `restored (-16)` only
+   when that fails or DISPCLK sits at divider 127); DCFCLK and the rest of
+   `dcn32_init_clocks` are not ported; DIO / PHY init of the unused
    links; the replay of the saved DCHUBBUB / DCCG globals stands in for
    `hubbub32_init`, `dccg32_init` and `hubbub3_init_dchub_sys_ctx`.
 4. **Lost display contents.** The gamma / degamma LUT RAMs (a restore after

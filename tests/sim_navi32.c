@@ -5450,10 +5450,33 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     S.reg[DCN_B1 + 0x007b] = 0;
     CHECK(dcn32_read_state(dev, &dp) == 0);
     CHECK(dcn32_state_check(dev, &st, 0, 0, &k) == 1 && !k.powered && !k.sys_ok && !k.routed && k.ndiff > 100);
-    /* the clocks can no longer carry the head: refused (no clock manager) */
+    /* the clocks can no longer carry the head and DISPCLK sits at divider
+     * 127 (the OTG pixel drop dance is not ported): refused */
     S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x7f;
     CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0) == RDNA3_EBUSY);
+    /* the PMFW came back at a low boot clock: dcn32_update_clocks asks the
+     * saved ones back through the DAL mailbox first */
+    {
+        rdna3_dcn_clocks ck0;
+        unsigned msgs0 = S.dal_msgs;
+        S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x60;
+        S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE] = 0x60;
+        dcn32_clk_read(dev, &ck0);
+        CHECK(dcn32_clk_fits(&ck0, st.head[0].pclk_khz) == RDNA3_EBUSY);
+        CHECK(dcn32_state_restore(dev, NULL, &dc, &st, 0, 0, 0) == RDNA3_ENODEV);   /* no DMCUB: before the clocks */
+        CHECK(S.dal_msgs == msgs0);
+        S.dmub.nseq = 0;
+        CHECK(dcn32_state_restore(dev, dm, &dc, &st, 0, 0, 0) == RDNA3_OK);
+        dcn32_clk_read(dev, &ck0);
+        CHECK(dcn32_clk_fits(&ck0, st.head[0].pclk_khz) == RDNA3_OK && S.dal_hard_min[RD_PPCLK_DISPCLK] &&
+              S.dal_hard_min[RD_PPCLK_DPPCLK] && S.dal_msgs > msgs0);
+        /* back to the power-loss state for the order checks below */
+        st_wipe(0, 1, 1, 0, 3, 3);
+        S.reg[DCN_B2 + 0x0475] = S.reg[DCN_B2 + 0x0476] = 0;
+        S.reg[DCN_B1 + 0x007b] = 0;
+    }
     S.reg[RD_CLK1_CLK0_DFS_CNTL] = 0x18;
+    S.reg[RD_CLK1_CLK0_DFS_CNTL + RD_CLK1_DFS_STRIDE] = 0x18;
     CHECK(dcn32_state_restore(dev, NULL, &dc, &st, 0, 0, 0) == RDNA3_ENODEV);
     i = S.dcn_gated_drops;
     S.dmub.nseq = 0;
