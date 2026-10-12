@@ -375,6 +375,14 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
     if (a->fDispLock) {
         IOLockLock(a->fDispLock);
         a->fDispAsleep = false;
+        if (resume && (powerLost || suspended)) {
+            /* dcn32_init_hw: "we want to turn off all dp displays before
+             * doing detection": a DP sink still in D0 is blanked and put
+             * to D3; the restore trains it again */
+            int nb = dcn32_dp_link_blank_all_dp_displays(a->fDpLink, 4);
+            if (nb)
+                LOG("wake: %d DP display(s) blanked before the restore (link_blank_all_dp_displays)", nb);
+        }
         if (resume) {
             lost = a->displayStateRestore("wake", true);
         } else if (!powerLost && a->fDcn) {

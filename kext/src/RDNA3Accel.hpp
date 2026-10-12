@@ -304,6 +304,7 @@ private:
     void          hotplugInit();
     void          hotplugStop();
     void          hotplugSuspend();   /* system sleep: no looks until hotplugResume */
+    void          hotplugDpLinkCheck();   /* the hotplug tick: DP link loss */
     void          hotplugResume();    /* the wake work, fDispLock not held */
     void          hotplugFree();
     bool          hotplugKick();

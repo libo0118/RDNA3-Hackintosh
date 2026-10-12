@@ -8226,6 +8226,38 @@ static void test_dp_state(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const r
     S.dcn_frames = 1;
     CHECK(dcn32_state_check(dev, &st, 0, 50, &k) == 0 && k.frames > 0 && !k.blanked && k.dig_on);
     S.dcn_frames = 0;
+
+    /* 5. the sink loses the link (dp_handle_link_loss): the check sees the
+     * lane status fall, the stream goes off and is trained again */
+    {
+        uint32_t hh[RD_DCN_MAX_PIPES];
+        rdna3_mode m;
+        dcn32_modeset_head_mode(&dc->head[0], 241500, &m);
+        memcpy(st_snap, S.reg, sizeof(st_snap));
+        CHECK(!dcn32_dp_link_lost(&dp) && dcn32_dp_link_master_heads_on(&dp, dc, hh) == 1 && hh[0] == 0);
+        S.dps.cr = S.dps.eq = 0;
+        CHECK(dcn32_dp_link_lost(&dp));
+        runs = dp.lt_runs;
+        CHECK(dcn32_dp_handle_link_loss(&dp, dc, &m) == RDNA3_OK && dp.lt_runs > runs && dp.link_losses == 1 &&
+              !dcn32_dp_link_lost(&dp) && S.dps.trained_rate == RD_DP_LINK_RATE_HIGH);
+        CHECK(st_diff("dp after the link loss") == 0);
+        /* 6. link_set_all_streams_dpms_off_for_link: the stream and the PHY off */
+        dcn32_dp_link_set_all_streams_dpms_off(&dp, dc);
+        CHECK(!dp.link_active && dcn32_dp_link_master_heads_on(&dp, dc, hh) == 0 && !dcn32_dp_link_lost(&dp) &&
+              !(S.reg[DIGN(regDIG0_DIG_BE_EN_CNTL, 1)] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK));
+        CHECK(dcn32_dp_handle_link_loss(&dp, dc, &m) == RDNA3_OK && dp.link_losses == 1);   /* nothing on */
+        /* 7. link_blank_all_dp_displays (dcn32_init_hw): a lit sink in D0 is
+         * blanked and put to D3; one in D3 is left alone */
+        CHECK(dcn32_dp_link_set_dpms_on(&dp, &m, 0) == RDNA3_OK && S.dpcd[0x600] == RD_DP_SET_POWER_D0);
+        {
+            rdna3_dp_link *ls[2] = { &dp, NULL };
+            CHECK(dcn32_dp_link_blank_all_dp_displays(ls, 2) == 1 && S.dpcd[0x600] == RD_DP_SET_POWER_D3 &&
+                  !(S.reg[DPR(regDP0_DP_VID_STREAM_CNTL, 2)] & DP0_DP_VID_STREAM_CNTL__DP_VID_STREAM_ENABLE_MASK));
+            CHECK(dcn32_dp_link_blank_all_dp_displays(ls, 2) == 0);
+        }
+        CHECK(dcn32_dp_link_set_dpms_on(&dp, &m, 0) == RDNA3_OK && S.dpcd[0x600] == RD_DP_SET_POWER_D0 &&
+              dcn32_dp_link_ok(&dp));
+    }
     st_nign = 0;
     S.reg[DCN_B2 + 0x0475] = S.reg[DCN_B2 + 0x0476] = 0;
 }

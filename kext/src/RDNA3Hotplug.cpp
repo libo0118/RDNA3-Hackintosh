@@ -48,6 +48,9 @@ extern "C" {
 #include "vbios.h"
 #include "dcn32_clone.h"
 #include "dchpd.h"
+#include "dcn32_dp.h"
+#include "dcn32_modeset.h"
+#include "dcn32_state.h"
 }
 #include "rdna3k_abi.h"
 
@@ -60,6 +63,8 @@ struct RDNA3HotplugState {
     uint64_t        lastPoll;                 /* mach absolute time */
     uint32_t        headGen[RD3K_MAX_HEADS];
     uint32_t        actions, clonesOn, clonesOff, bootReports, noEdid;
+    uint32_t        ticks, linkLosses;
+    uint8_t         lossFails[4];             /* trainings in a row that failed, per head */
     bool            suspended;                /* stopped for a system sleep */
     uint32_t        resumes;
 };
@@ -197,11 +202,49 @@ void RDNA3Accel::hotplugTick(void *owner, void *)
         a->hotplugPublish(raw, changed);
     if (changed)
         a->hotplugHandle(changed);
+    if (!hp->stop && ++hp->ticks % 4 == 0)
+        a->hotplugDpLinkCheck();   /* every 2 s: a DP link that lost its lock */
     if (!hp->stop) {
         uint64_t now;
         clock_get_uptime(&now);
         thread_call_enter_delayed(hp->call, now + hpPollAbs());
     }
+}
+
+/* dc_link_handle_hpd_rx_irq's link-loss part for the DP heads this driver
+ * lit (rdna3dplink=1): amdgpu learns of it from the HPD RX interrupt (the
+ * sink's short pulse) and reads the link status; that interrupt is not
+ * taken here, so the status (DPCD 0x200..0x205) is read every 2 s instead.
+ * A link that lost its lock is trained again (dp_handle_link_loss) at the
+ * mode its head runs. */
+void RDNA3Accel::hotplugDpLinkCheck()
+{
+    if (!fDispLock || !fDcn || fDispAsleep || !rd3_arg("rdna3dplink", 0))
+        return;
+    IOLockLock(fDispLock);
+    for (uint32_t i = 0; i < fDcn->nheads && i < 4; i++) {
+        rdna3_dp_link *l = fDpLink[i];
+        if (!l || fHeadLinkDown[i] || fDispAsleep || fHp->lossFails[i] >= 3 || !dcn32_dp_link_lost(l))
+            continue;
+        const rdna3_display_path *p = displayHeadPath(i);
+        uint32_t khz = displayHeadPclk(i, p);
+        if (!khz && fDispState && fDispState->head[i].valid)
+            khz = fDispState->head[i].pclk_khz;
+        if (!khz) {
+            LOG("display: head %u: the DP link lost its lock, no pixel clock known to train it again", i);
+            continue;
+        }
+        rdna3_mode m;
+        dcn32_modeset_head_mode(&fDcn->head[i], khz, &m);
+        l->dm = fDisplayDm;
+        int r = dcn32_dp_handle_link_loss(l, fDcn, &m);
+        fHp->linkLosses++;
+        fHp->lossFails[i] = r ? (uint8_t)(fHp->lossFails[i] + 1) : 0;
+        setNumber("RDNA3,DPLinkLosses", fHp->linkLosses);
+        LOG("display: head %u: the DP link lost its lock: trained again (%d)%s", i, r,
+            fHp->lossFails[i] >= 3 ? "; three failures in a row: no more tries until a hotplug" : "");
+    }
+    IOLockUnlock(fDispLock);
 }
 
 /* RDNA3,HPDState: "HPD1 1 HPD2 0 ..." (debounced), a pin whose last look
@@ -278,8 +321,11 @@ void RDNA3Accel::hotplugHandle(uint32_t changed)
         hotplugTidyProps();
         /* the heads this pin feeds: their framebuffers re-ask */
         for (uint32_t h = 0; fDcn && h < fDcn->nheads && h < RD3K_MAX_HEADS; h++)
-            if (dchpd_head_pin(&fDcn->head[h], fPaths, fNPaths) == (int)pin)
+            if (dchpd_head_pin(&fDcn->head[h], fPaths, fNPaths) == (int)pin) {
                 hp->headGen[h]++;
+                if (h < 4)
+                    hp->lossFails[h] = 0;   /* a new sink: link losses are looked at again */
+            }
         rdna3_hp_view v;
         v.boot_pin = fDcn && fDcn->nheads ? dchpd_head_pin(&fDcn->head[0], fPaths, fNPaths) : -1;
         v.clone_pin = fMirrorOn && fMirror ? fMirror->hpd : -1;

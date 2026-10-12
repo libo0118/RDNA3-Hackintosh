@@ -1703,6 +1703,52 @@ void dcn32_dp_enable_link_phy(rdna3_dp_link *l, const rdna3_dp_link_settings *s)
     dpcd_write_rx_power_ctrl(l, 1);
 }
 
+/* dcn10_get_dig_frontend: the front end the back end takes (its one
+ * DIG_FE_SOURCE_SELECT bit), -1 for none */
+static int dcn10_get_dig_frontend(rdna3_dp_link *l)
+{
+    uint32_t sel = GET(RI(l->d, regDIG0_DIG_BE_CNTL, l->be, DIG_S), DIG0_DIG_BE_CNTL, DIG_FE_SOURCE_SELECT), i;
+    for (i = 0; i < 7; i++)
+        if (sel == (1u << i))
+            return (int)i;
+    return -1;
+}
+
+void dcn32_dp_link_blank_dp_stream(rdna3_dp_link *l, int hw_init)
+{
+    if (dcn10_is_dig_enabled(l)) {
+        int fe = dcn10_get_dig_frontend(l);
+        if (fe >= 0) {
+            /* the stream encoder the back end takes: dp_blank on it */
+            uint32_t keep = l->fe;
+            l->fe = (uint32_t)fe;
+            enc1_stream_encoder_dp_blank(l);
+            l->fe = keep;
+        }
+    }
+    if (!l->keep_receiver_powered || hw_init)
+        dpcd_write_rx_power_ctrl(l, 0);
+}
+
+int dcn32_dp_link_blank_all_dp_displays(rdna3_dp_link *const *links, uint32_t n)
+{
+    uint32_t i;
+    int k = 0;
+    for (i = 0; i < n; i++) {
+        rdna3_dp_link *l = links[i];
+        uint8_t st = 0;
+        if (!l || !l->d || !l->caps_valid || l->mst)
+            continue;   /* no DP sink known on it (local_sink NULL) */
+        /* "DP 2.0 spec requires that we read LTTPR caps first" */
+        dp_retrieve_lttpr_cap(l);
+        if (core_link_read_dpcd(l, RD_DPCD_SET_POWER, &st, 1) == RDNA3_OK && st == RD_DP_SET_POWER_D0) {
+            dcn32_dp_link_blank_dp_stream(l, 1);
+            k++;
+        }
+    }
+    return k;
+}
+
 /* dp_disable_link_phy: dcn32_disable_link_output -> the link hwss's
  * disable_link_output (DIO or HPO, as the running setting has it) */
 void dcn32_dp_disable_link_phy(rdna3_dp_link *l)
@@ -3474,6 +3520,59 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
         RLOG(l->d, "dp: 128b/132b SST payload: %u time slots, VC rate X.Y %u.%u, hblank min symbol width %u, ACT %s",
              l->sst_slots, l->sst_vcp_x, l->sst_vcp_y, l->hblank_min_symbol_width, l->sst_act ? "handled" : "NOT handled");
     return status;
+}
+
+/* is_master_pipe_for_link + link_get_master_pipes_with_dpms_on: the heads
+ * whose OTG feeds the link's stream while it is on (DC's stream dpms_off
+ * false: here the stream link_set_dpms_on left active) */
+uint32_t dcn32_dp_link_master_heads_on(const rdna3_dp_link *l, const rdna3_dcn *dc, uint32_t *heads)
+{
+    uint32_t h, n = 0;
+    if (!l->link_active || !dc)
+        return 0;
+    for (h = 0; h < dc->nheads && h < RD_DCN_MAX_PIPES; h++)
+        if (dc->head[h].otg == l->otg)
+            heads[n++] = h;
+    return n;
+}
+
+void dcn32_dp_link_set_all_streams_dpms_off(rdna3_dp_link *l, const rdna3_dcn *dc)
+{
+    uint32_t heads[RD_DCN_MAX_PIPES];
+    if (dcn32_dp_link_master_heads_on(l, dc, heads))
+        dcn32_dp_link_set_dpms_off(l);
+    /* "link can be also enabled by vbios. In this case it is not recorded
+     * in pipe_ctx. Disable link phy here to make sure it is completely off" */
+    dcn32_dp_disable_link_phy(l);
+}
+
+int dcn32_dp_handle_link_loss(rdna3_dp_link *l, const rdna3_dcn *dc, const rdna3_mode *m)
+{
+    uint32_t heads[RD_DCN_MAX_PIPES];
+    rdna3_dsc_config cfg = l->dsc_cfg;
+    int dsc = l->stream_dsc, r;
+    if (!dcn32_dp_link_master_heads_on(l, dc, heads))
+        return RDNA3_OK;
+    /* link_set_dpms_off (it forgets the stream's DSC, DC keeps it in the
+     * stream), then link_set_dpms_on at the stream's own settings */
+    dcn32_dp_link_set_dpms_off(l);
+    l->stream_dsc = dsc;
+    l->dsc_cfg = cfg;
+    l->link_losses++;
+    r = dcn32_dp_link_set_dpms_on(l, m, 0);
+    RLOG(l->d, "dp: UNIPHY %u: link loss: the stream down and trained again (%d)", l->be, r);
+    return r;
+}
+
+int dcn32_dp_link_lost(rdna3_dp_link *l)
+{
+    uint8_t sc = 0;
+    /* hpd_rx_irq_check_link_loss_status, for an active SST link; a sink
+     * that does not answer (dp_read_hpd_rx_irq_data failed) is no loss */
+    if (!l->link_active || l->mst || !l->cur_link_settings.lane_count ||
+        core_link_read_dpcd(l, RD_DPCD_SINK_COUNT, &sc, 1) != RDNA3_OK)
+        return 0;
+    return !dcn32_dp_link_ok(l);
 }
 
 /* ---- link_validation.c ---- */

@@ -441,6 +441,7 @@ typedef struct rdna3_dp_link {
     struct rdna3_mst_mgr *mgr;
     int      mst_port;
     int      link_active;
+    uint32_t link_losses;           /* dcn32_dp_handle_link_loss runs (log, reports) */
     rdna3_mst_alloc_table mst_alloc;
     uint32_t mst_pbn, mst_slots, mst_vcp_x, mst_vcp_y;   /* the last payload (log, tests) */
     int      mst_act;               /* the last ACT handled */
@@ -582,6 +583,16 @@ int  dcn32_dp_perform_link_training(rdna3_dp_link *l, const rdna3_dp_link_settin
 int  dcn32_dp_link_training_with_retries(rdna3_dp_link *l, const rdna3_dp_link_settings *set, int skip_video_pattern,
                                          int attempts, int do_fallback, uint32_t req_kbps);
 
+/* link_blank_dp_stream: the stream of the front end the link's DIG back
+ * end takes blanked (dp_blank) when that DIG runs, then the sink's
+ * receiver to D3 (unless keep_receiver_powered, always with 'hw_init') */
+void dcn32_dp_link_blank_dp_stream(rdna3_dp_link *l, int hw_init);
+/* link_blank_all_dp_displays (dcn32_init_hw: "we want to turn off all dp
+ * displays before doing detection"): every SST link of 'links' with a sink
+ * known (caps read) whose DPCD SET_POWER reads D0 (the LTTPR caps read
+ * first) gets link_blank_dp_stream(hw_init). Returns how many. */
+int  dcn32_dp_link_blank_all_dp_displays(rdna3_dp_link *const *links, uint32_t n);
+
 /* dp_enable_link_phy / dp_disable_link_phy */
 void dcn32_dp_enable_link_phy(rdna3_dp_link *l, const rdna3_dp_link_settings *set);
 void dcn32_dp_disable_link_phy(rdna3_dp_link *l);
@@ -636,6 +647,19 @@ int  dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fal
 
 /* the link status bits (DPCD 0x202..0x204) still hold: dp_check_link_loss_status */
 int  dcn32_dp_link_ok(rdna3_dp_link *l);
+/* hpd_rx_irq_check_link_loss_status for an active SST link: 1 = the sink
+ * lost the link (no HPD RX interrupt here: the caller polls) */
+int  dcn32_dp_link_lost(rdna3_dp_link *l);
+/* link_get_master_pipes_with_dpms_on: the heads of 'dc' feeding the link's
+ * stream while it is on, into heads[RD_DCN_MAX_PIPES]; returns how many */
+uint32_t dcn32_dp_link_master_heads_on(const rdna3_dp_link *l, const rdna3_dcn *dc, uint32_t *heads);
+/* link_set_all_streams_dpms_off_for_link: the stream off (link_set_dpms_off)
+ * when on, then dp_disable_link_phy (a link the VBIOS lit is off too) */
+void dcn32_dp_link_set_all_streams_dpms_off(rdna3_dp_link *l, const rdna3_dcn *dc);
+/* dp_handle_link_loss: the stream off and on again at mode 'm' (the one
+ * its head runs), trained at the link's settings; its DSC kept. 0 when no
+ * stream is on, else what link_set_dpms_on returns. */
+int  dcn32_dp_handle_link_loss(rdna3_dp_link *l, const rdna3_dcn *dc, const rdna3_mode *m);
 
 /* a link rate's name (log, reports) */
 const char *dcn32_dp_rate_name(uint32_t link_rate);
