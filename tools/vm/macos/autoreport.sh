@@ -225,6 +225,43 @@ prog() {
     fi
 }
 hl=0
+# the CTS subset (step cts): every "<seconds> <pattern>" line of
+# $D/cts/patterns.txt in its own deqp-vk run; prints per group and in total
+# what passed, failed and was not supported, the failing (or, when a run
+# was killed, the hanging) cases. 0 when nothing failed or timed out.
+cts_run() {
+    icd=/tmp/rdna3-radeon_icd.json
+    printf '{\n    "file_format_version": "1.0.0",\n    "ICD": {\n        "library_path": "%s/libvulkan_radeon.dylib",\n        "api_version": "1.4.0"\n    }\n}\n' \
+        "$D/bin" > "$icd"
+    cp=0; cf=0; cn=0; ct=0; cto=0; i=0
+    while read -r t p; do
+        case "$t" in ''|\#*) continue ;; esac
+        i=$((i + 1))
+        o=/tmp/rdna3-cts-$i.txt
+        ( cd "$D/cts" && DYLD_LIBRARY_PATH="$D/cts:$D/bin" VK_DRIVER_FILES="$icd" VK_ICD_FILENAMES="$icd" \
+            with_limit "$t" ./deqp-vk --deqp-vk-library-path="$D/cts/libvulkan.1.dylib" --deqp-case="$p" \
+                --deqp-log-filename="/tmp/rdna3-cts-$i.qpa" --deqp-log-images=disable \
+                --deqp-log-shader-sources=disable --deqp-shadercache=disable ) > "$o" 2>&1
+        r=$?
+        tot=$(sed -n 's/^ *Passed: *\([0-9]*\)\/\([0-9]*\).*/\1 \2/p' "$o" | tail -1)
+        f=$(sed -n 's/^ *Failed: *\([0-9]*\)\/.*/\1/p' "$o" | tail -1)
+        n=$(sed -n 's/^ *Not supported: *\([0-9]*\)\/.*/\1/p' "$o" | tail -1)
+        if [ -n "$tot" ]; then
+            set -- $tot
+            echo "CTS $p: pass $1, fail ${f:-0}, not supported ${n:-0} (of $2)"
+            cp=$((cp + $1)); cf=$((cf + ${f:-0})); cn=$((cn + ${n:-0})); ct=$((ct + $2))
+        else
+            cto=$((cto + 1))
+            echo "CTS $p: no totals (exit $r: killed at ${t} s or crashed) - last case started:"
+            grep "^Test case '" "$o" | tail -1 | sed 's/^/    /'
+            tail -5 "$o" | sed 's/^/    | /'
+        fi
+        awk '/^Test case / { c = $3 } /^  (Fail|Crash|InternalError|ResourceError|Timeout)/ { print "    FAIL " c " " $0 }' \
+            "$o" | head -20
+    done < "$D/cts/patterns.txt"
+    echo "CTS: pass $cp, fail $cf, not supported $cn of $ct cases; $cto group(s) without totals"
+    [ "$cf" -eq 0 ] && [ "$cto" -eq 0 ]
+}
 hdr() {   # a test starts: its header in the results, a line in the window
     echo "== $*"
     hl=$(wc -l < "$extra" 2>/dev/null || echo 0)
@@ -235,7 +272,7 @@ done_() {   # done_ EXIT: the test's exit code and summary line
     echo "[exit $1]"
     partial
     sum=$(tail -n +"$((hl + 1))" "$extra" 2>/dev/null |
-          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|PMCTL:|BACO:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
+          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|PMCTL:|BACO:|CTS:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
     if [ "$1" = 0 ]; then prog "    OK  ${sum}"; else prog "    FAIL (exit $1)  ${sum}"; fi
 }
 [ -n "$win" ] || { rm -f "$P"; touch "$P"; chmod 644 "$P"; }
@@ -440,6 +477,24 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             "$D/bin/libvulkan_radeon.dylib" 2>&1
         done_ $?
     fi
+    # Vulkan CTS subset (rdna3cts=1, V2): deqp-vk from `rdna3vm cts` through
+    # the Khronos loader and RADV's ICD, one run per line of its
+    # patterns.txt (a time limit each); totals per group, the failing cases
+    case " $args " in
+    *" rdna3cts=1 "*)
+        ctsum=$([ -n "$HOST" ] && curl -sf --max-time 10 "$HOST/rdna3-cts.sha256" | cut -c1-64)
+        if [ -n "$ctsum" ] && [ "$ctsum" != "$(cat "$D/cts.sha256" 2>/dev/null)" ]; then
+            rm -rf "$D/cts"
+            curl -sf --max-time 900 "$HOST/rdna3-cts.tar.gz" | tar -xz -C "$D" && echo "$ctsum" > "$D/cts.sha256"
+        fi
+        if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/cts/deqp-vk" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then
+            hdr "Vulkan CTS subset ($(cut -d, -f1 "$D/cts/VERSION" 2>/dev/null))"
+            cts_run
+            done_ $?
+        else
+            echo "== Vulkan CTS: no deqp-vk bundle (rdna3vm cts) or no RADV in the report's bin"
+        fi ;;
+    esac
     # Metal (build_metal.sh installed the plugin): devices and a compute
     # kernel through plugin -> translator -> RADV; the plugin's log after it
     if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/mtlprobe" ] && [ -d /Library/GPUBundles/RDNA3MTLDriver.bundle ]; then

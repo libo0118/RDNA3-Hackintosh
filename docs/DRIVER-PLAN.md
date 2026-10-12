@@ -163,6 +163,8 @@ standby (link off), display restore after a mode-1 GPU reset.
 
 | A2: swap copies onto a scanout by SDMA (`rdna3CopyVram`: HDP flush, COPY_LINEAR per row, one fence) instead of the CPU through the BAR, no 120-frame cap | (A2 batch) | `rdna3accelsdma=1`, step `accelsdma` and `big4`; three refusals in a row hand the swaps back to the CPU |
 
+| V2: Vulkan CTS subset in the report (`tools/cts/patterns.txt`, ~2360 cases), `deqp-vk` + the Khronos loader built by build.yml with `cts` on the macOS runner | (V2 batch) | step `cts` after `rdna3vm cts` |
+
 DSC over MST needs an MST hub with a DSC monitor behind it on the card: a
 bench with one runs step `mst` with `rdna3dsc=1` and a mode beyond the
 port's bandwidth (4K60 on an HBR2 x2 port).

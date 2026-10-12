@@ -57,6 +57,10 @@ baco rdna3lvl=8 rdna3msi=1 rdna3pm=2 rdna3pmctl=1 rdna3baco=1
 # both monitors, the accelerator with its gates open (desktop composited
 # through it on both heads)
 big rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2
+# V2: the Vulkan CTS subset (tools/cts/patterns.txt, about 2360 cases) on
+# the desktop of step metal, after the report's own tests; needs the deqp-vk
+# bundle of build.yml with cts (rdna3vm cts) in the VM share, RADV in its bin
+cts rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3cts=1
 # A2: big with the swap copies onto a scanout by SDMA in the core kext
 accelsdma rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3accelsdma=1
 # round 18: big + the idle-power experiment (60 s) then the idle GFXCLK

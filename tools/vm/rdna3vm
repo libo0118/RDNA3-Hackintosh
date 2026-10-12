@@ -15,6 +15,8 @@
 #   rdna3vm result                                the last run's reports in ONE file to send
 #                                                 (~/Downloads/rdna3-result.tar.gz, replaced each time)
 #   rdna3vm update                                git pull + the newest CI artifact + prepare
+#   rdna3vm cts [rdna3-cts.zip]                   the Vulkan CTS subset step cts runs (without a
+#                                                 zip: the newest rdna3-cts artifact of CI)
 #
 # Everything lives in $RDNA3VM_DIR (default ~/rdna3-vm).
 set -euo pipefail
@@ -432,6 +434,9 @@ auto_limit() {
     # rdna3resume=1: a system sleep, and a restart to send the results when
     # the VM's network did not come back from it
     case " $1 " in *" rdna3resume=1 "*) m=$((m + 5)) ;; esac
+    # rdna3cts=1: the CTS subset's time limits (tools/cts/patterns.txt: 41
+    # min at most) and the bundle's download
+    case " $1 " in *" rdna3cts=1 "*) m=$((m + 45)) ;; esac
     echo "$m"
 }
 
@@ -1065,6 +1070,38 @@ cmd_result() {
     echo "Send this one file. The next 'rdna3vm result' replaces it."
 }
 
+# the Vulkan CTS subset (V2): deqp-vk + the loader built by build.yml's
+# cts-macos job (a run with cts), put
+# next to the bundle; the report fetches it in step cts (rdna3cts=1)
+cmd_cts() {
+    local zip=${1:-} remote slug run_no art st f
+    mkdir -p "$WORK/share"
+    if [ -z "$zip" ]; then
+        remote=$(git -C "$ROOT" remote get-url origin)
+        slug=$(printf '%s\n' "$remote" | sed -E 's#^.*github\.com[:/]+##; s#\.git$##')
+        say "newest rdna3-cts artifact of $slug (build.yml run with cts)"
+        read -r art run_no < <(gh_api "repos/$slug/actions/artifacts?name=rdna3-cts&per_page=10" | python3 -c '
+import json, sys
+a = [x for x in json.load(sys.stdin)["artifacts"] if not x["expired"]]
+print(*(a[0]["id"], a[0]["workflow_run"]["id"]) if a else ("", ""))')
+        [ -n "$art" ] || die "no rdna3-cts artifact (Actions -> build -> Run workflow with cts; it expires after 30 days)"
+        zip=$WORK/rdna3-cts.zip
+        gh_api "repos/$slug/actions/artifacts/$art/zip" "$zip.part" || die "download failed"
+        mv "$zip.part" "$zip"
+        ok "artifact of run $run_no"
+    fi
+    [ -f "$zip" ] || die "no $zip"
+    st=$(mktemp -d)
+    $VMTOOL unzip "$zip" "$st"
+    f=$(find "$st" -name rdna3-cts.tar.gz | head -1)
+    [ -n "$f" ] || { rm -rf "$st"; die "$zip has no rdna3-cts.tar.gz"; }
+    cp "$f" "$WORK/share/rdna3-cts.tar.gz"
+    sha256sum "$WORK/share/rdna3-cts.tar.gz" | cut -d' ' -f1 > "$WORK/share/rdna3-cts.sha256"
+    tar -xzOf "$f" cts/VERSION 2>/dev/null || true
+    rm -rf "$st"
+    ok "$WORK/share/rdna3-cts.tar.gz: step cts runs it (rdna3vm step cts)"
+}
+
 cmd_reports() {
     ls -lt "$WORK/reports" | head -30
     echo
@@ -1083,8 +1120,9 @@ case "${1:-}" in
     reports) shift; cmd_reports "$@" ;;
     result|results) shift; cmd_result "$@" ;;
     update) shift; cmd_update "$@" ;;
+    cts) shift; cmd_cts "$@" ;;
     _update) shift; cmd__update "$@" ;;
     _oc) shift; cmd__oc "$@" ;;
     _passthrough) shift; cmd__passthrough "$@" ;;
-    *) sed -n '2,17p' "$SELF"; exit 1 ;;
+    *) sed -n '2,19p' "$SELF"; exit 1 ;;
 esac

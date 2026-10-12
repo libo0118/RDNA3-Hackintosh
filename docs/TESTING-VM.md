@@ -367,6 +367,23 @@ and `rdna3_vktest` where the report runs them.
 From step 8 on the report then has a `== rdna3_vktest` section: RADV creates
 a Vulkan device on the card and fills and copies buffers on every queue.
 
+### Vulkan CTS subset (step cts)
+
+With RADV in the VM, the report can run a fixed part of the Vulkan
+conformance tests (`tools/cts/patterns.txt`, about 2360 cases, up to 45
+minutes). The `deqp-vk` build comes from CI: Actions -> build -> Run
+workflow with `cts` on (the first build takes about an hour on the macOS
+runner, later ones minutes). Then, once per CTS build:
+
+```sh
+rdna3vm cts          # the newest rdna3-cts artifact into the VM's share
+rdna3vm step cts
+```
+
+The report's `== Vulkan CTS subset` section has one line per group (pass,
+fail, not supported) and the failing cases; a group that hangs is killed at
+its time limit and named with the case it was in. Triage prints the total.
+
 ### Metal plugin (optional, once)
 
 After `build_radv.sh`, in the same `rdna3vm window` session:

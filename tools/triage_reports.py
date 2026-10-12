@@ -410,6 +410,18 @@ def summary(path, serial=None):
         out.append(("screens %s" % (look.group(1) if look else "1"),
                     "%d lit%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
                                       ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "")))
+    # the Vulkan CTS subset (step cts): the total, the groups that failed or
+    # hung, the first failing cases
+    cts = re.search(r"^CTS: .*$", txt, re.M)
+    if cts:
+        out.append(("Vulkan CTS", cts.group(0)[5:][:100]))
+        bad = re.findall(r"^CTS (dEQP\S+): (pass \d+, fail [1-9]\d*.*|no totals.*)$", txt, re.M)
+        for g, v in bad[:8]:
+            out.append(("  " + g[:40], v[:70]))
+        for c in re.findall(r"^    FAIL '([^']+)'", txt, re.M)[:10]:
+            out.append(("  failed case", c[:90]))
+    elif "== Vulkan CTS: no deqp-vk bundle" in txt:
+        out.append(("Vulkan CTS", "not run: no deqp-vk bundle in the VM (rdna3vm cts)"))
     for pat, name in ((r"^MODES: .*$", "scaled modes"), (r"^GAMMA: .*$", "gamma"), (r"^SOAK: .*$", "soak"),
                       (r"^HANG TEST: .*$", "hang test"), (r"^VCN TEST: .*$", "video (VCN)")):
         m = re.search(pat, txt, re.M)

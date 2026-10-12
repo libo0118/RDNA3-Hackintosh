@@ -23,9 +23,14 @@ on:
         description: 'With full off: build RADV + rdna3_vktest too (no Metal plugin)'
         type: boolean
         default: false
+      cts:
+        description: 'Build the Vulkan CTS subset for step cts (deqp-vk + loader, an hour the first time)'
+        type: boolean
+        default: false
 
+# a CTS build (an hour) has its own group: a push does not cancel it
 concurrency:
-  group: build-${{ github.ref }}
+  group: build-${{ github.ref }}${{ inputs.cts && '-cts' || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -216,6 +221,40 @@ jobs:
         continue-on-error: true
         working-directory: metal/translator/translator
         run: cargo test --release --target-dir "$XLATE_TARGET" --test leaf_memcpy_interior_field
+
+  cts-macos:
+    # The Vulkan CTS subset of the card report (V2): deqp-vk + the Khronos
+    # loader for the macOS VM, on request only. The clones and build trees
+    # stay in the runner's tool cache, so a rebuild is quick. The artifact
+    # goes to the VM with `rdna3vm cts`; step cts runs it.
+    if: inputs.cts
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools (Python 3.12 venv with cmake + ninja, as radv-macos)
+        run: |
+          T="$RUNNER_TOOL_CACHE/rdna3-radv"
+          mkdir -p "$T"
+          tools/ci/install_tools.sh uv
+          export PATH="$HOME/.local/bin:$PATH"
+          [ -x "$T/venv/bin/python3" ] || uv venv --python 3.12 "$T/venv"
+          uv pip install --python "$T/venv/bin/python3" --quiet cmake ninja
+          echo "$T/venv/bin" >> "$GITHUB_PATH"
+      - name: Build deqp-vk + the loader
+        run: tools/ci/build_cts.sh build/cts-out "$RUNNER_TOOL_CACHE/rdna3-cts"
+      - name: deqp-vk starts without a driver (lists the smoke cases)
+        run: |
+          d=$(mktemp -d)
+          tar -xzf build/cts-out/rdna3-cts.tar.gz -C "$d"
+          cd "$d/cts"
+          file deqp-vk libvulkan.1.dylib
+          ./deqp-vk --deqp-runmode=stdout-caselist --deqp-case='dEQP-VK.api.smoke.*' | head -20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rdna3-cts
+          path: build/cts-out/rdna3-cts.tar.gz
+          retention-days: 30
 
   radv-macos:
     # Experimental: drives the Stage 5 port. Failures here are the to-do list.
