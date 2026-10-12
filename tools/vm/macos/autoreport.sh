@@ -324,6 +324,15 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     # why the Auxiliary KC keeps an old RDNA3Framebuffer (first card runs:
     # kernelmanagerd "invalid codeful kernel extension in the restricted
     # lookup table" for every /Library/Extensions copy)
+    # the builds that run against the ones installed (stale_kexts: an
+    # automatic boot stops on a difference; card run 39 went on with the
+    # framebuffer of the build before)
+    echo "== running vs installed framebuffer / accelerator"
+    for n in RDNA3Framebuffer:FBSource RDNA3Accelerator:AccelSource; do
+        k=${n%%:*}; key=${n#*:}
+        echo "$k: running $(ioreg -l -w0 -r -c "$k" -d 1 2>/dev/null | sed -n "s/.*\"RDNA3,$key\" = \"\([0-9a-f]*\)\".*/\1/p" | head -n 1), installed $(/usr/libexec/PlistBuddy -c "Print :RDNA3SourceHash" "/Library/Extensions/$k.kext/Contents/Info.plist" 2>/dev/null)"
+    done
+    echo "stale: $(stale_kexts | tr '\n' ';')"
     echo "== Auxiliary KC diagnostics"
     ls -l /Library/KernelCollections/ 2>&1
     kmutil showloaded --list-only 2>/dev/null | grep -i rdna3

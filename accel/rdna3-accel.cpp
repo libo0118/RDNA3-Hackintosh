@@ -323,6 +323,20 @@ public:
                  when, i, *(const volatile uint8_t *)(p + 0x298), *(const volatile uint8_t *)(p + 0x282));
         }
     }
+    /* the pipe slot whose framebuffer (pipe + 0x98, as the walk below reads
+     * it) is 'fb', or -1 */
+    int pipeOfFramebuffer(IOService *fb) {
+        if (!fDM || !fb) return -1;
+        uint8_t *dm = (uint8_t *)fDM;
+        uint32_t n = *(const volatile uint32_t *)(dm + 0x108);
+        if (n > 16) return -1;
+        for (uint32_t k = 0; k < n; k++) {
+            uint8_t *p = *(uint8_t *const volatile *)(dm + 0x88 + 8 * k);
+            if (p && *(IOService *const volatile *)(p + 0x98) == fb)
+                return (int)k;
+        }
+        return -1;
+    }
     unsigned registerPendingLocked(const char *why) {
         unsigned added = 0;
         for (unsigned i = 0; i < kRd3MaxFB; i++) {
@@ -334,6 +348,22 @@ public:
                 break;
             }
             if (fFBRegistered & (1u << i)) continue;
+            /* the family may have registered this framebuffer itself and
+             * given it a pipe already (card run 39: head 0 was known, the
+             * count stayed 1 -> 1, the head was never marked piped, and
+             * "only head piped" sent both displays' frames to head 1 -
+             * one monitor flickering, the other black) */
+            {
+                int have = pipeOfFramebuffer(fb);
+                if (have >= 0) {
+                    fFBRegistered |= 1u << i;
+                    gRd3HeadsRegistered = fFBRegistered;
+                    gRd3HeadsPiped |= 1u << i;
+                    ALOG("  %s: index %u already has pipe %d (registered by the family): marked piped", why, i, have);
+                    added++;
+                    continue;
+                }
+            }
             unsigned b = fDM->getFramebufferCount();
             ALOG("  %s: calling found_framebuffer(%s index %u) -- count before %u", why, fb->getName(), i, b);
             fDM->found_framebuffer((IOFramebuffer *)fb);

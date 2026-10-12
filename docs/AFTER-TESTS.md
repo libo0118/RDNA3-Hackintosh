@@ -1415,3 +1415,29 @@ Settings. That is expected for them, not a display regression.
   encode/decode and the user queue fence (diagnostics added: the ring /
   VCPU / MMHUB state on a timeout, the client's last GPUVM fault), M4
   presents never on screen, an underflow after the display wake.
+
+### Card run 39 (step big4, build 154; framebuffer / accelerator of build 152)
+
+- The second monitor lit at boot (the DMCUB fix held) and the extended
+  desktop came up, but one monitor flickered whenever something moved and
+  the other stayed black with only the cursor: the family had registered
+  head 0's framebuffer itself (pipe 0 active, `count went 1 -> 1`), the
+  accelerator never marked head 0 piped (`piped 0x2`), and "only head
+  piped" sent both displays' frames to head 1. Fixed: a head whose
+  framebuffer already drives a pipe is marked piped
+  (`pipeOfFramebuffer`).
+- Unplugging the HDMI monitor (head 0) blanked the other for ~20 s:
+  recheck with the routing fixed.
+- System sleep #1: QEMU kept the card powered through the guest's S3; the
+  wake found the PSP sOS running with its TMR freed and `LOAD_IP_FW SMC`
+  timed out (`resume #1 FAILED`); sleep #2 lost the card (config space all
+  1s), QEMU `vfio: Unable to power on device, stuck in D3`, and the host
+  hung handing it back (amdgpu `trn=2 ACK should not assert`). amdgpu
+  resets a dGPU at the end of every S3 suspend
+  (`amdgpu_pmops_suspend_noirq` -> `amdgpu_acpi_should_gpu_reset` ->
+  `amdgpu_asic_reset`, mode 1): ported into `systemSuspend`
+  (`RDNA3,SuspendResetResult`). `rdna3vm` reboots the host instead of
+  suspending it when QEMU reports the card stuck in D3.
+- The run used the framebuffer of build 152 although 154 was installed
+  and the queue did not stop: the report now prints the running and the
+  installed hashes (`== running vs installed`).

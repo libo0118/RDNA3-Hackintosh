@@ -2862,6 +2862,26 @@ bool RDNA3Bringup::systemSuspend()
     if (fKiq) { fKiq->rb.ready = 0; fKiq->mapped = 0; }
     if (fKcq) { fKcq->rb.ready = 0; fKcq->mapped = 0; }
     memset(fGdsKnown, 0, sizeof(fGdsKnown));
+    /* amdgpu_pmops_suspend_noirq: amdgpu_acpi_should_gpu_reset is true for
+     * a dGPU going to S3 (the target state is not s2idle), so
+     * amdgpu_asic_reset - mode 1 on MP1 13.0.10 (soc21_asic_reset ->
+     * amdgpu_device_mode1_reset): the wake starts from a reset GPU whether
+     * or not the platform cut its power. Card run 39: QEMU kept the card
+     * powered through the guest's S3, the wake found the sOS still running
+     * with its TMR freed and LOAD_IP_FW SMC timed out; the next sleep lost
+     * the card (config space all 1s) and the host hung taking it back */
+    if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu) {
+        uint32_t i;
+        fPci->setBusMasterEnable(false);
+        int r = smu13_mode1_reset(fDev);
+        for (i = 0; i < fDev->usec_timeout; i++) {
+            if (rdna3_rreg(fDev, mmRCC_CONFIG_MEMSIZE) != 0xffffffffu)
+                break;
+            IODelay(1);
+        }
+        BLOG("suspend #%u: mode-1 reset before the sleep (amdgpu_pmops_suspend_noirq) -> %d", fSystemSuspends, r);
+        publish("RDNA3,SuspendResetResult", (uint64_t)(int64_t)r);
+    }
     fSuspended = true;
     publish("RDNA3,SystemSuspends", fSystemSuspends);
     return true;

@@ -754,6 +754,15 @@ restore() {
     if [ "${RESTORE_MODE:-suspend}" = reboot ]; then
         echo "== rebooting (RESTORE_MODE=reboot)"; sync; systemctl reboot; return 0
     fi
+    # the card fell off in the VM (QEMU: "Unable to power on device, stuck
+    # in D3"): the suspend that power-cycles it and amdgpu's probe both hung
+    # the host on it (card run 39, amdgpu "trn=2 ACK should not assert" for
+    # minutes, the screens dark). Only a reboot brings it back
+    if [ -n "${RUNLOG:-}" ] && grep -q "stuck in D3" "$RUNLOG" 2>/dev/null; then
+        echo "== the card is stuck in D3 (lost in the VM): rebooting instead of handing it to amdgpu"
+        echo "   after the reboot: 'rdna3vm result' collects this run, 'rdna3vm queue' goes on"
+        sync; systemctl reboot; return 0
+    fi
     if [ "${RESTORE_MODE:-suspend}" = suspend ] && command -v rtcwake >/dev/null; then
         echo "== suspend to RAM for 5 s to power-cycle the card"
         sync; rtcwake -m mem -s 5 || echo "   suspend failed, going on"
@@ -799,6 +808,7 @@ cmd__passthrough() {
     local stamp log bdf d slot i rp
     stamp=$(date +%Y%m%d-%H%M%S)
     log=$WORK/reports/host-$stamp.log
+    RUNLOG=$log
     exec > >(tee -a "$log") 2>&1
     echo "boot-args: $RDNA3VM_BOOTARGS"
     cmd__oc --boot-args "$RDNA3VM_BOOTARGS" || exit 1
