@@ -299,15 +299,32 @@ EOF
 # into EFI/OC/Kexts and add them to Kernel/Add. OpenCore injects them into
 # the kernel at boot: kernelmanagerd refuses our ad-hoc signed kexts in the
 # Auxiliary KC ("invalid codeful kernel extension").
+# the OpenCore image's mount and loop device, undone however cmd__oc ends
+# (set -e, die, Ctrl-C): a leftover loop device keeps the image busy
+OC_MNT= OC_LOOP=
+oc_cleanup() {
+    if [ -n "$OC_MNT" ]; then
+        mountpoint -q "$OC_MNT" && { sync; umount "$OC_MNT" || umount -l "$OC_MNT"; }
+        rmdir "$OC_MNT" 2>/dev/null || true
+    fi
+    [ -n "$OC_LOOP" ] && losetup -d "$OC_LOOP" 2>/dev/null
+    OC_MNT= OC_LOOP=
+    return 0
+}
+
 cmd__oc() {
-    local img=$WORK/OpenCore-rdna3.img mnt loop part kdir=""
+    local img=$WORK/OpenCore-rdna3.img part kdir="" old_trap
     [ -f "$img" ] || die "no $img"
     if [ "${1:-}" = --kexts ]; then kdir=$2; shift 2; fi
-    mnt=$(mktemp -d)
-    loop=$(losetup --find --show --partscan "$img")
-    part=${loop}p1
-    [ -b "$part" ] || part=$loop
-    mount -t vfat "$part" "$mnt" || { losetup -d "$loop"; die "cannot mount OpenCore"; }
+    old_trap=$(trap -p EXIT)
+    trap 'oc_cleanup' EXIT
+    trap 'oc_cleanup; exit 130' INT TERM
+    OC_MNT=$(mktemp -d)
+    local mnt=$OC_MNT
+    OC_LOOP=$(losetup --find --show --partscan "$img")
+    part=${OC_LOOP}p1
+    [ -b "$part" ] || part=$OC_LOOP
+    mount -t vfat "$part" "$mnt" || die "cannot mount OpenCore"
     local rc=0 k n
     if [ -n "$kdir" ]; then
         rm -rf "$mnt"/EFI/OC/Kexts/RDNA3*.kext
@@ -321,7 +338,9 @@ cmd__oc() {
         done
     fi
     [ $rc = 0 ] && { $VMTOOL plist "$mnt/EFI/OC/config.plist" "$@" || rc=$?; }
-    sync; umount "$mnt"; losetup -d "$loop"; rmdir "$mnt"
+    oc_cleanup
+    trap - INT TERM
+    if [ -n "$old_trap" ]; then eval "$old_trap"; else trap - EXIT; fi
     return $rc
 }
 

@@ -56,11 +56,15 @@ static int pm_call(uint32_t op, uint32_t n, const int32_t *a, rdna3_pmctl_reply 
     uint32_t i;
     kern_return_t kr;
 
+    if (n > RD_PMCTL_MAX_ARGS) {   /* never send a count the arguments do not back */
+        fprintf(stderr, "%u arguments: at most %u\n", n, RD_PMCTL_MAX_ARGS);
+        return -EINVAL;
+    }
     memset(&rq, 0, sizeof(rq));
     rq.abi = RDNA3_PMCTL_ABI;
     rq.op = op;
     rq.nargs = n;
-    for (i = 0; i < n && i < RD_PMCTL_MAX_ARGS; i++)
+    for (i = 0; i < n; i++)
         rq.a[i] = a[i];
     kr = IOConnectCallMethod(conn, RDNA3_PMCTL_SELECTOR, NULL, 0, &rq, sizeof(rq), &err, &nout, rp, &rsz);
     if (kr != KERN_SUCCESS) {
@@ -446,7 +450,9 @@ int main(int argc, char **argv)
         a[0] = profile_index(argv[2]);
         if (a[0] < 0)
             return usage();
-        for (i = 3; i < argc && i - 2 < RD_PMCTL_MAX_ARGS; i++)
+        if (argc - 2 > RD_PMCTL_MAX_ARGS)
+            return usage();
+        for (i = 3; i < argc; i++)
             a[i - 2] = atoi(argv[i]);
         r = pm_call(RD_PMCTL_PROFILE, (uint32_t)(argc - 2), a, &rp);
     } else if (!strcmp(cmd, "profiles")) {

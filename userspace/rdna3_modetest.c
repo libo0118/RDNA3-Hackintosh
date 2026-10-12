@@ -157,6 +157,53 @@ static int set_ref(uint32_t di, CGDirectDisplayID id, CGDisplayModeRef m)
     return e == kCGErrorSuccess && got - want < 0.5 && want - got < 0.5 ? 0 : 1;
 }
 
+/* s appended to out single-quoted for sh (each ' as '\''); -1 when it
+ * does not fit, so a cut-off path never runs */
+static int shq(char *out, size_t n, const char *s)
+{
+    size_t o = strlen(out);
+    if (o + 3 > n)
+        return -1;
+    out[o++] = '\'';
+    for (; *s; s++) {
+        if (*s == '\'') {
+            if (o + 4 + 2 > n)
+                return -1;
+            memcpy(out + o, "'\\''", 4);
+            o += 4;
+        } else {
+            if (o + 1 + 2 > n)
+                return -1;
+            out[o++] = *s;
+        }
+    }
+    out[o++] = '\'';
+    out[o] = 0;
+    return 0;
+}
+
+/* "mkdir -p DIR/SUB && DRMINFO --scanout DIR/SUB 2>&1" (then the exit
+ * status when show_exit), every path quoted: the report directory comes
+ * from the command line */
+static int scanout_cmd(char *cmd, size_t n, const char *drminfo, const char *dir, const char *sub, int show_exit)
+{
+    char path[1024];
+    const char *tail = show_exit ? " 2>&1; echo \"[exit $?]\"" : " 2>&1";
+    if ((size_t)snprintf(path, sizeof(path), "%s/%s", dir, sub) >= sizeof(path))
+        return -1;
+    snprintf(cmd, n, "mkdir -p ");
+    if (shq(cmd, n, path) || strlen(cmd) + 4 >= n)
+        return -1;
+    strcat(cmd, " && ");
+    if (shq(cmd, n, drminfo) || strlen(cmd) + 11 >= n)
+        return -1;
+    strcat(cmd, " --scanout ");
+    if (shq(cmd, n, path) || strlen(cmd) + strlen(tail) >= n)
+        return -1;
+    strcat(cmd, tail);
+    return 0;
+}
+
 /* the fastest mode of the display's own size above its refresh rate (a
  * real timing that may need more DISPCLK, rdna3dispclk=1), a look at the
  * pipes, then the old mode again; 0 tried when there is none */
@@ -167,7 +214,7 @@ static int faster(uint32_t di, CGDirectDisplayID id, const char *drminfo, const 
     size_t nw = CGDisplayPixelsWide(id), nh = CGDisplayPixelsHigh(id);
     double best = cur ? CGDisplayModeGetRefreshRate(cur) + 0.5 : 1e9;
     int bad = 0;
-    char cmd[1024];
+    char cmd[4096], sub[64];
     for (CFIndex k = 0; modes && k < CFArrayGetCount(modes); k++) {
         CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, k);
         if (CGDisplayModeGetPixelWidth(m) == nw && CGDisplayModeGetPixelHeight(m) == nh &&
@@ -186,9 +233,8 @@ static int faster(uint32_t di, CGDirectDisplayID id, const char *drminfo, const 
             sleep(4);
             printf("== rdna3_drminfo --scanout (look mode-d%u-%zux%zu-%.0fhz)\n", di, nw, nh, best);
             fflush(stdout);
-            snprintf(cmd, sizeof(cmd), "mkdir -p '%s/mode-d%u-%zux%zu-%.0fhz' && '%s' --scanout '%s/mode-d%u-%zux%zu-%.0fhz' "
-                     "2>&1; echo \"[exit $?]\"", dir, di, nw, nh, best, drminfo, dir, di, nw, nh, best);
-            if (system(cmd) != 0)
+            snprintf(sub, sizeof(sub), "mode-d%u-%zux%zu-%.0fhz", di, nw, nh, best);
+            if (scanout_cmd(cmd, sizeof(cmd), drminfo, dir, sub, 1) || system(cmd) != 0)
                 bad++;
         }
         if (cur)
@@ -249,7 +295,7 @@ static int cycle(const char *drminfo, const char *dir)
         if (modes)
             CFRelease(modes);
         for (uint32_t k = 0; k < 2; k++) {
-            char cmd[1024];
+            char cmd[4096], sub[64];
             if (!pick_w[k] || (nd && done_w[0] == pick_w[k]))
                 continue;
             done_w[nd++] = pick_w[k];
@@ -263,9 +309,8 @@ static int cycle(const char *drminfo, const char *dir)
             sleep(4);
             printf("== rdna3_drminfo --scanout (look mode-d%u-%zux%zu)\n", i, pick_w[k], pick_h[k]);
             fflush(stdout);
-            snprintf(cmd, sizeof(cmd), "mkdir -p '%s/mode-d%u-%zux%zu' && '%s' --scanout '%s/mode-d%u-%zux%zu' 2>&1; echo \"[exit $?]\"",
-                     dir, i, pick_w[k], pick_h[k], drminfo, dir, i, pick_w[k], pick_h[k]);
-            if (system(cmd) != 0)
+            snprintf(sub, sizeof(sub), "mode-d%u-%zux%zu", i, pick_w[k], pick_h[k]);
+            if (scanout_cmd(cmd, sizeof(cmd), drminfo, dir, sub, 1) || system(cmd) != 0)
                 bad++;
         }
     }
@@ -283,14 +328,15 @@ static int cycle(const char *drminfo, const char *dir)
 struct pipe_look { int lit, valid, pic; unsigned r, g, b, mean; };
 static int look(const char *drminfo, const char *dir, const char *name, struct pipe_look pl[4])
 {
-    char cmd[1024], line[512];
+    char cmd[4096], line[512], sub[64];
     int pipe = -1;
     FILE *f;
     memset(pl, 0, sizeof(*pl) * 4);
     printf("== rdna3_drminfo --scanout (look gamma-%s)\n", name);
     fflush(stdout);
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s/gamma-%s' && '%s' --scanout '%s/gamma-%s' 2>&1", dir, name, drminfo,
-             dir, name);
+    snprintf(sub, sizeof(sub), "gamma-%s", name);
+    if (scanout_cmd(cmd, sizeof(cmd), drminfo, dir, sub, 0))
+        return -1;
     f = popen(cmd, "r");
     if (!f)
         return -1;
