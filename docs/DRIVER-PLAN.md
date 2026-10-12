@@ -213,8 +213,12 @@ The S3 gap - what a full resume still lacks, in the order it will bite:
    and ODM combined heads are still refused (blank only).
 7. **Ordering with macOS.** The wake work runs on a thread call after
    `setPowerState(1)`; framebuffer power requests that arrive earlier are
-   recorded and applied afterwards. Nothing yet tells IOFramebuffer that
-   its VRAM contents are gone.
+   recorded and applied afterwards. A picture lost in VRAM (a wake or a
+   mode-1 reset whose VRAM did not all come back) moves
+   `RD3KDisplayHotplug.lost`; every framebuffer then raises its
+   connect-change interrupt, so IOGraphics probes the head again and
+   WindowServer draws everything again (`RDNA3,DisplayPictureLost`,
+   `RDNA3,PictureLost` on the framebuffer).
 8. **Hotplug across the sleep.** Done: the HPD looks stop before the sleep
    (`amdgpu_dm_irq_suspend`; after a power loss the pins read unplugged
    until they are enabled again), the wake work programs the HPD pins and

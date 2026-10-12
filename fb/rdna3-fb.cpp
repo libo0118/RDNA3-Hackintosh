@@ -142,12 +142,13 @@ class RDNA3Framebuffer : public IOFramebuffer {
     bool     fEdidAsked = false;
     unsigned fEdidTries = 0;
     IOReturn fEdidLast = kIOReturnSuccess;
-    /* hotplug (rdna3hotplug=1): the core's generation of this head's sink
-     * (rdna3DisplayHotplug), looked at every ~30 VBLs; a new one drops the
-     * cached EDID and raises IOFramebuffer's connect-change interrupt */
+    /* rdna3DisplayHotplug, looked at every ~30 VBLs: with rdna3hotplug=1 a
+     * new generation of this head's sink drops the cached EDID; that, and
+     * a picture lost in VRAM (a wake or reset whose VRAM did not come
+     * back), raise IOFramebuffer's connect-change interrupt */
     const OSSymbol *fSymHotplug = nullptr;
-    bool     fHpOn = false, fConnected = true;
-    uint32_t fHpGen = 0, fHpTick = 0, fHpChanges = 0;
+    bool     fHpOn = false, fHpPins = false, fConnected = true;
+    uint32_t fHpGen = 0, fHpTick = 0, fHpChanges = 0, fLostGen = 0, fLostChanges = 0;
     void     hotplugPoll(bool first);
 
     /* hardware cursor: 256x256 ARGB8888 premultiplied in VRAM from the core */
@@ -414,8 +415,8 @@ bool RDNA3Framebuffer::start(IOService *provider)
         fetchEdid();
     modesInit();
     fSymHotplug = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_HOTPLUG);
-    if (fDcn && bootArgOn("rdna3hotplug"))
-        hotplugPoll(true);
+    if (fDcn)
+        hotplugPoll(true);   /* the picture-lost count always, the pins with rdna3hotplug=1 */
 
     setProperty("IOFBDependentID", (unsigned long long)0x5244334600000001ull, 64);  /* 'RD3F' */
     setProperty("IOFBDependentIndex", (unsigned long long)fHead, 32);
@@ -1198,14 +1199,28 @@ void RDNA3Framebuffer::hotplugPoll(bool first)
     }
     if (first) {
         fHpOn = true;
+        fHpPins = q.hotplug != 0;
         fHpGen = q.generation;
+        fLostGen = q.lost;
         fConnected = q.connected != 0;
         setProperty("RDNA3,Connected", fConnected);
-        FBLOG("head %u: hotplug on, HPD%d %s", fHead, q.pin == ~0u ? 0 : (int)q.pin + 1,
-              fConnected ? "connected" : "disconnected");
+        if (fHpPins)
+            FBLOG("head %u: hotplug on, HPD%d %s", fHead, q.pin == ~0u ? 0 : (int)q.pin + 1,
+                  fConnected ? "connected" : "disconnected");
         return;
     }
-    if (q.generation == fHpGen)
+    if (q.lost != fLostGen) {
+        /* the monitor stayed, its picture did not: IOGraphics probes the
+         * head again and WindowServer draws everything again */
+        fLostGen = q.lost;
+        fLostChanges++;
+        setProperty("RDNA3,PictureLost", (unsigned long long)fLostChanges, 32);
+        FBLOG("head %u: the picture in VRAM was lost: connect change to IOGraphics so WindowServer draws again%s",
+              fHead, fConnect.proc ? "" : " (no handler registered)");
+        if (fConnect.proc && (!fHpPins || q.generation == fHpGen))
+            fConnect.proc(fConnect.target, fConnect.ref);
+    }
+    if (!fHpPins || q.generation == fHpGen)
         return;
     fHpGen = q.generation;
     fConnected = q.connected != 0;

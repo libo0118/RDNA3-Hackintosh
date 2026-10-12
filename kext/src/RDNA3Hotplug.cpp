@@ -323,10 +323,18 @@ IOReturn RDNA3Accel::displayHotplugQuery(RD3KDisplayHotplug *q)
 {
     if (!q || q->version != RD3K_DISPLAY_ABI_VERSION)
         return kIOReturnBadArgument;
-    if (!fHp)
-        return kIOReturnUnsupported;
     if (!fDcn || q->head >= fDcn->nheads || q->head >= RD3K_MAX_HEADS)
         return kIOReturnNotReady;
+    q->lost = fDispLostGen;
+    if (!fHp) {
+        q->hotplug = 0;
+        q->generation = 0;
+        q->connected = 1;
+        q->pin = ~0u;
+        q->events = 0;
+        return kIOReturnSuccess;
+    }
+    q->hotplug = 1;
     /* reads only (a byte and a word the tick writes) */
     int pin = dchpd_head_pin(&fDcn->head[q->head], fPaths, fNPaths);
     q->generation = fHp->headGen[q->head];

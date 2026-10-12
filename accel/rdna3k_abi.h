@@ -85,7 +85,7 @@ struct RD3KFlipRequest {
 
 /* ---- display heads (answered by the core kext, asked by RDNA3Framebuffer):
  *      what the firmware left on screen, flips, frame counter ---- */
-#define RD3K_DISPLAY_ABI_VERSION 1u
+#define RD3K_DISPLAY_ABI_VERSION 2u
 #define RD3K_DISPLAY_FN_INFO     "rdna3DisplayInfo"
 #define RD3K_DISPLAY_FN_FLIP     "rdna3DisplayFlip"
 #define RD3K_DISPLAY_FN_STATUS   "rdna3DisplayStatus"
@@ -204,8 +204,13 @@ struct RD3KDisplayStatus {
  * moved, drops its cached EDID and calls IOFramebuffer's connect-change
  * interrupt, so IOGraphics asks kConnectionCheckEnable / hasDDCConnect /
  * getDDCBlock again. A second monitor's head comes and goes with its own
- * framebuffer (the RDNA3DisplayHead nub). kIOReturnUnsupported without
- * rdna3hotplug=1. */
+ * framebuffer (the RDNA3DisplayHead nub). Without rdna3hotplug=1 only
+ * 'lost' moves (hotplug 0, generation 0, connected 1).
+ * 'lost' moves when the picture in VRAM is gone while the monitor stayed:
+ * a wake or a mode-1 reset whose VRAM did not all come back (the
+ * eviction, kext/src/RDNA3Evict.cpp, was incomplete or did not run). The
+ * framebuffer then raises the same connect-change interrupt, so IOGraphics
+ * probes the head again and WindowServer draws everything again. */
 #define RD3K_DISPLAY_FN_HOTPLUG  "rdna3DisplayHotplug"
 struct RD3KDisplayHotplug {
     unsigned int version;         /* RD3K_DISPLAY_ABI_VERSION */
@@ -214,6 +219,8 @@ struct RD3KDisplayHotplug {
     unsigned int connected;       /* out: 1 = the head's connector senses a sink */
     unsigned int pin;             /* out: its HPD pin (HPD1 = 0), ~0u unknown */
     unsigned int events;          /* out: debounced changes on all pins since start */
+    unsigned int hotplug;         /* out: 1 = rdna3hotplug polls the pins */
+    unsigned int lost;            /* out: +1 every time the picture in VRAM was lost */
 };
 
 /* display CRC: p1 = head (uintptr_t), p2 = unsigned *crc out */

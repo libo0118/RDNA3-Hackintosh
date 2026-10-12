@@ -793,6 +793,11 @@ the HPD looks pause for the sleep and come back with
 `hotplug: wake: N HPD filter(s) programmed again (link_resume)`
 (`RDNA3,HotplugResumes`); a `hotplug:` unplug of a monitor that stayed
 connected right after a wake means the pins were looked at too early.
+`display: the picture in VRAM was lost (...)` after a wake means the
+eviction did not bring everything back (see the `suspend:` / `resume:`
+VRAM lines); the framebuffers then log `the picture in VRAM was lost:
+connect change` and WindowServer should redraw within a second - a desktop
+that stays black or garbled after that line is a WindowServer question.
 
 | Symptom | Likely cause | Action |
 |---|---|---|

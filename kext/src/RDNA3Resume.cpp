@@ -239,6 +239,18 @@ uint32_t RDNA3Accel::displayStateRestore(const char *why, bool restore)
     return lost;
 }
 
+/* the picture in VRAM is gone while the monitors stayed (the restore
+ * shows whatever VRAM holds now): every framebuffer sees
+ * RD3KDisplayHotplug.lost move and raises its connect change, so
+ * WindowServer draws everything again */
+void RDNA3Accel::displayPictureLost(const char *why)
+{
+    fDispLostGen++;
+    setNumber("RDNA3,DisplayPictureLost", fDispLostGen);
+    LOG("display: the picture in VRAM was lost (%s): the framebuffers ask WindowServer to draw again (#%u)", why,
+        fDispLostGen);
+}
+
 /* RDNA3Bringup after a GPU recovery: a GFX / SDMA soft reset leaves DCN
  * alone (verify only); the mode-1 reset takes it down (restore with
  * rdna3resume=1). Called under the DRM lock. */
@@ -256,6 +268,8 @@ void RDNA3Accel::displayAfterReset(bool chipReset)
             lost ? "LOST (unexpected)" : "still lit");
     else if (lost && !restore)
         LOG("display: the mode-1 reset took %u head(s) down; rdna3resume=1 restores them from the snapshot", lost);
+    if (chipReset && fBringup && fBringup->lastVramLost())
+        displayPictureLost("mode-1 reset");
 }
 
 /* --------------------------- sleep and wake --------------------------- */
@@ -301,6 +315,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
     uint32_t memsize = a->fMmio ? a->rreg(mmRCC_CONFIG_MEMSIZE) : ~0u;
     int needPost = -1, sos = -1;
     uint32_t lost = 0;
+    bool resumed = false;
     char val[256];
 
     a->fWakes++;
@@ -337,6 +352,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
         if (resume && a->fBringup && a->fBringup->finished() && a->fDrmLock) {
             IOLockLock(a->fDrmLock);
             bool ok = a->fBringup->resumeAfterPowerLoss();
+            resumed = ok;
             a->drmVmReplayIfNeeded();
             /* the evicted VRAM back before the display restore shows it */
             a->vramRestore(ok && a->fBringup->lastResumeLostVram());
@@ -377,6 +393,10 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
         IOLockUnlock(a->fDispLock);
     }
     a->setNumber("RDNA3,WakeHeadsLost", lost);
+    /* the evicted VRAM came back unless the resume did not run, failed, or
+     * the eviction was incomplete (lastResumeLostVram stays set) */
+    if (powerLost && (!resume || !resumed || (a->fBringup && a->fBringup->lastResumeLostVram())))
+        a->displayPictureLost("wake after a power loss");
     a->hotplugResume();   /* link_resume: the HPD filters again, then the looks */
     /* VCN / JPEG (rdna3vcn): amdgpu_device_ip_resume_phase2 when the card
      * kept its power; after a power loss resumeAfterPowerLoss's hwInit

@@ -165,6 +165,7 @@ public:
     /* the last resume found VRAM lost; forgetVramLoss: every evicted range
      * came back, the clients are not told (amdgpu_device_resume) */
     bool     lastResumeLostVram() const { return fLastResumeVramLost; }
+    bool     lastVramLost() const { return fLastVramLost; }   /* the last checkVramLost */
     /* the MES scheduler started again after a reset and forgot its user
      * queues: the DRM puts them back (rdna3_drm_device_userq_reset);
      * true once, *vramLost: whether that reset lost VRAM */

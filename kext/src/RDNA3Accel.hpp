@@ -394,6 +394,8 @@ private:
     const struct rdna3_display_path *displayHeadPath(uint32_t head);
     uint32_t      displayHeadPclk(uint32_t head, const struct rdna3_display_path *p);
     struct rdna3_dp_link *displayStateDpLink(uint32_t head, bool sink);   /* fDispLock held */
+    volatile uint32_t fDispLostGen = 0;      /* RD3KDisplayHotplug.lost */
+    void          displayPictureLost(const char *why);
     void          displayStateSave(uint32_t head);   /* fDispLock held */
     void          displayStateSaveAll();
     void          displayStateFree();
