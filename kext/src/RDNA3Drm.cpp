@@ -76,8 +76,16 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
             if (a->fVramMap && off + bo->size <= a->fVramMap->getLength()) {
                 bzero((void *)(a->fVramMap->getVirtualAddress() + off), (size_t)bo->size);
             } else if (!a->fBringup || a->fBringup->clearVram(off, bo->size) != 0) {
+                /* no SDMA ring (yet): the visible part, which the CPU clears */
                 range_alloc_put(from, off, bo->size);
-                return -RD_ENOMEM;
+                off = from != a->fVramHeap ? range_alloc_get(a->fVramHeap, bo->size, align) : RANGE_ALLOC_FAIL;
+                if (off == RANGE_ALLOC_FAIL || !a->fVramMap || off + bo->size > a->fVramMap->getLength()) {
+                    if (off != RANGE_ALLOC_FAIL)
+                        range_alloc_put(a->fVramHeap, off, bo->size);
+                    return -RD_ENOMEM;
+                }
+                bo->vram_offset = off;
+                bzero((void *)(a->fVramMap->getVirtualAddress() + off), (size_t)bo->size);
             }
         }
         return 0;
