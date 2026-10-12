@@ -326,7 +326,7 @@ typedef struct sim {
         struct {
             int connected;
             uint8_t edid[256];
-            uint8_t dpcd[0x20];
+            uint8_t dpcd[0x200];            /* the sink's DPCD (DSC caps, link set, DSC_ENABLE) */
             uint16_t full_pbn;
             uint8_t vcpi;                   /* ALLOCATE_PAYLOAD */
             uint16_t pbn;
@@ -336,6 +336,12 @@ typedef struct sim {
         uint8_t act_slot_vcpi[64];          /* the table the last ACT made current */
         unsigned msgs, hdr_crc_errors, body_crc_errors, link_addr, enum_path, alloc_payload, clear_table;
         unsigned remote_dpcd, remote_i2c, naks, table_updates, acts, act_mismatch, table_resets;
+        unsigned remote_dpcd_writes, dsc_enable_writes;
+        /* Synaptics remote control (SYNAPTICS_RC_* in the branch's DPCD):
+         * the commands run, three of its registers */
+        uint8_t rc_log[32];
+        unsigned rc_count;
+        uint32_t rc_reg[3];
         uint8_t last_alloc_order;           /* 1: ALLOCATE_PAYLOAD came after the table update and ACT */
         uint8_t esi0, pts;                  /* DEVICE_SERVICE_IRQ_VECTOR_ESI0, PAYLOAD_TABLE_UPDATE_STATUS (W1C) */
         int zero_chunk;                     /* the next follow-up chunk has msg_len 0 (a broken hub) */
@@ -1882,6 +1888,24 @@ static void hub_request(void)
         hub_reply(b, n);
         break;
     }
+    case 0x21: { /* REMOTE_DPCD_WRITE */
+        uint32_t a = (uint32_t)(q[1] & 0xf) << 16 | (uint32_t)q[2] << 8 | q[3], len = q[4];
+        S.mst.remote_dpcd_writes++;
+        p = q[1] >> 4;
+        if (p < 1 || p > 2 || !S.mst.port[p].connected) {
+            hub_nak(0x21, 0x03);
+            break;
+        }
+        for (i = 0; i < len; i++)
+            if (a + i < sizeof(S.mst.port[p].dpcd))
+                S.mst.port[p].dpcd[a + i] = q[5 + i];
+        if (a <= 0x160 && a + len > 0x160)
+            S.mst.dsc_enable_writes++;
+        b[n++] = 0x21;
+        b[n++] = (uint8_t)p;
+        hub_reply(b, n);
+        break;
+    }
     case 0x22: { /* REMOTE_I2C_READ: writes set the EDID segment / offset */
         uint32_t nt = q[1] & 3, k = 2, t, seg = 0, off = 0, len;
         S.mst.remote_i2c++;
@@ -1971,6 +1995,10 @@ static void hub_payload_table_written(void)
         for (; k < 64; k++)
             S.mst.slot_vcpi[k] = 0;
     } else {
+        /* an id already in the table is resized at its start */
+        for (i = 1; i < 64; i++)
+            if (S.mst.slot_vcpi[i] == id)
+                S.mst.slot_vcpi[i] = 0;
         for (i = start; i < start + count && i < 64; i++)
             S.mst.slot_vcpi[i] = id;
     }
@@ -2009,9 +2037,31 @@ static void hub_act(uint32_t sat0, uint32_t sat1)
     S.dpcd[0x2c0] = S.mst.pts;
 }
 
+/* a Synaptics remote control command (SYNAPTICS_RC_COMMAND 0x4b2 with
+ * bit 7): 0x31 reads 4 bytes of a register at SYNAPTICS_RC_OFFSET into
+ * SYNAPTICS_RC_DATA, 0x21 writes them; done at once, result 0 */
+static void hub_rc_command(void)
+{
+    uint8_t cmd = (uint8_t)(S.dpcd[0x4b2] & 0x7f);
+    uint32_t off = (uint32_t)S.dpcd[0x4bc] | (uint32_t)S.dpcd[0x4bd] << 8 | (uint32_t)S.dpcd[0x4be] << 16 |
+                   (uint32_t)S.dpcd[0x4bf] << 24;
+    int r = off == 0x220998 ? 0 : off == 0x220d98 ? 1 : off == 0x221198 ? 2 : -1;
+    if (S.mst.rc_count < sizeof(S.mst.rc_log))
+        S.mst.rc_log[S.mst.rc_count] = cmd;
+    S.mst.rc_count++;
+    if (cmd == 0x31 && r >= 0)
+        memcpy(&S.dpcd[0x4c0], &S.mst.rc_reg[r], 4);
+    if (cmd == 0x21 && r >= 0)
+        memcpy(&S.mst.rc_reg[r], &S.dpcd[0x4c0], 4);
+    S.dpcd[0x4b2] = cmd;     /* active 0 */
+    S.dpcd[0x4b3] = 0;       /* result: success */
+}
+
 /* DPCD writes the branch reacts to */
 static void hub_written(uint32_t addr, uint32_t len)
 {
+    if (addr <= 0x4b2 && addr + len > 0x4b2 && (S.dpcd[0x4b2] & 0x80))
+        hub_rc_command();
     if (addr >= 0x1000 && addr < 0x1200)
         hub_down_req_written(addr - 0x1000, len);
     if (addr <= 0x2003 && addr + len > 0x2003) {   /* ESI0: write 1 to clear */
@@ -7715,6 +7765,254 @@ static void test_dp_mst(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rdn
     S.dcn_frames = 0;
 }
 
+/* DSC over MST (rdna3mst=1 + rdna3dsc=1): the hub of test_dp_mst with a
+ * DSC 1.2 + FEC sink behind port 2 (1280 PBN). The connector's DSC aux
+ * (validate_dsc_caps_on_connector), the port support check (DSC needed and
+ * found; refused when the last link does not carry the stream), the DSC
+ * fairness of the atomic check (no compression, max compression, the free
+ * slots shared out, compression off where it fits), the mode set with
+ * DSC_ENABLE through REMOTE_DPCD_WRITE and the DSC PBN as the payload, the
+ * same commit again (pre_validate_dsc: no mode change), a stream update
+ * when the port's bandwidth grows and shrinks (link_update_dsc_config,
+ * link_increase_mst_payload, link_reduce_mst_payload: no retraining), back
+ * to a mode without DSC; then a Synaptics hub without virtual DPCD (the
+ * DSC aux of the dock, the SDP FIFO reset over its remote control, DSC off
+ * only with the link) and the PCON adaptive sync type */
+static void test_dp_mst_dsc(rdna3_dev *dev, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_display_path *own)
+{
+    static rdna3_dcn_modeset ms;
+    static rdna3_dp_link dp;
+    static rdna3_mst_mgr mgr;
+    static const uint8_t rc_seq[] = { 0x01, 0x31, 0x21, 0x31, 0x21, 0x31, 0x21, 0x31, 0x21, 0x31, 0x31, 0x21, 0x02 };
+    rdna3_mode m, up, uhd;
+    rdna3_dsc_timing t;
+    rdna3_dsc_config cfg;
+    uint32_t otg = dc->head[0].otg, fe = (uint32_t)dc->head[0].dig_fe, i, pbn, slots, x, x0, tps1, sat0;
+    int pb = -1, n, dsc, mc;
+
+    memset(&uhd, 0, sizeof(uhd));
+    uhd.h_active = 3840; uhd.v_active = 2160; uhd.h_total = 4000; uhd.v_total = 2222;
+    uhd.h_front = 48; uhd.h_sync = 32; uhd.v_front = 3; uhd.v_sync = 5; uhd.pixel_khz = 533250; uhd.h_sync_pos = 1;
+    memset(&up, 0, sizeof(up));
+    up.h_active = 2560; up.v_active = 1440; up.h_total = 2720; up.v_total = 1481;
+    up.h_front = 48; up.h_sync = 32; up.v_front = 3; up.v_sync = 5; up.pixel_khz = 241500; up.h_sync_pos = 1;
+    CHECK(edid_dmt(1920, 1080, 60, &m) == 0);
+    make_mst_hub();
+    /* the hub passes DSC through; the sink behind port 2 decodes it (DSC
+     * 1.2, FEC), its own link HBR3 x4 */
+    S.dpcd[0x060] = 0x02;
+    memcpy(&S.mst.port[2].dpcd[0x060], ref_dsc_caps, 16);
+    S.mst.port[2].dpcd[0x090] = 0x01;
+    S.mst.port[2].dpcd[0x100] = RD_DP_LINK_RATE_HIGH3;
+    S.mst.port[2].dpcd[0x101] = 0x84;
+    S.mst.port[2].dpcd[0x108] = 0x01;
+    S.dps.fail_rate = 0;
+    dcn32_dp_link_init(&dp, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 600000);
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && (dp.dpcd_caps.mstm_cap & 1) && dp.dpcd_caps.dsc_basic[0] == 0x02);
+    dp_mst_mgr_init(&mgr, dev, 0);
+    CHECK(dp_mst_set_mst(&mgr, 1) == RDNA3_OK && mgr.mst_state);
+    for (i = 0; i < RD_MST_MAX_PORTS; i++)
+        if (mgr.port[i].used && mgr.port[i].port_num == 2)
+            pb = (int)i;
+    CHECK(pb >= 0 && mgr.port[pb].full_pbn == 1280);
+    dp.mst = 1;
+    dp.mgr = &mgr;
+    dp.mst_port = pb;
+
+    /* validate_dsc_caps_on_connector: the endpoint decodes (DSC + FEC, no
+     * virtual DPCD, not a Synaptics hub): the port's own aux, no
+     * passthrough; retrieve_downstream_port_device: none */
+    dcn32_dp_mst_detect_dsc(&dp, &dp.mst_conn, pb);
+    CHECK(dp.mst_conn.valid && dp.mst_conn.port == pb && dp.mst_conn.dsc_aux == pb &&
+          dp.mst_conn.passthrough_aux == RD_MST_AUX_NONE && dp.mst_conn.dsc_caps.is_dsc_supported &&
+          dp.mst_conn.mst_downstream_port_present == 0 && !dcn32_dp_mst_needs_dsc_aux_workaround(&dp));
+    /* kbps_to_peak_pbn: x 1.006 x 1.031 (8b/10b FEC) */
+    CHECK(dcn32_dp_mst_kbps_to_peak_pbn(&dp, 12798000) == 1967 && dcn32_dp_mst_kbps_to_peak_pbn(&dp, 1000) == 1);
+
+    /* 4K60 needs 12.8 Gbps, port 2 carries 1280 PBN (8.59 Gbps): refused
+     * without rdna3dsc */
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].h_active == 2560);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &uhd, NULL, &ms) == RD_MODESET_LINK_BW);
+    dp.fec_policy = dp.dsc_policy = 1;
+    /* dm_dp_mst_is_port_support_mode: DSC needed, a config within the
+     * end-to-end 8.59 Gbps */
+    dcn32_dp_dsc_timing(&uhd, 8, &t);
+    CHECK(dcn32_dp_mst_is_port_support_mode(&dp, &dp.mst_conn, &t) == RDNA3_OK && t.dsc &&
+          t.dsc_cfg.bits_per_pixel > 0 && t.dsc_cfg.bits_per_pixel <= 16 * 16);
+    /* decoded at the last link: an HBR2 x2 sink link does not carry the
+     * uncompressed 12.8 Gbps */
+    S.mst.port[2].dpcd[0x100] = RD_DP_LINK_RATE_HIGH2;
+    S.mst.port[2].dpcd[0x101] = 0x82;
+    dcn32_dp_dsc_timing(&uhd, 8, &t);
+    CHECK(dcn32_dp_mst_is_port_support_mode(&dp, &dp.mst_conn, &t) == RDNA3_EINVAL);
+    S.mst.port[2].dpcd[0x100] = RD_DP_LINK_RATE_HIGH3;
+    S.mst.port[2].dpcd[0x101] = 0x84;
+    /* 1080p fits without DSC */
+    dcn32_dp_dsc_timing(&m, 8, &t);
+    CHECK(dcn32_dp_mst_is_port_support_mode(&dp, &dp.mst_conn, &t) == RDNA3_OK && !t.dsc);
+
+    /* the atomic check: no compression (1967 PBN) over the port's 1280,
+     * max compression (8 bpp) fits, its full slack (to 16 bpp) does not:
+     * the stream stays at the minimum bpp */
+    CHECK(dcn32_dp_mst_mode_fits(&dp, &uhd, &pbn, &slots, &dsc, &cfg, &mc) == RDNA3_OK);
+    CHECK(pbn == 666 && slots == 17 && dsc && cfg.bits_per_pixel == 8 * 16 && mc == 1);
+    /* the topology is not touched by the check */
+    CHECK(mgr.port[pb].vcpi == 0 && mgr.payload_count == 0);
+
+    /* the mode set: DSC on the pipe, DSC_ENABLE in the sink through
+     * REMOTE_DPCD_WRITE, the payload at the DSC PBN */
+    CHECK(dcn32_read_state(dev, dc) == 1);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 241500, &uhd, NULL, &ms) == RD_MODESET_OK && ms.dp_want_dsc &&
+          ms.dp_want_dsc_cfg.bits_per_pixel == 128 && ms.dp_mst_pbn == 666 && ms.dp_mst_slots == 17 &&
+          !ms.dp_mst_dsc_update);
+    S.dcn_frames = 1;
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 3840, FB_START + 0x8000000, 2560, 50) == RDNA3_OK);
+    CHECK(dp.stream_dsc && dp.dsc_cfg.bits_per_pixel == 128 && S.mst.port[2].dpcd[0x160] == 1 &&
+          S.mst.dsc_enable_writes == 1 && S.mst.port[2].pbn == 666 && S.mst.port[2].vcpi == 1 &&
+          dp.mst_alloc.stream_count == 1 && dp.mst_alloc.a[0].slot_count == 17 && dp.mst_act && dp.mst_cur_valid &&
+          dp.mst_cur_timing.dsc && dc->head[0].width == 3840);
+    for (i = 1, n = 0; i < 64; i++)
+        n += S.mst.act_slot_vcpi[i] == 1;
+    CHECK(n == 17 && S.mst.act_mismatch == 0 && S.mst.last_alloc_order == 1);
+    /* DSC on the pipe and in the OPTC */
+    CHECK((S.reg[ODMR(regODM0_OPTC_DATA_FORMAT_CONTROL, otg)] & ODM0_OPTC_DATA_FORMAT_CONTROL__OPTC_DSC_MODE_MASK) != 0);
+    /* VC rate: the compressed 4.27 Gbps over 40 PBN per slot */
+    x0 = (S.reg[DPR(regDP0_DP_MSE_RATE_CNTL, fe)] & DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X_MASK) >>
+         DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X__SHIFT;
+    CHECK(x0 >= 15 && x0 <= 16);
+
+    /* the same commit again: pre_validate_dsc finds the timing and DSC the
+     * stream runs (no mode change) */
+    CHECK(dcn32_dp_mst_mode_fits(&dp, &uhd, &pbn, &slots, &dsc, &cfg, &mc) == RDNA3_OK && mc == 0 && pbn == 666 &&
+          slots == 17 && dsc && cfg.bits_per_pixel == 128);
+
+    /* the port's bandwidth grows (1500 PBN): the fairness gives the stream
+     * its full slack (16 bpp, 1312 PBN); the same timing, so a stream update:
+     * the DSC config and PPS, the payload resized (table, ACT, then
+     * ALLOCATE_PAYLOAD), the VC rate up - no training, no blank */
+    mgr.port[pb].full_pbn = 1500;
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].dig_mode == 5);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 533250, &uhd, NULL, &ms) == RD_MODESET_OK && ms.dp_want_dsc &&
+          ms.dp_want_dsc_cfg.bits_per_pixel == 256 && ms.dp_mst_pbn > 1280 && ms.dp_mst_pbn <= 1500 &&
+          ms.dp_mst_dsc_update);
+    pbn = ms.dp_mst_pbn;
+    slots = (pbn + 39) / 40;
+    tps1 = S.dps.tps1_sets;
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 3840, FB_START, 3840, 50) == RDNA3_OK);
+    x = (S.reg[DPR(regDP0_DP_MSE_RATE_CNTL, fe)] & DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X_MASK) >>
+        DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X__SHIFT;
+    for (i = 1, n = 0; i < 64; i++)
+        n += S.mst.act_slot_vcpi[i] == 1;
+    sat0 = S.reg[DPR(regDP0_DP_MSE_SAT0, 1)];
+    CHECK(S.dps.tps1_sets == tps1 && dp.link_active && dp.dsc_cfg.bits_per_pixel == 256 && S.mst.port[2].pbn == pbn &&
+          S.mst.port[2].vcpi == 1 && n == (int)slots && S.mst.act_mismatch == 0 && S.mst.last_alloc_order == 1 &&
+          ((sat0 & DP0_DP_MSE_SAT0__DP_MSE_SAT_SLOT_COUNT0_MASK) >> DP0_DP_MSE_SAT0__DP_MSE_SAT_SLOT_COUNT0__SHIFT) == slots &&
+          dp.mst_alloc.a[0].slot_count == slots && mgr.next_start_slot == 1 + (int)slots && x > x0 &&
+          dp.mst_cur_timing.dsc_cfg.bits_per_pixel == 256 && S.mst.port[2].dpcd[0x160] == 1);
+    /* the PPS carries the new bits per pixel (PPS bytes 4..5: bpp x16) */
+    CHECK((((uint32_t)dp.pps[4] & 0x3) << 8 | dp.pps[5]) == 256);
+
+    /* and shrinks back (1280): 8 bpp again, the X.Y down first, then
+     * ALLOCATE_PAYLOAD, the table and the ACT */
+    mgr.port[pb].full_pbn = 1280;
+    CHECK(dcn32_read_state(dev, dc) == 1);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 533250, &uhd, NULL, &ms) == RD_MODESET_OK &&
+          ms.dp_want_dsc_cfg.bits_per_pixel == 128 && ms.dp_mst_pbn == 666 && ms.dp_mst_dsc_update);
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 3840, FB_START, 3840, 50) == RDNA3_OK);
+    for (i = 1, n = 0; i < 64; i++)
+        n += S.mst.act_slot_vcpi[i] == 1;
+    x = (S.reg[DPR(regDP0_DP_MSE_RATE_CNTL, fe)] & DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X_MASK) >>
+        DP0_DP_MSE_RATE_CNTL__DP_MSE_RATE_X__SHIFT;
+    CHECK(S.dps.tps1_sets == tps1 && n == 17 && S.mst.port[2].pbn == 666 && dp.mst_alloc.a[0].slot_count == 17 &&
+          mgr.next_start_slot == 18 && x == x0 && S.mst.act_mismatch == 0 && dp.dsc_cfg.bits_per_pixel == 128);
+    /* the stream update refused without DSC on the stream */
+    cfg = dp.dsc_cfg;
+    dp.stream_dsc = 0;
+    CHECK(dcn32_dp_mst_update_stream_dsc(&dp, &uhd, &cfg, 666) == RDNA3_EINVAL);
+    dp.stream_dsc = 1;
+
+    /* 1080p without DSC: a mode set; DSC off in the sink (REMOTE_DPCD_WRITE 0) */
+    CHECK(dcn32_read_state(dev, dc) == 1);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 533250, &m, NULL, &ms) == RD_MODESET_OK && !ms.dp_want_dsc &&
+          !ms.dp_mst_dsc_update);
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 1920, FB_START, 3840, 50) == RDNA3_OK &&
+          !dp.stream_dsc && S.mst.port[2].dpcd[0x160] == 0 && dc->head[0].width == 1920 &&
+          !(S.reg[ODMR(regODM0_OPTC_DATA_FORMAT_CONTROL, otg)] & ODM0_OPTC_DATA_FORMAT_CONTROL__OPTC_DSC_MODE_MASK));
+
+    /* back to SST as test_dp_mst leaves the head */
+    dcn32_dp_link_set_dpms_off(&dp);
+    CHECK(dp_mst_set_mst(&mgr, 0) == RDNA3_OK && !mgr.mst_state);
+
+    /* a Synaptics hub (OUI 90-CC-24, "SYNA", Panamera, cascaded) with two
+     * sinks and no virtual DPCD: drm_dp_mst_dsc_aux_for_port's quirk and
+     * the cascaded hub give the hub's own DPCD as the DSC aux */
+    memcpy(&S.dpcd[0x060], ref_dsc_caps, 16);
+    S.dpcd[0x500] = 0x90; S.dpcd[0x501] = 0xcc; S.dpcd[0x502] = 0x24;
+    memcpy(&S.dpcd[0x503], "SYNA\x53\x00", 6);
+    S.dpcd[0x50e] = 0x5a;                      /* SYNAPTICS_CASCADED_HUB_ID */
+    S.dpcd[0x200] = 0x02;                      /* two sinks */
+    for (i = 0; i < 3; i++)
+        S.mst.rc_reg[i] = 0x02;
+    S.mst.rc_count = 0;
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK && dp.dpcd_caps.branch_dev_id == 0x90cc24 &&
+          dcn32_dp_mst_needs_dsc_aux_workaround(&dp));
+    dp.mst = 1;
+    CHECK(dp_mst_set_mst(&mgr, 1) == RDNA3_OK);
+    dcn32_dp_mst_detect_dsc(&dp, &dp.mst_conn, pb);
+    CHECK(dp.mst_conn.dsc_aux == RD_MST_AUX_ROOT && dp.mst_conn.passthrough_aux == RD_MST_AUX_NONE &&
+          dp.mst_conn.dsc_caps.is_dsc_supported && dp.mst_conn.mst_downstream_port_present == 0x01);
+    /* DSC on with the link down: the SDP FIFO reset over the remote
+     * control (the "PRIUS" unlock, bit 1 of the three registers cleared and
+     * set again as amdgpu does it, the commit), then DSC_ENABLE in the hub */
+    dp.link_active = 0;
+    S.dpcd[0x160] = 0;
+    CHECK(dcn32_dp_mst_write_dsc_enable(&dp, 1) == 1 && S.dpcd[0x160] == 1 && S.mst.rc_count == sizeof(rc_seq) &&
+          memcmp(S.mst.rc_log, rc_seq, sizeof(rc_seq)) == 0 && (S.mst.rc_reg[0] & 2) && !(S.mst.rc_reg[1] & 2) &&
+          (S.mst.rc_reg[2] & 2));
+    /* off only with the link down: kept while it is up */
+    dp.link_active = 1;
+    CHECK(dcn32_dp_mst_write_dsc_enable(&dp, 0) == 0 && S.dpcd[0x160] == 1);
+    dp.link_active = 0;
+    CHECK(dcn32_dp_mst_write_dsc_enable(&dp, 0) == 1 && S.dpcd[0x160] == 0);
+    /* the downstream port a DP sink (PORT_PRESENT, type 1): the plain path */
+    dp.mst_conn.mst_downstream_port_present = 0x03;
+    S.mst.rc_count = 0;
+    CHECK(dcn32_dp_mst_write_dsc_enable(&dp, 1) == 1 && S.dpcd[0x160] == 1 && S.mst.rc_count == 0);
+    CHECK(dp_mst_set_mst(&mgr, 0) == RDNA3_OK);
+
+    /* dm_get_adaptive_sync_support_type: a whitelisted DP-HDMI PCON with
+     * adaptive sync SDPs and MSA ignore */
+    dp.dpcd_caps.dongle_type = RD_DONGLE_DP_HDMI;
+    dp.dpcd_caps.adaptive_sync_caps = 0x01;
+    dp.dpcd_caps.allow_invalid_msa_timing_param = 1;
+    CHECK(dcn32_dp_adaptive_sync_support_type(&dp) == RD_FREESYNC_TYPE_PCON_IN_WHITELIST);
+    dp.dpcd_caps.branch_dev_id = 0x0060ad;
+    CHECK(dcn32_dp_adaptive_sync_support_type(&dp) == RD_FREESYNC_TYPE_PCON_IN_WHITELIST);
+    dp.dpcd_caps.branch_dev_id = 0x001cf8;
+    CHECK(dcn32_dp_adaptive_sync_support_type(&dp) == RD_ADAPTIVE_SYNC_TYPE_NONE);
+    dp.dpcd_caps.branch_dev_id = 0x00e04c;
+    dp.dpcd_caps.allow_invalid_msa_timing_param = 0;
+    CHECK(dcn32_dp_adaptive_sync_support_type(&dp) == RD_ADAPTIVE_SYNC_TYPE_NONE);
+    dp.dpcd_caps.allow_invalid_msa_timing_param = 1;
+    dp.dpcd_caps.dongle_type = RD_DONGLE_NONE;
+    CHECK(dcn32_dp_adaptive_sync_support_type(&dp) == RD_ADAPTIVE_SYNC_TYPE_NONE);
+
+    /* the hub's DPCD as test_dp_mst left it, the SST stream on again */
+    memset(&S.dpcd[0x060], 0, 16);
+    memset(&S.dpcd[0x500], 0, 0x10);
+    S.dpcd[0x160] = 0;
+    S.dpcd[0x200] = 0x01;
+    S.mst.on = 0;
+    dcn32_dp_link_init(&dp, dev, dm, 0, 1, 2, otg, 0, 0x13, 0x1e, 0, 600000);
+    CHECK(dcn32_dp_read_caps(&dp) == RDNA3_OK);
+    CHECK(dcn32_dp_link_set_dpms_on(&dp, &m, 0) == RDNA3_OK && dcn32_dp_link_ok(&dp));
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].dig_mode == 0 && dc->head[0].h_active == 1920);
+    CHECK(dcn32_modeset_plan_dp(dev, dc, 0, own, &dp, 148500, &up, NULL, &ms) == RD_MODESET_OK);
+    CHECK(dcn32_modeset_apply(dev, dm, dc, NULL, &ms, FB_START, 2560, FB_START, 1920, 50) == RDNA3_OK);
+    CHECK(dcn32_read_state(dev, dc) == 1 && dc->head[0].dig_mode == 0 && dc->head[0].h_active == 2560);
+    S.dcn_frames = 0;
+}
+
 /* DP 2.1 UHBR (rdna3uhbr): the DP head of test_dp_link on a sink with
  * 128b/132b (UHBR10 / 13.5 / 20) that does not train at UHBR20 (LT_FAILED):
  * the UHBR caps (the VBIOS encoder caps, the policy), the link cap verified
@@ -8532,6 +8830,7 @@ static void test_dp_link(rdna3_dev *dev, rdna3_dmub *dm)
     test_dsc_pps();
     test_dp_dsc(dev, dm, &dc, &own);
     test_dp_mst(dev, dm, &dc, &own);
+    test_dp_mst_dsc(dev, dm, &dc, &own);
     /* UHBR (128b/132b) and ODM combine on this head */
     test_dp_uhbr(dev, dm, &dc, &own);
     test_dp_odm(dev, dm, &dc, &own);

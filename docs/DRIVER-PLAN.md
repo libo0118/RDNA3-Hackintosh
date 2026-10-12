@@ -159,14 +159,11 @@ standby (link off), display restore after a mode-1 GPU reset.
 | DP link loss retrained (`dp_handle_link_loss`), DP displays blanked before a resume | `0d31090` | link status polled every 2 s in place of the HPD RX interrupt |
 | Report triage for the sleep | `8ca16a4` | |
 
-Left of the amdgpu functions (`docs/status/STATUS.md`, 28): DSC over MST
-(DM's `compute_mst_dsc_configs_for_state` fairness, `drm_dp_mst_dsc_aux_for_port`,
-the remote DSC enable and PPS through sideband messages, the Synaptics hub
-workarounds) with `link_increase/reduce_mst_payload` and
-`link_update_dsc_config` - one block, only useful with an MST hub and a DSC
-monitor behind it, so it waits for such a bench; and `amdgpu_ring_max_ibs`,
-deliberately not taken: the CS ioctl answers AMDGPU_INFO_MAX_IBS with 8 and
-RADV splits its submissions by it.
+| DSC over MST: the DM fairness, the DSC aux of the port, DSC enable through REMOTE_DPCD_WRITE, the Synaptics hub workarounds, a DSC stream update without a mode set (`link_update_dsc_config`, `link_increase/reduce_mst_payload`); `amdgpu_ring_max_ibs` in AMDGPU_INFO_MAX_IBS | (this batch) | `rdna3mst=1 rdna3dsc=1`; without `rdna3dsc` MST plans as before. The last 28 amdgpu functions: the port is at 100 % |
+
+DSC over MST needs an MST hub with a DSC monitor behind it on the card: a
+bench with one runs step `mst` with `rdna3dsc=1` and a mode beyond the
+port's bandwidth (4K60 on an HBR2 x2 port).
 
 ## Order
 

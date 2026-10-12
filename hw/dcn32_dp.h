@@ -395,6 +395,25 @@ typedef struct rdna3_dp_lt_settings {
     int      lttpr_mode;
 } rdna3_dp_lt_settings;
 
+/* enum dsc_clock_force_state */
+enum { RD_DSC_CLK_FORCE_DEFAULT = 0, RD_DSC_CLK_FORCE_ENABLE, RD_DSC_CLK_FORCE_DISABLE };
+
+/* the MST DSC parts of struct amdgpu_dm_connector for an MST output port,
+ * with its dc_sink's DSC caps: dsc_aux (an MST aux of dp_mst.h, the port
+ * whose DPCD decodes or RD_MST_AUX_NONE), the port's passthrough_aux,
+ * mst_downstream_port_present, display_info.max_dsc_bpp and the
+ * dsc_settings amdgpu takes from debugfs (here boot arguments) */
+typedef struct rdna3_mst_connector {
+    int      valid;                 /* detected (dcn32_dp_mst_detect_dsc) */
+    int      port;
+    int      dsc_aux, passthrough_aux;
+    rdna3_dsc_dec_caps dsc_caps;
+    uint8_t  mst_downstream_port_present;
+    uint32_t max_dsc_bpp;
+    int      dsc_force_enable;
+    uint32_t dsc_num_slices_h, dsc_num_slices_v, dsc_bits_per_pixel;
+} rdna3_mst_connector;
+
 /* struct dc_link + the pipe resources one DP SST stream uses */
 typedef struct rdna3_dp_link {
     rdna3_dev  *d;
@@ -445,6 +464,15 @@ typedef struct rdna3_dp_link {
     rdna3_mst_alloc_table mst_alloc;
     uint32_t mst_pbn, mst_slots, mst_vcp_x, mst_vcp_y;   /* the last payload (log, tests) */
     int      mst_act;               /* the last ACT handled */
+    /* the connector of mst_port (validate_dsc_caps_on_connector) and the
+     * PBN the atomic check gave the stream (dm_connector_state->pbn: the
+     * DSC fairness' share; 0 = drm_dp_calc_pbn_mode at 8 bpc) */
+    rdna3_mst_connector mst_conn;
+    uint32_t mst_req_pbn;
+    /* the MST stream the link runs (DC's current_state stream: its timing
+     * with flags.DSC / dsc_cfg in the link's highest encoding) */
+    int      mst_cur_valid;
+    rdna3_dsc_timing mst_cur_timing;
     /* UHBR (rdna3uhbr=1): uhbr_policy = !debug.disable_uhbr. The HPO
      * resources of the link: stream encoder hpo_se (0..3, VPG 6 + n) and
      * link encoder hpo_le (0..1); hpo_active = dp_is_128b_132b_signal for
@@ -519,6 +547,9 @@ const rdna3_dp_link_settings *dcn32_dp_link_cap(const rdna3_dp_link *l);
 void dcn32_dp_dsc_timing(const rdna3_mode *m, uint32_t bpc, rdna3_dsc_timing *t);
 int  dcn32_dp_sink_dsc_caps(const rdna3_dp_link *l, rdna3_dsc_dec_caps *caps);
 int  dcn32_dp_decide_dsc(const rdna3_dp_link *l, const rdna3_mode *m, uint32_t bpc, rdna3_dsc_config *cfg);
+/* link_update_dsc_config: the running stream's DSC engines and PPS
+ * reprogrammed for l->dsc_cfg (no blank). 0 when the stream has no DSC */
+int  dcn32_dp_link_update_dsc_config(rdna3_dp_link *l, const rdna3_mode *m);
 /* the same for an ODM stream of 'opp_cnt' segments: the slices divisible
  * by the segments (dc_dsc_config_options.dsc_force_odm_hslice_override) */
 int  dcn32_dp_decide_dsc_odm(const rdna3_dp_link *l, const rdna3_mode *m, uint32_t bpc, uint32_t opp_cnt,

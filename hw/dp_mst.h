@@ -76,8 +76,42 @@ extern "C" {
 #define RD_DP_ALLOCATE_PAYLOAD              0x11
 #define RD_DP_CLEAR_PAYLOAD_ID_TABLE        0x14
 #define RD_DP_REMOTE_DPCD_READ              0x20
+#define RD_DP_REMOTE_DPCD_WRITE             0x21
 #define RD_DP_REMOTE_I2C_READ               0x22
 #define RD_DP_SIDEBAND_REPLY_NAK            0x01
+/* the DPCD the DSC aux selection reads (drm_dp.h) */
+#ifndef RD_DPCD_DSC_SUPPORT
+#define RD_DPCD_DSC_SUPPORT                 0x060
+#endif
+#ifndef RD_DPCD_FEC_CAPABILITY
+#define RD_DPCD_FEC_CAPABILITY              0x090
+#endif
+#ifndef RD_DPCD_BRANCH_OUI
+#define RD_DPCD_BRANCH_OUI                  0x500
+#endif
+#ifndef RD_DP_DSC_DECOMPRESSION_IS_SUPPORTED
+#define RD_DP_DSC_DECOMPRESSION_IS_SUPPORTED (1u << 0)
+#endif
+#ifndef RD_DP_DSC_PASSTHROUGH_IS_SUPPORTED
+#define RD_DP_DSC_PASSTHROUGH_IS_SUPPORTED  (1u << 1)
+#endif
+#ifndef RD_DP_FEC_CAPABLE
+#define RD_DP_FEC_CAPABLE                   (1u << 0)
+#endif
+#ifndef RD_DP_DWN_STRM_PORT_PRESENT
+#define RD_DP_DWN_STRM_PORT_PRESENT         (1u << 0)
+#endif
+#ifndef RD_DP_DWN_STRM_PORT_TYPE_MASK
+#define RD_DP_DWN_STRM_PORT_TYPE_MASK       0x06
+#endif
+#ifndef RD_DP_DWN_STRM_PORT_TYPE_ANALOG
+#define RD_DP_DWN_STRM_PORT_TYPE_ANALOG     (1u << 1)
+#endif
+/* an MST "aux" (struct drm_dp_aux *): a port index for its remote DPCD,
+ * the manager's physical AUX channel, or none */
+#define RD_MST_AUX_ROOT  (-1)
+#define RD_MST_AUX_NONE  (-2)
+#define RD_MST_MAX_PAYLOADS 31            /* drm_dp_mst_topology_mgr_init: max_payloads */
 /* peer device types */
 #define RD_DP_PEER_DEVICE_NONE              0x0
 #define RD_DP_PEER_DEVICE_SOURCE_OR_SST     0x1
@@ -134,6 +168,7 @@ typedef struct rdna3_mst_reply {
     struct { uint8_t port_number; int fec_capable; uint16_t full_payload_bw_number, avail_payload_bw_number; } path_resources;
     struct { uint8_t port_number, vcpi; uint16_t allocated_pbn; } allocate_payload;
     struct { uint8_t port_number, num_bytes; uint8_t bytes[256]; } remote_read_ack;   /* DPCD and I2C read acks */
+    struct { uint8_t port_number; } remote_dpcd_write_ack;
 } rdna3_mst_reply;
 
 /* struct drm_dp_sideband_msg_tx (one at a time) */
@@ -202,6 +237,15 @@ typedef struct rdna3_mst_mgr {
     uint32_t msgs, replies, naks, timeouts, bad_replies;
 } rdna3_mst_mgr;
 
+/* the payloads of one atomic commit (struct drm_dp_mst_topology_state):
+ * what the DSC fairness of amdgpu_dm tries before anything is sent */
+typedef struct rdna3_mst_atomic {
+    uint32_t pbn_div;
+    int      total_avail_slots;
+    int      has[RD_MST_MAX_PORTS], pbn[RD_MST_MAX_PORTS], time_slots[RD_MST_MAX_PORTS];
+    int      dsc_enabled[RD_MST_MAX_PORTS];
+} rdna3_mst_atomic;
+
 /* drm_dp_mst_topology_mgr_init (the parts that are not locks / work items) */
 void dp_mst_mgr_init(rdna3_mst_mgr *mgr, rdna3_dev *d, uint32_t aux);
 /* drm_dp_read_mst_cap: RD_DRM_DP_* of the sink on 'aux' with DPCD revision 'rev' */
@@ -219,6 +263,28 @@ int  dp_mst_probe(rdna3_mst_mgr *mgr);
 int  dp_mst_read_edid(rdna3_mst_mgr *mgr, int port);
 /* drm_dp_send_dpcd_read on port 'port' (its parent branch reads the peer) */
 int  dp_mst_dpcd_read(rdna3_mst_mgr *mgr, int port, uint32_t offset, uint8_t *buf, uint32_t size);
+/* drm_dp_send_dpcd_write: REMOTE_DPCD_WRITE to the port's sink; bytes
+ * written or an error (a NAK: RDNA3_EIO) */
+int  dp_mst_dpcd_write(rdna3_mst_mgr *mgr, int port, uint32_t offset, const uint8_t *buf, uint32_t size);
+/* drm_dp_dpcd_read / _write on an MST aux (a port, RD_MST_AUX_ROOT) */
+int  dp_mst_aux_read(rdna3_mst_mgr *mgr, int aux, uint32_t offset, uint8_t *buf, uint32_t size);
+int  dp_mst_aux_write(rdna3_mst_mgr *mgr, int aux, uint32_t offset, const uint8_t *buf, uint32_t size);
+/* drm_dp_mst_dsc_aux_for_port (with drm_dp_mst_is_virtual_dpcd and the
+ * Synaptics DSC_WITHOUT_VIRTUAL_DPCD quirk): the aux that reads the DSC
+ * caps and writes DSC_ENABLE for port 'port' (a port, RD_MST_AUX_ROOT, or
+ * RD_MST_AUX_NONE: no DSC), *passthrough_aux the upstream port for
+ * passthrough (else RD_MST_AUX_NONE) */
+int  dp_mst_dsc_aux_for_port(rdna3_mst_mgr *mgr, int port, int *passthrough_aux);
+/* the atomic topology state: from the manager's payloads, then
+ * drm_dp_atomic_find_time_slots (time slots of 'pbn', returned) and
+ * drm_dp_mst_atomic_check (payload_alloc_limits + mstb_bw_limit:
+ * RDNA3_ENOSPC when the slots or a port's PBN do not hold it) */
+void dp_mst_atomic_init(const rdna3_mst_mgr *mgr, rdna3_mst_atomic *st);
+int  dp_mst_atomic_find_time_slots(const rdna3_mst_mgr *mgr, rdna3_mst_atomic *st, int port, int pbn);
+int  dp_mst_atomic_check(const rdna3_mst_mgr *mgr, const rdna3_mst_atomic *st);
+/* drm_dp_mst_atomic_enable_dsc: the DSC flag of the port's payload; with
+ * 'enable' its time slots again for 'pbn'. The time slots or RDNA3_EINVAL */
+int  dp_mst_atomic_enable_dsc(const rdna3_mst_mgr *mgr, rdna3_mst_atomic *st, int port, int pbn, int enable);
 /* the first connected SST sink (end device) port with ddps, or -1 */
 int  dp_mst_first_sink_port(const rdna3_mst_mgr *mgr);
 
@@ -234,6 +300,10 @@ int  dp_mst_find_time_slots(rdna3_mst_mgr *mgr, int port, int pbn);
 void dp_mst_release_time_slots(rdna3_mst_mgr *mgr, int port);
 /* drm_dp_add_payload_part1 / drm_dp_add_payload_part2 */
 int  dp_mst_add_payload_part1(rdna3_mst_mgr *mgr, int port);
+/* a payload already allocated resized (see dp_mst.c): the table entry
+ * ('old_time_slots' is what it held), then ALLOCATE_PAYLOAD with the new PBN */
+int  dp_mst_update_payload_part1(rdna3_mst_mgr *mgr, int port, int old_time_slots);
+int  dp_mst_update_payload_part2(rdna3_mst_mgr *mgr, int port);
 int  dp_mst_add_payload_part2(rdna3_mst_mgr *mgr, int port);
 /* drm_dp_remove_payload_part1 / drm_dp_remove_payload_part2 (the old
  * payload's time slots as dm_helpers_construct_old_payload counts them) */

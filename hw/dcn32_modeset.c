@@ -288,10 +288,21 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
              * no HPO MST in this port */
             if (dcn32_dp_mst_decide_link_encoding_format(dp) == RD_DP_128b_132b_ENCODING)
                 return RD_MODESET_DP_LINK;
-            /* dm_dp_mst_is_port_support_mode + the PBN / time slots */
-            req = dcn32_dp_mode_kbps(m, 8, 0);
-            if (dcn32_dp_mst_mode_fits(dp, req, m->pixel_khz, &ms->dp_mst_pbn, &ms->dp_mst_slots))
+            /* dm_dp_mst_is_port_support_mode, the PBN / time slots and the
+             * DSC fairness of amdgpu_dm_atomic_check */
+            rdna3_dsc_timing mt;
+            int mode_changed;
+            if (dcn32_dp_mst_mode_fits(dp, m, &ms->dp_mst_pbn, &ms->dp_mst_slots, &ms->dp_want_dsc,
+                                       &ms->dp_want_dsc_cfg, &mode_changed))
                 return RD_MODESET_LINK_BW;
+            /* the running DSC stream at this timing with another DSC config:
+             * dc_update_stream (dsc_config + mst_bw_update) */
+            dcn32_dp_dsc_timing(m, 8, &mt);
+            ms->dp_mst_dsc_update = mode_changed && dp->mst_cur_valid && dp->stream_dsc && ms->dp_want_dsc &&
+                                    mt.h_addressable == dp->mst_cur_timing.h_addressable &&
+                                    mt.v_addressable == dp->mst_cur_timing.v_addressable &&
+                                    mt.h_total == dp->mst_cur_timing.h_total && mt.v_total == dp->mst_cur_timing.v_total &&
+                                    mt.pix_clk_100hz == dp->mst_cur_timing.pix_clk_100hz;
         } else {
             /* apply_dsc_policy_for_stream (rdna3dsc), then link_decide_link_settings
              * over the link cap (dp_validate_mode_timing) */
@@ -436,6 +447,7 @@ static int plan_common(rdna3_dev *d, const rdna3_dcn *dc, uint32_t head, const r
         ms->dp_want = *m;
         ms->dp_cur_dsc = ms->dp->stream_dsc;
         ms->dp_cur_dsc_cfg = ms->dp->dsc_cfg;
+        ms->dp_cur_mst_pbn = ms->dp->mst_pbn;
         if (ms->dp_want_dsc)
             RLOG(d, "modeset: head %u: %ux%u needs DSC: %u x %u slices, %u.%04u bpp", head, m->h_active,
                  m->v_active, ms->dp_want_dsc_cfg.num_slices_h, ms->dp_want_dsc_cfg.num_slices_v,
@@ -784,8 +796,8 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
  * pixel rate divider, the DP DTO (dcn31_program_pix_clk) and the DTBCLK
  * DTO, the ODM pipe and dcn32_update_odm, OTG on, link_set_dpms_on */
 static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, const rdna3_modeset_regs *r,
-                      const rdna3_mode *m, int dsc, const rdna3_dsc_config *dsc_cfg, uint64_t mc, uint32_t pitch_px,
-                      uint32_t odm)
+                      const rdna3_mode *m, int dsc, const rdna3_dsc_config *dsc_cfg, uint32_t mst_pbn, uint64_t mc,
+                      uint32_t pitch_px, uint32_t odm)
 {
     rdna3_dp_link *dp = ms->dp;
     uint32_t v, opp_inst[2];
@@ -826,6 +838,7 @@ static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, 
      * setting and with it the HPO encoders */
     dp->stream_dsc = dsc;
     dp->dsc_cfg = *dsc_cfg;
+    dp->mst_req_pbn = dp->mst ? mst_pbn : 0;   /* dm_connector_state->pbn */
     dp->odm_opp_cnt = odm;
     dp->odm_opp[0] = ms->opp;
     dp->odm_dsc[0] = dp->dsc_inst;
@@ -931,6 +944,17 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     if (!dc || ms->head >= dc->nheads || pitch_px < ms->want.h_active || (mc & 0xff) || mc < d->fb_start ||
         mc - d->fb_start + (uint64_t)pitch_px * 4 * ms->want.v_active > d->vram_size)
         return RDNA3_EINVAL;
+    /* an MST DSC stream that keeps its timing and surface: the stream
+     * update (link_update_dsc_config, link_increase / reduce_mst_payload) */
+    if (ms->dp && ms->dp_mst_dsc_update && mc == old_mc && pitch_px == old_pitch_px && !(sc && sc->saved[ms->pipe])) {
+        ret = dcn32_dp_mst_update_stream_dsc(ms->dp, &ms->dp_want, &ms->dp_want_dsc_cfg, ms->dp_mst_pbn);
+        if (!ret) {
+            update_head(dc, sc, ms, &ms->want, mc, pitch_px, 1);
+            RLOG(d, "modeset: head %u: MST DSC stream update at %ux%u", ms->head, ms->want.h_active, ms->want.v_active);
+            return RDNA3_OK;
+        }
+        RLOG(d, "modeset: head %u: MST DSC stream update refused (%d): a mode set", ms->head, ret);
+    }
     /* dcn32_update_clocks(safe_to_lower = false) before the new timing:
      * the faster clocks first, nothing touched when they do not come */
     if (ms->raise_dispclk_khz || ms->raise_dppclk_khz) {
@@ -953,8 +977,8 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     /* a scaled source first goes back to the GOP's bypass state */
     if (sc && sc->saved[ms->pipe])
         dcn32_set_source(d, dc, sc, ms->head, old_mc, sc->native_w[ms->pipe], sc->native_h[ms->pipe], old_pitch_px);
-    ret = ms->dp ? program_dp(d, dc, ms, &ms->want, &ms->dp_want, ms->dp_want_dsc, &ms->dp_want_dsc_cfg, mc, pitch_px,
-                              ms->odm_want)
+    ret = ms->dp ? program_dp(d, dc, ms, &ms->want, &ms->dp_want, ms->dp_want_dsc, &ms->dp_want_dsc_cfg, ms->dp_mst_pbn,
+                              mc, pitch_px, ms->odm_want)
                  : program(d, dm, dc, ms, &ms->want, &ms->tmds_want, mc, pitch_px, ms->cur.pclk_khz, 1);
     /* dce110_apply_ctx_to_hw: dcn32_resync_fifo_dccg_dio after the stream */
     if (ms->dc_seq)
@@ -976,8 +1000,8 @@ int dcn32_modeset_apply(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_s
     }
     if (ret) {
         if (ms->dp)
-            program_dp(d, dc, ms, &ms->cur, &ms->dp_cur, ms->dp_cur_dsc, &ms->dp_cur_dsc_cfg, old_mc, old_pitch_px,
-                       ms->odm_cur);
+            program_dp(d, dc, ms, &ms->cur, &ms->dp_cur, ms->dp_cur_dsc, &ms->dp_cur_dsc_cfg, ms->dp_cur_mst_pbn, old_mc,
+                       old_pitch_px, ms->odm_cur);
         else
             program(d, dm, dc, ms, &ms->cur, &ms->tmds_cur, old_mc, old_pitch_px, ms->want.pclk_khz, 0);
         if (ms->dc_seq)

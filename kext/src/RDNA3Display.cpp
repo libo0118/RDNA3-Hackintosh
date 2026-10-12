@@ -40,6 +40,7 @@ extern "C" {
 #include "dcn32_audio.h"
 #include "dcn32_hpo.h"
 #include "dp_mst.h"
+#include "dcn32_dp_mst.h"
 #include "dcn32_gamma.h"
 #include "dcn32_otg.h"
 #include "dcn32_hwseq.h"
@@ -1099,6 +1100,11 @@ rdna3_dp_link *RDNA3Accel::displayDpLink(uint32_t head, const rdna3_display_path
         l->verified = 0;
         LOG("display: head %u: another DP sink: its link cap is verified again on the next mode set", head);
     }
+    /* amdgpu_dm_update_freesync_caps' dm_get_adaptive_sync_support_type:
+     * logged once per sink (no FreeSync on macOS yet) */
+    if (!had && dcn32_dp_adaptive_sync_support_type(l) == RD_FREESYNC_TYPE_PCON_IN_WHITELIST)
+        LOG("display: head %u: DP-HDMI PCON with FreeSync (branch 0x%06x, whitelisted)", head,
+            l->dpcd_caps.branch_dev_id);
     return l;
 }
 
@@ -1167,7 +1173,10 @@ int RDNA3Accel::displayMstTakeover(uint32_t head, rdna3_dp_link *l, const rdna3_
     l->mst = 1;
     l->mgr = mgr;
     l->mst_port = pick;
-    LOG("display: head %u: MST: the stream goes to port %u (%u messages)", head, mgr->port[pick].port_num, mgr->msgs);
+    /* dm_dp_mst_get_modes: the connector's DSC aux and caps */
+    dcn32_dp_mst_detect_dsc(l, &l->mst_conn, pick);
+    LOG("display: head %u: MST: the stream goes to port %u (%u messages), DSC aux %d%s", head, mgr->port[pick].port_num,
+        mgr->msgs, l->mst_conn.dsc_aux, l->mst_conn.dsc_caps.is_dsc_supported ? " (DSC)" : "");
     return RDNA3_OK;
 }
 
@@ -1550,7 +1559,7 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     rdna3_dcn_clocks ck;
     dcn32_clk_read(fDispDev, &ck);   /* raised or not: the report sees them */
     char dpval[128] = "";
-    char dscval[96] = "", mstval[96] = "", uhbrval[160] = "", odmval[96] = "";
+    char dscval[96] = "", mstval[128] = "", uhbrval[160] = "", odmval[96] = "";
     if (dpHead) {
         snprintf(dpval, sizeof(dpval), "verified 0x%x x%u, running 0x%x x%u, last training %d, %u trainings, %u fallbacks",
                  dpl->verified_link_cap.link_rate, dpl->verified_link_cap.lane_count, dpl->cur_link_settings.link_rate,
@@ -1577,9 +1586,10 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
         else
             snprintf(dscval, sizeof(dscval), "off, FEC %d", dpl->fec_state);
         if (dpl->mst && dpl->mgr && dpl->mst_port >= 0)
-            snprintf(mstval, sizeof(mstval), "port %u, VCPI %d, PBN %u, %u slots, X.Y %u.%u, ACT %d",
+            snprintf(mstval, sizeof(mstval), "port %u, VCPI %d, PBN %u, %u slots, X.Y %u.%u, ACT %d, DSC aux %d%s",
                      dpl->mgr->port[dpl->mst_port].port_num, dpl->mgr->port[dpl->mst_port].vcpi, dpl->mst_pbn,
-                     dpl->mst_slots, dpl->mst_vcp_x, dpl->mst_vcp_y, dpl->mst_act);
+                     dpl->mst_slots, dpl->mst_vcp_x, dpl->mst_vcp_y, dpl->mst_act, dpl->mst_conn.dsc_aux,
+                     dpl->mst_conn.passthrough_aux != RD_MST_AUX_NONE ? " (passthrough)" : "");
         else
             snprintf(mstval, sizeof(mstval), "SST");
     }

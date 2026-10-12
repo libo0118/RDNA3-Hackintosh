@@ -370,6 +370,14 @@ int main(void)
         CHECK(di.num_rb_pipes == 12 && di.wave_front_size == 32);
         CHECK(di.virtual_address_max == 0x0000800000000000ull);
         CHECK(info(f, AMDGPU_INFO_ACCEL_WORKING, &aw, 4) == 0 && aw == 0);
+        {
+            /* amdgpu_ring_max_ibs (GFX 192, compute 125, JPEG 16, others 49)
+             * within the CS ioctl's RD_MAX_CS_IBS */
+            uint32_t max_ibs[AMDGPU_HW_IP_NUM], k;
+            CHECK(info(f, AMDGPU_INFO_MAX_IBS, max_ibs, sizeof(max_ibs)) == 0);
+            for (k = 0; k < AMDGPU_HW_IP_NUM; k++)
+                CHECK(max_ibs[k] == RD_MAX_CS_IBS);
+        }
         CHECK(di.cu_bitmap[0][0] == 0x3ff && di.cu_ao_mask == 0 && di.cu_ao_bitmap[0][0] == 0 &&
               di.enabled_rb_pipes_mask == 0xfff);
         /* harvesting read from the GC replaces the defaults */

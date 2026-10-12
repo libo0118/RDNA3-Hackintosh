@@ -167,6 +167,7 @@ typedef struct sb_req {
     uint8_t port_number;
     struct { uint8_t vcpi; uint16_t pbn; uint8_t number_sdp_streams; uint8_t sdp_stream_sink[16]; } allocate_payload;
     struct { uint32_t dpcd_address; uint8_t num_bytes; } dpcd_read;
+    struct { uint32_t dpcd_address; uint8_t num_bytes; const uint8_t *bytes; } dpcd_write;
     struct {
         uint8_t num_transactions;
         struct { uint8_t i2c_dev_id, num_bytes; const uint8_t *bytes; uint8_t no_stop_bit, i2c_transaction_delay; } t[4];
@@ -204,6 +205,16 @@ static void drm_dp_encode_sideband_req(const sb_req *req, rdna3_mst_sb_tx *raw)
         buf[idx++] = (uint8_t)((req->dpcd_read.dpcd_address & 0xff00) >> 8);
         buf[idx++] = (uint8_t)(req->dpcd_read.dpcd_address & 0xff);
         buf[idx++] = req->dpcd_read.num_bytes;
+        break;
+    case RD_DP_REMOTE_DPCD_WRITE:
+        buf[idx] = (uint8_t)((req->port_number & 0xf) << 4);
+        buf[idx] = (uint8_t)(buf[idx] | (((req->dpcd_write.dpcd_address & 0xf0000) >> 16) & 0xf));
+        idx++;
+        buf[idx++] = (uint8_t)((req->dpcd_write.dpcd_address & 0xff00) >> 8);
+        buf[idx++] = (uint8_t)(req->dpcd_write.dpcd_address & 0xff);
+        buf[idx++] = req->dpcd_write.num_bytes;
+        for (i = 0; i < req->dpcd_write.num_bytes; i++)
+            buf[idx++] = req->dpcd_write.bytes[i];
         break;
     case RD_DP_REMOTE_I2C_READ:
         buf[idx++] = (uint8_t)(((req->port_number & 0xf) << 4) | (req->i2c_read.num_transactions & 0x3));
@@ -335,6 +346,15 @@ static int drm_dp_sideband_parse_remote_read_ack(const rdna3_mst_sb_rx *raw, rdn
     return 1;
 }
 
+/* drm_dp_sideband_parse_remote_dpcd_write */
+static int drm_dp_sideband_parse_remote_dpcd_write(const rdna3_mst_sb_rx *raw, rdna3_mst_reply *rep)
+{
+    uint32_t idx = 1;
+    rep->remote_dpcd_write_ack.port_number = (uint8_t)(raw->msg[idx] & 0xf);
+    idx++;
+    return idx <= raw->curlen;
+}
+
 /* drm_dp_sideband_parse_enum_path_resources_ack */
 static int drm_dp_sideband_parse_enum_path_resources_ack(const rdna3_mst_sb_rx *raw, rdna3_mst_reply *rep)
 {
@@ -386,6 +406,7 @@ static int drm_dp_sideband_parse_reply(rdna3_mst_mgr *mgr, const rdna3_mst_sb_rx
     case RD_DP_LINK_ADDRESS: return drm_dp_sideband_parse_link_address(raw, msg);
     case RD_DP_REMOTE_DPCD_READ:
     case RD_DP_REMOTE_I2C_READ: return drm_dp_sideband_parse_remote_read_ack(raw, msg);
+    case RD_DP_REMOTE_DPCD_WRITE: return drm_dp_sideband_parse_remote_dpcd_write(raw, msg);
     case RD_DP_ENUM_PATH_RESOURCES: return drm_dp_sideband_parse_enum_path_resources_ack(raw, msg);
     case RD_DP_ALLOCATE_PAYLOAD: return drm_dp_sideband_parse_allocate_payload_ack(raw, msg);
     case RD_DP_CLEAR_PAYLOAD_ID_TABLE: return 1;   /* nothing to parse */
@@ -452,6 +473,20 @@ static void build_dpcd_read(rdna3_mst_sb_tx *msg, uint8_t port_num, uint32_t off
     req.port_number = port_num;
     req.dpcd_read.dpcd_address = offset;
     req.dpcd_read.num_bytes = num_bytes;
+    drm_dp_encode_sideband_req(&req, msg);
+}
+
+/* build_dpcd_write */
+static void build_dpcd_write(rdna3_mst_sb_tx *msg, uint8_t port_num, uint32_t offset, uint8_t num_bytes,
+                             const uint8_t *bytes)
+{
+    sb_req req;
+    zero(&req, sizeof(req));
+    req.req_type = RD_DP_REMOTE_DPCD_WRITE;
+    req.port_number = port_num;
+    req.dpcd_write.dpcd_address = offset;
+    req.dpcd_write.num_bytes = num_bytes;
+    req.dpcd_write.bytes = bytes;
     drm_dp_encode_sideband_req(&req, msg);
 }
 
@@ -1146,6 +1181,282 @@ int dp_mst_dpcd_read(rdna3_mst_mgr *mgr, int p, uint32_t offset, uint8_t *bytes,
     return (int)size;
 }
 
+/* drm_dp_send_dpcd_write */
+int dp_mst_dpcd_write(rdna3_mst_mgr *mgr, int p, uint32_t offset, const uint8_t *bytes, uint32_t size)
+{
+    rdna3_mst_sb_tx *txmsg = &mgr->tx;
+    rdna3_mst_port *port;
+    int ret;
+    /* the request (header and CRC included) must fit one message */
+    if (p < 0 || p >= RD_MST_MAX_PORTS || !mgr->port[p].used || size > RD_MST_MSG_MAX - 16)
+        return RDNA3_EINVAL;
+    port = &mgr->port[p];
+    zero(txmsg, sizeof(*txmsg));
+    build_dpcd_write(txmsg, port->port_num, offset, (uint8_t)size, bytes);
+    txmsg->dst = port->parent;
+    ret = drm_dp_mst_wait_tx_reply(mgr, txmsg);
+    if (ret < 0)
+        return ret;
+    if (txmsg->reply.reply_type == RD_DP_SIDEBAND_REPLY_NAK) {
+        RDBG(mgr->d, "mst: port %u: DPCD write at 0x%x (%u bytes) NAKed", port->port_num, offset, size);
+        return RDNA3_EIO;
+    }
+    return (int)size;
+}
+
+/* drm_dp_dpcd_read / _write on an MST "aux": the manager's physical AUX
+ * (RD_MST_AUX_ROOT) or a port's (remote DPCD through its branch).
+ * Bytes transferred or a negative error. */
+int dp_mst_aux_read(rdna3_mst_mgr *mgr, int aux, uint32_t offset, uint8_t *b, uint32_t n)
+{
+    if (aux == RD_MST_AUX_ROOT) {
+        int r = dpcd_read(mgr, offset, b, n);
+        return r < 0 ? r : (int)n;
+    }
+    return aux >= 0 ? dp_mst_dpcd_read(mgr, aux, offset, b, n) : RDNA3_EINVAL;
+}
+
+int dp_mst_aux_write(rdna3_mst_mgr *mgr, int aux, uint32_t offset, const uint8_t *b, uint32_t n)
+{
+    if (aux == RD_MST_AUX_ROOT) {
+        int r = dpcd_write(mgr, offset, b, n);
+        return r < 0 ? r : (int)n;
+    }
+    return aux >= 0 ? dp_mst_dpcd_write(mgr, aux, offset, b, n) : RDNA3_EINVAL;
+}
+
+/* drm_dp_mst_port_is_logical: ports 8 and up of a branch are internal */
+static int drm_dp_mst_port_is_logical(const rdna3_mst_port *port)
+{
+    return port->port_num >= 8;
+}
+
+/* drm_dp_mst_is_virtual_dpcd */
+static int drm_dp_mst_is_virtual_dpcd(const rdna3_mst_mgr *mgr, int p)
+{
+    const rdna3_mst_port *port;
+    int i, n = 0, sst = 0;
+    if (p < 0 || p >= RD_MST_MAX_PORTS || !mgr->port[p].used)
+        return 0;
+    port = &mgr->port[p];
+    if (port->dpcd_rev < 0x14)
+        return 0;
+    /* Virtual DP Sink (Internal Display Panel) */
+    if (drm_dp_mst_port_is_logical(port))
+        return 1;
+    /* DP-to-HDMI Protocol Converter */
+    if (port->pdt == RD_DP_PEER_DEVICE_DP_LEGACY_CONV && !port->mcs && port->ldps)
+        return 1;
+    /* DP-to-DP: a branch with two ports, one an SST sink output */
+    if (port->pdt == RD_DP_PEER_DEVICE_MST_BRANCHING && port->mstb >= 0) {
+        for (i = 0; i < RD_MST_MAX_PORTS; i++)
+            if (mgr->port[i].used && mgr->port[i].parent == port->mstb) {
+                n++;
+                sst |= mgr->port[i].pdt == RD_DP_PEER_DEVICE_SST_SINK && !mgr->port[i].input;
+            }
+        if (n == 2 && sst)
+            return 1;
+    }
+    return 0;
+}
+
+/* drm_dp_read_desc (branch: the OUI at DP_BRANCH_OUI) + drm_dp_get_quirks'
+ * DP_DPCD_QUIRK_DSC_WITHOUT_VIRTUAL_DPCD: Synaptics DP1.4 MST hubs (OUI
+ * 90-CC-24, any device). 1 with the quirk, 0 without, < 0 read error. */
+static int dsc_without_virtual_dpcd_quirk(rdna3_mst_mgr *mgr, int aux)
+{
+    uint8_t ident[12];
+    int r = dp_mst_aux_read(mgr, aux, RD_DPCD_BRANCH_OUI, ident, sizeof(ident));
+    if (r < 0)
+        return r;
+    return ident[0] == 0x90 && ident[1] == 0xcc && ident[2] == 0x24;
+}
+
+int dp_mst_dsc_aux_for_port(rdna3_mst_mgr *mgr, int p, int *passthrough_aux)
+{
+    const rdna3_mst_port *port;
+    int up = -1, fec, r;
+    uint8_t endpoint_dsc = 0, endpoint_fec = 0, upstream_dsc = 0;
+    *passthrough_aux = RD_MST_AUX_NONE;
+    if (p < 0 || p >= RD_MST_MAX_PORTS || !mgr->port[p].used)
+        return RD_MST_AUX_NONE;
+    port = &mgr->port[p];
+    if (port->parent >= 0 && port->parent < RD_MST_MAX_BRANCHES)
+        up = mgr->mstb[port->parent].port_parent;   /* immediate_upstream_port */
+    /* each physical link between the output and the primary device: FEC */
+    for (fec = up; fec >= 0;) {
+        int b = mgr->port[fec].parent;
+        if (!drm_dp_mst_is_virtual_dpcd(mgr, fec) && !mgr->port[fec].fec_capable)
+            return RD_MST_AUX_NONE;
+        fec = b >= 0 && b < RD_MST_MAX_BRANCHES ? mgr->mstb[b].port_parent : -1;
+    }
+    /* DP-to-DP peer device */
+    if (drm_dp_mst_is_virtual_dpcd(mgr, up)) {
+        if (dp_mst_aux_read(mgr, p, RD_DPCD_DSC_SUPPORT, &endpoint_dsc, 1) != 1 ||
+            dp_mst_aux_read(mgr, p, RD_DPCD_FEC_CAPABILITY, &endpoint_fec, 1) != 1 ||
+            dp_mst_aux_read(mgr, up, RD_DPCD_DSC_SUPPORT, &upstream_dsc, 1) != 1)
+            return RD_MST_AUX_NONE;
+        /* endpoint decompression with a DP-to-DP peer device */
+        if ((endpoint_dsc & RD_DP_DSC_DECOMPRESSION_IS_SUPPORTED) && (endpoint_fec & RD_DP_FEC_CAPABLE) &&
+            (upstream_dsc & RD_DP_DSC_PASSTHROUGH_IS_SUPPORTED)) {
+            *passthrough_aux = up;
+            return p;
+        }
+        return up;   /* virtual DPCD decompression with a DP-to-DP peer device */
+    }
+    /* virtual DPCD decompression with DP-to-HDMI or a virtual DP sink */
+    if (drm_dp_mst_is_virtual_dpcd(mgr, p))
+        return p;
+    /* Synaptics quirk: physical aux with Synaptics OUI, DP 1.4+, the port on
+     * the primary branch, not a VGA adapter */
+    {
+        int ua = up >= 0 ? up : RD_MST_AUX_ROOT;
+        r = dsc_without_virtual_dpcd_quirk(mgr, ua);
+        if (r < 0)
+            return RD_MST_AUX_NONE;
+        if (r) {
+            uint8_t ext[16];
+            if (dp_mst_aux_read(mgr, ua, RD_DPCD_DSC_SUPPORT, &upstream_dsc, 1) != 1)
+                return RD_MST_AUX_NONE;
+            if (!(upstream_dsc & RD_DP_DSC_DECOMPRESSION_IS_SUPPORTED))
+                return RD_MST_AUX_NONE;
+            /* drm_dp_read_dpcd_caps: the receiver caps (0x000..0x00f) */
+            if (dp_mst_aux_read(mgr, ua, 0x000, ext, sizeof(ext)) != (int)sizeof(ext))
+                return RD_MST_AUX_NONE;
+            if (ext[0] >= 0x14 && (ext[5] & RD_DP_DWN_STRM_PORT_PRESENT) &&
+                (ext[5] & RD_DP_DWN_STRM_PORT_TYPE_MASK) != RD_DP_DWN_STRM_PORT_TYPE_ANALOG)
+                return ua;
+        }
+    }
+    /* the MST sink connected to the GPU: DSC and FEC capable endpoint */
+    if (dp_mst_aux_read(mgr, p, RD_DPCD_DSC_SUPPORT, &endpoint_dsc, 1) != 1 ||
+        dp_mst_aux_read(mgr, p, RD_DPCD_FEC_CAPABILITY, &endpoint_fec, 1) != 1)
+        return RD_MST_AUX_NONE;
+    if ((endpoint_dsc & RD_DP_DSC_DECOMPRESSION_IS_SUPPORTED) && (endpoint_fec & RD_DP_FEC_CAPABLE))
+        return p;
+    return RD_MST_AUX_NONE;
+}
+
+/* ---- the atomic topology state (drm_dp_mst_topology_state) ---- */
+
+void dp_mst_atomic_init(const rdna3_mst_mgr *mgr, rdna3_mst_atomic *st)
+{
+    int i;
+    zero(st, sizeof(*st));
+    st->pbn_div = mgr->pbn_div;
+    st->total_avail_slots = mgr->total_avail_slots;
+    for (i = 0; i < RD_MST_MAX_PORTS; i++)
+        if (mgr->port[i].used && mgr->port[i].vcpi) {
+            st->has[i] = 1;
+            st->pbn[i] = mgr->port[i].pbn;
+            st->time_slots[i] = mgr->port[i].time_slots;
+        }
+}
+
+int dp_mst_atomic_find_time_slots(const rdna3_mst_mgr *mgr, rdna3_mst_atomic *st, int p, int pbn)
+{
+    if (p < 0 || p >= RD_MST_MAX_PORTS || !mgr->port[p].used || !st->pbn_div)
+        return RDNA3_EINVAL;
+    st->has[p] = 1;
+    st->time_slots[p] = (int)(((uint32_t)pbn + st->pbn_div - 1) / st->pbn_div);
+    st->pbn[p] = pbn;
+    return st->time_slots[p];
+}
+
+int dp_mst_atomic_enable_dsc(const rdna3_mst_mgr *mgr, rdna3_mst_atomic *st, int p, int pbn, int enable)
+{
+    int time_slots = 0;
+    if (p < 0 || p >= RD_MST_MAX_PORTS || !st->has[p]) {
+        RDBG(mgr->d, "mst: port %d: no payload in the atomic state", p);
+        return RDNA3_EINVAL;
+    }
+    if (st->dsc_enabled[p] == !!enable)
+        time_slots = st->time_slots[p];   /* the DSC flag is already set */
+    if (enable) {
+        time_slots = dp_mst_atomic_find_time_slots(mgr, st, p, pbn);
+        if (time_slots < 0)
+            return RDNA3_EINVAL;
+    }
+    st->dsc_enabled[p] = !!enable;
+    return time_slots;
+}
+
+static int port_downstream_of_branch(const rdna3_mst_mgr *mgr, int p, int b)
+{
+    int guard = 0;
+    while (p >= 0 && guard++ < RD_MST_MAX_PORTS) {
+        int pb = mgr->port[p].parent;
+        if (pb == b)
+            return 1;
+        p = pb >= 0 && pb < RD_MST_MAX_BRANCHES ? mgr->mstb[pb].port_parent : -1;
+    }
+    return 0;
+}
+
+static int check_port_bw_limit(const rdna3_mst_mgr *mgr, const rdna3_mst_atomic *st, int p, int depth);
+
+/* drm_dp_mst_atomic_check_mstb_bw_limit */
+static int check_mstb_bw_limit(const rdna3_mst_mgr *mgr, const rdna3_mst_atomic *st, int b, int depth)
+{
+    int i, found = 0, pbn_used = 0, r;
+    if (b < 0 || b >= RD_MST_MAX_BRANCHES || depth > RD_MST_MAX_BRANCHES)
+        return 0;
+    for (i = 0; i < RD_MST_MAX_PORTS && !found; i++)
+        found = st->has[i] && st->pbn[i] && port_downstream_of_branch(mgr, i, b);
+    if (!found)
+        return 0;
+    for (i = 0; i < RD_MST_MAX_PORTS; i++) {
+        if (!mgr->port[i].used || mgr->port[i].parent != b)
+            continue;
+        r = check_port_bw_limit(mgr, st, i, depth + 1);
+        if (r < 0)
+            return r;
+        pbn_used += r;
+    }
+    return pbn_used;
+}
+
+/* drm_dp_mst_atomic_check_port_bw_limit */
+static int check_port_bw_limit(const rdna3_mst_mgr *mgr, const rdna3_mst_atomic *st, int p, int depth)
+{
+    const rdna3_mst_port *port = &mgr->port[p];
+    int pbn_used;
+    if (port->pdt == RD_DP_PEER_DEVICE_NONE)
+        return 0;
+    if (drm_dp_mst_is_end_device(port->pdt, port->mcs)) {
+        if (!st->has[p])
+            return 0;
+        if (!port->full_pbn)
+            return RDNA3_EINVAL;   /* the sink went, the branch still lists it */
+        pbn_used = st->pbn[p];
+    } else {
+        pbn_used = check_mstb_bw_limit(mgr, st, port->mstb, depth);
+        if (pbn_used <= 0)
+            return pbn_used;
+    }
+    if (pbn_used > port->full_pbn)
+        return RDNA3_ENOSPC;
+    return pbn_used;
+}
+
+int dp_mst_atomic_check(const rdna3_mst_mgr *mgr, const rdna3_mst_atomic *st)
+{
+    int i, avail = st->total_avail_slots, count = 0, r;
+    /* drm_dp_mst_atomic_check_payload_alloc_limits */
+    for (i = 0; i < RD_MST_MAX_PORTS; i++) {
+        if (!st->has[i] || !st->pbn[i])
+            continue;
+        avail -= st->time_slots[i];
+        if (avail < 0)
+            return RDNA3_ENOSPC;
+        if (++count > RD_MST_MAX_PAYLOADS)
+            return RDNA3_EINVAL;
+    }
+    /* drm_dp_mst_atomic_check_mstb_bw_limit from the primary branch */
+    r = check_mstb_bw_limit(mgr, st, mgr->mst_primary, 0);
+    return r < 0 ? r : RDNA3_OK;
+}
+
 /* drm_dp_mst_i2c_read: 'num' write transactions then one read (no STOP
  * between them: I2C_M_STOP is not set by drm_do_probe_ddc_edid) */
 static int drm_dp_mst_i2c_read(rdna3_mst_mgr *mgr, int p, const uint8_t *w_addr, const uint8_t *const *w_buf,
@@ -1446,6 +1757,40 @@ int dp_mst_add_payload_part2(rdna3_mst_mgr *mgr, int p)
     else
         port->payload_allocation_status = RD_PAYLOAD_ALLOCATION_REMOTE;
     return ret;
+}
+
+/* a payload that is already in the table resized to the time slots
+ * dp_mst_find_time_slots gave it again: the VC payload ID table entry at
+ * its start slot with the new count (the DP payload table update of an
+ * allocated ID). Only the last payload of the table: one in front of
+ * others would move them. */
+int dp_mst_update_payload_part1(rdna3_mst_mgr *mgr, int p, int old_time_slots)
+{
+    rdna3_mst_port *port;
+    int ret;
+    if (p < 0 || p >= RD_MST_MAX_PORTS || !mgr->port[p].used || !mgr->port[p].vcpi || mgr->port[p].vc_start_slot < 0 ||
+        mgr->port[p].payload_allocation_status < RD_PAYLOAD_ALLOCATION_DFP)
+        return RDNA3_EIO;
+    port = &mgr->port[p];
+    if (port->vc_start_slot + old_time_slots != mgr->next_start_slot) {
+        RDBG(mgr->d, "mst: port %u: the payload is not the last of the table: not resized", port->port_num);
+        return RDNA3_EINVAL;
+    }
+    ret = drm_dp_create_payload_at_dfp(mgr, port);
+    if (ret < 0)
+        return ret;
+    mgr->next_start_slot = port->vc_start_slot + port->time_slots;
+    return RDNA3_OK;
+}
+
+/* ALLOCATE_PAYLOAD again with the port's new PBN for its VCPI */
+int dp_mst_update_payload_part2(rdna3_mst_mgr *mgr, int p)
+{
+    if (p < 0 || p >= RD_MST_MAX_PORTS || !mgr->port[p].used ||
+        mgr->port[p].payload_allocation_status < RD_PAYLOAD_ALLOCATION_DFP)
+        return RDNA3_EIO;
+    mgr->port[p].payload_allocation_status = RD_PAYLOAD_ALLOCATION_DFP;
+    return dp_mst_add_payload_part2(mgr, p);
 }
 
 void dp_mst_remove_payload_part1(rdna3_mst_mgr *mgr, int p)

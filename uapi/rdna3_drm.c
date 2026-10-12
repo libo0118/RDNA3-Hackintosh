@@ -3578,6 +3578,46 @@ static void userq_metadata_info_gfx(struct drm_amdgpu_info_uq_metadata_gfx *meta
 
 /* ------------------------------ info ------------------------------ */
 
+/* enum amdgpu_ring_type */
+enum {
+    RD_RING_TYPE_GFX = 0, RD_RING_TYPE_COMPUTE, RD_RING_TYPE_SDMA, RD_RING_TYPE_UVD, RD_RING_TYPE_VCE,
+    RD_RING_TYPE_UVD_ENC = 6, RD_RING_TYPE_VCN_DEC, RD_RING_TYPE_VCN_ENC, RD_RING_TYPE_VCN_JPEG,
+    RD_RING_TYPE_VPE = 10
+};
+
+/* amdgpu_hw_ip_to_ring_type */
+static int amdgpu_hw_ip_to_ring_type(uint32_t hw_ip)
+{
+    switch (hw_ip) {
+    case AMDGPU_HW_IP_GFX: return RD_RING_TYPE_GFX;
+    case AMDGPU_HW_IP_COMPUTE: return RD_RING_TYPE_COMPUTE;
+    case AMDGPU_HW_IP_DMA: return RD_RING_TYPE_SDMA;
+    case AMDGPU_HW_IP_UVD: return RD_RING_TYPE_UVD;
+    case AMDGPU_HW_IP_VCE: return RD_RING_TYPE_VCE;
+    case AMDGPU_HW_IP_UVD_ENC: return RD_RING_TYPE_UVD_ENC;
+    case AMDGPU_HW_IP_VCN_DEC: return RD_RING_TYPE_VCN_DEC;
+    case AMDGPU_HW_IP_VCN_ENC: return RD_RING_TYPE_VCN_ENC;
+    case AMDGPU_HW_IP_VCN_JPEG: return RD_RING_TYPE_VCN_JPEG;
+    case AMDGPU_HW_IP_VPE: return RD_RING_TYPE_VPE;
+    default: return -1;
+    }
+}
+
+/* amdgpu_ring_max_ibs: the IBs one submission may carry on a ring of 'type' */
+static uint32_t amdgpu_ring_max_ibs(int type)
+{
+    switch (type) {
+    case RD_RING_TYPE_GFX:
+        return 192;   /* "Need to keep at least 192 on GFX7+ for old radv." */
+    case RD_RING_TYPE_COMPUTE:
+        return 125;
+    case RD_RING_TYPE_VCN_JPEG:
+        return 16;
+    default:
+        return 49;
+    }
+}
+
 static int info_out(rdna3_drm_file *f, struct drm_amdgpu_info *in, const void *p, size_t n)
 {
     size_t len = MIN((size_t)in->return_size, n);
@@ -3759,10 +3799,14 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
     case AMDGPU_INFO_MAX_IBS: {
         uint32_t max_ibs[AMDGPU_HW_IP_NUM];
         uint32_t i;
-        /* what the CS ioctl takes (amdgpu answers per-ring maximums; more
-         * than RD_MAX_CS_IBS would be refused, so RADV splits by this) */
-        for (i = 0; i < AMDGPU_HW_IP_NUM; i++)
-            max_ibs[i] = RD_MAX_CS_IBS;
+        /* amdgpu_ring_max_ibs of each IP's ring type, within what the CS
+         * ioctl takes (more than RD_MAX_CS_IBS would be refused, so RADV
+         * splits by this) */
+        for (i = 0; i < AMDGPU_HW_IP_NUM; i++) {
+            max_ibs[i] = amdgpu_ring_max_ibs(amdgpu_hw_ip_to_ring_type(i));
+            if (max_ibs[i] > RD_MAX_CS_IBS)
+                max_ibs[i] = RD_MAX_CS_IBS;
+        }
         return info_out(f, in, max_ibs, sizeof(max_ibs));
     }
     case AMDGPU_INFO_VIDEO_CAPS: {

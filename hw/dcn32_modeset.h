@@ -126,7 +126,10 @@ typedef struct rdna3_dcn_modeset {
      * new and the running timing; MST: the new stream's PBN and time slots */
     int      dp_want_dsc, dp_cur_dsc;
     rdna3_dsc_config dp_want_dsc_cfg, dp_cur_dsc_cfg;
-    uint32_t dp_mst_pbn, dp_mst_slots;
+    uint32_t dp_mst_pbn, dp_mst_slots, dp_cur_mst_pbn;
+    /* MST: the running DSC stream keeps its timing and changes its DSC
+     * config (the hub's DSC fairness): a stream update, no mode set */
+    int      dp_mst_dsc_update;
     /* DP SST: the new stream on a 128b/132b link setting (rdna3uhbr: the
      * HPO encoders, DTBCLK); the ODM combine of the new and the running
      * timing (rdna3odm; 1 = one pipe) and the ODM pipe when either is 2 */

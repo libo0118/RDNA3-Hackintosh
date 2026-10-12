@@ -2874,10 +2874,13 @@ uint32_t dcn32_dp_stream_req_kbps(const rdna3_dp_link *l, const rdna3_mode *m, c
 }
 
 /* dp_set_dsc_on_rx -> dm_helpers_dp_write_dsc_enable (SST: DP_DSC_ENABLE
- * on the RX itself, no converter or a DP-HDMI one) */
+ * on the RX itself, no converter or a DP-HDMI one; MST: through the
+ * connector's DSC aux, dcn32_dp_mst_write_dsc_enable) */
 static int dp_set_dsc_on_rx(rdna3_dp_link *l, int enable)
 {
     uint8_t enable_dsc = enable ? 0x01 : 0x00;   /* DSC_DECODING / DSC_DISABLE */
+    if (l->mst)
+        return dcn32_dp_mst_write_dsc_enable(l, enable);
     if (l->dpcd_caps.dongle_type != RD_DONGLE_NONE && l->dpcd_caps.dongle_type != RD_DONGLE_DP_HDMI)
         return 0;
     RLOG(l->d, "dp: AUX %u: SST_DSC: DSC %s on the RX", l->aux, enable ? "enable" : "disable");
@@ -3008,6 +3011,16 @@ static int link_set_dsc_enable(rdna3_dp_link *l, const rdna3_mode *m, int enable
             if (dcn32_dsc_pg_status(l->d, seg_dsc(l, k)))
                 dcn32_dsc_pg_control(l->d, seg_dsc(l, k), 0);
     }
+    return 1;
+}
+
+int dcn32_dp_link_update_dsc_config(rdna3_dp_link *l, const rdna3_mode *m)
+{
+    /* the stream's DSC engine (pipe_ctx->stream_res.dsc) */
+    if (!l->stream_dsc || l->dsc_inst >= RD_DCN_MAX_PIPES)
+        return 0;
+    link_set_dsc_on_stream(l, m, 1);
+    link_set_dsc_pps_packet(l, m, 1, 0);
     return 1;
 }
 
@@ -3267,6 +3280,7 @@ void dcn32_dp_link_set_dpms_off(rdna3_dp_link *l)
     if (l->stream_dsc)
         link_set_dsc_enable(l, 0, 0);
     l->stream_dsc = 0;
+    l->mst_cur_valid = 0;
     if (hpo)
         dcn32_otg_set_out_mux(l->d, l->otg, 0 /* OUT_MUX_DIO */);
     l->hpo_active = 0;
@@ -3499,7 +3513,15 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
     }
     if (l->mst && dcn32_dp_mst_allocate_payload(l, m, req))
         status = RDNA3_EIO;
-    else if (hpo)
+    else if (l->mst) {
+        /* the stream dc->current_state has on the link */
+        dcn32_dp_dsc_timing(m, 8, &l->mst_cur_timing);
+        l->mst_cur_timing.link_encoding = dcn32_dp_highest_encoding(l);
+        l->mst_cur_timing.dsc = l->stream_dsc;
+        if (l->stream_dsc)
+            l->mst_cur_timing.dsc_cfg = l->dsc_cfg;
+        l->mst_cur_valid = 1;
+    } else if (hpo)
         update_sst_payload(l, m, 1);
     /* dcn32_unblank_stream */
     if (hpo)
