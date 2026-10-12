@@ -1896,11 +1896,18 @@ void RDNA3Bringup::mesStart(const char *why)
     BLOG("MES: scheduler %s %s (%d), firmware sched 0x%x kiq 0x%x", why, ret ? "FAILED" : "up", ret,
          fMes->sched_version, fMes->kiq_version);
     if (fUserqMask && !ret) {
-        /* amdgpu's user queue resume is not ported: a restarted scheduler has
-         * forgotten the queues it had, their clients have to make new ones */
         userqIrqs();
-        BLOG("user queues: the scheduler restarted (%s), queues mapped before are gone", why);
+        /* a restarted scheduler has forgotten the queues it had: the DRM
+         * puts them back (amdgpu_userq_post_reset), or, after a system
+         * sleep, amdgpu_userq_resume does */
+        if (fMesStarted) {
+            fUserqRestart = true;
+            fUserqRestartVramLost = fReinit && fLastVramLost;
+            BLOG("user queues: the scheduler restarted (%s): the mapped queues go back on it", why);
+        }
     }
+    if (!ret)
+        fMesStarted = true;
 }
 
 void RDNA3Bringup::pmPublishMetrics()
@@ -2607,7 +2614,8 @@ bool RDNA3Bringup::checkVramLost(const char *what)
     if (fResetMagic == UINT64_MAX)
         return false;
     rdna3_vram_read(fDev, fResetMagic, &magic, 4);
-    if (magic != kResetMagic) {
+    fLastVramLost = magic != kResetMagic;
+    if (fLastVramLost) {
         fVramLostCount++;
         BLOG("%s: VRAM content lost (0x%08x), clients see VRAMLOST", what, magic);
         return true;

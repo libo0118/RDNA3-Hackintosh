@@ -375,11 +375,21 @@ int RDNA3Accel::drmFenceSignaled(void *ctx, uint32_t ip, uint32_t ring, uint64_t
 
 void RDNA3Accel::drmVmReplayIfNeeded()
 {
-    if (!fBringup || !fDrm || !fBringup->takeVmReplay())
+    bool vramLost = false;
+    if (!fBringup || !fDrm)
         return;
-    int failed = rdna3_drm_device_vm_replay(fDrm);
-    LOG("VRAM lost: the clients' GPUVM ranges mapped again%s", failed ? " (some failed)" : "");
-    setNumber("RDNA3,VMReplayFailures", (uint64_t)failed);
+    if (fBringup->takeVmReplay()) {
+        int failed = rdna3_drm_device_vm_replay(fDrm);
+        LOG("VRAM lost: the clients' GPUVM ranges mapped again%s", failed ? " (some failed)" : "");
+        setNumber("RDNA3,VMReplayFailures", (uint64_t)failed);
+    }
+    /* amdgpu_userq_post_reset: the queues the restarted scheduler forgot */
+    if (fBringup->takeUserqRestart(&vramLost)) {
+        int failed = rdna3_drm_device_userq_reset(fDrm, vramLost ? 1 : 0);
+        LOG("user queues after the reset: %s%s", vramLost ? "hung (VRAM lost)" : "mapped again",
+            failed ? ", some failed" : "");
+        setNumber("RDNA3,UserqResetFailures", (uint64_t)failed);
+    }
 }
 
 /* Called from rdna3_drm_ioctl, i.e. with fDrmLock held. The sleep runs

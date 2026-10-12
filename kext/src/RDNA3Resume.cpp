@@ -323,6 +323,11 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
             a->drmVmReplayIfNeeded();
             /* the evicted VRAM back before the display restore shows it */
             a->vramRestore(ok && a->fBringup->lastResumeLostVram());
+            if (ok && a->fDrm) {   /* amdgpu_userq_resume, with their MQDs back */
+                int uf = rdna3_drm_device_userq_resume(a->fDrm);
+                if (uf)
+                    LOG("wake: %d user queue(s) not back on the scheduler (hung)", uf);
+            }
             IOLockUnlock(a->fDrmLock);
             a->setNumber("RDNA3,WakeResumeResult", ok ? 1 : 0);
             LOG("wake: GPU bring-up after the %s %s", powerLost ? "power loss" : "suspend",

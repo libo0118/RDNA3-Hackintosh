@@ -503,6 +503,12 @@ int  rdna3_drm_device_vm_replay(rdna3_drm_device *dev);
  * export, the seq64 slots): amdgpu_device_evict_resources' list. The
  * callback must not free BOs. */
 void rdna3_drm_device_for_each_vram_bo(rdna3_drm_device *dev, void (*fn)(void *ctx, rdna3_bo *bo), void *ctx);
+/* amdgpu_userq_suspend / _resume around a system sleep, and
+ * amdgpu_userq_pre_reset + _post_reset once a GPU reset restarted the MES
+ * scheduler; each returns the queues that failed */
+int  rdna3_drm_device_userq_suspend(rdna3_drm_device *dev);
+int  rdna3_drm_device_userq_resume(rdna3_drm_device *dev);
+int  rdna3_drm_device_userq_reset(rdna3_drm_device *dev, int vram_lost);
 /* Harvesting read from the GC (gfx11_get_cu_info): replaces the "all CUs
  * and RBs active" defaults in DEV_INFO. 'bitmap' uses cu_info->bitmap[0]'s
  * 4x4 layout. */

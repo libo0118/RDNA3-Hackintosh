@@ -6632,6 +6632,15 @@ static void uq_submit(rdna3_drm_file *f, uint32_t ring, uint32_t wp, const uint3
         rdna3_doorbell_wr64(UQ.dev, doorbell, *wptr);
 }
 
+/* the scheduler slot holding the queue on doorbell 'db', -1 for none */
+static int uq_slot_db(uint32_t db)
+{
+    for (int i = 0; i < (int)(sizeof(S.uq) / sizeof(S.uq[0])); i++)
+        if (S.uq[i].used && S.uq[i].doorbell == db)
+            return i;
+    return -1;
+}
+
 static void test_userq_uapi(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
 {
     static rdna3_drm_device dd;
@@ -6899,6 +6908,36 @@ static void test_userq_uapi(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
         CHECK(uq_signal(&f2, qg, &s4, 1) == -RD_ENOENT);
     }
 
+    /* a system sleep (amdgpu_userq_suspend / _resume): every queue off the
+     * scheduler, then back; a job after the resume runs */
+    {
+        uint32_t a0 = UQ.adds, r0 = UQ.removes;
+        CHECK(rdna3_drm_device_userq_suspend(&dd) == 0 && UQ.removes == r0 + 3 && uq_slot_db(dbbase) < 0 &&
+              uq_slot_db(dbbase + 2) < 0 && uq_slot_db(dbbase + 1024 + 6) < 0);
+        CHECK(rdna3_drm_device_userq_suspend(&dd) == 0 && UQ.removes == r0 + 3);   /* nothing mapped */
+        CHECK(rdna3_drm_device_userq_resume(&dd) == 0 && UQ.adds == a0 + 3 && uq_slot_db(dbbase) >= 0 &&
+              uq_slot_db(dbbase + 2) >= 0 && uq_slot_db(dbbase + 1024 + 6) >= 0);
+        n = uq_pm4(pk, va + 0x4030, 0xFEED0006, va + 0x4034, 0x16);
+        uq_submit(&f1, hring, hwp, pk, n, &wc, 4, dbbase, 0);
+        rdna3_doorbell_wr64(dev, dbbase, wc);
+        rdna3_vram_read(dev, rdna3_drm_bo_lookup(&f1, hdst)->vram_offset + 0x30, &v, 4);
+        CHECK(v == 0xFEED0006 && S.uq_faults == 0);
+        /* a GPU reset restarted the scheduler: the queues come back
+         * (no VRAM loss), their fences complete */
+        memset(&S.uq, 0, sizeof(S.uq));
+        CHECK(rdna3_drm_device_userq_reset(&dd, 0) == 0 && UQ.adds == a0 + 6 && uq_slot_db(dbbase) >= 0);
+        /* with VRAM lost they stay hung (amdgpu_userq_post_reset) */
+        memset(&S.uq, 0, sizeof(S.uq));
+        CHECK(rdna3_drm_device_userq_reset(&dd, 1) == 0 && UQ.adds == a0 + 6 && uq_slot_db(dbbase) < 0);
+        CHECK(rdna3_drm_device_userq_resume(&dd) == 0 && UQ.adds == a0 + 6);   /* hung: not mapped */
+        /* back to mapped for the rest of the test */
+        for (rdna3_drm_file *ff = dd.files; ff; ff = ff->next_file)
+            for (i = 0; ff->userqs && i < RD_MAX_USERQ; i++)
+                if (ff->userqs[i].used == 1)
+                    ff->userqs[i].state = RD_USERQ_STATE_UNMAPPED;
+        CHECK(rdna3_drm_device_userq_resume(&dd) == 0 && UQ.adds == a0 + 9);
+    }
+
     /* USERQ_FREE: REMOVE_QUEUE, its doorbell reaches nothing any more;
      * a signal on it fails, the fences it made count as signaled */
     removes0 = UQ.removes;
@@ -6913,7 +6952,7 @@ static void test_userq_uapi(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
     n = uq_pm4(pk, va + 0x4020, 0xFEED0005, va + 0x4024, 0x15);
     uq_submit(&f1, hring, hwp, pk, n, &wc, 4, dbbase, 0);
     CHECK(uq_signal(&f1, qc, &s1, 1) == 0 && uq_sobj_wait(&f1, s1, 0) == -RD_ETIME);
-    CHECK(uq_free(&f1, qc) == 0 && UQ.removes == removes0 + 1 && !S.uq[0].used);
+    CHECK(uq_free(&f1, qc) == 0 && UQ.removes == removes0 + 1 && uq_slot_db(dbbase) < 0);
     CHECK(uq_free(&f1, qc) == -RD_EINVAL && uq_signal(&f1, qc, &s1, 1) == -RD_ENOENT);
     CHECK(uq_sobj_wait(&f1, s1, 0) == 0);   /* its driver is gone: cancelled */
     {
@@ -6925,9 +6964,9 @@ static void test_userq_uapi(rdna3_dev *dev, rdna3_mes *mes, rdna3_gmc *gmc)
 
     /* a closing client takes its queues with it */
     rdna3_drm_file_close(&f1);
-    CHECK(UQ.removes == removes0 + 2 && !S.uq[1].used && S.uq[2].used);
+    CHECK(UQ.removes == removes0 + 2 && uq_slot_db(dbbase + 2) < 0 && uq_slot_db(dbbase + 1024 + 6) >= 0);
     rdna3_drm_file_close(&f2);
-    CHECK(UQ.removes == removes0 + 3 && !S.uq[2].used);
+    CHECK(UQ.removes == removes0 + 3 && uq_slot_db(dbbase + 1024 + 6) < 0);
     for (i = 0; i < RD_MAX_FENCE_DRV; i++)
         CHECK(!dd.fence_drv[i].refcnt);
     for (i = 0; i < RD_SEQ64_SLOTS / 8; i++)

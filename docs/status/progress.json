@@ -1,11 +1,11 @@
 {
  "amdgpu": {
   "works": 506,
-  "ported": 1443,
+  "ported": 1445,
   "total": 1489,
   "not_applicable": 632,
   "works_pct": 34.0,
-  "ported_pct": 96.9,
+  "ported_pct": 97.0,
   "groups": [
    {
     "name": "PSP 13",
@@ -1032,8 +1032,8 @@
      "userq"
     ],
     "works": 0,
-    "ported": 43,
-    "todo": 3,
+    "ported": 45,
+    "todo": 1,
     "items": {
      "amdgpu_seq64_alloc": "ported",
      "amdgpu_seq64_fini": "ported",
@@ -1066,9 +1066,9 @@
      "amdgpu_userq_mgr_fini": "ported",
      "amdgpu_userq_mgr_init": "ported",
      "amdgpu_userq_priority_permit": "ported",
-     "amdgpu_userq_resume": "todo",
+     "amdgpu_userq_resume": "ported",
      "amdgpu_userq_signal_ioctl": "ported",
-     "amdgpu_userq_suspend": "todo",
+     "amdgpu_userq_suspend": "ported",
      "amdgpu_userq_unmap_helper": "ported",
      "amdgpu_userq_wait_for_last_fence": "ported",
      "amdgpu_userq_wait_ioctl": "ported",

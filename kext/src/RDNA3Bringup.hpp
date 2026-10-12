@@ -165,6 +165,16 @@ public:
     /* the last resume found VRAM lost; forgetVramLoss: every evicted range
      * came back, the clients are not told (amdgpu_device_resume) */
     bool     lastResumeLostVram() const { return fLastResumeVramLost; }
+    /* the MES scheduler started again after a reset and forgot its user
+     * queues: the DRM puts them back (rdna3_drm_device_userq_reset);
+     * true once, *vramLost: whether that reset lost VRAM */
+    bool     takeUserqRestart(bool *vramLost)
+    {
+        bool r = fUserqRestart;
+        fUserqRestart = false;
+        *vramLost = fUserqRestartVramLost;
+        return r;
+    }
     void     forgetVramLoss();
     /* VCN / JPEG across a system sleep (rdna3vcn): amdgpu_device_ip_suspend's
      * jpeg_v4_0_suspend + vcn_v4_0_suspend before it (the VCPU BOs copied
@@ -338,6 +348,9 @@ private:
     bool             fSuspended = false;     /* systemSuspend ran, the resume has not */
     bool             fVmReplay = false;      /* takeVmReplay */
     bool             fLastResumeVramLost = false;
+    bool             fLastVramLost = false;          /* the last checkVramLost */
+    bool             fMesStarted = false;
+    bool             fUserqRestart = false, fUserqRestartVramLost = false;
     uint32_t         fSystemSuspends = 0;
     uint32_t         fResetCount = 0, fVramLostCount = 0;
     uint64_t         fGpuResets = 0, fSoftRecoveries = 0, fVmFaults = 0;

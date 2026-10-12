@@ -2488,6 +2488,14 @@ void rdna3_drm_device_for_each_vram_bo(rdna3_drm_device *dev, void (*fn)(void *c
     for (i = 0; i < RD_MAX_EXPORTS; i++)
         vram_bo_visit(dev, dev->exports[i].bo, fn, ctx);
     vram_bo_visit(dev, dev->seq64_bo, fn, ctx);
+    /* the user queues' kernel objects: MQD, firmware context, wptr page */
+    for (f = dev->files; f; f = f->next_file)
+        for (i = 0; f->userqs && i < RD_MAX_USERQ; i++)
+            if (f->userqs[i].used) {
+                vram_bo_visit(dev, f->userqs[i].mqd.obj, fn, ctx);
+                vram_bo_visit(dev, f->userqs[i].fw_obj.obj, fn, ctx);
+                vram_bo_visit(dev, f->userqs[i].wptr_obj.obj, fn, ctx);
+            }
 }
 
 /* ---- fence drivers ---- */
@@ -3066,6 +3074,72 @@ static void userq_cleanup(rdna3_drm_file *f, rdna3_userq *q)
     if (q->db_obj)
         bo_put_dev(f->dev, q->db_obj);
     zero(q, sizeof(*q));
+}
+
+/* Ported from amdgpu_userq_fence_driver_force_completion: the slot reads as
+ * the last fence made on the queue, every waiter goes on */
+static void userq_fence_force_completion(rdna3_drm_device *dev, rdna3_userq *q)
+{
+    rdna3_userq_fence_drv *fd = fdrv_find(dev, q->fence_ctx);
+    if (!fd || !fd->cpu_addr)
+        return;
+    *fd->cpu_addr = fd->last_seq;
+    userq_fence_driver_process(dev, fd);
+}
+
+/* Ported from amdgpu_userq_suspend (S3; S0ix would preempt instead):
+ * every queue off the scheduler before the sleep. Returns the failures. */
+int rdna3_drm_device_userq_suspend(rdna3_drm_device *dev)
+{
+    rdna3_drm_file *f;
+    uint32_t i;
+    int failed = 0;
+    for (f = dev->files; f; f = f->next_file)
+        for (i = 0; f->userqs && i < RD_MAX_USERQ; i++)
+            if (f->userqs[i].used == 1 && userq_unmap_helper(f, &f->userqs[i]))
+                failed++;
+    return failed;
+}
+
+/* Ported from amdgpu_userq_resume: the queues back on the scheduler (their
+ * MQDs and rings came back with the evicted VRAM) */
+int rdna3_drm_device_userq_resume(rdna3_drm_device *dev)
+{
+    rdna3_drm_file *f;
+    uint32_t i;
+    int failed = 0;
+    for (f = dev->files; f; f = f->next_file)
+        for (i = 0; f->userqs && i < RD_MAX_USERQ; i++)
+            if (f->userqs[i].used == 1 && userq_map_helper(f, &f->userqs[i]))
+                failed++;
+    return failed;
+}
+
+/* Ported from amdgpu_userq_pre_reset + amdgpu_userq_post_reset, after the
+ * fact: the GPU reset restarted the MES scheduler, which forgot its queues
+ * (no REMOVE_QUEUE reaches it any more). Every mapped queue is hung, its
+ * fences complete; without a VRAM loss the queues go back on the
+ * scheduler. Returns the failures. */
+int rdna3_drm_device_userq_reset(rdna3_drm_device *dev, int vram_lost)
+{
+    rdna3_drm_file *f;
+    uint32_t i;
+    int failed = 0;
+    for (f = dev->files; f; f = f->next_file)
+        for (i = 0; f->userqs && i < RD_MAX_USERQ; i++) {
+            rdna3_userq *q = &f->userqs[i];
+            if (q->used != 1 || q->state != RD_USERQ_STATE_MAPPED)
+                continue;
+            q->state = RD_USERQ_STATE_HUNG;
+            userq_fence_force_completion(dev, q);
+            if (vram_lost)
+                continue;
+            if (mes_userq_map(f, q))
+                failed++;
+            else
+                q->state = RD_USERQ_STATE_MAPPED;
+        }
+    return failed;
 }
 
 /* Ported from amdgpu_userq_mgr_init: the queue table, with the first queue */

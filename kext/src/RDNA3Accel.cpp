@@ -135,6 +135,11 @@ IOReturn RDNA3Accel::setPowerState(unsigned long state, IOService *)
          * with rdna3resume=1 all of them (P4), else the video block only */
         if (s3) {
             IOLockLock(fDrmLock);
+            if (fDrm) {   /* amdgpu_userq_suspend: no queue runs while its VRAM moves */
+                int uf = rdna3_drm_device_userq_suspend(fDrm);
+                if (uf)
+                    LOG("suspend: %d user queue(s) did not come off the scheduler", uf);
+            }
             vramEvict();   /* amdgpu_device_evict_resources, while SDMA and the GART still run */
             fBringup->systemSuspend();
             IOLockUnlock(fDrmLock);
@@ -151,6 +156,8 @@ IOReturn RDNA3Accel::setPowerState(unsigned long state, IOService *)
         bool ok = fBringup->resumeAfterPowerLoss();
         drmVmReplayIfNeeded();
         vramRestore(ok && fBringup->lastResumeLostVram());
+        if (ok && fDrm)
+            rdna3_drm_device_userq_resume(fDrm);   /* amdgpu_userq_resume */
         IOLockUnlock(fDrmLock);
         LOG("wake: GPU resume after the suspend %s", ok ? "done" : "FAILED");
     } else if (vcn) {

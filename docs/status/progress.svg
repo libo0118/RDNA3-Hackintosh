@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 376" width="1000" height="376">
 <rect x="0.0" y="0.0" width="1000.0" height="376.0" fill="#0d1117" stroke="#0d1117" stroke-width="0"/>
 <text x="4.0" y="20.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="15" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">amdgpu kernel functions*</text>
-<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 34.0%   ported 96.9%   (506 / 1443 / 1489)</text>
+<text x="4.0" y="42.0" font-family="Verdana,DejaVu Sans,sans-serif" font-size="12" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">works 34.0%   ported 97.0%   (506 / 1445 / 1489)</text>
 <g><title>Display: modeset: works 23%, ported 96% (42+130 of 180); verified by step(s) modeset</title>
 <rect x="1.0" y="53.0" width="9.7" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="10.7" y="53.0" width="9.7" height="9.6" fill="#2ea043" stroke="#0d1117" stroke-width="0.5"/>
@@ -1263,7 +1263,7 @@
 <text x="378.6" y="159.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">SoC / …</text>
 <text x="378.6" y="173.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">62% / 100%</text>
 </g>
-<g><title>User queues: works 0%, ported 93% (0+43 of 46); verified by step(s) userq</title>
+<g><title>User queues: works 0%, ported 98% (0+45 of 46); verified by step(s) userq</title>
 <rect x="436.6" y="145.9" width="9.6" height="9.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="446.2" y="145.9" width="9.6" height="9.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="455.7" y="145.9" width="9.6" height="9.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
@@ -1307,12 +1307,12 @@
 <rect x="482.5" y="202.4" width="11.5" height="9.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="436.6" y="211.8" width="11.5" height="9.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="448.1" y="211.8" width="11.5" height="9.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="459.6" y="211.8" width="11.5" height="9.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
-<rect x="471.0" y="211.8" width="11.5" height="9.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="459.6" y="211.8" width="11.5" height="9.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
+<rect x="471.0" y="211.8" width="11.5" height="9.4" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="482.5" y="211.8" width="11.5" height="9.4" fill="#6e7681" stroke="#0d1117" stroke-width="0.5"/>
 <rect x="435.6" y="144.9" width="59.4" height="77.3" fill="none" stroke="#0d1117" stroke-width="2"/>
 <text x="440.6" y="159.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="11" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">User q…</text>
-<text x="440.6" y="173.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 93%</text>
+<text x="440.6" y="173.9" font-family="Verdana,DejaVu Sans,sans-serif" font-size="10" fill="#ffffff" stroke="#0d1117" stroke-width="3" paint-order="stroke">0% / 98%</text>
 </g>
 <g><title>Display: MST: works 0%, ported 48% (0+22 of 46); verified by step(s) mst</title>
 <rect x="306.2" y="223.2" width="9.3" height="9.5" fill="#d29922" stroke="#0d1117" stroke-width="0.5"/>
