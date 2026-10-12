@@ -147,6 +147,27 @@ per mode (S4).
 Open from this batch: S5 gamma, real mode setting (other timings), monitor
 standby (link off), display restore after a mode-1 GPU reset.
 
+## Done 2026-10-12 (sim / host verified, CI on the self-hosted runners; card: step `big4`)
+
+| Item | Commit | Notes |
+|---|---|---|
+| S3: DP SST heads restored and in standby through their link | `1347b00` | `rdna3dplink=1`; MST / ODM heads stay blank |
+| S3: HPD looks paused for the sleep, `link_resume` on the wake | `85e00d3` | `rdna3hotplug=1` (now in `big4`) |
+| S3 gap 7: a picture lost in VRAM makes WindowServer redraw | `23e2e5e` | display ABI 2 (`RD3KDisplayHotplug.lost`) |
+| Kernel queues mapped by the MES scheduler from MES 0x47 on | `87f3fd8` | `rdna3amdgpu=1 rdna3mes=1`, KIQ fallback |
+| `amdgpu_userq_active`; VCN functions VCN 4.0 never calls classified | `0d8a24f` | |
+| DP link loss retrained (`dp_handle_link_loss`), DP displays blanked before a resume | `0d31090` | link status polled every 2 s in place of the HPD RX interrupt |
+| Report triage for the sleep | `8ca16a4` | |
+
+Left of the amdgpu functions (`docs/status/STATUS.md`, 28): DSC over MST
+(DM's `compute_mst_dsc_configs_for_state` fairness, `drm_dp_mst_dsc_aux_for_port`,
+the remote DSC enable and PPS through sideband messages, the Synaptics hub
+workarounds) with `link_increase/reduce_mst_payload` and
+`link_update_dsc_config` - one block, only useful with an MST hub and a DSC
+monitor behind it, so it waits for such a bench; and `amdgpu_ring_max_ibs`,
+deliberately not taken: the CS ioctl answers AMDGPU_INFO_MAX_IBS with 8 and
+RADV splits its submissions by it.
+
 ## Order
 
 1. A1 (pictures confirm two heads) -> defaults on (A1, P3).
