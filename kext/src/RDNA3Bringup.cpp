@@ -1263,12 +1263,8 @@ bool RDNA3Bringup::hwInit()
         if (!ret && fGfxOffWanted && fPmUp && fSmu) {
             fGfxOffCall = thread_call_allocate((thread_call_func_t)gfxOffTick, this);
             if (fGfxOffCall) {
-                IOLock *l = fOwner->drmHeldByMe() ? nullptr : fOwner->drmLock();
-                if (l)
-                    IOLockLock(l);
+                RD3DrmScope lk(fOwner);
                 gfxOffRelease();
-                if (l)
-                    IOLockUnlock(l);
             }
         }
         /* the gfx ring's fence interrupt (amdgpu_fence_driver_hw_init's
@@ -2588,9 +2584,54 @@ int RDNA3Bringup::recover(uint32_t ip, uint32_t ring, uint64_t seq)
  * on MP1 13.0.10, soc21_asic_reset -> amdgpu_device_mode1_reset): the PMFW
  * resets the chip, the PSP bootloader comes back, levels 4-8 run again.
  * VRAM normally survives; the magic word says so. */
+/* every VM's next job flushes its TLBs, on every engine */
+void RDNA3Bringup::vmFlushAllOnNextJob()
+{
+    for (uint32_t id = 1; id < 16; id++)
+        if (fVmByVmid[id])
+            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = fVmByVmid[id]->dmaFlush = true;
+}
+
+/* the reset magic word in VRAM: gone = VRAM lost, which clients see as
+ * AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST */
+void RDNA3Bringup::checkVramLost(const char *what)
+{
+    uint32_t magic = 0;
+    if (fResetMagic == UINT64_MAX)
+        return;
+    rdna3_vram_read(fDev, fResetMagic, &magic, 4);
+    if (magic != kResetMagic) {
+        fVramLostCount++;
+        BLOG("%s: VRAM content lost (0x%08x), clients see VRAMLOST", what, magic);
+    }
+}
+
+/* amdgpu_device_ip_resume after a full reset or a power loss: everything
+ * from level 4 on is programmed again by hwInit(). gmc_v11_0_resume adds
+ * amdgpu_vmid_reset_all: no VMID keeps its PASID mapping. The caller holds
+ * fDrmLock. */
+bool RDNA3Bringup::reinitFromLevel4()
+{
+    bool ok;
+    rdna3_vram_alloc_init(fDev, fAllocLo, fAllocHi);
+    fDev->doorbell_ok = 0;
+    if (fSdma) fSdma->ready = 0;
+    if (fGfx) fGfx->ready = 0;
+    if (fKiq) { fKiq->rb.ready = 0; fKiq->mapped = 0; }
+    if (fKcq) { fKcq->rb.ready = 0; fKcq->mapped = 0; }
+    fReinit = true;
+    fOwner->drmHeldHere(true);
+    ok = hwInit();
+    fOwner->drmHeldHere(false);
+    fReinit = false;
+    fResetCount++;
+    memset(fVmidPasid, 0, sizeof(fVmidPasid));
+    return ok;
+}
+
 bool RDNA3Bringup::gpuReset(bool baco)
 {
-    uint32_t magic = 0, i;
+    uint32_t i;
     bool ok;
 
     if (baco) {
@@ -2603,9 +2644,7 @@ bool RDNA3Bringup::gpuReset(bool baco)
     }
     if (fIntr)
         fIntr->disable();
-    for (uint32_t id = 1; id < 16; id++)
-        if (fVmByVmid[id])
-            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = fVmByVmid[id]->dmaFlush = true;
+    vmFlushAllOnNextJob();
     if (fKcq && fKcq->rb.ready)
         gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
     if (fGfx && fGfx->ready)
@@ -2669,30 +2708,8 @@ bool RDNA3Bringup::gpuReset(bool baco)
             break;
         IODelay(1);
     }
-    if (fResetMagic != UINT64_MAX) {
-        rdna3_vram_read(fDev, fResetMagic, &magic, 4);
-        if (magic != kResetMagic) {
-            fVramLostCount++;
-            BLOG("GPU reset: VRAM content lost (0x%08x), clients see VRAMLOST", magic);
-        }
-    }
-
-    /* everything from level 4 on is programmed again by hwInit() */
-    rdna3_vram_alloc_init(fDev, fAllocLo, fAllocHi);
-    fDev->doorbell_ok = 0;
-    if (fSdma) fSdma->ready = 0;
-    if (fGfx) fGfx->ready = 0;
-    if (fKiq) { fKiq->rb.ready = 0; fKiq->mapped = 0; }
-    if (fKcq) { fKcq->rb.ready = 0; fKcq->mapped = 0; }
-    fReinit = true;
-    fOwner->drmHeldHere(true);   /* the caller holds fDrmLock */
-    ok = hwInit();
-    fOwner->drmHeldHere(false);
-    fReinit = false;
-    fResetCount++;
-    /* gmc_v11_0_resume = gmc_v11_0_hw_init (in hwInit) + amdgpu_vmid_reset_all:
-     * no VMID keeps its PASID mapping */
-    memset(fVmidPasid, 0, sizeof(fVmidPasid));
+    checkVramLost("GPU reset");
+    ok = reinitFromLevel4();
     if (fIntr)
         fIntr->enable();
     BLOG("%s #%llu %s", baco ? "BACO cycle" : "GPU reset",
@@ -2719,7 +2736,6 @@ int RDNA3Bringup::sosAlive()
  * clients see VRAM lost. Under the DRM lock. */
 bool RDNA3Bringup::resumeAfterPowerLoss()
 {
-    uint32_t magic = 0;
     uint64_t fbStart = fDev ? fDev->fb_start : 0;
     bool ok;
 
@@ -2732,9 +2748,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
         fIntr->disable();
     forceFences();
     memset(fGdsKnown, 0, sizeof(fGdsKnown));
-    for (uint32_t id = 1; id < 16; id++)
-        if (fVmByVmid[id])
-            fVmByVmid[id]->gfxFlush = fVmByVmid[id]->compFlush = fVmByVmid[id]->dmaFlush = true;
+    vmFlushAllOnNextJob();
     fPci->setBusMasterEnable(false);
     /* as run(): in a VM the wake comes with a bus reset (QEMU resets the
      * devices on an S3 wake), which leaves the PSP stuck */
@@ -2752,13 +2766,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
         publish("RDNA3,ResumeResult", 2);
         return false;
     }
-    if (fResetMagic != UINT64_MAX) {
-        rdna3_vram_read(fDev, fResetMagic, &magic, 4);
-        if (magic != kResetMagic) {
-            fVramLostCount++;
-            BLOG("resume: VRAM content lost (0x%08x), clients see VRAMLOST", magic);
-        }
-    }
+    checkVramLost("resume");
     /* rdna3amdgpu=1: soc21_common_resume - an aborted S3 with the TOS still
      * running gets a reset first (soc21_need_reset_on_resume); this wake
      * follows a completed sleep (amdgpu: suspend_complete), so it does not;
@@ -2767,18 +2775,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
         BLOG("resume: S3 suspend aborted, resetting");
         smu13_mode1_reset(fDev);
     }
-    rdna3_vram_alloc_init(fDev, fAllocLo, fAllocHi);
-    fDev->doorbell_ok = 0;
-    if (fSdma) fSdma->ready = 0;
-    if (fGfx) fGfx->ready = 0;
-    if (fKiq) { fKiq->rb.ready = 0; fKiq->mapped = 0; }
-    if (fKcq) { fKcq->rb.ready = 0; fKcq->mapped = 0; }
-    fReinit = true;
-    fOwner->drmHeldHere(true);   /* the caller holds fDrmLock */
-    ok = hwInit();
-    fOwner->drmHeldHere(false);
-    fReinit = false;
-    fResetCount++;
+    ok = reinitFromLevel4();
     if (fIntr)
         fIntr->enable();
     publish("RDNA3,Resumes", fResumes);

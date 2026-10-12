@@ -422,4 +422,26 @@ private:
     void      setNumber(const char *key, uint64_t val, unsigned bits = 32);
 };
 
+/* fDrmLock for a scope, unless this thread already holds it (a bring-up
+ * callback reached from inside a DRM ioctl): the setters below are called
+ * from both */
+class RD3DrmScope {
+public:
+    explicit RD3DrmScope(const RDNA3Accel *a) : fLock(a && !a->drmHeldByMe() ? a->drmLock() : nullptr)
+    {
+        if (fLock)
+            IOLockLock(fLock);
+    }
+    ~RD3DrmScope()
+    {
+        if (fLock)
+            IOLockUnlock(fLock);
+    }
+    RD3DrmScope(const RD3DrmScope &) = delete;
+    RD3DrmScope &operator=(const RD3DrmScope &) = delete;
+
+private:
+    IOLock *fLock;
+};
+
 #endif /* RDNA3_ACCEL_HPP */

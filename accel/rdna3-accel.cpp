@@ -1383,6 +1383,22 @@ static IOBufferMemoryDescriptor *rd3SVStage(unsigned long long len)
     return b;
 }
 
+/* RD3K_SS_FN_PAGEOFF: the core's copy engine moves the VRAM of 'vm' into
+ * 'pages' (4 KiB each); the status, the copy's time in *usec */
+static unsigned rd3SVPageoffCall(const struct RD3KRmHandles *h, RD3VidMemory *vm, unsigned long long *pages,
+                                 unsigned long long n, unsigned long long len, unsigned long long *usec)
+{
+    struct RD3KSurfPageoff q; rd3SVZero(&q, sizeof q);
+    q.version = RD3K_SS_RM_VERSION; q.status = RD3K_SS_OFF; q.kapiDevice = h->kapiDevice; q.kapiMemory = vm->fRmHandle;
+    q.pages = pages; q.pageCount = n; q.length = len;
+    IOService *core = rd3AccelCore();
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_SS_FN_PAGEOFF);
+    if (core && sym) core->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr);
+    if (sym) sym->release();
+    *usec = q.usec;
+    return q.status;
+}
+
 void RD3Resource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long long a3)
 {
     volatile unsigned char *r = (volatile unsigned char *)this;
@@ -1415,14 +1431,7 @@ void RD3Resource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lo
         unsigned long long *spa = (sp && sl >= len && pages) ? (unsigned long long *)IOMalloc(pages * sizeof *spa) : nullptr;
         if (spa) {
             for (unsigned long long k = 0; k < pages; k++) spa[k] = sp + k * 4096;
-            struct RD3KSurfPageoff q; rd3SVZero(&q, sizeof q);
-            q.version = RD3K_SS_RM_VERSION; q.status = RD3K_SS_OFF; q.kapiDevice = h.kapiDevice; q.kapiMemory = vm->fRmHandle;
-            q.pages = spa; q.pageCount = pages; q.length = len;
-            IOService *core = rd3AccelCore();
-            const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_SS_FN_PAGEOFF);
-            if (core && sym) core->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr);
-            if (sym) sym->release();
-            st = q.status; usec = q.usec;
+            st = rd3SVPageoffCall(&h, vm, spa, pages, len, &usec);
             if (st == 0) {
                 const uint64_t t0 = mach_absolute_time();
                 const IOByteCount w = md->writeBytes(0, sb->getBytesNoCopy(), (IOByteCount)len);
@@ -1449,14 +1458,8 @@ void RD3Resource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lo
             for (IOByteCount k = 0; k < seglen && i < pages; k += 4096, off += 4096) pa[i++] = phys + k;
         }
         if (i == pages) {
-            struct RD3KSurfPageoff q; rd3SVZero(&q, sizeof q);
-            q.version = RD3K_SS_RM_VERSION; q.status = RD3K_SS_OFF; q.kapiDevice = h.kapiDevice; q.kapiMemory = vm->fRmHandle;
-            q.pages = pa; q.pageCount = pages; q.length = len;
-            IOService *core = rd3AccelCore();
-            const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_SS_FN_PAGEOFF);
-            if (core && sym) core->callPlatformFunction(sym, false, &q, nullptr, nullptr, nullptr);
-            if (sym) sym->release();
-            st = q.status; usec = q.usec; ok = st == 0;
+            st = rd3SVPageoffCall(&h, vm, pa, pages, len, &usec);
+            ok = st == 0;
             if (st == 0x65u) mayUnwire = false;
         }
         IOFree(pa, pages * sizeof *pa);

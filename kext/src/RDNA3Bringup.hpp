@@ -331,6 +331,10 @@ private:
     /* 'baco': the chip goes through BACO (enter + exit, rdna3baco=1)
      * instead of the mode-1 reset; the same re-init follows */
     bool             gpuReset(bool baco = false);
+    /* shared by gpuReset and resumeAfterPowerLoss */
+    void             vmFlushAllOnNextJob();
+    void             checkVramLost(const char *what);
+    bool             reinitFromLevel4();
     void             markGuilty(uint32_t vmid, const char *why);
     void             forceFences();
     bool             fDoorbells = true;     /* boot-arg rdna3doorbell */
