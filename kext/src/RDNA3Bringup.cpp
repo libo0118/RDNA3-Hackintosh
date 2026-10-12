@@ -907,7 +907,7 @@ bool RDNA3Bringup::hwInit()
                     BLOG("DAL SMU: SetAlwaysWaitDmcubResp 0 -> %d", r);
                     publish("RDNA3,DMUBWaitAckResult", (uint64_t)(int64_t)r);
                 }
-                fOwner->displayMirror(fDmub, true);   /* rdna3mirror=1: step 9b */
+                fOwner->displayMirror(fDmub, true, fReinit);   /* rdna3mirror=1: step 9b */
                 /* rdna3mall=1 (step mall): display power, item O. The
                  * PMFW fetches the watermark range table from VRAM
                  * (dcn32_notify_wm_ranges) */
@@ -3559,8 +3559,15 @@ int RDNA3Bringup::fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t a
             return 0;
         }
         absolutetime_to_nanoseconds(mach_continuous_time(), &now);
-        if (absNs != UINT64_MAX && now >= absNs)
+        if (absNs != UINT64_MAX && now >= absNs) {
+            /* card run 2026-10-12: encode/decode jobs never came back while
+             * the VCN ring tests passed; the state for the report */
+            static SInt32 gVcnDiags;
+            if (ip == AMDGPU_HW_IP_VCN_ENC && fVcn && ring < RD_VCN_MAX_INST && now - start >= 1000000000ull &&
+                OSIncrementAtomic(&gVcnDiags) < 6)
+                vcn40_ring_diag(fDev, fVcn, ring, seq);
             return -RD_ETIME;
+        }
         /* drm_sched_fault (rdna3amdgpu=1): a CP fault IV named this ring */
         bool faulted = (fSchedFault & fbit) != 0;
         if (faulted)

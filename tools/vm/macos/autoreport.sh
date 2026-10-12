@@ -109,7 +109,7 @@ stale_kexts() {
         k=${n%%:*}; key=${n#*:}
         h=$(/usr/libexec/PlistBuddy -c "Print :RDNA3SourceHash" "/Library/Extensions/$k.kext/Contents/Info.plist" 2>/dev/null) ||
             continue
-        r=$(ioreg -r -c "$k" -d 1 2>/dev/null | sed -n "s/.*\"RDNA3,$key\" = \"\([0-9a-f]*\)\".*/\1/p" | head -n 1)
+        r=$(ioreg -l -w0 -r -c "$k" -d 1 2>/dev/null | sed -n "s/.*\"RDNA3,$key\" = \"\([0-9a-f]*\)\".*/\1/p" | head -n 1)
         [ -n "$r" ] && [ -n "$h" ] && [ "$r" != "$h" ] && echo "$k: running $r, installed $h (not approved yet)"
     done
 }

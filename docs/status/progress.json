@@ -1,10 +1,10 @@
 {
  "amdgpu": {
-  "works": 517,
+  "works": 523,
   "ported": 1483,
   "total": 1483,
   "not_applicable": 638,
-  "works_pct": 34.9,
+  "works_pct": 35.3,
   "ported_pct": 100.0,
   "groups": [
    {
@@ -145,8 +145,8 @@
     "steps": [
      "5"
     ],
-    "works": 38,
-    "ported": 53,
+    "works": 44,
+    "ported": 47,
     "todo": 0,
     "items": {
      "smu_v13_0_0_append_powerplay_table": "works",
@@ -191,11 +191,11 @@
      "smu_v13_0_ack_ac_dc_interrupt": "ported",
      "smu_v13_0_allow_ih_interrupt": "ported",
      "smu_v13_0_auto_fan_control": "ported",
-     "smu_v13_0_baco_enter": "ported",
-     "smu_v13_0_baco_exit": "ported",
-     "smu_v13_0_baco_get_state": "ported",
-     "smu_v13_0_baco_set_armd3_sequence": "ported",
-     "smu_v13_0_baco_set_state": "ported",
+     "smu_v13_0_baco_enter": "works",
+     "smu_v13_0_baco_exit": "works",
+     "smu_v13_0_baco_get_state": "works",
+     "smu_v13_0_baco_set_armd3_sequence": "works",
+     "smu_v13_0_baco_set_state": "works",
      "smu_v13_0_check_fw_status": "works",
      "smu_v13_0_check_fw_version": "works",
      "smu_v13_0_deep_sleep_control": "ported",
@@ -203,7 +203,7 @@
      "smu_v13_0_disable_thermal_alert": "ported",
      "smu_v13_0_enable_thermal_alert": "ported",
      "smu_v13_0_fini_microcode": "works",
-     "smu_v13_0_get_bamaco_support": "ported",
+     "smu_v13_0_get_bamaco_support": "works",
      "smu_v13_0_get_current_power_limit": "works",
      "smu_v13_0_get_dpm_freq_by_index": "works",
      "smu_v13_0_get_dpm_level_count": "works",
@@ -2665,6 +2665,7 @@
   "9d",
   "9m",
   "9s",
+  "baco",
   "hanggfx",
   "hotplug",
   "modeset",

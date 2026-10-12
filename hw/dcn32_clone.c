@@ -623,9 +623,12 @@ int dcn32_clone_disable(rdna3_dev *d, rdna3_dmub *dm, const rdna3_dcn_clone *c)
     /* optc32_disable_crtc: the VTG goes with the OTG */
     v = RI(d, regVTG0_CONTROL, c->dst_otg, VTG_S);
     WI(d, regVTG0_CONTROL, c->dst_otg, VTG_S, SET(v, VTG0_CONTROL, VTG0_ENABLE, 0));
-    /* dce110_clock_source_power_down: SetPixelClock with 0 stops the PHY PLL */
-    if (dm && dm->hw_init)
-        vbios_pixel_clock(dm, c, 0);
+    /* dce110_clock_source_power_down sends nothing on DCN 3.2: it asks for
+     * controller CONTROLLER_ID_UNDEFINED, which controller_id_to_atom2
+     * refuses, so set_pixel_clock_v7 returns before the DMCUB; the PHY PLL
+     * goes with the transmitter's DISABLE. SetPixelClock with 0 for the
+     * CRTC just disabled hung the DMCUB on the card (2026-10-12: every
+     * later command timed out, the clone could not be lit again) */
     v = RI(d, regMPC_OUT0_MUX, c->dst_opp, MUX_S);
     WI(d, regMPC_OUT0_MUX, c->dst_opp, MUX_S, SET(v, MPC_OUT0_MUX, MPC_OUT_MUX, MPCC_NONE));
     WI(d, regMPCC0_MPCC_TOP_SEL, c->dst_mpcc, MPCC_S, MPCC_NONE);

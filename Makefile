@@ -105,6 +105,8 @@ test: $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test
 	rm -f $(BUILD)/scanout-pipe*.ppm
 	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '1 pipe(s) lit'
 	python3 tools/triage_reports.py --picture $(BUILD)/scanout-pipe0.ppm | grep -q 'png'
+	# two jobs in one process each get their own VA (card run 2026-10-12)
+	! $(BUILD)/rdna3_drminfo_host --dma-test --gfx-test 2>&1 | grep -q 'GEM_VA'
 	tests/test_oc_install.sh
 	tests/test_make_pkg.sh
 

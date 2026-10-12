@@ -52,9 +52,15 @@ static int job_test(int fd, int gfx, int hang)
     union drm_amdgpu_cs cs;
     union drm_amdgpu_wait_cs w;
     struct timespec ts;
-    uint64_t chunk_ptr, gva = 0x100000;
+    /* a VA of its own per job in this process: '--dma-test --gfx-test'
+     * runs two, and the first BO stays mapped (amdgpu refuses a second map
+     * over it with EINVAL: the after-the-wake GFX test of 2026-10-12) */
+    static uint64_t next_gva = 0x100000;
+    uint64_t chunk_ptr, gva = next_gva;
     uint32_t *p, n = 0;
     int bad = 0;
+
+    next_gva += 64 << 10;
 
     memset(&c, 0, sizeof(c));
     c.in.bo_size = 64 << 10;
@@ -200,6 +206,27 @@ static void *uq_bo(int fd, uint32_t size, uint32_t dom, uint64_t gva, uint32_t *
 }
 
 /* --userq-test: DRM_AMDGPU_USERQ / _SIGNAL / _WAIT with a compute queue */
+/* the last GPUVM fault of this client's VM (AMDGPU_INFO_GPUVM_FAULT), after a
+ * job that did not finish: a fence or an IB behind an unmapped VA shows
+ * here (card run 2026-10-12: user queue and VCN fences never came back) */
+static void print_vm_fault(int fd)
+{
+    struct drm_amdgpu_info in;
+    struct drm_amdgpu_info_gpuvm_fault vf;
+    memset(&in, 0, sizeof(in));
+    memset(&vf, 0, sizeof(vf));
+    in.return_pointer = (uint64_t)(uintptr_t)&vf;
+    in.return_size = sizeof(vf);
+    in.query = AMDGPU_INFO_GPUVM_FAULT;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_INFO), in))
+        printf("GPUVM fault: query failed\n");
+    else if (!vf.status && !vf.addr)
+        printf("GPUVM fault: none recorded\n");
+    else
+        printf("GPUVM fault: addr 0x%llx status 0x%08x vmhub %u (%s)\n", (unsigned long long)vf.addr, vf.status,
+               vf.vmhub, vf.vmhub < 8 ? "GFXHUB" : "MMHUB");
+}
+
 static int userq_test(int fd)
 {
     const uint64_t gva = 0x400000;   /* ring, wptr/rptr, EOP, dst: a page each */
@@ -313,6 +340,8 @@ static int userq_test(int fd)
     r = IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_USERQ), uq);
     printf("USERQ FREE: %d\n", r);
     bad += r != 0;
+    if (bad)
+        print_vm_fault(fd);
     printf("USERQ TEST: %s\n", bad ? "FAILED" : "PASSED (a compute user queue ran through the MES)");
     return bad != 0;
 }
@@ -636,6 +665,8 @@ static int vcn_test(int fd)
         bad += vcn_job(fd, cx.out.alloc.ctx_id, AMDGPU_HW_IP_VCN_JPEG, gva + 4 * 4096, 16, "JPEG pitch write");
     }
     drm_xnu_munmap(p, 256 << 10);
+    if (bad)
+        print_vm_fault(fd);
     printf("VCN TEST: %s\n", bad ? "FAILED" : "PASSED (video rings run jobs from a client VM)");
     return bad != 0;
 }

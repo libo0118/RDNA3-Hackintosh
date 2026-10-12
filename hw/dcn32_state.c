@@ -441,8 +441,7 @@ static int vbios_tx(rdna3_dmub *dm, const rdna3_dcn_head_state *h, uint8_t actio
 
 static int vbios_pclk(rdna3_dmub *dm, const rdna3_dcn_head_state *h, uint32_t khz)
 {
-    /* set_pixel_clock_v7 as dcn31_program_pix_clk fills it for TMDS; 0
-     * stops the PHY PLL (dce110_clock_source_power_down) */
+    /* set_pixel_clock_v7 as dcn31_program_pix_clk fills it for TMDS */
     rdna3_pixclk_v1_7 p = { 0 };
     p.pixclk_100hz = khz * 10;
     p.pll_id = (uint8_t)(RD_ATOM_COMBOPHY_PLL0 + h->be);
@@ -606,8 +605,10 @@ int dcn32_state_head_off(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, rdna3_dcn_
         ret = link_off(d, dm, h);
     }
     otg_disable(d, h->otg);
-    if (!ret && !isdp)
-        ret = vbios_pclk(dm, h, 0);
+    /* cs_power_down (dce110_clock_source_power_down) sends nothing on DCN
+     * 3.2 (controller UNDEFINED: set_pixel_clock_v7 stops before the
+     * DMCUB); a SetPixelClock with 0 for the disabled CRTC hung the DMCUB
+     * on the card (2026-10-12, clone power down) */
     RLOG(d, "state: head %u off for the sleep (%d)", head, ret);
     return ret;
 }

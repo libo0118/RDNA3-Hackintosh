@@ -324,6 +324,10 @@ typedef struct rdna3_vcn_ib {
     uint32_t length_dw;
     const uint32_t *kdata;    /* JPEG: the checked copy (parse_cs) the JRBC runs */
 } rdna3_vcn_ib;
+/* diagnostic: a user job's fence did not come back in time (card run
+ * 2026-10-12: encode/decode IBs never finished while the ring and the
+ * fence-only tests passed): the ring, the VCPU and the MMHUB fault state */
+void vcn40_ring_diag(rdna3_dev *d, rdna3_vcn *v, uint32_t inst, uint64_t seq);
 uint32_t vcn40_submit(rdna3_dev *d, rdna3_vcn *v, uint32_t inst, uint32_t vmid, const rdna3_vcn_ib *ibs,
                       uint32_t n, uint64_t uf_mc);
 /* vcn_v4_0_process_interrupt: 1 when the IV is a VCN fence trap (*inst set) */

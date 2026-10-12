@@ -1376,3 +1376,42 @@ Settings. That is expected for them, not a display regression.
   on such a package and reproduces both messages; fixed in `hw/vcn40.c`.
 - Not reached: userq, pmctl, VCN tests from userspace, Vulkan, the planned
   system sleep, BACO. Run `big4` again.
+
+### Card runs 37-38 (step big4, builds 150 and 152, 2026-10-12)
+
+- Run 37 ran the framebuffer and accelerator approved on 2026-10-10/11
+  (the new ones waited for "Allow"): built against display ABI 1, refused
+  by the core, console mode; black shown blue (console base `0x80000001`,
+  IOGraphics' flag bit taken as address), frames copied by the CPU about
+  once a second. Fixed: the core answers ABI 1, the console base is
+  masked, the queue stops for `rdna3vm approve` (`stale_kexts`).
+- Run 38 (framebuffer / accelerator of build 150, the same code as 152
+  for this run): colours right, desktop through the accelerator, the
+  monitor's name; modeset 3 of 3, display sleep / wake, system sleep with
+  every head back, BACO, DMA/GFX, Vulkan 13/13, Metal compute + render,
+  A3 (IOSurface <-> Metal texture both ways) and **M6: Chess and Maps on
+  the Metal plugin without a crash**.
+- **Second monitor**: lit at boot, then HPD3 low for > 0.5 s (the monitor
+  waking up on the new signal), the clone taken down, and every DMCUB
+  command after that timed out (`DMUB: command ... not consumed (rptr
+  0x240 ...)`, relight `SetPixelClock ... failed (-62)`). Cause: the
+  clone's power down sent SetPixelClock with 0 for the CRTC just
+  disabled, which the DMCUB never finished; amdgpu sends nothing there
+  (`dce110_clock_source_power_down`: controller UNDEFINED,
+  `set_pixel_clock_v7` returns before the DMCUB). Removed in the clone and
+  the sleep path; the simulator hangs its DMCUB on that command. After a
+  wake with the power lost the bring-up no longer tries a new clone before
+  the boot head is restored (`source OPP 0 / MPCC 15 unknown`).
+- Mode switches showed stripes / a cut picture for a moment on the HDMI
+  monitor: the framebuffer now holds a mode lock across a switch and the
+  accelerator's flips, so no old-size frame reaches the head mid-switch.
+- After the wake `GEM_VA: Invalid argument`: `rdna3_drminfo --dma-test
+  --gfx-test` mapped both jobs at the same VA in one process (amdgpu
+  refuses that too); each job has its own VA now.
+- OD fan curve point 2 -> -5: the PMFW refuses a table with one manual
+  point among the all-zero auto curve; the selftest sets all five points.
+- Open: gamma (macOS sends it in plane-less display-pipe transactions,
+  IOAcceleratorFamily2's base class answers unsupported), VCN
+  encode/decode and the user queue fence (diagnostics added: the ring /
+  VCPU / MMHUB state on a timeout, the client's last GPUVM fault), M4
+  presents never on screen, an underflow after the display wake.

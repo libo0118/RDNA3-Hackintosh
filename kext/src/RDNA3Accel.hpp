@@ -164,7 +164,7 @@ public:
      * before the bring-up frees it (RDNA3Display.cpp) */
     /* 'probe': called from the bring-up, which owns the PMFW mailbox then:
      * the clone checks the PMFW answers after each DMCUB VBIOS command */
-    void displayMirror(struct rdna3_dmub *dm, bool probe = false);
+    void displayMirror(struct rdna3_dmub *dm, bool probe = false, bool reinit = false);
     /* rdna3mall=1: display power after the DMCUB runs (RDNA3DisplayPower.cpp) */
     void displayPowerInit(struct rdna3_dev *d, struct rdna3_dmub *dm, uint64_t wmTableOff);
     void displayMirrorOff(struct rdna3_dmub *dm);

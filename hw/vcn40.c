@@ -8,6 +8,7 @@
 #include "psp13.h"
 #include "psp_gfx_if.h"
 #include "gen/vcn_4_0_0.h"
+#include "gmc11.h"
 
 #define REG_FIELD_SHIFT(reg, field) reg##__##field##__SHIFT
 #define REG_FIELD_MASK(reg, field)  reg##__##field##_MASK
@@ -1834,6 +1835,19 @@ int vcn40_sw_fini(rdna3_dev *d, rdna3_vcn *v)
     }
     v->sw_ready = 0;
     return RDNA3_OK;
+}
+
+void vcn40_ring_diag(rdna3_dev *d, rdna3_vcn *v, uint32_t inst, uint64_t seq)
+{
+    rdna3_vcn_ring *r;
+    if (!v || inst >= v->num_vcn_inst || !v->ring_enc[inst].ready)
+        return;
+    r = &v->ring_enc[inst];
+    RLOG(d, "VCN%u: job fence %llu not back: ring fence %u (emitted %u), rptr 0x%llx wptr 0x%llx, UVD_STATUS 0x%08x, "
+         "power %s, MMHUB fault status 0x%08x", inst, (unsigned long long)seq, wb_read32(d, r, RD_VCN_WB_FENCE),
+         r->fence_seq, (unsigned long long)vcn40_unified_ring_get_rptr(d, r),
+         (unsigned long long)vcn40_unified_ring_get_wptr(d, r), RV(d, inst, regUVD_STATUS),
+         v->cur_state == RD_PG_STATE_UNGATE ? "ungated" : "gated", mmhub302_fault_status(d, 0));
 }
 
 uint32_t vcn40_submit(rdna3_dev *d, rdna3_vcn *v, uint32_t inst, uint32_t vmid, const rdna3_vcn_ib *ibs,

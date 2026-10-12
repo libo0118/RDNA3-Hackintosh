@@ -341,14 +341,29 @@ static int selftest(void)
             r = od_edit(RD_PP_OD_EDIT_FAN_ZERO_RPM_STOP_TEMP, 1, in, 1, &rp);
             printf("  info  OD zero rpm stop %d C -> %d %s (needs the zero-fan OD feature)\n", in[0], r,
                    errname(r));
-            /* a point inside OD_RANGE (the auto curve reads all 0, below
-             * the limits, which smu_v13_0_0_od_edit_dpm_table refuses) */
-            in[0] = 2;
-            in[1] = (boot.info.od_lim_min[RD_OD_SET_FAN_CURVE_TEMP] + boot.info.od_lim_max[RD_OD_SET_FAN_CURVE_TEMP]) / 2;
-            in[2] = (boot.info.od_lim_min[RD_OD_SET_FAN_CURVE_PWM] + boot.info.od_lim_max[RD_OD_SET_FAN_CURVE_PWM]) / 2;
-            r = od_edit(RD_PP_OD_EDIT_FAN_CURVE, 3, in, 1, &rp);
-            T_CHECK(r == 0 && rp.info.od_fan_mode == 1 && rp.info.od_fan_curve_pwm[2] == (uint32_t)in[2],
-                    "OD fan curve point 2: %d C %d %% -> %d", in[1], in[2], r);
+            /* a whole curve inside OD_RANGE, rising: the auto curve reads
+             * all 0, below the limits, and the PMFW refuses a table with
+             * one point set among those (card run 2026-10-12: point 2 alone
+             * -> TransferTableDram2Smu failed, -5). Committed with the last */
+            {
+                int32_t tlo = (int32_t)boot.info.od_lim_min[RD_OD_SET_FAN_CURVE_TEMP];
+                int32_t thi = (int32_t)boot.info.od_lim_max[RD_OD_SET_FAN_CURVE_TEMP];
+                int32_t plo = (int32_t)boot.info.od_lim_min[RD_OD_SET_FAN_CURVE_PWM];
+                int32_t phi = (int32_t)boot.info.od_lim_max[RD_OD_SET_FAN_CURVE_PWM];
+                int32_t k, t2 = 0, p2 = 0;
+                for (k = 0, r = 0; k < 5 && !r; k++) {
+                    in[0] = k;
+                    in[1] = tlo + (thi - tlo) * (k + 1) / 6;
+                    in[2] = plo + (phi - plo) * (k + 1) / 6;
+                    if (k == 2) {
+                        t2 = in[1];
+                        p2 = in[2];
+                    }
+                    r = od_edit(RD_PP_OD_EDIT_FAN_CURVE, 3, in, k == 4, &rp);
+                }
+                T_CHECK(r == 0 && rp.info.od_fan_mode == 1 && rp.info.od_fan_curve_pwm[2] == (uint32_t)p2,
+                        "OD fan curve of 5 points (point 2: %d C %d %%) -> %d", t2, p2, r);
+            }
             sleep(4);
             pm_call(RD_PMCTL_INFO, 0, NULL, &rp);
             printf("  info  fan with the curve: %u rpm, pwm %u/255\n", rp.info.fan_rpm, rp.info.fan_pwm);

@@ -127,6 +127,10 @@ class RDNA3Framebuffer : public IOFramebuffer {
     uint32_t fLastFrame = 0;
     unsigned fVblWaits = 0;
     IOSimpleLock *fLock = nullptr;
+    /* a mode switch and a flip never interleave: a WindowServer frame of
+     * the old size must not reach a head mid-switch (card run 2026-10-12:
+     * stripes and a cut picture while the modes changed) */
+    IOLock *fModeLock = nullptr;
     volatile SInt32 fStopping = 0;
 
     /* flips */
@@ -168,6 +172,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
     uint64_t   vblPeriodAbs() const;
     bool       coreStatus(RD3KDisplayStatus *s);
     bool       flipTo(uint64_t vramOffset, uint32_t w, uint32_t h, uint32_t pitch, int *rc);
+    bool       flipToLocked(uint64_t vramOffset, uint32_t w, uint32_t h, uint32_t pitch, int *rc);
     void       scheduleVbl(uint64_t deadline);
     static void vblFire(thread_call_param_t p0, thread_call_param_t);
 
@@ -386,6 +391,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
         fCore = core;
     }
     fLock = IOSimpleLockAlloc();
+    fModeLock = IOLockAlloc();
     fSymInfo = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_INFO);
     fSymFlip = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_FLIP);
     fSymBlank = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_BLANK);
@@ -395,7 +401,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
     fSymStatus = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_STATUS);
     fSymCursor = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_CURSOR);
     fSymEdid = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_EDID);
-    if (!fLock || !fSymInfo || !fSymFlip || !fSymStatus || !fSymCursor || !fSymEdid)
+    if (!fLock || !fModeLock || !fSymInfo || !fSymFlip || !fSymStatus || !fSymCursor || !fSymEdid)
         return false;
 
     if (!fCore)
@@ -489,8 +495,11 @@ void RDNA3Framebuffer::stop(IOService *provider)
         }
         fVblTimer = nullptr;
     }
-    if (fCurMode)
+    if (fCurMode) {
+        IOLockLock(fModeLock);
         switchMode(0);   /* the native timing's own surface again, scaler off */
+        IOLockUnlock(fModeLock);
+    }
     if (fFlipped && fDcn) {
         int rc;
         flipTo(fBootVram, fW, fH, fBootPitch, &rc);   /* leave the boot surface on screen */
@@ -522,6 +531,10 @@ void RDNA3Framebuffer::free()
     if (fLock) {
         IOSimpleLockFree(fLock);
         fLock = nullptr;
+    }
+    if (fModeLock) {
+        IOLockFree(fModeLock);
+        fModeLock = nullptr;
     }
     super::free();
 }
@@ -854,7 +867,10 @@ IOReturn RDNA3Framebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth)
         return kIOReturnUnsupportedMode;
     if (idx == fCurMode)
         return kIOReturnSuccess;
-    return switchMode(idx);
+    IOLockLock(fModeLock);
+    IOReturn r = switchMode(idx);
+    IOLockUnlock(fModeLock);
+    return r;
 }
 
 IOReturn RDNA3Framebuffer::getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info)
@@ -1413,6 +1429,17 @@ IOReturn RDNA3Framebuffer::setCursorState(SInt32 x, SInt32 y, bool visible)
 bool RDNA3Framebuffer::flipTo(uint64_t vramOffset, uint32_t w, uint32_t h, uint32_t pitch, int *rc)
 {
     *rc = -1;
+    if (!fDcn || !fCore || !fModeLock)
+        return false;
+    IOLockLock(fModeLock);
+    bool ok = flipToLocked(vramOffset, w, h, pitch, rc);
+    IOLockUnlock(fModeLock);
+    return ok;
+}
+
+bool RDNA3Framebuffer::flipToLocked(uint64_t vramOffset, uint32_t w, uint32_t h, uint32_t pitch, int *rc)
+{
+    *rc = -1;
     if (!fDcn || !fCore)
         return false;
     if (w != fW || h != fH || pitch < w * 4 || (pitch & 3)) {
@@ -1475,8 +1502,14 @@ IOReturn RDNA3Framebuffer::callPlatformFunction(const OSSymbol *fn, bool wait, v
         if (!f || f->version != RD3K_FLIP_ABI_VERSION)
             return kIOReturnBadArgument;
         int rc = -1;
-        bool ok = (f->flags & 1u) ? flipTo(fBootVram, fW, fH, fBootPitch, &rc)   /* home */
-                                  : flipTo(f->allocationCookie, f->width, f->height, f->pitch, &rc);
+        bool ok = false;
+        if (fDcn && fModeLock) {
+            /* home is read under the mode lock too: a switch moves it */
+            IOLockLock(fModeLock);
+            ok = (f->flags & 1u) ? flipToLocked(fBootVram, fW, fH, fBootPitch, &rc)
+                                 : flipToLocked(f->allocationCookie, f->width, f->height, f->pitch, &rc);
+            IOLockUnlock(fModeLock);
+        }
         f->flipResult = rc;
         return ok ? kIOReturnSuccess : kIOReturnIOError;
     }

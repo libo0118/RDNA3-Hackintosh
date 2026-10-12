@@ -466,7 +466,7 @@ void RDNA3Accel::displayPublishRoutes()
  * a DDC EDID (TMDS: HDMI or a DP++ adaptor) and the boot mode in it. fDcn
  * keeps describing the boot heads only: the framebuffer's head numbers do
  * not move. */
-void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe)
+void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe, bool reinit)
 {
     uint32_t want = rd3_arg("rdna3mirror", 0);
     fDisplayDm = dm;   /* mode sets drive the PHY through it too */
@@ -475,6 +475,11 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe)
     fMirrorDm = dm;   /* hotplug lights it later, or switches it off */
     if (fMirrorOn)
         return;   /* a GPU reset / resume runs hwInit again: the clone is the restore's */
+    /* nor a new clone then: the boot head is not back from its snapshot
+     * yet (card run 2026-10-12, a wake with the power lost: MPCC 15, the
+     * clone refused); a second monitor not lit before is hotplug's */
+    if (reinit)
+        return;
     if (!fDcn || !fDispDev || !fDispLock || !fPaths || !fConnectors || !fDcn->nheads) {
         setProperty("RDNA3,Mirror", "failed: no boot head / connectors");
         return;

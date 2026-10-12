@@ -349,7 +349,7 @@ typedef struct sim {
     /* DMCUB: the firmware's view (boot checks, mailbox, GPINT) */
     struct {
         int running, psp_loaded, hang;
-        unsigned boots, stops, bad_boots, cmds, caps_queries, bad_cmds, tx_cmds;
+        unsigned boots, stops, bad_boots, cmds, caps_queries, bad_cmds, tx_cmds, pll_off_hangs;
         uint8_t tx[16];
         /* VBIOS commands in order: sub type, and the payloads of the last
          * SetPixelClock / DIGxEncoderControl */
@@ -874,8 +874,12 @@ static void sim_od_limits(OverDriveLimits_t *lo, OverDriveLimits_t *up)
  * monitor coefficients (made up, but distinct per workload) */
 static void sim_smu_pm_defaults(void)
 {
-    static const uint8_t temps[NUM_OD_FAN_MAX_POINTS] = { 25, 45, 65, 80, 95, 100 };
-    static const uint8_t pwms[NUM_OD_FAN_MAX_POINTS] = { 20, 30, 45, 60, 80, 100 };
+    /* the card's PMFW reads the curve as all 0 while the fan is automatic
+     * (rdna3_pmctl selftest, 2026-10-12: "OD_FAN_CURVE (auto): 0: 0C 0%
+     * ..."), below OverDriveLimitsMin: an upload that sets one point and
+     * leaves the others there is refused */
+    static const uint8_t temps[NUM_OD_FAN_MAX_POINTS] = { 0, 0, 0, 0, 0, 0 };
+    static const uint8_t pwms[NUM_OD_FAN_MAX_POINTS] = { 0, 0, 0, 0, 0, 0 };
     unsigned i;
     if (S.smu.od_init)
         return;
@@ -938,7 +942,9 @@ static int sim_od_accept(const OverDriveTable_t *t)
     if (m & (1u << PP_OD_FEATURE_FAN_CURVE_BIT)) {
         if (t->FanMode > FAN_MODE_MANUAL_LINEAR)
             return 0;
-        for (i = 0; i < NUM_OD_FAN_MAX_POINTS - 1; i++)
+        /* the points count in the manual curve only (automatic: the
+         * PMFW's own, the table's read as 0) */
+        for (i = 0; t->FanMode == FAN_MODE_MANUAL_LINEAR && i < NUM_OD_FAN_MAX_POINTS - 1; i++)
             if (!IN(t->FanLinearTempPoints[i], FanLinearTempPoints) ||
                 !IN(t->FanLinearPwmPoints[i], FanLinearPwmPoints))
                 return 0;
@@ -1618,6 +1624,19 @@ static void dmub_inbox(uint32_t wptr)
                 }
             } else if (sub == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && len == 16) {
                 memcpy(S.dmub.pixclk, c + 4, 16);
+                /* card run 2026-10-12: SetPixelClock with 0 for the CRTC
+                 * just disabled (a clone's power down) was taken from the
+                 * inbox and never finished: no command after it ran
+                 * (rptr stuck, every later one timed out). amdgpu never
+                 * sends it (dce110_clock_source_power_down: controller
+                 * UNDEFINED, set_pixel_clock_v7 sends nothing) */
+                if (!(c[4] | c[5] | c[6] | c[7]) && c[12] < 6 &&
+                    !(S.reg[OTG(regOTG0_OTG_CONTROL, c[12])] & OTG0_OTG_CONTROL__OTG_MASTER_EN_MASK)) {
+                    S.dmub.pll_off_hangs++;
+                    S.dmub.hang = 1;
+                    S.reg[DMR(regDMCUB_INBOX1_RPTR)] = (rptr + RD_DMUB_RB_CMD_SIZE) % RD_DMUB_RB_SIZE;
+                    return;
+                }
             } else if (sub == RD_DMUB_VBIOS_DIGX_ENCODER_CONTROL && len == 12) {
                 memcpy(S.dmub.enc, c + 4, 12);
             } else {
@@ -5505,9 +5524,10 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     memcpy(st_snap, S.reg, sizeof(st_snap));
     S.dmub.nseq = 0;
     CHECK(dcn32_state_head_off(dev, dm, &dc, &st, 0, NULL) == RDNA3_OK && dcn32_state_head_off(dev, dm, &dc, &st, 1, NULL) == RDNA3_OK);
-    CHECK(S.dmub.nseq == 4 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE &&
-          S.dmub.seq[1] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.seq_tx_action[2] == RD_ATOM_TX_DISABLE &&
-          S.dmub.seq[3] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.pixclk[0] == 0);
+    /* the transmitters off, no SetPixelClock 0 (cs_power_down sends
+     * nothing on DCN 3.2; it hung the DMCUB on the card) */
+    CHECK(S.dmub.nseq == 2 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE &&
+          S.dmub.seq_tx_action[1] == RD_ATOM_TX_DISABLE && !S.dmub.hang && !S.dmub.pll_off_hangs);
     CHECK(dcn32_read_state(dev, &dp) == 0);
     CHECK(dcn32_state_check(dev, &st, 1, 0, &k) == 1 && !k.otg_on && k.blanked && !k.dig_on && k.powered);
     S.dmub.nseq = 0;
@@ -9028,6 +9048,19 @@ static void test_pm_control(rdna3_dev *dev, const rdna3_vbios *vb)
     CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_ZERO_RPM_STOP_TEMP, in, 1) == RDNA3_OK);
     in[0] = 2;
     CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_ZERO_RPM_ENABLE, in, 1) == RDNA3_EINVAL);
+    /* one point of the curve set, the others as the PMFW reads them in
+     * auto (0 C 0 %): the PMFW refuses the table (card run 2026-10-12,
+     * rdna3_pmctl selftest), so the whole curve goes in first */
+    {
+        unsigned rej = S.smu.od_rejects, i;
+        static const int32_t ct[5] = { 30, 45, 60, 75, 90 }, cp[5] = { 30, 50, 70, 85, 100 };
+        CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_COMMIT_DPM_TABLE, NULL, 0) != RDNA3_OK &&
+              S.smu.od_rejects == rej + 1);
+        for (i = 0; i < 5; i++) {
+            in[0] = (int32_t)i; in[1] = ct[i]; in[2] = cp[i];
+            CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_EDIT_FAN_CURVE, in, 3) == RDNA3_OK);
+        }
+    }
     CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_COMMIT_DPM_TABLE, NULL, 0) == RDNA3_OK);
     CHECK(S.smu.od.FanMode == FAN_MODE_MANUAL_LINEAR && S.smu.od.FanLinearPwmPoints[2] == 70 &&
           S.smu.od.AcousticLimitRpmThreshold == 2500 && S.smu.od.FanTargetTemperature == 90);
@@ -9036,7 +9069,7 @@ static void test_pm_control(rdna3_dev *dev, const rdna3_vbios *vb)
     /* restore one setting: the fan curve back to the boot one, auto again */
     in[0] = RD_PP_OD_EDIT_FAN_CURVE;
     CHECK(smu13_od_edit_dpm_table(dev, &smu, RD_PP_OD_RESTORE_DEFAULT_TABLE, in, 1) == RDNA3_OK);
-    CHECK(S.smu.od.FanMode == FAN_MODE_AUTO && S.smu.od.FanLinearPwmPoints[2] == 45);
+    CHECK(S.smu.od.FanMode == FAN_MODE_AUTO && S.smu.od.FanLinearPwmPoints[2] == 0);
     CHECK(smu13_get_fan_speed_rpm(dev, &smu, &v) == RDNA3_OK && v == 900);
 
     /* resume / re-init: the PMFW lost the OD settings, the user's come back */
@@ -9139,6 +9172,17 @@ static void test_pm_control(rdna3_dev *dev, const rdna3_vbios *vb)
         CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK);
         pmctl_req(&rq, RD_PMCTL_OD_EDIT, 2, a);                         /* too few inputs */
         CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_EINVAL);
+        /* the rest of the curve (the PMFW refuses one point among zeros) */
+        {
+            int32_t k;
+            for (k = 0; k < 5; k++) {
+                if (k == 1)
+                    continue;
+                a[0] = RD_PP_OD_EDIT_FAN_CURVE; a[1] = k; a[2] = 30 + 15 * k; a[3] = 40 + 15 * k;
+                pmctl_req(&rq, RD_PMCTL_OD_EDIT, 4, a);
+                CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK);
+            }
+        }
         a[0] = RD_PP_OD_COMMIT_DPM_TABLE;
         pmctl_req(&rq, RD_PMCTL_OD_EDIT, 1, a);
         CHECK(smu13_pmctl(dev, &smu, &rq, &rp, all) == RDNA3_OK);
@@ -12572,8 +12616,7 @@ static void run(const char *fwdir)
                 CHECK(S.reg[DCN_B2 + RD_DCHUBBUB_ARB_DRAM_STATE_CNTL] == 0x1 &&
                       S.reg[DCN_B2 + RD_DCHUBBUB_ARB_USR_RETRAINING_CNTL] == 0x1);   /* back */
             }
-            CHECK(S.dmub.nseq == 2 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE &&
-                  S.dmub.seq[1] == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && S.dmub.pixclk[0] == 0 && S.dmub.pixclk[2] == 0);
+            CHECK(S.dmub.nseq == 1 && S.dmub.seq_tx_action[0] == RD_ATOM_TX_DISABLE && !S.dmub.hang);
             CHECK(!(S.reg[DCN_B2 + regVTG0_CONTROL + 1] & VTG0_CONTROL__VTG0_ENABLE_MASK) &&
                   !(S.reg[DCN_B1 + regDPPCLK_DTO_CTRL] & 3));
             CHECK(dcn32_read_state(&dev, &dc2) == 1 && dc2.head[0].pipe == 1);
@@ -12662,8 +12705,9 @@ static void run(const char *fwdir)
             S.smu_wedge_at = 3;
             S.dmub.nseq = 0;
             CHECK(dcn32_clone_enable(&dev, &dm, &cl) == RDNA3_EIO);
-            CHECK(S.dmub.nseq >= 4 && S.dmub.seq[2] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL &&
-                  S.dmub.seq_tx_action[2] == RD_ATOM_TX_INIT && S.dmub.seq_tx_action[3] != RD_ATOM_TX_ENABLE);
+            CHECK(S.dmub.nseq >= 3 && S.dmub.seq[2] == RD_DMUB_VBIOS_DIG1_TRANSMITTER_CONTROL &&
+                  S.dmub.seq_tx_action[2] == RD_ATOM_TX_INIT &&
+                  (S.dmub.nseq == 3 || S.dmub.seq_tx_action[3] != RD_ATOM_TX_ENABLE));
             S.smu_wedge_at = 0;
             S.reg[MP1(90)] = 1;      /* the PMFW back (a reset in real life) */
             CHECK(dcn32_read_state(&dev, &dc2) == 1);
