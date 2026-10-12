@@ -299,6 +299,9 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
         IOLockUnlock(a->fDrmLock);
     }
     bool powerLost = vendor != 0x1002 || memsize == ~0u || memsize == 0 || needPost == 1 || sos == 0;
+    /* P4: after amdgpu_device_suspend the IPs are down whether or not the
+     * card kept its power: amdgpu_device_resume runs either way */
+    bool suspended = a->fBringup && a->fBringup->suspended();
     snprintf(val, sizeof(val), "wake #%u: PCI %04x cmd 0x%04x, MEMSIZE %u MiB, ASIC_Init %s, PSP sOS %s, %u head(s) lost: %s",
              a->fWakes, vendor, cmd, memsize, needPost < 0 ? "?" : needPost ? "NEEDED" : "done",
              sos < 0 ? "?" : sos ? "running" : "GONE", lost,
@@ -311,13 +314,14 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
     a->setNumber("RDNA3,Wakes", a->fWakes);
     LOG("%s", val);
 
-    if (powerLost) {
+    if (powerLost || suspended) {
         if (resume && a->fBringup && a->fBringup->finished() && a->fDrmLock) {
             IOLockLock(a->fDrmLock);
             bool ok = a->fBringup->resumeAfterPowerLoss();
             IOLockUnlock(a->fDrmLock);
             a->setNumber("RDNA3,WakeResumeResult", ok ? 1 : 0);
-            LOG("wake: GPU bring-up after the power loss %s", ok ? "done" : "FAILED");
+            LOG("wake: GPU bring-up after the %s %s", powerLost ? "power loss" : "suspend",
+                ok ? "done" : "FAILED");
         } else {
             LOG("wake: the GPU needs ASIC_Init (atom_asic_init), the PSP / SMU / firmware bring-up from level 4 "
                 "(hwInit) and the display restore (dcn32_state_restore); rdna3resume=1 tries that. The display "
@@ -342,7 +346,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
             for (uint32_t i = 0; i < a->fDcn->nheads && i < 4; i++)
                 if (a->fHeadLinkDown[i] && !a->fHeadBlank[i])
                     a->displayLinkUp(i);
-        a->displayPowerWake(powerLost);   /* item O: after the heads are back */
+        a->displayPowerWake(powerLost || suspended);   /* item O: after the heads are back (hwInit reloaded the DMCUB) */
         IOLockUnlock(a->fDispLock);
     }
     a->setNumber("RDNA3,WakeHeadsLost", lost);

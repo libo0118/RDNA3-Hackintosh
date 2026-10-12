@@ -124,17 +124,29 @@ IOReturn RDNA3Accel::setPowerState(unsigned long state, IOService *)
     /* D4: system sleep and wake (RDNA3Resume.cpp); the wake work runs on
      * a thread call */
     bool vcn = fBringup && fBringup->finished() && fBringup->vcnWanted() && fDrmLock;
+    bool s3 = fBringup && fBringup->finished() && fDrmLock && rd3_arg("rdna3resume", 0) && !fShuttingDown;
     if (state == 0) {
         displayWillSleep();
         /* amdgpu_device_suspend: the display first (phase 1), then the
-         * other IPs in reverse order, JPEG and VCN among them (rdna3vcn) */
-        if (vcn) {
+         * other IPs in reverse order, JPEG and VCN among them (rdna3vcn);
+         * with rdna3resume=1 all of them (P4), else the video block only */
+        if (s3) {
+            IOLockLock(fDrmLock);
+            fBringup->systemSuspend();
+            IOLockUnlock(fDrmLock);
+        } else if (vcn) {
             IOLockLock(fDrmLock);
             fBringup->vcnSuspend();
             IOLockUnlock(fDrmLock);
         }
     } else if (fDispAsleep) {
-        displayDidWake();   /* the wake work resumes VCN / JPEG at its end */
+        displayDidWake();   /* the wake work resumes the GPU and VCN / JPEG */
+    } else if (fBringup && fBringup->suspended() && fDrmLock) {
+        /* suspended with no display wake work (no heads): the resume here */
+        IOLockLock(fDrmLock);
+        bool ok = fBringup->resumeAfterPowerLoss();
+        IOLockUnlock(fDrmLock);
+        LOG("wake: GPU resume after the suspend %s", ok ? "done" : "FAILED");
     } else if (vcn) {
         /* no display wake work: VCN / JPEG straight away (vcnResume does
          * nothing when the PSP sOS is gone, i.e. the card lost its power) */

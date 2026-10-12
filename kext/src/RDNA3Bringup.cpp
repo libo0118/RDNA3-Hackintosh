@@ -2629,6 +2629,47 @@ bool RDNA3Bringup::reinitFromLevel4()
     return ok;
 }
 
+/* amdgpu_device_ip_suspend (phase 2, the display is the accelerator's):
+ * the EOP interrupts off, then in reverse IP order VCN / JPEG, MES, SDMA,
+ * GFX, PSP, IH, GMC and the SoC block. 'all' false: the video block only
+ * (a reset without rdna3amdgpu=1 resets the rest anyway) */
+void RDNA3Bringup::ipSuspend(bool all)
+{
+    if (fKcq && fKcq->rb.ready)
+        gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
+    if (fGfx && fGfx->ready)
+        gfx11_set_eop_interrupt(fDev, fGfx, 0);
+
+    /* amdgpu_device_pre_asic_reset -> amdgpu_device_ip_suspend: the video
+     * block suspended while the chip still runs (vcnStart resumes it) */
+    vcnSuspend();
+    /* rdna3amdgpu=1: mes_v11_0_suspend (amdgpu_mes_suspend: every gang) */
+    if (all && fMes && fMes->ready && fDev)
+        gfx11_mes_suspend(fDev, fMes);
+    /* amdgpu_device_ip_suspend before a full reset: sdma_v6_0_suspend
+     * (rdna3amdgpu=1) */
+    if (all && fSdma && fDev)
+        sdma60_hw_fini(fDev, fDev->ipver[HWIP_SDMA1].present ? 2 : 1);
+    /* ... and gfx_v11_0_suspend after it (reverse IP order) */
+    if (all)
+        gfxSuspend();
+
+    /* amdgpu_device_ip_suspend goes on in reverse IP order (rdna3amdgpu=1):
+     * psp_suspend, ih_v6_0_suspend (= ih_v6_0_hw_fini), gmc_v11_0_suspend
+     * (= gmc_v11_0_hw_fini) */
+    if (all) {
+        if (fPsp && fPsp->ring_created)
+            psp13_suspend(fPsp);
+        if (fIh && fIh->enabled && fDev)
+            ih60_disable(fDev, fIh);
+        if (fGmc && fDev)
+            gmc11_hw_fini(fDev);
+        /* soc21_common_suspend (= soc21_common_hw_fini), the first IP block */
+        if (fDev && fDev->doorbell_ok)
+            soc21_common_hw_fini(fDev);
+    }
+}
+
 bool RDNA3Bringup::gpuReset(bool baco)
 {
     uint32_t i;
@@ -2645,39 +2686,7 @@ bool RDNA3Bringup::gpuReset(bool baco)
     if (fIntr)
         fIntr->disable();
     vmFlushAllOnNextJob();
-    if (fKcq && fKcq->rb.ready)
-        gfx11_set_eop_interrupt(fDev, &fKcq->rb, 0);
-    if (fGfx && fGfx->ready)
-        gfx11_set_eop_interrupt(fDev, fGfx, 0);
-
-    /* amdgpu_device_pre_asic_reset -> amdgpu_device_ip_suspend: the video
-     * block suspended while the chip still runs (vcnStart resumes it) */
-    vcnSuspend();
-    /* rdna3amdgpu=1: mes_v11_0_suspend (amdgpu_mes_suspend: every gang) */
-    if (fAmdgpuExact && fMes && fMes->ready && fDev)
-        gfx11_mes_suspend(fDev, fMes);
-    /* amdgpu_device_ip_suspend before a full reset: sdma_v6_0_suspend
-     * (rdna3amdgpu=1) */
-    if (fAmdgpuExact && fSdma && fDev)
-        sdma60_hw_fini(fDev, fDev->ipver[HWIP_SDMA1].present ? 2 : 1);
-    /* ... and gfx_v11_0_suspend after it (reverse IP order) */
-    if (fAmdgpuExact)
-        gfxSuspend();
-
-    /* amdgpu_device_ip_suspend goes on in reverse IP order (rdna3amdgpu=1):
-     * psp_suspend, ih_v6_0_suspend (= ih_v6_0_hw_fini), gmc_v11_0_suspend
-     * (= gmc_v11_0_hw_fini) */
-    if (fAmdgpuExact) {
-        if (fPsp && fPsp->ring_created)
-            psp13_suspend(fPsp);
-        if (fIh && fIh->enabled && fDev)
-            ih60_disable(fDev, fIh);
-        if (fGmc && fDev)
-            gmc11_hw_fini(fDev);
-        /* soc21_common_suspend (= soc21_common_hw_fini), the first IP block */
-        if (fDev && fDev->doorbell_ok)
-            soc21_common_hw_fini(fDev);
-    }
+    ipSuspend(fAmdgpuExact);
 
     /* soc21_need_full_reset is true on every GC 11: no IP soft reset first.
      * soc21_asic_mode1_reset: no bus mastering across the reset */
@@ -2734,6 +2743,33 @@ int RDNA3Bringup::sosAlive()
  * amdgpu_device_ip_resume, which here is the whole hwInit() again, as
  * gpuReset() runs it after the mode-1 reset. VRAM did not survive: the
  * clients see VRAM lost. Under the DRM lock. */
+/* amdgpu_device_suspend (S3) for what is not the display (the
+ * accelerator's dm_suspend ran first): amdgpu_fence_driver_hw_fini (every
+ * ring idle, else forced), then amdgpu_device_ip_suspend_phase2 in reverse
+ * IP order (ipSuspend). smu_suspend has nothing to send on SMU 13.0.7:
+ * smu_disable_dpms leaves the features to the PMFW there, and mp1_state
+ * stays NONE for a sleep. No ring takes work until the resume. Under the
+ * DRM lock. */
+bool RDNA3Bringup::systemSuspend()
+{
+    if (!fFinished || !fDev || fSuspended)
+        return false;
+    fSystemSuspends++;
+    BLOG("suspend #%u: rings idle, then the IPs down in reverse order (amdgpu_device_suspend)", fSystemSuspends);
+    fenceDriverHwFini();
+    if (fIntr)
+        fIntr->disable();
+    ipSuspend(true);
+    if (fSdma) fSdma->ready = 0;
+    if (fGfx) fGfx->ready = 0;
+    if (fKiq) { fKiq->rb.ready = 0; fKiq->mapped = 0; }
+    if (fKcq) { fKcq->rb.ready = 0; fKcq->mapped = 0; }
+    memset(fGdsKnown, 0, sizeof(fGdsKnown));
+    fSuspended = true;
+    publish("RDNA3,SystemSuspends", fSystemSuspends);
+    return true;
+}
+
 bool RDNA3Bringup::resumeAfterPowerLoss()
 {
     uint64_t fbStart = fDev ? fDev->fb_start : 0;
@@ -2742,7 +2778,8 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
     if (!fFinished || !fDev || !fPsp)
         return false;
     fResumes++;
-    BLOG("resume #%u: the GPU lost its power in the sleep: post, then bring-up from level 4", fResumes);
+    BLOG("resume #%u: %s: post if needed, then bring-up from level 4", fResumes,
+         fSuspended ? "after amdgpu_device_suspend" : "the GPU lost its power in the sleep");
     IOSleep(100);
     if (fIntr)
         fIntr->disable();
@@ -2776,6 +2813,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
         smu13_mode1_reset(fDev);
     }
     ok = reinitFromLevel4();
+    fSuspended = false;
     if (fIntr)
         fIntr->enable();
     publish("RDNA3,Resumes", fResumes);

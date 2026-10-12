@@ -154,6 +154,10 @@ public:
     bool     vcnWanted() const { return fVcnWanted; }
     int      sosAlive();
     bool     resumeAfterPowerLoss();
+    /* P4 (rdna3resume=1): amdgpu_device_suspend before a system sleep;
+     * the wake then always runs the resume (resumeAfterPowerLoss) */
+    bool     systemSuspend();
+    bool     suspended() const { return fSuspended; }
     /* VCN / JPEG across a system sleep (rdna3vcn): amdgpu_device_ip_suspend's
      * jpeg_v4_0_suspend + vcn_v4_0_suspend before it (the VCPU BOs copied
      * to system memory), and after a wake that kept the card's power their
@@ -220,6 +224,7 @@ private:
     uint64_t         fIbTestBuf = UINT64_MAX;
     void             gfxSuspend();
     void             fenceDriverHwFini();
+    void             ipSuspend(bool all);
     /* rdna3amdgpu=1: the SMU's thermal / MP1 IVs (smu_v13_0_irq_process).
      * The hardware CTF is handled in the IV callback; whatever needs the
      * PMFW mailbox runs from fSmuIrqCall under the DRM lock (50 ms later
@@ -322,6 +327,8 @@ private:
     amd_fw_blob_ref  fBlobRefs[AMD_BLOB_COUNT] = {};
     uint64_t         fAllocLo = 0, fAllocHi = 0;
     bool             fReinit = false;        /* hwInit() runs again after a reset */
+    bool             fSuspended = false;     /* systemSuspend ran, the resume has not */
+    uint32_t         fSystemSuspends = 0;
     uint32_t         fResetCount = 0, fVramLostCount = 0;
     uint64_t         fGpuResets = 0, fSoftRecoveries = 0, fVmFaults = 0;
     uint64_t         fResetMagic = UINT64_MAX;   /* VRAM slot: did VRAM survive the reset? */

@@ -778,7 +778,11 @@ reset the heads are `LOST` unless `rdna3resume=1` restored them.
 Serial lines: `state: head N saved/link down/link up/restore/restored`
 (`hw/dcn32_state.c`), `display: head N <why>: ...` (the check after each
 event), `wake #N: PCI ..., MEMSIZE ..., ASIC_Init ..., PSP sOS ...`,
-`resume #N ...` (`RDNA3Bringup::resumeAfterPowerLoss`).
+`resume #N ...` (`RDNA3Bringup::resumeAfterPowerLoss`). With
+`rdna3resume=1` the sleep also runs `amdgpu_device_suspend`
+(`suspend #N: rings idle, then the IPs down in reverse order`,
+`RDNA3,SystemSuspends`), so every wake runs the resume, also when the card
+kept its power (`resume #N: after amdgpu_device_suspend`).
 
 | Symptom | Likely cause | Action |
 |---|---|---|
@@ -786,7 +790,9 @@ event), `wake #N: PCI ..., MEMSIZE ..., ASIC_Init ..., PSP sOS ...`,
 | standby works, the monitor wakes without a picture | TransmitterControl ENABLE alone does not bring the stream back on the boot head | compare `state: head N link up (r)` with the clone's `clone: link up`; next: `enable_link_hdmi`'s `setup_stream_encoder` (STREAM_SETUP) before ENABLE in `dcn32_head_link`, modelled in the sim first |
 | `SYSTEM SLEEP: the system did not sleep` | VM: guest S3 off, or an assertion | `pmset -g log` lines in the test output, `host-*.log` QEMU line with `ICH9-LPC.disable_s3=0`; `pmset -g assertions` in the VM |
 | report ends at `system sleep`, `host-*.log` `still suspended after 90 s: system_wakeup` | the guest did not wake (RTC alarm lost, system_wakeup refused) | QEMU version / `info status` output in `host-*.log`; next round without `pmset sleepnow` (display part only) |
-| `RDNA3,Wake ... the card kept its power`, every head `restored (0), running`, pictures and CRC like before | pass | `sleep <date> vm` into `docs/status/hw-verified.txt` |
+| `RDNA3,Wake ... the card kept its power`, `WakeResumeResult 1`, every head `restored (0), running`, pictures and CRC like before, DMA/GFX tests after the wake pass | pass | `sleep <date> vm` into `docs/status/hw-verified.txt` |
+| `unload: ring X.Y stuck at fence N: forced` before `suspend #N` | a job still ran when the sleep came (amdgpu_fence_driver_hw_fini forces it too) | harmless if the resume passes; else the ring named |
+| card kept its power, `WakeResumeResult 0` | the resume with a live sOS: `psp_resume` path (`PSP: sOS already alive` must appear) or `hwInit` after the IPs' suspend | serial from `resume #N` on: the first `failed:` `Stage2` value names the block |
 | `RDNA3,Wake ... the card lost its power`, `WakeResumeResult 0` | `resumeAfterPowerLoss` stopped: `ResumeResult` 1 ASIC_Init, 2 FB location moved, 3 `hwInit` | serial `resume #1` and the `PSP` / `post` / `Stage2` lines after it; in the VM a wake brings a bus reset: `resetIfPspStuck` must log the mode-1 reset |
 | heads `restored (-16)` after a power loss | DISPCLK / DPPCLK below the pixel rate: the clock manager (`dcn32_init_clocks`, `dcn32_update_clocks`) is not ported | `state: head N: DISPCLK ... no longer carry` line; port the hard minimums through `dcn32_smu_set_hard_min` (DAL mailbox) |
 | heads `restored (-19)` | no DMCUB after the resume (`rdna3dmub=3` attaches to the GOP's firmware, gone after a power loss) | `rdna3dmub=1`; `DMUB:` lines after `resume` |
