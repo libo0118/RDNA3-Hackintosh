@@ -464,15 +464,34 @@ int main(void)
         va.operation = AMDGPU_VA_OP_REPLACE; va.va_address = 0x201000; va.map_size = 4096;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
         CHECK(vm_maps == 3 && vm_unmaps == 2 && vm_mapped == 4096);
+        /* PR #2 review: MAP refuses an overlap (amdgpu_vm_bo_map), nothing
+         * in the GMC hole or past the VM, the high half is the low one */
+        va.operation = AMDGPU_VA_OP_MAP; va.va_address = 0x200000; va.map_size = 2 * 4096;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL && vm_maps == 3);
+        va.va_address = 0x0000800000000000ull; va.map_size = 4096;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL);
+        va.va_address = (1ull << 48) - 4096;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL);
+        va.va_address = 0xffff800000400000ull;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0 && vm_maps == 4);
+        va.va_address = 0x800000;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
+        va.va_address = 0x0000800000400000ull & 0x0000ffffffffffffull;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL);   /* the hole */
+        va.operation = AMDGPU_VA_OP_UNMAP; va.va_address = 0xffff800000400000ull;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
+        va.va_address = 0x800000;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
+        CHECK(vm_maps == 5 && vm_unmaps == 4 && vm_mapped == 4096);
         /* closing the handle drops its mappings, like amdgpu_gem_object_close */
 
         cl.handle = h; cl.pad = 0;
         CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == 0);
         CHECK(IOCTL(f, RD_NR_GEM_CLOSE, cl) == -RD_EINVAL);
-        CHECK(vm_mapped == 0 && vm_unmaps == 3);
+        CHECK(vm_mapped == 0 && vm_unmaps == 5);
         va.operation = AMDGPU_VA_OP_CLEAR; va.va_address = 0x200000; va.map_size = 1 << 20;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
-        CHECK(vm_unmaps == 3);
+        CHECK(vm_unmaps == 5);
         CHECK(info(f, AMDGPU_INFO_VRAM_USAGE, &vram, 8) == 0 && vram == 0);
         CHECK(live_bos == 1);
     }

@@ -41,6 +41,7 @@ static size_t slen(const char *s)
 #define VA_RESERVED_TOP     ((1ull << 16) + (2ull << 20) + (2ull << 20))
 #define GMC_HOLE_START      0x0000800000000000ull
 #define GMC_HOLE_END        0xffff800000000000ull
+#define GMC_HOLE_MASK       0x0000ffffffffffffull   /* AMDGPU_GMC_HOLE_MASK */
 #define VM_SIZE             ((1ull << 48) - VA_RESERVED_TOP)
 
 void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
@@ -1927,6 +1928,13 @@ static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
     if (va->va_address < VA_RESERVED_BOTTOM || (va->va_address & 4095) || (va->map_size & 4095) ||
         (va->offset_in_bo & 4095) || va->va_address + va->map_size < va->va_address)
         return -RD_EINVAL;
+    /* amdgpu_gem_va_ioctl: nothing in the GMC hole; the high half is the
+     * low one sign-extended; nothing past max_pfn less the reserved top */
+    if (va->va_address >= GMC_HOLE_START && va->va_address < GMC_HOLE_END)
+        return -RD_EINVAL;
+    va->va_address &= GMC_HOLE_MASK;
+    if (va->va_address + va->map_size > VM_SIZE)
+        return -RD_EINVAL;
     switch (va->operation) {
     case AMDGPU_VA_OP_MAP:
     case AMDGPU_VA_OP_REPLACE: {
@@ -1938,13 +1946,16 @@ static int gem_va(rdna3_drm_file *f, struct drm_amdgpu_gem_va *va)
         if (!va->map_size || va->offset_in_bo > bo->size || va->map_size > bo->size - va->offset_in_bo ||
             bo_onchip(bo))
             return -RD_EINVAL;
-        if (va->operation == AMDGPU_VA_OP_REPLACE)
-            for (i = 0; i < f->nvas; i++) {
-                rdna3_va *m = &f->vas[i];
-                if (m->handle && m->va < va->va_address + va->map_size &&
-                    va->va_address < m->va + m->size)
-                    va_release(f, m);
-            }
+        /* REPLACE clears what it overlaps (amdgpu_vm_bo_clear_mappings);
+         * MAP refuses it (amdgpu_vm_bo_map: "conflict with") */
+        for (i = 0; i < f->nvas; i++) {
+            rdna3_va *m = &f->vas[i];
+            if (!m->handle || !(m->va < va->va_address + va->map_size && va->va_address < m->va + m->size))
+                continue;
+            if (va->operation != AMDGPU_VA_OP_REPLACE)
+                return -RD_EINVAL;
+            va_release(f, m);
+        }
         for (i = 0; i < f->nvas; i++)
             if (!f->vas[i].handle)
                 break;
@@ -2197,7 +2208,6 @@ static int proc_options_ioctl(struct drm_amdgpu_proc_options *o)
  * through BO reservations does not exist in this driver (the BO lists of
  * USERQ_SIGNAL / USERQ_WAIT are looked up, nothing is attached to them). */
 
-#define GMC_HOLE_MASK   0x0000ffffffffffffull   /* AMDGPU_GMC_HOLE_MASK */
 #define VM_MAX_PFN      (1ull << 36)            /* adev->vm_manager.max_pfn, 48-bit VM */
 #define USERQ_PROC_CTX_SZ 4096u                 /* AMDGPU_USERQ_PROC_CTX_SZ */
 #define USERQ_GANG_CTX_SZ 4096u                 /* AMDGPU_USERQ_GANG_CTX_SZ */
