@@ -151,13 +151,13 @@ jobs:
         run: make -C metal plugin
       - name: AIR->SPIR-V translator (librdna3mtl_translate.dylib)
         run: |
-          # rustup into ~/.cargo on first use (no Homebrew on Intel Macs)
-          if ! command -v rustup >/dev/null && [ ! -x "$HOME/.cargo/bin/rustup" ]; then
-            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
-          fi
+          # rustup into ~/.cargo on first use (no Homebrew on Intel Macs),
+          # a pinned release checked by SHA-256. The runner is x86_64, so
+          # cargo's host target is the one the plugin loads.
+          tools/ci/install_tools.sh rustup
           export PATH="$HOME/.cargo/bin:$PATH"
-          rustup target add x86_64-apple-darwin
-          make -C metal translator CARGO_BUILD_TARGET=x86_64-apple-darwin || make -C metal translator
+          make -C metal translator
+          lipo -archs build/metal/librdna3mtl_translate.dylib | grep -qw x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: RDNA3MTL
@@ -179,11 +179,9 @@ jobs:
         run: |
           T="$RUNNER_TOOL_CACHE/rdna3-translator"
           mkdir -p "$T"
-          if ! command -v cargo >/dev/null && [ ! -x "$HOME/.cargo/bin/cargo" ]; then
-            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path
-          fi
+          command -v cargo >/dev/null || tools/ci/install_tools.sh rustup
+          tools/ci/install_tools.sh uv
           export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
-          command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
           [ -x "$T/venv/bin/python3" ] || uv venv --python 3.12 "$T/venv"
           uv pip install --python "$T/venv/bin/python3" --quiet cmake ninja
           export PATH="$T/venv/bin:$PATH"
@@ -236,8 +234,8 @@ jobs:
           # downloads and builds them.
           T="$RUNNER_TOOL_CACHE/rdna3-radv"
           mkdir -p "$T"
+          tools/ci/install_tools.sh uv   # pinned, checked by SHA-256
           export PATH="$HOME/.local/bin:$PATH"
-          command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | env UV_NO_MODIFY_PATH=1 sh
           [ -x "$T/venv/bin/python3" ] || uv venv --python 3.12 "$T/venv"
           uv pip install --python "$T/venv/bin/python3" --quiet meson ninja mako pyyaml packaging pkgconf cmake
           export PATH="$T/venv/bin:$T/bin:$PATH"
