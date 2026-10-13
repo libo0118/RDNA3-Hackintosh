@@ -371,7 +371,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         # IOPresentment: does WindowServer hand the display pipes a plane
         # (iop_ok / iop_src_surf), and what did AGDC answer (rdna3agdc)
         echo "== display pipe and AGDC counters"
-        sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|flips)|heads_)|rdna3agdc" || true
+        sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|copy_skip|flips)|heads_)|rdna3agdc" || true
         ioreg -r -c RDNA3AGDC -w0 -d1 2>/dev/null | grep -E '"RDNA3,AGDC' | sed 's/^ *//'
         # display sleep (rdna3dpms=1): the heads must blank, then come back
         case " $args " in

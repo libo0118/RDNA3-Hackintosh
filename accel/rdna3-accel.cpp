@@ -282,7 +282,9 @@ public:
                      slotted ? "its extra reference returned" : "NOT slotted: keeping its reference rather than risk a reader");
                 if (slotted) old->release();
             }
-        } else if (!OSCompareAndSwapPtr(nullptr, newService, (void *volatile *)&me->fFB)) newService->release();
+        /* only head 0 may become the primary framebuffer (NullMoth 249ef8c):
+         * another head publishing first stayed fFB on their machines */
+        } else if (idx != 0 || !OSCompareAndSwapPtr(nullptr, newService, (void *volatile *)&me->fFB)) newService->release();
         unsigned before = me->fDM ? me->fDM->getFramebufferCount() : 0xFFFFFFFFu;
         ALOG("%s published -- display machine framebuffer count = %u (index %u %s)", newService->getName(), before, idx, what);
         if (gRd3AccelArmed)
@@ -751,8 +753,11 @@ void *RD3Resource::getApertureMemoryDescriptor(unsigned long long *a0)
     return fApDesc;
 }
 
+static void rd3SVForgetResource(RD3Resource *resource);
+
 void RD3Resource::free()
 {
+    rd3SVForgetResource(this);
     if (fApDesc) { fApDesc->release(); fApDesc = nullptr; }
     rd3AccelResourceGone(this);
     OSAddAtomic64(1, &gCntResFree);
@@ -883,7 +888,7 @@ bool RD3DisplayPipe::isTransactionComplete(IOAccelDisplayPipeTransaction2 *)
     return gRd3Iop != 0 && !rd3AccelIopAsyncBusy(this);
 }
 
-static void rd3AccelSurfScanoutSync(IOSurface *s);
+static bool rd3AccelSurfCopyReady(IOSurface *s, unsigned head);
 static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe);
 static void rd3AccelIopHome(IOService *fb, unsigned head);
 
@@ -1028,7 +1033,12 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
         OSAddAtomic64(1, &gCntIopSrcSurf); OSAddAtomic64(1, &gCntIopOk); OSAddAtomic64(1, &gCntIopOkHead[head]);
         return kIOReturnSuccess;
     } else if (s) {
-        rd3AccelSurfScanoutSync(s);
+        /* NullMoth c2af33d: a copied frame must come from the surface's
+         * newest pixels. Copying while they were still only in VRAM put a
+         * stale, one-colour buffer on the panel every other frame (their
+         * full-screen flicker on the copy path, nvaccel_iop_blank about half
+         * of the copied frames). Such a frame keeps the previous picture. */
+        if (!rd3AccelSurfCopyReady(s, head)) return kIOReturnSuccess;
         const unsigned fmt = s->getPixelFormat();
         if (fmt != 0x42475241u) RD3IOP_FAIL(kIOReturnUnsupported, "surface 0x%x format 0x%08x is not BGRA", s->getSurfaceID(), fmt);
         const unsigned long long W = s->getWidth(), H = s->getHeight(), P = s->getBytesPerRow();
@@ -1179,6 +1189,8 @@ RD3ACCEL_CNT(rdna3accel_iop_empty_base_err, gCntIopEmptyBaseErr, "rdna3gamma=1: 
 RD3ACCEL_CNT(rdna3accel_iop_src_res,      gCntIopSrcRes,      "K3: frames sourced from our VRAM resource");
 RD3ACCEL_CNT(rdna3accel_iop_src_surf,     gCntIopSrcSurf,     "K3: frames sourced from the IOSurface memory");
 RD3ACCEL_CNT(rdna3accel_iop_blank,        gCntIopBlank,       "K6: frames copied whose 64 samples were all ONE colour (a blank frame)");
+static SInt64 gCntIopCopySkip;
+RD3ACCEL_CNT(rdna3accel_iop_copy_skip,    gCntIopCopySkip,    "frames kept on the panel because the surface's newest pixels were not yet in system memory");
 static int    gIopFlip = 0;
 static SInt64 gCntIopFlip, gCntIopFlipHome, gCntIopFlipNo[8];
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_iop_flip, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gIopFlip, 0, "1 = scan the composited IOSurface out of its own VRAM (no copy)");
@@ -1218,7 +1230,7 @@ static void rdna3accelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_empty);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_empty_base); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_empty_base_err);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_src_res);    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_src_surf);
-    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_blank);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_iop_blank);   sysctl_register_oid(&sysctl__debug_rdna3accel_iop_copy_skip);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flip);       sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flips);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flip_home);  sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flip_lock);
     sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flip_novram); sysctl_register_oid(&sysctl__debug_rdna3accel_iop_flip_stale);
@@ -1334,21 +1346,42 @@ static void rd3FamUnlock(RDNA3Accelerator *a)
 static unsigned gNVSVLockMiss;
 enum { kNVSVPend = 512 };
 static unsigned gNVSVPendId[kNVSVPend];
+static RD3Resource *gNVSVPendResource[kNVSVPend];
 static IOSimpleLock *volatile gNVSVPendLock;
-static bool rd3SVPend(unsigned id, int op)
+/* op 1 marks surface 'id' pending (owned by 'resource'), 0 clears, 2 asks */
+static bool rd3SVPend(unsigned id, int op, RD3Resource *resource = nullptr)
 {
     if (!id) return op == 1 ? false : false;
     if (!gNVSVPendLock) return op == 1 ? false : false;
     bool r = false; int freeSlot = -1;
     IOSimpleLockLock(gNVSVPendLock);
     for (int i = 0; i < kNVSVPend; i++) {
-        if (gNVSVPendId[i] == id) { r = true; if (op == 0) gNVSVPendId[i] = 0; break; }
+        if (gNVSVPendId[i] == id) {
+            r = true;
+            if (op == 0) { gNVSVPendId[i] = 0; gNVSVPendResource[i] = nullptr; }
+            else if (op == 1) gNVSVPendResource[i] = resource;
+            break;
+        }
         if (!gNVSVPendId[i] && freeSlot < 0) freeSlot = i;
     }
-    if (op == 1 && !r) { if (freeSlot >= 0) { gNVSVPendId[freeSlot] = id; r = true; } }
+    if (op == 1 && !r) { if (freeSlot >= 0) { gNVSVPendId[freeSlot] = id; gNVSVPendResource[freeSlot] = resource; r = true; } }
     else if (op == 1) r = true;
     IOSimpleLockUnlock(gNVSVPendLock);
     return r;
+}
+/* NullMoth 79e1c2f: a pending mark belongs to the resource that last
+ * dirtied the surface; a freed resource drops only its own marks (no device
+ * cache read during destruction, a newer owner's mark stays), so the 512
+ * slots do not fill with surfaces that are gone */
+static void rd3SVForgetResource(RD3Resource *resource)
+{
+    if (!resource || !gNVSVPendLock) return;
+    IOSimpleLockLock(gNVSVPendLock);
+    for (unsigned i = 0; i < kNVSVPend; i++) if (gNVSVPendResource[i] == resource) {
+        gNVSVPendId[i] = 0;
+        gNVSVPendResource[i] = nullptr;
+    }
+    IOSimpleLockUnlock(gNVSVPendLock);
 }
 static void    *gNVSVRoot;
 static unsigned gNVSVOk, gNVSVRefused;
@@ -1362,7 +1395,7 @@ static unsigned rd3AccelSurfDirty(void *cache, RD3Resource *res, unsigned plane)
     unsigned int fl = *(volatile unsigned int *)(r + 0xc);
     volatile unsigned short *valid = *(unsigned short *volatile *)(r + 0x30);
     if (type != 0xc0 || (fl & 0x8000) || !valid || plane > 15) return RD3K_SS_NO_CACHE;
-    if (!rd3SVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1)) return RD3K_SS_NO_CACHE;
+    if (!rd3SVPend(_ZNK9IOSurface12getSurfaceIDEv(*(void *volatile *)((unsigned char *)cache + 0x10)), 1, res)) return RD3K_SS_NO_CACHE;
     _ZN20IOSurfaceDeviceCache10setCurrentEv(cache);
     valid[6] |= (unsigned short)(1u << plane);
     valid[0] &= (unsigned short)~(1u << plane);
@@ -1721,24 +1754,41 @@ static void rd3AccelIopHome(IOService *fb, unsigned head)
     if (rr != kIOReturnSuccess && gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: HOME flip refused (0x%x) head %u", (unsigned)rr, head); }
     gIopFlipped[head] = false;
 }
-static void rd3AccelSurfScanoutSync(IOSurface *s)
+/* True when the surface's system memory holds its newest pixels, after
+ * moving them there if the GPU drew them into VRAM. Unlike
+ * the old scan-out sync it waits a few ms for the accelerator lock and
+ * keeps the pending mark when the page-off fails. At most 4 frames in a row
+ * are held back per head: a surface that never syncs is copied as before
+ * rather than freezing the panel (NullMoth c2af33d). */
+static unsigned gIopCopyHeld[kRd3MaxFB];
+static bool rd3AccelSurfCopyReady(IOSurface *s, unsigned head)
 {
-    if (!s || !RDNA3Accelerator::gAccel || !rd3SVPend(_ZNK9IOSurface12getSurfaceIDEv((void *)s), 2)) return;
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
-    if (!rd3FamLock(a, true)) {
-        if (++gNVSVLockMiss <= 8 || (gNVSVLockMiss & 1023) == 0)
-            ALOG("surfvram scanout: accelerator lock busy, surface %u stays pending (misses %u)",
-                 _ZNK9IOSurface12getSurfaceIDEv((void *)s), gNVSVLockMiss);
-        return;
+    if (!s || !a) return true;
+    const unsigned id = _ZNK9IOSurface12getSurfaceIDEv((void *)s);
+    bool ready = !rd3SVPend(id, 2);
+    if (!ready) {
+        bool locked = false;
+        for (unsigned i = 0; i < 8 && !(locked = rd3FamLock(a, true)); i++) IOSleep(1);
+        if (locked) {
+            void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, (void *)s, 0);
+            OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
+            RD3Resource *res = OSDynamicCast(RD3Resource, ctx);
+            volatile unsigned short *valid = res ? *(unsigned short *volatile *)((volatile unsigned char *)res + 0x30) : nullptr;
+            if (!res || !valid || (valid[0] & 1u)) ready = true;
+            else { bool out = false; res->pageoff(nullptr, true, &out, 0); ready = out || (valid[0] & 1u); }
+            if (ready) rd3SVPend(id, 0);
+            if (cache) ((OSObject *)cache)->release();
+            rd3FamUnlock(a);
+        } else if (++gNVSVLockMiss <= 8 || (gNVSVLockMiss & 1023) == 0) {
+            ALOG("surfvram copy: accelerator lock busy for 8 ms, surface %u stays pending (misses %u)", id, gNVSVLockMiss);
+        }
     }
-    void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, (void *)s, 0);
-    OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
-    RD3Resource *res = OSDynamicCast(RD3Resource, ctx);
-    bool out = false;
-    if (res) res->pageoff(nullptr, true, &out, 0);
-    if (!out) rd3SVPend(_ZNK9IOSurface12getSurfaceIDEv((void *)s), 0);
-    if (cache) ((OSObject *)cache)->release();
-    rd3FamUnlock(a);
+    if (head >= kRd3MaxFB) return true;
+    if (ready) { gIopCopyHeld[head] = 0; return true; }
+    if (++gIopCopyHeld[head] > 4) { gIopCopyHeld[head] = 0; return true; }
+    OSAddAtomic64(1, &gCntIopCopySkip);
+    return false;
 }
 
 static unsigned rd3VaAllocLogged, rd3VaMapLogged;
