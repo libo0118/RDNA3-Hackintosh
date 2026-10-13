@@ -28,6 +28,13 @@
  *              generation, accel/rdna3k_abi.h) and raises IOFramebuffer's
  *              connect-change interrupt.
  *
+ * rdna3hotplug=2 (the NullMoth NVIDIA driver's answer to a monitor switched
+ * to another input and back, their issue #110): a monitor that goes away
+ * keeps its pipe and framebuffer, macOS is not told; when it is back the
+ * same head's link goes down and up again (displayHeadRelight) in the mode
+ * it had. Card run 40: the connect change made macOS move both monitors to
+ * 1920x1080 at 71.9 Hz, and the HDMI one stayed black after the replug.
+ *
  * Polling, not the IH, decides: the DCN HPD interrupt needs MSI (rdna3msi=1)
  * and has not been seen on the card yet; the poll costs five register reads
  * per half second and works from rdna3lvl=2.
@@ -62,7 +69,7 @@ struct RDNA3HotplugState {
     volatile bool   stop;
     uint64_t        lastPoll;                 /* mach absolute time */
     uint32_t        headGen[RD3K_MAX_HEADS];
-    uint32_t        actions, clonesOn, clonesOff, bootReports, noEdid;
+    uint32_t        actions, clonesOn, clonesOff, bootReports, noEdid, relights, relightFails;
     uint32_t        ticks, linkLosses;
     uint8_t         lossFails[4];             /* trainings in a row that failed, per head */
     bool            suspended;                /* stopped for a system sleep */
@@ -331,6 +338,7 @@ void RDNA3Accel::hotplugHandle(uint32_t changed)
         v.clone_pin = fMirrorOn && fMirror ? fMirror->hpd : -1;
         v.mirror = mirror;
         v.can_clone = fMirrorDm != nullptr && !fMirrorOn;   /* one clone at a time */
+        v.relight = rd3_arg("rdna3hotplug", 0) == 2;
         int act = dchpd_decide(&v, pin, on, det == RD_HPD_SINK ? c : nullptr);
         IOLockUnlock(fDispLock);
         if (det == RD_HPD_SINK_NO_EDID)
@@ -354,6 +362,26 @@ void RDNA3Accel::hotplugHandle(uint32_t changed)
             hp->bootReports++;
             setProperty("RDNA3,HotplugBootHead", on ? "connected (pipe as the GOP left it)"
                                                     : "disconnected (pipe kept lit)");
+        } else if (act == RD_HP_BOOT_RELIGHT || act == RD_HP_CLONE_RELIGHT) {
+            /* rdna3hotplug=2: the same head lit again, macOS keeps its
+             * framebuffer and mode (RDNA3Framebuffer sends no connect change) */
+            int head = act == RD_HP_BOOT_RELIGHT ? 0 : fCloneHead;
+            int r = RDNA3_EINVAL;
+            if (head >= 0) {
+                IOLockLock(fDispLock);
+                r = displayHeadRelight((uint32_t)head);
+                IOLockUnlock(fDispLock);
+            }
+            if (r == RDNA3_OK) hp->relights++;
+            else hp->relightFails++;
+            if (act == RD_HP_BOOT_RELIGHT)
+                hp->bootReports++;
+            LOG("hotplug: head %d's monitor is back: link down and up again -> %d", head, r);
+            if (act == RD_HP_BOOT_RELIGHT)
+                setProperty("RDNA3,HotplugBootHead", r == RDNA3_OK ? "connected (link brought up again)"
+                                                                   : "connected (link bring-up FAILED)");
+        } else if (act == RD_HP_CLONE_KEEP) {
+            LOG("hotplug: the second monitor is away: its pipe and framebuffer stay (rdna3hotplug=2)");
         }
         setProperty("RDNA3,HotplugLast", line);
     }
@@ -362,6 +390,8 @@ void RDNA3Accel::hotplugHandle(uint32_t changed)
     setNumber("RDNA3,HotplugClonesLit", hp->clonesOn);
     setNumber("RDNA3,HotplugClonesOff", hp->clonesOff);
     setNumber("RDNA3,HotplugBootReports", hp->bootReports);
+    setNumber("RDNA3,HotplugRelights", hp->relights);
+    setNumber("RDNA3,HotplugRelightFails", hp->relightFails);
     setNumber("RDNA3,HotplugNoEdid", hp->noEdid);
 }
 

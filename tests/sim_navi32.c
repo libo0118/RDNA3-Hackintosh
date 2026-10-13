@@ -12214,7 +12214,7 @@ static void run(const char *fwdir)
          * once, the clone's pin unplugged takes it down, DP sinks wait */
         memset(&c, 0, sizeof(c));
         c.aux = 2; c.hpd = 1; c.edid_len = 256; c.edid_ddc = 1;
-        v.boot_pin = 1; v.clone_pin = -1; v.mirror = 2; v.can_clone = 1;
+        v.boot_pin = 1; v.clone_pin = -1; v.mirror = 2; v.can_clone = 1; v.relight = 0;
         CHECK(dchpd_decide(&v, 1, 0, NULL) == RD_HP_BOOT && dchpd_decide(&v, 1, 1, &c) == RD_HP_BOOT);
         CHECK(dchpd_decide(&v, 2, 1, &c) == RD_HP_CLONE_ON);
         CHECK(dchpd_decide(&v, 2, 0, NULL) == RD_HP_NONE);
@@ -12232,6 +12232,17 @@ static void run(const char *fwdir)
         CHECK(dchpd_decide(&v, 2, 1, &c) == RD_HP_NONE && dchpd_decide(&v, 2, 0, NULL) == RD_HP_CLONE_OFF);
         CHECK(dchpd_decide(&v, 3, 0, NULL) == RD_HP_NONE);
         CHECK(strcmp(dchpd_action_name(RD_HP_CLONE_OFF), "take the second monitor's pipe down") == 0);
+        /* rdna3hotplug=2 (NullMoth 08c5bba): a monitor that goes away keeps
+         * its pipe and framebuffer; when it comes back the same head's link
+         * goes down and up again (a full link bring-up) and macOS is not told */
+        v.relight = 1;
+        CHECK(dchpd_decide(&v, 1, 0, NULL) == RD_HP_BOOT && dchpd_decide(&v, 1, 1, &c) == RD_HP_BOOT_RELIGHT);
+        CHECK(dchpd_decide(&v, 2, 0, NULL) == RD_HP_CLONE_KEEP && dchpd_decide(&v, 2, 1, &c) == RD_HP_CLONE_RELIGHT);
+        CHECK(dchpd_decide(&v, 2, 1, NULL) == RD_HP_NONE);   /* back without a sink found: nothing to light */
+        v.clone_pin = -1;
+        CHECK(dchpd_decide(&v, 2, 1, &c) == RD_HP_CLONE_ON && dchpd_decide(&v, 3, 0, NULL) == RD_HP_NONE);
+        CHECK(strcmp(dchpd_action_name(RD_HP_BOOT_RELIGHT), "boot head: its link brought up again") == 0);
+        v.relight = 0;
         S.hpd_model = 0;
         S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] = 0;
         S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 0)] = HPD0_DC_HPD_INT_STATUS__DC_HPD_SENSE_MASK |
@@ -12646,7 +12657,7 @@ static void run(const char *fwdir)
                 S.now_us += 1000000;
                 dchpd_track_init(&ht, &dev, RD_AUX_ENGINES, RD_HPD_DEBOUNCE);
                 hv.boot_pin = dchpd_head_pin(&dc2.head[0], hp, 2);
-                hv.clone_pin = -1; hv.mirror = 2; hv.can_clone = 1;
+                hv.clone_pin = -1; hv.mirror = 2; hv.can_clone = 1; hv.relight = 0;
                 CHECK(hv.boot_pin == 0);
                 hpd_cable(2, 1);
                 for (k3 = 0; k3 < 4 && !ch; k3++) {
@@ -12679,6 +12690,29 @@ static void run(const char *fwdir)
                 }
                 CHECK(ch == 1u << 0 && dchpd_decide(&hv, 0, ht.state[0], NULL) == RD_HP_BOOT);
                 hpd_cable(0, 1);
+                /* rdna3hotplug=2 (NullMoth 08c5bba): the clone's cable pulled
+                 * keeps its pipe; plugged again, its link goes down and up */
+                hv.relight = 1;
+                hpd_cable(2, 0);
+                for (ch = 0, k3 = 0; k3 < 6 && !(ch & (1u << 2)); k3++) {
+                    sim_msleep(NULL, RD_HPD_POLL_MS);
+                    ch |= dchpd_track_poll(&ht, &dev, NULL);
+                }
+                CHECK((ch & (1u << 2)) && dchpd_decide(&hv, 2, ht.state[2], NULL) == RD_HP_CLONE_KEEP);
+                CHECK(dcn32_read_state(&dev, &dc2) == 2);   /* nothing taken down */
+                hpd_cable(2, 1);
+                for (ch = 0, k3 = 0; k3 < 6 && !(ch & (1u << 2)); k3++) {
+                    sim_msleep(NULL, RD_HPD_POLL_MS);
+                    ch |= dchpd_track_poll(&ht, &dev, NULL);
+                }
+                CHECK((ch & (1u << 2)) && ht.state[2] == 1);
+                S.i2c_sink = 2;
+                CHECK(dchpd_detect(&dev, (uint32_t)dchpd_pin_aux(2, hp, 2), &hc, RD_HPD_EDID_TRIES) == RD_HPD_SINK);
+                S.i2c_sink = -1;
+                CHECK(dchpd_decide(&hv, 2, ht.state[2], &hc) == RD_HP_CLONE_RELIGHT);
+                CHECK(dcn32_clone_link(&dev, &dm, &cl, 0) == RDNA3_OK && dcn32_clone_link(&dev, &dm, &cl, 1) == RDNA3_OK);
+                CHECK(dcn32_read_state(&dev, &dc2) == 2);
+                hv.relight = 0;
                 /* the clone's cable pulled: its pipe goes */
                 hpd_cable(2, 0);
                 for (ch = 0, k3 = 0; k3 < 6 && !(ch & (1u << 2)); k3++) {
@@ -12692,7 +12726,7 @@ static void run(const char *fwdir)
                 S.dmub.nseq = 0;
                 CHECK(dcn32_clone_disable(&dev, &dm, &cl) == RDNA3_OK);
                 CHECK(dcn32_read_state(&dev, &dc2) == 1 && dc2.head[0].pipe == 1);
-                CHECK(ht.state[0] == 1 && ht.events == 4 && ht.generation == 4);
+                CHECK(ht.state[0] == 1 && ht.events == 6 && ht.generation == 6);
                 S.hpd_model = 0;
                 S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] = 0;
                 for (k3 = 0; k3 < 4; k3++)

@@ -197,6 +197,29 @@ void RDNA3Accel::displayLinkUp(uint32_t head)
     LOG("display: head %u link back after the wake (%d)", head, r);
 }
 
+/* rdna3hotplug=2: the monitor of 'head' is back (fDispLock held). Its link
+ * goes down and up again the way the monitor-standby path does it (the
+ * NullMoth driver relights such a head with a full mode set); a head in
+ * standby waits for macOS's unblank (displayLinkUp) */
+int RDNA3Accel::displayHeadRelight(uint32_t head)
+{
+    int r;
+    if (head >= 4)
+        return RDNA3_EINVAL;
+    if (fHeadLinkDown[head])
+        return RDNA3_OK;
+    if (fMirrorOn && fMirror && fMirrorDm && fCloneHead >= 0 && (uint32_t)fCloneHead == head) {
+        r = dcn32_clone_link(fDispDev, fMirrorDm, fMirror, 0);
+        if (r == RDNA3_OK)
+            r = dcn32_clone_link(fDispDev, fMirrorDm, fMirror, 1);
+        return r;
+    }
+    r = displayHeadDpms(head, true);
+    if (r == RDNA3_OK)
+        r = displayHeadDpms(head, false);
+    return r;
+}
+
 /* ------------------------------ restore ------------------------------ */
 
 /* Check every saved head; with 'restore' the lost ones are programmed

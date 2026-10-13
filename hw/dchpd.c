@@ -199,7 +199,15 @@ int dchpd_pin_aux(uint32_t pin, const rdna3_display_path *p, uint32_t n)
 int dchpd_decide(const rdna3_hp_view *v, uint32_t pin, int connected, const rdna3_connector *c)
 {
     if (v->boot_pin >= 0 && (uint32_t)v->boot_pin == pin)
-        return RD_HP_BOOT;
+        return v->relight && connected ? RD_HP_BOOT_RELIGHT : RD_HP_BOOT;
+    /* relight (the NullMoth NVIDIA driver's answer to a monitor switched to
+     * another input and back): the clone's pipe and framebuffer stay while
+     * its monitor is away, and its link comes up again when it is back */
+    if (v->relight && v->clone_pin >= 0 && (uint32_t)v->clone_pin == pin) {
+        if (!connected)
+            return RD_HP_CLONE_KEEP;
+        return c ? RD_HP_CLONE_RELIGHT : RD_HP_NONE;
+    }
     if (!connected)
         return v->clone_pin >= 0 && (uint32_t)v->clone_pin == pin ? RD_HP_CLONE_OFF : RD_HP_NONE;
     /* a TMDS sink with an EDID read over the DDC (HDMI, or DP++ adaptor):
@@ -216,6 +224,9 @@ const char *dchpd_action_name(int action)
     case RD_HP_BOOT:      return "boot head: pipe kept, reported";
     case RD_HP_CLONE_ON:  return "light the second monitor";
     case RD_HP_CLONE_OFF: return "take the second monitor's pipe down";
+    case RD_HP_BOOT_RELIGHT:  return "boot head: its link brought up again";
+    case RD_HP_CLONE_KEEP:    return "second monitor away: its pipe kept";
+    case RD_HP_CLONE_RELIGHT: return "second monitor back: its link brought up again";
     default:              return "nothing to do";
     }
 }

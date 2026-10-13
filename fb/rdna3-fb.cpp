@@ -1278,14 +1278,25 @@ void RDNA3Framebuffer::hotplugPoll(bool first)
     if (!fHpPins || q.generation == fHpGen)
         return;
     fHpGen = q.generation;
-    fConnected = q.connected != 0;
     fHpChanges++;
+    setProperty("RDNA3,HotplugChanges", (unsigned long long)fHpChanges, 32);
+    /* rdna3hotplug=2 (NullMoth 08c5bba): IOGraphics is not told. The
+     * framebuffer and its mode stay for the monitor's return, when the core
+     * brings the same head's link up again; card run 40's connect change
+     * made macOS move both monitors to another mode and the HDMI one stayed
+     * black after the replug */
+    if (rd3_arg("rdna3hotplug", 0) == 2) {
+        FBLOG("head %u: the monitor on HPD%d is %s: framebuffer kept, IOGraphics not told (rdna3hotplug=2)", fHead,
+              q.pin == ~0u ? 0 : (int)q.pin + 1, q.connected ? "back" : "away");
+        setProperty("RDNA3,MonitorAway", q.connected == 0);
+        return;
+    }
+    fConnected = q.connected != 0;
     fEdidAsked = false;
     fEdidTries = 0;
     if (fConnected)
         fetchEdid();
     setProperty("RDNA3,Connected", fConnected);
-    setProperty("RDNA3,HotplugChanges", (unsigned long long)fHpChanges, 32);
     FBLOG("head %u: the monitor on HPD%d is %s: connect change %u to IOGraphics%s", fHead,
           q.pin == ~0u ? 0 : (int)q.pin + 1, fConnected ? "back" : "gone", fHpChanges,
           fConnect.proc ? "" : " (no handler registered)");

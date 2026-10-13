@@ -115,12 +115,16 @@ typedef struct rdna3_hp_view {
     int      clone_pin;     /* the lit clone's HPD pin, -1 no clone lit */
     uint32_t mirror;        /* rdna3mirror: 0 off, 1 mirror, 2 extended */
     int      can_clone;     /* a DMCUB to drive the PHY */
+    int      relight;       /* rdna3hotplug=2: a monitor that left keeps its pipe; back, its link comes up again */
 } rdna3_hp_view;
 enum {
     RD_HP_NONE      = 0,
     RD_HP_BOOT      = 1,    /* the boot head's sink: the pipe stays, report only */
     RD_HP_CLONE_ON  = 2,    /* a TMDS sink on a free connector: light the clone */
     RD_HP_CLONE_OFF = 4,    /* the clone's sink is gone: take the pipe down */
+    RD_HP_BOOT_RELIGHT  = 8,    /* relight: the boot head's sink is back: its link down and up */
+    RD_HP_CLONE_KEEP    = 16,   /* relight: the clone's sink is gone: the pipe stays */
+    RD_HP_CLONE_RELIGHT = 32,   /* relight: the clone's sink is back: its link down and up */
 };
 /* 'c': the connector after dchpd_detect (NULL: not found) */
 int  dchpd_decide(const rdna3_hp_view *v, uint32_t pin, int connected, const rdna3_connector *c);

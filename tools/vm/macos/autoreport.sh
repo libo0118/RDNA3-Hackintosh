@@ -421,10 +421,10 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         # state (RDNA3,HPDState) whenever it changes, the kext's hotplug
         # lines, then a look at what the pipes show
         case " $args " in
-            *" rdna3hotplug=1 "*)
+            *" rdna3hotplug=1 "*|*" rdna3hotplug=2 "*)
                 hpstate() {
                     ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null |
-                        grep -E '"RDNA3,(HPDState|HotplugGeneration|HotplugLast|HotplugClonesLit|HotplugClonesOff|HotplugBootHead|Mirror|ExtendHead)"' |
+                        grep -E '"RDNA3,(HPDState|HotplugGeneration|HotplugLast|HotplugClonesLit|HotplugClonesOff|HotplugBootHead|HotplugRelights|HotplugRelightFails|Mirror|ExtendHead)"' |
                         sed 's/^[ |]*//' | tr '\n' ' '
                 }
                 hdr "hotplug window (120 s): unplug and replug the second monitor now"

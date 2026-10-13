@@ -405,6 +405,7 @@ private:
     void          displayNoteBlank(uint32_t head, bool blank);
     int           displayHeadDpms(uint32_t head, bool blank);
     void          displayLinkUp(uint32_t head);   /* fDispLock held */
+    int           displayHeadRelight(uint32_t head);   /* fDispLock held, rdna3hotplug=2 */
     uint32_t      displayStateRestore(const char *why, bool restore);   /* fDispLock held */
     void          displayWillSleep();
     void          displayDidWake();
