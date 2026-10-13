@@ -166,18 +166,7 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
                 curl -sf --max-time 10 -T /tmp/rdna3-rerun.txt "$HOST/reports/rerun-$(date +%Y%m%d-%H%M%S).txt" >/dev/null 2>&1 &&
                     finish
             fi
-            # installed earlier, but macOS still runs the build approved
-            # before (card run 2026-10-12: the step ran on a framebuffer
-            # older than the core's display ABI, in console mode): tell
-            # the host to stop for 'rdna3vm approve' and stop here
-            if [ -z "$updated" ] && [ -n "$HOST" ]; then
-                stale=$(stale_kexts)
-                if [ -n "$stale" ]; then
-                    echo "$stale" > /tmp/rdna3-approve.txt
-                    curl -sf --max-time 10 -T /tmp/rdna3-approve.txt "$HOST/reports/approve-$(date +%Y%m%d-%H%M%S).txt" >/dev/null 2>&1 &&
-                        finish
-                fi
-            fi ;;
+            ;;
         *)
             if [ -n "$updated" ]; then
                 u=$(stat -f %Su /dev/console 2>/dev/null)
@@ -189,6 +178,23 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
             fi ;;
     esac
 fi
+
+# installed earlier (this block runs whether or not the host offered a new
+# bundle - inside the install branch it never ran once the bundle was in
+# place, card run 40), but macOS still runs a build approved before (card
+# run 37: a framebuffer older than the core's display ABI, console mode):
+# on an automatic boot tell the host to stop for 'rdna3vm approve'
+case " $(nvram boot-args 2>/dev/null | cut -f2-) " in
+    *" rdna3vmauto=1 "*)
+        if [ -z "$updated" ] && [ -n "$HOST" ]; then
+            stale=$(stale_kexts)
+            if [ -n "$stale" ]; then
+                echo "$stale" > /tmp/rdna3-approve.txt
+                curl -sf --max-time 10 -T /tmp/rdna3-approve.txt "$HOST/reports/approve-$(date +%Y%m%d-%H%M%S).txt" >/dev/null 2>&1 &&
+                    finish
+            fi
+        fi ;;
+esac
 
 args=$(nvram boot-args 2>/dev/null | cut -f2-)
 label=$(echo "$args" | tr ' ' '\n' | grep -E '^rdna3(lvl|dmub|msi|fb|accel)=' | tr '=' '-' | tr '\n' '_' | sed 's/_$//')

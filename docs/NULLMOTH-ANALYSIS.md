@@ -106,3 +106,84 @@ The amdgpu code (MIT) and our kext stay MIT regardless of the choice.
    (so we can check it early on RADV under Linux)?
 4. Which IOAccelerator/IOSurface behaviors that WindowServer expects were
    the hardest to reproduce?
+
+## Update 2026-10-13: upstream since our import (`b9a5a2b` → `cd8e2bb`)
+
+`accel/`, `fb/` and `metal/` were imported from `b9a5a2b`; upstream has 217
+commits since. What matters for the open RDNA3 problems (card runs 37-40):
+
+### 1. AppleGraphicsDeviceControl (`kexts/NVRMAGDC`) - we have none
+
+Upstream arms the display in this order (`NVRM.cpp`, auto-go):
+`debug.nvaccelfb=1` → `=4` → `debug.nvrmfb_agdc_k5=1` + `debug.nvrmfb_agdc=1`
+→ `debug.nvaccel_iop=1` (→ zero-copy flip 60 s later). The AGDC object is an
+`AppleGraphicsDeviceControl` subclass attached to the GPU's PCI device that
+answers IOPresentment's vendor queries:
+
+| cmd | answer |
+|---|---|
+| `1` | vendor info: version `0x30000`, vendor name, PCI vendor id, class 2 |
+| `0x980` | GPU capability: port mask, counts, `maxFramebuffers`, the PCI device and the framebuffers by `IOFBDependentIndex` |
+| `0x921` (K5) | `kAGDCLinkConfig` per framebuffer index: the head's timing (pixel clock, h/v active, blanking, sync), 1 link, RGB 8 bpc, port `1 + index` |
+| `0x711` (K5) | extended capability type `0x10` (plane scaler): source and destination limits = the head's raster |
+
+The framebuffer publishes its timing for it (`NVRMTiming`: 13 words, tag
+`0x4b350001`) and `IOFBDependentIndex`.
+
+Our card runs show every display-pipe transaction arriving **without a
+plane** (`debug.rdna3accel_iop_empty` ~1000 per boot, `iop_ok` 0,
+`iop_src_surf` 0): WindowServer never hands a composited surface to the
+pipe, frames reach the panel only through the swap path, gamma arrives as
+plane-less transactions the base class refuses (0xe00002c7), and Metal
+layer presents (M4) are never shown. Upstream gets plane-0 surfaces in
+`performTransaction` once AGDC answers. Plan: an AMD-only AGDC object in
+`RDNA3Accelerator` (or its own kext), fed by a timing property from
+`RDNA3Framebuffer`, armed between `rdna3accelfb=4` and `rdna3acceliop=1`;
+the report records `iop_ok` / `iop_src_surf` / the AGDC counters.
+
+### 2. Accelerator fixes to port (`accel/`)
+
+* `c2af33d`: a copied frame waits until the IOSurface's newest pixels are
+  in system memory (page-off under the family lock, bounded wait) or keeps
+  the previous frame, at most 4 in a row per head. Fixed full-screen
+  flicker on machines whose frames take the copy path ("windows flicker
+  while something moves", card runs 38-39).
+* `79e1c2f`: a pending dirty-surface mark remembers the resource that set
+  it; `Resource::free` drops only its own marks (no stale marks, no device
+  cache read during destruction).
+* `249ef8c`: only head 0 becomes the accelerator's primary framebuffer.
+
+### 3. Framebuffer behaviour to adopt (`fb/`)
+
+* `08c5bba` (issue #110): a known display that is seen disconnected and
+  then connected again is relit with a full mode set of the same head; the
+  framebuffer stays and IOGraphics is not told. Our hotplug sends a connect
+  change instead and the re-created pipe stays black after a replug (run
+  40). Candidate: the same relight as an `rdna3hotplug` mode.
+* `5b0965e`: a display connected after boot gets its own framebuffer by
+  matching the idle display nub again.
+* `7c7b2a4`: only rasters larger than the boot raster are added beyond what
+  macOS proposes (smaller ones made the login window black on a high
+  refresh monitor).
+* `79e1c2f` / `531faec`: display power requests share one gate; a refused
+  wake keeps the sleeping state so the next request retries, and no
+  power-on notification follows a failed wake.
+
+### 4. Metal plugin and translator (`metal/`)
+
+~40 vendor-neutral upstream commits (translator fixes, OpenCL, Blender,
+WebGL in Chromium, the Unity lock-up, surface upload copies, texture
+swizzle, pixel-sampler variants, the surface-writer map lock). The upstream
+diff applies to `metal/` except `NVMTLDevice.m` and `nvmtl_vk.c`, where our
+AMD changes sit; upstream's own vendor switch (`37e7c9d`, RADV for
+`0x1002`) replaces most of them.
+
+### 5. Upstream's own AMD path (`gpu-port/`)
+
+`NMXGPU.kext` runs drm-kmod's amdgpu (display core included) on FreeBSD's
+LinuxKPI over xnu, RADV through libdrm for Darwin, and `NMXAccel` (this
+accelerator built with `-DNMX_ACCEL`) as an app-only Metal device with
+frames copied to the DRM framebuffer. Not loaded on hardware yet, one mode,
+no per-output framebuffers. Our port is further on display, power and
+sleep; their tree is a reference to compare amdgpu behaviour against (for
+example VCN power gating) once it runs.
