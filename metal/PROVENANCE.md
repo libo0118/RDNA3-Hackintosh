@@ -17,3 +17,17 @@ it is built as a separate dynamic library and its source is shipped here.
 The first commit that adds this directory contains the files byte-for-byte
 as upstream; every AMD adaptation is a later, separate commit so the diff
 against upstream stays reviewable (`git log -- metal/`).
+
+## Synced with upstream `cd8e2bb4` (2026-10-13)
+
+The upstream changes to `plugin/` and `translator/` since `b9a5a2b` (about
+40 commits: translator fixes for OpenCL, Blender, CoreImage and stage
+outputs, WebGL in Chromium, the Unity command-buffer lock-up, surface
+upload copies, texture swizzle, the surface-writer map lock, the sandbox
+`sysconf` fallback) applied as one diff. Kept as ours where they meet the
+AMD adaptation: the compile-time vendor (`rdna3mtl_config.h`) instead of
+upstream's run-time NVK/RADV/ANV switch, whose AMD path is an app-only GPU
+beside another one's WindowServer (`nvmtl_vk_vendor` here is fixed to AMD
+and never headless), the NVIDIA video codecs compiled out, no ANGLE
+`disableMetalOnNvidia` override, our allow list.
+

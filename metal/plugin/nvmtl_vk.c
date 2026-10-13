@@ -6,6 +6,9 @@
 
 #include <dlfcn.h>
 #include <mach-o/loader.h>
+#include <mach-o/nlist.h>
+#include <mach/mach.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +62,11 @@ static inline const char *nvmtl_icd_lib_path(void) {
     return nvmtl_pick_vk(RDNA3MTL_ICD_DYLIB, RDNA3MTL_ICD_DYLIB);
 }
 #define NVMTL_ICD_LIB nvmtl_icd_lib_path()
+/* RDNA3MTL: one vendor, and it drives the display (rdna3mtl_config.h). Upstream picks NVK, RADV or ANV at run time and
+ * runs AMD as an app-only GPU next to another one's WindowServer (NMXAccel, headless); here RADV is the GPU WindowServer
+ * composites on, so the vendor is fixed and nothing below treats it as headless. */
+uint16_t nvmtl_vk_set_accelerator(mach_port_t accel) { (void)accel; return 0x1002; }
+uint16_t nvmtl_vk_vendor(void) { return 0x1002; }
 
 static void *g_lib;
 static int g_sample_loader_unwrapped;
@@ -186,6 +194,78 @@ static uint32_t g_dsr_depth_modes, g_dsr_stencil_modes, g_dsr_indep, g_dsr_indep
 static void *nvmtl_rp_shape_variant(nvk_pipeline *p, uint32_t load, uint32_t prm, uint32_t dmode, uint32_t smode);
 #define DECL(f) static PFN_##f p##f;
 static PFN_vkGetInstanceProcAddr pvkGetInstanceProcAddr; static PFN_vkCreateInstance pvkCreateInstance;
+// Chrome's GPU process (and other sandboxed renderers) may not read sysctl hw.memsize, so the driver's
+// sysconf(_SC_PHYS_PAGES) returns -1 there; NVK then fails "Failed to query total system memory", the device never comes
+// up and the app has no Metal device (measured 10-12: Chrome on an RTX 5060 had no WebGL with its GPU sandbox on, and
+// WebGL on the GPU with it off). The kernel's host_info answers the same number through a Mach call sandboxes allow.
+#include "nvmtl_fd_token.h"
+static long nvmtl_sysconf(int name)
+{
+    long v = sysconf(name);
+    if (v > 0 || name != _SC_PHYS_PAGES) return v;
+    static mach_port_t host;
+    if (!host) host = mach_host_self();
+    host_basic_info_data_t hi; mach_msg_type_number_t n = HOST_BASIC_INFO_COUNT;
+    if (host_info(host, HOST_BASIC_INFO, (host_info_t)&hi, &n) != KERN_SUCCESS || !hi.max_mem) return v;
+    long page = getpagesize();
+    return page > 0 ? (long)(hi.max_mem / (uint64_t)page) : v;
+}
+// Point one imported symbol of the image that holds `inside` at `repl` (its lazy and non-lazy pointers). Returns how
+// many pointers were changed. The driver's own dylib only: nothing else in the process is touched.
+static int nvmtl_rebind_import(const void *inside, const char *symbol, void *repl)
+{
+    Dl_info di;
+    if (!dladdr(inside, &di) || !di.dli_fbase) return -1;
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)di.dli_fbase;
+    if (mh->magic != MH_MAGIC_64) return -1;
+    const struct segment_command_64 *text = NULL, *linkedit = NULL;
+    const struct symtab_command *st = NULL; const struct dysymtab_command *dst = NULL;
+    const uint8_t *lc = (const uint8_t *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++, lc += ((const struct load_command *)lc)->cmdsize) {
+        const struct load_command *c = (const struct load_command *)lc;
+        if (c->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg = (const struct segment_command_64 *)c;
+            if (!strcmp(sg->segname, SEG_TEXT)) text = sg;
+            else if (!strcmp(sg->segname, SEG_LINKEDIT)) linkedit = sg;
+        } else if (c->cmd == LC_SYMTAB) st = (const struct symtab_command *)c;
+        else if (c->cmd == LC_DYSYMTAB) dst = (const struct dysymtab_command *)c;
+    }
+    if (!text || !linkedit || !st || !dst || !dst->nindirectsyms) return -1;
+    const intptr_t slide = (intptr_t)mh - (intptr_t)text->vmaddr;
+    const uint8_t *lebase = (const uint8_t *)(slide + linkedit->vmaddr - linkedit->fileoff);
+    const struct nlist_64 *syms = (const struct nlist_64 *)(lebase + st->symoff);
+    const char *strs = (const char *)(lebase + st->stroff);
+    const uint32_t *ind = (const uint32_t *)(lebase + dst->indirectsymoff);
+    int changed = 0;
+    lc = (const uint8_t *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++, lc += ((const struct load_command *)lc)->cmdsize) {
+        const struct load_command *c = (const struct load_command *)lc;
+        if (c->cmd != LC_SEGMENT_64) continue;
+        const struct segment_command_64 *sg = (const struct segment_command_64 *)c;
+        if (strncmp(sg->segname, "__DATA", 6)) continue;
+        const struct section_64 *sec = (const struct section_64 *)(sg + 1);
+        for (uint32_t k = 0; k < sg->nsects; k++, sec++) {
+            const uint32_t type = sec->flags & SECTION_TYPE;
+            if (type != S_LAZY_SYMBOL_POINTERS && type != S_NON_LAZY_SYMBOL_POINTERS) continue;
+            void **slots = (void **)(slide + sec->addr);
+            for (uint64_t e = 0; e < sec->size / sizeof(void *); e++) {
+                if ((uint64_t)sec->reserved1 + e >= dst->nindirectsyms) break;   // a malformed table ends the section
+                const uint32_t si = ind[sec->reserved1 + e];
+                if (si == INDIRECT_SYMBOL_ABS || si == INDIRECT_SYMBOL_LOCAL || (si & INDIRECT_SYMBOL_ABS) || si >= st->nsyms) continue;
+                if (syms[si].n_un.n_strx >= st->strsize) continue;
+                if (strcmp(strs + syms[si].n_un.n_strx, symbol)) continue;
+                vm_address_t page = (vm_address_t)&slots[e] & ~(vm_address_t)(getpagesize() - 1);
+                // __DATA_CONST is read-only after binding: open the one page, write, close it again
+                if (vm_protect(mach_task_self(), page, getpagesize(), 0, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS) continue;
+                slots[e] = repl;
+                if (!strcmp(sg->segname, "__DATA_CONST")) vm_protect(mach_task_self(), page, getpagesize(), 0, VM_PROT_READ);
+                changed++;
+            }
+        }
+    }
+    return changed;
+}
+
 INSTANCE_FNS(DECL) DEVICE_FNS(DECL)
 #undef DECL
 #define LOAD_I(f) do { p##f = (PFN_##f)pvkGetInstanceProcAddr(g_inst, #f); if (!p##f) { nvlog("vk: missing %s", #f); return -1; } } while (0);
@@ -575,6 +655,10 @@ static int nvmtl_vk_initialize(void)
         if (pvkGetInstanceProcAddr) {
             char vid[1200];
             nvlog("vk: driver opened directly: %s (image %s)", NVMTL_ICD_LIB, nvmtl_image_ident((const void *)pvkGetInstanceProcAddr, vid, sizeof vid));
+            { int rb = nvmtl_rebind_import((const void *)pvkGetInstanceProcAddr, "_sysconf", (void *)nvmtl_sysconf);
+              if (rb <= 0) nvlog("vk: memory-size fallback missing: _sysconf not rebound in %s (%d) -- sandboxed apps may have no device", NVMTL_ICD_LIB, rb); }
+            if (nvmtl_vk_vendor() == 0x10de) { int rb = nvmtl_rebind_import((const void *)pvkGetInstanceProcAddr, "_open", (void *)nvmtl_icd_open);
+              if (rb <= 0) nvlog("vk: owned handle fallback missing: _open not rebound in %s (%d)", NVMTL_ICD_LIB, rb); }
             pnvk_stage_import = (void (*)(const nvmtl_vram_rec *))dlsym(g_lib, "nvmtl_nvk_stage_import");
             pnvk_surface_dirty = (uint32_t (*)(VkDevice, uint32_t, uint32_t))dlsym(g_lib, "nvmtl_nvk_surface_dirty");
             pnvk_sample_depth_contract = (VkResult (*)(VkDevice, uint32_t *, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_contract_v1");
@@ -703,6 +787,7 @@ static int nvmtl_vk_initialize(void)
         v12.vulkanMemoryModelDeviceScope = q12.vulkanMemoryModelDeviceScope;
         v11.storageBuffer16BitAccess = q11.storageBuffer16BitAccess;
         v11.uniformAndStorageBuffer16BitAccess = q11.uniformAndStorageBuffer16BitAccess;
+        v11.shaderDrawParameters = q11.shaderDrawParameters;  /* [[base_vertex]] / [[base_instance]] (Blender 4.2) */
         g_float16 = q12.shaderFloat16 == VK_TRUE;
         g_vulkan_memory_model = q12.vulkanMemoryModel == VK_TRUE;
         g_vulkan_memory_device_scope = q12.vulkanMemoryModelDeviceScope == VK_TRUE;
@@ -1683,12 +1768,25 @@ static int nvmtl_vk_image_create_typed_lifetime_body(uint32_t w, uint32_t h, uin
 
     return 0;
 }
+#include <sys/sysctl.h>
+/* A GPU with no display of its own (laptops whose screen is on the Intel or AMD GPU; the kernel sets
+   debug.nvaccel_headless) hands frames to that GPU's WindowServer, which reads an IOSurface from system memory and
+   cannot page our VRAM copy off. Apple's two-GPU Macs copy the discrete GPU's frames the same way. So on such a GPU,
+   IOSurface textures are private per process and copied out after every GPU write. */
+static int nvmtl_gpu_headless(void)
+{
+    static int h = -1;
+    /* (upstream: every AMD/Intel GPU is app-only there; RDNA3MTL's AMD GPU owns the display, see nvmtl_vk_vendor) */
+    if (h < 0) { int v = 0; size_t n = sizeof v; h = sysctlbyname("debug.nvaccel_headless", &v, &n, NULL, 0) == 0 && v;
+                 if (h) nvlog("headless GPU: the display belongs to another GPU - IOSurfaces are copied out to system memory"); }
+    return h;
+}
 int nvmtl_vk_surface_share_on(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("NVMTL_NO_SURFACE_SHARE");
-        on = pnvk_stage_import && g_extfd && g_linmod && !(e && e[0] == '1');
+        on = pnvk_stage_import && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
         nvlog("item 7: IOSurface textures %s (NVK import %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s)",
               on ? "live in the surface's family VRAM (one per surface, every process)" : "private per process (copies)",
               pnvk_stage_import ? "present" : "ABSENT", g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset");
@@ -1700,7 +1798,7 @@ int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("NVMTL_NO_SURFACE_PAGEOFF");
-        on = pnvk_surface_dirty && !(e && e[0] == '1');
+        on = pnvk_surface_dirty && !(e && e[0] == '1') && !nvmtl_gpu_headless();
         nvlog("after a GPU write, IOSurface VRAM is %s (NVK dirty export %s, NVMTL_NO_SURFACE_PAGEOFF=%s)",
               on ? "marked newest; a CPU lock / the display pipe pages it off (Apple's page-off)" : "copied out eagerly (old)",
               pnvk_surface_dirty ? "present" : "ABSENT", e ?: "unset");
@@ -2718,7 +2816,10 @@ int nvmtl_vk_bind_sampler(nvk_cmdbuf *c, uint32_t set, uint32_t index, nvk_sampl
 int nvmtl_vk_sample_positions_backend(void) { return nvmtl_vk_init() == 0 && g_sample_locations; }
 int nvmtl_vk_sample_positions_default(uint32_t count, nvmtl_sample_pattern *out)
 {
-    if (!nvmtl_vk_sample_positions_backend() || !(g_sample_props.sampleLocationSampleCounts & count)) return -1;
+    /* Without the programmable-position backend the hardware still draws the standard pattern, which is Metal's default.
+       Apps read these positions and pass them back to setSamplePositions; returning nothing left their array
+       uninitialised, the pass then failed validation and drew nothing (Chess). */
+    if (nvmtl_vk_sample_positions_backend() && !(g_sample_props.sampleLocationSampleCounts & count)) return -1;
     return nvmtl_sample_default(count, out);
 }
 static VkSampleLocationsInfoEXT nvmtl_sample_info(const nvmtl_sample_pattern *p, VkSampleLocationEXT vk[8])
@@ -3849,6 +3950,7 @@ int nvmtl_vk_cmd_dispatch_sass(nvk_cmdbuf *c,
     uint32_t grid[3];
 
     if (!c || !c->cb || !sass || !sass_len) return -1;
+    if (nvmtl_vk_vendor() != 0x10de) return -3;     /* NVIDIA machine code: the caller dispatches the SPIR-V instead */
     if (nparams > 16) { nvlog("sass dispatch: %u parameters is more than 16 — REFUSED", nparams); return -2; }
 
     if (!looked) {
@@ -3922,9 +4024,28 @@ void nvmtl_vk_cmd_dispatch_threads(nvk_cmdbuf *c, nvk_pipeline *p, const uint32_
         if (!vp) { c->skipped++; continue; }
         pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, vp);
         if (!bound) { pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, g_dyn_zero); bound = 1; }
-        uint32_t pc[12] = { threads[0], threads[1], threads[2], tbase[0], tbase[1], tbase[2], gbase[0], gbase[1], gbase[2], groups[0], groups[1], groups[2] };
-        pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
-        pvkCmdDispatch(c->cb, gc[0], gc[1], gc[2]);
+        // Metal allows any group count per axis; Vulkan caps it (NVK: 0x7fffffff x 65535 x 65535, the width of the QMD
+        // grid fields). Geekbench's OpenCL Face Detection dispatched past 65535 on y and NAK's nak_fill_qmd aborted the
+        // process. Split into chunks and advance thread_base/threadgroup_base, which the translated kernel adds to
+        // GlobalInvocationId/WorkgroupId, so every chunk sees the positions of the whole grid.
+        uint32_t cap[3];
+        for (int d = 0; d < 3; d++) cap[d] = g_lim.maxComputeWorkGroupCount[d] ? g_lim.maxComputeWorkGroupCount[d] : 65535;
+        if ((gc[0] > cap[0] || gc[1] > cap[1] || gc[2] > cap[2])) {
+            static int said;
+            if (!said++) nvlog("vk: dispatch of %ux%ux%u groups exceeds the device's %ux%ux%u — split into chunks",
+                               gc[0], gc[1], gc[2], cap[0], cap[1], cap[2]);
+        }
+        for (uint32_t z = 0; z < gc[2]; z += cap[2])
+        for (uint32_t y = 0; y < gc[1]; y += cap[1])
+        for (uint32_t x = 0; x < gc[0]; x += cap[0]) {
+            uint32_t off[3] = { x, y, z }, n[3];
+            for (int d = 0; d < 3; d++) n[d] = gc[d] - off[d] < cap[d] ? gc[d] - off[d] : cap[d];
+            uint32_t pc[12] = { threads[0], threads[1], threads[2],
+                                tbase[0] + off[0] * local[0], tbase[1] + off[1] * local[1], tbase[2] + off[2] * local[2],
+                                gbase[0] + off[0], gbase[1] + off[1], gbase[2] + off[2], groups[0], groups[1], groups[2] };
+            pvkCmdPushConstants(c->cb, (VkPipelineLayout)p->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, NVMTL_DISPATCH_PC_BYTES, pc);
+            pvkCmdDispatch(c->cb, n[0], n[1], n[2]);
+        }
     }
 }
 void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off, const uint32_t tgIn[3])
@@ -3953,6 +4074,14 @@ void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t
     if (!s[0] || !s[1]) { c->nobind = 1; return; }
     c->nobind = 0;
     pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipelineLayout)p->layout, 0, g_heapSet ? 3 : 2, s, nvmtl_table_ubo() ? 2 : 0, g_dyn_zero);
+    // This path reads WorkgroupId raw (no base push constants), so it cannot be chunked. Past the device's group
+    // count NAK aborts the whole app inside nak_fill_qmd; refuse the one dispatch loudly instead.
+    if ((g_lim.maxComputeWorkGroupCount[1] && gy > g_lim.maxComputeWorkGroupCount[1]) ||
+        (g_lim.maxComputeWorkGroupCount[2] && gz > g_lim.maxComputeWorkGroupCount[2]) ||
+        (g_lim.maxComputeWorkGroupCount[0] && gx > g_lim.maxComputeWorkGroupCount[0])) {
+        nvlog("vk: raw dispatch of %ux%ux%u groups exceeds the device limit — SKIPPED", gx, gy, gz);
+        c->skipped++; return;
+    }
     pvkCmdDispatch(c->cb, gx, gy, gz);
 }
 
@@ -4174,8 +4303,17 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
     if (!nvmtl_sample_pattern_valid(&pattern) || pattern.count != (p->samples > 1 ? p->samples : 1)) {
         nvlog("sample positions: count/pattern incompatible with render pipeline"); return -1;
     }
-    if (ps->sample_pattern.count && !g_sample_locations) { nvlog("sample positions: backend unavailable"); return -1; }
     if (nvmtl_sample_pattern_quantize(&pattern, &pattern)) return -1;
+    if (ps->sample_pattern.count && !g_sample_locations) {
+        /* No programmable-position backend: the pass draws at the standard positions. A pass asking for exactly those
+           (what getDefaultSamplePositions returns) is plain MSAA. Any other pattern is drawn at the standard positions
+           too, said once, instead of refusing the pass: refusing it left Chess's 4x MSAA passes black. */
+        nvmtl_sample_pattern std;
+        int same = !nvmtl_sample_default(pattern.count, &std) && !nvmtl_sample_pattern_quantize(&std, &std) &&
+                   !memcmp(std.position, pattern.position, pattern.count * sizeof pattern.position[0]);
+        static int said;
+        if (!same && said++ < 4) nvlog("sample positions: backend unavailable; custom %u-sample pattern drawn at the standard positions", pattern.count);
+    }
     uint32_t cf[NVMTL_NCOL], rmask, ncol = nvmtl_rt_shape(p, cf, &rmask);
     for (uint32_t i = 0; i < ncol; i++) {
         if (!cf[i]) continue;
@@ -4185,7 +4323,10 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
             if (img->samples != p->samples) { nvlog("begin_render: pipeline has %u samples but the colour target has %u — pass REFUSED", p->samples, img->samples); return -1; }
             if ((rmask & (1u << i)) && resolve && (resolve->samples > 1 || ps->resw[i] != ps->colw[i] || ps->resh[i] != ps->colh[i])) { nvlog("begin_render: resolve texture must be 1-sample and the same size — pass REFUSED"); return -1; }
         } else if (img->samples > 1) { nvlog("begin_render: a 1-sample pipeline on a %u-sample target — pass REFUSED", img->samples); return -1; }
-        if ((ps->colfmt[i] ? ps->colfmt[i] : img->fmt) != cf[i]) { static int said; if (said++ < 4) nvlog("begin_render: apps2 colour %u: the pipeline's format %u draws into a format-%u image (census: the image format; a format-view texture attaches in its view format since gl3)", i, cf[i], img->fmt); }
+        // The render pass is built in the pipeline's format and the attachment view is in the texture's: Vulkan's render
+        // pass begin asserts they are equal, and that assert aborted the app (1.13 crash report, iOS Simulator). WAS a
+        // census line only. The pass is refused instead, like the sample-count mismatches above.
+        if ((ps->colfmt[i] ? ps->colfmt[i] : img->fmt) != cf[i]) { static int said; if (said++ < 4) nvlog("begin_render: colour %u: the pipeline's format %u draws into a format-%u attachment - pass REFUSED", i, cf[i], ps->colfmt[i] ? ps->colfmt[i] : img->fmt); return -1; }
     }
     if (p->has_depth && !ps->dsview) { nvlog("begin_render: pipeline has a depth attachment but the encoder has no depth texture — pass REFUSED"); return -1; }
     if (p->has_depth && ps->ds) {
@@ -4643,7 +4784,14 @@ int nvmtl_vk_cmd_empty_pass(nvk_cmdbuf *c, const nvk_pass *ps)
 int nvmtl_vk_cmd_begin_render(nvk_cmdbuf *c, nvk_image *img, nvk_pipeline *p, const float clear[4])
 { return nvmtl_vk_cmd_begin_render_ex(c, img, p, clear, 0); }
 void nvmtl_vk_cmd_set_viewport(nvk_cmdbuf *c, float x, float y, float w, float h, float zn, float zf)
-{ VkViewport vp = { x, y + h, w, -h, zn, zf }; pvkCmdSetViewport(c->cb, 0, 1, &vp); }
+{
+    /* Vulkan requires minDepth/maxDepth in [0,1] and NVK asserts it (nvk_emit_viewport "0.0 <= zmin && zmin <= 1.0");
+       Apple GPUs take any value. 1.10 crash reports (10-11, RTX 4060): mediaanalysisd's Live Text draw aborted there on
+       every run. The !(>=) form also sends NaN to Metal's defaults, 0 and 1. */
+    if (!(zn >= 0.0f)) zn = 0.0f; else if (zn > 1.0f) zn = 1.0f;
+    if (!(zf >= 0.0f)) zf = isnan(zf) ? 1.0f : 0.0f; else if (zf > 1.0f) zf = 1.0f;
+    VkViewport vp = { x, y + h, w, -h, zn, zf }; pvkCmdSetViewport(c->cb, 0, 1, &vp);
+}
 static void nvmtl_vk_zero_dummies(void)
 {
     static int done;
@@ -4751,9 +4899,20 @@ void nvmtl_vk_cmd_set_cull(nvk_cmdbuf *c, int mode)
     pvkCmdSetCullMode(c->cb, m == 1 ? VK_CULL_MODE_FRONT_BIT : m == 2 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
     pvkCmdSetFrontFace(c->cb, (mode & 4) ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
 }
+// An index offset at or past the end of the index buffer: Vulkan's whole-size bind then underflows to a range over
+// 4 GB and NVK's assert aborted the app (1.13 crash report, a video app drawing through OpenGL). Metal treats such a draw
+// as invalid; it is skipped here and logged once.
+static int nvmtl_index_range_ok(const nvk_buffer *idx, size_t offset)
+{
+    if (idx && idx->buf && offset < idx->size && idx->size - offset <= 0xffffffffull) return 1;
+    static int told; if (!told++) nvlog("draw: index offset %zu outside its %llu-byte buffer - draw skipped", offset,
+                                        (unsigned long long)(idx ? idx->size : 0));
+    return 0;
+}
 void nvmtl_vk_cmd_draw_indexed(nvk_cmdbuf *c, nvk_buffer *idx, size_t offset, uint32_t count, int is32,
                                uint32_t instances, int32_t baseVertex, uint32_t baseInstance)
 {
+    if (!nvmtl_index_range_ok(idx, offset)) return;
     pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, offset, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (c->nobind) return;
     pvkCmdDrawIndexed(c->cb, count, instances ? instances : 1, 0, baseVertex, baseInstance);
@@ -5370,31 +5529,107 @@ void nvmtl_vk_queue_destroy(nvk_queue *q)
 
 size_t nvmtl_vk_allocated_bytes(void) { return g_alloc_bytes; }
 
+/* One reusable staging buffer per thread for surface uploads, instead of a new one per upload (community patch #96).
+ * The upload itself stays synchronous: #96 also deferred the fence wait to overlap uploads, but
+ * nvmtl_vk_image_destroy() frees an image and its memory at once, so an app that uploads a surface and frees it
+ * (IOSurface-backed textures do) would leave the GPU copying into freed memory. A thread keeps at most
+ * NVMTL_UPSTAGE_KEEP bytes between uploads (a 4K BGRA frame); a larger one-off upload frees its buffer afterwards. */
+#define NVMTL_UPSTAGE_KEEP (32u << 20)
+typedef struct { nvk_buffer buf; nvk_cmdbuf cb; } nvmtl_upstage;
+static pthread_key_t g_upstage_key; static pthread_once_t g_upstage_once = PTHREAD_ONCE_INIT;
+static void nvmtl_upstage_free(void *p)
+{
+    nvmtl_upstage *st = p;
+    if (!st) return;
+    if (st->buf.buf) nvmtl_vk_buffer_destroy(&st->buf);
+    free(st);
+}
+static void nvmtl_upstage_key_make(void)
+{
+    if (pthread_key_create(&g_upstage_key, nvmtl_upstage_free)) nvlog("stage: pthread_key_create FAILED");
+}
+static nvmtl_upstage *nvmtl_upstage_get(size_t size)
+{
+    pthread_once(&g_upstage_once, nvmtl_upstage_key_make);
+    nvmtl_upstage *st = pthread_getspecific(g_upstage_key);
+    if (!st) {
+        st = calloc(1, sizeof *st);
+        if (!st) return NULL;
+        if (pthread_setspecific(g_upstage_key, st)) { free(st); return NULL; }
+    }
+    if (!st->buf.buf || st->buf.size < size) {
+        if (st->buf.buf) nvmtl_vk_buffer_destroy(&st->buf);
+        memset(&st->buf, 0, sizeof st->buf);
+        if (nvmtl_vk_buffer_create(size, 1, &st->buf)) { memset(&st->buf, 0, sizeof st->buf); return NULL; }
+    }
+    return st;
+}
+
+// Streaming loads avoid serial PCIe reads from write-combining IOSurface pages.
+// Ordinary memory, unaligned sources, short rows, and other CPUs retain memcpy.
+#if defined(__x86_64__)
+#include <immintrin.h>
+__attribute__((target("sse4.1")))
+static void nvmtl_copy_surface_stream(void *dst, const void *src, size_t n)
+{
+    const __m128i *s = (const __m128i *)src;
+    char *d = (char *)dst;
+    const size_t blocks = n / 64;
+    _mm_mfence();
+    for (size_t i = 0; i < blocks; i++, s += 4, d += 64) {
+        const __m128i a = _mm_stream_load_si128((__m128i *)s);
+        const __m128i b = _mm_stream_load_si128((__m128i *)s + 1);
+        const __m128i c = _mm_stream_load_si128((__m128i *)s + 2);
+        const __m128i e = _mm_stream_load_si128((__m128i *)s + 3);
+        _mm_storeu_si128((__m128i *)d, a);
+        _mm_storeu_si128((__m128i *)(d + 16), b);
+        _mm_storeu_si128((__m128i *)(d + 32), c);
+        _mm_storeu_si128((__m128i *)(d + 48), e);
+    }
+    _mm_mfence();
+    memcpy(d, s, n - blocks * 64);
+}
+#endif
+static void nvmtl_copy_from_surface(void *dst, const void *src, size_t n)
+{
+#if defined(__x86_64__)
+    if (n >= 4096 && !((uintptr_t)src & 15) && __builtin_cpu_supports("sse4.1")) {
+        nvmtl_copy_surface_stream(dst, src, n); return;
+    }
+#endif
+    memcpy(dst, src, n);
+}
+
 int nvmtl_vk_image_write(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes)
 {
     const size_t bpp = img->bpp ? img->bpp : 4;
     const uint32_t cols = nvmtl_blocks(img->w, img->bw), rows = nvmtl_blocks(img->h, img->bh);
     if (row_bytes < (size_t)cols * bpp) { nvlog("image_write: bytesPerRow %zu < %u blocks * %zu B", row_bytes, cols, bpp); return -1; }
-    nvk_buffer stage;
-    if (nvmtl_vk_stage(q, (size_t)cols * rows * bpp, &stage)) return -1;
-    uint8_t *dst = (uint8_t *)stage.map;
-    for (uint32_t y = 0; y < rows; y++)
-        memcpy(dst + (size_t)y * cols * bpp, (const uint8_t *)src + (size_t)y * row_bytes, (size_t)cols * bpp);
-    nvk_cmdbuf c; if (nvmtl_vk_cmd_begin(q, &c)) return -1;
+    const size_t tight = (size_t)cols * bpp;
+    nvmtl_upstage *sl = nvmtl_upstage_get(tight * (size_t)rows);
+    if (!sl) return -1;
+    uint8_t *dst = (uint8_t *)sl->buf.map;
+    if (row_bytes == tight) nvmtl_copy_from_surface(dst, src, tight * (size_t)rows);   /* a 4K surface is 2160 rows of 15 KB: one pass, not 2160 calls */
+    else for (uint32_t y = 0; y < rows; y++)
+        nvmtl_copy_from_surface(dst + (size_t)y * tight, (const uint8_t *)src + (size_t)y * row_bytes, tight);
+    nvk_cmdbuf *const c = &sl->cb;
+    if (nvmtl_vk_cmd_begin(q, c)) return -1;
     VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
     VkImageMemoryBarrier toDst = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
-    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &toDst);
     VkBufferImageCopy bic = { 0, 0, 0, { nvmtl_copy_aspect(img), 0, 0, 1 }, { 0, 0, 0 }, { img->w, img->h, 1 } };
-    pvkCmdCopyBufferToImage(c.cb, (VkBuffer)stage.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    pvkCmdCopyBufferToImage(c->cb, (VkBuffer)sl->buf.buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
     VkImageMemoryBarrier toRead = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
-    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &toRead);
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &toRead);
     img->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    return nvmtl_vk_submit_wait(&c);
+    const int rc = nvmtl_vk_submit_wait_at(c, "surface upload");
+    if (sl->buf.size > NVMTL_UPSTAGE_KEEP) { nvmtl_vk_buffer_destroy(&sl->buf); memset(&sl->buf, 0, sizeof sl->buf); }
+    return rc;
 }
 
 int nvmtl_vk_copy_buffer(nvk_queue *q, nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size)
@@ -5417,6 +5652,17 @@ int nvmtl_vk_image_read(nvk_queue *q, nvk_image *img, void *dst, size_t row_byte
     nvk_buffer stage;
     if (nvmtl_vk_stage(q, (size_t)cols * rows * bpp, &stage)) return -1;
     nvk_cmdbuf c; if (nvmtl_vk_cmd_begin(q, &c)) return -1;
+    // SurfaceOut also reads images last used as sampled/storage images or blit
+    // destinations. A completed fence does not change their image layout or
+    // provide the transfer-read dependency. Transition the copied subresource.
+    VkImageSubresourceRange range = { nvmtl_barrier_aspect(img), 0, 1, 0, 1 };
+    VkImageMemoryBarrier toSrc = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+        VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+        (VkImageLayout)img->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img, range };
+    pvkCmdPipelineBarrier(c.cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, NULL, 0, NULL, 1, &toSrc);
+    img->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     VkBufferImageCopy bic = { 0, 0, 0, { nvmtl_copy_aspect(img), 0, 0, 1 }, { 0, 0, 0 }, { img->w, img->h, 1 } };
     pvkCmdCopyImageToBuffer(c.cb, img->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, stage.buf, 1, &bic);
     if (nvmtl_vk_submit_wait(&c)) return -1;
@@ -5585,6 +5831,7 @@ int nvmtl_vk_cmd_draw_patches(nvk_cmdbuf *c, const nvk_pipeline *p, uint64_t fac
 }
 void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t idxOff, int is32, nvk_buffer *b, size_t off)
 {
+    if (!nvmtl_index_range_ok(idx, idxOff)) return;
     pvkCmdBindIndexBuffer(c->cb, (VkBuffer)idx->buf, idxOff, is32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (c->nobind) return;
     pvkCmdDrawIndexedIndirect(c->cb, (VkBuffer)b->buf, off, 1, 0);
@@ -6831,9 +7078,15 @@ int nvmtl_vk_image_size_align(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t m
     return rc;
 }
 
-int nvmtl_vk_cmd_copy_image_sub(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
-                                nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h)
+/* Texture-to-texture copy with a depth range. A 3D image keeps its depth in ->layers; a Metal copy into or out of a 3D texture names
+   the plane with origin.z and the plane count with size.depth (slice must be 0). WAS: z and depth were dropped, so every plane of a
+   3D destination landed on plane 0 (Factorio builds its night colour-grading LUT, a 16x16x16 3D texture, from sixteen 16x16 copies). */
+int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy, uint32_t sz,
+                                 nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t dz,
+                                 uint32_t w, uint32_t h, uint32_t depth)
 {
+    if (!depth) depth = 1;
+    const int s3 = src && src->mtl_type == 7, d3 = dst && dst->mtl_type == 7;
     if (!c || !src || !dst || !w || !h || src->fmt != dst->fmt
         || (src->samples ? src->samples : 1) != (dst->samples ? dst->samples : 1)
         || ss >= (src->layers ? src->layers : 1) || ds >= (dst->layers ? dst->layers : 1)
@@ -6848,14 +7101,24 @@ int nvmtl_vk_cmd_copy_image_sub(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint
         nvlog("copy_image_sub: region outside selected mip extent");
         return -1;
     }
+    {   /* planes: a 3D image has nvmtl_lvl(layers, level) of them; a 2D image only plane 0 */
+        const uint32_t sd = s3 ? nvmtl_lvl(src->layers ? src->layers : 1, sl) : 1u, dd = d3 ? nvmtl_lvl(dst->layers ? dst->layers : 1, dl) : 1u;
+        if ((s3 ? (sz > sd || depth > sd - sz) : (sz != 0 || (!d3 && depth != 1)))
+            || (d3 ? (dz > dd || depth > dd - dz) : (dz != 0 || (!s3 && depth != 1)))) {
+            nvlog("copy_image_sub: depth range z %u/%u +%u is outside the 3D extent (%u / %u planes)", sz, dz, depth, sd, dd);
+            return -1;
+        }
+    }
 
     const VkImageAspectFlags aspects = nvmtl_barrier_aspect(src);
     VkImageCopy regions[2]; uint32_t count = 0;
     for (VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
          aspect <= VK_IMAGE_ASPECT_STENCIL_BIT; aspect <<= 1) {
         if (!(aspects & aspect)) continue;
-        regions[count++] = (VkImageCopy){ { aspect, sl, ss, 1 }, { (int32_t)sx, (int32_t)sy, 0 },
-                                         { aspect, dl, ds, 1 }, { (int32_t)dx, (int32_t)dy, 0 }, { w, h, 1 } };
+        /* Vulkan: a 3D image uses base layer 0 / layer count 1 and offset.z; a 2D side of a 2D<->3D copy carries the plane count as its layerCount */
+        regions[count++] = (VkImageCopy){ { aspect, sl, s3 ? 0u : ss, s3 ? 1u : (d3 ? depth : 1u) }, { (int32_t)sx, (int32_t)sy, s3 ? (int32_t)sz : 0 },
+                                         { aspect, dl, d3 ? 0u : ds, d3 ? 1u : (s3 ? depth : 1u) }, { (int32_t)dx, (int32_t)dy, d3 ? (int32_t)dz : 0 },
+                                         { w, h, depth } };
     }
     nvmtl_vk_cmd_barrier(c);
     img_to(c, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
@@ -6868,6 +7131,11 @@ int nvmtl_vk_cmd_copy_image_sub(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint
            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     nvmtl_vk_cmd_barrier(c);
     return 0;
+}
+int nvmtl_vk_cmd_copy_image_sub(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uint32_t ss, uint32_t sx, uint32_t sy,
+                                nvk_image *dst, uint32_t dl, uint32_t ds, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h)
+{
+    return nvmtl_vk_cmd_copy_image_sub3(c, src, sl, ss, sx, sy, 0, dst, dl, ds, dx, dy, 0, w, h, 1);
 }
 int nvmtl_vk_image_view_create_range(nvk_image *img, uint32_t vkfmt, int a8, uint32_t baseLevel, uint32_t levelCount,
                                      uint32_t baseLayer, uint32_t layerCount, uint32_t mtl_view_type, void **out_view)

@@ -336,13 +336,35 @@ fn function_type_capabilities(
 }
 
 impl LlModule {
+    /// Inlines leaf helpers until none is left. A helper that calls other helpers (Geekbench 6's OpenCL compare_intensity
+    /// calls the cos/sin/round wrappers) only becomes a leaf once those are spliced into it, and one pass never came
+    /// back for it: the call stayed, and a descriptor-backed pointer argument cannot cross a call, so the kernel failed
+    /// to translate ("byte cursor cannot cross the call", Feature Matching). Bounded: a call graph is at most this deep
+    /// before a round splices nothing.
     pub(in crate::native) fn inline_ordinary_leaf_helpers(&mut self) -> TypedInlineStats {
+        const MAX_ROUNDS: usize = 8;
+        let mut total = TypedInlineStats::default();
+        let mut site = 0usize;
+        for _ in 0..MAX_ROUNDS {
+            let (stats, next_site) = self.inline_ordinary_leaf_round(site);
+            site = next_site;
+            total.splices += stats.splices;
+            total.helper_instances += stats.helper_instances;
+            if stats.splices == 0 {
+                break;
+            }
+        }
+        total
+    }
+
+    /// One round; `first_site` continues the previous round's numbering so spliced locals never share a name.
+    fn inline_ordinary_leaf_round(&mut self, first_site: usize) -> (TypedInlineStats, usize) {
         let Some(entry_name) = self
             .entry_name
             .clone()
             .or_else(|| self.functions.first().map(|function| function.name.clone()))
         else {
-            return TypedInlineStats::default();
+            return (TypedInlineStats::default(), first_site);
         };
         let bodied_functions = self
             .functions
@@ -377,7 +399,7 @@ impl LlModule {
             })
             .collect::<HashMap<_, _>>();
         if helpers.is_empty() {
-            return TypedInlineStats::default();
+            return (TypedInlineStats::default(), first_site);
         }
         let source_pointees = self.ptr_pointees.clone();
         let mut source_value_pointees = source_pointees.clone();
@@ -400,7 +422,7 @@ impl LlModule {
         let mut cloned_pointer_loads = Vec::new();
         let mut processed_helpers = HashSet::new();
         let mut stats = TypedInlineStats::default();
-        let mut site = 0usize;
+        let mut site = first_site;
         for function_index in 0..self.functions.len() {
             let caller_name = self.functions[function_index].name.clone();
             if !reachable.contains(&caller_name) {
@@ -480,9 +502,27 @@ impl LlModule {
 
                     let mut local_rename = HashMap::new();
                     let mut parameter_bindings = Vec::with_capacity(arguments.len());
-                    for (index, ((parameter, _), argument)) in
+                    for (index, ((parameter, parameter_type), argument)) in
                         helper.params.iter().zip(arguments).enumerate()
                     {
+                        // A pointer passed as a plain caller local IS that local: use its name. Through a proxy the
+                        // emitter lost what it knows about a kernel buffer's struct layout, so an i64 load across two
+                        // i32 fields translated in the entry and failed in a one-block helper ("reinterpret load bit
+                        // width mismatch Int(32) vs Int(64)").
+                        // Only for a kernel buffer of structs the metadata describes; any other pointer keeps its
+                        // proxy (a pointer-chasing buffer relies on it: the loop-carried device address case).
+                        if let (LlType::Ptr(_), LlValue::Local(argument_name)) = (parameter_type, &argument.value) {
+                            let key = (caller_name.clone(), argument_name.clone());
+                            if source_data_buffers.contains(&key)
+                                && matches!(
+                                    source_value_pointees.get(&key),
+                                    Some(LlType::Struct(_)) | Some(LlType::Named(_))
+                                )
+                            {
+                                local_rename.insert(parameter.clone(), argument_name.clone());
+                                continue;
+                            }
+                        }
                         let proxy = format!(
                             "%metal2vulkan.helper.{}.{}.param.{index}",
                             helper.ordinal, site
@@ -618,6 +658,6 @@ impl LlModule {
         }
         self.functions
             .retain(|function| remaining_reachable.contains(&function.name));
-        stats
+        (stats, site)
     }
 }

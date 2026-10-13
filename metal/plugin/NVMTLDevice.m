@@ -32,10 +32,15 @@ static inline int nvmtl_rel_devpath(const char *p) {
 }
 static inline int nvmtl_rel_access(const char *p, int m) { return nvmtl_rel_devpath(p) ? -1 : access(p, m); }
 static inline FILE *nvmtl_rel_fopen(const char *p, const char *m) { return nvmtl_rel_devpath(p) ? NULL : fopen(p, m); }
-#define access nvmtl_rel_access
-#define fopen nvmtl_rel_fopen
+// Function-like on purpose: an object-like `#define access` also renamed every Objective-C `-access` method in this
+// one-TU plugin, so release builds answered -[MTLBinding access] with nothing (selector nvmtl_rel_access in the
+// shipped binary). Apple's OpenCL then read every image as read-only and refused write-only images (-38).
+#define access(p, m) nvmtl_rel_access(p, m)
+#define fopen(p, m) nvmtl_rel_fopen(p, m)
 #endif
 int nvmtl_vk_init(void);
+uint16_t nvmtl_vk_set_accelerator(mach_port_t accelerator);
+uint16_t nvmtl_vk_vendor(void);
 const char *nvmtl_vk_device_name(void);
 void nvmtl_vk_counts(uint64_t *bm, uint64_t *bg, uint64_t *im, uint64_t *ig, size_t *bytes);
 void nvmtl_vk_cmd_counts(uint64_t *begun, uint64_t *submitted, uint64_t *abandoned);
@@ -173,6 +178,15 @@ static bool nvmtl_accel_armed(void)
 #include <dlfcn.h>
 #include <libgen.h>
 #if RDNA3MTL_NV_VIDEO_CODECS
+// The video libraries tile and untile frames in the Blackwell (GB20x) layout. Earlier GPUs' NVDEC/NVENC use the classic
+// one: on an RTX 3070 Laptop (issue #65, measured against Apple's software codecs) H.264 decode showed shifted macroblock
+// rows and a green stripe, and both encoders produced torn pictures. The decoder's only difference is its untiling mode
+// (1 = Blackwell, 0 = classic), so earlier GPUs load libnvdec_h264_t2d.dylib, the same library with mode 0 (51 dB on
+// GA104). The encoders are not registered on them, so apps use Apple's encoder until they are fixed for those GPUs.
+static bool nvmtl_video_is_blackwell(void)
+{
+    return strstr(nvmtl_vk_device_name(), "NVK GB") != NULL;
+}
 static void nvmtl_nvdec_register(void)
 {
     static dispatch_once_t once;
@@ -187,7 +201,7 @@ static void nvmtl_nvdec_register(void)
         if (!dladdr((const void *)nvmtl_nvdec_register, &di) || !di.dli_fname) { nvlog("nvdec: dladdr failed - not registering"); return; }
         char dir[1024], path[1200];
         strlcpy(dir, di.dli_fname, sizeof dir);
-        snprintf(path, sizeof path, "%s/libnvdec_h264.dylib", dirname(dir));
+        snprintf(path, sizeof path, "%s/%s", dirname(dir), nvmtl_video_is_blackwell() ? "libnvdec_h264.dylib" : "libnvdec_h264_t2d.dylib");
         void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
         if (!h) { nvlog("nvdec: dlopen %s FAILED: %s", path, dlerror()); return; }
         void *fac = dlsym(h, "NVDecH264_CreateInstance");
@@ -205,6 +219,7 @@ static void nvmtl_nvenc_register(void)
     dispatch_once(&once, ^{
         const char *me = getprogname();
         if (getenv("NVMTL_NO_NVENC")) { nvlog("nvenc: NVMTL_NO_NVENC set - not registering in %s", me); return; }
+        if (!nvmtl_video_is_blackwell()) { nvlog("nvenc: %s is not Blackwell - H.264 encode stays on Apple's encoder", nvmtl_vk_device_name()); return; }
         if (!strcmp(me, "WindowServer")) return;
         typedef int32_t (*RegFn)(uint32_t, CFDictionaryRef, void *);
         RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoEncoderWithInfo");
@@ -258,6 +273,7 @@ static void nvmtl_nvenc_hevc_register(void)
     dispatch_once(&once, ^{
         const char *me = getprogname();
         if (getenv("NVMTL_NO_NVENC_HEVC")) { nvlog("nvenc: NVMTL_NO_NVENC_HEVC set - not registering HEVC in %s", me); return; }
+        if (!nvmtl_video_is_blackwell()) { nvlog("nvenc: %s is not Blackwell - HEVC encode stays on Apple's encoder", nvmtl_vk_device_name()); return; }
         if (!strcmp(me, "WindowServer")) return;
         typedef int32_t (*RegFn)(uint32_t, CFDictionaryRef, void *);
         RegFn reg = (RegFn)dlsym(RTLD_DEFAULT, "VTRegisterVideoEncoderWithInfo");
@@ -348,6 +364,12 @@ static void nvmtl_install_hw_resource_pools(id dev)
     nvlog("-[NVMTLDevice initWithAcceleratorPort:%u] in %s", port, getprogname());
     self = [super initWithAcceleratorPort:port];
     if (!self) { nvlog("  super initWithAcceleratorPort: returned nil"); return nil; }
+    {   /* one GPU per process: the plugin runs a single Vulkan device, so a second Metal device on another vendor's
+           accelerator (a PC with an NVIDIA card and an AMD or Intel GPU) is refused rather than given the wrong GPU */
+        uint16_t mine = nvmtl_vk_set_accelerator(port), live = nvmtl_vk_vendor();
+        if (mine && mine != live) { nvlog("  accelerator vendor %04x, but this process runs Metal on %04x: no second device", mine, live); return nil; }
+        nvlog("  GPU vendor %04x (%s)", live, live == 0x1002 ? "AMD, RADV" : live == 0x8086 ? "Intel, ANV" : "NVIDIA, NVK");
+    }
     if (!nvmtl_process_is_allowed()) { nvlog("  not allow-listed: no device for %s", getprogname()); return nil; }
     nvlog("MTLIOAccelDevice's initWithAcceleratorPort: -> %p", (__bridge void *)self);
     gNVMTLMainDevice = self;
@@ -641,6 +663,7 @@ static BOOL nvmtl_desc_fbo(MTLTextureDescriptor *d) {
     t->_usage = d.usage;
     if (wantStex && !t->_stex) { static unsigned long lost; lost++;
         if (!(lost & (lost - 1))) nvlog("newTextureWithDescriptor: pixel format %lu asked for ShaderWrite and NVK cannot make it a storage image — shader writes to it will be LOST (%lu texture(s) so far in this process)", (unsigned long)d.pixelFormat, lost); }
+    nvmtl_texture_desc_swizzle(t, d);
     nvlog("newTextureWithDescriptor: %lux%lu%s -> %p", (unsigned long)d.width, (unsigned long)d.height, t->_stex ? " +storage" : "", (__bridge void *)t); return t; }
 
 typedef struct { uint32_t magic, seed, gen; } nvmtl_vram_tag;
@@ -706,7 +729,16 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
     return nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, stex, 2u, 1u, &t->_i);
 }
 
+static char nvmtl_surface_cache_key;
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d iosurface:(IOSurfaceRef)surf plane:(NSUInteger)plane {
+    @synchronized(self) {
+        NSMapTable *cache = objc_getAssociatedObject(self, &nvmtl_surface_cache_key);
+        if (!cache) { cache = [NSMapTable strongToWeakObjectsMapTable];
+            objc_setAssociatedObject(self, &nvmtl_surface_cache_key, cache, OBJC_ASSOCIATION_RETAIN_NONATOMIC); }
+        return [self nvmtlNewSurfaceTexture:d surface:surf plane:plane cache:cache];
+    }
+}
+- (id<MTLTexture>)nvmtlNewSurfaceTexture:(MTLTextureDescriptor *)d surface:(IOSurfaceRef)surf plane:(NSUInteger)plane cache:(NSMapTable *)cache {
     if (nvmtl_vk_init()) return nil;
     size_t w = d.width, h = d.height;
     if (!w || !h || w > UINT32_MAX || h > UINT32_MAX) return nil;
@@ -718,6 +750,19 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    NSArray *key = surf ? @[@(IOSurfaceGetID(surf)), @(plane), @(w), @(h), @(d.pixelFormat), @(wantStex), @(t->_ropt), @(t->_fbo)] : nil;
+    NVMTLTexture *backing = key ? [cache objectForKey:key] : nil;
+    // Failed BAR imports use a private image. Repeated wrappers of the same
+    // surface must share that image, just as successful family imports do.
+    // Weak entries do not pin the image after the application's last wrapper.
+    if (backing && !backing->_vramOn) {
+        NVMTLTexture *alias = (NVMTLTexture *)[backing newTextureViewWithPixelFormat:d.pixelFormat];
+        if (alias) {
+            alias->_viewParent = nil; alias->_usage = d.usage; alias->_ropt = t->_ropt; alias->_fbo = t->_fbo;
+            nvmtl_texture_desc_swizzle(alias, d);
+            return alias;
+        }
+    }
     if (nvmtl_surface_image_create(t, surf, plane, (uint32_t)w, (uint32_t)h, vkf, bpp, a8, wantStex)) {
         nvlog("newTextureWithDescriptor:iosurface:plane: image create FAILED (%zux%zu)", w, h); return nil; }
     t->_q = nvmtl_device_queue();
@@ -726,6 +771,8 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
     t->_fmt = d.pixelFormat;
     t->_stex = t->_i.storage != 0;
     t->_usage = d.usage;
+    nvmtl_texture_desc_swizzle(t, d);
+    if (key && !t->_vramOn) [cache setObject:t forKey:key];
     nvlog("newTextureWithDescriptor:iosurface:%p plane:%lu -> %p (%zux%zu fmt %lu)",
           (void *)surf, (unsigned long)plane, (__bridge void *)t, w, h, (unsigned long)d.pixelFormat);
     return t; }
@@ -1242,6 +1289,9 @@ void nvmtl_gl_tag_reflection(id refl, MTLRenderPipelineDescriptor *d);
             (unsigned long)ad.offset, (unsigned long)ld.stride, (unsigned long)ld.stepFunction, (unsigned long)ld.stepRate];
     }
     ps->_vdesc = vdesc; ps->_descriptor = [d copy];
+    /* _descriptor keeps the caller's (unlinked) functions; a pixel-sampler variant re-translates from these, the
+     * stages the pipeline was actually built from (RenderBox's custom_fn fragments only translate once linked). */
+    ps->_linkedVert = vf; ps->_linkedFrag = noFrag ? nil : ff;
     if (!vf->_spirv.length || !ff->_spirv.length)
         return nvmtl_fail(err, [NSString stringWithFormat:
             @"pipeline: REFUSED — %@ is a visible function, not an entry point (vertex %lu B, fragment %lu B)",

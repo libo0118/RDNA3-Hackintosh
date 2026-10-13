@@ -32,6 +32,58 @@ static int nvmtl_gsub_finish(NVMTLSubmissionPart *part) {
     if (r == 0) nvmtl_vk_inflight_free(f);
     return r;
 }
+@interface NVMTLPendingSurfaceWrite : NSObject {
+@public __weak NVMTLCommandBuffer *buffer; __weak NVMTLTexture *texture; uint32_t seed;
+}
+@end
+@implementation NVMTLPendingSurfaceWrite @end
+// Queue keys and command-buffer references are weak. An abandoned recording is
+// never registered; completion removes committed entries without retaining VRAM.
+static NSMapTable *nvmtl_surface_writers;
+static NSString *nvmtl_surface_writer_key(NVMTLTexture *t) {
+    return [NSString stringWithFormat:@"%u:%lu", (unsigned)IOSurfaceGetID(t->_surf), (unsigned long)t->_plane];
+}
+static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
+    if (!cb || !t || !t->_surf) return NO;
+    @synchronized ([NVMTLCommandBuffer class]) {
+        NSString *key = nvmtl_surface_writer_key(t);
+        for (id queue in nvmtl_surface_writers.keyEnumerator) {
+            NSDictionary *writes = [nvmtl_surface_writers objectForKey:queue];
+            NVMTLPendingSurfaceWrite *write = writes[key];
+            NVMTLCommandBuffer *writer = write ? write->buffer : nil;
+            NVMTLTexture *backing = write ? write->texture : nil;
+            const BOOL sameBacking = backing && (backing == t || (backing->_vramOn && t->_vramOn));
+            if (writer && writer != cb && sameBacking && write->seed == IOSurfaceGetSeed(t->_surf)) return YES;
+        }
+        return NO;
+    }
+}
+static void nvmtl_surface_register_writes(NVMTLCommandBuffer *cb) {
+    // The same lock as pending_write and finish_writes, taken here too: the map is shared with the completion thread, and
+    // its one caller holding this (recursive) lock today must not be what keeps WindowServer's heap intact.
+    @synchronized ([NVMTLCommandBuffer class]) {
+        if (!nvmtl_surface_writers) nvmtl_surface_writers = [NSMapTable weakToStrongObjectsMapTable];
+        NSMutableDictionary *writes = [nvmtl_surface_writers objectForKey:cb->_queue];
+        for (NVMTLSubmissionPart *part in cb->_parts) for (NVMTLTexture *t in part->surfaces) {
+            if (!t->_surf) continue;
+            if (!writes) { writes = [NSMutableDictionary new]; [nvmtl_surface_writers setObject:writes forKey:cb->_queue]; }
+            NVMTLPendingSurfaceWrite *write = [NVMTLPendingSurfaceWrite new];
+            write->buffer = cb; write->texture = t; write->seed = IOSurfaceGetSeed(t->_surf);
+            writes[nvmtl_surface_writer_key(t)] = write;
+        }
+    }
+}
+static void nvmtl_surface_finish_writes(NVMTLCommandBuffer *cb) {
+    @synchronized ([NVMTLCommandBuffer class]) {
+        NSMutableDictionary *writes = [nvmtl_surface_writers objectForKey:cb->_queue];
+        for (NSString *key in [writes.allKeys copy]) {
+            NVMTLPendingSurfaceWrite *write = writes[key];
+            if (!write->buffer || write->buffer == cb) [writes removeObjectForKey:key];
+        }
+        if (!writes.count) [nvmtl_surface_writers removeObjectForKey:cb->_queue];
+    }
+}
+
 @implementation NVMTLSubmissionPart
 - (void)dealloc {
     if (inflight) {
@@ -126,7 +178,8 @@ static int nvmtl_skip_empty_on(void) {
     if (!handlers.count) return;
     dispatch_queue_t order;
     dispatch_queue_t target;
-    @synchronized (_queue) {
+    // the class, not the queue: apps may hold @synchronized(queue) while they wait for this command buffer
+    @synchronized ([NVMTLCommandQueue class]) {
         if (!_queue->_callbackOrderQueue)
             _queue->_callbackOrderQueue = dispatch_queue_create("com.nvmtl.command-callbacks", DISPATCH_QUEUE_SERIAL);
         order = _queue->_callbackOrderQueue;
@@ -183,6 +236,7 @@ static int nvmtl_skip_empty_on(void) {
     double deviceStart = 0, deviceEnd = 0;
     if (!error && _gpuTimingSeen && !_gpuTimingInvalid)
         (void)nvmtl_vk_interval_seconds(&_gpuTiming, &deviceStart, &deviceEnd);
+    nvmtl_surface_finish_writes(self);
     [_completionCondition lock];
     _gpuStart = deviceStart; _gpuEnd = deviceEnd;
     _legacyKernelEnd = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
@@ -190,6 +244,9 @@ static int nvmtl_skip_empty_on(void) {
     _executionDone = YES;
     [_completionCondition unlock];
     [_parts removeAllObjects];
+    // Applications may retain completed command buffers. Pending overwrite
+    // bookkeeping must not keep their IOSurfaces and VRAM alive indefinitely.
+    [_surfOverwrites removeAllObjects]; _surfOverwrites = nil;
     if (!error) nvmtl_res2_cb_done(self);
     [self nvmtlReleaseCapacity];
 }
@@ -394,6 +451,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (!__atomic_load_n(&_rep, __ATOMIC_ACQUIRE)) __atomic_store_n(&_rep, nvmtl_ep_enter(), __ATOMIC_RELEASE);
         [_completionCondition lock]; _cbstatus = MTLCommandBufferStatusCommitted; [_completionCondition unlock];
         [self nvmtlSealPartWithSignal:nil value:0 restart:NO];
+        nvmtl_surface_register_writes(self);
         if (!nvmtl_pending_buffers) nvmtl_pending_buffers = [NSMutableArray new];
         [nvmtl_pending_buffers addObject:self];
         nvmtl_pump_buffers();
