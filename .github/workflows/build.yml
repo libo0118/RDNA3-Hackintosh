@@ -113,6 +113,10 @@ jobs:
         run: |
           make -C fb
           make -C fb check
+      - name: Build RDNA3AGDC.kext (AppleGraphicsDeviceControl for IOPresentment)
+        run: |
+          make -C agdc
+          make -C agdc check
       - name: Inspect
         run: |
           file build/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel
@@ -132,6 +136,7 @@ jobs:
             build/RDNA3Accelerator.kext
             build/RDNA3AcceleratorTahoe.kext
             build/RDNA3Framebuffer.kext
+            build/RDNA3AGDC.kext
             build/userspace/rdna3_drminfo
             build/userspace/rdna3_modetest
             build/userspace/rdna3_pmctl

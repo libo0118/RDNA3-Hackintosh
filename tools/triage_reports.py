@@ -110,7 +110,7 @@ def bootarg_level(args):
     return int(m.group(1)) if m else 0
 
 
-def fb_source_hash(files=("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h")):
+def fb_source_hash(files=("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h")):
     """fb/Makefile's FB_SRC_HASH (accel/Makefile's ACCEL_SRC_HASH with the
     accelerator's files): sha1 of the concatenated sources, 10 hex"""
     import hashlib
@@ -291,6 +291,32 @@ def report(path, show_all):
             if "RDNA3FB:" in l and not fb_edid:
                 print("     " + l[l.find("RDNA3FB:"):][:140])
         failed = failed or not fb_started or not fb_edid
+    # AGDC (rdna3agdc=1/2): IOPresentment's display-topology answers; with
+    # them WindowServer should hand display-pipe transactions a plane
+    # (rdna3accel_iop_ok / iop_src_surf instead of only iop_empty)
+    if re.search(r"rdna3agdc=[12]\b", args):
+        want = fb_source_hash(("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/AppleGraphicsDeviceControl_re.h",
+                               "agdc/Info.plist"))
+        ag = re.search(r"RDNA3-agdc: build (\S+)", log)
+        same = bool(want and ag and ag.group(1) == want)
+        print("   %s %-20s %s" % ("PASS" if same else "FAIL", "AGDC build",
+                                 "%s = these sources" % want if same else
+                                 "AGDC %s, these sources %s: stale or missing RDNA3AGDC.kext - 'rdna3vm approve'" %
+                                 (ag.group(1) if ag else "not loaded", want or "?")))
+        up = re.search(r"RDNA3-agdc: UP on .*", log)
+        print("   %s %-20s %s" % ("PASS" if up else "FAIL", "AGDC object",
+                                 up.group(0)[:140] if up else "never up (see the RDNA3-agdc lines below)"))
+        for l in log.splitlines():
+            if "RDNA3-agdc:" in l and ("NOT" in l or "failed" in l or "refused" in l or "differs" in l or
+                                       "not making" in l or "slot table" in l):
+                print("     " + l[l.find("RDNA3-agdc:"):][:140])
+        tp = path[:-len(".tar.gz")] + "-tests.txt"
+        tests = open(tp, errors="replace").read() if os.path.exists(tp) else ""
+        ok = re.findall(r"debug\.rdna3accel_iop_ok: (\d+)", tests)
+        ok = ok[-1] if ok else None
+        print("   %s %-20s %s" % ("PASS" if ok and int(ok) > 0 else "FAIL", "planes in transactions",
+                                 "rdna3accel_iop_ok %s" % (ok if ok else "not in the report")))
+        failed = failed or not same or not up
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
         want = fb_source_hash(("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_abi.h",

@@ -83,8 +83,9 @@ parts=()
 
 # --- kexts (never with firmware inside: a build tree after 'make -C kext
 # firmware' has it in Resources; --fw puts it where the kext reads it)
-for k in RDNA3Accel RDNA3Framebuffer RDNA3Accelerator; do
+for k in RDNA3Accel RDNA3Framebuffer RDNA3Accelerator RDNA3AGDC; do
     src=$(find_part d "$k.kext") || { [ $k = RDNA3Accel ] && { say "no RDNA3Accel.kext in ${SRCS[*]}"; exit 1; }
+                                      [ $k = RDNA3AGDC ] && continue   # optional: only rdna3agdc=1 uses it
                                       say "WARNING: no $k.kext: the default profile needs it"; continue; }
     if [ ! -f "$src/Contents/MacOS/$k" ] || [ ! -f "$src/Contents/Info.plist" ]; then say "$src is incomplete"; exit 1; fi
     cp -R "$src" "$R/Library/Extensions/"

@@ -105,7 +105,7 @@ fi
 # /Library/Extensions (RDNA3SourceHash, written by fb/ and accel/Makefile):
 # a line per kext whose new build waits for the user's approval
 stale_kexts() {
-    for n in RDNA3Framebuffer:FBSource RDNA3Accelerator:AccelSource; do
+    for n in RDNA3Framebuffer:FBSource RDNA3Accelerator:AccelSource RDNA3AGDC:AGDCSource; do
         k=${n%%:*}; key=${n#*:}
         h=$(/usr/libexec/PlistBuddy -c "Print :RDNA3SourceHash" "/Library/Extensions/$k.kext/Contents/Info.plist" 2>/dev/null) ||
             continue
@@ -333,8 +333,8 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     # the builds that run against the ones installed (stale_kexts: an
     # automatic boot stops on a difference; card run 39 went on with the
     # framebuffer of the build before)
-    echo "== running vs installed framebuffer / accelerator"
-    for n in RDNA3Framebuffer:FBSource RDNA3Accelerator:AccelSource; do
+    echo "== running vs installed framebuffer / accelerator / AGDC"
+    for n in RDNA3Framebuffer:FBSource RDNA3Accelerator:AccelSource RDNA3AGDC:AGDCSource; do
         k=${n%%:*}; key=${n#*:}
         echo "$k: running $(ioreg -l -w0 -r -c "$k" -d 1 2>/dev/null | sed -n "s/.*\"RDNA3,$key\" = \"\([0-9a-f]*\)\".*/\1/p" | head -n 1), installed $(/usr/libexec/PlistBuddy -c "Print :RDNA3SourceHash" "/Library/Extensions/$k.kext/Contents/Info.plist" 2>/dev/null)"
     done
@@ -342,7 +342,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     echo "== Auxiliary KC diagnostics"
     ls -l /Library/KernelCollections/ 2>&1
     kmutil showloaded --list-only 2>/dev/null | grep -i rdna3
-    for n in RDNA3Framebuffer RDNA3Accelerator; do
+    for n in RDNA3Framebuffer RDNA3Accelerator RDNA3AGDC; do
         k=/Library/Extensions/$n.kext
         [ -d "$k" ] || continue
         echo "-- $n"
@@ -368,6 +368,11 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             done_ $?
             [ $k = 3 ] || sleep 20
         done
+        # IOPresentment: does WindowServer hand the display pipes a plane
+        # (iop_ok / iop_src_surf), and what did AGDC answer (rdna3agdc)
+        echo "== display pipe and AGDC counters"
+        sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|flips)|heads_)|rdna3agdc" || true
+        ioreg -r -c RDNA3AGDC -w0 -d1 2>/dev/null | grep -E '"RDNA3,AGDC' | sed 's/^ *//'
         # display sleep (rdna3dpms=1): the heads must blank, then come back
         case " $args " in
             *" rdna3dpms=1 "*|*" rdna3dpms=2 "*)

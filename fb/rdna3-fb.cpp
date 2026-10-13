@@ -49,6 +49,7 @@
 #include <pexpert/pexpert.h>
 #include <mach/kmod.h>
 #include "../accel/rdna3k_abi.h"
+#include "../agdc/rdna3_agdc_k5.h"
 
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d);
 extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
@@ -154,6 +155,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
     bool     fHpOn = false, fHpPins = false, fConnected = true;
     uint32_t fHpGen = 0, fHpTick = 0, fHpChanges = 0, fLostGen = 0, fLostChanges = 0;
     void     hotplugPoll(bool first);
+    void     publishK5Timing();
 
     /* hardware cursor: 256x256 ARGB8888 premultiplied in VRAM from the core */
     static const uint32_t kCurDim = 256;
@@ -433,6 +435,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
 
     setProperty("IOFBDependentID", (unsigned long long)0x5244334600000001ull, 64);  /* 'RD3F' */
     setProperty("IOFBDependentIndex", (unsigned long long)fHead, 32);
+    publishK5Timing();
     setProperty("IOFBMemorySize", (unsigned long long)fBytes, 64);
     setProperty("RDNA3,Mode", fDcn ? "dcn" : "console");
     setProperty("RDNA3,FBSource", FB_COMMIT);
@@ -869,8 +872,37 @@ IOReturn RDNA3Framebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth)
         return kIOReturnSuccess;
     IOLockLock(fModeLock);
     IOReturn r = switchMode(idx);
+    if (r == kIOReturnSuccess)
+        publishK5Timing();
     IOLockUnlock(fModeLock);
     return r;
+}
+
+/* the current mode's timing for RDNA3AGDC (its kAGDCLinkConfig and
+ * plane-scaler answers, agdc/rdna3_agdc_k5.h); none in console mode */
+void RDNA3Framebuffer::publishK5Timing()
+{
+    IOTimingInformation ti;
+    uint32_t t[RD3K5_TIMING_WORDS];
+    if (getTimingInfoForDisplayMode(kModeId + fCurMode, &ti) != kIOReturnSuccess || !(ti.flags & kIODetailedTimingValid)) {
+        removeProperty(RD3K5_TIMING_PROP);
+        return;
+    }
+    const IODetailedTimingInformationV2 &d = ti.detailedInfo.v2;
+    int why = rd3k5_timing_from(t, d.pixelClock, d.horizontalActive, d.horizontalBlanking, d.horizontalSyncOffset,
+                                d.horizontalSyncPulseWidth, d.verticalActive, d.verticalBlanking, d.verticalSyncOffset,
+                                d.verticalSyncPulseWidth, modeRefresh(fCurMode), d.horizontalSyncConfig != 0,
+                                d.verticalSyncConfig != 0);
+    if (why) {
+        FBLOG("head %u: mode %u has no usable timing for AGDC (%d)", fHead, fCurMode, why);
+        removeProperty(RD3K5_TIMING_PROP);
+        return;
+    }
+    OSData *o = OSData::withBytes(t, sizeof(t));
+    if (o) {
+        setProperty(RD3K5_TIMING_PROP, o);
+        o->release();
+    }
 }
 
 IOReturn RDNA3Framebuffer::getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info)

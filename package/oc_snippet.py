@@ -23,9 +23,9 @@ from xml.sax.saxutils import escape
 
 # what the core must come before: the framebuffer and the accelerator wait
 # for the RDNA3Accel service (waitForMatchingService), no OSBundleLibraries link
-ORDER = ["RDNA3Accel", "RDNA3Framebuffer", "RDNA3Accelerator"]
+ORDER = ["RDNA3Accel", "RDNA3Framebuffer", "RDNA3Accelerator", "RDNA3AGDC"]
 SYSTEM_KC_ONLY = ("com.apple.iokit.IOGraphicsFamily", "com.apple.iokit.IOAcceleratorFamily2",
-                  "com.apple.iokit.IOSurface")
+                  "com.apple.iokit.IOSurface", "com.apple.AppleGraphicsDeviceControl")
 
 
 def load(kdir):

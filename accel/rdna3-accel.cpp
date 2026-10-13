@@ -1109,6 +1109,26 @@ static int rdna3acceliop_sysctl SYSCTL_HANDLER_ARGS
 /* the boot-arg presets, on a thread call queued by fbPublished */
 static void rd3AccelBootGates(void *, void *)
 {
+    /* rdna3agdc (RDNA3AGDC.kext): the NVIDIA driver's order - the
+     * framebuffers registered first, then the AppleGraphicsDeviceControl
+     * object IOPresentment asks about them, then the display-pipe
+     * capabilities that make WindowServer use the pipes */
+    if (rd3_arg("rdna3agdc", 0) && gBootIop && !gRd3Iop) {
+        ALOG("boot-arg rdna3accelfb=%d: as if `sysctl -w debug.rdna3accelfb=%d` was typed (rdna3agdc: before the pipe "
+             "capabilities)", gBootAccelFb, gBootAccelFb);
+        RDNA3Accelerator::triggerFromSysctl(gBootAccelFb);
+        int ag = -99, i;
+        for (i = 0; i < 50; i++) {
+            size_t len = sizeof(ag);
+            if (sysctlbyname("debug.rdna3agdc", &ag, &len, nullptr, 0) == 0 && ag == 1) break;
+            IOSleep(200);
+        }
+        ALOG("rdna3agdc: AGDC state %d after %d ms%s", ag, i * 200,
+             ag == 1 ? "" : " (not up: RDNA3AGDC.kext missing, not approved or refused - the pipes open anyway)");
+        if (!gRd3Iop)
+            rd3AccelSetIop(1);
+        return;
+    }
     if (gBootIop && !gRd3Iop)
         rd3AccelSetIop(1);
     ALOG("boot-arg rdna3accelfb=%d: as if `sysctl -w debug.rdna3accelfb=%d` was typed", gBootAccelFb, gBootAccelFb);

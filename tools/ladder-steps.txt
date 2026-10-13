@@ -79,6 +79,11 @@ modeset rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 r
 # the MPCC OGAM; rdna3_modetest gamma sets a dark table, the identity and
 # the ColorSync settings back, the OTG CRC after each
 gamma rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3gamma=1
+# AppleGraphicsDeviceControl (agdc/, RDNA3AGDC.kext): IOPresentment learns
+# the framebuffers, their timings and the plane scaler; WindowServer should
+# then hand the display pipes a plane (rdna3accel_iop_ok) instead of only
+# plane-less transactions; the gamma test alongside (it came plane-less)
+agdc rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3gamma=1 rdna3agdc=1
 # modeset + faster timings (rdna3dispclk: DISPCLK/DPPCLK raised through the
 # PMFW's DAL mailbox, SetHardMinByFreq) + line buffer and DLG/TTU for the
 # scaled modes (rdna3scaledlg: card run 20's underflow on pipe 1 at 960x540)

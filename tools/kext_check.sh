@@ -6,7 +6,7 @@
 #
 #   MACOS_SDK=/path/to/MacOSX11.3.sdk tools/kext_check.sh [files...]
 #
-# Default files: kext/src/*.cpp, fb/*.cpp and the hw/common C sources the
+# Default files: kext/src/*.cpp, fb/*.cpp, agdc/*.cpp and the hw/common C sources the
 # kext builds. The SDK can come from github.com/phracker/MacOSX-SDKs.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -19,7 +19,7 @@ COMMON="-target x86_64-apple-macos11.0 -fsyntax-only -isysroot $SDK -mkernel -no
  -DKEXT_VERSION=\"check\" -DKEXT_COMMIT=\"check\" -O2 -Wall -Wextra -Werror
  -Wno-unused-parameter -Wno-macro-redefined"
 if [ $# -eq 0 ]; then
-    set -- "$ROOT"/kext/src/*.cpp "$ROOT"/kext/src/*.c "$ROOT"/fb/*.cpp "$ROOT"/accel/*.cpp
+    set -- "$ROOT"/kext/src/*.cpp "$ROOT"/kext/src/*.c "$ROOT"/fb/*.cpp "$ROOT"/agdc/*.cpp "$ROOT"/accel/*.cpp
 fi
 rc=0
 for f in "$@"; do

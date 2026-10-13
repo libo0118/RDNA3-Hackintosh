@@ -20,7 +20,8 @@ done
 [ -n "$ROOT" ] || [ "$(id -u)" = 0 ] || { echo "run with sudo"; exit 1; }
 A="$ROOT/Library/Application Support/RDNA3"
 rm -rf "$ROOT"/Library/Extensions/RDNA3Accel.kext "$ROOT"/Library/Extensions/RDNA3Accelerator.kext \
-       "$ROOT"/Library/Extensions/RDNA3Framebuffer.kext "$ROOT"/Library/GPUBundles/RDNA3MTLDriver.bundle \
+       "$ROOT"/Library/Extensions/RDNA3Framebuffer.kext "$ROOT"/Library/Extensions/RDNA3AGDC.kext \
+       "$ROOT"/Library/GPUBundles/RDNA3MTLDriver.bundle \
        "$ROOT"/Library/GPUBundles/rdna3mtl "$ROOT"/Library/GPUBundles/rdna3mtl-allow.txt
 if [ $KEEPFW = 1 ]; then
     [ -d "$A" ] && find "$A" -mindepth 1 -maxdepth 1 ! -name firmware -exec rm -rf {} +

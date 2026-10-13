@@ -14,7 +14,7 @@ MK=$(sed -n '/^FW_FILES *:=/,/[^\\]$/p' "$ROOT/kext/Makefile" | sed 's/^FW_FILES
 
 # --- fake artifacts: RDNA3Accel-kext (dir), RDNA3MTL (zip), radv-macos-logs (dir)
 a=$T/art
-for p in kext:RDNA3Accel fb:RDNA3Framebuffer accel:RDNA3Accelerator; do
+for p in kext:RDNA3Accel fb:RDNA3Framebuffer accel:RDNA3Accelerator agdc:RDNA3AGDC; do
     d=${p%%:*}; n=${p#*:}
     mkdir -p "$a/$n.kext/Contents/MacOS"
     cp "$ROOT/$d/Info.plist" "$a/$n.kext/Contents/"
@@ -52,7 +52,7 @@ rel=$(ls -d "$T"/x/RDNA3-Hackintosh-*)
 S=$T/sys
 A="$S/Library/Application Support/RDNA3"
 "$rel/install.sh" --root "$S" --fw "$T/lf/amdgpu" >/dev/null
-for k in RDNA3Accel RDNA3Framebuffer RDNA3Accelerator; do
+for k in RDNA3Accel RDNA3Framebuffer RDNA3Accelerator RDNA3AGDC; do
     [ -x "$S/Library/Extensions/$k.kext/Contents/MacOS/$k" ] || fail "$k not installed (or not executable)"
 done
 [ -e "$S/Library/Extensions/RDNA3Accel.kext/Contents/Resources/psp_13_0_10_sos.bin" ] && fail "firmware shipped inside the kext"

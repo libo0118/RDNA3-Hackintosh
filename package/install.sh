@@ -6,6 +6,7 @@
 #   /Library/Extensions/RDNA3Accel.kext          kext (+ firmware in Resources)
 #   /Library/Extensions/RDNA3Accelerator.kext    Stage 7 accelerator (if built)
 #   /Library/Extensions/RDNA3Framebuffer.kext    Stage 3 framebuffer (if built)
+#   /Library/Extensions/RDNA3AGDC.kext           AppleGraphicsDeviceControl for IOPresentment (if built)
 #   /Library/GPUBundles/RDNA3MTLDriver.bundle    Metal plugin
 #   /Library/GPUBundles/rdna3mtl/                libdrm, libdrm_amdgpu, RADV, ICD json,
 #                                                translator, amdgpu.ids
@@ -59,6 +60,14 @@ if [ -d "$FB" ]; then
     run chown -R root:wheel /Library/Extensions/RDNA3Framebuffer.kext
     run chmod -R go-w /Library/Extensions/RDNA3Framebuffer.kext
     echo "NOTE: the framebuffer starts in the default profile (no rdna3lvl) or with rdna3fb=1"
+fi
+AGDC=$ROOT/build/RDNA3AGDC.kext
+if [ -d "$AGDC" ]; then
+    run rm -rf /Library/Extensions/RDNA3AGDC.kext
+    run cp -R "$AGDC" /Library/Extensions/
+    run chown -R root:wheel /Library/Extensions/RDNA3AGDC.kext
+    run chmod -R go-w /Library/Extensions/RDNA3AGDC.kext
+    echo "NOTE: RDNA3AGDC (display topology for WindowServer) idles unless rdna3agdc=1"
 fi
 
 run mkdir -p "$DIR"

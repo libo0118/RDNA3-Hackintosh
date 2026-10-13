@@ -23,14 +23,14 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
 # user to allow every new binary (Auxiliary KC), so the binary may change
 # only when the framebuffer itself does (tools/triage_reports.py computes
 # the same hash)
-FB_SRC_HASH := $(shell cat rdna3-fb.cpp Info.plist ../accel/rdna3k_abi.h | shasum | cut -c1-10)
+FB_SRC_HASH := $(shell cat rdna3-fb.cpp Info.plist ../accel/rdna3k_abi.h ../agdc/rdna3_agdc_k5.h | shasum | cut -c1-10)
 CXXFLAGS += -DFB_COMMIT='"$(FB_SRC_HASH)"'
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext
 
 .PHONY: all check clean
 all: $(BUNDLE)
 
-$(OBJDIR)/rdna3-fb.o: rdna3-fb.cpp ../accel/rdna3k_abi.h
+$(OBJDIR)/rdna3-fb.o: rdna3-fb.cpp ../accel/rdna3k_abi.h ../agdc/rdna3_agdc_k5.h
 	mkdir -p $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
