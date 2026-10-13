@@ -1133,8 +1133,13 @@ void RDNA3Framebuffer::powerBlank(bool on, const char *why)
                                              (void *)(uintptr_t)(on ? 0 : 1), nullptr, nullptr);
     if (b == kIOReturnUnsupported)
         return;
-    fPowerOn = on;
-    FBLOG("%s: head %u %s (0x%x)", why, fHead, on ? "unblanked" : "blanked", (unsigned)b);
+    /* a refused wake (or sleep) keeps the old state, so the next power
+     * request tries again (NullMoth 79e1c2f: a failed wake recorded as done
+     * left the head black with nothing left to retry it) */
+    if (b == kIOReturnSuccess)
+        fPowerOn = on;
+    FBLOG("%s: head %u %s (0x%x)%s", why, fHead, on ? "unblanked" : "blanked", (unsigned)b,
+          b == kIOReturnSuccess ? "" : ": FAILED, the next power request retries");
 }
 
 IOReturn RDNA3Framebuffer::setPowerState(unsigned long ordinal, IOService *)
