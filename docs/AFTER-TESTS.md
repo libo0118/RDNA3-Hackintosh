@@ -1515,3 +1515,29 @@ Settings. That is expected for them, not a display regression.
   copy installed before (`diff -r` against `$D/kexts`); only a changed
   kext counts as an update. `rdna3vm step`/`args` run the same boot-args
   once more after a rerun marker, like the queue.
+
+### Card run 45 (step agdc, build 174)
+
+- The current AGDC ran (sources = installed = running); the triage's STALE
+  flag came from kernelmanagerd waiting for a relinked copy of the same
+  sources (a CI rebuild reinstalled it): now only a note when `stale:` is
+  empty, and autoreport.sh compares kexts by RDNA3SourceHash.
+- The object was up early and IOPresentment asked K5 for both framebuffers:
+  `k5_link 56`, `k5_caps 56`, masks 3, nothing refused for a known index.
+  WindowServer aborted at every start, 16 PIDs (`__assert_rtn` in
+  `CoreDisplay_CreateDisplayForCGXDisplayDevice`), both pipes black, no
+  transaction at all. 996 refused calls, mostly 0x711 for capability types
+  other than the plane scaler, 0x925, 0x2001.
+- Runs 41 and 45 (K5 answered) both crash-looped; run 42 (no K5 question)
+  had the desktop. The slot table (run 41's suspect) was full in run 45.
+  NullMoth keeps its K5 off after every boot (runtime sysctl only).
+- Fix: K5 is off with `rdna3agdc=1`/`2`; `=3` answers from the start (the
+  crash, kept for experiments); `=4` turns K5 on 90 s after the object is
+  up, after WindowServer started (step `agdc`). Refused 0x711 types are
+  logged and collected in `debug.rdna3agdc_k5_types`. Triage counts
+  WindowServer PIDs in the report's WindowServer log (it read only the
+  tests file and showed 0).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `agdc`: `k5_link`/`k5_caps` > 0, WindowServer restarts (assert in `CoreDisplay_CreateDisplayForCGXDisplayDevice`), both screens black | K5 answered while CoreDisplay builds its displays (`rdna3agdc=3`, or `=4` with a slow WindowServer start) | `rdna3agdc=4` (or a longer delay, `kAgdcK5LateMs`); compare with `rdna3agdc=1` |

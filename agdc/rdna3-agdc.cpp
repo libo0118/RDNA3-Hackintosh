@@ -23,9 +23,18 @@
  * Its own kext: it links Apple's AppleGraphicsDeviceControl, whose layout is
  * reconstructed (AppleGraphicsDeviceControl_re.h); if that does not match a
  * macOS release only this kext fails, the framebuffer keeps the display.
- * Boot-arg rdna3agdc=1 arms it when the first framebuffer publishes
- * (rdna3agdc=2: without the K5 answers); without it, the sysctl
- * debug.rdna3agdc=1 does. -rdna3off keeps it off.
+ * Boot-arg rdna3agdc=1 (or 2) arms it when the first framebuffer publishes,
+ * without the K5 answers; =3 with them from the start; =4 turns them on
+ * 90 s after the object is up (after WindowServer started). Without it,
+ * the sysctl debug.rdna3agdc=1 does; debug.rdna3agdc_k5 switches K5.
+ * -rdna3off keeps it off.
+ *
+ * K5 from the start (card runs 41 and 45): IOPresentment asked the link
+ * configs and plane scalers of both framebuffers, every one answered, and
+ * WindowServer aborted at each start (__assert_rtn in
+ * CoreDisplay_CreateDisplayForCGXDisplayDevice); without K5 (run 42) the
+ * desktop came up. NullMoth keeps K5 off after every boot (its sysctl
+ * only), so off is the default here too.
  */
 
 #include <IOKit/IOService.h>
@@ -56,6 +65,10 @@ extern "C" kern_return_t _stop(kmod_info_t *, void *) { return KERN_SUCCESS; }
 #define kFBClass "RDNA3Framebuffer"
 
 static int    gAgdcK5 = 0;
+static int    gAgdcK5Late = 0;          /* rdna3agdc=4: K5 on at gAgdcK5Due */
+static uint64_t gAgdcK5Due = 0;
+static int    gAgdcK5Types = 0;         /* bit t = a 0x711 asked capability type t (< 32) */
+enum { kAgdcK5LateMs = 90000 };
 static SInt64 gAgdcK5Link = 0, gAgdcK5Caps = 0;
 static int    gAgdcK5Why = 0;
 static SInt64 gAgdcCmds = 0, gAgdcUnsupported = 0;
@@ -196,8 +209,17 @@ IOReturn RD3DeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned l
     }
     OSAddAtomic64(1, &gAgdcUnsupported);
     gAgdcLastRefused = (int)cmd;
-    if (OSIncrementAtomic(&gAgdcLogged) < 40)
-        AGLOG("command %#x (in %lu bytes) -> Unsupported", cmd, inSize);
+    /* AGDCFBGetExtendedCapability_t: fbIndex, then the capability type
+     * (card run 45: hundreds of 0x711 for types other than the plane
+     * scaler) */
+    uint32_t type = (cmd == RD3K5_CMD_FBCAPEX && in && inSize >= 8) ? ((const uint32_t *)in)[1] : 0xffffffffu;
+    if (type < 32) OSBitOrAtomic(1u << type, (volatile UInt32 *)&gAgdcK5Types);
+    if (OSIncrementAtomic(&gAgdcLogged) < 40) {
+        if (type != 0xffffffffu)
+            AGLOG("command %#x (in %lu bytes, index %u, type %#x) -> Unsupported", cmd, inSize, ((const uint32_t *)in)[0], type);
+        else
+            AGLOG("command %#x (in %lu bytes) -> Unsupported", cmd, inSize);
+    }
     return kIOReturnUnsupported;
 }
 
@@ -356,6 +378,10 @@ static void rd3AgdcWorkBody(void)
         AGLOG("UP on %s: %u framebuffer slot(s), K5 %s; vendor calls %lld, refused %lld (last %#x)", pci->getName(),
               gAgdcNFB, gAgdcK5 ? "on" : "off", gAgdcCmds, gAgdcUnsupported, gAgdcLastRefused);
         rd3SetStateProp("up");
+        if (gAgdcK5Late && !gAgdcK5) {
+            clock_interval_to_deadline(kAgdcK5LateMs, kMillisecondScale, &gAgdcK5Due);
+            AGLOG("rdna3agdc=4: K5 answers from %u s on (after WindowServer started)", kAgdcK5LateMs / 1000);
+        }
     } else if (gAgdcWant == 1 && gAgdc) {
         rd3Scan(gAgdc->fPci);   /* a framebuffer came or went */
     } else if (gAgdcWant == 0 && gAgdc) {
@@ -369,10 +395,27 @@ static void rd3AgdcWorkBody(void)
         rd3SetStateProp("terminated");
     }
 }
+/* rdna3agdc=4: K5 on once its time came. Every worker run checks it and
+ * arms the call for the rest of the wait: a later kick (a framebuffer
+ * publish) replaces the pending deadline of the one thread call */
+static void rd3K5Late(void)
+{
+    if (!gAgdcK5Due || !gAgdc || !gAgdcCall) return;
+    if (gAgdcK5) { gAgdcK5Due = 0; return; }
+    if (mach_absolute_time() < gAgdcK5Due) {
+        thread_call_enter_delayed(gAgdcCall, gAgdcK5Due);
+        return;
+    }
+    gAgdcK5Due = 0;
+    gAgdcK5 = 1;
+    AGLOG("rdna3agdc=4: K5 on now; vendor calls so far %lld, refused %lld", gAgdcCmds, gAgdcUnsupported);
+    rd3SetStateProp("up, K5 on");
+}
 static void rd3AgdcWork(thread_call_param_t, thread_call_param_t)
 {
     OSIncrementAtomic(&gAgdcBusy);
     rd3AgdcWorkBody();
+    rd3K5Late();
     OSDecrementAtomic(&gAgdcBusy);
 }
 static void rd3AgdcKickIn(unsigned ms)
@@ -423,6 +466,7 @@ SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_maxfb,   CTLFLAG_RD | CTLFLAG_LOCKED, &g
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_asked, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5Asked, 0, "bit i = a 0x921/0x711 named index i");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_link_mask, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5LinkMask, 0, "bit i = kAGDCLinkConfig answered for index i");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_caps_mask, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5CapsMask, 0, "bit i = the plane-scaler capability answered for index i");
+SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_types, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5Types, 0, "bit t = a 0x711 for capability type t was refused (0x10 = plane scaler, answered with K5 on)");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_last_refused_idx, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5LastRefusedIdx, 0, "the index the last refused K5 query named (-1 none)");
 #pragma clang diagnostic pop
 
@@ -432,6 +476,7 @@ static struct sysctl_oid *const kOids[] = {
     &sysctl__debug_rdna3agdc_k5_caps, &sysctl__debug_rdna3agdc_k5_why, &sysctl__debug_rdna3agdc_fbmap,
     &sysctl__debug_rdna3agdc_maxfb, &sysctl__debug_rdna3agdc_k5_asked, &sysctl__debug_rdna3agdc_k5_link_mask,
     &sysctl__debug_rdna3agdc_k5_caps_mask, &sysctl__debug_rdna3agdc_k5_last_refused_idx,
+    &sysctl__debug_rdna3agdc_k5_types,
 };
 
 /* ------------------------------------------------------------------ */
@@ -480,7 +525,8 @@ bool RDNA3AGDC::start(IOService *provider)
     fSysctl = true;
     const uint32_t arg = rd3_arg("rdna3agdc", 0);
     if (arg) {
-        gAgdcK5 = arg == 2 ? 0 : 1;
+        gAgdcK5 = arg == 3;
+        gAgdcK5Late = arg == 4;
         gAgdcWant = 1;
         rd3SetStateProp("armed: waiting for a framebuffer");
     } else {
@@ -496,9 +542,10 @@ bool RDNA3AGDC::start(IOService *provider)
         fTerm = addMatchingNotification(gIOTerminatedNotification, m, &RDNA3AGDC::fbChanged, this, nullptr, 0);
         m->release();
     }
-    AGLOG("build %s: %s", AGDC_SRC, arg ? (gAgdcK5 ? "rdna3agdc: up when the first framebuffer publishes, K5 on"
-                                                  : "rdna3agdc=2: up when the first framebuffer publishes, K5 off")
-                                        : "idle until `sysctl debug.rdna3agdc=1`");
+    AGLOG("build %s: %s", AGDC_SRC, !arg ? "idle until `sysctl debug.rdna3agdc=1`"
+                                    : gAgdcK5 ? "rdna3agdc=3: up when the first framebuffer publishes, K5 on from the start"
+                                    : gAgdcK5Late ? "rdna3agdc=4: up when the first framebuffer publishes, K5 on 90 s after"
+                                    : "rdna3agdc: up when the first framebuffer publishes, K5 off");
     registerService();
     return true;
 }

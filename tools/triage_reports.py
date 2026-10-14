@@ -172,6 +172,7 @@ def report(path, show_all):
         props_txt = read_member(tar, "11-ioreg-props.txt")
         log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt")
         panics = read_member(tar, "21-log-panics.txt")
+        wsmember = read_member(tar, "22-log-windowserver.txt") or ""
         kexts = read_member(tar, "03-kexts.txt")
         pci = read_member(tar, "04-pci.txt")
     args = " ".join(l for l in args.splitlines() if not l.startswith("$") and not l.startswith("[exit"))
@@ -294,7 +295,7 @@ def report(path, show_all):
     # AGDC (rdna3agdc=1/2): IOPresentment's display-topology answers; with
     # them WindowServer should hand display-pipe transactions a plane
     # (rdna3accel_iop_ok / iop_src_surf instead of only iop_empty)
-    if re.search(r"rdna3agdc=[12]\b", args):
+    if re.search(r"rdna3agdc=[1-4]\b", args):
         want = fb_source_hash(("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/AppleGraphicsDeviceControl_re.h",
                                "agdc/Info.plist"))
         ag = re.search(r"RDNA3-agdc: build ([0-9a-f]+)", log)
@@ -318,7 +319,10 @@ def report(path, show_all):
                                  "rdna3accel_iop_ok %s" % (ok if ok else "not in the report")))
         # card run 2026-10-14: an AGDC answer CoreDisplay could not use made
         # WindowServer abort at every start (both screens black)
-        pids = set(re.findall(r"WindowServer\[(\d+):", tests))
+        # the WindowServer log is in the report archive (card run 45: the
+        # tests file holds none, 0 counted while it restarted 17 times)
+        wslog = wsmember + tests
+        pids = set(re.findall(r"WindowServer\[(\d+):", wslog))
         print("   %s %-20s %s" % ("PASS" if len(pids) <= 2 else "FAIL", "WindowServer starts",
                                  "%d WindowServer process(es) in the report's logs%s" %
                                  (len(pids), "" if len(pids) <= 2 else ": a restart loop (23-windowserver-crash.txt)")))
@@ -556,7 +560,14 @@ def main():
         tests = p[:-len(".tar.gz")] + "-tests.txt"
         if os.path.exists(tests):
             txt = open(tests, errors="replace").read()
-            if "not approved to load" in txt:
+            stale = re.search(r"^stale: (.*)$", txt, re.M)
+            if "not approved to load" in txt and stale and not stale.group(1).strip():
+                # the builds running are the ones installed (same source
+                # hashes): only a relinked copy of the same sources waits
+                # (card run 45: a CI rebuild reinstalled), the results count
+                print("   note: kernelmanagerd waits for approval of a relinked copy of the running "
+                      "sources only ('stale:' empty); the results count")
+            elif "not approved to load" in txt:
                 print("   !! a new RDNA3Framebuffer/RDNA3Accelerator waits for approval in macOS: run "
                       "'rdna3vm approve' (System Settings -> Privacy & Security -> Allow)")
                 # the ones approved earlier ran instead: what this run says

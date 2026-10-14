@@ -141,9 +141,18 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
             # the same build as the one installed (the bundle's hash changes
             # with every 'rdna3vm prepare', its kexts not): left alone, so
             # macOS does not ask to allow it again (card run 44: a boot that
-            # already ran the approved build reinstalled it and stopped)
-            if [ -d "/Library/Extensions/$n" ] && diff -rq "$k" "$D/kexts/$n" >/dev/null 2>&1; then
-                continue
+            # already ran the approved build reinstalled it and stopped).
+            # Same build = the same RDNA3SourceHash (fb/, accel/, agdc/
+            # Makefile): a CI run of the same sources links a binary that
+            # differs (card run 45); kexts without it: the same files
+            nh=$(/usr/libexec/PlistBuddy -c "Print :RDNA3SourceHash" "$k/Contents/Info.plist" 2>/dev/null)
+            oh=$(/usr/libexec/PlistBuddy -c "Print :RDNA3SourceHash" "/Library/Extensions/$n/Contents/Info.plist" 2>/dev/null)
+            if [ -d "/Library/Extensions/$n" ]; then
+                if [ -n "$nh" ]; then
+                    [ "$nh" = "$oh" ] && continue
+                elif diff -rq "$k" "$D/kexts/$n" >/dev/null 2>&1; then
+                    continue
+                fi
             fi
             changed="$changed ${n%.kext}"
             rm -rf "/Library/Extensions/$n" "$D/kexts/$n"
