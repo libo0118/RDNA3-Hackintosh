@@ -16,7 +16,7 @@ done; this file decides the order from here.
 Horizon: macOS 26 is the last x86_64 release; the work only pays while it
 is supported.
 
-## State per area (updated 2026-10-12)
+## State per area (updated 2026-10-14, card run 56)
 
 Legend: **card** = verified on the card (`docs/status/hw-verified.txt`),
 **sim** = simulator/host tests only, **-** = missing. The amdgpu functions
@@ -31,8 +31,8 @@ that apply to this card are all ported (`docs/status/STATUS.md`: 1483 of
 | Display | GOP takeover, cursor, EDID names, extended desktop, own mode set with the DISPCLK raise, scaled modes, display sleep, hotplug | DP SST / MST / DSC (also over MST) / UHBR / ODM, HDMI 2.0 with scrambling, audio, output format, gamma, the display state across a reset and a sleep | the DP / DSC / MST / UHBR / 4K HDMI steps need such monitors on the bench |
 | UAPI (amdgpu ioctls) | CS on DMA/GFX/compute, fences, BO mmap, USERPTR, PRIME | user queues, timeline syncobj fds | IOSurface sharing with the accelerator (A3) |
 | Vulkan (RADV) | `rdna3_vktest` 13/13: compute, transfer, a triangle through a render pass, image copies, a timeline semaphore | the CTS subset in the report (V2, step `cts`) | WSI / present (V3) |
-| Accelerator / WindowServer | desktop composited through it on both heads, flipped zero-copy | swap copies by SDMA (A2, `rdna3accelsdma=1`) | gates on by default (A1), IOSurface <-> BO (A3) |
-| Metal | the card listed, a compute kernel and a render triangle right (`mtlprobe`) | - | CAMetalLayer present (M4), WindowServer on Metal (M5), apps (M6) |
+| Accelerator / WindowServer | desktop composited through it on both heads, flipped zero-copy; copy forward (`submitCopyForward`, a no-op while the back buffer is the frame on the panel) | swap copies by SDMA (A2, `rdna3accelsdma=1`) | gates on by default (A1), IOSurface <-> BO (A3: WindowServer composites into per-process copies, 8-10 ms per 1080p frame) |
+| Metal | `mtlprobe` compute + render, a CAMetalLayer window on the screen (M4), WindowServer composites on the plugin (M5), Chess and Maps run on it (M6) | - | GPU access to the apps' read-only backing stores (GEM_USERPTR read-only, run 57), point/line draws (mesa 0009), Safari's GPU process (sandbox blocks `/Library/GPUBundles`) |
 | Video (VCN 4.0) | - | VCN 4.0 + JPEG 4.0 rings, VIDEO_CAPS and CS, DPG power gating, suspend/resume | the card run (steps `vcn`, `vcn2`, `vcnsleep`); decode/encode from Mesa; VideoToolbox (optional) |
 | Packaging | OpenCore in the VM | `package/oc_install.sh`, the installer `.pkg` and tarball from CI | bare metal run of the guide, Tahoe (26) layout on a 26 VM (R4) |
 
