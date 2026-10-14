@@ -12,7 +12,8 @@
 #   rdna3vm args "BOOT-ARGS" [--stay]             the same with your own rdna3* boot-args
 #   rdna3vm queue STEP... | pending               several steps one after the other, unattended
 #   rdna3vm queue                                 go on with a queue a host reboot interrupted
-#   rdna3vm approve                               allow a new framebuffer build in macOS (once per build)
+#   rdna3vm approve [--card]                      allow a new framebuffer build in macOS (once per
+#                                                 build), in a window without the card
 #   rdna3vm reports                               what came back
 #   rdna3vm result                                the last run's reports in ONE file to send
 #                                                 (~/Downloads/rdna3-result.tar.gz, replaced each time)
@@ -416,11 +417,12 @@ start_share() {
 }
 
 cmd_window() {
-    local zoom=on res=
+    local zoom=on res= extra=
     while [ $# -gt 0 ]; do
         case $1 in
             --no-zoom) zoom=off; shift ;;
             --res) res=${2:-}; shift 2 ;;
+            --approve) extra=" rdna3vmapprove=1"; shift ;;
             *) die "unknown option $1 (--res WxH, --no-zoom)" ;;
         esac
     done
@@ -432,7 +434,7 @@ cmd_window() {
     case $res in [0-9]*x[0-9]*) ;; *) die "--res wants WxH, e.g. 1280x800" ;; esac
     msrs
     # verbose boot without our drivers' levels: a hang shows where it stops
-    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --boot-args "$BASE_ARGS -v keepsyms=1 debug=0x100 amfi=0x80" \
+    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --boot-args "$BASE_ARGS -v keepsyms=1 debug=0x100 amfi=0x80$extra" \
         --resolution "$res" >/dev/null
     qemu_common
     [ -f "$INSTALLER" ] && QARGS+=(-drive id=InstallMedia,if=none,format=raw,file="$INSTALLER"
@@ -493,6 +495,7 @@ launch() {   # launch "rdna3 args" stay(0/1)
     bootargs="$BASE_ARGS $DEBUG_ARGS $extra"
     [ "$stay" = 1 ] || bootargs="$bootargs rdna3vmauto=1"
     sudo -v || die "sudo is needed"
+    install_first
     # an automatic step is done in ~3 min; a stuck one should not keep the
     # screen dark for long. --stay keeps TIMEOUT_MIN.
     local limit=$TIMEOUT_MIN
@@ -516,10 +519,85 @@ launch() {   # launch "rdna3 args" stay(0/1)
         bash "$SELF" _once
 }
 
+# the bundle the VM last said it has installed (autoreport uploads
+# bundle-<date>.txt with it on every boot)
+vm_bundle_seen() {
+    local f
+    f=$(ls -t "$WORK"/reports/bundle-*.txt 2>/dev/null | head -n1) || true
+    [ -n "$f" ] && head -c 64 "$f" > "$WORK/vm-bundle.sha256"
+    rm -f "$WORK"/reports/bundle-*.txt
+}
+
+# Install a new bundle (rdna3vm prepare / update) into the macOS disk
+# WITHOUT the card: macOS boots headless on QEMU's own display adapter, the
+# card stays with Linux (the screen too), autoreport (rdna3vminstall=1)
+# copies the kexts and syncs the Metal plugin's libdrm/RADV, then shuts down.
+# The card step after it then boots straight into the new build: no install
+# boot with the card that stops and runs the step again (card run 50: that
+# boot's shutdown panicked). Nothing to do when the VM already has the
+# bundle. A new framebuffer/accelerator build still waits for 'Allow' once
+# (rdna3vm approve) - macOS asks for it however it was installed.
+cmd__install() {
+    load_conf
+    local want stamp limit=${INSTALL_TIMEOUT_MIN:-10} qpid tm how
+    want=$(cut -c1-64 "$WORK/share/rdna3-bundle.sha256" 2>/dev/null) || true
+    [ -n "$want" ] || return 0
+    mkdir -p "$WORK/reports"
+    vm_bundle_seen
+    [ "$want" = "$(cat "$WORK/vm-bundle.sha256" 2>/dev/null)" ] && return 0
+    stamp=$(date +%Y%m%d-%H%M%S)
+    echo "== installing the new bundle in macOS without the card (headless, the screen stays with Linux, ~3 min)"
+    cmd__oc --boot-args "$BASE_ARGS rdna3vmauto=1 rdna3vminstall=1" --resolution "${WINDOW_RESOLUTION:-1440x900}" ||
+        { echo "!! OpenCore not updated: the card step installs the bundle itself"; return 0; }
+    msrs
+    qemu_common
+    QARGS+=(-device vmware-svga -display none -device usb-tablet,bus=xhci.0
+            -serial "file:$WORK/reports/serial-install-$stamp.log")
+    start_share || { echo "!! no report server: the card step installs the bundle itself"; return 0; }
+    qemu-system-x86_64 "${QARGS[@]}" & qpid=$!
+    sleep $((limit * 60)) & tm=$!
+    how="shut down by itself"
+    while kill -0 $qpid 2>/dev/null && kill -0 $tm 2>/dev/null; do wait -n || true; done
+    if kill -0 $qpid 2>/dev/null; then
+        how="stopped after $limit min"
+        kill $qpid; sleep 3; kill -9 $qpid 2>/dev/null || true
+    fi
+    wait $qpid 2>/dev/null || true
+    kill $tm "$SHARE_PID" 2>/dev/null || true
+    # this boot tested nothing: its markers are not the card step's
+    rm -f "$WORK"/reports/rerun-*.txt "$WORK"/reports/approve-*.txt
+    vm_bundle_seen
+    # new framebuffer / accelerator / AGDC builds: macOS wants "Allow"
+    if ls "$WORK"/reports/allow-*.txt >/dev/null 2>&1; then
+        cat "$WORK"/reports/allow-*.txt | tr '\n' ' ' > "$WORK/needs-allow"
+        rm -f "$WORK"/reports/allow-*.txt
+    fi
+    chown -R --reference="$WORK" "$WORK/reports" "$WORK/vm-bundle.sha256" "$WORK/needs-allow" 2>/dev/null || true
+    if [ "$want" = "$(cat "$WORK/vm-bundle.sha256" 2>/dev/null)" ]; then
+        echo "== bundle installed without the card (the VM $how)"
+    else
+        echo "!! the install boot did not confirm the bundle (the VM $how): the card step installs it itself"
+    fi
+}
+
+# before a card step or queue, in the user's terminal: the new bundle into
+# macOS without the card, and "Allow" for new kexts in a window right away
+# (a card step before it would run the old framebuffer/accelerator)
+install_first() {
+    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _install || true
+    if [ -s "$WORK/needs-allow" ]; then
+        say "macOS wants 'Allow' for the new $(cat "$WORK/needs-allow")- in a window first, the card step after it"
+        cmd_approve
+        rm -f "$WORK/needs-allow"
+        say "Allowed (window closed): on to the card"
+    fi
+}
+
 # one VM run started by 'rdna3vm step' / 'args' / 'approve'. Like the queue:
 # when the VM installed new kexts and stopped before testing (autoreport's
 # rerun marker: they load from the next boot), the same boot-args once more
 cmd__once() {
+    bash "$SELF" _install || true
     bash "$SELF" _passthrough || true
     if ls "$WORK"/reports/rerun-*.txt >/dev/null 2>&1; then
         rm -f "$WORK"/reports/rerun-*.txt
@@ -540,17 +618,28 @@ cmd_step() {
 
 # macOS loads RDNA3Framebuffer / RDNA3Accelerator from the Auxiliary KC
 # only after the user allowed the new (ad-hoc signed) build in System
-# Settings; OpenCore cannot inject them (they link IOGraphicsFamily)
+# Settings; OpenCore cannot inject them (they link IOGraphicsFamily).
+# Allowing needs no card: by default macOS runs in a window (the card and the
+# screen stay with Linux); --card boots it with the card as before.
 cmd_approve() {
     say "Allowing the new framebuffer/accelerator build in macOS (once per build)"
-    echo "  macOS starts and stays up. Wait ~2 minutes after the desktop appears:"
-    echo "  the new kexts are installed then, and Privacy & Security opens by itself"
-    echo "  with a dialog. Then:"
+    if [ "${1:-}" = --card ]; then
+        echo "  macOS starts with the card and stays up. Wait ~2 minutes after the desktop"
+        echo "  appears: the new kexts are installed then, and Privacy & Security opens by"
+        echo "  itself with a dialog. Then:"
+    else
+        echo "  macOS starts in a window (the card stays with Linux). ~2 minutes after the"
+        echo "  desktop appears Privacy & Security opens by itself with a dialog. Then:"
+    fi
     echo "    1. scroll down: 'System software from developer ... was blocked' -> Allow (password)"
     echo "    2. when it asks to restart: choose Not Now, then Apple menu -> Shut Down"
-    echo "  No dialog after 3 minutes? The bundle was already installed: check Privacy &"
-    echo "  Security yourself; no 'Allow' button there = already allowed, just shut down."
-    launch "$(step_args 0)" 1
+    echo "  No 'Allow' button in Privacy & Security = already allowed, just shut down."
+    if [ "${1:-}" = --card ]; then
+        launch "$(step_args 0)" 1
+    else
+        sleep 3
+        cmd_window --approve
+    fi
 }
 
 cmd_args() {
@@ -601,6 +690,7 @@ cmd_queue() {
     [ -s "$QUEUE" ] || die "no queue: give steps, e.g. rdna3vm queue 5b 8c 9  (or: rdna3vm queue pending = $PENDING_STEPS)"
     gpu_bdf >/dev/null || die "no 1002:747e card found"
     sudo -v || die "sudo is needed"
+    install_first
     say "Running the steps $(tr '\n' ' ' < "$QUEUE")one after the other"
     echo "  Each step: the screen goes dark, macOS runs and shuts down, the desktop"
     echo "  comes back for a moment, then the next step starts (~5 min a step)."
@@ -620,6 +710,14 @@ cmd__queue() {
         sed -i 1d "$QUEUE"
         a=$(step_args "$n") || continue
         echo "== queue: step $n ($a), left: $(tr '\n' ' ' < "$QUEUE")"
+        bash "$SELF" _install || true
+        if [ -s "$WORK/needs-allow" ]; then
+            echo "== queue: stopped before step $n: macOS wants 'Allow' for the new $(cat "$WORK/needs-allow")"
+            echo "== queue: run 'rdna3vm approve', then 'rdna3vm queue' goes on with: $n $(tr '\n' ' ' < "$QUEUE")"
+            rm -f "$WORK/needs-allow"
+            { printf '%s\n' "$n"; cat "$QUEUE"; } > "$QUEUE.new" && cat "$QUEUE.new" > "$QUEUE"; rm -f "$QUEUE.new"
+            return 0
+        fi
         rm -f "$WORK/last-run"
         RDNA3VM_BOOTARGS="$BASE_ARGS $DEBUG_ARGS $a rdna3vmauto=1" \
             RDNA3VM_TIMEOUT="$(auto_limit "$a")" bash "$SELF" _passthrough || true
@@ -1318,5 +1416,6 @@ case "${1:-}" in
     _oc) shift; cmd__oc "$@" ;;
     _passthrough) shift; cmd__passthrough "$@" ;;
     _once) shift; cmd__once "$@" ;;
+    _install) shift; cmd__install "$@" ;;
     *) sed -n '2,19p' "$SELF"; exit 1 ;;
 esac

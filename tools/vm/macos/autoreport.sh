@@ -87,10 +87,28 @@ early_window() {
         touch /tmp/rdna3-progress.win
 }
 
+# rdna3vminstall=1: the host booted macOS without the card only to install
+# its new bundle (rdna3vm _install): no tests, no desktop to wait for -
+# install as soon as the host answers, then shut down
+INSTALL_ONLY=
+case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" rdna3vminstall=1 "*) INSTALL_ONLY=1 ;; esac
+# rdna3vmapprove=1: 'rdna3vm approve' in a window without the card: open
+# Privacy & Security for "Allow" even when the bundle was installed before
+# (by the install boot), then stop - no tests without the card
+APPROVE=
+case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" rdna3vmapprove=1 "*) APPROVE=1 ;; esac
+
 if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ]; then
     rm -f /tmp/rdna3-progress.win
-    early_window
-    sleep $((90 - ${w:-0}))
+    if [ -n "$INSTALL_ONLY" ]; then
+        w=0
+        until curl -sf --max-time 5 -o /dev/null "$HOST/rdna3-bundle.sha256" || [ $w -ge 120 ]; do
+            sleep 5; w=$((w + 5))
+        done
+    else
+        early_window
+        sleep $((90 - ${w:-0}))
+    fi
     # newest report scripts from the host (rdna3vm start_share); a new
     # autoreport.sh takes over right away
     for f in collect.sh ioreg_discovery.sh autoreport.sh; do
@@ -120,6 +138,7 @@ stale_kexts() {
 # Auxiliary KC, which kernelmanagerd rebuilds from /Library/Extensions:
 # the new copies run from the next boot on.
 updated=
+changed=
 new=$([ -n "$HOST" ] && curl -sf --max-time 10 "$HOST/rdna3-bundle.sha256" | cut -c1-64)
 if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
     t=$(mktemp -d /tmp/rdna3b.XXXXXX)
@@ -178,6 +197,24 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
             updated="the Metal plugin's libdrm/RADV updated: WindowServer loads them from the next boot"
     fi
     rm -rf "$t"
+fi
+# the bundle installed now, for the host (rdna3vm _install skips its
+# install boot when the VM has the current one)
+[ -n "$HOST" ] && [ -s "$D/bundle.sha256" ] &&
+    curl -sf --max-time 10 -T "$D/bundle.sha256" "$HOST/reports/bundle-$(date +%Y%m%d-%H%M%S).txt" >/dev/null 2>&1
+# the install boot without the card is done: nothing to test here. The new
+# framebuffer/accelerator load from the Auxiliary KC on the next boot (the
+# card step the host starts now), so no rerun marker.
+if [ -n "$INSTALL_ONLY" ]; then
+    # a new framebuffer / accelerator / AGDC build waits for "Allow" before
+    # macOS loads it: the host opens 'rdna3vm approve' first instead of a
+    # card step that would run the old build
+    allow=$(printf '%s\n' $changed | grep -x -E 'RDNA3(Framebuffer|Accelerator|AGDC)' | tr '\n' ' ')
+    [ -n "$allow" ] && [ -n "$HOST" ] && echo "$allow" > /tmp/rdna3-allow.txt &&
+        curl -sf --max-time 10 -T /tmp/rdna3-allow.txt "$HOST/reports/allow-$(date +%Y%m%d-%H%M%S).txt" >/dev/null 2>&1
+    finish
+fi
+if [ -n "$updated" ] || [ -n "$APPROVE" ]; then
     # an interactive boot (rdna3vm approve / window, no rdna3vmauto): the new
     # framebuffer/accelerator wait for "Allow" in Privacy & Security, which
     # only shows up now - open it for whoever is logged in and say so
@@ -194,7 +231,7 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
             fi
             ;;
         *)
-            if [ -n "$updated" ]; then
+            if [ -n "$updated" ] || [ -n "$APPROVE" ]; then
                 u=$(stat -f %Su /dev/console 2>/dev/null)
                 uid=$(id -u "$u" 2>/dev/null)
                 if [ -n "$uid" ] && [ "$u" != root ]; then
@@ -204,6 +241,7 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
             fi ;;
     esac
 fi
+[ -n "$APPROVE" ] && exit 0
 
 # installed earlier (this block runs whether or not the host offered a new
 # bundle - inside the install branch it never ran once the bundle was in

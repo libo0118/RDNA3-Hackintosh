@@ -225,18 +225,13 @@ with a build that changed them (the reports say so: `waits for approval`):
 rdna3vm approve
 ```
 
-macOS starts and stays up: System Settings → Privacy & Security, scroll
-down, **Allow** next to the blocked system software, enter the password,
-then **Not Now** at the restart question and Apple menu → Shut Down.
-
-Only a kext that really changed is installed again (and needs the
-Allow); `rdna3vm prepare` with the same build changes nothing in macOS.
-A single `rdna3vm step` that installed new kexts runs itself once more,
-so the step tests them.
-
-`rdna3vm window` works as well (the card stays with Linux): about 2
-minutes after the login the boot-time report script has installed the
-new kexts, and the **Allow** button appears in the same place.
+macOS starts in a window (the card and the screen stay with Linux) and
+stays up; about 2 minutes after the login System Settings → Privacy &
+Security opens by itself: scroll down, **Allow** next to the blocked
+system software, enter the password, then **Not Now** at the restart
+question and Apple menu → Shut Down. No **Allow** button there = already
+allowed, just shut down. `rdna3vm approve --card` does the same with the
+card passed through (the old way).
 
 A queue that reaches a boot where macOS still runs the build allowed
 before stops by itself instead of testing it (`rdna3vm queue status`:
@@ -245,6 +240,24 @@ before stops by itself instead of testing it (`rdna3vm queue status`:
 Without that (builds before 2026-10-12) such a run shows the old
 framebuffer in its fallback console mode: everything redrawn about once a
 second, and before the fix of that mode black shown blue.
+
+### A new build reaches macOS without the card
+
+A step or queue whose bundle (`rdna3vm prepare` / `update`) the VM does
+not have yet first boots macOS **headless, without the card**: Linux keeps
+the card and the screen for those ~3 minutes (`== installing the new
+bundle in macOS without the card` in the host log), macOS copies the new
+kexts and the Metal plugin's libdrm/RADV, and shuts down. Then the step
+starts with the card and already runs the new build: no install boot with
+the card that stops and runs the step again. Only a kext that really
+changed is installed again; a new framebuffer, accelerator or AGDC build
+needs the **Allow** above, and `rdna3vm step` / `queue` then opens the
+`rdna3vm approve` window by itself before the card step (Allow, Not Now,
+Shut Down: the card step starts after the window closes). `rdna3vm
+prepare` with the same build changes nothing in macOS. Should the headless
+boot not confirm the install (10 min limit, `INSTALL_TIMEOUT_MIN` in the
+config), the card step installs the bundle itself and runs once more, as
+before.
 
 ### Several steps in one go
 
