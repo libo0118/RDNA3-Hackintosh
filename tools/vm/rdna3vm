@@ -1132,6 +1132,26 @@ for r in json.load(sys.stdin)["workflow_runs"]:
             tries=$((tries + 1))
             sleep 15
         done
+        # no build of HEAD itself ([skip ci], docs only): the newest run of an
+        # earlier commit of this checkout that is still going is the build
+        # this checkout's code comes from - wait for that one instead
+        if [ -z "$newest" ]; then
+            local cand c_st c_co c_id c_no c_sha
+            cand=$(gh_api "repos/$slug/actions/workflows/build.yml/runs?branch=$branch&per_page=10" | python3 -c '
+import json, sys
+for r in json.load(sys.stdin)["workflow_runs"]:
+    print(r["status"], r.get("conclusion") or "-", r["id"], r["run_number"], r["head_sha"])') || cand=""
+            while read -r c_st c_co c_id c_no c_sha; do
+                [ -n "$c_sha" ] || continue
+                [ "$c_no" -gt "$run_no" ] 2>/dev/null || continue
+                git -C "$ROOT" merge-base --is-ancestor "$c_sha" "$head" 2>/dev/null || continue
+                case $c_st in completed) continue ;; esac
+                newest="$c_st $c_co $c_id $c_no"
+                echo "  ${head:0:7} has no build of its own; build #$c_no of ${c_sha:0:7} (part of this checkout) is still running"
+                head=$c_sha
+                break
+            done <<< "$cand"
+        fi
         case "$newest" in
         queued*|in_progress*|waiting*|requested*|pending*)
             [ "$nowait" = 1 ] &&
