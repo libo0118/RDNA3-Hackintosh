@@ -113,6 +113,11 @@ struct rd_xnu_scanout {
 /* after the read, clear the sticky HUBP underflow status (hubp2_clear_underflow):
  * a later look shows whether it comes back */
 #define RD_XNU_SCANOUT_CLEAR_UNDERFLOW 1u
+/* every call (not only row0): sample at RD_XNU_SCANOUT_HIRES_W wide (at
+ * most the surface's width), as many rows per call as rgb[] holds - card
+ * run 54: stale regions in apps were too small to see at 320 wide */
+#define RD_XNU_SCANOUT_HIRES           2u
+#define RD_XNU_SCANOUT_HIRES_W         1280
 /* private: this file's device-wide id (non-zero, never reused while the
  * device lives). DRM_AMDGPU_SCHED names the file whose contexts it changes
  * by a DRM fd; the kext has no fds, so libdrm_xnu puts the id of that fd's

@@ -11,12 +11,13 @@ dir=$(mktemp -d "/tmp/rdna3-report-XXXXXX")
 out="$HOME/rdna3-report-$label-$stamp.tar.gz"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 
+lim=45
 run() {   # run <file> <command...>: output and exit code, never stops the
-          # script; a command still running after 45 s is killed
+          # script; a command still running after $lim s (45) is killed
     f=$1; shift
     { echo "\$ $*"
       "$@" & p=$!
-      ( sleep 45; kill -9 "$p" 2>/dev/null ) & w=$!
+      ( sleep "$lim"; kill -9 "$p" 2>/dev/null ) & w=$!
       wait "$p"; r=$?
       kill "$w" 2>/dev/null
       echo "[exit $r]"; } > "$dir/$f" 2>&1
@@ -38,6 +39,9 @@ run 12-ioreg-fb.txt ioreg -l -w0 -r -c RDNA3Framebuffer
 run 13-ioreg-accel.txt ioreg -l -w0 -r -c RDNA3Accelerator
 run 14-ioreg-displays.txt sh -c "ioreg -l -w0 -r -c IODisplayConnect | head -200"
 run 15-system-profiler.txt system_profiler SPDisplaysDataType
+# the logs of a whole card run: 45 s cut card run 54's plugin log off
+# before Maps (log show over a boot of several apps takes longer)
+lim=180
 run 20-log-rdna3.txt log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3" OR eventMessage CONTAINS "rdna3" OR eventMessage CONTAINS "RD3" OR eventMessage CONTAINS "RDNA3MTL"'
 run 21-log-panics.txt sh -c "ls -lt /Library/Logs/DiagnosticReports/ 2>/dev/null | head -20; for f in \$(ls -t /Library/Logs/DiagnosticReports/*.panic 2>/dev/null | head -2); do echo \"== \$f\"; head -120 \"\$f\"; done"
 # WindowServer crash reports (step 10: it restarts in a loop): the newest
@@ -58,6 +62,14 @@ run 25-windowserver-exits.txt sh -c "for f in \$(ls -t /Library/Logs/DiagnosticR
 # the Metal plugin in every other process (card run 51: Chess's plugin
 # log stopped where its lines no longer named RDNA3, before the failure)
 run 26-log-metal-plugin.txt sh -c "log show --last boot --info --style compact --predicate 'eventMessage CONTAINS \"NVMTL\" AND process != \"WindowServer\"' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture'"
+lim=45
+# card run 54 (stale regions, Chess, Maps): RD3Surface::submitCopyForward and
+# CoreDisplay's copy forward in one place, then each app's plugin warnings
+grep -h -e 'copy forward' -e 'copy_forward' "$dir/20-log-rdna3.txt" "$dir/24-log-coredisplay.txt" 2>/dev/null \
+    | head -400 > "$dir/27-copy-forward.txt"
+grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -e 'clear-only' -e 'surface-in' \
+    -e 'surface-out' "$dir/26-log-metal-plugin.txt" "$dir/24-log-coredisplay.txt" 2>/dev/null \
+    | sed -E 's/^[0-9-]+ [0-9:.]+ +[A-Za-z]+ +//' | sort | uniq -c | sort -rn | head -300 > "$dir/28-plugin-warnings.txt"
 [ -s "$dir/20-log-rdna3.txt" ] && grep -q "RDNA3" "$dir/20-log-rdna3.txt" || \
     run 20-log-rdna3-sudo.txt sudo log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3"'
 

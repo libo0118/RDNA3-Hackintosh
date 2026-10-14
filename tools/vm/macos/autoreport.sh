@@ -815,8 +815,10 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 run=$(pgrep -x "$app" >/dev/null && echo yes || echo NO)
                 pl=$(lsof -n -c "$app" 2>/dev/null | grep -c RDNA3MTLDriver)
                 mkdir -p "$HOME/rdna3-scanout/m6$app"
-                echo "== rdna3_drminfo --scanout (look m6$app)"
-                with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/m6$app" 2>&1 >/dev/null
+                # 1280 wide (card run 54: Chess's and Maps' faults were too
+                # small to see at 320)
+                echo "== rdna3_drminfo --scanout-hires (look m6$app)"
+                with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6$app" 2>&1 >/dev/null
                 pkill -x "$app" 2>/dev/null
                 sleep 2
                 cr=$(find /Library/Logs/DiagnosticReports /Users/*/Library/Logs/DiagnosticReports -name "$app*" \
@@ -829,6 +831,22 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             done
             [ -f /var/db/rdna3-allow.bak ] && mv /var/db/rdna3-allow.bak "$al"
             echo "M6: $m6ok of 2 apps ran on the plugin without a crash"
+            # card run 54: System Settings' sidebar stayed stale while it
+            # scrolled (WindowServer's copy forward, RD3Surface::
+            # submitCopyForward): its window and the desktop afterwards, 1280
+            # wide, and what the copy forward did meanwhile
+            in_session open -b com.apple.systempreferences 2>&1
+            sleep 8
+            mkdir -p "$HOME/rdna3-scanout/m6Settings"
+            echo "== rdna3_drminfo --scanout-hires (look m6Settings)"
+            with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6Settings" 2>&1 >/dev/null
+            pkill -x "System Settings" 2>/dev/null
+            sleep 3
+            mkdir -p "$HOME/rdna3-scanout/m6desktop"
+            echo "== rdna3_drminfo --scanout-hires (look m6desktop)"
+            with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6desktop" 2>&1 >/dev/null
+            echo "== copy forward (kernel) during M6"
+            with_limit 60 log show --last 3m --style compact --predicate 'eventMessage CONTAINS "copy forward"' 2>/dev/null | tail -30
             done_ 0
             [ "$m6ok" = 2 ] && cache_keep 0
             CFP=

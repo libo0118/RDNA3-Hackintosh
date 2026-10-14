@@ -118,6 +118,13 @@ public:
         rd3AccelSwapProbe(a1, a2);
         rd3AccelSwapToPanel(this, a1, a2);
     }
+    /* copy_forward's (set_shape bit 12) back-buffer refresh: rd3AccelCopyForward */
+    IOReturn submitCopyForward(IOAccelEvent* a0, unsigned int a1, IOAccelResource2* a2, IOAccelResource2* a3,
+                               IOAccelBounds const* a4, unsigned int a5) APPLE_KEXT_OVERRIDE {
+        (void)a0;
+        return rd3AccelCopyForward(this, a1, a2, a3, (const void *)a4, a5,
+                                   *(const volatile uint32_t *)((const uint8_t *)this + 0x11B0));
+    }
     void shapeSurface(unsigned int a0, unsigned short a1, unsigned short a2) APPLE_KEXT_OVERRIDE {
         const unsigned w = a1, h = a2;
         uint32_t smode = *(const volatile uint32_t *)((const uint8_t *)this + 0x11B0);

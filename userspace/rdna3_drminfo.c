@@ -28,6 +28,8 @@
  *                              now: HUBP state and a 320-wide picture of it,
  *                              DIR/scanout-pipe<N>.ppm - the report's proof of
  *                              what reaches each panel. Nothing else runs.
+ *   rdna3_drminfo --scanout-hires DIR  the same, 1280 wide (an app's
+ *                              stale regions and text, card run 54)
  *
  * SPDX-License-Identifier: MIT
  */
@@ -356,7 +358,7 @@ static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info,
         memset(&s, 0, sizeof(s));
         s.pipe = pipe;
         s.row0 = row;
-        s.flags = row ? 0 : flags;
+        s.flags = (row ? 0 : flags) | (flags & RD_XNU_SCANOUT_HIRES);
         if (IOCTL(fd, RD_NR_XNU_SCANOUT, s))
             return row ? row : (uint32_t)-1;
         if (row == 0)
@@ -370,9 +372,9 @@ static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info,
     }
 }
 
-static int scanout_dump(int fd, const char *dir)
+static int scanout_dump(int fd, const char *dir, uint32_t hires)
 {
-    enum { CAP = RD_XNU_SCANOUT_W * RD_XNU_SCANOUT_W * 4 * 3 };
+    enum { CAP = RD_XNU_SCANOUT_HIRES_W * RD_XNU_SCANOUT_HIRES_W * 4 * 3 };
     uint8_t *img = malloc(CAP), *img2 = malloc(CAP);
     int lit = 0;
     if (!img || !img2)
@@ -381,7 +383,7 @@ static int scanout_dump(int fd, const char *dir)
         struct rd_xnu_scanout s, s2 = {0};
         /* the sticky underflow is read, then cleared: the second look 2 s
          * later tells whether it keeps coming (bandwidth) or was a switch */
-        uint32_t rows = scanout_grab(fd, p, &s, img, CAP, RD_XNU_SCANOUT_CLEAR_UNDERFLOW), i, n, nonblack = 0,
+        uint32_t rows = scanout_grab(fd, p, &s, img, CAP, RD_XNU_SCANOUT_CLEAR_UNDERFLOW | hires), i, n, nonblack = 0,
                  diff = 0;
         uint64_t sum[3] = {0, 0, 0};
         if (rows == (uint32_t)-1) {
@@ -419,7 +421,7 @@ static int scanout_dump(int fd, const char *dir)
         }
         /* a second look 2 s later: is something drawing? */
         sleep(2);
-        if (scanout_grab(fd, p, &s2, img2, CAP, 0) == rows)
+        if (scanout_grab(fd, p, &s2, img2, CAP, hires) == rows)
             for (i = 0; i < n * 3; i++)
                 diff += img[i] != img2[i];
         printf("  picture %ux%u: %u%% not black, mean rgb %u %u %u, %u bytes changed in 2 s%s\n",
@@ -692,8 +694,9 @@ int main(int argc, char **argv)
     v.name_len = sizeof(name) - 1;
     if (IOCTL(fd, RD_NR_VERSION, v)) { perror("DRM_IOCTL_VERSION"); return 1; }
     printf("driver %s %d.%d.%d\n", name, v.version_major, v.version_minor, v.version_patchlevel);
-    if (argc > 1 && !strcmp(argv[1], "--scanout")) {
-        fails = scanout_dump(fd, argc > 2 ? argv[2] : NULL);
+    if (argc > 1 && (!strcmp(argv[1], "--scanout") || !strcmp(argv[1], "--scanout-hires"))) {
+        fails = scanout_dump(fd, argc > 2 ? argv[2] : NULL,
+                             strcmp(argv[1], "--scanout") ? RD_XNU_SCANOUT_HIRES : 0);
         drm_xnu_close(fd);
         return fails;
     }

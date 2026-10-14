@@ -1766,3 +1766,32 @@ Settings. That is expected for them, not a display regression.
   macOS. autoreport now labels the M4 line "NO PRESENT CALLBACK ... the m4
   scanout look decides" and exits 0 for both; triage ignores the probes'
   exit codes (M4 is decided by the screen in the summary).
+
+### Card run 54 (step agdc + probes, build 187)
+
+- **Every reached check passed** (M6 2/2), but the user saw three faults:
+  System Settings' sidebar did not update while it scrolled (only after a
+  resize), Chess's window was see-through with no title bar, Maps' text was
+  misplaced.
+- WindowServer logged `copy_forward_region: copy forward failed
+  (0xe00002c7) ... disabling` 813 times. Probe runs 7-10 (CoreDisplay,
+  IOAcceleratorFamily2 on the runner): CoreDisplay calls
+  `IOAccelSetSurfaceFramebufferShape(surface, rects, 0x1000, fb)`; shape bit
+  12 goes to `IOAccelLegacySurface::copy_forward`, which calls the virtual
+  `submitCopyForward(event, fb index, buffer 0 = front, buffer 1 = back,
+  rects, count)`. The family's own is a bare `return kIOReturnUnsupported`,
+  and CoreDisplay ignores the failure: the back buffer keeps regions two
+  frames old. RD3Surface now implements it (`rd3AccelCopyForward`: SDMA by
+  `rdna3CopyVram`, the CPU for small rects; `rdna3accelcf=0` restores the
+  refusal).
+- Open question for the next run: WindowServer composites into per-process
+  copies of its framebuffer IOSurfaces (G13 surface-in/out, 8-10 ms per
+  1920x1080 frame), so the next surface-out may write the stale copy over
+  the kernel's copy. `copy forward check #n ... KEPT / REVERTED` in
+  `27-copy-forward.txt` answers it: KEPT means the fix holds, REVERTED means
+  the copy forward has to reach the plugin's copy (or the IOSurfaces have to
+  live in VRAM, item 7 for RADV).
+- The report gains 1280-wide scanout looks (`--scanout-hires`) of Chess,
+  Maps, System Settings and the desktop, `27-copy-forward.txt`,
+  `28-plugin-warnings.txt`, and logs collected for up to 180 s (45 s cut
+  the plugin log off before Maps).

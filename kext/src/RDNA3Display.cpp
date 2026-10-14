@@ -331,6 +331,7 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
     RDNA3Accel *a = (RDNA3Accel *)ctx;
     rdna3_scanout_info si;
     uint32_t pipe = s->pipe, row0 = s->row0, nrows = 0, out_h = 0;
+    uint32_t out_w = RD_XNU_SCANOUT_W, per_call = RD_XNU_SCANOUT_ROWS;
     int r;
     if (!kauth_cred_issuser(kauth_cred_get()))
         return -RD_EPERM;
@@ -376,12 +377,15 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
     if (r == RDNA3_OK && row0 == 0 && (s->flags & RD_XNU_SCANOUT_CLEAR_UNDERFLOW) && si.underflow)
         dcn32_clear_underflow(a->fDispDev, pipe);
     if (r == RDNA3_OK && si.lit && si.width && si.height) {
-        out_h = (uint32_t)((uint64_t)si.height * RD_XNU_SCANOUT_W / si.width);
-        if (out_h > 4 * RD_XNU_SCANOUT_W)
-            out_h = 4 * RD_XNU_SCANOUT_W;
+        if ((s->flags & RD_XNU_SCANOUT_HIRES) && si.width > RD_XNU_SCANOUT_W)
+            out_w = si.width < RD_XNU_SCANOUT_HIRES_W ? si.width : RD_XNU_SCANOUT_HIRES_W;
+        per_call = (uint32_t)(sizeof(s->rgb) / ((size_t)out_w * 3));
+        out_h = (uint32_t)((uint64_t)si.height * out_w / si.width);
+        if (out_h > 4 * out_w)
+            out_h = 4 * out_w;
         if (row0 < out_h) {
-            nrows = out_h - row0 < RD_XNU_SCANOUT_ROWS ? out_h - row0 : RD_XNU_SCANOUT_ROWS;
-            if (dcn32_scanout_sample(a->fDispDev, &si, RD_XNU_SCANOUT_W, out_h, row0, nrows,
+            nrows = out_h - row0 < per_call ? out_h - row0 : per_call;
+            if (dcn32_scanout_sample(a->fDispDev, &si, out_w, out_h, row0, nrows,
                                      s->rgb) != RDNA3_OK)
                 nrows = 0;
         }
@@ -403,7 +407,7 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
     s->height = si.height;
     s->pitch_px = si.pitch_px;
     s->flip_pending = si.flip_pending;
-    s->out_w = RD_XNU_SCANOUT_W;
+    s->out_w = out_w;
     s->out_h = out_h;
     s->nrows = nrows;
     s->address = si.address;

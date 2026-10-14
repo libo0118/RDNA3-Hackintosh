@@ -14,7 +14,7 @@ public:
     virtual void setSyncCommand(unsigned int*, unsigned int&, unsigned int&, _AMDSurfaceSwapSyncOptions const&) const = 0;
     virtual void didSubmitSwap(unsigned int, unsigned int);
     virtual bool isBackBufferReady(unsigned int);
-    virtual void submitCopyForward(IOAccelEvent*, unsigned int, IOAccelResource2*, IOAccelResource2*, IOAccelBounds const*, unsigned int);
+    virtual IOReturn submitCopyForward(IOAccelEvent*, unsigned int, IOAccelResource2*, IOAccelResource2*, IOAccelBounds const*, unsigned int);
     virtual void submitUpdate(unsigned int, IOAccelBounds*, unsigned int);
     virtual void pickPresentType(unsigned int);
     virtual void _pure335() = 0;
