@@ -47,4 +47,19 @@ python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 \
     > "$out/37-set-shape.txt" 2>&1
 python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 --grep '0xe00002c7|; .*[Cc]opy[Ff]orward' \
     > "$out/38-unsupported.txt" 2>&1
-wc -l "$out"/3[1-8]-*.txt >> "$sys"
+# probe run 8: set_shape bit 12 goes to copy_forward, which calls the
+# virtual submitCopyForward (the family's own returns kIOReturnUnsupported):
+# what copy_forward hands it, and how Apple's AMD driver on this runner
+# (AMDRadeonX6000, Navi 1x) implements it, the port's reference
+python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 \
+    'IOAccelLegacySurface::copy_forward\(' 'IOAccelLegacySurface::did_update\(' \
+    > "$out/39-copy-forward.txt" 2>&1
+for k in /System/Library/KernelCollections/*.kc; do
+    otool -l "$k" 2>/dev/null | grep 'entry_id.*AMD' | sed "s|^|$k: |" >> "$sys"
+    for b in $(otool -l "$k" 2>/dev/null | grep -A4 LC_FILESET_ENTRY | sed -n 's/.*entry_id \(com\.apple\.kext\.AMDRadeonX[0-9]*\) .*/\1/p' | sort -u); do
+        echo "== $k $b" >> "$sys"
+        python3 "$here/kc_func.py" "$k" "$b" '::submitCopyForward\(' '::submitUpdate\(' \
+            > "$out/40-$b-copyforward.txt" 2>&1
+    done
+done
+wc -l "$out"/3[1-9]-*.txt "$out"/40-*.txt >> "$sys"
