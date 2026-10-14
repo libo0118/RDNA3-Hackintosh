@@ -1754,3 +1754,15 @@ Settings. That is expected for them, not a display regression.
   lock (rd3AccelSurfaceGuard, logged when one waits), and autoreport no
   longer kmutil-loads a kext that is running (the new build loads from the
   next boot anyway; installs run without the card now).
+
+### Card run 53 (step agdc + probes, build 184)
+
+- **M6: both apps ran on the plugin without a crash** - Chess (OpenGL on
+  Metal) too, after the GTT placement of CPU-mappable BOs; Metal compute +
+  render, A3, M4 on the screen (8238 magenta pixels), M5, one WindowServer.
+- The result still said "something failed" for two probe exits that are
+  not failures: mtlprobe's M4 verdict waits for presented callbacks the
+  flip path never sends, and V3 records that RADV has no present path on
+  macOS. autoreport now labels the M4 line "NO PRESENT CALLBACK ... the m4
+  scanout look decides" and exits 0 for both; triage ignores the probes'
+  exit codes (M4 is decided by the screen in the summary).

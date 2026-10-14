@@ -504,7 +504,7 @@ def summary(path, serial=None):
         out.append(("Vulkan CTS", "not run: no deqp-vk bundle in the VM (rdna3vm cts)"))
     # the card-only plan items (rdna3probe=1, step big4)
     for pat, name in ((r"^PLATFORM: (.*)$", "R3 platform"), (r"^R4: (.*)$", "R4 macOS"), (r"^WSI: (.*)$", "V3 Vulkan WSI"),
-                      (r"^A3: ((?:PASSED|FAILED).*)$", "A3 IOSurface"), (r"^M4: ((?:PASSED|FAILED).*)$", "M4 CAMetalLayer"),
+                      (r"^A3: ((?:PASSED|FAILED).*)$", "A3 IOSurface"), (r"^M4: ((?:PASSED|FAILED|NO PRESENT CALLBACK).*)$", "M4 CAMetalLayer"),
                       (r"^M5: (.*)$", "M5 WindowServer"), (r"^M6: (.*)$", "M6 apps")):
         m = re.search(pat, txt, re.M)
         if m:
@@ -534,8 +534,8 @@ def summary(path, serial=None):
         # while the line said FAILED): the screen decides
         if best > 1000:
             for i, (k, v) in enumerate(out):
-                if k == "M4 CAMetalLayer" and v.startswith("FAILED"):
-                    out[i] = (k, "PASS on the screen (mtlprobe: " + v[len("FAILED "):][:80] + ")")
+                if k == "M4 CAMetalLayer" and (v.startswith("FAILED") or v.startswith("NO PRESENT")):
+                    out[i] = (k, "PASS on the screen (mtlprobe: " + v.split(" ", 1 if v.startswith("FAILED") else 3)[-1][:80] + ")")
     # P2: the PM experiment's variants, the RLC state after each
     lines = log.splitlines()
     for i, l in enumerate(lines):
@@ -700,8 +700,19 @@ def main():
                 for l in txt.splitlines():
                     if l.startswith("==") or "verified" in l or "[exit" in l or "fail" in l.lower():
                         print("     " + l)
-                if re.search(r"\[exit [1-9]", txt):
-                    failed = True
+                # the probes' own exits do not decide: V3 records that RADV has
+                # no present path on macOS, M4 is decided by the screen in the
+                # summary (mtlprobe gets no presented callback on the flip
+                # path; card runs 49-53 counted that as a failure)
+                cur = ""
+                for l in txt.splitlines():
+                    if l.startswith("== probe:"):
+                        cur = l
+                    elif l.startswith("== ") and not l.startswith("== rdna3_drminfo --scanout") and \
+                            not l.startswith("== plugin log") and not l.startswith("== using"):
+                        cur = ""
+                    if re.match(r"\[exit [1-9]", l) and not ("(V3)" in cur or "(M4)" in cur):
+                        failed = True
             if "== rdna3_vktest" in txt:
                 vk = txt[txt.index("== rdna3_vktest"):]
                 print("   vulkan (RADV):")
