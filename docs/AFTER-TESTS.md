@@ -1727,3 +1727,22 @@ Settings. That is expected for them, not a display regression.
 - False FAILs fixed: M4 is decided by the screen (8238 magenta pixels),
   mtlprobe never gets presented callbacks on the flip path; M5 read lsof's
   name cut to "WindowSer" as "not loaded".
+
+### Card run 52 (step agdc + probes, build 183)
+
+- Metal compute + render PASS again (the GTT fallback), M4 and M5 PASS,
+  Maps on the plugin, one WindowServer, gamma and modes as before.
+- Chess still aborted: the whole plugin log (26-log-metal-plugin.txt) shows
+  the GL layer's shaders lowered and translated, then
+  `vkCreateDescriptorPool -> -2` before every pipeline, and the kernel
+  logged no VRAM-full line. RADV makes its descriptor pools VRAM BOs with
+  neither CPU_ACCESS_REQUIRED nor NO_CPU_ACCESS and maps them at once; the
+  kext let such a BO land outside the BAR when the 144 MiB visible part was
+  full, and a BO there cannot be mapped (amdgpu moves it into the BAR on
+  the CPU fault, amdgpu_bo_fault_reserve_notify; nothing does here). Only
+  NO_CPU_ACCESS BOs go outside the BAR now; the rest falls back to GTT.
+  A refused map of a VRAM BO is logged.
+- Shutdown panic (run 50): probe run 4 showed clientClose loading the
+  surface's accelerator (+0x12c8) at +0x1e and finding it NULL at +0x1c5;
+  probe run 5 lists its writers: IOAccelSurface::stopLocked, ::stop and
+  ::detach_surface. Their callers are the next probe.

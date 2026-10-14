@@ -54,14 +54,21 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
             return -RD_ENOMEM;
         /* amdgpu_bo_placement_from_domain: CPU_ACCESS_REQUIRED stays in the
          * visible part; NO_CPU_ACCESS goes outside it first; anything else
-         * prefers visible (nothing here migrates a BO on a CPU fault) */
+         * prefers visible. amdgpu lets the rest land outside the BAR and
+         * moves it in on a CPU fault (amdgpu_bo_fault_reserve_notify);
+         * nothing migrates a BO here, and a BO outside the BAR cannot be
+         * mapped (drmMemoryForOffset), so only NO_CPU_ACCESS may go there:
+         * the rest falls back to GTT in the UAPI (card run 52: RADV's
+         * descriptor pools, VRAM without either flag, landed outside the
+         * full visible part, their map failed, every Chess pipeline with
+         * VK_ERROR_OUT_OF_DEVICE_MEMORY) */
         uint64_t align = bo->alignment > 4096 ? bo->alignment : 4096;
         range_alloc *first = (bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) ? a->fVramHeapHi
                                                                            : a->fVramHeap;
         range_alloc *second = first == a->fVramHeap ? a->fVramHeapHi : a->fVramHeap;
         range_alloc *from = first;
         uint64_t off = range_alloc_get(first, bo->size, align);
-        if (off == RANGE_ALLOC_FAIL && !(bo->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED)) {
+        if (off == RANGE_ALLOC_FAIL && (bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS)) {
             from = second;
             off = range_alloc_get(second, bo->size, align);
         }
@@ -72,7 +79,7 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
             if (OSIncrementAtomic(&gVramFull) < 8)
                 LOG("GEM: %llu KiB of VRAM%s did not fit (visible heap %llu KiB free, the rest %llu KiB free): GTT",
                     (unsigned long long)(bo->size >> 10),
-                    (bo->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED) ? " with CPU access" : "",
+                    (bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) ? " without CPU access" : " the CPU may map",
                     (unsigned long long)(range_alloc_free_bytes(a->fVramHeap) >> 10),
                     (unsigned long long)(range_alloc_free_bytes(a->fVramHeapHi) >> 10));
             return -RD_ENOMEM;
@@ -865,6 +872,15 @@ IOMemoryDescriptor *RDNA3Accel::drmMemoryForOffset(rdna3_drm_file *f, uint64_t o
         md = IOSubMemoryDescriptor::withSubRange(fVramDev, bo->vram_offset, bo->size,
                                                  kIODirectionInOut);
         *options = kIOMapWriteCombineCache;
+    } else if (bo && bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
+        /* outside the BAR: the client's map fails (its driver says
+         * OUT_OF_DEVICE_MEMORY); say which BO for the report */
+        static SInt32 gMapOutside;
+        if (OSIncrementAtomic(&gMapOutside) < 8)
+            LOG("GEM: map of a %llu KiB VRAM BO at 0x%llx refused: outside the %llu MiB BAR (flags 0x%llx)",
+                (unsigned long long)(bo->size >> 10), (unsigned long long)bo->vram_offset,
+                (unsigned long long)((fVramDev ? fVramDev->getLength() : 0) >> 20),
+                (unsigned long long)bo->flags);
     }
     IOLockUnlock(fDrmLock);
     return md;
