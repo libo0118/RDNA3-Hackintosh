@@ -13,6 +13,8 @@ on:
       - '**/*.md'
       - 'NOTICE'
       - 'LICENSE*'
+      - 'tools/probe/**'
+      - '.github/workflows/probe.yml'
   workflow_dispatch:
     inputs:
       full:

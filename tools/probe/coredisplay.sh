@@ -1,0 +1,45 @@
+#!/bin/sh
+# What CoreDisplay checks where WindowServer aborts with K5 answered (card
+# runs 41, 45: __assert_rtn in CoreDisplay_CreateDisplayForCGXDisplayDevice).
+# Runs on the self-hosted macOS runner (.github/workflows/probe.yml): the
+# disassembly of the functions on the crash stack, read from the dyld
+# shared cache with dyld_info, plus the strings __assert_rtn is called with.
+# Output: $1 (a directory).
+out=${1:-probe-out}
+mkdir -p "$out"
+sw_vers > "$out/00-system.txt"; uname -a >> "$out/00-system.txt"
+xcode-select -p >> "$out/00-system.txt" 2>&1
+command -v dyld_info >> "$out/00-system.txt" 2>&1
+dyld_info -help 2>&1 | head -40 >> "$out/00-system.txt"
+
+for lib in /System/Library/Frameworks/CoreDisplay.framework/Versions/A/CoreDisplay \
+           /System/Library/PrivateFrameworks/CoreDisplay.framework/Versions/A/CoreDisplay \
+           /System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/SkyLight \
+           /System/Library/PrivateFrameworks/IOPresentment.framework/Versions/A/IOPresentment; do
+    n=$(basename "$lib")
+    echo "== $lib" >> "$out/00-system.txt"
+    dyld_info -platform "$lib" >> "$out/00-system.txt" 2>&1 || continue
+    dyld_info -arch x86_64 -disassemble "$lib" > "$out/$n.dis" 2>"$out/$n.dis.err" ||
+        dyld_info -disassemble "$lib" > "$out/$n.dis" 2>>"$out/$n.dis.err"
+    dyld_info -arch x86_64 -section __TEXT __cstring "$lib" > "$out/$n.cstring" 2>&1
+    dyld_info -arch x86_64 -exports "$lib" > "$out/$n.exports" 2>&1
+    wc -l "$out/$n.dis" "$out/$n.cstring" "$out/$n.exports" >> "$out/00-system.txt"
+done
+
+# the functions on the crash stack, whole
+fn() {   # fn FILE SYMBOL-REGEX OUT
+    awk -v re="$2" '
+        /^[_A-Za-z0-9$.]+.*:$/ || /^_[^ ]*:$/ { on = ($0 ~ re) }
+        on { print }' "$1" > "$3"
+    wc -l "$3" >> "$out/00-system.txt"
+}
+cd_dis=$out/CoreDisplay.dis
+fn "$cd_dis" 'CoreDisplay_CreateDisplayForCGXDisplayDevice' "$out/10-CreateDisplayForCGXDisplayDevice.s"
+fn "$cd_dis" 'ZN11CoreDisplay11FramebufferC[12]E' "$out/11-Framebuffer-ctor.s"
+fn "$cd_dis" 'ZN11CoreDisplay3GPUC[12]E' "$out/12-GPU-ctor.s"
+fn "$out/SkyLight.dis" 'UpdateCGXDisplayDevice|AddCGXDisplayDeviceToDeviceList' "$out/13-SkyLight-CGXDisplayDevice.s"
+# every assertion string of CoreDisplay that names a display device, a
+# display pipe or AGDC
+grep -n -i 'CGXDisplayDevice\|DisplayPipe\|agdc\|linkconfig\|assert' "$out/CoreDisplay.cstring" > "$out/20-CoreDisplay-strings.txt" 2>&1
+grep -n -i 'agdc\|linkconfig\|planescaler\|0x921\|0x711' "$out/IOPresentment.cstring" > "$out/21-IOPresentment-strings.txt" 2>&1
+ls -la "$out" >> "$out/00-system.txt"
