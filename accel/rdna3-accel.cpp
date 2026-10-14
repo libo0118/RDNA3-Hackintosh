@@ -2352,7 +2352,8 @@ static void rd3AccelCopyForwardCheck(IOAccelResource2 *res)
     if (!vm || !gCfCheck.armed || gCfCheck.vm != vm || !vm->fKva) return;
     gCfCheck.armed = false;
     unsigned w, h, pitch;
-    if (!rd3res_geom(res, &w, &h, &pitch) || pitch != gCfCheck.pitch || gCfCheck.x >= w || gCfCheck.y >= h) return;
+    if (!rd3res_geom(res, &w, &h, &pitch) || pitch != gCfCheck.pitch || gCfCheck.x >= w || gCfCheck.y >= h ||
+        (unsigned long long)gCfCheck.y * pitch + gCfCheck.x * 4ull + 4 > vm->fBytes) return;
     const unsigned now = rd3px(vm, pitch, gCfCheck.x, gCfCheck.y);
     const char *what;
     gCfChecks++;
@@ -2365,19 +2366,69 @@ static void rd3AccelCopyForwardCheck(IOAccelResource2 *res)
              gCfCheck.copied, now, what, gCfKept, gCfReverted, gCfOther);
 }
 
-static bool rd3AccelCfSdma(RD3VidMemory *vs, RD3VidMemory *vd, unsigned long long so, unsigned spitch,
-                           unsigned long long dof, unsigned dpitch, unsigned rowb, unsigned rows, unsigned long long *us)
+/* one side of a copy forward: where its pixels are and how many bytes back
+ * them. The display pipe's framebuffer vidmem is asked of its framebuffer
+ * every time (as rd3AccelCopyToScanout does): a mode switch moves the
+ * scanout and frees the old one, so a cached offset could aim SDMA at freed
+ * VRAM. The rows are clamped to the bytes really allocated. */
+struct RD3CfSide {
+    RD3VidMemory *vm;
+    unsigned long long cookie, bytes;
+    unsigned w, h, pitch;
+    bool cpu;   /* has a kernel mapping that matches cookie / pitch */
+};
+static bool rd3AccelCfSide(IOAccelResource2 *res, RD3CfSide *o)
+{
+    o->vm = rd3res_vidmem(res);
+    if (!o->vm || !rd3res_geom(res, &o->w, &o->h, &o->pitch)) return false;
+    if (o->vm->fScanout) {
+        RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+        IOService *fb = nullptr;
+        if (a && gHeadFbResLock) {
+            IOSimpleLockLock(gHeadFbResLock);
+            for (unsigned h = 0; h < kRd3MaxFB && !fb; h++)
+                if (gHeadFbRes[h] == res) fb = a->fFBs[h];
+            IOSimpleLockUnlock(gHeadFbResLock);
+        }
+        if (!fb) return false;
+        struct RD3KVramRequest q;
+        for (unsigned i = 0; i < sizeof q; i++) ((volatile unsigned char *)&q)[i] = 0;
+        q.version = RD3K_VRAM_ABI_VERSION;
+        if (a->askFramebufferForScanout(&q, fb) != kIOReturnSuccess || !q.pitch || !q.actualSize) return false;
+        o->cookie = q.allocationCookie; o->bytes = q.actualSize; o->pitch = q.pitch;
+        if (q.width && q.width < o->w) o->w = q.width;
+        if (q.height && q.height < o->h) o->h = q.height;
+        o->cpu = false;
+    } else {
+        if (!o->vm->fRmHandle || !o->vm->fBytes) return false;
+        o->cookie = o->vm->fAllocationCookie; o->bytes = o->vm->fBytes;
+        o->cpu = o->vm->fKva != nullptr;
+    }
+    /* 4-byte pixels only: a pitch of twice that is an 8-byte (F16 / EDR) buffer */
+    if (o->pitch < o->w * 4u || (o->w >= 64 && o->pitch >= o->w * 8u)) return false;
+    if ((unsigned long long)o->w * 4u > o->bytes) return false;
+    const unsigned long long fit = (o->bytes - (unsigned long long)o->w * 4u) / o->pitch + 1;
+    if (fit < o->h) o->h = (unsigned)fit;
+    return o->h != 0;
+}
+
+static unsigned gCfSdmaOffAt;
+static bool rd3AccelCfSdma(const RD3CfSide &S, const RD3CfSide &D, unsigned long long so, unsigned long long dof,
+                           unsigned rowb, unsigned rows, unsigned long long *us)
 {
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     IOService *fb = nullptr;
     for (unsigned i = 0; a && i < kRd3MaxFB && !fb; i++) fb = a->fFBs[i];
+    if (gCfSdmaOff && gCfCalls - gCfSdmaOffAt >= 600) {   /* try again now and then */
+        gCfSdmaOff = false; gCfSdmaFailRun = 0;
+    }
     if (!fb || gCfSdmaOff) return false;
     struct RD3KCopyRequest c;
     for (unsigned i = 0; i < sizeof c; i++) ((volatile unsigned char *)&c)[i] = 0;
     c.version = RD3K_COPY_ABI_VERSION;
-    c.srcCookie = vs->fAllocationCookie + so;
-    c.dstCookie = vd->fAllocationCookie + dof;
-    c.srcPitch = spitch; c.dstPitch = dpitch; c.rowBytes = rowb; c.rows = rows;
+    c.srcCookie = S.cookie + so;
+    c.dstCookie = D.cookie + dof;
+    c.srcPitch = S.pitch; c.dstPitch = D.pitch; c.rowBytes = rowb; c.rows = rows;
     const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_COPY_FN);
     if (!sym) return false;
     IOReturn ret = fb->callPlatformFunction(sym, false, &c, nullptr, nullptr, nullptr);
@@ -2386,8 +2437,8 @@ static bool rd3AccelCfSdma(RD3VidMemory *vs, RD3VidMemory *vd, unsigned long lon
         gCfSdmaFailRun++;
         ALOG("copy forward by SDMA refused (0x%x, status %d): %u rows x %u bytes 0x%llx -> 0x%llx%s", (unsigned)ret,
              c.status, rows, rowb, c.srcCookie, c.dstCookie,
-             gCfSdmaFailRun >= 3 ? " -- three in a row: small rects by the CPU from now on" : "");
-        if (gCfSdmaFailRun >= 3) gCfSdmaOff = true;
+             gCfSdmaFailRun >= 3 ? " -- three in a row: small rects by the CPU for the next 600 calls" : "");
+        if (gCfSdmaFailRun >= 3) { gCfSdmaOff = true; gCfSdmaOffAt = gCfCalls; }
         return false;
     }
     gCfSdmaFailRun = 0;
@@ -2397,92 +2448,94 @@ static bool rd3AccelCfSdma(RD3VidMemory *vs, RD3VidMemory *vd, unsigned long lon
 
 /* the CPU through the BAR: reads of VRAM are uncached, so only small rects */
 #define RD3CF_CPU_MAX (256u * 1024u)
-static void rd3AccelCfCpu(RD3VidMemory *vs, RD3VidMemory *vd, unsigned long long so, unsigned spitch,
-                          unsigned long long dof, unsigned dpitch, unsigned rowb, unsigned rows)
+static void rd3AccelCfCpu(const RD3CfSide &S, const RD3CfSide &D, unsigned long long so, unsigned long long dof,
+                          unsigned rowb, unsigned rows)
 {
     for (unsigned y = 0; y < rows; y++) {
-        const volatile unsigned int *sp = (const volatile unsigned int *)((const volatile unsigned char *)vs->fKva + so + (unsigned long long)y * spitch);
-        volatile unsigned int *dp = (volatile unsigned int *)((volatile unsigned char *)vd->fKva + dof + (unsigned long long)y * dpitch);
+        const volatile unsigned int *sp = (const volatile unsigned int *)((const volatile unsigned char *)S.vm->fKva + so + (unsigned long long)y * S.pitch);
+        volatile unsigned int *dp = (volatile unsigned int *)((volatile unsigned char *)D.vm->fKva + dof + (unsigned long long)y * D.pitch);
         for (unsigned x = 0; x < rowb / 4; x++) dp[x] = sp[x];
     }
+}
+
+static bool rd3AccelCfClip(const RD3CfBounds &r, unsigned w, unsigned h, int *x0, int *y0, int *x1, int *y1)
+{
+    *x0 = r.x; *y0 = r.y; *x1 = *x0 + r.w; *y1 = *y0 + r.h;
+    if (*x0 < 0) *x0 = 0;
+    if (*y0 < 0) *y0 = 0;
+    if (*x1 > (int)w) *x1 = (int)w;
+    if (*y1 > (int)h) *y1 = (int)h;
+    return *x1 > *x0 && *y1 > *y0;
 }
 
 IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource2 *src, IOAccelResource2 *dst,
                              const void *rects, unsigned count, unsigned smode)
 {
     const unsigned n = ++gCfCalls;
-    RD3VidMemory *vs = rd3res_vidmem(src), *vd = rd3res_vidmem(dst);
-    unsigned sw = 0, sh = 0, sp = 0, dw = 0, dh = 0, dp = 0;
-    const bool geo = src && dst && rd3res_geom(src, &sw, &sh, &sp) && rd3res_geom(dst, &dw, &dh, &dp);
+    RD3CfSide S = {}, D = {};
+    const bool okS = src && rd3AccelCfSide(src, &S), okD = dst && rd3AccelCfSide(dst, &D);
     const RD3CfBounds *b = (const RD3CfBounds *)rects;
     if (n <= 12)
         RD3CFLOG("copy forward #%u: surface %p fb index %u smode 0x%x, %u rect(s)%s; src %p (vm %p %ux%u pitch %u "
-                 "off 0x%llx%s) -> dst %p (vm %p %ux%u pitch %u off 0x%llx%s)", n, surf, fbIndex, smode, count,
-                 gBootCopyForward ? "" : " [rdna3accelcf=0: refused]", src, vs, sw, sh, sp,
-                 vs ? vs->fAllocationCookie : 0ull, vs && vs->fScanout ? " scanout" : "", dst, vd, dw, dh, dp,
-                 vd ? vd->fAllocationCookie : 0ull, vd && vd->fScanout ? " scanout" : "");
+                 "off 0x%llx of %llu%s%s) -> dst %p (vm %p %ux%u pitch %u off 0x%llx of %llu%s%s)", n, surf, fbIndex,
+                 smode, count, gBootCopyForward ? "" : " [rdna3accelcf=0: refused]", src, S.vm, S.w, S.h, S.pitch,
+                 S.cookie, S.bytes, S.vm && S.vm->fScanout ? " scanout" : "", okS ? "" : " NOT COPYABLE", dst, D.vm,
+                 D.w, D.h, D.pitch, D.cookie, D.bytes, D.vm && D.vm->fScanout ? " scanout" : "",
+                 okD ? "" : " NOT COPYABLE");
     if (n <= 12 && b)
         for (unsigned i = 0; i < count && i < 4; i++)
             RD3CFLOG("   rect %u: %d,%d %dx%d", i, b[i].x, b[i].y, b[i].w, b[i].h);
     if (!gBootCopyForward) return kIOReturnUnsupported;
-    if (!geo || !vs || !vd || (!vs->fRmHandle && !vs->fScanout) ||
-        (!vd->fRmHandle && !vd->fScanout) || (count && !b)) {
+    if (!okS || !okD || (count && !b)) {
         gCfFailed++;
-        RD3CFLOG("copy forward #%u: buffers not copyable (geometry %d, vm %p -> %p) -- refused (%u refused so far)",
-                 n, (int)geo, vs, vd, gCfFailed);
+        RD3CFLOG("copy forward #%u: buffers not copyable (src %d, dst %d) -- refused (%u refused so far)",
+                 n, (int)okS, (int)okD, gCfFailed);
         return kIOReturnUnsupported;
     }
-    if (vs == vd || (vs->fPhys && vs->fPhys == vd->fPhys)) { gCfSkipped++; return kIOReturnSuccess; }
-    const unsigned w = sw < dw ? sw : dw, h = sh < dh ? sh : dh;
-    const bool cpu = vs->fKva && vd->fKva;   /* the scanout's vidmem has no kernel mapping here */
+    if (S.vm == D.vm || S.cookie == D.cookie) { gCfSkipped++; return kIOReturnSuccess; }
+    const unsigned w = S.w < D.w ? S.w : D.w, h = S.h < D.h ? S.h : D.h;
+    const bool cpu = S.cpu && D.cpu;
     unsigned long long us = 0, bytes = 0;
     unsigned best = 0, bestArea = 0, done = 0, failed = 0;
+    int x0, y0, x1, y1;
     for (unsigned i = 0; i < count; i++) {
-        int x0 = b[i].x, y0 = b[i].y, x1 = x0 + b[i].w, y1 = y0 + b[i].h;
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (x1 > (int)w) x1 = (int)w;
-        if (y1 > (int)h) y1 = (int)h;
-        if (x1 <= x0 || y1 <= y0) continue;
+        if (!rd3AccelCfClip(b[i], w, h, &x0, &y0, &x1, &y1)) continue;
         const unsigned area = (unsigned)(x1 - x0) * (unsigned)(y1 - y0);
         if (area > bestArea) { bestArea = area; best = i; }
     }
     /* the check pixel: one of the biggest rect whose stale and new values differ */
     unsigned cx = 0, cy = 0, before = 0, want = 0;
     bool check = false;
-    if (cpu && bestArea && (n <= 400 || n % 200 == 0) && !gCfCheck.armed) {
-        const RD3CfBounds &r = b[best];
+    if (cpu && bestArea && (n <= 400 || n % 200 == 0) && !gCfCheck.armed &&
+        rd3AccelCfClip(b[best], w, h, &x0, &y0, &x1, &y1)) {
         for (unsigned gy = 1; gy <= 4 && !check; gy++)
             for (unsigned gx = 1; gx <= 4 && !check; gx++) {
-                const int x = r.x + r.w * (int)gx / 5, y = r.y + r.h * (int)gy / 5;
-                if (x < 0 || y < 0 || x >= (int)w || y >= (int)h) continue;
-                before = rd3px(vd, dp, (unsigned)x, (unsigned)y);
-                want = rd3px(vs, sp, (unsigned)x, (unsigned)y);
-                if (before != want) { cx = (unsigned)x; cy = (unsigned)y; check = true; }
+                const unsigned x = (unsigned)(x0 + (x1 - x0) * (int)gx / 5), y = (unsigned)(y0 + (y1 - y0) * (int)gy / 5);
+                before = rd3px(D.vm, D.pitch, x, y);
+                want = rd3px(S.vm, S.pitch, x, y);
+                if (before != want) { cx = x; cy = y; check = true; }
             }
     }
     for (unsigned i = 0; i < count; i++) {
-        int x0 = b[i].x, y0 = b[i].y, x1 = x0 + b[i].w, y1 = y0 + b[i].h;
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (x1 > (int)w) x1 = (int)w;
-        if (y1 > (int)h) y1 = (int)h;
-        if (x1 <= x0 || y1 <= y0) continue;
+        if (!rd3AccelCfClip(b[i], w, h, &x0, &y0, &x1, &y1)) continue;
         const unsigned rowb = (unsigned)(x1 - x0) * 4u, rows = (unsigned)(y1 - y0);
-        const unsigned long long so = (unsigned long long)y0 * sp + (unsigned)x0 * 4u;
-        const unsigned long long dof = (unsigned long long)y0 * dp + (unsigned)x0 * 4u;
-        if (rd3AccelCfSdma(vs, vd, so, sp, dof, dp, rowb, rows, &us)) gCfSdma++;
-        else if (cpu && (unsigned long long)rowb * rows <= RD3CF_CPU_MAX) { rd3AccelCfCpu(vs, vd, so, sp, dof, dp, rowb, rows); gCfCpu++; }
+        const unsigned long long so = (unsigned long long)y0 * S.pitch + (unsigned)x0 * 4u;
+        const unsigned long long dof = (unsigned long long)y0 * D.pitch + (unsigned)x0 * 4u;
+        if (rd3AccelCfSdma(S, D, so, dof, rowb, rows, &us)) gCfSdma++;
+        else if (cpu && (unsigned long long)rowb * rows <= RD3CF_CPU_MAX) { rd3AccelCfCpu(S, D, so, dof, rowb, rows); gCfCpu++; }
         else { gCfFailed++; failed++; continue; }
         bytes += (unsigned long long)rowb * rows;
         done++;
     }
+    __asm__ volatile("mfence" ::: "memory");   /* the CPU's writes through the write-combined BAR */
     gCfRects += done; gCfBytes += bytes; gCfUsec += us;
     if (us > gCfUsecMax) gCfUsecMax = us;
     if (check) {
-        const unsigned after = rd3px(vd, dp, cx, cy);
-        gCfCheck.vm = vd; gCfCheck.x = cx; gCfCheck.y = cy; gCfCheck.pitch = dp;
-        gCfCheck.before = before; gCfCheck.copied = after; gCfCheck.call = n; gCfCheck.armed = true;
+        const unsigned after = rd3px(D.vm, D.pitch, cx, cy);
+        gCfCheck.vm = D.vm; gCfCheck.x = cx; gCfCheck.y = cy; gCfCheck.pitch = D.pitch;
+        gCfCheck.before = before; gCfCheck.copied = after; gCfCheck.call = n;
+        __asm__ volatile("" ::: "memory");
+        gCfCheck.armed = true;
         if (after != want)
             RD3CFLOG("copy forward #%u: pixel (%u,%u) reads 0x%08x after the copy, the front has 0x%08x -- the copy "
                      "did NOT land", n, cx, cy, after, want);
