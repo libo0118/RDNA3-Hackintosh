@@ -783,7 +783,7 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
         /* no alias: a read-only texture over CPU-visible bytes becomes a private copy refreshed per command buffer */
         const BOOL ro = !(d.usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget));
         const BOOL fits = bpr >= w * bpp && offset <= _b.size && bpr * (h - 1) + w * bpp <= _b.size - offset;
-        if (!ro || !fits || !nvmtl_buf_cpu(self) ||
+        if (!ro || !fits || ![self contents] ||
             nvmtl_vk_image_create_typed((uint32_t)w, (uint32_t)h, vkf, bpp, a8, 1, 0, 2u, 1u, &t->_i)) {
             nvlog("buffer newTextureWithDescriptor:offset:%lu bytesPerRow:%lu (%zux%zu fmt %lu, buffer %lu B, storage %lu, usage 0x%lx) -> nil "
                   "(reason above%s)", (unsigned long)offset, (unsigned long)bpr, w, h, (unsigned long)d.pixelFormat, (unsigned long)_b.size,
@@ -1189,7 +1189,9 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
 }
 - (void)nvmtlBufCopyIn {
     NVMTLTexture *r = _parent ? _parent : self;
-    const uint8_t *src = r->_backBuf ? (const uint8_t *)nvmtl_buf_cpu(r->_backBuf) : NULL;
+    /* -contents: the app's own pages for a no-copy buffer (nvmtl_buf_cpu would give the private copy, refreshed
+       from them only at commit) */
+    const uint8_t *src = r->_backBuf ? (const uint8_t *)[(id<MTLBuffer>)r->_backBuf contents] : NULL;
     if (!src || nvmtl_vk_image_write(r->_q, &r->_i, src + r->_backOff, r->_backBPR))
         nvlog("buffer texture copy: refresh FAILED (%ux%u)", r->_i.w, r->_i.h);
 }
@@ -1356,6 +1358,14 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
             (unsigned long)region.size.height, (unsigned long)region.origin.x, (unsigned long)region.origin.y, (unsigned long)level, (unsigned long)row,
             [self nvi]->w, [self nvi]->h, nvmtl_surf_id(self), nz, nn); }
       g_trace_mute = was; }
+    { NVMTLTexture *r = _parent ? _parent : self;
+      if (r->_bufCopy && bytes) {   /* the buffer is the texture's storage: the next refresh reads it back */
+          uint8_t *dst = (uint8_t *)[(id<MTLBuffer>)r->_backBuf contents]; const size_t bpp = r->_i.bpp ? r->_i.bpp : 4;
+          if (dst && region.origin.x + region.size.width <= r->_i.w && region.origin.y + region.size.height <= r->_i.h)
+              for (NSUInteger y = 0; y < region.size.height; y++)
+                  memcpy(dst + r->_backOff + (region.origin.y + y) * r->_backBPR + region.origin.x * bpp,
+                         (const uint8_t *)bytes + y * row, region.size.width * bpp);
+      } }
     if (!bytes || row < (size_t)_i.w * (_i.bpp ? _i.bpp : 4) || !nvmtl_surface_full_overwrite(self, region, level, 0)) [self nvmtlSurfaceIn];
     if (nvmtl_vk_image_write_region_level_layer(_q, [self nvi], (const uint8_t *)bytes, row, (uint32_t)region.origin.x, (uint32_t)region.origin.y,
                                                 (uint32_t)region.size.width, (uint32_t)region.size.height, (uint32_t)level + _baseLevel, _baseSlice))

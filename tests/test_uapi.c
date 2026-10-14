@@ -459,6 +459,8 @@ int main(void)
         /* amdgpu_gem_create_ioctl: VRAM is always handed out cleared */
         CHECK(rdna3_drm_bo_lookup(f, h)->flags & AMDGPU_GEM_CREATE_VRAM_CLEARED);
         CHECK(info(f, AMDGPU_INFO_VRAM_USAGE, &vram, 8) == 0 && vram == (1 << 20));
+        /* amdgpu_vram_mgr_vis_size: a BO at offset 0 lies in the CPU-visible window */
+        CHECK(info(f, AMDGPU_INFO_VIS_VRAM_USAGE, &vram, 8) == 0 && vram == (1 << 20));
 
         memset(&c, 0, sizeof(c));
         c.in.bo_size = 128u << 20;
@@ -556,6 +558,7 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0);
         CHECK(vm_unmaps == 5);
         CHECK(info(f, AMDGPU_INFO_VRAM_USAGE, &vram, 8) == 0 && vram == 0);
+        CHECK(info(f, AMDGPU_INFO_VIS_VRAM_USAGE, &vram, 8) == 0 && vram == 0);
         CHECK(live_bos == 1);
     }
     /* contexts */

@@ -303,6 +303,20 @@ static void doorbell_pages_set(rdna3_drm_device *dev, uint64_t first, uint64_t n
     }
 }
 
+
+/* amdgpu_vram_mgr_vis_size: the part of a VRAM BO inside the CPU-visible
+ * window [0, vis_vram_size), what AMDGPU_INFO_VIS_VRAM_USAGE and the
+ * cpu_accessible_vram heap report (RADV's budget for its host-visible VRAM
+ * heap; it stayed 0 here, so the heap always looked empty) */
+static uint64_t bo_vis_bytes(const rdna3_drm_device *dev, const rdna3_bo *bo)
+{
+    uint64_t end;
+    if (bo->placement != AMDGPU_GEM_DOMAIN_VRAM || bo->vram_offset >= dev->vis_vram_size)
+        return 0;
+    end = bo->vram_offset + bo->size;
+    return (end < dev->vis_vram_size ? end : dev->vis_vram_size) - bo->vram_offset;
+}
+
 static void bo_put_dev(rdna3_drm_device *dev, rdna3_bo *bo)
 {
     if (--bo->refcnt)
@@ -321,6 +335,7 @@ static void bo_put_dev(rdna3_drm_device *dev, rdna3_bo *bo)
     }
     if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
         dev->vram_usage -= bo->size;
+        dev->vis_vram_usage -= bo_vis_bytes(dev, bo);
     } else {
         dev->gtt_usage -= bo->size;
     }
@@ -1905,10 +1920,12 @@ static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
     }
     bo->mmap_offset = dev->next_mmap_offset;
     dev->next_mmap_offset += bo->size + 4096;
-    if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM)
+    if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
         dev->vram_usage += bo->size;
-    else
+        dev->vis_vram_usage += bo_vis_bytes(dev, bo);
+    } else {
         dev->gtt_usage += bo->size;
+    }
 
     r = handle_alloc(f, bo, &handle);
     if (r) {
@@ -2418,6 +2435,7 @@ static int seq64_init(rdna3_drm_device *dev)
         return r;
     }
     dev->vram_usage += bo->size;
+    dev->vis_vram_usage += bo_vis_bytes(dev, bo);
     cpu = ops->bo_kmap(ops->ctx, bo);
     r = ops->bo_gpu_addr(ops->ctx, bo, &mc);
     if (!cpu || r) {
@@ -2795,6 +2813,7 @@ static int userq_create_object(rdna3_drm_device *dev, rdna3_userq_obj *o, uint32
         return r;
     }
     dev->vram_usage += bo->size;
+    dev->vis_vram_usage += bo_vis_bytes(dev, bo);
     o->obj = bo;
     o->cpu_ptr = ops->bo_kmap(ops->ctx, bo);
     r = ops->bo_gpu_addr(ops->ctx, bo, &o->gpu_addr);

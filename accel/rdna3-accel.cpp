@@ -42,7 +42,8 @@ IOReturn                  rd3AccelCopyForward(const void *surf, unsigned fbIndex
                                               IOAccelResource2 *dst, const void *rects, unsigned count,
                                               unsigned smode);
 static void               rd3AccelCopyForwardCheck(IOAccelResource2 *res);
-static void               rd3AccelNotePresented(const void *vm);
+static void               rd3AccelNotePresented(const void *vm, unsigned head);
+void                      rd3AccelVidmemGone(const void *vm);
 static void               rd3AccelWriteStamp(int index, unsigned int value);
 static bool               rd3AccelLocksInit(void);
 /* Navi 3x display devices (data/amdgpu.ids); the core kext must also claim the card */
@@ -815,6 +816,7 @@ bool RD3VidMemory::allocPhysical()
 
 void RD3VidMemory::deallocPhysical()
 {
+    rd3AccelVidmemGone(this);
     if (fScanout) {
         ALOG("RD3VidMemory::deallocPhysical(%p): SCANOUT -- not ours to free, only forgetting it", this);
         fPhys = 0; fBytes = 0; fScanout = false;
@@ -1769,7 +1771,7 @@ static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pi
     if (!W || !H || P < 4 * W || H * P > bytes) return rd3AccelIopFlipNo(6);
     struct RD3KFlipRequest f; rd3SVZero(&f, sizeof f);
     f.version = RD3K_FLIP_ABI_VERSION; f.kapiMemory = kmem; f.allocationCookie = vm->fAllocationCookie; f.width = (unsigned)W; f.height = (unsigned)H; f.pitch = (unsigned)P;
-    rd3AccelNotePresented(vm);
+    rd3AccelNotePresented(vm, head);
     if (gIopAsync && pipe) return rd3AccelIopAsyncStart(pipe, fb, head, s, &f);
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("rd3FlipToSurfacePure");
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
@@ -2307,7 +2309,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     IOService *fb = a->fFBs[head];
     if (!rd3AccelFlipTo(src, fb, head))
         rd3AccelCopyToScanout(src, fb, head);
-    rd3AccelNotePresented(rd3res_vidmem(src));
+    rd3AccelNotePresented(rd3res_vidmem(src), head);
 }
 
 /* ---- copy forward (card run 54) ----
@@ -2340,19 +2342,29 @@ static unsigned gCfChecks, gCfKept, gCfReverted, gCfOther, gCfNotShown;
  * the last frame: a copy forward from a buffer that was never shown would
  * copy black over it (card run 56: "copied 0x00000000" on every check,
  * the screen black but for what changed). Pointers are only compared. */
-static const void *volatile gCfShown[8];
-static volatile UInt32 gCfShownNext;
-static void rd3AccelNotePresented(const void *vm)
+static struct { const void *volatile vm; volatile unsigned long long cookie; } gCfShown[kRd3MaxFB];
+static void rd3AccelNotePresented(const void *vm, unsigned head)
 {
-    if (!vm) return;
-    for (unsigned i = 0; i < 8; i++)
-        if (gCfShown[i] == vm) return;
-    gCfShown[OSIncrementAtomic((volatile SInt32 *)&gCfShownNext) & 7] = vm;
+    const RD3VidMemory *m = (const RD3VidMemory *)vm;
+    if (!m || head >= kRd3MaxFB) return;
+    gCfShown[head].vm = nullptr;   /* never a pointer with another buffer's cookie */
+    gCfShown[head].cookie = m->fAllocationCookie;
+    gCfShown[head].vm = vm;
 }
-static bool rd3AccelWasPresented(const void *vm)
+/* a freed vidmem leaves the table: its address may come back for a new,
+ * never-shown buffer */
+void rd3AccelVidmemGone(const void *vm)
 {
-    for (unsigned i = 0; vm && i < 8; i++)
-        if (gCfShown[i] == vm) return true;
+    for (unsigned h = 0; vm && h < kRd3MaxFB; h++)
+        if (gCfShown[h].vm == vm) gCfShown[h].vm = nullptr;
+}
+/* the frame on a panel now: the buffer each head showed last, or the scanout itself */
+static bool rd3AccelWasPresented(const RD3VidMemory *vm)
+{
+    if (!vm) return false;
+    if (vm->fScanout) return true;
+    for (unsigned h = 0; h < kRd3MaxFB; h++)
+        if (gCfShown[h].vm == vm && gCfShown[h].cookie == vm->fAllocationCookie) return true;
     return false;
 }
 

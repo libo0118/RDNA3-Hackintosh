@@ -1831,3 +1831,8 @@ Settings. That is expected for them, not a display regression.
   them as the plugin's NVK path did. A read-only buffer texture over
   CPU-visible bytes is now a private image refreshed from the buffer once
   per command buffer that uses it.
+- Known limit: Safari's GPU process (`com.apple.WebKit.GPU`) cannot load
+  the plugin: its sandbox blocks mapping code from `/Library/GPUBundles`
+  ("file system sandbox blocked mmap()"), SIP off or not. Apple's own GPU
+  bundles live on the sealed system volume; M6 for Safari needs the bundle
+  there or WebKit's GPU process off.
