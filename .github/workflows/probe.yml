@@ -24,7 +24,8 @@ jobs:
           cat probe-out/00-system.txt
           echo "== assertion and pipe strings"; head -200 probe-out/20-CoreDisplay-strings.txt
           echo "== IOPresentment strings"; head -100 probe-out/21-IOPresentment-strings.txt
-          echo "== CoreDisplay_CreateDisplayForCGXDisplayDevice"; head -1500 probe-out/10-CreateDisplayForCGXDisplayDevice.s
+          echo "== copy forward strings and exports"; cat probe-out/22-copy-forward-strings.txt
+          echo "== copy forward functions"; head -2500 probe-out/14-copy-forward.s
       - uses: actions/upload-artifact@v4
         with:
           name: probe-coredisplay
