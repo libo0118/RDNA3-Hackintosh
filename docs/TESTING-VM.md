@@ -114,9 +114,12 @@ window on the Linux desktop.
 rdna3vm window
 ```
 
-The picture is scaled to the window (QEMU's GTK `zoom-to-fit`): resize the
-window freely, the whole macOS desktop stays visible. `rdna3vm window
---no-zoom` shows it 1:1.
+macOS runs at 1440x900 there (`WINDOW_RESOLUTION` in the config, or
+`rdna3vm window --res 1280x800` for one run), not at the monitor's full
+size, and the picture is scaled to the window (QEMU's GTK `zoom-to-fit`):
+resize the window freely, the whole desktop stays visible. `--no-zoom`
+shows it 1:1. The steps with the card set the card's own mode back
+(`OC_RESOLUTION`).
 
 1. In the OpenCore menu choose **macOS Base System**.
 2. **Disk Utility** → choose *QEMU HARDDISK* (about 128 GB) → **Erase**:

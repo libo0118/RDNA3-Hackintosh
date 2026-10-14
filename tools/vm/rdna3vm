@@ -5,8 +5,9 @@
 #   rdna3vm check                                 is this machine ready?
 #   rdna3vm prepare --osx-kvm DIR --artifact ZIP  one-time setup (+ after a new build)
 #           [--radv radv-macos-logs.zip]        + RADV: rdna3_vktest from step 8 on
-#   rdna3vm window [--no-zoom]                    macOS in a window (install, setup); the picture
-#                                                 scaled to the window (GTK zoom-to-fit)
+#   rdna3vm window [--res WxH] [--no-zoom]        macOS in a window (install, setup) at WxH
+#                                                 (default WINDOW_RESOLUTION, 1440x900), the
+#                                                 picture scaled to the window (GTK zoom-to-fit)
 #   rdna3vm step N [--stay]                       ladder step N with the GPU passed through
 #   rdna3vm args "BOOT-ARGS" [--stay]             the same with your own rdna3* boot-args
 #   rdna3vm queue STEP... | pending               several steps one after the other, unattended
@@ -202,6 +203,8 @@ PRE_SUSPEND=${PRE_SUSPEND:-1}
 # GOP mode OpenCore picks before macOS (UEFI/Output/Resolution): OVMF leaves
 # 800x600; Max = the largest mode the card's GOP offers for the monitor
 OC_RESOLUTION=${OC_RESOLUTION:-Max}
+# macOS's screen size in 'rdna3vm window' (no card there: QEMU's display)
+WINDOW_RESOLUTION=${WINDOW_RESOLUTION:-1440x900}
 EOF
     [ -n "${BASE_ARGS:-}" ] && echo "BASE_ARGS=\"$BASE_ARGS\"" >> "$CONF"
     ok "$CONF (RAM ${RAM_GB:-$ram} GiB, $cpus CPU)"
@@ -411,12 +414,24 @@ start_share() {
 }
 
 cmd_window() {
-    local zoom=on
-    [ "${1:-}" = --no-zoom ] && zoom=off
+    local zoom=on res=
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --no-zoom) zoom=off; shift ;;
+            --res) res=${2:-}; shift 2 ;;
+            *) die "unknown option $1 (--res WxH, --no-zoom)" ;;
+        esac
+    done
     load_conf
+    # the window's own size for macOS (OpenCore's GOP mode, which macOS keeps
+    # without a display driver): not the card's Max of the passthrough runs,
+    # which those set back (cmd__passthrough)
+    res=${res:-${WINDOW_RESOLUTION:-1440x900}}
+    case $res in [0-9]*x[0-9]*) ;; *) die "--res wants WxH, e.g. 1280x800" ;; esac
     msrs
     # verbose boot without our drivers' levels: a hang shows where it stops
-    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --boot-args "$BASE_ARGS -v keepsyms=1 debug=0x100 amfi=0x80" >/dev/null
+    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --boot-args "$BASE_ARGS -v keepsyms=1 debug=0x100 amfi=0x80" \
+        --resolution "$res" >/dev/null
     qemu_common
     [ -f "$INSTALLER" ] && QARGS+=(-drive id=InstallMedia,if=none,format=raw,file="$INSTALLER"
                                   -device ide-hd,bus=sata.3,drive=InstallMedia)
@@ -430,7 +445,7 @@ cmd_window() {
     fi
     start_share || exit 1
     trap "kill $SHARE_PID 2>/dev/null" EXIT
-    say "macOS in a window (the card stays with Linux). In the macOS Terminal:"
+    say "macOS in a window at $res (the card stays with Linux). In the macOS Terminal:"
     echo "    curl -s http://10.0.2.2:8000/setup.sh | sudo sh"
     qemu-system-x86_64 "${QARGS[@]}"
 }
@@ -835,7 +850,9 @@ cmd__passthrough() {
     RUNLOG=$log
     exec > >(tee -a "$log") 2>&1
     echo "boot-args: $RDNA3VM_BOOTARGS"
-    cmd__oc --boot-args "$RDNA3VM_BOOTARGS" || exit 1
+    # the card's GOP mode again (rdna3vm window sets its own window size)
+    local res=${OC_RESOLUTION-Max}
+    cmd__oc --boot-args "$RDNA3VM_BOOTARGS" ${res:+--resolution "$res"} || exit 1
     bdf=$(gpu_bdf)
     mapfile -t DEVS < <(group_devs "$bdf")
     echo "to the VM: ${DEVS[*]}"
