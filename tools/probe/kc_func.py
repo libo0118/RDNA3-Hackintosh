@@ -9,7 +9,10 @@ demangled-looking names match, cuts their bytes up to the next symbol and
 has clang + otool disassemble them. Call targets inside the collection are
 named from the same symbol table.
 
-  kc_func.py KC BUNDLE-ID REGEX [REGEX...]
+  kc_func.py KC BUNDLE-ID REGEX [REGEX...]       functions by name
+  kc_func.py KC BUNDLE-ID --at ADDR[,ADDR...]     functions by address
+  kc_func.py KC BUNDLE-ID --grep REGEX            every instruction of
+                                                  __text matching, by function
 """
 import re
 import struct
@@ -44,12 +47,18 @@ def main():
                 entry = (vmaddr, fileoff)
     if not entry:
         raise SystemExit("no fileset entry " + bundle)
-    segs, syms = [], []
+    segs, syms, sects = [], [], []
     for cmd, p, size in load_commands(buf, entry[1]):
         if cmd == LC_SEGMENT_64:
             segname = buf[p + 8:p + 24].rstrip(b"\0").decode()
             vmaddr, vmsize, fileoff, filesize = struct.unpack_from("<QQQQ", buf, p + 24)
             segs.append((segname, vmaddr, vmsize, fileoff, filesize))
+            nsects = struct.unpack_from("<I", buf, p + 64)[0]
+            for k in range(nsects):
+                q = p + 72 + 80 * k
+                sect = buf[q:q + 16].rstrip(b"\0").decode()
+                saddr, ssize = struct.unpack_from("<QQ", buf, q + 32)
+                sects.append((segname, sect, saddr, ssize))
         elif cmd == LC_SYMTAB:
             symoff, nsyms, stroff, strsize = struct.unpack_from("<IIII", buf, p + 8)
             for i in range(nsyms):
@@ -89,6 +98,43 @@ def main():
     except OSError:
         pass
 
+    def disasm(code):
+        with tempfile.TemporaryDirectory() as d:
+            s_, o = os.path.join(d, "f.s"), os.path.join(d, "f.o")
+            with open(s_, "w") as fh:
+                fh.write(".text\n_f:\n")
+                for k in range(0, len(code), 16):
+                    fh.write(".byte " + ",".join("0x%02x" % b for b in code[k:k + 16]) + "\n")
+            subprocess.run(["xcrun", "clang", "-c", "-arch", "x86_64", s_, "-o", o], check=True)
+            return subprocess.run(["otool", "-tv", o], capture_output=True, text=True).stdout.splitlines()
+
+    def pretty_at(a):
+        n = name_of(a)
+        if not n:
+            return "0x%x" % a
+        base, _, off = n.rpartition("+")
+        return demangle.get(base, base) + "+" + off
+
+    if sys.argv[3] == "--grep":
+        rx = re.compile(sys.argv[4])
+        for seg, sect, saddr, ssize in sects:
+            if (seg, sect) != ("__TEXT", "__text") and not (seg.startswith("__TEXT") and sect == "__text"):
+                continue
+            fo = file_of(saddr)
+            print("== %s,%s 0x%x+0x%x" % (seg, sect, saddr, ssize))
+            for line in disasm(buf[fo:fo + ssize])[2:]:
+                m = re.match(r"^([0-9a-f]+)\s+(.*)$", line)
+                if m and rx.search(m.group(2)):
+                    print("  %-60s %s" % (pretty_at(saddr + int(m.group(1), 16)), m.group(2)))
+        return
+    if sys.argv[3] == "--at":
+        want = [int(x, 16) for x in sys.argv[4].split(",")]
+        pats = []
+        for a in want:
+            n = name_of(a)
+            if n:
+                pats.append(re.compile("^" + re.escape(n.rpartition("+")[0]) + "$"))
+
     for i, (addr, name) in enumerate(syms):
         pretty = demangle.get(name, name)
         if not any(p_.search(pretty) or p_.search(name) for p_ in pats):
@@ -101,14 +147,7 @@ def main():
             print("  not in a file-backed segment")
             continue
         code = buf[fo:fo + (end - addr)]
-        with tempfile.TemporaryDirectory() as d:
-            s, o = os.path.join(d, "f.s"), os.path.join(d, "f.o")
-            with open(s, "w") as fh:
-                fh.write(".text\n_f:\n")
-                for k in range(0, len(code), 16):
-                    fh.write(".byte " + ",".join("0x%02x" % b for b in code[k:k + 16]) + "\n")
-            subprocess.run(["xcrun", "clang", "-c", "-arch", "x86_64", s, "-o", o], check=True)
-            dis = subprocess.run(["otool", "-tv", o], capture_output=True, text=True).stdout.splitlines()
+        dis = disasm(code)
         for line in dis[2:]:
             m = re.match(r"^([0-9a-f]+)\s+(.*)$", line)
             if not m:
@@ -119,15 +158,15 @@ def main():
             # rip-relative and direct branch targets, as addresses in the collection
             t = re.search(r"\b(?:callq|jmp\w*|j\w+)\s+0x([0-9a-f]+)\b", ins)
             if t:
-                tgt = addr + int(t.group(1), 16)
-                note = name_of(tgt) or ("0x%x" % tgt)
+                tgt = (addr + int(t.group(1), 16)) & 0xffffffffffffffff
+                note = pretty_at(tgt)
             r = re.search(r"(-?0x[0-9a-f]+)\(%rip\)", ins)
             if r:
                 # the next instruction's offset: otool prints the bytes' length implicitly
                 nxt = next((int(x.split()[0], 16) for x in dis[dis.index(line) + 1:] if re.match(r"^[0-9a-f]+\s", x)), off)
-                tgt = addr + nxt + int(r.group(1), 16)
-                note = (note + " " if note else "") + "[rip] " + (name_of(tgt) or "0x%x" % tgt)
-            print("  +0x%03x  %-48s %s" % (off, ins, ("; " + demangle.get(note.split("+")[0], note)) if note else ""))
+                tgt = (addr + nxt + int(r.group(1), 16)) & 0xffffffffffffffff
+                note = (note + " " if note else "") + "[rip] " + pretty_at(tgt)
+            print("  +0x%03x  %-48s %s" % (off, ins, ("; " + note) if note else ""))
 
 
 if __name__ == "__main__":

@@ -22,7 +22,14 @@ here=$(dirname "$0")
 python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 \
     'IOAccelLegacySurface::clientClose\(' 'IOAccelSurface::clientClose\(' \
     > "$out/31-clientClose.txt" 2>&1
+# probe run 4: clientClose read this+0x12c8 (the accelerator) at +0x1e and
+# found it NULL at +0x1c5: who writes that field, and the functions it
+# calls in between (the display pipe's, on this+0x13a8)
+python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 --grep ', 0x12c8\(%' \
+    > "$out/32-writes-12c8.txt" 2>&1
+python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 --at 0x14e141d2,0x14e14286,0x14e144ea,0x14e1e25c \
+    > "$out/33-callees.txt" 2>&1
 python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 \
-    'IOAccelLegacySurface::free\(' 'IOAccelLegacySurface::detach' 'IOAccelLegacySurface::release_' \
-    > "$out/32-surface.txt" 2>&1
-wc -l "$out/31-clientClose.txt" "$out/32-surface.txt" >> "$sys"
+    'IOAccelLegacySurface::leave_assembly_fullscreen' 'IOAccelSurface::surfaceStop' \
+    > "$out/34-stop.txt" 2>&1
+wc -l "$out"/3[1-4]-*.txt >> "$sys"
