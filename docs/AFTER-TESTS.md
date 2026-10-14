@@ -1647,3 +1647,30 @@ Settings. That is expected for them, not a display regression.
   without the plugin's per-texture lines.
 - Step `agdc` gets the Metal probes (`rdna3probe=1`: M4 CAMetalLayer on
   screen, M5, M6 Chess and Maps) now that WindowServer is on Metal.
+
+### Card run 49 (step agdc + probes, build 180)
+
+- WindowServer on Metal for 9 minutes through modes (4/4), display sleep
+  and wake, gamma, A3 and **M4: the CAMetalLayer window was on the screen**
+  (the user saw it magenta, 8470 magenta pixels on pipe 1). mtlprobe said
+  FAILED only because no presented callback arrives on the flip path; the
+  triage now decides M4 by the screen.
+- Gamma: on pipe 0 the identity table brought the CRC of before back
+  exactly; ColorSync's restore loads its own curve (a RAM table), so its
+  CRC differs although the screen looks as before (the user saw it come
+  back). PASS now also when the identity table returns a pipe's CRC.
+- **M6 (Chess) broke the desktop**: Chess opened the device through the
+  bridge, then `[gfxhub] page fault vmid 3 at 0x800100958000, client 10`
+  (SQC data, MAPPING_ERROR, read) and "VMID 3's client is guilty";
+  WindowServer aborted ("COREANIMATION ... pipeline: Vulkan is not up in
+  this process") and restarted six more times about every 10 s; Maps
+  could not launch. No GPU hang or reset. The report kept neither which
+  process owned VMID 3 nor why the later WindowServers died (the log's
+  middle was cut, one crash file kept).
+- Diagnostics: the kernel logs each VMID with its process and pid, the
+  guilty line names it, a freed VM says so; collect.sh keeps the whole
+  CoreDisplay / plugin log and `25-windowserver-exits.txt` (every
+  WindowServer crash of the boot: pid, launch, termination, asi; launchd's
+  exits).
+- IH ring overflows (3 this run, 1 in run 48) precede the fault: the ring
+  fills faster than it is read; to look at with the VMID owners known.

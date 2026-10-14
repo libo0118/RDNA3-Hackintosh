@@ -45,6 +45,10 @@ CSRC   += ../hw/dcn32_hpo.c ../hw/dcn32_odm.c
 CSRC   += ../hw/dcn32_audio.c ../hw/dcn32_opp.c
 CSRC   += ../hw/dcn32_pstate.c ../hw/dcn32_subvp.c
 HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../hw/gen/*.h ../uapi/*.h ../third_party/amd/*.h ../accel/rdna3k_abi.h)
+# a hash of the sources (like fb/ and accel/): the VM's report skips a test
+# that passed before with the same build of what it tests
+CORE_SRC_HASH := $(shell cat $(CXXSRC) $(CSRC) $(HDRS) Info.plist | shasum | cut -c1-10)
+CXXFLAGS += -DKEXT_SRC_HASH='"$(CORE_SRC_HASH)"'
 OBJS   := $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(CXXSRC))) \
           $(patsubst %.c,$(OBJDIR)/%.o,$(notdir $(CSRC)))
 vpath %.cpp src

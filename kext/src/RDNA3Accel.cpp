@@ -16,6 +16,9 @@
 #include <libkern/c++/OSDictionary.h>
 #include <pexpert/pexpert.h>
 #include "rdna3_bootargs.h"
+#ifndef KEXT_SRC_HASH
+#define KEXT_SRC_HASH "unknown"   /* kext/Makefile sets it (tools/kext_check.sh does not) */
+#endif
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
@@ -52,6 +55,7 @@ bool RDNA3Accel::start(IOService *provider)
     /* the framebuffer publishes its own: a mismatch means one of the two
      * kexts is a stale copy (the Auxiliary KC keeps the last setup.sh one) */
     setProperty("RDNA3,Commit", KEXT_COMMIT);
+    setProperty("RDNA3,CoreSource", KEXT_SRC_HASH);
 
     readConfigSpace();
 

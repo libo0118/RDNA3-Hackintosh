@@ -48,9 +48,13 @@ run 23-windowserver-crash.txt sh -c "for f in \$(ls -t /Library/Logs/DiagnosticR
 run 22-log-windowserver.txt log show --last boot --style compact --predicate 'process == "WindowServer" AND (eventMessage CONTAINS "GPU" OR eventMessage CONTAINS "Metal" OR eventMessage CONTAINS "accel")'
 # CoreDisplay / IOPresentment / GPUWrangler / the Metal plugin in
 # WindowServer, unfiltered: why a display pipe or Metal device failed
-run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --predicate 'process == \"WindowServer\" AND (subsystem BEGINSWITH \"com.apple.CoreDisplay\" OR subsystem BEGINSWITH \"com.apple.IOPresentment\" OR subsystem BEGINSWITH \"com.apple.GPUWrangler\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS[c] \"agdc\" OR eventMessage CONTAINS \"MetalDevice\")' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture' > /tmp/rdna3-cd.log; head -400 /tmp/rdna3-cd.log; n=\$(wc -l < /tmp/rdna3-cd.log); [ \$n -gt 600 ] && echo \"... (\$((n - 600)) lines left out)\"; [ \$n -gt 400 ] && tail -200 /tmp/rdna3-cd.log"
-# (the start matters - the plugin's device for WindowServer - and WindowServer
-# on Metal logs a lot: card run 48 lost it to a tail)
+run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --predicate 'process == \"WindowServer\" AND (subsystem BEGINSWITH \"com.apple.CoreDisplay\" OR subsystem BEGINSWITH \"com.apple.IOPresentment\" OR subsystem BEGINSWITH \"com.apple.GPUWrangler\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS[c] \"agdc\" OR eventMessage CONTAINS \"MetalDevice\")' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture'"
+# whole (card run 48 lost the plugin's start to a tail, run 49 the middle
+# where WindowServer restarted six times)
+# every WindowServer crash of this boot, its termination reason and the
+# assertion text (run 49: one "COREANIMATION ... Vulkan is not up" kept,
+# the other restarts unexplained)
+run 25-windowserver-exits.txt sh -c "for f in \$(ls -t /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips 2>/dev/null | head -12); do echo \"== \$f\"; tr -d '\\n' < \"\$f\" | grep -o -E '\"(pid|procLaunch|termination|asi|exception)\" *: *(\\{[^}]*\\}|\"[^\"]*\"|[0-9]+)' | head -8; done; echo '== launchd about WindowServer'; log show --last boot --style compact --predicate 'process == \"launchd\" AND eventMessage CONTAINS \"WindowServer\"' 2>/dev/null | grep -i -E 'exit|crash|signal|spawn' | tail -40"
 [ -s "$dir/20-log-rdna3.txt" ] && grep -q "RDNA3" "$dir/20-log-rdna3.txt" || \
     run 20-log-rdna3-sudo.txt sudo log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3"'
 

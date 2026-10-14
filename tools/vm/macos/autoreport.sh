@@ -347,6 +347,50 @@ done_() {   # done_ EXIT: the test's exit code and summary line
           grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|PMCTL:|BACO:|CTS:|PLATFORM:|WSI:|A3:|M4:|M5:|M6:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
     if [ "$1" = 0 ]; then prog "    OK  ${sum}"; else prog "    FAIL (exit $1)  ${sum}"; fi
 }
+# Tests that passed before are not run again while nothing they test
+# changed: a fingerprint of the builds a test uses (source hashes of the
+# kexts, the test tool, the Metal plugin, RADV / libdrm) and the step's
+# rdna3 boot-args. A skipped test's saved output goes into the results with
+# a SKIPPED line, so the triage reads it as before. rdna3nocache=1 runs all.
+CACHE_DIR="$D/passed"
+cache_part() {
+    case $1 in
+        core)  # the source hash (kext/Makefile); older builds: the commit
+               c=$(ioreg -l -w0 -r -c RDNA3Accel -d 1 2>/dev/null | sed -n 's/.*"RDNA3,CoreSource" = "\([^"]*\)".*/\1/p' | head -1)
+               [ -n "$c" ] && [ "$c" != unknown ] || c=commit-$(ioreg -l -w0 -r -c RDNA3Accel -d 1 2>/dev/null | sed -n 's/.*"RDNA3,Commit" = "\([^"]*\)".*/\1/p' | head -1)
+               echo "$c" ;;
+        fb)    ioreg -l -w0 -r -c RDNA3Framebuffer -d 1 2>/dev/null | sed -n 's/.*"RDNA3,FBSource" = "\([^"]*\)".*/\1/p' | head -1 ;;
+        accel) ioreg -l -w0 -r -c RDNA3Accelerator -d 1 2>/dev/null | sed -n 's/.*"RDNA3,AccelSource" = "\([^"]*\)".*/\1/p' | head -1 ;;
+        agdc)  ioreg -l -w0 -r -c RDNA3AGDC -d 1 2>/dev/null | sed -n 's/.*"RDNA3,AGDCSource" = "\([^"]*\)".*/\1/p' | head -1 ;;
+        metal) cat /Library/GPUBundles/RDNA3MTLDriver.bundle/Contents/MacOS/RDNA3MTLDriver \
+                   /Library/GPUBundles/rdna3mtl/*.dylib /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | shasum | cut -c1-16 ;;
+        radv)  cat "$D/bin/libvulkan_radeon.dylib" "$D/bin/libdrm.2.dylib" "$D/bin/libdrm_amdgpu.1.dylib" 2>/dev/null | shasum | cut -c1-16 ;;
+        cts)   cat "$D/cts.sha256" 2>/dev/null ;;
+        bin:*) shasum "$D/bin/${1#bin:}" 2>/dev/null | cut -c1-16 ;;
+    esac
+}
+cache_skip() {   # cache_skip NAME PART...: 0 = passed before with the same builds, its output replayed
+    CNAME=$1; shift
+    CFP=
+    [ -z "$STANDALONE" ] || return 1
+    case " $args " in *" rdna3nocache=1 "*) return 1 ;; esac
+    CFP=$({ for c in "$@"; do echo "$c=$(cache_part "$c")"; done
+            echo "args=$(printf '%s\n' $args | grep '^rdna3' | grep -v -e '^rdna3vmauto=' -e '^rdna3nocache=' | sort | tr '\n' ' ')"
+          } | shasum | cut -c1-16)
+    if [ -f "$CACHE_DIR/$CNAME.out" ] && [ "$(cat "$CACHE_DIR/$CNAME.fp" 2>/dev/null)" = "$CFP" ]; then
+        echo "== $CNAME: SKIPPED - passed on $(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$CACHE_DIR/$CNAME.fp") with the same builds of what it tests ($*); rdna3nocache=1 runs it. Its output then:"
+        cat "$CACHE_DIR/$CNAME.out"
+        prog "    skipped: $CNAME passed before with the same builds"
+        return 0
+    fi
+    return 1
+}
+cache_keep() {   # cache_keep EXIT: after done_, the test's output kept when it passed
+    [ "$1" = 0 ] && [ -n "${CFP:-}" ] || return 0
+    mkdir -p "$CACHE_DIR"
+    tail -n +"$((hl + 1))" "$extra" > "$CACHE_DIR/$CNAME.out" 2>/dev/null && echo "$CFP" > "$CACHE_DIR/$CNAME.fp"
+    CFP=
+}
 [ -n "$win" ] || { rm -f "$P"; touch "$P"; chmod 644 "$P"; }
 [ -n "$win" ] && notify "Tests started: $(echo "$args" | tr ' ' '\n' | grep -c '^rdna3') rdna3 boot-args"
 prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
@@ -439,9 +483,11 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                     hdr "rdna3_modetest list"
                     with_limit 60 in_session "$D/bin/rdna3_modetest" list 2>&1
                     done_ $?
-                    hdr "rdna3_modetest cycle"
-                    with_limit 240 in_session "$D/bin/rdna3_modetest" cycle "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
-                    done_ $?
+                    if ! cache_skip modes core fb accel agdc metal bin:rdna3_modetest bin:rdna3_drminfo; then
+                        hdr "rdna3_modetest cycle"
+                        with_limit 240 in_session "$D/bin/rdna3_modetest" cycle "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
+                        r=$?; done_ $r; cache_keep $r
+                    fi
                 fi ;;
         esac
         # hotplug (rdna3hotplug=1): a marked window in which the user pulls
@@ -491,9 +537,11 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                     # Which way does the table go: the accelerator's display
                     # pipe transactions (empty = no plane, gamma/options only)?
                     echo "== display pipe counters before"; sysctl debug 2>/dev/null | grep -E "rdna3accel_iop" || true
-                    hdr "rdna3_modetest gamma"
-                    with_limit 180 in_session "$D/bin/rdna3_modetest" gamma "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
-                    done_ $?
+                    if ! cache_skip gamma core fb accel agdc metal bin:rdna3_modetest bin:rdna3_drminfo; then
+                        hdr "rdna3_modetest gamma"
+                        with_limit 180 in_session "$D/bin/rdna3_modetest" gamma "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
+                        r=$?; done_ $r; cache_keep $r
+                    fi
                     echo "== display pipe counters after"; sysctl debug 2>/dev/null | grep -E "rdna3accel_iop" || true
                     echo "== IOAcceleratorFamily2: display pipe transaction and gamma symbols"
                     for k in /System/Library/Extensions/IOAcceleratorFamily2.kext/Contents/MacOS/IOAcceleratorFamily2 \
@@ -537,9 +585,11 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         done_ $?
         case " $args " in
         *" rdna3pmctl=1 "*|*" rdna3pmctl=2 "*)
-            hdr "rdna3_pmctl selftest"
-            with_limit 120 "$D/bin/rdna3_pmctl" selftest 2>&1
-            done_ $?
+            if ! cache_skip pmctl-selftest core bin:rdna3_pmctl; then
+                hdr "rdna3_pmctl selftest"
+                with_limit 120 "$D/bin/rdna3_pmctl" selftest 2>&1
+                r=$?; done_ $r; cache_keep $r
+            fi
             hdr "rdna3_pmctl profiles"
             with_limit 30 "$D/bin/rdna3_pmctl" profiles 2>&1
             done_ $? ;;
@@ -560,10 +610,12 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     # Vulkan: RADV (prepare --radv) straight through its ICD entry points,
     # no loader; libdrm_xnu talks to RDNA3Accel's user client
     if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_vktest" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then
-        hdr "rdna3_vktest"
-        DYLD_LIBRARY_PATH="$D/bin" RADV_DEBUG=startup with_limit 90 "$D/bin/rdna3_vktest" \
-            "$D/bin/libvulkan_radeon.dylib" 2>&1
-        done_ $?
+        if ! cache_skip vktest core radv bin:rdna3_vktest; then
+            hdr "rdna3_vktest"
+            DYLD_LIBRARY_PATH="$D/bin" RADV_DEBUG=startup with_limit 90 "$D/bin/rdna3_vktest" \
+                "$D/bin/libvulkan_radeon.dylib" 2>&1
+            r=$?; done_ $r; cache_keep $r
+        fi
     fi
     # Vulkan CTS subset (rdna3cts=1, V2): deqp-vk from `rdna3vm cts` through
     # the Khronos loader and RADV's ICD, one run per line of its
@@ -576,9 +628,11 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             curl -sf --max-time 900 "$HOST/rdna3-cts.tar.gz" | tar -xz -C "$D" && echo "$ctsum" > "$D/cts.sha256"
         fi
         if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/cts/deqp-vk" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then
-            hdr "Vulkan CTS subset ($(cut -d, -f1 "$D/cts/VERSION" 2>/dev/null))"
-            cts_run
-            done_ $?
+            if ! cache_skip cts core radv cts; then
+                hdr "Vulkan CTS subset ($(cut -d, -f1 "$D/cts/VERSION" 2>/dev/null))"
+                cts_run
+                r=$?; done_ $r; cache_keep $r
+            fi
         else
             echo "== Vulkan CTS: no deqp-vk bundle (rdna3vm cts) or no RADV in the report's bin"
         fi ;;
@@ -587,12 +641,14 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     # kernel through plugin -> translator -> RADV; the plugin's log after it
     if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/mtlprobe" ] && [ -d /Library/GPUBundles/RDNA3MTLDriver.bundle ]; then
         sync_metal "$D/bin"
-        hdr "mtlprobe (MetalPluginName: $(ioreg -r -c RDNA3Accelerator -w0 | grep -c MetalPluginName))"
-        rm -f /tmp/rdna3-nvmtl.log
-        NVMTL_LOG_PATH=/tmp/rdna3-nvmtl.log with_limit 90 "$D/bin/mtlprobe" 2>&1
-        done_ $?
-        echo "== plugin log (last 60 lines)"
-        tail -60 /tmp/rdna3-nvmtl.log 2>/dev/null
+        if ! cache_skip mtlprobe core accel metal bin:mtlprobe; then
+            hdr "mtlprobe (MetalPluginName: $(ioreg -r -c RDNA3Accelerator -w0 | grep -c MetalPluginName))"
+            rm -f /tmp/rdna3-nvmtl.log
+            NVMTL_LOG_PATH=/tmp/rdna3-nvmtl.log with_limit 90 "$D/bin/mtlprobe" 2>&1
+            r=$?; done_ $r; cache_keep $r
+            echo "== plugin log (last 60 lines)"
+            tail -60 /tmp/rdna3-nvmtl.log 2>/dev/null
+        fi
     elif [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/mtlprobe" ]; then
         hdr "mtlprobe: plugin not installed (tools/build_metal.sh in the VM)"
         with_limit 30 "$D/bin/mtlprobe" --list 2>&1
@@ -664,6 +720,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             # M6: two system apps that draw with Metal, allowed for this run
             # only (the allow list comes back afterwards, or at the next
             # report if this one dies)
+            if ! cache_skip m6 core fb accel agdc metal; then
             hdr "probe: Metal apps (M6)"
             al=/Library/GPUBundles/rdna3mtl-allow.txt
             [ -f "$al" ] && [ ! -f /var/db/rdna3-allow.bak ] && cp "$al" /var/db/rdna3-allow.bak
@@ -689,6 +746,9 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             [ -f /var/db/rdna3-allow.bak ] && mv /var/db/rdna3-allow.bak "$al"
             echo "M6: $m6ok of 2 apps ran on the plugin without a crash"
             done_ 0
+            [ "$m6ok" = 2 ] && cache_keep 0
+            CFP=
+            fi
         else
             echo "== probe: A3 / M4 / M5 / M6 need the Metal plugin (tools/build_metal.sh in the VM) and level 8"
         fi ;;
@@ -697,6 +757,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     # loop; the PM trend in the serial log runs alongside
     soak=$(printf '%s\n' $args | sed -n 's/^rdna3soak=\([0-9]*\)$/\1/p' | head -1)
     if [ -n "$soak" ] && [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
+        if ! cache_skip soak core radv bin:rdna3_drminfo bin:rdna3_vktest; then
         hdr "soak for $soak min"
         end=$(( $(date +%s) + soak * 60 )); n=0; bad=0
         while [ "$(date +%s)" -lt "$end" ]; do
@@ -711,6 +772,8 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         echo "SOAK: $n rounds, $bad failed"
         if [ "$bad" = 0 ]; then prog "    OK  SOAK: $n rounds"; else prog "    FAIL  SOAK: $n rounds, $bad failed"; fi
         partial
+        cache_keep "$bad"
+        fi
     fi
     # system sleep (rdna3resume=1, step sleep): a short S3 with an RTC wake
     # (rdna3vm wakes the VM after 90 s otherwise), the heads before and

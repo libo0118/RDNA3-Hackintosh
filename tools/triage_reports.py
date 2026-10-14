@@ -518,7 +518,12 @@ def summary(path, serial=None):
             c = count_color(ppm, (255, 0, 255))
             if c:
                 seen.append("%s %d of %d" % (os.path.basename(ppm).split("-")[-1][:-4], c[0], c[1]))
-        out.append(("M4 on the screen", "magenta pixels: " + (", ".join(seen) if seen else "no picture")))
+        best = max([count_color(p_, (255, 0, 255))[0] for p_ in pics if count_color(p_, (255, 0, 255))] or [0])
+        # card run 49: the window was on the screen (the user saw it pink)
+        # while mtlprobe counted no presented callback: with WindowServer
+        # presenting by flips none is delivered; the screen decides
+        out.append(("M4 on the screen", "magenta pixels: " + (", ".join(seen) if seen else "no picture") +
+                    (" -> PASS: the CAMetalLayer window is on the screen" if best > 1000 else "")))
     # P2: the PM experiment's variants, the RLC state after each
     lines = log.splitlines()
     for i, l in enumerate(lines):
@@ -586,6 +591,10 @@ def main():
         if os.path.exists(tests):
             txt = open(tests, errors="replace").read()
             stale = re.search(r"^stale: (.*)$", txt, re.M)
+            skipped = re.findall(r"^== (\S+): SKIPPED - passed on ([0-9-]+ [0-9:]+)", txt, re.M)
+            if skipped:
+                print("   note: %d test(s) not run again, passed before with the same builds (their saved results "
+                      "below): %s" % (len(skipped), ", ".join("%s (%s)" % k for k in skipped)))
             if "not approved to load" in txt and stale and not stale.group(1).strip():
                 # the builds running are the ones installed (same source
                 # hashes): only a relinked copy of the same sources waits

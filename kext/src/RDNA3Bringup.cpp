@@ -11,6 +11,7 @@
 #include <sys/vnode.h>
 #include <sys/uio.h>
 #include <sys/fcntl.h>
+#include <sys/proc.h>
 #include <libkern/OSAtomic.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
@@ -1983,6 +1984,8 @@ struct RDNA3Vm {
     bool     gfxFlush;   /* next GFX job re-points the VMID and flushes from the ring */
     bool     compFlush;  /* same for the next compute job (the hub is shared, the rings are not) */
     bool     dmaFlush;   /* rdna3amdgpu=1: same for the next DMA job (amdgpu_vm_flush on the SDMA ring) */
+    int      ownerPid;   /* the process that opened it (card run 49: a page fault named only "VMID 3") */
+    char     owner[24];
 };
 
 
@@ -1994,7 +1997,8 @@ void RDNA3Bringup::markGuilty(uint32_t vmid, const char *why)
         return;
     }
     if (!v->guilty)
-        BLOG("%s: VMID %u's client is guilty, its submissions now fail", why, vmid);
+        BLOG("%s: VMID %u's client (%s, pid %d) is guilty, its submissions now fail", why, vmid,
+             v->owner[0] ? v->owner : "?", v->ownerPid);
     v->guilty = true;
 }
 
@@ -2954,6 +2958,9 @@ void *RDNA3Bringup::vmCreate()
     v->vm.root = UINT64_MAX;
     v->resetSeen = fResetCount;
     v->vramLostSeen = fVramLostCount;
+    /* the opener's thread (IOServiceOpen -> the user client's start) */
+    v->ownerPid = proc_selfpid();
+    proc_selfname(v->owner, sizeof(v->owner));
     if (!fVmReady)
         return v;
     /* one VMID per open file for now (amdgpu hands VMIDs out per job); with
@@ -2979,6 +2986,7 @@ void *RDNA3Bringup::vmCreate()
                 gfxhub303_setup_vm_pt_regs(fDev, id, gpuvm_pd_addr(fDev, &v->vm));
             vmFlush(id);
             v->gfxFlush = v->compFlush = v->dmaFlush = true;
+            BLOG("VM: VMID %u for %s (pid %d)", id, v->owner[0] ? v->owner : "?", v->ownerPid);
             break;
         }
     }
@@ -3070,6 +3078,8 @@ void RDNA3Bringup::vmDestroy(void *p)
         fVmidUsed &= ~(1u << v->vmid);
         fVmPd[v->vmid] = 0;
         fVmByVmid[v->vmid] = nullptr;
+        BLOG("VM: VMID %u of %s (pid %d) freed%s", v->vmid, v->owner[0] ? v->owner : "?", v->ownerPid,
+             v->guilty ? " (it was guilty)" : "");
     }
     IOFree(v, sizeof(*v));
 }

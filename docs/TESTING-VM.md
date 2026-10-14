@@ -203,6 +203,17 @@ If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
 
 Step `hotplug` is the one step that needs you at the screens: about two minutes after the desktop appears, the progress window and a notification say *unplug and replug the second monitor now*. You have two minutes from then: pull the second monitor's cable (the one the GOP did not light at boot), wait about 10 seconds, plug it back in. The report records what the driver saw (`RDNA3,HPDState` over time, the hotplug lines of the log) and takes a picture of both pipes afterwards. If you miss the window, the report says `HOTPLUG: 0 HPD change(s)`; run the step again.
 
+### Tests that already passed
+
+The report does not run a long test again (scaled modes, gamma, the
+Vulkan test and CTS, mtlprobe, M6, the PM selftest, soak) when it passed
+before with the same builds of everything it tests: the kexts' source
+hashes, the test tool, the Metal plugin and RADV/libdrm, and the step's
+boot-args. Its saved result goes into the report marked `SKIPPED - passed
+on <date>`, and the triage lists them. Any change to what a test uses runs
+it again. To run everything regardless: add `rdna3nocache=1`, e.g.
+`rdna3vm args "<the step's boot-args> rdna3nocache=1"`.
+
 ### A new framebuffer build: allow it once
 
 OpenCore injects the core kext itself, but `RDNA3Framebuffer` and
