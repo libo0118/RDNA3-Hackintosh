@@ -25,8 +25,9 @@ jobs:
           echo "== assertion and pipe strings"; head -200 probe-out/20-CoreDisplay-strings.txt
           echo "== IOPresentment strings"; head -100 probe-out/21-IOPresentment-strings.txt
           echo "== copy forward strings and exports"; cat probe-out/22-copy-forward-strings.txt
-          echo "== copy forward functions"; head -400 probe-out/14-copy-forward.s
-          echo "== IOAccelSetSurfaceFramebufferShape"; head -1500 probe-out/15-IOAccelSetSurfaceFramebufferShape.s
+          echo "== IOAccelSetSurfaceFramebufferShape"; head -600 probe-out/15-IOAccelSetSurfaceFramebufferShape.s
+          echo "== copy_forward_region callers"; head -4000 probe-out/16-copy-forward-callers.s
+          echo "== CGXDisplayCreateCopyForwardShape callers"; head -3000 probe-out/17-copy-forward-shape-callers.s
       - uses: actions/upload-artifact@v4
         with:
           name: probe-coredisplay
@@ -42,7 +43,7 @@ jobs:
         run: |
           sh tools/probe/iofam.sh probe-iofam
           cat probe-iofam/30-iofam-system.txt
-          for f in probe-iofam/39-*.txt probe-iofam/40-*.txt; do echo "== $f"; head -3000 "$f"; done
+          for f in probe-iofam/40-*.txt; do echo "== $f"; head -3000 "$f"; done
       - uses: actions/upload-artifact@v4
         with:
           name: probe-iofam

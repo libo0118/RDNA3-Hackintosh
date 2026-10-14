@@ -50,6 +50,21 @@ grep -n -i 'copy_forward\|copyforward\|CopyForward' "$out/CoreDisplay.exports" "
 iolib=/System/Library/PrivateFrameworks/IOAccelerator.framework/Versions/A/IOAccelerator
 dyld_info -arch x86_64 -disassemble "$iolib" > "$out/IOAccelerator.dis" 2>"$out/IOAccelerator.dis.err"
 fn "$out/IOAccelerator.dis" 'IOAccelSetSurfaceFramebufferShape|IOAccelSetSurfaceShape' "$out/15-IOAccelSetSurfaceFramebufferShape.s"
+echo "== IOAccelerator: $(wc -l < "$out/IOAccelerator.dis") lines; $(head -3 "$out/IOAccelerator.dis.err")" >> "$out/00-system.txt"
+grep -n 'SetSurfaceFramebufferShape' "$out/IOAccelerator.dis" | head -20 >> "$out/00-system.txt"
+# probe run 8: what copy_forward_region's callers do with its false
+# ("... disabling" was logged 813 times, so nothing stays disabled): every
+# function that calls it, and every one that calls those
+callers() {   # callers FILE SYMBOL-REGEX OUT
+    awk -v re="$2" '
+        /^[_A-Za-z0-9$.]+.*:$/ || /^_[^ ]*:$/ { if (hit) printf "%s", buf; buf = ""; hit = 0; name = $0 }
+        { buf = buf $0 "\n" }
+        $0 ~ re && $0 !~ /:$/ { hit = 1 }
+        END { if (hit) printf "%s", buf }' "$1" > "$3"
+    wc -l "$3" >> "$out/00-system.txt"
+}
+callers "$cd_dis" 'copy_forward_region' "$out/16-copy-forward-callers.s"
+callers "$cd_dis" 'CGXDisplayCreateCopyForwardShape' "$out/17-copy-forward-shape-callers.s"
 # every assertion string of CoreDisplay that names a display device, a
 # display pipe or AGDC
 grep -n -i 'CGXDisplayDevice\|DisplayPipe\|agdc\|linkconfig\|assert' "$out/CoreDisplay.cstring" > "$out/20-CoreDisplay-strings.txt" 2>&1
