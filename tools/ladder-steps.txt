@@ -87,7 +87,7 @@ gamma rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdn
 # once the object is up), WindowServer gets the Metal device CoreDisplay
 # needs then ("@WindowServer" in the plugin's allow list: rebuild the
 # plugin in the VM with build_metal.sh first; card runs 41, 45, 46)
-agdc rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3gamma=1 rdna3agdc=3
+agdc rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3gamma=1 rdna3agdc=3 rdna3probe=1
 # modeset + faster timings (rdna3dispclk: DISPCLK/DPPCLK raised through the
 # PMFW's DAL mailbox, SetHardMinByFreq) + line buffer and DLG/TTU for the
 # scaled modes (rdna3scaledlg: card run 20's underflow on pipe 1 at 960x540)

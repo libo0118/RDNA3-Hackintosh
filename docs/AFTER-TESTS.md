@@ -1622,3 +1622,28 @@ Settings. That is expected for them, not a display regression.
 | Symptom | Likely cause | Action |
 |---|---|---|
 | `NVMTL: vk: zero physical devices ... in WindowServer`, serial `IOUC RDNA3UserClient failed MACF ... WindowServer` | the sandbox refuses the DRM client class | libdrm falls back to the accelerator bridge; serial `newUserClient(0x52440000) -> IOAccelRDNA3Bridge on the ACCELERATOR` shows it was used |
+
+### Card run 48 (step agdc, build 179): WindowServer on Metal (M5)
+
+- The install boot crash-looped as expected (the old libdrm in the
+  plugin), synced the plugin's libdrm and asked for the rerun.
+- The rerun: the boot hold released after 6.5 s ("display stack armed",
+  both framebuffers), K5 answered for both, **one** WindowServer start.
+  WindowServer's open of RDNA3UserClient failed MACF, the libdrm fallback
+  got `IOAccelRDNA3Bridge` from the accelerator, RADV came up inside
+  WindowServer and the plugin is its Metal device: **WindowServer
+  composites on our Metal plugin** (thousands of submissions), the user
+  saw the mode-switch fade. Desktop on both monitors, presented by
+  surface swaps and zero-copy flips (40 `FLIPPED`); display-pipe
+  transactions stay 0 on this path (triage: "WindowServer on Metal").
+- Scaled modes 4 of 4. Gamma: CoreDisplay now sends tables continuously
+  (MPCC RAM A/B ~450 times); the dark table moved both pipes' CRC and the
+  restore put the OGAM back to bypass, but the screen had changed between
+  "before" and the test, so the verdict compared the wrong looks. The
+  test now also accepts restored = the identity look when ColorSync's
+  table is the identity.
+- The report's CoreDisplay log kept only its last 600 lines and lost the
+  plugin's start in WindowServer: now the first 400 and the last 200,
+  without the plugin's per-texture lines.
+- Step `agdc` gets the Metal probes (`rdna3probe=1`: M4 CAMetalLayer on
+  screen, M5, M6 Chess and Maps) now that WindowServer is on Metal.

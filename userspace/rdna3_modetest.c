@@ -386,7 +386,7 @@ static int gamma_test(const char *drminfo, const char *dir)
     static CGGammaValue save[3][GAMMA_N], dark[GAMMA_N], ident[GAMMA_N];
     uint32_t saved = 0, n = displays(ids), i, k;
     struct pipe_look base[2][4], drk[4], idn[4], rest[4];
-    int bad = 0, pipes = 0, stable = 1, moved = 0, back = 0, soft = 0, ok[4] = { 0 };
+    int bad = 0, pipes = 0, stable = 1, moved = 0, back = 0, soft = 0, ok[4] = { 0 }, allIdent = 1;
     char name[32];
 
     for (i = 0; i < GAMMA_N; i++) {
@@ -405,6 +405,7 @@ static int gamma_test(const char *drminfo, const char *dir)
             if (d > worst)
                 worst = d;
         }
+        allIdent &= saved > 1 && worst < 0.002f;
         printf("display %u: id 0x%x, ColorSync table of %u entries, %s (largest step from the identity %.4f)\n", i,
                ids[i], saved, saved ? (worst < 0.002f ? "identity" : "a curve") : "not readable", (double)worst);
     }
@@ -424,6 +425,12 @@ static int gamma_test(const char *drminfo, const char *dir)
         look(drminfo, dir, name, rest);
         for (i = 0; i < 4; i++) {
             ok[i] |= crc_eq(&rest[i], &base[0][i]) || crc_eq(&rest[i], &base[1][i]);
+            /* ColorSync's table is the identity: restored = the identity
+             * look, taken seconds before. Card run 48: the screen changed
+             * between "before" and the dark table (WindowServer on Metal
+             * redraws), so the restored CRC matched the identity look,
+             * not "before", though the OGAM went back to bypass */
+            ok[i] |= allIdent && crc_eq(&rest[i], &idn[i]) && !crc_eq(&idn[i], &drk[i]);
             all &= ok[i] || !base[0][i].lit || !base[0][i].valid;
         }
         if (all)

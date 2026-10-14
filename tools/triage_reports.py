@@ -317,8 +317,21 @@ def report(path, show_all):
         tests = open(tp, errors="replace").read() if os.path.exists(tp) else ""
         ok = re.findall(r"debug\.rdna3accel_iop_ok: (\d+)", tests)
         ok = ok[-1] if ok else None
-        print("   %s %-20s %s" % ("PASS" if ok and int(ok) > 0 else "FAIL", "planes in transactions",
-                                 "rdna3accel_iop_ok %s" % (ok if ok else "not in the report")))
+        # card run 48: with a Metal device WindowServer composites on our
+        # plugin and presents by surface swaps the accelerator flips to
+        # (zero-copy); display-pipe transactions then stay 0
+        flips = len(re.findall(r"FLIPPED\*\*\* head|\*\*\* FLIPPED \*\*\*", log))
+        wsmetal = (bool(re.search(r"MTLIOAccelDevice's initWithAcceleratorPort: -> 0x[0-9a-f]+", cdlog)) and
+                   "NVK did not come up in this process" not in cdlog) or \
+            bool(re.search(r"WindowServer\[\d+:[0-9a-f]+\] \(RDNA3MTLDriver\) NVMTL: (vk: submit census|newHeapWithDescriptor)", cdlog))
+        if ok and int(ok) > 0:
+            print("   PASS %-20s rdna3accel_iop_ok %s" % ("planes in transactions", ok))
+        elif wsmetal and flips:
+            print("   PASS %-20s WindowServer composites on the Metal plugin, %d zero-copy flip(s) logged; "
+                  "display-pipe transactions %s" % ("WindowServer on Metal", flips, ok or "0"))
+        else:
+            print("   FAIL %-20s rdna3accel_iop_ok %s%s" % ("planes in transactions", ok if ok else "not in the report",
+                  "" if wsmetal else "; WindowServer has no Metal device (24-log-coredisplay.txt NVMTL lines)"))
         # card run 2026-10-14: an AGDC answer CoreDisplay could not use made
         # WindowServer abort at every start (both screens black)
         # the WindowServer log is in the report archive (card run 45: the
