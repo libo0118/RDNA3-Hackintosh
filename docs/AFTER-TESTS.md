@@ -1541,3 +1541,18 @@ Settings. That is expected for them, not a display regression.
 | Symptom | Likely cause | Action |
 |---|---|---|
 | `agdc`: `k5_link`/`k5_caps` > 0, WindowServer restarts (assert in `CoreDisplay_CreateDisplayForCGXDisplayDevice`), both screens black | K5 answered while CoreDisplay builds its displays (`rdna3agdc=3`, or `=4` with a slow WindowServer start) | `rdna3agdc=4` (or a longer delay, `kAgdcK5LateMs`); compare with `rdna3agdc=1` |
+
+### Card run 46 (step agdc, `rdna3agdc=4`, build 175)
+
+- No reinstall this time (the bundle's kexts unchanged): the tooling fix
+  works. The object came up with K5 off, both framebuffers in the table;
+  K5 went on at 90 s, just before the report script started.
+- Then nothing: no tests file, no report, the VM stopped at the 12 min
+  limit. The serial log shows no panic and no RDNA3 error; userland
+  services kept logging "unexpected session uid -1" (no GUI session).
+- Four K5 runs: 41 and 45 (from the start) crash-looped WindowServer, 46
+  (late) hung the report; 42 (no K5 question) is the only one with the
+  desktop. **K5 is parked**: no default or queued step uses it (`big4`
+  never did); `agdc` stays as an experiment only. The plane path for
+  display-pipe transactions (gamma, M4) needs another approach than
+  answering IOPresentment's K5 queries.
