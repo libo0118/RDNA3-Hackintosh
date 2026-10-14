@@ -4,42 +4,25 @@
 # (iokit_client_died). What that function reads there, from the
 # IOAcceleratorFamily2 of the self-hosted macOS runner (the same macOS
 # build as the VM, .github/workflows/probe.yml). macOS 11+ keeps the kexts'
-# code only in the kernel collections (MH_FILESET), not in
-# /System/Library/Extensions: lldb opens those. Output: $1 (a directory).
+# code only in the kernel collections (MH_FILESET); neither otool nor lldb
+# splits them (probe run 3: lldb saw one image), so kc_func.py cuts the
+# functions out by the fileset entry's own symbol table. Output: $1.
 out=${1:-probe-out}
 mkdir -p "$out"
 sys=$out/30-iofam-system.txt
-{ sw_vers; uname -a
-  echo "== kernel collections"; ls -la /System/Library/KernelCollections/
-  echo "== the kext bundle"; find /System/Library/Extensions/IOAcceleratorFamily2.kext -maxdepth 3 | head -20
-  echo "== KDKs"; ls /Library/Developer/KDKs 2>&1
-  echo "== tools"; command -v lldb otool llvm-objdump 2>&1; xcrun --find lldb 2>&1
-} > "$sys" 2>&1
+{ sw_vers; uname -a; ls -la /System/Library/KernelCollections/; } > "$sys" 2>&1
 
-# which collection holds the kext (LC_FILESET_ENTRY names)
 kc=
 for k in /System/Library/KernelCollections/*.kc; do
-    if otool -l "$k" 2>/dev/null | grep -A4 LC_FILESET_ENTRY | grep -q 'com.apple.iokit.IOAcceleratorFamily2'; then
-        kc=$k
-        echo "== IOAcceleratorFamily2 is in $k" >> "$sys"
-        otool -l "$k" 2>/dev/null | grep -B2 -A4 'com.apple.iokit.IOAcceleratorFamily2' >> "$sys"
-    fi
+    otool -l "$k" 2>/dev/null | grep -A4 LC_FILESET_ENTRY | grep -q 'com.apple.iokit.IOAcceleratorFamily2' && kc=$k
 done
-[ -n "$kc" ] || { echo "== no collection names IOAcceleratorFamily2; trying all" >> "$sys"; kc=$(ls /System/Library/KernelCollections/*.kc | tr '\n' ' '); }
-
-lldb_dis() {   # lldb_dis KC OUT COMMAND...: one lldb batch on a collection
-    k=$1; o=$2; shift 2
-    set -- --batch -o "target create \"$k\"" "$@"
-    xcrun lldb "$@" > "$o" 2>&1 || lldb "$@" > "$o" 2>&1
-}
-for k in $kc; do
-    n=$(basename "$k" .kc)
-    lldb_dis "$k" "$out/31-$n-clientClose.txt" \
-        -o "image lookup -r -n 'IOAccelLegacySurface::clientClose'" \
-        -o "disassemble -n 'IOAccelLegacySurface::clientClose()'" \
-        -o "disassemble -n 'IOAccelSurface::clientClose()'"
-    lldb_dis "$k" "$out/32-$n-surface.txt" \
-        -o "image lookup -r -n 'IOAccelLegacySurface::'" \
-        -o "disassemble -n 'IOAccelLegacySurface::free()'"
-    wc -l "$out/31-$n-clientClose.txt" "$out/32-$n-surface.txt" >> "$sys"
-done
+echo "== IOAcceleratorFamily2 is in ${kc:-no collection}" >> "$sys"
+[ -n "$kc" ] || exit 0
+here=$(dirname "$0")
+python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 \
+    'IOAccelLegacySurface::clientClose\(' 'IOAccelSurface::clientClose\(' \
+    > "$out/31-clientClose.txt" 2>&1
+python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 \
+    'IOAccelLegacySurface::free\(' 'IOAccelLegacySurface::detach' 'IOAccelLegacySurface::release_' \
+    > "$out/32-surface.txt" 2>&1
+wc -l "$out/31-clientClose.txt" "$out/32-surface.txt" >> "$sys"
