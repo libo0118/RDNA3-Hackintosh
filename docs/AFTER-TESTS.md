@@ -1745,4 +1745,12 @@ Settings. That is expected for them, not a display regression.
 - Shutdown panic (run 50): probe run 4 showed clientClose loading the
   surface's accelerator (+0x12c8) at +0x1e and finding it NULL at +0x1c5;
   probe run 5 lists its writers: IOAccelSurface::stopLocked, ::stop and
-  ::detach_surface. Their callers are the next probe.
+  ::detach_surface. Probe run 6: stop takes lock_busy like clientClose (no
+  race); detach_surface does not and runs from IOAccelSurface::didTerminate,
+  i.e. when IOKit terminates the surface. Run 50's install boot had run
+  `kmutil load` on the new accelerator just before its shutdown, which
+  terminates the running instance while WindowServer's surfaces close.
+  Fix: RD3Surface runs clientClose and didTerminate under one recursive
+  lock (rd3AccelSurfaceGuard, logged when one waits), and autoreport no
+  longer kmutil-loads a kext that is running (the new build loads from the
+  next boot anyway; installs run without the card now).

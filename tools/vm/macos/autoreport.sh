@@ -181,7 +181,17 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
             chown -R root:wheel "/Library/Extensions/$n"
             chmod -R go-w "/Library/Extensions/$n"
             codesign --force --deep --sign - "/Library/Extensions/$n" >/dev/null 2>&1
-            kmutil load -p "/Library/Extensions/$n" >/dev/null 2>&1
+            # the new build loads from the next boot (Auxiliary KC); a load
+            # now of a kext that runs terminated the running instance while
+            # WindowServer closed its surfaces at the shutdown that follows
+            # (card run 50: kernel panic in IOAccelLegacySurface::clientClose)
+            bid=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$k/Contents/Info.plist" 2>/dev/null)
+            if [ -n "$bid" ] && kmutil showloaded --list-only 2>/dev/null | grep -q "$bid" ||
+               { [ -n "$bid" ] && kextstat -l 2>/dev/null | grep -q "$bid"; }; then
+                :
+            else
+                kmutil load -p "/Library/Extensions/$n" >/dev/null 2>&1
+            fi
         done
         mkdir -p "$D/bin"
         cp "$t"/bin/* "$D/bin/" 2>/dev/null && chmod +x "$D/bin/"*

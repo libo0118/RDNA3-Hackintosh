@@ -98,6 +98,21 @@ public:
         rd3AccelSurfaceGone(this);   /* its swap -> head answer goes with it */
         IOAccelLegacySurface::free();
     }
+    /* clientClose and didTerminate (-> detach_surface, which zeroes the
+     * accelerator pointer clientClose unlocks through) never overlap:
+     * rd3AccelSurfaceGuard, card run 50's shutdown panic */
+    IOReturn clientClose() APPLE_KEXT_OVERRIDE {
+        rd3AccelSurfaceGuard(true, "clientClose");
+        IOReturn r = IOAccelLegacySurface::clientClose();
+        rd3AccelSurfaceGuard(false, nullptr);
+        return r;
+    }
+    bool didTerminate(IOService *provider, IOOptionBits options, bool *defer) APPLE_KEXT_OVERRIDE {
+        rd3AccelSurfaceGuard(true, "didTerminate");
+        bool r = IOAccelLegacySurface::didTerminate(provider, options, defer);
+        rd3AccelSurfaceGuard(false, nullptr);
+        return r;
+    }
     void submitSwapCopy(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2) APPLE_KEXT_OVERRIDE {
         (void)a0;
         rd3AccelSwapProbe(a1, a2);
