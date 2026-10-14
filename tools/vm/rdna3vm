@@ -1059,7 +1059,7 @@ for j in jobs:
 # wait_build SLUG RUN_ID RUN_NO: the run's jobs live until it finishes;
 # 0 = success, 1 = it failed or was cancelled
 wait_build() {
-    local slug=$1 id=$2 no=$3 start=$SECONDS shown=0 info st co lines
+    local slug=$1 id=$2 no=$3 start=$SECONDS shown=0 info st co lines jobs kextok
     say "build #$no of the checked-out commit is still running: waiting for it (Ctrl+C stops; 'rdna3vm update --no-wait' does not wait)"
     while :; do
         info=$(gh_api "repos/$slug/actions/runs/$id" | python3 -c '
@@ -1067,11 +1067,23 @@ import json, sys
 r = json.load(sys.stdin)
 print(r.get("status") or "-", r.get("conclusion") or "-")' 2>/dev/null) || info="unknown -"
         st=${info% *}; co=${info#* }
-        lines=$( { gh_api "repos/$slug/actions/runs/$id/jobs?per_page=50" 2>/dev/null || echo '{}'; } | build_jobs_lines)
+        jobs=$(gh_api "repos/$slug/actions/runs/$id/jobs?per_page=50" 2>/dev/null) || jobs='{}'
+        lines=$(printf '%s' "$jobs" | build_jobs_lines)
+        # the job that uploads RDNA3Accel-kext: once it succeeded the
+        # artifact is there; RADV / Metal / CTS jobs may run much longer
+        kextok=$(printf '%s' "$jobs" | python3 -c '
+import json, sys
+try: jobs = json.load(sys.stdin).get("jobs", [])
+except Exception: jobs = []
+print(any(j.get("name") == "kext" and j.get("conclusion") == "success" for j in jobs))' 2>/dev/null)
         # redraw in place on a terminal, plain lines otherwise
         if [ -t 1 ] && [ "$shown" -gt 0 ]; then printf '\033[%dA\033[J' "$shown"; fi
         printf '  build #%s: %s, %dm%02ds waited\n%s\n' "$no" "$st" $(( (SECONDS - start) / 60 )) $(( (SECONDS - start) % 60 )) "$lines"
         shown=$(( $(printf '%s\n' "$lines" | wc -l) + 1 ))
+        if [ "$st" != completed ] && [ "$kextok" = True ]; then
+            ok "build #$no: the kext job finished, its artifact is ready (the other jobs go on without us)"
+            return 0
+        fi
         if [ "$st" = completed ]; then
             [ "$co" = success ] && { ok "build #$no finished"; return 0; }
             warn "build #$no ended: $co"

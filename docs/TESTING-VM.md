@@ -358,7 +358,8 @@ then `prepare`. It needs GitHub access once: `gh auth login` (GitHub CLI), or
 a token with *Actions: read* for the repository in
 `~/.config/rdna3vm/github-token`. When the build of the pulled commit is
 still running, `update` shows its jobs live (each job's current step and
-time, refreshed every 15 s) and carries on by itself once it finished; a
+time, refreshed every 15 s) and carries on by itself once its `kext` job
+(the artifact) finished, without waiting for the longer RADV/Metal jobs; a
 failed build falls back to the last good one. Right after a push it looks
 for the build for up to 2 minutes (not for `[skip ci]` or docs-only
 commits). `rdna3vm update --no-wait` stops instead of waiting. By hand:
