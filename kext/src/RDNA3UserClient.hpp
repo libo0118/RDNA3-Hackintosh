@@ -43,6 +43,7 @@ public:
     virtual bool start(IOService *provider) override;
     virtual void stop(IOService *provider) override;
     virtual IOReturn clientClose() override;
+    void closeFile();
     virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
                                     IOExternalMethodDispatch *dispatch, OSObject *target,
                                     void *reference) override;
@@ -57,7 +58,7 @@ private:
     RDNA3Accel     *fOwner = nullptr;
     task_t          fTask = nullptr;
     rdna3_drm_file *fFile = nullptr;
-    bool            fOpen = false;
+    volatile UInt32 fOpen = 0;     /* 1 while the DRM file is open; closeFile clears it once */
 };
 
 /* RDNA3UserClient handed out by the accelerator (RD3K_FN_NEW_CLIENT) */

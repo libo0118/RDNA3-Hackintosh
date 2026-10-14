@@ -856,7 +856,9 @@ IOMemoryDescriptor *RDNA3Accel::drmMemoryForOffset(rdna3_drm_file *f, uint64_t o
 {
     IOMemoryDescriptor *md = nullptr;
     IOLockLock(fDrmLock);
-    rdna3_bo *bo = rdna3_drm_bo_by_mmap_offset(f, off);
+    /* a map that waited for the lock while the file closed meets a dead
+     * file (its BO table is gone) */
+    rdna3_bo *bo = (f->closing || !f->bos) ? nullptr : rdna3_drm_bo_by_mmap_offset(f, off);
     if (bo && bo->placement == AMDGPU_GEM_DOMAIN_DOORBELL) {
         /* a user queue's doorbell page in BAR2, uncached */
         if (fDoorbellDev && bo->vram_offset + bo->size <= fDoorbellDev->getLength()) {

@@ -422,11 +422,12 @@ static void exports_gc(rdna3_drm_device *dev, const struct rdna3_drm_file *closi
  * recovers a ring that never gets there (amdgpu_job_timedout). */
 static int fence_wait_abs(rdna3_drm_device *dev, const rdna3_fence *fe, uint64_t abs_ns);
 
-static void file_wait_idle(rdna3_drm_file *f)
+static int file_wait_idle(rdna3_drm_file *f)
 {
     rdna3_drm_device *dev = f->dev;
     rdna3_fence fe;
     uint32_t ip, ring;
+    int idle = 1;
     for (ip = 0; ip < AMDGPU_HW_IP_NUM; ip++)
         for (ring = 0; ring < 4; ring++) {
             if (!f->last_seq[ip][ring])
@@ -435,9 +436,11 @@ static void file_wait_idle(rdna3_drm_file *f)
             fe.ip = ip;
             fe.ring = ring;
             fe.seq = f->last_seq[ip][ring];
-            fence_wait_abs(dev, &fe, UINT64_MAX);
+            if (fence_wait_abs(dev, &fe, UINT64_MAX) && !fence_done(dev, &fe))
+                idle = 0;   /* not even the recovery got it through */
             f->last_seq[ip][ring] = 0;
         }
+    return idle;
 }
 
 void rdna3_drm_file_close(rdna3_drm_file *f)
@@ -445,8 +448,11 @@ void rdna3_drm_file_close(rdna3_drm_file *f)
     rdna3_drm_ops *ops = &f->dev->ops;
     rdna3_drm_file **pp;
     uint32_t i;
+    int idle;
+    if (f->closing)
+        return;   /* a second close of the same file (clientClose and stop) */
     f->closing = 1;
-    file_wait_idle(f);
+    idle = file_wait_idle(f);
     for (pp = &f->dev->files; *pp; pp = &(*pp)->next_file)
         if (*pp == f) {
             *pp = f->next_file;
@@ -466,16 +472,22 @@ void rdna3_drm_file_close(rdna3_drm_file *f)
             f->dev->uq_deferred[i].file = NULL;
     for (i = 0; i < RD_MAX_BO_LISTS; i++)
         bo_list_release(f, i);
-    if (f->vas)
+    /* !idle: a job of this file still runs after the job timeout's
+     * recovery. Its mappings, page tables and BOs stay (amdgpu: TTM frees
+     * them only once the fences in their reservations signal, which these
+     * never do): leaked rather than freed under the job; the tables that
+     * only name them go */
+    if (f->vas && idle)
         for (i = 0; i < f->nvas; i++)
             if (f->vas[i].handle)
                 va_release(f, &f->vas[i]);
-    seq64_unmap(f);
-    if (f->vm && ops->vm_destroy)
+    if (idle)
+        seq64_unmap(f);
+    if (f->vm && ops->vm_destroy && idle)
         ops->vm_destroy(ops->ctx, f->vm);
     f->vm = NULL;
     if (f->bos) {
-        for (i = 0; i < RD_MAX_HANDLES; i++)
+        for (i = 0; i < RD_MAX_HANDLES && idle; i++)
             if (f->bos[i])
                 bo_put(f, f->bos[i]);
         ops->free(ops->ctx, f->bos, sizeof(rdna3_bo *) * RD_MAX_HANDLES);
@@ -488,7 +500,8 @@ void rdna3_drm_file_close(rdna3_drm_file *f)
     f->syncobjs = NULL;
     f->vas = NULL;
     exports_gc(f->dev, f);
-    f->closing = 0;
+    /* closing stays set: an ioctl or mmap that waited for the OS lock meets
+     * a dead file (rdna3_drm_file_open zeroes it again) */
 }
 
 rdna3_bo *rdna3_drm_bo_lookup(rdna3_drm_file *f, uint32_t handle)
@@ -1878,8 +1891,10 @@ static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
      * would leave it where the CPU cannot reach it: straight to GTT, which
      * the CPU reaches (card run 51: RADV's descriptor pool, VRAM with CPU
      * access, found the visible VRAM full) */
-    if (r && bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
+    if (r && bo->placement == AMDGPU_GEM_DOMAIN_VRAM &&
+        dev->gtt_usage + bo->size <= dev->gtt_size) {   /* no unbounded wired memory */
         bo->placement = AMDGPU_GEM_DOMAIN_GTT;
+        bo->vram_offset = 0;
         r = dev->ops.bo_alloc(dev->ops.ctx, bo);
         if (!r && !(dom & AMDGPU_GEM_DOMAIN_GTT))
             bo->domains = dom | AMDGPU_GEM_DOMAIN_GTT;
@@ -3224,6 +3239,7 @@ static void userq_mgr_fini(rdna3_drm_file *f)
         if (!q->used)
             continue;
         q->used = 2;   /* out of reach of userq_find */
+        userq_wait_for_last_fence(f->dev, q);   /* amdgpu_userq_mgr_fini */
         userq_unmap_helper(f, q);
         userq_cleanup(f, q);
     }

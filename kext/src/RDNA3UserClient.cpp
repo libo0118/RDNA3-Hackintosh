@@ -36,20 +36,25 @@ bool RDNA3UserClient::start(IOService *provider)
         return false;
     }
     fFile->os = fTask;   /* GEM_USERPTR wires pages of this task */
-    fOpen = true;
+    fOpen = 1;
     return true;
+}
+
+/* clientClose and stop (the termination thread) may both get here; the
+ * close's fence wait drops the DRM lock, so only the one that clears fOpen
+ * closes and frees the file (ECC review of card run 50's close wait) */
+void RDNA3UserClient::closeFile()
+{
+    if (!OSCompareAndSwap(1, 0, &fOpen))
+        return;
+    fAccel->drmClose(fFile);
+    IOFree(fFile, sizeof(*fFile));
+    fFile = nullptr;
 }
 
 IOReturn RDNA3UserClient::clientClose()
 {
-    if (fOpen) {
-        fAccel->drmClose(fFile);
-        fOpen = false;
-    }
-    if (fFile) {
-        IOFree(fFile, sizeof(*fFile));
-        fFile = nullptr;
-    }
+    closeFile();
     if (!isInactive())
         terminate();
     return kIOReturnSuccess;
@@ -57,10 +62,7 @@ IOReturn RDNA3UserClient::clientClose()
 
 void RDNA3UserClient::stop(IOService *provider)
 {
-    if (fOpen) {
-        fAccel->drmClose(fFile);
-        fOpen = false;
-    }
+    closeFile();
     super::stop(provider);
 }
 

@@ -35,7 +35,7 @@ static bool               rd3AccelCopyToScanout(IOAccelResource2 *res, IOService
 void                      rd3AccelSwapProbe(IOAccelResource2 *a1, IOAccelResource2 *a2);
 void                      rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource2 *a2);
 void                      rd3AccelSurfaceGone(const void *surf);
-void                      rd3AccelSurfaceGuard(bool enter, const char *who);
+bool                      rd3AccelSurfaceGuard(bool enter, const void *surf, const char *who);
 void                      rd3AccelResourceGone(const void *res);
 bool                      rd3AccelResHasContent(IOAccelResource2 *res);
 static void               rd3AccelWriteStamp(int index, unsigned int value);
@@ -1626,27 +1626,41 @@ static void rd3AccelIopCachePut(IOSurface *s, RD3Resource *res, RD3VidMemory *vm
  * (probe runs 4-6: the writers are stop, which takes lock_busy, stopLocked
  * and detach_surface). A kmutil load of a new accelerator build terminated
  * the running one while WindowServer's surfaces were closing. RD3Surface
- * runs both under this recursive lock (recursive: a synchronous terminate
- * from inside clientClose re-enters on the same thread). */
-static IORecursiveLock *volatile gSurfCloseLock;
+ * runs both under a recursive lock of the table below (recursive: a
+ * synchronous terminate from inside clientClose re-enters on the same
+ * thread). Should didTerminate win, clientClose finds the pointer NULL but
+ * skips its body: it tests the "started" byte (+0xf2) first, which
+ * stopLocked and detach_surface clear before the pointer (probe run 6). */
+/* The race is per surface: a small striped table keyed by the surface's
+ * address, so one surface's long close never holds up another's
+ * termination (ECC review); no member added to the subclass of a base read
+ * by raw offsets. */
+enum { kRd3SurfLocks = 16 };
+static IORecursiveLock *volatile gSurfCloseLock[kRd3SurfLocks];
 static bool rd3SurfCloseLockOnce(void)
 {
-    if (!gSurfCloseLock) {
-        IORecursiveLock *l = IORecursiveLockAlloc();
-        if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gSurfCloseLock)) IORecursiveLockFree(l);
+    for (unsigned i = 0; i < kRd3SurfLocks; i++) {
+        if (!gSurfCloseLock[i]) {
+            IORecursiveLock *l = IORecursiveLockAlloc();
+            if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gSurfCloseLock[i])) IORecursiveLockFree(l);
+        }
+        if (!gSurfCloseLock[i]) return false;
     }
-    return gSurfCloseLock != nullptr;
+    return true;
 }
-void rd3AccelSurfaceGuard(bool enter, const char *who)
+/* returns whether the lock was taken: the exit unlocks only then */
+bool rd3AccelSurfaceGuard(bool enter, const void *surf, const char *who)
 {
     static SInt32 gWaitLogs;
-    if (!rd3SurfCloseLockOnce()) return;
-    if (!enter) { IORecursiveLockUnlock(gSurfCloseLock); return; }
-    if (!IORecursiveLockTryLock(gSurfCloseLock)) {
+    IORecursiveLock *l = gSurfCloseLock[((uintptr_t)surf >> 6) % kRd3SurfLocks];
+    if (!l) return false;
+    if (!enter) { IORecursiveLockUnlock(l); return true; }
+    if (!IORecursiveLockTryLock(l)) {
         if (OSIncrementAtomic(&gWaitLogs) < 8)
-            ALOG("surface %s waits for another surface close/terminate (card run 50 race)", who);
-        IORecursiveLockLock(gSurfCloseLock);
+            ALOG("surface %p %s waits for its close/terminate twin (card run 50 race)", surf, who);
+        IORecursiveLockLock(l);
     }
+    return true;
 }
 
 static bool rd3AccelLocksInit(void)

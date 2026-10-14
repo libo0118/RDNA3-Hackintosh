@@ -1588,6 +1588,17 @@ int main(void)
          * further than the door */
         CHECK(probe_vm_live == live0 && probe_vm_unmaps == unm0 && probe_ioctl == -RD_ENODEV);
         CHECK(ring_done >= pend && vm_live == live0 - 1 && vm_unmaps == unm0 + 1);
+        /* a job that never finishes, not even after the OS's job-timeout
+         * recovery (h_hang): the VM is left alone, not freed under it */
+        CHECK(rdna3_drm_file_open(&dev, &fz) == 0);
+        CHECK(cs_submit(&fz, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
+        live0 = vm_live;
+        h_hang = 1;
+        rdna3_drm_file_close(&fz);
+        h_hang = 0;
+        CHECK(vm_live == live0);   /* leaked, as TTM keeps BOs with pending fences */
+        vm_live--;                 /* (released by hand for the totals below) */
+        ring_done = ring_next;
         h_only = only0;
         h_hang = hang0;
         h_ring32 = r32;
@@ -1596,6 +1607,19 @@ int main(void)
 
     rdna3_drm_file_close(f);
     CHECK(live_bos == 0 && vm_live == 0);
+    /* a closed file stays dead: no ioctl gets through (one that waited for
+     * the OS lock while it closed); the tests below open it again */
+    {
+        struct drm_amdgpu_info dead;
+        uint32_t dv = 0;
+        memset(&dead, 0, sizeof(dead));
+        dead.return_pointer = (uint64_t)(uintptr_t)&dv;
+        dead.return_size = 4;
+        dead.query = AMDGPU_INFO_ACCEL_WORKING;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_INFO), dead) == -RD_ENODEV);
+        rdna3_drm_file_close(f);   /* a second close is a no-op */
+    }
+    CHECK(rdna3_drm_file_open(&dev, f) == 0);
 
     /* the video IPs (VCN 4.0 / JPEG 4.0): without the block (rdna3vcn=0)
      * the answers stay what they were; once the kext reports it up they

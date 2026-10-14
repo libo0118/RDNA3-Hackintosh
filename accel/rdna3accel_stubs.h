@@ -102,15 +102,15 @@ public:
      * accelerator pointer clientClose unlocks through) never overlap:
      * rd3AccelSurfaceGuard, card run 50's shutdown panic */
     IOReturn clientClose() APPLE_KEXT_OVERRIDE {
-        rd3AccelSurfaceGuard(true, "clientClose");
+        bool g = rd3AccelSurfaceGuard(true, this, "clientClose");
         IOReturn r = IOAccelLegacySurface::clientClose();
-        rd3AccelSurfaceGuard(false, nullptr);
+        if (g) rd3AccelSurfaceGuard(false, this, nullptr);
         return r;
     }
     bool didTerminate(IOService *provider, IOOptionBits options, bool *defer) APPLE_KEXT_OVERRIDE {
-        rd3AccelSurfaceGuard(true, "didTerminate");
+        bool g = rd3AccelSurfaceGuard(true, this, "didTerminate");
         bool r = IOAccelLegacySurface::didTerminate(provider, options, defer);
-        rd3AccelSurfaceGuard(false, nullptr);
+        if (g) rd3AccelSurfaceGuard(false, this, nullptr);
         return r;
     }
     void submitSwapCopy(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2) APPLE_KEXT_OVERRIDE {
