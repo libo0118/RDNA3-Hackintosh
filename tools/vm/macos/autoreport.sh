@@ -46,7 +46,7 @@ sync_metal() {
     m=/Library/GPUBundles/rdna3mtl
     [ -d "$m" ] && [ -f "$1/libvulkan_radeon.dylib" ] || return 0
     for f in libvulkan_radeon.dylib libdrm.2.dylib libdrm_amdgpu.1.dylib; do
-        [ -f "$1/$f" ] && ! cmp -s "$1/$f" "$m/$f" && cp "$1/$f" "$m/$f" && touch "$m/.changed"
+        [ -f "$1/$f" ] && ! cmp -s "$1/$f" "$m/$f" && cp "$1/$f" "$m/$f" && touch "$m/.changed" && metal_synced=1
     done
     if [ -f "$m/.changed" ]; then
         install_name_tool -add_rpath "$m" "$m/libvulkan_radeon.dylib" 2>/dev/null
@@ -169,6 +169,13 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
         echo "$new" > "$D/bundle.sha256"
         [ -n "$changed" ] &&
             updated="kexts updated to the host's new bundle ($changed ): the framebuffer from it runs from the next boot"
+        # the Metal plugin's libdrm / RADV now, not only in the tests below:
+        # WindowServer loads them when it starts (card run 47: its DRM client
+        # path is in libdrm), so a change needs the next boot like a kext
+        metal_synced=
+        sync_metal "$D/bin"
+        [ -n "$metal_synced" ] && [ -z "$updated" ] &&
+            updated="the Metal plugin's libdrm/RADV updated: WindowServer loads them from the next boot"
     fi
     rm -rf "$t"
     # an interactive boot (rdna3vm approve / window, no rdna3vmauto): the new
