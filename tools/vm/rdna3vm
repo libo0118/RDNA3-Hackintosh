@@ -5,7 +5,8 @@
 #   rdna3vm check                                 is this machine ready?
 #   rdna3vm prepare --osx-kvm DIR --artifact ZIP  one-time setup (+ after a new build)
 #           [--radv radv-macos-logs.zip]        + RADV: rdna3_vktest from step 8 on
-#   rdna3vm window                                macOS in a window (install, setup)
+#   rdna3vm window [--no-zoom]                    macOS in a window (install, setup); the picture
+#                                                 scaled to the window (GTK zoom-to-fit)
 #   rdna3vm step N [--stay]                       ladder step N with the GPU passed through
 #   rdna3vm args "BOOT-ARGS" [--stay]             the same with your own rdna3* boot-args
 #   rdna3vm queue STEP... | pending               several steps one after the other, unattended
@@ -410,6 +411,8 @@ start_share() {
 }
 
 cmd_window() {
+    local zoom=on
+    [ "${1:-}" = --no-zoom ] && zoom=off
     load_conf
     msrs
     # verbose boot without our drivers' levels: a hang shows where it stops
@@ -418,6 +421,13 @@ cmd_window() {
     [ -f "$INSTALLER" ] && QARGS+=(-drive id=InstallMedia,if=none,format=raw,file="$INSTALLER"
                                   -device ide-hd,bus=sata.3,drive=InstallMedia)
     QARGS+=(-device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 -device vmware-svga)
+    # the guest's picture scaled to the window (any window size, the whole
+    # desktop visible); GTK only - a QEMU without it keeps its default display
+    if qemu-system-x86_64 -display help 2>/dev/null | grep -qx gtk; then
+        QARGS+=(-display "gtk,zoom-to-fit=$zoom")
+    else
+        echo "  (this QEMU has no GTK display: no zoom-to-fit)"
+    fi
     start_share || exit 1
     trap "kill $SHARE_PID 2>/dev/null" EXIT
     say "macOS in a window (the card stays with Linux). In the macOS Terminal:"

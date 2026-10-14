@@ -114,6 +114,10 @@ window on the Linux desktop.
 rdna3vm window
 ```
 
+The picture is scaled to the window (QEMU's GTK `zoom-to-fit`): resize the
+window freely, the whole macOS desktop stays visible. `rdna3vm window
+--no-zoom` shows it 1:1.
+
 1. In the OpenCore menu choose **macOS Base System**.
 2. **Disk Utility** → choose *QEMU HARDDISK* (about 128 GB) → **Erase**:
    name `macOS`, format **APFS**. Close Disk Utility.
