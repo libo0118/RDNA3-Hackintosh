@@ -16,7 +16,9 @@
 #   rdna3vm reports                               what came back
 #   rdna3vm result                                the last run's reports in ONE file to send
 #                                                 (~/Downloads/rdna3-result.tar.gz, replaced each time)
-#   rdna3vm update                                git pull + the newest CI artifact + prepare
+#   rdna3vm update [--no-wait]                    git pull + the newest CI artifact + prepare; a
+#                                                 build of the pulled commit still running is
+#                                                 shown live and waited for
 #   rdna3vm cts [rdna3-cts.zip]                   the Vulkan CTS subset step cts runs (without a
 #                                                 zip: the newest rdna3-cts artifact of CI)
 #
@@ -1027,7 +1029,74 @@ gh_api() {   # gh_api PATH [OUTFILE]: GitHub REST GET, JSON to stdout or a file
         ${out:+-o "$out"} "https://api.github.com/$path"
 }
 
+# a build.yml run's jobs, one line each (status, current step, time)
+build_jobs_lines() {   # stdin: the run's jobs JSON
+    python3 -c '
+import json, sys, datetime
+def secs(a, b=None):
+    if not a: return ""
+    t0 = datetime.datetime.fromisoformat(a.replace("Z", "+00:00"))
+    t1 = datetime.datetime.fromisoformat(b.replace("Z", "+00:00")) if b else datetime.datetime.now(datetime.timezone.utc)
+    s = max(0, int((t1 - t0).total_seconds()))
+    return "%dm%02ds" % (s // 60, s % 60)
+jobs = json.load(sys.stdin).get("jobs", [])
+if not jobs:
+    print("  (no jobs started yet: the self-hosted runners are busy or offline)")
+for j in jobs:
+    st, co = j.get("status"), j.get("conclusion")
+    if st == "completed":
+        mark = {"success": "\033[32m done\033[0m", "skipped": " skip", "cancelled": "\033[33mcancel\033[0m"}.get(co, "\033[31mFAILED\033[0m")
+        what = secs(j.get("started_at"), j.get("completed_at"))
+    elif st == "in_progress":
+        step = next((x["name"] for x in j.get("steps", []) if x.get("status") == "in_progress"), "")
+        mark, what = "\033[36m  run\033[0m", "%s  %s" % (secs(j.get("started_at")), step[:50])
+    else:
+        mark, what = " wait", st or ""
+    print("  %s  %-34s %s" % (mark, j.get("name", "?")[:34], what))
+'
+}
+
+# wait_build SLUG RUN_ID RUN_NO: the run's jobs live until it finishes;
+# 0 = success, 1 = it failed or was cancelled
+wait_build() {
+    local slug=$1 id=$2 no=$3 start=$SECONDS shown=0 info st co lines
+    say "build #$no of the checked-out commit is still running: waiting for it (Ctrl+C stops; 'rdna3vm update --no-wait' does not wait)"
+    while :; do
+        info=$(gh_api "repos/$slug/actions/runs/$id" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+print(r.get("status") or "-", r.get("conclusion") or "-")' 2>/dev/null) || info="unknown -"
+        st=${info% *}; co=${info#* }
+        lines=$( { gh_api "repos/$slug/actions/runs/$id/jobs?per_page=50" 2>/dev/null || echo '{}'; } | build_jobs_lines)
+        # redraw in place on a terminal, plain lines otherwise
+        if [ -t 1 ] && [ "$shown" -gt 0 ]; then printf '\033[%dA\033[J' "$shown"; fi
+        printf '  build #%s: %s, %dm%02ds waited\n%s\n' "$no" "$st" $(( (SECONDS - start) / 60 )) $(( (SECONDS - start) % 60 )) "$lines"
+        shown=$(( $(printf '%s\n' "$lines" | wc -l) + 1 ))
+        if [ "$st" = completed ]; then
+            [ "$co" = success ] && { ok "build #$no finished"; return 0; }
+            warn "build #$no ended: $co"
+            return 1
+        fi
+        [ $(( SECONDS - start )) -lt 7200 ] || die "build #$no still not finished after 2 hours: check GitHub Actions"
+        sleep 15
+    done
+}
+
+# the commit changes only files build.yml ignores (docs, Markdown, probes):
+# no build will come for it
+commit_unbuilt() {
+    local f n=0
+    while read -r f; do
+        [ -n "$f" ] || continue
+        case $f in docs/*|*.md|NOTICE|LICENSE*|tools/probe/*|.github/workflows/probe.yml) ;; *) return 1 ;; esac
+        n=$((n + 1))
+    done < <(git -C "$ROOT" diff --name-only HEAD~1 HEAD 2>/dev/null)
+    [ "$n" -gt 0 ]
+}
+
 cmd__update() {
+    local nowait=0
+    [ "${1:-}" = --no-wait ] && nowait=1
     local remote slug branch zip=$HOME/Downloads/RDNA3Accel-kext.zip runs run_id run_no sha art tmp
     remote=$(git -C "$ROOT" remote get-url origin)
     slug=$(printf '%s\n' "$remote" | sed -E 's#^.*github\.com[:/]+##; s#\.git$##')
@@ -1043,19 +1112,36 @@ print(*(r[0]["id"], r[0]["run_number"], r[0]["head_sha"]) if r else ("", "", "")
     ok "build #$run_no, commit ${sha:0:7} (checkout: $(git -C "$ROOT" rev-parse --short HEAD))"
     # card runs 31-32 tested the previous build: the update ran while the
     # build of the pulled commit was still going. Wait for it instead.
-    local head newest
+    local head newest tries=0 nid
     head=$(git -C "$ROOT" rev-parse HEAD)
     if [ "$sha" != "$head" ]; then
-        newest=$(gh_api "repos/$slug/actions/workflows/build.yml/runs?branch=$branch&per_page=5" | python3 -c '
+        while :; do
+            newest=$(gh_api "repos/$slug/actions/workflows/build.yml/runs?branch=$branch&per_page=5" | python3 -c '
 import json, sys
 head = sys.argv[1]
 for r in json.load(sys.stdin)["workflow_runs"]:
     if r["head_sha"] == head:
-        print(r["status"], r.get("conclusion") or "-", r["run_number"])
+        print(r["status"], r.get("conclusion") or "-", r["id"], r["run_number"])
         break' "$head") || newest=""
+            # just pushed: GitHub lists the run a few seconds later. A
+            # [skip ci] or docs-only commit never gets one.
+            [ -z "$newest" ] && [ "$nowait" = 0 ] && [ "$tries" -lt 8 ] &&
+                ! git -C "$ROOT" log -1 --format=%B | grep -q '\[skip ci\]' && ! commit_unbuilt &&
+                [ $(( $(date +%s) - $(git -C "$ROOT" log -1 --format=%ct) )) -lt 900 ] || break
+            [ "$tries" = 0 ] && echo "  no build of ${head:0:7} listed yet (pushed moments ago?): looking again for 2 minutes"
+            tries=$((tries + 1))
+            sleep 15
+        done
         case "$newest" in
         queued*|in_progress*|waiting*|requested*|pending*)
-            die "build #${newest##* } of the checked-out commit ${head:0:7} is still running: run 'rdna3vm update' again in a few minutes" ;;
+            [ "$nowait" = 1 ] &&
+                die "build #${newest##* } of the checked-out commit ${head:0:7} is still running: run 'rdna3vm update' again in a few minutes"
+            nid=$(echo "$newest" | cut -d' ' -f3)
+            if wait_build "$slug" "$nid" "${newest##* }"; then
+                run_id=$nid; run_no=${newest##* }; sha=$head
+            else
+                warn "using the last good build #$run_no (${sha:0:7})"
+            fi ;;
         "completed failure"*|"completed cancelled"*)
             warn "build #${newest##* } of ${head:0:7} failed: using the last good build #$run_no (${sha:0:7})" ;;
         "")
