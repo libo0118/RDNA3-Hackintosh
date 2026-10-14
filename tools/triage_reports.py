@@ -297,7 +297,7 @@ def report(path, show_all):
     if re.search(r"rdna3agdc=[12]\b", args):
         want = fb_source_hash(("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/AppleGraphicsDeviceControl_re.h",
                                "agdc/Info.plist"))
-        ag = re.search(r"RDNA3-agdc: build (\S+)", log)
+        ag = re.search(r"RDNA3-agdc: build ([0-9a-f]+)", log)
         same = bool(want and ag and ag.group(1) == want)
         print("   %s %-20s %s" % ("PASS" if same else "FAIL", "AGDC build",
                                  "%s = these sources" % want if same else
@@ -316,7 +316,13 @@ def report(path, show_all):
         ok = ok[-1] if ok else None
         print("   %s %-20s %s" % ("PASS" if ok and int(ok) > 0 else "FAIL", "planes in transactions",
                                  "rdna3accel_iop_ok %s" % (ok if ok else "not in the report")))
-        failed = failed or not same or not up
+        # card run 2026-10-14: an AGDC answer CoreDisplay could not use made
+        # WindowServer abort at every start (both screens black)
+        pids = set(re.findall(r"WindowServer\[(\d+):", tests))
+        print("   %s %-20s %s" % ("PASS" if len(pids) <= 2 else "FAIL", "WindowServer starts",
+                                 "%d WindowServer process(es) in the report's logs%s" %
+                                 (len(pids), "" if len(pids) <= 2 else ": a restart loop (23-windowserver-crash.txt)")))
+        failed = failed or not same or not up or len(pids) > 2
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
         want = fb_source_hash(("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_abi.h",

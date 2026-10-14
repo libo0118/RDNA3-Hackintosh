@@ -1464,3 +1464,24 @@ Settings. That is expected for them, not a display regression.
   (`amdgpu_device_load_pci_state`). All mode-1 resets now go through
   `mode1Reset()` with amdgpu's order. Open: the vmid-0 fault and the
   `0x900000000000` table after the first wake.
+
+### Card run 41 (step agdc, build 169, 2026-10-14)
+
+- User: after the verbose boot text both monitors stayed black with a
+  signal. Both pipes scanned out black (CRC 0), every display-pipe counter
+  0 (not even plane-less transactions): WindowServer aborted at every start
+  (six PIDs, `23-windowserver-crash.txt`: `__assert_rtn` in
+  `CoreDisplay_CreateDisplayForCGXDisplayDevice`, after a CoreDisplay error
+  in `CoreDisplay::Framebuffer::Framebuffer` / `DisplayPipe`).
+- RDNA3AGDC was up and answered (709 vendor calls, K5 link / plane scaler
+  28 each for index 0), but its slot table held one framebuffer
+  (`rdna3agdc_fbmap n=1`, `maxfb 1`) while GPUWrangler listed two
+  (`fb0:1 .../RDNA3DisplayHead/RDNA3Framebuffer`, `fb1:0 .../RDNA3Framebuffer`):
+  the table was scanned a moment before the second head's framebuffer
+  registered and never again.
+- Fix: the table is scanned again at every 0x980 query and for a K5 query
+  naming an index it does not have; a publish or terminate looks 500 ms
+  later, one worker at a time (THREAD_CALL_OPTIONS_ONCE); the left-out
+  reasons are logged whenever they change. Triage: the AGDC build hash
+  parsed without the trailing colon, a `WindowServer starts` row (more than
+  two WindowServer PIDs = a restart loop).

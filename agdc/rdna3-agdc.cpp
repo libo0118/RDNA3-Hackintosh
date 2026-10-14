@@ -36,6 +36,7 @@
 #include <libkern/OSAtomic.h>
 #include <sys/sysctl.h>
 #include <kern/thread_call.h>
+#include <kern/clock.h>
 #include <pexpert/pexpert.h>
 #include <mach/kmod.h>
 #include "../common/rdna3_bootargs.h"
@@ -80,6 +81,8 @@ static int    gAgdcMaxFBOut = 0;
 static int    gAgdcK5Asked = 0, gAgdcK5LinkMask = 0, gAgdcK5CapsMask = 0;
 static int    gAgdcK5LastRefusedIdx = -1;
 
+static void rd3Scan(IOService *pci);
+
 class RD3DeviceControl : public AppleGraphicsDeviceControl {
     OSDeclareDefaultStructors(RD3DeviceControl)
 public:
@@ -90,8 +93,19 @@ public:
 };
 OSDefineMetaClassAndStructors(RD3DeviceControl, AppleGraphicsDeviceControl)
 
-static IOReturn rd3K5Answer(unsigned int cmd, unsigned long *in, unsigned long inSize, unsigned long *out, unsigned long *outSize)
+static IOReturn rd3K5Answer(IOService *pci, unsigned int cmd, unsigned long *in, unsigned long inSize, unsigned long *out,
+                            unsigned long *outSize)
 {
+    /* a K5 query for an index the table does not have yet: a framebuffer
+     * that published after the last scan */
+    if (in && inSize >= 4 && pci) {
+        uint32_t want = *(const uint32_t *)in;   /* AGDCLinkConfig_t.id / AGDCFBGetExtendedCapability_t.fbIndex */
+        IOLockLock(gTabLock);
+        bool missing = want < kAgdcMaxFB && want >= gAgdcNFB;
+        IOLockUnlock(gTabLock);
+        if (missing)
+            rd3Scan(pci);
+    }
     uint32_t t[kAgdcMaxFB][RD3K5_TIMING_WORDS];
     struct rd3k5_head h[kAgdcMaxFB];
     unsigned nh;
@@ -155,6 +169,13 @@ IOReturn RD3DeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned l
         if (!out || !outSize || *outSize != sizeof(struct caps)) return kIOReturnBadArgument;
         struct caps *c = (struct caps *)out;
         bzero(c, sizeof *c);
+        /* card run 2026-10-14: the table was built a moment before the
+         * second head's framebuffer registered and never again, so this
+         * answer listed one framebuffer while WindowServer opened two, and
+         * CoreDisplay asserted (CoreDisplay_CreateDisplayForCGXDisplayDevice,
+         * WindowServer restarting every few seconds, both screens black).
+         * The table is taken from the framebuffers running at each query. */
+        rd3Scan(fPci);
         IOLockLock(gTabLock);
         unsigned n = gAgdcNFB;
         for (unsigned i = 0; i < n; i++) { c->framebuffer[i] = gAgdcFB[i]; c->portMask |= 1ull << (1 + i); }
@@ -170,7 +191,7 @@ IOReturn RD3DeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned l
         return kIOReturnSuccess;
     }
     if (gAgdcK5 && (cmd == RD3K5_CMD_LINKCONFIG || cmd == RD3K5_CMD_FBCAPEX)) {
-        IOReturn k5 = rd3K5Answer(cmd, in, inSize, out, outSize);
+        IOReturn k5 = rd3K5Answer(fPci, cmd, in, inSize, out, outSize);
         if (k5 != kIOReturnUnsupported) return k5;
     }
     OSAddAtomic64(1, &gAgdcUnsupported);
@@ -274,8 +295,11 @@ static void rd3Scan(IOService *pci)
         snprintf(gAgdcFBMap + w, sizeof gAgdcFBMap - (size_t)w, " (left out: noidx %u range %u dup %u gpu %u hole %u)",
                  noidx, range, dup, other, hole);
     IOLockUnlock(gTabLock);
-    if (!same)
+    static unsigned lastLeftOut = ~0u;
+    const unsigned leftOut = noidx | range << 4 | dup << 8 | other << 12 | hole << 16;
+    if (!same || leftOut != lastLeftOut)
         AGLOG("slot table %s (%u framebuffer(s) seen)", gAgdcFBMap, seen);
+    lastLeftOut = leftOut;
 }
 
 static void rd3SetStateProp(const char *s)
@@ -342,7 +366,12 @@ static void rd3AgdcWork(thread_call_param_t, thread_call_param_t)
 }
 static void rd3AgdcKick(void)
 {
-    if (gAgdcCall) thread_call_enter(gAgdcCall);
+    if (!gAgdcCall) return;
+    /* the publish notification can come before the registry iteration
+     * returns the new framebuffer: look 500 ms later */
+    uint64_t d;
+    clock_interval_to_deadline(500, kMillisecondScale, &d);
+    thread_call_enter_delayed(gAgdcCall, d);
 }
 
 static int rdna3agdc_sysctl SYSCTL_HANDLER_ARGS
@@ -414,7 +443,9 @@ bool RDNA3AGDC::start(IOService *provider)
     if (!IOService::start(provider))
         return false;
     gTabLock = IOLockAlloc();
-    gAgdcCall = thread_call_allocate(rd3AgdcWork, nullptr);
+    /* ONCE: a kick while the worker runs queues it again instead of a
+     * second worker beside it */
+    gAgdcCall = thread_call_allocate_with_options(rd3AgdcWork, nullptr, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
     if (!gTabLock || !gAgdcCall) {
         AGLOG("no lock / thread call: not starting");
         if (gAgdcCall) { thread_call_free(gAgdcCall); gAgdcCall = nullptr; }
