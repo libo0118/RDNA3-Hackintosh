@@ -309,6 +309,10 @@ jobs:
             -I build/mesa/src/include -o build/mesa/install/bin/rdna3_vktest userspace/rdna3_vktest.c
       - name: vulkaninfo on the in-process UAPI (loopback libdrm, no kext)
         if: always()
+        # build 167 hung here for 1.5 h (no log while it ran) and held the
+        # macOS runner; a diagnostic step must not decide the build
+        timeout-minutes: 10
+        continue-on-error: true
         run: |
           make -C userspace loopback
           cp build/userspace/libdrm_loopback.dylib build/userspace/prefix/lib/libdrm.2.dylib
