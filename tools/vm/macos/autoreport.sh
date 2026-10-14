@@ -814,6 +814,14 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 sleep 15
                 run=$(pgrep -x "$app" >/dev/null && echo yes || echo NO)
                 pl=$(lsof -n -c "$app" 2>/dev/null | grep -c RDNA3MTLDriver)
+                # card run 56: lsof counted the plugin in Maps, yet Maps logged
+                # no NVMTL line at all: which process has it, and what the app
+                # itself says about Metal and the GPU
+                echo "== M6 $app: processes with the plugin mapped"
+                lsof -n -c "$app" 2>/dev/null | grep -E 'RDNA3MTLDriver|libvulkan_radeon' | awk '{print $1, $2, $NF}' | sort -u | head -8
+                echo "== M6 $app: its own log about Metal / the GPU (last minute)"
+                with_limit 40 log show --last 1m --style compact --predicate "process == \"$app\" AND (eventMessage CONTAINS[c] \"metal\" OR eventMessage CONTAINS[c] \"gpu\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS[c] \"MTL\")" \
+                    2>/dev/null | tail -25
                 mkdir -p "$HOME/rdna3-scanout/m6$app"
                 # 1280 wide (card run 54: Chess's and Maps' faults were too
                 # small to see at 320)
