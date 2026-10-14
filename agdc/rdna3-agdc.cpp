@@ -307,6 +307,8 @@ static void rd3SetStateProp(const char *s)
     if (gAgdcLoader) gAgdcLoader->setProperty("RDNA3,AGDC", s);
 }
 
+static void rd3AgdcKickIn(unsigned ms);
+
 static void rd3AgdcWorkBody(void)
 {
     if (gAgdcWant == 1 && !gAgdc) {
@@ -315,7 +317,16 @@ static void rd3AgdcWorkBody(void)
         OSSafeReleaseNULL(m);
         IOService *pci = rd3PciOf(fb);
         OSSafeReleaseNULL(fb);
-        if (!pci) { gAgdcState = -1; AGLOG("no RDNA3Framebuffer on a PCI device yet"); rd3SetStateProp("waiting for a framebuffer"); return; }
+        if (!pci) {
+            /* the framebuffer that published is not in the registry
+             * iteration yet: look again in 100 ms, for 10 s */
+            static unsigned tries;
+            gAgdcState = -1;
+            if (!tries) AGLOG("no RDNA3Framebuffer on a PCI device yet: looking again every 100 ms");
+            rd3SetStateProp("waiting for a framebuffer");
+            if (++tries <= 100) rd3AgdcKickIn(100);
+            return;
+        }
         /* the reconstructed layout must be the running one, or the object
          * would overrun Apple's (or Apple's code ours) */
         const unsigned size = AppleGraphicsDeviceControl::metaClass ? AppleGraphicsDeviceControl::metaClass->getClassSize() : 0;
@@ -364,14 +375,24 @@ static void rd3AgdcWork(thread_call_param_t, thread_call_param_t)
     rd3AgdcWorkBody();
     OSDecrementAtomic(&gAgdcBusy);
 }
+static void rd3AgdcKickIn(unsigned ms)
+{
+    if (!gAgdcCall) return;
+    uint64_t d;
+    clock_interval_to_deadline(ms, kMillisecondScale, &d);
+    thread_call_enter_delayed(gAgdcCall, d);
+}
+/* The object must be up before WindowServer starts: card run 42 made it
+ * 600 ms after (the delay below re-armed by every publish) and IOPresentment
+ * never asked a K5 question; card run 41's object, up before WindowServer,
+ * got them. So the object is made at once; a table update (it is also
+ * rescanned at every 0x980) waits 500 ms, for the publish notification can
+ * come before the registry iteration returns the new framebuffer. */
 static void rd3AgdcKick(void)
 {
     if (!gAgdcCall) return;
-    /* the publish notification can come before the registry iteration
-     * returns the new framebuffer: look 500 ms later */
-    uint64_t d;
-    clock_interval_to_deadline(500, kMillisecondScale, &d);
-    thread_call_enter_delayed(gAgdcCall, d);
+    if (!gAgdc) thread_call_enter(gAgdcCall);
+    else rd3AgdcKickIn(500);
 }
 
 static int rdna3agdc_sysctl SYSCTL_HANDLER_ARGS

@@ -1485,3 +1485,18 @@ Settings. That is expected for them, not a display regression.
   reasons are logged whenever they change. Triage: the AGDC build hash
   parsed without the trailing colon, a `WindowServer starts` row (more than
   two WindowServer PIDs = a restart loop).
+
+### Card run 42 (step agdc, build 171)
+
+- The desktop on both monitors again, no WindowServer restart: AGDC's
+  table held both framebuffers (`n=2`, `maxfb 2`). METAL ALL PASSED.
+- Still only plane-less transactions (`iop_empty` 199, `iop_ok` 0), gamma
+  FAIL as before. AGDC got 13 vendor calls and no K5 question
+  (`k5_asked 0`); refused 0x3, 0x941, 0x923, 0x2, 0x2001.
+- The object came up 600 ms after WindowServer had opened the accelerator
+  (the 500 ms delayed kick, re-armed by each publish). In run 41 it was up
+  before WindowServer and IOPresentment asked the K5 questions. NullMoth
+  holds the registry busy until its display stack is armed.
+- Fix: the object is made at once when the first framebuffer publishes (a
+  100 ms retry while the registry does not show it yet); only table
+  updates wait 500 ms (the table is also rescanned at every 0x980).
