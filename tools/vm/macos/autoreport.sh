@@ -423,6 +423,27 @@ cache_skip() {   # cache_skip NAME PART...: 0 = passed before with the same buil
     fi
     return 1
 }
+ips_summary() {   # ips_summary FILE: a crash report's reason and crashed thread (JXA parses the JSON)
+    osascript -l JavaScript -e '
+function run(a) {
+    var t = $.NSString.stringWithContentsOfFileEncodingError(a[0], 4, null).js;
+    var j = JSON.parse(t.slice(t.indexOf("\n") + 1)), o = [];
+    ["exception", "termination", "asi"].forEach(function (k) {
+        if (j[k]) o.push(k + ": " + JSON.stringify(j[k]));
+    });
+    var th = j.threads ? j.threads[j.faultingThread || 0] : null, im = j.usedImages || [];
+    if (th) {
+        o.push("crashed thread " + (j.faultingThread || 0) + (th.queue ? " (" + th.queue + ")" : "") + ":");
+        th.frames.slice(0, 30).forEach(function (f) {
+            var m = im[f.imageIndex];
+            o.push("  " + (m && m.name ? m.name : "?") + "  " + (f.symbol || "0x" + (f.imageOffset || 0).toString(16)) +
+                   (f.symbolLocation ? " + " + f.symbolLocation : ""));
+        });
+    }
+    return o.join("\n");
+}' "$1"
+}
+
 cache_keep() {   # cache_keep EXIT: after done_, the test's output kept when it passed
     [ "$1" = 0 ] && [ -n "${CFP:-}" ] || return 0
     mkdir -p "$CACHE_DIR"
@@ -778,7 +799,9 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 cr=$(find /Library/Logs/DiagnosticReports /Users/*/Library/Logs/DiagnosticReports -name "$app*" \
                      -newer "/tmp/rdna3-m6-$app" 2>/dev/null | head -1)
                 echo "M6 $app: running $run, plugin $([ "$pl" -gt 0 ] && echo loaded || echo "NOT loaded"), crash report: ${cr:-none}"
-                [ -n "$cr" ] && head -40 "$cr"
+                # the reason and the crashed thread's frames (card run 50:
+                # the first 40 lines of Chess's .ips were only its header)
+                [ -n "$cr" ] && { ips_summary "$cr" 2>/dev/null || head -40 "$cr"; }
                 [ "$run" = yes ] && [ "$pl" -gt 0 ] && [ -z "$cr" ] && m6ok=$((m6ok + 1))
             done
             [ -f /var/db/rdna3-allow.bak ] && mv /var/db/rdna3-allow.bak "$al"

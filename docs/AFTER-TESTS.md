@@ -1674,3 +1674,32 @@ Settings. That is expected for them, not a display regression.
   exits).
 - IH ring overflows (3 this run, 1 in run 48) precede the fault: the ring
   fills faster than it is read; to look at with the VMID owners known.
+
+### Card run 50 (step agdc + probes, build 181)
+
+- Install boot (new bundle, then shutdown): **kernel panic at shutdown**,
+  NULL read in `IOAccelLegacySurface::clientClose+0x1cc` (RAX 0xffffffdf)
+  from `iokit_client_died` while WindowServer (pid 158) exited, after
+  "VMID 2 of WindowServer freed". The test boot's shutdown passed the same
+  path without a panic. tools/probe/iofam.sh disassembles the function on
+  the macOS runner; the installs now run without the card anyway
+  (`rdna3vm _install`).
+- Test boot: modes 4/4, display sleep/wake, **gamma PASS on both pipes**,
+  Vulkan 13/13, Metal compute + render, A3, M4 on the screen (8470 magenta
+  pixels), WindowServer on Metal for 9 minutes with 40 zero-copy flips.
+- **The M6 cause, found with the VMID owners**: Chess (pid 1571) got
+  VMIDs 3 and 4, crashed 3 s after its launch, and its file was closed with
+  a job still on the GFX ring: "VMID 3 of Chess freed", then the GFXHUB
+  fault at 0x8001006a8000 on VMID 3 "which no client owns" (GRBM and CP
+  busy). The job ran on into torn-down page tables; WindowServer's
+  Vulkan device went down ("MTLTexture creation failed - vulkan down"),
+  it aborted and every later WindowServer died with "Vulkan is not up".
+  amdgpu never frees a VM under its jobs (amdgpu_flush waits for the
+  contexts' entities, amdgpu_vm_fini for the VM's last fences, TTM frees
+  the page tables only once the fences in their reservations signal).
+  Fix: `rdna3_drm_file_close` waits for the file's last submission on
+  every ring before it unmaps, destroys the VM and drops the BOs (the OS's
+  fence wait: its 10 s job timeout recovers a ring that never gets there),
+  and takes no new ioctls meanwhile (test_uapi).
+- Why Chess crashed in the first place is still open (its .ips was cut
+  after the header in the tests file; the next run has the full exits).

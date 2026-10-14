@@ -468,6 +468,12 @@ typedef struct rdna3_drm_file {
      * (entity->fence_seq, vcn_v4_0_limit_sched) */
     uint8_t  vcn_entity[RD_MAX_CTX];
     uint32_t vcn_entity_jobs[RD_MAX_CTX];
+    /* the file's own last submission per ring (extended like
+     * rdna3_drm_device.last_seq): its close waits for them */
+    uint64_t last_seq[AMDGPU_HW_IP_NUM][4];
+    /* rdna3_drm_file_close runs (its wait may drop the OS lock): no new
+     * ioctls on the file */
+    uint32_t closing;
 } rdna3_drm_file;
 
 /* Fill dev_info and sizes for a Navi 3x from discovery + PCI identity. */

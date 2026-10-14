@@ -121,6 +121,17 @@ static int h_signaled(void *c, uint32_t ip, uint32_t ring, uint64_t seq)
 }
 /* runs "while the lock is dropped": what another thread could do meanwhile */
 static void (*h_during_wait)(void);
+/* what the close of a file with a job on the ring still had when it waited */
+static int probe_vm_live = -1, probe_vm_unmaps = -1, probe_ioctl = 1;
+static rdna3_drm_file *probe_file;
+static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip, uint32_t in_sobj,
+                     uint32_t out_sobj, uint64_t *handle);
+static void probe_close_wait(void)
+{
+    probe_vm_live = vm_live;
+    probe_vm_unmaps = vm_unmaps;
+    probe_ioctl = cs_submit(probe_file, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL);
+}
 /* a hung GPU (h_hang): no fence ever signals; a slice of a wait-any moves
  * the fake clock 1 ms, a full wait (the caller's own deadline) is where the
  * OS's 10 s cap and recovery would run */
@@ -1522,6 +1533,50 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gc) == 0 &&
               rdna3_drm_bo_lookup(f, gc.out.handle)->vram_offset == RD_DOORBELL_KERNEL_SIZE);   /* reused */
         rdna3_drm_device_set_userq(&dev, 0, 0);
+    }
+
+    /* a client that exits with a job still on the ring (card run 50: Chess
+     * freed its VM under a running job, which faulted and hung the GFX
+     * ring): amdgpu_flush / amdgpu_vm_fini, the close waits for the job
+     * before the mappings and the VM go, and takes no new ioctls meanwhile */
+    {
+        static rdna3_drm_file fz;
+        union drm_amdgpu_gem_create gz;
+        struct drm_amdgpu_gem_va vz;
+        int only0 = h_only, hang0 = h_hang, r32 = h_ring32, live0, unm0;
+        uint64_t pend;
+        h_only = h_hang = h_ring32 = 0;
+        ring_done = ring_next;
+        memset(&g_uf, 0, sizeof(g_uf));
+        g_bl = NULL; g_dep = NULL; g_shadow = NULL; g_bl_handle = 0;
+        dev.ops.submit = h_submit;
+        rdna3_drm_device_set_ring_ready(&dev, AMDGPU_HW_IP_DMA, 1);
+        CHECK(rdna3_drm_file_open(&dev, &fz) == 0);
+        memset(&gz, 0, sizeof(gz));
+        gz.in.bo_size = 65536;
+        gz.in.domains = AMDGPU_GEM_DOMAIN_GTT;
+        CHECK(IOCTL(&fz, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gz) == 0);
+        memset(&vz, 0, sizeof(vz));
+        vz.handle = gz.out.handle; vz.operation = AMDGPU_VA_OP_MAP; vz.va_address = 0x400000;
+        vz.map_size = 65536;
+        CHECK(IOCTL(&fz, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), vz) == 0);
+        CHECK(cs_submit(&fz, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
+        pend = ring_next;
+        CHECK(ring_done < pend);
+        live0 = vm_live;
+        unm0 = vm_unmaps;
+        probe_vm_live = probe_vm_unmaps = -1;
+        probe_file = &fz;
+        h_during_wait = probe_close_wait;
+        rdna3_drm_file_close(&fz);
+        /* waited with everything in place, and another thread's CS got no
+         * further than the door */
+        CHECK(probe_vm_live == live0 && probe_vm_unmaps == unm0 && probe_ioctl == -RD_ENODEV);
+        CHECK(ring_done >= pend && vm_live == live0 - 1 && vm_unmaps == unm0 + 1);
+        h_only = only0;
+        h_hang = hang0;
+        h_ring32 = r32;
+        dev.ops.submit = NULL;
     }
 
     rdna3_drm_file_close(f);

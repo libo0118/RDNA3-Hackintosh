@@ -412,11 +412,41 @@ static void exports_gc(rdna3_drm_device *dev, const struct rdna3_drm_file *closi
     }
 }
 
+/* amdgpu_flush (amdgpu_ctx_mgr_entity_flush) and amdgpu_vm_fini
+ * (dma_fence_wait on the VM's last fences; TTM frees the page tables and
+ * BOs only once the jobs' fences in their reservations signalled): the
+ * file's jobs finish before its mappings, VM and BOs go. Card run 50: Chess
+ * exited with a job on the GFX ring, its VM was freed under it, the job
+ * faulted on the unmapped page tables and the ring hung for everybody.
+ * The wait is the OS's fence_wait without a deadline: its job timeout
+ * recovers a ring that never gets there (amdgpu_job_timedout). */
+static int fence_wait_abs(rdna3_drm_device *dev, const rdna3_fence *fe, uint64_t abs_ns);
+
+static void file_wait_idle(rdna3_drm_file *f)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_fence fe;
+    uint32_t ip, ring;
+    for (ip = 0; ip < AMDGPU_HW_IP_NUM; ip++)
+        for (ring = 0; ring < 4; ring++) {
+            if (!f->last_seq[ip][ring])
+                continue;
+            zero(&fe, sizeof(fe));
+            fe.ip = ip;
+            fe.ring = ring;
+            fe.seq = f->last_seq[ip][ring];
+            fence_wait_abs(dev, &fe, UINT64_MAX);
+            f->last_seq[ip][ring] = 0;
+        }
+}
+
 void rdna3_drm_file_close(rdna3_drm_file *f)
 {
     rdna3_drm_ops *ops = &f->dev->ops;
     rdna3_drm_file **pp;
     uint32_t i;
+    f->closing = 1;
+    file_wait_idle(f);
     for (pp = &f->dev->files; *pp; pp = &(*pp)->next_file)
         if (*pp == f) {
             *pp = f->next_file;
@@ -458,6 +488,7 @@ void rdna3_drm_file_close(rdna3_drm_file *f)
     f->syncobjs = NULL;
     f->vas = NULL;
     exports_gc(f->dev, f);
+    f->closing = 0;
 }
 
 rdna3_bo *rdna3_drm_bo_lookup(rdna3_drm_file *f, uint32_t handle)
@@ -1637,6 +1668,7 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
     }
     seq = seq_extend(dev, ip, ring, seq);
     dev->last_seq[ip][ring] = seq;
+    f->last_seq[ip][ring] = seq;
     if (job.uf_bo) {
         job.uf_bo->refcnt++;
         dev->uf_pending[uf_slot].bo = job.uf_bo;
@@ -4116,6 +4148,8 @@ int rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
 {
     uint64_t ext[64];   /* 512 bytes: larger than every DRM/amdgpu ioctl struct */
     int r;
+    if (f->closing)
+        return -RD_ENODEV;
     if (size < 8 || size >= sizeof(ext))
         return drm_ioctl_dispatch(f, nr, data, size);
     uint32_t i;
