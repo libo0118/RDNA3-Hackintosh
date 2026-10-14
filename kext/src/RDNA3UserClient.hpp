@@ -2,7 +2,12 @@
  * RDNA3UserClient - the kernel end of the libdrm shim.
  *
  * Userspace opens the RDNA3Accel service (IOServiceOpen, type 0) once per
- * "DRM fd". Selectors:
+ * "DRM fd". Where the sandbox refuses that class (WindowServer: "IOUC
+ * RDNA3UserClient failed MACF", card run 47), it opens RDNA3Accelerator
+ * with type RD3K_UC_TYPE_BASE instead and gets an IOAccelRDNA3Bridge: the
+ * same client under a name WindowServer's sandbox lets through, attached
+ * to one of the accelerator's carriers (NullMoth's IOAccelNVRMBridge).
+ * Selectors:
  *   0 kSelIoctl   scalar in [nr], struct in/out = ioctl payload,
  *                 scalar out [errno]; nr is the DRM ioctl number byte
  *                 (DRM_COMMAND_BASE + DRM_AMDGPU_* for amdgpu ioctls).
@@ -43,13 +48,21 @@ public:
                                     void *reference) override;
     virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options,
                                          IOMemoryDescriptor **memory) override;
+    /* the device when the provider is not RDNA3Accel (a bridge on a carrier) */
+    void setOwner(RDNA3Accel *owner) { fOwner = owner; }
 
 private:
     IOReturn        pmMethod(IOExternalMethodArguments *args);
     RDNA3Accel     *fAccel = nullptr;
+    RDNA3Accel     *fOwner = nullptr;
     task_t          fTask = nullptr;
     rdna3_drm_file *fFile = nullptr;
     bool            fOpen = false;
+};
+
+/* RDNA3UserClient handed out by the accelerator (RD3K_FN_NEW_CLIENT) */
+class IOAccelRDNA3Bridge : public RDNA3UserClient {
+    OSDeclareDefaultStructors(IOAccelRDNA3Bridge)
 };
 
 #endif

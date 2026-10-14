@@ -10,6 +10,7 @@
 
 #define super IOUserClient
 OSDefineMetaClassAndStructors(RDNA3UserClient, IOUserClient)
+OSDefineMetaClassAndStructors(IOAccelRDNA3Bridge, RDNA3UserClient)
 
 bool RDNA3UserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
 {
@@ -23,7 +24,7 @@ bool RDNA3UserClient::start(IOService *provider)
 {
     if (!super::start(provider))
         return false;
-    fAccel = OSDynamicCast(RDNA3Accel, provider);
+    fAccel = fOwner ? fOwner : OSDynamicCast(RDNA3Accel, provider);
     if (!fAccel || !fAccel->drmAvailable())
         return false;
     fFile = (rdna3_drm_file *)IOMalloc(sizeof(*fFile));

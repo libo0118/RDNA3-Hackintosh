@@ -19,8 +19,10 @@
  *                                    accelerator's swap copy, A2)
  *   rdna3SurfShare                   not offered (no RM-style cross-client
  *                                    handles on AMD; RADV shares by GEM)
- *   rdna3NewAccelClient              not offered: RADV opens RDNA3Accel
- *                                    directly (RDNA3UserClient)
+ *   rdna3NewAccelClient              an IOAccelRDNA3Bridge (RDNA3UserClient)
+ *                                    for a process whose sandbox refuses
+ *                                    RDNA3UserClient (WindowServer, card
+ *                                    run 47); the accelerator attaches it
  *
  * Display heads (Stage 3, RDNA3Display.cpp) are answered here for
  * RDNA3Framebuffer; the accelerator's own scanout/flip requests go to the
@@ -29,6 +31,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "RDNA3Accel.hpp"
+#include "RDNA3UserClient.hpp"
 
 #include <IOKit/IOLib.h>
 #include <libkern/c++/OSSymbol.h>
@@ -354,8 +357,25 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return platformGpuVa(1, (RD3KGpuVaRequest *)p1);
         if (fn->isEqualTo(RD3K_GPUVA_FN_FREE))
             return platformGpuVa(2, (RD3KGpuVaRequest *)p1);
-        if (fn->isEqualTo(RD3K_FN_NEW_CLIENT))
-            return kIOReturnUnsupported;
+        if (fn->isEqualTo(RD3K_FN_NEW_CLIENT)) {
+            /* p1 the task, p2 the type's low 16 bits, p3 IOUserClient ** */
+            IOUserClient **out = (IOUserClient **)p3;
+            if (!out || !p1)
+                return kIOReturnBadArgument;
+            *out = nullptr;
+            if (!drmAvailable())
+                return kIOReturnNotReady;
+            IOAccelRDNA3Bridge *uc = OSTypeAlloc(IOAccelRDNA3Bridge);
+            if (!uc)
+                return kIOReturnNoMemory;
+            uc->setOwner(this);
+            if (!uc->initWithTask((task_t)p1, nullptr, (UInt32)(uintptr_t)p2)) {
+                uc->release();
+                return kIOReturnNoResources;
+            }
+            *out = uc;
+            return kIOReturnSuccess;
+        }
         if (fn->isEqualTo(RD3K_SS_FN_PAGEOFF))
             return platformPageoff((RD3KSurfPageoff *)p1);
         if (fn->isEqualTo(RD3K_COPY_FN))

@@ -17,6 +17,10 @@ static io_service_t find_service(void)
     return IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("RDNA3Accel"));
 }
 
+/* RDNA3Accelerator hands out the same client as IOAccelRDNA3Bridge for this
+ * type (accel/rdna3k_abi.h RD3K_UC_TYPE_BASE) */
+#define RD3K_UC_TYPE_BASE 0x52440000u
+
 static uintptr_t iokit_open(void)
 {
     io_connect_t conn = 0;
@@ -28,11 +32,23 @@ static uintptr_t iokit_open(void)
     }
     kr = IOServiceOpen(svc, mach_task_self(), 0, &conn);
     IOObjectRelease(svc);
-    if (kr != KERN_SUCCESS) {
-        errno = kr == kIOReturnNotPrivileged ? EACCES : ENODEV;
-        return 0;
+    if (kr == KERN_SUCCESS)
+        return (uintptr_t)conn;
+    /* WindowServer's sandbox refuses RDNA3UserClient ("IOUC RDNA3UserClient
+     * failed MACF", card run 47) but lets IOAccel* clients of the
+     * accelerator through: the same device through RDNA3Accelerator */
+    {
+        io_service_t acc = IOServiceGetMatchingService(kIOMainPortDefault,
+                                                       IOServiceMatching("RDNA3Accelerator"));
+        kern_return_t kb = acc ? IOServiceOpen(acc, mach_task_self(), RD3K_UC_TYPE_BASE, &conn)
+                               : kIOReturnNotFound;
+        if (acc)
+            IOObjectRelease(acc);
+        if (kb == KERN_SUCCESS)
+            return (uintptr_t)conn;
     }
-    return (uintptr_t)conn;
+    errno = kr == kIOReturnNotPrivileged ? EACCES : ENODEV;
+    return 0;
 }
 
 static void iokit_close(uintptr_t c) { IOServiceClose((io_connect_t)c); }

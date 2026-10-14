@@ -1599,3 +1599,26 @@ Settings. That is expected for them, not a display regression.
 |---|---|---|
 | `agdc`: WindowServer restarts, assert "Failed to create MetalDevice" | WindowServer got no Metal device from the plugin while a display pipe exists | the allow list has `@WindowServer`, mode 644; the plugin rebuilt with it (build_metal.sh); `NVMTL:` lines of WindowServer in `24-log-coredisplay.txt` say why |
 | `agdc`: WindowServer never opens the accelerator, no report | AGDC appeared while WindowServer started | `RDNA3,AGDCBootHold` must say "display stack armed"; "CAP" = the object or the table was late |
+
+### Card run 47 (step agdc, `rdna3agdc=3`, build 177)
+
+- The new diagnostics named the next layer at once: WindowServer is
+  allow-listed and the plugin's device initialises, but RADV inside
+  WindowServer enumerates no GPU (`vkEnumeratePhysicalDevices -> count 0`,
+  "NVK did not come up in this process"), so CoreDisplay still asserts
+  "Failed to create MetalDevice" (16 WindowServer starts).
+- Why: the serial log has `IOUC RDNA3UserClient failed MACF in process
+  pid 157, WindowServer`: WindowServer's sandbox refuses our DRM client
+  class. NullMoth's NVK reaches its GPU from WindowServer through the
+  accelerator: `newUserClient` type 0x4E56xxxx returns `IOAccelNVRMBridge`
+  attached to a carrier, a class name the sandbox lets through. Our
+  accelerator already had that path (type `RD3K_UC_TYPE_BASE`, carriers)
+  but the core answered `rdna3NewAccelClient` with Unsupported.
+- Fix: the core makes an `IOAccelRDNA3Bridge` (an RDNA3UserClient with the
+  device set explicitly, its provider is a carrier); libdrm_xnu opens
+  RDNA3Accelerator with type 0x52440000 when opening RDNA3Accel fails.
+  Only the core kext (OpenCore-injected) and libdrm changed: no approval.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `NVMTL: vk: zero physical devices ... in WindowServer`, serial `IOUC RDNA3UserClient failed MACF ... WindowServer` | the sandbox refuses the DRM client class | libdrm falls back to the accelerator bridge; serial `newUserClient(0x52440000) -> IOAccelRDNA3Bridge on the ACCELERATOR` shows it was used |
