@@ -29,3 +29,23 @@ jobs:
           name: probe-coredisplay
           path: probe-out
           retention-days: 7
+
+  iofam:
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: IOAccelLegacySurface::clientClose disassembly (card run 50 panic)
+        run: |
+          sh tools/probe/iofam.sh probe-iofam
+          cat probe-iofam/30-iofam-system.txt
+          echo "== IOAccelLegacySurface::clientClose"; cat probe-iofam/31-LegacySurface-clientClose.s
+          echo "== IOAccelSurface::clientClose"; cat probe-iofam/32-Surface-clientClose.s
+          echo "== IOAccelLegacySurface::free"; head -300 probe-iofam/33-LegacySurface-free.s
+          echo "== IOAccelLegacySurface init"; head -300 probe-iofam/34-LegacySurface-init.s
+          echo "== symbols"; head -200 probe-iofam/35-surface-symbols.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-iofam
+          path: probe-iofam
+          retention-days: 7
