@@ -255,6 +255,8 @@ private:
     IOReturn      platformCopyVram(struct RD3KCopyRequest *q);
     uint64_t      fAccelVramBytes = 0;
     uint32_t      fCopyVramFails = 0;      /* rdna3CopyVram refused (log limit) */
+    uint32_t      fUserptrRo = 0;          /* GEM_USERPTR wired read-only after a read-write refusal */
+    uint32_t      fUserptrFails = 0;       /* GEM_USERPTR refused (log limit) */
     bool          platformInit();
     void          platformFree();
     IOReturn      platformVramAlloc(struct RD3KVramRequest *r);

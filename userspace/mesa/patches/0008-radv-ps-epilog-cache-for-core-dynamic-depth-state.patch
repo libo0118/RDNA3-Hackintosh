@@ -1,0 +1,36 @@
+From: RDNA3-Hackintosh
+Subject: [PATCH] radv: always create the PS epilog cache
+
+radv_CreateDevice makes device->ps_epilogs only when a feature that needs
+PS epilogs is enabled (graphicsPipelineLibrary, shaderObject,
+extendedDynamicState, some extendedDynamicState3 bits). A Vulkan 1.3
+application can still make depth/stencil test state dynamic (core
+since 1.3) without enabling extendedDynamicState; a pipeline whose
+fragment shader writes depth then sets depth_output_needs_epilog, and the
+first draw looks the epilog up in a cache that was never initialised
+(card run 56: Chess crashed in radv_shader_part_cache_get from
+radv_bind_ps_epilog during glReadPixels' blit on the Metal plugin).
+---
+diff --git a/src/amd/vulkan/radv_device.c b/src/amd/vulkan/radv_device.c
+index c01cbff..5fe7d86 100644
+--- a/src/amd/vulkan/radv_device.c
++++ b/src/amd/vulkan/radv_device.c
+@@ -1695,14 +1695,10 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
+          goto fail;
+    }
+ 
+-   if (device->vk.enabled_features.graphicsPipelineLibrary || device->vk.enabled_features.shaderObject ||
+-       device->vk.enabled_features.extendedDynamicState ||
+-       device->vk.enabled_features.extendedDynamicState3ColorBlendEnable ||
+-       device->vk.enabled_features.extendedDynamicState3ColorWriteMask ||
+-       device->vk.enabled_features.extendedDynamicState3AlphaToCoverageEnable ||
+-       device->vk.enabled_features.extendedDynamicState3ColorBlendEquation ||
+-       device->vk.enabled_features.extendedDynamicState3RasterizationSamples)
+-      radv_shader_part_cache_init(&device->ps_epilogs, &ps_epilog_ops);
++   /* Always: a Vulkan 1.3 application may make depth/stencil test state dynamic (core) without enabling
++    * extendedDynamicState, and a depth-writing fragment shader then needs a PS epilog. The cache is only
++    * a hash set, so making it unconditionally costs nothing when no epilog is ever looked up. */
++   radv_shader_part_cache_init(&device->ps_epilogs, &ps_epilog_ops);
+ 
+    if (pdev->info.has_zero_index_buffer_bug || device->compiler_info.key.mitigate_smem_oob) {
+       result = radv_bo_create(

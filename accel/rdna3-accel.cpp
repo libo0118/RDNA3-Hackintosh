@@ -42,6 +42,7 @@ IOReturn                  rd3AccelCopyForward(const void *surf, unsigned fbIndex
                                               IOAccelResource2 *dst, const void *rects, unsigned count,
                                               unsigned smode);
 static void               rd3AccelCopyForwardCheck(IOAccelResource2 *res);
+static void               rd3AccelNotePresented(const void *vm);
 static void               rd3AccelWriteStamp(int index, unsigned int value);
 static bool               rd3AccelLocksInit(void);
 /* Navi 3x display devices (data/amdgpu.ids); the core kext must also claim the card */
@@ -1768,6 +1769,7 @@ static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pi
     if (!W || !H || P < 4 * W || H * P > bytes) return rd3AccelIopFlipNo(6);
     struct RD3KFlipRequest f; rd3SVZero(&f, sizeof f);
     f.version = RD3K_FLIP_ABI_VERSION; f.kapiMemory = kmem; f.allocationCookie = vm->fAllocationCookie; f.width = (unsigned)W; f.height = (unsigned)H; f.pitch = (unsigned)P;
+    rd3AccelNotePresented(vm);
     if (gIopAsync && pipe) return rd3AccelIopAsyncStart(pipe, fb, head, s, &f);
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("rd3FlipToSurfacePure");
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
@@ -2305,6 +2307,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     IOService *fb = a->fFBs[head];
     if (!rd3AccelFlipTo(src, fb, head))
         rd3AccelCopyToScanout(src, fb, head);
+    rd3AccelNotePresented(rd3res_vidmem(src));
 }
 
 /* ---- copy forward (card run 54) ----
@@ -2330,7 +2333,28 @@ static bool gCfSdmaOff;
 #define RD3CFLOG(...) do { if (gCfLogs < 60) { gCfLogs++; ALOG(__VA_ARGS__); } } while (0)
 /* one pixel of the last copy, looked at again when its buffer is swapped */
 static struct { const void *vm; unsigned x, y, pitch, before, copied, call; bool armed; } gCfCheck;
-static unsigned gCfChecks, gCfKept, gCfReverted, gCfOther;
+static unsigned gCfChecks, gCfKept, gCfReverted, gCfOther, gCfNotShown;
+/* the buffers that last went to a panel. A legacy swap is presented by
+ * flipping its back buffer itself (zero-copy), never by the swap copy into
+ * the front buffer, so the front stays empty and the back already holds
+ * the last frame: a copy forward from a buffer that was never shown would
+ * copy black over it (card run 56: "copied 0x00000000" on every check,
+ * the screen black but for what changed). Pointers are only compared. */
+static const void *volatile gCfShown[8];
+static volatile UInt32 gCfShownNext;
+static void rd3AccelNotePresented(const void *vm)
+{
+    if (!vm) return;
+    for (unsigned i = 0; i < 8; i++)
+        if (gCfShown[i] == vm) return;
+    gCfShown[OSIncrementAtomic((volatile SInt32 *)&gCfShownNext) & 7] = vm;
+}
+static bool rd3AccelWasPresented(const void *vm)
+{
+    for (unsigned i = 0; vm && i < 8; i++)
+        if (gCfShown[i] == vm) return true;
+    return false;
+}
 
 static bool rd3res_geom(IOAccelResource2 *r, unsigned *w, unsigned *h, unsigned *pitch)
 {
@@ -2493,6 +2517,13 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
         return kIOReturnUnsupported;
     }
     if (S.vm == D.vm || S.cookie == D.cookie) { gCfSkipped++; return kIOReturnSuccess; }
+    if (!rd3AccelWasPresented(S.vm)) {
+        /* nothing to bring forward: the back buffer is the frame on the panel */
+        if (gCfNotShown++ < 6 || gCfNotShown % 2000 == 0)
+            ALOG("copy forward #%u: the front buffer (vm %p) was never shown -- the back buffer already holds the "
+                 "last frame, nothing copied (%u such calls)", n, S.vm, gCfNotShown);
+        return kIOReturnSuccess;
+    }
     const unsigned w = S.w < D.w ? S.w : D.w, h = S.h < D.h ? S.h : D.h;
     const bool cpu = S.cpu && D.cpu;
     unsigned long long us = 0, bytes = 0;

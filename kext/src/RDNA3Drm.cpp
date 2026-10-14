@@ -152,7 +152,31 @@ int RDNA3Accel::drmBoUserptr(void *ctx, void *fileOs, rdna3_bo *bo, uint64_t uad
     md = IOMemoryDescriptor::withAddressRange(uaddr, bo->size, dir, task);
     if (!md)
         return -RD_EFAULT;
-    if (md->prepare() != kIOReturnSuccess) {
+    IOReturn pr = md->prepare();
+    if (pr != kIOReturnSuccess && dir == kIODirectionInOut) {
+        /* RADV imports every host pointer read-write (amdgpu_create_bo_from_user_mem has no READONLY), but
+         * WindowServer gets the apps' CoreAnimation backing stores mapped read-only, so wiring them for writing
+         * fails and each such Metal buffer fell back to a copy that never saw the app's next drawing (card runs
+         * 54-56: every "imported host pointer" refused, System Settings' sidebar stale while scrolling). Wire
+         * them read-only and map them so: the GPU only reads those pages. */
+        md->release();
+        md = IOMemoryDescriptor::withAddressRange(uaddr, bo->size, kIODirectionOut, task);
+        if (!md)
+            return -RD_EFAULT;
+        IOReturn pr2 = md->prepare();
+        if (pr2 == kIOReturnSuccess) {
+            bo->userptr_ro = 1;
+            if (a->fUserptrRo++ < 4)
+                LOG("GEM_USERPTR: %llu bytes at 0x%llx are not writable (0x%x): wired read-only, the GPU maps them "
+                    "read-only (%u so far)", (unsigned long long)bo->size, (unsigned long long)uaddr, (unsigned)pr,
+                    a->fUserptrRo);
+        }
+        pr = pr2;
+    }
+    if (pr != kIOReturnSuccess) {
+        if (a->fUserptrFails++ < 8)
+            LOG("GEM_USERPTR: %llu bytes at 0x%llx (flags 0x%x) could not be wired (0x%x) - refused",
+                (unsigned long long)bo->size, (unsigned long long)uaddr, flags, (unsigned)pr);
         md->release();
         return -RD_EFAULT;
     }

@@ -1,0 +1,46 @@
+From: RDNA3-Hackintosh
+Subject: [PATCH] radv: a dynamic primitive topology may change class
+
+The Metal plugin builds every graphics pipeline with a dynamic primitive
+topology and draws points, lines and triangles with the same pipeline,
+as Metal allows. RADV reports dynamicPrimitiveTopologyUnrestricted =
+false and compiles the pipeline for the topology class it was created
+with, so the plugin skipped every point and line draw (card runs 54-56:
+"G14 draw: point/line primitives ... NOT drawn" in WindowServer).
+
+RADV already compiles for an unknown topology with graphics pipeline
+libraries (V_008958_DI_PT_NONE: NGG lowered for three vertices, the
+hardware ignores the extra ones for points and lines, NGG culling is
+turned off for them at draw time). Use that key whenever the topology is
+dynamic and report the feature.
+---
+diff --git a/src/amd/vulkan/radv_physical_device.c b/src/amd/vulkan/radv_physical_device.c
+index 5edb325..d4baeb5 100644
+--- a/src/amd/vulkan/radv_physical_device.c
++++ b/src/amd/vulkan/radv_physical_device.c
+@@ -2260,7 +2260,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
+       .prefersCompactPrimitiveOutput = false,
+ 
+       /* VK_EXT_extended_dynamic_state3 */
+-      .dynamicPrimitiveTopologyUnrestricted = false,
++      .dynamicPrimitiveTopologyUnrestricted = true,
+ 
+       /* VK_EXT_descriptor_buffer */
+       .combinedImageSamplerDescriptorSingleArray = true,
+diff --git a/src/amd/vulkan/radv_pipeline_graphics.c b/src/amd/vulkan/radv_pipeline_graphics.c
+index b742d71..e0cc0b2 100644
+--- a/src/amd/vulkan/radv_pipeline_graphics.c
++++ b/src/amd/vulkan/radv_pipeline_graphics.c
+@@ -1721,6 +1721,12 @@ radv_generate_graphics_state_key(const struct radv_compiler_info *compiler_info,
+ 
+    if (state->ia) {
+       key.ia.topology = radv_translate_prim(state->ia->primitive_topology);
++      /* A dynamic topology may change class at draw time (dynamicPrimitiveTopologyUnrestricted): compile for an
++       * unknown topology, as with graphics pipeline libraries (NGG for up to 3 vertices, culling off for
++       * points and lines at draw time).
++       */
++      if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY))
++         key.ia.topology = V_008958_DI_PT_NONE;
+    }
+ 
+    key.rs.polygon_mode_unknown = !state->rs || BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_RS_POLYGON_MODE);

@@ -1795,3 +1795,39 @@ Settings. That is expected for them, not a display regression.
   Maps, System Settings and the desktop, `27-copy-forward.txt`,
   `28-plugin-warnings.txt`, and logs collected for up to 180 s (45 s cut
   the plugin log off before Maps).
+
+### Card run 56 (step agdc + probes, build 191)
+
+- **The screen went black** but for what changed. `27-copy-forward.txt`:
+  every check read `copied 0x00000000 ... KEPT`. The copy reached the
+  flip, but its source was empty: a legacy swap is presented by flipping
+  its back buffer itself (zero-copy, `rd3AccelFlipTo` on `a2`), never by
+  the swap copy into the front buffer, so buffer 0 (the front) never holds
+  a frame and buffer 1 (the back) already holds the last one. Copy forward
+  from a buffer that was never shown is now a no-op; it copies only from a
+  buffer that went to a panel. Copy forward was therefore not what kept
+  the System Settings sidebar stale.
+- **Chess crashed** in RADV: `radv_shader_part_cache_get` (NULL) from
+  `lookup_ps_epilog` during `glReadPixels`' blit. The plugin makes depth
+  and stencil state dynamic (Vulkan 1.3 core) without enabling
+  `extendedDynamicState`, and RADV creates its PS epilog cache only with
+  that feature. The plugin now enables `VK_EXT_extended_dynamic_state`, and
+  mesa patch 0008 creates the cache always. The run before it drew Chess
+  almost right (a few cyan slivers on the knights).
+- **Point and line draws were skipped** in WindowServer ("G14 draw:
+  point/line primitives ... NOT drawn"): RADV reports
+  `dynamicPrimitiveTopologyUnrestricted = false`. Mesa patch 0009 compiles
+  pipelines with a dynamic topology for an unknown topology class (as with
+  graphics pipeline libraries) and reports the feature.
+- **Every host-pointer import was refused** ("vkAllocateMemory refused
+  the imported host pointer", including 14.7 MB buffers). RADV imports
+  read-write, and WindowServer gets the apps' CoreAnimation backing stores
+  mapped read-only. GEM_USERPTR now wires such pages read-only after a
+  read-write refusal (the VA mapping drops write), and logs refusals with
+  their IOReturn. This is the lead for the stale sidebar: the CPU-drawn
+  layers reached WindowServer only as copies.
+- **Buffer textures came back nil** (glyph / icon textures: "bytesPerRow
+  ... not a multiple of 32", "refused on memory types"): RADV cannot alias
+  them as the plugin's NVK path did. A read-only buffer texture over
+  CPU-visible bytes is now a private image refreshed from the buffer once
+  per command buffer that uses it.

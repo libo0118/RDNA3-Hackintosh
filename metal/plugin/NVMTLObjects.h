@@ -54,6 +54,7 @@ static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return 
 - (void *)nvview;
 - (void *)nvsampleview;
 - (void)nvmtlSurfaceIn;
+- (void)nvmtlBufCopyIn;
 - (BOOL)nvmtlSurfaceOut;
 @end
 @interface NVMTLFunction : NSObject <MTLFunction> { @public NSData *_spirv; NSString *_fname; NSString *_stage; NSString *_air; NSDictionary *_fc; NSArray *_embedded; unsigned char _bcHash[32]; BOOL _bcHashed;
@@ -248,6 +249,10 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 @interface NVMTLCommandBuffer () { @public NSString *_label; uint64_t _rep; } @end
 @interface NVMTLCommandBuffer () { @public NSMutableSet *_stTwins; } @end
 @interface NVMTLTexture () { @public nvk_image _stTwin; BOOL _stTwinTried; } @end
+/* a buffer texture the GPU cannot alias (RADV: memory type or row pitch): a private image refreshed from the
+   buffer's CPU contents before each command buffer that uses it (card run 56: glyph and icon textures came back nil) */
+@interface NVMTLTexture () { @public BOOL _bufCopy; } @end
+@interface NVMTLCommandBuffer () { @public NSMutableSet *_bufCopied; } @end
 @interface NVMTLDepthStencilState () { @public NSString *_label; } @end
 @interface NVMTLSamplerState () { @public NSString *_label; } @end
 @interface NVMTLComputePipelineState () { @public NSString *_label; } @end

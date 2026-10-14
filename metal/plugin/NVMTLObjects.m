@@ -777,11 +777,24 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
     const uint32_t bkey[12] = { 2, (uint32_t)w, (uint32_t)h, vkf, bpp, (uint32_t)a8, (d.usage & MTLTextureUsageShaderWrite) != 0,
         (d.usage & MTLTextureUsageRenderTarget) != 0, (uint32_t)offset, (uint32_t)((uint64_t)offset >> 32), (uint32_t)bpr, (uint32_t)((uint64_t)bpr >> 32) };
     const BOOL brec = !noRecycle && _nbpk && nvmtl_bpark_take(self, bkey, &t->_i) == 0;
+    BOOL copied = NO;
     if (!brec && nvmtl_vk_image_create_buffer_alias((uint32_t)w, (uint32_t)h, vkf, bpp, a8, (d.usage & MTLTextureUsageShaderWrite) != 0,
                                            (d.usage & MTLTextureUsageRenderTarget) != 0, &_b, offset, bpr, &t->_i)) {
-        nvlog("buffer newTextureWithDescriptor:offset:%lu bytesPerRow:%lu (%zux%zu fmt %lu, buffer %lu B, storage %lu) -> nil (reason above)",
-              (unsigned long)offset, (unsigned long)bpr, w, h, (unsigned long)d.pixelFormat, (unsigned long)_b.size, (unsigned long)_storage);
-        return nil; }
+        /* no alias: a read-only texture over CPU-visible bytes becomes a private copy refreshed per command buffer */
+        const BOOL ro = !(d.usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget));
+        const BOOL fits = bpr >= w * bpp && offset <= _b.size && bpr * (h - 1) + w * bpp <= _b.size - offset;
+        if (!ro || !fits || !nvmtl_buf_cpu(self) ||
+            nvmtl_vk_image_create_typed((uint32_t)w, (uint32_t)h, vkf, bpp, a8, 1, 0, 2u, 1u, &t->_i)) {
+            nvlog("buffer newTextureWithDescriptor:offset:%lu bytesPerRow:%lu (%zux%zu fmt %lu, buffer %lu B, storage %lu, usage 0x%lx) -> nil "
+                  "(reason above%s)", (unsigned long)offset, (unsigned long)bpr, w, h, (unsigned long)d.pixelFormat, (unsigned long)_b.size,
+                  (unsigned long)_storage, (unsigned long)d.usage, !ro ? "; written by the GPU, so no copy either" : !fits ? "; outside the buffer" :
+                  "; no CPU view or no image for a copy");
+            return nil; }
+        copied = YES;
+        static _Atomic unsigned long ncopied; const unsigned long k = atomic_fetch_add(&ncopied, 1) + 1;
+        if (!(k & (k - 1))) nvlog("buffer texture: %zux%zu fmt %lu bpr %lu not aliasable -> a private copy refreshed per command buffer (%lu so far)",
+                                  w, h, (unsigned long)d.pixelFormat, (unsigned long)bpr, k);
+    }
     t->_q = nvmtl_device_queue();
     t->_fmt = d.pixelFormat; t->_mips = 1;
     t->_stex = t->_i.storage != 0;
@@ -789,7 +802,9 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
     t->_usage = d.usage;
     _texSeen = YES;
     t->_backBuf = self; t->_backOff = offset; t->_backBPR = bpr;
-    t->_bparkable = !noRecycle; memcpy(t->_pkey, bkey, sizeof bkey);
+    t->_bufCopy = copied;
+    if (copied) [t nvmtlBufCopyIn];
+    t->_bparkable = !noRecycle && !copied; memcpy(t->_pkey, bkey, sizeof bkey);
     atomic_fetch_add(brec ? &gBTRecycled : &gBTNew, 1); nvmtl_buftex_census(brec ? "recycled" : "new");
     nvmtl_texture_desc_swizzle(t, d);
     nvlog("buffer %p newTextureWithDescriptor:offset:%lu bytesPerRow:%lu -> %p (%zux%zu fmt %lu usage 0x%lx, storage %lu)", (__bridge void *)self,
@@ -995,6 +1010,12 @@ static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t)
 static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!t) return;
     NVMTLTexture *r = t->_parent ? t->_parent : t;
+    if (r->_bufCopy) {   /* the buffer's bytes as of this command buffer, once per command buffer */
+        if (cb && [cb->_bufCopied containsObject:r]) return;
+        if (cb) { if (!cb->_bufCopied) cb->_bufCopied = [NSMutableSet new]; [cb->_bufCopied addObject:r]; }
+        [r nvmtlBufCopyIn];
+        return;
+    }
     if (cb && r->_surf && [cb->_surfOverwrites containsObject:r]) return;
     // A prior committed buffer defines this GPU backing's contents.
     // Importing the old CPU surface here would run ahead of this buffer and
@@ -1166,8 +1187,15 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
         return monitor;
     }
 }
+- (void)nvmtlBufCopyIn {
+    NVMTLTexture *r = _parent ? _parent : self;
+    const uint8_t *src = r->_backBuf ? (const uint8_t *)nvmtl_buf_cpu(r->_backBuf) : NULL;
+    if (!src || nvmtl_vk_image_write(r->_q, &r->_i, src + r->_backOff, r->_backBPR))
+        nvlog("buffer texture copy: refresh FAILED (%ux%u)", r->_i.w, r->_i.h);
+}
 - (void)nvmtlSurfaceIn {
     NVMTLTexture *r = _parent ? _parent : self;
+    if (r->_bufCopy) { [r nvmtlBufCopyIn]; return; }
     if (!r->_surf) return;
     @synchronized (nvmtl_surface_sync(r)) {
     const uint32_t vgen = r->_vramOn ? 0 : nvmtl_vram_gen(r->_surf, r->_plane);
