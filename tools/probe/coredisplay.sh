@@ -44,6 +44,12 @@ fn "$out/SkyLight.dis" 'UpdateCGXDisplayDevice|AddCGXDisplayDeviceToDeviceList' 
 fn "$cd_dis" 'copy_forward|CopyForward|copyForward' "$out/14-copy-forward.s"
 grep -n -i 'copy.forward\|copyforward' "$out/CoreDisplay.cstring" "$out/SkyLight.cstring" > "$out/22-copy-forward-strings.txt" 2>&1
 grep -n -i 'copy_forward\|copyforward\|CopyForward' "$out/CoreDisplay.exports" "$out/SkyLight.exports" "$out/IOPresentment.exports" >> "$out/22-copy-forward-strings.txt" 2>&1
+# copy_forward_region calls IOAccelSetSurfaceFramebufferShape(surface,
+# rects, 0x1000, framebuffer index) and that returns kIOReturnUnsupported:
+# the user-side function (which surface selector it calls) from IOAccelerator
+iolib=/System/Library/PrivateFrameworks/IOAccelerator.framework/Versions/A/IOAccelerator
+dyld_info -arch x86_64 -disassemble "$iolib" > "$out/IOAccelerator.dis" 2>"$out/IOAccelerator.dis.err"
+fn "$out/IOAccelerator.dis" 'IOAccelSetSurfaceFramebufferShape|IOAccelSetSurfaceShape' "$out/15-IOAccelSetSurfaceFramebufferShape.s"
 # every assertion string of CoreDisplay that names a display device, a
 # display pipe or AGDC
 grep -n -i 'CGXDisplayDevice\|DisplayPipe\|agdc\|linkconfig\|assert' "$out/CoreDisplay.cstring" > "$out/20-CoreDisplay-strings.txt" 2>&1

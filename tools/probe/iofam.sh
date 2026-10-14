@@ -38,4 +38,13 @@ python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 --grep '; 
 python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 \
     'IOAccelSurface::detach_surface\(' 'IOAccelSurface::stopLocked\(' 'IOAccelSurface::stop\(' 'IOAccelContext2::remove_surface\(' \
     > "$out/36-clearers.txt" 2>&1
-wc -l "$out"/3[1-6]-*.txt >> "$sys"
+# card run 54: CoreDisplay's copy forward (IOAccelSetSurfaceFramebufferShape
+# with shape bit 0x1000) is answered kIOReturnUnsupported: the kernel side
+# of set_shape and copy forward, and every place that returns 0xe00002c7
+python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 \
+    'IOAccel(Legacy)?Surface::(s_)?set_shape' 'IOAccel(Legacy)?Surface::.*[Cc]opy[Ff]orward' \
+    'IOAccelSurface::externalMethod' 'IOAccelSurface::set_scale' \
+    > "$out/37-set-shape.txt" 2>&1
+python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 --grep '0xe00002c7|; .*[Cc]opy[Ff]orward' \
+    > "$out/38-unsupported.txt" 2>&1
+wc -l "$out"/3[1-8]-*.txt >> "$sys"
