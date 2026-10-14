@@ -32,4 +32,10 @@ python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 --at 0x14e
 python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 \
     'IOAccelLegacySurface::leave_assembly_fullscreen' 'IOAccelSurface::surfaceStop' \
     > "$out/34-stop.txt" 2>&1
-wc -l "$out"/3[1-4]-*.txt >> "$sys"
+# probe run 5: stopLocked, stop and detach_surface clear 0x12c8; their callers
+python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 --grep '; IOAccelSurface::(stopLocked|stop|detach_surface|surfaceStop)\(' \
+    > "$out/35-callers.txt" 2>&1
+python3 "$here/kc_func.py" "$kc" com.apple.iokit.IOAcceleratorFamily2 \
+    'IOAccelSurface::detach_surface\(' 'IOAccelSurface::stopLocked\(' 'IOAccelSurface::stop\(' 'IOAccelContext2::remove_surface\(' \
+    > "$out/36-clearers.txt" 2>&1
+wc -l "$out"/3[1-6]-*.txt >> "$sys"

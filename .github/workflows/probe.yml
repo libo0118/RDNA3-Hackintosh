@@ -39,7 +39,7 @@ jobs:
         run: |
           sh tools/probe/iofam.sh probe-iofam
           cat probe-iofam/30-iofam-system.txt
-          for f in probe-iofam/32-*.txt probe-iofam/33-*.txt probe-iofam/34-*.txt; do echo "== $f"; head -900 "$f"; done
+          for f in probe-iofam/35-*.txt probe-iofam/36-*.txt; do echo "== $f"; head -900 "$f"; done
       - uses: actions/upload-artifact@v4
         with:
           name: probe-iofam

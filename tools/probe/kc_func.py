@@ -124,8 +124,14 @@ def main():
             print("== %s,%s 0x%x+0x%x" % (seg, sect, saddr, ssize))
             for line in disasm(buf[fo:fo + ssize])[2:]:
                 m = re.match(r"^([0-9a-f]+)\s+(.*)$", line)
-                if m and rx.search(m.group(2)):
-                    print("  %-60s %s" % (pretty_at(saddr + int(m.group(1), 16)), m.group(2)))
+                if not m:
+                    continue
+                ins = m.group(2)
+                t = re.search(r"\b(?:callq|jmp\w*|j\w+)\s+0x([0-9a-f]+)\b", ins)
+                if t:   # the target by name, so a regex can ask for its callers
+                    ins += "    ; " + pretty_at((saddr + int(t.group(1), 16)) & 0xffffffffffffffff)
+                if rx.search(ins):
+                    print("  %-60s %s" % (pretty_at(saddr + int(m.group(1), 16)), ins))
         return
     if sys.argv[3] == "--at":
         want = [int(x, 16) for x in sys.argv[4].split(",")]
