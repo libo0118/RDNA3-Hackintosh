@@ -1550,9 +1550,52 @@ Settings. That is expected for them, not a display regression.
 - Then nothing: no tests file, no report, the VM stopped at the 12 min
   limit. The serial log shows no panic and no RDNA3 error; userland
   services kept logging "unexpected session uid -1" (no GUI session).
-- Four K5 runs: 41 and 45 (from the start) crash-looped WindowServer, 46
-  (late) hung the report; 42 (no K5 question) is the only one with the
-  desktop. **K5 is parked**: no default or queued step uses it (`big4`
-  never did); `agdc` stays as an experiment only. The plane path for
-  display-pipe transactions (gamma, M4) needs another approach than
-  answering IOPresentment's K5 queries.
+- WindowServer never opened the accelerator in run 46 (0 surfaces, 0 GPU
+  tasks, 0 display-pipe clients), while in run 45 it did at each of its 17
+  starts before aborting: run 46 stopped earlier.
+
+### Root cause of runs 41, 45, 46 (analysis of all four AGDC runs)
+
+- **The abort (41, 45) is not about K5's contents.** Disassembled on the
+  self-hosted macOS runner (same build, 15.8.1 24H32;
+  `tools/probe/coredisplay.sh`): `CoreDisplay_CreateDisplayForCGXDisplayDevice`
+  builds a `CoreDisplay::Display`, which first looks for a display pipe
+  for the framebuffer (`FindDisplayPipeForService`, remembered at +0x14c)
+  and then calls `CreateMetalDevice(accelerator)`. When that throws, the
+  catch logs "Failed to create MetalDevice for accelerator" and goes on
+  if there is no display pipe, but asserts **"Failed to create MetalDevice
+  (%s)"** if there is one. A display pipe exists only with an AGDC object
+  up when WindowServer starts.
+- Our Metal plugin gives WindowServer no device: it is not on
+  `rdna3mtl-allow.txt`. NullMoth's installer documents the same abort for
+  an allow list WindowServer could not read.
+- **Run 42 had the desktop only because AGDC came up after WindowServer**
+  (GPUWrangler: `agdc 0x000000000`); in 41/45 it shows `/RD3DeviceControl`.
+  CoreDisplay's `[ERROR]` backtrace (Framebuffer ctor) is in run 42 too:
+  harmless.
+- **The hang (46):** the object came up while WindowServer was starting
+  (5 log lines after IOConsoleUsers), K5 off; WindowServer stopped after
+  9 vendor calls. NullMoth holds the registry busy (`NVRM::fBootHold`)
+  until all heads published, the accelerator armed, K5 set, AGDC up and
+  iop on, so WindowServer's IOKitWaitQuiet returns on a finished stack.
+  We had no such hold, so where AGDC lands relative to WindowServer was
+  luck (before: 41/45, during: 46, after: 42).
+- My earlier claim that NullMoth keeps K5 off was wrong: its NVRM writes
+  `debug.nvrmfb_agdc_k5=1` before `debug.nvrmfb_agdc=1`.
+- The report hid the cause: the crash file was cut at 24 KB before the
+  `asi` (assertion text), and the WindowServer log filter dropped
+  CoreDisplay's info lines.
+- Fixes: `@WindowServer` in the allow list (the plugin gives WindowServer
+  a device only while `debug.rdna3agdc` reads 1), the plugin and list
+  readable by `_windowserver` (build_metal.sh); the AGDC loader holds the
+  registry busy until the object is up and its slot table settled 5 s
+  (cap 40 s, `RDNA3,AGDCBootHold`); step `agdc` back to K5 from the start
+  (`rdna3agdc=3`); collect.sh prints the crash's `asi` and
+  `24-log-coredisplay.txt` (CoreDisplay, IOPresentment, GPUWrangler,
+  NVMTL, info level); triage shows the assertion and the plugin's
+  WindowServer lines.
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `agdc`: WindowServer restarts, assert "Failed to create MetalDevice" | WindowServer got no Metal device from the plugin while a display pipe exists | the allow list has `@WindowServer`, mode 644; the plugin rebuilt with it (build_metal.sh); `NVMTL:` lines of WindowServer in `24-log-coredisplay.txt` say why |
+| `agdc`: WindowServer never opens the accelerator, no report | AGDC appeared while WindowServer started | `RDNA3,AGDCBootHold` must say "display stack armed"; "CAP" = the object or the table was late |

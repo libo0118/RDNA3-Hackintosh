@@ -1,6 +1,9 @@
 # Processes allowed to get the RDNA3 Metal device (one per line, '*' = all,
-# '-name' = deny, '!name' = only once the accelerator kext is armed).
+# '-name' = deny, '!name' = only once the accelerator kext is armed,
+# '@name' = only while RDNA3AGDC's object is up: CoreDisplay then needs a
+# Metal device for WindowServer, or it aborts - card runs 41 and 45).
 # Start narrow while bring-up is in progress; widen as things work.
 mtlprobe
 nvmtltest
 vulkaninfo
+@WindowServer

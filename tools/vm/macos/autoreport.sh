@@ -392,6 +392,8 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         echo "== display pipe and AGDC counters"
         sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|copy_skip|flips)|heads_)|rdna3agdc" || true
         ioreg -r -c RDNA3AGDC -w0 -d1 2>/dev/null | grep -E '"RDNA3,AGDC' | sed 's/^ *//'
+        # with AGDC up WindowServer needs the Metal plugin's device (card runs 41/45)
+        echo "Metal allow list: $(grep -v '^#' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | tr '\n' ' ') ($(stat -f %Lp /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null))"
         # display sleep (rdna3dpms=1): the heads must blank, then come back
         case " $args " in
             *" rdna3dpms=1 "*|*" rdna3dpms=2 "*)
@@ -650,7 +652,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 --predicate 'process == "WindowServer" AND (eventMessage CONTAINS[c] "metal" OR eventMessage CONTAINS[c] "MTL" OR eventMessage CONTAINS[c] "GPU" OR eventMessage CONTAINS[c] "accelerator")' \
                 2>/dev/null | tail -25
             ws=$(echo "$ld" | grep -c WindowServer)
-            echo "M5: WindowServer $([ "$ws" -gt 0 ] && echo "LOADED" || echo "did not load") the plugin; $(grep -qx WindowServer /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null && echo "it is" || echo "not") on the allow list"
+            echo "M5: WindowServer $([ "$ws" -gt 0 ] && echo "LOADED" || echo "did not load") the plugin; $(grep -qxE '[@!]?WindowServer' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null && echo "it is" || echo "not") on the allow list"
             done_ 0
             # M6: two system apps that draw with Metal, allowed for this run
             # only (the allow list comes back afterwards, or at the next

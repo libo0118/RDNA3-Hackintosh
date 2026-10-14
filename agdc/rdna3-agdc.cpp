@@ -24,17 +24,25 @@
  * reconstructed (AppleGraphicsDeviceControl_re.h); if that does not match a
  * macOS release only this kext fails, the framebuffer keeps the display.
  * Boot-arg rdna3agdc=1 (or 2) arms it when the first framebuffer publishes,
- * without the K5 answers; =3 with them from the start; =4 turns them on
- * 90 s after the object is up (after WindowServer started). Without it,
- * the sysctl debug.rdna3agdc=1 does; debug.rdna3agdc_k5 switches K5.
+ * without the K5 answers; =3 with them from the start (NullMoth's NVRM
+ * arms K5 before its object); =4 turns them on 90 s after the object is
+ * up. With any of them the loader holds the registry busy until the
+ * object is up (the boot hold below). Without it, the sysctl
+ * debug.rdna3agdc=1 does; debug.rdna3agdc_k5 switches K5.
  * -rdna3off keeps it off.
  *
- * K5 from the start (card runs 41 and 45): IOPresentment asked the link
- * configs and plane scalers of both framebuffers, every one answered, and
- * WindowServer aborted at each start (__assert_rtn in
- * CoreDisplay_CreateDisplayForCGXDisplayDevice); without K5 (run 42) the
- * desktop came up. NullMoth keeps K5 off after every boot (its sysctl
- * only), so off is the default here too.
+ * Card runs 41 and 45 (K5 from the start): WindowServer aborted at each
+ * start in CoreDisplay_CreateDisplayForCGXDisplayDevice. The assertion is
+ * "Failed to create MetalDevice" (CoreDisplay::Display::Display, macOS
+ * 15.8.1, tools/probe/coredisplay.sh): with this object up CoreDisplay
+ * finds a display pipe for each framebuffer and then must get a Metal
+ * device for the accelerator; the Metal plugin gave WindowServer none (not
+ * on its allow list). Run 42 had the desktop because the object came up
+ * after WindowServer (GPUWrangler: agdc 0), so no display pipe was found
+ * and the failed Metal device was only logged. NullMoth's installer notes
+ * the same abort for an allow list WindowServer could not read. The allow
+ * list's "@WindowServer" gives WindowServer the device while this object
+ * is up (metal/rdna3mtl-allow.txt).
  */
 
 #include <IOKit/IOService.h>
@@ -150,7 +158,7 @@ static IOReturn rd3K5Answer(IOService *pci, unsigned int cmd, unsigned long *in,
     if (r == RD3K5_R_NOTFOUND && idx >= 0 && (unsigned)idx < nh && !h[idx].t) why = 0x30;
     gAgdcK5Why = why;
     gAgdcK5LastRefusedIdx = idx;
-    if (OSIncrementAtomic(&gAgdcLogged) < 40)
+    if (OSIncrementAtomic(&gAgdcLogged) < 120)
         AGLOG("K5: command %#x index %d NOT answered (why %#x, %u slot(s))", cmd, idx, why, nh);
     return r == RD3K5_R_BADARG ? kIOReturnBadArgument : kIOReturnNotFound;
 }
@@ -214,7 +222,7 @@ IOReturn RD3DeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned l
      * scaler) */
     uint32_t type = (cmd == RD3K5_CMD_FBCAPEX && in && inSize >= 8) ? ((const uint32_t *)in)[1] : 0xffffffffu;
     if (type < 32) OSBitOrAtomic(1u << type, (volatile UInt32 *)&gAgdcK5Types);
-    if (OSIncrementAtomic(&gAgdcLogged) < 40) {
+    if (OSIncrementAtomic(&gAgdcLogged) < 120) {
         if (type != 0xffffffffu)
             AGLOG("command %#x (in %lu bytes, index %u, type %#x) -> Unsupported", cmd, inSize, ((const uint32_t *)in)[0], type);
         else
@@ -231,6 +239,16 @@ static thread_call_t gAgdcCall = nullptr;
 static int gAgdcWant = 0;
 static SInt32 gAgdcBusy = 0;
 static IOService *gAgdcLoader = nullptr;
+/* the boot hold (NullMoth's NVRM::fBootHold): with the boot-arg the loader
+ * keeps the registry busy until the object is up and its slot table has not
+ * changed for kHoldSettleMs, at most kHoldCapMs. WindowServer starts after
+ * IOKitWaitQuiet, so it finds the whole display stack in place. Card run 46:
+ * the object came up while WindowServer started and WindowServer stopped
+ * after a few vendor calls, before it opened the accelerator */
+static thread_call_t gHoldCall = nullptr;
+static SInt32 gHold = 0, gHoldBusy = 0;
+static uint64_t gHoldStart = 0, gAgdcTableAt = 0;
+enum { kHoldSettleMs = 5000, kHoldCapMs = 40000, kHoldTickMs = 500 };
 
 static IOService *rd3PciOf(IOService *f)
 {
@@ -319,6 +337,8 @@ static void rd3Scan(IOService *pci)
     IOLockUnlock(gTabLock);
     static unsigned lastLeftOut = ~0u;
     const unsigned leftOut = noidx | range << 4 | dup << 8 | other << 12 | hole << 16;
+    if (!same)
+        gAgdcTableAt = mach_absolute_time();
     if (!same || leftOut != lastLeftOut)
         AGLOG("slot table %s (%u framebuffer(s) seen)", gAgdcFBMap, seen);
     lastLeftOut = leftOut;
@@ -395,6 +415,43 @@ static void rd3AgdcWorkBody(void)
         rd3SetStateProp("terminated");
     }
 }
+static void rd3HoldRelease(const char *why)
+{
+    if (!OSCompareAndSwap(1, 0, &gHold)) return;
+    if (gAgdcLoader) {
+        gAgdcLoader->setProperty("RDNA3,AGDCBootHold", why);
+        gAgdcLoader->adjustBusy(-1);
+    }
+    uint64_t ns;
+    absolutetime_to_nanoseconds(mach_absolute_time() - gHoldStart, &ns);
+    AGLOG("boot hold released after %llu ms: %s; slot table %s, K5 %s", ns / 1000000ull, why, gAgdcFBMap,
+          gAgdcK5 ? "on" : "off");
+}
+static void rd3HoldTickBody(void)
+{
+    if (!gHold) return;
+    const uint64_t now = mach_absolute_time();
+    uint64_t held, quiet;
+    absolutetime_to_nanoseconds(now - gHoldStart, &held);
+    if (gAgdc && gAgdcTableAt) {
+        absolutetime_to_nanoseconds(now - gAgdcTableAt, &quiet);
+        if (quiet >= kHoldSettleMs * 1000000ull) { rd3HoldRelease("display stack armed (object up, slot table settled)"); return; }
+    }
+    if (held >= kHoldCapMs * 1000000ull) {
+        rd3HoldRelease(gAgdc ? "CAP: the slot table kept changing" : "CAP: the object did not come up");
+        return;
+    }
+    uint64_t d;
+    clock_interval_to_deadline(kHoldTickMs, kMillisecondScale, &d);
+    thread_call_enter_delayed(gHoldCall, d);
+}
+static void rd3HoldTick(thread_call_param_t, thread_call_param_t)
+{
+    OSIncrementAtomic(&gHoldBusy);
+    rd3HoldTickBody();
+    OSDecrementAtomic(&gHoldBusy);
+}
+
 /* rdna3agdc=4: K5 on once its time came. Every worker run checks it and
  * arms the call for the rest of the wait: a later kick (a framebuffer
  * publish) replaces the pending deadline of the one thread call */
@@ -529,6 +586,16 @@ bool RDNA3AGDC::start(IOService *provider)
         gAgdcK5Late = arg == 4;
         gAgdcWant = 1;
         rd3SetStateProp("armed: waiting for a framebuffer");
+        gHoldCall = thread_call_allocate_with_options(rd3HoldTick, nullptr, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+        if (gHoldCall) {
+            gHoldStart = mach_absolute_time();
+            adjustBusy(1);
+            gHold = 1;
+            setProperty("RDNA3,AGDCBootHold", "holding the registry busy");
+            uint64_t d;
+            clock_interval_to_deadline(kHoldTickMs, kMillisecondScale, &d);
+            thread_call_enter_delayed(gHoldCall, d);
+        }
     } else {
         rd3SetStateProp("idle (sysctl debug.rdna3agdc=1)");
     }
@@ -554,6 +621,14 @@ void RDNA3AGDC::stop(IOService *provider)
 {
     if (fPub) { fPub->remove(); fPub = nullptr; }
     if (fTerm) { fTerm->remove(); fTerm = nullptr; }
+    if (gHoldCall) {
+        /* gHold 0 first: a tick running now does not arm the call again */
+        rd3HoldRelease("the loader stops");
+        thread_call_cancel(gHoldCall);
+        int spins = 0;
+        while (gHoldBusy && spins++ < 200) IOSleep(10);
+        if (!gHoldBusy) { thread_call_free(gHoldCall); gHoldCall = nullptr; }
+    }
     if (fSysctl) {
         for (unsigned i = 0; i < sizeof kOids / sizeof kOids[0]; i++)
             sysctl_unregister_oid(kOids[i]);

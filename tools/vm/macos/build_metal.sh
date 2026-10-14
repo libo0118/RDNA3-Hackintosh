@@ -60,6 +60,11 @@ sudo mv "$DIR/rdna3mtl-allow.txt" "$GB/"
 # RADV + libdrm: the report refreshes these from its bin on every boot
 sudo sh "$W/src/tools/vm/macos/autoreport.sh" --sync-metal "$D/bin"
 sudo chown -R root:wheel "$DIR" "$GB/RDNA3MTLDriver.bundle" "$GB/rdna3mtl-allow.txt"
+# WindowServer (_windowserver) must read the plugin and the allow list: with
+# RDNA3AGDC up CoreDisplay aborts without a Metal device for it (NullMoth's
+# installer: an allow list left 0600 did exactly that)
+sudo chmod -R go-w,a+rX "$GB/RDNA3MTLDriver.bundle" "$DIR"
+sudo chmod 644 "$GB/rdna3mtl-allow.txt"
 ls -la "$GB" "$DIR"
 echo
 echo "Done. Shut the VM down (sudo shutdown -h now); the report runs mtlprobe on the card"

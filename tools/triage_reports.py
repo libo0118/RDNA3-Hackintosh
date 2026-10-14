@@ -173,6 +173,8 @@ def report(path, show_all):
         log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt")
         panics = read_member(tar, "21-log-panics.txt")
         wsmember = read_member(tar, "22-log-windowserver.txt") or ""
+        crashmember = read_member(tar, "23-windowserver-crash.txt") or ""
+        cdlog = read_member(tar, "24-log-coredisplay.txt") or ""
         kexts = read_member(tar, "03-kexts.txt")
         pci = read_member(tar, "04-pci.txt")
     args = " ".join(l for l in args.splitlines() if not l.startswith("$") and not l.startswith("[exit"))
@@ -326,6 +328,16 @@ def report(path, show_all):
         print("   %s %-20s %s" % ("PASS" if len(pids) <= 2 else "FAIL", "WindowServer starts",
                                  "%d WindowServer process(es) in the report's logs%s" %
                                  (len(pids), "" if len(pids) <= 2 else ": a restart loop (23-windowserver-crash.txt)")))
+        # card runs 41/45: the abort is CoreDisplay's "Failed to create
+        # MetalDevice" (CoreDisplay::Display::Display) once a display pipe
+        # exists; the Metal plugin must give WindowServer a device
+        # ('@WindowServer' in rdna3mtl-allow.txt) while AGDC is up
+        for m in sorted(set(re.findall(r"Assertion failed:[^\"\]]*|Failed to create MetalDevice[^\n]*", crashmember + cdlog)))[:4]:
+            print("     " + m[:160])
+        wsdev = [l for l in cdlog.splitlines() if "NVMTL:" in l and ("allow" in l or "no device" in l
+                                                                      or "initWithAcceleratorPort" in l)]
+        for l in wsdev[:4]:
+            print("     " + l[l.find("NVMTL:"):][:150])
         failed = failed or not same or not up or len(pids) > 2
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:

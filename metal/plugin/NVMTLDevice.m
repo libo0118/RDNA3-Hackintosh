@@ -175,6 +175,16 @@ static bool nvmtl_accel_armed(void)
     if (sysctlbyname(RDNA3MTL_ARMED_SYSCTL, &v, &n, NULL, 0) != 0) return false;
     return v != 0;
 }
+/* RDNA3AGDC's object is up (debug.rdna3agdc reads 1): CoreDisplay then finds a
+ * display pipe for each framebuffer and asserts unless WindowServer gets a
+ * Metal device for the accelerator ("Failed to create MetalDevice", in
+ * CoreDisplay::Display::Display; card runs 41 and 45) */
+static bool nvmtl_display_pipe_up(void)
+{
+    int v = 0; size_t n = sizeof v;
+    if (sysctlbyname(RDNA3MTL_DISPLAYPIPE_SYSCTL, &v, &n, NULL, 0) != 0) return false;
+    return v == 1;
+}
 #include <dlfcn.h>
 #include <libgen.h>
 #if RDNA3MTL_NV_VIDEO_CODECS
@@ -311,11 +321,16 @@ static bool nvmtl_process_is_allowed(void)
         char *p = line; while (*p == ' ' || *p == '\t') p++;
         if (!*p || *p == '#') continue;
         if (*p == '-') { p++; while (*p == ' ' || *p == '\t') p++; if (!strcmp(p, me)) { nvlog("  denied by list: no device for %s", me); fclose(f); return false; } continue; }
-        bool armedOnly = false;
+        bool armedOnly = false, pipeOnly = false;
         if (*p == '!') { armedOnly = true; p++; while (*p == ' ' || *p == '\t') p++; }
+        else if (*p == '@') { pipeOnly = true; p++; while (*p == ' ' || *p == '\t') p++; }
         if (strcmp(p, "*") && strcmp(p, me)) continue;
         if (armedOnly && !nvmtl_accel_armed()) {
             nvlog("  '%s' is armed-only and debug.rdna3accelfb reads 0 -- no device (arm it with sysctl -w debug.rdna3accelfb=1)", me);
+            break;
+        }
+        if (pipeOnly && !nvmtl_display_pipe_up()) {
+            nvlog("  '%s' only with the AGDC display pipe and debug.rdna3agdc is not 1 -- no device", me);
             break;
         }
         ok = true; break;

@@ -16,6 +16,9 @@
 #define RDNA3MTL_DIR            "/Library/GPUBundles/rdna3mtl"
 #define RDNA3MTL_ALLOW_LIST     "/Library/GPUBundles/rdna3mtl-allow.txt"
 #define RDNA3MTL_ALLOW_LIST_ALT "/Library/Extensions/rdna3mtl-allow.txt"
+/* reads 1 while RDNA3AGDC's AppleGraphicsDeviceControl object is up ('@name'
+ * lines of the allow list) */
+#define RDNA3MTL_DISPLAYPIPE_SYSCTL "debug.rdna3agdc"
 #define RDNA3MTL_GPUPASS_PROBE  "/Library/GPUBundles/rdna3mtl-gpupass-probe"
 #define RDNA3MTL_CONF           RDNA3MTL_DIR "/rdna3mtl.conf"
 /* Vulkan driver: Mesa RADV built for macOS against libdrm_xnu (Stage 5) */

@@ -41,9 +41,14 @@ run 15-system-profiler.txt system_profiler SPDisplaysDataType
 run 20-log-rdna3.txt log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3" OR eventMessage CONTAINS "rdna3" OR eventMessage CONTAINS "RD3" OR eventMessage CONTAINS "RDNA3MTL"'
 run 21-log-panics.txt sh -c "ls -lt /Library/Logs/DiagnosticReports/ 2>/dev/null | head -20; for f in \$(ls -t /Library/Logs/DiagnosticReports/*.panic 2>/dev/null | head -2); do echo \"== \$f\"; head -120 \"\$f\"; done"
 # WindowServer crash reports (step 10: it restarts in a loop): the newest
-# two, the crashed thread and the exception are in the first ~150 lines
-run 23-windowserver-crash.txt sh -c "for f in \$(ls -t /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips 2>/dev/null | head -2); do echo \"== \$f\"; head -c 24000 \"\$f\"; echo; done"
+# two, the crashed thread and the exception are in the first ~150 lines;
+# the assertion text ("asi") is near the END of the .ips, so it is printed
+# on its own first (card runs 41/45: cut off at 24 KB, it was lost)
+run 23-windowserver-crash.txt sh -c "for f in \$(ls -t /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips 2>/dev/null | head -2); do echo \"== \$f\"; grep -o '\"asi\" *: *{[^}]*}' \"\$f\" | head -3; head -c 24000 \"\$f\"; echo; done"
 run 22-log-windowserver.txt log show --last boot --style compact --predicate 'process == "WindowServer" AND (eventMessage CONTAINS "GPU" OR eventMessage CONTAINS "Metal" OR eventMessage CONTAINS "accel")'
+# CoreDisplay / IOPresentment / GPUWrangler / the Metal plugin in
+# WindowServer, unfiltered: why a display pipe or Metal device failed
+run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --predicate 'process == \"WindowServer\" AND (subsystem BEGINSWITH \"com.apple.CoreDisplay\" OR subsystem BEGINSWITH \"com.apple.IOPresentment\" OR subsystem BEGINSWITH \"com.apple.GPUWrangler\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS[c] \"agdc\" OR eventMessage CONTAINS \"MetalDevice\")' 2>/dev/null | tail -600"
 [ -s "$dir/20-log-rdna3.txt" ] && grep -q "RDNA3" "$dir/20-log-rdna3.txt" || \
     run 20-log-rdna3-sudo.txt sudo log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3"'
 
