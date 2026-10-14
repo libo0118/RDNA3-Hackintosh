@@ -1500,3 +1500,18 @@ Settings. That is expected for them, not a display regression.
 - Fix: the object is made at once when the first framebuffer publishes (a
   100 ms retry while the registry does not show it yet); only table
   updates wait 500 ms (the table is also rescanned at every 0x980).
+
+### Card runs 43-44 (step agdc, build 171)
+
+- Run 43: macOS still ran the AGDC allowed before (`approve-*.txt`), the
+  step stopped before testing. The user allowed it in System Settings.
+- Run 44: the new AGDC ran (`UP on S80` early in the boot, both
+  framebuffers in the table, vendor calls 0x3 and 0x941 before
+  WindowServer), but the report script installed the host's bundle again
+  and stopped without a report: `rdna3vm prepare` packs a new tarball each
+  time, its hash changed while its kexts did not, and every reinstall
+  re-signs them (another "Allow" for the same build).
+- Fix (tooling only): autoreport.sh leaves a kext alone when it equals the
+  copy installed before (`diff -r` against `$D/kexts`); only a changed
+  kext counts as an update. `rdna3vm step`/`args` run the same boot-args
+  once more after a rerun marker, like the queue.

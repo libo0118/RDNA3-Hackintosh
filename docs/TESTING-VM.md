@@ -211,6 +211,11 @@ macOS starts and stays up: System Settings → Privacy & Security, scroll
 down, **Allow** next to the blocked system software, enter the password,
 then **Not Now** at the restart question and Apple menu → Shut Down.
 
+Only a kext that really changed is installed again (and needs the
+Allow); `rdna3vm prepare` with the same build changes nothing in macOS.
+A single `rdna3vm step` that installed new kexts runs itself once more,
+so the step tests them.
+
 `rdna3vm window` works as well (the card stays with Linux): about 2
 minutes after the login the boot-time report script has installed the
 new kexts, and the **Allow** button appears in the same place.

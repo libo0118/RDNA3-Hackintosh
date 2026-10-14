@@ -486,7 +486,21 @@ launch() {   # launch "rdna3 args" stay(0/1)
     sudo systemd-run --unit="rdna3vm-$(date +%H%M%S)" --collect --quiet \
         --setenv=RDNA3VM_DIR="$WORK" --setenv=RDNA3VM_BOOTARGS="$bootargs" \
         --setenv=RDNA3VM_TIMEOUT="$limit" \
-        bash "$SELF" _passthrough
+        bash "$SELF" _once
+}
+
+# one VM run started by 'rdna3vm step' / 'args' / 'approve'. Like the queue:
+# when the VM installed new kexts and stopped before testing (autoreport's
+# rerun marker: they load from the next boot), the same boot-args once more
+cmd__once() {
+    bash "$SELF" _passthrough || true
+    if ls "$WORK"/reports/rerun-*.txt >/dev/null 2>&1; then
+        rm -f "$WORK"/reports/rerun-*.txt
+        echo "== the VM installed new kexts; running the same boot-args again in 60 s so they are the ones tested"
+        sleep 60
+        bash "$SELF" _passthrough || true
+        rm -f "$WORK"/reports/rerun-*.txt
+    fi
 }
 
 cmd_step() {
@@ -1158,5 +1172,6 @@ case "${1:-}" in
     _update) shift; cmd__update "$@" ;;
     _oc) shift; cmd__oc "$@" ;;
     _passthrough) shift; cmd__passthrough "$@" ;;
+    _once) shift; cmd__once "$@" ;;
     *) sed -n '2,19p' "$SELF"; exit 1 ;;
 esac

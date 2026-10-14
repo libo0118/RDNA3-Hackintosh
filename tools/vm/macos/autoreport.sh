@@ -135,8 +135,17 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
                 rm -rf "$t/kexts/RDNA3AcceleratorTahoe.kext"
             fi
         fi
+        changed=
         for k in "$t"/kexts/*.kext; do
             n=$(basename "$k")
+            # the same build as the one installed (the bundle's hash changes
+            # with every 'rdna3vm prepare', its kexts not): left alone, so
+            # macOS does not ask to allow it again (card run 44: a boot that
+            # already ran the approved build reinstalled it and stopped)
+            if [ -d "/Library/Extensions/$n" ] && diff -rq "$k" "$D/kexts/$n" >/dev/null 2>&1; then
+                continue
+            fi
+            changed="$changed ${n%.kext}"
             rm -rf "/Library/Extensions/$n" "$D/kexts/$n"
             mkdir -p "$D/kexts"
             cp -R "$k" "$D/kexts/"
@@ -149,7 +158,8 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
         mkdir -p "$D/bin"
         cp "$t"/bin/* "$D/bin/" 2>/dev/null && chmod +x "$D/bin/"*
         echo "$new" > "$D/bundle.sha256"
-        updated="kexts updated to the host's new bundle: the framebuffer from it runs from the next boot"
+        [ -n "$changed" ] &&
+            updated="kexts updated to the host's new bundle ($changed ): the framebuffer from it runs from the next boot"
     fi
     rm -rf "$t"
     # an interactive boot (rdna3vm approve / window, no rdna3vmauto): the new
