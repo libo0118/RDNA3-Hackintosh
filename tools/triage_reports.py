@@ -482,7 +482,9 @@ def summary(path, serial=None):
     else:
         out.append(("Metal", mt.group(0)[:80] if mt else "not run"))
     for blk in txt.split("== rdna3_drminfo --scanout")[1:]:
-        look = re.match(r"\s*\(look (\S+)\)", blk)
+        look = re.match(r"(?:-hires)?\s*\(look (\S+)\)", blk)
+        if "pipe(s) lit" not in blk.split("\n== ")[0]:
+            continue   # a picture-only look (M6 keeps only the pictures)
         lit = re.findall(r"^pipe (\d+): LIT .* in use (0x[0-9a-f]+)", blk, re.M)
         blank = len(re.findall(r"^pipe \d+: BLANKED", blk, re.M))
         uf = len(re.findall(r"UNDERFLOW", blk))
@@ -631,7 +633,7 @@ def main():
                 # scan the same surface (a mirrored picture)
                 print("   screens (what each display pipe scanned out):")
                 for blk in txt.split("== rdna3_drminfo --scanout")[1:]:
-                    look = re.match(r"\s*\(look (\w+)\)", blk)
+                    look = re.match(r"(?:-hires)?\s*\(look (\w+)\)", blk)
                     addrs = []
                     print("     look %s:" % (look.group(1) if look else "1"))
                     for l in blk.splitlines()[1:]:
@@ -713,6 +715,14 @@ def main():
                         cur = ""
                     if re.match(r"\[exit [1-9]", l) and not ("(V3)" in cur or "(M4)" in cur):
                         failed = True
+                # M6 exits 0 either way: an app that crashed on the plugin is a
+                # failure (card run 56: Chess crashed, the result said passed)
+                m6 = re.search(r"^M6: (\d+) of (\d+) apps", txt, re.M)
+                if m6 and int(m6.group(1)) < int(m6.group(2)):
+                    print("   FAIL M6: " + m6.group(0))
+                    for l in re.findall(r"^M6 \S+: .*crash report: /.*$", txt, re.M):
+                        print("     " + l[:150])
+                    failed = True
             if "== rdna3_vktest" in txt:
                 vk = txt[txt.index("== rdna3_vktest"):]
                 print("   vulkan (RADV):")
