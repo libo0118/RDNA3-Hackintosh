@@ -1703,3 +1703,27 @@ Settings. That is expected for them, not a display regression.
   and takes no new ioctls meanwhile (test_uapi).
 - Why Chess crashed in the first place is still open (its .ips was cut
   after the header in the tests file; the next run has the full exits).
+
+### Card run 51 (step agdc + probes, build 182, first install without the card)
+
+- The bundle went in through the headless boot (`bundle-*.txt` came back),
+  the card step ran the new build straight away.
+- **The M6 fix holds**: no page fault, one WindowServer for the whole boot
+  (run 50: seven), **Maps ran on the plugin** without a crash.
+- Chess (an OpenGL app on Metal) aborted in
+  `GLDDeviceRec::getBuiltinRenderPipelineStateFromDescriptor`
+  (MTLReleaseAssertionFailure): the plugin returned no render pipeline for
+  the GL layer's present blit. Its plugin log stopped after four lines: the
+  report kept only plugin lines that named RDNA3; collect.sh now keeps the
+  plugin's log of every process (26-log-metal-plugin.txt).
+- mtlprobe FAILED in `vkCreateComputePipelines`: RADV's descriptor pool
+  (VRAM with CPU access) got VK_ERROR_OUT_OF_DEVICE_MEMORY. Only 144 MiB of
+  VRAM are CPU-visible (BAR0 cut to 256 MiB for the VM), and a VRAM-only
+  request had no fallback. amdgpu_gem_create_ioctl retries with GTT added;
+  the UAPI does that now (its other retry, dropping CPU_ACCESS_REQUIRED,
+  relies on TTM moving the BO on a CPU fault, which nothing does here). The
+  kext logs how full both VRAM heaps were when one did not fit. Chess's
+  pipeline likely failed the same way.
+- False FAILs fixed: M4 is decided by the screen (8238 magenta pixels),
+  mtlprobe never gets presented callbacks on the flip path; M5 read lsof's
+  name cut to "WindowSer" as "not loaded".

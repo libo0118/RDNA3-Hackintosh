@@ -466,6 +466,21 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), c) == 0);
         h2 = c.out.handle;
         CHECK(rdna3_drm_bo_lookup(f, h2)->placement == AMDGPU_GEM_DOMAIN_GTT);
+        /* VRAM only (RADV's descriptor pools: VRAM + CPU access) and no room:
+         * amdgpu_gem_create_ioctl retries with GTT added (card run 51: the
+         * visible VRAM was full, vkCreateComputePipelines OUT_OF_DEVICE_MEMORY) */
+        {
+            struct drm_gem_close gcl;
+            memset(&c, 0, sizeof(c));
+            c.in.bo_size = 128u << 20;
+            c.in.domains = AMDGPU_GEM_DOMAIN_VRAM;
+            c.in.domain_flags = AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
+            CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), c) == 0);
+            CHECK(rdna3_drm_bo_lookup(f, c.out.handle)->placement == AMDGPU_GEM_DOMAIN_GTT);
+            memset(&gcl, 0, sizeof(gcl));
+            gcl.handle = c.out.handle;
+            CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gcl) == 0);
+        }
         /* the eviction list before a sleep: the VRAM BO once, not the GTT one */
         {
             uint32_t n = 0;

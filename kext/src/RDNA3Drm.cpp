@@ -65,8 +65,18 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
             from = second;
             off = range_alloc_get(second, bo->size, align);
         }
-        if (off == RANGE_ALLOC_FAIL)
+        if (off == RANGE_ALLOC_FAIL) {
+            /* the UAPI places it in GTT instead (card run 51: the visible
+             * part was full); how full, for the report */
+            static SInt32 gVramFull;
+            if (OSIncrementAtomic(&gVramFull) < 8)
+                LOG("GEM: %llu KiB of VRAM%s did not fit (visible heap %llu KiB free, the rest %llu KiB free): GTT",
+                    (unsigned long long)(bo->size >> 10),
+                    (bo->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED) ? " with CPU access" : "",
+                    (unsigned long long)(range_alloc_free_bytes(a->fVramHeap) >> 10),
+                    (unsigned long long)(range_alloc_free_bytes(a->fVramHeapHi) >> 10));
             return -RD_ENOMEM;
+        }
         bo->vram_offset = off;
         bo->backing = nullptr;
         /* AMDGPU_GEM_CREATE_VRAM_CLEARED (the UAPI sets it on every VRAM

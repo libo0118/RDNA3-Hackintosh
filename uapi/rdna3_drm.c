@@ -1872,9 +1872,17 @@ static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
     bo->placement = (dom & AMDGPU_GEM_DOMAIN_VRAM) ? AMDGPU_GEM_DOMAIN_VRAM
                                                    : AMDGPU_GEM_DOMAIN_GTT;
     r = dev->ops.bo_alloc(dev->ops.ctx, bo);
-    if (r && bo->placement == AMDGPU_GEM_DOMAIN_VRAM && (dom & AMDGPU_GEM_DOMAIN_GTT)) {
+    /* amdgpu_gem_create_ioctl's retries: without CPU_ACCESS_REQUIRED (TTM
+     * moves the BO into the visible window on a CPU fault), then with GTT
+     * added to a VRAM-only request. Nothing migrates a BO here, so the first
+     * would leave it where the CPU cannot reach it: straight to GTT, which
+     * the CPU reaches (card run 51: RADV's descriptor pool, VRAM with CPU
+     * access, found the visible VRAM full) */
+    if (r && bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
         bo->placement = AMDGPU_GEM_DOMAIN_GTT;
         r = dev->ops.bo_alloc(dev->ops.ctx, bo);
+        if (!r && !(dom & AMDGPU_GEM_DOMAIN_GTT))
+            bo->domains = dom | AMDGPU_GEM_DOMAIN_GTT;
     }
     if (r) {
         dev->ops.free(dev->ops.ctx, bo, sizeof(*bo));

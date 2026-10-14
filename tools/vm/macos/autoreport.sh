@@ -766,14 +766,16 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             hdr "probe: WindowServer and the Metal plugin (M5)"
             ioreg -r -c RDNA3Accelerator -w0 -d1 2>/dev/null | grep -E '"(MetalPluginName|MetalPluginClassName|IOGLBundleName)"' | sed 's/^ *//'
             echo "allow list: $(grep -v '^#' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | tr '\n' ' ')"
-            ld=$(lsof -n 2>/dev/null | awk '/RDNA3MTLDriver/ { print $1 "(" $2 ")" }' | sort -u | tr '\n' ' ')
+            # +c 0: whole command names (lsof cuts them to 9 characters,
+            # card run 51 read "WindowSer" as no WindowServer)
+            ld=$(lsof +c 0 -n 2>/dev/null | awk '/RDNA3MTLDriver/ { print $1 "(" $2 ")" }' | sort -u | tr '\n' ' ')
             echo "processes with the plugin loaded: ${ld:-none}"
             with_limit 60 system_profiler SPDisplaysDataType 2>/dev/null | grep -iE 'Chipset|Metal|VRAM|Vendor|Device ID|Resolution|Display Type|Main Display' | sed 's/^ *//'
             echo "== WindowServer about Metal / the GPU (last 15 min)"
             with_limit 90 log show --last 15m --style compact \
                 --predicate 'process == "WindowServer" AND (eventMessage CONTAINS[c] "metal" OR eventMessage CONTAINS[c] "MTL" OR eventMessage CONTAINS[c] "GPU" OR eventMessage CONTAINS[c] "accelerator")' \
                 2>/dev/null | tail -25
-            ws=$(echo "$ld" | grep -c WindowServer)
+            ws=$(echo "$ld" | grep -c WindowSer)
             echo "M5: WindowServer $([ "$ws" -gt 0 ] && echo "LOADED" || echo "did not load") the plugin; $(grep -qxE '[@!]?WindowServer' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null && echo "it is" || echo "not") on the allow list"
             done_ 0
             # M6: two system apps that draw with Metal, allowed for this run

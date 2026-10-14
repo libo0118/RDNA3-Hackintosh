@@ -509,6 +509,11 @@ def summary(path, serial=None):
         m = re.search(pat, txt, re.M)
         if m:
             out.append((name, m.group(1)[:110]))
+    # lsof cut the name to "WindowSer" (reports before card run 52)
+    if re.search(r"^processes with the plugin loaded:.*\bWindowSer\w*\(", txt, re.M):
+        for i, (k, v) in enumerate(out):
+            if k == "M5 WindowServer" and "did not load" in v:
+                out[i] = (k, v.replace("did not load", "LOADED"))
     for m in re.finditer(r"^M6 (\S+): (.*)$", txt, re.M):
         out.append(("  " + m.group(1), m.group(2)[:100]))
     if "== rdna3_drminfo --scanout (look m4)" in txt:
@@ -524,6 +529,13 @@ def summary(path, serial=None):
         # presenting by flips none is delivered; the screen decides
         out.append(("M4 on the screen", "magenta pixels: " + (", ".join(seen) if seen else "no picture") +
                     (" -> PASS: the CAMetalLayer window is on the screen" if best > 1000 else "")))
+        # mtlprobe's own verdict waits for presented callbacks, which the
+        # flip path never delivers (card runs 49-51: the user saw the window
+        # while the line said FAILED): the screen decides
+        if best > 1000:
+            for i, (k, v) in enumerate(out):
+                if k == "M4 CAMetalLayer" and v.startswith("FAILED"):
+                    out[i] = (k, "PASS on the screen (mtlprobe: " + v[len("FAILED "):][:80] + ")")
     # P2: the PM experiment's variants, the RLC state after each
     lines = log.splitlines()
     for i, l in enumerate(lines):

@@ -55,6 +55,9 @@ run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --
 # assertion text (run 49: one "COREANIMATION ... Vulkan is not up" kept,
 # the other restarts unexplained)
 run 25-windowserver-exits.txt sh -c "for f in \$(ls -t /Library/Logs/DiagnosticReports/WindowServer*.ips /Library/Logs/DiagnosticReports/Retired/WindowServer*.ips 2>/dev/null | head -12); do echo \"== \$f\"; tr -d '\\n' < \"\$f\" | grep -o -E '\"(pid|procLaunch|termination|asi|exception)\" *: *(\\{[^}]*\\}|\"[^\"]*\"|[0-9]+)' | head -8; done; echo '== launchd about WindowServer'; log show --last boot --style compact --predicate 'process == \"launchd\" AND eventMessage CONTAINS \"WindowServer\"' 2>/dev/null | grep -i -E 'exit|crash|signal|spawn' | tail -40"
+# the Metal plugin in every other process (card run 51: Chess's plugin
+# log stopped where its lines no longer named RDNA3, before the failure)
+run 26-log-metal-plugin.txt sh -c "log show --last boot --info --style compact --predicate 'eventMessage CONTAINS \"NVMTL\" AND process != \"WindowServer\"' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture'"
 [ -s "$dir/20-log-rdna3.txt" ] && grep -q "RDNA3" "$dir/20-log-rdna3.txt" || \
     run 20-log-rdna3-sudo.txt sudo log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3"'
 
