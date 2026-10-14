@@ -26,3 +26,26 @@
   on the card goes into `docs/status/hw-verified.txt`, then regenerate.
   New amdgpu source files to track: `tools/progress/sources.txt`, then
   `python3 tools/progress/update_index.py`.
+
+## ECC
+
+The project uses ECC (https://github.com/affaan-m/ECC):
+`.claude/settings.json` enables its Claude Code plugin `ecc@ecc` (agents,
+skills, commands, hooks) for every session in this repository, and
+`.claude/rules/ecc/` holds its `common` and `cpp` rules. Use its agents and
+skills where they fit (planning, code review, security review, TDD on the
+host tests). Where ECC and this file disagree, this file wins:
+
+- Commits keep this repository's style: a plain summary line ("Card run
+  50: ...", "rdna3vm: ..."), a body that explains why, the session's
+  trailers. No `feat:`/`fix:` prefixes.
+- The kext is XNU kernel code (IOKit, libkern C++): no STL, no exceptions,
+  no `std::unique_ptr`/`std::vector`, no `new`/`delete` outside OSObject;
+  IOMalloc/IOFree and OSObject retain/release are the norm there. `hw/` and
+  `uapi/` are portable C99. The ECC C++ rules on modern C++, RAII through
+  the standard library, GoogleTest/CMake and clang-format do not apply.
+- Tests are `make test` (simulator, UAPI, host tools) and the card runs;
+  the 80% coverage and E2E rules do not apply. Hardware fixes still follow
+  "port, don't invent" (docs/AFTER-TESTS.md) rather than ECC's research
+  step.
+- CI is only the self-hosted runners above.
