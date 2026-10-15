@@ -1,11 +1,11 @@
 {
  "amdgpu": {
   "works": 523,
-  "ported": 1483,
-  "total": 1483,
+  "ported": 1504,
+  "total": 1522,
   "not_applicable": 638,
-  "works_pct": 35.3,
-  "ported_pct": 100.0,
+  "works_pct": 34.4,
+  "ported_pct": 98.8,
   "groups": [
    {
     "name": "PSP 13",
@@ -2431,6 +2431,57 @@
      "dce_aud_destroy": "Linux Display Core object constructors / destructors",
      "dce_audio_create": "Linux Display Core object constructors / destructors"
     }
+   },
+   {
+    "name": "Display: FreeSync",
+    "steps": [
+     "?"
+    ],
+    "works": 0,
+    "ported": 21,
+    "todo": 18,
+    "items": {
+     "apply_below_the_range": "todo",
+     "apply_fixed_refresh": "todo",
+     "build_vrr_infopacket_checksum": "ported",
+     "build_vrr_infopacket_data_v1": "ported",
+     "build_vrr_infopacket_data_v3": "ported",
+     "build_vrr_infopacket_fs2_data": "todo",
+     "build_vrr_infopacket_header_v1": "ported",
+     "build_vrr_infopacket_header_v2": "ported",
+     "build_vrr_infopacket_header_v3": "ported",
+     "build_vrr_infopacket_sdp_v1_3": "ported",
+     "build_vrr_infopacket_v1": "ported",
+     "build_vrr_infopacket_v2": "ported",
+     "build_vrr_infopacket_v3": "ported",
+     "calc_duration_in_us_from_refresh_in_uhz": "ported",
+     "calc_duration_in_us_from_v_total": "todo",
+     "calc_refresh_in_uhz_from_duration": "todo",
+     "calc_v_total_from_duration": "todo",
+     "determine_flip_interval_workaround_req": "todo",
+     "mod_build_adaptive_sync_infopacket": "ported",
+     "mod_build_adaptive_sync_infopacket_v1": "ported",
+     "mod_build_adaptive_sync_infopacket_v2": "todo",
+     "mod_build_hf_vsif_infopacket": "ported",
+     "mod_build_vsc_infopacket": "todo",
+     "mod_freesync_build_vrr_infopacket": "ported",
+     "mod_freesync_build_vrr_params": "ported",
+     "mod_freesync_calc_field_rate_from_timing": "todo",
+     "mod_freesync_calc_nominal_field_rate": "ported",
+     "mod_freesync_calc_v_total_from_refresh": "ported",
+     "mod_freesync_create": "todo",
+     "mod_freesync_destroy": "todo",
+     "mod_freesync_get_freesync_enabled": "ported",
+     "mod_freesync_get_settings": "todo",
+     "mod_freesync_get_v_position": "todo",
+     "mod_freesync_get_vmin_vmax": "todo",
+     "mod_freesync_handle_preflip": "ported",
+     "mod_freesync_handle_v_update": "todo",
+     "mod_freesync_is_valid_range": "todo",
+     "update_v_total_for_static_ramp": "todo",
+     "vrr_settings_require_update": "ported"
+    },
+    "na": {}
    }
   ]
  },
