@@ -128,13 +128,13 @@ open / in work / done (with the commit).
 | N12 | Translator: indirect calls through function pointers (visible function tables) | metal/translator | L | open |
 | N13 | Display: overlays / more than one plane per head | hw/dcn32 | L | open |
 | N14 | Display: YCbCr 4:2:0, MST over UHBR, DP HPD_RX short-pulse IRQ (polled every 2 s now), leaving the DISPCLK /127 divider (OTG add/drop pixel) | hw/dcn32 | S-M each | open |
-| N15 | Gamma (Night Shift, calibration) off by default: `rdna3gamma=1` needed though card run 56 passed it | accel, fb | S | quick: in work |
+| N15 | Gamma (Night Shift, calibration) off by default: `rdna3gamma=1` needed though card run 56 passed it | accel, fb | S | done 2026-10-15 (merge of quick/n15; card check: colours with Night Shift) |
 | N16 | OpenGL beyond Apple's layer (Zink/EGL), OpenCL, Vulkan video | userspace/mesa | L-XL | open |
 | N17 | GFX/SDMA mid-IB preemption (MCBP), per-queue reset (only soft reset / mode 1) | hw/gfx11, hw/sdma60 | M | open |
 | N18 | `AMDGPU_INFO_VRAM_LOST_COUNTER` (and NUM_EVICTIONS etc.) always 0 although the kext handles VRAM loss | uapi | S | quick: in work |
 | N19 | GART dummy page in system memory, `GEM_OP_SET_PLACEMENT` migration, RESERVE_VMID | hw/gmc11, uapi | S-M | open |
 | N20 | Release: updater / release feed, signed package, macOS 26 in the package (= R4, R5) | package, CI | M | open |
-| N21 | Uninstall leaves the OpenCore EFI copy, its Kernel/Add entries and boot-args (only a NOTE) | package/uninstall.sh | S | quick: in work |
+| N21 | Uninstall leaves the OpenCore EFI copy, its Kernel/Add entries and boot-args (only a NOTE) | package/uninstall.sh | S | done 2026-10-15 (6be15e1: `oc_install.sh --remove`, run by uninstall.sh) |
 | N22 | End-user crash/report collection (only the manual `autoreport.sh --standalone`), kext log after a panic | tools, package | M | open |
 | N24 | VMIDs held for a process's whole life: one of the 15 hardware VMIDs (7 with `rdna3userq`) per open DRM file, so with the Metal plugin serving every app (N1) the card runs out after about a dozen programs and the next one gets no GPU. amdgpu binds a VMID only while a job runs and takes it back when the job's fence signals (`amdgpu_vmid_grab`, `amdgpu_vmid_grab_idle`, `amdgpu_vmid_grab_reserved`, the VMID manager `amdgpu_vmid_mgr_init`, the page-table flush on a reused VMID `amdgpu_vm_flush`); port that so VMIDs are shared in time. Until then the open is refused cleanly when none is free (N18 follow-up) | kext, hw/gpuvm | L | open |
 | N23 | User docs: FAQ / troubleshooting, supported monitors and features, `rdna3_pmctl`; ROADMAP.md stale; DRIVER-PLAN vs STATUS disagree on `dcn32_init_hw` / `dcn32_init_clocks` | docs | S | open |
