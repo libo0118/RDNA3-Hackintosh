@@ -193,6 +193,8 @@ IOReturn RDNA3Accel::platformVramRef(void *handle)
  * (RD3ACCEL_SS_FN); it may start after the first client opens */
 IOService *RDNA3Accel::accelService()
 {
+    if (fAccelSvc && fAccelSvc->isInactive())   /* the accelerator kext went away or restarted */
+        OSSafeReleaseNULL(fAccelSvc);
     if (!fAccelSvc) {
         OSDictionary *m = IOService::serviceMatching("RDNA3Accelerator");
         if (m) {

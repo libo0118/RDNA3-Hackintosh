@@ -140,6 +140,7 @@ struct rd_xnu_file_id {
 #define RD_NR_XNU_SURFACE_BO       0xF5
 #define RD_XNU_SURFACE_BO_IMPORT   0
 #define RD_XNU_SURFACE_BO_DIRTY    1
+#define RD_XNU_SURFACE_MAX_PLANE   15
 struct rd_xnu_surface_bo {
     uint32_t op;                   /* RD_XNU_SURFACE_BO_* */
     uint32_t surface_id, plane;    /* in */

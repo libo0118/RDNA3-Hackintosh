@@ -790,6 +790,9 @@ int main(void)
         CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOENT && live_bos == bos0);
         sb.surface_id = 9;
         CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL && live_bos == bos0);
+        sb.plane = RD_XNU_SURFACE_MAX_PLANE + 1;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL);
+        sb.plane = 0;
         sb.op = 5; sb.surface_id = 7;
         CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL);
         sb.op = RD_XNU_SURFACE_BO_IMPORT;

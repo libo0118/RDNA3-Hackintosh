@@ -1855,10 +1855,13 @@ int nvmtl_vk_surface_share_on(void)
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("NVMTL_NO_SURFACE_SHARE");
-        on = (pnvk_stage_import || pdrm_surface_fd) && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
+        /* RADV's route needs a kext that knows RD_NR_XNU_SURFACE_BO: surface 0 does not exist (ENOENT), an older kext
+           answers the unknown ioctl (ENODEV after libdrm_xnu's EINVAL) - then no surface tries an import */
+        int drm_ok = pdrm_surface_fd && pdrm_surface_dirty && (pdrm_surface_dirty(0, 0) == 0 || errno != ENODEV);
+        on = (pnvk_stage_import || drm_ok) && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
         nvlog("item 7: IOSurface textures %s (NVK import %s, libdrm_xnu surface fds %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s)",
               on ? "live in the surface's family VRAM (one per surface, every process)" : "private per process (copies)",
-              pnvk_stage_import ? "present" : "ABSENT", pdrm_surface_fd ? "present" : "ABSENT",
+              pnvk_stage_import ? "present" : "ABSENT", drm_ok ? "present" : pdrm_surface_fd ? "ABSENT in the kext" : "ABSENT",
               g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset");
     }
     return on;

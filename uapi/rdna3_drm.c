@@ -2032,6 +2032,8 @@ static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s)
     uint32_t handle = 0;
     int r;
 
+    if (s->plane > RD_XNU_SURFACE_MAX_PLANE)   /* IOSurface planes; never handed on to the OS unchecked */
+        return -RD_EINVAL;
     if (s->op == RD_XNU_SURFACE_BO_DIRTY) {
         if (!dev->ops.surface_dirty)
             return -RD_ENODEV;

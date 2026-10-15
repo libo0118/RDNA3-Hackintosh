@@ -620,19 +620,31 @@ int drm_xnu_surface_fd(uint32_t surface_id, uint32_t plane, uint64_t size)
 
 int drm_xnu_surface_dirty(uint32_t surface_id, uint32_t plane)
 {
-    static int fd = -1;
+    static int fd = -1, gone;   /* gone: no device, or a kext without the ioctl (per frame: asked once) */
     struct xnu_surface_bo s;
+    int r;
     pthread_mutex_lock(&g_surf_lock);
-    if (fd < 0)
-        fd = drm_xnu_open(DRM_XNU_RENDER_NODE, O_RDWR);
+    if (fd < 0 && !gone && (fd = drm_xnu_open(DRM_XNU_RENDER_NODE, O_RDWR)) < 0)
+        gone = 1;
+    r = gone;
     pthread_mutex_unlock(&g_surf_lock);
-    if (fd < 0)
+    if (r) {
+        errno = ENODEV;
         return -1;
+    }
     memset(&s, 0, sizeof(s));
     s.op = XNU_SURFACE_BO_DIRTY;
     s.surface_id = surface_id;
     s.plane = plane;
-    return drm_xnu_ioctl_nr(fd, XNU_NR_SURFACE_BO, &s, sizeof(s));
+    r = drm_xnu_ioctl_nr(fd, XNU_NR_SURFACE_BO, &s, sizeof(s));
+    /* an unknown ioctl answers EINVAL; surface ids are never refused with it */
+    if (r && errno == EINVAL && plane <= 15) {
+        pthread_mutex_lock(&g_surf_lock);
+        gone = 1;
+        pthread_mutex_unlock(&g_surf_lock);
+        errno = ENODEV;
+    }
+    return r;
 }
 
 int drm_xnu_pci_info(uint16_t *vendor, uint16_t *device, uint16_t *subvendor,
