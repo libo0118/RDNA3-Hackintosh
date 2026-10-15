@@ -458,8 +458,13 @@ int main(void)
             while (rdna3_vmid_admit(free_ids, a, user, 0) == RD_VMID_ADMIT) { a++; free_ids--; }
             CHECK(a == RD_VMID_UID_CAP && free_ids == 15 - RD_VMID_UID_CAP);
             while (rdna3_vmid_admit(free_ids, b, user + 1, 0) == RD_VMID_ADMIT) { b++; free_ids--; }
-            CHECK(b == RD_VMID_UID_CAP && free_ids == 15 - 2 * RD_VMID_UID_CAP);
-            CHECK(rdna3_vmid_admit(free_ids, 0, user + 2, 0) == RD_VMID_ADMIT);
+            {   /* the second user stops at its cap or where the reserve starts */
+                uint32_t left = 15 - RD_VMID_UID_CAP - RD_VMID_RESERVE;
+                uint32_t want = left < RD_VMID_UID_CAP ? left : RD_VMID_UID_CAP;
+                CHECK(b == want && free_ids == 15 - RD_VMID_UID_CAP - want);
+            }
+            CHECK(rdna3_vmid_admit(free_ids, 0, user + 2, 0) ==
+                  (free_ids > RD_VMID_RESERVE ? RD_VMID_ADMIT : RD_VMID_RESERVED));
             free_ids = RD_VMID_RESERVE;
             CHECK(rdna3_vmid_admit(free_ids, 0, user + 3, 0) == RD_VMID_RESERVED &&
                   rdna3_vmid_admit(free_ids, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);

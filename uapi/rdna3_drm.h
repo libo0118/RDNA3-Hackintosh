@@ -595,7 +595,7 @@ void rdna3_drm_device_set_vram_lost_cs(rdna3_drm_device *dev, int refuse);
  * _windowserver (uid RD_UID_WINDOWSERVER). free_ids: client VMIDs not
  * taken; uid_in_use: VMIDs this uid holds (leaked ones included).
  * RD_VMID_ADMIT or the reason for the refusal. */
-#define RD_VMID_UID_CAP      4
+#define RD_VMID_UID_CAP      8   /* the Metal plugin serves every app of the user (all one uid) */
 #define RD_VMID_RESERVE      2
 #define RD_UID_WINDOWSERVER  88
 enum { RD_VMID_ADMIT = 0, RD_VMID_POOL_EMPTY, RD_VMID_OVER_UID_CAP, RD_VMID_RESERVED };
