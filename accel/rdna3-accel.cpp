@@ -1474,6 +1474,51 @@ static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsign
     return kIOReturnSuccess;
 }
 
+/* RD3K_ESC_SURF_GEM (RD_NR_XNU_SURFACE_BO): the VRAM allocation behind an
+ * IOSurface plane for a GEM BO the core kext builds over it, so RADV draws
+ * where WindowServer and the display read (A3). The same lookup as the RM
+ * share above, in the client's task; the reference is taken while the
+ * family lock still holds the surface's vidmem. */
+static unsigned gNVSVGemOk, gNVSVGemRefused;
+static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
+{
+    p->kapiMemory = nullptr; p->bytes = 0;
+    if (p->version != RD3K_SURFGEM_VERSION) { p->status = RD3K_SS_BAD_VERSION; return kIOReturnSuccess; }
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    IOService *core = rd3AccelCore();
+    if (!task || !a || !core) { p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
+    if (!gNVSVRoot) {
+        OSDictionary *m = IOService::serviceMatching("IOSurfaceRoot");
+        if (m) { gNVSVRoot = IOService::waitForMatchingService(m, 5ULL * 1000 * 1000 * 1000); m->release(); }
+        if (!gNVSVRoot) { p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
+    }
+    void *surf = _ZN13IOSurfaceRoot13lookupSurfaceEjP4task(gNVSVRoot, p->surfaceID, task);
+    if (!surf) { p->status = RD3K_SS_NO_SURFACE; gNVSVGemRefused++; return kIOReturnSuccess; }
+    if (!rd3FamLock(a, false)) { ((OSObject *)surf)->release(); p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
+    void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, p->plane);
+    OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
+    RD3Resource *res = OSDynamicCast(RD3Resource, ctx);
+    RD3VidMemory *vm = res ? rd3res_vidmem(res) : nullptr;
+    if (vm && !vm->fRmHandle && !vm->fScanout) _ZN16IOAccelVidMemory4wireEv(vm);
+    if (!cache || !res) p->status = RD3K_SS_NO_CACHE;
+    else if (!vm || !vm->fRmHandle || !vm->fBytes || vm->fScanout) p->status = RD3K_SS_NO_VRAM;
+    else {
+        const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_REF);
+        IOReturn rr = sym ? core->callPlatformFunction(sym, false, vm->fRmHandle, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
+        if (sym) sym->release();
+        if (rr == kIOReturnSuccess) { p->status = 0; p->kapiMemory = vm->fRmHandle; p->bytes = vm->fBytes; }
+        else p->status = RD3K_SS_NO_VRAM;
+    }
+    if (p->status == 0) gNVSVGemOk++; else gNVSVGemRefused++;
+    if (gNVSVGemOk + gNVSVGemRefused <= 8 || ((gNVSVGemOk + gNVSVGemRefused) & 1023) == 0)
+        ALOG("surfgem: surface %u plane %u -> vidmem %p (%llu B) status %#x (ok %u, refused %u)", p->surfaceID, p->plane,
+             vm, vm ? vm->fBytes : 0ull, p->status, gNVSVGemOk, gNVSVGemRefused);
+    if (cache) ((OSObject *)cache)->release();
+    rd3FamUnlock(a);
+    ((OSObject *)surf)->release();
+    return kIOReturnSuccess;
+}
+
 #include <mach/mach_time.h>
 static IOLock *volatile gNVSVStageLock;
 static IOBufferMemoryDescriptor *gNVSVStageBuf;
@@ -2598,8 +2643,11 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
 
 IOReturn RDNA3Accelerator::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)
 {
-    if (fn && p1 && fn->isEqualTo(RD3ACCEL_SS_FN))
+    if (fn && p1 && fn->isEqualTo(RD3ACCEL_SS_FN)) {
+        if ((unsigned)(uintptr_t)p3 == RD3K_ESC_SURF_GEM)
+            return rd3AccelSurfGem((struct RD3KSurfGem *)p1, (task_t)p2);
         return rd3AccelSurfVram((struct RD3KSurfShareEsc *)p1, (task_t)p2, (unsigned)(uintptr_t)p3);
+    }
     return IOService::callPlatformFunction(fn, wait, p1, p2, p3, p4);
 }
 

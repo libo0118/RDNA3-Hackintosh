@@ -177,6 +177,7 @@ def report(path, show_all):
         cdlog = read_member(tar, "24-log-coredisplay.txt") or ""
         kexts = read_member(tar, "03-kexts.txt")
         pci = read_member(tar, "04-pci.txt")
+        surfvram = read_member(tar, "29-surface-vram.txt") or ""
     args = " ".join(l for l in args.splitlines() if not l.startswith("$") and not l.startswith("[exit"))
     args = args.replace("boot-args", "").strip()
     lvl = bootarg_level(args)
@@ -351,6 +352,16 @@ def report(path, show_all):
                                                                       or "initWithAcceleratorPort" in l)]
         for l in wsdev[:4]:
             print("     " + l[l.find("NVMTL:"):][:150])
+        # A3: IOSurface textures in the accelerator's VRAM (no per-process
+        # copies); informational until it has run on the card
+        sv = surfvram
+        if sv:
+            gem = len(re.findall(r"GEM: IOSurface \d+", sv))
+            live = "live in the surface's family VRAM" in sv
+            print("   %s %-20s %s" % ("INFO", "IOSurface VRAM (A3)",
+                                     "surfaces %s, %d kernel BO(s) logged%s" %
+                                     ("shared" if live else "private per process", gem,
+                                      "" if gem or not live else " -- imports refused? 29-surface-vram.txt")))
         failed = failed or not same or not up or len(pids) > 2
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:

@@ -70,6 +70,11 @@ grep -h -e 'copy forward' -e 'copy_forward' "$dir/20-log-rdna3.txt" "$dir/24-log
 grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -e 'clear-only' -e 'surface-in' \
     -e 'surface-out' "$dir/26-log-metal-plugin.txt" "$dir/24-log-coredisplay.txt" 2>/dev/null \
     | sed -E 's/^[0-9-]+ [0-9:.]+ +[A-Za-z]+ +//' | sort | uniq -c | sort -rn | head -300 > "$dir/28-plugin-warnings.txt"
+# A3: IOSurfaces in the accelerator's VRAM for RADV (kernel: "GEM: IOSurface",
+# "surfgem:"; plugin: "item 7", surface dirty marks)
+grep -h -e 'GEM: IOSurface' -e 'surfgem:' -e 'surfvram' -e 'item 7' -e 'IOSurface VRAM is' -e 'dirty refused' \
+    "$dir/20-log-rdna3.txt" "$dir/26-log-metal-plugin.txt" "$dir/24-log-coredisplay.txt" 2>/dev/null \
+    | sed -E 's/^[0-9-]+ [0-9:.]+ +[A-Za-z]+ +//' | head -400 > "$dir/29-surface-vram.txt"
 [ -s "$dir/20-log-rdna3.txt" ] && grep -q "RDNA3" "$dir/20-log-rdna3.txt" || \
     run 20-log-rdna3-sudo.txt sudo log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3"'
 

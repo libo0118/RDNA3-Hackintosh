@@ -2435,11 +2435,11 @@
   ]
  },
  "uapi": {
-  "works": 100,
-  "ported": 105,
-  "total": 105,
+  "works": 101,
+  "ported": 106,
+  "total": 106,
   "not_applicable": 15,
-  "works_pct": 95.2,
+  "works_pct": 95.3,
   "ported_pct": 100.0,
   "groups": [
    {
@@ -2483,7 +2483,7 @@
      "7",
      "8"
     ],
-    "works": 18,
+    "works": 19,
     "ported": 0,
     "todo": 0,
     "items": {
@@ -2504,7 +2504,8 @@
      "DRM_IOCTL_VERSION": "works",
      "DRM_IOCTL_XNU_BO_EXPORT": "works",
      "DRM_IOCTL_XNU_BO_IMPORT": "works",
-     "DRM_IOCTL_XNU_SCANOUT": "works"
+     "DRM_IOCTL_XNU_SCANOUT": "works",
+     "DRM_IOCTL_XNU_SURFACE_BO": "works"
     },
     "na": {
      "DRM_IOCTL_PRIME_FD_TO_HANDLE": "Linux dma-buf; macOS shares buffers through DRM_IOCTL_XNU_BO_EXPORT / IMPORT",

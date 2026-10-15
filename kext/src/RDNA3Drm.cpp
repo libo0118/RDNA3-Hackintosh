@@ -242,7 +242,10 @@ void RDNA3Accel::gttFree(RDNA3Gtt *g)
 void RDNA3Accel::drmBoFree(void *ctx, rdna3_bo *bo)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
-    if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
+    if (bo->foreign) {   /* an IOSurface's VRAM: the accelerator's allocation */
+        a->platformVramPutLocked((struct RDNA3VramHandle *)bo->backing);
+        bo->backing = nullptr;
+    } else if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
         range_alloc *h = bo->vram_offset < a->fVramHeapVisEnd ? a->fVramHeap : a->fVramHeapHi;
         if (h)
             range_alloc_put(h, bo->vram_offset, bo->size);
@@ -680,6 +683,8 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     /* every profile: wait-any slices its waits by this clock (PR #2 review:
      * with it only under rdna3userq=1, wait-any waited on the first fence) */
     ops.now_ns = drmNowNs;
+    ops.surface_bo = drmSurfaceBo;
+    ops.surface_dirty = drmSurfaceDirty;
     {
         /* user queues: the hooks only with rdna3userq=1, so the default
          * profile has no path into them; the UAPI offers queues once the
@@ -828,6 +833,7 @@ void RDNA3Accel::drmFree()
         IOLockFree(fDrmLock);
     OSSafeReleaseNULL(fVramMap);
     OSSafeReleaseNULL(fVramDev);
+    OSSafeReleaseNULL(fAccelSvc);
     OSSafeReleaseNULL(fDoorbellDev);
     if (fVbiosCopy)
         IOFree(fVbiosCopy, fVbiosCopyLen);

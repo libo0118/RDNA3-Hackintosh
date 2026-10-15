@@ -261,6 +261,13 @@ private:
     void          platformFree();
     IOReturn      platformVramAlloc(struct RD3KVramRequest *r);
     IOReturn      platformVramFree(struct RD3KVramRequest *r);
+    /* RD_NR_XNU_SURFACE_BO: a GEM BO holds an accelerator allocation (A3) */
+    IOReturn      platformVramRef(void *handle);
+    void          platformVramPutLocked(struct RDNA3VramHandle *h);
+    IOService    *accelService();          /* fDrmLock held */
+    IOService    *fAccelSvc = nullptr;     /* RDNA3Accelerator, retained once found */
+    static int    drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane);
+    static int    drmSurfaceDirty(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane);
     IOReturn      platformGpuVa(int op, struct RD3KGpuVaRequest *g);
 
     /* Stage 3: display heads the firmware lit (RDNA3Display.cpp) */

@@ -30,7 +30,7 @@ static int h_bo_alloc(void *c, rdna3_bo *bo)
     live_bos++;
     return 0;
 }
-static void h_bo_free(void *c, rdna3_bo *bo) { (void)c; if (!bo->userptr) free(bo->backing); live_bos--; }
+static void h_bo_free(void *c, rdna3_bo *bo) { (void)c; if (!bo->userptr && !bo->foreign) free(bo->backing); live_bos--; }
 static int h_copyin(void *c, void *d, uint64_t u, size_t n) { (void)c; memcpy(d, (void *)(uintptr_t)u, n); return 0; }
 static int h_copyout(void *c, uint64_t u, const void *s, size_t n) { (void)c; memcpy((void *)(uintptr_t)u, s, n); return 0; }
 
@@ -49,6 +49,31 @@ static int h_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32_
     bo->backing = (void *)(uintptr_t)uaddr;
     live_bos++;
     return 0;
+}
+/* IOSurface 7 plane 0 has 64 KiB of the accelerator's VRAM at 1 MiB;
+ * surface 9 answers a bad (unaligned) range */
+static uint32_t h_dirty_surface, h_dirty_plane;
+static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
+{
+    (void)c;
+    if (os != (void *)0x7a5c || plane)
+        return -RD_ENOENT;
+    if (id == 9) {
+        bo->vram_offset = 0x100800; bo->size = 0x10000;
+    } else if (id == 7) {
+        bo->vram_offset = 0x100000; bo->size = 0x10000;
+    } else {
+        return -RD_ENOENT;
+    }
+    bo->backing = (void *)0x5afe;
+    live_bos++;
+    return 0;
+}
+static int h_surface_dirty(void *c, void *os, uint32_t id, uint32_t plane)
+{
+    (void)c; (void)os;
+    h_dirty_surface = id; h_dirty_plane = plane;
+    return id == 7 ? 0 : -RD_ENOENT;
 }
 static int h_sensor(void *c, uint32_t type, uint32_t *v)
 {
@@ -335,7 +360,7 @@ int main(void)
     rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
                           h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL, NULL,
                           NULL, NULL, NULL, NULL, NULL, NULL,
-                          NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -741,6 +766,64 @@ int main(void)
         gc.handle = u.handle;
         CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0 && live_bos == bos0);
         dev.ops.bo_userptr = NULL;
+    }
+    /* RD_NR_XNU_SURFACE_BO: a BO over an IOSurface's VRAM (A3) - mapped like
+     * any VRAM BO, not counted as the client's VRAM, the OS's hold dropped
+     * with the last reference; DIRTY reaches the OS */
+    {
+        struct rd_xnu_surface_bo sb;
+        union drm_amdgpu_gem_mmap m;
+        struct rd_xnu_bo_share sh;
+        struct drm_gem_close gc;
+        unsigned bos0 = live_bos;
+        uint64_t used0 = dev.vram_usage, vis0 = dev.vis_vram_usage;
+        rdna3_bo *bo;
+        memset(&sb, 0, sizeof(sb));
+        sb.op = RD_XNU_SURFACE_BO_IMPORT; sb.surface_id = 7;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENODEV);   /* no OS hook */
+        dev.ops.surface_bo = h_surface_bo;
+        dev.ops.surface_dirty = h_surface_dirty;
+        f->os = (void *)0x7a5c;
+        sb.surface_id = 0;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL);
+        sb.surface_id = 8;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOENT && live_bos == bos0);
+        sb.surface_id = 9;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL && live_bos == bos0);
+        sb.op = 5; sb.surface_id = 7;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL);
+        sb.op = RD_XNU_SURFACE_BO_IMPORT;
+        sb.size = 0x10001;   /* more than the surface has */
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOSPC && live_bos == bos0);
+        sb.size = 0xF000;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == 0 && sb.handle != 0 && sb.size == 0x10000);
+        bo = rdna3_drm_bo_lookup(f, sb.handle);
+        CHECK(bo && bo->foreign && bo->placement == AMDGPU_GEM_DOMAIN_VRAM && bo->vram_offset == 0x100000);
+        CHECK(live_bos == bos0 + 1 && dev.vram_usage == used0 && dev.vis_vram_usage == vis0);
+        memset(&m, 0, sizeof(m));
+        m.in.handle = sb.handle;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP), m) == 0 && m.out.addr_ptr != 0);
+        CHECK(rdna3_drm_bo_by_mmap_offset(f, m.out.addr_ptr) == bo);
+        /* PRIME: the plugin exports it, RADV imports it into its own file */
+        memset(&sh, 0, sizeof(sh));
+        sh.handle = sb.handle;
+        CHECK(IOCTL(f, RD_NR_XNU_BO_EXPORT, sh) == 0 && sh.token != 0 && sh.size == 0x10000);
+        gc.handle = sb.handle; gc.pad = 0;
+        CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0 && live_bos == bos0 + 1);   /* the export holds it */
+        sh.handle = 0;
+        CHECK(IOCTL(f, RD_NR_XNU_BO_IMPORT, sh) == 0 && sh.handle != 0);
+        CHECK(rdna3_drm_bo_lookup(f, sh.handle) == bo);
+        gc.handle = sh.handle;
+        CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0);
+        sb.op = RD_XNU_SURFACE_BO_DIRTY; sb.surface_id = 7; sb.plane = 0;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == 0 && h_dirty_surface == 7 && h_dirty_plane == 0);
+        sb.surface_id = 3;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOENT);
+        CHECK(strcmp(rdna3_drm_ioctl_name(RD_NR_XNU_SURFACE_BO), "XNU_SURFACE_BO") == 0);
+        dev.ops.surface_bo = NULL;
+        dev.ops.surface_dirty = NULL;
+        sb.op = RD_XNU_SURFACE_BO_DIRTY;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENODEV);
     }
     /* sensors and the GPUVM fault cache come from the OS */
     {

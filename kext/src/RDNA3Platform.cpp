@@ -19,6 +19,9 @@
  *                                    accelerator's swap copy, A2)
  *   rdna3SurfShare                   not offered (no RM-style cross-client
  *                                    handles on AMD; RADV shares by GEM)
+ *   rdna3RefVram                     a GEM BO over an accelerator
+ *                                    allocation holds it
+ *                                    (RD_NR_XNU_SURFACE_BO, A3)
  *   rdna3NewAccelClient              an IOAccelRDNA3Bridge (RDNA3UserClient)
  *                                    for a process whose sandbox refuses
  *                                    RDNA3UserClient (WindowServer, card
@@ -53,6 +56,10 @@ static const uint64_t kAccelVaSize = 0x0000010000000000ull; /* 1 TiB */
 struct RDNA3VramHandle {
     uint64_t offset, size;
     RDNA3VramHandle *prev, *next;   /* fVramHandles, under fDrmLock */
+    /* the accelerator's own reference until rdna3FreeVram, one per GEM BO
+     * over it (RD_NR_XNU_SURFACE_BO); the range goes back at zero, and the
+     * allocation stays on the eviction list until then */
+    uint32_t refs;
 };
 
 /* the accelerator's live VRAM allocations (the eviction list before a
@@ -110,6 +117,7 @@ IOReturn RDNA3Accel::platformVramAlloc(RD3KVramRequest *r)
         fAccelVramBytes += size;
         h->offset = off;
         h->size = size;
+        h->refs = 1;
         h->prev = nullptr;
         h->next = fVramHandles;
         if (fVramHandles)
@@ -140,8 +148,18 @@ IOReturn RDNA3Accel::platformVramFree(RD3KVramRequest *r)
 {
     if (!r || !r->handle || !fVramHeap || !fDrmLock)
         return kIOReturnBadArgument;
-    RDNA3VramHandle *h = (RDNA3VramHandle *)r->handle;
     IOLockLock(fDrmLock);
+    platformVramPutLocked((RDNA3VramHandle *)r->handle);
+    IOLockUnlock(fDrmLock);
+    r->handle = nullptr;
+    return kIOReturnSuccess;
+}
+
+/* fDrmLock held */
+void RDNA3Accel::platformVramPutLocked(RDNA3VramHandle *h)
+{
+    if (!h || !h->refs || --h->refs)
+        return;
     range_alloc_put(fVramHeap, h->offset, h->size);
     fAccelVramBytes -= h->size;
     if (h->prev)
@@ -150,10 +168,108 @@ IOReturn RDNA3Accel::platformVramFree(RD3KVramRequest *r)
         fVramHandles = h->next;
     if (h->next)
         h->next->prev = h->prev;
-    IOLockUnlock(fDrmLock);
     IOFree(h, sizeof(*h));
-    r->handle = nullptr;
-    return kIOReturnSuccess;
+}
+
+/* RD3K_VRAM_FN_REF: the accelerator, still holding the surface's vidmem,
+ * lends its allocation to a GEM BO. Only a live handle of ours is taken. */
+IOReturn RDNA3Accel::platformVramRef(void *handle)
+{
+    IOReturn r = kIOReturnNotFound;
+    if (!handle || !fDrmLock)
+        return kIOReturnBadArgument;
+    IOLockLock(fDrmLock);
+    for (RDNA3VramHandle *h = fVramHandles; h; h = h->next)
+        if (h == handle && h->refs) {
+            h->refs++;
+            r = kIOReturnSuccess;
+            break;
+        }
+    IOLockUnlock(fDrmLock);
+    return r;
+}
+
+/* the accelerator kext's service, for the IOSurface lookups it answers
+ * (RD3ACCEL_SS_FN); it may start after the first client opens */
+IOService *RDNA3Accel::accelService()
+{
+    if (!fAccelSvc) {
+        OSDictionary *m = IOService::serviceMatching("RDNA3Accelerator");
+        if (m) {
+            fAccelSvc = IOService::copyMatchingService(m);   /* retained */
+            m->release();
+        }
+    }
+    return fAccelSvc;
+}
+
+static int surfaceStatusErrno(unsigned int st)
+{
+    switch (st) {
+    case 0:                   return 0;
+    case RD3K_SS_NO_SURFACE:  return -RD_ENOENT;
+    case RD3K_SS_BAD_VERSION: return -RD_EINVAL;
+    default:                  return -RD_ENODEV;   /* no vidmem yet, accelerator not up */
+    }
+}
+
+/* ops.surface_bo, fDrmLock held: the accelerator takes its own family lock
+ * and then ours (rdna3RefVram), so ours is dropped around the call */
+int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    IOService *acc = a->accelService();
+    if (!acc || !fileOs)
+        return -RD_ENODEV;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3ACCEL_SS_FN);
+    if (!sym)
+        return -RD_ENOMEM;
+    RD3KSurfGem g;
+    bzero(&g, sizeof(g));
+    g.version = RD3K_SURFGEM_VERSION;
+    g.surfaceID = surfaceId;
+    g.plane = plane;
+    g.status = RD3K_SS_OFF;
+    IOLockUnlock(a->fDrmLock);
+    IOReturn rr = acc->callPlatformFunction(sym, false, &g, fileOs, (void *)(uintptr_t)RD3K_ESC_SURF_GEM, nullptr);
+    IOLockLock(a->fDrmLock);
+    sym->release();
+    if (rr != kIOReturnSuccess)
+        return -RD_ENODEV;
+    if (g.status || !g.kapiMemory)
+        return g.status ? surfaceStatusErrno(g.status) : -RD_ENODEV;
+    RDNA3VramHandle *h = (RDNA3VramHandle *)g.kapiMemory;
+    bo->vram_offset = h->offset;
+    bo->size = h->size;
+    bo->backing = h;   /* the reference rdna3RefVram took; drmBoFree drops it */
+    static SInt32 gSurfBoLog;
+    if (OSIncrementAtomic(&gSurfBoLog) < 8)
+        LOG("GEM: IOSurface %u plane %u -> %llu KiB of the accelerator's VRAM at 0x%llx (A3)", surfaceId, plane,
+            (unsigned long long)(h->size >> 10), (unsigned long long)h->offset);
+    return 0;
+}
+
+/* ops.surface_dirty: after a GPU write through such a BO */
+int RDNA3Accel::drmSurfaceDirty(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    IOService *acc = a->accelService();
+    if (!acc || !fileOs)
+        return -RD_ENODEV;
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3ACCEL_SS_FN);
+    if (!sym)
+        return -RD_ENOMEM;
+    RD3KSurfShareEsc e;
+    bzero(&e, sizeof(e));
+    e.version = RD3K_SURFSHARE_VERSION;
+    e.surfaceID = surfaceId;
+    e.plane = plane;
+    e.status = RD3K_SS_OFF;
+    IOLockUnlock(a->fDrmLock);
+    IOReturn rr = acc->callPlatformFunction(sym, false, &e, fileOs, (void *)(uintptr_t)RD3K_ESC_SURF_DIRTY, nullptr);
+    IOLockLock(a->fDrmLock);
+    sym->release();
+    return rr != kIOReturnSuccess ? -RD_ENODEV : surfaceStatusErrno(e.status);
 }
 
 IOReturn RDNA3Accel::platformGpuVa(int op, RD3KGpuVaRequest *g)
@@ -343,6 +459,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return platformVramAlloc((RD3KVramRequest *)p1);
         if (fn->isEqualTo(RD3K_VRAM_FN_FREE))
             return platformVramFree((RD3KVramRequest *)p1);
+        if (fn->isEqualTo(RD3K_VRAM_FN_REF))
+            return platformVramRef(p1);
         if (fn->isEqualTo(RD3K_GPUVA_FN_HANDLES)) {
             RD3KRmHandles *h = (RD3KRmHandles *)p1;
             if (!h || h->version != RD3K_GPUVA_ABI_VERSION)

@@ -176,6 +176,38 @@ int main(void)
         CHECK(drm_xnu_close(fd3) == 0);
         close((int)dmafd);
     }
+    /* an IOSurface plane as a dma-buf (A3): RADV's OPAQUE_FD import reaches
+     * RD_NR_XNU_SURFACE_BO in its own connection; every import sees the
+     * same memory; nothing is exported */
+    {
+        extern uint32_t lb_surface_dirty_count;
+        struct amdgpu_bo_import_result imp, imp2;
+        uint8_t *p = NULL, *q = NULL;
+        int sfd = drm_xnu_surface_fd(0x51, 0, 5000), bad;
+        CHECK(sfd >= 0 && lseek(sfd, 0, SEEK_END) == 8192);   /* whole pages */
+        memset(&imp, 0, sizeof(imp));
+        CHECK(amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)sfd, &imp) == 0);
+        CHECK(imp.alloc_size == 8192 && amdgpu_bo_cpu_map(imp.buf_handle, (void **)&p) == 0 && p);
+        memset(&imp2, 0, sizeof(imp2));
+        CHECK(amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)sfd, &imp2) == 0);
+        CHECK(amdgpu_bo_cpu_map(imp2.buf_handle, (void **)&q) == 0 && q);
+        if (p && q) {
+            p[100] = 0xA3;
+            CHECK(q[100] == 0xA3);
+        }
+        CHECK(amdgpu_bo_free(imp2.buf_handle) == 0);
+        CHECK(amdgpu_bo_free(imp.buf_handle) == 0);
+        close(sfd);
+        bad = drm_xnu_surface_fd(0x52, 0, 4096);              /* not this process's surface */
+        CHECK(bad >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)bad, &imp) != 0);
+        close(bad);
+        bad = drm_xnu_surface_fd(0x51, 0, 128u << 10);        /* larger than the surface */
+        CHECK(bad >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)bad, &imp) != 0);
+        close(bad);
+        CHECK(drm_xnu_surface_fd(0, 0, 4096) == -1 && errno == EINVAL);
+        CHECK(drm_xnu_surface_dirty(0x51, 0) == 0 && lb_surface_dirty_count == 1);
+        CHECK(drm_xnu_surface_dirty(0x52, 0) == -1 && errno == ENOENT);
+    }
     /* CS on the (software) DMA ring through libdrm_amdgpu, like RADV's
      * winsys: raw submit with chunks, then the fence query */
     {

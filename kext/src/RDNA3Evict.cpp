@@ -55,6 +55,8 @@ static void evictAdd(void *ctx, uint64_t off, uint64_t len)
 
 static void evictAddBo(void *ctx, rdna3_bo *bo)
 {
+    if (bo->foreign)   /* an accelerator allocation: platformForEachVram has it */
+        return;
     evictAdd(ctx, bo->vram_offset, bo->size);
 }
 

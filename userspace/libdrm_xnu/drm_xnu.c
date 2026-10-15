@@ -64,6 +64,16 @@ struct xnu_bo_share { uint32_t handle, pad; uint64_t token, size; };
 struct xnu_prime_handle { uint32_t handle, flags; int32_t fd; };
 #define XNU_NR_PRIME_HANDLE_TO_FD    0x2d
 #define XNU_NR_PRIME_FD_TO_HANDLE    0x2e
+/* an IOSurface plane as a "dma-buf fd" (drm_xnu_surface_fd): importing it
+ * asks the kext for a BO over the surface's VRAM in the importing
+ * connection (RD_NR_XNU_SURFACE_BO), checked against that process's own
+ * IOSurface access; nothing is exported, so nothing outlives the importer */
+#define XNU_SURFBUF_MAGIC "RD3SURF1"
+struct xnu_surfbuf { char magic[8]; uint32_t version, surface_id, plane, pad; uint64_t size; };
+struct xnu_surface_bo { uint32_t op, surface_id, plane, handle; uint64_t size; };
+#define XNU_NR_SURFACE_BO            0xF5   /* RD_NR_XNU_SURFACE_BO */
+#define XNU_SURFACE_BO_IMPORT        0
+#define XNU_SURFACE_BO_DIRTY         1
 #define XNU_NR_BO_EXPORT             0xF1   /* RD_NR_XNU_BO_EXPORT */
 #define XNU_NR_BO_IMPORT             0xF2
 #define XNU_DRM_CLOEXEC              02000000   /* Linux O_CLOEXEC, as drm.h DRM_CLOEXEC */
@@ -87,6 +97,7 @@ struct xnu_fence_to_handle {
 struct xnu_sched { uint32_t op; int32_t fd; int32_t priority; uint32_t ctx_id; };
 struct xnu_file_id { uint32_t id, pad; };
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_surf_lock = PTHREAD_MUTEX_INITIALIZER;   /* drm_xnu_surface_dirty's connection */
 static int g_trace = -1;
 
 static const drm_xnu_backend *be(void) { return &drm_xnu_backend_default; }
@@ -382,12 +393,35 @@ static int prime_handle_to_fd(int ci, struct xnu_prime_handle *a)
     return 0;
 }
 
+static int surface_fd_to_handle(int ci, int fd, uint32_t *handle)
+{
+    struct xnu_surfbuf b;
+    struct xnu_surface_bo s;
+    int err;
+    if (pread(fd, &b, sizeof(b), 0) != (ssize_t)sizeof(b) || memcmp(b.magic, XNU_SURFBUF_MAGIC, 8) ||
+        b.version != 1)
+        return EBADF;
+    memset(&s, 0, sizeof(s));
+    s.op = XNU_SURFACE_BO_IMPORT;
+    s.surface_id = b.surface_id;
+    s.plane = b.plane;
+    s.size = b.size;
+    err = be()->ioctl(g_conns[ci].conn, XNU_NR_SURFACE_BO, &s, sizeof(s));
+    if (err)
+        return err;
+    *handle = s.handle;
+    return 0;
+}
+
 static int prime_fd_to_handle(int ci, struct xnu_prime_handle *a)
 {
     struct xnu_bo_share x;
     struct xnu_dmabuf b;
     struct stat st;
     int err;
+    if (!fstat(a->fd, &st) && S_ISREG(st.st_mode) && st.st_size >= (off_t)sizeof(struct xnu_surfbuf) &&
+        pread(a->fd, &b, 8, 0) == 8 && !memcmp(b.magic, XNU_SURFBUF_MAGIC, 8))
+        return surface_fd_to_handle(ci, a->fd, &a->handle);
     if (fstat(a->fd, &st) || !S_ISREG(st.st_mode) || st.st_size < (off_t)sizeof(b) ||
         pread(a->fd, &b, sizeof(b), 0) != (ssize_t)sizeof(b) ||
         memcmp(b.magic, XNU_DMABUF_MAGIC, 8) || b.version != 1)
@@ -548,6 +582,57 @@ int drm_xnu_close(int fd)
     gc_orphans_locked();
     pthread_mutex_unlock(&g_lock);
     return r;
+}
+
+int drm_xnu_surface_fd(uint32_t surface_id, uint32_t plane, uint64_t size)
+{
+    struct xnu_surfbuf b;
+    const char *tmp = getenv("TMPDIR");
+    char path[1024];
+    int fd;
+    if (!surface_id || !size || size > UINT64_MAX - 4095) {
+        errno = EINVAL;
+        return -1;
+    }
+    size = (size + 4095) & ~4095ull;   /* whole pages, as dma-bufs are: RADV maps all of it */
+    memset(&b, 0, sizeof(b));
+    memcpy(b.magic, XNU_SURFBUF_MAGIC, 8);
+    b.version = 1;
+    b.surface_id = surface_id;
+    b.plane = plane;
+    b.size = size;
+    snprintf(path, sizeof(path), "%s/rdna3-surface.XXXXXX", tmp && *tmp ? tmp : "/tmp");
+    fd = mkstemp(path);
+    if (fd < 0)
+        return -1;
+    unlink(path);
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    /* sized like the surface: libdrm_amdgpu reads the BO size with lseek */
+    if (pwrite(fd, &b, sizeof(b), 0) != (ssize_t)sizeof(b) ||
+        (size > sizeof(b) && ftruncate(fd, (off_t)size) != 0)) {
+        int e = errno ? errno : EIO;
+        close(fd);
+        errno = e;
+        return -1;
+    }
+    return fd;
+}
+
+int drm_xnu_surface_dirty(uint32_t surface_id, uint32_t plane)
+{
+    static int fd = -1;
+    struct xnu_surface_bo s;
+    pthread_mutex_lock(&g_surf_lock);
+    if (fd < 0)
+        fd = drm_xnu_open(DRM_XNU_RENDER_NODE, O_RDWR);
+    pthread_mutex_unlock(&g_surf_lock);
+    if (fd < 0)
+        return -1;
+    memset(&s, 0, sizeof(s));
+    s.op = XNU_SURFACE_BO_DIRTY;
+    s.surface_id = surface_id;
+    s.plane = plane;
+    return drm_xnu_ioctl_nr(fd, XNU_NR_SURFACE_BO, &s, sizeof(s));
 }
 
 int drm_xnu_pci_info(uint16_t *vendor, uint16_t *device, uint16_t *subvendor,

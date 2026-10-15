@@ -333,7 +333,9 @@ static void bo_put_dev(rdna3_drm_device *dev, rdna3_bo *bo)
         dev->ops.free(dev->ops.ctx, bo, sizeof(*bo));
         return;
     }
-    if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
+    if (bo->foreign) {
+        /* the accelerator's VRAM: never counted in vram_usage */
+    } else if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
         dev->vram_usage -= bo->size;
         dev->vis_vram_usage -= bo_vis_bytes(dev, bo);
     } else {
@@ -2019,6 +2021,60 @@ static int gem_userptr(rdna3_drm_file *f, struct drm_amdgpu_gem_userptr *a)
         return r;
     }
     a->handle = handle;
+    return 0;
+}
+
+/* RD_NR_XNU_SURFACE_BO: a handle on an IOSurface's VRAM, or its dirty mark */
+static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_bo *bo;
+    uint32_t handle = 0;
+    int r;
+
+    if (s->op == RD_XNU_SURFACE_BO_DIRTY) {
+        if (!dev->ops.surface_dirty)
+            return -RD_ENODEV;
+        return dev->ops.surface_dirty(dev->ops.ctx, f->os, s->surface_id, s->plane);
+    }
+    if (s->op != RD_XNU_SURFACE_BO_IMPORT || !s->surface_id)
+        return -RD_EINVAL;
+    if (!dev->ops.surface_bo)
+        return -RD_ENODEV;
+    bo = (rdna3_bo *)dev->ops.zalloc(dev->ops.ctx, sizeof(*bo));
+    if (!bo)
+        return -RD_ENOMEM;
+    bo->refcnt = 1;
+    r = dev->ops.surface_bo(dev->ops.ctx, f->os, bo, s->surface_id, s->plane);
+    if (r) {
+        dev->ops.free(dev->ops.ctx, bo, sizeof(*bo));
+        return r;
+    }
+    /* a VRAM BO RADV may map and place in its VA like any other; WindowServer
+     * and the display read the same bytes */
+    bo->foreign = 1;
+    bo->alignment = 4096;
+    bo->domains = AMDGPU_GEM_DOMAIN_VRAM;
+    bo->placement = AMDGPU_GEM_DOMAIN_VRAM;
+    bo->flags = AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
+    if (!bo->size || (bo->size & 4095) || (bo->vram_offset & 4095) ||
+        bo->vram_offset + bo->size > dev->vram_size || bo->vram_offset + bo->size < bo->vram_offset) {
+        bo_put(f, bo);   /* the OS's hold goes back through bo_free */
+        return -RD_EINVAL;
+    }
+    if (s->size > bo->size) {   /* the GPU would address past the surface */
+        bo_put(f, bo);
+        return -RD_ENOSPC;
+    }
+    bo->mmap_offset = dev->next_mmap_offset;
+    dev->next_mmap_offset += bo->size + 4096;
+    r = handle_alloc(f, bo, &handle);
+    if (r) {
+        bo_put(f, bo);
+        return r;
+    }
+    s->handle = handle;
+    s->size = bo->size;
     return 0;
 }
 
@@ -4129,6 +4185,8 @@ static int drm_ioctl_dispatch(rdna3_drm_file *f, uint32_t nr, void *data, uint32
         return userq_signal_ioctl(f, (struct drm_amdgpu_userq_signal *)data);
     case RD_NR_AMDGPU(DRM_AMDGPU_USERQ_WAIT): NEED(struct drm_amdgpu_userq_wait);
         return userq_wait_ioctl(f, (struct drm_amdgpu_userq_wait *)data);
+    case RD_NR_XNU_SURFACE_BO: NEED(struct rd_xnu_surface_bo);
+        return surface_bo(f, (struct rd_xnu_surface_bo *)data);
     case RD_NR_XNU_FILE_ID: NEED(struct rd_xnu_file_id);
         ((struct rd_xnu_file_id *)data)->id = f->id;
         ((struct rd_xnu_file_id *)data)->pad = 0;
@@ -4165,6 +4223,7 @@ const char *rdna3_drm_ioctl_name(uint32_t nr)
     case RD_NR_XNU_BO_IMPORT: return "XNU_BO_IMPORT";
     case RD_NR_XNU_SCANOUT: return "XNU_SCANOUT";
     case RD_NR_XNU_FILE_ID: return "XNU_FILE_ID";
+    case RD_NR_XNU_SURFACE_BO: return "XNU_SURFACE_BO";
     case RD_NR_AMDGPU(DRM_AMDGPU_SCHED): return "AMDGPU_SCHED";
     case RD_NR_AMDGPU(DRM_AMDGPU_PROC_OPTIONS): return "AMDGPU_PROC_OPTIONS";
     case RD_NR_AMDGPU(DRM_AMDGPU_GEM_USERPTR): return "AMDGPU_GEM_USERPTR";

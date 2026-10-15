@@ -39,6 +39,16 @@ int   drm_xnu_ioctl_nr(int fd, uint32_t nr, void *arg, uint32_t size);
 void *drm_xnu_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off);
 int   drm_xnu_munmap(void *addr, size_t len);
 int   drm_xnu_close(int fd);
+/* An IOSurface plane as a "dma-buf fd" for Vulkan's OPAQUE_FD / DMA_BUF
+ * import (VkImportMemoryFdInfoKHR, amdgpu_bo_import): the importer gets a
+ * BO over the VRAM the accelerator keeps for the surface, if its process
+ * may use the surface; 'size' bytes must fit in it. Returns an fd for
+ * close(), or -1 with errno set. */
+int   drm_xnu_surface_fd(uint32_t surface_id, uint32_t plane, uint64_t size);
+/* after a GPU write into such memory: the surface's VRAM is newer than its
+ * system-memory copy (a CPU lock pages it off). 0, or -1 with errno set
+ * (ENOENT: no such surface here, ENODEV: it has no accelerator VRAM). */
+int   drm_xnu_surface_dirty(uint32_t surface_id, uint32_t plane);
 int   drm_xnu_pci_info(uint16_t *vendor, uint16_t *device, uint16_t *subvendor,
                        uint16_t *subdevice, uint8_t *revision, uint16_t *domain,
                        uint8_t *bus, uint8_t *dev, uint8_t *func);

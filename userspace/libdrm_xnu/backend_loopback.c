@@ -30,8 +30,38 @@ static int lb_bo_alloc(void *c, rdna3_bo *bo)
 static void lb_bo_free(void *c, rdna3_bo *bo)
 {
     (void)c;
-    if (!bo->userptr)   /* a userptr BO's pages are the client's */
+    if (!bo->userptr && !bo->foreign)   /* a userptr BO's pages are the client's */
         munmap(bo->backing, (size_t)bo->size);
+}
+/* RD_NR_XNU_SURFACE_BO: "IOSurface" 0x51 is 64 KiB every import shares
+ * (the accelerator's VRAM on the card); others do not exist */
+#define LB_SURFACE_ID   0x51u
+#define LB_SURFACE_SIZE (64u << 10)
+static void *lb_surface;
+uint32_t lb_surface_dirty_count;
+static int lb_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
+{
+    (void)c; (void)os;
+    if (id != LB_SURFACE_ID || plane)
+        return -RD_ENOENT;
+    if (!lb_surface) {
+        void *p = mmap(NULL, LB_SURFACE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (p == MAP_FAILED)
+            return -RD_ENOMEM;
+        lb_surface = p;
+    }
+    bo->backing = lb_surface;
+    bo->vram_offset = 1u << 20;
+    bo->size = LB_SURFACE_SIZE;
+    return 0;
+}
+static int lb_surface_dirty(void *c, void *os, uint32_t id, uint32_t plane)
+{
+    (void)c; (void)os;
+    if (id != LB_SURFACE_ID || plane)
+        return -RD_ENOENT;
+    lb_surface_dirty_count++;
+    return 0;
 }
 /* GEM_USERPTR: in one process the client's pages are already ours */
 static int lb_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32_t flags)
@@ -319,7 +349,7 @@ static void dev_init(void)
                           lb_vm_create, lb_vm_destroy, lb_vm_map, lb_vm_unmap,
                           lb_submit, lb_signaled, lb_wait, NULL,
                           lb_bo_userptr, lb_sensor, NULL, lb_random64, lb_scanout, lb_privileged,
-                          NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, lb_surface_bo, lb_surface_dirty };
     amd_discovery disc;
     if (g_dev_ready)
         return;

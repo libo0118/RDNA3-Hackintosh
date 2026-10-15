@@ -29,7 +29,7 @@ that apply to this card are all ported (`docs/status/STATUS.md`: 1483 of
 | Recovery | GFX and DMA hang recovery (`hanggfx`, `8h`) | mode-1 reset, VM faults, BACO | - |
 | Power | GFX CG, GFXOFF allowed, UCLK DPM free, idle GFXCLK cap (14-15 W) | non-GFX clock gating, S3 suspend/resume with VRAM eviction, PM control (fan, power, OD, profiles) | idle power down to Linux's ~12 W (the PMFW counts GFX busy) |
 | Display | GOP takeover, cursor, EDID names, extended desktop, own mode set with the DISPCLK raise, scaled modes, display sleep, hotplug | DP SST / MST / DSC (also over MST) / UHBR / ODM, HDMI 2.0 with scrambling, audio, output format, gamma, the display state across a reset and a sleep | the DP / DSC / MST / UHBR / 4K HDMI steps need such monitors on the bench |
-| UAPI (amdgpu ioctls) | CS on DMA/GFX/compute, fences, BO mmap, USERPTR, PRIME | user queues, timeline syncobj fds | IOSurface sharing with the accelerator (A3) |
+| UAPI (amdgpu ioctls) | CS on DMA/GFX/compute, fences, BO mmap, USERPTR, PRIME | user queues, timeline syncobj fds; IOSurface BOs (`RD_NR_XNU_SURFACE_BO`, A3, host-tested, not on the card yet) | |
 | Vulkan (RADV) | `rdna3_vktest` 13/13: compute, transfer, a triangle through a render pass, image copies, a timeline semaphore | the CTS subset in the report (V2, step `cts`) | WSI / present (V3) |
 | Accelerator / WindowServer | desktop composited through it on both heads, flipped zero-copy; copy forward (`submitCopyForward`, a no-op while the back buffer is the frame on the panel) | swap copies by SDMA (A2, `rdna3accelsdma=1`) | gates on by default (A1), IOSurface <-> BO (A3: WindowServer composites into per-process copies, 8-10 ms per 1080p frame) |
 | Metal | `mtlprobe` compute + render, a CAMetalLayer window on the screen (M4), WindowServer composites on the plugin (M5), Chess and Maps run on it (M6) | - | GPU access to the apps' read-only backing stores (GEM_USERPTR read-only, run 57), point/line draws (mesa 0009), Safari's GPU process (sandbox blocks `/Library/GPUBundles`) |
@@ -81,7 +81,7 @@ needs several rounds, cannot be written far ahead.
 |---|---|---|---|
 | A1 | Two heads confirmed by the scanout pictures, then `rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1` default (boot-loop guard kept: `-rdna3off`) | S | 1 boot |
 | A2 | Swap copies by SDMA/GPU instead of the CPU (`submitSwapCopy` -> SDMA linear copy), BAR reads avoided | M | now -> 1 boot |
-| A3 | IOSurface <-> GEM BO (same VRAM allocation visible to WindowServer and to RADV/Metal) | L | iterate |
+| A3 | IOSurface <-> GEM BO (same VRAM allocation visible to WindowServer and to RADV/Metal): `RD_NR_XNU_SURFACE_BO` gives a BO over the accelerator's allocation for a surface plane (looked up in the caller's task, referenced while the BO lives); libdrm_xnu's `drm_xnu_surface_fd` makes it a dma-buf fd for RADV's OPAQUE_FD import, the Metal plugin uses it where NVK used its RM hook. Card check: plugin log "item 7: ... live in the surface's family VRAM", kernel log "GEM: IOSurface ... (A3)" | L | written, card check pending |
 
 ### M - Metal (finish line M)
 

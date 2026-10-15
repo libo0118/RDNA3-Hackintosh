@@ -279,6 +279,58 @@ static VkResult nvmtl_opaque_CreateBuffer(VkDevice dev, const VkBufferCreateInfo
     if (result == VK_SUCCESS) *out = handle;
     return result;
 }
+/* The memory type of each live VkDeviceMemory. An image placed in a buffer's memory needs that one type among its
+   memoryTypeBits; card run 56: RADV keeps images out of 3 of its 11 types (0x7ad of 0x7ff), and asking for every
+   type refused each buffer texture. Linear probing with backward-shift deletion; a full table answers "unknown". */
+#define NVMTL_MT_SLOTS 16384u
+static struct { VkDeviceMemory mem; uint32_t type; } g_mt[NVMTL_MT_SLOTS];
+static pthread_mutex_t g_mt_lock = PTHREAD_MUTEX_INITIALIZER;
+static PFN_vkAllocateMemory g_real_AllocateMemory;
+static PFN_vkFreeMemory g_real_FreeMemory;
+static uint32_t nvmtl_mt_slot(VkDeviceMemory m) { uint64_t k = (uint64_t)(uintptr_t)m; k ^= k >> 29; k *= 0x9e3779b97f4a7c15ull; return (uint32_t)(k >> 40) % NVMTL_MT_SLOTS; }
+static void nvmtl_mt_put(VkDeviceMemory m, uint32_t type)
+{
+    pthread_mutex_lock(&g_mt_lock);
+    for (uint32_t n = 0, i = nvmtl_mt_slot(m); n < NVMTL_MT_SLOTS; n++, i = (i + 1) % NVMTL_MT_SLOTS)
+        if (!g_mt[i].mem || g_mt[i].mem == m) { g_mt[i].mem = m; g_mt[i].type = type; break; }
+    pthread_mutex_unlock(&g_mt_lock);
+}
+static void nvmtl_mt_del(VkDeviceMemory m)
+{
+    pthread_mutex_lock(&g_mt_lock);
+    uint32_t i = nvmtl_mt_slot(m), n = 0;
+    while (n < NVMTL_MT_SLOTS && g_mt[i].mem && g_mt[i].mem != m) { i = (i + 1) % NVMTL_MT_SLOTS; n++; }
+    if (n < NVMTL_MT_SLOTS && g_mt[i].mem == m) {
+        g_mt[i].mem = VK_NULL_HANDLE;
+        for (uint32_t j = (i + 1) % NVMTL_MT_SLOTS; g_mt[j].mem; j = (j + 1) % NVMTL_MT_SLOTS) {
+            uint32_t h = nvmtl_mt_slot(g_mt[j].mem);
+            /* move j back into the hole at i unless its home lies cyclically in (i, j] */
+            if ((j > i && (h <= i || h > j)) || (j < i && h <= i && h > j)) { g_mt[i] = g_mt[j]; g_mt[j].mem = VK_NULL_HANDLE; i = j; }
+        }
+    }
+    pthread_mutex_unlock(&g_mt_lock);
+}
+static int nvmtl_mem_type(VkDeviceMemory m)
+{
+    int t = -1;
+    if (!m) return -1;
+    pthread_mutex_lock(&g_mt_lock);
+    for (uint32_t n = 0, i = nvmtl_mt_slot(m); n < NVMTL_MT_SLOTS && g_mt[i].mem; n++, i = (i + 1) % NVMTL_MT_SLOTS)
+        if (g_mt[i].mem == m) { t = (int)g_mt[i].type; break; }
+    pthread_mutex_unlock(&g_mt_lock);
+    return t;
+}
+static VKAPI_ATTR VkResult VKAPI_CALL nvmtl_track_AllocateMemory(VkDevice dev, const VkMemoryAllocateInfo *info, const VkAllocationCallbacks *a, VkDeviceMemory *out)
+{
+    VkResult r = g_real_AllocateMemory(dev, info, a, out);
+    if (r == VK_SUCCESS && info && *out) nvmtl_mt_put(*out, info->memoryTypeIndex);
+    return r;
+}
+static VKAPI_ATTR void VKAPI_CALL nvmtl_track_FreeMemory(VkDevice dev, VkDeviceMemory m, const VkAllocationCallbacks *a)
+{
+    if (m) nvmtl_mt_del(m);
+    g_real_FreeMemory(dev, m, a);
+}
 _Static_assert(sizeof(VkDeviceMemory) == sizeof(void *) && _Alignof(VkDeviceMemory) == _Alignof(void *), "VkDeviceMemory bridge ABI");
 static VkResult nvmtl_opaque_AllocateMemory(VkDevice dev, const VkMemoryAllocateInfo *info, const VkAllocationCallbacks *allocator, void **out)
 {
@@ -415,6 +467,10 @@ static VkResult nvmtl_opaque_AllocateCommandBuffers(VkDevice dev, const VkComman
 typedef struct { uint32_t version, surfaceID, plane, pad; uint64_t size_B; } nvmtl_vram_rec;
 static void (*pnvk_stage_import)(const nvmtl_vram_rec *);
 static uint32_t (*pnvk_surface_dirty)(VkDevice, uint32_t, uint32_t);
+/* RADV's route (libdrm_xnu, A3): an IOSurface plane as a dma-buf fd its OPAQUE_FD import turns into a GEM BO over the
+   accelerator's VRAM for the surface, and the dirty mark through the kext */
+static int (*pdrm_surface_fd)(uint32_t, uint32_t, uint64_t);
+static int (*pdrm_surface_dirty)(uint32_t, uint32_t);
 static int (*pnvk_sparse)(void);
 static int g_qsparse, g_sparse;
 static int g_extfd;
@@ -661,6 +717,8 @@ static int nvmtl_vk_initialize(void)
               if (rb <= 0) nvlog("vk: owned handle fallback missing: _open not rebound in %s (%d)", NVMTL_ICD_LIB, rb); }
             pnvk_stage_import = (void (*)(const nvmtl_vram_rec *))dlsym(g_lib, "nvmtl_nvk_stage_import");
             pnvk_surface_dirty = (uint32_t (*)(VkDevice, uint32_t, uint32_t))dlsym(g_lib, "nvmtl_nvk_surface_dirty");
+            pdrm_surface_fd = (int (*)(uint32_t, uint32_t, uint64_t))dlsym(g_lib, "drm_xnu_surface_fd");
+            pdrm_surface_dirty = (int (*)(uint32_t, uint32_t))dlsym(g_lib, "drm_xnu_surface_dirty");
             pnvk_sample_depth_contract = (VkResult (*)(VkDevice, uint32_t *, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_contract_v1");
             pnvk_sample_depth_image = (VkResult (*)(VkDevice, VkImage, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_image_v1");
             pnvk_sparse = (int (*)(void))dlsym(g_lib, "nvmtl_nvk_sparse_bind_v1");
@@ -882,6 +940,8 @@ static int nvmtl_vk_initialize(void)
     nvlog("vk: VK_EXT_extended_dynamic_state %s", have[14] ? "ENABLED (dynamic depth/stencil state, PS epilogs)" : "ABSENT");
     VKCK(pvkCreateDevice(g_pdev, &dci, NULL, &g_dev), "vkCreateDevice");
     DEVICE_FNS(LOAD_D)
+    g_real_AllocateMemory = pvkAllocateMemory; pvkAllocateMemory = nvmtl_track_AllocateMemory;
+    g_real_FreeMemory = pvkFreeMemory; pvkFreeMemory = nvmtl_track_FreeMemory;
     if (g_pstat) { p_pstat_props = (PFN_vkGetPipelineExecutablePropertiesKHR)pvkGetDeviceProcAddr(g_dev, "vkGetPipelineExecutablePropertiesKHR");
                    p_pstat_stats = (PFN_vkGetPipelineExecutableStatisticsKHR)pvkGetDeviceProcAddr(g_dev, "vkGetPipelineExecutableStatisticsKHR");
                    if (!p_pstat_props || !p_pstat_stats) g_pstat = 0;
@@ -1795,10 +1855,11 @@ int nvmtl_vk_surface_share_on(void)
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("NVMTL_NO_SURFACE_SHARE");
-        on = pnvk_stage_import && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
-        nvlog("item 7: IOSurface textures %s (NVK import %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s)",
+        on = (pnvk_stage_import || pdrm_surface_fd) && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
+        nvlog("item 7: IOSurface textures %s (NVK import %s, libdrm_xnu surface fds %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s)",
               on ? "live in the surface's family VRAM (one per surface, every process)" : "private per process (copies)",
-              pnvk_stage_import ? "present" : "ABSENT", g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset");
+              pnvk_stage_import ? "present" : "ABSENT", pdrm_surface_fd ? "present" : "ABSENT",
+              g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset");
     }
     return on;
 }
@@ -1807,13 +1868,14 @@ int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("NVMTL_NO_SURFACE_PAGEOFF");
-        on = pnvk_surface_dirty && !(e && e[0] == '1') && !nvmtl_gpu_headless();
-        nvlog("after a GPU write, IOSurface VRAM is %s (NVK dirty export %s, NVMTL_NO_SURFACE_PAGEOFF=%s)",
+        on = (pnvk_surface_dirty || pdrm_surface_dirty) && !(e && e[0] == '1') && !nvmtl_gpu_headless();
+        nvlog("after a GPU write, IOSurface VRAM is %s (NVK dirty export %s, libdrm_xnu dirty %s, NVMTL_NO_SURFACE_PAGEOFF=%s)",
               on ? "marked newest; a CPU lock / the display pipe pages it off (Apple's page-off)" : "copied out eagerly (old)",
-              pnvk_surface_dirty ? "present" : "ABSENT", e ?: "unset");
+              pnvk_surface_dirty ? "present" : "ABSENT", pdrm_surface_dirty ? "present" : "ABSENT", e ?: "unset");
     }
     if (!on || !g_dev) return -1;
-    uint32_t st = pnvk_surface_dirty(g_dev, surfaceID, plane);
+    uint32_t st = pnvk_surface_dirty ? pnvk_surface_dirty(g_dev, surfaceID, plane)
+                                     : (pdrm_surface_dirty(surfaceID, plane) ? (uint32_t)errno | 0x80000000u : 0u);
     if (st) { static unsigned n; if (n++ < 8 || n % 2000 == 0) nvlog("surface %u dirty refused (%#x) - copy-out (%u so far)", surfaceID, st, n); }
     return st ? -1 : 0;
 }
@@ -1825,14 +1887,18 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
     int mt = memtype(all, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (mt < 0) return -1;
     nvmtl_vram_rec r = { 3, surfaceID, plane, 0, (uint64_t)need };
+    /* NVK takes the staged record and ignores the fd; RADV imports the surface fd itself (Vulkan owns it on success) */
     VkImportMemoryFdInfoKHR imp = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, NULL, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
-                                    open("/dev/null", O_RDONLY | O_CLOEXEC) };
-    if (imp.fd < 0) return -1;
+                                    pnvk_stage_import ? open("/dev/null", O_RDONLY | O_CLOEXEC) : pdrm_surface_fd(surfaceID, plane, need) };
+    if (imp.fd < 0) {
+        static unsigned nf; if (nf++ < 8 || nf % 1000 == 0) nvlog("item 7: surface %u: no import fd (errno %d) - private", surfaceID, errno);
+        return -1;
+    }
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp, need, (uint32_t)mt };
     VkDeviceMemory m = VK_NULL_HANDLE;
-    pnvk_stage_import(&r);
+    if (pnvk_stage_import) pnvk_stage_import(&r);
     VkResult vr = pvkAllocateMemory(g_dev, &mai, NULL, &m);
-    pnvk_stage_import(NULL);
+    if (pnvk_stage_import) pnvk_stage_import(NULL);
     if (vr != VK_SUCCESS) {
         close(imp.fd);
         static unsigned n; if (n++ < 8 || n % 1000 == 0)
@@ -6764,10 +6830,12 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
     VkMemoryRequirements mr; pvkGetImageMemoryRequirements(g_dev, (VkImage)out->img, &mr);
     uint32_t all = g_memp.memoryTypeCount >= 32 ? 0xffffffffu : ((1u << g_memp.memoryTypeCount) - 1u);
     size_t at = b->moff + offset;
-    const char *why = (mr.memoryTypeBits & all) != all ? "memory types" : (mr.alignment && at % mr.alignment) ? "alignment" : NULL;
+    const int bt = nvmtl_mem_type((VkDeviceMemory)b->mem);   /* -1: not known, every type must do */
+    const int typed = bt >= 0 && bt < 32 ? (mr.memoryTypeBits >> bt) & 1 : (mr.memoryTypeBits & all) == all;
+    const char *why = !typed ? "memory types" : (mr.alignment && at % mr.alignment) ? "alignment" : NULL;
     if (why) {
-        nvlog("buffer texture: refused on %s - image types 0x%x of 0x%x, bind at %zu (buffer %zu + %zu) vs alignment %llu",
-              why, mr.memoryTypeBits, all, at, b->moff, offset, (unsigned long long)mr.alignment);
+        nvlog("buffer texture: refused on %s - image types 0x%x of 0x%x, the buffer's type %d, bind at %zu (buffer %zu + %zu) vs alignment %llu",
+              why, mr.memoryTypeBits, all, bt, at, b->moff, offset, (unsigned long long)mr.alignment);
         pvkDestroyImage(g_dev, (VkImage)out->img, NULL); memset(out, 0, sizeof *out); return -1; }
     if (mr.size > b->size - offset)
         nvlog("buffer texture: image size %llu runs %llu B past the buffer's %zu at offset %zu (the tail of the last row, never addressed)",

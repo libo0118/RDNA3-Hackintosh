@@ -290,6 +290,23 @@ struct RD3KSurfShareEsc {
     unsigned long long size;
 };
 
+/* RD3K_ESC_SURF_GEM: the core kext asks the accelerator (RD3ACCEL_SS_FN,
+ * p2 the client's task, p3 this cmd, p1 a struct RD3KSurfGem) for the
+ * VRAM allocation behind an IOSurface plane, for a GEM BO over it
+ * (RD_NR_XNU_SURFACE_BO). The accelerator takes a reference on it with
+ * RD3K_VRAM_FN_REF while it still holds the surface, so the allocation
+ * outlives its own free until the core drops that reference. */
+#define RD3K_ESC_SURF_GEM      0xE4u
+#define RD3K_SURFGEM_VERSION   1u
+#define RD3K_VRAM_FN_REF      "rdna3RefVram"
+struct RD3KSurfGem {
+    unsigned int version;
+    unsigned int surfaceID, plane;     /* in */
+    unsigned int status;               /* out: 0 or RD3K_SS_* */
+    void *kapiMemory;                  /* out: the allocation, referenced */
+    unsigned long long bytes;          /* out */
+};
+
 #ifdef RD3K_SS_KERNEL_ABI
 #define RD3ACCEL_SS_FN     "rdna3SurfVram"
 #define RD3K_SS_FN_PAGEOFF "rdna3SurfPageoff"

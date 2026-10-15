@@ -127,6 +127,27 @@ struct rd_xnu_file_id {
     uint32_t id, pad;              /* out */
 };
 
+/* private: a GEM BO over the VRAM the accelerator (IOGraphicsAccelerator2)
+ * keeps for an IOSurface's plane, so RADV renders where WindowServer and
+ * the display read the surface, without a copy per frame (A3; the NVK
+ * route of the Metal plugin did the same with RM handles). IMPORT looks the
+ * surface up in the calling process (its IOSurface access rules) and gives
+ * a new handle; the BO keeps that VRAM allocated while it lives. DIRTY
+ * marks the plane's VRAM newer than the surface's system-memory copy after
+ * a GPU write, so a CPU lock pages it off instead of reading stale bytes.
+ * -ENOENT: no such surface for this process; -ENODEV: the surface has no
+ * VRAM of the accelerator's (not drawn by it yet, or the OS has no hook). */
+#define RD_NR_XNU_SURFACE_BO       0xF5
+#define RD_XNU_SURFACE_BO_IMPORT   0
+#define RD_XNU_SURFACE_BO_DIRTY    1
+struct rd_xnu_surface_bo {
+    uint32_t op;                   /* RD_XNU_SURFACE_BO_* */
+    uint32_t surface_id, plane;    /* in */
+    uint32_t handle;               /* IMPORT: out */
+    uint64_t size;                 /* IMPORT: in, the bytes the caller will address (0: any;
+                                      -ENOSPC when the VRAM is smaller); out, the BO's size */
+};
+
 /* We advertise the amdgpu DRM version RADV/libdrm expect from Linux 6.x */
 #define RD_DRM_MAJOR 3
 #define RD_DRM_MINOR 61
@@ -156,6 +177,8 @@ typedef struct rdna3_bo {
     uint64_t tiling_info;
     uint8_t  userptr;         /* GEM_USERPTR: backing wraps the client's pages, no mmap */
     uint8_t  userptr_ro;      /* AMDGPU_GEM_USERPTR_READONLY: never mapped writable */
+    uint8_t  foreign;         /* RD_NR_XNU_SURFACE_BO: VRAM the accelerator owns; bo_free drops
+                                 the OS's hold on it, no VRAM usage is counted */
     uint32_t visit;           /* rdna3_drm_device_for_each_vram_bo: seen in this pass */
     uint64_t user_addr;
 } rdna3_bo;
@@ -378,6 +401,15 @@ typedef struct rdna3_drm_ops {
     /* CLOCK_MONOTONIC in ns, for the bounded waits of a queue teardown
      * (amdgpu_userq_wait_for_last_fence: 100 ms); optional */
     uint64_t (*now_ns)(void *ctx);
+    /* RD_NR_XNU_SURFACE_BO, both optional (-ENODEV when missing).
+     * surface_bo: place 'bo' (zeroed but for refcnt) over the VRAM of plane
+     * 'plane' of IOSurface 'surface_id' as the client 'file_os' sees it:
+     * set vram_offset, size (page aligned) and backing (the OS's hold, which
+     * bo_free drops). surface_dirty: mark that VRAM newest. Both may drop
+     * the OS's lock (the accelerator takes its own first); the UAPI holds
+     * no pointers into the device across the call. 0 / -errno. */
+    int   (*surface_bo)(void *ctx, void *file_os, rdna3_bo *bo, uint32_t surface_id, uint32_t plane);
+    int   (*surface_dirty)(void *ctx, void *file_os, uint32_t surface_id, uint32_t plane);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
