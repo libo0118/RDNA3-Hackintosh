@@ -391,6 +391,13 @@ msrs() {   # macOS needs unknown MSRs ignored
 # (127.0.0.1:8000 = 10.0.2.2:8000 inside the VM). A server left over from an
 # earlier run holds the port, so stop it first and check the new one listens.
 SHARE_PID=
+# key=value lines: head = HEAD, metal = last commit touching metal/ (the
+# Metal plugin), mesa = last commit touching what build_radv.sh builds
+src_rev() {
+    echo "head=$(git -C "$ROOT" rev-parse --short HEAD)"
+    echo "metal=$(git -C "$ROOT" log -1 --format=%h HEAD -- metal)"
+    echo "mesa=$(git -C "$ROOT" log -1 --format=%h HEAD -- userspace/mesa userspace/rdna3_vktest.c)"
+}
 start_share() {
     # the current report scripts: autoreport.sh in the VM fetches them on
     # every boot, so changes to them need no new setup.sh run
@@ -400,6 +407,10 @@ start_share() {
        "$TOOLS/macos/build_metal.sh" "$WORK/share/tools/" 2>/dev/null || true
     # this checkout for tools/build_radv.sh (RADV built inside the VM)
     git -C "$ROOT" archive --format=tar.gz -o "$WORK/share/rdna3-src.tar.gz" HEAD 2>/dev/null || true
+    # the revision of that tarball (build_metal.sh / build_radv.sh stamp their
+    # builds with it, the triage compares): HEAD and the last commit touching
+    # what each build uses. Written with the tarball so the two always agree.
+    src_rev > "$WORK/share/rdna3-src.rev" 2>/dev/null || true
     pkill -f "vmtool.py serve " 2>/dev/null || true
     sleep 0.5
     $VMTOOL serve "$WORK/share" 8000 "$WORK/reports" >>"$WORK/share.log" 2>&1 &
@@ -1332,6 +1343,9 @@ cmd_result() {
     for f in "${sel[@]}"; do cp "$WORK/reports/$f" "$tmp/rdna3-result/" 2>/dev/null || sudo cat "$WORK/reports/$f" > "$tmp/rdna3-result/$f"; done
     git -C "$ROOT" log -1 --format='repo %h %s' > "$tmp/rdna3-result/00-host.txt" 2>/dev/null || true
     [ -f "$WORK/artifact-run" ] && echo "artifact from CI run $(cat "$WORK/artifact-run")" >> "$tmp/rdna3-result/00-host.txt" 
+    # what the VM's plugin / RADV builds must match (tools/triage_reports.py
+    # STALE PLUGIN/RADV): the last commits touching their sources
+    src_rev | sed -n -e 's/^metal=/repo-metal /p' -e 's/^mesa=/repo-mesa /p' >> "$tmp/rdna3-result/00-host.txt" 2>/dev/null || true
     # what the VM sent (or did not): the upload server's log and the newest files
     { echo; echo "== share server log (last 40)"; tail -n 40 "$WORK/share.log" 2>/dev/null
       echo; echo "== newest files in $WORK/reports"; ls -lt "$WORK/reports" 2>/dev/null | head -15

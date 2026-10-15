@@ -127,6 +127,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_discovery $(BUI
 	tests/test_make_pkg.sh
 	tests/test_triage_a3.sh
 	tests/test_triage_tx.sh
+	tests/test_triage_stale_plugin.sh
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump
 

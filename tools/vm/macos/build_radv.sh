@@ -56,6 +56,10 @@ glslangValidator --version | head -1
 
 say "sources from the host (rdna3vm window serves the checkout)"
 rm -rf "$W/src" && mkdir -p "$W/src"
+# the tarball has no git history: the host sends its revision beside it
+# (rdna3vm start_share); an older host has none -> the stamp says "unknown"
+REV=$(curl -sf --max-time 10 "$HOST/rdna3-src.rev" || true)
+rev() { printf '%s\n' "$REV" | sed -n "s/^$1=//p" | head -1; }
 curl -sf "$HOST/rdna3-src.tar.gz" | tar -xz -C "$W/src"
 [ -f "$W/src/userspace/mesa/build_radv.sh" ] || { echo "no sources at $HOST/rdna3-src.tar.gz (update rdna3vm: git pull, then rdna3vm window)"; exit 1; }
 
@@ -80,5 +84,10 @@ sudo cp "$LIB" "$W/rdna3_vktest" "$D/bin/"
 sudo cp "$W/src/build/userspace/prefix/lib/libdrm_amdgpu.1.dylib" "$D/bin/"
 sudo cp "$W/src/build/userspace/prefix/lib/libdrm.2.dylib" "$D/bin/"
 sudo chmod +x "$D/bin/rdna3_vktest"
+# the build stamp the report carries (tools/macos/collect.sh): which source
+# this RADV is, so the triage can say when it is older than the checkout
+{ echo "built=$(date '+%Y-%m-%d %H:%M:%S')"
+  echo "head=$(rev head)"
+  echo "mesa=$(rev mesa)"; } | sed 's/=$/=unknown/' | sudo tee "$D/bin/radv.stamp" >/dev/null
 echo
 echo "Done. Shut the VM down (sudo shutdown -h now); from step 8 on the report runs rdna3_vktest on the card."

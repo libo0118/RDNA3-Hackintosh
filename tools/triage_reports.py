@@ -20,6 +20,7 @@ import io
 import os
 import re
 import struct
+import subprocess
 import sys
 import tarfile
 import zlib
@@ -165,6 +166,124 @@ def count_color(path, rgb, tol=40):
     return hit, w * h
 
 
+# --- STALE PLUGIN / RADV -----------------------------------------------------
+# tools/vm/rdna3vm update installs only the kext; the Metal plugin and RADV are
+# built inside the VM (tools/vm/macos/build_metal.sh, build_radv.sh), so they
+# can silently be older than the kext under test (card run 2026-10-15: a fix
+# of eb5e3e8 and the N1/A3 plugin work were never tested). Two checks:
+#  1. the build stamps (35-build-stamps.txt, written by the build scripts):
+#     the last commit touching metal/ (resp. userspace/mesa) in the source the
+#     build used, against the same in the repo at the commit 00-host.txt names.
+#     STALE only when the stamp's commit is provably an ancestor of the repo's
+#     (git history of this checkout); otherwise an INFO line says why not.
+#  2. no stamp (reports before stamps, CI-artifact RADV): the plugin log has
+#     the "vk: G14 primitive topology" line (eb5e3e8's neighbour) but not the
+#     "vk: VK_EXT_extended_dynamic_state (ENABLED|ABSENT)" line that eb5e3e8
+#     added right before it -> a plugin older than that commit.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STALE_SOURCES = {   # kind: (stamp key, 00-host.txt key, paths in the repo)
+    "PLUGIN": ("metal", "repo-metal", ("metal",)),
+    "RADV": ("mesa", "repo-mesa", ("userspace/mesa", "userspace/rdna3_vktest.c")),
+}
+HEX_SHA = re.compile(r"[0-9a-f]{7,40}\Z")
+
+
+def git_out(*args):
+    """stdout of a git command in this checkout, or None (no git, no repo,
+    non-zero exit). The report is untrusted: only hex ids reach `args`."""
+    try:
+        r = subprocess.run(["git", "-C", REPO_ROOT] + list(args), capture_output=True,
+                           text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def parse_stamps(text):
+    """35-build-stamps.txt -> {"plugin": {key: value} or None, "radv": ...}"""
+    out, cur = {}, None
+    for l in text.splitlines():
+        m = re.match(r"== (plugin|radv) \(", l)
+        if m:
+            cur = m.group(1)
+            out[cur] = None
+        elif cur and re.match(r"[a-z]+=", l):
+            out[cur] = out[cur] or {}
+            k, v = l.split("=", 1)
+            out[cur][k] = v.strip()
+    return out
+
+
+def parse_host(text):
+    """00-host.txt (tools/vm/rdna3vm result): "repo <sha> <subject>",
+    "repo-metal <sha>", "repo-mesa <sha>" -> {"repo": sha, ...}"""
+    out = {}
+    for m in re.finditer(r"^(repo(?:-metal|-mesa)?) ([0-9a-f]{7,40})\b", text, re.M):
+        out[m.group(1)] = m.group(2)
+    return out
+
+
+def stamp_verdict(kind, stamp, host):
+    """("ok" | "stale" | "unknown", text) for one build's stamp"""
+    key, hkey, paths = STALE_SOURCES[kind]
+    sha = (stamp or {}).get(key, "")
+    if not HEX_SHA.match(sha):
+        return "unknown", "%s stamp has no revision (%s)" % (kind, sha or "empty")
+    ref = host.get("repo", "")
+    if not (HEX_SHA.match(ref) and git_out("cat-file", "-e", ref + "^{commit}") is not None):
+        ref = "HEAD"        # the host's commit is not in this clone
+    target = git_out("log", "-1", "--format=%H", ref, "--", *paths) or host.get(hkey)
+    if not target:
+        return "unknown", "%s: no git history here and no %s line in 00-host.txt" % (kind, hkey)
+    where = "/".join(paths) if len(paths) == 1 else paths[0]
+    if target.startswith(sha) or sha.startswith(target):
+        return "ok", "%s %s at %s = the repo's" % (kind, where, sha)
+    subj = git_out("log", "-1", "--format=%s", target) or ""
+    both = git_out("cat-file", "-e", sha + "^{commit}") is not None and \
+        git_out("cat-file", "-e", target + "^{commit}") is not None
+    if both and git_out("merge-base", "--is-ancestor", sha, target) is not None:
+        return "stale", "%s built from %s at %s, the repo's last commit there is %s%s" % (
+            kind, where, sha, target[:7], " (%s)" % subj[:70] if subj else "")
+    if both and git_out("merge-base", "--is-ancestor", target, sha) is not None:
+        return "ok", "%s %s at %s is newer than the repo's %s" % (kind, where, sha, target[:7])
+    return "unknown", "%s %s at %s, the repo's is %s: cannot tell which is older (commit not in this clone)" % (
+        kind, where, sha, target[:7])
+
+
+def stale_builds(stamps_txt, host_txt, plugin_log):
+    """Prints the stamps / STALE lines; True when a stale build was proven."""
+    stamps, host = parse_stamps(stamps_txt), parse_host(host_txt)
+    has_plugin = "NVMTL" in plugin_log
+    if not stamps_txt.strip() and not has_plugin:
+        return False
+    reasons = []
+    notes = []
+    for kind, name in (("PLUGIN", "plugin"), ("RADV", "radv")):
+        st = stamps.get(name)
+        if not st:
+            if name == "plugin" and not has_plugin:
+                continue
+            notes.append("%s: no stamp (built before stamps existed%s)" % (
+                kind, ", or installed from a CI artifact" if kind == "RADV" else ""))
+            continue
+        verdict, text = stamp_verdict(kind, st, host)
+        notes.append("%s %s (built %s)" % (text, "STALE" if verdict == "stale" else "", st.get("built", "?")))
+        if verdict == "stale":
+            reasons.append(text)
+    # the log is the ground truth whatever the stamp says (and the only evidence without one)
+    if not any(r.startswith("PLUGIN") for r in reasons) and "vk: G14 primitive topology" in plugin_log and \
+            not re.search(r"vk: VK_EXT_extended_dynamic_state (?:ENABLED|ABSENT)", plugin_log):
+        reasons.append("PLUGIN log has the 'vk: G14 primitive topology' line but no 'vk: "
+                       "VK_EXT_extended_dynamic_state ENABLED/ABSENT' line: a plugin older than eb5e3e8 "
+                       "(the Chess crash fix, Mesa patch 0008)")
+    print("   INFO %-20s %s" % ("build stamps", "; ".join(n.replace("  ", " ") for n in notes) or "none"))
+    if reasons:
+        print("   FAIL STALE PLUGIN/RADV: %s; run build_radv.sh and build_metal.sh in the VM "
+              "(docs/TESTING-VM.md) - the plugin / RADV results of this run do not test the current code" %
+              "; ".join(reasons))
+    return bool(reasons)
+
+
 def report(path, show_all):
     failed = False
     with tarfile.open(path) as tar:
@@ -179,6 +298,8 @@ def report(path, show_all):
         pci = read_member(tar, "04-pci.txt")
         surfvram = read_member(tar, "29-surface-vram.txt") or ""
         mtlallow = read_member(tar, "34-metal-allow.txt") or ""
+        stamps_txt = read_member(tar, "35-build-stamps.txt") or ""
+        pluginlog = read_member(tar, "26-log-metal-plugin.txt") or ""
     args = " ".join(l for l in args.splitlines() if not l.startswith("$") and not l.startswith("[exit"))
     args = args.replace("boot-args", "").strip()
     lvl = bootarg_level(args)
@@ -269,6 +390,13 @@ def report(path, show_all):
         if "soc21 CG" in l or "SocCG" in l:
             print("   info " + l[l.find("soc21"):][:120] if "soc21" in l else "   info " + l[:120])
             break
+    # the Metal plugin / RADV built in the VM against the repo (see above)
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(path)), "00-host.txt"), errors="replace") as fh:
+            host_txt = fh.read()
+    except OSError:
+        host_txt = ""
+    failed = stale_builds(stamps_txt, host_txt, pluginlog + "\n" + cdlog) or failed
     # step 9: our framebuffer (rdna3fb=1) took the head and has the EDID
     if "rdna3fb=1" in args:
         fb_started = "RDNA3-fb: started" in log
@@ -687,6 +815,10 @@ def main():
             print(ppm_to_png(p))
         return
     d = sys.argv[1]
+    # a collected 'rdna3vm result' archive unpacks to <dir>/rdna3-result/
+    if not glob.glob(os.path.join(d, "rdna3-report-*")) and \
+            glob.glob(os.path.join(d, "rdna3-result", "rdna3-report-*")):
+        d = os.path.join(d, "rdna3-result")
     show_all = "--all" in sys.argv
     load_linux_reference(d)
     failed = False

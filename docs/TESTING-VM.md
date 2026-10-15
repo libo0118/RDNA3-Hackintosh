@@ -466,6 +466,21 @@ device: WindowServer, and every application in apps mode (the `%apps` line;
 `rdna3mtlapps=0` in the boot-args or no such line gives the explicit names
 only). Everything else sees nothing new.
 
+### Keeping the plugin and RADV current
+
+`rdna3vm update` installs only the kext bundle. The
+Metal plugin and a RADV built in the VM stay as they were built, so after a
+`git pull` that touches `metal/` or `userspace/mesa/` they are older than the
+kext the report tests. Both build scripts therefore write a stamp (the last
+commit that touched `metal/`, resp. `userspace/mesa/`, in the sources they
+built) and the report carries it in `35-build-stamps.txt`. When the triage
+prints `FAIL STALE PLUGIN/RADV`, the plugin / RADV results of that run do
+not test the current code: `git pull`, `rdna3vm window`, then in the VM
+Terminal `build_radv.sh` and `build_metal.sh` again (the commands above),
+shut the VM down and run the steps again. Reports from before the stamps
+(and a RADV from a CI artifact) have none; for the plugin the triage then
+looks for the `vk: VK_EXT_extended_dynamic_state` line in its log.
+
 ## How it works (for the curious)
 
 - `rdna3vm step N` writes the step's boot-args to the OpenCore `config.plist` (a copy
