@@ -56,7 +56,9 @@ backup() {
 # the boot-args OpenCore sets now, without our rdna3* ones
 current=$(plist "$CONF" --show)
 # shellcheck disable=SC2086 # split into words on purpose
+set -f   # split the boot-args into words without expanding a '*' or '?' in a foreign one
 keep=$(printf '%s\n' $current | { grep -v -E '^-?rdna3' || true; } | tr '\n' ' ' | sed 's/ *$//')
+set +f
 
 if [ $REMOVE = 1 ]; then
     if [ $OFF = 1 ] || [ -n "$STEP" ] || [ -n "$FW" ]; then
@@ -68,7 +70,9 @@ if [ $REMOVE = 1 ]; then
         grep -q "<string>$n.kext</string>" "$CONF" && inadd="$inadd $n"
     done
     # shellcheck disable=SC2086 # split into words on purpose
+    set -f   # split the boot-args into words without expanding a '*' or '?' in a foreign one
     ours=$(printf '%s\n' $current | { grep -E '^-?rdna3' || true; } | tr '\n' ' ' | sed 's/ *$//')
+    set +f
     if [ -z "$inkexts$inadd$ours" ]; then
         echo "OpenCore ($EFI): nothing of RDNA3-Hackintosh there (no kexts, Kernel/Add entries or rdna3 boot-args); not changed."
         exit 0
