@@ -47,6 +47,24 @@ int main(void)
     test_bootargs = noprofile_off;
     CHECK(!rd3_gamma_on());
 
+    /* card run 58: WindowServer's display framebuffers stay out of A3 unless
+     * rdna3a3display=1, with or without the profile */
+    {
+        static const struct test_bootarg a3on[] = { { "rdna3a3display", 1 }, { NULL, 0 } };
+        static const struct test_bootarg a3off[] = { { "rdna3a3display", 0 }, { NULL, 0 } };
+        static const struct test_bootarg a3ladder[] = { { "rdna3lvl", 8 }, { "rdna3a3display", 1 }, { NULL, 0 } };
+        test_bootargs = none;
+        CHECK(!rd3_a3_display_on());
+        test_bootargs = ladder;
+        CHECK(!rd3_a3_display_on());
+        test_bootargs = a3on;
+        CHECK(rd3_a3_display_on());
+        test_bootargs = a3off;
+        CHECK(!rd3_a3_display_on());
+        test_bootargs = a3ladder;
+        CHECK(rd3_a3_display_on());
+    }
+
     if (fails) {
         printf("test_bootargs: %d check(s) failed\n", fails);
         return 1;

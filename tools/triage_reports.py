@@ -188,6 +188,73 @@ STALE_SOURCES = {   # kind: (stamp key, 00-host.txt key, paths in the repo)
 HEX_SHA = re.compile(r"[0-9a-f]{7,40}\Z")
 
 
+# M6 opens Chess, Maps and System Settings on the main display, then looks
+# at the desktop: a pipe whose picture is byte-identical in every M6 look
+# never showed the apps (card run 58: head 0 kept an old frame while
+# WindowServer drew into A3 BOs no swap scanned out)
+M6_LOOK = re.compile(r"-scanoutm6([A-Za-z]+)-pipe(\d+)\.ppm$")
+
+
+def m6_frozen(prefix):
+    """[(pipe, [look names])] of the pipes whose M6 pictures never changed"""
+    by_pipe = {}
+    for ppm in sorted(glob.glob(prefix + "-scanoutm6*-pipe*.ppm")):
+        m = M6_LOOK.search(ppm)
+        if not m:
+            continue
+        try:
+            with open(ppm, "rb") as f:
+                data = f.read()
+        except OSError:
+            continue
+        by_pipe.setdefault(int(m.group(2)), []).append((m.group(1), data))
+    out = []
+    for pipe, looks in sorted(by_pipe.items()):
+        if len(looks) >= 3 and len(set(d for _, d in looks)) == 1:
+            out.append((pipe, [n for n, _ in looks]))
+    return out
+
+
+FAULT = re.compile(r"\[(gfxhub|mmhub)\] page fault \(src_id:\d+ ring:\d+ vmid:(\d+) pasid:\d+\) at (0x[0-9a-f]+)")
+FAULT_OWNER = re.compile(r"page fault: VMID (\d+)'s client \(([^,]+), pid (\d+)\)")
+FAULT_CID = re.compile(r"L2_PROTECTION_FAULT_STATUS 0x[0-9a-f]+: UTCL2 client (0x[0-9a-f]+), .* RW (read|write)")
+# gfxhub_v3_0.c gfxhub_client_ids
+GFXHUB_CLIENTS = {0x0: "CB/DB", 0x2: "GE1", 0x3: "GE2", 0x4: "CPF", 0x5: "CPC", 0x6: "CPG", 0x7: "RLC", 0x8: "TCP",
+                  0x9: "SQC inst", 0xa: "SQC data", 0xb: "SQG", 0xd: "SDMA0", 0xe: "SDMA1", 0xf: "GCR"}
+
+
+def vm_fault_groups(log):
+    """the GPU page faults of a kernel log grouped by hub, VMID and address:
+    [(count, hub, vmid, addr, owner, client)] (card run 58: 9 faults of
+    Terminal's VMID 5, each followed by 4 on VMID 0 at address 0)"""
+    groups, order, owners = {}, [], {}
+    last = None
+    for l in log.splitlines():
+        m = FAULT.search(l)
+        if m:
+            last = (m.group(1), int(m.group(2)), m.group(3))
+            if last not in groups:
+                groups[last] = [0, ""]
+                order.append(last)
+            groups[last][0] += 1
+            continue
+        m = FAULT_CID.search(l)
+        if m and last and not groups[last][1]:
+            cid = int(m.group(1), 16)
+            groups[last][1] = "%s %s" % (GFXHUB_CLIENTS.get(cid, "client 0x%x" % cid) if last[0] == "gfxhub"
+                                         else "client 0x%x" % cid, m.group(2))
+            continue
+        m = FAULT_OWNER.search(l)
+        if m:
+            owners.setdefault(int(m.group(1)), set()).add("%s %s" % (m.group(2), m.group(3)))
+    out = []
+    for k in order:
+        hub, vmid, addr = k
+        who = "no client (the kernel's VMID)" if vmid == 0 else ", ".join(sorted(owners.get(vmid, {"?"})))
+        out.append((groups[k][0], hub, vmid, addr, who, groups[k][1]))
+    return out
+
+
 def git_out(*args):
     """stdout of a git command in this checkout, or None (no git, no repo,
     non-zero exit). The report is untrusted: only hex ids reach `args`."""
@@ -500,6 +567,11 @@ def report(path, show_all):
             gem = len(re.findall(r"GEM: IOSurface \d+ plane \d+ ->", sv))
             refused = re.findall(r"(?:surfgem|GEM: IOSurface \d+ plane \d+ \w+(?: \w+)?) refused: ([^(\n]*)", sv)
             imp_ref = re.findall(r"family VRAM import refused \(VkResult (-?\d+), kernel errno (\d+)", sv)
+            # card run 58: WindowServer's display framebuffers stay out of A3
+            # by design (kernel status RD3K_SS_DISPLAY, errno 1 in the plugin)
+            disp = len(re.findall(r"surfgem: surface \d+ plane \d+ refused: WindowServer's display framebuffer", sv))
+            refused = [r for r in refused if not r.startswith("WindowServer's display framebuffer")]
+            imp_ref = [(vr, ke) for vr, ke in imp_ref if not (disp and ke == "1")]
             shared = sum(1 for l in live if l.startswith("live"))
             state = ("%d process(es) shared, %d private" % (shared, len(live) - shared)) if live else "no plugin line"
             warn = (shared and not gem) or refused or imp_ref
@@ -511,6 +583,28 @@ def report(path, show_all):
                 print("     plugin import refused: VkResult %s, kernel errno %s" % (vr, ke))
             for l in sorted(set(re.findall(r"item 7: kext surface BOs probe[^\n]*", sv)))[:2]:
                 print("     " + l[:150])
+        # card run 58: which VRAM each head scans out against what
+        # WindowServer drew ("a3 display:" lines of the accelerator)
+        a3d = re.findall(r"a3 display: head (\d+): .*$", log, re.M)
+        a3lines = {}
+        for l in log.splitlines():
+            m = re.search(r"a3 display: head (\d+): .*$", l)
+            if m:
+                a3lines[m.group(1)] = m.group(0)
+        apart = [l for l in a3lines.values() if "DOES NOT READ" in l]
+        disp_kept = "WindowServer's display framebuffer" in sv or "kept out of A3" in log
+        if apart:
+            print("   FAIL %-20s WindowServer draws display surfaces into A3 BOs no swap scans out "
+                  "(rdna3a3display=1): the panel keeps an old frame" % "A3 display")
+            for l in apart:
+                print("     " + l[:300])
+            failed = True
+        elif a3d or disp_kept:
+            print("   INFO %-20s %s" % ("A3 display", "WindowServer's display framebuffers kept out of A3 "
+                                        "(composited through copies, card run 58)" if disp_kept and not
+                                        "MAY become BOs" in log else "display surfaces imported (rdna3a3display=1)"))
+            for h in sorted(a3lines):
+                print("     " + a3lines[h][:200])
         failed = failed or not same or not up or len(pids) > 2
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
@@ -762,6 +856,17 @@ def summary(path, serial=None):
                 out[i] = (k, v.replace("did not load", "LOADED"))
     for m in re.finditer(r"^M6 (\S+): (.*)$", txt, re.M):
         out.append(("  " + m.group(1), m.group(2)[:100]))
+    m6pics = glob.glob(path[:-len(".tar.gz")] + "-scanoutm6*-pipe*.ppm")
+    if m6pics:
+        frozen = m6_frozen(path[:-len(".tar.gz")])
+        out.append(("M6 screens", "; ".join("pipe %d FROZEN in all %d looks" % (pp, len(n)) for pp, n in frozen)
+                    if frozen else "every pipe's picture changed between the M6 looks"))
+    faults = vm_fault_groups(log)
+    if faults:
+        out.append(("VM faults", "%d in %d place(s)" % (sum(f[0] for f in faults), len(faults))))
+        for n, hub, vmid, addr, who, client in faults[:6]:
+            out.append(("  VMID %d" % vmid, "%dx %s at %s%s: %s" % (n, hub, addr, " (%s)" % client if client else "",
+                                                                     who)[:150]))
     if "== rdna3_drminfo --scanout (look m4)" in txt:
         pics = sorted(glob.glob(path[:-len(".tar.gz")] + "-scanoutm4-pipe*.ppm"))
         seen = []
@@ -919,6 +1024,11 @@ def main():
                         print("       %s display wake: %d pipe(s) lit, %d still blanked" %
                               ("PASS" if nl and not nb else "FAIL", nl, nb))
                         failed = failed or not nl or nb > 0
+            for pipe, names in m6_frozen(p[:-len(".tar.gz")]):
+                print("   FAIL M6 screen: pipe %d showed the same picture in all %d M6 looks (%s): the apps' "
+                      "frames never reached it (card run 58: an old frame on the main screen)" %
+                      (pipe, len(names), ", ".join(names)))
+                failed = True
             for ppm in sorted(glob.glob(p[:-len(".tar.gz")] + "-scanout*-pipe*.ppm")):
                 try:
                     print("     picture: " + ppm_to_png(ppm))

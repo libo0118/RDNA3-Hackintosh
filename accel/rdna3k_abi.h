@@ -278,6 +278,7 @@ struct RD3KCopyRequest {
 #define RD3K_SS_NO_CACHE      0x80000004u
 #define RD3K_SS_NO_VRAM       0x80000005u
 #define RD3K_SS_TOO_SMALL     0x80000006u
+#define RD3K_SS_DISPLAY       0x80000007u   /* WindowServer's display framebuffer: kept out of A3 (card run 58) */
 struct RD3KSurfShareEsc {
     unsigned int version;
     unsigned int surfaceID;

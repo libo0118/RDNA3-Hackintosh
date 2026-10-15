@@ -245,6 +245,9 @@ item in the SUMMARY; the full output is in the tests file under `== probe:`.
 | `M4 CAMetalLayer`, `M4 on the screen` | M4 present | drawables, rendering, presents; magenta pixels in the scanout picture taken while the window showed | drawables NONE: the layer refused the plugin's device; presented 0 or no magenta on the screen: the drawable never reaches WindowServer's composition |
 | `M5 WindowServer` | M5 | which processes loaded the plugin, whether WindowServer did, system_profiler's Metal line, WindowServer's GPU messages; the allow list and its mode (`allow mode: apps` / `list`) | WindowServer does not load it (not on the allow list): an M5 step with WindowServer allowed is the next experiment |
 | `M6 apps`, `M6 Chess` / `Maps` | M6 apps | running, plugin loaded, crash report | a crash report: its first 40 lines in the tests file name the Metal call that failed |
+| `M6 screens`, `FAIL M6 screen: pipe N showed the same picture in all M6 looks` | M6 apps on the panel | whether each pipe's hi-res picture changed while Chess, Maps and Settings opened | a frozen main screen (card run 58): WindowServer drew where the head does not scan out. Read `A3 display` and the `a3 display: head N:` lines: `kept out of A3` and the screen still frozen is a new cause (the copies or the swap); `WINDOWSERVER DRAWS WHERE THE PANEL DOES NOT READ` means rdna3a3display=1 was set |
+| `A3 display` (`a3 display: head N: ... swaps`, `surfgem: ... refused: WindowServer's display framebuffer`) | A3 and the display | card run 58: WindowServer's display framebuffer IOSurfaces stay out of A3 (`common/rdna3_a3_display.h`), the swap scans out the legacy surface's buffers (`it scans out phys`); `debug.rdna3accel_a3display_refused`, `swaps_h<N>`, `swaps_a3_h<N>` in the counters | `FAIL A3 display` (only with `rdna3a3display=1`): no swap ever scanned out an A3 BO - the swap must flip the IOSurface's own VRAM before display surfaces can join A3 |
+| `VM faults`, `VMID N` (SUMMARY, from the serial log) | VM faults | the faults grouped by VMID and address with the UTCL2 client (`gfxhub_client_ids`) and the owner | card run 58: Terminal's VMID 5 TCP reads at an unmapped VA, each followed by 4 CPC writes at 0 on VMID 0 (not a second bug: they come with every client fault) |
 
 ### Step 8c (`rdna3mes=1`): MES scheduler pipe
 
@@ -1876,3 +1879,39 @@ Settings. That is expected for them, not a display regression.
   ignores status and self-clearing fields, and watches the clone of
   `rdna3mirror=1` too.
 
+
+### Card run 58 (step agdc + probes, build 98582a0, 2026-10-15c)
+
+- The first run with the current Metal plugin and RADV (A3 and N1 on the
+  card). **The main (HDMI) screen kept an old frame** - the wallpaper and
+  the menu bar - while the windows on it (Terminal, Settings, Chess, the
+  menus) flashed in for a moment; the DP screen looked fine (it only
+  showed the static desktop). The looks agree: pipe 0 scanned out one
+  buffer (0x800b100000, later 0x800bc50000) whose picture lacked the open
+  Terminal and never changed in 2 s; all four M6 hi-res pictures of pipe 0
+  were byte-identical.
+- Cause: A3 made WindowServer's 1920x1080 compositing IOSurfaces GEM BOs
+  over their own device-cache VRAM (`GEM: IOSurface 1..4 ... at 0xd0f0000
+  / 0xd8e0000 / 0xe0d0000 / 0xe8d0000`, each allocated by the import's
+  wire). The legacy surface swap scans out other allocations - the
+  IOAccelSurface's buffers (0xb100000, 0xb8f0000, 0xc0e0000, 0xc8d0000),
+  which the family fills from the IOSurface's system memory (page-on
+  through the aperture). No flip ever went to an A3 BO. The plugin's
+  "surface-out -> dirty, no copy" left that system memory stale, so the
+  panel showed whatever a CPU lock had paged off last (three 8 MB
+  page-offs at 17:46:48, the early desktop).
+- Interim fix: WindowServer surfaces of a head's scanout size stay out of
+  A3 (`common/rdna3_a3_display.h`, status `RD3K_SS_DISPLAY`, errno EPERM
+  to the plugin, which composites them through copies as before A3);
+  `rdna3a3display=1` / `sysctl debug.rdna3accel_a3display=1` lets them in
+  again. The next run must show `surfgem: ... refused: WindowServer's
+  display framebuffer` for the 1920x1080 surfaces, `a3 display: head 0:
+  ... kept out of A3`, the plugin's `import refused (... kernel errno 1 ...)
+  - private image + copies` for them, and pipe 0's M6 pictures differing
+  (triage `M6 screens`, `FAIL M6 screen` otherwise).
+- The 45 VMFaults: Terminal (VMID 5, apps mode) TCP reads at an unmapped
+  VA 0x80018223f000, 9 times from the 960x540 mode switch on (and after
+  its VM was marked guilty), each followed by 4 CPC writes at address 0 on
+  VMID 0 ("which no client owns"). At the first one WindowServer's GFX job
+  hung for 10 s (soft reset, WindowServer restarted). Open (DRIVER-PLAN
+  N27); triage now groups the faults (`VM faults` in the summary).

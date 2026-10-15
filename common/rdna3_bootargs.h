@@ -57,4 +57,13 @@ static inline int rd3_gamma_on(void)
     return rd3_arg("rdna3gamma", 1) != 0;
 }
 
+/* A3 and WindowServer's display framebuffers (rdna3_a3_display.h): kept
+ * out of A3 unless rdna3a3display=1 (card run 58: the swap scans out the
+ * legacy surface's own VRAM, so a BO over the IOSurface's never reached
+ * the panel) */
+static inline int rd3_a3_display_on(void)
+{
+    return rd3_arg("rdna3a3display", 0) != 0;
+}
+
 #endif

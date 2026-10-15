@@ -240,6 +240,7 @@ static int surfaceStatusErrno(unsigned int st)
     case RD3K_SS_NO_SURFACE:  return -RD_ENOENT;   /* no such surface for this task */
     case RD3K_SS_NO_CACHE:
     case RD3K_SS_NO_VRAM:     return -RD_ENODEV;   /* the accelerator has no VRAM for it (yet) */
+    case RD3K_SS_DISPLAY:     return -RD_EPERM;    /* a display framebuffer: kept out of A3 (card run 58) */
     default:                  return -RD_ENXIO;    /* accelerator off / not up / other ABI */
     }
 }
@@ -254,6 +255,7 @@ static const char *surfaceStatusName(unsigned int st)
     case RD3K_SS_NO_CACHE:    return "the accelerator never drew it";
     case RD3K_SS_NO_VRAM:     return "no VRAM behind it";
     case RD3K_SS_TOO_SMALL:   return "too small";
+    case RD3K_SS_DISPLAY:     return "WindowServer's display framebuffer, kept out of A3 (rdna3a3display=1 lets it in)";
     default:                  return "?";
     }
 }

@@ -77,7 +77,7 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
     for f in 20-log-rdna3.txt 26-log-metal-plugin.txt 24-log-coredisplay.txt; do
         echo "== $f"
         if [ ! -s "$dir/$f" ]; then echo "(no such log in this report)"; continue; fi
-        grep -h -e 'GEM: IOSurface' -e 'surfgem' -e 'surfvram' -e 'item 7' -e 'IOSurface VRAM is' \
+        grep -h -e 'GEM: IOSurface' -e 'surfgem' -e 'surfvram' -e 'a3 display' -e 'A3: WindowServer' -e 'item 7' -e 'IOSurface VRAM is' \
             -e 'dirty refused' -e 'surface-out -> dirty' -e 'memory types' -e 'identity' "$dir/$f" \
             | head -250 || true
     done
