@@ -106,10 +106,31 @@ RDNA3_FW_URL=file:///nonexistent "$(ls -d "$T"/x2/RDNA3-Hackintosh-*)/install.sh
 sh "$T/sys3/Library/Application Support/RDNA3/firmware.sh" --dest "$T/sys3/Library/Application Support/RDNA3/firmware" \
     --check >/dev/null || fail "bundled firmware not installed"
 
-# --- uninstall
-"$A/uninstall.sh" --root "$S" --keep-firmware >/dev/null
+# --- uninstall, with the OpenCore install of above (RDNA3Accel injected, step boot-args,
+#     a kext and an entry of the user's own) in a fake EFI
+EC=$T/efi/EFI/OC/config.plist
+mkdir -p "$T/efi/EFI/OC/Kexts/Lilu.kext"
+"$A/oc_install.sh" --efi "$T/efi" --step 9b3 >/dev/null
+rm -f "$T/efi/EFI/OC"/config.plist.rdna3-*
+# a failing OpenCore removal (no EFI there) stops before anything is removed
+"$A/uninstall.sh" --root "$S" --efi "$T/nowhere" >/dev/null 2>&1 && fail "uninstall went on without the EFI"
+[ -e "$S/Library/Extensions/RDNA3Accel.kext" ] && [ -d "$A/firmware" ] || fail "failed uninstall removed files"
+# --keep-opencore leaves OpenCore alone and says so
+out=$("$A/uninstall.sh" --root "$S" --keep-firmware --efi "$T/efi" --keep-opencore)
 [ -e "$S/Library/Extensions/RDNA3Accel.kext" ] && fail "uninstall left the kext"
 if [ ! -d "$A/firmware" ] || [ -e "$A/bin" ]; then fail "--keep-firmware"; fi
-"$ROOT/package/uninstall.sh" --root "$S" >/dev/null
+grep -q '<string>RDNA3Accel.kext</string>' "$EC" && [ -d "$T/efi/EFI/OC/Kexts/RDNA3Accel.kext" ] || fail "--keep-opencore touched OpenCore"
+ls "$T/efi/EFI/OC"/config.plist.rdna3-* >/dev/null 2>&1 && fail "--keep-opencore wrote a backup"
+case "$out" in *"left as it is"*) ;; *) fail "--keep-opencore says nothing: $out";; esac
+# the full uninstall (helper from the source tree: --keep-firmware removed the installed one)
+out=$("$ROOT/package/uninstall.sh" --root "$S" --efi "$T/efi")
 [ -e "$A" ] || [ -e "$S/Library/GPUBundles/rdna3mtl" ] && fail "uninstall left files"
+[ -e "$T/efi/EFI/OC/Kexts/RDNA3Accel.kext" ] && fail "uninstall left the kext in EFI/OC/Kexts"
+grep -q 'RDNA3' "$EC" && fail "uninstall left Kernel/Add entries"
+[ -d "$T/efi/EFI/OC/Kexts/Lilu.kext" ] && grep -q '<string>Lilu.kext</string>' "$EC" || fail "uninstall touched the user's own kext"
+[ "$(python3 "$ROOT/tools/vm/vmtool.py" plist "$EC" --show)" = "alcid=1 -v keepsyms=1" ] || fail "uninstall boot-args"
+ls "$T/efi/EFI/OC"/config.plist.rdna3-* >/dev/null 2>&1 || fail "uninstall made no config.plist backup"
+case "$out" in *Removed*"OpenCore ("*"Left alone"*) ;; *) fail "uninstall does not say what it removed and left: $out";; esac
+# without OpenCore in the picture (no --efi, not on macOS): nothing to remove, no error
+"$ROOT/package/uninstall.sh" --root "$T/sys4" >/dev/null || fail "uninstall of an empty root"
 echo "test_make_pkg: all checks passed"

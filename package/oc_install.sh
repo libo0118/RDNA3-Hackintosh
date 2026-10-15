@@ -8,6 +8,13 @@
 #   sudo package/oc_install.sh --efi /Volumes/EFI --fw /path/to/linux-firmware/amdgpu [--step N]
 #   sudo package/oc_install.sh --efi /Volumes/EFI --step N      only change the boot-args
 #   sudo package/oc_install.sh --efi /Volumes/EFI --off         disable the RDNA3 kexts again
+#   sudo package/oc_install.sh --efi /Volumes/EFI --remove      take our part out of OpenCore
+#
+# --off only adds -rdna3off (the kexts stay and are told not to start).
+# --remove deletes what this script added and nothing else: the RDNA3*.kext
+# copies in EFI/OC/Kexts, their Kernel/Add entries and the rdna3* /
+# -rdna3* boot-args (package/uninstall.sh runs it). Your other kexts,
+# entries and boot-args stay; with nothing of ours there it changes nothing.
 #
 # Mount the EFI partition first: 'sudo diskutil mount disk0s1' (see
 # 'diskutil list' for the right disk). config.plist is backed up next to
@@ -18,13 +25,15 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # a function, not a string: the installed copy lives under "Application Support"
 plist() { python3 "$ROOT/tools/vm/vmtool.py" plist "$@"; }
 BUILD=${RDNA3_BUILD:-$ROOT/build}
-EFI=""; FW=""; STEP=""; OFF=0; DRY=0
+EFI=""; FW=""; STEP=""; OFF=0; DRY=0; REMOVE=0
+OURS="RDNA3Accel RDNA3Framebuffer RDNA3Accelerator RDNA3AGDC"
 while [ $# -gt 0 ]; do
     case "$1" in
         --efi) EFI=$2; shift 2;;
         --fw) FW=$2; shift 2;;
         --step) STEP=$2; shift 2;;
         --off) OFF=1; shift;;
+        --remove) REMOVE=1; shift;;
         --dry-run) DRY=1; shift;;
         *) echo "unknown option $1"; exit 2;;
     esac
@@ -40,6 +49,38 @@ run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
 current=$(plist "$CONF" --show)
 # shellcheck disable=SC2086 # split into words on purpose
 keep=$(printf '%s\n' $current | { grep -v -E '^-?rdna3' || true; } | tr '\n' ' ' | sed 's/ *$//')
+
+if [ $REMOVE = 1 ]; then
+    if [ $OFF = 1 ] || [ -n "$STEP" ] || [ -n "$FW" ]; then
+        echo "--remove cannot be combined with --off, --step or --fw"; exit 2
+    fi
+    inkexts=""; inadd=""
+    for n in $OURS; do
+        [ -e "$EFI/EFI/OC/Kexts/$n.kext" ] && inkexts="$inkexts $n"
+        grep -q "<string>$n.kext</string>" "$CONF" && inadd="$inadd $n"
+    done
+    # shellcheck disable=SC2086 # split into words on purpose
+    ours=$(printf '%s\n' $current | { grep -E '^-?rdna3' || true; } | tr '\n' ' ' | sed 's/ *$//')
+    if [ -z "$inkexts$inadd$ours" ]; then
+        echo "OpenCore ($EFI): nothing of RDNA3-Hackintosh there (no kexts, Kernel/Add entries or rdna3 boot-args); not changed."
+        exit 0
+    fi
+    inkexts=${inkexts# }; inadd=${inadd# }
+    run cp "$CONF" "$CONF.rdna3-$(date +%Y%m%d-%H%M%S)"
+    for n in $inkexts; do run rm -rf "$EFI/EFI/OC/Kexts/$n.kext"; done
+    set --
+    [ -z "$ours" ] || set -- --boot-args "$keep"
+    for n in $inadd; do set -- ${1+"$@"} --remove-kext "$n"; done
+    if [ $# -gt 0 ]; then
+        if [ $DRY = 1 ]; then echo "+ vmtool.py plist $CONF $*"; else plist "$CONF" "$@" >/dev/null; fi
+    fi
+    echo "OpenCore ($EFI): removed"
+    echo "  kexts in EFI/OC/Kexts:   ${inkexts:-none}"
+    echo "  Kernel/Add entries:      ${inadd:-none}"
+    echo "  boot-args:               ${ours:-none}"
+    echo "  left alone: your other kexts, entries and boot-args (${keep:-none}), the config.plist.rdna3-* backups"
+    exit 0
+fi
 
 if [ $OFF = 1 ]; then
     args="$keep -rdna3off"

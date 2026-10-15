@@ -249,7 +249,9 @@ Prepare **one** of these before the first boot:
    `config.plist` is the problem.
 2. **`-rdna3off` in `config.plist`**: `oc_install.sh --efi /Volumes/EFI --off`
    writes it (with a backup `config.plist.rdna3-<date>`; restore a backup to
-   undo). `sudo nvram boot-args=…` does not help when OpenCore sets
+   undo). `--remove` instead takes the kext copies, their `Kernel/Add`
+   entries and the `rdna3*` boot-args out for good (see Uninstall below).
+   `sudo nvram boot-args=…` does not help when OpenCore sets
    boot-args from `config.plist` at every boot.
 3. **From Recovery**, when macOS no longer starts: remove the kexts from
    the Data volume,
@@ -262,9 +264,28 @@ Prepare **one** of these before the first boot:
 Safe Mode (Shift in the picker) skips the Auxiliary KC (framebuffer,
 accelerator) but not the core that OpenCore injects.
 
-**Uninstall:** `sudo "/Library/Application Support/RDNA3/uninstall.sh"`
-(`--keep-firmware` keeps the firmware), then remove the OpenCore entry and
-`EFI/OC/Kexts/RDNA3Accel.kext`, and restart.
+**Uninstall:** mount the EFI partition (`sudo diskutil mount disk0s1`), then
+`sudo "/Library/Application Support/RDNA3/uninstall.sh"` and restart. It
+removes the kexts in `/Library/Extensions`, the Metal plugin and RADV in
+`/Library/GPUBundles` and `/Library/Application Support/RDNA3`, and takes
+the OpenCore side out through `oc_install.sh --remove`, which first writes
+the backup `config.plist.rdna3-<date>` and then deletes only what this
+installer added: the `RDNA3*.kext` copies in `EFI/OC/Kexts`, their
+`Kernel/Add` entries and the `rdna3*` / `-rdna3*` boot-args. Your other
+kexts, entries and boot-args and the backups stay, and it prints what it
+removed and what it left.
+
+- The EFI is taken from `--efi DIR`, else `/Volumes/EFI`. If OpenCore booted
+  the Mac but no EFI is mounted, the script stops **before removing
+  anything** and says so; mount it, or add `--keep-opencore`.
+- `--keep-opencore` leaves OpenCore alone. Its kexts then inject a core
+  that is gone; remove them later with
+  `sudo package/oc_install.sh --efi /Volumes/EFI --remove` from a source
+  checkout (the installed copy is deleted by the uninstall), or by hand.
+- `--keep-firmware` keeps `/Library/Application Support/RDNA3/firmware`.
+- The same removal alone, keeping the install:
+  `sudo "/Library/Application Support/RDNA3/oc_install.sh" --efi /Volumes/EFI --remove`.
+  (`--off` is different: it only adds `-rdna3off`, the kexts stay.)
 
 ## Licenses
 
