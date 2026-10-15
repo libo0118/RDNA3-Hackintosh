@@ -5591,8 +5591,10 @@ static void test_tx_state(rdna3_dev *dev, int standby)
     S.reg[prc] = keep | OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE_MASK | OTG0_PIXEL_RATE_CNTL__DPDTO0_ENABLE_STATUS_MASK;
     CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == 0);
     S.reg[prc] = keep;
-    dcn32_tx_problems_str(RD_TX_P_NO_CHAIN, why, sizeof(why));
-    CHECK(strchr(why, ';') == NULL);   /* triage splits the change line at ';' */
+    for (uint32_t b = 0; b < RD_TX_P_NBITS; b++) {   /* triage splits the change line at ';' */
+        dcn32_tx_problems_str(1u << b, why, sizeof(why));
+        CHECK(why[0] && strchr(why, ';') == NULL);
+    }
     CHECK(dcn32_tx_state_read(dev, 4, 2, 1, &t) == RDNA3_EINVAL && dcn32_tx_state_read(dev, 2, 5, 1, &t) == RDNA3_EINVAL &&
           dcn32_tx_state_read(dev, 2, 2, 5, &t) == RDNA3_EINVAL && dcn32_tx_state_read(NULL, 2, 2, 1, &t) == RDNA3_EINVAL);
 

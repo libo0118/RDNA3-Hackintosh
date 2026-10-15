@@ -531,7 +531,7 @@ static int scanout_dump(int fd, const char *dir, uint32_t hires)
 {
     enum { CAP = RD_XNU_SCANOUT_HIRES_W * RD_XNU_SCANOUT_HIRES_W * 4 * 3 };
     uint8_t *img = malloc(CAP), *img2 = malloc(CAP);
-    int lit = 0;
+    int lit = 0, asleep = 0;
     if (!img || !img2)
         return 1;
     for (uint32_t p = 0; p < 4; p++) {
@@ -548,6 +548,7 @@ static int scanout_dump(int fd, const char *dir, uint32_t hires)
         }
         if (s.asleep) {
             printf("pipe %u: not read: the display is asleep (system sleep or shutdown)\n", p);
+            asleep++;
             continue;
         }
         printf("pipe %u: %s%s otg %u %ux%u pitch %u fmt %u sw %u dcc %u address 0x%llx in use 0x%llx%s\n",
@@ -582,7 +583,7 @@ static int scanout_dump(int fd, const char *dir, uint32_t hires)
         }
         /* a second look 2 s later: is something drawing? */
         sleep(2);
-        if (scanout_grab(fd, p, &s2, img2, CAP, hires) == rows)
+        if (scanout_grab(fd, p, &s2, img2, CAP, hires) == rows && !s2.asleep)
             for (i = 0; i < n * 3; i++)
                 diff += img[i] != img2[i];
         printf("  picture %ux%u: %u%% not black, mean rgb %u %u %u, %u bytes changed in 2 s%s\n",
@@ -609,7 +610,10 @@ static int scanout_dump(int fd, const char *dir, uint32_t hires)
             }
         }
     }
-    printf("%d pipe(s) lit\n", lit);
+    if (asleep)
+        printf("display asleep: %d pipe(s) not read, nothing to judge\n", asleep);
+    else
+        printf("%d pipe(s) lit\n", lit);
     free(img); free(img2);
     return 0;
 }

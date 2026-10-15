@@ -688,6 +688,10 @@ def summary(path, serial=None):
         out.append(("Metal", mt.group(0)[:80] if mt else "not run"))
     for blk in txt.split("== rdna3_drminfo --scanout")[1:]:
         look = re.match(r"(?:-hires)?\s*\(look (\S+)\)", blk)
+        if "display asleep:" in blk.split("\n== ")[0]:
+            out.append(("screens %s" % (look.group(1) if look else "1"),
+                        "NOT READ: the display was asleep (system sleep or shutdown)"))
+            continue
         if "pipe(s) lit" not in blk.split("\n== ")[0]:
             continue   # a picture-only look (M6 keeps only the pictures)
         lit = re.findall(r"^pipe (\d+): LIT .* in use (0x[0-9a-f]+)", blk, re.M)

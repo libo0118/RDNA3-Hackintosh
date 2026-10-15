@@ -322,6 +322,7 @@ void RDNA3Accel::displayTxCheck(const char *when)
         if (tx->skipLogged[e]) {
             LOG("display: %s TX readable again", name);
             tx->skipLogged[e] = false;
+            publish = true;   /* the property still says "not read" */
         }
         uint32_t p = dcn32_tx_state_problems(&now);
         rdna3_tx_state *last = &tx->last[e];
@@ -732,6 +733,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
     if (a->fDispLock) {
         IOLockLock(a->fDispLock);
         a->fDispAsleep = false;
+        a->fScanoutAsleepLogged = false;   /* a look in the next sleep logs again */
         if (resume && (powerLost || suspended)) {
             /* dcn32_init_hw: "we want to turn off all dp displays before
              * doing detection": a DP sink still in D0 is blanked and put
