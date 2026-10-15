@@ -80,10 +80,11 @@ public:
      * created "record only" and map/unmap do nothing. Once it is up a VM
      * always runs: without a free VMID or page tables vmCreate returns
      * nullptr (the file open fails) instead of a VM that cannot submit. */
-    void *vmCreate();
-    /* a new DRM file would get a VM that runs (always true before the GMC
-     * is up); false logs the refusal with the VMIDs' holders */
-    bool  vmCanOpen();
+    void *vmCreate(bool quiet = false);   /* quiet: no log line when there is no VM */
+    /* a new DRM file of 'uid' (admin: kIOClientPrivilegeAdministrator)
+     * may take a VMID (rdna3_vmid_admit; always before the GMC is up);
+     * false logs the refusal, its reason and the VMIDs' holders */
+    bool  vmCanOpen(uint32_t uid, bool admin);
     /* rdna3_drm_ops.vm_orphaned: the file closed with a job still running */
     void  vmOrphaned(void *vm, bool reclaimable);
     void  vmDestroy(void *vm);

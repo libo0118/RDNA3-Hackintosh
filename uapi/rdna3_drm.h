@@ -586,6 +586,21 @@ void rdna3_drm_device_vram_lost(rdna3_drm_device *dev);
 /* refuse = 0: contexts made before a VRAM loss keep submitting (the
  * counter and QUERY_STATE2's VRAMLOST stay); 1 is amdgpu's and the default */
 void rdna3_drm_device_set_vram_lost_cs(rdna3_drm_device *dev, int refuse);
+/* Which new DRM file may take a VMID while the OS gives each file its own
+ * (until VMIDs are grabbed per job, amdgpu_vmid_grab): one user must not
+ * hold them all and lock every later client out (WindowServer's included).
+ * Not an administrator (kIOClientPrivilegeAdministrator): at most
+ * RD_VMID_UID_CAP per uid (per uid, not per process: fork). The last
+ * RD_VMID_RESERVE free VMIDs only for administrators, root and
+ * _windowserver (uid RD_UID_WINDOWSERVER). free_ids: client VMIDs not
+ * taken; uid_in_use: VMIDs this uid holds (leaked ones included).
+ * RD_VMID_ADMIT or the reason for the refusal. */
+#define RD_VMID_UID_CAP      4
+#define RD_VMID_RESERVE      2
+#define RD_UID_WINDOWSERVER  88
+enum { RD_VMID_ADMIT = 0, RD_VMID_POOL_EMPTY, RD_VMID_OVER_UID_CAP, RD_VMID_RESERVED };
+int  rdna3_vmid_admit(uint32_t free_ids, uint32_t uid_in_use, uint32_t uid, int admin);
+const char *rdna3_vmid_admit_reason(int verdict);
 /* the orphans (rdna3_drm_ops.vm_orphaned) whose jobs are done now (a later
  * GPU reset forces their fences): VM destroyed, mappings and BOs dropped.
  * Returns how many went; device lock held. rdna3_drm_file_open runs it

@@ -70,6 +70,23 @@ void RDNA3Accel::platformForEachVram(void (*fn)(void *ctx, uint64_t off, uint64_
         fn(ctx, h->offset, h->size);
 }
 
+/* from the bring-up thread once GPUVM runs (fVmReady): the accelerator's
+ * VM takes its VMID before any DRM client can, so WindowServer's IOSurface
+ * maps never find the pool empty */
+void RDNA3Accel::platformVmReady()
+{
+    RD3DrmScope lk(this);
+    if (!fBringup || !fAccelVa || (fAccelVm && fBringup->vmLive(fAccelVm)))
+        return;
+    if (fAccelVm)
+        fBringup->vmDestroy(fAccelVm);
+    fAccelVm = fBringup->vmCreate();
+    if (!fAccelVm) {
+        LOG("accelerator: no VM at GPUVM start: IOSurface GPU maps fail until one is free");
+        fAccelVmRefusalLogged = true;
+    }
+}
+
 bool RDNA3Accel::platformInit()
 {
     fAccelVa = (range_alloc *)drmZalloc(this, sizeof(*fAccelVa));
@@ -370,10 +387,16 @@ IOReturn RDNA3Accel::platformGpuVa(int op, RD3KGpuVaRequest *g)
             size = h->size;
         IOLockLock(fDrmLock);
         if (fBringup && (!fAccelVm || !fBringup->vmLive(fAccelVm))) {
-            /* made before the GMC was up: record-only, make a real one */
+            /* made before the GMC was up: record-only, make a real one
+             * (platformVmReady normally made it when the GMC came up) */
             if (fAccelVm)
                 fBringup->vmDestroy(fAccelVm);
-            fAccelVm = fBringup->vmCreate();
+            fAccelVm = fBringup->vmCreate(fAccelVmRefusalLogged);
+            if (!fAccelVm && !fAccelVmRefusalLogged) {
+                LOG("accelerator: no VMID or page tables for its VM: IOSurface GPU maps fail until one "
+                    "is free (logged once)");
+                fAccelVmRefusalLogged = true;
+            }
         }
         /* with the GMC up and no VMID or page tables left there is no VM
          * (vmCreate logged it): the map fails instead of doing nothing */

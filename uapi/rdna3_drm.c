@@ -516,6 +516,28 @@ static int orphan_done(rdna3_drm_device *dev, const struct rdna3_orphan *o)
     return 1;
 }
 
+int rdna3_vmid_admit(uint32_t free_ids, uint32_t uid_in_use, uint32_t uid, int admin)
+{
+    if (!free_ids)
+        return RD_VMID_POOL_EMPTY;
+    if (!admin && uid_in_use >= RD_VMID_UID_CAP)
+        return RD_VMID_OVER_UID_CAP;
+    if (!admin && uid != 0 && uid != RD_UID_WINDOWSERVER && free_ids <= RD_VMID_RESERVE)
+        return RD_VMID_RESERVED;
+    return RD_VMID_ADMIT;
+}
+
+const char *rdna3_vmid_admit_reason(int verdict)
+{
+    switch (verdict) {
+    case RD_VMID_ADMIT:        return "admitted";
+    case RD_VMID_POOL_EMPTY:   return "no VMID left";
+    case RD_VMID_OVER_UID_CAP: return "this user holds the most VMIDs one user may";
+    case RD_VMID_RESERVED:     return "the last VMIDs are kept for root and WindowServer";
+    default:                   return "?";
+    }
+}
+
 /* TTM's delayed delete (ttm_bo_delayed_delete: the BO goes once the fences
  * in its reservation signalled) for a closed file whose jobs outlived the
  * recovery: amdgpu_vm_fini's page tables and the BOs are freed then */

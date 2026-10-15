@@ -63,7 +63,8 @@ bool RDNA3UserClient::start(IOService *provider)
     fFile = (rdna3_drm_file *)IOMalloc(sizeof(*fFile));
     if (!fFile)
         return false;
-    if (fAccel->drmOpen(fFile) != 0) {
+    bool admin = clientHasPrivilege(fTask, kIOClientPrivilegeAdministrator) == kIOReturnSuccess;
+    if (fAccel->drmOpen(fFile, admin) != 0) {
         IOFree(fFile, sizeof(*fFile));
         fFile = nullptr;
         return false;

@@ -901,14 +901,17 @@ void RDNA3Accel::drmFree()
     fDrmLock = nullptr;
 }
 
-int RDNA3Accel::drmOpen(rdna3_drm_file *f)
+int RDNA3Accel::drmOpen(rdna3_drm_file *f, bool admin)
 {
+    /* the opener's thread (IOServiceOpen -> the user client's start) */
+    uint32_t uid = kauth_cred_getuid(kauth_cred_get());
     IOLockLock(fDrmLock);
-    /* one VMID per file: with none left the open fails (the user client
-     * does not start, libdrm's open fails, the Metal plugin falls back to
-     * no device) instead of handing out a VM that cannot submit */
     rdna3_drm_device_reap_orphans(fDrm);   /* a leaked VMID whose job is done comes back */
-    if (fBringup && !fBringup->vmCanOpen()) {
+    /* one VMID per file: with none left for this client (rdna3_vmid_admit:
+     * pool, per-uid cap, the reserve) the open fails - the user client does
+     * not start, libdrm's open fails, the Metal plugin falls back to no
+     * device - instead of handing out a VM that cannot submit */
+    if (fBringup && !fBringup->vmCanOpen(uid, admin)) {
         IOLockUnlock(fDrmLock);
         return -RD_ENOSPC;
     }

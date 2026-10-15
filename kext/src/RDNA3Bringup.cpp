@@ -12,6 +12,7 @@
 #include <sys/uio.h>
 #include <sys/fcntl.h>
 #include <sys/proc.h>
+#include <sys/kauth.h>
 #include <libkern/OSAtomic.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
@@ -1023,6 +1024,9 @@ bool RDNA3Bringup::hwInit()
                 __sync_synchronize();   /* publish the pool before fVmReady */
                 fVmReady = true;
                 publish("RDNA3,VMTablePages", fPtPool->npages);
+                /* the accelerator's VM first, before any DRM client can
+                 * take the VMIDs (WindowServer's IOSurface maps need it) */
+                fOwner->platformVmReady();
             } else {
                 BLOG("no page-table pool: GEM_VA stays record-only");
             }
@@ -1985,6 +1989,7 @@ struct RDNA3Vm {
     bool     compFlush;  /* same for the next compute job (the hub is shared, the rings are not) */
     bool     dmaFlush;   /* rdna3amdgpu=1: same for the next DMA job (amdgpu_vm_flush on the SDMA ring) */
     int      ownerPid;   /* the process that opened it (card run 49: a page fault named only "VMID 3") */
+    uint32_t ownerUid;   /* its effective uid: rdna3_vmid_admit's per-uid cap */
     char     owner[24];
     bool     orphaned;   /* its file closed with a job still running: kept until the job is done */
 };
@@ -2951,7 +2956,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
 /* ------------------------------ GPUVM ------------------------------ */
 
 
-void *RDNA3Bringup::vmCreate()
+void *RDNA3Bringup::vmCreate(bool quiet)
 {
     RDNA3Vm *v = (RDNA3Vm *)IOMalloc(sizeof(*v));
     if (!v)
@@ -2962,6 +2967,7 @@ void *RDNA3Bringup::vmCreate()
     v->vramLostSeen = fVramLostCount;
     /* the opener's thread (IOServiceOpen -> the user client's start) */
     v->ownerPid = proc_selfpid();
+    v->ownerUid = kauth_cred_getuid(kauth_cred_get());
     proc_selfname(v->owner, sizeof(v->owner));
     if (!fVmReady)
         return v;
@@ -2999,8 +3005,9 @@ void *RDNA3Bringup::vmCreate()
          * record-only VM would map nothing and every CS of it would fail
          * with -EINVAL: no VM, so the open fails and the client sees no
          * device */
-        BLOG("VM: no %s left for %s (pid %d): no VM, a DRM open fails",
-             vmidsFree() ? "page tables" : "VMID", v->owner[0] ? v->owner : "?", v->ownerPid);
+        if (!quiet)
+            BLOG("VM: no %s left for %s (pid %d): no VM, a DRM open fails",
+                 vmidsFree() ? "page tables" : "VMID", v->owner[0] ? v->owner : "?", v->ownerPid);
         IOFree(v, sizeof(*v));
         return nullptr;
     }
@@ -3034,26 +3041,36 @@ void RDNA3Bringup::vmOrphaned(void *p, bool reclaimable)
          fVmidsLeaked);
 }
 
-bool RDNA3Bringup::vmCanOpen()
+bool RDNA3Bringup::vmCanOpen(uint32_t uid, bool admin)
 {
     char who[384];
     size_t len = 0;
-    if (!fVmReady || vmidsFree())
+    uint32_t mine = 0, freeIds;
+    int verdict;
+    if (!fVmReady)
+        return true;
+    freeIds = vmidsFree();
+    for (uint32_t id = 1; id < 16; id++)
+        if (fVmByVmid[id] && fVmByVmid[id]->ownerUid == uid)
+            mine++;
+    verdict = rdna3_vmid_admit(freeIds, mine, uid, admin ? 1 : 0);
+    if (verdict == RD_VMID_ADMIT)
         return true;
     who[0] = 0;
     for (uint32_t id = 1; id < vmidLimit() && len < sizeof(who); id++) {
         RDNA3Vm *v = fVmByVmid[id];
         if (!v)
             continue;
-        int w = snprintf(who + len, sizeof(who) - len, " %u=%s/%d%s", id, v->owner[0] ? v->owner : "?",
-                         v->ownerPid, v->orphaned ? "(leaked)" : "");
+        int w = snprintf(who + len, sizeof(who) - len, " %u=%s/%d/%u%s", id, v->owner[0] ? v->owner : "?",
+                         v->ownerPid, v->ownerUid, v->orphaned ? "(leaked)" : "");
         if (w < 0)
             break;
         len += (size_t)w;
     }
     fVmidRefusals++;
-    BLOG("VM: all %u VMIDs in use, %u leaked (VMID=process/pid:%s): DRM open #%u refused (-ENOSPC), "
-         "that client sees no device", vmidLimit() - 1, fVmidsLeaked, who, fVmidRefusals);
+    BLOG("VM: DRM open #%u of uid %u refused (-ENOSPC, %s): %u of %u VMIDs free, this uid holds %u, "
+         "%u leaked (VMID=process/pid/uid:%s); that client sees no device", fVmidRefusals, uid,
+         rdna3_vmid_admit_reason(verdict), freeIds, vmidLimit() - 1, mine, fVmidsLeaked, who);
     publish("RDNA3,VMIDRefusals", fVmidRefusals);
     return false;
 }

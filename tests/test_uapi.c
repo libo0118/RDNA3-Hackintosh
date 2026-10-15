@@ -430,6 +430,43 @@ int main(void)
     rdna3_drm_device_init(&dev, &ops, &disc, 0x747E, 0xC8, 0x0, 16ull << 30, 256ull << 20, 8ull << 30);
     CHECK(rdna3_drm_file_open(&dev, f) == 0);
     CHECK(vm_live == 1);
+    /* VMID admission while each file holds a VMID (rdna3_vmid_admit) */
+    {
+        const uint32_t user = 501;
+        /* an ordinary user: up to the per-uid cap, while more than the
+         * reserve is free */
+        CHECK(rdna3_vmid_admit(14, 0, user, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP - 1, user, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP, user, 0) == RD_VMID_OVER_UID_CAP);
+        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE + 1, 0, user, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE, 0, user, 0) == RD_VMID_RESERVED);
+        CHECK(rdna3_vmid_admit(1, 0, user, 0) == RD_VMID_RESERVED);
+        CHECK(rdna3_vmid_admit(0, 0, user, 0) == RD_VMID_POOL_EMPTY);
+        /* _windowserver: the reserve, but the per-uid cap (not an administrator) */
+        CHECK(rdna3_vmid_admit(1, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE, 1, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP, RD_UID_WINDOWSERVER, 0) == RD_VMID_OVER_UID_CAP);
+        /* root without the privilege bit gets the reserve; an administrator
+         * has no cap; nobody gets a VMID that is not there */
+        CHECK(rdna3_vmid_admit(1, 0, 0, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(1, 12, user, 1) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(0, 0, 0, 1) == RD_VMID_POOL_EMPTY);
+        /* the 15 VMIDs, one user opening until refused: the cap first,
+         * a second user up to the reserve, then only WindowServer */
+        {
+            uint32_t free_ids = 15, a = 0, b = 0;
+            while (rdna3_vmid_admit(free_ids, a, user, 0) == RD_VMID_ADMIT) { a++; free_ids--; }
+            CHECK(a == RD_VMID_UID_CAP && free_ids == 15 - RD_VMID_UID_CAP);
+            while (rdna3_vmid_admit(free_ids, b, user + 1, 0) == RD_VMID_ADMIT) { b++; free_ids--; }
+            CHECK(b == RD_VMID_UID_CAP && free_ids == 15 - 2 * RD_VMID_UID_CAP);
+            CHECK(rdna3_vmid_admit(free_ids, 0, user + 2, 0) == RD_VMID_ADMIT);
+            free_ids = RD_VMID_RESERVE;
+            CHECK(rdna3_vmid_admit(free_ids, 0, user + 3, 0) == RD_VMID_RESERVED &&
+                  rdna3_vmid_admit(free_ids, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
+        }
+        CHECK(strcmp(rdna3_vmid_admit_reason(RD_VMID_OVER_UID_CAP), "?") != 0 &&
+              strcmp(rdna3_vmid_admit_reason(RD_VMID_POOL_EMPTY), rdna3_vmid_admit_reason(RD_VMID_RESERVED)) != 0);
+    }
     /* no VM that can run (the kext: no VMID left): the open fails cleanly,
      * nothing of the file stays on the device; the next open works */
     {
