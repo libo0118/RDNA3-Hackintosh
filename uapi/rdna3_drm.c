@@ -516,13 +516,21 @@ static int orphan_done(rdna3_drm_device *dev, const struct rdna3_orphan *o)
     return 1;
 }
 
-int rdna3_vmid_admit(uint32_t free_ids, uint32_t uid_in_use, uint32_t uid, int admin)
+uint32_t rdna3_vmid_uid_cap(uint32_t pool, int console)
+{
+    uint32_t shared = pool > RD_VMID_RESERVE ? pool - RD_VMID_RESERVE : 1;
+    if (console)
+        return shared;
+    return shared / 2 ? shared / 2 : 1;
+}
+
+int rdna3_vmid_admit(uint32_t pool, uint32_t free_ids, uint32_t uid_in_use, uint32_t uid, int console)
 {
     if (!free_ids)
         return RD_VMID_POOL_EMPTY;
-    if (!admin && uid_in_use >= RD_VMID_UID_CAP)
+    if (uid != 0 && uid_in_use >= rdna3_vmid_uid_cap(pool, console))
         return RD_VMID_OVER_UID_CAP;
-    if (!admin && uid != 0 && uid != RD_UID_WINDOWSERVER && free_ids <= RD_VMID_RESERVE)
+    if (uid != 0 && uid != RD_UID_WINDOWSERVER && free_ids <= RD_VMID_RESERVE)
         return RD_VMID_RESERVED;
     return RD_VMID_ADMIT;
 }

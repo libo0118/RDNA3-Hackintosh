@@ -3041,19 +3041,26 @@ void RDNA3Bringup::vmOrphaned(void *p, bool reclaimable)
          fVmidsLeaked);
 }
 
-bool RDNA3Bringup::vmCanOpen(uint32_t uid, bool admin)
+bool RDNA3Bringup::vmCanOpen(uint32_t uid, bool console)
 {
     char who[384];
     size_t len = 0;
-    uint32_t mine = 0, freeIds;
+    uint32_t mine = 0, kernel = 0, freeIds, pool;
     int verdict;
     if (!fVmReady)
         return true;
     freeIds = vmidsFree();
-    for (uint32_t id = 1; id < 16; id++)
-        if (fVmByVmid[id] && fVmByVmid[id]->ownerUid == uid)
+    for (uint32_t id = 1; id < 16; id++) {
+        if (!fVmByVmid[id])
+            continue;
+        if (fVmByVmid[id]->ownerPid == 0)
+            kernel++;   /* the accelerator's own (platformVmReady) */
+        else if (fVmByVmid[id]->ownerUid == uid)
             mine++;
-    verdict = rdna3_vmid_admit(freeIds, mine, uid, admin ? 1 : 0);
+    }
+    /* the clients' pool: the VMIDs less the kernel's own */
+    pool = vmidLimit() - 1 > kernel ? vmidLimit() - 1 - kernel : 0;
+    verdict = rdna3_vmid_admit(pool, freeIds, mine, uid, console ? 1 : 0);
     if (verdict == RD_VMID_ADMIT)
         return true;
     who[0] = 0;
@@ -3068,9 +3075,10 @@ bool RDNA3Bringup::vmCanOpen(uint32_t uid, bool admin)
         len += (size_t)w;
     }
     fVmidRefusals++;
-    BLOG("VM: DRM open #%u of uid %u refused (-ENOSPC, %s): %u of %u VMIDs free, this uid holds %u, "
-         "%u leaked (VMID=process/pid/uid:%s); that client sees no device", fVmidRefusals, uid,
-         rdna3_vmid_admit_reason(verdict), freeIds, vmidLimit() - 1, mine, fVmidsLeaked, who);
+    BLOG("VM: DRM open #%u of uid %u%s refused (-ENOSPC, %s): %u of %u client VMIDs free, this uid "
+         "holds %u of its %u, %u leaked (VMID=process/pid/uid:%s); that client sees no device",
+         fVmidRefusals, uid, console ? " (console)" : "", rdna3_vmid_admit_reason(verdict), freeIds, pool,
+         mine, rdna3_vmid_uid_cap(pool, console ? 1 : 0), fVmidsLeaked, who);
     publish("RDNA3,VMIDRefusals", fVmidRefusals);
     return false;
 }

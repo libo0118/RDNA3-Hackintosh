@@ -8,6 +8,12 @@
 
 #include <IOKit/IOLib.h>
 
+/* XNU's IOKitKeysPrivate.h, not in the SDK; IOUserClient::clientHasPrivilege
+ * compares the name: the task's audit session is the console session */
+#ifndef kIOClientPrivilegeConsoleSession
+#define kIOClientPrivilegeConsoleSession "consolesession"
+#endif
+
 #define super IOUserClient
 OSDefineMetaClassAndStructors(RDNA3UserClient, IOUserClient)
 OSDefineMetaClassAndStructors(IOAccelRDNA3Bridge, RDNA3UserClient)
@@ -63,8 +69,9 @@ bool RDNA3UserClient::start(IOService *provider)
     fFile = (rdna3_drm_file *)IOMalloc(sizeof(*fFile));
     if (!fFile)
         return false;
-    bool admin = clientHasPrivilege(fTask, kIOClientPrivilegeAdministrator) == kIOReturnSuccess;
-    if (fAccel->drmOpen(fFile, admin) != 0) {
+    /* the console user gets the larger VMID share (rdna3_vmid_uid_cap) */
+    bool console = clientHasPrivilege(fTask, kIOClientPrivilegeConsoleSession) == kIOReturnSuccess;
+    if (fAccel->drmOpen(fFile, console) != 0) {
         IOFree(fFile, sizeof(*fFile));
         fFile = nullptr;
         return false;

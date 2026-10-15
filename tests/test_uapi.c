@@ -432,42 +432,45 @@ int main(void)
     CHECK(vm_live == 1);
     /* VMID admission while each file holds a VMID (rdna3_vmid_admit) */
     {
-        const uint32_t user = 501;
-        /* an ordinary user: up to the per-uid cap, while more than the
-         * reserve is free */
-        CHECK(rdna3_vmid_admit(14, 0, user, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP - 1, user, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP, user, 0) == RD_VMID_OVER_UID_CAP);
-        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE + 1, 0, user, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE, 0, user, 0) == RD_VMID_RESERVED);
-        CHECK(rdna3_vmid_admit(1, 0, user, 0) == RD_VMID_RESERVED);
-        CHECK(rdna3_vmid_admit(0, 0, user, 0) == RD_VMID_POOL_EMPTY);
-        /* _windowserver: the reserve, but the per-uid cap (not an administrator) */
-        CHECK(rdna3_vmid_admit(1, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE, 1, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP, RD_UID_WINDOWSERVER, 0) == RD_VMID_OVER_UID_CAP);
-        /* root without the privilege bit gets the reserve; an administrator
-         * has no cap; nobody gets a VMID that is not there */
-        CHECK(rdna3_vmid_admit(1, 0, 0, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(1, 12, user, 1) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(0, 0, 0, 1) == RD_VMID_POOL_EMPTY);
-        /* the 15 VMIDs, one user opening until refused: the cap first,
-         * a second user up to the reserve, then only WindowServer */
+        const uint32_t user = 501, other = 502;
+        const uint32_t big = 14, small = 6;   /* 15 / 7 client VMIDs less the accelerator's */
+        uint32_t cc = rdna3_vmid_uid_cap(big, 1), oc = rdna3_vmid_uid_cap(big, 0);
+        /* the cap out of the real pool: the console user everything outside
+         * the reserve, any other uid half of that, at least one */
+        CHECK(cc == big - RD_VMID_RESERVE && oc == (big - RD_VMID_RESERVE) / 2);
+        CHECK(rdna3_vmid_uid_cap(small, 1) == 4 && rdna3_vmid_uid_cap(small, 0) == 2);
+        CHECK(rdna3_vmid_uid_cap(RD_VMID_RESERVE, 0) == 1 && rdna3_vmid_uid_cap(1, 1) == 1 &&
+              rdna3_vmid_uid_cap(0, 0) == 1);
+        /* an ordinary uid: up to its cap, while more than the reserve is free */
+        CHECK(rdna3_vmid_admit(big, 14, 0, other, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(big, 10, oc - 1, other, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(big, 10, oc, other, 0) == RD_VMID_OVER_UID_CAP);
+        CHECK(rdna3_vmid_admit(big, 10, oc, user, 1) == RD_VMID_ADMIT);   /* the console's is higher */
+        CHECK(rdna3_vmid_admit(big, 10, cc, user, 1) == RD_VMID_OVER_UID_CAP);
+        CHECK(rdna3_vmid_admit(big, RD_VMID_RESERVE + 1, 0, user, 1) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(big, RD_VMID_RESERVE, 0, user, 1) == RD_VMID_RESERVED);
+        CHECK(rdna3_vmid_admit(big, 0, 0, user, 1) == RD_VMID_POOL_EMPTY);
+        /* _windowserver: the reserve, and a cap; root: both, no cap; nobody
+         * gets a VMID that is not there */
+        CHECK(rdna3_vmid_admit(big, 1, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(big, 10, oc, RD_UID_WINDOWSERVER, 0) == RD_VMID_OVER_UID_CAP);
+        CHECK(rdna3_vmid_admit(big, 1, 13, 0, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(big, 0, 0, 0, 0) == RD_VMID_POOL_EMPTY);
+        /* the pool filled in either order: another local uid first, then
+         * the console user still gets VMIDs; then only WindowServer and
+         * root get the reserve */
         {
-            uint32_t free_ids = 15, a = 0, b = 0;
-            while (rdna3_vmid_admit(free_ids, a, user, 0) == RD_VMID_ADMIT) { a++; free_ids--; }
-            CHECK(a == RD_VMID_UID_CAP && free_ids == 15 - RD_VMID_UID_CAP);
-            while (rdna3_vmid_admit(free_ids, b, user + 1, 0) == RD_VMID_ADMIT) { b++; free_ids--; }
-            {   /* the second user stops at its cap or where the reserve starts */
-                uint32_t left = 15 - RD_VMID_UID_CAP - RD_VMID_RESERVE;
-                uint32_t want = left < RD_VMID_UID_CAP ? left : RD_VMID_UID_CAP;
-                CHECK(b == want && free_ids == 15 - RD_VMID_UID_CAP - want);
+            const uint32_t pools[2] = { big, small };
+            for (uint32_t k = 0; k < 2; k++) {
+                uint32_t pool = pools[k], free_ids = pool, a = 0, b = 0;
+                while (rdna3_vmid_admit(pool, free_ids, b, other, 0) == RD_VMID_ADMIT) { b++; free_ids--; }
+                CHECK(b == rdna3_vmid_uid_cap(pool, 0));
+                while (rdna3_vmid_admit(pool, free_ids, a, user, 1) == RD_VMID_ADMIT) { a++; free_ids--; }
+                CHECK(a >= 1 && a == pool - RD_VMID_RESERVE - b && free_ids == RD_VMID_RESERVE);
+                CHECK(rdna3_vmid_admit(pool, free_ids, 0, other + 1, 0) == RD_VMID_RESERVED &&
+                      rdna3_vmid_admit(pool, free_ids, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT &&
+                      rdna3_vmid_admit(pool, free_ids, 0, 0, 0) == RD_VMID_ADMIT);
             }
-            CHECK(rdna3_vmid_admit(free_ids, 0, user + 2, 0) ==
-                  (free_ids > RD_VMID_RESERVE ? RD_VMID_ADMIT : RD_VMID_RESERVED));
-            free_ids = RD_VMID_RESERVE;
-            CHECK(rdna3_vmid_admit(free_ids, 0, user + 3, 0) == RD_VMID_RESERVED &&
-                  rdna3_vmid_admit(free_ids, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
         }
         CHECK(strcmp(rdna3_vmid_admit_reason(RD_VMID_OVER_UID_CAP), "?") != 0 &&
               strcmp(rdna3_vmid_admit_reason(RD_VMID_POOL_EMPTY), rdna3_vmid_admit_reason(RD_VMID_RESERVED)) != 0);
