@@ -207,6 +207,9 @@ if [ -n "$new" ] && [ "$new" != "$(cat "$D/bundle.sha256" 2>/dev/null)" ]; then
         done
         mkdir -p "$D/bin"
         cp "$t"/bin/* "$D/bin/" 2>/dev/null && chmod +x "$D/bin/"*
+        # a RADV from the host's bundle (a CI artifact) replaced the one
+        # build_radv.sh stamped: its stamp no longer describes it
+        [ -f "$t/bin/libvulkan_radeon.dylib" ] && rm -f "$D/bin/radv.stamp"
         echo "$new" > "$D/bundle.sha256"
         [ -n "$changed" ] &&
             updated="kexts updated to the host's new bundle ($changed ): the framebuffer from it runs from the next boot"

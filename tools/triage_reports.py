@@ -814,13 +814,16 @@ def main():
         for p in sys.argv[2:]:
             print(ppm_to_png(p))
         return
-    d = sys.argv[1]
+    d = d0 = sys.argv[1]
     # a collected 'rdna3vm result' archive unpacks to <dir>/rdna3-result/
     if not glob.glob(os.path.join(d, "rdna3-report-*")) and \
             glob.glob(os.path.join(d, "rdna3-result", "rdna3-report-*")):
         d = os.path.join(d, "rdna3-result")
     show_all = "--all" in sys.argv
-    load_linux_reference(d)
+    # linux-reference/ sits next to rdna3-result/ (docs/AFTER-TESTS.md intake)
+    load_linux_reference(d0)
+    if d != d0:
+        load_linux_reference(d)
     failed = False
     reports = glob.glob(os.path.join(d, "rdna3-report-*.tar.gz"))
     # a tests file whose archive never came (collect.sh killed): its results
