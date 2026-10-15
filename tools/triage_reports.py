@@ -178,6 +178,7 @@ def report(path, show_all):
         kexts = read_member(tar, "03-kexts.txt")
         pci = read_member(tar, "04-pci.txt")
         surfvram = read_member(tar, "29-surface-vram.txt") or ""
+        mtlallow = read_member(tar, "34-metal-allow.txt") or ""
     args = " ".join(l for l in args.splitlines() if not l.startswith("$") and not l.startswith("[exit"))
     args = args.replace("boot-args", "").strip()
     lvl = bootarg_level(args)
@@ -352,6 +353,15 @@ def report(path, show_all):
                                                                       or "initWithAcceleratorPort" in l)]
         for l in wsdev[:4]:
             print("     " + l[l.find("NVMTL:"):][:150])
+        # N1: which processes the Metal plugin served (apps mode or the
+        # explicit list) and who it refused, from the plugin's own decisions
+        if mtlallow.strip():
+            served = sorted(set(re.findall(r"allow mode: [^;]*; ([^:]+): (?:apps mode|allow-listed)", mtlallow)))
+            refused = sorted(set(re.findall(r"allow mode: [^;]*; ([^:]+): (?:not allow-listed|denied|'[^']*' (?:is armed-only|only with the AGDC))", mtlallow)))
+            modes = sorted(set(re.findall(r"allow mode: (\w+)", mtlallow)))
+            print("   INFO %-20s mode %s; device for %s; refused %s" % (
+                "Metal apps mode", "/".join(modes) or "?", ", ".join(served) or "none",
+                ", ".join(refused[:12]) + (" ..." if len(refused) > 12 else "") if refused else "none"))
         # A3: IOSurface textures in the accelerator's VRAM (no per-process
         # copies); informational until it has run on the card
         sv = surfvram

@@ -461,8 +461,10 @@ the AIR->SPIR-V translator (5-10 minutes) and installs them with RADV into
 `/Library/GPUBundles`. From then on the report has a `== mtlprobe` section:
 does Metal list the AMD device, and does a compute kernel compiled from
 source run on it (`METAL: ALL PASSED`). Without the plugin it only lists
-the Metal devices. Only processes in `rdna3mtl-allow.txt` (and `mtlprobe`)
-get the device; everything else, WindowServer included, sees nothing new.
+the Metal devices. Only the processes `rdna3mtl-allow.txt` allows (and `mtlprobe`) get the
+device: WindowServer, and every application in apps mode (the `%apps` line;
+`rdna3mtlapps=0` in the boot-args or no such line gives the explicit names
+only). Everything else sees nothing new.
 
 ## How it works (for the curious)
 

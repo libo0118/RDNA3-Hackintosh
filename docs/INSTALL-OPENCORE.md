@@ -151,9 +151,9 @@ Then, once per new build: System Settings → Privacy & Security → **Allow**
 next to the blocked system software, and restart. Until then the
 framebuffer and the accelerator do not load (the core from OpenCore does).
 
-The Metal plugin is loaded only into the processes listed in
-`/Library/GPUBundles/rdna3mtl-allow.txt` (test tools for now). NullMoth
-also uses `amfi_get_out_of_my_way=0x1` so WindowServer accepts an unsigned
+The Metal plugin decides per process whether it hands out its Metal device
+(`/Library/GPUBundles/rdna3mtl-allow.txt`, see "Which apps get the GPU"
+below). NullMoth also uses `amfi_get_out_of_my_way=0x1` so WindowServer accepts an unsigned
 bundle; not needed for the default profile, and it weakens the system's
 code-signing checks further.
 
@@ -240,9 +240,55 @@ what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
 | `rdna3post=0` | do not post an unposted card through the VBIOS |
 | `rdna3doorbell=0` | no doorbell BAR: rings keep their write-pointer registers |
 | `rdna3cursor=0` | no hardware cursor |
+| `rdna3mtlapps=0` | read by the Metal plugin: ends apps mode (`%apps` in `rdna3mtl-allow.txt`), only the names in the list keep the GPU |
 | `rdna3enum=1` | report the GPU as working for enumeration only; submissions fail (debug) |
 | `rdna3vramlostcs=0` | after a VRAM loss (a reset or a sleep whose VRAM did not all come back), contexts made before it keep submitting instead of failing with -ECANCELED (amdgpu's behaviour, the default); the counter and VRAMLOST are reported either way. With the default, RADV turns the refused submission into `VK_ERROR_DEVICE_LOST` ("The CS has been cancelled because the context is lost"), the Metal plugin then disables its Vulkan backend for that process and every later command buffer ends with `MTLCommandBufferErrorInternal`: the process (WindowServer too, while it has the RDNA3 Metal device) stops drawing with the GPU until it is restarted, rather than drawing from lost memory. `=0` keeps it drawing, possibly garbage (debug) |
 | `rdna3soak=<min>`, `rdna3hangtest=1`/`2` | read by the report script only: soak loop, hang/recovery test |
+
+### Which apps get the GPU (Metal plugin)
+
+`/Library/GPUBundles/rdna3mtl-allow.txt` decides, in every process that
+loads the plugin, whether that process gets the Metal device. Without a
+device an app stays on Apple's software path (nothing breaks, it is just
+not on the GPU). The shipped list has two parts:
+
+- **Apps mode** (the `%apps` line): every application, meaning an
+  executable in `Contents/MacOS` of an `.app` in `/Applications`,
+  `/System/Applications` or the running user's own `~/Applications` (only
+  `/Users/<name>`; homes elsewhere, other users' folders and translocated
+  apps are refused; `Info.plist` is not read), but only while the accelerator is armed
+  (`debug.rdna3accelfb`) and WindowServer runs on the plugin
+  (`debug.rdna3agdc` is 1): the configuration card runs 48-56 ran Chess and
+  Maps in. Not served: the session's agents (Dock, Finder, SystemUIServer,
+  loginwindow: they run all session and each would hold one of the card's
+  GPU address spaces), helpers and XPC services inside bundles, apps nested in another app
+  (Xcode's Simulator), and command line tools. `-name` lines are a deny list
+  (shipped: `-Safari`); they match the process name and the executable's file
+  name, and `NVMTL_ENABLE` plus `mtlprobe`, `nvmtltest`, `nvmtlrender`
+  bypass the list.
+- **Names**: `mtlprobe`, `nvmtltest`, `vulkaninfo` and `@WindowServer`
+  (WindowServer only while the display pipe is up: CoreDisplay asserts
+  without a Metal device then, card runs 41 and 45). Leave these as they are.
+
+Switch apps mode off without rebuilding anything: delete (or `#`) the
+`%apps` line, which gives the old explicit-names list back, or add
+`rdna3mtlapps=0` to the OpenCore boot-args when the desktop is unusable
+(the list file needs a working session, the boot-arg does not). Add a helper
+or an app that lives elsewhere by name (one line each); deny one with
+`-name`. A package install replaces the file.
+
+Each process that loads the plugin logs one line, `NVMTL: allow mode: <mode>;
+<process>: <reason>` (report: `34-metal-allow.txt`); if a sandbox hides the
+boot-args from a process, the line says `boot-args unreadable` and
+`rdna3mtlapps=0` was not checked there (use the list file for those). Limits that are not the
+driver's to fix: Safari's web content renders in `com.apple.WebKit.GPU`,
+whose sandbox refuses to map code from `/Library/GPUBundles` ("file system
+sandbox blocked mmap()", card run 56, SIP off or not), so Safari pages stay
+on Apple's software path; Apple's own GPU bundles live on the sealed system
+volume. Other sandboxed helpers (Chrome and Electron GPU processes) are in
+the same position. Every process with the device takes one of the card's
+15 GPU address spaces (VMIDs; 7 with `rdna3userq=1`) for as long as it runs,
+so many GPU apps at once can exhaust them (the kernel log says `VM: no VMID`).
 
 ## 8. The way back
 

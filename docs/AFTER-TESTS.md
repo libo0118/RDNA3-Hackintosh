@@ -241,7 +241,7 @@ item in the SUMMARY; the full output is in the tests file under `== probe:`.
 | `V3 Vulkan WSI` | V3 present | the WSI extensions RADV offers; with a headless surface, a swapchain cleared and presented | `no present path`: RADV is built without WSI (`-Dplatforms=`): the next step is Mesa's WSI common with a headless or Metal-layer platform |
 | `A3 IOSurface` | A3 IOSurface <-> BO | an IOSurface as a Metal texture: CPU -> GPU and GPU -> CPU pixel counts | `newTextureWithDescriptor:iosurface: returned nil`: the plugin has no IOSurface textures (its log after the probe); counts wrong: the surface's backing is not the memory the GPU used |
 | `M4 CAMetalLayer`, `M4 on the screen` | M4 present | drawables, rendering, presents; magenta pixels in the scanout picture taken while the window showed | drawables NONE: the layer refused the plugin's device; presented 0 or no magenta on the screen: the drawable never reaches WindowServer's composition |
-| `M5 WindowServer` | M5 | which processes loaded the plugin, whether WindowServer did, system_profiler's Metal line, WindowServer's GPU messages | WindowServer does not load it (not on the allow list): an M5 step with WindowServer allowed is the next experiment |
+| `M5 WindowServer` | M5 | which processes loaded the plugin, whether WindowServer did, system_profiler's Metal line, WindowServer's GPU messages; the allow list and its mode (`allow mode: apps` / `list`) | WindowServer does not load it (not on the allow list): an M5 step with WindowServer allowed is the next experiment |
 | `M6 apps`, `M6 Chess` / `Maps` | M6 apps | running, plugin loaded, crash report | a crash report: its first 40 lines in the tests file name the Metal call that failed |
 
 ### Step 8c (`rdna3mes=1`): MES scheduler pipe
@@ -1598,6 +1598,7 @@ Settings. That is expected for them, not a display regression.
 | Symptom | Likely cause | Action |
 |---|---|---|
 | `agdc`: WindowServer restarts, assert "Failed to create MetalDevice" | WindowServer got no Metal device from the plugin while a display pipe exists | the allow list has `@WindowServer`, mode 644; the plugin rebuilt with it (build_metal.sh); `NVMTL:` lines of WindowServer in `24-log-coredisplay.txt` say why |
+| apps mode (the `%apps` line of `rdna3mtl-allow.txt`, N1): an application misbehaves or the GPU address spaces run out | every application on the desktop now gets the device while the card is armed and WindowServer is on the plugin | `34-metal-allow.txt` (triage "Metal apps mode"): which processes got it and why the others did not; the kernel log's `VM: VMID n for <process>` lines and `VM: no VMID` (15 VMIDs, one per open file; 7 with `rdna3userq`). Deny the app with `-name`, or `rdna3mtlapps=0` / no `%apps` line for the old explicit list. Safari's WebKit.GPU cannot load the plugin at all (sandbox, card run 56): not a driver bug |
 | `agdc`: WindowServer never opens the accelerator, no report | AGDC appeared while WindowServer started | `RDNA3,AGDCBootHold` must say "display stack armed"; "CAP" = the object or the table was late |
 
 ### Card run 47 (step agdc, `rdna3agdc=3`, build 177)
