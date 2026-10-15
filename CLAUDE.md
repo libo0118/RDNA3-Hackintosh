@@ -65,8 +65,14 @@ tool's `model` on every delegation, it overrides the agent's own default):
 
 Small, mechanical steps (a one-line fix, git, CI dispatch, reading a log)
 the manager may do directly; anything larger goes to the team. Two
-employees never edit the same files at the same time (use worktree
-isolation or split the files).
+employees never edit the same files at the same time: give each one its
+own worktree. Do NOT use the Agent tool's `isolation: "worktree"` — it
+branches from origin/main, which is far behind `stage1-kext` (it put five
+agents 88 commits back on 2026-10-15). Instead create them from the tip:
+`git worktree add .claude/worktrees/<task> -b quick/<task> stage1-kext`
+(`.claude/worktrees/` is git-ignored), tell the agent to work only there
+and commit on that branch without pushing, then merge the branch into
+`stage1-kext` and remove the worktree.
 
 ## ECC
 
