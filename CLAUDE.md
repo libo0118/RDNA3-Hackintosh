@@ -32,7 +32,20 @@
 The project uses ECC (https://github.com/affaan-m/ECC):
 `.claude/settings.json` enables its Claude Code plugin `ecc@ecc` (agents,
 skills, commands, hooks) for every session in this repository, and
-`.claude/rules/ecc/` holds its `common` and `cpp` rules. Use its agents and
+`.claude/rules/ecc/` holds its `common` and `cpp` rules.
+
+**Use ECC whenever it can help (the owner's standing request).** After
+every code change, before or right after the push, run the ECC agents that
+fit, in parallel and in the background: `ecc:code-reviewer` or
+`ecc:cpp-reviewer` (kext, accel, uapi, hw, libdrm_xnu), `ecc:security-reviewer`
+(ioctls, user input, memory shared between processes),
+`ecc:silent-failure-hunter` (the driver is debugged only from the card's
+report logs, so a failure without a log line is a bug) and
+`ecc:pr-test-analyzer` (what `make test` could cover). Fix what they
+confirm, add the tests they find missing, record what stays open in
+docs/DRIVER-PLAN.md, and say in the commit that ECC reviewed it. Use
+ECC's planning agents for larger features and its build resolvers when
+CI is red. Use its other agents and
 skills where they fit (planning, code review, security review, TDD on the
 host tests). Where ECC and this file disagree, this file wins:
 
