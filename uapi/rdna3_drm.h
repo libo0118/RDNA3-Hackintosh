@@ -162,6 +162,7 @@ struct rd_xnu_surface_bo {
 
 #define RD_MAX_HANDLES  16384
 #define RD_MAX_CTX      256
+#define RD_MAX_ORPHANS  16      /* closed files whose job never finished (one per VMID) */
 #define RD_MAX_SYNCOBJ  4096
 #define RD_MAX_VA       65536
 #define RD_TA_TYPES     16      /* > TA_FW_TYPE_MAX_INDEX (amdgpu_ucode.h) */
@@ -361,8 +362,9 @@ typedef struct rdna3_drm_ops {
     int   (*fence_wait)(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t abs_ns);
     /* GPU reset / fault state of a VM for AMDGPU_CTX_OP_QUERY_STATE*:
      * AMDGPU_CTX_QUERY2_FLAGS_RESET (a reset happened since the VM was
-     * made), _VRAMLOST, _GUILTY (one of its jobs hung or faulted). Optional;
-     * a guilty VM's submissions fail with -ECANCELED like amdgpu's. */
+     * made), _GUILTY (one of its jobs hung or faulted). Optional; a guilty
+     * VM's submissions fail with -ECANCELED like amdgpu's. _VRAMLOST is
+     * ignored: the UAPI keeps it per context (rdna3_drm_device_vram_lost). */
     uint32_t (*vm_query)(void *ctx, void *vm);
     /* GEM_USERPTR: wire the client's pages [uaddr, uaddr + bo->size) for the
      * GPU (file_os = rdna3_drm_file.os, the owning task); optional.
@@ -417,6 +419,11 @@ typedef struct rdna3_drm_ops {
      * no pointers into the device across the call. 0 / -errno. */
     int   (*surface_bo)(void *ctx, void *file_os, rdna3_bo *bo, uint32_t surface_id, uint32_t plane);
     int   (*surface_dirty)(void *ctx, void *file_os, uint32_t surface_id, uint32_t plane);
+    /* optional: a closing file's job still runs after the recovery, so its
+     * VM stays (orphaned = 1) until rdna3_drm_device_reap_orphans finds the
+     * job done and vm_destroy frees it; orphaned = 0: the VM never goes
+     * (no orphan slot left) */
+    void  (*vm_orphaned)(void *ctx, void *vm, int reclaimable);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -481,6 +488,22 @@ typedef struct rdna3_drm_device {
     uint32_t vcn_num_inst, vcn_harvest;
     uint32_t vcn_inst_ready;      /* instances whose unified ring runs (hw rings of VCN_ENC) */
     uint32_t jpeg_ready;
+    /* adev->vram_lost_counter: AMDGPU_INFO_VRAM_LOST_COUNTER, and what each
+     * context recorded at creation (rdna3_drm_device_vram_lost) */
+    uint32_t vram_lost_counter;
+    /* amdgpu_cs_pass1's -ECANCELED for a context older than the last VRAM
+     * loss: 1 (rdna3_drm_device_init), 0 = such contexts keep submitting */
+    uint32_t vram_lost_cs_refuse;
+    /* closed files whose last jobs had not finished (rdna3_drm_file_close
+     * after the recovery gave up): the VM, BOs and mappings stay until the
+     * jobs' fences signal, as TTM's delayed delete keeps them in amdgpu */
+    struct rdna3_orphan {
+        void *vm;
+        struct rdna3_bo **bos;        /* [RD_MAX_HANDLES] */
+        struct rdna3_va *vas;         /* [RD_MAX_VA] */
+        uint32_t nvas;
+        uint64_t last_seq[AMDGPU_HW_IP_NUM][4];   /* the unfinished jobs */
+    } orphans[RD_MAX_ORPHANS];
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {
@@ -501,6 +524,10 @@ typedef struct rdna3_drm_file {
     /* amdgpu_ctx init_priority / override_priority (AMDGPU_CTX_PRIORITY_*,
      * override UNSET until DRM_AMDGPU_SCHED sets one) by context id */
     int16_t  ctx_init_prio[RD_MAX_CTX], ctx_override_prio[RD_MAX_CTX];
+    /* the device's vram_lost_counter when each context was made (the
+     * high half of amdgpu_ctx.generation): QUERY_STATE2 _VRAMLOST and CS
+     * -ECANCELED once VRAM was lost after it */
+    uint32_t ctx_vram_lost[RD_MAX_CTX];
     uint32_t id;                       /* RD_NR_XNU_FILE_ID */
     struct rdna3_drm_file *next_file;  /* rdna3_drm_device.files */
     /* amdgpu_userq_mgr: the file's user queues [RD_MAX_USERQ] (index = id - 1,
@@ -549,6 +576,36 @@ void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_
 /* VRAM (and every page table) was lost and each live VM has a new empty
  * root: map every client's ranges again; returns the mappings that failed */
 int  rdna3_drm_device_vm_replay(rdna3_drm_device *dev);
+/* amdgpu_inc_vram_lost: the clients' VRAM contents are gone for good (a
+ * reset or a resume found the reset magic lost and nothing put them back).
+ * AMDGPU_INFO_VRAM_LOST_COUNTER counts up; every context made before it
+ * reports AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST and its submissions fail with
+ * -ECANCELED (amdgpu_cs_pass1); contexts made after it work. Once per
+ * loss, device lock held. */
+void rdna3_drm_device_vram_lost(rdna3_drm_device *dev);
+/* refuse = 0: contexts made before a VRAM loss keep submitting (the
+ * counter and QUERY_STATE2's VRAMLOST stay); 1 is amdgpu's and the default */
+void rdna3_drm_device_set_vram_lost_cs(rdna3_drm_device *dev, int refuse);
+/* Which new DRM file may take a VMID while the OS gives each file its own
+ * (until VMIDs are grabbed per job, amdgpu_vmid_grab): one user must not
+ * hold them all and lock every later client out (WindowServer's included).
+ * Not an administrator (kIOClientPrivilegeAdministrator): at most
+ * RD_VMID_UID_CAP per uid (per uid, not per process: fork). The last
+ * RD_VMID_RESERVE free VMIDs only for administrators, root and
+ * _windowserver (uid RD_UID_WINDOWSERVER). free_ids: client VMIDs not
+ * taken; uid_in_use: VMIDs this uid holds (leaked ones included).
+ * RD_VMID_ADMIT or the reason for the refusal. */
+#define RD_VMID_UID_CAP      8   /* the Metal plugin serves every app of the user (all one uid) */
+#define RD_VMID_RESERVE      2
+#define RD_UID_WINDOWSERVER  88
+enum { RD_VMID_ADMIT = 0, RD_VMID_POOL_EMPTY, RD_VMID_OVER_UID_CAP, RD_VMID_RESERVED };
+int  rdna3_vmid_admit(uint32_t free_ids, uint32_t uid_in_use, uint32_t uid, int admin);
+const char *rdna3_vmid_admit_reason(int verdict);
+/* the orphans (rdna3_drm_ops.vm_orphaned) whose jobs are done now (a later
+ * GPU reset forces their fences): VM destroyed, mappings and BOs dropped.
+ * Returns how many went; device lock held. rdna3_drm_file_open runs it
+ * too. */
+int  rdna3_drm_device_reap_orphans(rdna3_drm_device *dev);
 /* every live BO placed in VRAM, once each (a BO several clients hold, an
  * export, the seq64 slots): amdgpu_device_evict_resources' list. The
  * callback must not free BOs. */

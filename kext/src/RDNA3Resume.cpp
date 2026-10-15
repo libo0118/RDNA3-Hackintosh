@@ -379,6 +379,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
             a->drmVmReplayIfNeeded();
             /* the evicted VRAM back before the display restore shows it */
             a->vramRestore(ok && a->fBringup->lastResumeLostVram());
+            a->drmVramLostSync();   /* what vramRestore could not bring back */
             if (ok && a->fDrm) {   /* amdgpu_userq_resume, with their MQDs back */
                 int uf = rdna3_drm_device_userq_resume(a->fDrm);
                 if (uf)

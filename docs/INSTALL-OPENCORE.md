@@ -241,6 +241,7 @@ what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
 | `rdna3doorbell=0` | no doorbell BAR: rings keep their write-pointer registers |
 | `rdna3cursor=0` | no hardware cursor |
 | `rdna3enum=1` | report the GPU as working for enumeration only; submissions fail (debug) |
+| `rdna3vramlostcs=0` | after a VRAM loss (a reset or a sleep whose VRAM did not all come back), contexts made before it keep submitting instead of failing with -ECANCELED (amdgpu's behaviour, the default); the counter and VRAMLOST are reported either way. With the default, RADV turns the refused submission into `VK_ERROR_DEVICE_LOST` ("The CS has been cancelled because the context is lost"), the Metal plugin then disables its Vulkan backend for that process and every later command buffer ends with `MTLCommandBufferErrorInternal`: the process (WindowServer too, while it has the RDNA3 Metal device) stops drawing with the GPU until it is restarted, rather than drawing from lost memory. `=0` keeps it drawing, possibly garbage (debug) |
 | `rdna3soak=<min>`, `rdna3hangtest=1`/`2` | read by the report script only: soak loop, hang/recovery test |
 
 ## 8. The way back

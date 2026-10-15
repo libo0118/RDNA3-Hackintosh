@@ -383,6 +383,13 @@ void RDNA3Accel::drmVmDestroy(void *ctx, void *vm)
         a->fBringup->vmDestroy(vm);
 }
 
+void RDNA3Accel::drmVmOrphaned(void *ctx, void *vm, int reclaimable)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    if (a->fBringup)
+        a->fBringup->vmOrphaned(vm, reclaimable != 0);
+}
+
 int RDNA3Accel::drmVmMap(void *ctx, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off,
                          uint64_t size, uint32_t flags)
 {
@@ -423,6 +430,10 @@ void RDNA3Accel::drmVmReplayIfNeeded()
     bool vramLost = false;
     if (!fBringup || !fDrm)
         return;
+    /* closed files whose jobs a recovery has finished now: their VMIDs back */
+    int reaped = rdna3_drm_device_reap_orphans(fDrm);
+    if (reaped)
+        LOG("%d closed client(s) whose jobs outlived them: VM, mappings and BOs freed now", reaped);
     if (fBringup->takeVmReplay()) {
         int failed = rdna3_drm_device_vm_replay(fDrm);
         LOG("VRAM lost: the clients' GPUVM ranges mapped again%s", failed ? " (some failed)" : "");
@@ -435,6 +446,31 @@ void RDNA3Accel::drmVmReplayIfNeeded()
             failed ? ", some failed" : "");
         setNumber("RDNA3,UserqResetFailures", (uint64_t)failed);
     }
+}
+
+void RDNA3Accel::drmVramLostSync()
+{
+    uint32_t n;
+    if (!fBringup || !fDrm)
+        return;
+    n = fBringup->vramLostCount();
+    if (n < fVramLostTold) {
+        /* not expected: forgetVramLoss runs before the sync. The next
+         * loss is then told again rather than missed */
+        LOG("VRAM lost count went back (%u -> %u) after the clients were told", fVramLostTold, n);
+        fVramLostTold = n;
+        return;
+    }
+    if (fVramLostTold == n)
+        return;
+    while (fVramLostTold < n) {
+        rdna3_drm_device_vram_lost(fDrm);
+        fVramLostTold++;
+    }
+    LOG("VRAM lost for the clients: AMDGPU_INFO_VRAM_LOST_COUNTER %u, older contexts see VRAMLOST%s",
+        fDrm->vram_lost_counter, fDrm->vram_lost_cs_refuse ? " and their submissions fail with -ECANCELED"
+                                                            : " (rdna3vramlostcs=0: they keep submitting)");
+    setNumber("RDNA3,VRAMLostCounter", fDrm->vram_lost_counter);
 }
 
 /* Called from rdna3_drm_ioctl, i.e. with fDrmLock held. The sleep runs
@@ -455,6 +491,7 @@ int RDNA3Accel::drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq
     if (cap)
         r = a->fBringup->fenceSignaled(ip, ring, seq) ? 0 : a->fBringup->recoverHang(ip, ring, seq);
     a->drmVmReplayIfNeeded();
+    a->drmVramLostSync();   /* a reset that lost VRAM: nothing brings it back */
     return r;
 }
 
@@ -518,6 +555,7 @@ int RDNA3Accel::pmCtl(const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp, bool adm
     if (fBringup) {
         r = fBringup->pmctl(rq, rp, admin);
         drmVmReplayIfNeeded();   /* rdna3baco: the chip went through BACO */
+        drmVramLostSync();
     } else {
         bzero(rp, sizeof(*rp));
         rp->op = rq->op;
@@ -673,6 +711,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.copyout = drmCopyout;
     ops.vm_create = drmVmCreate;
     ops.vm_destroy = drmVmDestroy;
+    ops.vm_orphaned = drmVmOrphaned;
     ops.vm_map = drmVmMap;
     ops.vm_unmap = drmVmUnmap;
     ops.submit = drmSubmit;
@@ -812,6 +851,16 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
         }
     }
 
+    /* amdgpu_cs_pass1's refusal of contexts older than a VRAM loss; the
+     * kill switch rdna3vramlostcs=0 lets them submit on (debug) */
+    uint32_t lostCs = 1;
+    PE_parse_boot_argn("rdna3vramlostcs", &lostCs, sizeof(lostCs));
+    rdna3_drm_device_set_vram_lost_cs(fDrm, lostCs ? 1 : 0);
+    setProperty("RDNA3,VRAMLostRefusesCS", lostCs ? 1 : 0, 32);
+    LOG("VRAM loss: %s", lostCs ? "contexts made before it fail their submissions with -ECANCELED "
+                                  "(amdgpu_cs_pass1; rdna3vramlostcs=0 turns that off)"
+                                : "rdna3vramlostcs=0: contexts made before it keep submitting; the "
+                                  "counter and VRAMLOST still report it");
     uint32_t enumOnly = 0;
     if (PE_parse_boot_argn("rdna3enum", &enumOnly, sizeof(enumOnly)) && enumOnly) {
         rdna3_drm_device_set_enumeration_only(fDrm, 1);
@@ -852,11 +901,24 @@ void RDNA3Accel::drmFree()
     fDrmLock = nullptr;
 }
 
-int RDNA3Accel::drmOpen(rdna3_drm_file *f)
+int RDNA3Accel::drmOpen(rdna3_drm_file *f, bool admin)
 {
+    /* the opener's thread (IOServiceOpen -> the user client's start) */
+    uint32_t uid = kauth_cred_getuid(kauth_cred_get());
     IOLockLock(fDrmLock);
+    rdna3_drm_device_reap_orphans(fDrm);   /* a leaked VMID whose job is done comes back */
+    /* one VMID per file: with none left for this client (rdna3_vmid_admit:
+     * pool, per-uid cap, the reserve) the open fails - the user client does
+     * not start, libdrm's open fails, the Metal plugin falls back to no
+     * device - instead of handing out a VM that cannot submit */
+    if (fBringup && !fBringup->vmCanOpen(uid, admin)) {
+        IOLockUnlock(fDrmLock);
+        return -RD_ENOSPC;
+    }
     int r = rdna3_drm_file_open(fDrm, f);
     IOLockUnlock(fDrmLock);
+    if (r)
+        LOG("DRM open failed (%d)", r);
     return r;
 }
 

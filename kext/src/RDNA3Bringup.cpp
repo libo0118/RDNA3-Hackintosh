@@ -12,6 +12,7 @@
 #include <sys/uio.h>
 #include <sys/fcntl.h>
 #include <sys/proc.h>
+#include <sys/kauth.h>
 #include <libkern/OSAtomic.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
@@ -1023,6 +1024,9 @@ bool RDNA3Bringup::hwInit()
                 __sync_synchronize();   /* publish the pool before fVmReady */
                 fVmReady = true;
                 publish("RDNA3,VMTablePages", fPtPool->npages);
+                /* the accelerator's VM first, before any DRM client can
+                 * take the VMIDs (WindowServer's IOSurface maps need it) */
+                fOwner->platformVmReady();
             } else {
                 BLOG("no page-table pool: GEM_VA stays record-only");
             }
@@ -1985,7 +1989,9 @@ struct RDNA3Vm {
     bool     compFlush;  /* same for the next compute job (the hub is shared, the rings are not) */
     bool     dmaFlush;   /* rdna3amdgpu=1: same for the next DMA job (amdgpu_vm_flush on the SDMA ring) */
     int      ownerPid;   /* the process that opened it (card run 49: a page fault named only "VMID 3") */
+    uint32_t ownerUid;   /* its effective uid: rdna3_vmid_admit's per-uid cap */
     char     owner[24];
+    bool     orphaned;   /* its file closed with a job still running: kept until the job is done */
 };
 
 
@@ -2012,8 +2018,9 @@ uint32_t RDNA3Bringup::vmQuery(void *p)
         fl |= AMDGPU_CTX_QUERY2_FLAGS_GUILTY;
     if (v->resetSeen != fResetCount)
         fl |= AMDGPU_CTX_QUERY2_FLAGS_RESET;
+    /* VRAMLOST is the DRM's, per context (rdna3_drm_device_vram_lost) */
     if (v->vramLostSeen != fVramLostCount)
-        fl |= AMDGPU_CTX_QUERY2_FLAGS_RESET | AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
+        fl |= AMDGPU_CTX_QUERY2_FLAGS_RESET;
     return fl;
 }
 
@@ -2949,7 +2956,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
 /* ------------------------------ GPUVM ------------------------------ */
 
 
-void *RDNA3Bringup::vmCreate()
+void *RDNA3Bringup::vmCreate(bool quiet)
 {
     RDNA3Vm *v = (RDNA3Vm *)IOMalloc(sizeof(*v));
     if (!v)
@@ -2960,6 +2967,7 @@ void *RDNA3Bringup::vmCreate()
     v->vramLostSeen = fVramLostCount;
     /* the opener's thread (IOServiceOpen -> the user client's start) */
     v->ownerPid = proc_selfpid();
+    v->ownerUid = kauth_cred_getuid(kauth_cred_get());
     proc_selfname(v->owner, sizeof(v->owner));
     if (!fVmReady)
         return v;
@@ -2970,7 +2978,7 @@ void *RDNA3Bringup::vmCreate()
     v->pasid = fNextPasid;
     /* rdna3amdgpu=1: amdgpu's GFXHUB id_mgr hands out VMIDs below
      * first_kfd_vmid only (8..15 have the compute apertures) */
-    for (uint32_t id = 1; id < ((fUserqWanted || fAmdgpuExact) ? (uint32_t)RD_FIRST_KFD_VMID : 16u); id++) {
+    for (uint32_t id = 1; id < vmidLimit(); id++) {
         if (!(fVmidUsed & (1u << id))) {
             if (gpuvm_vm_init(fDev, &v->vm, fPtPool) != RDNA3_OK)
                 break;
@@ -2990,9 +2998,81 @@ void *RDNA3Bringup::vmCreate()
             break;
         }
     }
-    if (!v->live)
-        BLOG("VM: no VMID or page tables left, this client's VM is record-only");
+    if (!v->live) {
+        /* amdgpu never hands out a VM that cannot run: amdgpu_vm_init
+         * fails without its root table, and VMIDs are grabbed per job
+         * (amdgpu_vmid_grab waits for one). With one VMID per file here a
+         * record-only VM would map nothing and every CS of it would fail
+         * with -EINVAL: no VM, so the open fails and the client sees no
+         * device */
+        if (!quiet)
+            BLOG("VM: no %s left for %s (pid %d): no VM, a DRM open fails",
+                 vmidsFree() ? "page tables" : "VMID", v->owner[0] ? v->owner : "?", v->ownerPid);
+        IOFree(v, sizeof(*v));
+        return nullptr;
+    }
+    publish("RDNA3,VMIDsInUse", (uint64_t)__builtin_popcount(fVmidUsed));
     return v;
+}
+
+uint32_t RDNA3Bringup::vmidsFree() const
+{
+    uint32_t n = 0;
+    for (uint32_t id = 1; id < vmidLimit(); id++)
+        if (!(fVmidUsed & (1u << id)))
+            n++;
+    return n;
+}
+
+/* the DRM kept this VM: its file closed while a job of it still ran after
+ * the recovery (rdna3_drm_file_close). reclaimable: it goes once the job is
+ * done (rdna3_drm_device_reap_orphans); else it never does. */
+void RDNA3Bringup::vmOrphaned(void *p, bool reclaimable)
+{
+    RDNA3Vm *v = (RDNA3Vm *)p;
+    if (!v || v->orphaned)
+        return;
+    v->orphaned = true;
+    fVmidsLeaked++;
+    publish("RDNA3,VMIDsLeaked", fVmidsLeaked);
+    BLOG("VM: %s (pid %d) closed with a job still running: VMID %u kept %s (%u kept now)",
+         v->owner[0] ? v->owner : "?", v->ownerPid, v->vmid,
+         reclaimable ? "until the job is done (a later GPU reset ends it)" : "for good (no orphan slot)",
+         fVmidsLeaked);
+}
+
+bool RDNA3Bringup::vmCanOpen(uint32_t uid, bool admin)
+{
+    char who[384];
+    size_t len = 0;
+    uint32_t mine = 0, freeIds;
+    int verdict;
+    if (!fVmReady)
+        return true;
+    freeIds = vmidsFree();
+    for (uint32_t id = 1; id < 16; id++)
+        if (fVmByVmid[id] && fVmByVmid[id]->ownerUid == uid)
+            mine++;
+    verdict = rdna3_vmid_admit(freeIds, mine, uid, admin ? 1 : 0);
+    if (verdict == RD_VMID_ADMIT)
+        return true;
+    who[0] = 0;
+    for (uint32_t id = 1; id < vmidLimit() && len < sizeof(who); id++) {
+        RDNA3Vm *v = fVmByVmid[id];
+        if (!v)
+            continue;
+        int w = snprintf(who + len, sizeof(who) - len, " %u=%s/%d/%u%s", id, v->owner[0] ? v->owner : "?",
+                         v->ownerPid, v->ownerUid, v->orphaned ? "(leaked)" : "");
+        if (w < 0)
+            break;
+        len += (size_t)w;
+    }
+    fVmidRefusals++;
+    BLOG("VM: DRM open #%u of uid %u refused (-ENOSPC, %s): %u of %u VMIDs free, this uid holds %u, "
+         "%u leaked (VMID=process/pid/uid:%s); that client sees no device", fVmidRefusals, uid,
+         rdna3_vmid_admit_reason(verdict), freeIds, vmidLimit() - 1, mine, fVmidsLeaked, who);
+    publish("RDNA3,VMIDRefusals", fVmidRefusals);
+    return false;
 }
 
 /* gfx_v11_0_suspend = gfx_v11_0_hw_fini (rdna3amdgpu=1, before a full
@@ -3080,6 +3160,11 @@ void RDNA3Bringup::vmDestroy(void *p)
         fVmByVmid[v->vmid] = nullptr;
         BLOG("VM: VMID %u of %s (pid %d) freed%s", v->vmid, v->owner[0] ? v->owner : "?", v->ownerPid,
              v->guilty ? " (it was guilty)" : "");
+        publish("RDNA3,VMIDsInUse", (uint64_t)__builtin_popcount(fVmidUsed));
+    }
+    if (v->orphaned && fVmidsLeaked) {
+        fVmidsLeaked--;
+        publish("RDNA3,VMIDsLeaked", fVmidsLeaked);
     }
     IOFree(v, sizeof(*v));
 }
