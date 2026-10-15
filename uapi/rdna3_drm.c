@@ -518,17 +518,21 @@ static int orphan_done(rdna3_drm_device *dev, const struct rdna3_orphan *o)
 
 uint32_t rdna3_vmid_uid_cap(uint32_t pool, int console)
 {
-    uint32_t shared = pool > RD_VMID_RESERVE ? pool - RD_VMID_RESERVE : 1;
+    uint32_t shared = pool > RD_VMID_RESERVE ? pool - RD_VMID_RESERVE : 0;
     if (console)
-        return shared;
-    return shared / 2 ? shared / 2 : 1;
+        return shared ? shared : 1;
+    /* half, rounded down: at least one of the shared VMIDs always stays
+     * the console user's (none for another uid when only one is shared) */
+    return shared / 2;
 }
 
 int rdna3_vmid_admit(uint32_t pool, uint32_t free_ids, uint32_t uid_in_use, uint32_t uid, int console)
 {
     if (!free_ids)
         return RD_VMID_POOL_EMPTY;
-    if (uid != 0 && uid_in_use >= rdna3_vmid_uid_cap(pool, console))
+    /* root and WindowServer (a LaunchDaemon outside the console session)
+     * have no cap */
+    if (uid != 0 && uid != RD_UID_WINDOWSERVER && uid_in_use >= rdna3_vmid_uid_cap(pool, console))
         return RD_VMID_OVER_UID_CAP;
     if (uid != 0 && uid != RD_UID_WINDOWSERVER && free_ids <= RD_VMID_RESERVE)
         return RD_VMID_RESERVED;
@@ -1133,8 +1137,12 @@ static uint64_t dep_seq(const rdna3_drm_file *f, uint32_t ip, uint32_t ring, uin
  * never submitted there (-EINVAL). Here the numbers are per ring and
  * shared by every file, so the file's own last submission on the ring is
  * the bound: a later number is another process's job, which this file
- * must not wait on (nor run into the hang cap and a recovery for). An
- * earlier one finishes no later than the file's own job behind it. */
+ * must not wait on directly. An earlier one finishes no later than the
+ * file's own job behind it. A wait can still reach another process's
+ * long job through a job (even a NOP) of its own queued behind it, and
+ * the hang cap then recovers for it: the recovery follows whoever waits,
+ * not the job's own runtime (amdgpu_job_timedout does), until that is
+ * ported. */
 static int own_seq(const rdna3_drm_file *f, uint32_t ip, uint32_t ring, uint64_t seq)
 {
     return ip < AMDGPU_HW_IP_NUM && ring < 4 && seq <= f->last_seq[ip][ring];

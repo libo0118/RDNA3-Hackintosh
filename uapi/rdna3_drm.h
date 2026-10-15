@@ -589,10 +589,11 @@ void rdna3_drm_device_set_vram_lost_cs(rdna3_drm_device *dev, int refuse);
 /* Which new DRM file may take a VMID while the OS gives each file its own
  * (until VMIDs are grabbed per job, amdgpu_vmid_grab): one user must not
  * hold them all and lock every later client out (WindowServer's included).
- * 'uid' is the opener's effective uid; root (0) has no cap. Every other
- * uid holds at most rdna3_vmid_uid_cap(pool, console) VMIDs (per uid, not
- * per process: fork). The last RD_VMID_RESERVE free VMIDs only for root
- * and _windowserver (uid RD_UID_WINDOWSERVER). pool: the VMIDs clients
+ * 'uid' is the opener's effective uid; root (0) and _windowserver (uid
+ * RD_UID_WINDOWSERVER, a LaunchDaemon outside the console session) have
+ * no cap. Every other uid holds at most rdna3_vmid_uid_cap(pool, console)
+ * VMIDs (per uid, not per process: fork). The last RD_VMID_RESERVE free
+ * VMIDs only for root and _windowserver. pool: the VMIDs clients
  * can have in all (15, or 7 with user queues, less the accelerator's own);
  * free_ids: those not taken; uid_in_use: VMIDs this uid holds (leaked ones
  * included); console: the opener runs in the console session
@@ -603,8 +604,8 @@ enum { RD_VMID_ADMIT = 0, RD_VMID_POOL_EMPTY, RD_VMID_OVER_UID_CAP, RD_VMID_RESE
 int  rdna3_vmid_admit(uint32_t pool, uint32_t free_ids, uint32_t uid_in_use, uint32_t uid, int console);
 /* the per-uid cap out of the real pool: everything outside the reserve for
  * the console user (all its apps share one uid, the Metal plugin serves
- * each), half of it (at least 1) for any other uid - so another local uid
- * can never leave the console user without a VMID */
+ * each; at least 1), half of it rounded down for any other uid - so one
+ * other local uid can never take the console user's last shared VMID */
 uint32_t rdna3_vmid_uid_cap(uint32_t pool, int console);
 const char *rdna3_vmid_admit_reason(int verdict);
 /* the orphans (rdna3_drm_ops.vm_orphaned) whose jobs are done now (a later
