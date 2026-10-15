@@ -48,4 +48,13 @@ static inline uint32_t rd3_arg(const char *name, uint32_t dflt)
     return dflt;
 }
 
+/* output gamma (setGammaTable: Night Shift, calibration, the ColorSync
+ * curve loaded at login) to the MPCC OGAM: on unless rdna3gamma=0, with
+ * or without the profile (card run 56: GAMMA PASS on both pipes). One
+ * place, so the framebuffer, the core and the accelerator agree. */
+static inline int rd3_gamma_on(void)
+{
+    return rd3_arg("rdna3gamma", 1) != 0;
+}
+
 #endif

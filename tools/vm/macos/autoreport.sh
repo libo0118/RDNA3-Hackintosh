@@ -65,6 +65,18 @@ fi
 # probe (which widens it for two apps)
 [ -f /var/db/rdna3-allow.bak ] && mv /var/db/rdna3-allow.bak /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null
 
+# which processes the Metal plugin serves (metal/plugin/rdna3mtl_allow_policy.h):
+# "apps" = every application (the list has a %apps line), "list" = the names
+# in the list only; rdna3mtlapps=0 in the boot-args switches apps mode off
+rdna3_allow_mode() {
+    _al=/Library/GPUBundles/rdna3mtl-allow.txt
+    [ -r "$_al" ] || { echo "no readable allow list"; return; }
+    if ! grep -q '^[[:space:]]*%apps[[:space:]]*$' "$_al"; then echo "list (no %apps line)"
+    elif sysctl -n kern.bootargs 2>/dev/null | tr ' ' '\n' | grep -qx 'rdna3mtlapps=0'; then
+        echo "list (%apps line switched off by boot-arg rdna3mtlapps=0)"
+    else echo "apps (every application; denied: $(sed -n 's/^[[:space:]]*-[[:space:]]*//p' "$_al" | tr '\n' ',' | sed 's/,$//'))"; fi
+}
+
 # the progress window as soon as somebody is logged in, with the time the
 # tests start: the 90 s pause after boot (the desktop and the driver
 # settle first) looked like nothing was happening
@@ -518,6 +530,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         ioreg -r -c RDNA3AGDC -w0 -d1 2>/dev/null | grep -E '"RDNA3,AGDC' | sed 's/^ *//'
         # with AGDC up WindowServer needs the Metal plugin's device (card runs 41/45)
         echo "Metal allow list: $(grep -v '^#' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | tr '\n' ' ') ($(stat -f %Lp /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null))"
+        echo "Metal allow mode: $(rdna3_allow_mode)"
         # display sleep (rdna3dpms=1): the heads must blank, then come back
         case " $args " in
             *" rdna3dpms=1 "*|*" rdna3dpms=2 "*)
@@ -601,8 +614,9 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 done_ $?
                 ;;
         esac
-        # output gamma (rdna3gamma=1): a dark table, the identity, the
-        # ColorSync settings back; each pipe's OTG CRC must follow
+        # output gamma (on unless rdna3gamma=0): a dark table, the identity,
+        # the ColorSync settings back; each pipe's OTG CRC must follow. The
+        # test is long, so a step selects it with an explicit rdna3gamma=1.
         case " $args " in
             *" rdna3gamma=1 "*)
                 if [ -x "$D/bin/rdna3_modetest" ]; then
@@ -791,6 +805,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             hdr "probe: WindowServer and the Metal plugin (M5)"
             ioreg -r -c RDNA3Accelerator -w0 -d1 2>/dev/null | grep -E '"(MetalPluginName|MetalPluginClassName|IOGLBundleName)"' | sed 's/^ *//'
             echo "allow list: $(grep -v '^#' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | tr '\n' ' ')"
+            echo "allow mode: $(rdna3_allow_mode)"
             # +c 0: whole command names (lsof cuts them to 9 characters,
             # card run 51 read "WindowSer" as no WindowServer)
             ld=$(lsof +c 0 -n 2>/dev/null | awk '/RDNA3MTLDriver/ { print $1 "(" $2 ")" }' | sort -u | tr '\n' ' ')
@@ -849,6 +864,9 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             # wide, and what the copy forward did meanwhile
             in_session open -b com.apple.systempreferences 2>&1
             sleep 8
+            # in apps mode System Settings is an application like the others
+            # (card run 54: its sidebar stayed stale on Apple's software path)
+            echo "System Settings: plugin $([ "$(lsof +c 0 -n -c 'System Settings' 2>/dev/null | grep -c RDNA3MTLDriver)" -gt 0 ] && echo loaded || echo "NOT loaded") ($(rdna3_allow_mode))"
             mkdir -p "$HOME/rdna3-scanout/m6Settings"
             echo "== rdna3_drminfo --scanout-hires (look m6Settings)"
             with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6Settings" 2>&1 >/dev/null

@@ -162,8 +162,9 @@ cat > "$A/oc_install.sh" <<'EOF'
 #!/bin/sh
 # package/oc_install.sh for this install: injects the RDNA3Accel.kext in
 # OpenCore/ (the same build as /Library/Extensions) through EFI/OC/Kexts and
-# Kernel/Add, or sets a ladder step's boot-args (--step N) or -rdna3off (--off).
-#   sudo "/Library/Application Support/RDNA3/oc_install.sh" --efi /Volumes/EFI [--step N | --off]
+# Kernel/Add, or sets a ladder step's boot-args (--step N) or -rdna3off (--off),
+# or takes our part out of OpenCore again (--remove).
+#   sudo "/Library/Application Support/RDNA3/oc_install.sh" --efi /Volumes/EFI [--step N | --off | --remove]
 # Run it again after every update. The firmware is already in place.
 A=$(cd "$(dirname "$0")" && pwd)
 case " $* " in *" --fw "*) echo "the firmware is installed already (firmware.sh)"; exit 2 ;; esac
@@ -210,7 +211,8 @@ chmod 755 "$T"/*.sh
 cat > "$T/README.txt" <<EOF
 RDNA3-Hackintosh $VER ($SHA): kexts and tools for the AMD RX 7800 XT on macOS 15.
   sudo ./install.sh [--fw <linux-firmware>/amdgpu]     install (the same as the .pkg)
-  sudo ./uninstall.sh                                  remove
+  sudo ./uninstall.sh [--efi /Volumes/EFI]             remove, OpenCore's copy and entries too
+                                                       (mount the EFI first; --keep-opencore skips it)
 Before the first boot read docs/INSTALL-OPENCORE.md in the repository
 (SIP, amfi=0x80, OpenCore injection, the way back).
 Parts: ${parts[*]}

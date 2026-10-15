@@ -1,9 +1,36 @@
-# Processes allowed to get the RDNA3 Metal device (one per line, '*' = all,
-# '-name' = deny, '!name' = only once the accelerator kext is armed,
-# '@name' = only while RDNA3AGDC's object is up: CoreDisplay then needs a
-# Metal device for WindowServer, or it aborts - card runs 41 and 45).
-# Start narrow while bring-up is in progress; widen as things work.
+# Which processes get the RDNA3 Metal device. Read by every process that
+# loads the plugin; the first line that matches the process decides, except
+# that a '-' line for it wins wherever it stands. One entry per line:
+#   name    the process with that name
+#   *       every process
+#   -name   never this process (a deny list)
+#   !name   only once the accelerator kext is armed (debug.rdna3accelfb != 0)
+#   @name   only while RDNA3AGDC's object is up (debug.rdna3agdc == 1):
+#           CoreDisplay then needs a Metal device for WindowServer, or it
+#           aborts - card runs 41 and 45
+#   %apps   apps mode: every application, i.e. an executable in
+#           Contents/MacOS of an .app in /Applications, /System/Applications
+#           or the running user's own ~/Applications (Info.plist is not
+#           read), while the card is armed and WindowServer is on the plugin
+#           (the configuration of card runs 48-56). Not the session's agents
+#           (Dock, Finder, ...), helpers, XPC services or apps nested in
+#           another app (Xcode's Simulator), nor translocated apps or homes
+#           outside /Users: name those above.
+# A '-' line also matches the executable's own file name, so renaming
+# argv[0] does not dodge it. NVMTL_ENABLE and mtlprobe, nvmtltest and
+# nvmtlrender always get the device. A line over 255 characters is ignored.
+#
+# Kill switches, no rebuild: delete the %apps line (the old explicit-names
+# list), or boot-arg rdna3mtlapps=0 (OpenCore; keeps the names below, ends
+# apps mode). Why each process got or missed the device: the "NVMTL: allow
+# mode" lines in the plugin log (26-log-metal-plugin.txt in a report).
+# A package install replaces this file.
 mtlprobe
 nvmtltest
 vulkaninfo
 @WindowServer
+# Safari: its web content renders in com.apple.WebKit.GPU, whose sandbox
+# blocks loading anything from /Library/GPUBundles (card run 56), so the
+# app itself would only hold a GPU VM for nothing
+-Safari
+%apps

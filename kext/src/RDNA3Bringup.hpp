@@ -77,8 +77,16 @@ public:
 
     /* GPUVM for the DRM UAPI (called under RDNA3Accel's fDrmLock). Before
      * the GMC is up (rdna3lvl < 6, or the thread still running) a VM is
-     * created "record only" and map/unmap do nothing. */
-    void *vmCreate();
+     * created "record only" and map/unmap do nothing. Once it is up a VM
+     * always runs: without a free VMID or page tables vmCreate returns
+     * nullptr (the file open fails) instead of a VM that cannot submit. */
+    void *vmCreate(bool quiet = false);   /* quiet: no log line when there is no VM */
+    /* a new DRM file of 'uid' (admin: kIOClientPrivilegeAdministrator)
+     * may take a VMID (rdna3_vmid_admit; always before the GMC is up);
+     * false logs the refusal, its reason and the VMIDs' holders */
+    bool  vmCanOpen(uint32_t uid, bool admin);
+    /* rdna3_drm_ops.vm_orphaned: the file closed with a job still running */
+    void  vmOrphaned(void *vm, bool reclaimable);
     void  vmDestroy(void *vm);
     int   vmMap(void *vm, rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size,
                 uint32_t flags);
@@ -170,6 +178,9 @@ public:
      * came back, the clients are not told (amdgpu_device_resume) */
     bool     lastResumeLostVram() const { return fLastResumeVramLost; }
     bool     lastVramLost() const { return fLastVramLost; }   /* the last checkVramLost */
+    /* VRAM losses so far (adev->vram_lost_counter), less the resumes whose
+     * contents all came back (forgetVramLoss) */
+    uint32_t vramLostCount() const { return fVramLostCount; }
     /* the MES scheduler started again after a reset and forgot its user
      * queues: the DRM puts them back (rdna3_drm_device_userq_reset);
      * true once, *vramLost: whether that reset lost VRAM */
@@ -378,6 +389,12 @@ private:
     bool             mapDoorbell();
     rdna3_pt_pool *fPtPool = nullptr;  /* level 6: page tables for user VMs */
     uint32_t      fVmidUsed = 0;       /* bit n = VMID n taken (0 is the kernel's) */
+    uint32_t      fVmidRefusals = 0;   /* DRM opens refused: no VMID left */
+    uint32_t      fVmidsLeaked = 0;    /* VMs of closed files whose job still runs (vmOrphaned) */
+    /* VMIDs for clients: 1..7 with user queues or rdna3amdgpu=1 (8..15 are
+     * the MES's / amdgpu's first_kfd_vmid), else 1..15 */
+    uint32_t      vmidLimit() const { return (fUserqWanted || fAmdgpuExact) ? (uint32_t)RD_FIRST_KFD_VMID : 16u; }
+    uint32_t      vmidsFree() const;   /* client VMIDs not taken */
     uint64_t      fVmPd[16] = {};      /* page directory per live VMID */
     volatile bool fVmReady = false;
     void          vmFlush(uint32_t vmid);

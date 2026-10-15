@@ -61,6 +61,7 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
     dev->vis_vram_size = vis_vram_size;
     dev->gtt_size = gtt_size;
     dev->next_mmap_offset = 1ull << 32;
+    dev->vram_lost_cs_refuse = 1;   /* amdgpu_cs_pass1 */
 
     di->device_id = pci_device;
     di->chip_rev = rev_id;
@@ -219,6 +220,7 @@ void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_
 
 int rdna3_drm_file_open(rdna3_drm_device *dev, rdna3_drm_file *f)
 {
+    rdna3_drm_device_reap_orphans(dev);   /* their VMs may make room */
     zero(f, sizeof(*f));
     f->dev = dev;
     f->bos = (rdna3_bo **)dev->ops.zalloc(dev->ops.ctx, sizeof(rdna3_bo *) * RD_MAX_HANDLES);
@@ -377,6 +379,8 @@ static void exports_gc(rdna3_drm_device *dev, const struct rdna3_drm_file *closi
 static void userq_mgr_fini(struct rdna3_drm_file *f);
 static void seq64_unmap(struct rdna3_drm_file *f);
 static void seq64_fini(rdna3_drm_device *dev);
+static void orphan_release(rdna3_drm_device *dev, struct rdna3_orphan *o);
+static int ctx_vram_lost(const struct rdna3_drm_file *f, uint32_t ctx_id);
 
 /* user fence BOs whose job finished can go (amdgpu_job_free drops uf_bo) */
 static void uf_reap(rdna3_drm_device *dev, int all)
@@ -396,6 +400,9 @@ void rdna3_drm_device_fini(rdna3_drm_device *dev)
 {
     uint32_t i;
     uf_reap(dev, 1);
+    for (i = 0; i < RD_MAX_ORPHANS; i++)   /* the rings are stopped */
+        if (dev->orphans[i].vm || dev->orphans[i].bos)
+            orphan_release(dev, &dev->orphans[i]);
     /* the fence drivers the files left (parked references), then seq64 */
     if (dev->fence_drv)
         dev->ops.free(dev->ops.ctx, dev->fence_drv, sizeof(*dev->fence_drv) * RD_MAX_FENCE_DRV);
@@ -463,11 +470,112 @@ static int file_wait_idle(rdna3_drm_file *f)
             fe.ip = ip;
             fe.ring = ring;
             fe.seq = f->last_seq[ip][ring];
-            if (fence_wait_abs(dev, &fe, UINT64_MAX) && !fence_done(dev, &fe))
-                idle = 0;   /* not even the recovery got it through */
+            if (fence_wait_abs(dev, &fe, UINT64_MAX) && !fence_done(dev, &fe)) {
+                idle = 0;   /* not even the recovery got it through: kept for the orphan */
+                continue;
+            }
             f->last_seq[ip][ring] = 0;
         }
     return idle;
+}
+
+static void orphan_release(rdna3_drm_device *dev, struct rdna3_orphan *o)
+{
+    rdna3_drm_ops *ops = &dev->ops;
+    uint32_t i;
+    if (o->vm && ops->vm_destroy)
+        ops->vm_destroy(ops->ctx, o->vm);   /* the tables go with the VM */
+    for (i = 0; o->vas && i < o->nvas; i++)
+        if (o->vas[i].handle && o->vas[i].bo)
+            bo_put_dev(dev, o->vas[i].bo);
+    for (i = 0; o->bos && i < RD_MAX_HANDLES; i++)
+        if (o->bos[i])
+            bo_put_dev(dev, o->bos[i]);
+    if (o->vas)
+        ops->free(ops->ctx, o->vas, sizeof(rdna3_va) * RD_MAX_VA);
+    if (o->bos)
+        ops->free(ops->ctx, o->bos, sizeof(rdna3_bo *) * RD_MAX_HANDLES);
+    zero(o, sizeof(*o));
+}
+
+static int orphan_done(rdna3_drm_device *dev, const struct rdna3_orphan *o)
+{
+    rdna3_fence fe;
+    uint32_t ip, ring;
+    for (ip = 0; ip < AMDGPU_HW_IP_NUM; ip++)
+        for (ring = 0; ring < 4; ring++) {
+            if (!o->last_seq[ip][ring])
+                continue;
+            zero(&fe, sizeof(fe));
+            fe.ip = ip;
+            fe.ring = ring;
+            fe.seq = o->last_seq[ip][ring];
+            if (!fence_done(dev, &fe))
+                return 0;
+        }
+    return 1;
+}
+
+int rdna3_vmid_admit(uint32_t free_ids, uint32_t uid_in_use, uint32_t uid, int admin)
+{
+    if (!free_ids)
+        return RD_VMID_POOL_EMPTY;
+    if (!admin && uid_in_use >= RD_VMID_UID_CAP)
+        return RD_VMID_OVER_UID_CAP;
+    if (!admin && uid != 0 && uid != RD_UID_WINDOWSERVER && free_ids <= RD_VMID_RESERVE)
+        return RD_VMID_RESERVED;
+    return RD_VMID_ADMIT;
+}
+
+const char *rdna3_vmid_admit_reason(int verdict)
+{
+    switch (verdict) {
+    case RD_VMID_ADMIT:        return "admitted";
+    case RD_VMID_POOL_EMPTY:   return "no VMID left";
+    case RD_VMID_OVER_UID_CAP: return "this user holds the most VMIDs one user may";
+    case RD_VMID_RESERVED:     return "the last VMIDs are kept for root and WindowServer";
+    default:                   return "?";
+    }
+}
+
+/* TTM's delayed delete (ttm_bo_delayed_delete: the BO goes once the fences
+ * in its reservation signalled) for a closed file whose jobs outlived the
+ * recovery: amdgpu_vm_fini's page tables and the BOs are freed then */
+int rdna3_drm_device_reap_orphans(rdna3_drm_device *dev)
+{
+    uint32_t i;
+    int n = 0;
+    for (i = 0; i < RD_MAX_ORPHANS; i++)
+        if ((dev->orphans[i].vm || dev->orphans[i].bos) && orphan_done(dev, &dev->orphans[i])) {
+            orphan_release(dev, &dev->orphans[i]);
+            n++;
+        }
+    return n;
+}
+
+/* a closing file that is not idle: what its jobs may still touch moves to
+ * an orphan slot; without a free slot it leaks for good, as before */
+static void file_orphan(rdna3_drm_file *f)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_drm_ops *ops = &dev->ops;
+    struct rdna3_orphan *o = NULL;
+    uint32_t i;
+    for (i = 0; i < RD_MAX_ORPHANS && !o; i++)
+        if (!dev->orphans[i].vm && !dev->orphans[i].bos)
+            o = &dev->orphans[i];
+    if (f->vm && ops->vm_orphaned)
+        ops->vm_orphaned(ops->ctx, f->vm, o != NULL);
+    if (!o)
+        return;
+    o->vm = f->vm;
+    o->bos = f->bos;
+    o->vas = f->vas;
+    o->nvas = f->nvas;
+    copy(o->last_seq, f->last_seq, sizeof(o->last_seq));
+    f->vm = NULL;
+    f->bos = NULL;
+    f->vas = NULL;
 }
 
 void rdna3_drm_file_close(rdna3_drm_file *f)
@@ -510,6 +618,8 @@ void rdna3_drm_file_close(rdna3_drm_file *f)
                 va_release(f, &f->vas[i]);
     if (idle)
         seq64_unmap(f);
+    if (!idle)
+        file_orphan(f);   /* reclaimed once its jobs are done (reap_orphans) */
     if (f->vm && ops->vm_destroy && idle)
         ops->vm_destroy(ops->ctx, f->vm);
     f->vm = NULL;
@@ -1466,10 +1576,19 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
     zero(&job, sizeof(job));
     if (!cs->in.num_chunks || cs->in.num_chunks > 64)
         return -RD_EINVAL;
+    /* amdgpu_cs_parser_init: amdgpu_ctx_get - no submission without a
+     * live context (id 0 or a freed one is -EINVAL) */
+    if (!ctx || ctx >= RD_MAX_CTX || !f->ctx_used[ctx])
+        return -RD_EINVAL;
     if (cs->in.bo_list_handle && bo_list_find(f, cs->in.bo_list_handle) < 0)
         return -RD_ENOENT;   /* amdgpu_bo_list_get */
     /* amdgpu_cs_submit: a guilty context never runs again */
     if (ops->vm_query && f->vm && (ops->vm_query(ops->ctx, f->vm) & AMDGPU_CTX_QUERY2_FLAGS_GUILTY))
+        return -RD_ECANCELED;
+    /* amdgpu_cs_pass1: ctx->generation != the job's generation - a context
+     * made before VRAM was lost submits nothing more; a new one does
+     * (unless the OS turned that off: rdna3_drm_device_set_vram_lost_cs) */
+    if (dev->vram_lost_cs_refuse && ctx_vram_lost(f, ctx))
         return -RD_ECANCELED;
 
     for (i = 0; i < cs->in.num_chunks; i++) {
@@ -2339,6 +2458,27 @@ int32_t rdna3_drm_ctx_priority(const rdna3_drm_file *f, uint32_t ctx_id)
                                                                      : f->ctx_override_prio[ctx_id];
 }
 
+/* a live context made before the last VRAM loss: ctx->generation !=
+ * amdgpu_vm_generation (its high half is adev->vram_lost_counter) */
+static int ctx_vram_lost(const rdna3_drm_file *f, uint32_t ctx_id)
+{
+    return ctx_id && ctx_id < RD_MAX_CTX && f->ctx_used[ctx_id] &&
+           f->ctx_vram_lost[ctx_id] != f->dev->vram_lost_counter;
+}
+
+/* Ported from amdgpu_inc_vram_lost (amdgpu_device_gpu_recover ->
+ * amdgpu_device_reinit_after_reset, once amdgpu_device_check_vram_lost
+ * found the reset magic gone) */
+void rdna3_drm_device_vram_lost(rdna3_drm_device *dev)
+{
+    dev->vram_lost_counter++;
+}
+
+void rdna3_drm_device_set_vram_lost_cs(rdna3_drm_device *dev, int refuse)
+{
+    dev->vram_lost_cs_refuse = refuse ? 1 : 0;
+}
+
 static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
 {
     uint32_t id = c->in.ctx_id, i;
@@ -2358,6 +2498,9 @@ static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
                 f->ctx_used[i] = 1;
                 f->ctx_init_prio[i] = (int16_t)prio;
                 f->ctx_override_prio[i] = AMDGPU_CTX_PRIORITY_UNSET;
+                /* ctx->generation = amdgpu_vm_generation: the VRAM loss
+                 * count the context was made under */
+                f->ctx_vram_lost[i] = f->dev->vram_lost_counter;
                 f->vcn_entity[i] = 0;
                 f->vcn_entity_jobs[i] = 0;
                 zero(c, sizeof(*c));
@@ -2374,13 +2517,18 @@ static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
         return 0;
     case AMDGPU_CTX_OP_QUERY_STATE:
     case AMDGPU_CTX_OP_QUERY_STATE2: {
-        /* amdgpu_ctx_query / amdgpu_ctx_query2: the reset state lives
-         * with the VM here (one VM per file, one VMID per VM) */
+        /* amdgpu_ctx_query / amdgpu_ctx_query2: the reset and guilty
+         * state lives with the VM here (one VM per file, one VMID per VM);
+         * VRAMLOST is the context's own: ctx->generation !=
+         * amdgpu_vm_generation, i.e. VRAM was lost after the context was
+         * made (rdna3_drm_device_vram_lost) */
         uint32_t fl = 0, op = c->in.op;
         if (!id || id >= RD_MAX_CTX || !f->ctx_used[id])
             return -RD_EINVAL;
         if (f->dev->ops.vm_query && f->vm)
-            fl = f->dev->ops.vm_query(f->dev->ops.ctx, f->vm);
+            fl = f->dev->ops.vm_query(f->dev->ops.ctx, f->vm) & ~(uint32_t)AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
+        if (ctx_vram_lost(f, id))
+            fl |= AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
         zero(c, sizeof(*c));
         if (op == AMDGPU_CTX_OP_QUERY_STATE2) {
             c->out.state.flags = fl;
@@ -3958,9 +4106,16 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         return info_out(f, in, &di, sizeof(di));
     }
     case AMDGPU_INFO_VRAM_LOST_COUNTER:
+        /* amdgpu_info_ioctl: atomic_read(&adev->vram_lost_counter), 4 bytes */
+        return info_out(f, in, &dev->vram_lost_counter, 4);
     case AMDGPU_INFO_NUM_EVICTIONS:
     case AMDGPU_INFO_NUM_VRAM_CPU_PAGE_FAULTS:
     case AMDGPU_INFO_NUM_BYTES_MOVED: {
+        /* adev->num_evictions / num_vram_cpu_page_faults / num_bytes_moved
+         * count TTM moves and CPU faults on VRAM BOs; nothing here moves a
+         * BO (SET_PLACEMENT migration is not there yet) or faults one in,
+         * and the sleep's VRAM copy (RDNA3Evict.cpp) works on ranges, not
+         * BOs: 0 */
         uint64_t z = 0;
         return info_out(f, in, &z, 8);
     }

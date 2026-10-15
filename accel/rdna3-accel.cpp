@@ -73,6 +73,15 @@ static bool rd3SupportedDevice(unsigned dev)
 static volatile SInt64 gCntVmAlloc, gCntVmAllocBytes, gCntVmDealloc, gCntVmDeallocBytes, gCntVmRefused,
                        gCntResNew, gCntResFree, gCntMapCommit, gCntMapRelease, gCntMapFree;
 static void rdna3accelInstallSysctl(void);
+/* the raw offsets into Apple's objects (re/, iofam/, +0x88 / +0x98 /
+ * +0xc8 ...) and the vtable slots were measured on one Darwin release per
+ * build: macOS 15 (Darwin 24), or macOS 26 (Darwin 25) for the NM_TAHOE
+ * build. On any other they would read and write the wrong fields */
+#ifdef NM_TAHOE
+static const int kRd3VerifiedDarwin = 25;
+#else
+static const int kRd3VerifiedDarwin = 24;
+#endif
 static int gRd3AccelArmed = 0;
 static const unsigned kRd3MaxFB = 4;
 static unsigned gRd3HeadsPublished = 0, gRd3HeadsRegistered = 0;
@@ -571,18 +580,10 @@ public:
         /* on in the default profile (no rdna3lvl, rdna3_bootargs.h); a test step
          * without rdna3accel=1 keeps it off (boot-loop guard) */
         if (!rd3_arg("rdna3accel", 0)) { ALOG("rdna3accel off: NOT starting (boot-loop guard)"); return false; }
-        /* the raw offsets into Apple's objects (re/, iofam/, +0x88 / +0x98 /
-         * +0xc8 ...) were measured on one Darwin release per build: macOS 15
-         * (Darwin 24), or macOS 26 (Darwin 25) for the NM_TAHOE build. On any
-         * other they would read and write the wrong fields */
-#ifdef NM_TAHOE
-        const int kVerifiedDarwin = 25;
-#else
-        const int kVerifiedDarwin = 24;
-#endif
-        if (version_major != kVerifiedDarwin && !rd3_arg("rdna3accelanyos", 0)) {
+        /* kRd3VerifiedDarwin: the release this build's offsets were measured on */
+        if (version_major != kRd3VerifiedDarwin && !rd3_arg("rdna3accelanyos", 0)) {
             ALOG("Darwin %d, but this build's object offsets were verified on Darwin %d only: NOT starting "
-                 "(rdna3accelanyos=1 overrides)", version_major, kVerifiedDarwin);
+                 "(rdna3accelanyos=1 overrides)", version_major, kRd3VerifiedDarwin);
             return false;
         }
         if (!rd3AccelLocksInit()) { ALOG("no memory for the module's locks: NOT starting"); return false; }
@@ -924,7 +925,8 @@ static void rd3AccelIopHome(IOService *fb, unsigned head);
  * without the accelerator setGammaTable reaches the framebuffer and the
  * MPCC OGAM works. IOAcceleratorFamily2's own implementation presumably
  * hands such a transaction's gamma to the pipe's IOFramebuffer, so with
- * rdna3gamma=1 it gets the transaction instead of the "done" we answer.
+ * gamma on (the default; rdna3gamma=0 turns it off) it gets the
+ * transaction instead of the "done" we answer.
  * Card run 34: from the Auxiliary KC the weak imports of
  * IOAccelLegacyDisplayPipe / IOAccelDisplayPipe::performTransaction passed
  * the OSKextSymbolIsResolved test although neither symbol exists on 24H32,
@@ -966,35 +968,80 @@ static long rd3PerformTransactionSlot(void)
         return -1;
     return (long)(raw.ptr - 1);
 }
-static int    gIopGammaBase = -1;   /* rdna3gamma, read on first use */
+static int    gIopGammaBase = -1;   /* rd3_gamma_on(), read on first use */
 static SInt64 gCntIopEmptyBase, gCntIopEmptyBaseErr;
+/* card run 35: a forward target must lie inside IOAcceleratorFamily2's code,
+ * i.e. near a function the kext imports strongly from it (the kernel linker
+ * resolves that one or refuses to load us). One MiB, as decided in run 35;
+ * a refusal logs the distance, so a legitimate target farther away shows
+ * in the report instead of being jumped to blindly. */
+static const uintptr_t kRd3FamilyCodeSpan = 1u << 20;
+static uintptr_t rd3FamilyDistance(const void *p)
+{
+    const uintptr_t anchor = (uintptr_t)&_ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv;
+    const uintptr_t a = (uintptr_t)p;
+    return a > anchor ? a - anchor : anchor - a;
+}
+/* the base class's performTransaction as read off IOAccelLegacyDisplayPipe's
+ * vtable; why == nullptr: it may be called */
+struct Rd3IopBase {
+    void *const *vt;
+    long        slot;
+    void       *fn;    /* the slot's content (also when refused, for the log) */
+    const char *why;
+};
+static Rd3IopBase rd3IopBaseTarget(void)
+{
+    Rd3IopBase b = { nullptr, -1, nullptr, nullptr };
+    /* rdna3accelanyos=1 lets the accelerator start on another release, but
+     * the slot comes from this build's headers: never jump through it there */
+    if (version_major != kRd3VerifiedDarwin) {
+        b.why = "the vtable layout was verified on another Darwin release";
+        return b;
+    }
+    b.vt = rd3LegacyPipeVtable();
+    b.slot = rd3PerformTransactionSlot();
+    if (!b.vt || (const void *)b.vt == gOSKextUnresolved || (const void *)b.vt == (const void *)&gOSKextUnresolved) {
+        b.why = "IOAccelLegacyDisplayPipe's vtable is not exported";
+        return b;
+    }
+    if (b.slot < 0 || (b.slot & 7)) {
+        b.why = "no performTransaction slot";
+        return b;
+    }
+    /* the address point is 2 words in (offset to top, RTTI) */
+    b.fn = b.vt[2 + b.slot / 8];
+    if (!b.fn || b.fn == gOSKextUnresolved || b.fn == (const void *)&gOSKextUnresolved)
+        b.why = "the slot is unresolved";
+    else if (b.fn == rd3PureVirtual())   /* pure in the base on this release (PR #2 review) */
+        b.why = "the slot is pure virtual";
+    else if (rd3FamilyDistance(b.fn) >= kRd3FamilyCodeSpan)
+        b.why = "the slot points outside IOAcceleratorFamily2";
+    return b;
+}
 static IOReturn rd3AccelIopGammaToBase(void *pipe, IOAccelDisplayPipeTransaction2 *txn, bool *handled)
 {
     typedef IOReturn (*PerformFn)(void *, IOAccelDisplayPipeTransaction2 *);
-    PerformFn fn = nullptr;
     const char *which = "IOAccelLegacyDisplayPipe vtable";
     *handled = false;
     if (gIopGammaBase < 0)
-        gIopGammaBase = rd3_arg("rdna3gamma", 0) ? 1 : 0;
+        gIopGammaBase = rd3_gamma_on() ? 1 : 0;
     if (!gIopGammaBase)
         return kIOReturnSuccess;
-    void *const *vt = rd3LegacyPipeVtable();
-    const long slot = rd3PerformTransactionSlot();
-    const bool vtOk = vt && (const void *)vt != gOSKextUnresolved && (const void *)vt != (const void *)&gOSKextUnresolved;
-    /* the address point is 2 words in (offset to top, RTTI) */
-    if (vtOk && slot >= 0 && !(slot & 7))
-        fn = (PerformFn)vt[2 + slot / 8];
-    if ((const void *)fn == gOSKextUnresolved || (const void *)fn == (const void *)&gOSKextUnresolved ||
-        (const void *)fn == rd3PureVirtual())   /* pure in the base on this release (PR #2 review) */
-        fn = nullptr;
+    const Rd3IopBase b = rd3IopBaseTarget();
     static SInt32 gIopBaseLogs;
-    if (!fn) {
-        if (OSIncrementAtomic(&gIopBaseLogs) < 2)
-            ALOG("iop: rdna3gamma=1 but IOAcceleratorFamily2 gives no performTransaction (vtable 0x%llx, slot %ld, unresolved 0x%llx): plane-less transaction answered as before",
-                 (unsigned long long)(uintptr_t)vt, slot, (unsigned long long)(uintptr_t)gOSKextUnresolved);
+    static volatile UInt32 gIopNoBaseLogged;
+    if (b.why) {
+        if (OSCompareAndSwap(0, 1, &gIopNoBaseLogged))
+            ALOG("iop: gamma on but no base performTransaction: %s (Darwin %d, verified %d, vtable 0x%llx, slot %ld, "
+                 "target 0x%llx, %llu bytes from signalTransactionInterrupt, unresolved 0x%llx): plane-less "
+                 "transaction answered as before",
+                 b.why, version_major, kRd3VerifiedDarwin, (unsigned long long)(uintptr_t)b.vt, b.slot,
+                 (unsigned long long)(uintptr_t)b.fn, b.fn ? (unsigned long long)rd3FamilyDistance(b.fn) : 0ull,
+                 (unsigned long long)(uintptr_t)gOSKextUnresolved);
         return kIOReturnSuccess;
     }
-    const IOReturn r = fn(pipe, txn);
+    const IOReturn r = ((PerformFn)b.fn)(pipe, txn);
     *handled = true;
     OSAddAtomic64(1, r == kIOReturnSuccess ? &gCntIopEmptyBase : &gCntIopEmptyBaseErr);
     if (OSIncrementAtomic(&gIopBaseLogs) < 8)
@@ -1025,7 +1072,7 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
                 ALOG("iop: empty #%lld +0x%03x: %08x %08x %08x %08x %08x %08x %08x %08x", (long long)e, o * 4,
                      w[o], w[o + 1], w[o + 2], w[o + 3], w[o + 4], w[o + 5], w[o + 6], w[o + 7]);
         }
-        /* rdna3gamma=1: the base class gets it (rd3AccelIopGammaToBase) */
+        /* gamma on (rdna3gamma=0 off): the base class gets it (rd3AccelIopGammaToBase) */
         bool handled;
         const IOReturn br = rd3AccelIopGammaToBase(this, txn, &handled);
         return handled ? br : kIOReturnSuccess;
@@ -1209,8 +1256,8 @@ SYSCTL_UINT(_debug, OID_AUTO, rdna3accel_heads_piped, CTLFLAG_RD | CTLFLAG_LOCKE
 static_assert(kRd3MaxFB == 4, "kRd3MaxFB changed: add debug.rdna3accel_iop_ok_h<i> for every new head");
 RD3ACCEL_CNT(rdna3accel_iop_fail,         gCntIopFail,        "K3: transactions refused (see the capped iop: log lines)");
 RD3ACCEL_CNT(rdna3accel_iop_empty,        gCntIopEmpty,       "K3: transactions with no plane (gamma/options only)");
-RD3ACCEL_CNT(rdna3accel_iop_empty_base,   gCntIopEmptyBase,   "rdna3gamma=1: plane-less transactions the base class performed");
-RD3ACCEL_CNT(rdna3accel_iop_empty_base_err, gCntIopEmptyBaseErr, "rdna3gamma=1: plane-less transactions the base class refused");
+RD3ACCEL_CNT(rdna3accel_iop_empty_base,   gCntIopEmptyBase,   "gamma on: plane-less transactions the base class performed");
+RD3ACCEL_CNT(rdna3accel_iop_empty_base_err, gCntIopEmptyBaseErr, "gamma on: plane-less transactions the base class refused");
 RD3ACCEL_CNT(rdna3accel_iop_src_res,      gCntIopSrcRes,      "K3: frames sourced from our VRAM resource");
 RD3ACCEL_CNT(rdna3accel_iop_src_surf,     gCntIopSrcSurf,     "K3: frames sourced from the IOSurface memory");
 RD3ACCEL_CNT(rdna3accel_iop_blank,        gCntIopBlank,       "K6: frames copied whose 64 samples were all ONE colour (a blank frame)");

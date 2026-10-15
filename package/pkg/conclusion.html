@@ -18,5 +18,7 @@ with <code>-rdna3off</code>.</li>
 <p>No <code>rdna3</code> boot-args are needed: the driver runs its default profile.
 Report for the developers: <code>sudo "/Library/Application Support/RDNA3/autoreport.sh" --standalone</code>
 (files in <code>/Users/Shared/rdna3-reports</code>).
-Uninstall: <code>sudo "/Library/Application Support/RDNA3/uninstall.sh"</code>.</p>
+Uninstall: mount the EFI partition, then
+<code>sudo "/Library/Application Support/RDNA3/uninstall.sh"</code>: it also removes the OpenCore
+copy, entries and <code>rdna3</code> boot-args (<code>--keep-opencore</code> skips that).</p>
 </body></html>

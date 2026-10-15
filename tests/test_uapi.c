@@ -47,7 +47,16 @@ static int vm_live, vm_maps, vm_unmaps;
 static uint64_t vm_mapped;
 static uint32_t vm_last_flags;
 static int vm_dummy;
-static void *h_vm_create(void *c) { (void)c; vm_live++; return &vm_dummy; }
+/* h_vm_full: the OS has no VM that could run (all VMIDs taken) */
+static int h_vm_full;
+static void *h_vm_create(void *c)
+{
+    (void)c;
+    if (h_vm_full)
+        return NULL;
+    vm_live++;
+    return &vm_dummy;
+}
 static uint32_t h_query_flags;
 static int h_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32_t flags)
 {
@@ -109,6 +118,8 @@ static int h_fault_info(void *c, void *vm, uint64_t *addr, uint32_t *status, uin
 }
 static uint32_t h_vm_query(void *c, void *vm) { (void)c; (void)vm; return h_query_flags; }
 static void h_vm_destroy(void *c, void *vm) { (void)c; (void)vm; vm_live--; }
+static int h_orphaned = -1;   /* the last vm_orphaned's 'reclaimable' */
+static void h_vm_orphaned(void *c, void *vm, int reclaimable) { (void)c; (void)vm; h_orphaned = reclaimable; }
 static int h_vm_map(void *c, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off, uint64_t size,
                     uint32_t flags)
 {
@@ -234,6 +245,31 @@ static uint32_t g_bl_handle;
 /* g_shadow: an AMDGPU_CHUNK_ID_CP_GFX_SHADOW chunk of g_shadow_dw dwords */
 static struct drm_amdgpu_cs_chunk_cp_gfx_shadow *g_shadow;
 static uint32_t g_shadow_dw;
+/* cs.in.ctx_id; 0: a context of the file's own (cs_ctx_of), unless
+ * g_cs_ctx_raw sends g_cs_ctx as it is */
+static uint32_t g_cs_ctx;
+static int g_cs_ctx_raw;
+static int ctx_alloc(rdna3_drm_file *f, int32_t prio, uint32_t *id);
+/* a live context of 'f' for submissions that do not care which (the CS
+ * needs one: amdgpu_cs_parser_init's amdgpu_ctx_get) */
+static uint32_t cs_ctx_of(rdna3_drm_file *f)
+{
+    static struct { rdna3_drm_file *f; uint32_t id; } cache[16];
+    uint32_t i, id = 0;
+    for (i = 0; i < 16; i++)
+        if (cache[i].f == f && cache[i].id && f->ctx_used[cache[i].id] && !f->closing &&
+            f->ctx_vram_lost[cache[i].id] == f->dev->vram_lost_counter)   /* not refused */
+            return cache[i].id;
+    if (ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &id))
+        return 0;
+    for (i = 0; i < 16; i++)
+        if (cache[i].f == f || !cache[i].f) {
+            cache[i].f = f;
+            cache[i].id = id;
+            break;
+        }
+    return id;
+}
 static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip, uint32_t in_sobj,
                      uint32_t out_sobj, uint64_t *handle)
 {
@@ -283,6 +319,7 @@ static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip
     cs.in.num_chunks = n;
     cs.in.chunks = (uint64_t)(uintptr_t)chunk_ptrs;
     cs.in.bo_list_handle = g_bl_handle;
+    cs.in.ctx_id = (g_cs_ctx || g_cs_ctx_raw) ? g_cs_ctx : cs_ctx_of(f);
     r = rdna3_drm_ioctl(f, RD_NR_AMDGPU(DRM_AMDGPU_CS), &cs, sizeof(cs));
     if (!r && handle)
         *handle = cs.out.handle;
@@ -377,7 +414,7 @@ int main(void)
     rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
                           h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL, NULL,
                           NULL, NULL, NULL, NULL, NULL, NULL,
-                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -393,6 +430,61 @@ int main(void)
     rdna3_drm_device_init(&dev, &ops, &disc, 0x747E, 0xC8, 0x0, 16ull << 30, 256ull << 20, 8ull << 30);
     CHECK(rdna3_drm_file_open(&dev, f) == 0);
     CHECK(vm_live == 1);
+    /* VMID admission while each file holds a VMID (rdna3_vmid_admit) */
+    {
+        const uint32_t user = 501;
+        /* an ordinary user: up to the per-uid cap, while more than the
+         * reserve is free */
+        CHECK(rdna3_vmid_admit(14, 0, user, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP - 1, user, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP, user, 0) == RD_VMID_OVER_UID_CAP);
+        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE + 1, 0, user, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE, 0, user, 0) == RD_VMID_RESERVED);
+        CHECK(rdna3_vmid_admit(1, 0, user, 0) == RD_VMID_RESERVED);
+        CHECK(rdna3_vmid_admit(0, 0, user, 0) == RD_VMID_POOL_EMPTY);
+        /* _windowserver: the reserve, but the per-uid cap (not an administrator) */
+        CHECK(rdna3_vmid_admit(1, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE, 1, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP, RD_UID_WINDOWSERVER, 0) == RD_VMID_OVER_UID_CAP);
+        /* root without the privilege bit gets the reserve; an administrator
+         * has no cap; nobody gets a VMID that is not there */
+        CHECK(rdna3_vmid_admit(1, 0, 0, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(1, 12, user, 1) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(0, 0, 0, 1) == RD_VMID_POOL_EMPTY);
+        /* the 15 VMIDs, one user opening until refused: the cap first,
+         * a second user up to the reserve, then only WindowServer */
+        {
+            uint32_t free_ids = 15, a = 0, b = 0;
+            while (rdna3_vmid_admit(free_ids, a, user, 0) == RD_VMID_ADMIT) { a++; free_ids--; }
+            CHECK(a == RD_VMID_UID_CAP && free_ids == 15 - RD_VMID_UID_CAP);
+            while (rdna3_vmid_admit(free_ids, b, user + 1, 0) == RD_VMID_ADMIT) { b++; free_ids--; }
+            {   /* the second user stops at its cap or where the reserve starts */
+                uint32_t left = 15 - RD_VMID_UID_CAP - RD_VMID_RESERVE;
+                uint32_t want = left < RD_VMID_UID_CAP ? left : RD_VMID_UID_CAP;
+                CHECK(b == want && free_ids == 15 - RD_VMID_UID_CAP - want);
+            }
+            CHECK(rdna3_vmid_admit(free_ids, 0, user + 2, 0) ==
+                  (free_ids > RD_VMID_RESERVE ? RD_VMID_ADMIT : RD_VMID_RESERVED));
+            free_ids = RD_VMID_RESERVE;
+            CHECK(rdna3_vmid_admit(free_ids, 0, user + 3, 0) == RD_VMID_RESERVED &&
+                  rdna3_vmid_admit(free_ids, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
+        }
+        CHECK(strcmp(rdna3_vmid_admit_reason(RD_VMID_OVER_UID_CAP), "?") != 0 &&
+              strcmp(rdna3_vmid_admit_reason(RD_VMID_POOL_EMPTY), rdna3_vmid_admit_reason(RD_VMID_RESERVED)) != 0);
+    }
+    /* no VM that can run (the kext: no VMID left): the open fails cleanly,
+     * nothing of the file stays on the device; the next open works */
+    {
+        static rdna3_drm_file full;
+        uint32_t next = dev.next_file_id;
+        h_vm_full = 1;
+        CHECK(rdna3_drm_file_open(&dev, &full) == -RD_ENOMEM);
+        CHECK(dev.files == f && f->next_file == NULL && dev.next_file_id == next && vm_live == 1);
+        h_vm_full = 0;
+        CHECK(rdna3_drm_file_open(&dev, &full) == 0 && vm_live == 2 && dev.files == &full);
+        rdna3_drm_file_close(&full);
+        CHECK(vm_live == 1 && dev.files == f);
+    }
 
     /* drmGetVersion */
     {
@@ -616,7 +708,8 @@ int main(void)
         c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = id;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == -RD_EINVAL);
-        /* reset state comes from the OS through vm_query (amdgpu_ctx_query2) */
+        /* reset state comes from the OS through vm_query (amdgpu_ctx_query2);
+         * VRAMLOST is the context's own, the VM's is ignored */
         memset(&c, 0, sizeof(c));
         c.in.op = AMDGPU_CTX_OP_ALLOC_CTX;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
@@ -625,7 +718,8 @@ int main(void)
         h_query_flags = AMDGPU_CTX_QUERY2_FLAGS_RESET | AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
         memset(&c, 0, sizeof(c));
         c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = id;
-        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 && c.out.state.flags == h_query_flags);
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
+              c.out.state.flags == AMDGPU_CTX_QUERY2_FLAGS_RESET);
         memset(&c, 0, sizeof(c));
         c.in.op = AMDGPU_CTX_OP_QUERY_STATE; c.in.ctx_id = id;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
@@ -639,6 +733,58 @@ int main(void)
         dev.ops.vm_query = NULL;
         memset(&c, 0, sizeof(c));
         c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = id;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+    }
+    /* VRAM lost for good (amdgpu_inc_vram_lost): the counter, and the
+     * contexts made before it report VRAMLOST (amdgpu_ctx_query2:
+     * ctx->generation != amdgpu_vm_generation); one made after does not */
+    {
+        union drm_amdgpu_ctx c;
+        uint32_t before, after, lost = 7;
+        CHECK(info(f, AMDGPU_INFO_VRAM_LOST_COUNTER, &lost, 4) == 0 && lost == 0);
+        CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &before) == 0);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 && c.out.state.flags == 0);
+        rdna3_drm_device_vram_lost(&dev);
+        CHECK(info(f, AMDGPU_INFO_VRAM_LOST_COUNTER, &lost, 4) == 0 && lost == 1);
+        CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &after) == 0 && after != before);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
+              c.out.state.flags == AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = after;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 && c.out.state.flags == 0);
+        /* QUERY_STATE (amdgpu_ctx_query) knows only resets */
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
+              c.out.state.reset_status == AMDGPU_CTX_NO_RESET);
+        /* a context id freed and handed out again records the new count */
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+        CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &before) == 0);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 && c.out.state.flags == 0);
+        /* a second loss: the context made between the two sees it */
+        rdna3_drm_device_vram_lost(&dev);
+        CHECK(info(f, AMDGPU_INFO_VRAM_LOST_COUNTER, &lost, 4) == 0 && lost == 2);
+        {
+            uint64_t l64 = ~0ull;   /* 4 bytes, whatever the buffer (min(size, 4u)) */
+            CHECK(info(f, AMDGPU_INFO_VRAM_LOST_COUNTER, &l64, 8) == 0 &&
+                  (uint32_t)l64 == 2 && (uint32_t)(l64 >> 32) == 0xffffffffu);
+        }
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = after;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
+              c.out.state.flags == AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+        c.in.ctx_id = after;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
     }
     /* context priorities (amdgpu_ctx_ioctl / amdgpu_ctx_priority_permit) and
@@ -1006,6 +1152,54 @@ int main(void)
         CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED);
         h_query_flags = AMDGPU_CTX_QUERY2_FLAGS_RESET;
         dev.ops.vm_query = NULL;
+        /* amdgpu_cs_pass1: a context made before VRAM was lost submits
+         * nothing more (-ECANCELED); one made after gets through */
+        {
+            uint32_t old_ctx, new_ctx;
+            CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &old_ctx) == 0);
+            g_cs_ctx = old_ctx;
+            CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            CHECK(dev.vram_lost_cs_refuse == 1);   /* amdgpu's, the default */
+            rdna3_drm_device_vram_lost(&dev);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED);
+            /* the kill switch (kext: rdna3vramlostcs=0): the old context
+             * submits again, QUERY_STATE2 still says VRAMLOST */
+            rdna3_drm_device_set_vram_lost_cs(&dev, 0);
+            CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            {
+                union drm_amdgpu_ctx qs;
+                memset(&qs, 0, sizeof(qs));
+                qs.in.op = AMDGPU_CTX_OP_QUERY_STATE2; qs.in.ctx_id = old_ctx;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), qs) == 0 &&
+                      qs.out.state.flags == AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST);
+            }
+            rdna3_drm_device_set_vram_lost_cs(&dev, 1);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED);
+            CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &new_ctx) == 0);
+            g_cs_ctx = new_ctx;
+            CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_cs_ctx = 0;
+            {
+                union drm_amdgpu_ctx c;
+                memset(&c, 0, sizeof(c));
+                c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = old_ctx;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+                c.in.ctx_id = new_ctx;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+            }
+            /* amdgpu_cs_parser_init: no live context, -EINVAL - id 0, a
+             * freed id (the one VRAM loss made stale included) and one
+             * past the table do not get around the refusal */
+            g_cs_ctx_raw = 1;
+            g_cs_ctx = 0;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_cs_ctx = old_ctx;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_cs_ctx = RD_MAX_CTX;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_cs_ctx_raw = 0;
+            g_cs_ctx = 0;
+        }
         CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);   /* not dwords */
         memset(&sc, 0, sizeof(sc));
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, sc) == 0);
@@ -1752,16 +1946,46 @@ int main(void)
         CHECK(probe_vm_live == live0 && probe_vm_unmaps == unm0 && probe_ioctl == -RD_ENODEV);
         CHECK(ring_done >= pend && vm_live == live0 - 1 && vm_unmaps == unm0 + 1);
         /* a job that never finishes, not even after the OS's job-timeout
-         * recovery (h_hang): the VM is left alone, not freed under it */
-        CHECK(rdna3_drm_file_open(&dev, &fz) == 0);
-        CHECK(cs_submit(&fz, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
-        live0 = vm_live;
-        h_hang = 1;
-        rdna3_drm_file_close(&fz);
-        h_hang = 0;
-        CHECK(vm_live == live0);   /* leaked, as TTM keeps BOs with pending fences */
-        vm_live--;                 /* (released by hand for the totals below) */
-        ring_done = ring_next;
+         * recovery (h_hang): the VM, its mappings and BOs are left alone,
+         * not freed under it, until the job is done (TTM's delayed delete:
+         * rdna3_drm_device_reap_orphans) */
+        {
+            unsigned bos0;
+            dev.ops.vm_orphaned = h_vm_orphaned;
+            CHECK(rdna3_drm_file_open(&dev, &fz) == 0);
+            bos0 = live_bos;
+            memset(&gz, 0, sizeof(gz));
+            gz.in.bo_size = 65536;
+            gz.in.domains = AMDGPU_GEM_DOMAIN_GTT;
+            CHECK(IOCTL(&fz, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gz) == 0);
+            vz.handle = gz.out.handle;
+            CHECK(IOCTL(&fz, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), vz) == 0);
+            CHECK(cs_submit(&fz, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
+            pend = ring_next;
+            live0 = vm_live;
+            unm0 = vm_unmaps;
+            h_hang = 1;
+            rdna3_drm_file_close(&fz);
+            h_hang = 0;
+            CHECK(vm_live == live0 && vm_unmaps == unm0 && live_bos == bos0 + 1 && h_orphaned == 1);
+            CHECK(dev.orphans[0].vm == &vm_dummy && dev.orphans[0].last_seq[AMDGPU_HW_IP_DMA][0] == pend);
+            CHECK(rdna3_drm_device_reap_orphans(&dev) == 0 && vm_live == live0);   /* still running */
+            ring_done = ring_next;   /* a later reset forced the fence */
+            CHECK(rdna3_drm_device_reap_orphans(&dev) == 1 && vm_live == live0 - 1 && live_bos == bos0);
+            CHECK(dev.orphans[0].vm == NULL && rdna3_drm_device_reap_orphans(&dev) == 0);
+            /* an open reaps first: a second orphan goes with the next open */
+            CHECK(rdna3_drm_file_open(&dev, &fz) == 0);
+            CHECK(cs_submit(&fz, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
+            live0 = vm_live;
+            h_hang = 1;
+            rdna3_drm_file_close(&fz);
+            h_hang = 0;
+            CHECK(vm_live == live0 && dev.orphans[0].vm);
+            ring_done = ring_next;
+            CHECK(rdna3_drm_file_open(&dev, &fz) == 0 && vm_live == live0 && !dev.orphans[0].vm);
+            rdna3_drm_file_close(&fz);
+            dev.ops.vm_orphaned = NULL;
+        }
         h_only = only0;
         h_hang = hang0;
         h_ring32 = r32;

@@ -33,8 +33,11 @@ make -C metal translator    # librdna3mtl_translate.dylib (cargo)
    (IOAcceleratorFamily2 with reconstructed headers). The AMD port is a separate
    kext loaded from the AuxKC (Stage 7).
 2. RADV with a working CS (Stage 2 + 5).
-3. The process allow list (`metal/rdna3mtl-allow.txt`) starts narrow:
-   `mtlprobe`, `nvmtltest`, `vulkaninfo`.
+3. The process allow list (`metal/rdna3mtl-allow.txt`) started narrow
+   (`mtlprobe`, `nvmtltest`, `vulkaninfo`, later `@WindowServer`) and
+   has an apps mode since card runs 48-56 (every application, minus a deny
+   list; `docs/INSTALL-OPENCORE.md`, policy in
+   `metal/plugin/rdna3mtl_allow_policy.h`, tested by `tests/test_mtl_allow.c`).
 
 ## Notes
 

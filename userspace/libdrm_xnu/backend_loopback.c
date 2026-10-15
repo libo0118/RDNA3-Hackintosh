@@ -349,7 +349,7 @@ static void dev_init(void)
                           lb_vm_create, lb_vm_destroy, lb_vm_map, lb_vm_unmap,
                           lb_submit, lb_signaled, lb_wait, NULL,
                           lb_bo_userptr, lb_sensor, NULL, lb_random64, lb_scanout, lb_privileged,
-                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, lb_surface_bo, lb_surface_dirty };
+                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, lb_surface_bo, lb_surface_dirty, NULL };
     amd_discovery disc;
     if (g_dev_ready)
         return;

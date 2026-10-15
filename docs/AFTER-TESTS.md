@@ -241,7 +241,7 @@ item in the SUMMARY; the full output is in the tests file under `== probe:`.
 | `V3 Vulkan WSI` | V3 present | the WSI extensions RADV offers; with a headless surface, a swapchain cleared and presented | `no present path`: RADV is built without WSI (`-Dplatforms=`): the next step is Mesa's WSI common with a headless or Metal-layer platform |
 | `A3 IOSurface` | A3 IOSurface <-> BO | an IOSurface as a Metal texture: CPU -> GPU and GPU -> CPU pixel counts | `newTextureWithDescriptor:iosurface: returned nil`: the plugin has no IOSurface textures (its log after the probe); counts wrong: the surface's backing is not the memory the GPU used |
 | `M4 CAMetalLayer`, `M4 on the screen` | M4 present | drawables, rendering, presents; magenta pixels in the scanout picture taken while the window showed | drawables NONE: the layer refused the plugin's device; presented 0 or no magenta on the screen: the drawable never reaches WindowServer's composition |
-| `M5 WindowServer` | M5 | which processes loaded the plugin, whether WindowServer did, system_profiler's Metal line, WindowServer's GPU messages | WindowServer does not load it (not on the allow list): an M5 step with WindowServer allowed is the next experiment |
+| `M5 WindowServer` | M5 | which processes loaded the plugin, whether WindowServer did, system_profiler's Metal line, WindowServer's GPU messages; the allow list and its mode (`allow mode: apps` / `list`) | WindowServer does not load it (not on the allow list): an M5 step with WindowServer allowed is the next experiment |
 | `M6 apps`, `M6 Chess` / `Maps` | M6 apps | running, plugin loaded, crash report | a crash report: its first 40 lines in the tests file name the Metal call that failed |
 
 ### Step 8c (`rdna3mes=1`): MES scheduler pipe
@@ -433,7 +433,7 @@ The report's `hotplug window` section has `RDNA3,HPDState` (`HPD1 1 HPD2 0 ...`,
 | triage `!! two lit pipes scan the same surface` | a swap routed to the wrong head | serial log `swap #N: head X now gets head Y's frame` / `surface ... moves from head` / `... freed`: which rule (`kHow`) answered; `rd3AccelSwapToPanel` |
 | `display sleep: FAIL` (no BLANKED pipe) | IOFramebuffer never set power 0, or the core refused | fb log `power 0: head N blanked`; core `display: head N blanked`; `rdna3dpms=1` in the boot args? |
 | `display wake: FAIL` (still BLANKED) | power 1 not delivered / unblank lost | same lines with `unblanked`; `dcn32_set_blank` |
-| step `gamma`: `GAMMA: FAIL - 0 of N pipe(s) moved with the dark table` | the table never reached the MPCC OGAM: boot-arg, fb not asking, core refusing, wrong MPCC, or MODE/SELECT not latched | fb log `head N: gamma ...` (no line: IOFramebuffer never called `setGammaTable`), core log `display: head N gamma ...` and ioreg `RDNA3,Head<n>,Gamma` (expect `table ... mode 2 RAM A/B`); `gamma: MPCC n OGAM memory does not power up` -> `MPCC_MEM_PWR_CTRL`; mode 2 and still no change: the head's MPCC walk (`dcn32_gamma_otg_mpccs`: OPTC_DATA_SOURCE_SELECT -> MPC_OUT_MUX) or the OTG lock in `dcn32_gamma_apply` |
+| step `gamma`: `GAMMA: FAIL - 0 of N pipe(s) moved with the dark table` | the table never reached the MPCC OGAM: `rdna3gamma=0` (gamma is on by default since card run 56), fb not asking, core refusing, wrong MPCC, or MODE/SELECT not latched | fb log `head N: gamma ...` (no line: IOFramebuffer never called `setGammaTable`), core log `display: head N gamma ...` and ioreg `RDNA3,Head<n>,Gamma` (expect `table ... mode 2 RAM A/B`); `gamma: MPCC n OGAM memory does not power up` -> `MPCC_MEM_PWR_CTRL`; mode 2 and still no change: the head's MPCC walk (`dcn32_gamma_otg_mpccs`: OPTC_DATA_SOURCE_SELECT -> MPC_OUT_MUX) or the OTG lock in `dcn32_gamma_apply` |
 | `GAMMA: FAIL - ... the restore did not reach the pipe` (moved, not back) | the ColorSync table did not come back, or the RAM ping-pong latched the wrong RAM | `== gamma pipe` lines: `identity` CRC vs `before` (saved table identity -> equal); `RDNA3,Head<n>,Gamma` call count went up after the restore? `mpc3_get_ogam_current` / `MPCC_OGAM_SELECT` in `hw/dcn32_gamma.c` |
 | `GAMMA: FAIL - the picture in VRAM darkened` | WindowServer applied the table in the compositor (software gamma), so the OGAM is not proven | fb log: was `setGammaTable` called at all; IOFramebuffer gamma properties (`IOFBGammaWidth` / `IOFBGammaCount`) |
 | `GAMMA: PASS`, but colours / Night Shift look wrong on the monitor | curve mapping: OGAM input taken as the encoded pixel value (DPP colour management in bypass, as the GOP leaves it); pixel value 0 always maps to 0 (start slope from the origin) | photo of the screen; same boot with the ColorSync profile set to sRGB; check the DPP's degamma / gamut remap (`CM_DGAM_*`, `CM_GAMUT_REMAP_*`) left by the GOP |
@@ -1163,7 +1163,7 @@ shows the queue.
 | Symptom | Likely cause | Action |
 |---|---|---|
 | GAMMA: FAIL, no "first setGammaTable" line in the fb log | IOFramebuffer does not hand gamma down | check IOFBGammaWidth/IOFBGammaCount on RDNA3Framebuffer in ioreg |
-| "first setGammaTable" logged, no "gamma ... -> 0x0" | the core refused (rdna3gamma=1? DCN head?) | core log `display: gamma` |
+| "first setGammaTable" logged, no "gamma ... -> 0x0" | the core refused (`rdna3gamma=0` in the boot-args? DCN head?) | core log `display: gamma` |
 | the call reaches the core, the CRC does not move | OGAM not reaching the pipe (MPCC routing, memory power, MODE_CURRENT) | `RDNA3,Head<n>,Gamma` state |
 
 ### Card run 27 (queue `gamma sleep hotplug`, build 102)
@@ -1598,6 +1598,7 @@ Settings. That is expected for them, not a display regression.
 | Symptom | Likely cause | Action |
 |---|---|---|
 | `agdc`: WindowServer restarts, assert "Failed to create MetalDevice" | WindowServer got no Metal device from the plugin while a display pipe exists | the allow list has `@WindowServer`, mode 644; the plugin rebuilt with it (build_metal.sh); `NVMTL:` lines of WindowServer in `24-log-coredisplay.txt` say why |
+| apps mode (the `%apps` line of `rdna3mtl-allow.txt`, N1): an application misbehaves or the GPU address spaces run out | every application on the desktop now gets the device while the card is armed and WindowServer is on the plugin | `34-metal-allow.txt` (triage "Metal apps mode"): which processes got it and why the others did not; the kernel log's `VM: VMID n for <process>` lines and `VM: no VMID` (15 VMIDs, one per open file; 7 with `rdna3userq`). Deny the app with `-name`, or `rdna3mtlapps=0` / no `%apps` line for the old explicit list. Safari's WebKit.GPU cannot load the plugin at all (sandbox, card run 56): not a driver bug |
 | `agdc`: WindowServer never opens the accelerator, no report | AGDC appeared while WindowServer started | `RDNA3,AGDCBootHold` must say "display stack armed"; "CAP" = the object or the table was late |
 
 ### Card run 47 (step agdc, `rdna3agdc=3`, build 177)

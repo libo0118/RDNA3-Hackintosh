@@ -116,13 +116,15 @@ public:
 
     /* Stage 4: DRM/amdgpu UAPI for RDNA3UserClient (RDNA3Drm.cpp) */
     bool  drmAvailable() const { return fDrm != nullptr; }
-    int   drmOpen(rdna3_drm_file *f);
+    int   drmOpen(rdna3_drm_file *f, bool admin);   /* admin: kIOClientPrivilegeAdministrator */
     void  drmClose(rdna3_drm_file *f);
     int   drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size);
     void drmBoRelease(rdna3_bo *bo);   /* a CPU mapping's reference (RDNA3BoMemory) */
     IOMemoryDescriptor *drmMemoryForOffset(rdna3_drm_file *f, uint64_t off,
                                            IOOptionBits *options);
 
+    /* the bring-up's GPUVM runs: the accelerator's own VM now */
+    void  platformVmReady();
     /* called by the bring-up thread when a ring really executes */
     void  drmRingReady(uint32_t ip, uint32_t mask);
     /* the MES runs and rdna3userq=1: user queues for the IPs of 'ipMask'
@@ -225,6 +227,12 @@ private:
     /* after a reset or a resume that lost VRAM: the clients' GPUVM ranges
      * into the rebuilt page tables (fDrmLock held) */
     void          drmVmReplayIfNeeded();
+    /* amdgpu_inc_vram_lost for every VRAM loss the DRM was not told of yet
+     * (rdna3_drm_device_vram_lost): after a reset, and after a resume once
+     * vramRestore decided (a loss every evicted range came back from is
+     * not one). fDrmLock held. */
+    void          drmVramLostSync();
+    uint32_t      fVramLostTold = 0;     /* the losses the DRM counted */
     static void  *drmZalloc(void *ctx, size_t n);
     static void   drmFreeMem(void *ctx, void *p, size_t n);
     static int    drmBoAlloc(void *ctx, rdna3_bo *bo);
@@ -240,6 +248,7 @@ private:
     static int    drmCopyout(void *ctx, uint64_t uaddr, const void *src, size_t len);
     static void  *drmVmCreate(void *ctx);
     static void   drmVmDestroy(void *ctx, void *vm);
+    static void   drmVmOrphaned(void *ctx, void *vm, int reclaimable);
     static int    drmVmMap(void *ctx, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off,
                            uint64_t size, uint32_t flags);
     static void   drmVmUnmap(void *ctx, void *vm, uint64_t va, uint64_t size);
@@ -252,6 +261,7 @@ private:
     /* Stage 7 */
     range_alloc  *fAccelVa = nullptr;
     void         *fAccelVm = nullptr;    /* the accelerator's GPUVM context (its own VMID) */
+    bool          fAccelVmRefusalLogged = false;
     IOReturn      platformPageoff(struct RD3KSurfPageoff *q);
     IOReturn      platformCopyVram(struct RD3KCopyRequest *q);
     uint64_t      fAccelVramBytes = 0;
@@ -442,7 +452,7 @@ private:
     void          displayReadVbios();
     static uint32_t dispMmioRd(void *ctx, uint64_t off);
     static void     dispMmioWr(void *ctx, uint64_t off, uint32_t v);
-    /* output gamma from the framebuffer (rdna3DisplayGamma, rdna3gamma=1) */
+    /* output gamma from the framebuffer (rdna3DisplayGamma; off with rdna3gamma=0) */
     IOReturn      displayGamma(struct RD3KDisplayGamma *g);
     void          displayGammaReload(uint32_t head);   /* fDispLock held */
     uint32_t      fGammaCalls[4] = {};

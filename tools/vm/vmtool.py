@@ -3,12 +3,14 @@
 vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
 
   vmtool.py plist CONFIG [--show] [--boot-args S] [--sip-off] [--timeout N] [--kext NAME[:EXEC[:MIN:MAX]]]
-                  [--resolution WxH|Max]
+                  [--remove-kext NAME] [--resolution WxH|Max]
       edit an OpenCore config.plist: boot-args and csr-active-config under
       NVRAM/Add (and listed under NVRAM/Delete so OpenCore really applies
       them), SecureBootModel Disabled, picker timeout, a Kernel/Add entry
       for EFI/OC/Kexts/NAME.kext, UEFI/Output/Resolution (the GOP mode
-      OpenCore sets before macOS: the boot framebuffer's size)
+      OpenCore sets before macOS: the boot framebuffer's size);
+      --remove-kext deletes the Kernel/Add entries of EFI/OC/Kexts/NAME.kext
+      (only those: other entries stay)
   vmtool.py romcheck FILE        a PCI option ROM with a UEFI (GOP) image?
   vmtool.py unzip ZIP DIR        extract (keeps the tree)
   vmtool.py serve DIR PORT [UP]  HTTP on 127.0.0.1: GET files, PUT into UP (DIR/reports)
@@ -86,6 +88,11 @@ def _set(text, sec, key, value_xml):
     return text[:close] + "\t<key>%s</key>\n\t%s\n" % (key, value_xml) + text[close:]
 
 
+def _unxml(s):
+    return (s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+            .replace("&apos;", "'").replace("&amp;", "&"))
+
+
 def _xml(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -141,6 +148,19 @@ def add_kext(text, spec):
     return text[:close] + "\t" + KEXT_ENTRY % v + "\n\t\t" + text[close:]
 
 
+def remove_kext(text, name):
+    """(text without the Kernel/Add entries whose BundlePath is NAME.kext,
+    how many were removed); the entries are flat <dict>s, other entries and
+    a missing Kernel/Add array stay untouched"""
+    found = _value_after_key(text, "Add", *_section(text, "Kernel"))
+    if not found or not text.startswith("<array", found[1]):
+        return text, 0
+    entry = re.compile(r"[ \t]*<dict>(?:(?!</dict>).)*?<key>BundlePath</key>\s*<string>%s\.kext</string>"
+                       r".*?</dict>[ \t]*\n?" % re.escape(_xml(name)), re.S)
+    arr, n = entry.subn("", text[found[1]:found[2]])
+    return text[:found[1]] + arr + text[found[2]:], n
+
+
 def cmd_plist(argv):
     """Edits only the values it changes, as text: OpenCore accepts plists
     that Python's plistlib refuses (and a rewrite would reformat the file)."""
@@ -150,7 +170,9 @@ def cmd_plist(argv):
     if "--show" in argv:
         found = _value_after_key(text, "boot-args", *add())
         m = re.match(r"<string>(.*?)</string>", text[found[1]:found[2]], re.S) if found else None
-        print(m.group(1) if m else "")
+        # the file holds XML text: a value with & comes back as the user typed it,
+        # so writing it again (which escapes) round-trips byte for byte
+        print(_unxml(m.group(1)) if m else "")
         return 0
 
     def delete_list(name):
@@ -186,6 +208,10 @@ def cmd_plist(argv):
         elif a == "--kext":
             text = add_kext(text, argv[i + 1])
             i += 2
+        elif a == "--remove-kext":
+            text, n = remove_kext(text, argv[i + 1])
+            print("Kernel/Add: %s.kext %s" % (argv[i + 1], "removed" if n else "not listed"))
+            i += 2
         elif a == "--resolution":
             text = _set(text, _section(text, "UEFI", "Output"), "Resolution",
                         "<string>%s</string>" % _xml(argv[i + 1]))
@@ -195,7 +221,7 @@ def cmd_plist(argv):
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     found = _value_after_key(text, "boot-args", *add())
-    print("boot-args:", re.sub(r"</?string>", "", text[found[1]:found[2]]) if found else "")
+    print("boot-args:", _unxml(re.sub(r"</?string>", "", text[found[1]:found[2]])) if found else "")
     return 0
 
 

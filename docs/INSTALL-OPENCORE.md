@@ -151,9 +151,9 @@ Then, once per new build: System Settings → Privacy & Security → **Allow**
 next to the blocked system software, and restart. Until then the
 framebuffer and the accelerator do not load (the core from OpenCore does).
 
-The Metal plugin is loaded only into the processes listed in
-`/Library/GPUBundles/rdna3mtl-allow.txt` (test tools for now). NullMoth
-also uses `amfi_get_out_of_my_way=0x1` so WindowServer accepts an unsigned
+The Metal plugin decides per process whether it hands out its Metal device
+(`/Library/GPUBundles/rdna3mtl-allow.txt`, see "Which apps get the GPU"
+below). NullMoth also uses `amfi_get_out_of_my_way=0x1` so WindowServer accepts an unsigned
 bundle; not needed for the default profile, and it weakens the system's
 code-signing checks further.
 
@@ -205,6 +205,9 @@ The profile's values (a boot-arg always wins; `rdna3profile=0` drops them
 all, `rdna3profile=1` adds them to an explicit `rdna3lvl`):
 `rdna3lvl=8 rdna3msi=1 rdna3dmub=1 rdna3fb=1 rdna3mirror=2 rdna3accel=1
 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1`.
+The output gamma (Night Shift, calibration, the ColorSync curve macOS loads
+at login) is on outside the profile too, at every `rdna3lvl` (card run 56);
+`rdna3gamma=0` turns it off.
 
 Opt-in features and switches (step names from `tools/ladder-steps.txt`,
 what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
@@ -223,6 +226,7 @@ what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
 | `rdna3baco=1` | with `rdna3pmctl`: `rdna3_pmctl baco-cycle` takes the chip through BACO and brings it up again (step baco); no sleep path uses BACO |
 | `rdna3socg=1` | HDP/ATHUB clock gating (`hw/soc21_cg.c`) |
 | `rdna3cg=0` | GFX clock gating off (on by default since card run 8) |
+| `rdna3gamma=0` | macOS's gamma tables (Night Shift, calibration, ColorSync) no longer reach the display's output gamma; the screen keeps the linear curve (on by default since card run 56) |
 | `rdna3sleep=1` | lift the idle-sleep block (no suspend/resume yet: the picture is gone after a sleep) |
 | `rdna3mirror=1` | the second monitor mirrors the first instead of extending the desktop (step 9b) |
 | `rdna3dmub=3` | attach to the DMCUB the GOP left running instead of restarting it (step 5c) |
@@ -237,8 +241,55 @@ what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
 | `rdna3post=0` | do not post an unposted card through the VBIOS |
 | `rdna3doorbell=0` | no doorbell BAR: rings keep their write-pointer registers |
 | `rdna3cursor=0` | no hardware cursor |
+| `rdna3mtlapps=0` | read by the Metal plugin: ends apps mode (`%apps` in `rdna3mtl-allow.txt`), only the names in the list keep the GPU |
 | `rdna3enum=1` | report the GPU as working for enumeration only; submissions fail (debug) |
+| `rdna3vramlostcs=0` | after a VRAM loss (a reset or a sleep whose VRAM did not all come back), contexts made before it keep submitting instead of failing with -ECANCELED (amdgpu's behaviour, the default); the counter and VRAMLOST are reported either way. With the default, RADV turns the refused submission into `VK_ERROR_DEVICE_LOST` ("The CS has been cancelled because the context is lost"), the Metal plugin then disables its Vulkan backend for that process and every later command buffer ends with `MTLCommandBufferErrorInternal`: the process (WindowServer too, while it has the RDNA3 Metal device) stops drawing with the GPU until it is restarted, rather than drawing from lost memory. `=0` keeps it drawing, possibly garbage (debug) |
 | `rdna3soak=<min>`, `rdna3hangtest=1`/`2` | read by the report script only: soak loop, hang/recovery test |
+
+### Which apps get the GPU (Metal plugin)
+
+`/Library/GPUBundles/rdna3mtl-allow.txt` decides, in every process that
+loads the plugin, whether that process gets the Metal device. Without a
+device an app stays on Apple's software path (nothing breaks, it is just
+not on the GPU). The shipped list has two parts:
+
+- **Apps mode** (the `%apps` line): every application, meaning an
+  executable in `Contents/MacOS` of an `.app` in `/Applications`,
+  `/System/Applications` or the running user's own `~/Applications` (only
+  `/Users/<name>`; homes elsewhere, other users' folders and translocated
+  apps are refused; `Info.plist` is not read), but only while the accelerator is armed
+  (`debug.rdna3accelfb`) and WindowServer runs on the plugin
+  (`debug.rdna3agdc` is 1): the configuration card runs 48-56 ran Chess and
+  Maps in. Not served: the session's agents (Dock, Finder, SystemUIServer,
+  loginwindow: they run all session and each would hold one of the card's
+  GPU address spaces), helpers and XPC services inside bundles, apps nested in another app
+  (Xcode's Simulator), and command line tools. `-name` lines are a deny list
+  (shipped: `-Safari`); they match the process name and the executable's file
+  name, and `NVMTL_ENABLE` plus `mtlprobe`, `nvmtltest`, `nvmtlrender`
+  bypass the list.
+- **Names**: `mtlprobe`, `nvmtltest`, `vulkaninfo` and `@WindowServer`
+  (WindowServer only while the display pipe is up: CoreDisplay asserts
+  without a Metal device then, card runs 41 and 45). Leave these as they are.
+
+Switch apps mode off without rebuilding anything: delete (or `#`) the
+`%apps` line, which gives the old explicit-names list back, or add
+`rdna3mtlapps=0` to the OpenCore boot-args when the desktop is unusable
+(the list file needs a working session, the boot-arg does not). Add a helper
+or an app that lives elsewhere by name (one line each); deny one with
+`-name`. A package install replaces the file.
+
+Each process that loads the plugin logs one line, `NVMTL: allow mode: <mode>;
+<process>: <reason>` (report: `34-metal-allow.txt`); if a sandbox hides the
+boot-args from a process, the line says `boot-args unreadable` and
+`rdna3mtlapps=0` was not checked there (use the list file for those). Limits that are not the
+driver's to fix: Safari's web content renders in `com.apple.WebKit.GPU`,
+whose sandbox refuses to map code from `/Library/GPUBundles` ("file system
+sandbox blocked mmap()", card run 56, SIP off or not), so Safari pages stay
+on Apple's software path; Apple's own GPU bundles live on the sealed system
+volume. Other sandboxed helpers (Chrome and Electron GPU processes) are in
+the same position. Every process with the device takes one of the card's
+15 GPU address spaces (VMIDs; 7 with `rdna3userq=1`) for as long as it runs,
+so many GPU apps at once can exhaust them (the kernel log says `VM: no VMID`).
 
 ## 8. The way back
 
@@ -250,7 +301,9 @@ Prepare **one** of these before the first boot:
    `config.plist` is the problem.
 2. **`-rdna3off` in `config.plist`**: `oc_install.sh --efi /Volumes/EFI --off`
    writes it (with a backup `config.plist.rdna3-<date>`; restore a backup to
-   undo). `sudo nvram boot-args=…` does not help when OpenCore sets
+   undo). `--remove` instead takes the kext copies, their `Kernel/Add`
+   entries and the `rdna3*` boot-args out for good (see Uninstall below).
+   `sudo nvram boot-args=…` does not help when OpenCore sets
    boot-args from `config.plist` at every boot.
 3. **From Recovery**, when macOS no longer starts: remove the kexts from
    the Data volume,
@@ -263,9 +316,28 @@ Prepare **one** of these before the first boot:
 Safe Mode (Shift in the picker) skips the Auxiliary KC (framebuffer,
 accelerator) but not the core that OpenCore injects.
 
-**Uninstall:** `sudo "/Library/Application Support/RDNA3/uninstall.sh"`
-(`--keep-firmware` keeps the firmware), then remove the OpenCore entry and
-`EFI/OC/Kexts/RDNA3Accel.kext`, and restart.
+**Uninstall:** mount the EFI partition (`sudo diskutil mount disk0s1`), then
+`sudo "/Library/Application Support/RDNA3/uninstall.sh"` and restart. It
+removes the kexts in `/Library/Extensions`, the Metal plugin and RADV in
+`/Library/GPUBundles` and `/Library/Application Support/RDNA3`, and takes
+the OpenCore side out through `oc_install.sh --remove`, which first writes
+the backup `config.plist.rdna3-<date>` and then deletes only what this
+installer added: the `RDNA3*.kext` copies in `EFI/OC/Kexts`, their
+`Kernel/Add` entries and the `rdna3*` / `-rdna3*` boot-args. Your other
+kexts, entries and boot-args and the backups stay, and it prints what it
+removed and what it left.
+
+- The EFI is taken from `--efi DIR`, else `/Volumes/EFI`. If OpenCore booted
+  the Mac but no EFI is mounted, the script stops **before removing
+  anything** and says so; mount it, or add `--keep-opencore`.
+- `--keep-opencore` leaves OpenCore alone. Its kexts then inject a core
+  that is gone; remove them later with
+  `sudo package/oc_install.sh --efi /Volumes/EFI --remove` from a source
+  checkout (the installed copy is deleted by the uninstall), or by hand.
+- `--keep-firmware` keeps `/Library/Application Support/RDNA3/firmware`.
+- The same removal alone, keeping the install:
+  `sudo "/Library/Application Support/RDNA3/oc_install.sh" --efi /Volumes/EFI --remove`.
+  (`--off` is different: it only adds `-rdna3off`, the kexts stay.)
 
 ## Licenses
 
