@@ -116,7 +116,7 @@ public:
 
     /* Stage 4: DRM/amdgpu UAPI for RDNA3UserClient (RDNA3Drm.cpp) */
     bool  drmAvailable() const { return fDrm != nullptr; }
-    int   drmOpen(rdna3_drm_file *f, bool admin);   /* admin: kIOClientPrivilegeAdministrator */
+    int   drmOpen(rdna3_drm_file *f, bool console);   /* console: kIOClientPrivilegeConsoleSession */
     void  drmClose(rdna3_drm_file *f);
     int   drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size);
     void drmBoRelease(rdna3_bo *bo);   /* a CPU mapping's reference (RDNA3BoMemory) */
@@ -262,6 +262,7 @@ private:
     range_alloc  *fAccelVa = nullptr;
     void         *fAccelVm = nullptr;    /* the accelerator's GPUVM context (its own VMID) */
     bool          fAccelVmRefusalLogged = false;
+    bool          fAccelVmStopping = false;   /* stop: no new accelerator VM (fDrmLock) */
     IOReturn      platformPageoff(struct RD3KSurfPageoff *q);
     IOReturn      platformCopyVram(struct RD3KCopyRequest *q);
     uint64_t      fAccelVramBytes = 0;

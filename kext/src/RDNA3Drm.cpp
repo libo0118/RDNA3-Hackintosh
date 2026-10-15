@@ -901,7 +901,7 @@ void RDNA3Accel::drmFree()
     fDrmLock = nullptr;
 }
 
-int RDNA3Accel::drmOpen(rdna3_drm_file *f, bool admin)
+int RDNA3Accel::drmOpen(rdna3_drm_file *f, bool console)
 {
     /* the opener's thread (IOServiceOpen -> the user client's start) */
     uint32_t uid = kauth_cred_getuid(kauth_cred_get());
@@ -911,7 +911,7 @@ int RDNA3Accel::drmOpen(rdna3_drm_file *f, bool admin)
      * pool, per-uid cap, the reserve) the open fails - the user client does
      * not start, libdrm's open fails, the Metal plugin falls back to no
      * device - instead of handing out a VM that cannot submit */
-    if (fBringup && !fBringup->vmCanOpen(uid, admin)) {
+    if (fBringup && !fBringup->vmCanOpen(uid, console)) {
         IOLockUnlock(fDrmLock);
         return -RD_ENOSPC;
     }

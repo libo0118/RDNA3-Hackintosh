@@ -310,6 +310,7 @@ void RDNA3Bringup::stopAndFree()
     fDmub = nullptr;
     if (fRom) IOFree(fRom, RD_VBIOS_MAX_LEN);
     fVmReady = false;
+    vmFreeLeftovers();   /* before the table pool goes */
     if (fPtPool) IOFree(fPtPool, sizeof(*fPtPool));
     fPtPool = nullptr;
     if (fMes) IOFree(fMes, sizeof(*fMes));
@@ -1992,6 +1993,7 @@ struct RDNA3Vm {
     uint32_t ownerUid;   /* its effective uid: rdna3_vmid_admit's per-uid cap */
     char     owner[24];
     bool     orphaned;   /* its file closed with a job still running: kept until the job is done */
+    bool     kernel;     /* the accelerator's own (vmCreate(.., true)): not in the clients' pool */
 };
 
 
@@ -2956,7 +2958,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
 /* ------------------------------ GPUVM ------------------------------ */
 
 
-void *RDNA3Bringup::vmCreate(bool quiet)
+void *RDNA3Bringup::vmCreate(bool quiet, bool kernel)
 {
     RDNA3Vm *v = (RDNA3Vm *)IOMalloc(sizeof(*v));
     if (!v)
@@ -2968,7 +2970,11 @@ void *RDNA3Bringup::vmCreate(bool quiet)
     /* the opener's thread (IOServiceOpen -> the user client's start) */
     v->ownerPid = proc_selfpid();
     v->ownerUid = kauth_cred_getuid(kauth_cred_get());
-    proc_selfname(v->owner, sizeof(v->owner));
+    v->kernel = kernel;
+    if (kernel)
+        strlcpy(v->owner, "accelerator", sizeof(v->owner));   /* maybe made on a client's thread */
+    else
+        proc_selfname(v->owner, sizeof(v->owner));
     if (!fVmReady)
         return v;
     /* one VMID per open file for now (amdgpu hands VMIDs out per job); with
@@ -3030,8 +3036,8 @@ uint32_t RDNA3Bringup::vmidsFree() const
 void RDNA3Bringup::vmOrphaned(void *p, bool reclaimable)
 {
     RDNA3Vm *v = (RDNA3Vm *)p;
-    if (!v || v->orphaned)
-        return;
+    if (!v || v->orphaned || !v->live)
+        return;   /* a record-only VM holds no VMID */
     v->orphaned = true;
     fVmidsLeaked++;
     publish("RDNA3,VMIDsLeaked", fVmidsLeaked);
@@ -3041,19 +3047,46 @@ void RDNA3Bringup::vmOrphaned(void *p, bool reclaimable)
          fVmidsLeaked);
 }
 
-bool RDNA3Bringup::vmCanOpen(uint32_t uid, bool admin)
+/* the kext stops: VMs nobody destroyed - orphans whose job never finished,
+ * which rdna3_drm_device_fini can no longer hand to a bring-up - lose
+ * their memory; the hardware is down, the table pool goes after this */
+void RDNA3Bringup::vmFreeLeftovers()
+{
+    uint32_t n = 0;
+    for (uint32_t id = 1; id < 16; id++) {
+        if (!fVmByVmid[id])
+            continue;
+        IOFree(fVmByVmid[id], sizeof(RDNA3Vm));
+        fVmByVmid[id] = nullptr;
+        fVmPd[id] = 0;
+        n++;
+    }
+    fVmidUsed = 0;
+    fVmidsLeaked = 0;
+    if (n)
+        BLOG("stop: %u VM(s) still held (orphans of hung jobs) freed", n);
+}
+
+bool RDNA3Bringup::vmCanOpen(uint32_t uid, bool console)
 {
     char who[384];
     size_t len = 0;
-    uint32_t mine = 0, freeIds;
+    uint32_t mine = 0, kernel = 0, freeIds, pool;
     int verdict;
     if (!fVmReady)
         return true;
     freeIds = vmidsFree();
-    for (uint32_t id = 1; id < 16; id++)
-        if (fVmByVmid[id] && fVmByVmid[id]->ownerUid == uid)
+    for (uint32_t id = 1; id < 16; id++) {
+        if (!fVmByVmid[id])
+            continue;
+        if (fVmByVmid[id]->kernel)
+            kernel++;   /* the accelerator's own, whichever thread made it */
+        else if (fVmByVmid[id]->ownerUid == uid)
             mine++;
-    verdict = rdna3_vmid_admit(freeIds, mine, uid, admin ? 1 : 0);
+    }
+    /* the clients' pool: the VMIDs less the kernel's own */
+    pool = vmidLimit() - 1 > kernel ? vmidLimit() - 1 - kernel : 0;
+    verdict = rdna3_vmid_admit(pool, freeIds, mine, uid, console ? 1 : 0);
     if (verdict == RD_VMID_ADMIT)
         return true;
     who[0] = 0;
@@ -3068,9 +3101,10 @@ bool RDNA3Bringup::vmCanOpen(uint32_t uid, bool admin)
         len += (size_t)w;
     }
     fVmidRefusals++;
-    BLOG("VM: DRM open #%u of uid %u refused (-ENOSPC, %s): %u of %u VMIDs free, this uid holds %u, "
-         "%u leaked (VMID=process/pid/uid:%s); that client sees no device", fVmidRefusals, uid,
-         rdna3_vmid_admit_reason(verdict), freeIds, vmidLimit() - 1, mine, fVmidsLeaked, who);
+    BLOG("VM: DRM open #%u of uid %u%s refused (-ENOSPC, %s): %u of %u client VMIDs free, this uid "
+         "holds %u of its %u, %u leaked (VMID=process/pid/uid:%s); that client sees no device",
+         fVmidRefusals, uid, console ? " (console)" : "", rdna3_vmid_admit_reason(verdict), freeIds, pool,
+         mine, rdna3_vmid_uid_cap(pool, console ? 1 : 0), fVmidsLeaked, who);
     publish("RDNA3,VMIDRefusals", fVmidRefusals);
     return false;
 }

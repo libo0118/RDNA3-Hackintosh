@@ -432,42 +432,58 @@ int main(void)
     CHECK(vm_live == 1);
     /* VMID admission while each file holds a VMID (rdna3_vmid_admit) */
     {
-        const uint32_t user = 501;
-        /* an ordinary user: up to the per-uid cap, while more than the
-         * reserve is free */
-        CHECK(rdna3_vmid_admit(14, 0, user, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP - 1, user, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP, user, 0) == RD_VMID_OVER_UID_CAP);
-        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE + 1, 0, user, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE, 0, user, 0) == RD_VMID_RESERVED);
-        CHECK(rdna3_vmid_admit(1, 0, user, 0) == RD_VMID_RESERVED);
-        CHECK(rdna3_vmid_admit(0, 0, user, 0) == RD_VMID_POOL_EMPTY);
-        /* _windowserver: the reserve, but the per-uid cap (not an administrator) */
-        CHECK(rdna3_vmid_admit(1, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(RD_VMID_RESERVE, 1, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(10, RD_VMID_UID_CAP, RD_UID_WINDOWSERVER, 0) == RD_VMID_OVER_UID_CAP);
-        /* root without the privilege bit gets the reserve; an administrator
-         * has no cap; nobody gets a VMID that is not there */
-        CHECK(rdna3_vmid_admit(1, 0, 0, 0) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(1, 12, user, 1) == RD_VMID_ADMIT);
-        CHECK(rdna3_vmid_admit(0, 0, 0, 1) == RD_VMID_POOL_EMPTY);
-        /* the 15 VMIDs, one user opening until refused: the cap first,
-         * a second user up to the reserve, then only WindowServer */
+        const uint32_t user = 501, other = 502;
+        const uint32_t big = 14, small = 6;   /* 15 / 7 client VMIDs less the accelerator's */
+        uint32_t cc = rdna3_vmid_uid_cap(big, 1), oc = rdna3_vmid_uid_cap(big, 0);
+        /* the cap out of the real pool: the console user everything outside
+         * the reserve, any other uid half of that, at least one */
+        CHECK(cc == big - RD_VMID_RESERVE && oc == (big - RD_VMID_RESERVE) / 2);
+        CHECK(rdna3_vmid_uid_cap(small, 1) == 4 && rdna3_vmid_uid_cap(small, 0) == 2);
+        /* the small pools: another uid never takes the console user's last
+         * shared VMID (one shared: none for it; two: one each) */
+        CHECK(rdna3_vmid_uid_cap(RD_VMID_RESERVE + 1, 1) == 1 && rdna3_vmid_uid_cap(RD_VMID_RESERVE + 1, 0) == 0);
+        CHECK(rdna3_vmid_uid_cap(RD_VMID_RESERVE + 2, 1) == 2 && rdna3_vmid_uid_cap(RD_VMID_RESERVE + 2, 0) == 1);
+        CHECK(rdna3_vmid_uid_cap(RD_VMID_RESERVE, 0) == 0 && rdna3_vmid_uid_cap(1, 1) == 1 &&
+              rdna3_vmid_uid_cap(0, 0) == 0);
+        for (uint32_t pool = 0; pool <= 15; pool++) {
+            uint32_t shared = pool > RD_VMID_RESERVE ? pool - RD_VMID_RESERVE : 0;
+            CHECK(shared == 0 || rdna3_vmid_uid_cap(pool, 0) < shared);
+            CHECK(rdna3_vmid_admit(pool, RD_VMID_RESERVE + 1, rdna3_vmid_uid_cap(pool, 0), other, 0) ==
+                  RD_VMID_OVER_UID_CAP);
+        }
+        /* an ordinary uid: up to its cap, while more than the reserve is free */
+        CHECK(rdna3_vmid_admit(big, 14, 0, other, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(big, 10, oc - 1, other, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(big, 10, oc, other, 0) == RD_VMID_OVER_UID_CAP);
+        CHECK(rdna3_vmid_admit(big, 10, oc, user, 1) == RD_VMID_ADMIT);   /* the console's is higher */
+        CHECK(rdna3_vmid_admit(big, 10, cc, user, 1) == RD_VMID_OVER_UID_CAP);
+        CHECK(rdna3_vmid_admit(big, RD_VMID_RESERVE + 1, 0, user, 1) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(big, RD_VMID_RESERVE, 0, user, 1) == RD_VMID_RESERVED);
+        CHECK(rdna3_vmid_admit(big, 0, 0, user, 1) == RD_VMID_POOL_EMPTY);
+        /* _windowserver: the reserve, and a cap; root: both, no cap; nobody
+         * gets a VMID that is not there */
+        CHECK(rdna3_vmid_admit(big, 1, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
+        /* WindowServer is a LaunchDaemon outside the console session: no
+         * cap, like root */
+        CHECK(rdna3_vmid_admit(big, 10, cc, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(small, 1, 5, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(big, 1, 13, 0, 0) == RD_VMID_ADMIT);
+        CHECK(rdna3_vmid_admit(big, 0, 0, 0, 0) == RD_VMID_POOL_EMPTY);
+        /* the pool filled in either order: another local uid first, then
+         * the console user still gets VMIDs; then only WindowServer and
+         * root get the reserve */
         {
-            uint32_t free_ids = 15, a = 0, b = 0;
-            while (rdna3_vmid_admit(free_ids, a, user, 0) == RD_VMID_ADMIT) { a++; free_ids--; }
-            CHECK(a == RD_VMID_UID_CAP && free_ids == 15 - RD_VMID_UID_CAP);
-            while (rdna3_vmid_admit(free_ids, b, user + 1, 0) == RD_VMID_ADMIT) { b++; free_ids--; }
-            {   /* the second user stops at its cap or where the reserve starts */
-                uint32_t left = 15 - RD_VMID_UID_CAP - RD_VMID_RESERVE;
-                uint32_t want = left < RD_VMID_UID_CAP ? left : RD_VMID_UID_CAP;
-                CHECK(b == want && free_ids == 15 - RD_VMID_UID_CAP - want);
+            const uint32_t pools[3] = { big, small, RD_VMID_RESERVE + 1 };
+            for (uint32_t k = 0; k < 3; k++) {
+                uint32_t pool = pools[k], free_ids = pool, a = 0, b = 0;
+                while (rdna3_vmid_admit(pool, free_ids, b, other, 0) == RD_VMID_ADMIT) { b++; free_ids--; }
+                CHECK(b == rdna3_vmid_uid_cap(pool, 0));
+                while (rdna3_vmid_admit(pool, free_ids, a, user, 1) == RD_VMID_ADMIT) { a++; free_ids--; }
+                CHECK(a >= 1 && a == pool - RD_VMID_RESERVE - b && free_ids == RD_VMID_RESERVE);
+                CHECK(rdna3_vmid_admit(pool, free_ids, 0, other + 1, 0) != RD_VMID_ADMIT &&
+                      rdna3_vmid_admit(pool, free_ids, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT &&
+                      rdna3_vmid_admit(pool, free_ids, 0, 0, 0) == RD_VMID_ADMIT);
             }
-            CHECK(rdna3_vmid_admit(free_ids, 0, user + 2, 0) ==
-                  (free_ids > RD_VMID_RESERVE ? RD_VMID_ADMIT : RD_VMID_RESERVED));
-            free_ids = RD_VMID_RESERVE;
-            CHECK(rdna3_vmid_admit(free_ids, 0, user + 3, 0) == RD_VMID_RESERVED &&
-                  rdna3_vmid_admit(free_ids, 0, RD_UID_WINDOWSERVER, 0) == RD_VMID_ADMIT);
         }
         CHECK(strcmp(rdna3_vmid_admit_reason(RD_VMID_OVER_UID_CAP), "?") != 0 &&
               strcmp(rdna3_vmid_admit_reason(RD_VMID_POOL_EMPTY), rdna3_vmid_admit_reason(RD_VMID_RESERVED)) != 0);
@@ -1244,11 +1260,13 @@ int main(void)
             /* WAIT_CS on a sequence that was never submitted: -EINVAL,
              * not a wait until the hang cap */
             memset(&w, 0, sizeof(w));
+            w.in.ctx_id = cs_ctx_of(f);
             w.in.handle = 5; w.in.ip_type = AMDGPU_HW_IP_DMA; w.in.timeout = 1;
             CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == -RD_EINVAL);
         }
         /* busy until the ring passes it */
         memset(&w, 0, sizeof(w));
+        w.in.ctx_id = cs_ctx_of(f);
         w.in.handle = h1; w.in.ip_type = AMDGPU_HW_IP_DMA; w.in.timeout = 1;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 1);
         memset(&q, 0, sizeof(q));
@@ -1266,6 +1284,7 @@ int main(void)
         /* fence -> syncobj */
         memset(&fth, 0, sizeof(fth));
         fth.in.fence.ip_type = AMDGPU_HW_IP_DMA; fth.in.fence.seq_no = 3;
+        fth.in.fence.ctx_id = cs_ctx_of(f);
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE), fth) == 0);
         so2 = fth.out.handle;
         /* PR #2 review: a fence that was never submitted is -EINVAL on
@@ -1277,7 +1296,7 @@ int main(void)
             bad.in.fence.seq_no = 1000;
             CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE), bad) == -RD_EINVAL);
             memset(&dep, 0, sizeof(dep));
-            dep.ip_type = AMDGPU_HW_IP_DMA; dep.handle = 1000;
+            dep.ip_type = AMDGPU_HW_IP_DMA; dep.handle = 1000; dep.ctx_id = cs_ctx_of(f);
             g_dep = &dep;
             CHECK(cs_submit(f, 0x500000, 32, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
             dep.handle = 2;
@@ -1592,6 +1611,62 @@ int main(void)
         /* WAIT_CS on ~0 = latest */
         w.in.handle = ~0ull; w.in.timeout = 1;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 0);
+        /* amdgpu_ctx_get / amdgpu_ctx_get_fence: no wait without a live
+         * context, and none on a fence this file never submitted - another
+         * process's job (fence numbers are per ring here) would run into
+         * the hang cap and a recovery on its behalf */
+        {
+            static rdna3_drm_file fo;
+            union drm_amdgpu_wait_cs wo;
+            union drm_amdgpu_wait_fences wf;
+            union drm_amdgpu_fence_to_handle fo_h;
+            struct drm_amdgpu_fence af;
+            struct drm_amdgpu_cs_chunk_dep dep;
+            uint64_t mine, theirs;
+            CHECK(rdna3_drm_file_open(&dev, &fo) == 0);
+            CHECK(cs_submit(&fo, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &mine) == 0);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &theirs) == 0 && theirs > mine);
+            ring_done = mine;   /* fo's job done, f's still running */
+            memset(&wo, 0, sizeof(wo));
+            wo.in.ip_type = AMDGPU_HW_IP_DMA; wo.in.timeout = 1;
+            wo.in.handle = mine;
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), wo) == -RD_EINVAL);   /* ctx 0 */
+            wo.in.ctx_id = 200;
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), wo) == -RD_EINVAL);   /* not allocated */
+            wo.in.ctx_id = cs_ctx_of(&fo);
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), wo) == 0 && wo.out.status == 0);
+            wo.in.handle = theirs;
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), wo) == -RD_EINVAL);
+            wo.in.handle = ~0ull;   /* this file's latest, not the ring's */
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), wo) == 0 && wo.out.status == 0);
+            memset(&af, 0, sizeof(af));
+            af.ctx_id = cs_ctx_of(&fo); af.ip_type = AMDGPU_HW_IP_DMA; af.seq_no = theirs;
+#define WF_SET() (memset(&wf, 0, sizeof(wf)), wf.in.fences = (uint64_t)(uintptr_t)&af, \
+                  wf.in.fence_count = 1, wf.in.wait_all = 1, wf.in.timeout_ns = 1)
+            WF_SET();
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_FENCES), wf) == -RD_EINVAL);
+            af.seq_no = mine;
+            WF_SET();
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_FENCES), wf) == 0 && wf.out.status == 1);
+            af.ctx_id = 0;
+            WF_SET();
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_FENCES), wf) == -RD_EINVAL);
+#undef WF_SET
+            memset(&fo_h, 0, sizeof(fo_h));
+            fo_h.in.what = AMDGPU_FENCE_TO_HANDLE_GET_SYNCOBJ;
+            fo_h.in.fence.ctx_id = cs_ctx_of(&fo); fo_h.in.fence.ip_type = AMDGPU_HW_IP_DMA;
+            fo_h.in.fence.seq_no = theirs;
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE), fo_h) == -RD_EINVAL);
+            memset(&dep, 0, sizeof(dep));
+            dep.ip_type = AMDGPU_HW_IP_DMA; dep.handle = theirs; dep.ctx_id = cs_ctx_of(&fo);
+            g_dep = &dep;
+            CHECK(cs_submit(&fo, 0x500000, 32, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            dep.handle = mine; dep.ctx_id = 0;
+            CHECK(cs_submit(&fo, 0x500000, 32, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_dep = NULL;
+            ring_done = ring_next;
+            rdna3_drm_file_close(&fo);
+        }
         dev.ops.submit = NULL;
         dev.available_rings[AMDGPU_HW_IP_DMA] = 0;
         dev.ready_rings[AMDGPU_HW_IP_DMA] = 0;
@@ -1960,6 +2035,12 @@ int main(void)
             CHECK(IOCTL(&fz, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gz) == 0);
             vz.handle = gz.out.handle;
             CHECK(IOCTL(&fz, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), vz) == 0);
+            {   /* exported too: the export outlives the file until the reap */
+                struct rd_xnu_bo_share xz;
+                memset(&xz, 0, sizeof(xz));
+                xz.handle = gz.out.handle;
+                CHECK(IOCTL(&fz, RD_NR_XNU_BO_EXPORT, xz) == 0 && xz.token);
+            }
             CHECK(cs_submit(&fz, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
             pend = ring_next;
             live0 = vm_live;
@@ -1971,7 +2052,10 @@ int main(void)
             CHECK(dev.orphans[0].vm == &vm_dummy && dev.orphans[0].last_seq[AMDGPU_HW_IP_DMA][0] == pend);
             CHECK(rdna3_drm_device_reap_orphans(&dev) == 0 && vm_live == live0);   /* still running */
             ring_done = ring_next;   /* a later reset forced the fence */
+            /* the VM, the BO and the ownerless export with it */
             CHECK(rdna3_drm_device_reap_orphans(&dev) == 1 && vm_live == live0 - 1 && live_bos == bos0);
+            for (uint32_t e = 0; e < RD_MAX_EXPORTS; e++)
+                CHECK(dev.exports[e].bo == NULL);
             CHECK(dev.orphans[0].vm == NULL && rdna3_drm_device_reap_orphans(&dev) == 0);
             /* an open reaps first: a second orphan goes with the next open */
             CHECK(rdna3_drm_file_open(&dev, &fz) == 0);
