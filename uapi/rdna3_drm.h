@@ -155,6 +155,25 @@ struct rd_xnu_surface_bo {
                                       -ENOSPC when the VRAM is smaller); out, the BO's size */
 };
 
+/* private: what the head on display pipe 'pipe' sends after its OTG
+ * (hw/dcn32_txstate.c): the OTG totals and DRR bounds, the pixel-rate / PHY
+ * PLL selects, the DIG front end and its packets, the back end and the
+ * PHY's clock and encoder selects, as text lines for the report
+ * (rdna3_drminfo --scanout), then the problems they show and what changed
+ * since the driver started. Card run of 2026-10-15: an HDMI monitor said
+ * "no signal" while its pipe scanned the desktop. Root only. valid 0: no
+ * head on that pipe. A kext without it answers -EINVAL, an OS without the
+ * hook -EOPNOTSUPP. */
+#define RD_NR_XNU_TXSTATE          0xF6
+#define RD_XNU_TXSTATE_TEXT        3584
+struct rd_xnu_txstate {
+    uint32_t pipe;                         /* in */
+    uint32_t valid;                        /* out */
+    uint32_t problems;                     /* out: RD_TX_P_* of hw/dcn32_txstate.h */
+    uint32_t changes;                      /* out: changes the driver's 2 s watch saw on this head */
+    char     text[RD_XNU_TXSTATE_TEXT];    /* out: lines ending in '\n', NUL terminated */
+};
+
 /* We advertise the amdgpu DRM version RADV/libdrm expect from Linux 6.x */
 #define RD_DRM_MAJOR 3
 #define RD_DRM_MINOR 61
@@ -424,6 +443,9 @@ typedef struct rdna3_drm_ops {
      * job done and vm_destroy frees it; orphaned = 0: the VM never goes
      * (no orphan slot left) */
     void  (*vm_orphaned)(void *ctx, void *vm, int reclaimable);
+    /* RD_NR_XNU_TXSTATE: fill everything after pipe; optional,
+     * -EOPNOTSUPP when missing. The OS checks privilege. */
+    int   (*txstate)(void *ctx, struct rd_xnu_txstate *t);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {

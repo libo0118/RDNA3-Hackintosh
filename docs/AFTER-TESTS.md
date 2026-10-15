@@ -376,6 +376,7 @@ The report's `hotplug window` section has `RDNA3,HPDState` (`HPD1 1 HPD2 0 ...`,
 | `MirrorCheck`: running, CRC DIFFERENT | the pipe scans out something else: HUBP surface/viewport, DPP/MPC/OPP copy | send the log; a black clone has a constant CRC |
 | result 0, `MirrorCheck` running + same CRC, second screen black or "no signal" | PHY/PLL side: `PHYPLL` / `PIXEL_RATE` in the `clone: pipe N lit` line still 0, or the HDMI sink wants infoframes | send the log; compare the source and clone `OTGn_PIXEL_RATE_CNTL`, `PHYxSYMCLK_CLOCK_CNTL`; next: write PHYPLL/SYMCLK source like the GOP's |
 | first screen flickers or goes black after the clone | DET split too small, or watermarks | send the log; the DET line shows the split |
+| a monitor says "no signal" while the look says its pipe is `LIT`, the OTG CRC moves and the picture is right (card run 57: the HDMI boot head) | the pixels leave the OTG but not the DIG / PHY: back end or symbol clock off, a DIO / DIG FIFO error, AV mute, DRR bounds of 0 under `V_TOTAL_MIN/MAX_SEL`, an HPO encoder on the PHY | the look's `TX` lines (`TX problems: ...`, the registers per block) and the serial log's TX watch: `display: head N TX at the start` (as the firmware left it), `... after the clone`, `TX change #n at T ms` (what changed, when). A change names the step that did it (compare T with the test steps); `problems: none` and no change since the start with a dark monitor: the PHY / PLL side the DCN does not show, or the sink - ask whether it was dark from the boot screen on |
 | 9c: only one display in System Settings | the second RDNA3Framebuffer did not start on the nub | `ioreg -n RDNA3DisplayHead`; `RDNA3-fb: head 1: ...` lines (VRAM for the surface, flip) |
 | 9c: second display black, first fine | the flip of head 1 to its own surface | `RDNA3-fb: head 1: own surface` then `flip #` lines; `RDNA3,Mirror` still names the clone |
 
@@ -1837,3 +1838,31 @@ Settings. That is expected for them, not a display regression.
   ("file system sandbox blocked mmap()"), SIP off or not. Apple's own GPU
   bundles live on the sealed system volume; M6 for Safari needs the bundle
   there or WebKit's GPU process off.
+
+### Card run 57 (step agdc + probes, build 8175274, 2026-10-15)
+
+- **The HDMI monitor (head 0, the boot head: OTG0 -> DIGD -> UNIPHYD)
+  said "no signal"**; the DP-3 one (clone / extended head through a DP++
+  adaptor) worked and macOS made it the secondary display. Every look
+  read pipe 0 `LIT`, its OTG CRC moving and the desktop in its picture;
+  mode switches, display sleep / wake and gamma worked by the registers.
+  The run before it (same build) showed the boot screen, then WindowServer
+  never started (one-off).
+- The core's display log is the same as card run 56's (build a96c9a1,
+  both monitors fine): the same route, clone (`PIXEL_RATE 0x0 PHYPLL
+  0x1`), snapshots, gamma tables, DPP-scaler mode switches (no timing
+  change), no hotplug, the head-0 wake check `intact, 0 regs differ`
+  (the snapshot holds the DIG front end's HDMI / packet registers, the
+  TMDS controls and the OTG's V_TOTAL_MIN / MAX / CONTROL). The FreeSync
+  batch (N6) changes nothing without `rdna3vrr=1`: no caps read (the mode
+  list came back unsupported), no DRR, the HDMI SPD only from a zeroed
+  stream. No cause in the driver's code or logs; the report could not say
+  when the monitor went dark nor what left the DIG.
+- Diagnostic build: `hw/dcn32_txstate.c` reads what each head sends after
+  its OTG (DC's DTN-log read-backs), the core logs it at the start, after
+  the clone and every change (2 s, `rdna3txwatch=0` off), publishes
+  `RDNA3,Head<n>,TX`, and the screen looks print it (`TX` lines,
+  `RD_NR_XNU_TXSTATE`); triage prints the lines, the warnings and a
+  `TX watch` summary. The simulator showed the states it names (DRR
+  bounds of 0, a DRR range, a DIO FIFO error, AV mute, the back end off).
+

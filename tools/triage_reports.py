@@ -244,7 +244,7 @@ def report(path, show_all):
                 "SOSVersion", "SMUDriverIF", "DMUBVersion", "GBAddrConfig", "LastFaultAddr",
                 "LastFaultStatus") else v))
     # displays (step 2+): connectors with an EDID, what each head drives
-    for key in sorted(k for k in props if re.match(r"(Connector\d+,(Monitor|EDIDSource|Type)|Head\d+,Route)$", k)):
+    for key in sorted(k for k in props if re.match(r"(Connector\d+,(Monitor|EDIDSource|Type)|Head\d+,(Route|TX))$", k)):
         print("   info %-20s = %s" % (key, props[key]))
     for l in log.splitlines():
         if "refresh" in l and "display: head" in l:
@@ -521,9 +521,21 @@ def summary(path, serial=None):
         blank = len(re.findall(r"^pipe \d+: BLANKED", blk, re.M))
         uf = len(re.findall(r"UNDERFLOW", blk))
         same = len(lit) > 1 and len(set(a for _, a in lit)) < len(lit)
+        txbad = [m for m in re.findall(r"^  TX problems: (.*?)(?:;|$)", blk.split("\n== ")[0], re.M) if m != "none"]
         out.append(("screens %s" % (look.group(1) if look else "1"),
-                    "%d lit%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
-                                      ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "")))
+                    "%d lit%s%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
+                                        ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "",
+                                        ", TX: " + "; ".join(txbad)[:80] if txbad else "")))
+    # the core's TX watch (what each head sends after its OTG): changes
+    # with their time, from the kernel log of the same boot
+    txch = re.findall(r"display: head (\d+) TX change #(\d+) at (\d+) ms[^:]*: (.*)$", log, re.M)
+    if txch or "TX at the start" in log:
+        heads = {}
+        for h, n, ms, what in txch:
+            heads.setdefault(h, []).append((int(n), int(ms), what))
+        out.append(("TX watch", "; ".join("head %s: %d change(s), first at %d ms: %s" %
+                                          (h, len(v), v[0][1], v[0][2][:70]) for h, v in sorted(heads.items()))
+                    if heads else "no change on any head after the start"))
     # the Vulkan CTS subset (step cts): the total, the groups that failed or
     # hung, the first failing cases
     cts = re.search(r"^CTS: .*$", txt, re.M)
@@ -674,6 +686,12 @@ def main():
                             break
                         if l.startswith(("pipe", "  picture", "  UNDERFLOW", "  OTG CRC", "[exit")) and "power-gated off" not in l:
                             print("       " + l[:160])
+                        # what the head sends after its OTG (RD_NR_XNU_TXSTATE):
+                        # the registers in full, the problems flagged
+                        elif l.startswith("  TX "):
+                            print("       " + l[:400])
+                            if l.startswith("  TX problems: ") and not l.startswith("  TX problems: none"):
+                                print("       !! the pixels leave the OTG, but its output is wrong: " + l[15:150])
                         m = re.match(r"pipe (\d+): LIT .* in use (0x[0-9a-f]+)", l)
                         if m:
                             addrs.append(m.group(2))
@@ -789,6 +807,16 @@ def main():
         print("=" * 78)
         print(os.path.basename(s), "(RDNA3 lines and panics, last 15)")
         tail_file(s, 15, r"RDNA3|panic|Panic|ERROR")
+        # what each head sent after its OTG at the start, after the clone
+        # and every change since (the core's TX watch, hw/dcn32_txstate.c)
+        try:
+            tx = [l for l in open(s, errors="replace").read().splitlines() if re.search(r"display: head \d+ TX", l)]
+        except OSError:
+            tx = []
+        if tx:
+            print("   TX watch (%d line(s); the first 60):" % len(tx))
+            for l in tx[:60]:
+                print("     " + l[l.find("display:"):][:400])
     for h in hosts:
         print("=" * 78)
         print(os.path.basename(h))

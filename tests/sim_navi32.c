@@ -76,6 +76,8 @@
 #include "dcn32_gamma.h"
 #include "gen/dcn_3_2_0_gamma.h"
 #include "dcn32_state.h"
+#include "dcn32_txstate.h"
+#include "gen/dcn_3_2_0_tx.h"
 #include "dcn32_dp.h"
 #include "gen/dcn_3_2_0_dp.h"
 #include "gen/dcn_3_2_0_dsc.h"
@@ -1618,10 +1620,13 @@ static void dmub_inbox(uint32_t wptr)
                     !(c[5] == RD_ATOM_TX_ENABLE && c[6] == 5 &&
                       ((uint32_t)c[8] | (uint32_t)c[9] << 8 | (uint32_t)c[10] << 16) >= 100000)) {
                     uint32_t *en = &S.reg[DCN_B2 + regDIG0_DIG_BE_EN_CNTL + RD_CLONE_DIGFE_STRIDE * c[4]];
+                    /* the back end and its symbol clock together (the
+                     * card reads DIG_BE_EN_CNTL 0x101 on a lit head) */
+                    const uint32_t on = DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK | DIG0_DIG_BE_EN_CNTL__DIG_SYMCLK_BE_ON_MASK;
                     if (c[5] == RD_ATOM_TX_ENABLE)
-                        *en |= DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK;
+                        *en |= on;
                     else
-                        *en &= ~DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK;
+                        *en &= ~on;
                 }
             } else if (sub == RD_DMUB_VBIOS_SET_PIXEL_CLOCK && len == 16) {
                 memcpy(S.dmub.pixclk, c + 4, 16);
@@ -5443,6 +5448,107 @@ static unsigned st_diff(const char *when)
     return n;
 }
 
+/* What a lit TMDS head sends after its OTG (hw/dcn32_txstate.c), for the
+ * report. Card run of 2026-10-15: the HDMI monitor of the boot head showed
+ * "no signal" while its OTG ran, its CRC moved and its picture was the
+ * desktop; nothing said what left the DIG. Here the model's boot head
+ * (OTG 2 -> DIGC front end -> DIGB back end, UNIPHY B, HDMI) reads clean,
+ * then each state that keeps the OTG running while an HDMI sink loses the
+ * picture is put in and must be named: DRR bounds of 0 under
+ * V_TOTAL_MIN/MAX_SEL (optc32_set_drr without bounds on a head whose
+ * V_TOTAL_MIN / MAX the GOP left at 0), a DRR range, a DIO FIFO error, AV
+ * mute and the back end off (monitor standby). */
+static rdna3_tx_state tx_lit;
+
+static void test_tx_state(rdna3_dev *dev, int standby)
+{
+    static rdna3_tx_state t;
+    char line[RD_TX_LINE], why[512];
+    const uint32_t prc = DCN_B1 + regOTG0_PIXEL_RATE_CNTL + (regOTG1_PIXEL_RATE_CNTL - regOTG0_PIXEL_RATE_CNTL) * 2;
+    uint32_t vtc, vmin, vmax, rate, gc;
+    rdna3_drr_params none;
+
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && t.valid &&
+          t.read_mask == (1u << RD_TX_NREGS) - 1 && t.otg == 2 && t.fe == 2 && t.be == 1);
+    if (standby) {
+        /* TransmitterControl DISABLE: the back end and its symbol clock off,
+         * the OTG still running; nothing else changed */
+        CHECK(dcn32_tx_state_problems(&t) == RD_TX_P_DIG_OFF);
+        CHECK(dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why)) == 1 &&
+              strstr(why, "DIG_BE_EN_CNTL 0x101 -> 0x0") != NULL);
+        dcn32_tx_problems_str(dcn32_tx_state_problems(&t), why, sizeof(why));
+        CHECK(strcmp(why, "DIG back end off") == 0);
+        return;
+    }
+    tx_lit = t;
+    CHECK(dcn32_tx_state_problems(&t) == 0);
+    CHECK(dcn32_tx_problems_str(0, why, sizeof(why)) == 4 && strcmp(why, "none") == 0);
+    CHECK(dcn32_tx_state_format(&t, 0, line, sizeof(line)) > 0 && strncmp(line, "OTG2: OTG_CONTROL 0x", 20) == 0 &&
+          strstr(line, " V_TOTAL 0x5c8 ") != NULL);
+    CHECK(dcn32_tx_state_format(&t, 1, line, sizeof(line)) > 0 && strncmp(line, "DIGC FE: DIG_FE_CNTL 0x", 23) == 0);
+    CHECK(dcn32_tx_state_format(&t, 2, line, sizeof(line)) > 0 && strncmp(line, "DIGC packets: ", 14) == 0);
+    CHECK(dcn32_tx_state_format(&t, 3, line, sizeof(line)) > 0 && strncmp(line, "DIG BE / UNIPHYB: ", 18) == 0 &&
+          strstr(line, "DIG_BE_EN_CNTL 0x101 ") != NULL);
+    CHECK(dcn32_tx_state_format(&t, RD_TX_GROUPS, line, sizeof(line)) == 0 && line[0] == 0);
+    /* a short buffer: cut and terminated, the full length returned */
+    CHECK(dcn32_tx_state_format(&t, 0, line, 8) > 8 && strlen(line) == 7);
+    CHECK(dcn32_tx_state_format(&t, 0, NULL, 0) == dcn32_tx_state_format(&t, 0, line, sizeof(line)));
+    CHECK(dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why)) == 0 && why[0] == 0);
+    /* the DIG instances not known: only the OTG and its clock selects */
+    {
+        static rdna3_tx_state u;
+        CHECK(dcn32_tx_state_read(dev, 2, -1, -1, &u) == RDNA3_OK && u.read_mask == 0xffu &&
+              u.fe == RD_TX_NONE && u.be == RD_TX_NONE && dcn32_tx_state_problems(&u) == 0);
+        CHECK(dcn32_tx_state_format(&u, 3, line, sizeof(line)) > 0 && strncmp(line, "DIG BE / UNIPHY?: DIG_BE_CNTL - ", 32) == 0);
+        CHECK(dcn32_tx_state_diff(&tx_lit, &u, why, sizeof(why)) == RD_TX_NREGS);
+    }
+    CHECK(dcn32_tx_state_read(dev, 4, 2, 1, &t) == RDNA3_EINVAL && dcn32_tx_state_read(dev, 2, 5, 1, &t) == RDNA3_EINVAL &&
+          dcn32_tx_state_read(dev, 2, 2, 5, &t) == RDNA3_EINVAL && dcn32_tx_state_read(NULL, 2, 2, 1, &t) == RDNA3_EINVAL);
+
+    vtc = S.reg[OTG(regOTG0_OTG_V_TOTAL_CONTROL, 2)];
+    vmin = S.reg[OTG(regOTG0_OTG_V_TOTAL_MIN, 2)];
+    vmax = S.reg[OTG(regOTG0_OTG_V_TOTAL_MAX, 2)];
+    rate = S.reg[prc];
+    gc = S.reg[DIGN(regDIG0_HDMI_GC, 2)];
+    /* the bounds a firmware that never ran DRR may leave: 0, unselected */
+    S.reg[OTG(regOTG0_OTG_V_TOTAL_CONTROL, 2)] = 0;
+    S.reg[OTG(regOTG0_OTG_V_TOTAL_MIN, 2)] = 0;
+    S.reg[OTG(regOTG0_OTG_V_TOTAL_MAX, 2)] = 0;
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &tx_lit) == RDNA3_OK && dcn32_tx_state_problems(&tx_lit) == 0);
+    /* optc32_set_drr without bounds still arms the manual trigger, which
+     * selects V_TOTAL_MIN / MAX: both 0 */
+    memset(&none, 0, sizeof(none));
+    dcn32_otg_set_drr(dev, 2, &none);
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == RD_TX_P_DRR_ZERO);
+    CHECK(dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why)) == 1 && strncmp(why, "V_TOTAL_CONTROL 0x0 -> 0x", 25) == 0);
+    /* the mode set's optc1_set_vtotal_min_max(v_total, v_total): nominal */
+    dcn32_otg_set_vtotal_min_max(dev, 2, 1481 - 1, 1481 - 1);
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == 0);
+    /* a DRR range (dc_stream_adjust_vmin_vmax of a FreeSync stream) */
+    dcn32_otg_set_vtotal_min_max(dev, 2, 1481 - 1, 1700 - 1);
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == RD_TX_P_DRR);
+    S.reg[OTG(regOTG0_OTG_V_TOTAL_CONTROL, 2)] = 0;
+    S.reg[OTG(regOTG0_OTG_V_TOTAL_MIN, 2)] = 0;
+    S.reg[OTG(regOTG0_OTG_V_TOTAL_MAX, 2)] = 0;
+    /* the DIO FIFO between the pixel and the symbol clock ran dry */
+    S.reg[prc] = rate | OTG0_PIXEL_RATE_CNTL__OTG0_DIO_FIFO_ERROR_MASK | (3u << OTG0_PIXEL_RATE_CNTL__OTG0_DIO_ERROR_COUNT__SHIFT);
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == RD_TX_P_DIO_FIFO);
+    S.reg[prc] = rate;
+    /* AV mute in the general control packet: the sink blanks */
+    S.reg[DIGN(regDIG0_HDMI_GC, 2)] = gc | DIG0_HDMI_GC__HDMI_GC_AVMUTE_MASK;
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == RD_TX_P_AVMUTE);
+    dcn32_tx_problems_str(RD_TX_P_AVMUTE | RD_TX_P_DIO_FIFO, why, sizeof(why));
+    CHECK(strcmp(why, "DIO FIFO error, AV mute") == 0);
+    S.reg[DIGN(regDIG0_HDMI_GC, 2)] = gc;
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why)) == 0);
+    /* back as the head was */
+    S.reg[OTG(regOTG0_OTG_V_TOTAL_CONTROL, 2)] = vtc;
+    S.reg[OTG(regOTG0_OTG_V_TOTAL_MIN, 2)] = vmin;
+    S.reg[OTG(regOTG0_OTG_V_TOTAL_MAX, 2)] = vmax;
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == 0);
+    tx_lit = t;
+}
+
 static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
 {
     static rdna3_dcn dc, dp;
@@ -5483,6 +5589,7 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
           st.head[1].opp == 2 && st.head[1].fe == 2 && st.head[1].be == 1 && st.saves == 2);
     CHECK(dcn32_state_check(dev, &st, 0, 0, &k) == 0 && k.otg_on && k.dig_on && k.ndiff == 0);
     CHECK(dcn32_state_check(dev, &st, 2, 0, &k) == RDNA3_EINVAL);
+    test_tx_state(dev, 0);
 
     /* 1. monitor standby on the boot head (rdna3dpms=2): blank +
      * TransmitterControl DISABLE on UNIPHY B, back with ENABLE + unblank;
@@ -5497,6 +5604,7 @@ static void test_dcn_state(rdna3_dev *dev, rdna3_dmub *dm)
     CHECK((S.reg[HUBP(regHUBP0_DCHUBP_CNTL, 1)] & HUBP0_DCHUBP_CNTL__HUBP_BLANK_EN_MASK) &&
           !(S.reg[DCN_B2 + regDIG0_DIG_BE_EN_CNTL + RD_CLONE_DIGFE_STRIDE] & DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK));
     CHECK(dcn32_head_link(dev, dm, &dc, &st, 1, 0, NULL) == RDNA3_OK && S.dmub.nseq == 1);   /* DIG off: no command */
+    test_tx_state(dev, 1);
     /* a snapshot taken in standby keeps the DIG ids of the last one */
     dp = dc;
     dp.head[1].dig_fe = dp.head[1].dig_be = -1;
@@ -11670,10 +11778,11 @@ static void run(const char *fwdir)
         S.reg[DIGR(regDIG0_DIG_FE_CNTL, 2)] = 2;
         S.reg[DIGR(regDIG0_DIG_BE_CNTL, 1)] = (1u << 2) << DIG0_DIG_BE_CNTL__DIG_FE_SOURCE_SELECT__SHIFT |
                                               3u << DIG0_DIG_BE_CNTL__DIG_MODE__SHIFT;
-        S.reg[DIGR(regDIG0_DIG_BE_EN_CNTL, 1)] = DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK;
+        /* a lit back end reads 0x101 on the card: DIG_ENABLE and DIG_SYMCLK_BE_ON */
+        S.reg[DIGR(regDIG0_DIG_BE_EN_CNTL, 1)] = DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK | DIG0_DIG_BE_EN_CNTL__DIG_SYMCLK_BE_ON_MASK;
         S.reg[DIGR(regDIG0_DIG_FE_CNTL, 0)] = 0;
         S.reg[DIGR(regDIG0_DIG_BE_CNTL, 0)] = 1u << DIG0_DIG_BE_CNTL__DIG_FE_SOURCE_SELECT__SHIFT;
-        S.reg[DIGR(regDIG0_DIG_BE_EN_CNTL, 0)] = DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK;
+        S.reg[DIGR(regDIG0_DIG_BE_EN_CNTL, 0)] = DIG0_DIG_BE_EN_CNTL__DIG_ENABLE_MASK | DIG0_DIG_BE_EN_CNTL__DIG_SYMCLK_BE_ON_MASK;
 
         CHECK(dcn32_read_state(&dev, &dc) == 1);
         CHECK(dc.head[0].pipe == 1 && dc.head[0].otg == 2);

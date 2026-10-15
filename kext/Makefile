@@ -44,6 +44,7 @@ CSRC   += ../hw/dcn32_otg.c ../hw/dcn32_color.c ../hw/dcn32_hdmi.c ../hw/dcn32_h
 CSRC   += ../hw/dcn32_hpo.c ../hw/dcn32_odm.c
 CSRC   += ../hw/dcn32_audio.c ../hw/dcn32_opp.c
 CSRC   += ../hw/dcn32_pstate.c ../hw/dcn32_subvp.c ../hw/dcn32_freesync.c
+CSRC   += ../hw/dcn32_txstate.c
 HDRS   := $(wildcard src/*.h src/*.hpp ../common/*.h ../hw/*.h ../hw/gen/*.h ../uapi/*.h ../third_party/amd/*.h ../accel/rdna3k_abi.h)
 # a hash of the sources (like fb/ and accel/): the VM's report skips a test
 # that passed before with the same build of what it tests

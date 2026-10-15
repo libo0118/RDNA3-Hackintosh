@@ -4430,6 +4430,10 @@ static int drm_ioctl_dispatch(rdna3_drm_file *f, uint32_t nr, void *data, uint32
         if (!f->dev->ops.scanout)
             return -RD_EOPNOTSUPP;
         return f->dev->ops.scanout(f->dev->ops.ctx, (struct rd_xnu_scanout *)data);
+    case RD_NR_XNU_TXSTATE: NEED(struct rd_xnu_txstate);
+        if (!f->dev->ops.txstate)
+            return -RD_EOPNOTSUPP;
+        return f->dev->ops.txstate(f->dev->ops.ctx, (struct rd_xnu_txstate *)data);
     case RD_NR_PRIME_HANDLE_TO_FD:               /* libdrm_xnu: RD_NR_XNU_BO_EXPORT/IMPORT */
     case RD_NR_PRIME_FD_TO_HANDLE:
     case RD_NR_SYNCOBJ_HANDLE_TO_FD:             /* fds are the libdrm_xnu layer's (drm_xnu.c) */

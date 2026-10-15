@@ -396,6 +396,17 @@ static int sched(rdna3_drm_file *f, uint32_t op, int32_t fd, int32_t prio, uint3
     return IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_SCHED), s);
 }
 
+static int h_txstate(void *ctx, struct rd_xnu_txstate *t)
+{
+    (void)ctx;
+    if (t->pipe > 3)
+        return -RD_EINVAL;
+    t->valid = 1;
+    t->problems = 1u << 1;
+    snprintf(t->text, sizeof(t->text), "head %u\nproblems: DIG back end off\n", t->pipe);
+    return 0;
+}
+
 static int h_scanout(void *ctx, struct rd_xnu_scanout *s)
 {
     (void)ctx;
@@ -414,7 +425,7 @@ int main(void)
     rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
                           h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL, NULL,
                           NULL, NULL, NULL, NULL, NULL, NULL,
-                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -1807,6 +1818,20 @@ int main(void)
         so.pipe = 9;
         CHECK(IOCTL(f, RD_NR_XNU_SCANOUT, so) == -RD_EINVAL);
         dev.ops.scanout = NULL;
+    }
+    /* XNU_TXSTATE: the same, text the OS fills */
+    {
+        static struct rd_xnu_txstate tx;
+        CHECK(sizeof(tx) <= 4096);   /* the IOUserClient's payload limit */
+        CHECK(IOCTL(f, RD_NR_XNU_TXSTATE, tx) == -RD_EOPNOTSUPP);
+        CHECK(rdna3_drm_ioctl(f, RD_NR_XNU_TXSTATE, &tx, 16) == -RD_EINVAL);
+        dev.ops.txstate = h_txstate;
+        tx.pipe = 1;
+        CHECK(IOCTL(f, RD_NR_XNU_TXSTATE, tx) == 0 && tx.valid && tx.problems == 2u &&
+              strcmp(tx.text, "head 1\nproblems: DIG back end off\n") == 0);
+        tx.pipe = 9;
+        CHECK(IOCTL(f, RD_NR_XNU_TXSTATE, tx) == -RD_EINVAL);
+        dev.ops.txstate = NULL;
     }
 
     /* PRIME: the export holds the BO while its exporter's file is open or

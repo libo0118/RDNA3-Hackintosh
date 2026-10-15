@@ -494,6 +494,31 @@ static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info,
     }
 }
 
+/* what the pipe's head sends after its OTG (RD_NR_XNU_TXSTATE): the OTG
+ * totals and DRR bounds, the DIG front end and its packets, the back end
+ * and the PHY, the problems and the changes since the driver started, one
+ * "  TX " line each. Card run of 2026-10-15: an HDMI monitor said "no
+ * signal" while its pipe scanned the desktop. Nothing from a kext without
+ * the ioctl. */
+static void scanout_txstate(int fd, uint32_t pipe)
+{
+    static struct rd_xnu_txstate t;
+    char *l, *nl;
+    memset(&t, 0, sizeof(t));
+    t.pipe = pipe;
+    if (IOCTL(fd, RD_NR_XNU_TXSTATE, t) || !t.valid)
+        return;
+    t.text[sizeof(t.text) - 1] = 0;
+    for (l = t.text; *l; l = nl + 1) {
+        nl = strchr(l, '\n');
+        if (!nl) {
+            printf("  TX %s\n", l);
+            break;
+        }
+        printf("  TX %.*s\n", (int)(nl - l), l);
+    }
+}
+
 static int scanout_dump(int fd, const char *dir, uint32_t hires)
 {
     enum { CAP = RD_XNU_SCANOUT_HIRES_W * RD_XNU_SCANOUT_HIRES_W * 4 * 3 };
@@ -528,6 +553,8 @@ static int scanout_dump(int fd, const char *dir, uint32_t hires)
                    s.det_segs, s.compbuf_segs, s.dispclk_khz, s.dppclk_khz, s.dscl_mode, s.lb_memory_ctrl,
                    s.dscl_mem_pwr, (s.dlg_after_scaler >> 16) & 7, s.dlg_after_scaler & 0x1fff, s.dlg_req_delivery,
                    s.dlg_line_delivery);
+        if (s.powered)
+            scanout_txstate(fd, p);
         if (!s.lit)
             continue;
         lit++;

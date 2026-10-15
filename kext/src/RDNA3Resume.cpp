@@ -23,6 +23,11 @@
  *              heads are restored. Without it the findings are logged and
  *              published (RDNA3,Wake*).
  *
+ *   TX watch   what each head sends after its OTG (hw/dcn32_txstate.c):
+ *              logged in full at the start and after the clone, then
+ *              every 2 s only what changed (rdna3txwatch=0: off), and
+ *              read by the report's screen looks (RD_NR_XNU_TXSTATE)
+ *
  * New behaviour on the card only with rdna3resume=1 (restore, zero
  * streams, resume) or rdna3dpms=2 (standby); the snapshot and the checks
  * only read registers.
@@ -34,13 +39,16 @@
 #include "RDNA3Regs.h"
 
 #include <IOKit/IOLib.h>
+#include <kern/clock.h>
 #include <kern/thread_call.h>
+#include <sys/kauth.h>
 
 extern "C" {
 #include "rdna3_hw.h"
 #include "rdna3_bootargs.h"
 #include "dcn32.h"
 #include "dcn32_state.h"
+#include "dcn32_txstate.h"
 #include "dcn32_clone.h"
 #include "dcn32_mode.h"
 #include "dcaux.h"
@@ -131,6 +139,159 @@ void RDNA3Accel::displayStateSaveAll()
     IOLockUnlock(fDispLock);
 }
 
+/* ------------------------------ TX watch ------------------------------ */
+
+/* Card run of 2026-10-15: the HDMI monitor of the boot head said "no
+ * signal" while its OTG ran, its CRC moved and its pipe scanned the
+ * desktop; the report could not tell when it went dark nor what changed
+ * after the OTG. The DTN log's read-backs (hw/dcn32_txstate.c), kept per
+ * head: the first state, the last one, how many changes. */
+struct RDNA3TxWatch {
+    rdna3_tx_state boot[4], last[4];
+    uint32_t       changes[4];
+};
+
+#define RD_TX_CHANGES_LOGGED 32   /* then every 64th */
+
+static uint64_t txUptimeMs()
+{
+    uint64_t abs, ns;
+    clock_get_uptime(&abs);
+    absolutetime_to_nanoseconds(abs, &ns);
+    return ns / 1000000ull;
+}
+
+/* the head's OTG and the DIG it was found or lit with; a head whose DIG
+ * reads off now (standby, or what is being looked for) keeps the route of
+ * its snapshot. fDispLock held. */
+bool RDNA3Accel::displayTxRead(uint32_t head, rdna3_tx_state *t)
+{
+    if (!fDcn || !fDispDev || head >= fDcn->nheads || head >= 4)
+        return false;
+    const rdna3_dcn_head *h = &fDcn->head[head];
+    int fe = h->dig_fe, be = h->dig_be;
+    if ((fe < 0 || be < 0) && fDispState && fDispState->head[head].valid && fDispState->head[head].be < 5) {
+        fe = (int)fDispState->head[head].fe;
+        be = (int)fDispState->head[head].be;
+    }
+    return dcn32_tx_state_read(fDispDev, h->otg, fe, be, t) == RDNA3_OK;
+}
+
+void RDNA3Accel::displayTxLogFull(uint32_t head, const char *when, const rdna3_tx_state *t)
+{
+    char line[RD_TX_LINE], probs[256];
+    dcn32_tx_problems_str(dcn32_tx_state_problems(t), probs, sizeof(probs));
+    LOG("display: head %u TX %s (%llu ms after the start): problems: %s", head, when,
+        (unsigned long long)txUptimeMs(), probs);
+    for (uint32_t g = 0; g < RD_TX_GROUPS; g++)
+        if (dcn32_tx_state_format(t, g, line, sizeof(line)))
+            LOG("display: head %u TX   %s", head, line);
+}
+
+/* when: logged in full ("at the start", "after the clone"); NULL (the 2 s
+ * statistics tick): only a change, with the time, the registers and what
+ * it means. Reads registers only. */
+void RDNA3Accel::displayTxCheck(const char *when)
+{
+    if (!fDcn || !fDispDev || !fDispLock || fDispAsleep || fShuttingDown || !rd3_arg("rdna3txwatch", 1))
+        return;
+    IOLockLock(fDispLock);
+    if (!fTx) {
+        fTx = (RDNA3TxWatch *)IOMalloc(sizeof(RDNA3TxWatch));
+        if (!fTx) {
+            IOLockUnlock(fDispLock);
+            LOG("display: TX watch: no memory, not watching");
+            return;
+        }
+        bzero(fTx, sizeof(*fTx));
+    }
+    for (uint32_t i = 0; i < fDcn->nheads && i < 4; i++) {
+        rdna3_tx_state now;
+        char diff[384], probs[256];
+        bool publish = false;
+        if (!displayTxRead(i, &now))
+            continue;
+        uint32_t p = dcn32_tx_state_problems(&now);
+        rdna3_tx_state *last = &fTx->last[i];
+        if (!fTx->boot[i].valid)
+            fTx->boot[i] = now;
+        if (when || !last->valid) {
+            displayTxLogFull(i, when ? when : "first look", &now);
+            if (when && dcn32_tx_state_diff(&fTx->boot[i], &now, diff, sizeof(diff)))
+                LOG("display: head %u TX %s, changed since the start: %s", i, when, diff);
+            publish = true;
+        } else if (uint32_t n = dcn32_tx_state_diff(last, &now, diff, sizeof(diff))) {
+            uint32_t c = ++fTx->changes[i];
+            if (c <= RD_TX_CHANGES_LOGGED || c % 64 == 0) {
+                dcn32_tx_problems_str(p, probs, sizeof(probs));
+                LOG("display: head %u TX change #%u at %llu ms after the start%s: %u register(s): %s; problems: %s",
+                    i, c, (unsigned long long)txUptimeMs(), fHeadLinkDown[i] ? " (monitor standby)" : "", n, diff,
+                    probs);
+            }
+            if (c == RD_TX_CHANGES_LOGGED)
+                LOG("display: head %u TX: %u changes logged, from now on every 64th", i, c);
+            publish = true;
+        }
+        *last = now;
+        if (publish) {
+            char key[32], val[320];
+            dcn32_tx_problems_str(p, probs, sizeof(probs));
+            snprintf(key, sizeof(key), "RDNA3,Head%u,TX", i);
+            snprintf(val, sizeof(val), "%s; %u change(s) since the start", probs, fTx->changes[i]);
+            setProperty(key, val);
+        }
+    }
+    IOLockUnlock(fDispLock);
+}
+
+/* RD_NR_XNU_TXSTATE: the head on pipe t->pipe as text for the report's
+ * screen looks (rdna3_drminfo --scanout). Root only, reads registers. */
+int RDNA3Accel::drmTxState(void *ctx, struct rd_xnu_txstate *t)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    uint32_t pipe = t->pipe;
+    if (!kauth_cred_issuser(kauth_cred_get()))
+        return -RD_EPERM;
+    if (!a->fDcn || !a->fDispDev || !a->fDispLock)
+        return -RD_ENODEV;
+    if (pipe >= RD_DCN_MAX_PIPES)
+        return -RD_EINVAL;
+    bzero(t, sizeof(*t));
+    t->pipe = pipe;
+    IOLockLock(a->fDispLock);
+    for (uint32_t i = 0; i < a->fDcn->nheads && i < 4; i++) {
+        rdna3_tx_state now;
+        if (a->fDcn->head[i].pipe != pipe || !a->displayTxRead(i, &now))
+            continue;
+        char line[RD_TX_LINE], diff[384];
+        size_t n = 0;
+        t->valid = 1;
+        t->problems = dcn32_tx_state_problems(&now);
+        t->changes = a->fTx ? a->fTx->changes[i] : 0;
+#define TXT(...)                                                                         \
+    do {                                                                                 \
+        if (n < sizeof(t->text)) {                                                       \
+            int w_ = snprintf(t->text + n, sizeof(t->text) - n, __VA_ARGS__);            \
+            n = w_ < 0 ? sizeof(t->text) : n + (size_t)w_;                               \
+        }                                                                                \
+    } while (0)
+        TXT("head %u\n", i);
+        for (uint32_t g = 0; g < RD_TX_GROUPS; g++)
+            if (dcn32_tx_state_format(&now, g, line, sizeof(line)))
+                TXT("%s\n", line);
+        dcn32_tx_problems_str(t->problems, line, sizeof(line));
+        TXT("problems: %s; %u change(s) seen by the driver's watch\n", line, t->changes);
+        if (a->fTx && a->fTx->boot[i].valid) {
+            uint32_t d = dcn32_tx_state_diff(&a->fTx->boot[i], &now, diff, sizeof(diff));
+            TXT("since the start: %s\n", d ? diff : "unchanged");
+        }
+#undef TXT
+        break;
+    }
+    IOLockUnlock(a->fDispLock);
+    return 0;
+}
+
 void RDNA3Accel::displayStateFree()
 {
     if (fWakeCall) {
@@ -141,6 +302,9 @@ void RDNA3Accel::displayStateFree()
     if (fDispState)
         IOFree(fDispState, sizeof(rdna3_dcn_state));
     fDispState = nullptr;
+    if (fTx)   /* the statistics tick that watches is stopped by now */
+        IOFree(fTx, sizeof(RDNA3TxWatch));
+    fTx = nullptr;
 }
 
 /* --------------------------- standby, blank --------------------------- */

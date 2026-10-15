@@ -125,6 +125,7 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     displayProbeConnectors();
     displayPublishRoutes();
     displayStateSaveAll();   /* D4: what a reset or a sleep must bring back */
+    displayTxCheck("at the start (as the firmware left it)");
     displayOtgCheck(this, fDispDev, fDcn);   /* rdna3otg=1: step otg */
 
     fHotplugCall = thread_call_allocate((thread_call_func_t)displayHotplugWork, this);
@@ -556,6 +557,8 @@ void RDNA3Accel::displayMirror(rdna3_dmub *dm, bool probe, bool reinit)
     setProperty("RDNA3,Mirror", val);
     setNumber("RDNA3,MirrorResult", (uint64_t)(int64_t)ret, 64);
     LOG("display: mirror: %s", val);
+    /* did lighting the clone change what the boot head sends? */
+    displayTxCheck("after the clone");
 }
 
 void RDNA3Accel::displayHotplug(uint32_t pin, int connected)

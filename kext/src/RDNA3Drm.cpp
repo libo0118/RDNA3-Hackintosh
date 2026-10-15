@@ -539,6 +539,9 @@ void RDNA3Accel::statsTick(void *owner, void *)
             LOG("PM: activity %u%%, gfxclk %u MHz, uclk %u MHz, %u W, edge %u C, hotspot %u C, mem %u C, fan %u rpm",
                 v[0], v[5], v[6], v[7], v[1], v[2], v[3], v[4]);
     }
+    /* what each head sends after its OTG, every 2 s (RDNA3Resume.cpp) */
+    if (ok && !a->fStatsStop)
+        a->displayTxCheck(nullptr);
     if (!a->fStatsStop && a->fStatsCall) {
         uint64_t dl;
         clock_interval_to_deadline(2000, kMillisecondScale, &dl);
@@ -721,6 +724,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.bo_userptr = drmBoUserptr;
     ops.sensor = drmSensor;
     ops.scanout = drmScanout;
+    ops.txstate = drmTxState;
     ops.vm_fault_info = drmVmFaultInfo;
     ops.random64 = drmRandom64;
     ops.gpu_clock = drmGpuClock;   /* AMDGPU_INFO_TIMESTAMP: SMUIO GOLDEN_TSC */

@@ -239,6 +239,7 @@ private:
     static int    drmBoUserptr(void *ctx, void *fileOs, rdna3_bo *bo, uint64_t uaddr, uint32_t flags);
     static int    drmSensor(void *ctx, uint32_t type, uint32_t *value);
     static int    drmScanout(void *ctx, struct rd_xnu_scanout *s);   /* RDNA3Display.cpp */
+    static int    drmTxState(void *ctx, struct rd_xnu_txstate *t);    /* RDNA3Display.cpp */
     static int    drmVmFaultInfo(void *ctx, void *vm, uint64_t *addr, uint32_t *status, uint32_t *vmhub);
     int           gttAlloc(rdna3_bo *bo);
     int           gttWire(rdna3_bo *bo, IOMemoryDescriptor *md, bool prepared);
@@ -442,6 +443,15 @@ private:
     void          displayPictureLost(const char *why);
     void          displayStateSave(uint32_t head);   /* fDispLock held */
     void          displayStateSaveAll();
+    /* What each head sends after its OTG (hw/dcn32_txstate.c): logged in
+     * full at the start and after the clone, then every 2 s (the
+     * statistics tick) only what changed; on unless rdna3txwatch=0. Card
+     * run of 2026-10-15: the HDMI monitor said "no signal" while its pipe
+     * scanned the desktop, and nothing told when or what changed. */
+    struct RDNA3TxWatch *fTx = nullptr;
+    void          displayTxCheck(const char *when);
+    bool          displayTxRead(uint32_t head, struct rdna3_tx_state *t);   /* fDispLock held */
+    void          displayTxLogFull(uint32_t head, const char *when, const struct rdna3_tx_state *t);
     void          displayStateFree();
     void          displayNoteBlank(uint32_t head, bool blank);
     int           displayHeadDpms(uint32_t head, bool blank);

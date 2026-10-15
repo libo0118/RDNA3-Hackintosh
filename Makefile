@@ -20,6 +20,7 @@ HW      += hw/dcn32_otg.c hw/dcn32_color.c hw/dcn32_hdmi.c hw/dcn32_hwseq.c
 HW      += hw/dcn32_hpo.c hw/dcn32_odm.c
 HW      += hw/dcn32_audio.c hw/dcn32_opp.c
 HW      += hw/dcn32_pstate.c hw/dcn32_subvp.c hw/dcn32_freesync.c
+HW      += hw/dcn32_txstate.c
 UAPI    := uapi/rdna3_drm.c
 COMMON_H := $(wildcard common/*.h) $(wildcard hw/*.h) $(wildcard uapi/*.h)
 
@@ -117,6 +118,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_discovery $(BUI
 	$(BUILD)/test_libdrm_amdgpu
 	rm -f $(BUILD)/scanout-pipe*.ppm
 	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '1 pipe(s) lit'
+	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '^  TX problems: none'
 	$(BUILD)/rdna3_drminfo_host --scanout-hires $(BUILD) | grep -q '1 pipe(s) lit'
 	python3 tools/triage_reports.py --picture $(BUILD)/scanout-pipe0.ppm | grep -q 'png'
 	# two jobs in one process each get their own VA (card run 2026-10-12)
@@ -124,6 +126,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_discovery $(BUI
 	tests/test_oc_install.sh
 	tests/test_make_pkg.sh
 	tests/test_triage_a3.sh
+	tests/test_triage_tx.sh
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump
 

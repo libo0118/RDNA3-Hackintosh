@@ -109,6 +109,22 @@ static int lb_scanout(void *c, struct rd_xnu_scanout *s)
     return 0;
 }
 
+/* RD_NR_XNU_TXSTATE: pipe 0's head as a clean HDMI output (what
+ * rdna3_drminfo --scanout prints on the host) */
+static int lb_txstate(void *c, struct rd_xnu_txstate *t)
+{
+    (void)c;
+    if (t->pipe > 3)
+        return -RD_EINVAL;
+    t->valid = t->pipe == 0;
+    t->problems = t->changes = 0;
+    snprintf(t->text, sizeof(t->text), "%s",
+             t->valid ? "head 0\nOTG0: OTG_CONTROL 0x10201 V_TOTAL 0x464\n"
+                        "problems: none; 0 change(s) seen by the driver's watch\nsince the start: unchanged\n"
+                      : "");
+    return 0;
+}
+
 static int lb_sensor(void *c, uint32_t type, uint32_t *v)
 {
     (void)c;
@@ -349,7 +365,8 @@ static void dev_init(void)
                           lb_vm_create, lb_vm_destroy, lb_vm_map, lb_vm_unmap,
                           lb_submit, lb_signaled, lb_wait, NULL,
                           lb_bo_userptr, lb_sensor, NULL, lb_random64, lb_scanout, lb_privileged,
-                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, lb_surface_bo, lb_surface_dirty, NULL };
+                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, lb_surface_bo, lb_surface_dirty, NULL,
+                          lb_txstate };
     amd_discovery disc;
     if (g_dev_ready)
         return;
