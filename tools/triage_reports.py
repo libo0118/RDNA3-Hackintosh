@@ -252,16 +252,16 @@ def m6_screens(prefix):
 
 
 def main_pipe(path, txt):
-    """the pipe of the main display: the pipe whose size followed the mode
-    switch of CG display 0 (rdna3_modetest's "display 0", the main display:
-    card run 58 showed it on pipe 1, not head 0's), else head 0's OTG (RDNA3,Head0,Route, the boot
-    head macOS makes main unless the user moved the menu bar) found in the
-    looks' 'pipe P: ... otg O' lines; pipe 0 when either is missing"""
-    m = re.search(r"^== rdna3_drminfo --scanout \(look mode-d0-(\d+)x(\d+)\)\n(.*?)(?=^== |\Z)", txt, re.M | re.S)
-    if m:
+    """(pipe, source) of the main display: the pipe whose size followed the
+    mode switch of CG display 0 (rdna3_modetest's "display 0", the main
+    display: card run 58 showed it on pipe 1, not head 0's), else head 0's
+    OTG (RDNA3,Head0,Route) found in the looks' 'pipe P: ... otg O' lines,
+    else pipe 0"""
+    for m in re.finditer(r"^== rdna3_drminfo --scanout \(look mode-d0-(\d+)x(\d+)(?:-[\w.]+)?\)\n(.*?)(?=^== |\Z)",
+                         txt, re.M | re.S):
         hit = re.findall(r"^pipe (\d+): LIT otg \d+ %sx%s " % (m.group(1), m.group(2)), m.group(3), re.M)
         if len(hit) == 1:
-            return int(hit[0])
+            return int(hit[0]), "display 0's mode switch to %sx%s" % (m.group(1), m.group(2))
     props_txt = ""
     if os.path.exists(path):
         try:
@@ -270,22 +270,29 @@ def main_pipe(path, txt):
         except (OSError, tarfile.TarError):
             pass
     m = re.search(r"OTG(\d+)", str(parse_props(props_txt).get("Head0,Route", "")))
-    if not m:
-        return 0
-    for pp, otg in re.findall(r"^pipe (\d+): \w+ otg (\d+)", txt, re.M):
-        if otg == m.group(1):
-            return int(pp)
-    return 0
+    if m:
+        for pp, otg in re.findall(r"^pipe (\d+): \w+ otg (\d+)", txt, re.M):
+            if otg == m.group(1):
+                return int(pp), "head 0's route, OTG%s" % m.group(1)
+    return 0, "the default: no mode switch look, no head 0 route"
 
 
-def m6_verdict(prefix, txt, main):
+def m6_cut(txt):
+    """M6 began but never reached its end: '== M6 end' (card run 58b), or for
+    older reports the copy-forward log that closes it"""
+    return "== probe: Metal apps (M6)" in txt and "== M6 end" not in txt and \
+        "== copy forward (kernel) during M6" not in txt
+
+
+def m6_verdict(prefix, txt, main_src):
     """[(level, text, short)] about the M6 pictures: FAIL only for the main display's
     pipe, only when every app ran and at least 3 looks were taken"""
+    main, src = main_src
     out = []
     norun = re.findall(r"^M6 (\S+): running NO", txt, re.M) + \
         [a for a, cr in re.findall(r"^M6 (\S+): running .*crash report: (\S+)", txt, re.M) if cr != "none"]
     for pipe, (names, most) in sorted(m6_screens(prefix).items()):
-        what = "pipe %d%s" % (pipe, " (main display)" if pipe == main else "")
+        what = "pipe %d%s" % (pipe, " (main display, by %s)" % src if pipe == main else "")
         if len(names) < 3:
             out.append(("INFO", "%s: %d M6 look(s), not judged" % (what, len(names)), "pipe %d not judged" % pipe))
         elif most >= M6_FROZEN_FRACTION:
@@ -416,8 +423,25 @@ def a3_display_verdict(log, sv):
     elif "WindowServer's other inputs MAY become BOs" in log:
         print("   INFO %-20s WindowServer's inputs may be BOs (rdna3a3ws=1: the 2026-10-15d flicker)" % "A3 WindowServer")
     elif "WindowServer's inputs are kept out" in log:
-        print("   INFO %-20s WindowServer's inputs kept out of A3: %d refused (card run 58, 2026-10-15d)" %
-              ("A3 WindowServer", ws_kept))
+        # every WindowServer import is refused in this mode: one that went
+        # into the family's VRAM all the same, or more non-display imports
+        # than refusals, is a leak (an unnamed caller is refused too)
+        ws_in = re.findall(r"item 7: surface (\d+) \d+x\d+ pitch \d+ -> the family's VRAM", cd)
+        other = c.get("a3display_other", 0)
+        unknown = c.get("a3display_task_mismatch", 0) + c.get("a3display_noname", 0)
+        if ws_in:
+            print("   FAIL %-20s WindowServer input leaked into A3: %d surface(s) in the family's VRAM in WindowServer "
+                  "(%s) although its inputs are kept out" % ("A3 WindowServer", len(set(ws_in)),
+                                                             ", ".join(sorted(set(ws_in), key=int)[:6])))
+            failed = True
+        elif c and other > c.get("a3ws_refused", 0):
+            print("   FAIL %-20s WindowServer input leaked into A3: %d non-display import(s), %d refused" %
+                  ("A3 WindowServer", other, c.get("a3ws_refused", 0)))
+            failed = True
+        else:
+            print("   INFO %-20s WindowServer's inputs kept out of A3: %d refused (card run 58, 2026-10-15d)%s" %
+                  ("A3 WindowServer", ws_kept, "; %d import(s) by a process the kernel could not name, refused" %
+                   unknown if unknown else ""))
     for h in sorted(a3lines):
         print("     " + a3lines[h][:300])
     for l in sorted(set(re.findall(r"flicker: head \d+: [^\n]*", log)))[-4:]:
@@ -428,27 +452,112 @@ def a3_display_verdict(log, sv):
     return failed
 
 
-A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3|"
-                       r"swaps(?:_a3|_abab)?_h\d|iop_flip): (\d+)", re.M)
+A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3|flicker|"
+                       r"swaps(?:_a3|_abab|_hashed|_hashskip)?_h\d|iop_flip): (\d+)", re.M)
 FLICKER_SHARE = 0.25   # of a head's swaps showing the picture of two swaps before: flicker
 
 
-def flicker_verdict(c):
-    """[(level, text)] from the A B A B counters (debug.rdna3accel_swaps_abab_h<N>)"""
+def gamma_unjudged(txt):
+    """(level, text) for 'GAMMA: UNJUDGED' (the screens kept changing): the
+    core's RDNA3,Head<n>,Gamma record before and after the test decides -
+    every head took the test's tables (its call count grew by 3 or more:
+    dark, identity, ColorSync's restore) is WARN (open, not a pass), else
+    FAIL"""
+    def calls(section):
+        m = re.search(r"^== gamma property %s\n(.*?)(?=^== |^\[exit|\Z)" % section, txt, re.M | re.S)
+        return dict((h, int(n)) for h, n in
+                    re.findall(r'"RDNA3,Head(\d),Gamma" = "[^"]*?(\d+) calls"', m.group(1))) if m else None
+    before, after = calls("before"), calls("after")
+    if not after:
+        return "FAIL", ("the screens kept changing (CRC before not stable) and no RDNA3,Head<n>,Gamma record came "
+                        "with the test: nothing shows that the tables reached the pipes")
+    grew = dict((h, n - (before or {}).get(h, 0)) for h, n in after.items())
+    short = sorted(h for h, d in grew.items() if d < 3)
+    if short:
+        return "FAIL", ("the screens kept changing, and head(s) %s took fewer than 3 tables during the test (%s)" %
+                        (", ".join(short), ", ".join("head %s +%d" % kv for kv in sorted(grew.items()))))
+    return "WARN", ("open: the screens kept changing (card run 58: flicker), so the CRCs prove nothing; the core "
+                    "took the tables (%s) - judge again on still screens" %
+                    ", ".join("head %s +%d" % kv for kv in sorted(grew.items())))
+
+
+def kernel_text(report, d):
+    """the kernel log of a report: the archive's 20-log-rdna3.txt and the
+    serial logs next to it"""
+    out = ""
+    if os.path.exists(report):
+        try:
+            with tarfile.open(report) as tar:
+                out = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt") or ""
+        except (OSError, tarfile.TarError):
+            pass
+    for f in glob.glob(os.path.join(d, "serial-*.log")):
+        try:
+            out += "\n" + open(f, errors="replace").read()
+        except OSError:
+            pass
+    return out
+
+
+def a3_counter_dumps(txt):
+    """[(name, {counter: value})] of every card run 58 sysctl dump in a tests
+    file or 29-surface-vram.txt, in order"""
     out = []
-    for k in sorted(c):
-        m = re.match(r"swaps_h(\d)$", k)
-        if not m or not c[k]:
-            continue
-        ab = c.get("swaps_abab_h" + m.group(1))
+    for m in re.finditer(r"^== (display pipe and AGDC counters|A3 display counters after M6|sysctl \(card run 58\))\n"
+                         r"(.*?)(?=^== |\Z)", txt, re.M | re.S):
+        c = dict((k, int(v)) for k, v in A3_SYSCTL.findall(m.group(2)))
+        if c:
+            out.append((m.group(1), c))
+    if not out and A3_SYSCTL.search(txt):   # counters without a known header: one dump
+        out.append(("the counters", dict((k, int(v)) for k, v in A3_SYSCTL.findall(txt))))
+    return out
+
+
+def flicker_verdict(txt_or_counters):
+    """[(level, text)] from the A B A B counters: per head the swaps whose
+    picture alternated against the swaps hashed (swaps_hashed_h<N>; older
+    kernels: all swaps), as the change between the first and the last dump
+    when there are two (the probes and M6), else since boot"""
+    if isinstance(txt_or_counters, dict):
+        dumps = [("the counters", txt_or_counters)]
+    else:
+        dumps = a3_counter_dumps(txt_or_counters)
+    if not dumps:
+        return [("INFO", "NOT MEASURED: no counters in this report")]
+    last_name, last = dumps[-1]
+    first_name, first = dumps[0] if len(dumps) > 1 else (None, {})
+    span = "between '%s' and '%s'" % (first_name, last_name) if first_name else "since boot ('%s')" % last_name
+    out = []
+    heads = sorted(set(m.group(1) for m in (re.match(r"swaps_(?:hashed_)?h(\d)$", k) for k in last) if m))
+    for h in heads:
+        if not last.get("swaps_h" + h, 0) and not last.get("swaps_hashed_h" + h, 0):
+            continue   # a head that never swapped (no monitor)
+        den_key = "swaps_hashed_h" + h if "swaps_hashed_h" + h in last else "swaps_h" + h
+        den = last.get(den_key, 0) - first.get(den_key, 0)
+        ab = last.get("swaps_abab_h" + h)
+        swaps = last.get("swaps_h" + h, 0) - first.get("swaps_h" + h, 0)
         if ab is None:
+            out.append(("INFO", "head %s: NOT MEASURED (a kernel without the flicker test)" % h))
             continue
-        share = ab / float(c[k])
-        if c[k] >= 60 and share >= FLICKER_SHARE:
-            out.append(("FAIL", "head %s flickers: %d of %d legacy swaps showed the picture of two swaps before "
-                                "(A B A B, %.0f%%)" % (m.group(1), ab, c[k], share * 100)))
+        ab -= first.get("swaps_abab_h" + h, 0)
+        if den <= 0:
+            if swaps > 0 or last.get("swaps_h" + h, 0):
+                out.append(("INFO", "head %s: NOT MEASURED %s: no hashed swaps (debug.rdna3accel_flicker=0, the test's "
+                                    "budget spent, or every swap skipped: swaps_hashskip_h%s %d)" %
+                            (h, span, h, last.get("swaps_hashskip_h" + h, 0))))
+            continue
+        share = ab / float(den)
+        what = "%d of %d %s swaps %s" % (ab, den, "hashed" if den_key.startswith("swaps_hashed") else "legacy", span)
+        if den < 60:
+            out.append(("INFO", "head %s: not judged, %s (fewer than 60)" % (h, what)))
+        elif share >= FLICKER_SHARE:
+            out.append(("FAIL", "head %s: alternating pictures (candidate flicker): %s showed the picture of two "
+                                "swaps before (A B A B, %.0f%%)" % (h, what, share * 100)))
+        elif ab:
+            out.append(("PASS", "head %s: %s A B A B (%.0f%%, under %.0f%%)" % (h, what, share * 100,
+                                                                              FLICKER_SHARE * 100)))
         else:
-            out.append(("PASS", "head %s: %d of %d legacy swaps A B A B (%.0f%%)" % (m.group(1), ab, c[k], share * 100)))
+            out.append(("PASS", "head %s: no A B A B in the sampled pixels (%s)" % (h, what)))
     return out
 
 
@@ -797,11 +906,6 @@ def report(path, show_all):
             ctr = cnt.get("a3display_refused", 0)
             if unnamed and ctr >= len(unnamed | disp_ids):
                 disp_ids |= unnamed
-            # WindowServer's inputs (any size) and rdna3a3=0: the kernel's counters cover them
-            unnamed = set(sid for sid, _, ke, _b in plug if ke == "1" and sid not in disp_ids)
-            pol = cnt.get("a3ws_refused", 0) + cnt.get("a3off_refused", 0)
-            if unnamed and pol and ctr + pol >= len(unnamed | disp_ids):
-                disp_ids |= unnamed
             imp_ref = [(vr, ke) for sid, vr, ke, _ in plug if not (ke == "1" and sid in disp_ids)]
             shared = sum(1 for l in live if l.startswith("live"))
             state = ("%d process(es) shared, %d private" % (shared, len(live) - shared)) if live else "no plugin line"
@@ -1069,7 +1173,7 @@ def summary(path, serial=None):
     m6 = m6_verdict(path[:-len(".tar.gz")], txt, main_pipe(path, txt))
     if m6:
         out.append(("M6 screens", "; ".join(sh for _, _, sh in m6)))
-    elif "== probe: Metal apps (M6)" in txt and not re.search(r"^M6: ", txt, re.M):
+    elif m6_cut(txt):
         out.append(("M6 screens", "NOT FINISHED: the run stopped inside M6 (the VM's time limit?), no pictures"))
     elif "(look m6" in txt:
         out.append(("M6 screens", "no pictures: the M6 looks' PPMs did not arrive"))
@@ -1077,8 +1181,14 @@ def summary(path, serial=None):
     if a3c is None:
         out.append(("A3 display counters", "none: the kext predates card run 58"))
     elif a3c:
-        for lv, t in flicker_verdict(a3c):
+        fl = flicker_verdict(txt)
+        for lv, t in fl:
             out.append(("flicker", "%s %s" % (lv, t)))
+        # the kernel logged A B A B, yet the share stayed under the line
+        if re.search(r"flicker: head \d+: swap \d+ showed alternating pictures", log) and \
+                not any(lv == "FAIL" for lv, _ in fl):
+            out.append(("flicker", "WARN the kernel logged alternating pictures (flicker: lines) under %.0f%% of "
+                                   "the hashed swaps" % (FLICKER_SHARE * 100)))
         out.append(("A3 display counters", "refused %s, imported %s, other %s (kept out %s); swaps %s" % (
             a3c.get("a3display_refused", "?"), a3c.get("a3display_imported", "?"), a3c.get("a3display_other", "?"),
             a3c.get("a3ws_refused", "?"),
@@ -1126,6 +1236,8 @@ def summary(path, serial=None):
         out.append(("P2 variant %s" % m.group(1), "%s: activity %s%%, %s W%s" % (
             m.group(2)[:28], m.group(3), m.group(4),
             ", GPM_STAT %s (pwr %s clk %s ls %s)" % g.groups() if g else "")))
+    if re.search(r"^GAMMA: UNJUDGED", txt, re.M):
+        out.append(("gamma (open)", "%s %s" % gamma_unjudged(txt)))
     for pat, name in ((r"^MODES: .*$", "scaled modes"), (r"^GAMMA: .*$", "gamma"), (r"^SOAK: .*$", "soak"),
                       (r"^HANG TEST: .*$", "hang test"), (r"^VCN TEST: .*$", "video (VCN)"),
                       (r"^SURFXPROC: .*$", "IOSurface isolation")):
@@ -1250,8 +1362,15 @@ def main():
                             # sleep after the display; the core's "head N
                             # blanked (display sleep)" lines (serial log) say
                             # whether the heads blanked first
-                            print("       INFO display sleep: not judged: the system was asleep at the look "
-                                  "(the serial log's 'blanked (display sleep)' lines decide)")
+                            klog = kernel_text(p, d)
+                            bl = sorted(set(re.findall(r"display: head (\d+) blanked \(display sleep\)", klog)))
+                            if bl:
+                                print("       INFO display sleep: not judged by the look (the system was asleep); "
+                                      "the kernel blanked head(s) %s first" % ", ".join(bl))
+                            else:
+                                print("       FAIL display sleep: never blanked a head (no 'display: head N blanked "
+                                      "(display sleep)' line in the kernel log), and the look found the system asleep")
+                                failed = True
                         else:
                             print("       %s display sleep: %d pipe(s) blanked" % ("PASS" if nb else "FAIL", nb))
                             failed = failed or not nb
@@ -1260,6 +1379,9 @@ def main():
                         print("       %s display wake: %d pipe(s) lit, %d still blanked" %
                               ("PASS" if nl and not nb else "FAIL", nl, nb))
                         failed = failed or not nl or nb > 0
+            if m6_cut(txt):
+                print("   WARN M6: NOT FINISHED - the run stopped inside M6 (the VM's time limit?): its pictures and "
+                      "counters are missing")
             for lv, t, _ in m6_verdict(p[:-len(".tar.gz")], txt, main_pipe(p, txt)):
                 print("   %s M6 screen: %s" % (lv, t))
                 failed = failed or lv == "FAIL"
@@ -1269,7 +1391,7 @@ def main():
                 print("   INFO A3 display counters: none (the kext predates card run 58)")
             elif a3c:
                 print("   INFO A3 display counters: " + ", ".join("%s %d" % kv for kv in sorted(a3c.items())))
-                for lv, t in flicker_verdict(a3c):
+                for lv, t in flicker_verdict(txt):
                     print("   %s flicker: %s" % (lv, t))
                     failed = failed or lv == "FAIL"
                 if a3c.get("a3display_imported") and any(v for k, v in a3c.items() if k.startswith("swaps_h")) and \
@@ -1304,8 +1426,9 @@ def main():
                     print("     " + l[3:170])
                 failed = failed or m.group(1) == "FAIL"
                 if m.group(1) == "UNJUDGED":
-                    print("   WARN gamma: the screens kept changing through the test (card run 58: flicker) - "
-                          "the round trip was not compared")
+                    lv, t = gamma_unjudged(txt)
+                    print("   %s gamma: %s" % (lv, t))
+                    failed = failed or lv == "FAIL"
             # A3: another process's IOSurface refused (rdna3_drminfo --surface-xproc)
             m = re.search(r"^SURFXPROC: (\w+).*$", txt, re.M)
             if m:

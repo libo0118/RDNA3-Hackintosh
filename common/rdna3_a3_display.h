@@ -104,4 +104,43 @@ static inline int rd3_flicker_abab(uint32_t h, uint32_t h1, uint32_t h2, uint64_
     return n >= 3 && h == h2 && h != h1;
 }
 
+/* The same per band of the picture (h, h1, h2: one hash per band, 'bands'
+ * of them): a menu or a status item alternating in its own band counts
+ * even when the rest stands still. 'n' is the number of hashes in a row
+ * taken so far (the newest included); a skipped swap starts it again. */
+static inline int rd3_flicker_abab_any(const uint32_t *h, const uint32_t *h1, const uint32_t *h2, unsigned bands,
+                                       uint64_t n)
+{
+    unsigned i;
+    for (i = 0; h && h1 && h2 && i < bands; i++)
+        if (rd3_flicker_abab(h[i], h1[i], h2[i], n))
+            return 1;
+    return 0;
+}
+
+/* the rows of band 'band' (of 'bands', the first one the top 32 rows: the
+ * menu bar at 1x and 2x) of a picture 'height' rows high that a flicker
+ * hash samples: 'rows' of them, written to out[]; returns how many */
+static inline unsigned rd3_flicker_band_rows(unsigned band, unsigned bands, unsigned height, unsigned rows,
+                                             unsigned *out)
+{
+    unsigned top, len, i, k = 0;
+    if (!bands || band >= bands || !height || !rows || !out)
+        return 0;
+    if (band == 0) {
+        top = 0;
+        len = height < 32 ? height : 32;
+    } else {
+        const unsigned rest = height > 32 ? height - 32 : 0;
+        top = 32 + (unsigned)(((uint64_t)rest * (band - 1)) / (bands - 1));
+        len = 32 + (unsigned)(((uint64_t)rest * band) / (bands - 1)) - top;
+    }
+    for (i = 0; i < rows && len; i++) {
+        const unsigned y = top + (unsigned)(((uint64_t)len * (2 * i + 1)) / (2 * rows));
+        if (y < height)
+            out[k++] = y;
+    }
+    return k;
+}
+
 #endif

@@ -489,8 +489,11 @@ auto_limit() {
     # rdna3cts=1: the CTS subset's time limits (tools/cts/patterns.txt: 41
     # min at most) and the bundle's download
     case " $1 " in *" rdna3cts=1 "*) m=$((m + 45)) ;; esac
-    # rdna3probe=1: V3 / A3 / M4 (15 s window) / M5 / M6 (two apps, 20 s each)
-    case " $1 " in *" rdna3probe=1 "*) m=$((m + 4)) ;; esac
+    # rdna3probe=1: V3 / A3 / M4 (15 s window) / M5 / M6: per app 15 s, its
+    # log (up to 40 s) and a hi-res look (up to 60 s), then System Settings,
+    # the desktop look, the copy-forward log and the counters (card run 58b:
+    # the 16 min limit stopped the run inside M6)
+    case " $1 " in *" rdna3probe=1 "*) m=$((m + 9)) ;; esac
     echo "$m"
 }
 
@@ -733,6 +736,8 @@ cmd__queue() {
         RDNA3VM_BOOTARGS="$BASE_ARGS $DEBUG_ARGS $a rdna3vmauto=1" \
             RDNA3VM_TIMEOUT="$(auto_limit "$a")" bash "$SELF" _passthrough || true
         how=$(cat "$WORK/last-run" 2>/dev/null || echo unknown)
+        [ "$how" = timeout ] &&
+            echo "== queue: step $n CUT by the $(auto_limit "$a") min limit: its report may be partial (no archive, a test unfinished)"
         # the VM installed a new bundle and stopped (autoreport: the new
         # framebuffer loads from the next boot): the same step again
         if ls "$WORK"/reports/rerun-*.txt >/dev/null 2>&1; then

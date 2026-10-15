@@ -72,6 +72,37 @@ int main(void)
     CHECK(!rd3_flicker_abab(0xc, 0xb, 0xa, 9));    /* a new picture every swap */
     CHECK(!rd3_flicker_abab(0xa, 0xa, 0xb, 9));    /* changed once, then still */
 
+    /* per band: one band alternating is enough, a still band is not */
+    {
+        const uint32_t now[3] = { 1, 2, 7 }, b1[3] = { 1, 2, 8 }, b2[3] = { 1, 2, 7 };
+        const uint32_t still[3] = { 1, 2, 7 };
+        CHECK(rd3_flicker_abab_any(now, b1, b2, 3, 3));
+        CHECK(!rd3_flicker_abab_any(now, still, still, 3, 3));
+        CHECK(!rd3_flicker_abab_any(now, b1, b2, 3, 2));   /* not three in a row yet */
+        CHECK(!rd3_flicker_abab_any(now, b1, b2, 2, 3));   /* the alternating band not asked about */
+        CHECK(!rd3_flicker_abab_any(NULL, b1, b2, 3, 3));
+    }
+    /* the bands' rows: band 0 is the menu bar (top 32 rows), the rest split the picture */
+    {
+        unsigned rows[4], k, b, y, last = 0, seen_top = 0;
+        k = rd3_flicker_band_rows(0, 8, 1080, 4, rows);
+        CHECK(k == 4 && rows[0] == 4 && rows[3] == 28);   /* inside a 24-row menu bar too: 4, 12, 20 */
+        for (b = 1; b < 8; b++) {
+            k = rd3_flicker_band_rows(b, 8, 1080, 2, rows);
+            CHECK(k == 2);
+            for (y = 0; y < k; y++) {
+                CHECK(rows[y] >= 32 && rows[y] < 1080 && rows[y] > last);
+                last = rows[y];
+            }
+        }
+        CHECK(last > 1000);   /* the bottom band reaches the Dock */
+        k = rd3_flicker_band_rows(0, 8, 20, 4, rows);   /* a picture lower than the menu bar band */
+        for (y = 0; y < k; y++) seen_top |= rows[y] >= 20;
+        CHECK(k == 4 && !seen_top);
+        CHECK(rd3_flicker_band_rows(8, 8, 1080, 2, rows) == 0);
+        CHECK(rd3_flicker_band_rows(3, 8, 1080, 2, NULL) == 0);
+    }
+
     if (fails) {
         printf("test_a3_display: %d check(s) failed\n", fails);
         return 1;

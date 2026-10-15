@@ -477,13 +477,15 @@ static int gamma_test(const char *drminfo, const char *dir)
                "cannot be compared)\n", pipes, idBack, back);
         return 0;
     }
-    /* card run 58 (2026-10-15d): the screens kept changing (flicker), so no
-     * look after the restore could match one before; the dark table did
-     * reach every pipe. Not a gamma failure, not a pass either. */
-    if (moved == pipes && !stable && !back && !idBack) {
-        printf("GAMMA: UNJUDGED - %d pipe(s) moved with the dark table, but the screen changed between every two "
-               "looks (CRC before not stable): the restore cannot be compared\n", pipes);
-        return 0;
+    /* card run 58 (2026-10-15d): the screens kept changing (flicker), so a
+     * CRC that "moved" proves nothing and no look after the restore could
+     * match one before. Neither a pass nor a failure from the CRCs: exit 3,
+     * the report adds the core's own record of the tables (RDNA3,Head<n>,
+     * Gamma) and triage judges with it. */
+    if (!stable && !back && !idBack) {
+        printf("GAMMA: UNJUDGED - the screen changed between every two looks (CRC before not stable): neither the "
+               "dark table nor the restore can be judged from the CRCs of %d pipe(s)\n", pipes);
+        return 3;
     }
     printf("GAMMA: FAIL - %d of %d pipe(s) moved with the dark table, %d came back (%s)\n", moved, pipes, back,
            moved < pipes ? "no gamma reaches the pipe: rdna3gamma=0? fb/core log 'gamma'"

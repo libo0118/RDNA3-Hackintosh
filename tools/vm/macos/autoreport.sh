@@ -557,10 +557,20 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 # 8 s after the display slept, so the look read nothing
                 # ("display asleep"); an idle-sleep assertion keeps the
                 # system up while the display sleeps
-                caffeinate -i -t 40 &
+                # caffeinate -i -w (the report's own) did not stop it: the
+                # power settings, the assertions and the power log before
+                # and after say what put the system to sleep; system sleep
+                # is set to never for the look and restored after it
+                old_sleep=$(pmset -g 2>/dev/null | awk '$1 == "sleep" { print $2; exit }')
+                echo "== power before: system sleep ${old_sleep:-?} min"
+                pmset -g assertions 2>/dev/null | grep -iE 'PreventUserIdleSystemSleep|PreventSystemSleep|caffeinate' | head -8
+                pmset -a sleep 0 2>&1
+                caffeinate -s -i -t 120 &
                 cf_pid=$!
                 pmset displaysleepnow 2>&1
                 sleep 8
+                echo "== power after displaysleepnow"
+                pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Display is turned)' | tail -6
                 for k in sleep wake; do
                     mkdir -p "$HOME/rdna3-scanout/$k"
                     hdr "rdna3_drminfo --scanout (look $k)"
@@ -572,7 +582,10 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                         sleep 8
                     fi
                 done
-                kill "$cf_pid" 2>/dev/null ;;
+                echo "== power after the looks"
+                pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Display is turned)' | tail -6
+                kill "$cf_pid" 2>/dev/null
+                [ -n "$old_sleep" ] && pmset -a sleep "$old_sleep" 2>&1 ;;
         esac
         # monitor standby on every TMDS head (rdna3dpms=2, step sleep): the
         # kext's check of each head after the link went down and came back
@@ -651,8 +664,16 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                     echo "== display pipe counters before"; sysctl debug 2>/dev/null | grep -E "rdna3accel_iop" || true
                     if ! cache_skip gamma core fb accel agdc metal bin:rdna3_modetest bin:rdna3_drminfo; then
                         hdr "rdna3_modetest gamma"
+                        echo "== gamma property before"
+                        ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null | grep -E '"RDNA3,Head[0-9],Gamma"' | sed 's/^ *//'
                         with_limit 180 in_session "$D/bin/rdna3_modetest" gamma "$D/bin/rdna3_drminfo" "$HOME/rdna3-scanout" 2>&1
-                        r=$?; done_ $r; cache_keep $r
+                        r=$?
+                        # the core's own record of the tables: what triage
+                        # judges an UNJUDGED test (exit 3: the screen kept
+                        # changing) by; such a run is not kept as passed
+                        echo "== gamma property after"
+                        ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null | grep -E '"RDNA3,Head[0-9],Gamma"' | sed 's/^ *//'
+                        if [ "$r" = 3 ]; then done_ 0; else done_ $r; cache_keep $r; fi
                     fi
                     echo "== display pipe counters after"; sysctl debug 2>/dev/null | grep -E "rdna3accel_iop" || true
                     echo "== IOAcceleratorFamily2: display pipe transaction and gamma symbols"
@@ -902,6 +923,8 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6desktop" 2>&1 | m6_look_state
             echo "== A3 display counters after M6"
             a3_sysctls
+            # the run's limit stops a slow M6 (card run 58b): triage keys "NOT FINISHED" on this line
+            echo "== M6 end"
             echo "== copy forward (kernel) during M6"
             with_limit 60 log show --last 3m --style compact --predicate 'eventMessage CONTAINS "copy forward"' 2>/dev/null | tail -30
             done_ 0

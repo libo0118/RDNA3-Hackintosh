@@ -70,7 +70,7 @@ with tarfile.open(path + ".tar.gz", "w:gz") as t:
         t.addfile(ti, io.BytesIO(data))
 open(path + "-tests.txt", "w").write(
     "== rdna3_drminfo --scanout-hires (look m6Chess)\npipe 0: LIT otg 0 1920x1080\npipe 1: LIT otg 1 1920x1080\n"
-    "2 pipe(s) lit\n== probe: Metal apps (M6)\nM6: 2 of 2 apps ran on the plugin without a crash\n" +
+    "2 pipe(s) lit\n== probe: Metal apps (M6)\nM6: 2 of 2 apps ran on the plugin without a crash\n== M6 end\n" +
     extra.replace("\\n", "\n"))
 looks = ("Chess", "Maps", "Settings", "desktop")[:2 if m6 == "two" else 4]
 if m6 != "none":
@@ -118,7 +118,7 @@ o=$(run r6)
 grep -q 'FAIL A3 display  *WindowServer draws display surfaces into A3 BOs no legacy swap scans out' <<<"$o" || fail "r6: $o"
 grep -q 'DOES NOT READ' <<<"$o" || fail "r6 the line: $o"
 o=$(run r7)
-grep -q 'FAIL M6 screen: pipe 0 (main display) showed the same picture in all 4 M6 looks (Chess, Maps, Settings, desktop' <<<"$o" || fail "r7: $o"
+grep -q 'FAIL M6 screen: pipe 0 (main display, by [^)]*) showed the same picture in all 4 M6 looks (Chess, Maps, Settings, desktop' <<<"$o" || fail "r7: $o"
 grep -q 'PASS M6 screen: pipe 1 changed' <<<"$o" || fail "r7 pipe 1 changed: $o"
 grep -q 'M6 screens  *pipe 0 (main) FROZEN in all 4 looks' <<<"$o" || fail "r7 summary: $o"
 o=$(run r8)
@@ -131,15 +131,15 @@ grep -q 'FAIL A3 display  *the refusal never fired' <<<"$o" || fail "r10: $o"
 o=$(run r11)
 grep -q 'INFO A3 display  *kept-out mode, but no display framebuffer import seen' <<<"$o" || fail "r11: $o"
 o=$(run r12)
-grep -q 'INFO M6 screen: pipe 0 (main display) did not change in the M6 looks, not judged: Chess did not run' <<<"$o" || fail "r12: $o"
+grep -q 'INFO M6 screen: pipe 0 (main display, by [^)]*) did not change in the M6 looks, not judged: Chess did not run' <<<"$o" || fail "r12: $o"
 ! grep -q 'FAIL M6 screen' <<<"$o" || fail "r12 no FAIL: $o"
 o=$(run r13)
 grep -q 'INFO M6 screen: pipe 1 did not change in the M6 looks .*not the main display' <<<"$o" || fail "r13: $o"
 ! grep -q 'FAIL M6 screen' <<<"$o" || fail "r13 no FAIL: $o"
 o=$(run r14)
-grep -q 'FAIL M6 screen: pipe 0 (main display) showed the same picture' <<<"$o" || fail "r14: one clock pixel must not clear a frozen pipe: $o"
+grep -q 'FAIL M6 screen: pipe 0 (main display, by [^)]*) showed the same picture' <<<"$o" || fail "r14: one clock pixel must not clear a frozen pipe: $o"
 o=$(run r15)
-grep -q 'INFO M6 screen: pipe 0 (main display): 2 M6 look(s), not judged' <<<"$o" || fail "r15: $o"
+grep -q 'INFO M6 screen: pipe 0 (main display, by [^)]*): 2 M6 look(s), not judged' <<<"$o" || fail "r15: $o"
 o=$(run r16)
 grep -q 'FAIL A3 display: 4 display surface(s) imported (rdna3a3display=1) and no legacy swap ever scanned one out' <<<"$o" || fail "r16: $o"
 grep -q 'A3 display counters  *refused ?, imported 4' <<<"$o" || fail "r16 summary: $o"
@@ -179,32 +179,64 @@ WSREF="RDNA3Accelerator: surfgem: surface 33 plane 0 refused: a WindowServer inp
 WSPLUG="NVMTL: item 7: surface 33 plane 0: family VRAM import refused (VkResult -1000072003, kernel errno 1 Operation not permitted, 184320 B) - private image + copies (1 so far)"
 WSPLUG2="NVMTL: item 7: surface 34 plane 0: family VRAM import refused (VkResult -1000072003, kernel errno 1 Operation not permitted, 8192 B) - private image + copies (2 so far)"
 mk58 r23/rdna3-report-flicker "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "debug.rdna3accel_swaps_h0: 765\\ndebug.rdna3accel_swaps_abab_h0: 500\\ndebug.rdna3accel_swaps_h1: 269\\ndebug.rdna3accel_swaps_abab_h1: 3\\n"
-mk58 r24/rdna3-report-wskept "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SCAN\\n$WSREF" "== 20-log-rdna3.txt\\n$WSREF\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n$WSPLUG\\n$WSPLUG2\\n== sysctl (card run 58)\\ndebug.rdna3accel_a3ws_refused: 2" differ
-mk58 r25/rdna3-report-asleep "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== rdna3_drminfo --scanout (look sleep)\\npipe 0: not read: the display is asleep (system sleep or shutdown)\\npipe 1: not read: the display is asleep (system sleep or shutdown)\\ndisplay asleep: 4 pipe(s) not read, nothing to judge\\n[exit 0]\\n"
+WSREF2="${WSREF//surface 33/surface 34}"
+mk58 r24/rdna3-report-wskept "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SCAN\\n$WSREF\\n$WSREF2" "== 20-log-rdna3.txt\\n$WSREF\\n$WSREF2\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n$WSPLUG\\n$WSPLUG2\\n== sysctl (card run 58)\\ndebug.rdna3accel_a3ws_refused: 2" differ
+mk58 r25/rdna3-report-asleep "RDNA3: hello\\nRDNA3: display: head 0 blanked (display sleep) (0)" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== rdna3_drminfo --scanout (look sleep)\\npipe 0: not read: the display is asleep (system sleep or shutdown)\\npipe 1: not read: the display is asleep (system sleep or shutdown)\\ndisplay asleep: 4 pipe(s) not read, nothing to judge\\n[exit 0]\\n"
 mk58 r26/rdna3-report-gamma "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "CRC before NOT stable (the screen changed between the two looks)\\nGAMMA: UNJUDGED - 2 pipe(s) moved with the dark table, but the screen changed between every two looks (CRC before not stable): the restore cannot be compared\\n"
 mk58 r27/rdna3-report-maindp "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" same1 "== rdna3_drminfo --scanout (look mode-d0-1600x900)\\npipe 0: LIT otg 0 1920x1080 pitch 1920\\npipe 1: LIT otg 1 1600x900 pitch 1600\\n2 pipe(s) lit\\n"
 mk58 r28/rdna3-report-m6cut "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" none
 # r28: the run stopped inside M6 (no "M6: n of 2" line)
-sed -i '/^M6: /d' "$T/r28/rdna3-report-m6cut-tests.txt"
+sed -i -e '/^M6: /d' -e '/^== M6 end$/d' "$T/r28/rdna3-report-m6cut-tests.txt"
 o=$(run r23)
-grep -q 'FAIL flicker: head 0 flickers: 500 of 765 legacy swaps showed the picture of two swaps before' <<<"$o" || fail "r23: $o"
-grep -q 'PASS flicker: head 1: 3 of 269' <<<"$o" || fail "r23 head 1: $o"
-grep -q 'flicker  *FAIL head 0 flickers' <<<"$o" || fail "r23 summary: $o"
+grep -q 'FAIL flicker: head 0: alternating pictures (candidate flicker): 500 of 765 legacy swaps since boot' <<<"$o" || fail "r23: $o"
+grep -q 'PASS flicker: head 1: 3 of 269 legacy swaps' <<<"$o" || fail "r23 head 1: $o"
+grep -q 'flicker  *FAIL head 0: alternating pictures' <<<"$o" || fail "r23 summary: $o"
 o=$(run r24)
 grep -q 'INFO IOSurface VRAM (A3)' <<<"$o" || fail "r24: WindowServer's refused inputs are the policy, not a WARN: $o"
 grep -q 'INFO A3 WindowServer  *WindowServer.s inputs kept out of A3: 2 refused' <<<"$o" || fail "r24 WS: $o"
 o=$(run r25)
-grep -q 'INFO display sleep: not judged: the system was asleep at the look' <<<"$o" || fail "r25: $o"
+grep -q 'INFO display sleep: not judged by the look (the system was asleep); the kernel blanked head(s) 0 first' <<<"$o" || fail "r25: $o"
 ! grep -q 'FAIL display sleep' <<<"$o" || fail "r25 no FAIL: $o"
 o=$(run r26)
 grep -q 'GAMMA: UNJUDGED' <<<"$o" || fail "r26: $o"
-grep -q 'WARN gamma: the screens kept changing' <<<"$o" || fail "r26 warn: $o"
+grep -q 'FAIL gamma: the screens kept changing (CRC before not stable) and no RDNA3,Head<n>,Gamma record' <<<"$o" || fail "r26: no core record is a FAIL: $o"
 o=$(run r27)
-grep -q 'FAIL M6 screen: pipe 1 (main display) showed the same picture' <<<"$o" || fail "r27: the main display is the pipe that followed display 0's mode switch: $o"
+grep -q 'FAIL M6 screen: pipe 1 (main display, by display 0.s mode switch to 1600x900) showed the same picture' <<<"$o" || fail "r27: the main display is the pipe that followed display 0's mode switch: $o"
 grep -q 'INFO M6 screen: pipe 0 ' <<<"$o" && fail "r27 pipe 0 changed: $o"
 o=$(run r28)
 grep -q 'M6 screens  *NOT FINISHED: the run stopped inside M6' <<<"$o" || fail "r28: $o"
+# round 2 of card run 58b: the flicker test's denominator and dumps, a
+# WindowServer input that leaked into A3, gamma judged by the core's record,
+# a display that never blanked
+for r in r29 r30 r31 r32 r33 r34 r35; do mkdir -p "$T/$r"; done
+mk58 r29/rdna3-report-fewswaps "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== A3 display counters after M6\\ndebug.rdna3accel_swaps_h0: 40\\ndebug.rdna3accel_swaps_hashed_h0: 20\\ndebug.rdna3accel_swaps_abab_h0: 10\\n"
+mk58 r30/rdna3-report-delta "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== display pipe and AGDC counters\\ndebug.rdna3accel_swaps_h0: 1000\\ndebug.rdna3accel_swaps_hashed_h0: 1000\\ndebug.rdna3accel_swaps_abab_h0: 10\\n== A3 display counters after M6\\ndebug.rdna3accel_swaps_h0: 1100\\ndebug.rdna3accel_swaps_hashed_h0: 1100\\ndebug.rdna3accel_swaps_abab_h0: 90\\n"
+mk58 r31/rdna3-report-skipped "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== A3 display counters after M6\\ndebug.rdna3accel_swaps_h0: 300\\ndebug.rdna3accel_swaps_hashed_h0: 0\\ndebug.rdna3accel_swaps_hashskip_h0: 300\\ndebug.rdna3accel_swaps_abab_h0: 0\\n"
+mk58 r32/rdna3-report-wsleak "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SCAN" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\nNVMTL: item 7: surface 2 1920x24 pitch 7680 -> the family's VRAM (vram 1, private 0)" none
+mk58 r33/rdna3-report-wscount "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SCAN" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n== sysctl (card run 58)\\ndebug.rdna3accel_a3display_other: 10\\ndebug.rdna3accel_a3ws_refused: 4" none
+mk58 r34/rdna3-report-gammarec "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== gamma property before\\n\"RDNA3,Head0,Gamma\" = \"table 3x256 -> 0: MPCC 0 mode 2 RAM A, DPP degamma 0, 4 calls\"\\n\"RDNA3,Head1,Gamma\" = \"table 3x256 -> 0: MPCC 1 mode 2 RAM A, DPP degamma 0, 4 calls\"\\nCRC before NOT stable (the screen changed between the two looks)\\nGAMMA: UNJUDGED - the screen changed between every two looks (CRC before not stable): neither the dark table nor the restore can be judged from the CRCs of 2 pipe(s)\\n== gamma property after\\n\"RDNA3,Head0,Gamma\" = \"table 3x256 -> 0: MPCC 0 mode 2 RAM B, DPP degamma 0, 8 calls\"\\n\"RDNA3,Head1,Gamma\" = \"table 3x256 -> 0: MPCC 1 mode 2 RAM B, DPP degamma 0, 7 calls\"\\n[exit 0]\\n"
+mk58 r35/rdna3-report-noblank "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== rdna3_drminfo --scanout (look sleep)\\npipe 0: not read: the display is asleep (system sleep or shutdown)\\ndisplay asleep: 4 pipe(s) not read, nothing to judge\\n[exit 0]\\n"
+for r in r36; do mkdir -p "$T/$r"; done
+mk58 r36/rdna3-report-wsunnamed "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SCAN\\n$WSREF" "== 20-log-rdna3.txt\\n$WSREF\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n$WSPLUG\\n$WSPLUG2\\n== sysctl (card run 58)\\ndebug.rdna3accel_a3ws_refused: 2" differ
+o=$(run r36)
+grep -q 'WARN IOSurface VRAM (A3)' <<<"$o" || fail "r36: an EPERM of a surface no kernel line named stays a warning: $o"
+o=$(run r29)
+grep -q 'INFO flicker: head 0: not judged, 10 of 20 hashed swaps' <<<"$o" || fail "r29: fewer than 60 hashed swaps are not judged: $o"
+! grep -q 'PASS flicker: head 0' <<<"$o" || fail "r29 no PASS: $o"
+o=$(run r30)
+grep -q "FAIL flicker: head 0: alternating pictures (candidate flicker): 80 of 100 hashed swaps between 'display pipe and AGDC counters' and 'A3 display counters after M6'" <<<"$o" || fail "r30: the change between the dumps decides: $o"
+o=$(run r31)
+grep -q 'INFO flicker: head 0: NOT MEASURED .*swaps_hashskip_h0 300' <<<"$o" || fail "r31: $o"
+o=$(run r32)
+grep -q 'FAIL A3 WindowServer  *WindowServer input leaked into A3: 1 surface(s)' <<<"$o" || fail "r32: $o"
+o=$(run r33)
+grep -q 'FAIL A3 WindowServer  *WindowServer input leaked into A3: 10 non-display import(s), 4 refused' <<<"$o" || fail "r33: $o"
+o=$(run r34)
+grep -q 'WARN gamma: open: the screens kept changing .*head 0 +4, head 1 +3' <<<"$o" || fail "r34: $o"
+! grep -q 'FAIL gamma' <<<"$o" || fail "r34 no FAIL: $o"
+o=$(run r35)
+grep -q 'FAIL display sleep: never blanked a head' <<<"$o" || fail "r35: $o"
 all=""
-for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28; do all="$all$(run $r)"; done
+for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36; do all="$all$(run $r)"; done
 ! grep -q Traceback <<<"$all" || fail "a traceback (run 58 cases)"
 echo "test_triage_a3: all checks passed"
