@@ -54,6 +54,23 @@ own job. For every request the manager:
    dispatches CI, and reports to the CEO in Polish: what was done, by whom,
    what was found and fixed, what is still open.
 
+How many employees at once (the CEO's rule: bigger tasks, fewer agents,
+so the Claude usage limits last). Count only agents running at the same
+time; an `opus` agent counts as two:
+
+| What is running | Most at once |
+|---|---|
+| Read-only search / inventory / log gathering (`haiku`) | 4 |
+| Reviews after a change (read-only reviewers) | 4 |
+| Small implementation tasks (size S) | 3 |
+| Medium implementation tasks (size M) | 2 |
+| Large tasks (L / XL), or any kernel work on `opus` | 1, plus at most one read-only helper |
+| Anything mixed | 4 units in total (opus = 2 units) |
+
+Queue the rest (TaskCreate) and start the next one when an agent
+finishes. Prefer one agent that does a whole task well over several that
+each redo the same reading.
+
 Which model each employee runs on (the CEO's choice; pass it as the Agent
 tool's `model` on every delegation, it overrides the agent's own default):
 
