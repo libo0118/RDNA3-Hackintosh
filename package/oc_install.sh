@@ -44,6 +44,14 @@ CONF=$EFI/EFI/OC/config.plist
 [ $DRY = 1 ] || [ -w "$CONF" ] || { echo "cannot write $CONF: run with sudo"; exit 1; }
 [ $DRY = 1 ] || [ -z "$FW" ] || [ "$(id -u)" = 0 ] || { echo "--fw writes to /Library: run with sudo"; exit 1; }
 run() { echo "+ $*"; [ $DRY = 1 ] || "$@"; }
+# a backup of config.plist that never overwrites an earlier one (two runs in
+# the same second get -1, -2, ...)
+backup() {
+    local b="$CONF.rdna3-$(date +%Y%m%d-%H%M%S)" n=0 f
+    f=$b
+    while [ -e "$f" ]; do n=$((n + 1)); f=$b-$n; done
+    run cp "$CONF" "$f"
+}
 
 # the boot-args OpenCore sets now, without our rdna3* ones
 current=$(plist "$CONF" --show)
@@ -66,15 +74,17 @@ if [ $REMOVE = 1 ]; then
         exit 0
     fi
     inkexts=${inkexts# }; inadd=${inadd# }
-    run cp "$CONF" "$CONF.rdna3-$(date +%Y%m%d-%H%M%S)"
-    for n in $inkexts; do run rm -rf "$EFI/EFI/OC/Kexts/$n.kext"; done
+    backup
+    # config.plist first: when the edit fails the kexts must stay next to
+    # the entries that still list them
     set --
     [ -z "$ours" ] || set -- --boot-args "$keep"
     for n in $inadd; do set -- ${1+"$@"} --remove-kext "$n"; done
     if [ $# -gt 0 ]; then
         if [ $DRY = 1 ]; then echo "+ vmtool.py plist $CONF $*"; else plist "$CONF" "$@" >/dev/null; fi
     fi
-    echo "OpenCore ($EFI): removed"
+    for n in $inkexts; do run rm -rf "$EFI/EFI/OC/Kexts/$n.kext"; done
+    if [ $DRY = 1 ]; then echo "OpenCore ($EFI): would remove (--dry-run, nothing changed)"; else echo "OpenCore ($EFI): removed"; fi
     echo "  kexts in EFI/OC/Kexts:   ${inkexts:-none}"
     echo "  Kernel/Add entries:      ${inadd:-none}"
     echo "  boot-args:               ${ours:-none}"
@@ -97,7 +107,7 @@ else
 fi
 args=${args#"${args%%[! ]*}"}
 
-run cp "$CONF" "$CONF.rdna3-$(date +%Y%m%d-%H%M%S)"
+backup
 
 kexts=()
 if [ -n "$FW" ] || { [ $OFF = 0 ] && [ -z "$STEP" ]; }; then

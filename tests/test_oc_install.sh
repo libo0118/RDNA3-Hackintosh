@@ -61,4 +61,56 @@ out=$("$ROOT/package/oc_install.sh" --efi "$T/efi" --remove)
 case "$out" in *"nothing of RDNA3"*) ;; *) fail "second --remove: $out";; esac
 RDNA3_BUILD=$T/build "$ROOT/package/oc_install.sh" --efi "$T/efi" >/dev/null
 grep -q '<string>RDNA3Accel.kext</string>' "$C" || fail "install after --remove"
+
+# --- an EFI path with a space; foreign Kernel/Add entries before and after ours;
+#     a foreign boot-arg with '&'; RDNA3Accelerator is not RDNA3Accel
+E="$T/my efi"; V=$ROOT/tools/vm/vmtool.py
+mkdir -p "$E/EFI/OC" "$T/build/RDNA3Accelerator.kext/Contents/MacOS"
+cp "$ROOT/tests/data/oc-config.plist" "$E/EFI/OC/config.plist"
+echo "<plist/>" > "$T/build/RDNA3Accelerator.kext/Contents/Info.plist"
+echo bin > "$T/build/RDNA3Accelerator.kext/Contents/MacOS/RDNA3Accelerator"
+RDNA3_BUILD=$T/build "$ROOT/package/oc_install.sh" --efi "$E" >/dev/null
+python3 "$V" plist "$E/EFI/OC/config.plist" --kext WhateverGreen --boot-args 'alcid=1 foo=a&b<c -v rdna3lvl=2' >/dev/null
+entries() { python3 -c 'import plistlib,sys; print(" ".join(e["BundlePath"] for e in plistlib.load(open(sys.argv[1],"rb"))["Kernel"]["Add"]))' "$1"; }
+[ "$(entries "$E/EFI/OC/config.plist")" = "Lilu.kext RDNA3Accel.kext RDNA3Framebuffer.kext RDNA3Accelerator.kext WhateverGreen.kext" ] ||
+    fail "setup entries: $(entries "$E/EFI/OC/config.plist")"
+[ "$(python3 "$V" plist "$E/EFI/OC/config.plist" --show)" = "alcid=1 foo=a&b<c -v rdna3lvl=2" ] || fail "--show does not unescape"
+# the entry removal matches the whole BundlePath: RDNA3Accel leaves RDNA3Accelerator
+cp "$E/EFI/OC/config.plist" "$T/one.plist"
+python3 "$V" plist "$T/one.plist" --remove-kext RDNA3Accel >/dev/null
+[ "$(entries "$T/one.plist")" = "Lilu.kext RDNA3Framebuffer.kext RDNA3Accelerator.kext WhateverGreen.kext" ] ||
+    fail "--remove-kext RDNA3Accel: $(entries "$T/one.plist")"
+"$ROOT/package/oc_install.sh" --efi "$E" --remove >/dev/null
+[ "$(entries "$E/EFI/OC/config.plist")" = "Lilu.kext WhateverGreen.kext" ] || fail "--remove entries: $(entries "$E/EFI/OC/config.plist")"
+[ "$(python3 "$V" plist "$E/EFI/OC/config.plist" --show)" = "alcid=1 foo=a&b<c -v" ] || fail "--remove changed a foreign boot-arg"
+grep -q 'foo=a&amp;b&lt;c' "$E/EFI/OC/config.plist" && ! grep -q '&amp;amp;' "$E/EFI/OC/config.plist" || fail "foreign boot-arg not byte-identical"
+"$ROOT/package/oc_install.sh" --efi "$E" --off >/dev/null
+[ "$(python3 "$V" plist "$E/EFI/OC/config.plist" --show)" = "alcid=1 foo=a&b<c -v -rdna3off" ] || fail "--off double-escaped"
+grep -q '&amp;amp;' "$E/EFI/OC/config.plist" && fail "--off double-escaped in the file"
+"$ROOT/package/oc_install.sh" --efi "$E" --remove --dry-run | grep -q 'would remove' || fail "--remove --dry-run says it removed"
+
+# --- a failing config.plist edit leaves the kexts where they are (no Kernel dict here)
+F=$T/bad; mkdir -p "$F/EFI/OC/Kexts/RDNA3Accel.kext"
+python3 - "$ROOT/tests/data/oc-config.plist" "$F/EFI/OC/config.plist" <<'PY'
+import re, sys
+t = open(sys.argv[1]).read()
+t = re.sub(r"\t<key>Kernel</key>.*?\n\t</dict>\n", "\t<key>Comment</key>\n\t<string>RDNA3Accel.kext</string>\n", t, flags=re.S)
+assert "<key>Kernel</key>" not in t
+open(sys.argv[2], "w").write(t)
+PY
+sum=$(cksum < "$F/EFI/OC/config.plist")
+"$ROOT/package/oc_install.sh" --efi "$F" --remove >/dev/null 2>&1 && fail "--remove succeeded on a config.plist it cannot edit"
+[ -d "$F/EFI/OC/Kexts/RDNA3Accel.kext" ] || fail "kext deleted although the config.plist edit failed"
+[ "$(cksum < "$F/EFI/OC/config.plist")" = "$sum" ] || fail "config.plist changed by a failed edit"
+
+# --- backups are never overwritten (date frozen: every run is in the same second)
+mkdir -p "$T/fakebin"
+printf '#!/bin/sh\necho 20260101-000000\n' > "$T/fakebin/date"; chmod +x "$T/fakebin/date"
+G=$T/same; mkdir -p "$G/EFI/OC"; cp "$ROOT/tests/data/oc-config.plist" "$G/EFI/OC/config.plist"
+for i in 1 2; do
+    PATH=$T/fakebin:$PATH RDNA3_BUILD=$T/build "$ROOT/package/oc_install.sh" --efi "$G" >/dev/null
+    PATH=$T/fakebin:$PATH "$ROOT/package/oc_install.sh" --efi "$G" --remove >/dev/null
+done
+[ "$(ls "$G/EFI/OC" | grep -c 'config.plist.rdna3-')" = 4 ] || fail "same-second backups overwritten: $(ls "$G/EFI/OC")"
+grep -q RDNA3 "$G/EFI/OC/config.plist.rdna3-20260101-000000" && fail "the first backup was overwritten"
 echo "test_oc_install: all checks passed"

@@ -75,12 +75,12 @@ assert e[0]["BundlePath"] == "RDNA3Accel.kext" and e[0]["Enabled"] and not any(x
     "$A/OpenCore/Kernel-Add.plist" || fail "OpenCore/Kernel-Add.plist"
 
 # --- the installed oc_install.sh injects only the core kext of this install
-mkdir -p "$T/efi/EFI/OC"
-cp "$ROOT/tests/data/oc-config.plist" "$T/efi/EFI/OC/config.plist"
-"$A/oc_install.sh" --efi "$T/efi" >/dev/null
-[ -f "$T/efi/EFI/OC/Kexts/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel" ] || fail "oc_install.sh: kext not in EFI"
-grep -q '<string>RDNA3Accel.kext</string>' "$T/efi/EFI/OC/config.plist" || fail "oc_install.sh: no Kernel/Add entry"
-grep -q 'RDNA3Framebuffer' "$T/efi/EFI/OC/config.plist" && fail "oc_install.sh injected the framebuffer"
+mkdir -p "$T/my efi/EFI/OC"
+cp "$ROOT/tests/data/oc-config.plist" "$T/my efi/EFI/OC/config.plist"
+"$A/oc_install.sh" --efi "$T/my efi" >/dev/null
+[ -f "$T/my efi/EFI/OC/Kexts/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel" ] || fail "oc_install.sh: kext not in EFI"
+grep -q '<string>RDNA3Accel.kext</string>' "$T/my efi/EFI/OC/config.plist" || fail "oc_install.sh: no Kernel/Add entry"
+grep -q 'RDNA3Framebuffer' "$T/my efi/EFI/OC/config.plist" && fail "oc_install.sh injected the framebuffer"
 
 # --- upgrade: stale files go, the firmware stays (no --fw, no download)
 echo stale > "$A/bin/stale"
@@ -108,29 +108,30 @@ sh "$T/sys3/Library/Application Support/RDNA3/firmware.sh" --dest "$T/sys3/Libra
 
 # --- uninstall, with the OpenCore install of above (RDNA3Accel injected, step boot-args,
 #     a kext and an entry of the user's own) in a fake EFI
-EC=$T/efi/EFI/OC/config.plist
-mkdir -p "$T/efi/EFI/OC/Kexts/Lilu.kext"
-"$A/oc_install.sh" --efi "$T/efi" --step 9b3 >/dev/null
-rm -f "$T/efi/EFI/OC"/config.plist.rdna3-*
+EC="$T/my efi/EFI/OC/config.plist"
+mkdir -p "$T/my efi/EFI/OC/Kexts/Lilu.kext"
+"$A/oc_install.sh" --efi "$T/my efi" --step 9b3 >/dev/null
+rm -f "$T/my efi/EFI/OC"/config.plist.rdna3-*
 # a failing OpenCore removal (no EFI there) stops before anything is removed
 "$A/uninstall.sh" --root "$S" --efi "$T/nowhere" >/dev/null 2>&1 && fail "uninstall went on without the EFI"
 [ -e "$S/Library/Extensions/RDNA3Accel.kext" ] && [ -d "$A/firmware" ] || fail "failed uninstall removed files"
 # --keep-opencore leaves OpenCore alone and says so
-out=$("$A/uninstall.sh" --root "$S" --keep-firmware --efi "$T/efi" --keep-opencore)
+out=$("$A/uninstall.sh" --root "$S" --keep-firmware --efi "$T/my efi" --keep-opencore)
 [ -e "$S/Library/Extensions/RDNA3Accel.kext" ] && fail "uninstall left the kext"
 if [ ! -d "$A/firmware" ] || [ -e "$A/bin" ]; then fail "--keep-firmware"; fi
-grep -q '<string>RDNA3Accel.kext</string>' "$EC" && [ -d "$T/efi/EFI/OC/Kexts/RDNA3Accel.kext" ] || fail "--keep-opencore touched OpenCore"
-ls "$T/efi/EFI/OC"/config.plist.rdna3-* >/dev/null 2>&1 && fail "--keep-opencore wrote a backup"
+grep -q '<string>RDNA3Accel.kext</string>' "$EC" && [ -d "$T/my efi/EFI/OC/Kexts/RDNA3Accel.kext" ] || fail "--keep-opencore touched OpenCore"
+ls "$T/my efi/EFI/OC"/config.plist.rdna3-* >/dev/null 2>&1 && fail "--keep-opencore wrote a backup"
 case "$out" in *"left as it is"*) ;; *) fail "--keep-opencore says nothing: $out";; esac
 # the full uninstall (helper from the source tree: --keep-firmware removed the installed one)
-out=$("$ROOT/package/uninstall.sh" --root "$S" --efi "$T/efi")
+out=$("$ROOT/package/uninstall.sh" --root "$S" --efi "$T/my efi")
 [ -e "$A" ] || [ -e "$S/Library/GPUBundles/rdna3mtl" ] && fail "uninstall left files"
-[ -e "$T/efi/EFI/OC/Kexts/RDNA3Accel.kext" ] && fail "uninstall left the kext in EFI/OC/Kexts"
+[ -e "$T/my efi/EFI/OC/Kexts/RDNA3Accel.kext" ] && fail "uninstall left the kext in EFI/OC/Kexts"
 grep -q 'RDNA3' "$EC" && fail "uninstall left Kernel/Add entries"
-[ -d "$T/efi/EFI/OC/Kexts/Lilu.kext" ] && grep -q '<string>Lilu.kext</string>' "$EC" || fail "uninstall touched the user's own kext"
+[ -d "$T/my efi/EFI/OC/Kexts/Lilu.kext" ] && grep -q '<string>Lilu.kext</string>' "$EC" || fail "uninstall touched the user's own kext"
 [ "$(python3 "$ROOT/tools/vm/vmtool.py" plist "$EC" --show)" = "alcid=1 -v keepsyms=1" ] || fail "uninstall boot-args"
-ls "$T/efi/EFI/OC"/config.plist.rdna3-* >/dev/null 2>&1 || fail "uninstall made no config.plist backup"
+ls "$T/my efi/EFI/OC"/config.plist.rdna3-* >/dev/null 2>&1 || fail "uninstall made no config.plist backup"
 case "$out" in *Removed*"OpenCore ("*"Left alone"*) ;; *) fail "uninstall does not say what it removed and left: $out";; esac
+case "$("$ROOT/package/uninstall.sh" --root "$T/sys4")" in *"no OpenCore EFI was found"*) ;; *) fail "uninstall: no word on OpenCore";; esac
 # without OpenCore in the picture (no --efi, not on macOS): nothing to remove, no error
 "$ROOT/package/uninstall.sh" --root "$T/sys4" >/dev/null || fail "uninstall of an empty root"
 echo "test_make_pkg: all checks passed"

@@ -29,7 +29,7 @@ done
 A="$ROOT/Library/Application Support/RDNA3"
 
 # --- OpenCore first: its helper lives in $A, which is removed below
-OCMSG="OpenCore: not in use here, nothing to remove."
+OCMSG="OpenCore: not touched: no OpenCore EFI was found at /Volumes/EFI (--efi DIR names one), so nothing was removed there."
 if [ $KEEPOC = 1 ]; then
     OCMSG="OpenCore: left as it is (--keep-opencore): EFI/OC/Kexts/RDNA3*.kext, their Kernel/Add entries and the rdna3* boot-args still inject a kext that is gone. Remove them with oc_install.sh --efi <EFI> --remove (source checkout) or by hand."
 else

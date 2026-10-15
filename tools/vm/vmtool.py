@@ -88,6 +88,11 @@ def _set(text, sec, key, value_xml):
     return text[:close] + "\t<key>%s</key>\n\t%s\n" % (key, value_xml) + text[close:]
 
 
+def _unxml(s):
+    return (s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+            .replace("&apos;", "'").replace("&amp;", "&"))
+
+
 def _xml(s):
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -165,7 +170,9 @@ def cmd_plist(argv):
     if "--show" in argv:
         found = _value_after_key(text, "boot-args", *add())
         m = re.match(r"<string>(.*?)</string>", text[found[1]:found[2]], re.S) if found else None
-        print(m.group(1) if m else "")
+        # the file holds XML text: a value with & comes back as the user typed it,
+        # so writing it again (which escapes) round-trips byte for byte
+        print(_unxml(m.group(1)) if m else "")
         return 0
 
     def delete_list(name):
@@ -214,7 +221,7 @@ def cmd_plist(argv):
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     found = _value_after_key(text, "boot-args", *add())
-    print("boot-args:", re.sub(r"</?string>", "", text[found[1]:found[2]]) if found else "")
+    print("boot-args:", _unxml(re.sub(r"</?string>", "", text[found[1]:found[2]])) if found else "")
     return 0
 
 
