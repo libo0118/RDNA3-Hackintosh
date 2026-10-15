@@ -56,6 +56,22 @@ int main(void)
         CHECK(rd3_a3_size_heads(800, 600, w, h, 40) == 0xffffffffu);
     }
 
+    /* card run 58 (2026-10-15d): every WindowServer import stays out by default */
+    CHECK(rd3_a3_ws_policy(0, 0x3u, 0, 0) == RD3_A3_ALLOW);            /* an app's own full-screen surface */
+    CHECK(rd3_a3_ws_policy(0, 0, 0, 0) == RD3_A3_ALLOW);               /* an app's window */
+    CHECK(rd3_a3_ws_policy(1, 0x1u, 0, 0) == RD3_A3_REFUSE_DISPLAY);   /* WindowServer's framebuffer */
+    CHECK(rd3_a3_ws_policy(1, 0x1u, 0, 1) == RD3_A3_REFUSE_DISPLAY);   /* rdna3a3ws=1 is not rdna3a3display=1 */
+    CHECK(rd3_a3_ws_policy(1, 0x1u, 1, 0) == RD3_A3_ALLOW);
+    CHECK(rd3_a3_ws_policy(1, 0, 0, 0) == RD3_A3_REFUSE_WS);           /* the menu bar, a window it composites */
+    CHECK(rd3_a3_ws_policy(1, 0, 1, 0) == RD3_A3_REFUSE_WS);
+    CHECK(rd3_a3_ws_policy(1, 0, 0, 1) == RD3_A3_ALLOW);
+    /* the flicker test: A B A B */
+    CHECK(rd3_flicker_abab(0xa, 0xb, 0xa, 3));
+    CHECK(!rd3_flicker_abab(0xa, 0xb, 0xa, 2));    /* too early */
+    CHECK(!rd3_flicker_abab(0xa, 0xa, 0xa, 9));    /* a still picture */
+    CHECK(!rd3_flicker_abab(0xc, 0xb, 0xa, 9));    /* a new picture every swap */
+    CHECK(!rd3_flicker_abab(0xa, 0xa, 0xb, 9));    /* changed once, then still */
+
     if (fails) {
         printf("test_a3_display: %d check(s) failed\n", fails);
         return 1;

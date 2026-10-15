@@ -64,6 +64,19 @@ int main(void)
         test_bootargs = a3ladder;
         CHECK(rd3_a3_display_on());
     }
+    /* card run 58 (2026-10-15d): WindowServer's inputs out unless rdna3a3ws=1; A3 on unless rdna3a3=0 */
+    {
+        static const struct test_bootarg wson[] = { { "rdna3a3ws", 1 }, { NULL, 0 } };
+        static const struct test_bootarg a3off[] = { { "rdna3a3", 0 }, { NULL, 0 } };
+        test_bootargs = none;
+        CHECK(!rd3_a3_ws_on() && rd3_a3_on());
+        test_bootargs = ladder;
+        CHECK(!rd3_a3_ws_on() && rd3_a3_on());
+        test_bootargs = wson;
+        CHECK(rd3_a3_ws_on() && rd3_a3_on() && !rd3_a3_display_on());
+        test_bootargs = a3off;
+        CHECK(!rd3_a3_on() && !rd3_a3_ws_on());
+    }
 
     if (fails) {
         printf("test_bootargs: %d check(s) failed\n", fails);

@@ -247,6 +247,10 @@ item in the SUMMARY; the full output is in the tests file under `== probe:`.
 | `M6 apps`, `M6 Chess` / `Maps` | M6 apps | running, plugin loaded, crash report | a crash report: its first 40 lines in the tests file name the Metal call that failed |
 | `M6 screens`, `FAIL M6 screen: pipe N (main display) showed the same picture in all M6 looks` | M6 apps on the panel | whether each pipe's hi-res picture changed (more than 1 % of the pixels between two consecutive looks; a clock tick is not enough) while Chess, Maps and Settings opened. Judged only on the main display's pipe (head 0's OTG from `RDNA3,Head0,Route`: the boot head, main unless the menu bar was moved), only when every M6 app ran and with 3 looks or more; the M6 looks keep their `pipe N:` state lines | a frozen main screen (card run 58): WindowServer drew where the head does not scan out. Read `A3 display` and the `a3 display: head N:` lines: `kept out of A3` and the screen still frozen is a new cause (the copies or the swap); `WINDOWSERVER DRAWS WHERE THE PANEL DOES NOT READ` means rdna3a3display=1 was set |
 | `A3 display` (`a3 display: head N: ... legacy swaps`, `surfgem: ... refused: WindowServer's display framebuffer`), `A3 display counters` | A3 and the display | card run 58: WindowServer's display framebuffer IOSurfaces (the size a framebuffer scans out at the import, or of the head's own swaps) stay out of A3 (`common/rdna3_a3_display.h`); the legacy swap scans out the legacy surface's buffers (`it scans out phys`). Counters dumped before the probes, after M6 and in `29-surface-vram.txt`: `debug.rdna3accel_a3display_refused` / `_imported` / `_other` / `_task_mismatch` / `_noname`, `swaps_h<N>`, `swaps_a3_h<N>` | `FAIL A3 display: the refusal never fired`: WindowServer got BOs of a scanout size and nothing was refused (the kernel's marker counts only when it looked at WindowServer imports: `other` + `unchecked` > 0; `debug.rdna3accel_iop_flip=1` is INFO) - the `surfgem: WindowServer surface ... is not a display framebuffer (heads, scanout/swap size: ...)` and `display check did not run` lines say why. `FAIL A3 display` with `rdna3a3display=1`: no legacy swap ever scanned out an A3 BO - the swap must flip the IOSurface's own VRAM before display surfaces can join A3. `debug.rdna3accel_iop_flip=1` turns the rule off (that path flips the IOSurface's own VRAM) |
+| `flicker` (`FAIL flicker: head N flickers`, kernel `flicker: head N: ... (A B A B)`, `debug.rdna3accel_swaps_abab_h<N>`) | the panel | card run 58 (2026-10-15d): the share of a head's legacy swaps that showed the picture of two swaps before and not the one before (16 x 16 samples per swap); 25 % or more over 60+ swaps is two buffers with different contents taking turns | with `A3 WindowServer ... kept out`: the copy path itself (the plugin's per-process copies of the display surfaces, copy forward); with `rdna3a3ws=1`: WindowServer's A3 inputs, as in 2026-10-15d |
+| `A3 WindowServer` (`A3: WindowServer's inputs are kept out`, `surfgem: ... refused: a WindowServer input`) | A3 | card run 58 (2026-10-15d): every IOSurface WindowServer imports (window backing stores, menus) stays out of A3 by default and goes through copies; applications keep A3 for their own and shared surfaces. `rdna3a3ws=1` lets them in, `rdna3a3=0` turns A3 off for every process; counters `debug.rdna3accel_a3ws_refused` / `a3off_refused` | flicker gone with them kept out: A3 for WindowServer's inputs needs an ordering of the owner's GPU / CPU writes with WindowServer's reads first (DRIVER-PLAN N27) |
+| `display sleep: not judged: the system was asleep at the look`, summary `display sleep` | display sleep | card run 58 (2026-10-15d): the VM went on into system sleep after the display slept; the summary lists the heads the kernel blanked first (`display: head N blanked (display sleep)`); autoreport now holds an idle-sleep assertion (`caffeinate -i`) through the sleep look | `NONE` blanked: the display sleep never reached the heads |
+| `GAMMA: UNJUDGED` (`WARN gamma: the screens kept changing`) | gamma | the dark table reached every pipe, but the screens changed between all looks (`CRC before NOT stable`), so the restore cannot be compared (card run 58: the flicker) | judge the flicker first |
 | `VM faults`, `VMID N` (SUMMARY, from the serial log) | VM faults | the faults grouped by VMID and address with the UTCL2 client (`gfxhub_client_ids`) and the owner | card run 58: Terminal's VMID 5 TCP reads at an unmapped VA, each followed by 4 CPC writes at 0 on VMID 0 (not a second bug: they come with every client fault) |
 
 ### Step 8c (`rdna3mes=1`): MES scheduler pipe
@@ -1915,3 +1919,38 @@ Settings. That is expected for them, not a display regression.
   VMID 0 ("which no client owns"). At the first one WindowServer's GFX job
   hung for 10 s (soft reset, WindowServer restarted). Open (DRIVER-PLAN
   N27); triage now groups the faults (`VM faults` in the summary).
+
+### Card run 58b (step agdc + probes, build 751f5b8, 2026-10-15d)
+
+- With WindowServer's display framebuffers kept out of A3 both screens
+  updated again, but **windows and menus flickered on both screens**. The
+  result came without the report archive or pictures: the VM's 16-minute
+  limit stopped the run inside M6 (no `M6:` line); the serial log and the
+  tests file are all there is.
+- Evidence: WindowServer imported 615 of its other inputs as BOs
+  (`debug.rdna3accel_a3display_other 615`: the menu bar strips 1920x24,
+  status items 44x24, window backing stores), and its plugin wrote into
+  those shared VRAM copies itself: `surface-in SKIPPED (shared VRAM current
+  at seed 3): 2 skipped, 747 copied` - 747 uploads of the IOSurfaces'
+  system memory into VRAM the owners also draw into through A3 (their
+  "surface-out -> dirty, no copy" leaves that system memory stale), plus
+  `dirty refused: errno 19` copy-outs for surfaces the accelerator never
+  drew. Nothing orders an owner's GPU or CPU write with WindowServer's
+  upload, so a window shows its newest frame and an older one in turns.
+  In run 58 (2026-10-15c) the same imports existed, but the main screen
+  was frozen and the second static, which hid it.
+- Fix: every WindowServer import stays out of A3 by default
+  (`rd3_a3_ws_policy`, status `RD3K_SS_POLICY`, EPERM to the plugin, which
+  goes through copies as before A3); applications keep A3 for their own
+  and shared surfaces. `rdna3a3ws=1` lets WindowServer's inputs in again,
+  `rdna3a3=0` turns A3 off for every process. The kernel now measures
+  flicker: per head the swaps that show the picture of two swaps before
+  (`flicker:` lines, `debug.rdna3accel_swaps_abab_h<N>`, triage
+  `flicker`).
+- GAMMA FAIL was the flicker (`CRC before NOT stable`, the dark table
+  reached both pipes): rdna3_modetest now says `GAMMA: UNJUDGED` then.
+  Display sleep FAIL was the system going to sleep after the display: the
+  kernel blanked both heads first (`head 0/1 blanked (display sleep)`,
+  `system sleep #1`); autoreport keeps the system awake through the look.
+- The main display is the DP head (pipe 1: CG display 0's mode switch
+  resized pipe 1 in both runs); triage takes the main pipe from that look.

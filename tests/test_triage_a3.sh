@@ -84,7 +84,7 @@ if m6 != "none":
                 f.write(b"P6\n32 32\n255\n" + bytes(px))
 PY
 }
-for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22; do mkdir -p "$T/$r"; done
+for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28; do mkdir -p "$T/$r"; done
 KEPTBOOT="RDNA3Accelerator: A3: WindowServer's display framebuffers are kept out of A3: WindowServer composites them through copies the legacy swap pages on (card run 58)"
 SCAN="RDNA3Accelerator: RD3DisplayPipe::initFramebufferResource(head 0, index 0, res 0x1) -> vidmem 0x2 over the LIVE SCANOUT phys 0x80000000 1920 x 1080 pitch 7680 (8294400 bytes)"
 KEPT="RDNA3Accelerator: surfgem: surface 1 plane 0 refused: WindowServer's display framebuffer of head mask 0x3 (1920x1080): the legacy swaps scan out the legacy surface's own VRAM, never a BO over this one (card run 58) -- copies instead; rdna3a3display=1 lets it in (status 0x80000007, 1 of this cause; ok 0, refused 1)"
@@ -170,7 +170,41 @@ grep -q 'WARN IOSurface VRAM (A3)' <<<"$o" || fail "r21: without the counter 2 u
 o=$(run r22)
 ! grep -q 'FAIL A3 display' <<<"$o" || fail "r22: the IOP flip path keeps display BOs by design: $o"
 grep -q 'INFO A3 display  *debug.rdna3accel_iop_flip=1' <<<"$o" || fail "r22 INFO: $o"
+# card run 58 (2026-10-15d): flicker on both screens, WindowServer's inputs
+# kept out, the system asleep at the sleep look, gamma that cannot be
+# compared on a changing screen, the main display found by its mode switch,
+# a run stopped inside M6
+WSBOOT="RDNA3Accelerator: A3: WindowServer's inputs are kept out (composited through copies); applications keep A3 for their own and shared surfaces (card run 58, 2026-10-15d)"
+WSREF="RDNA3Accelerator: surfgem: surface 33 plane 0 refused: a WindowServer input (1920x24): its writers (GPU, CPU, the plugin's copies) are not ordered with the VRAM WindowServer would sample (card run 58: flicker on both screens) -- copies instead; rdna3a3ws=1 lets it in (status 0x80000008, 1 of this cause; ok 0, refused 1)"
+WSPLUG="NVMTL: item 7: surface 33 plane 0: family VRAM import refused (VkResult -1000072003, kernel errno 1 Operation not permitted, 184320 B) - private image + copies (1 so far)"
+WSPLUG2="NVMTL: item 7: surface 34 plane 0: family VRAM import refused (VkResult -1000072003, kernel errno 1 Operation not permitted, 8192 B) - private image + copies (2 so far)"
+mk58 r23/rdna3-report-flicker "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "debug.rdna3accel_swaps_h0: 765\\ndebug.rdna3accel_swaps_abab_h0: 500\\ndebug.rdna3accel_swaps_h1: 269\\ndebug.rdna3accel_swaps_abab_h1: 3\\n"
+mk58 r24/rdna3-report-wskept "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SCAN\\n$WSREF" "== 20-log-rdna3.txt\\n$WSREF\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n$WSPLUG\\n$WSPLUG2\\n== sysctl (card run 58)\\ndebug.rdna3accel_a3ws_refused: 2" differ
+mk58 r25/rdna3-report-asleep "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== rdna3_drminfo --scanout (look sleep)\\npipe 0: not read: the display is asleep (system sleep or shutdown)\\npipe 1: not read: the display is asleep (system sleep or shutdown)\\ndisplay asleep: 4 pipe(s) not read, nothing to judge\\n[exit 0]\\n"
+mk58 r26/rdna3-report-gamma "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "CRC before NOT stable (the screen changed between the two looks)\\nGAMMA: UNJUDGED - 2 pipe(s) moved with the dark table, but the screen changed between every two looks (CRC before not stable): the restore cannot be compared\\n"
+mk58 r27/rdna3-report-maindp "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" same1 "== rdna3_drminfo --scanout (look mode-d0-1600x900)\\npipe 0: LIT otg 0 1920x1080 pitch 1920\\npipe 1: LIT otg 1 1600x900 pitch 1600\\n2 pipe(s) lit\\n"
+mk58 r28/rdna3-report-m6cut "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" none
+# r28: the run stopped inside M6 (no "M6: n of 2" line)
+sed -i '/^M6: /d' "$T/r28/rdna3-report-m6cut-tests.txt"
+o=$(run r23)
+grep -q 'FAIL flicker: head 0 flickers: 500 of 765 legacy swaps showed the picture of two swaps before' <<<"$o" || fail "r23: $o"
+grep -q 'PASS flicker: head 1: 3 of 269' <<<"$o" || fail "r23 head 1: $o"
+grep -q 'flicker  *FAIL head 0 flickers' <<<"$o" || fail "r23 summary: $o"
+o=$(run r24)
+grep -q 'INFO IOSurface VRAM (A3)' <<<"$o" || fail "r24: WindowServer's refused inputs are the policy, not a WARN: $o"
+grep -q 'INFO A3 WindowServer  *WindowServer.s inputs kept out of A3: 2 refused' <<<"$o" || fail "r24 WS: $o"
+o=$(run r25)
+grep -q 'INFO display sleep: not judged: the system was asleep at the look' <<<"$o" || fail "r25: $o"
+! grep -q 'FAIL display sleep' <<<"$o" || fail "r25 no FAIL: $o"
+o=$(run r26)
+grep -q 'GAMMA: UNJUDGED' <<<"$o" || fail "r26: $o"
+grep -q 'WARN gamma: the screens kept changing' <<<"$o" || fail "r26 warn: $o"
+o=$(run r27)
+grep -q 'FAIL M6 screen: pipe 1 (main display) showed the same picture' <<<"$o" || fail "r27: the main display is the pipe that followed display 0's mode switch: $o"
+grep -q 'INFO M6 screen: pipe 0 ' <<<"$o" && fail "r27 pipe 0 changed: $o"
+o=$(run r28)
+grep -q 'M6 screens  *NOT FINISHED: the run stopped inside M6' <<<"$o" || fail "r28: $o"
 all=""
-for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22; do all="$all$(run $r)"; done
+for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28; do all="$all$(run $r)"; done
 ! grep -q Traceback <<<"$all" || fail "a traceback (run 58 cases)"
 echo "test_triage_a3: all checks passed"

@@ -66,4 +66,16 @@ static inline int rd3_a3_display_on(void)
     return rd3_arg("rdna3a3display", 0) != 0;
 }
 
+/* card run 58 (2026-10-15d, flicker on both screens): WindowServer's other
+ * inputs (window backing stores, menus) stay out of A3 unless rdna3a3ws=1;
+ * rdna3a3=0 keeps every process's IOSurfaces out of A3 */
+static inline int rd3_a3_ws_on(void)
+{
+    return rd3_arg("rdna3a3ws", 0) != 0;
+}
+static inline int rd3_a3_on(void)
+{
+    return rd3_arg("rdna3a3", 1) != 0;
+}
+
 #endif

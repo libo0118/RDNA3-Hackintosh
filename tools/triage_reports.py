@@ -252,9 +252,16 @@ def m6_screens(prefix):
 
 
 def main_pipe(path, txt):
-    """the pipe of the main display: head 0's OTG (RDNA3,Head0,Route, the boot
+    """the pipe of the main display: the pipe whose size followed the mode
+    switch of CG display 0 (rdna3_modetest's "display 0", the main display:
+    card run 58 showed it on pipe 1, not head 0's), else head 0's OTG (RDNA3,Head0,Route, the boot
     head macOS makes main unless the user moved the menu bar) found in the
     looks' 'pipe P: ... otg O' lines; pipe 0 when either is missing"""
+    m = re.search(r"^== rdna3_drminfo --scanout \(look mode-d0-(\d+)x(\d+)\)\n(.*?)(?=^== |\Z)", txt, re.M | re.S)
+    if m:
+        hit = re.findall(r"^pipe (\d+): LIT otg \d+ %sx%s " % (m.group(1), m.group(2)), m.group(3), re.M)
+        if len(hit) == 1:
+            return int(hit[0])
     props_txt = ""
     if os.path.exists(path):
         try:
@@ -400,15 +407,49 @@ def a3_display_verdict(log, sv):
               "A3 display")
     else:
         print("   INFO %-20s display surfaces may become BOs (rdna3a3display=1)" % "A3 display")
+    ws_kept = len(set(re.findall(r"(?:surfgem|surfvram): surface (\d+) plane \d+ refused: a WindowServer input",
+                                 log + "\n" + sv)))
+    ws_kept = max(ws_kept, c.get("a3ws_refused", 0))
+    if "A3: OFF for every process" in log:
+        print("   INFO %-20s A3 off for every process (rdna3a3=0): %d import(s) refused" %
+              ("A3 WindowServer", c.get("a3off_refused", 0)))
+    elif "WindowServer's other inputs MAY become BOs" in log:
+        print("   INFO %-20s WindowServer's inputs may be BOs (rdna3a3ws=1: the 2026-10-15d flicker)" % "A3 WindowServer")
+    elif "WindowServer's inputs are kept out" in log:
+        print("   INFO %-20s WindowServer's inputs kept out of A3: %d refused (card run 58, 2026-10-15d)" %
+              ("A3 WindowServer", ws_kept))
     for h in sorted(a3lines):
         print("     " + a3lines[h][:300])
+    for l in sorted(set(re.findall(r"flicker: head \d+: [^\n]*", log)))[-4:]:
+        print("     " + l[:220])
     for l in sorted(set(re.findall(r"surfgem: (?:WindowServer surface \d+ .*? is not a display framebuffer|surface \d+ .*?"
                                    r"display check did not run)[^\n]*", log)))[:4]:
         print("     " + l[:200])
     return failed
 
 
-A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|swaps(?:_a3)?_h\d): (\d+)", re.M)
+A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3|"
+                       r"swaps(?:_a3|_abab)?_h\d|iop_flip): (\d+)", re.M)
+FLICKER_SHARE = 0.25   # of a head's swaps showing the picture of two swaps before: flicker
+
+
+def flicker_verdict(c):
+    """[(level, text)] from the A B A B counters (debug.rdna3accel_swaps_abab_h<N>)"""
+    out = []
+    for k in sorted(c):
+        m = re.match(r"swaps_h(\d)$", k)
+        if not m or not c[k]:
+            continue
+        ab = c.get("swaps_abab_h" + m.group(1))
+        if ab is None:
+            continue
+        share = ab / float(c[k])
+        if c[k] >= 60 and share >= FLICKER_SHARE:
+            out.append(("FAIL", "head %s flickers: %d of %d legacy swaps showed the picture of two swaps before "
+                                "(A B A B, %.0f%%)" % (m.group(1), ab, c[k], share * 100)))
+        else:
+            out.append(("PASS", "head %s: %d of %d legacy swaps A B A B (%.0f%%)" % (m.group(1), ab, c[k], share * 100)))
+    return out
 
 
 def a3_counters(txt):
@@ -736,9 +777,12 @@ def report(path, show_all):
             imp_ref = re.findall(r"family VRAM import refused \(VkResult (-?\d+), kernel errno (\d+)", sv)
             # card run 58: WindowServer's display framebuffers stay out of A3
             # by design (kernel status RD3K_SS_DISPLAY, errno 1 in the plugin)
-            disp_ids = set(re.findall(r"(?:surfgem|surfvram): surface (\d+) plane \d+ refused: WindowServer's display "
-                                      r"framebuffer", sv + "\n" + log))
-            refused = [r for r in refused if not r.startswith("WindowServer's display framebuffer")]
+            disp_ids = set(re.findall(r"(?:surfgem|surfvram): surface (\d+) plane \d+ refused: (?:WindowServer's display "
+                                      r"framebuffer|a WindowServer input|A3 is off)", sv + "\n" + log))
+            # the policy's refusals (card run 58: display framebuffers, then
+            # every WindowServer input; rdna3a3=0) are no warning
+            refused = [r for r in refused if not r.startswith(("WindowServer's display framebuffer",
+                                                               "a WindowServer input", "A3 is off"))]
             # only the plugin's refusals of those very surfaces: any other
             # EPERM stays a warning
             # a plugin EPERM of a display-size surface the kernel's capped log
@@ -749,8 +793,14 @@ def report(path, show_all):
                               r"(\d+)(?:[^,\n]*, (\d+) B\))?", sv)
             unnamed = set(sid for sid, _, ke, b in plug if ke == "1" and sid not in disp_ids and b and
                           int(b) in disp_bytes)
-            ctr = (a3_counters(sv) or {}).get("a3display_refused", 0)
+            cnt = a3_counters(sv) or {}
+            ctr = cnt.get("a3display_refused", 0)
             if unnamed and ctr >= len(unnamed | disp_ids):
+                disp_ids |= unnamed
+            # WindowServer's inputs (any size) and rdna3a3=0: the kernel's counters cover them
+            unnamed = set(sid for sid, _, ke, _b in plug if ke == "1" and sid not in disp_ids)
+            pol = cnt.get("a3ws_refused", 0) + cnt.get("a3off_refused", 0)
+            if unnamed and pol and ctr + pol >= len(unnamed | disp_ids):
                 disp_ids |= unnamed
             imp_ref = [(vr, ke) for sid, vr, ke, _ in plug if not (ke == "1" and sid in disp_ids)]
             shared = sum(1 for l in live if l.startswith("live"))
@@ -1019,14 +1069,25 @@ def summary(path, serial=None):
     m6 = m6_verdict(path[:-len(".tar.gz")], txt, main_pipe(path, txt))
     if m6:
         out.append(("M6 screens", "; ".join(sh for _, _, sh in m6)))
+    elif "== probe: Metal apps (M6)" in txt and not re.search(r"^M6: ", txt, re.M):
+        out.append(("M6 screens", "NOT FINISHED: the run stopped inside M6 (the VM's time limit?), no pictures"))
+    elif "(look m6" in txt:
+        out.append(("M6 screens", "no pictures: the M6 looks' PPMs did not arrive"))
     a3c = a3_counters(txt)
     if a3c is None:
         out.append(("A3 display counters", "none: the kext predates card run 58"))
     elif a3c:
-        out.append(("A3 display counters", "refused %s, imported %s, other %s; swaps %s" % (
+        for lv, t in flicker_verdict(a3c):
+            out.append(("flicker", "%s %s" % (lv, t)))
+        out.append(("A3 display counters", "refused %s, imported %s, other %s (kept out %s); swaps %s" % (
             a3c.get("a3display_refused", "?"), a3c.get("a3display_imported", "?"), a3c.get("a3display_other", "?"),
+            a3c.get("a3ws_refused", "?"),
             ", ".join("h%s %d (A3 %d)" % (k[-1], v, a3c.get("swaps_a3_h" + k[-1], 0))
                       for k, v in sorted(a3c.items()) if k.startswith("swaps_h") and v))))
+    blanked = sorted(set(re.findall(r"display: head (\d+) blanked \(display sleep\)", log)))
+    if "look sleep" in txt and "display asleep:" in txt.split("(look sleep)", 1)[-1][:600]:
+        out.append(("display sleep", "the look found the system asleep; heads blanked first (kernel log): %s" %
+                    (", ".join(blanked) or "NONE")))
     # the serial log when there is one: the unified log may carry the same lines
     faults = vm_fault_groups(open(serial, errors="replace").read() if serial else log)
     if faults:
@@ -1184,8 +1245,16 @@ def main():
                     # display sleep (rdna3dpms=1): blanked while asleep, lit after the wake
                     if look and look.group(1) == "sleep":
                         nb = len(re.findall(r"^pipe \d+: BLANKED", blk, re.M))
-                        print("       %s display sleep: %d pipe(s) blanked" % ("PASS" if nb else "FAIL", nb))
-                        failed = failed or not nb
+                        if not nb and re.search(r"^display asleep: \d+ pipe\(s\) not read", blk, re.M):
+                            # card run 58 (2026-10-15d): the system went on into
+                            # sleep after the display; the core's "head N
+                            # blanked (display sleep)" lines (serial log) say
+                            # whether the heads blanked first
+                            print("       INFO display sleep: not judged: the system was asleep at the look "
+                                  "(the serial log's 'blanked (display sleep)' lines decide)")
+                        else:
+                            print("       %s display sleep: %d pipe(s) blanked" % ("PASS" if nb else "FAIL", nb))
+                            failed = failed or not nb
                     if look and look.group(1) == "wake":
                         nl, nb = len(addrs), len(re.findall(r"^pipe \d+: BLANKED", blk, re.M))
                         print("       %s display wake: %d pipe(s) lit, %d still blanked" %
@@ -1200,6 +1269,9 @@ def main():
                 print("   INFO A3 display counters: none (the kext predates card run 58)")
             elif a3c:
                 print("   INFO A3 display counters: " + ", ".join("%s %d" % kv for kv in sorted(a3c.items())))
+                for lv, t in flicker_verdict(a3c):
+                    print("   %s flicker: %s" % (lv, t))
+                    failed = failed or lv == "FAIL"
                 if a3c.get("a3display_imported") and any(v for k, v in a3c.items() if k.startswith("swaps_h")) and \
                         not any(v for k, v in a3c.items() if k.startswith("swaps_a3_h")):
                     print("   FAIL A3 display: %d display surface(s) imported (rdna3a3display=1) and no legacy swap "
@@ -1231,6 +1303,9 @@ def main():
                 for l in re.findall(r"^== gamma pipe .*$", txt, re.M):
                     print("     " + l[3:170])
                 failed = failed or m.group(1) == "FAIL"
+                if m.group(1) == "UNJUDGED":
+                    print("   WARN gamma: the screens kept changing through the test (card run 58: flicker) - "
+                          "the round trip was not compared")
             # A3: another process's IOSurface refused (rdna3_drminfo --surface-xproc)
             m = re.search(r"^SURFXPROC: (\w+).*$", txt, re.M)
             if m:

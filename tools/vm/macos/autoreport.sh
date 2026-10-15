@@ -80,7 +80,7 @@ rdna3_allow_mode() {
 # card run 58: WindowServer's display framebuffers and A3 (refused /
 # imported, the legacy swaps per head and those that scanned out an A3 BO)
 a3_sysctls() {
-    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|swaps_|iop_flip:)")
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|swaps_|iop_flip:)")
     if [ -n "$_a3" ]; then echo "$_a3"
     else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
 }
@@ -553,6 +553,12 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         case " $args " in
             *" rdna3dpms=1 "*|*" rdna3dpms=2 "*)
                 hdr "display sleep: pmset displaysleepnow"
+                # card run 58 (2026-10-15d): the VM went on into system sleep
+                # 8 s after the display slept, so the look read nothing
+                # ("display asleep"); an idle-sleep assertion keeps the
+                # system up while the display sleeps
+                caffeinate -i -t 40 &
+                cf_pid=$!
                 pmset displaysleepnow 2>&1
                 sleep 8
                 for k in sleep wake; do
@@ -565,7 +571,8 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                         caffeinate -u -t 3 2>&1
                         sleep 8
                     fi
-                done ;;
+                done
+                kill "$cf_pid" 2>/dev/null ;;
         esac
         # monitor standby on every TMDS head (rdna3dpms=2, step sleep): the
         # kext's check of each head after the link went down and came back
