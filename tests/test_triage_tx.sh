@@ -17,8 +17,10 @@ mk() {   # mk <dir> <ticks property or -> <report log>
     python3 -I - "$T/$1/rdna3-report-tx" "$2" "$3" <<'PY'
 import io, sys, tarfile
 path, ticks, log = sys.argv[1], sys.argv[2], sys.argv[3]
-props = '  |   "RDNA3,Head0,TX" = "DIG back end off, DIO FIFO error; 1 change(s) since the start"\n'
-if ticks != "-":
+props = '  |   "RDNA3,Head0,TX" = "1 change(s) since the start; problems: DIG back end off, DIO FIFO error"\n'
+if ticks.startswith("skips="):
+    props += '  |   "RDNA3,TXWatchBusySkips" = %s\n' % ticks[6:]
+elif ticks != "-":
     props += '  |   "RDNA3,TXWatchTicks" = %s\n' % ticks
 members = {
     "01-boot-args.txt": "boot-args rdna3lvl=8 rdna3fb=1\n",
@@ -56,27 +58,33 @@ RDNA3: display: TX watch: on (each head's output after its OTG: in full now and 
 RDNA3: display: head 0 TX at the start (as the firmware left it) (5000 ms uptime), OTG0 -> DIGD -> UNIPHYD: problems: none
 RDNA3: display: head 0 TX   DIG BE / UNIPHYD: DIG_BE_CNTL 0x30803 DIG_BE_EN_CNTL 0x101
 RDNA3: display: head 0 TX after the clone (9000 ms uptime), OTG0 -> DIGD -> UNIPHYD: problems: none
-RDNA3: display: head 0 TX   OTG0: OTG_CONTROL 0x10201
+RDNA3: display: head 0 TX   DIG BE / UNIPHYD: DIG_BE_CNTL 0x30803 DIG_BE_EN_CNTL 0x101
 RDNA3: display: TX watch: first tick at 20000 ms uptime
 $CHANGE1
+RDNA3: display: clone TX change #1 at 70000 ms uptime: problems: DIG chain not found (its registers not read, see every DIG); 2 register(s): DIGB BE_EN 0x101 -> 0x0, DIGB BE_CNTL 0x30400 -> 0x0
 EOF
 
 o=$(python3 "$ROOT/tools/triage_reports.py" "$T/r" 2>&1 || true)
 ! grep -q Traceback <<<"$o" || fail "a traceback: $o"
-grep -q 'info Head0,TX *= DIG back end off, DIO FIFO error; 1 change(s) since the start' <<<"$o" || fail "the property: $o"
+grep -q 'info Head0,TX *= 1 change(s) since the start; problems: DIG back end off, DIO FIFO error' <<<"$o" || fail "the property: $o"
 grep -q '  TX DIG BE / UNIPHYD: DIG_BE_CNTL 0x30803 DIG_BE_EN_CNTL 0x101' <<<"$o" || fail "look 1's TX line: $o"
 [ "$(grep -c '!! the pixels leave the OTG, but its output is wrong: DIG back end off, DIO FIFO error$' <<<"$o")" = 1 ] ||
     fail "one warning, for look 2 only, problems uncut: $o"
 [ "$(grep -c '!! lit pipe(s) but no TX lines' <<<"$o")" = 1 ] || fail "look 3 has no TX lines: $o"
-grep -q 'TX watch (7 line(s); the full states' <<<"$o" || fail "the watch's lines: $o"
-grep -q '^     display: head 0 TX   OTG0: OTG_CONTROL 0x10201$' <<<"$o" || fail "the after-clone state in full: $o"
+grep -q 'TX watch (8 line(s); the full states' <<<"$o" || fail "the watch's lines: $o"
+# the after-clone dump has the start's registers: both kept
+[ "$(grep -c '^     display: head 0 TX   DIG BE / UNIPHYD: DIG_BE_CNTL 0x30803 DIG_BE_EN_CNTL 0x101$' <<<"$o")" = 2 ] ||
+    fail "both identical dumps in full: $o"
 grep -q '^     display: head 0 TX change #1 at 61234 ms uptime: problems: DIG back end off' <<<"$o" || fail "the change line: $o"
 grep -q 'screens 1 *1 lit$' <<<"$o" || fail "summary look 1: $o"
 grep -q 'screens 2 *1 lit, TX: DIG back end off, DIO FIFO error$' <<<"$o" || fail "summary look 2: $o"
 grep -q 'screens 3 *1 lit, NO TX LINES$' <<<"$o" || fail "summary look 3: $o"
 # the change is in the report's log and in the serial log: counted once
-grep -q 'TX watch *head 0: 1 change(s); first with problems at 61234 ms: problems: DIG back end off, DIO FIFO error; 1 register(s): DIG_BE_EN_CNTL 0x101 -> 0x0' <<<"$o" ||
+grep -q 'TX watch .*head 0: 1 change(s); first with problems at 61234 ms: problems: DIG back end off, DIO FIFO error; 1 register(s): DIG_BE_EN_CNTL 0x101 -> 0x0' <<<"$o" ||
     fail "summary watch: $o"
+# a problem with commas and parentheses stays whole, its registers after the ';'
+grep -q 'clone: 1 change(s); first with problems at 70000 ms: problems: DIG chain not found (its registers not read, see every DIG); 2 register(s): DIGB BE_EN 0x101 -> 0x0' <<<"$o" ||
+    fail "summary clone NO_CHAIN: $o"
 
 # a watch that logged its start but never ticked proves nothing
 mk n - "RDNA3: display: TX watch: on (each head ...)\\nRDNA3: display: head 0 TX at the start (x) (5000 ms uptime), OTG0 -> DIGD -> UNIPHYD: problems: none"
@@ -86,4 +94,15 @@ grep -q 'TX watch *NEVER TICKED' <<<"$o" || fail "never ticked: $o"
 mk k 40 "RDNA3: display: TX watch: on (each head ...)"
 o=$(python3 "$ROOT/tools/triage_reports.py" "$T/k" 2>&1 || true)
 grep -q 'TX watch *no change on any head after the start (40 tick(s))' <<<"$o" || fail "ticked, no change: $o"
+# every tick skipped on a busy display lock: said so, not "never ticked"
+mk b skips=31 "RDNA3: display: TX watch: on (each head ...)\nRDNA3: display: TX watch: skipped, display lock busy (1 skips)"
+o=$(python3 "$ROOT/tools/triage_reports.py" "$T/b" 2>&1 || true)
+grep -q 'TX watch *NO TICK: every tick skipped, the display lock was busy (31 skip(s))' <<<"$o" || fail "busy: $o"
+# not started, and a failed publish
+mk m - "RDNA3: display: TX watch: NOT started: no memory for its state"
+o=$(python3 "$ROOT/tools/triage_reports.py" "$T/m" 2>&1 || true)
+grep -q 'TX watch *NOT STARTED: no memory' <<<"$o" || fail "not started: $o"
+mk p 12 "RDNA3: display: TX watch: on (each head ...)\nRDNA3: display: TX watch: could not publish RDNA3,Head0,TX"
+o=$(python3 "$ROOT/tools/triage_reports.py" "$T/p" 2>&1 || true)
+grep -q 'TX watch publish *FAILED' <<<"$o" || fail "publish: $o"
 echo "test_triage_tx: all checks passed"

@@ -155,13 +155,12 @@ void RDNA3Accel::displayStateSaveAll()
 struct RDNA3TxWatch {
     rdna3_tx_state boot[RD_TX_ENTITIES], last[RD_TX_ENTITIES];
     uint32_t       changes[RD_TX_ENTITIES], lastProblems[RD_TX_ENTITIES];
-    bool           skipLogged[RD_TX_ENTITIES], publishFailLogged;
+    bool           skipLogged[RD_TX_ENTITIES];
     uint32_t       ticks;
-    volatile SInt32 busySkips;    /* periodic looks skipped: fDispLock was held */
 };
 
 typedef struct {
-    char key[32], val[256];
+    char key[32], val[384];
 } TxProp;
 
 static uint64_t txUptimeMs()
@@ -282,17 +281,25 @@ void RDNA3Accel::displayTxCheck(const char *when)
     if (when) {
         IOLockLock(fDispLock);
     } else if (!IOLockTryLock(fDispLock)) {
-        OSIncrementAtomic(&fTx->busySkips);   /* a mode set, a flip, a restore holds it: the next tick */
+        /* a mode set, a flip, a restore holds it: the next tick. Said on
+         * the first skip and every 30th, so a watch that never got the
+         * lock is not taken for one that never ran */
+        SInt32 n = OSIncrementAtomic(&fTxBusySkips) + 1;
+        if (n == 1 || n % 30 == 0)
+            LOG("display: TX watch: skipped, display lock busy (%d skips)", (int)n);
+        setNumber("RDNA3,TXWatchBusySkips", (uint32_t)n);
         return;
     }
-    /* a system sleep or the shutdown may have begun while we waited */
-    if (fDispAsleep || fShuttingDown) {
+    /* a system sleep, the shutdown or the stop (fTx freed) may have begun
+     * while we waited; fTx is only touched under the lock from here on */
+    RDNA3TxWatch *tx = fTx;
+    if (!tx || fDispAsleep || fShuttingDown) {
         IOLockUnlock(fDispLock);
         return;
     }
-    if (!when && ++fTx->ticks == 1)
+    if (!when && ++tx->ticks == 1)
         LOG("display: TX watch: first tick at %llu ms uptime", (unsigned long long)txUptimeMs());
-    ticks = fTx->ticks;
+    ticks = tx->ticks;
     for (uint32_t e = 0; e < RD_TX_ENTITIES; e++) {
         rdna3_tx_state now;
         char diff[640], probs[320], why[128], name[16];
@@ -303,23 +310,26 @@ void RDNA3Accel::displayTxCheck(const char *when)
             continue;
         txName(e, name, sizeof(name));
         if (displayTxRead(e, &now, why, sizeof(why)) != RDNA3_OK) {
-            if (!fTx->skipLogged[e]) {
+            if (!tx->skipLogged[e]) {
                 LOG("display: %s TX not read: %s", name, why);
-                fTx->skipLogged[e] = true;
+                tx->skipLogged[e] = true;
                 txKey(e, props[nprops].key, sizeof(props[nprops].key));
                 snprintf(props[nprops].val, sizeof(props[nprops].val), "not read: %s", why);
                 nprops++;
             }
             continue;
         }
-        fTx->skipLogged[e] = false;
+        if (tx->skipLogged[e]) {
+            LOG("display: %s TX readable again", name);
+            tx->skipLogged[e] = false;
+        }
         uint32_t p = dcn32_tx_state_problems(&now);
-        rdna3_tx_state *last = &fTx->last[e];
-        if (!fTx->boot[e].valid)
-            fTx->boot[e] = now;
+        rdna3_tx_state *last = &tx->last[e];
+        if (!tx->boot[e].valid)
+            tx->boot[e] = now;
         if (when || !last->valid) {
             displayTxLogFull(name, when ? when : "first look", &now);
-            if (when && dcn32_tx_state_diff(&fTx->boot[e], &now, diff, sizeof(diff), nullptr))
+            if (when && dcn32_tx_state_diff(&tx->boot[e], &now, diff, sizeof(diff), nullptr))
                 LOG("display: %s TX %s, changed since the start: %s", name, when, diff);
             publish = true;
         } else {
@@ -327,17 +337,17 @@ void RDNA3Accel::displayTxCheck(const char *when)
             uint32_t n = dcn32_tx_state_diff(last, &now, diff, sizeof(diff), &imp);
             if (n == RD_TX_NREGS && imp && (last->otg != now.otg || last->fe != now.fe || last->be != now.be)) {
                 /* another chain (a mode set, the DIG found again): it is the new start */
-                uint32_t c = ++fTx->changes[e];
+                uint32_t c = ++tx->changes[e];
                 dcn32_tx_problems_str(p, probs, sizeof(probs));
                 LOG("display: %s TX change #%u at %llu ms uptime: problems: %s; %s (re-baselined)", name, c,
                     (unsigned long long)txUptimeMs(), probs, diff);
                 displayTxLogFull(name, "new chain", &now);
-                fTx->boot[e] = now;
+                tx->boot[e] = now;
                 publish = true;
-            } else if (n || p != fTx->lastProblems[e]) {
-                uint32_t c = ++fTx->changes[e];
+            } else if (n || p != tx->lastProblems[e]) {
+                uint32_t c = ++tx->changes[e];
                 dcn32_tx_problems_str(p, probs, sizeof(probs));
-                if (p != fTx->lastProblems[e] || imp || c <= RD_TX_CHANGES_LOGGED || c % 64 == 0)
+                if (p != tx->lastProblems[e] || imp || c <= RD_TX_CHANGES_LOGGED || c % 64 == 0)
                     LOG("display: %s TX change #%u at %llu ms uptime: problems: %s; %u register(s): %s%s", name, c,
                         (unsigned long long)txUptimeMs(), probs, n, n ? diff : "(only status fields)",
                         e < 4 && fHeadLinkDown[e] ? " (monitor standby)" : "");
@@ -348,26 +358,24 @@ void RDNA3Accel::displayTxCheck(const char *when)
             }
         }
         *last = now;
-        fTx->lastProblems[e] = p;
+        tx->lastProblems[e] = p;
         if (publish && nprops < RD_TX_ENTITIES) {
             dcn32_tx_problems_str(p, probs, sizeof(probs));
             txKey(e, props[nprops].key, sizeof(props[nprops].key));
-            snprintf(props[nprops].val, sizeof(props[nprops].val), "%s; %u change(s) since the start", probs,
-                     fTx->changes[e]);
+            snprintf(props[nprops].val, sizeof(props[nprops].val), "%u change(s) since the start; problems: %s",
+                     tx->changes[e], probs);
             nprops++;
         }
     }
     IOLockUnlock(fDispLock);
     /* the registry outside the display lock */
     for (uint32_t i = 0; i < nprops; i++)
-        if (!setProperty(props[i].key, props[i].val) && !fTx->publishFailLogged) {
-            fTx->publishFailLogged = true;
+        if (!setProperty(props[i].key, props[i].val) && !fTxPublishFailLogged) {
+            fTxPublishFailLogged = true;
             LOG("display: TX watch: could not publish %s", props[i].key);
         }
-    if (!when) {
+    if (!when)
         setNumber("RDNA3,TXWatchTicks", ticks);
-        setNumber("RDNA3,TXWatchBusySkips", (uint32_t)fTx->busySkips);
-    }
 }
 
 /* RD_NR_XNU_TXSTATE: the chain on pipe t->pipe (a head, or the clone of
@@ -426,11 +434,13 @@ int RDNA3Accel::drmTxState(void *ctx, struct rd_xnu_txstate *t)
                 TXT("%s\n", line);
         if (!a->fTx)
             TXT("watch: %s\n", rd3_arg("rdna3txwatch", 1) ? "not started (no memory)" : "off (rdna3txwatch=0)");
+        else if (!a->fTx->ticks && a->fTxBusySkips)
+            TXT("watch: no tick yet, %u skipped: display lock busy\n", (uint32_t)a->fTxBusySkips);
         else if (!a->fTx->ticks)
             TXT("watch: never ticked (it runs from the statistics tick)\n");
         else
             TXT("watch: %u tick(s), %u change(s), %u busy skip(s)\n", a->fTx->ticks, t->changes,
-                (uint32_t)a->fTx->busySkips);
+                (uint32_t)a->fTxBusySkips);
         if (a->fTx && a->fTx->boot[e].valid) {
             uint32_t d = dcn32_tx_state_diff(&a->fTx->boot[e], &now, diff, sizeof(diff), nullptr);
             TXT("since the start: %s\n", d ? diff : "unchanged");
@@ -438,6 +448,9 @@ int RDNA3Accel::drmTxState(void *ctx, struct rd_xnu_txstate *t)
         break;
     }
     IOLockUnlock(a->fDispLock);
+    /* a cut text says so */
+    if (n >= sizeof(t->text))
+        memcpy(t->text + sizeof(t->text) - 5, "...\n", 5);
 #undef TXT
     return 0;
 }

@@ -449,7 +449,11 @@ private:
      * boot heads and the clone of rdna3mirror=1 (RDNA3Resume.cpp). Card
      * run of 2026-10-15: the HDMI monitor said "no signal" while its pipe
      * scanned the desktop, and nothing told when or what changed. */
-    struct RDNA3TxWatch *fTx = nullptr;
+    struct RDNA3TxWatch *fTx = nullptr;     /* freed at stop: read only under fDispLock */
+    volatile SInt32 fTxBusySkips = 0;       /* ticks skipped: fDispLock was held */
+    bool          fTxPublishFailLogged = false;
+    bool          fScanoutAsleepLogged = false;
+    int           drmScanoutAsleep(struct rd_xnu_scanout *s);
     void          displayTxInit();
     void          displayTxCheck(const char *when);
     bool          displayTxChain(uint32_t e, uint32_t *otg, int *fe, int *be);   /* fDispLock held */

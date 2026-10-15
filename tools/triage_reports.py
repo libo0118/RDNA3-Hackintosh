@@ -478,7 +478,7 @@ def tail_file(path, n, pattern=None):
         print("     " + l[-160:])
 
 
-TX_CHANGE = re.compile(r"display: (head \d+|clone) TX change #(\d+) at (\d+) ms uptime: problems: ([^;]*); (.*)$")
+TX_CHANGE = re.compile(r"display: (head \d+|clone) TX change #(\d+) at (\d+) ms uptime: problems: ([^;]*); (.*)$", re.M)
 TX_LINE = re.compile(r"display: (head \d+|clone) TX|display: TX watch")
 
 
@@ -501,10 +501,11 @@ def tx_changes(log):
 def tx_excerpt(lines):
     """the watch's lines worth reading: every full state (the start, after
     the clone, a new chain) with its register lines, the watch's own
-    lines, the first change with problems, the last 20; once each"""
+    lines, the first change with problems, the last 20; each line of the
+    log once (two dumps with the same registers are both kept)"""
     keep, first_bad, full = set(), None, None
     for i, l in enumerate(lines):
-        if re.search(r"TX (at the start|after the clone|new chain|first look)|TX watch:|TX not read|changed since the start", l):
+        if re.search(r"TX (at the start|after the clone|new chain|first look)|TX watch:|TX not read|TX readable again|changed since the start", l):
             keep.add(i)
             full = re.search(r"display: (head \d+|clone) TX", l)
             full = full.group(1) if full else None
@@ -518,13 +519,7 @@ def tx_excerpt(lines):
     if first_bad is not None:
         keep.add(first_bad)
     keep.update(range(max(0, len(lines) - 20), len(lines)))
-    out, seen = [], set()
-    for i in sorted(keep):
-        t = lines[i][lines[i].find("display:"):]
-        if t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
+    return [lines[i][lines[i].find("display:"):] for i in sorted(keep)]
 
 
 def summary(path, serial=None):
@@ -583,23 +578,32 @@ def summary(path, serial=None):
     # with their time, problems first, from the kernel log of the same boot
     if "TX watch:" in log or "TX at the start" in log:
         ch = tx_changes(log)
-        ticks = parse_props(props_txt).get("TXWatchTicks") if props_txt else None
+        pr = parse_props(props_txt) if props_txt else {}
+        ticks, skips = pr.get("TXWatchTicks"), pr.get("TXWatchBusySkips")
         ticked = "TX watch: first tick" in log or (isinstance(ticks, int) and ticks > 0)
+        busy = (isinstance(skips, int) and skips > 0) or "TX watch: skipped, display lock busy" in log
         parts = []
         for ent, v in sorted(ch.items()):
             bad = [c for c in v if c[2] != "none"]
             c = bad[0] if bad else v[0]
             parts.append("%s: %d change(s); first %s at %d ms: problems: %s; %s" %
                          (ent, len(v), "with problems" if bad else "", c[1], c[2], c[3][:160]))
-        if parts:
+        if "TX watch: NOT started" in log:
+            out.append(("TX watch", "NOT STARTED: no memory for its state"))
+        elif parts:
             out.append(("TX watch", " | ".join(parts)))
         elif "TX watch: off" in log:
             out.append(("TX watch", "off (rdna3txwatch=0)"))
+        elif not ticked and busy:
+            out.append(("TX watch", "NO TICK: every tick skipped, the display lock was busy (%s skip(s))" %
+                        (skips if isinstance(skips, int) else "some")))
         elif ticked:
             out.append(("TX watch", "no change on any head after the start (%s tick(s))" %
                         (ticks if isinstance(ticks, int) else "some")))
         else:
             out.append(("TX watch", "NEVER TICKED: no change seen proves nothing (the statistics tick did not run)"))
+        if "TX watch: could not publish" in log:
+            out.append(("TX watch publish", "FAILED: the RDNA3,Head<n>,TX properties are stale (see the log)"))
     # the Vulkan CTS subset (step cts): the total, the groups that failed or
     # hung, the first failing cases
     cts = re.search(r"^CTS: .*$", txt, re.M)

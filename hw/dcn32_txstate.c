@@ -176,6 +176,15 @@ uint32_t dcn32_tx_state_problems(const rdna3_tx_state *t)
         return 0;
     if (!GET(t->v[I_OTG_CONTROL], OTG0_OTG_CONTROL, OTG_MASTER_EN))
         p |= RD_TX_P_OTG_OFF;
+    else if (!GET(t->v[I_OTG_CONTROL], OTG0_OTG_CONTROL, OTG_CURRENT_MASTER_EN_STATE))
+        p |= RD_TX_P_NOT_RUNNING;
+    /* the status fields the change detection leaves out: a DTO asked for
+     * that does not run (the pixel clock of a DP / HPO stream) */
+    if ((GET(t->v[I_PIXEL_RATE], OTG0_PIXEL_RATE_CNTL, DP_DTO0_ENABLE) &&
+         !GET(t->v[I_PIXEL_RATE], OTG0_PIXEL_RATE_CNTL, DPDTO0_ENABLE_STATUS)) ||
+        (GET(t->v[I_PIXEL_RATE], OTG0_PIXEL_RATE_CNTL, DTBCLK_DTO0_ENABLE) &&
+         !GET(t->v[I_PIXEL_RATE], OTG0_PIXEL_RATE_CNTL, DTBCLKDTO0_ENABLE_STATUS)))
+        p |= RD_TX_P_DTO_NOT_RUNNING;
     /* optc1_read_otg_state / optc32_set_drr: V_TOTAL_MIN_SEL / MAX_SEL put
      * the DRR bounds in charge of the frame length */
     ctl = t->v[I_V_TOTAL_CONTROL];
@@ -301,7 +310,8 @@ size_t dcn32_tx_problems_str(uint32_t p, char *buf, size_t len)
         "OTG off", "DIG back end off", "back end symbol clock off", "front end symbol clock off",
         "DIG routing not this OTG", "DIG forced off", "DIG FIFO error", "DIO FIFO error", "AV mute",
         "HDMI error", "DRR on (V_TOTAL_MIN/MAX not the nominal total)", "DRR bound 0",
-        "the PHY takes an HPO encoder", "DIG chain not found (its registers not read; see every DIG)",
+        "the PHY takes an HPO encoder", "DIG chain not found (its registers not read, see every DIG)",
+        "OTG enabled but not running", "pixel clock DTO enabled but not running",
     };
     tx_out o = { buf, len, 0 };
     uint32_t i, any = 0;

@@ -109,6 +109,7 @@ struct rd_xnu_scanout {
     uint32_t dscl_mode, lb_memory_ctrl, dscl_mem_pwr;
     uint32_t dlg_after_scaler, dlg_req_delivery, dlg_line_delivery;
     uint32_t flags;                                /* in (row0 0): RD_XNU_SCANOUT_* */
+    uint32_t asleep;                               /* out: system sleep / shutdown, nothing read */
 };
 /* after the read, clear the sticky HUBP underflow status (hubp2_clear_underflow):
  * a later look shows whether it comes back */

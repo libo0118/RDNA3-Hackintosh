@@ -4488,6 +4488,10 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
     (void)ctx;
     if (off >= MMIO_LEN)
         return;
+    /* OTG_CURRENT_MASTER_EN_STATE is status: a read-modify-write does not store it */
+    for (uint32_t n = 0; n < RD_DCN_MAX_PIPES; n++)
+        if (dw == OTG(regOTG0_OTG_CONTROL, n))
+            v &= ~OTG0_OTG_CONTROL__OTG_CURRENT_MASTER_EN_STATE_MASK;
     if (sk_wr(dw, v))
         return;
     if (hpo_wr(dw, v))
@@ -5112,6 +5116,12 @@ static uint32_t sim_rd(void *ctx, uint64_t off)
     for (uint32_t n = 0; n < RD_AUX_ENGINES; n++)
         if ((S.hpd_model & (1u << n)) && dw == HPDR(regHPD0_DC_HPD_INT_STATUS, n))
             hpd_filter_eval(n);
+    /* OTG_CURRENT_MASTER_EN_STATE follows OTG_MASTER_EN once the timing
+     * generator runs (the card reads OTG_CONTROL 0x10201 on a lit head) */
+    for (uint32_t n = 0; n < RD_DCN_MAX_PIPES; n++)
+        if (dw == OTG(regOTG0_OTG_CONTROL, n) && S.reg[dw] != 0xffffffffu)
+            return (S.reg[dw] & ~OTG0_OTG_CONTROL__OTG_CURRENT_MASTER_EN_STATE_MASK) |
+                   ((S.reg[dw] & OTG0_OTG_CONTROL__OTG_MASTER_EN_MASK) ? OTG0_OTG_CONTROL__OTG_CURRENT_MASTER_EN_STATE_MASK : 0);
     /* DIG_SYMCLK_FE_ON: an enabled back end takes the front end's symbols */
     if (S.dps.be >= 0)
         for (uint32_t n = 0; n < 5; n++)
@@ -5563,6 +5573,26 @@ static void test_tx_state(rdna3_dev *dev, int standby)
     S.reg[OTG(regOTG0_OTG_CONTROL, 3)] = 0xffffffffu;
     CHECK(dcn32_tx_state_read(dev, 3, 0, 0, &t) == RDNA3_ENODEV && !t.valid && dcn32_tx_state_problems(&t) == 0);
     S.reg[OTG(regOTG0_OTG_CONTROL, 3)] = keep;
+    /* requested but not running: the OTG enabled without its state, a DTO
+     * enabled without its status (fields the change detection ignores) */
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK &&
+          (t.v[0] & OTG0_OTG_CONTROL__OTG_CURRENT_MASTER_EN_STATE_MASK) && dcn32_tx_state_problems(&t) == 0);
+    t.v[0] &= ~OTG0_OTG_CONTROL__OTG_CURRENT_MASTER_EN_STATE_MASK;
+    CHECK(dcn32_tx_state_problems(&t) == RD_TX_P_NOT_RUNNING);
+    keep = S.reg[prc];
+    S.reg[prc] = (keep & ~(OTG0_PIXEL_RATE_CNTL__DPDTO0_ENABLE_STATUS_MASK)) | OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE_MASK;
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == RD_TX_P_DTO_NOT_RUNNING);
+    /* the model's DTBCLK DTO reports running as soon as it is enabled: the
+     * read state is changed instead (PIXEL_RATE_CNTL is v[6], kTx's order) */
+    S.reg[prc] = keep;
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == 0);
+    t.v[6] = (t.v[6] & ~OTG0_PIXEL_RATE_CNTL__DTBCLKDTO0_ENABLE_STATUS_MASK) | OTG0_PIXEL_RATE_CNTL__DTBCLK_DTO0_ENABLE_MASK;
+    CHECK(dcn32_tx_state_problems(&t) == RD_TX_P_DTO_NOT_RUNNING);
+    S.reg[prc] = keep | OTG0_PIXEL_RATE_CNTL__DP_DTO0_ENABLE_MASK | OTG0_PIXEL_RATE_CNTL__DPDTO0_ENABLE_STATUS_MASK;
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == 0);
+    S.reg[prc] = keep;
+    dcn32_tx_problems_str(RD_TX_P_NO_CHAIN, why, sizeof(why));
+    CHECK(strchr(why, ';') == NULL);   /* triage splits the change line at ';' */
     CHECK(dcn32_tx_state_read(dev, 4, 2, 1, &t) == RDNA3_EINVAL && dcn32_tx_state_read(dev, 2, 5, 1, &t) == RDNA3_EINVAL &&
           dcn32_tx_state_read(dev, 2, 2, 5, &t) == RDNA3_EINVAL && dcn32_tx_state_read(NULL, 2, 2, 1, &t) == RDNA3_EINVAL);
 

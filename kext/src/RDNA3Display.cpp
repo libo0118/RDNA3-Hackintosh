@@ -332,6 +332,24 @@ void RDNA3Accel::displayProbeConnectors()
 /* RD_NR_XNU_SCANOUT: what pipe s->pipe scans out, and a scaled slice of
  * it, for the report (rdna3_drminfo --scanout): proof of what reaches each
  * panel without anyone at the screen. Screen contents: root only. */
+/* the screen look during a system sleep or the shutdown: no register is
+ * read (the card may have lost its power), the look says why instead of
+ * failing (the report's look after the wake keeps its other pipes) */
+int RDNA3Accel::drmScanoutAsleep(struct rd_xnu_scanout *s)
+{
+    uint32_t pipe = s->pipe, row0 = s->row0, flags = s->flags;
+    bzero(s, sizeof(*s));
+    s->pipe = pipe;
+    s->row0 = row0;
+    s->flags = flags;
+    s->asleep = 1;
+    if (!fScanoutAsleepLogged) {
+        fScanoutAsleepLogged = true;
+        LOG("display: scanout look refused: display asleep (system sleep or shutdown)");
+    }
+    return 0;
+}
+
 int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
@@ -344,12 +362,21 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
     if (!a->fDispDev || !a->fDispLock)
         return -RD_ENODEV;
     if (a->fDispAsleep || a->fShuttingDown)   /* a card that may have lost its power */
-        return -RD_ENODEV;
+        return a->drmScanoutAsleep(s);
+    /* the same after every wait for the display lock (also the CRC's sleep) */
+#define SCANOUT_LOCK_OR_ASLEEP()                     \
+    do {                                             \
+        IOLockLock(a->fDispLock);                    \
+        if (a->fDispAsleep || a->fShuttingDown) {    \
+            IOLockUnlock(a->fDispLock);              \
+            return a->drmScanoutAsleep(s);           \
+        }                                            \
+    } while (0)
     /* the OTG CRC of what leaves the pipe (after the scaler and the blank),
      * on the first call of a picture: windows over the active area, two
      * frames to settle (nothing borrowed while the lock is dropped) */
     if (row0 == 0) {
-        IOLockLock(a->fDispLock);
+        SCANOUT_LOCK_OR_ASLEEP();
         r = dcn32_scanout_info(a->fDispDev, pipe, &si);
         IOLockUnlock(a->fDispLock);
         if (r == RDNA3_OK && (si.lit || si.blanked)) {
@@ -358,11 +385,11 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
             bzero(&one, sizeof(one));
             one.nheads = 1;
             one.head[0].otg = si.otg;
-            IOLockLock(a->fDispLock);
+            SCANOUT_LOCK_OR_ASLEEP();
             dcn32_crc_enable(a->fDispDev, &one, 0, 1);
             IOLockUnlock(a->fDispLock);
             IOSleep(40);
-            IOLockLock(a->fDispLock);
+            SCANOUT_LOCK_OR_ASLEEP();
             if (dcn32_crc_read(a->fDispDev, &one, 0, &rr, &gg, &bb) == RDNA3_OK) {
                 s->crc_valid = 1;
                 s->crc_rg = rr | gg << 16;
@@ -371,7 +398,8 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
             IOLockUnlock(a->fDispLock);
         }
     }
-    IOLockLock(a->fDispLock);
+    SCANOUT_LOCK_OR_ASLEEP();
+#undef SCANOUT_LOCK_OR_ASLEEP
     /* the display's register device has no BAR0 view of its own: lend it
      * the DRM's for this read only */
     volatile uint8_t *oldCpu = a->fDispDev->vram_cpu;

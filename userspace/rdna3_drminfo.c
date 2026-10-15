@@ -546,6 +546,10 @@ static int scanout_dump(int fd, const char *dir, uint32_t hires)
             free(img); free(img2);
             return 1;
         }
+        if (s.asleep) {
+            printf("pipe %u: not read: the display is asleep (system sleep or shutdown)\n", p);
+            continue;
+        }
         printf("pipe %u: %s%s otg %u %ux%u pitch %u fmt %u sw %u dcc %u address 0x%llx in use 0x%llx%s\n",
                p, s.powered ? "" : "power-gated ", s.lit ? "LIT" : s.blanked ? "BLANKED" : "off", s.otg,
                s.width, s.height,

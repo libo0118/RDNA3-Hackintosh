@@ -62,7 +62,9 @@ typedef struct rdna3_tx_state {
 #define RD_TX_P_DRR_ZERO   (1u << 11)   /* V_TOTAL_MIN / MAX selected with a bound of 0 */
 #define RD_TX_P_NOT_DIO    (1u << 12)   /* DIO_LINK<x>_CNTL.ENC_TYPE_SEL not the DIG (TMDS needs it) */
 #define RD_TX_P_NO_CHAIN   (1u << 13)   /* the DIG front / back end was not known: not read */
-#define RD_TX_P_NBITS      14
+#define RD_TX_P_NOT_RUNNING (1u << 14)  /* OTG_MASTER_EN 1, OTG_CURRENT_MASTER_EN_STATE 0 */
+#define RD_TX_P_DTO_NOT_RUNNING (1u << 15)   /* DP_DTO0 / DTBCLK_DTO0 enabled, its status 0 */
+#define RD_TX_P_NBITS      16
 
 /* Read the chain of OTG 'otg' -> DIG FE 'fe' -> DIG BE / PHY 'be' (fe / be
  * < 0: not known; then every DIG's routing and PHY selects are read).
@@ -73,7 +75,8 @@ int dcn32_tx_state_read(rdna3_dev *d, uint32_t otg, int fe, int be, rdna3_tx_sta
 /* RD_TX_P_* of a state read */
 uint32_t dcn32_tx_state_problems(const rdna3_tx_state *t);
 
-/* "none" or the names of the bits in 'p', comma separated; the length */
+/* "none" or the names of the bits in 'p', comma separated (never a ';':
+ * the core's change lines end the problems with one); the length */
 size_t dcn32_tx_problems_str(uint32_t p, char *buf, size_t len);
 
 /* "OTG1 -> DIGD -> UNIPHYD" ('?' for a DIG not known); the length */
