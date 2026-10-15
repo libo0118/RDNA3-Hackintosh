@@ -262,6 +262,7 @@ private:
     range_alloc  *fAccelVa = nullptr;
     void         *fAccelVm = nullptr;    /* the accelerator's GPUVM context (its own VMID) */
     bool          fAccelVmRefusalLogged = false;
+    bool          fAccelVmStopping = false;   /* stop: no new accelerator VM (fDrmLock) */
     IOReturn      platformPageoff(struct RD3KSurfPageoff *q);
     IOReturn      platformCopyVram(struct RD3KCopyRequest *q);
     uint64_t      fAccelVramBytes = 0;

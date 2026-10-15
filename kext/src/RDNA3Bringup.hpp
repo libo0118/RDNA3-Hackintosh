@@ -80,7 +80,9 @@ public:
      * created "record only" and map/unmap do nothing. Once it is up a VM
      * always runs: without a free VMID or page tables vmCreate returns
      * nullptr (the file open fails) instead of a VM that cannot submit. */
-    void *vmCreate(bool quiet = false);   /* quiet: no log line when there is no VM */
+    /* quiet: no log line when there is no VM; kernel: the accelerator's own
+     * VM (outside the clients' pool, whichever thread makes it) */
+    void *vmCreate(bool quiet = false, bool kernel = false);
     /* a new DRM file of effective uid 'uid' (console: in the console
      * session, kIOClientPrivilegeConsoleSession) may take a VMID
      * (rdna3_vmid_admit; always before the GMC is up); false logs the

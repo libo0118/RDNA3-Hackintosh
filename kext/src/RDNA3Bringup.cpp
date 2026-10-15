@@ -1993,6 +1993,7 @@ struct RDNA3Vm {
     uint32_t ownerUid;   /* its effective uid: rdna3_vmid_admit's per-uid cap */
     char     owner[24];
     bool     orphaned;   /* its file closed with a job still running: kept until the job is done */
+    bool     kernel;     /* the accelerator's own (vmCreate(.., true)): not in the clients' pool */
 };
 
 
@@ -2957,7 +2958,7 @@ bool RDNA3Bringup::resumeAfterPowerLoss()
 /* ------------------------------ GPUVM ------------------------------ */
 
 
-void *RDNA3Bringup::vmCreate(bool quiet)
+void *RDNA3Bringup::vmCreate(bool quiet, bool kernel)
 {
     RDNA3Vm *v = (RDNA3Vm *)IOMalloc(sizeof(*v));
     if (!v)
@@ -2969,7 +2970,11 @@ void *RDNA3Bringup::vmCreate(bool quiet)
     /* the opener's thread (IOServiceOpen -> the user client's start) */
     v->ownerPid = proc_selfpid();
     v->ownerUid = kauth_cred_getuid(kauth_cred_get());
-    proc_selfname(v->owner, sizeof(v->owner));
+    v->kernel = kernel;
+    if (kernel)
+        strlcpy(v->owner, "accelerator", sizeof(v->owner));   /* maybe made on a client's thread */
+    else
+        proc_selfname(v->owner, sizeof(v->owner));
     if (!fVmReady)
         return v;
     /* one VMID per open file for now (amdgpu hands VMIDs out per job); with
@@ -3074,8 +3079,8 @@ bool RDNA3Bringup::vmCanOpen(uint32_t uid, bool console)
     for (uint32_t id = 1; id < 16; id++) {
         if (!fVmByVmid[id])
             continue;
-        if (fVmByVmid[id]->ownerPid == 0)
-            kernel++;   /* the accelerator's own (platformVmReady) */
+        if (fVmByVmid[id]->kernel)
+            kernel++;   /* the accelerator's own, whichever thread made it */
         else if (fVmByVmid[id]->ownerUid == uid)
             mine++;
     }
