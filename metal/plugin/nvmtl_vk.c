@@ -288,12 +288,18 @@ static pthread_mutex_t g_mt_lock = PTHREAD_MUTEX_INITIALIZER;
 static PFN_vkAllocateMemory g_real_AllocateMemory;
 static PFN_vkFreeMemory g_real_FreeMemory;
 static uint32_t nvmtl_mt_slot(VkDeviceMemory m) { uint64_t k = (uint64_t)(uintptr_t)m; k ^= k >> 29; k *= 0x9e3779b97f4a7c15ull; return (uint32_t)(k >> 40) % NVMTL_MT_SLOTS; }
+static unsigned g_mt_dropped;
 static void nvmtl_mt_put(VkDeviceMemory m, uint32_t type)
 {
+    uint32_t n = 0;
     pthread_mutex_lock(&g_mt_lock);
-    for (uint32_t n = 0, i = nvmtl_mt_slot(m); n < NVMTL_MT_SLOTS; n++, i = (i + 1) % NVMTL_MT_SLOTS)
+    for (uint32_t i = nvmtl_mt_slot(m); n < NVMTL_MT_SLOTS; n++, i = (i + 1) % NVMTL_MT_SLOTS)
         if (!g_mt[i].mem || g_mt[i].mem == m) { g_mt[i].mem = m; g_mt[i].type = type; break; }
+    unsigned dropped = n == NVMTL_MT_SLOTS ? ++g_mt_dropped : 0;
     pthread_mutex_unlock(&g_mt_lock);
+    if (dropped == 1 || (dropped && dropped % 4096 == 0))
+        nvlog("memory types: %u live allocations fill the table - %u not recorded (their buffer textures need every type)",
+              NVMTL_MT_SLOTS, dropped);
 }
 static void nvmtl_mt_del(VkDeviceMemory m)
 {
@@ -471,6 +477,7 @@ static uint32_t (*pnvk_surface_dirty)(VkDevice, uint32_t, uint32_t);
    accelerator's VRAM for the surface, and the dirty mark through the kext */
 static int (*pdrm_surface_fd)(uint32_t, uint32_t, uint64_t);
 static int (*pdrm_surface_dirty)(uint32_t, uint32_t);
+static int (*pdrm_surface_last_error)(void);
 static int (*pnvk_sparse)(void);
 static int g_qsparse, g_sparse;
 static int g_extfd;
@@ -719,6 +726,7 @@ static int nvmtl_vk_initialize(void)
             pnvk_surface_dirty = (uint32_t (*)(VkDevice, uint32_t, uint32_t))dlsym(g_lib, "nvmtl_nvk_surface_dirty");
             pdrm_surface_fd = (int (*)(uint32_t, uint32_t, uint64_t))dlsym(g_lib, "drm_xnu_surface_fd");
             pdrm_surface_dirty = (int (*)(uint32_t, uint32_t))dlsym(g_lib, "drm_xnu_surface_dirty");
+            pdrm_surface_last_error = (int (*)(void))dlsym(g_lib, "drm_xnu_surface_last_error");
             pnvk_sample_depth_contract = (VkResult (*)(VkDevice, uint32_t *, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_contract_v1");
             pnvk_sample_depth_image = (VkResult (*)(VkDevice, VkImage, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_image_v1");
             pnvk_sparse = (int (*)(void))dlsym(g_lib, "nvmtl_nvk_sparse_bind_v1");
@@ -940,8 +948,9 @@ static int nvmtl_vk_initialize(void)
     nvlog("vk: VK_EXT_extended_dynamic_state %s", have[14] ? "ENABLED (dynamic depth/stencil state, PS epilogs)" : "ABSENT");
     VKCK(pvkCreateDevice(g_pdev, &dci, NULL, &g_dev), "vkCreateDevice");
     DEVICE_FNS(LOAD_D)
-    g_real_AllocateMemory = pvkAllocateMemory; pvkAllocateMemory = nvmtl_track_AllocateMemory;
-    g_real_FreeMemory = pvkFreeMemory; pvkFreeMemory = nvmtl_track_FreeMemory;
+    /* LOAD_D just reloaded the driver's own pointers; never wrap the wrapper */
+    if (pvkAllocateMemory != nvmtl_track_AllocateMemory) { g_real_AllocateMemory = pvkAllocateMemory; pvkAllocateMemory = nvmtl_track_AllocateMemory; }
+    if (pvkFreeMemory != nvmtl_track_FreeMemory) { g_real_FreeMemory = pvkFreeMemory; pvkFreeMemory = nvmtl_track_FreeMemory; }
     if (g_pstat) { p_pstat_props = (PFN_vkGetPipelineExecutablePropertiesKHR)pvkGetDeviceProcAddr(g_dev, "vkGetPipelineExecutablePropertiesKHR");
                    p_pstat_stats = (PFN_vkGetPipelineExecutableStatisticsKHR)pvkGetDeviceProcAddr(g_dev, "vkGetPipelineExecutableStatisticsKHR");
                    if (!p_pstat_props || !p_pstat_stats) g_pstat = 0;
@@ -1850,18 +1859,35 @@ static int nvmtl_gpu_headless(void)
                  if (h) nvlog("headless GPU: the display belongs to another GPU - IOSurfaces are copied out to system memory"); }
     return h;
 }
+/* RADV's route needs a kext that knows RD_NR_XNU_SURFACE_BO. The probe asks for surface 0, which never exists: ENOENT
+   is the yes; ENOSYS (an older kext's unknown ioctl, or no hook) is a lasting no; ENXIO (the accelerator or device not up
+   yet) asks again later. 1 yes, 0 no, -1 not yet. */
+static int g_drm_surf_errno;
+static int nvmtl_drm_surface_probe(void)
+{
+    static int state = -1; static unsigned tries;
+    if (state >= 0 || !pdrm_surface_fd || !pdrm_surface_dirty) return state >= 0 ? state : (state = 0);
+    errno = 0;
+    int rc = pdrm_surface_dirty(0, 0);
+    g_drm_surf_errno = rc ? errno : 0;
+    if (!rc || errno == ENOENT || errno == ENODEV) state = 1;
+    else if (errno != ENXIO || ++tries >= 64) state = 0;
+    if (state >= 0 || tries == 1)
+        nvlog("item 7: kext surface BOs probe -> rc %d errno %d (%s)%s", rc, g_drm_surf_errno, strerror(g_drm_surf_errno),
+              state == 1 ? ": supported" : state == 0 ? ": not offered - IOSurface textures stay private" : ": accelerator not up yet, asked again later");
+    return state;
+}
 int nvmtl_vk_surface_share_on(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("NVMTL_NO_SURFACE_SHARE");
-        /* RADV's route needs a kext that knows RD_NR_XNU_SURFACE_BO: surface 0 does not exist (ENOENT), an older kext
-           answers the unknown ioctl (ENODEV after libdrm_xnu's EINVAL) - then no surface tries an import */
-        int drm_ok = pdrm_surface_fd && pdrm_surface_dirty && (pdrm_surface_dirty(0, 0) == 0 || errno != ENODEV);
-        on = (pnvk_stage_import || drm_ok) && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
+        int drm = pnvk_stage_import ? 0 : nvmtl_drm_surface_probe();
+        if (drm < 0) return 0;   /* not decided yet: private until the accelerator answers */
+        on = (pnvk_stage_import || drm) && g_extfd && g_linmod && !(e && e[0] == '1') && !nvmtl_gpu_headless();
         nvlog("item 7: IOSurface textures %s (NVK import %s, libdrm_xnu surface fds %s, VK_KHR_external_memory_fd %s, DRM linear %s, NVMTL_NO_SURFACE_SHARE=%s)",
               on ? "live in the surface's family VRAM (one per surface, every process)" : "private per process (copies)",
-              pnvk_stage_import ? "present" : "ABSENT", drm_ok ? "present" : pdrm_surface_fd ? "ABSENT in the kext" : "ABSENT",
+              pnvk_stage_import ? "present" : "ABSENT", drm ? "present" : pdrm_surface_fd ? "not offered by the kext" : "ABSENT",
               g_extfd ? "present" : "ABSENT", g_linmod ? "present" : "ABSENT", e ?: "unset");
     }
     return on;
@@ -1876,25 +1902,36 @@ int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
               on ? "marked newest; a CPU lock / the display pipe pages it off (Apple's page-off)" : "copied out eagerly (old)",
               pnvk_surface_dirty ? "present" : "ABSENT", pdrm_surface_dirty ? "present" : "ABSENT", e ?: "unset");
     }
-    if (!on || !g_dev) return -1;
-    uint32_t st = pnvk_surface_dirty ? pnvk_surface_dirty(g_dev, surfaceID, plane)
-                                     : (pdrm_surface_dirty(surfaceID, plane) ? (uint32_t)errno | 0x80000000u : 0u);
-    if (st) { static unsigned n; if (n++ < 8 || n % 2000 == 0) nvlog("surface %u dirty refused (%#x) - copy-out (%u so far)", surfaceID, st, n); }
-    return st ? -1 : 0;
+    if (!on) return -1;
+    if (!g_dev) { static int said; if (!said++) nvlog("surface dirty: no Vulkan device - copy-out"); return -1; }
+    if (pnvk_surface_dirty) {
+        uint32_t st = pnvk_surface_dirty(g_dev, surfaceID, plane);
+        if (st) { static unsigned n; if (n++ < 8 || n % 2000 == 0) nvlog("surface %u dirty refused (%#x) - copy-out (%u so far)", surfaceID, st, n); }
+        return st ? -1 : 0;
+    }
+    if (!pdrm_surface_dirty(surfaceID, plane)) return 0;
+    /* per cause: one noisy surface does not hide the others' reasons */
+    int er = errno; static unsigned ncause[8];
+    unsigned k = er == ENOENT ? 0 : er == ENODEV ? 1 : er == ENXIO ? 2 : er == ENOSYS ? 3 : 4;
+    if (ncause[k]++ < 6 || ncause[k] % 2000 == 0)
+        nvlog("surface %u plane %u dirty refused: errno %d (%s) - copy-out (%u of this cause)", surfaceID, plane, er, strerror(er), ncause[k]);
+    return -1;
 }
 int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out)
 {
     memset(out, 0, sizeof *out);
-    if (!nvmtl_vk_surface_share_on() || !need) return -1;
+    if (!nvmtl_vk_surface_share_on()) return -1;
+    if (!need) { nvlog("item 7: surface %u: 0 bytes asked - private", surfaceID); return -1; }
     uint32_t all = g_memp.memoryTypeCount >= 32 ? 0xffffffffu : ((1u << g_memp.memoryTypeCount) - 1u);
     int mt = memtype(all, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (mt < 0) return -1;
+    if (mt < 0) { static int said; if (!said++) nvlog("item 7: no DEVICE_LOCAL memory type - surfaces private"); return -1; }
     nvmtl_vram_rec r = { 3, surfaceID, plane, 0, (uint64_t)need };
     /* NVK takes the staged record and ignores the fd; RADV imports the surface fd itself (Vulkan owns it on success) */
     VkImportMemoryFdInfoKHR imp = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, NULL, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
                                     pnvk_stage_import ? open("/dev/null", O_RDONLY | O_CLOEXEC) : pdrm_surface_fd(surfaceID, plane, need) };
     if (imp.fd < 0) {
-        static unsigned nf; if (nf++ < 8 || nf % 1000 == 0) nvlog("item 7: surface %u: no import fd (errno %d) - private", surfaceID, errno);
+        int er = errno;
+        static unsigned nf; if (nf++ < 8 || nf % 1000 == 0) nvlog("item 7: surface %u: no import fd (errno %d %s) - private", surfaceID, er, strerror(er));
         return -1;
     }
     VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &imp, need, (uint32_t)mt };
@@ -1904,8 +1941,12 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
     if (pnvk_stage_import) pnvk_stage_import(NULL);
     if (vr != VK_SUCCESS) {
         close(imp.fd);
+        /* the kernel's reason (Vulkan has one VkResult for all of them): ENOENT not this process's surface, ENODEV no
+           accelerator VRAM behind it, ENXIO accelerator not up, ENOSPC smaller than asked or the per-process cap */
+        int ke = pdrm_surface_last_error ? pdrm_surface_last_error() : 0;
         static unsigned n; if (n++ < 8 || n % 1000 == 0)
-            nvlog("item 7: surface %u plane %u: family VRAM import refused (%d) - private image + copies (%u so far)", surfaceID, plane, (int)vr, n);
+            nvlog("item 7: surface %u plane %u: family VRAM import refused (VkResult %d, kernel errno %d %s, %zu B) - private image + copies (%u so far)",
+                  surfaceID, plane, (int)vr, ke, ke ? strerror(ke) : "", need, n);
         return -1;
     }
     VkBufferCreateInfo bci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0, need,
@@ -6837,8 +6878,9 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
     const int typed = bt >= 0 && bt < 32 ? (mr.memoryTypeBits >> bt) & 1 : (mr.memoryTypeBits & all) == all;
     const char *why = !typed ? "memory types" : (mr.alignment && at % mr.alignment) ? "alignment" : NULL;
     if (why) {
-        nvlog("buffer texture: refused on %s - image types 0x%x of 0x%x, the buffer's type %d, bind at %zu (buffer %zu + %zu) vs alignment %llu",
-              why, mr.memoryTypeBits, all, bt, at, b->moff, offset, (unsigned long long)mr.alignment);
+        nvlog("buffer texture: refused on %s - image types 0x%x of 0x%x, the buffer's type %d%s, bind at %zu (buffer %zu + %zu) vs alignment %llu",
+              why, mr.memoryTypeBits, all, bt, bt < 0 ? (g_mt_dropped ? " (unknown: the type table is full)" : " (unknown: not allocated through the plugin)") : "",
+              at, b->moff, offset, (unsigned long long)mr.alignment);
         pvkDestroyImage(g_dev, (VkImage)out->img, NULL); memset(out, 0, sizeof *out); return -1; }
     if (mr.size > b->size - offset)
         nvlog("buffer texture: image size %llu runs %llu B past the buffer's %zu at offset %zu (the tail of the last row, never addressed)",

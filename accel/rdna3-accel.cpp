@@ -602,8 +602,14 @@ public:
             /* the card's name and VRAM size the core kext put on the PCI device: Apple's AMD
              * accelerators carry them too, and System Information reads them there */
             static const char *const kIdKeys[] = { "VRAM,totalMB", "VRAM,totalsize", "model" };
-            for (unsigned k = 0; k < sizeof kIdKeys / sizeof kIdKeys[0]; k++)
-                if (OSObject *v = pci->getProperty(kIdKeys[k])) setProperty(kIdKeys[k], v);
+            char have[64] = "";
+            for (unsigned k = 0; k < sizeof kIdKeys / sizeof kIdKeys[0]; k++) {
+                OSObject *v = pci->getProperty(kIdKeys[k]);
+                if (v) setProperty(kIdKeys[k], v);
+                strlcat(have, k ? (v ? " +" : " -") : (v ? "+" : "-"), sizeof have);
+                strlcat(have, kIdKeys[k], sizeof have);
+            }
+            ALOG("identity keys from the PCI device (+ copied, - absent): %s", have);
         }
         ALOG("start(%s): calling IOGraphicsAccelerator2::start — the family's own bring-up", provider ? provider->getName() : "?");
         bool r = IOGraphicsAccelerator2::start(provider);
@@ -1479,40 +1485,82 @@ static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsign
  * where WindowServer and the display read (A3). The same lookup as the RM
  * share above, in the client's task; the reference is taken while the
  * family lock still holds the surface's vidmem. */
-static unsigned gNVSVGemOk, gNVSVGemRefused;
+static volatile SInt32 gNVSVGemOk, gNVSVGemRefused, gNVSVGemCause[8];
+/* every answer but the first imports is counted; each refusal cause logs
+ * its first few, so the card report says why a surface stayed private */
+static void rd3AccelSurfGemLog(const struct RD3KSurfGem *p, const char *why, const void *vm, unsigned long long bytes)
+{
+    if (p->status == 0) {
+        SInt32 n = OSIncrementAtomic(&gNVSVGemOk);
+        if (n < 8 || (n & 4095) == 0)
+            ALOG("surfgem: surface %u plane %u -> vidmem %p (%llu B) (ok %d, refused %d)", p->surfaceID, p->plane, vm,
+                 bytes, (int)n + 1, (int)gNVSVGemRefused);
+        return;
+    }
+    OSIncrementAtomic(&gNVSVGemRefused);
+    SInt32 c = OSIncrementAtomic(&gNVSVGemCause[p->status & 7u]);
+    if (c < 6 || (c & 1023) == 0)
+        ALOG("surfgem: surface %u plane %u refused: %s (status %#x, %d of this cause; ok %d, refused %d)", p->surfaceID,
+             p->plane, why, p->status, (int)c + 1, (int)gNVSVGemOk, (int)gNVSVGemRefused);
+}
+/* IOSurfaceRoot, found once (two first callers race: the loser drops its reference) */
+static void *rd3AccelSurfaceRoot(void)
+{
+    if (gNVSVRoot) return gNVSVRoot;
+    OSDictionary *m = IOService::serviceMatching("IOSurfaceRoot");
+    if (!m) return nullptr;
+    IOService *r = IOService::waitForMatchingService(m, 5ULL * 1000 * 1000 * 1000);
+    m->release();
+    if (!r) {
+        static volatile SInt32 said;
+        if (OSIncrementAtomic(&said) < 3) ALOG("surfgem: no IOSurfaceRoot after 5 s");
+        return nullptr;
+    }
+    if (!OSCompareAndSwapPtr(nullptr, r, &gNVSVRoot)) r->release();
+    return gNVSVRoot;
+}
 static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
 {
     p->kapiMemory = nullptr; p->bytes = 0;
-    if (p->version != RD3K_SURFGEM_VERSION) { p->status = RD3K_SS_BAD_VERSION; return kIOReturnSuccess; }
+    if (p->version != RD3K_SURFGEM_VERSION) {
+        p->status = RD3K_SS_BAD_VERSION; rd3AccelSurfGemLog(p, "the core kext speaks another version", nullptr, 0);
+        return kIOReturnSuccess;
+    }
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     IOService *core = rd3AccelCore();
-    if (!task || !a || !core) { p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
-    if (!gNVSVRoot) {
-        OSDictionary *m = IOService::serviceMatching("IOSurfaceRoot");
-        if (m) { gNVSVRoot = IOService::waitForMatchingService(m, 5ULL * 1000 * 1000 * 1000); m->release(); }
-        if (!gNVSVRoot) { p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
+    if (!task || !a || !core) {
+        p->status = RD3K_SS_OFF; rd3AccelSurfGemLog(p, !task ? "no task" : !a ? "accelerator not started" : "no core kext", nullptr, 0);
+        return kIOReturnSuccess;
     }
-    void *surf = _ZN13IOSurfaceRoot13lookupSurfaceEjP4task(gNVSVRoot, p->surfaceID, task);
-    if (!surf) { p->status = RD3K_SS_NO_SURFACE; gNVSVGemRefused++; return kIOReturnSuccess; }
-    if (!rd3FamLock(a, false)) { ((OSObject *)surf)->release(); p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
+    void *root = rd3AccelSurfaceRoot();
+    if (!root) { p->status = RD3K_SS_OFF; rd3AccelSurfGemLog(p, "no IOSurfaceRoot", nullptr, 0); return kIOReturnSuccess; }
+    void *surf = _ZN13IOSurfaceRoot13lookupSurfaceEjP4task(root, p->surfaceID, task);
+    if (!surf) { p->status = RD3K_SS_NO_SURFACE; rd3AccelSurfGemLog(p, "no such surface for this task", nullptr, 0); return kIOReturnSuccess; }
+    if (!rd3FamLock(a, false)) {
+        ((OSObject *)surf)->release();
+        p->status = RD3K_SS_OFF; rd3AccelSurfGemLog(p, "the family lock is gone (accelerator stopping)", nullptr, 0);
+        return kIOReturnSuccess;
+    }
     void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, p->plane);
     OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
     RD3Resource *res = OSDynamicCast(RD3Resource, ctx);
     RD3VidMemory *vm = res ? rd3res_vidmem(res) : nullptr;
+    const char *why = nullptr;
+    IOReturn rr = kIOReturnSuccess;
     if (vm && !vm->fRmHandle && !vm->fScanout) _ZN16IOAccelVidMemory4wireEv(vm);
-    if (!cache || !res) p->status = RD3K_SS_NO_CACHE;
-    else if (!vm || !vm->fRmHandle || !vm->fBytes || vm->fScanout) p->status = RD3K_SS_NO_VRAM;
+    if (!cache || !res) { p->status = RD3K_SS_NO_CACHE; why = !cache ? "no device cache (never used on this GPU)" : "no resource in its cache"; }
+    else if (!vm) { p->status = RD3K_SS_NO_VRAM; why = "the resource has no vidmem"; }
+    else if (vm->fScanout) { p->status = RD3K_SS_NO_VRAM; why = "a scanout buffer"; }
+    else if (!vm->fRmHandle || !vm->fBytes) { p->status = RD3K_SS_NO_VRAM; why = "its vidmem did not wire"; }
     else {
         const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_REF);
-        IOReturn rr = sym ? core->callPlatformFunction(sym, false, vm->fRmHandle, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
+        rr = sym ? core->callPlatformFunction(sym, false, vm->fRmHandle, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
         if (sym) sym->release();
         if (rr == kIOReturnSuccess) { p->status = 0; p->kapiMemory = vm->fRmHandle; p->bytes = vm->fBytes; }
-        else p->status = RD3K_SS_NO_VRAM;
+        else { p->status = RD3K_SS_NO_VRAM; why = "the core kext refused the reference (allocation unknown or freed)"; }
     }
-    if (p->status == 0) gNVSVGemOk++; else gNVSVGemRefused++;
-    if (gNVSVGemOk + gNVSVGemRefused <= 8 || ((gNVSVGemOk + gNVSVGemRefused) & 1023) == 0)
-        ALOG("surfgem: surface %u plane %u -> vidmem %p (%llu B) status %#x (ok %u, refused %u)", p->surfaceID, p->plane,
-             vm, vm ? vm->fBytes : 0ull, p->status, gNVSVGemOk, gNVSVGemRefused);
+    rd3AccelSurfGemLog(p, why ? why : "?", vm, vm ? vm->fBytes : 0ull);
+    if (rr != kIOReturnSuccess) ALOG("surfgem: rdna3RefVram -> %#x", rr);
     if (cache) ((OSObject *)cache)->release();
     rd3FamUnlock(a);
     ((OSObject *)surf)->release();

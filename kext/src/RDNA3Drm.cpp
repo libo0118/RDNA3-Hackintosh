@@ -18,6 +18,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
+#include <sys/random.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IODMACommand.h>
 #include <pexpert/pexpert.h>
@@ -641,9 +642,14 @@ void RDNA3Accel::drmRingReady(uint32_t ip, uint32_t mask)
 /* BO export tokens (RD_NR_XNU_BO_EXPORT): libkern's random() (seeded
  * from the kernel's entropy at boot) mixed with the timebase - only KPI
  * symbols, so the kext keeps loading on every macOS */
+/* PRIME export tokens are capabilities: the kernel's CSPRNG (yarrow /
+ * Fortuna behind read_random), not random(), whose state a client could
+ * recover from its own tokens (ECC security review) */
 static uint64_t drmRandom64(void *)
 {
-    return (((uint64_t)random() << 32) | (uint32_t)random()) ^ (mach_absolute_time() * 0x9E3779B97F4A7C15ull);
+    uint64_t v = 0;
+    read_random(&v, sizeof(v));
+    return v;
 }
 
 /* DRM_AMDGPU_SCHED and context priorities above NORMAL: Linux lets the
@@ -834,6 +840,7 @@ void RDNA3Accel::drmFree()
     OSSafeReleaseNULL(fVramMap);
     OSSafeReleaseNULL(fVramDev);
     OSSafeReleaseNULL(fAccelSvc);
+    OSSafeReleaseNULL(fAccelSsSym);
     OSSafeReleaseNULL(fDoorbellDev);
     if (fVbiosCopy)
         IOFree(fVbiosCopy, fVbiosCopyLen);
@@ -881,6 +888,63 @@ int RDNA3Accel::drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t si
     return r;
 }
 
+/* A CPU mapping of a VRAM or doorbell BO holds the BO until it is
+ * unmapped: the IOMemoryMap keeps this descriptor, and the range goes back
+ * to the heap only when the descriptor is freed. Before, a client could
+ * close the BO with the mapping still in place and then read and write
+ * whatever the range was handed to next (another process's windows; ECC
+ * security review of A3, which also lets it pick the range). GTT BOs are
+ * IOBufferMemoryDescriptors the map retains itself. */
+class RDNA3BoMemory : public IOSubMemoryDescriptor {
+    OSDeclareDefaultStructors(RDNA3BoMemory)
+public:
+    static RDNA3BoMemory *withBo(RDNA3Accel *a, IOMemoryDescriptor *of, rdna3_bo *bo);
+protected:
+    virtual void free() override;
+private:
+    RDNA3Accel *fAccel = nullptr;
+    rdna3_bo   *fBo = nullptr;
+};
+OSDefineMetaClassAndStructors(RDNA3BoMemory, IOSubMemoryDescriptor)
+
+/* fDrmLock held */
+RDNA3BoMemory *RDNA3BoMemory::withBo(RDNA3Accel *a, IOMemoryDescriptor *of, rdna3_bo *bo)
+{
+    RDNA3BoMemory *m = OSTypeAlloc(RDNA3BoMemory);
+    if (!m)
+        return nullptr;
+    if (!m->initSubRange(of, (IOByteCount)bo->vram_offset, (IOByteCount)bo->size, kIODirectionInOut)) {
+        m->release();
+        return nullptr;
+    }
+    a->retain();
+    m->fAccel = a;
+    rdna3_drm_bo_get(bo);
+    m->fBo = bo;
+    return m;
+}
+
+/* never with fDrmLock held: drmMemoryForOffset hands the descriptor out
+ * after unlocking, and the map's last release comes from the client */
+void RDNA3BoMemory::free()
+{
+    if (fBo && fAccel)
+        fAccel->drmBoRelease(fBo);
+    fBo = nullptr;
+    OSSafeReleaseNULL(fAccel);
+    IOSubMemoryDescriptor::free();
+}
+
+void RDNA3Accel::drmBoRelease(rdna3_bo *bo)
+{
+    if (!fDrmLock)
+        return;
+    IOLockLock(fDrmLock);
+    if (fDrm)   /* after drmFree the device's BOs are gone with it */
+        rdna3_drm_bo_put(fDrm, bo);
+    IOLockUnlock(fDrmLock);
+}
+
 IOMemoryDescriptor *RDNA3Accel::drmMemoryForOffset(rdna3_drm_file *f, uint64_t off,
                                                    IOOptionBits *options)
 {
@@ -892,8 +956,7 @@ IOMemoryDescriptor *RDNA3Accel::drmMemoryForOffset(rdna3_drm_file *f, uint64_t o
     if (bo && bo->placement == AMDGPU_GEM_DOMAIN_DOORBELL) {
         /* a user queue's doorbell page in BAR2, uncached */
         if (fDoorbellDev && bo->vram_offset + bo->size <= fDoorbellDev->getLength()) {
-            md = IOSubMemoryDescriptor::withSubRange(fDoorbellDev, bo->vram_offset, bo->size,
-                                                     kIODirectionInOut);
+            md = RDNA3BoMemory::withBo(this, fDoorbellDev, bo);
             *options = kIOMapInhibitCache;
         }
     } else if (bo && bo->placement != AMDGPU_GEM_DOMAIN_VRAM && bo->backing) {
@@ -901,8 +964,7 @@ IOMemoryDescriptor *RDNA3Accel::drmMemoryForOffset(rdna3_drm_file *f, uint64_t o
         md->retain();
         *options = 0;
     } else if (bo && fVramDev && bo->vram_offset + bo->size <= fVramDev->getLength()) {
-        md = IOSubMemoryDescriptor::withSubRange(fVramDev, bo->vram_offset, bo->size,
-                                                 kIODirectionInOut);
+        md = RDNA3BoMemory::withBo(this, fVramDev, bo);
         *options = kIOMapWriteCombineCache;
     } else if (bo && bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
         /* outside the BAR: the client's map fails (its driver says

@@ -40,6 +40,7 @@ public:
     enum { kMaxPayload = 4096 };
 
     virtual bool initWithTask(task_t owningTask, void *securityID, UInt32 type) override;
+    virtual void free() override;
     virtual bool start(IOService *provider) override;
     virtual void stop(IOService *provider) override;
     virtual IOReturn clientClose() override;
@@ -54,6 +55,11 @@ public:
 
 private:
     IOReturn        pmMethod(IOExternalMethodArguments *args);
+    IOReturn        ioctlMethod(IOExternalMethodArguments *args);
+    bool            useBegin();
+    void            useEnd();
+    IOLock         *fUseLock = nullptr;
+    uint32_t        fUsers = 0;    /* ioctls / maps in progress, under fUseLock */
     RDNA3Accel     *fAccel = nullptr;
     RDNA3Accel     *fOwner = nullptr;
     task_t          fTask = nullptr;

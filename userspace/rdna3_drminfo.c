@@ -30,6 +30,14 @@
  *                              what reaches each panel. Nothing else runs.
  *   rdna3_drminfo --scanout-hires DIR  the same, 1280 wide (an app's
  *                              stale regions and text, card run 54)
+ *   rdna3_drminfo --surface-xproc  (macOS, rdna3accel=1) RD_NR_XNU_SURFACE_BO
+ *                              must refuse another process's (non-global)
+ *                              IOSurface with ENOENT: only IOSurfaceRoot's
+ *                              lookup in the caller's task stands between a
+ *                              client and WindowServer's surfaces (ECC
+ *                              security review of A3). Its own surface:
+ *                              a BO, or ENODEV while the accelerator never
+ *                              drew it. Nothing else runs.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -43,6 +51,113 @@
 #include "rdna3_drm.h"
 
 #define IOCTL(fd, nr, arg) drm_xnu_ioctl_nr((fd), (nr), &(arg), sizeof(arg))
+
+#ifdef __APPLE__
+#include <errno.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOSurface/IOSurface.h>
+extern char **environ;
+
+static IOSurfaceRef make_surface(void)
+{
+    int w = 256, h = 256, bpe = 4;
+    CFMutableDictionaryRef d = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+                                                         &kCFTypeDictionaryValueCallBacks);
+    CFNumberRef nw = CFNumberCreate(NULL, kCFNumberIntType, &w), nh = CFNumberCreate(NULL, kCFNumberIntType, &h),
+                nb = CFNumberCreate(NULL, kCFNumberIntType, &bpe);
+    CFDictionarySetValue(d, kIOSurfaceWidth, nw);
+    CFDictionarySetValue(d, kIOSurfaceHeight, nh);
+    CFDictionarySetValue(d, kIOSurfaceBytesPerElement, nb);
+    IOSurfaceRef s = IOSurfaceCreate(d);
+    CFRelease(nw); CFRelease(nh); CFRelease(nb); CFRelease(d);
+    return s;
+}
+
+/* the other process: a private surface, its ID on stdout, held until stdin closes */
+static int surface_hold(void)
+{
+    IOSurfaceRef s = make_surface();
+    char c;
+    if (!s)
+        return 1;
+    printf("%u\n", IOSurfaceGetID(s));
+    fflush(stdout);
+    while (read(0, &c, 1) > 0)
+        ;
+    CFRelease(s);
+    return 0;
+}
+
+static int surface_import(int fd, uint32_t id, uint32_t *handle)
+{
+    struct rd_xnu_surface_bo b;
+    memset(&b, 0, sizeof(b));
+    b.op = RD_XNU_SURFACE_BO_IMPORT;
+    b.surface_id = id;
+    errno = 0;
+    if (IOCTL(fd, RD_NR_XNU_SURFACE_BO, b))
+        return errno ? errno : EIO;
+    *handle = b.handle;
+    return 0;
+}
+
+static int surface_xproc(int fd, const char *self)
+{
+    int in[2], out[2], st = 0, e_other, e_own, ok;
+    char line[32] = { 0 };
+    char *args[] = { (char *)self, "--surface-hold", NULL };
+    posix_spawn_file_actions_t fa;
+    pid_t pid;
+    uint32_t other = 0, h = 0;
+    IOSurfaceRef mine;
+    if (pipe(in) || pipe(out))
+        return 1;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, in[0], 0);
+    posix_spawn_file_actions_adddup2(&fa, out[1], 1);
+    posix_spawn_file_actions_addclose(&fa, in[1]);
+    posix_spawn_file_actions_addclose(&fa, out[0]);
+    if (posix_spawn(&pid, self, &fa, NULL, args, environ)) {
+        perror("posix_spawn");
+        return 1;
+    }
+    posix_spawn_file_actions_destroy(&fa);
+    close(in[0]);
+    close(out[1]);
+    if (read(out[0], line, sizeof(line) - 1) > 0)
+        other = (uint32_t)strtoul(line, NULL, 10);
+    e_other = other ? surface_import(fd, other, &h) : -1;
+    if (!e_other) {   /* must not happen: drop the BO before saying so */
+        struct drm_gem_close cl = { h, 0 };
+        IOCTL(fd, RD_NR_GEM_CLOSE, cl);
+    }
+    mine = make_surface();
+    h = 0;
+    e_own = mine ? surface_import(fd, IOSurfaceGetID(mine), &h) : -1;
+    if (!e_own) {
+        struct drm_gem_close cl = { h, 0 };
+        IOCTL(fd, RD_NR_GEM_CLOSE, cl);
+    }
+    if (mine)
+        CFRelease(mine);
+    close(in[1]);
+    close(out[0]);
+    waitpid(pid, &st, 0);
+    if (e_other == EINVAL || e_own == EINVAL || e_other == ENXIO) {
+        printf("SURFXPROC: SKIP - the kext answers %s (no surface BOs, or the accelerator is not up)\n",
+               strerror(e_other == -1 ? e_own : e_other));
+        return 0;
+    }
+    ok = other && e_other == ENOENT && (e_own == 0 || e_own == ENODEV);
+    printf("SURFXPROC: %s - another process's surface %u: %s; this process's own: %s\n",
+           ok ? "PASS" : "FAIL", other,
+           !other ? "the helper made none" : !e_other ? "*** A BO WAS GIVEN ***" : strerror(e_other),
+           e_own < 0 ? "no surface" : !e_own ? "a BO" : strerror(e_own));
+    return ok ? 0 : 1;
+}
+#endif
 
 static int job_test(int fd, int gfx, int hang)
 {
@@ -684,6 +799,10 @@ int main(int argc, char **argv)
     char name[32] = {0};
     int fd, fails = 0;
 
+#ifdef __APPLE__
+    if (argc > 1 && !strcmp(argv[1], "--surface-hold"))
+        return surface_hold();
+#endif
     fd = drm_xnu_open(DRM_XNU_RENDER_NODE, 0);
     if (fd < 0) {
         perror("open RDNA3Accel");
@@ -694,6 +813,13 @@ int main(int argc, char **argv)
     v.name_len = sizeof(name) - 1;
     if (IOCTL(fd, RD_NR_VERSION, v)) { perror("DRM_IOCTL_VERSION"); return 1; }
     printf("driver %s %d.%d.%d\n", name, v.version_major, v.version_minor, v.version_patchlevel);
+#ifdef __APPLE__
+    if (argc > 1 && !strcmp(argv[1], "--surface-xproc")) {
+        fails = surface_xproc(fd, argv[0]);
+        drm_xnu_close(fd);
+        return fails;
+    }
+#endif
     if (argc > 1 && (!strcmp(argv[1], "--scanout") || !strcmp(argv[1], "--scanout-hires"))) {
         fails = scanout_dump(fd, argc > 2 ? argv[2] : NULL,
                              strcmp(argv[1], "--scanout") ? RD_XNU_SCANOUT_HIRES : 0);

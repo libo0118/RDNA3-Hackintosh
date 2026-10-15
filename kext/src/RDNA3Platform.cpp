@@ -158,7 +158,11 @@ IOReturn RDNA3Accel::platformVramFree(RD3KVramRequest *r)
 /* fDrmLock held */
 void RDNA3Accel::platformVramPutLocked(RDNA3VramHandle *h)
 {
-    if (!h || !h->refs || --h->refs)
+    if (h && !h->refs) {   /* a put too many: a refcount bug, the range may already be someone else's */
+        LOG("VRAM: a reference dropped on a free accelerator allocation (%p) - ignored", h);
+        return;
+    }
+    if (!h || --h->refs)
         return;
     range_alloc_put(fVramHeap, h->offset, h->size);
     fAccelVramBytes -= h->size;
@@ -190,11 +194,15 @@ IOReturn RDNA3Accel::platformVramRef(void *handle)
 }
 
 /* the accelerator kext's service, for the IOSurface lookups it answers
- * (RD3ACCEL_SS_FN); it may start after the first client opens */
+ * (RD3ACCEL_SS_FN); it may start after the first client opens. fDrmLock
+ * held; the caller gets its own reference (the lock is dropped around the
+ * call, and another thread may forget an inactive service meanwhile). */
 IOService *RDNA3Accel::accelService()
 {
-    if (fAccelSvc && fAccelSvc->isInactive())   /* the accelerator kext went away or restarted */
+    if (fAccelSvc && fAccelSvc->isInactive()) {   /* the accelerator kext went away or restarted */
+        LOG("GEM: the accelerator service went inactive - looking it up again");
         OSSafeReleaseNULL(fAccelSvc);
+    }
     if (!fAccelSvc) {
         OSDictionary *m = IOService::serviceMatching("RDNA3Accelerator");
         if (m) {
@@ -202,76 +210,132 @@ IOService *RDNA3Accel::accelService()
             m->release();
         }
     }
+    if (fAccelSvc)
+        fAccelSvc->retain();
     return fAccelSvc;
 }
 
+/* the accelerator's RD3K_SS_* answer as the ioctl's errno; each cause has
+ * its own so the client (and the log) can tell them apart */
 static int surfaceStatusErrno(unsigned int st)
 {
     switch (st) {
     case 0:                   return 0;
-    case RD3K_SS_NO_SURFACE:  return -RD_ENOENT;
-    case RD3K_SS_BAD_VERSION: return -RD_EINVAL;
-    default:                  return -RD_ENODEV;   /* no vidmem yet, accelerator not up */
+    case RD3K_SS_NO_SURFACE:  return -RD_ENOENT;   /* no such surface for this task */
+    case RD3K_SS_NO_CACHE:
+    case RD3K_SS_NO_VRAM:     return -RD_ENODEV;   /* the accelerator has no VRAM for it (yet) */
+    default:                  return -RD_ENXIO;    /* accelerator off / not up / other ABI */
     }
 }
 
-/* ops.surface_bo, fDrmLock held: the accelerator takes its own family lock
- * and then ours (rdna3RefVram), so ours is dropped around the call */
+static const char *surfaceStatusName(unsigned int st)
+{
+    switch (st) {
+    case 0:                   return "ok";
+    case RD3K_SS_BAD_VERSION: return "accelerator kext of another ABI";
+    case RD3K_SS_OFF:         return "accelerator not up";
+    case RD3K_SS_NO_SURFACE:  return "no such surface for this process";
+    case RD3K_SS_NO_CACHE:    return "the accelerator never drew it";
+    case RD3K_SS_NO_VRAM:     return "no VRAM behind it";
+    case RD3K_SS_TOO_SMALL:   return "too small";
+    default:                  return "?";
+    }
+}
+
+/* the first refusals of each cause, then one in 1024 */
+static void surfaceRefusedLog(const char *what, uint32_t surfaceId, uint32_t plane, unsigned int st, IOReturn rr)
+{
+    static SInt32 gRefused[8];
+    unsigned i = st == 0 ? 0 : (st & 7u);
+    SInt32 n = OSIncrementAtomic(&gRefused[i]);
+    if (n < 6 || (n & 1023) == 0)
+        LOG("GEM: IOSurface %u plane %u %s refused: %s (status %#x, call %#x, %d of this cause)", surfaceId, plane,
+            what, rr != kIOReturnSuccess ? "the accelerator did not answer" : surfaceStatusName(st), st, rr,
+            (int)n + 1);
+}
+
+/* RD3ACCEL_SS_FN 'cmd' on the accelerator; fDrmLock held and dropped
+ * around the call (the accelerator takes its family lock, then ours).
+ * Returns the IOReturn of the call; *svc false: no accelerator service. */
+IOReturn RDNA3Accel::accelSurfaceCall(void *arg, void *fileOs, unsigned cmd, bool *svc)
+{
+    IOService *acc = accelService();
+    *svc = acc != nullptr;
+    if (!acc)
+        return kIOReturnNotAttached;
+    /* made once: the dirty mark comes every frame */
+    if (!fAccelSsSym)
+        fAccelSsSym = OSSymbol::withCString(RD3ACCEL_SS_FN);
+    const OSSymbol *sym = fAccelSsSym;
+    if (!sym) {
+        acc->release();
+        return kIOReturnNoMemory;
+    }
+    IOLockUnlock(fDrmLock);
+    IOReturn rr = acc->callPlatformFunction(sym, false, arg, fileOs, (void *)(uintptr_t)cmd, nullptr);
+    IOLockLock(fDrmLock);
+    acc->release();
+    return rr;
+}
+
+/* ops.surface_bo, fDrmLock held */
 int RDNA3Accel::drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
-    IOService *acc = a->accelService();
-    if (!acc || !fileOs)
-        return -RD_ENODEV;
-    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3ACCEL_SS_FN);
-    if (!sym)
-        return -RD_ENOMEM;
     RD3KSurfGem g;
+    bool svc;
+    if (!fileOs)
+        return -RD_ENXIO;
     bzero(&g, sizeof(g));
     g.version = RD3K_SURFGEM_VERSION;
     g.surfaceID = surfaceId;
     g.plane = plane;
     g.status = RD3K_SS_OFF;
-    IOLockUnlock(a->fDrmLock);
-    IOReturn rr = acc->callPlatformFunction(sym, false, &g, fileOs, (void *)(uintptr_t)RD3K_ESC_SURF_GEM, nullptr);
-    IOLockLock(a->fDrmLock);
-    sym->release();
-    if (rr != kIOReturnSuccess)
-        return -RD_ENODEV;
-    if (g.status || !g.kapiMemory)
+    IOReturn rr = a->accelSurfaceCall(&g, fileOs, RD3K_ESC_SURF_GEM, &svc);
+    if (!svc) {
+        static SInt32 gNoSvc;
+        if (OSIncrementAtomic(&gNoSvc) < 4)
+            LOG("GEM: IOSurface %u refused: no RDNA3Accelerator service (accelerator kext not started)", surfaceId);
+        return -RD_ENXIO;
+    }
+    if (rr != kIOReturnSuccess || g.status || !g.kapiMemory) {
+        surfaceRefusedLog("import", surfaceId, plane, g.status, rr);
+        if (rr != kIOReturnSuccess)
+            return -RD_ENXIO;
         return g.status ? surfaceStatusErrno(g.status) : -RD_ENODEV;
+    }
     RDNA3VramHandle *h = (RDNA3VramHandle *)g.kapiMemory;
     bo->vram_offset = h->offset;
     bo->size = h->size;
     bo->backing = h;   /* the reference rdna3RefVram took; drmBoFree drops it */
     static SInt32 gSurfBoLog;
-    if (OSIncrementAtomic(&gSurfBoLog) < 8)
-        LOG("GEM: IOSurface %u plane %u -> %llu KiB of the accelerator's VRAM at 0x%llx (A3)", surfaceId, plane,
-            (unsigned long long)(h->size >> 10), (unsigned long long)h->offset);
+    SInt32 n = OSIncrementAtomic(&gSurfBoLog);
+    if (n < 8 || (n & 4095) == 0)
+        LOG("GEM: IOSurface %u plane %u -> %llu KiB of the accelerator's VRAM at 0x%llx (A3, import %d)", surfaceId,
+            plane, (unsigned long long)(h->size >> 10), (unsigned long long)h->offset, (int)n + 1);
     return 0;
 }
 
-/* ops.surface_dirty: after a GPU write through such a BO */
+/* ops.surface_dirty, fDrmLock held: after a GPU write through such a BO */
 int RDNA3Accel::drmSurfaceDirty(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
-    IOService *acc = a->accelService();
-    if (!acc || !fileOs)
-        return -RD_ENODEV;
-    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3ACCEL_SS_FN);
-    if (!sym)
-        return -RD_ENOMEM;
     RD3KSurfShareEsc e;
+    bool svc;
+    if (!fileOs)
+        return -RD_ENXIO;
     bzero(&e, sizeof(e));
     e.version = RD3K_SURFSHARE_VERSION;
     e.surfaceID = surfaceId;
     e.plane = plane;
     e.status = RD3K_SS_OFF;
-    IOLockUnlock(a->fDrmLock);
-    IOReturn rr = acc->callPlatformFunction(sym, false, &e, fileOs, (void *)(uintptr_t)RD3K_ESC_SURF_DIRTY, nullptr);
-    IOLockLock(a->fDrmLock);
-    sym->release();
-    return rr != kIOReturnSuccess ? -RD_ENODEV : surfaceStatusErrno(e.status);
+    IOReturn rr = a->accelSurfaceCall(&e, fileOs, RD3K_ESC_SURF_DIRTY, &svc);
+    if (!svc || rr != kIOReturnSuccess)
+        return -RD_ENXIO;
+    /* surface 0 is the Metal plugin's probe for the ioctl: not a refusal */
+    if (e.status && surfaceId)
+        surfaceRefusedLog("dirty mark", surfaceId, plane, e.status, rr);
+    return surfaceStatusErrno(e.status);
 }
 
 IOReturn RDNA3Accel::platformGpuVa(int op, RD3KGpuVaRequest *g)

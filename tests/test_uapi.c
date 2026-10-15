@@ -30,7 +30,15 @@ static int h_bo_alloc(void *c, rdna3_bo *bo)
     live_bos++;
     return 0;
 }
-static void h_bo_free(void *c, rdna3_bo *bo) { (void)c; if (!bo->userptr && !bo->foreign) free(bo->backing); live_bos--; }
+static void h_bo_free(void *c, rdna3_bo *bo)
+{
+    (void)c;
+    if (bo->foreign && bo->backing)
+        (*(int *)bo->backing)--;
+    else if (!bo->userptr)
+        free(bo->backing);
+    live_bos--;
+}
 static int h_copyin(void *c, void *d, uint64_t u, size_t n) { (void)c; memcpy(d, (void *)(uintptr_t)u, n); return 0; }
 static int h_copyout(void *c, uint64_t u, const void *s, size_t n) { (void)c; memcpy((void *)(uintptr_t)u, s, n); return 0; }
 
@@ -52,23 +60,32 @@ static int h_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32_
 }
 /* IOSurface 7 plane 0 has 64 KiB of the accelerator's VRAM at 1 MiB;
  * surface 9 answers a bad (unaligned) range */
+/* the OS's hold on each surface's allocation, as the kext's
+ * RDNA3VramHandle refs: every BO takes one, bo_free drops it; surface 11
+ * is 100 MiB (more than half of the 256 MiB visible VRAM over two imports) */
+static int h_surf_refs[16];
 static uint32_t h_dirty_surface, h_dirty_plane;
 static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
 {
     (void)c;
-    if (os != (void *)0x7a5c || plane)
+    if ((os != (void *)0x7a5c && os != (void *)0x7a5d) || plane)
         return -RD_ENOENT;
     if (id == 9) {
         bo->vram_offset = 0x100800; bo->size = 0x10000;
     } else if (id == 7) {
         bo->vram_offset = 0x100000; bo->size = 0x10000;
+    } else if (id == 11) {
+        bo->vram_offset = 0x10000000; bo->size = 100u << 20;
     } else {
         return -RD_ENOENT;
     }
-    bo->backing = (void *)0x5afe;
+    h_surf_refs[id]++;
+    bo->backing = &h_surf_refs[id];
     live_bos++;
     return 0;
 }
+static unsigned h_foreign_seen;
+static void count_foreign(void *ctx, rdna3_bo *bo) { (void)ctx; if (bo->foreign) h_foreign_seen++; }
 static int h_surface_dirty(void *c, void *os, uint32_t id, uint32_t plane)
 {
     (void)c; (void)os;
@@ -780,7 +797,7 @@ int main(void)
         rdna3_bo *bo;
         memset(&sb, 0, sizeof(sb));
         sb.op = RD_XNU_SURFACE_BO_IMPORT; sb.surface_id = 7;
-        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENODEV);   /* no OS hook */
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOSYS);   /* no OS hook */
         dev.ops.surface_bo = h_surface_bo;
         dev.ops.surface_dirty = h_surface_dirty;
         f->os = (void *)0x7a5c;
@@ -807,26 +824,83 @@ int main(void)
         m.in.handle = sb.handle;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_GEM_MMAP), m) == 0 && m.out.addr_ptr != 0);
         CHECK(rdna3_drm_bo_by_mmap_offset(f, m.out.addr_ptr) == bo);
-        /* PRIME: the plugin exports it, RADV imports it into its own file */
+        /* no PRIME token for it: every importer goes through its own
+         * IOSurface lookup (ECC security review) */
         memset(&sh, 0, sizeof(sh));
         sh.handle = sb.handle;
-        CHECK(IOCTL(f, RD_NR_XNU_BO_EXPORT, sh) == 0 && sh.token != 0 && sh.size == 0x10000);
+        CHECK(IOCTL(f, RD_NR_XNU_BO_EXPORT, sh) == -RD_EPERM && sh.token == 0);
+        /* a CPU mapping's reference (the OS's) outlives the handle */
+        rdna3_drm_bo_get(bo);
         gc.handle = sb.handle; gc.pad = 0;
-        CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0 && live_bos == bos0 + 1);   /* the export holds it */
-        sh.handle = 0;
-        CHECK(IOCTL(f, RD_NR_XNU_BO_IMPORT, sh) == 0 && sh.handle != 0);
-        CHECK(rdna3_drm_bo_lookup(f, sh.handle) == bo);
-        gc.handle = sh.handle;
-        CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0);
+        CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0 && live_bos == bos0 + 1);
+        rdna3_drm_bo_put(&dev, bo);
+        CHECK(live_bos == bos0 && dev.vram_usage == used0);
         sb.op = RD_XNU_SURFACE_BO_DIRTY; sb.surface_id = 7; sb.plane = 0;
         CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == 0 && h_dirty_surface == 7 && h_dirty_plane == 0);
         sb.surface_id = 3;
         CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOENT);
         CHECK(strcmp(rdna3_drm_ioctl_name(RD_NR_XNU_SURFACE_BO), "XNU_SURFACE_BO") == 0);
+        /* the probe the Metal plugin sends: surface 0 reaches the OS and is
+         * not there; a plane past the last one never reaches it */
+        sb.surface_id = 0; h_dirty_surface = 99;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOENT && h_dirty_surface == 0);
+        sb.surface_id = 7; sb.plane = RD_XNU_SURFACE_MAX_PLANE + 1; h_dirty_surface = 99;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL && h_dirty_surface == 99);
+        sb.plane = 0;
+        /* every failure path gives the OS's hold back */
+        CHECK(h_surf_refs[7] == 0 && h_surf_refs[9] == 0);
+        {
+            static rdna3_drm_file file2;
+            rdna3_drm_file *f2 = &file2;
+            struct drm_amdgpu_gem_va va;
+            struct rd_xnu_surface_bo a1, a2, a3;
+            int maps0, unmaps0;
+            CHECK(rdna3_drm_file_open(&dev, f2) == 0);
+            f2->os = (void *)0x7a5d;
+            /* two processes, and one of them twice: a BO and a hold each */
+            memset(&a1, 0, sizeof(a1)); a1.op = RD_XNU_SURFACE_BO_IMPORT; a1.surface_id = 7;
+            a2 = a1; a3 = a1;
+            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, a1) == 0 && IOCTL(f2, RD_NR_XNU_SURFACE_BO, a2) == 0 &&
+                  IOCTL(f2, RD_NR_XNU_SURFACE_BO, a3) == 0);
+            CHECK(h_surf_refs[7] == 3 && a2.handle != a3.handle);
+            CHECK(rdna3_drm_bo_lookup(f, a1.handle) != rdna3_drm_bo_lookup(f2, a2.handle) &&
+                  rdna3_drm_bo_lookup(f, a1.handle)->vram_offset == rdna3_drm_bo_lookup(f2, a2.handle)->vram_offset);
+            gc.handle = a3.handle;
+            CHECK(IOCTL(f2, RD_NR_GEM_CLOSE, gc) == 0 && h_surf_refs[7] == 2);
+            /* RADV maps it in its VA like any VRAM BO; it is on the VRAM BO
+             * list (the kext's eviction skips it: the accelerator's list
+             * has the range) and a VRAM loss maps it again */
+            maps0 = vm_maps; unmaps0 = vm_unmaps;
+            memset(&va, 0, sizeof(va));
+            va.handle = a2.handle; va.operation = AMDGPU_VA_OP_MAP; va.va_address = 0x400000;
+            va.map_size = 0x10000;
+            CHECK(IOCTL(f2, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == 0 && vm_maps == maps0 + 1);
+            va.map_size = 0x20000; va.va_address = 0x600000;
+            CHECK(IOCTL(f2, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), va) == -RD_EINVAL);   /* past the surface */
+            va.map_size = 0x10000;
+            h_foreign_seen = 0;
+            rdna3_drm_device_for_each_vram_bo(&dev, count_foreign, NULL);
+            CHECK(h_foreign_seen == 2);
+            CHECK(rdna3_drm_device_vm_replay(&dev) == 0 && vm_maps == maps0 + 2);
+            vm_mapped -= 0x10000;   /* the fake tables count a replay as new pages */
+            /* the importer goes with the mapping in place: unmapped, hold dropped */
+            rdna3_drm_file_close(f2);
+            CHECK(vm_unmaps == unmaps0 + 1 && h_surf_refs[7] == 1);
+            gc.handle = a1.handle;
+            CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0 && h_surf_refs[7] == 0);
+            CHECK(live_bos == bos0 && dev.vram_usage == used0 && dev.vis_vram_usage == vis0);
+            /* one file holds at most half of the visible VRAM in surfaces */
+            a1.surface_id = 11; a1.handle = 0; a1.size = 0;
+            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, a1) == 0);
+            a2 = a1;
+            CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, a2) == -RD_ENOSPC && h_surf_refs[11] == 1);
+            gc.handle = a1.handle;
+            CHECK(IOCTL(f, RD_NR_GEM_CLOSE, gc) == 0 && h_surf_refs[11] == 0 && live_bos == bos0);
+        }
         dev.ops.surface_bo = NULL;
         dev.ops.surface_dirty = NULL;
         sb.op = RD_XNU_SURFACE_BO_DIRTY;
-        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENODEV);
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOSYS);
     }
     /* sensors and the GPUVM fault cache come from the OS */
     {

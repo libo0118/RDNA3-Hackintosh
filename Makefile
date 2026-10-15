@@ -114,6 +114,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/si
 	! $(BUILD)/rdna3_drminfo_host --dma-test --gfx-test 2>&1 | grep -q 'GEM_VA'
 	tests/test_oc_install.sh
 	tests/test_make_pkg.sh
+	tests/test_triage_a3.sh
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump
 

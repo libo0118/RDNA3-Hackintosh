@@ -13176,13 +13176,47 @@ static void run(const char *fwdir)
     free(S.vram);
 }
 
+/* amdgpu.ids names (System Information's "Chipset Model"): every Navi 3x
+ * row of libdrm's table (device 0x7440-0x749F) has its own name here */
+static void test_marketing_names(void)
+{
+    FILE *f = fopen("third_party/libdrm/data/amdgpu.ids", "r");
+    char line[256];
+    unsigned rows = 0, d;
+    int exact = -1;
+    CHECK(f != NULL);
+    while (f && fgets(line, sizeof(line), f)) {
+        unsigned dev, rev;
+        char name[160];
+        if (sscanf(line, "%x , %x , %159[^\n]", &dev, &rev, name) != 3 || dev < 0x7440 || dev > 0x749F)
+            continue;
+        if (strcmp(rdna3_marketing_name_ex((uint16_t)dev, (uint8_t)rev, &exact), name) || !exact)
+            fprintf(stderr, "marketing name %04X:%02X: \"%s\" (amdgpu.ids \"%s\")\n", dev, rev,
+                    rdna3_marketing_name((uint16_t)dev, (uint8_t)rev), name);
+        CHECK(!strcmp(rdna3_marketing_name((uint16_t)dev, (uint8_t)rev), name) && exact == 1);
+        rows++;
+    }
+    if (f)
+        fclose(f);
+    CHECK(rows >= 29);
+    /* the generic names when a revision is not in the table */
+    CHECK(!strcmp(rdna3_marketing_name_ex(0x747E, 0x01, &exact), "AMD Radeon RX 7800 / 7700 Series") && !exact);
+    CHECK(!strcmp(rdna3_marketing_name(0x744C, 0x00), "AMD Radeon RX 7900 Series"));
+    CHECK(!strcmp(rdna3_marketing_name(0x7480, 0x01), "AMD Radeon RX 7600 Series"));
+    CHECK(!strcmp(rdna3_marketing_name(0x7448, 0xC8), "AMD Radeon RX 7000 Series"));
+    CHECK(!strcmp(rdna3_marketing_name(0xFFFF, 0xFF), "AMD Radeon RX 7000 Series"));
+    for (d = 0; d < 0x10000; d++) {   /* the kext takes strlen() of it */
+        const char *n = rdna3_marketing_name((uint16_t)d, 0xC8);
+        if (!n || !n[0]) {
+            CHECK(n && n[0]);
+            break;
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
-    /* amdgpu.ids names (System Information's "Chipset Model") */
-    CHECK(!strcmp(rdna3_marketing_name(0x747E, 0xC8), "AMD Radeon RX 7800 XT"));
-    CHECK(!strcmp(rdna3_marketing_name(0x747E, 0xFF), "AMD Radeon RX 7700 XT"));
-    CHECK(!strcmp(rdna3_marketing_name(0x744C, 0xC8), "AMD Radeon RX 7900 XTX"));
-    CHECK(!strcmp(rdna3_marketing_name(0x747E, 0x01), "AMD Radeon RX 7800 / 7700 Series"));
+    test_marketing_names();
     run(NULL);
     if (argc > 1 && argv[1][0])
         run(argv[1]);

@@ -69,7 +69,7 @@ $(BUILD)/libdrm_amdgpu.dylib: $(AMD_OBJS) $(BUILD)/libdrm.dylib
 
 $(BUILD)/rdna3_drminfo: rdna3_drminfo.c $(BUILD)/libdrm.dylib
 	$(CC) -O2 -g $(ARCH) $(WARN) -I$(XNU) -I../uapi -I../common -I../third_party/amd \
-	  -o $@ $< -L$(BUILD) -ldrm -Wl,-rpath,@executable_path $(LIBS)
+	  -o $@ $< -L$(BUILD) -ldrm -Wl,-rpath,@executable_path $(LIBS) -framework IOSurface
 
 $(BUILD)/rdna3_pmctl: rdna3_pmctl.c ../common/rdna3_pmctl.h | $(BUILD)/obj
 	$(CC) -O2 -g $(ARCH) $(WARN) -I../common -o $@ $< $(LIBS)

@@ -205,8 +205,57 @@ int main(void)
         CHECK(bad >= 0 && amdgpu_bo_import(dev, amdgpu_bo_handle_type_dma_buf_fd, (uint32_t)bad, &imp) != 0);
         close(bad);
         CHECK(drm_xnu_surface_fd(0, 0, 4096) == -1 && errno == EINVAL);
+        CHECK(drm_xnu_surface_fd(0x51, 0, 0) == -1 && errno == EINVAL);
+        CHECK(drm_xnu_surface_fd(0x51, 0, UINT64_MAX) == -1 && errno == EINVAL);
         CHECK(drm_xnu_surface_dirty(0x51, 0) == 0 && lb_surface_dirty_count == 1);
         CHECK(drm_xnu_surface_dirty(0x52, 0) == -1 && errno == ENOENT);
+        /* the Metal plugin's probe: surface 0 never exists (the kext knows
+         * the ioctl); an unknown ioctl answers EINVAL (what an older kext
+         * gives the probe) */
+        CHECK(drm_xnu_surface_dirty(0, 0) == -1 && errno == ENOENT);
+        {
+            uint8_t junk[32] = { 0 };
+            CHECK(drm_xnu_ioctl_nr(fd, 0xF9, junk, sizeof(junk)) == -1 && errno == EINVAL);
+        }
+        CHECK(drm_xnu_surface_dirty(0x51, 0) == 0 && lb_surface_dirty_count == 2);   /* still asked */
+    }
+    /* malformed surface files: refused, nothing imported, the reason kept */
+    {
+        static const struct { const char *magic; uint32_t version, id, plane; uint64_t size; size_t len; int err; } bad[] = {
+            { "RD3SURF1", 2, 0x51, 0, 4096, 32, EBADF },   /* another version */
+            { "RD3SURF2", 1, 0x51, 0, 4096, 32, EBADF },   /* another magic: not a dma-buf either */
+            { "RD3SURF1", 1, 0x51, 0, 4096, 31, EBADF },   /* short: read as a (bad) dma-buf */
+            { "RD3SURF1", 1, 0, 0, 4096, 32, EINVAL },     /* surface 0 */
+            { "RD3SURF1", 1, 0x51, 16, 4096, 32, EINVAL }, /* past the last plane */
+            { "RD3SURF1", 1, 0x51, 0, 1u << 20, 32, ENOSPC },
+            { "RD3SURF1", 1, 0x77, 0, 4096, 32, ENOENT },  /* not this process's */
+        };
+        unsigned i;
+        for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            char path[] = "/tmp/rdna3-test-surf.XXXXXX";
+            uint8_t b[32];
+            uint32_t h = 0;
+            int tf = mkstemp(path), r;
+            CHECK(tf >= 0);
+            if (tf < 0)
+                continue;
+            unlink(path);
+            memset(b, 0, sizeof(b));
+            memcpy(b, bad[i].magic, 8);
+            memcpy(b + 8, &bad[i].version, 4);
+            memcpy(b + 12, &bad[i].id, 4);
+            memcpy(b + 16, &bad[i].plane, 4);
+            memcpy(b + 24, &bad[i].size, 8);
+            CHECK(write(tf, b, bad[i].len) == (ssize_t)bad[i].len);
+            errno = 0;
+            r = drmPrimeFDToHandle(fd, tf, &h);
+            if (r == 0 || errno != bad[i].err)
+                fprintf(stderr, "surface file %u: r %d errno %d (want %d)\n", i, r, errno, bad[i].err);
+            CHECK(r != 0 && errno == bad[i].err && h == 0);
+            if (bad[i].len == 32 && bad[i].version == 1 && !memcmp(bad[i].magic, "RD3SURF1", 8))
+                CHECK(drm_xnu_surface_last_error() == bad[i].err);
+            close(tf);
+        }
     }
     /* CS on the (software) DMA ring through libdrm_amdgpu, like RADV's
      * winsys: raw submit with chunks, then the fence query */

@@ -17,7 +17,40 @@ bool RDNA3UserClient::initWithTask(task_t owningTask, void *securityID, UInt32 t
     if (!super::initWithTask(owningTask, securityID, type))
         return false;
     fTask = owningTask;
-    return true;
+    fUseLock = IOLockAlloc();
+    return fUseLock != nullptr;
+}
+
+void RDNA3UserClient::free()
+{
+    if (fUseLock)
+        IOLockFree(fUseLock);
+    fUseLock = nullptr;
+    super::free();
+}
+
+/* the DRM file for one call: only from the task that opened the client
+ * (its IOSurfaces and pages are what the file stands for; a connection
+ * port handed to another process must not act as the opener), and not
+ * while closeFile tears it down */
+bool RDNA3UserClient::useBegin()
+{
+    if (current_task() != fTask)
+        return false;
+    IOLockLock(fUseLock);
+    bool ok = fOpen != 0;
+    if (ok)
+        fUsers++;
+    IOLockUnlock(fUseLock);
+    return ok;
+}
+
+void RDNA3UserClient::useEnd()
+{
+    IOLockLock(fUseLock);
+    if (--fUsers == 0)
+        IOLockWakeup(fUseLock, &fUsers, false);
+    IOLockUnlock(fUseLock);
 }
 
 bool RDNA3UserClient::start(IOService *provider)
@@ -47,6 +80,12 @@ void RDNA3UserClient::closeFile()
 {
     if (!OSCompareAndSwap(1, 0, &fOpen))
         return;
+    /* an ioctl or map of this client still running (ECC security review:
+     * it read fFile while another thread freed it) finishes first */
+    IOLockLock(fUseLock);
+    while (fUsers)
+        IOLockSleep(fUseLock, &fUsers, THREAD_UNINT);
+    IOLockUnlock(fUseLock);
     fAccel->drmClose(fFile);
     IOFree(fFile, sizeof(*fFile));
     fFile = nullptr;
@@ -75,6 +114,15 @@ IOReturn RDNA3UserClient::externalMethod(uint32_t selector, IOExternalMethodArgu
         return kIOReturnBadArgument;
     if (args->scalarInputCount < 1 || args->scalarOutputCount < 1)
         return kIOReturnBadArgument;
+    if (!useBegin())
+        return current_task() != fTask ? kIOReturnNotPrivileged : kIOReturnNotOpen;
+    IOReturn r = ioctlMethod(args);
+    useEnd();
+    return r;
+}
+
+IOReturn RDNA3UserClient::ioctlMethod(IOExternalMethodArguments *args)
+{
 
     uint32_t nr = (uint32_t)args->scalarInput[0];
     uint32_t inSize = args->structureInputSize;
@@ -105,10 +153,11 @@ IOReturn RDNA3UserClient::externalMethod(uint32_t selector, IOExternalMethodArgu
 IOReturn RDNA3UserClient::clientMemoryForType(UInt32 type, IOOptionBits *options,
                                               IOMemoryDescriptor **memory)
 {
-    if (!fOpen)
-        return kIOReturnNotOpen;
+    if (!useBegin())
+        return current_task() != fTask ? kIOReturnNotPrivileged : kIOReturnNotOpen;
     uint64_t off = (uint64_t)type << 12;
     IOMemoryDescriptor *md = fAccel->drmMemoryForOffset(fFile, off, options);
+    useEnd();
     if (!md)
         return kIOReturnNotFound;
     *memory = md;   /* retained; IOUserClient releases it */

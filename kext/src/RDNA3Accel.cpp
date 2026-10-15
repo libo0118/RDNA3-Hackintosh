@@ -370,25 +370,26 @@ void RDNA3Accel::publishGpuIdentity(uint32_t mb)
 {
     const uint16_t dev = fPci->configRead16(kIOPCIConfigDeviceID);
     const uint8_t rev = fPci->configRead8(kIOPCIConfigRevisionID);
-    const char *name = rdna3_marketing_name(dev, rev);
+    int exact = 0;
+    const char *name = rdna3_marketing_name_ex(dev, rev, &exact);
+    const char *model = "kept from DeviceProperties";
     if (!fPci->getProperty("model")) {
         OSData *d = OSData::withBytes(name, (unsigned)strlen(name) + 1);
-        if (d) {
-            fPci->setProperty("model", d);
-            d->release();
-        }
+        model = d && fPci->setProperty("model", d) ? name : "NOT SET (no memory)";
+        OSSafeReleaseNULL(d);
     }
     const uint64_t bytes = (uint64_t)mb << 20;
     OSData *t = OSData::withBytes(&bytes, sizeof(bytes));
-    if (t) {
-        fPci->setProperty("VRAM,totalsize", t);
+    bool sized = t && fPci->setProperty("VRAM,totalsize", t);
+    if (t)
         setProperty("VRAM,totalsize", t);
-        t->release();
-    }
-    fPci->setProperty("VRAM,totalMB", mb, 32);
+    OSSafeReleaseNULL(t);
+    sized = fPci->setProperty("VRAM,totalMB", mb, 32) && sized;
     setProperty("VRAM,totalMB", mb, 32);
     setProperty("RDNA3,Model", name);
-    LOG("identity: %s, %u MiB of VRAM (System Information: Chipset Model, VRAM (Total))", name, mb);
+    LOG("identity: %04x:%02x -> \"%s\"%s; model %s; VRAM %u MiB %s (System Information: Chipset Model, VRAM (Total))",
+        dev, rev, name, exact ? "" : " (generic: this revision is not in amdgpu.ids' Navi 3x rows)", model, mb,
+        sized ? "published" : "NOT fully published (no memory)");
 }
 
 /* ---------------------------- level 2 ----------------------------- */

@@ -350,6 +350,16 @@ static void bo_put(rdna3_drm_file *f, rdna3_bo *bo)
     bo_put_dev(f->dev, bo);
 }
 
+void rdna3_drm_bo_get(rdna3_bo *bo)
+{
+    bo->refcnt++;
+}
+
+void rdna3_drm_bo_put(rdna3_drm_device *dev, rdna3_bo *bo)
+{
+    bo_put_dev(dev, bo);
+}
+
 static void bo_list_release(rdna3_drm_file *f, uint32_t i)
 {
     if (f->bo_lists[i].gds)
@@ -636,7 +646,9 @@ static int bo_export(rdna3_drm_file *f, struct rd_xnu_bo_share *x)
     uint32_t i, free_slot = RD_MAX_EXPORTS, mine = 0;
     if (!bo || bo_onchip(bo))
         return -RD_EINVAL;
-    if (bo->userptr)
+    /* a surface's VRAM is reached through RD_NR_XNU_SURFACE_BO, which asks
+     * the IOSurface rules of each importer; a token would skip them */
+    if (bo->userptr || bo->foreign)
         return -RD_EPERM;
     for (i = 0; i < RD_MAX_EXPORTS; i++) {
         if (dev->exports[i].bo == bo) {
@@ -2024,6 +2036,18 @@ static int gem_userptr(rdna3_drm_file *f, struct drm_amdgpu_gem_userptr *a)
     return 0;
 }
 
+/* the accelerator VRAM a file pins through surface BOs (they cannot be
+ * exported, so only the importing file has handles on them) */
+static uint64_t file_foreign_bytes(const rdna3_drm_file *f)
+{
+    uint64_t n = 0;
+    uint32_t i;
+    for (i = 0; i < RD_MAX_HANDLES; i++)
+        if (f->bos[i] && f->bos[i]->foreign)
+            n += f->bos[i]->size;
+    return n;
+}
+
 /* RD_NR_XNU_SURFACE_BO: a handle on an IOSurface's VRAM, or its dirty mark */
 static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s)
 {
@@ -2036,13 +2060,13 @@ static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s)
         return -RD_EINVAL;
     if (s->op == RD_XNU_SURFACE_BO_DIRTY) {
         if (!dev->ops.surface_dirty)
-            return -RD_ENODEV;
+            return -RD_ENOSYS;
         return dev->ops.surface_dirty(dev->ops.ctx, f->os, s->surface_id, s->plane);
     }
     if (s->op != RD_XNU_SURFACE_BO_IMPORT || !s->surface_id)
         return -RD_EINVAL;
     if (!dev->ops.surface_bo)
-        return -RD_ENODEV;
+        return -RD_ENOSYS;
     bo = (rdna3_bo *)dev->ops.zalloc(dev->ops.ctx, sizeof(*bo));
     if (!bo)
         return -RD_ENOMEM;
@@ -2065,6 +2089,13 @@ static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s)
         return -RD_EINVAL;
     }
     if (s->size > bo->size) {   /* the GPU would address past the surface */
+        bo_put(f, bo);
+        return -RD_ENOSPC;
+    }
+    /* a BO keeps the surface's VRAM after the surface is gone: one client
+     * may pin at most half of the CPU-visible VRAM the accelerator draws
+     * from (ECC security review: a loop of imports starved WindowServer) */
+    if (file_foreign_bytes(f) + bo->size > RD_SURFACE_BO_FILE_MAX(dev)) {
         bo_put(f, bo);
         return -RD_ENOSPC;
     }
@@ -3023,6 +3054,10 @@ static int mes_userq_map_gtt_bo_to_gart(rdna3_drm_device *dev, rdna3_bo *bo, uin
     int r;
     if (bo->placement != AMDGPU_GEM_DOMAIN_VRAM && bo->placement != AMDGPU_GEM_DOMAIN_GTT)
         return -RD_EINVAL;
+    /* GART binds the page writable: never a client's read-only pages (as
+     * va_map_hw keeps them read-only; ECC security review) */
+    if (bo->userptr_ro)
+        return -RD_EPERM;
     r = dev->ops.bo_gpu_addr(dev->ops.ctx, bo, mc);
     if (r)
         return r;

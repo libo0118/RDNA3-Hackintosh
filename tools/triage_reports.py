@@ -355,13 +355,24 @@ def report(path, show_all):
         # A3: IOSurface textures in the accelerator's VRAM (no per-process
         # copies); informational until it has run on the card
         sv = surfvram
-        if sv:
-            gem = len(re.findall(r"GEM: IOSurface \d+", sv))
-            live = "live in the surface's family VRAM" in sv
-            print("   %s %-20s %s" % ("INFO", "IOSurface VRAM (A3)",
-                                     "surfaces %s, %d kernel BO(s) logged%s" %
-                                     ("shared" if live else "private per process", gem,
-                                      "" if gem or not live else " -- imports refused? 29-surface-vram.txt")))
+        if not sv.strip():
+            print("   INFO %-20s no 29-surface-vram.txt (a collector before A3)" % "IOSurface VRAM (A3)")
+        else:
+            live = re.findall(r"item 7: IOSurface textures (live in the surface's family VRAM|private per process)[^\n]*", sv)
+            gem = len(re.findall(r"GEM: IOSurface \d+ plane \d+ ->", sv))
+            refused = re.findall(r"(?:surfgem|GEM: IOSurface \d+ plane \d+ \w+(?: \w+)?) refused: ([^(\n]*)", sv)
+            imp_ref = re.findall(r"family VRAM import refused \(VkResult (-?\d+), kernel errno (\d+)", sv)
+            shared = sum(1 for l in live if l.startswith("live"))
+            state = ("%d process(es) shared, %d private" % (shared, len(live) - shared)) if live else "no plugin line"
+            warn = (shared and not gem) or refused or imp_ref
+            print("   %s %-20s %s; %d kernel BO(s) logged%s" % ("WARN" if warn else "INFO", "IOSurface VRAM (A3)", state, gem,
+                  "" if not warn else " -- see 29-surface-vram.txt"))
+            for why in sorted(set(r.strip() for r in refused))[:4]:
+                print("     kernel refused: " + why[:120])
+            for vr, ke in sorted(set(imp_ref))[:4]:
+                print("     plugin import refused: VkResult %s, kernel errno %s" % (vr, ke))
+            for l in sorted(set(re.findall(r"item 7: kext surface BOs probe[^\n]*", sv)))[:2]:
+                print("     " + l[:150])
         failed = failed or not same or not up or len(pids) > 2
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
@@ -561,7 +572,8 @@ def summary(path, serial=None):
             m.group(2)[:28], m.group(3), m.group(4),
             ", GPM_STAT %s (pwr %s clk %s ls %s)" % g.groups() if g else "")))
     for pat, name in ((r"^MODES: .*$", "scaled modes"), (r"^GAMMA: .*$", "gamma"), (r"^SOAK: .*$", "soak"),
-                      (r"^HANG TEST: .*$", "hang test"), (r"^VCN TEST: .*$", "video (VCN)")):
+                      (r"^HANG TEST: .*$", "hang test"), (r"^VCN TEST: .*$", "video (VCN)"),
+                      (r"^SURFXPROC: .*$", "IOSurface isolation")):
         m = re.search(pat, txt, re.M)
         if m:
             out.append((name, m.group(0)[:100]))
@@ -692,6 +704,11 @@ def main():
                 print("   " + m.group(0)[:150])
                 for l in re.findall(r"^== gamma pipe .*$", txt, re.M):
                     print("     " + l[3:170])
+                failed = failed or m.group(1) == "FAIL"
+            # A3: another process's IOSurface refused (rdna3_drminfo --surface-xproc)
+            m = re.search(r"^SURFXPROC: (\w+).*$", txt, re.M)
+            if m:
+                print("   " + m.group(0)[:160])
                 failed = failed or m.group(1) == "FAIL"
             m = re.search(r"^SOAK: (\d+) rounds, (\d+) failed", txt, re.M)
             if m:

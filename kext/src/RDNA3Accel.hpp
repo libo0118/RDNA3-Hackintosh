@@ -119,6 +119,7 @@ public:
     int   drmOpen(rdna3_drm_file *f);
     void  drmClose(rdna3_drm_file *f);
     int   drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size);
+    void drmBoRelease(rdna3_bo *bo);   /* a CPU mapping's reference (RDNA3BoMemory) */
     IOMemoryDescriptor *drmMemoryForOffset(rdna3_drm_file *f, uint64_t off,
                                            IOOptionBits *options);
 
@@ -264,8 +265,10 @@ private:
     /* RD_NR_XNU_SURFACE_BO: a GEM BO holds an accelerator allocation (A3) */
     IOReturn      platformVramRef(void *handle);
     void          platformVramPutLocked(struct RDNA3VramHandle *h);
-    IOService    *accelService();          /* fDrmLock held */
+    IOService    *accelService();          /* fDrmLock held; returns a reference */
+    IOReturn      accelSurfaceCall(void *arg, void *fileOs, unsigned cmd, bool *svc);
     IOService    *fAccelSvc = nullptr;     /* RDNA3Accelerator, retained once found */
+    const OSSymbol *fAccelSsSym = nullptr; /* RD3ACCEL_SS_FN */
     static int    drmSurfaceBo(void *ctx, void *fileOs, rdna3_bo *bo, uint32_t surfaceId, uint32_t plane);
     static int    drmSurfaceDirty(void *ctx, void *fileOs, uint32_t surfaceId, uint32_t plane);
     IOReturn      platformGpuVa(int op, struct RD3KGpuVaRequest *g);

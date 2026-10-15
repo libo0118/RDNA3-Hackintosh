@@ -72,6 +72,7 @@ struct xnu_prime_handle { uint32_t handle, flags; int32_t fd; };
 struct xnu_surfbuf { char magic[8]; uint32_t version, surface_id, plane, pad; uint64_t size; };
 struct xnu_surface_bo { uint32_t op, surface_id, plane, handle; uint64_t size; };
 #define XNU_NR_SURFACE_BO            0xF5   /* RD_NR_XNU_SURFACE_BO */
+static int rd_errno_to_host(int e);
 #define XNU_SURFACE_BO_IMPORT        0
 #define XNU_SURFACE_BO_DIRTY         1
 #define XNU_NR_BO_EXPORT             0xF1   /* RD_NR_XNU_BO_EXPORT */
@@ -393,6 +394,15 @@ static int prime_handle_to_fd(int ci, struct xnu_prime_handle *a)
     return 0;
 }
 
+/* the kernel's answer to the calling thread's last surface import: Vulkan
+ * turns every refusal into one VkResult, the Metal plugin logs this */
+static __thread int g_surface_err;
+
+int drm_xnu_surface_last_error(void)
+{
+    return g_surface_err;
+}
+
 static int surface_fd_to_handle(int ci, int fd, uint32_t *handle)
 {
     struct xnu_surfbuf b;
@@ -400,13 +410,14 @@ static int surface_fd_to_handle(int ci, int fd, uint32_t *handle)
     int err;
     if (pread(fd, &b, sizeof(b), 0) != (ssize_t)sizeof(b) || memcmp(b.magic, XNU_SURFBUF_MAGIC, 8) ||
         b.version != 1)
-        return EBADF;
+        return g_surface_err = EBADF;
     memset(&s, 0, sizeof(s));
     s.op = XNU_SURFACE_BO_IMPORT;
     s.surface_id = b.surface_id;
     s.plane = b.plane;
     s.size = b.size;
     err = be()->ioctl(g_conns[ci].conn, XNU_NR_SURFACE_BO, &s, sizeof(s));
+    g_surface_err = rd_errno_to_host(err);
     if (err)
         return err;
     *handle = s.handle;
@@ -620,16 +631,29 @@ int drm_xnu_surface_fd(uint32_t surface_id, uint32_t plane, uint64_t size)
 
 int drm_xnu_surface_dirty(uint32_t surface_id, uint32_t plane)
 {
-    static int fd = -1, gone;   /* gone: no device, or a kext without the ioctl (per frame: asked once) */
+    /* one connection for the process's dirty marks. A kext without the
+     * ioctl (EINVAL for an unknown nr; plane is in range here) is asked no
+     * more; a failed open is tried again after 256 calls (the device may
+     * not be up yet) */
+    static int fd = -1, unknown, skip;
     struct xnu_surface_bo s;
-    int r;
+    int r, e = 0;
     pthread_mutex_lock(&g_surf_lock);
-    if (fd < 0 && !gone && (fd = drm_xnu_open(DRM_XNU_RENDER_NODE, O_RDWR)) < 0)
-        gone = 1;
-    r = gone;
+    if (fd < 0 && !unknown && !skip) {
+        fd = drm_xnu_open(DRM_XNU_RENDER_NODE, O_RDWR);
+        if (fd < 0) {
+            e = errno ? errno : ENODEV;
+            skip = 256;
+        }
+    } else if (fd < 0 && skip) {
+        skip--;
+        e = ENXIO;
+    }
+    if (unknown)
+        e = ENOSYS;
     pthread_mutex_unlock(&g_surf_lock);
-    if (r) {
-        errno = ENODEV;
+    if (e) {
+        errno = e;
         return -1;
     }
     memset(&s, 0, sizeof(s));
@@ -637,12 +661,11 @@ int drm_xnu_surface_dirty(uint32_t surface_id, uint32_t plane)
     s.surface_id = surface_id;
     s.plane = plane;
     r = drm_xnu_ioctl_nr(fd, XNU_NR_SURFACE_BO, &s, sizeof(s));
-    /* an unknown ioctl answers EINVAL; surface ids are never refused with it */
     if (r && errno == EINVAL && plane <= 15) {
         pthread_mutex_lock(&g_surf_lock);
-        gone = 1;
+        unknown = 1;
         pthread_mutex_unlock(&g_surf_lock);
-        errno = ENODEV;
+        errno = ENOSYS;
     }
     return r;
 }

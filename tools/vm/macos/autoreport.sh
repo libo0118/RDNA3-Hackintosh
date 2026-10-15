@@ -507,6 +507,10 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             done_ $?
             [ $k = 3 ] || sleep 20
         done
+        # A3: another process's IOSurface must stay out of reach (ENOENT)
+        hdr "rdna3_drminfo --surface-xproc"
+        with_limit 30 "$D/bin/rdna3_drminfo" --surface-xproc 2>&1
+        done_ $?
         # IOPresentment: does WindowServer hand the display pipes a plane
         # (iop_ok / iop_src_surf), and what did AGDC answer (rdna3agdc)
         echo "== display pipe and AGDC counters"

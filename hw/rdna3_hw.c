@@ -414,8 +414,8 @@ uint64_t rdna3_gpu_clock_counter(rdna3_dev *d)
 }
 
 /* amdgpu_get_marketing_name (libdrm amdgpu_asic_id.c over data/amdgpu.ids):
- * the Navi 3x entries */
-const char *rdna3_marketing_name(uint16_t device, uint8_t revision)
+ * the Navi 3x entries (the host test checks them against that file) */
+const char *rdna3_marketing_name_ex(uint16_t device, uint8_t revision, int *exact)
 {
     static const struct { uint16_t dev; uint8_t rev; const char *name; } ids[] = {
         { 0x7448, 0x00, "AMD Radeon Pro W7900" },
@@ -427,6 +427,8 @@ const char *rdna3_marketing_name(uint16_t device, uint8_t revision)
         { 0x744C, 0xCE, "AMD Radeon RX 7900 GRE" },
         { 0x744C, 0xCF, "AMD Radeon RX 7900M" },
         { 0x745E, 0xCC, "AMD Radeon Pro W7800" },
+        { 0x7460, 0x00, "AMD Radeon Pro V710" },
+        { 0x7461, 0x00, "AMD Radeon Pro V710 MxGPU" },
         { 0x7470, 0x00, "AMD Radeon Pro W7700" },
         { 0x747E, 0xC8, "AMD Radeon RX 7800 XT" },
         { 0x747E, 0xD8, "AMD Radeon RX 7800M" },
@@ -439,18 +441,30 @@ const char *rdna3_marketing_name(uint16_t device, uint8_t revision)
         { 0x7480, 0xC3, "AMD Radeon RX 7600S" },
         { 0x7480, 0xC7, "AMD Radeon RX 7600M XT" },
         { 0x7480, 0xCF, "AMD Radeon RX 7600" },
+        { 0x7481, 0xC7, "AMD Steam Machine" },
         { 0x7483, 0xCF, "AMD Radeon RX 7600M" },
         { 0x7489, 0x00, "AMD Radeon Pro W7500" },
         { 0x7499, 0x00, "AMD Radeon Pro W7400" },
+        { 0x7499, 0xC0, "AMD Radeon RX 7400" },
+        { 0x7499, 0xC1, "AMD Radeon RX 7300" },
     };
     unsigned i;
+    if (exact)
+        *exact = 1;
     for (i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
         if (ids[i].dev == device && ids[i].rev == revision)
             return ids[i].name;
+    if (exact)
+        *exact = 0;
     switch (device) {
     case 0x744C: return "AMD Radeon RX 7900 Series";
     case 0x747E: return "AMD Radeon RX 7800 / 7700 Series";
     case 0x7480: return "AMD Radeon RX 7600 Series";
     default:     return "AMD Radeon RX 7000 Series";
     }
+}
+
+const char *rdna3_marketing_name(uint16_t device, uint8_t revision)
+{
+    return rdna3_marketing_name_ex(device, revision, 0);
 }

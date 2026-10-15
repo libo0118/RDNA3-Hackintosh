@@ -724,9 +724,19 @@ static void nvmtl_vram_tag_set(IOSurfaceRef surf, NSUInteger plane, uint32_t see
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
                                       uint32_t vkf, uint32_t bpp, int a8, int stex)
 {
-    if (surf && plane == 0 && IOSurfaceGetPlaneCount(surf) <= 1 && nvmtl_vk_surface_share_on()) {
+    if (surf && nvmtl_vk_surface_share_on()) {
         size_t row = IOSurfaceGetBytesPerRow(surf), sh = IOSurfaceGetHeight(surf);
-        if ((size_t)w * (bpp ? bpp : 4) <= row && h <= sh && row % 32 == 0) {
+        /* why a surface stays private, first few of each kind (card logs had only a count) */
+        static const char *const kWhy[] = { NULL, "a planar surface", "the texture is wider than a row",
+                                            "the texture is taller than the surface", "bytesPerRow is not a multiple of 32" };
+        unsigned k = plane != 0 || IOSurfaceGetPlaneCount(surf) > 1 ? 1 : (size_t)w * (bpp ? bpp : 4) > row ? 2
+                   : h > sh ? 3 : row % 32 ? 4 : 0;
+        const char *why = kWhy[k];
+        if (why) {
+            static unsigned nwhy[5];
+            if (nwhy[k]++ < 4) nvlog("item 7: surface %u %ux%u (bytesPerRow %zu, plane %lu) stays private: %s",
+                                     (unsigned)IOSurfaceGetID(surf), w, h, row, (unsigned long)plane, why);
+        } else {
             nvk_buffer vb;
             if (!nvmtl_vk_surface_vram(IOSurfaceGetID(surf), 0, row * h, &vb)) {
                 if (!nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, stex, 1, &vb, 0, row, &t->_i)) {

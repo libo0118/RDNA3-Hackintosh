@@ -209,6 +209,8 @@ uint32_t rdna3_nbio_rev_id(rdna3_dev *d);
 /* the product name by PCI device and revision ID, as libdrm's amdgpu.ids
  * (amdgpu_get_marketing_name) names it; a generic Navi 3x name otherwise */
 const char *rdna3_marketing_name(uint16_t device, uint8_t revision);
+/* the same; *exact (may be NULL) 0 when the generic name was taken */
+const char *rdna3_marketing_name_ex(uint16_t device, uint8_t revision, int *exact);
 /* gfx_v11_0_get_gpu_clock_counter: GOLDEN_TSC, upper read twice so a carry
  * between the two halves cannot tear the value (AMDGPU_INFO_TIMESTAMP) */
 uint64_t rdna3_gpu_clock_counter(rdna3_dev *d);   /* nbio_v4_3_set_reg_remap + remap_hdp_registers */

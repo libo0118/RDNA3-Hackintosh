@@ -46,9 +46,14 @@ int   drm_xnu_close(int fd);
  * close(), or -1 with errno set. */
 int   drm_xnu_surface_fd(uint32_t surface_id, uint32_t plane, uint64_t size);
 /* after a GPU write into such memory: the surface's VRAM is newer than its
- * system-memory copy (a CPU lock pages it off). 0, or -1 with errno set
- * (ENOENT: no such surface here, ENODEV: it has no accelerator VRAM). */
+ * system-memory copy (a CPU lock pages it off). 0, or -1 with errno set:
+ * ENOENT no such surface here, ENODEV it has no accelerator VRAM, ENXIO
+ * the accelerator (or the device) is not up yet, ENOSYS the kext has no
+ * such ioctl (asked once). Surface 0 never exists: a probe of the kext. */
 int   drm_xnu_surface_dirty(uint32_t surface_id, uint32_t plane);
+/* the kernel's errno for this thread's last surface fd import (0: it
+ * worked), which Vulkan reports only as a VkResult */
+int   drm_xnu_surface_last_error(void);
 int   drm_xnu_pci_info(uint16_t *vendor, uint16_t *device, uint16_t *subvendor,
                        uint16_t *subdevice, uint8_t *revision, uint16_t *domain,
                        uint8_t *bus, uint8_t *dev, uint8_t *func);

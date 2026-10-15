@@ -30,7 +30,7 @@ extern "C" {
 
 /* Linux errno values: the shim returns them to libdrm as-is */
 enum {
-    RD_EPERM = 1, RD_ENOENT = 2, RD_EINTR = 4, RD_EIO = 5, RD_EBADF = 9, RD_EACCES = 13,
+    RD_EPERM = 1, RD_ENOENT = 2, RD_EINTR = 4, RD_EIO = 5, RD_ENXIO = 6, RD_EBADF = 9, RD_EACCES = 13,
     RD_ENOMEM = 12, RD_EFAULT = 14, RD_EBUSY = 16, RD_EINVAL = 22, RD_ENOSPC = 28,
     RD_ECANCELED = 89,
     RD_ENOSYS = 38, RD_ENODEV = 19, RD_ENODATA = 61, RD_ETIME = 62, RD_EOPNOTSUPP = 95,
@@ -135,12 +135,18 @@ struct rd_xnu_file_id {
  * a new handle; the BO keeps that VRAM allocated while it lives. DIRTY
  * marks the plane's VRAM newer than the surface's system-memory copy after
  * a GPU write, so a CPU lock pages it off instead of reading stale bytes.
+ * Such a BO cannot be exported (-EPERM): each process imports for itself.
+ * -ENOSPC also when the file would hold more than RD_SURFACE_BO_FILE_MAX.
  * -ENOENT: no such surface for this process; -ENODEV: the surface has no
- * VRAM of the accelerator's (not drawn by it yet, or the OS has no hook). */
+ * VRAM of the accelerator's (not drawn by it yet); -ENXIO: the accelerator
+ * is not up (may pass); -ENOSYS: the OS has no hook. A kext without this
+ * ioctl answers -EINVAL. */
 #define RD_NR_XNU_SURFACE_BO       0xF5
 #define RD_XNU_SURFACE_BO_IMPORT   0
 #define RD_XNU_SURFACE_BO_DIRTY    1
 #define RD_XNU_SURFACE_MAX_PLANE   15
+/* the most accelerator VRAM one file may hold through surface BOs */
+#define RD_SURFACE_BO_FILE_MAX(dev) ((dev)->vis_vram_size / 2)
 struct rd_xnu_surface_bo {
     uint32_t op;                   /* RD_XNU_SURFACE_BO_* */
     uint32_t surface_id, plane;    /* in */
@@ -599,6 +605,12 @@ void rdna3_drm_device_set_vcn(rdna3_drm_device *dev, uint32_t ip_version, uint32
  * ctx_prio); AMDGPU_CTX_PRIORITY_UNSET for no such context. The rings run
  * one queue each in submission order, so nothing acts on it yet. */
 int32_t rdna3_drm_ctx_priority(const rdna3_drm_file *f, uint32_t ctx_id);
+
+/* a reference the OS holds outside any file: a CPU mapping of the BO keeps
+ * its memory until it is unmapped, after the client's handles are gone
+ * (with the device's lock held, as for the ioctls) */
+void rdna3_drm_bo_get(rdna3_bo *bo);
+void rdna3_drm_bo_put(rdna3_drm_device *dev, rdna3_bo *bo);
 
 /* Lookup for the OS mmap path: BO whose fake offset is 'off'. */
 rdna3_bo *rdna3_drm_bo_by_mmap_offset(rdna3_drm_file *f, uint64_t off);
