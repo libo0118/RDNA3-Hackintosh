@@ -700,7 +700,7 @@ def main():
                     failed = True
             m = re.search(r"^GAMMA: (\w+).*$", txt, re.M)
             if m:
-                # output gamma (rdna3gamma=1): the OTG CRC per pipe after each table
+                # output gamma (on unless rdna3gamma=0): the OTG CRC per pipe after each table
                 print("   " + m.group(0)[:150])
                 for l in re.findall(r"^== gamma pipe .*$", txt, re.M):
                     print("     " + l[3:170])

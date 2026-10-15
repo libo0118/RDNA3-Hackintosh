@@ -205,6 +205,9 @@ The profile's values (a boot-arg always wins; `rdna3profile=0` drops them
 all, `rdna3profile=1` adds them to an explicit `rdna3lvl`):
 `rdna3lvl=8 rdna3msi=1 rdna3dmub=1 rdna3fb=1 rdna3mirror=2 rdna3accel=1
 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1`.
+The output gamma (Night Shift, calibration, the ColorSync curve macOS loads
+at login) is on outside the profile too, at every `rdna3lvl` (card run 56);
+`rdna3gamma=0` turns it off.
 
 Opt-in features and switches (step names from `tools/ladder-steps.txt`,
 what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
@@ -222,6 +225,7 @@ what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
 | `rdna3baco=1` | with `rdna3pmctl`: `rdna3_pmctl baco-cycle` takes the chip through BACO and brings it up again (step baco); no sleep path uses BACO |
 | `rdna3socg=1` | HDP/ATHUB clock gating (`hw/soc21_cg.c`) |
 | `rdna3cg=0` | GFX clock gating off (on by default since card run 8) |
+| `rdna3gamma=0` | macOS's gamma tables (Night Shift, calibration, ColorSync) no longer reach the display's output gamma; the screen keeps the linear curve (on by default since card run 56) |
 | `rdna3sleep=1` | lift the idle-sleep block (no suspend/resume yet: the picture is gone after a sleep) |
 | `rdna3mirror=1` | the second monitor mirrors the first instead of extending the desktop (step 9b) |
 | `rdna3dmub=3` | attach to the DMCUB the GOP left running instead of restarting it (step 5c) |

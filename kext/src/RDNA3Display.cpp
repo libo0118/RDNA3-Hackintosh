@@ -9,7 +9,7 @@
  *   rdna3DisplayStatus   OTG frame counter, scanline, vblank, flip pending
  *   rdna3DisplayCrc      OTG CRC of the last frame
  *   rdna3DisplayCursor   hardware cursor image (VRAM) and position
- *   rdna3DisplayGamma    output gamma table (MPCC OGAM, rdna3gamma=1)
+ *   rdna3DisplayGamma    output gamma table (MPCC OGAM, off with rdna3gamma=0)
  *
  * Nothing here writes a register until the framebuffer asks for a flip or
  * a CRC, and the framebuffer only starts with the boot-arg rdna3fb=1.
@@ -1742,8 +1742,8 @@ IOReturn RDNA3Accel::displayGamma(RD3KDisplayGamma *g)
         (g->channels && (g->count < 2 || g->count > RD3K_GAMMA_MAX)))
         return kIOReturnBadArgument;
     g->result = 0;
-    if (!rd3_arg("rdna3gamma", 0))
-        return kIOReturnUnsupported;
+    if (!rd3_gamma_on())
+        return kIOReturnUnsupported;   /* rdna3gamma=0 */
     if (!fDcn || !fDispDev || !fDispLock || g->head >= fDcn->nheads || g->head >= 4)
         return kIOReturnNotReady;
     rdna3_gamma_pwl *p = nullptr;
@@ -1769,8 +1769,12 @@ IOReturn RDNA3Accel::displayGamma(RD3KDisplayGamma *g)
         /* kept for a restore after a power loss (amdgpu: the stream's
          * out_transfer_func, programmed again by dc_commit_streams) */
         if (r == RDNA3_OK) {
-            if (use && !fGammaTab[g->head])
+            if (use && !fGammaTab[g->head]) {
                 fGammaTab[g->head] = (rdna3_gamma_pwl *)IOMalloc(sizeof(rdna3_gamma_pwl));
+                if (!fGammaTab[g->head])
+                    LOG("display: head %u gamma table not kept (no memory): a restore after a power loss "
+                        "leaves this head's output gamma in bypass", g->head);
+            }
             if (use && fGammaTab[g->head]) {
                 *fGammaTab[g->head] = *use;
             } else if (!use && fGammaTab[g->head]) {

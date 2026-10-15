@@ -601,8 +601,9 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 done_ $?
                 ;;
         esac
-        # output gamma (rdna3gamma=1): a dark table, the identity, the
-        # ColorSync settings back; each pipe's OTG CRC must follow
+        # output gamma (on unless rdna3gamma=0): a dark table, the identity,
+        # the ColorSync settings back; each pipe's OTG CRC must follow. The
+        # test is long, so a step selects it with an explicit rdna3gamma=1.
         case " $args " in
             *" rdna3gamma=1 "*)
                 if [ -x "$D/bin/rdna3_modetest" ]; then
