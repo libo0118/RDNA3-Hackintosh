@@ -32,6 +32,10 @@ say "sources from the host (rdna3vm window serves the checkout)"
 # the translator's cargo build survives a re-run (minutes saved)
 [ -d "$W/src/build/metal/xlate-target" ] && rm -rf "$W/xlate-target" && mv "$W/src/build/metal/xlate-target" "$W/"
 rm -rf "$W/src" && mkdir -p "$W/src"
+# the tarball has no git history: the host sends its revision beside it
+# (rdna3vm start_share); an older host has none -> the stamp says "unknown"
+REV=$(curl -sf --max-time 10 "$HOST/rdna3-src.rev" || true)
+rev() { printf '%s\n' "$REV" | sed -n "s/^$1=//p" | head -1; }
 curl -sf "$HOST/rdna3-src.tar.gz" | tar -xz -C "$W/src"
 [ -d "$W/xlate-target" ] && mkdir -p "$W/src/build/metal" && mv "$W/xlate-target" "$W/src/build/metal/"
 [ -f "$W/src/metal/Makefile" ] || { echo "no sources at $HOST/rdna3-src.tar.gz (update rdna3vm: git pull, then rdna3vm window)"; exit 1; }
@@ -56,6 +60,12 @@ sudo rm -rf "$GB/RDNA3MTLDriver.bundle"
 sudo cp -R "$B/RDNA3MTLDriver.bundle" "$GB/"
 sudo cp "$B/librdna3mtl_translate.dylib" "$DIR/"
 sudo cp "$W/src/third_party/libdrm/data/amdgpu.ids" "$W/src/metal/rdna3mtl-allow.txt" "$DIR/"
+# the build stamp the report carries (tools/macos/collect.sh): which source
+# this plugin is, so the triage can say when it is older than the checkout
+# (card run 2026-10-15: an old plugin and RADV tested against a current kext)
+{ echo "built=$(date '+%Y-%m-%d %H:%M:%S')"
+  echo "head=$(rev head)"
+  echo "metal=$(rev metal)"; } | sed 's/=$/=unknown/' | sudo tee "$DIR/metal.stamp" >/dev/null
 sudo mv "$DIR/rdna3mtl-allow.txt" "$GB/"
 # RADV + libdrm: the report refreshes these from its bin on every boot
 sudo sh "$W/src/tools/vm/macos/autoreport.sh" --sync-metal "$D/bin"

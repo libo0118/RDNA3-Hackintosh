@@ -93,6 +93,18 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
     grep -h 'allow mode' "$dir/24-log-coredisplay.txt" "$dir/26-log-metal-plugin.txt" 2>/dev/null \
         | sed -E 's/^[0-9-]+ [0-9:.]+ +[A-Za-z]+ +//' | sort | uniq -c | sort -rn | head -200
 } > "$dir/34-metal-allow.txt" 2>&1
+# which source the Metal plugin and RADV in this machine were built from
+# (build_metal.sh / build_radv.sh write the stamps; tools/triage_reports.py
+# compares them with the checkout: STALE PLUGIN/RADV). The kext was current
+# but the plugin and RADV were not on card run 2026-10-15.
+{
+    for st in "plugin /Library/GPUBundles/rdna3mtl/metal.stamp" "radv /Library/Application Support/RDNA3VM/bin/radv.stamp"; do
+        name=${st%% *}; file=${st#* }
+        echo "== $name ($file)"
+        if [ -r "$file" ]; then cat "$file"
+        else echo "no stamp (built before stamps existed, or installed from a CI artifact)"; fi
+    done
+} > "$dir/35-build-stamps.txt" 2>&1
 [ -s "$dir/20-log-rdna3.txt" ] && grep -q "RDNA3" "$dir/20-log-rdna3.txt" || \
     run 20-log-rdna3-sudo.txt sudo log show --last boot --style compact --predicate 'eventMessage CONTAINS "RDNA3"'
 
