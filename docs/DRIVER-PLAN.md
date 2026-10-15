@@ -119,7 +119,7 @@ open / in work / done (with the commit).
 | N3 | Sleep: S3 on the card (P4), S4 hibernate (no code), runtime idle / BACO-on-idle (P5) | kext | L | open |
 | N4 | Other Navi 3x cards: matching is `0x747e1002` only (kext, fb, accel Info.plist, tools); 7900 (Navi 31), 7600 (Navi 33), Pro | all | M-L per chip | open |
 | N5 | HDR / EDR / 10-bit: IOFramebuffer 8-bit only, no HDR static metadata infoframe, accel present path BGRA8 only, no XR pixel formats | fb, hw/dcn32, accel, plugin | L | open |
-| N6 | VRR / FreeSync: `dcn32_set_drr` has no caller, no adaptive-sync / SPD infopackets | hw/dcn32_dp, hw/dcn32_hdmi, RDNA3Display | M-L | quick: in work |
+| N6 | VRR / FreeSync: `dcn32_set_drr` has no caller, no adaptive-sync / SPD infopackets | hw/dcn32_dp, hw/dcn32_hdmi, RDNA3Display | M-L | done 2026-10-15 behind `rdna3vrr=1` (merge 89ca848); macOS has no VRR API, the driver stretches vblank and each flip ends the frame; open: below-the-range frame doubling (needs a vblank IRQ hook), FreeSync video modes; card check: `RDNA3,Head<n>,VRRRange` and whether WindowServer flips often enough |
 | N7 | Fan / power / sensors for the user: only root `rdna3_pmctl`; no daemon with profiles, no sensor provider for iStat-style tools, no app | kext, userspace | M | open |
 | N8 | HDMI/DP audio (= S8) | hw, kext | M-L | open |
 | N9 | Vulkan WSI / swapchain (= V3; RADV built with `-Dplatforms=`) | userspace/mesa | L | open |
