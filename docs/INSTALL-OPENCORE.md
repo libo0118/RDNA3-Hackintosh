@@ -247,15 +247,20 @@ loads the plugin, whether that process gets the Metal device. Without a
 device an app stays on Apple's software path (nothing breaks, it is just
 not on the GPU). The shipped list has two parts:
 
-- **Apps mode** (the `%apps` line): every application, meaning the main
-  executable of an `.app` in `/Applications`, `/System/Applications` or
-  `~/Applications`, but only while the accelerator is armed
+- **Apps mode** (the `%apps` line): every application, meaning an
+  executable in `Contents/MacOS` of an `.app` in `/Applications`,
+  `/System/Applications` or the running user's own `~/Applications` (only
+  `/Users/<name>`; homes elsewhere, other users' folders and translocated
+  apps are refused; `Info.plist` is not read), but only while the accelerator is armed
   (`debug.rdna3accelfb`) and WindowServer runs on the plugin
   (`debug.rdna3agdc` is 1): the configuration card runs 48-56 ran Chess and
   Maps in. Not served: the session's agents (Dock, Finder, SystemUIServer,
   loginwindow: they run all session and each would hold one of the card's
-  GPU address spaces), helpers and XPC services inside bundles, and command
-  line tools. `-name` lines are a deny list (shipped: `-Safari`).
+  GPU address spaces), helpers and XPC services inside bundles, apps nested in another app
+  (Xcode's Simulator), and command line tools. `-name` lines are a deny list
+  (shipped: `-Safari`); they match the process name and the executable's file
+  name, and `NVMTL_ENABLE` plus `mtlprobe`, `nvmtltest`, `nvmtlrender`
+  bypass the list.
 - **Names**: `mtlprobe`, `nvmtltest`, `vulkaninfo` and `@WindowServer`
   (WindowServer only while the display pipe is up: CoreDisplay asserts
   without a Metal device then, card runs 41 and 45). Leave these as they are.
@@ -268,7 +273,9 @@ or an app that lives elsewhere by name (one line each); deny one with
 `-name`. A package install replaces the file.
 
 Each process that loads the plugin logs one line, `NVMTL: allow mode: <mode>;
-<process>: <reason>` (report: `34-metal-allow.txt`). Limits that are not the
+<process>: <reason>` (report: `34-metal-allow.txt`); if a sandbox hides the
+boot-args from a process, the line says `boot-args unreadable` and
+`rdna3mtlapps=0` was not checked there (use the list file for those). Limits that are not the
 driver's to fix: Safari's web content renders in `com.apple.WebKit.GPU`,
 whose sandbox refuses to map code from `/Library/GPUBundles` ("file system
 sandbox blocked mmap()", card run 56, SIP off or not), so Safari pages stay

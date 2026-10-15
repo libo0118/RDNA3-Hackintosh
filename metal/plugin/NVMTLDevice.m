@@ -7,6 +7,8 @@
 #include "rdna3mtl_config.h"
 #include "rdna3mtl_allow_policy.h"
 #include <libproc.h>
+#include <pwd.h>
+#include <errno.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
@@ -309,11 +311,18 @@ static void nvmtl_nvenc_hevc_register(void)
 }
 #endif /* RDNA3MTL_NV_VIDEO_CODECS */
 /* The kernel's boot-args (sysctl kern.bootargs reads unprivileged): the kill
- * switch for apps mode that needs neither the list file nor a rebuild. */
-static bool nvmtl_bootarg_is(const char *key, const char *val)
+ * switch for apps mode that needs neither the list file nor a rebuild.
+ * Returns 1 when key=val is there, 0 when it is not, -1 when the boot-args
+ * cannot be read (a sandbox may deny the sysctl): the switch then cannot be
+ * seen, which the caller logs. */
+static int nvmtl_bootarg_is(const char *key, const char *val)
 {
     char args[2048]; size_t n = sizeof args - 1;
-    if (sysctlbyname("kern.bootargs", args, &n, NULL, 0) != 0) return false;
+    if (sysctlbyname("kern.bootargs", args, &n, NULL, 0) != 0) {
+        static int logged;
+        if (!logged) { logged = 1; nvlog("  kern.bootargs unreadable in %s (errno %d): boot-arg %s=%s is not checked", getprogname(), errno, key, val); }
+        return -1;
+    }
     args[n < sizeof args ? n : sizeof args - 1] = 0;
     return rdna3mtl_bootarg_is(args, key, val);
 }
@@ -323,19 +332,20 @@ static bool nvmtl_process_is_allowed(void)
 {
     const char *me = getprogname();
     if (!me) return false;
-    if (getenv("NVMTL_ENABLE")) { nvlog("  NVMTL_ENABLE set: device for %s", me); return true; }
-    if (!strcmp(me, "mtlprobe") || !strcmp(me, "nvmtltest") || !strcmp(me, "nvmtlrender")) return true;
     FILE *f = fopen(RDNA3MTL_ALLOW_LIST, "r");
     if (!f) f = fopen(RDNA3MTL_ALLOW_LIST_ALT, "r");
-    if (!f) { nvlog("  no allow-list readable from this process: no device for %s", me); return false; }
     char path[1024] = "";
     if (proc_pidpath(getpid(), path, sizeof path) <= 0) path[0] = 0;
-    rdna3mtl_allow_ctx c = { me, path, nvmtl_accel_armed(), nvmtl_display_pipe_up(),
-                             nvmtl_bootarg_is("rdna3mtlapps", "0") };
-    char why[400]; rdna3mtl_allow_mode mode;
-    bool ok = rdna3mtl_allow_decide(f, &c, why, sizeof why, &mode) != 0;
-    fclose(f);
-    nvlog("  allow mode: %s; %s: %s", rdna3mtl_allow_mode_name(mode), me, why);
+    /* the user's home from the directory, not $HOME (a sandbox points that at its container) */
+    struct passwd *pw = getpwuid(getuid());
+    int apps_off = nvmtl_bootarg_is("rdna3mtlapps", "0");
+    rdna3mtl_allow_ctx c = { me, path, pw ? pw->pw_dir : NULL, nvmtl_accel_armed(), nvmtl_display_pipe_up(),
+                             apps_off > 0 };
+    char why[500]; rdna3mtl_allow_mode mode;
+    bool ok = rdna3mtl_process_allowed(f, &c, getenv("NVMTL_ENABLE") != NULL, why, sizeof why, &mode) != 0;
+    if (f) fclose(f);
+    nvlog("  allow mode: %s%s; %s: %s", rdna3mtl_allow_mode_name(mode),
+          apps_off < 0 ? " [boot-args unreadable: rdna3mtlapps=0 not checked]" : "", me, why);
     return ok;
 }
 

@@ -8,11 +8,17 @@
 #   @name   only while RDNA3AGDC's object is up (debug.rdna3agdc == 1):
 #           CoreDisplay then needs a Metal device for WindowServer, or it
 #           aborts - card runs 41 and 45
-#   %apps   apps mode: every application, i.e. the main executable of an
-#           .app in /Applications, /System/Applications or ~/Applications,
-#           while the card is armed and WindowServer is on the plugin (the
-#           configuration of card runs 48-56). Not the session's agents
-#           (Dock, Finder, ...), helpers or XPC services: name those above.
+#   %apps   apps mode: every application, i.e. an executable in
+#           Contents/MacOS of an .app in /Applications, /System/Applications
+#           or the running user's own ~/Applications (Info.plist is not
+#           read), while the card is armed and WindowServer is on the plugin
+#           (the configuration of card runs 48-56). Not the session's agents
+#           (Dock, Finder, ...), helpers, XPC services or apps nested in
+#           another app (Xcode's Simulator), nor translocated apps or homes
+#           outside /Users: name those above.
+# A '-' line also matches the executable's own file name, so renaming
+# argv[0] does not dodge it. NVMTL_ENABLE and mtlprobe, nvmtltest and
+# nvmtlrender always get the device. A line over 255 characters is ignored.
 #
 # Kill switches, no rebuild: delete the %apps line (the old explicit-names
 # list), or boot-arg rdna3mtlapps=0 (OpenCore; keeps the names below, ends

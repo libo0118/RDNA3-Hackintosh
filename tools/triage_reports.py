@@ -357,7 +357,7 @@ def report(path, show_all):
         # explicit list) and who it refused, from the plugin's own decisions
         if mtlallow.strip():
             served = sorted(set(re.findall(r"allow mode: [^;]*; ([^:]+): (?:apps mode|allow-listed)", mtlallow)))
-            refused = sorted(set(re.findall(r"allow mode: [^;]*; ([^:]+): (?:not allow-listed|denied)", mtlallow)))
+            refused = sorted(set(re.findall(r"allow mode: [^;]*; ([^:]+): (?:not allow-listed|denied|'[^']*' (?:is armed-only|only with the AGDC))", mtlallow)))
             modes = sorted(set(re.findall(r"allow mode: (\w+)", mtlallow)))
             print("   INFO %-20s mode %s; device for %s; refused %s" % (
                 "Metal apps mode", "/".join(modes) or "?", ", ".join(served) or "none",
