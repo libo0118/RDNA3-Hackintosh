@@ -412,3 +412,45 @@ uint64_t rdna3_gpu_clock_counter(rdna3_dev *d)
         lo = RREG32_SOC15(d, SMUIO, 0, regGOLDEN_TSC_COUNT_LOWER);
     return lo | (hi_after << 32);
 }
+
+/* amdgpu_get_marketing_name (libdrm amdgpu_asic_id.c over data/amdgpu.ids):
+ * the Navi 3x entries */
+const char *rdna3_marketing_name(uint16_t device, uint8_t revision)
+{
+    static const struct { uint16_t dev; uint8_t rev; const char *name; } ids[] = {
+        { 0x7448, 0x00, "AMD Radeon Pro W7900" },
+        { 0x7449, 0x00, "AMD Radeon Pro W7800 48GB" },
+        { 0x744A, 0x00, "AMD Radeon Pro W7900 Dual Slot" },
+        { 0x744B, 0x00, "AMD Radeon Pro W7900D" },
+        { 0x744C, 0xC8, "AMD Radeon RX 7900 XTX" },
+        { 0x744C, 0xCC, "AMD Radeon RX 7900 XT" },
+        { 0x744C, 0xCE, "AMD Radeon RX 7900 GRE" },
+        { 0x744C, 0xCF, "AMD Radeon RX 7900M" },
+        { 0x745E, 0xCC, "AMD Radeon Pro W7800" },
+        { 0x7470, 0x00, "AMD Radeon Pro W7700" },
+        { 0x747E, 0xC8, "AMD Radeon RX 7800 XT" },
+        { 0x747E, 0xD8, "AMD Radeon RX 7800M" },
+        { 0x747E, 0xDB, "AMD Radeon RX 7700" },
+        { 0x747E, 0xFF, "AMD Radeon RX 7700 XT" },
+        { 0x7480, 0x00, "AMD Radeon Pro W7600" },
+        { 0x7480, 0xC0, "AMD Radeon RX 7600 XT" },
+        { 0x7480, 0xC1, "AMD Radeon RX 7700S" },
+        { 0x7480, 0xC2, "AMD Radeon RX 7650 GRE" },
+        { 0x7480, 0xC3, "AMD Radeon RX 7600S" },
+        { 0x7480, 0xC7, "AMD Radeon RX 7600M XT" },
+        { 0x7480, 0xCF, "AMD Radeon RX 7600" },
+        { 0x7483, 0xCF, "AMD Radeon RX 7600M" },
+        { 0x7489, 0x00, "AMD Radeon Pro W7500" },
+        { 0x7499, 0x00, "AMD Radeon Pro W7400" },
+    };
+    unsigned i;
+    for (i = 0; i < sizeof(ids) / sizeof(ids[0]); i++)
+        if (ids[i].dev == device && ids[i].rev == revision)
+            return ids[i].name;
+    switch (device) {
+    case 0x744C: return "AMD Radeon RX 7900 Series";
+    case 0x747E: return "AMD Radeon RX 7800 / 7700 Series";
+    case 0x7480: return "AMD Radeon RX 7600 Series";
+    default:     return "AMD Radeon RX 7000 Series";
+    }
+}

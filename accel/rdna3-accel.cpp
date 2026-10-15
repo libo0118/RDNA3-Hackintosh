@@ -599,6 +599,11 @@ public:
                 return false;
             }
             ALOG("RDNA3Accel owns %04x:%04x (waited %u ms) - starting", pci->configRead16(0x00), pci->configRead16(0x02), waited * 100);
+            /* the card's name and VRAM size the core kext put on the PCI device: Apple's AMD
+             * accelerators carry them too, and System Information reads them there */
+            static const char *const kIdKeys[] = { "VRAM,totalMB", "VRAM,totalsize", "model" };
+            for (unsigned k = 0; k < sizeof kIdKeys / sizeof kIdKeys[0]; k++)
+                if (OSObject *v = pci->getProperty(kIdKeys[k])) setProperty(kIdKeys[k], v);
         }
         ALOG("start(%s): calling IOGraphicsAccelerator2::start — the family's own bring-up", provider ? provider->getName() : "?");
         bool r = IOGraphicsAccelerator2::start(provider);

@@ -13178,6 +13178,11 @@ static void run(const char *fwdir)
 
 int main(int argc, char **argv)
 {
+    /* amdgpu.ids names (System Information's "Chipset Model") */
+    CHECK(!strcmp(rdna3_marketing_name(0x747E, 0xC8), "AMD Radeon RX 7800 XT"));
+    CHECK(!strcmp(rdna3_marketing_name(0x747E, 0xFF), "AMD Radeon RX 7700 XT"));
+    CHECK(!strcmp(rdna3_marketing_name(0x744C, 0xC8), "AMD Radeon RX 7900 XTX"));
+    CHECK(!strcmp(rdna3_marketing_name(0x747E, 0x01), "AMD Radeon RX 7800 / 7700 Series"));
     run(NULL);
     if (argc > 1 && argv[1][0])
         run(argv[1]);

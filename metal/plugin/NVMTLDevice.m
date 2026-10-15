@@ -444,7 +444,10 @@ static void nvmtl_install_hw_resource_pools(id dev)
     NSString *full = [NSString stringWithUTF8String:(vkname ? vkname : RDNA3MTL_FALLBACK_NAME)];
     NSRange cut = [full rangeOfString:@RDNA3MTL_VK_NAME_CUT];
     NSString *marketing = (cut.location != NSNotFound) ? [full substringToIndex:cut.location] : full;
-    return [NSString stringWithFormat:@"%@ (" RDNA3MTL_TAG " over %@)", marketing, full];
+    /* the product name alone, as Apple's AMD drivers report it ("AMD Radeon RX 6800 XT"): apps and
+       System Information show this string. The Vulkan device behind it goes to the log once. */
+    static int said; if (!said++) nvlog("name -> %s (" RDNA3MTL_TAG " over %s)", marketing.UTF8String, full.UTF8String);
+    return marketing.length ? marketing : @RDNA3MTL_FALLBACK_NAME;
 }
 - (id<MTLCommandQueue>)newCommandQueue { return [self newCommandQueueWithMaxCommandBufferCount:64]; }
 - (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)n {

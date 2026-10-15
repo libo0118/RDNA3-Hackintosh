@@ -436,6 +436,7 @@ private:
     uint32_t  rreg(uint32_t dw);          /* returns ~0u when out of range */
     bool      waitForIfwi();
     bool      readVramSize();
+    void      publishGpuIdentity(uint32_t mb);
 
     /* level 2 */
     void      vramRead(uint64_t pos, uint32_t *buf, uint32_t dwords);

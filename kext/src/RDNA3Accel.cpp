@@ -357,7 +357,38 @@ bool RDNA3Accel::readVramSize()
     fVramSize = (uint64_t)mb << 20;
     LOG("VRAM %u MiB", mb);
     setNumber("RDNA3,VRAMSizeMB", mb);
+    publishGpuIdentity(mb);
     return true;
+}
+
+/* What System Information and About This Mac show for the card: the PCI
+ * device's "model" (Chipset Model) and "VRAM,totalsize" / "VRAM,totalMB"
+ * (VRAM (Total)), the keys Apple's AMD drivers set. Without them macOS
+ * showed "Type: GPU" and the BAR's 256 MB for a 16 GB card (card run 56).
+ * A "model" from OpenCore's DeviceProperties is kept. */
+void RDNA3Accel::publishGpuIdentity(uint32_t mb)
+{
+    const uint16_t dev = fPci->configRead16(kIOPCIConfigDeviceID);
+    const uint8_t rev = fPci->configRead8(kIOPCIConfigRevisionID);
+    const char *name = rdna3_marketing_name(dev, rev);
+    if (!fPci->getProperty("model")) {
+        OSData *d = OSData::withBytes(name, (unsigned)strlen(name) + 1);
+        if (d) {
+            fPci->setProperty("model", d);
+            d->release();
+        }
+    }
+    const uint64_t bytes = (uint64_t)mb << 20;
+    OSData *t = OSData::withBytes(&bytes, sizeof(bytes));
+    if (t) {
+        fPci->setProperty("VRAM,totalsize", t);
+        setProperty("VRAM,totalsize", t);
+        t->release();
+    }
+    fPci->setProperty("VRAM,totalMB", mb, 32);
+    setProperty("VRAM,totalMB", mb, 32);
+    setProperty("RDNA3,Model", name);
+    LOG("identity: %s, %u MiB of VRAM (System Information: Chipset Model, VRAM (Total))", name, mb);
 }
 
 /* ---------------------------- level 2 ----------------------------- */

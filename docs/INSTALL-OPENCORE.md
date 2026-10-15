@@ -162,8 +162,18 @@ code-signing checks further.
 * **DeviceProperties:** none needed. Remove any `device-id` spoof for the
   card: the kexts match `IOPCIPrimaryMatch 0x747e1002` against the ids in
   the IORegistry, so a spoofed id hides the card from them.
-* **BIOS:** CSM off, Above 4G Decoding on. Trouble with Resizable BAR:
-  disable it or set `Booter → Quirks → ResizeAppleGpuBars = -1`.
+* **BIOS:** CSM off, Above 4G Decoding on, Resizable BAR on. The GPU always
+  uses all of its VRAM; the BAR0 window decides only how much of it the CPU
+  can reach directly (the CPU-visible heap: buffers macOS maps, uploads,
+  the framebuffer). The kext takes the window the firmware assigned, with
+  no setting of its own: 16 GiB with Resizable BAR, 256 MiB without it (and
+  in the VM, where `rdna3vm` shrinks BAR0 because the VM firmware fails with
+  a 16 GiB BAR). The window it got is in the IORegistry as
+  `RDNA3,VRAMApertureMB` and in the boot log (`BAR0 VRAM aperture`).
+  Leave `Booter → Quirks → ResizeAppleGpuBars = -1` (BARs kept as the
+  firmware sized them). If macOS fails to start with the full window, set
+  it to `10` (1 GiB) or disable Resizable BAR; everything above the window
+  then stays GPU-only VRAM.
 * **`UEFI → Output → Resolution`:** `Max` (what the VM uses). The
   framebuffer starts on the mode the GOP left on head 0, so this is the
   boot resolution of the desktop.
