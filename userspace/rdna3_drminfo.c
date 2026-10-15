@@ -30,7 +30,7 @@
  *                              what reaches each panel. Nothing else runs.
  *   rdna3_drminfo --scanout-hires DIR  the same, 1280 wide (an app's
  *                              stale regions and text, card run 54)
- *   rdna3_drminfo --surface-xproc  (macOS, rdna3accel=1) RD_NR_XNU_SURFACE_BO
+ *   rdna3_drminfo --surface-xproc  (the macOS build, rdna3accel=1) RD_NR_XNU_SURFACE_BO
  *                              must refuse another process's (non-global)
  *                              IOSurface with ENOENT: only IOSurfaceRoot's
  *                              lookup in the caller's task stands between a
@@ -52,7 +52,7 @@
 
 #define IOCTL(fd, nr, arg) drm_xnu_ioctl_nr((fd), (nr), &(arg), sizeof(arg))
 
-#ifdef __APPLE__
+#ifdef RDNA3_DRMINFO_IOSURFACE
 #include <errno.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -799,7 +799,7 @@ int main(int argc, char **argv)
     char name[32] = {0};
     int fd, fails = 0;
 
-#ifdef __APPLE__
+#ifdef RDNA3_DRMINFO_IOSURFACE
     if (argc > 1 && !strcmp(argv[1], "--surface-hold"))
         return surface_hold();
 #endif
@@ -813,7 +813,7 @@ int main(int argc, char **argv)
     v.name_len = sizeof(name) - 1;
     if (IOCTL(fd, RD_NR_VERSION, v)) { perror("DRM_IOCTL_VERSION"); return 1; }
     printf("driver %s %d.%d.%d\n", name, v.version_major, v.version_minor, v.version_patchlevel);
-#ifdef __APPLE__
+#ifdef RDNA3_DRMINFO_IOSURFACE
     if (argc > 1 && !strcmp(argv[1], "--surface-xproc")) {
         fails = surface_xproc(fd, argv[0]);
         drm_xnu_close(fd);
