@@ -118,6 +118,8 @@ static int h_fault_info(void *c, void *vm, uint64_t *addr, uint32_t *status, uin
 }
 static uint32_t h_vm_query(void *c, void *vm) { (void)c; (void)vm; return h_query_flags; }
 static void h_vm_destroy(void *c, void *vm) { (void)c; (void)vm; vm_live--; }
+static int h_orphaned = -1;   /* the last vm_orphaned's 'reclaimable' */
+static void h_vm_orphaned(void *c, void *vm, int reclaimable) { (void)c; (void)vm; h_orphaned = reclaimable; }
 static int h_vm_map(void *c, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off, uint64_t size,
                     uint32_t flags)
 {
@@ -412,7 +414,7 @@ int main(void)
     rdna3_drm_ops ops = { NULL, h_zalloc, h_free, h_bo_alloc, h_bo_free, h_copyin, h_copyout, NULL, NULL,
                           h_vm_create, h_vm_destroy, h_vm_map, h_vm_unmap, NULL, NULL, NULL, NULL,
                           NULL, NULL, NULL, NULL, NULL, NULL,
-                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+                          NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
     amd_discovery disc;
     rdna3_drm_file *f = &file;
 
@@ -1902,16 +1904,46 @@ int main(void)
         CHECK(probe_vm_live == live0 && probe_vm_unmaps == unm0 && probe_ioctl == -RD_ENODEV);
         CHECK(ring_done >= pend && vm_live == live0 - 1 && vm_unmaps == unm0 + 1);
         /* a job that never finishes, not even after the OS's job-timeout
-         * recovery (h_hang): the VM is left alone, not freed under it */
-        CHECK(rdna3_drm_file_open(&dev, &fz) == 0);
-        CHECK(cs_submit(&fz, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
-        live0 = vm_live;
-        h_hang = 1;
-        rdna3_drm_file_close(&fz);
-        h_hang = 0;
-        CHECK(vm_live == live0);   /* leaked, as TTM keeps BOs with pending fences */
-        vm_live--;                 /* (released by hand for the totals below) */
-        ring_done = ring_next;
+         * recovery (h_hang): the VM, its mappings and BOs are left alone,
+         * not freed under it, until the job is done (TTM's delayed delete:
+         * rdna3_drm_device_reap_orphans) */
+        {
+            unsigned bos0;
+            dev.ops.vm_orphaned = h_vm_orphaned;
+            CHECK(rdna3_drm_file_open(&dev, &fz) == 0);
+            bos0 = live_bos;
+            memset(&gz, 0, sizeof(gz));
+            gz.in.bo_size = 65536;
+            gz.in.domains = AMDGPU_GEM_DOMAIN_GTT;
+            CHECK(IOCTL(&fz, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gz) == 0);
+            vz.handle = gz.out.handle;
+            CHECK(IOCTL(&fz, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), vz) == 0);
+            CHECK(cs_submit(&fz, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
+            pend = ring_next;
+            live0 = vm_live;
+            unm0 = vm_unmaps;
+            h_hang = 1;
+            rdna3_drm_file_close(&fz);
+            h_hang = 0;
+            CHECK(vm_live == live0 && vm_unmaps == unm0 && live_bos == bos0 + 1 && h_orphaned == 1);
+            CHECK(dev.orphans[0].vm == &vm_dummy && dev.orphans[0].last_seq[AMDGPU_HW_IP_DMA][0] == pend);
+            CHECK(rdna3_drm_device_reap_orphans(&dev) == 0 && vm_live == live0);   /* still running */
+            ring_done = ring_next;   /* a later reset forced the fence */
+            CHECK(rdna3_drm_device_reap_orphans(&dev) == 1 && vm_live == live0 - 1 && live_bos == bos0);
+            CHECK(dev.orphans[0].vm == NULL && rdna3_drm_device_reap_orphans(&dev) == 0);
+            /* an open reaps first: a second orphan goes with the next open */
+            CHECK(rdna3_drm_file_open(&dev, &fz) == 0);
+            CHECK(cs_submit(&fz, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
+            live0 = vm_live;
+            h_hang = 1;
+            rdna3_drm_file_close(&fz);
+            h_hang = 0;
+            CHECK(vm_live == live0 && dev.orphans[0].vm);
+            ring_done = ring_next;
+            CHECK(rdna3_drm_file_open(&dev, &fz) == 0 && vm_live == live0 && !dev.orphans[0].vm);
+            rdna3_drm_file_close(&fz);
+            dev.ops.vm_orphaned = NULL;
+        }
         h_only = only0;
         h_hang = hang0;
         h_ring32 = r32;

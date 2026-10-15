@@ -84,6 +84,8 @@ public:
     /* a new DRM file would get a VM that runs (always true before the GMC
      * is up); false logs the refusal with the VMIDs' holders */
     bool  vmCanOpen();
+    /* rdna3_drm_ops.vm_orphaned: the file closed with a job still running */
+    void  vmOrphaned(void *vm, bool reclaimable);
     void  vmDestroy(void *vm);
     int   vmMap(void *vm, rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size,
                 uint32_t flags);
@@ -387,6 +389,7 @@ private:
     rdna3_pt_pool *fPtPool = nullptr;  /* level 6: page tables for user VMs */
     uint32_t      fVmidUsed = 0;       /* bit n = VMID n taken (0 is the kernel's) */
     uint32_t      fVmidRefusals = 0;   /* DRM opens refused: no VMID left */
+    uint32_t      fVmidsLeaked = 0;    /* VMs of closed files whose job still runs (vmOrphaned) */
     /* VMIDs for clients: 1..7 with user queues or rdna3amdgpu=1 (8..15 are
      * the MES's / amdgpu's first_kfd_vmid), else 1..15 */
     uint32_t      vmidLimit() const { return (fUserqWanted || fAmdgpuExact) ? (uint32_t)RD_FIRST_KFD_VMID : 16u; }

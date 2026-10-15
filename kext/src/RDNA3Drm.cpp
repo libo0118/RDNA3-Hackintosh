@@ -383,6 +383,13 @@ void RDNA3Accel::drmVmDestroy(void *ctx, void *vm)
         a->fBringup->vmDestroy(vm);
 }
 
+void RDNA3Accel::drmVmOrphaned(void *ctx, void *vm, int reclaimable)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    if (a->fBringup)
+        a->fBringup->vmOrphaned(vm, reclaimable != 0);
+}
+
 int RDNA3Accel::drmVmMap(void *ctx, void *vm, rdna3_bo *bo, uint64_t va, uint64_t off,
                          uint64_t size, uint32_t flags)
 {
@@ -423,6 +430,10 @@ void RDNA3Accel::drmVmReplayIfNeeded()
     bool vramLost = false;
     if (!fBringup || !fDrm)
         return;
+    /* closed files whose jobs a recovery has finished now: their VMIDs back */
+    int reaped = rdna3_drm_device_reap_orphans(fDrm);
+    if (reaped)
+        LOG("%d closed client(s) whose jobs outlived them: VM, mappings and BOs freed now", reaped);
     if (fBringup->takeVmReplay()) {
         int failed = rdna3_drm_device_vm_replay(fDrm);
         LOG("VRAM lost: the clients' GPUVM ranges mapped again%s", failed ? " (some failed)" : "");
@@ -700,6 +711,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.copyout = drmCopyout;
     ops.vm_create = drmVmCreate;
     ops.vm_destroy = drmVmDestroy;
+    ops.vm_orphaned = drmVmOrphaned;
     ops.vm_map = drmVmMap;
     ops.vm_unmap = drmVmUnmap;
     ops.submit = drmSubmit;
@@ -895,6 +907,7 @@ int RDNA3Accel::drmOpen(rdna3_drm_file *f)
     /* one VMID per file: with none left the open fails (the user client
      * does not start, libdrm's open fails, the Metal plugin falls back to
      * no device) instead of handing out a VM that cannot submit */
+    rdna3_drm_device_reap_orphans(fDrm);   /* a leaked VMID whose job is done comes back */
     if (fBringup && !fBringup->vmCanOpen()) {
         IOLockUnlock(fDrmLock);
         return -RD_ENOSPC;

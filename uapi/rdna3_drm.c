@@ -220,6 +220,7 @@ void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_
 
 int rdna3_drm_file_open(rdna3_drm_device *dev, rdna3_drm_file *f)
 {
+    rdna3_drm_device_reap_orphans(dev);   /* their VMs may make room */
     zero(f, sizeof(*f));
     f->dev = dev;
     f->bos = (rdna3_bo **)dev->ops.zalloc(dev->ops.ctx, sizeof(rdna3_bo *) * RD_MAX_HANDLES);
@@ -378,6 +379,7 @@ static void exports_gc(rdna3_drm_device *dev, const struct rdna3_drm_file *closi
 static void userq_mgr_fini(struct rdna3_drm_file *f);
 static void seq64_unmap(struct rdna3_drm_file *f);
 static void seq64_fini(rdna3_drm_device *dev);
+static void orphan_release(rdna3_drm_device *dev, struct rdna3_orphan *o);
 static int ctx_vram_lost(const struct rdna3_drm_file *f, uint32_t ctx_id);
 
 /* user fence BOs whose job finished can go (amdgpu_job_free drops uf_bo) */
@@ -398,6 +400,9 @@ void rdna3_drm_device_fini(rdna3_drm_device *dev)
 {
     uint32_t i;
     uf_reap(dev, 1);
+    for (i = 0; i < RD_MAX_ORPHANS; i++)   /* the rings are stopped */
+        if (dev->orphans[i].vm || dev->orphans[i].bos)
+            orphan_release(dev, &dev->orphans[i]);
     /* the fence drivers the files left (parked references), then seq64 */
     if (dev->fence_drv)
         dev->ops.free(dev->ops.ctx, dev->fence_drv, sizeof(*dev->fence_drv) * RD_MAX_FENCE_DRV);
@@ -465,11 +470,90 @@ static int file_wait_idle(rdna3_drm_file *f)
             fe.ip = ip;
             fe.ring = ring;
             fe.seq = f->last_seq[ip][ring];
-            if (fence_wait_abs(dev, &fe, UINT64_MAX) && !fence_done(dev, &fe))
-                idle = 0;   /* not even the recovery got it through */
+            if (fence_wait_abs(dev, &fe, UINT64_MAX) && !fence_done(dev, &fe)) {
+                idle = 0;   /* not even the recovery got it through: kept for the orphan */
+                continue;
+            }
             f->last_seq[ip][ring] = 0;
         }
     return idle;
+}
+
+static void orphan_release(rdna3_drm_device *dev, struct rdna3_orphan *o)
+{
+    rdna3_drm_ops *ops = &dev->ops;
+    uint32_t i;
+    if (o->vm && ops->vm_destroy)
+        ops->vm_destroy(ops->ctx, o->vm);   /* the tables go with the VM */
+    for (i = 0; o->vas && i < o->nvas; i++)
+        if (o->vas[i].handle && o->vas[i].bo)
+            bo_put_dev(dev, o->vas[i].bo);
+    for (i = 0; o->bos && i < RD_MAX_HANDLES; i++)
+        if (o->bos[i])
+            bo_put_dev(dev, o->bos[i]);
+    if (o->vas)
+        ops->free(ops->ctx, o->vas, sizeof(rdna3_va) * RD_MAX_VA);
+    if (o->bos)
+        ops->free(ops->ctx, o->bos, sizeof(rdna3_bo *) * RD_MAX_HANDLES);
+    zero(o, sizeof(*o));
+}
+
+static int orphan_done(rdna3_drm_device *dev, const struct rdna3_orphan *o)
+{
+    rdna3_fence fe;
+    uint32_t ip, ring;
+    for (ip = 0; ip < AMDGPU_HW_IP_NUM; ip++)
+        for (ring = 0; ring < 4; ring++) {
+            if (!o->last_seq[ip][ring])
+                continue;
+            zero(&fe, sizeof(fe));
+            fe.ip = ip;
+            fe.ring = ring;
+            fe.seq = o->last_seq[ip][ring];
+            if (!fence_done(dev, &fe))
+                return 0;
+        }
+    return 1;
+}
+
+/* TTM's delayed delete (ttm_bo_delayed_delete: the BO goes once the fences
+ * in its reservation signalled) for a closed file whose jobs outlived the
+ * recovery: amdgpu_vm_fini's page tables and the BOs are freed then */
+int rdna3_drm_device_reap_orphans(rdna3_drm_device *dev)
+{
+    uint32_t i;
+    int n = 0;
+    for (i = 0; i < RD_MAX_ORPHANS; i++)
+        if ((dev->orphans[i].vm || dev->orphans[i].bos) && orphan_done(dev, &dev->orphans[i])) {
+            orphan_release(dev, &dev->orphans[i]);
+            n++;
+        }
+    return n;
+}
+
+/* a closing file that is not idle: what its jobs may still touch moves to
+ * an orphan slot; without a free slot it leaks for good, as before */
+static void file_orphan(rdna3_drm_file *f)
+{
+    rdna3_drm_device *dev = f->dev;
+    rdna3_drm_ops *ops = &dev->ops;
+    struct rdna3_orphan *o = NULL;
+    uint32_t i;
+    for (i = 0; i < RD_MAX_ORPHANS && !o; i++)
+        if (!dev->orphans[i].vm && !dev->orphans[i].bos)
+            o = &dev->orphans[i];
+    if (f->vm && ops->vm_orphaned)
+        ops->vm_orphaned(ops->ctx, f->vm, o != NULL);
+    if (!o)
+        return;
+    o->vm = f->vm;
+    o->bos = f->bos;
+    o->vas = f->vas;
+    o->nvas = f->nvas;
+    copy(o->last_seq, f->last_seq, sizeof(o->last_seq));
+    f->vm = NULL;
+    f->bos = NULL;
+    f->vas = NULL;
 }
 
 void rdna3_drm_file_close(rdna3_drm_file *f)
@@ -512,6 +596,8 @@ void rdna3_drm_file_close(rdna3_drm_file *f)
                 va_release(f, &f->vas[i]);
     if (idle)
         seq64_unmap(f);
+    if (!idle)
+        file_orphan(f);   /* reclaimed once its jobs are done (reap_orphans) */
     if (f->vm && ops->vm_destroy && idle)
         ops->vm_destroy(ops->ctx, f->vm);
     f->vm = NULL;

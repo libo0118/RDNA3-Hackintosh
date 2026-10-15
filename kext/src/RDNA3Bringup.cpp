@@ -1986,6 +1986,7 @@ struct RDNA3Vm {
     bool     dmaFlush;   /* rdna3amdgpu=1: same for the next DMA job (amdgpu_vm_flush on the SDMA ring) */
     int      ownerPid;   /* the process that opened it (card run 49: a page fault named only "VMID 3") */
     char     owner[24];
+    bool     orphaned;   /* its file closed with a job still running: kept until the job is done */
 };
 
 
@@ -3016,6 +3017,23 @@ uint32_t RDNA3Bringup::vmidsFree() const
     return n;
 }
 
+/* the DRM kept this VM: its file closed while a job of it still ran after
+ * the recovery (rdna3_drm_file_close). reclaimable: it goes once the job is
+ * done (rdna3_drm_device_reap_orphans); else it never does. */
+void RDNA3Bringup::vmOrphaned(void *p, bool reclaimable)
+{
+    RDNA3Vm *v = (RDNA3Vm *)p;
+    if (!v || v->orphaned)
+        return;
+    v->orphaned = true;
+    fVmidsLeaked++;
+    publish("RDNA3,VMIDsLeaked", fVmidsLeaked);
+    BLOG("VM: %s (pid %d) closed with a job still running: VMID %u kept %s (%u kept now)",
+         v->owner[0] ? v->owner : "?", v->ownerPid, v->vmid,
+         reclaimable ? "until the job is done (a later GPU reset ends it)" : "for good (no orphan slot)",
+         fVmidsLeaked);
+}
+
 bool RDNA3Bringup::vmCanOpen()
 {
     char who[384];
@@ -3027,15 +3045,15 @@ bool RDNA3Bringup::vmCanOpen()
         RDNA3Vm *v = fVmByVmid[id];
         if (!v)
             continue;
-        int w = snprintf(who + len, sizeof(who) - len, " %u=%s/%d", id, v->owner[0] ? v->owner : "?",
-                         v->ownerPid);
+        int w = snprintf(who + len, sizeof(who) - len, " %u=%s/%d%s", id, v->owner[0] ? v->owner : "?",
+                         v->ownerPid, v->orphaned ? "(leaked)" : "");
         if (w < 0)
             break;
         len += (size_t)w;
     }
     fVmidRefusals++;
-    BLOG("VM: all %u VMIDs in use (VMID=process/pid:%s): DRM open #%u refused (-ENOSPC), that "
-         "client sees no device", vmidLimit() - 1, who, fVmidRefusals);
+    BLOG("VM: all %u VMIDs in use, %u leaked (VMID=process/pid:%s): DRM open #%u refused (-ENOSPC), "
+         "that client sees no device", vmidLimit() - 1, fVmidsLeaked, who, fVmidRefusals);
     publish("RDNA3,VMIDRefusals", fVmidRefusals);
     return false;
 }
@@ -3126,6 +3144,10 @@ void RDNA3Bringup::vmDestroy(void *p)
         BLOG("VM: VMID %u of %s (pid %d) freed%s", v->vmid, v->owner[0] ? v->owner : "?", v->ownerPid,
              v->guilty ? " (it was guilty)" : "");
         publish("RDNA3,VMIDsInUse", (uint64_t)__builtin_popcount(fVmidUsed));
+    }
+    if (v->orphaned && fVmidsLeaked) {
+        fVmidsLeaked--;
+        publish("RDNA3,VMIDsLeaked", fVmidsLeaked);
     }
     IOFree(v, sizeof(*v));
 }

@@ -162,6 +162,7 @@ struct rd_xnu_surface_bo {
 
 #define RD_MAX_HANDLES  16384
 #define RD_MAX_CTX      256
+#define RD_MAX_ORPHANS  16      /* closed files whose job never finished (one per VMID) */
 #define RD_MAX_SYNCOBJ  4096
 #define RD_MAX_VA       65536
 #define RD_TA_TYPES     16      /* > TA_FW_TYPE_MAX_INDEX (amdgpu_ucode.h) */
@@ -418,6 +419,11 @@ typedef struct rdna3_drm_ops {
      * no pointers into the device across the call. 0 / -errno. */
     int   (*surface_bo)(void *ctx, void *file_os, rdna3_bo *bo, uint32_t surface_id, uint32_t plane);
     int   (*surface_dirty)(void *ctx, void *file_os, uint32_t surface_id, uint32_t plane);
+    /* optional: a closing file's job still runs after the recovery, so its
+     * VM stays (orphaned = 1) until rdna3_drm_device_reap_orphans finds the
+     * job done and vm_destroy frees it; orphaned = 0: the VM never goes
+     * (no orphan slot left) */
+    void  (*vm_orphaned)(void *ctx, void *vm, int reclaimable);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -488,6 +494,16 @@ typedef struct rdna3_drm_device {
     /* amdgpu_cs_pass1's -ECANCELED for a context older than the last VRAM
      * loss: 1 (rdna3_drm_device_init), 0 = such contexts keep submitting */
     uint32_t vram_lost_cs_refuse;
+    /* closed files whose last jobs had not finished (rdna3_drm_file_close
+     * after the recovery gave up): the VM, BOs and mappings stay until the
+     * jobs' fences signal, as TTM's delayed delete keeps them in amdgpu */
+    struct rdna3_orphan {
+        void *vm;
+        struct rdna3_bo **bos;        /* [RD_MAX_HANDLES] */
+        struct rdna3_va *vas;         /* [RD_MAX_VA] */
+        uint32_t nvas;
+        uint64_t last_seq[AMDGPU_HW_IP_NUM][4];   /* the unfinished jobs */
+    } orphans[RD_MAX_ORPHANS];
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {
@@ -570,6 +586,11 @@ void rdna3_drm_device_vram_lost(rdna3_drm_device *dev);
 /* refuse = 0: contexts made before a VRAM loss keep submitting (the
  * counter and QUERY_STATE2's VRAMLOST stay); 1 is amdgpu's and the default */
 void rdna3_drm_device_set_vram_lost_cs(rdna3_drm_device *dev, int refuse);
+/* the orphans (rdna3_drm_ops.vm_orphaned) whose jobs are done now (a later
+ * GPU reset forces their fences): VM destroyed, mappings and BOs dropped.
+ * Returns how many went; device lock held. rdna3_drm_file_open runs it
+ * too. */
+int  rdna3_drm_device_reap_orphans(rdna3_drm_device *dev);
 /* every live BO placed in VRAM, once each (a BO several clients hold, an
  * export, the seq64 slots): amdgpu_device_evict_resources' list. The
  * callback must not free BOs. */
