@@ -47,7 +47,16 @@ static int vm_live, vm_maps, vm_unmaps;
 static uint64_t vm_mapped;
 static uint32_t vm_last_flags;
 static int vm_dummy;
-static void *h_vm_create(void *c) { (void)c; vm_live++; return &vm_dummy; }
+/* h_vm_full: the OS has no VM that could run (all VMIDs taken) */
+static int h_vm_full;
+static void *h_vm_create(void *c)
+{
+    (void)c;
+    if (h_vm_full)
+        return NULL;
+    vm_live++;
+    return &vm_dummy;
+}
 static uint32_t h_query_flags;
 static int h_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32_t flags)
 {
@@ -395,6 +404,19 @@ int main(void)
     rdna3_drm_device_init(&dev, &ops, &disc, 0x747E, 0xC8, 0x0, 16ull << 30, 256ull << 20, 8ull << 30);
     CHECK(rdna3_drm_file_open(&dev, f) == 0);
     CHECK(vm_live == 1);
+    /* no VM that can run (the kext: no VMID left): the open fails cleanly,
+     * nothing of the file stays on the device; the next open works */
+    {
+        static rdna3_drm_file full;
+        uint32_t next = dev.next_file_id;
+        h_vm_full = 1;
+        CHECK(rdna3_drm_file_open(&dev, &full) == -RD_ENOMEM);
+        CHECK(dev.files == f && f->next_file == NULL && dev.next_file_id == next && vm_live == 1);
+        h_vm_full = 0;
+        CHECK(rdna3_drm_file_open(&dev, &full) == 0 && vm_live == 2 && dev.files == &full);
+        rdna3_drm_file_close(&full);
+        CHECK(vm_live == 1 && dev.files == f);
+    }
 
     /* drmGetVersion */
     {

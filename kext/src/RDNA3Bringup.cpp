@@ -2971,7 +2971,7 @@ void *RDNA3Bringup::vmCreate()
     v->pasid = fNextPasid;
     /* rdna3amdgpu=1: amdgpu's GFXHUB id_mgr hands out VMIDs below
      * first_kfd_vmid only (8..15 have the compute apertures) */
-    for (uint32_t id = 1; id < ((fUserqWanted || fAmdgpuExact) ? (uint32_t)RD_FIRST_KFD_VMID : 16u); id++) {
+    for (uint32_t id = 1; id < vmidLimit(); id++) {
         if (!(fVmidUsed & (1u << id))) {
             if (gpuvm_vm_init(fDev, &v->vm, fPtPool) != RDNA3_OK)
                 break;
@@ -2991,9 +2991,53 @@ void *RDNA3Bringup::vmCreate()
             break;
         }
     }
-    if (!v->live)
-        BLOG("VM: no VMID or page tables left, this client's VM is record-only");
+    if (!v->live) {
+        /* amdgpu never hands out a VM that cannot run: amdgpu_vm_init
+         * fails without its root table, and VMIDs are grabbed per job
+         * (amdgpu_vmid_grab waits for one). With one VMID per file here a
+         * record-only VM would map nothing and every CS of it would fail
+         * with -EINVAL: no VM, so the open fails and the client sees no
+         * device */
+        BLOG("VM: no %s left for %s (pid %d): no VM, a DRM open fails",
+             vmidsFree() ? "page tables" : "VMID", v->owner[0] ? v->owner : "?", v->ownerPid);
+        IOFree(v, sizeof(*v));
+        return nullptr;
+    }
+    publish("RDNA3,VMIDsInUse", (uint64_t)__builtin_popcount(fVmidUsed));
     return v;
+}
+
+uint32_t RDNA3Bringup::vmidsFree() const
+{
+    uint32_t n = 0;
+    for (uint32_t id = 1; id < vmidLimit(); id++)
+        if (!(fVmidUsed & (1u << id)))
+            n++;
+    return n;
+}
+
+bool RDNA3Bringup::vmCanOpen()
+{
+    char who[384];
+    size_t len = 0;
+    if (!fVmReady || vmidsFree())
+        return true;
+    who[0] = 0;
+    for (uint32_t id = 1; id < vmidLimit() && len < sizeof(who); id++) {
+        RDNA3Vm *v = fVmByVmid[id];
+        if (!v)
+            continue;
+        int w = snprintf(who + len, sizeof(who) - len, " %u=%s/%d", id, v->owner[0] ? v->owner : "?",
+                         v->ownerPid);
+        if (w < 0)
+            break;
+        len += (size_t)w;
+    }
+    fVmidRefusals++;
+    BLOG("VM: all %u VMIDs in use (VMID=process/pid:%s): DRM open #%u refused (-ENOSPC), that "
+         "client sees no device", vmidLimit() - 1, who, fVmidRefusals);
+    publish("RDNA3,VMIDRefusals", fVmidRefusals);
+    return false;
 }
 
 /* gfx_v11_0_suspend = gfx_v11_0_hw_fini (rdna3amdgpu=1, before a full
@@ -3081,6 +3125,7 @@ void RDNA3Bringup::vmDestroy(void *p)
         fVmByVmid[v->vmid] = nullptr;
         BLOG("VM: VMID %u of %s (pid %d) freed%s", v->vmid, v->owner[0] ? v->owner : "?", v->ownerPid,
              v->guilty ? " (it was guilty)" : "");
+        publish("RDNA3,VMIDsInUse", (uint64_t)__builtin_popcount(fVmidUsed));
     }
     IOFree(v, sizeof(*v));
 }

@@ -892,8 +892,17 @@ void RDNA3Accel::drmFree()
 int RDNA3Accel::drmOpen(rdna3_drm_file *f)
 {
     IOLockLock(fDrmLock);
+    /* one VMID per file: with none left the open fails (the user client
+     * does not start, libdrm's open fails, the Metal plugin falls back to
+     * no device) instead of handing out a VM that cannot submit */
+    if (fBringup && !fBringup->vmCanOpen()) {
+        IOLockUnlock(fDrmLock);
+        return -RD_ENOSPC;
+    }
     int r = rdna3_drm_file_open(fDrm, f);
     IOLockUnlock(fDrmLock);
+    if (r)
+        LOG("DRM open failed (%d)", r);
     return r;
 }
 

@@ -375,7 +375,9 @@ IOReturn RDNA3Accel::platformGpuVa(int op, RD3KGpuVaRequest *g)
                 fBringup->vmDestroy(fAccelVm);
             fAccelVm = fBringup->vmCreate();
         }
-        int r = 0;
+        /* with the GMC up and no VMID or page tables left there is no VM
+         * (vmCreate logged it): the map fails instead of doing nothing */
+        int r = (fBringup && !fAccelVm) ? -RD_ENOSPC : 0;
         if (fBringup && fAccelVm && fBringup->vmLive(fAccelVm)) {
             rdna3_bo bo;
             bzero(&bo, sizeof(bo));
