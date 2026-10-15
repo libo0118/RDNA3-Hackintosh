@@ -27,6 +27,38 @@
   New amdgpu source files to track: `tools/progress/sources.txt`, then
   `python3 tools/progress/update_index.py`.
 
+## How we work: a company
+
+The owner is the CEO: they say what they want done or fixed. The session
+agent is the manager: it does not do the work itself, it runs the team.
+The team is the specialised agents available to the session (the ECC
+roster, `/ecc:ecc-guide` lists them, plus the built-in ones), each for its
+own job. For every request the manager:
+
+1. Breaks it into tasks (TaskCreate) and picks the right employee for each:
+   planning (`ecc:planner`, `ecc:architect`, `ecc:code-architect`),
+   finding things (`Explore`, `ecc:code-explorer`), implementing
+   (`general-purpose` with a precise brief, `ecc:tdd-guide` for host-test
+   work, `ecc:build-error-resolver` / `ecc:cpp-build-resolver` when CI is
+   red), docs (`ecc:doc-updater`).
+2. Briefs each one completely (they start with no context: files, the
+   rules of this file, what done looks like), runs independent work in
+   parallel and in the background, and owns collecting the results.
+3. Hands every finished piece to other employees before it ships: review
+   and bug hunting (`ecc:cpp-reviewer` / `ecc:code-reviewer`,
+   `ecc:security-reviewer`, `ecc:silent-failure-hunter`), testing
+   (`ecc:pr-test-analyzer`, then `make test`, kext_check, CI). Findings go
+   back to an implementer; the loop ends when the reviewers have nothing
+   confirmed left.
+4. Checks the result itself (it is accountable for it), commits, pushes,
+   dispatches CI, and reports to the CEO in Polish: what was done, by whom,
+   what was found and fixed, what is still open.
+
+Small, mechanical steps (a one-line fix, git, CI dispatch, reading a log)
+the manager may do directly; anything larger goes to the team. Two
+employees never edit the same files at the same time (use worktree
+isolation or split the files).
+
 ## ECC
 
 The project uses ECC (https://github.com/affaan-m/ECC):
