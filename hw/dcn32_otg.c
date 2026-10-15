@@ -389,7 +389,11 @@ void dcn32_otg_program_manual_trigger(rdna3_dev *d, uint32_t otg)
     WO(d, regOTG0_OTG_TRIGA_MANUAL_TRIG, otg, FLD(OTG0_OTG_TRIGA_MANUAL_TRIG, OTG_TRIGA_MANUAL_TRIG, 1));
 }
 
-/* optc32_set_drr */
+/* optc32_set_drr (v6.12 and v6.16 alike). Unlike DCN 3.1's optc31_set_drr
+ * it has no "DRR off" branch: without a vmin / vmax it leaves MIN_SEL /
+ * MAX_SEL and V_TOTAL_MIN / MAX as they are and arms the manual trigger
+ * all the same (the mode set's optc1_set_vtotal_min_max(v_total, v_total)
+ * keeps such a stream at its nominal timing). */
 void dcn32_otg_set_drr(rdna3_dev *d, uint32_t otg, const rdna3_drr_params *p)
 {
     if (p && p->vertical_total_max > 0 && p->vertical_total_min > 0) {

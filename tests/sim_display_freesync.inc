@@ -14,6 +14,8 @@
 static struct {
     uint8_t  cea[128];       /* the CTA block the driver sent */
     unsigned cea_cmds, cea_results;
+    int      nack_at;        /* > 0: the chunk at offset nack_at - 1 is NACKed */
+    int      unknown_reply;  /* the firmware answers with an unknown result type */
 } SF;
 
 /* the firmware's AMD VSDB search over the CTA data block collection: a
@@ -58,6 +60,16 @@ static int fs_dmub_cmd(uint8_t *c, uint32_t hdr)
         return 1;
     }
     memcpy(SF.cea + off, c + 9, len);
+    if (SF.unknown_reply) {
+        c[4] = 7;
+        return 1;
+    }
+    if (SF.nack_at > 0 && off == (uint32_t)(SF.nack_at - 1) && off + len < total) {
+        c[4] = RD_DMUB_EDID_CEA_ACK;
+        c[5] = (uint8_t)off; c[6] = (uint8_t)(off >> 8);
+        c[7] = 0;
+        return 1;
+    }
     if (off + len >= total) {
         sf_cea_parse(c);
     } else {
@@ -121,6 +133,125 @@ static uint8_t sf_check(const rdna3_info_packet *p, uint32_t payload)
     for (i = 0; i <= payload; i++)
         s = (uint8_t)(s + p->sb[i]);
     return s;
+}
+
+/* the edges: DisplayID, offsets, bad ranges, CTA descriptors, short
+ * buffers, a failing parser, the uHz clamp */
+static void test_dc_freesync_edges(rdna3_dmub *dm)
+{
+    static uint8_t e[384];
+    rdna3_freesync_caps c;
+    rdna3_freesync_crtc crtc;
+    rdna3_vrr_stream s;
+    rdna3_vsdb_info v;
+    rdna3_mode m;
+    uint32_t len, lo, hi;
+    unsigned cmds0;
+
+    /* parse_edid_displayid_vrr: the dynamic video timing range block, 8-bit
+     * and 10-bit max; through the caps when the EDID has no descriptor */
+    len = sf_edid(e, 4, 0x01, 0, 0, 0, 0, 0, 0, 0);
+    e[72 + 3] = 0x10;   /* no range descriptor: a dummy one */
+    e[126] = 1;
+    sf_sum(e);
+    memset(e + 128, 0, 128);
+    e[128] = 0x70;
+    e[128 + 10] = 0x25; e[128 + 11] = 0x00; e[128 + 12] = 9;
+    e[128 + 19] = 40; e[128 + 20] = 165;
+    len = 256;
+    lo = hi = 0;
+    dcn32_parse_edid_displayid_vrr(e, len, &lo, &hi);
+    CHECK(lo == 40 && hi == 165);
+    e[128 + 11] = 0x01; e[128 + 21] = 0x01;   /* bits 9:8 of the max */
+    dcn32_parse_edid_displayid_vrr(e, len, &lo, &hi);
+    CHECK(lo == 40 && hi == 165 + 256);
+    dcn32_update_freesync_caps(&c, e, len, RD_SIGNAL_DISPLAY_PORT, 1, RD_ADAPTIVE_SYNC_TYPE_NONE, NULL);
+    CHECK(c.freesync_capable && c.min_vfreq == 40 && c.max_vfreq == 421 && c.from == RD_VRR_FROM_MONITOR_RANGE);
+
+    /* EDID 1.4's +255 on the min and the max */
+    len = sf_edid(e, 4, 0x01, 10, 105, 3, 1, 0, 0, 0);
+    lo = hi = 0;
+    dcn32_drm_get_monitor_range(e, len, &lo, &hi);
+    CHECK(lo == 265 && hi == 360);
+
+    /* min above max: not capable; min 0: capable in amdgpu, but the stream
+     * has no min refresh and stays UNSUPPORTED (no SPD, no DRR) */
+    len = sf_edid(e, 4, 0x01, 144, 48, 0, 1, 0, 0, 0);
+    dcn32_update_freesync_caps(&c, e, len, RD_SIGNAL_DISPLAY_PORT, 1, RD_ADAPTIVE_SYNC_TYPE_NONE, NULL);
+    CHECK(!c.freesync_capable && c.min_vfreq == 144 && c.max_vfreq == 48);
+    len = sf_edid(e, 4, 0x01, 0, 144, 0, 1, 0, 0, 0);
+    dcn32_update_freesync_caps(&c, e, len, RD_SIGNAL_DISPLAY_PORT, 1, RD_ADAPTIVE_SYNC_TYPE_NONE, NULL);
+    CHECK(c.freesync_capable && c.min_vfreq == 0 && c.max_vfreq == 144);
+    memset(&m, 0, sizeof(m));
+    m.h_active = 1920; m.v_active = 1080; m.h_total = 2200; m.v_total = 1125; m.v_front = 4;
+    m.pixel_khz = 148500;
+    dcn32_vrr_stream_from_mode(&s, &m, RD_SIGNAL_DISPLAY_PORT);
+    memset(&crtc, 0, sizeof(crtc));
+    dcn32_freesync_update_stream(&crtc, &s, &c, &m, 1);
+    /* (update_stream_irq_parameters keeps the config's vsif_supported: an
+     * SPD that says "not supported", as amdgpu sends it) */
+    CHECK(crtc.vrr_supported && crtc.config.state == RD_VRR_STATE_UNSUPPORTED && !dcn32_freesync_vrr_active(&crtc) &&
+          crtc.vrr.adjust.v_total_min == 1125 && crtc.vrr.adjust.v_total_max == 1125 && s.vrr_infopacket.valid &&
+          s.vrr_infopacket.sb[6] == 0 && !s.allow_freesync);
+
+    /* a range descriptor in a CTA extension's detailed timing area */
+    len = sf_edid(e, 4, 0x01, 0, 0, 0, 0, 0, 0, 0);
+    e[72 + 3] = 0x10;
+    e[126] = 1;
+    sf_sum(e);
+    memset(e + 128, 0, 128);
+    e[128] = 0x02; e[129] = 0x03; e[130] = 4;
+    e[128 + 4 + 18 + 3] = 0xfd;   /* the second slot */
+    e[128 + 4 + 18 + 5] = 50; e[128 + 4 + 18 + 6] = 100; e[128 + 4 + 18 + 10] = 1;
+    sf_sum(e + 128);
+    lo = hi = 0;
+    dcn32_drm_get_monitor_range(e, 256, &lo, &hi);
+    CHECK(lo == 50 && hi == 100);
+    /* the same EDID cut to its base block: the extension is not read */
+    lo = hi = 0;
+    dcn32_drm_get_monitor_range(e, 128, &lo, &hi);
+    CHECK(lo == 0 && hi == 0);
+
+    /* an EDID that claims more extensions than the buffer holds */
+    len = sf_edid(e, 3, 0x00, 56, 75, 0, 0, 2, 48, 120);
+    e[126] = 2;
+    sf_sum(e);
+    cmds0 = SF.cea_cmds;
+    memset(&v, 0, sizeof(v));
+    CHECK(dcn32_parse_hdmi_amd_vsdb(dm, e, 128, &v) == -1 && SF.cea_cmds == cmds0);
+    CHECK(dcn32_parse_hdmi_amd_vsdb(dm, e, 256, &v) == 0 && v.freesync_supported && v.max_refresh_rate_hz == 120);
+
+    /* the firmware: a NACKed chunk is logged and the parse goes on (as
+     * amdgpu); an unknown answer or a command that does not run (DMCUB in
+     * D3) fails the parse, told apart from "no AMD VSDB" */
+    SF.nack_at = 1 + 16;
+    memset(&v, 0, sizeof(v));
+    CHECK(dcn32_parse_hdmi_amd_vsdb(dm, e, 256, &v) == 0 && v.freesync_supported);
+    SF.nack_at = 0;
+    SF.unknown_reply = 1;
+    cmds0 = SF.cea_cmds;
+    memset(&v, 0, sizeof(v));
+    CHECK(dcn32_parse_hdmi_amd_vsdb(dm, e, 256, &v) == RD_AMD_VSDB_PARSER_FAILED && SF.cea_cmds == cmds0 + 1);
+    SF.unknown_reply = 0;
+    dmub32_set_power_state(dm, RD_DMUB_POWER_STATE_D3);
+    cmds0 = SF.cea_cmds;
+    dcn32_update_freesync_caps(&c, e, 256, RD_SIGNAL_HDMI_TYPE_A, 0, RD_ADAPTIVE_SYNC_TYPE_NONE, dm);
+    CHECK(c.hdmi_vsdb == RD_AMD_VSDB_PARSER_FAILED && !c.freesync_capable && SF.cea_cmds == cmds0);
+    dmub32_set_power_state(dm, RD_DMUB_POWER_STATE_D0);
+    dcn32_update_freesync_caps(&c, e, 256, RD_SIGNAL_HDMI_TYPE_A, 0, RD_ADAPTIVE_SYNC_TYPE_NONE, dm);
+    CHECK(c.hdmi_vsdb == 0 && c.freesync_capable);
+
+    /* a VSDB rate past 4294 Hz: the uHz clamp, no wrap */
+    c.min_vfreq = 48;
+    c.max_vfreq = 5000;
+    c.freesync_capable = 1;
+    m.h_active = 160; m.v_active = 90; m.h_total = 200; m.v_total = 100; m.v_front = 2;
+    m.pixel_khz = 200u * 100u * 4500u / 1000u;   /* 4500 Hz */
+    dcn32_vrr_stream_from_mode(&s, &m, RD_SIGNAL_HDMI_TYPE_A);
+    memset(&crtc, 0, sizeof(crtc));
+    dcn32_freesync_update_stream(&crtc, &s, &c, &m, 1);
+    CHECK(crtc.vrr_supported && crtc.config.max_refresh_in_uhz == 4294000000u &&
+          crtc.config.min_refresh_in_uhz == 48000000u && crtc.vrr.max_refresh_in_uhz == 4294000000u);
 }
 
 static void test_dc_freesync(rdna3_dev *dev, rdna3_dmub *dm)
@@ -368,11 +499,36 @@ static void test_dc_freesync(rdna3_dev *dev, rdna3_dmub *dm)
         /* above DCN 3.2's 15-bit v_total: refused (no set_long_vtotal), nothing written */
         a.v_total_max = RD_DCN32_MAX_V_TOTAL + 1;
         CHECK(!dcn32_stream_adjust_vmin_vmax(dev, o, &a) && S.reg[OTG(regOTG0_OTG_V_TOTAL_MAX, o)] == 1524);
-        /* zero (DRR off): only the manual trigger set up, the static screen untouched */
+        /* zero (DRR off): optc32_set_drr has no "off" branch (optc31's does):
+         * V_TOTAL_MIN / MAX stay, the manual trigger stays armed (MIN_SEL /
+         * MAX_SEL, TRIGA mask), the static screen control is untouched */
         S.reg[OTG(regOTG0_OTG_STATIC_SCREEN_CONTROL, o)] = 0;
+        S.reg[OTG(regOTG0_OTG_V_TOTAL_CONTROL, o)] = 0;
         memset(&a, 0, sizeof(a));
         dcn32_set_drr(dev, o, &a);
-        CHECK(S.reg[OTG(regOTG0_OTG_STATIC_SCREEN_CONTROL, o)] == 0 && S.reg[OTG(regOTG0_OTG_V_TOTAL_MAX, o)] == 1524);
+        k = S.reg[OTG(regOTG0_OTG_V_TOTAL_CONTROL, o)];
+        CHECK(S.reg[OTG(regOTG0_OTG_STATIC_SCREEN_CONTROL, o)] == 0 && S.reg[OTG(regOTG0_OTG_V_TOTAL_MAX, o)] == 1524 &&
+              S.reg[OTG(regOTG0_OTG_V_TOTAL_MIN, o)] == 1524 &&
+              (k & OTG0_OTG_V_TOTAL_CONTROL__OTG_V_TOTAL_MIN_SEL_MASK) &&
+              (k & OTG0_OTG_V_TOTAL_CONTROL__OTG_V_TOTAL_MAX_SEL_MASK) &&
+              ((k & OTG0_OTG_V_TOTAL_CONTROL__OTG_SET_V_TOTAL_MIN_MASK_MASK) >>
+               OTG0_OTG_V_TOTAL_CONTROL__OTG_SET_V_TOTAL_MIN_MASK__SHIFT) == 2);
     }
+    /* a resume's dcn32_state_restore brings DRR back: the head snapshot
+     * (rd_clone_otg) holds V_TOTAL_MIN / MAX / MID / CONTROL and the static
+     * screen control, and the kext saves it after the mode set's DRR */
+    {
+        static const uint16_t need[] = { regOTG0_OTG_V_TOTAL_MIN, regOTG0_OTG_V_TOTAL_MAX, regOTG0_OTG_V_TOTAL_MID,
+                                         regOTG0_OTG_V_TOTAL_CONTROL, regOTG0_OTG_STATIC_SCREEN_CONTROL };
+        uint32_t i, j, found = 0;
+        for (i = 0; i < sizeof(need) / sizeof(need[0]); i++)
+            for (j = 0; j < sizeof(rd_clone_otg) / sizeof(rd_clone_otg[0]); j++)
+                if (rd_clone_otg[j] == need[i]) {
+                    found++;
+                    break;
+                }
+        CHECK(found == sizeof(need) / sizeof(need[0]));
+    }
+    test_dc_freesync_edges(dm);
     printf("sim_navi32: FreeSync tests ran (%u EDID CEA commands, %u parser results)\n", SF.cea_cmds, SF.cea_results);
 }
