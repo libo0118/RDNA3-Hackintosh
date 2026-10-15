@@ -249,7 +249,7 @@ public:
         return kIOReturnSuccess;
     }
     bool fetchEdid();
-    /* gamma: to the core's MPCC output gamma (rdna3gamma=1); success either way */
+    /* gamma: to the core's MPCC output gamma (on unless rdna3gamma=0); success either way */
     IOReturn setGammaTable(UInt32 channels, UInt32 count, UInt32 width, void *data) override
     {
         return gammaToCore(channels, count, width, data);
@@ -442,8 +442,8 @@ bool RDNA3Framebuffer::start(IOService *provider)
     /* IOFramebuffer hands gamma tables to setGammaTable only when the
      * framebuffer names their format (card run 26: no call without these,
      * the table went nowhere): 256 entries of 12 bits per channel, what the
-     * core resamples onto the MPCC OGAM curve */
-    if (fDcn && bootArgOn("rdna3gamma")) {
+     * core resamples onto the MPCC OGAM curve; on unless rdna3gamma=0 */
+    if (fDcn && rd3_gamma_on()) {
         setProperty(kIOFBGammaWidthKey, 12ull, 32);
         setProperty(kIOFBGammaCountKey, 256ull, 32);
         setProperty("IOFBGammaHeaderSize", 0ull, 32);

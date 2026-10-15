@@ -924,7 +924,8 @@ static void rd3AccelIopHome(IOService *fb, unsigned head);
  * without the accelerator setGammaTable reaches the framebuffer and the
  * MPCC OGAM works. IOAcceleratorFamily2's own implementation presumably
  * hands such a transaction's gamma to the pipe's IOFramebuffer, so with
- * rdna3gamma=1 it gets the transaction instead of the "done" we answer.
+ * gamma on (the default; rdna3gamma=0 turns it off) it gets the
+ * transaction instead of the "done" we answer.
  * Card run 34: from the Auxiliary KC the weak imports of
  * IOAccelLegacyDisplayPipe / IOAccelDisplayPipe::performTransaction passed
  * the OSKextSymbolIsResolved test although neither symbol exists on 24H32,
@@ -966,7 +967,7 @@ static long rd3PerformTransactionSlot(void)
         return -1;
     return (long)(raw.ptr - 1);
 }
-static int    gIopGammaBase = -1;   /* rdna3gamma, read on first use */
+static int    gIopGammaBase = -1;   /* rd3_gamma_on(), read on first use */
 static SInt64 gCntIopEmptyBase, gCntIopEmptyBaseErr;
 static IOReturn rd3AccelIopGammaToBase(void *pipe, IOAccelDisplayPipeTransaction2 *txn, bool *handled)
 {
@@ -975,7 +976,7 @@ static IOReturn rd3AccelIopGammaToBase(void *pipe, IOAccelDisplayPipeTransaction
     const char *which = "IOAccelLegacyDisplayPipe vtable";
     *handled = false;
     if (gIopGammaBase < 0)
-        gIopGammaBase = rd3_arg("rdna3gamma", 0) ? 1 : 0;
+        gIopGammaBase = rd3_gamma_on() ? 1 : 0;
     if (!gIopGammaBase)
         return kIOReturnSuccess;
     void *const *vt = rd3LegacyPipeVtable();
@@ -990,7 +991,7 @@ static IOReturn rd3AccelIopGammaToBase(void *pipe, IOAccelDisplayPipeTransaction
     static SInt32 gIopBaseLogs;
     if (!fn) {
         if (OSIncrementAtomic(&gIopBaseLogs) < 2)
-            ALOG("iop: rdna3gamma=1 but IOAcceleratorFamily2 gives no performTransaction (vtable 0x%llx, slot %ld, unresolved 0x%llx): plane-less transaction answered as before",
+            ALOG("iop: gamma on but IOAcceleratorFamily2 gives no performTransaction (vtable 0x%llx, slot %ld, unresolved 0x%llx): plane-less transaction answered as before",
                  (unsigned long long)(uintptr_t)vt, slot, (unsigned long long)(uintptr_t)gOSKextUnresolved);
         return kIOReturnSuccess;
     }
@@ -1025,7 +1026,7 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
                 ALOG("iop: empty #%lld +0x%03x: %08x %08x %08x %08x %08x %08x %08x %08x", (long long)e, o * 4,
                      w[o], w[o + 1], w[o + 2], w[o + 3], w[o + 4], w[o + 5], w[o + 6], w[o + 7]);
         }
-        /* rdna3gamma=1: the base class gets it (rd3AccelIopGammaToBase) */
+        /* gamma on (rdna3gamma=0 off): the base class gets it (rd3AccelIopGammaToBase) */
         bool handled;
         const IOReturn br = rd3AccelIopGammaToBase(this, txn, &handled);
         return handled ? br : kIOReturnSuccess;
@@ -1209,8 +1210,8 @@ SYSCTL_UINT(_debug, OID_AUTO, rdna3accel_heads_piped, CTLFLAG_RD | CTLFLAG_LOCKE
 static_assert(kRd3MaxFB == 4, "kRd3MaxFB changed: add debug.rdna3accel_iop_ok_h<i> for every new head");
 RD3ACCEL_CNT(rdna3accel_iop_fail,         gCntIopFail,        "K3: transactions refused (see the capped iop: log lines)");
 RD3ACCEL_CNT(rdna3accel_iop_empty,        gCntIopEmpty,       "K3: transactions with no plane (gamma/options only)");
-RD3ACCEL_CNT(rdna3accel_iop_empty_base,   gCntIopEmptyBase,   "rdna3gamma=1: plane-less transactions the base class performed");
-RD3ACCEL_CNT(rdna3accel_iop_empty_base_err, gCntIopEmptyBaseErr, "rdna3gamma=1: plane-less transactions the base class refused");
+RD3ACCEL_CNT(rdna3accel_iop_empty_base,   gCntIopEmptyBase,   "gamma on: plane-less transactions the base class performed");
+RD3ACCEL_CNT(rdna3accel_iop_empty_base_err, gCntIopEmptyBaseErr, "gamma on: plane-less transactions the base class refused");
 RD3ACCEL_CNT(rdna3accel_iop_src_res,      gCntIopSrcRes,      "K3: frames sourced from our VRAM resource");
 RD3ACCEL_CNT(rdna3accel_iop_src_surf,     gCntIopSrcSurf,     "K3: frames sourced from the IOSurface memory");
 RD3ACCEL_CNT(rdna3accel_iop_blank,        gCntIopBlank,       "K6: frames copied whose 64 samples were all ONE colour (a blank frame)");

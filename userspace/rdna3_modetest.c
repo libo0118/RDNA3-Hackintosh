@@ -13,7 +13,7 @@
  *                                    modes; after each switch DRMINFO --scanout
  *                                    DIR/mode-d<D>-<W>x<H> looks at the pipes;
  *                                    then all back to native
- *   rdna3_modetest gamma DRMINFO DIR the output gamma (rdna3gamma=1): every display
+ *   rdna3_modetest gamma DRMINFO DIR the output gamma (off with rdna3gamma=0): every display
  *                                    gets a dark table, an identity table, then
  *                                    its ColorSync settings back; DRMINFO
  *                                    --scanout DIR/gamma-<step> reads each pipe's
@@ -478,7 +478,7 @@ static int gamma_test(const char *drminfo, const char *dir)
         return 0;
     }
     printf("GAMMA: FAIL - %d of %d pipe(s) moved with the dark table, %d came back (%s)\n", moved, pipes, back,
-           moved < pipes ? "no gamma reaches the pipe: rdna3gamma=1? fb/core log 'gamma'"
+           moved < pipes ? "no gamma reaches the pipe: rdna3gamma=0? fb/core log 'gamma'"
                          : "the restore did not reach the pipe");
     return 1;
 }

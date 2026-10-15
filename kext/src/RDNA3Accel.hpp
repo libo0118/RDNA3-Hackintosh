@@ -428,7 +428,7 @@ private:
     void          displayReadVbios();
     static uint32_t dispMmioRd(void *ctx, uint64_t off);
     static void     dispMmioWr(void *ctx, uint64_t off, uint32_t v);
-    /* output gamma from the framebuffer (rdna3DisplayGamma, rdna3gamma=1) */
+    /* output gamma from the framebuffer (rdna3DisplayGamma; off with rdna3gamma=0) */
     IOReturn      displayGamma(struct RD3KDisplayGamma *g);
     void          displayGammaReload(uint32_t head);   /* fDispLock held */
     uint32_t      fGammaCalls[4] = {};
