@@ -225,6 +225,12 @@ private:
     /* after a reset or a resume that lost VRAM: the clients' GPUVM ranges
      * into the rebuilt page tables (fDrmLock held) */
     void          drmVmReplayIfNeeded();
+    /* amdgpu_inc_vram_lost for every VRAM loss the DRM was not told of yet
+     * (rdna3_drm_device_vram_lost): after a reset, and after a resume once
+     * vramRestore decided (a loss every evicted range came back from is
+     * not one). fDrmLock held. */
+    void          drmVramLostSync();
+    uint32_t      fVramLostTold = 0;     /* the losses the DRM counted */
     static void  *drmZalloc(void *ctx, size_t n);
     static void   drmFreeMem(void *ctx, void *p, size_t n);
     static int    drmBoAlloc(void *ctx, rdna3_bo *bo);

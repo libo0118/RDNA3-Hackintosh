@@ -2012,8 +2012,9 @@ uint32_t RDNA3Bringup::vmQuery(void *p)
         fl |= AMDGPU_CTX_QUERY2_FLAGS_GUILTY;
     if (v->resetSeen != fResetCount)
         fl |= AMDGPU_CTX_QUERY2_FLAGS_RESET;
+    /* VRAMLOST is the DRM's, per context (rdna3_drm_device_vram_lost) */
     if (v->vramLostSeen != fVramLostCount)
-        fl |= AMDGPU_CTX_QUERY2_FLAGS_RESET | AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
+        fl |= AMDGPU_CTX_QUERY2_FLAGS_RESET;
     return fl;
 }
 

@@ -234,6 +234,7 @@ static uint32_t g_bl_handle;
 /* g_shadow: an AMDGPU_CHUNK_ID_CP_GFX_SHADOW chunk of g_shadow_dw dwords */
 static struct drm_amdgpu_cs_chunk_cp_gfx_shadow *g_shadow;
 static uint32_t g_shadow_dw;
+static uint32_t g_cs_ctx;   /* cs.in.ctx_id */
 static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip, uint32_t in_sobj,
                      uint32_t out_sobj, uint64_t *handle)
 {
@@ -283,6 +284,7 @@ static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip
     cs.in.num_chunks = n;
     cs.in.chunks = (uint64_t)(uintptr_t)chunk_ptrs;
     cs.in.bo_list_handle = g_bl_handle;
+    cs.in.ctx_id = g_cs_ctx;
     r = rdna3_drm_ioctl(f, RD_NR_AMDGPU(DRM_AMDGPU_CS), &cs, sizeof(cs));
     if (!r && handle)
         *handle = cs.out.handle;
@@ -616,7 +618,8 @@ int main(void)
         c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = id;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == -RD_EINVAL);
-        /* reset state comes from the OS through vm_query (amdgpu_ctx_query2) */
+        /* reset state comes from the OS through vm_query (amdgpu_ctx_query2);
+         * VRAMLOST is the context's own, the VM's is ignored */
         memset(&c, 0, sizeof(c));
         c.in.op = AMDGPU_CTX_OP_ALLOC_CTX;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
@@ -625,7 +628,8 @@ int main(void)
         h_query_flags = AMDGPU_CTX_QUERY2_FLAGS_RESET | AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
         memset(&c, 0, sizeof(c));
         c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = id;
-        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 && c.out.state.flags == h_query_flags);
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
+              c.out.state.flags == AMDGPU_CTX_QUERY2_FLAGS_RESET);
         memset(&c, 0, sizeof(c));
         c.in.op = AMDGPU_CTX_OP_QUERY_STATE; c.in.ctx_id = id;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
@@ -639,6 +643,58 @@ int main(void)
         dev.ops.vm_query = NULL;
         memset(&c, 0, sizeof(c));
         c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = id;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+    }
+    /* VRAM lost for good (amdgpu_inc_vram_lost): the counter, and the
+     * contexts made before it report VRAMLOST (amdgpu_ctx_query2:
+     * ctx->generation != amdgpu_vm_generation); one made after does not */
+    {
+        union drm_amdgpu_ctx c;
+        uint32_t before, after, lost = 7;
+        CHECK(info(f, AMDGPU_INFO_VRAM_LOST_COUNTER, &lost, 4) == 0 && lost == 0);
+        CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &before) == 0);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 && c.out.state.flags == 0);
+        rdna3_drm_device_vram_lost(&dev);
+        CHECK(info(f, AMDGPU_INFO_VRAM_LOST_COUNTER, &lost, 4) == 0 && lost == 1);
+        CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &after) == 0 && after != before);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
+              c.out.state.flags == AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = after;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 && c.out.state.flags == 0);
+        /* QUERY_STATE (amdgpu_ctx_query) knows only resets */
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
+              c.out.state.reset_status == AMDGPU_CTX_NO_RESET);
+        /* a context id freed and handed out again records the new count */
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+        CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &before) == 0);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 && c.out.state.flags == 0);
+        /* a second loss: the context made between the two sees it */
+        rdna3_drm_device_vram_lost(&dev);
+        CHECK(info(f, AMDGPU_INFO_VRAM_LOST_COUNTER, &lost, 4) == 0 && lost == 2);
+        {
+            uint64_t l64 = ~0ull;   /* 4 bytes, whatever the buffer (min(size, 4u)) */
+            CHECK(info(f, AMDGPU_INFO_VRAM_LOST_COUNTER, &l64, 8) == 0 &&
+                  (uint32_t)l64 == 2 && (uint32_t)(l64 >> 32) == 0xffffffffu);
+        }
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_QUERY_STATE2; c.in.ctx_id = after;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0 &&
+              c.out.state.flags == AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST);
+        memset(&c, 0, sizeof(c));
+        c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = before;
+        CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+        c.in.ctx_id = after;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
     }
     /* context priorities (amdgpu_ctx_ioctl / amdgpu_ctx_priority_permit) and
@@ -1006,6 +1062,28 @@ int main(void)
         CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED);
         h_query_flags = AMDGPU_CTX_QUERY2_FLAGS_RESET;
         dev.ops.vm_query = NULL;
+        /* amdgpu_cs_pass1: a context made before VRAM was lost submits
+         * nothing more (-ECANCELED); one made after gets through */
+        {
+            uint32_t old_ctx, new_ctx;
+            CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &old_ctx) == 0);
+            g_cs_ctx = old_ctx;
+            CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            rdna3_drm_device_vram_lost(&dev);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED);
+            CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &new_ctx) == 0);
+            g_cs_ctx = new_ctx;
+            CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_cs_ctx = 0;
+            {
+                union drm_amdgpu_ctx c;
+                memset(&c, 0, sizeof(c));
+                c.in.op = AMDGPU_CTX_OP_FREE_CTX; c.in.ctx_id = old_ctx;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+                c.in.ctx_id = new_ctx;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
+            }
+        }
         CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);   /* not dwords */
         memset(&sc, 0, sizeof(sc));
         CHECK(IOCTL(f, RD_NR_SYNCOBJ_CREATE, sc) == 0);

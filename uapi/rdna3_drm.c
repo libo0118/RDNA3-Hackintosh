@@ -377,6 +377,7 @@ static void exports_gc(rdna3_drm_device *dev, const struct rdna3_drm_file *closi
 static void userq_mgr_fini(struct rdna3_drm_file *f);
 static void seq64_unmap(struct rdna3_drm_file *f);
 static void seq64_fini(rdna3_drm_device *dev);
+static int ctx_vram_lost(const struct rdna3_drm_file *f, uint32_t ctx_id);
 
 /* user fence BOs whose job finished can go (amdgpu_job_free drops uf_bo) */
 static void uf_reap(rdna3_drm_device *dev, int all)
@@ -1471,6 +1472,10 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
     /* amdgpu_cs_submit: a guilty context never runs again */
     if (ops->vm_query && f->vm && (ops->vm_query(ops->ctx, f->vm) & AMDGPU_CTX_QUERY2_FLAGS_GUILTY))
         return -RD_ECANCELED;
+    /* amdgpu_cs_pass1: ctx->generation != the job's generation - a context
+     * made before VRAM was lost submits nothing more; a new one does */
+    if (ctx_vram_lost(f, ctx))
+        return -RD_ECANCELED;
 
     for (i = 0; i < cs->in.num_chunks; i++) {
         uint64_t cptr;
@@ -2339,6 +2344,22 @@ int32_t rdna3_drm_ctx_priority(const rdna3_drm_file *f, uint32_t ctx_id)
                                                                      : f->ctx_override_prio[ctx_id];
 }
 
+/* a live context made before the last VRAM loss: ctx->generation !=
+ * amdgpu_vm_generation (its high half is adev->vram_lost_counter) */
+static int ctx_vram_lost(const rdna3_drm_file *f, uint32_t ctx_id)
+{
+    return ctx_id && ctx_id < RD_MAX_CTX && f->ctx_used[ctx_id] &&
+           f->ctx_vram_lost[ctx_id] != f->dev->vram_lost_counter;
+}
+
+/* Ported from amdgpu_inc_vram_lost (amdgpu_device_gpu_recover ->
+ * amdgpu_device_reinit_after_reset, once amdgpu_device_check_vram_lost
+ * found the reset magic gone) */
+void rdna3_drm_device_vram_lost(rdna3_drm_device *dev)
+{
+    dev->vram_lost_counter++;
+}
+
 static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
 {
     uint32_t id = c->in.ctx_id, i;
@@ -2358,6 +2379,9 @@ static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
                 f->ctx_used[i] = 1;
                 f->ctx_init_prio[i] = (int16_t)prio;
                 f->ctx_override_prio[i] = AMDGPU_CTX_PRIORITY_UNSET;
+                /* ctx->generation = amdgpu_vm_generation: the VRAM loss
+                 * count the context was made under */
+                f->ctx_vram_lost[i] = f->dev->vram_lost_counter;
                 f->vcn_entity[i] = 0;
                 f->vcn_entity_jobs[i] = 0;
                 zero(c, sizeof(*c));
@@ -2374,13 +2398,18 @@ static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
         return 0;
     case AMDGPU_CTX_OP_QUERY_STATE:
     case AMDGPU_CTX_OP_QUERY_STATE2: {
-        /* amdgpu_ctx_query / amdgpu_ctx_query2: the reset state lives
-         * with the VM here (one VM per file, one VMID per VM) */
+        /* amdgpu_ctx_query / amdgpu_ctx_query2: the reset and guilty
+         * state lives with the VM here (one VM per file, one VMID per VM);
+         * VRAMLOST is the context's own: ctx->generation !=
+         * amdgpu_vm_generation, i.e. VRAM was lost after the context was
+         * made (rdna3_drm_device_vram_lost) */
         uint32_t fl = 0, op = c->in.op;
         if (!id || id >= RD_MAX_CTX || !f->ctx_used[id])
             return -RD_EINVAL;
         if (f->dev->ops.vm_query && f->vm)
-            fl = f->dev->ops.vm_query(f->dev->ops.ctx, f->vm);
+            fl = f->dev->ops.vm_query(f->dev->ops.ctx, f->vm) & ~(uint32_t)AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
+        if (ctx_vram_lost(f, id))
+            fl |= AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST;
         zero(c, sizeof(*c));
         if (op == AMDGPU_CTX_OP_QUERY_STATE2) {
             c->out.state.flags = fl;
@@ -3958,9 +3987,16 @@ static int info_ioctl(rdna3_drm_file *f, struct drm_amdgpu_info *in)
         return info_out(f, in, &di, sizeof(di));
     }
     case AMDGPU_INFO_VRAM_LOST_COUNTER:
+        /* amdgpu_info_ioctl: atomic_read(&adev->vram_lost_counter), 4 bytes */
+        return info_out(f, in, &dev->vram_lost_counter, 4);
     case AMDGPU_INFO_NUM_EVICTIONS:
     case AMDGPU_INFO_NUM_VRAM_CPU_PAGE_FAULTS:
     case AMDGPU_INFO_NUM_BYTES_MOVED: {
+        /* adev->num_evictions / num_vram_cpu_page_faults / num_bytes_moved
+         * count TTM moves and CPU faults on VRAM BOs; nothing here moves a
+         * BO (SET_PLACEMENT migration is not there yet) or faults one in,
+         * and the sleep's VRAM copy (RDNA3Evict.cpp) works on ranges, not
+         * BOs: 0 */
         uint64_t z = 0;
         return info_out(f, in, &z, 8);
     }

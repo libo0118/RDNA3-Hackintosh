@@ -437,6 +437,30 @@ void RDNA3Accel::drmVmReplayIfNeeded()
     }
 }
 
+void RDNA3Accel::drmVramLostSync()
+{
+    uint32_t n;
+    if (!fBringup || !fDrm)
+        return;
+    n = fBringup->vramLostCount();
+    if (n < fVramLostTold) {
+        /* not expected: forgetVramLoss runs before the sync. The next
+         * loss is then told again rather than missed */
+        LOG("VRAM lost count went back (%u -> %u) after the clients were told", fVramLostTold, n);
+        fVramLostTold = n;
+        return;
+    }
+    if (fVramLostTold == n)
+        return;
+    while (fVramLostTold < n) {
+        rdna3_drm_device_vram_lost(fDrm);
+        fVramLostTold++;
+    }
+    LOG("VRAM lost for the clients: AMDGPU_INFO_VRAM_LOST_COUNTER %u, older contexts see VRAMLOST "
+        "and their submissions fail with -ECANCELED", fDrm->vram_lost_counter);
+    setNumber("RDNA3,VRAMLostCounter", fDrm->vram_lost_counter);
+}
+
 /* Called from rdna3_drm_ioctl, i.e. with fDrmLock held. The sleep runs
  * without it, so one client's wait (up to the 10 s cap) does not stall the
  * others; the UAPI holds no pointers across it (fences by value, syncobjs
@@ -455,6 +479,7 @@ int RDNA3Accel::drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq
     if (cap)
         r = a->fBringup->fenceSignaled(ip, ring, seq) ? 0 : a->fBringup->recoverHang(ip, ring, seq);
     a->drmVmReplayIfNeeded();
+    a->drmVramLostSync();   /* a reset that lost VRAM: nothing brings it back */
     return r;
 }
 
@@ -518,6 +543,7 @@ int RDNA3Accel::pmCtl(const rdna3_pmctl_req *rq, rdna3_pmctl_reply *rp, bool adm
     if (fBringup) {
         r = fBringup->pmctl(rq, rp, admin);
         drmVmReplayIfNeeded();   /* rdna3baco: the chip went through BACO */
+        drmVramLostSync();
     } else {
         bzero(rp, sizeof(*rp));
         rp->op = rq->op;

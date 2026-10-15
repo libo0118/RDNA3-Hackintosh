@@ -161,6 +161,7 @@ IOReturn RDNA3Accel::setPowerState(unsigned long state, IOService *)
         bool ok = fBringup->resumeAfterPowerLoss();
         drmVmReplayIfNeeded();
         vramRestore(ok && fBringup->lastResumeLostVram());
+        drmVramLostSync();   /* what vramRestore could not bring back */
         if (ok && fDrm)
             rdna3_drm_device_userq_resume(fDrm);   /* amdgpu_userq_resume */
         IOLockUnlock(fDrmLock);

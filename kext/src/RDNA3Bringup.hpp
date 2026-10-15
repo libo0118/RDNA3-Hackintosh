@@ -170,6 +170,9 @@ public:
      * came back, the clients are not told (amdgpu_device_resume) */
     bool     lastResumeLostVram() const { return fLastResumeVramLost; }
     bool     lastVramLost() const { return fLastVramLost; }   /* the last checkVramLost */
+    /* VRAM losses so far (adev->vram_lost_counter), less the resumes whose
+     * contents all came back (forgetVramLoss) */
+    uint32_t vramLostCount() const { return fVramLostCount; }
     /* the MES scheduler started again after a reset and forgot its user
      * queues: the DRM puts them back (rdna3_drm_device_userq_reset);
      * true once, *vramLost: whether that reset lost VRAM */

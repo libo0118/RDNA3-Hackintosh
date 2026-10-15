@@ -361,8 +361,9 @@ typedef struct rdna3_drm_ops {
     int   (*fence_wait)(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq, uint64_t abs_ns);
     /* GPU reset / fault state of a VM for AMDGPU_CTX_OP_QUERY_STATE*:
      * AMDGPU_CTX_QUERY2_FLAGS_RESET (a reset happened since the VM was
-     * made), _VRAMLOST, _GUILTY (one of its jobs hung or faulted). Optional;
-     * a guilty VM's submissions fail with -ECANCELED like amdgpu's. */
+     * made), _GUILTY (one of its jobs hung or faulted). Optional; a guilty
+     * VM's submissions fail with -ECANCELED like amdgpu's. _VRAMLOST is
+     * ignored: the UAPI keeps it per context (rdna3_drm_device_vram_lost). */
     uint32_t (*vm_query)(void *ctx, void *vm);
     /* GEM_USERPTR: wire the client's pages [uaddr, uaddr + bo->size) for the
      * GPU (file_os = rdna3_drm_file.os, the owning task); optional.
@@ -481,6 +482,9 @@ typedef struct rdna3_drm_device {
     uint32_t vcn_num_inst, vcn_harvest;
     uint32_t vcn_inst_ready;      /* instances whose unified ring runs (hw rings of VCN_ENC) */
     uint32_t jpeg_ready;
+    /* adev->vram_lost_counter: AMDGPU_INFO_VRAM_LOST_COUNTER, and what each
+     * context recorded at creation (rdna3_drm_device_vram_lost) */
+    uint32_t vram_lost_counter;
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {
@@ -501,6 +505,10 @@ typedef struct rdna3_drm_file {
     /* amdgpu_ctx init_priority / override_priority (AMDGPU_CTX_PRIORITY_*,
      * override UNSET until DRM_AMDGPU_SCHED sets one) by context id */
     int16_t  ctx_init_prio[RD_MAX_CTX], ctx_override_prio[RD_MAX_CTX];
+    /* the device's vram_lost_counter when each context was made (the
+     * high half of amdgpu_ctx.generation): QUERY_STATE2 _VRAMLOST and CS
+     * -ECANCELED once VRAM was lost after it */
+    uint32_t ctx_vram_lost[RD_MAX_CTX];
     uint32_t id;                       /* RD_NR_XNU_FILE_ID */
     struct rdna3_drm_file *next_file;  /* rdna3_drm_device.files */
     /* amdgpu_userq_mgr: the file's user queues [RD_MAX_USERQ] (index = id - 1,
@@ -549,6 +557,13 @@ void rdna3_drm_device_set_ring_ready(rdna3_drm_device *dev, uint32_t ip, uint32_
 /* VRAM (and every page table) was lost and each live VM has a new empty
  * root: map every client's ranges again; returns the mappings that failed */
 int  rdna3_drm_device_vm_replay(rdna3_drm_device *dev);
+/* amdgpu_inc_vram_lost: the clients' VRAM contents are gone for good (a
+ * reset or a resume found the reset magic lost and nothing put them back).
+ * AMDGPU_INFO_VRAM_LOST_COUNTER counts up; every context made before it
+ * reports AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST and its submissions fail with
+ * -ECANCELED (amdgpu_cs_pass1); contexts made after it work. Once per
+ * loss, device lock held. */
+void rdna3_drm_device_vram_lost(rdna3_drm_device *dev);
 /* every live BO placed in VRAM, once each (a BO several clients hold, an
  * export, the seq64 slots): amdgpu_device_evict_resources' list. The
  * callback must not free BOs. */
