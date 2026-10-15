@@ -168,6 +168,7 @@ static int job_test(int fd, int gfx, int hang)
     struct drm_amdgpu_cs_chunk_ib ib;
     union drm_amdgpu_cs cs;
     union drm_amdgpu_wait_cs w;
+    union drm_amdgpu_ctx cx;
     struct timespec ts;
     /* a VA of its own per job in this process: '--dma-test --gfx-test'
      * runs two, and the first BO stays mapped (amdgpu refuses a second map
@@ -245,7 +246,12 @@ static int job_test(int fd, int gfx, int hang)
     ch.length_dw = sizeof(ib) / 4;
     ch.chunk_data = (uint64_t)(uintptr_t)&ib;
     chunk_ptr = (uint64_t)(uintptr_t)&ch;
+    /* the CS needs a live context (amdgpu_cs_parser_init: amdgpu_ctx_get) */
+    memset(&cx, 0, sizeof(cx));
+    cx.in.op = AMDGPU_CTX_OP_ALLOC_CTX;
+    if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_CTX), cx)) { perror("CTX"); return 1; }
     memset(&cs, 0, sizeof(cs));
+    cs.in.ctx_id = cx.out.alloc.ctx_id;
     cs.in.num_chunks = 1;
     cs.in.chunks = (uint64_t)(uintptr_t)&chunk_ptr;
     if (IOCTL(fd, RD_NR_AMDGPU(DRM_AMDGPU_CS), cs)) {
@@ -257,6 +263,7 @@ static int job_test(int fd, int gfx, int hang)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     memset(&w, 0, sizeof(w));
     w.in.handle = cs.out.handle;
+    w.in.ctx_id = cx.out.alloc.ctx_id;
     w.in.ip_type = ib.ip_type;
     w.in.timeout = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec +
                    (hang ? 30000000000ull : 2000000000ull);

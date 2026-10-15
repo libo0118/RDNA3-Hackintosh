@@ -1468,6 +1468,10 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
     zero(&job, sizeof(job));
     if (!cs->in.num_chunks || cs->in.num_chunks > 64)
         return -RD_EINVAL;
+    /* amdgpu_cs_parser_init: amdgpu_ctx_get - no submission without a
+     * live context (id 0 or a freed one is -EINVAL) */
+    if (!ctx || ctx >= RD_MAX_CTX || !f->ctx_used[ctx])
+        return -RD_EINVAL;
     if (cs->in.bo_list_handle && bo_list_find(f, cs->in.bo_list_handle) < 0)
         return -RD_ENOENT;   /* amdgpu_bo_list_get */
     /* amdgpu_cs_submit: a guilty context never runs again */

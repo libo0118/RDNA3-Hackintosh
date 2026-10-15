@@ -243,7 +243,31 @@ static uint32_t g_bl_handle;
 /* g_shadow: an AMDGPU_CHUNK_ID_CP_GFX_SHADOW chunk of g_shadow_dw dwords */
 static struct drm_amdgpu_cs_chunk_cp_gfx_shadow *g_shadow;
 static uint32_t g_shadow_dw;
-static uint32_t g_cs_ctx;   /* cs.in.ctx_id */
+/* cs.in.ctx_id; 0: a context of the file's own (cs_ctx_of), unless
+ * g_cs_ctx_raw sends g_cs_ctx as it is */
+static uint32_t g_cs_ctx;
+static int g_cs_ctx_raw;
+static int ctx_alloc(rdna3_drm_file *f, int32_t prio, uint32_t *id);
+/* a live context of 'f' for submissions that do not care which (the CS
+ * needs one: amdgpu_cs_parser_init's amdgpu_ctx_get) */
+static uint32_t cs_ctx_of(rdna3_drm_file *f)
+{
+    static struct { rdna3_drm_file *f; uint32_t id; } cache[16];
+    uint32_t i, id = 0;
+    for (i = 0; i < 16; i++)
+        if (cache[i].f == f && cache[i].id && f->ctx_used[cache[i].id] && !f->closing &&
+            f->ctx_vram_lost[cache[i].id] == f->dev->vram_lost_counter)   /* not refused */
+            return cache[i].id;
+    if (ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &id))
+        return 0;
+    for (i = 0; i < 16; i++)
+        if (cache[i].f == f || !cache[i].f) {
+            cache[i].f = f;
+            cache[i].id = id;
+            break;
+        }
+    return id;
+}
 static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip, uint32_t in_sobj,
                      uint32_t out_sobj, uint64_t *handle)
 {
@@ -293,7 +317,7 @@ static int cs_submit(rdna3_drm_file *f, uint64_t va, uint32_t bytes, uint32_t ip
     cs.in.num_chunks = n;
     cs.in.chunks = (uint64_t)(uintptr_t)chunk_ptrs;
     cs.in.bo_list_handle = g_bl_handle;
-    cs.in.ctx_id = g_cs_ctx;
+    cs.in.ctx_id = (g_cs_ctx || g_cs_ctx_raw) ? g_cs_ctx : cs_ctx_of(f);
     r = rdna3_drm_ioctl(f, RD_NR_AMDGPU(DRM_AMDGPU_CS), &cs, sizeof(cs));
     if (!r && handle)
         *handle = cs.out.handle;
@@ -1119,6 +1143,18 @@ int main(void)
                 c.in.ctx_id = new_ctx;
                 CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), c) == 0);
             }
+            /* amdgpu_cs_parser_init: no live context, -EINVAL - id 0, a
+             * freed id (the one VRAM loss made stale included) and one
+             * past the table do not get around the refusal */
+            g_cs_ctx_raw = 1;
+            g_cs_ctx = 0;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_cs_ctx = old_ctx;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_cs_ctx = RD_MAX_CTX;
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_cs_ctx_raw = 0;
+            g_cs_ctx = 0;
         }
         CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);   /* not dwords */
         memset(&sc, 0, sizeof(sc));
