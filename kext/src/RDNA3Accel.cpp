@@ -206,8 +206,16 @@ void RDNA3Accel::stop(IOService *provider)
             root->releasePMAssertion(fSleepAssertion);
         fSleepAssertion = 0;
     }
+    if (fBringup && fAccelVm && fDrmLock) {
+        /* while the bring-up still owns it (platformFree comes after the
+         * bring-up is gone and could no longer free it) */
+        IOLockLock(fDrmLock);
+        fBringup->vmDestroy(fAccelVm);
+        fAccelVm = nullptr;
+        IOLockUnlock(fDrmLock);
+    }
     if (fBringup) {
-        fBringup->stopAndFree();
+        fBringup->stopAndFree();   /* frees the orphans' VMs (vmFreeLeftovers) */
         delete fBringup;
         fBringup = nullptr;
     }

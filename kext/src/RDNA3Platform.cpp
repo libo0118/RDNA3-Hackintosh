@@ -81,10 +81,9 @@ void RDNA3Accel::platformVmReady()
     if (fAccelVm)
         fBringup->vmDestroy(fAccelVm);
     fAccelVm = fBringup->vmCreate();
-    if (!fAccelVm) {
+    fAccelVmRefusalLogged = !fAccelVm;
+    if (!fAccelVm)
         LOG("accelerator: no VM at GPUVM start: IOSurface GPU maps fail until one is free");
-        fAccelVmRefusalLogged = true;
-    }
 }
 
 bool RDNA3Accel::platformInit()
@@ -396,6 +395,10 @@ IOReturn RDNA3Accel::platformGpuVa(int op, RD3KGpuVaRequest *g)
                 LOG("accelerator: no VMID or page tables for its VM: IOSurface GPU maps fail until one "
                     "is free (logged once)");
                 fAccelVmRefusalLogged = true;
+            } else if (fAccelVm && fBringup->vmLive(fAccelVm)) {
+                if (fAccelVmRefusalLogged)
+                    LOG("accelerator: its VM has a VMID again");
+                fAccelVmRefusalLogged = false;   /* a later failure logs again */
             }
         }
         /* with the GMC up and no VMID or page tables left there is no VM

@@ -88,6 +88,8 @@ public:
     bool  vmCanOpen(uint32_t uid, bool console);
     /* rdna3_drm_ops.vm_orphaned: the file closed with a job still running */
     void  vmOrphaned(void *vm, bool reclaimable);
+    /* stopAndFree: the VMs nobody destroyed, memory only */
+    void  vmFreeLeftovers();
     void  vmDestroy(void *vm);
     int   vmMap(void *vm, rdna3_bo *bo, uint64_t va, uint64_t offset, uint64_t size,
                 uint32_t flags);

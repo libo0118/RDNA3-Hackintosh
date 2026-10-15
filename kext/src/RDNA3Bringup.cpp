@@ -310,6 +310,7 @@ void RDNA3Bringup::stopAndFree()
     fDmub = nullptr;
     if (fRom) IOFree(fRom, RD_VBIOS_MAX_LEN);
     fVmReady = false;
+    vmFreeLeftovers();   /* before the table pool goes */
     if (fPtPool) IOFree(fPtPool, sizeof(*fPtPool));
     fPtPool = nullptr;
     if (fMes) IOFree(fMes, sizeof(*fMes));
@@ -3030,8 +3031,8 @@ uint32_t RDNA3Bringup::vmidsFree() const
 void RDNA3Bringup::vmOrphaned(void *p, bool reclaimable)
 {
     RDNA3Vm *v = (RDNA3Vm *)p;
-    if (!v || v->orphaned)
-        return;
+    if (!v || v->orphaned || !v->live)
+        return;   /* a record-only VM holds no VMID */
     v->orphaned = true;
     fVmidsLeaked++;
     publish("RDNA3,VMIDsLeaked", fVmidsLeaked);
@@ -3039,6 +3040,26 @@ void RDNA3Bringup::vmOrphaned(void *p, bool reclaimable)
          v->owner[0] ? v->owner : "?", v->ownerPid, v->vmid,
          reclaimable ? "until the job is done (a later GPU reset ends it)" : "for good (no orphan slot)",
          fVmidsLeaked);
+}
+
+/* the kext stops: VMs nobody destroyed - orphans whose job never finished,
+ * which rdna3_drm_device_fini can no longer hand to a bring-up - lose
+ * their memory; the hardware is down, the table pool goes after this */
+void RDNA3Bringup::vmFreeLeftovers()
+{
+    uint32_t n = 0;
+    for (uint32_t id = 1; id < 16; id++) {
+        if (!fVmByVmid[id])
+            continue;
+        IOFree(fVmByVmid[id], sizeof(RDNA3Vm));
+        fVmByVmid[id] = nullptr;
+        fVmPd[id] = 0;
+        n++;
+    }
+    fVmidUsed = 0;
+    fVmidsLeaked = 0;
+    if (n)
+        BLOG("stop: %u VM(s) still held (orphans of hung jobs) freed", n);
 }
 
 bool RDNA3Bringup::vmCanOpen(uint32_t uid, bool console)
