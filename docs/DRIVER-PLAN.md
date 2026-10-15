@@ -105,6 +105,42 @@ needs several rounds, cannot be written far ahead.
 | R5 | Release: signed-as-possible bundle, `package/` installer, OpenCore snippet, versioned artifacts | M | now |
 | R6 | Video VCN 4.0 + VideoToolbox | XL | optional, last |
 
+### N - not built at all (inventory 2026-10-15)
+
+Three code-explorer agents went through the kernel, accel/metal and the
+userspace/installer for what does not exist yet (not what is untested).
+Order is by what a user misses most; "quick" = the first batch. Status:
+open / in work / done (with the commit).
+
+| # | Missing | Where it shows | Size | Status |
+|---|---|---|---|---|
+| N1 | Ordinary apps get no GPU: the Metal plugin loads only into the allow-list (`rdna3mtl-allow.txt`); Safari's WebKit.GPU sandbox refuses `/Library/GPUBundles` | metal/plugin, package | M | quick: in work |
+| N2 | Hardware video: VCN 4.0 decode/encode behind VideoToolbox (= R6); `RD3VideoContext` empty | accel, kext, plugin | XL | open |
+| N3 | Sleep: S3 on the card (P4), S4 hibernate (no code), runtime idle / BACO-on-idle (P5) | kext | L | open |
+| N4 | Other Navi 3x cards: matching is `0x747e1002` only (kext, fb, accel Info.plist, tools); 7900 (Navi 31), 7600 (Navi 33), Pro | all | M-L per chip | open |
+| N5 | HDR / EDR / 10-bit: IOFramebuffer 8-bit only, no HDR static metadata infoframe, accel present path BGRA8 only, no XR pixel formats | fb, hw/dcn32, accel, plugin | L | open |
+| N6 | VRR / FreeSync: `dcn32_set_drr` has no caller, no adaptive-sync / SPD infopackets | hw/dcn32_dp, hw/dcn32_hdmi, RDNA3Display | M-L | quick: in work |
+| N7 | Fan / power / sensors for the user: only root `rdna3_pmctl`; no daemon with profiles, no sensor provider for iStat-style tools, no app | kext, userspace | M | open |
+| N8 | HDMI/DP audio (= S8) | hw, kext | M-L | open |
+| N9 | Vulkan WSI / swapchain (= V3; RADV built with `-Dplatforms=`) | userspace/mesa | L | open |
+| N10 | Metal gaps: GPU-side indirect command buffers, raster order groups, tile shading, MTLIO, cross-process shared events, sparse (resource state encoder), multiple viewports, MSAA depth resolve, profiler counters, Metal 4 | metal/plugin | S..L each | open |
+| N11 | Pixel formats: BGR10_XR / BGRA10_XR, 16-bit packed (B5G6R5, ABGR4, A1BGR5, BGR5A1), GBGR422 / BGRG422; RG8 sRGB maps to a non-sRGB format | metal/plugin | S each | open |
+| N12 | Translator: indirect calls through function pointers (visible function tables) | metal/translator | L | open |
+| N13 | Display: overlays / more than one plane per head | hw/dcn32 | L | open |
+| N14 | Display: YCbCr 4:2:0, MST over UHBR, DP HPD_RX short-pulse IRQ (polled every 2 s now), leaving the DISPCLK /127 divider (OTG add/drop pixel) | hw/dcn32 | S-M each | open |
+| N15 | Gamma (Night Shift, calibration) off by default: `rdna3gamma=1` needed though card run 56 passed it | accel, fb | S | quick: in work |
+| N16 | OpenGL beyond Apple's layer (Zink/EGL), OpenCL, Vulkan video | userspace/mesa | L-XL | open |
+| N17 | GFX/SDMA mid-IB preemption (MCBP), per-queue reset (only soft reset / mode 1) | hw/gfx11, hw/sdma60 | M | open |
+| N18 | `AMDGPU_INFO_VRAM_LOST_COUNTER` (and NUM_EVICTIONS etc.) always 0 although the kext handles VRAM loss | uapi | S | quick: in work |
+| N19 | GART dummy page in system memory, `GEM_OP_SET_PLACEMENT` migration, RESERVE_VMID | hw/gmc11, uapi | S-M | open |
+| N20 | Release: updater / release feed, signed package, macOS 26 in the package (= R4, R5) | package, CI | M | open |
+| N21 | Uninstall leaves the OpenCore EFI copy, its Kernel/Add entries and boot-args (only a NOTE) | package/uninstall.sh | S | quick: in work |
+| N22 | End-user crash/report collection (only the manual `autoreport.sh --standalone`), kext log after a panic | tools, package | M | open |
+| N23 | User docs: FAQ / troubleshooting, supported monitors and features, `rdna3_pmctl`; ROADMAP.md stale; DRIVER-PLAN vs STATUS disagree on `dcn32_init_hw` / `dcn32_init_clocks` | docs | S | open |
+
+Left out on purpose (project decisions): HDCP / secure display TAs,
+eDP / PSR / ABM, USB-C / DPIA, KFD / ROCm, RAS / ECC, XGMI.
+
 ## How much can be written without the card
 
 - **Simulator-verifiable ports** (register sequences from named amdgpu
