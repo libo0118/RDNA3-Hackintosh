@@ -134,7 +134,8 @@ int dcn32_allow_subvp_high_refresh_rate(const rdna3_pstate_ctx *ctx, const rdna3
     r = dcn32_refresh_rate_ceil(p);
     if (r < SUBVP_HIGH_REFRESH_MIN || r > SUBVP_HIGH_REFRESH_MAX)
         return 0;
-    /* no FreeSync here: the single-stream "!allow_freesync" holds */
+    /* the single-stream "!allow_freesync" holds: the kext puts no FreeSync on
+     * a stream with rdna3subvp=1 (rdna3vrr, hw/dcn32_freesync.c) */
     for (i = 0; i < sizeof(subvp_high_refresh_res) / sizeof(subvp_high_refresh_res[0]); i++)
         if (dcn32_check_native_scaling_for_res(p, subvp_high_refresh_res[i].w, subvp_high_refresh_res[i].h))
             return 1;

@@ -22,6 +22,7 @@
 #include "dcn32_hwseq.h"
 #include "gen/dcn_3_2_0_hpo.h"
 #include "dcn32_audio.h"
+#include "dcn32_freesync.h"
 
 #define GET(v, reg, field) (((v) & (uint32_t)reg##__##field##_MASK) >> reg##__##field##__SHIFT)
 #define SET(v, reg, field, x) \
@@ -1488,6 +1489,24 @@ static void enc1_stream_encoder_stop_dp_info_packets(rdna3_dp_link *l)
         UPDATE(l->d, regDP0_DP_SEC_CNTL, l->fe, DP_S, DP0_DP_SEC_CNTL, DP_SEC_STREAM_ENABLE, 1);
 }
 
+void dcn32_dp_build_info_frames(const rdna3_dp_link *l, const rdna3_mode *m, rdna3_dp_info_frames *f)
+{
+    uint32_t k;
+    for (k = 0; k < sizeof(*f); k++)
+        ((uint8_t *)f)[k] = 0;
+    /* set_spd_info_packet */
+    if (l->vrr_infopacket.valid)
+        f->spd = l->vrr_infopacket;
+    /* set_adaptive_sync_info_packet */
+    if (l->adaptive_sync_infopacket.valid) {
+        rdna3_vrr_stream s;
+        dcn32_vrr_stream_from_mode(&s, m, RD_SIGNAL_DISPLAY_PORT);
+        dcn32_adaptive_sync_sdp_line_num(&s, l->vstartup_start, &f->adaptive_sync_line_num_valid,
+                                         &f->adaptive_sync_line_num);
+        f->adaptive_sync = l->adaptive_sync_infopacket;
+    }
+}
+
 void dcn32_enc_update_dp_info_packets_sdp_line_num(rdna3_dp_link *l, const rdna3_dp_info_frames *f)
 {
     if (f->adaptive_sync.valid && f->adaptive_sync_line_num_valid) {
@@ -1567,7 +1586,7 @@ int dcn32_enc_dp_get_pixel_format(rdna3_dp_link *l, uint32_t *encoding, uint32_t
 }
 
 /* enable_stream_features (SST): DP_DOWNSPREAD_CTRL's MSA_TIMING_PAR_IGNORE
- * as the stream wants it (ignore_msa_timing_param: FreeSync only, so off);
+ * as the stream wants it (ignore_msa_timing_param: FreeSync, rdna3vrr=1);
  * MST: dm_helpers_mst_enable_stream_features, the same on the link's DPCD
  * (amdgpu's TODO: no virtual DPCD) */
 static void enable_stream_features(rdna3_dp_link *l)
@@ -3330,7 +3349,7 @@ static int enable_link_dp_mst(rdna3_dp_link *l, const rdna3_dp_link_settings *s,
 static void dcn20_enable_stream_hpo(rdna3_dp_link *l, const rdna3_mode *m)
 {
     rdna3_dp_info_frames f;
-    uint32_t k1, k2, k;
+    uint32_t k1, k2;
     dcn32_dccg_set_dtbclk_dto(l->d, l->otg, m->pixel_khz, l->dtbclk_khz, 0);
     dcn32_dccg_set_dpstreamclk(l->d, RD_STREAMCLK_DTBCLK0, l->otg, l->hpo_se);
     dcn32_dccg_enable_symclk32_se(l->d, l->hpo_se, RD_PHYD32CLKA + l->be);
@@ -3339,8 +3358,7 @@ static void dcn20_enable_stream_hpo(rdna3_dp_link *l, const rdna3_mode *m)
     dcn32_dccg_set_pixel_rate_div(l->d, l->otg, k1, k2);
     dcn32_hpo_se_enable_stream(l->d, l->hpo_se);
     dcn32_hpo_se_map_stream_to_link(l->d, l->hpo_se, l->hpo_le);
-    for (k = 0; k < sizeof(f); k++)
-        ((uint8_t *)&f)[k] = 0;
+    dcn32_dp_build_info_frames(l, m, &f);
     dcn32_hpo_se_update_dp_info_packets_sdp_line_num(l->d, l->hpo_se, &f);
     dcn32_hpo_se_update_dp_info_packets(l->d, l->hpo_se, &f);
 }
@@ -3488,9 +3506,8 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
         dcn10_link_encoder_setup(l);
         /* dcn20_enable_stream: link_hwss->setup_stream_encoder (the pixel
          * rate divider of an 8b/10b single pipe and the early control stay
-         * as they are), then dcn30_update_info_frame: no VSC (RGB, no PSR),
-         * SPD (no FreeSync), HDR or adaptive sync packet in this driver's
-         * streams */
+         * as they are), then dcn30_update_info_frame with the packets
+         * resource_build_info_frame made (dcn32_dp_build_info_frames) */
         if (odm_cnt(l) > 1) {
             uint32_t k1, k2;
             dcn32_calculate_dccg_k1_k2_values(RD_K12_SIGNAL_DP, m, 0, 0, odm_cnt(l), &k1, &k2);
@@ -3499,9 +3516,7 @@ int dcn32_dp_link_set_dpms_on(rdna3_dp_link *l, const rdna3_mode *m, int do_fall
         setup_dio_stream_encoder(l);
         {
             rdna3_dp_info_frames f;
-            uint32_t k;
-            for (k = 0; k < sizeof(f); k++)
-                ((uint8_t *)&f)[k] = 0;
+            dcn32_dp_build_info_frames(l, m, &f);
             dcn32_enc_update_dp_info_packets_sdp_line_num(l, &f);
             dcn32_enc_update_dp_info_packets(l, &f);
         }

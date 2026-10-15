@@ -1545,6 +1545,7 @@ static void dmub_boot(void)
 }
 
 static int pst_dmub_cmd(uint8_t *c, uint32_t hdr);   /* sim_display_pstate.inc */
+static int fs_dmub_cmd(uint8_t *c, uint32_t hdr);    /* sim_display_freesync.inc */
 
 static void dmub_inbox(uint32_t wptr)
 {
@@ -1645,7 +1646,7 @@ static void dmub_inbox(uint32_t wptr)
             break;
         }
         default:
-            if (!pst_dmub_cmd(c, hdr))
+            if (!pst_dmub_cmd(c, hdr) && !fs_dmub_cmd(c, hdr))
                 S.dmub.bad_cmds++;
         }
         rptr = (rptr + RD_DMUB_RB_CMD_SIZE) % RD_DMUB_RB_SIZE;
@@ -4474,6 +4475,7 @@ static void sim_doorbell32(void *ctx, uint32_t index, uint32_t v)
 #include "sim_display_hpo.inc"
 #include "sim_display_audio.inc"
 #include "sim_display_pstate.inc"
+#include "sim_display_freesync.inc"
 
 static void sim_wr(void *ctx, uint64_t off, uint32_t v)
 {
@@ -12958,6 +12960,7 @@ static void run(const char *fwdir)
             test_dcn_state(&dev, &dm);
             test_dp_link(&dev, &dm);
             test_dc_k(&dev, &dm);
+            test_dc_freesync(&dev, &dm);
             test_dc_pstate(&dev, &dm);
             S.dcn_pg = 0;
         }

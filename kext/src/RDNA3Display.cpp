@@ -44,6 +44,7 @@ extern "C" {
 #include "dcn32_gamma.h"
 #include "dcn32_otg.h"
 #include "dcn32_hwseq.h"
+#include "dcn32_freesync.h"
 }
 #include "rdna3k_abi.h"
 
@@ -254,6 +255,9 @@ void RDNA3Accel::displayProbeConnectors()
     if (!fConnectors)
         return;
     bzero(fConnectors, sizeof(rdna3_connector) * RD_AUX_ENGINES);
+    /* a new probe: the DMCUB's EDID CEA parser may be asked again */
+    for (uint32_t i = 0; i < 4; i++)
+        fVrrCeaFailed[i] = false;
     int n = dcaux_probe(fDispDev, fConnectors, RD_AUX_ENGINES);
     fNConnectors = n > 0 ? (uint32_t)n : 0;
     setNumber("RDNA3,Connectors", fNConnectors);
@@ -825,6 +829,10 @@ void RDNA3Accel::displayFree()
         fAudio[i] = nullptr;
         if (fMstMgr[i]) IOFree(fMstMgr[i], sizeof(rdna3_mst_mgr));
         fMstMgr[i] = nullptr;
+        if (fVrrCaps[i]) IOFree(fVrrCaps[i], sizeof(rdna3_freesync_caps));
+        fVrrCaps[i] = nullptr;
+        if (fVrrCrtc[i]) IOFree(fVrrCrtc[i], sizeof(rdna3_freesync_crtc));
+        fVrrCrtc[i] = nullptr;
     }
     if (fDispDev) IOFree(fDispDev, sizeof(rdna3_dev));
     if (fDispLock) IOLockFree(fDispLock);
@@ -932,6 +940,10 @@ IOReturn RDNA3Accel::displayFlip(RD3KDisplayFlip *f)
         bool imm = (f->flags & RD3K_DISPLAY_FLIP_IMMEDIATE) != 0;
         displayPowerFlip(f->head, fDispDev->fb_start + f->vramOffset, imm, 0);   /* item O */
         r = dcn32_flip(fDispDev, fDcn, f->head, fDispDev->fb_start + f->vramOffset, f->pitch / 4, imm);
+        /* rdna3vrr=1: commit_planes_for_stream fires the OTG's manual
+         * trigger after a flip, ending the DRR-stretched vertical blank */
+        if (r == RDNA3_OK && f->head < 4 && fVrrCrtc[f->head] && dcn32_freesync_vrr_active(fVrrCrtc[f->head]))
+            dcn32_otg_program_manual_trigger(fDispDev, fDcn->head[f->head].otg);
         displayPowerFlip(f->head, fDispDev->fb_start + f->vramOffset, imm, 1);
     }
     IOLockUnlock(fDispLock);
@@ -1110,7 +1122,7 @@ rdna3_dp_link *RDNA3Accel::displayDpLink(uint32_t head, const rdna3_display_path
         LOG("display: head %u: another DP sink: its link cap is verified again on the next mode set", head);
     }
     /* amdgpu_dm_update_freesync_caps' dm_get_adaptive_sync_support_type:
-     * logged once per sink (no FreeSync on macOS yet) */
+     * logged once per sink (the caps: displayVrrCaps) */
     if (!had && dcn32_dp_adaptive_sync_support_type(l) == RD_FREESYNC_TYPE_PCON_IN_WHITELIST)
         LOG("display: head %u: DP-HDMI PCON with FreeSync (branch 0x%06x, whitelisted)", head,
             l->dpcd_caps.branch_dev_id);
@@ -1297,6 +1309,145 @@ rdna3_audio_stream *RDNA3Accel::displayAudio(uint32_t head, rdna3_dp_link *l, co
 /* rdna3DisplayModes: the sink's EDID timings the head can switch to
  * (dcn32_modeset_plan says yes), the running one flagged CURRENT. The list
  * is kept: rdna3DisplaySetMode names a mode by its index in it. */
+/* the signal DC gives the head's sink (link_detection.c): DP SST / MST
+ * from the DIG mode, TMDS as HDMI with an HDMI VSDB, else DVI */
+static uint32_t vrr_signal(const rdna3_dcn_head *h, const rdna3_dp_link *dpl, const rdna3_edid *ed)
+{
+    if (dpl)
+        return dpl->mst ? RD_SIGNAL_DISPLAY_PORT_MST : RD_SIGNAL_DISPLAY_PORT;
+    if (h->dig_mode == 0)
+        return RD_SIGNAL_DISPLAY_PORT;
+    if (h->dig_mode == 5)
+        return RD_SIGNAL_DISPLAY_PORT_MST;
+    return ed->hdmi ? RD_SIGNAL_HDMI_TYPE_A : RD_SIGNAL_DVI_SINGLE_LINK;
+}
+
+/* amdgpu_dm_update_freesync_caps for the head's sink: logged and published
+ * as RDNA3,Head<n>,VRRRange. The HDMI AMD VSDB needs the DMCUB's EDID CEA
+ * parser, asked only with rdna3vrr=1. Called with fDispLock held. */
+void RDNA3Accel::displayVrrCaps(uint32_t head, const uint8_t *edid, uint32_t len, const rdna3_edid *ed,
+                                const rdna3_dcn_head *h, rdna3_dp_link *dpl)
+{
+    static const char *const from[] = { "none", "EDID monitor range", "EDID range descriptor", "AMD VSDB",
+                                        "AMD VSDB via PCON" };
+    static const char *const sig[] = { "?", "DVI", "DVI", "HDMI", "DP", "DP MST" };
+    if (head >= 4)
+        return;
+    if (!fVrrCaps[head]) {
+        fVrrCaps[head] = (rdna3_freesync_caps *)IOMalloc(sizeof(rdna3_freesync_caps));
+        if (!fVrrCaps[head]) {
+            LOG("display: head %u VRR: no memory for the caps", head);
+            return;
+        }
+    }
+    rdna3_freesync_caps *c = fVrrCaps[head];
+    bool on = rd3_arg("rdna3vrr", 0) != 0;
+    uint32_t s = vrr_signal(h, dpl, ed);
+    int msa = dpl ? dpl->dpcd_caps.allow_invalid_msa_timing_param : 0;
+    int as = dpl ? dcn32_dp_adaptive_sync_support_type(dpl) : RD_ADAPTIVE_SYNC_TYPE_NONE;
+    fVrrSignal[head] = s;
+    dcn32_update_freesync_caps(c, edid, len, s, msa, as, on && !fVrrCeaFailed[head] ? fDisplayDm : nullptr);
+    const char *note = "";
+    if (c->hdmi_vsdb == RD_AMD_VSDB_PARSER_FAILED) {
+        fVrrCeaFailed[head] = true;
+        LOG("display: head %u VRR: the DMCUB's EDID CEA parser failed: not asked again until the next hotplug",
+            head);
+    }
+    if (s == RD_SIGNAL_DISPLAY_PORT && !dpl)
+        note = ", MSA ignore unknown (rdna3dplink=0)";
+    else if (s == RD_SIGNAL_DISPLAY_PORT && !msa)
+        note = ", the sink does not ignore MSA timing";
+    else if (s == RD_SIGNAL_HDMI_TYPE_A && !on)
+        note = ", AMD VSDB not read (rdna3vrr=0)";
+    else if (s == RD_SIGNAL_HDMI_TYPE_A && !fDisplayDm)
+        note = ", AMD VSDB not read (no DMCUB)";
+    else if ((s == RD_SIGNAL_HDMI_TYPE_A || as == RD_FREESYNC_TYPE_PCON_IN_WHITELIST) && fVrrCeaFailed[head])
+        note = ", AMD VSDB not read (the DMCUB's parser failed)";
+    char key[32], val[160];
+    snprintf(key, sizeof(key), "RDNA3,Head%u,VRRRange", head);
+    snprintf(val, sizeof(val), "%u-%u Hz (%s), FreeSync %s; monitor range %u-%u Hz; %s sink%s%s", c->min_vfreq,
+             c->max_vfreq, c->from < 5 ? from[c->from] : "?", c->freesync_capable ? "capable" : "no",
+             c->monitor_min_vfreq, c->monitor_max_vfreq, s < 6 ? sig[s] : "?", note,
+             c->pack_sdp_v1_3 ? ", PCON SDP 1.3" : "");
+    setProperty(key, val);
+    LOG("display: head %u VRR range: %s", head, val);
+}
+
+/* get_freesync_config_for_crtc .. update_freesync_state_on_stream for the
+ * next mode set into 'nw' / 'vs' (the stream's MSA ignore, SPD and adaptive
+ * sync SDP); the caller hands them to the link / HDMI stream for the mode
+ * set and keeps them only when it ran. false (and 'vs' without FreeSync)
+ * without rdna3vrr=1 or a path that carries the packets. Called with
+ * fDispLock held. */
+bool RDNA3Accel::displayVrrStream(uint32_t head, const rdna3_mode *want, rdna3_dp_link *dpl, bool hdmiStream,
+                                  rdna3_freesync_crtc *nw, rdna3_vrr_stream *vs, char *why, size_t whyLen)
+{
+    bzero(nw, sizeof(*nw));
+    bzero(vs, sizeof(*vs));
+    if (!rd3_arg("rdna3vrr", 0))
+        return false;
+    if (head >= 4 || !fVrrCaps[head]) {
+        snprintf(why, whyLen, "no caps: no mode list read");
+        return false;
+    }
+    if (!dpl && !hdmiStream) {
+        snprintf(why, whyLen, "the stream carries no SPD (needs rdna3dplink=1 or rdna3hdmi=1)");
+        return false;
+    }
+    /* hw/dcn32_subvp.c takes the single stream as one without FreeSync
+     * (dcn32_allow_subvp_high_refresh_rate's !allow_freesync) and its main
+     * as a fixed timing: no FreeSync on the stream with rdna3subvp=1 */
+    if (rd3_arg("rdna3subvp", 0)) {
+        snprintf(why, whyLen, "off: rdna3subvp=1");
+        return false;
+    }
+    dcn32_vrr_stream_from_mode(vs, want, fVrrSignal[head]);
+    dcn32_freesync_update_stream(nw, vs, fVrrCaps[head], want, 1);
+    if (!nw->vrr_supported)
+        snprintf(why, whyLen, "%u Hz outside the sink's %u-%u Hz or no FreeSync", dcn32_drm_mode_vrefresh(want),
+                 fVrrCaps[head]->min_vfreq, fVrrCaps[head]->max_vfreq);
+    return true;
+}
+
+/* after a mode set: is_dc_timing_adjust_needed, and the first vblank's
+ * dc_stream_adjust_vmin_vmax of an ACTIVE_VARIABLE stream (DRR on the
+ * OTG); 'nw' NULL = no FreeSync on the new stream. Called with fDispLock held. */
+void RDNA3Accel::displayVrrCommit(uint32_t head, uint32_t otg, const rdna3_freesync_crtc *nw, char *val,
+                                  size_t valLen)
+{
+    static const char *const st[] = { "unsupported", "disabled", "inactive", "active", "active fixed" };
+    if (head >= 4)
+        return;
+    if (!fVrrCrtc[head]) {
+        fVrrCrtc[head] = (rdna3_freesync_crtc *)IOMalloc(sizeof(rdna3_freesync_crtc));
+        if (!fVrrCrtc[head]) {
+            snprintf(val, valLen, "no memory for the state");
+            return;
+        }
+        bzero(fVrrCrtc[head], sizeof(rdna3_freesync_crtc));
+    }
+    rdna3_freesync_crtc none;
+    bzero(&none, sizeof(none));
+    const rdna3_freesync_crtc *n = nw ? nw : &none;
+    int drr = -1;
+    if (dcn32_freesync_timing_adjust_needed(fVrrCrtc[head], n) || dcn32_freesync_vrr_active(n))
+        drr = dcn32_stream_adjust_vmin_vmax(fDispDev, otg, &n->vrr.adjust);
+    *fVrrCrtc[head] = *n;
+    if (drr == 0) {
+        /* DRR refused (logged by the hw side): not an active VRR CRTC, so
+         * no manual trigger on its flips */
+        fVrrCrtc[head]->config.state = RD_VRR_STATE_INACTIVE;
+        fVrrCrtc[head]->vrr.state = RD_VRR_STATE_INACTIVE;
+        LOG("display: head %u VRR: DRR refused for v_total %u..%u: the CRTC stays inactive", head,
+            n->vrr.adjust.v_total_min, n->vrr.adjust.v_total_max);
+    }
+    snprintf(val, valLen, "%s, %u-%u Hz, v_total %u..%u, DRR %s on OTG %u, SPD %s", n->vrr.state < 5 ? st[n->vrr.state] : "?",
+             (n->vrr.min_refresh_in_uhz + 500000) / 1000000, (n->vrr.max_refresh_in_uhz + 500000) / 1000000,
+             n->vrr.adjust.v_total_min, n->vrr.adjust.v_total_max,
+             drr < 0 ? "unchanged" : drr ? (dcn32_freesync_vrr_active(n) ? "armed" : "back to nominal") : "refused",
+             otg, n->vrr.send_info_frame ? "sent" : "none");
+}
+
 IOReturn RDNA3Accel::displayModes(RD3KDisplayModes *r)
 {
     if (!r || !RD3K_DISPLAY_ABI_OK(r->version))
@@ -1393,6 +1544,8 @@ IOReturn RDNA3Accel::displayModes(RD3KDisplayModes *r)
                     fAudio[r->head]->info.audio_latency);
             }
         }
+        /* the sink's FreeSync range (amdgpu_dm_update_freesync_caps) */
+        displayVrrCaps(r->head, e->data, e->length, ed, h, dpl);
         if (hc)
             LOG("display: head %u HDMI: sink %s, SCDC %d, LTE scramble %d, max TMDS %u MHz, HDMI 6G %d, %u audio modes",
                 r->head, hc->hdmi_sink ? "HDMI" : "DVI", ed->scdc_present, hc->lte_340_scramble, hc->max_tmds_clk_mhz,
@@ -1491,6 +1644,11 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
     /* rdna3audio: the DP link's audio stream (link_set_dpms_off / _on run it) */
     if (dpl)
         dpl->audio = displayAudio(m->head, dpl, nullptr, dpl->fe, dpl->otg);
+    /* rdna3vrr=1: the stream's FreeSync state, its SPD / MSA ignore for the mode set */
+    rdna3_freesync_crtc vrrNew;
+    rdna3_vrr_stream vrrStream;
+    char vrrWhy[96] = "", vrrval[160] = "";
+    bool vrrOn = displayVrrStream(m->head, want, dpl, hc != nullptr, &vrrNew, &vrrStream, vrrWhy, sizeof(vrrWhy));
     int r = !p ? RD_MODESET_BAD_HEAD
           : hc ? dcn32_modeset_plan_hdmi(fDispDev, fDcn, m->head, p, hc, cur, want, displayClkLimits(), ms)
                : dcn32_modeset_plan_dp(fDispDev, fDcn, m->head, p, dpl, cur, want, displayClkLimits(), ms);
@@ -1510,6 +1668,24 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
      * FIFO resync after the switch (hw/dcn32_hwseq.c) */
     if (r == RD_MODESET_OK)
         ms->dc_seq = rd3_arg("rdna3dcseq", 0) ? 1 : 0;
+    /* the new stream's MSA ignore / SPD / adaptive sync SDP for this mode
+     * set only: the link keeps its old ones if it does not run (a later
+     * link_set_dpms_on on hotplug or resume sends what runs) */
+    int oldMsa = dpl ? dpl->ignore_msa_timing_param : 0;
+    rdna3_info_packet oldSpd, oldAs;
+    bzero(&oldSpd, sizeof(oldSpd));
+    bzero(&oldAs, sizeof(oldAs));
+    if (dpl) {
+        oldSpd = dpl->vrr_infopacket;
+        oldAs = dpl->adaptive_sync_infopacket;
+    }
+    if (r == RD_MODESET_OK && dpl) {
+        dpl->ignore_msa_timing_param = vrrStream.ignore_msa_timing_param;
+        dpl->vrr_infopacket = vrrStream.vrr_infopacket;
+        dpl->adaptive_sync_infopacket = vrrStream.adaptive_sync_infopacket;
+    }
+    if (r == RD_MODESET_OK && hc)
+        ms->hdmi.vrr_infopacket = vrrStream.vrr_infopacket;
     if (r == RD_MODESET_OK)
         r = dcn32_modeset_apply(fDispDev, dm, fDcn, fScale, ms, fDispDev->fb_start + m->vramOffset, m->pitch / 4,
                                 fDispDev->fb_start + m->oldVramOffset, m->oldPitch / 4, 200);
@@ -1519,6 +1695,19 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
         /* the first MST stream did not run: the old timing came back as an
          * MST stream; SST again */
         displayMstRevert(m->head, dpl, dpHead ? &ms->dp_cur : &curMode);
+    }
+    if (r != RDNA3_OK && dpl) {
+        dpl->ignore_msa_timing_param = oldMsa;
+        dpl->vrr_infopacket = oldSpd;
+        dpl->adaptive_sync_infopacket = oldAs;
+    }
+    if (r == RDNA3_OK && hc && fHdmiCfg[m->head])
+        fHdmiCfg[m->head]->vrr_infopacket = vrrStream.vrr_infopacket;
+    if (r == RDNA3_OK && rd3_arg("rdna3vrr", 0)) {
+        /* DRR on the new stream (dc_stream_adjust_vmin_vmax) */
+        displayVrrCommit(m->head, ms->otg, vrrOn ? &vrrNew : nullptr, vrrval, sizeof(vrrval));
+        if (vrrWhy[0])
+            snprintf(vrrval + strlen(vrrval), sizeof(vrrval) - strlen(vrrval), " (%s)", vrrWhy);
     }
     if (r == RDNA3_OK) {
         fDispRefresh[m->head] = want->refresh_mhz;
@@ -1614,6 +1803,12 @@ IOReturn RDNA3Accel::displaySetMode(RD3KDisplayMode *m)
         snprintf(key, sizeof(key), "RDNA3,Head%u,Audio", m->head);
         setProperty(key, audval);
         LOG("display: head %u audio: %s", m->head, audval);
+    }
+    if (vrrval[0]) {
+        char key[32];
+        snprintf(key, sizeof(key), "RDNA3,Head%u,VRR", m->head);
+        setProperty(key, vrrval);
+        LOG("display: head %u VRR: %s", m->head, vrrval);
     }
     if (fmtval[0]) {
         char key[32];

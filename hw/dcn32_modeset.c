@@ -774,6 +774,9 @@ static int program(rdna3_dev *d, rdna3_dmub *dm, rdna3_dcn *dc, const rdna3_dcn_
         /* dce110_enable_stream -> dcn30_update_info_frame: the AVI / vendor
          * infoframes resource_build_info_frame made for the stream */
         dcn32_hdmi_build_info_frames(&f, tm, &fmt, ms->hdmi.hdmi_sink);
+        /* set_spd_info_packet: the stream's FreeSync SPD (rdna3vrr=1) */
+        if (ms->hdmi.vrr_infopacket.valid)
+            f.spd = ms->hdmi.vrr_infopacket;
         dcn32_enc_update_hdmi_info_packets(d, ms->fe, &f);
     }
     /* clear the sticky underflow bit for the check, then unblank */
@@ -884,7 +887,9 @@ static int program_dp(rdna3_dev *d, rdna3_dcn *dc, const rdna3_dcn_modeset *ms, 
     WI(d, regOTG0_OTG_CONTROL, ms->otg, OTG_S,
        SET(SET(v, OTG0_OTG_CONTROL, OTG_DISABLE_POINT_CNTL, 2), OTG0_OTG_CONTROL, OTG_MASTER_EN, 1));
     /* link_set_dpms_on (DC trains without fallback here: the verified
-     * cap already fell back) */
+     * cap already fell back); the pipe's VSTARTUP for the adaptive sync
+     * SDP line (pipe_dlg_param.vstartup_start) */
+    dp->vstartup_start = GET(r->vstartup, OTG0_OTG_VSTARTUP_PARAM, VSTARTUP_START);
     ret = dcn32_dp_link_set_dpms_on(dp, m, 0);
     if (ret && dp->stream_dsc)
         RERR(d, "modeset: head %u: the DSC stream did not come up (%d)", ms->head, ret);

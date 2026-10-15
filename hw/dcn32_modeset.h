@@ -93,6 +93,9 @@ typedef struct rdna3_hdmi_cfg {
     int      force_yuv422;
     rdna3_crtc_format running;
     uint32_t running_cs;
+    /* stream->vrr_infopacket: the FreeSync SPD infoframe of the next mode
+     * set (rdna3vrr=1, hw/dcn32_freesync.c), !valid without FreeSync */
+    rdna3_info_packet vrr_infopacket;
 } rdna3_hdmi_cfg;
 
 /* everything one timing needs, as register values */

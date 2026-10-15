@@ -433,7 +433,11 @@ typedef struct rdna3_dp_link {
     uint16_t chip_id;               /* PCI device id: dpcd_set_source_specific_data (asic_id.chip_id) */
     int      keep_receiver_powered; /* wa_flags.dp_keep_receiver_powered (dp_wa_power_up_0010FA) */
     uint8_t  dpcd_sink_ext_caps;    /* DP_SOURCE_SINK_CAP (dpcd_read_sink_ext_caps) */
-    int      ignore_msa_timing_param;   /* stream->ignore_msa_timing_param: FreeSync only, 0 */
+    int      ignore_msa_timing_param;   /* stream->ignore_msa_timing_param: FreeSync (rdna3vrr=1) */
+    /* stream->vrr_infopacket (the FreeSync SPD) and adaptive_sync_infopacket
+     * (a whitelisted PCON), hw/dcn32_freesync.c; !valid without FreeSync */
+    rdna3_info_packet vrr_infopacket, adaptive_sync_infopacket;
+    uint32_t vstartup_start;          /* the pipe's VSTARTUP_START (the adaptive sync SDP line) */
     uint32_t pix_per_cycle;         /* dio_se_pix_per_cycle: 1, 2; 0 = take the boot state's */
     int      caps_valid, verified;
     rdna3_dp_caps dpcd_caps;
@@ -581,6 +585,12 @@ int  dcn32_dp_validate_mode_timing(const rdna3_dp_link *l, const rdna3_mode *m);
  * static metadata (3), adaptive sync (5) through the stream encoder's VPG,
  * their DP_SEC_CNTL enables and the master enable */
 void dcn32_enc_update_dp_info_packets(rdna3_dp_link *l, const rdna3_dp_info_frames *f);
+/* resource_build_info_frame, the DP part for this driver's streams of mode
+ * 'm': no VSC (RGB, no PSR), no HDR metadata; the SPD is the stream's
+ * vrr_infopacket (set_spd_info_packet), the adaptive sync SDP its
+ * adaptive_sync_infopacket with the line DC gives it
+ * (set_adaptive_sync_info_packet) */
+void dcn32_dp_build_info_frames(const rdna3_dp_link *l, const rdna3_mode *m, rdna3_dp_info_frames *f);
 /* enc3_stream_encoder_update_dp_info_packets_sdp_line_num (adaptive sync) */
 void dcn32_enc_update_dp_info_packets_sdp_line_num(rdna3_dp_link *l, const rdna3_dp_info_frames *f);
 /* enc1_stream_encoder_dp_get_pixel_format: the DP stream encoder's pixel
