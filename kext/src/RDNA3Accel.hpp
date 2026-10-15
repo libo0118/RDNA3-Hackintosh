@@ -401,10 +401,14 @@ private:
     struct rdna3_freesync_caps *fVrrCaps[4] = {};
     struct rdna3_freesync_crtc *fVrrCrtc[4] = {};
     uint32_t      fVrrSignal[4] = {};
+    /* the DMCUB's EDID CEA parser failed for the head's sink: not asked
+     * again until the next connector probe (hotplug) */
+    bool          fVrrCeaFailed[4] = {};
     void          displayVrrCaps(uint32_t head, const uint8_t *edid, uint32_t len, const struct rdna3_edid *ed,
                                  const struct rdna3_dcn_head *h, struct rdna3_dp_link *dpl);
     bool          displayVrrStream(uint32_t head, const struct rdna3_mode *want, struct rdna3_dp_link *dpl,
-                                   bool hdmiStream, struct rdna3_freesync_crtc *nw, char *why, size_t whyLen);
+                                   bool hdmiStream, struct rdna3_freesync_crtc *nw, struct rdna3_vrr_stream *vs,
+                                   char *why, size_t whyLen);
     void          displayVrrCommit(uint32_t head, uint32_t otg, const struct rdna3_freesync_crtc *nw, char *val,
                                    size_t valLen);
     /* rdna3dsc=1: FEC + DSC policies on those links. rdna3mst=1: an MST

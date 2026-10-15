@@ -124,7 +124,8 @@ typedef struct rdna3_freesync_caps {
     int      pack_sdp_v1_3;
     rdna3_vsdb_info vsdb_info;
     uint32_t from;                  /* RD_VRR_FROM_* */
-    int      hdmi_vsdb;             /* parse_hdmi_amd_vsdb's result: extension index, < 0 none */
+    int      hdmi_vsdb;             /* parse_hdmi_amd_vsdb's result: extension index, -1 none,
+                                     * RD_AMD_VSDB_PARSER_FAILED */
 } rdna3_freesync_caps;
 
 /* struct mod_freesync_config */
@@ -188,8 +189,10 @@ void dcn32_drm_get_monitor_range(const uint8_t *edid, uint32_t len, uint32_t *mi
 void dcn32_parse_edid_displayid_vrr(const uint8_t *edid, uint32_t len, uint32_t *min_vfreq, uint32_t *max_vfreq);
 /* parse_hdmi_amd_vsdb: the first CTA extension handed to the DMCUB's EDID
  * CEA parser (DMUB_CMD__EDID_CEA, 8 bytes per command: parse_edid_cea_dmub,
- * dm_edid_parser_send_cea). The extension index, or -1 (no CTA block, no
- * DMCUB, no FreeSync AMD VSDB). */
+ * dm_edid_parser_send_cea). The extension index, -1 (no CTA block, no
+ * DMCUB, no FreeSync AMD VSDB) or RD_AMD_VSDB_PARSER_FAILED (a command
+ * the firmware did not run or answered with an unknown result). */
+#define RD_AMD_VSDB_PARSER_FAILED (-2)
 int  dcn32_parse_hdmi_amd_vsdb(rdna3_dmub *dm, const uint8_t *edid, uint32_t len, rdna3_vsdb_info *v);
 /* amdgpu_dm_update_freesync_caps for a sink of 'signal' (RD_SIGNAL_*):
  * 'allow_invalid_msa_timing_param' = the link's DPCD bit (DP_MSA_TIMING_PAR_IGNORED,

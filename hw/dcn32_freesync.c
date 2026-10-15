@@ -151,7 +151,10 @@ static uint32_t get16(const uint8_t *p)
 }
 
 /* dm_edid_parser_send_cea: one chunk of the CTA block to the DMCUB, its
- * ack, or (after the last) the AMD VSDB it found */
+ * ack, or (after the last) the AMD VSDB it found. 1 = go on, 0 = no AMD
+ * VSDB (amdgpu's false), -1 = the firmware did not run it or answered
+ * something unknown (also false in amdgpu; told apart here so the caller
+ * stops asking a hung DMCUB) */
 static int dm_edid_parser_send_cea(rdna3_dmub *dm, uint32_t offset, uint32_t total_length, const uint8_t *data,
                                    uint32_t length, rdna3_vsdb_info *vsdb)
 {
@@ -172,8 +175,8 @@ static int dm_edid_parser_send_cea(rdna3_dmub *dm, uint32_t offset, uint32_t tot
         cmd[9 + i] = data[i];
     ret = dmub32_cmd_execute(dm, cmd, 1, EDID_CEA_TIMEOUT_US);
     if (ret != RDNA3_OK) {
-        RERR(dm->d, "freesync: EDID CEA parser failed (%d)", ret);
-        return 0;
+        RERR(dm->d, "freesync: EDID CEA parser failed at offset %u (%d)", offset, ret);
+        return -1;
     }
     /* struct dmub_cmd_edid_cea_output: type, then the ack or the VSDB */
     if (cmd[4] == RD_DMUB_EDID_CEA_ACK) {
@@ -187,20 +190,22 @@ static int dm_edid_parser_send_cea(rdna3_dmub *dm, uint32_t offset, uint32_t tot
         vsdb->min_refresh_rate_hz = get16(cmd + 9);
         vsdb->max_refresh_rate_hz = get16(cmd + 11);
     } else {
-        RLOG(dm->d, "freesync: unknown EDID CEA parser result %u", cmd[4]);
-        return 0;
+        RERR(dm->d, "freesync: unknown EDID CEA parser result %u at offset %u", cmd[4], offset);
+        return -1;
     }
     return 1;
 }
 
-/* parse_edid_cea_dmub (8 bytes per command) */
+/* parse_edid_cea_dmub (8 bytes per command): 1 FreeSync, 0 none, -1 the
+ * firmware failed */
 static int parse_edid_cea_dmub(rdna3_dmub *dm, const uint8_t *edid_ext, uint32_t len, rdna3_vsdb_info *v)
 {
     uint32_t i;
+    int r;
     for (i = 0; i < len; i += RD_DMUB_EDID_CEA_DATA_CHUNK)
-        if (!dm_edid_parser_send_cea(dm, i, len, edid_ext + i, RD_DMUB_EDID_CEA_DATA_CHUNK, v))
-            return 0;
-    return v->freesync_supported;
+        if ((r = dm_edid_parser_send_cea(dm, i, len, edid_ext + i, RD_DMUB_EDID_CEA_DATA_CHUNK, v)) <= 0)
+            return r;
+    return v->freesync_supported ? 1 : 0;
 }
 
 int dcn32_parse_hdmi_amd_vsdb(rdna3_dmub *dm, const uint8_t *edid, uint32_t len, rdna3_vsdb_info *v)
@@ -219,7 +224,11 @@ int dcn32_parse_hdmi_amd_vsdb(rdna3_dmub *dm, const uint8_t *edid, uint32_t len,
     /* parse_edid_cea: the DMCUB parses it (no DMCU on DCN 3.2) */
     if (!dm || !dm->hw_init)
         return -1;
-    return parse_edid_cea_dmub(dm, ext, EDID_LENGTH, v) ? (int)i : -1;
+    switch (parse_edid_cea_dmub(dm, ext, EDID_LENGTH, v)) {
+    case 1:  return (int)i;
+    case 0:  return -1;
+    default: return RD_AMD_VSDB_PARSER_FAILED;
+    }
 }
 
 void dcn32_update_freesync_caps(rdna3_freesync_caps *c, const uint8_t *edid, uint32_t len, uint32_t signal,
