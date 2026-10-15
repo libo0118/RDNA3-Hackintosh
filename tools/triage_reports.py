@@ -189,29 +189,107 @@ HEX_SHA = re.compile(r"[0-9a-f]{7,40}\Z")
 
 
 # M6 opens Chess, Maps and System Settings on the main display, then looks
-# at the desktop: a pipe whose picture is byte-identical in every M6 look
-# never showed the apps (card run 58: head 0 kept an old frame while
-# WindowServer drew into A3 BOs no swap scanned out)
+# at the desktop: a pipe whose picture hardly changed between any two
+# consecutive M6 looks never showed the apps (card run 58: head 0 kept an
+# old frame while WindowServer drew into A3 BOs no swap scanned out). A
+# clock tick in the menu bar is far below the threshold, a window is far
+# above it.
 M6_LOOK = re.compile(r"-scanoutm6([A-Za-z]+)-pipe(\d+)\.ppm$")
+M6_ORDER = ("Chess", "Maps", "Settings", "desktop")
+M6_FROZEN_FRACTION = 0.01   # of the pixels: below this between every two looks = frozen
 
 
-def m6_frozen(prefix):
-    """[(pipe, [look names])] of the pipes whose M6 pictures never changed"""
+def ppm_pixels(path):
+    """(width, height, rgb bytes) of a binary PPM, or None"""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    m = re.match(rb"P6\s+(?:#[^\n]*\s+)*(\d+)\s+(\d+)\s+(\d+)\s", data)
+    if not m:
+        return None
+    w, h = int(m.group(1)), int(m.group(2))
+    px = data[m.end():m.end() + w * h * 3]
+    return (w, h, px) if len(px) == w * h * 3 else None
+
+
+def changed_fraction(a, b):
+    """the fraction of pixels that differ between two pictures (1.0 when the sizes differ)"""
+    if not a or not b or a[0] != b[0] or a[1] != b[1]:
+        return 1.0
+    w, h, pa = a
+    pb = b[2]
+    row, n = w * 3, 0
+    for y in range(h):
+        ra, rb = pa[y * row:(y + 1) * row], pb[y * row:(y + 1) * row]
+        if ra != rb:
+            n += sum(1 for x in range(0, row, 3) if ra[x:x + 3] != rb[x:x + 3])
+    return n / float(w * h)
+
+
+def m6_screens(prefix):
+    """{pipe: (look names in order, the largest change between two
+    consecutive looks)} of the M6 hi-res pictures"""
     by_pipe = {}
-    for ppm in sorted(glob.glob(prefix + "-scanoutm6*-pipe*.ppm")):
+    for ppm in glob.glob(prefix + "-scanoutm6*-pipe*.ppm"):
         m = M6_LOOK.search(ppm)
-        if not m:
-            continue
-        try:
-            with open(ppm, "rb") as f:
-                data = f.read()
-        except OSError:
-            continue
-        by_pipe.setdefault(int(m.group(2)), []).append((m.group(1), data))
-    out = []
+        if m:
+            by_pipe.setdefault(int(m.group(2)), []).append((m.group(1), ppm))
+    rank = lambda n: (M6_ORDER.index(n) if n in M6_ORDER else len(M6_ORDER), n)
+    out = {}
     for pipe, looks in sorted(by_pipe.items()):
-        if len(looks) >= 3 and len(set(d for _, d in looks)) == 1:
-            out.append((pipe, [n for n, _ in looks]))
+        looks.sort(key=lambda t: rank(t[0]))
+        pics = [ppm_pixels(f) for _, f in looks]
+        most = max([changed_fraction(pics[i], pics[i + 1]) for i in range(len(pics) - 1)] or [0.0])
+        out[pipe] = ([n for n, _ in looks], most)
+    return out
+
+
+def main_pipe(path, txt):
+    """the pipe of the main display: head 0's OTG (RDNA3,Head0,Route, the boot
+    head macOS makes main unless the user moved the menu bar) found in the
+    looks' 'pipe P: ... otg O' lines; pipe 0 when either is missing"""
+    props_txt = ""
+    if os.path.exists(path):
+        try:
+            with tarfile.open(path) as tar:
+                props_txt = read_member(tar, "11-ioreg-props.txt") or ""
+        except (OSError, tarfile.TarError):
+            pass
+    m = re.search(r"OTG(\d+)", str(parse_props(props_txt).get("Head0,Route", "")))
+    if not m:
+        return 0
+    for pp, otg in re.findall(r"^pipe (\d+): \w+ otg (\d+)", txt, re.M):
+        if otg == m.group(1):
+            return int(pp)
+    return 0
+
+
+def m6_verdict(prefix, txt, main):
+    """[(level, text, short)] about the M6 pictures: FAIL only for the main display's
+    pipe, only when every app ran and at least 3 looks were taken"""
+    out = []
+    norun = re.findall(r"^M6 (\S+): running NO", txt, re.M) + \
+        [a for a, cr in re.findall(r"^M6 (\S+): running .*crash report: (\S+)", txt, re.M) if cr != "none"]
+    for pipe, (names, most) in sorted(m6_screens(prefix).items()):
+        what = "pipe %d%s" % (pipe, " (main display)" if pipe == main else "")
+        if len(names) < 3:
+            out.append(("INFO", "%s: %d M6 look(s), not judged" % (what, len(names)), "pipe %d not judged" % pipe))
+        elif most >= M6_FROZEN_FRACTION:
+            out.append(("PASS", "%s changed between the M6 looks (up to %.0f%% of the pixels)" % (what, most * 100),
+                        "pipe %d changed (%.0f%%)" % (pipe, most * 100)))
+        elif pipe != main:
+            out.append(("INFO", "%s did not change in the M6 looks (%s): not the main display, the apps open "
+                                "elsewhere" % (what, ", ".join(names)), "pipe %d unchanged (not main)" % pipe))
+        elif norun:
+            out.append(("INFO", "%s did not change in the M6 looks, not judged: %s did not run" %
+                        (what, ", ".join(sorted(set(norun)))), "pipe %d unchanged, an app did not run" % pipe))
+        else:
+            out.append(("FAIL", "%s showed the same picture in all %d M6 looks (%s; under %.0f%% of the pixels "
+                                "changed): the apps' frames never reached it (card run 58: an old frame on the "
+                                "main screen)" % (what, len(names), ", ".join(names), M6_FROZEN_FRACTION * 100),
+                        "pipe %d (main) FROZEN in all %d looks" % (pipe, len(names))))
     return out
 
 
@@ -252,6 +330,73 @@ def vm_fault_groups(log):
         hub, vmid, addr = k
         who = "no client (the kernel's VMID)" if vmid == 0 else ", ".join(sorted(owners.get(vmid, {"?"})))
         out.append((groups[k][0], hub, vmid, addr, who, groups[k][1]))
+    return out
+
+
+def a3_display_verdict(log, sv):
+    """card run 58: WindowServer's display framebuffers and A3 - kept out
+    (the refusal lines), the refusal that never fired (display-size BOs in
+    WindowServer, no refusal), or let in and never scanned out. Prints the
+    verdict; True when it failed."""
+    a3lines = {}
+    for l in log.splitlines():
+        m = re.search(r"a3 display: head (\d+): .*$", l)
+        if m:
+            a3lines[m.group(1)] = m.group(0)
+    kept_mode = "display framebuffers are kept out of A3" in log
+    let_in = "display framebuffers MAY become BOs" in log
+    if not (kept_mode or let_in or a3lines):
+        return False   # a kernel before card run 58
+    refused = len(set(re.findall(r"(?:surfgem|surfvram): surface (\d+) plane \d+ refused: WindowServer's display "
+                                 r"framebuffer", log + "\n" + sv)))
+    c = a3_counters(sv) or {}   # the sysctl dump at the end of 29-surface-vram.txt (log lines are capped)
+    refused = max(refused, c.get("a3display_refused", 0))
+    # the heads' scanout sizes, and the plugin's display-size BOs in WindowServer
+    sizes = set(re.findall(r"LIVE SCANOUT phys 0x[0-9a-f]+ (\d+) x (\d+)", log)) | \
+        set(re.findall(r"a3 display: head \d+: .*?\((\d+)x(\d+)\)", log))
+    cd = sv.split("== 24-log-coredisplay.txt", 1)[1] if "== 24-log-coredisplay.txt" in sv else ""
+    ws_bos = set(sid for sid, w, h in re.findall(r"item 7: surface (\d+) (\d+)x(\d+) pitch \d+ -> the family's VRAM", cd)
+                 if (w, h) in sizes)
+    apart = [l for l in a3lines.values() if "DOES NOT READ" in l]
+    never = [l for l in a3lines.values() if "the refusal never fired" in l]
+    failed = False
+    if apart:
+        print("   FAIL %-20s WindowServer draws display surfaces into A3 BOs no legacy swap scans out "
+              "(rdna3a3display=1): the panel keeps an old frame" % "A3 display")
+        failed = True
+    elif kept_mode and (never or (ws_bos and not refused)):
+        print("   FAIL %-20s the refusal never fired: %d WindowServer surface(s) of a scanout size became BOs (%s), "
+              "0 refused - the check missed them (the 'surfgem: WindowServer surface ... is not a display "
+              "framebuffer' / 'did not run' lines say why)" % ("A3 display", len(ws_bos),
+                                                                ", ".join(sorted(ws_bos, key=int)[:6]) or "?"))
+        failed = True
+    elif kept_mode and refused:
+        print("   INFO %-20s WindowServer's display framebuffers kept out of A3: %d surface(s) refused, composited "
+              "through copies (card run 58)" % ("A3 display", refused))
+    elif kept_mode:
+        print("   INFO %-20s kept-out mode, but no display framebuffer import seen (none refused, none shared)" %
+              "A3 display")
+    else:
+        print("   INFO %-20s display surfaces may become BOs (rdna3a3display=1)" % "A3 display")
+    for h in sorted(a3lines):
+        print("     " + a3lines[h][:300])
+    for l in sorted(set(re.findall(r"surfgem: (?:WindowServer surface \d+ .*? is not a display framebuffer|surface \d+ .*?"
+                                   r"display check did not run)[^\n]*", log)))[:4]:
+        print("     " + l[:200])
+    return failed
+
+
+A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|swaps(?:_a3)?_h\d): (\d+)", re.M)
+
+
+def a3_counters(txt):
+    """the last dump of the card run 58 sysctls in the tests file: {name: value},
+    None when the kext had none ("no rdna3accel_a3display sysctl")"""
+    if "no rdna3accel_a3display sysctl" in txt and not A3_SYSCTL.search(txt):
+        return None
+    out = {}
+    for k, v in A3_SYSCTL.findall(txt):
+        out[k] = int(v)
     return out
 
 
@@ -569,9 +714,14 @@ def report(path, show_all):
             imp_ref = re.findall(r"family VRAM import refused \(VkResult (-?\d+), kernel errno (\d+)", sv)
             # card run 58: WindowServer's display framebuffers stay out of A3
             # by design (kernel status RD3K_SS_DISPLAY, errno 1 in the plugin)
-            disp = len(re.findall(r"surfgem: surface \d+ plane \d+ refused: WindowServer's display framebuffer", sv))
+            disp_ids = set(re.findall(r"(?:surfgem|surfvram): surface (\d+) plane \d+ refused: WindowServer's display "
+                                      r"framebuffer", sv + "\n" + log))
             refused = [r for r in refused if not r.startswith("WindowServer's display framebuffer")]
-            imp_ref = [(vr, ke) for vr, ke in imp_ref if not (disp and ke == "1")]
+            # only the plugin's refusals of those very surfaces: any other
+            # EPERM stays a warning
+            imp_ref = [(vr, ke) for sid, vr, ke in
+                       re.findall(r"surface (\d+) plane \d+: family VRAM import refused \(VkResult (-?\d+), kernel errno (\d+)", sv)
+                       if not (ke == "1" and sid in disp_ids)]
             shared = sum(1 for l in live if l.startswith("live"))
             state = ("%d process(es) shared, %d private" % (shared, len(live) - shared)) if live else "no plugin line"
             warn = (shared and not gem) or refused or imp_ref
@@ -583,33 +733,14 @@ def report(path, show_all):
                 print("     plugin import refused: VkResult %s, kernel errno %s" % (vr, ke))
             for l in sorted(set(re.findall(r"item 7: kext surface BOs probe[^\n]*", sv)))[:2]:
                 print("     " + l[:150])
-        # card run 58: which VRAM each head scans out against what
-        # WindowServer drew ("a3 display:" lines of the accelerator)
-        a3d = re.findall(r"a3 display: head (\d+): .*$", log, re.M)
-        a3lines = {}
-        for l in log.splitlines():
-            m = re.search(r"a3 display: head (\d+): .*$", l)
-            if m:
-                a3lines[m.group(1)] = m.group(0)
-        apart = [l for l in a3lines.values() if "DOES NOT READ" in l]
-        disp_kept = "WindowServer's display framebuffer" in sv or "kept out of A3" in log
-        if apart:
-            print("   FAIL %-20s WindowServer draws display surfaces into A3 BOs no swap scans out "
-                  "(rdna3a3display=1): the panel keeps an old frame" % "A3 display")
-            for l in apart:
-                print("     " + l[:300])
-            failed = True
-        elif a3d or disp_kept:
-            print("   INFO %-20s %s" % ("A3 display", "WindowServer's display framebuffers kept out of A3 "
-                                        "(composited through copies, card run 58)" if disp_kept and not
-                                        "MAY become BOs" in log else "display surfaces imported (rdna3a3display=1)"))
-            for h in sorted(a3lines):
-                print("     " + a3lines[h][:200])
+        # card run 58: WindowServer's display framebuffers and A3
+        failed = a3_display_verdict(log, sv) or failed
         failed = failed or not same or not up or len(pids) > 2
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
         want = fb_source_hash(("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_abi.h",
-                               "accel/rdna3accel_stubs.h"))
+                               "accel/rdna3accel_stubs.h", "common/rdna3_bootargs.h",
+                               "common/rdna3_a3_display.h"))   # accel/Makefile's ACCEL_SRC_HASH, same order
         ac = re.search(r"RDNA3Accelerator: build (\S+)", log)
         same = bool(want and ac and ac.group(1) == want)
         print("   %s %-20s %s" % ("PASS" if same else "FAIL", "accelerator build",
@@ -856,12 +987,19 @@ def summary(path, serial=None):
                 out[i] = (k, v.replace("did not load", "LOADED"))
     for m in re.finditer(r"^M6 (\S+): (.*)$", txt, re.M):
         out.append(("  " + m.group(1), m.group(2)[:100]))
-    m6pics = glob.glob(path[:-len(".tar.gz")] + "-scanoutm6*-pipe*.ppm")
-    if m6pics:
-        frozen = m6_frozen(path[:-len(".tar.gz")])
-        out.append(("M6 screens", "; ".join("pipe %d FROZEN in all %d looks" % (pp, len(n)) for pp, n in frozen)
-                    if frozen else "every pipe's picture changed between the M6 looks"))
-    faults = vm_fault_groups(log)
+    m6 = m6_verdict(path[:-len(".tar.gz")], txt, main_pipe(path, txt))
+    if m6:
+        out.append(("M6 screens", "; ".join(sh for _, _, sh in m6)))
+    a3c = a3_counters(txt)
+    if a3c is None:
+        out.append(("A3 display counters", "none: the kext predates card run 58"))
+    elif a3c:
+        out.append(("A3 display counters", "refused %s, imported %s, other %s; swaps %s" % (
+            a3c.get("a3display_refused", "?"), a3c.get("a3display_imported", "?"), a3c.get("a3display_other", "?"),
+            ", ".join("h%s %d (A3 %d)" % (k[-1], v, a3c.get("swaps_a3_h" + k[-1], 0))
+                      for k, v in sorted(a3c.items()) if k.startswith("swaps_h") and v))))
+    # the serial log when there is one: the unified log may carry the same lines
+    faults = vm_fault_groups(open(serial, errors="replace").read() if serial else log)
     if faults:
         out.append(("VM faults", "%d in %d place(s)" % (sum(f[0] for f in faults), len(faults))))
         for n, hub, vmid, addr, who, client in faults[:6]:
@@ -1024,11 +1162,20 @@ def main():
                         print("       %s display wake: %d pipe(s) lit, %d still blanked" %
                               ("PASS" if nl and not nb else "FAIL", nl, nb))
                         failed = failed or not nl or nb > 0
-            for pipe, names in m6_frozen(p[:-len(".tar.gz")]):
-                print("   FAIL M6 screen: pipe %d showed the same picture in all %d M6 looks (%s): the apps' "
-                      "frames never reached it (card run 58: an old frame on the main screen)" %
-                      (pipe, len(names), ", ".join(names)))
-                failed = True
+            for lv, t, _ in m6_verdict(p[:-len(".tar.gz")], txt, main_pipe(p, txt)):
+                print("   %s M6 screen: %s" % (lv, t))
+                failed = failed or lv == "FAIL"
+            # card run 58's counters (the dumps of autoreport.sh, the last wins)
+            a3c = a3_counters(txt)
+            if a3c is None:
+                print("   INFO A3 display counters: none (the kext predates card run 58)")
+            elif a3c:
+                print("   INFO A3 display counters: " + ", ".join("%s %d" % kv for kv in sorted(a3c.items())))
+                if a3c.get("a3display_imported") and any(v for k, v in a3c.items() if k.startswith("swaps_h")) and \
+                        not any(v for k, v in a3c.items() if k.startswith("swaps_a3_h")):
+                    print("   FAIL A3 display: %d display surface(s) imported (rdna3a3display=1) and no legacy swap "
+                          "ever scanned one out" % a3c["a3display_imported"])
+                    failed = True
             for ppm in sorted(glob.glob(p[:-len(".tar.gz")] + "-scanout*-pipe*.ppm")):
                 try:
                     print("     picture: " + ppm_to_png(ppm))

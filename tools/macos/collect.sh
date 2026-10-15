@@ -77,10 +77,17 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
     for f in 20-log-rdna3.txt 26-log-metal-plugin.txt 24-log-coredisplay.txt; do
         echo "== $f"
         if [ ! -s "$dir/$f" ]; then echo "(no such log in this report)"; continue; fi
-        grep -h -e 'GEM: IOSurface' -e 'surfgem' -e 'surfvram' -e 'a3 display' -e 'A3: WindowServer' -e 'item 7' -e 'IOSurface VRAM is' \
+        grep -h -e 'GEM: IOSurface' -e 'surfgem' -e 'surfvram' -e 'item 7' -e 'IOSurface VRAM is' \
             -e 'dirty refused' -e 'surface-out -> dirty' -e 'memory types' -e 'identity' "$dir/$f" \
             | head -250 || true
+        # card run 58 with a budget of its own (the 250 above fill up first):
+        # the display rule at start, the refusals, the misses, the verdicts per head
+        grep -h -e 'a3 display' -e 'A3: WindowServer' -e "WindowServer's display framebuffer" \
+            -e 'is not a display framebuffer' -e 'display check did not run' "$dir/$f" | tail -60 || true
     done
+    echo "== sysctl (card run 58)"
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|swaps_)")
+    if [ -n "$_a3" ]; then echo "$_a3"; else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
 } > "$dir/29-surface-vram.txt" 2>/dev/null
 # N1: which processes the Metal plugin served and why. The list, the
 # boot-args (rdna3mtlapps=0 ends apps mode) and the plugin's decision line of

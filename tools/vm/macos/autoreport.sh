@@ -77,6 +77,20 @@ rdna3_allow_mode() {
     else echo "apps (every application; denied: $(sed -n 's/^[[:space:]]*-[[:space:]]*//p' "$_al" | tr '\n' ',' | sed 's/,$//'))"; fi
 }
 
+# card run 58: WindowServer's display framebuffers and A3 (refused /
+# imported, the legacy swaps per head and those that scanned out an A3 BO)
+a3_sysctls() {
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|swaps_)")
+    if [ -n "$_a3" ]; then echo "$_a3"
+    else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
+}
+
+# an M6 hi-res look keeps only its picture; the pipes' state stays in the
+# results (a pipe not lit or asleep must not look like a frozen picture)
+m6_look_state() {
+    grep -E '^pipe [0-9]+: |pipe\(s\) lit|asleep' | cut -c1-140
+}
+
 # the progress window as soon as somebody is logged in, with the time the
 # tests start: the 90 s pause after boot (the desktop and the driver
 # settle first) looked like nothing was happening
@@ -529,8 +543,8 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         # IOPresentment: does WindowServer hand the display pipes a plane
         # (iop_ok / iop_src_surf), and what did AGDC answer (rdna3agdc)
         echo "== display pipe and AGDC counters"
-        # card run 58: display framebuffers kept out of A3 / swaps per head that scanned out an A3 BO
-        sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|copy_skip|flips)|heads_|a3display|swaps_)|rdna3agdc" || true
+        sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|copy_skip|flips)|heads_)|rdna3agdc" || true
+        a3_sysctls
         ioreg -r -c RDNA3AGDC -w0 -d1 2>/dev/null | grep -E '"RDNA3,AGDC' | sed 's/^ *//'
         # with AGDC up WindowServer needs the Metal plugin's device (card runs 41/45)
         echo "Metal allow list: $(grep -v '^#' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | tr '\n' ' ') ($(stat -f %Lp /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null))"
@@ -849,7 +863,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 # 1280 wide (card run 54: Chess's and Maps' faults were too
                 # small to see at 320)
                 echo "== rdna3_drminfo --scanout-hires (look m6$app)"
-                with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6$app" 2>&1 >/dev/null
+                with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6$app" 2>&1 | m6_look_state
                 pkill -x "$app" 2>/dev/null
                 sleep 2
                 cr=$(find /Library/Logs/DiagnosticReports /Users/*/Library/Logs/DiagnosticReports -name "$app*" \
@@ -873,12 +887,14 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             echo "System Settings: plugin $([ "$(lsof +c 0 -n -c 'System Settings' 2>/dev/null | grep -c RDNA3MTLDriver)" -gt 0 ] && echo loaded || echo "NOT loaded") ($(rdna3_allow_mode))"
             mkdir -p "$HOME/rdna3-scanout/m6Settings"
             echo "== rdna3_drminfo --scanout-hires (look m6Settings)"
-            with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6Settings" 2>&1 >/dev/null
+            with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6Settings" 2>&1 | m6_look_state
             pkill -x "System Settings" 2>/dev/null
             sleep 3
             mkdir -p "$HOME/rdna3-scanout/m6desktop"
             echo "== rdna3_drminfo --scanout-hires (look m6desktop)"
-            with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6desktop" 2>&1 >/dev/null
+            with_limit 60 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/m6desktop" 2>&1 | m6_look_state
+            echo "== A3 display counters after M6"
+            a3_sysctls
             echo "== copy forward (kernel) during M6"
             with_limit 60 log show --last 3m --style compact --predicate 'eventMessage CONTAINS "copy forward"' 2>/dev/null | tail -30
             done_ 0

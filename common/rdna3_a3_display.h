@@ -12,10 +12,14 @@
  * IOSurface's system memory, which "surface-out -> dirty, no copy" no
  * longer refreshed. The main screen kept an old frame (the wallpaper and
  * the menu bar) and showed a new one only when a CPU lock paged the VRAM
- * off. Until the swap flips a surface's own VRAM, a WindowServer surface
- * the size of a head's scanout stays out of A3 and the plugin composites
- * it through copies, as before A3; boot-arg rdna3a3display=1 (or sysctl
- * debug.rdna3accel_a3display=1) lets it in again.
+ * off. Until the legacy swap flips a surface's own VRAM, a WindowServer
+ * surface the size of a head's scanout (asked of the framebuffers at the
+ * import, and the size of the head's own swaps) stays out of A3 and the
+ * plugin composites it through copies, as before A3; boot-arg
+ * rdna3a3display=1 (or sysctl debug.rdna3accel_a3display=1) lets it in
+ * again. The process is all the kernel knows of a surface: an application's
+ * full-screen surface that WindowServer imports is refused too (WindowServer
+ * then reads it through copies; DRIVER-PLAN N27).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -27,23 +31,39 @@
 
 #define RD3_A3_DISPLAY_PROC "WindowServer"
 
-/* The head whose display framebuffer an IOSurface of w x h pixels looked
- * up by process 'proc' is, or -1: only WindowServer's, only the size a
- * head scans out (head_w/head_h[i], 0 = head i unknown). Another process's
- * surface of that size (a full-screen app) is its own: it keeps A3. */
-static inline int rd3_a3_display_head(const char *proc, uint64_t w, uint64_t h,
-                                      const volatile uint32_t *head_w, const volatile uint32_t *head_h,
-                                      unsigned heads)
+/* the process whose display framebuffers these are (an empty or other name: not) */
+static inline int rd3_a3_display_proc(const char *proc)
 {
-    unsigned i;
-    if (!proc || strcmp(proc, RD3_A3_DISPLAY_PROC) != 0 || !w || !h || !head_w || !head_h)
-        return -1;
-    for (i = 0; i < heads; i++) {
+    return proc && strcmp(proc, RD3_A3_DISPLAY_PROC) == 0;
+}
+
+/* bit i: head i scans out w x h (head_w/head_h[i], 0 = head i unknown).
+ * Two heads of one size both match: the surface may be either's. */
+static inline unsigned rd3_a3_size_heads(uint64_t w, uint64_t h, const volatile uint32_t *head_w,
+                                         const volatile uint32_t *head_h, unsigned heads)
+{
+    unsigned i, mask = 0;
+    if (!w || !h || !head_w || !head_h)
+        return 0;
+    for (i = 0; i < heads && i < 32; i++) {
         const uint32_t hw = head_w[i], hh = head_h[i];
         if (hw && hh && hw == w && hh == h)
-            return (int)i;
+            mask |= 1u << i;
     }
-    return -1;
+    return mask;
+}
+
+/* The heads whose display framebuffer an IOSurface of w x h pixels looked
+ * up by process 'proc' may be (a bit mask, 0 = none): only WindowServer's,
+ * only the size a head scans out. Another process's surface of that size
+ * (a full-screen app) is its own: it keeps A3. */
+static inline unsigned rd3_a3_display_heads(const char *proc, uint64_t w, uint64_t h,
+                                            const volatile uint32_t *head_w, const volatile uint32_t *head_h,
+                                            unsigned heads)
+{
+    if (!rd3_a3_display_proc(proc))
+        return 0;
+    return rd3_a3_size_heads(w, h, head_w, head_h, heads);
 }
 
 #endif

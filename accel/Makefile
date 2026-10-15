@@ -25,11 +25,13 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
 # build id = hash of the sources (tools/triage_reports.py computes the same):
 # the VM loads this kext from the Auxiliary KC, which keeps an old copy until
 # the user approves a new one, and the report must tell which one ran
-ACCEL_SRC_HASH := $(shell cat rdna3-accel.cpp Info.plist rdna3k_abi.h rdna3accel_stubs.h | shasum | cut -c1-10)
+# (the common/ headers the accelerator includes count too: card run 58's
+# display rule lives in common/rdna3_a3_display.h)
+ACCEL_SRC_HASH := $(shell cat rdna3-accel.cpp Info.plist rdna3k_abi.h rdna3accel_stubs.h ../common/rdna3_bootargs.h ../common/rdna3_a3_display.h | shasum | cut -c1-10)
 CXXFLAGS += -DACCEL_SRC='"$(ACCEL_SRC_HASH)"'
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext
 
-HDRS     := $(wildcard *.h iofam/*.h re/*.h)
+HDRS     := $(wildcard *.h iofam/*.h re/*.h) ../common/rdna3_bootargs.h ../common/rdna3_a3_display.h
 
 .PHONY: all check clean
 all: $(BUNDLE)
