@@ -87,7 +87,9 @@ grep -q 'foo=a&amp;b&lt;c' "$E/EFI/OC/config.plist" && ! grep -q '&amp;amp;' "$E
 "$ROOT/package/oc_install.sh" --efi "$E" --off >/dev/null
 [ "$(python3 "$V" plist "$E/EFI/OC/config.plist" --show)" = "alcid=1 foo=a&b<c -v -rdna3off" ] || fail "--off double-escaped"
 grep -q '&amp;amp;' "$E/EFI/OC/config.plist" && fail "--off double-escaped in the file"
-"$ROOT/package/oc_install.sh" --efi "$E" --remove --dry-run | grep -q 'would remove' || fail "--remove --dry-run says it removed"
+# into a variable first: with pipefail, grep -q stopping early gives the script SIGPIPE (failed on macOS)
+out=$("$ROOT/package/oc_install.sh" --efi "$E" --remove --dry-run)
+grep -q 'would remove' <<<"$out" || fail "--remove --dry-run says it removed"
 
 # --- a failing config.plist edit leaves the kexts where they are (no Kernel dict here)
 F=$T/bad; mkdir -p "$F/EFI/OC/Kexts/RDNA3Accel.kext"
