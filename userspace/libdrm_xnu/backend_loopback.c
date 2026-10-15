@@ -119,8 +119,8 @@ static int lb_txstate(void *c, struct rd_xnu_txstate *t)
     t->valid = t->pipe == 0;
     t->problems = t->changes = 0;
     snprintf(t->text, sizeof(t->text), "%s",
-             t->valid ? "head 0\nOTG0: OTG_CONTROL 0x10201 V_TOTAL 0x464\n"
-                        "problems: none; 0 change(s) seen by the driver's watch\nsince the start: unchanged\n"
+             t->valid ? "head 0: OTG0 -> DIGD -> UNIPHYD\nproblems: none\nOTG0: OTG_CONTROL 0x10201 V_TOTAL 0x464\n"
+                        "watch: 3 tick(s), 0 change(s), 0 busy skip(s)\nsince the start: unchanged\n"
                       : "");
     return 0;
 }

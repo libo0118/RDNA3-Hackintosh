@@ -118,7 +118,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_discovery $(BUI
 	$(BUILD)/test_libdrm_amdgpu
 	rm -f $(BUILD)/scanout-pipe*.ppm
 	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '1 pipe(s) lit'
-	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '^  TX problems: none'
+	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '^  TX problems: none$$'
 	$(BUILD)/rdna3_drminfo_host --scanout-hires $(BUILD) | grep -q '1 pipe(s) lit'
 	python3 tools/triage_reports.py --picture $(BUILD)/scanout-pipe0.ppm | grep -q 'png'
 	# two jobs in one process each get their own VA (card run 2026-10-12)

@@ -4461,6 +4461,7 @@ const char *rdna3_drm_ioctl_name(uint32_t nr)
     case RD_NR_XNU_BO_EXPORT: return "XNU_BO_EXPORT";
     case RD_NR_XNU_BO_IMPORT: return "XNU_BO_IMPORT";
     case RD_NR_XNU_SCANOUT: return "XNU_SCANOUT";
+    case RD_NR_XNU_TXSTATE: return "XNU_TXSTATE";
     case RD_NR_XNU_FILE_ID: return "XNU_FILE_ID";
     case RD_NR_XNU_SURFACE_BO: return "XNU_SURFACE_BO";
     case RD_NR_AMDGPU(DRM_AMDGPU_SCHED): return "AMDGPU_SCHED";

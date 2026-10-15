@@ -125,6 +125,7 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     displayProbeConnectors();
     displayPublishRoutes();
     displayStateSaveAll();   /* D4: what a reset or a sleep must bring back */
+    displayTxInit();
     displayTxCheck("at the start (as the firmware left it)");
     displayOtgCheck(this, fDispDev, fDcn);   /* rdna3otg=1: step otg */
 
@@ -341,6 +342,8 @@ int RDNA3Accel::drmScanout(void *ctx, struct rd_xnu_scanout *s)
     if (!kauth_cred_issuser(kauth_cred_get()))
         return -RD_EPERM;
     if (!a->fDispDev || !a->fDispLock)
+        return -RD_ENODEV;
+    if (a->fDispAsleep || a->fShuttingDown)   /* a card that may have lost its power */
         return -RD_ENODEV;
     /* the OTG CRC of what leaves the pipe (after the scaler and the blank),
      * on the first call of a picture: windows over the active area, two

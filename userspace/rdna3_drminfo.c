@@ -41,6 +41,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -497,18 +498,25 @@ static uint32_t scanout_grab(int fd, uint32_t pipe, struct rd_xnu_scanout *info,
 /* what the pipe's head sends after its OTG (RD_NR_XNU_TXSTATE): the OTG
  * totals and DRR bounds, the DIG front end and its packets, the back end
  * and the PHY, the problems and the changes since the driver started, one
- * "  TX " line each. Card run of 2026-10-15: an HDMI monitor said "no
- * signal" while its pipe scanned the desktop. Nothing from a kext without
- * the ioctl. */
+ * "  TX " line each; "TX unavailable" / "TX none" / "... not read" when
+ * there is none. Card run of 2026-10-15: an HDMI monitor said "no signal"
+ * while its pipe scanned the desktop. */
 static void scanout_txstate(int fd, uint32_t pipe)
 {
     static struct rd_xnu_txstate t;
     char *l, *nl;
     memset(&t, 0, sizeof(t));
     t.pipe = pipe;
-    if (IOCTL(fd, RD_NR_XNU_TXSTATE, t) || !t.valid)
+    if (IOCTL(fd, RD_NR_XNU_TXSTATE, t)) {
+        int e = errno;
+        printf("  TX unavailable: errno=%d (%s)\n", e, strerror(e));
         return;
+    }
     t.text[sizeof(t.text) - 1] = 0;
+    if (!t.valid && !t.text[0]) {
+        printf("  TX none: no head on pipe %u\n", pipe);
+        return;
+    }
     for (l = t.text; *l; l = nl + 1) {
         nl = strchr(l, '\n');
         if (!nl) {

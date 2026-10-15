@@ -5465,7 +5465,8 @@ static void test_tx_state(rdna3_dev *dev, int standby)
     static rdna3_tx_state t;
     char line[RD_TX_LINE], why[512];
     const uint32_t prc = DCN_B1 + regOTG0_PIXEL_RATE_CNTL + (regOTG1_PIXEL_RATE_CNTL - regOTG0_PIXEL_RATE_CNTL) * 2;
-    uint32_t vtc, vmin, vmax, rate, gc;
+    uint32_t vtc, vmin, vmax, rate, gc, keep;
+    int imp;
     rdna3_drr_params none;
 
     CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && t.valid &&
@@ -5474,7 +5475,7 @@ static void test_tx_state(rdna3_dev *dev, int standby)
         /* TransmitterControl DISABLE: the back end and its symbol clock off,
          * the OTG still running; nothing else changed */
         CHECK(dcn32_tx_state_problems(&t) == RD_TX_P_DIG_OFF);
-        CHECK(dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why)) == 1 &&
+        CHECK(dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why), &imp) == 1 && imp &&
               strstr(why, "DIG_BE_EN_CNTL 0x101 -> 0x0") != NULL);
         dcn32_tx_problems_str(dcn32_tx_state_problems(&t), why, sizeof(why));
         CHECK(strcmp(why, "DIG back end off") == 0);
@@ -5490,18 +5491,78 @@ static void test_tx_state(rdna3_dev *dev, int standby)
     CHECK(dcn32_tx_state_format(&t, 3, line, sizeof(line)) > 0 && strncmp(line, "DIG BE / UNIPHYB: ", 18) == 0 &&
           strstr(line, "DIG_BE_EN_CNTL 0x101 ") != NULL);
     CHECK(dcn32_tx_state_format(&t, RD_TX_GROUPS, line, sizeof(line)) == 0 && line[0] == 0);
-    /* a short buffer: cut and terminated, the full length returned */
-    CHECK(dcn32_tx_state_format(&t, 0, line, 8) > 8 && strlen(line) == 7);
+    CHECK(dcn32_tx_state_format(&t, 4, line, sizeof(line)) == 0 && !t.all_digs);   /* the chain was known */
+    CHECK(dcn32_tx_chain_str(&t, line, sizeof(line)) > 0 && strcmp(line, "OTG2 -> DIGC -> UNIPHYB") == 0);
+    /* a short buffer: cut, marked and terminated, the full length returned */
+    CHECK(dcn32_tx_state_format(&t, 0, line, 8) > 8 && strcmp(line, "OTG2...") == 0);
     CHECK(dcn32_tx_state_format(&t, 0, NULL, 0) == dcn32_tx_state_format(&t, 0, line, sizeof(line)));
-    CHECK(dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why)) == 0 && why[0] == 0);
-    /* the DIG instances not known: only the OTG and its clock selects */
+    CHECK(dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why), &imp) == 0 && why[0] == 0 && !imp);
+    /* the DIG instances not known (what dcn32_otg_dig gives for a DIG that
+     * is off, not one-hot or not on this OTG): never "none", and every
+     * DIG's routing and PHY selects instead */
     {
         static rdna3_tx_state u;
         CHECK(dcn32_tx_state_read(dev, 2, -1, -1, &u) == RDNA3_OK && u.read_mask == 0xffu &&
-              u.fe == RD_TX_NONE && u.be == RD_TX_NONE && dcn32_tx_state_problems(&u) == 0);
+              u.fe == RD_TX_NONE && u.be == RD_TX_NONE && u.all_digs &&
+              dcn32_tx_state_problems(&u) == RD_TX_P_NO_CHAIN);
         CHECK(dcn32_tx_state_format(&u, 3, line, sizeof(line)) > 0 && strncmp(line, "DIG BE / UNIPHY?: DIG_BE_CNTL - ", 32) == 0);
-        CHECK(dcn32_tx_state_diff(&tx_lit, &u, why, sizeof(why)) == RD_TX_NREGS);
+        CHECK(dcn32_tx_state_format(&u, 4, line, sizeof(line)) > 0 &&
+              strncmp(line, "every DIG (the chain was not known): A: BE_EN 0x101 ", 52) == 0 &&
+              strstr(line, "; B: BE_EN 0x101 BE_CNTL 0x30400 ") != NULL && strstr(line, "; C: BE_EN 0x0 ") != NULL);
+        dcn32_tx_problems_str(RD_TX_P_NO_CHAIN, why, sizeof(why));
+        CHECK(strncmp(why, "DIG chain not found", 19) == 0);
+        CHECK(dcn32_tx_state_diff(&tx_lit, &u, why, sizeof(why), &imp) == RD_TX_NREGS && imp &&
+              strcmp(why, "another chain: OTG2 -> DIGC -> UNIPHYB => OTG2 -> DIG? -> UNIPHY?") == 0);
+        /* the boot head's back end no longer one-hot: dcn32_otg_dig loses it */
+        keep = S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)];
+        S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] = keep | (1u << 3) << DIG0_DIG_BE_CNTL__DIG_FE_SOURCE_SELECT__SHIFT;
+        CHECK(dcn32_otg_dig(dev, 2, NULL, NULL) == -1);
+        {
+            static rdna3_tx_state w;
+            CHECK(dcn32_tx_state_read(dev, 2, -1, -1, &w) == RDNA3_OK &&
+                  (dcn32_tx_state_problems(&w) & RD_TX_P_NO_CHAIN));
+            CHECK(dcn32_tx_state_diff(&u, &w, why, sizeof(why), &imp) == 1 && imp &&
+                  strcmp(why, "DIGB BE_CNTL 0x30400 -> 0x30c00") == 0);
+        }
+        S.reg[DIGN(regDIG0_DIG_BE_CNTL, 1)] = keep;
     }
+    /* status and self-clearing fields do not count as a change; the
+     * problems still show them */
+    keep = S.reg[DIGN(regDIG0_HDMI_STATUS, 2)];
+    S.reg[DIGN(regDIG0_HDMI_STATUS, 2)] = keep | DIG0_HDMI_STATUS__HDMI_ERROR_INT_MASK;
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == RD_TX_P_HDMI_ERROR &&
+          dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why), &imp) == 0 && !imp);
+    S.reg[DIGN(regDIG0_HDMI_STATUS, 2)] = keep;
+    keep = S.reg[DIGN(regDIG0_HDMI_GENERIC_PACKET_CONTROL0, 2)];
+    S.reg[DIGN(regDIG0_HDMI_GENERIC_PACKET_CONTROL0, 2)] = keep | DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC3_SEND_MASK;
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == 0 &&
+          dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why), &imp) == 0);
+    S.reg[DIGN(regDIG0_HDMI_GENERIC_PACKET_CONTROL0, 2)] = keep | DIG0_HDMI_GENERIC_PACKET_CONTROL0__HDMI_GENERIC3_CONT_MASK;
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK &&
+          dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why), &imp) == 1 && !imp &&
+          strncmp(why, "HDMI_GENERIC_PACKET_CONTROL0 ", 29) == 0);
+    /* a cut diff text ends in "...", the count is whole */
+    CHECK(dcn32_tx_state_diff(&tx_lit, &t, why, 12, &imp) == 1 && strcmp(why, "HDMI_GEN...") == 0);
+    S.reg[DIGN(regDIG0_HDMI_GENERIC_PACKET_CONTROL0, 2)] = keep;
+    /* the PHY's registers by the back end: B for UNIPHY B, never A's */
+    {
+        const uint32_t phya = DCN_B2 + regPHYASYMCLK_CLOCK_CNTL, syma = DCN_B1 + regSYMCLKA_CLOCK_ENABLE,
+                       dioa = DCN_B2 + regDIO_LINKA_CNTL;
+        uint32_t k0[6] = { S.reg[phya], S.reg[phya + 1], S.reg[syma], S.reg[syma + 1], S.reg[dioa], S.reg[dioa + 1] };
+        S.reg[phya] = 0x10; S.reg[phya + 1] = 0x21;
+        S.reg[syma] = 0x101; S.reg[syma + 1] = 0x201;
+        S.reg[dioa] = 0x600; S.reg[dioa + 1] = 0x700;
+        CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == 0);
+        CHECK(dcn32_tx_state_format(&t, 3, line, sizeof(line)) > 0 &&
+              strstr(line, " DIO_LINK_CNTL 0x700 PHYSYMCLK_CLOCK_CNTL 0x21 SYMCLK_CLOCK_ENABLE 0x201") != NULL);
+        S.reg[phya] = k0[0]; S.reg[phya + 1] = k0[1]; S.reg[syma] = k0[2]; S.reg[syma + 1] = k0[3];
+        S.reg[dioa] = k0[4]; S.reg[dioa + 1] = k0[5];
+    }
+    /* a timing generator that reads all ones: no state */
+    keep = S.reg[OTG(regOTG0_OTG_CONTROL, 3)];
+    S.reg[OTG(regOTG0_OTG_CONTROL, 3)] = 0xffffffffu;
+    CHECK(dcn32_tx_state_read(dev, 3, 0, 0, &t) == RDNA3_ENODEV && !t.valid && dcn32_tx_state_problems(&t) == 0);
+    S.reg[OTG(regOTG0_OTG_CONTROL, 3)] = keep;
     CHECK(dcn32_tx_state_read(dev, 4, 2, 1, &t) == RDNA3_EINVAL && dcn32_tx_state_read(dev, 2, 5, 1, &t) == RDNA3_EINVAL &&
           dcn32_tx_state_read(dev, 2, 2, 5, &t) == RDNA3_EINVAL && dcn32_tx_state_read(NULL, 2, 2, 1, &t) == RDNA3_EINVAL);
 
@@ -5520,7 +5581,8 @@ static void test_tx_state(rdna3_dev *dev, int standby)
     memset(&none, 0, sizeof(none));
     dcn32_otg_set_drr(dev, 2, &none);
     CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == RD_TX_P_DRR_ZERO);
-    CHECK(dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why)) == 1 && strncmp(why, "V_TOTAL_CONTROL 0x0 -> 0x", 25) == 0);
+    CHECK(dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why), &imp) == 1 && imp &&
+          strncmp(why, "V_TOTAL_CONTROL 0x0 -> 0x", 25) == 0);
     /* the mode set's optc1_set_vtotal_min_max(v_total, v_total): nominal */
     dcn32_otg_set_vtotal_min_max(dev, 2, 1481 - 1, 1481 - 1);
     CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == 0);
@@ -5532,7 +5594,8 @@ static void test_tx_state(rdna3_dev *dev, int standby)
     S.reg[OTG(regOTG0_OTG_V_TOTAL_MAX, 2)] = 0;
     /* the DIO FIFO between the pixel and the symbol clock ran dry */
     S.reg[prc] = rate | OTG0_PIXEL_RATE_CNTL__OTG0_DIO_FIFO_ERROR_MASK | (3u << OTG0_PIXEL_RATE_CNTL__OTG0_DIO_ERROR_COUNT__SHIFT);
-    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == RD_TX_P_DIO_FIFO);
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_problems(&t) == RD_TX_P_DIO_FIFO &&
+          dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why), &imp) == 0);   /* error bits: problems, not a change */
     S.reg[prc] = rate;
     /* AV mute in the general control packet: the sink blanks */
     S.reg[DIGN(regDIG0_HDMI_GC, 2)] = gc | DIG0_HDMI_GC__HDMI_GC_AVMUTE_MASK;
@@ -5540,7 +5603,7 @@ static void test_tx_state(rdna3_dev *dev, int standby)
     dcn32_tx_problems_str(RD_TX_P_AVMUTE | RD_TX_P_DIO_FIFO, why, sizeof(why));
     CHECK(strcmp(why, "DIO FIFO error, AV mute") == 0);
     S.reg[DIGN(regDIG0_HDMI_GC, 2)] = gc;
-    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why)) == 0);
+    CHECK(dcn32_tx_state_read(dev, 2, 2, 1, &t) == RDNA3_OK && dcn32_tx_state_diff(&tx_lit, &t, why, sizeof(why), &imp) == 0);
     /* back as the head was */
     S.reg[OTG(regOTG0_OTG_V_TOTAL_CONTROL, 2)] = vtc;
     S.reg[OTG(regOTG0_OTG_V_TOTAL_MIN, 2)] = vmin;

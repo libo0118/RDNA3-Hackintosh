@@ -218,7 +218,7 @@ what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
 | `rdna3lvl=0`…`8` | a test-ladder level instead of the profile (`oc_install.sh --step N` sets a whole step) |
 | `rdna3modeset=1` | own display timings: the monitor's EDID modes through `hw/dcn32_modeset.c` (step `modeset`) |
 | `rdna3vrr=1` | FreeSync / VRR with `rdna3modeset=1` (`hw/dcn32_freesync.c`): a mode inside the sink's range runs with DRR (v_total from the max to the min refresh, flips end the stretched blank), MSA timing ignored on DP and the FreeSync SPD sent; needs `rdna3dplink=1` (DP) or `rdna3hdmi=1` (HDMI, the AMD VSDB read through the DMCUB); off with `rdna3subvp=1` (SubVP assumes a fixed timing). The range is in ioreg `RDNA3,Head<n>,VRRRange` either way, the state in `RDNA3,Head<n>,VRR` |
-| `rdna3txwatch=0` | no TX watch: by default the core logs what each head sends after its OTG (DIG, HDMI packets, PHY clock selects; `hw/dcn32_txstate.c`) at the start, after the clone and whenever it changes (every 2 s, reads only), and publishes `RDNA3,Head<n>,TX` |
+| `rdna3txwatch=0` | no TX watch: by default the core logs what each head sends after its OTG (DIG, HDMI packets, PHY clock selects; `hw/dcn32_txstate.c`) at the start, after the clone and whenever it changes (every 2 s, reads only), and publishes `RDNA3,Head<n>,TX`, `RDNA3,CloneTX` and `RDNA3,TXWatchTicks` |
 | `rdna3mes=1` | MES scheduler pipe (step 8c) |
 | `rdna3userq=1` | user queues (DRM_AMDGPU_USERQ, amdgpu's `user_queue=1`) through the MES; turns `rdna3mes` on, kernel VMs keep VMIDs 1-7 (step userq) |
 | `rdna3vcn=1` | the video engines: VCN 4.0 (two instances) and JPEG 4.0 for VCN_ENC / VCN_JPEG command submission and VIDEO_CAPS; the PSP also loads `vcn_4_0_0.bin` for VCN1 (step vcn) |

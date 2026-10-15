@@ -15,6 +15,11 @@
  * after the clone and whenever it changes, and the report's screen looks
  * print it.
  *
+ * A chain whose DIG is not known (off, not one-hot, not pointing at the
+ * OTG: what dcn32_otg_dig cannot follow) is never reported clean: every
+ * DIG's routing and every PHY's selects are read instead (group 4) and
+ * RD_TX_P_NO_CHAIN is set.
+ *
  * SPDX-License-Identifier: MIT
  */
 #ifndef RDNA3_DCN32_TXSTATE_H
@@ -26,16 +31,20 @@
 extern "C" {
 #endif
 
-#define RD_TX_NREGS 31
-#define RD_TX_NONE  0xffu           /* a DIG instance not known: its registers are not read */
-#define RD_TX_GROUPS 4              /* OTG / clocks, DIG FE, FE packets, DIG BE / PHY */
-#define RD_TX_LINE  320             /* one group, formatted */
+#define RD_TX_NREGS    31
+#define RD_TX_NONE     0xffu        /* a DIG instance not known: its registers are not read */
+#define RD_TX_GROUPS   5            /* OTG / clocks, DIG FE, FE packets, DIG BE / PHY, every DIG */
+#define RD_TX_LINE     512          /* one group, formatted */
+#define RD_TX_MAX_DIG  5            /* DIGA..DIGE, UNIPHY A..E */
+#define RD_TX_DIG_REGS 6            /* per DIG in group 4: BE_EN, BE_CNTL, FE_CNTL, DIO_LINK, PHYSYMCLK, SYMCLK */
 
 typedef struct rdna3_tx_state {
     uint32_t valid;
     uint32_t otg, fe, be;           /* fe / be RD_TX_NONE when not known */
     uint32_t read_mask;             /* bit i: v[i] was read */
     uint32_t v[RD_TX_NREGS];
+    uint32_t all_digs;              /* dig[][] read: the chain was not known */
+    uint32_t dig[RD_TX_MAX_DIG][RD_TX_DIG_REGS];
 } rdna3_tx_state;
 
 /* what the state says is wrong with the output (dcn32_tx_state_problems) */
@@ -52,10 +61,13 @@ typedef struct rdna3_tx_state {
 #define RD_TX_P_DRR        (1u << 10)   /* V_TOTAL_MIN / MAX selected and not the nominal V_TOTAL */
 #define RD_TX_P_DRR_ZERO   (1u << 11)   /* V_TOTAL_MIN / MAX selected with a bound of 0 */
 #define RD_TX_P_NOT_DIO    (1u << 12)   /* DIO_LINK<x>_CNTL.ENC_TYPE_SEL not the DIG (TMDS needs it) */
-#define RD_TX_P_NBITS      13
+#define RD_TX_P_NO_CHAIN   (1u << 13)   /* the DIG front / back end was not known: not read */
+#define RD_TX_P_NBITS      14
 
 /* Read the chain of OTG 'otg' -> DIG FE 'fe' -> DIG BE / PHY 'be' (fe / be
- * < 0: not known, skipped). RDNA3_EINVAL for an instance out of range. */
+ * < 0: not known; then every DIG's routing and PHY selects are read).
+ * RDNA3_EINVAL for an instance out of range, RDNA3_ENODEV when OTG_CONTROL
+ * reads all ones (the block or the bus is gone: no state, valid 0). */
 int dcn32_tx_state_read(rdna3_dev *d, uint32_t otg, int fe, int be, rdna3_tx_state *t);
 
 /* RD_TX_P_* of a state read */
@@ -64,14 +76,23 @@ uint32_t dcn32_tx_state_problems(const rdna3_tx_state *t);
 /* "none" or the names of the bits in 'p', comma separated; the length */
 size_t dcn32_tx_problems_str(uint32_t p, char *buf, size_t len);
 
+/* "OTG1 -> DIGD -> UNIPHYD" ('?' for a DIG not known); the length */
+size_t dcn32_tx_chain_str(const rdna3_tx_state *t, char *buf, size_t len);
+
 /* group g (0..RD_TX_GROUPS-1) as "OTG1: OTG_CONTROL 0x... V_TOTAL ..."
- * ("-" for a register not read); the length (0 for g out of range) */
+ * ("-" for a register not read); the length (0 for g out of range, or
+ * group 4 of a state whose chain was known) */
 size_t dcn32_tx_state_format(const rdna3_tx_state *t, uint32_t g, char *buf, size_t len);
 
-/* the registers read in both that differ, "NAME 0xold -> 0xnew, ...";
- * returns how many (the text may be cut, the count is not). Different
- * instances count as every register changed. */
-uint32_t dcn32_tx_state_diff(const rdna3_tx_state *was, const rdna3_tx_state *now, char *buf, size_t len);
+/* The registers read in both whose lasting bits differ, "NAME 0xold ->
+ * 0xnew, ..." ("..." at the end when the text was cut); returns how many
+ * (the count is never cut). Status and self-clearing fields (error
+ * counters, *_SEND, *_UPDATE, HDMI_STATUS ...) do not count: the problems
+ * show those. *important (may be NULL): one of them is the OTG enable, a
+ * DRR bound, a clock select, the DIG routing / enable or a PHY select.
+ * Another OTG / DIG chain: RD_TX_NREGS, the text says which, *important 1. */
+uint32_t dcn32_tx_state_diff(const rdna3_tx_state *was, const rdna3_tx_state *now, char *buf, size_t len,
+                             int *important);
 
 #ifdef __cplusplus
 }

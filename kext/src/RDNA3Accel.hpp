@@ -445,13 +445,16 @@ private:
     void          displayStateSaveAll();
     /* What each head sends after its OTG (hw/dcn32_txstate.c): logged in
      * full at the start and after the clone, then every 2 s (the
-     * statistics tick) only what changed; on unless rdna3txwatch=0. Card
+     * statistics tick) only what changed; on unless rdna3txwatch=0. The
+     * boot heads and the clone of rdna3mirror=1 (RDNA3Resume.cpp). Card
      * run of 2026-10-15: the HDMI monitor said "no signal" while its pipe
      * scanned the desktop, and nothing told when or what changed. */
     struct RDNA3TxWatch *fTx = nullptr;
+    void          displayTxInit();
     void          displayTxCheck(const char *when);
-    bool          displayTxRead(uint32_t head, struct rdna3_tx_state *t);   /* fDispLock held */
-    void          displayTxLogFull(uint32_t head, const char *when, const struct rdna3_tx_state *t);
+    bool          displayTxChain(uint32_t e, uint32_t *otg, int *fe, int *be);   /* fDispLock held */
+    int           displayTxRead(uint32_t e, struct rdna3_tx_state *t, char *why, size_t whyLen);   /* fDispLock held */
+    void          displayTxLogFull(const char *name, const char *when, const struct rdna3_tx_state *t);
     void          displayStateFree();
     void          displayNoteBlank(uint32_t head, bool blank);
     int           displayHeadDpms(uint32_t head, bool blank);

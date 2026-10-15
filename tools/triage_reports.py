@@ -478,14 +478,64 @@ def tail_file(path, n, pattern=None):
         print("     " + l[-160:])
 
 
+TX_CHANGE = re.compile(r"display: (head \d+|clone) TX change #(\d+) at (\d+) ms uptime: problems: ([^;]*); (.*)$")
+TX_LINE = re.compile(r"display: (head \d+|clone) TX|display: TX watch")
+
+
+def tx_changes(log):
+    """the core's TX watch changes (what a head sends after its OTG), once
+    each even when a line is both in the report's log and the serial log:
+    {entity: [(n, ms, problems, registers)]}"""
+    seen, out = set(), {}
+    for m in TX_CHANGE.finditer(log):
+        ent, n = m.group(1), int(m.group(2))
+        if (ent, n) in seen:
+            continue
+        seen.add((ent, n))
+        out.setdefault(ent, []).append((n, int(m.group(3)), m.group(4).strip(), m.group(5)))
+    for v in out.values():
+        v.sort()
+    return out
+
+
+def tx_excerpt(lines):
+    """the watch's lines worth reading: every full state (the start, after
+    the clone, a new chain) with its register lines, the watch's own
+    lines, the first change with problems, the last 20; once each"""
+    keep, first_bad, full = set(), None, None
+    for i, l in enumerate(lines):
+        if re.search(r"TX (at the start|after the clone|new chain|first look)|TX watch:|TX not read|changed since the start", l):
+            keep.add(i)
+            full = re.search(r"display: (head \d+|clone) TX", l)
+            full = full.group(1) if full else None
+        elif full and re.search(r"display: %s TX   " % re.escape(full), l):
+            keep.add(i)
+        else:
+            full = None
+        m = TX_CHANGE.search(l)
+        if m and m.group(4).strip() != "none" and first_bad is None:
+            first_bad = i
+    if first_bad is not None:
+        keep.add(first_bad)
+    keep.update(range(max(0, len(lines) - 20), len(lines)))
+    out, seen = [], set()
+    for i in sorted(keep):
+        t = lines[i][lines[i].find("display:"):]
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def summary(path, serial=None):
     """one line per area for the newest report: what a round's message to
     the user is made of"""
-    log = args = ""
+    log = args = props_txt = ""
     if os.path.exists(path):   # else only the tests file came (collect.sh did not finish)
         with tarfile.open(path) as tar:
             log = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt")
             args = read_member(tar, "01-boot-args.txt")
+            props_txt = read_member(tar, "11-ioreg-props.txt") or ""
     tests = path[:-len(".tar.gz")] + "-tests.txt"
     txt = open(tests, errors="replace").read() if os.path.exists(tests) else ""
     if serial:   # the kernel log of the same boot has the whole PM trend
@@ -521,21 +571,35 @@ def summary(path, serial=None):
         blank = len(re.findall(r"^pipe \d+: BLANKED", blk, re.M))
         uf = len(re.findall(r"UNDERFLOW", blk))
         same = len(lit) > 1 and len(set(a for _, a in lit)) < len(lit)
-        txbad = [m for m in re.findall(r"^  TX problems: (.*?)(?:;|$)", blk.split("\n== ")[0], re.M) if m != "none"]
+        own = blk.split("\n== ")[0]
+        txbad = [m for m in re.findall(r"^  TX problems: (.*)$", own, re.M) if m.strip() != "none"]
+        notx = lit and not re.search(r"^  TX ", own, re.M)
         out.append(("screens %s" % (look.group(1) if look else "1"),
-                    "%d lit%s%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
-                                        ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "",
-                                        ", TX: " + "; ".join(txbad)[:80] if txbad else "")))
+                    "%d lit%s%s%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
+                                          ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "",
+                                          ", TX: " + "; ".join(txbad) if txbad else "",
+                                          ", NO TX LINES" if notx else "")))
     # the core's TX watch (what each head sends after its OTG): changes
-    # with their time, from the kernel log of the same boot
-    txch = re.findall(r"display: head (\d+) TX change #(\d+) at (\d+) ms[^:]*: (.*)$", log, re.M)
-    if txch or "TX at the start" in log:
-        heads = {}
-        for h, n, ms, what in txch:
-            heads.setdefault(h, []).append((int(n), int(ms), what))
-        out.append(("TX watch", "; ".join("head %s: %d change(s), first at %d ms: %s" %
-                                          (h, len(v), v[0][1], v[0][2][:70]) for h, v in sorted(heads.items()))
-                    if heads else "no change on any head after the start"))
+    # with their time, problems first, from the kernel log of the same boot
+    if "TX watch:" in log or "TX at the start" in log:
+        ch = tx_changes(log)
+        ticks = parse_props(props_txt).get("TXWatchTicks") if props_txt else None
+        ticked = "TX watch: first tick" in log or (isinstance(ticks, int) and ticks > 0)
+        parts = []
+        for ent, v in sorted(ch.items()):
+            bad = [c for c in v if c[2] != "none"]
+            c = bad[0] if bad else v[0]
+            parts.append("%s: %d change(s); first %s at %d ms: problems: %s; %s" %
+                         (ent, len(v), "with problems" if bad else "", c[1], c[2], c[3][:160]))
+        if parts:
+            out.append(("TX watch", " | ".join(parts)))
+        elif "TX watch: off" in log:
+            out.append(("TX watch", "off (rdna3txwatch=0)"))
+        elif ticked:
+            out.append(("TX watch", "no change on any head after the start (%s tick(s))" %
+                        (ticks if isinstance(ticks, int) else "some")))
+        else:
+            out.append(("TX watch", "NEVER TICKED: no change seen proves nothing (the statistics tick did not run)"))
     # the Vulkan CTS subset (step cts): the total, the groups that failed or
     # hung, the first failing cases
     cts = re.search(r"^CTS: .*$", txt, re.M)
@@ -680,6 +744,7 @@ def main():
                 for blk in txt.split("== rdna3_drminfo --scanout")[1:]:
                     look = re.match(r"(?:-hires)?\s*\(look (\w+)\)", blk)
                     addrs = []
+                    txl = 0
                     print("     look %s:" % (look.group(1) if look else "1"))
                     for l in blk.splitlines()[1:]:
                         if l.startswith("=="):
@@ -689,14 +754,18 @@ def main():
                         # what the head sends after its OTG (RD_NR_XNU_TXSTATE):
                         # the registers in full, the problems flagged
                         elif l.startswith("  TX "):
-                            print("       " + l[:400])
-                            if l.startswith("  TX problems: ") and not l.startswith("  TX problems: none"):
-                                print("       !! the pixels leave the OTG, but its output is wrong: " + l[15:150])
+                            print("       " + l)
+                            txl += 1
+                            if l.startswith("  TX problems: ") and l.strip() != "TX problems: none":
+                                print("       !! the pixels leave the OTG, but its output is wrong: " + l[15:])
                         m = re.match(r"pipe (\d+): LIT .* in use (0x[0-9a-f]+)", l)
                         if m:
                             addrs.append(m.group(2))
                     if len(addrs) > 1 and len(set(addrs)) < len(addrs):
                         print("       !! two lit pipes scan the same surface: both monitors show one picture")
+                    if addrs and not txl and "pipe(s) lit" in blk.split("\n== ")[0]:
+                        print("       !! lit pipe(s) but no TX lines: what leaves the OTG was not read "
+                              "(a kext or rdna3_drminfo without RD_NR_XNU_TXSTATE?)")
                     # display sleep (rdna3dpms=1): blanked while asleep, lit after the wake
                     if look and look.group(1) == "sleep":
                         nb = len(re.findall(r"^pipe \d+: BLANKED", blk, re.M))
@@ -810,13 +879,14 @@ def main():
         # what each head sent after its OTG at the start, after the clone
         # and every change since (the core's TX watch, hw/dcn32_txstate.c)
         try:
-            tx = [l for l in open(s, errors="replace").read().splitlines() if re.search(r"display: head \d+ TX", l)]
+            tx = [l for l in open(s, errors="replace").read().splitlines() if TX_LINE.search(l)]
         except OSError:
             tx = []
         if tx:
-            print("   TX watch (%d line(s); the first 60):" % len(tx))
-            for l in tx[:60]:
-                print("     " + l[l.find("display:"):][:400])
+            ex = tx_excerpt(tx)
+            print("   TX watch (%d line(s); the full states, the first change with problems, the last 20):" % len(tx))
+            for l in ex:
+                print("     " + l)
     for h in hosts:
         print("=" * 78)
         print(os.path.basename(h))
