@@ -54,6 +54,15 @@ own job. For every request the manager:
    dispatches CI, and reports to the CEO in Polish: what was done, by whom,
    what was found and fixed, what is still open.
 
+Which model each employee runs on (the CEO's choice; pass it as the Agent
+tool's `model` on every delegation, it overrides the agent's own default):
+
+| Work | Model |
+|---|---|
+| Kernel code (kext, hw, uapi, fb, agdc), the accelerator, security review, architecture and planning | `opus` |
+| Other implementation (plugin, libdrm_xnu, tools, tests, docs), code review, test analysis, build fixes | `sonnet` |
+| Searching the code, gathering logs and reports, simple lookups | `haiku` |
+
 Small, mechanical steps (a one-line fix, git, CI dispatch, reading a log)
 the manager may do directly; anything larger goes to the team. Two
 employees never edit the same files at the same time (use worktree
