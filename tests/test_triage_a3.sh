@@ -186,7 +186,9 @@ mk58 r26/rdna3-report-gamma "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" 
 mk58 r27/rdna3-report-maindp "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" same1 "== rdna3_drminfo --scanout (look mode-d0-1600x900)\\npipe 0: LIT otg 0 1920x1080 pitch 1920\\npipe 1: LIT otg 1 1600x900 pitch 1600\\n2 pipe(s) lit\\n"
 mk58 r28/rdna3-report-m6cut "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" none
 # r28: the run stopped inside M6 (no "M6: n of 2" line)
-sed -i -e '/^M6: /d' -e '/^== M6 end$/d' "$T/r28/rdna3-report-m6cut-tests.txt"
+# portable in-place edit (BSD sed on the macOS runner has no GNU -i)
+f="$T/r28/rdna3-report-m6cut-tests.txt"
+sed -e '/^M6: /d' -e '/^== M6 end$/d' "$f" > "$f.new" && mv "$f.new" "$f"
 o=$(run r23)
 # a kernel that does not count the bands, one head over the line: a caret
 # cannot be told from a picture (card run 58b review), WARN
