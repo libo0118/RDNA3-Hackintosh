@@ -12,7 +12,7 @@
 #                                                translator, amdgpu.ids
 #   /Library/GPUBundles/rdna3mtl-allow.txt
 # then rebuilds the Auxiliary Kernel Collection. A reboot is required.
-# Remove with package/uninstall.sh.
+# Remove with package/uninstall.sh (also takes the OpenCore part out when the EFI is mounted).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 FW=""; RADV="$ROOT/build/mesa/install"; DRY=0

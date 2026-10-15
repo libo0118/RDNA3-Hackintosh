@@ -37,7 +37,8 @@ it together with a description of the symptom. Module details are in `STAGE1`–
    sudo diskutil mount disk0s1                   # your EFI partition (diskutil list)
    sudo package/oc_install.sh --efi /Volumes/EFI --fw /path/to/linux-firmware/amdgpu
    sudo package/oc_install.sh --efi /Volumes/EFI --step 2     # boot-args of a step
-   sudo package/oc_install.sh --efi /Volumes/EFI --off        # everything off again
+   sudo package/oc_install.sh --efi /Volumes/EFI --off        # everything off again (-rdna3off)
+   sudo package/oc_install.sh --efi /Volumes/EFI --remove     # our kexts, entries and boot-args out of OpenCore
    ```
 
    It copies the kexts to `EFI/OC/Kexts`, adds them to `Kernel/Add`, puts
@@ -209,7 +210,8 @@ repository or a Linux host.
    table above; `--step default` goes back to no `rdna3` boot-args), restart,
    report as in 4. Walk up from the last step that worked.
 6. **Roll back:** `--off` (sets `-rdna3off`), the USB EFI, or from Recovery
-   as INSTALL-OPENCORE §8 describes; `sudo "$R/uninstall.sh"` removes the install.
+   as INSTALL-OPENCORE §8 describes; `sudo "$R/uninstall.sh"` removes the install
+   and, with the EFI mounted, its OpenCore part too (`--keep-opencore` skips that).
 
 A dark screen with the system alive: SSH in, run step 4 there, then
 `--off` and restart.
