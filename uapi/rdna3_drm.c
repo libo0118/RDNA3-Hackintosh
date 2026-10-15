@@ -1111,11 +1111,29 @@ static int syncobj_fence(rdna3_drm_file *f, struct rd_xnu_syncobj_fence *x)
 }
 
 /* DEPENDENCIES / WAIT_CS handles: ~0 = latest on that ring, 0 = none */
-static uint64_t dep_seq(rdna3_drm_device *dev, uint32_t ip, uint32_t ring, uint64_t h)
+static uint64_t dep_seq(const rdna3_drm_file *f, uint32_t ip, uint32_t ring, uint64_t h)
 {
-    if (h == ~0ull)
-        return dev->last_seq[ip][ring];
+    if (h == ~0ull)   /* amdgpu_ctx_get_fence: the entity's last, i.e. this file's */
+        return f->last_seq[ip][ring];
     return h;
+}
+
+/* amdgpu_ctx_get_fence looks a fence up in the context's entity, whose
+ * sequence numbers are its own: one at or past centity->sequence was
+ * never submitted there (-EINVAL). Here the numbers are per ring and
+ * shared by every file, so the file's own last submission on the ring is
+ * the bound: a later number is another process's job, which this file
+ * must not wait on (nor run into the hang cap and a recovery for). An
+ * earlier one finishes no later than the file's own job behind it. */
+static int own_seq(const rdna3_drm_file *f, uint32_t ip, uint32_t ring, uint64_t seq)
+{
+    return ip < AMDGPU_HW_IP_NUM && ring < 4 && seq <= f->last_seq[ip][ring];
+}
+
+/* amdgpu_ctx_get: a live context of this file */
+static int ctx_live(const rdna3_drm_file *f, uint32_t ctx_id)
+{
+    return ctx_id && ctx_id < RD_MAX_CTX && f->ctx_used[ctx_id];
 }
 
 /* the on-chip BOs of a BO list, as handles (amdgpu_bo_list_create: the
@@ -1578,7 +1596,7 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
         return -RD_EINVAL;
     /* amdgpu_cs_parser_init: amdgpu_ctx_get - no submission without a
      * live context (id 0 or a freed one is -EINVAL) */
-    if (!ctx || ctx >= RD_MAX_CTX || !f->ctx_used[ctx])
+    if (!ctx_live(f, ctx))
         return -RD_EINVAL;
     if (cs->in.bo_list_handle && bo_list_find(f, cs->in.bo_list_handle) < 0)
         return -RD_ENOENT;   /* amdgpu_bo_list_get */
@@ -1629,15 +1647,19 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
                 rdna3_fence fe;
                 if (ops->copyin(ops->ctx, &dep, ch.chunk_data + sizeof(dep) * j, sizeof(dep)))
                     return -RD_EFAULT;
+                /* amdgpu_cs_process_fence_dep: amdgpu_ctx_get first */
+                if (!ctx_live(f, dep.ctx_id))
+                    return -RD_EINVAL;
                 if (!dep.handle || !ring_ok(dev, dep.ip_type, dep.ring))
                     continue;
                 fe.ip = dep.ip_type;
                 fe.ring = entity_ring(f, dep.ctx_id, dep.ip_type, dep.ring);
-                fe.seq = dep_seq(dev, dep.ip_type, fe.ring, dep.handle);
-                /* amdgpu_ctx_get_fence: a sequence number never submitted
-                 * is -EINVAL; waited on, it would run into the hang cap and
-                 * a reset that hits other clients (PR #2 review) */
-                if (!seq_submitted(dev, fe.ip, fe.ring, fe.seq))
+                fe.seq = dep_seq(f, dep.ip_type, fe.ring, dep.handle);
+                /* amdgpu_ctx_get_fence: a sequence number this file never
+                 * submitted is -EINVAL; waited on, it would run into the
+                 * hang cap and a reset that hits other clients (PR #2
+                 * review, N18 security review) */
+                if (!own_seq(f, fe.ip, fe.ring, fe.seq))
                     return -RD_EINVAL;
                 /* same ring: in-order execution already covers it */
                 if (ch.chunk_id == AMDGPU_CHUNK_ID_DEPENDENCIES && !fence_done(dev, &fe) &&
@@ -1860,15 +1882,16 @@ static int wait_cs(rdna3_drm_file *f, union drm_amdgpu_wait_cs *w)
     rdna3_drm_device *dev = f->dev;
     rdna3_fence fe;
     uint64_t timeout = w->in.timeout;
-    if (!ring_ok(dev, w->in.ip_type, w->in.ring))
+    /* amdgpu_cs_wait_ioctl: amdgpu_ctx_get, then amdgpu_ctx_get_fence */
+    if (!ctx_live(f, w->in.ctx_id) || !ring_ok(dev, w->in.ip_type, w->in.ring))
         return -RD_EINVAL;
     fe.ip = w->in.ip_type;
     fe.ring = entity_ring(f, w->in.ctx_id, w->in.ip_type, w->in.ring);
-    fe.seq = dep_seq(dev, fe.ip, fe.ring, w->in.handle);
+    fe.seq = dep_seq(f, fe.ip, fe.ring, w->in.handle);
     zero(&w->out, sizeof(w->out));
     if (!fe.seq)
         return 0;
-    if (!seq_submitted(dev, fe.ip, fe.ring, fe.seq))
+    if (!own_seq(f, fe.ip, fe.ring, fe.seq))
         return -RD_EINVAL;
     w->out.status = fence_wait_abs(dev, &fe, timeout) ? 1 : 0;
     return 0;
@@ -1887,12 +1910,13 @@ static int wait_fences(rdna3_drm_file *f, union drm_amdgpu_wait_fences *w)
         rdna3_fence fe;
         if (dev->ops.copyin(dev->ops.ctx, &af, w->in.fences + sizeof(af) * i, sizeof(af)))
             return -RD_EFAULT;
-        if (!ring_ok(dev, af.ip_type, af.ring))
+        /* amdgpu_cs_get_fence: amdgpu_ctx_get, amdgpu_ctx_get_fence */
+        if (!ctx_live(f, af.ctx_id) || !ring_ok(dev, af.ip_type, af.ring))
             return -RD_EINVAL;
         fe.ip = af.ip_type;
         fe.ring = entity_ring(f, af.ctx_id, af.ip_type, af.ring);
         fe.seq = af.seq_no;
-        if (!seq_submitted(dev, fe.ip, fe.ring, fe.seq))
+        if (!own_seq(f, fe.ip, fe.ring, fe.seq))
             return -RD_EINVAL;
         if (!i)
             fe0 = fe;
@@ -1926,13 +1950,14 @@ static int fence_to_handle(rdna3_drm_file *f, union drm_amdgpu_fence_to_handle *
     int r;
     if (h->in.what != AMDGPU_FENCE_TO_HANDLE_GET_SYNCOBJ)
         return -RD_EOPNOTSUPP;   /* FDs need PRIME-style export (Stage 4b) */
-    if (!ring_ok(f->dev, h->in.fence.ip_type, h->in.fence.ring))
-        return -RD_EINVAL;
-    /* amdgpu_cs_get_fence -> amdgpu_ctx_get_fence: never submitted = -EINVAL */
+    if (!ctx_live(f, h->in.fence.ctx_id) || !ring_ok(f->dev, h->in.fence.ip_type, h->in.fence.ring))
+        return -RD_EINVAL;   /* amdgpu_cs_get_fence: amdgpu_ctx_get */
+    /* amdgpu_cs_get_fence -> amdgpu_ctx_get_fence: never submitted by this
+     * file = -EINVAL */
     {
         uint32_t ring = entity_ring(f, h->in.fence.ctx_id, h->in.fence.ip_type, h->in.fence.ring);
-        if (!seq_submitted(f->dev, h->in.fence.ip_type, ring,
-                           dep_seq(f->dev, h->in.fence.ip_type, ring, h->in.fence.seq_no)))
+        if (!own_seq(f, h->in.fence.ip_type, ring,
+                     dep_seq(f, h->in.fence.ip_type, ring, h->in.fence.seq_no)))
             return -RD_EINVAL;
     }
     zero(&c, sizeof(c));
@@ -1942,7 +1967,7 @@ static int fence_to_handle(rdna3_drm_file *f, union drm_amdgpu_fence_to_handle *
     s = sobj(f, c.handle);
     s->fence.ip = h->in.fence.ip_type;
     s->fence.ring = entity_ring(f, h->in.fence.ctx_id, h->in.fence.ip_type, h->in.fence.ring);
-    s->fence.seq = dep_seq(f->dev, s->fence.ip, s->fence.ring, h->in.fence.seq_no);
+    s->fence.seq = dep_seq(f, s->fence.ip, s->fence.ring, h->in.fence.seq_no);
     s->has_fence = s->fence.seq != 0;
     s->signaled = !s->has_fence;
     zero(&h->out, sizeof(h->out));

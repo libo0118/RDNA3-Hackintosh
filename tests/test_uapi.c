@@ -1244,11 +1244,13 @@ int main(void)
             /* WAIT_CS on a sequence that was never submitted: -EINVAL,
              * not a wait until the hang cap */
             memset(&w, 0, sizeof(w));
+            w.in.ctx_id = cs_ctx_of(f);
             w.in.handle = 5; w.in.ip_type = AMDGPU_HW_IP_DMA; w.in.timeout = 1;
             CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == -RD_EINVAL);
         }
         /* busy until the ring passes it */
         memset(&w, 0, sizeof(w));
+        w.in.ctx_id = cs_ctx_of(f);
         w.in.handle = h1; w.in.ip_type = AMDGPU_HW_IP_DMA; w.in.timeout = 1;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 1);
         memset(&q, 0, sizeof(q));
@@ -1266,6 +1268,7 @@ int main(void)
         /* fence -> syncobj */
         memset(&fth, 0, sizeof(fth));
         fth.in.fence.ip_type = AMDGPU_HW_IP_DMA; fth.in.fence.seq_no = 3;
+        fth.in.fence.ctx_id = cs_ctx_of(f);
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE), fth) == 0);
         so2 = fth.out.handle;
         /* PR #2 review: a fence that was never submitted is -EINVAL on
@@ -1277,7 +1280,7 @@ int main(void)
             bad.in.fence.seq_no = 1000;
             CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE), bad) == -RD_EINVAL);
             memset(&dep, 0, sizeof(dep));
-            dep.ip_type = AMDGPU_HW_IP_DMA; dep.handle = 1000;
+            dep.ip_type = AMDGPU_HW_IP_DMA; dep.handle = 1000; dep.ctx_id = cs_ctx_of(f);
             g_dep = &dep;
             CHECK(cs_submit(f, 0x500000, 32, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
             dep.handle = 2;
@@ -1592,6 +1595,62 @@ int main(void)
         /* WAIT_CS on ~0 = latest */
         w.in.handle = ~0ull; w.in.timeout = 1;
         CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), w) == 0 && w.out.status == 0);
+        /* amdgpu_ctx_get / amdgpu_ctx_get_fence: no wait without a live
+         * context, and none on a fence this file never submitted - another
+         * process's job (fence numbers are per ring here) would run into
+         * the hang cap and a recovery on its behalf */
+        {
+            static rdna3_drm_file fo;
+            union drm_amdgpu_wait_cs wo;
+            union drm_amdgpu_wait_fences wf;
+            union drm_amdgpu_fence_to_handle fo_h;
+            struct drm_amdgpu_fence af;
+            struct drm_amdgpu_cs_chunk_dep dep;
+            uint64_t mine, theirs;
+            CHECK(rdna3_drm_file_open(&dev, &fo) == 0);
+            CHECK(cs_submit(&fo, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &mine) == 0);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, &theirs) == 0 && theirs > mine);
+            ring_done = mine;   /* fo's job done, f's still running */
+            memset(&wo, 0, sizeof(wo));
+            wo.in.ip_type = AMDGPU_HW_IP_DMA; wo.in.timeout = 1;
+            wo.in.handle = mine;
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), wo) == -RD_EINVAL);   /* ctx 0 */
+            wo.in.ctx_id = 200;
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), wo) == -RD_EINVAL);   /* not allocated */
+            wo.in.ctx_id = cs_ctx_of(&fo);
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), wo) == 0 && wo.out.status == 0);
+            wo.in.handle = theirs;
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), wo) == -RD_EINVAL);
+            wo.in.handle = ~0ull;   /* this file's latest, not the ring's */
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_CS), wo) == 0 && wo.out.status == 0);
+            memset(&af, 0, sizeof(af));
+            af.ctx_id = cs_ctx_of(&fo); af.ip_type = AMDGPU_HW_IP_DMA; af.seq_no = theirs;
+#define WF_SET() (memset(&wf, 0, sizeof(wf)), wf.in.fences = (uint64_t)(uintptr_t)&af, \
+                  wf.in.fence_count = 1, wf.in.wait_all = 1, wf.in.timeout_ns = 1)
+            WF_SET();
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_FENCES), wf) == -RD_EINVAL);
+            af.seq_no = mine;
+            WF_SET();
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_FENCES), wf) == 0 && wf.out.status == 1);
+            af.ctx_id = 0;
+            WF_SET();
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_WAIT_FENCES), wf) == -RD_EINVAL);
+#undef WF_SET
+            memset(&fo_h, 0, sizeof(fo_h));
+            fo_h.in.what = AMDGPU_FENCE_TO_HANDLE_GET_SYNCOBJ;
+            fo_h.in.fence.ctx_id = cs_ctx_of(&fo); fo_h.in.fence.ip_type = AMDGPU_HW_IP_DMA;
+            fo_h.in.fence.seq_no = theirs;
+            CHECK(IOCTL(&fo, RD_NR_AMDGPU(DRM_AMDGPU_FENCE_TO_HANDLE), fo_h) == -RD_EINVAL);
+            memset(&dep, 0, sizeof(dep));
+            dep.ip_type = AMDGPU_HW_IP_DMA; dep.handle = theirs; dep.ctx_id = cs_ctx_of(&fo);
+            g_dep = &dep;
+            CHECK(cs_submit(&fo, 0x500000, 32, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            dep.handle = mine; dep.ctx_id = 0;
+            CHECK(cs_submit(&fo, 0x500000, 32, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            g_dep = NULL;
+            ring_done = ring_next;
+            rdna3_drm_file_close(&fo);
+        }
         dev.ops.submit = NULL;
         dev.available_rings[AMDGPU_HW_IP_DMA] = 0;
         dev.ready_rings[AMDGPU_HW_IP_DMA] = 0;
