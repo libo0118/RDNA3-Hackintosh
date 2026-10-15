@@ -32,6 +32,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <CoreGraphics/CoreGraphics.h>
+#include "rdna3_gamma_judge.h"
 
 #define MAX_DISPLAYS 8
 
@@ -386,7 +387,9 @@ static int gamma_test(const char *drminfo, const char *dir)
     static CGGammaValue save[3][GAMMA_N], dark[GAMMA_N], ident[GAMMA_N];
     uint32_t saved = 0, n = displays(ids), i, k;
     struct pipe_look base[2][4], drk[4], idn[4], rest[4];
-    int bad = 0, pipes = 0, stable = 1, moved = 0, back = 0, soft = 0, ok[4] = { 0 }, allIdent = 1, idBack = 0;
+    struct rd3_gamma_pipe gp[4];
+    struct rd3_gamma_sum sum;
+    int bad = 0, pipes = 0, soft = 0, ok[4] = { 0 }, allIdent = 1, verdict;
     char name[32];
 
     for (i = 0; i < GAMMA_N; i++) {
@@ -441,15 +444,16 @@ static int gamma_test(const char *drminfo, const char *dir)
         const struct pipe_look *b = &base[0][i];
         if (!b->lit || !b->valid)
             continue;
-        pipes++;
-        stable &= crc_eq(b, &base[1][i]);
-        moved += !crc_eq(&drk[i], b) && !crc_eq(&drk[i], &base[1][i]);
-        back += ok[i];
+        /* stable per pipe (card run 58b review): a still pipe next to a
+         * changing one is still judged */
+        gp[pipes].stable = crc_eq(b, &base[1][i]);
+        gp[pipes].moved = !crc_eq(&drk[i], b) && !crc_eq(&drk[i], &base[1][i]);
+        gp[pipes].back = ok[i];
         /* the identity table brought the CRC of before back: the round trip
          * through the OGAM works on this pipe. Card run 49: ColorSync's
          * restore then loads its own curve (a RAM table, not bypass) with a
          * CRC of its own while the screen looks as before */
-        idBack += crc_eq(&idn[i], b) || crc_eq(&idn[i], &base[1][i]);
+        gp[pipes].idBack = crc_eq(&idn[i], b) || crc_eq(&idn[i], &base[1][i]);
         /* the table in the compositor instead of the OGAM: the picture in
          * VRAM darkens too */
         soft += b->pic && drk[i].pic && drk[i].mean * 10 < b->mean * 7;
@@ -457,8 +461,14 @@ static int gamma_test(const char *drminfo, const char *dir)
                "restored %04x/%04x/%04x (%s); picture mean %u -> %u with the dark table\n", i, b->r, b->g, b->b,
                drk[i].r, drk[i].g, drk[i].b, idn[i].r, idn[i].g, idn[i].b, rest[i].r, rest[i].g, rest[i].b,
                ok[i] ? "back" : "NOT back", b->mean, drk[i].mean);
+        printf("   CRC before %s, %s with the dark table\n",
+               gp[pipes].stable ? "stable" : "NOT stable (this screen changed between the two looks)",
+               gp[pipes].moved ? "moved" : "did NOT move");
+        pipes++;
     }
-    printf("CRC before %s\n", stable ? "stable" : "NOT stable (the screen changed between the two looks)");
+    sum = rd3_gamma_sum(gp, pipes);
+    printf("CRC before %s (%d of %d pipe(s) still)\n",
+           sum.stable == pipes ? "stable" : "NOT stable (the screen changed between the two looks)", sum.stable, pipes);
     if (bad || !pipes) {
         printf("GAMMA: FAIL - %s\n", bad ? "CGSetDisplayTransferByTable refused a table" : "no lit pipe with an OTG CRC");
         return 1;
@@ -467,29 +477,36 @@ static int gamma_test(const char *drminfo, const char *dir)
         printf("GAMMA: FAIL - the picture in VRAM darkened: the compositor applied the table, not the OGAM\n");
         return 1;
     }
-    if (moved == pipes && back == pipes) {
+    /* rdna3_gamma_judge.h. Card run 58 (2026-10-15d): the screens kept
+     * changing (flicker), so a CRC that "moved" proves nothing and no look
+     * after the restore could match one before. With no still pipe that is
+     * neither a pass nor a failure from the CRCs: exit 3, the report adds
+     * the core's own record of the tables (RDNA3,Head<n>,Gamma) and triage
+     * judges with it. A still pipe that did not move fails the test. */
+    verdict = rd3_gamma_judge(&sum);
+    if (verdict == RD3_GAMMA_PASS && sum.back == pipes) {
         printf("GAMMA: PASS - %d pipe(s): the CRC moved with the dark table and came back after the restore\n", pipes);
         return 0;
     }
-    if (moved == pipes && idBack > 0) {
+    if (verdict == RD3_GAMMA_PASS) {
         printf("GAMMA: PASS - %d pipe(s) moved with the dark table; %d came back exactly with the identity table "
                "(%d after ColorSync's restore, which loads its own curve; a pipe whose screen changed meanwhile "
-               "cannot be compared)\n", pipes, idBack, back);
+               "cannot be compared)\n", pipes, sum.idBack, sum.back);
         return 0;
     }
-    /* card run 58 (2026-10-15d): the screens kept changing (flicker), so a
-     * CRC that "moved" proves nothing and no look after the restore could
-     * match one before. Neither a pass nor a failure from the CRCs: exit 3,
-     * the report adds the core's own record of the tables (RDNA3,Head<n>,
-     * Gamma) and triage judges with it. */
-    if (!stable && !back && !idBack) {
+    if (verdict == RD3_GAMMA_UNJUDGED) {
         printf("GAMMA: UNJUDGED - the screen changed between every two looks (CRC before not stable): neither the "
                "dark table nor the restore can be judged from the CRCs of %d pipe(s)\n", pipes);
         return 3;
     }
-    printf("GAMMA: FAIL - %d of %d pipe(s) moved with the dark table, %d came back (%s)\n", moved, pipes, back,
-           moved < pipes ? "no gamma reaches the pipe: rdna3gamma=0? fb/core log 'gamma'"
-                         : "the restore did not reach the pipe");
+    if (sum.stuck) {
+        printf("GAMMA: FAIL - %d still pipe(s) did not move with the dark table (%d of %d moved, %d came back): no "
+               "gamma reaches the pipe: rdna3gamma=0? fb/core log 'gamma'\n", sum.stuck, sum.moved, pipes, sum.back);
+        return 1;
+    }
+    printf("GAMMA: FAIL - %d of %d pipe(s) moved with the dark table, %d came back (%s)\n", sum.moved, pipes, sum.back,
+           sum.moved < pipes ? "no gamma reaches the pipe: rdna3gamma=0? fb/core log 'gamma'"
+                             : "the restore did not reach the pipe");
     return 1;
 }
 

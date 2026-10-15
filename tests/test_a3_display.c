@@ -81,6 +81,12 @@ int main(void)
         CHECK(!rd3_flicker_abab_any(now, b1, b2, 3, 2));   /* not three in a row yet */
         CHECK(!rd3_flicker_abab_any(now, b1, b2, 2, 3));   /* the alternating band not asked about */
         CHECK(!rd3_flicker_abab_any(NULL, b1, b2, 3, 3));
+        CHECK(rd3_flicker_abab_bands(now, b1, b2, 3, 3) == 1);   /* a caret: one band */
+    }
+    {
+        const uint32_t now[3] = { 5, 2, 7 }, b1[3] = { 6, 2, 8 }, b2[3] = { 5, 2, 7 };
+        CHECK(rd3_flicker_abab_bands(now, b1, b2, 3, 3) == 2);   /* a picture: two bands */
+        CHECK(rd3_flicker_abab_bands(now, b1, b2, 3, 2) == 0);
     }
     /* the bands' rows: band 0 is the menu bar (top 32 rows), the rest split the picture */
     {

@@ -188,9 +188,12 @@ mk58 r28/rdna3-report-m6cut "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" 
 # r28: the run stopped inside M6 (no "M6: n of 2" line)
 sed -i -e '/^M6: /d' -e '/^== M6 end$/d' "$T/r28/rdna3-report-m6cut-tests.txt"
 o=$(run r23)
-grep -q 'FAIL flicker: head 0: alternating pictures (candidate flicker): 500 of 765 legacy swaps since boot' <<<"$o" || fail "r23: $o"
+# a kernel that does not count the bands, one head over the line: a caret
+# cannot be told from a picture (card run 58b review), WARN
+grep -q 'WARN flicker: head 0: alternating pictures (candidate flicker): 500 of 765 legacy swaps since boot.*this kernel does not count the bands' <<<"$o" || fail "r23: $o"
 grep -q 'PASS flicker: head 1: 3 of 269 legacy swaps' <<<"$o" || fail "r23 head 1: $o"
-grep -q 'flicker  *FAIL head 0: alternating pictures' <<<"$o" || fail "r23 summary: $o"
+grep -q 'flicker  *WARN head 0: alternating pictures' <<<"$o" || fail "r23 summary: $o"
+! grep -q 'the kernel logged alternating pictures' <<<"$o" || fail "r23: one WARN is enough: $o"
 o=$(run r24)
 grep -q 'INFO IOSurface VRAM (A3)' <<<"$o" || fail "r24: WindowServer's refused inputs are the policy, not a WARN: $o"
 grep -q 'INFO A3 WindowServer  *WindowServer.s inputs kept out of A3: 2 refused' <<<"$o" || fail "r24 WS: $o"
@@ -210,7 +213,7 @@ grep -q 'M6 screens  *NOT FINISHED: the run stopped inside M6' <<<"$o" || fail "
 # a display that never blanked
 for r in r29 r30 r31 r32 r33 r34 r35; do mkdir -p "$T/$r"; done
 mk58 r29/rdna3-report-fewswaps "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== A3 display counters after M6\\ndebug.rdna3accel_swaps_h0: 40\\ndebug.rdna3accel_swaps_hashed_h0: 20\\ndebug.rdna3accel_swaps_abab_h0: 10\\n"
-mk58 r30/rdna3-report-delta "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== display pipe and AGDC counters\\ndebug.rdna3accel_swaps_h0: 1000\\ndebug.rdna3accel_swaps_hashed_h0: 1000\\ndebug.rdna3accel_swaps_abab_h0: 10\\n== A3 display counters after M6\\ndebug.rdna3accel_swaps_h0: 1100\\ndebug.rdna3accel_swaps_hashed_h0: 1100\\ndebug.rdna3accel_swaps_abab_h0: 90\\n"
+mk58 r30/rdna3-report-delta "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== display pipe and AGDC counters\\ndebug.rdna3accel_swaps_h0: 1000\\ndebug.rdna3accel_swaps_hashed_h0: 1000\\ndebug.rdna3accel_swaps_abab_h0: 10\\ndebug.rdna3accel_swaps_ababwide_h0: 10\\n== A3 display counters after M6\\ndebug.rdna3accel_swaps_h0: 1100\\ndebug.rdna3accel_swaps_hashed_h0: 1100\\ndebug.rdna3accel_swaps_abab_h0: 90\\ndebug.rdna3accel_swaps_ababwide_h0: 60\\n"
 mk58 r31/rdna3-report-skipped "RDNA3: hello" "== 26-log-metal-plugin.txt\\n$LIVE" differ "== A3 display counters after M6\\ndebug.rdna3accel_swaps_h0: 300\\ndebug.rdna3accel_swaps_hashed_h0: 0\\ndebug.rdna3accel_swaps_hashskip_h0: 300\\ndebug.rdna3accel_swaps_abab_h0: 0\\n"
 mk58 r32/rdna3-report-wsleak "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SCAN" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\nNVMTL: item 7: surface 2 1920x24 pitch 7680 -> the family's VRAM (vram 1, private 0)" none
 mk58 r33/rdna3-report-wscount "RDNA3: hello\\n$KEPTBOOT\\n$WSBOOT\\n$SCAN" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n== sysctl (card run 58)\\ndebug.rdna3accel_a3display_other: 10\\ndebug.rdna3accel_a3ws_refused: 4" none
@@ -225,6 +228,7 @@ grep -q 'INFO flicker: head 0: not judged, 10 of 20 hashed swaps' <<<"$o" || fai
 ! grep -q 'PASS flicker: head 0' <<<"$o" || fail "r29 no PASS: $o"
 o=$(run r30)
 grep -q "FAIL flicker: head 0: alternating pictures (candidate flicker): 80 of 100 hashed swaps between 'display pipe and AGDC counters' and 'A3 display counters after M6'" <<<"$o" || fail "r30: the change between the dumps decides: $o"
+grep -q 'swaps h0 1100 (A3 0)$' <<<"$o" || fail "r30: one swaps entry per head in the summary: $o"
 o=$(run r31)
 grep -q 'INFO flicker: head 0: NOT MEASURED .*swaps_hashskip_h0 300' <<<"$o" || fail "r31: $o"
 o=$(run r32)
@@ -237,6 +241,35 @@ grep -q 'WARN gamma: open: the screens kept changing .*head 0 +4, head 1 +3' <<<
 o=$(run r35)
 grep -q 'FAIL display sleep: never blanked a head' <<<"$o" || fail "r35: $o"
 all=""
-for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36; do all="$all$(run $r)"; done
+# round 3 of card run 58b: the bands that alternated (a caret is one band),
+# the dump right before the probes, a display sleep with no kernel log, a
+# refusal for another task
+for r in r37 r38 r39 r40 r41 r42; do mkdir -p "$T/$r"; done
+mk58 r37/rdna3-report-twoheads "RDNA3: hello" "== 26-log-metal-plugin.txt\n$LIVE" differ "debug.rdna3accel_swaps_h0: 765\ndebug.rdna3accel_swaps_abab_h0: 500\ndebug.rdna3accel_swaps_h1: 269\ndebug.rdna3accel_swaps_abab_h1: 100\n"
+mk58 r38/rdna3-report-wide "RDNA3: hello" "== 26-log-metal-plugin.txt\n$LIVE" differ "== A3 display counters after M6\ndebug.rdna3accel_swaps_h0: 400\ndebug.rdna3accel_swaps_hashed_h0: 400\ndebug.rdna3accel_swaps_abab_h0: 200\ndebug.rdna3accel_swaps_ababwide_h0: 150\ndebug.rdna3accel_swaps_h1: 400\ndebug.rdna3accel_swaps_hashed_h1: 400\ndebug.rdna3accel_swaps_abab_h1: 0\ndebug.rdna3accel_swaps_ababwide_h1: 0\n"
+mk58 r39/rdna3-report-caret "RDNA3: hello\nRDNA3Accelerator: flicker: head 0: swap 120 showed alternating pictures (A B A B in 1 of 8 bands, candidate flicker), 120 of 240 hashed swaps so far, 0 in more than one band (phys 0xb100000, 1920x1080)" "== 26-log-metal-plugin.txt\n$LIVE" differ "== A3 display counters after M6\ndebug.rdna3accel_swaps_h0: 400\ndebug.rdna3accel_swaps_hashed_h0: 400\ndebug.rdna3accel_swaps_abab_h0: 200\ndebug.rdna3accel_swaps_ababwide_h0: 3\n"
+mk58 r40/rdna3-report-beforeprobes "RDNA3: hello" "== 26-log-metal-plugin.txt\n$LIVE" differ "== display pipe and AGDC counters\ndebug.rdna3accel_swaps_h0: 500\ndebug.rdna3accel_swaps_hashed_h0: 500\ndebug.rdna3accel_swaps_abab_h0: 0\ndebug.rdna3accel_swaps_ababwide_h0: 0\n== A3 display counters before the probes\ndebug.rdna3accel_flicker: 2\ndebug.rdna3accel_swaps_h0: 1000\ndebug.rdna3accel_swaps_hashed_h0: 1000\ndebug.rdna3accel_swaps_abab_h0: 10\ndebug.rdna3accel_swaps_ababwide_h0: 10\n== probe: platform (R3 bare metal, R4 macOS 26)\n== A3 display counters after M6\ndebug.rdna3accel_swaps_h0: 1100\ndebug.rdna3accel_swaps_hashed_h0: 1100\ndebug.rdna3accel_swaps_abab_h0: 90\ndebug.rdna3accel_swaps_ababwide_h0: 90\n"
+mk58 r41/rdna3-report-nolog "" "== 26-log-metal-plugin.txt\n$LIVE" differ "== rdna3_drminfo --scanout (look sleep)\npipe 0: not read: the display is asleep (system sleep or shutdown)\ndisplay asleep: 4 pipe(s) not read, nothing to judge\n[exit 0]\n"
+TMREF="RDNA3Accelerator: surfgem: surface 33 plane 0 refused: imported for another task than the caller's (1920x24): its process is unknown and might be WindowServer -- copies instead (status 0x80000008, 1 of this cause; ok 0, refused 1)"
+TMREF2="${TMREF//surface 33/surface 34}"
+mk58 r42/rdna3-report-taskmis "RDNA3: hello\n$KEPTBOOT\n$WSBOOT\n$SCAN\n$TMREF\n$TMREF2" "== 20-log-rdna3.txt\n$TMREF\n$TMREF2\n$GEM23\n== 24-log-coredisplay.txt\n$LIVE\n$WSPLUG\n$WSPLUG2\n== sysctl (card run 58)\ndebug.rdna3accel_a3display_task_mismatch: 2" differ
+o=$(run r37)
+grep -q 'FAIL flicker: head 0: alternating pictures .*this kernel does not count the bands; on 2 heads' <<<"$o" || fail "r37: two heads over the line: $o"
+grep -q 'FAIL flicker: head 1: alternating pictures .*on 2 heads' <<<"$o" || fail "r37 head 1: $o"
+o=$(run r38)
+grep -q 'FAIL flicker: head 0: alternating pictures (candidate flicker): 200 of 400 hashed swaps.*150 of them in more than one band' <<<"$o" || fail "r38: more than one band is a picture: $o"
+grep -q 'PASS flicker: head 1: no A B A B' <<<"$o" || fail "r38 head 1: $o"
+o=$(run r39)
+grep -q 'WARN flicker: head 0: alternating pictures .*3 of them in more than one band: one band taking turns on one head' <<<"$o" || fail "r39: a caret is a WARN: $o"
+! grep -q 'FAIL flicker' <<<"$o" || fail "r39 no FAIL: $o"
+! grep -q 'the kernel logged alternating pictures' <<<"$o" || fail "r39: one WARN is enough: $o"
+o=$(run r40)
+grep -q "FAIL flicker: head 0: alternating pictures (candidate flicker): 80 of 100 hashed swaps between 'A3 display counters before the probes' and 'A3 display counters after M6'" <<<"$o" || fail "r40: the dump before the probes is the baseline: $o"
+o=$(run r41)
+grep -q 'INFO display sleep: not judged: the look found the system asleep and there is no kernel log' <<<"$o" || fail "r41: $o"
+! grep -q 'FAIL display sleep' <<<"$o" || fail "r41 no FAIL: $o"
+o=$(run r42)
+grep -q 'INFO IOSurface VRAM (A3)' <<<"$o" || fail "r42: a refusal for another task is the policy: $o"
+for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42; do all="$all$(run $r)"; done
 ! grep -q Traceback <<<"$all" || fail "a traceback (run 58 cases)"
 echo "test_triage_a3: all checks passed"

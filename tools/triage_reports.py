@@ -453,7 +453,10 @@ def a3_display_verdict(log, sv):
 
 
 A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3|flicker|"
-                       r"swaps(?:_a3|_abab|_hashed|_hashskip)?_h\d|iop_flip): (\d+)", re.M)
+                       r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip)?_h\d|iop_flip): (\d+)", re.M)
+# the kernel's refusal reasons that are the A3 policy (rd3AccelA3Why), not a fault
+A3_POLICY_REASONS = ("WindowServer's display framebuffer", "a WindowServer input", "A3 is off",
+                     "imported for another task", "a process the kernel could not name")
 FLICKER_SHARE = 0.25   # of a head's swaps showing the picture of two swaps before: flicker
 
 
@@ -503,7 +506,8 @@ def a3_counter_dumps(txt):
     """[(name, {counter: value})] of every card run 58 sysctl dump in a tests
     file or 29-surface-vram.txt, in order"""
     out = []
-    for m in re.finditer(r"^== (display pipe and AGDC counters|A3 display counters after M6|sysctl \(card run 58\))\n"
+    for m in re.finditer(r"^== (display pipe and AGDC counters|A3 display counters before the probes|"
+                         r"A3 display counters after M6|sysctl \(card run 58\))\n"
                          r"(.*?)(?=^== |\Z)", txt, re.M | re.S):
         c = dict((k, int(v)) for k, v in A3_SYSCTL.findall(m.group(2)))
         if c:
@@ -517,7 +521,11 @@ def flicker_verdict(txt_or_counters):
     """[(level, text)] from the A B A B counters: per head the swaps whose
     picture alternated against the swaps hashed (swaps_hashed_h<N>; older
     kernels: all swaps), as the change between the first and the last dump
-    when there are two (the probes and M6), else since boot"""
+    when there are two (before the probes and after M6), else since boot.
+    One band taking turns is a blinking caret or one status item: a head
+    over the line is FAIL only when more than one band alternated in that
+    share of its swaps (swaps_ababwide_h<N>), or when two heads or more are
+    over the line; else WARN"""
     if isinstance(txt_or_counters, dict):
         dumps = [("the counters", txt_or_counters)]
     else:
@@ -525,9 +533,12 @@ def flicker_verdict(txt_or_counters):
     if not dumps:
         return [("INFO", "NOT MEASURED: no counters in this report")]
     last_name, last = dumps[-1]
-    first_name, first = dumps[0] if len(dumps) > 1 else (None, {})
+    # the dump right before the probes (the flicker test turned on for them)
+    # when the run has one, else the first
+    first_name, first = next((d for d in dumps[:-1] if d[0] == "A3 display counters before the probes"),
+                             dumps[0] if len(dumps) > 1 else (None, {}))
     span = "between '%s' and '%s'" % (first_name, last_name) if first_name else "since boot ('%s')" % last_name
-    out = []
+    out, over = [], []
     heads = sorted(set(m.group(1) for m in (re.match(r"swaps_(?:hashed_)?h(\d)$", k) for k in last) if m))
     for h in heads:
         if not last.get("swaps_h" + h, 0) and not last.get("swaps_hashed_h" + h, 0):
@@ -551,13 +562,29 @@ def flicker_verdict(txt_or_counters):
         if den < 60:
             out.append(("INFO", "head %s: not judged, %s (fewer than 60)" % (h, what)))
         elif share >= FLICKER_SHARE:
-            out.append(("FAIL", "head %s: alternating pictures (candidate flicker): %s showed the picture of two "
-                                "swaps before (A B A B, %.0f%%)" % (h, what, share * 100)))
+            wide = last.get("swaps_ababwide_h" + h)
+            if wide is not None:
+                wide -= first.get("swaps_ababwide_h" + h, 0)
+            over.append((h, what, share, wide, den))
         elif ab:
             out.append(("PASS", "head %s: %s A B A B (%.0f%%, under %.0f%%)" % (h, what, share * 100,
                                                                               FLICKER_SHARE * 100)))
         else:
             out.append(("PASS", "head %s: no A B A B in the sampled pixels (%s)" % (h, what)))
+    for h, what, share, wide, den in over:
+        text = "head %s: alternating pictures (candidate flicker): %s showed the picture of two swaps before " \
+               "(A B A B, %.0f%%)" % (h, what, share * 100)
+        if wide is None:
+            bands = "this kernel does not count the bands"
+        else:
+            bands = "%d of them in more than one band" % wide
+        if wide is not None and wide / float(den) >= FLICKER_SHARE:
+            out.append(("FAIL", "%s, %s" % (text, bands)))
+        elif len(over) > 1:
+            out.append(("FAIL", "%s, %s; on %d heads" % (text, bands, len(over))))
+        else:
+            out.append(("WARN", "%s, %s: one band taking turns on one head - a blinking caret or one status item, "
+                                "or flicker in a small area" % (text, bands)))
     return out
 
 
@@ -887,11 +914,12 @@ def report(path, show_all):
             # card run 58: WindowServer's display framebuffers stay out of A3
             # by design (kernel status RD3K_SS_DISPLAY, errno 1 in the plugin)
             disp_ids = set(re.findall(r"(?:surfgem|surfvram): surface (\d+) plane \d+ refused: (?:WindowServer's display "
-                                      r"framebuffer|a WindowServer input|A3 is off)", sv + "\n" + log))
+                                      r"framebuffer|a WindowServer input|A3 is off|imported for another task|"
+                                      r"a process the kernel could not name)", sv + "\n" + log))
             # the policy's refusals (card run 58: display framebuffers, then
-            # every WindowServer input; rdna3a3=0) are no warning
-            refused = [r for r in refused if not r.startswith(("WindowServer's display framebuffer",
-                                                               "a WindowServer input", "A3 is off"))]
+            # every WindowServer input and every caller that might be it;
+            # rdna3a3=0) are no warning
+            refused = [r for r in refused if not r.startswith(A3_POLICY_REASONS)]
             # only the plugin's refusals of those very surfaces: any other
             # EPERM stays a warning
             # a plugin EPERM of a display-size surface the kernel's capped log
@@ -1186,14 +1214,14 @@ def summary(path, serial=None):
             out.append(("flicker", "%s %s" % (lv, t)))
         # the kernel logged A B A B, yet the share stayed under the line
         if re.search(r"flicker: head \d+: swap \d+ showed alternating pictures", log) and \
-                not any(lv == "FAIL" for lv, _ in fl):
+                not any(lv in ("FAIL", "WARN") for lv, _ in fl):
             out.append(("flicker", "WARN the kernel logged alternating pictures (flicker: lines) under %.0f%% of "
                                    "the hashed swaps" % (FLICKER_SHARE * 100)))
         out.append(("A3 display counters", "refused %s, imported %s, other %s (kept out %s); swaps %s" % (
             a3c.get("a3display_refused", "?"), a3c.get("a3display_imported", "?"), a3c.get("a3display_other", "?"),
             a3c.get("a3ws_refused", "?"),
             ", ".join("h%s %d (A3 %d)" % (k[-1], v, a3c.get("swaps_a3_h" + k[-1], 0))
-                      for k, v in sorted(a3c.items()) if k.startswith("swaps_h") and v))))
+                      for k, v in sorted(a3c.items()) if re.match(r"swaps_h\d$", k) and v))))
     blanked = sorted(set(re.findall(r"display: head (\d+) blanked \(display sleep\)", log)))
     if "look sleep" in txt and "display asleep:" in txt.split("(look sleep)", 1)[-1][:600]:
         out.append(("display sleep", "the look found the system asleep; heads blanked first (kernel log): %s" %
@@ -1367,6 +1395,11 @@ def main():
                             if bl:
                                 print("       INFO display sleep: not judged by the look (the system was asleep); "
                                       "the kernel blanked head(s) %s first" % ", ".join(bl))
+                            elif not klog.strip():
+                                # no 20-log-rdna3.txt (the run cut before the
+                                # archive) and no serial log: nothing says no
+                                print("       INFO display sleep: not judged: the look found the system asleep and "
+                                      "there is no kernel log to judge whether a head blanked first")
                             else:
                                 print("       FAIL display sleep: never blanked a head (no 'display: head N blanked "
                                       "(display sleep)' line in the kernel log), and the look found the system asleep")

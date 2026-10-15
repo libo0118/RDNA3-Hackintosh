@@ -64,6 +64,22 @@ fi
 # the Metal allow list as it was, should a report have died inside its M6
 # probe (which widens it for two apps)
 [ -f /var/db/rdna3-allow.bak ] && mv /var/db/rdna3-allow.bak /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null
+# the system sleep setting as it was, should a report have died inside its
+# display sleep look (which sets it to never; the VM's time limit, a kill):
+# a bare-metal machine must not keep "never" (card run 58b review)
+SLEEP_BAK=/var/db/rdna3-sleep.bak
+restore_sleep() {
+    [ -f "$SLEEP_BAK" ] || return 0
+    _s=$(sed -n '1s/^\([0-9][0-9]*\)$/\1/p' "$SLEEP_BAK")
+    if [ -n "$_s" ] && pmset -a sleep "$_s" >/dev/null 2>&1; then
+        rm -f "$SLEEP_BAK"
+        echo "system sleep restored to $_s min"
+    else
+        echo "system sleep NOT restored from $SLEEP_BAK (\"$(head -c 40 "$SLEEP_BAK")\"): pmset -a sleep <minutes> by hand"
+    fi
+}
+restore_sleep
+[ -n "$STANDALONE" ] && trap 'restore_sleep' EXIT && trap 'restore_sleep; exit 130' INT && trap 'restore_sleep; exit 143' TERM
 
 # which processes the Metal plugin serves (metal/plugin/rdna3mtl_allow_policy.h):
 # "apps" = every application (the list has a %apps line), "list" = the names
@@ -80,7 +96,7 @@ rdna3_allow_mode() {
 # card run 58: WindowServer's display framebuffers and A3 (refused /
 # imported, the legacy swaps per head and those that scanned out an A3 BO)
 a3_sysctls() {
-    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|swaps_|iop_flip:)")
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|iop_flip:)")
     if [ -n "$_a3" ]; then echo "$_a3"
     else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
 }
@@ -417,12 +433,16 @@ hdr() {   # a test starts: its header in the results, a line in the window
     prog "$(echo "$*" | sed 's/^rdna3_drminfo //') ..."
     partial   # up before it runs: a test that freezes the VM still shows
 }
-done_() {   # done_ EXIT: the test's exit code and summary line
-    echo "[exit $1]"
+done_() {   # done_ EXIT [UNJUDGED]: the test's exit code and summary line
+    # UNJUDGED (the gamma test's exit 3, the screens kept changing): neither
+    # passed nor failed, and the line says so ("[exit 3: ...]" is no failure
+    # to triage's "[exit N]" checks)
+    if [ "${2:-}" = UNJUDGED ]; then echo "[exit $1: UNJUDGED, not a failure]"; else echo "[exit $1]"; fi
     partial
     sum=$(tail -n +"$((hl + 1))" "$extra" 2>/dev/null |
           grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|PMCTL:|BACO:|CTS:|PLATFORM:|WSI:|A3:|M4:|M5:|M6:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
-    if [ "$1" = 0 ]; then prog "    OK  ${sum}"; else prog "    FAIL (exit $1)  ${sum}"; fi
+    if [ "${2:-}" = UNJUDGED ]; then prog "    UNJUDGED (exit $1)  ${sum}"
+    elif [ "$1" = 0 ]; then prog "    OK  ${sum}"; else prog "    FAIL (exit $1)  ${sum}"; fi
 }
 # Tests that passed before are not run again while nothing they test
 # changed: a fingerprint of the builds a test uses (source hashes of the
@@ -561,10 +581,19 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 # power settings, the assertions and the power log before
                 # and after say what put the system to sleep; system sleep
                 # is set to never for the look and restored after it
+                # (only when the old value was read, and saved first:
+                # restore_sleep puts it back on the next run, or at exit
+                # in standalone mode, should this one die in the look)
                 old_sleep=$(pmset -g 2>/dev/null | awk '$1 == "sleep" { print $2; exit }')
+                case "$old_sleep" in *[!0-9]*) old_sleep= ;; esac
                 echo "== power before: system sleep ${old_sleep:-?} min"
                 pmset -g assertions 2>/dev/null | grep -iE 'PreventUserIdleSystemSleep|PreventSystemSleep|caffeinate' | head -8
-                pmset -a sleep 0 2>&1
+                if [ -z "$old_sleep" ]; then
+                    echo "system sleep left as it is: its value was not read (the caffeinate assertion alone keeps the system up)"
+                elif [ "$old_sleep" != 0 ]; then
+                    if echo "$old_sleep" > "$SLEEP_BAK" && pmset -a sleep 0 2>&1; then :
+                    else echo "system sleep left as it is: could not save it to $SLEEP_BAK or set it"; rm -f "$SLEEP_BAK"; fi
+                fi
                 caffeinate -s -i -t 120 &
                 cf_pid=$!
                 pmset displaysleepnow 2>&1
@@ -585,7 +614,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 echo "== power after the looks"
                 pmset -g log 2>/dev/null | grep -E ' (Sleep|Wake|DarkWake|Display is turned)' | tail -6
                 kill "$cf_pid" 2>/dev/null
-                [ -n "$old_sleep" ] && pmset -a sleep "$old_sleep" 2>&1 ;;
+                restore_sleep ;;
         esac
         # monitor standby on every TMDS head (rdna3dpms=2, step sleep): the
         # kext's check of each head after the link went down and came back
@@ -673,7 +702,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                         # changing) by; such a run is not kept as passed
                         echo "== gamma property after"
                         ioreg -r -c RDNA3Accel -w0 -d1 2>/dev/null | grep -E '"RDNA3,Head[0-9],Gamma"' | sed 's/^ *//'
-                        if [ "$r" = 3 ]; then done_ 0; else done_ $r; cache_keep $r; fi
+                        if [ "$r" = 3 ]; then done_ 3 UNJUDGED; else done_ $r; cache_keep $r; fi
                     fi
                     echo "== display pipe counters after"; sysctl debug 2>/dev/null | grep -E "rdna3accel_iop" || true
                     echo "== IOAcceleratorFamily2: display pipe transaction and gamma symbols"
@@ -792,6 +821,14 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     # the PM experiment, rdna3pmexp=1, in the kernel log)
     case " $args " in
     *" rdna3probe=1 "*)
+        # the flicker test's baseline right before the probes and M6, with
+        # the test on for every swap (its 3000-swap budget is spent by now)
+        # until M6 ends; triage takes the change from this dump
+        echo "== A3 display counters before the probes"
+        flick_old=$(sysctl -n debug.rdna3accel_flicker 2>/dev/null)
+        [ -n "$flick_old" ] && sysctl -w debug.rdna3accel_flicker=2 >/dev/null 2>&1 &&
+            echo "debug.rdna3accel_flicker set to 2 for the probes (was $flick_old)"
+        a3_sysctls
         hdr "probe: platform (R3 bare metal, R4 macOS 26)"
         vm=$([ "$(sysctl -n kern.hv_vmm_present 2>/dev/null)" = 1 ] && echo "virtual machine" || echo "bare metal")
         echo "PLATFORM: $(sw_vers -productName) $(sw_vers -productVersion) ($(sw_vers -buildVersion)), Darwin $(uname -r), $vm, $(sysctl -n hw.model) $(sysctl -n machdep.cpu.brand_string)"
@@ -933,7 +970,10 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             fi
         else
             echo "== probe: A3 / M4 / M5 / M6 need the Metal plugin (tools/build_metal.sh in the VM) and level 8"
-        fi ;;
+        fi
+        # the flicker test back to its setting (a run killed before this
+        # leaves 2 until the next boot: sysctls do not persist)
+        [ -n "${flick_old:-}" ] && sysctl -w debug.rdna3accel_flicker="$flick_old" >/dev/null 2>&1 ;;
     esac
     # soak (rdna3soak=<minutes>): DMA + GFX jobs and the Vulkan test in a
     # loop; the PM trend in the serial log runs alongside

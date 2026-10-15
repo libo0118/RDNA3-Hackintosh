@@ -74,8 +74,8 @@ $(BUILD)/rdna3_drminfo: rdna3_drminfo.c $(BUILD)/libdrm.dylib
 $(BUILD)/rdna3_pmctl: rdna3_pmctl.c ../common/rdna3_pmctl.h | $(BUILD)/obj
 	$(CC) -O2 -g $(ARCH) $(WARN) -I../common -o $@ $< $(LIBS)
 
-$(BUILD)/rdna3_modetest: rdna3_modetest.c | $(BUILD)/obj
-	$(CC) -O2 -g $(ARCH) $(WARN) -o $@ $< -framework CoreGraphics -framework CoreFoundation
+$(BUILD)/rdna3_modetest: rdna3_modetest.c ../common/rdna3_gamma_judge.h | $(BUILD)/obj
+	$(CC) -O2 -g $(ARCH) $(WARN) -I../common -o $@ $< -framework CoreGraphics -framework CoreFoundation
 
 VULKAN_HEADERS ?= $(BUILD)/Vulkan-Headers/include
 $(VULKAN_HEADERS)/vulkan/vulkan_core.h: | $(BUILD)/obj

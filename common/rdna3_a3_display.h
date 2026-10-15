@@ -108,14 +108,18 @@ static inline int rd3_flicker_abab(uint32_t h, uint32_t h1, uint32_t h2, uint64_
  * of them): a menu or a status item alternating in its own band counts
  * even when the rest stands still. 'n' is the number of hashes in a row
  * taken so far (the newest included); a skipped swap starts it again. */
+static inline unsigned rd3_flicker_abab_bands(const uint32_t *h, const uint32_t *h1, const uint32_t *h2, unsigned bands,
+                                              uint64_t n)
+{
+    unsigned i, k = 0;
+    for (i = 0; h && h1 && h2 && i < bands; i++)
+        k += rd3_flicker_abab(h[i], h1[i], h2[i], n) ? 1u : 0u;
+    return k;   /* how many bands alternate: one is a caret or a small item, more a picture */
+}
 static inline int rd3_flicker_abab_any(const uint32_t *h, const uint32_t *h1, const uint32_t *h2, unsigned bands,
                                        uint64_t n)
 {
-    unsigned i;
-    for (i = 0; h && h1 && h2 && i < bands; i++)
-        if (rd3_flicker_abab(h[i], h1[i], h2[i], n))
-            return 1;
-    return 0;
+    return rd3_flicker_abab_bands(h, h1, h2, bands, n) > 0;
 }
 
 /* the rows of band 'band' (of 'bands', the first one the top 32 rows: the
