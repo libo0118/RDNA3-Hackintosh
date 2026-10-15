@@ -558,6 +558,8 @@ int rdna3_drm_device_reap_orphans(rdna3_drm_device *dev)
             orphan_release(dev, &dev->orphans[i]);
             n++;
         }
+    if (n)
+        exports_gc(dev, NULL);   /* an orphan's BO may have been an export's last other holder */
     return n;
 }
 

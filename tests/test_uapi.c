@@ -2022,6 +2022,12 @@ int main(void)
             CHECK(IOCTL(&fz, RD_NR_AMDGPU(DRM_AMDGPU_GEM_CREATE), gz) == 0);
             vz.handle = gz.out.handle;
             CHECK(IOCTL(&fz, RD_NR_AMDGPU(DRM_AMDGPU_GEM_VA), vz) == 0);
+            {   /* exported too: the export outlives the file until the reap */
+                struct rd_xnu_bo_share xz;
+                memset(&xz, 0, sizeof(xz));
+                xz.handle = gz.out.handle;
+                CHECK(IOCTL(&fz, RD_NR_XNU_BO_EXPORT, xz) == 0 && xz.token);
+            }
             CHECK(cs_submit(&fz, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == 0);
             pend = ring_next;
             live0 = vm_live;
@@ -2033,7 +2039,10 @@ int main(void)
             CHECK(dev.orphans[0].vm == &vm_dummy && dev.orphans[0].last_seq[AMDGPU_HW_IP_DMA][0] == pend);
             CHECK(rdna3_drm_device_reap_orphans(&dev) == 0 && vm_live == live0);   /* still running */
             ring_done = ring_next;   /* a later reset forced the fence */
+            /* the VM, the BO and the ownerless export with it */
             CHECK(rdna3_drm_device_reap_orphans(&dev) == 1 && vm_live == live0 - 1 && live_bos == bos0);
+            for (uint32_t e = 0; e < RD_MAX_EXPORTS; e++)
+                CHECK(dev.exports[e].bo == NULL);
             CHECK(dev.orphans[0].vm == NULL && rdna3_drm_device_reap_orphans(&dev) == 0);
             /* an open reaps first: a second orphan goes with the next open */
             CHECK(rdna3_drm_file_open(&dev, &fz) == 0);
