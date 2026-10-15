@@ -111,6 +111,11 @@ def bootarg_level(args):
     return int(m.group(1)) if m else 0
 
 
+# accel/Makefile's ACCEL_SRC_HASH inputs, in its order (tests/test_accel_hash_parity.py keeps them equal)
+ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_abi.h", "accel/rdna3accel_stubs.h",
+                    "common/rdna3_bootargs.h", "common/rdna3_a3_display.h")
+
+
 def fb_source_hash(files=("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h")):
     """fb/Makefile's FB_SRC_HASH (accel/Makefile's ACCEL_SRC_HASH with the
     accelerator's files): sha1 of the concatenated sources, 10 hex"""
@@ -333,6 +338,12 @@ def vm_fault_groups(log):
     return out
 
 
+def scanout_sizes(log):
+    """the (w, h) strings each head scanned out, from the accelerator's log"""
+    return set(re.findall(r"LIVE SCANOUT phys 0x[0-9a-f]+ (\d+) x (\d+)", log)) | \
+        set(re.findall(r"a3 display: head \d+: .*?\((\d+)x(\d+)\)", log))
+
+
 def a3_display_verdict(log, sv):
     """card run 58: WindowServer's display framebuffers and A3 - kept out
     (the refusal lines), the refusal that never fired (display-size BOs in
@@ -352,18 +363,29 @@ def a3_display_verdict(log, sv):
     c = a3_counters(sv) or {}   # the sysctl dump at the end of 29-surface-vram.txt (log lines are capped)
     refused = max(refused, c.get("a3display_refused", 0))
     # the heads' scanout sizes, and the plugin's display-size BOs in WindowServer
-    sizes = set(re.findall(r"LIVE SCANOUT phys 0x[0-9a-f]+ (\d+) x (\d+)", log)) | \
-        set(re.findall(r"a3 display: head \d+: .*?\((\d+)x(\d+)\)", log))
+    sizes = scanout_sizes(log)
     cd = sv.split("== 24-log-coredisplay.txt", 1)[1] if "== 24-log-coredisplay.txt" in sv else ""
     ws_bos = set(sid for sid, w, h in re.findall(r"item 7: surface (\d+) (\d+)x(\d+) pitch \d+ -> the family's VRAM", cd)
                  if (w, h) in sizes)
     apart = [l for l in a3lines.values() if "DOES NOT READ" in l]
-    never = [l for l in a3lines.values() if "the refusal never fired" in l]
+    # the marker counts only when the rule looked at something (kernels of
+    # aa913df printed it with "0 other WindowServer surfaces, 0 unchecked" too)
+    never = []
+    for l in a3lines.values():
+        m = re.search(r"(\d+) other WindowServer surfaces, (\d+) unchecked", l)
+        if "the refusal never fired" in l and (not m or int(m.group(1)) + int(m.group(2)) > 0):
+            never.append(l)
+    # debug.rdna3accel_iop_flip=1 flips the IOSurface's own VRAM: the rule is off by design
+    iop_flip = "debug.rdna3accel_iop_flip=1 flips IOSurfaces" in log or \
+        bool(re.search(r"^debug\.rdna3accel_iop_flip: [1-9]", sv, re.M))
     failed = False
     if apart:
         print("   FAIL %-20s WindowServer draws display surfaces into A3 BOs no legacy swap scans out "
               "(rdna3a3display=1): the panel keeps an old frame" % "A3 display")
         failed = True
+    elif iop_flip and not refused:
+        print("   INFO %-20s debug.rdna3accel_iop_flip=1: display surfaces may be BOs (that path flips the "
+              "IOSurface's own VRAM)" % "A3 display")
     elif kept_mode and (never or (ws_bos and not refused)):
         print("   FAIL %-20s the refusal never fired: %d WindowServer surface(s) of a scanout size became BOs (%s), "
               "0 refused - the check missed them (the 'surfgem: WindowServer surface ... is not a display "
@@ -719,9 +741,18 @@ def report(path, show_all):
             refused = [r for r in refused if not r.startswith("WindowServer's display framebuffer")]
             # only the plugin's refusals of those very surfaces: any other
             # EPERM stays a warning
-            imp_ref = [(vr, ke) for sid, vr, ke in
-                       re.findall(r"surface (\d+) plane \d+: family VRAM import refused \(VkResult (-?\d+), kernel errno (\d+)", sv)
-                       if not (ke == "1" and sid in disp_ids)]
+            # a plugin EPERM of a display-size surface the kernel's capped log
+            # did not name counts as the policy while the kernel's counter
+            # covers them all
+            disp_bytes = set(int(w) * int(h) * 4 for w, h in scanout_sizes(log))
+            plug = re.findall(r"surface (\d+) plane \d+: family VRAM import refused \(VkResult (-?\d+), kernel errno "
+                              r"(\d+)(?:[^,\n]*, (\d+) B\))?", sv)
+            unnamed = set(sid for sid, _, ke, b in plug if ke == "1" and sid not in disp_ids and b and
+                          int(b) in disp_bytes)
+            ctr = (a3_counters(sv) or {}).get("a3display_refused", 0)
+            if unnamed and ctr >= len(unnamed | disp_ids):
+                disp_ids |= unnamed
+            imp_ref = [(vr, ke) for sid, vr, ke, _ in plug if not (ke == "1" and sid in disp_ids)]
             shared = sum(1 for l in live if l.startswith("live"))
             state = ("%d process(es) shared, %d private" % (shared, len(live) - shared)) if live else "no plugin line"
             warn = (shared and not gem) or refused or imp_ref
@@ -738,9 +769,7 @@ def report(path, show_all):
         failed = failed or not same or not up or len(pids) > 2
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
-        want = fb_source_hash(("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_abi.h",
-                               "accel/rdna3accel_stubs.h", "common/rdna3_bootargs.h",
-                               "common/rdna3_a3_display.h"))   # accel/Makefile's ACCEL_SRC_HASH, same order
+        want = fb_source_hash(ACCEL_HASH_FILES)
         ac = re.search(r"RDNA3Accelerator: build (\S+)", log)
         same = bool(want and ac and ac.group(1) == want)
         print("   %s %-20s %s" % ("PASS" if same else "FAIL", "accelerator build",

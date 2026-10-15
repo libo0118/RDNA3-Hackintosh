@@ -84,7 +84,7 @@ if m6 != "none":
                 f.write(b"P6\n32 32\n255\n" + bytes(px))
 PY
 }
-for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18; do mkdir -p "$T/$r"; done
+for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22; do mkdir -p "$T/$r"; done
 KEPTBOOT="RDNA3Accelerator: A3: WindowServer's display framebuffers are kept out of A3: WindowServer composites them through copies the legacy swap pages on (card run 58)"
 SCAN="RDNA3Accelerator: RD3DisplayPipe::initFramebufferResource(head 0, index 0, res 0x1) -> vidmem 0x2 over the LIVE SCANOUT phys 0x80000000 1920 x 1080 pitch 7680 (8294400 bytes)"
 KEPT="RDNA3Accelerator: surfgem: surface 1 plane 0 refused: WindowServer's display framebuffer of head mask 0x3 (1920x1080): the legacy swaps scan out the legacy surface's own VRAM, never a BO over this one (card run 58) -- copies instead; rdna3a3display=1 lets it in (status 0x80000007, 1 of this cause; ok 0, refused 1)"
@@ -148,7 +148,29 @@ grep -q 'INFO A3 display counters: none (the kext predates card run 58)' <<<"$o"
 o=$(run r18)
 grep -q 'WARN IOSurface VRAM (A3)' <<<"$o" || fail "r18: another EPERM refusal stays a warning: $o"
 grep -q 'plugin import refused: VkResult -1000072003, kernel errno 1' <<<"$o" || fail "r18 line: $o"
+# round 2: the marker of a kernel that printed it with nothing looked at
+# (aa913df), 2 heads x 4 display surfaces with the kernel naming only 6 of
+# them, the IOP flip path
+A3QUIET="RDNA3Accelerator: a3 display: head 0: 8 legacy swaps, it scans out phys 0x8b100000 (1920x1080); WindowServer's display framebuffers are kept out of A3, composited through copies (0 refused, 0 other WindowServer surfaces, 0 unchecked) *** the refusal never fired ***"
+mk58 r19/rdna3-report-quietmark "RDNA3: hello\\n$KEPTBOOT\\n$A3QUIET" "== 26-log-metal-plugin.txt\\n$LIVE" none
+K6=""; P8=""
+for i in 1 2 3 4 5 6; do K6="$K6\\nRDNA3Accelerator: surfgem: surface $i plane 0 refused: WindowServer's display framebuffer of head mask 0x3 (1920x1080): copies instead (status 0x80000007, $i of this cause; ok 0, refused $i)"; done
+for i in 1 2 3 4 5 6 7 8; do P8="$P8\\nNVMTL: item 7: surface $i plane 0: family VRAM import refused (VkResult -1000072003, kernel errno 1 Operation not permitted, 8294400 B) - private image + copies ($i so far)"; done
+mk58 r20/rdna3-report-eight "RDNA3: hello\\n$KEPTBOOT\\n$SCAN$K6" "== 20-log-rdna3.txt$K6\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE$P8\\n== sysctl (card run 58)\\ndebug.rdna3accel_a3display: 0\\ndebug.rdna3accel_a3display_refused: 8" differ
+mk58 r21/rdna3-report-eightnoctr "RDNA3: hello\\n$KEPTBOOT\\n$SCAN$K6" "== 20-log-rdna3.txt$K6\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE$P8" differ
+mk58 r22/rdna3-report-iopflip "RDNA3: hello\\n$KEPTBOOT\\n$SCAN\\nRDNA3Accelerator: surfgem: debug.rdna3accel_iop_flip=1 flips IOSurfaces out of their own VRAM: no display surface is kept out of A3" "== 20-log-rdna3.txt\\n$GEM23\\n== 24-log-coredisplay.txt\\n$LIVE\\n$WSBO" none
+o=$(run r19)
+! grep -q 'FAIL A3 display' <<<"$o" || fail "r19: the marker with nothing looked at is no failure: $o"
+grep -q 'INFO A3 display  *kept-out mode, but no display framebuffer import seen' <<<"$o" || fail "r19 INFO: $o"
+o=$(run r20)
+grep -q 'INFO IOSurface VRAM (A3)' <<<"$o" || fail "r20: 8 display EPERMs with the counter at 8 are the policy: $o"
+grep -q 'INFO A3 display  *WindowServer.s display framebuffers kept out of A3: 8 surface(s) refused' <<<"$o" || fail "r20 kept: $o"
+o=$(run r21)
+grep -q 'WARN IOSurface VRAM (A3)' <<<"$o" || fail "r21: without the counter 2 unnamed EPERMs stay a warning: $o"
+o=$(run r22)
+! grep -q 'FAIL A3 display' <<<"$o" || fail "r22: the IOP flip path keeps display BOs by design: $o"
+grep -q 'INFO A3 display  *debug.rdna3accel_iop_flip=1' <<<"$o" || fail "r22 INFO: $o"
 all=""
-for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18; do all="$all$(run $r)"; done
+for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22; do all="$all$(run $r)"; done
 ! grep -q Traceback <<<"$all" || fail "a traceback (run 58 cases)"
 echo "test_triage_a3: all checks passed"

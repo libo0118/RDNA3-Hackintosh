@@ -48,6 +48,7 @@ static void               rd3AccelNotePresented(const void *vm, unsigned head);
 static void               rd3AccelA3DispDirty(unsigned surfaceID, unsigned long long phys);
 static unsigned           rd3AccelDisplayHeads(void *surf, task_t task, unsigned surfaceID);
 static void               rd3AccelA3Why(char *why, unsigned long n, unsigned heads, void *surf);
+static bool               rd3AccelA3RefusedFirst(unsigned surfaceID, SInt64 n);
 void                      rd3AccelVidmemGone(const void *vm);
 static void               rd3AccelWriteStamp(int index, unsigned int value);
 static bool               rd3AccelLocksInit(void);
@@ -1556,7 +1557,7 @@ static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsign
             rd3AccelA3Why(why, sizeof why, dh, surf);
             ((OSObject *)surf)->release();
             p->status = RD3K_SS_DISPLAY; gNVSVRefused++;
-            if (n < 8 || (n & 1023) == 0)
+            if (rd3AccelA3RefusedFirst(p->surfaceID, n))
                 ALOG("surfvram: surface %u plane %u refused: %s (%lld refused)", p->surfaceID, p->plane, why, (long long)n + 1);
             return kIOReturnSuccess;
         }
@@ -1748,6 +1749,21 @@ static void rd3AccelA3DispDirty(unsigned surfaceID, unsigned long long phys)
         }
     IOSimpleLockUnlock(gA3DispLock);
 }
+/* a display refusal is logged once per surface (the last 32 kept): the
+ * plugin retries one surface many times, and triage needs every surface's
+ * own line to tell the policy's EPERM from any other. True: log this one. */
+static bool rd3AccelA3RefusedFirst(unsigned surfaceID, SInt64 n)
+{
+    static unsigned seen[32], next;
+    bool fresh = true;
+    if (gA3DispLock) {
+        IOSimpleLockLock(gA3DispLock);
+        for (unsigned i = 0; i < 32 && fresh; i++) if (seen[i] == surfaceID) fresh = false;
+        if (fresh) seen[next++ % 32] = surfaceID;
+        IOSimpleLockUnlock(gA3DispLock);
+    }
+    return fresh || (n & 1023) == 0;
+}
 /* the refusal (RD3K_SS_DISPLAY) and its reason for the surfgem log */
 static void rd3AccelA3Why(char *why, unsigned long n, unsigned heads, void *surf)
 {
@@ -1775,11 +1791,17 @@ static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
     /* card run 58: before the wire below, which would give it a second VRAM copy */
     const unsigned dispHeads = rd3AccelDisplayHeads(surf, task, p->surfaceID);
     if (dispHeads) {
-        OSAddAtomic64(1, &gCntA3DispRefused);
-        char why[240];
-        rd3AccelA3Why(why, sizeof why, dispHeads, surf);
+        const SInt64 n = OSAddAtomic64(1, &gCntA3DispRefused);
+        p->status = RD3K_SS_DISPLAY;
+        OSIncrementAtomic(&gNVSVGemRefused);
+        OSIncrementAtomic(&gNVSVGemCause[RD3K_SS_DISPLAY & 7u]);
+        if (rd3AccelA3RefusedFirst(p->surfaceID, n)) {
+            char why[240];
+            rd3AccelA3Why(why, sizeof why, dispHeads, surf);
+            ALOG("surfgem: surface %u plane %u refused: %s (status %#x, %lld of this cause; ok %d, refused %d)",
+                 p->surfaceID, p->plane, why, p->status, (long long)n + 1, (int)gNVSVGemOk, (int)gNVSVGemRefused);
+        }
         ((OSObject *)surf)->release();
-        p->status = RD3K_SS_DISPLAY; rd3AccelSurfGemLog(p, why, nullptr, 0);
         return kIOReturnSuccess;
     }
     if (!rd3FamLock(a, false)) {
@@ -1807,7 +1829,17 @@ static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
     }
     rd3AccelSurfGemLog(p, why ? why : "?", vm, vm ? vm->fBytes : 0ull);
     if (rr != kIOReturnSuccess) ALOG("surfgem: rdna3RefVram -> %#x", rr);
-    if (p->status == 0 && gA3Display && vm) {   /* rdna3a3display=1: which imports are display framebuffers */
+    /* rdna3a3display=1: only WindowServer's imports can be display framebuffers;
+     * their sizes are asked of the framebuffers after the family lock is dropped */
+    char proc[32];
+    proc[0] = 0;
+    const bool a3Note = p->status == 0 && gA3Display && vm && task == current_task() &&
+                        (proc_selfname(proc, (int)sizeof proc), rd3_a3_display_proc(proc));
+    const unsigned long long a3Phys = a3Note ? vm->fPhys : 0;
+    const void *a3Vm = vm;
+    if (cache) ((OSObject *)cache)->release();
+    rd3FamUnlock(a);
+    if (a3Note) {
         IOSurface *s = (IOSurface *)surf;
         RDNA3Accelerator *ra = RDNA3Accelerator::gAccel;
         uint32_t lw[kRd3MaxFB], lh[kRd3MaxFB];
@@ -1819,23 +1851,17 @@ static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
             q.version = RD3K_VRAM_ABI_VERSION;
             if (fb && ra->askFramebufferForScanout(&q, fb) == kIOReturnSuccess) { lw[i] = q.width; lh[i] = q.height; }
         }
-        char proc[32];
-        proc[0] = 0;
-        if (task == current_task()) proc_selfname(proc, (int)sizeof proc);
-        const unsigned heads = rd3_a3_display_proc(proc)
-            ? (rd3_a3_size_heads(s->getWidth(), s->getHeight(), lw, lh, kRd3MaxFB) |
-               rd3_a3_size_heads(s->getWidth(), s->getHeight(), gHeadSwapW, gHeadSwapH, kRd3MaxFB)) : 0;
+        const unsigned heads = rd3_a3_size_heads(s->getWidth(), s->getHeight(), lw, lh, kRd3MaxFB) |
+                               rd3_a3_size_heads(s->getWidth(), s->getHeight(), gHeadSwapW, gHeadSwapH, kRd3MaxFB);
         if (heads) {
             const SInt64 n = OSAddAtomic64(1, &gCntA3DispImported);
-            rd3AccelA3DispNote(p->surfaceID, heads, vm->fPhys, vm);
+            rd3AccelA3DispNote(p->surfaceID, heads, a3Phys, a3Vm);
             if (n < 8 || (n & 1023) == 0)
                 ALOG("surfgem: display surface %u (head mask 0x%x) -> a BO over its own VRAM at phys 0x%llx "
                      "(rdna3a3display=1; the legacy swap path: the a3 display: lines say whether a swap ever scans "
-                     "this out)", p->surfaceID, heads, vm->fPhys);
+                     "this out)", p->surfaceID, heads, a3Phys);
         }
     }
-    if (cache) ((OSObject *)cache)->release();
-    rd3FamUnlock(a);
     ((OSObject *)surf)->release();
     return kIOReturnSuccess;
 }
@@ -2640,7 +2666,9 @@ static void rd3AccelA3SwapNote(unsigned head, IOAccelResource2 *src, unsigned lo
              gA3Display ? "no display surface of this head became a BO"
                         : "WindowServer's display framebuffers are kept out of A3, composited through copies",
              refused, (long long)gCntA3WsOther, (long long)(gCntA3TaskMismatch + gCntA3NoName),
-             !gA3Display && !gIopFlip && !refused ? " *** the refusal never fired ***" : "");
+             /* only when WindowServer imported something the rule looked at and refused nothing */
+             !gA3Display && !gIopFlip && !refused && (gCntA3WsOther + gCntA3TaskMismatch + gCntA3NoName) > 0
+                 ? " *** the refusal never fired ***" : "");
         return;
     }
     ALOG("a3 display: head %u: %lld legacy swaps, %lld scanned out an A3 BO; it shows phys 0x%llx, WindowServer drew "
