@@ -237,6 +237,7 @@ what each step checks: [TESTING-HW](TESTING-HW.md#the-ladder)):
 | `rdna3doorbell=0` | no doorbell BAR: rings keep their write-pointer registers |
 | `rdna3cursor=0` | no hardware cursor |
 | `rdna3enum=1` | report the GPU as working for enumeration only; submissions fail (debug) |
+| `rdna3vramlostcs=0` | after a VRAM loss, contexts made before it keep submitting instead of failing with -ECANCELED (amdgpu's behaviour, the default); the counter and VRAMLOST are still reported. Default on because after a reset that lost VRAM, WindowServer's Metal device goes "device lost" and WindowServer restarts instead of drawing from lost memory (debug) |
 | `rdna3soak=<min>`, `rdna3hangtest=1`/`2` | read by the report script only: soak loop, hang/recovery test |
 
 ## 8. The way back

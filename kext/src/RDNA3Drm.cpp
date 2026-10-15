@@ -456,8 +456,9 @@ void RDNA3Accel::drmVramLostSync()
         rdna3_drm_device_vram_lost(fDrm);
         fVramLostTold++;
     }
-    LOG("VRAM lost for the clients: AMDGPU_INFO_VRAM_LOST_COUNTER %u, older contexts see VRAMLOST "
-        "and their submissions fail with -ECANCELED", fDrm->vram_lost_counter);
+    LOG("VRAM lost for the clients: AMDGPU_INFO_VRAM_LOST_COUNTER %u, older contexts see VRAMLOST%s",
+        fDrm->vram_lost_counter, fDrm->vram_lost_cs_refuse ? " and their submissions fail with -ECANCELED"
+                                                            : " (rdna3vramlostcs=0: they keep submitting)");
     setNumber("RDNA3,VRAMLostCounter", fDrm->vram_lost_counter);
 }
 
@@ -838,6 +839,16 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
         }
     }
 
+    /* amdgpu_cs_pass1's refusal of contexts older than a VRAM loss; the
+     * kill switch rdna3vramlostcs=0 lets them submit on (debug) */
+    uint32_t lostCs = 1;
+    PE_parse_boot_argn("rdna3vramlostcs", &lostCs, sizeof(lostCs));
+    rdna3_drm_device_set_vram_lost_cs(fDrm, lostCs ? 1 : 0);
+    setProperty("RDNA3,VRAMLostRefusesCS", lostCs ? 1 : 0, 32);
+    LOG("VRAM loss: %s", lostCs ? "contexts made before it fail their submissions with -ECANCELED "
+                                  "(amdgpu_cs_pass1; rdna3vramlostcs=0 turns that off)"
+                                : "rdna3vramlostcs=0: contexts made before it keep submitting; the "
+                                  "counter and VRAMLOST still report it");
     uint32_t enumOnly = 0;
     if (PE_parse_boot_argn("rdna3enum", &enumOnly, sizeof(enumOnly)) && enumOnly) {
         rdna3_drm_device_set_enumeration_only(fDrm, 1);

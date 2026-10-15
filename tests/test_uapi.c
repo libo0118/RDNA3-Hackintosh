@@ -1069,7 +1069,21 @@ int main(void)
             CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &old_ctx) == 0);
             g_cs_ctx = old_ctx;
             CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            CHECK(dev.vram_lost_cs_refuse == 1);   /* amdgpu's, the default */
             rdna3_drm_device_vram_lost(&dev);
+            CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED);
+            /* the kill switch (kext: rdna3vramlostcs=0): the old context
+             * submits again, QUERY_STATE2 still says VRAMLOST */
+            rdna3_drm_device_set_vram_lost_cs(&dev, 0);
+            CHECK(cs_submit(f, 0x400000, 6, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_EINVAL);
+            {
+                union drm_amdgpu_ctx qs;
+                memset(&qs, 0, sizeof(qs));
+                qs.in.op = AMDGPU_CTX_OP_QUERY_STATE2; qs.in.ctx_id = old_ctx;
+                CHECK(IOCTL(f, RD_NR_AMDGPU(DRM_AMDGPU_CTX), qs) == 0 &&
+                      qs.out.state.flags == AMDGPU_CTX_QUERY2_FLAGS_VRAMLOST);
+            }
+            rdna3_drm_device_set_vram_lost_cs(&dev, 1);
             CHECK(cs_submit(f, 0x400000, 64, AMDGPU_HW_IP_DMA, 0, 0, NULL) == -RD_ECANCELED);
             CHECK(ctx_alloc(f, AMDGPU_CTX_PRIORITY_NORMAL, &new_ctx) == 0);
             g_cs_ctx = new_ctx;

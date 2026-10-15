@@ -485,6 +485,9 @@ typedef struct rdna3_drm_device {
     /* adev->vram_lost_counter: AMDGPU_INFO_VRAM_LOST_COUNTER, and what each
      * context recorded at creation (rdna3_drm_device_vram_lost) */
     uint32_t vram_lost_counter;
+    /* amdgpu_cs_pass1's -ECANCELED for a context older than the last VRAM
+     * loss: 1 (rdna3_drm_device_init), 0 = such contexts keep submitting */
+    uint32_t vram_lost_cs_refuse;
 } rdna3_drm_device;
 
 typedef struct rdna3_drm_file {
@@ -564,6 +567,9 @@ int  rdna3_drm_device_vm_replay(rdna3_drm_device *dev);
  * -ECANCELED (amdgpu_cs_pass1); contexts made after it work. Once per
  * loss, device lock held. */
 void rdna3_drm_device_vram_lost(rdna3_drm_device *dev);
+/* refuse = 0: contexts made before a VRAM loss keep submitting (the
+ * counter and QUERY_STATE2's VRAMLOST stay); 1 is amdgpu's and the default */
+void rdna3_drm_device_set_vram_lost_cs(rdna3_drm_device *dev, int refuse);
 /* every live BO placed in VRAM, once each (a BO several clients hold, an
  * export, the seq64 slots): amdgpu_device_evict_resources' list. The
  * callback must not free BOs. */

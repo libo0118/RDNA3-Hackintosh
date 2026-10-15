@@ -61,6 +61,7 @@ void rdna3_drm_device_init(rdna3_drm_device *dev, const rdna3_drm_ops *ops,
     dev->vis_vram_size = vis_vram_size;
     dev->gtt_size = gtt_size;
     dev->next_mmap_offset = 1ull << 32;
+    dev->vram_lost_cs_refuse = 1;   /* amdgpu_cs_pass1 */
 
     di->device_id = pci_device;
     di->chip_rev = rev_id;
@@ -1473,8 +1474,9 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
     if (ops->vm_query && f->vm && (ops->vm_query(ops->ctx, f->vm) & AMDGPU_CTX_QUERY2_FLAGS_GUILTY))
         return -RD_ECANCELED;
     /* amdgpu_cs_pass1: ctx->generation != the job's generation - a context
-     * made before VRAM was lost submits nothing more; a new one does */
-    if (ctx_vram_lost(f, ctx))
+     * made before VRAM was lost submits nothing more; a new one does
+     * (unless the OS turned that off: rdna3_drm_device_set_vram_lost_cs) */
+    if (dev->vram_lost_cs_refuse && ctx_vram_lost(f, ctx))
         return -RD_ECANCELED;
 
     for (i = 0; i < cs->in.num_chunks; i++) {
@@ -2358,6 +2360,11 @@ static int ctx_vram_lost(const rdna3_drm_file *f, uint32_t ctx_id)
 void rdna3_drm_device_vram_lost(rdna3_drm_device *dev)
 {
     dev->vram_lost_counter++;
+}
+
+void rdna3_drm_device_set_vram_lost_cs(rdna3_drm_device *dev, int refuse)
+{
+    dev->vram_lost_cs_refuse = refuse ? 1 : 0;
 }
 
 static int ctx_ioctl(rdna3_drm_file *f, union drm_amdgpu_ctx *c)
