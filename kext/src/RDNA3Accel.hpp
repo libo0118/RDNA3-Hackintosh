@@ -383,6 +383,20 @@ private:
     bool          fDccgInit = false;
     struct rdna3_audio_stream *displayAudio(uint32_t head, struct rdna3_dp_link *l, const struct rdna3_hdmi_cfg *hc,
                                             uint32_t fe, uint32_t otg);
+    /* rdna3vrr=1: FreeSync (hw/dcn32_freesync.c). Each head's sink caps
+     * from the EDID of the last mode list (amdgpu_dm_update_freesync_caps;
+     * the range is published with or without the boot-arg), its signal,
+     * and the FreeSync state of the last mode set (dm_crtc_state +
+     * dm_irq_params: DRR armed when ACTIVE_VARIABLE) */
+    struct rdna3_freesync_caps *fVrrCaps[4] = {};
+    struct rdna3_freesync_crtc *fVrrCrtc[4] = {};
+    uint32_t      fVrrSignal[4] = {};
+    void          displayVrrCaps(uint32_t head, const uint8_t *edid, uint32_t len, const struct rdna3_edid *ed,
+                                 const struct rdna3_dcn_head *h, struct rdna3_dp_link *dpl);
+    bool          displayVrrStream(uint32_t head, const struct rdna3_mode *want, struct rdna3_dp_link *dpl,
+                                   bool hdmiStream, struct rdna3_freesync_crtc *nw, char *why, size_t whyLen);
+    void          displayVrrCommit(uint32_t head, uint32_t otg, const struct rdna3_freesync_crtc *nw, char *val,
+                                   size_t valLen);
     /* rdna3dsc=1: FEC + DSC policies on those links. rdna3mst=1: an MST
      * capable sink (hub, daisy chain) on such a head is taken over at the
      * next mode set: the topology probed, its sinks' EDIDs read, the head's

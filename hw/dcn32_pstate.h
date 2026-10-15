@@ -78,9 +78,10 @@
  * immediate-flip bandwidth: macOS flips at vsync), FractionOfUrgentBandwidth
  * from the steady and prefetch read bandwidth, synchronized timings never
  * assumed (the heads run unsynchronised), FPO (FW-based vblank stretch) not
- * reached (it needs a DRR / FreeSync stream, which this driver never sets
- * up: dcn32_can_support_mclk_switch_using_fw_based_vblank_stretch returns
- * no candidate).
+ * reached (it needs a DRR / FreeSync stream, which this driver sets up
+ * only with rdna3vrr=1 (hw/dcn32_freesync.c), and FPO is not ported:
+ * dcn32_can_support_mclk_switch_using_fw_based_vblank_stretch returns no
+ * candidate).
  *
  * All integer arithmetic (no FPU in the kernel): times in ns, clocks in
  * kHz / MHz, bandwidths in MB/s (= bytes per us).

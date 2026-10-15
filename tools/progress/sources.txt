@@ -87,3 +87,5 @@ Display: ODM         | display/dc/opp/dcn20/dcn20_opp.c
 Display: audio       | display/dc/dce/dce_audio.c
 Display: audio       | display/dc/dcn30/dcn30_afmt.c
 Display: audio       | display/dc/dcn31/dcn31_apg.c
+Display: FreeSync    | display/modules/freesync/freesync.c
+Display: FreeSync    | display/modules/info_packet/info_packet.c
