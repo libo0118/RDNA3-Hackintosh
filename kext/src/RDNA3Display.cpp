@@ -1769,8 +1769,12 @@ IOReturn RDNA3Accel::displayGamma(RD3KDisplayGamma *g)
         /* kept for a restore after a power loss (amdgpu: the stream's
          * out_transfer_func, programmed again by dc_commit_streams) */
         if (r == RDNA3_OK) {
-            if (use && !fGammaTab[g->head])
+            if (use && !fGammaTab[g->head]) {
                 fGammaTab[g->head] = (rdna3_gamma_pwl *)IOMalloc(sizeof(rdna3_gamma_pwl));
+                if (!fGammaTab[g->head])
+                    LOG("display: head %u gamma table not kept (no memory): a restore after a power loss "
+                        "leaves this head's output gamma in bypass", g->head);
+            }
             if (use && fGammaTab[g->head]) {
                 *fGammaTab[g->head] = *use;
             } else if (!use && fGammaTab[g->head]) {
