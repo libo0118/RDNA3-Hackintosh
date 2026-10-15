@@ -20,8 +20,8 @@
  *                       read back and presented each 100 ms (run in the
  *                       user's GUI session); last line "M4: ..."
  *
- * The plugin hands out a device only to allow-listed processes; "mtlprobe"
- * is allowed by name (metal/plugin/NVMTLDevice.m). Its own log goes to
+ * The plugin hands out a device only to processes its allow list allows;
+ * "mtlprobe" is allowed by name (metal/plugin/NVMTLDevice.m). Its own log goes to
  * NVMTL_LOG_PATH (the report sets it).
  *
  * Last line: "METAL: ALL PASSED ..." or "METAL: FAILED <step> ...".

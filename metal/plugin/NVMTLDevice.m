@@ -5,6 +5,8 @@
  */
 
 #include "rdna3mtl_config.h"
+#include "rdna3mtl_allow_policy.h"
+#include <libproc.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
@@ -306,37 +308,34 @@ static void nvmtl_nvenc_hevc_register(void)
     });
 }
 #endif /* RDNA3MTL_NV_VIDEO_CODECS */
+/* The kernel's boot-args (sysctl kern.bootargs reads unprivileged): the kill
+ * switch for apps mode that needs neither the list file nor a rebuild. */
+static bool nvmtl_bootarg_is(const char *key, const char *val)
+{
+    char args[2048]; size_t n = sizeof args - 1;
+    if (sysctlbyname("kern.bootargs", args, &n, NULL, 0) != 0) return false;
+    args[n < sizeof args ? n : sizeof args - 1] = 0;
+    return rdna3mtl_bootarg_is(args, key, val);
+}
+/* Who gets a device: rdna3mtl_allow_policy.h decides (tests/test_mtl_allow.c),
+ * this reads the process, the sysctls and the list, and says why in the log. */
 static bool nvmtl_process_is_allowed(void)
 {
     const char *me = getprogname();
     if (!me) return false;
-    if (getenv("NVMTL_ENABLE")) return true;
+    if (getenv("NVMTL_ENABLE")) { nvlog("  NVMTL_ENABLE set: device for %s", me); return true; }
     if (!strcmp(me, "mtlprobe") || !strcmp(me, "nvmtltest") || !strcmp(me, "nvmtlrender")) return true;
     FILE *f = fopen(RDNA3MTL_ALLOW_LIST, "r");
     if (!f) f = fopen(RDNA3MTL_ALLOW_LIST_ALT, "r");
     if (!f) { nvlog("  no allow-list readable from this process: no device for %s", me); return false; }
-    char line[256]; bool ok = false;
-    while (fgets(line, sizeof line, f)) {
-        char *nl = strpbrk(line, "\r\n"); if (nl) *nl = 0;
-        char *p = line; while (*p == ' ' || *p == '\t') p++;
-        if (!*p || *p == '#') continue;
-        if (*p == '-') { p++; while (*p == ' ' || *p == '\t') p++; if (!strcmp(p, me)) { nvlog("  denied by list: no device for %s", me); fclose(f); return false; } continue; }
-        bool armedOnly = false, pipeOnly = false;
-        if (*p == '!') { armedOnly = true; p++; while (*p == ' ' || *p == '\t') p++; }
-        else if (*p == '@') { pipeOnly = true; p++; while (*p == ' ' || *p == '\t') p++; }
-        if (strcmp(p, "*") && strcmp(p, me)) continue;
-        if (armedOnly && !nvmtl_accel_armed()) {
-            nvlog("  '%s' is armed-only and debug.rdna3accelfb reads 0 -- no device (arm it with sysctl -w debug.rdna3accelfb=1)", me);
-            break;
-        }
-        if (pipeOnly && !nvmtl_display_pipe_up()) {
-            nvlog("  '%s' only with the AGDC display pipe and debug.rdna3agdc is not 1 -- no device", me);
-            break;
-        }
-        ok = true; break;
-    }
+    char path[1024] = "";
+    if (proc_pidpath(getpid(), path, sizeof path) <= 0) path[0] = 0;
+    rdna3mtl_allow_ctx c = { me, path, nvmtl_accel_armed(), nvmtl_display_pipe_up(),
+                             nvmtl_bootarg_is("rdna3mtlapps", "0") };
+    char why[400]; rdna3mtl_allow_mode mode;
+    bool ok = rdna3mtl_allow_decide(f, &c, why, sizeof why, &mode) != 0;
     fclose(f);
-    if (ok) nvlog("  allow-listed: %s", me);
+    nvlog("  allow mode: %s; %s: %s", rdna3mtl_allow_mode_name(mode), me, why);
     return ok;
 }
 
