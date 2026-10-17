@@ -957,6 +957,63 @@ the VM is enough).
 - The kext cannot be compiled locally (no macOS SDK): kext-side changes are
   verified only by the CI run — read them twice before pushing.
 
+## Plugin frame trace
+
+Every process that loads the Metal plugin writes a binary trace of what it did
+with IOSurfaces, command buffers and Vulkan: `/var/tmp/rdna3-nvmtl/<process>-<pid>.trace`
+(format: `metal/plugin/nvmtl_trace.h`). `tools/macos/collect_plugin_trace.sh`
+puts them in the report as `31-plugin-trace/` and saves WindowServer's NVMTL
+log whole as `32-log-nvmtl-windowserver.txt`. The text log is rate limited;
+the trace is the record. Decode on the host:
+
+    python3 tools/plugin_trace.py rdna3-report-*.tar.gz          # all processes, WindowServer first
+    python3 tools/plugin_trace.py REPORT --proc WindowServer --frames 40
+    python3 tools/plugin_trace.py REPORT --surface 1234 --all    # one IOSurface's whole timeline + failures
+    python3 tools/plugin_trace.py REPORT --rates                 # counts per second of process life
+
+Questions it answers (the "findings:" block names each, per IOSurface):
+
+* *Which surface did WindowServer render into, frame by frame?* The frame view
+  lists, per command buffer, the pass (`surf`, load/store action, clear colour)
+  and what it turned out to be: DRAWN, **CLEAR-ONLY** (cleared and nothing
+  drawn; `clear-only` finding when the surface is display sized and the colour
+  is transparent black), or untouched.
+* *Was it published?* `never-published`: a command buffer wrote the surface and
+  no dirty mark and no copy-out ran for it (FAIL). The `per IOSurface` table
+  counts `o:dirt` (dirty mark, no copy), `o:copy` (copy-out), `o:refu` (copy-out
+  because the kernel refused the dirty mark), `o:fail`, `EMPTY`.
+* *Did the kernel refuse?* `dirty-refused` lists the errno (macOS numbers; 19 =
+  ENODEV: no VRAM behind the surface); `kreq-import` the refused surface imports.
+* *Was the published picture empty?* `empty-publish`: the band hash of the data
+  written into the IOSurface (the same 8 bands x 48 columns FNV hash as the
+  kernel's `rd3AccelBandHash`, so a hash can be matched with the kext's `swap
+  #N` band lines) has every sampled pixel zero. A back buffer that is always
+  CLEAR-ONLY + EMPTY while its twin is DRAWN + dirty is the flicker.
+* *Surface-in skipped while the VRAM was stale?* `skip-stale`: a "shared VRAM
+  current" skip right after a failed, empty or refused-then-copied publish of
+  that surface; `skip-foreign` (INFO): a skip that relies on a VRAM tag written
+  by another process. `NVMTL_TRACE_HASH=2` additionally hashes the unlocked CPU
+  copy of skipped / dirty surfaces (not a default: it reads memory the plugin
+  did not lock).
+* *Did Vulkan fail?* `vk-submit` (vkQueueSubmit not VK_SUCCESS, with the
+  function that submitted), `vk-wait` (fence timeout / error, wait time),
+  `vk-disable` ("disabling backend" decisions), `alloc-fail` (vkCreate*/
+  vkAllocateMemory/newBufferWithBytesNoCopy), `cb-error`.
+
+Reading a block: `+S.mmm` is seconds since the process opened its trace, next
+to it the wall clock (UTC; `--utc-offset H` for the card's zone; the process's
+`NVMTLDevice +load` log line gives the same instant). `events: N written, M
+kept` says how much the rings still hold (main ring 16384 records, vk ring 8192:
+about the last 10 to 30 s of WindowServer); `lifetime totals` come from the
+per-second summary (8192 s) and never wrap, so a rate is trustworthy even when
+the events are gone. SURF_OUT `rc` is the dirty request's errno (negative: -2
+dirty path off, -3 no Vulkan device); seeds are `IOSurfaceGetSeed` before ->
+after the lock. A frame with `NOT FINISHED` was still in flight when the
+report was taken. If `31-plugin-trace/info.txt` says 0 traces: the plugin is
+older than the trace, or `NVMTL_TRACE=0` is set (also readable from the
+`trace:` line in the plugin log). Switch off: `NVMTL_TRACE=0` in
+`/Library/GPUBundles/rdna3mtl/rdna3mtl.conf`. Triage: `plugin_trace.triage_lines(report)`.
+
 ## Linux reference dump (`tools/linux/card_dump.sh`)
 
 `sudo bash tools/linux/card_dump.sh` on the Linux host (amdgpu, idle desktop)

@@ -19,6 +19,7 @@
 #include <vulkan/vulkan.h>
 #include "nvmtl_vk.h"
 #include "nvmtl_sampler_state.h"
+#include "nvmtl_trace.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
 
@@ -468,7 +469,7 @@ static VkResult nvmtl_opaque_AllocateCommandBuffers(VkDevice dev, const VkComman
     return result;
 }
 
-#define VKCK(x, what) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { nvlog("vk: %s -> %d", what, r_); return -1; } } while (0)
+#define VKCK(x, what) do { VkResult r_ = (x); if (r_ != VK_SUCCESS) { nvt_alloc_fail(what, (int)r_); nvlog("vk: %s -> %d", what, r_); return -1; } } while (0)
 #include <fcntl.h>
 typedef struct { uint32_t version, surfaceID, plane, pad; uint64_t size_B; } nvmtl_vram_rec;
 static void (*pnvk_stage_import)(const nvmtl_vram_rec *);
@@ -1872,6 +1873,7 @@ static int nvmtl_drm_surface_probe(void)
     g_drm_surf_errno = rc ? errno : 0;
     if (!rc || errno == ENOENT || errno == ENODEV) state = 1;
     else if (errno != ENXIO || ++tries >= 64) state = 0;
+    nvt_kreq_probe(state < 0 ? 2u : (unsigned)state, rc, g_drm_surf_errno);
     if (state >= 0 || tries == 1)
         nvlog("item 7: kext surface BOs probe -> rc %d errno %d (%s)%s", rc, g_drm_surf_errno, strerror(g_drm_surf_errno),
               state == 1 ? ": supported" : state == 0 ? ": not offered - IOSurface textures stay private" : ": accelerator not up yet, asked again later");
@@ -1892,9 +1894,12 @@ int nvmtl_vk_surface_share_on(void)
     }
     return on;
 }
+static __thread int g_last_dirty_errno;
+int nvmtl_vk_last_dirty_errno(void) { return g_last_dirty_errno; }
 int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
 {
     static int on = -1;
+    g_last_dirty_errno = 0;
     if (on < 0) {
         const char *e = getenv("NVMTL_NO_SURFACE_PAGEOFF");
         on = (pnvk_surface_dirty || pdrm_surface_dirty) && !(e && e[0] == '1') && !nvmtl_gpu_headless();
@@ -1902,16 +1907,24 @@ int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
               on ? "marked newest; a CPU lock / the display pipe pages it off (Apple's page-off)" : "copied out eagerly (old)",
               pnvk_surface_dirty ? "present" : "ABSENT", pdrm_surface_dirty ? "present" : "ABSENT", e ?: "unset");
     }
-    if (!on) return -1;
-    if (!g_dev) { static int said; if (!said++) nvlog("surface dirty: no Vulkan device - copy-out"); return -1; }
+    if (!on) { g_last_dirty_errno = -2; nvt_kreq_dirty(surfaceID, plane, NVT_KD_OFF, -1, -2, 0); return -1; }
+    if (!g_dev) {
+        static int said; if (!said++) nvlog("surface dirty: no Vulkan device - copy-out");
+        g_last_dirty_errno = -3; nvt_kreq_dirty(surfaceID, plane, NVT_KD_NO_DEVICE, -1, -3, 0); return -1;
+    }
+    const uint64_t trT0 = nvt_now();
     if (pnvk_surface_dirty) {
         uint32_t st = pnvk_surface_dirty(g_dev, surfaceID, plane);
         if (st) { static unsigned n; if (n++ < 8 || n % 2000 == 0) nvlog("surface %u dirty refused (%#x) - copy-out (%u so far)", surfaceID, st, n); }
+        g_last_dirty_errno = st ? (int)st : 0;
+        nvt_kreq_dirty(surfaceID, plane, st ? NVT_KD_REFUSED : NVT_KD_ACCEPTED, st ? -1 : 0, (int)st, nvt_us_since(trT0));
         return st ? -1 : 0;
     }
-    if (!pdrm_surface_dirty(surfaceID, plane)) return 0;
+    if (!pdrm_surface_dirty(surfaceID, plane)) { nvt_kreq_dirty(surfaceID, plane, NVT_KD_ACCEPTED, 0, 0, nvt_us_since(trT0)); return 0; }
     /* per cause: one noisy surface does not hide the others' reasons */
     int er = errno; static unsigned ncause[8];
+    g_last_dirty_errno = er;
+    nvt_kreq_dirty(surfaceID, plane, NVT_KD_REFUSED, -1, er, nvt_us_since(trT0));
     unsigned k = er == ENOENT ? 0 : er == ENODEV ? 1 : er == ENXIO ? 2 : er == ENOSYS ? 3 : 4;
     if (ncause[k]++ < 6 || ncause[k] % 2000 == 0)
         nvlog("surface %u plane %u dirty refused: errno %d (%s) - copy-out (%u of this cause)", surfaceID, plane, er, strerror(er), ncause[k]);
@@ -1920,17 +1933,19 @@ int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
 int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out)
 {
     memset(out, 0, sizeof *out);
-    if (!nvmtl_vk_surface_share_on()) return -1;
+    if (!nvmtl_vk_surface_share_on()) { nvt_kreq_import(surfaceID, plane, need, NVT_KI_SHARE_OFF, 0, 0, 0); return -1; }
     if (!need) { nvlog("item 7: surface %u: 0 bytes asked - private", surfaceID); return -1; }
     uint32_t all = g_memp.memoryTypeCount >= 32 ? 0xffffffffu : ((1u << g_memp.memoryTypeCount) - 1u);
     int mt = memtype(all, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (mt < 0) { static int said; if (!said++) nvlog("item 7: no DEVICE_LOCAL memory type - surfaces private"); return -1; }
     nvmtl_vram_rec r = { 3, surfaceID, plane, 0, (uint64_t)need };
     /* NVK takes the staged record and ignores the fd; RADV imports the surface fd itself (Vulkan owns it on success) */
+    const uint64_t trT0 = nvt_now();
     VkImportMemoryFdInfoKHR imp = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR, NULL, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
                                     pnvk_stage_import ? open("/dev/null", O_RDONLY | O_CLOEXEC) : pdrm_surface_fd(surfaceID, plane, need) };
     if (imp.fd < 0) {
         int er = errno;
+        nvt_kreq_import(surfaceID, plane, need, NVT_KI_NO_FD, 0, er, nvt_us_since(trT0));
         static unsigned nf; if (nf++ < 8 || nf % 1000 == 0) nvlog("item 7: surface %u: no import fd (errno %d %s) - private", surfaceID, er, strerror(er));
         return -1;
     }
@@ -1944,6 +1959,7 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
         /* the kernel's reason (Vulkan has one VkResult for all of them): ENOENT not this process's surface, ENODEV no
            accelerator VRAM behind it, ENXIO accelerator not up, ENOSPC smaller than asked or the per-process cap */
         int ke = pdrm_surface_last_error ? pdrm_surface_last_error() : 0;
+        nvt_kreq_import(surfaceID, plane, need, NVT_KI_ALLOC_REFUSED, (int)vr, ke, nvt_us_since(trT0));
         static unsigned n; if (n++ < 8 || n % 1000 == 0)
             nvlog("item 7: surface %u plane %u: family VRAM import refused (VkResult %d, kernel errno %d %s, %zu B) - private image + copies (%u so far)",
                   surfaceID, plane, (int)vr, ke, ke ? strerror(ke) : "", need, n);
@@ -1955,9 +1971,11 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
     if (pvkCreateBuffer(g_dev, &bci, NULL, &b) != VK_SUCCESS || pvkBindBufferMemory(g_dev, b, m, 0) != VK_SUCCESS) {
         if (b) pvkDestroyBuffer(g_dev, b, NULL);
         pvkFreeMemory(g_dev, m, NULL);
+        nvt_kreq_import(surfaceID, plane, need, NVT_KI_BIND_REFUSED, 0, 0, nvt_us_since(trT0));
         nvlog("item 7: surface %u: a buffer over the imported VRAM was refused - private", surfaceID);
         return -1;
     }
+    nvt_kreq_import(surfaceID, plane, need, NVT_KI_OK, 0, 0, nvt_us_since(trT0));
     out->buf = b; out->mem = m; out->size = need; out->alloc = 0; out->imported = 1;
     g_buf_made++;
     return 0;
@@ -5205,7 +5223,7 @@ static void nvmtl_pre_drop(nvmtl_prologue *p)
     for (unsigned i = 0; i < p->nhold; i++) if (p->hold[i] && nvmtl_pre_release_hook) nvmtl_pre_release_hook(p->hold[i]);
     p->nhold = 0;
 }
-struct nvmtl_inflight { nvk_cmdbuf *c; VkFence fence; nvmtl_prologue pre; uint64_t pt[8]; };
+struct nvmtl_inflight { nvk_cmdbuf *c; VkFence fence; nvmtl_prologue pre; uint64_t pt[8]; uint32_t trseq; const char *who; };
 nvmtl_inflight *nvmtl_vk_inflight_new(void) { return calloc(1, sizeof(nvmtl_inflight)); }
 void nvmtl_vk_inflight_free(nvmtl_inflight *f) { free(f); }
 void nvmtl_vk_gsub_nvk_stats(uint64_t *out, unsigned n)
@@ -5250,11 +5268,12 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
 {
     nvmtl_subwho_note(who, 0);
     memset(f, 0, sizeof *f); f->c = c;
+    f->who = who; f->trseq = nvt_on() ? nvt_next_id() : 0;   /* frame trace: this submit's id, joined to its fence wait */
     uint64_t *const pt = f->pt;
-    if (g_state != 1 || !c || !c->cb) return -2;
-    if (c->counter_error || nvmtl_counter_flush(c)) { nvmtl_cmd_retire(c); return -1; }
+    if (g_state != 1 || !c || !c->cb) { nvt_vk_submit(f->trseq, who, NVT_SUB_NO_BACKEND, -2, 0, 0, 0); return -2; }
+    if (c->counter_error || nvmtl_counter_flush(c)) { nvt_vk_submit(f->trseq, who, NVT_SUB_EARLY_FAIL, -1, 0, 0, 0); nvmtl_cmd_retire(c); return -1; }
     VkCommandBuffer counter_reset = VK_NULL_HANDLE;
-    if (nvmtl_counter_reset_finish(c, &counter_reset)) { nvmtl_cmd_retire(c); return -1; }
+    if (nvmtl_counter_reset_finish(c, &counter_reset)) { nvt_vk_submit(f->trseq, who, NVT_SUB_EARLY_FAIL, -1, 0, 0, 0); nvmtl_cmd_retire(c); return -1; }
     c->timing.clock = nvmtl_clock_snapshot();
     c->timing.host_before_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     if (c->timing_pool && !c->in_rp)
@@ -5267,11 +5286,11 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     const uint32_t wseq = nvmtl_keep_on() ? nvmtl_wit_record(c) : 0;
     VkResult result = pvkEndCommandBuffer(c->cb);
     const uint64_t sB = nvmtl_perf_now();
-    if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); return -1; }
+    if (result != VK_SUCCESS) { nvt_vk_submit(f->trseq, who, NVT_SUB_EARLY_FAIL, (int)result, 0, 0, 0); nvmtl_cmd_retire(c); return -1; }
     VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkFence fence;
     result = pvkCreateFence(g_dev, &fci, NULL, &fence);
     const uint64_t sC = nvmtl_perf_now();
-    if (result != VK_SUCCESS) { nvmtl_cmd_retire(c); return -1; }
+    if (result != VK_SUCCESS) { nvt_vk_submit(f->trseq, who, NVT_SUB_EARLY_FAIL, (int)result, 0, 0, 0); nvmtl_cmd_retire(c); return -1; }
     nvmtl_prologue *const pre = &f->pre;
     pthread_mutex_lock(&nvmtl_submit_mutex);
     if (pro && nvmtl_pre_submit_hook) {
@@ -5301,12 +5320,15 @@ int nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
     nvmtl_wit_control(wseq);
     const uint64_t sE = nvmtl_perf_now();
     if (pt[0]) { pt[1] = pt[0] + (sA - pt[0]) + (sD - sC); pt[2] = pt[1] + (sB - sA) + (sE - sD); pt[3] = pt[2] + (sC - sB); }
+    const uint64_t trS0 = nvt_now();
     result = g_state == 1 ? pvkQueueSubmit(g_queue, 1, &si, fence) : VK_ERROR_DEVICE_LOST;
     pthread_mutex_unlock(&nvmtl_submit_mutex);
     pt[4] = nvmtl_perf_now();
     g_cmd_submitted++;
+    nvt_vk_submit(f->trseq, who, result == VK_SUCCESS ? NVT_SUB_OK : NVT_SUB_FAILED, (int)result, nvt_us_since(trS0), ncb, pre->n);
     if (result != VK_SUCCESS) {
         g_state = -1;
+        nvt_vk_disable(f->trseq, who, NVT_DIS_SUBMIT, (int)result);
         nvlog("vk: queue submit -> %d; disabling backend and retaining uncertain in-flight resources", result);
         return -2;
     }
@@ -5327,8 +5349,11 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
         if (waited_ms >= budget_ms) break;
     }
     pt[5] = nvmtl_perf_now();
-    atomic_fetch_add(&g_submit_wait_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - w0);
+    const uint64_t trWaitNs = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - w0;
+    atomic_fetch_add(&g_submit_wait_ns, trWaitNs);
     atomic_fetch_add(&g_submit_waits, 1);
+    nvt_vk_wait(f->trseq, f->who, wr == VK_SUCCESS ? NVT_WAIT_OK : wr == VK_TIMEOUT ? NVT_WAIT_TIMEOUT : NVT_WAIT_ERROR, (int)wr,
+                trWaitNs / 1000u > 0xffffffffull ? 0xffffffffu : (uint32_t)(trWaitNs / 1000u), (uint32_t)waited_ms, (uint32_t)budget_ms);
     if (waited_ms > g_slow_submit_ms) {
         g_slow_submit_ms = waited_ms;
         if (waited_ms >= 1000)
@@ -5336,12 +5361,15 @@ int nvmtl_vk_submit_finish(nvmtl_inflight *f)
     }
     if (wr != VK_SUCCESS || g_state != 1) {
         g_state = -1;
+        nvt_vk_disable(f->trseq, f->who, NVT_DIS_WAIT, (int)wr);
         nvlog("vk: fence wait -> %d after %ld ms (budget %ld ms); disabling backend without retiring in-flight resources", wr, waited_ms, budget_ms);
         return -2;
     }
     if (c->wseq && c->wseq != NVMTL_WSEQ_BLIND) {
         if (nvmtl_keep_verdict(c->wseq) < 0) {
             g_state = -1;
+            nvt_vk_wait(f->trseq, f->who, NVT_WAIT_WITNESS, 0, 0, 0, 0);
+            nvt_vk_disable(f->trseq, f->who, NVT_DIS_WITNESS, 0);
             nvlog("vk: completion witness missing; disabling backend and retaining all in-flight resources");
             return -2;
         }

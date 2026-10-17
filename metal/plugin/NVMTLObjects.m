@@ -1021,7 +1021,9 @@ static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     // Importing the old CPU surface here would run ahead of this buffer and
     // overwrite that earlier GPU write. Queue order or the application's event supplies the dependency.
     if (nvmtl_surface_pending_write(cb, r)) return;
+    nvt_set_cb(nvmtl_tr_cb_id(cb));
     [t nvmtlSurfaceIn];
+    nvt_set_cb(0);
 }
 static unsigned nvmtl_surf_id(NVMTLTexture *t) { NVMTLTexture *r = (t && t->_parent) ? t->_parent : t; return (r && r->_surf) ? (unsigned)IOSurfaceGetID(r->_surf) : 0u; }
 static int nvmtl_noseed(void) { static uint64_t next; static int on; uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
@@ -1201,52 +1203,81 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     if (!r->_surf) return;
     @synchronized (nvmtl_surface_sync(r)) {
     const uint32_t vgen = r->_vramOn ? 0 : nvmtl_vram_gen(r->_surf, r->_plane);
-    if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (r->_vramOn || vgen == r->_surfGen)) return;
-    if (![r nvmtlSurfaceCopyable]) return;
+    if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (r->_vramOn || vgen == r->_surfGen)) { nvt_count(NVT_C_IN_SYNCED, 1); return; }
+    const uint64_t trT0 = nvt_now();   // frame trace (nvmtl_trace.h): every decision below is recorded, none depends on it
+    const uint32_t trSeed0 = nvt_on() ? IOSurfaceGetSeed(r->_surf) : 0;
+    if (![r nvmtlSurfaceCopyable]) { nvmtl_tr_surf(r, NVT_K_SURF_IN, NVT_IN_NOT_COPYABLE, 0, trSeed0, trSeed0, trT0, 0, NULL, 0); return; }
     { uint32_t now = IOSurfaceGetSeed(r->_surf);
       if (r->_vramOn && nvmtl_vram_tag_current(r->_surf, r->_plane, now)) {
           r->_surfSeed = now; r->_surfSynced = YES; g_surfin_skip++;
           static unsigned ns; if (ns++ < 6 || ns % 2000 == 0) nvlog("item 7: surface-in SKIPPED (shared VRAM current at seed %u): %llu skipped, %llu copied", now, g_surfin_skip, g_surfin_copy);
+          // NVMTL_TRACE_HASH=2 only: the CPU copy of a skipped surface, read without a lock
+          uint32_t trBands[8]; const BOOL trHashed = nvt_hash_mode() >= 2 && nvt_on() &&
+              nvmtl_tr_hash(r, IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane), IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane), trBands);
+          nvmtl_tr_surf(r, NVT_K_SURF_IN, NVT_IN_SKIP_VRAM, 0, now, now, trT0, 0, trHashed ? trBands : NULL, trHashed ? NVT_F_HASH_UNLOCKED : 0);
           return; } }
     uint32_t seed = 0;
-    if (IOSurfaceLock(r->_surf, kIOSurfaceLockReadOnly, &seed) != kIOReturnSuccess) { nvlog("G13 surface-in: IOSurfaceLock FAILED"); return; }
+    const IOReturn trLock = IOSurfaceLock(r->_surf, kIOSurfaceLockReadOnly, &seed);
+    if (trLock != kIOReturnSuccess) { nvlog("G13 surface-in: IOSurfaceLock FAILED");
+        nvmtl_tr_surf(r, NVT_K_SURF_IN, NVT_IN_LOCK_FAILED, (int)trLock, trSeed0, trSeed0, trT0, 0, NULL, NVT_F_RO_LOCK); return; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
     int rc = (base && row) ? nvmtl_vk_image_write(r->_q, &r->_i, base, row) : -1;
     if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "in%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
+    uint32_t trBands[8]; const BOOL trHashed = !rc && nvt_on() && nvmtl_tr_hash(r, base, row, trBands);   // the CPU memory just uploaded, still locked
     IOSurfaceUnlock(r->_surf, kIOSurfaceLockReadOnly, NULL);
-    if (rc) { nvlog("G13 surface-in: upload FAILED (%ux%u) — retried at the next use", r->_i.w, r->_i.h); return; }
+    if (rc) { nvlog("G13 surface-in: upload FAILED (%ux%u) — retried at the next use", r->_i.w, r->_i.h);
+        nvmtl_tr_surf(r, NVT_K_SURF_IN, NVT_IN_UPLOAD_FAILED, rc, trSeed0, seed, trT0, 0, NULL, NVT_F_RO_LOCK); return; }
     r->_surfSeed = seed; r->_surfSynced = YES; r->_surfGen = vgen;
     g_surfin_copy++; if (r->_vramOn) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-in #%u: %ux%u surface %p seed %u uploaded", n, r->_i.w, r->_i.h, (void *)r->_surf, seed);
+    nvmtl_tr_surf(r, NVT_K_SURF_IN, NVT_IN_UPLOAD, 0, trSeed0, seed, trT0, (uint64_t)r->_i.w * r->_i.h * (r->_i.bpp ? r->_i.bpp : 4),
+                  trHashed ? trBands : NULL, NVT_F_RO_LOCK);
     }
 }
 - (BOOL)nvmtlSurfaceOut {
     NVMTLTexture *r = _parent ? _parent : self;
     if (!r->_surf) return YES;
     @synchronized (nvmtl_surface_sync(r)) {
-    if (![r nvmtlSurfaceCopyable]) return NO;
-    if (r->_vramOn && !nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane)) {
-        uint32_t seed = IOSurfaceGetSeed(r->_surf);
-        r->_surfSeed = seed; r->_surfSynced = YES;
-        r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, seed);
-        static unsigned nd; if (nd++ < 6 || nd % 5000 == 0) nvlog("surface-out -> dirty, no copy (%ux%u surface %u seed %u, #%u)", r->_i.w, r->_i.h, (unsigned)IOSurfaceGetID(r->_surf), seed, nd);
-        return YES;
+    const uint64_t trT0 = nvt_now();   // frame trace: records what happens below, decides nothing
+    const uint32_t trSeed0 = nvt_on() ? IOSurfaceGetSeed(r->_surf) : 0;
+    if (![r nvmtlSurfaceCopyable]) { nvmtl_tr_surf(r, NVT_K_SURF_OUT, NVT_OUT_NOT_COPYABLE, 0, trSeed0, trSeed0, trT0, 0, NULL, 0); return NO; }
+    int trRefused = 0;
+    if (r->_vramOn) {
+        const int dirtied = nvmtl_vk_surface_dirty((uint32_t)IOSurfaceGetID(r->_surf), (uint32_t)r->_plane);
+        if (!dirtied) {
+            uint32_t seed = IOSurfaceGetSeed(r->_surf);
+            r->_surfSeed = seed; r->_surfSynced = YES;
+            r->_surfGen = nvmtl_vram_tag_bump(r->_surf, r->_plane, seed);
+            static unsigned nd; if (nd++ < 6 || nd % 5000 == 0) nvlog("surface-out -> dirty, no copy (%ux%u surface %u seed %u, #%u)", r->_i.w, r->_i.h, (unsigned)IOSurfaceGetID(r->_surf), seed, nd);
+            // NVMTL_TRACE_HASH=2 only: the (stale) CPU copy, read without a lock
+            uint32_t trBands[8]; const BOOL trHashed = nvt_hash_mode() >= 2 && nvt_on() &&
+                nvmtl_tr_hash(r, IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane), IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane), trBands);
+            nvmtl_tr_surf(r, NVT_K_SURF_OUT, NVT_OUT_DIRTY, 0, trSeed0, seed, trT0, 0, trHashed ? trBands : NULL, trHashed ? NVT_F_HASH_UNLOCKED : 0);
+            return YES;
+        }
+        trRefused = nvmtl_vk_last_dirty_errno();   // why the mark was not taken (errno, or -2 path off, -3 no device)
     }
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     uint32_t lockopt = nvmtl_noseed() ? kIOSurfaceLockReadOnly : 0;
-    if (IOSurfaceLock(r->_surf, lockopt, NULL) != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED"); return NO; }
+    const IOReturn trLock = IOSurfaceLock(r->_surf, lockopt, NULL);
+    if (trLock != kIOReturnSuccess) { nvlog("G13 surface-out: IOSurfaceLock FAILED");
+        nvmtl_tr_surf(r, NVT_K_SURF_OUT, NVT_OUT_LOCK_FAILED, (int)trLock, trSeed0, trSeed0, trT0, 0, NULL, lockopt ? NVT_F_RO_LOCK : 0); return NO; }
     void *base = IOSurfaceGetBaseAddressOfPlane(r->_surf, (uint32_t)r->_plane);
     size_t row = IOSurfaceGetBytesPerRowOfPlane(r->_surf, (uint32_t)r->_plane);
     int rc = (base && row) ? nvmtl_vk_image_read(r->_q, &r->_i, base, row) : -1;
     if (!rc && r->_i.bpp == 4) { char tag[24]; snprintf(tag, sizeof tag, "out%u-", (unsigned)IOSurfaceGetID(r->_surf)); nvmtl_frame_dump(tag, base, row, r->_i.w, r->_i.h); }
+    uint32_t trBands[8]; const BOOL trHashed = !rc && nvt_on() && nvmtl_tr_hash(r, base, row, trBands);   // what the GPU image held, as written into the surface
     uint32_t seed = 0; IOReturn unlocked = IOSurfaceUnlock(r->_surf, lockopt, &seed); if (lockopt) seed = IOSurfaceGetSeed(r->_surf);
-    if (rc || unlocked != kIOReturnSuccess) { nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h); return NO; }
+    if (rc || unlocked != kIOReturnSuccess) { nvlog("G13 surface-out: readback FAILED (%ux%u)", r->_i.w, r->_i.h);
+        nvmtl_tr_surf(r, NVT_K_SURF_OUT, NVT_OUT_READBACK_FAILED, rc ? rc : (int)unlocked, trSeed0, seed, trT0, 0, NULL, lockopt ? NVT_F_RO_LOCK : 0); return NO; }
     r->_surfSeed = seed; r->_surfSynced = YES;
     r->_surfGen = r->_vramOn ? r->_surfGen : nvmtl_vram_gen(r->_surf, r->_plane);
     if (r->_vramOn && !lockopt) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-out #%u: %ux%u surface %p seed %u, %.2f ms", n, r->_i.w, r->_i.h,
         (void *)r->_surf, seed, (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1e6);
+    nvmtl_tr_surf(r, NVT_K_SURF_OUT, r->_vramOn ? NVT_OUT_COPY_AFTER_REFUSE : NVT_OUT_COPY_PRIVATE, trRefused, trSeed0, seed, trT0,
+                  (uint64_t)r->_i.w * r->_i.h * (r->_i.bpp ? r->_i.bpp : 4), trHashed ? trBands : NULL, lockopt ? NVT_F_RO_LOCK : 0);
     return YES;
     }
 }
@@ -3101,22 +3132,29 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
             [self nvmtlVisibilityError:[NSString stringWithFormat:@"visibility: accumulation failed at offset %zu", offset]];
     }
     _visRecords = nil;
-    if (_begun) return;
-    if (_refused) return;
+    if (_begun) { nvmtl_tr_pass_end(self, NVT_PASS_DRAWN, 0); return; }
+    if (_refused) { nvmtl_tr_pass_end(self, NVT_PASS_REFUSED, 0); return; }
     switch (nvmtl_vk_pass_kind(&_pass)) {
-        case 1: { static int said; if (!said++) nvlog("encoder: apps2 a pass with no draws loads everything and resolves nothing — left untouched"); return; }
-        case 2:
-            if (nvmtl_vk_cmd_empty_pass(&_cb->_c, &_pass)) nvlog("encoder: apps2 empty pass FAILED — its clears and resolves are NOT applied");
+        case 1: { static int said; if (!said++) nvlog("encoder: apps2 a pass with no draws loads everything and resolves nothing — left untouched");
+                  nvmtl_tr_pass_end(self, NVT_PASS_LOAD_UNTOUCHED, 0); return; }
+        case 2: {
+            const int emptyFailed = nvmtl_vk_cmd_empty_pass(&_cb->_c, &_pass);
+            if (emptyFailed) nvlog("encoder: apps2 empty pass FAILED — its clears and resolves are NOT applied");
             else { static int said; if (said++ < 4) nvlog("encoder: apps2 empty pass (the clears/resolves of a pass with no draws)"); }
             if (_resolve) { NVMTLTexture *rs = _resolve->_parent ? _resolve->_parent : _resolve; if (rs->_surf) nvmtl_surf_dirty(_cb, rs); }
-            return;
+            nvmtl_tr_pass_end(self, emptyFailed ? NVT_PASS_EMPTY_FAILED : NVT_PASS_EMPTY, emptyFailed);
+            return; }
         default: break;
     }
-    if (_load & 1u) { static int said; if (!said++) nvlog("encoder: a Load pass with no draws — target left untouched"); return; }
-    if (_target && nvmtl_vk_cmd_clear_image(&_cb->_c, [_target nvi], _clear))
+    if (_load & 1u) { static int said; if (!said++) nvlog("encoder: a Load pass with no draws — target left untouched");
+        nvmtl_tr_pass_end(self, NVT_PASS_LOAD_UNTOUCHED, 0); return; }
+    if (_target && nvmtl_vk_cmd_clear_image(&_cb->_c, [_target nvi], _clear)) {
         nvlog("encoder: clear-only pass FAILED");
-    else if (_target)
+        nvmtl_tr_pass_end(self, NVT_PASS_CLEAR_FAILED, 1);
+    } else if (_target) {
         nvlog("encoder: clear-only pass (%.2f %.2f %.2f %.2f)", _clear[0], _clear[1], _clear[2], _clear[3]);
+        nvmtl_tr_pass_end(self, NVT_PASS_CLEAR_ONLY, 0);
+    } else nvmtl_tr_pass_end(self, NVT_PASS_LOAD_UNTOUCHED, 0);
 }
 - (void)setViewport:(MTLViewport)v {
     nvtrace("VP %.4g %.4g %.4g %.4g z %.3g %.3g", v.originX, v.originY, v.width, v.height, v.znear, v.zfar);
@@ -4701,6 +4739,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     e->_visBuf = (NVMTLBuffer *)d.visibilityResultBuffer;
     MTLClearColor cc = d.colorAttachments[0].clearColor;
     e->_clear[0] = (float)cc.red; e->_clear[1] = (float)cc.green; e->_clear[2] = (float)cc.blue; e->_clear[3] = (float)cc.alpha;
+    (void)nvmtl_tr_pass_begin(self, e, d);   // frame trace: which IOSurface(s) this pass writes, load/store, clear colour
     if (![e nvmtlBuildPass:d]) e->_refused = YES;
     return e;
 }

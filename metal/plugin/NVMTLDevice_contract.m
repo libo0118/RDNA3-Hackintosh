@@ -19,13 +19,14 @@ static void nvbt(const char *tag, int *count, int max);
 - (id)newBufferWithBytesNoCopy:(void *)a0 length:(NSUInteger)a1 options:(NSUInteger)a2 deallocator:(id)a3
 {
     const MTLStorageMode sm = (MTLStorageMode)((a2 >> MTLResourceStorageModeShift) & 0xF);
-    if (!a1) { nvlog("newBufferWithBytesNoCopy: zero length -> nil (the deallocator is not called)"); return nil; }
+    if (!a1) { nvt_alloc_fail("newBufferWithBytesNoCopy: zero length", 0); nvlog("newBufferWithBytesNoCopy: zero length -> nil (the deallocator is not called)"); return nil; }
     if (sm == MTLStorageModePrivate || sm == MTLStorageModeMemoryless) {
+        nvt_alloc_fail("newBufferWithBytesNoCopy: private storage", (int)sm);
         nvlog("newBufferWithBytesNoCopy: storage mode %d -> nil (a real driver ABORTS: storageModePrivate incompatible with ...WithBytes variant of newBuffer)", (int)sm);
         return nil; }
     if (!a0) {
         NVMTLBuffer *z = (NVMTLBuffer *)[self newBufferWithLength:a1 options:a2];
-        if (!z) { nvlog("newBufferWithBytesNoCopy: NULL pointer, %lu bytes: no buffer to stand in -> nil", (unsigned long)a1); return nil; }
+        if (!z) { nvt_alloc_fail("newBufferWithBytesNoCopy: NULL pointer", 0); nvlog("newBufferWithBytesNoCopy: NULL pointer, %lu bytes: no buffer to stand in -> nil", (unsigned long)a1); return nil; }
         void *zc = [z contents];
         if (zc) { memset(zc, 0, a1); if (z->_shadow.map) [z didModifyRange:NSMakeRange(0, a1)]; }
         if (a3) { void (^user)(void *, NSUInteger) = [a3 copy]; const NSUInteger n = a1;

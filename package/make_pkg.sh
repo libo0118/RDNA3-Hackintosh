@@ -153,7 +153,7 @@ if b=$(find_part d RDNA3MTLDriver.bundle); then
 fi
 
 # --- tools: report, firmware, uninstall, OpenCore helper
-cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" "$A/tools/macos/"
+cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" "$ROOT/tools/macos/collect_plugin_trace.sh" "$A/tools/macos/"
 cp "$ROOT/tools/vm/macos/autoreport.sh" "$P/firmware.sh" "$P/uninstall.sh" "$A/"
 cp "$P/oc_install.sh" "$A/package/"
 cp "$ROOT/tools/vm/vmtool.py" "$A/tools/vm/"
