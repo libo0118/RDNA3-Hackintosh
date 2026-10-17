@@ -200,7 +200,7 @@ head -c 5000000 /dev/zero > "$T/bc-src"; echo keep > "$T/bc-dst"
 ( cap=1000; . "$T/bc.sh"; bounded_copy "$T/bc-src" "$T/bc-dst" ) && fail "the copy overwrote an existing file"
 [ "$(cat "$T/bc-dst")" = keep ] || fail "noclobber did not protect the destination"
 ( cap=1000; . "$T/bc.sh"; bounded_copy "$T/bc-src" "$T/bc-new" ) || fail "bounded copy"
-[ "$(wc -c < "$T/bc-new")" = 1000 ] || fail "the copy is not bounded by the cap"
+[ "$(wc -c < "$T/bc-new" | tr -d " ")" = 1000 ] || fail "the copy is not bounded by the cap"
 # a size cap
 mkdir -p "$T/col3"
 PATH="$T/bin:$PATH" NVMTL_COLLECT_MAXBYTES=1000000 NVMTL_TRACE_DIR="$T/colsrc" sh "$ROOT/tools/macos/collect_plugin_trace.sh" "$T/col3" || fail "collector (cap)"
