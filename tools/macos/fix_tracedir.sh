@@ -39,9 +39,15 @@ fi
 [ ! -L "$TD" ] && [ -d "$TD" ] || fail "not a directory"
 o=$(owner "$TD")
 case "$o" in 0|88|"$me") ;; *) fail "owned by uid $o" ;; esac
-chmod 1777 "$TD" || fail "cannot chmod"
+# never through a link: a uid-88 owner could swap the entry for a symlink
+# after the check above (-h acts on the link itself; GNU chmod has no -h)
+hflag=; [ "$(uname)" = Darwin ] && hflag=-h
 if [ $sys = 1 ]; then
-    chown root:admin "$TD" || fail "cannot chown root:admin"
+    chown -h root:admin "$TD" || fail "cannot chown root:admin"
+fi
+chmod $hflag 1777 "$TD" || fail "cannot chmod"
+[ ! -L "$TD" ] && [ -d "$TD" ] || fail "not a directory after chmod"
+if [ $sys = 1 ]; then
     [ "$(owner "$TD")" = 0 ] || fail "not root's"
 fi
 exit 0

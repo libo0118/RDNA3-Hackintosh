@@ -40,7 +40,7 @@ note() { echo "$*" >> "$info"; }
 bounded_copy() {
     ( set -C; exec head -c "$cap" < "$1" > "$2" ) 2>/dev/null &
     cp_pid=$!
-    ( sleep 60; kill -9 "$cp_pid" 2>/dev/null ) >/dev/null 2>&1 &
+    ( sleep 60 & s=$!; trap 'kill $s 2>/dev/null; exit 0' TERM; wait $s; kill -9 "$cp_pid" 2>/dev/null ) >/dev/null 2>&1 &
     cp_wd=$!
     wait "$cp_pid"; cp_rc=$?
     kill "$cp_wd" 2>/dev/null
