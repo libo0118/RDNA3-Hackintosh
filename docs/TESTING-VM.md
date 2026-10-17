@@ -200,6 +200,7 @@ steps:
 | `amdgpu` | the default profile, but the driver follows Linux amdgpu's own order where the tested one differs (`rdna3amdgpu=1`): firmware load order, power management setup, page tables, the interrupt ring in system memory | medium risk; after `default` passed. Looks like step `default`; if the screen stays on the boot picture and the report says PSP or SMU failed, boot once without it |
 | `bisect` | the display bug (black screens, windows that do not appear or only flash, flicker): every new feature that has a runtime switch off, then back on one at a time, 30 s each (13 steps, 6.5 min; [Display bisect](#display-bisect-step-bisect)) | **sit at the monitors for the whole run**: a notification, a spoken "step N" and N beeps announce every step; note the step numbers where the picture goes wrong |
 | `bisect-plugin` | the same for the Metal plugin's switches (`rdna3mtl.conf`, the allow list); **restarts WindowServer three times** | run it last, after `bisect`; log in again at the login window each time unless the guest logs in by itself |
+| `bisect-agdc` | the same bisect on the **agdc profile** (WindowServer on our Metal plugin, the card busy): `swap_mode`, `swap_stale`, `iop`, `a3`, `swap_latch`, `iop_flip` in 12 combinations of 30 s each, 6 min ([Display bisect on the agdc profile](#display-bisect-on-the-agdc-profile-step-bisect-agdc)) | the plain `bisect` runs the default profile, where the AGDC is idle and WindowServer draws on the CPU: use this one for the real desktop. **Sit at the monitors for the whole run**; same announcements as `bisect`. Steps 4 and 5 turn `iop` off while WindowServer runs: the picture may stay wrong afterwards (shut macOS down from the report's end as usual) |
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
 
@@ -309,6 +310,12 @@ panic (card run 50). The run uploads its table after every step, and the
 plugin's files are put back at the end and at the next boot should the run
 die. Run it last, and only when `bisect` points at nothing in the kernel.
 
+This run is the default profile, where the AGDC is idle and WindowServer does
+no GPU work (it renders on the CPU). Its answer (swap mode 0 fine, mode 1
+broken) therefore does not hold for the real desktop, which is the `agdc`
+profile: use [`bisect-agdc`](#display-bisect-on-the-agdc-profile-step-bisect-agdc)
+for that.
+
 Not switchable at runtime (not tested by the steps above): the copy
 forward fixes of 2026-10-17 (`rdna3accelcf=0` switches copy forward off for
 the whole boot), the visible-VRAM reserve (`rdna3visreserve=<MiB>`, 0 = none),
@@ -316,8 +323,8 @@ output gamma on by default (`rdna3gamma=0`), the VRAM-lost CS refusal
 (`rdna3vramlostcs=0`), FreeSync (`rdna3vrr=1`, off by default), the VMID
 admission and every other change in the kext without a switch. Try those with
 `rdna3vm args "<the boot-arg>"` (no `rdna3lvl` in it: the default profile) and
-compare with step 0. Older than the bug and left alone: `iop`, `iop_async`,
-`iop_flip`, `crc_head` and the plugin's `NVMTL_NO_DIRTYONLY`, `NVMTL_NO_TEXBUF`,
+compare with step 0. Older than the bug and left alone: `iop_async`,
+`crc_head` and the plugin's `NVMTL_NO_DIRTYONLY`, `NVMTL_NO_TEXBUF`,
 `NVMTL_SKIP_EMPTY`, `NVMTL_NO_BUFTEX_RECYCLE` (all imported with the plugin on
 2026-10-09; their defaults did not change).
 
@@ -327,6 +334,100 @@ two looks, the swap and stale-hold counter changes) and names the first step
 you marked `n`, the first whose looks went black or stood still, and where
 the run says the bug starts (`BISECT: BREAKS AT step N`). Anything missing
 (a look, the counters, a step that never ran) is a `WARN`.
+
+### Display bisect on the agdc profile (step `bisect-agdc`)
+
+Card run 2026-10-17f (`rdna3vm step play`, swap mode 0): the desktop is broken
+again. The serial log says `swap #83: head 1: the buffer it showed (phys ...)
+changed while on the panel ... rewritten in place and shown again` and
+`FRONT SURFACE sample: *** MOVED -- A LIVE WRITER IS PAINTING THE SCANNED-OUT
+SURFACE ***`, and the second back buffer reads empty at every swap. The plain
+`bisect` could not have seen that: it boots the default profile, where the
+AGDC is idle and WindowServer renders on the CPU. `bisect-agdc` is the same
+30-seconds-per-step bisect on the profile you really use.
+
+```sh
+rdna3vm update
+rdna3vm step bisect-agdc
+```
+
+The boot-args are exactly those of step `agdc` (WindowServer on our Metal
+plugin: `rdna3agdc=3 rdna3acceliop=1 rdna3accelfb=4` ...) plus
+`rdna3bisect=4`. (`rdna3bisect=3` is "no tests this boot, start by hand", see
+above.) The run takes about 6 minutes of steps, the rest is the usual report
+(trace pump, plugin trace, `collect.sh`); the host stops the VM after about 23
+minutes at the latest. Everything else is as in `bisect`: the notification
+"step N of 11: ...", the voice, N beeps, two pictures of each monitor per step
+(8 s and 20 s in) and the table in `39-bisect.txt` / `<report>-bisect.txt`.
+Without keys the triage judges from the pictures (black, frozen). To answer
+with `y` / `n` / Enter, boot the agdc profile without tests and start the run
+in a macOS Terminal (the plain `rdna3bisect=3` has no agdc profile, the AGDC
+would stay idle):
+
+```sh
+rdna3vm args "$(awk '$1 == "agdc" { $1 = ""; print }' tools/ladder-steps.txt) rdna3bisect=3" --stay
+sudo sh "/Library/Application Support/RDNA3VM/autoreport.sh" --bisect-agdc    # in the macOS Terminal
+```
+
+Unlike `bisect` the steps are **not cumulative**: every step sets its whole
+combination from the values the boot left, so a step is only what its row
+says. Each holds 30 s; the time is after the start (the first notification
+says the clock time).
+
+| Step | Time | What is set (everything else as the boot left it; `trace_scan` 0) |
+|---|---|---|
+| 0 | 00:00 | the reference: `swap_mode` 0 (the flip), `swap_stale` 1, `iop` 1, `a3` as booted |
+| 1 | 00:30 | `swap_mode` 1 (the copy), `swap_stale` 1 |
+| 2 | 01:00 | `swap_mode` 1, `swap_stale` 0 (stale backs copied, not held) |
+| 3 | 01:30 | `swap_mode` 2 (every back copied) |
+| 4 | 02:00 | `swap_mode` 0, `iop` 0 (no display-pipe transactions) |
+| 5 | 02:30 | `swap_mode` 1, `swap_stale` 1, `iop` 0 |
+| 6 | 03:00 | `swap_mode` 0, `a3` 0 (Activity Monitor opened again) |
+| 7 | 03:30 | `swap_mode` 1, `swap_stale` 1, `a3` 0 (Activity Monitor opened again) |
+| 8 | 04:00 | `swap_mode` 0, `swap_latch` 0 (Activity Monitor opened again: `a3` is back, and only new surfaces see it) |
+| 9 | 04:30 | `swap_mode` 1, `swap_stale` 1, `swap_latch` 0 |
+| 10 | 05:00 | `swap_mode` 0, `iop_flip` toggled from its boot value (0 -> 1) |
+| 11 | 05:30 | the defaults again (Activity Monitor opened again) |
+
+All the switches can change at runtime (read from `accel/rdna3-accel.cpp`:
+`swap_mode`, `swap_stale`, `trace_scan`, `swap_latch` and `iop_flip` are read
+at every swap or import, `a3` at every IOSurface import, `iop` is a handler
+that publishes or removes `IOAccelDisplayPipeCapabilities` and makes the
+transaction hooks answer as the base class), so none was dropped. Three things
+the run cannot promise: `a3` only reaches surfaces created after the switch
+(hence the reopened Activity Monitor); WindowServer may have read the pipe
+capabilities once at its start, so `iop` 0 may change only what the hooks
+answer; and after steps 4 and 5 the later steps assume `iop` back at 1 really
+puts WindowServer back (step 11 has the same switches as step 0: a different
+picture there is reported as flaky or an order effect). `iop` is never written
+to the value it already has. The unswitched boot-args stay: `rdna3gamma`,
+`rdna3accelcf` and the rest are in the report's boot-args.
+
+Evidence per step, on top of what `bisect` records: the swap counters at the
+step's start (the table subtracts them, so a delta is exactly one step), the
+trace position (`trace_events_start` / `trace_events`, `stream_bytes_start` /
+`stream_bytes`) so the decoder cuts the accelerator / DRM trace stream and
+the Metal plugin's trace per step (`tools/rdna3_trace.py` on the stream, events
+`trace_events_start`..`trace_events`), and one line `trace: events W..W (asked
+by sysctl debug.rdna3accel_trace_dump)` in the kernel log at each step's start
+(the serial log has no clock; the triage cuts the log by these lines). The
+trace pump runs for the whole bisect; the full report follows the steps: the
+trace stream, the plugin trace snapshot at the end, `collect.sh`. A plugin
+trace snapshot after every step is not on by default (about 50 MB uploaded per
+step, and the copy loads the guest while you look); by hand
+`BISECT_PLUGIN_SNAP=1 sudo -E sh .../autoreport.sh --bisect-agdc` does it.
+
+The result: `rdna3vm result` prints the same table as `bisect`, and a second
+one with the counters of each step: swaps per head, copies, stale holds, zero-copy
+`iop` flips, buffers **rewritten in place** (the flicker you saw), torn
+buffers, frames copied by the display pipe, and the `FRONT SURFACE` lines of
+that step (`live writer lines / sampler lines`). It names the steps that
+**looked right** (your answers; black %, motion of the pictures) and the
+ones that looked broken, and the same by swap mode. The FRONT SURFACE column
+needs the kernel log: the serial log next to the report or the archive's
+`20-log-rdna3.txt`. The kext samples the front surface only 40 times per boot, so
+if those were used up before the bisect the column says so (a WARN) and the
+`inplace` / `torn` counters are the evidence.
 
 ### Play (step `play`): the desktop is yours
 

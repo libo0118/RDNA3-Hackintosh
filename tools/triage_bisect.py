@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 triage_bisect.py - the per-step table of the display bisect (card run
-2026-10-17d): `rdna3vm step bisect` / `bisect-plugin`, tools/vm/macos/
-autoreport.sh bisect_run, docs/TESTING-VM.md "Display bisect".
+2026-10-17d): `rdna3vm step bisect` / `bisect-plugin` / `bisect-agdc`,
+tools/vm/macos/autoreport.sh bisect_run, docs/TESTING-VM.md "Display bisect".
 
     python3 tools/triage_bisect.py bisect.txt [report-prefix]
 
@@ -21,6 +21,19 @@ never silence. It names the first step the owner marked n, the first whose
 looks went black, the first whose looks stood still, and what the run says
 about the bug (see verdict()).
 
+`bisect-agdc` (variant 4, card run 2026-10-17f) is the same bisect on the agdc
+profile (WindowServer on our Metal plugin). Its steps are not cumulative (each
+sets its whole combination), so there is no "breaks at step N" verdict: the
+table names the steps that LOOKED RIGHT (the owner's answers; the looks'
+black % and movement) and the ones that looked broken, by swap_mode, and a
+second table has the per-step swap counters (swaps, copies, holds, iop flips,
+buffers rewritten in place, torn) and the FRONT SURFACE sampler's lines
+("*** MOVED -- A LIVE WRITER IS PAINTING THE SCANNED-OUT SURFACE ***") cut out
+of the kernel log per step (analyse(text, prefix, logs): logs = [(name, text)],
+the archive's 20-log-rdna3.txt and the serial log; cut by the one-event
+"trace: events W..W (asked by sysctl ...)" line every step writes into the
+kernel log at its start, else by the log's own clock).
+
 Python 3, standard library only; imported by tools/triage_reports.py.
 """
 import os
@@ -37,12 +50,20 @@ MOVED_FRACTION = 0.003
 # the values the switches have without any boot-arg (accel/rdna3-accel.cpp)
 DEFAULTS = {"a3": "1", "flicker": "1", "swap_latch": "1", "swap_torn": "1", "swap_mode": "0",
             "trace_scan": "0", "swap_stale": "1", "swap_landed": "0", "a3ws": "0"}
-MAIN_KINDS = ("ref", "off", "on", "final")
+MAIN_KINDS = ("ref", "off", "on", "final", "var")
+# plan 4 (bisect-agdc) also switches these (the agdc profile's own defaults: iop on, iop_flip off)
+DEFAULTS_AGDC = dict(DEFAULTS, iop="1", iop_flip="0")
+# the kext's FRONT SURFACE sampler stops after this many samples per boot (accel/rdna3-accel.cpp rd3AccelSampleFront)
+FRONT_SAMPLE_CAP = 40
+# a step's marker line in the kernel log names the event count W a few events after trace_events_start
+MARK_TOL = 300
 
 _KEY = re.compile(r"^([a-z_0-9]+): ?(.*)$")
 _PIPE = re.compile(r"^pipe (\d+): (?:power-gated )?(\w+)")
 _PIC = re.compile(r"^  picture (\d+)x(\d+): (\d+)% not black, mean rgb \d+ \d+ \d+, (\d+) bytes changed")
 _CNT = re.compile(r"^(debug\.\S+): (-?\d+)\s*$")
+_MARK = re.compile(r"trace: events (\d+)\.\.(\d+) \(asked by sysctl")
+_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2} (\d{2}):(\d{2}):(\d{2})")
 
 
 def parse(text):
@@ -95,6 +116,10 @@ def parse(text):
         if line.startswith("-- counters"):
             sect = ("counters",)
             continue
+        if line.startswith("-- before"):
+            sect = ("before",)
+            cur.setdefault("before", {})
+            continue
         if sect and sect[0] == "look":
             lk = cur["looks"][sect[1]]
             m = _KEY.match(line)
@@ -122,10 +147,10 @@ def parse(text):
             if m:
                 lk["lit"] = int(m.group(1))
             continue
-        if sect and sect[0] == "counters":
+        if sect and sect[0] in ("counters", "before"):
             m = _CNT.match(line)
             if m:
-                cur["counters"][m.group(1)] = int(m.group(2))
+                cur["counters" if sect[0] == "counters" else "before"][m.group(1)] = int(m.group(2))
                 continue
         m = _KEY.match(line)
         if m:
@@ -232,10 +257,16 @@ def step_metrics(step, prev, prefix):
         met["problems"].append("the early look (bisect%da) is missing: movement judged from the main look only" % n)
     if not met["lit"] and not any(i["state"] == "asleep" for i in main["pipes"].values()):
         met["problems"].append("no pipe lit in the look (the card showed nothing?)")
-    c, pc = step["counters"], (prev["counters"] if prev else None)
+    # the counters at the start of this step when the run took them (autoreport's "-- before"), else the step before's
+    c, pc = step["counters"], (step.get("before") or (prev["counters"] if prev else None))
     if not c:
         met["problems"].append("no counters")
     met["deltas"] = {
+        "copy": _delta(c, pc, r"^debug\.rdna3accel_swaps_copy_h\d$"),
+        "inplace": _delta(c, pc, r"^debug\.rdna3accel_swaps_inplace_h\d$"),
+        "torn": _delta(c, pc, r"^debug\.rdna3accel_swaps_torn_h\d$"),
+        "flips": _delta(c, pc, r"^debug\.rdna3accel_iop_flips$"),
+        "iopok": _delta(c, pc, r"^debug\.rdna3accel_iop_ok$"),
         "sw0": _delta(c, pc, r"^debug\.rdna3accel_swaps_h0$"),
         "sw1": _delta(c, pc, r"^debug\.rdna3accel_swaps_h1$"),
         "hold": _delta(c, pc, r"^debug\.rdna3accel_swaps_stalehold_h\d$"),
@@ -285,9 +316,123 @@ def _short(t, n):
     return t if len(t) <= n else t[:n - 1] + "~"
 
 
-def analyse(text, prefix=None):
-    """{"table": [lines], "findings": [(level, text)], "rows": [(name, text)] for the SUMMARY, "steps": n}"""
+def _int(v):
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _secs(hms):
+    m = re.match(r"^(\d+):(\d+):(\d+)$", (hms or "").strip())
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3)) if m else None
+
+
+def cut_log(lines, steps, hold):
+    """({step n: (first line, end line)}, method): where each step's lines are in a kernel log. 'markers': the
+    one-event 'trace: events W..W (asked by sysctl' line each step writes at its start, W a few events after the
+    step's trace_events_start, in step order (the serial log has no clock); else 'clock': the lines' own
+    'YYYY-MM-DD HH:MM:SS' (log show) against the steps' 'at:' times. ({}, None) when neither places a step."""
+    marks = []
+    allmarks = []
+    for i, l in enumerate(lines):
+        m = _MARK.search(l)
+        if m:
+            allmarks.append(i)
+            if m.group(1) == m.group(2):
+                marks.append((i, int(m.group(1))))
+    start, j = {}, 0
+    for st in steps:
+        e0 = _int(st.get("trace_events_start"))
+        if e0 is None:
+            continue
+        for k in range(j, len(marks)):
+            if e0 <= marks[k][1] <= e0 + MARK_TOL:
+                start[st["n"]] = marks[k][0]
+                j = k + 1
+                break
+    if start:
+        ordered = sorted(start.items())
+        cuts = {}
+        for idx, (n, a) in enumerate(ordered):
+            if idx + 1 < len(ordered):
+                z = ordered[idx + 1][1]
+            else:   # the last step ends at the next dump of any size (autoreport's end-of-run one), else the log's end
+                z = next((x for x in allmarks if x > a), len(lines))
+            cuts[n] = (a, z)
+        return cuts, "markers"
+    # the log's own clock
+    stamps, cur = [], None
+    for l in lines:
+        m = _STAMP.match(l)
+        if m:
+            cur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+        stamps.append(cur)
+    if all(x is None for x in stamps):
+        return {}, None
+    ats = [(st["n"], _secs(st.get("at"))) for st in steps]
+    seen = [t for t in stamps if t is not None]
+    first, last = min(seen), max(seen)
+    cuts = {}
+    for idx, (n, a) in enumerate(ats):
+        if a is None:
+            continue
+        z = ats[idx + 1][1] if idx + 1 < len(ats) and ats[idx + 1][1] is not None else a + (hold or 30)
+        sel = [i for i, t in enumerate(stamps) if t is not None and a <= t < z]
+        if sel:
+            cuts[n] = (sel[0], sel[-1] + 1)
+        elif first <= a and z <= last:   # the log covers the step's time and has no line in it: an empty window
+            cuts[n] = (0, 0)
+    return cuts, ("clock" if cuts else None)
+
+
+def front_by_step(steps, hold, logs):
+    """({step n: (lines with 'A LIVE WRITER', FRONT SURFACE sample lines)}, [(level, text)]) from the kernel logs
+    ([(name, text)]); the log that places most steps is used"""
+    notes = []
+    if not logs:
+        notes.append(("WARN", "no kernel log given (the archive's 20-log-rdna3.txt, a serial-*.log next to the report): the "
+                              "FRONT SURFACE column is empty"))
+        return {}, notes
+    best = None
+    for name, text in logs:
+        lines = text.splitlines()
+        cuts, how = cut_log(lines, steps, hold)
+        tot = sum(1 for l in lines if "FRONT SURFACE sample" in l)
+        key = (len(cuts), how == "markers", tot)
+        if best is None or key > best[0]:
+            best = (key, name, lines, cuts, how, tot)
+    _, name, lines, cuts, how, tot = best
+    if not cuts:
+        notes.append(("WARN", "%s: could not place any step in the log (no 'trace: events W..W (asked by sysctl' marker near the "
+                              "steps' trace_events_start, no clock in its lines): the FRONT SURFACE column is empty" % name))
+        return {}, notes
+    out = {}
+    for n, (a, z) in cuts.items():
+        seg = lines[a:z]
+        out[n] = (sum(1 for l in seg if "A LIVE WRITER IS PAINTING" in l), sum(1 for l in seg if "FRONT SURFACE sample" in l))
+    unplaced = [st["n"] for st in steps if st["n"] not in cuts]
+    notes.append(("WARN" if unplaced else "INFO", "FRONT SURFACE lines per step: %s, cut by %s%s" % (
+        name, "the trace_dump marker lines" if how == "markers" else "the log's clock",
+        "; step(s) %s not found in it" % ", ".join(map(str, unplaced)) if unplaced else "")))
+    inside = sum(v[1] for v in out.values())
+    if inside == 0:
+        if tot:
+            notes.append(("WARN", "the log has %d FRONT SURFACE sample line(s), none inside a step: the kext samples the front "
+                                  "surface only %d times per boot (rd3AccelSampleFront) and used them up before the bisect, so "
+                                  "a live writer cannot show in the log in this run - the per-step 'inplace' / 'torn' counters "
+                                  "are the evidence" % (tot, FRONT_SAMPLE_CAP)))
+        else:
+            notes.append(("WARN", "no FRONT SURFACE sample line in %s at all (the sampler runs only with the flip path and "
+                                  "only %d times per boot): no live-writer evidence from the log" % (name, FRONT_SAMPLE_CAP)))
+    return out, notes
+
+
+def analyse(text, prefix=None, logs=None):
+    """{"table": [lines], "findings": [(level, text)], "rows": [(name, text)] for the SUMMARY, "steps": n};
+    logs = [(name, kernel log text)] for the agdc variant's FRONT SURFACE column"""
     b = parse(text)
+    agdc = b["head"].get("variant", "").startswith("4")
     steps = b["steps"]
     f = []
     table = []
@@ -307,7 +452,8 @@ def analyse(text, prefix=None):
         head.get("variant", "?"), head.get("hold_s", "?"), head.get("mode", "?"), head.get("started", "?"), len(steps),
         "" if b["ended"] else " (NO END LINE: the run was cut)"))
     table.append("%4s %-6s %-44s %-5s %5s %5s %-11s %s" % (
-        "step", "kind", "what changed", "owner", "pipe0", "pipe1", "moved", "deltas since the step before: swaps h0/h1, held, would-hold, empty backs"))
+        "step", "kind", "what changed", "owner", "pipe0", "pipe1", "moved",
+        ("deltas in the step" if agdc else "deltas since the step before") + ": swaps h0/h1, held, would-hold, empty backs"))
     for s in steps:
         n = s["n"]
         m, v = mets[n], verdicts[n]
@@ -321,6 +467,26 @@ def analyse(text, prefix=None):
             n, s.get("kind", "?"), _short("(the defaults as the boot left them)" if s.get("kind") == "ref" else s.get("changed", s.get("name", "?")), 44), ans, pcts[0], pcts[1], moved,
             _fmt(d.get("sw0")), _fmt(d.get("sw1")), _fmt(d.get("hold")), _fmt(d.get("would")), _fmt(d.get("empty")),
             "   <-- " + "; ".join(v["why"]) if v["bad"] else ""))
+    front = {}
+    if agdc:
+        front, fnotes = front_by_step(steps, _int(head.get("hold_s")), logs)
+        f.extend(fnotes)
+        table.append("swap counters per step (from the step's start to its second look, ~20 s in; 'front' = FRONT SURFACE "
+                     "live-writer lines / sampler lines in the kernel log during the step):")
+        table.append("%4s %-26s %6s %6s %6s %6s %6s %6s %6s %6s %-9s %s" % (
+            "step", "swap_mode/stale/iop/a3/lat/flip", "sw h0", "sw h1", "copy", "hold", "flips", "inplace", "torn", "iop_ok",
+            "front", "trace events"))
+        for s in steps:
+            n = s["n"]
+            d, rb = mets[n]["deltas"], s["readback"]
+            sw = "/".join(rb.get("debug.rdna3accel_" + k, "?") for k in ("swap_mode", "swap_stale", "iop", "a3", "swap_latch", "iop_flip"))
+            fr = ("%d/%d" % front[n]) if n in front else "?"
+            e0, e1 = _int(s.get("trace_events_start")), _int(s.get("trace_events"))
+            table.append("%4d %-26s %6s %6s %6s %6s %6s %6s %6s %6s %-9s %s" % (
+                n, sw, _fmt(d.get("sw0")), _fmt(d.get("sw1")), _fmt(d.get("copy")), _fmt(d.get("hold")), _fmt(d.get("flips")),
+                _fmt(d.get("inplace")), _fmt(d.get("torn")), _fmt(d.get("iopok")), fr,
+                ("%d..%d (stream bytes %s..%s)" % (e0, e1, s.get("stream_bytes_start", "?"), s.get("stream_bytes", "?"))
+                 if e0 is not None and e1 is not None else "?")))
     # --- missing data: loud
     for s in steps:
         n = s["n"]
@@ -352,7 +518,8 @@ def analyse(text, prefix=None):
     # the switches at step 0 against the compiled defaults
     s0 = by_n.get(0)
     if s0 and s0["readback"]:
-        odd = ["%s %s (default %s)" % (k, s0["readback"].get("debug.rdna3accel_" + k), dv) for k, dv in sorted(DEFAULTS.items())
+        odd = ["%s %s (default %s)" % (k, s0["readback"].get("debug.rdna3accel_" + k), dv)
+               for k, dv in sorted((DEFAULTS_AGDC if agdc else DEFAULTS).items())
                if s0["readback"].get("debug.rdna3accel_" + k) not in (None, "-", dv)]
         if odd:
             f.append(("WARN", "step 0 is not the compiled defaults: %s (a boot-arg set it?); the 'on' steps return to what the boot left" %
@@ -363,7 +530,8 @@ def analyse(text, prefix=None):
     pick = firstn or anyn
     if pick:
         f.append(("FAIL", "the first step the owner marked n: step %d (%s)%s" % (
-            pick["n"], label(pick), " - the reference, the bug as it is; BISECT below says where it comes from" if pick["n"] == 0 else "")))
+            pick["n"], label(pick), " - the reference, the bug as it is; %s below says where it comes from" % ("BISECT-AGDC" if agdc else "BISECT")
+            if pick["n"] == 0 else "")))
     for what, key in (("black", "black"), ("stood still", "still")):
         for s in steps:
             if s.get("kind") not in MAIN_KINDS:
@@ -374,7 +542,7 @@ def analyse(text, prefix=None):
                     what, s["n"], label(s), "; ".join(w),
                     " - the reference, the bug as it is" if s["n"] == 0 else "")))
                 break
-    f.extend(verdict(steps, verdicts, by_n))
+    f.extend(verdict_agdc(steps, verdicts, by_n) if agdc else verdict(steps, verdicts, by_n))
     for s in steps:
         if s.get("kind") == "extra" and verdicts[s["n"]]["bad"]:
             f.append(("INFO", "control step %d (%s) looked bad: expected, these are the off-by-default states: %s" % (
@@ -441,6 +609,76 @@ def verdict(steps, verdicts, by_n):
             out.append(("WARN", "BISECT: step %d has the same switches as step 0 but looked %s there, %s here: flaky, or the "
                                 "state before decides" % (s["n"], "broken" if verdicts[s["n"]]["bad"] else "fine",
                                                          "broken" if verdicts[0]["bad"] else "fine")))
+    return out
+
+
+def _vary(s):
+    """what a step of the agdc plan sets, short"""
+    if s.get("kind") == "ref":
+        return "the defaults"
+    name = s.get("name", "?")
+    return name if len(name) <= 70 else name[:69] + "~"
+
+
+def verdict_agdc(steps, verdicts, by_n):
+    """[(level, text)] for `bisect-agdc` (plan 4): the steps are not cumulative, so no 'breaks at'; it names the steps
+    that looked RIGHT and the ones that looked broken, and the same by swap_mode"""
+    out = []
+    ref = verdicts.get(0)
+    judged = [s for s in steps if verdicts[s["n"]]["known"]]
+    right = [s for s in judged if not verdicts[s["n"]]["bad"]]
+    wrong = [s for s in judged if verdicts[s["n"]]["bad"]]
+    unknown = [s for s in steps if not verdicts[s["n"]]["known"]]
+
+    def lst(ss, why=False):
+        return "; ".join("step %d (%s)%s" % (s["n"], _vary(s), " [%s]" % "; ".join(verdicts[s["n"]]["why"]) if why else "")
+                         for s in ss) or "none"
+    if ref is None or not ref["known"]:
+        out.append(("WARN", "BISECT-AGDC: the reference (step 0) has no readable look and no answer: nothing to compare the others with"))
+    if ref is not None and ref["known"] and ref["bad"]:
+        rr = [s for s in right if s["n"] != 0]
+        if rr:
+            out.append(("FAIL", "BISECT-AGDC: the reference (step 0, the agdc profile's defaults) looked BROKEN [%s]; the steps that "
+                                "looked RIGHT: %s" % ("; ".join(ref["why"]), lst(rr))))
+        else:
+            out.append(("FAIL", "BISECT-AGDC: the reference (step 0) looked BROKEN [%s] and NO step looked right: none of swap_mode "
+                                "0/1/2, swap_stale, iop, a3, swap_latch, iop_flip repairs it on the agdc profile (or the answers are "
+                                "missing: see the WARN lines) - the bug is elsewhere (WindowServer's own draw path, the plugin: "
+                                "step bisect-plugin, the copy forward, the hardware)" % "; ".join(ref["why"])))
+        out.append(("INFO", "BISECT-AGDC: looked broken: %s" % lst([s for s in wrong if s["n"] != 0])))
+    elif ref is not None and ref["known"]:
+        if wrong:
+            out.append(("WARN", "BISECT-AGDC: the reference (step 0) looked RIGHT - the bug did not show at the defaults - but these "
+                                "steps looked BROKEN: %s" % lst(wrong, True)))
+        else:
+            out.append(("INFO", "BISECT-AGDC: no step looked broken - the bug did not show in this run (or needs real apps, or only "
+                                "with the screens as the owner uses them)"))
+    if unknown:
+        out.append(("WARN", "BISECT-AGDC: not judged (no readable look and no answer): %s" % lst(unknown)))
+    # by swap_mode: the question the plan was made for
+    groups = {}
+    for s in steps:
+        mode = s["readback"].get("debug.rdna3accel_swap_mode")
+        if mode is None:
+            continue
+        g = groups.setdefault(mode, {"right": [], "wrong": [], "?": []})
+        v = verdicts[s["n"]]
+        g["?" if not v["known"] else "wrong" if v["bad"] else "right"].append(s["n"])
+    if groups:
+        out.append(("INFO", "BISECT-AGDC by swap_mode: " + "; ".join(
+            "mode %s: right %s, broken %s%s" % (m, g["right"] or "none", g["wrong"] or "none", ", not judged %s" % g["?"] if g["?"] else "")
+            for m, g in sorted(groups.items()))))
+    # the same switches as step 0 must look the same (an order effect: the iop steps switch the pipe capabilities at runtime)
+    r0 = by_n.get(0)
+    for s in steps:
+        if s["n"] == 0 or s.get("kind") != "final" or not r0 or not r0["readback"]:
+            continue
+        if r0["readback"] == s["readback"] and verdicts[0]["known"] and verdicts[s["n"]]["known"] \
+                and verdicts[0]["bad"] != verdicts[s["n"]]["bad"]:
+            out.append(("WARN", "BISECT-AGDC: step %d has the same switches as step 0 but looked %s there, %s here: flaky, or an "
+                                "order effect (iop 0 in steps 4 and 5 changes what WindowServer was told about the pipes at runtime)" % (
+                                    s["n"], "broken" if verdicts[s["n"]]["bad"] else "right",
+                                    "broken" if verdicts[0]["bad"] else "right")))
     return out
 
 

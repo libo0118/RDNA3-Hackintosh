@@ -2526,6 +2526,41 @@ pumped all through the run: `stream_bytes` / `trace_events` per step place a
 step in the decoded trace (`tools/rdna3_trace.py`), the steps' wall clock is in
 `at:`. The swap A/B is not part of this step (the triage does not expect it).
 
+### Step `bisect-agdc` (the same bisect on the agdc profile: WindowServer on the GPU)
+
+The plain `bisect` boots the default profile (AGDC idle, WindowServer on the
+CPU), so its result does not hold for the real desktop; card run 2026-10-17f
+(`rdna3vm step play`, swap mode 0) is broken again. `rdna3vm step bisect-agdc`
+([TESTING-VM](TESTING-VM.md), "Display bisect on the agdc profile") has the
+`agdc` step's boot-args plus `rdna3bisect=4` and 12 steps of 30 s that are NOT
+cumulative (each sets its whole combination from the boot's values): 0 the
+defaults, 1 mode 1 + stale 1, 2 mode 1 + stale 0, 3 mode 2, 4 mode 0 + `iop` 0,
+5 mode 1 + stale 1 + `iop` 0, 6 mode 0 + `a3` 0, 7 mode 1 + stale 1 + `a3` 0,
+8 mode 0 + `swap_latch` 0, 9 mode 1 + stale 1 + `swap_latch` 0, 10 mode 0 +
+`iop_flip` toggled, 11 the defaults again. Same `39-bisect.txt` /
+`<report>-bisect.txt` as `bisect` (`variant: 4 (bisect-agdc)`), plus at each
+step's start a `-- before` counter block, `trace_events_start`,
+`stream_bytes_start`, and one `trace: events W..W (asked by sysctl
+debug.rdna3accel_trace_dump)` line in the kernel log.
+
+| Triage line | Meaning | Action |
+|---|---|---|
+| `FAIL BISECT-AGDC: the reference (step 0 ...) looked BROKEN [...]; the steps that looked RIGHT: step K (...)` | the bug shows at the defaults and the listed combinations (the owner's `y`, or lit pipes that are not black and move) did not | the switches that differ in the right steps and are the same in the broken ones are the lead (the steps are not cumulative: compare each with step 0 directly); `INFO BISECT-AGDC by swap_mode` groups right / broken by the mode; port the matching amdgpu behaviour, do not just flip the default |
+| `FAIL BISECT-AGDC: ... looked BROKEN ... and NO step looked right` | none of swap_mode 0/1/2, `swap_stale`, `iop`, `a3`, `swap_latch`, `iop_flip` repairs it on the agdc profile (or the answers are missing: read the WARN lines) | not these switches: the writer of the scanned-out buffer itself (WindowServer / the plugin: `rdna3vm step bisect-plugin`, the plugin trace of the same run), the copy forward, the hardware; the `inplace` / `torn` counters say whether the panel reads a buffer that is being drawn |
+| `WARN BISECT-AGDC: the reference (step 0) looked RIGHT ... but these steps looked BROKEN` | the bug did not show at the defaults; the listed steps are what breaks it | repeat the run; the broken steps' switches are the ones to look at |
+| `INFO BISECT-AGDC: no step looked broken` | the bug did not show | needs real apps or the owner's own use (`rdna3vm step play`) |
+| `WARN BISECT-AGDC: step 11 has the same switches as step 0 but looked ...` | flaky, or an order effect: `iop` 0 in steps 4 and 5 removes the pipe capabilities at runtime and WindowServer may not take `iop` 1 back | read steps 0 and 11 side by side; if only the steps after 5 are broken, run again without steps 4 and 5 in front (reboot) |
+| `INFO FRONT SURFACE lines per step: <log>, cut by ...` and the `front` column (`live writer lines / sampler lines`) | the kext's `FRONT SURFACE ... *** MOVED -- A LIVE WRITER ... ***` lines per step, cut out of the serial log by the step's marker line or out of the archive's log by its clock | a live writer in step K = something paints the scanned-out surface in that combination |
+| `WARN the log has N FRONT SURFACE sample line(s), none inside a step` | the sampler logs 40 samples per boot (`rd3AccelSampleFront`) and they were used up before the bisect | the log cannot show a live writer in this run: the per-step `inplace` (buffers rewritten while on the panel and shown again) and `torn` counters in the second table are the evidence; re-arming the sampler per step is the open item in DRIVER-PLAN N36 |
+| `WARN <log>: could not place any step in the log` / `step(s) ... not found in it` / `WARN no kernel log given` | no `trace: events W..W (asked by sysctl` marker near the steps' `trace_events_start` and no clock in the lines (an older kext without `trace_dump`, a log that starts later, the wrong serial log) | the `front` column is `?`; read the serial log by hand with `at:` times and the `trace_events` numbers of bisect.txt |
+
+The second table has, per step, the deltas from that step's own `-- before` block (an older autoreport.sh
+without it falls back to the step before): swaps per head, `copy` (swap mode 1/2 copies), `hold` (stale
+holds), `flips` (`iop_flips`, zero-copy), `inplace`, `torn`, `iop_ok`. The trace of each step: events
+`trace_events_start`..`trace_events` of `36-stream-trace-stream.bin` (`tools/rdna3_trace.py`), the stream's
+byte positions are next to them; WindowServer's plugin trace is the end-of-run snapshot (`plugin-end-...`,
+`plugin-bisect-end-...`), per step only with `BISECT_PLUGIN_SNAP=1` (by hand).
+
 ### Card run 2026-10-17d: the bisect
 
 - Evidence (`rdna3vm step bisect`, the owner's report): step 5 (every switch

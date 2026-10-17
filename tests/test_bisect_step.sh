@@ -17,6 +17,13 @@
 #    restarted twice, both files exactly as they were afterwards (also when
 #    there was no conf), a dead run's files put back
 #  - the same table from tools/triage_bisect.py
+#  - `bisect-agdc` (rdna3bisect=4, card run 2026-10-17f): 12 steps that are NOT
+#    cumulative (each sets its whole combination of swap_mode / swap_stale /
+#    iop / a3 / swap_latch / iop_flip from the boot's values; iop is never
+#    written to the value it has), the trace position and counters at every
+#    step's start, one trace_dump=1 marker per step, iop_flip toggled from its
+#    boot value, a kernel without iop skipping it, the opt-in per-step plugin
+#    snapshot, the boot-args / flag / step lists, the table
 # plus bash -n / dash -n of the scripts the step touches.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -45,7 +52,7 @@ case "$1" in
     -w) oid=${2%%=*}; val=${2#*=}
         [ -f "$d/$oid" ] || { echo "sysctl: unknown oid '$oid'" >&2; exit 1; }
         [ -f "$d/refuse.$oid" ] && { echo "sysctl: $oid: Operation not permitted" >&2; exit 1; }
-        old=$(cat "$d/$oid"); echo "$val" > "$d/$oid"; echo "$oid: $old -> $val"; exit 0 ;;
+        old=$(cat "$d/$oid"); echo "$val" > "$d/$oid"; echo "$oid=$val" >> "$d/.writes"; echo "$oid: $old -> $val"; exit 0 ;;
     debug)
         n=$(cat "$d/.calls" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$d/.calls"
         echo $((n * 10)) > "$d/debug.rdna3accel_swaps_h0"; echo $((n * 7)) > "$d/debug.rdna3accel_swaps_h1"
@@ -80,7 +87,8 @@ mkoids() {   # mkoids <dir> [omit oid ...]: the accelerator's switches at their 
     local d=$1; shift
     rm -rf "$d"; mkdir -p "$d"
     for kv in a3=1 flicker=1 swap_latch=1 swap_torn=1 swap_mode=0 trace_scan=0 swap_stale=1 swap_landed=0 a3ws=0 \
-              swaps_h0=0 swaps_h1=0 swap_trace_events=5 swaps_stalehold_h0=0 swaps_stalehold_would_h0=0 swaps_copyempty_h0=0; do
+              swaps_h0=0 swaps_h1=0 swap_trace_events=5 swaps_stalehold_h0=0 swaps_stalehold_would_h0=0 swaps_copyempty_h0=0 \
+              iop=1 iop_flip=0 iop_flips=0 iop_ok=0 trace_dump=0 swaps_copy_h0=0 swaps_inplace_h0=0; do
         echo "${kv#*=}" > "$d/debug.rdna3accel_${kv%%=*}"
     done
     for o in "$@"; do rm -f "$d/debug.rdna3accel_$o"; done
@@ -96,6 +104,7 @@ with_limit() { shift; "$@"; }
 hdr() { echo "== $*"; }
 a3_sysctls() { sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3|flicker|swaps_|swap_)"; }
 trace_snapshot() { echo "snapshot $1" >> "$HT/prog.log"; }
+snap_plugin() { echo "plugin snapshot $1" >> "$HT/prog.log"; }
 restore_sleep() { :; }
 STANDALONE=1; HOST=; base=rdna3-report-test; TS=$HT/ts; D=$HT/D; mkdir -p "$TS"; echo 12345 > "$TS/trace-stream.bin"
 HOME=$HT/home; export HOME
@@ -291,6 +300,100 @@ cp "$T/allow.orig" "$T/allow.bak"; grep -v '%apps' "$T/allow.orig" > "$T/allow"
 cmp -s "$T/conf" "$T/conf.orig" && cmp -s "$T/allow" "$T/allow.orig" || fail "bisect_plugin_restore after a dead run"
 echo "test_bisect_step: ok plugin variant"
 
+# ------------------------------------------------------- bisect-agdc (plan 4)
+# 12 steps, NOT cumulative: every step sets its whole combination from the boot's values
+mkoids "$T/sys"
+run 4 agdc
+B=$T/agdc/bisect.txt
+[ -s "$B" ] || fail "agdc: no bisect.txt: $(cat "$T/agdc.out")"
+grep -q '^rc=0$' "$T/agdc.out" || fail "agdc: bisect_run did not return 0: $(tail -5 "$T/agdc.out")"
+grep -q '^variant: 4 (bisect-agdc)$' "$B" || fail "agdc: variant line: $(grep '^variant' "$B")"
+[ "$(grep -c '^== step ' "$B")" = 12 ] && [ "$(grep -c '^== end step ' "$B")" = 12 ] || fail "agdc: not 12 steps: $(grep '^== step ' "$B" | tr '\n' ' ')"
+[ "$(grep -c '^plan: ' "$B")" = 12 ] || fail "agdc: no 12-line timetable"
+grep -q '^plan: 11|00:00|final|' "$B" || fail "agdc: the timetable's last line: $(grep '^plan: 11' "$B")"
+! grep -q '^failed:' "$B" || fail "agdc: a switch failed: $(grep '^failed:' "$B")"
+grep -q '^absent:' "$B" && fail "agdc: absent switches on a full kext: $(grep '^absent' "$B")"
+wantA() {   # wantA <step> a3 flicker latch torn mode scan stale landed a3ws iop flip
+    local s=$1 got exp; shift
+    got=$(for k in a3 flicker swap_latch swap_torn swap_mode trace_scan swap_stale swap_landed a3ws iop iop_flip; do sw "$B" "$s" $k; done | tr '\n' ' ')
+    exp="$* "
+    [ "$got" = "$exp" ] || fail "agdc: step $s reads back [$got], expected [$exp]"
+}
+wantA 0  1 1 1 1 0 0 1 0 0 1 0
+wantA 1  1 1 1 1 1 0 1 0 0 1 0
+wantA 2  1 1 1 1 1 0 0 0 0 1 0
+wantA 3  1 1 1 1 2 0 1 0 0 1 0
+wantA 4  1 1 1 1 0 0 1 0 0 0 0
+wantA 5  1 1 1 1 1 0 1 0 0 0 0
+wantA 6  0 1 1 1 0 0 1 0 0 1 0
+wantA 7  0 1 1 1 1 0 1 0 0 1 0
+wantA 8  1 1 0 1 0 0 1 0 0 1 0
+wantA 9  1 1 0 1 1 0 1 0 0 1 0
+wantA 10 1 1 1 1 0 0 1 0 0 1 1
+wantA 11 1 1 1 1 0 0 1 0 0 1 0
+# every step's 'changed' is against the boot, not against the step before
+chg() { [ "$(val "$B" "$1" changed)" = "$2" ] || fail "agdc: step $1 'changed' is [$(val "$B" "$1" changed)], expected [$2]"; }
+chg 0 "nothing"
+chg 1 "swap_mode 0->1"
+chg 2 "swap_mode 0->1, swap_stale 1->0"
+chg 3 "swap_mode 0->2"
+chg 4 "iop 1->0"
+chg 5 "swap_mode 0->1, iop 1->0"
+chg 6 "a3 1->0"
+chg 7 "a3 1->0, swap_mode 0->1"
+chg 8 "swap_latch 1->0"
+chg 9 "swap_latch 1->0, swap_mode 0->1"
+chg 10 "iop_flip 0->1"
+chg 11 "nothing"
+# the whole combination is set every time (the unnamed @ switches are written to the boot's value), but iop only when it changes
+[ "$(val "$B" 1 set | wc -w | tr -d " ")" = 10 ] || fail "agdc: step 1 set [$(val "$B" 1 set)], expected the 10 switches but iop"
+grep -c '^debug.rdna3accel_iop=0$' "$T/sys/.writes" | grep -qx 1 || fail "agdc: iop written to 0 $(grep -c '^debug.rdna3accel_iop=0$' "$T/sys/.writes") times, expected 1 (step 4; step 5 already has it)"
+grep -c '^debug.rdna3accel_iop=1$' "$T/sys/.writes" | grep -qx 1 || fail "agdc: iop written to 1 $(grep -c '^debug.rdna3accel_iop=1$' "$T/sys/.writes") times, expected 1 (step 6; steps 0 and 11 have it)"
+grep -q '^restored: 1 1 1 1 0 0 1 0 0 1 0$' "$B" || fail "agdc: restored line: $(grep '^restored:' "$B")"
+# the trace position and the counters at the start of each step, and one marker in the kernel log per step
+[ "$(grep -c '^-- before$' "$B")" = 12 ] && [ "$(grep -c '^trace_events_start: 5$' "$B")" = 12 ] && [ "$(grep -c '^stream_bytes_start: 6$' "$B")" = 12 ] ||
+    fail "agdc: the start-of-step blocks: $(grep -c '^-- before$' "$B") / $(grep -c '^trace_events_start' "$B") / $(grep -c '^stream_bytes_start' "$B")"
+[ "$(grep -c '^debug.rdna3accel_trace_dump=1$' "$T/sys/.writes")" = 12 ] || fail "agdc: trace_dump=1 markers: $(grep -c 'trace_dump=1$' "$T/sys/.writes")"
+[ "$(grep -c '^-- counters' "$B")" = 12 ] || fail "agdc: counters blocks"
+awk '/^== step 0$/ { on = 1 } /^== step 1$/ { on = 0 } on' "$B" | grep -q '^debug.rdna3accel_iop: 1$' || fail "agdc: the iop switch is not in the step's counters"
+awk '/^== step 0$/ { on = 1 } /^== step 1$/ { on = 0 } on' "$B" | grep -q '^debug.rdna3accel_iop_flips: 0$' || fail "agdc: iop_flips is not in the step's counters"
+[ "$(grep -c '^say step ' "$T/stub.log")" = 12 ] || fail "agdc: say called $(grep -c '^say step ' "$T/stub.log") times"
+[ "$(grep -c '^afplay ' "$T/stub.log")" = 66 ] || fail "agdc: afplay $(grep -c '^afplay ' "$T/stub.log") times, expected 0+1+...+11 = 66"
+# Activity Monitor re-opened where a3 changes or comes back: steps 0 6 7 8 11
+[ "$(grep -c '^pkill -x Activity Monitor' "$T/stub.log")" = 5 ] || fail "agdc: Activity Monitor re-opens: $(grep -c '^pkill' "$T/stub.log"), expected 5"
+! grep -q 'plugin snapshot' "$T/prog.log" || fail "agdc: the per-step plugin snapshots are opt-in"
+python3 -I "$ROOT/tools/triage_bisect.py" "$B" "$T/nothing" > "$T/agdc.table" || true
+[ "$(grep -cE '^ *[0-9]+ (ref|var|final) ' "$T/agdc.table")" = 12 ] || fail "agdc: triage_bisect table: $(cat "$T/agdc.table")"
+echo "test_bisect_step: ok bisect-agdc steps"
+
+# iop_flip toggled from its boot value (1 -> 0); the opt-in plugin snapshot after every step
+mkoids "$T/sys"; echo 1 > "$T/sys/debug.rdna3accel_iop_flip"
+run 4 agdcflip BISECT_PLUGIN_SNAP=1
+B=$T/agdcflip/bisect.txt
+[ "$(sw "$B" 10 iop_flip)" = 0 ] && [ "$(val "$B" 10 changed)" = "iop_flip 1->0" ] || fail "agdc: iop_flip toggled from 1: [$(sw "$B" 10 iop_flip)] [$(val "$B" 10 changed)]"
+[ "$(sw "$B" 0 iop_flip)" = 1 ] && [ "$(sw "$B" 11 iop_flip)" = 1 ] || fail "agdc: iop_flip is not the boot's value in steps 0 / 11"
+[ "$(cat "$T/sys/debug.rdna3accel_iop_flip")" = 1 ] || fail "agdc: iop_flip not put back"
+[ "$(grep -c '^plugin_snapshot: bisect' "$B")" = 12 ] && [ "$(grep -c '^plugin snapshot bisect' "$T/prog.log")" = 12 ] ||
+    fail "agdc: BISECT_PLUGIN_SNAP=1: $(grep -c '^plugin_snapshot' "$B") lines, $(grep -c 'plugin snapshot' "$T/prog.log") snapshots"
+
+# a kernel without iop / iop_flip (older than the agdc profile's switches): skipped, said in absent:, no failure
+mkoids "$T/sys" iop iop_flip
+run 4 agdcabsent
+B=$T/agdcabsent/bisect.txt
+grep -q '^absent: iop iop_flip$' "$B" || fail "agdc: absent line: $(grep '^absent' "$B")"
+! grep -q '^failed:' "$B" || fail "agdc: an absent switch is not a failure: $(grep '^failed' "$B")"
+grep -q '^rc=0$' "$T/agdcabsent.out" || fail "agdc: absent iop: rc"
+[ "$(grep -c '^== end step ' "$B")" = 12 ] || fail "agdc: absent iop stopped the run"
+
+# a switch that does not take
+mkoids "$T/sys"; touch "$T/sys/refuse.debug.rdna3accel_iop"
+run 4 agdcrefuse
+B=$T/agdcrefuse/bisect.txt
+grep -q '^failed: .*debug.rdna3accel_iop:set-failed' "$B" || fail "agdc: refusal not reported: $(grep '^failed' "$B" | head -3)"
+grep -q '^rc=1$' "$T/agdcrefuse.out" || fail "agdc: a refused switch should make bisect_run return 1"
+[ "$(grep -c '^== step ' "$B")" = 12 ] || fail "agdc: a refused switch stopped the run"
+echo "test_bisect_step: ok bisect-agdc"
+
 # the top of autoreport.sh puts a dead bisect-plugin run's conf back, and the flags / boot-args reach the group
 grep -q 'rdna3-bisect-conf.bak' "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh does not restore a dead run's conf"
 grep -q -- '--bisect-plugin) BISECT=2' "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh: --bisect-plugin"
@@ -298,4 +401,14 @@ grep -q 'rdna3bisect=2 "\*) \[ -n "\$BISECT" \] || BISECT=2' "$ROOT/tools/vm/mac
 grep -q '^bisect rdna3bisect=1$' "$ROOT/tools/ladder-steps.txt" && grep -q '^bisect-plugin rdna3bisect=2$' "$ROOT/tools/ladder-steps.txt" ||
     fail "tools/ladder-steps.txt: bisect / bisect-plugin"
 grep -q '39-bisect.txt' "$ROOT/tools/macos/collect.sh" || fail "collect.sh does not pack the bisect"
+# bisect-agdc: the flag, the boot-arg, the step (the agdc step's boot-args exactly, plus rdna3bisect=4), the step lists, the time limit
+grep -q -- '--bisect-agdc) BISECT=4' "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh: --bisect-agdc"
+grep -q 'rdna3bisect=4 "\*) \[ -n "\$BISECT" \] || BISECT=4' "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh: boot-arg rdna3bisect=4"
+agdc=$(awk '$1 == "agdc" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
+bagdc=$(awk '$1 == "bisect-agdc" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
+[ -n "$agdc" ] && [ "$bagdc" = "$agdc rdna3bisect=4" ] || fail "ladder-steps.txt: bisect-agdc is [$bagdc], agdc [$agdc]"
+[ "$(grep -c 'bisect bisect-plugin bisect-agdc play' "$ROOT/tools/vm/rdna3vm")" = 2 ] || fail "rdna3vm: bisect-agdc is not in both step lists"
+sed -n '/^auto_limit() {/,/^}/p' "$ROOT/tools/vm/rdna3vm" > "$T/limit.sh"
+m=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$bagdc")
+[ "$m" -ge 20 ] && [ "$m" -lt 30 ] || fail "rdna3vm: auto_limit of bisect-agdc is [$m] min, expected 20..29 (12 steps of 30 s + the report)"
 echo "test_bisect_step: ok"
