@@ -855,6 +855,9 @@ bisect_run() {   # bisect_run <1|2>: the whole sequence; 0 when every step ran a
     trap 'bisect_restore' EXIT
     trap 'bisect_restore; exit 130' INT
     trap 'bisect_restore; exit 143' TERM
+    # the plugin variant restarts WindowServer, which closes a Terminal it was
+    # started from: ignore the hangup so the steps and the restore still run
+    [ "$_bv" = 2 ] && trap '' HUP
     caffeinate -u -t 5 >/dev/null 2>&1 &
     BSTART=$(( $(date +%s) + ${BISECT_LEAD:-20} ))
     bisect_timetable
