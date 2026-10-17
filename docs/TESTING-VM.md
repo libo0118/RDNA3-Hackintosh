@@ -362,6 +362,15 @@ It packs every report written since the last `step` / `args` / `queue`
 started (plus a triage summary) into **one** file,
 `~/Downloads/rdna3-result.tar.gz`, replaced each time it runs. Send that file.
 
+It also prints every test on its own line, `PASS` / `FAIL` / `WARN` /
+`INFO` / `NOT RUN`, with the counts and the triage's verdict at the end
+(the same list is saved in the file as `00-checklist.txt`). `WARN` is a
+finding that needs reading (a lit pipe without TX lines, two pipes on one
+surface, an underflow), `INFO` only describes the run (boot-args, power,
+counters), `NOT RUN` is a test that gave no verdict (a sleeping display,
+no present path). To print the list again later, without collecting
+anything: `rdna3vm result --show`.
+
 `rdna3vm reports` only lists them. What one step writes to `~/rdna3-vm/reports`:
 - `rdna3-report-*.tar.gz` (report from macOS);
 - `*-tests.txt` (DMA and GFX test results, from step 7);
