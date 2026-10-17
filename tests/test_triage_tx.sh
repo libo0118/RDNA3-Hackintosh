@@ -76,9 +76,9 @@ grep -q 'TX watch (8 line(s); the full states' <<<"$o" || fail "the watch's line
 [ "$(grep -c '^     display: head 0 TX   DIG BE / UNIPHYD: DIG_BE_CNTL 0x30803 DIG_BE_EN_CNTL 0x101$' <<<"$o")" = 2 ] ||
     fail "both identical dumps in full: $o"
 grep -q '^     display: head 0 TX change #1 at 61234 ms uptime: problems: DIG back end off' <<<"$o" || fail "the change line: $o"
-grep -q 'screens 1 *1 lit$' <<<"$o" || fail "summary look 1: $o"
-grep -q 'screens 2 *1 lit, TX: DIG back end off, DIO FIFO error$' <<<"$o" || fail "summary look 2: $o"
-grep -q 'screens 3 *1 lit, NO TX LINES$' <<<"$o" || fail "summary look 3: $o"
+grep -q 'screens 1 *1 lit, pipe 0 100% not black$' <<<"$o" || fail "summary look 1: $o"
+grep -q 'screens 2 *1 lit, TX: DIG back end off, DIO FIFO error, pipe 0 100% not black$' <<<"$o" || fail "summary look 2: $o"
+grep -q 'screens 3 *1 lit, NO TX LINES, pipe 0 100% not black$' <<<"$o" || fail "summary look 3: $o"
 # the change is in the report's log and in the serial log: counted once
 grep -q 'TX watch .*head 0: 1 change(s); first with problems at 61234 ms: problems: DIG back end off, DIO FIFO error; 1 register(s): DIG_BE_EN_CNTL 0x101 -> 0x0' <<<"$o" ||
     fail "summary watch: $o"

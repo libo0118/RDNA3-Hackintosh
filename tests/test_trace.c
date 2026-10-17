@@ -39,7 +39,7 @@ static void layout(void)
     CHECK(offsetof(struct rd3_trace_hdr, written) == 24);
     CHECK(offsetof(struct rd3_trace_hdr, now) == 40);
     CHECK(offsetof(struct rd3_trace_hdr, nomem) == 48);
-    CHECK(offsetof(struct rd3_trace_hdr, salt_check) == 56);
+    CHECK(offsetof(struct rd3_trace_hdr, boot_id) == 56);
     CHECK(offsetof(struct rd3_trace_hdr, tb_numer) == 64);
     CHECK(offsetof(struct rd3_trace_hdr, ab) == 76);
     CHECK(offsetof(struct rd3_trace_hdr, wall_us) == 80);
@@ -109,10 +109,24 @@ static void helpers(void)
     CHECK(rd3_trace_band(a, 8) == 0);   /* alpha only: an empty (black, transparent) band */
     CHECK(rd3_trace_band(b, 8) != 0 && rd3_trace_band(b, 8) != rd3_trace_band(c, 8));
     CHECK(rd3_trace_band(b, 8) == rd3_trace_band(b, 8));
-    CHECK(rd3_trace_obj(0, 7) == 0);
-    CHECK(rd3_trace_obj(0xffffff8012345678ull, 7) != 0);
-    CHECK(rd3_trace_obj(0xffffff8012345678ull, 7) != rd3_trace_obj(0xffffff8012345678ull, 8));
-    CHECK(rd3_trace_obj(0xffffff8012345678ull, 7) != (uint32_t)0x12345678u);
+    {
+        /* SipHash-2-4's reference vectors (key 00..0f, message 00..len-1) */
+        uint8_t key[16], key2[16], msg[16];
+        unsigned i;
+        for (i = 0; i < 16; i++) {
+            key[i] = (uint8_t)i;
+            key2[i] = (uint8_t)(i + 1);
+            msg[i] = (uint8_t)i;
+        }
+        CHECK(rd3_siphash24(key, msg, 0) == 0x726fdb47dd0e0e31ull);
+        CHECK(rd3_siphash24(key, msg, 8) == 0x93f5f5799a932462ull);
+        CHECK(rd3_siphash24(key, msg, 15) == 0xa129ca6149be45e5ull);
+        CHECK(rd3_trace_obj(0, key) == 0);
+        CHECK(rd3_trace_obj(0xffffff8012345678ull, key) != 0);
+        CHECK(rd3_trace_obj(0xffffff8012345678ull, key) != rd3_trace_obj(0xffffff8012345678ull, key2));
+        CHECK(rd3_trace_obj(0xffffff8012345678ull, key) != rd3_trace_obj(0xffffff8012345679ull, key));
+        CHECK(rd3_trace_obj(0xffffff8012345678ull, key) != (uint32_t)0x12345678u);
+    }
     memset(w, 0, sizeof w);
     rd3_trace_put16(w, 1, 0x1234);
     rd3_trace_put16(w, 3, 0xffff);

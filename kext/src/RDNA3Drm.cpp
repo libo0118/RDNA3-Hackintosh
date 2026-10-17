@@ -973,6 +973,11 @@ void RDNA3Accel::drmClose(rdna3_drm_file *f)
     IOLockUnlock(fDrmLock);
 }
 
+/* refused AMDGPU_CS per errno, for the trace's rate limit (under fDrmLock) */
+enum { kCsRefusedSlots = 8 };
+struct CsRefused { int err; uint32_t n, skipped; };
+static CsRefused gCsRefused[kCsRefusedSlots];
+
 int RDNA3Accel::drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size)
 {
     IOLockLock(fDrmLock);
@@ -987,15 +992,31 @@ int RDNA3Accel::drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t si
     if (r && nr == RD_NR_AMDGPU(DRM_AMDGPU_CS)) {
         /* card run 2026-10-17b's trace: a submission refused anywhere (the
          * chunk parse, a guilty context, the ring): arg 0xff, the errno in
-         * v4 (ECC review round 1: only the ring's own answer was traced) */
-        struct rd3_trace_ev e;
-        bzero(&e, sizeof e);
-        e.type = RD3_TR_CS;
-        e.head = 0xff;
-        e.arg = 0xff;
-        e.v0 = (uint32_t)proc_selfpid();
-        e.v4 = (uint32_t)r;
-        rdna3TraceCore(&e);
+         * v4 (ECC review round 1); per errno the first 64, then every 64th
+         * (v1 that errno's count, v2 those not traced since the last one;
+         * round 2: a client retrying in a loop must not flush the ring) */
+        unsigned slot = kCsRefusedSlots;
+        for (unsigned i = 0; i < kCsRefusedSlots && slot == kCsRefusedSlots; i++)
+            if (gCsRefused[i].err == r || !gCsRefused[i].n) slot = i;
+        if (slot == kCsRefusedSlots) slot = kCsRefusedSlots - 1;   /* full: the last slot takes the rest */
+        CsRefused &c = gCsRefused[slot];
+        c.err = c.n ? c.err : r;
+        c.n++;
+        if (c.n <= 64 || (c.n & 63) == 0) {
+            struct rd3_trace_ev e;
+            bzero(&e, sizeof e);
+            e.type = RD3_TR_CS;
+            e.head = 0xff;
+            e.arg = 0xff;
+            e.v0 = (uint32_t)proc_selfpid();
+            e.v1 = c.n;
+            e.v2 = c.skipped;
+            e.v4 = (uint32_t)r;
+            rdna3TraceCore(&e);
+            c.skipped = 0;
+        } else {
+            c.skipped++;
+        }
         if (fCsFailLogs < 8 || (fCsFailLogs & 1023) == 0)
             LOG("drm: AMDGPU_CS from pid %d refused (%d) (%u such)", proc_selfpid(), r, fCsFailLogs + 1);
         fCsFailLogs++;

@@ -39,7 +39,7 @@ def split_row(line):
 
 
 def _lvl(word):
-    return {"PASS": PASS, "FAIL": FAIL, "WARN": WARN, "INFO": INFO}[word]
+    return {"PASS": PASS, "FAIL": FAIL, "WARN": WARN, "INFO": INFO, "CRITICAL": FAIL}[word]
 
 
 def classify(name, text):
@@ -63,7 +63,7 @@ def classify(name, text):
     low = t.lower()
 
     # 1. an explicit verdict in the text
-    m = re.match(r"^(?:[A-Z][A-Z0-9 ]*: )?(PASS|FAIL|WARN|INFO)\b", t)
+    m = re.match(r"^(?:[A-Z][A-Z0-9 ]*: )?(PASS|FAIL|CRITICAL|WARN|INFO)\b", t)
     if m:
         if t.startswith(m.group(1) + " "):   # a bare "WARN head 0: ..." says it in the verdict column
             t = t[len(m.group(1)) + 1:]
@@ -143,7 +143,7 @@ def classify(name, text):
         return INFO, t
 
     # 5. descriptive rows and the rest: a keyword decides, else INFO
-    if re.search(r"\b(FAILED|CRASHED)\b|\bFAIL\b", t):
+    if re.search(r"\b(FAILED|CRASHED|CRITICAL)\b|\bFAIL\b", t):
         return FAIL, t
     if re.search(r"\bWARN\b|UNDERFLOW|NOT FINISHED|SAME SURFACE", t):
         return WARN, t
@@ -169,6 +169,8 @@ def _screens(n, t):
         return (FAIL if blanked == 0 else WARN), t
     if "wake" in n and blanked > 0:
         return FAIL, t   # a pipe is still blanked after the wake
+    if re.search(r"BLACK pipe", t):   # a lit pipe whose picture is (nearly) all black (ECC review round 2)
+        return FAIL, t
     if re.search(r"UNDERFLOW|SAME SURFACE|NO TX LINES|TX: ", t):
         return WARN, t
     return PASS, t
@@ -208,7 +210,7 @@ def parse(lines):
         elif in_sum and s.startswith("  ") and s.strip():
             rows.append(split_row(s) + (None,))
         elif not in_sum:
-            m = re.match(r"^\s+FAIL\s+(\S.*)$", s)
+            m = re.match(r"^\s+(?:FAIL|CRITICAL)\s+(\S.*)$", s)
             if m:
                 forced.append(_fail_name(m.group(1).strip()) + (FAIL,))
     if not rows:

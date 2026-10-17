@@ -85,12 +85,16 @@ static void               rd3AccelScPanelMoved(unsigned head, const char *why);
 static void               rd3AccelScFrontGone(const void *vm);
 /* APERTURE's v2: the path (getApertureMemoryDescriptor's every return, ECC review round 1) */
 enum { kApWhyNew = 0, kApWhyGate = 1, kApWhyCached = 2, kApWhyNoVram = 3, kApWhyRange = 4 };
-static void               rd3AccelTraceAperture(const void *res, unsigned what, bool ok, unsigned why);
+static void               rd3AccelTraceAperture(const void *res, unsigned what, bool ok, unsigned why,
+                                                unsigned count = 0);
 static void               rd3AccelTraceVm(const void *vm, bool alloc, bool ok, unsigned long long phys,
                                           unsigned long long bytes, unsigned long long mapped, IOReturn ret,
                                           bool scanout);
 static void               rd3AccelTraceSurfRes(const void *res, unsigned surfaceID, unsigned plane, unsigned how,
-                                               unsigned long long phys, unsigned long long bytes);
+                                               unsigned long long phys, unsigned long long bytes,
+                                               bool idZeroToo = false);
+static unsigned           rd3AccelResSurfaceId(const void *res);
+static unsigned           rd3AccelResType(const void *res);
 static void               rd3AccelVramBase(unsigned long long phys, unsigned long long cookie);
 extern "C" unsigned int   _ZNK9IOSurface12getSurfaceIDEv(void *surface);
 /* Navi 3x display devices (data/amdgpu.ids); the core kext must also claim the card */
@@ -303,7 +307,12 @@ static int gRd3Aperture = 0;
 static struct rd3_trace_ring gTr;
 static IOSimpleLock *volatile gTrLock;
 static struct rd3_trace_sec *gTrSec;   /* RD3_TRACE_SECS x RD3_TRACE_SEC_ROWS */
-static uint32_t gTrSalt;
+/* the object names' SipHash key (never leaves the kernel) and the boot's
+ * random id in the headers (ECC review round 2: no reversible salt) */
+static uint8_t gTrKey[16];
+static uint32_t gTrBootId;
+static bool gTrKeyed;
+static IOSimpleLock *volatile gSurfResLock;   /* the SURFRES dedup table */
 static volatile SInt64 gCntTrNomem, gCntTrWritten;
 static uint64_t gTrCursor;             /* the stream reader's last event number (under gTrLock) */
 /* debug.rdna3accel_swap_mode / boot-arg rdna3swapmode (rdna3_swap_copy.h),
@@ -321,7 +330,7 @@ static void rd3TraceDumpQueue(uint64_t from, uint64_t to, const char *why);
 
 static inline uint32_t rd3TrObj(const void *p)
 {
-    return rd3_trace_obj((uint64_t)(uintptr_t)p, gTrSalt);
+    return rd3_trace_obj((uint64_t)(uintptr_t)p, gTrKey);
 }
 static inline struct rd3_trace_ev rd3TrEv(unsigned type, unsigned head = 0xff)
 {
@@ -437,7 +446,16 @@ static bool rd3TraceInit(void)
         if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gTrLock)) IOSimpleLockFree(l);
     }
     if (!gTrLock) return false;
-    read_random(&gTrSalt, sizeof gTrSalt);
+    if (!gSurfResLock) {
+        IOSimpleLock *l = IOSimpleLockAlloc();
+        if (l && !OSCompareAndSwapPtr(nullptr, l, (void *volatile *)&gSurfResLock)) IOSimpleLockFree(l);
+    }
+    if (!gTrKeyed) {   /* once: the names stay the same for the whole boot */
+        read_random(gTrKey, sizeof gTrKey);
+        read_random(&gTrBootId, sizeof gTrBootId);
+        if (!gTrBootId) gTrBootId = 1;
+        gTrKeyed = true;
+    }
     if (!gTr.ev) {
         const size_t evb = (size_t)RD3_TRACE_CAP * sizeof(struct rd3_trace_ev);
         const size_t secb = (size_t)RD3_TRACE_SECS * RD3_TRACE_SEC_ROWS * sizeof(struct rd3_trace_sec);
@@ -1147,7 +1165,13 @@ void *RD3Resource::getApertureMemoryDescriptor(unsigned long long *a0)
         rd3AccelTraceAperture(this, 2, false, kApWhyGate);
         return nullptr;
     }
-    if (fApDesc) { rd3AccelTraceAperture(this, 2, true, kApWhyCached); return fApDesc; }
+    if (fApDesc) {
+        /* the cached descriptor: every page-on of a buffer comes here; the
+         * first 4 per resource traced, then every 256th (v3 the count) */
+        const unsigned c = ++fApCached;
+        if (c <= 4 || (c & 255) == 0) rd3AccelTraceAperture(this, 2, true, kApWhyCached, c);
+        return fApDesc;
+    }
     RD3VidMemory *m = rd3res_vidmem(this);
     if (!m || !m->fPhys || !m->fBytes) {
         if (fApLogged < 8) { fApLogged++;
@@ -2759,7 +2783,7 @@ static void rd3AccelIopHome(IOService *fb, unsigned head)
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
     OSAddAtomic64(1, &gCntIopFlipHome);
-    rd3AccelScPanelMoved(head, "an IOP flip home");
+    if (rr == kIOReturnSuccess) rd3AccelScPanelMoved(head, "an IOP flip home");   /* only a flip that was done (round 2) */
     if (rr != kIOReturnSuccess && gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: HOME flip refused (0x%x) head %u", (unsigned)rr, head); }
     gIopFlipped[head] = false;
 }
@@ -3939,6 +3963,8 @@ struct RD3ScHead {
     bool lastPixels;                    /* ... and it had pixels */
     unsigned dRetry;                    /* swaps until D's allocation is tried again */
     unsigned long long homePhys;        /* the framebuffer's own scanout (home), as last described */
+    bool seen;                          /* the last flip was SEEN latched (not a wait that gave up): D's free */
+    uint64_t ownFlipAbs;                /* this head's last flip of the swaps' own (posts older are stale) */
 };
 static RD3ScHead gSc[kRd3MaxFB];
 /* what moved a head's panel outside the family's lock, the last one wins */
@@ -3964,6 +3990,13 @@ static SInt64 gCntScNoWait[kRd3MaxFB], gCntScBrkFlip[kRd3MaxFB], gCntScFreeWait[
 static void rd3AccelSwapCopy(unsigned head, IOService *fb, IOAccelResource2 *back, IOAccelResource2 *frontRes,
                              bool backEmpty, unsigned n, struct rd3_trace_ev *tr);
 static void rd3AccelScBrkEvent(enum rd3_sc_brk_ev ev, unsigned n, unsigned head, int status, IOReturn r);
+static void rd3AccelScLatchEvent(unsigned head, enum rd3_latch_event e, const char *why);
+static inline uint64_t rd3AccelUsNow(void)
+{
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+    return ns / 1000;
+}
 /* the swaps copy now: modes 1/2 and the SDMA breaker not open (copy
  * forward's choice of source follows the swaps') */
 static inline bool rd3AccelScCopying(void)
@@ -3987,25 +4020,39 @@ static void rd3AccelScPanelMoved(unsigned head, const char *why)
     (void)why;
     rd3AccelScPost(head, kScPostAway);   /* not D (a copy into D is safe once this flip latched) */
 }
-/* under the family's lock: what moved the panels since the last holder */
+/* under the family's lock: what moved the panels since the last holder;
+ * a post older than the head's own last flip is stale (it was in flight
+ * while a swap flipped: rd3_sc_post_applies, ECC review round 2) */
+static unsigned gScStalePosts;
 static void rd3AccelScApply(unsigned head)
 {
     if (head >= kRd3MaxFB) return;
     const UInt32 what = __atomic_exchange_n(&gScPost[head], (UInt32)kScPostNone, __ATOMIC_ACQ_REL);
+    if (what == kScPostNone) return;
     RD3ScHead &S = gSc[head];
+    const uint64_t at = gScPostAbs[head];
+    if (!rd3_sc_post_applies(at, S.ownFlipAbs)) {
+        if (rd3_log_due(gScStalePosts++, 4, 1023))
+            ALOG("swap copy: head %u: a %s posted before the swaps' own last flip -- ignored (that flip is on the "
+                 "panel)", head, what == kScPostModeSet ? "display mode change" : "panel move");
+        return;
+    }
     if (what == kScPostModeSet) {
         S.shows = RD3_SCS_HOME;
         S.flipped = false;
         S.latched = true;
+        S.seen = true;             /* the mode set itself waited for the new surface */
         S.scanoutFrame = false;
-        (void)rd3_latch_rearm(&S.lat);
+        S.homePhys = 0;            /* the new mode's home is learned at the next copy (ECC review round 2) */
+        rd3AccelScLatchEvent(head, rd3_latch_rearm(&S.lat), "a display mode change re-armed them");
     } else if (what == kScPostAway) {
         S.shows = RD3_SCS_OTHER;
         S.scanoutFrame = false;
         S.flipped = true;          /* someone's flip: D may still be read until it latched */
         S.latched = false;
+        S.seen = false;
         S.flipFrameKnown = false;
-        S.flipAbs = gScPostAbs[head];
+        S.flipAbs = at;
         rd3_latch_flipped(&S.lat);
     }
 }
@@ -4133,9 +4180,13 @@ static unsigned rd3AccelBufIndex(IOAccelResource2 *const *bufs, unsigned nbufs, 
 }
 /* one SCAN event; returns the change state (rd3AccelSigSwap) */
 static int rd3AccelTraceScan(unsigned head, const void *surf, unsigned idx, unsigned long long phys, const RD3Scan &sc,
-                             unsigned flags, unsigned n, unsigned v1 = 0)
+                             unsigned flags, unsigned n, unsigned v1 = 0, const void *res = nullptr)
 {
     struct rd3_trace_ev e = rd3TrEv(RD3_TR_SCAN, head);
+    if (res) {   /* the join with the plugin's trace: the IOSurface id and the resource's type byte (round 2) */
+        e.v3 = rd3AccelResSurfaceId(res);
+        e.v4 = rd3AccelResType(res);
+    }
     uint8_t prev[8];
     const int ch = rd3AccelSigSwap(head, phys, sc.band, prev);
     e.arg = (uint8_t)idx;
@@ -4163,7 +4214,7 @@ static void rd3AccelTraceScanFwd(unsigned head, const void *surf, IOAccelResourc
     RD3Scan sc;
     sc.rc = rc;
     memcpy(sc.band, band, 8);
-    rd3AccelTraceScan(head, surf, 0xff, rd3res_phys(res), sc, flags, n, v1);
+    rd3AccelTraceScan(head, surf, 0xff, rd3res_phys(res), sc, flags, n, v1, res);
 }
 /* the surface's buffers other than a1 / a2, sampled (Q2: where did
  * WindowServer's frame land); 'landing' (the back read empty) also logs
@@ -4191,7 +4242,7 @@ static void rd3AccelScanOthers(unsigned head, const void *surf, IOAccelResource2
         RD3Scan sc;
         rd3AccelResScan(r, &sc);
         const unsigned long long phys = rd3res_phys(r);
-        const int ch = rd3AccelTraceScan(head, surf, i, phys, sc, 0, n);
+        const int ch = rd3AccelTraceScan(head, surf, i, phys, sc, 0, n, 0, r);
         scanned++;
         if (logIt && used < sizeof line)
             used += (size_t)snprintf(line + used, sizeof line - used, ", buf[%u] 0x%llx %s%s", i, phys,
@@ -4204,9 +4255,12 @@ static void rd3AccelScanOthers(unsigned head, const void *surf, IOAccelResource2
 }
 /* what the head's HUBP scans now (Q6): the core's SURFACE_EARLIEST_INUSE
  * and the requested address as CPU addresses, the frame state */
-static unsigned gPanelLogs[4];
-/* PANEL's v3: why the HUBP's address is missing (0: it is there) */
-enum { kPanelOk = 0, kPanelNoCore = 1, kPanelNoCoreHead = 2, kPanelCallFailed = 3, kPanelNoBase = 4 };
+/* PANEL's v3: why the HUBP's address is missing (0: it is there); 4 and 5
+ * carry the MC addresses in pa / pb with flag 2 (not comparable with the
+ * BAR addresses of the other events, ECC review round 2) */
+enum { kPanelOk = 0, kPanelNoCore = 1, kPanelNoCoreHead = 2, kPanelCallFailed = 3, kPanelNoBase = 4,
+       kPanelBelowFb = 5, kPanelWhys = 6 };
+static unsigned gPanelLogs[kPanelWhys];
 static void rd3AccelTracePanel(unsigned head, IOService *fb, unsigned long long expect)
 {
     if (head >= kRd3MaxFB || !fb) return;
@@ -4234,10 +4288,10 @@ static void rd3AccelTracePanel(unsigned head, IOService *fb, unsigned long long 
             e.pb = q.requested >= q.fbStart ? base + (q.requested - q.fbStart) : 0;
             e.flags = q.flipPending ? 1 : 0;
         } else if (r == kIOReturnSuccess) {
-            e.pa = q.inUse;               /* MC addresses: no VRAM base learned yet */
+            e.pa = q.inUse;               /* MC addresses: no VRAM base learned yet, or below the FB aperture */
             e.pb = q.requested;
             e.flags = (q.flipPending ? 1 : 0) | 2;
-            why = kPanelNoBase;
+            why = base ? kPanelBelowFb : kPanelNoBase;
         } else {
             why = kPanelCallFailed;
         }
@@ -4245,9 +4299,11 @@ static void rd3AccelTracePanel(unsigned head, IOService *fb, unsigned long long 
     e.v3 = why;
     e.v4 = r;
     if (why != kPanelOk && why != kPanelNoBase && rd3_log_due(gPanelLogs[why]++, 4, 1023))
-        ALOG("trace: head %u: what its HUBP scans is unknown (the PANEL events carry 0): %s (0x%x%s%s)", head,
+        ALOG("trace: head %u: what its HUBP scans is unknown (the PANEL events carry 0 or MC addresses): %s "
+             "(0x%x%s%s)", head,
              why == kPanelNoCore ? "no core kext (RDNA3Accel) found"
              : why == kPanelNoCoreHead ? "the core does not know this framebuffer's head"
+             : why == kPanelBelowFb ? "the HUBP's address is below the framebuffer aperture (not VRAM the BAR shows)"
              : r == kIOReturnUnsupported ? "the core has no rdna3DisplayScanAddr (an older core kext)"
                                          : "the core's rdna3DisplayScanAddr failed",
              (unsigned)r, w.why ? ": " : "", w.why ? w.why : "");
@@ -4384,11 +4440,15 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     const unsigned rc1 = s1.rc, rc2 = s2.rc;
     const unsigned long long p1 = rd3res_phys(a1), p2 = rd3res_phys(a2);
     const unsigned n = ++gSwapCount;
+    /* the join with the plugin's trace (Q10, ECC review round 2): each new
+     * (resource, IOSurface id, address) of a1 / a2 once, an id of 0 too */
+    if (a1) rd3AccelTraceSurfRes(a1, rd3AccelResSurfaceId(a1), 1, 3, p1, v1 ? v1->fBytes : 0, true);
+    if (a2) rd3AccelTraceSurfRes(a2, rd3AccelResSurfaceId(a2), 2, 3, p2, v2 ? v2->fBytes : 0, true);
     const unsigned knownHead = frontHead < kRd3MaxFB ? frontHead : rd3AccelSurfKnownHead(surf);
     bool brkFlip = false;
     if (mode != RD3_SWAPMODE_FLIP) {
         enum rd3_sc_brk_ev bev;
-        if (!rd3_sc_brk_allow(&gScBrk, n, &bev)) {
+        if (!rd3_sc_brk_allow(&gScBrk, rd3AccelUsNow(), &bev)) {
             mode = RD3_SWAPMODE_FLIP;   /* the SDMA breaker is open (rd3_sc_brk) */
             brkFlip = true;
             if (knownHead < kRd3MaxFB) OSAddAtomic64(1, &gCntScBrkFlip[knownHead]);
@@ -4557,7 +4617,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
                         : "neither flipped nor copied, the panel keeps the last picture", (long long)k + 1);
         rd3AccelLatchForget(head, "a flip refused");   /* the framebuffer's own scanout, not a recorded buffer */
         tr.arg = copied ? RD3_TRS_FLIP_COPIED : RD3_TRS_FLIP_FAILED;
-        if (copied) rd3AccelScPanelMoved(head, "a copy onto the framebuffer's scanout");
+        /* a copy into home is no flip: the panel stays where it was (ECC review round 2) */
     }
     rd3Trace(tr);
     rd3AccelScanOthers(head, surf, a1, a2, s1, s2, ch1, ch2, bufs, nbufs, n, emptyShown, "the back read empty (shown)");
@@ -5001,7 +5061,7 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
         RD3Scan sc;
         rd3AccelResScan(dst, &sc);
         rd3AccelTraceScan(t.e.head < kRd3MaxFB ? t.e.head : kRd3MaxFB, surf, rd3AccelBufIndex(bufs, nbufs, dst),
-                          rd3res_phys(dst), sc, 32u, gCfCalls);
+                          rd3res_phys(dst), sc, 32u, gCfCalls, 0, dst);
     }
     /* anything but success makes CoreDisplay switch copy forward off for
      * good ("copy forward failed ... disabling"): said every time it happens
@@ -5299,11 +5359,12 @@ static void rd3AccelScLatchEvent(unsigned head, enum rd3_latch_event e, const ch
 static void rd3AccelScLook(unsigned head, IOService *fb, const char *why)
 {
     RD3ScHead &S = gSc[head];
-    if (!fb || !S.flipped || S.latched) return;
+    if (!fb || !S.flipped || S.seen) return;
     RD3KDisplayStatus st;
     RD3StatusWhy w;
     if (rd3AccelDispStatus(fb, head, &st, &w) && !st.flipPending) {
         S.latched = true;
+        S.seen = true;
         rd3AccelScLatchEvent(head, rd3_latch_seen(&S.lat), why);
     }
 }
@@ -5319,7 +5380,7 @@ static bool rd3AccelScEnsureD(unsigned head, IOService *fb, unsigned w, unsigned
     if (!rd3_sc_d_stale(S.dHandle != nullptr, S.dW, S.dH, w, h)) return true;
     if (S.dHandle) {
         rd3AccelScLook(head, fb, "the look before freeing the old second buffer");
-        if (!rd3_sc_d_freeable((enum rd3_sc_shows)S.shows, S.flipped, S.latched)) {
+        if (!rd3_sc_d_freeable((enum rd3_sc_shows)S.shows, S.flipped, S.seen)) {
             /* on the panel, or the flip away not latched yet: next swap */
             const SInt64 k = OSAddAtomic64(1, &gCntScFreeWait[head]);
             if (rd3_log_due(gScFreeLogs[head]++, 4, 1023))
@@ -5376,8 +5437,7 @@ static void rd3AccelScLatchEvent(unsigned head, enum rd3_latch_event e, const ch
              "last flip until one is seen latched (a copy may write the buffer the panel still reads: "
              "debug.rdna3accel_swaps_copynowait_h%u)", head, RD3_LATCH_TIMEOUT_RUN, head);
     else
-        ALOG("swap copy: head %u: a flip was seen latched (%s) -- the head's copies wait for the last flip again",
-             head, why);
+        ALOG("swap copy: head %u: the head's copies wait for the last flip again (%s)", head, why);
 }
 /* the SDMA breaker's transitions: logged (the first 8, then every 64th),
  * traced (MODESET arg 2: v0 the old state, v1 the new: 0 closed, 1 open,
@@ -5410,13 +5470,13 @@ static void rd3AccelScBrkEvent(enum rd3_sc_brk_ev ev, unsigned n, unsigned head,
     if (ev == RD3_SC_BRK_OPENED)
         ALOG("swap copy: SDMA BREAKER OPEN at swap #%u (head %u): %s (IOReturn 0x%x, status %d; %u failure(s) in a "
              "row) -- the swaps FLIP to WindowServer's back as in mode 0 (the flicker of card run 2026-10-17 may come "
-             "back) instead of waiting on the engine at every swap; SDMA tried again at swap #%u "
+             "back) instead of waiting on the engine at every swap; SDMA tried again in %llu s "
              "(debug.rdna3accel_swaps_copybrkflip_h<N>, swaps_copybrktrips)", n, head,
              status == kRd3Etime ? "the copy timed out" : "the copy was refused", (unsigned)r, status, gScBrk.run,
-             n + RD3_SC_BRK_RETRY);
+             RD3_SC_BRK_RETRY_US / 1000000ull);
     else if (ev == RD3_SC_BRK_REOPENED)
         ALOG("swap copy: SDMA breaker: the try at swap #%u failed (IOReturn 0x%x, status %d) -- the swaps keep "
-             "flipping, next try at swap #%u", n, (unsigned)r, status, n + RD3_SC_BRK_RETRY);
+             "flipping, next try in %llu s", n, (unsigned)r, status, RD3_SC_BRK_RETRY_US / 1000000ull);
     else if (ev == RD3_SC_BRK_PROBE)
         ALOG("swap copy: SDMA breaker: swap #%u tries the copy again", n);
     else
@@ -5426,7 +5486,7 @@ static void rd3AccelScBrkEvent(enum rd3_sc_brk_ev ev, unsigned n, unsigned head,
 static void rd3AccelScSdmaNote(IOReturn r, int status, unsigned n, unsigned head)
 {
     if (r == kIOReturnSuccess) rd3AccelScBrkEvent(rd3_sc_brk_ok(&gScBrk), n, head, 0, r);
-    else rd3AccelScBrkEvent(rd3_sc_brk_fail(&gScBrk, n, status == kRd3Etime), n, head, status, r);
+    else rd3AccelScBrkEvent(rd3_sc_brk_fail(&gScBrk, rd3AccelUsNow(), status == kRd3Etime), n, head, status, r);
 }
 static void rd3AccelScFail(unsigned head, unsigned n, unsigned step, const char *why, unsigned long long phys,
                            unsigned v, struct rd3_trace_ev *tr)
@@ -5477,6 +5537,7 @@ static void rd3AccelScWait(unsigned head, IOService *fb, enum rd3_sc_target tg, 
     }
     const uint64_t us = rd3AccelUsSince(t0);
     S.latched = true;   /* seen, or given up: the copy goes on (bounded) */
+    S.seen = step == RD3_LATCH_DONE;   /* only an observation frees D */
     if (step == RD3_LATCH_DONE) rd3AccelScLatchEvent(head, rd3_latch_seen(&S.lat), "the wait before a copy");
     else if (step == RD3_LATCH_TIMEOUT) rd3AccelScLatchEvent(head, rd3_latch_timeout(&S.lat), "");
     else rd3_latch_give_up(&S.lat);
@@ -5587,11 +5648,11 @@ static void rd3AccelSwapCopy(unsigned head, IOService *fb, IOAccelResource2 *bac
         RD3StatusWhy w;
         S.shows = rd3_sc_after_flip((enum rd3_sc_shows)S.shows, tg, 1);
         S.flipped = true;
-        S.flipAbs = mach_absolute_time();
+        S.flipAbs = S.ownFlipAbs = mach_absolute_time();
         const bool ok = rd3AccelDispStatus(fb, head, &st, &w);
         S.flipFrame = ok ? st.frame : 0;
         S.flipFrameKnown = ok;
-        S.latched = ok && !st.flipPending;
+        S.latched = S.seen = ok && !st.flipPending;
         rd3_latch_flipped(&S.lat);
         if (S.latched) rd3AccelScLatchEvent(head, rd3_latch_seen(&S.lat), "right after the flip");
         S.scanoutFrame = true;
@@ -5639,7 +5700,7 @@ static void rd3AccelSwapCopy(unsigned head, IOService *fb, IOAccelResource2 *bac
     if (F.vm && F.vm->fKva) {
         RD3Scan sc;
         rd3AccelResScan(frontRes, &sc);
-        rd3AccelTraceScan(head, nullptr, 0xfd, F.vm->fPhys, sc, 128u, n);
+        rd3AccelTraceScan(head, nullptr, 0xfd, F.vm->fPhys, sc, 128u, n, 0, frontRes);
     }
 }
 /* leaving modes 1/2 (under the family's lock): a head showing D gets its
@@ -5659,12 +5720,21 @@ static void rd3AccelScLeave(unsigned head, IOService *fb)
     int cst = 0;
     const char *why = nullptr;
     IOReturn r = qr;
+    /* the flip to D must have latched: until then the HUBP may still read
+     * home, which the copy writes (ECC review round 2); bounded by the cap,
+     * a timeout is logged and counted by rd3AccelScWait */
+    struct rd3_trace_ev wt = rd3TrEv(RD3_TR_SWAP, head);
+    rd3AccelScWait(head, fb, RD3_SCT_HOME, gSwapCount, &wt);
     if (qr != kIOReturnSuccess || !q.pitch || !q.actualSize) why = "the framebuffer would not describe its scanout";
     else if (!rd3_sc_extent(S.dW, S.dH, S.dPitch, S.dBytes, q.width, q.height, q.pitch, q.actualSize, &rowb, &rows))
         why = "D and home have no common extent";
-    else if ((r = rd3AccelScSdma(fb, S.dCookie, S.dPitch, q.allocationCookie, q.pitch, rowb, rows, &us, &cst)) !=
-             kIOReturnSuccess)
-        why = "rdna3CopyVram refused the copy";
+    else if (gScBrk.off && !gScBrk.probing)
+        why = "the SDMA breaker is open";
+    else {
+        r = rd3AccelScSdma(fb, S.dCookie, S.dPitch, q.allocationCookie, q.pitch, rowb, rows, &us, &cst);
+        rd3AccelScSdmaNote(r, cst, gSwapCount, head);   /* the breaker hears this copy too */
+        if (r != kIOReturnSuccess) why = cst == kRd3Etime ? "rdna3CopyVram timed out" : "rdna3CopyVram refused the copy";
+    }
     if (!why) {
         struct RD3KFlipRequest f;
         bzero(&f, sizeof f);
@@ -5691,11 +5761,11 @@ static void rd3AccelScLeave(unsigned head, IOService *fb)
     RD3StatusWhy w;
     S.shows = RD3_SCS_HOME;
     S.flipped = true;
-    S.flipAbs = mach_absolute_time();
+    S.flipAbs = S.ownFlipAbs = mach_absolute_time();
     const bool ok = rd3AccelDispStatus(fb, head, &st, &w);
     S.flipFrame = ok ? st.frame : 0;
     S.flipFrameKnown = ok;
-    S.latched = ok && !st.flipPending;
+    S.latched = S.seen = ok && !st.flipPending;
     rd3_latch_flipped(&S.lat);
     S.scanoutFrame = false;
     ALOG("swap mode: head %u: leaving the copy modes -- the last frame copied into home (phys 0x%llx, %llu us) and "
@@ -5709,27 +5779,44 @@ static void rd3AccelTraceMode(unsigned arg)
     e.arg = (uint8_t)arg;
     rd3Trace(e);
 }
-/* an IOSurface id seen with a resource: one SURFRES event per new pair */
+/* an IOSurface id seen with a resource: one SURFRES event per new
+ * (resource, id, address); at swaps also a resource without an id (id 0:
+ * the join with the plugin's trace says which backs have none). v4 the
+ * resource's type byte. The table under its own lock (any thread; round 2) */
 enum { kSurfResSlots = 64 };
 static struct { uint32_t obj, id; unsigned long long phys; } gSurfRes[kSurfResSlots];
 static unsigned gSurfResNext;
 static void rd3AccelTraceSurfRes(const void *res, unsigned surfaceID, unsigned plane, unsigned how,
-                                 unsigned long long phys, unsigned long long bytes)
+                                 unsigned long long phys, unsigned long long bytes, bool idZeroToo)
 {
-    if (!res || !surfaceID) return;
+    if (!res || (!surfaceID && !idZeroToo)) return;
+    IOSimpleLock *lk = gSurfResLock;
+    if (!lk) return;
     const uint32_t obj = rd3TrObj(res);
-    for (unsigned i = 0; i < kSurfResSlots; i++)
-        if (gSurfRes[i].obj == obj && gSurfRes[i].id == surfaceID && gSurfRes[i].phys == phys) return;   /* known */
-    const unsigned k = gSurfResNext++ % kSurfResSlots;
-    gSurfRes[k].obj = obj; gSurfRes[k].id = surfaceID; gSurfRes[k].phys = phys;
+    bool known = false;
+    IOSimpleLockLock(lk);
+    for (unsigned i = 0; i < kSurfResSlots && !known; i++)
+        known = gSurfRes[i].obj == obj && gSurfRes[i].id == surfaceID && gSurfRes[i].phys == phys;
+    if (!known) {
+        const unsigned k = gSurfResNext++ % kSurfResSlots;
+        gSurfRes[k].obj = obj; gSurfRes[k].id = surfaceID; gSurfRes[k].phys = phys;
+    }
+    IOSimpleLockUnlock(lk);
+    if (known) return;
     struct rd3_trace_ev e = rd3TrEv(RD3_TR_SURFRES);
     e.obj = obj;
     e.v0 = surfaceID;
     e.v1 = plane;
     e.v2 = how;
     e.v3 = rd3TrSat(bytes >> 10);
+    e.v4 = rd3AccelResType(res);
     e.pa = phys;
     rd3Trace(e);
+}
+/* a legacy / device-cache resource's type byte (+0x14: 0xc0 device cache) */
+static unsigned rd3AccelResType(const void *res)
+{
+    return res ? ((const volatile unsigned char *)res)[0x14] : 0;
 }
 /* the IOSurface behind a legacy / device-cache resource, as pageoff finds it */
 static unsigned rd3AccelResSurfaceId(const void *res)
@@ -5740,7 +5827,7 @@ static unsigned rd3AccelResSurfaceId(const void *res)
     void *surf = cache ? *(void *volatile *)((unsigned char *)cache + 0x10) : nullptr;
     return surf ? _ZNK9IOSurface12getSurfaceIDEv(surf) : 0;
 }
-static void rd3AccelTraceAperture(const void *res, unsigned what, bool ok, unsigned why)
+static void rd3AccelTraceAperture(const void *res, unsigned what, bool ok, unsigned why, unsigned count)
 {
     RD3VidMemory *m = rd3res_vidmem((IOAccelResource2 *)res);
     struct rd3_trace_ev e = rd3TrEv(RD3_TR_APERTURE);
@@ -5748,8 +5835,9 @@ static void rd3AccelTraceAperture(const void *res, unsigned what, bool ok, unsig
     e.flags = ok ? 1 : 0;
     e.obj = rd3TrObj(res);
     e.v0 = m ? rd3TrSat(m->fBytes >> 10) : 0;
-    e.v1 = rd3AccelResSurfaceId(res);
+    e.v1 = why == kApWhyCached ? 0 : rd3AccelResSurfaceId(res);   /* the id on new / failed paths only (round 2) */
     e.v2 = why;
+    e.v3 = count;
     e.pa = m ? m->fPhys : 0;
     rd3Trace(e);
     if (e.v1 && m) rd3AccelTraceSurfRes(res, e.v1, 0, 1, m->fPhys, m->fBytes);
@@ -5785,6 +5873,7 @@ static void rd3AccelTraceVm(const void *vm, bool alloc, bool ok, unsigned long l
     }
     rd3Trace(e);
 }
+enum { kShapeScans = 256 };
 void rd3AccelTraceShape(const void *surf, unsigned mask, unsigned w, unsigned h, unsigned smode, unsigned present,
                         unsigned shaped, IOAccelResource2 *const *bufs)
 {
@@ -5799,14 +5888,18 @@ void rd3AccelTraceShape(const void *surf, unsigned mask, unsigned w, unsigned h,
         (i == 0 ? e.pa : i == 1 ? e.pb : e.pc) = r ? rd3res_phys(r) : 0;
     }
     rd3Trace(e);
-    /* the present buffers' content at the shape (Q3) */
+    /* the present buffers' content at the shape (Q3): the first
+     * kShapeScans shapes, or every one with debug.rdna3accel_trace_scan=2
+     * (64 uncached BAR reads per buffer; ECC review round 2) */
+    static unsigned shapes;
+    if (shapes++ >= kShapeScans && gTrScan < 2) return;
     for (unsigned i = 0; bufs && i < 32; i++) {
         if (!(mask & (1u << i))) continue;
         IOAccelResource2 *r = OSDynamicCast(IOAccelResource2, (OSObject *)bufs[i]);
         if (!r || !rd3res_phys(r)) continue;
         RD3Scan sc;
         rd3AccelResScan(r, &sc);
-        rd3AccelTraceScan(e.head < kRd3MaxFB ? e.head : kRd3MaxFB, surf, i, rd3res_phys(r), sc, 0, 0);
+        rd3AccelTraceScan(e.head < kRd3MaxFB ? e.head : kRd3MaxFB, surf, i, rd3res_phys(r), sc, 0, 0, 0, r);
     }
 }
 void rd3AccelTraceSync(const void *surf, unsigned what, unsigned long long v0, unsigned long long v1)
@@ -5952,7 +6045,7 @@ static int rd3AccelTraceRead(struct sysctl_req *req, int kind)
     clock_get_calendar_microtime(&ws, &wus);
     h->wall_us = (uint64_t)ws * 1000000ull + (uint64_t)wus;
     h->nomem = (uint64_t)gCntTrNomem;
-    h->salt_check = rd3_trace_obj(0x1000, gTrSalt);
+    h->boot_id = gTrBootId;
     h->source = RD3_TRACE_SRC_ACCEL;
     h->tb_numer = tb.numer;
     h->tb_denom = tb.denom;

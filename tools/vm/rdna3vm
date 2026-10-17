@@ -505,10 +505,13 @@ auto_limit() {
     # card run 2026-10-17b: the swap A/B (2 x 60 s, two looks, the trace's
     # uploads) - with rdna3accel=1, or the default profile (no rdna3lvl= and
     # no rdna3profile=0: autoreport.sh turns the accelerator on itself)
+    # + 3 min: the snapshots after each phase (the pump paused, the stream
+    # and WindowServer's plugin trace sent: up to a minute each) and
+    # collect.sh's plugin trace and its 4 min log (budget 360 -> 540 s)
     case " $1 " in
-        *" rdna3accel=1 "*) m=$((m + 3)) ;;
+        *" rdna3accel=1 "*) m=$((m + 9)) ;;
         *" rdna3lvl="*|*" rdna3profile=0 "*) ;;
-        *) m=$((m + 3)) ;;
+        *) m=$((m + 9)) ;;
     esac
     echo "$m"
 }
@@ -1460,7 +1463,8 @@ cmd_reports() {
     echo
     echo "Send the newest: rdna3-report-*.tar.gz, *-tests.txt, serial-*.log, host-*.log,"
     echo "  and the frame trace next to the report: *-trace-stream.bin, *-drmtrace-stream.bin, *-trace-sec.bin"
-    echo "  with their *.size files (the archive holds copies as 36-stream-*.bin)"
+    echo "  with their *.size files (the archive holds copies as 36-stream-*.bin), and the plugin's"
+    echo "  WindowServer traces sent during the A/B: *-plugin-*-WindowServer-*.trace"
 }
 
 case "${1:-}" in

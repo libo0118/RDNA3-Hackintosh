@@ -12,7 +12,7 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d)
-trap 'rm -rf -- "$T"' EXIT
+trap '[ -n "${KEEP:-}" ] || rm -rf -- "$T"' EXIT
 fail() { echo "test_triage_trace: FAIL $*"; exit 1; }
 has() { grep -qF -- "$2" <<<"$1" || fail "$3: '$2' not in: $1"; }
 hasnt() { ! grep -qF -- "$2" <<<"$1" || fail "$3: '$2' unexpected in: $1"; }
@@ -61,12 +61,12 @@ has "$out" "trace version 9 at byte 0 (this decoder reads 1-2)" version
 has "$out" "FAIL     trace incomplete: Q1-Q8" version
 out=$(dec truncated)
 has "$out" "FAIL     trace incomplete: Q8" truncated
-has "$out" "TRUNCATED: 122 of 124 record(s)" truncated
+has "$out" "TRUNCATED: 124 of 126 record(s)" truncated
 out=$(dec corrupt)
-has "$out" "no R3TR header at byte 10016 (after 1 blob(s))" corrupt
+has "$out" "no R3TR header at byte 10096 (after 1 blob(s))" corrupt
 has "$out" "FAIL     trace incomplete: Q8" corrupt
 out=$(dec gap)
-has "$out" "62 event(s) between two reads MISSING from the file" gap
+has "$out" "63 event(s) between two reads MISSING from the file" gap
 out=$(dec inactive)
 has "$out" "FAIL     A/B inconclusive: phase 2 had 0 swaps on head 0 (need 20)" inactive
 hasnt "$out" "A/B verdict" inactive
@@ -78,10 +78,24 @@ has "$out" "7 event(s) NOT recorded (no memory for the accelerator's ring)" nome
 has "$out" "FAIL     trace incomplete: Q8" nomem
 out=$(dec short)
 has "$out" "FAIL     A/B inconclusive: phase 1 had 10 swaps on head 0 (need 20)" short
+# ECC review round 2
+out=$(dec nojoin)
+has "$out" "WARN     join: head 0 back 0x8b100000 (40 swaps, 40 with pixels) has NO IOSurface id" nojoin
+out=$(dec bootlost)   # the first stream read is the boot before the pump: its 'lost' is no loss of the run
+has "$out" "PASS     Q8: 2 stream reads, 0 events lost between them; the boot before the pump: 500 events" bootlost
+out=$(dec copyblack)
+has "$out" "FAIL     COPY-BLACK: 10 copy(ies) of a back WITH pixels left the scanout buffer without any" copyblack
+out=$(dec gpucap)
+has "$out" "WARN     GPU: 1 GPU wait(s) ran out the 10 s cap" gpucap
+out=$(dec mc)
+hasnt "$out" "WARN     PANEL" mc                            # MC addresses are not compared with BAR ones
+has "$out" "no VRAM base yet (MC addresses): 10" mc
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/ab.bin" --timeline 5)
+has "$out" "08:00:00." wall-clock                         # the timeline in the logs' clock (UTC)
 # garbage never crashes the decoder: a text file where the binary was expected
 printf 'debug.rdna3accel_trace: Format:S,rd3_trace Length:4096\n' > "$T/text.bin"
 out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/text.bin")
-has "$out" "NOT a trace (no R3TR header" text
+has "$out" "NOT a trace (no R3TR header; it starts b'debug.rdna3accel_trace: ', 55 bytes" text   # the real first bytes
 head -c 3000 /dev/urandom > "$T/random.bin"
 python3 "$ROOT/tools/rdna3_trace.py" "$T/random.bin" >/dev/null || fail "random bytes crashed the decoder"
 # a kernel log dump missing lines
@@ -149,14 +163,31 @@ with tarfile.open(base + ".tar.gz", "w:gz") as t:
             add("36-stream-trace-stream.bin.size", b"%d\n" % (len(data) + (500 if extra == "cut" else 0)))
         else:
             add("36-frame-trace.bin", data)
+    if extra.startswith("plugin"):   # the Metal plugin's trace of WindowServer (plugin-join / -wrap / -old / -none)
+        pk = extra[len("plugin-"):]
+        if pk != "none":
+            add("31-plugin-trace/WindowServer-158.trace", open(os.path.join(d, "plugin.trace"), "rb").read())
+        add("31-plugin-trace/info.txt", (b"boottime 1792310000\n" + (b"== plugin frame traces collected: 0 (rejected: 1)\n"
+                                         b"REJECT -rw-r----- 1 uid 501 size 4198400 WindowServer-9.trace: named WindowServer "
+                                         b"but owned by uid 501\n" if pk == "none" else
+                                         b"== plugin frame traces collected: 1 (rejected: 0)\n")))
     ft = "debug.rdna3accel_trace: 1000 bytes in 36-frame-trace.bin\n"
     if extra == "notread":
         ft = "debug.rdna3accel_trace: NOT read (not root, or a kext before card run 2026-10-17b)\n"
     add("36-frame-trace.txt", ft.encode())
 if counters != "NOTESTS":
     dump = "".join("debug.rdna3accel_%s: %s\n" % tuple(l.split()) for l in counters.strip().splitlines()
-                   if l.strip() and not l.startswith("=="))
+                   if len(l.split()) == 2 and l.split()[0] != "AB")
     txt = "== A3 display counters after M6\n" + dump
+    if "M5" in counters:
+        txt = "M5: WindowServer LOADED the plugin; it is on the allow list\n" + txt
+    if "LOOKS" in counters:   # rdna3_drminfo --scanout looks: ab1 (mode 1) left pipe 0 black, ab0 (mode 0) did not
+        look = ("== rdna3_drminfo --scanout (look %s)\n2 pipe(s) lit\n"
+                "pipe 0: LIT otg 0 2560x1440 pitch 10240 fmt 10 sw 0 dcc 0 address 0x1 in use 0x1\n"
+                "  picture 320x180: %d%% not black, mean rgb 1 1 1, 0 bytes changed in 2 s\n"
+                "pipe 1: LIT otg 1 1920x1080 pitch 7680 fmt 10 sw 0 dcc 0 address 0x2 in use 0x2\n"
+                "  picture 320x180: 41%% not black, mean rgb 9 9 9, 10 bytes changed in 2 s\n")
+        txt = look % ("ab1", 1) + look % ("ab0", 44) + txt
     if "AB" in counters:   # the A/B's markers and two counter dumps (head 0: 30 swaps in the window)
         txt = ("debug.rdna3accel_swaps_h0: 100\n== swap A/B phase 1: swap mode 1\n== swap A/B phase 2: swap mode 0\n"
                "== swap A/B counters after mode 0\ndebug.rdna3accel_swaps_h0: %d\n== swap A/B phase 3\n" %
@@ -233,5 +264,49 @@ PY
 out=$(run garbage)
 hasnt "$out" "Traceback" triage-garbage
 has "$out" "NOT a trace (no R3TR header" triage-garbage
+
+# the plugin's trace joined with the kernel's: each back's IOSurface and what the plugin did to it
+python3 -I "$ROOT/tests/trace_fixture.py" plugin-join "$T/pj.trace"
+mkp() {   # mkp <name> <trace kind> <plugin kind> <counters>
+    mkdir -p "$T/$1"
+    python3 -I "$ROOT/tests/trace_fixture.py" "plugin-$3" "$T/$1/plugin.trace"
+    mk "$1" "$2" "$4" "" "plugin-$3"
+}
+mkp join ab join "swaps_h0 80
+M5"
+out=$(run join)
+has "$out" "join: head 0 back 0x8b100000 = IOSurface 101 (80 swaps, 80 with pixels): plugin DRAWN 40, published 40 (dirty 40, copy-out 0)" triage-join
+has "$out" "plugin trace WindowServer[158] (opened 2026-10-18 08:00:00 UTC)" triage-join
+# a wrapped plugin ring that does not cover the A/B
+mkp wrap ab wrap "swaps_h0 80
+M5"
+out=$(run wrap)
+has "$out" "main ring WRAPPED (5000 events written" triage-wrap
+has "$out" "is NOT covered" triage-wrap
+# an old boot's trace in the directory: not judged
+mkp old ab old "swaps_h0 80
+M5"
+out=$(run old)
+has "$out" "OLD - opened 2025-10-18" triage-old
+has "$out" "plugin trace MISSING" triage-old
+# WindowServer loaded the plugin, no trace: MISSING with the collector's reason, the REJECT line
+mkp none ab none "swaps_h0 80
+M5"
+out=$(run none)
+has "$out" "WARN plugin trace MISSING (plugin frame traces collected: 0 (rejected: 1)) although WindowServer loaded the plugin" triage-none-plugin
+has "$out" "plugin trace collector: REJECT -rw-r----- 1 uid 501" triage-none-plugin
+hasnt "$out" "$T" triage-none-plugin                     # no archive path in the MISSING line
+# the panels: a black pipe in the A/B's mode 1 look, CoreDisplay's copy forward switch-off in the SUMMARY
+mk looks ab "swaps_h0 80
+LOOKS" "2026-10-17 13:20:15.056 E  WindowServer[158:29f] [com.apple.CoreDisplay:default] [ERROR] - copy_forward_region: copy forward failed (0xe00002bc) ... disabling." stream
+run looks > "$T/looks-sum.txt"
+sum=$(cat "$T/looks-sum.txt")
+has "$sum" "A/B screens" triage-looks
+has "$sum" "FAIL mode 1 left pipe(s) 0 BLACK (pipe 0: mode 1 1%, mode 0 44%" triage-looks
+has "$sum" "BLACK pipe(s) 0" triage-looks
+has "$sum" "CRITICAL CoreDisplay disabled copy forward" triage-looks
+python3 -I -B "$ROOT/tools/result_checklist.py" --no-color --width 200 "$T/looks-sum.txt" > "$T/looks-chk.txt" 2>&1 || true
+grep -qE "^FAIL +copy forward +CRITICAL|^FAIL +copy forward" "$T/looks-chk.txt" || { cat "$T/looks-chk.txt"; fail "CRITICAL is not a FAIL in the checklist"; }
+grep -qE "^FAIL +A/B screens" "$T/looks-chk.txt" || fail "a black A/B look is not a FAIL in the checklist"
 
 echo "test_triage_trace: all checks passed"

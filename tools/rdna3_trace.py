@@ -34,7 +34,7 @@ EV_SIZE, HDR_SIZE, SEC_SIZE = struct.calcsize(EV_FMT), struct.calcsize(HDR_FMT),
 HDR_SIZE_V1 = struct.calcsize(HDR_FMT_V1)
 assert (EV_SIZE, HDR_SIZE, HDR_SIZE_V1, SEC_SIZE) == (80, 96, 80, 32)
 HDR_KEYS = ("magic", "version", "ev_size", "cap", "count", "swap_mode", "written", "lost", "now", "nomem",
-            "salt_check", "source", "tb_numer", "tb_denom", "read_kind", "ab", "wall_us", "flags", "hdr_size")
+            "boot_id", "source", "tb_numer", "tb_denom", "read_kind", "ab", "wall_us", "flags", "hdr_size")
 HDR_HDP_NOINV, HDR_CHUNKED = 1, 2
 # the swaps rdna3accel_swaps_h<N> counts (routed and presented: not skipped, held or headless)
 COUNTED_SWAPS = (1, 2, 3, 4, 6)
@@ -101,14 +101,16 @@ class Trace(object):
             self.problem("FAIL", "Q8", "%s: empty" % (where or "a trace file"))
             return 0
         if len(data) < 4 or struct.unpack_from("<I", data, 0)[0] != MAGIC:
+            raw = data
             hx = re.findall(r"0x([0-9a-fA-F]{16,})", data.decode("latin-1", "replace"))
             try:
                 data = bytes.fromhex("".join(hx)) if hx else b""
             except ValueError:
                 data = b""
             if not data:
-                self.problem("FAIL", "Q8", "%s: NOT a trace (no R3TR header: %r...; sysctl -b printed text, or "
-                                           "the file is not binary)" % (where or "a trace file", bytes(data[:16])))
+                self.problem("FAIL", "Q8", "%s: NOT a trace (no R3TR header; it starts %r, %d bytes; sysctl -b "
+                                           "printed text, or the file is not binary)" %
+                             (where or "a trace file", bytes(raw[:24]), len(raw)))
                 return 0
         off = 0
         n = 0
@@ -229,10 +231,12 @@ class Trace(object):
     def finish(self):
         self.events.sort(key=lambda e: (e.t, e.src, e.seq))
         self._check_streams()
-        salts = set(h["salt_check"] for h in self.headers if h["source"] == SRC_ACCEL and h["salt_check"])
-        if len(salts) > 1:
-            self.problem("FAIL", "Q8", "accelerator blobs of %d different boots (salt_check %s): files of two reports "
-                                       "mixed" % (len(salts), ", ".join("%08x" % x for x in sorted(salts))))
+        # version 2 headers carry the boot's random id; version 1 a salt check
+        # (the same field): either way two values are two boots
+        boots = set(h["boot_id"] for h in self.headers if h["source"] == SRC_ACCEL and h["boot_id"])
+        if len(boots) > 1:
+            self.problem("FAIL", "Q8", "accelerator blobs of %d different boots (boot id %s): files of two reports "
+                                       "mixed" % (len(boots), ", ".join("%08x" % x for x in sorted(boots))))
         for h in self.headers:
             if h["nomem"]:
                 self.problem("FAIL", "Q8", "%s: %d event(s) NOT recorded (no memory for the %s ring)" %
@@ -367,6 +371,9 @@ def ab_validity(trace, expected=False, min_swaps=AB_MIN_SWAPS):
     if not per:
         out.append(("FAIL", "A/B inconclusive: no swap on any head in phases 1 and 2 (nothing redrew: Activity "
                             "Monitor not running?)"))
+    others = sorted(set(e.head for e in trace.by("SWAP") if e.head != 0xff) - set(per))
+    for h in others:
+        out.append(("INFO", "A/B: head %d had no swap in phases 1 and 2 (nothing redrew on its display): not judged" % h))
     for h, c in sorted(per.items()):
         for p in (1, 2):
             if c[p] < min_swaps:
@@ -497,7 +504,8 @@ def hypotheses(trace):
                     "have no VRAM (copy forward / page-on fail inside the family)" % (len(refused), refused[0].v4,
                                                                                      refused[0].v0)))
     # the panel scanning another buffer than the swap expected
-    mism = [e for e in trace.by("PANEL") if e.pc and e.pa and not e.flags & 1 and e.pa != e.pc]
+    # MC addresses (flag 2: no VRAM base yet, or below the aperture) are not comparable
+    mism = [e for e in trace.by("PANEL") if e.pc and e.pa and not e.flags & 3 and e.pa != e.pc]
     if mism:
         out.append(("WARN", "PANEL", "%d swap(s) found the HUBP scanning 0x%x instead of 0x%x (first) - the panel "
                     "is not where the driver thinks" % (len(mism), mism[0].pa, mism[0].pc)))
@@ -505,11 +513,107 @@ def hypotheses(trace):
     if faults:
         out.append(("WARN", "GPU", "%d GPU page fault(s) (first VMID %d at 0x%x, pid %d)" %
                     (len(faults), faults[0].v0, faults[0].pa, faults[0].v2)))
+    capped = [e for e in trace.by("GPUWAIT") if e.v3 == 1]
+    if capped:
+        out.append(("WARN", "GPU", "%d GPU wait(s) ran out the 10 s cap (a hang: first IP %d seq %d, pid %d) - the "
+                    "plugin's fence waits around them time out too" % (len(capped), capped[0].arg, capped[0].v2,
+                                                                       capped[0].v0)))
+    out.extend(copy_black(trace, swaps))
     resets = trace.by("RESET")
     if resets:
         out.append(("WARN", "GPU", "%d hang recover%s (first IP %d seq %d)" % (len(resets), "y" if len(resets) == 1
                                                                               else "ies", resets[0].arg, resets[0].v2)))
     return out
+
+
+def copy_black(trace, swaps=None):
+    """[(level, name, text)]: COPY-BLACK - a mode 1/2 copy whose back had
+    pixels but the scanout buffer (SCAN 0xfe) or the front (0xfd) sampled
+    right after it had none: the copy itself lost the picture"""
+    after = {}
+    for e in trace.by("SCAN"):
+        if e.arg in (0xfe, 0xfd) and e.flags & (64 | 128):
+            after.setdefault((e.head, e.v0), []).append(e)
+    bad = []
+    for e in (trace.by("SWAP") if swaps is None else swaps):
+        if e.arg != 4:
+            continue
+        back, rcb = swap_back(e)[:2]
+        if rcb != 5:
+            continue
+        for sc in after.get((e.head, e.v0), []):
+            if not sc.flags & 1:
+                bad.append((e, sc))
+                break
+    if not bad:
+        return []
+    e, sc = bad[0]
+    return [("FAIL", "COPY-BLACK", "%d copy(ies) of a back WITH pixels left the %s without any (first: swap #%d head "
+             "%d, back 0x%x -> 0x%x): the copy lost the picture (SDMA, a wrong source / pitch, or HDP)" %
+             (len(bad), "scanout buffer" if sc.arg == 0xfe else "front", e.v0, e.head, swap_back(e)[0], sc.pa))]
+
+
+def back_surfaces(trace, swaps=None):
+    """{head: {back phys: [swaps, IOSurface id or None, type byte or None, swaps with pixels]}}:
+    the join of the swaps' backs with the IOSurface ids SURFRES / SCAN carry"""
+    ids = {}
+    for e in trace.by("SURFRES"):
+        if e.pa:
+            if e.v0 or e.pa not in ids:
+                ids[e.pa] = (e.v0 or None, e.v4)
+    for e in trace.by("SCAN"):
+        if e.pa and e.v3 and e.pa not in ids:
+            ids[e.pa] = (e.v3, e.v4)
+    out = {}
+    for e in (trace.by("SWAP") if swaps is None else swaps):
+        if e.head == 0xff:
+            continue
+        back, rcb = swap_back(e)[:2]
+        if not back:
+            continue
+        sid, ty = ids.get(back, (None, None))
+        st = out.setdefault(e.head, {}).setdefault(back, [0, sid, ty, 0])
+        st[0] += 1
+        st[3] += rcb == 5
+    return out
+
+
+def join_lines(trace, plugin=None):
+    """[(level, text)]: every back the swaps named (phases 1-2 when the A/B
+    ran) with its IOSurface id; WARN for a back without one (the plugin's
+    trace cannot be joined to it). plugin: {IOSurface id: what the plugin's
+    trace says of it} (tools/plugin_trace.py surface_summary)"""
+    swaps, _ = ab_events(trace)
+    out = []
+    for h, bufs in sorted(back_surfaces(trace, swaps).items()):
+        for phys, (n, sid, ty, pix) in sorted(bufs.items()):
+            if sid is None:
+                out.append(("WARN", "join: head %d back 0x%x (%d swaps, %d with pixels) has NO IOSurface id in the "
+                                    "trace%s - the plugin's trace cannot be joined to it" %
+                            (h, phys, n, pix, " (resource type 0x%02x)" % (ty & 0xff) if ty is not None else
+                             " (no SURFRES for it)")))
+                continue
+            what = ""
+            if plugin is not None:
+                what = ": plugin " + plugin.get(sid, "NEVER saw this IOSurface (not rendered by Metal, or the plugin's "
+                                                     "trace does not cover the time)")
+            out.append(("INFO", "join: head %d back 0x%x = IOSurface %d (%d swaps, %d with pixels)%s" %
+                        (h, phys, sid, n, pix, what)))
+    return out
+
+
+def ab_window(trace):
+    """(start, end) wall seconds of the A/B's phases 1-2 (MODESET arg 1), None
+    without a wall anchor or an A/B"""
+    ms = [e for e in trace.events if e.src == SRC_ACCEL and e.type == T["MODESET"] and e.arg == 1]
+    start = [e for e in ms if e.v1 == 1]
+    end = [e for e in ms if e.v1 in (3, 0) and start and e.t > start[0].t]
+    if not start:
+        return None
+    a, b = wall_of(trace, start[0]), wall_of(trace, end[0]) if end else None
+    if a is None:
+        return None
+    return a, b
 
 
 def ab_table(trace):
@@ -614,13 +718,14 @@ def coverage(trace, ctx=None):
                     (len(allocs), len(frees), len(shapes),
                      "" if ok5 else " - none although the ring still holds the whole boot and swaps ran")))
         panel = trace.by("PANEL")
-        known = [e for e in panel if e.pa]
+        known = [e for e in panel if e.pa and not e.flags & 2]   # MC addresses are not known (round 2)
         whyp = {}
         for e in panel:
-            if not e.pa:
+            if not e.pa or e.flags & 2:
                 whyp[e.v3] = whyp.get(e.v3, 0) + 1
         reasons = {1: "no core", 2: "the core does not know the head", 3: "the core's rdna3DisplayScanAddr failed",
-                   0: "a core without rdna3DisplayScanAddr"}
+                   0: "a core without rdna3DisplayScanAddr", 4: "no VRAM base yet (MC addresses)",
+                   5: "an address below the framebuffer aperture (MC)"}
         out.append(("Q6", bool(known) or not swaps,
                     "%d panel reads, %d with the HUBP's address%s" %
                     (len(panel), len(known), "" if known or not panel else " (%s)" % ", ".join(
@@ -630,13 +735,24 @@ def coverage(trace, ctx=None):
                     "%d swap mode / A/B changes, %d display mode events" % (len(ms), len(trace.by("MODE")))))
         streams = [h for h in trace.headers if h["read_kind"] == READ_STREAM]
         if streams:
-            # every stream read in the files is inside the run (the pump's first
-            # read only moves the cursor and is not saved)
-            lost = sum(h["lost"] for h in streams)
-            lc = sum(h["lost"] for h in streams if h["source"] == SRC_CORE)
+            # the first read of each stream file is the boot before the pump
+            # started (autoreport.sh keeps it, ECC review round 2): what the
+            # ring overwrote before it is not a loss of the run
+            first = set()
+            seen = set()
+            for h in streams:
+                k = (h["where"], h["source"])
+                if k not in seen:
+                    seen.add(k)
+                    first.add(id(h))
+            boot = sum(h["lost"] for h in streams if id(h) in first)
+            run_ = [h for h in streams if id(h) not in first]
+            lost = sum(h["lost"] for h in run_)
+            lc = sum(h["lost"] for h in run_ if h["source"] == SRC_CORE)
             ok8 = lost == 0
-            why = "%d stream reads, %d events lost between them%s" % (len(streams), lost,
-                                                                     " (%d of the core's)" % lc if lc else "")
+            why = "%d stream reads, %d events lost between them%s%s" % (
+                len(streams), lost, " (%d of the core's)" % lc if lc else "",
+                "; the boot before the pump: %d events overwritten before its first read" % boot if boot else "")
         else:
             lost = max([h["lost"] for h in acc] or [0])
             ok8 = lost == 0 or not ab_ran
@@ -673,6 +789,13 @@ def coverage(trace, ctx=None):
 def fmt_event(trace, e, t0=0):
     ms = (trace.ns(e, e.src) - t0) / 1e6
     n = e.name
+    w = wall_of(trace, e)
+    if w is not None:   # the logs' clock (UTC), so plugin and kernel lines can be read side by side
+        return time.strftime("%H:%M:%S", time.gmtime(w)) + ".%03d " % int((w % 1) * 1000) + _fmt_event(trace, e, ms, n)
+    return _fmt_event(trace, e, ms, n)
+
+
+def _fmt_event(trace, e, ms, n):
     if n == "SWAP":
         back, rcb, front, rcf, bb, fb = swap_back(e)
         return ("%10.3f ms SWAP #%d h%s mode %d %s: back 0x%x (%s, %s) front 0x%x (%s) -> panel 0x%x target %s%s%s "
@@ -682,18 +805,23 @@ def fmt_event(trace, e, t0=0):
                                           " FRONT-OK" if e.flags & F_FRONT_OK else "",
                                           " tear-free" if e.flags & F_DOUBLE else "", e.v2, e.v3))
     if n == "SCAN":
-        return "%10.3f ms SCAN h%s buf[%s] 0x%x %s%s%s bands %s (was %s)" % (
+        return "%10.3f ms SCAN h%s buf[%s] 0x%x %s%s%s%s bands %s (was %s)" % (
             ms, e.head if e.head != 0xff else "?", "%d" % e.arg if e.arg < 0xfd else {0xfe: "scanout", 0xfd: "front",
                                                                                         0xff: "-"}[e.arg],
             e.pa, "pixels" if e.flags & 1 else "empty", " CHANGED" if e.flags & 2 else "",
-            " (re-sampled %d us later)" % e.v1 if e.flags & 16 else "", e.ba.hex(), e.bb.hex())
+            " (re-sampled %d us later)" % e.v1 if e.flags & 16 else "",
+            " IOSurface %d" % e.v3 if e.v3 else "", e.ba.hex(), e.bb.hex())
+    if n == "SURFRES":
+        return "%10.3f ms SURFRES 0x%x = IOSurface %s (how %d, %s, type 0x%02x, %d KiB)" % (
+            ms, e.pa, e.v0 or "NONE", e.v2, {1: "a1", 2: "a2"}.get(e.v1, "plane %d" % e.v1), e.v4 & 0xff, e.v3)
     if n == "CF":
         x0, y0, x1, y1 = struct.unpack("<HHHH", e.ba)
         return "%10.3f ms CF h%s pick %d: front 0x%x -> target 0x%x from 0x%x, %d/%d rects box %d,%d-%d,%d %d KiB %d us -> 0x%x" % (
             ms, e.head if e.head != 0xff else "?", e.arg, e.pa, e.pb, e.pc, e.v1, e.v0, x0, y0, x1, y1, e.v2, e.v3, e.v4)
     if n == "PANEL":
-        return "%10.3f ms PANEL h%d scans 0x%x (requested 0x%x, expected 0x%x)%s frame %d line %d" % (
-            ms, e.head, e.pa, e.pb, e.pc, " FLIP PENDING" if e.flags & 1 else "", e.v0, e.v1)
+        return "%10.3f ms PANEL h%d scans 0x%x%s (requested 0x%x, expected 0x%x)%s frame %d line %d" % (
+            ms, e.head, e.pa, " (MC)" if e.flags & 2 else "", e.pb, e.pc, " FLIP PENDING" if e.flags & 1 else "",
+            e.v0, e.v1)
     if n == "APERTURE":
         return "%10.3f ms APERTURE %s 0x%x (%d KiB, IOSurface %d)" % (ms, "add" if e.arg == 1 else "desc", e.pa, e.v0,
                                                                       e.v1)
@@ -701,6 +829,9 @@ def fmt_event(trace, e, t0=0):
         return "%10.3f ms %s 0x%x %d KiB%s%s" % (ms, n, e.pa, e.v0, "" if e.arg else " REFUSED 0x%x" % e.v4,
                                                  " while scanned by head %d" % e.head if n == "VMFREE" and e.flags & 0xe
                                                  else "")
+    if n == "CS" and e.arg == 0xff:
+        return "%10.3f ms CS REFUSED pid %d -> %d (that error %d times, %d not traced before this)" % (
+            ms, e.v0, e.v4 - (1 << 32) if e.v4 >> 31 else e.v4, e.v1, e.v2)
     if n == "CS":
         return "%10.3f ms CS pid %d vmid %d ip %d ring %d seq %d ibs %d bos %d -> %d" % (
             ms, e.v0, e.v1, e.arg, e.flags, e.v2, e.v3 & 0xffff, e.v3 >> 16, e.v4 - (1 << 32) if e.v4 >> 31 else e.v4)
@@ -729,6 +860,9 @@ def summary_lines(trace, ctx=None, last=60):
             out.append((lv, "%s: %s" % (q, text)))
     for lv, name, text in hypotheses(trace):
         out.append((lv, "%s: %s" % (name, text)))
+    # the backs without an IOSurface id (the join with the plugin's trace is
+    # printed by tools/triage_reports.py, which reads both)
+    out.extend(l for l in join_lines(trace) if l[0] != "INFO")
     valid = ab_validity(trace, (ctx or {}).get("ab_expected", False))
     for lv, text in valid:
         out.append((lv, text))

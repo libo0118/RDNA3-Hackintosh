@@ -161,12 +161,23 @@ static inline int rd3_sc_d_stale(int haveD, unsigned dW, unsigned dH, unsigned w
 }
 /* D may be freed now: the panel does not show it and the head's last flip
  * (away from D, or anyone's: a mode 0 or IOP flip, posted to the swaps)
- * was seen latched - until then the HUBP may still read D (ECC review
+ * was SEEN latched - until then the HUBP may still read D (ECC review
  * round 1: a freed D is VRAM the next allocation scribbles on while it is
- * on the panel) */
-static inline int rd3_sc_d_freeable(enum rd3_sc_shows shows, int flipped, int latched)
+ * on the panel). 'seen' is an observation of the latch, never a wait that
+ * gave up (round 2). */
+static inline int rd3_sc_d_freeable(enum rd3_sc_shows shows, int flipped, int seen)
 {
-    return shows != RD3_SCS_D && (!flipped || latched);
+    return shows != RD3_SCS_D && (!flipped || seen);
+}
+
+/* A panel move posted from outside the family's lock (an IOP flip, a
+ * display mode change) applies only when it is newer than the head's last
+ * flip of its own: a post that was in flight while a swap flipped would
+ * otherwise undo that swap's record (ECC review round 2). Times in any
+ * monotonic unit (mach_absolute_time). */
+static inline int rd3_sc_post_applies(unsigned long long postAt, unsigned long long lastOwnFlipAt)
+{
+    return postAt > lastOwnFlipAt;
 }
 
 /* the wait before a copy: none, the bounded wait for the latch, or (the
@@ -209,29 +220,31 @@ static inline int rd3_sc_front_current(const struct rd3_sc_front *f, const void 
  * at every swap. RD3_SC_BRK_RUN failures in a row, or one timeout, open the
  * breaker: the swaps flip as in mode 0 (the panel keeps getting frames, the
  * flicker of card run 2026-10-17 comes back, nothing waits on the engine)
- * until RD3_SC_BRK_RETRY swaps later one swap tries SDMA again; its success
- * closes the breaker, its failure opens it for another RD3_SC_BRK_RETRY.
- * Every transition is an event the caller logs and traces. */
-#define RD3_SC_BRK_RUN   3u
-#define RD3_SC_BRK_RETRY 600u
+ * until RD3_SC_BRK_RETRY_US later (by the clock, not by swaps: a quiet
+ * desktop swaps rarely, round 2) one swap tries SDMA again; its success
+ * closes the breaker, its failure opens it for another RD3_SC_BRK_RETRY_US.
+ * Every transition is an event the caller logs and traces. 'now' is in
+ * microseconds. */
+#define RD3_SC_BRK_RUN      3u
+#define RD3_SC_BRK_RETRY_US 10000000ull   /* 10 s */
 struct rd3_sc_brk {
     unsigned run;            /* failures in a row */
     int off;                 /* open: the swaps flip */
     int probing;             /* the one swap trying SDMA again */
-    unsigned long long offAt;/* the swap number it opened at */
+    unsigned long long offAt;/* when it opened (us) */
     unsigned trips;          /* times it opened */
 };
 enum rd3_sc_brk_ev {
     RD3_SC_BRK_NONE = 0, RD3_SC_BRK_OPENED = 1, RD3_SC_BRK_PROBE = 2, RD3_SC_BRK_CLOSED = 3,
-    RD3_SC_BRK_REOPENED = 4   /* the probe failed: open for another RD3_SC_BRK_RETRY swaps */
+    RD3_SC_BRK_REOPENED = 4   /* the probe failed: open for another RD3_SC_BRK_RETRY_US */
 };
-/* whether swap 'now' copies (else it flips); *ev: a probe begins */
+/* whether a swap at 'now' (us) copies (else it flips); *ev: a probe begins */
 static inline int rd3_sc_brk_allow(struct rd3_sc_brk *b, unsigned long long now, enum rd3_sc_brk_ev *ev)
 {
     *ev = RD3_SC_BRK_NONE;
     if (!b->off)
         return 1;
-    if (!b->probing && now - b->offAt >= RD3_SC_BRK_RETRY) {
+    if (!b->probing && now - b->offAt >= RD3_SC_BRK_RETRY_US) {
         b->probing = 1;
         *ev = RD3_SC_BRK_PROBE;
         return 1;

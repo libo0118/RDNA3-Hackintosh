@@ -15,6 +15,7 @@ some triage output above the summary
    !! two lit pipes scan the same surface: both monitors show one picture
    FAIL STALE PLUGIN/RADV: PLUGIN log has the G14 line but no extended_dynamic_state line
    FAIL framebuffer build    framebuffer cb91605a29, these sources b7bc5af461: stale RDNA3Framebuffer.kext
+   CRITICAL copy forward: CoreDisplay disabled copy forward at 13:20 (0xe00002bc)
        FAIL display sleep: never blanked a head
    PASS framebuffer EDID     present
 ==============================================================================
@@ -39,6 +40,11 @@ SUMMARY of the newest report (rdna3-report-test.tar.gz)
   screens dark           0 lit
   screens mode-d0-1600x900 2 lit, UNDERFLOW
   screens same           2 lit, SAME SURFACE on two pipes
+  screens black          2 lit, pipe 0 1% not black, pipe 1 40% not black, BLACK pipe(s) 0
+  screens lit ok         2 lit, pipe 0 45% not black, pipe 1 40% not black
+  A/B screens            FAIL mode 1 left pipe(s) 0 BLACK (pipe 0: mode 1 1%, mode 0 44%)
+  copy forward           CRITICAL CoreDisplay disabled copy forward at 2026-10-17 13:20:15.056 (0xe00002bc)
+  frame trace            CRITICAL CF-ERROR: 1 copy forward(s) answered an error
   screens notx           2 lit, NO TX LINES
   screens dig            2 lit, TX: DIG FIFO error
   screens wake           2 lit, 2 blanked
@@ -110,6 +116,7 @@ want 'FAIL' 'R4 macOS bad' 'not running'
 want 'FAIL' 'triage: STALE PLUGIN/RADV' 'G14'
 want 'FAIL' 'triage: framebuffer build' 'stale RDNA3Framebuffer.kext'
 want 'FAIL' 'triage: display sleep' 'never blanked'
+want 'FAIL' 'triage: copy forward' 'CoreDisplay disabled'        # an indented CRITICAL line is forced too
 grep -q 'framebuffer EDID' "$T/out.txt" && fail "a PASS detail line outside the SUMMARY became a row"
 want 'PASS' 'Metal' 'ALL PASSED'
 want 'FAIL' 'Metal bad' 'METAL: FAILED'
@@ -121,6 +128,11 @@ want 'PASS' 'screens sleep dpms' '0 lit, 2 blanked'
 want 'FAIL' 'screens dark' '0 lit'
 want 'WARN' 'screens mode-d0-1600x900' 'UNDERFLOW'      # a name longer than the column
 want 'WARN' 'screens same' 'SAME SURFACE'
+want 'FAIL' 'screens black' 'BLACK pipe'
+want 'PASS' 'screens lit ok' '45% not black'
+want 'FAIL' 'A/B screens' 'BLACK'
+want 'FAIL' 'copy forward' 'CoreDisplay disabled copy forward'    # CRITICAL is a FAIL (ECC review round 2)
+want 'FAIL' 'frame trace' 'CF-ERROR'
 want 'WARN' 'screens notx' 'NO TX LINES'
 want 'WARN' 'screens dig' 'DIG FIFO error'
 want 'FAIL' 'screens wake' '2 blanked'                  # still blanked after the wake
@@ -163,7 +175,7 @@ want 'INFO' 'something new' 'a row no rule knows'        # unknown: INFO with it
 # the verdict word is not repeated in the text of "WARN head 0: ..." rows
 grep -qE '^WARN +copy forward +head 0: 190' "$T/out.txt" || fail "verdict word not stripped from the text"
 # the "!!" line above the SUMMARY is not a row; every SUMMARY row and FAIL line is
-[ "$(grep -cE '^(PASS|FAIL|WARN|INFO|NOT RUN) ' "$T/out.txt")" -eq "$(( $(sed -n '/^SUMMARY/,/^====/p' "$T/triage.txt" | grep -cE '^  [^=S ]|^    ') + $(grep -cE '^ +FAIL ' "$T/triage.txt") ))" ] ||
+[ "$(grep -cE '^(PASS|FAIL|WARN|INFO|NOT RUN) ' "$T/out.txt")" -eq "$(( $(sed -n '/^SUMMARY/,/^====/p' "$T/triage.txt" | grep -cE '^  [^=S ]|^    ') + $(grep -cE '^ +(FAIL|CRITICAL) ' "$T/triage.txt") ))" ] ||
     fail "row count differs from the SUMMARY's"
 grep -q 'scan the same surface' "$T/out.txt" && fail "a line outside the SUMMARY was printed"
 grep -qE '^[0-9]+ PASS, [0-9]+ FAIL, [0-9]+ WARN, [0-9]+ INFO, [0-9]+ NOT RUN$' "$T/out.txt" || fail "count line"

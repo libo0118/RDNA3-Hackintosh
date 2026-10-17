@@ -11,7 +11,19 @@
 #   <dir>/32-log-nvmtl-windowserver.txt           WindowServer's NVMTL os_log lines of this boot, unfiltered
 # Decode on the host with tools/plugin_trace.py <report>.tar.gz (docs/AFTER-TESTS.md "Plugin frame trace").
 # Read-only except for the two outputs; never fails the report (always exits 0).
+#   --traces-only   no log show (autoreport.sh's snapshots during the A/B: seconds, not minutes)
+#   --only NAME     only files whose name starts with NAME (e.g. WindowServer)
+# Traces opened before this boot (kern.boottime; NVMTL_BOOTTIME=<seconds> overrides it for tests) are old
+# files in a directory nobody cleans: REJECTed, never judged as this run's.
 set -u
+traces_only=; only=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --traces-only) traces_only=1; shift ;;
+        --only) only=${2:-}; shift 2 ;;
+        *) break ;;
+    esac
+done
 dir=${1:-}
 if [ -z "$dir" ] || [ ! -d "$dir" ]; then
     echo "usage: collect_plugin_trace.sh <report dir>" >&2
@@ -34,6 +46,10 @@ info="$out/info.txt"
 cap=${NVMTL_COLLECT_MAXBYTES:-268435456}
 me=$(id -u)
 note() { echo "$*" >> "$info"; }
+# this boot's start (seconds since 1970): "{ sec = 1792310400, usec = 0 } ..." on macOS
+boot=${NVMTL_BOOTTIME:-$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9]*\).*/\1/p')}
+case "$boot" in ''|*[!0-9]*) boot=; note "boottime unknown: traces of older boots are not filtered" ;; *) note "boottime $boot" ;; esac
+mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }   # GNU first: its -f is the file system
 # The checks above and this copy are two opens of the name, and the directory is world writable: the copy is
 # bounded (never more than the cap, whatever the name has become by now), exclusive (noclobber) and watched (a FIFO
 # swapped in would block the open; the watchdog ends it), and checked again afterwards.
@@ -59,6 +75,7 @@ for src in ${NVMTL_TRACE_DIR:-} /var/tmp/rdna3-nvmtl; do
     for f in "$src"/*.trace; do
         [ -e "$f" ] || [ -L "$f" ] || continue
         b=$(basename "$f")
+        case "$b" in "$only"*) ;; *) continue ;; esac
         set -- $(ls -ldn "$f" 2>/dev/null)
         mode=${1:-?}; links=${2:-0}; owner=${3:-x}; size=${5:-0}
         line="$mode $links uid $owner size $size $b"
@@ -73,6 +90,11 @@ for src in ${NVMTL_TRACE_DIR:-} /var/tmp/rdna3-nvmtl; do
             [ -r "$f" ] && { magic=$(head -c 8 "$f" 2>/dev/null); hu=$(od -An -tu4 -j104 -N4 "$f" 2>/dev/null | tr -d ' '); }
             if [ ! -r "$f" ]; then why="unreadable: run with sudo"
             elif [ "$magic" != NVMTLTR1 ]; then why="no NVMTLTR1 magic"
+            elif [ -n "$boot" ] && [ "$(mtime_of "$f")" -lt "$boot" ] 2>/dev/null; then
+                why="written before this boot (mtime $(mtime_of "$f"), boot $boot): an old trace"
+            elif [ -n "$boot" ] && sw=$(od -An -tu8 -j72 -N8 "$f" 2>/dev/null | tr -d ' ') && [ -n "$sw" ] && [ ${#sw} -le 18 ] &&
+                 [ "$((sw / 1000000000))" -lt "$boot" ] 2>/dev/null; then
+                why="opened before this boot (header $((sw / 1000000000)), boot $boot): an old trace"
             else
                 case "$b" in
                 WindowServer*) case "$owner" in 0|88) ;; *) why="named WindowServer but owned by uid $owner" ;; esac ;;
@@ -110,6 +132,7 @@ done
     fi
 } >> "$info" 2>&1
 
+[ -n "$traces_only" ] && exit 0
 # WindowServer's NVMTL lines whole: the text log is rate limited, the traces above are the record, but the log
 # carries the plugin's own explanations (which route each surface took, the kernel's refusals)
 lim=240
@@ -117,7 +140,7 @@ lim=240
     echo "\$ log show --last boot --info --style compact --predicate 'process == \"WindowServer\" AND eventMessage CONTAINS \"NVMTL\"'"
     log show --last boot --info --style compact --predicate 'process == "WindowServer" AND eventMessage CONTAINS "NVMTL"' &
     p=$!
-    ( sleep "$lim"; kill -9 "$p" 2>/dev/null ) &
+    ( sleep "$lim" & s=$!; trap 'kill $s 2>/dev/null; exit 0' TERM; wait $s; kill -9 "$p" 2>/dev/null ) &
     w=$!
     wait "$p"; r=$?
     kill "$w" 2>/dev/null

@@ -368,23 +368,25 @@ static void breaker(void)
     CHECK(rd3_sc_brk_fail(&b, 4, 0) == RD3_SC_BRK_NONE);
     CHECK(rd3_sc_brk_fail(&b, 5, 0) == RD3_SC_BRK_OPENED);
     CHECK(!rd3_sc_brk_allow(&b, 6, &ev) && ev == RD3_SC_BRK_NONE);
-    CHECK(rd3_sc_brk_allow(&b, 5 + RD3_SC_BRK_RETRY, &ev) && ev == RD3_SC_BRK_PROBE);
+    CHECK(rd3_sc_brk_allow(&b, 5 + RD3_SC_BRK_RETRY_US, &ev) && ev == RD3_SC_BRK_PROBE);
     CHECK(rd3_sc_brk_ok(&b) == RD3_SC_BRK_CLOSED);
-    CHECK(rd3_sc_brk_allow(&b, 5 + RD3_SC_BRK_RETRY + 1, &ev));
+    CHECK(rd3_sc_brk_allow(&b, 5 + RD3_SC_BRK_RETRY_US + 1, &ev));
     /* one timeout opens it at once */
     memset(&b, 0, sizeof b);
     CHECK(rd3_sc_brk_fail(&b, 10, 1) == RD3_SC_BRK_OPENED);
-    /* a dead engine over 10000 swaps (every copy times out) */
+    /* a dead engine over 10000 swaps at 60 Hz (every copy times out): one
+     * try per RD3_SC_BRK_RETRY_US of the clock (round 2: not per swaps) */
     memset(&b, 0, sizeof b);
     for (n = 1; n <= 10000; n++) {
-        if (!rd3_sc_brk_allow(&b, n, &ev)) {
+        const unsigned long long t = n * 16667ull;
+        if (!rd3_sc_brk_allow(&b, t, &ev)) {
             flips++;
             continue;
         }
         if (ev == RD3_SC_BRK_PROBE)
             probes++;
         tries++;
-        ev = rd3_sc_brk_fail(&b, n, 1);
+        ev = rd3_sc_brk_fail(&b, t, 1);
         if (ev == RD3_SC_BRK_OPENED)
             opened++;
         if (ev == RD3_SC_BRK_REOPENED)
@@ -392,8 +394,64 @@ static void breaker(void)
     }
     CHECK(opened == 1 && b.trips == 1);
     CHECK(tries == 1 + probes && reopened == probes);
-    CHECK(probes == 10000 / RD3_SC_BRK_RETRY);   /* one copy per RD3_SC_BRK_RETRY swaps */
+    CHECK(probes == 16);                         /* 166 s: one try per 10 s */
     CHECK(flips == 10000 - tries);
+    /* a quiet desktop: a swap every 2 s still gets a try every 10 s */
+    memset(&b, 0, sizeof b);
+    probes = 0;
+    for (n = 1; n <= 100; n++) {
+        const unsigned long long t = n * 2000000ull;
+        if (rd3_sc_brk_allow(&b, t, &ev)) {
+            if (ev == RD3_SC_BRK_PROBE)
+                probes++;
+            (void)rd3_sc_brk_fail(&b, t, 1);
+        }
+    }
+    CHECK(probes == 19);
+}
+
+/* ECC review round 2: a panel move posted from outside the family's lock
+ * never undoes a later flip of the swap's own. A head's record against
+ * what its HUBP was programmed with last, over random interleavings of
+ * IOP flips (posted, applied at the next swap) and swaps' own flips. */
+static void posts(void)
+{
+    unsigned i, wrong = 0, ignored = 0;
+    unsigned long long clock = 1, lastOwn = 0, postAt = 0;
+    int posted = 0, recorded = 0 /* 0 ours, 1 someone else's */, hubp = 0;
+    CHECK(rd3_sc_post_applies(5, 4) && !rd3_sc_post_applies(4, 4) && !rd3_sc_post_applies(3, 4));
+    for (i = 0; i < 20000; i++) {
+        const unsigned r = rnd(3);
+        clock++;
+        if (r == 0) {              /* an IOP flip programs another buffer and posts it */
+            hubp = 1;
+            postAt = clock;
+            posted = 1;
+        } else {                   /* a swap: applies posts, then (r == 2) flips its own buffer */
+            if (posted) {
+                if (rd3_sc_post_applies(postAt, lastOwn))
+                    recorded = 1;
+                else
+                    ignored++;
+                posted = 0;
+            }
+            if (recorded != hubp)
+                wrong++;
+            if (r == 2) {
+                clock++;
+                lastOwn = clock;
+                hubp = 0;
+                recorded = 0;
+                /* a post made before this flip but applied after it (the race of round 2) */
+                if (rnd(4) == 0) {
+                    postAt = lastOwn - 1;
+                    posted = 1;
+                }
+            }
+        }
+    }
+    CHECK(wrong == 0);
+    CHECK(ignored > 0);    /* the race was exercised */
 }
 
 int main(void)
@@ -408,6 +466,7 @@ int main(void)
     wait_backoff();
     front_record();
     breaker();
+    posts();
     if (fails) {
         printf("test_swap_copy: %d check(s) FAILED\n", fails);
         return 1;

@@ -239,6 +239,22 @@ class Trace:
         except (OverflowError, ValueError, OSError):
             return "?"
 
+    def wall_s(self, ticks):
+        """a record's wall clock in seconds since 1970 (float), None for an impossible clock"""
+        try:
+            v = (self.start_wall_ns + max(0, ticks - self.start_abs) * self.tb_n // self.tb_d) / 1e9
+            return v if 0 < v < 1e11 else None
+        except (OverflowError, ValueError, ZeroDivisionError):
+            return None
+
+    def kept_window(self):
+        """(first, last) wall seconds of the main ring's kept records, or None"""
+        main = [r for r in self.recs if r.ring == 0]
+        if not main:
+            return None
+        a, b = self.wall_s(main[0].abs), self.wall_s(main[-1].abs)
+        return (a, b) if a is not None and b is not None else None
+
     def totals(self):
         t = collections.Counter()
         for _s, _f, c in self.sums:
@@ -263,8 +279,20 @@ def read_regular(path):
         return fh.read(MAX_FILE + 1)
 
 
-def load_paths(paths):
+def utc(sec):
+    try:
+        return datetime.datetime.fromtimestamp(sec, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    except (OverflowError, ValueError, OSError, TypeError):
+        return "?"
+
+
+def load_paths(paths, boottime=None):
+    """(traces, problems). A report .tar.gz also takes the snapshots autoreport.sh sent next to it
+    (<report>-plugin-<when>-<process>-<pid>.trace: a later cut must not lose the A/B); one trace per
+    process (the one with the most events wins). boottime (seconds since 1970, else the archive's
+    31-plugin-trace/info.txt 'boottime N' line): traces opened before it are another boot's, not judged."""
     traces, problems = [], []
+    found_boot = [boottime]
 
     def add(name, data):
         try:
@@ -289,18 +317,46 @@ def load_paths(paths):
                 n0 = len(traces)
                 with tarfile.open(p) as tar:
                     for m in tar:
+                        if m.isfile() and m.name.endswith("31-plugin-trace/info.txt") and m.size < (1 << 20):
+                            bt = re.search(r"^boottime (\d+)", tar.extractfile(m).read().decode("ascii", "replace"), re.M)
+                            if bt and found_boot[0] is None:
+                                found_boot[0] = int(bt.group(1))
                         if not (m.isfile() and m.name.endswith(".trace")):
                             continue
                         if m.size > MAX_FILE:
                             problems.append("%s: %d bytes, more than %d (not read)" % (clean(m.name), m.size, MAX_FILE))
                             continue
                         add(os.path.basename(m.name), tar.extractfile(m).read())
+                in_archive = len(traces) - n0
+                base = p[:-len(".tar.gz")] if p.endswith(".tar.gz") else p.rsplit(".", 1)[0]
+                import glob as _glob
+                for f in sorted(_glob.glob(_glob.escape(base) + "-plugin-*.trace")):
+                    try:
+                        add(os.path.basename(f), read_regular(f))
+                    except (ValueError, OSError) as e:
+                        problems.append(clean(e))
                 if len(traces) == n0:
                     problems.append("%s: no plugin traces in the archive (collect_plugin_trace.sh did not run, or the plugin is older)" % clean(p))
+                elif not in_archive:
+                    problems.append("%s: no plugin traces in the archive; the A/B snapshots sent next to it are read" % clean(p))
             else:
                 add(os.path.basename(p), read_regular(p))
         except (ValueError, OSError, tarfile.TarError) as e:
             problems.append(clean(e))
+    # one trace per process: the archive's final copy and the A/B snapshots of the same file
+    best = {}
+    for t in traces:
+        k = (t.proc, t.pid, t.start_wall_ns)
+        if k not in best or t.total_events > best[k].total_events:
+            best[k] = t
+    traces = list(best.values())
+    bt = found_boot[0]
+    if bt:
+        old = [t for t in traces if t.start_wall_ns / 1e9 < bt - 5]
+        for t in old:
+            problems.append("%s[%d] (%s): OLD - opened %s UTC, before this boot (%s UTC): not judged" %
+                            (t.proc, t.pid, t.name, t.opened(), utc(bt)))
+        traces = [t for t in traces if t not in old]
     traces.sort(key=lambda t: (t.proc != "WindowServer", t.proc, t.pid))
     return traces, problems
 
@@ -748,28 +804,85 @@ def print_rates(tr, out):
         prev = sec
 
 
-def triage_lines(path, big=(1024, 600)):
-    """[(level, text)] for tools/triage_reports.py: the findings of a report's traces, WindowServer first"""
-    traces, problems = load_paths([path])
+def surface_summary(an):
+    """{IOSurface id: what this process's trace says of it} (tools/rdna3_trace.py's join)"""
+    out = {}
+    for sid, sf in an.surfs.items():
+        if not sid:
+            continue
+        bits = []
+        if sf.drawn:
+            bits.append("DRAWN %d" % sf.drawn)
+        if sf.clear_only:
+            bits.append("CLEAR-ONLY %d" % sf.clear_only)
+        if sf.other_pass:
+            bits.append("other passes %d" % sf.other_pass)
+        if not sf.frames:
+            bits.append("no pass")
+        pub = "published %d (dirty %d, copy-out %d" % (sf.published, sf.out_dirty, sf.out_copy)
+        if sf.empty_out:
+            pub += ", %d EMPTY" % sf.empty_out
+        pub += ")"
+        if not sf.published and sf.dirtied:
+            pub = "NEVER published (written by %d command buffer(s))" % sf.dirtied
+        elif not sf.published:
+            pub = "never published"
+        bits.append(pub)
+        if sf.out_fail:
+            bits.append("%d copy-out FAILURE(s)" % sf.out_fail)
+        if sf.in_upload or sf.in_skip:
+            bits.append("surface-in %d upload / %d skip" % (sf.in_upload, sf.in_skip))
+        out[sid] = ", ".join(bits)
+    return out
+
+
+def triage(path, big=(1024, 600), ab_window=None, boottime=None):
+    """(lines, surfaces): [(level, text)] for tools/triage_reports.py - the findings of a report's traces,
+    WindowServer first, each with when its trace was opened, the time the main ring still covers, and a
+    WARN when it wrapped (and does not cover the A/B: ab_window = (start, end) wall seconds) - and
+    {IOSurface id: summary} of WindowServer's surfaces for the join with the kernel's trace"""
+    traces, problems = load_paths([path], boottime)
     out = []
+    surfaces = {}
     for p in problems:
-        out.append(("INFO", "plugin trace: %s" % p))
+        out.append(("WARN" if "OLD -" in p else "INFO", "plugin trace: %s" % p))
     for tr in traces:
         an = Analysis(tr, big)
         ws = tr.proc == "WindowServer"
+        tag = "plugin trace %s[%d] (opened %s UTC)" % (tr.proc, tr.pid, tr.opened())
         for level, code, text, detail in an.findings:
             if level == "INFO" and not ws:
                 continue
             if not ws and level == "WARN":
                 continue   # an app's refused dirty marks are not the desktop's
-            out.append((level, "plugin trace %s[%d] %s: %s%s" % (tr.proc, tr.pid, code, text, ("  [" + "; ".join(detail[:2]) + "]") if detail else "")))
-        if ws:
-            t = tr.totals()
-            out.append(("INFO", "plugin trace WindowServer[%d]: %d frames in the ring, %d passes on surfaces (%d clear-only), %d dirty / %d copy-out "
-                        "(%d after a refused dirty mark) / %d skipped uploads; decode: tools/plugin_trace.py" %
-                        (tr.pid, len([f for f in an.frames.values() if f.commit]), t["passes_surf"], t["clear_only"], t["out_dirty"], t["out_copy"],
-                         t["out_refused"], t["in_skip"])))
-    return out
+            out.append((level, "%s %s: %s%s" % (tag, code, text, ("  [" + "; ".join(detail[:2]) + "]") if detail else "")))
+        if not ws:
+            continue
+        surfaces.update(surface_summary(an))
+        t = tr.totals()
+        win = tr.kept_window()
+        out.append(("INFO", "%s: %d frames in the ring, %d passes on surfaces (%d clear-only), %d dirty / %d copy-out "
+                    "(%d after a refused dirty mark) / %d skipped uploads; kept %s; decode: tools/plugin_trace.py" %
+                    (tag, len([f for f in an.frames.values() if f.commit]), t["passes_surf"], t["clear_only"], t["out_dirty"],
+                     t["out_copy"], t["out_refused"], t["in_skip"],
+                     "%s .. %s UTC (%.0f s)" % (utc(win[0]), utc(win[1])[11:], win[1] - win[0]) if win else "nothing")))
+        if not tr.complete_history():
+            cov = ""
+            if ab_window and ab_window[0] and win:
+                if win[0] > ab_window[0]:
+                    cov = " - the A/B (from %s UTC) is NOT covered: it starts before the oldest kept event" % utc(ab_window[0])
+                else:
+                    cov = " - the A/B (from %s UTC) is covered" % utc(ab_window[0])
+            out.append(("WARN", "%s: main ring WRAPPED (%d events written, %d kept, ring %d): only %s .. %s UTC kept%s "
+                        "(NVMTL_TRACE_RING in rdna3mtl.conf enlarges it from the next WindowServer start)" %
+                        (tag, tr.widx_main, tr.kept, tr.nmain, utc(win[0]) if win else "?",
+                         utc(win[1])[11:] if win else "?", cov)))
+    return out, surfaces
+
+
+def triage_lines(path, big=(1024, 600), ab_window=None, boottime=None):
+    """[(level, text)] for tools/triage_reports.py (triage() without the surfaces)"""
+    return triage(path, big, ab_window, boottime)[0]
 
 
 def main(argv=None):

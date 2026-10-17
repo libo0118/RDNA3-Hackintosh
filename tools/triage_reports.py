@@ -241,6 +241,49 @@ def changed_fraction(a, b):
     return n / float(w * h)
 
 
+# a look whose picture is at most this much not black is a black screen (A5)
+BLACK_PCT = 3
+
+
+def look_pictures(blk):
+    """{pipe: (% not black, bytes changed in 2 s)} of one rdna3_drminfo --scanout block"""
+    out = {}
+    cur = None
+    for line in blk.splitlines():
+        m = re.match(r"^pipe (\d+): ", line)
+        if m:
+            cur = m.group(1)
+            continue
+        m = re.match(r"^  picture \d+x\d+: (\d+)% not black, mean rgb \d+ \d+ \d+, (\d+) bytes changed", line)
+        if m and cur is not None:
+            out[cur] = (int(m.group(1)), int(m.group(2)))
+    return out
+
+
+def ab_pictures(txt):
+    """the A/B's two looks side by side (look ab1: mode 1, look ab0: mode 0):
+    'FAIL ...' when mode 1 left a pipe black that mode 0 did not (or both
+    black), '' without both looks"""
+    looks = {}
+    for blk in txt.split("== rdna3_drminfo --scanout")[1:]:
+        m = re.match(r"\s*\(look (ab[01])\)", blk)
+        if m:
+            looks[m.group(1)] = look_pictures(blk.split("\n== ")[0])
+    if "ab1" not in looks or "ab0" not in looks:
+        return ""
+    a, b = looks["ab1"], looks["ab0"]
+    pipes = sorted(set(a) | set(b))
+    side = "; ".join("pipe %s: mode 1 %s%%, mode 0 %s%%" % (p, a.get(p, ("?",))[0], b.get(p, ("?",))[0]) for p in pipes)
+    black1 = [p for p in pipes if p in a and a[p][0] <= BLACK_PCT]
+    black0 = [p for p in pipes if p in b and b[p][0] <= BLACK_PCT]
+    if black1:
+        return "FAIL mode 1 left pipe(s) %s BLACK (%s)%s" % (" ".join(black1), side,
+                                                           "; mode 0 too" if set(black1) & set(black0) else "")
+    if black0:
+        return "WARN mode 0 left pipe(s) %s black, mode 1 did not (%s)" % (" ".join(black0), side)
+    return "PASS no black pipe in either mode (%s)" % side
+
+
 def m6_screens(prefix):
     """{pipe: (look names in order, the largest change between two
     consecutive looks)} of the M6 hi-res pictures"""
@@ -1108,11 +1151,17 @@ def _trace_lines(path, txt, klog="", args=""):
     if not tr.headers and klog:
         tr.add_lines(klog)
     tr.finish()
+    _TRACE_CACHE[path] = tr
     c = a3_counters(txt) if txt else {}
     c = c or {}
     want = fb_source_hash(ACCEL_HASH_FILES)
     ac = re.search(r"RDNA3Accelerator: build (\S+)", klog)
-    current = bool(want and ac and ac.group(1) == want)
+    # a kernel with the trace: the build line names these sources, or (no
+    # build line in the log: a cut log, a serial-only run) the report shows
+    # the trace's own sysctls (ECC review round 2: a missing build line must
+    # not silence every 'trace incomplete')
+    current = bool(want and ac and ac.group(1) == want) or \
+        (not ac and bool(re.search(r"rdna3accel_swap_mode|rdna3accel_trace", txt + ftxt)))
     accel_on = "rdna3accel=1" in args or "rdna3accel=1" in txt or ("rdna3lvl=" not in args and current)
     out = []
     # collect.sh's own record of what it could read (root only sysctls)
@@ -1153,6 +1202,9 @@ def _trace_lines(path, txt, klog="", args=""):
     return out, tl
 
 
+_TRACE_CACHE = {}   # report path -> the kernel trace _trace_lines decoded (the plugin's join reads it)
+
+
 def read_tar_member(path, suffix):
     """one member of a report archive, "" when there is none"""
     if not os.path.exists(path):
@@ -1164,28 +1216,63 @@ def read_tar_member(path, suffix):
         return ""
 
 
-def plugin_trace_lines(path, cdlog=""):
-    """[(level, text)] of the Metal plugin's trace (tools/plugin_trace.py,
-    another engineer's): its own verdicts; INFO when the report has none on
-    a run where the plugin loaded"""
+def plugin_trace_lines(path, cdlog="", txt=""):
+    """[(level, text)] of the Metal plugin's trace (tools/plugin_trace.py):
+    its verdicts with the time its ring covers against the kernel's A/B, the
+    join of each back the kernel's swaps named with what the plugin did to
+    that IOSurface, and WARN 'plugin trace MISSING (<why>)' when WindowServer
+    loaded the plugin (the tests file's M5 line, the CoreDisplay log) but the
+    report has no trace of it (ECC review round 2)"""
+    ws_loaded = bool(re.search(r"^M5: WindowServer LOADED", txt, re.M) or
+                     re.search(r"^processes with the plugin loaded:.*\bWindowSer", txt, re.M) or
+                     re.search(r"WindowServer\[\d+:[0-9a-f]+\].*NVMTL", cdlog))
+    ktr = _TRACE_CACHE.get(path)
+    abw = rdna3_trace.ab_window(ktr) if (ktr is not None and rdna3_trace is not None) else None
+    info = read_tar_member(path, "31-plugin-trace/info.txt")
+    coll = read_tar_member(path, "37-plugin-trace-collect.txt")
+    out = []
+    for l in re.findall(r"^REJECT .*$", info, re.M)[:6]:
+        out.append(("WARN", "plugin trace collector: " + l[:200]))
     try:
         import plugin_trace  # noqa: E402
-    except ImportError:
-        return []
+    except ImportError as e:
+        out.append(("WARN" if ws_loaded else "INFO", "plugin trace NOT decoded: tools/plugin_trace.py is not next to "
+                                                     "this script (%s)" % e))
+        return out + _join_lines(ktr, None)
     try:
-        lines = plugin_trace.triage_lines(path) or []
+        lines, surfaces = plugin_trace.triage(path, ab_window=abw)
     except Exception as e:   # noqa: BLE001 - the report is untrusted input
-        return [("FAIL", "plugin trace not decoded: %s: %s" % (type(e).__name__, str(e)[:200]))]
-    out = []
-    for l in lines:
-        if isinstance(l, (tuple, list)) and len(l) >= 2:
-            out.append((str(l[0]), str(l[1])))
+        return out + [("FAIL", "plugin trace not decoded: %s: %s" % (type(e).__name__, str(e)[:200]))] + \
+            _join_lines(ktr, None)
+    ws = False
+    for lv, t in lines:
+        if "no plugin traces in the archive" in t and "snapshots" not in t:
+            continue   # said below, with the reason
+        ws = ws or "plugin trace WindowServer[" in t
+        out.append((str(lv), str(t)))
+    if not ws and ws_loaded:
+        why = re.search(r"^== plugin frame traces collected: .*$", info, re.M)
+        if why:
+            why = why.group(0)[3:]
+            hint = re.search(r"^== no traces: (.*)$", info, re.M)
+            if hint:
+                why += "; " + hint.group(1)
+        elif coll:
+            ex = re.findall(r"^\[exit (\d+)\]", coll, re.M)
+            why = "collect_plugin_trace.sh ran (exit %s) but left no 31-plugin-trace/info.txt" % (ex[-1] if ex else "?")
+        elif os.path.exists(path):
+            why = "collect_plugin_trace.sh did not run (no 31-plugin-trace/ and no 37-plugin-trace-collect.txt)"
         else:
-            out.append(("INFO", str(l)))
-    if not out and "NVMTL" in cdlog:
-        out.append(("INFO", "plugin trace: not in this report (the plugin loaded: collect_plugin_trace.sh did not "
-                            "run or found nothing)"))
-    return out
+            why = "no archive (collect.sh did not finish), no snapshot next to it"
+        out.append(("WARN", "plugin trace MISSING (%s) although WindowServer loaded the plugin" % why))
+    return out + _join_lines(ktr, surfaces if ws else None)
+
+
+def _join_lines(ktr, surfaces):
+    """the kernel's backs joined with the plugin's surfaces (rdna3_trace.join_lines)"""
+    if ktr is None or rdna3_trace is None:
+        return []
+    return [(lv, t) for lv, t in rdna3_trace.join_lines(ktr, surfaces) if lv == "INFO"]
 
 
 def coredisplay_cf_lines(cdlog, tr_lines=()):
@@ -1828,11 +1915,18 @@ def summary(path, serial=None):
         own = blk.split("\n== ")[0]
         txbad = [m for m in re.findall(r"^  TX problems: (.*)$", own, re.M) if m.strip() != "none"]
         notx = lit and not re.search(r"^  TX ", own, re.M)
+        pics = look_pictures(own)
+        black = sorted(p for p, (pct, _) in pics.items() if pct <= BLACK_PCT)
         out.append(("screens %s" % (look.group(1) if look else "1"),
-                    "%d lit%s%s%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
-                                          ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "",
-                                          ", TX: " + "; ".join(txbad) if txbad else "",
-                                          ", NO TX LINES" if notx else "")))
+                    "%d lit%s%s%s%s%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
+                                              ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "",
+                                              ", TX: " + "; ".join(txbad) if txbad else "",
+                                              ", NO TX LINES" if notx else "",
+                                              "".join(", pipe %s %d%% not black" % (p, pics[p][0]) for p in sorted(pics)),
+                                              ", BLACK pipe(s) %s" % " ".join(black) if black else "")))
+    ab = ab_pictures(txt)
+    if ab:
+        out.append(("A/B screens", ab))
     # the core's TX watch (what each head sends after its OTG): changes
     # with their time, problems first, from the kernel log of the same boot
     if "TX watch:" in log or "TX at the start" in log:
@@ -1924,8 +2018,12 @@ def summary(path, serial=None):
     for lv, t in tlv:
         if lv in ("FAIL", "CRITICAL", "WARN") or t.startswith("A/B"):
             out.append(("frame trace", "%s %s" % (lv, t[:300])))
-    for lv, t in plugin_trace_lines(path, read_tar_member(path, "24-log-coredisplay.txt")):
-        out.append(("plugin trace", "%s %s" % (lv, t[:300])))
+    cdl = read_tar_member(path, "24-log-coredisplay.txt")
+    for lv, t in coredisplay_cf_lines(cdl, tlv):
+        out.append(("copy forward", "%s %s" % (lv, t[:300])))
+    for lv, t in plugin_trace_lines(path, cdl, txt):
+        if lv in ("FAIL", "CRITICAL", "WARN") or t.startswith("join:"):
+            out.append(("plugin trace", "%s %s" % (lv, t[:300])))
     blanked = sorted(set(re.findall(r"display: head (\d+) blanked \(display sleep\)", log)))
     if "look sleep" in txt and "display asleep:" in txt.split("(look sleep)", 1)[-1][:600]:
         out.append(("display sleep", "the look found the system asleep; heads blanked first (kernel log): %s" %
@@ -2055,8 +2153,8 @@ def main():
         for lv, t in coredisplay_cf_lines(cd, tl_lv):
             print("   %s copy forward: %s" % (lv, t))
             failed = True
-        for lv, t in plugin_trace_lines(p, cd):
-            print("   %s plugin trace: %s" % (lv, t))
+        for lv, t in plugin_trace_lines(p, cd, ttxt):
+            print("   %s %s" % (lv, t if t.startswith("plugin trace") else "plugin trace: " + t))
             failed = failed or lv in ("FAIL", "CRITICAL")
         if tl:
             print("   frame trace timeline (tools/rdna3_trace.py for all of it):")

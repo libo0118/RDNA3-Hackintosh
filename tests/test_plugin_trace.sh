@@ -134,8 +134,9 @@ need "$T/rates.txt" 'per second'
 # --check: the FAIL findings above fail the run; --triage prints LEVEL lines
 if $PT --check "$T/ws/nvmtl" > /dev/null; then fail "--check passed a trace with FAIL findings"; fi
 $PT --triage "$T/ws/nvmtl" > "$T/tri.txt"
-need "$T/tri.txt" '^FAIL plugin trace WindowServer\[[0-9]*\] never-published: '
-need "$T/tri.txt" '^INFO plugin trace WindowServer\[[0-9]*\]: 10 frames in the ring, 10 passes on surfaces (4 clear-only)'
+need "$T/tri.txt" '^FAIL plugin trace WindowServer\[[0-9]*\] (opened [0-9-]* [0-9:]* UTC) never-published: '
+need "$T/tri.txt" '^INFO plugin trace WindowServer\[[0-9]*\] (opened [0-9-]* [0-9:]* UTC): 10 frames in the ring, 10 passes on surfaces (4 clear-only)'
+need "$T/tri.txt" 'kept [0-9-]* [0-9:]* .. [0-9:]* UTC'
 
 # --- a report archive: 31-plugin-trace/ inside a tar.gz, and an extracted report dir ---
 mkdir -p "$T/rep/rdna3-report-x/31-plugin-trace"
@@ -269,5 +270,40 @@ echo "not a trace" > "$T/dmg/junk.trace"
 $PT "$T/dmg" > "$T/dmg.txt" || true
 need "$T/dmg.txt" 'is cut off'
 need "$T/dmg.txt" 'junk.trace: not a plugin trace'
+
+# --- ECC review round 2: old boots, the snapshots next to a report, a wrapped ring against the A/B ---
+mkdir -p "$T/col5" "$T/col6"
+PATH="$T/bin:$PATH" NVMTL_BOOTTIME=4000000000 NVMTL_TRACE_DIR="$T/colsrc" sh "$ROOT/tools/macos/collect_plugin_trace.sh" "$T/col5" || fail "collector (boottime)"
+need "$T/col5/31-plugin-trace/info.txt" 'REJECT .* Finder-[0-9]*\.trace: written before this boot'
+need "$T/col5/31-plugin-trace/info.txt" 'boottime 4000000000'
+PATH="$T/bin:$PATH" NVMTL_BOOTTIME=1 NVMTL_TRACE_DIR="$T/colsrc" sh "$ROOT/tools/macos/collect_plugin_trace.sh" --traces-only --only Finder "$T/col6" || fail "collector (traces only)"
+need "$T/col6/31-plugin-trace/info.txt" 'ACCEPT .* Finder-[0-9]*\.trace'
+grep -q 'nomagic-5' "$T/col6/31-plugin-trace/info.txt" && fail "--only took another name"
+[ -e "$T/col6/32-log-nvmtl-windowserver.txt" ] && fail "--traces-only ran log show"
+# an archive whose info.txt says the boot began after the trace was opened: OLD, not judged
+mkdir -p "$T/old/rdna3-report-o/31-plugin-trace"
+cp "$f" "$T/old/rdna3-report-o/31-plugin-trace/"
+echo "boottime 4000000000" > "$T/old/rdna3-report-o/31-plugin-trace/info.txt"
+tar -C "$T/old" -czf "$T/old.tar.gz" rdna3-report-o
+$PT --triage "$T/old.tar.gz" > "$T/old.txt"
+need "$T/old.txt" 'WARN plugin trace: WindowServer\[[0-9]*\] .*OLD - opened .* before this boot'
+grep -q 'never-published' "$T/old.txt" && fail "an old boot's trace was judged"
+# no trace in the archive, the A/B snapshot sent next to it: read
+tar -C "$T/rep" -czf "$T/snap.tar.gz" --files-from /dev/null
+cp "$f" "$T/snap-plugin-ab1-WindowServer-1.trace"
+$PT --triage "$T/snap.tar.gz" > "$T/snap.txt"
+need "$T/snap.txt" 'the A/B snapshots sent next to it are read'
+need "$T/snap.txt" 'never-published'
+# a wrapped WindowServer ring: WARN with the kept window, and whether it covers the A/B
+NVMTL_TRACE_RING=256 NVMTL_TRACE_DIR="$T/wrapws" NVMTL_TRACE_NAME=WindowServer "$W" wrap 2>/dev/null
+python3 -I -B - "$ROOT/tools" "$T/wrapws" > "$T/wrapws.txt" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import plugin_trace as p
+for lv, t in p.triage_lines(sys.argv[2], ab_window=(1.0, 2.0)):
+    print(lv, t)
+PY
+need "$T/wrapws.txt" 'WARN plugin trace WindowServer\[[0-9]*\] (opened .*): main ring WRAPPED (1000 events written'
+need "$T/wrapws.txt" 'the A/B (from 1970-01-01 00:00:01 UTC) is NOT covered'
 
 echo "test_plugin_trace: ok"

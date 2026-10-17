@@ -204,7 +204,9 @@ repository or a Linux host.
    `…-tests.txt`, `…-scanout*.ppm` and the kernel's frame trace streamed
    through the whole run (`…-trace-stream.bin`, `…-drmtrace-stream.bin`,
    `…-trace-sec.bin`, each with a `.size` file; the archive holds copies as
-   `36-stream-*.bin`). Send all of them; they are what
+   `36-stream-*.bin`; the VM also sends WindowServer's plugin trace after each
+   A/B phase as `…-plugin-ab1-WindowServer-<pid>.trace` and the like). Send
+   all of them; they are what
    [AFTER-TESTS](AFTER-TESTS.md) expects from the VM.
    Only the collection, without running any test:
    `"$R/tools/macos/collect.sh" <label>` (writes `~/rdna3-report-<label>-<date>.tar.gz`).

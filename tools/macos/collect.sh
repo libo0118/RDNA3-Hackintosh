@@ -13,15 +13,27 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 
 lim=45
 run() {   # run <file> <command...>: output and exit code, never stops the
-          # script; a command still running after $lim s (45) is killed
+          # script; a command still running after $lim s (45) is killed. The
+          # watchdog takes its own sleep with it (no orphan sleep left behind
+          # for minutes after a fast command, ECC review round 2)
     f=$1; shift
     { echo "\$ $*"
       "$@" & p=$!
-      ( sleep "$lim"; kill -9 "$p" 2>/dev/null ) & w=$!
+      ( sleep "$lim" & s=$!; trap 'kill $s 2>/dev/null; exit 0' TERM; wait $s; kill -9 "$p" 2>/dev/null ) & w=$!
       wait "$p"; r=$?
       kill "$w" 2>/dev/null
       echo "[exit $r]"; } > "$dir/$f" 2>&1
 }
+
+# the Metal plugin's traces first (tools/macos/collect_plugin_trace.sh, as
+# root, at most 120 s): before the slow log shows below, so WindowServer's
+# live ring still holds the A/B when it is copied (ECC review round 2); its
+# WindowServer log (32-log-nvmtl-windowserver.txt) comes later, bounded
+if [ -f "$root/tools/macos/collect_plugin_trace.sh" ]; then
+    lim=120
+    run 37-plugin-trace-collect.txt sh "$root/tools/macos/collect_plugin_trace.sh" --traces-only "$dir"
+    lim=45
+fi
 
 run 00-system.txt sw_vers
 uname -a >> "$dir/00-system.txt" 2>&1
@@ -148,11 +160,11 @@ pm="$root/build/userspace/rdna3_pmctl"
 vki="$root/build/mesa/vulkaninfo.log"
 [ -f "$vki" ] && cp "$vki" "$dir/32-vulkaninfo-ci.log"
 
-# the Metal plugin's own trace (tools/macos/collect_plugin_trace.sh, when
-# this checkout has it): as root, at most 120 s
+# WindowServer's NVMTL lines of this boot, whole (the plugin trace's
+# companion; collect_plugin_trace.sh --traces-only above left it out)
 if [ -f "$root/tools/macos/collect_plugin_trace.sh" ]; then
-    lim=120
-    run 37-plugin-trace-collect.txt sh "$root/tools/macos/collect_plugin_trace.sh" "$dir"
+    lim=240
+    run 32-log-nvmtl-windowserver.txt log show --last boot --info --style compact --predicate 'process == "WindowServer" AND eventMessage CONTAINS "NVMTL"'
     lim=45
 fi
 

@@ -25,6 +25,7 @@
 #define RDNA3_TRACE_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #define RD3_TRACE_MAGIC     0x52543352u   /* "R3TR" in the file (little endian) */
 #define RD3_TRACE_VERSION   2u            /* 2: the 96-byte header (wall clock, flags, its own size) */
@@ -116,7 +117,8 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *  APERTURE arg 1 addToAperture, 2 getApertureMemoryDescriptor; flags 1 ok;
  *          obj the resource; v0 KiB, v1 the IOSurface id, v2 the path
  *          (0 new, 1 the gate closed, 2 the cached descriptor, 3 no BAR
- *          VRAM, 4 IODeviceMemory::withRange failed); pa its address
+ *          VRAM, 4 IODeviceMemory::withRange failed), v3 the cached path's
+ *          count (traced 4 times per resource, then every 256th); pa its address
  *  PAGEOFF arg 1 copied; obj the resource; v0 KiB, v1 us; pa its address
  *  SURFGEM arg 1 imported / 0 refused; v0 the IOSurface id, v1 the status,
  *          v2 the reason, v3 w | h << 16; pa the VRAM when imported
@@ -144,12 +146,14 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          bytes it had when last sampled; flags 16 a delayed re-sample
  *          (v1 its microseconds after the swap), 32 a copy forward's target
  *          after the copy, 64 a scanout buffer of the accelerator after the
- *          swap's copy (arg 0xfe), 128 the front after it (arg 0xfd)
+ *          swap's copy (arg 0xfe), 128 the front after it (arg 0xfd); v3 the
+ *          buffer's IOSurface id (0 none or unknown), v4 its resource type byte
  *  CS      arg the IP (AMDGPU_HW_IP_*), flags the ring, head 0xff; v0 the
  *          submitter's pid, v1 its VMID, v2 the fence seq (low 32 bits), v3
  *          IBs | BOs << 16, v4 the result (0 or -errno); pa the first IB's VA;
  *          arg 0xff: the AMDGPU_CS ioctl refused anywhere (v0 the pid, v4
- *          the error)
+ *          the error, v1 that error's count, v2 those not traced since the
+ *          last: 64 per error, then every 64th)
  *  FENCE   arg the IP, flags the ring; v2 the seq, v0 the pid of its submitter
  *          when known; one per newly seen seq (an upper bound of the signal)
  *  GPUWAIT arg the IP, flags the ring; v0 the pid, v1 the wait's us, v2 the
@@ -159,15 +163,17 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          UTCL2 client id, v2 the owning pid (0 unknown), v3 the status; pa
  *          the faulting address
  *  SURFRES obj the resource; v0 the IOSurface id, v1 the plane, v2 how
- *          (1 aperture, 2 page-off, 3 swap a1/a2, 4 import, 5 dirty); pa its
- *          VRAM, v3 its KiB
+ *          (1 aperture, 2 page-off, 3 swap a1/a2: v1 1 a1, 2 a2, also with
+ *          id 0, 4 import, 5 dirty); pa its VRAM, v3 its KiB, v4 the
+ *          resource's type byte (+0x14)
  *  PANEL   head; flags 1 a flip pending; v0 the OTG frame, v1 the scanline,
  *          v2 in vblank; pa the address scanned (EARLIEST_INUSE), pb the one
  *          requested, both as CPU (BAR) addresses like every pa; pc the
  *          address the accelerator expects there (0 unknown); v3 why pa is
  *          missing (0 there, 1 no core, 2 the core does not know the head, 3
- *          the core's rdna3DisplayScanAddr failed, 4 no VRAM base yet: MC
- *          addresses), v4 the IOReturn
+ *          the core's rdna3DisplayScanAddr failed, 4 no VRAM base yet, 5 the
+ *          address below the framebuffer aperture: 4 and 5 carry MC addresses
+ *          with flag 2), v4 the IOReturn
  *  Time: t is mach_absolute_time (the Metal plugin's traces use it too),
  *  the header carries the timebase. */
 struct rd3_trace_ev {
@@ -203,7 +209,7 @@ struct rd3_trace_hdr {
     uint64_t lost;          /* read all: overwritten before this read; stream: since the last stream read */
     uint64_t now;           /* the read's mach_absolute_time */
     uint64_t nomem;         /* events not recorded: the ring could not be allocated */
-    uint32_t salt_check;    /* rd3_trace_obj(0x1000, salt): two reads of one boot agree */
+    uint32_t boot_id;       /* a per-boot random number (not derived from the object key): reads of one boot agree */
     uint32_t source;        /* RD3_TRACE_SRC_* */
     uint32_t tb_numer, tb_denom;   /* mach timebase: ns = t * numer / denom */
     uint32_t read_kind;     /* RD3_TRACE_READ_* */
@@ -372,16 +378,65 @@ static inline uint32_t rd3_trace_copy(const struct rd3_trace_ring *r, uint64_t f
     return rd3_trace_copy_chunk(r, &next, r->written, out, max, &lost);
 }
 
-/* a pointer as a 32-bit name: salted per boot (no kernel address in the
- * report), never 0 for a pointer */
-static inline uint32_t rd3_trace_obj(uint64_t p, uint32_t salt)
+/* little-endian 64-bit value of 8 bytes */
+static inline uint64_t rd3_trace_le64(const uint8_t *b)
 {
+    uint64_t v = 0;
+    unsigned i;
+    for (i = 0; i < 8; i++)
+        v |= (uint64_t)b[i] << (8 * i);
+    return v;
+}
+
+/* SipHash-2-4 (Aumasson, Bernstein 2012; the reference siphash.c), the
+ * 64-bit output: a keyed PRF, so without the key a name says nothing about
+ * the pointer behind it (ECC review round 2: the salted multiply-xorshift
+ * of round 1 could be inverted, giving the kernel's slide away) */
+#define RD3_SIP_ROTL(x, b) (uint64_t)(((x) << (b)) | ((x) >> (64 - (b))))
+#define RD3_SIP_ROUND(v0, v1, v2, v3) do { \
+        v0 += v1; v1 = RD3_SIP_ROTL(v1, 13); v1 ^= v0; v0 = RD3_SIP_ROTL(v0, 32); \
+        v2 += v3; v3 = RD3_SIP_ROTL(v3, 16); v3 ^= v2; \
+        v0 += v3; v3 = RD3_SIP_ROTL(v3, 21); v3 ^= v0; \
+        v2 += v1; v1 = RD3_SIP_ROTL(v1, 17); v1 ^= v2; v2 = RD3_SIP_ROTL(v2, 32); } while (0)
+static inline uint64_t rd3_siphash24(const uint8_t key[16], const uint8_t *m, size_t len)
+{
+    const uint64_t k0 = rd3_trace_le64(key), k1 = rd3_trace_le64(key + 8);
+    uint64_t v0 = 0x736f6d6570736575ull ^ k0, v1 = 0x646f72616e646f6dull ^ k1;
+    uint64_t v2 = 0x6c7967656e657261ull ^ k0, v3 = 0x7465646279746573ull ^ k1;
+    uint64_t b = (uint64_t)len << 56, mi;
+    size_t i = 0, j;
+    for (; i + 8 <= len; i += 8) {
+        mi = rd3_trace_le64(m + i);
+        v3 ^= mi;
+        RD3_SIP_ROUND(v0, v1, v2, v3);
+        RD3_SIP_ROUND(v0, v1, v2, v3);
+        v0 ^= mi;
+    }
+    for (j = 0; i + j < len; j++)
+        b |= (uint64_t)m[i + j] << (8 * j);
+    v3 ^= b;
+    RD3_SIP_ROUND(v0, v1, v2, v3);
+    RD3_SIP_ROUND(v0, v1, v2, v3);
+    v0 ^= b;
+    v2 ^= 0xff;
+    for (j = 0; j < 4; j++)
+        RD3_SIP_ROUND(v0, v1, v2, v3);
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+
+/* a pointer as a 32-bit name: SipHash-2-4 under a per-boot random key that
+ * never leaves the kernel (no kernel address in the report, and none to be
+ * recovered from it), never 0 for a pointer */
+static inline uint32_t rd3_trace_obj(uint64_t p, const uint8_t key[16])
+{
+    uint8_t m[8];
     uint64_t x;
+    unsigned i;
     if (!p)
         return 0;
-    x = (p ^ ((uint64_t)salt << 17) ^ salt) * 0x9e3779b97f4a7c15ull;
-    x ^= x >> 29;
-    x *= 0xbf58476d1ce4e5b9ull;
+    for (i = 0; i < 8; i++)
+        m[i] = (uint8_t)(p >> (8 * i));
+    x = rd3_siphash24(key, m, 8);
     x ^= x >> 32;
     return (uint32_t)x ? (uint32_t)x : 1u;
 }
@@ -451,13 +506,5 @@ static inline unsigned rd3_trace_u16(int v)
  * after t in hex, ba / bb as little-endian 64-bit words
  * (tools/rdna3_trace.py) */
 #define RD3_TRACE_LINE_FMT "tr %u %u %llu %u %u %u %x %x %x %x %x %x %x %llx %llx %llx %llx %llx"
-static inline uint64_t rd3_trace_le64(const uint8_t *b)
-{
-    uint64_t v = 0;
-    unsigned i;
-    for (i = 0; i < 8; i++)
-        v |= (uint64_t)b[i] << (8 * i);
-    return v;
-}
 
 #endif

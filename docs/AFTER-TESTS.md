@@ -2199,11 +2199,12 @@ Settings. That is expected for them, not a display regression.
   the core kext keeps a second ring of RADV's submissions, fences, waits,
   resets and GPU faults. `tools/macos/collect.sh` puts them in the archive
   (`36-frame-trace.bin`, `36-frame-trace-sec.bin`, `36-drm-trace.bin`,
-  `36-frame-trace.txt`); autoreport.sh's swap A/B streams both rings
-  every 3 s (`<report>-trace-stream.bin`, `-drmtrace-stream.bin`,
-  `-trace-sec.bin`). The kernel log gets the first 300 events of a boot
-  and 600 more at the A/B's end ("tr" lines; triage decodes them when the
-  files are missing).
+  `36-frame-trace.txt`); autoreport.sh streams both rings every 3 s
+  through the whole run (`<report>-trace-stream.bin`, `-drmtrace-stream.bin`,
+  `-trace-sec.bin`; snapshots go up after each A/B phase). The kernel log
+  gets the first 300 events of a boot, 600 more at the A/B's end and 600
+  at the end of the tests (`debug.rdna3accel_trace_dump`; "tr" lines,
+  triage decodes them when the files are missing).
 - The A/B (autoreport.sh, every accelerator run): 60 s in mode 1, a look
   (`look ab1`) and the counters, 60 s in mode 0 (`look ab0`), back.
   Triage prints both side by side (`frame trace: A/B mode N ...`) with a
@@ -2261,6 +2262,35 @@ HDP 6.0); the headers say so (flag `HDP_NOINV`). The other buffers of a
 swapping surface are sampled at every swap for a head's first 600 swaps,
 during the A/B and at empty backs, else every 8th
 (`debug.rdna3accel_trace_scan`: 0 only empty backs, 2 always).
+
+#### ECC review round 2: one run must answer "why black / flicker"
+
+| Seen | Where | Meaning, action |
+|---|---|---|
+| `screens <look> ... pipe N P% not black, BLACK pipe(s) N` (FAIL), `A/B screens FAIL mode 1 left pipe(s) N BLACK (pipe N: mode 1 a%, mode 0 b%)` | the rdna3_drminfo looks of the run and of the A/B (`look ab1` / `look ab0`), at most 3 % not black = black | the panel itself, not a counter: start here |
+| `frame trace FAIL COPY-BLACK: n copy(ies) of a back WITH pixels left the scanout buffer / front without any` | SCAN 0xfe / 0xfd after a mode 1 copy | the copy lost the picture (SDMA, a wrong source / pitch); compare with the core's `copy:` lines |
+| `plugin trace INFO join: head N back 0x... = IOSurface X (...): plugin DRAWN a, CLEAR-ONLY b, published p (dirty d, copy-out c, k EMPTY)` / `plugin NEVER saw this IOSurface` / `WARN join: ... has NO IOSurface id` | the kernel's SURFRES (how 3: a1 / a2 at every new address, id 0 too) and SCAN (`v3` the id, `v4` the resource's type byte) joined with WindowServer's plugin trace | which buffer the panel got, and what the plugin did to it: a back the plugin only cleared or never published is black on the panel whatever the swap does |
+| `plugin trace WindowServer[pid] (opened ... UTC): main ring WRAPPED (...): only a .. b UTC kept - the A/B (from ...) is NOT covered` | the plugin's ring wrapped before collection | autoreport writes `NVMTL_TRACE_RING=262144` into `/Library/GPUBundles/rdna3mtl/rdna3mtl.conf` (32 MB main ring per process); WindowServer takes it at its next start (the boot after the first run of this autoreport); snapshots after each A/B phase (`<report>-plugin-ab1-WindowServer-<pid>.trace`, `-ab2-`, `-ab-end-`, `-end-`) keep the A/B even when it wraps later |
+| `plugin trace: ... OLD - opened <date> UTC, before this boot` | a trace of an earlier boot left in `/var/tmp/rdna3-nvmtl` | not judged; collect_plugin_trace.sh REJECTs them (kern.boottime against the mtime and the header's open time) |
+| `WARN plugin trace MISSING (<the collector's reason>) although WindowServer loaded the plugin`, `plugin trace collector: REJECT ...` | M5 / CoreDisplay say WindowServer loaded the plugin, the report has no trace of it | the reason is the collector's (`31-plugin-trace/info.txt`, `37-plugin-trace-collect.txt`) |
+| `CRITICAL` anywhere | triage, `rdna3vm result` | a FAIL in the checklist (it was INFO before) |
+| `frame trace WARN GPU: n GPU wait(s) ran out the 10 s cap` | GPUWAIT `v3` 1 | a hang; the plugin's fence timeouts line up with it |
+| `Q6 ... no VRAM base yet (MC addresses)` / `below the framebuffer aperture` | PANEL `v3` 4 / 5, flag 2 | MC addresses are never compared with the BAR addresses (no false `PANEL` mismatch) |
+| `Q8 ...; the boot before the pump: N events overwritten before its first read` | the stream files' first blob is the boot (kept now) | not a loss of the run |
+| `== swap A/B: console user ...`, `power: ...`, `NOBODY LOGGED IN`, `activity: ...`, `(exit n)` | the A/B's preconditions; `swap A/B` in the tests file is FAILED when a setting did not take or nothing redrew | a head that had no swap in the A/B is listed as not judged |
+| `== frame trace: pump read errors`, `... reached 536870912 bytes` | the pump's failed reads and its 512 MB cap per file | |
+
+Kernel side of round 2: a panel move posted from outside the family's lock
+is ignored when it is older than the swaps' own last flip (it would undo
+that flip's record); D is freed only after a latch was SEEN (a wait that
+gave up does not count); leaving modes 1/2 waits for the flip to D before
+copying D home, and that copy feeds the SDMA breaker; the breaker retries
+after 10 s of the clock (not 600 swaps: a quiet desktop swaps rarely);
+object names are SipHash-2-4 under a per-boot key (the round 1 salt could be
+inverted), the headers carry a random boot id instead of the salt check;
+refused AMDGPU_CS are traced 64 times per error, then every 64th (v1 the
+count, v2 those skipped); the aperture's cached path 4 times per resource,
+then every 256th; shapes sample their buffers for the first 256 shapes.
 
 #### Symptom -> trace -> action
 
