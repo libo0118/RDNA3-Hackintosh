@@ -113,7 +113,8 @@ def bootarg_level(args):
 
 # accel/Makefile's ACCEL_SRC_HASH inputs, in its order (tests/test_accel_hash_parity.py keeps them equal)
 ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_abi.h", "accel/rdna3accel_stubs.h",
-                    "common/rdna3_bootargs.h", "common/rdna3_a3_display.h")
+                    "common/rdna3_bootargs.h", "common/rdna3_a3_display.h",
+                    "common/rdna3_swap_front.h")
 
 
 def fb_source_hash(files=("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h")):
@@ -453,7 +454,7 @@ def a3_display_verdict(log, sv):
 
 
 A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3|flicker|"
-                       r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip)?_h\d|iop_flip): (\d+)", re.M)
+                       r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip)?_h\d|cf_(?:shown|backlast|src)_h\d|cf_notshown|cf_shown_failed|iop_flip): (\d+)", re.M)
 # the kernel's refusal reasons that are the A3 policy (rd3AccelA3Why), not a fault
 A3_POLICY_REASONS = ("WindowServer's display framebuffer", "a WindowServer input", "A3 is off",
                      "imported for another task", "a process the kernel could not name")
@@ -586,6 +587,71 @@ def flicker_verdict(txt_or_counters):
             out.append(("WARN", "%s, %s: one band taking turns on one head - a blinking caret or one status item, "
                                 "or flicker in a small area" % (text, bands)))
     return out
+
+
+SERIAL_SWAP_LINE = re.compile(r"(flicker: head \d+: swap \d+ showed[^\n]*|swap: head \d+: \d+ swaps over[^\n]*|"
+                              r"copy forward #\d+: head \d+: from the buffer it shows[^\n]*|"
+                              r"swap: head \d+: the back \(phys[^\n]*|swap #\d+: head \d+ shows a new buffer[^\n]*|"
+                              r"copy forward #\d+: the front buffer \(vm [^)]*\) was never shown[^\n]*)")
+
+
+def serial_swap_verdict(text):
+    """([(level, text)], [lines]) from the kernel's swap and flicker lines in
+    a serial log (card run 58b, 2026-10-16: the VM was stopped before the
+    report, the serial log was all there was). Per head the last 'flicker:'
+    line: A B A B in 25 % or more of 60+ hashed swaps, in more than one band
+    in 25 %, is FAIL; over the line in one band only WARN. A kernel before
+    rdna3_swap_front.h that skipped copy forward ('front buffer ... was
+    never shown') while a head's swaps took turns between two buffers: WARN,
+    the cause of that run's flicker."""
+    out, lines = [], []
+    last = {}
+    for m in re.finditer(r"flicker: head (\d+): swap \d+ showed alternating pictures \(A B A B in (\d+) of \d+ bands"
+                         r"[^)]*\), (\d+) of (\d+) hashed swaps so far(?:, (\d+) in more than one band)?", text):
+        last[m.group(1)] = (int(m.group(3)), int(m.group(4)), int(m.group(5)) if m.group(5) else None)
+    for h, (ab, den, wide) in sorted(last.items()):
+        what = "%d of %d hashed swaps A B A B%s" % (ab, den, "" if wide is None else ", %d in more than one band" % wide)
+        if den < 60:
+            out.append(("INFO", "head %s: not judged, %s (fewer than 60)" % (h, what)))
+        elif ab / float(den) >= FLICKER_SHARE and wide is not None and wide / float(den) >= FLICKER_SHARE:
+            out.append(("FAIL", "head %s: alternating pictures (candidate flicker): %s" % (h, what)))
+        elif ab / float(den) >= FLICKER_SHARE:
+            out.append(("WARN", "head %s: alternating pictures in one band (a caret, or flicker in a small area): %s" %
+                        (h, what)))
+        else:
+            out.append(("PASS", "head %s: %s, under %.0f%%" % (h, what, FLICKER_SHARE * 100)))
+    # an older kernel: two backs taking turns while copy forward copied nothing
+    bufs = {}
+    for h, a, b in re.findall(r"swap #\d+: head (\d+) frame phys (0x[0-9a-f]+) -> (0x[0-9a-f]+)", text):
+        bufs.setdefault(h, set()).update((a, b))
+    turns = sorted(h for h, b in bufs.items() if len(b - {"0x0"}) >= 3)
+    if turns and "was never shown -- the back buffer already holds the last frame" in text:
+        out.append(("WARN", "head(s) %s: two back buffers took turns while copy forward copied nothing ('the front "
+                            "buffer ... was never shown'): each back kept what changed two frames before - the A B A B "
+                            "flicker of card run 58b; a kernel with rdna3_swap_front.h copies from the shown buffer" %
+                    ", ".join(turns)))
+    for l in SERIAL_SWAP_LINE.findall(text):
+        if l not in lines:
+            lines.append(l)
+    return out, lines[-16:]
+
+
+def copy_forward_verdict(c):
+    """(level, text) from the card run 58b copy forward counters, None on a
+    kernel without them: per head the copies from the buffer it showed
+    (two backs taking turns), WARN when SDMA refused some or a surface had
+    no head (rects left stale)"""
+    if not any(k.startswith("cf_") for k in c):
+        return None
+    heads = sorted(set(k[-1] for k in c if re.match(r"cf_(?:shown|backlast|src)_h\d$", k)))
+    per = ", ".join("h%s %d from the shown buffer / %d not needed / %d from the front" % (
+        h, c.get("cf_shown_h" + h, 0), c.get("cf_backlast_h" + h, 0), c.get("cf_src_h" + h, 0))
+        for h in heads if c.get("cf_shown_h" + h, 0) or c.get("cf_backlast_h" + h, 0) or c.get("cf_src_h" + h, 0))
+    bad = c.get("cf_shown_failed", 0) + c.get("cf_notshown", 0)
+    skips = sum(v for k, v in c.items() if k.startswith("swaps_frontskip_h"))
+    text = "%s; %d refused by SDMA, %d with no head (rects left stale); %d swap(s) skipped for an empty back" % (
+        per or "no copy forward", c.get("cf_shown_failed", 0), c.get("cf_notshown", 0), skips)
+    return ("WARN" if bad else "INFO"), text
 
 
 def a3_counters(txt):
@@ -1217,6 +1283,9 @@ def summary(path, serial=None):
                 not any(lv in ("FAIL", "WARN") for lv, _ in fl):
             out.append(("flicker", "WARN the kernel logged alternating pictures (flicker: lines) under %.0f%% of "
                                    "the hashed swaps" % (FLICKER_SHARE * 100)))
+        cfv = copy_forward_verdict(a3c)
+        if cfv:
+            out.append(("copy forward", "%s %s" % cfv))
         out.append(("A3 display counters", "refused %s, imported %s, other %s (kept out %s); swaps %s" % (
             a3c.get("a3display_refused", "?"), a3c.get("a3display_imported", "?"), a3c.get("a3display_other", "?"),
             a3c.get("a3ws_refused", "?"),
@@ -1547,6 +1616,17 @@ def main():
             print("   TX watch (%d line(s); the full states, the first change with problems, the last 20):" % len(tx))
             for l in ex:
                 print("     " + l)
+        try:
+            sv = serial_swap_verdict(open(s, errors="replace").read())
+        except OSError:
+            sv = ([], [])
+        if sv[0] or sv[1]:
+            print("   swaps and flicker (the kernel's lines; a run without a report has only these):")
+            for lv, t in sv[0]:
+                print("   %s %-20s %s" % (lv, "swap/flicker", t))
+                failed = failed or lv == "FAIL"
+            for l in sv[1]:
+                print("     " + l[:240])
     for h in hosts:
         print("=" * 78)
         print(os.path.basename(h))
