@@ -135,7 +135,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
     volatile SInt32 fStopping = 0;
 
     /* flips */
-    unsigned fFlips = 0, fFlipRejects = 0;
+    unsigned fFlips = 0, fFlipRejects = 0, fFlipStillPending = 0;
     bool     fFlipped = false;
 
     const OSSymbol *fSymInfo = nullptr, *fSymFlip = nullptr, *fSymStatus = nullptr;
@@ -1500,6 +1500,15 @@ bool RDNA3Framebuffer::flipToLocked(uint64_t vramOffset, uint32_t w, uint32_t h,
     RD3KDisplayStatus st;
     for (unsigned i = 0; i < 40 && coreStatus(&st) && st.flipPending; i++)
         IODelay(500);
+    /* 20 ms and the previous flip still pending (a blanked head, a stuck
+     * HUBP): flipped anyway, said (card run 2026-10-17, ECC review round 2:
+     * the accelerator's latch counters cannot see this wait) */
+    if (coreStatus(&st) && st.flipPending) {
+        fFlipStillPending++;
+        if (fFlipStillPending <= 8 || (fFlipStillPending & 1023) == 0)
+            FBLOG("flip to VRAM 0x%llx: the previous flip still pending after 20 ms -- flipped anyway (%u such)",
+                  (unsigned long long)vramOffset, fFlipStillPending);
+    }
     RD3KDisplayFlip f;
     bzero(&f, sizeof(f));
     f.version = RD3K_DISPLAY_ABI_VERSION;

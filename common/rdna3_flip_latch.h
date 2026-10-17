@@ -43,8 +43,8 @@
  * latched again (a head that never latches must not cost every swap) */
 #define RD3_LATCH_TIMEOUT_RUN 3u
 
-/* the limit of one swap's waits (entry and after the flip share it) for a
- * head whose frame lasts frame_us (0: unknown, 60 Hz assumed) */
+/* the limit of a swap's wait for its flip, from that flip, for a head whose
+ * frame lasts frame_us (0: unknown, 60 Hz assumed) */
 static inline uint64_t rd3_latch_cap_us(uint64_t frame_us)
 {
     uint64_t cap = frame_us * 5u / 2u;
@@ -59,16 +59,17 @@ enum rd3_latch_step {
     RD3_LATCH_DONE = 0,     /* latched: the panel reads the new buffer */
     RD3_LATCH_WAIT = 1,     /* still pending: look again */
     RD3_LATCH_TIMEOUT = 2,  /* this flip still pending after RD3_LATCH_FRAMES frames or the cap: stuck */
-    RD3_LATCH_UNKNOWN = 3,  /* no status from the core */
-    RD3_LATCH_BUDGET = 4    /* the swap's shared wait budget is spent (the flip itself is not late) */
+    RD3_LATCH_UNKNOWN = 3   /* no status from the core */
 };
 
-/* One look at the head: status_ok (the core answered), pending
- * (dcn32_flip_pending), the OTG frame counter (24 bit) when the flip was
- * programmed and now, the microseconds since that flip and since the swap
- * began waiting, the swap's cap (rd3_latch_cap_us). */
+/* One look at the head after its flip: status_ok (the core answered),
+ * pending (dcn32_flip_pending), the OTG frame counter (24 bit) when the
+ * flip was programmed and now, the microseconds since that flip, the cap
+ * (rd3_latch_cap_us). Measured from the flip only: whatever the swap did
+ * before it (the hashes, flipToLocked's wait for the flip before) never
+ * turns a stuck flip into anything but a timeout (ECC review round 2). */
 static inline enum rd3_latch_step rd3_latch_step(int status_ok, int pending, uint32_t frame0, uint32_t frame,
-                                                 uint64_t flip_us, uint64_t swap_us, uint64_t cap_us)
+                                                 uint64_t flip_us, uint64_t cap_us)
 {
     if (!status_ok)
         return RD3_LATCH_UNKNOWN;
@@ -76,15 +77,14 @@ static inline enum rd3_latch_step rd3_latch_step(int status_ok, int pending, uin
         return RD3_LATCH_DONE;
     if (((frame - frame0) & 0xffffffu) >= RD3_LATCH_FRAMES || flip_us >= cap_us)
         return RD3_LATCH_TIMEOUT;
-    if (swap_us >= cap_us)
-        return RD3_LATCH_BUDGET;
     return RD3_LATCH_WAIT;
 }
 
-/* A head's latch state across swaps (the accelerator keeps one per head):
+/* A head's latch state across swaps (the accelerator keeps one per head).
+ * A swap waits once, right after its own flip; the next swap's entry only
+ * looks (a pending flip there is counted, a latched one ends the run):
  *   latched  - the last flip was seen latched (or there is nothing to wait for)
- *   gave_up  - the last flip timed out, was not waited for or not readable:
- *              no later wait is spent on it
+ *   gave_up  - the last flip timed out, was not waited for or not readable
  *   run      - timeouts in a row; RD3_LATCH_TIMEOUT_RUN of them turn 'off' on
  *   off      - the head's waits are off until a flip is seen latched
  * Every transition of 'off' is returned as an event the caller logs once. */
@@ -122,8 +122,8 @@ static inline enum rd3_latch_event rd3_latch_timeout(struct rd3_latch_state *st)
     }
     return RD3_LATCH_EV_NONE;
 }
-/* the flip is not waited for any more (budget spent, state unreadable,
- * waits off or disabled): not a timeout */
+/* the flip is not waited for (state unreadable, waits off or disabled):
+ * not a timeout */
 static inline void rd3_latch_give_up(struct rd3_latch_state *st)
 {
     st->gave_up = 1;
@@ -133,12 +133,6 @@ static inline void rd3_latch_give_up(struct rd3_latch_state *st)
 static inline enum rd3_latch_event rd3_latch_rearm(struct rd3_latch_state *st)
 {
     return rd3_latch_seen(st);
-}
-/* whether the swap's entry waits for the previous flip: enabled, the head's
- * waits on, the flip neither latched nor given up (waited for once only) */
-static inline int rd3_latch_wait_entry(int enabled, const struct rd3_latch_state *st)
-{
-    return enabled && !st->off && !st->latched && !st->gave_up;
 }
 /* whether the swap waits after its own flip */
 static inline int rd3_latch_wait_flip(int enabled, const struct rd3_latch_state *st)
@@ -185,6 +179,29 @@ static inline enum rd3_torn_kind rd3_torn_classify(unsigned changed, int same_ne
     if (!changed)
         return RD3_TORN_NONE;
     return same_next ? RD3_TORN_INPLACE : RD3_TORN_SHOWN;
+}
+
+/* the head's frame time from the core's measured refresh (milli-Hz; under
+ * 1 Hz: unknown, 0) */
+static inline uint32_t rd3_latch_frame_us(uint32_t refresh_mhz)
+{
+    return refresh_mhz >= 1000u ? (uint32_t)(1000000000ull / refresh_mhz) : 0u;
+}
+/* asks of a head's refresh per mode before 60 Hz is kept for good */
+#define RD3_LATCH_FRAME_TRIES 8u
+/* whether the refresh is asked again: not answered yet, tries left */
+static inline int rd3_latch_ask_frame(int answered, unsigned tries)
+{
+    return !answered && tries < RD3_LATCH_FRAME_TRIES;
+}
+
+/* whether a skipped swap's empty back is read again 4 ms later (a sleep in
+ * the swap): only with the latch wait on (swap_latch=0 sleeps nowhere), the
+ * first 8 of a head, then every 256th; 'sample' counts the head's skips
+ * from 0 */
+static inline int rd3_empty_resample_due(int latch_on, uint64_t sample)
+{
+    return latch_on && (sample < 8u || (sample & 255u) == 0);
 }
 
 /* rate limit of the driver's log lines: the first 'first', then every

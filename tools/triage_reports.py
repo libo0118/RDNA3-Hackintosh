@@ -456,7 +456,7 @@ def a3_display_verdict(log, sv):
 A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3|flicker|"
                        r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg|"
                        r"_latchpend|_latchwait|_latchus|_latchmax|_latchtimeout|_latchunknown|_latchoff|_tornchk|"
-                       r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill|_latchimmediate|_latchbudget|"
+                       r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill|_latchimmediate|_latchwaitsoff|"
                        r"_flipfailed)?_h\d|swap_latch|swap_torn|"
                        r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed|onpanel)_h\d|swaps_skipped_all|"
                        r"swaps_nohead|cf_(?:calls|nohead|shown_stale|refused|same|disabled|pend_blocked|pend_forced|pend_evicted|"
@@ -605,11 +605,13 @@ SERIAL_SWAP_LINE = re.compile(r"(flicker: head \d+: [^\n]*|swap: head \d+: \d+ s
                               r"the front \(phys[^\n]*not copyable|pixel \(\d+,\d+\)[^\n]*did NOT land)[^\n]*|"
                               r"swap: head \d+: the back \(phys[^\n]*|swap: no front named[^\n]*|"
                               r"swap #\d+: head \d+ shows a new buffer[^\n]*|swap #\d+: head \d+: the back[^\n]*|"
-                              r"swap: surface [^\n]*matched no head[^\n]*|swap latch: head \d+: [^\n]*|"
+                              r"swap: surface [^\n]*matched no head[^\n]*|"
+                              r"swap latch: (?:head \d+(?: \(core head \d+\))?: |a swap returns|OFF: a swap)[^\n]*|"
+                              r"flip to VRAM [^\n]*still pending after 20 ms[^\n]*|"
                               r"swap #\d+: head \d+: the (?:previous flip|flip to phys|buffer it showed)[^\n]*"
                               r"(?:NOT latched|changed while on the panel)[^\n]*|"
                               r"swap #\d+: head \d+: (?:the flip state could not be read|the torn test skipped|"
-                              r"the swap's wait budget|the flip to phys [^\n]*was refused)[^\n]*|"
+                              r"the flip to phys [^\n]*was refused)[^\n]*|"
                               r"copy forward #\d+: head \d+: the target [^\n]*STILL ON THE PANEL[^\n]*|"
                               r"swap: head \d+: the buffer [^\n]*was FREED[^\n]*|"
                               r"swap: head \d+: the empty back [^\n]*read again[^\n]*|"
@@ -800,7 +802,7 @@ SHOWN_FREED_WARN = 4
 # card run 2026-10-17's per-head counters (common/rdna3_flip_latch.h), the
 # names without their _h<N>
 LATCH_KEYS = ("swaps_latchpend", "swaps_latchwait", "swaps_latchus", "swaps_latchmax", "swaps_latchimmediate",
-              "swaps_latchtimeout", "swaps_latchbudget", "swaps_latchunknown", "swaps_latchoff", "swaps_flipfailed",
+              "swaps_latchtimeout", "swaps_latchunknown", "swaps_latchoff", "swaps_latchwaitsoff", "swaps_flipfailed",
               "swaps_tornchk", "swaps_torn", "swaps_inplace", "swaps_tornskip", "cf_onpanel", "swaps_shownfreed",
               "swaps_emptyfilled", "swaps_emptystill")
 
@@ -813,7 +815,7 @@ def latch_verdict(c, current=False, report_missing=True):
     """[(level, text)] from the card run 2026-10-17 counters. Per head: the
     swaps whose entry found the previous flip not latched (the panel still
     read the buffer WindowServer had back), how long the waited flips took
-    to latch, flips latched at once, timeouts, spent budgets, unreadable
+    to latch, flips latched at once, timeouts, waits off at the end, unreadable
     states, flips not waited for, refused flips; copy forwards into the
     buffer on the panel; shown frames that changed on the panel (torn:
     FAIL from TORN_SHARE of TORN_MIN_CHECKS+ checks, else WARN; a head with
@@ -870,14 +872,17 @@ def latch_verdict(c, current=False, report_missing=True):
             why.append("the flip state never read pending - the wait did nothing")
         out.append(("WARN" if why else "INFO",
                     "head %s: %s of %s swaps: the previous flip had not latched at the swap; flips waited for %s "
-                    "time(s), avg %s us, max %s us; %s latched at once; %s timeouts, %s budget spent, %s unknown, %s "
-                    "not waited (swap_latch %s)%s" %
+                    "time(s), avg %s us, max %s us; %s latched at once; %s timeouts, %s unknown, %s not waited "
+                    "(swap_latch %s)%s" %
                     (h, f("swaps_latchpend"), f("swaps"), f("swaps_latchwait"),
                      us // waits if waits and g("swaps_latchus") is not None else ("?" if g("swaps_latchus") is None
                                                                                    else 0),
-                     f("swaps_latchmax"), f("swaps_latchimmediate"), f("swaps_latchtimeout"), f("swaps_latchbudget"),
+                     f("swaps_latchmax"), f("swaps_latchimmediate"), f("swaps_latchtimeout"),
                      f("swaps_latchunknown"), f("swaps_latchoff"), "?" if latch_on is None else latch_on,
                      " - " + ", ".join(why) if why else "")))
+        if v("swaps_latchwaitsoff"):
+            out.append(("WARN", "head %s: its swaps were NOT waiting for their flips at the end (timeouts in a row; "
+                                "until a flip is seen latched)" % h))
         if v("swaps_flipfailed"):
             out.append(("WARN", "head %s: %d flip(s) refused by the framebuffer (copied onto its scanout or not shown)" %
                         (h, v("swaps_flipfailed"))))
@@ -887,7 +892,7 @@ def latch_verdict(c, current=False, report_missing=True):
         if g("swaps_tornchk") is None:
             pass
         elif not chk and swaps > TORN_MIN_CHECKS:
-            out.append(("WARN", "head %s: torn test not measured: 0 checks in %d swaps (swap_torn %s, %s skipped)" %
+            out.append(("INFO" if torn_on == 0 else "WARN", "head %s: torn test not measured: 0 checks in %d swaps (swap_torn %s, %s skipped)" %
                         (h, swaps, "?" if torn_on is None else torn_on, f("swaps_tornskip"))))
         elif chk or torn or inpl or tskip:
             what = "head %s: %d of %d shown frames changed while on the panel, then flipped away (torn)" % (h, torn, chk)
@@ -959,8 +964,8 @@ SERIAL_LATCH = re.compile(
     r"(\d+) us, max (\d+) us\), (\d+) timeouts, (\d+) unknown, (\d+) not waited; shown buffers hashed again (\d+): "
     r"(\d+) changed on the panel then flipped away \(torn\), (\d+) rewritten in place \(one back\), (\d+) not hashed; "
     r"copy forwards into the buffer on the panel (\d+); buffers freed on the panel (\d+); empty backs read again: "
-    r"(\d+) filled, (\d+) still empty \(swap_latch (-?\d+)(?:, card run [^)]*\); latched at once (\d+), budget spent "
-    r"(\d+), flips failed (\d+))?")
+    r"(\d+) filled, (\d+) still empty \(swap_latch (-?\d+)(?:, card run [^)]*\); latched at once (\d+), flips failed "
+    r"(\d+), waits (on|OFF))?")
 
 
 def serial_latch_verdict(text, seen=()):
@@ -970,18 +975,20 @@ def serial_latch_verdict(text, seen=()):
     a kernel that has them, is INFO 'not measured'"""
     last = {}
     for m in SERIAL_LATCH.finditer(text):
-        last[m.group(1)] = [None if x is None else int(x) for x in m.groups()[1:]]
+        g = list(m.groups()[1:])
+        g[-1] = None if g[-1] is None else int(g[-1] == "OFF")
+        last[m.group(1)] = [None if x is None else int(x) for x in g]
     out = []
     for h, v in sorted(last.items()):
         (swaps, pend, waits, avg, mx, tout, unk, off, chk, torn, inpl, tskip, onp, freed, filled, still,
-         latch_on, imm, budget, failed) = v
+         latch_on, imm, failed, waits_off) = v
         c = {"swaps_h" + h: swaps, "swaps_latchpend_h" + h: pend, "swaps_latchwait_h" + h: waits,
              "swaps_latchus_h" + h: avg * waits, "swaps_latchmax_h" + h: mx, "swaps_latchtimeout_h" + h: tout,
              "swaps_latchunknown_h" + h: unk, "swaps_latchoff_h" + h: off, "swaps_tornchk_h" + h: chk,
              "swaps_torn_h" + h: torn, "swaps_inplace_h" + h: inpl, "swaps_tornskip_h" + h: tskip,
              "cf_onpanel_h" + h: onp, "swaps_shownfreed_h" + h: freed, "swaps_emptyfilled_h" + h: filled,
              "swaps_emptystill_h" + h: still, "swap_latch": latch_on}
-        for k, x in (("swaps_latchimmediate", imm), ("swaps_latchbudget", budget), ("swaps_flipfailed", failed)):
+        for k, x in (("swaps_latchimmediate", imm), ("swaps_flipfailed", failed), ("swaps_latchwaitsoff", waits_off)):
             if x is not None:
                 c[k + "_h" + h] = x
         for lv, t in latch_verdict(c, report_missing=False):

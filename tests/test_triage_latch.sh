@@ -20,7 +20,7 @@ HASH=$(cd "$ROOT" && python3 -I -c 'import sys; sys.path.insert(0, "tools"); imp
 ZERO=""
 for h in 0 1; do
     for k in swaps_latchpend swaps_latchwait swaps_latchus swaps_latchmax swaps_latchimmediate swaps_latchtimeout \
-             swaps_latchbudget swaps_latchunknown swaps_latchoff swaps_flipfailed swaps_tornchk swaps_torn \
+             swaps_latchunknown swaps_latchoff swaps_latchwaitsoff swaps_flipfailed swaps_tornchk swaps_torn \
              swaps_inplace swaps_tornskip cf_onpanel swaps_shownfreed swaps_emptyfilled swaps_emptystill; do
         ZERO+="${k}_h$h 0"$'\n'
     done
@@ -88,7 +88,7 @@ mk torn/rdna3-report-torn "$TORN"
 o=$(run torn)
 hasnt "$o" Traceback torn
 has "$o" 'FAIL flip latch: head 1: 30 of 200 shown frames changed while on the panel, then flipped away (torn): 15%' torn
-has "$o" 'WARN flip latch: head 1: 40 of 300 swaps: the previous flip had not latched at the swap; flips waited for 40 time(s), avg 5000 us, max 9000 us; 260 latched at once; 0 timeouts, 0 budget spent, 0 unknown, 0 not waited (swap_latch 0) - the panel still read the buffer WindowServer had back' torn
+has "$o" 'WARN flip latch: head 1: 40 of 300 swaps: the previous flip had not latched at the swap; flips waited for 40 time(s), avg 5000 us, max 9000 us; 260 latched at once; 0 timeouts, 0 unknown, 0 not waited (swap_latch 0) - the panel still read the buffer WindowServer had back' torn
 has "$o" 'WARN flip latch: debug.rdna3accel_swap_latch was 0' torn
 has "$o" 'WARN flip latch: head 1: 3 copy forward(s) wrote into the buffer on the panel' torn
 has "$o" 'WARN flip latch: head 1: 4 flip(s) refused by the framebuffer' torn
@@ -121,6 +121,7 @@ swaps_latchus_h0 900000
 swaps_latchmax_h0 41000
 swaps_latchtimeout_h0 3
 swaps_latchoff_h0 7
+swaps_latchwaitsoff_h0 1
 swaps_tornchk_h0 100
 swaps_torn_h0 1
 swaps_inplace_h0 80
@@ -130,7 +131,8 @@ hasnt "$o" Traceback inplace
 has "$o" 'WARN flip latch: head 0: 80 of 100 shown frames rewritten in place and shown again (one back buffer' inplace
 grep -q 'WARN flip latch: head 0: 1 of 100 shown frames changed while on the panel, then flipped away (torn)$' <<<"$o" ||
     fail "inplace: one torn frame is a WARN: $o"
-has "$o" '3 timeouts, 0 budget spent, 0 unknown, 7 not waited (swap_latch 1) - 3 flip(s) never latched in time, 7 flip(s) not waited for (waits off after timeouts, or given up)' inplace
+has "$o" '3 timeouts, 0 unknown, 7 not waited (swap_latch 1) - 3 flip(s) never latched in time, 7 flip(s) not waited for (waits off after timeouts, or given up)' inplace
+has "$o" 'WARN flip latch: head 0: its swaps were NOT waiting for their flips at the end' inplace
 hasnt "$o" 'FAIL flip latch' inplace
 
 # the wait that did nothing (every flip latched at once), the torn test
@@ -145,15 +147,23 @@ o=$(python3 - "$T/idle/rdna3-report-idle-tests.txt" <<'PY'
 import re, sys
 p = sys.argv[1]
 s = open(p).read()
-s = re.sub(r"debug\.rdna3accel_swaps_(?:latchbudget|tornchk)_h1: 0\n", "", s)
+s = re.sub(r"debug\.rdna3accel_swaps_(?:latchmax|tornchk)_h1: 0\n", "", s)
 open(p, "w").write(s)
 PY
 run idle)
 hasnt "$o" Traceback idle
 has "$o" 'the flip state never read pending - the wait did nothing' idle
-has "$o" 'WARN flip latch: head 0: torn test not measured: 0 checks in 500 swaps (swap_torn 0, 0 skipped)' idle
-has "$o" 'WARN flip latch: head 1: counters missing (unknown, not 0): swaps_latchbudget, swaps_tornchk' idle
-has "$o" '? budget spent' idle
+# swap_torn=0 set deliberately: not measured is INFO; with the test on, WARN
+has "$o" 'INFO flip latch: head 0: torn test not measured: 0 checks in 500 swaps (swap_torn 0, 0 skipped)' idle
+has "$o" 'WARN flip latch: head 1: counters missing (unknown, not 0): swaps_latchmax, swaps_tornchk' idle
+has "$o" 'max ? us' idle
+mk idle2/rdna3-report-idle2 "${ZERO}swap_latch 1
+swap_torn 1
+swaps_h0 500
+swaps_latchwait_h0 400
+swaps_h1 0"
+o=$(run idle2)
+has "$o" 'WARN flip latch: head 0: torn test not measured: 0 checks in 500 swaps (swap_torn 1, 0 skipped)' idle2
 
 # a kernel before the latch counters: no flip latch line - unless the
 # kernel log says it runs these sources ('counters missing')
@@ -173,12 +183,15 @@ has "$o" 'WARN flip latch: counters missing: the accelerator runs these sources 
 mkdir -p "$T/ser"
 cat > "$T/ser/serial-1.log" <<'EOF'
 RDNA3Accelerator: swap latch: a swap returns only once its flip latched
+RDNA3Accelerator: swap latch: head 1 (core head 1): refresh 60000 mHz, frame 16666 us -> a swap waits at most 41665 us after its flip
+RDNA3-fb: flip to VRAM 0x8b100000: the previous flip still pending after 20 ms -- flipped anyway (1 such)
 RDNA3Accelerator: swap: surface <ptr> -> head 0 (only head piped; a1 phys 0x1 a2 phys 0x2, front a1, src a2)
-RDNA3Accelerator: swap latch: head 1: 8 swaps; previous flip not latched at entry 0; latched while waited 8 (avg 9000 us, max 16000 us), 0 timeouts, 0 unknown, 0 not waited; shown buffers hashed again 7: 0 changed on the panel then flipped away (torn), 0 rewritten in place (one back), 0 not hashed; copy forwards into the buffer on the panel 0; buffers freed on the panel 0; empty backs read again: 0 filled, 0 still empty (swap_latch 1, card run 2026-10-17); latched at once 0, budget spent 0, flips failed 0, waits on
+RDNA3Accelerator: swap latch: head 1: 8 swaps; previous flip not latched at entry 0; latched while waited 8 (avg 9000 us, max 16000 us), 0 timeouts, 0 unknown, 0 not waited; shown buffers hashed again 7: 0 changed on the panel then flipped away (torn), 0 rewritten in place (one back), 0 not hashed; copy forwards into the buffer on the panel 0; buffers freed on the panel 0; empty backs read again: 0 filled, 0 still empty (swap_latch 1, card run 2026-10-17); latched at once 0, flips failed 0, waits on
 RDNA3Accelerator: swap #90: head 1: the buffer it showed (phys 0x8b100000) changed while on the panel: bands 0x7e of 8 (bit 0 the top 32 rows); its flip latched 8000 us after it, 12 ms ago -- WRITTEN WHILE SHOWN, now flipped away (torn: the panel showed the writes) (1 such, 60 checked)
 RDNA3Accelerator: swap #91: head 1: the flip state could not be read after the flip: the core refused rdna3DisplayStatus (0xe00002c2) -- not waited for (1 such)
-RDNA3Accelerator: swap latch: head 1: 120 swaps; previous flip not latched at entry 2; latched while waited 118 (avg 8000 us, max 16500 us), 0 timeouts, 1 unknown, 0 not waited; shown buffers hashed again 119: 50 changed on the panel then flipped away (torn), 0 rewritten in place (one back), 1 not hashed; copy forwards into the buffer on the panel 0; buffers freed on the panel 0; empty backs read again: 1 filled, 3 still empty (swap_latch 1, card run 2026-10-17); latched at once 0, budget spent 0, flips failed 0, waits on
+RDNA3Accelerator: swap latch: head 1: 120 swaps; previous flip not latched at entry 2; latched while waited 118 (avg 8000 us, max 16500 us), 0 timeouts, 1 unknown, 0 not waited; shown buffers hashed again 119: 50 changed on the panel then flipped away (torn), 0 rewritten in place (one back), 1 not hashed; copy forwards into the buffer on the panel 0; buffers freed on the panel 0; empty backs read again: 1 filled, 3 still empty (swap_latch 1, card run 2026-10-17); latched at once 0, flips failed 0, waits on
 EOF
+echo 'RDNA3Accelerator: swap latch: head 2: 120 swaps; previous flip not latched at entry 0; latched while waited 0 (avg 0 us, max 0 us), 3 timeouts, 0 unknown, 117 not waited; shown buffers hashed again 0: 0 changed on the panel then flipped away (torn), 0 rewritten in place (one back), 0 not hashed; copy forwards into the buffer on the panel 0; buffers freed on the panel 0; empty backs read again: 0 filled, 0 still empty (swap_latch 1, card run 2026-10-17); latched at once 0, flips failed 0, waits OFF (timeouts)' >> "$T/ser/serial-1.log"
 o=$(python3 "$ROOT/tools/triage_reports.py" "$T/ser" 2>&1 || true)
 hasnt "$o" Traceback serial
 grep -q 'FAIL swap/flicker  *head 1: 50 of 119 shown frames changed while on the panel, then flipped away (torn): 42% - something writes the buffer the panel shows (flip latch, serial at swap 120)' <<<"$o" ||
@@ -188,4 +201,8 @@ has "$o" 'swap #90: head 1: the buffer it showed (phys 0x8b100000) changed while
 has "$o" 'swap #91: head 1: the flip state could not be read after the flip' serial
 has "$o" "INFO swap/flicker         head 0: flip latch not measured (no 'swap latch: head 0' line in the log)" serial
 hasnt "$o" 'counters missing' serial
+grep -q 'WARN swap/flicker  *head 2: its swaps were NOT waiting for their flips at the end' <<<"$o" || fail "serial: waits off: $o"
+has "$o" 'swap latch: head 1 (core head 1): refresh 60000 mHz' serial
+has "$o" 'swap latch: a swap returns only once its flip latched' serial
+has "$o" 'flip to VRAM 0x8b100000: the previous flip still pending after 20 ms' serial
 echo "test_triage_latch: all checks passed"
