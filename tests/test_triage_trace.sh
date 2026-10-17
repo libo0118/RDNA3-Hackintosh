@@ -101,7 +101,7 @@ d = r.stale_backs(r.load([sys.argv[2]]))[1]
 whys = [w for _, w in d["real"]]
 assert sum("aperture write" in w for w in whys) == 15 and sum("a new frame" in w for w in whys) == 15, whys
 PY
-# stale holds half or more of a head's swaps: the panel may look frozen (WARN)
+# more than two stale holds per copy on a head: the panel may look frozen (WARN)
 python3 -I - "$ROOT" "$T/frozen.bin" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1] + "/tests")
@@ -117,7 +117,7 @@ for n in range(3, 9):
     f.swap(w, n, 1, 5, f.B2, True, head=1, pc=f.HOME, stale=1)
 open(sys.argv[2], "wb").write(w.blob())
 out = r.h_stale(r.load([sys.argv[2]]))
-assert any(lv == "WARN" and "6 of its 8 swaps were stale holds" in t for lv, n, t in out), out
+assert any(lv == "WARN" and "6 stale holds against 2 copies" in t for lv, n, t in out), out
 PY
 # every other fixture's backs are drawn or empty: never a stale FAIL
 out=$(dec b2landed)

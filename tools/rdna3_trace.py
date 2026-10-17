@@ -755,8 +755,8 @@ def h_stale(trace, ctx=None):
     """[(level, "H-STALE" / "A-B-A", text)]: one H-STALE line per head with
     mode 1/2 swaps - copies decoded, stale copies, holds, A-B-A on the
     scanout samples. FAIL a stale copy in mode 1 (not on purpose: swap_stale
-    0 is WARN), FAIL a hold of a real frame, WARN stale holds >= half the
-    head's swaps (a frozen panel), WARN no decodable copy, WARN the kernel's
+    0 is WARN), FAIL a hold of a real frame, WARN more than two stale holds
+    per copy (a frozen panel), WARN no decodable copy, WARN the kernel's
     hold counter and the trace's holds apart by more than the events lost;
     INFO otherwise. The A-B-A line is its own: the kernel's flicker test
     (swaps_abab_h<N>) hashes the backs it shows, not the panel, so its PASS
@@ -810,9 +810,12 @@ def h_stale(trace, ctx=None):
             out.append(("FAIL", "H-STALE", "head %d: held a REAL frame at %d stale hold(s) (first swap #%d: %s) - the "
                         "back was redrawn although its samples matched: the panel missed that frame" % (
                             h, len(d["real"]), e.v0, why)))
-        if held and len(held) * 2 >= d["swaps"]:
-            out.append(("WARN", "H-STALE", "head %d: %d of its %d swaps were stale holds (half or more): the panel "
-                        "may look frozen - compare the looks" % (h, len(held), d["swaps"])))
+        # WindowServer's healthy pattern is about one stale hold per copy (B1 drawn, B2 not): more than two
+        # per copy means frames that should have reached the panel were held
+        if held and len(held) > 2 * d["copies"]:
+            out.append(("WARN", "H-STALE", "head %d: %d stale holds against %d copies (more than two per copy; "
+                        "WindowServer's two swaps per frame give about one): the panel may look frozen - compare "
+                        "the looks" % (h, len(held), d["copies"])))
         if "swaps_stalehold_h%d" % h in c:
             k = c["swaps_stalehold_h%d" % h]
             if abs(k - len(held)) > lost:
