@@ -81,19 +81,19 @@ static void test_no_cpu_stays_out(void)
     int pool = -1;
     setup(-1);
     vis0 = vis_free();
-    off = rdna3_vram_alloc_gem(&P, 4096, 4096, 1, &pool);
+    off = rdna3_vram_alloc_gem(&P, 4096, 4096, 1, 0, &pool);
     CHECK(off != RANGE_ALLOC_FAIL && pool == RD3_POOL_HI && off >= VIS_END);
     /* beyond BAR0 full: refused (the UAPI places it in GTT), the visible heap untouched */
     for (;;) {
         uint64_t big = range_alloc_largest_free(&hi);
         if (!big)
             break;
-        off = rdna3_vram_alloc_gem(&P, big, 4096, 1, &pool);
+        off = rdna3_vram_alloc_gem(&P, big, 4096, 1, 0, &pool);
         CHECK(off != RANGE_ALLOC_FAIL);
     }
     CHECK(range_alloc_free_bytes(&hi) == 0);
     CHECK(vis_free() == vis0);
-    off = rdna3_vram_alloc_gem(&P, 4096, 4096, 1, &pool);
+    off = rdna3_vram_alloc_gem(&P, 4096, 4096, 1, 0, &pool);
     CHECK(off == RANGE_ALLOC_FAIL);
     CHECK(vis_free() == vis0);                      /* the old code took 4 KiB of the visible heap here */
     CHECK(P.own[RD3_VO_GEM_HI].refused == 1 && P.hi_full == 1 && P.refused_total == 1);
@@ -110,14 +110,14 @@ static void test_reserve_for_the_accelerator(void)
     setup(-1);
     /* GEM BOs the CPU may map until the visible part says no */
     for (;;) {
-        off = rdna3_vram_alloc_gem(&P, 36992 * KiB, 2 * MiB, 0, &pool);
+        off = rdna3_vram_alloc_gem(&P, 36992 * KiB, 2 * MiB, 0, 0, &pool);
         if (off == RANGE_ALLOC_FAIL)
             break;
         CHECK(pool == RD3_POOL_GEM && off >= acc.end && off + 36992 * KiB <= VIS_END);
         n++;
     }
     CHECK(n >= 1);
-    while (rdna3_vram_alloc_gem(&P, 4 * KiB, 4 * KiB, 0, &pool) != RANGE_ALLOC_FAIL)
+    while (rdna3_vram_alloc_gem(&P, 4 * KiB, 4 * KiB, 0, 0, &pool) != RANGE_ALLOC_FAIL)
         ;
     /* the reserve is whole and the GEM refusals saw it */
     CHECK(range_alloc_free_bytes(&acc) == 96 * MiB);
@@ -166,8 +166,8 @@ static void test_accel_spill_and_refusal(void)
     /* GEM BOs still go beyond BAR0 only if they need no CPU access */
     {
         int pool;
-        CHECK(rdna3_vram_alloc_gem(&P, 4096, 4096, 0, &pool) == RANGE_ALLOC_FAIL);
-        CHECK(rdna3_vram_alloc_gem(&P, 4096, 4096, 1, &pool) != RANGE_ALLOC_FAIL && pool == RD3_POOL_HI);
+        CHECK(rdna3_vram_alloc_gem(&P, 4096, 4096, 0, 0, &pool) == RANGE_ALLOC_FAIL);
+        CHECK(rdna3_vram_alloc_gem(&P, 4096, 4096, 1, 0, &pool) != RANGE_ALLOC_FAIL && pool == RD3_POOL_HI);
     }
 }
 
@@ -179,7 +179,7 @@ static void test_no_reserve(void)
     uint64_t off;
     setup(0);
     CHECK(range_alloc_free_bytes(&acc) == 0);
-    off = rdna3_vram_alloc_gem(&P, 36992 * KiB, 4096, 0, &pool);
+    off = rdna3_vram_alloc_gem(&P, 36992 * KiB, 4096, 0, 0, &pool);
     CHECK(off != RANGE_ALLOC_FAIL && off >= START && pool == RD3_POOL_GEM);
     off = rdna3_vram_alloc_accel(&P, 8 * MiB, RD3_VO_ACCEL);
     CHECK(off != RANGE_ALLOC_FAIL && off >= START);
@@ -203,8 +203,8 @@ static void test_soak(void)
             uint64_t off;
             int owner, pool;
             switch (rand() % 3) {
-            case 0:  off = rdna3_vram_alloc_gem(&P, size, 4096ull << (rand() % 9), 0, &pool); owner = RD3_VO_GEM; break;
-            case 1:  off = rdna3_vram_alloc_gem(&P, size, 4096ull << (rand() % 9), 1, &pool); owner = RD3_VO_GEM_HI; break;
+            case 0:  off = rdna3_vram_alloc_gem(&P, size, 4096ull << (rand() % 9), 0, 0, &pool); owner = RD3_VO_GEM; break;
+            case 1:  off = rdna3_vram_alloc_gem(&P, size, 4096ull << (rand() % 9), 1, 0, &pool); owner = RD3_VO_GEM_HI; break;
             default: owner = rand() % 4; off = rdna3_vram_alloc_accel(&P, size, owner); break;
             }
             if (off == RANGE_ALLOC_FAIL)
@@ -238,9 +238,105 @@ static void test_soak(void)
 }
 
 
+/* kernel-internal BOs (seq64, user queue objects) need CPU access and have no GTT fallback:
+ * the general part first, then the reserve; a client's BO never takes the reserve */
+static void test_internal_spills_to_reserve(void)
+{
+    int pool = -1;
+    uint64_t off, last = 0;
+    unsigned n = 0;
+    setup(-1);
+    /* the GEM pool full of clients' BOs */
+    while (rdna3_vram_alloc_gem(&P, 1 * MiB, 4096, 0, 0, &pool) != RANGE_ALLOC_FAIL)
+        n++;
+    CHECK(n == 48 && range_alloc_free_bytes(&gem) == 0);          /* 144 MiB heap - 96 MiB reserve */
+    CHECK(rdna3_vram_alloc_gem(&P, 64 * KiB, 4096, 0, 0, &pool) == RANGE_ALLOC_FAIL);   /* a client: no */
+    /* seq64 (64 KiB) and a queue object (CPU access, contiguous, internal) still succeed, from the reserve */
+    off = rdna3_vram_alloc_gem(&P, 64 * KiB, 4096, 0, 1, &pool);
+    CHECK(off != RANGE_ALLOC_FAIL && pool == RD3_POOL_ACC && off < acc.end);
+    CHECK(P.own[RD3_VO_KERNEL].live == 1 && P.own[RD3_VO_KERNEL].bytes == 64 * KiB && P.own[RD3_VO_KERNEL].refused == 0);
+    CHECK(rdna3_vram_bo_owner(&P, off, 1) == RD3_VO_KERNEL);
+    CHECK(rdna3_vram_bo_owner(&P, off, 0) == RD3_VO_GEM);
+    /* the reserve is then 64 KiB short for the display only by what the kernel BO took */
+    CHECK(range_alloc_free_bytes(&acc) == 96 * MiB - 64 * KiB);
+    CHECK(rdna3_vram_free(&P, off, 64 * KiB, RD3_VO_KERNEL) == 0 && P.own[RD3_VO_KERNEL].live == 0);
+    CHECK(range_alloc_free_bytes(&acc) == 96 * MiB);
+    /* both full: refused, as the kernel's */
+    while (rdna3_vram_alloc_accel(&P, 1 * MiB, RD3_VO_ACCEL) != RANGE_ALLOC_FAIL)
+        ;
+    last = rdna3_vram_alloc_gem(&P, 64 * KiB, 4096, 0, 1, &pool);
+    CHECK(last == RANGE_ALLOC_FAIL && P.own[RD3_VO_KERNEL].refused == 1);
+}
+
+/* a free that fails is counted and the owner keeps what it holds; a lost range lets the owner go;
+ * a retired range is held by nobody */
+static void test_free_failures(void)
+{
+    int pool;
+    uint64_t a1, a2, base, off, i;
+    setup(-1);
+    a1 = rdna3_vram_alloc_gem(&P, 1 * MiB, 4096, 0, 0, &pool);
+    a2 = rdna3_vram_alloc_gem(&P, 1 * MiB, 4096, 0, 0, &pool);
+    CHECK(a1 != RANGE_ALLOC_FAIL && a2 != RANGE_ALLOC_FAIL);
+    CHECK(rdna3_vram_free(&P, a1, 1 * MiB, RD3_VO_GEM) == 0);
+    CHECK(P.own[RD3_VO_GEM].live == 1 && P.own[RD3_VO_GEM].bytes == 1 * MiB);
+    /* a double free: refused, counted, the owner's totals untouched */
+    CHECK(rdna3_vram_free(&P, a1, 1 * MiB, RD3_VO_GEM) == -1);
+    CHECK(P.free_fail == 1 && P.free_fail_bytes == 1 * MiB);
+    CHECK(P.own[RD3_VO_GEM].live == 1 && P.own[RD3_VO_GEM].bytes == 1 * MiB && P.own[RD3_VO_GEM].frees == 1);
+    /* outside every heap, and a bad owner */
+    CHECK(rdna3_vram_free(&P, HEAP_END + 64 * MiB, 4096, RD3_VO_GEM) == -1 && P.free_fail == 2);
+    CHECK(rdna3_vram_free(&P, a2, 4096, 99) == -1 && P.free_fail == 3);
+    CHECK(rdna3_vram_free(&P, a2, 1 * MiB, RD3_VO_GEM) == 0);
+    /* no pool (heaps gone): refused, not a crash */
+    {
+        rdna3_vram_pools z;
+        memset(&z, 0, sizeof(z));
+        CHECK(rdna3_vram_free(&z, a1, 4096, RD3_VO_GEM) == -1 && z.free_fail == 1);
+    }
+    /* a full free list: the put is lost (-2) and the owner lets go */
+    setup(0);   /* no reserve: the general part is the whole visible heap */
+    base = 0;
+    for (i = 0; i < 9000; i++) {
+        off = rdna3_vram_alloc_gem(&P, 4096, 4096, 0, 0, &pool);
+        if (off == RANGE_ALLOC_FAIL)
+            break;
+        if (!i)
+            base = off;
+    }
+    CHECK(i >= 9000 && P.own[RD3_VO_GEM].live == 9000);
+    {
+        unsigned lost = 0, ok = 0;
+        for (i = 0; i < 9000; i += 2) {
+            int r = rdna3_vram_free(&P, base + i * 4096, 4096, RD3_VO_GEM);
+            if (r == -2) lost++; else if (r == 0) ok++; else CHECK(0);
+        }
+        CHECK(lost > 0 && ok > 0 && P.free_fail == 0);
+        CHECK(P.own[RD3_VO_GEM].live == 9000 - 4500);                   /* the lost ones are not held either */
+        CHECK(gem.lost_ranges == lost && gem.lost_bytes == (uint64_t)lost * 4096);
+    }
+    /* a retired range (a clear that timed out) */
+    setup(-1);
+    off = rdna3_vram_alloc_gem(&P, 1 * MiB, 4096, 0, 0, &pool);
+    CHECK(off != RANGE_ALLOC_FAIL && P.own[RD3_VO_GEM].bytes == 1 * MiB);
+    rdna3_vram_retire(&P, 1 * MiB, RD3_VO_GEM);
+    CHECK(P.own[RD3_VO_GEM].bytes == 0 && P.own[RD3_VO_GEM].live == 0 && P.retired_n == 1 && P.retired_bytes == 1 * MiB);
+    CHECK(range_alloc_free_bytes(&gem) == 48 * MiB - 1 * MiB);          /* not free again */
+}
+
 /* ---- through the UAPI: GEM_CREATE with the kext's decisions (drmBoAlloc's flow
  * on the shared header, no clear) ---- */
 static unsigned live_bos;
+static int h_gtt_fail;                     /* the OS's GTT allocation fails */
+static unsigned h_hook_calls;
+static uint64_t h_hook_size;
+static int h_hook_why;
+static void h_gtt_failed(void *c, uint64_t size, int err, int why)
+{
+    (void)c;
+    CHECK(err < 0);
+    h_hook_calls++; h_hook_size = size; h_hook_why = why;
+}
 static void *h_zalloc(void *c, size_t n) { (void)c; return calloc(1, n); }
 static void h_free(void *c, void *p, size_t n) { (void)c; (void)n; free(p); }
 static int h_bo_alloc(void *c, rdna3_bo *bo)
@@ -248,13 +344,15 @@ static int h_bo_alloc(void *c, rdna3_bo *bo)
     (void)c;
     if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
         int pool, no_cpu = (bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) != 0;
-        uint64_t off = rdna3_vram_alloc_gem(&P, bo->size, bo->alignment, no_cpu, &pool);
+        uint64_t off = rdna3_vram_alloc_gem(&P, bo->size, bo->alignment, no_cpu, (bo->flags & RD_BO_FLAG_INTERNAL) != 0, &pool);
         if (off == RANGE_ALLOC_FAIL)
             return -RD_ENOMEM;
         bo->vram_offset = off;
         live_bos++;
         return 0;
     }
+    if (h_gtt_fail)
+        return -RD_ENOMEM;
     bo->backing = calloc(1, 16);    /* GTT: any backing */
     live_bos++;
     return 0;
@@ -264,7 +362,7 @@ static void h_bo_free(void *c, rdna3_bo *bo)
     (void)c;
     if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM)
         CHECK(rdna3_vram_free(&P, bo->vram_offset, bo->size,
-                              rdna3_vram_pool_of(&P, bo->vram_offset) == RD3_POOL_HI ? RD3_VO_GEM_HI : RD3_VO_GEM) == 0);
+                              rdna3_vram_bo_owner(&P, bo->vram_offset, (bo->flags & RD_BO_FLAG_INTERNAL) != 0)) == 0);
     else
         free(bo->backing);
     live_bos--;
@@ -300,6 +398,7 @@ static void test_uapi_placement(void)
     memset(&ops, 0, sizeof(ops));
     ops.zalloc = h_zalloc; ops.free = h_free; ops.bo_alloc = h_bo_alloc; ops.bo_free = h_bo_free;
     ops.copyin = h_copyin; ops.copyout = h_copyout;
+    ops.gtt_fallback_failed = h_gtt_failed;
     memset(&disc, 0, sizeof(disc));
     disc.has_gc_info = 1; disc.gc.num_se = 3; disc.gc.num_sa_per_se = 2; disc.gc.num_wgp0_per_sa = 5;
     disc.gc.num_rb_per_se = 4; disc.gc.wave_size = 32; disc.gc.num_gl2c = 16; disc.gc.gl2c_per_gpu = 4u << 20;
@@ -319,12 +418,46 @@ static void test_uapi_placement(void)
     /* beyond BAR0 full: the BO goes to GTT (the UAPI's retry), the visible heap is not touched */
     total = range_alloc_free_bytes(&hi);
     while ((big = range_alloc_largest_free(&hi)) != 0)
-        CHECK(rdna3_vram_alloc_gem(&P, big, 4096, 1, NULL) != RANGE_ALLOC_FAIL);
+        CHECK(rdna3_vram_alloc_gem(&P, big, 4096, 1, 0, NULL) != RANGE_ALLOC_FAIL);
     (void)total;
     CHECK(gem_create(&file, AMDGPU_GEM_DOMAIN_VRAM, 4096, 4096, AMDGPU_GEM_CREATE_NO_CPU_ACCESS, &h) == 0);
     bo = rdna3_drm_bo_lookup(&file, h);
     CHECK(bo && bo->placement == AMDGPU_GEM_DOMAIN_GTT);
     CHECK(vis_free() == vis0 && dev.vis_vram_usage == 0);
+
+    /* a client cannot ask for the kernel's reserve: the internal bit is dropped and not reported back */
+    CHECK(gem_create(&file, AMDGPU_GEM_DOMAIN_VRAM, 4096, 4096,
+                     AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED | RD_BO_FLAG_INTERNAL, &h) == 0);
+    bo = rdna3_drm_bo_lookup(&file, h);
+    CHECK(bo && !(bo->flags & RD_BO_FLAG_INTERNAL) && (bo->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED));
+    CHECK(P.own[RD3_VO_KERNEL].allocs == 0 && P.own[RD3_VO_GEM].allocs >= 1);
+
+    /* VRAM refused and the GTT budget is gone: the client's BO fails and it is counted, not silent */
+    {
+        uint32_t gh[16], hh;
+        unsigned ng = 0, k;
+        CHECK(dev.gtt_fallback_fail == 0 && h_hook_calls == 0);
+        while (dev.gtt_usage + (1ull << 30) <= dev.gtt_size && ng < 16)
+            CHECK(gem_create(&file, AMDGPU_GEM_DOMAIN_GTT, 1ull << 30, 4096, 0, &gh[ng++]) == 0);
+        if (dev.gtt_usage < dev.gtt_size && ng < 16)   /* the rest of the budget */
+            CHECK(gem_create(&file, AMDGPU_GEM_DOMAIN_GTT, dev.gtt_size - dev.gtt_usage, 4096, 0, &gh[ng++]) == 0);
+        CHECK(dev.gtt_usage == dev.gtt_size);
+        CHECK(gem_create(&file, AMDGPU_GEM_DOMAIN_VRAM, 8192, 4096, AMDGPU_GEM_CREATE_NO_CPU_ACCESS, &hh) == -RD_ENOMEM);
+        CHECK(dev.gtt_fallback_fail == 1 && dev.gtt_fallback_fail_bytes == 8192);
+        CHECK(h_hook_calls == 1 && h_hook_size == 8192 && h_hook_why == 1);
+        for (k = 0; k < ng; k++) {
+            struct drm_gem_close cl; cl.handle = gh[k]; cl.pad = 0;
+            CHECK(rdna3_drm_ioctl(&file, RD_NR_GEM_CLOSE, &cl, sizeof(cl)) == 0);
+        }
+        /* GTT within budget but the OS's allocation fails */
+        h_gtt_fail = 1;
+        CHECK(gem_create(&file, AMDGPU_GEM_DOMAIN_VRAM, 4096, 4096, AMDGPU_GEM_CREATE_NO_CPU_ACCESS, &hh) == -RD_ENOMEM);
+        h_gtt_fail = 0;
+        CHECK(dev.gtt_fallback_fail == 2 && h_hook_calls == 2 && h_hook_why == 2);
+        /* a VRAM|GTT BO that VRAM refuses and GTT takes is no failure */
+        CHECK(gem_create(&file, AMDGPU_GEM_DOMAIN_VRAM, 4096, 4096, AMDGPU_GEM_CREATE_NO_CPU_ACCESS, &hh) == 0);
+        CHECK(dev.gtt_fallback_fail == 2);
+    }
 
     /* BOs the CPU may map fill the general part, never the reserve; the next goes to GTT */
     for (i = 0; i < 64; i++) {
@@ -354,6 +487,8 @@ int main(void)
     test_accel_spill_and_refusal();
     test_no_reserve();
     test_soak();
+    test_internal_spills_to_reserve();
+    test_free_failures();
     test_uapi_placement();
     if (failures) {
         fprintf(stderr, "test_vram_place: %d failure(s)\n", failures);

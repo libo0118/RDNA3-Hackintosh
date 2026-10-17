@@ -54,8 +54,10 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
 {
     RDNA3Accel *a = (RDNA3Accel *)ctx;
     if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
-        if (!a->fVramHeap || !a->fVramHeapHi || !a->fVramAcc)
+        if (!a->fVramHeap || !a->fVramHeapHi || !a->fVramAcc) {
+            __sync_fetch_and_add(&a->fVramPools.refused_other, 1);   /* no heaps (drmInit failed / torn down) */
             return -RD_ENOMEM;
+        }
         /* amdgpu_bo_placement_from_domain: CPU_ACCESS_REQUIRED stays in the
          * visible part; NO_CPU_ACCESS goes outside it (lpfn/fpfn above
          * visible_vram_size); anything else prefers visible. amdgpu lets the
@@ -69,17 +71,20 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
          * Card run 2026-10-17c: the other way round holds too - a BO
          * without CPU access never takes visible space (it used to fall back
          * into the visible heap when the part beyond BAR0 refused it), and
-         * the reserve in front of the visible heap stays the accelerator's
+         * the reserve in front of the visible heap stays the accelerator's (a kernel-internal BO may spill into it)
          * (common/rdna3_vram_place.h) */
         const bool noCpu = (bo->flags & AMDGPU_GEM_CREATE_NO_CPU_ACCESS) != 0;
+        const bool internal = (bo->flags & RD_BO_FLAG_INTERNAL) != 0;   /* seq64, user queue objects */
         int pool = RD3_POOL_GEM;
-        const int owner = noCpu ? RD3_VO_GEM_HI : RD3_VO_GEM;
-        uint64_t off = rdna3_vram_alloc_gem(&a->fVramPools, bo->size, bo->alignment, noCpu, &pool);
+        const int owner = internal ? RD3_VO_KERNEL : noCpu ? RD3_VO_GEM_HI : RD3_VO_GEM;
+        uint64_t off = rdna3_vram_alloc_gem(&a->fVramPools, bo->size, bo->alignment, noCpu, internal, &pool);
         if (off == RANGE_ALLOC_FAIL) {
-            /* the UAPI places it in GTT instead (card run 51: the visible
-             * part was full); who holds what, for the report */
-            a->vramNoteRefusal(noCpu ? "GEM BO without CPU access" : "GEM BO the CPU may map", bo->size,
-                               bo->alignment, owner);
+            /* a client's BO: the UAPI tries GTT instead (card run 51: the
+             * visible part was full); a kernel BO has no fallback. Who holds
+             * what, for the report */
+            a->vramNoteRefusal(internal ? "kernel BO (no GTT fallback)"
+                                        : noCpu ? "GEM BO without CPU access" : "GEM BO the CPU may map",
+                               bo->size, bo->alignment, owner);
             return -RD_ENOMEM;
         }
         if (bo->size >= (1ull << 30) && a->fVramLargeLogs++ < 8)
@@ -96,9 +101,14 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
         if (bo->flags & AMDGPU_GEM_CREATE_VRAM_CLEARED) {
             int cr = a->fBringup ? a->fBringup->clearVram(off, bo->size) : RDNA3_ENODEV;
             if (cr == RDNA3_ETIME) {
-                /* the fill may still land: the range is not reused */
-                LOG("VRAM clear of %llu KiB at 0x%llx timed out: range retired",
-                    (unsigned long long)(bo->size >> 10), (unsigned long long)off);
+                /* the fill may still land: the range is not reused, and its
+                 * owner does not hold it any more (retired_* in debug.rdna3_vram) */
+                rdna3_vram_retire(&a->fVramPools, bo->size, owner);
+                const uint32_t nr = a->fVramPools.retired_n;
+                if (nr <= 8 || !(nr & 63))
+                    LOG("VRAM clear of %llu KiB at 0x%llx timed out: range retired (%u retired, %llu KiB)",
+                        (unsigned long long)(bo->size >> 10), (unsigned long long)off, nr,
+                        (unsigned long long)(a->fVramPools.retired_bytes >> 10));
                 return -RD_ENOMEM;
             }
             if (cr != RDNA3_OK) {
@@ -121,6 +131,22 @@ int RDNA3Accel::drmBoAlloc(void *ctx, rdna3_bo *bo)
         return 0;
     }
     return a->gttAlloc(bo);
+}
+
+/* GEM_CREATE: VRAM refused the client's BO and GTT did not take it either
+ * (the UAPI counts it in gtt_fallback_fail); rate-limited: the first 8, then
+ * every 64th */
+void RDNA3Accel::drmGttFallbackFailed(void *ctx, uint64_t size, int err, int why)
+{
+    RDNA3Accel *a = (RDNA3Accel *)ctx;
+    const uint32_t n = a->fDrm ? a->fDrm->gtt_fallback_fail : 1;
+    if (n > 8 && (n & 63))
+        return;
+    LOG("GEM: a %llu KiB BO found no VRAM and no GTT either (%s; GTT %llu of %llu MiB used, error %d): the "
+        "client's allocation fails (%u so far)", (unsigned long long)(size >> 10),
+        why == 1 ? "over the GTT budget" : "the GTT allocation failed",
+        a->fDrm ? (unsigned long long)(a->fDrm->gtt_usage >> 20) : 0ull,
+        a->fDrm ? (unsigned long long)(a->fDrm->gtt_size >> 20) : 0ull, err, n);
 }
 
 /* GTT: amdgpu's dma mask for GFX 11 is 44 bits; the pages are wired by
@@ -248,8 +274,8 @@ void RDNA3Accel::drmBoFree(void *ctx, rdna3_bo *bo)
     } else if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
         if (a->fVramHeap)
             a->vramFreeRange(bo->vram_offset, bo->size,
-                             rdna3_vram_pool_of(&a->fVramPools, bo->vram_offset) == RD3_POOL_HI ? RD3_VO_GEM_HI
-                                                                                                   : RD3_VO_GEM);
+                             rdna3_vram_bo_owner(&a->fVramPools, bo->vram_offset,
+                                                 (bo->flags & RD_BO_FLAG_INTERNAL) != 0));
     } else if (bo->backing) {
         RDNA3Gtt *g = (RDNA3Gtt *)bo->backing;
         if (g->gartSlot && a->fBringup)   /* a user queue's wptr page was bound to GART */
@@ -742,6 +768,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     ops.free = drmFreeMem;
     ops.bo_alloc = drmBoAlloc;
     ops.bo_free = drmBoFree;
+    ops.gtt_fallback_failed = drmGttFallbackFailed;
     ops.copyin = drmCopyin;
     ops.copyout = drmCopyout;
     ops.vm_create = drmVmCreate;
@@ -947,6 +974,7 @@ void RDNA3Accel::drmFree()
     fVramAcc = nullptr;
     fVramHeap = nullptr;
     fVramHeapHi = nullptr;
+    bzero(&fVramPools, sizeof(fVramPools));   /* nothing may reach the freed heaps through the pools */
     fDrmLock = nullptr;
 }
 

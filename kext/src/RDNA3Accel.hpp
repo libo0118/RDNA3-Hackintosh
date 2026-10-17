@@ -269,6 +269,7 @@ private:
     int           gttWire(rdna3_bo *bo, IOMemoryDescriptor *md, bool prepared);
     static void   gttFree(RDNA3Gtt *g);
     static void   drmBoFree(void *ctx, rdna3_bo *bo);
+    static void   drmGttFallbackFailed(void *ctx, uint64_t size, int err, int why);
     static int    drmCopyin(void *ctx, void *dst, uint64_t uaddr, size_t len);
     static int    drmCopyout(void *ctx, uint64_t uaddr, const void *src, size_t len);
     static void  *drmVmCreate(void *ctx);

@@ -116,8 +116,10 @@ IOReturn RDNA3Accel::platformVramAlloc(RD3KVramRequest *r)
 {
     if (!r || r->version != RD3K_VRAM_ABI_VERSION || !r->size)
         return kIOReturnBadArgument;
-    if (!fVramHeap || !fVramMap || !fVramDev || !fDrmLock)
+    if (!fVramHeap || !fVramMap || !fVramDev || !fDrmLock) {
+        __sync_fetch_and_add(&fVramPools.refused_other, 1);   /* no heap yet / any more: not an exhaustion */
         return kIOReturnNotReady;
+    }
 
     uint64_t size = (r->size + 4095) & ~4095ull;
     /* who asks (rdna3k_abi.h RD3K_VRAM_OWNER_*; an older caller sends 0) */
@@ -125,8 +127,10 @@ IOReturn RDNA3Accel::platformVramAlloc(RD3KVramRequest *r)
     if (owner > RD3_VO_ACCEL_LAST)
         owner = RD3_VO_ACCEL;
     RDNA3VramHandle *h = (RDNA3VramHandle *)IOMalloc(sizeof(*h));
-    if (!h)
+    if (!h) {
+        __sync_fetch_and_add(&fVramPools.refused_other, 1);
         return kIOReturnNoMemory;
+    }
 
     IOLockLock(fDrmLock);
     /* the reserve in front of the visible heap first, then the general
@@ -213,46 +217,55 @@ void RDNA3Accel::platformVramPutLocked(RDNA3VramHandle *h)
  * judges it). fDrmLock held unless said. */
 
 static const char *const kVramOwnerName[RD3_VO_N] = {
-    "accel", "fb-surface", "fb-cursor", "swap-D", "gem", "gem-beyond-BAR0"
+    "accel", "fb-surface", "fb-cursor", "swap-D", "gem", "gem-beyond-BAR0", "kernel"
 };
 static const char *const kVramPoolName[RD3_POOL_N] = { "reserve", "gem", "beyond-BAR0" };
 
 #define KIB(v) ((unsigned long long)((v) >> 10))
 
-/* the owners with something held or ever held: "accel 49200 KiB x5 (peak 65000)" */
+/* the owners with something held or ever held: "accel 49200 KiB x5 (peak 65000
+ * KiB, refused 0)"; an entry is written whole or not at all */
 static int vramHeldText(const rdna3_vram_pools *p, char *buf, size_t n)
 {
     size_t len = 0;
     buf[0] = 0;
-    for (int o = 0; o < RD3_VO_N && len + 1 < n; o++) {
+    for (int o = 0; o < RD3_VO_N; o++) {
         const rdna3_vram_stat *st = &p->own[o];
+        char ent[96];
         if (!st->peak_bytes && !st->refused)
             continue;
-        int w = snprintf(buf + len, n - len, "%s%s %llu KiB x%u (peak %llu KiB, refused %u)", len ? ", " : "",
-                         kVramOwnerName[o], KIB(st->bytes), st->live, KIB(st->peak_bytes), st->refused);
-        if (w < 0 || (size_t)w >= n - len)
+        int w = snprintf(ent, sizeof(ent), "%s %llu KiB x%u (peak %llu KiB, refused %u)", kVramOwnerName[o],
+                         KIB(st->bytes), st->live, KIB(st->peak_bytes), st->refused);
+        if (w < 0 || (size_t)w >= sizeof(ent) || len + (len ? 2 : 0) + (size_t)w + 1 > n) {
+            if (len + 4 < n)
+                snprintf(buf + len, n - len, "%s...", len ? ", " : "");   /* the rest did not fit */
             break;
-        len += (size_t)w;
+        }
+        len += (size_t)snprintf(buf + len, n - len, "%s%s", len ? ", " : "", ent);
     }
     return (int)len;
 }
 
-/* back into the pool the offset lies in; a range the free list had no slot
- * for is lost and says so (the lists hold 4096 ranges) */
+/* back into the pool the offset lies in. A refused put (outside the heap, a
+ * double free) is counted in free_fail and logged (the first 8, then every
+ * 64th); a range the full free list could not take is lost and says so
+ * (the lists hold 4096 ranges). The owner's totals follow
+ * rdna3_vram_free's rules. fDrmLock held. */
 void RDNA3Accel::vramFreeRange(uint64_t off, uint64_t size, int owner)
 {
     const int pool = rdna3_vram_pool_of(&fVramPools, off);
     range_alloc *ra = fVramPools.pool[pool];
-    uint64_t lostBefore = ra ? ra->lost_bytes : 0;
-    if (!ra || rdna3_vram_free(&fVramPools, off, size, owner)) {
-        static SInt32 gFreeFails;
-        if (OSIncrementAtomic(&gFreeFails) < 8)
-            LOG("VRAM: could not give %llu KiB at 0x%llx (%s) back to the %s heap%s - the range is lost "
-                "(%llu KiB lost in this heap so far)", KIB(size), (unsigned long long)off, kVramOwnerName[owner],
-                kVramPoolName[pool],
-                ra && ra->lost_bytes != lostBefore ? " (free list full)" : " (outside the heap or freed twice)",
-                ra ? KIB(ra->lost_bytes) : 0ull);
+    const int r = rdna3_vram_free(&fVramPools, off, size, owner);
+    if (r) {
+        const uint32_t n = r == -1 ? fVramPools.free_fail : ra ? ra->lost_ranges : 1;
+        if (n <= 8 || !(n & 63))
+            LOG("VRAM: could not give %llu KiB at 0x%llx (%s) back to the %s heap: %s (%u so far, %llu KiB; "
+                "%llu KiB lost in this heap)", KIB(size), (unsigned long long)off,
+                owner >= 0 && owner < RD3_VO_N ? kVramOwnerName[owner] : "?", kVramPoolName[pool],
+                r == -1 ? "outside the heap or freed twice - the owner still holds it" : "the free list is full",
+                n, KIB(r == -1 ? fVramPools.free_fail_bytes : size), ra ? KIB(ra->lost_bytes) : 0ull);
     }
+    vramSummaryMaybe(false);
 }
 
 /* one refusal: what was asked, what each heap has, who holds the rest.
@@ -262,25 +275,32 @@ void RDNA3Accel::vramNoteRefusal(const char *who, uint64_t size, uint64_t align,
 {
     const rdna3_vram_pools *p = &fVramPools;
     const uint32_t n = ++fVramRefusalLogs;
+    if (n == 1)
+        vramSummaryMaybe(true);   /* the state around the first one, whatever the 30 s say */
     if (n > 16 && (n & 63))
         return;
-    char held[360];
+    char held[512];
     vramHeldText(p, held, sizeof(held));
     const range_alloc *acc = p->pool[RD3_POOL_ACC], *gem = p->pool[RD3_POOL_GEM], *hi = p->pool[RD3_POOL_HI];
-    LOG("VRAM REFUSED #%u: %s, %llu KiB by %s (alignment %llu KiB, placed at %llu KiB): free reserve %llu KiB "
-        "(largest %llu KiB), visible heap %llu KiB (largest %llu KiB), beyond BAR0 %llu KiB (largest %llu KiB); "
-        "free ranges %u/%u/%u, lost %llu KiB; held: %s",
-        n, who, KIB(size), kVramOwnerName[owner], KIB(align), KIB(rdna3_vram_place_align(size, align)),
+    if (!acc || !gem || !hi)
+        return;
+    LOG("VRAM REFUSED #%u: %s, %llu KiB by %s; held: %s; alignment %llu KiB, placed at %llu KiB; free reserve "
+        "%llu KiB (largest %llu KiB), visible heap %llu KiB (largest %llu KiB), beyond BAR0 %llu KiB (largest "
+        "%llu KiB); free ranges %u/%u/%u, lost %llu KiB",
+        n, who, KIB(size), kVramOwnerName[owner], held[0] ? held : "nothing", KIB(align),
+        KIB(rdna3_vram_place_align(size, align)),
         KIB(range_alloc_free_bytes(acc)), KIB(range_alloc_largest_free(acc)),
         KIB(range_alloc_free_bytes(gem)), KIB(range_alloc_largest_free(gem)),
         KIB(range_alloc_free_bytes(hi)), KIB(range_alloc_largest_free(hi)), acc->nfree, gem->nfree, hi->nfree,
-        KIB(acc->lost_bytes + gem->lost_bytes + hi->lost_bytes), held);
+        KIB(acc->lost_bytes + gem->lost_bytes + hi->lost_bytes));
 }
 
 /* every 30 s at most, and only when something allocates or frees */
 void RDNA3Accel::vramSummaryMaybe(bool force)
 {
     uint64_t now;
+    if (!fVramPools.pool[RD3_POOL_ACC])
+        return;
     absolutetime_to_nanoseconds(mach_continuous_time(), &now);
     if (!fVramSummaryAt) {
         fVramSummaryAt = now ? now : 1;
@@ -291,7 +311,9 @@ void RDNA3Accel::vramSummaryMaybe(bool force)
         return;
     fVramSummaryAt = now;
     const rdna3_vram_pools *p = &fVramPools;
-    char held[360];
+    if (!p->pool[RD3_POOL_ACC] || !p->pool[RD3_POOL_GEM] || !p->pool[RD3_POOL_HI])
+        return;
+    char held[512];
     vramHeldText(p, held, sizeof(held));
     LOG("VRAM heap: visible %llu KiB (reserve %llu KiB) free %llu + %llu KiB, beyond BAR0 free %llu KiB, "
         "refused %u, GEM blocked by the reserve %u; held: %s",
@@ -315,7 +337,7 @@ void RDNA3Accel::vramReport(char *buf, size_t n)
     const rdna3_vram_pools *p = &fVramPools;
     const range_alloc *ra[RD3_POOL_N] = { p->pool[RD3_POOL_ACC], p->pool[RD3_POOL_GEM], p->pool[RD3_POOL_HI] };
     static const char *const pn[RD3_POOL_N] = { "acc", "gem", "hi" };
-    static const char *const on[RD3_VO_N] = { "accel", "fb_surface", "fb_cursor", "swap_d", "gem", "gem_hi" };
+    static const char *const on[RD3_VO_N] = { "accel", "fb_surface", "fb_cursor", "swap_d", "gem", "gem_hi", "kernel" };
     uint64_t lost = 0;
     uint32_t refusedAccel = 0;
     for (int i = 0; i < RD3_POOL_N; i++)
@@ -324,10 +346,14 @@ void RDNA3Accel::vramReport(char *buf, size_t n)
         refusedAccel += p->own[o].refused;
     size_t len = vramAppend(buf, n, 0,
         snprintf(buf, n, "visible_kib=%llu reserve_kib=%llu reserve_arg=%lld refused=%u refused_accel=%u "
-                 "refused_gem=%u refused_hi=%u reserve_blocked=%u hi_full=%u hi_clear_fail=%u lost_kib=%llu",
+                 "refused_gem=%u refused_hi=%u reserve_blocked=%u hi_full=%u hi_clear_fail=%u lost_kib=%llu "
+                 "free_fail=%u free_fail_kib=%llu retired_n=%u retired_kib=%llu refused_other=%u gtt_fail=%u "
+                 "gtt_fail_kib=%llu",
                  KIB(p->vis_end - ra[0]->base), KIB(p->acc_end - ra[0]->base), (long long)fVisReserveArg,
                  p->refused_total, refusedAccel, p->own[RD3_VO_GEM].refused, p->own[RD3_VO_GEM_HI].refused,
-                 p->gem_reserve_blocked, p->hi_full, fVramHiClearFails, KIB(lost)));
+                 p->gem_reserve_blocked, p->hi_full, fVramHiClearFails, KIB(lost),
+                 p->free_fail, KIB(p->free_fail_bytes), p->retired_n, KIB(p->retired_bytes), p->refused_other,
+                 fDrm ? fDrm->gtt_fallback_fail : 0u, fDrm ? KIB(fDrm->gtt_fallback_fail_bytes) : 0ull));
     for (int i = 0; i < RD3_POOL_N && len + 1 < n; i++)
         len = vramAppend(buf, n, len,
             snprintf(buf + len, n - len, " free_%s_kib=%llu largest_%s_kib=%llu nfree_%s=%u full_skips_%s=%u",
@@ -358,7 +384,7 @@ static SInt32 gVramSysctlBusy;
 static int rdna3_vram_sysctl SYSCTL_HANDLER_ARGS
 {
     (void)oidp; (void)arg1; (void)arg2;
-    const size_t cap = 2048;
+    const size_t cap = 3072;   /* the longest line is under 2000 bytes */
     int err = ENXIO;
     OSIncrementAtomic(&gVramSysctlBusy);
     RDNA3Accel *a = gVramOwner;
@@ -400,8 +426,11 @@ void RDNA3Accel::vramSysctlUnregister()
     sysctl_unregister_oid(&sysctl__debug_rdna3_vram);
     gVramOwner = nullptr;
     fVramSysctl = false;
-    for (int i = 0; i < 200 && gVramSysctlBusy; i++)   /* a read in flight finishes first */
+    int i = 0;
+    for (; i < 200 && gVramSysctlBusy; i++)   /* a read in flight finishes first */
         IOSleep(10);
+    if (gVramSysctlBusy)
+        LOG("VRAM: debug.rdna3_vram was still being read after 2 s; going on");
 }
 
 /* RD3K_VRAM_FN_REF: the accelerator, still holding the surface's vidmem,

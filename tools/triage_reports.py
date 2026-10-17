@@ -1369,7 +1369,9 @@ def coredisplay_cf_lines(cdlog, tr_lines=()):
 
 
 VRAM_HEAP_OWNERS = (("accel", "accel"), ("fb_surface", "fb-surface"), ("fb_cursor", "fb-cursor"),
-                    ("swap_d", "swap-D"), ("gem", "gem"), ("gem_hi", "gem-beyond-BAR0"))
+                    ("swap_d", "swap-D"), ("gem", "gem"), ("gem_hi", "gem-beyond-BAR0"), ("kernel", "kernel"))
+# the last key vramReport() prints: a dump without it was cut (the sysctl buffer, a pipe)
+VRAM_HEAP_LAST_KEY = "kernel_refused_kib"
 
 
 def vram_heap_counters(*texts):
@@ -1417,7 +1419,14 @@ def vram_heap_lines(path, txt, log):
     fb_refused = len(re.findall(r"RD3VidMemory::allocPhysical\([^)]*\): \d+ bytes REFUSED by the framebuffer", log))
     nref = max([int(n) for n in re.findall(r"VRAM REFUSED #(\d+):", log)] or [0])
     new_kext = "accelerator's reserve" in log or "VRAM heap:" in log or nref
+    out = []
     if c is None:
+        if arc.strip():
+            # collect.sh ran and left no dump: loud whatever the log says
+            why = re.search(r"^\(no debug\.rdna3_vram[^\n]*\)", arc, re.M)
+            return [("WARN", "not measured: 38-vram-heap.txt has no debug.rdna3_vram dump%s (%d 'VRAM REFUSED' "
+                             "line(s) and %d framebuffer refusal(s) in the log)"
+                     % (" - " + why.group(0) if why else "", nref, fb_refused))]
         if new_kext:
             # the kext that has the report left no dump: loud, not silent
             return [("WARN", "not measured: debug.rdna3_vram is in neither the tests file nor 38-vram-heap.txt "
@@ -1427,15 +1436,26 @@ def vram_heap_lines(path, txt, log):
             return [("WARN", "%d accelerator VRAM allocation(s) refused by the framebuffer, no debug.rdna3_vram to say "
                              "who held the visible heap (a kext before card run 2026-10-17c)" % fb_refused)]
         return []
-    out = []
     refused = c.get("refused", 0)
     ra, rg, rh = c.get("refused_accel", 0), c.get("refused_gem", 0), c.get("refused_hi", 0)
+    rk = c.get("kernel_refused", 0)
     owners = vram_heap_owners_text(c)
+    if VRAM_HEAP_LAST_KEY not in c:
+        out.append(("WARN", "dump truncated: debug.rdna3_vram ends before %s - the counters after the cut are "
+                            "missing, read the kernel log's 'VRAM heap:' lines" % VRAM_HEAP_LAST_KEY))
+    if c.get("visible_kib", 0) == 0:
+        out.append(("WARN", "visible_kib=0: the core reports no CPU-visible heap (BAR0 not mapped, or smaller than "
+                            "the kernel's windows): nothing of the accelerator's or the clients' CPU-visible VRAM "
+                            "is placed"))
+    if nref > refused:
+        out.append(("WARN", "log shows %d refusals, newest dump says %d: the dump is older than the log (read "
+                            "before the run ended), or the counters were reset" % (nref, refused)))
     if ra or rg:
         lv = "FAIL" if ra else "WARN"
         out.append((lv, "VISIBLE VRAM exhausted: %d refusals (%d of the accelerator's own allocations - the display's "
-                        "framebuffers; %d of GEM BOs, which fall back to GTT), owners %s; visible heap %d KiB with a "
-                        "%d KiB reserve for the accelerator, free now: reserve %d KiB, general %d KiB (largest %d KiB)%s"
+                        "framebuffers; %d of GEM BOs, which the UAPI then tries to place in GTT: gtt_fail below says "
+                        "when that failed too), owners %s; visible heap %d KiB with a %d KiB reserve for the "
+                        "accelerator, free now: reserve %d KiB, general %d KiB (largest %d KiB)%s"
                     % (ra + rg, ra, rg, owners, c.get("visible_kib", 0), c.get("reserve_kib", 0),
                        c.get("free_acc_kib", 0), c.get("free_gem_kib", 0), c.get("largest_gem_kib", 0),
                        "; %d GEM request(s) were held off by the reserve" % c["reserve_blocked"]
@@ -1444,29 +1464,55 @@ def vram_heap_lines(path, txt, log):
             out.append(("INFO", "the accelerator was refused although its reserve is %d KiB: more than the reserve and "
                                 "the general heap together - raise it with rdna3visreserve=<MiB>, or a bigger BAR0 "
                                 "(RESIZE_BAR_LOG2 in ~/rdna3-vm/config)" % c.get("reserve_kib", 0)))
+    if rk:
+        out.append(("FAIL", "%d kernel-internal BO(s) (seq64, user queue objects) refused: no room in the general part "
+                            "or the reserve, and they have no GTT fallback" % rk))
+    if c.get("gtt_fail"):
+        out.append(("WARN", "%d client BO(s), %d KiB, found no VRAM and no GTT either (the allocation returned an "
+                            "error; the kernel log's 'no VRAM and no GTT either' line has the GTT usage)"
+                    % (c["gtt_fail"], c.get("gtt_fail_kib", 0))))
     if rh or c.get("hi_full"):
         out.append(("WARN", "%d BO(s) without CPU access found no room beyond BAR0 (free %d KiB, largest %d KiB, "
-                            "alignment/fragmentation) and went to GTT; the visible heap was not touched"
+                            "alignment/fragmentation); they never take visible space, so the UAPI tries GTT for them"
                     % (rh, c.get("free_hi_kib", 0), c.get("largest_hi_kib", 0))))
+    if c.get("free_fail"):
+        out.append(("FAIL", "%d free(s) of %d KiB were refused by the heap (outside it, or a double free): the owner "
+                            "still counts the memory, a refcount bug - the kernel log's 'could not give' lines "
+                            "name the first ones" % (c["free_fail"], c.get("free_fail_kib", 0))))
     if c.get("lost_kib"):
         out.append(("FAIL", "the heap lost %d KiB: a free list was full when a range came back (nfree acc/gem/hi "
                             "%d/%d/%d) - fragmentation beyond what the allocator can hold"
                     % (c["lost_kib"], c.get("nfree_acc", 0), c.get("nfree_gem", 0), c.get("nfree_hi", 0))))
+    if c.get("retired_n"):
+        out.append(("WARN", "%d range(s), %d KiB, retired for good: a VRAM clear timed out (the SDMA fill may still "
+                            "land, so the range is never reused) - the kernel log's 'range retired' lines"
+                    % (c["retired_n"], c.get("retired_kib", 0))))
     skips = c.get("full_skips_acc", 0) + c.get("full_skips_gem", 0) + c.get("full_skips_hi", 0)
     if skips:
         out.append(("WARN", "%d allocation attempt(s) skipped a free range only because the free list was full "
                             "(nfree %d/%d/%d)" % (skips, c.get("nfree_acc", 0), c.get("nfree_gem", 0),
                                                   c.get("nfree_hi", 0))))
     if c.get("hi_clear_fail"):
-        out.append(("WARN", "%d BO(s) without CPU access could not be cleared by the SDMA ring and went to GTT "
-                            "(they no longer take visible VRAM for a CPU clear)" % c["hi_clear_fail"]))
+        out.append(("WARN", "%d BO(s) without CPU access could not be cleared by the SDMA ring and were refused "
+                            "(they no longer take visible VRAM for a CPU clear; the UAPI tries GTT)"
+                    % c["hi_clear_fail"]))
+    if c.get("refused_other"):
+        out.append(("WARN", "%d allocation(s) refused before the heaps were asked (no heap yet or any more, no "
+                            "memory for the handle): not an exhaustion" % c["refused_other"]))
     if fb_refused and not ra:
         out.append(("WARN", "%d allocation(s) 'REFUSED by the framebuffer' in the log, but the core's accelerator "
                             "refusal counter is %d: another cause (the request, the BAR check) - read the log lines"
                     % (fb_refused, ra)))
-    if not out:
-        out.append(("PASS", "no refusals (%d): the accelerator's reserve is %d KiB of the %d KiB visible heap; held at "
-                            "the end: %s" % (refused, c.get("reserve_kib", 0), c.get("visible_kib", 0), owners)))
+    # the kernel's own refusal lines (GEM BOs as well as the accelerator's), first of each kind
+    seen = set()
+    for l in log.splitlines():
+        m = re.search(r"RDNA3: (VRAM REFUSED #\d+: ([^,]*),.*)$", l)
+        if m and m.group(2) not in seen and len(seen) < 4:
+            seen.add(m.group(2))
+            out.append(("INFO", "log: " + m.group(1)[:300]))
+    if not any(lv in ("FAIL", "WARN") for lv, _ in out):
+        out.insert(0, ("PASS", "no refusals (%d): the accelerator's reserve is %d KiB of the %d KiB visible heap; held at "
+                               "the end: %s" % (refused, c.get("reserve_kib", 0), c.get("visible_kib", 0), owners)))
     return out
 
 

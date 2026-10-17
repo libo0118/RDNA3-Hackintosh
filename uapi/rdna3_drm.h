@@ -190,13 +190,20 @@ struct rd_xnu_txstate {
 struct rdna3_drm_device;
 
 /* A buffer object. 'backing' is owned by the OS layer. */
+/* bo->flags bit of the UAPI's own kernel BOs (seq64, user queue objects):
+ * they need CPU access and have no GTT fallback, so the OS layer may place
+ * them in the accelerator's reserve of the visible VRAM when the general part
+ * is full (card run 2026-10-17c, ECC review round 1). Never taken from a
+ * client's domain_flags, never reported back to it. */
+#define RD_BO_FLAG_INTERNAL (1ull << 63)
+
 typedef struct rdna3_bo {
     uint32_t refcnt;
     uint64_t size;
     uint64_t alignment;
     uint32_t domains;         /* AMDGPU_GEM_DOMAIN_* requested */
     uint32_t placement;       /* domain actually used */
-    uint64_t flags;
+    uint64_t flags;           /* AMDGPU_GEM_CREATE_* | RD_BO_FLAG_INTERNAL */
     uint64_t vram_offset;     /* VRAM placement */
     void    *backing;         /* OS object (IOBufferMemoryDescriptor, malloc...) */
     uint64_t mmap_offset;     /* fake offset handed to mmap() */
@@ -450,6 +457,10 @@ typedef struct rdna3_drm_ops {
     /* RD_NR_XNU_TXSTATE: fill everything after pipe; optional,
      * -EOPNOTSUPP when missing. The OS checks privilege. */
     int   (*txstate)(void *ctx, struct rd_xnu_txstate *t);
+    /* optional: GEM_CREATE found no VRAM and could not place the BO in GTT
+     * either (why: 1 = the GTT budget, 2 = the OS's allocation failed), for
+     * the OS layer's log; the UAPI counts it in gtt_fallback_fail */
+    void  (*gtt_fallback_failed)(void *ctx, uint64_t size, int err, int why);
 } rdna3_drm_ops;
 
 typedef struct rdna3_drm_device {
@@ -457,6 +468,10 @@ typedef struct rdna3_drm_device {
     struct drm_amdgpu_info_device dev_info;
     uint64_t vram_size, vis_vram_size, gtt_size;
     uint64_t vram_usage, vis_vram_usage, gtt_usage;
+    /* GEM_CREATE: VRAM refused and GTT did not take the BO either (the
+     * client got an error); count and bytes */
+    uint32_t gtt_fallback_fail;
+    uint64_t gtt_fallback_fail_bytes;
     uint32_t accel_working;
     uint32_t available_rings[AMDGPU_HW_IP_NUM];   /* bitmask per HW IP */
     uint32_t ip_ver_major[AMDGPU_HW_IP_NUM], ip_ver_minor[AMDGPU_HW_IP_NUM];

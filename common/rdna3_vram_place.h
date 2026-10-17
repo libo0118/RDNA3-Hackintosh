@@ -27,6 +27,10 @@
  *    never touch the reserve (TTM has the same idea in the other direction:
  *    the kernel's own allocations - firmware, rings - are carved out before
  *    userspace gets any).
+ *  - Kernel-internal BOs (RD_BO_FLAG_INTERNAL: the seq64 slots, user queue
+ *    objects) need CPU access and have no GTT fallback: they take the general
+ *    part first and may spill into the reserve, which GEM BOs of clients never
+ *    can (ECC review round 1).
  *  - amdgpu_vram_mgr_new: the block alignment never exceeds the size of
  *    the allocation (the buddy allocator's block order is bounded by the
  *    size), so a 4 KiB BO with a large alignment hint does not need a
@@ -57,7 +61,8 @@ enum rdna3_vram_owner {
     RD3_VO_SWAP_D = 3,     /* the swap copy's D buffer */
     RD3_VO_GEM = 4,        /* a GEM BO in the visible heap */
     RD3_VO_GEM_HI = 5,     /* a GEM BO beyond BAR0 (no CPU access) */
-    RD3_VO_N = 6
+    RD3_VO_KERNEL = 6,     /* a kernel-internal BO (seq64, user queue objects): no GTT fallback */
+    RD3_VO_N = 7
 };
 #define RD3_VO_ACCEL_LAST RD3_VO_SWAP_D
 
@@ -81,6 +86,12 @@ typedef struct rdna3_vram_pools {
      * GTT; it never takes visible space */
     uint32_t hi_full;
     uint32_t refused_total;        /* all owners */
+    /* a range that could not go back (overlap, outside the heap, double free)
+     * or was retired on purpose (a clear that timed out: the fill may still
+     * land, so the range is not reused); neither is held by its owner any
+     * more */
+    uint32_t free_fail, retired_n, refused_other;
+    uint64_t free_fail_bytes, retired_bytes;
 } rdna3_vram_pools;
 
 static inline uint64_t rdna3_vp_pow2_up(uint64_t v)
@@ -176,20 +187,26 @@ static inline void rdna3_vram_note_refused(rdna3_vram_pools *p, int owner, uint6
     p->refused_total++;
 }
 
-/* A GEM BO. no_cpu: AMDGPU_GEM_CREATE_NO_CPU_ACCESS. Returns the offset
- * (and the pool in *pool_out) or RANGE_ALLOC_FAIL; the UAPI then places the
- * BO in GTT. No_cpu BOs use only HI; the others only GEM. */
+/* A GEM BO. no_cpu: AMDGPU_GEM_CREATE_NO_CPU_ACCESS. internal: a kernel BO
+ * (RD_BO_FLAG_INTERNAL). Returns the offset (and the pool in *pool_out) or
+ * RANGE_ALLOC_FAIL; the UAPI then tries GTT for a client's BO. No_cpu BOs use
+ * only HI; the others the general part, an internal one then the reserve. */
 static inline uint64_t rdna3_vram_alloc_gem(rdna3_vram_pools *p, uint64_t size, uint64_t align,
-                                            int no_cpu, int *pool_out)
+                                            int no_cpu, int internal, int *pool_out)
 {
     int pool = no_cpu ? RD3_POOL_HI : RD3_POOL_GEM;
-    int owner = no_cpu ? RD3_VO_GEM_HI : RD3_VO_GEM;
-    uint64_t off = range_alloc_get(p->pool[pool], size, rdna3_vram_place_align(size, align));
+    int owner = internal ? RD3_VO_KERNEL : no_cpu ? RD3_VO_GEM_HI : RD3_VO_GEM;
+    uint64_t al = rdna3_vram_place_align(size, align);
+    uint64_t off = range_alloc_get(p->pool[pool], size, al);
+    if (off == RANGE_ALLOC_FAIL && internal && !no_cpu) {
+        pool = RD3_POOL_ACC;
+        off = range_alloc_get(p->pool[pool], size, al);
+    }
     if (off == RANGE_ALLOC_FAIL) {
         rdna3_vram_note_refused(p, owner, size);
         if (no_cpu)
             p->hi_full++;
-        else if (range_alloc_free_bytes(p->pool[RD3_POOL_ACC]) >= size)
+        else if (!internal && range_alloc_free_bytes(p->pool[RD3_POOL_ACC]) >= size)
             p->gem_reserve_blocked++;
         return RANGE_ALLOC_FAIL;
     }
@@ -197,6 +214,14 @@ static inline uint64_t rdna3_vram_alloc_gem(rdna3_vram_pools *p, uint64_t size, 
     if (pool_out)
         *pool_out = pool;
     return off;
+}
+
+/* the owner a GEM/kernel BO at 'off' is counted under */
+static inline int rdna3_vram_bo_owner(const rdna3_vram_pools *p, uint64_t off, int internal)
+{
+    if (internal)
+        return RD3_VO_KERNEL;
+    return rdna3_vram_pool_of(p, off) == RD3_POOL_HI ? RD3_VO_GEM_HI : RD3_VO_GEM;
 }
 
 /* An accelerator allocation (owner RD3_VO_ACCEL..RD3_VO_ACCEL_LAST; unknown
@@ -219,16 +244,49 @@ static inline uint64_t rdna3_vram_alloc_accel(rdna3_vram_pools *p, uint64_t size
 }
 
 /* back to the pool the offset lies in; owner as when it was allocated.
- * Returns range_alloc_put's result (-1: outside / overlapping / lost). */
+ * 0: back. -1: refused (outside the heap, overlapping free space = a double
+ * free, no such pool): counted in free_fail, the owner still holds it. -2:
+ * the free list was full, the range is lost (the range_alloc counts it): the
+ * owner no longer holds it. */
 static inline int rdna3_vram_free(rdna3_vram_pools *p, uint64_t off, uint64_t size, int owner)
+{
+    range_alloc *ra = p->pool[rdna3_vram_pool_of(p, off)];
+    uint32_t lost0;
+    int r;
+    if (!ra || owner < 0 || owner >= RD3_VO_N) {
+        p->free_fail++;
+        p->free_fail_bytes += size;
+        return -1;
+    }
+    lost0 = ra->lost_ranges;
+    r = range_alloc_put(ra, off, size);
+    if (r && ra->lost_ranges == lost0) {
+        p->free_fail++;
+        p->free_fail_bytes += size;
+        return -1;
+    }
+    {
+        rdna3_vram_stat *s = &p->own[owner];
+        if (s->live) {
+            s->live--;
+            s->frees++;
+            s->bytes = s->bytes >= size ? s->bytes - size : 0;
+        }
+    }
+    return r ? -2 : 0;
+}
+
+/* a range that is neither free nor held: the owner lets go of it (a clear
+ * that timed out - the fill may still land - so the range is not reused) */
+static inline void rdna3_vram_retire(rdna3_vram_pools *p, uint64_t size, int owner)
 {
     rdna3_vram_stat *s = &p->own[owner];
     if (s->live) {
         s->live--;
-        s->frees++;
         s->bytes = s->bytes >= size ? s->bytes - size : 0;
     }
-    return range_alloc_put(p->pool[rdna3_vram_pool_of(p, off)], off, size);
+    p->retired_n++;
+    p->retired_bytes += size;
 }
 
 /* visible heap bytes held by each side, for the report */
