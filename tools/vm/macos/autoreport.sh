@@ -129,7 +129,7 @@ rdna3_allow_mode() {
 # card run 58: WindowServer's display framebuffers and A3 (refused /
 # imported, the legacy swaps per head and those that scanned out an A3 BO)
 a3_sysctls() {
-    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|cf_|bufs_|iop_flip:)")
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:)")
     if [ -n "$_a3" ]; then echo "$_a3"
     else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
     # card run 2026-10-17c: who holds the CPU-visible VRAM now (tools/triage_reports.py "VISIBLE VRAM")
@@ -342,7 +342,9 @@ plugin_trace_conf() {
 
 # card run 2026-10-17b: one run decides between the swap models. 60 s with
 # debug.rdna3accel_swap_mode=1 (the copy), 60 s with 0 (the flip), back to
-# what it was; per phase a look at the panels, the counters and a snapshot
+# what it was. Opt-in since card run 2026-10-17d: only with the boot-arg
+# rdna3swapab=1 (the flip is the default and mode 1 broke both monitors, so
+# the picture is deliberately broken for a minute); per phase a look at the panels, the counters and a snapshot
 # of the traces. Activity Monitor redraws its graphs every few seconds: both
 # phases see the same kind of activity (whether it runs is logged; a head
 # whose display shows nothing that redraws has no swaps and is not judged,
@@ -444,7 +446,8 @@ BISECT_CONFBAK=${BISECT_CONFBAK:-/var/db/rdna3-bisect-conf.bak}
 BISECT_ALLOWBAK=${BISECT_ALLOWBAK:-/var/db/rdna3-allow.bak}
 
 # the steps of `bisect`: N|kind|name|a3 flicker swap_latch swap_torn swap_mode trace_scan swap_stale swap_landed a3ws|reopen
-# @ = the value the boot left (the default), - = set nothing, a number = that value;
+# @ = the value the boot left (the default: since card run 2026-10-17d swap_mode 0 = the flip, trace_scan 0),
+# - = set nothing, a number = that value;
 # reopen 1 = Activity Monitor is opened again (a3 / a3ws only reach surfaces created after the switch)
 bisect_plan_1() {
     cat <<'PLAN'
@@ -454,10 +457,10 @@ bisect_plan_1() {
 3|on|flicker test of the swaps (flicker)|@ @ 0 0 0 0 0 0 @|0
 4|on|a swap waits for its flip to latch (swap_latch)|@ @ @ 0 0 0 0 0 @|0
 5|on|torn-frame test (swap_torn)|@ @ @ @ 0 0 0 0 @|0
-6|on|swap mode 1: the back is copied, not flipped to (swap_mode)|@ @ @ @ @ 0 0 0 @|0
-7|on|trace sampling of the swap's other buffers (trace_scan)|@ @ @ @ @ @ 0 0 @|0
-8|on|stale-back hold (swap_stale): the defaults again|@ @ @ @ @ @ @ @ @|0
-9|extra|CONTROL, off by default: the landed buffer is presented (swap_landed=1)|@ @ @ @ @ @ @ 1 @|0
+6|on|stale-back hold (swap_stale): the defaults again|@ @ @ @ @ @ @ @ @|0
+7|extra|CONTROL, off by default: swap mode 1, the copy (broke both monitors in card run 2026-10-17d)|@ @ @ @ 1 @ @ @ @|0
+8|extra|CONTROL, off by default: trace sampling of the swap's other buffers (trace_scan=1)|@ @ @ @ @ 1 @ @ @|0
+9|extra|CONTROL, off by default: mode 1, the landed buffer is presented (swap_mode=1, swap_landed=1)|@ @ @ @ 1 @ @ 1 @|0
 10|extra|CONTROL, off by default: mode 2, every back copied (swap_mode=2)|@ @ @ @ 2 @ @ @ @|0
 11|extra|CONTROL, off by default: WindowServer's inputs in A3 (a3ws=1, the card run 58b flicker)|@ @ @ @ @ @ @ @ 1|1
 12|final|the defaults again|@ @ @ @ @ @ @ @ @|1
@@ -1114,6 +1117,12 @@ esac
 case " $args " in
     *" rdna3bisect=3 "*) [ -n "$BISECT_HAND" ] || { echo "rdna3bisect=3: no tests this boot; start the bisect by hand (sudo sh $0 --bisect)"; finish; } ;;
 esac
+# rdna3play=1 (rdna3vm step play): the desktop is the owner's. No test runs; the full report
+# (looks, counters, PM lines, the trace, collect.sh) is taken at minute 5 and again at minute 10, the VM
+# stays up. Not in a standalone run.
+PLAY=
+case " $args " in *" rdna3play=1 "*) [ -n "$STANDALONE" ] || { PLAY=1; label=play; } ;; esac
+PLAY_FIRST=${PLAY_FIRST:-300}; PLAY_SECOND=${PLAY_SECOND:-600}
 # no rdna3lvl: the kexts run their default profile (common/rdna3_bootargs.h);
 # the tests below gate on the same settings
 case " $args " in
@@ -1305,6 +1314,65 @@ cache_keep() {   # cache_keep EXIT: after done_, the test's output kept when it 
     tail -n +"$((hl + 1))" "$extra" > "$CACHE_DIR/$CNAME.out" 2>/dev/null && echo "$CFP" > "$CACHE_DIR/$CNAME.fp"
     CFP=
 }
+# ---- step play (rdna3play=1) -------------------------------------------------
+play_sleep_until() {   # play_sleep_until <seconds after PLAY_T0>
+    _pt=$((PLAY_T0 + $1))
+    while [ "$(date +%s)" -lt "$_pt" ]; do sleep 5; done
+}
+play_looks() {   # play_looks <minute>: three scanout looks 20 s apart, the counters and the PM lines (all read-only)
+    for _pk in a b c; do
+        mkdir -p "$HOME/rdna3-scanout/play$1$_pk"
+        hdr "rdna3_drminfo --scanout (look play$1$_pk)"
+        if [ -x "$D/bin/rdna3_drminfo" ]; then with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/play$1$_pk" 2>&1
+        else echo "play: no rdna3_drminfo in $D/bin: no scanout look"; fi
+        done_ $?
+        [ "$_pk" = c ] || sleep 20
+    done
+    echo "== display pipe and AGDC counters (play, minute $1)"
+    sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|copy_skip|flips)|heads_)|rdna3agdc" || true
+    a3_sysctls
+    if [ "${lvl:-0}" -ge 5 ] && [ -x "$D/bin/rdna3_pmctl" ]; then
+        hdr "rdna3_pmctl info (play, minute $1)"
+        with_limit 30 "$D/bin/rdna3_pmctl" info 2>&1
+        done_ $?
+    fi
+}
+play_first() {   # inside the results block: wait for minute 5, then the looks
+    PLAY_T0=$(date +%s)
+    notify "RDNA3 play: use the desktop; the report is taken at minute $((PLAY_FIRST / 60)) and again at minute $((PLAY_SECOND / 60))"
+    prog "play: use the desktop; reports at minute $((PLAY_FIRST / 60)) and $((PLAY_SECOND / 60)); the VM stays up after that"
+    play_sleep_until "$PLAY_FIRST"
+    play_looks "$((PLAY_FIRST / 60))"
+}
+play_second() {   # after the first report went up: wait for minute 10, then a second full report under its own name
+    prog "play: first report done; the second at minute $((PLAY_SECOND / 60))"
+    play_sleep_until "$PLAY_SECOND"
+    stamp=$(date +%Y%m%d-%H%M%S)
+    base=rdna3-report-$label-$stamp
+    extra="$HOME/rdna3-extra-2.txt"
+    : > "$extra"; hl=0
+    {
+        echo "boot-args: $args"
+        echo "== play: second collection at minute $((PLAY_SECOND / 60)) (the pump still runs)"
+        play_looks "$((PLAY_SECOND / 60))"
+        trace_snapshot play10
+    } >> "$extra" 2>&1
+    prog "play: sending the second report (up to 9 min)"
+    pend_cp "$extra" "/var/db/rdna3-pending-$base-tests.txt"
+    curl -sf --max-time 30 -T "$extra" "$HOST/reports/$base-tests.txt" && echo "uploaded $base-tests.txt" &&
+        rm -f "/var/db/rdna3-pending-$base-tests.txt"
+    for p in "$HOME"/rdna3-scanout/play$((PLAY_SECOND / 60))*/scanout-pipe*.ppm; do
+        [ -f "$p" ] && curl -sf --max-time 30 -T "$p" \
+            "$HOST/reports/$base-scanout$(basename "$(dirname "$p")")-$(basename "$p" | sed 's/^scanout-//')"
+    done
+    RDNA3_STAMP=$stamp with_limit 540 sh "$D/tools/macos/collect.sh" "$label"
+    f="$HOME/$base.tar.gz"
+    [ -f "$f" ] && pend_cp "$f" "/var/db/rdna3-pending-$base.tar.gz"
+    [ -f "$f" ] && curl -sf --max-time 60 -T "$f" "$HOST/reports/$base.tar.gz" && echo "uploaded $f" &&
+        rm -f "/var/db/rdna3-pending-$base.tar.gz"
+    if [ -f "$f" ]; then prog "play: second report sent - the VM stays up, shut macOS down when you are done"; notify "RDNA3 play: both reports sent; shut macOS down when you are done"
+    else prog "play: the second full report did not finish"; notify "RDNA3 play: the second report did not finish"; fi
+}
 [ -n "$win" ] || { rm -f "$P"; touch "$P"; chmod 644 "$P"; }
 [ -n "$win" ] && notify "Tests started: $(echo "$args" | tr ' ' '\n' | grep -c '^rdna3') rdna3 boot-args"
 prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
@@ -1358,8 +1426,12 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         bisect_run "$BISECT"
         echo "[exit $?]"
     fi
+    if [ -n "$PLAY" ]; then
+        hdr "play: the desktop is yours (reports at minute $((PLAY_FIRST / 60)) and $((PLAY_SECOND / 60)))"
+        play_first
+    fi
     # (not re-indented: every other test, from here to the trace pump's stop)
-    if [ -z "$BISECT" ]; then
+    if [ -z "$BISECT" ] && [ -z "$PLAY" ]; then
     if [ "${lvl:-0}" -ge 2 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
         for k in 1 2 3; do
             mkdir -p "$HOME/rdna3-scanout/$k"
@@ -1377,10 +1449,18 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         echo "== display pipe and AGDC counters"
         sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|copy_skip|flips)|heads_)|rdna3agdc" || true
         a3_sysctls
-        # card run 2026-10-17b: the swap models side by side, the trace streamed
-        hdr "swap A/B (mode 1 copy / mode 0 flip, 60 s each)"
-        swap_ab
-        done_ $?
+        # card run 2026-10-17b: the swap models side by side, the trace streamed.
+        # Opt-in since card run 2026-10-17d (boot-arg rdna3swapab=1): the flip
+        # (mode 0) is the default again and mode 1 broke both monitors in the
+        # bisect, so a normal step must not run 60 s of it
+        case " $args " in
+            *" rdna3swapab=1 "*)
+                hdr "swap A/B (mode 1 copy / mode 0 flip, 60 s each)"
+                swap_ab
+                done_ $?
+                ;;
+            *) echo "== swap A/B: NOT ASKED (boot-arg rdna3swapab=1 runs it; it breaks the picture for 60 s with mode 1)" ;;
+        esac
         ioreg -r -c RDNA3AGDC -w0 -d1 2>/dev/null | grep -E '"RDNA3,AGDC' | sed 's/^ *//'
         # with AGDC up WindowServer needs the Metal plugin's device (card runs 41/45)
         echo "Metal allow list: $(grep -v '^#' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | tr '\n' ' ') ($(stat -f %Lp /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null))"
@@ -1913,12 +1993,18 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 done_ $?
             fi ;;
     esac
-    fi   # [ -z "$BISECT" ]
-    trace_pump_stop
+    fi   # [ -z "$BISECT" ] && [ -z "$PLAY" ]
+    [ -n "$PLAY" ] || trace_pump_stop
 } > "$extra" 2>&1
-trace_pump_stop >> "$extra" 2>&1   # a shell that ran the block in a subshell: the pump stops here
-trace_send >> "$extra" 2>&1
-snap_plugin end >> "$extra" 2>&1
+if [ -n "$PLAY" ]; then
+    # the pump keeps running: a whole-blob snapshot goes up and into the archive instead of its stop
+    trace_snapshot play5 >> "$extra" 2>&1
+    export RDNA3_TRACE_DIR="$TS/snap"
+else
+    trace_pump_stop >> "$extra" 2>&1   # a shell that ran the block in a subshell: the pump stops here
+    trace_send >> "$extra" 2>&1
+    snap_plugin end >> "$extra" 2>&1
+fi
 
 # the standalone run's report folder as root's own directory: /Users/Shared
 # is world-writable (and sticky), so nothing found at the name is trusted or
@@ -1991,5 +2077,7 @@ if ls /var/db/rdna3-pending-* >/dev/null 2>&1; then
             sleep 60 ;;
     esac
 fi
+# step play: the second report, then the VM stays up (no shutdown)
+if [ -n "$PLAY" ]; then play_second; exit 0; fi
 case " $args " in *" rdna3vmauto=1 "*) prog "shutting down in 10 s"; sleep 10 ;; esac
 finish

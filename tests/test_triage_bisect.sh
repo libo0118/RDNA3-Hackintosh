@@ -3,7 +3,8 @@
 # display bisect (card run 2026-10-17d, `rdna3vm step bisect`): a fake report
 # with a 39-bisect.txt, a tests file and the looks' PPMs.
 #  - breaks at one switch: fine with everything off, broken at the defaults and
-#    from step 6 on -> the table, the owner's first n, the first black look and
+#    from step 6 on (the last of the 'on' steps since the swap mode 1 became a
+#    control step, 2026-10-17d) -> the table, the owner's first n, the first black look and
 #    "BREAKS AT step 6"
 #  - still broken with every switch off -> "not one of these switches"
 #  - nothing looked broken -> INFO, no FAIL
@@ -32,11 +33,11 @@ PLAN = [  # n, kind, name, values (None = unchanged)
     (0, "ref", "reference", None), (1, "off", "every new feature off", "0 0 0 0 0 0 0 0 0"),
     (2, "on", "A3", "1 0 0 0 0 0 0 0 0"), (3, "on", "flicker test", "1 1 0 0 0 0 0 0 0"),
     (4, "on", "swap_latch", "1 1 1 0 0 0 0 0 0"), (5, "on", "swap_torn", "1 1 1 1 0 0 0 0 0"),
-    (6, "on", "swap mode 1", "1 1 1 1 1 0 0 0 0"), (7, "on", "trace_scan", "1 1 1 1 1 1 0 0 0"),
-    (8, "on", "stale-back hold: the defaults again", "1 1 1 1 1 1 1 0 0"),
-    (9, "extra", "CONTROL landed", "1 1 1 1 1 1 1 1 0"), (10, "extra", "CONTROL mode 2", "1 1 1 1 2 1 1 0 0"),
-    (11, "extra", "CONTROL a3ws", "1 1 1 1 1 1 1 0 1"), (12, "final", "the defaults again", "1 1 1 1 1 1 1 0 0")]
-DEF = "1 1 1 1 1 1 1 0 0"
+    (6, "on", "stale-back hold: the defaults again", "1 1 1 1 0 0 1 0 0"),
+    (7, "extra", "CONTROL mode 1", "1 1 1 1 1 0 1 0 0"), (8, "extra", "CONTROL trace_scan", "1 1 1 1 0 1 1 0 0"),
+    (9, "extra", "CONTROL mode 1 landed", "1 1 1 1 1 0 1 1 0"), (10, "extra", "CONTROL mode 2", "1 1 1 1 2 0 1 0 0"),
+    (11, "extra", "CONTROL a3ws", "1 1 1 1 0 0 1 0 1"), (12, "final", "the defaults again", "1 1 1 1 0 0 1 0 0")]
+DEF = "1 1 1 1 0 0 1 0 0"
 
 
 def ppm(path, rgb, w=8, h=8, noise=0):
@@ -93,11 +94,11 @@ def block(n, kind, name, vals, prev, answer, pcts, still=(), nolook=False, nocnt
 def build(bad_from=None, ref_bad=True, off_bad=False, still_step=None, tty=True, cut_after=None, drop_look=None,
           drop_counters=None, fail_step=None, nonstd=False):
     head = ["# rdna3 bisect v1", "variant: 1 (bisect)", "hold_s: 30", "mode: " + ("tty" if tty else "timer"), "started: 12:00:00",
-            "console_user: tester", "autologin: none", "originals: " + " ".join("%s=%s" % kv for kv in zip(KNOBS, (("0 1 1 1 1 1 1 0 0" if nonstd else DEF)).split()))]
+            "console_user: tester", "autologin: none", "originals: " + " ".join("%s=%s" % kv for kv in zip(KNOBS, (("0 1 1 1 1 0 1 0 0" if nonstd else DEF)).split()))]
     for n, kind, name, vals in PLAN:
         head.append("plan: %d|%02d:%02d|%s|%s|x" % (n, n * 30 // 60, n * 30 % 60, kind, name))
     lines = list(head)
-    prev = "0 1 1 1 1 1 1 0 0" if nonstd else DEF   # what the boot left
+    prev = "0 1 1 1 1 0 1 0 0" if nonstd else DEF   # what the boot left
     for n, kind, name, vals in PLAN:
         if cut_after is not None and n > cut_after:
             break
@@ -165,12 +166,12 @@ run() { python3 -I "$ROOT/tools/triage_reports.py" "$1" 2>&1 || true; }
 mk "$T/a" breaks
 o=$(run "$T/a")
 grep -q 'display bisect (tools/triage_bisect.py' <<<"$o" || fail "no bisect table: $o"
-grep -qE '^ +6 on +swap_mode 1->1|^ +6 on' <<<"$o" || fail "step 6 not in the table: $o"
+grep -qE '^ +6 on' <<<"$o" || fail "step 6 not in the table: $o"
 grep -qE '^ +0 ref .* n +45% +1% ' <<<"$o" || fail "step 0 row (owner n, pipe 1 1%): $(grep -E '^ +0 ' <<<"$o")"
 grep -qE '^ +1 off .* y +45% +30% ' <<<"$o" || fail "step 1 row: $(grep -E '^ +1 ' <<<"$o")"
 grep -qE '^ +2 on +a3 0->1 +y ' <<<"$o" || fail "step 2 row: $(grep -E '^ +2 ' <<<"$o")"
 grep -qE '^ +6 on .* n +45% +1% .*<-- the owner marked it n; pipe 1 black' <<<"$o" || fail "step 6 should be flagged: $(grep -E '^ +6 ' <<<"$o")"
-grep -q 'FAIL BISECT: BREAKS AT step 6 (swap_mode' <<<"$o" || fail "verdict: $(grep BISECT <<<"$o")"
+grep -q 'FAIL BISECT: BREAKS AT step 6 (swap_stale' <<<"$o" || fail "verdict: $(grep BISECT <<<"$o")"
 grep -q 'FAIL the first step the owner marked n: step 0' <<<"$o" || fail "first n: $(grep 'first step' <<<"$o")"
 grep -q 'FAIL the first step whose looks black: step 0 .*pipe 1 black' <<<"$o" || fail "first black: $(grep 'first step' <<<"$o")"
 grep -qE 'moved|move/still' <<<"$o" || fail "no moved column: $o"
@@ -214,6 +215,7 @@ mk "$T/f" failed
 o=$(run "$T/f")
 grep -q 'FAIL step 4: a switch did not take: debug.rdna3accel_swap_latch:set-failed' <<<"$o" || fail "failed switch: $(grep 'step 4' <<<"$o")"
 grep -q 'WARN step 0 is not the compiled defaults: a3 0 (default 1)' <<<"$o" || fail "non-default originals: $(grep 'compiled' <<<"$o")"
+grep -q 'swap_mode 1 (default 0)' <<<"$o" || fail "swap_mode 1 is not the default since 2026-10-17d: $(grep 'compiled' <<<"$o")"
 mk "$T/m" missing
 o=$(run "$T/m")
 grep -q 'FAIL bisect run (rdna3bisect in the boot-args) but no bisect.txt' <<<"$o" || fail "missing bisect.txt: $o"

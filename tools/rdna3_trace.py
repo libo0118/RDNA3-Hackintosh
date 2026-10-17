@@ -524,10 +524,13 @@ def hypotheses(trace, ctx=None):
         if mode != 0:
             continue
         if s["inplace_checked"] >= 20 and s["inplace"] >= 0.25 * s["inplace_checked"]:
-            out.append(("FAIL", "H-COPY", "mode 0%s: %d of %d flipped buffers were rewritten while on the panel and shown "
-                        "again - WindowServer treats the back as free when the swap returns (copy semantics): the "
-                        "copy (swap mode 1) is the fix" % (" (" + AB_NAME.get(phase, str(phase)) + ")" if phase else "",
-                                                          s["inplace"], s["inplace_checked"])))
+            # WARN since card run 2026-10-17d: the bisect found mode 1 (the copy) broke both monitors and mode 0
+            # right on both, so the in-place rewrites are no longer a failure by themselves: judge by the looks
+            out.append(("WARN", "H-COPY", "mode 0%s: %d of %d flipped buffers were rewritten while on the panel and shown "
+                        "again (WindowServer treats the back as free when the swap returns) - the picture is judged "
+                        "by the looks: mode 1 (the copy) broke both monitors in the 2026-10-17d bisect, mode 0 was "
+                        "right" % (" (" + AB_NAME.get(phase, str(phase)) + ")" if phase else "",
+                                   s["inplace"], s["inplace_checked"])))
         elif s["inplace"]:
             out.append(("WARN", "H-COPY", "mode 0: %d of %d flipped buffers rewritten in place" %
                         (s["inplace"], s["inplace_checked"])))
@@ -770,6 +773,8 @@ def h_stale(trace, ctx=None):
     lost = accel_lost(trace)
     for h, d in sorted(data.items()):
         if not d["mode12"]:
+            if d["swaps"]:   # card run 2026-10-17d: mode 0 (flip) is the default; there is no copy to judge
+                out.append(("INFO", "H-STALE", "head %d: %d swaps, all mode 0 (flip): not judged" % (h, d["swaps"])))
             continue
         cp, held, would = d["copied"], d["held"], d["would"]
         cp1 = [x for x in cp if swap_mode(x[0]) == 1]
@@ -1030,7 +1035,12 @@ def coverage(trace, ctx=None):
             why1 += " (no tests file: the counters' window not compared)"
         out.append(("Q1", ok1, why1))
         scans = [e for e in trace.by("SCAN") if e.arg not in (0xfe, 0xfd) and not e.flags & 16]
-        out.append(("Q2", bool(scans) or not swaps, "%d samples of the surfaces' other buffers" % len(scans)))
+        # card run 2026-10-17d: trace_scan is 0 by default (only empty backs are sampled): no samples is then
+        # what the kernel was told to do, not a hole in the trace - but only a report that says so
+        # (debug.rdna3accel_trace_scan in its counters) is excused
+        off = (ctx.get("counters") or {}).get("trace_scan") == 0
+        out.append(("Q2", bool(scans) or not swaps or off, "%d samples of the surfaces' other buffers%s" % (
+            len(scans), " (trace_scan 0: only empty backs are sampled)" if off and not scans else "")))
         empty = sum(1 for e in swaps if e.flags & F_EMPTY and e.head != 0xff)
         late = [e for e in trace.by("SCAN") if e.flags & 16]
         out.append(("Q3", bool(late) or empty < 8, "%d empty backs, %d delayed re-samples" % (empty, len(late))))
