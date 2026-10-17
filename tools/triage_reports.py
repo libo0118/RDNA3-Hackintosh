@@ -576,7 +576,7 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg|"
                        r"_latchpend|_latchwait|_latchus|_latchmax|_latchtimeout|_latchunknown|_latchoff|_tornchk|"
                        r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill|_latchimmediate|_latchwaitsoff|"
-                       r"_flipfailed|_copy|_copyempty|_copylanded|_copylanded_would|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
+                       r"_flipfailed|_copy|_copyempty|_copylanded|_copylanded_would|_stalehold|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
                        r"_copylatchto|_copyfail|_copydirect|_copyfront|_copyfrontfail|_copynowait|_copybrkflip|_copyfreewait)?_h\d|"
                        r"swaps_copybrktrips|swap_latch|swap_torn|swap_landed|"
                        r"swap_mode|swap_trace_events|swap_trace_nomem|swap_trace_lost|cf_sc(?:src|scanout|stale)_h\d|"
@@ -1079,15 +1079,17 @@ def swapcopy_verdict(c):
         black, held, fail, direct = g("swaps_copyblack"), g("swaps_copyempty"), g("swaps_copyfail"), g("swaps_copydirect")
         landed = g("swaps_copylanded")   # card run 2026-10-17c: the landed buffer presented instead of the back
         would = g("swaps_copylanded_would")   # ... found but not presented (debug.rdna3accel_swap_landed=0)
+        stale = g("swaps_stalehold")   # ... backs WindowServer did not redraw since presented, held (H-STALE)
         waits = g("swaps_copywait")
         nowait, brk, freewait = g("swaps_copynowait"), g("swaps_copybrkflip"), g("swaps_copyfreewait")
         line = ("head %s: %d backs copied (%d MiB, avg %d us, max %d us), %d of them the landed buffer instead of an "
-                "empty / stale back, %d empty backs kept off a picture, %d black "
+                "empty / stale back, %d empty backs kept off a picture, %d stale backs held (not redrawn since "
+                "shown), %d black "
                 "frames, %d failed, %d direct copies (no second buffer: may tear), %d waits for the last flip (avg %d "
                 "us, %d ran out), front copies %d ok / %d not; copy forward from the front %d, from the panel's buffer "
                 "%d, nothing to copy from %d" % (h, copies, g("swaps_copybytes") >> 20,
                                                 g("swaps_copyus") // copies if copies else 0, g("swaps_copyusmax"),
-                                                landed, held, black, fail, direct, waits,
+                                                landed, held, stale, black, fail, direct, waits,
                                                 g("swaps_copywaitus") // waits if waits else 0, g("swaps_copylatchto"),
                                                 g("swaps_copyfront"), g("swaps_copyfrontfail"), g("cf_scsrc"),
                                                 g("cf_scscanout"), g("cf_scstale")))
@@ -1121,6 +1123,10 @@ def swapcopy_verdict(c):
             out.append(("WARN", "head %s: as many empty backs as frames (%d / %d): WindowServer presents a back it "
                                 "never draws (H-B2) - the trace's H-B2 line says whether a frame was held back" %
                         (h, held, copies)))
+        if stale:   # card run 2026-10-17c: a back WindowServer did not redraw since presented, held
+            out.append(("INFO", "head %s: H-STALE handled: %d stale backs held (WindowServer did not redraw them since "
+                                "this head presented them, a newer frame after them: the panel kept it; the trace's "
+                                "H-STALE line says whether any was still copied)" % (h, stale)))
     return out
 
 
@@ -2144,11 +2150,11 @@ def summary(path, serial=None):
     for lv, t in latch_lines(path, txt, args):
         out.append(("flip latch", "%s %s" % (lv, t)))
     for lv, t in swapcopy_verdict(a3_counters(txt) if txt else {}):
-        if lv != "INFO" or t.startswith("swap mode") or "H-B2 handled" in t:
+        if lv != "INFO" or t.startswith("swap mode") or "H-B2 handled" in t or "H-STALE handled" in t:
             out.append(("swap copy", "%s %s" % (lv, t)))
     tlv, _ = trace_lines(path, txt, log, args)
     for lv, t in tlv:
-        if lv in ("FAIL", "CRITICAL", "WARN") or t.startswith("A/B") or t.startswith("H-B2"):
+        if lv in ("FAIL", "CRITICAL", "WARN") or t.startswith("A/B") or t.startswith(("H-B2", "H-STALE")):
             out.append(("frame trace", "%s %s" % (lv, t[:300])))
     cdl = read_tar_member(path, "24-log-coredisplay.txt")
     for lv, t in coredisplay_cf_lines(cdl, tlv):

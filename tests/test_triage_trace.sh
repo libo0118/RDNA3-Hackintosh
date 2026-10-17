@@ -49,6 +49,26 @@ has "$out" "80 shown (40 landed),    0 held/skipped" b2landed
 hasnt "$out" "FAIL     H-B2" b2landed
 has "$out" "0 BLACK frames" b2landed
 
+# card run 2026-10-17c: head 1's second swap of a frame named a back WindowServer did not redraw. The old
+# kext copied its old frame over every new one (H-STALE FAIL, A-B-A on the scanout); the stale-back hold keeps
+# the newer frame (INFO), the timeline names the swap that showed it
+python3 -I "$ROOT/tests/trace_fixture.py" stale "$T/stale.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/stale.bin" --timeline 400)
+has "$out" "FAIL     H-STALE: head 1: 30 stale backs COPIED (0x8b8f0000 30x; first swap #3, shown before at #1; 30 A-B-A on the head's scanout samples)" stale
+has "$out" "a kernel without the stale-back hold, swaps_stalehold_h<N>" stale
+hasnt "$out" "H-STALE: head 0" stale
+hasnt "$out" "COPY-BLACK" stale
+python3 -I "$ROOT/tests/trace_fixture.py" stalehold "$T/stalehold.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/stalehold.bin" --timeline 400)
+has "$out" "INFO     H-STALE: head 1: held 30 stale backs" stalehold
+has "$out" "none copied; 0 A-B-A on the head's scanout samples" stalehold
+has "$out" "hold: back 0x8b8f0000 (pixels, 0708090a0b0c0d0e) front 0x87040000 (empty) held: stale back (shown at #1)" stalehold
+has "$out" "30 held/skipped (0 with a new frame elsewhere), 30 stale backs held" stalehold
+hasnt "$out" "FAIL     H-STALE" stalehold
+# every other fixture's backs are drawn or empty: no H-STALE
+out=$(dec b2landed)
+hasnt "$out" "H-STALE" b2landed-stale
+
 out=$(dec copy)
 has "$out" "FAIL     H-COPY: mode 0: 39 of 39 flipped buffers were rewritten" copy
 hasnt "$out" "H-B2" copy
@@ -279,6 +299,23 @@ swaps_copylanded_would_h0 7
 swaps_copyempty_h0 7"
 out=$(run would)
 has "$out" "WARN swap copy: head 0: the landed buffer WOULD have been presented 7 times (swap_landed 0" triage-would
+# card run 2026-10-17c: the stale back - the counter (swaps_stalehold_h<N>) and the trace's verdict, in the
+# report's lines and the SUMMARY
+mk stalehold stalehold "swaps_h1 31
+swap_mode 1
+swaps_copy_h1 31
+swaps_stalehold_h1 30"
+out=$(run stalehold)
+has "$out" "0 empty backs kept off a picture, 30 stale backs held (not redrawn since shown)" triage-stalehold
+has "$out" "INFO swap copy: head 1: H-STALE handled: 30 stale backs held" triage-stalehold
+has "$out" "swap copy              INFO head 1: H-STALE handled: 30 stale backs held" triage-stalehold-summary
+has "$out" "frame trace            INFO H-STALE: head 1: held 30 stale backs" triage-stalehold-summary
+mk stale stale "swaps_h1 61
+swap_mode 1
+swaps_copy_h1 61"
+out=$(run stale)
+has "$out" "FAIL frame trace: H-STALE: head 1: 30 stale backs COPIED" triage-stale
+has "$out" "frame trace            FAIL H-STALE: head 1: 30 stale backs COPIED" triage-stale-summary
 
 # ECC review round 1 through triage
 # no tests file: the A/B judged from the trace, said so

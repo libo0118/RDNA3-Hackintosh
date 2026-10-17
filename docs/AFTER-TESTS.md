@@ -2317,6 +2317,7 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
 | Seen | Trace / triage line | Action |
 |---|---|---|
 | black frames in mode 1 | A/B: `BLACK frames` > 0 in mode 1, `swaps_copyblack_h<N>` | mode 1 only copies an empty back with no picture to lose: look at Q2 for where the frame went; `debug.rdna3accel_swap_mode=0` to compare |
+| `H-STALE` FAIL (2026-10-17c) | a mode 1/2 copy of a back with no copy forward into it since it was shown, unchanged, < 20 ms after another back's copy; A-B-A on the scanout samples | modes 1/2 hold such a back (`swaps_stalehold_h<N>`); see "The stale back" under card run 2026-10-17c |
 | `H-B2` FAIL | a back named by swaps never receives a frame (no aperture write, empty at every swap) and a frame was held back or black shown at its swaps (since card run 2026-10-17c: WARN `no frame lost` / INFO `handled`, see that run) | modes 1/2 present the landed buffer; find with SURFRES / SURFGEM which IOSurface WindowServer draws (H-B2 is the family's / WindowServer's buffer rotation, not a driver write) |
 | `H-COPY` FAIL in mode 0, none in mode 1 | in-place rewrites only while flipping | the copy is right: keep mode 1 |
 | `H-FREE` | VMFREE flags 2-8 | in mode 1 the panel never scans WindowServer's buffers; in mode 0 expected |
@@ -2375,3 +2376,37 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
 | `frame trace FAIL H-B2: ...; n held/skipped, k of them with a new frame in another buffer, b shown black` | a held swap while another buffer had a new frame (a frame waited for the next swap), or the empty back shown | a kernel before the landed buffer, or the landed rule missed it (its SCAN not taken: `held swaps without samples`) |
 | A/B `shown (k landed), held/skipped (n with a new frame elsewhere)`, verdict `mode 1: h held (n with a new frame in another buffer: frames held back), k landed buffers presented` | the A/B per mode | n > 0 in mode 1: frames held back |
 | `plugin trace MISSING although WindowServer loaded the plugin: the VM's plugin is STALE: PLUGIN built from metal at X, ... - a plugin without the frame trace (metal/plugin/NVMTLTrace.m came with Y after it)` | 35-build-stamps.txt against 00-host.txt (the same check as `STALE PLUGIN/RADV`) | rebuild the plugin in the VM; the collector's generic reasons are printed only when the plugin is current |
+
+#### The stale back: the side monitor flickers, windows appear and disappear (2026-10-17c)
+
+- Seen (certain from the run's stream, `tools/rdna3_trace.py`): head 1's
+  swaps come in pairs per frame - a copy forward into B1, the swap of B1
+  (the frame), then 5-14 ms later the swap of B2, which WindowServer did not
+  draw this frame. B2 (0x8d0c0000, later 0x8d8b0000) received pixels once,
+  from a window animation that rotated three buffers, and never again. Mode
+  1 copied it at every frame: the panel showed the old frame for most of
+  each frame period, and the copy into the front spread it into the next
+  frame through copy forward. 259 such copies on head 1 by the decoder's
+  count (130 of 0x8d0c0000, 102 of 0x8d8b0000, the rest the same pattern
+  on other buffer sets), none on head 0; 14 A-B-A patterns on head 1's
+  scanout samples, 0 on head 0. No GPU work of WindowServer was pending at
+  any of those swaps (not a render race); SYNC's dirty bits are 0.
+- Change (evidence-driven, no amdgpu analogue: macOS legacy surface
+  semantics; `common/rdna3_swap_copy.h` `rd3_sc_stale_hold`,
+  `tests/test_swap_copy.c` `stale_model`): modes 1/2 remember per head and
+  per buffer address the hash of the back's 64 samples when the head last
+  presented it and whether a copy forward targeted it since. A back with
+  pixels is held - no copy to the panel, none into the front, the panel
+  keeps the newer frame - when no copy forward targeted it since, its
+  samples are unchanged and another buffer was presented after it (and
+  the panel holds a frame these modes copied). Never presented: copied.
+  The records are forgotten when the surface or the head's framebuffer
+  resource goes, at a display or swap mode change, when D is reallocated,
+  and per address when the VRAM is freed. Mode 0 is unchanged.
+
+| Seen | Trace / counter / triage line | Meaning, action |
+|---|---|---|
+| side monitor flickers, windows appear and disappear (mode 1) | `frame trace FAIL H-STALE: head N: k stale backs COPIED (0x... nx, ...; first swap #m, shown before at #p; a A-B-A on the head's scanout samples)` | a kernel without the stale-back hold: modes 1/2 copied a back WindowServer did not redraw (no CF into it since it was shown, unchanged, < 20 ms after another back's copy) over the newer frame |
+| `swap #n: head N: the back 0x... (a2, buf[i]) is unchanged since it was shown at swap #m and 0x... was shown after it, with no copy forward into it -- held, the panel keeps the newer frame (k such)` (log, first 8 then every 1024th) | `swaps_stalehold_h<N>`; SWAP arg 5 (hold) with `v1` bit 23, `v3` = m; the decoder prints `held: stale back (shown at #m)`; triage `INFO swap copy: head N: H-STALE handled: k stale backs held`, `frame trace INFO H-STALE: head N: held k stale backs` | the fix working: nothing to do; the flicker should be gone (compare the looks) |
+| `FAIL H-STALE ... ; k held` | the kernel held some, but a stale back was still copied | the decoder compares band bytes, the kernel a 64-bit hash of the same samples: a copy here means the samples differed in alpha or a band byte collided, or a record was evicted (8 per head) - read that swap's timeline |
+| flicker stays, `swaps_stalehold_h<N>` > 0, no `H-STALE` FAIL | a back held although WindowServer redrew it between the 64 samples (a small redraw without a copy forward) | the panel misses that redraw until the next frame: look for the held swap's back drawn by CS / aperture writes; open item N31 |

@@ -97,8 +97,10 @@ enum rd3_sc_act {
     RD3_SC_COPY = 0,        /* the back has pixels (or could not be sampled): copied */
     RD3_SC_COPY_EMPTY = 1,  /* the back read empty: copied anyway (mode 2, or nothing to lose) */
     RD3_SC_HOLD = 2,        /* mode 1: an empty back over a picture: not copied, the last frame stays */
-    RD3_SC_COPY_LANDED = 3  /* modes 1/2: the back is suspect, another buffer of the surface holds the new
+    RD3_SC_COPY_LANDED = 3, /* modes 1/2: the back is suspect, another buffer of the surface holds the new
                              * frame (rd3_sc_landed_pick): that one copied */
+    RD3_SC_HOLD_STALE = 4   /* modes 1/2: a back WindowServer did not redraw since the head presented it, a
+                             * newer frame after it (rd3_sc_stale_hold): not copied, the panel keeps that frame */
 };
 /* sampled: the back's 64 samples were read (a mapping and a geometry);
  * pixels: one was not 0; picture: the front, or the head's last copy, has
@@ -178,6 +180,132 @@ static inline int rd3_sc_landed_pick(const struct rd3_sc_cand *c, unsigned n)
             best = (int)i;
     }
     return best;
+}
+
+/* ---- the stale back (card run 2026-10-17c) ----
+ * Evidence-driven, no amdgpu analogue (macOS legacy surface semantics, as
+ * the landed buffer above). WindowServer issues two legacy swaps per frame
+ * on a head: a1 = B1, the frame (copy forward refreshed it from the front
+ * just before), then a2 = B2, which it did not draw this frame. Head 1's
+ * B2 (0x8d0c0000) got pixels once, from a window animation that rotated
+ * three buffers, and was never drawn again; from then on every frame the
+ * mode 1 copy put B1's new frame on the panel and, 5-14 ms later, B2's old
+ * one (and into the front, from where the next copy forward spread it into
+ * the next frame): windows appeared and disappeared on the side monitor.
+ * 234 such copies on head 1 (0x8d0c0000 and later 0x8d8b0000) of its 709,
+ * none on head 0; no WindowServer GPU work was pending at those swaps.
+ *
+ * So modes 1/2 remember, per head and per buffer address, what each back
+ * looked like when the head last presented it (a hash of its 64 samples,
+ * rd3_sc_sig_*) and whether a copy forward targeted it since. A back with
+ * pixels is HELD (no copy to the panel or the front: the panel keeps the
+ * newer frame, as for an empty back) when
+ *   (a) no copy forward targeted it since its last presentation here,
+ *   (b) its samples equal those of that presentation, and
+ *   (c) a different buffer was presented on the head after it,
+ * and the panel holds a frame these modes copied (after a mode set or
+ * another flip it holds none: copied). Never presented here (no record):
+ * copied. The records are forgotten when the surface goes, at a display
+ * or swap mode change and D's reallocation (rd3_sc_stale_reset), and
+ * per address when its VRAM is freed (rd3_sc_stale_forget). Fixed size,
+ * no allocation: a record evicted from a full table means a copy. */
+#define RD3_SC_STALE_SLOTS 8u
+/* the samples' hash: 64-bit FNV-1a over the 64 raw 32-bit samples (alpha
+ * too: stricter than the trace's band bytes, which are RGB only) */
+#define RD3_SC_SIG_INIT 14695981039346656037ull
+static inline unsigned long long rd3_sc_sig_add(unsigned long long h, unsigned v)
+{
+    for (unsigned i = 0; i < 4; i++) {
+        h ^= (v >> (8u * i)) & 0xffu;
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+struct rd3_sc_stale_rec {
+    unsigned long long addr;   /* the buffer's VRAM address; 0: a free slot */
+    unsigned long long sig;    /* its samples' hash at the head's last presentation of it */
+    unsigned shownAt;          /* that swap's number */
+    int cfSince;               /* a copy forward targeted it since */
+};
+struct rd3_sc_stale {
+    struct rd3_sc_stale_rec r[RD3_SC_STALE_SLOTS];
+    unsigned long long lastShown;   /* the buffer the head presented last; 0: none */
+    unsigned next;                  /* the slot a new buffer takes when none is free */
+};
+static inline struct rd3_sc_stale_rec *rd3_sc_stale_find(struct rd3_sc_stale *s, unsigned long long addr)
+{
+    for (unsigned i = 0; s && addr && i < RD3_SC_STALE_SLOTS; i++)
+        if (s->r[i].addr == addr)
+            return &s->r[i];
+    return 0;
+}
+static inline void rd3_sc_stale_reset(struct rd3_sc_stale *s)
+{
+    for (unsigned i = 0; i < RD3_SC_STALE_SLOTS; i++) {
+        s->r[i].addr = 0;
+        s->r[i].sig = 0;
+        s->r[i].shownAt = 0;
+        s->r[i].cfSince = 0;
+    }
+    s->lastShown = 0;
+    s->next = 0;
+}
+/* hold the back at 'addr' whose samples hash to 'sig' (rules (a)-(c) above);
+ * pixels: one of its samples was not 0 (an empty back is rd3_sc_action's);
+ * panelFrame: the head's panel shows a frame modes 1/2 copied. *shownAt:
+ * the swap that last presented it */
+static inline int rd3_sc_stale_hold(struct rd3_sc_stale *s, int mode, int pixels, int panelFrame,
+                                    unsigned long long addr, unsigned long long sig, unsigned *shownAt)
+{
+    const struct rd3_sc_stale_rec *r;
+    if (mode != RD3_SWAPMODE_COPY && mode != RD3_SWAPMODE_COPY_ALL)
+        return 0;
+    if (!pixels || !panelFrame || !addr)
+        return 0;
+    r = rd3_sc_stale_find(s, addr);
+    if (!r || r->cfSince || r->sig != sig || !s->lastShown || s->lastShown == addr)
+        return 0;
+    if (shownAt)
+        *shownAt = r->shownAt;
+    return 1;
+}
+/* swap 'n' presented the buffer at 'addr' (its samples' hash 'sig') */
+static inline void rd3_sc_stale_shown(struct rd3_sc_stale *s, unsigned long long addr, unsigned long long sig,
+                                      unsigned n)
+{
+    struct rd3_sc_stale_rec *r = rd3_sc_stale_find(s, addr);
+    if (!addr)
+        return;
+    for (unsigned i = 0; !r && i < RD3_SC_STALE_SLOTS; i++)
+        if (!s->r[i].addr)
+            r = &s->r[i];
+    if (!r) {
+        r = &s->r[s->next % RD3_SC_STALE_SLOTS];
+        s->next = (s->next + 1u) % RD3_SC_STALE_SLOTS;
+    }
+    r->addr = addr;
+    r->sig = sig;
+    r->shownAt = n;
+    r->cfSince = 0;
+    s->lastShown = addr;
+}
+/* a copy forward targeted the buffer at 'addr' (WindowServer refreshes it
+ * for a new frame): never held until it is presented again */
+static inline void rd3_sc_stale_cf(struct rd3_sc_stale *s, unsigned long long addr)
+{
+    struct rd3_sc_stale_rec *r = rd3_sc_stale_find(s, addr);
+    if (r)
+        r->cfSince = 1;
+}
+/* the buffer at 'addr' was freed: a new one there is never taken for it */
+static inline int rd3_sc_stale_forget(struct rd3_sc_stale *s, unsigned long long addr)
+{
+    struct rd3_sc_stale_rec *r = rd3_sc_stale_find(s, addr);
+    if (!r)
+        return 0;
+    r->addr = 0;
+    r->cfSince = 0;
+    return 1;
 }
 
 /* what the head's panel shows as far as the accelerator knows */

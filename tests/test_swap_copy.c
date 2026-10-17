@@ -14,7 +14,9 @@
  * Then the decision helpers one by one: roles, the empty-back action per
  * mode, the target, the wait, the extent, copy forward's source, and the
  * landed buffer of card run 2026-10-17c (a swap naming a back WindowServer
- * never drew presents the buffer its frame did land in).
+ * never drew presents the buffer its frame did land in), and the stale back
+ * of the same run (a back WindowServer did not redraw since the head showed
+ * it is held, never copied over the newer frame).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -651,6 +653,218 @@ static void landed_rules(void)
     CHECK(rd3_sc_landed_pick(many, RD3_SC_LANDED_MAX + 2) == -1);
 }
 
+/* ---- the stale back (card run 2026-10-17c) ----
+ * A head and its surface's buffers, each holding a frame number (0 empty);
+ * the panel shows a frame number. WindowServer refreshes a back by copy
+ * forward and draws the frame into it (sm_cf), or draws without one
+ * (sm_draw); a swap presents a buffer unless rd3_sc_stale_hold holds it
+ * (sm_swap: the accelerator's order - the hold decision, then the copy and
+ * the record). Newer frames have larger numbers: the panel must never go
+ * back to an older one. */
+enum { SB_N = 12 };
+struct smodel {
+    struct rd3_sc_stale st;
+    unsigned content[SB_N];
+    unsigned panel;            /* the frame on the panel */
+    int panelFrame;            /* the panel holds a frame these modes copied */
+    unsigned n;                /* swap number */
+    unsigned held, copied, regressed;
+    unsigned lastShownAt;      /* the hold's *shownAt */
+    int hold;                  /* the rule on (else every back copied, the kext before the fix) */
+};
+static unsigned long long sm_addr(unsigned i)
+{
+    return 0x8c000000ull + (unsigned long long)i * 0x00800000ull;
+}
+static unsigned long long sm_sig(unsigned frame)
+{
+    /* 64 samples: a frame's pixels differ from another's in some of them */
+    unsigned long long h = RD3_SC_SIG_INIT;
+    for (unsigned k = 0; k < 64; k++)
+        h = rd3_sc_sig_add(h, frame ? (frame * 2654435761u) ^ k : 0);
+    return h;
+}
+static void sm_init(struct smodel *m, int hold)
+{
+    memset(m, 0, sizeof *m);
+    rd3_sc_stale_reset(&m->st);
+    m->hold = hold;
+}
+static void sm_cf(struct smodel *m, unsigned b, unsigned frame)
+{
+    rd3_sc_stale_cf(&m->st, sm_addr(b));
+    m->content[b] = frame;
+}
+static void sm_draw(struct smodel *m, unsigned b, unsigned frame)
+{
+    m->content[b] = frame;
+}
+/* returns 1 held */
+static int sm_swap(struct smodel *m, unsigned b, int mode)
+{
+    const unsigned n = ++m->n;
+    const int pixels = m->content[b] != 0;
+    unsigned at = 0;
+    if (m->hold && rd3_sc_stale_hold(&m->st, mode, pixels, m->panelFrame, sm_addr(b), sm_sig(m->content[b]), &at)) {
+        m->held++;
+        m->lastShownAt = at;
+        return 1;
+    }
+    if (m->panelFrame && m->content[b] < m->panel)
+        m->regressed++;
+    m->panel = m->content[b];
+    m->panelFrame = 1;
+    m->copied++;
+    rd3_sc_stale_shown(&m->st, sm_addr(b), sm_sig(m->content[b]), n);
+    return 0;
+}
+
+static void stale_model(void)
+{
+    enum { B1 = 0, B2 = 1, B3 = 2, FRAMES = 300 };
+    struct smodel m;
+    /* card run 2026-10-17c, head 1: the window animation rotated three
+     * buffers (B2 received a frame through a copy forward once), then every
+     * frame is CF -> B1, swap B1, swap B2 with B2 not redrawn */
+    for (int hold = 0; hold <= 1; hold++) {
+        sm_init(&m, hold);
+        unsigned f = 1;
+        sm_cf(&m, B1, f++); sm_swap(&m, B1, RD3_SWAPMODE_COPY);
+        sm_cf(&m, B2, f++); sm_swap(&m, B2, RD3_SWAPMODE_COPY);
+        sm_cf(&m, B3, f++); sm_swap(&m, B3, RD3_SWAPMODE_COPY);
+        const unsigned b2shown = m.n - 1;
+        const unsigned copied0 = m.copied;
+        unsigned stale = 0;
+        for (unsigned k = 0; k < FRAMES; k++) {
+            sm_cf(&m, B1, f++);
+            CHECK(sm_swap(&m, B1, RD3_SWAPMODE_COPY) == 0);
+            CHECK(m.panel == f - 1);
+            stale += (unsigned)sm_swap(&m, B2, RD3_SWAPMODE_COPY);
+            CHECK(!hold || m.panel == f - 1);   /* the newest frame stays on the panel */
+        }
+        if (hold) {
+            CHECK(stale == FRAMES);
+            CHECK(m.held == FRAMES);
+            CHECK(m.regressed == 0);
+            CHECK(m.lastShownAt == b2shown);    /* the log names the swap that showed it */
+            CHECK(m.copied == copied0 + FRAMES);
+        } else {
+            CHECK(m.regressed == FRAMES);      /* the old kext: B2's old frame over every new one */
+        }
+        /* mode 2 holds it too, mode 0 never decides (the flip path) */
+        sm_cf(&m, B1, f++);
+        sm_swap(&m, B1, RD3_SWAPMODE_COPY_ALL);
+        CHECK(sm_swap(&m, B2, RD3_SWAPMODE_COPY_ALL) == hold);
+        CHECK(sm_swap(&m, B2, RD3_SWAPMODE_FLIP) == 0);
+    }
+
+    /* head 0, swap #89: B1 changed without a copy forward (0 -> pixels) */
+    sm_init(&m, 1);
+    sm_draw(&m, B1, 0);
+    m.panelFrame = 1;                                  /* a picture from an earlier copy */
+    CHECK(sm_swap(&m, B1, RD3_SWAPMODE_COPY) == 0);   /* empty: rd3_sc_action's, never this rule's */
+    sm_cf(&m, B2, 10);
+    CHECK(sm_swap(&m, B2, RD3_SWAPMODE_COPY) == 0);
+    sm_draw(&m, B1, 11);
+    CHECK(sm_swap(&m, B1, RD3_SWAPMODE_COPY) == 0);
+    sm_draw(&m, B2, 12);                               /* redrawn in place, no copy forward: changed */
+    CHECK(sm_swap(&m, B2, RD3_SWAPMODE_COPY) == 0);
+    CHECK(m.held == 0 && m.panel == 12);
+
+    /* the first presentation of a buffer: copied */
+    sm_init(&m, 1);
+    sm_cf(&m, B1, 1);
+    sm_swap(&m, B1, RD3_SWAPMODE_COPY);
+    sm_draw(&m, B3, 2);
+    CHECK(sm_swap(&m, B3, RD3_SWAPMODE_COPY) == 0);
+
+    /* a back re-presented with nothing else shown in between: copied */
+    sm_init(&m, 1);
+    sm_cf(&m, B1, 1);
+    sm_swap(&m, B1, RD3_SWAPMODE_COPY);
+    CHECK(sm_swap(&m, B1, RD3_SWAPMODE_COPY) == 0);
+    CHECK(sm_swap(&m, B1, RD3_SWAPMODE_COPY) == 0);
+    CHECK(m.held == 0);
+
+    /* 43185 ms: a triple rotation where B2 legitimately got a copy forward -
+     * copied, even when the copy forward left its samples as they were */
+    sm_init(&m, 1);
+    unsigned f = 1;
+    sm_cf(&m, B1, f++); sm_swap(&m, B1, RD3_SWAPMODE_COPY);
+    sm_cf(&m, B2, f++); sm_swap(&m, B2, RD3_SWAPMODE_COPY);
+    sm_cf(&m, B1, f++); sm_swap(&m, B1, RD3_SWAPMODE_COPY);
+    CHECK(sm_swap(&m, B2, RD3_SWAPMODE_COPY) == 1);   /* stale: held */
+    for (unsigned k = 0; k < 30; k++) {
+        const unsigned b = k % 3;
+        sm_cf(&m, b, f++);
+        CHECK(sm_swap(&m, b, RD3_SWAPMODE_COPY) == 0);
+    }
+    CHECK(m.regressed == 0);
+    sm_cf(&m, B2, m.content[B2]);                     /* targeted, its samples as they were */
+    CHECK(sm_swap(&m, B2, RD3_SWAPMODE_COPY) == 0);
+
+    /* no frame of ours on the panel (a mode set, an IOP flip): copied */
+    sm_init(&m, 1);
+    sm_cf(&m, B1, 1); sm_swap(&m, B1, RD3_SWAPMODE_COPY);
+    sm_cf(&m, B2, 2); sm_swap(&m, B2, RD3_SWAPMODE_COPY);
+    m.panelFrame = 0;
+    CHECK(sm_swap(&m, B1, RD3_SWAPMODE_COPY) == 0);
+
+    /* the buffer freed (VMFREE): a new one at its address is copied */
+    sm_init(&m, 1);
+    sm_cf(&m, B1, 1); sm_swap(&m, B1, RD3_SWAPMODE_COPY);
+    sm_cf(&m, B2, 2); sm_swap(&m, B2, RD3_SWAPMODE_COPY);
+    CHECK(rd3_sc_stale_forget(&m.st, sm_addr(B1)) == 1);
+    CHECK(rd3_sc_stale_forget(&m.st, sm_addr(B1)) == 0);
+    CHECK(rd3_sc_stale_forget(&m.st, 0) == 0);
+    CHECK(sm_swap(&m, B1, RD3_SWAPMODE_COPY) == 0);
+    /* the surface gone, a mode change, D reallocated: everything forgotten */
+    sm_cf(&m, B2, 3); sm_swap(&m, B2, RD3_SWAPMODE_COPY);
+    rd3_sc_stale_reset(&m.st);
+    CHECK(m.st.lastShown == 0);
+    CHECK(sm_swap(&m, B1, RD3_SWAPMODE_COPY) == 0);
+
+    /* bounded: more buffers than slots - the oldest evicted (copied), never a wrong hold */
+    sm_init(&m, 1);
+    for (unsigned i = 0; i < SB_N; i++) {
+        sm_cf(&m, i, i + 1);
+        sm_swap(&m, i, RD3_SWAPMODE_COPY);
+    }
+    unsigned recs = 0;
+    for (unsigned i = 0; i < RD3_SC_STALE_SLOTS; i++)
+        recs += m.st.r[i].addr != 0;
+    CHECK(recs == RD3_SC_STALE_SLOTS);
+    CHECK(sm_swap(&m, 0, RD3_SWAPMODE_COPY) == 0);          /* evicted: copied */
+    CHECK(sm_swap(&m, SB_N - 1, RD3_SWAPMODE_COPY) == 1);   /* recorded, unchanged, B0 shown after: held */
+    CHECK(m.regressed == 1);   /* the evicted one: the cost of the bound */
+
+    /* the rule's inputs one by one */
+    struct rd3_sc_stale s;
+    unsigned at = 77;
+    rd3_sc_stale_reset(&s);
+    rd3_sc_stale_shown(&s, 0x1000, 5, 1);
+    rd3_sc_stale_shown(&s, 0x2000, 6, 2);
+    CHECK(rd3_sc_stale_hold(&s, RD3_SWAPMODE_COPY, 1, 1, 0x1000, 5, &at) == 1 && at == 1);
+    CHECK(rd3_sc_stale_hold(&s, RD3_SWAPMODE_COPY, 1, 1, 0x1000, 5, NULL) == 1);
+    CHECK(rd3_sc_stale_hold(&s, RD3_SWAPMODE_COPY, 1, 1, 0x1000, 9, &at) == 0);   /* (b) changed */
+    CHECK(rd3_sc_stale_hold(&s, RD3_SWAPMODE_COPY, 1, 1, 0x2000, 6, &at) == 0);   /* (c) the last one shown */
+    CHECK(rd3_sc_stale_hold(&s, RD3_SWAPMODE_COPY, 1, 1, 0x3000, 5, &at) == 0);   /* never shown */
+    CHECK(rd3_sc_stale_hold(&s, RD3_SWAPMODE_COPY, 0, 1, 0x1000, 5, &at) == 0);   /* empty */
+    CHECK(rd3_sc_stale_hold(&s, RD3_SWAPMODE_COPY, 1, 0, 0x1000, 5, &at) == 0);   /* no frame of ours shown */
+    CHECK(rd3_sc_stale_hold(&s, RD3_SWAPMODE_FLIP, 1, 1, 0x1000, 5, &at) == 0);
+    CHECK(rd3_sc_stale_hold(&s, 7, 1, 1, 0x1000, 5, &at) == 0);
+    CHECK(rd3_sc_stale_hold(&s, RD3_SWAPMODE_COPY, 1, 1, 0, 5, &at) == 0);
+    rd3_sc_stale_cf(&s, 0x1000);                                                   /* (a) */
+    CHECK(rd3_sc_stale_hold(&s, RD3_SWAPMODE_COPY, 1, 1, 0x1000, 5, &at) == 0);
+    rd3_sc_stale_cf(&s, 0x4000);                                                   /* unknown: nothing */
+    rd3_sc_stale_shown(&s, 0, 1, 3);                                               /* no address: nothing */
+    CHECK(s.lastShown == 0x2000);
+    /* the hash: every sample and its order count */
+    CHECK(rd3_sc_sig_add(RD3_SC_SIG_INIT, 1) != rd3_sc_sig_add(RD3_SC_SIG_INIT, 0x01000000));
+    CHECK(rd3_sc_sig_add(rd3_sc_sig_add(RD3_SC_SIG_INIT, 1), 2) != rd3_sc_sig_add(rd3_sc_sig_add(RD3_SC_SIG_INIT, 2), 1));
+    CHECK(sm_sig(1) != sm_sig(2) && sm_sig(0) != sm_sig(1));
+}
+
 int main(void)
 {
     model();
@@ -666,6 +880,7 @@ int main(void)
     posts();
     landed_model();
     landed_rules();
+    stale_model();
     if (fails) {
         printf("test_swap_copy: %d check(s) FAILED\n", fails);
         return 1;

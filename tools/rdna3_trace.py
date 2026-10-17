@@ -15,7 +15,7 @@ Damaged input never raises: Trace.problems names the file and byte.
   tools/rdna3_trace.py <file>... [--timeline N] [--head H]
 
 tools/triage_reports.py imports it: verdicts per hypothesis (H-COPY,
-H-B2, H-FREE, copy forward errors), the A/B side by side, the coverage
+H-B2, H-STALE, H-FREE, copy forward errors), the A/B side by side, the coverage
 self-check of docs/AFTER-TESTS.md's questions Q1-Q11 and the last events
 per head.
 """
@@ -55,6 +55,8 @@ V1_BRK_FLIP = 1 << 20                 # SWAP v1: modes 1/2 flipped, the SDMA bre
 V1_LANDED = 1 << 21                   # SWAP v1: modes 1/2 presented the landed buffer (card run 2026-10-17c)
 V1_LANDED_WOULD = 1 << 22             # SWAP v1: one found, not presented (debug.rdna3accel_swap_landed=0)
 LANDED_A1 = 0xfe                      # SWAP v4 >> 24 with V1_LANDED(_WOULD): the landed buffer is a1 itself
+V1_STALE = 1 << 23                    # SWAP v1 with arg 5: a stale back held (v3: the swap that last showed it)
+STALE_NS = 20 * 10 ** 6               # H-STALE: a stale copy follows another back's copy within this
 AB_NAME = {0: "-", 1: "A: mode 1", 2: "B: mode 0", 3: "back"}
 
 
@@ -478,14 +480,15 @@ def segments(trace, swaps=None):
         k = (swap_mode(e), ph.get(id(e), 0))
         s = seg.setdefault(k, {"swaps": 0, "shown": 0, "held": 0, "black": 0, "empty": 0, "failed": 0, "direct": 0,
                                "double": 0, "waits": 0, "wait_us": 0, "copy_us": 0, "events": [], "landed": 0,
-                               "held_new": 0, "would": 0})
+                               "held_new": 0, "would": 0, "stale": 0})
         s["swaps"] += 1
         shown = e.arg in (1, 2, 4)
         s["shown"] += shown
         s["held"] += e.arg in (0, 5)
         # card run 2026-10-17c: the landed buffer presented, and holds while another buffer had a new frame
         s["landed"] += e.arg == 4 and bool(e.v1 & V1_LANDED)
-        s["held_new"] += e.arg in (0, 5) and bool(new_frame_elsewhere(trace, e))
+        s["held_new"] += e.arg in (0, 5) and not e.v1 & V1_STALE and bool(new_frame_elsewhere(trace, e))
+        s["stale"] += e.arg == 5 and bool(e.v1 & V1_STALE)   # a back not redrawn since shown, held (2026-10-17c)
         s["would"] += bool(e.v1 & V1_LANDED_WOULD)   # found, not presented (debug.rdna3accel_swap_landed=0)
         s["empty"] += bool(e.flags & F_EMPTY)
         s["black"] += bool(e.flags & F_EMPTY) and shown
@@ -559,6 +562,7 @@ def hypotheses(trace):
                     "plugin's fence waits around them time out too" % (len(capped), capped[0].arg, capped[0].v2,
                                                                        capped[0].v0)))
     out.extend(copy_black(trace, swaps))
+    out.extend(h_stale(trace))
     resets = trace.by("RESET")
     if resets:
         out.append(("WARN", "GPU", "%d hang recover%s (first IP %d seq %d)" % (len(resets), "y" if len(resets) == 1
@@ -610,6 +614,101 @@ def h_b2(trace, swaps, h, p, st, drawn, ap):
     return ("FAIL", "H-B2", "%s - a back that never receives a frame (copying or flipping it shows black); %s%s%s" % (
         base, counts, gap, "; %d held swaps without samples of the other buffers" % (len(held) - len(sampled))
         if len(sampled) < len(held) else ""))
+
+
+def stale_backs(trace):
+    """the stale back of card run 2026-10-17c, per head over the whole trace:
+    {head: {"copied": [(SWAP, the swap # that showed it before)], "held":
+    [SWAP]}}. A mode 1/2 copy is stale when the back it copied had no copy
+    forward into it since this head last presented it, its band bytes are
+    those of that presentation, and it came less than STALE_NS after
+    another back's copy on the head (WindowServer's second swap of a frame,
+    naming a back it did not draw): the panel then shows the older frame
+    for most of the frame period. "held": the swaps the kernel held as
+    stale (SWAP v1 bit 23)."""
+    out = {}
+    st = {}   # head -> {"rec": {addr: [bands, cf since, swap #]}, "last": addr, "t": ns}
+    forget = (T["VMFREE"], T["GONE"], T["MODESET"], T["MODE"])
+    for e in trace.events:
+        if e.src != SRC_ACCEL or e.type not in (T["SWAP"], T["CF"]) + forget:
+            continue
+        # the kernel forgets the records as these do (rdna3_swap_copy.h): the address freed, the surface or
+        # the head's pipe resource gone, a swap or display mode change
+        if e.type == T["VMFREE"]:
+            for hs in st.values():
+                hs["rec"].pop(e.pa, None)
+            continue
+        if e.type in forget:
+            if e.type == T["GONE"] or (e.type == T["MODESET"] and e.arg == 0 and e.v0 != e.v1) or \
+                    (e.type == T["MODE"] and e.arg == 1):
+                for h in ([e.head] if e.type == T["GONE"] else list(st)):
+                    st.pop(h, None)
+            continue
+        if e.type == T["CF"]:   # the target refreshed (head unknown: every head's record)
+            for h, hs in st.items():
+                if e.head in (0xff, h) and e.pb in hs["rec"]:
+                    hs["rec"][e.pb][1] = True
+            continue
+        if e.head == 0xff or swap_mode(e) == 0:
+            continue
+        hs = st.setdefault(e.head, {"rec": {}, "last": None, "t": None})
+        if e.arg == 5 and e.v1 & V1_STALE:
+            out.setdefault(e.head, {"copied": [], "held": []})["held"].append(e)
+            continue
+        if e.arg != 4:
+            continue
+        back, _, _, _, bb, _ = swap_back(e)
+        lb = swap_landed(trace, e) if e.v1 & V1_LANDED else 0
+        if lb:   # the landed buffer went to the panel, not the back named; its bands are in that swap's SCAN
+            back = lb
+            bb = next((s.ba for s in _scans_by_swap(trace).get((e.head, e.v0), ()) if s.pa == lb), None)
+        t = trace.ns(e, e.src)
+        r = hs["rec"].get(back)
+        if (r and bb is not None and not r[1] and r[0] == bb and hs["last"] not in (None, back) and
+                hs["t"] is not None and t - hs["t"] < STALE_NS):
+            out.setdefault(e.head, {"copied": [], "held": []})["copied"].append((e, r[2]))
+        hs["rec"][back] = [bb, False, e.v0]
+        hs["last"], hs["t"] = back, t
+    return out
+
+
+def scanout_aba(trace):
+    """{head: A-B-A patterns}: the head's scanout samples after the mode 1/2
+    copies (SCAN 0xfe) where a picture came back after one other picture
+    (the old frame shown again between two new ones looks so)"""
+    seq = {}
+    for e in trace.by("SCAN"):
+        if e.arg == 0xfe and e.flags & 64 and e.head != 0xff:
+            seq.setdefault(e.head, []).append(bytes(e.ba))
+    return dict((h, sum(1 for i in range(2, len(s)) if s[i] == s[i - 2] and s[i] != s[i - 1]))
+                for h, s in seq.items())
+
+
+def h_stale(trace):
+    """[(level, "H-STALE", text)] per head: FAIL when a stale back was
+    copied to the panel (stale_backs), INFO when the kernel held them all"""
+    out = []
+    aba = scanout_aba(trace)
+    for h, d in sorted(stale_backs(trace).items()):
+        cp, held = d["copied"], d["held"]
+        sup = "; %d A-B-A on the head's scanout samples" % aba.get(h, 0)
+        if cp:
+            per = {}
+            for e, _ in cp:
+                b = swap_back(e)[0]
+                per[b] = per.get(b, 0) + 1
+            top = ", ".join("0x%x %dx" % (b, k) for b, k in sorted(per.items(), key=lambda x: -x[1])[:3])
+            out.append(("FAIL", "H-STALE", "head %d: %d stale backs COPIED (%s; first swap #%d, shown before at #%d%s): "
+                        "WindowServer did not redraw them - no copy forward into them since this head presented "
+                        "them, their samples unchanged, < %d ms after another back's copy - so the panel showed the "
+                        "older frame for most of the frame period and the front got it too%s" % (
+                            h, len(cp), top, cp[0][0].v0, cp[0][1], sup, STALE_NS // 10 ** 6,
+                            "; %d held" % len(held) if held else
+                            " (a kernel without the stale-back hold, swaps_stalehold_h<N>)")))
+        elif held:
+            out.append(("INFO", "H-STALE", "head %d: held %d stale backs (not redrawn since this head presented them, "
+                        "a newer frame after them: the panel kept it), none copied%s" % (h, len(held), sup)))
+    return out
 
 
 def copy_black(trace, swaps=None):
@@ -726,11 +825,12 @@ def ab_table(trace):
     lines = []
     for (mode, phase), s in sorted(seg.items(), key=lambda kv: (kv[0][1], kv[0][0])):
         lines.append("mode %d %-10s %5d swaps: %5d shown (%d landed), %4d held/skipped (%d with a new frame "
-                     "elsewhere), %d landed buffers NOT presented (swap_landed 0), %4d empty backs, %4d BLACK frames, "
+                     "elsewhere), %d stale backs held, %d landed buffers NOT presented (swap_landed 0), %4d empty "
+                     "backs, %4d BLACK frames, "
                      "%4d failed, %4d in-place rewrites of %d, %4d tear-free copies, %4d direct (may tear), "
                      "waits %d (avg %d us), copy avg %d us" %
                      (mode, "(" + AB_NAME.get(phase, str(phase)) + ")", s["swaps"], s["shown"], s["landed"],
-                      s["held"], s["held_new"], s["would"], s["empty"],
+                      s["held"], s["held_new"], s["stale"], s["would"], s["empty"],
                       s["black"], s["failed"], s["inplace"], s["inplace_checked"], s["double"], s["direct"],
                       s["waits"], s["wait_us"] // s["waits"] if s["waits"] else 0,
                       s["copy_us"] // max(1, s["double"] + s["direct"])))
@@ -911,12 +1011,15 @@ def _fmt_event(trace, e, ms, n):
         landed = "" if lb == 0 else " %s the landed buffer %s" % (
             "presented" if e.v1 & V1_LANDED else "would present (swap_landed 0)",
             "0x%x" % lb if lb else "buf[%d]" % ((e.v4 >> 24) & 0xff))
+        if e.arg == 5 and e.v1 & V1_STALE:
+            landed += " held: stale back (shown at #%d)" % e.v3
         return ("%10.3f ms SWAP #%d h%s mode %d %s: back 0x%x (%s, %s) front 0x%x (%s)%s -> panel 0x%x target %s%s%s "
                 "copy %d us wait %d us" % (ms, e.v0, e.head if e.head != 0xff else "?", swap_mode(e),
                                           SWAP_ARG.get(e.arg, e.arg), back, RC.get(rcb, rcb), bb.hex(), front,
                                           RC.get(rcf, rcf), landed, e.pc, TARGET.get((e.v1 >> 16) & 0xf, "?"),
                                           " FRONT-OK" if e.flags & F_FRONT_OK else "",
-                                          " tear-free" if e.flags & F_DOUBLE else "", e.v2, e.v3))
+                                          " tear-free" if e.flags & F_DOUBLE else "", e.v2,
+                                          0 if e.arg == 5 and e.v1 & V1_STALE else e.v3))
     if n == "SCAN":
         return "%10.3f ms SCAN h%s buf[%s] 0x%x %s%s%s%s bands %s (was %s)" % (
             ms, e.head if e.head != 0xff else "?", "%d" % e.arg if e.arg < 0xfd else {0xfe: "scanout", 0xfd: "front",
