@@ -20,6 +20,15 @@ if [ "${1:-}" = --standalone ]; then
     STANDALONE=1; HOST=; D="/Library/Application Support/RDNA3"; shift
     [ "$(id -u)" = 0 ] || { echo "run it with sudo"; exit 1; }
 fi
+# the display bisect (card run 2026-10-17d, bisect_run below), by hand in a
+# Terminal: sudo sh autoreport.sh --standalone --bisect | --bisect-plugin (a
+# tty: y / n / Enter per step). In the VM the boot-arg rdna3bisect=1 / 2 asks
+# for it (rdna3vm step bisect / bisect-plugin).
+BISECT=; BISECT_HAND=
+case "${1:-}" in
+    --bisect) BISECT=1; BISECT_HAND=1; shift ;;
+    --bisect-plugin) BISECT=2; BISECT_HAND=1; shift ;;
+esac
 
 # with_limit SECONDS command...: never let one stage hold the VM up
 with_limit() {
@@ -80,6 +89,14 @@ fi
 # the Metal allow list as it was, should a report have died inside its M6
 # probe (which widens it for two apps)
 [ -f /var/db/rdna3-allow.bak ] && mv /var/db/rdna3-allow.bak /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null
+# the same for a bisect-plugin run that died (it edits rdna3mtl.conf and the
+# allow list; the allow list's copy is the one above)
+if [ -f /var/db/rdna3-bisect-conf.bak ]; then
+    mv -f /var/db/rdna3-bisect-conf.bak /Library/GPUBundles/rdna3mtl/rdna3mtl.conf 2>/dev/null &&
+        echo "== rdna3mtl.conf put back from a bisect-plugin run that did not finish"
+elif [ -f /var/db/rdna3-bisect-conf.bak.absent ]; then
+    rm -f /Library/GPUBundles/rdna3mtl/rdna3mtl.conf /var/db/rdna3-bisect-conf.bak.absent
+fi
 # the system sleep setting as it was, should a report have died inside its
 # display sleep look (which sets it to never; the VM's time limit, a kill):
 # a bare-metal machine must not keep "never" (card run 58b review)
@@ -401,6 +418,471 @@ swap_ab() {
     return $ab_rc
 }
 
+# BISECT-BEGIN (tests/test_bisect_step.sh runs this block on the host)
+# Display bisect (card run 2026-10-17d): the owner's windows do not appear or
+# flash, the screens go black or flicker, since about card run 58. Every new
+# feature that has a runtime switch is turned off, then back on one at a time
+# (oldest first), and each state is held for BISECT_HOLD (30) s while the
+# owner looks at both monitors. `rdna3vm step bisect` (boot-arg rdna3bisect=1:
+# the kernel's sysctls) or `rdna3vm step bisect-plugin` (rdna3bisect=2: the
+# Metal plugin's conf, WindowServer restarted), or by hand in a Terminal
+# (a tty: y / n / Enter per step):
+#   sudo sh autoreport.sh --standalone --bisect      (or --bisect-plugin)
+# The owner knows which step runs even with a broken picture: a notification,
+# `say "step N"` and N short beeps at every step. Evidence per step goes into
+# $HOME/rdna3-bisect/bisect.txt (collect.sh: 39-bisect.txt; uploaded as
+# <report>-bisect.txt after every step): the switches set and read back, the
+# owner's answer, two scanout looks (bisect<N>a about 8 s in, bisect<N> about
+# 20 s in; the PPMs go up as <report>-scanoutbisect<N>[a]-pipe<P>.ppm), the
+# counters, the trace stream's size. tools/triage_reports.py (tools/triage_bisect.py)
+# prints the table. Nothing here changes the swap_ab label: with it set the
+# trace sampling (trace_scan=1) would scan every swap, which is not the default.
+BISECT_KNOBS="a3 flicker swap_latch swap_torn swap_mode trace_scan swap_stale swap_landed a3ws"
+BISECT_CONF=${BISECT_CONF:-/Library/GPUBundles/rdna3mtl/rdna3mtl.conf}
+BISECT_ALLOW=${BISECT_ALLOW:-/Library/GPUBundles/rdna3mtl-allow.txt}
+BISECT_CONFBAK=${BISECT_CONFBAK:-/var/db/rdna3-bisect-conf.bak}
+BISECT_ALLOWBAK=${BISECT_ALLOWBAK:-/var/db/rdna3-allow.bak}
+
+# the steps of `bisect`: N|kind|name|a3 flicker swap_latch swap_torn swap_mode trace_scan swap_stale swap_landed a3ws|reopen
+# @ = the value the boot left (the default), - = set nothing, a number = that value;
+# reopen 1 = Activity Monitor is opened again (a3 / a3ws only reach surfaces created after the switch)
+bisect_plan_1() {
+    cat <<'PLAN'
+0|ref|reference: the defaults as the boot left them|- - - - - - - - -|1
+1|off|every new feature off (closest to before the bug)|0 0 0 0 0 0 0 0 @|1
+2|on|A3: applications' IOSurfaces in the card's VRAM (a3)|@ 0 0 0 0 0 0 0 @|1
+3|on|flicker test of the swaps (flicker)|@ @ 0 0 0 0 0 0 @|0
+4|on|a swap waits for its flip to latch (swap_latch)|@ @ @ 0 0 0 0 0 @|0
+5|on|torn-frame test (swap_torn)|@ @ @ @ 0 0 0 0 @|0
+6|on|swap mode 1: the back is copied, not flipped to (swap_mode)|@ @ @ @ @ 0 0 0 @|0
+7|on|trace sampling of the swap's other buffers (trace_scan)|@ @ @ @ @ @ 0 0 @|0
+8|on|stale-back hold (swap_stale): the defaults again|@ @ @ @ @ @ @ @ @|0
+9|extra|CONTROL, off by default: the landed buffer is presented (swap_landed=1)|@ @ @ @ @ @ @ 1 @|0
+10|extra|CONTROL, off by default: mode 2, every back copied (swap_mode=2)|@ @ @ @ 2 @ @ @ @|0
+11|extra|CONTROL, off by default: WindowServer's inputs in A3 (a3ws=1, the card run 58b flicker)|@ @ @ @ @ @ @ @ 1|1
+12|final|the defaults again|@ @ @ @ @ @ @ @ @|1
+PLAN
+}
+# the steps of `bisect-plugin`: N|kind|name|action|reopen|what is switched
+bisect_plan_2() {
+    cat <<'PLAN'
+0|ref|reference: the Metal plugin as it is|-|1|nothing (Activity Monitor re-opened)
+1|off|every plugin feature off|off|1|NVMTL_NO_SURFACE_SHARE=1, NVMTL_NO_SURFACE_PAGEOFF=1 and NVMTL_TRACE=0 in rdna3mtl.conf, the %apps line out of the allow list, WindowServer restarted
+2|on|A3's plugin half: IOSurface sharing and dirty marks|share|1|both NVMTL_NO_SURFACE_* lines out of rdna3mtl.conf, WindowServer restarted (apps mode and the trace still off)
+3|on|apps mode: every application gets the Metal device|apps|1|the allow list as it was (the %apps line), Activity Monitor re-opened; WindowServer is not restarted
+4|final|the plugin's frame trace (NVMTL_TRACE): the defaults again|trace|1|rdna3mtl.conf as it was, WindowServer restarted
+PLAN
+}
+
+bisect_w() { printf '%s\n' "$*" >> "$BF"; }
+bisect_say() {   # the results, the progress window and, from a Terminal, the Terminal
+    echo "$*"
+    prog "$*"
+    if [ -n "${_btty:-}" ] && [ -z "${BISECT_KEYFILE:-}" ]; then echo "$*" > /dev/tty 2>/dev/null; fi
+    return 0
+}
+bisect_mmss() { printf '%02d:%02d' $(($1 / 60)) $(($1 % 60)); }
+bisect_clock() { date -r "$1" +%H:%M:%S 2>/dev/null || date -d "@$1" +%H:%M:%S 2>/dev/null || echo "?"; }
+bisect_knob() { echo "$BISECT_KNOBS" | cut -d' ' -f"$1"; }
+bisect_orig() { eval "echo \"\${BORIG_$1:--}\""; }
+
+bisect_read_originals() {   # the value of every switch now (- = this kext has no such sysctl)
+    _i=0
+    for _k in $BISECT_KNOBS; do
+        _i=$((_i + 1))
+        _v=$(sysctl -n "debug.rdna3accel_$_k" 2>/dev/null)
+        [ -n "$_v" ] || _v=-
+        eval "BORIG_$_i=\$_v"
+    done
+    [ "$(bisect_orig 5)" != - ]   # swap_mode is the oldest of them: without it nothing here can run
+}
+bisect_values_now() {   # the nine values, in knob order
+    _o=; _i=0
+    for _k in $BISECT_KNOBS; do
+        _i=$((_i + 1))
+        _v=$(sysctl -n "debug.rdna3accel_$_k" 2>/dev/null)
+        _o="$_o ${_v:--}"
+    done
+    echo $_o
+}
+bisect_resolve() {   # bisect_resolve "<nine tokens>": @ -> the value the boot left
+    _o=; _i=0
+    for _t in $1; do
+        _i=$((_i + 1))
+        [ "$_t" = "@" ] && _t=$(bisect_orig "$_i")
+        _o="$_o $_t"
+    done
+    echo $_o
+}
+bisect_changed() {   # bisect_changed "<before>" "<after>": what differs, by switch name
+    _o=; _i=0
+    for _k in $BISECT_KNOBS; do
+        _i=$((_i + 1))
+        _p=$(echo "$1" | cut -d' ' -f"$_i"); _c=$(echo "$2" | cut -d' ' -f"$_i")
+        if [ "$_c" != - ] && [ "$_c" != "$_p" ]; then _o="$_o$_k $_p->$_c, "; fi
+    done
+    _o=${_o%, }
+    echo "${_o:-nothing}"
+}
+bisect_make_plan() {   # bisect_make_plan <1|2>: $BD/plan.txt = N|kind|name|values or action|reopen|what is switched
+    : > "$BD/plan.txt"
+    bisect_plan_"$1" | {
+        _prev=$(bisect_resolve "@ @ @ @ @ @ @ @ @")
+        while IFS='|' read -r _pn _pk _pname _pasg _preo _pchg; do
+            [ -n "$_pn" ] || continue
+            if [ "$1" = 1 ]; then
+                _res=$(bisect_resolve "$_pasg")
+                _pchg=$(bisect_changed "$_prev" "$_res")
+                [ -z "$(echo "$_res" | tr -d ' -')" ] || _prev=$_res   # a step that sets nothing keeps the base
+                _pasg=$_res
+            fi
+            printf '%s|%s|%s|%s|%s|%s\n' "$_pn" "$_pk" "$_pname" "$_pasg" "$_preo" "$_pchg" >> "$BD/plan.txt"
+        done
+    }
+}
+bisect_timetable() {   # the timetable on the screen, in the results and (plan: lines) in bisect.txt
+    bisect_say "BISECT timetable: step, mm:ss after the start at $(bisect_clock "$BSTART"), what is switched (each step holds $HOLD s)"
+    while IFS='|' read -r _pn _pk _pname _pasg _preo _pchg <&3; do
+        _line=$(printf 'step %2d  %s  %s: %s' "$_pn" "$(bisect_mmss $((_pn * HOLD)))" "$_pname" "$_pchg")
+        bisect_say "  $_line"
+        bisect_w "plan: $_pn|$(bisect_mmss $((_pn * HOLD)))|$_pk|$_pname|$_pchg"
+    done 3< "$BD/plan.txt"
+    [ "$_bv" = 2 ] && bisect_say "  (the times do not count the WindowServer restarts: log in when the login window shows)"
+    return 0
+}
+
+bisect_beeps() {   # N short beeps: afplay of a system sound, else the terminal bell
+    _bn=$1; _bi=0
+    _snd=${BISECT_SOUND:-/System/Library/Sounds/Tink.aiff}
+    while [ "$_bi" -lt "$_bn" ]; do
+        if command -v afplay >/dev/null 2>&1 && [ -f "$_snd" ]; then in_session afplay "$_snd" >/dev/null 2>&1
+        else { printf '\a' > /dev/tty; } 2>/dev/null || printf '\a' >&2; sleep "${BISECT_BEEPGAP:-0.4}"; fi
+        _bi=$((_bi + 1))
+    done
+}
+bisect_announce() {   # bisect_announce N LAST NAME CHANGED
+    bisect_say "BISECT step $1 of $2: $3 - switched: $4"
+    notify "step $1 of $2: $3"
+    ( command -v say >/dev/null 2>&1 && in_session say "step $1" >/dev/null 2>&1
+      bisect_beeps "$1" ) >/dev/null 2>&1 &
+    _bpid=$!
+    if [ -n "${_btty:-}" ] && [ -z "${BISECT_KEYFILE:-}" ]; then
+        echo "    y = looks right, n = broken, Enter = next step ($HOLD s)" > /dev/tty 2>/dev/null
+    fi
+    return 0
+}
+
+bisect_key() {   # bisect_key SECONDS: prints y, n or e (Enter), nothing on a timeout; a key file stands in for the tty in the host test
+    if [ -n "${BISECT_KEYFILE:-}" ]; then
+        _kl=$(head -n 1 "$BISECT_KEYFILE" 2>/dev/null)
+        if [ -s "$BISECT_KEYFILE" ]; then tail -n +2 "$BISECT_KEYFILE" > "$BISECT_KEYFILE.t"; mv -f "$BISECT_KEYFILE.t" "$BISECT_KEYFILE"; fi
+        case $_kl in y|Y) echo y ;; n|N) echo n ;; "") echo e ;; esac   # any other line (-): no key
+        return 0
+    fi
+    _ks=$(stty -g < /dev/tty 2>/dev/null) || { sleep "$1"; return 0; }
+    stty -icanon -echo min 0 time $(($1 * 10)) < /dev/tty 2>/dev/null
+    _kh=$(dd bs=1 count=1 < /dev/tty 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    stty "$_ks" < /dev/tty 2>/dev/null
+    case $_kh in 79|59) echo y ;; 6e|4e) echo n ;; 0a|0d) echo e ;; esac
+}
+bisect_takekey() {   # bisect_takekey SECONDS: wait up to that long for y / n / Enter and note it
+    if [ -n "${BISECT_KEYFILE:-}" ]; then   # the host test: one line of the file per step, then only the clock
+        if [ -z "${_bkread:-}" ]; then _bkread=1; _kk=$(bisect_key "$1"); else _kk=; sleep "$1"; fi
+    else
+        _kk=$(bisect_key "$1")
+    fi
+    case $_kk in
+        y) _bans=y; _bgo=1 ;;
+        n) _bans=n; _bgo=1 ;;
+        e) [ -n "$_bans" ] || _bans=enter; _bgo=1 ;;
+    esac
+    return 0
+}
+bisect_wait() {   # bisect_wait EPOCH: to that second; with a tty a key ends the step once its evidence is in
+    while [ "$(date +%s)" -lt "$1" ]; do
+        if [ -n "${_btty:-}" ]; then
+            bisect_takekey 1
+            [ "${_bev:-}" = 1 ] && [ "${_bgo:-}" = 1 ] && return 0
+        else
+            sleep 1
+        fi
+    done
+    # a key typed while the looks ran is still waiting in the terminal
+    if [ -n "${_btty:-}" ] && [ "${_bev:-}" = 1 ] && [ -z "${_bgo:-}" ]; then bisect_takekey 0; fi
+    return 0
+}
+
+bisect_look() {   # bisect_look NAME LIMIT: rdna3_drminfo --scanout into rdna3-scanout/NAME; its pipe lines into bisect.txt
+    bisect_w "-- look $1 ($(date +%T))"
+    if [ ! -x "$D/bin/rdna3_drminfo" ]; then bisect_w "NOT TAKEN: no $D/bin/rdna3_drminfo"; return 1; fi
+    mkdir -p "$HOME/rdna3-scanout/$1"
+    with_limit "$2" "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/$1" > "$BD/look.out" 2>&1
+    _lr=$?
+    grep -E '^(pipe [0-9]+:|  picture|  UNDERFLOW|display asleep|[0-9]+ pipe\(s\) lit)' "$BD/look.out" | cut -c1-200 >> "$BF"
+    bisect_w "exit: $_lr"
+    return $_lr
+}
+bisect_counters() {
+    bisect_w "-- counters"
+    { a3_sysctls; sysctl debug.rdna3accel_trace_scan 2>/dev/null; } | grep -v '^debug.rdna3_vram' | cut -c1-200 >> "$BF"
+}
+bisect_trace() {   # the trace stream is pumped all through the run: its size and the event count place this step in it
+    _sb=$(wc -c < "$TS/trace-stream.bin" 2>/dev/null | tr -d ' ')
+    bisect_w "stream_bytes: ${_sb:-none}"
+    bisect_w "trace_events: $(sysctl -n debug.rdna3accel_swap_trace_events 2>/dev/null || echo none)"
+}
+bisect_reopen_am() {   # Activity Monitor redraws every few seconds on the main display; a new window = new surfaces
+    pkill -x "Activity Monitor" 2>/dev/null
+    sleep "${BISECT_AMWAIT:-1}"
+    in_session open -g -a "Activity Monitor" >/dev/null 2>&1
+    sleep "${BISECT_AMWAIT:-1}"
+}
+
+bisect_apply_kext() {   # bisect_apply_kext "<nine values>": set, read back, say what did not take
+    _bset=; _bfail=
+    _i=0
+    for _v in $1; do
+        _i=$((_i + 1)); _k=$(bisect_knob "$_i")
+        [ "$_v" = - ] && continue
+        [ "$(bisect_orig "$_i")" = - ] && continue   # this kext has no such switch (the header's absent: line says so)
+        _bset="$_bset debug.rdna3accel_$_k=$_v"
+        if ! _e=$(sysctl -w "debug.rdna3accel_$_k=$_v" 2>&1); then
+            _bfail="$_bfail debug.rdna3accel_$_k:set-failed($(echo "$_e" | head -c 60 | tr -d '\n'))"
+            continue
+        fi
+        _r=$(sysctl -n "debug.rdna3accel_$_k" 2>/dev/null)
+        [ "$_r" = "$_v" ] || _bfail="$_bfail debug.rdna3accel_$_k:reads-${_r:-nothing}-after-setting-$_v"
+    done
+    bisect_w "set:${_bset:- (nothing)}"
+    _rb=; _i=0
+    for _v in $(bisect_values_now); do
+        _i=$((_i + 1)); _rb="$_rb debug.rdna3accel_$(bisect_knob "$_i")=$_v"
+    done
+    bisect_w "readback:$_rb"
+    [ -z "$_bfail" ] || bisect_w "failed:$_bfail"
+    [ -z "$_bfail" ]
+}
+
+# --- the plugin variant: rdna3mtl.conf and the allow list, WindowServer restarted
+bisect_plugin_save() {   # the originals, once (a dead run's are put back at the next start)
+    [ -f "$BISECT_CONFBAK" ] || [ -f "$BISECT_CONFBAK.absent" ] || {
+        if [ -f "$BISECT_CONF" ]; then cp "$BISECT_CONF" "$BISECT_CONFBAK"; else : > "$BISECT_CONFBAK.absent"; fi; }
+    [ -f "$BISECT_ALLOWBAK" ] || { [ -f "$BISECT_ALLOW" ] && cp "$BISECT_ALLOW" "$BISECT_ALLOWBAK"; }
+    return 0
+}
+bisect_own() { chown root:wheel "$1" 2>/dev/null; chmod 644 "$1" 2>/dev/null; }
+bisect_plugin_restore() {
+    if [ -f "$BISECT_CONFBAK" ]; then mv -f "$BISECT_CONFBAK" "$BISECT_CONF" && bisect_own "$BISECT_CONF"
+    elif [ -f "$BISECT_CONFBAK.absent" ]; then rm -f "$BISECT_CONF" "$BISECT_CONFBAK.absent"; fi
+    if [ -f "$BISECT_ALLOWBAK" ]; then mv -f "$BISECT_ALLOWBAK" "$BISECT_ALLOW" && bisect_own "$BISECT_ALLOW"; fi
+    return 0
+}
+bisect_conf_set() {   # bisect_conf_set "<lines>": the NVMTL_NO_SURFACE_* and NVMTL_TRACE lines replaced by these (the others stay)
+    { grep -v -e '^NVMTL_NO_SURFACE_SHARE=' -e '^NVMTL_NO_SURFACE_PAGEOFF=' -e '^NVMTL_TRACE=' "$BISECT_CONF" 2>/dev/null
+      for _cl in $1; do echo "$_cl"; done; true; } > "$BISECT_CONF.new" &&
+        bisect_own "$BISECT_CONF.new" && mv -f "$BISECT_CONF.new" "$BISECT_CONF"
+}
+bisect_conf_original() {   # rdna3mtl.conf exactly as the run found it (the backup stays until the end)
+    if [ -f "$BISECT_CONFBAK" ]; then cp "$BISECT_CONFBAK" "$BISECT_CONF" && bisect_own "$BISECT_CONF"
+    elif [ -f "$BISECT_CONFBAK.absent" ]; then rm -f "$BISECT_CONF"; fi
+}
+bisect_allow_apps() {   # bisect_allow_apps off|on: the %apps line out of the list, or the list as it was
+    if [ "$1" = off ]; then
+        grep -v '^[[:space:]]*%apps[[:space:]]*$' "$BISECT_ALLOW" > "$BISECT_ALLOW.new" &&
+            bisect_own "$BISECT_ALLOW.new" && mv -f "$BISECT_ALLOW.new" "$BISECT_ALLOW"
+    else
+        [ -f "$BISECT_ALLOWBAK" ] && cp "$BISECT_ALLOWBAK" "$BISECT_ALLOW" && bisect_own "$BISECT_ALLOW"
+    fi
+}
+bisect_console_user() { if [ -n "${BISECT_USER:-}" ]; then echo "$BISECT_USER"; else stat -f %Su /dev/console 2>/dev/null; fi; }
+bisect_wait_login() {   # after the restart: the old session ends, the login window shows, somebody logs in (300 s)
+    [ -n "${BISECT_NOLOGINWAIT:-}" ] && return 0
+    sleep 5
+    _w=0
+    while [ "$_w" -lt 20 ]; do
+        case $(bisect_console_user) in ""|root|loginwindow) break ;; esac
+        sleep 1; _w=$((_w + 1))
+    done
+    _w=0
+    while [ "$_w" -lt 300 ]; do
+        case $(bisect_console_user) in
+            ""|root|loginwindow) ;;
+            *) sleep 15; return 0 ;;
+        esac
+        if [ $((_w % 30)) = 0 ]; then
+            echo "$(date +%T) bisect: waiting for the login ($_w s): log in at the login window"
+            ( command -v say >/dev/null 2>&1 && say "log in now" ) >/dev/null 2>&1 &
+        fi
+        sleep 2; _w=$((_w + 2))
+    done
+    return 1
+}
+bisect_readback_plugin() {
+    _c=$(grep -e '^NVMTL_NO_SURFACE' -e '^NVMTL_TRACE=' "$BISECT_CONF" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+    _a=$(grep -c '^[[:space:]]*%apps[[:space:]]*$' "$BISECT_ALLOW" 2>/dev/null)
+    bisect_w "readback: conf ${_c:-(no NVMTL_NO_SURFACE_* or NVMTL_TRACE line)} allow-list %apps lines ${_a:-0}"
+}
+bisect_apply_plugin() {   # bisect_apply_plugin ACTION
+    bisect_plugin_save
+    case $1 in
+        -) bisect_w "set: (nothing)" ;;
+        off)
+            bisect_w "set: rdna3mtl.conf NVMTL_NO_SURFACE_SHARE=1 NVMTL_NO_SURFACE_PAGEOFF=1 NVMTL_TRACE=0; allow list without %apps; WindowServer restart"
+            bisect_conf_set "NVMTL_NO_SURFACE_SHARE=1 NVMTL_NO_SURFACE_PAGEOFF=1 NVMTL_TRACE=0" || bisect_w "failed: rdna3mtl.conf not written"
+            bisect_allow_apps off || bisect_w "failed: allow list not written"
+            bisect_restart_ws || return 1 ;;
+        share)
+            bisect_w "set: rdna3mtl.conf without the NVMTL_NO_SURFACE_* lines (NVMTL_TRACE=0 stays); WindowServer restart"
+            bisect_conf_set "NVMTL_TRACE=0" || bisect_w "failed: rdna3mtl.conf not written"
+            bisect_restart_ws || return 1 ;;
+        apps)
+            bisect_w "set: the allow list as it was (%apps back)"
+            bisect_allow_apps on || bisect_w "failed: allow list not restored" ;;
+        trace)
+            bisect_w "set: rdna3mtl.conf as it was (NVMTL_TRACE back); WindowServer restart"
+            bisect_conf_original || bisect_w "failed: rdna3mtl.conf not restored"
+            bisect_restart_ws || return 1 ;;
+    esac
+    bisect_readback_plugin
+    _kv=$(bisect_values_now)
+    bisect_w "kext: $_kv"
+    return 0
+}
+bisect_restart_ws() {   # the plugin conf reaches WindowServer only at its start: the session ends, the login window shows
+    bisect_w "ws_restart: $(date +%T)"
+    killall -HUP WindowServer 2>/dev/null || pkill -HUP -x WindowServer 2>/dev/null
+    if bisect_wait_login; then bisect_w "login: ok ($(date +%T))"; return 0; fi
+    bisect_w "ABORT: nobody logged in within 300 s after the WindowServer restart: the remaining steps were not run"
+    bisect_say "BISECT: nobody logged in within 300 s - the plugin steps stop here"
+    return 1
+}
+
+bisect_restore() {   # every switch back to what the boot left, the plugin's files as they were
+    _i=0
+    for _k in $BISECT_KNOBS; do
+        _i=$((_i + 1)); _o=$(bisect_orig "$_i")
+        [ "$_o" = - ] && continue
+        sysctl -w "debug.rdna3accel_$_k=$_o" >/dev/null 2>&1
+    done
+    bisect_plugin_restore
+    # a run stopped while it waited for a key must not leave the Terminal without echo
+    if [ -n "${_btty:-}" ] && [ -z "${BISECT_KEYFILE:-}" ]; then stty sane < /dev/tty 2>/dev/null; fi
+    return 0
+}
+
+bisect_step() {   # bisect_step N KIND NAME VALUES REOPEN CHANGED LAST
+    _n=$1; _kind=$2; _name=$3; _vals=$4; _reo=$5; _chg=$6; _last=$7
+    _bans=; _bgo=; _bev=; _bkread=
+    bisect_w "== step $_n"
+    bisect_w "kind: $_kind"
+    bisect_w "name: $_name"
+    bisect_w "changed: $_chg"
+    hdr "bisect step $_n of $_last: $_name"
+    _rc=0
+    if [ "$_bv" = 2 ]; then bisect_apply_plugin "$_vals" || return 1; else bisect_apply_kext "$_vals" || _rc=1; fi
+    [ "$_rc" = 0 ] || bisect_say "BISECT step $_n: a switch did NOT apply (see bisect.txt 'failed:')"
+    [ "$_reo" = 1 ] && bisect_reopen_am
+    _t0=$(date +%s)
+    bisect_w "at: $(date +%T)"
+    bisect_w "offset: $(bisect_mmss $((_t0 - BSTART)))"
+    bisect_announce "$_n" "$_last" "$_name" "$_chg"
+    bisect_wait $((_t0 + BEARLY))
+    bisect_look "bisect${_n}a" 12
+    bisect_wait $((_t0 + BMAIN))
+    bisect_look "bisect${_n}" 20
+    bisect_w "looks: bisect${_n}a bisect${_n}"
+    bisect_counters
+    bisect_trace
+    _bev=1
+    bisect_wait $((_t0 + HOLD))
+    [ -n "${_bpid:-}" ] && wait "$_bpid" 2>/dev/null
+    if [ -n "${_btty:-}" ]; then bisect_w "answer: ${_bans:-none}"; else bisect_w "answer: -"; fi
+    bisect_w "== end step $_n"
+    bisect_push
+    return $_rc
+}
+bisect_push() {   # up to the host after every step: a run cut short keeps what it did
+    [ -n "$HOST" ] || return 0
+    curl -sf --max-time 10 -T "$BF" "$HOST/reports/$base-bisect.txt" >/dev/null 2>&1
+    for _pp in "$HOME"/rdna3-scanout/bisect*/scanout-pipe*.ppm; do
+        [ -f "$_pp" ] || continue
+        [ -f "$BD/sent.$(basename "$(dirname "$_pp")").$(basename "$_pp")" ] && continue
+        curl -sf --max-time 20 -T "$_pp" "$HOST/reports/$base-scanout$(basename "$(dirname "$_pp")")-$(basename "$_pp" | sed 's/^scanout-//')" >/dev/null 2>&1 &&
+            : > "$BD/sent.$(basename "$(dirname "$_pp")").$(basename "$_pp")"
+    done
+    return 0
+}
+
+bisect_run() {   # bisect_run <1|2>: the whole sequence; 0 when every step ran and every switch took
+    _bv=$1
+    BD=${BISECT_OUT:-$HOME/rdna3-bisect}; BF=$BD/bisect.txt
+    HOLD=${BISECT_HOLD:-30}
+    BEARLY=$((HOLD * 8 / 30)); BMAIN=$((HOLD * 20 / 30))
+    rm -rf "$BD"; mkdir -p "$BD" || { echo "== bisect: cannot make $BD"; return 1; }
+    _btty=
+    if [ -n "${BISECT_KEYFILE:-}" ]; then _btty=1
+    elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
+    bisect_w "# rdna3 bisect v1"
+    bisect_w "variant: $_bv ($([ "$_bv" = 2 ] && echo bisect-plugin || echo bisect))"
+    bisect_w "hold_s: $HOLD"
+    bisect_w "mode: $([ -n "$_btty" ] && echo tty || echo timer)"
+    bisect_w "started: $(date +%T)"
+    bisect_w "console_user: $(bisect_console_user)"
+    bisect_w "autologin: $(defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>/dev/null || echo none)"
+    if ! bisect_read_originals; then
+        bisect_w "ABORT: no debug.rdna3accel_swap_mode sysctl: the accelerator is not running, or is older than card run 2026-10-17b"
+        bisect_say "BISECT: NOT RUN - no debug.rdna3accel_swap_mode sysctl (accelerator down or too old)"
+        return 1
+    fi
+    _o=; _i=0
+    for _k in $BISECT_KNOBS; do _i=$((_i + 1)); _o="$_o $_k=$(bisect_orig "$_i")"; done
+    bisect_w "originals:$_o"
+    _o=; _i=0
+    for _k in $BISECT_KNOBS; do _i=$((_i + 1)); [ "$(bisect_orig "$_i")" = - ] && _o="$_o $_k"; done
+    [ -z "$_o" ] || bisect_w "absent:$_o"
+    # a switch this kext does not have is no step's business; the table says so
+    bisect_make_plan "$_bv"
+    _last=$(tail -n 1 "$BD/plan.txt" | cut -d'|' -f1)
+    # somebody must be logged in (a desktop that redraws), as in the swap A/B
+    _w=0; _u=
+    while [ "$_w" -lt 120 ]; do
+        _u=$(bisect_console_user)
+        case "$_u" in ""|root|loginwindow) sleep 5; _w=$((_w + 5)) ;; *) break ;; esac
+    done
+    case "$_u" in ""|root|loginwindow)
+        bisect_w "WARN: nobody logged in after $_w s: nothing redraws, the looks prove little"
+        bisect_say "BISECT: NOBODY LOGGED IN - log in; the steps start in $((${BISECT_LEAD:-20})) s anyway" ;; esac
+    trap 'bisect_restore' EXIT
+    trap 'bisect_restore; exit 130' INT
+    trap 'bisect_restore; exit 143' TERM
+    # the plugin variant restarts WindowServer, which closes a Terminal it was
+    # started from: ignore the hangup so the steps and the restore still run
+    [ "$_bv" = 2 ] && trap '' HUP
+    caffeinate -u -t 5 >/dev/null 2>&1 &
+    BSTART=$(( $(date +%s) + ${BISECT_LEAD:-20} ))
+    bisect_timetable
+    notify "bisect starts at $(bisect_clock "$BSTART"): $((_last + 1)) steps of $HOLD s - look at both monitors"
+    bisect_wait "$BSTART"
+    _fail=0
+    # the plan is read on fd 3: a command inside the loop (curl, launchctl, osascript) must not eat it from stdin
+    while IFS='|' read -r _pn _pk _pname _pasg _preo _pchg <&3; do
+        bisect_step "$_pn" "$_pk" "$_pname" "$_pasg" "$_preo" "$_pchg" "$_last" || { _fail=1; [ "$_bv" = 2 ] && break; }
+    done 3< "$BD/plan.txt"
+    bisect_restore
+    bisect_w "restored: $(bisect_values_now)"
+    sysctl -w debug.rdna3accel_trace_dump=600 >/dev/null 2>&1
+    trace_snapshot bisect-end
+    bisect_w "finished: $(date +%T)"
+    bisect_w "== end"
+    bisect_push
+    trap - EXIT INT TERM
+    [ -n "$STANDALONE" ] && trap 'restore_sleep' EXIT && trap 'restore_sleep; exit 130' INT && trap 'restore_sleep; exit 143' TERM
+    echo "BISECT: $((_last + 1)) step(s) of $HOLD s, mode $([ -n "$_btty" ] && echo tty || echo timer), $([ "$_fail" = 0 ] && echo "every switch applied" || echo "A SWITCH DID NOT APPLY OR THE RUN STOPPED"); bisect.txt in the report"
+    bisect_say "BISECT done: the report has the table (39-bisect.txt)"
+    return $_fail
+}
+# BISECT-END
+
 # an M6 hi-res look keeps only its picture; the pipes' state stays in the
 # results (a pipe not lit or asleep must not look like a frozen picture)
 m6_look_state() {
@@ -440,7 +922,7 @@ case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" rdna3vminstall=1 "*) IN
 APPROVE=
 case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" rdna3vmapprove=1 "*) APPROVE=1 ;; esac
 
-if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ]; then
+if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ] && [ -z "$BISECT_HAND" ]; then
     rm -f /tmp/rdna3-progress.win
     # the plugin's trace ring knob on every boot of the VM (the install boot
 # included: the card boot's WindowServer then starts with the big ring)
@@ -621,6 +1103,17 @@ esac
 args=$(nvram boot-args 2>/dev/null | cut -f2-)
 label=$(echo "$args" | tr ' ' '\n' | grep -E '^rdna3(lvl|dmub|msi|fb|accel)=' | tr '=' '-' | tr '\n' '_' | sed 's/_$//')
 [ -n "$label" ] || label=default-profile
+# rdna3bisect=1 / 2 (rdna3vm step bisect / bisect-plugin): only the display bisect runs
+case " $args " in
+    *" rdna3bisect=1 "*) [ -n "$BISECT" ] || BISECT=1 ;;
+    *" rdna3bisect=2 "*) [ -n "$BISECT" ] || BISECT=2 ;;
+esac
+[ -n "$BISECT" ] && label="bisect-$BISECT"
+# rdna3bisect=3 (rdna3vm args "rdna3bisect=3" --stay): nothing runs at boot, so the bisect can be started by hand in
+# a Terminal of the guest, with a keyboard to answer on: sudo sh <this script> --bisect | --bisect-plugin
+case " $args " in
+    *" rdna3bisect=3 "*) [ -n "$BISECT_HAND" ] || { echo "rdna3bisect=3: no tests this boot; start the bisect by hand (sudo sh $0 --bisect)"; finish; } ;;
+esac
 # no rdna3lvl: the kexts run their default profile (common/rdna3_bootargs.h);
 # the tests below gate on the same settings
 case " $args " in
@@ -857,7 +1350,16 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     # to the report; the host's triage turns them into PNGs
     # three looks 20 s apart: card run 17's second monitor switched
     # between its own picture and the first one's
-    rm -rf "$HOME/rdna3-scanout"
+    rm -rf "$HOME/rdna3-scanout" "$HOME/rdna3-bisect"
+    if [ -n "$BISECT" ]; then
+        # the display bisect replaces the other tests: they would draw on the
+        # screens the owner is looking at (collect.sh packs bisect.txt)
+        hdr "bisect ($([ "$BISECT" = 2 ] && echo "bisect-plugin: the Metal plugin's switches" || echo "the kernel's switches"))"
+        bisect_run "$BISECT"
+        echo "[exit $?]"
+    fi
+    # (not re-indented: every other test, from here to the trace pump's stop)
+    if [ -z "$BISECT" ]; then
     if [ "${lvl:-0}" -ge 2 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
         for k in 1 2 3; do
             mkdir -p "$HOME/rdna3-scanout/$k"
@@ -1411,6 +1913,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 done_ $?
             fi ;;
     esac
+    fi   # [ -z "$BISECT" ]
     trace_pump_stop
 } > "$extra" 2>&1
 trace_pump_stop >> "$extra" 2>&1   # a shell that ran the block in a subshell: the pump stops here
@@ -1443,6 +1946,7 @@ if [ -n "$STANDALONE" ]; then
     for p in "$HOME"/rdna3-scanout/*/scanout-pipe*.ppm; do
         [ -f "$p" ] && cp "$p" "$out/$base-scanout$(basename "$(dirname "$p")")-$(basename "$p" | sed 's/^scanout-//')"
     done
+    [ -s "$HOME/rdna3-bisect/bisect.txt" ] && cp "$HOME/rdna3-bisect/bisect.txt" "$out/$base-bisect.txt"
     prog "tests done - the full report (up to 9 min)"
     RDNA3_STAMP=$stamp with_limit 540 sh "$D/tools/macos/collect.sh" "$label"
     [ -f "$HOME/$base.tar.gz" ] && mv "$HOME/$base.tar.gz" "$out/"
@@ -1466,6 +1970,8 @@ for p in "$HOME"/rdna3-scanout/*/scanout-pipe*.ppm; do
     [ -f "$p" ] && curl -sf --max-time 30 -T "$p" \
         "$HOST/reports/$base-scanout$(basename "$(dirname "$p")")-$(basename "$p" | sed 's/^scanout-//')"
 done
+# the display bisect's table once more (bisect_push sent it after every step)
+[ -s "$HOME/rdna3-bisect/bisect.txt" ] && curl -sf --max-time 30 -T "$HOME/rdna3-bisect/bisect.txt" "$HOST/reports/$base-bisect.txt" >/dev/null 2>&1
 # collect.sh packs everything from ~/rdna3-*
 RDNA3_STAMP=$stamp with_limit 540 sh "$D/tools/macos/collect.sh" "$label"
 f="$HOME/$base.tar.gz"

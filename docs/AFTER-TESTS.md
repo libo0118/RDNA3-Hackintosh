@@ -2484,3 +2484,38 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
 | `WARN log shows N refusals, newest dump says M` | the dump was read before the run ended | the log lines are the later truth |
 | `WARN dump truncated` / `visible_kib=0` / `not measured: 38-vram-heap.txt has no .. dump` | the report is incomplete (sysctl buffer, collector) or BAR0 was not mapped | `sysctl debug.rdna3_vram` in the VM; `RDNA3,VRAMApertureMB` |
 | `WARN not measured: debug.rdna3_vram is in neither ...` | the kext logs the heap but the collector did not read the sysctl | `collect.sh` ran as another user or too early: `sysctl debug.rdna3_vram` in the VM |
+
+### Step `bisect` / `bisect-plugin` (the display bug: black screens, windows that flash, flicker)
+
+The owner runs `rdna3vm step bisect` ([TESTING-VM](TESTING-VM.md), "Display
+bisect"): instead of the other tests every new feature with a runtime switch
+is turned off (step 1), then on again one at a time, oldest first, 30 s each
+(steps 2-8; step 8 = the defaults = step 0), three controls that are off by
+default (9-11) and the defaults again (12). The report has the table
+(`39-bisect.txt` in the archive, `<report>-bisect.txt` uploaded after every
+step, the looks as `<report>-scanoutbisect<N>[a]-pipe<P>.ppm`), the tests
+file only the step headers. `tools/triage_reports.py` prints it
+(`tools/triage_bisect.py`): step, what changed, the owner's answer (tty only;
+`-` on the timer), pipe 0 / 1 % not black, whether the picture moved between
+the step's two looks (`move` / `still`), the deltas of the swaps per head, the
+stale holds, the would-hold count and the empty backs since the step before.
+
+| Triage line | Meaning | Action |
+|---|---|---|
+| `FAIL BISECT: BREAKS AT step K (<switch>)` | step 1 (everything off) was fine, step 0 broken, and step K is the first that switches a feature back on and broke | the switch of step K is the suspect (the steps are cumulative: everything before K is on too): `a3` (2) = A3 (`accel/rdna3-accel.cpp` import rule, N27), `flicker` (3) / `swap_torn` (5) = the BAR reads of the diagnostics (cost per swap: `swaps_hashed_h<N>`; a budget of 3000 / 20000 per head is used up early, then the switch does nothing), `swap_latch` (4) = the wait under the family's lock (N28 open item 2), `swap_mode` (6) = the copy (N29), `trace_scan` (7) = more BAR reads, `swap_stale` (8) = the hold (N31). Ask for the same step again before changing code: the line `WARN BISECT: step 8 has the same switches as step 0 ... flaky` says when the looks differ between two runs of one state |
+| `FAIL BISECT: still broken with every switchable feature off` | step 1 is bad as well | not one of these switches: boot-args (`rdna3gamma`, `rdna3visreserve`, `rdna3accelcf`), the copy forward fixes, the VMID admission, kext code without a switch, the plugin (run `bisect-plugin`) or the hardware; compare an older build (`rdna3vm step default` on the commit before card run 58) |
+| `WARN BISECT: the defaults (step 0) looked fine but every switch off (step 1) broke` | the old behaviour is the broken one, or the bug is intermittent | repeat the step; read the looks of both |
+| `INFO BISECT: no step looked broken` | the bug did not show | needs real apps or the owner's own use; `WARN` lines about missing looks say whether the run proved anything |
+| `FAIL the first step the owner marked n` / `FAIL ... whose looks black` / `WARN ... stood still` | the first step by the owner's `n`, a lit pipe with at most 3 % of its picture not black, a pipe that moved in other steps and did not between the step's two looks | step 0 is the reference (the bug itself); the others are in the `BISECT` line |
+| `WARN step N: no look` / `no counters` / `step(s) ... never ran` / `has no end line` | data missing: `rdna3_drminfo` absent or failed, a sysctl dump empty, the VM's time limit hit | the tests file's `== bisect step N` headers and the serial log say where it stopped; `AUTO_TIMEOUT_MIN` |
+| `FAIL step N: a switch did not take` | `sysctl -w` failed or read back another value (`failed:` in bisect.txt) | the step did not test what its row says; the kext may be older (`absent:` lists switches this kext lacks) |
+| `WARN step 0 is not the compiled defaults` | a boot-arg set a switch (`rdna3a3ws`, `rdna3swaplanded` ...) | the 'on' steps return to what the boot left, not to the compiled default |
+| `FAIL bisect run ... but no bisect.txt` | the VM ran an autoreport.sh without the bisect, or `debug.rdna3accel_swap_mode` was missing (the tests file says `NOT RUN`) | `rdna3vm update`, then the step again |
+
+`bisect-plugin` (steps 0-4) does the same with `rdna3mtl.conf`
+(`NVMTL_NO_SURFACE_SHARE`, `NVMTL_NO_SURFACE_PAGEOFF`, `NVMTL_TRACE`) and the
+allow list's `%apps` line, restarting WindowServer at steps 1, 2 and 4; its
+`autologin:` line says whether the guest logs in by itself. The trace stream is
+pumped all through the run: `stream_bytes` / `trace_events` per step place a
+step in the decoded trace (`tools/rdna3_trace.py`), the steps' wall clock is in
+`at:`. The swap A/B is not part of this step (the triage does not expect it).

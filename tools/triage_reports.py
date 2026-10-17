@@ -30,6 +30,10 @@ try:
     import rdna3_trace  # noqa: E402  (tools/rdna3_trace.py: the kernel's per-frame trace)
 except ImportError:      # a copy of this file alone (the tests' fake checkouts)
     rdna3_trace = None
+try:
+    import triage_bisect  # noqa: E402  (tools/triage_bisect.py: the display bisect's table)
+except ImportError:
+    triage_bisect = None
 
 U64 = 1 << 64
 
@@ -1307,7 +1311,9 @@ def _trace_lines(path, txt, klog="", args=""):
                                    ("; " + "; ".join(t for _, _, t in tr.problems[:3]) if tr.problems else ""))], []
         return out, []
     streams = any("stream" in n for n, _ in inputs)
-    ab_expected = bool(current and accel_on and "swap A/B: SKIPPED" not in txt and
+    # a display bisect run (rdna3bisect=1 / 2) replaces the other tests, the swap A/B among them
+    is_bisect = bisect_run_expected(path, txt, args)
+    ab_expected = bool(current and accel_on and not is_bisect and "swap A/B: SKIPPED" not in txt and
                        (bootarg_level(args) >= 2 or "rdna3lvl=" not in args) and (txt or streams))
     ctx = {"swaps": sum(v for k, v in c.items() if re.match(r"swaps_h\d$", k)) or None,
            "swaps_window": ab_counter_window(txt) if txt else {},
@@ -2188,6 +2194,51 @@ def tx_excerpt(lines):
     return [lines[i][lines[i].find("display:"):] for i in sorted(keep)]
 
 
+def bisect_run_expected(path, tests_txt, args=""):
+    """whether this report was a display bisect run (rdna3bisect=1 / 2 in its boot-args or in the tests file)"""
+    return bool(re.search(r"rdna3bisect=[12]\b", (args or "") + "\n" + tests_txt[:2000]) or "\n== bisect" in "\n" + tests_txt)
+
+
+def bisect_analysis(path, tests_txt, args=""):
+    """(expected, result of tools/triage_bisect.analyse or None, [(level, text)] when there is nothing to table)"""
+    expected = bisect_run_expected(path, tests_txt, args)
+    base = path[:-len(".tar.gz")] if path.endswith(".tar.gz") else path
+    if triage_bisect is None:
+        if expected:
+            return True, None, [("WARN", "bisect run, but tools/triage_bisect.py is missing next to this script: the step table is not made")]
+        return False, None, []
+    text = triage_bisect.locate(path)
+    if not text:
+        if expected:
+            return True, None, [("FAIL", "bisect run (rdna3bisect in the boot-args) but no bisect.txt: neither the archive's "
+                                          "39-bisect.txt nor %s-bisect.txt came - autoreport.sh's bisect_run never wrote it "
+                                          "(an older autoreport.sh in the VM? no debug.rdna3accel_swap_mode?) - the tests file "
+                                          "has the reason" % os.path.basename(base))]
+        return False, None, []
+    return True, triage_bisect.analyse(text, base), []
+
+
+def bisect_print(path, tests_txt, args=""):
+    """([lines to print], failed): the display bisect's table and findings"""
+    expected, res, alone = bisect_analysis(path, tests_txt, args)
+    lines = ["   %s bisect: %s" % (lv, t) for lv, t in alone]
+    if res:
+        lines.append("   display bisect (tools/triage_bisect.py; a step = 30 s of one set of switches):")
+        lines.extend("     " + l for l in res["table"])
+        lines.extend("   %s %s" % (lv, t) for lv, t in res["findings"])
+    failed = any(l.startswith("   FAIL") for l in lines)
+    return lines, failed
+
+
+def bisect_rows(path, tests_txt, args=""):
+    """[(name, text)] for the SUMMARY"""
+    expected, res, alone = bisect_analysis(path, tests_txt, args)
+    rows = [("bisect", "%s %s" % (lv, t[:300])) for lv, t in alone]
+    if res:
+        rows.extend(res["rows"])
+    return rows
+
+
 def summary(path, serial=None):
     """one line per area for the newest report: what a round's message to
     the user is made of"""
@@ -2251,6 +2302,7 @@ def summary(path, serial=None):
                                                       for p in sorted(pics)),
                                               ", BLACK pipe(s) %s" % " ".join(black) if black else "")))
     out.extend(ab_pictures(txt, main_pipe(path, txt)))
+    out.extend(bisect_rows(path, txt, args))
     abd = ab_diag_row(txt)
     if abd:
         out.append(abd)
@@ -2319,7 +2371,8 @@ def summary(path, serial=None):
         out.append(("M6 screens", "no pictures: the M6 looks' PPMs did not arrive"))
     a3c = a3_counters(txt)
     if a3c is None:
-        out.append(("A3 display counters", "none: the kext predates card run 58"))
+        out.append(("A3 display counters", "none (bisect run: the counters are per step in the bisect table)"
+                    if bisect_run_expected(path, txt, args) else "none: the kext predates card run 58"))
     elif a3c:
         fl = flicker_verdict(txt)
         for lv, t in fl:
@@ -2491,6 +2544,10 @@ def main():
         for lv, t in plugin_trace_lines(p, cd, ttxt):
             print("   %s %s" % (lv, t if t.startswith("plugin trace") else "plugin trace: " + t))
             failed = failed or lv in ("FAIL", "CRITICAL")
+        bl, bfail = bisect_print(p, ttxt, read_tar_member(p, "01-boot-args.txt"))
+        for l in bl:
+            print(l)
+        failed = failed or bfail
         if tl:
             print("   frame trace timeline (tools/rdna3_trace.py for all of it):")
             for l in tl:
@@ -2589,7 +2646,9 @@ def main():
             # card run 58's counters (the dumps of autoreport.sh, the last wins)
             a3c = a3_counters(txt)
             if a3c is None:
-                print("   INFO A3 display counters: none (the kext predates card run 58)")
+                print("   INFO A3 display counters: none (%s)" % (
+                    "bisect run: the counters are per step in the bisect table" if bisect_run_expected(p, txt)
+                    else "the kext predates card run 58"))
             elif a3c:
                 print("   INFO A3 display counters: " + ", ".join("%s %d" % kv for kv in sorted(a3c.items())))
                 for lv, t in flicker_verdict(txt):
