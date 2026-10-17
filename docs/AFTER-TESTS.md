@@ -144,7 +144,7 @@ Hypotheses are ordered by likelihood. "VM:" = only possible with passthrough
 | no `RDNA3` log lines, `03-kexts.txt` without RDNA3Accel | VM: no AMD device in `04-pci.txt` (triage prints the AMD ids) | the card must sit on `pcie.0` (`GPU_BUS=pcie0`, default): behind a `pcie-root-port` macOS leaves it unconfigured. Check `host-*.log` "guest PCI bus": BAR0 mapped at 40 s |
 | same, AMD device present | not loaded: kernelmanagerd refuses ad-hoc kexts in the Auxiliary KC ("invalid codeful kernel extension") | the VM injects the kexts with OpenCore (`rdna3vm prepare`, `EFI/OC/Kexts`); serial log must show "a prelinked copy … is already present" for the `/Library/Extensions` copy |
 | loaded, not matched | `IOPCIMatch` / topology | `04-pci.txt`; fix matching in `kext/Info.plist` |
-| hang / black screen at step 0 | VM firmware, not the driver | ask for `rdna3vm step off`. If that hangs too: VM setup — re-dump VBIOS with amdgpu loaded, Resizable BAR off, larger `X-PciMmio64Mb`, `CPU_MODEL=Penryn,…` in `~/rdna3-vm/config` |
+| hang / black screen at step 0 | VM firmware, not the driver | ask for `rdna3vm step off`. If that hangs too: VM setup — re-dump VBIOS with amdgpu loaded, Resizable BAR off, larger `X-PciMmio64Mb` (`PCI_MMIO64_MB`), `CPU_MODEL=Penryn,…` in `~/rdna3-vm/config`; a bigger BAR0 (`RESIZE_BAR_LOG2` above 8) is the first thing to set back to 8 |
 
 ### Step 1 (`rdna3lvl=1`): BAR5, IFWI wait, VRAM size
 
@@ -2321,6 +2321,55 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
 | `H-COPY` FAIL in mode 0, none in mode 1 | in-place rewrites only while flipping | the copy is right: keep mode 1 |
 | `H-FREE` | VMFREE flags 2-8 | in mode 1 the panel never scans WindowServer's buffers; in mode 0 expected |
 | `CF-ERROR` CRITICAL | a CF with `v4` != 0 | only `rdna3accelcf=0` answers an error: a bug if it shows otherwise |
-| CoreDisplay `copy forward failed` CRITICAL | no CF error in the trace, `VRAM` WARN (allocations refused) | the family failed on a buffer without VRAM: the CPU-visible heap ran out (BAR size); open item N29 (2) |
+| CoreDisplay `copy forward failed` CRITICAL | no CF error in the trace, `VRAM` WARN (allocations refused) | the family failed on a buffer without VRAM: the CPU-visible heap ran out (BAR size); see "Card run 2026-10-17c" below, N30; the triage's `VISIBLE VRAM` line says who held it |
 | `PANEL` WARN | HUBP address != expected | the framebuffer or an IOP flip moved the panel: see the FLIP events around it |
 | tearing in mode 1 | `swaps_copydirect_h<N>` (no second buffer) or `swaps_copylatchto_h<N>` | D could not be allocated (VRAM) or flips did not latch in time |
+
+### Card run 2026-10-17c (the CPU-visible VRAM ran out; step agdc + probes)
+
+- Evidence (`serial-*.log`): the VM's BAR0 is 256 MiB (`rdna3vm` shrinks it,
+  `OVMF 64-bit PCI window: 0 MiB (BAR0 256 MiB)`), so the CPU-visible heap
+  is 144 MiB (`DRM/amdgpu UAPI ready: ... 144 MiB visible`). RADV's BOs the
+  CPU may map (36992 KiB and 4096 KiB each) filled it (`GEM: ... did not
+  fit (visible heap 9568 KiB free ...): GTT`); then `RD3VidMemory::
+  allocPhysical: 2658304 / 3145728 / 8294400 bytes REFUSED by the
+  framebuffer (0xe00002db)` for WindowServer's framebuffers: the main
+  display went black and froze (gamma "pipe 1 2 % not black", M6 FROZEN).
+- Code findings (certain from code): (1) the accelerator's allocations
+  (`rdna3AllocVram`: WindowServer's framebuffers, the framebuffer kext's
+  surfaces and cursor, the swap copy's D) and GEM BOs shared one first-fit
+  visible heap, GEM first come first served; (2) a BO created without CPU
+  access went beyond BAR0 first but fell back into the visible heap when
+  that refused it (`4 KiB of VRAM without CPU access did not fit (visible
+  heap 8872 KiB free, the rest 252472 KiB free)`); (3) `range_alloc_get`
+  cut a free range to `[s,a)` before it found its free list (1024 ranges)
+  had no slot for the tail: the failed allocation lost the tail for good -
+  the 15.4 GiB drop of the "rest" between two log lines is that or a
+  15 GiB BO nobody logged; which of the two the next run says (below);
+  (4) a 4 KiB BO with a large alignment hint needed a large aligned hole.
+- Fixed (`common/rdna3_vram_place.h`, `tests/test_vram_place.c`):
+  BOs without CPU access never use the visible heap
+  (amdgpu_bo_placement_from_domain); the visible heap has a reserve at its
+  start for the accelerator's allocations (default two thirds of it, at most
+  128 MiB; `rdna3visreserve=<MiB>`, 0 = none) that GEM BOs never take; the
+  alignment never exceeds the allocation's own power of two
+  (amdgpu_vram_mgr_new); the free lists hold 4096 ranges, a split with no
+  slot changes nothing, a range that cannot be given back is counted.
+- Log lines (kernel): `VRAM REFUSED #n: <who>, <size> KiB by <owner>
+  (alignment .., placed at ..): free reserve .. visible heap .. beyond BAR0
+  .. (largest ..); free ranges a/g/h, lost .. KiB; held: <owner> <KiB> xN
+  (peak, refused)` (first 16, then every 64th), `VRAM heap: ...` (at most
+  every 30 s while allocations happen), `GEM: a N MiB VRAM BO ... placed at`
+  (BOs of 1 GiB and more), `VRAM: could not give N KiB .. back`.
+  Counters: `debug.rdna3_vram` (one line of key=value; autoreport adds it to
+  every counter dump of the tests file, collect.sh writes
+  `38-vram-heap.txt`).
+
+| Seen (triage `VISIBLE VRAM`) | Cause | Action |
+|---|---|---|
+| `FAIL VISIBLE VRAM exhausted: N refusals (K of the accelerator's own ...)` | the display's allocations did not fit the reserve plus the general heap | read `owners`: who holds the visible heap at the end (`accel` = WindowServer's framebuffers + legacy surfaces, `swap-D`, `fb-*`); more reserve (`rdna3visreserve=<MiB>`) or a bigger BAR0 (`RESIZE_BAR_LOG2=11` in `~/rdna3-vm/config`, docs/TESTING-VM.md, risky) |
+| `WARN VISIBLE VRAM exhausted: N refusals (0 of the accelerator ...; M of GEM BOs)` | RADV's BOs the CPU may map filled the general part and went to GTT (expected with 256 MiB); `reserve_blocked` counts those the reserve alone could have held | nothing to fix for the display; if RADV slows down, a bigger BAR0 |
+| `WARN .. BO(s) without CPU access found no room beyond BAR0` | the part beyond BAR0 was full or fragmented (see `largest`, the `VRAM REFUSED` line's alignment) | the line says free vs largest: free but not largest = fragmentation (alignment hint, free-list size) |
+| `FAIL the heap lost N KiB` | a free list (4096 ranges) was full when a range came back | fragmentation the allocator cannot hold: raise `RANGE_ALLOC_MAX_FREE` or merge ranges |
+| `WARN .. skipped a free range only because the free list was full` | the same, no range lost yet | as above |
+| `WARN not measured: debug.rdna3_vram is in neither ...` | the kext logs the heap but the collector did not read the sysctl | `collect.sh` ran as another user or too early: `sysctl debug.rdna3_vram` in the VM |

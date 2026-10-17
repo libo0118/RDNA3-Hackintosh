@@ -122,6 +122,20 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
         cp "$f" "$dir/36-stream-$(basename "$f")" && echo "stream: $(wc -c < "$f") bytes in 36-stream-$(basename "$f")"
     done
 } > "$dir/36-frame-trace.txt" 2>&1
+# card run 2026-10-17c: who holds the CPU-visible VRAM (the heap WindowServer's
+# framebuffers and the GEM BOs share): the core's per-owner report and the
+# kernel's refusal / summary lines; tools/triage_reports.py "VISIBLE VRAM"
+{
+    echo "== sysctl debug.rdna3_vram (the end of the run)"
+    _vh=$(sysctl -n debug.rdna3_vram 2>/dev/null)
+    if [ -n "$_vh" ]; then echo "debug.rdna3_vram: $_vh"
+    else echo "(no debug.rdna3_vram sysctl: kext older than card run 2026-10-17c, or not loaded)"; fi
+    echo "== kernel log (20-log-rdna3.txt)"
+    if [ -s "$dir/20-log-rdna3.txt" ]; then
+        grep -h -e 'VRAM REFUSED' -e 'VRAM heap:' -e 'DRM/amdgpu UAPI ready' -e 'REFUSED by the framebuffer' \
+            -e 'could not give' -e 'VRAM: a ' -e 'GEM: .* VRAM BO' "$dir/20-log-rdna3.txt" | head -150 || true
+    else echo "(no kernel log in this report)"; fi
+} > "$dir/38-vram-heap.txt" 2>/dev/null
 # N1: which processes the Metal plugin served and why. The list, the
 # boot-args (rdna3mtlapps=0 ends apps mode) and the plugin's decision line of
 # every process that loaded it: "allow mode: <mode>; <process>: <reason>"

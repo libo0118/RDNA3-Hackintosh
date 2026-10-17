@@ -25,6 +25,18 @@
 #define RD3K_VRAM_FN_FREE     "rdna3FreeVram"
 #define RD3K_VRAM_FN_SCANOUT  "rdna3ScanoutInfo"
 
+/* flags, low byte: who asks, for the core's per-owner heap report (card run
+ * 2026-10-17c: the CPU-visible heap ran out and the display's allocations
+ * were refused; the core logs and counts the occupancy by owner). 0 = the
+ * accelerator's own (WindowServer's framebuffers and legacy surfaces). An
+ * older caller sends 0, an older core ignores the byte; the core clamps
+ * unknown values to 0. Matches common/rdna3_vram_place.h (RD3_VO_*). */
+#define RD3K_VRAM_OWNER_MASK       0xffu
+#define RD3K_VRAM_OWNER_ACCEL      0u
+#define RD3K_VRAM_OWNER_FB_SURFACE 1u   /* the framebuffer kext's mode / own surface */
+#define RD3K_VRAM_OWNER_FB_CURSOR  2u   /* the hardware cursor */
+#define RD3K_VRAM_OWNER_SWAP_D     3u   /* the swap copy's D buffer */
+
 struct RD3KVramRequest {
     unsigned int       version;
     unsigned int       flags;

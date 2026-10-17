@@ -1368,6 +1368,108 @@ def coredisplay_cf_lines(cdlog, tr_lines=()):
     return out
 
 
+VRAM_HEAP_OWNERS = (("accel", "accel"), ("fb_surface", "fb-surface"), ("fb_cursor", "fb-cursor"),
+                    ("swap_d", "swap-D"), ("gem", "gem"), ("gem_hi", "gem-beyond-BAR0"))
+
+
+def vram_heap_counters(*texts):
+    """{key: int} of the newest 'debug.rdna3_vram: key=value ...' line in the
+    given texts (the core's per-owner report of the CPU-visible VRAM, card
+    run 2026-10-17c), None when none has one. Later texts win ties on the
+    refusal count (the archive is read after the run's last dump)."""
+    best = None
+    for t in texts:
+        for l in (t or "").splitlines():
+            m = re.match(r"\s*debug\.rdna3_vram: (visible_kib=.*)$", l)
+            if m:
+                c = {k: int(v) for k, v in re.findall(r"(\w+)=(-?\d+)", m.group(1))}
+                if best is None or c.get("refused", 0) >= best.get("refused", 0):
+                    best = c
+    return best
+
+
+def vram_heap_owners_text(c):
+    """'accel 49200 KiB x5 (peak 65000 KiB, refused 3), gem ...' of the owners that held anything"""
+    out = []
+    for key, name in VRAM_HEAP_OWNERS:
+        if c.get(key + "_peak_kib") or c.get(key + "_refused"):
+            out.append("%s %d KiB x%d (peak %d KiB%s)" % (
+                name, c.get(key + "_kib", 0), c.get(key + "_n", 0), c.get(key + "_peak_kib", 0),
+                ", refused %d" % c[key + "_refused"] if c.get(key + "_refused") else ""))
+    return ", ".join(out) or "nothing"
+
+
+def vram_heap_lines(path, txt, log):
+    """[(level, text)] of the CPU-visible VRAM (card run 2026-10-17c: RADV's BOs filled
+    the 144 MiB visible heap, WindowServer's framebuffers were refused and the main
+    display froze). From debug.rdna3_vram (the tests file's dumps, the archive's
+    38-vram-heap.txt) and the kernel's 'VRAM REFUSED' lines. FAIL: the accelerator's
+    (display) allocations were refused or the heap lost a range; WARN: GEM BOs fell
+    back to GTT, a free list ran full, or the data is missing on a kext that has it."""
+    arc = ""
+    if os.path.exists(path):
+        try:
+            with tarfile.open(path) as tar:
+                arc = read_member(tar, "38-vram-heap.txt") or ""
+        except (OSError, tarfile.TarError):
+            pass
+    c = vram_heap_counters(txt, arc)
+    fb_refused = len(re.findall(r"RD3VidMemory::allocPhysical\([^)]*\): \d+ bytes REFUSED by the framebuffer", log))
+    nref = max([int(n) for n in re.findall(r"VRAM REFUSED #(\d+):", log)] or [0])
+    new_kext = "accelerator's reserve" in log or "VRAM heap:" in log or nref
+    if c is None:
+        if new_kext:
+            # the kext that has the report left no dump: loud, not silent
+            return [("WARN", "not measured: debug.rdna3_vram is in neither the tests file nor 38-vram-heap.txt "
+                             "although the kernel log has the heap lines (%d 'VRAM REFUSED' line(s), %d framebuffer "
+                             "refusal(s)) - collect.sh / autoreport.sh did not read it" % (nref, fb_refused))]
+        if fb_refused:
+            return [("WARN", "%d accelerator VRAM allocation(s) refused by the framebuffer, no debug.rdna3_vram to say "
+                             "who held the visible heap (a kext before card run 2026-10-17c)" % fb_refused)]
+        return []
+    out = []
+    refused = c.get("refused", 0)
+    ra, rg, rh = c.get("refused_accel", 0), c.get("refused_gem", 0), c.get("refused_hi", 0)
+    owners = vram_heap_owners_text(c)
+    if ra or rg:
+        lv = "FAIL" if ra else "WARN"
+        out.append((lv, "VISIBLE VRAM exhausted: %d refusals (%d of the accelerator's own allocations - the display's "
+                        "framebuffers; %d of GEM BOs, which fall back to GTT), owners %s; visible heap %d KiB with a "
+                        "%d KiB reserve for the accelerator, free now: reserve %d KiB, general %d KiB (largest %d KiB)%s"
+                    % (ra + rg, ra, rg, owners, c.get("visible_kib", 0), c.get("reserve_kib", 0),
+                       c.get("free_acc_kib", 0), c.get("free_gem_kib", 0), c.get("largest_gem_kib", 0),
+                       "; %d GEM request(s) were held off by the reserve" % c["reserve_blocked"]
+                       if c.get("reserve_blocked") else "")))
+        if ra:
+            out.append(("INFO", "the accelerator was refused although its reserve is %d KiB: more than the reserve and "
+                                "the general heap together - raise it with rdna3visreserve=<MiB>, or a bigger BAR0 "
+                                "(RESIZE_BAR_LOG2 in ~/rdna3-vm/config)" % c.get("reserve_kib", 0)))
+    if rh or c.get("hi_full"):
+        out.append(("WARN", "%d BO(s) without CPU access found no room beyond BAR0 (free %d KiB, largest %d KiB, "
+                            "alignment/fragmentation) and went to GTT; the visible heap was not touched"
+                    % (rh, c.get("free_hi_kib", 0), c.get("largest_hi_kib", 0))))
+    if c.get("lost_kib"):
+        out.append(("FAIL", "the heap lost %d KiB: a free list was full when a range came back (nfree acc/gem/hi "
+                            "%d/%d/%d) - fragmentation beyond what the allocator can hold"
+                    % (c["lost_kib"], c.get("nfree_acc", 0), c.get("nfree_gem", 0), c.get("nfree_hi", 0))))
+    skips = c.get("full_skips_acc", 0) + c.get("full_skips_gem", 0) + c.get("full_skips_hi", 0)
+    if skips:
+        out.append(("WARN", "%d allocation attempt(s) skipped a free range only because the free list was full "
+                            "(nfree %d/%d/%d)" % (skips, c.get("nfree_acc", 0), c.get("nfree_gem", 0),
+                                                  c.get("nfree_hi", 0))))
+    if c.get("hi_clear_fail"):
+        out.append(("WARN", "%d BO(s) without CPU access could not be cleared by the SDMA ring and went to GTT "
+                            "(they no longer take visible VRAM for a CPU clear)" % c["hi_clear_fail"]))
+    if fb_refused and not ra:
+        out.append(("WARN", "%d allocation(s) 'REFUSED by the framebuffer' in the log, but the core's accelerator "
+                            "refusal counter is %d: another cause (the request, the BAR check) - read the log lines"
+                    % (fb_refused, ra)))
+    if not out:
+        out.append(("PASS", "no refusals (%d): the accelerator's reserve is %d KiB of the %d KiB visible heap; held at "
+                            "the end: %s" % (refused, c.get("reserve_kib", 0), c.get("visible_kib", 0), owners)))
+    return out
+
+
 def latch_lines(path, txt, args=""):
     """[(level, text)] of a report's flip latch: the counters of its tests
     file, else the archive's 29-surface-vram.txt (collect.sh without
@@ -2091,6 +2193,9 @@ def summary(path, serial=None):
             a3c.get("a3ws_refused", "?"),
             ", ".join("h%s %d (A3 %d)" % (k[-1], v, a3c.get("swaps_a3_h" + k[-1], 0))
                       for k, v in sorted(a3c.items()) if re.match(r"swaps_h\d$", k) and v))))
+    for lv, t in vram_heap_lines(path, txt, log):
+        if lv != "INFO":
+            out.append(("VISIBLE VRAM", "%s %s" % (lv, t[:360])))
     for lv, t in latch_lines(path, txt, args):
         out.append(("flip latch", "%s %s" % (lv, t)))
     for lv, t in swapcopy_verdict(a3_counters(txt) if txt else {}):
@@ -2213,6 +2318,10 @@ def main():
         tests = p[:-len(".tar.gz")] + "-tests.txt"
         # card run 2026-10-17: the flip latch, from the tests file or the archive
         ttxt = open(tests, errors="replace").read() if os.path.exists(tests) else ""
+        # card run 2026-10-17c: who holds the CPU-visible VRAM, and what was refused
+        for lv, t in vram_heap_lines(p, ttxt, kernel_text(p, d)):
+            print("   %s VISIBLE VRAM: %s" % (lv, t))
+            failed = failed or lv == "FAIL"
         for lv, t in latch_lines(p, ttxt):
             print("   %s flip latch: %s" % (lv, t))
             failed = failed or lv == "FAIL"

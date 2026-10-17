@@ -47,6 +47,7 @@ extern "C" {
 #include "amd_discovery.h"
 #include "rdna3_drm.h"
 #include "range_alloc.h"
+#include "rdna3_vram_place.h"
 #include "rdna3_pmctl.h"
 }
 
@@ -208,9 +209,32 @@ private:
     rdna3_drm_device *fDrm  = nullptr;
     IOLock       *fDrmLock  = nullptr;
     IOThread      fDrmHeldBy = nullptr;
-    range_alloc  *fVramHeap = nullptr;   /* user BOs, CPU-visible part of VRAM */
-    range_alloc  *fVramHeapHi = nullptr; /* user BOs beyond the BAR window */
-    uint64_t      fVramHeapVisEnd = 0;   /* offsets below this are in fVramHeap */
+    /* the heaps (common/rdna3_vram_place.h, card run 2026-10-17c): the
+     * reserve at the start of the CPU-visible part belongs to the
+     * accelerator's allocations, the rest of it to GEM BOs (and what the
+     * accelerator spills), the part beyond BAR0 to BOs without CPU access */
+    range_alloc  *fVramAcc  = nullptr;   /* reserve, accelerator only */
+    range_alloc  *fVramHeap = nullptr;   /* CPU-visible part: GEM BOs the CPU may map */
+    range_alloc  *fVramHeapHi = nullptr; /* beyond the BAR window: BOs without CPU access */
+    rdna3_vram_pools fVramPools;         /* the three above and the per-owner counters (fDrmLock) */
+    uint64_t      fVramReserve = 0;      /* bytes of fVramAcc */
+    int64_t       fVisReserveArg = -1;   /* rdna3visreserve=<MiB>, -1 = default */
+    uint64_t      fVramSummaryAt = 0;    /* mach_continuous_time of the last "VRAM heap:" summary */
+    uint32_t      fVramRefusalLogs = 0;
+    uint32_t      fVramHiClearFails = 0; /* a no-CPU BO could not be cleared and went to GTT */
+    uint32_t      fVramLargeLogs = 0;
+    bool          fVramSysctl = false;
+    /* the report (fDrmLock held): "key=value ..." for debug.rdna3_vram, the
+     * summary line and the line at a refusal */
+    void          vramReport(char *buf, size_t n);
+    void          vramFreeRange(uint64_t off, uint64_t size, int owner);
+    void          vramNoteRefusal(const char *who, uint64_t size, uint64_t align, int owner);
+    void          vramSummaryMaybe(bool force);
+    void          vramSysctlRegister();
+    void          vramSysctlUnregister();
+public:
+    int           vramSysctlRead(char *buf, size_t n);   /* takes fDrmLock */
+private:
     IOMemoryMap  *fVramMap  = nullptr;   /* BAR0, for BO clears / kernel access */
     IODeviceMemory *fVramDev = nullptr;  /* BAR0 descriptor for user mappings */
     IODeviceMemory *fDoorbellDev = nullptr;  /* BAR2 descriptor: user queue doorbell BOs */
