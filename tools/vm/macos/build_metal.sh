@@ -75,6 +75,9 @@ sudo chown -R root:wheel "$DIR" "$GB/RDNA3MTLDriver.bundle" "$GB/rdna3mtl-allow.
 # installer: an allow list left 0600 did exactly that)
 sudo chmod -R go-w,a+rX "$GB/RDNA3MTLDriver.bundle" "$DIR"
 sudo chmod 644 "$GB/rdna3mtl-allow.txt"
+# the plugin's frame trace directory: root:admin 1777 before WindowServer makes its own (_windowserver:wheel, unreadable
+# for the report); an existing one keeps its traces
+sudo sh "$W/src/tools/macos/fix_tracedir.sh" || say "WARNING: the frame trace directory was not set up"
 ls -la "$GB" "$DIR"
 echo
 echo "Done. Shut the VM down (sudo shutdown -h now); the report runs mtlprobe on the card"

@@ -8,6 +8,7 @@
  *   test_plugin_trace_writer parity     the band hash against the kernel's (common/rdna3_a3_display.h) formula
  *   test_plugin_trace_writer off        NVMTL_TRACE=0: nothing may be created
  *   test_plugin_trace_writer dir PATH   nvt_open_dir: a new shared dir is 1777, a symlink is refused, a foreign owner too
+ *   test_plugin_trace_writer append DIR nvt_open_append: refuses a symlink, a FIFO, a hard link, (as root) a foreign file
  *   test_plugin_trace_writer squat      a symlink and a foreign file sit on the trace's name: another name is taken
  *   test_plugin_trace_writer prune DIR  nvt_prune_fd: dead-pid traces over the limit go, WindowServer's and live ones stay
  * The trace goes to $NVMTL_TRACE_DIR as $NVMTL_TRACE_NAME-<pid>.trace.
@@ -248,9 +249,51 @@ static int prune(const char *dir)
     return 0;
 }
 
+static int append(const char *dir)
+{
+    char p[512], q[512];
+    struct stat st;
+    CHECK(mkdir(dir, 0700) == 0);
+    snprintf(p, sizeof p, "%s/log", dir);
+    int fd = nvt_open_append(p, 0644);
+    CHECK(fd >= 0);
+    CHECK(!(fcntl(fd, F_GETFL) & O_NONBLOCK));   /* the log writes block like any file's */
+    CHECK(write(fd, "a", 1) == 1);
+    close(fd);
+    fd = nvt_open_append(p, 0644);   /* an existing plain file of ours */
+    CHECK(fd >= 0);
+    close(fd);
+    snprintf(q, sizeof q, "%s/link", dir);
+    CHECK(symlink(p, q) == 0);
+    errno = 0;
+    CHECK(nvt_open_append(q, 0644) < 0 && errno == ELOOP);
+    snprintf(q, sizeof q, "%s/fifo", dir);
+    CHECK(mkfifo(q, 0600) == 0);
+    errno = 0;
+    CHECK(nvt_open_append(q, 0644) < 0 && (errno == ENXIO || errno == EPERM));   /* never blocks, never opens it */
+    snprintf(q, sizeof q, "%s/hard", dir);
+    CHECK(link(p, q) == 0);
+    errno = 0;
+    CHECK(nvt_open_append(q, 0644) < 0 && errno == EPERM);
+    CHECK(nvt_open_append(p, 0644) < 0 && errno == EPERM);   /* the original has two links now */
+    if (geteuid() == 0) {
+        snprintf(q, sizeof q, "%s/foreign", dir);
+        fd = open(q, O_WRONLY | O_CREAT, 0644);
+        CHECK(fd >= 0);
+        close(fd);
+        CHECK(chown(q, 1234, 1234) == 0);
+        errno = 0;
+        CHECK(nvt_open_append(q, 0644) < 0 && errno == EPERM);   /* root does not append to a user's file */
+    }
+    CHECK(stat(dir, &st) == 0);
+    puts("append ok");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) return 2;
+    if (!strcmp(argv[1], "append") && argc > 2) return append(argv[2]);
     if (!strcmp(argv[1], "squat")) return squat();
     if (!strcmp(argv[1], "dir") && argc > 2) return dirs(argv[2]);
     if (!strcmp(argv[1], "prune") && argc > 2) return prune(argv[2]);

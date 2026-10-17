@@ -258,6 +258,24 @@ static inline int nvt_secure(void) { return getuid() != geteuid() || getgid() !=
 #endif
 static inline const char *nvt_env(const char *name) { return nvt_secure() ? NULL : getenv(name); }
 
+/* Open an append-only log file the way a root process can afford: never through a symlink, never a FIFO or device
+ * (O_NONBLOCK, so the open itself cannot hang on a planted FIFO), only a regular file with one link, and for a root
+ * process only a root-owned one (a user planted it). -1 with errno ELOOP / EPERM / ENXIO for those refusals. */
+static inline int nvt_open_append(const char *path, mode_t mode)
+{
+    const int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, mode);
+    if (fd < 0) return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1 || (geteuid() == 0 && st.st_uid != 0)) {
+        close(fd);
+        errno = EPERM;
+        return -1;
+    }
+    const int fl = fcntl(fd, F_GETFL);
+    if (fl >= 0) (void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    return fd;
+}
+
 static inline int nvt_is_ws(const char *n) { return strncmp(n, "WindowServer", 12) == 0 && (n[12] == '-' || n[12] == '.'); }
 
 /* Delete the traces of dead processes in the directory 'dfd' (the caller opened it once; nothing here resolves a path
@@ -265,7 +283,7 @@ static inline int nvt_is_ws(const char *n) { return strncmp(n, "WindowServer", 1
  * desktop's is the one that matters. 'keep' is our own file. Looks at no more than NVT_MAX_SCAN entries. */
 static void nvt_prune_fd(int dfd, const char *keep)
 {
-    const int fd2 = dup(dfd);
+    const int fd2 = fcntl(dfd, F_DUPFD_CLOEXEC, 0);   /* close-on-exec: no child inherits the directory */
     if (fd2 < 0) return;
     DIR *d = fdopendir(fd2);
     if (!d) { close(fd2); return; }
@@ -313,15 +331,21 @@ static void *nvt_prune_thread(void *p)
 static void nvt_prune_async(int dfd, const char *keep)
 {
     struct nvt_prune_arg *a = (struct nvt_prune_arg *)malloc(sizeof *a);
-    if (!a) return;
-    a->dfd = dup(dfd);
+    if (!a) { nvlog("trace: cannot start the pruner (out of memory) - old traces stay"); return; }
+    a->dfd = fcntl(dfd, F_DUPFD_CLOEXEC, 0);
     snprintf(a->keep, sizeof a->keep, "%s", keep);
     pthread_t th;
     pthread_attr_t at;
-    if (a->dfd < 0 || pthread_attr_init(&at) != 0) { if (a->dfd >= 0) close(a->dfd); free(a); return; }
-    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&th, &at, nvt_prune_thread, a) != 0) { close(a->dfd); free(a); }
-    pthread_attr_destroy(&at);
+    int err = a->dfd < 0 ? errno : pthread_attr_init(&at);
+    if (err == 0) {
+        pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+        err = pthread_create(&th, &at, nvt_prune_thread, a);
+        pthread_attr_destroy(&at);
+        if (err == 0) return;
+    }
+    nvlog("trace: cannot start the pruner (errno %d %s) - old traces stay", err, strerror(err));
+    if (a->dfd >= 0) close(a->dfd);
+    free(a);
 }
 
 /* Open the trace directory once (O_NOFOLLOW: a symlink is refused) and return the fd; everything after goes through

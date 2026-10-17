@@ -1,8 +1,10 @@
 #!/bin/sh
-# Add the Metal plugin's frame traces to a report directory. Run it by hand on the card machine, or from
-# tools/macos/collect.sh before that packs the archive - collect.sh does NOT call it until a line is added there
-# (and autoreport.sh must fetch this file next to collect.sh):
-#   tools/macos/collect_plugin_trace.sh <report dir>
+# Add the Metal plugin's frame traces to a report directory. Run it by hand on the card machine, as root (the trace
+# files are 0640 root/_windowserver/<user>:admin; an ordinary admin sees only some), or from tools/macos/collect.sh
+# before that packs the archive - collect.sh does NOT call it until a line is added there (and autoreport.sh must
+# fetch this file next to collect.sh):
+#   sudo sh tools/macos/collect_plugin_trace.sh <report dir>
+# Run through sudo, the files it adds are handed back to the invoking user (SUDO_UID) so that they can pack the report.
 # Adds
 #   <dir>/31-plugin-trace/<process>-<pid>.trace   every process that loaded the plugin wrote one
 #                                                (metal/plugin/nvmtl_trace.h); 31-plugin-trace/info.txt lists them
@@ -32,6 +34,18 @@ info="$out/info.txt"
 cap=${NVMTL_COLLECT_MAXBYTES:-268435456}
 me=$(id -u)
 note() { echo "$*" >> "$info"; }
+# The checks above and this copy are two opens of the name, and the directory is world writable: the copy is
+# bounded (never more than the cap, whatever the name has become by now), exclusive (noclobber) and watched (a FIFO
+# swapped in would block the open; the watchdog ends it), and checked again afterwards.
+bounded_copy() {
+    ( set -C; exec head -c "$cap" < "$1" > "$2" ) 2>/dev/null &
+    cp_pid=$!
+    ( sleep 60; kill -9 "$cp_pid" 2>/dev/null ) >/dev/null 2>&1 &
+    cp_wd=$!
+    wait "$cp_pid"; cp_rc=$?
+    kill "$cp_wd" 2>/dev/null
+    return "$cp_rc"
+}
 n=0; rejected=0
 for src in ${NVMTL_TRACE_DIR:-} /var/tmp/rdna3-nvmtl; do
     [ -n "$src" ] || continue
@@ -55,9 +69,10 @@ for src in ${NVMTL_TRACE_DIR:-} /var/tmp/rdna3-nvmtl; do
         elif [ "$size" -gt "$cap" ] 2>/dev/null; then why="over $cap bytes"
         elif [ "$size" -lt 4096 ] 2>/dev/null; then why="shorter than a trace header"
         else
-            magic=$(head -c 8 "$f" 2>/dev/null)
-            hu=$(od -An -tu4 -j104 -N4 "$f" 2>/dev/null | tr -d ' ')
-            if [ "$magic" != NVMTLTR1 ]; then why="no NVMTLTR1 magic (or unreadable: run as an admin user)"
+            magic=""; hu=""
+            [ -r "$f" ] && { magic=$(head -c 8 "$f" 2>/dev/null); hu=$(od -An -tu4 -j104 -N4 "$f" 2>/dev/null | tr -d ' '); }
+            if [ ! -r "$f" ]; then why="unreadable: run with sudo"
+            elif [ "$magic" != NVMTLTR1 ]; then why="no NVMTLTR1 magic"
             else
                 case "$b" in
                 WindowServer*) case "$owner" in 0|88) ;; *) why="named WindowServer but owned by uid $owner" ;; esac ;;
@@ -68,7 +83,8 @@ for src in ${NVMTL_TRACE_DIR:-} /var/tmp/rdna3-nvmtl; do
         if [ -n "$why" ]; then note "REJECT $line: $why"; rejected=$((rejected + 1)); continue; fi
         dest="$b"; k=0
         while [ -e "$out/$dest" ]; do k=$((k + 1)); dest="dup$k-$b"; done
-        if cp -p "$f" "$out/$dest" 2>/dev/null && [ "$(head -c 8 "$out/$dest" 2>/dev/null)" = NVMTLTR1 ]; then
+        if bounded_copy "$f" "$out/$dest" && [ "$(head -c 8 "$out/$dest" 2>/dev/null)" = NVMTLTR1 ]; then
+            chmod 644 "$out/$dest" 2>/dev/null
             note "ACCEPT $line -> $dest"; n=$((n + 1))
         else
             rm -f "$out/$dest"
@@ -89,7 +105,8 @@ done
     if [ "$n" = 0 ]; then
         echo "== no traces: the plugin is older than the frame trace, NVMTL_TRACE=0 is set (environment or"
         echo "   /Library/GPUBundles/rdna3mtl/rdna3mtl.conf), or no process used the plugin since the directory was last cleaned."
-        echo "   The plugin's own line says which: grep 'trace:' in 26-log-metal-plugin.txt / 32-log-nvmtl-windowserver.txt"
+        echo "   The plugin's own line says which: grep 'trace:' in 26-log-metal-plugin.txt / 32-log-nvmtl-windowserver.txt."
+        echo "   Files listed REJECT ... unreadable: run with sudo (they are 0640, group admin; root reads them all)"
     fi
 } >> "$info" 2>&1
 
@@ -106,4 +123,8 @@ lim=240
     kill "$w" 2>/dev/null
     echo "[exit $r]"
 } > "$dir/32-log-nvmtl-windowserver.txt" 2>&1
+# run through sudo: the files belong to root now; give them to the user who will pack the report
+if [ "$(id -u)" = 0 ] && [ -n "${SUDO_UID:-}" ]; then
+    chown -R "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$out" "$dir/32-log-nvmtl-windowserver.txt" 2>/dev/null
+fi
 exit 0

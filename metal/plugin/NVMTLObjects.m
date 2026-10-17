@@ -963,7 +963,7 @@ static void nvtrace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void nvtrace(const char *fmt, ...) {
     if (!nvmtl_trace_on()) return;
     char p[96]; snprintf(p, sizeof p, "/tmp/nvmtl-trace-%d.txt", (int)getpid());
-    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
+    int fd = nvmtl_open_append(p, 0600);
     if (fd < 0) { static int said; if (!said++) nvlog("G15 trace: cannot open %s (errno %d)", p, errno); return; }
     char b[700]; va_list a; va_start(a, fmt); int n = vsnprintf(b, sizeof b - 1, fmt, a); va_end(a);
     if (n < 0) n = 0; if (n > (int)sizeof b - 2) n = (int)sizeof b - 2;

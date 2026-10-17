@@ -42,26 +42,13 @@ for k in "$E"/RDNA3*.kext; do
     # the signature covers the final bundle; setup.sh signs the same way
     [ $sys = 1 ] && { codesign --force --deep --sign - "$k" >/dev/null 2>&1 || say "WARNING: codesign failed for $k"; }
 done
-# the Metal plugin's frame trace directory (metal/plugin/nvmtl_trace.h): root:admin, sticky and world writable, so
-# every process the plugin runs in (WindowServer is _windowserver) can create its file whatever starts first, and the
-# files (0640, the directory's group) are readable by the admin who collects the report. /var/tmp is world writable:
-# anything a user planted at this name (a symlink to a directory root would chmod, or a directory of theirs) is
-# removed without being followed, and the directory is made by mkdir alone (no -p, no chmod/chown by path of
-# something that was not just made), then checked.
-TD="$DST/private/var/tmp/rdna3-nvmtl"
-fix_tracedir() {
-    if [ -L "$TD" ] || { [ -e "$TD" ] && [ ! -d "$TD" ]; }; then rm -f "$TD" || return 1; fi
-    if [ -d "$TD" ] && [ "$(ls -ldn "$TD" | awk '{print $3}')" != 0 ]; then rm -rf "$TD" || return 1; fi
-    if [ ! -d "$TD" ]; then
-        mkdir -m 1777 "$TD" || return 1
-    fi
-    # a real directory of root's now, or the one left by an earlier install: re-apply, never through a link
-    [ ! -L "$TD" ] && [ -d "$TD" ] && [ "$(ls -ldn "$TD" | awk '{print $3}')" = 0 ] || return 1
-    chmod 1777 "$TD" || return 1
-    [ $sys = 1 ] && { chown root:admin "$TD" || return 1; }
-    return 0
-}
-fix_tracedir || say "WARNING: could not set up $TD (the Metal plugin's frame trace will not be written)"
+# the Metal plugin's frame trace directory (metal/plugin/nvmtl_trace.h): root:admin 1777, set up safely by
+# tools/macos/fix_tracedir.sh (it is also what the VM harness runs)
+if [ -f "$A/tools/macos/fix_tracedir.sh" ]; then
+    sh "$A/tools/macos/fix_tracedir.sh" "$DST" || say "WARNING: the frame trace directory was not set up (see above)"
+else
+    say "WARNING: $A/tools/macos/fix_tracedir.sh is missing; the frame trace directory was not set up"
+fi
 
 if [ $sys = 1 ]; then
     chown -R root:wheel "$A"

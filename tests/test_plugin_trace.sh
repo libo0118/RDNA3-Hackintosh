@@ -22,6 +22,7 @@ need() {   # need <file> <pattern>: the decoder output must contain it
 }
 
 W=$T/writer
+ME=$(id -u)
 ${CC:-cc} -std=c99 -D_GNU_SOURCE -O1 -g -Wall -Wextra -Werror -Wshadow -Wconversion -Wno-sign-conversion \
     -fsanitize=address,undefined -fno-sanitize-recover=all -I"$ROOT/metal/plugin" -I"$ROOT/common" \
     -o "$W" "$ROOT/tests/test_plugin_trace_writer.c"
@@ -39,18 +40,40 @@ if grep -n 'getenv("NVMTL_TRACE_' "$ROOT/metal/plugin/nvmtl_trace.h" | grep -v '
     fail "a NVMTL_TRACE_* knob is read with plain getenv"
 fi
 
-# --- package/pkg/postinstall's trace directory: a planted symlink is replaced, never followed ---
+# --- tools/macos/fix_tracedir.sh (package/pkg/postinstall and the VM harness run it): never follows or trusts a plant ---
+mode_of() { python3 -I -B -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode&0o7777)[2:])' "$1"; }
+FIX="$ROOT/tools/macos/fix_tracedir.sh"
 mkdir -p "$T/pi/private/var/tmp" "$T/pi/victim"
 chmod 755 "$T/pi/victim"
-ln -s "$T/pi/victim" "$T/pi/private/var/tmp/rdna3-nvmtl"
-{ echo 'sys=0; DST=$1; TD="$DST/private/var/tmp/rdna3-nvmtl"; say() { echo "$*"; }'
-  sed -n '/^fix_tracedir() {/,/^}/p' "$ROOT/package/pkg/postinstall"
-  echo 'fix_tracedir'; } > "$T/pi/run.sh"
-sh "$T/pi/run.sh" "$T/pi" || fail "postinstall's trace directory"
-[ ! -L "$T/pi/private/var/tmp/rdna3-nvmtl" ] && [ -d "$T/pi/private/var/tmp/rdna3-nvmtl" ] || fail "the planted symlink is still there"
-[ "$(python3 -I -B -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode&0o7777)[2:])' "$T/pi/victim")" = 755 ] || fail "postinstall chmod'ed the symlink's target"
-[ "$(python3 -I -B -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode&0o7777)[2:])' "$T/pi/private/var/tmp/rdna3-nvmtl")" = 1777 ] || fail "trace directory is not 1777"
-sh "$T/pi/run.sh" "$T/pi" || fail "postinstall's trace directory (second run)"
+TD=$T/pi/private/var/tmp/rdna3-nvmtl
+ln -s "$T/pi/victim" "$TD"
+sh "$FIX" "$T/pi" || fail "fix_tracedir.sh (symlink)"
+[ ! -L "$TD" ] && [ -d "$TD" ] || fail "the planted symlink is still there"
+[ "$(mode_of "$T/pi/victim")" = 755 ] || fail "fix_tracedir chmod'ed the symlink's target"
+[ "$(mode_of "$TD")" = 1777 ] || fail "trace directory is not 1777"
+rm -rf "$TD"; : > "$TD"                      # a plain file at the name
+sh "$FIX" "$T/pi" || fail "fix_tracedir.sh (file)"
+[ -d "$TD" ] || fail "a file at the name was not replaced"
+echo live > "$TD/WindowServer-1.trace"
+sh "$FIX" "$T/pi" || fail "fix_tracedir.sh (second run)"
+[ -f "$TD/WindowServer-1.trace" ] || fail "an existing directory of ours lost its traces"
+if [ "$ME" = 0 ]; then
+    chown 88 "$TD"                           # WindowServer made it first: kept, with its live trace
+    sh "$FIX" "$T/pi" || fail "fix_tracedir.sh (uid 88)"
+    [ -f "$TD/WindowServer-1.trace" ] || fail "a directory of _windowserver's lost its traces"
+    chown 1234 "$TD"                         # somebody else's: replaced
+    sh "$FIX" "$T/pi" || fail "fix_tracedir.sh (foreign)"
+    [ ! -e "$TD/WindowServer-1.trace" ] && [ -d "$TD" ] && [ "$(mode_of "$TD")" = 1777 ] || fail "a foreign directory was not replaced"
+fi
+mkdir -p "$T/pi2"                            # a volume root without /private/var/tmp: made, quietly
+sh "$FIX" "$T/pi2" 2> "$T/pi2.err" || fail "fix_tracedir.sh (new volume)"
+[ ! -s "$T/pi2.err" ] || { cat "$T/pi2.err"; fail "fix_tracedir.sh is noisy"; }
+[ "$(mode_of "$T/pi2/private/var/tmp/rdna3-nvmtl")" = 1777 ] || fail "new volume: trace directory is not 1777"
+grep -q 'tools/macos/fix_tracedir.sh' "$ROOT/package/pkg/postinstall" || fail "postinstall does not run fix_tracedir.sh"
+grep -q 'fix_tracedir.sh' "$ROOT/tools/vm/macos/build_metal.sh" || fail "build_metal.sh does not run fix_tracedir.sh"
+
+# --- append-only log files (nvlog): no symlink, FIFO, hard link, or (as root) foreign file ---
+"$W" append "$T/appendtest" > /dev/null 2>&1 || fail "nvt_open_append"
 
 # --- the kernel's band hash ---
 "$W" parity > "$T/parity.txt" 2>&1 || { cat "$T/parity.txt"; fail "band hash differs from the kernel's"; }
@@ -134,7 +157,6 @@ cat > "$T/bin/log" <<'LOG'
 echo "2026-10-17 13:15:12.471 Df WindowServer[158:29f] (RDNA3MTLDriver) NVMTL: trace: frame trace /var/tmp/rdna3-nvmtl/WindowServer-158.trace"
 LOG
 chmod +x "$T/bin/log"
-ME=$(id -u)
 mkdir -m 700 "$T/colsrc"
 NVMTL_TRACE_DIR="$T/colsrc" NVMTL_TRACE_NAME=Finder "$W" scenario 2>/dev/null
 good=$(ls "$T"/colsrc/Finder-*.trace)
@@ -142,6 +164,7 @@ cp "$good" "$T/hard-src.trace"; mv "$T/hard-src.trace" "$T/colsrc/hardsrc.trace"
 ln -s /etc/hostname "$T/colsrc/symlink-3.trace"
 ln -s "$good" "$T/colsrc/symlink-to-trace-4.trace"
 head -c 8000 /dev/zero > "$T/colsrc/nomagic-5.trace"
+mkfifo "$T/colsrc/fifo-9.trace"
 if [ "$ME" = 0 ]; then
     cp "$good" "$T/colsrc/foreign-6.trace"; chown 1234 "$T/colsrc/foreign-6.trace"          # owner 1234, header uid 0
     cp "$good" "$T/colsrc/WindowServer-7.trace"; chown 1234 "$T/colsrc/WindowServer-7.trace" # a forged WindowServer
@@ -156,6 +179,7 @@ need "$I" 'REJECT .* hardlink-2.trace: 2 hard links'
 need "$I" 'REJECT .* symlink-3.trace: a symlink'
 need "$I" 'REJECT .* symlink-to-trace-4.trace: a symlink'
 need "$I" 'REJECT .* nomagic-5.trace: no NVMTLTR1 magic'
+need "$I" 'REJECT .* fifo-9.trace: not a regular file'
 if [ "$ME" = 0 ]; then
     need "$I" 'REJECT .* foreign-6.trace: owned by uid 1234, its header says uid 0'
     need "$I" 'REJECT .* WindowServer-7.trace: named WindowServer but owned by uid 1234'
@@ -169,6 +193,13 @@ fi
 need "$I" 'plugin frame traces collected: [0-9]'
 need "$T/col/32-log-nvmtl-windowserver.txt" 'NVMTL: trace: frame trace'
 need "$T/col/32-log-nvmtl-windowserver.txt" '\[exit 0\]'
+# the copy itself is bounded, exclusive and cannot be blocked by a FIFO
+sed -n '/^bounded_copy() {/,/^}/p' "$ROOT/tools/macos/collect_plugin_trace.sh" > "$T/bc.sh"
+head -c 5000000 /dev/zero > "$T/bc-src"; echo keep > "$T/bc-dst"
+( cap=1000; . "$T/bc.sh"; bounded_copy "$T/bc-src" "$T/bc-dst" ) && fail "the copy overwrote an existing file"
+[ "$(cat "$T/bc-dst")" = keep ] || fail "noclobber did not protect the destination"
+( cap=1000; . "$T/bc.sh"; bounded_copy "$T/bc-src" "$T/bc-new" ) || fail "bounded copy"
+[ "$(wc -c < "$T/bc-new")" = 1000 ] || fail "the copy is not bounded by the cap"
 # a size cap
 mkdir -p "$T/col3"
 PATH="$T/bin:$PATH" NVMTL_COLLECT_MAXBYTES=1000000 NVMTL_TRACE_DIR="$T/colsrc" sh "$ROOT/tools/macos/collect_plugin_trace.sh" "$T/col3" || fail "collector (cap)"

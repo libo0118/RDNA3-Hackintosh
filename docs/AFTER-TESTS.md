@@ -964,7 +964,8 @@ with IOSurfaces, command buffers and Vulkan: `/var/tmp/rdna3-nvmtl/<process>-<pi
 (format: `metal/plugin/nvmtl_trace.h`). `tools/macos/collect_plugin_trace.sh`
 puts them in the report as `31-plugin-trace/` and saves WindowServer's NVMTL
 log whole as `32-log-nvmtl-windowserver.txt` (once `collect.sh` calls it; until
-then run it by hand on the card machine: `sh tools/macos/collect_plugin_trace.sh <dir>`). The text log is rate limited;
+then run it by hand on the card machine, as root: `sudo sh tools/macos/collect_plugin_trace.sh <dir>`;
+the files it adds are handed back to the invoking user). The text log is rate limited;
 the trace is the record. Decode on the host:
 
     python3 tools/plugin_trace.py rdna3-report-*.tar.gz          # all processes, WindowServer first
@@ -1016,14 +1017,19 @@ report was taken. If `31-plugin-trace/info.txt` says 0 traces: the plugin is
 older than the trace, or `NVMTL_TRACE=0` is set (also readable from the
 `trace:` line in the plugin log). Switch off: `NVMTL_TRACE=0` in
 `/Library/GPUBundles/rdna3mtl/rdna3mtl.conf`. The directory `/var/tmp/rdna3-nvmtl`
-is created root:admin, mode 1777, by the package's postinstall (a symlink or a
-directory of somebody else's planted there is removed first, never followed);
+is created root:admin, mode 1777, by `tools/macos/fix_tracedir.sh` (run by the
+package's postinstall, by `build_metal.sh` and the VM's `autoreport.sh --sync-metal`: a
+symlink, a file or a foreign directory planted there is removed first, never
+followed; an existing directory of root's or WindowServer's is kept with its
+live traces and only chown'ed, so WindowServer cannot make it `_windowserver:wheel`
+and hide the traces from the admin);
 the files are mode 0640, so the admin group (and root) can read them and other
 users cannot. If an app created the directory first, root, WindowServer (uid 88)
 and that app's user are accepted as owner (a root process accepts only root's),
 anyone else's is refused (`trace: cannot use the trace directory ...` in the
 plugin log); without the postinstall's group the files carry the creator's
-group, so collect as root (`sudo`) then. The collector takes only regular files
+group, so collect as root (`sudo`) then; a file the collector cannot read is
+listed as `REJECT ... unreadable: run with sudo`. The collector takes only regular files
 with one link, the NVMTLTR1 magic, owned by root/uid 88 or by the uid their own
 header names (never a link, never a file named WindowServer* of another user),
 and says what it refused in `31-plugin-trace/info.txt` (`REJECT ... reason`).

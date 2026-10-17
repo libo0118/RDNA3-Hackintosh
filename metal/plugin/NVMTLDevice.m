@@ -43,14 +43,25 @@ static inline FILE *nvmtl_rel_fopen(const char *p, const char *m) { return nvmtl
 #define access(p, m) nvmtl_rel_access(p, m)
 #define fopen(p, m) nvmtl_rel_fopen(p, m)
 #endif
-/* Append-only log files are opened without following a symlink: the plugin also runs as root (mtlprobe from the VM
- * harness, daemons) and the paths are predictable names in /tmp. NULL when it cannot be opened. */
+/* Append-only log files (nvlog and the dev logs) are opened by nvt_open_append: not through a symlink, not a FIFO, a
+ * regular single-link file, and for root one of root's - the plugin also runs as root (mtlprobe from the VM harness,
+ * daemons) on predictable names in /tmp. The refusal is said once, through syslog (nvlog would call us again). */
+#include "nvmtl_trace.h"
+static int nvmtl_open_append(const char *path, mode_t mode)
+{
+    const int fd = nvt_open_append(path, mode);
+    if (fd < 0 && (errno == ELOOP || errno == EPERM || errno == ENXIO)) {
+        static int said;
+        if (!said++) syslog(LOG_ERR, "NVMTL: refusing log file %s (errno %d %s): not a plain single-link file of ours", path, errno, strerror(errno));
+    }
+    return fd;
+}
 static FILE *nvmtl_log_open(const char *path)
 {
 #if NVMTL_RELEASE
     if (nvmtl_rel_devpath(path)) return NULL;
 #endif
-    const int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644);
+    const int fd = nvmtl_open_append(path, 0644);
     if (fd < 0) return NULL;
     FILE *f = fdopen(fd, "a");
     if (!f) close(fd);
@@ -128,9 +139,7 @@ void nvlog(const char *fmt, ...) {
 #endif
 }
 
-/* the per-process frame trace (docs/AFTER-TESTS.md "Plugin frame trace"); nvlog above is the only thing it needs */
-#include "nvmtl_trace.h"
-
+/* the per-process frame trace (docs/AFTER-TESTS.md "Plugin frame trace"; nvmtl_trace.h is included above) */
 #define NVMTL_OOM_STREAK      32
 #define NVMTL_OOM_COOLDOWN_NS (250ull * 1000ull * 1000ull)
 static _Atomic uint64_t g_oom_streak, g_oom_until;
