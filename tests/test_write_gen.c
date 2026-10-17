@@ -49,46 +49,87 @@ static void table(void)
     rd3_wg_bump(&w, 0x10000, 0);                      /* the first address written again: no longer the oldest */
     CHECK(rd3_wg_bump(&w, 0x900000, &ev) == RD3_WG_SLOTS + 2 && ev == 0x20000);
     CHECK(rd3_wg_gen(&w, 0x20000) == 0 && rd3_wg_gen(&w, 0x10000) == RD3_WG_SLOTS + 1);
+    CHECK(w.evictedMax == 2);   /* the evicted generation is kept (ECC review round 1: eviction fails open) */
+}
+
+/* ECC review round 1: a hold never freezes the panel, an eviction fails open, a newer buffer presents instead */
+static void failopen(void)
+{
+    struct rd3_wg_head h;
+    struct rd3_wg w;
+    unsigned long long g[4];
+    memset(&h, 0, sizeof h);
+    memset(&w, 0, sizeof w);
+    rd3_wg_presented(&h, 0x1000, 10, 1, 7, 1000);
+    CHECK(h.presentedUs == 1000 && h.holds == 0);
+    /* aged: RD3_WG_AGE_HOLDS holds in a row and RD3_WG_AGE_US since the last present */
+    CHECK(rd3_wg_decide(&h, 0x2000, 0, 1, 9, 0, 1000 + RD3_WG_AGE_US) == RD3_WGW_UNWRITTEN);   /* the first hold */
+    rd3_wg_held(&h);
+    CHECK(rd3_wg_decide(&h, 0x2000, 0, 1, 9, 0, 1000 + RD3_WG_AGE_US) == RD3_WGW_UNWRITTEN);   /* the second */
+    rd3_wg_held(&h);
+    CHECK(rd3_wg_decide(&h, 0x2000, 0, 1, 9, 0, 1000 + RD3_WG_AGE_US - 1) == RD3_WGW_UNWRITTEN);   /* too soon */
+    CHECK(rd3_wg_decide(&h, 0x2000, 0, 1, 9, 0, 1000 + RD3_WG_AGE_US) == RD3_WGW_AGED);
+    CHECK(rd3_wg_decide(&h, 0x1000, 10, 1, 7, 0, 1000 + RD3_WG_AGE_US) == RD3_WGW_AGED);    /* the panel's own too */
+    CHECK(rd3_wg_decide(&h, 0x2000, 0, 1, 9, 0, 500) == RD3_WGW_UNWRITTEN);   /* a clock before the present */
+    CHECK(rd3_wg_presents(RD3_WGW_AGED) && rd3_wg_presents(RD3_WGW_EVICTED) && !rd3_wg_holds(RD3_WGW_AGED));
+    rd3_wg_presented(&h, 0x2000, 0, 1, 9, 2000000);
+    CHECK(h.holds == 0 && h.presentedUs == 2000000);
+    /* eviction: a back with no generation while a generation newer than the head's frame was evicted presents */
+    CHECK(rd3_wg_decide(&h, 0x3000, 0, 1, 1, 11, 2000001) == RD3_WGW_EVICTED);
+    CHECK(rd3_wg_decide(&h, 0x3000, 0, 1, 1, 10, 2000001) == RD3_WGW_UNWRITTEN);   /* only older ones evicted */
+    CHECK(rd3_wg_decide(&h, 0x3000, 4, 1, 1, 11, 2000001) == RD3_WGW_OLDER);      /* it has a generation: known */
+    /* the full table keeps the newest evicted generation */
+    for (unsigned i = 0; i < RD3_WG_SLOTS + 3; i++)
+        rd3_wg_bump(&w, 0x100000ull * (i + 1), 0);
+    CHECK(w.evictedMax == 3);
+    /* the landed pick: the newest buffer written after the head's frame */
+    g[0] = 5; g[1] = 12; g[2] = 0; g[3] = 11;
+    CHECK(rd3_wg_landed_pick(g, 4, 10) == 1);
+    CHECK(rd3_wg_landed_pick(g, 4, 12) == -1);
+    CHECK(rd3_wg_landed_pick(g, 0, 0) == -1 && rd3_wg_landed_pick(0, 4, 0) == -1);
+    /* a reset clears the hold run */
+    rd3_wg_held(&h);
+    CHECK(h.holds == 1 && rd3_wg_head_reset(&h) == 1 && h.holds == 0);
 }
 
 static void decide(void)
 {
     struct rd3_wg_head h;
     memset(&h, 0, sizeof h);
-    CHECK(rd3_wg_decide(0, 0x1000, 5, 1, 7) == RD3_WGW_OFF);
-    CHECK(rd3_wg_decide(&h, 0, 5, 1, 7) == RD3_WGW_OFF);
+    CHECK(rd3_wg_decide(0, 0x1000, 5, 1, 7, 0, 0) == RD3_WGW_OFF);
+    CHECK(rd3_wg_decide(&h, 0, 5, 1, 7, 0, 0) == RD3_WGW_OFF);
     /* nothing presented since the reset: the first swap presents, whatever its back */
-    CHECK(rd3_wg_decide(&h, 0x1000, 0, 1, 7) == RD3_WGW_FIRST);
-    rd3_wg_presented(&h, 0x1000, 0, 1, 7);
+    CHECK(rd3_wg_decide(&h, 0x1000, 0, 1, 7, 0, 0) == RD3_WGW_FIRST);
+    rd3_wg_presented(&h, 0x1000, 0, 1, 7, 0);
     CHECK(h.presented && h.gen == 0 && h.addr == 0x1000);
     /* never written, the panel's buffer: SAME; another never written: UNWRITTEN */
-    CHECK(rd3_wg_decide(&h, 0x1000, 0, 1, 7) == RD3_WGW_SAME);
-    CHECK(rd3_wg_decide(&h, 0x2000, 0, 1, 9) == RD3_WGW_UNWRITTEN);
+    CHECK(rd3_wg_decide(&h, 0x1000, 0, 1, 7, 0, 0) == RD3_WGW_SAME);
+    CHECK(rd3_wg_decide(&h, 0x2000, 0, 1, 9, 0, 0) == RD3_WGW_UNWRITTEN);
     /* written: NEWER */
-    CHECK(rd3_wg_decide(&h, 0x1000, 3, 1, 8) == RD3_WGW_NEWER);
-    rd3_wg_presented(&h, 0x1000, 3, 1, 8);
+    CHECK(rd3_wg_decide(&h, 0x1000, 3, 1, 8, 0, 0) == RD3_WGW_NEWER);
+    rd3_wg_presented(&h, 0x1000, 3, 1, 8, 0);
     CHECK(h.gen == 3);
-    CHECK(rd3_wg_decide(&h, 0x1000, 3, 1, 8) == RD3_WGW_SAME);   /* swapped again, not written since */
-    CHECK(rd3_wg_decide(&h, 0x2000, 2, 1, 9) == RD3_WGW_OLDER);  /* written before the head's frame */
+    CHECK(rd3_wg_decide(&h, 0x1000, 3, 1, 8, 0, 0) == RD3_WGW_SAME);   /* swapped again, not written since */
+    CHECK(rd3_wg_decide(&h, 0x2000, 2, 1, 9, 0, 0) == RD3_WGW_OLDER);  /* written before the head's frame */
     CHECK(rd3_wg_presents(RD3_WGW_NEWER) && rd3_wg_presents(RD3_WGW_FIRST) && rd3_wg_presents(RD3_WGW_CONTENT));
     CHECK(!rd3_wg_presents(RD3_WGW_SAME) && !rd3_wg_presents(RD3_WGW_OFF) && rd3_wg_holds(RD3_WGW_UNWRITTEN));
     CHECK(!rd3_wg_holds(RD3_WGW_OFF) && rd3_wg_holds(RD3_WGW_OLDER) && rd3_wg_holds(RD3_WGW_SAME));
     /* the content guard: a buffer this head presented whose samples changed with no write seen */
-    CHECK(rd3_wg_decide(&h, 0x1000, 3, 1, 99) == RD3_WGW_CONTENT);
-    CHECK(rd3_wg_decide(&h, 0x1000, 3, 0, 99) == RD3_WGW_SAME);  /* not sampled: no guard */
-    CHECK(rd3_wg_decide(&h, 0x2000, 2, 1, 99) == RD3_WGW_OLDER); /* never presented here: no record to differ from */
+    CHECK(rd3_wg_decide(&h, 0x1000, 3, 1, 99, 0, 0) == RD3_WGW_CONTENT);
+    CHECK(rd3_wg_decide(&h, 0x1000, 3, 0, 99, 0, 0) == RD3_WGW_SAME);  /* not sampled: no guard */
+    CHECK(rd3_wg_decide(&h, 0x2000, 2, 1, 99, 0, 0) == RD3_WGW_OLDER); /* never presented here: no record to differ from */
     /* presented by the guard: the head's generation never goes back */
-    rd3_wg_presented(&h, 0x2000, 2, 1, 99);
+    rd3_wg_presented(&h, 0x2000, 2, 1, 99, 0);
     CHECK(h.gen == 3 && h.addr == 0x2000);
-    CHECK(rd3_wg_decide(&h, 0x2000, 2, 1, 99) == RD3_WGW_SAME);
-    CHECK(rd3_wg_decide(&h, 0x2000, 2, 1, 100) == RD3_WGW_CONTENT);
+    CHECK(rd3_wg_decide(&h, 0x2000, 2, 1, 99, 0, 0) == RD3_WGW_SAME);
+    CHECK(rd3_wg_decide(&h, 0x2000, 2, 1, 100, 0, 0) == RD3_WGW_CONTENT);
     /* not sampled at its presentation: its record goes (unknown is never "unchanged") */
-    rd3_wg_presented(&h, 0x2000, 2, 0, 0);
+    rd3_wg_presented(&h, 0x2000, 2, 0, 0, 0);
     CHECK(rd3_wg_head_sig(&h, 0x2000) == 0);
-    CHECK(rd3_wg_decide(&h, 0x2000, 2, 1, 100) == RD3_WGW_SAME);
+    CHECK(rd3_wg_decide(&h, 0x2000, 2, 1, 100, 0, 0) == RD3_WGW_SAME);
     /* more buffers than sample slots: the oldest slot is reused */
     for (unsigned i = 0; i < RD3_WG_HEAD_SIGS + 2; i++)
-        rd3_wg_presented(&h, 0x10000ull * (i + 1), 10 + i, 1, i);
+        rd3_wg_presented(&h, 0x10000ull * (i + 1), 10 + i, 1, i, 0);
     CHECK(rd3_wg_head_sig(&h, 0x10000ull * (RD3_WG_HEAD_SIGS + 2)) != 0);
     /* a freed buffer leaves the samples, the generation stays */
     {
@@ -98,7 +139,7 @@ static void decide(void)
     }
     /* a reset: the next swap presents */
     CHECK(rd3_wg_head_reset(&h) == 1 && !h.presented);
-    CHECK(rd3_wg_decide(&h, 0x2000, 0, 1, 1) == RD3_WGW_FIRST);
+    CHECK(rd3_wg_decide(&h, 0x2000, 0, 1, 1, 0, 0) == RD3_WGW_FIRST);
     CHECK(rd3_wg_head_reset(&h) == 0);
     /* copy forward's source and the flip-buffer pick */
     CHECK(!rd3_wg_src_newer(0, 0) && rd3_wg_src_newer(5, 4) && !rd3_wg_src_newer(5, 5) && !rd3_wg_src_newer(3, 4));
@@ -132,6 +173,7 @@ struct model {
     struct rd3_wg_head h;
     struct rd3_sc_stale st;  /* the old rule (mode 1 without the generations) */
     unsigned swaps;
+    unsigned long long now;  /* microseconds: a swap every 8.3 ms (two per 60 Hz frame) */
     /* outcomes */
     unsigned back, held, presented, staleShown, olderCf, live, missed, replaced;
 };
@@ -171,8 +213,10 @@ static void swap(struct model *m, int b)
 {
     int present = 1;
     m->swaps++;
+    m->now += 8333;
     if (m->genRule) {
-        present = rd3_wg_presents(rd3_wg_decide(&m->h, m->addr[b], gen_of(m, b), 1, sig_of(m, b)));
+        present = rd3_wg_presents(rd3_wg_decide(&m->h, m->addr[b], gen_of(m, b), 1, sig_of(m, b), m->w.evictedMax,
+                                                m->now));
     } else if (m->mode == 1 && m->frame[b]) {
         unsigned at = 0;
         int nocf = 0;
@@ -183,6 +227,8 @@ static void swap(struct model *m, int b)
         present = 0;   /* an empty back: mode 0 skips it (rd3_swap_source), mode 1 holds it (rd3_sc_action) */
     if (!present) {
         m->held++;
+        if (m->genRule)
+            rd3_wg_held(&m->h);
         return;
     }
     if (m->frame[b] < m->panelFrame)
@@ -199,7 +245,7 @@ static void swap(struct model *m, int b)
         m->frontCurrent = 1;
     }
     if (m->genRule)
-        rd3_wg_presented(&m->h, m->addr[b], gen_of(m, b), 1, sig_of(m, b));
+        rd3_wg_presented(&m->h, m->addr[b], gen_of(m, b), 1, sig_of(m, b), m->now);
     else
         rd3_sc_stale_shown(&m->st, m->addr[b], sig_of(m, b), 0, m->swaps);
 }
@@ -271,6 +317,7 @@ int main(void)
 {
     table();
     decide();
+    failopen();
     model();
     if (fails) {
         printf("test_write_gen: %d check(s) FAILED\n", fails);

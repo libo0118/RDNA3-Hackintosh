@@ -119,8 +119,12 @@ enum rd3_trace_swap {
 #define RD3_TRV1_GEN_HOLD  (1u << 25)
 #define RD3_TRV1_GEN_WOULD (1u << 26)
 #define RD3_TRV1_GEN_WHY_SHIFT 28u
-#define RD3_TRV1_GEN_WHY_MASK  7u
-#define RD3_TRV1_FLIPBUF   (1u << 31)
+#define RD3_TRV1_GEN_WHY_MASK  15u
+#define RD3_TRV1_FLIPBUF   (1u << 27)
+/* a mode 1 swap whose back the generations would hold but that presented
+ * the surface's buffer written after the head's frame instead
+ * (rd3_wg_landed_pick) carries RD3_TRV1_LANDED (v4 >> 24 that buffer's
+ * index) with the hold's reason in the why field and no RD3_TRV1_GEN_HOLD */
 /* RD3_TR_FLIPBUF's v4: what the flip-buffer present did */
 enum rd3_trace_flipbuf {
     RD3_TRFB_TRACED = 0,    /* only traced (debug.rdna3accel_flipbuf_present 0) */
@@ -241,8 +245,8 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          (submitUpdate's count), v2 the base's return value (rax, the low
  *          32 bits; isBackBufferReady: its low byte), v3 this kind's calls so
  *          far (the first 2048 of a kind traced, then every 8th)
- *  SWAP's write generations: v1 bits 25, 26, 28-30 and 31 (RD3_TRV1_GEN_*,
- *          RD3_TRV1_FLIPBUF); v2 = the copy's us (16 bits, saturated) | the
+ *  SWAP's write generations: v1 bits 25, 26, 27 and 28-31 (RD3_TRV1_GEN_*,
+ *          RD3_TRV1_FLIPBUF); v2 = the copy's us (16 bits, saturated at 65535) | the
  *          back's generation << 16 (its low 16 bits); v3 the head's
  *          generation on a generation hold
  *  Time: t is mach_absolute_time (the Metal plugin's traces use it too),

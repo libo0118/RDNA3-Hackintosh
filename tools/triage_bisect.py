@@ -666,6 +666,15 @@ def verdict_agdc(steps, verdicts, by_n):
                                 "with the screens as the owner uses them)"))
     if unknown:
         out.append(("WARN", "BISECT-AGDC: not judged (no readable look and no answer): %s" % lst(unknown)))
+    # the plan varies swap_gen / flipbuf_present: a kernel without their sysctls ran those steps as step 0
+    # (ECC review round 1)
+    rb = next((s["readback"] for s in steps if s["readback"]), None)
+    if rb is not None:
+        gone = [k for k in ("swap_gen", "flipbuf_present") if rb.get("debug.rdna3accel_" + k) in (None, "-")]
+        if gone:
+            out.append(("WARN", "BISECT-AGDC: the kernel has no %s sysctl (the readback): the steps that switch it ran "
+                                "with what the boot left, they tested nothing - a kext before the write generations / the "
+                                "flip-present hooks" % " / ".join(gone)))
     # by swap_mode: the question the plan was made for
     groups = {}
     for s in steps:

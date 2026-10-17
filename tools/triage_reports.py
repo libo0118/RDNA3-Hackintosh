@@ -587,10 +587,13 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"_stalehold_changed|_stalenocf|_stalereset|_staleevict|_stalegone|"
                        r"_stalecheck_(?:norecord|changed|cf|sameshown|nopanel|nohead)|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
                        r"_copylatchto|_copyfail|_copydirect|_copyfront|_copyfrontfail|_copynowait|_copybrkflip|_copyfreewait|"
-                       r"_genpresent|_genhold|_genhold_would|_genfirst|_gencontent|_genunwritten)?_h\d|"
-                       r"swaps_gen_(?:aperture|cf|evicted|freed|resets)|swap_gen|flipbuf_present|cf_gennewer_h\d|"
-                       r"flipbuf(?:_scanout|_presented|_held|_failed)?_h\d|flipbuf_(?:nohead|busy|unlocked)|"
-                       r"hook_(?:intr|pickpresent|didsubmitswap|backready|backready_no|submitupdate)|"
+                       r"_genpresent|_genhold|_genhold_would|_genfirst|_gencontent|_genunwritten|_gen_judged|_gen_aged|"
+                       r"_gen_evictpresent|_gen_landed|_gennotjudged|_gen_resets)?_h\d|"
+                       r"swaps_gen_(?:aperture|apcached|cf|cfnostamp|evicted|freed|resets)|swap_gen|flipbuf_present|cf_gennewer_h\d|"
+                       r"flipbuf(?:_scanout|_presented|_held|_failed|_busy|_unlocked|_emptyheld)?_h\d|"
+                       r"flipbuf_(?:nohead|nores|intoff|badptr|busy|unlocked)|"
+                       r"hook_(?:intr_(?:flipbuf|scanout|pickpresent|didsubmitswap|backready|submitupdate)|intr|intoff|pickpresent|"
+                       r"didsubmitswap|backready|backready_no|submitupdate)|"
                        r"swaps_copybrktrips|swap_latch|swap_torn|swap_landed|swap_stale|"
                        r"swap_mode|trace_scan|swap_trace_events|swap_trace_nomem|swap_trace_lost|cf_sc(?:src|scanout|stale)_h\d|"
                        r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed|onpanel)_h\d|swaps_skipped_all|"
@@ -1180,15 +1183,55 @@ def swapcopy_verdict(c):
     return out
 
 
+GEN_LOG_RE = re.compile(r"write generations:|hook:|flip-present hooks|flipbuf|held:|did not judge")
+GEN_LOG_MAX = 12
+
+
+def gen_log_lines(log):
+    """the first GEN_LOG_MAX kernel-log lines of each kind: the write generations ('write generations:', 'held:',
+    'did not judge'), the flip-present hooks ('flip-present hooks installed', 'hook:', 'flipbuf') - for --all"""
+    out, per = [], {}
+    for l in (log or "").splitlines():
+        m = GEN_LOG_RE.search(l)
+        if not m:
+            continue
+        k = m.group(0)
+        if per.get(k, 0) >= GEN_LOG_MAX:
+            continue
+        per[k] = per.get(k, 0) + 1
+        out.append(l.strip())
+    return out or ["(none: a kext without the write generations, or a cut log)"]
+
+
+def accel_current(log):
+    """the kernel log's accelerator build line names these sources (ACCEL_HASH_FILES): the kext has every
+    counter these sources define (ECC review round 1: gen_verdict's missing-counter WARNs)"""
+    want = fb_source_hash(ACCEL_HASH_FILES)
+    ac = re.search(r"RDNA3Accelerator: build (\S+)", log or "")
+    return bool(want and ac and ac.group(1) == want)
+
+
 GEN_COUNTERS = ("swaps_genpresent", "swaps_genhold", "swaps_genhold_would", "swaps_genfirst", "swaps_gencontent",
                 "swaps_genunwritten", "cf_gennewer", "flipbuf", "flipbuf_scanout", "flipbuf_presented", "flipbuf_held",
                 "flipbuf_failed")
+# ECC review round 1 of the write generations: a kext of these sources has them all
+GEN_COUNTERS_R1 = ("swaps_gen_judged", "swaps_gen_aged", "swaps_gen_evictpresent", "swaps_gen_landed",
+                   "swaps_gennotjudged", "swaps_gen_resets", "flipbuf_busy", "flipbuf_unlocked", "flipbuf_emptyheld")
+GEN_GLOBALS = ("swaps_gen_aperture", "swaps_gen_apcached", "swaps_gen_cf", "swaps_gen_cfnostamp", "swaps_gen_evicted",
+               "swaps_gen_freed", "swaps_gen_resets", "flipbuf_nohead", "flipbuf_nores", "flipbuf_intoff",
+               "flipbuf_badptr", "hook_intr", "hook_intoff")
+HOOK_INTR_KINDS = ("flipbuf", "scanout", "pickpresent", "didsubmitswap", "backready", "submitupdate")
+# counters read one by one while swaps go on: a sum may be off by a swap or two
+GEN_SLACK = 2
 
 
 def gen_verdict(c, current=False):
     """[(level, text)] from the write generations' and the flip-present hooks' counters (card run 2026-10-17d:
     swap_gen, flipbuf_present, swaps_gen*_h<N>, cf_gennewer_h<N>, flipbuf*_h<N>, hook_*); a kext of these sources
-    ('current') without them is a WARN, an older kext says nothing"""
+    ('current': the kernel log's accelerator build line is these sources) without them is a WARN, an older kext
+    says nothing. ECC review round 1: the rule judging nothing is a FAIL, the judged swaps reconcile with their
+    outcomes, the flip-buffer calls with theirs, the hooks' interrupt-level calls and the hooks never firing on
+    a current kext are WARNs"""
     if not c:
         return []
     if "swap_gen" not in c:
@@ -1196,52 +1239,137 @@ def gen_verdict(c, current=False):
             return [("WARN", "counter missing: swap_gen and the write generations' counters (swaps_genhold_h<N>, "
                              "flipbuf_h<N>) although the kext is of these sources: the collector's grep missed them")]
         return []
-    out = [("INFO", "write generations: swap_gen %s, flipbuf_present %s; generations handed out by page-on %s, by copy "
-                    "forward %s; evicted %s, freed %s, head resets %s" % (
-                        c.get("swap_gen"), c.get("flipbuf_present", "?"), c.get("swaps_gen_aperture", "?"),
-                        c.get("swaps_gen_cf", "?"), c.get("swaps_gen_evicted", "?"), c.get("swaps_gen_freed", "?"),
-                        c.get("swaps_gen_resets", "?")))]
+    out = [("INFO", "write generations: swap_gen %s, flipbuf_present %s, swap mode %s; generations handed out by "
+                    "page-on %s (+%s by its cached descriptor), by copy forward %s (%s targets kept theirs: the copy "
+                    "failed); evicted %s, freed %s, head resets %s" % (
+                        c.get("swap_gen"), c.get("flipbuf_present", "?"), c.get("swap_mode", "?"),
+                        c.get("swaps_gen_aperture", "?"), c.get("swaps_gen_apcached", "?"), c.get("swaps_gen_cf", "?"),
+                        c.get("swaps_gen_cfnostamp", "?"), c.get("swaps_gen_evicted", "?"),
+                        c.get("swaps_gen_freed", "?"), c.get("swaps_gen_resets", "?")))]
+    if current:
+        gmiss = [k for k in GEN_GLOBALS if k not in c]
+        if gmiss:
+            out.append(("WARN", "counter missing: %s although the kext is of these sources (a partial dump: the "
+                                "collector's grep)" % ", ".join(gmiss)))
     if c.get("swaps_gen_evicted"):
         out.append(("WARN", "write generations: %d evicted from the full 32-slot table - an evicted back reads 'never "
-                            "written' and is held until its next write (the trace's H-GEN line says whether a frame "
-                            "was held back)" % c["swaps_gen_evicted"]))
+                            "written'; while the evicted generation is newer than a head's frame such a back presents "
+                            "(the eviction guard: %d time(s))" % (
+                                c["swaps_gen_evicted"],
+                                sum(v for k, v in c.items() if re.match(r"swaps_gen_evictpresent_h\d$", k)))))
+    swap_mode = c.get("swap_mode")
     heads = sorted(set(m.group(1) for m in (re.match(r"(?:swaps_gen\w*|flipbuf\w*|cf_gennewer)_h(\d)$", k) for k in c)
-                       if m))
+                       if m) | set(k[-1] for k, v in c.items() if re.match(r"swaps_h\d$", k) and v))
     for h in heads:
         def g(k):
             return c.get(k + "_h" + h, 0)
+        sw = c.get("swaps_h" + h, 0)
+        if not any(k + "_h" + h in c for k in GEN_COUNTERS + GEN_COUNTERS_R1):
+            if sw:
+                out.append(("WARN", "head %s: %d swaps but NONE of the write generations' counters (swaps_gen*_h%s): "
+                                    "a partial dump" % (h, sw, h)))
+            continue
         missing = [k for k in GEN_COUNTERS if k + "_h" + h not in c]
+        if current:
+            missing += [k for k in GEN_COUNTERS_R1 if k + "_h" + h not in c]
         if missing:
             out.append(("WARN", "head %s: counter missing: %s - a partial dump (the collector's grep)" % (
                 h, ", ".join(k + "_h" + h for k in missing))))
-        if not any(g(k) for k in GEN_COUNTERS):
+        judged_known = "swaps_gen_judged_h" + h in c
+        judged = g("swaps_gen_judged")
+        outcomes = g("swaps_genpresent") + g("swaps_genhold") + g("swaps_genhold_would") + g("swaps_gen_landed")
+        # the rule judging nothing while it is on and the head swaps (ECC review round 1, H2)
+        if c.get("swap_gen") == 1 and swap_mode in (0, 1) and sw > 20 and \
+                (judged == 0 if judged_known else outcomes == 0):
+            out.append(("FAIL", "head %s: the write generations judged NONE of %d swaps (swap_gen 1, swap mode %d) - "
+                                "the rule is inert: %d not judged (swaps_gennotjudged_h%s; the kernel log's 'did not "
+                                "judge' lines say why)" % (h, sw, swap_mode, g("swaps_gennotjudged"), h)))
+        if not any(g(k) for k in GEN_COUNTERS + GEN_COUNTERS_R1):
             continue
-        out.append(("INFO", "head %s: write generations: %d presented (%d the first after a reset, %d changed with no "
-                            "write seen), %d held (%d never written), %d would have been held (swap_gen 0 / mode 2); copy "
-                            "forward took a newer front %d times; flip-buffer calls %d + %d scanout, %d presented, %d "
-                            "held, %d failed" % (
-                                h, g("swaps_genpresent"), g("swaps_genfirst"), g("swaps_gencontent"), g("swaps_genhold"),
-                                g("swaps_genunwritten"), g("swaps_genhold_would"), g("cf_gennewer"), g("flipbuf"),
-                                g("flipbuf_scanout"), g("flipbuf_presented"), g("flipbuf_held"), g("flipbuf_failed"))))
+        out.append(("INFO", "head %s: write generations: %s judged: %d presented (%d the first after a reset, %d "
+                            "changed with no write seen, %d by the age guard, %d by the eviction guard), %d held (%d "
+                            "never written), %d the surface's newer buffer instead, %d would have been held (swap_gen "
+                            "0 / mode 2); %d not judged; %d resets; copy forward took a newer front %d times; "
+                            "flip-buffer calls %d + %d scanout, %d presented, %d held (%d empty), %d failed, %d busy, "
+                            "%d took the lock" % (
+                                h, judged if judged_known else "?", g("swaps_genpresent"), g("swaps_genfirst"),
+                                g("swaps_gencontent"), g("swaps_gen_aged"), g("swaps_gen_evictpresent"),
+                                g("swaps_genhold"), g("swaps_genunwritten"), g("swaps_gen_landed"),
+                                g("swaps_genhold_would"), g("swaps_gennotjudged"), g("swaps_gen_resets"),
+                                g("cf_gennewer"), g("flipbuf"), g("flipbuf_scanout"), g("flipbuf_presented"),
+                                g("flipbuf_held"), g("flipbuf_emptyheld"), g("flipbuf_failed"), g("flipbuf_busy"),
+                                g("flipbuf_unlocked"))))
+        if judged_known and abs(judged - outcomes) > GEN_SLACK:
+            out.append(("WARN", "head %s: the write generations' outcomes do not add up: %d judged, but presented %d + "
+                                "held %d + would-hold %d + newer buffer %d = %d - a decision without its counter" % (
+                                    h, judged, g("swaps_genpresent"), g("swaps_genhold"), g("swaps_genhold_would"),
+                                    g("swaps_gen_landed"), outcomes)))
+        if g("swaps_gennotjudged"):
+            out.append(("WARN", "head %s: %d swap(s) the write generations did NOT judge (no head known at the swap's "
+                                "entry, or no VRAM address): presented as before, unguarded (the kernel log's 'did not "
+                                "judge' lines)" % (h, g("swaps_gennotjudged"))))
         if g("swaps_gencontent"):
             out.append(("WARN", "head %s: %d back(s) changed with NO write the accelerator saw (presented by the content "
                                 "guard): a writer that is neither the family's page-on nor copy forward" %
                         (h, g("swaps_gencontent"))))
+        if g("swaps_gen_aged") or g("swaps_gen_evictpresent"):
+            out.append(("WARN", "head %s: the hold guards presented %d back(s) the rule would have held (age guard %d: "
+                                "no present for 250 ms and 3 holds in a row; eviction guard %d) - the panel was not "
+                                "frozen, but those frames may be old (the trace's H-GEN line)" % (
+                                    h, g("swaps_gen_aged") + g("swaps_gen_evictpresent"), g("swaps_gen_aged"),
+                                    g("swaps_gen_evictpresent"))))
+        if g("swaps_genpresent") >= 10 and g("swaps_genfirst") > 0.3 * g("swaps_genpresent"):
+            out.append(("WARN", "head %s: %d of %d generation presents were the first after a reset (> 30%%): the head's "
+                                "record keeps restarting (%d resets on the head) - the rule barely judges" % (
+                                    h, g("swaps_genfirst"), g("swaps_genpresent"), g("swaps_gen_resets"))))
         if g("swaps_genhold") >= 20 and g("swaps_genhold") > 2 * max(g("swaps_genpresent"), 1):
             out.append(("WARN", "head %s: %d generation holds against %d presents: the panel may look frozen - compare the "
                                 "looks" % (h, g("swaps_genhold"), g("swaps_genpresent"))))
         if g("flipbuf_failed"):
             out.append(("WARN", "head %s: %d flip-buffer presents FAILED (the kernel log's 'flipbuf #' lines say why)" %
                         (h, g("flipbuf_failed"))))
-    if c.get("flipbuf_busy"):
-        out.append(("WARN", "flip-buffer presents not done %d time(s): the family's lock held by another thread "
-                            "(flipbuf_busy)" % c["flipbuf_busy"]))
+        if g("flipbuf_busy"):
+            out.append(("WARN", "head %s: flip-buffer presents not done %d time(s): the family's lock held by another "
+                                "thread (flipbuf_busy_h%s)" % (h, g("flipbuf_busy"), h)))
+    # the flip-buffer calls against their outcomes (debug.rdna3accel_flipbuf_present=1 for the whole run)
+    def total(k):
+        return sum(v for kk, v in c.items() if re.match(k + r"_h\d$", kk))
+    calls = total("flipbuf") + total("flipbuf_scanout")
+    if c.get("flipbuf_present") == 1 and calls:
+        done = total("flipbuf_presented") + total("flipbuf_held") + total("flipbuf_failed") + total("flipbuf_busy") + \
+            c.get("flipbuf_nores", 0)
+        if abs(calls - done) > GEN_SLACK:
+            out.append(("WARN", "flip-buffer calls do not add up: %d calls on our heads, but presented %d + held %d + "
+                                "failed %d + busy %d + no resource %d = %d (unless flipbuf_present was switched during "
+                                "the run)" % (calls, total("flipbuf_presented"), total("flipbuf_held"),
+                                              total("flipbuf_failed"), total("flipbuf_busy"), c.get("flipbuf_nores", 0),
+                                              done)))
+    if c.get("flipbuf_nores"):
+        out.append(("WARN", "flip-buffer presents not done %d time(s): neither buffer a VRAM resource of ours "
+                            "(flipbuf_nores)" % c["flipbuf_nores"]))
+    if c.get("flipbuf_badptr"):
+        out.append(("WARN", "flip-buffer calls with a resource argument that is no kernel address: %d (flipbuf_badptr) "
+                            "- the reconstructed signature may be wrong" % c["flipbuf_badptr"]))
+    if c.get("hook_intr"):
+        kinds = ", ".join("%s %d" % (k, c["hook_intr_" + k]) for k in HOOK_INTR_KINDS if c.get("hook_intr_" + k))
+        out.append(("WARN", "flip-present hooks called at INTERRUPT LEVEL %d time(s)%s: only counted and forwarded, "
+                            "those frames were neither traced nor presented" % (
+                                c["hook_intr"], " (%s)" % kinds if kinds else "")))
+    if c.get("flipbuf_intoff") or c.get("hook_intoff"):
+        out.append(("WARN", "flip-present hooks called with INTERRUPTS DISABLED: %d flip-buffer, %d surface call(s): "
+                            "only counted and forwarded" % (c.get("flipbuf_intoff", 0), c.get("hook_intoff", 0))))
     hooks = [(k, c[k]) for k in ("hook_pickpresent", "hook_didsubmitswap", "hook_backready", "hook_backready_no",
-                                 "hook_submitupdate", "hook_intr", "flipbuf_nohead", "flipbuf_unlocked") if k in c]
+                                 "hook_submitupdate", "hook_intr", "flipbuf_nohead") if k in c]
     if hooks:
         out.append(("INFO", "flip-present hooks: " + ", ".join("%s %d" % kv for kv in hooks)))
     elif current:
         out.append(("WARN", "counter missing: hook_* (the surface hooks' counters) although swap_gen is there"))
+    swaps = sum(v for k, v in c.items() if re.match(r"swaps_h\d$", k))
+    fired = sum(v for k, v in hooks) + calls
+    if current and hooks and swaps > 50 and not fired:
+        out.append(("WARN", "hook wiring unproven: %d swaps and NOT ONE call of any flip-present hook (hook_*, "
+                            "flipbuf*): the overrides may not be in the family's vtables - the kernel log's 'flip-present "
+                            "hooks installed' line gives their offsets" % swaps))
     return out
 
 
@@ -1962,6 +2090,11 @@ def report(path, show_all):
             print("   info %-20s = %s" % (key, hex(v) if isinstance(v, int) and key in (
                 "SOSVersion", "SMUDriverIF", "DMUBVersion", "GBAddrConfig", "LastFaultAddr",
                 "LastFaultStatus") else v))
+    # ECC review round 1: --all lists the first kernel-log lines of the write generations and the flip-present hooks
+    if show_all and log:
+        print("   --   write generations / flip-present hooks (the kernel log's first lines):")
+        for l in gen_log_lines(log):
+            print("        " + l[:240])
     # displays (step 2+): connectors with an EDID, what each head drives
     for key in sorted(k for k in props if re.match(r"(Connector\d+,(Monitor|EDIDSource|Type)|Head\d+,(Route|TX))$", k)):
         print("   info %-20s = %s" % (key, props[key]))
@@ -2495,7 +2628,7 @@ def summary(path, serial=None):
         if lv != "INFO" or t.startswith("swap mode") or "H-B2 handled" in t or "H-STALE handled" in t or \
                 ": stale back (swap_stale" in t:
             out.append(("swap copy", "%s %s" % (lv, t)))
-    for lv, t in gen_verdict(a3_counters(txt) if txt else {}):
+    for lv, t in gen_verdict(a3_counters(txt) if txt else {}, accel_current(log)):
         if lv != "INFO" or t.startswith(("write generations", "flip-present")) or ": write generations:" in t:
             out.append(("swap gen", "%s %s" % (lv, t[:300])))
     tlv, _ = trace_lines(path, txt, log, args)
@@ -2627,10 +2760,10 @@ def main():
         for lv, t in swapcopy_verdict(a3_counters(ttxt) if ttxt else {}):
             print("   %s swap copy: %s" % (lv, t))
             failed = failed or lv == "FAIL"
-        for lv, t in gen_verdict(a3_counters(ttxt) if ttxt else {}):
+        klog = kernel_text(p, d)
+        for lv, t in gen_verdict(a3_counters(ttxt) if ttxt else {}, accel_current(klog)):
             print("   %s swap gen: %s" % (lv, t))
             failed = failed or lv == "FAIL"
-        klog = kernel_text(p, d)
         tl_lv, tl = trace_lines(p, ttxt, klog)
         for lv, t in tl_lv:
             print("   %s frame trace: %s" % (lv, t))

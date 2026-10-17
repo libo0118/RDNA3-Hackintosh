@@ -2650,6 +2650,55 @@ byte positions are next to them; WindowServer's plugin trace is the end-of-run s
   ..., head H; call K)`; `flipbuf #N: head H: ...'s buffer (phys ...) NOT
   presented: ...`; `flipbuf: head H: ... NOT presented: the family's lock is held
   by another thread ...`.
+- ECC review round 1 (the guards and the counters that make a decision
+  provable from the report):
+  - A hold never freezes the panel: after 250 ms without a present on the
+    head and 3 holds in a row the back presents (the age guard,
+    `swaps_gen_aged_h<N>`); a back with no generation while a newer one was
+    evicted from the full table presents (the eviction guard,
+    `swaps_gen_evictpresent_h<N>`). The 17c/17d traces had no hold run that
+    the age guard would have cut (the longest: 5 swaps).
+  - Swap mode 1, before a hold: the surface's buffer written after the
+    head's frame (the newest, with pixels) is presented instead
+    (`swaps_gen_landed_h<N>`; the trace marks it as a landed buffer).
+  - Every judged swap is counted: `swaps_gen_judged_h<N>` = `swaps_genpresent`
+    + `swaps_genhold` + `swaps_genhold_would` + `swaps_gen_landed` (per
+    head); the swaps the rule could not judge (no head known at the swap's
+    entry, no VRAM address) are `swaps_gennotjudged_h<N>`. Head resets per
+    head: `swaps_gen_resets_h<N>` (another surface taking the head over
+    resets it only after the last one was quiet for 500 ms; surfaces taking
+    turns keep the record).
+  - Stamps: `swaps_gen_apcached` (the page-on's cached descriptor, apart
+    from `swaps_gen_aperture`), `swaps_gen_cfnostamp` (a copy forward that
+    failed or did not copy every rect keeps its target's generation). The
+    head's frame takes the generation captured at the decision.
+  - Hooks: nothing runs at interrupt level or with interrupts disabled but a
+    count (`hook_intr` with `hook_intr_<kind>`, `flipbuf_intoff`,
+    `hook_intoff`); a resource argument below the kernel's addresses is not
+    cast (`flipbuf_badptr`); `flipbuf_nores`, `flipbuf_busy_h<N>`,
+    `flipbuf_unlocked_h<N>` (per head now), `flipbuf_emptyheld_h<N>` (of
+    `flipbuf_held_h<N>`, the buffer read empty).
+  - `tools/kext_check.sh` compiles the accelerator to assembly and
+    `tools/check_accel_slots.py` checks every `rd3Base*` call jumps through
+    the measured slot (2512 2504 2672 2640 2648 2664; the lock overrides 2144
+    2152).
+  - New log lines: `flip-present hooks installed: RD3DisplayPipe
+    submitFlipBuffer vtable+2496, ...` (at the accelerator's start; the base
+    calls' slots are these + 16); `swap #N: head H: ... presented by a guard:
+    the AGE GUARD ...` / `the EVICTION GUARD ...`; `swap #N: head H: the back
+    ... would be held (...) -- the surface's buffer 0x... written after the
+    head's frame (...) presented instead`; `swap #N: head H: the write
+    generations did not judge this swap: ...`; `write generations: head H
+    reset (another surface swaps on the head, the last one quiet for 500
+    ms)`; `copy forward #N: the target 0x... keeps its write generation:
+    ...`; `flipbuf #N: head H: ...'s buffer (phys ...) read empty -- held`;
+    `flipbuf: head H: ... NOT presented: neither buffer is a VRAM resource of
+    ours ...`; `hook: ... was called at INTERRUPT LEVEL` / `with INTERRUPTS
+    DISABLED` (the first of each kind, logged by the next call); the first 16
+    `hook:` lines say `interrupts enabled`.
+  - `triage_reports.py --all` lists the first kernel-log lines of each kind
+    (`write generations:`, `hook:`, `flip-present hooks`, `flipbuf`,
+    `held:`, `did not judge`).
 
 | Seen | Meaning | Action |
 |---|---|---|
@@ -2661,4 +2710,14 @@ byte positions are next to them; WindowServer's plugin trace is the end-of-run s
 | `INFO H-FLIPPATH: head N: flip-buffer calls submitFlipBuffer K; traced K` | the bursts' path found: the frames come through the pipe's flip buffer | run bisect-agdc (steps 4 and 5: `flipbuf_present 1`) and read whether movement gets smooth |
 | `WARN ... flip-buffer presents FAILED` / `flipbuf_busy` > 0 | `flipbuf_present 1` could not copy / flip, or the call came without the family's lock while another thread held it | the `flipbuf #` / `flipbuf:` log lines say why; the family's own present ran anyway |
 | `counter missing: swaps_genhold_h<N>` / `flipbuf_h<N>` / `hook_*` | the collector's grep (`collect.sh` / `autoreport.sh` `a3_sysctls`) or an older kext | update the guest's scripts (`rdna3vm update`) |
+| `WARN swap gen: counter missing: swap_gen and the write generations' counters ... although the kext is of these sources` / `head N: K swaps but NONE of the write generations' counters` | the accelerator's build line is this checkout but the dump lacks the counters | the collector's grep; `rdna3vm update` |
+| `FAIL swap gen: head N: the write generations judged NONE of K swaps` / `FAIL frame trace: H-GEN: head N: K swaps in mode 0/1 with swap_gen 1, NONE judged` | the rule is inert on that head: every swap bypassed it | `swaps_gennotjudged_h<N>` and the kernel log's `did not judge` lines say why (no head known at the swap's entry, no VRAM address) |
+| `WARN swap gen: head N: the write generations' outcomes do not add up` | a decision path without its counter (`swaps_gen_judged` against presented + held + would + landed) | a bug in the kext's counting: read `rd3AccelWgNote`'s callers |
+| `WARN swap gen: head N: the hold guards presented K back(s)` | the age guard (250 ms, 3 holds) or the eviction guard let a back through that the rule would have held | not frozen; if the picture jumped back, the H-GEN line and the timeline around those swaps say which frame |
+| `WARN swap gen: head N: K of P generation presents were the first after a reset (> 30%)` | the head's record keeps restarting (`swaps_gen_resets_h<N>`) | the kernel log's `write generations: head H reset (...)` lines name the cause |
+| `FAIL frame trace: H-GEN: head N: held a CHANGED back K time(s)` | a held back's samples differ from the last time the same address was presented: a frame held that WindowServer had drawn | the timeline at that swap; the write path that did not stamp it |
+| `WARN swap gen: flip-present hooks called at INTERRUPT LEVEL` / `with INTERRUPTS DISABLED` | the family calls a hooked method where nothing may lock or log: only counted and forwarded, those frames were not traced or presented | the kernel log's first `hook: ... INTERRUPT LEVEL` line names the kind; such frames cannot be presented from the hook |
+| `WARN swap gen: flip-buffer calls do not add up` / `flipbuf_nores` / `flipbuf_badptr` > 0 | calls on our heads against presented + held + failed + busy + no resource (with `flipbuf_present 1` for the whole run); a buffer that is no VRAM resource of ours; an argument that is no kernel pointer (the reconstructed signature) | the `flipbuf` and `hook:` log lines |
+| `WARN ... hook wiring unproven: K swaps and NOT ONE call of any flip-present hook` | the overrides never ran: not in the vtable the family calls | the boot log's `flip-present hooks installed` offsets against `tools/check_accel_slots.py`'s slots (minus 16) |
+| `WARN BISECT-AGDC: the kernel has no swap_gen / flipbuf_present sysctl` | bisect-agdc ran on a kext before the write generations: steps 2-5 tested nothing | `rdna3vm update`, rerun |
 | picture broken in mode 1, right after `sysctl -w debug.rdna3accel_swap_mode=0` | the copy path itself, not the stale frames | report both pictures; bisect-agdc steps 0-3 tell mode x generations apart |

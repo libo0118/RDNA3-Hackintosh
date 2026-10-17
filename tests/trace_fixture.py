@@ -127,7 +127,7 @@ def stale_run(w, kind):
             w.add(15, 1, 0xfe, 64 | 1, 0, (n + 1, 0, 5, 0, 0), D, 0, 0, band(200))
 
 
-GEN_KINDS = ("gen", "genreal", "flippath")
+GEN_KINDS = ("gen", "genreal", "flippath", "genchanged")
 
 
 def gswap(w, n, arg, back, why, hold=False, head=0, gen=0, hgen=0, dt=100):
@@ -146,6 +146,8 @@ def gen_run(w, kind):
     decoder sees the write, the kernel did not stamp it (FAIL). flippath: a copy forward burst rotating F -> B1 -> B2
     -> F with no swap (the family's flip-buffer path), the flip-buffer calls and the surface hooks traced"""
     g = 0
+    if kind == "genchanged":   # B2 presented once: every later hold of it has other band bytes (a changed back held)
+        gswap(w, 99, 4, B2, 1, gen=1)
     for i in range(30):
         w.add(6, arg=1, flags=1, obj=0x1111, v=(8100, 3, 0, 0, 0), pa=B1)
         cf(w, 0, B1)

@@ -56,6 +56,16 @@
  * A back with no write recorded that this head never presented is held
  * (RD3_WGW_UNWRITTEN: the b2 WindowServer never draws).
  *
+ * A hold never freezes the panel (ECC review round 1): when the head has not
+ * presented for RD3_WG_AGE_US and this is its RD3_WG_AGE_HOLDS-th hold in a
+ * row, the back presents (RD3_WGW_AGED; 17c and 17d's traces have no such
+ * case, their longest hold runs were 5 swaps inside 250 ms), and a back with
+ * no generation presents while a generation newer than the head's frame was
+ * evicted from the full table (RD3_WGW_EVICTED: it may be that one). The
+ * caller looks for a newer buffer of the surface before it holds
+ * (rd3_wg_landed_pick: a frame WindowServer wrote into a buffer the swap did
+ * not name presents instead).
+ *
  * Fixed size, no allocation: RD3_WG_SLOTS buffer addresses, the oldest
  * generation evicted from a full table (that buffer then reads 0, "never
  * written", until its next write); forgotten per address when its VRAM is
@@ -69,6 +79,8 @@
 
 #define RD3_WG_SLOTS     32u   /* buffer addresses with a generation (3 per display surface, other surfaces) */
 #define RD3_WG_HEAD_SIGS 4u    /* buffers whose samples a head remembers from their presentation */
+#define RD3_WG_AGE_US    250000ull   /* no present for this long ... */
+#define RD3_WG_AGE_HOLDS 3u          /* ... and this many holds in a row: the back presents (RD3_WGW_AGED) */
 
 struct rd3_wg_rec {
     unsigned long long addr;   /* the buffer's VRAM address; 0: a free slot */
@@ -77,6 +89,7 @@ struct rd3_wg_rec {
 struct rd3_wg {
     struct rd3_wg_rec r[RD3_WG_SLOTS];
     unsigned long long seq;    /* the last generation handed out */
+    unsigned long long evictedMax;   /* the newest generation evicted from a full table (0: none) */
 };
 
 static inline struct rd3_wg_rec *rd3_wg_find(struct rd3_wg *w, unsigned long long addr)
@@ -115,6 +128,8 @@ static inline unsigned long long rd3_wg_bump(struct rd3_wg *w, unsigned long lon
                 r = &w->r[i];
         if (evicted)
             *evicted = r->addr;
+        if (r->gen > w->evictedMax)
+            w->evictedMax = r->gen;
     }
     r->addr = addr;
     r->gen = ++w->seq;
@@ -141,6 +156,8 @@ struct rd3_wg_head {
     unsigned long long gen;    /* the newest generation it presented (0: none written) */
     unsigned long long addr;   /* the buffer of its last presentation */
     int presented;             /* it presented since its last reset */
+    unsigned long long presentedUs;   /* when it presented last (any monotonic microseconds) */
+    unsigned holds;            /* swaps held in a row since */
     unsigned next;             /* the sample slot a new buffer takes when none is free */
     struct rd3_wg_sig s[RD3_WG_HEAD_SIGS];
 };
@@ -153,13 +170,17 @@ enum rd3_wg_why {
     RD3_WGW_CONTENT = 3,    /* no write seen since, but its samples changed since this head presented it: presented */
     RD3_WGW_SAME = 4,       /* the buffer the panel shows, not written since: held */
     RD3_WGW_OLDER = 5,      /* written before the head's last frame: held */
-    RD3_WGW_UNWRITTEN = 6   /* no write recorded (never, evicted or freed) and not presented here: held */
+    RD3_WGW_UNWRITTEN = 6,  /* no write recorded (never, evicted or freed) and not presented here: held */
+    RD3_WGW_AGED = 7,       /* would hold, but the head has not presented for RD3_WG_AGE_US and RD3_WG_AGE_HOLDS
+                             * holds in a row: presented (a hold never freezes the panel) */
+    RD3_WGW_EVICTED = 8     /* no generation, and one newer than the head's frame was evicted: presented */
 };
-#define RD3_WGW_MAX RD3_WGW_UNWRITTEN
+#define RD3_WGW_MAX RD3_WGW_EVICTED
 
 static inline int rd3_wg_presents(enum rd3_wg_why w)
 {
-    return w == RD3_WGW_NEWER || w == RD3_WGW_FIRST || w == RD3_WGW_CONTENT;
+    return w == RD3_WGW_NEWER || w == RD3_WGW_FIRST || w == RD3_WGW_CONTENT || w == RD3_WGW_AGED ||
+           w == RD3_WGW_EVICTED;
 }
 static inline int rd3_wg_holds(enum rd3_wg_why w)
 {
@@ -175,9 +196,12 @@ static inline const struct rd3_wg_sig *rd3_wg_head_sig(const struct rd3_wg_head 
 }
 
 /* the back at 'addr' with generation 'gen' (rd3_wg_gen); 'sampled': its
- * 64 samples were read at this swap and hash to 'sig' */
+ * 64 samples were read at this swap and hash to 'sig'; 'evictedMax' the
+ * table's (rd3_wg.evictedMax), 'nowUs' the time in the unit of
+ * rd3_wg_presented's */
 static inline enum rd3_wg_why rd3_wg_decide(const struct rd3_wg_head *h, unsigned long long addr,
-                                            unsigned long long gen, int sampled, unsigned long long sig)
+                                            unsigned long long gen, int sampled, unsigned long long sig,
+                                            unsigned long long evictedMax, unsigned long long nowUs)
 {
     const struct rd3_wg_sig *s;
     if (!h || !addr)
@@ -189,9 +213,31 @@ static inline enum rd3_wg_why rd3_wg_decide(const struct rd3_wg_head *h, unsigne
     s = rd3_wg_head_sig(h, addr);
     if (sampled && s && s->sig != sig)
         return RD3_WGW_CONTENT;
+    if (!gen && evictedMax > h->gen)
+        return RD3_WGW_EVICTED;
+    if (h->holds + 1u >= RD3_WG_AGE_HOLDS && nowUs >= h->presentedUs && nowUs - h->presentedUs >= RD3_WG_AGE_US)
+        return RD3_WGW_AGED;
     if (addr == h->addr)
         return RD3_WGW_SAME;
     return gen ? RD3_WGW_OLDER : (s ? RD3_WGW_OLDER : RD3_WGW_UNWRITTEN);
+}
+/* the swap was held (the run RD3_WGW_AGED counts) */
+static inline void rd3_wg_held(struct rd3_wg_head *h)
+{
+    if (h)
+        h->holds++;
+}
+/* before a hold: the buffer of the surface written after the head's frame,
+ * the newest - WindowServer's frame in a buffer the swap did not name.
+ * gens[i] the generation of candidate i (0: none / not a candidate: the
+ * back, the head's framebuffer resource, no VRAM); the index, -1 none */
+static inline int rd3_wg_landed_pick(const unsigned long long *gens, unsigned n, unsigned long long headGen)
+{
+    int best = -1;
+    for (unsigned i = 0; gens && i < n; i++)
+        if (gens[i] > headGen && (best < 0 || gens[i] > gens[best]))
+            best = (int)i;
+    return best;
 }
 
 /* the head presented the buffer at 'addr' (generation 'gen'; its samples
@@ -199,12 +245,14 @@ static inline enum rd3_wg_why rd3_wg_decide(const struct rd3_wg_head *h, unsigne
  * "unchanged"). The head's generation never goes back: a buffer presented
  * by the content guard keeps the order of the writes that were seen. */
 static inline void rd3_wg_presented(struct rd3_wg_head *h, unsigned long long addr, unsigned long long gen,
-                                    int sampled, unsigned long long sig)
+                                    int sampled, unsigned long long sig, unsigned long long nowUs)
 {
     struct rd3_wg_sig *s = 0;
     if (!h || !addr)
         return;
     h->presented = 1;
+    h->presentedUs = nowUs;
+    h->holds = 0;
     if (gen > h->gen)
         h->gen = gen;
     h->addr = addr;
@@ -239,6 +287,7 @@ static inline int rd3_wg_head_reset(struct rd3_wg_head *h)
         return 0;
     had = h->presented;
     h->presented = 0;
+    h->holds = 0;
     h->addr = 0;
     h->next = 0;
     for (unsigned i = 0; i < RD3_WG_HEAD_SIGS; i++) {

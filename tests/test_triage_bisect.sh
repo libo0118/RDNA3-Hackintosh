@@ -156,7 +156,7 @@ def ev0(n):
     return 10000 + 5000 * n
 
 
-def build4(right=(), tty=True, nobefore=False):
+def build4(right=(), tty=True, nobefore=False, nogen=False):
     """bisect.txt of a bisect-agdc run: step 0 and the steps not in `right` look broken (pipe 1 black, the owner says n);
     the counters of step n are 1000*n cumulative at its start and +300 swaps h0 / +150 h1 / +10*n copies / +2*n holds /
     +5*n rewritten in place / +7 iop flips by its second look; 40 swaps pass between a step's look and the next start"""
@@ -176,7 +176,8 @@ def build4(right=(), tty=True, nobefore=False):
                   "debug.rdna3accel_swaps_inplace_h0: %d" % (base // 20), "debug.rdna3accel_swaps_torn_h0: 0",
                   "debug.rdna3accel_iop_flips: 0", "debug.rdna3accel_iop_ok: %d" % base]
         o += ["stream_bytes_start: %d" % (n * 1000), "trace_events_start: %d" % ev0(n),
-              "set: (nothing)", "readback: " + " ".join("debug.rdna3accel_%s=%s" % kv for kv in zip(KNOBS4, vals.split())),
+              "set: (nothing)", "readback: " + " ".join("debug.rdna3accel_%s=%s" % (k, "-" if nogen and k in (
+                  "flipbuf_present", "swap_gen") else v) for k, v in zip(KNOBS4, vals.split())),
               "at: 12:%02d:00" % n, "offset: 00:%02d" % (n * 30)]
         pcts = [45, 1 if bad else 30]
         mv = [9000, 0]
@@ -288,6 +289,8 @@ elif scen.startswith("agdc"):
         write(build4(right=tuple(n for n in range(13) if n != 2)), args=A, serial=serial4({}))
     elif scen == "agdcflaky":       # step 12 has the switches of step 0 and looks different
         write(build4(right=(12,)), args=A, serial=serial4({}))
+    elif scen == "agdcnogen":       # a kernel without the swap_gen / flipbuf_present sysctls (ECC review round 1)
+        write(build4(right=(3, 4), nogen=True), args=A, serial=serial4({}))
     elif scen == "agdcnobefore":    # an older autoreport: no "-- before" block, the deltas come from the step before
         write(build4(right=(3,), nobefore=True), args=A, serial=serial4({}))
 elif scen == "plain":    # an ordinary run: no bisect at all
@@ -430,6 +433,13 @@ grep -q 'WARN BISECT-AGDC: step 12 has the same switches as step 0 but looked ri
 mk "$T/g9" agdcnobefore
 o=$(run "$T/g9")
 grep -qE '^ +3 +0/1/1/1/1/0/0/0 +1000 +500 ' <<<"$o" || fail "agdc no before: $(grep -E '^ +3 +[0-9]/' <<<"$o")"
+
+# a kernel without the write generations' sysctls: the steps that switch them tested nothing (ECC review round 1)
+mk "$T/g10" agdcnogen
+o=$(run "$T/g10")
+grep -q 'WARN BISECT-AGDC: the kernel has no swap_gen / flipbuf_present sysctl' <<<"$o" || fail "agdc no gen: $(grep BISECT <<<"$o")"
+o=$(run "$T/g1")
+! grep -q 'the kernel has no swap_gen' <<<"$o" || fail "agdc: a missing-sysctl WARN with every sysctl read back"
 
 # the boot-args of the run reach the group
 python3 -I - "$ROOT" <<'PY' || fail "triage_reports.bisect_run_expected(rdna3bisect=4)"
