@@ -165,6 +165,14 @@ public:
                 ALOG("   surf+0x%04x: %016llx %016llx", 0x1160 + o, qq[o / 8], qq[o / 8 + 1]);
         }
     }
+    /* the family's virtuals around a present (card run 2026-10-17d): traced
+     * and forwarded to IOAccelLegacySurface's own, always (naked wrappers in
+     * rdna3-accel.cpp, "the flip-present hooks": the base's return registers
+     * pass back untouched whatever its real return type) */
+    void didSubmitSwap(unsigned int a0, unsigned int a1) APPLE_KEXT_OVERRIDE;
+    bool isBackBufferReady(unsigned int a0) APPLE_KEXT_OVERRIDE;
+    void submitUpdate(unsigned int a0, IOAccelBounds* a1, unsigned int a2) APPLE_KEXT_OVERRIDE;
+    void pickPresentType(unsigned int a0) APPLE_KEXT_OVERRIDE;
     uint32_t getDirtyBufferBitsFromPrivateModeBits(unsigned long long a0) APPLE_KEXT_OVERRIDE {
         static volatile SInt32 gDirtyLogs;
         const SInt32 k = OSIncrementAtomic(&gDirtyLogs);
@@ -184,6 +192,14 @@ public:
     IOReturn performTransaction(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
     bool     isTransactionComplete(IOAccelDisplayPipeTransaction2 *txn) APPLE_KEXT_OVERRIDE;
     void     free() APPLE_KEXT_OVERRIDE;
+    /* the family's flip-buffer present path (card run 2026-10-17d: copy
+     * forward bursts with no swap): traced, counted, forwarded to
+     * IOAccelLegacyDisplayPipe's own always; debug.rdna3accel_flipbuf_present=1
+     * also presents the buffer (naked wrappers in rdna3-accel.cpp) */
+    void     submitScanoutFlipBuffer(IOAccelEvent *a0, unsigned int a1, IOAccelResource2 *a2,
+                                     IOAccelResource2 *a3) APPLE_KEXT_OVERRIDE;
+    void     submitFlipBuffer(IOAccelEvent *a0, unsigned int a1, IOAccelResource2 *a2,
+                              IOAccelResource2 *a3) APPLE_KEXT_OVERRIDE;
     enum { kIopSrcSlots = 4 };
     struct RD3IopSrc { unsigned id; IOMemoryDescriptor *md; IOMemoryMap *map; } fIopSrc[kIopSrcSlots];
     unsigned fIopNext;

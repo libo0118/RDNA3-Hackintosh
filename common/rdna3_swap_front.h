@@ -88,6 +88,8 @@ struct rd3_cf_in {
     int shownIsSrc;   /* that buffer is the front WindowServer named */
     int shownOwned;   /* that buffer is one of the calling surface's own */
     int srcShown;     /* the front is recorded as shown on some head (used when no head is known) */
+    int srcNewer;     /* the front was written after the frame the head presented last (rdna3_write_gen.h
+                         rd3_wg_src_newer: a copy forward burst's chain, card run 2026-10-17d): the source */
 };
 
 static inline enum rd3_cf_pick rd3_cf_source(const struct rd3_cf_in *in)
@@ -95,6 +97,8 @@ static inline enum rd3_cf_pick rd3_cf_source(const struct rd3_cf_in *in)
     if (!in || in->srcIsDst)
         return RD3_CF_SKIP_SAME;
     if (in->headKnown) {
+        if (in->srcNewer)
+            return RD3_CF_COPY_SRC;
         if (!in->headShown)
             return RD3_CF_SKIP_NOTHING_SHOWN;
         if (in->shownIsDst)

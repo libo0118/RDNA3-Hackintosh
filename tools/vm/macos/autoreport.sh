@@ -131,7 +131,7 @@ rdna3_allow_mode() {
 # card run 58: WindowServer's display framebuffers and A3 (refused /
 # imported, the legacy swaps per head and those that scanned out an A3 BO)
 a3_sysctls() {
-    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:)")
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:|flipbuf|hook_)")
     if [ -n "$_a3" ]; then echo "$_a3"
     else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
     # card run 2026-10-17c: who holds the CPU-visible VRAM now (tools/triage_reports.py "VISIBLE VRAM")
@@ -345,8 +345,9 @@ plugin_trace_conf() {
 # card run 2026-10-17b: one run decides between the swap models. 60 s with
 # debug.rdna3accel_swap_mode=1 (the copy), 60 s with 0 (the flip), back to
 # what it was. Opt-in since card run 2026-10-17d: only with the boot-arg
-# rdna3swapab=1 (the flip is the default and mode 1 broke both monitors, so
-# the picture is deliberately broken for a minute); per phase a look at the panels, the counters and a snapshot
+# rdna3swapab=1 (one of the two modes may break the picture for a minute; the
+# flip was the default 2026-10-17d..g, the copy again since the write
+# generations); per phase a look at the panels, the counters and a snapshot
 # of the traces. Activity Monitor redraws its graphs every few seconds: both
 # phases see the same kind of activity (whether it runs is logged; a head
 # whose display shows nothing that redraws has no swaps and is not judged,
@@ -438,7 +439,7 @@ swap_ab() {
 # profile, where the AGDC is idle and WindowServer does no GPU work, so its
 # result (swap mode 0 fine, mode 1 broken) says nothing about the real
 # desktop. Its steps are NOT cumulative: each sets its whole combination
-# (plan 4 below); it adds the iop and iop_flip switches and the per-step trace
+# (plan 4 below); it adds the iop, iop_flip, flipbuf_present and swap_gen switches and the per-step trace
 # position (trace_events_start / stream_bytes_start, and a one-event
 # trace_dump line in the kernel log as a marker: the serial log has no clock).
 # The owner knows which step runs even with a broken picture: a notification,
@@ -451,14 +452,15 @@ swap_ab() {
 # prints the table. Nothing here changes the swap_ab label: with it set the
 # trace sampling (trace_scan=1) would scan every swap, which is not the default.
 BISECT_KNOBS_BASE="a3 flicker swap_latch swap_torn swap_mode trace_scan swap_stale swap_landed a3ws"
-BISECT_KNOBS=$BISECT_KNOBS_BASE   # bisect_run adds iop and iop_flip for the agdc variant (4)
+BISECT_KNOBS=$BISECT_KNOBS_BASE   # bisect_run adds iop, iop_flip, flipbuf_present and swap_gen for the agdc variant (4)
 BISECT_CONF=${BISECT_CONF:-/Library/GPUBundles/rdna3mtl/rdna3mtl.conf}
 BISECT_ALLOW=${BISECT_ALLOW:-/Library/GPUBundles/rdna3mtl-allow.txt}
 BISECT_CONFBAK=${BISECT_CONFBAK:-/var/db/rdna3-bisect-conf.bak}
 BISECT_ALLOWBAK=${BISECT_ALLOWBAK:-/var/db/rdna3-allow.bak}
 
 # the steps of `bisect`: N|kind|name|a3 flicker swap_latch swap_torn swap_mode trace_scan swap_stale swap_landed a3ws|reopen
-# @ = the value the boot left (the default: since card run 2026-10-17d swap_mode 0 = the flip, trace_scan 0),
+# @ = the value the boot left (the defaults: swap_mode 1 = the copy, again since the write generations of card run
+# 2026-10-17d; it was 0 = the flip from 2026-10-17d to 2026-10-17g; trace_scan 0),
 # - = set nothing, a number = that value;
 # reopen 1 = Activity Monitor is opened again (a3 / a3ws only reach surfaces created after the switch)
 bisect_plan_1() {
@@ -469,8 +471,8 @@ bisect_plan_1() {
 3|on|flicker test of the swaps (flicker)|@ @ 0 0 0 0 0 0 @|0
 4|on|a swap waits for its flip to latch (swap_latch)|@ @ @ 0 0 0 0 0 @|0
 5|on|torn-frame test (swap_torn)|@ @ @ @ 0 0 0 0 @|0
-6|on|stale-back hold (swap_stale): the defaults again|@ @ @ @ @ @ @ @ @|0
-7|extra|CONTROL, off by default: swap mode 1, the copy (broke both monitors in card run 2026-10-17d)|@ @ @ @ 1 @ @ @ @|0
+6|on|stale-back hold (swap_stale) and swap mode 1 (the copy, the default again): the defaults again|@ @ @ @ @ @ @ @ @|0
+7|extra|CONTROL, off by default: swap mode 0, the flip (the default 2026-10-17d..g; on the agdc profile it shows the buffer WindowServer writes)|@ @ @ @ 0 @ @ @ @|0
 8|extra|CONTROL, off by default: trace sampling of the swap's other buffers (trace_scan=1)|@ @ @ @ @ 1 @ @ @|0
 9|extra|CONTROL, off by default: mode 1, the landed buffer is presented (swap_mode=1, swap_landed=1)|@ @ @ @ 1 @ @ 1 @|0
 10|extra|CONTROL, off by default: mode 2, every back copied (swap_mode=2)|@ @ @ @ 2 @ @ @ @|0
@@ -489,30 +491,33 @@ bisect_plan_2() {
 PLAN
 }
 
-# the steps of `bisect-agdc` (rdna3bisect=4): N|kind|name|a3 flicker swap_latch swap_torn swap_mode trace_scan swap_stale swap_landed a3ws iop iop_flip|reopen
+# the steps of `bisect-agdc` (rdna3bisect=4): N|kind|name|a3 flicker swap_latch swap_torn swap_mode trace_scan swap_stale swap_landed a3ws iop iop_flip flipbuf_present swap_gen|reopen
 # NOT cumulative: every step sets its whole combination; @ = the value the boot left, ! = the other one of 0 / 1
-# (iop_flip toggled), a number = that value. The four values every step names (swap_mode, trace_scan, swap_stale,
-# iop) are the defaults of the agdc profile (swap_mode 0 = the flip, trace_scan 0, swap_stale 1, iop 1), so the
-# reference is those defaults even if a boot-arg moved one of them. All of these switches can change at runtime
-# (accel/rdna3-accel.cpp: swap_mode, trace_scan, swap_stale, swap_latch, a3, iop_flip are read at every swap or
-# import; iop is a SYSCTL_PROC that publishes / removes IOAccelDisplayPipeCapabilities and makes the transaction
-# hooks answer as the base class), none was dropped. Only surfaces created after the switch see a3 (reopen 1 =
-# Activity Monitor opened again); WindowServer may have read the pipe capabilities at its start (iop 0 then only
-# changes what the hooks answer: the card says).
+# (iop_flip toggled), a number = that value. The values every step names (swap_mode, trace_scan, swap_stale, iop,
+# flipbuf_present, swap_gen) are the defaults of the agdc profile (swap_mode 1 = the copy, trace_scan 0, swap_stale 1,
+# iop 1, flipbuf_present 0, swap_gen 1: card run 2026-10-17d's write generations), so the reference is those
+# defaults even if a boot-arg moved one of them. All of these switches can change at runtime (accel/rdna3-accel.cpp:
+# swap_mode, trace_scan, swap_stale, swap_latch, a3, iop_flip, swap_gen, flipbuf_present are read at every swap,
+# flip-buffer call or import; iop is a SYSCTL_PROC that publishes / removes IOAccelDisplayPipeCapabilities and makes
+# the transaction hooks answer as the base class), none was dropped. Only surfaces created after the switch see a3
+# (reopen 1 = Activity Monitor opened again); WindowServer may have read the pipe capabilities at its start (iop 0
+# then only changes what the hooks answer: the card says). Steps 1-3 tell the copy from the flip with and without
+# the write generations, steps 4-5 the family's flip-buffer frames presented (flipbuf_present 1) in either mode.
 bisect_plan_4() {
     cat <<'PLAN'
-0|ref|reference: the defaults of the agdc profile (swap_mode 0, swap_stale 1, trace_scan 0, iop 1)|@ @ @ @ 0 0 1 @ @ 1 @|1
-1|var|swap_mode 1 (the copy), swap_stale 1|@ @ @ @ 1 0 1 @ @ 1 @|0
-2|var|swap_mode 1, swap_stale 0 (stale backs copied, not held)|@ @ @ @ 1 0 0 @ @ 1 @|0
-3|var|swap_mode 2 (every back copied)|@ @ @ @ 2 0 1 @ @ 1 @|0
-4|var|swap_mode 0, iop 0 (no display-pipe transactions)|@ @ @ @ 0 0 1 @ @ 0 @|0
-5|var|swap_mode 1, swap_stale 1, iop 0|@ @ @ @ 1 0 1 @ @ 0 @|0
-6|var|swap_mode 0, a3 0 (IOSurfaces not in the card's VRAM)|0 @ @ @ 0 0 1 @ @ 1 @|1
-7|var|swap_mode 1, swap_stale 1, a3 0|0 @ @ @ 1 0 1 @ @ 1 @|1
-8|var|swap_mode 0, swap_latch 0 (a swap does not wait for its flip to latch)|@ @ 0 @ 0 0 1 @ @ 1 @|1
-9|var|swap_mode 1, swap_stale 1, swap_latch 0|@ @ 0 @ 1 0 1 @ @ 1 @|0
-10|var|swap_mode 0, iop_flip toggled from its boot value|@ @ @ @ 0 0 1 @ @ 1 !|0
-11|final|the defaults again|@ @ @ @ 0 0 1 @ @ 1 @|1
+0|ref|reference: the defaults of the agdc profile (swap_mode 1 the copy, swap_gen 1, swap_stale 1, trace_scan 0, iop 1, flipbuf_present 0)|@ @ @ @ 1 0 1 @ @ 1 @ 0 1|1
+1|var|swap_mode 0 (the flip), swap_gen 1|@ @ @ @ 0 0 1 @ @ 1 @ 0 1|0
+2|var|swap_mode 1, swap_gen 0 (the write generations only counted: the copy of card run 2026-10-17d)|@ @ @ @ 1 0 1 @ @ 1 @ 0 0|0
+3|var|swap_mode 0, swap_gen 0 (the flip of card runs 2026-10-17f / g)|@ @ @ @ 0 0 1 @ @ 1 @ 0 0|0
+4|var|swap_mode 1, flipbuf_present 1 (the family's flip-buffer frames copied to the panel too)|@ @ @ @ 1 0 1 @ @ 1 @ 1 1|0
+5|var|swap_mode 0, flipbuf_present 1 (the family's flip-buffer frames flipped to)|@ @ @ @ 0 0 1 @ @ 1 @ 1 1|0
+6|var|swap_mode 2 (every back copied: the control, nothing held)|@ @ @ @ 2 0 1 @ @ 1 @ 0 1|0
+7|var|swap_mode 1, iop 0 (no display-pipe transactions)|@ @ @ @ 1 0 1 @ @ 0 @ 0 1|0
+8|var|swap_mode 1, a3 0 (IOSurfaces not in the card's VRAM)|0 @ @ @ 1 0 1 @ @ 1 @ 0 1|1
+9|var|swap_mode 1, swap_latch 0 (a copy does not wait for the last flip to latch)|@ @ 0 @ 1 0 1 @ @ 1 @ 0 1|1
+10|var|swap_mode 1, swap_stale 0 (stale backs left to the write generations alone)|@ @ @ @ 1 0 0 @ @ 1 @ 0 1|0
+11|var|swap_mode 0, iop_flip toggled from its boot value|@ @ @ @ 0 0 1 @ @ 1 ! 0 1|0
+12|final|the defaults again|@ @ @ @ 1 0 1 @ @ 1 @ 0 1|1
 PLAN
 }
 
@@ -896,7 +901,7 @@ bisect_run() {   # bisect_run <1|2|4>: the whole sequence; 0 when every step ran
     _btty=
     if [ -n "${BISECT_KEYFILE:-}" ]; then _btty=1
     elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
-    case $_bv in 4) BISECT_KNOBS="$BISECT_KNOBS_BASE iop iop_flip" ;; *) BISECT_KNOBS=$BISECT_KNOBS_BASE ;; esac
+    case $_bv in 4) BISECT_KNOBS="$BISECT_KNOBS_BASE iop iop_flip flipbuf_present swap_gen" ;; *) BISECT_KNOBS=$BISECT_KNOBS_BASE ;; esac
     bisect_w "# rdna3 bisect v1"
     bisect_w "variant: $_bv ($(case $_bv in 2) echo bisect-plugin ;; 4) echo bisect-agdc ;; *) echo bisect ;; esac))"
     bisect_w "hold_s: $HOLD"

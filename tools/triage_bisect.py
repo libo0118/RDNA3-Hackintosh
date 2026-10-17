@@ -47,12 +47,16 @@ BLACK_PCT = 3
 # pixels stood still (a clock tick in the menu bar is ~0.02 %, Activity
 # Monitor's graphs on the main display far more)
 MOVED_FRACTION = 0.003
-# the values the switches have without any boot-arg (accel/rdna3-accel.cpp)
-DEFAULTS = {"a3": "1", "flicker": "1", "swap_latch": "1", "swap_torn": "1", "swap_mode": "0",
+# the values the switches have without any boot-arg (accel/rdna3-accel.cpp; swap_mode 1, the copy, again since the
+# write generations of card run 2026-10-17d - it was 0 from 2026-10-17d to 2026-10-17g)
+DEFAULTS = {"a3": "1", "flicker": "1", "swap_latch": "1", "swap_torn": "1", "swap_mode": "1",
             "trace_scan": "0", "swap_stale": "1", "swap_landed": "0", "a3ws": "0"}
 MAIN_KINDS = ("ref", "off", "on", "final", "var")
-# plan 4 (bisect-agdc) also switches these (the agdc profile's own defaults: iop on, iop_flip off)
-DEFAULTS_AGDC = dict(DEFAULTS, iop="1", iop_flip="0")
+# plan 4 (bisect-agdc) also switches these (the agdc profile's own defaults: iop on, iop_flip off; the write
+# generations on, the flip-buffer present off: card run 2026-10-17d)
+DEFAULTS_AGDC = dict(DEFAULTS, iop="1", iop_flip="0", flipbuf_present="0", swap_gen="1")
+# the agdc table's switch column, in this order
+AGDC_SWITCHES = ("swap_mode", "swap_stale", "iop", "a3", "swap_latch", "iop_flip", "flipbuf_present", "swap_gen")
 # the kext's FRONT SURFACE sampler stops after this many samples per boot (accel/rdna3-accel.cpp rd3AccelSampleFront)
 FRONT_SAMPLE_CAP = 40
 # a step's marker line in the kernel log names the event count W a few events after trace_events_start
@@ -272,6 +276,10 @@ def step_metrics(step, prev, prefix):
         "hold": _delta(c, pc, r"^debug\.rdna3accel_swaps_stalehold_h\d$"),
         "would": _delta(c, pc, r"^debug\.rdna3accel_swaps_stalehold_would_h\d$"),
         "empty": _delta(c, pc, r"^debug\.rdna3accel_swaps_copyempty_h\d$"),
+        # card run 2026-10-17d: the write generations' holds, the family's flip-buffer calls and their presents
+        "genhold": _delta(c, pc, r"^debug\.rdna3accel_swaps_genhold_h\d$"),
+        "flipbuf": _delta(c, pc, r"^debug\.rdna3accel_flipbuf(?:_scanout)?_h\d$"),
+        "fbpres": _delta(c, pc, r"^debug\.rdna3accel_flipbuf_presented_h\d$"),
     }
     return met
 
@@ -473,18 +481,21 @@ def analyse(text, prefix=None, logs=None):
         f.extend(fnotes)
         table.append("swap counters per step (from the step's start to its second look, ~20 s in; 'front' = FRONT SURFACE "
                      "live-writer lines / sampler lines in the kernel log during the step):")
-        table.append("%4s %-26s %6s %6s %6s %6s %6s %6s %6s %6s %-9s %s" % (
-            "step", "swap_mode/stale/iop/a3/lat/flip", "sw h0", "sw h1", "copy", "hold", "flips", "inplace", "torn", "iop_ok",
-            "front", "trace events"))
+        table.append("(the switch column: swap_mode/stale/iop/a3/lat/flip/fbp/gen = %s; gen hold = the write "
+                     "generations' holds, fbuf = the family's flip-buffer calls / of them presented)" % ", ".join(AGDC_SWITCHES))
+        table.append("%4s %-30s %6s %6s %6s %6s %6s %6s %6s %6s %8s %9s %-9s %s" % (
+            "step", "swap_mode/stale/iop/a3/lat/flip/fbp/gen", "sw h0", "sw h1", "copy", "hold", "flips", "inplace", "torn",
+            "iop_ok", "gen hold", "fbuf", "front", "trace events"))
         for s in steps:
             n = s["n"]
             d, rb = mets[n]["deltas"], s["readback"]
-            sw = "/".join(rb.get("debug.rdna3accel_" + k, "?") for k in ("swap_mode", "swap_stale", "iop", "a3", "swap_latch", "iop_flip"))
+            sw = "/".join(rb.get("debug.rdna3accel_" + k, "-") for k in AGDC_SWITCHES)
             fr = ("%d/%d" % front[n]) if n in front else "?"
             e0, e1 = _int(s.get("trace_events_start")), _int(s.get("trace_events"))
-            table.append("%4d %-26s %6s %6s %6s %6s %6s %6s %6s %6s %-9s %s" % (
+            table.append("%4d %-30s %6s %6s %6s %6s %6s %6s %6s %6s %8s %9s %-9s %s" % (
                 n, sw, _fmt(d.get("sw0")), _fmt(d.get("sw1")), _fmt(d.get("copy")), _fmt(d.get("hold")), _fmt(d.get("flips")),
-                _fmt(d.get("inplace")), _fmt(d.get("torn")), _fmt(d.get("iopok")), fr,
+                _fmt(d.get("inplace")), _fmt(d.get("torn")), _fmt(d.get("iopok")), _fmt(d.get("genhold")),
+                "%s/%s" % (_fmt(d.get("flipbuf")), _fmt(d.get("fbpres"))), fr,
                 ("%d..%d (stream bytes %s..%s)" % (e0, e1, s.get("stream_bytes_start", "?"), s.get("stream_bytes", "?"))
                  if e0 is not None and e1 is not None else "?")))
     # --- missing data: loud
@@ -642,7 +653,7 @@ def verdict_agdc(steps, verdicts, by_n):
                                 "looked RIGHT: %s" % ("; ".join(ref["why"]), lst(rr))))
         else:
             out.append(("FAIL", "BISECT-AGDC: the reference (step 0) looked BROKEN [%s] and NO step looked right: none of swap_mode "
-                                "0/1/2, swap_stale, iop, a3, swap_latch, iop_flip repairs it on the agdc profile (or the answers are "
+                                "0/1/2, swap_gen, flipbuf_present, swap_stale, iop, a3, swap_latch, iop_flip repairs it on the agdc profile (or the answers are "
                                 "missing: see the WARN lines) - the bug is elsewhere (WindowServer's own draw path, the plugin: "
                                 "step bisect-plugin, the copy forward, the hardware)" % "; ".join(ref["why"])))
         out.append(("INFO", "BISECT-AGDC: looked broken: %s" % lst([s for s in wrong if s["n"] != 0])))

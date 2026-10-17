@@ -177,7 +177,7 @@ static void actions(void)
     }
     CHECK(rd3_swapmode_valid(0) && rd3_swapmode_valid(1) && rd3_swapmode_valid(2));
     CHECK(!rd3_swapmode_valid(-1) && !rd3_swapmode_valid(3));
-    CHECK(RD3_SWAPMODE_DEFAULT == RD3_SWAPMODE_FLIP);
+    CHECK(RD3_SWAPMODE_DEFAULT == RD3_SWAPMODE_COPY);   /* the copy again (rdna3_write_gen.h) */
 }
 
 static void targets(void)
@@ -249,6 +249,13 @@ static void cf_sources(void)
     CHECK(rd3_sc_cf_source(&in) == RD3_SCCF_SCANOUT);      /* the front copy failed: the panel's buffer */
     in.scanoutKnown = 0;
     CHECK(rd3_sc_cf_source(&in) == RD3_SCCF_STALE);
+    /* card run 2026-10-17d: the front written after the head's last frame (a burst's chain) is the source */
+    in.srcNewer = 1;
+    CHECK(rd3_sc_cf_source(&in) == RD3_SCCF_SRC);
+    in.scanoutKnown = 1;
+    CHECK(rd3_sc_cf_source(&in) == RD3_SCCF_SRC);
+    in.srcIsDst = 1;
+    CHECK(rd3_sc_cf_source(&in) == RD3_SCCF_SAME);
 }
 
 /* ECC review round 1: D is freed (a mode change, the swaps' new size) only

@@ -63,7 +63,7 @@ static void frame(struct sim *s, int back, unsigned lastDamage, unsigned damage,
     int from = -1;
     if (newRule) {
         const struct rd3_cf_in in = { 0 == back, 1, s->shown >= 0, s->shown == back, s->shown == 0,
-                                      s->shown == 1 || s->shown == 2, s->shown == 0 };
+                                      s->shown == 1 || s->shown == 2, s->shown == 0, 0 };
         const enum rd3_cf_pick p = rd3_cf_source(&in);
         from = p == RD3_CF_COPY_SRC ? 0 : p == RD3_CF_COPY_SHOWN ? s->shown : -1;
         /* nothing copied with rects to copy: they are pending in the target */
@@ -159,23 +159,35 @@ int main(void)
 
     /* copy forward's source */
     {
-        struct rd3_cf_in in = { 1, 1, 1, 1, 1, 1, 1 };
+        struct rd3_cf_in in = { 1, 1, 1, 1, 1, 1, 1, 1 };
         CHECK(rd3_cf_source(&in) == RD3_CF_SKIP_SAME);
         CHECK(rd3_cf_source(NULL) == RD3_CF_SKIP_SAME);
-        in = (struct rd3_cf_in){ 0, 1, 1, 1, 0, 1, 0 };
+        in = (struct rd3_cf_in){ 0, 1, 1, 1, 0, 1, 0, 0 };
         CHECK(rd3_cf_source(&in) == RD3_CF_SKIP_BACK_IS_LAST);   /* one back (card run 56) */
-        in = (struct rd3_cf_in){ 0, 1, 1, 0, 0, 1, 0 };
+        in = (struct rd3_cf_in){ 0, 1, 1, 0, 0, 1, 0, 0 };
         CHECK(rd3_cf_source(&in) == RD3_CF_COPY_SHOWN);          /* two backs (card run 58b) */
-        in = (struct rd3_cf_in){ 0, 1, 1, 0, 0, 0, 0 };
+        in = (struct rd3_cf_in){ 0, 1, 1, 0, 0, 0, 0, 0 };
         CHECK(rd3_cf_source(&in) == RD3_CF_SKIP_FOREIGN);        /* another surface's frame: never copied */
-        in = (struct rd3_cf_in){ 0, 1, 1, 0, 1, 1, 1 };
+        in = (struct rd3_cf_in){ 0, 1, 1, 0, 1, 1, 1, 0 };
         CHECK(rd3_cf_source(&in) == RD3_CF_COPY_SRC);            /* the front was shown last */
-        in = (struct rd3_cf_in){ 0, 1, 0, 0, 0, 0, 1 };
+        in = (struct rd3_cf_in){ 0, 1, 0, 0, 0, 0, 1, 0 };
         CHECK(rd3_cf_source(&in) == RD3_CF_SKIP_NOTHING_SHOWN);  /* head known, nothing shown: never the front */
-        in = (struct rd3_cf_in){ 0, 0, 0, 0, 0, 0, 1 };
+        in = (struct rd3_cf_in){ 0, 0, 0, 0, 0, 0, 1, 0 };
         CHECK(rd3_cf_source(&in) == RD3_CF_COPY_SRC);            /* no head known, the front was shown */
-        in = (struct rd3_cf_in){ 0, 0, 0, 0, 0, 0, 0 };
+        in = (struct rd3_cf_in){ 0, 0, 0, 0, 0, 0, 0, 0 };
         CHECK(rd3_cf_source(&in) == RD3_CF_SKIP_NO_HEAD);
+        /* card run 2026-10-17d: the front written after the head's last frame (a copy forward burst's chain) is
+         * the source - over the shown buffer, the target being the shown one, nothing shown yet */
+        in = (struct rd3_cf_in){ 0, 1, 1, 0, 0, 1, 0, 1 };
+        CHECK(rd3_cf_source(&in) == RD3_CF_COPY_SRC);
+        in = (struct rd3_cf_in){ 0, 1, 1, 1, 0, 1, 0, 1 };
+        CHECK(rd3_cf_source(&in) == RD3_CF_COPY_SRC);
+        in = (struct rd3_cf_in){ 0, 1, 0, 0, 0, 0, 0, 1 };
+        CHECK(rd3_cf_source(&in) == RD3_CF_COPY_SRC);
+        in = (struct rd3_cf_in){ 1, 1, 1, 1, 1, 1, 1, 1 };
+        CHECK(rd3_cf_source(&in) == RD3_CF_SKIP_SAME);           /* one buffer: still nothing to do */
+        in = (struct rd3_cf_in){ 0, 0, 0, 0, 0, 0, 0, 1 };
+        CHECK(rd3_cf_source(&in) == RD3_CF_SKIP_NO_HEAD);        /* no head: no generation to compare with */
     }
 
     {

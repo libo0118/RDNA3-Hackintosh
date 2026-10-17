@@ -2532,12 +2532,13 @@ The plain `bisect` boots the default profile (AGDC idle, WindowServer on the
 CPU), so its result does not hold for the real desktop; card run 2026-10-17f
 (`rdna3vm step play`, swap mode 0) is broken again. `rdna3vm step bisect-agdc`
 ([TESTING-VM](TESTING-VM.md), "Display bisect on the agdc profile") has the
-`agdc` step's boot-args plus `rdna3bisect=4` and 12 steps of 30 s that are NOT
-cumulative (each sets its whole combination from the boot's values): 0 the
-defaults, 1 mode 1 + stale 1, 2 mode 1 + stale 0, 3 mode 2, 4 mode 0 + `iop` 0,
-5 mode 1 + stale 1 + `iop` 0, 6 mode 0 + `a3` 0, 7 mode 1 + stale 1 + `a3` 0,
-8 mode 0 + `swap_latch` 0, 9 mode 1 + stale 1 + `swap_latch` 0, 10 mode 0 +
-`iop_flip` toggled, 11 the defaults again. Same `39-bisect.txt` /
+`agdc` step's boot-args plus `rdna3bisect=4` and 13 steps of 30 s that are NOT
+cumulative (each sets its whole combination from the boot's values; since the
+write generations, below): 0 the defaults (mode 1, `swap_gen` 1,
+`flipbuf_present` 0), 1 mode 0, 2 mode 1 + `swap_gen` 0, 3 mode 0 + `swap_gen`
+0, 4 mode 1 + `flipbuf_present` 1, 5 mode 0 + `flipbuf_present` 1, 6 mode 2,
+7 mode 1 + `iop` 0, 8 mode 1 + `a3` 0, 9 mode 1 + `swap_latch` 0, 10 mode 1 +
+`swap_stale` 0, 11 mode 0 + `iop_flip` toggled, 12 the defaults again. Same `39-bisect.txt` /
 `<report>-bisect.txt` as `bisect` (`variant: 4 (bisect-agdc)`), plus at each
 step's start a `-- before` counter block, `trace_events_start`,
 `stream_bytes_start`, and one `trace: events W..W (asked by sysctl
@@ -2546,17 +2547,19 @@ debug.rdna3accel_trace_dump)` line in the kernel log.
 | Triage line | Meaning | Action |
 |---|---|---|
 | `FAIL BISECT-AGDC: the reference (step 0 ...) looked BROKEN [...]; the steps that looked RIGHT: step K (...)` | the bug shows at the defaults and the listed combinations (the owner's `y`, or lit pipes that are not black and move) did not | the switches that differ in the right steps and are the same in the broken ones are the lead (the steps are not cumulative: compare each with step 0 directly); `INFO BISECT-AGDC by swap_mode` groups right / broken by the mode; port the matching amdgpu behaviour, do not just flip the default |
-| `FAIL BISECT-AGDC: ... looked BROKEN ... and NO step looked right` | none of swap_mode 0/1/2, `swap_stale`, `iop`, `a3`, `swap_latch`, `iop_flip` repairs it on the agdc profile (or the answers are missing: read the WARN lines) | not these switches: the writer of the scanned-out buffer itself (WindowServer / the plugin: `rdna3vm step bisect-plugin`, the plugin trace of the same run), the copy forward, the hardware; the `inplace` / `torn` counters say whether the panel reads a buffer that is being drawn |
+| `FAIL BISECT-AGDC: ... looked BROKEN ... and NO step looked right` | none of swap_mode 0/1/2, `swap_gen`, `flipbuf_present`, `swap_stale`, `iop`, `a3`, `swap_latch`, `iop_flip` repairs it on the agdc profile (or the answers are missing: read the WARN lines) | not these switches: the writer of the scanned-out buffer itself (WindowServer / the plugin: `rdna3vm step bisect-plugin`, the plugin trace of the same run), the copy forward, the hardware; the `inplace` / `torn` counters say whether the panel reads a buffer that is being drawn |
 | `WARN BISECT-AGDC: the reference (step 0) looked RIGHT ... but these steps looked BROKEN` | the bug did not show at the defaults; the listed steps are what breaks it | repeat the run; the broken steps' switches are the ones to look at |
 | `INFO BISECT-AGDC: no step looked broken` | the bug did not show | needs real apps or the owner's own use (`rdna3vm step play`) |
-| `WARN BISECT-AGDC: step 11 has the same switches as step 0 but looked ...` | flaky, or an order effect: `iop` 0 in steps 4 and 5 removes the pipe capabilities at runtime and WindowServer may not take `iop` 1 back | read steps 0 and 11 side by side; if only the steps after 5 are broken, run again without steps 4 and 5 in front (reboot) |
+| `WARN BISECT-AGDC: step 12 has the same switches as step 0 but looked ...` | flaky, or an order effect: `iop` 0 in step 7 removes the pipe capabilities at runtime and WindowServer may not take `iop` 1 back | read steps 0 and 12 side by side; if only the steps after 7 are broken, run again without step 7 in front (reboot) |
 | `INFO FRONT SURFACE lines per step: <log>, cut by ...` and the `front` column (`live writer lines / sampler lines`) | the kext's `FRONT SURFACE ... *** MOVED -- A LIVE WRITER ... ***` lines per step, cut out of the serial log by the step's marker line or out of the archive's log by its clock | a live writer in step K = something paints the scanned-out surface in that combination |
 | `WARN the log has N FRONT SURFACE sample line(s), none inside a step` | the sampler logs 40 samples per boot (`rd3AccelSampleFront`) and they were used up before the bisect | the log cannot show a live writer in this run: the per-step `inplace` (buffers rewritten while on the panel and shown again) and `torn` counters in the second table are the evidence; re-arming the sampler per step is the open item in DRIVER-PLAN N36 |
 | `WARN <log>: could not place any step in the log` / `step(s) ... not found in it` / `WARN no kernel log given` | no `trace: events W..W (asked by sysctl` marker near the steps' `trace_events_start` and no clock in the lines (an older kext without `trace_dump`, a log that starts later, the wrong serial log) | the `front` column is `?`; read the serial log by hand with `at:` times and the `trace_events` numbers of bisect.txt |
 
 The second table has, per step, the deltas from that step's own `-- before` block (an older autoreport.sh
 without it falls back to the step before): swaps per head, `copy` (swap mode 1/2 copies), `hold` (stale
-holds), `flips` (`iop_flips`, zero-copy), `inplace`, `torn`, `iop_ok`. The trace of each step: events
+holds), `flips` (`iop_flips`, zero-copy), `inplace`, `torn`, `iop_ok`, `gen hold` (`swaps_genhold_h<N>`: the
+write generations' holds), `fbuf` (the family's flip-buffer calls / of them presented). The switch column is
+`swap_mode/stale/iop/a3/lat/flip/fbp/gen` (`-` for a switch an older run did not have). The trace of each step: events
 `trace_events_start`..`trace_events` of `36-stream-trace-stream.bin` (`tools/rdna3_trace.py`), the stream's
 byte positions are next to them; WindowServer's plugin trace is the end-of-run snapshot (`plugin-end-...`,
 `plugin-bisect-end-...`), per step only with `BISECT_PLUGIN_SNAP=1` (by hand).
@@ -2574,7 +2577,8 @@ byte positions are next to them; WindowServer's plugin trace is the end-of-run s
   (`gTrScan` in `accel/rdna3-accel.cpp`, commit e8d8fda; the sysctl turns it
   on). The owner confirms the picture is right on both monitors. Modes 1 and 2
   stay for comparison: boot-arg `rdna3swapmode=1` / `2` or
-  `sysctl -w debug.rdna3accel_swap_mode=1`.
+  `sysctl -w debug.rdna3accel_swap_mode=1`. **Superseded** by the write
+  generations (the last section of this file): mode 1 is the default again.
 - The tools follow: (1) the swap A/B is opt-in (boot-arg `rdna3swapab=1`); a
   normal step runs none and triage does not fail it; (2) the bisect's steps 6-11
   are now: 6 `swap_stale` (= the defaults = step 0), 7 control mode 1, 8
@@ -2597,7 +2601,64 @@ byte positions are next to them; WindowServer's plugin trace is the end-of-run s
 
 | Seen | Cause | Action |
 |---|---|---|
-| picture broken after `rdna3swapmode=1` / `swap_mode=1` / `rdna3swapab=1` | mode 1 (the copy) breaks both monitors (bisect step 6) | expected: the flip is the default; do not use mode 1 for daily work |
+| picture broken after `rdna3swapmode=1` / `swap_mode=1` / `rdna3swapab=1` | mode 1 (the copy) breaks both monitors (bisect step 6) | superseded by the write generations (below): mode 1 is the default again; a broken picture in mode 1 now is read there |
 | `WARN H-COPY: mode 0 ...` | WindowServer rewrites a buffer the panel shows | look at the pictures; the old FAIL advice (mode 1) was disproved |
 | `swap A/B  not asked` | normal step | `rdna3vm args "<step's args> rdna3swapab=1"` to run the comparison |
 | `rdna3vm step play` report with label `play` | the owner's hand-driven session, reports at minute 5 and 10 (two reports, `-play-`) | read as any step; no tests ran, so only the looks, counters, trace and PM lines |
+
+### Reports 2026-10-17d/f/g: the write generations and the flip-present hooks
+
+- Evidence (17d's trace, 17f/g's serial logs): on the agdc profile WindowServer
+  composites on the CPU through the family's aperture into buf[1] of each display
+  surface, every frame (17d: 0x88850000 441 page-ons, 0x89040000 none): page-on
+  b1 about 13 ms after a swap, copy forward b0 -> b1 about 1.9 ms before the
+  next, `submitSwapCopy(b0, b1)` and 0.36 ms later `submitSwapCopy(b0, b2)` of a
+  b2 it never draws. Mode 0 (the flip) puts b1 on the panel and WindowServer
+  writes the next frame into it (17f: "rewritten in place", "A LIVE WRITER IS
+  PAINTING THE SCANNED-OUT SURFACE"). Copy forward bursts rotate the three
+  buffers at about 60 Hz with no swap (17d: 688.51-688.72 s, 803.1-806.6 s): the
+  family presents those frames by another path; a burst leaves an old frame in
+  b2, which mode 0 flipped to and mode 1 copied over the panel.
+- Done: the write generations (`common/rdna3_write_gen.h`, `tests/test_write_gen.c`).
+  A page-on or a copy forward into a buffer stamps it; a swap presents its back
+  only when it was written after the head's frame, otherwise it holds (no flip,
+  no copy: the panel keeps its frame). Copy forward copies from a front written
+  after that frame. **Swap mode 1 (the copy) is the default again**: the only
+  mode in which the panel never shows a buffer WindowServer writes. The
+  flip-present hooks trace (and with `debug.rdna3accel_flipbuf_present=1`
+  present) the family's `submitFlipBuffer` / `submitScanoutFlipBuffer`, and
+  trace `pickPresentType`, `didSubmitSwap`, `isBackBufferReady`, `submitUpdate`;
+  all of them always run the family's own afterwards.
+- Switches: `debug.rdna3accel_swap_gen` / boot-arg `rdna3swapgen` (1, 0 = only
+  counted: `swaps_genhold_would_h<N>`), `debug.rdna3accel_flipbuf_present` /
+  `rdna3flipbufpresent` (0), `debug.rdna3accel_swap_mode` / `rdna3swapmode` (1,
+  0 = the flip of 17d..g). The bisect-agdc plan (13 steps) compares them.
+- Log lines: `swap #N: head H: the back (a2) 0x... held: never written (no
+  page-on, no copy forward into it) and never presented on this head
+  (generation G, the head's G2) -- no flip, no copy, the panel keeps its frame`;
+  `... presented: written after the head's last frame (...)` (the first 8 of each
+  head, then every 4096th); `swap #N: head H: the back ... was NOT written since
+  this head presented it ... but its samples changed -- presented: a writer the
+  accelerator does not see`; `write generations: head H reset (a display mode
+  change)`; `write generations: the table is full (32 buffers) ...`; `copy
+  forward #N: head H: the front (phys ..., generation G) was written after the
+  head's frame (generation G2) -- copied from it instead of ...`; `hook:
+  IOAccelLegacyDisplayPipe::submitFlipBuffer(event ..., N, res ... (phys ...),
+  res ... (phys ...)) on head H (...; family lock ...; flipbuf_present 0:
+  traced) -- the family's own runs next` (the first 16 of each hook);
+  `hook: IOAccelLegacySurface::isBackBufferReady(N) -> 0x1 (ready) (surface
+  ..., head H; call K)`; `flipbuf #N: head H: ...'s buffer (phys ...) NOT
+  presented: ...`; `flipbuf: head H: ... NOT presented: the family's lock is held
+  by another thread ...`.
+
+| Seen | Meaning | Action |
+|---|---|---|
+| `INFO frame trace: H-GEN: head N: X swaps judged ...: P presented (...), H held (the panel's a, older b, never written c)` | the rule worked: about one hold (b2) per present is WindowServer's normal pattern | compare with the looks; nothing to do when they are right |
+| `FAIL frame trace: H-GEN: head N: K hold(s) of a back the trace shows WRITTEN since the head's last frame` | a frame was held back: the decoder saw a page-on / copy forward into the held back that the kernel's table did not have (an eviction: `swaps_gen_evicted`, or a write path that does not stamp) | read the swap in the timeline and the APERTURE / CF events before it; raise `RD3_WG_SLOTS` for evictions; else find the unstamped path (the family's `pageon` on macOS 26 is forwarded in `tahoe_fwd.h`: does it reach `addToAperture`?) |
+| `WARN swap gen: head N: K back(s) changed with NO write the accelerator saw` / `WARN frame trace: H-GEN: ... content guard` | a writer that is neither the page-on nor copy forward wrote a legacy buffer (the content guard presented it, nothing was lost) | the kernel log's `NOT written since this head presented it` lines name the buffer; find that writer (a GPU blit through the plugin, a kernel mapping) and stamp it |
+| `WARN ... holds against ... presents: the panel may look frozen` | more than two holds per present | look at the pictures; if frozen, `sysctl -w debug.rdna3accel_swap_gen=0` (or `rdna3swapgen=0`) brings the old rules back for the comparison, and report it |
+| `WARN H-FLIPPATH: head N: K of M copy forwards with no swap ... bursts ... and NO flip-buffer call in the trace` | the family presented frames by a path that is not `submitFlipBuffer` / `submitScanoutFlipBuffer` | hook `IOAccelLegacyDisplayMachine::submitFlipBuffer` / `submitScanoutFlipBuffer` next (DRIVER-PLAN N35) |
+| `INFO H-FLIPPATH: head N: flip-buffer calls submitFlipBuffer K; traced K` | the bursts' path found: the frames come through the pipe's flip buffer | run bisect-agdc (steps 4 and 5: `flipbuf_present 1`) and read whether movement gets smooth |
+| `WARN ... flip-buffer presents FAILED` / `flipbuf_busy` > 0 | `flipbuf_present 1` could not copy / flip, or the call came without the family's lock while another thread held it | the `flipbuf #` / `flipbuf:` log lines say why; the family's own present ran anyway |
+| `counter missing: swaps_genhold_h<N>` / `flipbuf_h<N>` / `hook_*` | the collector's grep (`collect.sh` / `autoreport.sh` `a3_sysctls`) or an older kext | update the guest's scripts (`rdna3vm update`) |
+| picture broken in mode 1, right after `sysctl -w debug.rdna3accel_swap_mode=0` | the copy path itself, not the stale frames | report both pictures; bisect-agdc steps 0-3 tell mode x generations apart |

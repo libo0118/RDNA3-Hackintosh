@@ -219,8 +219,9 @@ repository or a Linux host.
    `--bisect-plugin` does the Metal plugin's switches (WindowServer is
    restarted three times; log in again each time). `--bisect-agdc` is the
    kernel bisect over the switches that matter when WindowServer runs on the
-   GPU (`swap_mode`, `swap_stale`, `iop`, `a3`, `swap_latch`, `iop_flip`; 12
-   combinations, not cumulative): use it on a machine booted with the `agdc`
+   GPU (`swap_mode`, `swap_gen`, `flipbuf_present`, `swap_stale`, `iop`, `a3`,
+   `swap_latch`, `iop_flip`; 13 combinations, not cumulative): use it on a
+   machine booted with the `agdc`
    profile's boot-args, see
    [TESTING-VM](TESTING-VM.md#display-bisect-on-the-agdc-profile-step-bisect-agdc).
    The step list, the

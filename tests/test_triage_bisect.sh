@@ -41,11 +41,11 @@ PLAN = [  # n, kind, name, values (None = unchanged)
     (0, "ref", "reference", None), (1, "off", "every new feature off", "0 0 0 0 0 0 0 0 0"),
     (2, "on", "A3", "1 0 0 0 0 0 0 0 0"), (3, "on", "flicker test", "1 1 0 0 0 0 0 0 0"),
     (4, "on", "swap_latch", "1 1 1 0 0 0 0 0 0"), (5, "on", "swap_torn", "1 1 1 1 0 0 0 0 0"),
-    (6, "on", "stale-back hold: the defaults again", "1 1 1 1 0 0 1 0 0"),
-    (7, "extra", "CONTROL mode 1", "1 1 1 1 1 0 1 0 0"), (8, "extra", "CONTROL trace_scan", "1 1 1 1 0 1 1 0 0"),
+    (6, "on", "stale-back hold and swap mode 1: the defaults again", "1 1 1 1 1 0 1 0 0"),
+    (7, "extra", "CONTROL mode 0", "1 1 1 1 0 0 1 0 0"), (8, "extra", "CONTROL trace_scan", "1 1 1 1 1 1 1 0 0"),
     (9, "extra", "CONTROL mode 1 landed", "1 1 1 1 1 0 1 1 0"), (10, "extra", "CONTROL mode 2", "1 1 1 1 2 0 1 0 0"),
-    (11, "extra", "CONTROL a3ws", "1 1 1 1 0 0 1 0 1"), (12, "final", "the defaults again", "1 1 1 1 0 0 1 0 0")]
-DEF = "1 1 1 1 0 0 1 0 0"
+    (11, "extra", "CONTROL a3ws", "1 1 1 1 1 0 1 0 1"), (12, "final", "the defaults again", "1 1 1 1 1 0 1 0 0")]
+DEF = "1 1 1 1 1 0 1 0 0"   # swap_mode 1 (the copy) again since the write generations
 
 
 def ppm(path, rgb, w=8, h=8, noise=0):
@@ -102,11 +102,11 @@ def block(n, kind, name, vals, prev, answer, pcts, still=(), nolook=False, nocnt
 def build(bad_from=None, ref_bad=True, off_bad=False, still_step=None, tty=True, cut_after=None, drop_look=None,
           drop_counters=None, fail_step=None, nonstd=False):
     head = ["# rdna3 bisect v1", "variant: 1 (bisect)", "hold_s: 30", "mode: " + ("tty" if tty else "timer"), "started: 12:00:00",
-            "console_user: tester", "autologin: none", "originals: " + " ".join("%s=%s" % kv for kv in zip(KNOBS, (("0 1 1 1 1 0 1 0 0" if nonstd else DEF)).split()))]
+            "console_user: tester", "autologin: none", "originals: " + " ".join("%s=%s" % kv for kv in zip(KNOBS, (("0 1 1 1 0 0 1 0 0" if nonstd else DEF)).split()))]
     for n, kind, name, vals in PLAN:
         head.append("plan: %d|%02d:%02d|%s|%s|x" % (n, n * 30 // 60, n * 30 % 60, kind, name))
     lines = list(head)
-    prev = "0 1 1 1 1 0 1 0 0" if nonstd else DEF   # what the boot left
+    prev = "0 1 1 1 0 0 1 0 0" if nonstd else DEF   # what the boot left
     for n, kind, name, vals in PLAN:
         if cut_after is not None and n > cut_after:
             break
@@ -130,21 +130,22 @@ def build(bad_from=None, ref_bad=True, off_bad=False, still_step=None, tty=True,
     return "\n".join(lines) + "\n"
 
 
-KNOBS4 = KNOBS + ["iop", "iop_flip"]
-BASE4 = "1 1 1 1 0 0 1 0 0 1 0"
+KNOBS4 = KNOBS + ["iop", "iop_flip", "flipbuf_present", "swap_gen"]
+BASE4 = "1 1 1 1 1 0 1 0 0 1 0 0 1"
 PLAN4 = [  # n, kind, name, values (the whole combination every time)
     (0, "ref", "reference: the defaults of the agdc profile", BASE4),
-    (1, "var", "swap_mode 1 (the copy), swap_stale 1", "1 1 1 1 1 0 1 0 0 1 0"),
-    (2, "var", "swap_mode 1, swap_stale 0", "1 1 1 1 1 0 0 0 0 1 0"),
-    (3, "var", "swap_mode 2 (every back copied)", "1 1 1 1 2 0 1 0 0 1 0"),
-    (4, "var", "swap_mode 0, iop 0", "1 1 1 1 0 0 1 0 0 0 0"),
-    (5, "var", "swap_mode 1, swap_stale 1, iop 0", "1 1 1 1 1 0 1 0 0 0 0"),
-    (6, "var", "swap_mode 0, a3 0", "0 1 1 1 0 0 1 0 0 1 0"),
-    (7, "var", "swap_mode 1, swap_stale 1, a3 0", "0 1 1 1 1 0 1 0 0 1 0"),
-    (8, "var", "swap_mode 0, swap_latch 0", "1 1 0 1 0 0 1 0 0 1 0"),
-    (9, "var", "swap_mode 1, swap_stale 1, swap_latch 0", "1 1 0 1 1 0 1 0 0 1 0"),
-    (10, "var", "swap_mode 0, iop_flip toggled", "1 1 1 1 0 0 1 0 0 1 1"),
-    (11, "final", "the defaults again", BASE4)]
+    (1, "var", "swap_mode 0 (the flip), swap_gen 1", "1 1 1 1 0 0 1 0 0 1 0 0 1"),
+    (2, "var", "swap_mode 1, swap_gen 0", "1 1 1 1 1 0 1 0 0 1 0 0 0"),
+    (3, "var", "swap_mode 0, swap_gen 0", "1 1 1 1 0 0 1 0 0 1 0 0 0"),
+    (4, "var", "swap_mode 1, flipbuf_present 1", "1 1 1 1 1 0 1 0 0 1 0 1 1"),
+    (5, "var", "swap_mode 0, flipbuf_present 1", "1 1 1 1 0 0 1 0 0 1 0 1 1"),
+    (6, "var", "swap_mode 2 (every back copied)", "1 1 1 1 2 0 1 0 0 1 0 0 1"),
+    (7, "var", "swap_mode 1, iop 0", "1 1 1 1 1 0 1 0 0 0 0 0 1"),
+    (8, "var", "swap_mode 1, a3 0", "0 1 1 1 1 0 1 0 0 1 0 0 1"),
+    (9, "var", "swap_mode 1, swap_latch 0", "1 1 0 1 1 0 1 0 0 1 0 0 1"),
+    (10, "var", "swap_mode 1, swap_stale 0", "1 1 1 1 1 0 0 0 0 1 0 0 1"),
+    (11, "var", "swap_mode 0, iop_flip toggled", "1 1 1 1 0 0 1 0 0 1 1 0 1"),
+    (12, "final", "the defaults again", BASE4)]
 FRONT_LINE = ("RDNA3Accelerator: FRONT SURFACE sample %d: sum 0x%08x %s nonzero 100/200 px(100,100)=0x1 px(960,540)=0x2 "
               "px(1800,1000)=0x3 1920x1080 pitch 7680")
 MOVED = "*** MOVED -- A LIVE WRITER IS PAINTING THE SCANNED-OUT SURFACE ***"
@@ -213,7 +214,8 @@ def serial4(front, cap_before=0, after=0, markers=True):
         for j in range(smp):
             k += 1
             out.append(FRONT_LINE % (k, k, MOVED if j < live else FROZEN))
-    out.append("RDNA3Accelerator: trace: events %d..%d (asked by sysctl debug.rdna3accel_trace_dump)" % (ev0(12) - 599, ev0(12)))
+    end = ev0(len(PLAN4))   # after the last step
+    out.append("RDNA3Accelerator: trace: events %d..%d (asked by sysctl debug.rdna3accel_trace_dump)" % (end - 599, end))
     for j in range(after):
         k += 1
         out.append(FRONT_LINE % (k, k, MOVED))
@@ -281,11 +283,11 @@ elif scen.startswith("agdc"):
     elif scen == "agdcnone":        # nothing looked right
         write(build4(right=()), args=A, serial=serial4(FR))
     elif scen == "agdcgood":        # nothing broke
-        write(build4(right=tuple(range(12)), tty=False), args=A, serial=serial4({}))
+        write(build4(right=tuple(range(13)), tty=False), args=A, serial=serial4({}))
     elif scen == "agdcrefok":       # the reference looked right, step 2 broken
-        write(build4(right=tuple(n for n in range(12) if n != 2)), args=A, serial=serial4({}))
-    elif scen == "agdcflaky":       # step 11 has the switches of step 0 and looks different
-        write(build4(right=(11,)), args=A, serial=serial4({}))
+        write(build4(right=tuple(n for n in range(13) if n != 2)), args=A, serial=serial4({}))
+    elif scen == "agdcflaky":       # step 12 has the switches of step 0 and looks different
+        write(build4(right=(12,)), args=A, serial=serial4({}))
     elif scen == "agdcnobefore":    # an older autoreport: no "-- before" block, the deltas come from the step before
         write(build4(right=(3,), nobefore=True), args=A, serial=serial4({}))
 elif scen == "plain":    # an ordinary run: no bisect at all
@@ -303,7 +305,7 @@ grep -qE '^ +0 ref .* n +45% +1% ' <<<"$o" || fail "step 0 row (owner n, pipe 1 
 grep -qE '^ +1 off .* y +45% +30% ' <<<"$o" || fail "step 1 row: $(grep -E '^ +1 ' <<<"$o")"
 grep -qE '^ +2 on +a3 0->1 +y ' <<<"$o" || fail "step 2 row: $(grep -E '^ +2 ' <<<"$o")"
 grep -qE '^ +6 on .* n +45% +1% .*<-- the owner marked it n; pipe 1 black' <<<"$o" || fail "step 6 should be flagged: $(grep -E '^ +6 ' <<<"$o")"
-grep -q 'FAIL BISECT: BREAKS AT step 6 (swap_stale' <<<"$o" || fail "verdict: $(grep BISECT <<<"$o")"
+grep -q 'FAIL BISECT: BREAKS AT step 6 (swap_mode 0->1, swap_stale' <<<"$o" || fail "verdict: $(grep BISECT <<<"$o")"
 grep -q 'FAIL the first step the owner marked n: step 0' <<<"$o" || fail "first n: $(grep 'first step' <<<"$o")"
 grep -q 'FAIL the first step whose looks black: step 0 .*pipe 1 black' <<<"$o" || fail "first black: $(grep 'first step' <<<"$o")"
 grep -qE 'moved|move/still' <<<"$o" || fail "no moved column: $o"
@@ -347,7 +349,7 @@ mk "$T/f" failed
 o=$(run "$T/f")
 grep -q 'FAIL step 4: a switch did not take: debug.rdna3accel_swap_latch:set-failed' <<<"$o" || fail "failed switch: $(grep 'step 4' <<<"$o")"
 grep -q 'WARN step 0 is not the compiled defaults: a3 0 (default 1)' <<<"$o" || fail "non-default originals: $(grep 'compiled' <<<"$o")"
-grep -q 'swap_mode 1 (default 0)' <<<"$o" || fail "swap_mode 1 is not the default since 2026-10-17d: $(grep 'compiled' <<<"$o")"
+grep -q 'swap_mode 0 (default 1)' <<<"$o" || fail "swap_mode 0 is not the default since the write generations: $(grep 'compiled' <<<"$o")"
 mk "$T/m" missing
 o=$(run "$T/m")
 grep -q 'FAIL bisect run (rdna3bisect in the boot-args) but no bisect.txt' <<<"$o" || fail "missing bisect.txt: $o"
@@ -360,27 +362,28 @@ o=$(run "$T/p")
 mk "$T/g1" agdc
 o=$(run "$T/g1")
 grep -q 'display bisect (tools/triage_bisect.py' <<<"$o" || fail "agdc: no bisect table: $o"
-[ "$(grep -cE '^ +[0-9]+ (ref|var|final) ' <<<"$o")" = 12 ] || fail "agdc: not 12 rows in the table: $(grep -E '^ +[0-9]+ (ref|var|final)' <<<"$o")"
+[ "$(grep -cE '^ +[0-9]+ (ref|var|final) ' <<<"$o")" = 13 ] || fail "agdc: not 13 rows in the table: $(grep -E '^ +[0-9]+ (ref|var|final)' <<<"$o")"
 grep -qE '^ +0 ref .* n +45% +1% ' <<<"$o" || fail "agdc: step 0 row: $(grep -E '^ +0 ref' <<<"$o")"
-grep -qE '^ +3 var .*swap_mode 0->2 +y +45% +30% ' <<<"$o" || fail "agdc: step 3 row (looks right): $(grep -E '^ +3 var' <<<"$o")"
-grep -qE '^ +5 var .*swap_mode 0->1, iop 1->0 +n ' <<<"$o" || fail "agdc: step 5 row (changed against the boot, not the step before): $(grep -E '^ +5 var' <<<"$o")"
+grep -qE '^ +3 var .*swap_mode 1->0, swap_gen 1->0 +y +45% +30% ' <<<"$o" || fail "agdc: step 3 row (looks right): $(grep -E '^ +3 var' <<<"$o")"
+grep -qE '^ +5 var .*swap_mode 1->0, flipbuf_present 0->1 +n ' <<<"$o" || fail "agdc: step 5 row (changed against the boot, not the step before): $(grep -E '^ +5 var' <<<"$o")"
 grep -q 'FAIL BISECT-AGDC: the reference (step 0, the agdc profile.s defaults) looked BROKEN' <<<"$o" || fail "agdc: verdict: $(grep BISECT <<<"$o")"
-grep -q 'the steps that looked RIGHT: step 3 (swap_mode 2 (every back copied)); step 4 (swap_mode 0, iop 0)' <<<"$o" || fail "agdc: the right steps: $(grep 'looked RIGHT' <<<"$o")"
-grep -q 'INFO BISECT-AGDC by swap_mode: mode 0: right \[4\], broken \[0, 6, 8, 10, 11\]; mode 1: right none, broken \[1, 2, 5, 7, 9\]; mode 2: right \[3\], broken none' <<<"$o" ||
+grep -q 'the steps that looked RIGHT: step 3 (swap_mode 0, swap_gen 0); step 4 (swap_mode 1, flipbuf_present 1)' <<<"$o" || fail "agdc: the right steps: $(grep 'looked RIGHT' <<<"$o")"
+grep -q 'INFO BISECT-AGDC by swap_mode: mode 0: right \[3\], broken \[1, 5, 11\]; mode 1: right \[4\], broken \[0, 2, 7, 8, 9, 10, 12\]; mode 2: right none, broken \[6\]' <<<"$o" ||
     fail "agdc: by swap_mode: $(grep 'by swap_mode' <<<"$o")"
 ! grep -q 'BREAKS AT' <<<"$o" || fail "agdc: a cumulative verdict for a plan that is not cumulative"
 grep -q 'bisect  *FAIL BISECT-AGDC: the reference' <<<"$o" || fail "agdc: SUMMARY row: $(sed -n '/^SUMMARY/,$p' <<<"$o" | grep -i bisect)"
 # the counters: from the step's own "-- before" block (swaps h0 +300, not +340 from the step before), per step
 grep -q 'swap counters per step' <<<"$o" || fail "agdc: no counter table"
-grep -qE '^ +3 +2/1/1/1/1/0 +300 +150 +30 +6 +7 +15 +0 +50 ' <<<"$o" || fail "agdc: step 3 counters: $(grep -E '^ +3 +[0-9]/' <<<"$o")"
-grep -qE '^ +10 +0/1/1/1/1/1 +300 +150 +100 +20 +7 +50 ' <<<"$o" || fail "agdc: step 10 counters: $(grep -E '^ +10 +[0-9]/' <<<"$o")"
+grep -qE '^ +3 +0/1/1/1/1/0/0/0 +300 +150 +30 +6 +7 +15 +0 +50 ' <<<"$o" || fail "agdc: step 3 counters: $(grep -E '^ +3 +[0-9]/' <<<"$o")"
+grep -qE '^ +10 +1/0/1/1/1/0/0/1 +300 +150 +100 +20 +7 +50 ' <<<"$o" || fail "agdc: step 10 counters: $(grep -E '^ +10 +[0-9]/' <<<"$o")"
+grep -q 'the switch column: swap_mode/stale/iop/a3/lat/flip/fbp/gen' <<<"$o" || fail "agdc: the switch column is not explained"
 # the trace slice of each step
 grep -qE '^ +3 .* 25000\.\.29000 \(stream bytes 3000\.\.3900\)' <<<"$o" || fail "agdc: step 3 trace slice: $(grep -E '^ +3 +[0-9]/' <<<"$o")"
 # FRONT SURFACE per step from the serial log, cut by the markers; the lines after the end dump are no step's
-grep -qE '^ +0 +0/1/1/1/1/0 .* +2/3 ' <<<"$o" || fail "agdc: step 0 front: $(grep -E '^ +0 +[0-9]/' <<<"$o")"
+grep -qE '^ +0 +1/1/1/1/1/0/0/1 .* +2/3 ' <<<"$o" || fail "agdc: step 0 front: $(grep -E '^ +0 +[0-9]/' <<<"$o")"
 grep -qE '^ +1 +[0-9/]+ .* +0/1 ' <<<"$o" || fail "agdc: step 1 front: $(grep -E '^ +1 +[0-9]/' <<<"$o")"
 grep -qE '^ +6 +[0-9/]+ .* +1/2 ' <<<"$o" || fail "agdc: step 6 front: $(grep -E '^ +6 +[0-9]/' <<<"$o")"
-grep -qE '^ +11 +[0-9/]+ .* +0/0 ' <<<"$o" || fail "agdc: step 11 front (the lines after the run's last dump are not its): $(grep -E '^ +11 +[0-9]/' <<<"$o")"
+grep -qE '^ +12 +[0-9/]+ .* +0/0 ' <<<"$o" || fail "agdc: step 12 front (the lines after the run's last dump are not its): $(grep -E '^ +12 +[0-9]/' <<<"$o")"
 grep -q 'INFO FRONT SURFACE lines per step: serial-20261017-120000.log, cut by the trace_dump marker lines' <<<"$o" || fail "agdc: the log used is not said: $(grep 'FRONT SURFACE' <<<"$o")"
 ! grep -q 'FRONT SURFACE sample line' <<<"$o" || fail "agdc: a cap warning where the steps have samples: $(grep 'FRONT SURFACE' <<<"$o")"
 
@@ -416,17 +419,17 @@ grep -q 'INFO BISECT-AGDC: no step looked broken' <<<"$o" || fail "agdc good: $(
 # the reference looked right, one step broke
 mk "$T/g7" agdcrefok
 o=$(run "$T/g7")
-grep -q 'WARN BISECT-AGDC: the reference (step 0) looked RIGHT .*these steps looked BROKEN: step 2 (swap_mode 1, swap_stale 0)' <<<"$o" || fail "agdc ref ok: $(grep BISECT <<<"$o")"
+grep -q 'WARN BISECT-AGDC: the reference (step 0) looked RIGHT .*these steps looked BROKEN: step 2 (swap_mode 1, swap_gen 0)' <<<"$o" || fail "agdc ref ok: $(grep BISECT <<<"$o")"
 
-# step 11 = step 0 but not alike
+# step 12 = step 0 but not alike
 mk "$T/g8" agdcflaky
 o=$(run "$T/g8")
-grep -q 'WARN BISECT-AGDC: step 11 has the same switches as step 0 but looked right there, broken here' <<<"$o" || fail "agdc flaky: $(grep BISECT <<<"$o")"
+grep -q 'WARN BISECT-AGDC: step 12 has the same switches as step 0 but looked right there, broken here' <<<"$o" || fail "agdc flaky: $(grep BISECT <<<"$o")"
 
 # an older autoreport without the "-- before" blocks: the deltas come from the step before (1000 swaps, the whole step before's span, not 300)
 mk "$T/g9" agdcnobefore
 o=$(run "$T/g9")
-grep -qE '^ +3 +2/1/1/1/1/0 +1000 +500 ' <<<"$o" || fail "agdc no before: $(grep -E '^ +3 +[0-9]/' <<<"$o")"
+grep -qE '^ +3 +0/1/1/1/1/0/0/0 +1000 +500 ' <<<"$o" || fail "agdc no before: $(grep -E '^ +3 +[0-9]/' <<<"$o")"
 
 # the boot-args of the run reach the group
 python3 -I - "$ROOT" <<'PY' || fail "triage_reports.bisect_run_expected(rdna3bisect=4)"
