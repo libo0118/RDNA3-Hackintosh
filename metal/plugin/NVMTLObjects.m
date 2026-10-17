@@ -51,7 +51,7 @@ static void nvmtl_buffer_sync_out(NVMTLBuffer *b);
 static void nvbt(const char *tag, int *count, int max) {
     if (*count >= max) return; (*count)++;
     extern const char *nvmtl_log_path(void);
-    FILE *f = fopen(nvmtl_log_path(), "a"); if (!f) return;
+    FILE *f = nvmtl_log_open(nvmtl_log_path()); if (!f) return;
     NSArray *syms = [NSThread callStackSymbols];
     fprintf(f, "pid %d NVMTL: BT %s #%d (%lu frames)\n", getpid(), tag, *count, (unsigned long)syms.count);
     for (NSUInteger i = 1; i < syms.count && i < 14; i++) fprintf(f, "pid %d NVMTL:    %s\n", getpid(), [syms[i] UTF8String]);
@@ -963,7 +963,7 @@ static void nvtrace(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void nvtrace(const char *fmt, ...) {
     if (!nvmtl_trace_on()) return;
     char p[96]; snprintf(p, sizeof p, "/tmp/nvmtl-trace-%d.txt", (int)getpid());
-    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, 0600);
     if (fd < 0) { static int said; if (!said++) nvlog("G15 trace: cannot open %s (errno %d)", p, errno); return; }
     char b[700]; va_list a; va_start(a, fmt); int n = vsnprintf(b, sizeof b - 1, fmt, a); va_end(a);
     if (n < 0) n = 0; if (n > (int)sizeof b - 2) n = (int)sizeof b - 2;
@@ -4770,7 +4770,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
                       dn ? (double)dwaits / (double)dn : 0.0);
                 {
                     static FILE *ff; static long fbytes;
-                    if (!ff) { char fp[512]; const char *td = getenv("TMPDIR"); snprintf(fp, sizeof fp, "%s/nvmtl-fps-%d.log", td && *td ? td : "/tmp", (int)getpid()); ff = fopen(fp, "a"); }
+                    if (!ff) { char fp[512]; const char *td = getenv("TMPDIR"); snprintf(fp, sizeof fp, "%s/nvmtl-fps-%d.log", td && *td ? td : "/tmp", (int)getpid()); ff = nvmtl_log_open(fp); }
                     if (ff && fbytes < (1 << 20)) {
                         time_t tt = time(NULL); struct tm lt; localtime_r(&tt, &lt);
                         fbytes += fprintf(ff, "%02d:%02d:%02d fps %.2f frames %llu gpuwait %.1f%% submits/frame %.1f\n", lt.tm_hour, lt.tm_min, lt.tm_sec,

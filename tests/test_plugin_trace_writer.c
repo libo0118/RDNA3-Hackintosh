@@ -7,6 +7,9 @@
  *   test_plugin_trace_writer wrap       more events than the ring holds (NVMTL_TRACE_RING=256)
  *   test_plugin_trace_writer parity     the band hash against the kernel's (common/rdna3_a3_display.h) formula
  *   test_plugin_trace_writer off        NVMTL_TRACE=0: nothing may be created
+ *   test_plugin_trace_writer dir PATH   nvt_open_dir: a new shared dir is 1777, a symlink is refused, a foreign owner too
+ *   test_plugin_trace_writer squat      a symlink and a foreign file sit on the trace's name: another name is taken
+ *   test_plugin_trace_writer prune DIR  nvt_prune_fd: dead-pid traces over the limit go, WindowServer's and live ones stay
  * The trace goes to $NVMTL_TRACE_DIR as $NVMTL_TRACE_NAME-<pid>.trace.
  */
 #ifndef _GNU_SOURCE
@@ -147,9 +150,110 @@ static int parity(void)
     return 0;
 }
 
+static int squat(void)
+{
+    /* the directory is world writable: someone plants the trace's name before the process starts */
+    const char *dir = getenv("NVMTL_TRACE_DIR");
+    char p[512], victim[512];
+    CHECK(dir);
+    snprintf(victim, sizeof victim, "%s/victim.txt", dir);
+    snprintf(p, sizeof p, "%s/%s-%u.trace", dir, getenv("NVMTL_TRACE_NAME"), (unsigned)getpid());
+    { int fd = open(victim, O_WRONLY | O_CREAT | O_TRUNC, 0600); CHECK(fd >= 0); CHECK(write(fd, "keep", 4) == 4); close(fd); }
+    CHECK(mkdir(dir, 0700) == 0 || errno == EEXIST);
+    CHECK(symlink(victim, p) == 0);
+    CHECK(nvt_on());
+    CHECK(strstr(g_nvt.path, ".1-") != NULL);   /* the next name */
+    nvt_ev_cb_commit(1, 0, 0, 0);
+    { char buf[8] = { 0 }; int fd = open(victim, O_RDONLY); CHECK(fd >= 0); CHECK(read(fd, buf, 8) == 4); close(fd); CHECK(memcmp(buf, "keep", 4) == 0); }
+    return 0;
+}
+
+static int dirs(const char *base)
+{
+    char d[512], l[512];
+    struct stat st;
+    CHECK(mkdir(base, 0700) == 0 || errno == EEXIST);
+    snprintf(d, sizeof d, "%s/shared", base);
+    int fd = nvt_open_dir(d, 1);
+    CHECK(fd >= 0);
+    CHECK(fstat(fd, &st) == 0 && (st.st_mode & 07777) == 01777);   /* made by this call: sticky and world writable */
+    close(fd);
+    fd = nvt_open_dir(d, 1);   /* it exists now: opened, not chmod'ed again */
+    CHECK(fd >= 0);
+    close(fd);
+    snprintf(d, sizeof d, "%s/private", base);
+    fd = nvt_open_dir(d, 0);
+    CHECK(fd >= 0 && fstat(fd, &st) == 0 && (st.st_mode & 07777) == 0700);   /* a named directory is never made public */
+    close(fd);
+    snprintf(l, sizeof l, "%s/link", base);
+    CHECK(symlink(d, l) == 0);
+    errno = 0;
+    CHECK(nvt_open_dir(l, 1) < 0 && (errno == ELOOP || errno == ENOTDIR || errno == EMLINK));   /* never follow a link */
+    CHECK(fstatat(AT_FDCWD, d, &st, 0) == 0 && (st.st_mode & 07777) == 0700);
+    if (geteuid() == 0) {   /* root never writes into a directory somebody else owns */
+        snprintf(d, sizeof d, "%s/foreign", base);
+        CHECK(mkdir(d, 0755) == 0 && chown(d, 1234, 1234) == 0);
+        errno = 0;
+        CHECK(nvt_open_dir(d, 1) < 0 && errno == EPERM);
+        snprintf(d, sizeof d, "%s/ws", base);
+        CHECK(mkdir(d, 0755) == 0 && chown(d, NVT_UID_WINDOWSERVER, 1234) == 0);
+        errno = 0;
+        CHECK(nvt_open_dir(d, 1) < 0 && errno == EPERM);
+    }
+    puts("dirs ok");
+    return 0;
+}
+
+static void touch_old(const char *dir, const char *name, long age)
+{
+    char p[512];
+    snprintf(p, sizeof p, "%s/%s", dir, name);
+    int fd = open(p, O_WRONLY | O_CREAT, 0600);
+    CHECK(fd >= 0);
+    close(fd);
+    struct timespec ts[2] = { { time(NULL) - age, 0 }, { time(NULL) - age, 0 } };
+    CHECK(utimensat(AT_FDCWD, p, ts, 0) == 0);
+}
+static int exists(const char *dir, const char *name)
+{
+    char p[512];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/%s", dir, name);
+    return lstat(p, &st) == 0;
+}
+static int prune(const char *dir)
+{
+    char n[64];
+    CHECK(mkdir(dir, 0700) == 0);
+    /* 80 dead apps (pids no process has), the newest ones a minute old; dead WindowServer traces; a live one (ours);
+     * one that merely looks like a trace */
+    for (int i = 0; i < 80; i++) { snprintf(n, sizeof n, "App-%d.trace", 4100000 + i); touch_old(dir, n, 60 + 10 * (80 - i)); }
+    touch_old(dir, "WindowServer-4200000.trace", 7200);
+    touch_old(dir, "WindowServer.1-4200001.trace", 4 * 86400);   /* a dead one older than 3 days goes by age */
+    snprintf(n, sizeof n, "Live-%u.trace", (unsigned)getpid()); touch_old(dir, n, 4 * 86400);
+    touch_old(dir, "notes.txt", 10 * 86400);
+    const int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    CHECK(dfd >= 0);
+    nvt_prune_fd(dfd, "keepme-1.trace");
+    close(dfd);
+    unsigned left = 0;
+    for (int i = 0; i < 80; i++) { snprintf(n, sizeof n, "App-%d.trace", 4100000 + i); left += (unsigned)exists(dir, n); }
+    CHECK(left == NVT_KEEP_FILES - 2);   /* 64 allowed: the two WindowServer files count in the total, 62 apps stay */
+    CHECK(!exists(dir, "App-4100000.trace") && exists(dir, "App-4100079.trace"));   /* the oldest went */
+    CHECK(exists(dir, "WindowServer-4200000.trace"));    /* never for the count */
+    CHECK(!exists(dir, "WindowServer.1-4200001.trace"));  /* by age */
+    snprintf(n, sizeof n, "Live-%u.trace", (unsigned)getpid());
+    CHECK(exists(dir, n) && exists(dir, "notes.txt"));
+    puts("prune ok");
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) return 2;
+    if (!strcmp(argv[1], "squat")) return squat();
+    if (!strcmp(argv[1], "dir") && argc > 2) return dirs(argv[2]);
+    if (!strcmp(argv[1], "prune") && argc > 2) return prune(argv[2]);
     if (!strcmp(argv[1], "scenario")) return scenario();
     if (!strcmp(argv[1], "wrap")) return wrap();
     if (!strcmp(argv[1], "parity")) return parity();

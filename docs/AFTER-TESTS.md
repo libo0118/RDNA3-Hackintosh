@@ -1016,9 +1016,22 @@ report was taken. If `31-plugin-trace/info.txt` says 0 traces: the plugin is
 older than the trace, or `NVMTL_TRACE=0` is set (also readable from the
 `trace:` line in the plugin log). Switch off: `NVMTL_TRACE=0` in
 `/Library/GPUBundles/rdna3mtl/rdna3mtl.conf`. The directory `/var/tmp/rdna3-nvmtl`
-is created root-owned, mode 1777, by the package's postinstall; if an app
-created it first, WindowServer (uid 88) and root are still accepted as owner,
-anyone else's directory is refused (`trace: cannot create ...` in the plugin log).
+is created root:admin, mode 1777, by the package's postinstall (a symlink or a
+directory of somebody else's planted there is removed first, never followed);
+the files are mode 0640, so the admin group (and root) can read them and other
+users cannot. If an app created the directory first, root, WindowServer (uid 88)
+and that app's user are accepted as owner (a root process accepts only root's),
+anyone else's is refused (`trace: cannot use the trace directory ...` in the
+plugin log); without the postinstall's group the files carry the creator's
+group, so collect as root (`sudo`) then. The collector takes only regular files
+with one link, the NVMTLTR1 magic, owned by root/uid 88 or by the uid their own
+header names (never a link, never a file named WindowServer* of another user),
+and says what it refused in `31-plugin-trace/info.txt` (`REJECT ... reason`).
+The decoder warns (`ws-uid`) about a WindowServer trace not written by uid 88.
+Privacy: a trace holds timestamps, IOSurface ids and unsalted hashes of sampled
+pixels (needed to match the kext's band hash), i.e. a coarse record of screen
+activity: keep reports private. `NVMTL_TRACE_*` knobs are ignored by set-uid
+processes; there is no /private/tmp fallback any more.
 Residual risks: the trace is an mmap'd file, so a process that truncates it
 (as root, by hand) kills the traced process with SIGBUS (deleting it is safe);
 `NVMTL_TRACE_HASH=2` reads IOSurface memory the plugin did not lock, so only

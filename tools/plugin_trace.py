@@ -37,6 +37,8 @@ import collections
 import datetime
 import io
 import os
+import re
+import stat
 import struct
 import sys
 import tarfile
@@ -45,6 +47,14 @@ HDR = struct.Struct("<8s6I3Q2I4Q4I64s")
 REC = struct.Struct("<QII4BIi7IQ4I12I")
 REC_SIZE = 128
 assert HDR.size == 176 and REC.size == REC_SIZE
+MAX_FILE = 256 << 20       # a trace is 4 MB; nothing bigger is read (a report comes from a machine others can write to)
+MAX_RECORDS = 1 << 21      # per region, what the header may claim
+_UNPRINTABLE = re.compile(r"[^\x20-\x7e]")
+
+
+def clean(text):
+    """text from a trace or a file name, made safe to print (no escape sequences, no control characters)"""
+    return _UNPRINTABLE.sub("?", str(text))
 
 # kinds (metal/plugin/nvmtl_trace.h NVT_K_*)
 K_SURF_IN, K_SURF_OUT, K_PASS_BEGIN, K_PASS_END = 2, 3, 4, 5
@@ -148,7 +158,7 @@ class Rec:
         (self.abs, self.seq, self.tid, self.kind, self.path, self.plane, self.flags, self.surf, self.rc, self.w, self.h,
          self.fmt, self.bpr, self.seed0, self.seed1, self.dur_us, self.bytes, self.id, self.a0, self.a1, self.a2) = v[:21]
         self.words = v[21:]
-        self.text = raw[80:128].split(b"\0", 1)[0].decode("utf-8", "replace")
+        self.text = clean(raw[80:128].split(b"\0", 1)[0].decode("utf-8", "replace"))
         self.ring = ring
         self.t = 0.0
 
@@ -175,9 +185,11 @@ class Trace:
         (_, self.version, self.rec_size, self.nmain, self.nvk, self.nsum, self.pid, self.off_main, self.off_vk, self.off_sum,
          self.tb_n, self.tb_d, self.start_abs, self.start_wall_ns, self.widx_main, self.widx_vk, self.seq_next, self.flags,
          self.uid, self.ncnt, proc) = HDR.unpack_from(data, 0)
-        self.proc = proc.split(b"\0", 1)[0].decode("utf-8", "replace")
+        self.proc = clean(proc.split(b"\0", 1)[0].decode("utf-8", "replace"))
         if self.version != 1 or self.rec_size != REC_SIZE or not self.tb_d:
             raise ValueError("%s: unsupported trace version %d / record size %d" % (name, self.version, self.rec_size))
+        if max(self.nmain, self.nvk, self.nsum) > MAX_RECORDS:
+            raise ValueError("%s: the header claims %d / %d / %d records (more than %d)" % (name, self.nmain, self.nvk, self.nsum, MAX_RECORDS))
         for ring, off, n in ((0, self.off_main, self.nmain), (1, self.off_vk, self.nvk)):
             if off + n * REC_SIZE > len(data):
                 self.problems.append("ring %d is cut off: the file holds %d of %d bytes" % (ring, max(0, len(data) - off), n * REC_SIZE))
@@ -210,13 +222,22 @@ class Trace:
         return max(0, ticks - self.start_abs) * self.tb_n / self.tb_d / 1e9
 
     def wall(self, r, utc_offset=0.0):
-        ns = self.start_wall_ns + max(0, r.abs - self.start_abs) * self.tb_n // self.tb_d
-        d = datetime.datetime.fromtimestamp(ns / 1e9, datetime.timezone.utc) + datetime.timedelta(hours=utc_offset)
-        return d.strftime("%H:%M:%S.%f")[:-3]
+        try:
+            ns = self.start_wall_ns + max(0, r.abs - self.start_abs) * self.tb_n // self.tb_d
+            d = datetime.datetime.fromtimestamp(ns / 1e9, datetime.timezone.utc) + datetime.timedelta(hours=utc_offset)
+            return d.strftime("%H:%M:%S.%f")[:-3]
+        except (OverflowError, ValueError, OSError):
+            return "??:??:??.???"   # a header with an impossible clock
 
     def complete_history(self):
         """the main ring never wrapped: every main-ring event since the trace opened is still here"""
         return self.widx_main <= self.nmain
+
+    def opened(self):
+        try:
+            return datetime.datetime.fromtimestamp(self.start_wall_ns / 1e9, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except (OverflowError, ValueError, OSError):
+            return "?"
 
     def totals(self):
         t = collections.Counter()
@@ -231,36 +252,55 @@ def off_ok(off, n, size):
 
 # ---------------------------------------------------------------------------------------------- loading
 
+def read_regular(path):
+    """the bytes of a regular file of a sane size; ValueError otherwise (a symlink, a device, a 300 MB file)"""
+    st = os.lstat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError("%s: not a regular file (a link or special file is not read)" % clean(path))
+    if st.st_size > MAX_FILE:
+        raise ValueError("%s: %d bytes, more than %d (not read)" % (clean(path), st.st_size, MAX_FILE))
+    with open(path, "rb") as fh:
+        return fh.read(MAX_FILE + 1)
+
+
 def load_paths(paths):
     traces, problems = [], []
 
     def add(name, data):
         try:
-            traces.append(Trace(name, data))
+            traces.append(Trace(clean(name), data))
         except (ValueError, struct.error) as e:
-            problems.append(str(e))
+            problems.append(clean(e))
 
     for p in paths:
-        if os.path.isdir(p):
-            sub = os.path.join(p, "31-plugin-trace")
-            d = sub if os.path.isdir(sub) else p
-            names = sorted(f for f in os.listdir(d) if f.endswith(".trace"))
-            if not names:
-                problems.append("%s: no .trace files" % d)
-            for f in names:
-                with open(os.path.join(d, f), "rb") as fh:
-                    add(f, fh.read())
-        elif p.endswith((".tar.gz", ".tgz", ".tar")):
-            n0 = len(traces)
-            with tarfile.open(p) as tar:
-                for m in tar.getmembers():
-                    if m.isfile() and m.name.endswith(".trace"):
+        try:
+            if os.path.isdir(p) and not os.path.islink(p):
+                sub = os.path.join(p, "31-plugin-trace")
+                d = sub if os.path.isdir(sub) and not os.path.islink(sub) else p
+                names = sorted(f for f in os.listdir(d) if f.endswith(".trace"))
+                if not names:
+                    problems.append("%s: no .trace files" % clean(d))
+                for f in names:
+                    try:
+                        add(f, read_regular(os.path.join(d, f)))
+                    except (ValueError, OSError) as e:
+                        problems.append(clean(e))
+            elif p.endswith((".tar.gz", ".tgz", ".tar")):
+                n0 = len(traces)
+                with tarfile.open(p) as tar:
+                    for m in tar:
+                        if not (m.isfile() and m.name.endswith(".trace")):
+                            continue
+                        if m.size > MAX_FILE:
+                            problems.append("%s: %d bytes, more than %d (not read)" % (clean(m.name), m.size, MAX_FILE))
+                            continue
                         add(os.path.basename(m.name), tar.extractfile(m).read())
-            if len(traces) == n0:
-                problems.append("%s: no plugin traces in the archive (collect_plugin_trace.sh did not run, or the plugin is older)" % p)
-        else:
-            with open(p, "rb") as fh:
-                add(os.path.basename(p), fh.read())
+                if len(traces) == n0:
+                    problems.append("%s: no plugin traces in the archive (collect_plugin_trace.sh did not run, or the plugin is older)" % clean(p))
+            else:
+                add(os.path.basename(p), read_regular(p))
+        except (ValueError, OSError, tarfile.TarError) as e:
+            problems.append(clean(e))
     traces.sort(key=lambda t: (t.proc != "WindowServer", t.proc, t.pid))
     return traces, problems
 
@@ -408,9 +448,9 @@ class Analysis:
         for f in self.frames.values():
             if not f.commit or not f.dirty:
                 continue
+            pubs = {o.surf for o in f.outs if o.path in (1, 2, 3)}
             for d in f.dirty:
-                ok = any(o.surf == d.surf and o.path in (1, 2, 3) for o in f.outs)
-                if ok:
+                if d.surf in pubs:
                     continue
                 (unfinished if f.done is None else never)[d.surf].append(f)
         for sid, fl in sorted(never.items()):
@@ -500,6 +540,9 @@ class Analysis:
                      ["cb %d at +%.3fs: error code %d" % (f.cb, f.done.t, f.done.rc) for f in errs[:3]])
         if tr.problems:
             self.add("WARN", "trace-damaged", "; ".join(tr.problems))
+        if tr.proc == "WindowServer" and tr.uid != 88:
+            self.add("WARN", "ws-uid", "a trace named WindowServer written by uid %d, not _windowserver (88): another WindowServer "
+                     "(root, a test) or a forged file - do not trust it" % tr.uid)
 
     def _skips(self):
         stale, foreign = [], []
@@ -601,11 +644,11 @@ def describe(tr, r, off, prefix=True):
 
 def print_header(tr, an, out):
     out.write("=" * 100 + "\n")
-    out.write("%s  pid %d  (%s, uid %d)\n" % (tr.proc, tr.pid, tr.name, tr.uid))
+    out.write("%s  pid %d  (%s, uid %d)\n" % (tr.proc, tr.pid, clean(tr.name), tr.uid))
     first = tr.recs[0].t if tr.recs else 0.0
     last = tr.recs[-1].t if tr.recs else 0.0
     out.write("trace opened %s UTC; events: %d written, %d kept (main ring %d, vk ring %d of %d); kept window +%.3fs .. +%.3fs%s\n" % (
-        datetime.datetime.fromtimestamp(tr.start_wall_ns / 1e9, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        tr.opened(),
         tr.total_events, tr.kept, tr.widx_main, tr.widx_vk, tr.nmain, first, last,
         "" if tr.complete_history() else "  (main ring WRAPPED: older events only in the summary)"))
     t = tr.totals()

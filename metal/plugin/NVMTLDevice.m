@@ -9,6 +9,7 @@
 #include <libproc.h>
 #include <pwd.h>
 #include <errno.h>
+#include <fcntl.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
@@ -42,6 +43,19 @@ static inline FILE *nvmtl_rel_fopen(const char *p, const char *m) { return nvmtl
 #define access(p, m) nvmtl_rel_access(p, m)
 #define fopen(p, m) nvmtl_rel_fopen(p, m)
 #endif
+/* Append-only log files are opened without following a symlink: the plugin also runs as root (mtlprobe from the VM
+ * harness, daemons) and the paths are predictable names in /tmp. NULL when it cannot be opened. */
+static FILE *nvmtl_log_open(const char *path)
+{
+#if NVMTL_RELEASE
+    if (nvmtl_rel_devpath(path)) return NULL;
+#endif
+    const int fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "a");
+    if (!f) close(fd);
+    return f;
+}
 int nvmtl_vk_init(void);
 uint16_t nvmtl_vk_set_accelerator(mach_port_t accelerator);
 uint16_t nvmtl_vk_vendor(void);
@@ -94,7 +108,7 @@ const char *nvmtl_log_path(void) {
     static char path[1024]; static int decided;
     if (!decided) {
         decided = 1;
-        FILE *f = fopen("/tmp/nvmtl.log", "a");
+        FILE *f = nvmtl_log_open("/tmp/nvmtl.log");
         if (f) { fclose(f); snprintf(path, sizeof path, "/tmp/nvmtl.log"); }
         else { const char *t = getenv("TMPDIR"); snprintf(path, sizeof path, "%s/nvmtl.log", (t && *t) ? t : "/private/tmp"); }
     }
@@ -110,7 +124,7 @@ void nvlog(const char *fmt, ...) {
     if (nvmtl_log_failure(t)) syslog(LOG_ERR, "NullMoth: %s", t);
 #else
     syslog(LOG_NOTICE, "NVMTL: %s", t);
-    FILE *f = fopen(nvmtl_log_path(), "a"); if (f) { fprintf(f, "pid %d NVMTL: %s\n", getpid(), t); fclose(f); }
+    FILE *f = nvmtl_log_open(nvmtl_log_path()); if (f) { fprintf(f, "pid %d NVMTL: %s\n", getpid(), t); fclose(f); }
 #endif
 }
 

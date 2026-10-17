@@ -8,7 +8,7 @@
  * marked it dirty, and whether the kernel refused. This file is the record.
  *
  * What: every process that loads the plugin maps
- *   /var/tmp/rdna3-nvmtl/<process>-<pid>.trace      (fallback /private/tmp/...)
+ *   /var/tmp/rdna3-nvmtl/<process>-<pid>.trace      (mode 0640, in a root:admin 1777 directory)
  * and writes fixed-size records into it. No syscall per event: the file is an
  * mmap'd ring, three regions:
  *   main ring  surface in/out, render passes, command buffers, kernel requests,
@@ -26,7 +26,8 @@
  * or as a line "NVMTL_TRACE=0" in /Library/GPUBundles/rdna3mtl/rdna3mtl.conf.
  * Other knobs: NVMTL_TRACE_RING=<records> (main ring size), NVMTL_TRACE_HASH
  * (0 none, 1 hash only memory the plugin has locked anyway (default), 2 also
- * hash unlocked CPU memory of surfaces it skips or marks dirty), NVMTL_TRACE_DIR.
+ * hash unlocked CPU memory of surfaces it skips or marks dirty), NVMTL_TRACE_DIR (a directory instead of the shared one;
+ * none of these is read by a set-uid process).
  *
  * Portable C99 plus GCC/clang builtins; compiled into the plugin (one
  * translation unit) and by the host test.
@@ -244,14 +245,35 @@ static inline uint32_t nvt_next_id(void)
 
 /* ---- the file ---------------------------------------------------------- */
 
-static void nvt_prune(const char *dir, const char *keep)
+#define NVT_UID_WINDOWSERVER 88u   /* _windowserver */
+#define NVT_MAX_SCAN   4096u       /* directory entries the pruner looks at, at most */
+#define NVT_KEEP_FILES 64u
+#define NVT_SHARED_DIR "/var/tmp/rdna3-nvmtl"
+
+/* A set-uid / set-gid process (or one that was) takes no knob from its environment. */
+#ifdef __APPLE__
+static inline int nvt_secure(void) { return issetugid() != 0; }
+#else
+static inline int nvt_secure(void) { return getuid() != geteuid() || getgid() != getegid(); }
+#endif
+static inline const char *nvt_env(const char *name) { return nvt_secure() ? NULL : getenv(name); }
+
+static inline int nvt_is_ws(const char *n) { return strncmp(n, "WindowServer", 12) == 0 && (n[12] == '-' || n[12] == '.'); }
+
+/* Delete the traces of dead processes in the directory 'dfd' (the caller opened it once; nothing here resolves a path
+ * again): over NVT_KEEP_FILES files, oldest first, or older than 3 days. WindowServer's traces go by age only: the
+ * desktop's is the one that matters. 'keep' is our own file. Looks at no more than NVT_MAX_SCAN entries. */
+static void nvt_prune_fd(int dfd, const char *keep)
 {
-    DIR *d = opendir(dir);
-    if (!d) return;
+    const int fd2 = dup(dfd);
+    if (fd2 < 0) return;
+    DIR *d = fdopendir(fd2);
+    if (!d) { close(fd2); return; }
+    rewinddir(d);
     struct nvt_ent { time_t mt; unsigned long pid; char name[80]; } ent[256];
-    unsigned n = 0;
+    unsigned n = 0, scanned = 0;
     struct dirent *e;
-    while (n < 256 && (e = readdir(d)) != NULL) {
+    while (n < 256 && scanned++ < NVT_MAX_SCAN && (e = readdir(d)) != NULL) {
         const size_t l = strlen(e->d_name);
         if (l < 9 || l >= sizeof ent[0].name || strcmp(e->d_name + l - 6, ".trace") != 0 || strcmp(e->d_name, keep) == 0) continue;
         const char *dash = strrchr(e->d_name, '-');
@@ -259,13 +281,11 @@ static void nvt_prune(const char *dir, const char *keep)
         char *end = NULL;
         const unsigned long pid = strtoul(dash + 1, &end, 10);
         if (end == dash + 1 || strcmp(end, ".trace") != 0) continue;
-        char p[512];
         struct stat st;
-        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
-        if (lstat(p, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (fstatat(dfd, e->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG(st.st_mode)) continue;
         ent[n].mt = st.st_mtime; ent[n].pid = pid; memcpy(ent[n].name, e->d_name, l + 1); n++;
     }
-    closedir(d);
+    closedir(d);   /* closes fd2 */
     for (unsigned i = 1; i < n; i++) {   /* oldest first */
         struct nvt_ent t = ent[i]; unsigned j = i;
         while (j && ent[j - 1].mt > t.mt) { ent[j] = ent[j - 1]; j--; }
@@ -276,45 +296,97 @@ static void nvt_prune(const char *dir, const char *keep)
     for (unsigned i = 0; i < n; i++) {
         const int dead = kill((pid_t)ent[i].pid, 0) != 0 && errno == ESRCH;
         const int old = now - ent[i].mt > 3 * 86400;
-        /* the desktop's trace is the one that matters: only age removes it, never the count limit */
-        const int ws = strncmp(ent[i].name, "WindowServer-", 13) == 0;
-        if (!dead || (!old && (ws || total <= 64))) continue;
-        char p[512];
-        snprintf(p, sizeof p, "%s/%s", dir, ent[i].name);
-        if (unlink(p) == 0) total--;
+        if (!dead || (!old && (nvt_is_ws(ent[i].name) || total <= NVT_KEEP_FILES))) continue;
+        if (unlinkat(dfd, ent[i].name, 0) == 0) total--;
     }
+}
+struct nvt_prune_arg { int dfd; char keep[160]; };
+static void *nvt_prune_thread(void *p)
+{
+    struct nvt_prune_arg *a = (struct nvt_prune_arg *)p;
+    nvt_prune_fd(a->dfd, a->keep);
+    close(a->dfd);
+    free(a);
+    return NULL;
+}
+/* the pruner runs on a thread of its own: the first event may come from a render thread */
+static void nvt_prune_async(int dfd, const char *keep)
+{
+    struct nvt_prune_arg *a = (struct nvt_prune_arg *)malloc(sizeof *a);
+    if (!a) return;
+    a->dfd = dup(dfd);
+    snprintf(a->keep, sizeof a->keep, "%s", keep);
+    pthread_t th;
+    pthread_attr_t at;
+    if (a->dfd < 0 || pthread_attr_init(&at) != 0) { if (a->dfd >= 0) close(a->dfd); free(a); return; }
+    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&th, &at, nvt_prune_thread, a) != 0) { close(a->dfd); free(a); }
+    pthread_attr_destroy(&at);
 }
 
-/* the directory is shared by every user the plugin runs as (root daemons, _windowserver, apps): sticky and world
- * writable like /tmp. Whoever creates it first decides its owner, so accept root's, ours, and _windowserver's (uid 88:
- * WindowServer must not lose its trace because an app got there first); refuse anything else (a planted symlink or
- * directory). The installer creates it root-owned (package/pkg/postinstall). */
-#define NVT_UID_WINDOWSERVER 88u
-static int nvt_dir_ok(const char *dir)
+/* Open the trace directory once (O_NOFOLLOW: a symlink is refused) and return the fd; everything after goes through
+ * it (openat / unlinkat / fstatat), no path is resolved twice. 'shared': the built-in directory every user writes to
+ * (sticky, world writable like /tmp; package/pkg/postinstall makes it root:admin 1777). It is chmod'ed only when this
+ * very call created it, through the fd. A directory the caller named (NVMTL_TRACE_DIR) is made 0700 and never
+ * chmod'ed. Owner: root only for a root process (a root process must not write into a directory someone else owns);
+ * root, ourselves or _windowserver for the rest (WindowServer must not lose its trace because an app made the
+ * directory first), _windowserver only in the shared directory. */
+static int nvt_open_dir(const char *dir, int shared)
 {
+    int created = 0;
+    if (mkdir(dir, shared ? 0777 : 0700) == 0) created = 1;
+    else if (errno != EEXIST) return -1;
+    const int fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
     struct stat st;
-    if (mkdir(dir, 0777) != 0 && errno != EEXIST) return -1;
-    if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
-    if (st.st_uid != 0 && st.st_uid != geteuid() && st.st_uid != NVT_UID_WINDOWSERVER) { errno = EPERM; return -1; }
-    if (st.st_uid == geteuid()) (void)chmod(dir, 01777);
-    return 0;
-}
-static int nvt_open_file(const char *dir, const char *file, char *path, size_t pn)
-{
-    snprintf(path, pn, "%s/%s", dir, file);
-    int fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
-    if (fd < 0 && errno == EEXIST) {   /* a dead process of that pid left it */
-        struct stat st;
-        if (lstat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() && unlink(path) == 0)
-            fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
-    }
-    if (fd >= 0) (void)fchmod(fd, 0644);
+    if (fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode)) { close(fd); errno = ENOTDIR; return -1; }
+    const uid_t me = geteuid();
+    const int ok = me == 0 ? st.st_uid == 0
+                 : (st.st_uid == 0 || st.st_uid == me || (shared && st.st_uid == NVT_UID_WINDOWSERVER));
+    if (!ok) { close(fd); errno = EPERM; return -1; }
+    if (created && shared) (void)fchmod(fd, 01777);
     return fd;
+}
+/* create <name>-<pid>.trace in the directory 'dfd': exclusively, never through a symlink. Another user may have
+ * squatted the name (the directory is world writable): a stale file of ours (regular, ours, one link) is replaced,
+ * anything else makes us take <name>.<k>-<pid>.trace. Mode 0640: the directory's group (admin) may read it, the
+ * trace shows what the desktop was doing. Returns the fd; 'file' receives the name. */
+static int nvt_open_file(int dfd, const char *name, char *file, size_t fn)
+{
+    for (unsigned k = 0; k < 8; k++) {
+        if (k) snprintf(file, fn, "%s.%u-%u.trace", name, k, (unsigned)getpid());
+        else snprintf(file, fn, "%s-%u.trace", name, (unsigned)getpid());
+        for (int again = 0; again < 2; again++) {
+            const int fd = openat(dfd, file, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0640);
+            if (fd >= 0) { (void)fchmod(fd, 0640); return fd; }
+            if (errno != EEXIST) return -1;
+            struct stat st;
+            if (again || fstatat(dfd, file, &st, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG(st.st_mode) ||
+                st.st_uid != geteuid() || st.st_nlink != 1 || unlinkat(dfd, file, 0) != 0)
+                break;   /* not a leftover of ours: next name */
+        }
+    }
+    errno = EEXIST;
+    return -1;
+}
+/* real disk blocks, so that a full disk cannot turn a later store into the mapping into SIGBUS */
+static int nvt_reserve(int fd, size_t sz)
+{
+#ifdef __APPLE__
+    fstore_t fs;
+    memset(&fs, 0, sizeof fs);
+    fs.fst_flags = F_ALLOCATEALL; fs.fst_posmode = F_PEOFPOSMODE; fs.fst_offset = 0; fs.fst_length = (off_t)sz;
+    if (fcntl(fd, F_PREALLOCATE, &fs) == -1 && errno != ENOTSUP && errno != EINVAL) return -1;
+#else
+    const int r = posix_fallocate(fd, 0, (off_t)sz);
+    if (r != 0 && r != EOPNOTSUPP && r != EINVAL) { errno = r; return -1; }
+#endif
+    return ftruncate(fd, (off_t)sz);
 }
 
 static const char *nvt_progname(void)
 {
-    const char *e = getenv("NVMTL_TRACE_NAME");
+    const char *e = nvt_env("NVMTL_TRACE_NAME");
     if (e && *e) return e;
 #ifdef __APPLE__
     return getprogname() ? getprogname() : "unknown";
@@ -337,16 +409,16 @@ static void nvt_atfork_child(void)
 
 static int nvt_open_map(void)
 {
-    const char *off = getenv("NVMTL_TRACE");
+    const char *off = getenv("NVMTL_TRACE");   /* a switch-off is honoured even for a set-uid process */
     if (off && off[0] == '0') { nvlog("trace: frame trace switched off (NVMTL_TRACE=0)"); return 0; }
     uint32_t nmain = NVT_RING_DEFAULT;
-    const char *rs = getenv("NVMTL_TRACE_RING");
+    const char *rs = nvt_env("NVMTL_TRACE_RING");
     if (rs && *rs) {
         const unsigned long v = strtoul(rs, NULL, 10);
         nmain = v < 256 ? 256u : v > (1ul << 20) ? (1u << 20) : (uint32_t)v;
     }
     const uint32_t nvk = nmain / 2u > 256u ? nmain / 2u : 256u;
-    const char *hs = getenv("NVMTL_TRACE_HASH");
+    const char *hs = nvt_env("NVMTL_TRACE_HASH");
     g_nvt.hash_mode = hs && *hs ? (hs[0] == '0' ? 0 : hs[0] == '2' ? 2 : 1) : 1;
 
     char name[96], file[160], proc[64];
@@ -359,29 +431,34 @@ static int nvt_open_map(void)
     }
     proc[k] = 0; name[k] = 0;
     if (!proc[0]) { snprintf(name, sizeof name, "unknown"); snprintf(proc, sizeof proc, "unknown"); }
-    snprintf(file, sizeof file, "%s-%u.trace", name, (unsigned)getpid());
 
-    const char *dirs[3] = { getenv("NVMTL_TRACE_DIR"), "/var/tmp/rdna3-nvmtl", "/private/tmp/rdna3-nvmtl" };
-    int fd = -1, err = 0;
-    const char *used = NULL;
-    for (int i = (dirs[0] && *dirs[0]) ? 0 : 1; i < 3; i++) {
-        if (nvt_dir_ok(dirs[i]) != 0) { err = errno; continue; }
-        fd = nvt_open_file(dirs[i], file, g_nvt.path, sizeof g_nvt.path);
-        if (fd >= 0) { used = dirs[i]; break; }
-        err = errno;
-    }
-    if (fd < 0) {
-        nvlog("trace: cannot create the frame trace %s (errno %d %s) - no trace for this process", file, err, strerror(err));
+    /* a directory named by NVMTL_TRACE_DIR is the only candidate (tests, experiments); else the shared one */
+    const char *user = nvt_env("NVMTL_TRACE_DIR");
+    const char *dir = user && *user ? user : NVT_SHARED_DIR;
+    const int dfd = nvt_open_dir(dir, !(user && *user));
+    if (dfd < 0) {
+        const int e1 = errno;
+        nvlog("trace: cannot use the trace directory %s (errno %d %s) - no trace for this process", dir, e1, strerror(e1));
         return 0;
     }
+    const int fd = nvt_open_file(dfd, name, file, sizeof file);
+    if (fd < 0) {
+        const int e1 = errno;
+        close(dfd);
+        nvlog("trace: cannot create the frame trace %s/%s (errno %d %s) - no trace for this process", dir, name, e1, strerror(e1));
+        return 0;
+    }
+    snprintf(g_nvt.path, sizeof g_nvt.path, "%s/%s", dir, file);
     const size_t sz = NVT_HDR_SIZE + ((size_t)nmain + nvk + NVT_SUM_SLOTS) * NVT_REC_SIZE;
     void *m = MAP_FAILED;
-    if (ftruncate(fd, (off_t)sz) == 0) m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    const int e2 = errno;
+    int e2 = 0;
+    if (nvt_reserve(fd, sz) == 0) m = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    e2 = errno;
     close(fd);
     if (m == MAP_FAILED) {
-        unlink(g_nvt.path);
-        nvlog("trace: cannot map the frame trace %s (errno %d %s) - no trace for this process", g_nvt.path, e2, strerror(e2));
+        (void)unlinkat(dfd, file, 0);
+        close(dfd);
+        nvlog("trace: cannot reserve or map the frame trace %s (errno %d %s) - no trace for this process", g_nvt.path, e2, strerror(e2));
         return 0;
     }
 #ifdef __APPLE__
@@ -408,7 +485,8 @@ static int nvt_open_map(void)
     g_nvt.sum = (nvt_sum *)(void *)(g_nvt.base + h->off_sum);      g_nvt.nsum = NVT_SUM_SLOTS;
     static int forkHook;
     if (!forkHook) { forkHook = 1; pthread_atfork(NULL, NULL, nvt_atfork_child); }
-    nvt_prune(used, strrchr(g_nvt.path, '/') + 1);
+    nvt_prune_async(dfd, file);
+    close(dfd);
     nvlog("trace: frame trace %s (%u + %u records of %u bytes, band hash mode %d); decode with tools/plugin_trace.py",
           g_nvt.path, (unsigned)nmain, (unsigned)nvk, (unsigned)NVT_REC_SIZE, g_nvt.hash_mode);
     return 1;

@@ -17,26 +17,73 @@ if [ -z "$dir" ] || [ ! -d "$dir" ]; then
 fi
 out="$dir/31-plugin-trace"
 mkdir -p "$out" 2>/dev/null || { echo "collect_plugin_trace: cannot create $out" >&2; exit 0; }
+info="$out/info.txt"
+: > "$info"
 
-# the plugin tries /var/tmp first, /private/tmp when that fails; NVMTL_TRACE_DIR is the plugin's own override (tests)
-n=0
-for src in ${NVMTL_TRACE_DIR:-} /var/tmp/rdna3-nvmtl /private/tmp/rdna3-nvmtl; do
-    [ -d "$src" ] || continue
+# The trace directory is world writable (like /tmp): any local user can plant a file in it. Only take what is a trace
+# of a process we can vouch for, and never anything that could be somebody else's data (the report is shared):
+#   - the directory is not a symlink and belongs to root, _windowserver (88) or us;
+#   - the file is a regular file (no symlink), with ONE link (no hard link to a root-only file), 4 KiB .. 256 MB,
+#     starts with the magic NVMTLTR1;
+#   - its owner is root or _windowserver, or the uid its own header names (an app's own trace); a file named
+#     WindowServer* must belong to root or _windowserver, so a forged one cannot shadow the real one;
+#   - it is checked again after the copy (the copy must still start with the magic), and a name already taken
+#     gets a prefix instead of replacing the first.
+cap=${NVMTL_COLLECT_MAXBYTES:-268435456}
+me=$(id -u)
+note() { echo "$*" >> "$info"; }
+n=0; rejected=0
+for src in ${NVMTL_TRACE_DIR:-} /var/tmp/rdna3-nvmtl; do
+    [ -n "$src" ] || continue
+    if [ -L "$src" ] || [ ! -d "$src" ]; then
+        [ -e "$src" ] || [ -L "$src" ] && note "REJECT dir $src: a symlink or not a directory"
+        continue
+    fi
+    set -- $(ls -ldn "$src" 2>/dev/null)
+    downer=${3:-x}
+    case "$downer" in 0|88|"$me") ;; *) note "REJECT dir $src: owned by uid $downer"; continue ;; esac
     for f in "$src"/*.trace; do
-        [ -f "$f" ] || continue
+        [ -e "$f" ] || [ -L "$f" ] || continue
         b=$(basename "$f")
-        [ -e "$out/$b" ] && continue
-        if cp "$f" "$out/$b" 2>/dev/null; then n=$((n + 1)); fi
+        set -- $(ls -ldn "$f" 2>/dev/null)
+        mode=${1:-?}; links=${2:-0}; owner=${3:-x}; size=${5:-0}
+        line="$mode $links uid $owner size $size $b"
+        why=""
+        if [ -L "$f" ]; then why="a symlink"
+        elif [ ! -f "$f" ]; then why="not a regular file"
+        elif [ "$links" != 1 ]; then why="$links hard links"
+        elif [ "$size" -gt "$cap" ] 2>/dev/null; then why="over $cap bytes"
+        elif [ "$size" -lt 4096 ] 2>/dev/null; then why="shorter than a trace header"
+        else
+            magic=$(head -c 8 "$f" 2>/dev/null)
+            hu=$(od -An -tu4 -j104 -N4 "$f" 2>/dev/null | tr -d ' ')
+            if [ "$magic" != NVMTLTR1 ]; then why="no NVMTLTR1 magic (or unreadable: run as an admin user)"
+            else
+                case "$b" in
+                WindowServer*) case "$owner" in 0|88) ;; *) why="named WindowServer but owned by uid $owner" ;; esac ;;
+                *) case "$owner" in 0|88) ;; *) [ "$owner" = "$hu" ] || why="owned by uid $owner, its header says uid ${hu:-?}" ;; esac ;;
+                esac
+            fi
+        fi
+        if [ -n "$why" ]; then note "REJECT $line: $why"; rejected=$((rejected + 1)); continue; fi
+        dest="$b"; k=0
+        while [ -e "$out/$dest" ]; do k=$((k + 1)); dest="dup$k-$b"; done
+        if cp -p "$f" "$out/$dest" 2>/dev/null && [ "$(head -c 8 "$out/$dest" 2>/dev/null)" = NVMTLTR1 ]; then
+            note "ACCEPT $line -> $dest"; n=$((n + 1))
+        else
+            rm -f "$out/$dest"
+            note "REJECT $line: unreadable, or not what it was when checked"; rejected=$((rejected + 1))
+        fi
     done
 done
 
 {
-    echo "== plugin frame traces collected: $n"
+    echo "== plugin frame traces collected: $n (rejected: $rejected)"
     date -u '+collected %Y-%m-%d %H:%M:%S UTC'
-    echo "== directories"
-    ls -ld /var/tmp/rdna3-nvmtl /private/tmp/rdna3-nvmtl 2>&1 || true
-    echo "== files (size, modification time)"
-    ls -l "$out" 2>&1 | grep '\.trace' || echo "(none)"
+    echo "== directory (numeric owner and group)"
+    ls -ldn /var/tmp/rdna3-nvmtl 2>&1 || true
+    echo "== copied files"
+    ls -ln "$out" 2>&1 | grep '\.trace' || echo "(none)"
     echo "== processes with the plugin loaded now (a trace of a live process keeps growing)"
     ps -axo pid,user,comm 2>/dev/null | grep -E 'WindowServer|Safari|Finder|Dock' | head -20 || true
     if [ "$n" = 0 ]; then
@@ -44,7 +91,7 @@ done
         echo "   /Library/GPUBundles/rdna3mtl/rdna3mtl.conf), or no process used the plugin since the directory was last cleaned."
         echo "   The plugin's own line says which: grep 'trace:' in 26-log-metal-plugin.txt / 32-log-nvmtl-windowserver.txt"
     fi
-} > "$out/info.txt" 2>&1
+} >> "$info" 2>&1
 
 # WindowServer's NVMTL lines whole: the text log is rate limited, the traces above are the record, but the log
 # carries the plugin's own explanations (which route each surface took, the kernel's refusals)
