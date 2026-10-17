@@ -177,7 +177,7 @@ static void actions(void)
     }
     CHECK(rd3_swapmode_valid(0) && rd3_swapmode_valid(1) && rd3_swapmode_valid(2));
     CHECK(!rd3_swapmode_valid(-1) && !rd3_swapmode_valid(3));
-    CHECK(RD3_SWAPMODE_DEFAULT == RD3_SWAPMODE_COPY);
+    CHECK(RD3_SWAPMODE_DEFAULT == RD3_SWAPMODE_FLIP);
 }
 
 static void targets(void)

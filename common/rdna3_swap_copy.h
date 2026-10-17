@@ -17,7 +17,8 @@
  * rules, rdna3_swap_front.h), and freed backs were still scanned
  * (swaps_shownfreed: 14 + 10).
  *
- * Mode 1 (the default, debug.rdna3accel_swap_mode / boot-arg rdna3swapmode)
+ * Mode 1 (debug.rdna3accel_swap_mode / boot-arg rdna3swapmode=1; the default
+ * until card run 2026-10-17d, whose bisect found it broke both monitors)
  * copies. The front resource stopped being the scanout on our card: the
  * family maps it into the GPU page table, which the scanout's vidmem cannot
  * be, frees it and gives the resource ordinary VRAM (card run 58b:
@@ -66,7 +67,9 @@
 /* 0 flip (card run 2026-10-17), 1 copy keeping the picture over an empty
  * back (the default), 2 copy everything */
 enum rd3_swap_mode { RD3_SWAPMODE_FLIP = 0, RD3_SWAPMODE_COPY = 1, RD3_SWAPMODE_COPY_ALL = 2 };
-#define RD3_SWAPMODE_DEFAULT RD3_SWAPMODE_COPY
+/* card run 2026-10-17d, step bisect: mode 0 with every other switch on was right on both
+ * monitors, switching to mode 1 broke both (step 6) - the flip is the default again */
+#define RD3_SWAPMODE_DEFAULT RD3_SWAPMODE_FLIP
 #define RD3_SWAPMODE_MAX     RD3_SWAPMODE_COPY_ALL
 
 static inline int rd3_swapmode_valid(long v)

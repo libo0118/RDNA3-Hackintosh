@@ -6530,7 +6530,7 @@ SYSCTL_INT(_debug, OID_AUTO, rdna3accel_trace_scan, CTLFLAG_RW | CTLFLAG_LOCKED,
            "for a head's first 600, during autoreport's A/B and at empty backs, else every 8th, 2 every swap");
 SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_swap_mode, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, nullptr, 0,
             rdna3accel_swapmode_sysctl, "I",
-            "card run 2026-10-17b: 0 flip to WindowServer's back, 1 (default, boot-arg rdna3swapmode) copy it, an "
+            "card run 2026-10-17b: 0 (default since 2026-10-17d, boot-arg rdna3swapmode) flip to WindowServer's back, 1 copy it, an "
             "empty back never over a picture, 2 copy every back");
 SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_swap_ab, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0,
             rdna3accel_swapab_sysctl, "I", "autoreport's A/B phase (a label in the trace: 0 none, 1 mode 1, 2 mode 0, 3 back)");
