@@ -490,6 +490,34 @@ shut the VM down and run the steps again. Reports from before the stamps
 (and a RADV from a CI artifact) have none; for the plugin the triage then
 looks for the `vk: VK_EXT_extended_dynamic_state` line in its log.
 
+### A bigger BAR0 for the VM (optional, untried)
+
+`rdna3vm` gives the VM the card with BAR0 cut to 256 MiB. That window is
+all the CPU can reach of the card's memory, and macOS's CPU-visible VRAM
+heap is what is left of it (144 MiB): WindowServer's framebuffers, the
+cursor and the swap copies share it with the buffers RADV maps. Card run
+2026-10-17c ran it dry (the main display froze); the driver now keeps a
+reserve of it for the display (`rdna3visreserve`, docs/INSTALL-OPENCORE.md)
+and keeps buffers that need no CPU access out of it, so 256 MiB stays the
+default. To try a larger window, put this in `~/rdna3-vm/config`:
+
+```sh
+RESIZE_BAR_LOG2=11     # 2^11 MiB = 2 GiB (10 = 1 GiB, 12 = 4 GiB); 8 = 256 MiB, the default
+```
+
+`rdna3vm step` then shrinks the card to that size instead and starts QEMU
+with a 64-bit PCI window of four times the BAR rounded up to a power of two
+(8 GiB for 2 GiB; `PCI_MMIO64_MB=<MiB>` in the config sets it by hand, the
+host log prints `OVMF 64-bit PCI window: ... (BAR0 ... MiB)`). Two things in
+this repository's history say it can fail: the VM once left the card
+unconfigured when its BARs sat in the 64-bit window (commit 0ae3df7: at 8 s
+OVMF had assigned them, at 40 s macOS had them unmapped), and a 16 GiB BAR0
+showed no picture at all, not even the OpenCore picker (5c1f617). Neither was
+tried with 1-4 GiB. If the VM shows no picture or the report says the card
+is not there, set `RESIZE_BAR_LOG2=8` again (or delete the line) and send
+`host-*.log`; the report's `VISIBLE VRAM` line and `RDNA3,VRAMApertureMB`
+tell what window the run really had.
+
 ## How it works (for the curious)
 
 - `rdna3vm step N` writes the step's boot-args to the OpenCore `config.plist` (a copy

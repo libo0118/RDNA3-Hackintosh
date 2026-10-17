@@ -112,7 +112,7 @@ cmd_check() {
         local start end _ bar0
         read -r start end _ < /sys/bus/pci/devices/$bdf/resource
         bar0=$(( (end - start + 1) / 1048576 ))
-        echo "     BAR0 (VRAM window): ${bar0} MiB$( [ "$bar0" -gt 256 ] && echo ' (amdgpu enlarges it by itself; step N shrinks it to 256 MiB for the VM)')"
+        echo "     BAR0 (VRAM window): ${bar0} MiB$( [ "$bar0" -gt 256 ] && echo " (amdgpu enlarges it by itself; step N shrinks it to $(( 1 << ${RESIZE_BAR_LOG2:-8} )) MiB for the VM: RESIZE_BAR_LOG2 in the config)")"
     else bad "no 1002:747e card found"; fail=1; fi
     say "Programs"
     local t
@@ -211,6 +211,15 @@ PRE_SUSPEND=${PRE_SUSPEND:-1}
 OC_RESOLUTION=${OC_RESOLUTION:-Max}
 # macOS's screen size in 'rdna3vm window' (no card there: QEMU's display)
 WINDOW_RESOLUTION=${WINDOW_RESOLUTION:-1440x900}
+# the card's BAR0 for the VM, 2^N MiB: 8 = 256 MiB (the safe default; macOS's
+# CPU-visible VRAM heap is then 144 MiB), 11 = 2 GiB (needs the 64-bit PCI
+# window, below; not proven in this VM: a 16 GiB BAR showed no picture, and the
+# 64-bit window once left the card unconfigured), 0 = leave it as amdgpu made it
+# RESIZE_BAR_LOG2=8
+# OVMF's 64-bit PCI window in MiB: 0 = none while BAR0 is 256 MiB (all BARs
+# below 4 GiB), sized automatically for a bigger BAR0; a number sets it,
+# default = OVMF's own
+# PCI_MMIO64_MB=0
 EOF
     [ -n "${BASE_ARGS:-}" ] && echo "BASE_ARGS=\"$BASE_ARGS\"" >> "$CONF"
     ok "$CONF (RAM ${RAM_GB:-$ram} GiB, $cpus CPU)"
@@ -807,6 +816,13 @@ DEVS=()
 # With no driver bound, shrink it back (2^N MiB, RESIZE_BAR_LOG2, default 8 =
 # 256 MiB) through the kernel's resourceN_resize (Linux 6.1+); amdgpu grows
 # it again when it gets the card back.
+# A bigger window (card run 2026-10-17c: macOS's CPU-visible VRAM heap is
+# BAR0 minus the kernel's windows, 144 MiB at 256 MiB) is opt-in in the
+# config: RESIZE_BAR_LOG2=11 (2 GiB; 10 = 1 GiB, 12 = 4 GiB). It needs the
+# 64-bit PCI window (below), and the history is a warning: with the 64-bit
+# window the VM once left the card unconfigured (commit 0ae3df7: BARs
+# assigned at 8 s, unmapped at 40 s), and a 16 GiB BAR0 showed no picture at
+# all (5c1f617). Not tried with 1-4 GiB: the default stays 256 MiB.
 resize_bar0() {
     local gpu f start end _ mb
     gpu=$(gpu_bdf) || return 0
@@ -821,6 +837,7 @@ resize_bar0() {
     else
         echo "  BAR0 ${mb} MiB (could not shrink it: no $f or refused)"
     fi
+    [ "${RESIZE_BAR_LOG2:-8}" -gt 8 ] && echo "  (RESIZE_BAR_LOG2=${RESIZE_BAR_LOG2}: a BAR0 above 256 MiB needs the VM's 64-bit PCI window; no picture or an unconfigured card = set it back to 8 in the config)"
 }
 
 # After an unbind amdgpu frees the card only when the last open /dev/dri or
@@ -1063,8 +1080,17 @@ cmd__passthrough() {
     local mm=${PCI_MMIO64_MB:-0} b0=0 r0s r0e
     read -r r0s r0e _ < "/sys/bus/pci/devices/$bdf/resource" 2>/dev/null &&
         b0=$(( (r0e - r0s + 1) >> 20 ))
-    # a BAR0 that is still large (resize failed) does not fit below 4 GiB
-    [ "$mm" = 0 ] && [ "$b0" -gt 1024 ] && { echo "  BAR0 $b0 MiB: 64-bit PCI window kept"; mm=65536; }
+    # a BAR0 above 256 MiB (a bigger RESIZE_BAR_LOG2, or a resize that
+    # failed) is not planned for the 32-bit window below 4 GiB, which q35's
+    # layout keeps well under 1 GiB: the 64-bit window is kept, 4 x the BAR
+    # rounded up to a power of two (8 GiB for 2 GiB, 64 GiB for the 16 GiB
+    # amdgpu leaves)
+    if [ "$mm" = 0 ] && [ "$b0" -gt 256 ]; then
+        local p2=256
+        while [ "$p2" -lt "$b0" ]; do p2=$((p2 * 2)); done
+        mm=$((p2 * 4)); [ "$mm" -lt 4096 ] && mm=4096
+        echo "  BAR0 $b0 MiB: 64-bit PCI window kept"
+    fi
     [ "$mm" != default ] &&
         QARGS+=(-fw_cfg "name=opt/ovmf/X-PciMmio64Mb,string=$mm")
     echo "  OVMF 64-bit PCI window: $mm MiB (BAR0 $b0 MiB)"

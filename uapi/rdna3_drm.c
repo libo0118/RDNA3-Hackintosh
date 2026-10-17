@@ -2074,7 +2074,7 @@ static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
     bo->size = (size + 4095) & ~4095ull;
     bo->alignment = MAX(a->in.alignment, 4096ull);
     bo->domains = dom;
-    bo->flags = a->in.domain_flags;
+    bo->flags = a->in.domain_flags & ~RD_BO_FLAG_INTERNAL;   /* a client cannot ask for the kernel's reserve */
     /* amdgpu_gem_create_ioctl: every VRAM allocation is handed out cleared */
     if (dom & AMDGPU_GEM_DOMAIN_VRAM)
         bo->flags |= AMDGPU_GEM_CREATE_VRAM_CLEARED;
@@ -2088,13 +2088,23 @@ static int gem_create(rdna3_drm_file *f, union drm_amdgpu_gem_create *a)
      * would leave it where the CPU cannot reach it: straight to GTT, which
      * the CPU reaches (card run 51: RADV's descriptor pool, VRAM with CPU
      * access, found the visible VRAM full) */
-    if (r && bo->placement == AMDGPU_GEM_DOMAIN_VRAM &&
-        dev->gtt_usage + bo->size <= dev->gtt_size) {   /* no unbounded wired memory */
-        bo->placement = AMDGPU_GEM_DOMAIN_GTT;
-        bo->vram_offset = 0;
-        r = dev->ops.bo_alloc(dev->ops.ctx, bo);
-        if (!r && !(dom & AMDGPU_GEM_DOMAIN_GTT))
-            bo->domains = dom | AMDGPU_GEM_DOMAIN_GTT;
+    if (r && bo->placement == AMDGPU_GEM_DOMAIN_VRAM) {
+        if (dev->gtt_usage + bo->size <= dev->gtt_size) {   /* no unbounded wired memory */
+            bo->placement = AMDGPU_GEM_DOMAIN_GTT;
+            bo->vram_offset = 0;
+            r = dev->ops.bo_alloc(dev->ops.ctx, bo);
+            if (!r && !(dom & AMDGPU_GEM_DOMAIN_GTT))
+                bo->domains = dom | AMDGPU_GEM_DOMAIN_GTT;
+        }
+        if (r) {
+            /* VRAM refused and GTT did not take it either: the client's
+             * allocation fails; the OS layer logs it (card run 2026-10-17c) */
+            dev->gtt_fallback_fail++;
+            dev->gtt_fallback_fail_bytes += bo->size;
+            if (dev->ops.gtt_fallback_failed)
+                dev->ops.gtt_fallback_failed(dev->ops.ctx, bo->size, r,
+                                             dev->gtt_usage + bo->size > dev->gtt_size ? 1 : 2);
+        }
     }
     if (r) {
         dev->ops.free(dev->ops.ctx, bo, sizeof(*bo));
@@ -2461,7 +2471,7 @@ static int gem_op(rdna3_drm_file *f, struct drm_amdgpu_gem_op *o)
         info.bo_size = bo->size;
         info.alignment = bo->alignment;
         info.domains = bo->domains;
-        info.domain_flags = bo->flags;
+        info.domain_flags = bo->flags & ~RD_BO_FLAG_INTERNAL;
         return f->dev->ops.copyout(f->dev->ops.ctx, o->value, &info, sizeof(info))
                    ? -RD_EFAULT : 0;
     }
@@ -2714,7 +2724,7 @@ static int seq64_init(rdna3_drm_device *dev)
     bo->size = RD_SEQ64_SIZE;
     bo->alignment = 4096;
     bo->domains = bo->placement = AMDGPU_GEM_DOMAIN_VRAM;
-    bo->flags = AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED | AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
+    bo->flags = AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED | AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS | RD_BO_FLAG_INTERNAL;
     r = ops->bo_alloc(ops->ctx, bo);
     if (r) {
         ops->free(ops->ctx, bo, sizeof(*bo));
@@ -3092,7 +3102,7 @@ static int userq_create_object(rdna3_drm_device *dev, rdna3_userq_obj *o, uint32
     bo->size = ((uint64_t)size + 4095) & ~4095ull;
     bo->alignment = 4096;
     bo->domains = bo->placement = AMDGPU_GEM_DOMAIN_VRAM;
-    bo->flags = AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS | AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
+    bo->flags = AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS | AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED | RD_BO_FLAG_INTERNAL;
     r = ops->bo_alloc(ops->ctx, bo);
     if (r) {
         ops->free(ops->ctx, bo, sizeof(*bo));
