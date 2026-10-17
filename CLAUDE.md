@@ -87,6 +87,8 @@ own worktree. Do NOT use the Agent tool's `isolation: "worktree"` — it
 branches from origin/main, which is far behind `stage1-kext` (it put five
 agents 88 commits back on 2026-10-15). Instead create them from the tip:
 `git worktree add .claude/worktrees/<task> -b quick/<task> stage1-kext`
+and give it the code graph:
+`ln -s "$PWD/graphify-out" .claude/worktrees/<task>/graphify-out`
 (`.claude/worktrees/` is git-ignored), tell the agent to work only there
 and commit on that branch without pushing, then merge the branch into
 `stage1-kext` and remove the worktree.
@@ -126,3 +128,20 @@ host tests). Where ECC and this file disagree, this file wins:
   "port, don't invent" (docs/AFTER-TESTS.md) rather than ECC's research
   step.
 - CI is only the self-hosted runners above.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- When graphify-out/graph.json exists, run `graphify query "<question>"` before your first grep, search or source-file read for a codebase question, and put this rule in every subagent prompt that explores code. Read raw files only for lines the graph or an earlier read already located. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+- A committed graphify-out/graph.json is rewritten whole on every build, so a large diff to it in a pull request is expected. Do not flag it as churn or suggest skipping the graph rebuild or its hooks.
+
+In this repository (the owner's rule: every agent uses the graph, to save tokens):
+- graphify-out/ is not committed. `.claude/hooks/graphify-session.sh` (SessionStart) installs the pinned CLI and builds or updates the graph of the checkout (AST only, about 30 s); the PreToolUse hooks (`graphify hook-guard`) hold back the first raw file read of a session until one `graphify query` ran. A session without the CLI or the graph simply reads files.
+- Every agent brief that involves code includes: "Use the code graph before grepping or reading files: `graphify query \"<question>\" --budget 1500`, `graphify explain \"<symbol>\"`, `graphify path \"<A>\" \"<B>\"`, `graphify affected \"<symbol>\"` (add `--graph <path>/graphify-out/graph.json` outside the repo root); read raw files only for the lines the graph located."
+- Worktrees link the main checkout's graph (see "How we work"); it describes `stage1-kext`, not the agent's own edits. Agents in a worktree do NOT run `graphify update` (it would rewrite the shared graph with their branch).
+- After merging a branch into `stage1-kext`, the manager runs `graphify update .` in the main checkout.

@@ -9,3 +9,6 @@ reports/
 
 # agents' git worktrees (the manager merges their branches)
 .claude/worktrees/
+
+# graphify code graph (built per checkout, see CLAUDE.md "graphify")
+graphify-out
