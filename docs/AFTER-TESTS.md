@@ -251,6 +251,7 @@ item in the SUMMARY; the full output is in the tests file under `== probe:`.
 | `A3 WindowServer` (`A3: WindowServer's inputs are kept out`, `surfgem: ... refused: a WindowServer input`) | A3 | card run 58 (2026-10-15d): every IOSurface WindowServer imports (window backing stores, menus) stays out of A3 by default and goes through copies; applications keep A3 for their own and shared surfaces. A caller the kernel cannot name is refused too (it might be WindowServer). `rdna3a3ws=1` lets them in, `rdna3a3=0` turns A3 off for every process; counters `debug.rdna3accel_a3ws_refused` / `a3off_refused` / `a3display_task_mismatch` / `_noname`; each refusal's line names its own cause (`a WindowServer input`, `imported for another task than the caller's`, `a process the kernel could not name`, `A3 is off`), all of them the policy, not a warning. `FAIL ... WindowServer input leaked into A3`: a WindowServer `item 7 ... -> the family's VRAM` line, or more non-display imports than refusals | flicker gone with them kept out: A3 for WindowServer's inputs needs an ordering of the owner's GPU / CPU writes with WindowServer's reads first (DRIVER-PLAN N27) |
 | `display sleep: not judged by the look`, `FAIL display sleep: never blanked a head`, summary `display sleep` | display sleep | card run 58 (2026-10-15d): the VM went on into system sleep after the display slept; triage takes the kernel's `display: head N blanked (display sleep)` lines (archive log or serial log) instead, FAIL without any, INFO when the report has no kernel log at all (`not judged: ... no kernel log`). autoreport sets system sleep to never for the look only when it read the old value, saves it to `/var/db/rdna3-sleep.bak` first and restores it after the look, at the start of every later run and (standalone) at exit (`system sleep restored to N min` / `NOT restored`: `pmset -a sleep <minutes>` by hand), holds `caffeinate -s -i`, and prints the assertions and the power log (`== power before / after`) | the power log names what slept the system |
 | `swap/flicker` (serial log: `flicker: head N: ...`, `a3 display: head N: ...`, `swap: head N: ... swaps over K buffer(s) ...`, `copy forward / swaps: head N at swap M ...`), `copy forward` (summary: `hN X from the shown buffer / Y not needed / Z from the front / M missed (H healed) / ...`) | the panel | card run 58b, second run (2026-10-16): a head whose swaps take turns between two back buffers needs copy forward from the surface's own buffer it showed last (`cf_shown_h<N>`); `WARN ... two back buffers took turns while copy forward copied nothing` is a kernel before `rdna3_swap_front.h`. Flicker from a serial log alone (the newest serial log only; a head the newest report's counters judged, 60+ hashed swaps, gets its serial flicker line as INFO `(serial said ...)`, the report decides; copy forward and swap warnings stay): the snapshot with the most hashed swaps per head (`at swap N`), FAIL with 25 % of 60+ hashed swaps A B A B in more than one band or on two heads, under the line only INFO (later swaps are not in the log). Copy forward WARN: copies impossible (`no head`, `shown buffer not usable`, `refused`), missed and not healed (`cf_miss_h<N>` > `cf_healed_h<N>`: the rects a buffer missed stay pending for that buffer and are copied with the next copy forward into it, from a source that did not miss them itself; too many become the whole picture, copied only with the copy engine on; a source that missed the same region blocks them, after 3 blocked calls they are copied anyway so both backs agree: `cf_pend_blocked` / `cf_pend_forced`; `cf_pend_evicted`: a list dropped from a full table, WARN; `cf_pend_whole`: lists that overflowed), the head showed another surface's buffer (`cf_foreign_h<N>`, never a source), more than 10 calls with nothing shown yet. Swaps: WARN when a head skipped 10 % or more (an empty back; the third in a row is shown as a black or clear frame, `swaps_emptyshown_h<N>`) or a swap matched no head (`swaps_nohead`), FAIL when a head skipped 10 or more swaps and showed none, WARN when swaps were skipped with no head named (`swaps_skipped_all` above the heads' sum) | the reason lines: `copy forward #n: ... not copied (SDMA refused ...)`, `... is not usable now`, `... has shown nothing recorded yet`, `... shows a buffer that is not this surface's`; `swap: head N: the back ... shows nothing (<why>)`; `swap: surface ... matched no head` |
+| `flip latch` (report counters `swaps_latch*_h<N>`, `swaps_torn*_h<N>`, `swaps_inplace_h<N>`, `cf_onpanel_h<N>`, `swaps_shownfreed_h<N>`, `swaps_empty{filled,still}_h<N>`, `swap_latch`; serial `swap latch: head N: ...`, shown under `swap/flicker`) | the panel | card run 2026-10-17: windows vanish for a moment and the wallpaper shows (both screens) while copy forward and the A B A B test look fine. `N of M swaps: the previous flip had not latched` (WARN): the swap returned before the panel left the old buffer and WindowServer wrote into it - with `swap_latch 0` that is the cause, with 1 it must be 0 (timeouts: `flip(s) never latched in 2 frames`, a head that never latches stops waiting after 3). `copy forward(s) wrote into the buffer on the panel` (WARN): the same seen from copy forward. `N of K shown frames changed while on the panel, then flipped away (torn)`: FAIL from 5 % of 60+ checks - something writes the buffer the panel shows after its swap (not H1: look at `swaps_shownfreed`, the plugin's surface-out and the family's page-on timing); `rewritten in place` (WARN from 25 %): one back buffer, the zero-copy flip shows the buffer WindowServer draws into (DRIVER-PLAN N28 (1)). `empty backs ... read again 4 ms later: N had pixels`: the frame landed after the swap asked for it (skips that should have waited) | the reason lines: `swap #n: head N: the previous flip (to phys ...) had NOT latched at this swap`, `the flip to phys ... had NOT latched ... us after it`, `the buffer it showed (phys ...) changed while on the panel: bands 0x..`, `copy forward #n: head N: the target ... is STILL ON THE PANEL`, `swap: head N: the buffer ... was FREED while the head scans it`, `swap: head N: the empty back ... read again ... us later` |
 | `GAMMA: UNJUDGED`, `gamma (open)`, progress `UNJUDGED (exit 3)` | gamma | no pipe stayed still between the looks (`CRC before NOT stable`, `0 of N pipe(s) still`, card run 58: the flicker), so the CRCs prove nothing either way (exit 3, `[exit 3: UNJUDGED, not a failure]`, never cached as passed); a still pipe next to a changing one is judged on its own and fails when it did not move with the dark table (`GAMMA: FAIL - N still pipe(s) did not move`); the core's `RDNA3,Head<n>,Gamma` record before and after the test decides: every head took 3+ tables is WARN (open), else FAIL | judge the flicker first, then the gamma on still screens |
 | `VM faults`, `VMID N` (SUMMARY, from the serial log) | VM faults | the faults grouped by VMID and address with the UTCL2 client (`gfxhub_client_ids`) and the owner | card run 58: Terminal's VMID 5 TCP reads at an unmapped VA, each followed by 4 CPC writes at 0 on VMID 0 (not a second bug: they come with every client fault) |
 
@@ -2017,3 +2018,47 @@ Settings. That is expected for them, not a display regression.
   no larger than `cf_healed_h<N>`, `cf_foreign_h<N>` / `cf_nohead` /
   `cf_shown_stale` at 0, no `flicker` FAIL (triage `flicker` /
   `swap/flicker`), and no flicker on the screens.
+
+
+### Card run 2026-10-17 (step agdc + probes, build 98b1abe)
+
+- About the 10th run where **windows and menus flicker on both screens**:
+  a window shows for a moment, then the wallpaper where it was; the
+  desktop is unusable. Copy forward works (head 1: 3080 from the shown
+  buffer, 0 missed), the A B A B test sees 1 % (head 1) / 15 % (head 0):
+  the old alternation is not what the user sees, and that test hashes a
+  buffer only at its swap. Head 0 skipped 320 of 1030 swaps for an empty
+  back. WindowServer crashed at 11:37 after a mode switch (the plugin's
+  fence wait gave up after 5000 ms, GPU hang): a separate bug (N27/N28).
+- Code finding: `rd3AccelFlipTo` -> `RDNA3Framebuffer::flipToLocked`
+  programs the HUBP address and returns; the flip latches at the next
+  vblank, up to a frame later. `submitSwapCopy` returned at once, so
+  WindowServer got the old buffer back (copy forward into it, the next
+  frame paged on) while the panel still read it - a half-drawn frame,
+  the wallpaper first. amdgpu sends the flip event from
+  `dm_pflip_high_irq` once the flip latched and userspace reuses the old
+  buffer only then.
+- Fix (diagnostic build, `common/rdna3_flip_latch.h`, `tests/test_flip_latch.c`
+  reproduces the writes into the scanned buffer without the wait and none
+  with it): the swap waits until its flip latched (1 ms sleeps, up to two
+  frames or 35 ms; `debug.rdna3accel_swap_latch` / boot-arg
+  `rdna3swaplatch`, default 1, 0 = the old behaviour for an A/B run).
+  Counted per head: the previous flip pending at a swap's entry and the
+  flip-to-latch times, copy forwards into the buffer on the panel, the
+  shown buffer's band hash at its swap against the head's next swap
+  (torn, or rewritten in place with one back buffer;
+  `debug.rdna3accel_swap_torn`), buffers freed while scanned, empty backs
+  read again 4 ms after a skipped swap. Triage: `flip latch`.
+- H2 (the flip before the GPU finished the frame): no mechanism in the
+  default configuration. WindowServer's display framebuffers stay out of
+  A3; its Metal composite goes through the plugin's private image,
+  `nvmtl_vk_submit_wait` (the GPU job waited for), then surface-out reads
+  it back into the IOSurface's system memory; the family pages that into
+  the legacy buffer through the aperture (CPU) and copy forward copies by
+  SDMA synchronously, both before the swap. No GPU-wait sysctl.
+- The next run must show `flip latch` with `0 of M swaps: the previous
+  flip had not latched` (swap_latch 1), no torn FAIL, and the user's
+  verdict on the flicker. If it stays: the torn / in-place counts say
+  which buffer is written on the panel; a run with
+  `sysctl debug.rdna3accel_swap_latch=0` (or `rdna3swaplatch=0`) gives the
+  comparison.

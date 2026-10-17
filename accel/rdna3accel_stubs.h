@@ -116,7 +116,9 @@ public:
     void submitSwapCopy(IOAccelEvent* a0, IOAccelResource2* a1, IOAccelResource2* a2) APPLE_KEXT_OVERRIDE {
         (void)a0;
         rd3AccelSwapProbe(a1, a2);
-        rd3AccelSwapToPanel(this, a1, a2);
+        /* the surface's own buffers (as shapeSurface reads them): the torn
+         * test reads the buffer the head showed only through one of them */
+        rd3AccelSwapToPanel(this, a1, a2, (IOAccelResource2 *const *)((const uint8_t *)this + 0x11C0), 32);
     }
     /* copy_forward's (set_shape bit 12) back-buffer refresh: rd3AccelCopyForward */
     IOReturn submitCopyForward(IOAccelEvent* a0, unsigned int a1, IOAccelResource2* a2, IOAccelResource2* a3,

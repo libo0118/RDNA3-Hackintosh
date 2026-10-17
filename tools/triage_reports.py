@@ -114,7 +114,7 @@ def bootarg_level(args):
 # accel/Makefile's ACCEL_SRC_HASH inputs, in its order (tests/test_accel_hash_parity.py keeps them equal)
 ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_abi.h", "accel/rdna3accel_stubs.h",
                     "common/rdna3_bootargs.h", "common/rdna3_a3_display.h",
-                    "common/rdna3_swap_front.h")
+                    "common/rdna3_swap_front.h", "common/rdna3_flip_latch.h")
 
 
 def fb_source_hash(files=("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h")):
@@ -454,8 +454,10 @@ def a3_display_verdict(log, sv):
 
 
 A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3|flicker|"
-                       r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg)?_h\d|"
-                       r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed)_h\d|swaps_skipped_all|"
+                       r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg|"
+                       r"_latchpend|_latchwait|_latchus|_latchmax|_latchtimeout|_latchunknown|_latchoff|_tornchk|"
+                       r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill)?_h\d|swap_latch|swap_torn|"
+                       r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed|onpanel)_h\d|swaps_skipped_all|"
                        r"swaps_nohead|cf_(?:calls|nohead|shown_stale|refused|same|disabled|pend_blocked|pend_forced|pend_evicted|"
                        r"pend_whole|nohead_miss)|iop_flip): (\d+)", re.M)
 # the kernel's refusal reasons that are the A3 policy (rd3AccelA3Why), not a fault
@@ -602,7 +604,12 @@ SERIAL_SWAP_LINE = re.compile(r"(flicker: head \d+: [^\n]*|swap: head \d+: \d+ s
                               r"the front \(phys[^\n]*not copyable|pixel \(\d+,\d+\)[^\n]*did NOT land)[^\n]*|"
                               r"swap: head \d+: the back \(phys[^\n]*|swap: no front named[^\n]*|"
                               r"swap #\d+: head \d+ shows a new buffer[^\n]*|swap #\d+: head \d+: the back[^\n]*|"
-                              r"swap: surface [^\n]*matched no head[^\n]*|"
+                              r"swap: surface [^\n]*matched no head[^\n]*|swap latch: head \d+: [^\n]*|"
+                              r"swap #\d+: head \d+: the (?:previous flip|flip to phys|buffer it showed)[^\n]*"
+                              r"(?:NOT latched|changed while on the panel)[^\n]*|"
+                              r"copy forward #\d+: head \d+: the target [^\n]*STILL ON THE PANEL[^\n]*|"
+                              r"swap: head \d+: the buffer [^\n]*was FREED[^\n]*|"
+                              r"swap: head \d+: the empty back [^\n]*read again[^\n]*|"
                               r"copy forward #\d+: the front buffer \(vm [^)]*\) was never shown[^\n]*)")
 SERIAL_SUMMARY = re.compile(
     r"swap: head (\d+): (\d+) swaps over (\d+) buffer\(s\) now \([^)]*\), (\d+) distinct so far, (\d+) buffer changes; "
@@ -704,6 +711,7 @@ def serial_swap_verdict(text):
                             "buffer ... was never shown'): each back kept what changed two frames before - the A B A B "
                             "flicker of card run 58b; a kernel with rdna3_swap_front.h copies from the shown buffer" %
                     ", ".join(turns)))
+    out.extend(serial_latch_verdict(text))
     lines = []
     for l in SERIAL_SWAP_LINE.findall(text):
         if l not in lines:
@@ -770,6 +778,116 @@ def copy_forward_verdict(c):
                             "heads)" % (c["swaps_skipped_all"] - per_head, c["swaps_skipped_all"], per_head)))
     if c.get("swaps_nohead", 0):
         out.append(("WARN", "%d swap(s) matched no head (not shown)" % c.get("swaps_nohead", 0)))
+    return out
+
+
+# card run 2026-10-17 (common/rdna3_flip_latch.h): of the shown buffers the
+# kernel hashed again at the head's next swap, this share changed while on
+# the panel and was then flipped away from (torn: the panel showed the writes)
+TORN_SHARE = 0.05
+TORN_MIN_CHECKS = 60
+# rewritten in place (one back buffer): the panel reads the buffer
+# WindowServer draws into; a WARN from this share on
+INPLACE_SHARE = 0.25
+# buffers freed while a head scanned them: a few come with every
+# WindowServer restart and login (its surfaces go before the new swaps)
+SHOWN_FREED_WARN = 4
+
+
+def latch_verdict(c):
+    """[(level, text)] from the card run 2026-10-17 counters, [] on a kernel
+    without them. Per head: the swaps whose entry found the previous flip not
+    latched (the panel still read the buffer WindowServer had back), how long
+    flips took to latch, timeouts and unreadable flip states, copy forwards
+    into the buffer on the panel, shown frames that changed on the panel
+    (torn: FAIL from TORN_SHARE of TORN_MIN_CHECKS+ checks, else WARN),
+    rewritten in place (one back), freed while scanned, empty backs that
+    filled 4 ms after a skipped swap."""
+    if not any(k.startswith("swaps_latch") or k.startswith("swaps_torn") for k in c):
+        return []
+    latch_on = c.get("swap_latch")
+    out = []
+    heads = sorted(set(m.group(1) for m in (re.match(r"swaps_h(\d)$", k) for k in c) if m))
+    for h in heads:
+        g = lambda k: c.get(k + "_h" + h, 0)
+        swaps = g("swaps")
+        if not swaps and not g("swaps_latchwait") and not g("swaps_tornchk"):
+            continue
+        pend, waits, us, mx = g("swaps_latchpend"), g("swaps_latchwait"), g("swaps_latchus"), g("swaps_latchmax")
+        tout, unk, off = g("swaps_latchtimeout"), g("swaps_latchunknown"), g("swaps_latchoff")
+        chk, torn, inpl, tskip = g("swaps_tornchk"), g("swaps_torn"), g("swaps_inplace"), g("swaps_tornskip")
+        onp, freed, filled, still = g("cf_onpanel"), g("swaps_shownfreed"), g("swaps_emptyfilled"), g("swaps_emptystill")
+        lat = "flips latched %d time(s) seen, avg %d us, max %d us" % (waits, us // waits if waits else 0, mx)
+        why = []
+        if pend:
+            why.append("the panel still read the buffer WindowServer had back")
+        if tout:
+            why.append("%d flip(s) never latched in 2 frames" % tout)
+        if unk:
+            why.append("%d flip state(s) unreadable" % unk)
+        out.append(("WARN" if why else "INFO",
+                    "head %s: %d of %d swaps: the previous flip had not latched at the swap; %s; %d timeouts, %d "
+                    "unknown, %d not waited (swap_latch %s)%s" % (h, pend, swaps, lat, tout, unk, off,
+                                                                   "?" if latch_on is None else latch_on,
+                                                                   " - " + ", ".join(why) if why else "")))
+        if onp:
+            out.append(("WARN", "head %s: %d copy forward(s) wrote into the buffer on the panel (the flip away from it "
+                                "had not latched)" % (h, onp)))
+        if chk or torn or inpl or tskip:
+            what = "head %s: %d of %d shown frames changed while on the panel, then flipped away (torn)" % (h, torn, chk)
+            if chk >= TORN_MIN_CHECKS and torn >= TORN_SHARE * chk:
+                out.append(("FAIL", "%s: %.0f%% - something writes the buffer the panel shows" %
+                            (what, 100.0 * torn / chk)))
+            elif torn:
+                out.append(("WARN", what))
+            else:
+                out.append(("PASS" if chk >= TORN_MIN_CHECKS else "INFO", what + ("" if chk >= TORN_MIN_CHECKS else
+                                                                                 " (fewer than %d checks)" %
+                                                                                 TORN_MIN_CHECKS)))
+            if inpl:
+                share = float(inpl) / chk if chk else 1.0
+                out.append(("WARN" if share >= INPLACE_SHARE else "INFO",
+                            "head %s: %d of %d shown frames rewritten in place and shown again (one back buffer: the "
+                            "panel reads the buffer WindowServer draws into)" % (h, inpl, chk)))
+            if tskip:
+                out.append(("INFO", "head %s: %d shown buffer(s) could not be hashed again (re-allocated, another "
+                                    "surface's)" % (h, tskip)))
+        if freed:
+            out.append(("WARN" if freed > SHOWN_FREED_WARN else "INFO",
+                        "head %s: %d buffer(s) freed while the head scanned them" % (h, freed)))
+        if filled or still:
+            out.append(("INFO", "head %s: empty backs of skipped swaps read again 4 ms later: %d had pixels (the frame "
+                                "landed after the swap), %d still empty" % (h, filled, still)))
+    return out
+
+
+SERIAL_LATCH = re.compile(
+    r"swap latch: head (\d+): (\d+) swaps; previous flip not latched at entry (\d+); latched while waited (\d+) \(avg "
+    r"(\d+) us, max (\d+) us\), (\d+) timeouts, (\d+) unknown, (\d+) not waited; shown buffers hashed again (\d+): "
+    r"(\d+) changed on the panel then flipped away \(torn\), (\d+) rewritten in place \(one back\), (\d+) not hashed; "
+    r"copy forwards into the buffer on the panel (\d+); buffers freed on the panel (\d+); empty backs read again: "
+    r"(\d+) filled, (\d+) still empty \(swap_latch (-?\d+)")
+
+
+def serial_latch_verdict(text):
+    """[(level, text)] from the kernel's last 'swap latch: head N' line per
+    head in a serial log (card run 2026-10-17), as latch_verdict judges the
+    report's counters"""
+    last = {}
+    for m in SERIAL_LATCH.finditer(text):
+        last[m.group(1)] = [int(x) for x in m.groups()[1:]]
+    out = []
+    for h, v in sorted(last.items()):
+        (swaps, pend, waits, avg, mx, tout, unk, off, chk, torn, inpl, tskip, onp, freed, filled, still,
+         latch_on) = v
+        c = {"swaps_h" + h: swaps, "swaps_latchpend_h" + h: pend, "swaps_latchwait_h" + h: waits,
+             "swaps_latchus_h" + h: avg * waits, "swaps_latchmax_h" + h: mx, "swaps_latchtimeout_h" + h: tout,
+             "swaps_latchunknown_h" + h: unk, "swaps_latchoff_h" + h: off, "swaps_tornchk_h" + h: chk,
+             "swaps_torn_h" + h: torn, "swaps_inplace_h" + h: inpl, "swaps_tornskip_h" + h: tskip,
+             "cf_onpanel_h" + h: onp, "swaps_shownfreed_h" + h: freed, "swaps_emptyfilled_h" + h: filled,
+             "swaps_emptystill_h" + h: still, "swap_latch": latch_on}
+        for lv, t in latch_verdict(c):
+            out.append((lv, "%s (flip latch, serial at swap %d)" % (t, swaps)))
     return out
 
 
@@ -1404,6 +1522,8 @@ def summary(path, serial=None):
                                    "the hashed swaps" % (FLICKER_SHARE * 100)))
         for lv, t in copy_forward_verdict(a3c):
             out.append(("copy forward", "%s %s" % (lv, t)))
+        for lv, t in latch_verdict(a3c):
+            out.append(("flip latch", "%s %s" % (lv, t)))
         out.append(("A3 display counters", "refused %s, imported %s, other %s (kept out %s); swaps %s" % (
             a3c.get("a3display_refused", "?"), a3c.get("a3display_imported", "?"), a3c.get("a3display_other", "?"),
             a3c.get("a3ws_refused", "?"),
@@ -1613,6 +1733,9 @@ def main():
                 print("   INFO A3 display counters: " + ", ".join("%s %d" % kv for kv in sorted(a3c.items())))
                 for lv, t in flicker_verdict(txt):
                     print("   %s flicker: %s" % (lv, t))
+                    failed = failed or lv == "FAIL"
+                for lv, t in latch_verdict(a3c):
+                    print("   %s flip latch: %s" % (lv, t))
                     failed = failed or lv == "FAIL"
                 if a3c.get("a3display_imported") and any(v for k, v in a3c.items() if k.startswith("swaps_h")) and \
                         not any(v for k, v in a3c.items() if k.startswith("swaps_a3_h")):
