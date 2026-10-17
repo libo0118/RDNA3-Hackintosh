@@ -2205,10 +2205,14 @@ Settings. That is expected for them, not a display regression.
   gets the first 300 events of a boot, 600 more at the A/B's end and 600
   at the end of the tests (`debug.rdna3accel_trace_dump`; "tr" lines,
   triage decodes them when the files are missing).
-- The A/B (autoreport.sh, every accelerator run): 60 s in mode 1, a look
-  (`look ab1`) and the counters, 60 s in mode 0 (`look ab0`), back.
-  Triage prints both side by side (`frame trace: A/B mode N ...`) with a
-  verdict.
+- The A/B (autoreport.sh, opt-in since card run 2026-10-17d: boot-arg
+  `rdna3swapab=1`; it used to run in every accelerator step): 60 s in mode 1,
+  a look (`look ab1`) and the counters, 60 s in mode 0 (`look ab0`), back.
+  Mode 1 broke both monitors in the bisect, so the A/B deliberately breaks the
+  picture for a minute. A normal step does none (`== swap A/B: NOT ASKED`;
+  triage: `swap A/B  not asked`, `INFO frame trace: A/B not asked`, no
+  `A/B did not run`). Triage prints both side by side
+  (`frame trace: A/B mode N ...`) with a verdict.
 
 #### Coverage: every open question -> where the next report answers it
 
@@ -2490,8 +2494,10 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
 The owner runs `rdna3vm step bisect` ([TESTING-VM](TESTING-VM.md), "Display
 bisect"): instead of the other tests every new feature with a runtime switch
 is turned off (step 1), then on again one at a time, oldest first, 30 s each
-(steps 2-8; step 8 = the defaults = step 0), three controls that are off by
-default (9-11) and the defaults again (12). The report has the table
+(steps 2-6; step 6 = the defaults = step 0, since 2026-10-17d `swap_mode` 0
+and `trace_scan` 0), five controls that are off by default (7-11: swap mode 1,
+`trace_scan` 1, mode 1 with `swap_landed`, mode 2, `a3ws`) and the defaults
+again (12). The report has the table
 (`39-bisect.txt` in the archive, `<report>-bisect.txt` uploaded after every
 step, the looks as `<report>-scanoutbisect<N>[a]-pipe<P>.ppm`), the tests
 file only the step headers. `tools/triage_reports.py` prints it
@@ -2509,7 +2515,7 @@ stale holds, the would-hold count and the empty backs since the step before.
 | `FAIL the first step the owner marked n` / `FAIL ... whose looks black` / `WARN ... stood still` | the first step by the owner's `n`, a lit pipe with at most 3 % of its picture not black, a pipe that moved in other steps and did not between the step's two looks | step 0 is the reference (the bug itself); the others are in the `BISECT` line |
 | `WARN step N: no look` / `no counters` / `step(s) ... never ran` / `has no end line` | data missing: `rdna3_drminfo` absent or failed, a sysctl dump empty, the VM's time limit hit | the tests file's `== bisect step N` headers and the serial log say where it stopped; `AUTO_TIMEOUT_MIN` |
 | `FAIL step N: a switch did not take` | `sysctl -w` failed or read back another value (`failed:` in bisect.txt) | the step did not test what its row says; the kext may be older (`absent:` lists switches this kext lacks) |
-| `WARN step 0 is not the compiled defaults` | a boot-arg set a switch (`rdna3a3ws`, `rdna3swaplanded` ...) | the 'on' steps return to what the boot left, not to the compiled default |
+| `WARN step 0 is not the compiled defaults` | a boot-arg set a switch (`rdna3a3ws`, `rdna3swaplanded`, `rdna3swapmode=1` ...); the compiled defaults are `swap_mode` 0 and `trace_scan` 0 since 2026-10-17d | the 'on' steps return to what the boot left, not to the compiled default |
 | `FAIL bisect run ... but no bisect.txt` | the VM ran an autoreport.sh without the bisect, or `debug.rdna3accel_swap_mode` was missing (the tests file says `NOT RUN`) | `rdna3vm update`, then the step again |
 
 `bisect-plugin` (steps 0-4) does the same with `rdna3mtl.conf`
@@ -2519,3 +2525,44 @@ allow list's `%apps` line, restarting WindowServer at steps 1, 2 and 4; its
 pumped all through the run: `stream_bytes` / `trace_events` per step place a
 step in the decoded trace (`tools/rdna3_trace.py`), the steps' wall clock is in
 `at:`. The swap A/B is not part of this step (the triage does not expect it).
+
+### Card run 2026-10-17d: the bisect
+
+- Evidence (`rdna3vm step bisect`, the owner's report): step 5 (every switch
+  since the display bug on, but `debug.rdna3accel_swap_mode` 0 - the flip -
+  and `trace_scan` 0) was perfect on both monitors. Step 6 switched only
+  `swap_mode` to 1 (copy into the accelerator's scanout buffers, the default
+  since 2026-10-17b) and broke both monitors. **Certain from the report: mode
+  1 is the display bug.** Why it breaks is unknown (DRIVER-PLAN N34).
+- Done: mode 0 (the flip) is the default again (`RD3_SWAPMODE_DEFAULT` in
+  `common/rdna3_swap_copy.h`, commit 8c8fcf7) and `trace_scan` is 0 by default
+  (`gTrScan` in `accel/rdna3-accel.cpp`, commit e8d8fda; the sysctl turns it
+  on). The owner confirms the picture is right on both monitors. Modes 1 and 2
+  stay for comparison: boot-arg `rdna3swapmode=1` / `2` or
+  `sysctl -w debug.rdna3accel_swap_mode=1`.
+- The tools follow: (1) the swap A/B is opt-in (boot-arg `rdna3swapab=1`); a
+  normal step runs none and triage does not fail it; (2) the bisect's steps 6-11
+  are now: 6 `swap_stale` (= the defaults = step 0), 7 control mode 1, 8
+  control `trace_scan`, 9 control mode 1 + `swap_landed`, 10 control mode 2, 11
+  control `a3ws`, 12 the defaults; `triage_bisect.py` expects `swap_mode` 0 and
+  `trace_scan` 0 at step 0; (3) the copy counters and H-STALE are not judged in
+  mode 0: `INFO swap mode 0 ... the copy counters below and H-STALE are not
+  judged` and `INFO H-STALE: head N: M swaps, all mode 0 (flip): not judged`;
+  (4) `H-COPY` (in-place rewrites in mode 0) is a WARN now, not a FAIL: its old
+  advice "the copy (mode 1) is the fix" is what the bisect disproved, judge the
+  looks; (5) coverage Q2 (samples of the surfaces' other buffers) accepts none
+  when the report's counters say `trace_scan 0` (autoreport and collect.sh now
+  dump `debug.rdna3accel_trace_scan`; a report without that counter still FAILs
+  Q2 on a run with no samples).
+- Open: window dragging is not smooth and Activity Monitor shows GPU 0 % in mode
+  0 (DRIVER-PLAN N35). Note that `rdna3vm args "rdna3bisect=3" --stay` has no
+  agdc profile (the AGDC is idle, WindowServer does no GPU work, the idle GFXCLK
+  cap is never lifted): to drive the desktop by hand and still get a report use
+  `rdna3vm step play` ([TESTING-VM](TESTING-VM.md), "Play").
+
+| Seen | Cause | Action |
+|---|---|---|
+| picture broken after `rdna3swapmode=1` / `swap_mode=1` / `rdna3swapab=1` | mode 1 (the copy) breaks both monitors (bisect step 6) | expected: the flip is the default; do not use mode 1 for daily work |
+| `WARN H-COPY: mode 0 ...` | WindowServer rewrites a buffer the panel shows | look at the pictures; the old FAIL advice (mode 1) was disproved |
+| `swap A/B  not asked` | normal step | `rdna3vm args "<step's args> rdna3swapab=1"` to run the comparison |
+| `rdna3vm step play` report with label `play` | the owner's hand-driven session, reports at minute 5 and 10 (two reports, `-play-`) | read as any step; no tests ran, so only the looks, counters, trace and PM lines |

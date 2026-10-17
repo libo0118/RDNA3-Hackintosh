@@ -225,7 +225,7 @@ rdna3vm step bisect
 The VM boots as for any step. A few minutes after the desktop appears (the
 progress window says when) the 13 steps start; the whole run is 6.5 minutes
 and the report arrives a few minutes later. **Nothing else runs in this step**
-(no swap A/B, no Metal apps, no mode switches): the screens show the desktop
+(no swap A/B, no Metal apps, no mode switches except the controls): the screens show the desktop
 and Activity Monitor (it redraws every few seconds, so a frozen picture shows).
 Only look at the monitors; do not touch the mouse or keyboard.
 
@@ -251,19 +251,23 @@ the switches read back are in the report (`39-bisect.txt`).
 | 3 | 01:30 | `flicker` 1: the flicker test hashes the swaps' pictures (reads the card's memory through the BAR) | 2026-10-15d |
 | 4 | 02:00 | `swap_latch` 1: a swap waits until its flip latched | 2026-10-17 |
 | 5 | 02:30 | `swap_torn` 1: a second hash of every shown buffer | 2026-10-17 |
-| 6 | 03:00 | `swap_mode` 1: the back is copied into a scanout buffer instead of flipped to | 2026-10-17b |
-| 7 | 03:30 | `trace_scan` 1: the trace samples the swap's other buffers | 2026-10-17b |
-| 8 | 04:00 | `swap_stale` 1: the stale-back hold. This is the defaults again (the same switches as step 0) | 2026-10-17c |
-| 9 | 04:30 | control, off by default: `swap_landed` 1 | 2026-10-17c |
+| 6 | 03:00 | `swap_stale` 1: the stale-back hold. This is the defaults again (the same switches as step 0; it only acts in mode 1/2) | 2026-10-17c |
+| 7 | 03:30 | control, off by default: `swap_mode` 1 (the back is copied into a scanout buffer instead of flipped to; the former default, it broke both monitors in the 2026-10-17d bisect) | 2026-10-17b |
+| 8 | 04:00 | control, off by default: `trace_scan` 1 (the trace samples the swap's other buffers) | 2026-10-17b |
+| 9 | 04:30 | control, off by default: `swap_mode` 1 with `swap_landed` 1 | 2026-10-17c |
 | 10 | 05:00 | control, off by default: `swap_mode` 2 (every back copied) | 2026-10-17b |
 | 11 | 05:30 | control, off by default: `a3ws` 1 (WindowServer's own inputs in A3, the card run 58b flicker) | 2026-10-15d |
 | 12 | 06:00 | the defaults again (the end state; the switches are put back even if the run dies) | |
 
-Steps 9 to 11 are controls: they show what the states that are off by default
-look like; a bad picture there is expected and does not count. A step 1 that
-looks fine and a step 0 that does not means the cause is one of the switches
-above; the first of steps 2 to 8 that is bad again is the one that brings it
-back. If step 1 is bad too, none of these switches is the cause.
+Steps 7 to 11 are controls: they show what the states that are off by default
+look like (swap mode 1 and 2, `trace_scan`, `a3ws`); a bad picture there is
+expected and does not count. Since card run 2026-10-17d the defaults are the
+flip (`swap_mode` 0) and `trace_scan` 0, i.e. the good state of that bisect, so
+step 0, step 6 and step 12 have the same switches (a different picture in them
+is reported as flaky). A step 1 that looks fine and a step 0 that does not means
+the cause is one of the switches above; the first of steps 2 to 6 that is bad
+again is the one that brings it back. If step 1 is bad too, none of these
+switches is the cause.
 
 `a3` and `a3ws` only reach surfaces created after the switch, so the run
 opens Activity Monitor again at steps 0, 1, 2, 11 and 12; every other switch
@@ -323,6 +327,39 @@ two looks, the swap and stale-hold counter changes) and names the first step
 you marked `n`, the first whose looks went black or stood still, and where
 the run says the bug starts (`BISECT: BREAKS AT step N`). Anything missing
 (a look, the counters, a step that never ran) is a `WARN`.
+
+### Play (step `play`): the desktop is yours
+
+When you want to drive the desktop by hand (drag windows, open apps) and still
+get a full report:
+
+```sh
+rdna3vm update
+rdna3vm step play
+```
+
+The profile is the `agdc` step's (WindowServer runs on our Metal plugin, so the
+card works and its clocks are lifted) plus `rdna3play=1`. Do not use
+`rdna3vm args "rdna3bisect=3" --stay` for this: it has no agdc profile, the
+AGDC stays idle, WindowServer does no GPU work and no report is sent.
+
+What happens: no test runs (no swap A/B, no mode switches, no apps, no gamma,
+no sleep). A notification says *use the desktop; the report is taken at
+minute 5 and again at minute 10*. The trace pump (accelerator and DRM trace
+streams, the plugin's trace snapshots) runs as in every step. At minute 5 (after
+the desktop has settled, about 90 s after boot) the run takes three scanout
+looks, the counters and `rdna3_pmctl info` and the full collection
+(`collect.sh`), and uploads it like any report (`rdna3vm result` picks it up).
+At minute 10 the same again, as a second report with its own name (the label
+is `play`). A snapshot of the trace stream is taken at each moment while the
+pump keeps running. Then the VM stays up: shut macOS down yourself (Apple
+menu), or the host stops it after 30 minutes. A report at shutdown is not
+possible (the shutdown gives the report script seconds, a collection needs
+minutes), so the second one is at minute 10.
+
+The swap A/B is no longer part of a normal step (card run 2026-10-17d): add the
+boot-arg `rdna3swapab=1` (`rdna3vm args "<the step's args> rdna3swapab=1"`) to
+run it; it breaks the picture for a minute on purpose (mode 1).
 
 ### Tests that already passed
 

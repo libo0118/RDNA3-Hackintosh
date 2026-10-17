@@ -4,8 +4,8 @@
 # afplay, killall, rdna3_drminfo and the report's helper functions:
 #  - timer mode: 13 steps, each switch set and read back as the plan says
 #    (step 1 every new feature off, then a3, flicker, swap_latch, swap_torn,
-#    swap_mode, trace_scan, swap_stale back on, oldest first; step 8 and the
-#    final step 12 = step 0), the three controls, the originals restored, the
+#    swap_stale back on, oldest first; step 6 and the final step 12 = step 0,
+#    which has swap_mode 0 and trace_scan 0 since card run 2026-10-17d), the five controls, the originals restored, the
 #    timetable, `say "step N"` and N beeps per step, two looks and the
 #    counters per step, no answers
 #  - tty mode (a key file stands in for the keyboard): y / n / Enter / nothing
@@ -79,7 +79,7 @@ chmod +x "$T/D/bin/rdna3_drminfo"
 mkoids() {   # mkoids <dir> [omit oid ...]: the accelerator's switches at their defaults
     local d=$1; shift
     rm -rf "$d"; mkdir -p "$d"
-    for kv in a3=1 flicker=1 swap_latch=1 swap_torn=1 swap_mode=1 trace_scan=1 swap_stale=1 swap_landed=0 a3ws=0 \
+    for kv in a3=1 flicker=1 swap_latch=1 swap_torn=1 swap_mode=0 trace_scan=0 swap_stale=1 swap_landed=0 a3ws=0 \
               swaps_h0=0 swaps_h1=0 swap_trace_events=5 swaps_stalehold_h0=0 swaps_stalehold_would_h0=0 swaps_copyempty_h0=0; do
         echo "${kv#*=}" > "$d/debug.rdna3accel_${kv%%=*}"
     done
@@ -146,31 +146,34 @@ for SH in sh bash; do
         exp="$* "
         [ "$got" = "$exp" ] || fail "$SH: step $s reads back [$got], expected [$exp]"
     }
-    want 0  1 1 1 1 1 1 1 0 0
+    # since card run 2026-10-17d the defaults are swap_mode 0 (the flip) and trace_scan 0; steps 6 and 12 = step 0,
+    # steps 7 to 11 are the controls (mode 1, trace_scan 1, mode 1 + landed, mode 2, a3ws), each from the defaults
+    want 0  1 1 1 1 0 0 1 0 0
     want 1  0 0 0 0 0 0 0 0 0
     want 2  1 0 0 0 0 0 0 0 0
     want 3  1 1 0 0 0 0 0 0 0
     want 4  1 1 1 0 0 0 0 0 0
     want 5  1 1 1 1 0 0 0 0 0
-    want 6  1 1 1 1 1 0 0 0 0
-    want 7  1 1 1 1 1 1 0 0 0
-    want 8  1 1 1 1 1 1 1 0 0
-    want 9  1 1 1 1 1 1 1 1 0
-    want 10 1 1 1 1 2 1 1 0 0
-    want 11 1 1 1 1 1 1 1 0 1
-    want 12 1 1 1 1 1 1 1 0 0
+    want 6  1 1 1 1 0 0 1 0 0
+    want 7  1 1 1 1 1 0 1 0 0
+    want 8  1 1 1 1 0 1 1 0 0
+    want 9  1 1 1 1 1 0 1 1 0
+    want 10 1 1 1 1 2 0 1 0 0
+    want 11 1 1 1 1 0 0 1 0 1
+    want 12 1 1 1 1 0 0 1 0 0
     [ "$(val "$B" 2 changed)" = "a3 0->1" ] || fail "$SH: step 2 'changed' is [$(val "$B" 2 changed)]"
-    [ "$(val "$B" 8 changed)" = "swap_stale 0->1" ] || fail "$SH: step 8 'changed' is [$(val "$B" 8 changed)]"
-    [ "$(val "$B" 9 changed)" = "swap_landed 0->1" ] || fail "$SH: step 9 'changed' is [$(val "$B" 9 changed)]"
+    [ "$(val "$B" 6 changed)" = "swap_stale 0->1" ] || fail "$SH: step 6 'changed' is [$(val "$B" 6 changed)]"
+    [ "$(val "$B" 7 changed)" = "swap_mode 0->1" ] || fail "$SH: step 7 'changed' is [$(val "$B" 7 changed)]"
+    [ "$(val "$B" 9 changed)" = "swap_mode 0->1, trace_scan 1->0, swap_landed 0->1" ] || fail "$SH: step 9 'changed' is [$(val "$B" 9 changed)]"
     [ "$(val "$B" 10 changed)" = "swap_mode 1->2, swap_landed 1->0" ] || fail "$SH: step 10 'changed' is [$(val "$B" 10 changed)]"
     [ "$(val "$B" 12 changed)" = "a3ws 1->0" ] || fail "$SH: step 12 'changed' is [$(val "$B" 12 changed)]"
     [ "$(val "$B" 1 set | wc -w | tr -d " ")" = 9 ] || fail "$SH: step 1 did not set the 9 switches: $(val "$B" 1 set)"
     # the defaults come back at the end
     for k in a3 flicker swap_latch swap_torn swap_mode trace_scan swap_stale swap_landed a3ws; do
-        v=$(cat "$T/sys/debug.rdna3accel_$k"); e=1; case $k in swap_landed|a3ws) e=0 ;; esac
+        v=$(cat "$T/sys/debug.rdna3accel_$k"); e=1; case $k in swap_mode|trace_scan|swap_landed|a3ws) e=0 ;; esac
         [ "$v" = "$e" ] || fail "$SH: $k is $v after the run, expected $e"
     done
-    grep -q '^restored: 1 1 1 1 1 1 1 0 0$' "$B" || fail "$SH: restored line: $(grep '^restored:' "$B")"
+    grep -q '^restored: 1 1 1 1 0 0 1 0 0$' "$B" || fail "$SH: restored line: $(grep '^restored:' "$B")"
     # the owner knows where he is: a notification, "step N" spoken and N beeps per step
     [ "$(grep -c '^say step ' "$T/stub.log")" = 13 ] || fail "$SH: say called $(grep -c '^say step ' "$T/stub.log") times"
     for n in 0 1 5 12; do grep -q "^say step $n\$" "$T/stub.log" || fail "$SH: no 'say step $n'"; done

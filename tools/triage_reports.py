@@ -327,6 +327,9 @@ def ab_diag_row(txt):
     fix_tracedir.sh failed; None when the tests file has no A/B at all"""
     if "== swap A/B" not in txt:
         return None
+    if "== swap A/B: NOT ASKED" in txt and "== swap A/B phase" not in txt:
+        # card run 2026-10-17d: the A/B is opt-in (boot-arg rdna3swapab=1); a normal step does none
+        return ("swap A/B", "not asked (opt-in: boot-arg rdna3swapab=1; the default swap mode is 0, the flip)")
     if "== swap A/B: SKIPPED" in txt:
         return ("swap A/B", "not run: " + re.search(r"== swap A/B: SKIPPED - (.*)", txt).group(1)[:120])
     fail, warn = [], []
@@ -585,7 +588,7 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"_stalecheck_(?:norecord|changed|cf|sameshown|nopanel|nohead)|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
                        r"_copylatchto|_copyfail|_copydirect|_copyfront|_copyfrontfail|_copynowait|_copybrkflip|_copyfreewait)?_h\d|"
                        r"swaps_copybrktrips|swap_latch|swap_torn|swap_landed|swap_stale|"
-                       r"swap_mode|swap_trace_events|swap_trace_nomem|swap_trace_lost|cf_sc(?:src|scanout|stale)_h\d|"
+                       r"swap_mode|trace_scan|swap_trace_events|swap_trace_nomem|swap_trace_lost|cf_sc(?:src|scanout|stale)_h\d|"
                        r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed|onpanel)_h\d|swaps_skipped_all|"
                        r"swaps_nohead|cf_(?:calls|nohead|shown_stale|refused|same|disabled|pend_blocked|pend_forced|pend_evicted|"
                        r"pend_whole|nohead_miss)|iop_flip): (\d+)", re.M)
@@ -1079,8 +1082,10 @@ def swapcopy_verdict(c):
         out.append(("WARN", "counter missing: swap_landed (kext older than 2026-10-17c): the landed buffer is not "
                             "counted"))
     mode = c.get("swap_mode")
-    out.append(("INFO", "swap mode %s at the dump (0 flip, 1 copy keeping the picture over an empty back, 2 copy all)" %
-                ("?" if mode is None else mode)))
+    out.append(("INFO", "swap mode %s at the dump (0 flip, the default since card run 2026-10-17d; 1 copy keeping the "
+                        "picture over an empty back, 2 copy all)%s" %
+                ("?" if mode is None else mode,
+                 ": mode 0 (flip): the copy counters below and H-STALE are not judged" if mode == 0 else "")))
     if c.get("swaps_copybrktrips"):
         out.append(("WARN", "the SDMA breaker of modes 1/2 opened %d time(s): the swaps flipped as in mode 0 while it "
                             "was open (the kernel log's 'SDMA BREAKER OPEN' line says why)" % c["swaps_copybrktrips"]))
@@ -1313,7 +1318,9 @@ def _trace_lines(path, txt, klog="", args=""):
     streams = any("stream" in n for n, _ in inputs)
     # a display bisect run (rdna3bisect=1 / 2) replaces the other tests, the swap A/B among them
     is_bisect = bisect_run_expected(path, txt, args)
-    ab_expected = bool(current and accel_on and not is_bisect and "swap A/B: SKIPPED" not in txt and
+    # card run 2026-10-17d: the A/B is opt-in (boot-arg rdna3swapab=1, or its phases are in the tests file)
+    ab_asked = "rdna3swapab=1" in args.split() or "== swap A/B phase" in txt
+    ab_expected = bool(current and accel_on and not is_bisect and ab_asked and "swap A/B: SKIPPED" not in txt and
                        (bootarg_level(args) >= 2 or "rdna3lvl=" not in args) and (txt or streams))
     ctx = {"swaps": sum(v for k, v in c.items() if re.match(r"swaps_h\d$", k)) or None,
            "swaps_window": ab_counter_window(txt) if txt else {},
@@ -1328,6 +1335,9 @@ def _trace_lines(path, txt, klog="", args=""):
     if not txt:
         out.append(("INFO", "no tests file next to this report: the A/B is judged from the trace alone, the "
                             "counters' window not compared"))
+    if current and accel_on and not is_bisect and not ab_asked:
+        out.append(("INFO", "A/B not asked: swap mode 0 (the flip) is the default since card run 2026-10-17d; "
+                            "the 60 s mode 1 / mode 0 comparison runs with the boot-arg rdna3swapab=1"))
     out += rdna3_trace.summary_lines(tr, ctx)
     tl = []
     heads = sorted(set(e.head for e in tr.events if e.src == rdna3_trace.SRC_ACCEL and e.head != 0xff))

@@ -64,8 +64,8 @@
 
 #include "rdna3_swap_front.h"
 
-/* 0 flip (card run 2026-10-17), 1 copy keeping the picture over an empty
- * back (the default), 2 copy everything */
+/* 0 flip (card run 2026-10-17; the default again since 2026-10-17d), 1 copy
+ * keeping the picture over an empty back, 2 copy everything */
 enum rd3_swap_mode { RD3_SWAPMODE_FLIP = 0, RD3_SWAPMODE_COPY = 1, RD3_SWAPMODE_COPY_ALL = 2 };
 /* card run 2026-10-17d, step bisect: mode 0 with every other switch on was right on both
  * monitors, switching to mode 1 broke both (step 6) - the flip is the default again */

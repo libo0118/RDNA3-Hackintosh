@@ -98,7 +98,7 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
             -e 'is not a display framebuffer' -e 'display check did not run' "$dir/$f" | tail -60 || true
     done
     echo "== sysctl (card run 58)"
-    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|cf_|bufs_|iop_flip:)")
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:)")
     if [ -n "$_a3" ]; then echo "$_a3"; else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
 } > "$dir/29-surface-vram.txt" 2>/dev/null
 # card run 2026-10-17b: the kernel's per-frame trace (common/rdna3_trace.h),
@@ -117,7 +117,8 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
     echo "swap mode: $(sysctl -n debug.rdna3accel_swap_mode 2>/dev/null || echo none)"
     # the stream autoreport.sh pumped through the whole run (and its sizes):
     # in the archive too, so a lost upload does not lose it
-    for f in "$HOME"/rdna3-trace/*.bin "$HOME"/rdna3-trace/*.size; do
+    # (RDNA3_TRACE_DIR: autoreport's play step points it at a whole-blob snapshot while the pump still runs)
+    for f in "${RDNA3_TRACE_DIR:-$HOME/rdna3-trace}"/*.bin "${RDNA3_TRACE_DIR:-$HOME/rdna3-trace}"/*.size; do
         [ -f "$f" ] || continue
         cp "$f" "$dir/36-stream-$(basename "$f")" && echo "stream: $(wc -c < "$f") bytes in 36-stream-$(basename "$f")"
     done

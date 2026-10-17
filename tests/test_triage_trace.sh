@@ -125,7 +125,8 @@ hasnt "$out" "FAIL     H-STALE" b2landed-stale
 has "$out" "INFO     H-STALE: head 0:" b2landed-stale
 
 out=$(dec copy)
-has "$out" "FAIL     H-COPY: mode 0: 39 of 39 flipped buffers were rewritten" copy
+has "$out" "WARN     H-COPY: mode 0: 39 of 39 flipped buffers were rewritten" copy   # a WARN since 2026-10-17d (mode 0 is the default)
+hasnt "$out" "FAIL     H-COPY" copy
 hasnt "$out" "H-B2" copy
 
 out=$(dec free)
@@ -238,7 +239,7 @@ mk() {   # mk <name> <trace kind or -> <tests counters or NOTESTS> [coredisplay 
 import io, os, sys, tarfile
 d, kind, h, counters, cd, extra = sys.argv[1:7]
 members = {
-    "01-boot-args.txt": "boot-args rdna3lvl=8 rdna3fb=1 rdna3accel=1 rdna3agdc=3\n",
+    "01-boot-args.txt": "boot-args rdna3lvl=8 rdna3fb=1 rdna3accel=1 rdna3agdc=3 %s\n" % os.environ.get("MK_ARGS", ""),
     "03-kexts.txt": "RDNA3Accel\n",
     "11-ioreg-props.txt": "",
     "20-log-rdna3.txt": "RDNA3Accelerator: build %s\nRDNA3Accelerator: IOGraphicsAccelerator2::start -> 1\n" % h,
@@ -439,10 +440,16 @@ out=$(run notests)
 has "$out" "no tests file next to this report" triage-notests
 has "$out" "PASS frame trace: A/B verdict" triage-notests
 # the accelerator current, an autoreport run, but no A/B in the trace
-mk noab clean "swaps_h0 40
+MK_ARGS="rdna3swapab=1" mk noab clean "swaps_h0 40
 swap_mode 1" "" stream
 out=$(run noab)
 has "$out" "FAIL frame trace: A/B did not run" triage-noab
+# card run 2026-10-17d: the A/B is opt-in; a normal step (no rdna3swapab=1) is not failed for not having one
+mk noabasked clean "swaps_h0 40
+swap_mode 0" "" stream
+out=$(run noabasked)
+hasnt "$out" "A/B did not run" triage-noabasked
+has "$out" "INFO frame trace: A/B not asked" triage-noabasked
 # collect.sh could not read the trace sysctls
 mk notread clean "swaps_h0 40" "" notread
 out=$(run notread)

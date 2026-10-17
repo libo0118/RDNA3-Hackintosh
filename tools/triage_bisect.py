@@ -35,8 +35,8 @@ BLACK_PCT = 3
 # Monitor's graphs on the main display far more)
 MOVED_FRACTION = 0.003
 # the values the switches have without any boot-arg (accel/rdna3-accel.cpp)
-DEFAULTS = {"a3": "1", "flicker": "1", "swap_latch": "1", "swap_torn": "1", "swap_mode": "1",
-            "trace_scan": "1", "swap_stale": "1", "swap_landed": "0", "a3ws": "0"}
+DEFAULTS = {"a3": "1", "flicker": "1", "swap_latch": "1", "swap_torn": "1", "swap_mode": "0",
+            "trace_scan": "0", "swap_stale": "1", "swap_landed": "0", "a3ws": "0"}
 MAIN_KINDS = ("ref", "off", "on", "final")
 
 _KEY = re.compile(r"^([a-z_0-9]+): ?(.*)$")

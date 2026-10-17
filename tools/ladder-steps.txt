@@ -256,3 +256,12 @@ big4 rdna3probe=1 rdna3pmexp=1 rdna3accelsdma=1 rdna3hotplug=2 rdna3amdgpu=1 rdn
 # must log in each time unless the guest logs in by itself): run it last
 bisect rdna3bisect=1
 bisect-plugin rdna3bisect=2
+# Play (card run 2026-10-17d): the desktop is yours. The agdc step's boot-args
+# (WindowServer runs on our Metal plugin, so the card is busy and its clocks
+# are lifted) plus rdna3play=1: autoreport runs no test (no A/B, no mode
+# switches, no apps, no gamma, no sleep), tells you to use the desktop and
+# takes the full report at minute 5 and again at minute 10; the VM then stays
+# up (the host stops it after 30 min, or shut macOS down yourself).
+# `rdna3vm args "rdna3bisect=3" --stay` has no agdc profile: the AGDC is idle
+# and WindowServer does no GPU work
+play rdna3lvl=8 rdna3msi=1 rdna3fb=1 rdna3dmub=1 rdna3mirror=2 rdna3accel=1 rdna3accelfb=4 rdna3acceliop=1 rdna3pm=2 rdna3idlecap=1 rdna3dpms=1 rdna3modes=1 rdna3gamma=1 rdna3agdc=3 rdna3probe=1 rdna3play=1
