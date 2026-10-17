@@ -198,10 +198,131 @@ steps:
 | `sleep` | monitor standby on every monitor, then a short system sleep: the display is saved, taken down and brought back (`rdna3dpms=2 rdna3resume=1`) | both monitors go to standby (no signal) and come back; then macOS sleeps for ~30 s and wakes by itself (the host wakes the VM after 90 s otherwise). **A screen may stay dark after the wake** |
 | `vcnsleep` | the `sleep` step with the video engines on (`rdna3vcn=2`): the video test runs before the system sleep and again after the wake | as `sleep`; after `sleep` and `vcn2` passed. **A screen may stay dark after the wake** |
 | `amdgpu` | the default profile, but the driver follows Linux amdgpu's own order where the tested one differs (`rdna3amdgpu=1`): firmware load order, power management setup, page tables, the interrupt ring in system memory | medium risk; after `default` passed. Looks like step `default`; if the screen stays on the boot picture and the report says PSP or SMU failed, boot once without it |
+| `bisect` | the display bug (black screens, windows that do not appear or only flash, flicker): every new feature that has a runtime switch off, then back on one at a time, 30 s each (13 steps, 6.5 min; [Display bisect](#display-bisect-step-bisect)) | **sit at the monitors for the whole run**: a notification, a spoken "step N" and N beeps announce every step; note the step numbers where the picture goes wrong |
+| `bisect-plugin` | the same for the Metal plugin's switches (`rdna3mtl.conf`, the allow list); **restarts WindowServer three times** | run it last, after `bisect`; log in again at the login window each time unless the guest logs in by itself |
 
 If you want to look longer, add `--stay`, for example `rdna3vm step 9 --stay`.
 
 Step `hotplug` is the one step that needs you at the screens: about two minutes after the desktop appears, the progress window and a notification say *unplug and replug the second monitor now*. You have two minutes from then: pull the second monitor's cable (the one the GOP did not light at boot), wait about 10 seconds, plug it back in. The report records what the driver saw (`RDNA3,HPDState` over time, the hotplug lines of the log) and takes a picture of both pipes afterwards. If you miss the window, the report says `HOTPLUG: 0 HPD change(s)`; run the step again.
+
+### Display bisect (step `bisect`)
+
+The screens have been wrong since about card run 58: black, windows that do
+not appear or only flash every few seconds, flicker. Since then several
+things were added; most have a switch that works while macOS runs. This step
+turns every one of them off, then on again one at a time (the oldest first,
+each one on top of the ones before it), and holds each state for 30 seconds
+while **you** look at both monitors. The report then says at which step the
+picture went wrong.
+
+What you run:
+
+```sh
+rdna3vm update
+rdna3vm step bisect
+```
+
+The VM boots as for any step. A few minutes after the desktop appears (the
+progress window says when) the 13 steps start; the whole run is 6.5 minutes
+and the report arrives a few minutes later. **Nothing else runs in this step**
+(no swap A/B, no Metal apps, no mode switches): the screens show the desktop
+and Activity Monitor (it redraws every few seconds, so a frozen picture shows).
+Only look at the monitors; do not touch the mouse or keyboard.
+
+What you see and hear at every step: a macOS notification "step N of 12: ...",
+the voice saying "step N", and N short beeps (step 5: five beeps). If the
+virtual machine has no sound you still get the notification and the progress
+window; the timetable below tells you the step by the clock as well. Write down
+the numbers of the steps where a monitor goes black, a window does not appear
+or only flashes, or the picture flickers, and which monitor. The run also
+looks at the monitors itself (two pictures of every pipe per step) and sends
+what each step switched, so the report answers even without your notes.
+
+Timetable (the time after the start; the progress window and the first
+notification say the clock time of the start). Each state is held for 30 s.
+"Off" is the value a switch has to restore the behaviour before it was added;
+the switches read back are in the report (`39-bisect.txt`).
+
+| Step | Time | What is switched | Since |
+|---|---|---|---|
+| 0 | 00:00 | nothing: the defaults as the boot left them (the reference) | |
+| 1 | 00:30 | **every new feature off**: `a3` 0, `flicker` 0, `swap_latch` 0, `swap_torn` 0, `swap_mode` 0 (the flip), `trace_scan` 0, `swap_stale` 0 (closest to before the bug) | |
+| 2 | 01:00 | `a3` 1: applications' IOSurfaces live in the card's VRAM (A3) | 2026-10-15 |
+| 3 | 01:30 | `flicker` 1: the flicker test hashes the swaps' pictures (reads the card's memory through the BAR) | 2026-10-15d |
+| 4 | 02:00 | `swap_latch` 1: a swap waits until its flip latched | 2026-10-17 |
+| 5 | 02:30 | `swap_torn` 1: a second hash of every shown buffer | 2026-10-17 |
+| 6 | 03:00 | `swap_mode` 1: the back is copied into a scanout buffer instead of flipped to | 2026-10-17b |
+| 7 | 03:30 | `trace_scan` 1: the trace samples the swap's other buffers | 2026-10-17b |
+| 8 | 04:00 | `swap_stale` 1: the stale-back hold. This is the defaults again (the same switches as step 0) | 2026-10-17c |
+| 9 | 04:30 | control, off by default: `swap_landed` 1 | 2026-10-17c |
+| 10 | 05:00 | control, off by default: `swap_mode` 2 (every back copied) | 2026-10-17b |
+| 11 | 05:30 | control, off by default: `a3ws` 1 (WindowServer's own inputs in A3, the card run 58b flicker) | 2026-10-15d |
+| 12 | 06:00 | the defaults again (the end state; the switches are put back even if the run dies) | |
+
+Steps 9 to 11 are controls: they show what the states that are off by default
+look like; a bad picture there is expected and does not count. A step 1 that
+looks fine and a step 0 that does not means the cause is one of the switches
+above; the first of steps 2 to 8 that is bad again is the one that brings it
+back. If step 1 is bad too, none of these switches is the cause.
+
+`a3` and `a3ws` only reach surfaces created after the switch, so the run
+opens Activity Monitor again at steps 0, 1, 2, 11 and 12; every other switch
+acts at the next swap.
+
+How to answer. By default the run is on a timer and records no answers
+(the triage uses its own looks: a lit pipe with almost no picture is black, a
+picture that stood still between two looks while it moved in other steps is
+frozen). To answer with the keyboard, start it by hand in a Terminal inside
+macOS instead:
+
+```sh
+rdna3vm args "rdna3bisect=3" --stay          # on the host: boots macOS, runs nothing
+sudo sh "/Library/Application Support/RDNA3VM/autoreport.sh" --bisect    # in the macOS Terminal
+```
+
+Then press `y` (the picture looks right), `n` (broken) or Enter (next step)
+once a step is on; a key moves on to the next step after the run has taken its
+pictures (about 20 s into the step), no key = the 30 s timer. On bare metal
+(docs/TESTING-HW.md) the same with `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --bisect`.
+
+The Metal plugin's own switches are the optional second run:
+
+```sh
+rdna3vm step bisect-plugin
+```
+
+Its steps: 0 the plugin as it is; 1 `NVMTL_NO_SURFACE_SHARE=1`,
+`NVMTL_NO_SURFACE_PAGEOFF=1` and `NVMTL_TRACE=0` in
+`/Library/GPUBundles/rdna3mtl/rdna3mtl.conf` and the `%apps` line out of the
+allow list (apps mode off); 2 the two `NVMTL_NO_SURFACE_*` lines out again (A3's
+plugin half, 2026-10-15); 3 apps mode back (2026-10-15); 4 the frame trace back
+(2026-10-17, the defaults again). The plugin reads its conf when a process
+loads it, so WindowServer is **restarted at steps 1, 2 and 4**: your session
+ends, the login window shows and you log in again (the run waits up to 5
+minutes; if the guest logs in by itself nothing is needed). The risk is
+that of any WindowServer restart: the picture may stay black and the VM may
+panic (card run 50). The run uploads its table after every step, and the
+plugin's files are put back at the end and at the next boot should the run
+die. Run it last, and only when `bisect` points at nothing in the kernel.
+
+Not switchable at runtime (not tested by the steps above): the copy
+forward fixes of 2026-10-17 (`rdna3accelcf=0` switches copy forward off for
+the whole boot), the visible-VRAM reserve (`rdna3visreserve=<MiB>`, 0 = none),
+output gamma on by default (`rdna3gamma=0`), the VRAM-lost CS refusal
+(`rdna3vramlostcs=0`), FreeSync (`rdna3vrr=1`, off by default), the VMID
+admission and every other change in the kext without a switch. Try those with
+`rdna3vm args "<the boot-arg>"` (no `rdna3lvl` in it: the default profile) and
+compare with step 0. Older than the bug and left alone: `iop`, `iop_async`,
+`iop_flip`, `crc_head` and the plugin's `NVMTL_NO_DIRTYONLY`, `NVMTL_NO_TEXBUF`,
+`NVMTL_SKIP_EMPTY`, `NVMTL_NO_BUFTEX_RECYCLE` (all imported with the plugin on
+2026-10-09; their defaults did not change).
+
+The result: `rdna3vm result` prints the table (step, what changed, your
+answer, pipe 0 / 1 % not black, whether each picture moved between the step's
+two looks, the swap and stale-hold counter changes) and names the first step
+you marked `n`, the first whose looks went black or stood still, and where
+the run says the bug starts (`BISECT: BREAKS AT step N`). Anything missing
+(a look, the counters, a step that never ran) is a `WARN`.
 
 ### Tests that already passed
 

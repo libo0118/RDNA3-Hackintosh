@@ -152,6 +152,14 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
     done
     [ "$_found" = 1 ] || echo "(no kernel log in this report)"
 } > "$dir/38-vram-heap.txt" 2>/dev/null
+# card run 2026-10-17d: the display bisect (rdna3vm step bisect, autoreport.sh
+# bisect_run): per step the switches set and read back, the owner's answer, the
+# looks' pipe lines and the counters; tools/triage_reports.py prints the table.
+# autoreport.sh removes the folder at the start of every other run, so an old
+# one is never packed
+if [ -s "$HOME/rdna3-bisect/bisect.txt" ]; then
+    cp "$HOME/rdna3-bisect/bisect.txt" "$dir/39-bisect.txt" 2>/dev/null
+fi
 # N1: which processes the Metal plugin served and why. The list, the
 # boot-args (rdna3mtlapps=0 ends apps mode) and the plugin's decision line of
 # every process that loaded it: "allow mode: <mode>; <process>: <reason>"

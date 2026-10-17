@@ -210,6 +210,17 @@ repository or a Linux host.
    [AFTER-TESTS](AFTER-TESTS.md) expects from the VM.
    Only the collection, without running any test:
    `"$R/tools/macos/collect.sh" <label>` (writes `~/rdna3-report-<label>-<date>.tar.gz`).
+   **Black screens, windows that do not appear or flash, flicker?** Instead of
+   the report run the display bisect from a Terminal on the machine itself:
+   `sudo "/Library/Application Support/RDNA3/autoreport.sh" --standalone --bisect`
+   switches every new feature off and back on one at a time, 30 s each, while
+   you look at the monitors (a notification, "step N" spoken, N beeps per step);
+   press `y` (looks right), `n` (broken) or Enter (next) in the Terminal.
+   `--bisect-plugin` does the Metal plugin's switches (WindowServer is
+   restarted three times; log in again each time). The step list, the
+   timetable and the reading of the result are in
+   [TESTING-VM](TESTING-VM.md#display-bisect-step-bisect); the same report
+   files land in `/Users/Shared/rdna3-reports/` (`…-bisect.txt` is new).
 5. **A ladder step instead of the profile**, when the default profile fails:
    `sudo "$R/oc_install.sh" --efi /Volumes/EFI --step 2` (any step of the
    table above; `--step default` goes back to no `rdna3` boot-args), restart,

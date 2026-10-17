@@ -244,3 +244,15 @@ big3 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=
 # window and a picture of it), M5 (who loaded the plugin, WindowServer's
 # view), M6 (Chess and Maps on the plugin)
 big4 rdna3probe=1 rdna3pmexp=1 rdna3accelsdma=1 rdna3hotplug=2 rdna3amdgpu=1 rdna3mes=1 rdna3userq=1 rdna3pmctl=2 rdna3vcn=2 rdna3modeset=1 rdna3dispclk=1 rdna3scaledlg=1 rdna3hdmi=1 rdna3fmt=1 rdna3audio=1 rdna3otg=1 rdna3cursormall=1 rdna3mall=1 rdna3gamma=1 rdna3dmubreset=1 rdna3dcseq=1 rdna3dpms=2 rdna3resume=1 rdna3baco=1
+# Display bisect (card run 2026-10-17d; docs/TESTING-VM.md "Display bisect"):
+# black screens, windows that do not appear or only flash, flicker, since about
+# card run 58. The default profile (what the owner runs every day) with
+# rdna3bisect=1: instead of the other tests every new feature that has a
+# runtime switch is turned off, then back on one at a time (oldest first),
+# 30 s each while the owner looks at both monitors (a notification, "step N"
+# spoken and N beeps at every step; a scanout look per step, the switches read
+# back, the counters). rdna3bisect=2 is the Metal plugin's half
+# (rdna3mtl.conf / the allow list; WindowServer is restarted three times and somebody
+# must log in each time unless the guest logs in by itself): run it last
+bisect rdna3bisect=1
+bisect-plugin rdna3bisect=2
