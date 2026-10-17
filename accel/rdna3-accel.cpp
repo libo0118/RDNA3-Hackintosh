@@ -5674,6 +5674,7 @@ static bool rd3AccelScEnsureD(unsigned head, IOService *fb, unsigned w, unsigned
     bzero(&r, sizeof r);
     r.version = RD3K_VRAM_ABI_VERSION;
     r.size = (unsigned long long)pitch * h;
+    r.flags = RD3K_VRAM_OWNER_SWAP_D;   /* counted as swap_d in debug.rdna3_vram */
     const IOReturn ret = a->askFramebufferForVram(&r, true);
     if (ret != kIOReturnSuccess || !r.handle || !r.phys) {
         S.dRetry = 600;
