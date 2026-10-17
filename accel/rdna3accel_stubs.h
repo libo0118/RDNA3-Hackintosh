@@ -122,8 +122,11 @@ public:
     IOReturn submitCopyForward(IOAccelEvent* a0, unsigned int a1, IOAccelResource2* a2, IOAccelResource2* a3,
                                IOAccelBounds const* a4, unsigned int a5) APPLE_KEXT_OVERRIDE {
         (void)a0;
+        /* the surface's own buffers (as shapeSurface reads them): copy
+         * forward copies only between these (ECC review of 60526e4) */
         return rd3AccelCopyForward(this, a1, a2, a3, (const void *)a4, a5,
-                                   *(const volatile uint32_t *)((const uint8_t *)this + 0x11B0));
+                                   *(const volatile uint32_t *)((const uint8_t *)this + 0x11B0),
+                                   (IOAccelResource2 *const *)((const uint8_t *)this + 0x11C0), 32);
     }
     void shapeSurface(unsigned int a0, unsigned short a1, unsigned short a2) APPLE_KEXT_OVERRIDE {
         const unsigned w = a1, h = a2;
