@@ -65,7 +65,7 @@ $(BUILD)/test_swap_front: tests/test_swap_front.c common/rdna3_swap_front.h comm
 $(BUILD)/test_flip_latch: tests/test_flip_latch.c common/rdna3_flip_latch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_flip_latch.c
 # card run 2026-10-17b: the swap as a copy (mode 1) and the per-frame trace
-$(BUILD)/test_swap_copy: tests/test_swap_copy.c common/rdna3_swap_copy.h common/rdna3_swap_front.h common/rdna3_flip_latch.h | $(BUILD)
+$(BUILD)/test_swap_copy: tests/test_swap_copy.c common/rdna3_swap_copy.h common/rdna3_swap_front.h common/rdna3_flip_latch.h common/rdna3_trace.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_swap_copy.c
 $(BUILD)/test_trace: tests/test_trace.c common/rdna3_trace.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_trace.c
@@ -154,6 +154,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	tests/test_make_pkg.sh
 	tests/test_triage_a3.sh
 	python3 -I -B tests/test_accel_hash_parity.py
+	python3 -I -B tests/test_trace_parity.py
 	tests/test_triage_tx.sh
 	tests/test_triage_stale_plugin.sh
 	tests/test_triage_latch.sh

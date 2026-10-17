@@ -14,7 +14,13 @@ headers: still read), version (a version this decoder does not know),
 truncated (the stream cut inside its last blob), corrupt (garbage between
 two blobs), gap (a stream read missing from the file), inactive (phase 2
 with no swaps), mode0never (phase 2's swaps still in mode 1), nomem (the
-ring could not be allocated), short (ab, too few swaps per phase)."""
+ring could not be allocated), short (ab, too few swaps per phase); card
+run 2026-10-17c: b2lost (mode 1 held the empty back while the other back
+had a new frame), b2landed (mode 1 presented that landed buffer), b2would
+(the same held with debug.rdna3accel_swap_landed=0: found, not presented),
+stale, stalehold, stalemixed, stalewould, stale20ms, stalereset, stalereal
+(head 1, mode 1: copy forward -> B1, swap B1, swap B2 that WindowServer never
+redrew; stale_run says how each differs)."""
 import struct
 import sys
 
@@ -54,13 +60,74 @@ def band(k):
     return bytes([(k * 7 + i) & 0xff or 1 for i in range(8)])
 
 
-def swap(w, n, mode, arg, back, backpix, front=F, head=0, pc=0, flags=0, bandk=1, target=0, extra=0, waited=0):
-    fl = 1 | (8 if backpix else 0) | (0 if backpix else 16) | flags
+def swap(w, n, mode, arg, back, backpix, front=F, head=0, pc=0, flags=0, bandk=1, target=0, extra=0, waited=0,
+         landed=None, would=None, stale=None, dt=100, stalewould=False):
+    """landed: the index of the buffer a mode 1/2 swap presented instead of
+    its (empty) back (SWAP v1 bit 21, v4 >> 24; card run 2026-10-17c);
+    stale: the swap that last presented the back a mode 1/2 swap held as
+    stale (SWAP v1 bit 23, v3)"""
+    fl = 1 | (8 if backpix else 0) | (0 if backpix or landed is not None else 16) | flags
     rc2 = 5 if backpix else 4
-    w.add(1, head, arg, fl, 0xabcd, (n, 4 | rc2 << 4 | 3 << 8 | mode << 12 | target << 16, 650 if mode else 0,
-                                     waited, 0 | 1 << 8), front, back, pc, b"\0" * 8,
-          band(bandk) if backpix else b"\0" * 8)
+    if would is not None:   # found, not presented (SWAP v1 bit 22)
+        landed_bits, landed = 1 << 22, would
+    else:
+        landed_bits = 1 << 21 if landed is not None else 0
+    if stale is not None:
+        landed_bits |= 1 << 23
+        waited = stale
+    if stalewould:
+        landed_bits |= 1 << 24
+    w.add(1, head, arg, fl, 0xabcd, (n, 4 | rc2 << 4 | 3 << 8 | mode << 12 | target << 16 |
+                                     landed_bits, 650 if mode else 0,
+                                     waited, 0 | 1 << 8 | (landed or 0) << 24), front, back, pc, b"\0" * 8,
+          band(bandk) if backpix else b"\0" * 8, dt=dt)
     w.add(22, head, 0, 0, 0, (n, 100, 0, 0, 0), pc or HOME, pc or HOME, pc)   # PANEL
+
+
+STALE_KINDS = ("stale", "stalehold", "stalemixed", "stalewould", "stale20ms", "stalereset", "stalereal")
+
+
+def stale_run(w, kind):
+    """head 1, mode 1: CF -> B1, swap B1 (a new frame), swap B2 (not redrawn since swap 1). stale: B2 copied
+    (the old kext); stalehold: held (SWAP v1 bit 23, v3 1); stalemixed: held at even frames, copied at odd;
+    stalewould: copied with v1 bit 24 (swap_stale 0); stale20ms: copied 25 ms after B1's copy in the first 15
+    frames (not stale by the decoder's window), 19 ms in the last 15; stalereset: copied, but the kernel's
+    records are forgotten before each (GONE, a swap mode change there and back, D reallocated); stalereal:
+    held while B1 had a new frame (even) or after an aperture write into B2 (odd)"""
+    cf(w, 1, B2)
+    swap(w, 1, 1, 4, B2, True, head=1, pc=D, flags=64 | 32, target=2, bandk=200)
+    w.add(15, 1, 0xfe, 64 | 1, 0, (1, 0, 5, 0, 0), D, 0, 0, band(200))
+    for i in range(30):
+        n = 2 * i + 2
+        cf(w, 1, B1)
+        swap(w, n, 1, 4, B1, True, head=1, pc=HOME, flags=64 | 32, target=1, bandk=10 + i)
+        w.add(15, 1, 0xfe, 64 | 1, 0, (n, 0, 5, 0, 0), HOME, 0, 0, band(10 + i))   # the scanout: the new frame
+        scan(w, n, 2, B2, True, False, head=1)                                    # B2: not redrawn
+        hold = kind in ("stalehold", "stalereal") or (kind == "stalemixed" and i % 2 == 0)
+        if kind == "stalereset":
+            if i % 3 == 0:
+                w.add(13, 1, 0, 0, 0xabcd)                                         # GONE: the surface
+            elif i % 3 == 1:
+                w.add(14, arg=0, v=(1, 2, 0, 0, 0))                                 # MODESET 1 -> 2
+                w.add(14, arg=0, v=(2, 1, 0, 0, 0))                                 # ... and back
+            else:
+                w.add(4, 1, 1, 1 | 8, 0x5000, (8100, 40, 0, 0, 0), D)               # VMALLOC: head 1's new D
+        if hold:
+            if kind == "stalereal" and i % 2 == 0:
+                scan(w, n + 1, 1, B1, True, True, head=1)                          # B1 had a new frame
+            elif kind == "stalereal":
+                w.add(6, arg=1, flags=1, obj=0x1111, v=(8100, 3, 0, 0, 0), pa=B2)  # the CPU wrote B2
+            swap(w, n + 1, 1, 5, B2, True, head=1, pc=HOME, stale=1)
+        else:
+            swap(w, n + 1, 1, 4, B2, True, head=1, pc=D, flags=64 | 32, target=2, bandk=200,
+                 dt=(25 if i < 15 else 19) * 10 ** 6 if kind == "stale20ms" else 100,
+                 stalewould=kind == "stalewould")
+            w.add(15, 1, 0xfe, 64 | 1, 0, (n + 1, 0, 5, 0, 0), D, 0, 0, band(200))
+
+
+def cf(w, head, target):
+    """a mode 1/2 copy forward from the front into 'target' (CF, pick 16 + 1)"""
+    w.add(2, head, 16 + 1, 1, 0xabcd, (4, 4, 100, 50, 0), F, target, F)
 
 
 def scan(w, n, idx, phys, pix, changed, head=0):
@@ -89,6 +156,21 @@ def make(kind):
             swap(w, 2 * i + 2, 0, 0, B2, False, pc=B1)
             scan(w, 2 * i + 2, 1, B1, True, False)
             w.add(15, 0, 0xff, 4 | 16, 0xabcd, (2 * i + 2, 4000, 4, 0, 0), B2)   # delayed re-sample: still empty
+        common_tail(w)
+    elif kind in ("b2lost", "b2landed", "b2would"):   # mode 1: B1 drawn, then a swap of the empty B2 with B1 redrawn
+        for i in range(40):
+            w.add(6, arg=1, flags=1, obj=0x1111, v=(8100, 3, 0, 0, 0), pa=B1)
+            swap(w, 2 * i + 1, 1, 4, B1, True, pc=D, flags=64 | 32, target=2, bandk=2 * i)
+            scan(w, 2 * i + 1, 2, B2, False, False)
+            if kind in ("b2lost", "b2would"):   # held although B1 had a new frame: it waits for the next swap
+                scan(w, 2 * i + 2, 1, B1, True, True)
+                swap(w, 2 * i + 2, 1, 5, B2, False, pc=D, would=1 if kind == "b2would" else None)
+            else:                  # the landed buffer (B1, index 1) copied instead
+                scan(w, 2 * i + 2, 1, B1, True, True)
+                swap(w, 2 * i + 2, 1, 4, B2, False, pc=HOME, flags=64 | 32, target=1, landed=1)
+        common_tail(w)
+    elif kind in STALE_KINDS:   # card run 2026-10-17c's head 1: B2 drawn once, then never again
+        stale_run(w, kind)
         common_tail(w)
     elif kind == "copy":
         for i in range(40):

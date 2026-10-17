@@ -19,11 +19,110 @@ hasnt() { ! grep -qF -- "$2" <<<"$1" || fail "$3: '$2' unexpected in: $1"; }
 dec() { python3 -I "$ROOT/tests/trace_fixture.py" "$1" "$T/$1.bin" && python3 "$ROOT/tools/rdna3_trace.py" "$T/$1.bin"; }
 
 out=$(dec b2)
-has "$out" "FAIL     H-B2: head 0: the back 0x8b8f0000 was named by 40 swaps and read EMPTY at 40" b2
+# card run 2026-10-17c: every swap of the empty back skipped while the other back had nothing new: no frame lost
+has "$out" "WARN     H-B2: head 0: the back 0x8b8f0000 was named by 40 swaps and read EMPTY at 40" b2
 has "$out" "WindowServer's frames land in 0x8b100000" b2
+has "$out" "but no frame lost: all 40 of its swaps were held/skipped" b2
 has "$out" "PASS     Q3: 40 empty backs, 40 delayed re-samples" b2
 hasnt "$out" "H-FREE" b2
 hasnt "$out" "CF-ERROR" b2
+
+# mode 1 held the empty back while the other back had a new frame: frames held back (FAIL), counted in the A/B line
+out=$(dec b2lost)
+has "$out" "FAIL     H-B2: head 0: the back 0x8b8f0000 was named by 40 swaps and read EMPTY at 40" b2lost
+has "$out" "40 held/skipped, 40 of them with a new frame in another buffer, 0 shown black" b2lost
+has "$out" "40 held/skipped (40 with a new frame elsewhere)" b2lost
+# debug.rdna3accel_swap_landed=0: the same holds, the buffer found but not presented - FAIL names it
+python3 -I "$ROOT/tests/trace_fixture.py" b2would "$T/b2would.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/b2would.bin" --timeline 400)
+has "$out" "FAIL     H-B2: head 0: the back 0x8b8f0000" b2would
+has "$out" "the landed buffer found but NOT presented at 40 (debug.rdna3accel_swap_landed=0" b2would
+has "$out" "hold: back 0x8b8f0000 (empty, 0000000000000000) front 0x87040000 (empty) would present (swap_landed 0) the landed buffer 0x8b100000" b2would
+has "$out" "40 landed buffers NOT presented (swap_landed 0)" b2would
+# mode 1 presented the landed buffer: H-B2 handled (INFO), the timeline names the buffer
+python3 -I "$ROOT/tests/trace_fixture.py" b2landed "$T/b2landed.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/b2landed.bin" --timeline 400)
+has "$out" "INFO     H-B2: head 0: the back 0x8b8f0000 was named by 40 swaps" b2landed
+has "$out" "handled: landed buffer presented 40 times" b2landed
+has "$out" "copy: back 0x8b8f0000 (empty, 0000000000000000) front 0x87040000 (empty) presented the landed buffer 0x8b100000" b2landed
+has "$out" "80 shown (40 landed),    0 held/skipped" b2landed
+hasnt "$out" "FAIL     H-B2" b2landed
+has "$out" "0 BLACK frames" b2landed
+
+# card run 2026-10-17c: head 1's second swap of a frame named a back WindowServer did not redraw. The old
+# kext copied its old frame over every new one (H-STALE FAIL, A-B-A on the scanout); the stale-back hold keeps
+# the newer frame (INFO), the timeline names the swap that showed it
+python3 -I "$ROOT/tests/trace_fixture.py" stale "$T/stale.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/stale.bin" --timeline 400)
+has "$out" "FAIL     H-STALE: head 1: 61 mode 1/2 copies decoded, 30 stale copied, 0 held, 30 A-B-A on the scanout samples - stale backs COPIED (0x8b8f0000 30x; first swap #3, shown before at #1)" stale
+has "$out" "no stale hold in the trace: a kext before the stale-back hold" stale
+has "$out" "WARN     A-B-A: head 1: 30 A-B-A patterns on the scanout samples" stale
+has "$out" "its PASS does not cover this" stale
+hasnt "$out" "H-STALE: head 0" stale
+hasnt "$out" "COPY-BLACK" stale
+python3 -I "$ROOT/tests/trace_fixture.py" stalehold "$T/stalehold.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/stalehold.bin" --timeline 400)
+has "$out" "INFO     H-STALE: head 1: 31 mode 1/2 copies decoded, 0 stale copied, 30 held, 0 A-B-A on the scanout samples" stalehold
+has "$out" "hold: back 0x8b8f0000 (pixels, 0708090a0b0c0d0e) front 0x87040000 (empty) held: stale back (shown at #1)" stalehold
+has "$out" "30 held/skipped (0 with a new frame elsewhere), 30 stale backs held" stalehold
+hasnt "$out" "FAIL     H-STALE" stalehold
+hasnt "$out" "A-B-A: head" stalehold
+hasnt "$out" "may look frozen" stalehold
+# some held, some copied: FAIL names the copies, the kext has the hold
+python3 -I "$ROOT/tests/trace_fixture.py" stalemixed "$T/stalemixed.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/stalemixed.bin")
+has "$out" "FAIL     H-STALE: head 1: 46 mode 1/2 copies decoded, 15 stale copied, 15 held" stalemixed
+has "$out" "the kext has the hold (its holds are in the trace)" stalemixed
+hasnt "$out" "a kext before the stale-back hold" stalemixed
+# swap_stale=0: the copies were on purpose (SWAP v1 bit 24): WARN, the timeline says so
+python3 -I "$ROOT/tests/trace_fixture.py" stalewould "$T/stalewould.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/stalewould.bin" --timeline 400)
+has "$out" "WARN     H-STALE: head 1: 61 mode 1/2 copies decoded, 30 stale copied, 0 held, 30 A-B-A on the scanout samples - copied on purpose (debug.rdna3accel_swap_stale=0)" stalewould
+has "$out" "stale: would hold (swap_stale 0)" stalewould
+hasnt "$out" "FAIL     H-STALE" stalewould
+# the 20 ms window: 25 ms after B1's copy is not stale, 19 ms is
+python3 -I "$ROOT/tests/trace_fixture.py" stale20ms "$T/stale20ms.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/stale20ms.bin")
+has "$out" "15 stale copied, 0 held" stale20ms
+has "$out" "first swap #33, shown before at #31" stale20ms
+# the kernel's resets (GONE, a swap mode change, D reallocated) forget the records: nothing stale
+python3 -I "$ROOT/tests/trace_fixture.py" stalereset "$T/stalereset.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/stalereset.bin")
+has "$out" "INFO     H-STALE: head 1: 61 mode 1/2 copies decoded, 0 stale copied, 0 held" stalereset
+# a held back while another buffer had a new frame, or after the CPU wrote it: a real frame held (FAIL)
+python3 -I "$ROOT/tests/trace_fixture.py" stalereal "$T/stalereal.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/stalereal.bin")
+has "$out" "FAIL     H-STALE: head 1: held a REAL frame at 30 stale hold(s) (first swap #3: a new frame in 0x8b100000 at that swap)" stalereal
+python3 -I - "$ROOT" "$T/stalereal.bin" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/tools")
+import rdna3_trace as r
+d = r.stale_backs(r.load([sys.argv[2]]))[1]
+whys = [w for _, w in d["real"]]
+assert sum("aperture write" in w for w in whys) == 15 and sum("a new frame" in w for w in whys) == 15, whys
+PY
+# more than two stale holds per copy on a head: the panel may look frozen (WARN)
+python3 -I - "$ROOT" "$T/frozen.bin" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/tests")
+sys.path.insert(0, sys.argv[1] + "/tools")
+import trace_fixture as f
+import rdna3_trace as r
+w = f.W()
+f.cf(w, 1, f.B2)
+f.swap(w, 1, 1, 4, f.B2, True, head=1, pc=f.D, flags=96, target=2, bandk=200)
+f.cf(w, 1, f.B1)
+f.swap(w, 2, 1, 4, f.B1, True, head=1, pc=f.HOME, flags=96, target=1, bandk=3)
+for n in range(3, 9):
+    f.swap(w, n, 1, 5, f.B2, True, head=1, pc=f.HOME, stale=1)
+open(sys.argv[2], "wb").write(w.blob())
+out = r.h_stale(r.load([sys.argv[2]]))
+assert any(lv == "WARN" and "6 stale holds against 2 copies" in t for lv, n, t in out), out
+PY
+# every other fixture's backs are drawn or empty: never a stale FAIL
+out=$(dec b2landed)
+hasnt "$out" "FAIL     H-STALE" b2landed-stale
+has "$out" "INFO     H-STALE: head 0:" b2landed-stale
 
 out=$(dec copy)
 has "$out" "FAIL     H-COPY: mode 0: 39 of 39 flipped buffers were rewritten" copy
@@ -217,7 +316,7 @@ mk b2 b2 "swaps_h0 80
 cf_calls 1
 swap_mode 0"
 out=$(run b2)
-has "$out" "FAIL frame trace: H-B2: head 0: the back 0x8b8f0000" triage-b2
+has "$out" "WARN frame trace: H-B2: head 0: the back 0x8b8f0000" triage-b2
 has "$out" "frame trace timeline" triage-b2
 
 mk none - "swaps_h0 80
@@ -236,6 +335,102 @@ has "$out" "CRITICAL copy forward: CoreDisplay disabled copy forward at 2026-10-
 has "$out" "the family failed before calling it" triage-cd
 has "$out" "FAIL swap copy: head 0: 40 backs copied" triage-cd
 has "$out" "10 black frames" triage-cd
+# card run 2026-10-17c: the landed buffer's counter (swaps_copylanded_h<N>): H-B2 handled, in the checklist too
+mk landed clean "swaps_h0 40
+swap_mode 1
+swaps_copy_h0 40
+swaps_copylanded_h0 12
+swaps_copyempty_h0 3"
+out=$(run landed)
+has "$out" "40 backs copied" triage-landed
+has "$out" "12 of them the landed buffer instead of an empty / stale back, 3 empty backs kept off a picture" triage-landed
+has "$out" "INFO swap copy: head 0: H-B2 handled: landed buffer presented 12 times" triage-landed
+has "$out" "swap copy              INFO head 0: H-B2 handled: landed buffer presented 12 times" triage-landed-summary
+mk would clean "swaps_h0 40
+swap_mode 1
+swap_landed 0
+swaps_copy_h0 40
+swaps_copylanded_would_h0 7
+swaps_copyempty_h0 7"
+out=$(run would)
+has "$out" "WARN swap copy: head 0: the landed buffer WOULD have been presented 7 times (swap_landed 0" triage-would
+# card run 2026-10-17c: the stale back - the counters (swaps_stalehold_h<N>, the reasons) and the trace's
+# verdict, in the report's lines and the SUMMARY
+mk stalehold stalehold "swaps_h1 31
+swap_mode 1
+swap_landed 0
+swap_stale 1
+swaps_copy_h1 31
+swaps_copylanded_h1 0
+swaps_stalehold_h1 30
+swaps_stalecheck_norecord_h1 1
+swaps_stalecheck_sameshown_h1 2
+swaps_staleevict_h1 0
+swaps_stalehold_miss_h1 4
+swaps_stalenocf_h1 5"
+out=$(run stalehold)
+has "$out" "0 of them the landed buffer instead of an empty / stale back, 0 empty backs kept off a picture, 30 stale backs held (not redrawn since shown)" triage-stalehold
+has "$out" "INFO swap copy: head 1: H-STALE handled: 30 stale backs held" triage-stalehold
+has "$out" "INFO swap copy: head 1: stale back (swap_stale 1): kernel: 30 held, 0 would (swap_stale 0); not held: norecord 1, changed 0, cf 0, sameshown 2, nopanel 0, nohead 0; 0 evicted (8-slot table), 4 second-grid misses, 5 changed without copy forward" triage-stalehold
+has "$out" "swap copy              INFO head 1: H-STALE handled: 30 stale backs held" triage-stalehold-summary
+has "$out" "frame trace            INFO H-STALE: head 1: 31 mode 1/2 copies decoded, 0 stale copied, 30 held" triage-stalehold-summary
+has "$out" "; kernel: 30 held" triage-stalehold-kern
+hasnt "$out" "counter missing" triage-stalehold
+hasnt "$out" "stale holds, the trace holds" triage-stalehold
+# the kext has the hold (counters) but copied some: the reasons named, never "a kext before the hold"; the
+# counter and the trace's holds apart (20 vs 15, nothing lost): WARN
+mk stalemixed stalemixed "swaps_h1 61
+swap_mode 1
+swap_landed 0
+swaps_copy_h1 46
+swaps_copylanded_h1 0
+swaps_stalehold_h1 20
+swaps_staleevict_h1 15"
+out=$(run stalemixed)
+has "$out" "FAIL frame trace: H-STALE: head 1: 46 mode 1/2 copies decoded, 15 stale copied, 15 held" triage-stalemixed
+hasnt "$out" "a kext before the stale-back hold" triage-stalemixed
+has "$out" "WARN frame trace: H-STALE: head 1: the kernel counted 20 stale holds, the trace holds 15 (0 events lost)" triage-stalemixed
+python3 -I - "$ROOT" "$T/stalemixed.bin" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/tools")
+import rdna3_trace as r
+c = {"swaps_stalehold_h1": 15, "swaps_staleevict_h1": 15, "swaps_stalecheck_norecord_h1": 15}
+lines = [t for lv, n, t in r.h_stale(r.load([sys.argv[2]]), {"counters": c}) if n == "H-STALE"]
+assert any("15 evicted (8-slot table)" in t and "norecord 15" in t for t in lines), lines
+assert not any("the kernel counted" in t for t in lines), lines
+PY
+mk stale stale "swaps_h1 61
+swap_mode 1
+swaps_copy_h1 61"
+out=$(run stale)
+has "$out" "FAIL frame trace: H-STALE: head 1: 61 mode 1/2 copies decoded, 30 stale copied" triage-stale
+has "$out" "frame trace            FAIL H-STALE: head 1: 61 mode 1/2 copies decoded, 30 stale copied" triage-stale-summary
+has "$out" "frame trace            WARN A-B-A: head 1: 30 A-B-A patterns" triage-stale-summary
+# an older kext: the counters missing are said, never printed as zeros
+has "$out" "WARN swap copy: counter missing: swap_landed (kext older than 2026-10-17c)" triage-stale-old
+has "$out" "WARN swap copy: head 1: counter missing: swaps_stalehold_h1, swaps_copylanded_h1 (kext older than 2026-10-17c)" triage-stale-old
+has "$out" "61 backs copied (0 MiB, avg 0 us, max 0 us), ? of them the landed buffer" triage-stale-old
+has "$out" "? stale backs held" triage-stale-old
+# the hold counter without swaps_copy (a partial dump): WARN; only stale holds on a head still get its lines
+mk stalenocopy - "swaps_h1 31
+swap_mode 1
+swap_landed 0
+swaps_stalehold_h1 30
+swaps_copy_h0 10
+swaps_copylanded_h0 0
+swaps_stalehold_h0 0"
+out=$(run stalenocopy)
+has "$out" "WARN swap copy: head 1: counter missing: swaps_copy_h1 although swaps_stalehold_h1 is 30" triage-stalenocopy
+# the counters without a trace: H-STALE not judged, said so
+has "$out" "WARN frame trace: H-STALE not judged: no trace in the report (swaps_stalehold_h<N> counters only)" triage-stalenotrace
+mk staleonly - "swaps_h1 31
+swap_mode 1
+swap_landed 1
+swaps_copy_h1 0
+swaps_copylanded_h1 0
+swaps_stalehold_h1 30"
+out=$(run staleonly)
+has "$out" "INFO swap copy: head 1: H-STALE handled: 30 stale backs held" triage-staleonly
 
 # ECC review round 1 through triage
 # no tests file: the A/B judged from the trace, said so
