@@ -594,6 +594,8 @@ def flicker_verdict(txt_or_counters):
 SERIAL_SWAP_LINE = re.compile(r"(flicker: head \d+: [^\n]*|swap: head \d+: \d+ swaps over[^\n]*|"
                               r"a3 display: head \d+: \d+ legacy swaps \(\d+ A B A B of \d+ hashed\)|"
                               r"copy forward #\d+: (?:head \d+: )?(?:from the buffer it shows|the buffer it showed|"
+                              r"the target \(phys 0x[0-9a-f]+\) is the buffer the head showed last|"
+                              r"\d+ rect\(s\) the target|the front \(phys[^\n]*holds the last frame|"
                               r"\d+ of \d+ rect\(s\) not copied|no head known|head \d+ has shown nothing|"
                               r"head \d+ shows a buffer that is not|the target \(phys[^\n]*not copyable|refused|"
                               r"the front \(phys[^\n]*not copyable|pixel \(\d+,\d+\)[^\n]*did NOT land)[^\n]*|"
@@ -690,10 +692,12 @@ def serial_swap_verdict(text):
             why.append("the head showed another surface's buffer")
         out.append(("WARN" if why else "INFO", "copy forward / swaps: %s%s" % (what, " - " + ", ".join(why) if why else "")))
     # an older kernel: two backs taking turns while copy forward copied nothing
-    bufs = {}
+    moves = {}
     for h, a, b in re.findall(r"swap #\d+: head (\d+) frame phys (0x[0-9a-f]+) -> (0x[0-9a-f]+)", text):
-        bufs.setdefault(h, set()).update((a, b))
-    turns = sorted(h for h, b in bufs.items() if len(b - {"0x0"}) >= 3)
+        if a != "0x0":
+            moves.setdefault(h, set()).add((a, b))
+    # taking turns: some buffer went A -> B and back B -> A
+    turns = sorted(h for h, m in moves.items() if any((b, a) in m for a, b in m))
     if turns and "was never shown -- the back buffer already holds the last frame" in text:
         out.append(("WARN", "head(s) %s: two back buffers took turns while copy forward copied nothing ('the front "
                             "buffer ... was never shown'): each back kept what changed two frames before - the A B A B "
@@ -705,6 +709,12 @@ def serial_swap_verdict(text):
             lines.append(l)
     # the earliest lines say how it started, the last where it ended
     return out, (lines if len(lines) <= 20 else lines[:6] + ["..."] + lines[-14:])
+
+
+# a head that skipped this many swaps and showed none is a failure (fewer:
+# the first swaps of a boot, before anything is drawn; the kernel shows an
+# empty back after RD3_SWAP_EMPTY_RUN skips anyway)
+SKIP_FAIL_MIN = 10
 
 
 def copy_forward_verdict(c):
@@ -742,11 +752,15 @@ def copy_forward_verdict(c):
                                                               c.get("cf_calls", 0), (" - " + "; ".join(why)) if why else "")))
     for h in heads:
         swaps, skipped = c.get("swaps_h" + h, 0), c.get("swaps_skipped_h" + h, 0)
-        if skipped and not swaps:
+        if skipped >= SKIP_FAIL_MIN and not swaps:
             out.append(("FAIL", "head %s: %d swap(s) skipped (empty back) and none shown" % (h, skipped)))
         elif skipped and skipped >= 0.1 * (swaps + skipped):
             out.append(("WARN", "head %s: %d of %d swaps skipped (empty back, %d with pixels in the front)" % (
                 h, skipped, swaps + skipped, c.get("swaps_frontskip_h" + h, 0))))
+    per_head = sum(c.get("swaps_skipped_h" + h, 0) for h in heads)
+    if c.get("swaps_skipped_all", 0) > per_head:
+        out.append(("WARN", "%d swap(s) skipped with no head named (nothing drawn and no front: %d in all, %d on "
+                            "heads)" % (c["swaps_skipped_all"] - per_head, c["swaps_skipped_all"], per_head)))
     if c.get("swaps_nohead", 0):
         out.append(("WARN", "%d swap(s) matched no head (not shown)" % c.get("swaps_nohead", 0)))
     return out
@@ -1713,13 +1727,30 @@ def main():
             print("   TX watch (%d line(s); the full states, the first change with problems, the last 20):" % len(tx))
             for l in ex:
                 print("     " + l)
+        # the newest serial log only (older boots' logs are history), and
+        # only when no report carries the flicker counters: a serial log is
+        # a snapshot from the middle of the run, the report's counters the
+        # end (review of e2bf78e)
+        if s != serials[-1]:
+            continue
         try:
             sv = serial_swap_verdict(open(s, errors="replace").read())
         except OSError:
             sv = ([], [])
+        counted = False
+        for r in reports:
+            tp = r[:-len(".tar.gz")] + "-tests.txt"
+            try:
+                counted = counted or "rdna3accel_swaps_hashed_h" in open(tp, errors="replace").read()
+            except OSError:
+                pass
         if sv[0] or sv[1]:
-            print("   swaps and flicker (the kernel's lines; a run without a report has only these):")
+            print("   swaps and flicker (the kernel's lines; a run without a report has only these%s):" %
+                  ("; the report's counters decide, so these are INFO" if counted else ""))
             for lv, t in sv[0]:
+                if counted and lv != "INFO":
+                    t = "(serial said %s) %s" % (lv, t)
+                    lv = "INFO"
                 print("   %s %-20s %s" % (lv, "swap/flicker", t))
                 failed = failed or lv == "FAIL"
             for l in sv[1]:

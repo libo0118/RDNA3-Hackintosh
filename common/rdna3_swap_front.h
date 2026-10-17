@@ -40,15 +40,17 @@
 /* the swap's buffer that goes to the panel */
 enum rd3_swap_pick { RD3_SWAP_SKIP = 0, RD3_SWAP_A1 = 1, RD3_SWAP_A2 = 2 };
 
-/* the swaps in a row of one empty back after which it goes to the panel */
+/* the swaps of a head skipped in a row after which an empty back goes to
+ * the panel */
 #define RD3_SWAP_EMPTY_RUN 3u
 
 /* a1IsFront / a2IsFront: that argument is a head's framebuffer resource
  * (the front); a1Content / a2Content: rd3AccelResContent found pixels;
- * emptyRun: the swaps of this same empty back skipped in a row before this
- * one. With the front known the other argument is the back and the only
- * candidate: an empty back is skipped (nothing drawn yet) until it has
- * been swapped RD3_SWAP_EMPTY_RUN times in a row (a black or clear frame),
+ * emptyRun: the head's swaps skipped in a row before this one, whichever
+ * back they named (two empty backs taking turns must reach the run too,
+ * review of e2bf78e). With the front known the other argument is the back
+ * and the only candidate: an empty back is skipped (nothing drawn yet)
+ * until RD3_SWAP_EMPTY_RUN swaps came in a row (a black or clear frame),
  * never replaced by the front. Without (or with two fronts) the older rule:
  * the argument that has content, a2 first (probe runs: a2 held the
  * composited frame). */
@@ -104,21 +106,135 @@ static inline enum rd3_cf_pick rd3_cf_source(const struct rd3_cf_in *in)
     return in->srcShown ? RD3_CF_COPY_SRC : RD3_CF_SKIP_NO_HEAD;
 }
 
-/* A copy that left rects stale in its target: copy forward moves only the
- * regions the last frame changed, so a missed region stays stale in that
- * buffer until it is redrawn, and shows in turns with the other back (the
- * A B A B again). The target is remembered; the next copy forward into it
- * copies the whole picture from the shown buffer (rd3_cf_full), so one
- * miss costs one frame. The miss is not reported to CoreDisplay: on
+/* Rects a copy forward left stale in its target (a copy that failed, or a
+ * call that copied nothing): copy forward moves only the regions the last
+ * frame changed, so a missed region stays stale in that buffer until it is
+ * redrawn and shows in turns with the other back (the A B A B again).
+ * Each buffer keeps its own missed rects (review of e2bf78e: one mark per
+ * head lost the first back's when the second missed too, and a whole copy
+ * from a source that had missed rects itself spread them). The next copy
+ * forward into that buffer copies them too, from the shown buffer - only
+ * those that do not touch a rect the source missed itself (the source is
+ * stale there; such rects stay pending). A rect the last frame or this one
+ * changed was drawn by WindowServer into the source, so the source holds
+ * it. Too many rects: the whole picture is pending, copied in one piece
+ * from a source with nothing pending, and only with the copy engine on
+ * (the CPU takes 256 KiB at most); until then only the rects. A buffer's
+ * rects go when it is freed. The miss is not reported to CoreDisplay: on
  * kIOReturnUnsupported it switches copy forward off for good ("copy
  * forward failed ... disabling", card run 54) and keeps drawing only the
  * damage, which would leave every later frame stale; it is counted and
  * logged instead (debug.rdna3accel_cf_miss_h<N>, cf_healed_h<N>). */
+struct rd3_rect { int x, y, w, h; };
+#define RD3_CF_PEND_RECTS 8u
+#define RD3_CF_PEND_BUFS  4u
+struct rd3_cf_pend { const void *buf; unsigned n; int whole; struct rd3_rect r[RD3_CF_PEND_RECTS]; };
+struct rd3_cf_heal { struct rd3_cf_pend b[RD3_CF_PEND_BUFS]; };
 
-/* copy the whole picture instead of the rects: the target missed a copy */
-static inline int rd3_cf_full(int dstMissedCopy)
+static inline int rd3_rect_meet(const struct rd3_rect *a, const struct rd3_rect *b)
 {
-    return dstMissedCopy != 0;
+    return a->w > 0 && a->h > 0 && b->w > 0 && b->h > 0 && a->x < b->x + b->w && b->x < a->x + a->w &&
+           a->y < b->y + b->h && b->y < a->y + a->h;
+}
+
+static inline struct rd3_cf_pend *rd3_cf_pend_get(struct rd3_cf_heal *s, const void *buf)
+{
+    unsigned i;
+    for (i = 0; s && buf && i < RD3_CF_PEND_BUFS; i++)
+        if (s->b[i].buf == buf)
+            return &s->b[i];
+    return 0;
+}
+
+/* anything pending for 'buf' */
+static inline int rd3_cf_pending(struct rd3_cf_heal *s, const void *buf)
+{
+    const struct rd3_cf_pend *p = rd3_cf_pend_get(s, buf);
+    return p && (p->n || p->whole);
+}
+
+/* the entry leaves the table; the later ones move up, so the table stays
+ * in the order the buffers first missed (the first is the oldest) */
+static inline void rd3_cf_pend_drop(struct rd3_cf_heal *s, struct rd3_cf_pend *p)
+{
+    unsigned i = (unsigned)(p - s->b);
+    for (; i + 1 < RD3_CF_PEND_BUFS; i++)
+        s->b[i] = s->b[i + 1];
+    s->b[RD3_CF_PEND_BUFS - 1].buf = 0;
+    s->b[RD3_CF_PEND_BUFS - 1].n = 0;
+    s->b[RD3_CF_PEND_BUFS - 1].whole = 0;
+}
+
+/* 'buf' missed 'n' rects ('r' NULL or n of ~0u: the whole picture). A full
+ * table drops the buffer listed first (the oldest). */
+static inline void rd3_cf_pend_add(struct rd3_cf_heal *s, const void *buf, const struct rd3_rect *r, unsigned n)
+{
+    struct rd3_cf_pend *p;
+    unsigned i;
+    if (!s || !buf)
+        return;
+    p = rd3_cf_pend_get(s, buf);
+    if (!p) {
+        for (i = 0; i < RD3_CF_PEND_BUFS && !p; i++)
+            if (!s->b[i].buf)
+                p = &s->b[i];
+        if (!p) {
+            rd3_cf_pend_drop(s, &s->b[0]);
+            p = &s->b[RD3_CF_PEND_BUFS - 1];
+        }
+        p->buf = buf; p->n = 0; p->whole = 0;
+    }
+    if (!r || n == ~0u) { p->whole = 1; p->n = 0; return; }
+    for (i = 0; i < n && !p->whole; i++) {
+        if (r[i].w <= 0 || r[i].h <= 0)
+            continue;
+        if (p->n == RD3_CF_PEND_RECTS) { p->whole = 1; p->n = 0; break; }
+        p->r[p->n++] = r[i];
+    }
+}
+
+/* the buffer is freed */
+static inline void rd3_cf_pend_forget(struct rd3_cf_heal *s, const void *buf)
+{
+    struct rd3_cf_pend *p = rd3_cf_pend_get(s, buf);
+    if (p)
+        rd3_cf_pend_drop(s, p);
+}
+
+/* The rects to copy into 'dst' from 'src' on top of this call's: dst's
+ * pending rects that touch none src missed itself; those leave dst's list
+ * (a copy of them that fails goes back with rd3_cf_pend_add). A whole
+ * picture pending in dst: one rect of w x h, when src has nothing pending
+ * and 'engine' (the copy engine is on), else nothing (it stays pending).
+ * Returns how many rects went to 'out' (at most 'max'). */
+static inline unsigned rd3_cf_pend_take(struct rd3_cf_heal *s, const void *dst, const void *src, int w, int h,
+                                        int engine, struct rd3_rect *out, unsigned max)
+{
+    struct rd3_cf_pend *d = rd3_cf_pend_get(s, dst), *sp = rd3_cf_pend_get(s, src);
+    unsigned i, j, k = 0, keep = 0;
+    const int srcPending = sp && sp != d && (sp->n || sp->whole);
+    if (!d || !out || !max)
+        return 0;
+    if (d->whole) {
+        if (srcPending || !engine)
+            return 0;
+        out[0].x = 0; out[0].y = 0; out[0].w = w; out[0].h = h;
+        rd3_cf_pend_drop(s, d);
+        return 1;
+    }
+    for (i = 0; i < d->n; i++) {
+        int clash = srcPending && sp->whole;
+        for (j = 0; srcPending && !clash && j < sp->n; j++)
+            clash = rd3_rect_meet(&d->r[i], &sp->r[j]);
+        if (clash || k == max)
+            d->r[keep++] = d->r[i];
+        else
+            out[k++] = d->r[i];
+    }
+    d->n = keep;
+    if (!d->n)
+        rd3_cf_pend_drop(s, d);
+    return k;
 }
 
 #endif

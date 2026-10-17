@@ -29,33 +29,60 @@ static int gNoHeal;   /* 1: the misses are not healed (to show the heal is neede
 struct sim {
     uint32_t buf[BUFS][BANDS];
     int shown;                  /* the buffer the head showed last, -1 none */
-    int heal;                   /* the back that missed a copy (copied whole next time), -1 none */
-    unsigned abab, wrong, copies, frames, healed;
+    struct rd3_cf_heal heal;    /* the rects each buffer missed */
+    unsigned abab, wrong, copies, frames, healed, ababAfter;
 };
 
-/* one frame: copy forward into 'back', draw the damage, swap (flip to the
- * back). 'miss': this frame's copy fails (SDMA refused). */
-static void frame(struct sim *s, int back, unsigned lastDamage, unsigned damage, uint32_t value, int newRule, int miss,
-                  uint32_t *truth, uint32_t h1[BANDS], uint32_t h2[BANDS])
+/* band b of the model as a rect (x 0, y b, 1 x 1) and back */
+static unsigned rects_of(unsigned mask, struct rd3_rect *r)
 {
-    unsigned rects = lastDamage & ~damage;   /* CGXDisplayCreateCopyForwardShape */
+    unsigned n = 0;
+    for (unsigned b = 0; b < BANDS; b++)
+        if (mask & (1u << b)) { r[n].x = 0; r[n].y = (int)b; r[n].w = 1; r[n].h = 1; n++; }
+    return n;
+}
+static unsigned mask_of(const struct rd3_rect *r, unsigned n)
+{
+    unsigned m = 0;
+    for (unsigned i = 0; i < n; i++)
+        for (int y = r[i].y; y < r[i].y + r[i].h && y < BANDS; y++)
+            if (y >= 0) m |= 1u << y;
+    return m;
+}
+
+/* one frame: copy forward into 'back', draw the damage, swap (flip to the
+ * back). 'miss': nothing can be copied this frame (SDMA refused, the rects
+ * too big for the CPU); 'sdmaOff': the copy engine is off, the CPU copies
+ * the (small) rects but not the whole picture. */
+static void frame(struct sim *s, int back, unsigned lastDamage, unsigned damage, uint32_t value, int newRule, int miss,
+                  int sdmaOff, uint32_t *truth, uint32_t h1[BANDS], uint32_t h2[BANDS])
+{
+    const unsigned rects = lastDamage & ~damage;   /* CGXDisplayCreateCopyForwardShape */
+    struct rd3_rect r[BANDS], extra[RD3_CF_PEND_RECTS];
+    const void *id = &s->buf[back];
     int from = -1;
     if (newRule) {
         const struct rd3_cf_in in = { 0 == back, 1, s->shown >= 0, s->shown == back, s->shown == 0,
                                       s->shown == 1 || s->shown == 2, s->shown == 0 };
         const enum rd3_cf_pick p = rd3_cf_source(&in);
         from = p == RD3_CF_COPY_SRC ? 0 : p == RD3_CF_COPY_SHOWN ? s->shown : -1;
-        if (from >= 0 && !gNoHeal && rd3_cf_full(s->heal == back))
-            rects = (1u << BANDS) - 1u;
+        /* nothing copied with rects to copy: they are pending in the target */
+        if (from < 0 && rects && !gNoHeal && (p == RD3_CF_SKIP_NOTHING_SHOWN || p == RD3_CF_SKIP_FOREIGN))
+            rd3_cf_pend_add(&s->heal, id, r, rects_of(rects, r));
     } else if (s->shown == 0) {
         from = 0;   /* card run 56-58b: only from a front that was shown; the front never is */
     }
-    if (from >= 0 && miss) {
-        s->heal = back;   /* the copy failed: this back is copied whole next time */
-    } else {
-        for (unsigned b = 0; from >= 0 && b < BANDS; b++)
-            if (rects & (1u << b)) { s->buf[back][b] = s->buf[from][b]; s->copies++; }
-        if (from >= 0 && s->heal == back) { s->heal = -1; s->healed++; }
+    if (from >= 0) {
+        const unsigned ne = gNoHeal ? 0 : rd3_cf_pend_take(&s->heal, id, &s->buf[from], 1, BANDS, !sdmaOff, extra,
+                                                           RD3_CF_PEND_RECTS);
+        const unsigned what = rects | mask_of(extra, ne);
+        if (miss) {
+            if (!gNoHeal) rd3_cf_pend_add(&s->heal, id, r, rects_of(what, r));
+        } else {
+            for (unsigned b = 0; b < BANDS; b++)
+                if (what & (1u << b)) { s->buf[back][b] = s->buf[from][b]; s->copies++; }
+            s->healed += ne > 0;
+        }
     }
     for (unsigned b = 0; b < BANDS; b++)
         if (damage & (1u << b)) { s->buf[back][b] = value; truth[b] = value; }
@@ -71,9 +98,13 @@ static void frame(struct sim *s, int back, unsigned lastDamage, unsigned damage,
 }
 
 /* 40 frames, the damage moving over the bands (a window dragged, a menu
- * opening), with one or two backs; copies fail on the frames in 'misses'
- * (a bit per frame); the wrong frames from frame 20 on go to 'wrongAfter' */
-static void run(int twoBacks, int newRule, uint64_t misses, struct sim *s, unsigned *wrongAfter)
+ * opening), with one or two backs; nothing can be copied on the frames in
+ * 'misses', the copy engine is off on those in 'sdmaOff' (a bit per
+ * frame); 'narrow': from frame 14 on only band 0 changes (a caret: nothing
+ * redraws a stale region). The wrong frames from frame 'measure' on go to
+ * 'wrongAfter'. */
+static void run(int twoBacks, int newRule, uint64_t misses, uint64_t sdmaOff, int narrow, unsigned measure,
+                struct sim *s, unsigned *wrongAfter)
 {
     uint32_t truth[BANDS], h1[BANDS], h2[BANDS];
     unsigned last = 0, before = 0;
@@ -82,16 +113,18 @@ static void run(int twoBacks, int newRule, uint64_t misses, struct sim *s, unsig
     memset(h1, 0, sizeof h1);
     memset(h2, 0, sizeof h2);
     s->shown = -1;
-    s->heal = -1;
     for (unsigned k = 0; k < 40; k++) {
         /* bands 0-5 change in turn, band 6 every fifth frame, band 7 once (frame 8: a menu that closed) */
-        const unsigned damage = k == 0 ? 0xffu : (1u << (k % 6)) | (k % 5 == 0 ? 0x40u : 0u) | (k == 8 ? 0x80u : 0u);
+        const unsigned damage = k == 0 ? 0xffu : narrow && k >= 14 ? 1u
+                              : (1u << (k % 6)) | (k % 5 == 0 ? 0x40u : 0u) | (k == 8 ? 0x80u : 0u);
         const int back = twoBacks ? 1 + (int)(k & 1) : 1;
-        if (k == 20) before = s->wrong;
-        frame(s, back, last, damage, 1000 + k, newRule, (int)((misses >> k) & 1u), truth, h1, h2);
+        if (k == measure) { before = s->wrong; s->ababAfter = s->abab; }
+        frame(s, back, last, damage, 1000 + k, newRule, (int)((misses >> k) & 1u), (int)((sdmaOff >> k) & 1u),
+              truth, h1, h2);
         last = damage;
     }
     if (wrongAfter) *wrongAfter = s->wrong - before;
+    s->ababAfter = s->abab - s->ababAfter;
 }
 
 int main(void)
@@ -112,6 +145,17 @@ int main(void)
     CHECK(rd3_swap_source(0, 0, 1, 0, 0) == RD3_SWAP_A1);
     CHECK(rd3_swap_source(0, 0, 0, 0, 9) == RD3_SWAP_SKIP); /* nothing drawn, no front: skipped */
     CHECK(rd3_swap_source(1, 1, 1, 0, 0) == RD3_SWAP_A1);   /* two fronts: the older rule */
+
+    {
+        /* two empty backs taking turns (review of e2bf78e): the caller counts the head's skipped swaps,
+         * whichever back they named, so the third one in a row is shown */
+        unsigned run = 0, shown = 0;
+        for (unsigned i = 0; i < 6; i++) {
+            if (rd3_swap_source(1, 0, 0, 0, run) == RD3_SWAP_SKIP) run++;
+            else { run = 0; shown |= 1u << i; }
+        }
+        CHECK(shown == ((1u << 2) | (1u << 5)));
+    }
 
     /* copy forward's source */
     {
@@ -134,31 +178,74 @@ int main(void)
         CHECK(rd3_cf_source(&in) == RD3_CF_SKIP_NO_HEAD);
     }
 
-    CHECK(rd3_cf_full(1) && !rd3_cf_full(0));
+    {
+        /* the pending rects, per buffer */
+        struct rd3_cf_heal h;
+        struct rd3_rect r[RD3_CF_PEND_RECTS + 2], o[RD3_CF_PEND_RECTS + 2];
+        int b[6];
+        memset(&h, 0, sizeof h);
+        for (unsigned i = 0; i < RD3_CF_PEND_RECTS + 2; i++) { r[i].x = 0; r[i].y = (int)i * 10; r[i].w = 10; r[i].h = 10; }
+        rd3_cf_pend_add(&h, &b[0], &r[0], 1);
+        rd3_cf_pend_add(&h, &b[1], &r[1], 1);
+        rd3_cf_pend_add(&h, &b[1], &r[2], 1);
+        CHECK(rd3_cf_pending(&h, &b[0]) && rd3_cf_pending(&h, &b[1]) && !rd3_cf_pending(&h, &b[2]));
+        /* b[0]'s rect touches none of b[1]'s: taken */
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4) == 1 && o[0].y == 0);
+        CHECK(!rd3_cf_pending(&h, &b[0]));
+        /* a rect the source missed itself stays pending */
+        rd3_cf_pend_add(&h, &b[0], &r[1], 1);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4) == 0 && rd3_cf_pending(&h, &b[0]));
+        CHECK(rd3_cf_pend_take(&h, &b[1], &b[2], 100, 100, 1, o, 4) == 2 && !rd3_cf_pending(&h, &b[1]));
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4) == 1 && !rd3_cf_pending(&h, &b[0]));
+        /* too many rects: the whole picture, only from a clean source with the copy engine on */
+        rd3_cf_pend_add(&h, &b[2], r, RD3_CF_PEND_RECTS + 1);
+        rd3_cf_pend_add(&h, &b[3], &r[0], 1);
+        CHECK(rd3_cf_pend_take(&h, &b[2], &b[3], 100, 50, 1, o, 4) == 0);   /* the source missed a rect */
+        CHECK(rd3_cf_pend_take(&h, &b[2], &b[4], 100, 50, 0, o, 4) == 0);   /* the copy engine off */
+        CHECK(rd3_cf_pend_take(&h, &b[2], &b[4], 100, 50, 1, o, 4) == 1 && o[0].w == 100 && o[0].h == 50);
+        CHECK(!rd3_cf_pending(&h, &b[2]));
+        rd3_cf_pend_add(&h, &b[5], NULL, 0);
+        CHECK(rd3_cf_pending(&h, &b[5]));
+        rd3_cf_pend_forget(&h, &b[5]);
+        rd3_cf_pend_forget(&h, &b[3]);
+        CHECK(!rd3_cf_pending(&h, &b[5]) && !rd3_cf_pending(&h, &b[3]) && !rd3_cf_pending(&h, NULL));
+        /* a full table drops the oldest buffer */
+        for (unsigned i = 0; i < 5; i++) rd3_cf_pend_add(&h, &b[i], &r[i], 1);
+        CHECK(!rd3_cf_pending(&h, &b[0]) && rd3_cf_pending(&h, &b[4]));
+        CHECK(rd3_rect_meet(&r[0], &r[0]) && !rd3_rect_meet(&r[0], &r[1]));
+    }
 
     /* card run 56: one back - nothing to copy, every frame right, either rule */
-    run(0, 0, 0, &s, NULL);
+    run(0, 0, 0, 0, 0, 20, &s, NULL);
     CHECK(s.wrong == 0 && s.abab == 0 && s.copies == 0);
-    run(0, 1, 0, &s, NULL);
+    run(0, 1, 0, 0, 0, 20, &s, NULL);
     CHECK(s.wrong == 0 && s.abab == 0 && s.copies == 0);
     /* card run 58b: two backs, the old rule - stale bands, A B A B */
-    run(1, 0, 0, &s, NULL);
+    run(1, 0, 0, 0, 0, 20, &s, NULL);
     CHECK(s.wrong > 0 && s.abab > 0 && s.copies == 0);
     printf("two backs, old rule: %u of %u frames wrong, %u A B A B\n", s.wrong, s.frames, s.abab);
     /* two backs, rd3_cf_source - every frame as drawn */
-    run(1, 1, 0, &s, NULL);
+    run(1, 1, 0, 0, 0, 20, &s, NULL);
     CHECK(s.wrong == 0 && s.abab == 0 && s.copies > 0);
     /* one missed copy (frame 9): healed by the whole-picture copy into that
      * back, nothing wrong from frame 20 on */
-    run(1, 1, 1ull << 9, &s, &after);
+    run(1, 1, 1ull << 9, 0, 0, 20, &s, &after);
     CHECK(s.wrong > 0 && after == 0 && s.healed == 1);
     /* without the heal the missed regions stay stale in that back: wrong frames go on */
     gNoHeal = 1;
-    run(1, 1, 1ull << 9, &s, &after);
+    run(1, 1, 1ull << 9, 0, 0, 20, &s, &after);
     CHECK(after > 0 && s.abab > 0);
     gNoHeal = 0;
-    /* three in a row (SDMA off a while): healed by the first copy that works */
-    run(1, 1, 7ull << 9, &s, &after);
+    /* three in a row, into both backs (review of e2bf78e: one heal slot per
+     * head left the first back stale), the damage narrow afterwards so
+     * nothing redraws the stale regions: both backs healed */
+    run(1, 1, 7ull << 9, 0, 0, 20, &s, &after);
+    CHECK(after == 0 && s.healed >= 2);
+    run(1, 1, 7ull << 9, 0, 1, 20, &s, &after);
+    CHECK(after == 0 && s.healed >= 2);
+    /* a miss, then the copy engine off for frames 10-29: the rects still go
+     * by the CPU, the whole picture waits; healed once it is back */
+    run(1, 1, 1ull << 9, 0xfffffull << 10, 1, 32, &s, &after);
     CHECK(after == 0 && s.healed >= 1);
 
     if (fails) {
