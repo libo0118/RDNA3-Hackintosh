@@ -54,7 +54,7 @@ case "$1" in
 esac
 exit 0
 EOF
-for c in afplay say killall caffeinate pkill; do
+for c in afplay say killall caffeinate pkill open launchctl osascript; do
     printf '#!/bin/sh\necho "%s $*" >> "$STUBLOG"\nexit 0\n' "$c" > "$T/bin/$c"
 done
 chmod +x "$T/bin/"*
@@ -164,7 +164,7 @@ for SH in sh bash; do
     [ "$(val "$B" 9 changed)" = "swap_landed 0->1" ] || fail "$SH: step 9 'changed' is [$(val "$B" 9 changed)]"
     [ "$(val "$B" 10 changed)" = "swap_mode 1->2, swap_landed 1->0" ] || fail "$SH: step 10 'changed' is [$(val "$B" 10 changed)]"
     [ "$(val "$B" 12 changed)" = "a3ws 1->0" ] || fail "$SH: step 12 'changed' is [$(val "$B" 12 changed)]"
-    [ "$(val "$B" 1 set | wc -w)" = 9 ] || fail "$SH: step 1 did not set the 9 switches: $(val "$B" 1 set)"
+    [ "$(val "$B" 1 set | wc -w | tr -d " ")" = 9 ] || fail "$SH: step 1 did not set the 9 switches: $(val "$B" 1 set)"
     # the defaults come back at the end
     for k in a3 flicker swap_latch swap_torn swap_mode trace_scan swap_stale swap_landed a3ws; do
         v=$(cat "$T/sys/debug.rdna3accel_$k"); e=1; case $k in swap_landed|a3ws) e=0 ;; esac
