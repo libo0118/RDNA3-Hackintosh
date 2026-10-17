@@ -78,6 +78,9 @@ $(BUILD)/test_mtl_allow: tests/test_mtl_allow.c metal/plugin/rdna3mtl_allow_poli
 
 $(BUILD)/test_range_alloc: tests/test_range_alloc.c $(COMMON) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion $(SAN) $(INC) -o $@ tests/test_range_alloc.c $(COMMON)
+# card run 2026-10-17c: where VRAM goes (the CPU-visible heap's reserve, no-CPU BOs stay out)
+$(BUILD)/test_vram_place: tests/test_vram_place.c common/rdna3_vram_place.h accel/rdna3k_abi.h $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/test_vram_place.c $(COMMON) $(UAPI)
 
 # Real libdrm_amdgpu over drm_xnu (loopback backend into uapi/) on the host
 LIBDRM      := third_party/libdrm
@@ -123,12 +126,13 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOB
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_swap_copy $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_mtl_allow $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_swap_copy $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_mtl_allow $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
 	$(BUILD)/test_uapi
 	$(BUILD)/test_range_alloc
+	$(BUILD)/test_vram_place
 	$(BUILD)/test_mtl_allow metal/rdna3mtl-allow.txt
 	$(BUILD)/test_agdc_k5
 	$(BUILD)/test_bootargs
@@ -155,6 +159,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	tests/test_triage_latch.sh
 	tests/test_result_checklist.sh
 	tests/test_triage_trace.sh
+	tests/test_triage_vram.sh
 	tests/test_plugin_trace.sh
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump

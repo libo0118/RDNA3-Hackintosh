@@ -366,7 +366,7 @@ static void dev_init(void)
                           lb_submit, lb_signaled, lb_wait, NULL,
                           lb_bo_userptr, lb_sensor, NULL, lb_random64, lb_scanout, lb_privileged,
                           NULL, NULL, NULL, NULL, NULL, NULL, NULL, lb_surface_bo, lb_surface_dirty, NULL,
-                          lb_txstate };
+                          lb_txstate, NULL };
     amd_discovery disc;
     if (g_dev_ready)
         return;

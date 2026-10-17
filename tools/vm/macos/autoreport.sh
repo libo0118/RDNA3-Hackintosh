@@ -115,6 +115,10 @@ a3_sysctls() {
     _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|cf_|bufs_|iop_flip:)")
     if [ -n "$_a3" ]; then echo "$_a3"
     else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
+    # card run 2026-10-17c: who holds the CPU-visible VRAM now (tools/triage_reports.py "VISIBLE VRAM")
+    _vh=$(sysctl -n debug.rdna3_vram 2>/dev/null)
+    if [ -n "$_vh" ]; then echo "debug.rdna3_vram: $_vh"
+    else echo "(no debug.rdna3_vram sysctl: kext older than card run 2026-10-17c)"; fi
 }
 
 # card run 2026-10-17b: the kernel's per-frame trace streamed every 3 s

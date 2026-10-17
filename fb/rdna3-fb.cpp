@@ -743,6 +743,7 @@ IOReturn RDNA3Framebuffer::switchMode(uint32_t idx)
     if (idx) {
         const OSSymbol *alloc = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_ALLOC);
         nv.version = RD3K_VRAM_ABI_VERSION;
+        nv.flags = RD3K_VRAM_OWNER_FB_SURFACE;
         nv.size = (unsigned long long)pitch * h;
         IOReturn r = alloc && fCore ? fCore->callPlatformFunction(alloc, false, &nv, nullptr, nullptr, nullptr)
                                     : kIOReturnNoResources;
@@ -810,6 +811,7 @@ IOReturn RDNA3Framebuffer::setTiming(uint32_t idx)
     if (idx) {
         const OSSymbol *alloc = OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_ALLOC);
         nv.version = RD3K_VRAM_ABI_VERSION;
+        nv.flags = RD3K_VRAM_OWNER_FB_SURFACE;
         nv.size = (unsigned long long)pitch * h;
         IOReturn r = alloc ? fCore->callPlatformFunction(alloc, false, &nv, nullptr, nullptr, nullptr)
                            : kIOReturnNoResources;
@@ -1162,6 +1164,7 @@ bool RDNA3Framebuffer::ownSurfaceInit()
         return false;
     bzero(&fOwnVram, sizeof(fOwnVram));
     fOwnVram.version = RD3K_VRAM_ABI_VERSION;
+    fOwnVram.flags = RD3K_VRAM_OWNER_FB_SURFACE;
     fOwnVram.size = (unsigned long long)pitch * fH;
     IOReturn r = fCore->callPlatformFunction(alloc, false, &fOwnVram, nullptr, nullptr, nullptr);
     alloc->release();
@@ -1212,6 +1215,7 @@ bool RDNA3Framebuffer::cursorInit()
         return false;
     bzero(&fCurVram, sizeof(fCurVram));
     fCurVram.version = RD3K_VRAM_ABI_VERSION;
+    fCurVram.flags = RD3K_VRAM_OWNER_FB_CURSOR;
     fCurVram.size = (unsigned long long)kCurDim * kCurDim * 4;
     IOReturn r = fCore->callPlatformFunction(alloc, false, &fCurVram, nullptr, nullptr, nullptr);
     alloc->release();
