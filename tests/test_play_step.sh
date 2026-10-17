@@ -19,7 +19,7 @@ AR=$ROOT/tools/vm/macos/autoreport.sh
 agdc=$(awk '$1 == "agdc" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
 play=$(awk '$1 == "play" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
 [ -n "$agdc" ] && [ "$play" = "$agdc rdna3play=1" ] || fail "ladder-steps.txt: play is [$play], agdc [$agdc]"
-[ "$(grep -c 'cursormall bisect bisect-plugin play' "$ROOT/tools/vm/rdna3vm")" = 2 ] || fail "rdna3vm: play is not in both step lists"
+[ "$(grep -c 'cursormall bisect bisect-plugin bisect-agdc play' "$ROOT/tools/vm/rdna3vm")" = 2 ] || fail "rdna3vm: play is not in both step lists"
 sed -n '/^auto_limit() {/,/^}/p' "$ROOT/tools/vm/rdna3vm" > "$T/limit.sh"
 [ -s "$T/limit.sh" ] || fail "rdna3vm: auto_limit not found"
 m=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$play")

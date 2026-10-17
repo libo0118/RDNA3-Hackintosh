@@ -1316,7 +1316,7 @@ def _trace_lines(path, txt, klog="", args=""):
                                    ("; " + "; ".join(t for _, _, t in tr.problems[:3]) if tr.problems else ""))], []
         return out, []
     streams = any("stream" in n for n, _ in inputs)
-    # a display bisect run (rdna3bisect=1 / 2) replaces the other tests, the swap A/B among them
+    # a display bisect run (rdna3bisect=1 / 2 / 4) replaces the other tests, the swap A/B among them
     is_bisect = bisect_run_expected(path, txt, args)
     # card run 2026-10-17d: the A/B is opt-in (boot-arg rdna3swapab=1, or its phases are in the tests file)
     ab_asked = "rdna3swapab=1" in args.split() or "== swap A/B phase" in txt
@@ -2205,8 +2205,8 @@ def tx_excerpt(lines):
 
 
 def bisect_run_expected(path, tests_txt, args=""):
-    """whether this report was a display bisect run (rdna3bisect=1 / 2 in its boot-args or in the tests file)"""
-    return bool(re.search(r"rdna3bisect=[12]\b", (args or "") + "\n" + tests_txt[:2000]) or "\n== bisect" in "\n" + tests_txt)
+    """whether this report was a display bisect run (rdna3bisect=1 / 2 / 4 in its boot-args or in the tests file)"""
+    return bool(re.search(r"rdna3bisect=[124]\b", (args or "") + "\n" + tests_txt[:2000]) or "\n== bisect" in "\n" + tests_txt)
 
 
 def bisect_analysis(path, tests_txt, args=""):
@@ -2225,7 +2225,25 @@ def bisect_analysis(path, tests_txt, args=""):
                                           "(an older autoreport.sh in the VM? no debug.rdna3accel_swap_mode?) - the tests file "
                                           "has the reason" % os.path.basename(base))]
         return False, None, []
-    return True, triage_bisect.analyse(text, base), []
+    # the agdc variant (rdna3vm step bisect-agdc) cuts the kernel log per step: FRONT SURFACE live-writer lines
+    logs = bisect_logs(path) if re.search(r"^variant: 4\b", text[:2000], re.M) else None
+    return True, triage_bisect.analyse(text, base, logs), []
+
+
+def bisect_logs(path):
+    """[(name, text)] of the kernel logs a report has: the archive's 20-log-rdna3.txt and the newest serial-*.log next to it
+    (tools/triage_bisect.py picks the one that places most of the bisect's steps)"""
+    out = []
+    t = read_tar_member(path, "20-log-rdna3.txt") or read_tar_member(path, "20-log-rdna3-sudo.txt")
+    if t:
+        out.append(("20-log-rdna3.txt", t))
+    d = os.path.dirname(os.path.abspath(path))
+    for f in sorted(glob.glob(os.path.join(d, "serial-*.log")), key=os.path.getmtime)[-1:]:
+        try:
+            out.append((os.path.basename(f), open(f, errors="replace").read()))
+        except OSError:
+            pass
+    return out
 
 
 def bisect_print(path, tests_txt, args=""):
