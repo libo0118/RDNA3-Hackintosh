@@ -190,22 +190,28 @@ enum { kTornBudget = 20000 };
  * a copy forward's latch look, both under the family's lock); the free path
  * only clears pointers, which are only compared, never followed */
 struct RD3HeadLatch {
+    /* compare-only pointers: never followed (a buffer is read only through
+     * a live resource of the swapping surface); the free path clears them
+     * on any thread, a race costs one count more or less */
     const void *volatile vm, *volatile prevVm;
     unsigned long long phys, prevPhys, cookie;
     uint64_t flipAbs;
-    volatile bool latched;
+    struct rd3_latch_state st;         /* rdna3_flip_latch.h: latched, given up, timeouts in a row, waits off */
     bool hashed;
     uint32_t latchUs;                  /* flip to latch, when seen (0: not measured) */
     uint32_t hash[kFlickBands];
 };
-static RD3HeadLatch gLatch[kRd3MaxFB];
-static unsigned gLatchTimeoutRun[kRd3MaxFB];
+static RD3HeadLatch gLatch[kRd3MaxFB] = { { nullptr, nullptr, 0, 0, 0, 0, { 0, 0, 0, 1 }, false, 0, { 0 } },
+                                            { nullptr, nullptr, 0, 0, 0, 0, { 0, 0, 0, 1 }, false, 0, { 0 } },
+                                            { nullptr, nullptr, 0, 0, 0, 0, { 0, 0, 0, 1 }, false, 0, { 0 } },
+                                            { nullptr, nullptr, 0, 0, 0, 0, { 0, 0, 0, 1 }, false, 0, { 0 } } };
 /* the counters (debug.rdna3accel_swaps_latch*_h<N>, _torn*, cf_onpanel,
  * swaps_shownfreed, swaps_empty{filled,still}): every outcome counted */
 static SInt64 gCntLatchPend[kRd3MaxFB], gCntLatchWait[kRd3MaxFB], gCntLatchUs[kRd3MaxFB], gCntLatchMax[kRd3MaxFB];
 static SInt64 gCntLatchTimeout[kRd3MaxFB], gCntLatchUnknown[kRd3MaxFB], gCntLatchOff[kRd3MaxFB];
 static SInt64 gCntTornChk[kRd3MaxFB], gCntTorn[kRd3MaxFB], gCntInplace[kRd3MaxFB], gCntTornSkip[kRd3MaxFB];
 static SInt64 gCntCfOnPanel[kRd3MaxFB], gCntShownFreed[kRd3MaxFB], gCntEmptyFilled[kRd3MaxFB], gCntEmptyStill[kRd3MaxFB];
+static SInt64 gCntLatchImmediate[kRd3MaxFB], gCntLatchBudget[kRd3MaxFB], gCntFlipFailed[kRd3MaxFB];
 /* the size of each head's own legacy swaps (only a swap that named the head's
  * framebuffer resource): the second source next to the framebuffers' answers */
 static volatile uint32_t gHeadSwapW[kRd3MaxFB], gHeadSwapH[kRd3MaxFB];
@@ -1519,8 +1525,13 @@ RD3ACCEL_CNT4(rdna3accel_swaps_inplace, gCntInplace, "buffers rewritten while on
 RD3ACCEL_CNT4(rdna3accel_swaps_tornskip, gCntTornSkip, "shown buffers the torn test could not hash again (not the surface's own any more, re-allocated)");
 RD3ACCEL_CNT4(rdna3accel_cf_onpanel, gCntCfOnPanel, "copy forwards into the buffer the panel still read (the flip away from it had not latched)");
 RD3ACCEL_CNT4(rdna3accel_swaps_shownfreed, gCntShownFreed, "buffers freed while the head scanned them (shown, or the flip away not latched)");
-RD3ACCEL_CNT4(rdna3accel_swaps_emptyfilled, gCntEmptyFilled, "empty backs of skipped swaps that had pixels when read again 4 ms later");
-RD3ACCEL_CNT4(rdna3accel_swaps_emptystill, gCntEmptyStill, "empty backs of skipped swaps still empty when read again 4 ms later");
+RD3ACCEL_CNT4(rdna3accel_swaps_emptyfilled, gCntEmptyFilled, "sampled empty backs of skipped swaps that had pixels when read again 4 ms later");
+RD3ACCEL_CNT4(rdna3accel_swaps_emptystill, gCntEmptyStill, "sampled empty backs of skipped swaps still empty when read again 4 ms later");
+RD3ACCEL_CNT4(rdna3accel_swaps_latchimmediate, gCntLatchImmediate, "flips already latched at the first look after them (not waited, not timed)");
+RD3ACCEL_CNT4(rdna3accel_swaps_latchbudget, gCntLatchBudget, "waits ended because the swap's one wait budget was spent (not a timeout)");
+RD3ACCEL_CNT4(rdna3accel_swaps_flipfailed, gCntFlipFailed, "swaps whose flip the framebuffer refused (copied onto the scanout, or nothing)");
+/* like every OID here these are registered by rdna3accelInstallSysctl and
+ * never unregistered (the kext does not unload: _stop does nothing) */
 static_assert(kRd3MaxFB == 4, "kRd3MaxFB changed: add debug.rdna3accel_swaps_h<i> / swaps_a3_h<i> for every new head");
 static int gCrcHead = 0;
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_crc_head, CTLFLAG_RW | CTLFLAG_LOCKED, &gCrcHead, 0, "b85k-crc: which head debug.rdna3accel_crc reads");
@@ -1593,6 +1604,8 @@ static void rdna3accelInstallSysctl(void)
     RD3ACCEL_REG4(rdna3accel_swaps_tornskip);   RD3ACCEL_REG4(rdna3accel_cf_onpanel);
     RD3ACCEL_REG4(rdna3accel_swaps_shownfreed); RD3ACCEL_REG4(rdna3accel_swaps_emptyfilled);
     RD3ACCEL_REG4(rdna3accel_swaps_emptystill);
+    RD3ACCEL_REG4(rdna3accel_swaps_latchimmediate); RD3ACCEL_REG4(rdna3accel_swaps_latchbudget);
+    RD3ACCEL_REG4(rdna3accel_swaps_flipfailed);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h0);       sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h1);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h2);       sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h3);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_a3_h0);    sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_a3_h1);
@@ -2856,14 +2869,19 @@ static bool rd3AccelFlipTo(IOAccelResource2 *res, IOService *fb, unsigned head)
  * the flip latched), and every way a buffer on the panel can be written is
  * counted per head:
  *   - the previous flip still pending at a swap's entry, and how long flips
- *     take to latch (swaps_latchpend / _latchwait / _latchus / _latchmax);
+ *     take to latch (swaps_latchpend / _latchwait / _latchus / _latchmax,
+ *     _latchimmediate for flips already latched when first read);
  *   - a copy forward into the buffer the panel still reads (cf_onpanel);
  *   - a shown buffer whose band hash at its swap differs from the one at the
  *     head's next swap: written while on the panel (swaps_torn, or
  *     swaps_inplace when the next swap shows it again: one back buffer);
  *   - a buffer freed while the head scans it (swaps_shownfreed);
- *   - an empty back read again 4 ms after its swap was skipped
- *     (swaps_emptyfilled / _emptystill: had the frame not landed yet?).
+ *   - an empty back read again 4 ms after its swap was skipped (sampled:
+ *     swaps_emptyfilled / _emptystill: had the frame not landed yet?).
+ * The wait sleeps in the swap, under the family's lock (the family hands
+ * the old buffer back to WindowServer when submitSwapCopy returns); two
+ * heads may take turns there. Completing the swap's IOAccelEvent from the
+ * flip-done instead is a later redesign (DRIVER-PLAN N28).
  * The legacy buffers are written only by the family's page-on (the CPU,
  * through the aperture) and copy forward (SDMA, waited for: rdna3CopyVram),
  * both done before the swap is called; WindowServer's GPU composite reaches
@@ -2873,31 +2891,72 @@ static bool rd3AccelFlipTo(IOAccelResource2 *res, IOService *fb, unsigned head)
  * (amdgpu_dm_commit_planes' dma_resv wait has no counterpart). Only an A3
  * display BO (rdna3a3display=1) would be GPU-written: swaps_a3_h<N>. */
 
-/* the head's state from the core (dcn32_flip_pending through
- * rdna3DisplayStatus), asked with the core's head number of the head's
- * framebuffer: the "RDNA3,Head" of its provider nub, 0 for the PCI device
- * (RDNA3Framebuffer::start's fHead) */
-static IOService *volatile gLatchFb[kRd3MaxFB];
-static unsigned gLatchCoreHead[kRd3MaxFB];
-static bool rd3AccelDispStatus(IOService *fb, unsigned head, RD3KDisplayStatus *st)
+/* why the head's display state could not be read (for the log lines) */
+struct RD3StatusWhy { const char *why; IOReturn ret; };
+
+/* the core's head number of a framebuffer, as RDNA3Framebuffer::start
+ * finds its fHead: 0 on the PCI device, else its provider nub's
+ * "RDNA3,Head" (read on every call: nothing cached across a framebuffer
+ * that may go) */
+static bool rd3AccelCoreHead(IOService *fb, unsigned *coreHead, RD3StatusWhy *w)
 {
-    if (!fb || head >= kRd3MaxFB) return false;
-    IOService *core = rd3AccelCore();
-    if (!core) return false;
-    if (gLatchFb[head] != fb) {
-        IOService *p = fb->getProvider();
-        OSNumber *num = p ? OSDynamicCast(OSNumber, p->getProperty("RDNA3,Head")) : nullptr;
-        gLatchCoreHead[head] = num ? num->unsigned32BitValue() : 0;
-        gLatchFb[head] = fb;
-    }
+    IOService *p = fb ? fb->getProvider() : nullptr;
+    if (!p) { w->why = "the framebuffer has no provider"; return false; }
+    if (OSDynamicCast(IOPCIDevice, p)) { *coreHead = 0; return true; }
+    OSNumber *num = OSDynamicCast(OSNumber, p->getProperty("RDNA3,Head"));
+    if (!num) { w->why = "the framebuffer's provider has no RDNA3,Head"; return false; }
+    *coreHead = num->unsigned32BitValue();
+    return true;
+}
+
+/* the head's state from the core (dcn32_flip_pending through
+ * rdna3DisplayStatus) */
+static bool rd3AccelDispStatus(IOService *fb, unsigned head, RD3KDisplayStatus *st, RD3StatusWhy *w)
+{
+    w->why = nullptr; w->ret = kIOReturnSuccess;
     for (unsigned i = 0; i < sizeof *st; i++) ((volatile unsigned char *)st)[i] = 0;
+    if (!fb || head >= kRd3MaxFB) { w->why = "no framebuffer for the head"; return false; }
+    IOService *core = rd3AccelCore();
+    if (!core) { w->why = "no core (RDNA3Accel)"; return false; }
+    unsigned coreHead = 0;
+    if (!rd3AccelCoreHead(fb, &coreHead, w)) return false;
     st->version = RD3K_DISPLAY_ABI_VERSION;
-    st->head = gLatchCoreHead[head];
+    st->head = coreHead;
     const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_STATUS);
-    if (!sym) return false;
-    const IOReturn r = core->callPlatformFunction(sym, false, st, nullptr, nullptr, nullptr);
+    if (!sym) { w->why = "no symbol"; return false; }
+    w->ret = core->callPlatformFunction(sym, false, st, nullptr, nullptr, nullptr);
     sym->release();
-    return r == kIOReturnSuccess;
+    if (w->ret != kIOReturnSuccess) { w->why = "the core refused rdna3DisplayStatus"; return false; }
+    return true;
+}
+
+/* the head's frame time from the core's measured refresh (rdna3DisplayInfo),
+ * asked once per head and mode (0: unknown, rd3_latch_cap_us assumes 60 Hz) */
+static uint32_t gLatchFrameUs[kRd3MaxFB];
+static bool gLatchFrameAsked[kRd3MaxFB];
+static uint64_t rd3AccelHeadFrameUs(IOService *fb, unsigned head)
+{
+    if (head >= kRd3MaxFB) return 0;
+    if (gLatchFrameAsked[head]) return gLatchFrameUs[head];
+    gLatchFrameAsked[head] = true;
+    RD3StatusWhy w = { nullptr, kIOReturnSuccess };
+    unsigned coreHead = 0;
+    IOService *core = rd3AccelCore();
+    const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_INFO);
+    RD3KDisplayInfo *info = (RD3KDisplayInfo *)IOMalloc(sizeof *info);
+    if (core && sym && info && rd3AccelCoreHead(fb, &coreHead, &w)) {
+        for (unsigned i = 0; i < sizeof *info; i++) ((volatile unsigned char *)info)[i] = 0;
+        info->version = RD3K_DISPLAY_ABI_VERSION;
+        if (core->callPlatformFunction(sym, false, info, nullptr, nullptr, nullptr) == kIOReturnSuccess &&
+            coreHead < info->nheads && coreHead < RD3K_MAX_HEADS && info->head[coreHead].refreshMilliHz >= 1000)
+            gLatchFrameUs[head] = (uint32_t)(1000000000ull / info->head[coreHead].refreshMilliHz);
+    }
+    if (info) IOFree(info, sizeof *info);
+    if (sym) sym->release();
+    ALOG("swap latch: head %u (core head %u): frame %u us -> a swap waits at most %llu us%s", head, coreHead,
+         gLatchFrameUs[head], rd3_latch_cap_us(gLatchFrameUs[head]),
+         gLatchFrameUs[head] ? "" : " (refresh unknown: 60 Hz assumed)");
+    return gLatchFrameUs[head];
 }
 
 static uint64_t rd3AccelUsSince(uint64_t abs0)
@@ -2935,105 +2994,174 @@ static const char *rd3AccelBandHash(IOAccelResource2 *res, uint32_t *hash)
     return nullptr;
 }
 
+/* the torn test's budget: checks and skips both count (a head whose
+ * checks keep being skipped must not hash forever); said once per head */
 static bool rd3AccelTornWants(unsigned head)
 {
-    return head < kRd3MaxFB && gSwapTorn && !(gSwapTorn == 1 && gCntTornChk[head] >= kTornBudget);
+    if (head >= kRd3MaxFB || !gSwapTorn) return false;
+    if (gSwapTorn != 1 || gCntTornChk[head] + gCntTornSkip[head] < kTornBudget) return true;
+    static bool said[kRd3MaxFB];
+    if (!said[head]) {
+        said[head] = true;
+        ALOG("swap latch: head %u: the torn test stopped after %d checks (%lld checked, %lld torn, %lld in place, %lld "
+             "skipped); debug.rdna3accel_swap_torn=2 keeps it on", head, (int)kTornBudget, (long long)gCntTornChk[head],
+             (long long)gCntTorn[head], (long long)gCntInplace[head], (long long)gCntTornSkip[head]);
+    }
+    return false;
+}
+
+/* a transition of the head's waits (rd3_latch_state), logged once each */
+static void rd3AccelLatchEvent(unsigned head, enum rd3_latch_event e, const char *why)
+{
+    if (e == RD3_LATCH_EV_OFF)
+        ALOG("swap latch: head %u: %u flips in a row did not latch -- the head's swaps STOP WAITING for their flips "
+             "until one is seen latched (the old buffer may be on the panel again)", head, RD3_LATCH_TIMEOUT_RUN);
+    else if (e == RD3_LATCH_EV_RESUMED)
+        ALOG("swap latch: head %u: a flip was seen latched (%s) -- the head's swaps wait for their flips again", head,
+             why);
+}
+
+/* the log budget of each place that reads the display state */
+enum { kUnkEntry = 0, kUnkWait, kUnkFlip, kUnkCf, kUnkSites };
+static unsigned gLatchUnkLogs[kUnkSites];
+static void rd3AccelLatchUnknown(unsigned head, unsigned site, const RD3StatusWhy &w, unsigned n, const char *what)
+{
+    const SInt64 k = OSAddAtomic64(1, &gCntLatchUnknown[head]);
+    if (site < kUnkSites && rd3_log_due(gLatchUnkLogs[site]++, 4, 1023))
+        ALOG("swap #%u: head %u: the flip state could not be read %s: %s (0x%x) -- %s (%lld such)", n, head,
+             site == kUnkEntry ? "at the swap's entry" : site == kUnkWait ? "while waiting"
+             : site == kUnkFlip ? "after the flip" : "for copy forward", w.why ? w.why : "?", (unsigned)w.ret, what,
+             (long long)k + 1);
 }
 
 /* the panel reads nothing of a recorded buffer any more (a mode switch, a
- * copy onto the scanout instead of a flip) */
-static void rd3AccelLatchForget(unsigned head)
+ * copy onto the scanout instead of a flip): every wait armed again */
+static void rd3AccelLatchForget(unsigned head, const char *why)
 {
     if (head >= kRd3MaxFB) return;
     RD3HeadLatch &L = gLatch[head];
-    L.vm = nullptr; L.prevVm = nullptr; L.phys = L.prevPhys = 0; L.hashed = false; L.latched = true;
+    L.vm = nullptr; L.prevVm = nullptr; L.phys = L.prevPhys = 0; L.hashed = false;
+    rd3AccelLatchEvent(head, rd3_latch_rearm(&L.st), why);
 }
 static void rd3AccelLatchForgetAll(const char *why)
 {
-    for (unsigned h = 0; h < kRd3MaxFB; h++)
-        if (gLatch[h].vm || gLatch[h].prevVm) {
+    for (unsigned h = 0; h < kRd3MaxFB; h++) {
+        gLatchFrameAsked[h] = false;   /* a new mode: its refresh asked again */
+        if (gLatch[h].vm || gLatch[h].prevVm)
             ALOG("swap latch: head %u: the record of phys 0x%llx forgotten (%s)", h, gLatch[h].phys, why);
-            rd3AccelLatchForget(h);
-        }
+        rd3AccelLatchForget(h, why);
+    }
 }
 
-/* a flip seen latched: counted with its time from the flip */
-static void rd3AccelLatchSeen(unsigned head, RD3HeadLatch &L)
+/* a flip seen latched. 'waited': a swap slept for it (its time counts in
+ * swaps_latchwait / _latchus / _latchmax); 'immediate': already latched at
+ * the first look after the flip (swaps_latchimmediate); else seen later
+ * (the next swap's entry, copy forward: not timed) */
+enum { kSeenLater = 0, kSeenWaited, kSeenImmediate };
+static void rd3AccelLatchSeen(unsigned head, RD3HeadLatch &L, unsigned how, const char *where)
 {
     const uint64_t us = rd3AccelUsSince(L.flipAbs);
-    L.latched = true;
+    rd3AccelLatchEvent(head, rd3_latch_seen(&L.st), where);
+    if (how == kSeenLater) return;
     L.latchUs = us > 0xffffffffull ? 0xffffffffu : (uint32_t)us;
-    gLatchTimeoutRun[head] = 0;
+    if (how == kSeenImmediate) { OSAddAtomic64(1, &gCntLatchImmediate[head]); return; }
     OSAddAtomic64(1, &gCntLatchWait[head]);
     OSAddAtomic64((SInt64)us, &gCntLatchUs[head]);
     if ((SInt64)us > gCntLatchMax[head]) gCntLatchMax[head] = (SInt64)us;   /* one writer: the head's swaps */
 }
 
 /* wait (1 ms sleeps, no spinlock held: the swap path already takes IOLocks
- * in flipToLocked) until the head's last flip latched, as long as
- * rd3_latch_step says; 'where' names the caller in the log */
-static void rd3AccelLatchWait(unsigned head, IOService *fb, uint32_t frame0, const char *where, unsigned n)
+ * in flipToLocked) until the head's last flip latched, as rd3_latch_step
+ * says; swap0 / cap: the swap's one shared budget; 'where' for the log */
+static void rd3AccelLatchWait(unsigned head, IOService *fb, uint32_t frame0, uint64_t swap0, uint64_t cap,
+                              const char *where, unsigned n)
 {
     RD3HeadLatch &L = gLatch[head];
-    const uint64_t t0 = mach_absolute_time();
     for (;;) {
         IOSleep(1);
         RD3KDisplayStatus st;
-        const bool ok = rd3AccelDispStatus(fb, head, &st);
+        RD3StatusWhy w;
+        const bool ok = rd3AccelDispStatus(fb, head, &st, &w);
         const enum rd3_latch_step step = rd3_latch_step(ok, ok && st.flipPending, frame0, ok ? st.frame : frame0,
-                                                        rd3AccelUsSince(t0));
-        if (step == RD3_LATCH_WAIT) continue;
-        if (step == RD3_LATCH_DONE) { rd3AccelLatchSeen(head, L); return; }
-        if (step == RD3_LATCH_UNKNOWN) {
-            const SInt64 k = OSAddAtomic64(1, &gCntLatchUnknown[head]);
+                                                        rd3AccelUsSince(L.flipAbs), rd3AccelUsSince(swap0), cap);
+        switch (step) {
+        case RD3_LATCH_WAIT:
+            continue;
+        case RD3_LATCH_DONE:
+            rd3AccelLatchSeen(head, L, kSeenWaited, where);
+            return;
+        case RD3_LATCH_UNKNOWN:
+            rd3_latch_give_up(&L.st);
+            rd3AccelLatchUnknown(head, kUnkWait, w, n, "not waited further");
+            return;
+        case RD3_LATCH_BUDGET: {
+            rd3_latch_give_up(&L.st);
+            const SInt64 k = OSAddAtomic64(1, &gCntLatchBudget[head]);
             if (rd3_log_due((uint64_t)k, 4, 1023))
-                ALOG("swap #%u: head %u: the flip state could not be read while waiting %s -- not waited further "
-                     "(%lld such)", n, head, where, (long long)k + 1);
+                ALOG("swap #%u: head %u: the swap's wait budget (%llu us) is spent %s -- the flip to phys 0x%llx not "
+                     "waited for further (%lld such)", n, head, cap, where, L.phys, (long long)k + 1);
             return;
         }
-        const SInt64 k = OSAddAtomic64(1, &gCntLatchTimeout[head]);
-        gLatchTimeoutRun[head]++;
-        if (rd3_log_due((uint64_t)k, 8, 1023))
-            ALOG("swap #%u: head %u: the flip to phys 0x%llx had NOT latched %llu us after it (%s; frame %u -> %u) -- "
-                 "the panel may still read phys 0x%llx; %u timeouts in a row%s (%lld such)", n, head, L.phys,
-                 rd3AccelUsSince(L.flipAbs), where, frame0, ok ? st.frame : frame0, L.prevPhys, gLatchTimeoutRun[head],
-                 rd3_latch_should_wait(1, gLatchTimeoutRun[head]) ? "" : ": the head's swaps stop waiting until a "
-                 "flip is seen latched", (long long)k + 1);
-        return;
+        case RD3_LATCH_TIMEOUT:
+        default: {
+            const enum rd3_latch_event e = rd3_latch_timeout(&L.st);
+            const SInt64 k = OSAddAtomic64(1, &gCntLatchTimeout[head]);
+            if (rd3_log_due((uint64_t)k, 8, 1023))
+                ALOG("swap #%u: head %u: the flip to phys 0x%llx had NOT latched %llu us after it (%s; frame %u -> %u, "
+                     "limit %llu us) -- the panel may still read phys 0x%llx; %u timeouts in a row (%lld such)", n, head,
+                     L.phys, rd3AccelUsSince(L.flipAbs), where, frame0, ok ? st.frame : frame0, cap, L.prevPhys,
+                     L.st.run, (long long)k + 1);
+            rd3AccelLatchEvent(head, e, where);
+            return;
+        }
+        }
     }
 }
 
 /* (a) at a swap's entry: the head's previous flip still pending? Then the
  * panel reads the buffer before it, the one WindowServer had back since
- * that swap. Waited for here (flipToLocked would wait for it anyway),
- * measured. */
-static void rd3AccelLatchEntry(unsigned head, IOService *fb, unsigned n)
+ * that swap. Waited for only with debug.rdna3accel_swap_latch on, the
+ * head's waits on and the flip not given up (once per flip); with it off
+ * flipToLocked waits as before, so 0 is the old behaviour. */
+static void rd3AccelLatchEntry(unsigned head, IOService *fb, uint64_t swap0, uint64_t cap, unsigned n)
 {
     RD3HeadLatch &L = gLatch[head];
-    if (!L.phys || L.latched) return;
+    if (!L.phys || L.st.latched) return;
     RD3KDisplayStatus st;
-    if (!rd3AccelDispStatus(fb, head, &st)) {
-        const SInt64 k = OSAddAtomic64(1, &gCntLatchUnknown[head]);
-        if (rd3_log_due((uint64_t)k, 4, 1023))
-            ALOG("swap #%u: head %u: the flip state could not be read (no display status from the core) -- whether "
-                 "the previous flip latched is unknown (%lld such)", n, head, (long long)k + 1);
-        L.latched = true;   /* not known: not asked again for this flip */
+    RD3StatusWhy w;
+    if (!rd3AccelDispStatus(fb, head, &st, &w)) {
+        rd3_latch_give_up(&L.st);
+        rd3AccelLatchUnknown(head, kUnkEntry, w, n, "whether the previous flip latched is unknown");
         return;
     }
-    if (!st.flipPending) { L.latched = true; return; }   /* latched before this swap (when: not measured) */
+    if (!st.flipPending) { rd3AccelLatchSeen(head, L, kSeenLater, "at the next swap"); return; }
     const SInt64 k = OSAddAtomic64(1, &gCntLatchPend[head]);
+    const bool wait = rd3_latch_wait_entry(gSwapLatch, &L.st);
     if (rd3_log_due((uint64_t)k, 8, 1023))
         ALOG("swap #%u: head %u: the previous flip (to phys 0x%llx, %llu us ago) had NOT latched at this swap -- the "
-             "panel still read phys 0x%llx, which WindowServer had back since that swap (%lld such; "
-             "debug.rdna3accel_swap_latch=%d)", n, head, L.phys, rd3AccelUsSince(L.flipAbs), L.prevPhys,
-             (long long)k + 1, gSwapLatch);
-    rd3AccelLatchWait(head, fb, st.frame, "at the next swap", n);
+             "panel still read phys 0x%llx, which WindowServer had back since that swap (%lld such; %s)", n, head,
+             L.phys, rd3AccelUsSince(L.flipAbs), L.prevPhys, (long long)k + 1,
+             wait ? "waited for now" : !gSwapLatch ? "debug.rdna3accel_swap_latch=0: not waited"
+             : L.st.off ? "the head's waits are off" : "given up before: not waited again");
+    if (!wait) {
+        if (gSwapLatch) OSAddAtomic64(1, &gCntLatchOff[head]);
+        rd3_latch_give_up(&L.st);
+        return;
+    }
+    rd3AccelLatchWait(head, fb, st.frame, swap0, cap, "at the next swap", n);
 }
 
 /* (c) the buffer the head's last swap showed, hashed again now: changed
  * while on the panel? 'src' / 'srcHash' the buffer this swap shows (its
  * hash when taken), 'bufs' the swapping surface's own buffers (a buffer is
  * read only through one of them, alive) */
+static void rd3AccelTornSkip(unsigned head, unsigned long long phys, const char *why, unsigned n)
+{
+    const SInt64 k = OSAddAtomic64(1, &gCntTornSkip[head]);
+    if (rd3_log_due((uint64_t)k, 4, 1023))
+        ALOG("swap #%u: head %u: the torn test skipped phys 0x%llx: %s (%lld such)", n, head, phys, why,
+             (long long)k + 1);
+}
 static void rd3AccelTornCheck(unsigned head, IOAccelResource2 *src, const uint32_t *srcHash,
                               IOAccelResource2 *const *bufs, unsigned nbufs, unsigned n)
 {
@@ -3054,13 +3182,7 @@ static void rd3AccelTornCheck(unsigned head, IOAccelResource2 *src, const uint32
         skip = !vm ? "freed" : !own ? "not one of the swapping surface's buffers"
              : !ov || ov->fAllocationCookie != L.cookie ? "re-allocated" : rd3AccelBandHash(own, now);
     }
-    if (skip) {
-        const SInt64 k = OSAddAtomic64(1, &gCntTornSkip[head]);
-        if (rd3_log_due((uint64_t)k, 4, 1023))
-            ALOG("swap #%u: head %u: the buffer it showed (phys 0x%llx) not hashed again: %s (%lld such)", n, head,
-                 L.phys, skip, (long long)k + 1);
-        return;
-    }
+    if (skip) { rd3AccelTornSkip(head, L.phys, skip, n); return; }
     OSAddAtomic64(1, &gCntTornChk[head]);
     const unsigned changed = rd3_torn_bands(L.hash, now, kFlickBands);
     const enum rd3_torn_kind kind = rd3_torn_classify(changed, same);
@@ -3070,7 +3192,7 @@ static void rd3AccelTornCheck(unsigned head, IOAccelResource2 *src, const uint32
     if (!rd3_log_due((uint64_t)k, 8, 1023)) return;
     char lat[48];
     if (L.latchUs) snprintf(lat, sizeof lat, "latched %u us after it", L.latchUs);
-    else snprintf(lat, sizeof lat, "%s", L.latched ? "latched (time not seen)" : "NOT seen latched");
+    else snprintf(lat, sizeof lat, "%s", L.st.latched ? "latched (time not seen)" : "NOT seen latched");
     ALOG("swap #%u: head %u: the buffer it showed (phys 0x%llx) changed while on the panel: bands 0x%02x of %u "
          "(bit 0 the top 32 rows); its flip %s, %llu ms ago -- %s (%lld such, %lld checked)", n, head, L.phys, changed,
          (unsigned)kFlickBands, lat, rd3AccelUsSince(L.flipAbs) / 1000,
@@ -3081,33 +3203,35 @@ static void rd3AccelTornCheck(unsigned head, IOAccelResource2 *src, const uint32
 }
 
 /* after a flip of 'res' (phys) on the head: the record, and the wait for
- * the latch (the fix, debug.rdna3accel_swap_latch) */
+ * the latch (the fix, debug.rdna3accel_swap_latch) inside the swap's budget */
 static void rd3AccelLatchFlipped(unsigned head, IOService *fb, IOAccelResource2 *res, unsigned long long phys,
-                                 const uint32_t *hash, unsigned n)
+                                 const uint32_t *hash, const char *hashSkip, uint64_t swap0, uint64_t cap, unsigned n)
 {
     RD3HeadLatch &L = gLatch[head];
     RD3VidMemory *vm = rd3res_vidmem(res);
     L.prevVm = L.vm; L.prevPhys = L.phys;
     L.vm = vm; L.phys = phys; L.cookie = vm ? vm->fAllocationCookie : 0;
     L.flipAbs = mach_absolute_time();
-    L.latched = false; L.latchUs = 0;
-    L.hashed = hash && rd3AccelTornWants(head);
+    L.latchUs = 0;
+    rd3_latch_flipped(&L.st);
+    const bool torn = rd3AccelTornWants(head);
+    L.hashed = hash && torn;
     for (unsigned b = 0; L.hashed && b < kFlickBands; b++) L.hash[b] = hash[b];
+    if (torn && !hash) rd3AccelTornSkip(head, phys, hashSkip ? hashSkip : "not hashed at its swap", n);
     RD3KDisplayStatus st;
-    if (!rd3AccelDispStatus(fb, head, &st)) {
-        const SInt64 k = OSAddAtomic64(1, &gCntLatchUnknown[head]);
-        if (rd3_log_due((uint64_t)k, 4, 1023))
-            ALOG("swap #%u: head %u: the flip state could not be read after the flip -- not waited for (%lld such)", n,
-                 head, (long long)k + 1);
-        L.latched = true;
+    RD3StatusWhy w;
+    if (!rd3AccelDispStatus(fb, head, &st, &w)) {
+        rd3_latch_give_up(&L.st);
+        rd3AccelLatchUnknown(head, kUnkFlip, w, n, "not waited for");
         return;
     }
-    if (!st.flipPending) { rd3AccelLatchSeen(head, L); return; }
-    if (!rd3_latch_should_wait(gSwapLatch, gLatchTimeoutRun[head])) {
+    if (!st.flipPending) { rd3AccelLatchSeen(head, L, kSeenImmediate, "right after the flip"); return; }
+    if (!rd3_latch_wait_flip(gSwapLatch, &L.st)) {
         if (gSwapLatch) OSAddAtomic64(1, &gCntLatchOff[head]);
-        return;   /* the next swap's entry looks (and flipToLocked waits) */
+        rd3_latch_give_up(&L.st);
+        return;   /* the next swap's entry looks; flipToLocked waits */
     }
-    rd3AccelLatchWait(head, fb, st.frame, "after the flip", n);
+    rd3AccelLatchWait(head, fb, st.frame, swap0, cap, "after the flip", n);
 }
 
 /* (b) copy forward's target, still on the panel? Only the buffer the last
@@ -3117,12 +3241,16 @@ static void rd3AccelCfPanelCheck(unsigned head, const RD3VidMemory *dst, unsigne
 {
     if (head >= kRd3MaxFB || !dst) return;
     RD3HeadLatch &L = gLatch[head];
-    if (L.latched || !L.prevVm || L.prevVm != (const void *)dst) return;
+    if (L.st.latched || !L.prevVm || L.prevVm != (const void *)dst) return;
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     RD3KDisplayStatus st;
-    if (!a || !rd3AccelDispStatus(a->fFBs[head], head, &st)) return;
-    if (rd3_latch_panel(L.phys, L.prevPhys, L.latched, st.flipPending, dst->fPhys) != RD3_PANEL_LEAVING) {
-        if (!st.flipPending) L.latched = true;   /* latched by now (when: not measured) */
+    RD3StatusWhy w = { "no accelerator", kIOReturnSuccess };
+    if (!a || !rd3AccelDispStatus(a->fFBs[head], head, &st, &w)) {
+        rd3AccelLatchUnknown(head, kUnkCf, w, n, "copy forward's target not checked");
+        return;
+    }
+    if (rd3_latch_panel(L.phys, L.prevPhys, L.st.latched, st.flipPending, dst->fPhys) != RD3_PANEL_LEAVING) {
+        if (!st.flipPending) rd3AccelLatchSeen(head, L, kSeenLater, "by copy forward");
         return;
     }
     const SInt64 k = OSAddAtomic64(1, &gCntCfOnPanel[head]);
@@ -3138,7 +3266,7 @@ static void rd3AccelLatchVidmemGone(const void *vm)
 {
     for (unsigned h = 0; vm && h < kRd3MaxFB; h++) {
         RD3HeadLatch &L = gLatch[h];
-        const bool shown = L.vm == vm, leaving = !shown && L.prevVm == vm && !L.latched;
+        const bool shown = L.vm == vm, leaving = !shown && L.prevVm == vm && !L.st.latched;
         if (!shown && !leaving) continue;
         const unsigned long long phys = shown ? L.phys : L.prevPhys;
         if (shown) { L.vm = nullptr; L.hashed = false; }
@@ -3151,43 +3279,47 @@ static void rd3AccelLatchVidmemGone(const void *vm)
     }
 }
 
-/* (e) a swap skipped because its back read empty: read again 4 ms later
- * (the first 24 of a head, then every 64th) - did the frame land late? */
+/* (e) a swap skipped because its back read empty: read again 4 ms later,
+ * sampled (the first 8 of a head, then every 256th: the sleep is under the
+ * family's lock, in the swap) - did the frame land late? */
 static unsigned gEmptyResamples[kRd3MaxFB];
 static void rd3AccelEmptyResample(unsigned head, IOAccelResource2 *back, bool wasEmpty, unsigned run)
 {
     if (head >= kRd3MaxFB || !back || !wasEmpty) return;
     const unsigned s = gEmptyResamples[head]++;
-    if (!rd3_log_due(s, 24, 63)) return;
+    if (!rd3_log_due(s, 8, 255)) return;
     const uint64_t t0 = mach_absolute_time();
     IOSleep(4);
     const bool filled = rd3AccelResHasContent(back);
     const uint64_t us = rd3AccelUsSince(t0);
     OSAddAtomic64(1, filled ? &gCntEmptyFilled[head] : &gCntEmptyStill[head]);
     const RD3VidMemory *bv = rd3res_vidmem(back);
-    if (rd3_log_due((uint64_t)(gCntEmptyFilled[head] + gCntEmptyStill[head] - 1), 12, 15))
+    if (rd3_log_due((uint64_t)(gCntEmptyFilled[head] + gCntEmptyStill[head] - 1), 8, 15))
         ALOG("swap: head %u: the empty back (phys 0x%llx, %u skipped in a row) read again %llu us later: %s (%lld "
-             "filled, %lld still empty of the backs read again)", head, bv ? bv->fPhys : 0ull, run, us,
-             filled ? "NOW HAS PIXELS -- the frame landed after the swap" : "still empty",
-             (long long)gCntEmptyFilled[head], (long long)gCntEmptyStill[head]);
+             "filled, %lld still empty of the sampled backs; %u skipped swaps of an empty back so far)", head,
+             bv ? bv->fPhys : 0ull, run, us, filled ? "NOW HAS PIXELS -- the frame landed after the swap" : "still empty",
+             (long long)gCntEmptyFilled[head], (long long)gCntEmptyStill[head], s + 1);
 }
 
-/* the head's latch and torn counts, at the 8th, 120th, 1200th and every
- * 4096th swap: what triage needs from a serial log alone */
+/* the head's latch and torn counts, at the 1st, 8th, 120th, 1200th and
+ * every 4096th swap: what triage needs from a serial log alone */
 static void rd3AccelLatchSummary(unsigned head, SInt64 n)
 {
-    if (n != 8 && n != 120 && n != 1200 && (n & 0xfff)) return;
+    if (n != 1 && n != 8 && n != 120 && n != 1200 && (n & 0xfff)) return;
     const SInt64 w = gCntLatchWait[head];
     ALOG("swap latch: head %u: %lld swaps; previous flip not latched at entry %lld; latched while waited %lld (avg %lld "
          "us, max %lld us), %lld timeouts, %lld unknown, %lld not waited; shown buffers hashed again %lld: %lld changed "
          "on the panel then flipped away (torn), %lld rewritten in place (one back), %lld not hashed; copy forwards into "
          "the buffer on the panel %lld; buffers freed on the panel %lld; empty backs read again: %lld filled, %lld "
-         "still empty (swap_latch %d, card run 2026-10-17)", head, (long long)n, (long long)gCntLatchPend[head],
+         "still empty (swap_latch %d, card run 2026-10-17); latched at once %lld, budget spent %lld, flips failed %lld, "
+         "waits %s", head, (long long)n, (long long)gCntLatchPend[head],
          (long long)w, w ? (long long)(gCntLatchUs[head] / w) : 0LL, (long long)gCntLatchMax[head],
          (long long)gCntLatchTimeout[head], (long long)gCntLatchUnknown[head], (long long)gCntLatchOff[head],
          (long long)gCntTornChk[head], (long long)gCntTorn[head], (long long)gCntInplace[head],
          (long long)gCntTornSkip[head], (long long)gCntCfOnPanel[head], (long long)gCntShownFreed[head],
-         (long long)gCntEmptyFilled[head], (long long)gCntEmptyStill[head], gSwapLatch);
+         (long long)gCntEmptyFilled[head], (long long)gCntEmptyStill[head], gSwapLatch,
+         (long long)gCntLatchImmediate[head], (long long)gCntLatchBudget[head], (long long)gCntFlipFailed[head],
+         gLatch[head].st.off ? "OFF (timeouts)" : "on");
 }
 
 /* A legacy surface swap (submitSwapCopy) names no display. Which head it is
@@ -3583,17 +3715,22 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     rd3AccelA3SwapNote(head, src, phys, how, hashSkip ? nullptr : hash, hashSkip);
     rd3AccelSwapSummary(head, gCntSwapHead[head], frontHead == head ? frontPhys : 0);
     IOService *fb = a->fFBs[head];
+    /* one wait budget for the swap: the entry's and the flip's waits share it */
+    const uint64_t swap0 = mach_absolute_time(), cap = rd3_latch_cap_us(rd3AccelHeadFrameUs(fb, head));
     /* the previous flip latched? the buffer it showed, changed on the panel? */
-    rd3AccelLatchEntry(head, fb, n);
+    rd3AccelLatchEntry(head, fb, swap0, cap, n);
     rd3AccelTornCheck(head, src, hashSkip ? nullptr : hash, bufs, nbufs, n);
     if (rd3AccelFlipTo(src, fb, head)) {
         /* returns once the flip latched (debug.rdna3accel_swap_latch) */
-        rd3AccelLatchFlipped(head, fb, src, phys, hashSkip ? nullptr : hash, n);
+        rd3AccelLatchFlipped(head, fb, src, phys, hashSkip ? nullptr : hash, hashSkip, swap0, cap, n);
     } else {
-        rd3AccelLatchForget(head);   /* the framebuffer's own scanout, not a recorded buffer */
-        if (!rd3AccelCopyToScanout(src, fb, head))
-            RD3FLIPWHY("swap #%u: head %u: neither flipped nor copied (phys 0x%llx) -- the panel keeps the last picture",
-                       n, head, phys);
+        const bool copied = rd3AccelCopyToScanout(src, fb, head);
+        const SInt64 k = OSAddAtomic64(1, &gCntFlipFailed[head]);
+        if (rd3_log_due((uint64_t)k, 8, 1023))
+            ALOG("swap #%u: head %u: the flip to phys 0x%llx was refused -- %s (%lld such)", n, head, phys,
+                 copied ? "copied onto the framebuffer's scanout instead"
+                        : "neither flipped nor copied, the panel keeps the last picture", (long long)k + 1);
+        rd3AccelLatchForget(head, "a flip refused");   /* the framebuffer's own scanout, not a recorded buffer */
     }
     rd3AccelLatchSummary(head, gCntSwapHead[head]);
     /* the record copy forward reads: WindowServer's last frame on this head

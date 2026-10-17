@@ -61,7 +61,8 @@ static struct run simulate(int wait, unsigned bufs)
             enum rd3_latch_step s;
             do {
                 now += POLL;
-                s = rd3_latch_step(1, now < latch_at, frame0, (uint32_t)(now / PERIOD), now - t);
+                s = rd3_latch_step(1, now < latch_at, frame0, (uint32_t)(now / PERIOD), now - t, now - t,
+                                   rd3_latch_cap_us(PERIOD));
             } while (s == RD3_LATCH_WAIT);
             if (s == RD3_LATCH_TIMEOUT)
                 r.timeouts++;
@@ -85,43 +86,168 @@ static struct run simulate(int wait, unsigned bufs)
     return r;
 }
 
+/* ---- the accelerator's swap, as rd3AccelLatchEntry / rd3AccelLatchFlipped /
+ * rd3AccelLatchWait run it, against a head that latches at the next vblank
+ * ('stuck' heads never do; their frame counter keeps moving) ---- */
+struct khead {
+    struct rd3_latch_state st;
+    int has_flip, stuck;
+    uint64_t flip_t, latch_at;   /* the last flip, when it latches */
+    uint32_t frame0;
+    unsigned timeouts, offs, resumed, entry_waits, flip_waits, budgets;
+    uint64_t waited;             /* microseconds the swaps spent waiting */
+};
+static int kpending(const struct khead *h, uint64_t now)
+{
+    return h->has_flip && (h->stuck || now < h->latch_at);
+}
+static void kevent(struct khead *h, enum rd3_latch_event e)
+{
+    if (e == RD3_LATCH_EV_OFF) h->offs++;
+    if (e == RD3_LATCH_EV_RESUMED) h->resumed++;
+}
+/* one wait: returns the time it ended */
+static uint64_t kwait(struct khead *h, uint64_t now, uint64_t swap0, uint64_t cap)
+{
+    for (;;) {
+        now += POLL;
+        const enum rd3_latch_step s = rd3_latch_step(1, kpending(h, now), h->frame0, (uint32_t)(now / PERIOD),
+                                                     now - h->flip_t, now - swap0, cap);
+        if (s == RD3_LATCH_WAIT) continue;
+        if (s == RD3_LATCH_DONE) kevent(h, rd3_latch_seen(&h->st));
+        else if (s == RD3_LATCH_TIMEOUT) { h->timeouts++; kevent(h, rd3_latch_timeout(&h->st)); }
+        else { if (s == RD3_LATCH_BUDGET) h->budgets++; rd3_latch_give_up(&h->st); }
+        return now;
+    }
+}
+/* a swap at 'now' with the sysctl 'enabled'; returns when it returns */
+static uint64_t kswap(struct khead *h, uint64_t now, int enabled)
+{
+    const uint64_t swap0 = now, cap = rd3_latch_cap_us(PERIOD);
+    if (h->has_flip && !h->st.latched) {
+        if (!kpending(h, now)) kevent(h, rd3_latch_seen(&h->st));
+        else if (rd3_latch_wait_entry(enabled, &h->st)) { h->entry_waits++; now = kwait(h, now, swap0, cap); }
+        else rd3_latch_give_up(&h->st);
+    }
+    h->has_flip = 1;
+    h->flip_t = now;
+    h->latch_at = next_vblank(now);
+    h->frame0 = (uint32_t)(now / PERIOD);
+    rd3_latch_flipped(&h->st);
+    if (!kpending(h, now)) kevent(h, rd3_latch_seen(&h->st));
+    else if (rd3_latch_wait_flip(enabled, &h->st)) { h->flip_waits++; now = kwait(h, now, swap0, cap); }
+    else rd3_latch_give_up(&h->st);
+    h->waited += now - swap0;
+    return now;
+}
+static void kmodel(void)
+{
+    const uint64_t cap = rd3_latch_cap_us(PERIOD);
+    /* swap_latch=0: no wait at all, at the entry or after the flip */
+    {
+        struct khead h;
+        memset(&h, 0, sizeof h);
+        h.st.latched = 1;
+        uint64_t t = 1000;
+        for (unsigned i = 0; i < 50; i++) t = kswap(&h, t, 0) + 3000;   /* faster than the panel */
+        CHECK(h.waited == 0 && h.entry_waits == 0 && h.flip_waits == 0);
+    }
+    /* a normal head: every flip waited for after it, never at the entry */
+    {
+        struct khead h;
+        memset(&h, 0, sizeof h);
+        h.st.latched = 1;
+        uint64_t t = 1000;
+        for (unsigned i = 0; i < 50; i++) t = kswap(&h, t, 1) + 3000;
+        CHECK(h.entry_waits == 0 && h.flip_waits == 50 && h.timeouts == 0 && h.budgets == 0);
+    }
+    /* a stuck head: three swaps wait once each, bounded by the cap (the
+     * entry never waits again for a flip given up), then the waits are off
+     * (reported once); when the head latches again the waits resume */
+    {
+        struct khead h;
+        memset(&h, 0, sizeof h);
+        h.st.latched = 1;
+        h.stuck = 1;
+        uint64_t t = 1000;
+        for (unsigned i = 0; i < 20; i++) {
+            const uint64_t before = h.waited;
+            t = kswap(&h, t, 1) + 3000;
+            CHECK(h.waited - before <= cap + POLL);   /* one swap: one budget */
+        }
+        CHECK(h.timeouts == RD3_LATCH_TIMEOUT_RUN && h.offs == 1 && h.entry_waits == 0);
+        CHECK(h.waited <= RD3_LATCH_TIMEOUT_RUN * (cap + POLL));
+        h.stuck = 0;   /* the display wakes: the next flips latch */
+        for (unsigned i = 0; i < 5; i++) t = kswap(&h, t, 1) + 30000;
+        CHECK(h.resumed == 1 && !h.st.off && h.flip_waits >= RD3_LATCH_TIMEOUT_RUN + 3);
+    }
+    /* recovery seen only at the entry (copy forward or the next swap finds
+     * the flip latched; card run review: the run was never reset there) */
+    {
+        struct khead h;
+        memset(&h, 0, sizeof h);
+        h.st.latched = 1;
+        h.stuck = 1;
+        uint64_t t = 1000;
+        for (unsigned i = 0; i < 4; i++) t = kswap(&h, t, 1) + 3000;
+        CHECK(h.st.off);
+        h.stuck = 0;
+        /* the off head's flip latches before the next swap: its entry sees it */
+        t = kswap(&h, t, 1);
+        t += 40000;
+        const unsigned waits = h.flip_waits;
+        t = kswap(&h, t, 1);
+        CHECK(h.resumed == 1 && !h.st.off && h.flip_waits == waits + 1);
+    }
+}
+
 int main(void)
 {
+    /* rd3_latch_cap_us: unknown 35 ms, else 2.5 frames, 5 Hz the maximum */
+    CHECK(rd3_latch_cap_us(0) == RD3_LATCH_CAP_US);
+    CHECK(rd3_latch_cap_us(PERIOD) == 41667);   /* 60 Hz: 2.5 frames */
+    CHECK(rd3_latch_cap_us(33333) == 83332);
+    CHECK(rd3_latch_cap_us(200000) == RD3_LATCH_CAP_MAX_US);
+
     /* rd3_latch_step */
-    CHECK(rd3_latch_step(0, 1, 0, 0, 0) == RD3_LATCH_UNKNOWN);
-    CHECK(rd3_latch_step(1, 0, 5, 5, 0) == RD3_LATCH_DONE);
-    CHECK(rd3_latch_step(1, 1, 5, 5, 1000) == RD3_LATCH_WAIT);
-    CHECK(rd3_latch_step(1, 1, 5, 6, 16000) == RD3_LATCH_WAIT);      /* one vblank passed: may still be latching */
-    CHECK(rd3_latch_step(1, 1, 5, 7, 20000) == RD3_LATCH_TIMEOUT);   /* two frames: late */
-    CHECK(rd3_latch_step(1, 1, 0xffffff, 1, 20000) == RD3_LATCH_TIMEOUT);   /* the 24-bit counter wraps */
-    CHECK(rd3_latch_step(1, 1, 0xffffff, 0, 1000) == RD3_LATCH_WAIT);
-    CHECK(rd3_latch_step(1, 1, 9, 9, RD3_LATCH_CAP_US) == RD3_LATCH_TIMEOUT);   /* a frozen counter: the cap */
-    CHECK(rd3_latch_step(1, 1, 9, 9, RD3_LATCH_CAP_US - 1) == RD3_LATCH_WAIT);
+    CHECK(rd3_latch_step(0, 1, 0, 0, 0, 0, 35000) == RD3_LATCH_UNKNOWN);
+    CHECK(rd3_latch_step(1, 0, 5, 5, 0, 0, 35000) == RD3_LATCH_DONE);
+    CHECK(rd3_latch_step(1, 1, 5, 5, 1000, 1000, 35000) == RD3_LATCH_WAIT);
+    CHECK(rd3_latch_step(1, 1, 5, 6, 16000, 16000, 35000) == RD3_LATCH_WAIT);      /* one vblank: may be latching */
+    CHECK(rd3_latch_step(1, 1, 5, 7, 20000, 20000, 35000) == RD3_LATCH_TIMEOUT);   /* two frames: late */
+    CHECK(rd3_latch_step(1, 1, 0xffffff, 1, 20000, 20000, 35000) == RD3_LATCH_TIMEOUT);   /* the 24-bit wrap */
+    CHECK(rd3_latch_step(1, 1, 0xffffff, 0, 1000, 1000, 35000) == RD3_LATCH_WAIT);
+    CHECK(rd3_latch_step(1, 1, 9, 9, 35000, 35000, 35000) == RD3_LATCH_TIMEOUT);   /* a frozen counter: the cap */
+    CHECK(rd3_latch_step(1, 1, 9, 9, 34999, 34999, 35000) == RD3_LATCH_WAIT);
+    /* 30 Hz: one frame is not late, the 60 Hz cap would have been */
+    CHECK(rd3_latch_step(1, 1, 9, 10, 40000, 40000, rd3_latch_cap_us(33333)) == RD3_LATCH_WAIT);
+    /* the swap's budget spent at entry: the flip after it is not late itself */
+    CHECK(rd3_latch_step(1, 1, 9, 9, 2000, 35000, 35000) == RD3_LATCH_BUDGET);
 
-    /* rd3_latch_should_wait: off, on, a run of timeouts stops it */
-    CHECK(!rd3_latch_should_wait(0, 0));
-    CHECK(rd3_latch_should_wait(1, 0));
-    CHECK(rd3_latch_should_wait(1, RD3_LATCH_TIMEOUT_RUN - 1));
-    CHECK(!rd3_latch_should_wait(1, RD3_LATCH_TIMEOUT_RUN));
-
-    /* a head that never latches (blanked): each swap stops at the cap, and
-     * after RD3_LATCH_TIMEOUT_RUN of them the swaps stop waiting */
+    /* the state machine */
     {
-        unsigned run = 0, waited = 0;
-        for (unsigned i = 0; i < 10; i++) {
-            if (!rd3_latch_should_wait(1, run))
-                continue;
-            uint64_t w = 0;
-            enum rd3_latch_step s;
-            do {
-                w += POLL;
-                s = rd3_latch_step(1, 1, 100, 100, w);
-            } while (s == RD3_LATCH_WAIT);
-            CHECK(s == RD3_LATCH_TIMEOUT && w <= RD3_LATCH_CAP_US + POLL);
-            run++;
-            waited++;
-        }
-        CHECK(waited == RD3_LATCH_TIMEOUT_RUN);
+        struct rd3_latch_state st = { 0, 0, 0, 1 };
+        rd3_latch_flipped(&st);
+        CHECK(rd3_latch_wait_entry(1, &st) && rd3_latch_wait_flip(1, &st));
+        CHECK(!rd3_latch_wait_entry(0, &st) && !rd3_latch_wait_flip(0, &st));   /* swap_latch=0: never */
+        CHECK(rd3_latch_timeout(&st) == RD3_LATCH_EV_NONE && st.run == 1 && st.gave_up);
+        CHECK(!rd3_latch_wait_entry(1, &st));   /* given up: waited for once only */
+        rd3_latch_flipped(&st);
+        CHECK(rd3_latch_timeout(&st) == RD3_LATCH_EV_NONE);
+        rd3_latch_flipped(&st);
+        CHECK(rd3_latch_timeout(&st) == RD3_LATCH_EV_OFF && st.off);
+        rd3_latch_flipped(&st);
+        CHECK(rd3_latch_timeout(&st) == RD3_LATCH_EV_NONE);   /* the transition is reported once */
+        CHECK(!rd3_latch_wait_flip(1, &st));
+        CHECK(rd3_latch_seen(&st) == RD3_LATCH_EV_RESUMED && !st.off && st.run == 0);
+        CHECK(rd3_latch_seen(&st) == RD3_LATCH_EV_NONE);
+        CHECK(rd3_latch_wait_flip(1, &st));
+        rd3_latch_flipped(&st);
+        rd3_latch_give_up(&st);
+        CHECK(st.run == 0 && !rd3_latch_wait_entry(1, &st));   /* a give-up is not a timeout */
+        st.off = 1;
+        st.run = RD3_LATCH_TIMEOUT_RUN;
+        CHECK(rd3_latch_rearm(&st) == RD3_LATCH_EV_RESUMED && st.latched && !st.off && !st.run);
     }
 
     /* rd3_latch_panel */
@@ -168,6 +294,8 @@ int main(void)
         const struct run one = simulate(1, 1);
         CHECK(one.on_panel == 0 && one.timeouts == 0);
     }
+
+    kmodel();
 
     if (fails) {
         printf("test_flip_latch: %d check(s) FAILED\n", fails);
