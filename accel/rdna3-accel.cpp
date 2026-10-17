@@ -81,7 +81,7 @@ void                      rd3AccelTraceSync(const void *surf, unsigned what, uns
                                             unsigned long long v1);
 static void               rd3AccelTraceMode(unsigned arg);
 static void               rd3AccelScModeChanged(void);
-static void               rd3AccelScPanelMoved(unsigned head, const char *why);
+static void               rd3AccelScPanelMoved(unsigned head, const char *why, uint64_t issuedAt);
 static void               rd3AccelScFrontGone(const void *vm);
 /* APERTURE's v2: the path (getApertureMemoryDescriptor's every return, ECC review round 1) */
 enum { kApWhyNew = 0, kApWhyGate = 1, kApWhyCached = 2, kApWhyNoVram = 3, kApWhyRange = 4 };
@@ -2661,11 +2661,12 @@ static void rd3AccelIopAsyncRun(void *p0, void *)
     const unsigned head = (unsigned)(e - gIopAs);
     IOSurface *s = e->s; e->s = nullptr;
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("rd3FlipToSurfacePure");
+    const uint64_t issued = mach_absolute_time();
     IOReturn rr = sym ? e->fb->callPlatformFunction(sym, false, &e->f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
     if (rr == kIOReturnSuccess) {
         gIopAsyncRefuseRun = 0;
-        rd3AccelScPanelMoved(head, "an IOP flip");
+        rd3AccelScPanelMoved(head, "an IOP flip", issued);
         if (gIopFlipPrev[head]) ((OSObject *)gIopFlipPrev[head])->release();
         gIopFlipPrev[head] = gIopFlipFront[head]; gIopFlipFront[head] = s; gIopFlipped[head] = true;
         const SInt64 n = OSAddAtomic64(1, &gCntIopFlip); OSAddAtomic64(1, &gCntIopAsync);
@@ -2743,6 +2744,7 @@ static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pi
     const unsigned long long seq = rd3AccelNotePresented(vm, head);
     if (gIopAsync && pipe) return rd3AccelIopAsyncStart(pipe, fb, head, s, &f, seq);
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("rd3FlipToSurfacePure");
+    const uint64_t issued = mach_absolute_time();
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
     if (rr != kIOReturnSuccess) {
@@ -2752,7 +2754,7 @@ static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pi
         return rd3AccelIopFlipNo(7);
     }
     ((OSObject *)s)->retain();
-    rd3AccelScPanelMoved(head, "an IOP flip");
+    rd3AccelScPanelMoved(head, "an IOP flip", issued);
     if (gIopFlipPrev[head]) ((OSObject *)gIopFlipPrev[head])->release();
     gIopFlipPrev[head] = gIopFlipFront[head]; gIopFlipFront[head] = s; gIopFlipped[head] = true;
     const SInt64 n = OSAddAtomic64(1, &gCntIopFlip);
@@ -2780,10 +2782,11 @@ static void rd3AccelIopHome(IOService *fb, unsigned head)
     struct RD3KFlipRequest f; rd3SVZero(&f, sizeof f);
     f.version = RD3K_FLIP_ABI_VERSION; f.flags = 1u;
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("rd3FlipToSurfacePure");
+    const uint64_t issued = mach_absolute_time();
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
     OSAddAtomic64(1, &gCntIopFlipHome);
-    if (rr == kIOReturnSuccess) rd3AccelScPanelMoved(head, "an IOP flip home");   /* only a flip that was done (round 2) */
+    if (rr == kIOReturnSuccess) rd3AccelScPanelMoved(head, "an IOP flip home", issued);   /* only a flip that was done (round 2) */
     if (rr != kIOReturnSuccess && gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: HOME flip refused (0x%x) head %u", (unsigned)rr, head); }
     gIopFlipped[head] = false;
 }
@@ -4004,21 +4007,25 @@ static inline bool rd3AccelScCopying(void)
     return gSwapMode != RD3_SWAPMODE_FLIP && !(gScBrk.off && !gScBrk.probing);
 }
 
-static void rd3AccelScPost(unsigned head, UInt32 what)
+/* 'at': when the move was issued (mach_absolute_time taken BEFORE the flip
+ * call, ECC review round 3: a time taken after it returned could postdate
+ * a swap's own later flip and undo it) */
+static void rd3AccelScPost(unsigned head, UInt32 what, uint64_t at)
 {
     if (head >= kRd3MaxFB) return;
-    gScPostAbs[head] = mach_absolute_time();
+    gScPostAbs[head] = at;
     __atomic_store_n(&gScPost[head], what, __ATOMIC_RELEASE);
 }
 static void rd3AccelScModeChanged(void)
 {
     /* the framebuffer's mode set programmed its own scanout (home) */
-    for (unsigned h = 0; h < kRd3MaxFB; h++) rd3AccelScPost(h, kScPostModeSet);
+    const uint64_t at = mach_absolute_time();
+    for (unsigned h = 0; h < kRd3MaxFB; h++) rd3AccelScPost(h, kScPostModeSet, at);
 }
-static void rd3AccelScPanelMoved(unsigned head, const char *why)
+static void rd3AccelScPanelMoved(unsigned head, const char *why, uint64_t issuedAt)
 {
     (void)why;
-    rd3AccelScPost(head, kScPostAway);   /* not D (a copy into D is safe once this flip latched) */
+    rd3AccelScPost(head, kScPostAway, issuedAt);   /* not D (a copy into D is safe once this flip latched) */
 }
 /* under the family's lock: what moved the panels since the last holder;
  * a post older than the head's own last flip is stale (it was in flight
@@ -4589,6 +4596,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     rd3AccelLatchEntry(head, fb, n);
     rd3AccelTornCheck(head, src, hashSkip ? nullptr : hash, bufs, nbufs, n);
     RD3FlipWhy fw;
+    const uint64_t issued = mach_absolute_time();
     const bool flipped = rd3AccelFlipTo(src, fb, head, &fw);
     {
         struct rd3_trace_ev fe = rd3TrEv(RD3_TR_FLIP, head);
@@ -4600,7 +4608,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
         rd3Trace(fe);
     }
     if (flipped) {
-        rd3AccelScPanelMoved(head, "a mode 0 flip");   /* the panel shows WindowServer's buffer, not D */
+        rd3AccelScPanelMoved(head, "a mode 0 flip", issued);   /* the panel shows WindowServer's buffer, not D */
         /* returns once the flip latched (debug.rdna3accel_swap_latch) */
         rd3AccelLatchFlipped(head, fb, src, phys, hashSkip ? nullptr : hash, hashSkip, cap, n);
         tr.arg = RD3_TRS_FLIP;

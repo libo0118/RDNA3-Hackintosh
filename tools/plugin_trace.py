@@ -230,8 +230,24 @@ class Trace:
             return "??:??:??.???"   # a header with an impossible clock
 
     def complete_history(self):
-        """the main ring never wrapped: every main-ring event since the trace opened is still here"""
-        return self.widx_main <= self.nmain
+        """the main ring never wrapped (or a snapshot merged in saw it before it did): every main-ring event
+        since the trace opened is still here"""
+        return self.widx_main <= self.nmain or getattr(self, "_complete", False)
+
+    def merge(self, other):
+        """another copy of the same file (an A/B snapshot, the archive's final copy): its records the ring has
+        overwritten since are added, by (ring, seq) (ECC review round 3: the newest copy alone lost the A/B)"""
+        have = set((r.ring, r.seq) for r in self.recs)
+        add = [r for r in other.recs if (r.ring, r.seq) not in have]
+        for r in add:
+            r.t = self.secs(r.abs)
+        self.recs.extend(add)
+        self.recs.sort(key=lambda r: r.seq)
+        self.kept = len(self.recs)
+        self._complete = self.complete_history() or other.complete_history()
+        self.merged = getattr(self, "merged", 1) + 1
+        self.problems.extend(p for p in other.problems if p not in self.problems)
+        return len(add)
 
     def opened(self):
         try:
@@ -343,16 +359,21 @@ def load_paths(paths, boottime=None):
                 add(os.path.basename(p), read_regular(p))
         except (ValueError, OSError, tarfile.TarError) as e:
             problems.append(clean(e))
-    # one trace per process: the archive's final copy and the A/B snapshots of the same file
-    best = {}
+    # one trace per process: the archive's final copy and the A/B snapshots of the same file, merged (the
+    # newest copy's header and summary, every record any copy still held)
+    groups = {}
     for t in traces:
-        k = (t.proc, t.pid, t.start_wall_ns)
-        if k not in best or t.total_events > best[k].total_events:
-            best[k] = t
-    traces = list(best.values())
+        groups.setdefault((t.proc, t.pid, t.start_wall_ns), []).append(t)
+    traces = []
+    for ts in groups.values():
+        ts.sort(key=lambda t: -t.total_events)
+        base = ts[0]
+        for o in ts[1:]:
+            base.merge(o)
+        traces.append(base)
     bt = found_boot[0]
     if bt:
-        old = [t for t in traces if t.start_wall_ns / 1e9 < bt - 5]
+        old = [t for t in traces if t.start_wall_ns / 1e9 < bt - 120]   # the collector's tolerance (NTP after the boot)
         for t in old:
             problems.append("%s[%d] (%s): OLD - opened %s UTC, before this boot (%s UTC): not judged" %
                             (t.proc, t.pid, t.name, t.opened(), utc(bt)))
@@ -837,6 +858,12 @@ def surface_summary(an):
 
 
 def triage(path, big=(1024, 600), ab_window=None, boottime=None):
+    """(lines, surfaces): triage_ex() without its coverage facts"""
+    r = triage_ex(path, big, ab_window, boottime)
+    return r["lines"], r["surfaces"]
+
+
+def triage_ex(path, big=(1024, 600), ab_window=None, boottime=None):
     """(lines, surfaces): [(level, text)] for tools/triage_reports.py - the findings of a report's traces,
     WindowServer first, each with when its trace was opened, the time the main ring still covers, and a
     WARN when it wrapped (and does not cover the A/B: ab_window = (start, end) wall seconds) - and
@@ -844,6 +871,8 @@ def triage(path, big=(1024, 600), ab_window=None, boottime=None):
     traces, problems = load_paths([path], boottime)
     out = []
     surfaces = {}
+    ws_found = False
+    covers = None    # WindowServer's kept records reach back to the A/B's start (None: no A/B window known)
     for p in problems:
         out.append(("WARN" if "OLD -" in p else "INFO", "plugin trace: %s" % p))
     for tr in traces:
@@ -859,25 +888,34 @@ def triage(path, big=(1024, 600), ab_window=None, boottime=None):
         if not ws:
             continue
         surfaces.update(surface_summary(an))
+        ws_found = True
         t = tr.totals()
         win = tr.kept_window()
+        complete = tr.complete_history()
+        if ab_window and ab_window[0]:
+            c = complete or bool(win and win[0] <= ab_window[0])
+            covers = c if covers is None else (covers or c)
+        merged = getattr(tr, "merged", 1)
         out.append(("INFO", "%s: %d frames in the ring, %d passes on surfaces (%d clear-only), %d dirty / %d copy-out "
-                    "(%d after a refused dirty mark) / %d skipped uploads; kept %s; decode: tools/plugin_trace.py" %
+                    "(%d after a refused dirty mark) / %d skipped uploads; main ring %d records%s; kept %s; decode: "
+                    "tools/plugin_trace.py" %
                     (tag, len([f for f in an.frames.values() if f.commit]), t["passes_surf"], t["clear_only"], t["out_dirty"],
-                     t["out_copy"], t["out_refused"], t["in_skip"],
+                     t["out_copy"], t["out_refused"], t["in_skip"], tr.nmain,
+                     " (%d copies merged)" % merged if merged > 1 else "",
                      "%s .. %s UTC (%.0f s)" % (utc(win[0]), utc(win[1])[11:], win[1] - win[0]) if win else "nothing")))
-        if not tr.complete_history():
-            cov = ""
+        if not complete:
+            cov, lvl = "", "WARN"
             if ab_window and ab_window[0] and win:
                 if win[0] > ab_window[0]:
                     cov = " - the A/B (from %s UTC) is NOT covered: it starts before the oldest kept event" % utc(ab_window[0])
                 else:
-                    cov = " - the A/B (from %s UTC) is covered" % utc(ab_window[0])
-            out.append(("WARN", "%s: main ring WRAPPED (%d events written, %d kept, ring %d): only %s .. %s UTC kept%s "
+                    cov = " - the A/B (from %s UTC) is covered%s" % (utc(ab_window[0]), " by the snapshots" if merged > 1 else "")
+                    lvl = "INFO"
+            out.append((lvl, "%s: main ring WRAPPED (%d events written, %d kept, ring %d): only %s .. %s UTC kept%s "
                         "(NVMTL_TRACE_RING in rdna3mtl.conf enlarges it from the next WindowServer start)" %
                         (tag, tr.widx_main, tr.kept, tr.nmain, utc(win[0]) if win else "?",
                          utc(win[1])[11:] if win else "?", cov)))
-    return out, surfaces
+    return {"lines": out, "surfaces": surfaces, "ws": ws_found, "covers_ab": covers}
 
 
 def triage_lines(path, big=(1024, 600), ab_window=None, boottime=None):

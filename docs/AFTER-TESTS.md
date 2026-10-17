@@ -2270,15 +2270,35 @@ during the A/B and at empty backs, else every 8th
 | `screens <look> ... pipe N P% not black, BLACK pipe(s) N` (FAIL), `A/B screens FAIL mode 1 left pipe(s) N BLACK (pipe N: mode 1 a%, mode 0 b%)` | the rdna3_drminfo looks of the run and of the A/B (`look ab1` / `look ab0`), at most 3 % not black = black | the panel itself, not a counter: start here |
 | `frame trace FAIL COPY-BLACK: n copy(ies) of a back WITH pixels left the scanout buffer / front without any` | SCAN 0xfe / 0xfd after a mode 1 copy | the copy lost the picture (SDMA, a wrong source / pitch); compare with the core's `copy:` lines |
 | `plugin trace INFO join: head N back 0x... = IOSurface X (...): plugin DRAWN a, CLEAR-ONLY b, published p (dirty d, copy-out c, k EMPTY)` / `plugin NEVER saw this IOSurface` / `WARN join: ... has NO IOSurface id` | the kernel's SURFRES (how 3: a1 / a2 at every new address, id 0 too) and SCAN (`v3` the id, `v4` the resource's type byte) joined with WindowServer's plugin trace | which buffer the panel got, and what the plugin did to it: a back the plugin only cleared or never published is black on the panel whatever the swap does |
-| `plugin trace WindowServer[pid] (opened ... UTC): main ring WRAPPED (...): only a .. b UTC kept - the A/B (from ...) is NOT covered` | the plugin's ring wrapped before collection | autoreport writes `NVMTL_TRACE_RING=262144` into `/Library/GPUBundles/rdna3mtl/rdna3mtl.conf` (32 MB main ring per process); WindowServer takes it at its next start (the boot after the first run of this autoreport); snapshots after each A/B phase (`<report>-plugin-ab1-WindowServer-<pid>.trace`, `-ab2-`, `-ab-end-`, `-end-`) keep the A/B even when it wraps later |
+| `plugin trace WindowServer[pid] (opened ... UTC): main ring WRAPPED (...): only a .. b UTC kept - the A/B (from ...) is NOT covered` | the plugin's ring wrapped before collection | autoreport writes `NVMTL_TRACE_RING=262144` into `/Library/GPUBundles/rdna3mtl/rdna3mtl.conf` on every VM boot, the install boot (`rdna3vminstall=1`, also through sync_metal) included, so the card boot's WindowServer starts with it; WindowServer reads it only when it loads the plugin, so a conf written during a run counts from the next boot (the INFO line prints the ring size each trace had). Disk: about 51 MB preallocated per process that loads the plugin; autoreport deletes the traces of earlier boots at each run's start, and a standalone run takes the knob out again after its report (so a standalone run keeps the 16 K ring); snapshots after each A/B phase (`<report>-plugin-ab1-WindowServer-<pid>.trace`, `-ab2-`, `-ab-end-`, `-end-`) keep the A/B even when it wraps later |
 | `plugin trace: ... OLD - opened <date> UTC, before this boot` | a trace of an earlier boot left in `/var/tmp/rdna3-nvmtl` | not judged; collect_plugin_trace.sh REJECTs them (kern.boottime against the mtime and the header's open time) |
 | `WARN plugin trace MISSING (<the collector's reason>) although WindowServer loaded the plugin`, `plugin trace collector: REJECT ...` | M5 / CoreDisplay say WindowServer loaded the plugin, the report has no trace of it | the reason is the collector's (`31-plugin-trace/info.txt`, `37-plugin-trace-collect.txt`) |
 | `CRITICAL` anywhere | triage, `rdna3vm result` | a FAIL in the checklist (it was INFO before) |
 | `frame trace WARN GPU: n GPU wait(s) ran out the 10 s cap` | GPUWAIT `v3` 1 | a hang; the plugin's fence timeouts line up with it |
 | `Q6 ... no VRAM base yet (MC addresses)` / `below the framebuffer aperture` | PANEL `v3` 4 / 5, flag 2 | MC addresses are never compared with the BAR addresses (no false `PANEL` mismatch) |
 | `Q8 ...; the boot before the pump: N events overwritten before its first read` | the stream files' first blob is the boot (kept now) | not a loss of the run |
-| `== swap A/B: console user ...`, `power: ...`, `NOBODY LOGGED IN`, `activity: ...`, `(exit n)` | the A/B's preconditions; `swap A/B` in the tests file is FAILED when a setting did not take or nothing redrew | a head that had no swap in the A/B is listed as not judged |
+| `== swap A/B: console user ...`, `power: ...`, `NOBODY LOGGED IN`, `activity: ...`, `(exit n)` | the A/B's preconditions in the tests file; the SUMMARY row `swap A/B` sums them up: FAIL for a failed A/B (its exit), a setting NOT APPLIED / FAILED, nobody logged in; WARN for no activity, pump read errors, failed uploads, plugin snapshots without a trace or with rejects, rdna3mtl.conf not written, fix_tracedir.sh failed | a head that had no swap in the A/B is listed as not judged |
 | `== frame trace: pump read errors`, `... reached 536870912 bytes` | the pump's failed reads and its 512 MB cap per file | |
+
+Round 3 (end-to-end, kernel, security): the plugin trace's copies of one
+process (the A/B snapshots, the archive's final copy) are merged by
+(ring, seq), so the join keeps what an earlier snapshot saw and a wrap the
+snapshots cover is no WARN (`main ring N records (k copies merged)`); a lit
+pipe whose picture is not readable is `NOT READABLE (not judged)`, never a
+PASS, `A/B screens WARN NOT JUDGED` / `look ab1 missing although the A/B
+ran`, and `A/B main display <verdict> mode 1 vs mode 0 on the main display
+(pipe P, how it was found): a% vs b% not black`; join lines carry the A/B
+phase split and the EMPTY swaps, and a back the plugin never saw although
+its trace covers the A/B is a WARN when it had empty swaps; backs to join
+without any WindowServer plugin trace are `plugin trace MISSING (<reason>) -
+the join lines below carry no plugin verdict`; the SUMMARY row `swap A/B`
+(see the table above); both "before this boot" checks allow 120 s (a clock
+set after the boot); the collector decides from the directory entry before
+it opens anything and reads the header from its own copy; autoreport makes
+the standalone folder with mkdir (no mv, no install -d through a link; a
+fresh mktemp directory otherwise), deletes plugin traces of earlier boots at
+each run's start, keeps every snapshot's pending copy; a posted panel move
+is timed before its flip is issued.
 
 Kernel side of round 2: a panel move posted from outside the family's lock
 is ignored when it is older than the swaps' own last flip (it would undo

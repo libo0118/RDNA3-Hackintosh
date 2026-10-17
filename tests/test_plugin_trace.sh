@@ -280,6 +280,10 @@ PATH="$T/bin:$PATH" NVMTL_BOOTTIME=1 NVMTL_TRACE_DIR="$T/colsrc" sh "$ROOT/tools
 need "$T/col6/31-plugin-trace/info.txt" 'ACCEPT .* Finder-[0-9]*\.trace'
 grep -q 'nomagic-5' "$T/col6/31-plugin-trace/info.txt" && fail "--only took another name"
 [ -e "$T/col6/32-log-nvmtl-windowserver.txt" ] && fail "--traces-only ran log show"
+# the clock set 60 s ahead after the boot (NTP): this boot's traces are not "older" (120 s tolerance)
+mkdir -p "$T/col7"
+PATH="$T/bin:$PATH" NVMTL_BOOTTIME=$(( $(date +%s) + 60 )) NVMTL_TRACE_DIR="$T/colsrc" sh "$ROOT/tools/macos/collect_plugin_trace.sh" --traces-only --only Finder "$T/col7" || fail "collector (tolerance)"
+need "$T/col7/31-plugin-trace/info.txt" 'ACCEPT .* Finder-[0-9]*\.trace'
 # an archive whose info.txt says the boot began after the trace was opened: OLD, not judged
 mkdir -p "$T/old/rdna3-report-o/31-plugin-trace"
 cp "$f" "$T/old/rdna3-report-o/31-plugin-trace/"
@@ -305,5 +309,24 @@ for lv, t in p.triage_lines(sys.argv[2], ab_window=(1.0, 2.0)):
 PY
 need "$T/wrapws.txt" 'WARN plugin trace WindowServer\[[0-9]*\] (opened .*): main ring WRAPPED (1000 events written'
 need "$T/wrapws.txt" 'the A/B (from 1970-01-01 00:00:01 UTC) is NOT covered'
+
+# two copies of one WindowServer trace (an A/B snapshot and the final copy after the ring wrapped): merged by
+# (ring, seq), so the snapshot's surfaces survive and the A/B counts as covered (ECC review round 3)
+mkdir -p "$T/two"
+python3 -I -B "$ROOT/tests/trace_fixture.py" plugin-join "$T/two/snap-WindowServer-158.trace"
+python3 -I -B "$ROOT/tests/trace_fixture.py" plugin-late "$T/two/WindowServer-158.trace"
+python3 -I -B - "$ROOT/tools" "$T/two" > "$T/two.txt" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import plugin_trace as p
+r = p.triage_ex(sys.argv[2], ab_window=(1792310400.0000005, 1792310401.0))
+for lv, t in r["lines"]:
+    print(lv, t)
+print("surfaces", sorted(r["surfaces"]), "covers", r["covers_ab"])
+PY
+need "$T/two.txt" '(2 copies merged)'
+need "$T/two.txt" 'surfaces \[101, 102, 103\] covers True'
+grep -q 'WARN .*WRAPPED' "$T/two.txt" && fail "a wrap the snapshot covers is still a WARN"
+need "$T/two.txt" 'main ring 256 records'
 
 echo "test_plugin_trace: ok"

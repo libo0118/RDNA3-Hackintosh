@@ -565,6 +565,7 @@ def back_surfaces(trace, swaps=None):
         if e.pa and e.v3 and e.pa not in ids:
             ids[e.pa] = (e.v3, e.v4)
     out = {}
+    ph = phase_of(trace)
     for e in (trace.by("SWAP") if swaps is None else swaps):
         if e.head == 0xff:
             continue
@@ -572,33 +573,48 @@ def back_surfaces(trace, swaps=None):
         if not back:
             continue
         sid, ty = ids.get(back, (None, None))
-        st = out.setdefault(e.head, {}).setdefault(back, [0, sid, ty, 0])
+        # [swaps, id, type, with pixels, in phase 1, in phase 2, empty]
+        st = out.setdefault(e.head, {}).setdefault(back, [0, sid, ty, 0, 0, 0, 0])
         st[0] += 1
         st[3] += rcb == 5
+        p = ph.get(id(e), 0)
+        st[4] += p == 1
+        st[5] += p == 2
+        st[6] += rcb == 4
     return out
 
 
-def join_lines(trace, plugin=None):
+def join_lines(trace, plugin=None, covers=None):
     """[(level, text)]: every back the swaps named (phases 1-2 when the A/B
-    ran) with its IOSurface id; WARN for a back without one (the plugin's
-    trace cannot be joined to it). plugin: {IOSurface id: what the plugin's
-    trace says of it} (tools/plugin_trace.py surface_summary)"""
+    ran) with its IOSurface id, its swaps per A/B phase and how many read
+    empty; WARN for a back without one (the plugin's trace cannot be joined
+    to it). plugin: {IOSurface id: what the plugin's trace says of it}
+    (tools/plugin_trace.py surface_summary); covers: the plugin's trace is
+    complete over the A/B - then a back with empty swaps the plugin never
+    saw is a WARN (ECC review round 3)"""
     swaps, _ = ab_events(trace)
     out = []
     for h, bufs in sorted(back_surfaces(trace, swaps).items()):
-        for phys, (n, sid, ty, pix) in sorted(bufs.items()):
+        for phys, (n, sid, ty, pix, n1, n2, empty) in sorted(bufs.items()):
             if sid is None:
                 out.append(("WARN", "join: head %d back 0x%x (%d swaps, %d with pixels) has NO IOSurface id in the "
                                     "trace%s - the plugin's trace cannot be joined to it" %
                             (h, phys, n, pix, " (resource type 0x%02x)" % (ty & 0xff) if ty is not None else
                              " (no SURFRES for it)")))
                 continue
-            what = ""
+            what, lv = "", "INFO"
             if plugin is not None:
-                what = ": plugin " + plugin.get(sid, "NEVER saw this IOSurface (not rendered by Metal, or the plugin's "
-                                                     "trace does not cover the time)")
-            out.append(("INFO", "join: head %d back 0x%x = IOSurface %d (%d swaps, %d with pixels)%s" %
-                        (h, phys, sid, n, pix, what)))
+                if sid in plugin:
+                    what = ": plugin " + plugin[sid]
+                elif covers:
+                    what = (": plugin NEVER saw this IOSurface although its trace covers the A/B - not rendered by "
+                            "Metal (the panel gets whatever is in it)")
+                    lv = "WARN" if empty else "INFO"
+                else:
+                    what = ": plugin NEVER saw this IOSurface (its trace does not cover the A/B, or Metal never drew it)"
+            split = ", %d in mode 1 / %d in mode 0 of the A/B" % (n1, n2) if n1 or n2 else ""
+            out.append((lv, "join: head %d back 0x%x = IOSurface %d (%d swaps%s, %d with pixels, %d EMPTY)%s" %
+                        (h, phys, sid, n, split, pix, empty, what)))
     return out
 
 

@@ -206,15 +206,19 @@ def make_plugin(kind):
     recs = []
     seq = 0
     frames = 40
+    sids = ((103, 1),) if kind == "late" else ((101, 1), (102, 2))
+    seq = 100000 if kind == "late" else 0      # 'late': the final copy after the ring wrapped (surface 103 only)
     for f in range(frames):
-        for sid, path in ((101, 1), (102, 2)):
+        for sid, path in sids:
             seq += 1
             recs.append(P_REC.pack(1000 + seq * 1000, seq, 1, 5, path, 0, 1, sid, 0, 2560, 1440, 80, 10240, 0, 0, 0,
                                    0, f + 1, 1, 0, 0, *([0] * 12)))                       # PASS_END
         seq += 1
-        recs.append(P_REC.pack(1000 + seq * 1000, seq, 1, 3, 1, 0, 1, 101, 0, 2560, 1440, 80, 10240, 0, 0, 0, 0,
+        recs.append(P_REC.pack(1000 + seq * 1000, seq, 1, 3, 1, 0, 1, sids[0][0], 0, 2560, 1440, 80, 10240, 0, 0, 0, 0,
                                f + 1, 0, 0, 0, *([0] * 12)))                              # SURF_OUT dirty
     widx = len(recs)
+    if kind == "late":
+        widx = 200000
     if kind == "wrap":
         widx = 5000                    # most were overwritten: the ring holds the last ones only
         recs = recs[-nmain:]

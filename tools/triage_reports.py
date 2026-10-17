@@ -246,13 +246,16 @@ BLACK_PCT = 3
 
 
 def look_pictures(blk):
-    """{pipe: (% not black, bytes changed in 2 s)} of one rdna3_drminfo --scanout block"""
+    """{pipe: (% not black or None, bytes changed in 2 s)} of the LIT pipes of one rdna3_drminfo --scanout
+    block; None: lit, but its picture was not readable (tiled, DCC, outside the BAR) or not printed"""
     out = {}
     cur = None
     for line in blk.splitlines():
-        m = re.match(r"^pipe (\d+): ", line)
+        m = re.match(r"^pipe (\d+): (\w+)", line)
         if m:
-            cur = m.group(1)
+            cur = m.group(1) if m.group(2) == "LIT" else None
+            if cur is not None:
+                out[cur] = (None, 0)
             continue
         m = re.match(r"^  picture \d+x\d+: (\d+)% not black, mean rgb \d+ \d+ \d+, (\d+) bytes changed", line)
         if m and cur is not None:
@@ -260,28 +263,94 @@ def look_pictures(blk):
     return out
 
 
-def ab_pictures(txt):
-    """the A/B's two looks side by side (look ab1: mode 1, look ab0: mode 0):
-    'FAIL ...' when mode 1 left a pipe black that mode 0 did not (or both
-    black), '' without both looks"""
+def ab_pictures(txt, main=None):
+    """[(row name, text)]: the A/B's two looks side by side (look ab1: mode 1, look ab0: mode 0) - 'FAIL ...'
+    when mode 1 left a judged pipe black, WARN for a lit pipe whose picture was not readable, for no pipe
+    judged in both looks and for a look missing although the A/B ran (ECC review round 3: those were a
+    silent PASS) - and, with main = (pipe, how it was found), the main display's line"""
     looks = {}
     for blk in txt.split("== rdna3_drminfo --scanout")[1:]:
         m = re.match(r"\s*\(look (ab[01])\)", blk)
         if m:
             looks[m.group(1)] = look_pictures(blk.split("\n== ")[0])
-    if "ab1" not in looks or "ab0" not in looks:
-        return ""
+    ran = "== swap A/B phase 1" in txt
+    missing = [k for k in ("ab1", "ab0") if k not in looks]
+    if missing:
+        if ran:
+            return [("A/B screens", "WARN look %s missing although the A/B ran (rdna3_drminfo not run or its "
+                                    "output lost): the panels were NOT JUDGED" % " and ".join(missing))]
+        return []
     a, b = looks["ab1"], looks["ab0"]
-    pipes = sorted(set(a) | set(b))
-    side = "; ".join("pipe %s: mode 1 %s%%, mode 0 %s%%" % (p, a.get(p, ("?",))[0], b.get(p, ("?",))[0]) for p in pipes)
-    black1 = [p for p in pipes if p in a and a[p][0] <= BLACK_PCT]
-    black0 = [p for p in pipes if p in b and b[p][0] <= BLACK_PCT]
-    if black1:
-        return "FAIL mode 1 left pipe(s) %s BLACK (%s)%s" % (" ".join(black1), side,
-                                                           "; mode 0 too" if set(black1) & set(black0) else "")
-    if black0:
-        return "WARN mode 0 left pipe(s) %s black, mode 1 did not (%s)" % (" ".join(black0), side)
-    return "PASS no black pipe in either mode (%s)" % side
+    pipes = sorted(set(a) | set(b), key=int)
+    unread = ["pipe %s picture NOT READABLE in look %s (not judged)" % (p, k)
+              for k, lk in (("ab1", a), ("ab0", b)) for p in pipes if p in lk and lk[p][0] is None]
+    judged = [p for p in pipes if a.get(p, (None,))[0] is not None and b.get(p, (None,))[0] is not None]
+    side = "; ".join("pipe %s: mode 1 %s%%, mode 0 %s%%" % (p, a[p][0], b[p][0]) for p in judged)
+    note = ("; " + "; ".join(unread)) if unread else ""
+    rows = []
+    black1 = [p for p in judged if a[p][0] <= BLACK_PCT]
+    black0 = [p for p in judged if b[p][0] <= BLACK_PCT]
+    if not judged:
+        rows.append(("A/B screens", "WARN NOT JUDGED: no lit pipe with a readable picture in both looks%s" % note))
+    elif black1:
+        rows.append(("A/B screens", "FAIL mode 1 left pipe(s) %s BLACK (%s)%s%s" %
+                     (" ".join(black1), side, "; mode 0 too" if set(black1) & set(black0) else "", note)))
+    elif black0:
+        rows.append(("A/B screens", "WARN mode 0 left pipe(s) %s black, mode 1 did not (%s)%s" %
+                     (" ".join(black0), side, note)))
+    elif unread:
+        rows.append(("A/B screens", "WARN no black pipe among those judged (%s)%s" % (side, note)))
+    else:
+        rows.append(("A/B screens", "PASS no black pipe in either mode (%s)" % side))
+    if main is not None:
+        mp = str(main[0])
+        x, y = a.get(mp, (None,))[0], b.get(mp, (None,))[0]
+        if x is None or y is None:
+            rows.append(("A/B main display", "WARN pipe %s (%s): %s - not judged" % (
+                mp, main[1], "not lit in both looks" if mp not in a or mp not in b else "picture NOT READABLE")))
+        else:
+            lv = "FAIL" if x <= BLACK_PCT else "WARN" if y <= BLACK_PCT else "PASS"
+            rows.append(("A/B main display", "%s mode 1 vs mode 0 on the main display (pipe %s, %s): %d%% vs %d%% "
+                         "not black" % (lv, mp, main[1], x, y)))
+    return rows
+
+
+def ab_diag_row(txt):
+    """('swap A/B', text) from the tests file's '== swap A/B' / '== frame trace' / '== plugin trace' lines
+    (ECC review round 3: autoreport's diagnostics never reached the SUMMARY): FAIL for a failed A/B (its
+    exit), a setting NOT APPLIED or FAILED, nobody logged in; WARN for no activity, pump read errors,
+    uploads that failed, plugin snapshots without a trace or with rejects, rdna3mtl.conf not written,
+    fix_tracedir.sh failed; None when the tests file has no A/B at all"""
+    if "== swap A/B" not in txt:
+        return None
+    if "== swap A/B: SKIPPED" in txt:
+        return ("swap A/B", "not run: " + re.search(r"== swap A/B: SKIPPED - (.*)", txt).group(1)[:120])
+    fail, warn = [], []
+    ex = re.findall(r"^== swap A/B done: .*\(exit (\d+)\)", txt, re.M)
+    if not ex:
+        fail.append("no '== swap A/B done' line (the A/B did not finish)")
+    elif ex[-1] != "0":
+        fail.append("exit %s" % ex[-1])
+    fail += [m[:100] for m in re.findall(r"^== swap A/B: ((?:FAILED to set|.*NOT APPLIED).*)$", txt, re.M)]
+    if "NOBODY LOGGED IN" in txt:
+        fail.append("NOBODY LOGGED IN")
+    if "Activity Monitor is NOT running" in txt:
+        warn.append("Activity Monitor NOT running")
+    if "pump read errors" in txt:
+        warn.append("pump read errors")
+    up = re.findall(r"^upload of (\S+) FAILED", txt, re.M)
+    if up:
+        warn.append("%d upload(s) FAILED (%s)" % (len(up), ", ".join(up[:3])))
+    for lab, n, rej in re.findall(r"^== plugin trace snapshot (\S+): (\d+) WindowServer trace\(s\); (\d+) rejected", txt, re.M):
+        if n == "0" or rej != "0":
+            warn.append("plugin snapshot %s: %s trace(s), %s rejected" % (lab, n, rej))
+    if "plugin trace ring: could NOT write" in txt:
+        warn.append("rdna3mtl.conf NOT written")
+    if "fix_tracedir.sh FAILED" in txt:
+        warn.append("fix_tracedir.sh FAILED")
+    snaps = len(re.findall(r"^== frame trace snapshot ", txt, re.M))
+    body = "; ".join(fail + warn) or "ran (%d snapshot(s) sent)" % snaps
+    return ("swap A/B", ("FAIL " if fail else "WARN " if warn else "PASS ") + body)
 
 
 def m6_screens(prefix):
@@ -1221,36 +1290,22 @@ def plugin_trace_lines(path, cdlog="", txt=""):
     its verdicts with the time its ring covers against the kernel's A/B, the
     join of each back the kernel's swaps named with what the plugin did to
     that IOSurface, and WARN 'plugin trace MISSING (<why>)' when WindowServer
-    loaded the plugin (the tests file's M5 line, the CoreDisplay log) but the
-    report has no trace of it (ECC review round 2)"""
+    loaded the plugin (the tests file's M5 line, the CoreDisplay log) or the
+    kernel's backs have IOSurface ids to join, but the report has no
+    WindowServer trace (ECC review rounds 2, 3)"""
     ws_loaded = bool(re.search(r"^M5: WindowServer LOADED", txt, re.M) or
                      re.search(r"^processes with the plugin loaded:.*\bWindowSer", txt, re.M) or
                      re.search(r"WindowServer\[\d+:[0-9a-f]+\].*NVMTL", cdlog))
     ktr = _TRACE_CACHE.get(path)
     abw = rdna3_trace.ab_window(ktr) if (ktr is not None and rdna3_trace is not None) else None
+    joinable = bool(_join_lines(ktr, None))
     info = read_tar_member(path, "31-plugin-trace/info.txt")
     coll = read_tar_member(path, "37-plugin-trace-collect.txt")
     out = []
     for l in re.findall(r"^REJECT .*$", info, re.M)[:6]:
         out.append(("WARN", "plugin trace collector: " + l[:200]))
-    try:
-        import plugin_trace  # noqa: E402
-    except ImportError as e:
-        out.append(("WARN" if ws_loaded else "INFO", "plugin trace NOT decoded: tools/plugin_trace.py is not next to "
-                                                     "this script (%s)" % e))
-        return out + _join_lines(ktr, None)
-    try:
-        lines, surfaces = plugin_trace.triage(path, ab_window=abw)
-    except Exception as e:   # noqa: BLE001 - the report is untrusted input
-        return out + [("FAIL", "plugin trace not decoded: %s: %s" % (type(e).__name__, str(e)[:200]))] + \
-            _join_lines(ktr, None)
-    ws = False
-    for lv, t in lines:
-        if "no plugin traces in the archive" in t and "snapshots" not in t:
-            continue   # said below, with the reason
-        ws = ws or "plugin trace WindowServer[" in t
-        out.append((str(lv), str(t)))
-    if not ws and ws_loaded:
+
+    def missing(why_extra):
         why = re.search(r"^== plugin frame traces collected: .*$", info, re.M)
         if why:
             why = why.group(0)[3:]
@@ -1264,15 +1319,39 @@ def plugin_trace_lines(path, cdlog="", txt=""):
             why = "collect_plugin_trace.sh did not run (no 31-plugin-trace/ and no 37-plugin-trace-collect.txt)"
         else:
             why = "no archive (collect.sh did not finish), no snapshot next to it"
-        out.append(("WARN", "plugin trace MISSING (%s) although WindowServer loaded the plugin" % why))
-    return out + _join_lines(ktr, surfaces if ws else None)
+        return ("WARN", "plugin trace MISSING (%s)%s" % (why, why_extra))
+
+    def tail(surfaces=None, covers=None, decoded=False):
+        res = []
+        if not decoded and (ws_loaded or joinable):
+            res.append(missing(" although WindowServer loaded the plugin" if ws_loaded else
+                               " - the join lines below carry no plugin verdict"))
+        return res + _join_lines(ktr, surfaces, covers)
+
+    try:
+        import plugin_trace  # noqa: E402
+    except ImportError as e:
+        out.append(("WARN" if (ws_loaded or joinable) else "INFO",
+                    "plugin trace NOT decoded: tools/plugin_trace.py is not next to this script (%s)" % e))
+        return out + tail()
+    try:
+        r = plugin_trace.triage_ex(path, ab_window=abw)
+    except Exception as e:   # noqa: BLE001 - the report is untrusted input
+        return out + [("FAIL", "plugin trace not decoded: %s: %s" % (type(e).__name__, str(e)[:200]))] + tail()
+    for lv, t in r["lines"]:
+        if "no plugin traces in the archive" in t and "snapshots" not in t:
+            continue   # said below, with the reason
+        out.append((str(lv), str(t)))
+    ws = bool(r.get("ws"))
+    return out + tail(r["surfaces"] if ws else None, r.get("covers_ab"), ws)
 
 
-def _join_lines(ktr, surfaces):
-    """the kernel's backs joined with the plugin's surfaces (rdna3_trace.join_lines)"""
+def _join_lines(ktr, surfaces, covers=None):
+    """the kernel's backs joined with the plugin's surfaces (rdna3_trace.join_lines; the WARNs for backs
+    without an id are the frame trace's own lines)"""
     if ktr is None or rdna3_trace is None:
         return []
-    return [(lv, t) for lv, t in rdna3_trace.join_lines(ktr, surfaces) if lv == "INFO"]
+    return [(lv, t) for lv, t in rdna3_trace.join_lines(ktr, surfaces, covers) if "has NO IOSurface id" not in t]
 
 
 def coredisplay_cf_lines(cdlog, tr_lines=()):
@@ -1916,17 +1995,20 @@ def summary(path, serial=None):
         txbad = [m for m in re.findall(r"^  TX problems: (.*)$", own, re.M) if m.strip() != "none"]
         notx = lit and not re.search(r"^  TX ", own, re.M)
         pics = look_pictures(own)
-        black = sorted(p for p, (pct, _) in pics.items() if pct <= BLACK_PCT)
+        black = sorted(p for p, (pct, _) in pics.items() if pct is not None and pct <= BLACK_PCT)
         out.append(("screens %s" % (look.group(1) if look else "1"),
                     "%d lit%s%s%s%s%s%s%s" % (len(lit), ", SAME SURFACE on two pipes" if same else "",
                                               ", %d blanked" % blank if blank else "", ", UNDERFLOW" if uf else "",
                                               ", TX: " + "; ".join(txbad) if txbad else "",
                                               ", NO TX LINES" if notx else "",
-                                              "".join(", pipe %s %d%% not black" % (p, pics[p][0]) for p in sorted(pics)),
+                                              "".join(", pipe %s %d%% not black" % (p, pics[p][0]) if pics[p][0] is not None
+                                                      else ", pipe %s picture NOT READABLE (not judged)" % p
+                                                      for p in sorted(pics)),
                                               ", BLACK pipe(s) %s" % " ".join(black) if black else "")))
-    ab = ab_pictures(txt)
-    if ab:
-        out.append(("A/B screens", ab))
+    out.extend(ab_pictures(txt, main_pipe(path, txt)))
+    abd = ab_diag_row(txt)
+    if abd:
+        out.append(abd)
     # the core's TX watch (what each head sends after its OTG): changes
     # with their time, problems first, from the kernel log of the same boot
     if "TX watch:" in log or "TX at the start" in log:

@@ -49,6 +49,7 @@ note() { echo "$*" >> "$info"; }
 # this boot's start (seconds since 1970): "{ sec = 1792310400, usec = 0 } ..." on macOS
 boot=${NVMTL_BOOTTIME:-$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9]*\).*/\1/p')}
 case "$boot" in ''|*[!0-9]*) boot=; note "boottime unknown: traces of older boots are not filtered" ;; *) note "boottime $boot" ;; esac
+tol=120   # seconds: a clock set after the boot (NTP) must not make this boot's traces "older"
 mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }   # GNU first: its -f is the file system
 # The checks above and this copy are two opens of the name, and the directory is world writable: the copy is
 # bounded (never more than the cap, whatever the name has become by now), exclusive (noclobber) and watched (a FIFO
@@ -80,38 +81,50 @@ for src in ${NVMTL_TRACE_DIR:-} /var/tmp/rdna3-nvmtl; do
         mode=${1:-?}; links=${2:-0}; owner=${3:-x}; size=${5:-0}
         line="$mode $links uid $owner size $size $b"
         why=""
+        # decided from the directory entry first (ls / test: nothing is opened yet; ECC review round 3): a
+        # name a user planted is never read as root unless it passes these
         if [ -L "$f" ]; then why="a symlink"
         elif [ ! -f "$f" ]; then why="not a regular file"
         elif [ "$links" != 1 ]; then why="$links hard links"
         elif [ "$size" -gt "$cap" ] 2>/dev/null; then why="over $cap bytes"
         elif [ "$size" -lt 4096 ] 2>/dev/null; then why="shorter than a trace header"
+        elif [ ! -r "$f" ]; then why="unreadable: run with sudo"
+        elif [ -n "$boot" ] && [ "$(mtime_of "$f")" -lt "$((boot - tol))" ] 2>/dev/null; then
+            why="written before this boot (mtime $(mtime_of "$f"), boot $boot): an old trace"
         else
-            magic=""; hu=""
-            [ -r "$f" ] && { magic=$(head -c 8 "$f" 2>/dev/null); hu=$(od -An -tu4 -j104 -N4 "$f" 2>/dev/null | tr -d ' '); }
-            if [ ! -r "$f" ]; then why="unreadable: run with sudo"
-            elif [ "$magic" != NVMTLTR1 ]; then why="no NVMTLTR1 magic"
-            elif [ -n "$boot" ] && [ "$(mtime_of "$f")" -lt "$boot" ] 2>/dev/null; then
-                why="written before this boot (mtime $(mtime_of "$f"), boot $boot): an old trace"
-            elif [ -n "$boot" ] && sw=$(od -An -tu8 -j72 -N8 "$f" 2>/dev/null | tr -d ' ') && [ -n "$sw" ] && [ ${#sw} -le 18 ] &&
-                 [ "$((sw / 1000000000))" -lt "$boot" ] 2>/dev/null; then
-                why="opened before this boot (header $((sw / 1000000000)), boot $boot): an old trace"
-            else
-                case "$b" in
-                WindowServer*) case "$owner" in 0|88) ;; *) why="named WindowServer but owned by uid $owner" ;; esac ;;
-                *) case "$owner" in 0|88) ;; *) [ "$owner" = "$hu" ] || why="owned by uid $owner, its header says uid ${hu:-?}" ;; esac ;;
-                esac
-            fi
+            case "$b" in
+            WindowServer*) case "$owner" in 0|88) ;; *) why="named WindowServer but owned by uid $owner" ;; esac ;;
+            esac
         fi
         if [ -n "$why" ]; then note "REJECT $line: $why"; rejected=$((rejected + 1)); continue; fi
+        # then one bounded, exclusive copy into our own directory; the magic, the header's uid and open time
+        # are read from the copy, never again from the name
         dest="$b"; k=0
         while [ -e "$out/$dest" ]; do k=$((k + 1)); dest="dup$k-$b"; done
-        if bounded_copy "$f" "$out/$dest" && [ "$(head -c 8 "$out/$dest" 2>/dev/null)" = NVMTLTR1 ]; then
-            chmod 644 "$out/$dest" 2>/dev/null
-            note "ACCEPT $line -> $dest"; n=$((n + 1))
-        else
+        if ! bounded_copy "$f" "$out/$dest"; then
             rm -f "$out/$dest"
             note "REJECT $line: unreadable, or not what it was when checked"; rejected=$((rejected + 1))
+            continue
         fi
+        c="$out/$dest"
+        magic=$(head -c 8 "$c" 2>/dev/null)
+        hu=$(od -An -tu4 -j104 -N4 "$c" 2>/dev/null | tr -d ' ')
+        sw=$(od -An -tu8 -j72 -N8 "$c" 2>/dev/null | tr -d ' ')
+        if [ "$magic" != NVMTLTR1 ]; then why="no NVMTLTR1 magic"
+        elif [ -n "$boot" ] && [ -n "$sw" ] && [ ${#sw} -le 18 ] && [ "$((sw / 1000000000))" -lt "$((boot - tol))" ] 2>/dev/null; then
+            why="opened before this boot (header $((sw / 1000000000)), boot $boot): an old trace"
+        else
+            case "$b" in
+            WindowServer*) ;;
+            *) case "$owner" in 0|88) ;; *) [ "$owner" = "$hu" ] || why="owned by uid $owner, its header says uid ${hu:-?}" ;; esac ;;
+            esac
+        fi
+        if [ -n "$why" ]; then
+            rm -f "$c"
+            note "REJECT $line: $why"; rejected=$((rejected + 1)); continue
+        fi
+        chmod 644 "$c" 2>/dev/null
+        note "ACCEPT $line -> $dest"; n=$((n + 1))
     done
 done
 

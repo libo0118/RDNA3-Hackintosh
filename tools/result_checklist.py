@@ -171,7 +171,7 @@ def _screens(n, t):
         return FAIL, t   # a pipe is still blanked after the wake
     if re.search(r"BLACK pipe", t):   # a lit pipe whose picture is (nearly) all black (ECC review round 2)
         return FAIL, t
-    if re.search(r"UNDERFLOW|SAME SURFACE|NO TX LINES|TX: ", t):
+    if re.search(r"UNDERFLOW|SAME SURFACE|NO TX LINES|TX: |NOT READABLE", t):
         return WARN, t
     return PASS, t
 

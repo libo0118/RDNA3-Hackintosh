@@ -245,8 +245,8 @@ snap_plugin() {   # snap_plugin <label>
     for t in "$TS/plug-$1"/31-plugin-trace/*.trace; do
         [ -f "$t" ] || continue
         _n=$((_n + 1))
-        # the newest snapshot replaces the older pending ones (a 48 MB trace each)
-        rm -f /var/db/rdna3-pending-"$base"-plugin-*-"$(basename "$t")"
+        # every snapshot keeps its own pending copy until sent: an earlier one
+        # holds records the ring has overwritten since (triage merges them)
         trace_upload "$t" "plugin-$1-$(basename "$t")"
     done
     echo "== plugin trace snapshot $1: $_n WindowServer trace(s); $(grep -c '^REJECT' "$TS/plug-$1/31-plugin-trace/info.txt" 2>/dev/null || echo 0) rejected"
@@ -274,6 +274,36 @@ trace_snapshot() {   # trace_snapshot <label>
 # release build drops inherited NVMTL_* variables first, the file's are
 # taken), so the knob reaches WindowServer at its next start: the next boot.
 PLUGIN_TRACE_RING=262144
+# Disk: with that ring every process that loads the plugin preallocates
+# about 51 MB (32 MB main ring, 16 MB Vulkan ring, the summary) in
+# /var/tmp/rdna3-nvmtl, and nothing cleans it: prune_old_traces deletes the
+# traces of earlier boots at the start of each run; a standalone run takes
+# the knob out again once its report is collected (the VM keeps it).
+prune_old_traces() {
+    _td=/var/tmp/rdna3-nvmtl
+    [ -d "$_td" ] && [ ! -L "$_td" ] || return 0
+    case "$(stat -f %u "$_td" 2>/dev/null)" in 0|88) ;; *) echo "== plugin traces: $_td is not root's or _windowserver's: not pruned"; return 0 ;; esac
+    _bt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9]*\).*/\1/p')
+    [ -n "$_bt" ] || { echo "== plugin traces: boot time unknown: not pruned"; return 0; }
+    _n=0; _kb=0
+    for _f in "$_td"/*.trace; do
+        [ -f "$_f" ] && [ ! -L "$_f" ] || continue
+        set -- $(ls -ldn "$_f" 2>/dev/null)
+        [ "${2:-0}" = 1 ] || continue
+        case "${3:-x}" in 0|88|"$(id -u)") ;; *) continue ;; esac
+        _m=$(stat -f %m "$_f" 2>/dev/null) || continue
+        [ "$_m" -lt "$((_bt - 120))" ] || continue
+        _kb=$((_kb + ${5:-0} / 1024))
+        rm -f "$_f" && _n=$((_n + 1))
+    done
+    echo "== plugin traces: $_n trace(s) of earlier boots deleted ($((_kb / 1024)) MB)"
+}
+plugin_trace_conf_off() {   # the standalone run: the ring back to the plugin's default
+    _cf=/Library/GPUBundles/rdna3mtl/rdna3mtl.conf
+    [ -f "$_cf" ] && [ ! -L "$_cf" ] && grep -q '^NVMTL_TRACE_RING=' "$_cf" || return 0
+    grep -v '^NVMTL_TRACE_RING=' "$_cf" > "$_cf.new" && chown root:wheel "$_cf.new" && chmod 644 "$_cf.new" &&
+        mv -f "$_cf.new" "$_cf" && echo "== plugin trace ring: NVMTL_TRACE_RING taken out of $_cf again (standalone run)"
+}
 plugin_trace_conf() {
     _m=/Library/GPUBundles/rdna3mtl
     [ -d "$_m" ] && [ ! -L "$_m" ] || return 0
@@ -408,7 +438,10 @@ case " $(nvram boot-args 2>/dev/null | cut -f2-) " in *" rdna3vmapprove=1 "*) AP
 
 if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ]; then
     rm -f /tmp/rdna3-progress.win
-    if [ -n "$INSTALL_ONLY" ]; then
+    # the plugin's trace ring knob on every boot of the VM (the install boot
+# included: the card boot's WindowServer then starts with the big ring)
+[ -z "$STANDALONE" ] && plugin_trace_conf
+if [ -n "$INSTALL_ONLY" ]; then
         w=0
         until curl -sf --max-time 5 -o /dev/null "$HOST/rdna3-bundle.sha256" || [ $w -ge 120 ]; do
             sleep 5; w=$((w + 5))
@@ -784,6 +817,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     # the Metal plugin's trace directory, safe from a planted link (before
     # anything that makes WindowServer or an app load the plugin)
     fix_tracedir
+    prune_old_traces
     plugin_trace_conf
     # the kernel's frame trace for the whole run (card run 2026-10-17b)
     trace_pump_start
@@ -1380,23 +1414,27 @@ trace_send >> "$extra" 2>&1
 snap_plugin end >> "$extra" 2>&1
 
 # the standalone run's report folder as root's own directory: /Users/Shared
-# is world-writable, so a link, a file or somebody else's directory planted
-# at the name is moved aside, never written through (ECC review round 2: a
-# planted symlink made root overwrite any file)
-safe_outdir() {   # safe_outdir <dir>
+# is world-writable (and sticky), so nothing found at the name is trusted or
+# moved: mkdir (it follows no link and fails when anything is there) makes
+# it, and only a real directory of root's is used; anything else gets a
+# fresh mktemp directory next to it (ECC review round 3: moving a planted
+# link, or install -d through one, let a user make root write anywhere)
+safe_outdir() {   # safe_outdir <dir>: prints the directory to use
     _o=$1
-    if [ -L "$_o" ] || { [ -e "$_o" ] && [ ! -d "$_o" ]; } ||
-       { [ -d "$_o" ] && [ "$(stat -f %u "$_o" 2>/dev/null)" != 0 ]; }; then
-        _a="$_o.untrusted-$(date +%Y%m%d-%H%M%S)"
-        mv "$_o" "$_a" && echo "!! $_o was a link, a file or not root's: moved to $_a"
+    mkdir -m 0755 "$_o" 2>/dev/null
+    if [ -d "$_o" ] && [ ! -L "$_o" ] && [ "$(stat -f %u "$_o" 2>/dev/null)" = 0 ]; then
+        echo "$_o"
+        return 0
     fi
-    [ -d "$_o" ] || install -d -o root -g wheel -m 0755 "$_o"
-    [ -d "$_o" ] && [ ! -L "$_o" ] && [ "$(stat -f %u "$_o" 2>/dev/null)" = 0 ]
+    _t=$(mktemp -d "$_o.XXXXXX") || return 1
+    chmod 755 "$_t"
+    echo "!! $_o is not root's own directory (a link, a file or somebody else's): the report goes to $_t" >&2
+    echo "$_t"
 }
 if [ -n "$STANDALONE" ]; then
     # the names the VM's uploads get (docs/AFTER-TESTS.md reads them)
     out=/Users/Shared/rdna3-reports
-    safe_outdir "$out" || { echo "!! cannot make $out root's own directory: the report stays in $HOME"; out=$HOME; }
+    out=$(safe_outdir "$out") || { echo "!! cannot make a report directory in /Users/Shared: the report stays in $HOME"; out=$HOME; }
     cp "$extra" "$out/$base-tests.txt"
     for p in "$HOME"/rdna3-scanout/*/scanout-pipe*.ppm; do
         [ -f "$p" ] && cp "$p" "$out/$base-scanout$(basename "$(dirname "$p")")-$(basename "$p" | sed 's/^scanout-//')"
@@ -1404,6 +1442,7 @@ if [ -n "$STANDALONE" ]; then
     prog "tests done - the full report (up to 9 min)"
     RDNA3_STAMP=$stamp with_limit 540 sh "$D/tools/macos/collect.sh" "$label"
     [ -f "$HOME/$base.tar.gz" ] && mv "$HOME/$base.tar.gz" "$out/"
+    plugin_trace_conf_off
     chmod -R a+rX "$out"
     ls -l "$out"/"$base"*
     prog "all done: $out/$base*"

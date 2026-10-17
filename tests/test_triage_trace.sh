@@ -179,16 +179,32 @@ if counters != "NOTESTS":
     dump = "".join("debug.rdna3accel_%s: %s\n" % tuple(l.split()) for l in counters.strip().splitlines()
                    if len(l.split()) == 2 and l.split()[0] != "AB")
     txt = "== A3 display counters after M6\n" + dump
-    if "M5" in counters:
+    if "M5" in counters.split():
         txt = "M5: WindowServer LOADED the plugin; it is on the allow list\n" + txt
-    if "LOOKS" in counters:   # rdna3_drminfo --scanout looks: ab1 (mode 1) left pipe 0 black, ab0 (mode 0) did not
+    if "LOOKS" in counters.split():   # rdna3_drminfo --scanout looks: ab1 (mode 1) left pipe 0 black, ab0 (mode 0) did not
         look = ("== rdna3_drminfo --scanout (look %s)\n2 pipe(s) lit\n"
                 "pipe 0: LIT otg 0 2560x1440 pitch 10240 fmt 10 sw 0 dcc 0 address 0x1 in use 0x1\n"
                 "  picture 320x180: %d%% not black, mean rgb 1 1 1, 0 bytes changed in 2 s\n"
                 "pipe 1: LIT otg 1 1920x1080 pitch 7680 fmt 10 sw 0 dcc 0 address 0x2 in use 0x2\n"
                 "  picture 320x180: 41%% not black, mean rgb 9 9 9, 10 bytes changed in 2 s\n")
         txt = look % ("ab1", 1) + look % ("ab0", 44) + txt
-    if "AB" in counters:   # the A/B's markers and two counter dumps (head 0: 30 swaps in the window)
+    if "LOOKSBAD" in counters.split():   # pipe 0 lit but its picture not readable in ab1; ab0 readable
+        txt = ("== rdna3_drminfo --scanout (look ab1)\n1 pipe(s) lit\n"
+               "pipe 0: LIT otg 0 2560x1440 pitch 10240 fmt 10 sw 0 dcc 1 address 0x1 in use 0x1\n"
+               "  picture: not readable (0 of 180 rows; tiled, DCC or outside the BAR)\n"
+               "== rdna3_drminfo --scanout (look ab0)\n1 pipe(s) lit\n"
+               "pipe 0: LIT otg 0 2560x1440 pitch 10240 fmt 10 sw 0 dcc 0 address 0x1 in use 0x1\n"
+               "  picture 320x180: 50% not black, mean rgb 9 9 9, 10 bytes changed in 2 s\n") + txt
+    if "LOOKSMISS" in counters.split():
+        txt = "== swap A/B phase 1: swap mode 1 (12:00:00)\n" + txt
+    if "ABDIAG" in counters.split():   # autoreport's A/B diagnostics in the tests file
+        txt = ("== swap A/B phase 1: swap mode 1 (12:00:00)\n"
+               "== swap A/B: activity: Activity Monitor is NOT running - the phases may see no swaps (inconclusive)\n"
+               "upload of trace-stream.bin FAILED (kept for the next boot)\n"
+               "== plugin trace snapshot ab1: 0 WindowServer trace(s); 1 rejected\n"
+               "== swap A/B: debug.rdna3accel_swap_mode is 1 after setting 0 (NOT APPLIED)\n"
+               "== swap A/B done: swap mode 1 (exit 1)\n") + txt
+    if "AB" in counters.split():   # the A/B's markers and two counter dumps (head 0: 30 swaps in the window)
         txt = ("debug.rdna3accel_swaps_h0: 100\n== swap A/B phase 1: swap mode 1\n== swap A/B phase 2: swap mode 0\n"
                "== swap A/B counters after mode 0\ndebug.rdna3accel_swaps_h0: %d\n== swap A/B phase 3\n" %
                (100 + int(counters.split("AB")[1].split()[0]))) + txt
@@ -265,6 +281,25 @@ out=$(run garbage)
 hasnt "$out" "Traceback" triage-garbage
 has "$out" "NOT a trace (no R3TR header" triage-garbage
 
+# ECC review round 3: a lit pipe whose picture is not readable is not a PASS; a missing A/B look is said;
+# autoreport's A/B diagnostics reach the SUMMARY
+mk looksbad ab "swaps_h0 80
+LOOKSBAD" "" stream
+out=$(run looksbad)
+has "$out" "A/B screens            WARN NOT JUDGED: no lit pipe with a readable picture in both looks; pipe 0 picture NOT READABLE in look ab1 (not judged)" triage-looksbad
+has "$out" "pipe 0 picture NOT READABLE (not judged)" triage-looksbad
+has "$out" "A/B main display       WARN pipe 0" triage-looksbad
+mk looksmiss ab "swaps_h0 80
+LOOKSMISS" "" stream
+out=$(run looksmiss)
+has "$out" "WARN look ab1 and ab0 missing although the A/B ran" triage-looksmiss
+mk abdiag ab "swaps_h0 80
+ABDIAG" "" stream
+run abdiag > "$T/abdiag.txt"
+out=$(cat "$T/abdiag.txt")
+has "$out" "swap A/B               FAIL exit 1; debug.rdna3accel_swap_mode is 1 after setting 0 (NOT APPLIED); Activity Monitor NOT running; 1 upload(s) FAILED (trace-stream.bin); plugin snapshot ab1: 0 trace(s), 1 rejected" triage-abdiag
+python3 -I -B "$ROOT/tools/result_checklist.py" --no-color --width 220 "$T/abdiag.txt" | grep -qE "^FAIL +swap A/B " || fail "a failed A/B is not a FAIL in the checklist"
+
 # the plugin's trace joined with the kernel's: each back's IOSurface and what the plugin did to it
 python3 -I "$ROOT/tests/trace_fixture.py" plugin-join "$T/pj.trace"
 mkp() {   # mkp <name> <trace kind> <plugin kind> <counters>
@@ -275,8 +310,33 @@ mkp() {   # mkp <name> <trace kind> <plugin kind> <counters>
 mkp join ab join "swaps_h0 80
 M5"
 out=$(run join)
-has "$out" "join: head 0 back 0x8b100000 = IOSurface 101 (80 swaps, 80 with pixels): plugin DRAWN 40, published 40 (dirty 40, copy-out 0)" triage-join
+has "$out" "join: head 0 back 0x8b100000 = IOSurface 101 (80 swaps, 40 in mode 1 / 40 in mode 0 of the A/B, 80 with pixels, 0 EMPTY): plugin DRAWN 40, published 40 (dirty 40, copy-out 0)" triage-join
 has "$out" "plugin trace WindowServer[158] (opened 2026-10-18 08:00:00 UTC)" triage-join
+# ECC review round 3: the archive's final copy wrapped (only surface 103), the A/B snapshot next to the report
+# still holds 101: merged, the join keeps the plugin's verdict
+mkp merge ab late "swaps_h0 80
+M5"
+python3 -I "$ROOT/tests/trace_fixture.py" plugin-join "$T/merge/rdna3-report-x-20261017-120000-plugin-ab1-WindowServer-158.trace"
+out=$(run merge)
+has "$out" "IOSurface 101 (80 swaps, 40 in mode 1 / 40 in mode 0 of the A/B, 80 with pixels, 0 EMPTY): plugin DRAWN 40" triage-merge
+has "$out" "(2 copies merged)" triage-merge
+# backs with IOSurface ids but no plugin trace at all (and no M5 line): MISSING, the join has no verdict
+mk nojoinplugin ab "swaps_h0 80" "" stream
+out=$(run nojoinplugin)
+has "$out" "WARN plugin trace MISSING (collect_plugin_trace.sh did not run (no 31-plugin-trace/ and no 37-plugin-trace-collect.txt)) - the join lines below carry no plugin verdict" triage-nojoinplugin
+# a back the plugin never saw although its trace covers the A/B, with empty swaps: WARN
+python3 -I "$ROOT/tests/trace_fixture.py" b2 "$T/b2j.bin"
+out=$(python3 -I - "$ROOT/tools" "$T/b2j.bin" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import rdna3_trace as r
+t = r.load([sys.argv[2]])
+for lv, x in r.join_lines(t, {101: "DRAWN 40"}, True):
+    print(lv, x)
+PY
+)
+has "$out" "WARN join: head 0 back 0x8b8f0000 = IOSurface 102 (40 swaps, 0 with pixels, 40 EMPTY): plugin NEVER saw this IOSurface although its trace covers the A/B" join-never
+has "$out" "INFO join: head 0 back 0x8b100000 = IOSurface 101" join-never
 # a wrapped plugin ring that does not cover the A/B
 mkp wrap ab wrap "swaps_h0 80
 M5"
