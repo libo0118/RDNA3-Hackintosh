@@ -28,7 +28,18 @@ for f in "$@"; do
         clang++ $(echo "$COMMON" | sed 's/-Wextra -Werror//') -std=gnu++17 -fapple-kext -fno-rtti \
             -fno-exceptions -fno-builtin -fno-common -Wno-inconsistent-missing-override \
             -Wno-unused-function -Wno-unused-variable -Wno-deprecated-declarations "$f" 2>&1 |
-            grep -E "error" && rc=1 ;;
+            grep -E "error" && rc=1
+        # the flip-present hooks' base calls at their measured vtable slots (ECC review round 1)
+        case "$f" in
+        */rdna3-accel.cpp)
+            asm=$(mktemp)
+            clang++ $(echo "$COMMON" | sed 's/-Wextra -Werror//; s/-fsyntax-only/-S/') -o "$asm" -std=gnu++17 \
+                -fapple-kext -fno-rtti -fno-exceptions -fno-builtin -fno-common \
+                -Wno-inconsistent-missing-override -Wno-unused-function -Wno-unused-variable \
+                -Wno-deprecated-declarations "$f" >/dev/null 2>&1 || true
+            python3 "$ROOT/tools/check_accel_slots.py" "$asm" || rc=1
+            rm -f "$asm" ;;
+        esac ;;
     *.cpp) clang++ $COMMON -std=gnu++17 -fapple-kext -fno-rtti -fno-exceptions \
                -Wno-inconsistent-missing-override -Wno-deprecated-declarations "$f" || rc=1 ;;
     *.c)   clang $COMMON -std=gnu11 "$f" || rc=1 ;;

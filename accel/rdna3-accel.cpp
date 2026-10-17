@@ -19,6 +19,7 @@
 #include "../common/rdna3_flip_latch.h"
 #include "../common/rdna3_swap_copy.h"
 #include "../common/rdna3_trace.h"
+#include "../common/rdna3_write_gen.h"
 #include <mach/mach_time.h>
 #include <sys/kauth.h>
 #include <sys/random.h>
@@ -81,9 +82,15 @@ void                      rd3AccelTraceSync(const void *surf, unsigned what, uns
                                             unsigned long long v1);
 static void               rd3AccelTraceMode(unsigned arg);
 static void               rd3AccelScModeChanged(void);
-static void               rd3AccelScPanelMoved(unsigned head, const char *why, uint64_t issuedAt);
+static void               rd3AccelScPanelMoved(unsigned head, const char *why, uint64_t issuedAt, bool foreign);
 static void               rd3AccelScFrontGone(const void *vm);
 static void               rd3AccelScStaleReset(unsigned head, const char *why);
+/* the write generations (card run 2026-10-17d, rdna3_write_gen.h): a write into a buffer (the family's page-on,
+ * a copy forward's target), a freed buffer, a head whose panel moved without a swap */
+enum { kWgAperture = 0, kWgApertureDesc = 1, kWgCf = 2, kWgApCached = 3 };
+static void               rd3AccelWgWrite(const void *res, unsigned why);
+static void               rd3AccelWgFreed(unsigned long long phys);
+static void               rd3AccelWgHeadReset(unsigned head, const char *why);
 /* APERTURE's v2: the path (getApertureMemoryDescriptor's every return, ECC review round 1) */
 enum { kApWhyNew = 0, kApWhyGate = 1, kApWhyCached = 2, kApWhyNoVram = 3, kApWhyRange = 4 };
 static void               rd3AccelTraceAperture(const void *res, unsigned what, bool ok, unsigned why,
@@ -282,6 +289,10 @@ static IOSimpleLock *volatile gCfPendLock;
 /* guards gScStale (the stale back, 2026-10-17c): the swaps and copy
  * forward under the family's lock, the free paths on any thread */
 static IOSimpleLock *volatile gScStaleLock;
+/* guards the write generations (gWg, gWgHead: card run 2026-10-17d): the
+ * page-on path and the VRAM free path on any thread, the swaps, copy
+ * forward and the flip-buffer hooks */
+static IOSimpleLock *volatile gWgLock;
 enum { kA3DispSlots = 4 * 4 };   /* 4 * kRd3MaxFB: every head's compositing surfaces */
 struct RD3A3Disp { unsigned surfaceID, heads; unsigned long long phys; const void *vm; };
 static RD3A3Disp gA3Disp[kA3DispSlots];
@@ -339,6 +350,22 @@ static int gSwapLanded = 0;
  * copies it as before and only counts (swaps_stalehold_would_h<N>) and
  * traces (SWAP v1 bit 24) what it would have held */
 static int gSwapStale = 1;
+/* debug.rdna3accel_swap_gen / boot-arg rdna3swapgen (card run 2026-10-17d,
+ * rdna3_write_gen.h): 1 (the default) modes 0 and 1 present a back only
+ * when WindowServer wrote it (the family's page-on, a copy forward into it)
+ * after the frame the head shows, and copy forward takes the front as its
+ * source when it was written after that frame; 0 only counts
+ * (swaps_genhold_would_h<N>) and traces (SWAP v1 bit 26) what it would have
+ * held. Mode 2 (the copy-everything control) never holds. */
+static int gSwapGen = 1;
+/* debug.rdna3accel_flipbuf_present / boot-arg rdna3flipbufpresent (card
+ * run 2026-10-17d): IOAccelLegacyDisplayPipe::submitFlipBuffer and
+ * submitScanoutFlipBuffer (the family's other present path, the copy
+ * forward bursts with no swap) are always traced, counted and forwarded to
+ * the family; 1 also presents their buffer as the swap mode does (copy
+ * into D / home in mode 1, flip in mode 0) with the latch wait and the
+ * write generations; 0 (the default) only traces */
+static int gFlipbufPresent = 0;
 static struct thread_call *gTrDumpCall;
 static volatile UInt32 gTrDumpBusy;
 static uint64_t gTrDumpFrom, gTrDumpTo;
@@ -574,6 +601,12 @@ class IOAccelRDNA3Carrier : public IOService {
 };
 OSDefineMetaClassAndStructors(IOAccelRDNA3Carrier, IOService)
 
+/* the thread that holds the family's lock, as the family's own lock path
+ * tells (acceleratorDidLock / acceleratorWillUnlock, card run 2026-10-17d):
+ * a flip-buffer present (debug.rdna3accel_flipbuf_present=1) runs only under
+ * that lock - its own thread's, or taken when nobody holds it. Compared
+ * with current_thread() only, never followed. */
+static void *volatile gFamOwner;
 class RDNA3Accelerator : public IOGraphicsAccelerator2 {
     OSDeclareDefaultStructors(RDNA3Accelerator)
     NM_TAHOE_FWD(RDNA3Accelerator)
@@ -581,6 +614,14 @@ class RDNA3Accelerator : public IOGraphicsAccelerator2 {
     unsigned            fCarrierNext = 0;
     unsigned            fCarrierLogged = 0;
 public:
+    void acceleratorDidLock(char const *fn, int line) APPLE_KEXT_OVERRIDE {
+        IOGraphicsAccelerator2::acceleratorDidLock(fn, line);
+        gFamOwner = (void *)current_thread();
+    }
+    void acceleratorWillUnlock(char const *fn, int line) APPLE_KEXT_OVERRIDE {
+        gFamOwner = nullptr;   /* a nested unlock clears it too: a present then waits for the next time (safe) */
+        IOGraphicsAccelerator2::acceleratorWillUnlock(fn, line);
+    }
     IOBufferMemoryDescriptor *fStamps = nullptr; IORangeAllocator *fRanges[32] = {};
     uint64_t  getStampMemory(unsigned int *p) APPLE_KEXT_OVERRIDE {
         if (!fStamps) { fStamps = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | kIOMemoryPhysicallyContiguous, 16384, 4096); if (fStamps) { fStamps->prepare(); bzero(fStamps->getBytesNoCopy(), 16384); } }
@@ -978,6 +1019,18 @@ public:
              gSwapLanded ? "1 = modes 1/2 present the buffer WindowServer's frame landed in instead of an empty / "
                            "stale back"
                          : "0 = only counted and traced (swaps_copylanded_would_h<N>), the back's old rule stands");
+        gSwapGen = rd3_arg("rdna3swapgen", 1) ? 1 : 0;
+        ALOG("swap gen: %s (card run 2026-10-17d; boot-arg rdna3swapgen, sysctl debug.rdna3accel_swap_gen)",
+             gSwapGen ? "1 = modes 0 and 1 present a back only when WindowServer wrote it (page-on, copy forward) "
+                        "after the head's frame, else hold it (swaps_genhold_h<N>); copy forward takes such a "
+                        "front as its source (cf_gennewer_h<N>)"
+                      : "0 = only counted and traced (swaps_genhold_would_h<N>), the backs presented as before");
+        gFlipbufPresent = rd3_arg("rdna3flipbufpresent", 0) ? 1 : 0;
+        ALOG("flipbuf present: %s (card run 2026-10-17d; boot-arg rdna3flipbufpresent, sysctl "
+             "debug.rdna3accel_flipbuf_present)",
+             gFlipbufPresent ? "1 = IOAccelLegacyDisplayPipe::submitFlipBuffer / submitScanoutFlipBuffer present "
+                               "their buffer as the swap mode does (flipbuf_presented_h<N>)"
+                             : "0 = the flip-buffer calls are traced, counted (flipbuf_h<N>) and forwarded only");
         gSwapStale = rd3_arg("rdna3swapstale", 1) ? 1 : 0;
         ALOG("swap stale: %s (card run 2026-10-17c; boot-arg rdna3swapstale, sysctl debug.rdna3accel_swap_stale)",
              gSwapStale ? "1 = mode 1 holds a back WindowServer did not redraw since the head presented it "
@@ -1177,6 +1230,7 @@ bool RD3Resource::addToAperture()
              m, m ? m->fPhys : 0ull, m ? m->fBytes : 0ull); }
     const bool ok = m && m->fPhys && m->fBytes;
     rd3AccelTraceAperture(this, 1, ok, ok ? kApWhyNew : kApWhyNoVram);   /* the family's CPU access: its page-on (card run 2026-10-17b) */
+    if (ok) rd3AccelWgWrite(this, kWgAperture);   /* WindowServer writes it now (card run 2026-10-17d) */
     return ok;
 }
 
@@ -1197,6 +1251,7 @@ void *RD3Resource::getApertureMemoryDescriptor(unsigned long long *a0)
          * first 4 per resource traced, then every 256th (v3 the count) */
         const unsigned c = ++fApCached;
         if (c <= 4 || (c & 255) == 0) rd3AccelTraceAperture(this, 2, true, kApWhyCached, c);
+        rd3AccelWgWrite(this, kWgApCached);   /* the page-on's descriptor: a write follows (2026-10-17d; counted apart) */
         return fApDesc;
     }
     RD3VidMemory *m = rd3res_vidmem(this);
@@ -1211,6 +1266,7 @@ void *RD3Resource::getApertureMemoryDescriptor(unsigned long long *a0)
                    m->fPhys, m->fBytes); rd3AccelTraceAperture(this, 2, false, kApWhyRange); return nullptr; }
     fApDesc = d;
     rd3AccelTraceAperture(this, 2, true, kApWhyNew);
+    rd3AccelWgWrite(this, kWgApertureDesc);
     if (fApLogged < 8) { fApLogged++;
         ALOG("RD3Resource::getApertureMemoryDescriptor -> %p over BAR1 phys 0x%llx (%llu bytes), offset 0",
              d, m->fPhys, m->fBytes); }
@@ -2666,6 +2722,7 @@ static bool rd3AccelLocksInit(void)
     return rd3SimpleLockOnce(&gHeadFbResLock) && rd3SimpleLockOnce(&gNVSVPendLock) &&
            rd3SimpleLockOnce(&gIopFlipCacheLock) && rd3LockOnce(&gNVSVStageLock) &&
            rd3SimpleLockOnce(&gA3DispLock) && rd3SimpleLockOnce(&gCfPendLock) && rd3SimpleLockOnce(&gScStaleLock) &&
+           rd3SimpleLockOnce(&gWgLock) &&
            rd3SurfCloseLockOnce() && (rd3TraceInit() || true);   /* no trace memory: the driver runs without it */
 }
 
@@ -2693,7 +2750,7 @@ static void rd3AccelIopAsyncRun(void *p0, void *)
     if (sym) sym->release();
     if (rr == kIOReturnSuccess) {
         gIopAsyncRefuseRun = 0;
-        rd3AccelScPanelMoved(head, "an IOP flip", issued);
+        rd3AccelScPanelMoved(head, "an IOP flip", issued, true);
         if (gIopFlipPrev[head]) ((OSObject *)gIopFlipPrev[head])->release();
         gIopFlipPrev[head] = gIopFlipFront[head]; gIopFlipFront[head] = s; gIopFlipped[head] = true;
         const SInt64 n = OSAddAtomic64(1, &gCntIopFlip); OSAddAtomic64(1, &gCntIopAsync);
@@ -2781,7 +2838,7 @@ static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pi
         return rd3AccelIopFlipNo(7);
     }
     ((OSObject *)s)->retain();
-    rd3AccelScPanelMoved(head, "an IOP flip", issued);
+    rd3AccelScPanelMoved(head, "an IOP flip", issued, true);
     if (gIopFlipPrev[head]) ((OSObject *)gIopFlipPrev[head])->release();
     gIopFlipPrev[head] = gIopFlipFront[head]; gIopFlipFront[head] = s; gIopFlipped[head] = true;
     const SInt64 n = OSAddAtomic64(1, &gCntIopFlip);
@@ -2813,7 +2870,7 @@ static void rd3AccelIopHome(IOService *fb, unsigned head)
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
     OSAddAtomic64(1, &gCntIopFlipHome);
-    if (rr == kIOReturnSuccess) rd3AccelScPanelMoved(head, "an IOP flip home", issued);   /* only a flip that was done (round 2) */
+    if (rr == kIOReturnSuccess) rd3AccelScPanelMoved(head, "an IOP flip home", issued, true);   /* only a flip that was done (round 2) */
     if (rr != kIOReturnSuccess && gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: HOME flip refused (0x%x) head %u", (unsigned)rr, head); }
     gIopFlipped[head] = false;
 }
@@ -3738,6 +3795,9 @@ void rd3AccelSurfaceGone(const void *surf)
                 gSwapEmptyRun[h] = 0;
                 rd3AccelForgetShown(h);       /* what it showed is no source for the next surface */
                 rd3AccelScStaleReset(h, "its surface was freed");   /* its backs' records go with it */
+                /* the next surface's first swap presents (the write generations: its buffers may be drawn by
+                 * WindowServer before any page-on of ours is seen) */
+                rd3AccelWgHeadReset(h, "its swapping surface was freed");
             }
         }
 }
@@ -4055,10 +4115,12 @@ static void rd3AccelScModeChanged(void)
     const uint64_t at = mach_absolute_time();
     for (unsigned h = 0; h < kRd3MaxFB; h++) rd3AccelScPost(h, kScPostModeSet, at);
 }
-static void rd3AccelScPanelMoved(unsigned head, const char *why, uint64_t issuedAt)
+static void rd3AccelScPanelMoved(unsigned head, const char *why, uint64_t issuedAt, bool foreign)
 {
-    (void)why;
     rd3AccelScPost(head, kScPostAway, issuedAt);   /* not D (a copy into D is safe once this flip latched) */
+    /* someone else's picture on the panel (an IOP surface): the head's next swap presents whatever it holds
+     * (the write generations, rdna3_write_gen.h); a mode 0 flip of the swaps' own is no such move */
+    if (foreign) rd3AccelWgHeadReset(head, why);
 }
 /* under the family's lock: what moved the panels since the last holder;
  * a post older than the head's own last flip is stale (it was in flight
@@ -4085,6 +4147,7 @@ static void rd3AccelScApply(unsigned head)
         S.scanoutFrame = false;
         S.homePhys = 0;            /* the new mode's home is learned at the next copy (ECC review round 2) */
         rd3AccelScStaleReset(head, "a display mode change");
+        rd3AccelWgHeadReset(head, "a display mode change");
         rd3AccelScLatchEvent(head, rd3_latch_rearm(&S.lat), "a display mode change re-armed them");
     } else if (what == kScPostAway) {
         S.shows = RD3_SCS_OTHER;
@@ -4232,6 +4295,241 @@ static void rd3AccelScStaleWhy(unsigned head, enum rd3_sc_stale_why why, int noc
         ALOG("swap #%u: head %u: the back 0x%llx changed since it was shown at swap #%u although no copy forward "
              "targeted it -- copied (WindowServer redrew a back without copy forward: the stale-back rule's "
              "assumption; %lld such)", n, head, phys, at, (long long)k + 1);
+}
+
+/* ---- the write generations (card run 2026-10-17d, rdna3_write_gen.h) ----
+ * Evidence-driven, no amdgpu analogue (macOS legacy surface semantics). One
+ * table of buffer addresses and the generation of their last write (the
+ * family's page-on: addToAperture / getApertureMemoryDescriptor; a copy
+ * forward's target, when the copy went through) and each head's last
+ * presented frame, all under gWgLock, a spinlock held for the table
+ * operations alone (no logs, no BAR reads, no sleep under it). A swap
+ * presents its back only when it was written after the head's frame;
+ * otherwise mode 1 first presents the surface's buffer written after that
+ * frame, if one is (rd3_wg_landed_pick), and else holds: the panel keeps its
+ * frame. A hold never freezes the panel: after 250 ms and 3 holds in a row,
+ * or while a newer generation was evicted, the back presents (ECC review
+ * round 1). Every judged swap is counted per head so that
+ *   swaps_gen_judged = swaps_genpresent + swaps_genhold + swaps_genhold_would + swaps_gen_landed
+ * and the swaps not judged too (swaps_gennotjudged_h<N>), traced (SWAP v1
+ * bits 25-31, v2 >> 16), the first ones of each kind logged. */
+static struct rd3_wg gWg;
+static struct rd3_wg_head gWgHead[kRd3MaxFB];
+static SInt64 gCntWgAperture, gCntWgApCached, gCntWgCf, gCntWgCfNoStamp, gCntWgEvicted, gCntWgFreed, gCntWgResets;
+static SInt64 gCntWgPresent[kRd3MaxFB], gCntWgHold[kRd3MaxFB], gCntWgWould[kRd3MaxFB], gCntWgFirst[kRd3MaxFB];
+static SInt64 gCntWgContent[kRd3MaxFB], gCntWgUnwritten[kRd3MaxFB], gCntCfGenNewer[kRd3MaxFB];
+static SInt64 gCntWgJudged[kRd3MaxFB], gCntWgAged[kRd3MaxFB], gCntWgEvictPresent[kRd3MaxFB], gCntWgLanded[kRd3MaxFB];
+static SInt64 gCntWgNotJudged[kRd3MaxFB], gCntWgResetsH[kRd3MaxFB];
+static unsigned gWgHoldLogs[kRd3MaxFB], gWgPresentLogs[kRd3MaxFB], gWgWouldLogs[kRd3MaxFB], gWgGuardLogs[kRd3MaxFB];
+static unsigned gWgLandedLogs[kRd3MaxFB], gWgNotJudgedLogs[kRd3MaxFB];
+/* each head's last swapping surface and when it swapped (compare-only: never followed) - a reset only when another
+ * surface takes over after the last one went quiet (ECC review round 1: surfaces taking turns must not reset) */
+static const void *volatile gWgSurf[kRd3MaxFB];
+static uint64_t gWgSurfAbs[kRd3MaxFB];
+#define RD3_WG_SURF_QUIET_US 500000ull
+static const char *const kWgWhy[RD3_WGW_MAX + 1] = {
+    "not judged", "written after the head's last frame", "the first swap since the head's reset",
+    "NOT written since, but its samples changed since this head presented it (a writer the accelerator does not see)",
+    "the buffer the panel shows, not written since", "written before the head's last frame",
+    "never written (no page-on, no copy forward into it) and never presented on this head",
+    "the AGE GUARD: no present for 250 ms and 3 holds in a row (a hold never freezes the panel)",
+    "the EVICTION GUARD: no generation, and a newer one was evicted from the full table (it may be this one)" };
+static unsigned long long rd3AccelWgBumpPhys(unsigned long long phys, unsigned why)
+{
+    if (!phys || !gWgLock) return 0;
+    unsigned long long ev = 0;
+    IOSimpleLockLock(gWgLock);
+    const unsigned long long g = rd3_wg_bump(&gWg, phys, &ev);
+    IOSimpleLockUnlock(gWgLock);
+    OSAddAtomic64(1, why == kWgCf ? &gCntWgCf : why == kWgApCached ? &gCntWgApCached : &gCntWgAperture);
+    if (ev) {
+        const SInt64 k = OSAddAtomic64(1, &gCntWgEvicted);
+        if (rd3_log_due((uint64_t)k, 8, 1023))
+            ALOG("write generations: the table is full (%u buffers): 0x%llx's generation evicted for 0x%llx -- "
+                 "0x%llx reads 'never written' until its next write; while its generation is newer than a head's "
+                 "frame a swap of a buffer without one presents (the eviction guard) (%lld such)",
+                 RD3_WG_SLOTS, ev, phys, ev, (long long)k + 1);
+    }
+    return g;
+}
+/* a write into a resource's VRAM ('why': kWgAperture, kWgApertureDesc, kWgApCached, kWgCf); any thread */
+static void rd3AccelWgWrite(const void *res, unsigned why)
+{
+    const RD3VidMemory *m = rd3res_vidmem((IOAccelResource2 *)res);
+    if (m && m->fPhys) (void)rd3AccelWgBumpPhys(m->fPhys, why);
+}
+static unsigned long long rd3AccelWgGen(unsigned long long phys)
+{
+    if (!phys || !gWgLock) return 0;
+    IOSimpleLockLock(gWgLock);
+    const unsigned long long g = rd3_wg_gen(&gWg, phys);
+    IOSimpleLockUnlock(gWgLock);
+    return g;
+}
+static unsigned long long rd3AccelWgHeadGen(unsigned head)
+{
+    if (head >= kRd3MaxFB || !gWgLock) return 0;
+    IOSimpleLockLock(gWgLock);
+    const unsigned long long g = gWgHead[head].gen;
+    IOSimpleLockUnlock(gWgLock);
+    return g;
+}
+/* the VRAM at 'phys' was freed (any thread): its generation and every head's samples of it go */
+static void rd3AccelWgFreed(unsigned long long phys)
+{
+    if (!phys || !gWgLock) return;
+    IOSimpleLockLock(gWgLock);
+    int had = rd3_wg_forget(&gWg, phys);
+    for (unsigned h = 0; h < kRd3MaxFB; h++) had |= rd3_wg_head_forget(&gWgHead[h], phys);
+    IOSimpleLockUnlock(gWgLock);
+    if (had) OSAddAtomic64(1, &gCntWgFreed);
+}
+/* the head's panel moved without a swap: its next swap presents (any thread) */
+static unsigned gWgResetLogs;
+static void rd3AccelWgHeadReset(unsigned head, const char *why)
+{
+    if (head >= kRd3MaxFB || !gWgLock) return;
+    IOSimpleLockLock(gWgLock);
+    const int had = rd3_wg_head_reset(&gWgHead[head]);
+    IOSimpleLockUnlock(gWgLock);
+    if (!had) return;
+    OSAddAtomic64(1, &gCntWgResetsH[head]);
+    const SInt64 k = OSAddAtomic64(1, &gCntWgResets);
+    if (rd3_log_due((uint64_t)k, 8, 1023))
+        ALOG("write generations: head %u reset (%s) -- its next swap presents whatever its back holds (%lld resets)",
+             head, why, (long long)k + 1);
+}
+/* a swap of 'surf' on the head: another surface taking over after the last one was quiet for 500 ms resets the
+ * head (its buffers' writes were never compared with this head's frame); surfaces taking turns do not */
+static void rd3AccelWgSurfSwap(unsigned head, const void *surf)
+{
+    if (head >= kRd3MaxFB || !surf) return;
+    const void *prev = gWgSurf[head];
+    if (prev && prev != surf && rd3AccelUsSince(gWgSurfAbs[head]) > RD3_WG_SURF_QUIET_US)
+        rd3AccelWgHeadReset(head, "another surface swaps on the head, the last one quiet for 500 ms");
+    gWgSurf[head] = surf;
+    gWgSurfAbs[head] = mach_absolute_time();
+}
+/* the rule on the back at 'phys' for the head: why, and its generation and
+ * the head's (for the trace and the log) */
+static enum rd3_wg_why rd3AccelWgDecide(unsigned head, unsigned long long phys, bool sampled,
+                                        unsigned long long sig, unsigned long long *gen, unsigned long long *headGen)
+{
+    *gen = 0;
+    *headGen = 0;
+    if (head >= kRd3MaxFB || !gWgLock || !phys) return RD3_WGW_OFF;
+    const unsigned long long now = rd3AccelUsNow();
+    IOSimpleLockLock(gWgLock);
+    *gen = rd3_wg_gen(&gWg, phys);
+    *headGen = gWgHead[head].gen;
+    const enum rd3_wg_why w = rd3_wg_decide(&gWgHead[head], phys, *gen, sampled ? 1 : 0, sig, gWg.evictedMax, now);
+    IOSimpleLockUnlock(gWgLock);
+    return w;
+}
+/* the head presented the buffer at 'phys' with generation 'gen' (as captured at the decision: a write between the
+ * decision and the copy is not this frame's) and its samples */
+static void rd3AccelWgPresented(unsigned head, unsigned long long phys, unsigned long long gen, bool sampled,
+                                unsigned long long sig)
+{
+    if (head >= kRd3MaxFB || !gWgLock || !phys) return;
+    const unsigned long long now = rd3AccelUsNow();
+    IOSimpleLockLock(gWgLock);
+    rd3_wg_presented(&gWgHead[head], phys, gen, sampled ? 1 : 0, sig, now);
+    IOSimpleLockUnlock(gWgLock);
+}
+/* a swap the rule could not judge (no head known at its entry, no VRAM address): counted, the first logged */
+static void rd3AccelWgNotJudged(unsigned head, unsigned n, const char *why)
+{
+    if (head >= kRd3MaxFB) return;
+    const SInt64 k = OSAddAtomic64(1, &gCntWgNotJudged[head]);
+    if (rd3_log_due(gWgNotJudgedLogs[head]++, 8, 1023))
+        ALOG("swap #%u: head %u: the write generations did not judge this swap: %s -- presented as before (%lld "
+             "such; debug.rdna3accel_swaps_gennotjudged_h%u)", n, head, why, (long long)k + 1, head);
+}
+/* mode 1, before a hold: the surface's buffer written after the head's frame (the newest), not the back nor the
+ * head's framebuffer resource - WindowServer's frame in a buffer the swap did not name. Its array index and
+ * generation; nullptr none. bufs are the swapping surface's own (live through the family's lock). */
+static IOAccelResource2 *rd3AccelWgLanded(unsigned head, IOAccelResource2 *back, IOAccelResource2 *fbRes,
+                                          IOAccelResource2 *const *bufs, unsigned nbufs, unsigned long long headGen,
+                                          unsigned *idx, unsigned long long *gen)
+{
+    enum { kMax = 8 };   /* a display surface has 2-3 buffers; the rest is not searched (kernel stack) */
+    unsigned long long g[kMax];
+    IOAccelResource2 *r[kMax];
+    unsigned n = 0;
+    for (unsigned i = 0; bufs && i < nbufs && i < kMax; i++) {
+        r[i] = OSDynamicCast(IOAccelResource2, (OSObject *)bufs[i]);
+        g[i] = r[i] && r[i] != back && r[i] != fbRes ? rd3AccelWgGen(rd3res_phys(r[i])) : 0;
+        n = i + 1;
+    }
+    const int pk = rd3_wg_landed_pick(g, n, headGen);
+    if (pk < 0) return nullptr;
+    *idx = (unsigned)pk;
+    *gen = g[pk];
+    (void)head;
+    return r[pk];
+}
+/* the decision's counters, trace bits and log lines. 'apply': the rule
+ * acts (swap_gen 1, modes 0 and 1); 'landPhys' / 'landGen': mode 1's
+ * newer buffer of the surface presented instead of a hold (0: none);
+ * returns true when the swap holds */
+static bool rd3AccelWgNote(unsigned head, enum rd3_wg_why why, bool apply, unsigned n, unsigned long long phys,
+                           unsigned long long gen, unsigned long long headGen, const char *what,
+                           unsigned long long landPhys, unsigned long long landGen, struct rd3_trace_ev *tr)
+{
+    if (why == RD3_WGW_OFF || head >= kRd3MaxFB) return false;
+    OSAddAtomic64(1, &gCntWgJudged[head]);
+    tr->v1 |= ((unsigned)why & RD3_TRV1_GEN_WHY_MASK) << RD3_TRV1_GEN_WHY_SHIFT;
+    tr->v2 = (tr->v2 & 0xffffu) | (rd3_wg_gen16(gen) << 16);
+    if (rd3_wg_presents(why)) {
+        const SInt64 k = OSAddAtomic64(1, &gCntWgPresent[head]);
+        if (why == RD3_WGW_FIRST) OSAddAtomic64(1, &gCntWgFirst[head]);
+        if (why == RD3_WGW_CONTENT || why == RD3_WGW_AGED || why == RD3_WGW_EVICTED) {
+            SInt64 *const c = why == RD3_WGW_CONTENT ? &gCntWgContent[head]
+                            : why == RD3_WGW_AGED ? &gCntWgAged[head] : &gCntWgEvictPresent[head];
+            const SInt64 kc = OSAddAtomic64(1, c);
+            if (rd3_log_due(gWgGuardLogs[head]++, 16, 1023))
+                ALOG("swap #%u: head %u: %s 0x%llx presented by a guard: %s (generation %llu, the head's %llu; %lld "
+                     "such of this guard)", n, head, what, phys, kWgWhy[why], gen, headGen, (long long)kc + 1);
+        } else if (rd3_log_due(gWgPresentLogs[head]++, 8, 4095)) {
+            ALOG("swap #%u: head %u: %s 0x%llx presented: %s (generation %llu, the head's %llu; %lld such)", n, head,
+                 what, phys, kWgWhy[why], gen, headGen, (long long)k + 1);
+        }
+        return false;
+    }
+    if (why == RD3_WGW_UNWRITTEN) OSAddAtomic64(1, &gCntWgUnwritten[head]);
+    if (!apply) {
+        tr->v1 |= RD3_TRV1_GEN_WOULD;
+        const SInt64 k = OSAddAtomic64(1, &gCntWgWould[head]);
+        if (rd3_log_due(gWgWouldLogs[head]++, 8, 1023))
+            ALOG("swap #%u: head %u: would hold %s 0x%llx: %s (generation %llu, the head's %llu) -- %s, so it goes on "
+                 "as before (%lld such)", n, head, what, phys, kWgWhy[why], gen, headGen,
+                 gSwapGen ? "swap mode 2 (the copy-everything control)" : "debug.rdna3accel_swap_gen=0",
+                 (long long)k + 1);
+        return false;
+    }
+    if (landPhys) {
+        const SInt64 k = OSAddAtomic64(1, &gCntWgLanded[head]);
+        if (rd3_log_due(gWgLandedLogs[head]++, 8, 1023))
+            ALOG("swap #%u: head %u: %s 0x%llx would be held (%s) -- the surface's buffer 0x%llx, written after the "
+                 "head's frame (generation %llu, the head's %llu), presented instead (%lld such; "
+                 "debug.rdna3accel_swaps_gen_landed_h%u)", n, head, what, phys, kWgWhy[why], landPhys, landGen,
+                 headGen, (long long)k + 1, head);
+        return false;
+    }
+    tr->v1 |= RD3_TRV1_GEN_HOLD;
+    tr->arg = RD3_TRS_HOLD;
+    tr->v3 = (uint32_t)headGen;
+    if (gWgLock) {
+        IOSimpleLockLock(gWgLock);
+        rd3_wg_held(&gWgHead[head]);   /* the run the age guard counts */
+        IOSimpleLockUnlock(gWgLock);
+    }
+    const SInt64 k = OSAddAtomic64(1, &gCntWgHold[head]);
+    if (rd3_log_due(gWgHoldLogs[head]++, 8, 1023))
+        ALOG("swap #%u: head %u: %s 0x%llx held: %s (generation %llu, the head's %llu) -- no flip, no copy, the panel "
+             "keeps its frame (%lld such)", n, head, what, phys, kWgWhy[why], gen, headGen, (long long)k + 1);
+    return true;
 }
 
 /* the 8 x 8 samples of a buffer (rd3AccelResContent's grid), all of them:
@@ -4730,6 +5028,10 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     if (a1) rd3AccelTraceSurfRes(a1, rd3AccelResSurfaceId(a1), 1, 3, p1, v1 ? v1->fBytes : 0, true);
     if (a2) rd3AccelTraceSurfRes(a2, rd3AccelResSurfaceId(a2), 2, 3, p2, v2 ? v2->fBytes : 0, true);
     const unsigned knownHead = frontHead < kRd3MaxFB ? frontHead : rd3AccelSurfKnownHead(surf);
+    /* another surface takes the head over after the last one went quiet: its buffers' writes were never compared
+     * with this head's frame - the write generations start over (the first swap presents); surfaces taking turns
+     * keep the head's record (ECC review round 1) */
+    if (knownHead < kRd3MaxFB) rd3AccelWgSurfSwap(knownHead, surf);
     bool brkFlip = false;
     if (mode != RD3_SWAPMODE_FLIP) {
         enum rd3_sc_brk_ev bev;
@@ -4762,6 +5064,50 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
         IOAccelResource2 *back = roles.back == 2 ? a2 : a1, *frontRes = roles.front == 1 ? a1 : a2;
         const RD3Scan &sb = roles.back == 2 ? s2 : s1, &sf = roles.front == 1 ? s1 : s2;
         const int chb = roles.back == 2 ? ch2 : ch1;
+        /* the write generations (card run 2026-10-17d, rdna3_write_gen.h): a back WindowServer did not write
+         * (page-on, copy forward) after the head's frame is held - no copy into D / home, no front copy, the
+         * panel keeps its frame (the stale buf[2] a copy forward burst left); mode 2, the copy-everything
+         * control, and debug.rdna3accel_swap_gen=0 only count it. Before a hold, the surface's buffer written
+         * after the head's frame, if one has pixels, is presented instead (ECC review round 1: WindowServer's
+         * frame in a buffer the swap did not name) */
+        bool wgJudged = false;
+        unsigned long long wgGen = 0, wgLandGen = 0;
+        IOAccelResource2 *wgLand = nullptr;
+        unsigned wgLandIdx = 0xff;
+        RD3Scan wgLandScan;
+        if (knownHead < kRd3MaxFB) {
+            unsigned long long wgHead = 0;
+            const unsigned long long bp = rd3res_phys(back);
+            const enum rd3_wg_why wg = rd3AccelWgDecide(knownHead, bp, sb.rc >= kRcEmpty, sb.sig, &wgGen, &wgHead);
+            const bool apply = gSwapGen && mode == RD3_SWAPMODE_COPY;
+            wgJudged = wg != RD3_WGW_OFF;
+            if (!wgJudged) rd3AccelWgNotJudged(knownHead, n, "the back has no VRAM address");
+            if (apply && rd3_wg_holds(wg)) {
+                unsigned li = 0;
+                unsigned long long lg = 0;
+                IOAccelResource2 *l = rd3AccelWgLanded(knownHead, back, pipeRes[knownHead], bufs, nbufs, wgHead,
+                                                       &li, &lg);
+                if (l) {
+                    rd3AccelResScan(l, &wgLandScan);
+                    if (wgLandScan.rc == kRcPixels) {
+                        wgLand = l;
+                        wgLandIdx = li;
+                        wgLandGen = lg;
+                    }
+                }
+            }
+            if (rd3AccelWgNote(knownHead, wg, apply, n, bp, wgGen, wgHead,
+                               roles.back == 2 ? "the back (a2)" : "the back (a1)", wgLand ? rd3res_phys(wgLand) : 0,
+                               wgLandGen, &tr)) {
+                tr.pc = rd3AccelScExpect(knownHead);
+                if (sb.rc == kRcEmpty) tr.flags |= RD3_TRF_BACK_EMPTY;
+                rd3Trace(tr);
+                rd3AccelScanOthers(knownHead, surf, a1, a2, s1, s2, ch1, ch2, bufs, nbufs, n, false,
+                                   "the back was not written since the head's frame (held)");
+                rd3AccelTracePanel(knownHead, a->fFBs[knownHead], tr.pc);
+                return;
+            }
+        }
         const bool picture = sf.rc == kRcPixels || (knownHead < kRd3MaxFB && gSc[knownHead].scanoutFrame &&
                                                     gSc[knownHead].lastPixels);
         enum rd3_sc_act act = rd3_sc_action(mode, sb.rc >= kRcEmpty, sb.rc == kRcPixels, picture);
@@ -4775,7 +5121,15 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
         const RD3Scan *ss = &sb;
         unsigned landedIdx = 0xff;
         const unsigned backType = rd3AccelResType(back);
-        if (knownHead < kRd3MaxFB &&
+        if (wgLand) {
+            /* the write generations' landed buffer: the older content rule's search is not needed */
+            src = wgLand;
+            ss = &wgLandScan;
+            act = RD3_SC_COPY_LANDED;
+            landedIdx = wgLandIdx;
+            tr.v1 |= RD3_TRV1_LANDED;
+            tr.v4 |= (wgLandIdx & 0xffu) << 24;
+        } else if (knownHead < kRd3MaxFB &&
             rd3_sc_landed_wanted(mode, sb.rc >= kRcEmpty, sb.rc == kRcPixels, chb != 0, backType == 0xc0)) {
             othDone = true;
             IOAccelResource2 *l = rd3AccelLanded(knownHead, surf, a1, a2, back, s1, ch1, pipeRes[knownHead], bufs,
@@ -4894,7 +5248,8 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
             return;
         }
         if (staleNoHead) OSAddAtomic64(1, &gCntScStaleNoHead[head]);   /* no head known at the check: copied */
-        if (act == RD3_SC_COPY_LANDED) {
+        if (knownHead >= kRd3MaxFB) rd3AccelWgNotJudged(head, n, "no head known at the swap's entry (mode 1)");
+        if (act == RD3_SC_COPY_LANDED && !wgLand) {   /* the write generations' landed one is counted and logged */
             const SInt64 k = OSAddAtomic64(1, &gCntScLanded[head]);
             if (rd3_log_due((uint64_t)k, 8, 1023)) {
                 char where[24];
@@ -4928,6 +5283,12 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
             unsigned long long sig2 = 0;
             (void)rd3AccelResSig2(src, &sig2);   /* unreadable: 0, a later check then copies */
             rd3AccelScStaleShown(knownHead < kRd3MaxFB ? knownHead : head, rd3res_phys(src), ss->sig, sig2, n);
+            /* the head's frame now (the write generations), with the generation captured at the decision: a
+             * write between the decision and the copy is not this frame's (ECC review round 1) */
+            const unsigned long long sp = rd3res_phys(src);
+            const unsigned long long pg = src == wgLand ? wgLandGen
+                                        : wgJudged && src == back ? wgGen : rd3AccelWgGen(sp);
+            rd3AccelWgPresented(knownHead < kRd3MaxFB ? knownHead : head, sp, pg, ss->rc >= kRcEmpty, ss->sig);
         }
         rd3Trace(tr);
         rd3AccelScanOthers(head, surf, a1, a2, s1, s2, ch1, ch2, bufs, nbufs, n, sb.rc == kRcEmpty,
@@ -4963,6 +5324,29 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     }
     IOAccelResource2 *src = pick == RD3_SWAP_A2 ? a2 : a1;
     const bool emptyShown = (pick == RD3_SWAP_A2 ? rc2 : rc1) != kRcPixels;
+    const RD3Scan &ssrc = pick == RD3_SWAP_A2 ? s2 : s1;
+    /* the write generations (card run 2026-10-17d, rdna3_write_gen.h): mode 0 flips only to a back WindowServer
+     * wrote after the head's frame - never back to the stale buf[2] a copy forward burst left (17d: h0 flipped
+     * to 0x89040000 about once a second from 309 s on); debug.rdna3accel_swap_gen=0 only counts it */
+    bool wgJudged = false;
+    unsigned long long wgGen = 0;
+    if (knownHead < kRd3MaxFB) {
+        unsigned long long wgHead = 0;
+        const unsigned long long sp = rd3res_phys(src);
+        const enum rd3_wg_why wg = rd3AccelWgDecide(knownHead, sp, ssrc.rc >= kRcEmpty, ssrc.sig, &wgGen, &wgHead);
+        wgJudged = wg != RD3_WGW_OFF;
+        if (!wgJudged) rd3AccelWgNotJudged(knownHead, n, "the back has no VRAM address (mode 0)");
+        if (rd3AccelWgNote(knownHead, wg, gSwapGen != 0, n, sp, wgGen, wgHead,
+                           pick == RD3_SWAP_A2 ? "the back (a2)" : "the back (a1)", 0, 0, &tr)) {
+            tr.pc = gLatch[knownHead].phys;
+            if (emptyShown) tr.flags |= RD3_TRF_BACK_EMPTY;
+            rd3Trace(tr);
+            rd3AccelScanOthers(knownHead, surf, a1, a2, s1, s2, ch1, ch2, bufs, nbufs, n, false,
+                               "the back was not written since the head's frame (held, mode 0)");
+            rd3AccelTracePanel(knownHead, a->fFBs[knownHead], tr.pc);
+            return;
+        }
+    }
     if (frontHead < kRd3MaxFB) gSwapEmptyRun[frontHead] = 0;
     unsigned how = 0;
     const unsigned head = rd3AccelSwapRoute(a, surf, frontHead, v1, v2, n, p1, p2, front, src == a2, pipeRes, &how);
@@ -4973,6 +5357,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
         rd3Trace(tr);
         return;
     }
+    if (knownHead >= kRd3MaxFB) rd3AccelWgNotJudged(head, n, "no head known at the swap's entry (mode 0)");
     if (emptyShown) {
         tr.flags |= RD3_TRF_BACK_EMPTY;
         const SInt64 k = OSAddAtomic64(1, &gCntSwapEmptyShown[head]);
@@ -5007,7 +5392,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
         rd3Trace(fe);
     }
     if (flipped) {
-        rd3AccelScPanelMoved(head, "a mode 0 flip", issued);   /* the panel shows WindowServer's buffer, not D */
+        rd3AccelScPanelMoved(head, "a mode 0 flip", issued, false);   /* the panel shows WindowServer's buffer, not D */
         /* returns once the flip latched (debug.rdna3accel_swap_latch) */
         rd3AccelLatchFlipped(head, fb, src, phys, hashSkip ? nullptr : hash, hashSkip, cap, n);
         tr.arg = RD3_TRS_FLIP;
@@ -5026,6 +5411,10 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
         tr.arg = copied ? RD3_TRS_FLIP_COPIED : RD3_TRS_FLIP_FAILED;
         /* a copy into home is no flip: the panel stays where it was (ECC review round 2) */
     }
+    /* the head's frame now (the write generations): flipped to, or copied onto its scanout */
+    if (tr.arg == RD3_TRS_FLIP || tr.arg == RD3_TRS_FLIP_COPIED)
+        rd3AccelWgPresented(knownHead < kRd3MaxFB ? knownHead : head, phys, wgJudged ? wgGen : rd3AccelWgGen(phys),
+                            ssrc.rc >= kRcEmpty, ssrc.sig);
     rd3Trace(tr);
     rd3AccelScanOthers(head, surf, a1, a2, s1, s2, ch1, ch2, bufs, nbufs, n, emptyShown, "the back read empty (shown)");
     rd3AccelLatchSummary(head, gCntSwapHead[head]);
@@ -5114,6 +5503,7 @@ void rd3AccelVidmemGone(const void *vm)
     rd3AccelLatchVidmemGone(vm);
     rd3AccelScFrontGone(vm);
     if (vm) rd3AccelScStaleGone(((const RD3VidMemory *)vm)->fPhys);   /* still set: deallocPhysical calls first */
+    if (vm) rd3AccelWgFreed(((const RD3VidMemory *)vm)->fPhys);       /* its write generation and samples go */
     rd3AccelA3DispGone(vm);
     for (unsigned h = 0; vm && h < kRd3MaxFB; h++)
         if (gCfShown[h].vm == vm) gCfShown[h].vm = nullptr;
@@ -5389,6 +5779,26 @@ static bool rd3AccelCfOne(const RD3CfSide &S, const RD3CfSide &D, const RD3CfBou
     return true;
 }
 
+/* copy forward's front was written after the head's last frame (the write
+ * generations, card run 2026-10-17d; debug.rdna3accel_swap_gen=0: never) */
+static int rd3AccelCfGenNewer(unsigned head, const RD3VidMemory *srcVm)
+{
+    if (!gSwapGen || head >= kRd3MaxFB || !srcVm || !srcVm->fPhys) return 0;
+    return rd3_wg_src_newer(rd3AccelWgGen(srcVm->fPhys), rd3AccelWgHeadGen(head));
+}
+/* ... and that changed the source: counted (cf_gennewer_h<N>), the first ones logged */
+static unsigned gCfGenLogs[kRd3MaxFB];
+static void rd3AccelCfGenNote(unsigned head, const RD3VidMemory *srcVm, const char *instead)
+{
+    if (head >= kRd3MaxFB) return;
+    const SInt64 k = OSAddAtomic64(1, &gCntCfGenNewer[head]);
+    if (rd3_log_due(gCfGenLogs[head]++, 8, 1023))
+        ALOG("copy forward #%u: head %u: the front (phys 0x%llx, generation %llu) was written after the head's frame "
+             "(generation %llu) -- copied from it instead of %s (a copy forward burst's chain; %lld such)", gCfCalls,
+             head, srcVm ? srcVm->fPhys : 0ull, srcVm ? rd3AccelWgGen(srcVm->fPhys) : 0ull, rd3AccelWgHeadGen(head),
+             instead, (long long)k + 1);
+}
+
 /* copy forward's source in modes 1/2 (rdna3_swap_copy.h): the front the
  * swap copied into, else the scanout buffer the panel shows; false: none
  * (the rects stay pending, counted) */
@@ -5410,7 +5820,14 @@ static bool rd3AccelCfScSource(unsigned head, IOAccelResource2 *src, RD3VidMemor
                       rd3_sc_front_current(&gSc[head].front, srcVm, srcVm->fAllocationCookie);
     in.scanoutKnown = head < kRd3MaxFB && gSc[head].scanoutFrame &&
                       (gSc[head].shows == RD3_SCS_D || gSc[head].shows == RD3_SCS_HOME);
+    in.srcNewer = 0;
+    const enum rd3_sc_cf oldPick = rd3_sc_cf_source(&in);
+    /* the write generations (card run 2026-10-17d): a front written after the head's frame holds a newer
+     * picture than the panel (a copy forward burst's chain): the source */
+    in.srcNewer = rd3AccelCfGenNewer(head, srcVm);
     const enum rd3_sc_cf pick = rd3_sc_cf_source(&in);
+    if (pick != oldPick) rd3AccelCfGenNote(head, srcVm, oldPick == RD3_SCCF_SCANOUT ? "the panel's buffer"
+                                                                                    : "nothing (rects pending)");
     *scPick = (unsigned)pick;
     if (pick == RD3_SCCF_SRC) {
         *usedPhys = srcVm ? srcVm->fPhys : 0;
@@ -5466,6 +5883,18 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
      * until it is presented again (card run 2026-10-17c); whatever the call
      * did; in every head's table */
     rd3AccelScStaleCf(t.e.pb);
+    /* a write into the target (the write generations, 2026-10-17d) - only when every rect went through: a target
+     * the copy did not (wholly) write keeps its generation (ECC review round 1) */
+    if (r == kIOReturnSuccess && t.e.v1 > 0 && !(t.e.flags & 4)) {
+        rd3AccelWgBumpPhys(t.e.pb, kWgCf);
+    } else if (count > 0 && t.e.pb) {
+        const SInt64 k = OSAddAtomic64(1, &gCntWgCfNoStamp);
+        if (rd3_log_due((uint64_t)k, 8, 1023))
+            ALOG("copy forward #%u: the target 0x%llx keeps its write generation: the copy %s (0x%x, %u of %u rects "
+                 "copied) (%lld such; debug.rdna3accel_swaps_gen_cfnostamp)", gCfCalls, t.e.pb,
+                 r != kIOReturnSuccess ? "was answered with an error" : "did not write every rect", (unsigned)r,
+                 t.e.v1, count, (long long)k + 1);
+    }
     t.e.v4 = (uint32_t)r;
     rd3Trace(t.e);
     /* the target after the copy (Q3) */
@@ -5577,7 +6006,18 @@ static IOReturn rd3AccelCopyForwardIn(const void *surf, unsigned fbIndex, IOAcce
     in.shownIsSrc = shownVm && shownVm == (const void *)srcVm;
     in.shownOwned = own != nullptr;
     in.srcShown = rd3AccelWasPresented(srcVm);
+    in.srcNewer = 0;
+    const enum rd3_cf_pick oldPick = rd3_cf_source(&in);
+    /* the write generations (card run 2026-10-17d): a front written after the head's frame is the newest
+     * picture of WindowServer's chain (a copy forward burst) - never the older buffer the head shows over it
+     * (17d: COPY_SHOWN copied the stale buf[2] mode 0 had flipped to back over the new buf[1]) */
+    in.srcNewer = head < kRd3MaxFB ? rd3AccelCfGenNewer(head, srcVm) : 0;
     pick = rd3_cf_source(&in);
+    if (pick != oldPick)
+        rd3AccelCfGenNote(head, srcVm, oldPick == RD3_CF_COPY_SHOWN ? "the buffer the head showed"
+                                       : oldPick == RD3_CF_SKIP_BACK_IS_LAST ? "nothing (the target is the buffer "
+                                                                               "the head showed)"
+                                       : "nothing (rects pending)");
     t->e.arg = (uint8_t)pick;
     switch (pick) {
     case RD3_CF_SKIP_SAME:
@@ -6022,13 +6462,13 @@ static void rd3AccelSwapCopy(unsigned head, IOService *fb, IOAccelResource2 *bac
     const IOReturn cr = rd3AccelScSdma(fb, B.cookie, B.pitch, tCookie, tPitch, rowb, rows, &us, &cst);
     rd3AccelScSdmaNote(cr, cst, n, head);
     if (cr != kIOReturnSuccess) {
-        tr->v2 = rd3TrSat(us);
+        tr->v2 = (tr->v2 & 0xffff0000u) | (us > 0xffffull ? 0xffffu : (uint32_t)us);   /* v2 >> 16: the generation */
         rd3AccelScFail(head, n, RD3_TRX_SDMA,
                        cst == kRd3Etime ? "rdna3CopyVram timed out (the front copy skipped too)"
                                         : "rdna3CopyVram refused the copy", backPhys, (unsigned)cr, tr);
         return;
     }
-    tr->v2 = rd3TrSat(us);
+    tr->v2 = (tr->v2 & 0xffff0000u) | (us > 0xffffull ? 0xffffu : (uint32_t)us);
     OSAddAtomic64(1, &gCntScCopy[head]);
     OSAddAtomic64((SInt64)rowb * rows, &gCntScBytes[head]);
     OSAddAtomic64((SInt64)us, &gCntScUs[head]);
@@ -6195,6 +6635,417 @@ static void rd3AccelScLeave(unsigned head, IOService *fb)
     S.scanoutFrame = false;
     ALOG("swap mode: head %u: leaving the copy modes -- the last frame copied into home (phys 0x%llx, %llu us) and "
          "flipped there%s", head, q.phys, us, S.latched ? "" : " (latches at the next vblank)");
+}
+
+/* ---- the flip-present hooks (card run 2026-10-17d) ----
+ * In bursts copy forward rotated a display surface's three buffers at
+ * ~60 Hz with no submitSwapCopy (17d: 688.51-688.72 s, 803.1-806.6 s):
+ * the family presents those frames by another path. Its candidates are
+ * IOAccelLegacyDisplayPipe::submitFlipBuffer / submitScanoutFlipBuffer
+ * (accel/iofam/IOAccelLegacyDisplayPipe.h) and the surface's
+ * pickPresentType / didSubmitSwap / isBackBufferReady / submitUpdate
+ * (IOAccelLegacySurface.h), none of which the driver overrode. Each is now
+ * overridden by a naked wrapper (RD3_HOOK_ASM below) that
+ *   1. saves the argument registers and calls rd3HookPre(kind, this, ...)
+ *      (the flip-buffer hooks: counted, traced, the first 16 calls logged,
+ *      and with debug.rdna3accel_flipbuf_present=1 the buffer presented),
+ *   2. ALWAYS calls the base class's implementation with the same
+ *      registers, through rd3Base<Method>: a C++ call qualified with the
+ *      base class, which -fapple-kext compiles into a jump through the
+ *      base's exported vtable at the slot the compiler takes from the
+ *      reconstructed headers - the technique of tahoe_fwd.h's forwarders,
+ *      without a slot number written by hand (checked against the compiled
+ *      vtables: RD3Surface didSubmitSwap 2640, isBackBufferReady 2648,
+ *      submitUpdate 2664 - tahoe_fwd.h's measured slot -, pickPresentType
+ *      2672; RD3DisplayPipe submitScanoutFlipBuffer 2504, submitFlipBuffer
+ *      2512, after setStereo 2480, tahoe_fwd.h's measured slot),
+ *   3. calls rd3HookPost(kind, this, the first three arguments, rax) (the
+ *      surface hooks: counted, traced with the base's return value, the
+ *      first 16 logged),
+ *   4. returns the base's rax:rdx untouched, so a return type the headers
+ *      only know as void reaches the family whole.
+ * Nothing but an atomic count happens at interrupt level or with interrupts
+ * disabled (the trace's lock, the family's lock and the log are never taken
+ * there); the first such call of each kind is logged by the next one in
+ * thread context (ECC review round 1). */
+enum { kHkFlipBuf = 0, kHkScanoutFlipBuf = 1, kHkPickPresent = 2, kHkDidSubmitSwap = 3, kHkBackReady = 4,
+       kHkSubmitUpdate = 5, kHkKinds = 6 };
+static const char *const kHkName[kHkKinds] = { "IOAccelLegacyDisplayPipe::submitFlipBuffer",
+                                                "IOAccelLegacyDisplayPipe::submitScanoutFlipBuffer",
+                                                "IOAccelLegacySurface::pickPresentType",
+                                                "IOAccelLegacySurface::didSubmitSwap",
+                                                "IOAccelLegacySurface::isBackBufferReady",
+                                                "IOAccelLegacySurface::submitUpdate" };
+static SInt64 gCntFlipbuf[kRd3MaxFB], gCntFlipbufScanout[kRd3MaxFB], gCntFlipbufPresented[kRd3MaxFB];
+static SInt64 gCntFlipbufHeld[kRd3MaxFB], gCntFlipbufFailed[kRd3MaxFB];
+static SInt64 gCntFlipbufBusy[kRd3MaxFB], gCntFlipbufUnlocked[kRd3MaxFB], gCntFlipbufEmptyHeld[kRd3MaxFB];
+static SInt64 gCntFlipbufNoHead, gCntFlipbufNoRes, gCntFlipbufIntOff, gCntFlipbufBadPtr, gCntHookIntr, gCntHookIntOff;
+static SInt64 gCntHook[kHkKinds], gCntHookBackNo, gCntHookIntrK[kHkKinds];
+static volatile SInt32 gHookLogs[kHkKinds];
+static unsigned gFlipbufFailLogs[kRd3MaxFB], gFlipbufBusyLogs, gFlipbufEmptyLogs[kRd3MaxFB], gFlipbufNoResLogs;
+/* bit k: kind k called at interrupt level, bit 8 + k: with interrupts disabled (set there, logged by the next
+ * call in thread context, once per bit) */
+static volatile UInt32 gHookOddPending, gHookOddLogged;
+extern "C" boolean_t ml_at_interrupt_context(void);
+extern "C" boolean_t ml_get_interrupts_enabled(void);
+/* the lowest x86_64 kernel / kext address (VM_MIN_KERNEL_AND_KEXT_ADDRESS, osfmk/mach/i386/vm_param.h, not in
+ * the public headers): a "pointer" argument below it is no kernel object - never handed to OSDynamicCast */
+static const uint64_t kRd3MinKernelVA = 0xffffff8000000000ull;
+
+/* the buffer of a flip-buffer present, as the swap mode presents a back
+ * (under the family's lock) */
+static unsigned rd3AccelFlipbufPresentLocked(unsigned head, IOService *fb, RD3DisplayPipe *pipe, unsigned kind,
+                                             IOAccelResource2 *res, IOAccelResource2 *other)
+{
+    const unsigned long long phys = rd3res_phys(res);
+    rd3AccelScApplyAll();   /* the panel moves posted since the last holder of the lock */
+    int mode = gSwapMode;
+    bool brkFlip = false;
+    const unsigned n = ++gSwapCount;
+    if (mode != RD3_SWAPMODE_FLIP) {
+        enum rd3_sc_brk_ev bev;
+        if (!rd3_sc_brk_allow(&gScBrk, rd3AccelUsNow(), &bev)) {
+            mode = RD3_SWAPMODE_FLIP;   /* the SDMA breaker is open */
+            brkFlip = true;
+            OSAddAtomic64(1, &gCntScBrkFlip[head]);
+        }
+        rd3AccelScBrkEvent(bev, n, head, 0, kIOReturnSuccess);
+    }
+    RD3Scan sc;
+    rd3AccelResScan(res, &sc);
+    struct rd3_trace_ev tr = rd3TrEv(RD3_TR_SWAP, head);
+    tr.obj = rd3TrObj(pipe);
+    tr.v0 = n;
+    tr.v1 = (sc.rc & 0xfu) | ((unsigned)mode << 12) | (brkFlip ? 1u << 20 : 0u) | RD3_TRV1_FLIPBUF;
+    tr.v4 = 0xffffu | (kind << 24);   /* in no surface's array; the hook's kind */
+    tr.pa = phys;
+    tr.pb = rd3res_phys(other);
+    tr.flags = (uint8_t)(sc.rc == kRcPixels ? RD3_TRF_A1_PIXELS : 0);
+    memcpy(tr.ba, sc.band, 8);
+    /* the write generations: only a buffer written after the head's frame */
+    unsigned long long wgGen = 0, wgHead = 0;
+    const enum rd3_wg_why wg = rd3AccelWgDecide(head, phys, sc.rc >= kRcEmpty, sc.sig, &wgGen, &wgHead);
+    const unsigned long long expect = mode != RD3_SWAPMODE_FLIP ? rd3AccelScExpect(head) : gLatch[head].phys;
+    if (rd3AccelWgNote(head, wg, gSwapGen && mode != RD3_SWAPMODE_COPY_ALL, n, phys, wgGen, wgHead,
+                       "the flip buffer", 0, 0, &tr)) {
+        tr.pc = expect;
+        rd3Trace(tr);
+        OSAddAtomic64(1, &gCntFlipbufHeld[head]);
+        return RD3_TRFB_HELD;
+    }
+    /* an empty buffer: held as mode 1 holds an empty back (rd3_sc_action) and mode 0 skips one */
+    if (sc.rc == kRcEmpty && mode != RD3_SWAPMODE_COPY_ALL) {
+        tr.arg = mode == RD3_SWAPMODE_FLIP ? RD3_TRS_SKIP : RD3_TRS_HOLD;
+        tr.flags |= RD3_TRF_BACK_EMPTY;
+        tr.pc = expect;
+        rd3Trace(tr);
+        OSAddAtomic64(1, &gCntFlipbufHeld[head]);
+        const SInt64 k = OSAddAtomic64(1, &gCntFlipbufEmptyHeld[head]);
+        if (rd3_log_due(gFlipbufEmptyLogs[head]++, 8, 1023))
+            ALOG("flipbuf #%u: head %u: %s's buffer (phys 0x%llx) read empty -- held, the panel keeps its frame "
+                 "(swap mode %d; %lld such; debug.rdna3accel_flipbuf_emptyheld_h%u)", n, head, kHkName[kind], phys,
+                 mode, (long long)k + 1, head);
+        return RD3_TRFB_HELD;
+    }
+    const char *fwhy = nullptr;
+    rd3AccelTracePanel(head, fb, expect);
+    if (mode != RD3_SWAPMODE_FLIP) {
+        /* modes 1/2: copied into D / home (the latch wait first) and flipped there; no front copy (this path
+         * names no front): copy forward then reads the panel's buffer, which holds this frame */
+        rd3AccelSwapCopy(head, fb, res, nullptr, sc.rc == kRcEmpty, n, &tr, sc.band);
+        rd3_sc_front_set(&gSc[head].front, nullptr, 0);
+        if (tr.arg != RD3_TRS_COPY) fwhy = "the copy did not reach the panel (the swap copy's own line says why)";
+    } else {
+        /* mode 0: the flip and its latch wait (debug.rdna3accel_swap_latch) */
+        const uint64_t cap = rd3_latch_cap_us(rd3AccelHeadFrameUs(fb, head));
+        rd3AccelLatchEntry(head, fb, n);
+        RD3FlipWhy fw;
+        const uint64_t issued = mach_absolute_time();
+        const bool flipped = rd3AccelFlipTo(res, fb, head, &fw);
+        struct rd3_trace_ev fe = rd3TrEv(RD3_TR_FLIP, head);
+        fe.arg = 5;   /* a flip-buffer present */
+        fe.flags = flipped ? 1 : 0;
+        fe.v0 = (uint32_t)fw.flipResult;
+        fe.v4 = fw.ret;
+        fe.pa = phys;
+        rd3Trace(fe);
+        if (flipped) {
+            rd3AccelScPanelMoved(head, "a flip-buffer present", issued, false);
+            rd3AccelLatchFlipped(head, fb, res, phys, nullptr, "a flip-buffer present (not hashed)", cap, n);
+            rd3AccelNotePresented(rd3res_vidmem(res), head);
+            tr.arg = RD3_TRS_FLIP;
+            tr.pc = phys;
+            tr.v3 = gLatch[head].latchUs;
+        } else {
+            tr.arg = RD3_TRS_FLIP_FAILED;
+            fwhy = fw.why ? fw.why : "the flip was refused";
+        }
+    }
+    /* the generation captured at the decision (ECC review round 1) */
+    if (!fwhy)
+        rd3AccelWgPresented(head, phys, wg != RD3_WGW_OFF ? wgGen : rd3AccelWgGen(phys), sc.rc >= kRcEmpty, sc.sig);
+    rd3Trace(tr);
+    if (fwhy) {
+        const SInt64 k = OSAddAtomic64(1, &gCntFlipbufFailed[head]);
+        if (rd3_log_due(gFlipbufFailLogs[head]++, 8, 1023))
+            ALOG("flipbuf #%u: head %u: %s's buffer (phys 0x%llx) NOT presented: %s (%lld such)", n, head,
+                 kHkName[kind], phys, fwhy, (long long)k + 1);
+        return RD3_TRFB_FAILED;
+    }
+    OSAddAtomic64(1, &gCntFlipbufPresented[head]);
+    return RD3_TRFB_PRESENTED;
+}
+/* debug.rdna3accel_flipbuf_present=1: which resource, the lock, the present */
+static unsigned rd3AccelFlipbufPresent(unsigned head, IOService *fb, RD3DisplayPipe *pipe, unsigned kind,
+                                       IOAccelResource2 *r1, IOAccelResource2 *r2, uint8_t *flags)
+{
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    if (!a || !fb || head >= kRd3MaxFB) return RD3_TRFB_NOHEAD;
+    bool fb1 = false, fb2 = false;
+    if (gHeadFbResLock) {
+        IOSimpleLockLock(gHeadFbResLock);
+        fb1 = r1 && gHeadFbRes[head] == r1;
+        fb2 = r2 && gHeadFbRes[head] == r2;
+        IOSimpleLockUnlock(gHeadFbResLock);
+    }
+    const unsigned long long p1 = rd3res_phys(r1), p2 = rd3res_phys(r2);
+    /* the head's framebuffer resource, or no VRAM of ours: never the one presented */
+    const int pick = rd3_wg_flip_pick(fb1 || !p1, fb2 || !p2, rd3AccelWgGen(p1), rd3AccelWgGen(p2));
+    IOAccelResource2 *res = pick == 1 ? r1 : r2, *other = pick == 1 ? r2 : r1;
+    if (!res || !rd3res_phys(res)) {
+        const SInt64 k = OSAddAtomic64(1, &gCntFlipbufNoRes);
+        if (rd3_log_due(gFlipbufNoResLogs++, 8, 1023))
+            ALOG("flipbuf: head %u: %s NOT presented: neither buffer is a VRAM resource of ours other than the head's "
+                 "framebuffer (res %p phys 0x%llx, res %p phys 0x%llx) -- only traced (%lld such; "
+                 "debug.rdna3accel_flipbuf_nores)", head, kHkName[kind], r1, p1, r2, p2, (long long)k + 1);
+        return RD3_TRFB_NORES;
+    }
+    bool took = false;
+    if (gFamOwner != (void *)current_thread()) {
+        if (!rd3FamLock(a, true)) {
+            const SInt64 k = OSAddAtomic64(1, &gCntFlipbufBusy[head]);
+            if (rd3_log_due(gFlipbufBusyLogs++, 8, 1023))
+                ALOG("flipbuf: head %u: %s's buffer NOT presented: the family's lock is held by another thread (or "
+                     "by a lock path that does not call acceleratorDidLock) -- only traced (%lld such)", head,
+                     kHkName[kind], (long long)k + 1);
+            return RD3_TRFB_BUSY;
+        }
+        took = true;
+        *flags |= 2;
+        OSAddAtomic64(1, &gCntFlipbufUnlocked[head]);
+    }
+    const unsigned r = rd3AccelFlipbufPresentLocked(head, fb, pipe, kind, res, other);
+    if (took) rd3FamUnlock(a);
+    return r;
+}
+static const char *rd3AccelFlipbufWhat(unsigned what)
+{
+    switch (what) {
+    case RD3_TRFB_TRACED:    return "traced";
+    case RD3_TRFB_PRESENTED: return "PRESENTED";
+    case RD3_TRFB_HELD:      return "held (not written since the head's frame, or empty)";
+    case RD3_TRFB_FAILED:    return "present FAILED";
+    case RD3_TRFB_NOHEAD:    return "no head";
+    case RD3_TRFB_NORES:     return "no VRAM resource of ours";
+    default:                 return "the family's lock busy";
+    }
+}
+/* submitFlipBuffer / submitScanoutFlipBuffer, before the family's own */
+static void rd3AccelFlipbufHook(unsigned kind, RD3DisplayPipe *pipe, const void *ev, unsigned idx, IOAccelResource2 *r1,
+                                IOAccelResource2 *r2)
+{
+    RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
+    unsigned head = kRd3MaxFB;
+    IOService *fb = a && pipe ? a->pipeFramebuffer(pipe, &head) : nullptr;
+    if (!fb) head = kRd3MaxFB;
+    const SInt64 k = head < kRd3MaxFB
+                         ? OSAddAtomic64(1, kind == kHkFlipBuf ? &gCntFlipbuf[head] : &gCntFlipbufScanout[head])
+                         : OSAddAtomic64(1, &gCntFlipbufNoHead);
+    OSAddAtomic64(1, &gCntHook[kind]);
+    /* the mangled names say IOAccelResource2 *: the cast checks the class, after a check that the value is a
+     * kernel address at all (a register the reconstructed signature got wrong, ECC review round 1) */
+    const bool bad1 = r1 && (uint64_t)r1 < kRd3MinKernelVA, bad2 = r2 && (uint64_t)r2 < kRd3MinKernelVA;
+    if (bad1 || bad2) OSAddAtomic64(1, &gCntFlipbufBadPtr);
+    IOAccelResource2 *c1 = r1 && !bad1 ? OSDynamicCast(IOAccelResource2, (OSObject *)r1) : nullptr;
+    IOAccelResource2 *c2 = r2 && !bad2 ? OSDynamicCast(IOAccelResource2, (OSObject *)r2) : nullptr;
+    struct rd3_trace_ev e = rd3TrEv(RD3_TR_FLIPBUF, head);
+    e.arg = (uint8_t)kind;
+    e.obj = rd3TrObj(pipe);
+    e.v0 = idx;
+    e.v1 = rd3TrSat((uint64_t)k + 1);
+    e.v2 = rd3TrObj(r1);
+    e.v3 = rd3TrObj(r2);
+    e.pa = rd3res_phys(c1);
+    e.pb = rd3res_phys(c2);
+    unsigned what = head < kRd3MaxFB ? (unsigned)RD3_TRFB_TRACED : (unsigned)RD3_TRFB_NOHEAD;
+    if (gFlipbufPresent && head < kRd3MaxFB) {
+        e.flags |= 1;
+        what = rd3AccelFlipbufPresent(head, fb, pipe, kind, c1, c2, &e.flags);
+    }
+    e.v4 = what;
+    e.pc = head < kRd3MaxFB ? (gSwapMode != RD3_SWAPMODE_FLIP ? rd3AccelScExpect(head) : gLatch[head].phys) : 0;
+    rd3Trace(e);
+    if (OSIncrementAtomic(&gHookLogs[kind]) < 16)
+        ALOG("hook: %s(event %p, %u, res %p (phys 0x%llx%s), res %p (phys 0x%llx%s)) on head %d (pipe %p; call %lld "
+             "of this kind on the head; family lock %s; interrupts %s; flipbuf_present %d: %s) -- the family's own "
+             "runs next", kHkName[kind], ev, idx, r1, e.pa,
+             bad1 ? ", NOT a kernel address" : r1 && !c1 ? ", NOT an IOAccelResource2" : "", r2, e.pb,
+             bad2 ? ", NOT a kernel address" : r2 && !c2 ? ", NOT an IOAccelResource2" : "",
+             head < kRd3MaxFB ? (int)head : -1, pipe, (long long)k + 1,
+             gFamOwner == (void *)current_thread() ? "held by this thread" : "not this thread's",
+             ml_get_interrupts_enabled() ? "enabled" : "DISABLED", gFlipbufPresent, rd3AccelFlipbufWhat(what));
+}
+/* the surface's hooks, after the family's own: its return value */
+static void rd3AccelSurfHookPost(unsigned kind, const void *surf, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t ret)
+{
+    const SInt64 k = OSAddAtomic64(1, &gCntHook[kind]);
+    if (kind == kHkBackReady && !(ret & 0xff)) OSAddAtomic64(1, &gCntHookBackNo);
+    const unsigned head = rd3AccelSurfKnownHead(surf);
+    if (k < 2048 || (k & 7) == 0) {
+        struct rd3_trace_ev e = rd3TrEv(RD3_TR_HOOK, head);
+        e.arg = (uint8_t)(kind - kHkPickPresent);
+        e.obj = rd3TrObj(surf);
+        e.v0 = (uint32_t)a0;
+        e.v1 = kind == kHkSubmitUpdate ? (uint32_t)a2 : (uint32_t)a1;
+        e.v2 = kind == kHkBackReady ? (uint32_t)(ret & 0xff) : (uint32_t)ret;
+        e.v3 = rd3TrSat((uint64_t)k + 1);
+        rd3Trace(e);
+    }
+    if (OSIncrementAtomic(&gHookLogs[kind]) >= 16) return;
+    const int h = head < kRd3MaxFB ? (int)head : -1;
+    const char *ints = ml_get_interrupts_enabled() ? "enabled" : "DISABLED";
+    if (kind == kHkSubmitUpdate)
+        ALOG("hook: %s(%u, bounds %p, %u) -> 0x%llx (surface %p, head %d; call %lld; interrupts %s)", kHkName[kind],
+             (unsigned)a0, (const void *)a1, (unsigned)a2, (unsigned long long)ret, surf, h, (long long)k + 1, ints);
+    else if (kind == kHkDidSubmitSwap)
+        ALOG("hook: %s(%u, %u) -> 0x%llx (surface %p, head %d; call %lld; interrupts %s)", kHkName[kind],
+             (unsigned)a0, (unsigned)a1, (unsigned long long)ret, surf, h, (long long)k + 1, ints);
+    else
+        ALOG("hook: %s(%u) -> 0x%llx%s (surface %p, head %d; call %lld; interrupts %s)", kHkName[kind], (unsigned)a0,
+             (unsigned long long)ret, kind == kHkBackReady ? ((ret & 0xff) ? " (ready)" : " (NOT ready)") : "", surf,
+             h, (long long)k + 1, ints);
+}
+/* the naked wrappers' C halves (asm names _rd3HookPre / _rd3HookPost) */
+/* the first call of each kind at interrupt level / with interrupts disabled, logged from thread context */
+static void rd3AccelHookOddReport(void)
+{
+    const UInt32 m = gHookOddPending & ~gHookOddLogged;
+    if (!m) return;
+    const UInt32 was = OSBitOrAtomic(m, &gHookOddLogged);
+    for (unsigned b = 0; b < 16; b++) {
+        if (!(m & (1u << b)) || (was & (1u << b))) continue;
+        const unsigned kind = b & 7;
+        if (kind >= kHkKinds) continue;
+        if (b < 8)
+            ALOG("hook: %s was called at INTERRUPT LEVEL (%lld such of this kind, %lld of all kinds) -- only counted "
+                 "and forwarded to the family; nothing it holds is traced or presented there "
+                 "(debug.rdna3accel_hook_intr)", kHkName[kind], (long long)gCntHookIntrK[kind], (long long)gCntHookIntr);
+        else
+            ALOG("hook: %s was called with INTERRUPTS DISABLED (%lld such of the %s kinds) -- only counted and "
+                 "forwarded to the family; no lock, trace or present taken there (debug.rdna3accel_%s)",
+                 kHkName[kind], kind <= kHkScanoutFlipBuf ? (long long)gCntFlipbufIntOff : (long long)gCntHookIntOff,
+                 kind <= kHkScanoutFlipBuf ? "flip-buffer" : "surface",
+                 kind <= kHkScanoutFlipBuf ? "flipbuf_intoff" : "hook_intoff");
+    }
+}
+extern "C" __attribute__((used)) void rd3HookPre(unsigned kind, void *self, uint64_t a0, uint64_t a1, uint64_t a2,
+                                                 uint64_t a3)
+{
+    if (kind >= kHkKinds) return;
+    /* counted per kind before anything else (ECC review round 1); neither path takes a lock or logs */
+    if (ml_at_interrupt_context()) {
+        OSAddAtomic64(1, &gCntHookIntr);
+        OSAddAtomic64(1, &gCntHookIntrK[kind]);
+        OSBitOrAtomic(1u << kind, &gHookOddPending);
+        return;
+    }
+    if (!ml_get_interrupts_enabled()) {
+        OSAddAtomic64(1, kind <= kHkScanoutFlipBuf ? &gCntFlipbufIntOff : &gCntHookIntOff);
+        OSBitOrAtomic(1u << (8 + kind), &gHookOddPending);
+        return;
+    }
+    rd3AccelHookOddReport();
+    if (kind == kHkFlipBuf || kind == kHkScanoutFlipBuf)
+        rd3AccelFlipbufHook(kind, (RD3DisplayPipe *)self, (const void *)a0, (unsigned)a1, (IOAccelResource2 *)a2,
+                            (IOAccelResource2 *)a3);
+}
+extern "C" __attribute__((used)) void rd3HookPost(unsigned kind, void *self, uint64_t a0, uint64_t a1, uint64_t a2,
+                                                  uint64_t ret)
+{
+    /* counted by rd3HookPre (the same call) */
+    if (kind < kHkPickPresent || kind >= kHkKinds || ml_at_interrupt_context() || !ml_get_interrupts_enabled()) return;
+    rd3AccelSurfHookPost(kind, self, a0, a1, a2, ret);
+}
+/* the base calls: qualified, so -fapple-kext jumps through the base's
+ * vtable (no symbol of the base needed: submitUpdate is not exported on
+ * macOS 26); void, the result is the base's rax as it leaves */
+extern "C" __attribute__((used)) void rd3BaseSubmitFlipBuffer(RD3DisplayPipe *p, IOAccelEvent *a0, unsigned a1,
+                                                              IOAccelResource2 *a2, IOAccelResource2 *a3)
+{
+    p->IOAccelLegacyDisplayPipe::submitFlipBuffer(a0, a1, a2, a3);
+}
+extern "C" __attribute__((used)) void rd3BaseSubmitScanoutFlipBuffer(RD3DisplayPipe *p, IOAccelEvent *a0, unsigned a1,
+                                                                     IOAccelResource2 *a2, IOAccelResource2 *a3)
+{
+    p->IOAccelLegacyDisplayPipe::submitScanoutFlipBuffer(a0, a1, a2, a3);
+}
+extern "C" __attribute__((used)) void rd3BasePickPresentType(RD3Surface *s, unsigned a0)
+{
+    s->IOAccelLegacySurface::pickPresentType(a0);
+}
+extern "C" __attribute__((used)) void rd3BaseDidSubmitSwap(RD3Surface *s, unsigned a0, unsigned a1)
+{
+    s->IOAccelLegacySurface::didSubmitSwap(a0, a1);
+}
+extern "C" __attribute__((used)) void rd3BaseIsBackBufferReady(RD3Surface *s, unsigned a0)
+{
+    (void)s->IOAccelLegacySurface::isBackBufferReady(a0);
+}
+extern "C" __attribute__((used)) void rd3BaseSubmitUpdate(RD3Surface *s, unsigned a0, IOAccelBounds *a1, unsigned a2)
+{
+    s->IOAccelLegacySurface::submitUpdate(a0, a1, a2);
+}
+/* the wrapper: an rbp frame, the six argument registers saved at -8..-48
+ * (rsp 16-aligned at every call), rd3HookPre(kind, this, a0..a3), the base
+ * with the original registers, rax / rdx saved, rd3HookPost(kind, this,
+ * a0, a1, a2, rax), rax / rdx back, return */
+#define RD3_HOOK_ASM(kind, base)                                                                                 \
+    "pushq %rbp\n\t" "movq %rsp, %rbp\n\t"                                                                       \
+    "pushq %rdi\n\t" "pushq %rsi\n\t" "pushq %rdx\n\t" "pushq %rcx\n\t" "pushq %r8\n\t" "pushq %r9\n\t"         \
+    "movq %r8, %r9\n\t" "movq %rcx, %r8\n\t" "movq %rdx, %rcx\n\t" "movq %rsi, %rdx\n\t" "movq %rdi, %rsi\n\t"  \
+    "movl $" #kind ", %edi\n\t" "callq _rd3HookPre\n\t"                                                           \
+    "movq -8(%rbp), %rdi\n\t" "movq -16(%rbp), %rsi\n\t" "movq -24(%rbp), %rdx\n\t"                             \
+    "movq -32(%rbp), %rcx\n\t" "movq -40(%rbp), %r8\n\t" "movq -48(%rbp), %r9\n\t"                               \
+    "callq _" base "\n\t"                                                                                        \
+    "pushq %rax\n\t" "pushq %rdx\n\t"                                                                            \
+    "movq %rax, %r9\n\t" "movl $" #kind ", %edi\n\t" "movq -8(%rbp), %rsi\n\t" "movq -16(%rbp), %rdx\n\t"         \
+    "movq -24(%rbp), %rcx\n\t" "movq -32(%rbp), %r8\n\t" "callq _rd3HookPost\n\t"                                 \
+    "popq %rdx\n\t" "popq %rax\n\t" "leave\n\t" "retq\n\t"
+__attribute__((naked)) void RD3DisplayPipe::submitFlipBuffer(IOAccelEvent *a0, unsigned int a1, IOAccelResource2 *a2,
+                                                             IOAccelResource2 *a3)
+{
+    __asm__(RD3_HOOK_ASM(0, "rd3BaseSubmitFlipBuffer"));
+}
+__attribute__((naked)) void RD3DisplayPipe::submitScanoutFlipBuffer(IOAccelEvent *a0, unsigned int a1,
+                                                                    IOAccelResource2 *a2, IOAccelResource2 *a3)
+{
+    __asm__(RD3_HOOK_ASM(1, "rd3BaseSubmitScanoutFlipBuffer"));
+}
+__attribute__((naked)) void RD3Surface::pickPresentType(unsigned int a0)
+{
+    __asm__(RD3_HOOK_ASM(2, "rd3BasePickPresentType"));
+}
+__attribute__((naked)) void RD3Surface::didSubmitSwap(unsigned int a0, unsigned int a1)
+{
+    __asm__(RD3_HOOK_ASM(3, "rd3BaseDidSubmitSwap"));
+}
+__attribute__((naked)) bool RD3Surface::isBackBufferReady(unsigned int a0)
+{
+    __asm__(RD3_HOOK_ASM(4, "rd3BaseIsBackBufferReady"));
+}
+__attribute__((naked)) void RD3Surface::submitUpdate(unsigned int a0, IOAccelBounds *a1, unsigned int a2)
+{
+    __asm__(RD3_HOOK_ASM(5, "rd3BaseSubmitUpdate"));
 }
 
 /* ---- the trace's hooks (card run 2026-10-17b) ---- */
@@ -6367,6 +7218,7 @@ static int rd3AccelSetSwapMode(int v, const char *why)
             gSwapEmptyRun[h] = 0;
             rd3_sc_front_set(&gSc[h].front, nullptr, 0);
             rd3AccelScStaleReset(h, "a swap mode change");
+            rd3AccelWgHeadReset(h, "a swap mode change");
         }
     }
     if (locked) rd3FamUnlock(a);
@@ -6530,8 +7382,8 @@ SYSCTL_INT(_debug, OID_AUTO, rdna3accel_trace_scan, CTLFLAG_RW | CTLFLAG_LOCKED,
            "for a head's first 600, during autoreport's A/B and at empty backs, else every 8th, 2 every swap");
 SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_swap_mode, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, nullptr, 0,
             rdna3accel_swapmode_sysctl, "I",
-            "card run 2026-10-17b: 0 (default since 2026-10-17d, boot-arg rdna3swapmode) flip to WindowServer's back, 1 copy it, an "
-            "empty back never over a picture, 2 copy every back");
+            "card run 2026-10-17b: 0 flip to WindowServer's back, 1 (default again since the write generations, boot-arg "
+            "rdna3swapmode) copy it, an empty back never over a picture, 2 copy every back");
 SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_swap_ab, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0,
             rdna3accel_swapab_sysctl, "I", "autoreport's A/B phase (a label in the trace: 0 none, 1 mode 1, 2 mode 0, 3 back)");
 RD3ACCEL_CNT(rdna3accel_swap_trace_events, gCntTrWritten, "card run 2026-10-17b: trace events recorded since the boot");
@@ -6580,6 +7432,115 @@ RD3ACCEL_CNT4(rdna3accel_swaps_copynowait, gCntScNoWait, "swap mode 1/2: copies 
 RD3ACCEL_CNT4(rdna3accel_swaps_copybrkflip, gCntScBrkFlip, "swap mode 1/2: swaps flipped as in mode 0, the SDMA breaker open");
 RD3ACCEL_CNT4(rdna3accel_swaps_copyfreewait, gCntScFreeWait, "swap mode 1/2: an old second buffer kept (on the panel, or its flip away not latched)");
 RD3ACCEL_CNT(rdna3accel_swaps_copybrktrips, gCntScBrkTrips, "swap mode 1/2: times the SDMA breaker opened (copies failed or timed out)");
+/* card run 2026-10-17d: the write generations (rdna3_write_gen.h) and the flip-present hooks */
+SYSCTL_INT(_debug, OID_AUTO, rdna3accel_swap_gen, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gSwapGen, 0,
+           "card run 2026-10-17d: 1 (default, boot-arg rdna3swapgen) swap modes 0 and 1 present a back only when "
+           "WindowServer wrote it (page-on, copy forward) after the head's frame, else hold it; copy forward takes a "
+           "front written after that frame as its source; 0 only counts and traces what would have been held");
+SYSCTL_INT(_debug, OID_AUTO, rdna3accel_flipbuf_present, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gFlipbufPresent, 0,
+           "card run 2026-10-17d: 1 IOAccelLegacyDisplayPipe::submitFlipBuffer / submitScanoutFlipBuffer also present "
+           "their buffer as the swap mode does (copy into D / home in mode 1, flip in mode 0, the latch wait, the "
+           "write generations); 0 (default, boot-arg rdna3flipbufpresent) only traced, counted and forwarded");
+RD3ACCEL_CNT4(rdna3accel_swaps_genpresent, gCntWgPresent, "card run 2026-10-17d: swaps (and flip-buffer presents) the write generations presented: written after the head's frame, the first after a reset, or changed with no write seen");
+RD3ACCEL_CNT4(rdna3accel_swaps_genhold, gCntWgHold, "card run 2026-10-17d: swaps held by the write generations: the back not written since the head's frame (no flip, no copy, the panel kept its frame)");
+RD3ACCEL_CNT4(rdna3accel_swaps_genhold_would, gCntWgWould, "swaps the write generations WOULD have held (debug.rdna3accel_swap_gen=0, or swap mode 2): presented as before");
+RD3ACCEL_CNT4(rdna3accel_swaps_genfirst, gCntWgFirst, "of the presented, the first swap after the head's reset (mode or swap mode change, an IOP flip)");
+RD3ACCEL_CNT4(rdna3accel_swaps_gencontent, gCntWgContent, "of the presented, backs NOT written since this head presented them whose samples changed: a writer the accelerator does not see");
+RD3ACCEL_CNT4(rdna3accel_swaps_genunwritten, gCntWgUnwritten, "of the held (or would-hold), backs never written and never presented on this head (the buf[2] WindowServer never draws)");
+RD3ACCEL_CNT4(rdna3accel_cf_gennewer, gCntCfGenNewer, "card run 2026-10-17d: copy forwards whose source the write generations changed: the front written after the head's frame (a burst's chain)");
+RD3ACCEL_CNT(rdna3accel_swaps_gen_aperture, gCntWgAperture, "card run 2026-10-17d: write generations handed out by the family's page-on (addToAperture, getApertureMemoryDescriptor)");
+RD3ACCEL_CNT(rdna3accel_swaps_gen_cf, gCntWgCf, "write generations handed out by copy forward (its target)");
+RD3ACCEL_CNT(rdna3accel_swaps_gen_evicted, gCntWgEvicted, "write generations evicted from the full 32-slot table (that buffer reads 'never written' until its next write)");
+RD3ACCEL_CNT(rdna3accel_swaps_gen_freed, gCntWgFreed, "write generations and samples forgotten because their VRAM was freed");
+RD3ACCEL_CNT(rdna3accel_swaps_gen_resets, gCntWgResets, "heads whose generation record was reset (mode or swap mode change, an IOP flip): their next swap presents");
+RD3ACCEL_CNT4(rdna3accel_swaps_gen_resets, gCntWgResetsH, "ECC review round 1: of those, this head's (another surface taking over after 500 ms quiet, mode change, IOP flip)");
+RD3ACCEL_CNT4(rdna3accel_swaps_gen_judged, gCntWgJudged, "ECC review round 1: swaps (and flip-buffer presents) the write generations judged = genpresent + genhold + genhold_would + gen_landed");
+RD3ACCEL_CNT4(rdna3accel_swaps_gen_aged, gCntWgAged, "of the presented, by the age guard: no present for 250 ms and 3 holds in a row (a hold never freezes the panel)");
+RD3ACCEL_CNT4(rdna3accel_swaps_gen_evictpresent, gCntWgEvictPresent, "of the presented, by the eviction guard: a back with no generation while a newer one was evicted");
+RD3ACCEL_CNT4(rdna3accel_swaps_gen_landed, gCntWgLanded, "swap mode 1: swaps the write generations would have held whose surface had a buffer written after the head's frame: that one presented");
+RD3ACCEL_CNT4(rdna3accel_swaps_gennotjudged, gCntWgNotJudged, "swaps the write generations did not judge (no head known at the swap's entry, no VRAM address): presented as before");
+RD3ACCEL_CNT(rdna3accel_swaps_gen_apcached, gCntWgApCached, "ECC review round 1: write generations handed out by the page-on's cached descriptor (getApertureMemoryDescriptor's second and later calls)");
+RD3ACCEL_CNT(rdna3accel_swaps_gen_cfnostamp, gCntWgCfNoStamp, "copy forwards whose target kept its generation: the copy failed, or not every rect was copied");
+RD3ACCEL_CNT4(rdna3accel_flipbuf, gCntFlipbuf, "card run 2026-10-17d: IOAccelLegacyDisplayPipe::submitFlipBuffer calls (traced, forwarded to the family)");
+RD3ACCEL_CNT4(rdna3accel_flipbuf_scanout, gCntFlipbufScanout, "IOAccelLegacyDisplayPipe::submitScanoutFlipBuffer calls (traced, forwarded to the family)");
+RD3ACCEL_CNT4(rdna3accel_flipbuf_presented, gCntFlipbufPresented, "flip-buffer calls whose buffer was presented (debug.rdna3accel_flipbuf_present=1)");
+RD3ACCEL_CNT4(rdna3accel_flipbuf_held, gCntFlipbufHeld, "flip-buffer presents held: not written since the head's frame, or empty (debug.rdna3accel_flipbuf_present=1)");
+RD3ACCEL_CNT4(rdna3accel_flipbuf_failed, gCntFlipbufFailed, "flip-buffer presents whose copy or flip failed (debug.rdna3accel_flipbuf_present=1)");
+RD3ACCEL_CNT(rdna3accel_flipbuf_nohead, gCntFlipbufNoHead, "flip-buffer calls on a pipe that drives no framebuffer of ours");
+RD3ACCEL_CNT4(rdna3accel_flipbuf_busy, gCntFlipbufBusy, "flip-buffer presents not done: the family's lock held by another thread");
+RD3ACCEL_CNT4(rdna3accel_flipbuf_unlocked, gCntFlipbufUnlocked, "flip-buffer presents that took the family's lock themselves (called without it)");
+RD3ACCEL_CNT4(rdna3accel_flipbuf_emptyheld, gCntFlipbufEmptyHeld, "ECC review round 1: of the flip-buffer holds, the buffer read empty");
+RD3ACCEL_CNT(rdna3accel_flipbuf_nores, gCntFlipbufNoRes, "ECC review round 1: flip-buffer presents not done: neither buffer a VRAM resource of ours other than the head's framebuffer");
+RD3ACCEL_CNT(rdna3accel_flipbuf_intoff, gCntFlipbufIntOff, "ECC review round 1: flip-buffer calls with interrupts disabled (only counted, forwarded)");
+RD3ACCEL_CNT(rdna3accel_flipbuf_badptr, gCntFlipbufBadPtr, "ECC review round 1: flip-buffer calls with a resource argument below the kernel's addresses (not cast, not presented)");
+RD3ACCEL_CNT(rdna3accel_hook_intoff, gCntHookIntOff, "ECC review round 1: surface hook calls with interrupts disabled (only counted, forwarded)");
+RD3ACCEL_CNT(rdna3accel_hook_intr, gCntHookIntr, "flip-present hook calls at interrupt level (only counted, forwarded)");
+RD3ACCEL_CNT(rdna3accel_hook_intr_flipbuf, gCntHookIntrK[kHkFlipBuf], "ECC review round 1: of those, submitFlipBuffer");
+RD3ACCEL_CNT(rdna3accel_hook_intr_scanout, gCntHookIntrK[kHkScanoutFlipBuf], "of those, submitScanoutFlipBuffer");
+RD3ACCEL_CNT(rdna3accel_hook_intr_pickpresent, gCntHookIntrK[kHkPickPresent], "of those, pickPresentType");
+RD3ACCEL_CNT(rdna3accel_hook_intr_didsubmitswap, gCntHookIntrK[kHkDidSubmitSwap], "of those, didSubmitSwap");
+RD3ACCEL_CNT(rdna3accel_hook_intr_backready, gCntHookIntrK[kHkBackReady], "of those, isBackBufferReady");
+RD3ACCEL_CNT(rdna3accel_hook_intr_submitupdate, gCntHookIntrK[kHkSubmitUpdate], "of those, submitUpdate");
+RD3ACCEL_CNT(rdna3accel_hook_pickpresent, gCntHook[kHkPickPresent], "card run 2026-10-17d: IOAccelLegacySurface::pickPresentType calls (traced, forwarded)");
+RD3ACCEL_CNT(rdna3accel_hook_didsubmitswap, gCntHook[kHkDidSubmitSwap], "IOAccelLegacySurface::didSubmitSwap calls (traced, forwarded)");
+RD3ACCEL_CNT(rdna3accel_hook_backready, gCntHook[kHkBackReady], "IOAccelLegacySurface::isBackBufferReady calls (traced, forwarded)");
+RD3ACCEL_CNT(rdna3accel_hook_backready_no, gCntHookBackNo, "of those, answered not ready by the family");
+RD3ACCEL_CNT(rdna3accel_hook_submitupdate, gCntHook[kHkSubmitUpdate], "IOAccelLegacySurface::submitUpdate calls (traced, forwarded)");
+/* the vtable offset of a virtual member function (Itanium ABI: its pointer's first word is 1 + the byte offset
+ * from the vtable's address point); 0 when it is not a virtual one */
+template <class M> static unsigned rd3VtOff(M m)
+{
+    uint64_t w = 0;
+    memcpy(&w, &m, sizeof w);
+    return (w & 1) ? (unsigned)(w - 1) : 0u;
+}
+/* the boot's line that the hooks are in (ECC review round 1): each override's vtable offset as compiled - the
+ * base calls (rd3Base*) jump through the base's vtable symbol, 16 bytes before the address point, so their
+ * operands are these + 16: 2512 2504 2672 2640 2648 2664 (tools/check_accel_slots.py checks the compiled ones) */
+static void rd3AccelHookInstalledLog(void)
+{
+    ALOG("flip-present hooks installed: RD3DisplayPipe submitFlipBuffer vtable+%u, submitScanoutFlipBuffer +%u; "
+         "RD3Surface pickPresentType +%u, didSubmitSwap +%u, isBackBufferReady +%u, submitUpdate +%u; "
+         "RDNA3Accelerator acceleratorDidLock +%u, acceleratorWillUnlock +%u (the base calls' slots are these + 16) "
+         "-- each logs its first 16 calls as 'hook:' lines (debug.rdna3accel_flipbuf_h<N>, _hook_*)",
+         rd3VtOff(&RD3DisplayPipe::submitFlipBuffer), rd3VtOff(&RD3DisplayPipe::submitScanoutFlipBuffer),
+         rd3VtOff(&RD3Surface::pickPresentType), rd3VtOff(&RD3Surface::didSubmitSwap),
+         rd3VtOff(&RD3Surface::isBackBufferReady), rd3VtOff(&RD3Surface::submitUpdate),
+         rd3VtOff(&RDNA3Accelerator::acceleratorDidLock), rd3VtOff(&RDNA3Accelerator::acceleratorWillUnlock));
+}
+static void rd3AccelInstallSysctlGen(void)
+{
+    rd3AccelHookInstalledLog();
+    sysctl_register_oid(&sysctl__debug_rdna3accel_swap_gen);    sysctl_register_oid(&sysctl__debug_rdna3accel_flipbuf_present);
+    RD3ACCEL_REG4(rdna3accel_swaps_genpresent); RD3ACCEL_REG4(rdna3accel_swaps_genhold);
+    RD3ACCEL_REG4(rdna3accel_swaps_genhold_would); RD3ACCEL_REG4(rdna3accel_swaps_genfirst);
+    RD3ACCEL_REG4(rdna3accel_swaps_gencontent); RD3ACCEL_REG4(rdna3accel_swaps_genunwritten);
+    RD3ACCEL_REG4(rdna3accel_cf_gennewer);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_gen_aperture); sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_gen_cf);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_gen_evicted); sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_gen_freed);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_gen_resets);
+    RD3ACCEL_REG4(rdna3accel_swaps_gen_resets); RD3ACCEL_REG4(rdna3accel_swaps_gen_judged);
+    RD3ACCEL_REG4(rdna3accel_swaps_gen_aged);   RD3ACCEL_REG4(rdna3accel_swaps_gen_evictpresent);
+    RD3ACCEL_REG4(rdna3accel_swaps_gen_landed); RD3ACCEL_REG4(rdna3accel_swaps_gennotjudged);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_gen_apcached);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_gen_cfnostamp);
+    RD3ACCEL_REG4(rdna3accel_flipbuf);          RD3ACCEL_REG4(rdna3accel_flipbuf_scanout);
+    RD3ACCEL_REG4(rdna3accel_flipbuf_presented); RD3ACCEL_REG4(rdna3accel_flipbuf_held);
+    RD3ACCEL_REG4(rdna3accel_flipbuf_failed);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_flipbuf_nohead); sysctl_register_oid(&sysctl__debug_rdna3accel_hook_intr);
+    RD3ACCEL_REG4(rdna3accel_flipbuf_busy); RD3ACCEL_REG4(rdna3accel_flipbuf_unlocked);
+    RD3ACCEL_REG4(rdna3accel_flipbuf_emptyheld);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_flipbuf_nores); sysctl_register_oid(&sysctl__debug_rdna3accel_flipbuf_intoff);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_flipbuf_badptr); sysctl_register_oid(&sysctl__debug_rdna3accel_hook_intoff);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_hook_intr_flipbuf); sysctl_register_oid(&sysctl__debug_rdna3accel_hook_intr_scanout);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_hook_intr_pickpresent);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_hook_intr_didsubmitswap);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_hook_intr_backready);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_hook_intr_submitupdate);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_hook_pickpresent); sysctl_register_oid(&sysctl__debug_rdna3accel_hook_didsubmitswap);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_hook_backready); sysctl_register_oid(&sysctl__debug_rdna3accel_hook_backready_no);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_hook_submitupdate);
+}
 static void rd3AccelInstallSysctl2(void)
 {
     sysctl_register_oid(&sysctl__debug_rdna3accel_trace);        sysctl_register_oid(&sysctl__debug_rdna3accel_trace_stream);
@@ -6609,6 +7570,7 @@ static void rd3AccelInstallSysctl2(void)
     RD3ACCEL_REG4(rdna3accel_swaps_copynowait); RD3ACCEL_REG4(rdna3accel_swaps_copybrkflip);
     RD3ACCEL_REG4(rdna3accel_swaps_copyfreewait);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_copybrktrips);
+    rd3AccelInstallSysctlGen();   /* card run 2026-10-17d */
 }
 
 IOReturn RDNA3Accelerator::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4)

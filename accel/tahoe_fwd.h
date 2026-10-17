@@ -18,8 +18,7 @@
     void set_shape(eIOAccelSurfaceShapeBits a0, unsigned int a1, IOAccelDeviceRegion* a2, unsigned long long a3) override; \
     void set_shape_backing_length_ext(eIOAccelSurfaceShapeBits a0, unsigned int a1, unsigned long long a2, unsigned int a3, unsigned long long a4, IOAccelDeviceRegion* a5, unsigned long long a6) override; \
     void surface_lock_options(eLockType a0, unsigned int a1, IOAccelSurfaceInformation* a2, unsigned long long a3) override; \
-    void surface_unlock_options(eLockType a0, unsigned int a1) override; \
-    void submitUpdate(unsigned int a0, IOAccelBounds* a1, unsigned int a2) override;
+    void surface_unlock_options(eLockType a0, unsigned int a1) override;
 #define NM_TAHOE_FWD_RD3DisplayPipe \
     void setStereo(IOAccelStereoMode a0) override;
 #define NM_TAHOE_FWD_RD3GLContext \
@@ -99,7 +98,6 @@ __attribute__((naked)) void RD3Surface::set_shape(eIOAccelSurfaceShapeBits a0, u
 __attribute__((naked)) void RD3Surface::set_shape_backing_length_ext(eIOAccelSurfaceShapeBits a0, unsigned int a1, unsigned long long a2, unsigned int a3, unsigned long long a4, IOAccelDeviceRegion* a5, unsigned long long a6) { __asm__("movq __ZTV20IOAccelLegacySurface@GOTPCREL(%rip), %r11\n\tjmpq *2600(%r11)"); } \
 __attribute__((naked)) void RD3Surface::surface_lock_options(eLockType a0, unsigned int a1, IOAccelSurfaceInformation* a2, unsigned long long a3) { __asm__("movq __ZTV20IOAccelLegacySurface@GOTPCREL(%rip), %r11\n\tjmpq *2608(%r11)"); } \
 __attribute__((naked)) void RD3Surface::surface_unlock_options(eLockType a0, unsigned int a1) { __asm__("movq __ZTV20IOAccelLegacySurface@GOTPCREL(%rip), %r11\n\tjmpq *2616(%r11)"); } \
-__attribute__((naked)) void RD3Surface::submitUpdate(unsigned int a0, IOAccelBounds* a1, unsigned int a2) { __asm__("movq __ZTV20IOAccelLegacySurface@GOTPCREL(%rip), %r11\n\tjmpq *2664(%r11)"); } \
 __attribute__((naked)) void RD3DisplayPipe::setStereo(IOAccelStereoMode a0) { __asm__("movq __ZTV24IOAccelLegacyDisplayPipe@GOTPCREL(%rip), %r11\n\tjmpq *2480(%r11)"); } \
 __attribute__((naked)) void * RD3GLContext::getOwningTask() const { __asm__("movq __ZTV17IOAccelGLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2416(%r11)"); } \
 __attribute__((naked)) void * RD3GLContext::getGPUTask() const { __asm__("movq __ZTV17IOAccelGLContext2@GOTPCREL(%rip), %r11\n\tjmpq *2424(%r11)"); } \
@@ -152,7 +150,8 @@ __attribute__((naked)) bool RD3MemoryMap::matchOptionBits(unsigned int a0) { __a
 __attribute__((naked)) unsigned long long RD3MemoryMap::getLength() const { __asm__("movq __ZTV16IOAccelMemoryMap@GOTPCREL(%rip), %r11\n\tjmpq *376(%r11)"); } \
 __attribute__((naked)) uint64_t RDNA3Accelerator::tmpTotalVRAM() { __asm__("movq __ZTV22IOGraphicsAccelerator2@GOTPCREL(%rip), %r11\n\tjmpq *2160(%r11)"); } \
 __attribute__((naked)) uint64_t RDNA3Accelerator::totalTextureMemory() { __asm__("movq __ZTV22IOGraphicsAccelerator2@GOTPCREL(%rip), %r11\n\tjmpq *2168(%r11)"); } \
-/* 67 forwarded slots (RD3Surface::submitCopyForward is implemented, card run 54) */
+/* 66 forwarded slots (RD3Surface::submitCopyForward is implemented, card run 54; RD3Surface::submitUpdate is
+ * traced and forwarded by rdna3-accel.cpp's flip-present hooks, card run 2026-10-17d) */
 #else
 #define NM_TAHOE_FWD(cls)
 #define NM_TAHOE_FWD_DEFS

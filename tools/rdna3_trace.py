@@ -15,7 +15,7 @@ Damaged input never raises: Trace.problems names the file and byte.
   tools/rdna3_trace.py <file>... [--timeline N] [--head H]
 
 tools/triage_reports.py imports it: verdicts per hypothesis (H-COPY,
-H-B2, H-STALE, H-FREE, copy forward errors), the A/B side by side, the coverage
+H-B2, H-STALE, H-GEN, H-FLIPPATH, H-FREE, copy forward errors), the A/B side by side, the coverage
 self-check of docs/AFTER-TESTS.md's questions Q1-Q11 and the last events
 per head.
 """
@@ -44,7 +44,8 @@ SRC_ACCEL, SRC_CORE = 0, 1
 READ_ALL, READ_STREAM, READ_SEC = 0, 1, 2
 TYPES = {0: "none", 1: "SWAP", 2: "CF", 3: "SHAPE", 4: "VMALLOC", 5: "VMFREE", 6: "APERTURE", 7: "PAGEOFF",
          8: "SURFGEM", 9: "MODE", 10: "FLIP", 11: "LATCH", 12: "SYNC", 13: "GONE", 14: "MODESET", 15: "SCAN",
-         16: "CS", 17: "FENCE", 18: "GPUWAIT", 19: "RESET", 20: "VMFAULT", 21: "SURFRES", 22: "PANEL"}
+         16: "CS", 17: "FENCE", 18: "GPUWAIT", 19: "RESET", 20: "VMFAULT", 21: "SURFRES", 22: "PANEL",
+         23: "FLIPBUF", 24: "HOOK"}
 T = dict((v, k) for k, v in TYPES.items())
 SWAP_ARG = {0: "skip", 1: "flip", 2: "flip refused, copied", 3: "flip refused", 4: "copy", 5: "hold", 6: "copy FAILED",
             7: "no head"}
@@ -57,6 +58,19 @@ V1_LANDED_WOULD = 1 << 22             # SWAP v1: one found, not presented (debug
 LANDED_A1 = 0xfe                      # SWAP v4 >> 24 with V1_LANDED(_WOULD): the landed buffer is a1 itself
 V1_STALE = 1 << 23                    # SWAP v1 with arg 5: a stale back held (v3: the swap that last showed it)
 V1_STALE_WOULD = 1 << 24              # SWAP v1: one would have been held, copied (debug.rdna3accel_swap_stale=0)
+V1_GEN_HOLD = 1 << 25                 # SWAP v1: held by the write generations (card run 2026-10-17d; v3 the head's)
+V1_GEN_WOULD = 1 << 26                # SWAP v1: the generations would have held it (swap_gen 0, or mode 2)
+V1_GEN_WHY_SHIFT, V1_GEN_WHY_MASK = 28, 15   # SWAP v1: the rule's reason (rdna3_write_gen.h enum rd3_wg_why)
+V1_FLIPBUF = 1 << 27                  # SWAP v1: a flip-buffer present (debug.rdna3accel_flipbuf_present=1)
+GEN_WHY = {0: "not judged", 1: "newer", 2: "first after a reset", 3: "changed with no write seen",
+           4: "same as the panel's", 5: "older", 6: "never written", 7: "aged (no present for 250 ms)",
+           8: "a newer generation was evicted"}
+GEN_PRESENTS, GEN_HOLDS = (1, 2, 3, 7, 8), (4, 5, 6)
+COPY_US_CAP = 0xffff                  # SWAP v2's copy time saturates here (v2 >> 16 is the generation)
+FLIPBUF_WHAT = {0: "traced", 1: "PRESENTED", 2: "held", 3: "present FAILED", 4: "no head", 5: "no VRAM resource",
+                6: "lock busy"}
+HOOK_KIND = {0: "pickPresentType", 1: "didSubmitSwap", 2: "isBackBufferReady", 3: "submitUpdate"}
+FLIPPATH_NS = 50 * 10 ** 6            # H-FLIPPATH: a copy forward with no swap of its surface within this
 STALE_NS = 20 * 10 ** 6               # H-STALE: a stale copy follows another back's copy within this
 AB_NAME = {0: "-", 1: "A: mode 1", 2: "B: mode 0", 3: "back"}
 
@@ -310,6 +324,18 @@ def swap_back(e):
     return e.pb, rc2, e.pa, rc1, e.bb, e.ba
 
 
+def swap_events(trace):
+    """the legacy swaps (submitSwapCopy): the flip-buffer presents (SWAP with V1_FLIPBUF, card run 2026-10-17d) are
+    not swaps of a surface and stay out of H-B2, H-COPY, the A/B and the coverage counts"""
+    return [e for e in trace.by("SWAP") if not e.v1 & V1_FLIPBUF]
+
+
+def copy_us_text(e):
+    """a SWAP's copy time: v2's low 16 bits, saturated at 65535 us (the high 16 bits are the generation)"""
+    us = e.v2 & COPY_US_CAP
+    return ">=%d us (capped)" % us if us == COPY_US_CAP else "%d us" % us
+
+
 def swap_mode(e):
     return (e.v1 >> 12) & 0xf
 
@@ -376,7 +402,7 @@ def ab_events(trace):
     """the swaps the A/B judges: those of phases 1 and 2 when the A/B ran,
     else all of them (and whether it was restricted)"""
     info = ab_info(trace)
-    swaps = trace.by("SWAP")
+    swaps = swap_events(trace)
     if not info["ran"]:
         return swaps, False
     ph = phase_of(trace)
@@ -403,7 +429,7 @@ def ab_validity(trace, expected=False, min_swaps=AB_MIN_SWAPS):
     ph = phase_of(trace)
     per = {}
     modes = {}
-    for e in trace.by("SWAP"):
+    for e in swap_events(trace):
         p = ph.get(id(e), 0)
         if p not in (1, 2) or e.head == 0xff:
             continue
@@ -414,7 +440,7 @@ def ab_validity(trace, expected=False, min_swaps=AB_MIN_SWAPS):
     if not per:
         out.append(("FAIL", "A/B inconclusive: no swap on any head in phases 1 and 2 (nothing redrew: Activity "
                             "Monitor not running?)"))
-    others = sorted(set(e.head for e in trace.by("SWAP") if e.head != 0xff) - set(per))
+    others = sorted(set(e.head for e in swap_events(trace) if e.head != 0xff) - set(per))
     for h in others:
         out.append(("INFO", "A/B: head %d had no swap in phases 1 and 2 (nothing redrew on its display): not judged" % h))
     for h, c in sorted(per.items()):
@@ -441,7 +467,7 @@ def per_head_buffers(trace, swaps=None):
         if e.arg == 1:
             ap[e.pa] = ap.get(e.pa, 0) + 1
     heads = {}
-    for e in (trace.by("SWAP") if swaps is None else swaps):
+    for e in (swap_events(trace) if swaps is None else swaps):
         if e.head == 0xff:
             continue
         back, rcb = swap_back(e)[:2]
@@ -477,7 +503,7 @@ def segments(trace, swaps=None):
     """the swaps per (swap mode, A/B phase): their counts side by side"""
     ph = phase_of(trace)
     seg = {}
-    for e in (trace.by("SWAP") if swaps is None else swaps):
+    for e in (swap_events(trace) if swaps is None else swaps):
         k = (swap_mode(e), ph.get(id(e), 0))
         s = seg.setdefault(k, {"swaps": 0, "shown": 0, "held": 0, "black": 0, "empty": 0, "failed": 0, "direct": 0,
                                "double": 0, "waits": 0, "wait_us": 0, "copy_us": 0, "events": [], "landed": 0,
@@ -499,7 +525,7 @@ def segments(trace, swaps=None):
         if e.flags & F_WAITED:
             s["waits"] += 1
             s["wait_us"] += e.v3
-        s["copy_us"] += e.v2
+        s["copy_us"] += e.v2 & 0xffff   # v2 >> 16: the back's write generation (card run 2026-10-17d)
         s["events"].append(e)
     for s in seg.values():
         s["inplace"], s["inplace_checked"] = inplace_rewrites(s["events"])
@@ -567,6 +593,8 @@ def hypotheses(trace, ctx=None):
                                                                        capped[0].v0)))
     out.extend(copy_black(trace, swaps))
     out.extend(h_stale(trace, ctx))
+    out.extend(h_gen(trace, ctx))
+    out.extend(h_flippath(trace, ctx))
     resets = trace.by("RESET")
     if resets:
         out.append(("WARN", "GPU", "%d hang recover%s (first IP %d seq %d)" % (len(resets), "y" if len(resets) == 1
@@ -630,6 +658,240 @@ def accel_lost(trace):
     return max([h["lost"] for h in acc] or [0])
 
 
+def gen_why(e):
+    """a SWAP's write-generation reason (rdna3_write_gen.h enum rd3_wg_why; 0: not judged)"""
+    return (e.v1 >> V1_GEN_WHY_SHIFT) & V1_GEN_WHY_MASK
+
+
+def gen_swaps(trace):
+    """{head: {"swaps", "judged", "presented", "held", "would", "landed", "other", "flipbuf", "why": {reason: n},
+    "real": [SWAP], "changed": [SWAP]}}: the write generations of card run 2026-10-17d per head. "judged" =
+    "presented" (the rule let it through and it went to the panel) + "held" (the rule held it) + "would" (it would have
+    held: swap_gen 0, mode 2) + "landed" (it would have held, the surface's newer buffer presented instead) + "other"
+    (the rule let it through, another rule held it: the empty back, the stale back - or the copy failed). A hold is
+    "real" when the decoder saw a write into the held back (an APERTURE add, a copy forward into it) after the head's
+    last presentation and before the hold (an evicted generation, a write path out of step), "changed" when the
+    held back's band bytes differ from those of its last presentation on the head (ECC review round 1)."""
+    out = {}
+    last = {}     # head -> ns of its last presentation
+    bands = {}    # (head, address) -> band bytes at its last presentation
+    writes = {}   # address -> [ns of writes]
+    for e in trace.events:
+        if e.src != SRC_ACCEL:
+            continue
+        t = trace.ns(e, e.src)
+        if e.type == T["APERTURE"] and e.arg == 1 and e.flags & 1:
+            writes.setdefault(e.pa, []).append(t)
+            continue
+        if e.type == T["CF"] and not e.v4 and not e.flags & 4:
+            writes.setdefault(e.pb, []).append(t)
+            continue
+        if e.type != T["SWAP"] or e.head == 0xff:
+            continue
+        flip = bool(e.v1 & V1_FLIPBUF)
+        back = e.pa if flip else swap_back(e)[0]
+        bb = e.ba if flip else swap_back(e)[4]
+        d = out.setdefault(e.head, {"swaps": 0, "judged": 0, "presented": 0, "held": 0, "would": 0, "landed": 0,
+                                    "other": 0, "flipbuf": 0, "why": {}, "real": [], "changed": [], "modes": set()})
+        d["swaps"] += 1
+        d["modes"].add(swap_mode(e))
+        why = gen_why(e)
+        shown = e.arg in (1, 2, 4)
+        if why or e.v1 & (V1_GEN_HOLD | V1_GEN_WOULD):
+            d["judged"] += 1
+            d["why"][why] = d["why"].get(why, 0) + 1
+            d["flipbuf"] += flip
+            if e.v1 & V1_GEN_WOULD:
+                d["would"] += 1
+            elif e.v1 & V1_GEN_HOLD:
+                d["held"] += 1
+                t0 = last.get(e.head)
+                if t0 is not None and any(t0 <= x <= t for x in writes.get(back, ())):
+                    d["real"].append(e)
+                pb = bands.get((e.head, back))
+                if pb is not None and bb != pb and any(bb):
+                    d["changed"].append(e)
+            elif why in GEN_HOLDS and shown and e.v1 & V1_LANDED:
+                d["landed"] += 1
+            elif shown:
+                d["presented"] += 1
+            else:
+                d["other"] += 1
+        if shown:
+            last[e.head] = t
+            lb = swap_landed(trace, e) if e.v1 & V1_LANDED else 0
+            if not lb:
+                bands[(e.head, back)] = bb
+    return out
+
+
+def h_gen(trace, ctx=None):
+    """[(level, "H-GEN", text)]: one line per head with judged swaps - presented (by reason), held (by reason), the
+    surface's newer buffer presented instead (landed), would-hold (swap_gen 0 / mode 2), let through but held by
+    another rule. FAIL a held back the decoder saw written since the head's last frame, FAIL a held back whose band
+    bytes changed since its last presentation, FAIL swaps of a head in mode 0/1 with swap_gen 1 and none judged (the
+    rule inert), WARN the content guard, the age guard, the eviction guard, WARN more than two holds per present,
+    WARN the kernel's counters apart from the trace's or missing."""
+    ctx = ctx or {}
+    c = ctx.get("counters") or {}
+    out = []
+    lost = accel_lost(trace)
+    for h, d in sorted(gen_swaps(trace).items()):
+        w = d["why"]
+        if not d["judged"]:
+            if c.get("swap_gen") == 1 and d["modes"] & set((0, 1)) and d["swaps"] >= 20:
+                out.append(("FAIL", "H-GEN", "head %d: %d swaps in mode 0/1 with swap_gen 1, NONE judged by the write "
+                            "generations: the rule is inert (no head known at the swaps, or a kext without it - "
+                            "swaps_gennotjudged_h%d says)" % (h, d["swaps"], h)))
+            continue
+        text = ("head %d: %d swaps judged by the write generations: %d presented (newer %d, first after a reset %d, "
+                "changed with no write seen %d, aged %d, after an eviction %d), %d held (the panel's %d, older %d, "
+                "never written %d), %d the surface's newer buffer instead, %d would have been held (swap_gen 0 / mode "
+                "2), %d let through but held by another rule or failed, %d of them flip-buffer presents" % (
+                    h, d["judged"], d["presented"], w.get(1, 0), w.get(2, 0), w.get(3, 0), w.get(7, 0), w.get(8, 0),
+                    d["held"], w.get(4, 0), w.get(5, 0), w.get(6, 0), d["landed"], d["would"], d["other"],
+                    d["flipbuf"]))
+        out.append(("INFO", "H-GEN", text))
+        if w.get(3):
+            out.append(("WARN", "H-GEN", "head %d: %d back(s) changed with no write the accelerator saw (presented by "
+                        "the content guard): a writer that is neither the family's page-on nor copy forward - the "
+                        "kernel log's 'NOT written since this head presented it' lines name them" % (h, w[3])))
+        if w.get(7) or w.get(8):
+            out.append(("WARN", "H-GEN", "head %d: %d swap(s) presented by the age guard (no present for 250 ms, 3 holds "
+                        "in a row) and %d after an eviction: the rule would have frozen the panel - a write it does not "
+                        "see, or a full table" % (h, w.get(7, 0), w.get(8, 0))))
+        if d["real"]:
+            e = d["real"][0]
+            out.append(("FAIL", "H-GEN", "head %d: %d hold(s) of a back the trace shows WRITTEN since the head's last "
+                        "frame (first swap #%d, back 0x%x): a frame held back - an evicted generation "
+                        "(swaps_gen_evicted) or a write the kernel did not stamp" % (
+                            h, len(d["real"]), e.v0, e.pa if e.v1 & V1_FLIPBUF else swap_back(e)[0])))
+        if d["changed"]:
+            e = d["changed"][0]
+            out.append(("FAIL", "H-GEN", "head %d: held a CHANGED back %d time(s) (first swap #%d, back 0x%x): its band "
+                        "bytes differ from its last presentation on this head - a frame held back" % (
+                            h, len(d["changed"]), e.v0, e.pa if e.v1 & V1_FLIPBUF else swap_back(e)[0])))
+        pres = d["presented"] + d["landed"]
+        if d["held"] > 2 * max(pres, 1) and d["held"] >= 20:
+            out.append(("WARN", "H-GEN", "head %d: %d holds against %d presents (WindowServer's two swaps per frame give "
+                        "about one): the panel may look frozen - compare the looks" % (h, d["held"], pres)))
+        if pres >= 10 and w.get(2, 0) > 0.3 * pres:
+            out.append(("WARN", "H-GEN", "head %d: %d of %d presents were the first after a reset (more than 30%%): the "
+                        "head is reset all the time (surfaces taking turns? swaps_gen_resets_h%d) and the rule hardly "
+                        "acts" % (h, w[2], pres, h)))
+        k = c.get("swaps_genhold_h%d" % h)
+        if k is None and c and current_counters(c):
+            out.append(("WARN", "H-GEN", "head %d: counter missing: swaps_genhold_h%d (the collector's grep, or a kext "
+                        "before the write generations) - the trace alone judges it" % (h, h)))
+        elif k is not None and abs(k - d["held"]) > lost:
+            out.append(("WARN", "H-GEN", "head %d: the kernel counted %d generation holds, the trace holds %d (%d "
+                        "events lost): the trace does not cover the counters' window" % (h, k, d["held"], lost)))
+    return out
+
+
+def current_counters(c):
+    """the report's counters come from a kext with the write generations (card run 2026-10-17d)"""
+    return "swap_gen" in c
+
+
+def flippath(trace):
+    """{head: {"cf": copy forwards, "alone": those with no swap of their surface within FLIPPATH_NS after,
+    "bursts": [(first CF, n, ms)] runs of 3 or more alone in a row, "flipbuf": {kind: n}, "what": {v4: n}}}: the
+    family's other present path (card run 2026-10-17d: copy forward rotated a surface's three buffers at ~60 Hz with
+    no submitSwapCopy)"""
+    swaps = {}
+    for e in swap_events(trace):
+        if e.src == SRC_ACCEL and e.obj:
+            swaps.setdefault(e.obj, []).append(trace.ns(e, e.src))
+    out = {}
+    run = {}
+
+    def new():
+        return {"cf": 0, "alone": 0, "bursts": [], "flipbuf": {}, "what": {}}
+    for e in trace.by("CF"):
+        if e.src != SRC_ACCEL:
+            continue
+        h = e.head
+        d = out.setdefault(h, new())
+        d["cf"] += 1
+        t = trace.ns(e, e.src)
+        alone = not any(t <= x <= t + FLIPPATH_NS for x in swaps.get(e.obj, ()))
+        r = run.setdefault(h, [])
+        if alone:
+            d["alone"] += 1
+            r.append((e, t))
+        else:
+            if len(r) >= 3:
+                d["bursts"].append((r[0][0], len(r), (r[-1][1] - r[0][1]) // 10 ** 6))
+            run[h] = []
+    for h, r in run.items():
+        if len(r) >= 3:
+            out[h]["bursts"].append((r[0][0], len(r), (r[-1][1] - r[0][1]) // 10 ** 6))
+    for e in trace.by("FLIPBUF"):
+        d = out.setdefault(e.head, new())
+        d["flipbuf"][e.arg] = d["flipbuf"].get(e.arg, 0) + 1
+        d["what"][e.v4] = d["what"].get(e.v4, 0) + 1
+    return out
+
+
+def h_flippath(trace, ctx=None):
+    """[(level, "H-FLIPPATH", text)]: per head, the copy forwards no swap of their surface followed within 50 ms (the
+    rotation bursts: frames the family presented by another path) and what the flip-buffer hooks saw (FLIPBUF events:
+    calls, presents, holds); the surface hooks (HOOK events) in one line. "not judged" for a kext without the hooks;
+    WARN bursts with no FLIPBUF event at all (the frames go by yet another path), WARN a failed flip-buffer present
+    and the outcomes that did not present (lock busy, no VRAM resource, no head), WARN a missing counter."""
+    ctx = ctx or {}
+    c = ctx.get("counters") or {}
+    out = []
+    hooks = trace.by("HOOK")
+    fb = trace.by("FLIPBUF")
+    hooked = bool(hooks or fb) or current_counters(c)
+    for h, d in sorted(flippath(trace).items(), key=lambda x: x[0]):
+        hn = "head %s" % (h if h != 0xff else "?")
+        if d["cf"]:
+            longest = max(d["bursts"], key=lambda b: b[1]) if d["bursts"] else None
+            base = "%s: %d of %d copy forwards with no swap of their surface within %d ms, %d burst(s) of 3 or more%s" % (
+                hn, d["alone"], d["cf"], FLIPPATH_NS // 10 ** 6, len(d["bursts"]),
+                " (the longest: %d copy forwards over %d ms from CF seq %d)" % (
+                    longest[1], longest[2], longest[0].seq) if longest else "")
+            if not hooked:
+                out.append(("INFO", "H-FLIPPATH", base + " - the flip-buffer path not judged: a kext without the "
+                            "flip-present hooks"))
+            elif d["bursts"] and not fb:
+                out.append(("WARN", "H-FLIPPATH", base + " - and NO flip-buffer call in the trace: those frames reach "
+                            "the panel by yet another path (or not at all)"))
+            else:
+                out.append(("INFO", "H-FLIPPATH", base))
+        if d["flipbuf"] and h != 0xff and c and current_counters(c) and "flipbuf_h%d" % h not in c:
+            out.append(("WARN", "H-FLIPPATH", "%s: counter missing: flipbuf_h%d although the trace has flip-buffer "
+                        "calls (the collector's grep)" % (hn, h)))
+        if d["flipbuf"]:
+            bad = dict((k, v) for k, v in d["what"].items() if k in (3, 4, 5, 6))
+            out.append(("WARN" if bad else "INFO", "H-FLIPPATH", "%s: flip-buffer calls %s; %s%s" % (
+                hn, ", ".join("%s %d" % ("submitScanoutFlipBuffer" if k == 1 else "submitFlipBuffer", v)
+                              for k, v in sorted(d["flipbuf"].items())),
+                ", ".join("%s %d" % (FLIPBUF_WHAT.get(k, k), v) for k, v in sorted(d["what"].items())),
+                " - NOT presented: %s (the kernel log's 'flipbuf' lines say why)" % ", ".join(
+                    "%s %d" % (FLIPBUF_WHAT.get(k, k), v) for k, v in sorted(bad.items())) if bad else "")))
+    if hooks:
+        per = {}
+        notready = 0
+        for e in hooks:
+            per[e.arg] = per.get(e.arg, 0) + 1
+            notready += e.arg == 2 and not e.v2
+        out.append(("INFO", "H-FLIPPATH", "surface hooks traced: %s%s" % (
+            ", ".join("%s %d" % (HOOK_KIND.get(k, k), v) for k, v in sorted(per.items())),
+            "; isBackBufferReady said NOT ready %d time(s)" % notready if notready else "")))
+    elif current_counters(c):
+        sw = sum(v for k, v in c.items() if re.match(r"swaps_h\d$", k))
+        calls = sum(v for k, v in c.items() if k.startswith(("hook_", "flipbuf")) and k != "flipbuf_present")
+        if sw > 50 and not calls:
+            out.append(("WARN", "H-FLIPPATH", "hook wiring unproven: %d swaps and every hook_* / flipbuf* counter 0 - "
+                        "the family never called a hooked method (or the vtable slots are not the ones it calls: the "
+                        "boot log's 'flip-present hooks installed' line has them)" % sw))
+    return out
+
+
 def stale_backs(trace):
     """the stale back of card run 2026-10-17c, per head over the whole trace:
     {head: {"copies": mode 1/2 copies decoded, "copied": [(SWAP, the swap #
@@ -682,7 +944,7 @@ def stale_backs(trace):
                 if e.pb in hs["rec"]:
                     hs["rec"][e.pb][1] = True
             continue
-        if e.head == 0xff:
+        if e.head == 0xff or e.v1 & V1_FLIPBUF:
             continue
         o = head_out(e.head)
         o["swaps"] += 1
@@ -845,7 +1107,7 @@ def copy_black(trace, swaps=None):
         if e.arg in (0xfe, 0xfd) and e.flags & (64 | 128):
             after.setdefault((e.head, e.v0), []).append(e)
     bad = []
-    for e in (trace.by("SWAP") if swaps is None else swaps):
+    for e in (swap_events(trace) if swaps is None else swaps):
         if e.arg != 4:
             continue
         back, rcb = swap_back(e)[:2]
@@ -876,7 +1138,7 @@ def back_surfaces(trace, swaps=None):
             ids[e.pa] = (e.v3, e.v4)
     out = {}
     ph = phase_of(trace)
-    for e in (trace.by("SWAP") if swaps is None else swaps):
+    for e in (swap_events(trace) if swaps is None else swaps):
         if e.head == 0xff:
             continue
         back, rcb = swap_back(e)[:2]
@@ -1009,7 +1271,7 @@ def coverage(trace, ctx=None):
     ctx = ctx or {}
     out = []
     ab_ran = bool(ctx.get("ab_ran")) or ab_info(trace)["ran"]
-    swaps = trace.by("SWAP")
+    swaps = swap_events(trace)
     acc = [h for h in trace.headers if h["source"] == SRC_ACCEL and h["read_kind"] != READ_SEC]
     core = [h for h in trace.headers if h["source"] == SRC_CORE]
     have_accel = bool(acc) or any(e.src == SRC_ACCEL for e in trace.events)
@@ -1145,13 +1407,34 @@ def _fmt_event(trace, e, ms, n):
             landed += " held: stale back (shown at #%d)" % e.v3
         if e.v1 & V1_STALE_WOULD:
             landed += " stale: would hold (swap_stale 0)"
+        why = gen_why(e)
+        if why:
+            landed += " gen %d: %s" % (e.v2 >> 16, GEN_WHY.get(why, why))
+        if e.v1 & V1_GEN_HOLD:
+            landed += " HELD: not written since the head's frame (head's generation %d)" % e.v3
+        if e.v1 & V1_GEN_WOULD:
+            landed += " gen: would hold (swap_gen 0 or mode 2)"
+        if e.v1 & V1_FLIPBUF:
+            return ("%10.3f ms SWAP #%d h%s mode %d %s FLIP-BUFFER PRESENT (%s): buffer 0x%x (%s, %s) other 0x%x%s -> "
+                    "panel 0x%x target %s copy %s" % (
+                        ms, e.v0, e.head if e.head != 0xff else "?", swap_mode(e), SWAP_ARG.get(e.arg, e.arg),
+                        "scanout" if (e.v4 >> 24) & 0xff == 1 else "flip", e.pa, RC.get(e.v1 & 0xf, e.v1 & 0xf),
+                        e.ba.hex(), e.pb, landed, e.pc, TARGET.get((e.v1 >> 16) & 0xf, "?"), copy_us_text(e)))
         return ("%10.3f ms SWAP #%d h%s mode %d %s: back 0x%x (%s, %s) front 0x%x (%s)%s -> panel 0x%x target %s%s%s "
-                "copy %d us wait %d us" % (ms, e.v0, e.head if e.head != 0xff else "?", swap_mode(e),
+                "copy %s wait %d us" % (ms, e.v0, e.head if e.head != 0xff else "?", swap_mode(e),
                                           SWAP_ARG.get(e.arg, e.arg), back, RC.get(rcb, rcb), bb.hex(), front,
                                           RC.get(rcf, rcf), landed, e.pc, TARGET.get((e.v1 >> 16) & 0xf, "?"),
                                           " FRONT-OK" if e.flags & F_FRONT_OK else "",
-                                          " tear-free" if e.flags & F_DOUBLE else "", e.v2,
-                                          0 if e.arg == 5 and e.v1 & V1_STALE else e.v3))
+                                          " tear-free" if e.flags & F_DOUBLE else "", copy_us_text(e),
+                                          0 if e.arg == 5 and e.v1 & (V1_STALE | V1_GEN_HOLD) else e.v3))
+    if n == "FLIPBUF":
+        return ("%10.3f ms FLIPBUF h%s %s(%d) #%d res 0x%x / 0x%x -> %s%s%s panel 0x%x" % (
+            ms, e.head if e.head != 0xff else "-", "submitScanoutFlipBuffer" if e.arg == 1 else "submitFlipBuffer",
+            e.v0, e.v1, e.pa, e.pb, FLIPBUF_WHAT.get(e.v4, e.v4), " (flipbuf_present 1)" if e.flags & 1 else "",
+            " (took the family's lock)" if e.flags & 2 else "", e.pc))
+    if n == "HOOK":
+        return "%10.3f ms HOOK h%s %s(%d, %d) -> 0x%x (call %d)" % (
+            ms, e.head if e.head != 0xff else "-", HOOK_KIND.get(e.arg, e.arg), e.v0, e.v1, e.v2, e.v3)
     if n == "SCAN":
         return "%10.3f ms SCAN h%s buf[%s] 0x%x %s%s%s%s bands %s (was %s)" % (
             ms, e.head if e.head != 0xff else "?", "%d" % e.arg if e.arg < 0xfd else {0xfe: "scanout", 0xfd: "front",

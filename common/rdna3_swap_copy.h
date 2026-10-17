@@ -18,8 +18,9 @@
  * (swaps_shownfreed: 14 + 10).
  *
  * Mode 1 (debug.rdna3accel_swap_mode / boot-arg rdna3swapmode=1; the default
- * until card run 2026-10-17d, whose bisect found it broke both monitors)
- * copies. The front resource stopped being the scanout on our card: the
+ * until card run 2026-10-17d, whose bisect found it broke both monitors, and
+ * again since the write generations of rdna3_write_gen.h hold the old frames
+ * that broke it) copies. The front resource stopped being the scanout on our card: the
  * family maps it into the GPU page table, which the scanout's vidmem cannot
  * be, frees it and gives the resource ordinary VRAM (card run 58b:
  * 0x87040000 / 0x88060000), so the panel needs its own copy. Each head has
@@ -64,12 +65,25 @@
 
 #include "rdna3_swap_front.h"
 
-/* 0 flip (card run 2026-10-17; the default again since 2026-10-17d), 1 copy
- * keeping the picture over an empty back, 2 copy everything */
+/* 0 flip (card run 2026-10-17; the default 2026-10-17d..g), 1 copy keeping
+ * the picture over an empty back (the default again since the write
+ * generations, rdna3_write_gen.h), 2 copy everything */
 enum rd3_swap_mode { RD3_SWAPMODE_FLIP = 0, RD3_SWAPMODE_COPY = 1, RD3_SWAPMODE_COPY_ALL = 2 };
-/* card run 2026-10-17d, step bisect: mode 0 with every other switch on was right on both
- * monitors, switching to mode 1 broke both (step 6) - the flip is the default again */
-#define RD3_SWAPMODE_DEFAULT RD3_SWAPMODE_FLIP
+/* Card run 2026-10-17d's bisect ran on the default profile (WindowServer on
+ * the CPU, the AGDC idle) and found mode 1 broke both monitors, so mode 0
+ * became the default. On the agdc profile (17f, 17g) mode 0 is broken
+ * itself: it flips the panel to buf[1], which WindowServer writes the next
+ * frame into ("rewritten in place", "A LIVE WRITER IS PAINTING THE
+ * SCANNED-OUT SURFACE"). Mode 1 is the only mode in which the panel never
+ * shows a buffer WindowServer writes. What broke it in 17d is in that run's
+ * trace: copy forward bursts put old frames into buf[2], which mode 1 copied
+ * over the panel (the stale-back hold needs "no copy forward into it");
+ * the write generations hold those (tests/test_write_gen.c: the model of
+ * 17d's sequence shows every frame on the panel in order and no old one
+ * in mode 1 with them, 8 old frames shown with the old rules). So the copy
+ * is the default again; rdna3swapmode=0 / debug.rdna3accel_swap_mode=0 is
+ * the flip. */
+#define RD3_SWAPMODE_DEFAULT RD3_SWAPMODE_COPY
 #define RD3_SWAPMODE_MAX     RD3_SWAPMODE_COPY_ALL
 
 static inline int rd3_swapmode_valid(long v)
@@ -613,12 +627,14 @@ struct rd3_sc_cf_in {
     int srcIsHeadFront;  /* the front is a head's framebuffer resource (else: a surface no head shows) */
     int frontCurrent;    /* that head's last swap copied into this front (same allocation) */
     int scanoutKnown;    /* that head shows a scanout buffer of the accelerator, its last frame */
+    int srcNewer;        /* the front was written after the frame the head presented last (rdna3_write_gen.h
+                          * rd3_wg_src_newer, card run 2026-10-17d): a newer frame than the panel's, the source */
 };
 static inline enum rd3_sc_cf rd3_sc_cf_source(const struct rd3_sc_cf_in *in)
 {
     if (!in || in->srcIsDst)
         return RD3_SCCF_SAME;
-    if (!in->srcIsHeadFront || in->frontCurrent)
+    if (!in->srcIsHeadFront || in->frontCurrent || in->srcNewer)
         return RD3_SCCF_SRC;
     return in->scanoutKnown ? RD3_SCCF_SCANOUT : RD3_SCCF_STALE;
 }

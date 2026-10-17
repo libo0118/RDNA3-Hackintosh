@@ -15,6 +15,10 @@ BASES = {'RD3Resource': 'IOAccelResource2', 'RD3SysMemory': 'IOAccelSysMemory', 
          'RD32DContext': 'IOAccel2DContext2', 'RD3CLContext': 'IOAccelCLContext2', 'RD3VideoContext': 'IOAccelVideoContext2',
          'RD3EventMachine': 'IOAccelEventMachineFast2', 'RD3DisplayMachine': 'IOAccelLegacyDisplayMachine', 'RD3Task': 'IOAccelTask',
          'RD3MemoryMap': 'IOAccelMemoryMap', 'RDNA3Accelerator': 'IOGraphicsAccelerator2'}
+# slots our classes implement themselves (no forwarder generated): RD3Surface::submitCopyForward (card run 54),
+# RD3Surface::submitUpdate (rdna3-accel.cpp's flip-present hooks, card run 2026-10-17d, which reach the base through
+# its vtable themselves)
+IMPLEMENTED = {('RD3Surface', 'submitCopyForward'), ('RD3Surface', 'submitUpdate')}
 def decls():
     out = {}
     for sub in ('iofam', 're'):
@@ -40,6 +44,7 @@ def main(binary, missfile):
             if sym not in miss: continue
             m = re.match(r'(\w+)::(\w+)\((.*)\)( const)?$', dn)
             owner, name, const = m.group(1), m.group(2), bool(m.group(4))
+            if (cls, name) in IMPLEMENTED: continue
             arity = 0 if not m.group(3).strip() else m.group(3).count(',') + 1
             ret, args = d[(owner, name, arity, const)]
             params = ', '.join('%s a%d' % (a, i) for i, a in enumerate(args))

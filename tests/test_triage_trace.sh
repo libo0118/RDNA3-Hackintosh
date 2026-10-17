@@ -376,7 +376,9 @@ has "$out" "INFO swap copy: head 1: stale back (swap_stale 1): kernel: 30 held, 
 has "$out" "swap copy              INFO head 1: H-STALE handled: 30 stale backs held" triage-stalehold-summary
 has "$out" "frame trace            INFO H-STALE: head 1: 31 mode 1/2 copies decoded, 0 stale copied, 30 held" triage-stalehold-summary
 has "$out" "; kernel: 30 held" triage-stalehold-kern
-hasnt "$out" "counter missing" triage-stalehold
+# the stale hold's counters are all there (the write generations' missing ones are gennone's test, ECC review round 1)
+hasnt "$out" "swap copy: counter missing" triage-stalehold
+hasnt "$out" "swap copy: head 1: counter missing" triage-stalehold
 hasnt "$out" "stale holds, the trace holds" triage-stalehold
 # the kext has the hold (counters) but copied some: the reasons named, never "a kext before the hold"; the
 # counter and the trace's holds apart (20 vs 15, nothing lost): WARN
@@ -570,5 +572,189 @@ has "$sum" "CRITICAL CoreDisplay disabled copy forward" triage-looks
 python3 -I -B "$ROOT/tools/result_checklist.py" --no-color --width 200 "$T/looks-sum.txt" > "$T/looks-chk.txt" 2>&1 || true
 grep -qE "^FAIL +copy forward +CRITICAL|^FAIL +copy forward" "$T/looks-chk.txt" || { cat "$T/looks-chk.txt"; fail "CRITICAL is not a FAIL in the checklist"; }
 grep -qE "^FAIL +A/B screens" "$T/looks-chk.txt" || fail "a black A/B look is not a FAIL in the checklist"
+
+# card run 2026-10-17d: the write generations - a back WindowServer never wrote held each frame (INFO), a held
+# back the trace saw written (FAIL), a copy forward burst with no swap and the flip-buffer / surface hooks
+out=$(dec gen)
+has "$out" "INFO     H-GEN: head 0: 60 swaps judged by the write generations: 30 presented (newer 30, first after a reset 0, changed with no write seen 0, aged 0, after an eviction 0), 30 held (the panel's 0, older 0, never written 30), 0 the surface's newer buffer instead" gen
+hasnt "$out" "FAIL     H-GEN" gen
+hasnt "$out" "may look frozen" gen
+python3 -I "$ROOT/tests/trace_fixture.py" gen "$T/gen.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/gen.bin" --timeline 400)
+has "$out" "hold: back 0x8b8f0000 (pixels, a4a5a6a7a8a9aaab) front 0x87040000 (empty) gen 0: never written HELD: not written since the head's frame (head's generation 60)" gen-timeline
+has "$out" "copy: back 0x8b100000 (pixels, 9d9e9fa0a1a2a3a4) front 0x87040000 (empty) gen 60: newer" gen-timeline
+# ECC review round 1: a held back whose band bytes changed since its presentation (FAIL)
+out=$(dec genchanged)
+has "$out" "FAIL     H-GEN: head 0: held a CHANGED back 30 time(s) (first swap #2, back 0x8b8f0000)" genchanged
+out=$(dec genreal)
+has "$out" "FAIL     H-GEN: head 0: 15 hold(s) of a back the trace shows WRITTEN since the head's last frame (first swap #4, back 0x8b8f0000)" genreal
+python3 -I "$ROOT/tests/trace_fixture.py" flippath "$T/flippath.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/flippath.bin" --timeline 400)
+has "$out" "H-FLIPPATH: head 0: 6 of 40 copy forwards with no swap of their surface within 50 ms, 1 burst(s) of 3 or more (the longest: 5 copy forwards" flippath
+has "$out" "H-FLIPPATH: head 0: flip-buffer calls submitFlipBuffer 3; traced 3" flippath
+has "$out" "H-FLIPPATH: surface hooks traced: pickPresentType 1, isBackBufferReady 2; isBackBufferReady said NOT ready 1 time(s)" flippath
+has "$out" "FLIPBUF h0 submitFlipBuffer(1) #1 res 0x8b100000 / 0x87040000 -> traced panel 0x8d000000" flippath
+has "$out" "HOOK h0 isBackBufferReady(1, 0) -> 0x1 (call 1)" flippath
+# 17d-like bursts with no flip-buffer call at all: WARN (the frames go by yet another path)
+python3 -I - "$ROOT" "$T/burstonly.bin" <<'PY'
+import struct, sys
+sys.path.insert(0, sys.argv[1] + "/tests")
+import trace_fixture as f
+w = f.W()
+f.gen_run(w, "flippath")
+w.ev = [e for e in w.ev if struct.unpack_from(f.EV, e)[2] != 23]
+open(sys.argv[2], "wb").write(w.blob())
+PY
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/burstonly.bin")
+has "$out" "WARN     H-FLIPPATH: head 0: 5 of 39 copy forwards with no swap of their surface within 50 ms, 1 burst(s) of 3 or more" burstonly
+has "$out" "and NO flip-buffer call in the trace" burstonly
+# the counters through triage: the write generations' verdict, a missing counter is loud
+mk gencnt gen "swaps_h0 60
+swap_mode 1
+swap_gen 1
+flipbuf_present 0
+swaps_gen_aperture 30
+swaps_gen_cf 30
+swaps_gen_evicted 0
+swaps_gen_freed 0
+swaps_gen_resets 0
+swaps_genpresent_h0 30
+swaps_genhold_h0 30
+swaps_genhold_would_h0 0
+swaps_genfirst_h0 1
+swaps_gencontent_h0 2
+swaps_genunwritten_h0 30
+cf_gennewer_h0 0
+flipbuf_h0 0
+flipbuf_scanout_h0 0
+flipbuf_presented_h0 0
+flipbuf_held_h0 0
+flipbuf_failed_h0 0
+swaps_gen_apcached 5
+swaps_gen_cfnostamp 1
+swaps_gen_judged_h0 60
+swaps_gen_aged_h0 0
+swaps_gen_evictpresent_h0 0
+swaps_gen_landed_h0 0
+swaps_gennotjudged_h0 0
+swaps_gen_resets_h0 0
+flipbuf_busy_h0 0
+flipbuf_unlocked_h0 0
+flipbuf_emptyheld_h0 0
+flipbuf_nohead 0
+flipbuf_nores 0
+flipbuf_intoff 0
+flipbuf_badptr 0
+hook_intr 0
+hook_intoff 0
+hook_pickpresent 4
+hook_didsubmitswap 0
+hook_backready 9
+hook_backready_no 1
+hook_submitupdate 0" "" stream
+out=$(run gencnt)
+has "$out" "INFO swap gen: write generations: swap_gen 1, flipbuf_present 0, swap mode 1; generations handed out by page-on 30 (+5 by its cached descriptor), by copy forward 30 (1 targets kept theirs" triage-gencnt
+hasnt "$out" "counter missing" triage-gencnt
+hasnt "$out" "do not add up" triage-gencnt
+hasnt "$out" "hook wiring unproven" triage-gencnt
+has "$out" "WARN swap gen: head 0: 2 back(s) changed with NO write the accelerator saw" triage-gencnt
+has "$out" "INFO swap gen: flip-present hooks: hook_pickpresent 4, hook_didsubmitswap 0, hook_backready 9, hook_backready_no 1" triage-gencnt
+has "$out" "H-GEN: head 0: 60 swaps judged" triage-gencnt
+hasnt "$out" "counter missing: swaps_genhold_h0" triage-gencnt
+# ECC review round 1: swap_gen 1 but no swap judged on a head (the rule inert): FAIL in the trace and the counters
+mk geninert clean "swaps_h0 40
+swap_mode 1
+swap_gen 1
+swaps_genpresent_h0 0
+swaps_genhold_h0 0" "" stream
+out=$(run geninert)
+has "$out" "FAIL frame trace: H-GEN: head 0: 40 swaps in mode 0/1 with swap_gen 1, NONE judged" triage-geninert
+has "$out" "FAIL swap gen: head 0: the write generations judged NONE of 40 swaps" triage-geninert
+mk gennocnt gen "swaps_h0 60
+swap_mode 1
+swap_gen 1
+swaps_genpresent_h0 30" "" stream
+out=$(run gennocnt)
+has "$out" "WARN swap gen: head 0: counter missing: swaps_genhold_h0" triage-gennocnt
+has "$out" "counter missing: swaps_genhold_h0 (the collector's grep" triage-gennocnt
+# ECC review round 1 (H1): a kext of these sources whose dump has none of the write generations' counters
+mk gennone gen "swaps_h0 60
+swap_mode 1" "" stream
+out=$(run gennone)
+has "$out" "WARN swap gen: counter missing: swap_gen and the write generations' counters" triage-gennone
+# ... and the same dump from an older kext says nothing
+cp -r "$T/gennone" "$T/gennoneold"
+python3 -I - "$T/gennoneold" <<'PY'
+import glob, io, sys, tarfile
+for p in glob.glob(sys.argv[1] + "/*.tar.gz"):
+    with tarfile.open(p) as t:
+        ms = [(m, t.extractfile(m).read() if m.isfile() else None) for m in t.getmembers()]
+    with tarfile.open(p, "w:gz") as t:
+        for m, data in ms:
+            if m.name.endswith("20-log-rdna3.txt"):
+                data = b"RDNA3Accelerator: build 0123456789\n"
+                m.size = len(data)
+            t.addfile(m, io.BytesIO(data) if data is not None else None)
+PY
+out=$(run gennoneold)
+hasnt "$out" "swap gen: counter missing" triage-gennoneold
+# ECC review round 1: the judged swaps against their outcomes, the first-after-reset share, interrupt-level hooks,
+# the flip-buffer calls against their outcomes, the hooks never firing
+mk genrecon gen "swaps_h0 60
+swap_mode 1
+swap_gen 1
+flipbuf_present 1
+swaps_genpresent_h0 20
+swaps_genhold_h0 10
+swaps_genhold_would_h0 0
+swaps_gen_landed_h0 0
+swaps_gen_judged_h0 50
+swaps_genfirst_h0 10
+flipbuf_h0 10
+flipbuf_presented_h0 3
+flipbuf_held_h0 2
+hook_intr 3
+hook_intr_flipbuf 3
+hook_pickpresent 0" "" stream
+out=$(run genrecon)
+has "$out" "WARN swap gen: head 0: the write generations' outcomes do not add up: 50 judged, but presented 20 + held 10" triage-genrecon
+has "$out" "WARN swap gen: head 0: 10 of 20 generation presents were the first after a reset (> 30%)" triage-genrecon
+has "$out" "WARN swap gen: flip-present hooks called at INTERRUPT LEVEL 3 time(s) (flipbuf 3)" triage-genrecon
+has "$out" "WARN swap gen: flip-buffer calls do not add up: 10 calls on our heads" triage-genrecon
+mk genunproven gen "swaps_h0 60
+swap_mode 1
+swap_gen 1
+flipbuf_present 0
+swaps_genpresent_h0 60
+swaps_gen_judged_h0 60
+flipbuf_h0 0
+flipbuf_scanout_h0 0
+hook_pickpresent 0
+hook_didsubmitswap 0
+hook_backready 0
+hook_submitupdate 0
+hook_intr 0" "" stream
+out=$(run genunproven)
+has "$out" "WARN swap gen: hook wiring unproven: 60 swaps and NOT ONE call of any flip-present hook" triage-genunproven
+
+# ECC review round 1 (M5): --all lists the first kernel-log lines of the write generations and the hooks
+out=$(python3 -I - "$ROOT/tools" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import triage_reports as t
+log = "\n".join(["RDNA3Accelerator: flip-present hooks installed: RD3DisplayPipe submitFlipBuffer vtable+2496"] +
+                 ["swap #%d: head 0: the back (a1) 0x8b8f0000 held: x" % i for i in range(30)] +
+                 ["write generations: head 0 reset (a mode change)", "something else"])
+for l in t.gen_log_lines(log):
+    print(l)
+print(t.gen_log_lines(""))
+PY
+)
+has "$out" "flip-present hooks installed: RD3DisplayPipe submitFlipBuffer vtable+2496" triage-genlog
+has "$out" "write generations: head 0 reset" triage-genlog
+has "$out" "swap #11: head 0" triage-genlog
+hasnt "$out" "swap #12: head 0" triage-genlog
+hasnt "$out" "something else" triage-genlog
+has "$out" "(none: a kext without the write generations" triage-genlog
 
 echo "test_triage_trace: all checks passed"

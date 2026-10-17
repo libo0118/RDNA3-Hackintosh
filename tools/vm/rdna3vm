@@ -519,7 +519,7 @@ auto_limit() {
     # and WindowServer's plugin trace sent: up to a minute each) and
     # collect.sh's plugin trace and its 4 min log (budget 360 -> 540 s)
     # step bisect (rdna3bisect=1): 13 steps of 30 s + the lead and the looks,
-    # no swap A/B; bisect-agdc (=4): 12 steps of 30 s the same way; bisect-plugin
+    # no swap A/B; bisect-agdc (=4): 13 steps of 30 s the same way; bisect-plugin
     # (=2): 5 steps, but three WindowServer restarts and a login after each (up
     # to 5 min each if nobody logs in at once)
     case " $1 " in

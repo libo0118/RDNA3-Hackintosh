@@ -39,6 +39,25 @@ if not a1 or int(a1.group(1), 16) != rdna3_trace.LANDED_A1:
 ver = re.search(r"#define RD3_TRACE_VERSION\s+(\d+)u", h)
 if not ver or int(ver.group(1)) != rdna3_trace.VERSION:
     fails.append("RD3_TRACE_VERSION %s, the decoder's VERSION %d" % (ver and ver.group(1), rdna3_trace.VERSION))
+# the write generations' reason field (card run 2026-10-17d) and the flip-buffer event's outcomes
+sh = re.search(r"#define RD3_TRV1_GEN_WHY_SHIFT (\d+)u", h)
+mk = re.search(r"#define RD3_TRV1_GEN_WHY_MASK\s+(\d+)u", h)
+if not sh or int(sh.group(1)) != rdna3_trace.V1_GEN_WHY_SHIFT or not mk or int(mk.group(1)) != rdna3_trace.V1_GEN_WHY_MASK:
+    fails.append("RD3_TRV1_GEN_WHY_SHIFT / _MASK %s / %s, the decoder's %d / %d" % (
+        sh and sh.group(1), mk and mk.group(1), rdna3_trace.V1_GEN_WHY_SHIFT, rdna3_trace.V1_GEN_WHY_MASK))
+wg = open(os.path.join(ROOT, "common", "rdna3_write_gen.h")).read()
+m2 = re.search(r"enum rd3_wg_why \{(.*?)\};", wg, re.S)
+why = dict((int(v), n) for n, v in re.findall(r"RD3_WGW_(\w+)\s*=\s*(\d+)", m2.group(1) if m2 else ""))
+if sorted(why) != sorted(rdna3_trace.GEN_WHY) or max(why) > rdna3_trace.V1_GEN_WHY_MASK:
+    fails.append("enum rd3_wg_why %s, the decoder's GEN_WHY %s" % (sorted(why), sorted(rdna3_trace.GEN_WHY)))
+m3 = re.search(r"enum rd3_trace_flipbuf \{(.*?)\};", h, re.S)
+fbw = sorted(int(v) for v in re.findall(r"RD3_TRFB_\w+\s*=\s*(\d+)", m3.group(1) if m3 else ""))
+if fbw != sorted(rdna3_trace.FLIPBUF_WHAT):
+    fails.append("enum rd3_trace_flipbuf %s, the decoder's FLIPBUF_WHAT %s" % (fbw, sorted(rdna3_trace.FLIPBUF_WHAT)))
+types = dict((int(v), n) for n, v in re.findall(r"RD3_TR_(\w+)\s*=\s*(\d+),", h))
+for v, n in sorted((v, n) for v, n in types.items() if v):
+    if rdna3_trace.TYPES.get(v) != n:
+        fails.append("RD3_TR_%s = %d, the decoder's TYPES[%d] = %s" % (n, v, v, rdna3_trace.TYPES.get(v)))
 # the bits the decoder uses that the header documents only in prose (the SDMA breaker, 1 << 20)
 if rdna3_trace.V1_BRK_FLIP != 1 << 20 or "1 << 20 when modes 1/2" not in h:
     fails.append("the SDMA breaker's SWAP v1 bit is not 1 << 20 in both")

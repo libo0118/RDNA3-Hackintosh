@@ -65,6 +65,10 @@ enum rd3_trace_type {
     /* the accelerator's again */
     RD3_TR_SURFRES = 21,  /* an IOSurface id seen with a resource and its VRAM (joins plugin traces to buffers) */
     RD3_TR_PANEL = 22,    /* what a head's HUBP scanned at a swap (SURFACE_EARLIEST_INUSE) */
+    RD3_TR_FLIPBUF = 23,  /* IOAccelLegacyDisplayPipe::submitFlipBuffer / submitScanoutFlipBuffer (the family's
+                           * other present path, card run 2026-10-17d's copy forward bursts) */
+    RD3_TR_HOOK = 24,     /* IOAccelLegacySurface::pickPresentType / didSubmitSwap / isBackBufferReady /
+                           * submitUpdate: traced and forwarded */
     RD3_TR_TYPES
 };
 
@@ -104,6 +108,33 @@ enum rd3_trace_swap {
 /* mode 1 would have held a stale back (the same rules) but
  * debug.rdna3accel_swap_stale=0: the swap copied it (arg is what it did) */
 #define RD3_TRV1_STALE_WOULD (1u << 24)
+/* the write generations (rdna3_write_gen.h, card run 2026-10-17d): held by
+ * the rule (arg RD3_TRS_HOLD; v3 is then the head's generation, the low 32
+ * bits); the rule would have held it but debug.rdna3accel_swap_gen=0 or
+ * mode 2 (arg is what the swap did); the rule's reason (enum rd3_wg_why,
+ * 0 not judged) in v1 >> RD3_TRV1_GEN_WHY_SHIFT & RD3_TRV1_GEN_WHY_MASK; a
+ * flip-buffer present (debug.rdna3accel_flipbuf_present=1:
+ * IOAccelLegacyDisplayPipe::submitFlipBuffer presented like a swap), not a
+ * submitSwapCopy. v2 >> 16 is the back's generation (its low 16 bits) */
+#define RD3_TRV1_GEN_HOLD  (1u << 25)
+#define RD3_TRV1_GEN_WOULD (1u << 26)
+#define RD3_TRV1_GEN_WHY_SHIFT 28u
+#define RD3_TRV1_GEN_WHY_MASK  15u
+#define RD3_TRV1_FLIPBUF   (1u << 27)
+/* a mode 1 swap whose back the generations would hold but that presented
+ * the surface's buffer written after the head's frame instead
+ * (rd3_wg_landed_pick) carries RD3_TRV1_LANDED (v4 >> 24 that buffer's
+ * index) with the hold's reason in the why field and no RD3_TRV1_GEN_HOLD */
+/* RD3_TR_FLIPBUF's v4: what the flip-buffer present did */
+enum rd3_trace_flipbuf {
+    RD3_TRFB_TRACED = 0,    /* only traced (debug.rdna3accel_flipbuf_present 0) */
+    RD3_TRFB_PRESENTED = 1, /* presented as the swap mode does (copy into D / home, or flip) */
+    RD3_TRFB_HELD = 2,      /* held by the write generations: not written since the head's last frame */
+    RD3_TRFB_FAILED = 3,    /* the copy or flip failed (the SWAP event says where) */
+    RD3_TRFB_NOHEAD = 4,    /* the pipe drives no framebuffer of ours */
+    RD3_TRFB_NORES = 5,     /* neither resource has VRAM of ours */
+    RD3_TRFB_BUSY = 6       /* the family's lock is held by another thread: not presented */
+};
 /* where a mode 1/2 swap failed (RD3_TRS_COPY_FAILED's v4) */
 enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD3_TRX_SDMA = 3, RD3_TRX_FLIP = 4 };
 
@@ -120,7 +151,7 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          back (RD3_TRV1_STALE, arg RD3_TRS_HOLD: v3 is then the number of
  *          the swap that last presented it) | 1 << 24 when it would have
  *          held one but debug.rdna3accel_swap_stale=0 (RD3_TRV1_STALE_WOULD),
- *          v2 the copy's us, v3 the wait's us, v4 = the index
+ *          v2 the copy's us (low 16 bits; the back's generation << 16), v3 the wait's us, v4 = the index
  *          of a1 in the surface's buffer array | a2's << 8 (0xff: not in
  *          it) | rd3_trace_fail << 16 | the landed buffer's index << 24
  *          (0xfe: a1 itself; its address is that swap's SCAN of the same
@@ -202,6 +233,22 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          the core's rdna3DisplayScanAddr failed, 4 no VRAM base yet, 5 the
  *          address below the framebuffer aperture: 4 and 5 carry MC addresses
  *          with flag 2), v4 the IOReturn
+ *  FLIPBUF head (0xff none); arg 0 submitFlipBuffer, 1 submitScanoutFlipBuffer;
+ *          flags 1 debug.rdna3accel_flipbuf_present was on, 2 the family's
+ *          lock was not held (taken for the present); obj the display pipe;
+ *          v0 the unsigned argument, v1 this kind's calls on the head, v2 /
+ *          v3 the two resources' object names, v4 rd3_trace_flipbuf; pa / pb
+ *          the two resources' VRAM, pc what the panel shows after it
+ *  HOOK    head (0xff unknown); arg 0 pickPresentType, 1 didSubmitSwap, 2
+ *          isBackBufferReady, 3 submitUpdate; obj the surface; v0 the first
+ *          unsigned argument, v1 the second (didSubmitSwap) or the third
+ *          (submitUpdate's count), v2 the base's return value (rax, the low
+ *          32 bits; isBackBufferReady: its low byte), v3 this kind's calls so
+ *          far (the first 2048 of a kind traced, then every 8th)
+ *  SWAP's write generations: v1 bits 25, 26, 27 and 28-31 (RD3_TRV1_GEN_*,
+ *          RD3_TRV1_FLIPBUF); v2 = the copy's us (16 bits, saturated at 65535) | the
+ *          back's generation << 16 (its low 16 bits); v3 the head's
+ *          generation on a generation hold
  *  Time: t is mach_absolute_time (the Metal plugin's traces use it too),
  *  the header carries the timebase. */
 struct rd3_trace_ev {

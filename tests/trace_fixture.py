@@ -20,7 +20,9 @@ had a new frame), b2landed (mode 1 presented that landed buffer), b2would
 (the same held with debug.rdna3accel_swap_landed=0: found, not presented),
 stale, stalehold, stalemixed, stalewould, stale20ms, stalereset, stalereal
 (head 1, mode 1: copy forward -> B1, swap B1, swap B2 that WindowServer never
-redrew; stale_run says how each differs)."""
+redrew; stale_run says how each differs); card run 2026-10-17d: gen,
+genreal, flippath (the write generations' holds, a hold of a back the trace
+saw written, a copy forward burst with no swap; gen_run says how)."""
 import struct
 import sys
 
@@ -125,6 +127,45 @@ def stale_run(w, kind):
             w.add(15, 1, 0xfe, 64 | 1, 0, (n + 1, 0, 5, 0, 0), D, 0, 0, band(200))
 
 
+GEN_KINDS = ("gen", "genreal", "flippath", "genchanged")
+
+
+def gswap(w, n, arg, back, why, hold=False, head=0, gen=0, hgen=0, dt=100):
+    """a mode 1 swap the write generations judged (card run 2026-10-17d): why = enum rd3_wg_why (SWAP v1 >> 28),
+    hold = SWAP v1 bit 25 (v3 the head's generation), the back's generation in v2 >> 16"""
+    v1 = 4 | 5 << 4 | 3 << 8 | 1 << 12 | why << 28 | (1 << 25 if hold else 0)
+    w.add(1, head, arg, 1 | 8 | (64 | 32 if arg == 4 else 0), 0xabcd,
+          (n, v1, (650 if arg == 4 else 0) | (gen & 0xffff) << 16, hgen if hold else 0, 1 << 8), F, back,
+          D if arg == 4 else HOME, b"\0" * 8, band(n), dt=dt)
+    w.add(22, head, 0, 0, 0, (n, 100, 0, 0, 0), D, D, D)   # PANEL
+
+
+def gen_run(w, kind):
+    """head 0, mode 1, per frame: page-on B1, copy forward -> B1, swap B1 (newer: presented), swap B2 (never written:
+    held). genreal: at odd frames the CPU also writes B2 (a page-on) before its swap, which is still held - the
+    decoder sees the write, the kernel did not stamp it (FAIL). flippath: a copy forward burst rotating F -> B1 -> B2
+    -> F with no swap (the family's flip-buffer path), the flip-buffer calls and the surface hooks traced"""
+    g = 0
+    if kind == "genchanged":   # B2 presented once: every later hold of it has other band bytes (a changed back held)
+        gswap(w, 99, 4, B2, 1, gen=1)
+    for i in range(30):
+        w.add(6, arg=1, flags=1, obj=0x1111, v=(8100, 3, 0, 0, 0), pa=B1)
+        cf(w, 0, B1)
+        g += 2
+        gswap(w, 2 * i + 1, 4, B1, 1, gen=g)
+        if kind == "genreal" and i % 2:
+            w.add(6, arg=1, flags=1, obj=0x1112, v=(8100, 3, 0, 0, 0), pa=B2)
+        gswap(w, 2 * i + 2, 5, B2, 6, hold=True, gen=0, hgen=g)
+        if kind == "flippath" and i == 10:
+            for k, (src, dst) in enumerate(((F, B1), (B1, B2), (B2, F)) * 3):
+                w.add(2, 0, 16 + 1, 1, 0xabcd, (1, 1, 1, 50, 0), src, dst, src, dt=16 * 10 ** 6)
+                if k % 3 == 0:
+                    w.add(23, 0, 0, 0, 0x7777, (1, k // 3 + 1, 0x11, 0x22, 0), dst, src, D)   # FLIPBUF, traced
+            w.add(24, 0, 2, 0, 0xabcd, (1, 0, 1, 1, 0))   # HOOK isBackBufferReady: ready
+            w.add(24, 0, 2, 0, 0xabcd, (2, 0, 0, 2, 0))   # ... not ready
+            w.add(24, 0, 0, 0, 0xabcd, (1, 0, 0, 1, 0))   # pickPresentType
+
+
 def cf(w, head, target):
     """a mode 1/2 copy forward from the front into 'target' (CF, pick 16 + 1)"""
     w.add(2, head, 16 + 1, 1, 0xabcd, (4, 4, 100, 50, 0), F, target, F)
@@ -168,6 +209,9 @@ def make(kind):
             else:                  # the landed buffer (B1, index 1) copied instead
                 scan(w, 2 * i + 2, 1, B1, True, True)
                 swap(w, 2 * i + 2, 1, 4, B2, False, pc=HOME, flags=64 | 32, target=1, landed=1)
+        common_tail(w)
+    elif kind in GEN_KINDS:     # card run 2026-10-17d: the write generations, the flip-buffer path
+        gen_run(w, kind)
         common_tail(w)
     elif kind in STALE_KINDS:   # card run 2026-10-17c's head 1: B2 drawn once, then never again
         stale_run(w, kind)

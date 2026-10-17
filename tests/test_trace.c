@@ -51,7 +51,8 @@ static void layout(void)
     CHECK(offsetof(struct rd3_trace_sec, freedshown) == 26);
     CHECK(offsetof(struct rd3_trace_sec, events) == 28);
     CHECK(RD3_TRACE_MAGIC == 0x52543352u);
-    CHECK(RD3_TR_TYPES == 23 && RD3_TR_SCAN == 15 && RD3_TR_CS == 16 && RD3_TR_PANEL == 22);
+    CHECK(RD3_TR_TYPES == 25 && RD3_TR_SCAN == 15 && RD3_TR_CS == 16 && RD3_TR_PANEL == 22);
+    CHECK(RD3_TR_FLIPBUF == 23 && RD3_TR_HOOK == 24);
 }
 
 static struct rd3_trace_ev store[8];
