@@ -253,6 +253,9 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
    buffer's CPU contents before each command buffer that uses it (card run 56: glyph and icon textures came back nil) */
 @interface NVMTLTexture () { @public BOOL _bufCopy; } @end
 @interface NVMTLCommandBuffer () { @public NSMutableSet *_bufCopied; } @end
+/* the frame trace (nvmtl_trace.h, NVMTLTrace.m): ids and times only, read by no decision */
+@interface NVMTLCommandBuffer () { @public uint32_t _trId; uint64_t _trCommitAbs; } @end
+@interface NVMTLRenderCommandEncoder () { @public uint32_t _trPass, _trSurf, _trW, _trH, _trSets0; uint64_t _trT0; } @end
 @interface NVMTLDepthStencilState () { @public NSString *_label; } @end
 @interface NVMTLSamplerState () { @public NSString *_label; } @end
 @interface NVMTLComputePipelineState () { @public NSString *_label; } @end

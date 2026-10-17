@@ -115,6 +115,25 @@ static int nvmtl_skip_empty_on(void) {
     return on;
 }
 
+// Frame trace (nvmtl_trace.h): the command buffer's commit with the IOSurfaces it wrote, and its completion.
+static void nvmtl_tr_cb_commit(NVMTLCommandBuffer *cb) {
+    if (!nvt_on()) return;
+    const uint32_t id = nvmtl_tr_cb_id(cb);
+    cb->_trCommitAbs = nvt_now();
+    uint32_t nsurf = 0;
+    for (NVMTLSubmissionPart *part in cb->_parts)
+        for (NVMTLTexture *t in part->surfaces) if (t->_surf) nsurf++;
+    nvt_ev_cb_commit(id, cb->_nEnc, cb->_nPresent, nsurf);
+    for (NVMTLSubmissionPart *part in cb->_parts)
+        for (NVMTLTexture *t in part->surfaces) if (t->_surf)
+            nvt_ev_cb_dirty(id, (uint32_t)IOSurfaceGetID(t->_surf), (unsigned)t->_plane, t->_i.w, t->_i.h, (uint32_t)t->_fmt,
+                            t->_vramOn ? NVT_F_VRAM : 0u);
+}
+static void nvmtl_tr_cb_done(NVMTLCommandBuffer *cb, NSError *error) {
+    if (!nvt_on()) return;
+    nvt_ev_cb_done(nvmtl_tr_cb_id(cb), error ? (int)error.code : 0, (uint32_t)cb->_cbstatus, cb->_trCommitAbs, (uint32_t)cb->_nextPart);
+}
+
 @implementation NVMTLCommandBuffer (EventSubmission)
 - (void)nvmtlReserveQueue {
     if (_reservation) return;
@@ -243,6 +262,7 @@ static int nvmtl_skip_empty_on(void) {
     _cbError = error; _cbstatus = error ? MTLCommandBufferStatusError : MTLCommandBufferStatusCompleted;
     _executionDone = YES;
     [_completionCondition unlock];
+    nvmtl_tr_cb_done(self, error);
     [_parts removeAllObjects];
     // Applications may retain completed command buffers. Pending overwrite
     // bookkeeping must not keep their IOSurfaces and VRAM alive indefinitely.
@@ -412,7 +432,9 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (result == 0) [self nvmtlCollectDeviceTiming:&part->commands];
         BOOL published = result == 0;
         if (published) {
+            nvt_set_cb(nvmtl_tr_cb_id(self));
             for (NVMTLTexture *texture in part->surfaces) if (![texture nvmtlSurfaceOut]) published = NO;
+            nvt_set_cb(0);
             for (id resource in part->resources)
                 if ([resource isKindOfClass:[NVMTLBuffer class]]) nvmtl_buffer_sync_out(resource);
         }
@@ -452,6 +474,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         [_completionCondition lock]; _cbstatus = MTLCommandBufferStatusCommitted; [_completionCondition unlock];
         [self nvmtlSealPartWithSignal:nil value:0 restart:NO];
         nvmtl_surface_register_writes(self);
+        nvmtl_tr_cb_commit(self);
         if (!nvmtl_pending_buffers) nvmtl_pending_buffers = [NSMutableArray new];
         [nvmtl_pending_buffers addObject:self];
         nvmtl_pump_buffers();

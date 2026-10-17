@@ -333,3 +333,5 @@ int nvmtl_vk_cmd_image_gen_mipmaps(nvk_cmdbuf *c, nvk_image *img);
 int nvmtl_vk_surface_share_on(void);
 int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_buffer *out);
 int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane);
+/* why the calling thread's last nvmtl_vk_surface_dirty returned -1: an errno, -2 the dirty path is off, -3 no Vulkan device, 0 it did not fail (frame trace) */
+int nvmtl_vk_last_dirty_errno(void);

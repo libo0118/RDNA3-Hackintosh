@@ -211,7 +211,7 @@ static void nvfwd_forward(id self, SEL _cmd, NSInvocation *inv)
     }
     if (count <= 3 || (count % 1000) == 0) {
         extern const char *nvmtl_log_path(void);
-        FILE *lf = fopen(nvmtl_log_path(), "a");
+        FILE *lf = nvmtl_log_open(nvmtl_log_path());
         const char *rt_ = [[inv methodSignature] methodReturnType];
         static const char *const kApple_[] = { "_MTLFunctionInternal", "_MTLFunction", "_MTLLibrary",
                                                "_MTLDevice", "_MTLCommandQueue", "_MTLCommandBuffer", NULL };

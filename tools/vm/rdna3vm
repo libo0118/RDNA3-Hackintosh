@@ -267,7 +267,7 @@ EOF
     for f in rdna3_vktest mtlprobe; do
         [ -f "$a/userspace/$f" ] && cp "$a/userspace/$f" "$st/bin/"
     done
-    cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" "$st/tools/macos/"
+    cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" "$ROOT/tools/macos/collect_plugin_trace.sh" "$ROOT/tools/macos/fix_tracedir.sh" "$st/tools/macos/"
     cp "$TOOLS/macos/autoreport.sh" "$st/"
     tar -czf "$WORK/share/rdna3-bundle.tar.gz" -C "$st" kexts bin tools autoreport.sh
     # autoreport.sh in macOS installs a bundle with a new checksum by itself
@@ -405,7 +405,7 @@ start_share() {
     # the current report scripts: autoreport.sh in the VM fetches them on
     # every boot, so changes to them need no new setup.sh run
     mkdir -p "$WORK/share/tools"
-    cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" \
+    cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" "$ROOT/tools/macos/collect_plugin_trace.sh" "$ROOT/tools/macos/fix_tracedir.sh" \
        "$TOOLS/macos/autoreport.sh" "$TOOLS/macos/build_radv.sh" \
        "$TOOLS/macos/build_metal.sh" "$WORK/share/tools/" 2>/dev/null || true
     # the Metal plugin's trace: its collector and the trace directory's fixer

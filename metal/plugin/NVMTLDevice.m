@@ -9,6 +9,7 @@
 #include <libproc.h>
 #include <pwd.h>
 #include <errno.h>
+#include <fcntl.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <objc/runtime.h>
@@ -42,6 +43,30 @@ static inline FILE *nvmtl_rel_fopen(const char *p, const char *m) { return nvmtl
 #define access(p, m) nvmtl_rel_access(p, m)
 #define fopen(p, m) nvmtl_rel_fopen(p, m)
 #endif
+/* Append-only log files (nvlog and the dev logs) are opened by nvt_open_append: not through a symlink, not a FIFO, a
+ * regular single-link file, and for root one of root's - the plugin also runs as root (mtlprobe from the VM harness,
+ * daemons) on predictable names in /tmp. The refusal is said once, through syslog (nvlog would call us again). */
+#include "nvmtl_trace.h"
+static int nvmtl_open_append(const char *path, mode_t mode)
+{
+    const int fd = nvt_open_append(path, mode);
+    if (fd < 0 && (errno == ELOOP || errno == EPERM || errno == ENXIO)) {
+        static int said;
+        if (!said++) syslog(LOG_ERR, "NVMTL: refusing log file %s (errno %d %s): not a plain single-link file of ours", path, errno, strerror(errno));
+    }
+    return fd;
+}
+static FILE *nvmtl_log_open(const char *path)
+{
+#if NVMTL_RELEASE
+    if (nvmtl_rel_devpath(path)) return NULL;
+#endif
+    const int fd = nvmtl_open_append(path, 0644);
+    if (fd < 0) return NULL;
+    FILE *f = fdopen(fd, "a");
+    if (!f) close(fd);
+    return f;
+}
 int nvmtl_vk_init(void);
 uint16_t nvmtl_vk_set_accelerator(mach_port_t accelerator);
 uint16_t nvmtl_vk_vendor(void);
@@ -94,7 +119,7 @@ const char *nvmtl_log_path(void) {
     static char path[1024]; static int decided;
     if (!decided) {
         decided = 1;
-        FILE *f = fopen("/tmp/nvmtl.log", "a");
+        FILE *f = nvmtl_log_open("/tmp/nvmtl.log");
         if (f) { fclose(f); snprintf(path, sizeof path, "/tmp/nvmtl.log"); }
         else { const char *t = getenv("TMPDIR"); snprintf(path, sizeof path, "%s/nvmtl.log", (t && *t) ? t : "/private/tmp"); }
     }
@@ -110,10 +135,11 @@ void nvlog(const char *fmt, ...) {
     if (nvmtl_log_failure(t)) syslog(LOG_ERR, "NullMoth: %s", t);
 #else
     syslog(LOG_NOTICE, "NVMTL: %s", t);
-    FILE *f = fopen(nvmtl_log_path(), "a"); if (f) { fprintf(f, "pid %d NVMTL: %s\n", getpid(), t); fclose(f); }
+    FILE *f = nvmtl_log_open(nvmtl_log_path()); if (f) { fprintf(f, "pid %d NVMTL: %s\n", getpid(), t); fclose(f); }
 #endif
 }
 
+/* the per-process frame trace (docs/AFTER-TESTS.md "Plugin frame trace"; nvmtl_trace.h is included above) */
 #define NVMTL_OOM_STREAK      32
 #define NVMTL_OOM_COOLDOWN_NS (250ull * 1000ull * 1000ull)
 static _Atomic uint64_t g_oom_streak, g_oom_until;
@@ -127,6 +153,7 @@ static int nvmtl_alloc_blocked(void) {
 }
 static void nvmtl_alloc_ok(void) { atomic_store(&g_oom_streak, 0); }
 static void nvmtl_alloc_failed(const char *what) {
+    nvt_alloc_fail(what, 0);
     uint64_t n = atomic_fetch_add(&g_oom_streak, 1) + 1;
     atomic_store(&g_oom_until, clock_gettime_nsec_np(CLOCK_MONOTONIC) + NVMTL_OOM_COOLDOWN_NS);
     if (n < NVMTL_OOM_STREAK) return;
@@ -147,6 +174,7 @@ static void nvmtl_alloc_failed(const char *what) {
 @interface NVMTLDevice : MTLIOAccelDevice <MTLDevice, MTLDeviceSPI>
 @end
 #import "NVMTLObjects.h"
+#import "NVMTLTrace.m"
 void nvmtl_vendor_compile_airs(NSDictionary<NSString *, NSString *> *airs,
                                NSDictionary<NSString *, NSString *> *stages);
 void nvmtl_vendor_attach_sass(id device, id pipelineState, id function);
@@ -730,9 +758,11 @@ static void nvmtl_vram_tag_set(IOSurfaceRef surf, NSUInteger plane, uint32_t see
     CFDataRef d = CFDataCreate(NULL, (const UInt8 *)&t, sizeof t); CFStringRef k = nvmtl_vram_tag_key(plane);
     IOSurfaceSetValue(surf, k, d); CFRelease(k); CFRelease(d);
 }
+static __thread unsigned g_tr_why;   /* frame trace: why the last surface image is private (NVT_WHY_*), 0 when shared */
 static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInteger plane, uint32_t w, uint32_t h,
                                       uint32_t vkf, uint32_t bpp, int a8, int stex)
 {
+    g_tr_why = NVT_WHY_SHARE_OFF;
     if (surf && nvmtl_vk_surface_share_on()) {
         size_t row = IOSurfaceGetBytesPerRow(surf), sh = IOSurfaceGetHeight(surf);
         /* why a surface stays private, first few of each kind (card logs had only a count) */
@@ -741,6 +771,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
         unsigned k = plane != 0 || IOSurfaceGetPlaneCount(surf) > 1 ? 1 : (size_t)w * (bpp ? bpp : 4) > row ? 2
                    : h > sh ? 3 : row % 32 ? 4 : 0;
         const char *why = kWhy[k];
+        g_tr_why = k;   /* NVT_WHY_PLANAR..NVT_WHY_PITCH are 1..4 like kWhy; 0 until the import decides */
         if (why) {
             static unsigned nwhy[5];
             if (nwhy[k]++ < 4) nvlog("item 7: surface %u %ux%u (bytesPerRow %zu, plane %lu) stays private: %s",
@@ -749,7 +780,7 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
             nvk_buffer vb;
             if (!nvmtl_vk_surface_vram(IOSurfaceGetID(surf), 0, row * h, &vb)) {
                 if (!nvmtl_vk_image_create_buffer_alias(w, h, vkf, bpp, a8, stex, 1, &vb, 0, row, &t->_i)) {
-                    t->_vramBuf = vb; t->_vramOn = YES; g_surf_vram++;
+                    t->_vramBuf = vb; t->_vramOn = YES; g_surf_vram++; g_tr_why = 0;
                     uint32_t seed = IOSurfaceGetSeed(surf);
                     int current = nvmtl_vram_tag_current(surf, 0, seed);
                     if (current) { t->_surfSeed = seed; t->_surfSynced = YES; }
@@ -759,7 +790,8 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
                     return 0;
                 }
                 nvmtl_vk_buffer_destroy(&vb);
-            }
+                g_tr_why = NVT_WHY_ALIAS_FAILED;
+            } else g_tr_why = NVT_WHY_IMPORT_FAILED;
         }
     }
     g_surf_private++;
@@ -809,6 +841,7 @@ static char nvmtl_surface_cache_key;
     t->_stex = t->_i.storage != 0;
     t->_usage = d.usage;
     nvmtl_texture_desc_swizzle(t, d);
+    nvmtl_tr_map(t, g_tr_why);
     if (key && !t->_vramOn) [cache setObject:t forKey:key];
     nvlog("newTextureWithDescriptor:iosurface:%p plane:%lu -> %p (%zux%zu fmt %lu)",
           (void *)surf, (unsigned long)plane, (__bridge void *)t, w, h, (unsigned long)d.pixelFormat);

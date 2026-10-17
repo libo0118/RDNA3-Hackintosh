@@ -155,6 +155,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	tests/test_triage_latch.sh
 	tests/test_result_checklist.sh
 	tests/test_triage_trace.sh
+	tests/test_plugin_trace.sh
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump
 
