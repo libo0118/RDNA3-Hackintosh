@@ -2040,8 +2040,9 @@ Settings. That is expected for them, not a display regression.
   buffer only then.
 - Fix (diagnostic build, `common/rdna3_flip_latch.h`, `tests/test_flip_latch.c`
   reproduces the writes into the scanned buffer without the wait and none
-  with it): the swap waits until its flip latched (1 ms sleeps, up to two
-  frames or 35 ms; `debug.rdna3accel_swap_latch` / boot-arg
+  with it): the swap waits once, after its own flip, until it latched (1 ms
+  sleeps, up to two OTG frames or 2.5 of the head's frames clamped to
+  35-100 ms; `debug.rdna3accel_swap_latch` / boot-arg
   `rdna3swaplatch`, default 1, 0 = the old behaviour for an A/B run).
   Counted per head: the previous flip pending at a swap's entry and the
   flip-to-latch times, copy forwards into the buffer on the panel, the

@@ -205,4 +205,8 @@ grep -q 'WARN swap/flicker  *head 2: its swaps were NOT waiting for their flips 
 has "$o" 'swap latch: head 1 (core head 1): refresh 60000 mHz' serial
 has "$o" 'swap latch: a swap returns only once its flip latched' serial
 has "$o" 'flip to VRAM 0x8b100000: the previous flip still pending after 20 ms' serial
+# the serial summary has no swap_torn: 'not measured' is INFO there, never WARN
+grep -q 'INFO swap/flicker  *head 2: torn test not measured: 0 checks in 120 swaps .*it may be 0 on purpose' <<<"$o" ||
+    fail "serial: torn not measured as INFO: $o"
+hasnt "$o" 'WARN swap/flicker         head 2: torn test not measured' serial
 echo "test_triage_latch: all checks passed"

@@ -992,6 +992,10 @@ def serial_latch_verdict(text, seen=()):
             if x is not None:
                 c[k + "_h" + h] = x
         for lv, t in latch_verdict(c, report_missing=False):
+            # the summary line does not carry swap_torn: a torn test that did
+            # not run may have been switched off on purpose (INFO, not WARN)
+            if lv == "WARN" and "torn test not measured" in t:
+                lv, t = "INFO", t + " - swap_torn is not in the serial line, it may be 0 on purpose"
             out.append((lv, "%s (flip latch, serial at swap %d)" % (t, swaps)))
     if "swap latch:" in text:
         for h in sorted(set(seen) - set(last)):
