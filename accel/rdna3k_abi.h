@@ -202,6 +202,19 @@ struct RD3KDisplayStatus {
     unsigned int inVblank;
     unsigned int flipPending;
 };
+/* card run 2026-10-17b: what a head's HUBP scans (hubp2_read_state_common:
+ * SURFACE_EARLIEST_INUSE) and what was last requested
+ * (PRIMARY_SURFACE_ADDRESS), MC addresses, and the MC address of VRAM offset
+ * 0 (fb_start), so the accelerator turns them into its VRAM offsets. A
+ * function of its own (not a field of RD3KDisplayStatus): a core without
+ * it refuses the call and the trace records 0 (unknown) */
+#define RD3K_DISPLAY_FN_SCANADDR "rdna3DisplayScanAddr"
+struct RD3KDisplayScanAddr {
+    unsigned int version;             /* RD3K_DISPLAY_ABI_VERSION */
+    unsigned int head;
+    unsigned long long inUse, requested, fbStart;
+    unsigned int flipPending, pad;
+};
 
 /* hotplug (rdna3hotplug=1, kext/src/RDNA3Hotplug.cpp): the core polls the
  * HPD pins (DC_HPD_SENSE_DELAYED after the toggle filter, debounced) and

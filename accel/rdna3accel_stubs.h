@@ -90,7 +90,15 @@ class RD3Surface : public IOAccelLegacySurface {
     OSDeclareDefaultStructors(RD3Surface)
     NM_TAHOE_FWD(RD3Surface)
 public:
-    void setSyncCommand(unsigned int* a0, unsigned int& a1, unsigned int& a2, _AMDSurfaceSwapSyncOptions const& a3) const APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::setSyncCommand"); }
+    /* the swap's vblank sync hook: traced every time (card run 2026-10-17b),
+     * logged the first 8 times and every 4096th (it came with every swap) */
+    void setSyncCommand(unsigned int* a0, unsigned int& a1, unsigned int& a2, _AMDSurfaceSwapSyncOptions const& a3) const APPLE_KEXT_OVERRIDE {
+        (void)a0; (void)a3;
+        static volatile SInt32 gSyncLogs;
+        const SInt32 k = OSIncrementAtomic(&gSyncLogs);
+        if (k < 8 || (k & 4095) == 0) ALOG("RD3Surface::setSyncCommand (%d so far; a1 %u a2 %u)", (int)k + 1, a1, a2);
+        rd3AccelTraceSync(this, 0, a1, a2);
+    }
     void _pure335() APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::_pure335"); }
     bool copyFromBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::copyFromBuffer"); return false; }
     bool copyToBuffer(int a0, int a1, int a2, int a3, unsigned int a4, unsigned int a5, IOAccelEvent* a6, IOAccelResource2* a7, IOAccelSysMemory* a8, unsigned int a9, unsigned long long a10, unsigned int a11) APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::copyToBuffer"); return false; }
@@ -148,6 +156,7 @@ public:
         }
         ALOG("RD3Surface::shapeSurface(mode 0x%x, %u x %u) smode 0x%x bpp %u pitch %u size %u -> %u present, %u shaped",
              a0, w, h, smode, bpp, pitch, size, present, shaped);
+        rd3AccelTraceShape(this, a0, w, h, smode, present, shaped, bufs);   /* card run 2026-10-17b (Q5) */
         static int gShapeDumps = 0;
         if (gShapeDumps < 4) { gShapeDumps++;
             const volatile unsigned long long *qq = (const volatile unsigned long long *)((const unsigned char *)this + 0x1160);
@@ -155,7 +164,14 @@ public:
                 ALOG("   surf+0x%04x: %016llx %016llx", 0x1160 + o, qq[o / 8], qq[o / 8 + 1]);
         }
     }
-    uint32_t getDirtyBufferBitsFromPrivateModeBits(unsigned long long a0) APPLE_KEXT_OVERRIDE { ALOG("RD3Surface::getDirtyBufferBitsFromPrivateModeBits(0x%llx)", (unsigned long long)a0); return 0; }
+    uint32_t getDirtyBufferBitsFromPrivateModeBits(unsigned long long a0) APPLE_KEXT_OVERRIDE {
+        static volatile SInt32 gDirtyLogs;
+        const SInt32 k = OSIncrementAtomic(&gDirtyLogs);
+        if (k < 8 || (k & 4095) == 0)
+            ALOG("RD3Surface::getDirtyBufferBitsFromPrivateModeBits(0x%llx) -> 0 (%d so far)", (unsigned long long)a0, (int)k + 1);
+        rd3AccelTraceSync(this, 1, a0 & 0xffffffffull, a0 >> 32);
+        return 0;
+    }
 };
 OSDefineMetaClassAndStructors(RD3Surface, IOAccelLegacySurface)
 class RD3DisplayPipe : public IOAccelLegacyDisplayPipe {

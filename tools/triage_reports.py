@@ -25,6 +25,12 @@ import sys
 import tarfile
 import zlib
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import rdna3_trace  # noqa: E402  (tools/rdna3_trace.py: the kernel's per-frame trace)
+except ImportError:      # a copy of this file alone (the tests' fake checkouts)
+    rdna3_trace = None
+
 U64 = 1 << 64
 
 
@@ -114,7 +120,8 @@ def bootarg_level(args):
 # accel/Makefile's ACCEL_SRC_HASH inputs, in its order (tests/test_accel_hash_parity.py keeps them equal)
 ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_abi.h", "accel/rdna3accel_stubs.h",
                     "common/rdna3_bootargs.h", "common/rdna3_a3_display.h",
-                    "common/rdna3_swap_front.h", "common/rdna3_flip_latch.h")
+                    "common/rdna3_swap_front.h", "common/rdna3_flip_latch.h", "common/rdna3_swap_copy.h",
+                    "common/rdna3_trace.h")
 
 
 def fb_source_hash(files=("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h")):
@@ -457,7 +464,10 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg|"
                        r"_latchpend|_latchwait|_latchus|_latchmax|_latchtimeout|_latchunknown|_latchoff|_tornchk|"
                        r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill|_latchimmediate|_latchwaitsoff|"
-                       r"_flipfailed)?_h\d|swap_latch|swap_torn|"
+                       r"_flipfailed|_copy|_copyempty|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
+                       r"_copylatchto|_copyfail|_copydirect|_copyfront|_copyfrontfail|_copynowait|_copybrkflip|_copyfreewait)?_h\d|"
+                       r"swaps_copybrktrips|swap_latch|swap_torn|"
+                       r"swap_mode|swap_trace_events|swap_trace_nomem|swap_trace_lost|cf_sc(?:src|scanout|stale)_h\d|"
                        r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed|onpanel)_h\d|swaps_skipped_all|"
                        r"swaps_nohead|cf_(?:calls|nohead|shown_stale|refused|same|disabled|pend_blocked|pend_forced|pend_evicted|"
                        r"pend_whole|nohead_miss)|iop_flip): (\d+)", re.M)
@@ -501,7 +511,10 @@ def kernel_text(report, d):
                 out = read_member(tar, "20-log-rdna3.txt") or read_member(tar, "20-log-rdna3-sudo.txt") or ""
         except (OSError, tarfile.TarError):
             pass
-    for f in glob.glob(os.path.join(d, "serial-*.log")):
+    # the newest serial log only: an older boot's "tr" lines and counters
+    # are another run's (ECC review round 1)
+    serials = sorted(glob.glob(os.path.join(d, "serial-*.log")), key=os.path.getmtime)
+    for f in serials[-1:]:
         try:
             out += "\n" + open(f, errors="replace").read()
         except OSError:
@@ -923,6 +936,269 @@ def latch_verdict(c, current=False, report_missing=True):
                         "head %s: sampled empty backs of skipped swaps, read again 4 ms later: %d had pixels%s, %d "
                         "still empty" % (h, filled, " (frames landing after the swap: skipped, not shown)" if filled
                                          else "", still)))
+    return out
+
+
+# card run 2026-10-17b's swap as a copy (common/rdna3_swap_copy.h): of a
+# head's copies in modes 1/2, this share of black frames (empty backs that
+# reached the panel) is a FAIL
+BLACK_SHARE = 0.05
+
+
+def swapcopy_verdict(c):
+    """[(level, text)] from the mode 1/2 counters (swaps_copy*_h<N>,
+    cf_sc*_h<N>, swap_mode); [] on a kernel without them"""
+    if not c or not any(k.startswith("swaps_copy") for k in c):
+        return []
+    out = []
+    mode = c.get("swap_mode")
+    out.append(("INFO", "swap mode %s at the dump (0 flip, 1 copy keeping the picture over an empty back, 2 copy all)" %
+                ("?" if mode is None else mode)))
+    if c.get("swaps_copybrktrips"):
+        out.append(("WARN", "the SDMA breaker of modes 1/2 opened %d time(s): the swaps flipped as in mode 0 while it "
+                            "was open (the kernel log's 'SDMA BREAKER OPEN' line says why)" % c["swaps_copybrktrips"]))
+    heads = sorted(set(m.group(1) for m in (re.match(r"swaps_copy_h(\d)$", k) for k in c) if m))
+    for h in heads:
+        def g(k):
+            return c.get(k + "_h" + h, 0)
+        copies = g("swaps_copy")
+        if not copies and not g("swaps_copyempty") and not g("swaps_copyfail"):
+            continue
+        black, held, fail, direct = g("swaps_copyblack"), g("swaps_copyempty"), g("swaps_copyfail"), g("swaps_copydirect")
+        waits = g("swaps_copywait")
+        nowait, brk, freewait = g("swaps_copynowait"), g("swaps_copybrkflip"), g("swaps_copyfreewait")
+        line = ("head %s: %d backs copied (%d MiB, avg %d us, max %d us), %d empty backs kept off a picture, %d black "
+                "frames, %d failed, %d direct copies (no second buffer: may tear), %d waits for the last flip (avg %d "
+                "us, %d ran out), front copies %d ok / %d not; copy forward from the front %d, from the panel's buffer "
+                "%d, nothing to copy from %d" % (h, copies, g("swaps_copybytes") >> 20,
+                                                g("swaps_copyus") // copies if copies else 0, g("swaps_copyusmax"),
+                                                held, black, fail, direct, waits,
+                                                g("swaps_copywaitus") // waits if waits else 0, g("swaps_copylatchto"),
+                                                g("swaps_copyfront"), g("swaps_copyfrontfail"), g("cf_scsrc"),
+                                                g("cf_scscanout"), g("cf_scstale")))
+        bad = []
+        if copies >= 20 and black >= BLACK_SHARE * copies:
+            bad.append("FAIL")
+        lv = "FAIL" if bad else ("WARN" if fail or direct or g("swaps_copylatchto") or g("swaps_copyfrontfail") or
+                                 g("cf_scstale") else "INFO")
+        extra = []
+        if nowait:
+            extra.append("%d copies NOT waited for (waits off after 3 latch timeouts: may tear)" % nowait)
+        if brk:
+            extra.append("%d swaps FLIPPED with the SDMA breaker open" % brk)
+        if freewait:
+            extra.append("%d swaps kept an old second buffer (still on the panel / not latched away)" % freewait)
+        if extra:
+            line += "; " + "; ".join(extra)
+            if lv == "INFO" and (nowait or brk):
+                lv = "WARN"
+        out.append((lv, line))
+        if held and copies and held >= copies:
+            out.append(("WARN", "head %s: as many empty backs as frames (%d / %d): WindowServer presents a back it "
+                                "never draws (H-B2) - the trace's H-B2 line names it" % (h, held, copies)))
+    return out
+
+
+def trace_inputs(path):
+    """the per-frame trace's pieces of a report: the archive's 36-*.bin (the
+    full reads and the stream collect.sh packed, 36-stream-*.bin) and the
+    stream files autoreport.sh sent next to it -> [(name, bytes)], plus
+    their .size sidecars -> {name: size}"""
+    out, sizes = [], {}
+    if os.path.exists(path):
+        try:
+            with tarfile.open(path) as tar:
+                for m in tar.getmembers():
+                    if not m.isfile():
+                        continue
+                    if re.search(r"36-(frame-trace|frame-trace-sec|drm-trace|stream-[\w.-]+)\.bin$", m.name):
+                        out.append((m.name, tar.extractfile(m).read()))
+                    elif re.search(r"36-stream-[\w.-]+\.bin\.size$", m.name):
+                        sizes[m.name[:-len(".size")]] = tar.extractfile(m).read().decode("ascii", "replace").strip()
+        except (OSError, tarfile.TarError):
+            pass
+    base = path[:-len(".tar.gz")]
+    for f in sorted(glob.glob(base + "-*trace*.bin")):
+        try:
+            with open(f, "rb") as fh:
+                out.append((f, fh.read()))
+        except OSError:
+            pass
+        try:
+            with open(f + ".size") as fh:
+                sizes[f] = fh.read().strip()
+        except OSError:
+            pass
+    return out, sizes
+
+
+def trace_size_problems(inputs, sizes):
+    """[text]: stream files whose bytes differ from the size autoreport.sh
+    wrote next to them (a cut-off upload or copy), and uploaded streams
+    shorter than the archive's copy of the same file"""
+    out = []
+    got = dict((n, len(d)) for n, d in inputs)
+    for n, want in sorted(sizes.items()):
+        if n in got and want.isdigit() and int(want) != got[n]:
+            out.append("%s: %d bytes, %s written (a cut-off upload or copy)" % (os.path.basename(n), got[n], want))
+    for n, ln in got.items():
+        m = re.search(r"36-stream-([\w.-]+\.bin)$", n)
+        if not m:
+            continue
+        for n2, ln2 in got.items():
+            if n2.endswith("-" + m.group(1)) and "36-stream-" not in n2 and ln2 < ln:
+                out.append("%s: %d bytes uploaded, the archive's copy has %d" % (os.path.basename(n2), ln2, ln))
+    return out
+
+
+def ab_counter_window(txt):
+    """{head: swaps the counters saw over the A/B} from the tests file: the
+    last swaps_h<N> dump before '== swap A/B phase 1' against the one after
+    mode 0; {} when either is missing"""
+    i = txt.find("== swap A/B phase 1")
+    j = txt.find("== swap A/B counters after mode 0")
+    if i < 0 or j < 0:
+        return {}
+    before = dict((int(h), int(v)) for h, v in re.findall(r"rdna3accel_swaps_h(\d): (\d+)", txt[:i]))
+    seg = txt[j:]
+    k = seg.find("\n== ", 5)
+    after = dict((int(h), int(v)) for h, v in re.findall(r"rdna3accel_swaps_h(\d): (\d+)",
+                                                          seg if k < 0 else seg[:k]))
+    return dict((h, after[h] - before.get(h, 0)) for h in after if after[h] - before.get(h, 0) > 0)
+
+
+def trace_lines(path, txt, klog="", args=""):
+    """[(level, text)], timeline lines: the per-frame trace of a report
+    (card run 2026-10-17b), else the 'tr' lines of the kernel log; with
+    neither on a kernel that has the trace: FAIL 'trace incomplete'. Never
+    raises: a decoder failure on a broken file is a FAIL naming it."""
+    try:
+        return _trace_lines(path, txt, klog, args)
+    except Exception as e:   # noqa: BLE001 - the report is untrusted input
+        return [("FAIL", "trace incomplete: Q1-Q11 (the decoder failed on this report: %s: %s)" %
+                 (type(e).__name__, str(e)[:200]))], []
+
+
+def _trace_lines(path, txt, klog="", args=""):
+    if rdna3_trace is None:
+        return [("WARN", "trace not decoded: tools/rdna3_trace.py is missing next to this script")], []
+    ftxt = ""
+    if os.path.exists(path):
+        try:
+            with tarfile.open(path) as tar:
+                args = args or read_member(tar, "01-boot-args.txt") or ""
+                ftxt = read_member(tar, "36-frame-trace.txt") or ""
+        except (OSError, tarfile.TarError):
+            pass
+    tr = rdna3_trace.Trace()
+    inputs, sizes = trace_inputs(path)
+    size_problems = trace_size_problems(inputs, sizes)
+    # an uploaded stream the archive also holds (36-stream-<f>): read once,
+    # the longer copy (the streams' checks count every header)
+    packed = dict((m.group(1), len(d)) for n, d in inputs for m in [re.search(r"36-stream-([\w.-]+\.bin)$", n)] if m)
+    inputs = [(n, d) for n, d in inputs
+              if "36-stream-" in n or not any(n.endswith("-" + f) and len(d) <= ln for f, ln in packed.items())]
+    inputs = [(n, d) for n, d in inputs
+              if not ("36-stream-" in n and any(n2.endswith("-" + n.split("36-stream-")[1]) and "36-stream-" not in n2
+                                               for n2, _ in inputs))]
+    for name, data in inputs:
+        tr.add_blob(data, os.path.basename(name))
+    if klog:
+        tr.check_dumps(klog)
+    if not tr.headers and klog:
+        tr.add_lines(klog)
+    tr.finish()
+    c = a3_counters(txt) if txt else {}
+    c = c or {}
+    want = fb_source_hash(ACCEL_HASH_FILES)
+    ac = re.search(r"RDNA3Accelerator: build (\S+)", klog)
+    current = bool(want and ac and ac.group(1) == want)
+    accel_on = "rdna3accel=1" in args or "rdna3accel=1" in txt or ("rdna3lvl=" not in args and current)
+    out = []
+    # collect.sh's own record of what it could read (root only sysctls)
+    for oid in re.findall(r"^(\S+): NOT read", ftxt, re.M):
+        if current and accel_on:
+            out.append(("FAIL", "trace incomplete: Q1-Q11 (%s NOT read by collect.sh: not root, or the sysctl is "
+                                "missing)" % oid))
+    if current and accel_on and os.path.exists(path) and not ftxt:
+        out.append(("FAIL", "trace incomplete: Q1-Q11 (no 36-frame-trace.txt in the archive: a collect.sh before "
+                            "card run 2026-10-17b)"))
+    if not tr.events and not tr.headers:
+        if current and accel_on:
+            return out + [("FAIL", "trace incomplete: Q1-Q11 (no 36-frame-trace.bin, no -trace-stream.bin and no "
+                                   "'tr' lines although the accelerator runs these sources)%s" %
+                                   ("; " + "; ".join(t for _, _, t in tr.problems[:3]) if tr.problems else ""))], []
+        return out, []
+    streams = any("stream" in n for n, _ in inputs)
+    ab_expected = bool(current and accel_on and "swap A/B: SKIPPED" not in txt and
+                       (bootarg_level(args) >= 2 or "rdna3lvl=" not in args) and (txt or streams))
+    ctx = {"swaps": sum(v for k, v in c.items() if re.match(r"swaps_h\d$", k)) or None,
+           "swaps_window": ab_counter_window(txt) if txt else {},
+           "no_tests": not txt,
+           "cf_calls": c.get("cf_calls"),
+           "ab_ran": "== swap A/B phase" in txt,
+           "ab_expected": ab_expected,
+           "size_problems": size_problems,
+           "core_expected": any(n.endswith("drm-trace.bin") or "drmtrace" in n for n, _ in inputs) or
+                            "== swap A/B" in txt}
+    if not txt:
+        out.append(("INFO", "no tests file next to this report: the A/B is judged from the trace alone, the "
+                            "counters' window not compared"))
+    out += rdna3_trace.summary_lines(tr, ctx)
+    tl = []
+    heads = sorted(set(e.head for e in tr.events if e.src == rdna3_trace.SRC_ACCEL and e.head != 0xff))
+    for h in heads:
+        tl.append("head %d, the last 60 events:" % h)
+        tl.extend("  " + l for l in rdna3_trace.timeline(tr, h, 60))
+    return out, tl
+
+
+def read_tar_member(path, suffix):
+    """one member of a report archive, "" when there is none"""
+    if not os.path.exists(path):
+        return ""
+    try:
+        with tarfile.open(path) as tar:
+            return read_member(tar, suffix) or ""
+    except (OSError, tarfile.TarError):
+        return ""
+
+
+def plugin_trace_lines(path, cdlog=""):
+    """[(level, text)] of the Metal plugin's trace (tools/plugin_trace.py,
+    another engineer's): its own verdicts; INFO when the report has none on
+    a run where the plugin loaded"""
+    try:
+        import plugin_trace  # noqa: E402
+    except ImportError:
+        return []
+    try:
+        lines = plugin_trace.triage_lines(path) or []
+    except Exception as e:   # noqa: BLE001 - the report is untrusted input
+        return [("FAIL", "plugin trace not decoded: %s: %s" % (type(e).__name__, str(e)[:200]))]
+    out = []
+    for l in lines:
+        if isinstance(l, (tuple, list)) and len(l) >= 2:
+            out.append((str(l[0]), str(l[1])))
+        else:
+            out.append(("INFO", str(l)))
+    if not out and "NVMTL" in cdlog:
+        out.append(("INFO", "plugin trace: not in this report (the plugin loaded: collect_plugin_trace.sh did not "
+                            "run or found nothing)"))
+    return out
+
+
+def coredisplay_cf_lines(cdlog, tr_lines=()):
+    """CoreDisplay switched copy forward off ("copy forward failed ...
+    disabling"): CRITICAL - with whether the driver's trace saw an error
+    answer (else the family failed before calling the driver)"""
+    out = []
+    for m in re.finditer(r"^(\S+ \S+).*copy_forward_region: copy forward failed \((0x[0-9a-f]+)\)", cdlog, re.M):
+        drv = any("CF-ERROR" in t for _, t in tr_lines)
+        out.append(("CRITICAL", "CoreDisplay disabled copy forward at %s (%s)%s" % (
+            m.group(1), m.group(2), " - the driver answered an error (trace CF-ERROR)" if drv else
+            " - the driver's submitCopyForward answers only success (or 0xe00002c7 with rdna3accelcf=0): the family "
+            "failed before calling it (a buffer without VRAM: look for VRAM refusals, the trace's VRAM line)")))
     return out
 
 
@@ -1641,6 +1917,15 @@ def summary(path, serial=None):
                       for k, v in sorted(a3c.items()) if re.match(r"swaps_h\d$", k) and v))))
     for lv, t in latch_lines(path, txt, args):
         out.append(("flip latch", "%s %s" % (lv, t)))
+    for lv, t in swapcopy_verdict(a3_counters(txt) if txt else {}):
+        if lv != "INFO" or t.startswith("swap mode"):
+            out.append(("swap copy", "%s %s" % (lv, t)))
+    tlv, _ = trace_lines(path, txt, log, args)
+    for lv, t in tlv:
+        if lv in ("FAIL", "CRITICAL", "WARN") or t.startswith("A/B"):
+            out.append(("frame trace", "%s %s" % (lv, t[:300])))
+    for lv, t in plugin_trace_lines(path, read_tar_member(path, "24-log-coredisplay.txt")):
+        out.append(("plugin trace", "%s %s" % (lv, t[:300])))
     blanked = sorted(set(re.findall(r"display: head (\d+) blanked \(display sleep\)", log)))
     if "look sleep" in txt and "display asleep:" in txt.split("(look sleep)", 1)[-1][:600]:
         out.append(("display sleep", "the look found the system asleep; heads blanked first (kernel log): %s" %
@@ -1747,9 +2032,36 @@ def main():
             failed = True
         tests = p[:-len(".tar.gz")] + "-tests.txt"
         # card run 2026-10-17: the flip latch, from the tests file or the archive
-        for lv, t in latch_lines(p, open(tests, errors="replace").read() if os.path.exists(tests) else ""):
+        ttxt = open(tests, errors="replace").read() if os.path.exists(tests) else ""
+        for lv, t in latch_lines(p, ttxt):
             print("   %s flip latch: %s" % (lv, t))
             failed = failed or lv == "FAIL"
+        # card run 2026-10-17b: the swap as a copy, and the per-frame trace
+        for lv, t in swapcopy_verdict(a3_counters(ttxt) if ttxt else {}):
+            print("   %s swap copy: %s" % (lv, t))
+            failed = failed or lv == "FAIL"
+        klog = kernel_text(p, d)
+        tl_lv, tl = trace_lines(p, ttxt, klog)
+        for lv, t in tl_lv:
+            print("   %s frame trace: %s" % (lv, t))
+            failed = failed or lv in ("FAIL", "CRITICAL")
+        cd = ""
+        if os.path.exists(p):
+            try:
+                with tarfile.open(p) as tar:
+                    cd = read_member(tar, "24-log-coredisplay.txt") or ""
+            except (OSError, tarfile.TarError):
+                pass
+        for lv, t in coredisplay_cf_lines(cd, tl_lv):
+            print("   %s copy forward: %s" % (lv, t))
+            failed = True
+        for lv, t in plugin_trace_lines(p, cd):
+            print("   %s plugin trace: %s" % (lv, t))
+            failed = failed or lv in ("FAIL", "CRITICAL")
+        if tl:
+            print("   frame trace timeline (tools/rdna3_trace.py for all of it):")
+            for l in tl:
+                print("     " + l[:220])
         if os.path.exists(tests):
             txt = open(tests, errors="replace").read()
             stale = re.search(r"^stale: (.*)$", txt, re.M)

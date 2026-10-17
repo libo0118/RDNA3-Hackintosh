@@ -42,7 +42,17 @@ finish() {
 # the Metal plugin's RADV + libdrm (build_metal.sh installs the plugin):
 # the copies next to it follow the report's bin, so a new bundle reaches
 # Metal too. RADV finds libdrm through the rpath added here.
+# the Metal plugin's trace directory (/var/tmp/rdna3-nvmtl): created or
+# repaired by tools/macos/fix_tracedir.sh (the plugin's own: a planted
+# symlink removed, no mkdir -p as root through someone's link); a failure
+# is logged, never fatal
+fix_tracedir() {
+    _ft="$D/tools/macos/fix_tracedir.sh"
+    [ -f "$_ft" ] || return 0
+    sh "$_ft" || echo "== fix_tracedir.sh FAILED ($?): the plugin's traces may be missing"
+}
 sync_metal() {
+    fix_tracedir
     m=/Library/GPUBundles/rdna3mtl
     [ -d "$m" ] && [ -f "$1/libvulkan_radeon.dylib" ] || return 0
     for f in libvulkan_radeon.dylib libdrm.2.dylib libdrm_amdgpu.1.dylib; do
@@ -101,6 +111,135 @@ a3_sysctls() {
     else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
 }
 
+# card run 2026-10-17b: the kernel's per-frame trace streamed every 3 s
+# through the whole run (both rings: the accelerator's and the core's), so
+# no event of the tests and the A/B is lost (the stream headers count any
+# that were; ECC review round 1: the pump ran only in the A/B before). The
+# files go into the archive (collect.sh: 36-stream-*.bin), up to the host
+# next to it, and into /var/db/rdna3-pending-* until they are sent.
+TS="$HOME/rdna3-trace"
+TRACE_FILES="trace-stream.bin drmtrace-stream.bin trace-sec.bin"
+trace_pump_start() {
+    mkdir -p "$TS"
+    rm -f "$TS"/*.bin "$TS"/*.size "$TS/.pump"
+    if ! sysctl -n debug.rdna3accel_swap_mode >/dev/null 2>&1; then
+        echo "== frame trace: no debug.rdna3accel_trace_stream (an accelerator before card run 2026-10-17b, or none): not streamed"
+        return 0
+    fi
+    # the first read moves the streams' cursors to now (the boot before it is
+    # in the kernel log's first 300 events and collect.sh's full read); it
+    # must be binary, starting with the header's magic "R3TR"
+    for oid in debug.rdna3accel_trace_stream debug.rdna3_drmtrace_stream; do
+        sysctl -b "$oid" > "$TS/first.bin" 2>"$TS/first.err"
+        m=$(head -c 4 "$TS/first.bin" 2>/dev/null)
+        if [ "$m" = R3TR ]; then
+            echo "== frame trace: $oid streams ($(wc -c < "$TS/first.bin") bytes at the start)"
+        else
+            echo "== frame trace: $oid NOT BINARY: sysctl -b gave $(wc -c < "$TS/first.bin") bytes starting \"$(head -c 40 "$TS/first.bin" | tr -c '[:print:]' '.')\" ($(head -c 120 "$TS/first.err")) -- the stream files of this run cannot be decoded"
+        fi
+    done
+    rm -f "$TS/first.bin" "$TS/first.err"
+    touch "$TS/.pump"
+    ( while [ -f "$TS/.pump" ]; do
+          sysctl -b debug.rdna3accel_trace_stream >> "$TS/trace-stream.bin" 2>/dev/null
+          sysctl -b debug.rdna3_drmtrace_stream >> "$TS/drmtrace-stream.bin" 2>/dev/null
+          sleep 3
+      done ) &
+    TRACE_PUMP=$!
+    echo "== frame trace: pump started ($(date +%T), every 3 s into $TS)"
+}
+trace_pump_stop() {
+    [ -n "${TRACE_PUMP:-}" ] || return 0
+    rm -f "$TS/.pump"
+    wait "$TRACE_PUMP" 2>/dev/null
+    TRACE_PUMP=
+    sysctl -b debug.rdna3accel_trace_stream >> "$TS/trace-stream.bin" 2>/dev/null
+    sysctl -b debug.rdna3_drmtrace_stream >> "$TS/drmtrace-stream.bin" 2>/dev/null
+    sysctl -b debug.rdna3accel_trace_sec > "$TS/trace-sec.bin" 2>/dev/null
+    # the newest events into the kernel log too: a serial log alone has them
+    sysctl -w debug.rdna3accel_trace_dump=600 >/dev/null 2>&1
+    echo "== frame trace: pump stopped ($(date +%T)); files:"
+    for f in $TRACE_FILES; do
+        [ -f "$TS/$f" ] || { echo "$f: MISSING"; continue; }
+        # the size next to it: triage tells a cut-off upload from a short run
+        wc -c < "$TS/$f" | tr -d ' ' > "$TS/$f.size"
+        echo "$f: $(cat "$TS/$f.size") bytes"
+    done
+}
+# the trace files up to the host (or into the standalone report folder);
+# what does not go up waits in /var/db/rdna3-pending-* for the next boot
+trace_send() {
+    for f in $TRACE_FILES; do
+        for g in "$f" "$f.size"; do
+            [ -s "$TS/$g" ] || continue
+            if [ -n "$HOST" ]; then
+                cp "$TS/$g" "/var/db/rdna3-pending-$base-$g" 2>/dev/null
+                curl -sf --max-time 60 -T "$TS/$g" "$HOST/reports/$base-$g" >/dev/null 2>&1 &&
+                    rm -f "/var/db/rdna3-pending-$base-$g" || echo "upload of $g FAILED (kept for the next boot)"
+            else
+                mkdir -p /Users/Shared/rdna3-reports && cp "$TS/$g" "/Users/Shared/rdna3-reports/$base-$g"
+            fi
+        done
+    done
+}
+
+# card run 2026-10-17b: one run decides between the swap models. 60 s with
+# debug.rdna3accel_swap_mode=1 (the copy), 60 s with 0 (the flip), back to
+# what it was; per phase a look at the panels and the counters. Activity
+# Monitor redraws its graphs every few seconds: both phases see the same
+# kind of activity (whether it runs is logged: a phase without swaps is
+# inconclusive, triage says so). The phases are labelled in the trace
+# (debug.rdna3accel_swap_ab) and here ("== swap A/B phase N"); triage
+# prints the two side by side. Should the report die inside it, the trap
+# puts the mode back (ECC review round 1).
+ab_restore() {
+    [ -n "${ab_old:-}" ] && sysctl -w debug.rdna3accel_swap_mode="$ab_old" >/dev/null 2>&1
+    sysctl -w debug.rdna3accel_swap_ab=0 >/dev/null 2>&1
+    rm -f "$TS/.pump"
+    restore_sleep
+}
+ab_set() {   # ab_set <oid> <value>: set and read back, loud when it did not take
+    if ! e=$(sysctl -w "$1=$2" 2>&1); then
+        echo "== swap A/B: FAILED to set $1=$2: $e"
+        return 1
+    fi
+    v=$(sysctl -n "$1" 2>/dev/null)
+    [ "$v" = "$2" ] || { echo "== swap A/B: $1 is $v after setting $2 (NOT APPLIED)"; return 1; }
+}
+swap_ab() {
+    if ! sysctl -n debug.rdna3accel_swap_mode >/dev/null 2>&1; then
+        echo "== swap A/B: SKIPPED - no debug.rdna3accel_swap_mode (an accelerator before card run 2026-10-17b, or none)"
+        return 0
+    fi
+    ab_old=$(sysctl -n debug.rdna3accel_swap_mode)
+    trap 'ab_restore' EXIT
+    trap 'ab_restore; exit 130' INT
+    trap 'ab_restore; exit 143' TERM
+    in_session open -g -a "Activity Monitor" 2>&1
+    sleep 3
+    am=$(pgrep -x "Activity Monitor" | head -1)
+    if [ -n "$am" ]; then echo "== swap A/B: activity: Activity Monitor runs (pid $am)"
+    else echo "== swap A/B: activity: Activity Monitor is NOT running - the phases may see no swaps (inconclusive)"; fi
+    for ph in "1 1" "2 0" "3 $ab_old"; do
+        phase=${ph% *}; mode=${ph#* }
+        ab_set debug.rdna3accel_swap_mode "$mode"
+        ab_set debug.rdna3accel_swap_ab "$phase"
+        echo "== swap A/B phase $phase: swap mode $(sysctl -n debug.rdna3accel_swap_mode 2>/dev/null) ($(date +%T))"
+        [ "$phase" = 3 ] && break
+        sleep 60
+        mkdir -p "$HOME/rdna3-scanout/ab$mode"
+        echo "== rdna3_drminfo --scanout (look ab$mode)"
+        [ -x "$D/bin/rdna3_drminfo" ] && with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/ab$mode" 2>&1
+        echo "== swap A/B counters after mode $mode"
+        a3_sysctls
+    done
+    ab_set debug.rdna3accel_swap_ab 0
+    pkill -x "Activity Monitor" 2>/dev/null
+    trap - EXIT INT TERM
+    [ -n "$STANDALONE" ] && trap 'restore_sleep' EXIT && trap 'restore_sleep; exit 130' INT && trap 'restore_sleep; exit 143' TERM
+    echo "== swap A/B done: swap mode $(sysctl -n debug.rdna3accel_swap_mode 2>/dev/null)"
+}
+
 # an M6 hi-res look keeps only its picture; the pipes' state stays in the
 # results (a pipe not lit or asleep must not look like a frozen picture)
 m6_look_state() {
@@ -153,7 +292,7 @@ if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ]; then
     fi
     # newest report scripts from the host (rdna3vm start_share); a new
     # autoreport.sh takes over right away
-    for f in collect.sh ioreg_discovery.sh autoreport.sh; do
+    for f in collect.sh ioreg_discovery.sh collect_plugin_trace.sh fix_tracedir.sh autoreport.sh; do
         case $f in autoreport.sh) dst="$D/$f" ;; *) dst="$D/tools/macos/$f" ;; esac
         curl -sf --max-time 10 "$HOST/tools/$f" -o "$dst.new" && [ -s "$dst.new" ] &&
             { cmp -s "$dst.new" "$dst" || { mv "$dst.new" "$dst"; [ $f = autoreport.sh ] && exec sh "$dst" --updated; }; }
@@ -515,6 +654,11 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
 {
     echo "boot-args: $args"
     [ -n "$updated" ] && echo "== $updated"
+    # the Metal plugin's trace directory, safe from a planted link (before
+    # anything that makes WindowServer or an app load the plugin)
+    fix_tracedir
+    # the kernel's frame trace for the whole run (card run 2026-10-17b)
+    trace_pump_start
     # why the Auxiliary KC keeps an old RDNA3Framebuffer (first card runs:
     # kernelmanagerd "invalid codeful kernel extension in the restricted
     # lookup table" for every /Library/Extensions copy)
@@ -565,6 +709,10 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         echo "== display pipe and AGDC counters"
         sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|copy_skip|flips)|heads_)|rdna3agdc" || true
         a3_sysctls
+        # card run 2026-10-17b: the swap models side by side, the trace streamed
+        hdr "swap A/B (mode 1 copy / mode 0 flip, 60 s each)"
+        swap_ab
+        done_ 0
         ioreg -r -c RDNA3AGDC -w0 -d1 2>/dev/null | grep -E '"RDNA3,AGDC' | sed 's/^ *//'
         # with AGDC up WindowServer needs the Metal plugin's device (card runs 41/45)
         echo "Metal allow list: $(grep -v '^#' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | tr '\n' ' ') ($(stat -f %Lp /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null))"
@@ -1097,7 +1245,10 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 done_ $?
             fi ;;
     esac
+    trace_pump_stop
 } > "$extra" 2>&1
+trace_pump_stop >> "$extra" 2>&1   # a shell that ran the block in a subshell: the pump stops here
+trace_send >> "$extra" 2>&1
 
 if [ -n "$STANDALONE" ]; then
     # the names the VM's uploads get (docs/AFTER-TESTS.md reads them)

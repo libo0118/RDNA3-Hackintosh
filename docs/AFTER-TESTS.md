@@ -252,6 +252,7 @@ item in the SUMMARY; the full output is in the tests file under `== probe:`.
 | `display sleep: not judged by the look`, `FAIL display sleep: never blanked a head`, summary `display sleep` | display sleep | card run 58 (2026-10-15d): the VM went on into system sleep after the display slept; triage takes the kernel's `display: head N blanked (display sleep)` lines (archive log or serial log) instead, FAIL without any, INFO when the report has no kernel log at all (`not judged: ... no kernel log`). autoreport sets system sleep to never for the look only when it read the old value, saves it to `/var/db/rdna3-sleep.bak` first and restores it after the look, at the start of every later run and (standalone) at exit (`system sleep restored to N min` / `NOT restored`: `pmset -a sleep <minutes>` by hand), holds `caffeinate -s -i`, and prints the assertions and the power log (`== power before / after`) | the power log names what slept the system |
 | `swap/flicker` (serial log: `flicker: head N: ...`, `a3 display: head N: ...`, `swap: head N: ... swaps over K buffer(s) ...`, `copy forward / swaps: head N at swap M ...`), `copy forward` (summary: `hN X from the shown buffer / Y not needed / Z from the front / M missed (H healed) / ...`) | the panel | card run 58b, second run (2026-10-16): a head whose swaps take turns between two back buffers needs copy forward from the surface's own buffer it showed last (`cf_shown_h<N>`); `WARN ... two back buffers took turns while copy forward copied nothing` is a kernel before `rdna3_swap_front.h`. Flicker from a serial log alone (the newest serial log only; a head the newest report's counters judged, 60+ hashed swaps, gets its serial flicker line as INFO `(serial said ...)`, the report decides; copy forward and swap warnings stay): the snapshot with the most hashed swaps per head (`at swap N`), FAIL with 25 % of 60+ hashed swaps A B A B in more than one band or on two heads, under the line only INFO (later swaps are not in the log). Copy forward WARN: copies impossible (`no head`, `shown buffer not usable`, `refused`), missed and not healed (`cf_miss_h<N>` > `cf_healed_h<N>`: the rects a buffer missed stay pending for that buffer and are copied with the next copy forward into it, from a source that did not miss them itself; too many become the whole picture, copied only with the copy engine on; a source that missed the same region blocks them, after 3 blocked calls they are copied anyway so both backs agree: `cf_pend_blocked` / `cf_pend_forced`; `cf_pend_evicted`: a list dropped from a full table, WARN; `cf_pend_whole`: lists that overflowed), the head showed another surface's buffer (`cf_foreign_h<N>`, never a source), more than 10 calls with nothing shown yet. Swaps: WARN when a head skipped 10 % or more (an empty back; the third in a row is shown as a black or clear frame, `swaps_emptyshown_h<N>`) or a swap matched no head (`swaps_nohead`), FAIL when a head skipped 10 or more swaps and showed none, WARN when swaps were skipped with no head named (`swaps_skipped_all` above the heads' sum) | the reason lines: `copy forward #n: ... not copied (SDMA refused ...)`, `... is not usable now`, `... has shown nothing recorded yet`, `... shows a buffer that is not this surface's`; `swap: head N: the back ... shows nothing (<why>)`; `swap: surface ... matched no head` |
 | `flip latch` (report counters `swaps_latch*_h<N>` (`pend`, `wait`/`us`/`max` for waited flips, `immediate`, `timeout`, `unknown`, `off`, `waitsoff`: 1 while the head's waits are off), `swaps_flipfailed_h<N>`, `swaps_torn*_h<N>`, `swaps_inplace_h<N>`, `cf_onpanel_h<N>`, `swaps_shownfreed_h<N>`, `swaps_empty{filled,still}_h<N>`, `swap_latch`, `swap_torn`; from the tests file, else the archive's `29-surface-vram.txt`; serial `swap latch: head N: ...`, shown under `swap/flicker`) | the panel | card run 2026-10-17: windows vanish for a moment and the wallpaper shows (both screens) while copy forward and the A B A B test look fine. `N of M swaps: the previous flip had not latched` (WARN): the swap returned before the panel left the old buffer and WindowServer wrote into it - with `swap_latch 0` that is the cause, with 1 it must be 0 (timeouts: `flip(s) never latched in time` - 2 OTG frames after the flip, or 2.5 of the head's frames, 35-100 ms, when the frame counter stops; a head stops waiting after 3 in a row, `its swaps were NOT waiting for their flips at the end` while still off, until a flip is seen latched; with the frame counter stopped the framebuffer also says `flip to VRAM ...: the previous flip still pending after 20 ms`). `copy forward(s) wrote into the buffer on the panel` (WARN): the same seen from copy forward. WARN too: `swap_latch was 0`, flips not waited for (`off`: waits off after 3 timeouts until a flip is seen latched, or a flip given up), `the flip state never read pending - the wait did nothing`, refused flips, `torn test not measured` (INFO with `swap_torn 0`), `counters missing` (a key absent is unknown, never 0; with the kernel built from these sources and no latch counters at all). `N of K shown frames changed while on the panel, then flipped away (torn)`: FAIL from 5 % of 60+ checks - something writes the buffer the panel shows after its swap (not H1: look at `swaps_shownfreed`, the plugin's surface-out and the family's page-on timing); `rewritten in place` (WARN from 25 %): one back buffer, the zero-copy flip shows the buffer WindowServer draws into (DRIVER-PLAN N28 (1)). `empty backs ... read again 4 ms later: N had pixels`: the frame landed after the swap asked for it (skips that should have waited) | the reason lines: `swap #n: head N: the previous flip (to phys ...) had NOT latched at this swap`, `the flip to phys ... had NOT latched ... us after it`, `the buffer it showed (phys ...) changed while on the panel: bands 0x..`, `copy forward #n: head N: the target ... is STILL ON THE PANEL`, `swap: head N: the buffer ... was FREED while the head scans it`, `swap: head N: the empty back ... read again ... us later` |
+| `swap copy` (counters `swaps_copy*_h<N>`, `cf_sc*_h<N>`, `swap_mode`), `frame trace` (H-B2 / H-COPY / H-FREE / CF-ERROR / VRAM / PANEL / GPU, `A/B mode N ...`, `A/B verdict`, `Qn` / `trace incomplete: Qn`, the timeline), `copy forward: CoreDisplay disabled copy forward` (CRITICAL) | the swap as a copy and the per-frame trace | card run 2026-10-17b: the swap copies the back into the scanout buffer the panel does not show and flips to it (mode 1), the trace records every frame; see "Card run 2026-10-17b" for the coverage matrix (Q1-Q11) and the symptom -> trace -> action table | the A/B verdict, then the hypothesis lines; any `trace incomplete` first (the next run must answer it) |
 | `GAMMA: UNJUDGED`, `gamma (open)`, progress `UNJUDGED (exit 3)` | gamma | no pipe stayed still between the looks (`CRC before NOT stable`, `0 of N pipe(s) still`, card run 58: the flicker), so the CRCs prove nothing either way (exit 3, `[exit 3: UNJUDGED, not a failure]`, never cached as passed); a still pipe next to a changing one is judged on its own and fails when it did not move with the dark table (`GAMMA: FAIL - N still pipe(s) did not move`); the core's `RDNA3,Head<n>,Gamma` record before and after the test decides: every head took 3+ tables is WARN (open), else FAIL | judge the flicker first, then the gamma on still screens |
 | `VM faults`, `VMID N` (SUMMARY, from the serial log) | VM faults | the faults grouped by VMID and address with the UTCL2 client (`gfxhub_client_ids`) and the owner | card run 58: Terminal's VMID 5 TCP reads at an unmapped VA, each followed by 4 CPC writes at 0 on VMID 0 (not a second bug: they come with every client fault) |
 
@@ -2063,3 +2064,127 @@ Settings. That is expected for them, not a display regression.
   which buffer is written on the panel; a run with
   `sysctl debug.rdna3accel_swap_latch=0` (or `rdna3swaplatch=0`) gives the
   comparison.
+
+### Card run 2026-10-17b (step agdc + probes, build ad55679)
+
+- **Both monitors mostly black, content now and then, everything
+  flickers; the side monitor is fine for a while, then breaks too.** The
+  flip latch works (0 flips pending at a swap's entry, 0 timeouts): it was
+  not the cause.
+- Evidence: head 0's legacy swaps name the head's framebuffer resource as
+  a1 (the front, 0x87040000) and two backs as a2 in turns: 0x8b100000
+  (pixels) and 0x8b8f0000 (64 samples all zero at every swap, also 4 ms
+  later). The family's aperture access - `addToAperture`, its page-on, the
+  only CPU path into a legacy buffer - was logged for the first back only,
+  never for the second (four log lines per resource allowed). 85 of 229
+  shown frames on head 0 were rewritten in place (WindowServer drew into
+  the buffer on the panel), 14 + 10 buffers were freed while scanned. At
+  the mode switch back to 1920x1080 the core refused VRAM (`allocPhysical
+  ... REFUSED (0xe00002db)`, the CPU-visible heap) and CoreDisplay logged
+  `copy forward failed (0xe00002bc) ... disabling` - the driver's
+  `submitCopyForward` answers only success (or 0xe00002c7 with
+  `rdna3accelcf=0`): the family failed before calling it.
+- Code findings: `IOAccelLegacySurface::submitSwapCopy(event, front, back)`
+  asks for a COPY of the back into the front (Apple's front is the
+  scanout) and hands the back to WindowServer when it returns; the driver
+  flipped to the back instead (H-COPY: the in-place rewrites, copy
+  forward's own "shown buffer" rules, buffers freed under the panel). The
+  front resource is not the scanout on this card: the family maps it into
+  the GPU page table, which the scanout vidmem cannot be, frees it and
+  gives it ordinary VRAM. Nothing in the driver writes a legacy back
+  (copy forward targeted only the first back; no GPU engine renders into
+  a legacy buffer), so the second back's emptiness is WindowServer's /
+  the family's (H-B2: certain that no driver path fills it; why
+  WindowServer names it needs the card - the trace below answers it).
+- Fix: `common/rdna3_swap_copy.h` (`tests/test_swap_copy.c`), swap mode
+  1 (default; `debug.rdna3accel_swap_mode`, boot-arg `rdna3swapmode`): the
+  back is copied by SDMA into the scanout buffer the panel does NOT show
+  (the framebuffer's own, "home", or the accelerator's second buffer D),
+  the head flips to it (latched at vblank: tear-free), the back is copied
+  into the front too (copy forward's source, as Apple's family expects);
+  before the next copy the swap waits until that flip latched (bounded by
+  the latch cap). An empty back is not copied over a picture
+  (`swaps_copyempty_h<N>`, the first ones logged with where WindowServer's
+  frame did land); mode 2 copies everything, mode 0 is the flip.
+- The per-frame trace (`common/rdna3_trace.h`, `tools/rdna3_trace.py`):
+  every swap, copy forward, shape, VRAM allocation / free, aperture access,
+  page-off, IOSurface answer, mode change, flip and what each HUBP
+  scanned, in a ring of 32768 events (2.5 MiB) plus a per-second table;
+  the core kext keeps a second ring of RADV's submissions, fences, waits,
+  resets and GPU faults. `tools/macos/collect.sh` puts them in the archive
+  (`36-frame-trace.bin`, `36-frame-trace-sec.bin`, `36-drm-trace.bin`,
+  `36-frame-trace.txt`); autoreport.sh's swap A/B streams both rings
+  every 3 s (`<report>-trace-stream.bin`, `-drmtrace-stream.bin`,
+  `-trace-sec.bin`). The kernel log gets the first 300 events of a boot
+  and 600 more at the A/B's end ("tr" lines; triage decodes them when the
+  files are missing).
+- The A/B (autoreport.sh, every accelerator run): 60 s in mode 1, a look
+  (`look ab1`) and the counters, 60 s in mode 0 (`look ab0`), back.
+  Triage prints both side by side (`frame trace: A/B mode N ...`) with a
+  verdict.
+
+#### Coverage: every open question -> where the next report answers it
+
+| Q | Question | Trace event / field / counter | What the values mean |
+|---|---|---|---|
+| Q1 | each swap: a1 / a2, their index in the surface's buffer array (0x11C0), VRAM, 8-band signature, content; what the driver did | `SWAP`: `pa`/`pb` a1/a2, `v4` low bytes the array indexes (0xff none), `ba`/`bb` the band bytes, `v1` bits 0-7 the content (4 empty, 5 pixels), `arg` (flip / skip / copy / hold / failed), `v1` bits 16-19 the target (home / D / home directly), `pc` what the panel shows after it, `v2` copy us, `v3` wait us; counters `swaps_copy*_h<N>` | an `arg` of hold with an empty back is mode 1 keeping the picture; `copy FAILED` names the step in `v4 >> 16` (1 source, 2 scanout, 3 SDMA, 4 flip) |
+| Q2 | where WindowServer's frame landed: every buffer of the surface at each swap vs the previous swap | `SCAN` per other buffer (`arg` its index), flag 2 = changed since this head last sampled it, `ba` now / `bb` before; the SWAP's own a1/a2 bands; kernel log `swap #n: head N: ... where WindowServer's frame is` | the buffer whose bands change is where the frame went; a back with 0 changes and empty content is H-B2 |
+| Q3 | when the "empty" back is written, if ever | `SCAN` at every swap, after each copy forward (flag 32), at shapes, `VMFREE`'s `ba`; delayed re-sample: `SCAN` flag 16 with `v1` the microseconds after the swap | flag 16 + pixels: the frame lands late; never pixels: never written |
+| Q4 | every copy forward | `CF`: `pa` the front named, `pb` the target, `pc` the source used, `v0`/`v1` rects / copied, `ba` the bounding box (x0 y0 x1 y1), `arg` the decision, `v4` the IOReturn answered | any `v4` != 0 is CRITICAL (`CF-ERROR`); CoreDisplay's `copy forward failed` without a CF error means the family failed before the driver |
+| Q5 | every vidmem alloc / free, scanned at the free?; shapes | `VMALLOC` (`arg` 0 = refused, `v4` the IOReturn, `v1` MiB handed out), `VMFREE` (flags 2/4/8: shown by mode 0 / leaving the panel / mode 1's D on the panel, `head`), `SHAPE` (`v0` mask, `v1` w/h, `v3` present / shaped, `pa`-`pc` buffers 0-2) | a `VMFREE` with flags 2-8 is H-FREE |
+| Q6 | what each panel really scanned | `PANEL` at each swap: `pa` SURFACE_EARLIEST_INUSE, `pb` the requested address, `pc` what the driver expects, flags 1 pending; `SCAN` arg 0xfe the scanout buffer after the copy, 0xfd the front | `pa` != `pc` with no flip pending: the panel is not where the driver thinks; triage `PANEL` WARN |
+| Q7 | mode switches and display mode changes | `MODESET` (`arg` 0 swap mode, 1 A/B phase: `v0` old, `v1` new), `MODE` (`arg` 0/1 will/did change, 2 initFramebufferResource with the scanout) | the A/B table segments by these |
+| Q8 | nothing dropped in the run | stream headers' `lost` (events overwritten between two reads, accelerator and core), the full read's `lost`, `nomem`; each stream file's reads must follow one another (`written` k - `written` k-1 = `count` + `lost`), its size must match its `.size` file; the per-second table (`36-frame-trace-sec.bin`: the last 4096 s, counts stop at 65535); counters `swap_trace_events / _lost / _nomem`; a kernel log dump must hold its `dump done, N line(s)` | any `lost` in the streams, a read missing from a file, a truncated / corrupt blob, an unknown version, `nomem` > 0, a size mismatch, blobs of two boots (`salt_check`): FAIL `trace incomplete: Q8 (...)` naming the file and byte |
+| Q9 | RADV's submissions, completions, waits, resets, faults | core ring: `CS` (pid, VMID, IP / ring, seq, IBs / BOs, result), `FENCE` (first seen signalled), `GPUWAIT` (pid, us, seq, cap ran out, result), `RESET`, `VMFAULT` (VMID, address, client, pid) | a plugin VkResult / timeout lines up with these by time |
+| Q10 | every IOSurface the kext sees, and its VRAM | `SURFGEM` (`arg` 0 refused, 1 imported, 2 dirty, 3 RM share; `v0` id, `v1` status, `v2` reason / plane, `pa` VRAM), `SURFRES` (resource, id, how: 1 aperture, 2 page-off, 4 import, 5 dirty; `pa` its VRAM) | joins the plugin's IOSurface ids to the legacy buffers' addresses |
+| Q11 | one clock | every `t` is mach_absolute_time; each header (version 2, 96 bytes) carries `tb_numer` / `tb_denom`, the read's `now` and its wall clock `wall_us` (us since 1970, taken next to `now`) | ns = t * numer / denom (the plugin's traces use the same clock); wall = wall_us - (now_ns - t_ns) / 1000; triage prints the anchor; a version 2 header without it: FAIL Q11 |
+
+Triage's self-check prints `FAIL trace incomplete: Qn (...)` for any
+question the report cannot answer (no trace at all on a kernel that has
+it, no HUBP address from a core without `rdna3DisplayScanAddr`, events
+lost in the A/B streams, no core trace when RADV ran).
+
+#### ECC review round 1 of the swap copy and the trace
+
+What could make the next report come back empty or wrong, and what says so:
+
+| Seen | Counter / log / triage line | Meaning, action |
+|---|---|---|
+| `swap copy: SDMA BREAKER OPEN at swap #n` (log), `swaps_copybrktrips`, `swaps_copybrkflip_h<N>`, SWAP `v1` bit 20, MODESET arg 2 | three SDMA copies failed in a row, or one timed out (~100 ms each) | modes 1/2 flip as in mode 0 until one swap 600 swaps later tries SDMA again (`... breaker CLOSED`); the A/B's phase 1 then WARNs; the SDMA ring is the fault (see the core's `copy:` lines) |
+| `swap copy: head N: 3 flips in a row did not latch in time -- the head's copies STOP WAITING`, `swaps_copynowait_h<N>`, LATCH arg 6/7/8 | rdna3_flip_latch.h's backoff in modes 1/2 | a head that never latches costs 3 capped waits, then only a look per swap; a latch seen turns the waits on again |
+| `swaps_copyfreewait_h<N>`, `the old second scanout buffer ... is on the panel / maybe still scanned` | D is freed only off the panel once the flip away latched | a mode change waits for the latch, the swap copies into home meanwhile |
+| `swap mode: head N: leaving the copy modes -- the last frame copied into home ... flipped there` | `debug.rdna3accel_swap_mode=0` while the panel showed D | mode 0 starts from home; a failure keeps D on the panel until mode 0's first flip (logged) |
+| `swap mode a -> b ... REFUSED: the family's lock could not be taken` | the mode never changes without the lock | the A/B's `ab_set` line says `NOT APPLIED`; triage `A/B inconclusive: mode 0 never applied in phase 2` |
+| `trace: head N: what its HUBP scans is unknown ...: <reason> (0x...)`, PANEL `v3` / `v4` | Q6 names the reason (no core, unknown head, an older core, the call failed) | |
+| APERTURE `v2` 1-4, CS `arg` 0xff | every getApertureMemoryDescriptor return (gate, cached, no VRAM, withRange) and every refused AMDGPU_CS (`drm: AMDGPU_CS from pid p refused (e)`) | Q3 / Q9 |
+| `== frame trace: <oid> NOT BINARY` (tests file) | `sysctl -b` gave text: the stream files cannot be decoded | triage `trace incomplete: Q8 (... NOT a trace ...)` |
+| `FAIL frame trace: A/B did not run` / `A/B inconclusive: phase X had n swaps on head h (need 20)` / `no MODESET to phase X` / `mode 0 never applied in phase 2` | the A/B is judged only from phases 1-2 events, with at least 20 swaps per head and phase | an inconclusive A/B prints its verdict as `INFO A/B verdict (NOT valid ...)`; `== swap A/B: activity: Activity Monitor is NOT running` explains a phase without swaps |
+| `trace incomplete: Q1 (... FEWER than the counters: head N: a in the trace, b counted over the A/B)` | the trace lost swaps the counters saw (`swaps_h<N>` before phase 1 and after mode 0) | |
+| `trace incomplete: Q1-Q11 (debug.rdna3accel_trace NOT read by collect.sh ...)` | `36-frame-trace.txt` says a root-only read failed | run collect.sh as root |
+| `plugin trace: ...` | tools/plugin_trace.py's verdicts (the Metal plugin's own trace, collected by tools/macos/collect_plugin_trace.sh into the archive) | INFO `not in this report` when the plugin loaded but its trace is missing |
+
+The kernel stream is pumped every 3 s through the whole run now (not only
+the A/B), into `$HOME/rdna3-trace/` on the machine, the archive
+(`36-stream-*.bin` and `.size`), the host (`<report>-trace-stream.bin`,
+`-drmtrace-stream.bin`, `-trace-sec.bin` and their `.size`) and
+`/var/db/rdna3-pending-*` until sent. Reads copy 256 events at a time with
+the ring's lock dropped between; the stream's cursor moves only after the
+copyout. Content samples are read through the BAR with no HDP invalidate,
+as amdgpu does on Navi 32 (`amdgpu_device_invalidate_hdp` is a no-op on
+HDP 6.0); the headers say so (flag `HDP_NOINV`). The other buffers of a
+swapping surface are sampled at every swap for a head's first 600 swaps,
+during the A/B and at empty backs, else every 8th
+(`debug.rdna3accel_trace_scan`: 0 only empty backs, 2 always).
+
+#### Symptom -> trace -> action
+
+| Seen | Trace / triage line | Action |
+|---|---|---|
+| black frames in mode 1 | A/B: `BLACK frames` > 0 in mode 1, `swaps_copyblack_h<N>` | mode 1 only copies an empty back with no picture to lose: look at Q2 for where the frame went; `debug.rdna3accel_swap_mode=0` to compare |
+| `H-B2` FAIL | a back named by swaps never receives a frame (no aperture write, empty at every swap) | the empty backs are held in mode 1; find with SURFRES / SURFGEM which IOSurface WindowServer draws (H-B2 is the family's / WindowServer's buffer rotation, not a driver write) |
+| `H-COPY` FAIL in mode 0, none in mode 1 | in-place rewrites only while flipping | the copy is right: keep mode 1 |
+| `H-FREE` | VMFREE flags 2-8 | in mode 1 the panel never scans WindowServer's buffers; in mode 0 expected |
+| `CF-ERROR` CRITICAL | a CF with `v4` != 0 | only `rdna3accelcf=0` answers an error: a bug if it shows otherwise |
+| CoreDisplay `copy forward failed` CRITICAL | no CF error in the trace, `VRAM` WARN (allocations refused) | the family failed on a buffer without VRAM: the CPU-visible heap ran out (BAR size); open item N29 (2) |
+| `PANEL` WARN | HUBP address != expected | the framebuffer or an IOP flip moved the panel: see the FLIP events around it |
+| tearing in mode 1 | `swaps_copydirect_h<N>` (no second buffer) or `swaps_copylatchto_h<N>` | D could not be allocated (VRAM) or flips did not latch in time |

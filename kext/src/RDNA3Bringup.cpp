@@ -22,6 +22,7 @@
 #include <mach/mach_time.h>
 #include <pexpert/pexpert.h>
 #include "rdna3_bootargs.h"
+#include "RDNA3Trace.h"
 
 extern "C" {
 #include "smu13.h"
@@ -3530,6 +3531,23 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
         fUfSlot[ufSlot].ring = ring;
         fUfSlot[ufSlot].seq = *seq;
     }
+    {
+        /* card run 2026-10-17b's trace: every submission, so a plugin's
+         * VkResult or timeout lines up with what reached the GPU */
+        struct rd3_trace_ev e;
+        bzero(&e, sizeof e);
+        e.type = RD3_TR_CS;
+        e.head = 0xff;
+        e.arg = (uint8_t)ip;
+        e.flags = (uint8_t)ring;
+        e.v0 = (uint32_t)v->ownerPid;
+        e.v1 = v->vmid;
+        e.v2 = r ? 0u : (uint32_t)*seq;
+        e.v3 = (n & 0xffffu) | ((job ? (job->bo_count > 0xffffu ? 0xffffu : job->bo_count) : 0u) << 16);
+        e.v4 = (uint32_t)r;
+        e.pa = n && ibs ? ibs[0].va : 0;
+        rdna3TraceCore(&e);
+    }
     return r;
 }
 
@@ -3666,7 +3684,32 @@ int RDNA3Bringup::submitRing(RDNA3Vm *v, uint32_t ip, uint32_t ring, const rdna3
     return -RD_EINVAL;
 }
 
+/* the newest fence seq of each (IP, ring) the trace has recorded as
+ * signalled (card run 2026-10-17b): one FENCE event per newly seen seq */
+static uint64_t gTrFenceSeen[16][8];
+static int fenceTraced(uint32_t ip, uint32_t ring, uint64_t seq, int done)
+{
+    if (done && ip < 16 && ring < 8 && seq > gTrFenceSeen[ip][ring]) {
+        struct rd3_trace_ev e;
+        gTrFenceSeen[ip][ring] = seq;
+        bzero(&e, sizeof e);
+        e.type = RD3_TR_FENCE;
+        e.head = 0xff;
+        e.arg = (uint8_t)ip;
+        e.flags = (uint8_t)ring;
+        e.v2 = (uint32_t)seq;
+        e.v3 = (uint32_t)(seq >> 32);
+        rdna3TraceCore(&e);
+    }
+    return done;
+}
+
 int RDNA3Bringup::fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq)
+{
+    return fenceTraced(ip, ring, seq, fenceSignaledRaw(ip, ring, seq));
+}
+
+int RDNA3Bringup::fenceSignaledRaw(uint32_t ip, uint32_t ring, uint64_t seq)
 {
     if (ip == AMDGPU_HW_IP_VCN_ENC && fVcn && ring < RD_VCN_MAX_INST && fVcn->ring_enc[ring].ring_size)
         return vcn40_fence_passed(fDev, &fVcn->ring_enc[ring], (uint32_t)seq);
@@ -3830,6 +3873,21 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
         gmc11_decode_vm_fault(b->fDev, iv, &f);
         gmc11_log_vm_fault(b->fDev, &f);
         b->fVmFaults++;
+        {
+            /* card run 2026-10-17b's trace: the fault with its time and owner */
+            struct rd3_trace_ev e;
+            bzero(&e, sizeof e);
+            e.type = RD3_TR_VMFAULT;
+            e.head = 0xff;
+            e.arg = (uint8_t)(f.hub ? 1 : 0);
+            e.flags = (uint8_t)(f.write ? 1 : 0);
+            e.v0 = f.vmid;
+            e.v1 = f.cid;
+            e.v2 = f.vmid < 16 && b->fVmByVmid[f.vmid] ? (uint32_t)b->fVmByVmid[f.vmid]->ownerPid : 0u;
+            e.v3 = f.status;
+            e.pa = f.addr;
+            rdna3TraceCore(&e);
+        }
         if (f.vmid < 16 && b->fVmByVmid[f.vmid]) {
             b->fVmByVmid[f.vmid]->faultAddr = f.addr;
             b->fVmByVmid[f.vmid]->faultStatus = f.status;

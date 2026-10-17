@@ -64,6 +64,11 @@ $(BUILD)/test_swap_front: tests/test_swap_front.c common/rdna3_swap_front.h comm
 
 $(BUILD)/test_flip_latch: tests/test_flip_latch.c common/rdna3_flip_latch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_flip_latch.c
+# card run 2026-10-17b: the swap as a copy (mode 1) and the per-frame trace
+$(BUILD)/test_swap_copy: tests/test_swap_copy.c common/rdna3_swap_copy.h common/rdna3_swap_front.h common/rdna3_flip_latch.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_swap_copy.c
+$(BUILD)/test_trace: tests/test_trace.c common/rdna3_trace.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_trace.c
 # common/rdna3_gamma_judge.h: rdna3_modetest's gamma verdict (card run 58)
 $(BUILD)/test_gamma_judge: tests/test_gamma_judge.c common/rdna3_gamma_judge.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_gamma_judge.c
@@ -118,7 +123,7 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOB
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_mtl_allow $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_swap_copy $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_mtl_allow $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
@@ -131,6 +136,8 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	$(BUILD)/test_gamma_judge
 	$(BUILD)/test_swap_front
 	$(BUILD)/test_flip_latch
+	$(BUILD)/test_swap_copy
+	$(BUILD)/test_trace
 	$(BUILD)/test_libdrm_amdgpu
 	rm -f $(BUILD)/scanout-pipe*.ppm
 	$(BUILD)/rdna3_drminfo_host --scanout $(BUILD) | grep -q '1 pipe(s) lit'
@@ -147,6 +154,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	tests/test_triage_stale_plugin.sh
 	tests/test_triage_latch.sh
 	tests/test_result_checklist.sh
+	tests/test_triage_trace.sh
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump
 

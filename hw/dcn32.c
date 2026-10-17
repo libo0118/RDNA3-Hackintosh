@@ -660,6 +660,20 @@ int dcn32_flip(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t mc, uint32_t pi
     return RDNA3_OK;
 }
 
+int dcn32_scan_addr(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t *inuse, uint64_t *requested)
+{
+    uint32_t p;
+    if (!dc || i >= dc->nheads || !inuse || !requested)
+        return RDNA3_EINVAL;
+    p = dc->head[i].pipe;
+    /* hubp2_read_state_common: SURFACE_EARLIEST_INUSE, PRIMARY_SURFACE_ADDRESS (HIGH: 16 bits) */
+    *inuse = RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, p) |
+             ((uint64_t)(RH(d, regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH, p) & 0xffff) << 32);
+    *requested = RH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, p) |
+                 ((uint64_t)(RH(d, regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, p) & 0xffff) << 32);
+    return RDNA3_OK;
+}
+
 int dcn32_flip_pending(rdna3_dev *d, rdna3_dcn *dc, uint32_t i)
 {
     uint32_t p;

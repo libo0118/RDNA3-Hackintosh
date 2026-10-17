@@ -14,6 +14,7 @@
 #include "RDNA3Regs.h"
 #include "RDNA3Bringup.hpp"
 #include "gfx11_info.h"
+#include "RDNA3Trace.h"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
@@ -27,6 +28,8 @@
 #include <mach/mach_time.h>
 
 #include <libkern/copyio.h>   /* copyin/copyout (kpi.libkern) */
+#include <sys/sysctl.h>
+#include <sys/proc.h>
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
@@ -485,11 +488,39 @@ int RDNA3Accel::drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq
     int r;
     if (!a->fBringup)
         return 0;
+    const uint64_t t0 = mach_absolute_time();
     IOLockUnlock(a->fDrmLock);
     r = a->fBringup->fenceWait(ip, ring, seq, absNs, &cap);
     IOLockLock(a->fDrmLock);
-    if (cap)
-        r = a->fBringup->fenceSignaled(ip, ring, seq) ? 0 : a->fBringup->recoverHang(ip, ring, seq);
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+    bool recovered = false;
+    int rr = 0;
+    if (cap) {
+        recovered = !a->fBringup->fenceSignaled(ip, ring, seq);
+        r = recovered ? (rr = a->fBringup->recoverHang(ip, ring, seq)) : 0;
+    }
+    {
+        /* card run 2026-10-17b's trace: the wait, and a recovery it caused */
+        struct rd3_trace_ev e;
+        bzero(&e, sizeof e);
+        e.type = RD3_TR_GPUWAIT;
+        e.head = 0xff;
+        e.arg = (uint8_t)ip;
+        e.flags = (uint8_t)ring;
+        e.v0 = (uint32_t)proc_selfpid();
+        e.v1 = (uint32_t)(ns / 1000 > 0xffffffffull ? 0xffffffffull : ns / 1000);
+        e.v2 = (uint32_t)seq;
+        e.v3 = cap ? 1u : 0u;
+        e.v4 = (uint32_t)r;
+        rdna3TraceCore(&e);
+        if (recovered) {
+            e.type = RD3_TR_RESET;
+            e.v0 = (uint32_t)rr;
+            e.v1 = e.v3 = e.v4 = 0;
+            rdna3TraceCore(&e);
+        }
+    }
     a->drmVmReplayIfNeeded();
     a->drmVramLostSync();   /* a reset that lost VRAM: nothing brings it back */
     return r;
@@ -705,6 +736,9 @@ static int drmPrivileged(void *)
 
 bool RDNA3Accel::drmInit(const amd_discovery *disc)
 {
+    if (!rdna3TraceCoreInit())
+        LOG("trace: no memory for the command-submission trace ring - debug.rdna3_drmtrace stays empty "
+            "(every event counted in its header's nomem)");
     rdna3_drm_ops ops = {};
     ops.ctx = this;
     ops.zalloc = drmZalloc;
@@ -881,6 +915,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
 
 void RDNA3Accel::drmFree()
 {
+    rdna3TraceCoreFini();
     if (fDrm && fDrm->ops.bo_free)   /* user fence BOs still held (rings are down) */
         rdna3_drm_device_fini(fDrm);
     if (fDrm)
@@ -949,6 +984,22 @@ int RDNA3Accel::drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t si
     int r = rdna3_drm_ioctl(f, nr, data, size);
     if (gb)
         gb->gfxOffRelease();
+    if (r && nr == RD_NR_AMDGPU(DRM_AMDGPU_CS)) {
+        /* card run 2026-10-17b's trace: a submission refused anywhere (the
+         * chunk parse, a guilty context, the ring): arg 0xff, the errno in
+         * v4 (ECC review round 1: only the ring's own answer was traced) */
+        struct rd3_trace_ev e;
+        bzero(&e, sizeof e);
+        e.type = RD3_TR_CS;
+        e.head = 0xff;
+        e.arg = 0xff;
+        e.v0 = (uint32_t)proc_selfpid();
+        e.v4 = (uint32_t)r;
+        rdna3TraceCore(&e);
+        if (fCsFailLogs < 8 || (fCsFailLogs & 1023) == 0)
+            LOG("drm: AMDGPU_CS from pid %d refused (%d) (%u such)", proc_selfpid(), r, fCsFailLogs + 1);
+        fCsFailLogs++;
+    }
     if (--f->inflight == 0)
         IOLockWakeup(fDrmLock, &f->inflight, false);
     IOLockUnlock(fDrmLock);
@@ -1045,4 +1096,168 @@ IOMemoryDescriptor *RDNA3Accel::drmMemoryForOffset(rdna3_drm_file *f, uint64_t o
     }
     IOLockUnlock(fDrmLock);
     return md;
+}
+
+/* ------------------- the trace ring (card run 2026-10-17b) ------------------- */
+
+static struct rd3_trace_ring gCoreTr;
+static IOSimpleLock *gCoreTrLock;
+static volatile SInt64 gCoreTrNomem;
+static uint64_t gCoreTrCursor;     /* the stream reader's last event number */
+static bool gCoreTrSysctl;
+
+void rdna3TraceCore(const struct rd3_trace_ev *in)
+{
+    IOSimpleLock *lk = gCoreTrLock;
+    if (!in || !lk || !gCoreTr.ev) {
+        OSIncrementAtomic64(&gCoreTrNomem);
+        return;
+    }
+    const uint64_t t = mach_absolute_time();
+    IOInterruptState is = IOSimpleLockLockDisableInterrupt(lk);
+    struct rd3_trace_ev *e = rd3_trace_next(&gCoreTr);
+    if (e) {
+        const uint32_t seq = e->seq;
+        *e = *in;
+        e->seq = seq;
+        e->t = t;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lk, is);
+}
+
+/* one read: the header, then the events (all kept, or those since the
+ * stream reader's last read); root only. The window is fixed at the start
+ * and copied RD3_TRACE_CHUNK events at a time, interrupts back on between
+ * chunks (ECC review round 1: the whole ring under a spinlock with
+ * interrupts off); the stream's cursor moves only after the copyout. */
+static int rdna3TraceCoreRead(struct sysctl_req *req, bool stream)
+{
+    if (req->newptr)
+        return EPERM;
+    if (!kauth_cred_issuser(kauth_cred_get()))
+        return EPERM;
+    const size_t maxLen = sizeof(struct rd3_trace_hdr) + (size_t)RD3_TRACE_CAP * sizeof(struct rd3_trace_ev);
+    if (!req->oldptr)
+        return SYSCTL_OUT(req, nullptr, maxLen);
+    uint8_t *buf = (uint8_t *)IOMalloc(maxLen);
+    if (!buf)
+        return ENOMEM;
+    bzero(buf, sizeof(struct rd3_trace_hdr));
+    struct rd3_trace_hdr *h = (struct rd3_trace_hdr *)buf;
+    struct rd3_trace_ev *ev = (struct rd3_trace_ev *)(buf + sizeof *h);
+    mach_timebase_info_data_t tb = { 1, 1 };
+    clock_timebase_info(&tb);
+    uint32_t n = 0;
+    uint64_t written = 0, lost = 0, cursor0 = 0, to = 0;
+    if (gCoreTrLock && gCoreTr.ev) {
+        uint64_t next;
+        IOInterruptState is = IOSimpleLockLockDisableInterrupt(gCoreTrLock);
+        to = written = gCoreTr.written;
+        cursor0 = gCoreTrCursor;
+        if (stream) {
+            next = rd3_trace_stream_from(&gCoreTr, cursor0, &lost);
+        } else {
+            next = rd3_trace_oldest(&gCoreTr);
+            lost = rd3_trace_lost(&gCoreTr);
+        }
+        IOSimpleLockUnlockEnableInterrupt(gCoreTrLock, is);
+        while (next <= to && n < RD3_TRACE_CAP) {
+            const uint32_t want = RD3_TRACE_CAP - n < RD3_TRACE_CHUNK ? RD3_TRACE_CAP - n : RD3_TRACE_CHUNK;
+            is = IOSimpleLockLockDisableInterrupt(gCoreTrLock);
+            const uint32_t got = rd3_trace_copy_chunk(&gCoreTr, &next, to, ev + n, want, &lost);
+            IOSimpleLockUnlockEnableInterrupt(gCoreTrLock, is);
+            n += got;
+            if (!got)
+                break;
+        }
+    }
+    clock_sec_t ws = 0;
+    clock_usec_t wus = 0;
+    h->magic = RD3_TRACE_MAGIC;
+    h->version = RD3_TRACE_VERSION;
+    h->ev_size = sizeof(struct rd3_trace_ev);
+    h->cap = RD3_TRACE_CAP;
+    h->count = n;
+    h->written = written;
+    h->lost = lost;
+    h->now = mach_absolute_time();
+    clock_get_calendar_microtime(&ws, &wus);
+    h->wall_us = (uint64_t)ws * 1000000ull + (uint64_t)wus;
+    h->nomem = (uint64_t)gCoreTrNomem;
+    h->source = RD3_TRACE_SRC_CORE;
+    h->tb_numer = tb.numer;
+    h->tb_denom = tb.denom;
+    h->read_kind = stream ? RD3_TRACE_READ_STREAM : RD3_TRACE_READ_ALL;
+    h->flags = RD3_TRACE_HDR_CHUNKED;
+    h->hdr_size = sizeof *h;
+    const int err = SYSCTL_OUT(req, buf, sizeof *h + (size_t)n * sizeof *ev);
+    IOFree(buf, maxLen);
+    if (!err && stream && gCoreTrLock) {
+        IOInterruptState is = IOSimpleLockLockDisableInterrupt(gCoreTrLock);
+        if (gCoreTrCursor == cursor0)
+            gCoreTrCursor = to;
+        IOSimpleLockUnlockEnableInterrupt(gCoreTrLock, is);
+    }
+    return err;
+}
+static int rdna3_drmtrace_sysctl SYSCTL_HANDLER_ARGS
+{
+    (void)oidp; (void)arg1; (void)arg2;
+    return rdna3TraceCoreRead(req, false);
+}
+static int rdna3_drmtrace_stream_sysctl SYSCTL_HANDLER_ARGS
+{
+    (void)oidp; (void)arg1; (void)arg2;
+    return rdna3TraceCoreRead(req, true);
+}
+/* the SDK's SYSCTL_STRUCT_INIT leaves oid_link to the registration */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wmissing-field-initializers"
+SYSCTL_PROC(_debug, OID_AUTO, rdna3_drmtrace, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED, nullptr,
+            0, rdna3_drmtrace_sysctl, "S,rd3_trace",
+            "card run 2026-10-17b: command submissions, fences, waits, resets, GPU faults (common/rdna3_trace.h; root)");
+SYSCTL_PROC(_debug, OID_AUTO, rdna3_drmtrace_stream, CTLTYPE_OPAQUE | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_MASKED,
+            nullptr, 0, rdna3_drmtrace_stream_sysctl, "S,rd3_trace",
+            "the same, only the events since the last read of this one (root)");
+#pragma clang diagnostic pop
+
+bool rdna3TraceCoreInit(void)
+{
+    if (!gCoreTrLock)
+        gCoreTrLock = IOSimpleLockAlloc();
+    if (gCoreTrLock && !gCoreTr.ev) {
+        struct rd3_trace_ev *ev = (struct rd3_trace_ev *)IOMalloc((size_t)RD3_TRACE_CAP * sizeof *ev);
+        if (ev) {
+            bzero(ev, (size_t)RD3_TRACE_CAP * sizeof *ev);
+            IOInterruptState is = IOSimpleLockLockDisableInterrupt(gCoreTrLock);
+            gCoreTr.cap = RD3_TRACE_CAP;
+            gCoreTr.written = 0;
+            gCoreTrCursor = 0;   /* a new ring: the stream starts at its first event (ECC review round 1) */
+            gCoreTr.ev = ev;
+            IOSimpleLockUnlockEnableInterrupt(gCoreTrLock, is);
+        }
+    }
+    if (!gCoreTrSysctl) {
+        sysctl_register_oid(&sysctl__debug_rdna3_drmtrace);
+        sysctl_register_oid(&sysctl__debug_rdna3_drmtrace_stream);
+        gCoreTrSysctl = true;
+    }
+    return gCoreTr.ev != nullptr;
+}
+
+void rdna3TraceCoreFini(void)
+{
+    if (gCoreTrSysctl) {
+        sysctl_unregister_oid(&sysctl__debug_rdna3_drmtrace_stream);
+        sysctl_unregister_oid(&sysctl__debug_rdna3_drmtrace);
+        gCoreTrSysctl = false;
+    }
+    if (gCoreTrLock && gCoreTr.ev) {
+        IOInterruptState is = IOSimpleLockLockDisableInterrupt(gCoreTrLock);
+        struct rd3_trace_ev *ev = gCoreTr.ev;
+        gCoreTr.ev = nullptr;
+        gCoreTr.cap = 0;
+        IOSimpleLockUnlockEnableInterrupt(gCoreTrLock, is);
+        IOFree(ev, (size_t)RD3_TRACE_CAP * sizeof *ev);
+    }
 }

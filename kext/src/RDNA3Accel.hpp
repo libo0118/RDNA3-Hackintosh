@@ -268,6 +268,7 @@ private:
     IOReturn      platformCopyVram(struct RD3KCopyRequest *q);
     uint64_t      fAccelVramBytes = 0;
     uint32_t      fCopyVramFails = 0;      /* rdna3CopyVram refused (log limit) */
+    uint32_t      fCsFailLogs = 0;         /* AMDGPU_CS refused (log limit; traced every time) */
     uint32_t      fUserptrRo = 0;          /* GEM_USERPTR wired read-only after a read-write refusal */
     uint32_t      fUserptrFails = 0;       /* GEM_USERPTR refused (log limit) */
     bool          platformInit();
@@ -345,6 +346,7 @@ private:
     IOReturn      displayInfo(struct RD3KDisplayInfo *r);
     IOReturn      displayFlip(struct RD3KDisplayFlip *f);
     IOReturn      displayStatus(struct RD3KDisplayStatus *s);
+    IOReturn      displayScanAddr(struct RD3KDisplayScanAddr *s);
     IOReturn      displayCrc(uint32_t head, uint32_t *crc);
     /* display sleep from the framebuffer (rdna3DisplayBlank, rdna3dpms=1) */
     IOReturn      displayBlank(uint32_t head, bool blank);
