@@ -669,7 +669,7 @@ def stale_backs(trace):
                     hs["last"] = None
             continue
         if e.type in forget:
-            if e.type == T["GONE"] or (e.type == T["VMALLOC"] and e.flags & 8):
+            if e.type == T["GONE"] or (e.type == T["VMALLOC"] and e.flags & 8 and e.arg == 1):  # D granted
                 st.pop(e.head, None)
             elif (e.type == T["MODESET"] and e.arg == 0 and e.v0 != e.v1) or (e.type == T["MODE"] and e.arg == 1):
                 st.clear()

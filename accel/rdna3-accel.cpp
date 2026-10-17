@@ -4821,7 +4821,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
                             ALOG("swap #%u: head %u: the back 0x%llx matched its first-grid samples of swap #%u but "
                                  "%s -- copied, not held (a redraw between the first grid's points; %lld such)", n,
                                  knownHead, bp, staleAt,
-                                 ok2 ? "not its second grid (shifted by half a cell)"
+                                 ok2 ? "not its second grid (shifted by half a cell), or its record went"
                                      : "its second grid could not be read",
                                  (long long)k + 1);
                     } else if (gSwapStale) {
