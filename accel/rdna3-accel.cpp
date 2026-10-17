@@ -322,6 +322,13 @@ static uint64_t gTrCursor;             /* the stream reader's last event number 
 static volatile int gSwapMode = RD3_SWAPMODE_DEFAULT;
 static volatile int gSwapAb = 0;
 static int gTrScan = 1;
+/* debug.rdna3accel_swap_landed / boot-arg rdna3swaplanded (card run
+ * 2026-10-17c, rdna3_swap_copy.h): 1 modes 1/2 present the landed buffer
+ * instead of a suspect back; 0 (the default) they only count, trace and log
+ * what they would have presented (the rule fired 0 times in that run's
+ * pattern and can show a half-drawn frame: the next report says whether it
+ * matters) */
+static int gSwapLanded = 0;
 static struct thread_call *gTrDumpCall;
 static volatile UInt32 gTrDumpBusy;
 static uint64_t gTrDumpFrom, gTrDumpTo;
@@ -956,6 +963,11 @@ public:
         gA3On = rd3_a3_on() ? 1 : 0;
         gSwapLatch = (int)rd3_arg("rdna3swaplatch", 1);
         gSwapTorn = (int)rd3_arg("rdna3swaptorn", 1);
+        gSwapLanded = rd3_arg("rdna3swaplanded", 0) ? 1 : 0;
+        ALOG("swap landed: %s (card run 2026-10-17c; boot-arg rdna3swaplanded, sysctl debug.rdna3accel_swap_landed)",
+             gSwapLanded ? "1 = modes 1/2 present the buffer WindowServer's frame landed in instead of an empty / "
+                           "stale back"
+                         : "0 = only counted and traced (swaps_copylanded_would_h<N>), the back's old rule stands");
         {
             const uint32_t m = rd3_arg("rdna3swapmode", RD3_SWAPMODE_DEFAULT);
             gSwapMode = rd3_swapmode_valid((long)m) ? (int)m : RD3_SWAPMODE_DEFAULT;
@@ -3992,6 +4004,7 @@ static SInt64 gCntScLatchTo[kRd3MaxFB], gCntScFail[kRd3MaxFB], gCntScDirect[kRd3
 static SInt64 gCntScFrontFail[kRd3MaxFB], gCntCfScSrc[kRd3MaxFB], gCntCfScScanout[kRd3MaxFB], gCntCfScStale[kRd3MaxFB];
 static SInt64 gCntScNoWait[kRd3MaxFB], gCntScBrkFlip[kRd3MaxFB], gCntScFreeWait[kRd3MaxFB], gCntScBrkTrips;
 static SInt64 gCntScLanded[kRd3MaxFB];   /* the landed buffer presented instead of the named back (2026-10-17c) */
+static SInt64 gCntScLandedWould[kRd3MaxFB];   /* ... found but not presented (debug.rdna3accel_swap_landed=0) */
 static void rd3AccelSwapCopy(unsigned head, IOService *fb, IOAccelResource2 *back, IOAccelResource2 *frontRes,
                              bool backEmpty, unsigned n, struct rd3_trace_ev *tr, const uint8_t *srcBand);
 static void rd3AccelScBrkEvent(enum rd3_sc_brk_ev ev, unsigned n, unsigned head, int status, IOReturn r);
@@ -4335,6 +4348,25 @@ static IOAccelResource2 *rd3AccelLanded(unsigned head, const void *surf, IOAccel
     *idx = ci[pk];
     return cr[pk];
 }
+/* debug.rdna3accel_swap_landed=0: a landed buffer found but not presented -
+ * counted, logged (first 8, then every 1024th) with what the swap did instead */
+static void rd3AccelLandedWould(unsigned head, unsigned n, IOAccelResource2 *back, int backArg, unsigned backType,
+                                bool backEmpty, IOAccelResource2 *l, unsigned idx, enum rd3_sc_act act)
+{
+    if (head >= kRd3MaxFB) return;
+    const SInt64 k = OSAddAtomic64(1, &gCntScLandedWould[head]);
+    if (!rd3_log_due((uint64_t)k, 8, 1023)) return;
+    char where[24];
+    if (idx == RD3_TRV4_LANDED_A1) strlcpy(where, "a1", sizeof where);
+    else snprintf(where, sizeof where, "buf[%u]", idx);
+    ALOG("swap #%u: head %u: would present landed buffer 0x%llx (%s, resource type 0x%02x, IOSurface %u) instead of "
+         "the back (phys 0x%llx, %s, resource type 0x%02x, %s) -- debug.rdna3accel_swap_landed=0, so %s (%lld such)",
+         n, head, rd3res_phys(l), where, rd3AccelResType(l), rd3AccelResSurfaceId(l), rd3res_phys(back),
+         backArg == 2 ? "a2" : "a1", backType, backEmpty ? "read empty" : "has no IOSurface and did not change",
+         act == RD3_SC_HOLD ? "held (the panel keeps the last frame)"
+         : act == RD3_SC_COPY_EMPTY ? "the empty back copied (a black frame)" : "the back copied",
+         (long long)k + 1);
+}
 /* what the head's HUBP scans now (Q6): the core's SURFACE_EARLIEST_INUSE
  * and the requested address as CPU addresses, the frame state */
 /* PANEL's v3: why the HUBP's address is missing (0: it is there); 4 and 5
@@ -4577,11 +4609,15 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
             othDone = true;
             IOAccelResource2 *l = rd3AccelLanded(knownHead, surf, a1, a2, back, s1, ch1, pipeRes[knownHead], bufs,
                                                  nbufs, n, &oth, &ss, &landedIdx);
-            if (l) {
+            if (l && gSwapLanded) {
                 src = l;
                 act = RD3_SC_COPY_LANDED;
                 tr.v1 |= RD3_TRV1_LANDED;
                 tr.v4 |= (landedIdx & 0xffu) << 24;
+            } else if (l) {   /* off: the back's old rule stands, what it would have presented is recorded */
+                tr.v1 |= RD3_TRV1_LANDED_WOULD;
+                tr.v4 |= (landedIdx & 0xffu) << 24;
+                rd3AccelLandedWould(knownHead, n, back, roles.back, backType, sb.rc == kRcEmpty, l, landedIdx, act);
             }
         }
         if (sb.rc == kRcEmpty && act != RD3_SC_COPY_LANDED) tr.flags |= RD3_TRF_BACK_EMPTY;
@@ -6247,6 +6283,10 @@ RD3ACCEL_CNT4(rdna3accel_swaps_copy, gCntScCopy, "swap mode 1/2: backs copied to
 RD3ACCEL_CNT4(rdna3accel_swaps_copyempty, gCntScEmpty, "swap mode 1: empty backs NOT copied over a picture (the panel kept its frame)");
 RD3ACCEL_CNT4(rdna3accel_swaps_copyblack, gCntScBlack, "swap mode 1/2: empty backs copied (black frames)");
 RD3ACCEL_CNT4(rdna3accel_swaps_copylanded, gCntScLanded, "card run 2026-10-17c: swap mode 1/2: the named back empty (or a stale one without an IOSurface), the surface's buffer WindowServer's frame landed in presented instead");
+RD3ACCEL_CNT4(rdna3accel_swaps_copylanded_would, gCntScLandedWould, "swap mode 1/2: such a landed buffer found but NOT presented (debug.rdna3accel_swap_landed=0): the back's old rule applied");
+SYSCTL_INT(_debug, OID_AUTO, rdna3accel_swap_landed, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gSwapLanded, 0,
+           "card run 2026-10-17c: 1 swap modes 1/2 present the buffer WindowServer's frame landed in instead of an "
+           "empty / stale back, 0 (default, boot-arg rdna3swaplanded) only count and trace it");
 RD3ACCEL_CNT4(rdna3accel_swaps_copybytes, gCntScBytes, "swap mode 1/2: bytes copied to the panel");
 RD3ACCEL_CNT4(rdna3accel_swaps_copyus, gCntScUs, "swap mode 1/2: microseconds of those copies, summed");
 RD3ACCEL_CNT4(rdna3accel_swaps_copyusmax, gCntScUsMax, "swap mode 1/2: the longest copy, microseconds");
@@ -6272,7 +6312,8 @@ static void rd3AccelInstallSysctl2(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_swap_ab);      sysctl_register_oid(&sysctl__debug_rdna3accel_swap_trace_events);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swap_trace_nomem); sysctl_register_oid(&sysctl__debug_rdna3accel_swap_trace_lost);
     RD3ACCEL_REG4(rdna3accel_swaps_copy);      RD3ACCEL_REG4(rdna3accel_swaps_copyempty);
-    RD3ACCEL_REG4(rdna3accel_swaps_copylanded);
+    RD3ACCEL_REG4(rdna3accel_swaps_copylanded); RD3ACCEL_REG4(rdna3accel_swaps_copylanded_would);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_swap_landed);
     RD3ACCEL_REG4(rdna3accel_swaps_copyblack); RD3ACCEL_REG4(rdna3accel_swaps_copybytes);
     RD3ACCEL_REG4(rdna3accel_swaps_copyus);    RD3ACCEL_REG4(rdna3accel_swaps_copyusmax);
     RD3ACCEL_REG4(rdna3accel_swaps_copywait);  RD3ACCEL_REG4(rdna3accel_swaps_copywaitus);

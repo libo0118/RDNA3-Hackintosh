@@ -2354,8 +2354,13 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
   pattern of this run it does not fire (nothing new at those swaps); it
   presents a frame that really sits in a buffer the swap did not name.
   The risk: a buffer WindowServer is drawing the next frame into also
-  "changed" - a half-drawn frame would show; watch `swaps_copylanded_h<N>`
-  against the looks.
+  "changed" - a half-drawn frame would show. So it is OFF by default
+  (`debug.rdna3accel_swap_landed` / boot-arg `rdna3swaplanded`, default
+  0): the swap keeps the old rule and only counts, traces and logs what it
+  would have presented (`swaps_copylanded_would_h<N>`, SWAP `v1` bit 22,
+  `would present landed buffer ...`). A next report with that counter at 0
+  says the rule does not matter; above 0, try `rdna3swaplanded=1` and
+  watch `swaps_copylanded_h<N>` against the looks.
 - The plugin's trace was missing because the VM's plugin was stale (built
   from metal/ at 8540be5, before the plugin's frame trace,
   `metal/plugin/NVMTLTrace.m`, came with e168385): rebuild it in the VM
@@ -2364,6 +2369,7 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
 | Seen | Trace / counter / triage line | Meaning, action |
 |---|---|---|
 | `swap #n: head N: the back (phys 0x..., a2, resource type 0x40) read empty -- presented the landed buffer 0x... instead (buf[i], resource type 0xc0, IOSurface s: ...)` (log, first 8 then every 1024th) | `swaps_copylanded_h<N>`; SWAP `v1` bit 21, `v4 >> 24` the buffer's index (0xfe: a1), the decoder prints `presented the landed buffer 0x...` | modes 1/2 copied the buffer WindowServer's frame landed in, not the empty / stale back |
+| `swap #n: head N: would present landed buffer 0x... (buf[i], ...) instead of the back (...) -- debug.rdna3accel_swap_landed=0, so held / the back copied` (log) | `swaps_copylanded_would_h<N>`, SWAP `v1` bit 22 (`v4 >> 24` the index), decoder `would present (swap_landed 0) the landed buffer 0x...`; triage `WARN swap copy: head N: the landed buffer WOULD have been presented N times`, H-B2 `found but NOT presented at N` | with the default 0 a frame sat in another buffer and the swap did not show it: set `rdna3swaplanded=1` for the next run and compare the looks |
 | `frame trace INFO H-B2: ... - handled: landed buffer presented N times` / `swap copy INFO head N: H-B2 handled: landed buffer presented N times` | the swaps naming the empty back presented the landed buffer | nothing to do; compare the looks (no half-drawn frames) |
 | `frame trace WARN H-B2: ... - but no frame lost: all N of its swaps were held/skipped and no other buffer had a new frame at any of them (median x ms after the head's swap of another back)` | SCAN of the other buffers at each held swap: none CHANGED with pixels | WindowServer's second swap of an already presented frame: the hold is right, H-B2 is not the cause of a black or flickering screen |
 | `frame trace FAIL H-B2: ...; n held/skipped, k of them with a new frame in another buffer, b shown black` | a held swap while another buffer had a new frame (a frame waited for the next swap), or the empty back shown | a kernel before the landed buffer, or the landed rule missed it (its SCAN not taken: `held swaps without samples`) |

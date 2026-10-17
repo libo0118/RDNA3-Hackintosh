@@ -16,7 +16,8 @@ two blobs), gap (a stream read missing from the file), inactive (phase 2
 with no swaps), mode0never (phase 2's swaps still in mode 1), nomem (the
 ring could not be allocated), short (ab, too few swaps per phase); card
 run 2026-10-17c: b2lost (mode 1 held the empty back while the other back
-had a new frame), b2landed (mode 1 presented that landed buffer)."""
+had a new frame), b2landed (mode 1 presented that landed buffer), b2would
+(the same held with debug.rdna3accel_swap_landed=0: found, not presented)."""
 import struct
 import sys
 
@@ -57,13 +58,17 @@ def band(k):
 
 
 def swap(w, n, mode, arg, back, backpix, front=F, head=0, pc=0, flags=0, bandk=1, target=0, extra=0, waited=0,
-         landed=None):
+         landed=None, would=None):
     """landed: the index of the buffer a mode 1/2 swap presented instead of
     its (empty) back (SWAP v1 bit 21, v4 >> 24; card run 2026-10-17c)"""
     fl = 1 | (8 if backpix else 0) | (0 if backpix or landed is not None else 16) | flags
     rc2 = 5 if backpix else 4
+    if would is not None:   # found, not presented (SWAP v1 bit 22)
+        landed_bits, landed = 1 << 22, would
+    else:
+        landed_bits = 1 << 21 if landed is not None else 0
     w.add(1, head, arg, fl, 0xabcd, (n, 4 | rc2 << 4 | 3 << 8 | mode << 12 | target << 16 |
-                                     (1 << 21 if landed is not None else 0), 650 if mode else 0,
+                                     landed_bits, 650 if mode else 0,
                                      waited, 0 | 1 << 8 | (landed or 0) << 24), front, back, pc, b"\0" * 8,
           band(bandk) if backpix else b"\0" * 8)
     w.add(22, head, 0, 0, 0, (n, 100, 0, 0, 0), pc or HOME, pc or HOME, pc)   # PANEL
@@ -96,14 +101,14 @@ def make(kind):
             scan(w, 2 * i + 2, 1, B1, True, False)
             w.add(15, 0, 0xff, 4 | 16, 0xabcd, (2 * i + 2, 4000, 4, 0, 0), B2)   # delayed re-sample: still empty
         common_tail(w)
-    elif kind in ("b2lost", "b2landed"):   # mode 1: B1 drawn, then a swap of the empty B2 with B1 redrawn
+    elif kind in ("b2lost", "b2landed", "b2would"):   # mode 1: B1 drawn, then a swap of the empty B2 with B1 redrawn
         for i in range(40):
             w.add(6, arg=1, flags=1, obj=0x1111, v=(8100, 3, 0, 0, 0), pa=B1)
             swap(w, 2 * i + 1, 1, 4, B1, True, pc=D, flags=64 | 32, target=2, bandk=2 * i)
             scan(w, 2 * i + 1, 2, B2, False, False)
-            if kind == "b2lost":   # held although B1 had a new frame: the frame waits for the next swap
+            if kind in ("b2lost", "b2would"):   # held although B1 had a new frame: it waits for the next swap
                 scan(w, 2 * i + 2, 1, B1, True, True)
-                swap(w, 2 * i + 2, 1, 5, B2, False, pc=D)
+                swap(w, 2 * i + 2, 1, 5, B2, False, pc=D, would=1 if kind == "b2would" else None)
             else:                  # the landed buffer (B1, index 1) copied instead
                 scan(w, 2 * i + 2, 1, B1, True, True)
                 swap(w, 2 * i + 2, 1, 4, B2, False, pc=HOME, flags=64 | 32, target=1, landed=1)

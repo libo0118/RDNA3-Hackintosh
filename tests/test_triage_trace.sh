@@ -32,6 +32,13 @@ out=$(dec b2lost)
 has "$out" "FAIL     H-B2: head 0: the back 0x8b8f0000 was named by 40 swaps and read EMPTY at 40" b2lost
 has "$out" "40 held/skipped, 40 of them with a new frame in another buffer, 0 shown black" b2lost
 has "$out" "40 held/skipped (40 with a new frame elsewhere)" b2lost
+# debug.rdna3accel_swap_landed=0: the same holds, the buffer found but not presented - FAIL names it
+python3 -I "$ROOT/tests/trace_fixture.py" b2would "$T/b2would.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/b2would.bin" --timeline 400)
+has "$out" "FAIL     H-B2: head 0: the back 0x8b8f0000" b2would
+has "$out" "the landed buffer found but NOT presented at 40 (debug.rdna3accel_swap_landed=0" b2would
+has "$out" "hold: back 0x8b8f0000 (empty, 0000000000000000) front 0x87040000 (empty) would present (swap_landed 0) the landed buffer 0x8b100000" b2would
+has "$out" "40 landed buffers NOT presented (swap_landed 0)" b2would
 # mode 1 presented the landed buffer: H-B2 handled (INFO), the timeline names the buffer
 python3 -I "$ROOT/tests/trace_fixture.py" b2landed "$T/b2landed.bin"
 out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/b2landed.bin" --timeline 400)
@@ -264,6 +271,14 @@ has "$out" "40 backs copied" triage-landed
 has "$out" "12 of them the landed buffer instead of an empty / stale back, 3 empty backs kept off a picture" triage-landed
 has "$out" "INFO swap copy: head 0: H-B2 handled: landed buffer presented 12 times" triage-landed
 has "$out" "swap copy              INFO head 0: H-B2 handled: landed buffer presented 12 times" triage-landed-summary
+mk would clean "swaps_h0 40
+swap_mode 1
+swap_landed 0
+swaps_copy_h0 40
+swaps_copylanded_would_h0 7
+swaps_copyempty_h0 7"
+out=$(run would)
+has "$out" "WARN swap copy: head 0: the landed buffer WOULD have been presented 7 times (swap_landed 0" triage-would
 
 # ECC review round 1 through triage
 # no tests file: the A/B judged from the trace, said so

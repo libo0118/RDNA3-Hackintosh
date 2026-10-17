@@ -53,7 +53,8 @@ F_A1_FRONT, F_A2_FRONT, F_A1_PIX, F_A2_PIX, F_EMPTY, F_FRONT_OK, F_DOUBLE, F_WAI
 TARGET = {0: "-", 1: "home", 2: "D", 3: "home DIRECT"}
 V1_BRK_FLIP = 1 << 20                 # SWAP v1: modes 1/2 flipped, the SDMA breaker open
 V1_LANDED = 1 << 21                   # SWAP v1: modes 1/2 presented the landed buffer (card run 2026-10-17c)
-LANDED_A1 = 0xfe                      # SWAP v4 >> 24 with V1_LANDED: the landed buffer is a1 itself
+V1_LANDED_WOULD = 1 << 22             # SWAP v1: one found, not presented (debug.rdna3accel_swap_landed=0)
+LANDED_A1 = 0xfe                      # SWAP v4 >> 24 with V1_LANDED(_WOULD): the landed buffer is a1 itself
 AB_NAME = {0: "-", 1: "A: mode 1", 2: "B: mode 0", 3: "back"}
 
 
@@ -328,7 +329,7 @@ def swap_landed(trace, e):
     """the landed buffer a mode 1/2 SWAP presented instead of the back it
     named (card run 2026-10-17c): its address; 0 when the swap did not, None
     when no SCAN of that swap names the buffer's index"""
-    if not e.v1 & V1_LANDED:
+    if not e.v1 & (V1_LANDED | V1_LANDED_WOULD):
         return 0
     i = (e.v4 >> 24) & 0xff
     if i == LANDED_A1:
@@ -477,7 +478,7 @@ def segments(trace, swaps=None):
         k = (swap_mode(e), ph.get(id(e), 0))
         s = seg.setdefault(k, {"swaps": 0, "shown": 0, "held": 0, "black": 0, "empty": 0, "failed": 0, "direct": 0,
                                "double": 0, "waits": 0, "wait_us": 0, "copy_us": 0, "events": [], "landed": 0,
-                               "held_new": 0})
+                               "held_new": 0, "would": 0})
         s["swaps"] += 1
         shown = e.arg in (1, 2, 4)
         s["shown"] += shown
@@ -485,6 +486,7 @@ def segments(trace, swaps=None):
         # card run 2026-10-17c: the landed buffer presented, and holds while another buffer had a new frame
         s["landed"] += e.arg == 4 and bool(e.v1 & V1_LANDED)
         s["held_new"] += e.arg in (0, 5) and bool(new_frame_elsewhere(trace, e))
+        s["would"] += bool(e.v1 & V1_LANDED_WOULD)   # found, not presented (debug.rdna3accel_swap_landed=0)
         s["empty"] += bool(e.flags & F_EMPTY)
         s["black"] += bool(e.flags & F_EMPTY) and shown
         s["failed"] += e.arg in (3, 6)
@@ -579,6 +581,7 @@ def h_b2(trace, swaps, h, p, st, drawn, ap):
             "into it; WindowServer's frames land in %s" % (h, p, st[0], st[1], ap.get(p, 0), where))
     ev = [e for e in swaps if e.head == h and swap_back(e)[0] == p]
     landed = [e for e in ev if e.arg == 4 and e.v1 & V1_LANDED]
+    would = [e for e in ev if e.v1 & V1_LANDED_WOULD]
     held = [e for e in ev if e.arg in (0, 5)]
     lost = [e for e in held if new_frame_elsewhere(trace, e)]
     sampled = [e for e in held if _scans_by_swap(trace).get((e.head, e.v0))]
@@ -592,14 +595,15 @@ def h_b2(trace, swaps, h, p, st, drawn, ap):
             gaps.append((trace.ns(e, e.src) - trace.ns(prev, prev.src)) / 1e6)
         prev = e
     gap = " (median %.2f ms after the head's swap of another back)" % sorted(gaps)[len(gaps) // 2] if gaps else ""
-    counts = "%d held/skipped, %d of them with a new frame in another buffer, %d shown black" % (
-        len(held), len(lost), len(black))
+    counts = "%d held/skipped, %d of them with a new frame in another buffer, %d shown black%s" % (
+        len(held), len(lost), len(black), "; the landed buffer found but NOT presented at %d (debug.rdna3accel_"
+        "swap_landed=0: rdna3swaplanded=1 presents it)" % len(would) if would else "")
     if landed:
         miss = sum(1 for e in landed if not swap_landed(trace, e))
         return ("INFO", "H-B2", "%s - handled: landed buffer presented %d times (swap mode 1/2 copied the buffer the "
                 "frame was in%s); %s" % (base, len(landed), ", %d without the landed buffer's SCAN" % miss if miss
                                          else "", counts))
-    if held and not lost and not black and len(sampled) == len(held):
+    if held and not lost and not black and not would and len(sampled) == len(held):
         return ("WARN", "H-B2", "%s - but no frame lost: all %d of its swaps were held/skipped and no other buffer "
                 "had a new frame at any of them%s: WindowServer's second swap of a frame the swap before presented "
                 "(copying or flipping this back would show black)" % (base, len(held), gap))
@@ -722,11 +726,11 @@ def ab_table(trace):
     lines = []
     for (mode, phase), s in sorted(seg.items(), key=lambda kv: (kv[0][1], kv[0][0])):
         lines.append("mode %d %-10s %5d swaps: %5d shown (%d landed), %4d held/skipped (%d with a new frame "
-                     "elsewhere), %4d empty backs, %4d BLACK frames, "
+                     "elsewhere), %d landed buffers NOT presented (swap_landed 0), %4d empty backs, %4d BLACK frames, "
                      "%4d failed, %4d in-place rewrites of %d, %4d tear-free copies, %4d direct (may tear), "
                      "waits %d (avg %d us), copy avg %d us" %
                      (mode, "(" + AB_NAME.get(phase, str(phase)) + ")", s["swaps"], s["shown"], s["landed"],
-                      s["held"], s["held_new"], s["empty"],
+                      s["held"], s["held_new"], s["would"], s["empty"],
                       s["black"], s["failed"], s["inplace"], s["inplace_checked"], s["double"], s["direct"],
                       s["waits"], s["wait_us"] // s["waits"] if s["waits"] else 0,
                       s["copy_us"] // max(1, s["double"] + s["direct"])))
@@ -738,9 +742,9 @@ def ab_table(trace):
         i0 = sum(s["inplace"] for s in m0)
         f1 = sum(s["failed"] for s in m1)
         # card run 2026-10-17c: the swaps naming an empty back - held, or the landed buffer presented
-        h1, n1, l1 = (sum(s[k] for s in m1) for k in ("held", "held_new", "landed"))
+        h1, n1, l1, w1 = (sum(s[k] for s in m1) for k in ("held", "held_new", "landed", "would"))
         held = "; mode 1: %d held (%d with a new frame in another buffer: frames held back), %d landed buffers " \
-               "presented" % (h1, n1, l1)
+               "presented, %d found but not presented (debug.rdna3accel_swap_landed=0)" % (h1, n1, l1, w1)
         if not b1 and not f1 and i0:
             verdict = ("PASS", "the copy (mode 1) showed no black frame and no failed copy, the flip (mode 0) %d "
                                "in-place rewrites and %d black frames: mode 1 fixes the model mismatch%s" %
@@ -904,8 +908,9 @@ def _fmt_event(trace, e, ms, n):
     if n == "SWAP":
         back, rcb, front, rcf, bb, fb = swap_back(e)
         lb = swap_landed(trace, e)
-        landed = "" if lb == 0 else " presented the landed buffer %s" % ("0x%x" % lb if lb else
-                                                                        "buf[%d]" % ((e.v4 >> 24) & 0xff))
+        landed = "" if lb == 0 else " %s the landed buffer %s" % (
+            "presented" if e.v1 & V1_LANDED else "would present (swap_landed 0)",
+            "0x%x" % lb if lb else "buf[%d]" % ((e.v4 >> 24) & 0xff))
         return ("%10.3f ms SWAP #%d h%s mode %d %s: back 0x%x (%s, %s) front 0x%x (%s)%s -> panel 0x%x target %s%s%s "
                 "copy %d us wait %d us" % (ms, e.v0, e.head if e.head != 0xff else "?", swap_mode(e),
                                           SWAP_ARG.get(e.arg, e.arg), back, RC.get(rcb, rcb), bb.hex(), front,

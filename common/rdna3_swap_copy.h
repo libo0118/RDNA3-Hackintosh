@@ -141,7 +141,10 @@ static inline enum rd3_sc_act rd3_sc_action(int mode, int sampled, int pixels, i
  * drawn one, which had not changed again by then (2 changes of 0x8b100000
  * between two swaps in the whole run, both copy forward's writes) - so the
  * rule would not have fired there, and the hold lost no frame. It fires when
- * a frame really is in a buffer the swap did not name. */
+ * a frame really is in a buffer the swap did not name. So the accelerator
+ * presents it only with debug.rdna3accel_swap_landed=1 (boot-arg
+ * rdna3swaplanded); by default (0) it counts and traces what it WOULD have
+ * presented (swaps_copylanded_would_h<N>) and keeps the old rule. */
 #define RD3_SC_LANDED_MAX 6u
 struct rd3_sc_cand {
     int sampled;    /* its 64 samples were read (a mapping and a geometry) */

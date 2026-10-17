@@ -576,9 +576,9 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg|"
                        r"_latchpend|_latchwait|_latchus|_latchmax|_latchtimeout|_latchunknown|_latchoff|_tornchk|"
                        r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill|_latchimmediate|_latchwaitsoff|"
-                       r"_flipfailed|_copy|_copyempty|_copylanded|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
+                       r"_flipfailed|_copy|_copyempty|_copylanded|_copylanded_would|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
                        r"_copylatchto|_copyfail|_copydirect|_copyfront|_copyfrontfail|_copynowait|_copybrkflip|_copyfreewait)?_h\d|"
-                       r"swaps_copybrktrips|swap_latch|swap_torn|"
+                       r"swaps_copybrktrips|swap_latch|swap_torn|swap_landed|"
                        r"swap_mode|swap_trace_events|swap_trace_nomem|swap_trace_lost|cf_sc(?:src|scanout|stale)_h\d|"
                        r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed|onpanel)_h\d|swaps_skipped_all|"
                        r"swaps_nohead|cf_(?:calls|nohead|shown_stale|refused|same|disabled|pend_blocked|pend_forced|pend_evicted|"
@@ -1078,6 +1078,7 @@ def swapcopy_verdict(c):
             continue
         black, held, fail, direct = g("swaps_copyblack"), g("swaps_copyempty"), g("swaps_copyfail"), g("swaps_copydirect")
         landed = g("swaps_copylanded")   # card run 2026-10-17c: the landed buffer presented instead of the back
+        would = g("swaps_copylanded_would")   # ... found but not presented (debug.rdna3accel_swap_landed=0)
         waits = g("swaps_copywait")
         nowait, brk, freewait = g("swaps_copynowait"), g("swaps_copybrkflip"), g("swaps_copyfreewait")
         line = ("head %s: %d backs copied (%d MiB, avg %d us, max %d us), %d of them the landed buffer instead of an "
@@ -1107,6 +1108,10 @@ def swapcopy_verdict(c):
             if lv == "INFO" and (nowait or brk):
                 lv = "WARN"
         out.append((lv, line))
+        if would:
+            out.append(("WARN", "head %s: the landed buffer WOULD have been presented %d times (swap_landed %s: the "
+                                "empty / stale back's old rule applied - held or copied); rdna3swaplanded=1 presents "
+                                "it (watch for half-drawn frames)" % (h, would, c.get("swap_landed", "?"))))
         if landed:
             out.append(("INFO", "head %s: H-B2 handled: landed buffer presented %d times (the named back empty or a "
                                 "stale one without an IOSurface, WindowServer's frame in another buffer of the "

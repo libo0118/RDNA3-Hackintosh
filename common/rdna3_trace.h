@@ -91,6 +91,9 @@ enum rd3_trace_swap {
 /* RD3_TR_SWAP's v1: modes 1/2 copied the buffer WindowServer's frame landed
  * in, not the (empty / stale) back the swap named (card run 2026-10-17c) */
 #define RD3_TRV1_LANDED    (1u << 21)
+/* ... found but not presented (debug.rdna3accel_swap_landed=0): the swap did
+ * what arg says, v4 >> 24 names the buffer it would have presented */
+#define RD3_TRV1_LANDED_WOULD (1u << 22)
 #define RD3_TRV4_LANDED_A1 0xfeu   /* the landed buffer's index << 24: a1 (not in the surface's array) */
 /* where a mode 1/2 swap failed (RD3_TRS_COPY_FAILED's v4) */
 enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD3_TRX_SDMA = 3, RD3_TRX_FLIP = 4 };
@@ -102,7 +105,9 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          directly) | 1 << 20 when modes 1/2 flipped because the SDMA
  *          breaker is open (mode then reads 0) | 1 << 21 when modes 1/2
  *          presented the landed buffer instead of the named back
- *          (RD3_TRV1_LANDED, rdna3_swap_copy.h), v2 the copy's us, v3 the wait's us, v4 = the index
+ *          (RD3_TRV1_LANDED, rdna3_swap_copy.h) | 1 << 22 when it found
+ *          one but debug.rdna3accel_swap_landed=0 (RD3_TRV1_LANDED_WOULD:
+ *          arg is what the swap did), v2 the copy's us, v3 the wait's us, v4 = the index
  *          of a1 in the surface's buffer array | a2's << 8 (0xff: not in
  *          it) | rd3_trace_fail << 16 | the landed buffer's index << 24
  *          (0xfe: a1 itself; its address is that swap's SCAN of the same
