@@ -111,6 +111,7 @@ public:
     int   submit(void *vm, uint32_t ip, uint32_t ring, const rdna3_ib *ibs, uint32_t n,
                  const rdna3_cs_job *job, uint64_t *seq);
     int   fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq);
+    int  fenceSignaledRaw(uint32_t ip, uint32_t ring, uint64_t seq);   /* without the trace */
     /* capHit == nullptr: run recover() at the 10 s cap (caller holds the
      * DRM lock). Otherwise report the cap in *capHit and let the caller
      * take the lock and recover: the wait itself runs unlocked. */

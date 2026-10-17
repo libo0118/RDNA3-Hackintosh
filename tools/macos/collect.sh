@@ -89,6 +89,21 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
     _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|cf_|bufs_|iop_flip:)")
     if [ -n "$_a3" ]; then echo "$_a3"; else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
 } > "$dir/29-surface-vram.txt" 2>/dev/null
+# card run 2026-10-17b: the kernel's per-frame trace (common/rdna3_trace.h),
+# root only: the accelerator's ring, its per-second table, the core's ring
+# (command submissions, fences, faults); decoded on the host by
+# tools/rdna3_trace.py (tools/triage_reports.py)
+{
+    for st in "debug.rdna3accel_trace 36-frame-trace.bin" "debug.rdna3accel_trace_sec 36-frame-trace-sec.bin" \
+              "debug.rdna3_drmtrace 36-drm-trace.bin"; do
+        oid=${st%% *}; f=${st#* }
+        sysctl -b "$oid" > "$dir/$f" 2>/dev/null
+        [ -s "$dir/$f" ] || sudo -n sysctl -b "$oid" > "$dir/$f" 2>/dev/null
+        if [ -s "$dir/$f" ]; then echo "$oid: $(wc -c < "$dir/$f") bytes in $f"
+        else rm -f "$dir/$f"; echo "$oid: NOT read (not root, or a kext before card run 2026-10-17b)"; fi
+    done
+    echo "swap mode: $(sysctl -n debug.rdna3accel_swap_mode 2>/dev/null || echo none)"
+} > "$dir/36-frame-trace.txt" 2>&1
 # N1: which processes the Metal plugin served and why. The list, the
 # boot-args (rdna3mtlapps=0 ends apps mode) and the plugin's decision line of
 # every process that loaded it: "allow mode: <mode>; <process>: <reason>"

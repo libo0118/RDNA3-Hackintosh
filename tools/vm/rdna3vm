@@ -494,6 +494,8 @@ auto_limit() {
     # the desktop look, the copy-forward log and the counters (card run 58b:
     # the 16 min limit stopped the run inside M6)
     case " $1 " in *" rdna3probe=1 "*) m=$((m + 9)) ;; esac
+    # card run 2026-10-17b: the swap A/B (2 x 60 s, two looks, the trace's uploads)
+    case " $1 " in *" rdna3accel=1 "*) m=$((m + 3)) ;; esac
     echo "$m"
 }
 

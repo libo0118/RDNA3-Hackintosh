@@ -345,6 +345,7 @@ private:
     IOReturn      displayInfo(struct RD3KDisplayInfo *r);
     IOReturn      displayFlip(struct RD3KDisplayFlip *f);
     IOReturn      displayStatus(struct RD3KDisplayStatus *s);
+    IOReturn      displayScanAddr(struct RD3KDisplayScanAddr *s);
     IOReturn      displayCrc(uint32_t head, uint32_t *crc);
     /* display sleep from the framebuffer (rdna3DisplayBlank, rdna3dpms=1) */
     IOReturn      displayBlank(uint32_t head, bool blank);

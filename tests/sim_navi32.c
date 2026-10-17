@@ -11943,8 +11943,20 @@ static void run(const char *fwdir)
         CHECK(dcn32_flip_pending(&dev, &dc, 0));
         S.reg[HUBP(regHUBPREQ0_DCSURF_FLIP_CONTROL, 1)] &= ~HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_PENDING_MASK;
         CHECK(dcn32_flip_pending(&dev, &dc, 0));   /* EARLIEST_INUSE still the old one */
+        /* the trace's panel address (card run 2026-10-17b): requested the new one, in use the old */
+        {
+            uint64_t inuse = 0, req = 0;
+            CHECK(dcn32_scan_addr(&dev, &dc, 0, &inuse, &req) == RDNA3_OK);
+            CHECK(req == FB_START + 0x5000000 && inuse != req);
+            CHECK(dcn32_scan_addr(&dev, &dc, 99, &inuse, &req) == RDNA3_EINVAL);
+        }
         S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, 1)] = (uint32_t)(FB_START + 0x5000000);
         CHECK(!dcn32_flip_pending(&dev, &dc, 0));
+        {
+            uint64_t inuse = 0, req = 0;
+            CHECK(dcn32_scan_addr(&dev, &dc, 0, &inuse, &req) == RDNA3_OK && inuse == req &&
+                  inuse == FB_START + 0x5000000);
+        }
         S.dcn_hold = 0;
         /* pitch change goes under SURFACE_UPDATE_LOCK, and the lock is released */
         CHECK(dcn32_flip(&dev, &dc, 0, FB_START + 0x6000000, 2624, 1) == RDNA3_OK);

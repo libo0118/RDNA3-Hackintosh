@@ -1224,6 +1224,7 @@ static int bo_list_ioctl(rdna3_drm_file *f, union drm_amdgpu_bo_list *l)
         handle = f->next_bo_list;
     }
     f->bo_lists[i].handle = handle;
+    f->bo_lists[i].count = l->in.bo_number;
     if ((f->bo_lists[i].gds = rdna3_drm_bo_lookup(f, h[0])) != NULL)
         f->bo_lists[i].gds->refcnt++;
     if ((f->bo_lists[i].gws = rdna3_drm_bo_lookup(f, h[1])) != NULL)
@@ -1616,8 +1617,12 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
      * live context (id 0 or a freed one is -EINVAL) */
     if (!ctx_live(f, ctx))
         return -RD_EINVAL;
-    if (cs->in.bo_list_handle && bo_list_find(f, cs->in.bo_list_handle) < 0)
-        return -RD_ENOENT;   /* amdgpu_bo_list_get */
+    if (cs->in.bo_list_handle) {
+        const int bl = bo_list_find(f, cs->in.bo_list_handle);
+        if (bl < 0)
+            return -RD_ENOENT;   /* amdgpu_bo_list_get */
+        job.bo_count = f->bo_lists[bl].count;
+    }
     /* amdgpu_cs_submit: a guilty context never runs again */
     if (ops->vm_query && f->vm && (ops->vm_query(ops->ctx, f->vm) & AMDGPU_CTX_QUERY2_FLAGS_GUILTY))
         return -RD_ECANCELED;
@@ -1757,6 +1762,7 @@ static int cs_ioctl(rdna3_drm_file *f, union drm_amdgpu_cs *cs)
             r = bo_list_scan(f, bl.bo_info_ptr, bl.bo_number, bl.bo_info_size, onchip);
             if (r)
                 return r;
+            job.bo_count = bl.bo_number;
             have_bo_handles = 1;
             break;
         }

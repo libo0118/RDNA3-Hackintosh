@@ -101,6 +101,69 @@ a3_sysctls() {
     else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
 }
 
+# card run 2026-10-17b: one run decides between the swap models. 60 s with
+# debug.rdna3accel_swap_mode=1 (the copy), 60 s with 0 (the flip), back to
+# what it was; per phase a look at the panels and the counters, and the
+# kernel's per-frame trace streamed every 3 s the whole time (both rings:
+# the accelerator's and the core's), so no event of the A/B window is lost
+# (the stream headers count any that were). Activity Monitor redraws its
+# graphs every few seconds: both phases see the same kind of activity.
+# The phases are labelled in the trace (debug.rdna3accel_swap_ab) and here
+# ("== swap A/B phase N"); triage prints the two side by side.
+swap_ab() {
+    if ! sysctl -n debug.rdna3accel_swap_mode >/dev/null 2>&1; then
+        echo "== swap A/B: SKIPPED - no debug.rdna3accel_swap_mode (an accelerator before card run 2026-10-17b, or none)"
+        return 0
+    fi
+    ab_old=$(sysctl -n debug.rdna3accel_swap_mode)
+    ts="$HOME/rdna3-trace"
+    mkdir -p "$ts"
+    rm -f "$ts/trace-stream.bin" "$ts/drmtrace-stream.bin" "$ts/trace-sec.bin"
+    # the streams' cursors to now: what came before is in collect.sh's full read
+    sysctl -b debug.rdna3accel_trace_stream >/dev/null 2>&1
+    sysctl -b debug.rdna3_drmtrace_stream >/dev/null 2>&1
+    touch "$ts/.pump"
+    ( while [ -f "$ts/.pump" ]; do
+          sysctl -b debug.rdna3accel_trace_stream >> "$ts/trace-stream.bin" 2>/dev/null
+          sysctl -b debug.rdna3_drmtrace_stream >> "$ts/drmtrace-stream.bin" 2>/dev/null
+          sleep 3
+      done ) &
+    pump=$!
+    in_session open -g -a "Activity Monitor" 2>&1
+    for ph in "1 1" "2 0" "3 $ab_old"; do
+        phase=${ph% *}; mode=${ph#* }
+        sysctl -w debug.rdna3accel_swap_mode="$mode" >/dev/null 2>&1
+        sysctl -w debug.rdna3accel_swap_ab="$phase" >/dev/null 2>&1
+        echo "== swap A/B phase $phase: swap mode $(sysctl -n debug.rdna3accel_swap_mode 2>/dev/null) ($(date +%T))"
+        [ "$phase" = 3 ] && break
+        sleep 60
+        mkdir -p "$HOME/rdna3-scanout/ab$mode"
+        echo "== rdna3_drminfo --scanout (look ab$mode)"
+        [ -x "$D/bin/rdna3_drminfo" ] && with_limit 30 "$D/bin/rdna3_drminfo" --scanout "$HOME/rdna3-scanout/ab$mode" 2>&1
+        echo "== swap A/B counters after mode $mode"
+        a3_sysctls
+    done
+    sysctl -w debug.rdna3accel_swap_ab=0 >/dev/null 2>&1
+    pkill -x "Activity Monitor" 2>/dev/null
+    rm -f "$ts/.pump"
+    wait "$pump" 2>/dev/null
+    sysctl -b debug.rdna3accel_trace_stream >> "$ts/trace-stream.bin" 2>/dev/null
+    sysctl -b debug.rdna3_drmtrace_stream >> "$ts/drmtrace-stream.bin" 2>/dev/null
+    sysctl -b debug.rdna3accel_trace_sec > "$ts/trace-sec.bin" 2>/dev/null
+    # the newest events into the kernel log too: a serial log alone has them
+    sysctl -w debug.rdna3accel_trace_dump=600 >/dev/null 2>&1
+    echo "== swap A/B done: swap mode $(sysctl -n debug.rdna3accel_swap_mode 2>/dev/null); trace files:"
+    ls -l "$ts" 2>&1 | tail -n +2
+    for f in trace-stream.bin drmtrace-stream.bin trace-sec.bin; do
+        [ -s "$ts/$f" ] || continue
+        if [ -n "$HOST" ]; then
+            curl -sf --max-time 60 -T "$ts/$f" "$HOST/reports/$base-$f" >/dev/null 2>&1 || echo "upload of $f FAILED"
+        else
+            mkdir -p /Users/Shared/rdna3-reports && cp "$ts/$f" "/Users/Shared/rdna3-reports/$base-$f"
+        fi
+    done
+}
+
 # an M6 hi-res look keeps only its picture; the pipes' state stays in the
 # results (a pipe not lit or asleep must not look like a frozen picture)
 m6_look_state() {
@@ -565,6 +628,10 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         echo "== display pipe and AGDC counters"
         sysctl debug 2>/dev/null | grep -E "rdna3accel_(iop_(ok|fail|empty|src_res|src_surf|blank|copy_skip|flips)|heads_)|rdna3agdc" || true
         a3_sysctls
+        # card run 2026-10-17b: the swap models side by side, the trace streamed
+        hdr "swap A/B (mode 1 copy / mode 0 flip, 60 s each)"
+        swap_ab
+        done_ 0
         ioreg -r -c RDNA3AGDC -w0 -d1 2>/dev/null | grep -E '"RDNA3,AGDC' | sed 's/^ *//'
         # with AGDC up WindowServer needs the Metal plugin's device (card runs 41/45)
         echo "Metal allow list: $(grep -v '^#' /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null | tr '\n' ' ') ($(stat -f %Lp /Library/GPUBundles/rdna3mtl-allow.txt 2>/dev/null))"

@@ -170,6 +170,12 @@ int  dcn32_otg_dig(rdna3_dev *d, uint32_t otg, int *fe, uint32_t *mode);
  * (SURFACE_FLIP_TYPE). Pitch changes go under SURFACE_UPDATE_LOCK. */
 int  dcn32_flip(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t mc, uint32_t pitch_px,
                 int immediate);
+/* hubp2_read_state_common's surface addresses of head 'i''s pipe: what
+ * the HUBP scans (DCSURF_SURFACE_EARLIEST_INUSE) and what was last
+ * requested (DCSURF_PRIMARY_SURFACE_ADDRESS), MC addresses; -RDNA3_EINVAL
+ * for no such head (card run 2026-10-17b: the accelerator's trace records
+ * what each panel really scanned at every swap) */
+int  dcn32_scan_addr(rdna3_dev *d, rdna3_dcn *dc, uint32_t i, uint64_t *inuse, uint64_t *requested);
 /* hubp2_is_flip_pending: 1 while the last flip of head 'i' has not latched */
 int  dcn32_flip_pending(rdna3_dev *d, rdna3_dcn *dc, uint32_t i);
 

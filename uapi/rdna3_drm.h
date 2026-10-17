@@ -247,6 +247,9 @@ typedef struct rdna3_cs_job {
      * Other rings and a ring without cp_gfx_shadow ignore them, as amdgpu. */
     uint64_t shadow_va, csa_va, gds_va;
     uint32_t init_shadow;
+    /* the BOs the job named (its BO list or BO_HANDLES chunk), for the
+     * kernel's trace only (card run 2026-10-17b); everything is resident */
+    uint32_t bo_count;
 } rdna3_cs_job;
 
 /* GFX 11 on-chip resources (gfx_v11_0_set_gds_init) */
@@ -539,7 +542,7 @@ typedef struct rdna3_drm_file {
     void    *vm;              /* ops.vm_create() result, may be NULL */
     void    *os;              /* the OS's handle on the client (its task), for bo_userptr */
     uint32_t next_bo_list;
-    struct { uint32_t handle; rdna3_bo *gds, *gws, *oa; } bo_lists[RD_MAX_BO_LISTS];
+    struct { uint32_t handle, count; rdna3_bo *gds, *gws, *oa; } bo_lists[RD_MAX_BO_LISTS];
     uint64_t client_caps;
     /* ioctls of this file in progress: the OS layer may drop its lock while
      * a fence wait sleeps, and must not tear the file down under them */

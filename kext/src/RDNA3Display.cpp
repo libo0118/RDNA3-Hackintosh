@@ -1902,6 +1902,27 @@ IOReturn RDNA3Accel::displayStatus(RD3KDisplayStatus *s)
     return kIOReturnSuccess;
 }
 
+/* card run 2026-10-17b: the accelerator's trace records what each panel
+ * really scanned at every swap (RD3KDisplayScanAddr) */
+IOReturn RDNA3Accel::displayScanAddr(RD3KDisplayScanAddr *s)
+{
+    if (!s || !RD3K_DISPLAY_ABI_OK(s->version))
+        return kIOReturnBadArgument;
+    if (!fDcn || !fDispDev || s->head >= fDcn->nheads)
+        return kIOReturnNotReady;
+    uint64_t inuse = 0, req = 0;
+    IOLockLock(fDispLock);
+    const int r = dcn32_scan_addr(fDispDev, fDcn, s->head, &inuse, &req);
+    s->flipPending = r ? 0u : (unsigned)dcn32_flip_pending(fDispDev, fDcn, s->head);
+    IOLockUnlock(fDispLock);
+    if (r)
+        return kIOReturnNotReady;
+    s->inUse = inuse;
+    s->requested = req;
+    s->fbStart = fDispDev->fb_start;
+    return kIOReturnSuccess;
+}
+
 IOReturn RDNA3Accel::displayCrc(uint32_t head, uint32_t *crc)
 {
     uint32_t r = 0, g = 0, b = 0;

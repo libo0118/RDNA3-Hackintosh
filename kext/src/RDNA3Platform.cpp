@@ -538,6 +538,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return displayFlip((RD3KDisplayFlip *)p1);
         if (fn->isEqualTo(RD3K_DISPLAY_FN_STATUS))
             return displayStatus((RD3KDisplayStatus *)p1);
+        if (fn->isEqualTo(RD3K_DISPLAY_FN_SCANADDR))
+            return displayScanAddr((RD3KDisplayScanAddr *)p1);
         if (fn->isEqualTo(RD3K_DISPLAY_FN_CURSOR))
             return displayCursor((RD3KDisplayCursor *)p1);
         if (fn->isEqualTo(RD3K_DISPLAY_FN_EDID))
