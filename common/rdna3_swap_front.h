@@ -225,6 +225,7 @@ static inline unsigned rd3_cf_pend_add(struct rd3_cf_heal *s, const void *buf, c
         }
         p->buf = buf; p->n = 0; p->whole = 0; p->blocked = 0;
     }
+    p->blocked = 0;   /* new rects: the waiting starts again */
     if (whole) { p->whole = 1; p->n = 0; return flags; }
     for (i = 0; i < n && !p->whole; i++) {
         if (r[i].w <= 0 || r[i].h <= 0)
@@ -261,13 +262,14 @@ static inline unsigned rd3_cf_pend_take(struct rd3_cf_heal *s, const void *dst, 
     if (info) { info->blocked = 0; info->forced = 0; }
     if (!d || !out || !max)
         return 0;
-    if (srcPending && d->blocked >= RD3_CF_PEND_BLOCKED_MAX) {
+    const int forcing = srcPending && d->blocked >= RD3_CF_PEND_BLOCKED_MAX;
+    if (forcing)
         srcPending = 0;
-        if (info) info->forced = 1;
-    }
     if (d->whole) {
-        if (!engine)
+        if (!engine) {
+            d->blocked = 0;   /* waiting for the copy engine, not for the source */
             return 0;
+        }
         if (srcPending) {
             d->blocked++;
             if (info) info->blocked = 1;
@@ -275,6 +277,7 @@ static inline unsigned rd3_cf_pend_take(struct rd3_cf_heal *s, const void *dst, 
         }
         out[0].x = 0; out[0].y = 0; out[0].w = w; out[0].h = h;
         rd3_cf_pend_drop(s, d);
+        if (info && forcing && w > 0 && h > 0) info->forced = 1;
         return w > 0 && h > 0;
     }
     for (i = 0; i < d->n; i++) {
@@ -291,7 +294,7 @@ static inline unsigned rd3_cf_pend_take(struct rd3_cf_heal *s, const void *dst, 
     }
     d->n = keep;
     d->blocked = blockedAny ? d->blocked + 1 : 0;
-    if (info) info->blocked = blockedAny;
+    if (info) { info->blocked = blockedAny; info->forced = forcing && k > 0; }
     if (!d->n)
         rd3_cf_pend_drop(s, d);
     return k;

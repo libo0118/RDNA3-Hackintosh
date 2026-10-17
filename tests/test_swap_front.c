@@ -264,6 +264,46 @@ int main(void)
               o[0].h == 15 && !rd3_cf_pending(&h, &b[0]));
     }
 
+    {
+        /* review of 2b6b6df: forced only when something is copied, the
+         * waiting starts again for the copy engine and for new rects */
+        struct rd3_cf_heal h;
+        struct rd3_cf_take t;
+        struct rd3_rect r[2], o[4];
+        int b[2];
+        memset(&h, 0, sizeof h);
+        r[0].x = 200; r[0].y = 0; r[0].w = 10; r[0].h = 10;   /* outside a 100 x 100 picture */
+        r[1] = r[0];
+        rd3_cf_pend_add(&h, &b[0], &r[0], 1, NULL);
+        rd3_cf_pend_add(&h, &b[1], &r[1], 1, NULL);
+        for (unsigned i = 0; i < RD3_CF_PEND_BLOCKED_MAX; i++)
+            CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0 && t.blocked);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0 && !t.forced);   /* clipped away */
+        /* the whole picture waiting for the copy engine: the blocked count starts again */
+        memset(&h, 0, sizeof h);
+        rd3_cf_pend_add(&h, &b[0], NULL, 0, NULL);
+        rd3_cf_pend_add(&h, &b[1], NULL, 0, NULL);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0 && t.blocked);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0 && t.blocked);
+        CHECK(h.b[0].blocked == 2);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 0, o, 4, &t) == 0 && h.b[0].blocked == 0);
+        /* new rects merged into a list: the blocked count starts again */
+        memset(&h, 0, sizeof h);
+        r[0].x = 0; r[1].x = 0;
+        rd3_cf_pend_add(&h, &b[0], &r[0], 1, NULL);
+        rd3_cf_pend_add(&h, &b[1], &r[1], 1, NULL);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0 && h.b[0].blocked == 2);
+        r[0].x = 50;
+        rd3_cf_pend_add(&h, &b[0], &r[0], 1, NULL);
+        CHECK(h.b[0].blocked == 0 && h.b[0].n == 2);
+        /* the non-overlapping rect goes, the overlapping one waits its 3 calls again */
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 1 && o[0].x == 50 && t.blocked && !t.forced);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 1 && t.forced);
+    }
+
     /* card run 56: one back - nothing to copy, every frame right, either rule */
     run(0, 0, 0, 0, 0, 20, &s, NULL);
     CHECK(s.wrong == 0 && s.abab == 0 && s.copies == 0);

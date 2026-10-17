@@ -197,6 +197,9 @@ static SInt64 gCntCfCalls, gCntCfNoHead, gCntCfShownStale, gCntCfRefused, gCntCf
  * a buffer's pending rects, calls that copied them anyway after the limit,
  * lists dropped from a full table, lists turned into the whole picture */
 static SInt64 gCntCfPendBlocked, gCntCfPendForced, gCntCfPendEvicted, gCntCfPendWhole;
+/* copy forwards with no head known whose rects could not all be copied:
+ * stale, with no table to keep them in */
+static SInt64 gCntCfNoHeadMiss;
 /* guards gCfPend: copy forward runs under the family's busy lock, the
  * vidmem free path (rd3AccelVidmemGone) on any thread without it */
 static IOSimpleLock *volatile gCfPendLock;
@@ -1441,6 +1444,7 @@ RD3ACCEL_CNT4(rdna3accel_cf_healed, gCntCfHealed, "copy forwards that also copie
 RD3ACCEL_CNT(rdna3accel_cf_pend_blocked, gCntCfPendBlocked, "card run 58b: copy forwards whose source had missed the target's pending rects too (they wait)");
 RD3ACCEL_CNT(rdna3accel_cf_pend_forced, gCntCfPendForced, "card run 58b: pending rects copied anyway after 3 blocked calls (both buffers alike there)");
 RD3ACCEL_CNT(rdna3accel_cf_pend_evicted, gCntCfPendEvicted, "card run 58b: pending-rect lists dropped from a full table (those rects may stay stale)");
+RD3ACCEL_CNT(rdna3accel_cf_nohead_miss, gCntCfNoHeadMiss, "card run 58b: copy forwards with no head known that left rects stale (nowhere to keep them)");
 RD3ACCEL_CNT(rdna3accel_cf_pend_whole, gCntCfPendWhole, "card run 58b: pending-rect lists that overflowed into the whole picture");
 RD3ACCEL_CNT(rdna3accel_swaps_skipped_all, gCntSwapSkipped, "card run 58b: legacy swaps skipped, every head and reason (nothing drawn)");
 RD3ACCEL_CNT(rdna3accel_swaps_nohead, gCntSwapNoHead, "card run 58b: legacy swaps that matched no head (not shown)");
@@ -1512,6 +1516,7 @@ static void rdna3accelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_cf_same);    sysctl_register_oid(&sysctl__debug_rdna3accel_cf_disabled);
     sysctl_register_oid(&sysctl__debug_rdna3accel_cf_pend_blocked); sysctl_register_oid(&sysctl__debug_rdna3accel_cf_pend_forced);
     sysctl_register_oid(&sysctl__debug_rdna3accel_cf_pend_evicted); sysctl_register_oid(&sysctl__debug_rdna3accel_cf_pend_whole);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_cf_nohead_miss);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h0);       sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h1);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h2);       sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h3);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_a3_h0);    sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_a3_h1);
@@ -2302,7 +2307,10 @@ static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSu
         return true;
     }
     if (!e->call) e->call = thread_call_allocate(rd3AccelIopAsyncRun, e);
-    if (!e->call) return false;
+    if (!e->call) {
+        rd3AccelForgetShownIf(head, seq);   /* the caller copies instead: this record is not on the panel */
+        return false;
+    }
     ((OSObject *)s)->retain();
     e->pipe = pipe; e->fb = fb; e->s = s; e->seq = seq;
     for (unsigned i = 0; i < sizeof *f; i++) ((volatile unsigned char *)&e->f)[i] = ((const unsigned char *)f)[i];
@@ -3547,9 +3555,11 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
      * which would switch copy forward off for good (review of e2bf78e) */
     if (!okD) {
         OSAddAtomic64(1, &gCntCfRefused); gCfFailed++;
-        rd3AccelCfPendCall(head, dstVm, b, count, false);
+        rd3AccelCfPendCall(head, dstVm, b, count, count && !b);
         RD3CFWHY(kCfWhyNoTarget, "copy forward #%u: the target (phys 0x%llx) is not copyable now (no vidmem, mapping or "
-                 "4-byte geometry) -- nothing copied, its rects stay pending%s", n, rd3res_phys(dst),
+                 "4-byte geometry) -- nothing copied, %s%s", n, rd3res_phys(dst),
+                 count && !b ? "the whole target is pending (no rect array)" : count ? "its rects stay pending"
+                                                                             : "no rects to keep",
                  head < kRd3MaxFB && dstVm ? "" : " (no head or no vidmem: not even that)");
         return kIOReturnSuccess;
     }
@@ -3703,6 +3713,7 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
     if (head >= kRd3MaxFB) {
         /* no head (the front was shown): no table to keep the miss in;
          * still not reported to CoreDisplay (copy forward off for good) */
+        if (failed) OSAddAtomic64(1, &gCntCfNoHeadMiss);
         if (failed)
             RD3CFWHY(kCfWhyNoHeadMiss, "copy forward #%u: no head known: %u of %u rect(s) not copied (SDMA refused, too "
                      "big for the CPU) -- they stay stale, nowhere to keep them", n, failed, count);

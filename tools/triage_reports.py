@@ -457,7 +457,7 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg)?_h\d|"
                        r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed)_h\d|swaps_skipped_all|"
                        r"swaps_nohead|cf_(?:calls|nohead|shown_stale|refused|same|disabled|pend_blocked|pend_forced|pend_evicted|"
-                       r"pend_whole)|iop_flip): (\d+)", re.M)
+                       r"pend_whole|nohead_miss)|iop_flip): (\d+)", re.M)
 # the kernel's refusal reasons that are the A3 policy (rd3AccelA3Why), not a fault
 A3_POLICY_REASONS = ("WindowServer's display framebuffer", "a WindowServer input", "A3 is off",
                      "imported for another task", "a process the kernel could not name")
@@ -745,6 +745,8 @@ def copy_forward_verdict(c):
             why.append("head %s showed another surface's buffer" % h)
         if g("cf_nothingshown") > 10:
             why.append("head %s: %d calls with nothing shown" % (h, g("cf_nothingshown")))
+    if c.get("cf_nohead_miss", 0):
+        why.append("%d call(s) with no head left rects stale" % c["cf_nohead_miss"])
     if c.get("cf_pend_evicted", 0):
         why.append("%d pending-rect list(s) dropped from a full table" % c["cf_pend_evicted"])
     if c.get("cf_pend_forced", 0):
