@@ -2317,10 +2317,55 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
 | Seen | Trace / triage line | Action |
 |---|---|---|
 | black frames in mode 1 | A/B: `BLACK frames` > 0 in mode 1, `swaps_copyblack_h<N>` | mode 1 only copies an empty back with no picture to lose: look at Q2 for where the frame went; `debug.rdna3accel_swap_mode=0` to compare |
-| `H-B2` FAIL | a back named by swaps never receives a frame (no aperture write, empty at every swap) | the empty backs are held in mode 1; find with SURFRES / SURFGEM which IOSurface WindowServer draws (H-B2 is the family's / WindowServer's buffer rotation, not a driver write) |
+| `H-B2` FAIL | a back named by swaps never receives a frame (no aperture write, empty at every swap) and a frame was held back or black shown at its swaps (since card run 2026-10-17c: WARN `no frame lost` / INFO `handled`, see that run) | modes 1/2 present the landed buffer; find with SURFRES / SURFGEM which IOSurface WindowServer draws (H-B2 is the family's / WindowServer's buffer rotation, not a driver write) |
 | `H-COPY` FAIL in mode 0, none in mode 1 | in-place rewrites only while flipping | the copy is right: keep mode 1 |
 | `H-FREE` | VMFREE flags 2-8 | in mode 1 the panel never scans WindowServer's buffers; in mode 0 expected |
 | `CF-ERROR` CRITICAL | a CF with `v4` != 0 | only `rdna3accelcf=0` answers an error: a bug if it shows otherwise |
 | CoreDisplay `copy forward failed` CRITICAL | no CF error in the trace, `VRAM` WARN (allocations refused) | the family failed on a buffer without VRAM: the CPU-visible heap ran out (BAR size); open item N29 (2) |
 | `PANEL` WARN | HUBP address != expected | the framebuffer or an IOP flip moved the panel: see the FLIP events around it |
 | tearing in mode 1 | `swaps_copydirect_h<N>` (no second buffer) or `swaps_copylatchto_h<N>` | D could not be allocated (VRAM) or flips did not latch in time |
+
+### Card run 2026-10-17c (step agdc + probes, build 1311b22)
+
+- Seen: head 0's swaps name the framebuffer resource as the front and two
+  backs in turns: 0x8b100000 (IOSurface 37, resource type 0xc0) and
+  0x8b8f0000 (type 0x40, no IOSurface). The second read EMPTY at all 159
+  swaps that named it (16 aperture writes into it, 272 into the first);
+  WindowServer's frame was in 0x8b100000 at 159 of 159 swaps. Mode 1 held
+  the panel at each of them (`swaps_copyempty_h0` 437).
+- The trace says when (certain from the run's stream): each swap of
+  0x8b8f0000 came 0.2-0.3 ms (median 0.30) after the swap of 0x8b100000,
+  which mode 1 had just copied; at none of them had 0x8b100000 (or any
+  other buffer) changed again (2 changes of it between two swaps in the
+  whole run, both copy forward's writes). So the empty back's swap is
+  WindowServer's second swap of a frame the swap before presented: the
+  hold lost no frame. Mode 0 skipped those swaps the same way.
+- Change (evidence-driven, no amdgpu analogue: macOS legacy surface
+  semantics; `common/rdna3_swap_copy.h` `rd3_sc_landed_wanted` /
+  `rd3_sc_landed_pick`, `tests/test_swap_copy.c`): in modes 1/2, at a
+  swap whose back reads empty - or has no IOSurface (type 0x40) and did
+  not change since the head last sampled it - the surface's other
+  buffers (its 0x11C0 array minus the back and the head's framebuffer
+  resource, plus a1 when it is neither) are sampled at that swap (at most
+  6, 64 BAR reads each, the same reads the trace's SCAN events use), and
+  the one that changed since the head's last look, has pixels and is not
+  the picture on the panel is copied instead (an IOSurface-backed one
+  first). Without one the old rule stands (hold over a picture). In the
+  pattern of this run it does not fire (nothing new at those swaps); it
+  presents a frame that really sits in a buffer the swap did not name.
+  The risk: a buffer WindowServer is drawing the next frame into also
+  "changed" - a half-drawn frame would show; watch `swaps_copylanded_h<N>`
+  against the looks.
+- The plugin's trace was missing because the VM's plugin was stale (built
+  from metal/ at 8540be5, before the plugin's frame trace,
+  `metal/plugin/NVMTLTrace.m`, came with e168385): rebuild it in the VM
+  (`tools/vm/macos/build_metal.sh`) before the next run.
+
+| Seen | Trace / counter / triage line | Meaning, action |
+|---|---|---|
+| `swap #n: head N: the back (phys 0x..., a2, resource type 0x40) read empty -- presented the landed buffer 0x... instead (buf[i], resource type 0xc0, IOSurface s: ...)` (log, first 8 then every 1024th) | `swaps_copylanded_h<N>`; SWAP `v1` bit 21, `v4 >> 24` the buffer's index (0xfe: a1), the decoder prints `presented the landed buffer 0x...` | modes 1/2 copied the buffer WindowServer's frame landed in, not the empty / stale back |
+| `frame trace INFO H-B2: ... - handled: landed buffer presented N times` / `swap copy INFO head N: H-B2 handled: landed buffer presented N times` | the swaps naming the empty back presented the landed buffer | nothing to do; compare the looks (no half-drawn frames) |
+| `frame trace WARN H-B2: ... - but no frame lost: all N of its swaps were held/skipped and no other buffer had a new frame at any of them (median x ms after the head's swap of another back)` | SCAN of the other buffers at each held swap: none CHANGED with pixels | WindowServer's second swap of an already presented frame: the hold is right, H-B2 is not the cause of a black or flickering screen |
+| `frame trace FAIL H-B2: ...; n held/skipped, k of them with a new frame in another buffer, b shown black` | a held swap while another buffer had a new frame (a frame waited for the next swap), or the empty back shown | a kernel before the landed buffer, or the landed rule missed it (its SCAN not taken: `held swaps without samples`) |
+| A/B `shown (k landed), held/skipped (n with a new frame elsewhere)`, verdict `mode 1: h held (n with a new frame in another buffer: frames held back), k landed buffers presented` | the A/B per mode | n > 0 in mode 1: frames held back |
+| `plugin trace MISSING although WindowServer loaded the plugin: the VM's plugin is STALE: PLUGIN built from metal at X, ... - a plugin without the frame trace (metal/plugin/NVMTLTrace.m came with Y after it)` | 35-build-stamps.txt against 00-host.txt (the same check as `STALE PLUGIN/RADV`) | rebuild the plugin in the VM; the collector's generic reasons are printed only when the plugin is current |

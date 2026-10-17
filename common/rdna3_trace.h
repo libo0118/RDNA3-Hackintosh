@@ -88,6 +88,10 @@ enum rd3_trace_swap {
 #define RD3_TRF_FRONT_OK   0x20u   /* modes 1/2: the back was copied into the front too */
 #define RD3_TRF_DOUBLE     0x40u   /* modes 1/2: copied into the buffer NOT on the panel, then flipped (tear-free) */
 #define RD3_TRF_WAITED     0x80u   /* a flip was waited for (mode 0: after it; modes 1/2: before the copy) */
+/* RD3_TR_SWAP's v1: modes 1/2 copied the buffer WindowServer's frame landed
+ * in, not the (empty / stale) back the swap named (card run 2026-10-17c) */
+#define RD3_TRV1_LANDED    (1u << 21)
+#define RD3_TRV4_LANDED_A1 0xfeu   /* the landed buffer's index << 24: a1 (not in the surface's array) */
 /* where a mode 1/2 swap failed (RD3_TRS_COPY_FAILED's v4) */
 enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD3_TRX_SDMA = 3, RD3_TRX_FLIP = 4 };
 
@@ -96,9 +100,13 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          swap number, v1 = rc(a1) | rc(a2) << 4 | route << 8 | mode << 12 |
  *          target << 16 (0 none, 1 home, 2 the driver's buffer, 3 home
  *          directly) | 1 << 20 when modes 1/2 flipped because the SDMA
- *          breaker is open (mode then reads 0), v2 the copy's us, v3 the wait's us, v4 = the index
+ *          breaker is open (mode then reads 0) | 1 << 21 when modes 1/2
+ *          presented the landed buffer instead of the named back
+ *          (RD3_TRV1_LANDED, rdna3_swap_copy.h), v2 the copy's us, v3 the wait's us, v4 = the index
  *          of a1 in the surface's buffer array | a2's << 8 (0xff: not in
- *          it) | rd3_trace_fail << 16;
+ *          it) | rd3_trace_fail << 16 | the landed buffer's index << 24
+ *          (0xfe: a1 itself; its address is that swap's SCAN of the same
+ *          index, or pa);
  *          pa a1, pb a2, pc what the panel shows after it; ba / bb the band
  *          bytes of a1 / a2 at the swap's entry
  *  CF      head, arg the source's pick (mode 0: rd3_cf_pick; modes 1/2: 16 +

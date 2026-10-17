@@ -19,11 +19,28 @@ hasnt() { ! grep -qF -- "$2" <<<"$1" || fail "$3: '$2' unexpected in: $1"; }
 dec() { python3 -I "$ROOT/tests/trace_fixture.py" "$1" "$T/$1.bin" && python3 "$ROOT/tools/rdna3_trace.py" "$T/$1.bin"; }
 
 out=$(dec b2)
-has "$out" "FAIL     H-B2: head 0: the back 0x8b8f0000 was named by 40 swaps and read EMPTY at 40" b2
+# card run 2026-10-17c: every swap of the empty back skipped while the other back had nothing new: no frame lost
+has "$out" "WARN     H-B2: head 0: the back 0x8b8f0000 was named by 40 swaps and read EMPTY at 40" b2
 has "$out" "WindowServer's frames land in 0x8b100000" b2
+has "$out" "but no frame lost: all 40 of its swaps were held/skipped" b2
 has "$out" "PASS     Q3: 40 empty backs, 40 delayed re-samples" b2
 hasnt "$out" "H-FREE" b2
 hasnt "$out" "CF-ERROR" b2
+
+# mode 1 held the empty back while the other back had a new frame: frames held back (FAIL), counted in the A/B line
+out=$(dec b2lost)
+has "$out" "FAIL     H-B2: head 0: the back 0x8b8f0000 was named by 40 swaps and read EMPTY at 40" b2lost
+has "$out" "40 held/skipped, 40 of them with a new frame in another buffer, 0 shown black" b2lost
+has "$out" "40 held/skipped (40 with a new frame elsewhere)" b2lost
+# mode 1 presented the landed buffer: H-B2 handled (INFO), the timeline names the buffer
+python3 -I "$ROOT/tests/trace_fixture.py" b2landed "$T/b2landed.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/b2landed.bin" --timeline 400)
+has "$out" "INFO     H-B2: head 0: the back 0x8b8f0000 was named by 40 swaps" b2landed
+has "$out" "handled: landed buffer presented 40 times" b2landed
+has "$out" "copy: back 0x8b8f0000 (empty, 0000000000000000) front 0x87040000 (empty) presented the landed buffer 0x8b100000" b2landed
+has "$out" "80 shown (40 landed),    0 held/skipped" b2landed
+hasnt "$out" "FAIL     H-B2" b2landed
+has "$out" "0 BLACK frames" b2landed
 
 out=$(dec copy)
 has "$out" "FAIL     H-COPY: mode 0: 39 of 39 flipped buffers were rewritten" copy
@@ -217,7 +234,7 @@ mk b2 b2 "swaps_h0 80
 cf_calls 1
 swap_mode 0"
 out=$(run b2)
-has "$out" "FAIL frame trace: H-B2: head 0: the back 0x8b8f0000" triage-b2
+has "$out" "WARN frame trace: H-B2: head 0: the back 0x8b8f0000" triage-b2
 has "$out" "frame trace timeline" triage-b2
 
 mk none - "swaps_h0 80
@@ -236,6 +253,17 @@ has "$out" "CRITICAL copy forward: CoreDisplay disabled copy forward at 2026-10-
 has "$out" "the family failed before calling it" triage-cd
 has "$out" "FAIL swap copy: head 0: 40 backs copied" triage-cd
 has "$out" "10 black frames" triage-cd
+# card run 2026-10-17c: the landed buffer's counter (swaps_copylanded_h<N>): H-B2 handled, in the checklist too
+mk landed clean "swaps_h0 40
+swap_mode 1
+swaps_copy_h0 40
+swaps_copylanded_h0 12
+swaps_copyempty_h0 3"
+out=$(run landed)
+has "$out" "40 backs copied" triage-landed
+has "$out" "12 of them the landed buffer instead of an empty / stale back, 3 empty backs kept off a picture" triage-landed
+has "$out" "INFO swap copy: head 0: H-B2 handled: landed buffer presented 12 times" triage-landed
+has "$out" "swap copy              INFO head 0: H-B2 handled: landed buffer presented 12 times" triage-landed-summary
 
 # ECC review round 1 through triage
 # no tests file: the A/B judged from the trace, said so

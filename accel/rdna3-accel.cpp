@@ -3964,6 +3964,7 @@ struct RD3ScHead {
     struct rd3_sc_front front;          /* the front our last copy reached, and its allocation */
     bool scanoutFrame;                  /* the panel shows a frame this mode copied */
     bool lastPixels;                    /* ... and it had pixels */
+    uint8_t lastBand[8];                /* ... and its source's band bytes at the swap (the landed buffer's "shown") */
     unsigned dRetry;                    /* swaps until D's allocation is tried again */
     unsigned long long homePhys;        /* the framebuffer's own scanout (home), as last described */
     bool seen;                          /* the last flip was SEEN latched (not a wait that gave up): D's free */
@@ -3990,8 +3991,9 @@ static SInt64 gCntScUs[kRd3MaxFB], gCntScUsMax[kRd3MaxFB], gCntScWait[kRd3MaxFB]
 static SInt64 gCntScLatchTo[kRd3MaxFB], gCntScFail[kRd3MaxFB], gCntScDirect[kRd3MaxFB], gCntScFront[kRd3MaxFB];
 static SInt64 gCntScFrontFail[kRd3MaxFB], gCntCfScSrc[kRd3MaxFB], gCntCfScScanout[kRd3MaxFB], gCntCfScStale[kRd3MaxFB];
 static SInt64 gCntScNoWait[kRd3MaxFB], gCntScBrkFlip[kRd3MaxFB], gCntScFreeWait[kRd3MaxFB], gCntScBrkTrips;
+static SInt64 gCntScLanded[kRd3MaxFB];   /* the landed buffer presented instead of the named back (2026-10-17c) */
 static void rd3AccelSwapCopy(unsigned head, IOService *fb, IOAccelResource2 *back, IOAccelResource2 *frontRes,
-                             bool backEmpty, unsigned n, struct rd3_trace_ev *tr);
+                             bool backEmpty, unsigned n, struct rd3_trace_ev *tr, const uint8_t *srcBand);
 static void rd3AccelScBrkEvent(enum rd3_sc_brk_ev ev, unsigned n, unsigned head, int status, IOReturn r);
 static void rd3AccelScLatchEvent(unsigned head, enum rd3_latch_event e, const char *why);
 static inline uint64_t rd3AccelUsNow(void)
@@ -4223,14 +4225,42 @@ static void rd3AccelTraceScanFwd(unsigned head, const void *surf, IOAccelResourc
     memcpy(sc.band, band, 8);
     rd3AccelTraceScan(head, surf, 0xff, rd3res_phys(res), sc, flags, n, v1, res);
 }
+/* the surface's buffers other than a1 / a2 as sampled at one swap: the
+ * trace's SCAN events and the landed buffer's candidates come from one
+ * sampling (at most RD3_SC_LANDED_MAX buffers, 64 BAR reads each) */
+struct RD3Others {
+    unsigned n;
+    IOAccelResource2 *res[RD3_SC_LANDED_MAX];
+    unsigned idx[RD3_SC_LANDED_MAX];
+    unsigned long long phys[RD3_SC_LANDED_MAX];
+    RD3Scan sc[RD3_SC_LANDED_MAX];
+    int ch[RD3_SC_LANDED_MAX];
+};
+static void rd3AccelOthersSample(unsigned head, const void *surf, IOAccelResource2 *a1, IOAccelResource2 *a2,
+                                 IOAccelResource2 *const *bufs, unsigned nbufs, unsigned n, RD3Others *o)
+{
+    o->n = 0;
+    for (unsigned i = 0; bufs && i < nbufs && o->n < RD3_SC_LANDED_MAX; i++) {
+        IOAccelResource2 *r = OSDynamicCast(IOAccelResource2, (OSObject *)bufs[i]);
+        if (!r || r == a1 || r == a2) continue;
+        const unsigned k = o->n++;
+        o->res[k] = r;
+        o->idx[k] = i;
+        rd3AccelResScan(r, &o->sc[k]);
+        o->phys[k] = rd3res_phys(r);
+        o->ch[k] = rd3AccelTraceScan(head, surf, i, o->phys[k], o->sc[k], 0, n, 0, r);
+    }
+}
 /* the surface's buffers other than a1 / a2, sampled (Q2: where did
  * WindowServer's frame land); 'landing' (the back read empty) also logs
- * the first ones of a head with every buffer's state */
+ * the first ones of a head with every buffer's state; 'pre': this swap
+ * already sampled them (the landed buffer's look), not sampled again */
 static unsigned gLandingLogs[kRd3MaxFB];
 static uint64_t gScanSwaps[kRd3MaxFB];   /* swaps that asked (rd3_trace_scan_due's count) */
 static void rd3AccelScanOthers(unsigned head, const void *surf, IOAccelResource2 *a1, IOAccelResource2 *a2,
                                const RD3Scan &s1, const RD3Scan &s2, int ch1, int ch2, IOAccelResource2 *const *bufs,
-                               unsigned nbufs, unsigned n, bool landing, const char *what)
+                               unsigned nbufs, unsigned n, bool landing, const char *what,
+                               const RD3Others *pre = nullptr)
 {
     char line[400];
     size_t used = 0;
@@ -4241,24 +4271,69 @@ static void rd3AccelScanOthers(unsigned head, const void *surf, IOAccelResource2
                                 ch1 > 0 ? " CHANGED" : ch1 == 0 ? " same" : " new", rd3res_phys(a2),
                                 s2.rc == kRcPixels ? "pixels" : kRcWhy[s2.rc < 6 ? s2.rc : 0],
                                 ch2 > 0 ? " CHANGED" : ch2 == 0 ? " same" : " new");
-    unsigned scanned = 0;
     const bool due = rd3_trace_scan_due(gTrScan, landing, head < kRd3MaxFB ? gScanSwaps[head]++ : 0, (unsigned)gSwapAb);
-    for (unsigned i = 0; due && bufs && i < nbufs && scanned < 6; i++) {
-        IOAccelResource2 *r = OSDynamicCast(IOAccelResource2, (OSObject *)bufs[i]);
-        if (!r || r == a1 || r == a2) continue;
-        RD3Scan sc;
-        rd3AccelResScan(r, &sc);
-        const unsigned long long phys = rd3res_phys(r);
-        const int ch = rd3AccelTraceScan(head, surf, i, phys, sc, 0, n, 0, r);
-        scanned++;
-        if (logIt && used < sizeof line)
-            used += (size_t)snprintf(line + used, sizeof line - used, ", buf[%u] 0x%llx %s%s", i, phys,
-                                     sc.rc == kRcPixels ? "pixels" : kRcWhy[sc.rc < 6 ? sc.rc : 0],
-                                     ch > 0 ? " CHANGED" : ch == 0 ? " same" : " new");
-    }
+    RD3Others own;
+    own.n = 0;
+    if (!pre && due) rd3AccelOthersSample(head, surf, a1, a2, bufs, nbufs, n, &own);
+    const RD3Others &o = pre ? *pre : own;
+    for (unsigned k = 0; logIt && k < o.n && used < sizeof line; k++)
+        used += (size_t)snprintf(line + used, sizeof line - used, ", buf[%u] 0x%llx %s%s", o.idx[k], o.phys[k],
+                                 o.sc[k].rc == kRcPixels ? "pixels" : kRcWhy[o.sc[k].rc < 6 ? o.sc[k].rc : 0],
+                                 o.ch[k] > 0 ? " CHANGED" : o.ch[k] == 0 ? " same" : " new");
     if (logIt)
         ALOG("swap #%u: head %u: %s -- where WindowServer's frame is (since this head's last look): %s", n, head,
              what, line);
+}
+/* The landed buffer (card run 2026-10-17c, rdna3_swap_copy.h). Evidence-
+ * driven, no amdgpu analogue (macOS legacy surface semantics): head 0's
+ * swaps named 0x8b100000 (IOSurface 37) and 0x8b8f0000 (type 0x40) in
+ * turns, WindowServer's frame was in 0x8b100000 at all 159 swaps, the other
+ * read empty at all of its 159. At a swap whose back is suspect
+ * (rd3_sc_landed_wanted) the surface's other buffers - the array minus the
+ * back and the head's framebuffer resource, plus a1 when it is neither -
+ * are sampled now (o: the trace's SCAN events come from the same reads)
+ * and rd3_sc_landed_pick chooses among them. Returns the buffer to copy,
+ * nullptr: none (the old rule stands); *srcScan its samples, *idx its
+ * index in the surface's array (RD3_TRV4_LANDED_A1: a1). */
+static IOAccelResource2 *rd3AccelLanded(unsigned head, const void *surf, IOAccelResource2 *a1, IOAccelResource2 *a2,
+                                        IOAccelResource2 *back, const RD3Scan &s1, int ch1, IOAccelResource2 *fbRes,
+                                        IOAccelResource2 *const *bufs, unsigned nbufs, unsigned n, RD3Others *o,
+                                        const RD3Scan **srcScan, unsigned *idx)
+{
+    rd3AccelOthersSample(head, surf, a1, a2, bufs, nbufs, n, o);
+    const RD3ScHead &S = gSc[head];
+    struct rd3_sc_cand c[RD3_SC_LANDED_MAX];
+    IOAccelResource2 *cr[RD3_SC_LANDED_MAX];
+    const RD3Scan *cs[RD3_SC_LANDED_MAX];
+    unsigned ci[RD3_SC_LANDED_MAX];
+    const bool a1Too = a1 && a1 != back && a1 != fbRes;
+    unsigned m = 0;
+    for (unsigned k = 0; k < o->n && m < RD3_SC_LANDED_MAX - (a1Too ? 1u : 0u); k++) {
+        if (o->res[k] == back || o->res[k] == fbRes) continue;
+        cr[m] = o->res[k];
+        cs[m] = &o->sc[k];
+        ci[m] = o->idx[k];
+        c[m].changed = o->ch[k] > 0;
+        m++;
+    }
+    if (a1Too) {   /* sampled at the swap's entry: its change state is ch1 (the reads are not repeated) */
+        cr[m] = a1;
+        cs[m] = &s1;
+        ci[m] = RD3_TRV4_LANDED_A1;
+        c[m].changed = ch1 > 0;
+        m++;
+    }
+    for (unsigned k = 0; k < m; k++) {
+        c[k].sampled = cs[k]->rc >= kRcEmpty;
+        c[k].pixels = cs[k]->rc == kRcPixels;
+        c[k].shown = S.scanoutFrame && memcmp(cs[k]->band, S.lastBand, 8) == 0;
+        c[k].iosurface = rd3AccelResType(cr[k]) == 0xc0;
+    }
+    const int pk = rd3_sc_landed_pick(c, m);
+    if (pk < 0) return nullptr;
+    *srcScan = cs[pk];
+    *idx = ci[pk];
+    return cr[pk];
 }
 /* what the head's HUBP scans now (Q6): the core's SURFACE_EARLIEST_INUSE
  * and the requested address as CPU addresses, the frame state */
@@ -4483,10 +4558,33 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
         const struct rd3_sc_roles roles = rd3_sc_roles(front == 1, front == 2);
         IOAccelResource2 *back = roles.back == 2 ? a2 : a1, *frontRes = roles.front == 1 ? a1 : a2;
         const RD3Scan &sb = roles.back == 2 ? s2 : s1, &sf = roles.front == 1 ? s1 : s2;
+        const int chb = roles.back == 2 ? ch2 : ch1;
         const bool picture = sf.rc == kRcPixels || (knownHead < kRd3MaxFB && gSc[knownHead].scanoutFrame &&
                                                     gSc[knownHead].lastPixels);
-        const enum rd3_sc_act act = rd3_sc_action(mode, sb.rc >= kRcEmpty, sb.rc == kRcPixels, picture);
-        if (sb.rc == kRcEmpty) tr.flags |= RD3_TRF_BACK_EMPTY;
+        enum rd3_sc_act act = rd3_sc_action(mode, sb.rc >= kRcEmpty, sb.rc == kRcPixels, picture);
+        /* the landed buffer (card run 2026-10-17c): a suspect back - empty,
+         * or without an IOSurface and unchanged - and another buffer of the
+         * surface holding a new frame: that one goes to the panel */
+        RD3Others oth;
+        oth.n = 0;
+        bool othDone = false;
+        IOAccelResource2 *src = back;
+        const RD3Scan *ss = &sb;
+        unsigned landedIdx = 0xff;
+        const unsigned backType = rd3AccelResType(back);
+        if (knownHead < kRd3MaxFB &&
+            rd3_sc_landed_wanted(mode, sb.rc >= kRcEmpty, sb.rc == kRcPixels, chb != 0, backType == 0xc0)) {
+            othDone = true;
+            IOAccelResource2 *l = rd3AccelLanded(knownHead, surf, a1, a2, back, s1, ch1, pipeRes[knownHead], bufs,
+                                                 nbufs, n, &oth, &ss, &landedIdx);
+            if (l) {
+                src = l;
+                act = RD3_SC_COPY_LANDED;
+                tr.v1 |= RD3_TRV1_LANDED;
+                tr.v4 |= (landedIdx & 0xffu) << 24;
+            }
+        }
+        if (sb.rc == kRcEmpty && act != RD3_SC_COPY_LANDED) tr.flags |= RD3_TRF_BACK_EMPTY;
         if (act == RD3_SC_HOLD) {
             /* an empty back over a picture: the panel and the front keep the
              * last frame (card run 2026-10-17b: head 0's second back never
@@ -4502,7 +4600,8 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
             }
             rd3Trace(tr);
             rd3AccelScanOthers(knownHead, surf, a1, a2, s1, s2, ch1, ch2, bufs, nbufs, n, true,
-                               "the back read empty (held, mode 1)");
+                               "the back read empty (held, mode 1; no other buffer had a new frame)",
+                               othDone ? &oth : nullptr);
             if (knownHead < kRd3MaxFB) {
                 rd3AccelTracePanel(knownHead, a->fFBs[knownHead], tr.pc);
                 rd3AccelEmptyResample(knownHead, back, true, 1, surf, n);
@@ -4510,13 +4609,26 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
             return;
         }
         unsigned how = 0;
-        const unsigned head = rd3AccelSwapRoute(a, surf, frontHead, v1, v2, n, p1, p2, front, back == a2, pipeRes, &how);
+        const unsigned head = rd3AccelSwapRoute(a, surf, frontHead, v1, v2, n, p1, p2, front, src == a2, pipeRes, &how);
         tr.head = (uint8_t)(head < kRd3MaxFB ? head : 0xffu);
         tr.v1 |= how << 8;
         if (head >= kRd3MaxFB) {
             tr.arg = RD3_TRS_NOHEAD;
             rd3Trace(tr);
             return;
+        }
+        if (act == RD3_SC_COPY_LANDED) {
+            const SInt64 k = OSAddAtomic64(1, &gCntScLanded[head]);
+            if (rd3_log_due((uint64_t)k, 8, 1023)) {
+                char where[24];
+                if (landedIdx == RD3_TRV4_LANDED_A1) strlcpy(where, "a1", sizeof where);
+                else snprintf(where, sizeof where, "buf[%u]", landedIdx);
+                ALOG("swap #%u: head %u: the back (phys 0x%llx, %s, resource type 0x%02x) %s -- presented the landed "
+                     "buffer 0x%llx instead (%s, resource type 0x%02x, IOSurface %u: new pixels since this head's "
+                     "last look; %lld such; swap mode %d)", n, head, rd3res_phys(back), roles.back == 2 ? "a2" : "a1",
+                     backType, sb.rc == kRcEmpty ? "read empty" : "has no IOSurface and did not change",
+                     rd3res_phys(src), where, rd3AccelResType(src), rd3AccelResSurfaceId(src), (long long)k + 1, mode);
+            }
         }
         if (act == RD3_SC_COPY_EMPTY) {
             const SInt64 k = OSAddAtomic64(1, &gCntScBlack[head]);
@@ -4527,14 +4639,16 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
         }
         uint32_t hash[kFlickBands];
         const char *hashSkip = nullptr;
-        rd3AccelSwapNote(head, surf, back, rd3res_phys(back), p1, p2, front, (unsigned)roles.back, how, n, frontHead,
+        rd3AccelSwapNote(head, surf, src, rd3res_phys(src), p1, p2, front, (unsigned)roles.back, how, n, frontHead,
                          frontPhys, hash, &hashSkip);
         IOService *fb = a->fFBs[head];
         rd3AccelTracePanel(head, fb, rd3AccelScExpect(head));
-        rd3AccelSwapCopy(head, fb, back, frontRes, sb.rc == kRcEmpty, n, &tr);
+        rd3AccelSwapCopy(head, fb, src, frontRes, ss->rc == kRcEmpty, n, &tr, ss->band);
         rd3Trace(tr);
         rd3AccelScanOthers(head, surf, a1, a2, s1, s2, ch1, ch2, bufs, nbufs, n, sb.rc == kRcEmpty,
-                           "the back read empty (copied)");
+                           act == RD3_SC_COPY_LANDED ? "the back was suspect (the landed buffer presented)"
+                                                     : "the back read empty (copied)",
+                           othDone ? &oth : nullptr);
         gHeadSurf[head] = surf;
         return;
     }
@@ -5569,7 +5683,7 @@ static void rd3AccelScWait(unsigned head, IOService *fb, enum rd3_sc_target tg, 
 /* modes 1/2: the back into the scanout buffer the panel does not show,
  * the flip to it, the back into the front (rdna3_swap_copy.h) */
 static void rd3AccelSwapCopy(unsigned head, IOService *fb, IOAccelResource2 *back, IOAccelResource2 *frontRes,
-                             bool backEmpty, unsigned n, struct rd3_trace_ev *tr)
+                             bool backEmpty, unsigned n, struct rd3_trace_ev *tr, const uint8_t *srcBand)
 {
     RD3ScHead &S = gSc[head];
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
@@ -5665,6 +5779,8 @@ static void rd3AccelSwapCopy(unsigned head, IOService *fb, IOAccelResource2 *bac
         if (S.latched) rd3AccelScLatchEvent(head, rd3_latch_seen(&S.lat), "right after the flip");
         S.scanoutFrame = true;
         S.lastPixels = !backEmpty;
+        if (srcBand) memcpy(S.lastBand, srcBand, sizeof S.lastBand);
+        else bzero(S.lastBand, sizeof S.lastBand);
         tr->arg = RD3_TRS_COPY;
         tr->pc = tPhys;
         if (rd3_sc_tear_free(tg)) tr->flags |= RD3_TRF_DOUBLE;
@@ -5677,7 +5793,16 @@ static void rd3AccelSwapCopy(unsigned head, IOService *fb, IOAccelResource2 *bac
         rd3AccelTraceScan(head, nullptr, 0xfe, tPhys, sc, 64u, n);
     }
     /* 4. the back into the front: copy forward's source, as Apple's family expects */
-    if (!frontRes || frontRes == back) return;
+    if (!frontRes) return;
+    if (frontRes == back) {
+        /* the copied buffer is the front itself (a landed a1, card run
+         * 2026-10-17c): it holds the frame on the panel, nothing to copy */
+        if (B.vm) {
+            rd3_sc_front_set(&S.front, B.vm, B.cookie);
+            tr->flags |= RD3_TRF_FRONT_OK;
+        }
+        return;
+    }
     RD3CfSide F = {};
     const char *fwhy = nullptr;
     IOReturn fcr = kIOReturnSuccess;
@@ -6121,6 +6246,7 @@ SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_swap_trace_lost, CTLTYPE_QUAD | CTLFLAG
 RD3ACCEL_CNT4(rdna3accel_swaps_copy, gCntScCopy, "swap mode 1/2: backs copied to the panel");
 RD3ACCEL_CNT4(rdna3accel_swaps_copyempty, gCntScEmpty, "swap mode 1: empty backs NOT copied over a picture (the panel kept its frame)");
 RD3ACCEL_CNT4(rdna3accel_swaps_copyblack, gCntScBlack, "swap mode 1/2: empty backs copied (black frames)");
+RD3ACCEL_CNT4(rdna3accel_swaps_copylanded, gCntScLanded, "card run 2026-10-17c: swap mode 1/2: the named back empty (or a stale one without an IOSurface), the surface's buffer WindowServer's frame landed in presented instead");
 RD3ACCEL_CNT4(rdna3accel_swaps_copybytes, gCntScBytes, "swap mode 1/2: bytes copied to the panel");
 RD3ACCEL_CNT4(rdna3accel_swaps_copyus, gCntScUs, "swap mode 1/2: microseconds of those copies, summed");
 RD3ACCEL_CNT4(rdna3accel_swaps_copyusmax, gCntScUsMax, "swap mode 1/2: the longest copy, microseconds");
@@ -6146,6 +6272,7 @@ static void rd3AccelInstallSysctl2(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_swap_ab);      sysctl_register_oid(&sysctl__debug_rdna3accel_swap_trace_events);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swap_trace_nomem); sysctl_register_oid(&sysctl__debug_rdna3accel_swap_trace_lost);
     RD3ACCEL_REG4(rdna3accel_swaps_copy);      RD3ACCEL_REG4(rdna3accel_swaps_copyempty);
+    RD3ACCEL_REG4(rdna3accel_swaps_copylanded);
     RD3ACCEL_REG4(rdna3accel_swaps_copyblack); RD3ACCEL_REG4(rdna3accel_swaps_copybytes);
     RD3ACCEL_REG4(rdna3accel_swaps_copyus);    RD3ACCEL_REG4(rdna3accel_swaps_copyusmax);
     RD3ACCEL_REG4(rdna3accel_swaps_copywait);  RD3ACCEL_REG4(rdna3accel_swaps_copywaitus);

@@ -12,7 +12,9 @@
  * after it, no swap waits longer than the latch cap, the front holds the
  * last frame for copy forward; without D the copy is direct (may tear).
  * Then the decision helpers one by one: roles, the empty-back action per
- * mode, the target, the wait, the extent, copy forward's source.
+ * mode, the target, the wait, the extent, copy forward's source, and the
+ * landed buffer of card run 2026-10-17c (a swap naming a back WindowServer
+ * never drew presents the buffer its frame did land in).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -454,6 +456,201 @@ static void posts(void)
     CHECK(ignored > 0);    /* the race was exercised */
 }
 
+/* ---- the landed buffer (card run 2026-10-17c) ----
+ * A surface of three buffers: 0 the head's framebuffer resource (the
+ * front: never a candidate), 1 an IOSurface-backed back (type 0xc0), 2 a
+ * back without an IOSurface (type 0x40). Each buffer holds a frame number
+ * (0: empty, its samples all zero); the head's signature table remembers
+ * what it last sampled in each; the panel shows a frame number. A swap
+ * samples the back it names, then (rd3_sc_landed_wanted) the others, as
+ * the accelerator does (rd3AccelSwapToPanel, rd3AccelScanOthers). */
+enum { LB_FRONT = 0, LB_B1 = 1, LB_B2 = 2, LB_N = 3 };
+struct lmodel {
+    unsigned content[LB_N];
+    unsigned sig[LB_N];
+    int seen[LB_N];
+    int iosurface[LB_N];
+    unsigned panel;          /* the frame on the panel, 0 black */
+    unsigned held, landed, black, copied;
+};
+static void lm_init(struct lmodel *m)
+{
+    memset(m, 0, sizeof *m);
+    m->iosurface[LB_B1] = 1;
+    m->content[LB_FRONT] = 1000;   /* the front has pixels: a picture an empty back would overwrite */
+}
+/* the head samples buffer i: changed since its last look (never seen: -1) */
+static int lm_sample(struct lmodel *m, unsigned i)
+{
+    const int ch = m->seen[i] ? m->content[i] != m->sig[i] : -1;
+    m->sig[i] = m->content[i];
+    m->seen[i] = 1;
+    return ch;
+}
+/* one swap naming 'back'; landed: the new rule on (else the old one) */
+static void lm_swap(struct lmodel *m, unsigned back, int mode, int landed)
+{
+    const int pixels = m->content[back] != 0;
+    const int chb = lm_sample(m, back);
+    enum rd3_sc_act act = rd3_sc_action(mode, 1, pixels, m->content[LB_FRONT] != 0 || m->panel != 0);
+    unsigned src = back;
+    struct rd3_sc_cand c[RD3_SC_LANDED_MAX];
+    unsigned idx[RD3_SC_LANDED_MAX], n = 0;
+    /* the others are sampled at an empty back either way (the trace's SCAN) */
+    const int wanted = rd3_sc_landed_wanted(mode, 1, pixels, chb != 0, m->iosurface[back]);
+    if (wanted || !pixels) {
+        for (unsigned i = 0; i < LB_N; i++) {
+            if (i == back || i == LB_FRONT)
+                continue;
+            const int ch = lm_sample(m, i);
+            c[n].sampled = 1;
+            c[n].pixels = m->content[i] != 0;
+            c[n].changed = ch > 0;
+            c[n].shown = m->panel != 0 && m->content[i] == m->panel;
+            c[n].iosurface = m->iosurface[i];
+            idx[n++] = i;
+        }
+    }
+    if (landed && wanted) {
+        const int pk = rd3_sc_landed_pick(c, n);
+        if (pk >= 0) {
+            act = RD3_SC_COPY_LANDED;
+            src = idx[pk];
+        }
+    }
+    switch (act) {
+    case RD3_SC_HOLD:
+        m->held++;
+        break;
+    case RD3_SC_COPY_EMPTY:
+        m->black++;
+        m->panel = 0;
+        break;
+    case RD3_SC_COPY_LANDED:
+        m->landed++;
+        m->panel = m->content[src];
+        break;
+    default:
+        m->copied++;
+        m->panel = m->content[src];
+        break;
+    }
+}
+
+static void landed_model(void)
+{
+    enum { FRAMES = 200 };
+    /* the brief's model: every frame lands in B1, the swaps name B1 and B2
+     * in turns; each swap must show the newest frame, none held, none black */
+    for (int landed = 0; landed <= 1; landed++) {
+        struct lmodel m;
+        unsigned stale = 0;
+        lm_init(&m);
+        for (unsigned k = 1; k <= FRAMES; k++) {
+            m.content[LB_B1] = k;
+            lm_swap(&m, k & 1 ? LB_B1 : LB_B2, RD3_SWAPMODE_COPY, landed);
+            stale += m.panel != k;
+        }
+        if (landed) {
+            CHECK(stale == 0);
+            CHECK(m.held == 0);
+            CHECK(m.black == 0);
+            CHECK(m.landed == FRAMES / 2);
+        } else {   /* the control: the old rule holds every second frame */
+            CHECK(stale == FRAMES / 2);
+            CHECK(m.held == FRAMES / 2);
+            CHECK(m.landed == 0);
+        }
+    }
+    /* card run 2026-10-17c as the trace shows it: the frame lands in B1, the
+     * swap of B1 copies it, the swap of B2 follows 0.3 ms later with nothing
+     * drawn in between - B1 is unchanged and already on the panel: held,
+     * no frame lost, the landed rule does not fire */
+    {
+        struct lmodel m;
+        unsigned stale = 0;
+        lm_init(&m);
+        for (unsigned k = 1; k <= FRAMES; k++) {
+            m.content[LB_B1] = k;
+            lm_swap(&m, LB_B1, RD3_SWAPMODE_COPY, 1);
+            lm_swap(&m, LB_B2, RD3_SWAPMODE_COPY, 1);
+            stale += m.panel != k;
+        }
+        CHECK(stale == 0);
+        CHECK(m.landed == 0);
+        CHECK(m.held == FRAMES);
+        CHECK(m.copied == FRAMES);
+    }
+    /* a back without an IOSurface that holds an old frame (pixels, never
+     * redrawn): the old rule copied it, an old picture every second swap;
+     * the new one presents B1's newest frame */
+    for (int landed = 0; landed <= 1; landed++) {
+        struct lmodel m;
+        unsigned stale = 0;
+        lm_init(&m);
+        m.content[LB_B2] = 7;
+        for (unsigned k = 1; k <= FRAMES; k++) {
+            m.content[LB_B1] = 100 + k;
+            lm_swap(&m, k & 1 ? LB_B1 : LB_B2, RD3_SWAPMODE_COPY, landed);
+            stale += m.panel != 100 + k;
+        }
+        /* the first swap of B2 cannot tell (never seen: trusted, copied) */
+        CHECK(landed ? stale == 1 : stale == FRAMES / 2);
+        CHECK(m.black == 0);
+    }
+    /* mode 2: an empty back and a landed buffer: the landed frame, not black */
+    {
+        struct lmodel m;
+        lm_init(&m);
+        m.content[LB_B1] = 5;
+        lm_swap(&m, LB_B1, RD3_SWAPMODE_COPY_ALL, 1);
+        m.content[LB_B1] = 6;
+        lm_swap(&m, LB_B2, RD3_SWAPMODE_COPY_ALL, 1);
+        CHECK(m.panel == 6);
+        CHECK(m.black == 0);
+        CHECK(m.landed == 1);
+        /* nothing new anywhere: mode 2 still copies the empty back (black) */
+        lm_swap(&m, LB_B2, RD3_SWAPMODE_COPY_ALL, 1);
+        CHECK(m.black == 1);
+    }
+}
+
+static void landed_rules(void)
+{
+    /* when to look */
+    CHECK(!rd3_sc_landed_wanted(RD3_SWAPMODE_FLIP, 1, 0, 0, 0));      /* mode 0: never */
+    CHECK(rd3_sc_landed_wanted(RD3_SWAPMODE_COPY, 1, 0, 0, 1));       /* an empty back */
+    CHECK(rd3_sc_landed_wanted(RD3_SWAPMODE_COPY_ALL, 1, 0, 1, 1));
+    CHECK(!rd3_sc_landed_wanted(RD3_SWAPMODE_COPY, 0, 0, 0, 0));      /* not sampled: copied as before */
+    CHECK(!rd3_sc_landed_wanted(RD3_SWAPMODE_COPY, 1, 1, 0, 1));      /* an IOSurface back with pixels */
+    CHECK(!rd3_sc_landed_wanted(RD3_SWAPMODE_COPY, 1, 1, 1, 0));      /* a type 0x40 back that changed */
+    CHECK(rd3_sc_landed_wanted(RD3_SWAPMODE_COPY, 1, 1, 0, 0));       /* a type 0x40 back that did not */
+    CHECK(!rd3_sc_landed_wanted(7, 1, 0, 0, 0));
+    /* which one */
+    struct rd3_sc_cand c[4];
+    memset(c, 0, sizeof c);
+    CHECK(rd3_sc_landed_pick(c, 4) == -1);
+    CHECK(rd3_sc_landed_pick(NULL, 4) == -1);
+    c[0] = (struct rd3_sc_cand){ 1, 1, 1, 0, 0 };   /* changed, type 0x40 */
+    c[1] = (struct rd3_sc_cand){ 1, 1, 1, 0, 1 };   /* changed, IOSurface: preferred */
+    CHECK(rd3_sc_landed_pick(c, 2) == 1);
+    CHECK(rd3_sc_landed_pick(c, 1) == 0);
+    c[1].shown = 1;                                  /* already on the panel */
+    CHECK(rd3_sc_landed_pick(c, 2) == 0);
+    c[0].pixels = 0;                                 /* changed to empty (cleared) */
+    CHECK(rd3_sc_landed_pick(c, 2) == -1);
+    c[2] = (struct rd3_sc_cand){ 1, 1, 0, 0, 1 };   /* not changed */
+    c[3] = (struct rd3_sc_cand){ 0, 1, 1, 0, 1 };   /* not sampled */
+    CHECK(rd3_sc_landed_pick(c, 4) == -1);
+    c[3].sampled = 1;
+    CHECK(rd3_sc_landed_pick(c, 4) == 3);
+    /* bounded: candidates past RD3_SC_LANDED_MAX are never read */
+    struct rd3_sc_cand many[RD3_SC_LANDED_MAX + 2];
+    memset(many, 0, sizeof many);
+    many[RD3_SC_LANDED_MAX] = (struct rd3_sc_cand){ 1, 1, 1, 0, 1 };
+    CHECK(rd3_sc_landed_pick(many, RD3_SC_LANDED_MAX + 2) == -1);
+}
+
 int main(void)
 {
     model();
@@ -467,6 +664,8 @@ int main(void)
     front_record();
     breaker();
     posts();
+    landed_model();
+    landed_rules();
     if (fails) {
         printf("test_swap_copy: %d check(s) FAILED\n", fails);
         return 1;

@@ -96,7 +96,9 @@ static inline struct rd3_sc_roles rd3_sc_roles(int a1IsFb, int a2IsFb)
 enum rd3_sc_act {
     RD3_SC_COPY = 0,        /* the back has pixels (or could not be sampled): copied */
     RD3_SC_COPY_EMPTY = 1,  /* the back read empty: copied anyway (mode 2, or nothing to lose) */
-    RD3_SC_HOLD = 2         /* mode 1: an empty back over a picture: not copied, the last frame stays */
+    RD3_SC_HOLD = 2,        /* mode 1: an empty back over a picture: not copied, the last frame stays */
+    RD3_SC_COPY_LANDED = 3  /* modes 1/2: the back is suspect, another buffer of the surface holds the new
+                             * frame (rd3_sc_landed_pick): that one copied */
 };
 /* sampled: the back's 64 samples were read (a mapping and a geometry);
  * pixels: one was not 0; picture: the front, or the head's last copy, has
@@ -108,6 +110,71 @@ static inline enum rd3_sc_act rd3_sc_action(int mode, int sampled, int pixels, i
     if (mode == RD3_SWAPMODE_COPY && picture)
         return RD3_SC_HOLD;
     return RD3_SC_COPY_EMPTY;
+}
+
+/* ---- the landed buffer (card run 2026-10-17c) ----
+ * Evidence-driven, no amdgpu analogue: this is macOS legacy surface
+ * semantics (IOAccelLegacySurface's buffer array, offset 0x11C0), which
+ * Linux has no counterpart of. In card run 2026-10-17c head 0's swaps named
+ * two backs in turns: 0x8b100000 (IOSurface 37, resource type 0xc0) and
+ * 0x8b8f0000 (type 0x40, no IOSurface). WindowServer's frame was in
+ * 0x8b100000 at 159 of 159 swaps (the trace's SCAN of the surface's other
+ * buffers); 0x8b8f0000 read EMPTY at all 159 swaps that named it (16
+ * aperture writes into it, 272 into 0x8b100000). Mode 1 held the panel at
+ * each of those (437 "empty backs kept off a picture" on head 0), mode 0
+ * flipped to them or skipped them.
+ *
+ * So at a swap whose named back reads empty - or is not IOSurface-backed
+ * (type 0x40) and has not changed since the head last sampled it - modes
+ * 1/2 look at the surface's other buffers (the array, and a1 when it is not
+ * the head's framebuffer resource), sampled at THIS swap (never a record of
+ * where frames landed before), and present the one that changed since the
+ * head last sampled it, has pixels and is not the picture the panel already
+ * shows; an IOSurface-backed one first (rd3_sc_landed_pick). Without one
+ * the old rule stands (rd3_sc_action: hold over a picture, or copy). The
+ * caller samples at most RD3_SC_LANDED_MAX buffers (64 BAR reads each), and
+ * only at those swaps.
+ *
+ * The limit: a buffer WindowServer is drawing the NEXT frame into also
+ * "changed"; presenting it would show a half-drawn frame. In run
+ * 2026-10-17c the empty back's swap came 0.2-0.3 ms after the swap of the
+ * drawn one, which had not changed again by then (2 changes of 0x8b100000
+ * between two swaps in the whole run, both copy forward's writes) - so the
+ * rule would not have fired there, and the hold lost no frame. It fires when
+ * a frame really is in a buffer the swap did not name. */
+#define RD3_SC_LANDED_MAX 6u
+struct rd3_sc_cand {
+    int sampled;    /* its 64 samples were read (a mapping and a geometry) */
+    int pixels;     /* one of them was not 0 */
+    int changed;    /* they differ from the head's last look at this buffer (never seen before: 0) */
+    int shown;      /* they equal the samples of the frame the head's panel shows (its last copy) */
+    int iosurface;  /* IOSurface-backed (resource type 0xc0) */
+};
+/* the named back is suspect: modes 1/2 look for the landed buffer.
+ * backChanged: the back's samples differ from the head's last look, or it
+ * was never seen (unknown: trusted) */
+static inline int rd3_sc_landed_wanted(int mode, int backSampled, int backPixels, int backChanged,
+                                       int backIOSurface)
+{
+    if (mode != RD3_SWAPMODE_COPY && mode != RD3_SWAPMODE_COPY_ALL)
+        return 0;
+    if (!backSampled)
+        return 0;   /* nothing known of the back: copied as before */
+    if (!backPixels)
+        return 1;
+    return !backIOSurface && !backChanged;
+}
+/* the buffer to present instead of the back: the index into c[], -1 none */
+static inline int rd3_sc_landed_pick(const struct rd3_sc_cand *c, unsigned n)
+{
+    int best = -1;
+    for (unsigned i = 0; c && i < n && i < RD3_SC_LANDED_MAX; i++) {
+        if (!c[i].sampled || !c[i].pixels || !c[i].changed || c[i].shown)
+            continue;
+        if (best < 0 || (c[i].iosurface && !c[best].iosurface))
+            best = (int)i;
+    }
+    return best;
 }
 
 /* what the head's panel shows as far as the accelerator knows */

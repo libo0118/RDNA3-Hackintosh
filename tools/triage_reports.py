@@ -576,7 +576,7 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg|"
                        r"_latchpend|_latchwait|_latchus|_latchmax|_latchtimeout|_latchunknown|_latchoff|_tornchk|"
                        r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill|_latchimmediate|_latchwaitsoff|"
-                       r"_flipfailed|_copy|_copyempty|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
+                       r"_flipfailed|_copy|_copyempty|_copylanded|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
                        r"_copylatchto|_copyfail|_copydirect|_copyfront|_copyfrontfail|_copynowait|_copybrkflip|_copyfreewait)?_h\d|"
                        r"swaps_copybrktrips|swap_latch|swap_torn|"
                        r"swap_mode|swap_trace_events|swap_trace_nomem|swap_trace_lost|cf_sc(?:src|scanout|stale)_h\d|"
@@ -1077,14 +1077,16 @@ def swapcopy_verdict(c):
         if not copies and not g("swaps_copyempty") and not g("swaps_copyfail"):
             continue
         black, held, fail, direct = g("swaps_copyblack"), g("swaps_copyempty"), g("swaps_copyfail"), g("swaps_copydirect")
+        landed = g("swaps_copylanded")   # card run 2026-10-17c: the landed buffer presented instead of the back
         waits = g("swaps_copywait")
         nowait, brk, freewait = g("swaps_copynowait"), g("swaps_copybrkflip"), g("swaps_copyfreewait")
-        line = ("head %s: %d backs copied (%d MiB, avg %d us, max %d us), %d empty backs kept off a picture, %d black "
+        line = ("head %s: %d backs copied (%d MiB, avg %d us, max %d us), %d of them the landed buffer instead of an "
+                "empty / stale back, %d empty backs kept off a picture, %d black "
                 "frames, %d failed, %d direct copies (no second buffer: may tear), %d waits for the last flip (avg %d "
                 "us, %d ran out), front copies %d ok / %d not; copy forward from the front %d, from the panel's buffer "
                 "%d, nothing to copy from %d" % (h, copies, g("swaps_copybytes") >> 20,
                                                 g("swaps_copyus") // copies if copies else 0, g("swaps_copyusmax"),
-                                                held, black, fail, direct, waits,
+                                                landed, held, black, fail, direct, waits,
                                                 g("swaps_copywaitus") // waits if waits else 0, g("swaps_copylatchto"),
                                                 g("swaps_copyfront"), g("swaps_copyfrontfail"), g("cf_scsrc"),
                                                 g("cf_scscanout"), g("cf_scstale")))
@@ -1105,9 +1107,15 @@ def swapcopy_verdict(c):
             if lv == "INFO" and (nowait or brk):
                 lv = "WARN"
         out.append((lv, line))
-        if held and copies and held >= copies:
+        if landed:
+            out.append(("INFO", "head %s: H-B2 handled: landed buffer presented %d times (the named back empty or a "
+                                "stale one without an IOSurface, WindowServer's frame in another buffer of the "
+                                "surface); %d empty backs still held (no other buffer had a new frame)" %
+                        (h, landed, held)))
+        elif held and copies and held >= copies:
             out.append(("WARN", "head %s: as many empty backs as frames (%d / %d): WindowServer presents a back it "
-                                "never draws (H-B2) - the trace's H-B2 line names it" % (h, held, copies)))
+                                "never draws (H-B2) - the trace's H-B2 line says whether a frame was held back" %
+                        (h, held, copies)))
     return out
 
 
@@ -1285,6 +1293,40 @@ def read_tar_member(path, suffix):
         return ""
 
 
+PLUGIN_TRACE_SRC = "metal/plugin/NVMTLTrace.m"   # the plugin's frame trace (card run 2026-10-17b)
+
+
+def plugin_stale_reason(path):
+    """why the plugin wrote no frame trace when the VM's plugin is provably
+    older than the repo's metal/ (the same check as stale_builds: the
+    archive's 35-build-stamps.txt against the 00-host.txt next to it), and
+    whether the commit it was built from had the plugin's trace at all;
+    "" when the plugin is not proven stale (card run 2026-10-17c: built from
+    8540be5, the trace came with e168385 - triage printed only the
+    collector's generic list of reasons)"""
+    st = parse_stamps(read_tar_member(path, "35-build-stamps.txt")).get("plugin")
+    if not st:
+        return ""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(path)), "00-host.txt"), errors="replace") as fh:
+            host = parse_host(fh.read())
+    except OSError:
+        host = {}
+    verdict, text = stamp_verdict("PLUGIN", st, host)
+    if verdict != "stale":
+        return ""
+    sha = st.get("metal", "")
+    added = git_out("log", "--diff-filter=A", "--format=%h", "--", PLUGIN_TRACE_SRC)
+    added = added.split()[-1] if added else ""
+    if HEX_SHA.match(sha) and git_out("cat-file", "-e", "%s:%s" % (sha, PLUGIN_TRACE_SRC)) is None:
+        has = "a plugin without the frame trace (%s came%s after it)" % (
+            PLUGIN_TRACE_SRC, " with " + added if added else "")
+    else:
+        has = "a plugin older than the repo's"
+    return ("the VM's plugin is STALE: %s - %s; rebuild it in the VM (tools/vm/macos/build_metal.sh, "
+            "docs/TESTING-VM.md) before the next card run" % (text, has))
+
+
 def plugin_trace_lines(path, cdlog="", txt=""):
     """[(level, text)] of the Metal plugin's trace (tools/plugin_trace.py):
     its verdicts with the time its ring covers against the kernel's A/B, the
@@ -1306,6 +1348,9 @@ def plugin_trace_lines(path, cdlog="", txt=""):
         out.append(("WARN", "plugin trace collector: " + l[:200]))
 
     def missing(why_extra):
+        stale = plugin_stale_reason(path)
+        if stale:   # the reason, not the collector's list of possible ones
+            return ("WARN", "plugin trace MISSING%s: %s" % (why_extra, stale))
         why = re.search(r"^== plugin frame traces collected: .*$", info, re.M)
         if why:
             why = why.group(0)[3:]
@@ -2094,11 +2139,11 @@ def summary(path, serial=None):
     for lv, t in latch_lines(path, txt, args):
         out.append(("flip latch", "%s %s" % (lv, t)))
     for lv, t in swapcopy_verdict(a3_counters(txt) if txt else {}):
-        if lv != "INFO" or t.startswith("swap mode"):
+        if lv != "INFO" or t.startswith("swap mode") or "H-B2 handled" in t:
             out.append(("swap copy", "%s %s" % (lv, t)))
     tlv, _ = trace_lines(path, txt, log, args)
     for lv, t in tlv:
-        if lv in ("FAIL", "CRITICAL", "WARN") or t.startswith("A/B"):
+        if lv in ("FAIL", "CRITICAL", "WARN") or t.startswith("A/B") or t.startswith("H-B2"):
             out.append(("frame trace", "%s %s" % (lv, t[:300])))
     cdl = read_tar_member(path, "24-log-coredisplay.txt")
     for lv, t in coredisplay_cf_lines(cdl, tlv):
