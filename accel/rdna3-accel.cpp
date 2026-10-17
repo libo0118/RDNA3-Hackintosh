@@ -83,7 +83,7 @@ static void               rd3AccelTraceMode(unsigned arg);
 static void               rd3AccelScModeChanged(void);
 static void               rd3AccelScPanelMoved(unsigned head, const char *why, uint64_t issuedAt);
 static void               rd3AccelScFrontGone(const void *vm);
-static void               rd3AccelScStalePost(unsigned head);
+static void               rd3AccelScStaleReset(unsigned head, const char *why);
 /* APERTURE's v2: the path (getApertureMemoryDescriptor's every return, ECC review round 1) */
 enum { kApWhyNew = 0, kApWhyGate = 1, kApWhyCached = 2, kApWhyNoVram = 3, kApWhyRange = 4 };
 static void               rd3AccelTraceAperture(const void *res, unsigned what, bool ok, unsigned why,
@@ -279,6 +279,9 @@ static SInt64 gCntCfNoHeadMiss;
 /* guards gCfPend: copy forward runs under the family's busy lock, the
  * vidmem free path (rd3AccelVidmemGone) on any thread without it */
 static IOSimpleLock *volatile gCfPendLock;
+/* guards gScStale (the stale back, 2026-10-17c): the swaps and copy
+ * forward under the family's lock, the free paths on any thread */
+static IOSimpleLock *volatile gScStaleLock;
 enum { kA3DispSlots = 4 * 4 };   /* 4 * kRd3MaxFB: every head's compositing surfaces */
 struct RD3A3Disp { unsigned surfaceID, heads; unsigned long long phys; const void *vm; };
 static RD3A3Disp gA3Disp[kA3DispSlots];
@@ -330,6 +333,12 @@ static int gTrScan = 1;
  * pattern and can show a half-drawn frame: the next report says whether it
  * matters) */
 static int gSwapLanded = 0;
+/* debug.rdna3accel_swap_stale / boot-arg rdna3swapstale (card run
+ * 2026-10-17c, rdna3_swap_copy.h): 1 (the default, the bug is proven) mode 1
+ * holds a back WindowServer did not redraw since the head presented it; 0
+ * copies it as before and only counts (swaps_stalehold_would_h<N>) and
+ * traces (SWAP v1 bit 24) what it would have held */
+static int gSwapStale = 1;
 static struct thread_call *gTrDumpCall;
 static volatile UInt32 gTrDumpBusy;
 static uint64_t gTrDumpFrom, gTrDumpTo;
@@ -969,6 +978,11 @@ public:
              gSwapLanded ? "1 = modes 1/2 present the buffer WindowServer's frame landed in instead of an empty / "
                            "stale back"
                          : "0 = only counted and traced (swaps_copylanded_would_h<N>), the back's old rule stands");
+        gSwapStale = rd3_arg("rdna3swapstale", 1) ? 1 : 0;
+        ALOG("swap stale: %s (card run 2026-10-17c; boot-arg rdna3swapstale, sysctl debug.rdna3accel_swap_stale)",
+             gSwapStale ? "1 = mode 1 holds a back WindowServer did not redraw since the head presented it "
+                          "(swaps_stalehold_h<N>)"
+                        : "0 = such a back is copied as before, only counted and traced (swaps_stalehold_would_h<N>)");
         {
             const uint32_t m = rd3_arg("rdna3swapmode", RD3_SWAPMODE_DEFAULT);
             gSwapMode = rd3_swapmode_valid((long)m) ? (int)m : RD3_SWAPMODE_DEFAULT;
@@ -2651,7 +2665,7 @@ static bool rd3AccelLocksInit(void)
 {
     return rd3SimpleLockOnce(&gHeadFbResLock) && rd3SimpleLockOnce(&gNVSVPendLock) &&
            rd3SimpleLockOnce(&gIopFlipCacheLock) && rd3LockOnce(&gNVSVStageLock) &&
-           rd3SimpleLockOnce(&gA3DispLock) && rd3SimpleLockOnce(&gCfPendLock) &&
+           rd3SimpleLockOnce(&gA3DispLock) && rd3SimpleLockOnce(&gCfPendLock) && rd3SimpleLockOnce(&gScStaleLock) &&
            rd3SurfCloseLockOnce() && (rd3TraceInit() || true);   /* no trace memory: the driver runs without it */
 }
 
@@ -3723,7 +3737,7 @@ void rd3AccelSurfaceGone(const void *surf)
                 gHeadBufLogs[h] = 0;          /* the next surface's buffers are logged again */
                 gSwapEmptyRun[h] = 0;
                 rd3AccelForgetShown(h);       /* what it showed is no source for the next surface */
-                rd3AccelScStalePost(h);       /* its backs' records go with it (applied by the next swap) */
+                rd3AccelScStaleReset(h, "its surface was freed");   /* its backs' records go with it */
             }
         }
 }
@@ -3751,7 +3765,7 @@ void rd3AccelResourceGone(const void *res)
                 rd3Trace(e);
             }
             rd3AccelForgetShown(h);   /* a new front, a new mode: nothing recorded holds its frame */
-            rd3AccelScStalePost(h);
+            rd3AccelScStaleReset(h, "its framebuffer resource was freed");
         }
 }
 
@@ -3984,7 +3998,6 @@ struct RD3ScHead {
     unsigned long long homePhys;        /* the framebuffer's own scanout (home), as last described */
     bool seen;                          /* the last flip was SEEN latched (not a wait that gave up): D's free */
     uint64_t ownFlipAbs;                /* this head's last flip of the swaps' own (posts older are stale) */
-    struct rd3_sc_stale stale;          /* what each back looked like at its last presentation (2026-10-17c) */
 };
 static RD3ScHead gSc[kRd3MaxFB];
 /* what moved a head's panel outside the family's lock, the last one wins */
@@ -4010,7 +4023,6 @@ static SInt64 gCntScNoWait[kRd3MaxFB], gCntScBrkFlip[kRd3MaxFB], gCntScFreeWait[
 static SInt64 gCntScLanded[kRd3MaxFB];   /* the landed buffer presented instead of the named back (2026-10-17c) */
 static SInt64 gCntScLandedWould[kRd3MaxFB];   /* ... found but not presented (debug.rdna3accel_swap_landed=0) */
 static SInt64 gCntScStale[kRd3MaxFB];   /* backs WindowServer did not redraw since presented, held (2026-10-17c) */
-static void rd3AccelScStaleReset(unsigned head, const char *why);
 static void rd3AccelSwapCopy(unsigned head, IOService *fb, IOAccelResource2 *back, IOAccelResource2 *frontRes,
                              bool backEmpty, unsigned n, struct rd3_trace_ev *tr, const uint8_t *srcBand);
 static void rd3AccelScBrkEvent(enum rd3_sc_brk_ev ev, unsigned n, unsigned head, int status, IOReturn r);
@@ -4116,50 +4128,110 @@ static void rd3AccelScFrontGone(const void *vm)
 
 /* ---- the stale back (card run 2026-10-17c, rdna3_swap_copy.h) ----
  * Evidence-driven, no amdgpu analogue (macOS legacy surface semantics).
- * Each head's records (gSc[h].stale) are written under the family's lock:
- * by the swaps (the hold, the presentations), copy forward (its target is
- * being refreshed) and the swap / display mode changes. The surface's and
- * the pipe resource's free paths post a forget (gScStaleForget) the next
- * swap applies under the lock; a freed VRAM address leaves the records by a
- * compare-and-swap (a swap holds the buffers it records and decides on, so
- * it is never the one being freed). */
-static volatile UInt32 gScStaleForget[kRd3MaxFB];
-static unsigned gScStaleResetLogs[kRd3MaxFB], gScStaleGoneLogs;
+ * Each head's table (gScStale[h]) is touched only under gScStaleLock, a
+ * spinlock held for the table operations alone (no BAR reads, no logs, no
+ * sleep under it): by the swaps (the check, the presentations), copy
+ * forward (its target marked in every head's table), the swap / display
+ * mode changes and D's reallocation (resets), the surface's and the pipe
+ * resource's free paths (resets) and the VRAM free path (the address
+ * forgotten). Every reset, eviction, free and reason is counted per head
+ * (debug.rdna3accel_swaps_stale*_h<N>) and the first ones logged. */
+static struct rd3_sc_stale gScStale[kRd3MaxFB];
+static SInt64 gCntScStaleWould[kRd3MaxFB], gCntScStaleMiss[kRd3MaxFB], gCntScStaleNocf[kRd3MaxFB];
+static SInt64 gCntScStaleChanged[kRd3MaxFB], gCntScStaleReset[kRd3MaxFB], gCntScStaleEvict[kRd3MaxFB];
+static SInt64 gCntScStaleGone[kRd3MaxFB];
+/* why a mode 1 back with pixels was not a hold candidate (rd3_sc_stale_why), and no head known */
+static SInt64 gCntScStaleNoRec[kRd3MaxFB], gCntScStaleChg[kRd3MaxFB], gCntScStaleCfd[kRd3MaxFB];
+static SInt64 gCntScStaleSame[kRd3MaxFB], gCntScStaleNoPanel[kRd3MaxFB], gCntScStaleNoHead[kRd3MaxFB];
+static unsigned gStaleResamples[kRd3MaxFB];
 static void rd3AccelScStaleReset(unsigned head, const char *why)
 {
-    if (head >= kRd3MaxFB) return;
-    const bool had = gSc[head].stale.lastShown != 0;
-    rd3_sc_stale_reset(&gSc[head].stale);
-    if (had && rd3_log_due(gScStaleResetLogs[head]++, 4, 1023))
-        ALOG("swap copy: head %u: what its backs looked like when presented is forgotten (%s) -- the next swaps of "
-             "every back are copied", head, why);
+    if (head >= kRd3MaxFB || !gScStaleLock) return;
+    IOSimpleLockLock(gScStaleLock);
+    const unsigned had = rd3_sc_stale_reset(&gScStale[head]);
+    IOSimpleLockUnlock(gScStaleLock);
+    if (!had) return;
+    const SInt64 k = OSAddAtomic64(1, &gCntScStaleReset[head]);
+    if (rd3_log_due((uint64_t)k, 8, 1023))
+        ALOG("swap copy: head %u: the stale-back records forgotten (%s; %u records) -- every back is copied at its "
+             "next swap (%lld resets)", head, why, had, (long long)k + 1);
 }
-static void rd3AccelScStalePost(unsigned head)
-{
-    if (head < kRd3MaxFB) __atomic_store_n(&gScStaleForget[head], 1u, __ATOMIC_RELEASE);
-}
-static void rd3AccelScStaleApply(unsigned head)
-{
-    if (head < kRd3MaxFB && __atomic_exchange_n(&gScStaleForget[head], 0u, __ATOMIC_ACQ_REL))
-        rd3AccelScStaleReset(head, "its surface or its framebuffer resource was freed");
-}
+/* a freed VRAM address leaves every head's table (any thread) */
 static void rd3AccelScStaleGone(unsigned long long phys)
 {
-    for (unsigned h = 0; phys && h < kRd3MaxFB; h++)
-        for (unsigned i = 0; i < RD3_SC_STALE_SLOTS; i++) {
-            unsigned long long expect = phys;
-            if (__atomic_compare_exchange_n(&gSc[h].stale.r[i].addr, &expect, 0ull, false, __ATOMIC_ACQ_REL,
-                                            __ATOMIC_ACQUIRE) &&
-                rd3_log_due(gScStaleGoneLogs++, 4, 1023))
-                ALOG("swap copy: head %u: the back at 0x%llx was freed -- its record is forgotten (a new buffer "
-                     "there is copied at its first swap)", h, phys);
-        }
+    if (!phys || !gScStaleLock) return;
+    unsigned gone = 0;
+    IOSimpleLockLock(gScStaleLock);
+    for (unsigned h = 0; h < kRd3MaxFB; h++)
+        if (rd3_sc_stale_forget_addr(&gScStale[h], phys)) gone |= 1u << h;
+    IOSimpleLockUnlock(gScStaleLock);
+    for (unsigned h = 0; h < kRd3MaxFB; h++) {
+        if (!(gone & (1u << h))) continue;
+        const SInt64 k = OSAddAtomic64(1, &gCntScStaleGone[h]);
+        if (rd3_log_due((uint64_t)k, 4, 1023))
+            ALOG("swap copy: head %u: the back at 0x%llx was freed -- its stale-back record is forgotten (a new "
+                 "buffer there is copied at its first swap; %lld such)", h, phys, (long long)k + 1);
+    }
 }
-/* a copy forward targeted 'phys' (head unknown: every head's record) */
-static void rd3AccelScStaleCf(unsigned head, unsigned long long phys)
+/* a copy forward targeted 'phys': marked in every head's table */
+static void rd3AccelScStaleCf(unsigned long long phys)
 {
-    for (unsigned h = 0; phys && h < kRd3MaxFB; h++)
-        if (head >= kRd3MaxFB || h == head) rd3_sc_stale_cf(&gSc[h].stale, phys);
+    if (!phys || !gScStaleLock) return;
+    IOSimpleLockLock(gScStaleLock);
+    rd3_sc_stale_cf(gScStale, kRd3MaxFB, phys);
+    IOSimpleLockUnlock(gScStaleLock);
+}
+/* swap n presented 'phys' on the head: its record (an eviction counted, logged) */
+static void rd3AccelScStaleShown(unsigned head, unsigned long long phys, unsigned long long sig,
+                                 unsigned long long sig2, unsigned n)
+{
+    if (head >= kRd3MaxFB || !gScStaleLock) return;
+    IOSimpleLockLock(gScStaleLock);
+    const unsigned long long ev = rd3_sc_stale_shown(&gScStale[head], phys, sig, sig2, n);
+    IOSimpleLockUnlock(gScStaleLock);
+    if (!ev) return;
+    const SInt64 k = OSAddAtomic64(1, &gCntScStaleEvict[head]);
+    if (rd3_log_due((uint64_t)k, 8, 1023))
+        ALOG("swap #%u: head %u: the stale-back table is full (%u buffers): 0x%llx's record evicted for 0x%llx -- "
+             "0x%llx is copied at its next swap whatever it holds (%lld such)", n, head, RD3_SC_STALE_SLOTS, ev, phys,
+             ev, (long long)k + 1);
+}
+static enum rd3_sc_stale_why rd3AccelScStaleCheck(unsigned head, int panelFrame, unsigned long long phys,
+                                                  unsigned long long sig, unsigned *at, int *nocf,
+                                                  unsigned long long *after)
+{
+    *after = 0;
+    if (head >= kRd3MaxFB || !gScStaleLock) return RD3_SCST_OFF;
+    IOSimpleLockLock(gScStaleLock);
+    const enum rd3_sc_stale_why why =
+        rd3_sc_stale_check(&gScStale[head], RD3_SWAPMODE_COPY, 1, panelFrame, phys, sig, at, nocf);
+    *after = gScStale[head].lastShown;
+    IOSimpleLockUnlock(gScStaleLock);
+    return why;
+}
+static bool rd3AccelScStaleConfirm(unsigned head, unsigned long long phys, unsigned long long sig2)
+{
+    if (head >= kRd3MaxFB || !gScStaleLock) return false;
+    IOSimpleLockLock(gScStaleLock);
+    const bool ok = rd3_sc_stale_confirm(&gScStale[head], phys, sig2);
+    IOSimpleLockUnlock(gScStaleLock);
+    return ok;
+}
+/* the reasons, counted per head; a change without a copy forward (the
+ * rule's assumption broken) logged, the first 8 then every 1024th */
+static void rd3AccelScStaleWhy(unsigned head, enum rd3_sc_stale_why why, int nocf, unsigned n,
+                               unsigned long long phys, unsigned at)
+{
+    if (head >= kRd3MaxFB) return;
+    SInt64 *const c[8] = { nullptr, nullptr, &gCntScStaleNoRec[head], &gCntScStaleChg[head], &gCntScStaleCfd[head],
+                           &gCntScStaleSame[head], &gCntScStaleNoPanel[head], nullptr };
+    if ((unsigned)why < 8 && c[why]) OSAddAtomic64(1, c[why]);
+    if (!nocf) return;
+    const SInt64 k = OSAddAtomic64(1, &gCntScStaleNocf[head]);
+    if (rd3_log_due((uint64_t)k, 8, 1023))
+        ALOG("swap #%u: head %u: the back 0x%llx changed since it was shown at swap #%u although no copy forward "
+             "targeted it -- copied (WindowServer redrew a back without copy forward: the stale-back rule's "
+             "assumption; %lld such)", n, head, phys, at, (long long)k + 1);
 }
 
 /* the 8 x 8 samples of a buffer (rd3AccelResContent's grid), all of them:
@@ -4177,27 +4249,27 @@ struct RD3Scan {
     uint8_t band[8];
     unsigned long long sig;   /* the 64 samples' hash (rd3_sc_sig_add: the stale back's "unchanged", 2026-10-17c) */
 };
+/* one grid's 64 samples (rdna3_swap_copy.h rd3_sc_grid_index: grid 0 the
+ * trace's, grid 1 shifted by half a cell); a point outside the allocation reads 0 */
+static void rd3AccelPxGrid(const volatile void *kva, unsigned long long bytes, unsigned w, unsigned h, unsigned pitch,
+                           unsigned grid, uint32_t *v)
+{
+    const volatile unsigned int *px = (const volatile unsigned int *)kva;
+    for (unsigned k = 0; k < RD3_SC_GRID_N; k++) {
+        unsigned long i = 0;
+        v[k] = rd3_sc_grid_index(grid, w, h, pitch, bytes, k, &i) ? px[i] : 0;
+    }
+}
 static void rd3AccelPxScan(const volatile void *kva, unsigned long long bytes, unsigned w, unsigned h, unsigned pitch,
                            RD3Scan *o)
 {
+    uint32_t v[RD3_SC_GRID_N];
     bool any = false;
-    unsigned long long sig = RD3_SC_SIG_INIT;
-    const volatile unsigned int *px = (const volatile unsigned int *)kva;
-    for (unsigned iy = 1; iy <= 8; iy++) {
-        uint32_t row[8];
-        for (unsigned ix = 1; ix <= 8; ix++) {
-            const unsigned x = (w * ix) / 9, y = (h * iy) / 9;
-            uint32_t v = 0;
-            if (x < w && y < h && (unsigned long long)y * pitch + x * 4ull + 4 <= bytes)
-                v = px[(unsigned long)y * (pitch / 4) + x];
-            row[ix - 1] = v;
-            any |= v != 0;
-            sig = rd3_sc_sig_add(sig, v);
-        }
-        o->band[iy - 1] = rd3_trace_band(row, 8);
-    }
+    rd3AccelPxGrid(kva, bytes, w, h, pitch, 0, v);
+    for (unsigned k = 0; k < RD3_SC_GRID_N; k++) any |= v[k] != 0;
+    for (unsigned r = 0; r < 8; r++) o->band[r] = rd3_trace_band(&v[r * 8], 8);
     o->rc = any ? kRcPixels : kRcEmpty;
-    o->sig = sig;
+    o->sig = rd3_sc_sig64(v);
 }
 static void rd3AccelResScan(IOAccelResource2 *res, RD3Scan *o)
 {
@@ -4210,6 +4282,43 @@ static void rd3AccelResScan(IOAccelResource2 *res, RD3Scan *o)
     if (!rd3res_geom(res, &w, &h, &pitch)) { o->rc = kRcNoGeometry; return; }
     rd3AccelPxScan(vm->fKva, vm->fBytes, w, h, pitch, o);
 }
+/* the second grid's hash of a resource (the stale back's confirmation,
+ * card run 2026-10-17c); false: no mapping or geometry */
+static bool rd3AccelResSig2(IOAccelResource2 *res, unsigned long long *sig)
+{
+    *sig = 0;
+    RD3VidMemory *vm = res ? rd3res_vidmem(res) : nullptr;
+    unsigned w, h, pitch;
+    if (!vm || !vm->fKva || !rd3res_geom(res, &w, &h, &pitch)) return false;
+    uint32_t v[RD3_SC_GRID_N];
+    rd3AccelPxGrid(vm->fKva, vm->fBytes, w, h, pitch, 1, v);
+    *sig = rd3_sc_sig64(v);
+    return true;
+}
+/* a stale back held at swap n read again ~4 ms later (the empty back's
+ * re-sample, same budget: first 8, then every 256th, only with
+ * swap_latch on): changed = a frame landed in it after the hold (counted,
+ * logged; it reaches the panel at the back's next swap) */
+static void rd3AccelStaleResample(unsigned head, IOAccelResource2 *back, unsigned long long sig, const void *surf,
+                                  unsigned n, unsigned shownAt)
+{
+    if (head >= kRd3MaxFB || !back) return;
+    const unsigned s = gStaleResamples[head]++;
+    if (!rd3_empty_resample_due(gSwapLatch, s)) return;
+    const uint64_t t0 = mach_absolute_time();
+    IOSleep(4);
+    RD3Scan sc;
+    rd3AccelResScan(back, &sc);
+    const uint64_t us = rd3AccelUsSince(t0);
+    rd3AccelTraceScanFwd(head, surf, back, sc.rc, sc.band, 4u | 16u, n, rd3TrSat(us));
+    if (sc.rc < kRcEmpty || sc.sig == sig) return;
+    const SInt64 k = OSAddAtomic64(1, &gCntScStaleChanged[head]);
+    if (rd3_log_due((uint64_t)k, 8, 1023))
+        ALOG("swap #%u: head %u: the stale back 0x%llx held at this swap (unchanged since swap #%u) CHANGED %llu us "
+             "later -- a frame landed after the hold; it reaches the panel at that back's next swap (%lld such)", n,
+             head, rd3res_phys(back), shownAt, us, (long long)k + 1);
+}
+
 /* a vidmem without a resource (a free): 64 samples spread over its bytes */
 static void rd3AccelVmScan(const RD3VidMemory *vm, RD3Scan *o)
 {
@@ -4682,21 +4791,50 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
                 rd3AccelLandedWould(knownHead, n, back, roles.back, backType, sb.rc == kRcEmpty, l, landedIdx, act);
             }
         }
-        /* the stale back (card run 2026-10-17c): a back with pixels that
-         * WindowServer did not redraw since this head presented it (no copy
-         * forward into it, its samples unchanged) while a newer frame was
+        /* the stale back (card run 2026-10-17c): a mode 1 back with pixels
+         * that WindowServer did not redraw since this head presented it (its
+         * samples unchanged, no copy forward into it) while a newer frame was
          * presented after it - copied, it would put the older frame on the
-         * panel and into the front (rd3_sc_stale_hold) */
+         * panel and into the front. The second grid confirms (a redraw
+         * between the first grid's points is copied); debug.rdna3accel_
+         * swap_stale=0 only counts what it would have held */
         unsigned staleAt = 0;
         unsigned long long staleAfter = 0;
-        if (act == RD3_SC_COPY && knownHead < kRd3MaxFB) {
-            rd3AccelScStaleApply(knownHead);
-            RD3ScHead &K = gSc[knownHead];
-            const int panelFrame = K.scanoutFrame && (K.shows == RD3_SCS_D || K.shows == RD3_SCS_HOME);
-            if (rd3_sc_stale_hold(&K.stale, mode, sb.rc == kRcPixels, panelFrame, rd3res_phys(back), sb.sig,
-                                  &staleAt)) {
-                act = RD3_SC_HOLD_STALE;
-                staleAfter = K.stale.lastShown;
+        bool staleNoHead = false;
+        if (act == RD3_SC_COPY && mode == RD3_SWAPMODE_COPY && sb.rc == kRcPixels) {
+            if (knownHead >= kRd3MaxFB) {
+                staleNoHead = true;   /* counted under the head the swap is routed to */
+            } else {
+                const RD3ScHead &K = gSc[knownHead];
+                const int panelFrame = K.scanoutFrame && (K.shows == RD3_SCS_D || K.shows == RD3_SCS_HOME);
+                const unsigned long long bp = rd3res_phys(back);
+                int nocf = 0;
+                const enum rd3_sc_stale_why why =
+                    rd3AccelScStaleCheck(knownHead, panelFrame, bp, sb.sig, &staleAt, &nocf, &staleAfter);
+                rd3AccelScStaleWhy(knownHead, why, nocf, n, bp, staleAt);
+                if (why == RD3_SCST_HOLD) {
+                    unsigned long long sig2 = 0;
+                    const bool ok2 = rd3AccelResSig2(back, &sig2);
+                    if (!ok2 || !rd3AccelScStaleConfirm(knownHead, bp, sig2)) {
+                        const SInt64 k = OSAddAtomic64(1, &gCntScStaleMiss[knownHead]);
+                        if (rd3_log_due((uint64_t)k, 8, 1023))
+                            ALOG("swap #%u: head %u: the back 0x%llx matched its first-grid samples of swap #%u but "
+                                 "%s -- copied, not held (a redraw between the first grid's points; %lld such)", n,
+                                 knownHead, bp, staleAt,
+                                 ok2 ? "not its second grid (shifted by half a cell)"
+                                     : "its second grid could not be read",
+                                 (long long)k + 1);
+                    } else if (gSwapStale) {
+                        act = RD3_SC_HOLD_STALE;
+                    } else {
+                        tr.v1 |= RD3_TRV1_STALE_WOULD;
+                        const SInt64 k = OSAddAtomic64(1, &gCntScStaleWould[knownHead]);
+                        if (rd3_log_due((uint64_t)k, 8, 1023))
+                            ALOG("swap #%u: head %u: would hold the stale back 0x%llx (unchanged since swap #%u, "
+                                 "0x%llx shown after it, no copy forward into it) -- debug.rdna3accel_swap_stale=0, "
+                                 "so copied (%lld such)", n, knownHead, bp, staleAt, staleAfter, (long long)k + 1);
+                    }
+                }
             }
         }
         if (act == RD3_SC_HOLD_STALE) {
@@ -4719,6 +4857,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
             rd3AccelScanOthers(knownHead, surf, a1, a2, s1, s2, ch1, ch2, bufs, nbufs, n, false,
                                "the back is stale (held)", othDone ? &oth : nullptr);
             rd3AccelTracePanel(knownHead, a->fFBs[knownHead], tr.pc);
+            rd3AccelStaleResample(knownHead, back, sb.sig, surf, n, staleAt);
             return;
         }
         if (sb.rc == kRcEmpty && act != RD3_SC_COPY_LANDED) tr.flags |= RD3_TRF_BACK_EMPTY;
@@ -4754,6 +4893,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
             rd3Trace(tr);
             return;
         }
+        if (staleNoHead) OSAddAtomic64(1, &gCntScStaleNoHead[head]);   /* no head known at the check: copied */
         if (act == RD3_SC_COPY_LANDED) {
             const SInt64 k = OSAddAtomic64(1, &gCntScLanded[head]);
             if (rd3_log_due((uint64_t)k, 8, 1023)) {
@@ -4781,9 +4921,13 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
         IOService *fb = a->fFBs[head];
         rd3AccelTracePanel(head, fb, rd3AccelScExpect(head));
         rd3AccelSwapCopy(head, fb, src, frontRes, ss->rc == kRcEmpty, n, &tr, ss->band);
-        if (tr.arg == RD3_TRS_COPY) {   /* on the panel: what it looked like (the stale back's record) */
-            rd3AccelScStaleApply(head);
-            rd3_sc_stale_shown(&gSc[head].stale, rd3res_phys(src), ss->sig, n);
+        if (tr.arg == RD3_TRS_COPY) {
+            /* on the panel: what it looked like (the stale back's record),
+             * under the head the checks read: the one known at the swap's
+             * entry, else the routed one */
+            unsigned long long sig2 = 0;
+            (void)rd3AccelResSig2(src, &sig2);   /* unreadable: 0, a later check then copies */
+            rd3AccelScStaleShown(knownHead < kRd3MaxFB ? knownHead : head, rd3res_phys(src), ss->sig, sig2, n);
         }
         rd3Trace(tr);
         rd3AccelScanOthers(head, surf, a1, a2, s1, s2, ch1, ch2, bufs, nbufs, n, sb.rc == kRcEmpty,
@@ -5320,8 +5464,8 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
     const IOReturn r = rd3AccelCopyForwardIn(surf, fbIndex, src, dst, rects, count, smode, bufs, nbufs, &t);
     /* WindowServer refreshes the target for a new frame: never a stale back
      * until it is presented again (card run 2026-10-17c); whatever the call
-     * did, under the family's lock */
-    rd3AccelScStaleCf(t.e.head, t.e.pb);
+     * did; in every head's table */
+    rd3AccelScStaleCf(t.e.pb);
     t.e.v4 = (uint32_t)r;
     rd3Trace(t.e);
     /* the target after the copy (Q3) */
@@ -6134,6 +6278,8 @@ static void rd3AccelTraceVm(const void *vm, bool alloc, bool ok, unsigned long l
     e.v1 = rd3TrSat(mapped >> 20);
     e.v4 = (uint32_t)ret;
     e.pa = phys;
+    for (unsigned h = 0; alloc && h < kRd3MaxFB; h++)
+        if ((const void *)&gSc[h] == vm) { e.flags |= 8; e.head = (uint8_t)h; }   /* D: the decoder's stale reset */
     if (!alloc) {
         /* who scans it now (Q5): mode 0's record, the flip away not latched; mode 1's D */
         for (unsigned h = 0; h < kRd3MaxFB; h++) {
@@ -6396,8 +6542,24 @@ RD3ACCEL_CNT4(rdna3accel_swaps_copy, gCntScCopy, "swap mode 1/2: backs copied to
 RD3ACCEL_CNT4(rdna3accel_swaps_copyempty, gCntScEmpty, "swap mode 1: empty backs NOT copied over a picture (the panel kept its frame)");
 RD3ACCEL_CNT4(rdna3accel_swaps_copyblack, gCntScBlack, "swap mode 1/2: empty backs copied (black frames)");
 RD3ACCEL_CNT4(rdna3accel_swaps_copylanded, gCntScLanded, "card run 2026-10-17c: swap mode 1/2: the named back empty (or a stale one without an IOSurface), the surface's buffer WindowServer's frame landed in presented instead");
-RD3ACCEL_CNT4(rdna3accel_swaps_stalehold, gCntScStale, "card run 2026-10-17c: swap mode 1/2: backs WindowServer did not redraw since this head presented them (no copy forward into them, the samples unchanged, another buffer presented after them) held: the panel kept the newer frame");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalehold_would, gCntScStaleWould, "swap mode 1: stale backs that WOULD have been held (debug.rdna3accel_swap_stale=0): copied");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalehold_miss, gCntScStaleMiss, "swap mode 1: stale-back candidates whose second sample grid differed (a small redraw): copied");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalehold_changed, gCntScStaleChanged, "swap mode 1: held stale backs that changed in the ~4 ms re-sample (a frame landed after the hold)");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalenocf, gCntScStaleNocf, "swap mode 1: backs changed since presented with no copy forward into them (the stale rule's assumption broken)");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalereset, gCntScStaleReset, "swap mode 1: stale-back tables forgotten (surface / pipe resource freed, mode changes, D reallocated)");
+RD3ACCEL_CNT4(rdna3accel_swaps_staleevict, gCntScStaleEvict, "swap mode 1: stale-back records evicted from the full 8-slot table (that buffer copied at its next swap)");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalegone, gCntScStaleGone, "swap mode 1: stale-back records forgotten because their VRAM was freed");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalecheck_norecord, gCntScStaleNoRec, "swap mode 1: backs with pixels not held: never presented on this head (or forgotten / evicted)");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalecheck_changed, gCntScStaleChg, "swap mode 1: backs with pixels not held: changed since presented");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalecheck_cf, gCntScStaleCfd, "swap mode 1: backs with pixels not held: unchanged, but a copy forward targeted them");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalecheck_sameshown, gCntScStaleSame, "swap mode 1: backs with pixels not held: nothing else presented after them");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalecheck_nopanel, gCntScStaleNoPanel, "swap mode 1: backs with pixels not held: the panel held no frame this mode copied");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalecheck_nohead, gCntScStaleNoHead, "swap mode 1: backs with pixels not judged: no head known at the swap's entry");
+RD3ACCEL_CNT4(rdna3accel_swaps_stalehold, gCntScStale, "card run 2026-10-17c: swap mode 1: backs WindowServer did not redraw since this head presented them (no copy forward into them, the samples unchanged, another buffer presented after them) held: the panel kept the newer frame");
 RD3ACCEL_CNT4(rdna3accel_swaps_copylanded_would, gCntScLandedWould, "swap mode 1/2: such a landed buffer found but NOT presented (debug.rdna3accel_swap_landed=0): the back's old rule applied");
+SYSCTL_INT(_debug, OID_AUTO, rdna3accel_swap_stale, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gSwapStale, 0,
+           "card run 2026-10-17c: 1 (default, boot-arg rdna3swapstale) swap mode 1 holds a back WindowServer did not "
+           "redraw since the head presented it, 0 copies it and only counts and traces it");
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_swap_landed, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gSwapLanded, 0,
            "card run 2026-10-17c: 1 swap modes 1/2 present the buffer WindowServer's frame landed in instead of an "
            "empty / stale back, 0 (default, boot-arg rdna3swaplanded) only count and trace it");
@@ -6428,7 +6590,15 @@ static void rd3AccelInstallSysctl2(void)
     RD3ACCEL_REG4(rdna3accel_swaps_copy);      RD3ACCEL_REG4(rdna3accel_swaps_copyempty);
     RD3ACCEL_REG4(rdna3accel_swaps_copylanded); RD3ACCEL_REG4(rdna3accel_swaps_copylanded_would);
     RD3ACCEL_REG4(rdna3accel_swaps_stalehold);
+    RD3ACCEL_REG4(rdna3accel_swaps_stalehold_would); RD3ACCEL_REG4(rdna3accel_swaps_stalehold_miss);
+    RD3ACCEL_REG4(rdna3accel_swaps_stalehold_changed); RD3ACCEL_REG4(rdna3accel_swaps_stalenocf);
+    RD3ACCEL_REG4(rdna3accel_swaps_stalereset); RD3ACCEL_REG4(rdna3accel_swaps_staleevict);
+    RD3ACCEL_REG4(rdna3accel_swaps_stalegone); RD3ACCEL_REG4(rdna3accel_swaps_stalecheck_norecord);
+    RD3ACCEL_REG4(rdna3accel_swaps_stalecheck_changed); RD3ACCEL_REG4(rdna3accel_swaps_stalecheck_cf);
+    RD3ACCEL_REG4(rdna3accel_swaps_stalecheck_sameshown); RD3ACCEL_REG4(rdna3accel_swaps_stalecheck_nopanel);
+    RD3ACCEL_REG4(rdna3accel_swaps_stalecheck_nohead);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swap_landed);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_swap_stale);
     RD3ACCEL_REG4(rdna3accel_swaps_copyblack); RD3ACCEL_REG4(rdna3accel_swaps_copybytes);
     RD3ACCEL_REG4(rdna3accel_swaps_copyus);    RD3ACCEL_REG4(rdna3accel_swaps_copyusmax);
     RD3ACCEL_REG4(rdna3accel_swaps_copywait);  RD3ACCEL_REG4(rdna3accel_swaps_copywaitus);

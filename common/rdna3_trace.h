@@ -76,7 +76,7 @@ enum rd3_trace_swap {
     RD3_TRS_FLIP_FAILED = 3, /* mode 0: neither flipped nor copied */
     RD3_TRS_COPY = 4,        /* modes 1/2: the back copied into a scanout buffer of ours and flipped to */
     RD3_TRS_HOLD = 5,        /* mode 1: an empty back over a picture, not copied (the panel keeps the last frame);
-                              * modes 1/2 with RD3_TRV1_STALE: a back not redrawn since shown, held */
+                              * with RD3_TRV1_STALE: a back not redrawn since shown, held (mode 1) */
     RD3_TRS_COPY_FAILED = 6, /* modes 1/2: nothing reached the panel (v4: the step, rd3_trace_fail) */
     RD3_TRS_NOHEAD = 7       /* matched no head */
 };
@@ -96,11 +96,14 @@ enum rd3_trace_swap {
  * what arg says, v4 >> 24 names the buffer it would have presented */
 #define RD3_TRV1_LANDED_WOULD (1u << 22)
 #define RD3_TRV4_LANDED_A1 0xfeu   /* the landed buffer's index << 24: a1 (not in the surface's array) */
-/* RD3_TRS_HOLD with this bit: modes 1/2 held a back WindowServer did not
+/* RD3_TRS_HOLD with this bit: mode 1 held a back WindowServer did not
  * redraw since the head presented it at swap v3 (no copy forward into it,
  * its samples unchanged, another buffer presented after it: the stale
  * back, rdna3_swap_copy.h, card run 2026-10-17c) */
 #define RD3_TRV1_STALE     (1u << 23)
+/* mode 1 would have held a stale back (the same rules) but
+ * debug.rdna3accel_swap_stale=0: the swap copied it (arg is what it did) */
+#define RD3_TRV1_STALE_WOULD (1u << 24)
 /* where a mode 1/2 swap failed (RD3_TRS_COPY_FAILED's v4) */
 enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD3_TRX_SDMA = 3, RD3_TRX_FLIP = 4 };
 
@@ -113,9 +116,11 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          presented the landed buffer instead of the named back
  *          (RD3_TRV1_LANDED, rdna3_swap_copy.h) | 1 << 22 when it found
  *          one but debug.rdna3accel_swap_landed=0 (RD3_TRV1_LANDED_WOULD:
- *          arg is what the swap did) | 1 << 23 when modes 1/2 held a stale
+ *          arg is what the swap did) | 1 << 23 when mode 1 held a stale
  *          back (RD3_TRV1_STALE, arg RD3_TRS_HOLD: v3 is then the number of
- *          the swap that last presented it), v2 the copy's us, v3 the wait's us, v4 = the index
+ *          the swap that last presented it) | 1 << 24 when it would have
+ *          held one but debug.rdna3accel_swap_stale=0 (RD3_TRV1_STALE_WOULD),
+ *          v2 the copy's us, v3 the wait's us, v4 = the index
  *          of a1 in the surface's buffer array | a2's << 8 (0xff: not in
  *          it) | rd3_trace_fail << 16 | the landed buffer's index << 24
  *          (0xfe: a1 itself; its address is that swap's SCAN of the same
@@ -130,7 +135,9 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          rects (4 x u16: x0 y0 x1 y1), bb[0] pending rects taken, bb[1] failed
  *  SHAPE   obj the surface; v0 the buffer mask, v1 w | h << 16, v2 the
  *          private mode bits, v3 present | shaped << 8; pa..pc buffers 0..2
- *  VMALLOC arg 1 granted / 0 refused, flags 1 a scanout; obj the vidmem; v0
+ *  VMALLOC arg 1 granted / 0 refused, flags 1 a scanout, 8 a swap copy's
+ *          second scanout buffer D (head: its head; the stale-back records
+ *          of that head are forgotten); obj the vidmem; v0
  *          KiB, v1 MiB handed out, v4 the IOReturn; pa its address
  *  VMFREE  head the head scanning it (0xff none), flags 1 a scanout, 2 shown
  *          by mode 0's record, 4 the flip away from it not latched; obj the
