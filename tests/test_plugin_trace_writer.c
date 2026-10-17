@@ -82,6 +82,8 @@ static int scenario(void)
         if (f % 2 == 0) frame(cb, 101, 0, 0, 1, 40 + f);     /* surface 101: rendered, marked dirty        */
         else            frame(cb, 102, 1, 1, 1, 50 + f);     /* surface 102: cleared, dirty refused, empty */
     }
+    /* surface 107: the pass drew, the dirty mark was refused, and the copy-out came back empty: the drawing was lost */
+    { const uint32_t cb = nvt_next_id(); frame(cb, 107, 0, 1, 1, 60); }
     /* a command buffer that dirtied surface 103 and never published it */
     { const uint32_t cb = nvt_next_id(); frame(cb, 103, 0, 0, 0, 7); }
     /* surface 102's last publish was the empty copy-out, and its next surface-in is skipped as "VRAM current" */

@@ -42,6 +42,11 @@ for k in "$E"/RDNA3*.kext; do
     # the signature covers the final bundle; setup.sh signs the same way
     [ $sys = 1 ] && { codesign --force --deep --sign - "$k" >/dev/null 2>&1 || say "WARNING: codesign failed for $k"; }
 done
+# the Metal plugin's frame trace directory (metal/plugin/nvmtl_trace.h): root's, sticky and world writable, so every
+# process the plugin runs in (WindowServer is _windowserver) can create its file whatever starts first
+TD="$DST/private/var/tmp/rdna3-nvmtl"
+mkdir -p "$TD" && chmod 1777 "$TD" && { [ $sys = 1 ] && chown root:wheel "$TD"; }
+
 if [ $sys = 1 ]; then
     chown -R root:wheel "$A"
     for p in "$GB/RDNA3MTLDriver.bundle" "$GB/rdna3mtl" "$GB/rdna3mtl-allow.txt"; do

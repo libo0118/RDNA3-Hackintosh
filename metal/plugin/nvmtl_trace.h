@@ -275,7 +275,10 @@ static void nvt_prune(const char *dir, const char *keep)
     unsigned total = n;
     for (unsigned i = 0; i < n; i++) {
         const int dead = kill((pid_t)ent[i].pid, 0) != 0 && errno == ESRCH;
-        if (!dead || (total <= 64 && now - ent[i].mt <= 3 * 86400)) continue;
+        const int old = now - ent[i].mt > 3 * 86400;
+        /* the desktop's trace is the one that matters: only age removes it, never the count limit */
+        const int ws = strncmp(ent[i].name, "WindowServer-", 13) == 0;
+        if (!dead || (!old && (ws || total <= 64))) continue;
         char p[512];
         snprintf(p, sizeof p, "%s/%s", dir, ent[i].name);
         if (unlink(p) == 0) total--;
@@ -283,13 +286,16 @@ static void nvt_prune(const char *dir, const char *keep)
 }
 
 /* the directory is shared by every user the plugin runs as (root daemons, _windowserver, apps): sticky and world
- * writable like /tmp. Refuse a path that is not a directory of root's or ours (a planted symlink). */
+ * writable like /tmp. Whoever creates it first decides its owner, so accept root's, ours, and _windowserver's (uid 88:
+ * WindowServer must not lose its trace because an app got there first); refuse anything else (a planted symlink or
+ * directory). The installer creates it root-owned (package/pkg/postinstall). */
+#define NVT_UID_WINDOWSERVER 88u
 static int nvt_dir_ok(const char *dir)
 {
     struct stat st;
     if (mkdir(dir, 0777) != 0 && errno != EEXIST) return -1;
     if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
-    if (st.st_uid != 0 && st.st_uid != geteuid()) { errno = EPERM; return -1; }
+    if (st.st_uid != 0 && st.st_uid != geteuid() && st.st_uid != NVT_UID_WINDOWSERVER) { errno = EPERM; return -1; }
     if (st.st_uid == geteuid()) (void)chmod(dir, 01777);
     return 0;
 }

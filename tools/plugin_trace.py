@@ -68,8 +68,10 @@ WHY_NAMES = {1: "planar surface", 2: "texture wider than a row", 3: "texture tal
              5: "surface sharing off", 6: "family VRAM import failed", 7: "image alias over the VRAM failed"}
 LOAD = {0: "DontCare", 1: "Load", 2: "Clear"}
 STORE = {0: "DontCare", 1: "Store", 2: "MultisampleResolve", 3: "StoreAndMultisampleResolve", 4: "Unknown", 5: "CustomSampleDepthStore"}
+# MTLPixelFormat.h of the macOS 11.3 SDK
 PIXFMT = {10: "R8Unorm", 70: "RGBA8Unorm", 71: "RGBA8Unorm_sRGB", 80: "BGRA8Unorm", 81: "BGRA8Unorm_sRGB", 90: "RGB10A2Unorm",
-          94: "RG11B10Float", 110: "RGBA16Unorm", 115: "RGBA16Float", 125: "RGBA32Float", 552: "BGR10A2Unorm", 554: "BGR10_XR"}
+          92: "RG11B10Float", 94: "BGR10A2Unorm", 110: "RGBA16Unorm", 115: "RGBA16Float", 125: "RGBA32Float", 554: "BGR10_XR",
+          555: "BGR10_XR_sRGB"}
 VKRES = {0: "VK_SUCCESS", 1: "VK_NOT_READY", 2: "VK_TIMEOUT", -1: "VK_ERROR_OUT_OF_HOST_MEMORY", -2: "VK_ERROR_OUT_OF_DEVICE_MEMORY",
          -3: "VK_ERROR_INITIALIZATION_FAILED", -4: "VK_ERROR_DEVICE_LOST", -5: "VK_ERROR_MEMORY_MAP_FAILED",
          -7: "VK_ERROR_EXTENSION_NOT_PRESENT", -8: "VK_ERROR_FEATURE_NOT_PRESENT", -12: "VK_ERROR_TOO_MANY_OBJECTS",
@@ -432,11 +434,31 @@ class Analysis:
         if kd:
             self.add("INFO", "kreq-dirty", "kernel dirty requests not accepted: " +
                      ", ".join("%s %s x%d" % (KD_NAMES.get(p, p), errno_name(e), n) for (p, e), n in kd.most_common(6)))
-        # 3. empty publications
+        # 3. empty publications. FAIL only when the same command buffer's pass on that surface DREW and the
+        # copy-out hashed empty (the drawing was lost); a surface that was only cleared is expected to be empty.
         for sid, s in sorted(self.surfs.items()):
-            if s.empty_out:
-                self.add("FAIL" if s.empty_out == s.out_copy and s.out_copy else "WARN", "empty-publish",
-                         "%s: %d of %d copy-out(s) published an EMPTY picture (all sampled pixels zero)" % (self.sdesc(s), s.empty_out, s.out_copy))
+            if not s.empty_out:
+                continue
+            drawn_empty, cleared_empty = [], 0
+            for r in s.events:
+                if r.kind != K_SURF_OUT or not r.empty() or r.path not in (2, 3):
+                    continue
+                f = self.frames.get(r.id)
+                ends = [p["end"] for p in f.passes.values() if p["end"] and p["end"].surf == sid] if f else []
+                if any(e.path == 1 for e in ends):
+                    drawn_empty.append(r)
+                elif ends and all(e.path == 2 for e in ends):
+                    cleared_empty += 1
+            other = s.empty_out - len(drawn_empty) - cleared_empty
+            if drawn_empty:
+                self.add("FAIL", "empty-publish", "%s: %d copy-out(s) published an EMPTY picture although the same command buffer DREW into it "
+                         "(all sampled pixels zero; first at +%.3fs, cb %d)" % (self.sdesc(s), len(drawn_empty), drawn_empty[0].t, drawn_empty[0].id))
+            if other:
+                self.add("WARN", "empty-publish", "%s: %d copy-out(s) published an EMPTY picture and the pass that wrote it is not in the trace" %
+                         (self.sdesc(s), other))
+            if cleared_empty:
+                self.add("INFO", "empty-publish", "%s: %d of %d copy-out(s) published an empty picture after a clear-only pass (expected)" %
+                         (self.sdesc(s), cleared_empty, s.out_copy))
         # 4. clear-only passes on display sized surfaces
         bw, bh = self.big
         for sid, s in sorted(self.surfs.items()):

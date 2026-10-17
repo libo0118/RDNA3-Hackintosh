@@ -1,6 +1,7 @@
 #!/bin/sh
-# Add the Metal plugin's frame traces to a report directory (tools/macos/collect.sh calls this before it packs the
-# archive; it can also be run by hand on the card machine):
+# Add the Metal plugin's frame traces to a report directory. Run it by hand on the card machine, or from
+# tools/macos/collect.sh before that packs the archive - collect.sh does NOT call it until a line is added there
+# (and autoreport.sh must fetch this file next to collect.sh):
 #   tools/macos/collect_plugin_trace.sh <report dir>
 # Adds
 #   <dir>/31-plugin-trace/<process>-<pid>.trace   every process that loaded the plugin wrote one

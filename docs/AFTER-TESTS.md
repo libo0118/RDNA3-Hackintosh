@@ -963,7 +963,8 @@ Every process that loads the Metal plugin writes a binary trace of what it did
 with IOSurfaces, command buffers and Vulkan: `/var/tmp/rdna3-nvmtl/<process>-<pid>.trace`
 (format: `metal/plugin/nvmtl_trace.h`). `tools/macos/collect_plugin_trace.sh`
 puts them in the report as `31-plugin-trace/` and saves WindowServer's NVMTL
-log whole as `32-log-nvmtl-windowserver.txt`. The text log is rate limited;
+log whole as `32-log-nvmtl-windowserver.txt` (once `collect.sh` calls it; until
+then run it by hand on the card machine: `sh tools/macos/collect_plugin_trace.sh <dir>`). The text log is rate limited;
 the trace is the record. Decode on the host:
 
     python3 tools/plugin_trace.py rdna3-report-*.tar.gz          # all processes, WindowServer first
@@ -984,7 +985,9 @@ Questions it answers (the "findings:" block names each, per IOSurface):
   because the kernel refused the dirty mark), `o:fail`, `EMPTY`.
 * *Did the kernel refuse?* `dirty-refused` lists the errno (macOS numbers; 19 =
   ENODEV: no VRAM behind the surface); `kreq-import` the refused surface imports.
-* *Was the published picture empty?* `empty-publish`: the band hash of the data
+* *Was the published picture empty?* (FAIL only when the same command buffer's
+  pass DREW into the surface and the copy-out is still empty; an empty picture
+  after a clear-only pass is INFO, one whose pass is not in the trace WARN.) `empty-publish`: the band hash of the data
   written into the IOSurface (the same 8 bands x 48 columns FNV hash as the
   kernel's `rd3AccelBandHash`, so a hash can be matched with the kext's `swap
   #N` band lines) has every sampled pixel zero. A back buffer that is always
@@ -1012,7 +1015,14 @@ after the lock. A frame with `NOT FINISHED` was still in flight when the
 report was taken. If `31-plugin-trace/info.txt` says 0 traces: the plugin is
 older than the trace, or `NVMTL_TRACE=0` is set (also readable from the
 `trace:` line in the plugin log). Switch off: `NVMTL_TRACE=0` in
-`/Library/GPUBundles/rdna3mtl/rdna3mtl.conf`. Triage: `plugin_trace.triage_lines(report)`.
+`/Library/GPUBundles/rdna3mtl/rdna3mtl.conf`. The directory `/var/tmp/rdna3-nvmtl`
+is created root-owned, mode 1777, by the package's postinstall; if an app
+created it first, WindowServer (uid 88) and root are still accepted as owner,
+anyone else's directory is refused (`trace: cannot create ...` in the plugin log).
+Residual risks: the trace is an mmap'd file, so a process that truncates it
+(as root, by hand) kills the traced process with SIGBUS (deleting it is safe);
+`NVMTL_TRACE_HASH=2` reads IOSurface memory the plugin did not lock, so only
+use it on a run where that is the question. Triage: `plugin_trace.triage_lines(report)`.
 
 ## Linux reference dump (`tools/linux/card_dump.sh`)
 

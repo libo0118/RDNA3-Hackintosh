@@ -34,13 +34,16 @@ NVMTL_TRACE=0 NVMTL_TRACE_DIR="$T/off" NVMTL_TRACE_NAME=Off "$W" off 2>/dev/null
 mkdir -p "$T/ws"
 NVMTL_TRACE_DIR="$T/ws/nvmtl" NVMTL_TRACE_NAME=WindowServer "$W" scenario 2>/dev/null
 f=$(ls "$T"/ws/nvmtl/WindowServer-*.trace)
-[ "$(stat -c %a "$f")" = 644 ] || fail "trace file mode $(stat -c %a "$f"), want 644"
-[ "$(stat -c %a "$T/ws/nvmtl")" = 1777 ] || fail "trace directory mode $(stat -c %a "$T/ws/nvmtl"), want 1777"
+mode() { python3 -I -B -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o7777)[2:])' "$1"; }   # stat(1) differs on macOS
+[ "$(mode "$f")" = 644 ] || fail "trace file mode $(mode "$f"), want 644"
+[ "$(mode "$T/ws/nvmtl")" = 1777 ] || fail "trace directory mode $(mode "$T/ws/nvmtl"), want 1777"
 $PT "$T/ws/nvmtl" --frames 20 > "$T/ws.txt"
 need "$T/ws.txt" '^WindowServer  pid'
-need "$T/ws.txt" 'events: 76 written, 76 kept'
+need "$T/ws.txt" 'events: 83 written, 83 kept'
 need "$T/ws.txt" 'FAIL never-published surface 103 2560x1440 (shared VRAM): 1 command buffer'
-need "$T/ws.txt" 'FAIL empty-publish   surface 102 2560x1440 (shared VRAM): 4 of 4 copy-out'
+need "$T/ws.txt" 'FAIL empty-publish   surface 107 2560x1440 (shared VRAM): 1 copy-out(s) published an EMPTY picture although the same command buffer DREW'
+need "$T/ws.txt" 'INFO empty-publish   surface 102 2560x1440 (shared VRAM): 4 of 4 copy-out(s) published an empty picture after a clear-only pass'
+if grep -q 'FAIL empty-publish.*surface 102' "$T/ws.txt"; then fail "a cleared surface's empty copy-out is not a FAIL"; fi
 need "$T/ws.txt" 'WARN clear-only      surface 102 2560x1440 .*4 of 4 pass(es) only cleared it (4 to transparent black): (0 0 0 0) x4'
 need "$T/ws.txt" 'WARN dirty-refused   surface 102 .*refused 4 time(s)'
 need "$T/ws.txt" 'errno 19 ENODEV x4'
@@ -79,7 +82,7 @@ need "$T/rates.txt" 'per second'
 if $PT --check "$T/ws/nvmtl" > /dev/null; then fail "--check passed a trace with FAIL findings"; fi
 $PT --triage "$T/ws/nvmtl" > "$T/tri.txt"
 need "$T/tri.txt" '^FAIL plugin trace WindowServer\[[0-9]*\] never-published: '
-need "$T/tri.txt" '^INFO plugin trace WindowServer\[[0-9]*\]: 9 frames in the ring, 9 passes on surfaces (4 clear-only)'
+need "$T/tri.txt" '^INFO plugin trace WindowServer\[[0-9]*\]: 10 frames in the ring, 10 passes on surfaces (4 clear-only)'
 
 # --- a report archive: 31-plugin-trace/ inside a tar.gz, and an extracted report dir ---
 mkdir -p "$T/rep/rdna3-report-x/31-plugin-trace"
