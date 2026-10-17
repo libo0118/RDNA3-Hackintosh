@@ -325,7 +325,7 @@ static uint64_t gTrCursor;             /* the stream reader's last event number 
  * every swap, 0: only at empty backs) */
 static volatile int gSwapMode = RD3_SWAPMODE_DEFAULT;
 static volatile int gSwapAb = 0;
-static int gTrScan = 1;
+static int gTrScan = 0;   /* card run 2026-10-17d: off, as in the bisect's good step 5 (sysctl turns it on) */
 /* debug.rdna3accel_swap_landed / boot-arg rdna3swaplanded (card run
  * 2026-10-17c, rdna3_swap_copy.h): 1 modes 1/2 present the landed buffer
  * instead of a suspect back; 0 (the default) they only count, trace and log
