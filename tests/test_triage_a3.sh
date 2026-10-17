@@ -301,7 +301,16 @@ grep -q 'copy forward  *WARN head 1: 60 of 460 swaps skipped' <<<"$o" || fail "r
 grep -q 'copy forward  *WARN 2 swap(s) matched no head' <<<"$o" || fail "r45 no head: $o"
 # the new kernel's summary line: a later, bigger count than the last
 # flicker: line (D1), and the copy forward outcomes of a serial log alone
-for r in r46 r47; do mkdir -p "$T/$r"; done
+for r in r46 r47 r48; do mkdir -p "$T/$r"; done
+# r48: the newest report did not judge head 1 (10 hashed swaps): the serial log's FAIL stands
+mk58 r48/rdna3-report-unjudged "RDNA3: hello" "== 26-log-metal-plugin.txt\n$LIVE" differ "== A3 display counters after M6\ndebug.rdna3accel_swaps_h1: 10\ndebug.rdna3accel_swaps_hashed_h1: 10\ndebug.rdna3accel_swaps_abab_h1: 0\ndebug.rdna3accel_cf_calls: 5\ndebug.rdna3accel_cf_pend_evicted: 2\n"
+{
+    echo "RDNA3Accelerator: flicker: head 1: swap 204 showed alternating pictures (A B A B in 6 of 8 bands, candidate flicker), 120 of 204 hashed swaps so far, 53 in more than one band (phys 0x8b100000, 1920x1080)"
+    echo "RDNA3Accelerator: swap #85: head 1 frame phys 0x8c0e0000 -> 0x8b100000 (surface <ptr>, argument is the pipe resource, a1 <ptr> a2 <ptr>)"
+    echo "RDNA3Accelerator: swap #113: head 1 frame phys 0x8b100000 -> 0x8b8f0000 (surface <ptr>, surface seen before, a1 <ptr> a2 <ptr>)"
+    echo "RDNA3Accelerator: swap #114: head 1 frame phys 0x8b8f0000 -> 0x8b100000 (surface <ptr>, surface seen before, a1 <ptr> a2 <ptr>)"
+    echo "RDNA3Accelerator: copy forward #1: the front buffer (vm <ptr>) was never shown -- the back buffer already holds the last frame, nothing copied (1 such calls)"
+} > "$T/r48/serial-20261016-111111.log"
 # r47: a report whose counters say no flicker next to a serial log with a
 # mid-run snapshot over the line: the report decides, the serial is INFO
 mk58 r47/rdna3-report-final "RDNA3: hello" "== 26-log-metal-plugin.txt\n$LIVE" differ "== A3 display counters after M6\ndebug.rdna3accel_swaps_h1: 2000\ndebug.rdna3accel_swaps_hashed_h1: 2000\ndebug.rdna3accel_swaps_abab_h1: 100\ndebug.rdna3accel_swaps_ababwide_h1: 90\n"
@@ -320,6 +329,12 @@ o=$(run r47)
 grep -q 'INFO swap/flicker  *(serial said FAIL) head 1: alternating pictures' <<<"$o" || fail "r47: the report decides: $o"
 ! grep -q 'FAIL swap/flicker' <<<"$o" || fail "r47 no serial FAIL: $o"
 grep -q 'PASS flicker: head 1' <<<"$o" || fail "r47 the report's verdict: $o"
-for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43 r44 r45 r46 r47; do all="$all$(run $r)"; done
+o=$(run r48)
+grep -q 'FAIL swap/flicker  *head 1: alternating pictures' <<<"$o" || fail "r48: an unjudged report does not silence the serial log: $o"
+grep -q 'WARN swap/flicker  *head(s) 1: two back buffers took turns' <<<"$o" || fail "r48: the old-kernel warning stays: $o"
+grep -q 'copy forward  *WARN .*2 pending-rect list(s) dropped' <<<"$o" || fail "r48 evicted: $o"
+o=$(run r47)
+grep -q 'the report.s counters decide head(s) 1' <<<"$o" || fail "r47 header: $o"
+for r in r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 r16 r17 r18 r19 r20 r21 r22 r23 r24 r25 r26 r27 r28 r29 r30 r31 r32 r33 r34 r35 r36 r37 r38 r39 r40 r41 r42 r43 r44 r45 r46 r47 r48; do all="$all$(run $r)"; done
 ! grep -q Traceback <<<"$all" || fail "a traceback (run 58 cases)"
 echo "test_triage_a3: all checks passed"

@@ -68,16 +68,16 @@ static void frame(struct sim *s, int back, unsigned lastDamage, unsigned damage,
         from = p == RD3_CF_COPY_SRC ? 0 : p == RD3_CF_COPY_SHOWN ? s->shown : -1;
         /* nothing copied with rects to copy: they are pending in the target */
         if (from < 0 && rects && !gNoHeal && (p == RD3_CF_SKIP_NOTHING_SHOWN || p == RD3_CF_SKIP_FOREIGN))
-            rd3_cf_pend_add(&s->heal, id, r, rects_of(rects, r));
+            rd3_cf_pend_add(&s->heal, id, r, rects_of(rects, r), NULL);
     } else if (s->shown == 0) {
         from = 0;   /* card run 56-58b: only from a front that was shown; the front never is */
     }
     if (from >= 0) {
         const unsigned ne = gNoHeal ? 0 : rd3_cf_pend_take(&s->heal, id, &s->buf[from], 1, BANDS, !sdmaOff, extra,
-                                                           RD3_CF_PEND_RECTS);
+                                                           RD3_CF_PEND_RECTS, NULL);
         const unsigned what = rects | mask_of(extra, ne);
         if (miss) {
-            if (!gNoHeal) rd3_cf_pend_add(&s->heal, id, r, rects_of(what, r));
+            if (!gNoHeal) rd3_cf_pend_add(&s->heal, id, r, rects_of(what, r), &s->buf[from]);
         } else {
             for (unsigned b = 0; b < BANDS; b++)
                 if (what & (1u << b)) { s->buf[back][b] = s->buf[from][b]; s->copies++; }
@@ -185,34 +185,83 @@ int main(void)
         int b[6];
         memset(&h, 0, sizeof h);
         for (unsigned i = 0; i < RD3_CF_PEND_RECTS + 2; i++) { r[i].x = 0; r[i].y = (int)i * 10; r[i].w = 10; r[i].h = 10; }
-        rd3_cf_pend_add(&h, &b[0], &r[0], 1);
-        rd3_cf_pend_add(&h, &b[1], &r[1], 1);
-        rd3_cf_pend_add(&h, &b[1], &r[2], 1);
+        rd3_cf_pend_add(&h, &b[0], &r[0], 1, NULL);
+        rd3_cf_pend_add(&h, &b[1], &r[1], 1, NULL);
+        rd3_cf_pend_add(&h, &b[1], &r[2], 1, NULL);
         CHECK(rd3_cf_pending(&h, &b[0]) && rd3_cf_pending(&h, &b[1]) && !rd3_cf_pending(&h, &b[2]));
         /* b[0]'s rect touches none of b[1]'s: taken */
-        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4) == 1 && o[0].y == 0);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, NULL) == 1 && o[0].y == 0);
         CHECK(!rd3_cf_pending(&h, &b[0]));
         /* a rect the source missed itself stays pending */
-        rd3_cf_pend_add(&h, &b[0], &r[1], 1);
-        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4) == 0 && rd3_cf_pending(&h, &b[0]));
-        CHECK(rd3_cf_pend_take(&h, &b[1], &b[2], 100, 100, 1, o, 4) == 2 && !rd3_cf_pending(&h, &b[1]));
-        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4) == 1 && !rd3_cf_pending(&h, &b[0]));
+        rd3_cf_pend_add(&h, &b[0], &r[1], 1, NULL);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, NULL) == 0 && rd3_cf_pending(&h, &b[0]));
+        CHECK(rd3_cf_pend_take(&h, &b[1], &b[2], 100, 100, 1, o, 4, NULL) == 2 && !rd3_cf_pending(&h, &b[1]));
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, NULL) == 1 && !rd3_cf_pending(&h, &b[0]));
         /* too many rects: the whole picture, only from a clean source with the copy engine on */
-        rd3_cf_pend_add(&h, &b[2], r, RD3_CF_PEND_RECTS + 1);
-        rd3_cf_pend_add(&h, &b[3], &r[0], 1);
-        CHECK(rd3_cf_pend_take(&h, &b[2], &b[3], 100, 50, 1, o, 4) == 0);   /* the source missed a rect */
-        CHECK(rd3_cf_pend_take(&h, &b[2], &b[4], 100, 50, 0, o, 4) == 0);   /* the copy engine off */
-        CHECK(rd3_cf_pend_take(&h, &b[2], &b[4], 100, 50, 1, o, 4) == 1 && o[0].w == 100 && o[0].h == 50);
+        rd3_cf_pend_add(&h, &b[2], r, RD3_CF_PEND_RECTS + 1, NULL);
+        rd3_cf_pend_add(&h, &b[3], &r[0], 1, NULL);
+        CHECK(rd3_cf_pend_take(&h, &b[2], &b[3], 100, 50, 1, o, 4, NULL) == 0);   /* the source missed a rect */
+        CHECK(rd3_cf_pend_take(&h, &b[2], &b[4], 100, 50, 0, o, 4, NULL) == 0);   /* the copy engine off */
+        CHECK(rd3_cf_pend_take(&h, &b[2], &b[4], 100, 50, 1, o, 4, NULL) == 1 && o[0].w == 100 && o[0].h == 50);
         CHECK(!rd3_cf_pending(&h, &b[2]));
-        rd3_cf_pend_add(&h, &b[5], NULL, 0);
+        rd3_cf_pend_add(&h, &b[5], NULL, 0, NULL);
         CHECK(rd3_cf_pending(&h, &b[5]));
         rd3_cf_pend_forget(&h, &b[5]);
         rd3_cf_pend_forget(&h, &b[3]);
         CHECK(!rd3_cf_pending(&h, &b[5]) && !rd3_cf_pending(&h, &b[3]) && !rd3_cf_pending(&h, NULL));
         /* a full table drops the oldest buffer */
-        for (unsigned i = 0; i < 5; i++) rd3_cf_pend_add(&h, &b[i], &r[i], 1);
+        for (unsigned i = 0; i < 5; i++) rd3_cf_pend_add(&h, &b[i], &r[i], 1, NULL);
         CHECK(!rd3_cf_pending(&h, &b[0]) && rd3_cf_pending(&h, &b[4]));
         CHECK(rd3_rect_meet(&r[0], &r[0]) && !rd3_rect_meet(&r[0], &r[1]));
+    }
+
+    {
+        /* review of 7b2c4c0: mutual blocking, overflow, eviction, clipping, empty adds */
+        struct rd3_cf_heal h;
+        struct rd3_cf_take t;
+        struct rd3_rect r[RD3_CF_PEND_RECTS + 1], o[RD3_CF_PEND_RECTS + 1];
+        int b[6];
+        unsigned got = 0, tries = 0;
+        memset(&h, 0, sizeof h);
+        for (unsigned i = 0; i < RD3_CF_PEND_RECTS + 1; i++) { r[i].x = (int)i * 10; r[i].y = 0; r[i].w = 10; r[i].h = 10; }
+        /* two backs each with the whole picture pending: each waits for the
+         * other, then copies anyway after RD3_CF_PEND_BLOCKED_MAX blocked calls */
+        rd3_cf_pend_add(&h, &b[0], NULL, 0, NULL);
+        rd3_cf_pend_add(&h, &b[1], NULL, 0, NULL);
+        while (!got && tries < 10) {
+            got = rd3_cf_pend_take(&h, &b[tries & 1u], &b[(tries & 1u) ^ 1u], 100, 100, 1, o, 4, &t);
+            tries++;
+        }
+        CHECK(got == 1 && t.forced == 1 && tries == 2 * RD3_CF_PEND_BLOCKED_MAX + 1);
+        CHECK(rd3_cf_pend_take(&h, &b[(tries & 1u)], &b[(tries & 1u) ^ 1u], 100, 100, 1, o, 4, &t) == 1 && !t.forced);
+        CHECK(!rd3_cf_pending(&h, &b[0]) && !rd3_cf_pending(&h, &b[1]));
+        /* overlapping rects block, then go anyway */
+        rd3_cf_pend_add(&h, &b[0], &r[0], 1, NULL);
+        rd3_cf_pend_add(&h, &b[1], &r[0], 1, NULL);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0 && t.blocked == 1);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 0);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 100, 1, o, 4, &t) == 1 && t.forced == 1);
+        rd3_cf_pend_forget(&h, &b[1]);
+        /* too many rects: the whole picture, reported */
+        CHECK(rd3_cf_pend_add(&h, &b[2], r, RD3_CF_PEND_RECTS + 1, NULL) == RD3_PEND_OVERFLOW);
+        CHECK(h.b[0].buf == &b[2] && h.b[0].whole && h.b[0].n == 0);
+        rd3_cf_pend_forget(&h, &b[2]);
+        /* a full table drops the oldest list that is not the source's */
+        for (unsigned i = 0; i < 4; i++) rd3_cf_pend_add(&h, &b[i], &r[i], 1, NULL);
+        CHECK(rd3_cf_pend_add(&h, &b[4], &r[4], 1, &b[0]) == RD3_PEND_EVICTED);
+        CHECK(rd3_cf_pending(&h, &b[0]) && !rd3_cf_pending(&h, &b[1]) && rd3_cf_pending(&h, &b[4]));
+        /* nothing valid: no entry claimed, nothing evicted */
+        r[5].w = 0;
+        CHECK(rd3_cf_pend_add(&h, &b[5], &r[5], 1, NULL) == 0 && !rd3_cf_pend_get(&h, &b[5]) &&
+              rd3_cf_pending(&h, &b[2]));
+        /* the picture got smaller: a pending rect is clipped, one outside it dropped */
+        memset(&h, 0, sizeof h);
+        r[0].x = 90; r[0].y = 0; r[0].w = 20; r[0].h = 20;
+        r[1].x = 200; r[1].y = 0; r[1].w = 20; r[1].h = 20;
+        rd3_cf_pend_add(&h, &b[0], r, 2, NULL);
+        CHECK(rd3_cf_pend_take(&h, &b[0], &b[1], 100, 15, 1, o, 4, &t) == 1 && o[0].x == 90 && o[0].w == 10 &&
+              o[0].h == 15 && !rd3_cf_pending(&h, &b[0]));
     }
 
     /* card run 56: one back - nothing to copy, every frame right, either rule */

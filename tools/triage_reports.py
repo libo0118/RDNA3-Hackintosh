@@ -456,7 +456,8 @@ def a3_display_verdict(log, sv):
 A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3|flicker|"
                        r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg)?_h\d|"
                        r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed)_h\d|swaps_skipped_all|"
-                       r"swaps_nohead|cf_(?:calls|nohead|shown_stale|refused|same|disabled)|iop_flip): (\d+)", re.M)
+                       r"swaps_nohead|cf_(?:calls|nohead|shown_stale|refused|same|disabled|pend_blocked|pend_forced|pend_evicted|"
+                       r"pend_whole)|iop_flip): (\d+)", re.M)
 # the kernel's refusal reasons that are the A3 policy (rd3AccelA3Why), not a fault
 A3_POLICY_REASONS = ("WindowServer's display framebuffer", "a WindowServer input", "A3 is off",
                      "imported for another task", "a process the kernel could not name")
@@ -744,6 +745,10 @@ def copy_forward_verdict(c):
             why.append("head %s showed another surface's buffer" % h)
         if g("cf_nothingshown") > 10:
             why.append("head %s: %d calls with nothing shown" % (h, g("cf_nothingshown")))
+    if c.get("cf_pend_evicted", 0):
+        why.append("%d pending-rect list(s) dropped from a full table" % c["cf_pend_evicted"])
+    if c.get("cf_pend_forced", 0):
+        why.append("%d pending copies forced from a source that missed them too (stale alike)" % c["cf_pend_forced"])
     glob_bad = c.get("cf_nohead", 0) + c.get("cf_shown_stale", 0) + c.get("cf_refused", 0)
     if glob_bad:
         why.append("%d with no head, %d shown buffer not usable, %d refused" % (
@@ -1737,18 +1742,28 @@ def main():
             sv = serial_swap_verdict(open(s, errors="replace").read())
         except OSError:
             sv = ([], [])
-        counted = False
-        for r in reports:
-            tp = r[:-len(".tar.gz")] + "-tests.txt"
+        # the heads the newest report's counters judged (60+ hashed swaps:
+        # PASS / WARN / FAIL in flicker_verdict) - their serial flicker
+        # lines are INFO; copy forward and swap warnings stay
+        judged = set()
+        if reports:
+            tp = reports[-1][:-len(".tar.gz")] + "-tests.txt"
             try:
-                counted = counted or "rdna3accel_swaps_hashed_h" in open(tp, errors="replace").read()
+                rtxt = open(tp, errors="replace").read()
             except OSError:
-                pass
+                rtxt = ""
+            if "rdna3accel_swaps_hashed_h" in rtxt:
+                for lv, t in flicker_verdict(rtxt):
+                    m = re.match(r"head (\d+): ", t)
+                    if m and lv != "INFO":
+                        judged.add(m.group(1))
         if sv[0] or sv[1]:
             print("   swaps and flicker (the kernel's lines; a run without a report has only these%s):" %
-                  ("; the report's counters decide, so these are INFO" if counted else ""))
+                  ("; the report's counters decide head(s) %s, their lines are INFO" % ", ".join(sorted(judged))
+                   if judged else ""))
             for lv, t in sv[0]:
-                if counted and lv != "INFO":
+                m = re.match(r"head (\d+): ", t)
+                if m and m.group(1) in judged and lv != "INFO":
                     t = "(serial said %s) %s" % (lv, t)
                     lv = "INFO"
                 print("   %s %-20s %s" % (lv, "swap/flicker", t))

@@ -45,10 +45,10 @@ IOReturn                  rd3AccelCopyForward(const void *surf, unsigned fbIndex
                                               IOAccelResource2 *dst, const void *rects, unsigned count,
                                               unsigned smode, IOAccelResource2 *const *bufs, unsigned nbufs);
 static void               rd3AccelCopyForwardCheck(IOAccelResource2 *res);
-static void               rd3AccelNotePresented(const void *vm, unsigned head);
+static unsigned long long rd3AccelNotePresented(const void *vm, unsigned head);
 static bool               rd3res_geom(IOAccelResource2 *r, unsigned *w, unsigned *h, unsigned *pitch);
 static void               rd3AccelForgetShown(unsigned head);
-static void               rd3AccelForgetShownIf(unsigned head, unsigned long long cookie);
+static void               rd3AccelForgetShownIf(unsigned head, unsigned long long seq);
 static void               rd3AccelA3DispDirty(unsigned surfaceID, unsigned long long phys);
 /* why rd3AccelA3Policy refused an import: picks the counter and the text of
  * the refusal's log line (card run 58b review: a WindowServer caller whose
@@ -193,6 +193,13 @@ static SInt64 gCntSwapEmptyShown[kRd3MaxFB], gCntSwapBufChg[kRd3MaxFB], gCntBufN
 static SInt64 gCntCfShown[kRd3MaxFB], gCntCfSrc[kRd3MaxFB], gCntCfBackLast[kRd3MaxFB];
 static SInt64 gCntCfNothingShown[kRd3MaxFB], gCntCfForeign[kRd3MaxFB], gCntCfMiss[kRd3MaxFB], gCntCfHealed[kRd3MaxFB];
 static SInt64 gCntCfCalls, gCntCfNoHead, gCntCfShownStale, gCntCfRefused, gCntCfSame, gCntCfDisabled;
+/* the pending-rects table (rdna3_swap_front.h): calls whose source blocked
+ * a buffer's pending rects, calls that copied them anyway after the limit,
+ * lists dropped from a full table, lists turned into the whole picture */
+static SInt64 gCntCfPendBlocked, gCntCfPendForced, gCntCfPendEvicted, gCntCfPendWhole;
+/* guards gCfPend: copy forward runs under the family's busy lock, the
+ * vidmem free path (rd3AccelVidmemGone) on any thread without it */
+static IOSimpleLock *volatile gCfPendLock;
 enum { kA3DispSlots = 4 * 4 };   /* 4 * kRd3MaxFB: every head's compositing surfaces */
 struct RD3A3Disp { unsigned surfaceID, heads; unsigned long long phys; const void *vm; };
 static RD3A3Disp gA3Disp[kA3DispSlots];
@@ -1429,8 +1436,12 @@ RD3ACCEL_CNT4(rdna3accel_cf_src, gCntCfSrc, "copy forwards from the front Window
 RD3ACCEL_CNT4(rdna3accel_cf_backlast, gCntCfBackLast, "copy forwards into the buffer the head shows: nothing to copy (one back)");
 RD3ACCEL_CNT4(rdna3accel_cf_nothingshown, gCntCfNothingShown, "copy forwards before the head showed anything recorded: nothing copied");
 RD3ACCEL_CNT4(rdna3accel_cf_foreign, gCntCfForeign, "copy forwards while the head shows another surface's buffer: nothing copied");
-RD3ACCEL_CNT4(rdna3accel_cf_miss, gCntCfMiss, "copy forwards that left rects stale (SDMA refused, too big for the CPU): copied whole next time");
-RD3ACCEL_CNT4(rdna3accel_cf_healed, gCntCfHealed, "whole-picture copies into a buffer that had missed one");
+RD3ACCEL_CNT4(rdna3accel_cf_miss, gCntCfMiss, "copy forwards that left rects stale (SDMA refused, too big for the CPU): pending in that buffer");
+RD3ACCEL_CNT4(rdna3accel_cf_healed, gCntCfHealed, "copy forwards that also copied rects their target had missed before");
+RD3ACCEL_CNT(rdna3accel_cf_pend_blocked, gCntCfPendBlocked, "card run 58b: copy forwards whose source had missed the target's pending rects too (they wait)");
+RD3ACCEL_CNT(rdna3accel_cf_pend_forced, gCntCfPendForced, "card run 58b: pending rects copied anyway after 3 blocked calls (both buffers alike there)");
+RD3ACCEL_CNT(rdna3accel_cf_pend_evicted, gCntCfPendEvicted, "card run 58b: pending-rect lists dropped from a full table (those rects may stay stale)");
+RD3ACCEL_CNT(rdna3accel_cf_pend_whole, gCntCfPendWhole, "card run 58b: pending-rect lists that overflowed into the whole picture");
 RD3ACCEL_CNT(rdna3accel_swaps_skipped_all, gCntSwapSkipped, "card run 58b: legacy swaps skipped, every head and reason (nothing drawn)");
 RD3ACCEL_CNT(rdna3accel_swaps_nohead, gCntSwapNoHead, "card run 58b: legacy swaps that matched no head (not shown)");
 RD3ACCEL_CNT(rdna3accel_cf_calls, gCntCfCalls, "card run 58b: copy forward calls");
@@ -1499,6 +1510,8 @@ static void rdna3accelInstallSysctl(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_cf_calls);   sysctl_register_oid(&sysctl__debug_rdna3accel_cf_nohead);
     sysctl_register_oid(&sysctl__debug_rdna3accel_cf_shown_stale); sysctl_register_oid(&sysctl__debug_rdna3accel_cf_refused);
     sysctl_register_oid(&sysctl__debug_rdna3accel_cf_same);    sysctl_register_oid(&sysctl__debug_rdna3accel_cf_disabled);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_cf_pend_blocked); sysctl_register_oid(&sysctl__debug_rdna3accel_cf_pend_forced);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_cf_pend_evicted); sysctl_register_oid(&sysctl__debug_rdna3accel_cf_pend_whole);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h0);       sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h1);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h2);       sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_h3);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_a3_h0);    sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_a3_h1);
@@ -2231,14 +2244,15 @@ static bool rd3AccelLocksInit(void)
 {
     return rd3SimpleLockOnce(&gHeadFbResLock) && rd3SimpleLockOnce(&gNVSVPendLock) &&
            rd3SimpleLockOnce(&gIopFlipCacheLock) && rd3LockOnce(&gNVSVStageLock) &&
-           rd3SimpleLockOnce(&gA3DispLock) &&
+           rd3SimpleLockOnce(&gA3DispLock) && rd3SimpleLockOnce(&gCfPendLock) &&
            rd3SurfCloseLockOnce();
 }
 
 extern "C" {
 void _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(void *pipe, void *arg);
 }
-struct RD3IopAsync { void *pipe; IOService *fb; IOSurface *s; struct RD3KFlipRequest f; volatile SInt32 busy; struct thread_call *call; };
+struct RD3IopAsync { void *pipe; IOService *fb; IOSurface *s; struct RD3KFlipRequest f; volatile SInt32 busy; struct thread_call *call;
+                     unsigned long long seq; /* the shown record this flip set */ };
 static RD3IopAsync gIopAs[kRd3MaxFB];
 static SInt32 gIopAsyncRefuseRun;
 static bool rd3AccelIopAsyncBusy(const void *pipe)
@@ -2267,7 +2281,7 @@ static void rd3AccelIopAsyncRun(void *p0, void *)
         OSAddAtomic64(1, &gCntIopAsyncRefused); OSAddAtomic64(1, &gCntIopFlipNo[7]);
         if (gIopFlipLogs < 8) { gIopFlipLogs++; ALOG("iop: async flip REFUSED (0x%x, flipResult %d) head %u -- that frame is not on the panel",
                                                      (unsigned)rr, e->f.flipResult, head); }
-        rd3AccelForgetShownIf(head, e->f.allocationCookie);
+        rd3AccelForgetShownIf(head, e->seq);
         if (++gIopAsyncRefuseRun >= 3 && gIopAsync) {
             gIopAsync = 0;
             ALOG("iop: b89k 3 async refusals in a row -- debug.rdna3accel_iop_async=0 (synchronous flip, which copies on refusal)");
@@ -2277,19 +2291,20 @@ static void rd3AccelIopAsyncRun(void *p0, void *)
     __atomic_store_n(&e->busy, 0, __ATOMIC_RELEASE);
     _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(e->pipe, nullptr);
 }
-static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSurface *s, const struct RD3KFlipRequest *f)
+static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSurface *s, const struct RD3KFlipRequest *f,
+                                  unsigned long long seq)
 {
     RD3IopAsync *e = &gIopAs[head];
     for (unsigned i = 0; i < 50 && __atomic_load_n(&e->busy, __ATOMIC_ACQUIRE); i++) IOSleep(1);
     if (__atomic_load_n(&e->busy, __ATOMIC_ACQUIRE)) {
         OSAddAtomic64(1, &gCntIopAsyncDrop);
-        rd3AccelForgetShownIf(head, f->allocationCookie);   /* this frame never reaches the panel */
+        rd3AccelForgetShownIf(head, seq);   /* this frame never reaches the panel */
         return true;
     }
     if (!e->call) e->call = thread_call_allocate(rd3AccelIopAsyncRun, e);
     if (!e->call) return false;
     ((OSObject *)s)->retain();
-    e->pipe = pipe; e->fb = fb; e->s = s;
+    e->pipe = pipe; e->fb = fb; e->s = s; e->seq = seq;
     for (unsigned i = 0; i < sizeof *f; i++) ((volatile unsigned char *)&e->f)[i] = ((const unsigned char *)f)[i];
     __atomic_store_n(&e->busy, 1, __ATOMIC_RELEASE);
     thread_call_enter(e->call);
@@ -2327,8 +2342,8 @@ static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pi
     f.version = RD3K_FLIP_ABI_VERSION; f.kapiMemory = kmem; f.allocationCookie = vm->fAllocationCookie; f.width = (unsigned)W; f.height = (unsigned)H; f.pitch = (unsigned)P;
     /* the head shows this IOSurface from now on (async: unless the flip is
      * dropped or refused, which forget it again) */
-    rd3AccelNotePresented(vm, head);
-    if (gIopAsync && pipe) return rd3AccelIopAsyncStart(pipe, fb, head, s, &f);
+    const unsigned long long seq = rd3AccelNotePresented(vm, head);
+    if (gIopAsync && pipe) return rd3AccelIopAsyncStart(pipe, fb, head, s, &f, seq);
     const OSSymbol *sym = OSSymbol::withCStringNoCopy("rd3FlipToSurfacePure");
     IOReturn rr = sym ? fb->callPlatformFunction(sym, false, &f, nullptr, nullptr, nullptr) : kIOReturnNoMemory;
     if (sym) sym->release();
@@ -3182,21 +3197,25 @@ static unsigned gCfChecks, gCfKept, gCfReverted, gCfOther;
  * another surface's buffer must not become a source); here the pointer and
  * the allocation it had are only compared. A scanout vidmem is never
  * recorded (its cookie is the mode's, a mode switch frees it). */
-static struct { const void *volatile vm; volatile unsigned long long cookie; } gCfShown[kRd3MaxFB];
+static struct { const void *volatile vm; volatile unsigned long long cookie, seq; } gCfShown[kRd3MaxFB];
+static volatile UInt64 gCfShownSeq;   /* each record's number: which presentation set it */
 /* the rects each buffer of a head missed (rdna3_swap_front.h): copied into
- * it with the next copy forward that can. Copy forward runs under the
- * family's busy lock; the vidmem free path only drops an entry by pointer. */
+ * it with the next copy forward that can; every access under gCfPendLock */
 static struct rd3_cf_heal gCfPend[kRd3MaxFB];
-static void rd3AccelNotePresented(const void *vm, unsigned head)
+/* returns the record's number (0: nothing recorded) */
+static unsigned long long rd3AccelNotePresented(const void *vm, unsigned head)
 {
     const RD3VidMemory *m = (const RD3VidMemory *)vm;
-    if (head >= kRd3MaxFB) return;
-    if (!m || m->fScanout) { rd3AccelForgetShown(head); return; }
+    if (head >= kRd3MaxFB) return 0;
+    if (!m || m->fScanout) { rd3AccelForgetShown(head); return 0; }
+    const unsigned long long seq = OSIncrementAtomic64((volatile SInt64 *)&gCfShownSeq) + 1;
     gCfShown[head].vm = nullptr;   /* never a pointer with another buffer's cookie */
     __asm__ volatile("" ::: "memory");
     gCfShown[head].cookie = m->fAllocationCookie;
+    gCfShown[head].seq = seq;
     __asm__ volatile("" ::: "memory");
     gCfShown[head].vm = vm;
+    return seq;
 }
 /* the head shows nothing recorded any more; the buffers' pending rects
  * stay (they are still stale) */
@@ -3205,21 +3224,25 @@ static void rd3AccelForgetShown(unsigned head)
     if (head >= kRd3MaxFB) return;
     gCfShown[head].vm = nullptr;
 }
-/* the same, only while the record is still the buffer of that VRAM (an
- * async flip refused or dropped must not wipe a newer swap's record) */
-static void rd3AccelForgetShownIf(unsigned head, unsigned long long cookie)
+/* the same, only while the record is still the one that presentation set
+ * (an async flip refused or dropped must not wipe a newer swap's record,
+ * even one of the same buffer) */
+static void rd3AccelForgetShownIf(unsigned head, unsigned long long seq)
 {
-    if (head >= kRd3MaxFB) return;
-    if (gCfShown[head].vm && gCfShown[head].cookie == cookie) gCfShown[head].vm = nullptr;
+    if (head >= kRd3MaxFB || !seq) return;
+    if (gCfShown[head].vm && gCfShown[head].seq == seq) gCfShown[head].vm = nullptr;
 }
 /* a freed vidmem leaves the tables: its address may come back for a new,
  * never-shown buffer */
 void rd3AccelVidmemGone(const void *vm)
 {
     rd3AccelA3DispGone(vm);
-    for (unsigned h = 0; vm && h < kRd3MaxFB; h++) {
+    for (unsigned h = 0; vm && h < kRd3MaxFB; h++)
         if (gCfShown[h].vm == vm) gCfShown[h].vm = nullptr;
-        rd3_cf_pend_forget(&gCfPend[h], vm);
+    if (vm && gCfPendLock) {
+        IOSimpleLockLock(gCfPendLock);
+        for (unsigned h = 0; h < kRd3MaxFB; h++) rd3_cf_pend_forget(&gCfPend[h], vm);
+        IOSimpleLockUnlock(gCfPendLock);
     }
 }
 /* a buffer some head's last swap presented (recorded only: card run 58b
@@ -3372,7 +3395,8 @@ static bool rd3AccelCfClip(const RD3CfBounds &r, unsigned w, unsigned h, int *x0
  * RD3CFLOG's 60 lines (spent by the 13th call in card run 58b) - 6 lines per
  * reason, then every 1024th of it */
 enum { kCfWhyDisabled = 0, kCfWhyNoTarget, kCfWhyNoRects, kCfWhyNoFront, kCfWhyNoHead, kCfWhyNothingShown,
-       kCfWhyForeign, kCfWhyStale, kCfWhyMiss, kCfWhyNotLanded, kCfWhyHeadDiffers, kCfWhyFrontNotOwn, kCfWhyCount };
+       kCfWhyForeign, kCfWhyStale, kCfWhyMiss, kCfWhyNotLanded, kCfWhyHeadDiffers, kCfWhyFrontNotOwn, kCfWhyBlocked,
+       kCfWhyForced, kCfWhyEvicted, kCfWhyOverflow, kCfWhyNoHeadMiss, kCfWhyCount };
 static unsigned gCfWhyLogs[kCfWhyCount];
 #define RD3CFWHY(why, ...) do { const unsigned _k = gCfWhyLogs[(why)]++; \
                                 if (_k < 6 || (_k & 1023) == 0) ALOG(__VA_ARGS__); } while (0)
@@ -3397,23 +3421,78 @@ static unsigned rd3AccelCfHead(const void *surf, IOAccelResource2 *src, unsigned
     return byFront < kRd3MaxFB ? byFront : bySurf;
 }
 
-/* this call's rects as rdna3_swap_front.h rects (count ~0u: the whole picture) */
-static unsigned rd3AccelCfRects(const RD3CfBounds *b, unsigned count, struct rd3_rect *out, unsigned max)
+/* rdna3_swap_front.h's pending table, always under gCfPendLock (the vidmem
+ * free path drops lists on any thread); nothing else is done under it */
+static void rd3CfPendNote(unsigned head, const void *buf, unsigned flags)
 {
-    if (!b) return ~0u;
-    if (count > max) return ~0u;
-    for (unsigned i = 0; i < count; i++) { out[i].x = b[i].x; out[i].y = b[i].y; out[i].w = b[i].w; out[i].h = b[i].h; }
-    return count;
+    if (flags & RD3_PEND_EVICTED) {
+        const SInt64 k = OSAddAtomic64(1, &gCntCfPendEvicted);
+        RD3CFWHY(kCfWhyEvicted, "copy forward: head %u: the pending-rect table was full, the oldest list went (its "
+                 "rects may stay stale) (%lld such)", head, (long long)k + 1);
+    }
+    if (flags & RD3_PEND_OVERFLOW) {
+        const SInt64 k = OSAddAtomic64(1, &gCntCfPendWhole);
+        RD3CFWHY(kCfWhyOverflow, "copy forward: head %u: more than %u rects pending in one buffer -- the whole picture is "
+                 "pending there (%lld such)", head, RD3_CF_PEND_RECTS, (long long)k + 1);
+    }
+    (void)buf;
+}
+static void rd3CfPendAdd(unsigned head, const void *buf, const struct rd3_rect *r, unsigned n, const void *keep)
+{
+    if (head >= kRd3MaxFB || !buf || !gCfPendLock) return;
+    IOSimpleLockLock(gCfPendLock);
+    const unsigned flags = rd3_cf_pend_add(&gCfPend[head], buf, r, n, keep);
+    IOSimpleLockUnlock(gCfPendLock);
+    rd3CfPendNote(head, buf, flags);
+}
+static unsigned rd3CfPendTake(unsigned head, const void *dst, const void *src, unsigned w, unsigned h, bool engine,
+                              struct rd3_rect *out, unsigned max, unsigned n)
+{
+    if (head >= kRd3MaxFB || !gCfPendLock) return 0;
+    struct rd3_cf_take t = { 0, 0 };
+    IOSimpleLockLock(gCfPendLock);
+    const unsigned k = rd3_cf_pend_take(&gCfPend[head], dst, src, (int)w, (int)h, engine ? 1 : 0, out, max, &t);
+    IOSimpleLockUnlock(gCfPendLock);
+    if (t.blocked) {
+        const SInt64 c = OSAddAtomic64(1, &gCntCfPendBlocked);
+        RD3CFWHY(kCfWhyBlocked, "copy forward #%u: head %u: the source missed the target's pending rects too -- they wait "
+                 "(%u blocked calls in a row copy anyway) (%lld such)", n, head, RD3_CF_PEND_BLOCKED_MAX, (long long)c + 1);
+    }
+    if (t.forced) {
+        const SInt64 c = OSAddAtomic64(1, &gCntCfPendForced);
+        RD3CFWHY(kCfWhyForced, "copy forward #%u: head %u: pending rects copied from a source that missed them too, after "
+                 "%u blocked calls -- both buffers alike there (stale, no A B A B) (%lld such)", n, head,
+                 RD3_CF_PEND_BLOCKED_MAX, (long long)c + 1);
+    }
+    return k;
 }
 
 /* the call's rects stay stale in its target (nothing copied into it this
- * time): pending there, copied with the next copy forward into it that can */
-static void rd3AccelCfPendCall(unsigned head, const void *dstVm, const RD3CfBounds *b, unsigned count)
+ * time): pending there, copied with the next copy forward into it that can.
+ * 'whole': the whole target (no rect array); else the rects, or the whole
+ * target when there are more than the table holds; none: nothing. */
+static void rd3AccelCfPendCall(unsigned head, const void *dstVm, const RD3CfBounds *b, unsigned count, bool whole)
 {
-    if (head >= kRd3MaxFB || !dstVm || (b && !count)) return;
+    if (head >= kRd3MaxFB || !dstVm) return;
+    if (whole) { rd3CfPendAdd(head, dstVm, nullptr, 0, nullptr); return; }
+    if (!b || !count) return;
+    if (count > RD3_CF_PEND_RECTS) { rd3CfPendAdd(head, dstVm, nullptr, 0, nullptr); return; }
     struct rd3_rect r[RD3_CF_PEND_RECTS];
-    const unsigned k = rd3AccelCfRects(b, count, r, RD3_CF_PEND_RECTS);
-    rd3_cf_pend_add(&gCfPend[head], dstVm, k == ~0u ? nullptr : r, k);
+    for (unsigned i = 0; i < count; i++) { r[i].x = b[i].x; r[i].y = b[i].y; r[i].w = b[i].w; r[i].h = b[i].h; }
+    rd3CfPendAdd(head, dstVm, r, count, nullptr);
+}
+
+/* one of the calling surface's own buffers (shapeSurface's array): the one
+ * over 'vm', or 'res' itself; scanned only when an answer is needed */
+static IOAccelResource2 *rd3AccelCfOwn(IOAccelResource2 *const *bufs, unsigned nbufs, const void *vm,
+                                       IOAccelResource2 *res)
+{
+    for (unsigned i = 0; bufs && (vm || res) && i < nbufs; i++) {
+        IOAccelResource2 *r = OSDynamicCast(IOAccelResource2, (OSObject *)bufs[i]);
+        if (!r) continue;
+        if (res ? r == res : (const void *)rd3res_vidmem(r) == vm) return r;
+    }
+    return nullptr;
 }
 
 /* one rect of a copy forward: SDMA, else the CPU for small rects; false: not copied */
@@ -3468,7 +3547,7 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
      * which would switch copy forward off for good (review of e2bf78e) */
     if (!okD) {
         OSAddAtomic64(1, &gCntCfRefused); gCfFailed++;
-        rd3AccelCfPendCall(head, dstVm, b, count);
+        rd3AccelCfPendCall(head, dstVm, b, count, false);
         RD3CFWHY(kCfWhyNoTarget, "copy forward #%u: the target (phys 0x%llx) is not copyable now (no vidmem, mapping or "
                  "4-byte geometry) -- nothing copied, its rects stay pending%s", n, rd3res_phys(dst),
                  head < kRd3MaxFB && dstVm ? "" : " (no head or no vidmem: not even that)");
@@ -3476,21 +3555,17 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
     }
     if (count && !b) {
         OSAddAtomic64(1, &gCntCfRefused); gCfFailed++;
-        rd3AccelCfPendCall(head, D.vm, nullptr, 0);
+        rd3AccelCfPendCall(head, D.vm, nullptr, 0, true);
         RD3CFWHY(kCfWhyNoRects, "copy forward #%u: %u rect(s) but no rect array -- nothing copied, the whole target is "
                  "pending", n, count);
         return kIOReturnSuccess;
     }
     const void *shownVm = head < kRd3MaxFB ? gCfShown[head].vm : nullptr;
     const unsigned long long shownCookie = head < kRd3MaxFB ? gCfShown[head].cookie : 0;
-    IOAccelResource2 *own = nullptr;
-    bool srcOwn = false;
-    for (unsigned i = 0; bufs && i < nbufs; i++) {
-        IOAccelResource2 *r = OSDynamicCast(IOAccelResource2, (OSObject *)bufs[i]);
-        if (!r) continue;
-        if (shownVm && !own && (const void *)rd3res_vidmem(r) == shownVm) own = r;
-        if (r == src) srcOwn = true;
-    }
+    /* the surface's own buffer the head showed, looked for only when it is
+     * neither the target nor the front */
+    IOAccelResource2 *own = head < kRd3MaxFB && shownVm && shownVm != (const void *)D.vm &&
+                            shownVm != (const void *)srcVm ? rd3AccelCfOwn(bufs, nbufs, shownVm, nullptr) : nullptr;
     struct rd3_cf_in in;
     in.srcIsDst = srcVm && srcVm == D.vm;
     in.headKnown = head < kRd3MaxFB;
@@ -3514,7 +3589,7 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
     }
     case RD3_CF_SKIP_NOTHING_SHOWN: {
         const SInt64 k = OSAddAtomic64(1, &gCntCfNothingShown[head]);
-        if (count) rd3AccelCfPendCall(head, D.vm, b, count);
+        rd3AccelCfPendCall(head, D.vm, b, count, false);
         RD3CFWHY(kCfWhyNothingShown, "copy forward #%u: head %u has shown nothing recorded yet (before its first swap, "
                  "after a free or a mode switch) -- nothing copied (the front, phys 0x%llx, is not the last frame "
                  "either), %u rect(s) pending in the target (%lld such calls)", n, head, rd3res_phys(src), count,
@@ -3530,7 +3605,7 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
     }
     case RD3_CF_SKIP_FOREIGN: {
         const SInt64 k = OSAddAtomic64(1, &gCntCfForeign[head]);
-        if (count) rd3AccelCfPendCall(head, D.vm, b, count);
+        rd3AccelCfPendCall(head, D.vm, b, count, false);
         RD3CFWHY(kCfWhyForeign, "copy forward #%u: head %u shows a buffer that is not this surface's (another surface, "
                  "an IOSurface flip) -- never a source, nothing copied, %u rect(s) pending in the target (%lld such "
                  "calls)", n, head, count, (long long)k + 1);
@@ -3541,7 +3616,7 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
         const RD3VidMemory *ov = rd3res_vidmem(own);
         if (!rd3AccelCfSide(own, &S) || !ov || ov->fAllocationCookie != shownCookie || S.vm == D.vm) {
             const SInt64 k = OSAddAtomic64(1, &gCntCfShownStale);
-            rd3AccelCfPendCall(head, D.vm, b, count);
+            rd3AccelCfPendCall(head, D.vm, b, count, false);
             RD3CFWHY(kCfWhyStale, "copy forward #%u: head %u: the buffer it showed (phys 0x%llx) is not usable now "
                      "(re-allocated or not copyable) -- nothing copied, %u rect(s) pending in the target (%lld such "
                      "calls)", n, head, rd3res_phys(own), count, (long long)k + 1);
@@ -3552,9 +3627,10 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
     case RD3_CF_COPY_SRC:
     default:
         /* the front only when it is this surface's own buffer too */
+        const bool srcOwn = src && rd3AccelCfOwn(bufs, nbufs, nullptr, src) != nullptr;
         if (!src || !srcOwn || !rd3AccelCfSide(src, &S)) {
             OSAddAtomic64(1, &gCntCfRefused); gCfFailed++;
-            rd3AccelCfPendCall(head, D.vm, b, count);
+            rd3AccelCfPendCall(head, D.vm, b, count, false);
             RD3CFWHY(srcOwn ? kCfWhyNoFront : kCfWhyFrontNotOwn, "copy forward #%u: the front (phys 0x%llx) holds the "
                      "last frame but %s -- nothing copied, %u rect(s) pending in the target", n, rd3res_phys(src),
                      srcOwn ? "is not copyable now" : "is not one of the surface's own buffers", count);
@@ -3567,8 +3643,7 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
     /* the rects the target missed before, those the source holds (it did
      * not miss them itself); the whole picture only with the copy engine on */
     struct rd3_rect extra[RD3_CF_PEND_RECTS];
-    const unsigned ne = head < kRd3MaxFB
-        ? rd3_cf_pend_take(&gCfPend[head], D.vm, S.vm, (int)w, (int)h, !gCfSdmaOff, extra, RD3_CF_PEND_RECTS) : 0;
+    const unsigned ne = rd3CfPendTake(head, D.vm, S.vm, w, h, !gCfSdmaOff, extra, RD3_CF_PEND_RECTS, n);
     unsigned long long us = 0, bytes = 0;
     unsigned best = 0, bestArea = 0, done = 0, failed = 0, failedExtra = 0;
     int x0, y0, x1, y1;
@@ -3625,8 +3700,14 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
              "(%u SDMA, %u CPU, %u failed), %llu MiB, %llu us SDMA, max %llu us per call, %u same buffer]", n, done,
              count + ne, ne, bytes >> 10, us, gCfSdmaOff ? " (SDMA off)" : "", n, gCfRects, gCfSdma, gCfCpu, gCfFailed,
              gCfBytes >> 20, gCfUsec, gCfUsecMax, gCfSkipped);
-    if (head >= kRd3MaxFB)   /* no head: the older answer, a failure goes back to CoreDisplay */
-        return failed ? kIOReturnUnsupported : kIOReturnSuccess;
+    if (head >= kRd3MaxFB) {
+        /* no head (the front was shown): no table to keep the miss in;
+         * still not reported to CoreDisplay (copy forward off for good) */
+        if (failed)
+            RD3CFWHY(kCfWhyNoHeadMiss, "copy forward #%u: no head known: %u of %u rect(s) not copied (SDMA refused, too "
+                     "big for the CPU) -- they stay stale, nowhere to keep them", n, failed, count);
+        return kIOReturnSuccess;
+    }
     if (pick == RD3_CF_COPY_SHOWN && !failed) OSAddAtomic64(1, &gCntCfShown[head]);
     if (pick == RD3_CF_COPY_SRC && !failed) OSAddAtomic64(1, &gCntCfSrc[head]);
     if (ne > failedExtra) {
@@ -3640,7 +3721,7 @@ IOReturn rd3AccelCopyForward(const void *surf, unsigned fbIndex, IOAccelResource
          * copy forward into it that can; not reported to CoreDisplay, which
          * would switch copy forward off for good (rdna3_swap_front.h) */
         const SInt64 k = OSAddAtomic64(1, &gCntCfMiss[head]);
-        rd3_cf_pend_add(&gCfPend[head], D.vm, overflow ? nullptr : missed, overflow ? ~0u : nm);
+        rd3CfPendAdd(head, D.vm, overflow ? nullptr : missed, overflow ? ~0u : nm, S.vm);
         RD3CFWHY(kCfWhyMiss, "copy forward #%u: head %u: %u of %u rect(s) not copied (SDMA refused%s, too big for the "
                  "CPU) -- pending in the target (phys 0x%llx) (%lld such calls)", n, head, failed, count + ne,
                  gCfSdmaOff ? " and off" : "", D.vm->fPhys, (long long)k + 1);
