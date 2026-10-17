@@ -71,7 +71,8 @@ def classify(name, text):
     m = re.search(r"-> (PASS|FAIL|WARN)\b", t)
     if m:
         return _lvl(m.group(1)), t
-    body = re.sub(r"^(?!(?:ALL )?PASSED)[A-Z][A-Z0-9 ]*: ", "", t)
+    # an upper-case label ("METAL: ", "MODES: ") is dropped, a verdict word before the colon is not
+    body = re.sub(r"^(?!(?:ALL PASSED|PASSED|FAILED|CRASHED|NOT STARTED|NOTHING TESTED)\b)[A-Z][A-Z0-9 ]*: ", "", t)
 
     # 2. counts
     m = re.match(r"^(\d+) verified, (\d+) wrong", t)
@@ -95,14 +96,15 @@ def classify(name, text):
     if m:      # Vulkan CTS total or group
         if int(m.group(2)) > 0:
             return FAIL, t
-        return (WARN if int(m.group(3) or 0) > 0 else PASS), t
+        return (FAIL if int(m.group(3) or 0) > 0 else PASS), t   # a group without totals hung or died
     if name.strip() == "failed case":
         return FAIL, t
 
     # 3. keywords at the start (behind a label)
     if re.match(r"^(ALL )?PASSED\b", body):
         return PASS, t
-    if re.match(r"^(FAILED|CRASHED|NOT STARTED)\b", body) or "NO PRESENT CALLBACK" in t or "FROZEN" in t:
+    if re.match(r"^(FAILED|CRASHED|NOT STARTED)\b", body) or "NO PRESENT CALLBACK" in t or "FROZEN" in t \
+            or "no verdict" in low or re.match(r"^no totals", body):
         return FAIL, t
     if re.match(r"^(NOTHING TESTED|not run)\b", body) or "NOT MEASURED" in t or "not judged" in low \
             or "no present path" in low or t == "?":
@@ -134,7 +136,7 @@ def classify(name, text):
     if n.startswith("display sleep") and "(kernel log): NONE" in t:
         return WARN, t
     if n.startswith("r4 macos") and "not running" in t:
-        return WARN, t
+        return FAIL, t
     if n.startswith("m4 on the screen") and t.endswith("no picture"):
         return NOT_RUN, t
     if n.startswith("boot-args"):
@@ -163,17 +165,37 @@ def _screens(n, t):
         return (PASS if "sleep" in n and blanked > 0 else FAIL), t
     if re.search(r"dark|NO SIGNAL", t):
         return FAIL, t
+    if "sleep" in n:     # lit pipes in the sleep look: nothing blanked is a failed display sleep
+        return (FAIL if blanked == 0 else WARN), t
+    if "wake" in n and blanked > 0:
+        return FAIL, t   # a pipe is still blanked after the wake
     if re.search(r"UNDERFLOW|SAME SURFACE|NO TX LINES|TX: ", t):
         return WARN, t
-    if "sleep" in n or ("wake" in n and blanked > 0):
-        return WARN, t   # lit while it should sleep / still blanked after the wake
     return PASS, t
 
 
+def _fail_name(rest):
+    """(name, text) of an indented triage line 'FAIL <name padded> <text>';
+    the name when it is set off by two spaces or ends in a colon, else the
+    whole line as text"""
+    m = re.match(r"^(\S+(?: \S+){0,3}?)\s{2,}(\S.*)$", rest)
+    if m:
+        return "triage: " + m.group(1), m.group(2)
+    m = re.match(r"^([A-Za-z][A-Za-z0-9/ ]{0,30}?): (.*)$", rest)
+    if m:
+        return "triage: " + m.group(1), m.group(2)
+    return "triage", rest
+
+
 def parse(lines):
-    """(rows, result line, note): rows = [(name, text)] of the SUMMARY
-    section; without one, the triage's '!!' lines (note says so)"""
+    """(rows, result line, note). rows = [(name, text, forced)]: the SUMMARY
+    section's rows (forced None) and every indented 'FAIL ...' detail line
+    outside it (forced FAIL: stale builds, VM faults, WindowServer starts,
+    planes in transactions, display sleep ... are printed only there). Without
+    a SUMMARY (no report from macOS arrived) the triage's '!!' complaints,
+    their continuation lines joined, are the rows."""
     rows, result, note, in_sum = [], "", "", False
+    forced = []
     for line in lines:
         s = line.rstrip("\n")
         if s.startswith("RESULT:"):
@@ -184,26 +206,40 @@ def parse(lines):
         elif in_sum and s.startswith("====="):
             in_sum = False
         elif in_sum and s.startswith("  ") and s.strip():
-            rows.append(split_row(s))
+            rows.append(split_row(s) + (None,))
+        elif not in_sum:
+            m = re.match(r"^\s+FAIL\s+(\S.*)$", s)
+            if m:
+                forced.append(_fail_name(m.group(1).strip()) + (FAIL,))
     if not rows:
         note = "no SUMMARY in the triage (no report from macOS arrived): the triage's own complaints"
-        for line in lines:
-            s = line.rstrip("\n")
+        i = 0
+        while i < len(lines):
+            s = lines[i].rstrip("\n")
             if s.lstrip().startswith("!!"):
-                rows.append(("triage", s.lstrip()[2:].strip()))
-    return rows, result, note
+                msg = s.lstrip()[2:].strip()
+                j = i + 1       # the message goes on in indented lines (up to 3)
+                while j < len(lines) and j - i <= 3 and re.match(r"^\s+\S", lines[j]) and \
+                        not re.match(r"^\s*(!!|FAIL\b)", lines[j]):
+                    msg += " " + lines[j].strip()
+                    j += 1
+                rows.append(("triage", msg, FAIL))
+                i = j
+            else:
+                i += 1
+    return forced + rows, result, note
 
 
 def render(rows, result, note, color, width):
     out = []
     if note:
         out.append(note)
-    namew = min(max([len(nm) for nm, _ in rows] or [0]), 32)
+    namew = min(max([len(r[0]) for r in rows] or [0]), 32)
     counts = dict.fromkeys(ORDER, 0)
     failed = []
-    for nm, tx in rows:
-        if nm.strip() == "triage" and note:
-            lv = FAIL
+    for nm, tx, forced in rows:
+        if forced:
+            lv = forced
         else:
             lv, tx = classify(nm, tx)
         counts[lv] += 1
@@ -222,6 +258,8 @@ def render(rows, result, note, color, width):
         out.append("FAIL: " + ", ".join(failed))
     if result:
         out.append(result)
+        if "failed" in result and not counts[FAIL]:
+            out.append("RESULT says failed but no FAIL row found: read 00-triage.txt")
     return "\n".join(out)
 
 

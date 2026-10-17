@@ -1398,7 +1398,7 @@ cmd_result() {
         >> "$tmp/rdna3-result/00-host.txt" || true   # set -e + pipefail: ls dies of SIGPIPE behind head
     python3 "$ROOT/tools/triage_reports.py" "$tmp/rdna3-result" > "$tmp/rdna3-result/00-triage.txt" 2>&1 || true
     # the per-test list goes into the result too (before the tarball is made)
-    checklist --no-color "$tmp/rdna3-result/00-triage.txt" > "$tmp/rdna3-result/00-checklist.txt" || true
+    checklist --no-color --width 400 "$tmp/rdna3-result/00-triage.txt" > "$tmp/rdna3-result/00-checklist.txt" || true
     mkdir -p "$(dirname "$out")"
     tar -czf "$out.tmp" -C "$tmp" rdna3-result && mv -f "$out.tmp" "$out"
     say "Result: $out ($(du -h "$out" | cut -f1), ${#sel[@]} files)"
