@@ -576,9 +576,11 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg|"
                        r"_latchpend|_latchwait|_latchus|_latchmax|_latchtimeout|_latchunknown|_latchoff|_tornchk|"
                        r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill|_latchimmediate|_latchwaitsoff|"
-                       r"_flipfailed|_copy|_copyempty|_copylanded|_copylanded_would|_stalehold|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
+                       r"_flipfailed|_copy|_copyempty|_copylanded|_copylanded_would|_stalehold|_stalehold_would|_stalehold_miss|"
+                       r"_stalehold_changed|_stalenocf|_stalereset|_staleevict|_stalegone|"
+                       r"_stalecheck_(?:norecord|changed|cf|sameshown|nopanel|nohead)|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
                        r"_copylatchto|_copyfail|_copydirect|_copyfront|_copyfrontfail|_copynowait|_copybrkflip|_copyfreewait)?_h\d|"
-                       r"swaps_copybrktrips|swap_latch|swap_torn|swap_landed|"
+                       r"swaps_copybrktrips|swap_latch|swap_torn|swap_landed|swap_stale|"
                        r"swap_mode|swap_trace_events|swap_trace_nomem|swap_trace_lost|cf_sc(?:src|scanout|stale)_h\d|"
                        r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed|onpanel)_h\d|swaps_skipped_all|"
                        r"swaps_nohead|cf_(?:calls|nohead|shown_stale|refused|same|disabled|pend_blocked|pend_forced|pend_evicted|"
@@ -740,6 +742,11 @@ SERIAL_SWAP_LINE = re.compile(r"(flicker: head \d+: [^\n]*|swap: head \d+: \d+ s
                               r"copy forward #\d+: head \d+: the target [^\n]*STILL ON THE PANEL[^\n]*|"
                               r"swap: head \d+: the buffer [^\n]*was FREED[^\n]*|"
                               r"swap: head \d+: the empty back [^\n]*read again[^\n]*|"
+                              # card run 2026-10-17c: the landed buffer's and the stale back's decisions
+                              r"swap #\d+: head \d+: (?:would hold the stale back|would present landed buffer|"
+                              r"the stale-back table is full|the stale back )[^\n]*|"
+                              r"swap copy: head \d+: (?:the stale-back records forgotten|the back at 0x[0-9a-f]+ was "
+                              r"freed)[^\n]*|swap (?:stale|landed): [^\n]*|"
                               r"copy forward #\d+: the front buffer \(vm [^)]*\) was never shown[^\n]*)")
 SERIAL_SUMMARY = re.compile(
     r"swap: head (\d+): (\d+) swaps over (\d+) buffer\(s\) now \([^)]*\), (\d+) distinct so far, (\d+) buffer changes; "
@@ -1060,36 +1067,55 @@ BLACK_SHARE = 0.05
 def swapcopy_verdict(c):
     """[(level, text)] from the mode 1/2 counters (swaps_copy*_h<N>,
     cf_sc*_h<N>, swap_mode); [] on a kernel without them"""
-    if not c or not any(k.startswith("swaps_copy") for k in c):
+    if not c or not any(k.startswith(("swaps_copy", "swaps_stalehold")) for k in c):
         return []
     out = []
+    # card run 2026-10-17c's counters: absent on an older kext - said so, never printed as zeros
+    if "swap_landed" not in c:
+        out.append(("WARN", "counter missing: swap_landed (kext older than 2026-10-17c): the landed buffer is not "
+                            "counted"))
     mode = c.get("swap_mode")
     out.append(("INFO", "swap mode %s at the dump (0 flip, 1 copy keeping the picture over an empty back, 2 copy all)" %
                 ("?" if mode is None else mode)))
     if c.get("swaps_copybrktrips"):
         out.append(("WARN", "the SDMA breaker of modes 1/2 opened %d time(s): the swaps flipped as in mode 0 while it "
                             "was open (the kernel log's 'SDMA BREAKER OPEN' line says why)" % c["swaps_copybrktrips"]))
-    heads = sorted(set(m.group(1) for m in (re.match(r"swaps_copy_h(\d)$", k) for k in c) if m))
+    heads = sorted(set(m.group(2) for m in (re.match(r"swaps_(copy|stalehold)_h(\d)$", k) for k in c) if m))
     for h in heads:
         def g(k):
             return c.get(k + "_h" + h, 0)
-        copies = g("swaps_copy")
-        if not copies and not g("swaps_copyempty") and not g("swaps_copyfail"):
+
+        def v(k):   # a counter as text: "?" when this kext has none
+            return str(c[k + "_h" + h]) if k + "_h" + h in c else "?"
+        if "swaps_copy_h" + h not in c:
+            out.append(("WARN", "head %s: counter missing: swaps_copy_h%s although swaps_stalehold_h%s is %s - a "
+                                "partial dump (the collector's grep), the copies not counted" %
+                        (h, h, h, v("swaps_stalehold"))))
             continue
+        copies = g("swaps_copy")
+        if not copies and not g("swaps_copyempty") and not g("swaps_copyfail") and not g("swaps_stalehold"):
+            continue
+        missing = [k for k in ("swaps_stalehold", "swaps_copylanded") if k + "_h" + h not in c]
+        if missing:
+            out.append(("WARN", "head %s: counter missing: %s (kext older than 2026-10-17c): %s not counted" % (
+                h, ", ".join(k + "_h" + h for k in missing),
+                " and ".join({"swaps_stalehold": "the stale back", "swaps_copylanded": "the landed buffer"}[k]
+                             for k in missing))))
         black, held, fail, direct = g("swaps_copyblack"), g("swaps_copyempty"), g("swaps_copyfail"), g("swaps_copydirect")
         landed = g("swaps_copylanded")   # card run 2026-10-17c: the landed buffer presented instead of the back
         would = g("swaps_copylanded_would")   # ... found but not presented (debug.rdna3accel_swap_landed=0)
         stale = g("swaps_stalehold")   # ... backs WindowServer did not redraw since presented, held (H-STALE)
         waits = g("swaps_copywait")
         nowait, brk, freewait = g("swaps_copynowait"), g("swaps_copybrkflip"), g("swaps_copyfreewait")
-        line = ("head %s: %d backs copied (%d MiB, avg %d us, max %d us), %d of them the landed buffer instead of an "
-                "empty / stale back, %d empty backs kept off a picture, %d stale backs held (not redrawn since "
+        line = ("head %s: %d backs copied (%d MiB, avg %d us, max %d us), %s of them the landed buffer instead of an "
+                "empty / stale back, %d empty backs kept off a picture, %s stale backs held (not redrawn since "
                 "shown), %d black "
                 "frames, %d failed, %d direct copies (no second buffer: may tear), %d waits for the last flip (avg %d "
                 "us, %d ran out), front copies %d ok / %d not; copy forward from the front %d, from the panel's buffer "
                 "%d, nothing to copy from %d" % (h, copies, g("swaps_copybytes") >> 20,
                                                 g("swaps_copyus") // copies if copies else 0, g("swaps_copyusmax"),
-                                                landed, held, stale, black, fail, direct, waits,
+                                                v("swaps_copylanded"), held, v("swaps_stalehold"), black, fail,
+                                                direct, waits,
                                                 g("swaps_copywaitus") // waits if waits else 0, g("swaps_copylatchto"),
                                                 g("swaps_copyfront"), g("swaps_copyfrontfail"), g("cf_scsrc"),
                                                 g("cf_scscanout"), g("cf_scstale")))
@@ -1127,6 +1153,17 @@ def swapcopy_verdict(c):
             out.append(("INFO", "head %s: H-STALE handled: %d stale backs held (WindowServer did not redraw them since "
                                 "this head presented them, a newer frame after them: the panel kept it; the trace's "
                                 "H-STALE line says whether any was still copied)" % (h, stale)))
+        kern = rdna3_trace.stale_counters(c, int(h)) if rdna3_trace is not None else None
+        if kern:
+            # why backs were not held, and the checks of the rule's assumptions (needs the card)
+            sw = c.get("swap_stale")
+            lvs = "WARN" if g("swaps_stalehold_changed") or g("swaps_stalehold_would") else "INFO"
+            out.append((lvs, "head %s: stale back (swap_stale %s): %s%s%s" % (
+                h, "?" if sw is None else sw, kern,
+                "; %d held backs CHANGED in the 4 ms re-sample (a frame landed after the hold)" %
+                g("swaps_stalehold_changed") if g("swaps_stalehold_changed") else "",
+                "; %d would have been held (debug.rdna3accel_swap_stale=0)" % g("swaps_stalehold_would")
+                if g("swaps_stalehold_would") else "")))
     return out
 
 
@@ -1261,6 +1298,9 @@ def _trace_lines(path, txt, klog="", args=""):
         out.append(("FAIL", "trace incomplete: Q1-Q11 (no 36-frame-trace.txt in the archive: a collect.sh before "
                             "card run 2026-10-17b)"))
     if not tr.events and not tr.headers:
+        if any(re.match(r"swaps_stalehold_h\d$", k) for k in c):
+            out.append(("WARN", "H-STALE not judged: no trace in the report (swaps_stalehold_h<N> counters only): "
+                                "whether a stale back was still copied needs the trace stream"))
         if current and accel_on:
             return out + [("FAIL", "trace incomplete: Q1-Q11 (no 36-frame-trace.bin, no -trace-stream.bin and no "
                                    "'tr' lines although the accelerator runs these sources)%s" %
@@ -1276,6 +1316,7 @@ def _trace_lines(path, txt, klog="", args=""):
            "ab_ran": "== swap A/B phase" in txt,
            "ab_expected": ab_expected,
            "size_problems": size_problems,
+           "counters": c,
            "core_expected": any(n.endswith("drm-trace.bin") or "drmtrace" in n for n, _ in inputs) or
                             "== swap A/B" in txt}
     if not txt:
@@ -2301,11 +2342,12 @@ def summary(path, serial=None):
     for lv, t in latch_lines(path, txt, args):
         out.append(("flip latch", "%s %s" % (lv, t)))
     for lv, t in swapcopy_verdict(a3_counters(txt) if txt else {}):
-        if lv != "INFO" or t.startswith("swap mode") or "H-B2 handled" in t or "H-STALE handled" in t:
+        if lv != "INFO" or t.startswith("swap mode") or "H-B2 handled" in t or "H-STALE handled" in t or \
+                ": stale back (swap_stale" in t:
             out.append(("swap copy", "%s %s" % (lv, t)))
     tlv, _ = trace_lines(path, txt, log, args)
     for lv, t in tlv:
-        if lv in ("FAIL", "CRITICAL", "WARN") or t.startswith("A/B") or t.startswith(("H-B2", "H-STALE")):
+        if lv in ("FAIL", "CRITICAL", "WARN") or t.startswith("A/B") or t.startswith(("H-B2", "H-STALE", "A-B-A")):
             out.append(("frame trace", "%s %s" % (lv, t[:300])))
     cdl = read_tar_member(path, "24-log-coredisplay.txt")
     for lv, t in coredisplay_cf_lines(cdl, tlv):

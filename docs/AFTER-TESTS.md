@@ -2317,7 +2317,7 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
 | Seen | Trace / triage line | Action |
 |---|---|---|
 | black frames in mode 1 | A/B: `BLACK frames` > 0 in mode 1, `swaps_copyblack_h<N>` | mode 1 only copies an empty back with no picture to lose: look at Q2 for where the frame went; `debug.rdna3accel_swap_mode=0` to compare |
-| `H-STALE` FAIL (2026-10-17c) | a mode 1/2 copy of a back with no copy forward into it since it was shown, unchanged, < 20 ms after another back's copy; A-B-A on the scanout samples | modes 1/2 hold such a back (`swaps_stalehold_h<N>`); see "The stale back" under card run 2026-10-17c |
+| `H-STALE` FAIL (2026-10-17c) | a mode 1/2 copy of a back with no copy forward into it since it was shown, unchanged, < 20 ms after another back's copy; `A-B-A` on the scanout samples | mode 1 holds such a back (`swaps_stalehold_h<N>`, `debug.rdna3accel_swap_stale`); see "The stale back" under card run 2026-10-17c |
 | `H-B2` FAIL | a back named by swaps never receives a frame (no aperture write, empty at every swap) and a frame was held back or black shown at its swaps (since card run 2026-10-17c: WARN `no frame lost` / INFO `handled`, see that run) | modes 1/2 present the landed buffer; find with SURFRES / SURFGEM which IOSurface WindowServer draws (H-B2 is the family's / WindowServer's buffer rotation, not a driver write) |
 | `H-COPY` FAIL in mode 0, none in mode 1 | in-place rewrites only while flipping | the copy is right: keep mode 1 |
 | `H-FREE` | VMFREE flags 2-8 | in mode 1 the panel never scans WindowServer's buffers; in mode 0 expected |
@@ -2392,24 +2392,43 @@ then every 256th; shapes sample their buffers for the first 256 shapes.
   scanout samples, 0 on head 0. No GPU work of WindowServer was pending at
   any of those swaps (not a render race); SYNC's dirty bits are 0.
 - Change (evidence-driven, no amdgpu analogue: macOS legacy surface
-  semantics; `common/rdna3_swap_copy.h` `rd3_sc_stale_hold`,
-  `tests/test_swap_copy.c` `stale_model`): modes 1/2 remember per head and
-  per buffer address the hash of the back's 64 samples when the head last
-  presented it and whether a copy forward targeted it since. A back with
-  pixels is held - no copy to the panel, none into the front, the panel
-  keeps the newer frame - when no copy forward targeted it since, its
-  samples are unchanged and another buffer was presented after it (and
-  the panel holds a frame these modes copied). Never presented: copied.
-  The records are forgotten when the surface or the head's framebuffer
-  resource goes, at a display or swap mode change, when D is reallocated,
-  and per address when the VRAM is freed. Mode 0 is unchanged.
+  semantics; `common/rdna3_swap_copy.h` `rd3_sc_stale_check` /
+  `rd3_sc_stale_confirm`, `tests/test_swap_copy.c` `stale_*`): mode 1
+  remembers per head and per buffer address the hashes of two grids of 64
+  samples of the back when the head last presented it (grid 0 the trace's,
+  grid 1 shifted by half a cell) and whether a copy forward targeted it
+  since (marked in every head's table). A back with pixels is held - no
+  copy to the panel, none into the front, the panel keeps the newer frame
+  - when its grid 0 is unchanged, no copy forward targeted it, another
+  buffer was presented after it, the panel holds a frame mode 1 copied,
+  and grid 1, read again then, is unchanged too (else: copied, counted as a
+  miss). Never presented: copied. Mode 2 stays the copy-everything control
+  (never holds), mode 0 is unchanged. `debug.rdna3accel_swap_stale` /
+  boot-arg `rdna3swapstale` (default 1) set to 0 copies such a back as
+  before and only counts and traces it. The records are forgotten when the
+  surface or the head's framebuffer resource goes, at a display or swap
+  mode change, when D is reallocated, and per address when the VRAM is
+  freed. A held back is read again ~4 ms later (the empty back's
+  re-sample budget): a change there is a frame that landed after the hold.
+- The decoder's bands are RGB only, the kernel's hashes include alpha: an
+  alpha-only change reads "unchanged" to the decoder (it may count a stale
+  copy the kernel rightly made).
 
 | Seen | Trace / counter / triage line | Meaning, action |
 |---|---|---|
-| side monitor flickers, windows appear and disappear (mode 1) | `frame trace FAIL H-STALE: head N: k stale backs COPIED (0x... nx, ...; first swap #m, shown before at #p; a A-B-A on the head's scanout samples)` | a kernel without the stale-back hold: modes 1/2 copied a back WindowServer did not redraw (no CF into it since it was shown, unchanged, < 20 ms after another back's copy) over the newer frame |
-| `swap #n: head N: the back 0x... (a2, buf[i]) is unchanged since it was shown at swap #m and 0x... was shown after it, with no copy forward into it -- held, the panel keeps the newer frame (k such)` (log, first 8 then every 1024th) | `swaps_stalehold_h<N>`; SWAP arg 5 (hold) with `v1` bit 23, `v3` = m; the decoder prints `held: stale back (shown at #m)`; triage `INFO swap copy: head N: H-STALE handled: k stale backs held`, `frame trace INFO H-STALE: head N: held k stale backs` | the fix working: nothing to do; the flicker should be gone (compare the looks) |
-| `FAIL H-STALE ... ; k held` | the kernel held some, but a stale back was still copied | the decoder compares band bytes, the kernel a 64-bit hash of the same samples: a copy here means the samples differed in alpha or a band byte collided, or a record was evicted (8 per head) - read that swap's timeline |
-| flicker stays, `swaps_stalehold_h<N>` > 0, no `H-STALE` FAIL | a back held although WindowServer redrew it between the 64 samples (a small redraw without a copy forward) | the panel misses that redraw until the next frame: look for the held swap's back drawn by CS / aperture writes; open item N31 |
+| side monitor flickers, windows appear and disappear (mode 1) | `frame trace FAIL H-STALE: head N: c mode 1/2 copies decoded, s stale copied, h held, a A-B-A on the scanout samples - stale backs COPIED (0x... nx, ...; first swap #m, shown before at #p): ...; <why>` | stale backs reached the panel. `<why>` says which kext: `no stale hold in the trace: a kext before the stale-back hold` (update it), `the kext has the hold` or, with the counters, `kernel: ... not held: norecord, changed, cf, sameshown, nopanel, nohead; evicted, second-grid misses, ...` (the reason the kernel copied them) |
+| `frame trace WARN A-B-A: head N: a A-B-A patterns on the scanout samples ... its PASS does not cover this` | SCAN 0xfe after the copies: a picture back after one other | the flicker the panel showed; the kernel's `flicker` test hashes the backs and can PASS while this happens |
+| `swap #n: head N: the back 0x... (a2, buf[i]) is unchanged since it was shown at swap #m and 0x... was shown after it, with no copy forward into it -- held, the panel keeps the newer frame (k such)` (log, first 8 then every 1024th) | `swaps_stalehold_h<N>`; SWAP arg 5 with `v1` bit 23, `v3` = m; decoder `held: stale back (shown at #m)`; triage `INFO swap copy: head N: H-STALE handled: k stale backs held`, `frame trace INFO H-STALE: head N: ... 0 stale copied, k held` | the fix working: nothing to do; compare the looks |
+| `swap #n: head N: would hold the stale back 0x... -- debug.rdna3accel_swap_stale=0, so copied` | `swaps_stalehold_would_h<N>`, SWAP `v1` bit 24, decoder `stale: would hold (swap_stale 0)`; `WARN H-STALE ... copied on purpose` | the switch is off: set `rdna3swapstale=1` (the default) unless this run is the A/B of it |
+| `swap #n: head N: the back 0x... matched its first-grid samples of swap #m but not its second grid ... -- copied, not held` | `swaps_stalehold_miss_h<N>` | a small redraw the first grid missed: the second grid saved it; many of them mean the redraws are small - the rule still works |
+| `swap #n: head N: the stale back 0x... held at this swap ... CHANGED x us later -- a frame landed after the hold` | `swaps_stalehold_changed_h<N>`; SCAN flags 4 and 16 of the back; `WARN swap copy: head N: stale back ...; k held backs CHANGED in the 4 ms re-sample` | WindowServer drew the held back after its swap: that frame waits for the back's next swap. Many: the hold is too eager - open item N31 |
+| `swap #n: head N: the back 0x... changed since it was shown at swap #m although no copy forward targeted it -- copied` | `swaps_stalenocf_h<N>` | WindowServer redraws a back without copy forward: the rule's assumption does not always hold. It is copied (safe); a redraw that both grids miss would be held - N31 (needs the card) |
+| `frame trace FAIL H-STALE: head N: held a REAL frame at k stale hold(s) (first swap #n: a new frame in 0x... / aperture write(s) into the back since swap #m)` | a stale hold while another buffer had a new frame, or after the CPU wrote the back | the hold hid a frame: compare `swaps_stalehold_miss_h<N>` / `_changed_h<N>`; set `rdna3swapstale=0` for the next run if the looks show missing updates |
+| `WARN H-STALE: head N: k of its n swaps were stale holds (half or more): the panel may look frozen` | holds against the head's swaps | compare the looks; WindowServer's two-swap pattern alone gives just under half |
+| `WARN H-STALE: head N: the kernel counted k stale holds, the trace holds h (l events lost)` | `swaps_stalehold_h<N>` against SWAP `v1` bit 23 | the stream did not cover the counters' window (it started late or lost reads), or a hold was not traced |
+| `WARN H-STALE: head N: c mode 1/2 swaps but no copy decoded` / `WARN frame trace: H-STALE not judged: no trace in the report` | no copies in the trace / no trace at all | the stale back is not judged: get the stream (`tools/vm/macos/autoreport.sh`) |
+| `WARN swap copy: head N: counter missing: swaps_stalehold_h<N>, swaps_copylanded_h<N> (kext older than 2026-10-17c)`, `counter missing: swap_landed`, `counter missing: swaps_copy_h<N> although swaps_stalehold_h<N> is k` | the counters the report has | an older kext (`?` printed, never zeros), or a partial dump |
+| `swap copy: head N: the stale-back records forgotten (why; k records)`, `the stale-back table is full (8 buffers): 0x...'s record evicted`, `the back at 0x... was freed -- its stale-back record is forgotten` | `swaps_stalereset_h<N>`, `swaps_staleevict_h<N>`, `swaps_stalegone_h<N>` | the records' life: evictions mean more than 8 buffers per head (each evicted one is copied once) |
 
 ### Card run 2026-10-17c (the CPU-visible VRAM ran out; step agdc + probes)
 

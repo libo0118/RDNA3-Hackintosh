@@ -56,6 +56,7 @@ V1_LANDED = 1 << 21                   # SWAP v1: modes 1/2 presented the landed 
 V1_LANDED_WOULD = 1 << 22             # SWAP v1: one found, not presented (debug.rdna3accel_swap_landed=0)
 LANDED_A1 = 0xfe                      # SWAP v4 >> 24 with V1_LANDED(_WOULD): the landed buffer is a1 itself
 V1_STALE = 1 << 23                    # SWAP v1 with arg 5: a stale back held (v3: the swap that last showed it)
+V1_STALE_WOULD = 1 << 24              # SWAP v1: one would have been held, copied (debug.rdna3accel_swap_stale=0)
 STALE_NS = 20 * 10 ** 6               # H-STALE: a stale copy follows another back's copy within this
 AB_NAME = {0: "-", 1: "A: mode 1", 2: "B: mode 0", 3: "back"}
 
@@ -505,7 +506,7 @@ def segments(trace, swaps=None):
     return seg
 
 
-def hypotheses(trace):
+def hypotheses(trace, ctx=None):
     """[(level, name, text)]: CRITICAL / FAIL / WARN / INFO / PASS, the
     hypothesis each trace pattern names"""
     out = []
@@ -562,7 +563,7 @@ def hypotheses(trace):
                     "plugin's fence waits around them time out too" % (len(capped), capped[0].arg, capped[0].v2,
                                                                        capped[0].v0)))
     out.extend(copy_black(trace, swaps))
-    out.extend(h_stale(trace))
+    out.extend(h_stale(trace, ctx))
     resets = trace.by("RESET")
     if resets:
         out.append(("WARN", "GPU", "%d hang recover%s (first IP %d seq %d)" % (len(resets), "y" if len(resets) == 1
@@ -616,59 +617,106 @@ def h_b2(trace, swaps, h, p, st, drawn, ap):
         if len(sampled) < len(held) else ""))
 
 
+def accel_lost(trace):
+    """events of the accelerator's ring the trace does not hold: every stream
+    read's loss (the boot before the pump too), else the full read's"""
+    acc = [h for h in trace.headers if h["source"] == SRC_ACCEL and h["read_kind"] != READ_SEC]
+    streams = [h for h in acc if h["read_kind"] == READ_STREAM]
+    if streams:
+        return sum(h["lost"] for h in streams)
+    return max([h["lost"] for h in acc] or [0])
+
+
 def stale_backs(trace):
     """the stale back of card run 2026-10-17c, per head over the whole trace:
-    {head: {"copied": [(SWAP, the swap # that showed it before)], "held":
-    [SWAP]}}. A mode 1/2 copy is stale when the back it copied had no copy
+    {head: {"copies": mode 1/2 copies decoded, "copied": [(SWAP, the swap #
+    that showed the back before)], "held": [SWAP], "would": [SWAP] (stale
+    copies the kernel knew of, swap_stale=0), "swaps": the head's swaps,
+    "mode12": its mode 1/2 swaps, "real": [(SWAP, why)] holds of a real
+    frame}}. A mode 1/2 copy is stale when the back it copied had no copy
     forward into it since this head last presented it, its band bytes are
     those of that presentation, and it came less than STALE_NS after
     another back's copy on the head (WindowServer's second swap of a frame,
     naming a back it did not draw): the panel then shows the older frame
-    for most of the frame period. "held": the swaps the kernel held as
-    stale (SWAP v1 bit 23)."""
+    for most of the frame period. The records are forgotten as the kernel
+    forgets them: the address freed (VMFREE), the surface or the head's pipe
+    resource gone (GONE), a swap mode change (MODESET arg 0), a display mode
+    change (MODE arg 1) and the head's D reallocated (VMALLOC flags 8). The
+    bands are RGB only (the kernel's hash has alpha too): an alpha-only
+    change reads "unchanged" here."""
     out = {}
-    st = {}   # head -> {"rec": {addr: [bands, cf since, swap #]}, "last": addr, "t": ns}
-    forget = (T["VMFREE"], T["GONE"], T["MODESET"], T["MODE"])
+    st = {}   # head -> {"rec": {addr: [bands, cf since, swap #, ns]}, "last": addr, "t": ns}
+    ap = {}   # address -> [ns of APERTURE adds]
+    shown_t = {}   # (head, swap #) -> ns
+    forget = (T["VMFREE"], T["GONE"], T["MODESET"], T["MODE"], T["VMALLOC"])
+
+    def head_out(h):
+        return out.setdefault(h, {"copies": 0, "copied": [], "held": [], "would": [], "swaps": 0, "mode12": 0,
+                                  "real": []})
+
     for e in trace.events:
-        if e.src != SRC_ACCEL or e.type not in (T["SWAP"], T["CF"]) + forget:
+        if e.src != SRC_ACCEL or e.type not in (T["SWAP"], T["CF"], T["APERTURE"]) + forget:
             continue
-        # the kernel forgets the records as these do (rdna3_swap_copy.h): the address freed, the surface or
-        # the head's pipe resource gone, a swap or display mode change
+        t = trace.ns(e, e.src)
+        if e.type == T["APERTURE"]:
+            if e.arg == 1:
+                ap.setdefault(e.pa, []).append(t)
+            continue
         if e.type == T["VMFREE"]:
             for hs in st.values():
                 hs["rec"].pop(e.pa, None)
+                if hs["last"] == e.pa:
+                    hs["last"] = None
             continue
         if e.type in forget:
-            if e.type == T["GONE"] or (e.type == T["MODESET"] and e.arg == 0 and e.v0 != e.v1) or \
-                    (e.type == T["MODE"] and e.arg == 1):
-                for h in ([e.head] if e.type == T["GONE"] else list(st)):
-                    st.pop(h, None)
+            if e.type == T["GONE"] or (e.type == T["VMALLOC"] and e.flags & 8):
+                st.pop(e.head, None)
+            elif (e.type == T["MODESET"] and e.arg == 0 and e.v0 != e.v1) or (e.type == T["MODE"] and e.arg == 1):
+                st.clear()
             continue
-        if e.type == T["CF"]:   # the target refreshed (head unknown: every head's record)
-            for h, hs in st.items():
-                if e.head in (0xff, h) and e.pb in hs["rec"]:
+        if e.type == T["CF"]:   # the target refreshed: marked in every head's table, as the kernel does
+            for hs in st.values():
+                if e.pb in hs["rec"]:
                     hs["rec"][e.pb][1] = True
             continue
-        if e.head == 0xff or swap_mode(e) == 0:
+        if e.head == 0xff:
             continue
+        o = head_out(e.head)
+        o["swaps"] += 1
+        if swap_mode(e) == 0:
+            continue
+        o["mode12"] += 1
         hs = st.setdefault(e.head, {"rec": {}, "last": None, "t": None})
+        back, _, _, _, bb, _ = swap_back(e)
         if e.arg == 5 and e.v1 & V1_STALE:
-            out.setdefault(e.head, {"copied": [], "held": []})["held"].append(e)
+            o["held"].append(e)
+            # a real frame held: another buffer had a new frame at the swap, or the CPU wrote the back
+            # (the family's aperture) between its presentation and the hold
+            new = new_frame_elsewhere(trace, e)
+            r = hs["rec"].get(back)
+            t0 = r[3] if r else shown_t.get((e.head, e.v3))
+            wrote = [x for x in ap.get(back, ()) if t0 is not None and t0 <= x <= t]
+            if new:
+                o["real"].append((e, "a new frame in 0x%x at that swap" % new[0]))
+            elif wrote:
+                o["real"].append((e, "%d aperture write(s) into the back since swap #%d" % (len(wrote), e.v3)))
             continue
         if e.arg != 4:
             continue
-        back, _, _, _, bb, _ = swap_back(e)
+        o["copies"] += 1
         lb = swap_landed(trace, e) if e.v1 & V1_LANDED else 0
         if lb:   # the landed buffer went to the panel, not the back named; its bands are in that swap's SCAN
             back = lb
             bb = next((s.ba for s in _scans_by_swap(trace).get((e.head, e.v0), ()) if s.pa == lb), None)
-        t = trace.ns(e, e.src)
         r = hs["rec"].get(back)
         if (r and bb is not None and not r[1] and r[0] == bb and hs["last"] not in (None, back) and
                 hs["t"] is not None and t - hs["t"] < STALE_NS):
-            out.setdefault(e.head, {"copied": [], "held": []})["copied"].append((e, r[2]))
-        hs["rec"][back] = [bb, False, e.v0]
+            o["copied"].append((e, r[2]))
+            if e.v1 & V1_STALE_WOULD:
+                o["would"].append(e)
+        hs["rec"][back] = [bb, False, e.v0, t]
         hs["last"], hs["t"] = back, t
+        shown_t[(e.head, e.v0)] = t
     return out
 
 
@@ -684,30 +732,99 @@ def scanout_aba(trace):
                 for h, s in seq.items())
 
 
-def h_stale(trace):
-    """[(level, "H-STALE", text)] per head: FAIL when a stale back was
-    copied to the panel (stale_backs), INFO when the kernel held them all"""
+STALE_WHY = (("norecord", "never presented here / forgotten"), ("changed", "changed"),
+             ("cf", "copy forward into it"), ("sameshown", "nothing shown after it"),
+             ("nopanel", "no frame of ours on the panel"), ("nohead", "no head known"))
+
+
+def stale_counters(c, h):
+    """the kernel's stale-back counters of head h (debug.rdna3accel_swaps_stale*_h<N>): a text naming why
+    backs were not held, or None on a kext without them"""
+    if not c or ("swaps_stalehold_h%d" % h) not in c:
+        return None
+    g = lambda k: c.get("%s_h%d" % (k, h), 0)   # noqa: E731
+    return ("kernel: %d held, %d would (swap_stale 0); not held: %s; %d evicted (8-slot table), %d second-grid "
+            "misses, %d changed without copy forward, %d resets, %d freed, %d changed after the hold" % (
+                g("swaps_stalehold"), g("swaps_stalehold_would"),
+                ", ".join("%s %d" % (k, g("swaps_stalecheck_" + k)) for k, _ in STALE_WHY),
+                g("swaps_staleevict"), g("swaps_stalehold_miss"), g("swaps_stalenocf"), g("swaps_stalereset"),
+                g("swaps_stalegone"), g("swaps_stalehold_changed")))
+
+
+def h_stale(trace, ctx=None):
+    """[(level, "H-STALE" / "A-B-A", text)]: one H-STALE line per head with
+    mode 1/2 swaps - copies decoded, stale copies, holds, A-B-A on the
+    scanout samples. FAIL a stale copy in mode 1 (not on purpose: swap_stale
+    0 is WARN), FAIL a hold of a real frame, WARN stale holds >= half the
+    head's swaps (a frozen panel), WARN no decodable copy, WARN the kernel's
+    hold counter and the trace's holds apart by more than the events lost;
+    INFO otherwise. The A-B-A line is its own: the kernel's flicker test
+    (swaps_abab_h<N>) hashes the backs it shows, not the panel, so its PASS
+    does not cover this."""
+    ctx = ctx or {}
+    c = ctx.get("counters") or {}
     out = []
     aba = scanout_aba(trace)
-    for h, d in sorted(stale_backs(trace).items()):
-        cp, held = d["copied"], d["held"]
-        sup = "; %d A-B-A on the head's scanout samples" % aba.get(h, 0)
-        if cp:
+    data = stale_backs(trace)
+    has_hold = any(e.v1 & (V1_STALE | V1_STALE_WOULD) for e in trace.by("SWAP"))
+    lost = accel_lost(trace)
+    for h, d in sorted(data.items()):
+        if not d["mode12"]:
+            continue
+        cp, held, would = d["copied"], d["held"], d["would"]
+        cp1 = [x for x in cp if swap_mode(x[0]) == 1]
+        cp2 = len(cp) - len(cp1)
+        kern = stale_counters(c, h)
+        if not d["copies"]:
+            out.append(("WARN", "H-STALE", "head %d: %d mode 1/2 swaps but no copy decoded - the stale back is not "
+                        "judged%s" % (h, d["mode12"], "; " + kern if kern else "")))
+            continue
+        base = "head %d: %d mode 1/2 copies decoded, %d stale copied%s, %d held, %d A-B-A on the scanout samples" % (
+            h, d["copies"], len(cp), " (%d in mode 2, the copy-everything control)" % cp2 if cp2 else "",
+            len(held), aba.get(h, 0))
+        if cp1:
             per = {}
-            for e, _ in cp:
+            for e, _ in cp1:
                 b = swap_back(e)[0]
                 per[b] = per.get(b, 0) + 1
             top = ", ".join("0x%x %dx" % (b, k) for b, k in sorted(per.items(), key=lambda x: -x[1])[:3])
-            out.append(("FAIL", "H-STALE", "head %d: %d stale backs COPIED (%s; first swap #%d, shown before at #%d%s): "
-                        "WindowServer did not redraw them - no copy forward into them since this head presented "
-                        "them, their samples unchanged, < %d ms after another back's copy - so the panel showed the "
-                        "older frame for most of the frame period and the front got it too%s" % (
-                            h, len(cp), top, cp[0][0].v0, cp[0][1], sup, STALE_NS // 10 ** 6,
-                            "; %d held" % len(held) if held else
-                            " (a kernel without the stale-back hold, swaps_stalehold_h<N>)")))
-        elif held:
-            out.append(("INFO", "H-STALE", "head %d: held %d stale backs (not redrawn since this head presented them, "
-                        "a newer frame after them: the panel kept it), none copied%s" % (h, len(held), sup)))
+            on_purpose = len(would) == len(cp1)
+            if kern:
+                why = kern
+            elif has_hold:
+                why = "the kext has the hold (its holds are in the trace); its counters are not in this report"
+            else:
+                why = ("no stale hold in the trace: a kext before the stale-back hold (2026-10-17c), or none of its "
+                       "checks passed (the swaps_stalecheck_*_h<N> counters say which)")
+            lvl = "WARN" if on_purpose else "FAIL"
+            out.append((lvl, "H-STALE", "%s - %s (%s; first swap #%d, shown before at #%d): %s - no copy forward "
+                        "into them since this head presented them, their samples unchanged, < %d ms after another "
+                        "back's copy: the panel showed the older frame for most of the frame period and the front "
+                        "got it too; %s" % (
+                            base, "copied on purpose (debug.rdna3accel_swap_stale=0)" if on_purpose else
+                            "stale backs COPIED", top, cp1[0][0].v0, cp1[0][1],
+                            "WindowServer did not redraw them", STALE_NS // 10 ** 6, why)))
+        else:
+            out.append(("INFO", "H-STALE", "%s%s" % (base, "; " + kern if kern else "")))
+        for e, why in d["real"][:1]:
+            out.append(("FAIL", "H-STALE", "head %d: held a REAL frame at %d stale hold(s) (first swap #%d: %s) - the "
+                        "back was redrawn although its samples matched: the panel missed that frame" % (
+                            h, len(d["real"]), e.v0, why)))
+        if held and len(held) * 2 >= d["swaps"]:
+            out.append(("WARN", "H-STALE", "head %d: %d of its %d swaps were stale holds (half or more): the panel "
+                        "may look frozen - compare the looks" % (h, len(held), d["swaps"])))
+        if "swaps_stalehold_h%d" % h in c:
+            k = c["swaps_stalehold_h%d" % h]
+            if abs(k - len(held)) > lost:
+                out.append(("WARN", "H-STALE", "head %d: the kernel counted %d stale holds, the trace holds %d (%d "
+                            "events lost): the trace does not cover the counters' window, or a hold was not traced" %
+                            (h, k, len(held), lost)))
+    for h in sorted(aba):
+        if aba[h]:
+            out.append(("INFO" if not data.get(h, {}).get("copied") else "WARN", "A-B-A",
+                        "head %d: %d A-B-A patterns on the scanout samples (a picture back after one other: an old "
+                        "frame shown between two new ones) - the kernel's flicker test (swaps_abab_h<N>) hashes the "
+                        "backs, not the panel: its PASS does not cover this" % (h, aba[h])))
     return out
 
 
@@ -1013,6 +1130,8 @@ def _fmt_event(trace, e, ms, n):
             "0x%x" % lb if lb else "buf[%d]" % ((e.v4 >> 24) & 0xff))
         if e.arg == 5 and e.v1 & V1_STALE:
             landed += " held: stale back (shown at #%d)" % e.v3
+        if e.v1 & V1_STALE_WOULD:
+            landed += " stale: would hold (swap_stale 0)"
         return ("%10.3f ms SWAP #%d h%s mode %d %s: back 0x%x (%s, %s) front 0x%x (%s)%s -> panel 0x%x target %s%s%s "
                 "copy %d us wait %d us" % (ms, e.v0, e.head if e.head != 0xff else "?", swap_mode(e),
                                           SWAP_ARG.get(e.arg, e.arg), back, RC.get(rcb, rcb), bb.hex(), front,
@@ -1074,7 +1193,7 @@ def summary_lines(trace, ctx=None, last=60):
     for lv, q, text in trace.problems:
         if lv != "FAIL":   # FAILs are named by the coverage check (Q8)
             out.append((lv, "%s: %s" % (q, text)))
-    for lv, name, text in hypotheses(trace):
+    for lv, name, text in hypotheses(trace, ctx):
         out.append((lv, "%s: %s" % (name, text)))
     # the backs without an IOSurface id (the join with the plugin's trace is
     # printed by tools/triage_reports.py, which reads both)
