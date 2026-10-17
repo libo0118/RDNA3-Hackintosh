@@ -41,9 +41,15 @@ own job. For every request the manager:
    (`general-purpose` with a precise brief, `ecc:tdd-guide` for host-test
    work, `ecc:build-error-resolver` / `ecc:cpp-build-resolver` when CI is
    red), docs (`ecc:doc-updater`).
-2. Briefs each one completely (they start with no context: files, the
-   rules of this file, what done looks like), runs independent work in
-   parallel and in the background, and owns collecting the results.
+2. Briefs each one completely but briefly: every brief starts with "Read
+   /home/user/RDNA3-Hackintosh/CLAUDE_SUBAGENT.md first" (the rules every
+   agent follows: graph first, worktree, commits and trailers, kernel
+   and plugin code rules, logging, checks before done, the final report,
+   reviewers) and then holds only what this task needs: the worktree,
+   files, goal, evidence, files other agents own, what done looks like.
+   Runs independent work in parallel and in the background, and owns
+   collecting the results. A rule that applies to every agent goes into
+   CLAUDE_SUBAGENT.md, not into briefs.
 3. Hands every finished piece to other employees before it ships: review
    and bug hunting (`ecc:cpp-reviewer` / `ecc:code-reviewer`,
    `ecc:security-reviewer`, `ecc:silent-failure-hunter`), testing
