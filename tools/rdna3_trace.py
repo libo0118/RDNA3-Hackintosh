@@ -8,7 +8,9 @@ fences, waits, resets, GPU faults), as binary reads of
 (one or more blobs, each a header and its events) or "tr" lines of a
 kernel log. Times are mach_absolute_time; each header carries the timebase,
 so a merged decoder (the Metal plugin's tools/plugin_trace.py) can put
-every source on one clock.
+every source on one clock; version 2 headers also carry the read's wall
+clock (anchors(), wall_of()) to line the trace up with the logs' dates.
+Damaged input never raises: Trace.problems names the file and byte.
 
   tools/rdna3_trace.py <file>... [--timeline N] [--head H]
 
@@ -20,14 +22,23 @@ per head.
 import re
 import struct
 import sys
+import time
 
 MAGIC = 0x52543352
-VERSION = 1
+VERSION = 2                           # RD3_TRACE_VERSION; version 1 (an 80-byte header) is still read
 EV_FMT = "<QIBBBBIIIIIIQQQ8s8s"       # struct rd3_trace_ev (80 bytes)
-HDR_FMT = "<IIIIIIQQQQIIIIII"         # struct rd3_trace_hdr (80 bytes)
+HDR_FMT_V1 = "<IIIIIIQQQQIIIIII"      # struct rd3_trace_hdr of version 1 (80 bytes)
+HDR_FMT = HDR_FMT_V1 + "QII"          # version 2 (96 bytes): + wall_us, flags, hdr_size
 SEC_FMT = "<IBBBBHHHHHHHHHHI"         # struct rd3_trace_sec (32 bytes)
 EV_SIZE, HDR_SIZE, SEC_SIZE = struct.calcsize(EV_FMT), struct.calcsize(HDR_FMT), struct.calcsize(SEC_FMT)
-assert (EV_SIZE, HDR_SIZE, SEC_SIZE) == (80, 80, 32)
+HDR_SIZE_V1 = struct.calcsize(HDR_FMT_V1)
+assert (EV_SIZE, HDR_SIZE, HDR_SIZE_V1, SEC_SIZE) == (80, 96, 80, 32)
+HDR_KEYS = ("magic", "version", "ev_size", "cap", "count", "swap_mode", "written", "lost", "now", "nomem",
+            "salt_check", "source", "tb_numer", "tb_denom", "read_kind", "ab", "wall_us", "flags", "hdr_size")
+HDR_HDP_NOINV, HDR_CHUNKED = 1, 2
+# the swaps rdna3accel_swaps_h<N> counts (routed and presented: not skipped, held or headless)
+COUNTED_SWAPS = (1, 2, 3, 4, 6)
+AB_MIN_SWAPS = 20                     # swaps per head and phase for an A/B to decide anything
 
 SRC_ACCEL, SRC_CORE = 0, 1
 READ_ALL, READ_STREAM, READ_SEC = 0, 1, 2
@@ -40,6 +51,7 @@ SWAP_ARG = {0: "skip", 1: "flip", 2: "flip refused, copied", 3: "flip refused", 
 RC = {0: "no res", 1: "no vidmem", 2: "no kva", 3: "no geometry", 4: "empty", 5: "pixels"}
 F_A1_FRONT, F_A2_FRONT, F_A1_PIX, F_A2_PIX, F_EMPTY, F_FRONT_OK, F_DOUBLE, F_WAITED = 1, 2, 4, 8, 16, 32, 64, 128
 TARGET = {0: "-", 1: "home", 2: "D", 3: "home DIRECT"}
+V1_BRK_FLIP = 1 << 20                 # SWAP v1: modes 1/2 flipped, the SDMA breaker open
 AB_NAME = {0: "-", 1: "A: mode 1", 2: "B: mode 0", 3: "back"}
 
 
@@ -67,7 +79,11 @@ class Trace(object):
         self.secs = []
         self.tb = {}            # source -> (numer, denom)
         self.lines = 0          # events from "tr" lines
+        self.problems = []      # (level, question, text): what the files say about their own completeness
         self._seen = set()
+
+    def problem(self, level, q, text):
+        self.problems.append((level, q, text))
 
     def add_event(self, src, vals):
         ev = Ev(src, vals)
@@ -78,26 +94,76 @@ class Trace(object):
         self.events.append(ev)
 
     def add_blob(self, data, where=""):
-        """parses one file's bytes: binary blobs back to back, else a 'sysctl -x' hex dump"""
-        if len(data) >= 4 and struct.unpack_from("<I", data, 0)[0] != MAGIC:
+        """parses one file's bytes: binary blobs back to back, else a 'sysctl -x'
+        hex dump. Never raises on garbage: what cannot be decoded is a problem
+        (FAIL, Q8) naming the file and the byte where decoding stopped."""
+        if not data:
+            self.problem("FAIL", "Q8", "%s: empty" % (where or "a trace file"))
+            return 0
+        if len(data) < 4 or struct.unpack_from("<I", data, 0)[0] != MAGIC:
             hx = re.findall(r"0x([0-9a-fA-F]{16,})", data.decode("latin-1", "replace"))
-            if hx:
-                data = bytes.fromhex("".join(hx))
+            try:
+                data = bytes.fromhex("".join(hx)) if hx else b""
+            except ValueError:
+                data = b""
+            if not data:
+                self.problem("FAIL", "Q8", "%s: NOT a trace (no R3TR header: %r...; sysctl -b printed text, or "
+                                           "the file is not binary)" % (where or "a trace file", bytes(data[:16])))
+                return 0
         off = 0
         n = 0
-        while off + HDR_SIZE <= len(data):
-            h = struct.unpack_from(HDR_FMT, data, off)
-            hdr = dict(zip(("magic", "version", "ev_size", "cap", "count", "swap_mode", "written", "lost", "now",
-                            "nomem", "salt_check", "source", "tb_numer", "tb_denom", "read_kind", "ab"), h))
-            if hdr["magic"] != MAGIC:
+        blobs = 0
+        while off < len(data):
+            rem = len(data) - off
+            if rem < 8:
+                self.problem("FAIL", "Q8", "%s: %d trailing byte(s) at %d after %d blob(s): a cut-off read or upload"
+                             % (where, rem, off, blobs))
+                break
+            magic, ver = struct.unpack_from("<II", data, off)
+            if magic != MAGIC:
+                self.problem("FAIL", "Q8", "%s: no R3TR header at byte %d (after %d blob(s)): %d byte(s) NOT decoded "
+                                           "(a corrupt or interleaved read)" % (where, off, blobs, rem))
+                break
+            if ver not in (1, 2):
+                self.problem("FAIL", "Q8", "%s: trace version %d at byte %d (this decoder reads 1-%d): %d byte(s) "
+                                           "NOT decoded - decode with the tools of the kernel's sources"
+                             % (where, ver, off, VERSION, rem))
+                break
+            hsize = HDR_SIZE if ver >= 2 else HDR_SIZE_V1
+            if rem < hsize:
+                self.problem("FAIL", "Q8", "%s: a header cut off at byte %d (%d of %d bytes)" % (where, off, rem, hsize))
+                break
+            h = struct.unpack_from(HDR_FMT if ver >= 2 else HDR_FMT_V1, data, off)
+            hdr = dict(zip(HDR_KEYS, h))
+            hdr.setdefault("wall_us", 0)
+            hdr.setdefault("flags", 0)
+            hdr.setdefault("hdr_size", hsize)
+            if hdr["hdr_size"] != hsize:
+                self.problem("FAIL", "Q8", "%s: header size %d at byte %d (version %d has %d): NOT decoded further"
+                             % (where, hdr["hdr_size"], off, ver, hsize))
                 break
             hdr["where"] = where
-            off += HDR_SIZE
+            hdr["order"] = len(self.headers)
+            off += hsize
+            want = SEC_SIZE if hdr["read_kind"] == READ_SEC else EV_SIZE
             size = hdr["ev_size"] * hdr["count"]
+            if hdr["ev_size"] != want:
+                self.problem("FAIL", "Q8", "%s: blob at byte %d has %d-byte records (this decoder reads %d): its %d "
+                                           "record(s) skipped" % (where, off - hsize, hdr["ev_size"], want, hdr["count"]))
+                off += size
+                hdr["truncated"] = False
+                hdr["skipped"] = True
+                self.headers.append(hdr)
+                blobs += 1
+                continue
             body = data[off:off + size]
             hdr["truncated"] = len(body) < size
+            if hdr["truncated"]:
+                self.problem("FAIL", "Q8", "%s: blob at byte %d TRUNCATED: %d of %d record(s) (an upload or read cut "
+                                           "off)" % (where, off - hsize, len(body) // want, hdr["count"]))
             off += size
             self.headers.append(hdr)
+            blobs += 1
             if hdr["tb_numer"] and hdr["tb_denom"]:
                 self.tb[hdr["source"]] = (hdr["tb_numer"], hdr["tb_denom"])
             if hdr["read_kind"] == READ_SEC:
@@ -107,13 +173,44 @@ class Trace(object):
                                                "black", "cf", "cferr", "aperture", "vmrefused", "freedshown",
                                                "events"), v)))
             else:
+                seqs = []
                 for i in range(len(body) // EV_SIZE):
-                    self.add_event(hdr["source"], struct.unpack_from(EV_FMT, body, i * EV_SIZE))
+                    vals = struct.unpack_from(EV_FMT, body, i * EV_SIZE)
+                    seqs.append(vals[1])
+                    self.add_event(hdr["source"], vals)
                     n += 1
+                hdr["seqs"] = (seqs[0], seqs[-1]) if seqs else None
+                hdr["contiguous"] = all(((b2 - a2) & 0xffffffff) == 1 for a2, b2 in zip(seqs, seqs[1:]))
         return n
 
     TR = re.compile(r"\btr (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) ([0-9a-f]+) ([0-9a-f]+) ([0-9a-f]+) ([0-9a-f]+) "
                     r"([0-9a-f]+) ([0-9a-f]+) ([0-9a-f]+) ([0-9a-f]+) ([0-9a-f]+) ([0-9a-f]+) ([0-9a-f]+) ([0-9a-f]+)")
+
+    DUMP_START = re.compile(r"trace: events (\d+)\.\.(\d+) \(")
+    DUMP_DONE = re.compile(r"trace: dump done, (\d+) line\(s\)")
+
+    def check_dumps(self, text, where="the kernel log"):
+        """each kernel log dump ("trace: events A..B" ... "trace: dump done, N
+        line(s)") must hold its N "tr" lines: a log that dropped some (log
+        show under load, a serial line cut) is a problem"""
+        inside, count, missing, dumps = False, 0, 0, 0
+        for line in text.splitlines():
+            if self.DUMP_START.search(line):
+                inside, count = True, 0
+            elif self.DUMP_DONE.search(line):
+                want = int(self.DUMP_DONE.search(line).group(1))
+                dumps += 1
+                if inside and count < want:
+                    missing += want - count
+                elif not inside:
+                    missing += want
+                inside = False
+            elif inside and self.TR.search(line):
+                count += 1
+        if missing:
+            self.problem("WARN", "Q8", "%s: %d 'tr' line(s) of %d dump(s) missing (the log dropped them)" %
+                         (where, missing, dumps))
+        return missing
 
     def add_lines(self, text):
         n = 0
@@ -131,7 +228,45 @@ class Trace(object):
 
     def finish(self):
         self.events.sort(key=lambda e: (e.t, e.src, e.seq))
+        self._check_streams()
+        salts = set(h["salt_check"] for h in self.headers if h["source"] == SRC_ACCEL and h["salt_check"])
+        if len(salts) > 1:
+            self.problem("FAIL", "Q8", "accelerator blobs of %d different boots (salt_check %s): files of two reports "
+                                       "mixed" % (len(salts), ", ".join("%08x" % x for x in sorted(salts))))
+        for h in self.headers:
+            if h["nomem"]:
+                self.problem("FAIL", "Q8", "%s: %d event(s) NOT recorded (no memory for the %s ring)" %
+                             (h["where"], h["nomem"], "accelerator's" if h["source"] == SRC_ACCEL else "core's"))
+                break
         return self
+
+    def _check_streams(self):
+        """each file's stream reads must follow one another: read k covers the
+        events after read k-1's 'written', so written_k - written_k-1 = count_k +
+        lost_k; less is a read missing from the file (another reader, a lost
+        upload), more an overlap; the events of a read are consecutive and end
+        at its 'written'"""
+        groups = {}
+        for h in self.headers:
+            if h["read_kind"] == READ_STREAM and not h.get("skipped"):
+                groups.setdefault((h["where"], h["source"]), []).append(h)
+        for (where, src), hs in groups.items():
+            name = "core" if src == SRC_CORE else "accelerator"
+            for prev, cur in zip(hs, hs[1:]):
+                d = cur["written"] - prev["written"]
+                got = cur["count"] + cur["lost"]
+                if d != got and not cur["truncated"]:
+                    self.problem("FAIL", "Q8", "%s (%s stream): %d event(s) between two reads %s (written %d -> %d, "
+                                               "this read %d + %d lost)" %
+                                 (where, name, abs(d - got), "MISSING from the file (another stream reader, or a "
+                                  "read not saved)" if d > got else "read twice (two stream readers)",
+                                  prev["written"], cur["written"], cur["count"], cur["lost"]))
+            for h in hs:
+                sq = h.get("seqs")
+                if sq and (not h.get("contiguous") or sq[1] != h["written"] & 0xffffffff) and not h["truncated"]:
+                    self.problem("FAIL", "Q8", "%s (%s stream): a read's events are not consecutive up to its "
+                                               "'written' (%d..%d, written %d)" % (where, name, sq[0], sq[1],
+                                                                                   h["written"]))
 
     def ns(self, ev_or_t, src=SRC_ACCEL):
         t = ev_or_t.t if isinstance(ev_or_t, Ev) else ev_or_t
@@ -150,6 +285,7 @@ def load(paths, texts=()):
             tr.add_blob(f.read(), p)
     for t in texts:
         tr.add_lines(t)
+        tr.check_dumps(t)
     return tr.finish()
 
 
@@ -170,7 +306,7 @@ def swap_mode(e):
 
 def phase_of(trace):
     """each accelerator event's A/B phase (MODESET arg 1 events; before the
-    first one: the phase of the oldest stream header that carried one)"""
+    first one: 0)"""
     cur = 0
     out = {}
     for e in trace.events:
@@ -180,14 +316,82 @@ def phase_of(trace):
     return out
 
 
-def per_head_buffers(trace):
+def ab_info(trace):
+    """the A/B as the trace saw it: {"ran": bool, "set": phases a MODESET set,
+    "seen": phases any record carries (events, headers, per-second rows)}"""
+    ms = set(e.v1 for e in trace.events if e.src == SRC_ACCEL and e.type == T["MODESET"] and e.arg == 1)
+    seen = set(ms) | set(h["ab"] for h in trace.headers if h["source"] == SRC_ACCEL) | set(r["ab"] for r in trace.secs)
+    seen.discard(0)
+    return {"ran": bool(seen & set((1, 2))), "set": ms, "seen": seen}
+
+
+def ab_events(trace):
+    """the swaps the A/B judges: those of phases 1 and 2 when the A/B ran,
+    else all of them (and whether it was restricted)"""
+    info = ab_info(trace)
+    swaps = trace.by("SWAP")
+    if not info["ran"]:
+        return swaps, False
+    ph = phase_of(trace)
+    return [e for e in swaps if ph.get(id(e), 0) in (1, 2)], True
+
+
+def ab_validity(trace, expected=False, min_swaps=AB_MIN_SWAPS):
+    """[(level, text)]: whether the A/B can decide anything - it ran (when
+    'expected'), every phase was labelled, each head that swapped had at
+    least min_swaps swaps in both phases, phase 1 ran the copy and phase 2
+    the flip"""
+    info = ab_info(trace)
+    out = []
+    if not info["ran"]:
+        if expected:
+            out.append(("FAIL", "A/B did not run: no phase 1 / 2 in the trace (no MODESET, no header or per-second "
+                                "row labelled) although this run should have had it - the tests file's '== swap A/B' "
+                                "lines say why"))
+        return out
+    for p in (1, 2, 3):
+        if p not in info["set"]:
+            out.append(("FAIL", "A/B inconclusive: no MODESET to phase %d in the trace (the label was never set, or "
+                                "its event was lost)" % p))
+    ph = phase_of(trace)
+    per = {}
+    modes = {}
+    for e in trace.by("SWAP"):
+        p = ph.get(id(e), 0)
+        if p not in (1, 2) or e.head == 0xff:
+            continue
+        per.setdefault(e.head, {1: 0, 2: 0})[p] += 1
+        modes.setdefault(p, {})
+        m = "brk" if e.v1 & V1_BRK_FLIP else swap_mode(e)
+        modes[p][m] = modes[p].get(m, 0) + 1
+    if not per:
+        out.append(("FAIL", "A/B inconclusive: no swap on any head in phases 1 and 2 (nothing redrew: Activity "
+                            "Monitor not running?)"))
+    for h, c in sorted(per.items()):
+        for p in (1, 2):
+            if c[p] < min_swaps:
+                out.append(("FAIL", "A/B inconclusive: phase %d had %d swaps on head %d (need %d)" %
+                            (p, c[p], h, min_swaps)))
+    m1, m2 = modes.get(1, {}), modes.get(2, {})
+    if m1 and not (m1.get(1, 0) + m1.get(2, 0)):
+        out.append(("FAIL", "A/B inconclusive: mode 1 never applied in phase 1 (its swaps ran as %s)" %
+                    ", ".join("%s: %d" % (k if k == "brk" else "mode %d" % k, v) for k, v in sorted(m1.items(), key=str))))
+    elif m1.get("brk"):
+        out.append(("WARN", "A/B: %d of phase 1's swaps flipped because the SDMA breaker was open" % m1["brk"]))
+    if m2 and not m2.get(0):
+        out.append(("FAIL", "A/B inconclusive: mode 0 never applied in phase 2 (its swaps ran in %s)" %
+                    ", ".join("mode %s: %d" % (k, v) for k, v in sorted(m2.items(), key=str))))
+    return out
+
+
+def per_head_buffers(trace, swaps=None):
     """{head: {back phys: [swaps, empty, pixels, aperture hits]}} and the aperture count per phys"""
     ap = {}
     for e in trace.by("APERTURE"):
         if e.arg == 1:
             ap[e.pa] = ap.get(e.pa, 0) + 1
     heads = {}
-    for e in trace.by("SWAP"):
+    for e in (trace.by("SWAP") if swaps is None else swaps):
         if e.head == 0xff:
             continue
         back, rcb = swap_back(e)[:2]
@@ -219,11 +423,11 @@ def inplace_rewrites(swaps):
     return inpl, chk
 
 
-def segments(trace):
+def segments(trace, swaps=None):
     """the swaps per (swap mode, A/B phase): their counts side by side"""
     ph = phase_of(trace)
     seg = {}
-    for e in trace.by("SWAP"):
+    for e in (trace.by("SWAP") if swaps is None else swaps):
         k = (swap_mode(e), ph.get(id(e), 0))
         s = seg.setdefault(k, {"swaps": 0, "shown": 0, "held": 0, "black": 0, "empty": 0, "failed": 0, "direct": 0,
                                "double": 0, "waits": 0, "wait_us": 0, "copy_us": 0, "events": []})
@@ -250,7 +454,8 @@ def hypotheses(trace):
     """[(level, name, text)]: CRITICAL / FAIL / WARN / INFO / PASS, the
     hypothesis each trace pattern names"""
     out = []
-    heads, ap = per_head_buffers(trace)
+    swaps, restricted = ab_events(trace)   # the A/B's phases 1 and 2 when it ran
+    heads, ap = per_head_buffers(trace, swaps)
     # H-B2: a back the swaps name that never receives WindowServer's frame
     for h, bufs in sorted(heads.items()):
         drawn = [(p, st) for p, st in bufs.items() if st[2] * 2 >= st[0] and st[0] >= 2]
@@ -263,7 +468,7 @@ def hypotheses(trace):
                             "(page-on) writes into it; WindowServer's frames land in %s - a back that never receives "
                             "a frame (copying or flipping it shows black)" % (h, p, st[0], st[1], ap.get(p, 0), where)))
     # H-COPY: mode 0 shows the buffer WindowServer draws into
-    seg = segments(trace)
+    seg = segments(trace, swaps)
     for (mode, phase), s in sorted(seg.items()):
         if mode != 0:
             continue
@@ -308,8 +513,10 @@ def hypotheses(trace):
 
 
 def ab_table(trace):
-    """the A/B side by side: one line per (mode, phase) and a verdict"""
-    seg = segments(trace)
+    """the A/B side by side: one line per (mode, phase) and a verdict (from
+    phases 1 and 2 only when the A/B ran)"""
+    swaps, restricted = ab_events(trace)
+    seg = segments(trace, swaps)
     lines = []
     for (mode, phase), s in sorted(seg.items(), key=lambda kv: (kv[0][1], kv[0][0])):
         lines.append("mode %d %-10s %5d swaps: %5d shown, %4d held/skipped, %4d empty backs, %4d BLACK frames, "
@@ -337,22 +544,58 @@ def ab_table(trace):
     return lines, verdict
 
 
+def anchors(trace):
+    """{source: (now ns, wall us)}: each source's newest read with a wall
+    clock (version 2 headers) - mach time and the logs' dates on one line"""
+    out = {}
+    for h in trace.headers:
+        if h.get("wall_us") and h["tb_numer"] and h["tb_denom"]:
+            out[h["source"]] = (h["now"] * h["tb_numer"] // h["tb_denom"], h["wall_us"])
+    return out
+
+
+def wall_of(trace, e):
+    """an event's wall clock (seconds since 1970, float) through its source's anchor, None without one"""
+    an = anchors(trace).get(e.src)
+    if not an:
+        return None
+    return (an[1] * 1000 - (an[0] - trace.ns(e, e.src))) / 1e9
+
+
 def coverage(trace, ctx=None):
     """[(question, ok, text)]: can the report answer Q1-Q11 (docs/AFTER-TESTS.md)?
-    ctx: swaps (the counters' swap count), cf_calls, ab_ran (autoreport ran the A/B),
-    core_expected (Metal / RADV ran)"""
+    ctx: swaps (the counters' swap count), swaps_window ({head: the counters'
+    swaps over the A/B}), cf_calls, ab_ran (autoreport ran the A/B),
+    core_expected (Metal / RADV ran), size_problems ([text]: stream files
+    whose size differs from their sidecar)"""
     ctx = ctx or {}
     out = []
+    ab_ran = bool(ctx.get("ab_ran")) or ab_info(trace)["ran"]
     swaps = trace.by("SWAP")
     acc = [h for h in trace.headers if h["source"] == SRC_ACCEL and h["read_kind"] != READ_SEC]
     core = [h for h in trace.headers if h["source"] == SRC_CORE]
     have_accel = bool(acc) or any(e.src == SRC_ACCEL for e in trace.events)
+    probs = [t for lv, q, t in trace.problems if q == "Q8" and lv == "FAIL"] + list(ctx.get("size_problems") or [])
     if not have_accel:
         out.append(("Q1-Q8", False, "no accelerator trace in the report (36-frame-trace.bin, the -trace-stream.bin "
-                                    "next to it, or 'tr' lines)"))
+                                    "next to it, or 'tr' lines)%s" % ("; " + "; ".join(probs[:3]) if probs else "")))
     else:
-        out.append(("Q1", bool(swaps) or not ctx.get("swaps"),
-                    "%d swap events (counters: %s swaps)" % (len(swaps), ctx.get("swaps", "?"))))
+        win = ctx.get("swaps_window") or {}
+        ok1 = bool(swaps) or not ctx.get("swaps")
+        why1 = "%d swap events (counters: %s swaps)" % (len(swaps), ctx.get("swaps", "?"))
+        short = []
+        for h, want in sorted(win.items()):
+            got = sum(1 for e in swaps if e.head == h and e.arg in COUNTED_SWAPS)
+            if want and got < want * 0.98:
+                short.append("head %d: %d in the trace, %d counted over the A/B" % (h, got, want))
+        if short:
+            ok1 = False
+            why1 += "; FEWER than the counters: " + ", ".join(short)
+        elif win:
+            why1 += "; the A/B window's counters all in it"
+        elif ctx.get("no_tests"):
+            why1 += " (no tests file: the counters' window not compared)"
+        out.append(("Q1", ok1, why1))
         scans = [e for e in trace.by("SCAN") if e.arg not in (0xfe, 0xfd) and not e.flags & 16]
         out.append(("Q2", bool(scans) or not swaps, "%d samples of the surfaces' other buffers" % len(scans)))
         empty = sum(1 for e in swaps if e.flags & F_EMPTY and e.head != 0xff)
@@ -361,41 +604,69 @@ def coverage(trace, ctx=None):
         cfs = trace.by("CF")
         out.append(("Q4", bool(cfs) or not ctx.get("cf_calls"), "%d copy forward events (counters: %s calls)" %
                     (len(cfs), ctx.get("cf_calls", "?"))))
-        out.append(("Q5", True, "%d allocations, %d frees, %d shapes" % (len(trace.by("VMALLOC")),
-                                                                       len(trace.by("VMFREE")), len(trace.by("SHAPE")))))
+        allocs, frees, shapes = trace.by("VMALLOC"), trace.by("VMFREE"), trace.by("SHAPE")
+        boot_kept = any(h["read_kind"] == READ_ALL and h["lost"] == 0 for h in acc)
+        # the buffers the swaps name were allocated and shaped somewhere: with the
+        # boot still in the ring, none of that recorded is a hook that never fires
+        ok5 = not swaps or bool(shapes) or not boot_kept
+        ok5 = ok5 and (not swaps or bool(allocs) or not boot_kept)
+        out.append(("Q5", ok5, "%d allocations, %d frees, %d shapes%s" %
+                    (len(allocs), len(frees), len(shapes),
+                     "" if ok5 else " - none although the ring still holds the whole boot and swaps ran")))
         panel = trace.by("PANEL")
         known = [e for e in panel if e.pa]
+        whyp = {}
+        for e in panel:
+            if not e.pa:
+                whyp[e.v3] = whyp.get(e.v3, 0) + 1
+        reasons = {1: "no core", 2: "the core does not know the head", 3: "the core's rdna3DisplayScanAddr failed",
+                   0: "a core without rdna3DisplayScanAddr"}
         out.append(("Q6", bool(known) or not swaps,
-                    "%d panel reads, %d with the HUBP's address%s" % (len(panel), len(known),
-                                                                      "" if known or not panel else
-                                                                      " (a core without rdna3DisplayScanAddr)")))
+                    "%d panel reads, %d with the HUBP's address%s" %
+                    (len(panel), len(known), "" if known or not panel else " (%s)" % ", ".join(
+                        "%s: %d" % (reasons.get(k, "reason %d" % k), v) for k, v in sorted(whyp.items())))))
         ms = trace.by("MODESET")
-        out.append(("Q7", bool([e for e in ms if e.arg == 1]) or not ctx.get("ab_ran"),
+        out.append(("Q7", bool([e for e in ms if e.arg == 1]) or not ab_ran,
                     "%d swap mode / A/B changes, %d display mode events" % (len(ms), len(trace.by("MODE")))))
-        streams = [h for h in acc if h["read_kind"] == READ_STREAM]
+        streams = [h for h in trace.headers if h["read_kind"] == READ_STREAM]
         if streams:
-            # autoreport.sh discards the read that moves the cursor to the A/B's
-            # start: every stream read in the files is inside the window
+            # every stream read in the files is inside the run (the pump's first
+            # read only moves the cursor and is not saved)
             lost = sum(h["lost"] for h in streams)
+            lc = sum(h["lost"] for h in streams if h["source"] == SRC_CORE)
             ok8 = lost == 0
-            why = "%d stream reads, %d events lost between them" % (len(streams), lost)
+            why = "%d stream reads, %d events lost between them%s" % (len(streams), lost,
+                                                                     " (%d of the core's)" % lc if lc else "")
         else:
             lost = max([h["lost"] for h in acc] or [0])
-            ok8 = lost == 0 or not ctx.get("ab_ran")
+            ok8 = lost == 0 or not ab_ran
             why = "no stream; the ring lost %d events before the read" % lost
         if not trace.secs:
             why += "; NO per-second table"
-            ok8 = ok8 and not ctx.get("ab_ran")
+            ok8 = ok8 and not ab_ran
+        if probs:
+            ok8 = False
+            why += "; " + "; ".join(probs[:4]) + ("; ... %d more" % (len(probs) - 4) if len(probs) > 4 else "")
         out.append(("Q8", ok8, why))
     cs = trace.by("CS")
+    bad_cs = [e for e in cs if e.arg == 0xff]
     out.append(("Q9", bool(core) or bool(cs) or not ctx.get("core_expected"),
-                "%d command submissions, %d fences, %d waits, %d resets, %d faults%s" %
-                (len(cs), len(trace.by("FENCE")), len(trace.by("GPUWAIT")), len(trace.by("RESET")),
-                 len(trace.by("VMFAULT")), "" if core or cs else " (no core trace: 36-drm-trace.bin)")))
+                "%d command submissions (%d refused), %d fences, %d waits, %d resets, %d faults%s" %
+                (len(cs) - len(bad_cs), len(bad_cs), len(trace.by("FENCE")), len(trace.by("GPUWAIT")),
+                 len(trace.by("RESET")), len(trace.by("VMFAULT")),
+                 "" if core or cs else " (no core trace: 36-drm-trace.bin)")))
     sg = trace.by("SURFGEM") + trace.by("SURFRES")
     out.append(("Q10", bool(sg) or not have_accel, "%d IOSurface answers / pairs" % len(sg)))
-    out.append(("Q11", bool(trace.tb) or not trace.headers, "timebase %s" %
-                (", ".join("src %d %d/%d" % (k, v[0], v[1]) for k, v in sorted(trace.tb.items())) or "none")))
+    an = anchors(trace)
+    v2 = [h for h in trace.headers if h["version"] >= 2]
+    ok11 = bool(trace.tb) or not trace.headers
+    if v2 and not an:
+        ok11 = False
+    out.append(("Q11", ok11, "timebase %s; wall clock %s" % (
+        ", ".join("src %d %d/%d" % (k, v[0], v[1]) for k, v in sorted(trace.tb.items())) or "none",
+        ", ".join("src %d: mach %d ns = %s UTC" % (k, v[0], time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(
+            v[1] // 1000000)) + ".%06d" % (v[1] % 1000000)) for k, v in sorted(an.items())) or
+        ("NONE in the version 2 headers" if v2 else "none (version 1 headers)"))))
     return out
 
 
@@ -453,13 +724,22 @@ def summary_lines(trace, ctx=None, last=60):
     core = [e for e in trace.events if e.src == SRC_CORE]
     out.append(("INFO", "%d accelerator events, %d core events, %d per-second rows, %d blob(s), %d log line(s)" %
                 (len(acc), len(core), len(trace.secs), len(trace.headers), trace.lines)))
+    for lv, q, text in trace.problems:
+        if lv != "FAIL":   # FAILs are named by the coverage check (Q8)
+            out.append((lv, "%s: %s" % (q, text)))
     for lv, name, text in hypotheses(trace):
         out.append((lv, "%s: %s" % (name, text)))
+    valid = ab_validity(trace, (ctx or {}).get("ab_expected", False))
+    for lv, text in valid:
+        out.append((lv, text))
     lines, verdict = ab_table(trace)
     for l in lines:
         out.append(("INFO", "A/B " + l))
     if verdict:
-        out.append((verdict[0], "A/B verdict: " + verdict[1]))
+        if any(lv == "FAIL" for lv, _ in valid):
+            out.append(("INFO", "A/B verdict (NOT valid, the A/B was inconclusive): " + verdict[1]))
+        else:
+            out.append((verdict[0], "A/B verdict: " + verdict[1]))
     for q, ok, text in coverage(trace, ctx):
         out.append(("PASS" if ok else "FAIL", ("%s: %s" % (q, text)) if ok else
                     "trace incomplete: %s (%s)" % (q, text)))

@@ -201,7 +201,10 @@ repository or a Linux host.
    and GFX tests, Vulkan and Metal when installed, then `collect.sh`. It
    takes 3 to 8 minutes, a Terminal window shows the progress, and the files
    land in `/Users/Shared/rdna3-reports/`: `rdna3-report-<label>-<date>.tar.gz`,
-   `…-tests.txt` and `…-scanout*.ppm`. Send all of them; they are what
+   `…-tests.txt`, `…-scanout*.ppm` and the kernel's frame trace streamed
+   through the whole run (`…-trace-stream.bin`, `…-drmtrace-stream.bin`,
+   `…-trace-sec.bin`, each with a `.size` file; the archive holds copies as
+   `36-stream-*.bin`). Send all of them; they are what
    [AFTER-TESTS](AFTER-TESTS.md) expects from the VM.
    Only the collection, without running any test:
    `"$R/tools/macos/collect.sh" <label>` (writes `~/rdna3-report-<label>-<date>.tar.gz`).

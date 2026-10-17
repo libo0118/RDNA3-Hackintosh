@@ -405,6 +405,11 @@ start_share() {
     cp "$ROOT/tools/macos/collect.sh" "$ROOT/tools/macos/ioreg_discovery.sh" \
        "$TOOLS/macos/autoreport.sh" "$TOOLS/macos/build_radv.sh" \
        "$TOOLS/macos/build_metal.sh" "$WORK/share/tools/" 2>/dev/null || true
+    # the Metal plugin's trace: its collector and the trace directory's fixer
+    # (autoreport.sh fetches them when they exist)
+    for f in collect_plugin_trace.sh fix_tracedir.sh; do
+        [ -f "$ROOT/tools/macos/$f" ] && cp "$ROOT/tools/macos/$f" "$WORK/share/tools/"
+    done
     # this checkout for tools/build_radv.sh (RADV built inside the VM)
     git -C "$ROOT" archive --format=tar.gz -o "$WORK/share/rdna3-src.tar.gz" HEAD 2>/dev/null || true
     # the revision of that tarball (build_metal.sh / build_radv.sh stamp their
@@ -494,8 +499,14 @@ auto_limit() {
     # the desktop look, the copy-forward log and the counters (card run 58b:
     # the 16 min limit stopped the run inside M6)
     case " $1 " in *" rdna3probe=1 "*) m=$((m + 9)) ;; esac
-    # card run 2026-10-17b: the swap A/B (2 x 60 s, two looks, the trace's uploads)
-    case " $1 " in *" rdna3accel=1 "*) m=$((m + 3)) ;; esac
+    # card run 2026-10-17b: the swap A/B (2 x 60 s, two looks, the trace's
+    # uploads) - with rdna3accel=1, or the default profile (no rdna3lvl= and
+    # no rdna3profile=0: autoreport.sh turns the accelerator on itself)
+    case " $1 " in
+        *" rdna3accel=1 "*) m=$((m + 3)) ;;
+        *" rdna3lvl="*|*" rdna3profile=0 "*) ;;
+        *) m=$((m + 3)) ;;
+    esac
     echo "$m"
 }
 
@@ -1417,7 +1428,9 @@ print(*(a[0]["id"], a[0]["workflow_run"]["id"]) if a else ("", ""))')
 cmd_reports() {
     ls -lt "$WORK/reports" | head -30
     echo
-    echo "Send the newest: rdna3-report-*.tar.gz, *-tests.txt, serial-*.log, host-*.log"
+    echo "Send the newest: rdna3-report-*.tar.gz, *-tests.txt, serial-*.log, host-*.log,"
+    echo "  and the frame trace next to the report: *-trace-stream.bin, *-drmtrace-stream.bin, *-trace-sec.bin"
+    echo "  with their *.size files (the archive holds copies as 36-stream-*.bin)"
 }
 
 case "${1:-}" in

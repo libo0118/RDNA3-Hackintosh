@@ -9,12 +9,18 @@ in place at every swap), free (a buffer freed while scanned), cferr (a copy
 forward answered an error), ab (an A/B: mode 1 clean, mode 0 rewriting in
 place), clean (mode 1, nothing wrong, every question answerable), nopanel
 (clean but a core without rdna3DisplayScanAddr), lost (the stream lost
-events in the A/B window)."""
+events in the A/B window); ECC review round 1: v1 (ab with version 1
+headers: still read), version (a version this decoder does not know),
+truncated (the stream cut inside its last blob), corrupt (garbage between
+two blobs), gap (a stream read missing from the file), inactive (phase 2
+with no swaps), mode0never (phase 2's swaps still in mode 1), nomem (the
+ring could not be allocated), short (ab, too few swaps per phase)."""
 import struct
 import sys
 
 EV = "<QIBBBBIIIIIIQQQ8s8s"
-HDR = "<IIIIIIQQQQIIIIII"
+HDR = "<IIIIIIQQQQIIIIIIQII"
+HDR1 = "<IIIIIIQQQQIIIIII"
 SEC = "<IBBBBHHHHHHHHHHI"
 MAGIC = 0x52543352
 F, B1, B2, D, HOME = 0x87040000, 0x8b100000, 0x8b8f0000, 0x8d000000, 0x80000000
@@ -33,10 +39,15 @@ class W(object):
         self.ev.append(struct.pack(EV, self.t, self.seq, ty, head, arg, flags, obj, v[0], v[1], v[2], v[3], v[4],
                                    pa, pb, pc, ba, bb))
 
-    def blob(self, kind=0, src=0, lost=0, ab=0, evs=None):
+    def blob(self, kind=0, src=0, lost=0, ab=0, evs=None, version=2, nomem=0, written=None):
         evs = self.ev if evs is None else evs
-        return struct.pack(HDR, MAGIC, 1, 80, 32768, len(evs), 1, self.seq, lost, self.t, 0, 7, src, 1, 1, kind,
-                           ab) + b"".join(evs)
+        if written is None:
+            written = struct.unpack_from(EV, evs[-1])[1] if evs else self.seq
+        if version == 1:
+            return struct.pack(HDR1, MAGIC, 1, 80, 32768, len(evs), 1, written, lost, self.t, nomem, 7, src, 1, 1,
+                               kind, ab) + b"".join(evs)
+        return struct.pack(HDR, MAGIC, version, 80, 32768, len(evs), 1, written, lost, self.t, nomem, 7, src, 1, 1,
+                           kind, ab, 1792310400000000, 3, 96) + b"".join(evs)
 
 
 def band(k):
@@ -93,38 +104,69 @@ def make(kind):
             scan(w, i + 1, 2, B2, True, False)
         w.add(2, 0, 16 + 1, 1, 0xabcd, (4, 0, 0, 0, 0xe00002c7), F, B1, F)
         common_tail(w)
-    elif kind in ("ab", "clean", "nopanel", "lost"):
-        w.add(14, arg=1, v=(0, 1, 0, 0, 0))
-        for i in range(40):
+    elif kind in AB_KINDS:
+        ab = kind not in ("clean", "nopanel", "lost")
+        n1 = 10 if kind == "short" else 40
+        w.add(14, arg=1 if ab else 0, v=(0, 1, 0, 0, 0))   # the A/B's phase 1, else a swap mode change
+        for i in range(n1):
             swap(w, i + 1, 1, 4, B1, True, pc=D if i % 2 else HOME, flags=64 | 32, target=2 if i % 2 else 1,
                  bandk=i, waited=5000)
             scan(w, i + 1, 2, B2, False, False)
-        if kind == "ab":
+        if ab:
             w.add(14, arg=1, v=(1, 2, 0, 0, 0))
-            for i in range(40):
-                swap(w, 100 + i, 0, 1, B1, True, pc=B1, bandk=i)
+            for i in range(0 if kind == "inactive" else n1):
+                if kind == "mode0never":   # the mode change did not apply: still the copy
+                    swap(w, 100 + i, 1, 4, B1, True, pc=D, flags=64 | 32, target=2, bandk=i)
+                else:
+                    swap(w, 100 + i, 0, 1, B1, True, pc=B1, bandk=i)
                 scan(w, 100 + i, 2, B2, False, False)
-        w.add(14, arg=1, v=(2 if kind == "ab" else 1, 0, 0, 0, 0))
+            w.add(14, arg=1, v=(2, 3, 0, 0, 0))
+        if ab:
+            w.add(14, arg=1, v=(3, 0, 0, 0, 0))
         common_tail(w)
         w.add(16, arg=0, v=(158, 3, 77, 2 | 40 << 16, 0), pa=0x400000)   # CS
         w.add(17, arg=0, v=(0, 0, 77, 0, 0))                           # FENCE
-        secs = [struct.pack(SEC, 5, 0, 1, 1, 0, 40, 40, 0, 0, 0, 1, 0, 0, 0, 0, 200)]
+        secs = [struct.pack(SEC, 5, 0, 1, 1 if ab else 0, 0, 40, 40, 0, 0, 0, 1, 0, 0, 0, 0, 200)]
         if kind == "nopanel":
             w.ev = [e for e in w.ev if struct.unpack_from(EV, e)[2] != 22]
             for i in range(40):
                 w.add(22, 0, 0, 0, 0, (i, 0, 0, 0, 0), 0, 0, D)   # PANEL without the HUBP's address
     out = b""
-    if kind in ("ab", "clean", "nopanel", "lost"):
-        half = len(w.ev) // 2
+    if kind in AB_KINDS:
+        ver = 1 if kind == "v1" else 9 if kind == "version" else 2
         core = [e for e in w.ev if struct.unpack_from(EV, e)[2] in (16, 17)]
         acc = [e for e in w.ev if struct.unpack_from(EV, e)[2] not in (16, 17)]
+        if kind == "lost":   # the second read's window began 25 events after the first one ended
+            acc = [struct.pack(EV, *((lambda v: v[:1] + (v[1] + (25 if i >= len(acc) // 2 else 0),) + v[2:])(
+                struct.unpack_from(EV, e)))) for i, e in enumerate(acc)]
         half = len(acc) // 2
-        out += w.blob(1, 0, 0, 1, acc[:half]) + w.blob(1, 0, 25 if kind == "lost" else 0, 2, acc[half:])
-        out += w.blob(0, 1, 0, 0, core)
-        out += struct.pack(HDR, MAGIC, 1, 32, 20480, len(secs), 1, w.seq, 0, w.t, 0, 7, 0, 1, 1, 2, 0) + b"".join(secs)
+        q = half // 2
+        p1, p2 = (1, 2) if ab else (0, 0)
+        if kind == "gap":   # three stream reads, the middle one not in the file
+            out += w.blob(1, 0, 0, p1, acc[:q]) + w.blob(1, 0, 0, p2, acc[half:])
+        else:
+            out += w.blob(1, 0, 0, p1, acc[:half], ver) + w.blob(1, 0, 25 if kind == "lost" else 0, p2, acc[half:], ver,
+                                                                 nomem=7 if kind == "nomem" else 0)
+        out += w.blob(0, 1, 0, 0, core, 1 if kind == "v1" else 2)
+        if kind == "v1":
+            out += struct.pack(HDR1, MAGIC, 1, 32, 20480, len(secs), 1, w.seq, 0, w.t, 0, 7, 0, 1, 1, 2, 0)
+        else:
+            out += struct.pack(HDR, MAGIC, 2, 32, 20480, len(secs), 1, w.seq, 0, w.t, 0, 7, 0, 1, 1, 2, 0,
+                               1792310400000000, 3, 96)
+        out += b"".join(secs)
+        if kind == "truncated":
+            first = w.blob(1, 0, 0, 1, acc[:half])
+            out = first + w.blob(1, 0, 0, 2, acc[half:])[:-100]
+        if kind == "corrupt":
+            first = w.blob(1, 0, 0, 1, acc[:half])
+            out = first + b"garbage!" * 5 + out[len(first):]
     else:
         out = w.blob()
     return out
+
+
+AB_KINDS = ("ab", "clean", "nopanel", "lost", "v1", "version", "truncated", "corrupt", "gap", "inactive",
+            "mode0never", "nomem", "short")
 
 
 if __name__ == "__main__":

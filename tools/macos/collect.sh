@@ -103,6 +103,12 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
         else rm -f "$dir/$f"; echo "$oid: NOT read (not root, or a kext before card run 2026-10-17b)"; fi
     done
     echo "swap mode: $(sysctl -n debug.rdna3accel_swap_mode 2>/dev/null || echo none)"
+    # the stream autoreport.sh pumped through the whole run (and its sizes):
+    # in the archive too, so a lost upload does not lose it
+    for f in "$HOME"/rdna3-trace/*.bin "$HOME"/rdna3-trace/*.size; do
+        [ -f "$f" ] || continue
+        cp "$f" "$dir/36-stream-$(basename "$f")" && echo "stream: $(wc -c < "$f") bytes in 36-stream-$(basename "$f")"
+    done
 } > "$dir/36-frame-trace.txt" 2>&1
 # N1: which processes the Metal plugin served and why. The list, the
 # boot-args (rdna3mtlapps=0 ends apps mode) and the plugin's decision line of
@@ -141,6 +147,14 @@ pm="$root/build/userspace/rdna3_pmctl"
 [ -x "$pm" ] && run 33-pmctl.txt "$pm" info
 vki="$root/build/mesa/vulkaninfo.log"
 [ -f "$vki" ] && cp "$vki" "$dir/32-vulkaninfo-ci.log"
+
+# the Metal plugin's own trace (tools/macos/collect_plugin_trace.sh, when
+# this checkout has it): as root, at most 120 s
+if [ -f "$root/tools/macos/collect_plugin_trace.sh" ]; then
+    lim=120
+    run 37-plugin-trace-collect.txt sh "$root/tools/macos/collect_plugin_trace.sh" "$dir"
+    lim=45
+fi
 
 tar -C "$(dirname "$dir")" -czf "$out" "$(basename "$dir")" && rm -rf "$dir"
 echo "report: $out"

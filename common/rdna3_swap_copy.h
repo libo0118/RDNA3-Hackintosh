@@ -159,10 +159,110 @@ static inline int rd3_sc_d_stale(int haveD, unsigned dW, unsigned dH, unsigned w
 {
     return !haveD || dW != w || dH != h;
 }
-/* D may be freed now: the panel does not show it */
-static inline int rd3_sc_d_freeable(enum rd3_sc_shows shows)
+/* D may be freed now: the panel does not show it and the head's last flip
+ * (away from D, or anyone's: a mode 0 or IOP flip, posted to the swaps)
+ * was seen latched - until then the HUBP may still read D (ECC review
+ * round 1: a freed D is VRAM the next allocation scribbles on while it is
+ * on the panel) */
+static inline int rd3_sc_d_freeable(enum rd3_sc_shows shows, int flipped, int latched)
 {
-    return shows != RD3_SCS_D;
+    return shows != RD3_SCS_D && (!flipped || latched);
+}
+
+/* the wait before a copy: none, the bounded wait for the latch, or (the
+ * head's waits are off: rdna3_flip_latch.h's RD3_LATCH_TIMEOUT_RUN timeouts
+ * in a row) one look without waiting - a latch seen there turns the waits
+ * back on (rd3_latch_seen) */
+enum rd3_sc_wait { RD3_SCW_NONE = 0, RD3_SCW_WAIT = 1, RD3_SCW_LOOK = 2 };
+static inline enum rd3_sc_wait rd3_sc_wait_plan(enum rd3_sc_target t, int flipped, int latched, int waitsOff)
+{
+    if (!rd3_sc_must_wait(t, flipped, latched))
+        return RD3_SCW_NONE;
+    return waitsOff ? RD3_SCW_LOOK : RD3_SCW_WAIT;
+}
+
+/* the front the head's last copy reached (copy forward's source): forgotten
+ * when that allocation is freed, so a new buffer at the same address (and
+ * the same VRAM offset) is never taken for one holding the last frame (ECC
+ * review round 1) */
+struct rd3_sc_front { const void *vm; unsigned long long cookie; };
+static inline void rd3_sc_front_set(struct rd3_sc_front *f, const void *vm, unsigned long long cookie)
+{
+    f->vm = vm;
+    f->cookie = cookie;
+}
+static inline int rd3_sc_front_forget(struct rd3_sc_front *f, const void *gone)
+{
+    if (!gone || f->vm != gone)
+        return 0;
+    f->vm = 0;
+    f->cookie = 0;
+    return 1;
+}
+static inline int rd3_sc_front_current(const struct rd3_sc_front *f, const void *vm, unsigned long long cookie)
+{
+    return vm && f->vm == vm && f->cookie == cookie;
+}
+
+/* The SDMA breaker of modes 1/2 (ECC review round 1). Every swap copies by
+ * SDMA, synchronously: a ring that times out costs its timeout (~100 ms)
+ * at every swap. RD3_SC_BRK_RUN failures in a row, or one timeout, open the
+ * breaker: the swaps flip as in mode 0 (the panel keeps getting frames, the
+ * flicker of card run 2026-10-17 comes back, nothing waits on the engine)
+ * until RD3_SC_BRK_RETRY swaps later one swap tries SDMA again; its success
+ * closes the breaker, its failure opens it for another RD3_SC_BRK_RETRY.
+ * Every transition is an event the caller logs and traces. */
+#define RD3_SC_BRK_RUN   3u
+#define RD3_SC_BRK_RETRY 600u
+struct rd3_sc_brk {
+    unsigned run;            /* failures in a row */
+    int off;                 /* open: the swaps flip */
+    int probing;             /* the one swap trying SDMA again */
+    unsigned long long offAt;/* the swap number it opened at */
+    unsigned trips;          /* times it opened */
+};
+enum rd3_sc_brk_ev {
+    RD3_SC_BRK_NONE = 0, RD3_SC_BRK_OPENED = 1, RD3_SC_BRK_PROBE = 2, RD3_SC_BRK_CLOSED = 3,
+    RD3_SC_BRK_REOPENED = 4   /* the probe failed: open for another RD3_SC_BRK_RETRY swaps */
+};
+/* whether swap 'now' copies (else it flips); *ev: a probe begins */
+static inline int rd3_sc_brk_allow(struct rd3_sc_brk *b, unsigned long long now, enum rd3_sc_brk_ev *ev)
+{
+    *ev = RD3_SC_BRK_NONE;
+    if (!b->off)
+        return 1;
+    if (!b->probing && now - b->offAt >= RD3_SC_BRK_RETRY) {
+        b->probing = 1;
+        *ev = RD3_SC_BRK_PROBE;
+        return 1;
+    }
+    return b->probing;
+}
+/* a copy failed ('timedOut': the engine's fence did not come) */
+static inline enum rd3_sc_brk_ev rd3_sc_brk_fail(struct rd3_sc_brk *b, unsigned long long now, int timedOut)
+{
+    b->run++;
+    if (b->probing || (!b->off && (timedOut || b->run >= RD3_SC_BRK_RUN))) {
+        const int was = b->off;
+        b->off = 1;
+        b->probing = 0;
+        b->offAt = now;
+        if (!was) {
+            b->trips++;
+            return RD3_SC_BRK_OPENED;
+        }
+        return RD3_SC_BRK_REOPENED;
+    }
+    return RD3_SC_BRK_NONE;
+}
+/* a copy went through */
+static inline enum rd3_sc_brk_ev rd3_sc_brk_ok(struct rd3_sc_brk *b)
+{
+    const int was = b->off;
+    b->run = 0;
+    b->off = 0;
+    b->probing = 0;
+    return was ? RD3_SC_BRK_CLOSED : RD3_SC_BRK_NONE;
 }
 
 /* the part of a copy both sides hold: the narrower width and the lower

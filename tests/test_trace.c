@@ -21,7 +21,7 @@ static int fails;
 static void layout(void)
 {
     CHECK(sizeof(struct rd3_trace_ev) == 80);
-    CHECK(sizeof(struct rd3_trace_hdr) == 80);
+    CHECK(sizeof(struct rd3_trace_hdr) == 96);
     CHECK(sizeof(struct rd3_trace_sec) == 32);
     /* tools/rdna3_trace.py's EV_FMT "<QIBBBBIIIIIIQQQ8s8s" */
     CHECK(offsetof(struct rd3_trace_ev, seq) == 8);
@@ -34,7 +34,7 @@ static void layout(void)
     CHECK(offsetof(struct rd3_trace_ev, pc) == 56);
     CHECK(offsetof(struct rd3_trace_ev, ba) == 64);
     CHECK(offsetof(struct rd3_trace_ev, bb) == 72);
-    /* "<IIIIIIQQQQIIIIII" */
+    /* "<IIIIIIQQQQIIIIIIQII" */
     CHECK(offsetof(struct rd3_trace_hdr, count) == 16);
     CHECK(offsetof(struct rd3_trace_hdr, written) == 24);
     CHECK(offsetof(struct rd3_trace_hdr, now) == 40);
@@ -42,6 +42,10 @@ static void layout(void)
     CHECK(offsetof(struct rd3_trace_hdr, salt_check) == 56);
     CHECK(offsetof(struct rd3_trace_hdr, tb_numer) == 64);
     CHECK(offsetof(struct rd3_trace_hdr, ab) == 76);
+    CHECK(offsetof(struct rd3_trace_hdr, wall_us) == 80);
+    CHECK(offsetof(struct rd3_trace_hdr, flags) == 88);
+    CHECK(offsetof(struct rd3_trace_hdr, hdr_size) == 92);
+    CHECK(RD3_TRACE_VERSION == 2);
     /* "<IBBBBHHHHHHHHHHI" */
     CHECK(offsetof(struct rd3_trace_sec, swaps) == 8);
     CHECK(offsetof(struct rd3_trace_sec, freedshown) == 26);
@@ -160,12 +164,79 @@ static void stream_and_seconds(void)
     CHECK(!rd3_trace_sec_get(0, 1, 1));
 }
 
+/* ECC review round 1: reads copy a fixed window in chunks with the lock
+ * dropped between; what the writers overwrite meanwhile is counted lost,
+ * never copied twice or out of order, and a full read starts at the oldest
+ * event (not at number 1: a loop over every event since the boot) */
+static void chunks(void)
+{
+    static struct rd3_trace_ev big[64], out[64];
+    struct rd3_trace_ring r;
+    uint64_t next, lost, to, expect;
+    uint32_t n = 0, got, i;
+    memset(&r, 0, sizeof r);
+    r.ev = big;
+    r.cap = 64;
+    for (i = 0; i < 1000; i++)
+        rd3_trace_next(&r);
+    CHECK(rd3_trace_oldest(&r) == 937);
+    /* a full read: 937..1000 */
+    CHECK(rd3_trace_copy(&r, 1, out, 64) == 64 && out[0].seq == 937 && out[63].seq == 1000);
+    CHECK(rd3_trace_copy(&r, 990, out, 64) == 11 && out[0].seq == 990);
+    /* a chunked read of [937, 1000] with 40 events written after the first
+     * chunk of 16: 937..976 overwritten meanwhile -> 16 copied, then 977.. */
+    to = r.written;
+    next = rd3_trace_oldest(&r);
+    lost = 0;
+    got = rd3_trace_copy_chunk(&r, &next, to, out, 16, &lost);
+    CHECK(got == 16 && next == 953 && lost == 0);
+    n = got;
+    for (i = 0; i < 40; i++)
+        rd3_trace_next(&r);   /* 1040 written: 977..1040 kept */
+    while (next <= to && n < 64) {
+        got = rd3_trace_copy_chunk(&r, &next, to, out + n, 16, &lost);
+        n += got;
+        if (!got)
+            break;
+    }
+    CHECK(lost == 977 - 953);       /* 953..976 */
+    CHECK(n == 16 + (1000 - 977 + 1));
+    expect = 937;
+    for (i = 0; i < n; i++) {
+        if (i == 16)
+            expect = 977;
+        CHECK(out[i].seq == (uint32_t)expect);
+        expect++;
+    }
+    CHECK(next == 1001);            /* the window ends where the read began, 1001..1040 are the next read's */
+    /* a window wholly overwritten: everything lost, nothing copied */
+    next = 900;
+    lost = 0;
+    CHECK(rd3_trace_copy_chunk(&r, &next, 950, out, 64, &lost) == 0 && lost == 51 && next == 951);
+    next = 0;
+    CHECK(rd3_trace_copy_chunk(&r, &next, 950, out, 64, &lost) == 0);   /* 0: no window */
+}
+
+/* the cost bound of sampling the surface's other buffers */
+static void scan_due(void)
+{
+    CHECK(rd3_trace_scan_due(0, 1, 5000, 0));          /* an empty back: always */
+    CHECK(!rd3_trace_scan_due(0, 0, 0, 1));
+    CHECK(rd3_trace_scan_due(2, 0, 5001, 0));
+    CHECK(rd3_trace_scan_due(1, 0, 10, 0));            /* a head's first swaps */
+    CHECK(rd3_trace_scan_due(1, 0, 5001, 2));          /* the A/B */
+    CHECK(!rd3_trace_scan_due(1, 0, 5001, 0));
+    CHECK(rd3_trace_scan_due(1, 0, 5000, 0));          /* every 8th */
+}
+
 int main(void)
 {
     layout();
     ring();
     helpers();
     stream_and_seconds();
+    chunks();
+    scan_due();
     if (fails) {
         printf("test_trace: %d check(s) FAILED\n", fails);
         return 1;

@@ -2134,15 +2134,47 @@ Settings. That is expected for them, not a display regression.
 | Q5 | every vidmem alloc / free, scanned at the free?; shapes | `VMALLOC` (`arg` 0 = refused, `v4` the IOReturn, `v1` MiB handed out), `VMFREE` (flags 2/4/8: shown by mode 0 / leaving the panel / mode 1's D on the panel, `head`), `SHAPE` (`v0` mask, `v1` w/h, `v3` present / shaped, `pa`-`pc` buffers 0-2) | a `VMFREE` with flags 2-8 is H-FREE |
 | Q6 | what each panel really scanned | `PANEL` at each swap: `pa` SURFACE_EARLIEST_INUSE, `pb` the requested address, `pc` what the driver expects, flags 1 pending; `SCAN` arg 0xfe the scanout buffer after the copy, 0xfd the front | `pa` != `pc` with no flip pending: the panel is not where the driver thinks; triage `PANEL` WARN |
 | Q7 | mode switches and display mode changes | `MODESET` (`arg` 0 swap mode, 1 A/B phase: `v0` old, `v1` new), `MODE` (`arg` 0/1 will/did change, 2 initFramebufferResource with the scanout) | the A/B table segments by these |
-| Q8 | nothing dropped in the A/B window | stream headers' `lost` (events overwritten between two reads), the full read's `lost`, `nomem`; the per-second table (`36-frame-trace-sec.bin`, never overflows); counters `swap_trace_events / _lost / _nomem` | any `lost` in the A/B streams: FAIL `trace incomplete: Q8` |
+| Q8 | nothing dropped in the run | stream headers' `lost` (events overwritten between two reads, accelerator and core), the full read's `lost`, `nomem`; each stream file's reads must follow one another (`written` k - `written` k-1 = `count` + `lost`), its size must match its `.size` file; the per-second table (`36-frame-trace-sec.bin`: the last 4096 s, counts stop at 65535); counters `swap_trace_events / _lost / _nomem`; a kernel log dump must hold its `dump done, N line(s)` | any `lost` in the streams, a read missing from a file, a truncated / corrupt blob, an unknown version, `nomem` > 0, a size mismatch, blobs of two boots (`salt_check`): FAIL `trace incomplete: Q8 (...)` naming the file and byte |
 | Q9 | RADV's submissions, completions, waits, resets, faults | core ring: `CS` (pid, VMID, IP / ring, seq, IBs / BOs, result), `FENCE` (first seen signalled), `GPUWAIT` (pid, us, seq, cap ran out, result), `RESET`, `VMFAULT` (VMID, address, client, pid) | a plugin VkResult / timeout lines up with these by time |
 | Q10 | every IOSurface the kext sees, and its VRAM | `SURFGEM` (`arg` 0 refused, 1 imported, 2 dirty, 3 RM share; `v0` id, `v1` status, `v2` reason / plane, `pa` VRAM), `SURFRES` (resource, id, how: 1 aperture, 2 page-off, 4 import, 5 dirty; `pa` its VRAM) | joins the plugin's IOSurface ids to the legacy buffers' addresses |
-| Q11 | one clock | every `t` is mach_absolute_time; each header carries `tb_numer` / `tb_denom` and the read's `now` | ns = t * numer / denom (the plugin's traces use the same clock) |
+| Q11 | one clock | every `t` is mach_absolute_time; each header (version 2, 96 bytes) carries `tb_numer` / `tb_denom`, the read's `now` and its wall clock `wall_us` (us since 1970, taken next to `now`) | ns = t * numer / denom (the plugin's traces use the same clock); wall = wall_us - (now_ns - t_ns) / 1000; triage prints the anchor; a version 2 header without it: FAIL Q11 |
 
 Triage's self-check prints `FAIL trace incomplete: Qn (...)` for any
 question the report cannot answer (no trace at all on a kernel that has
 it, no HUBP address from a core without `rdna3DisplayScanAddr`, events
 lost in the A/B streams, no core trace when RADV ran).
+
+#### ECC review round 1 of the swap copy and the trace
+
+What could make the next report come back empty or wrong, and what says so:
+
+| Seen | Counter / log / triage line | Meaning, action |
+|---|---|---|
+| `swap copy: SDMA BREAKER OPEN at swap #n` (log), `swaps_copybrktrips`, `swaps_copybrkflip_h<N>`, SWAP `v1` bit 20, MODESET arg 2 | three SDMA copies failed in a row, or one timed out (~100 ms each) | modes 1/2 flip as in mode 0 until one swap 600 swaps later tries SDMA again (`... breaker CLOSED`); the A/B's phase 1 then WARNs; the SDMA ring is the fault (see the core's `copy:` lines) |
+| `swap copy: head N: 3 flips in a row did not latch in time -- the head's copies STOP WAITING`, `swaps_copynowait_h<N>`, LATCH arg 6/7/8 | rdna3_flip_latch.h's backoff in modes 1/2 | a head that never latches costs 3 capped waits, then only a look per swap; a latch seen turns the waits on again |
+| `swaps_copyfreewait_h<N>`, `the old second scanout buffer ... is on the panel / maybe still scanned` | D is freed only off the panel once the flip away latched | a mode change waits for the latch, the swap copies into home meanwhile |
+| `swap mode: head N: leaving the copy modes -- the last frame copied into home ... flipped there` | `debug.rdna3accel_swap_mode=0` while the panel showed D | mode 0 starts from home; a failure keeps D on the panel until mode 0's first flip (logged) |
+| `swap mode a -> b ... REFUSED: the family's lock could not be taken` | the mode never changes without the lock | the A/B's `ab_set` line says `NOT APPLIED`; triage `A/B inconclusive: mode 0 never applied in phase 2` |
+| `trace: head N: what its HUBP scans is unknown ...: <reason> (0x...)`, PANEL `v3` / `v4` | Q6 names the reason (no core, unknown head, an older core, the call failed) | |
+| APERTURE `v2` 1-4, CS `arg` 0xff | every getApertureMemoryDescriptor return (gate, cached, no VRAM, withRange) and every refused AMDGPU_CS (`drm: AMDGPU_CS from pid p refused (e)`) | Q3 / Q9 |
+| `== frame trace: <oid> NOT BINARY` (tests file) | `sysctl -b` gave text: the stream files cannot be decoded | triage `trace incomplete: Q8 (... NOT a trace ...)` |
+| `FAIL frame trace: A/B did not run` / `A/B inconclusive: phase X had n swaps on head h (need 20)` / `no MODESET to phase X` / `mode 0 never applied in phase 2` | the A/B is judged only from phases 1-2 events, with at least 20 swaps per head and phase | an inconclusive A/B prints its verdict as `INFO A/B verdict (NOT valid ...)`; `== swap A/B: activity: Activity Monitor is NOT running` explains a phase without swaps |
+| `trace incomplete: Q1 (... FEWER than the counters: head N: a in the trace, b counted over the A/B)` | the trace lost swaps the counters saw (`swaps_h<N>` before phase 1 and after mode 0) | |
+| `trace incomplete: Q1-Q11 (debug.rdna3accel_trace NOT read by collect.sh ...)` | `36-frame-trace.txt` says a root-only read failed | run collect.sh as root |
+| `plugin trace: ...` | tools/plugin_trace.py's verdicts (the Metal plugin's own trace, collected by tools/macos/collect_plugin_trace.sh into the archive) | INFO `not in this report` when the plugin loaded but its trace is missing |
+
+The kernel stream is pumped every 3 s through the whole run now (not only
+the A/B), into `$HOME/rdna3-trace/` on the machine, the archive
+(`36-stream-*.bin` and `.size`), the host (`<report>-trace-stream.bin`,
+`-drmtrace-stream.bin`, `-trace-sec.bin` and their `.size`) and
+`/var/db/rdna3-pending-*` until sent. Reads copy 256 events at a time with
+the ring's lock dropped between; the stream's cursor moves only after the
+copyout. Content samples are read through the BAR with no HDP invalidate,
+as amdgpu does on Navi 32 (`amdgpu_device_invalidate_hdp` is a no-op on
+HDP 6.0); the headers say so (flag `HDP_NOINV`). The other buffers of a
+swapping surface are sampled at every swap for a head's first 600 swaps,
+during the A/B and at empty backs, else every 8th
+(`debug.rdna3accel_trace_scan`: 0 only empty backs, 2 always).
 
 #### Symptom -> trace -> action
 

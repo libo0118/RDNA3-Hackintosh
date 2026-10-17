@@ -27,12 +27,13 @@
 #include <stdint.h>
 
 #define RD3_TRACE_MAGIC     0x52543352u   /* "R3TR" in the file (little endian) */
-#define RD3_TRACE_VERSION   1u
+#define RD3_TRACE_VERSION   2u            /* 2: the 96-byte header (wall clock, flags, its own size) */
 /* events kept (80 bytes each: 2.5 MiB). A swap records about 4-6 events
  * (SWAP, PANEL, SCAN of the surface's other buffers, APERTURE, SYNC, CF):
  * two heads at 60 Hz fill it in about 25 s; autoreport.sh reads the stream
- * sysctl every few seconds, and the per-second table (struct
- * rd3_trace_sec) never overflows */
+ * sysctl every few seconds. The per-second table (struct rd3_trace_sec)
+ * keeps counts the ring may have lost, for the last RD3_TRACE_SECS seconds
+ * (older rows are reused) with 16-bit counts that stop at 65535 */
 #define RD3_TRACE_CAP       32768u
 #define RD3_TRACE_BOOT_DUMP 300u          /* events of a boot logged once */
 #define RD3_TRACE_DUMP_MAX  2000u         /* the most one dump request logs */
@@ -93,7 +94,8 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *  SWAP    head, arg rd3_trace_swap, flags RD3_TRF_*, obj the surface; v0 the
  *          swap number, v1 = rc(a1) | rc(a2) << 4 | route << 8 | mode << 12 |
  *          target << 16 (0 none, 1 home, 2 the driver's buffer, 3 home
- *          directly), v2 the copy's us, v3 the wait's us, v4 = the index
+ *          directly) | 1 << 20 when modes 1/2 flipped because the SDMA
+ *          breaker is open (mode then reads 0), v2 the copy's us, v3 the wait's us, v4 = the index
  *          of a1 in the surface's buffer array | a2's << 8 (0xff: not in
  *          it) | rd3_trace_fail << 16;
  *          pa a1, pb a2, pc what the panel shows after it; ba / bb the band
@@ -112,23 +114,29 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          by mode 0's record, 4 the flip away from it not latched; obj the
  *          vidmem; v0 KiB; pa its address
  *  APERTURE arg 1 addToAperture, 2 getApertureMemoryDescriptor; flags 1 ok;
- *          obj the resource; v0 KiB; pa its address
+ *          obj the resource; v0 KiB, v1 the IOSurface id, v2 the path
+ *          (0 new, 1 the gate closed, 2 the cached descriptor, 3 no BAR
+ *          VRAM, 4 IODeviceMemory::withRange failed); pa its address
  *  PAGEOFF arg 1 copied; obj the resource; v0 KiB, v1 us; pa its address
  *  SURFGEM arg 1 imported / 0 refused; v0 the IOSurface id, v1 the status,
  *          v2 the reason, v3 w | h << 16; pa the VRAM when imported
  *  MODE    arg 0 will change, 1 did change, 2 initFramebufferResource (head,
  *          pa the scanout, v0 w | h << 16, v1 pitch)
  *  FLIP    head, arg 0 mode 0's flip of a back, 1 to the driver's buffer, 2
- *          home, 3 an IOP surface; flags 1 done; v0 flipResult, v4 the
+ *          home, 3 an IOP surface, 4 home when leaving modes 1/2; flags 1 done; v0 flipResult, v4 the
  *          IOReturn; pa the target
  *  LATCH   head, arg 0 waited, 1 at once, 2 timed out, 3 unreadable, 4 modes
- *          1/2: latched before the next copy, 5 not in time; v0 us; pa the flip
+ *          1/2: latched before the next copy, 5 not in time, 6 not waited
+ *          for (the head's waits are off), 7 the waits go off (3 timeouts in
+ *          a row), 8 they come back (a latch seen); v0 us; pa the flip
  *  SYNC    arg 0 setSyncCommand (v0 / v1 its two counts), 1
  *          getDirtyBufferBitsFromPrivateModeBits (v0 / v1 the bits); obj the surface
  *  GONE    arg 0 a surface (head its head), 1 a head's pipe resource
  *  MODESET arg 0 debug.rdna3accel_swap_mode changed, arg 1 autoreport's A/B
  *          phase changed (debug.rdna3accel_swap_ab: 0 none, 1 mode 1, 2
- *          mode 0, 3 back); v0 the old value, v1 the new
+ *          mode 0, 3 back); v0 the old value, v1 the new; arg 2 the SDMA
+ *          breaker of modes 1/2 (v0 old, v1 new: 0 closed, 1 open, 2 a
+ *          probe; v2 the copy's status, v3 its trips, v4 the IOReturn)
  *  SCAN    head, arg the buffer's index in the surface's array (0xff: not
  *          in it), flags 1 pixels, 2 changed since this head last sampled
  *          it, 4 the swap's back, 8 the swap's front; obj the surface; v0
@@ -139,7 +147,9 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          swap's copy (arg 0xfe), 128 the front after it (arg 0xfd)
  *  CS      arg the IP (AMDGPU_HW_IP_*), flags the ring, head 0xff; v0 the
  *          submitter's pid, v1 its VMID, v2 the fence seq (low 32 bits), v3
- *          IBs | BOs << 16, v4 the result (0 or -errno); pa the first IB's VA
+ *          IBs | BOs << 16, v4 the result (0 or -errno); pa the first IB's VA;
+ *          arg 0xff: the AMDGPU_CS ioctl refused anywhere (v0 the pid, v4
+ *          the error)
  *  FENCE   arg the IP, flags the ring; v2 the seq, v0 the pid of its submitter
  *          when known; one per newly seen seq (an upper bound of the signal)
  *  GPUWAIT arg the IP, flags the ring; v0 the pid, v1 the wait's us, v2 the
@@ -154,7 +164,10 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *  PANEL   head; flags 1 a flip pending; v0 the OTG frame, v1 the scanline,
  *          v2 in vblank; pa the address scanned (EARLIEST_INUSE), pb the one
  *          requested, both as CPU (BAR) addresses like every pa; pc the
- *          address the accelerator expects there (0 unknown)
+ *          address the accelerator expects there (0 unknown); v3 why pa is
+ *          missing (0 there, 1 no core, 2 the core does not know the head, 3
+ *          the core's rdna3DisplayScanAddr failed, 4 no VRAM base yet: MC
+ *          addresses), v4 the IOReturn
  *  Time: t is mach_absolute_time (the Metal plugin's traces use it too),
  *  the header carries the timebase. */
 struct rd3_trace_ev {
@@ -175,6 +188,12 @@ typedef char rd3_trace_ev_is_80_bytes[sizeof(struct rd3_trace_ev) == 80 ? 1 : -1
 #define RD3_TRACE_SRC_CORE  1u   /* the core (RDNA3Accel): command submissions, fences, faults */
 #define RD3_TRACE_READ_ALL    0u
 #define RD3_TRACE_READ_STREAM 1u
+/* RD3_TRACE_HDR_* flags */
+#define RD3_TRACE_HDR_HDP_NOINV 0x1u   /* the content samples were read through the BAR with no HDP invalidate:
+                                        * amdgpu_device_invalidate_hdp is a no-op on HDP 6.0 (hdp_v6_0_funcs has
+                                        * only flush_hdp, soc21 no asic invalidate_hdp), so none is needed */
+#define RD3_TRACE_HDR_CHUNKED   0x2u   /* copied in chunks with the lock dropped between: events overwritten
+                                        * meanwhile are counted in 'lost' */
 struct rd3_trace_hdr {
     uint32_t magic, version;
     uint32_t ev_size, cap;
@@ -189,8 +208,16 @@ struct rd3_trace_hdr {
     uint32_t tb_numer, tb_denom;   /* mach timebase: ns = t * numer / denom */
     uint32_t read_kind;     /* RD3_TRACE_READ_* */
     uint32_t ab;            /* autoreport's A/B phase at the read (debug.rdna3accel_swap_ab) */
+    uint64_t wall_us;       /* the read's wall clock (microtime: us since 1970), taken next to 'now': Q11's
+                             * anchor between mach_absolute_time and the logs' dates */
+    uint32_t flags;         /* RD3_TRACE_HDR_* */
+    uint32_t hdr_size;      /* sizeof(struct rd3_trace_hdr): the events start here */
 };
-typedef char rd3_trace_hdr_is_80_bytes[sizeof(struct rd3_trace_hdr) == 80 ? 1 : -1];
+typedef char rd3_trace_hdr_is_96_bytes[sizeof(struct rd3_trace_hdr) == 96 ? 1 : -1];
+/* a read's chunk: events copied under the lock at a time (the lock is
+ * dropped between chunks, ECC review round 1: a 32768-event copy held a
+ * spinlock, interrupts off on the core's ring, for milliseconds) */
+#define RD3_TRACE_CHUNK 256u
 
 /* The per-second table: one row per second of uptime and head (head 4: the
  * events no head owns), RD3_TRACE_SECS seconds kept, so a whole run's
@@ -272,6 +299,39 @@ static inline uint64_t rd3_trace_stream_from(const struct rd3_trace_ring *r, uin
     return cursor + 1 < oldest ? oldest : cursor + 1;
 }
 
+/* the first event still in the ring (written + 1 when empty) */
+static inline uint64_t rd3_trace_oldest(const struct rd3_trace_ring *r)
+{
+    return r->written - (r->written < r->cap ? r->written : r->cap) + 1;
+}
+
+/* one chunk of a read: the events numbered *next..to still in the ring, at
+ * most max of them. *next moves past those copied; those overwritten since
+ * the read began are skipped and added to *lost. The caller holds the lock
+ * around each call and may drop it between calls. */
+static inline uint32_t rd3_trace_copy_chunk(const struct rd3_trace_ring *r, uint64_t *next, uint64_t to,
+                                            struct rd3_trace_ev *out, uint32_t max, uint64_t *lost)
+{
+    uint64_t oldest;
+    uint32_t n = 0;
+    if (!r || !r->ev || !r->cap || !out || !*next)
+        return 0;
+    if (to > r->written)
+        to = r->written;
+    oldest = rd3_trace_oldest(r);
+    if (*next < oldest) {
+        const uint64_t stop = to + 1 < oldest ? to + 1 : oldest;
+        if (stop > *next)
+            *lost += stop - *next;
+        *next = stop > *next ? stop : *next;
+    }
+    while (*next <= to && n < max) {
+        out[n++] = r->ev[(*next - 1) % r->cap];
+        (*next)++;
+    }
+    return n;
+}
+
 /* the events numbered from 'from' on still in the ring, at most 'max', the
  * oldest first, into 'out'; returns how many (the caller holds the lock) */
 static inline uint32_t rd3_trace_copy(const struct rd3_trace_ring *r, uint64_t from, struct rd3_trace_ev *out,
@@ -305,16 +365,11 @@ static inline long rd3_trace_find(const struct rd3_trace_ring *r, uint64_t seq)
 static inline uint32_t rd3_trace_copy(const struct rd3_trace_ring *r, uint64_t from, struct rd3_trace_ev *out,
                                       uint32_t max)
 {
-    uint32_t n = 0;
-    uint64_t seq;
+    uint64_t next = from ? from : 1, lost = 0;
     if (!r || !r->ev || !out)
         return 0;
-    for (seq = from ? from : 1; seq <= r->written && n < max; seq++) {
-        const long i = rd3_trace_find(r, seq);
-        if (i >= 0)
-            out[n++] = r->ev[i];
-    }
-    return n;
+    /* from the oldest kept, never a loop over every number since the boot */
+    return rd3_trace_copy_chunk(r, &next, r->written, out, max, &lost);
 }
 
 /* a pointer as a 32-bit name: salted per boot (no kernel address in the
@@ -347,6 +402,23 @@ static inline uint8_t rd3_trace_band(const uint32_t *px, unsigned n)
         return 0;
     b = (uint8_t)(h ^ (h >> 8) ^ (h >> 16) ^ (h >> 24));
     return b ? b : 1u;
+}
+
+/* whether a swap samples the surface's other buffers (SCAN events, Q2):
+ * 64 uncached BAR reads per buffer, so bounded (ECC review round 1).
+ * debug.rdna3accel_trace_scan: 0 only when the back read empty ('landing'),
+ * 2 every swap, 1 (the default) every swap for a head's first
+ * RD3_TRACE_SCAN_FIRST swaps and while autoreport's A/B runs (ab != 0),
+ * otherwise every RD3_TRACE_SCAN_EVERY-th swap; an empty back always */
+#define RD3_TRACE_SCAN_FIRST 600u
+#define RD3_TRACE_SCAN_EVERY 8u
+static inline int rd3_trace_scan_due(int setting, int landing, uint64_t headSwaps, unsigned ab)
+{
+    if (landing || setting >= 2)
+        return 1;
+    if (setting <= 0)
+        return 0;
+    return headSwaps < RD3_TRACE_SCAN_FIRST || ab != 0 || headSwaps % RD3_TRACE_SCAN_EVERY == 0;
 }
 
 /* little-endian 16-bit field i of an 8-byte array */
