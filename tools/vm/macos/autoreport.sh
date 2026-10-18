@@ -903,7 +903,8 @@ bisect_run() {   # bisect_run <1|2|4>: the whole sequence; 0 when every step ran
     elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
     case $_bv in 4) BISECT_KNOBS="$BISECT_KNOBS_BASE iop iop_flip flipbuf_present swap_gen" ;; *) BISECT_KNOBS=$BISECT_KNOBS_BASE ;; esac
     bisect_w "# rdna3 bisect v1"
-    bisect_w "variant: $_bv ($(case $_bv in 2) echo bisect-plugin ;; 4) echo bisect-agdc ;; *) echo bisect ;; esac))"
+    case $_bv in 2) _bvn=bisect-plugin ;; 4) _bvn=bisect-agdc ;; *) _bvn=bisect ;; esac
+    bisect_w "variant: $_bv ($_bvn)"
     bisect_w "hold_s: $HOLD"
     bisect_w "mode: $([ -n "$_btty" ] && echo tty || echo timer)"
     bisect_w "started: $(date +%T)"
@@ -1502,7 +1503,13 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     if [ -n "$BISECT" ]; then
         # the display bisect replaces the other tests: they would draw on the
         # screens the owner is looking at (collect.sh packs bisect.txt)
-        hdr "bisect ($(case $BISECT in 2) echo "bisect-plugin: the Metal plugin's switches" ;; 4) echo "bisect-agdc: the kernel's switches, WindowServer on the GPU" ;; *) echo "the kernel's switches" ;; esac))"
+        # (no case inside $( ): macOS's bash 3.2 cannot parse its patterns there)
+        case $BISECT in
+            2) _bwhat="bisect-plugin: the Metal plugin's switches" ;;
+            4) _bwhat="bisect-agdc: the kernel's switches, WindowServer on the GPU" ;;
+            *) _bwhat="the kernel's switches" ;;
+        esac
+        hdr "bisect ($_bwhat)"
         bisect_run "$BISECT"
         echo "[exit $?]"
     fi
