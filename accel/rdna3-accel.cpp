@@ -5429,8 +5429,8 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
     rd3AccelLatchEntry(head, fb, n);
     rd3AccelTornCheck(head, src, hashSkip ? nullptr : hash, bufs, nbufs, n);
     /* the back already on the panel, its flip latched: not flipped again, no wait (card run 2026-10-18b) */
-    const enum rd3_same_shown same = rd3_latch_same_shown(gSwapSameNoFlip, gLatch[head].phys, gLatch[head].st.latched,
-                                                          ps.known, ps.scan, ps.pending, phys);
+    const enum rd3_same_shown same = rd3_latch_same_shown(gSwapSameNoFlip && fb, gLatch[head].phys,
+                                                          gLatch[head].st.latched, ps.known, ps.scan, ps.pending, phys);
     RD3FlipWhy fw = { nullptr, kIOReturnSuccess, 0 };
     const uint64_t issued = mach_absolute_time();
     const bool flipped = same != RD3_SAME_SKIP && rd3AccelFlipTo(src, fb, head, &fw);

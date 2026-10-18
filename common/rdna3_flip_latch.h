@@ -169,7 +169,9 @@ static inline enum rd3_panel rd3_latch_panel(uint64_t shown, uint64_t prev, int 
  * ('scan', SURFACE_EARLIEST_INUSE as the swap's address) and whether a flip
  * is pending ('scan_pending'). The scanned address, when known, overrides
  * the record: another buffer there means the record is stale (flip), a
- * pending flip means wait as before. amdgpu completes the swap's event from
+ * pending flip means wait as before; unknown, the swap flips and waits as
+ * before (an IOP or home flip moves the panel without updating the record).
+ * amdgpu completes the swap's event from
  * dm_pflip_high_irq instead (DRIVER-PLAN N28): this is the cheap part. */
 enum rd3_same_shown {
     RD3_SAME_NO = 0,       /* another buffer, nothing recorded or off: flip and wait as before */
@@ -186,7 +188,10 @@ static inline enum rd3_same_shown rd3_latch_same_shown(int enabled, uint64_t sho
             return RD3_SAME_NO;
         return scan_pending ? RD3_SAME_PENDING : RD3_SAME_SKIP;
     }
-    return latched ? RD3_SAME_SKIP : RD3_SAME_PENDING;
+    /* the scanned address unknown: never skip on the record alone - an IOP
+     * or home flip moves the panel without updating it (review round 1) */
+    (void)latched;
+    return RD3_SAME_PENDING;
 }
 
 /* the bands of a buffer whose sample hash changed between its flip and

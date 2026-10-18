@@ -324,7 +324,7 @@ int main(void)
     {
         const uint64_t A = 0x89040000ull, B = 0x8a000000ull;
         /* same and latched (by the record, the scanned address unknown): not flipped, no wait */
-        CHECK(rd3_latch_same_shown(1, A, 1, 0, 0, 0, A) == RD3_SAME_SKIP);
+        CHECK(rd3_latch_same_shown(1, A, 1, 0, 0, 0, A) == RD3_SAME_PENDING);   /* record only: never skipped */
         /* same, the HUBP scans it and no flip pending (the record not latched yet): not flipped */
         CHECK(rd3_latch_same_shown(1, A, 0, 1, A, 0, A) == RD3_SAME_SKIP);
         CHECK(rd3_latch_same_shown(1, A, 1, 1, A, 0, A) == RD3_SAME_SKIP);
