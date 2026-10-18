@@ -61,6 +61,11 @@ for v, n in sorted((v, n) for v, n in types.items() if v):
 # the bits the decoder uses that the header documents only in prose (the SDMA breaker, 1 << 20)
 if rdna3_trace.V1_BRK_FLIP != 1 << 20 or "1 << 20 when modes 1/2" not in h:
     fails.append("the SDMA breaker's SWAP v1 bit is not 1 << 20 in both")
+# SWAP's target 4: mode 0's swap to the buffer already on the panel, not flipped (card run 2026-10-18b)
+m4 = re.search(r"#define RD3_TRV1_TARGET_SAME (\d+)u", h)
+if not m4 or int(m4.group(1)) != rdna3_trace.TARGET_SAME or rdna3_trace.TARGET_SAME not in rdna3_trace.TARGET:
+    fails.append("RD3_TRV1_TARGET_SAME %s, the decoder's TARGET_SAME %d / TARGET %s" %
+                 (m4.group(1) if m4 else "missing", rdna3_trace.TARGET_SAME, sorted(rdna3_trace.TARGET)))
 if fails:
     sys.exit("test_trace_parity: FAIL " + "; ".join(fails))
 print("test_trace_parity: all checks passed (%d v1 bits, %d swap args)" % (len(bits), len(trs)))

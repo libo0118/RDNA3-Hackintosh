@@ -51,7 +51,9 @@ SWAP_ARG = {0: "skip", 1: "flip", 2: "flip refused, copied", 3: "flip refused", 
             7: "no head"}
 RC = {0: "no res", 1: "no vidmem", 2: "no kva", 3: "no geometry", 4: "empty", 5: "pixels"}
 F_A1_FRONT, F_A2_FRONT, F_A1_PIX, F_A2_PIX, F_EMPTY, F_FRONT_OK, F_DOUBLE, F_WAITED = 1, 2, 4, 8, 16, 32, 64, 128
-TARGET = {0: "-", 1: "home", 2: "D", 3: "home DIRECT"}
+TARGET = {0: "-", 1: "home", 2: "D", 3: "home DIRECT",
+          4: "same buffer, not flipped"}   # 4: mode 0, the back already on the panel (card run 2026-10-18b)
+TARGET_SAME = 4
 V1_BRK_FLIP = 1 << 20                 # SWAP v1: modes 1/2 flipped, the SDMA breaker open
 V1_LANDED = 1 << 21                   # SWAP v1: modes 1/2 presented the landed buffer (card run 2026-10-17c)
 V1_LANDED_WOULD = 1 << 22             # SWAP v1: one found, not presented (debug.rdna3accel_swap_landed=0)
@@ -507,7 +509,7 @@ def segments(trace, swaps=None):
         k = (swap_mode(e), ph.get(id(e), 0))
         s = seg.setdefault(k, {"swaps": 0, "shown": 0, "held": 0, "black": 0, "empty": 0, "failed": 0, "direct": 0,
                                "double": 0, "waits": 0, "wait_us": 0, "copy_us": 0, "events": [], "landed": 0,
-                               "held_new": 0, "would": 0, "stale": 0})
+                               "held_new": 0, "would": 0, "stale": 0, "same": 0})
         s["swaps"] += 1
         shown = e.arg in (1, 2, 4)
         s["shown"] += shown
@@ -521,6 +523,7 @@ def segments(trace, swaps=None):
         s["black"] += bool(e.flags & F_EMPTY) and shown
         s["failed"] += e.arg in (3, 6)
         s["direct"] += e.arg == 4 and ((e.v1 >> 16) & 0xf) == 3
+        s["same"] += e.arg == 1 and ((e.v1 >> 16) & 0xf) == TARGET_SAME   # mode 0: not flipped again, no wait
         s["double"] += bool(e.flags & F_DOUBLE)
         if e.flags & F_WAITED:
             s["waits"] += 1
@@ -1215,11 +1218,11 @@ def ab_table(trace):
                      "elsewhere), %d stale backs held, %d landed buffers NOT presented (swap_landed 0), %4d empty "
                      "backs, %4d BLACK frames, "
                      "%4d failed, %4d in-place rewrites of %d, %4d tear-free copies, %4d direct (may tear), "
-                     "waits %d (avg %d us), copy avg %d us" %
+                     "%d same buffer (not flipped), waits %d (avg %d us), copy avg %d us" %
                      (mode, "(" + AB_NAME.get(phase, str(phase)) + ")", s["swaps"], s["shown"], s["landed"],
                       s["held"], s["held_new"], s["stale"], s["would"], s["empty"],
                       s["black"], s["failed"], s["inplace"], s["inplace_checked"], s["double"], s["direct"],
-                      s["waits"], s["wait_us"] // s["waits"] if s["waits"] else 0,
+                      s["same"], s["waits"], s["wait_us"] // s["waits"] if s["waits"] else 0,
                       s["copy_us"] // max(1, s["double"] + s["direct"])))
     m1 = [s for (m, _), s in seg.items() if m in (1, 2)]
     m0 = [s for (m, _), s in seg.items() if m == 0]

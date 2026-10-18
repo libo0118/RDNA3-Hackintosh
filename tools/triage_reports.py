@@ -582,7 +582,7 @@ def a3_display_verdict(log, sv):
 A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)?|a3off_refused|a3|flicker|"
                        r"swaps(?:_a3|_abab|_ababwide|_hashed|_hashskip|_frontskip|_skipped|_emptyshown|_bufchg|"
                        r"_latchpend|_latchwait|_latchus|_latchmax|_latchtimeout|_latchunknown|_latchoff|_tornchk|"
-                       r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill|_latchimmediate|_latchwaitsoff|"
+                       r"_torn|_inplace|_tornskip|_shownfreed|_emptyfilled|_emptystill|_latchimmediate|_latchwaitsoff|_latchsame|"
                        r"_flipfailed|_copy|_copyempty|_copylanded|_copylanded_would|_stalehold|_stalehold_would|_stalehold_miss|"
                        r"_stalehold_changed|_stalenocf|_stalereset|_staleevict|_stalegone|"
                        r"_stalecheck_(?:norecord|changed|cf|sameshown|nopanel|nohead)|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
@@ -594,7 +594,7 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"flipbuf_(?:nohead|nores|intoff|badptr|busy|unlocked)|"
                        r"hook_(?:intr_(?:flipbuf|scanout|pickpresent|didsubmitswap|backready|submitupdate)|intr|intoff|pickpresent|"
                        r"didsubmitswap|backready|backready_no|submitupdate)|"
-                       r"swaps_copybrktrips|swap_latch|swap_torn|swap_landed|swap_stale|"
+                       r"swaps_copybrktrips|swap_latch|swap_torn|swap_samenoflip|swap_landed|swap_stale|"
                        r"swap_mode|trace_scan|swap_trace_events|swap_trace_nomem|swap_trace_lost|cf_sc(?:src|scanout|stale)_h\d|"
                        r"bufs_new_h\d|cf_(?:shown|src|backlast|nothingshown|foreign|miss|healed|onpanel)_h\d|swaps_skipped_all|"
                        r"swaps_nohead|cf_(?:calls|nohead|shown_stale|refused|same|disabled|pend_blocked|pend_forced|pend_evicted|"
@@ -748,6 +748,7 @@ SERIAL_SWAP_LINE = re.compile(r"(flicker: head \d+: [^\n]*|swap: head \d+: \d+ s
                               r"swap #\d+: head \d+ shows a new buffer[^\n]*|swap #\d+: head \d+: the back[^\n]*|"
                               r"swap: surface [^\n]*matched no head[^\n]*|"
                               r"swap latch: (?:head \d+(?: \(core head \d+\))?: |a swap returns|OFF: a swap)[^\n]*|"
+                              r"swap same: [^\n]*|"
                               r"flip to VRAM [^\n]*still pending after 20 ms[^\n]*|"
                               r"swap #\d+: head \d+: the (?:previous flip|flip to phys|buffer it showed)[^\n]*"
                               r"(?:NOT latched|changed while on the panel)[^\n]*|"
@@ -981,6 +982,7 @@ def latch_verdict(c, current=False, report_missing=True):
         return []
     out = []
     latch_on, torn_on = c.get("swap_latch"), c.get("swap_torn")
+    same_on = c.get("swap_samenoflip")
     if latch_on == 0:
         out.append(("WARN", "debug.rdna3accel_swap_latch was 0: swaps returned before their flip latched (the A/B run "
                             "without the fix)"))
@@ -1002,6 +1004,10 @@ def latch_verdict(c, current=False, report_missing=True):
         if missing and report_missing:
             out.append(("WARN", "head %s: counters missing (unknown, not 0): %s" % (h, ", ".join(missing))))
         pend, waits, us = v("swaps_latchpend"), v("swaps_latchwait"), v("swaps_latchus")
+        # card run 2026-10-18b: mode 0 swaps to the buffer already on the panel, not flipped again (no latch wait)
+        same_txt = "" if g("swaps_latchsame") is None and same_on is None else (
+            "; same buffer, not flipped: %s swap(s) (swap_samenoflip %s)" % (f("swaps_latchsame"),
+                                                                          "?" if same_on is None else same_on))
         imm, tout, unk, off = v("swaps_latchimmediate"), v("swaps_latchtimeout"), v("swaps_latchunknown"), v("swaps_latchoff")
         chk, torn, inpl, tskip = v("swaps_tornchk"), v("swaps_torn"), v("swaps_inplace"), v("swaps_tornskip")
         why = []
@@ -1025,7 +1031,10 @@ def latch_verdict(c, current=False, report_missing=True):
                                                                                    else 0),
                      f("swaps_latchmax"), f("swaps_latchimmediate"), f("swaps_latchtimeout"),
                      f("swaps_latchunknown"), f("swaps_latchoff"), "?" if latch_on is None else latch_on,
-                     " - " + ", ".join(why) if why else "")))
+                     " - " + ", ".join(why) if why else "") + same_txt))
+        if g("swaps_latchsame") is None and same_on is not None:
+            out.append(("WARN", "head %s: counter missing (unknown, not 0): swaps_latchsame (the kernel has "
+                                "swap_samenoflip)" % h))
         if v("swaps_latchwaitsoff"):
             out.append(("WARN", "head %s: its swaps were NOT waiting for their flips at the end (timeouts in a row; "
                                 "until a flip is seen latched)" % h))
@@ -1865,7 +1874,7 @@ SERIAL_LATCH = re.compile(
     r"(\d+) changed on the panel then flipped away \(torn\), (\d+) rewritten in place \(one back\), (\d+) not hashed; "
     r"copy forwards into the buffer on the panel (\d+); buffers freed on the panel (\d+); empty backs read again: "
     r"(\d+) filled, (\d+) still empty \(swap_latch (-?\d+)(?:, card run [^)]*\); latched at once (\d+), flips failed "
-    r"(\d+), waits (on|OFF))?")
+    r"(\d+), waits (on|OFF)(?: \(timeouts\))?(?:; same buffer not flipped (\d+) \(swap_samenoflip (-?\d+)\))?)?")
 
 
 def serial_latch_verdict(text, seen=()):
@@ -1876,19 +1885,22 @@ def serial_latch_verdict(text, seen=()):
     last = {}
     for m in SERIAL_LATCH.finditer(text):
         g = list(m.groups()[1:])
-        g[-1] = None if g[-1] is None else int(g[-1] == "OFF")
+        g[-3] = None if g[-3] is None else int(g[-3] == "OFF")
         last[m.group(1)] = [None if x is None else int(x) for x in g]
     out = []
     for h, v in sorted(last.items()):
         (swaps, pend, waits, avg, mx, tout, unk, off, chk, torn, inpl, tskip, onp, freed, filled, still,
-         latch_on, imm, failed, waits_off) = v
+         latch_on, imm, failed, waits_off, same, same_on) = v
         c = {"swaps_h" + h: swaps, "swaps_latchpend_h" + h: pend, "swaps_latchwait_h" + h: waits,
              "swaps_latchus_h" + h: avg * waits, "swaps_latchmax_h" + h: mx, "swaps_latchtimeout_h" + h: tout,
              "swaps_latchunknown_h" + h: unk, "swaps_latchoff_h" + h: off, "swaps_tornchk_h" + h: chk,
              "swaps_torn_h" + h: torn, "swaps_inplace_h" + h: inpl, "swaps_tornskip_h" + h: tskip,
              "cf_onpanel_h" + h: onp, "swaps_shownfreed_h" + h: freed, "swaps_emptyfilled_h" + h: filled,
              "swaps_emptystill_h" + h: still, "swap_latch": latch_on}
-        for k, x in (("swaps_latchimmediate", imm), ("swaps_flipfailed", failed), ("swaps_latchwaitsoff", waits_off)):
+        if same_on is not None:
+            c["swap_samenoflip"] = same_on
+        for k, x in (("swaps_latchimmediate", imm), ("swaps_flipfailed", failed), ("swaps_latchwaitsoff", waits_off),
+                     ("swaps_latchsame", same)):
             if x is not None:
                 c[k + "_h" + h] = x
         for lv, t in latch_verdict(c, report_missing=False):

@@ -213,6 +213,12 @@ def make(kind):
     elif kind in GEN_KINDS:     # card run 2026-10-17d: the write generations, the flip-buffer path
         gen_run(w, kind)
         common_tail(w)
+    elif kind == "samebuf":   # card run 2026-10-18b: mode 0, one back: the first swap flips, the rest are not flipped
+        for i in range(40):
+            w.add(6, arg=1, flags=1, obj=0x1111, v=(8100, 3, 0, 0, 0), pa=B1)
+            swap(w, i + 1, 0, 1, B1, True, pc=B1, bandk=i, target=4 if i else 0, waited=0 if i else 14800,
+                 flags=0 if i else 128)
+        common_tail(w)
     elif kind in STALE_KINDS:   # card run 2026-10-17c's head 1: B2 drawn once, then never again
         stale_run(w, kind)
         common_tail(w)
