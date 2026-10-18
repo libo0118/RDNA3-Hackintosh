@@ -83,7 +83,9 @@ enum rd3_swap_mode { RD3_SWAPMODE_FLIP = 0, RD3_SWAPMODE_COPY = 1, RD3_SWAPMODE_
  * in mode 1 with them, 8 old frames shown with the old rules). So the copy
  * is the default again; rdna3swapmode=0 / debug.rdna3accel_swap_mode=0 is
  * the flip. */
-#define RD3_SWAPMODE_DEFAULT RD3_SWAPMODE_COPY
+/* card run 2026-10-18 (bisect-agdc, WindowServer on the GPU): every mode 0 step
+ * was right on both monitors, every mode 1 / 2 step broken - the flip is the default */
+#define RD3_SWAPMODE_DEFAULT RD3_SWAPMODE_FLIP
 #define RD3_SWAPMODE_MAX     RD3_SWAPMODE_COPY_ALL
 
 static inline int rd3_swapmode_valid(long v)

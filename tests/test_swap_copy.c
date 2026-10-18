@@ -177,7 +177,7 @@ static void actions(void)
     }
     CHECK(rd3_swapmode_valid(0) && rd3_swapmode_valid(1) && rd3_swapmode_valid(2));
     CHECK(!rd3_swapmode_valid(-1) && !rd3_swapmode_valid(3));
-    CHECK(RD3_SWAPMODE_DEFAULT == RD3_SWAPMODE_COPY);   /* the copy again (rdna3_write_gen.h) */
+    CHECK(RD3_SWAPMODE_DEFAULT == RD3_SWAPMODE_FLIP);   /* card run 2026-10-18: only mode 0 was right */
 }
 
 static void targets(void)
