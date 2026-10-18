@@ -97,6 +97,7 @@ has "$o" 'WARN flip latch: head 1: sampled empty backs of skipped swaps, read ag
 has "$o" 'PASS flip latch: head 0: 0 of 200 shown frames changed while on the panel' torn
 has "$o" 'INFO flip latch: head 0: 0 of 300 swaps: the previous flip had not latched at the swap; flips waited for 250 time(s), avg 10000 us, max 16900 us' torn
 hasnt "$o" 'counters missing' torn
+hasnt "$o" 'same buffer, not flipped' torn
 grep -q 'flip latch  *FAIL head 1: 30 of 200' <<<"$o" || fail "torn: the summary line: $o"
 grep -q '^RESULT: something failed' <<<"$o" || fail "torn: the result: $o"
 
@@ -125,9 +126,14 @@ swaps_latchwaitsoff_h0 1
 swaps_tornchk_h0 100
 swaps_torn_h0 1
 swaps_inplace_h0 80
+swap_samenoflip 1
+swaps_latchsame_h0 70
 swaps_h1 0"
 o=$(run inplace)
 hasnt "$o" Traceback inplace
+# card run 2026-10-18b: mode 0 swaps to the buffer already on the panel, not flipped again
+has "$o" '(waits off after timeouts, or given up); same buffer, not flipped: 70 swap(s) (swap_samenoflip 1)' inplace
+hasnt "$o" 'swaps_latchsame (the kernel has' inplace
 has "$o" 'WARN flip latch: head 0: 80 of 100 shown frames rewritten in place and shown again (one back buffer' inplace
 grep -q 'WARN flip latch: head 0: 1 of 100 shown frames changed while on the panel, then flipped away (torn)$' <<<"$o" ||
     fail "inplace: one torn frame is a WARN: $o"
@@ -142,7 +148,9 @@ swap_torn 0
 swaps_h0 500
 swaps_latchimmediate_h0 500
 swaps_h1 100
-swaps_latchpend_h1 0"
+swaps_latchpend_h1 0
+swap_samenoflip 1
+swaps_latchsame_h0 0"
 o=$(python3 - "$T/idle/rdna3-report-idle-tests.txt" <<'PY'
 import re, sys
 p = sys.argv[1]
@@ -157,6 +165,8 @@ has "$o" 'the flip state never read pending - the wait did nothing' idle
 has "$o" 'INFO flip latch: head 0: torn test not measured: 0 checks in 500 swaps (swap_torn 0, 0 skipped)' idle
 has "$o" 'WARN flip latch: head 1: counters missing (unknown, not 0): swaps_latchmax, swaps_tornchk' idle
 has "$o" 'max ? us' idle
+has "$o" 'WARN flip latch: head 1: counter missing (unknown, not 0): swaps_latchsame (the kernel has swap_samenoflip)' idle
+has "$o" '; same buffer, not flipped: ? swap(s) (swap_samenoflip 1)' idle
 mk idle2/rdna3-report-idle2 "${ZERO}swap_latch 1
 swap_torn 1
 swaps_h0 500
@@ -189,7 +199,8 @@ RDNA3Accelerator: swap: surface <ptr> -> head 0 (only head piped; a1 phys 0x1 a2
 RDNA3Accelerator: swap latch: head 1: 8 swaps; previous flip not latched at entry 0; latched while waited 8 (avg 9000 us, max 16000 us), 0 timeouts, 0 unknown, 0 not waited; shown buffers hashed again 7: 0 changed on the panel then flipped away (torn), 0 rewritten in place (one back), 0 not hashed; copy forwards into the buffer on the panel 0; buffers freed on the panel 0; empty backs read again: 0 filled, 0 still empty (swap_latch 1, card run 2026-10-17); latched at once 0, flips failed 0, waits on
 RDNA3Accelerator: swap #90: head 1: the buffer it showed (phys 0x8b100000) changed while on the panel: bands 0x7e of 8 (bit 0 the top 32 rows); its flip latched 8000 us after it, 12 ms ago -- WRITTEN WHILE SHOWN, now flipped away (torn: the panel showed the writes) (1 such, 60 checked)
 RDNA3Accelerator: swap #91: head 1: the flip state could not be read after the flip: the core refused rdna3DisplayStatus (0xe00002c2) -- not waited for (1 such)
-RDNA3Accelerator: swap latch: head 1: 120 swaps; previous flip not latched at entry 2; latched while waited 118 (avg 8000 us, max 16500 us), 0 timeouts, 1 unknown, 0 not waited; shown buffers hashed again 119: 50 changed on the panel then flipped away (torn), 0 rewritten in place (one back), 1 not hashed; copy forwards into the buffer on the panel 0; buffers freed on the panel 0; empty backs read again: 1 filled, 3 still empty (swap_latch 1, card run 2026-10-17); latched at once 0, flips failed 0, waits on
+RDNA3Accelerator: swap latch: head 1: 120 swaps; previous flip not latched at entry 2; latched while waited 118 (avg 8000 us, max 16500 us), 0 timeouts, 1 unknown, 0 not waited; shown buffers hashed again 119: 50 changed on the panel then flipped away (torn), 0 rewritten in place (one back), 1 not hashed; copy forwards into the buffer on the panel 0; buffers freed on the panel 0; empty backs read again: 1 filled, 3 still empty (swap_latch 1, card run 2026-10-17); latched at once 0, flips failed 0, waits on; same buffer not flipped 5 (swap_samenoflip 1)
+RDNA3Accelerator: swap #92: head 1: the back (phys 0x8b100000) is the buffer the panel already scans -- not flipped again, no latch wait (1 such; its flip seen latched; debug.rdna3accel_swap_samenoflip=0 flips it)
 EOF
 echo 'RDNA3Accelerator: swap latch: head 2: 120 swaps; previous flip not latched at entry 0; latched while waited 0 (avg 0 us, max 0 us), 3 timeouts, 0 unknown, 117 not waited; shown buffers hashed again 0: 0 changed on the panel then flipped away (torn), 0 rewritten in place (one back), 0 not hashed; copy forwards into the buffer on the panel 0; buffers freed on the panel 0; empty backs read again: 0 filled, 0 still empty (swap_latch 1, card run 2026-10-17); latched at once 0, flips failed 0, waits OFF (timeouts)' >> "$T/ser/serial-1.log"
 o=$(python3 "$ROOT/tools/triage_reports.py" "$T/ser" 2>&1 || true)
@@ -199,6 +210,8 @@ grep -q 'FAIL swap/flicker  *head 1: 50 of 119 shown frames changed while on the
 grep -q 'WARN swap/flicker  *head 1: 2 of 120 swaps: the previous flip had not latched at the swap' <<<"$o" || fail "serial: pending: $o"
 has "$o" 'swap #90: head 1: the buffer it showed (phys 0x8b100000) changed while on the panel' serial
 has "$o" 'swap #91: head 1: the flip state could not be read after the flip' serial
+has "$o" 'swap #92: head 1: the back (phys 0x8b100000) is the buffer the panel already scans' serial
+has "$o" 'unreadable; same buffer, not flipped: 5 swap(s) (swap_samenoflip 1) (flip latch, serial at swap 120)' serial
 has "$o" "INFO swap/flicker         head 0: flip latch not measured (no 'swap latch: head 0' line in the log)" serial
 hasnt "$o" 'counters missing' serial
 grep -q 'WARN swap/flicker  *head 2: its swaps were NOT waiting for their flips at the end' <<<"$o" || fail "serial: waits off: $o"

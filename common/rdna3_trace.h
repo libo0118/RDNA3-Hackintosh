@@ -121,6 +121,10 @@ enum rd3_trace_swap {
 #define RD3_TRV1_GEN_WHY_SHIFT 28u
 #define RD3_TRV1_GEN_WHY_MASK  15u
 #define RD3_TRV1_FLIPBUF   (1u << 27)
+/* SWAP's target field (v1 >> 16 & 0xf) of a mode 0 swap (arg RD3_TRS_FLIP)
+ * whose back was the buffer the head already scanned, its flip latched: not
+ * flipped again, no latch wait (card run 2026-10-18b, rd3_latch_same_shown) */
+#define RD3_TRV1_TARGET_SAME 4u
 /* a mode 1 swap whose back the generations would hold but that presented
  * the surface's buffer written after the head's frame instead
  * (rd3_wg_landed_pick) carries RD3_TRV1_LANDED (v4 >> 24 that buffer's
@@ -142,8 +146,10 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *  SWAP    head, arg rd3_trace_swap, flags RD3_TRF_*, obj the surface; v0 the
  *          swap number, v1 = rc(a1) | rc(a2) << 4 | route << 8 | mode << 12 |
  *          target << 16 (0 none, 1 home, 2 the driver's buffer, 3 home
- *          directly) | 1 << 20 when modes 1/2 flipped because the SDMA
- *          breaker is open (mode then reads 0) | 1 << 21 when modes 1/2
+ *          directly, 4 mode 0: the buffer already on the panel, not
+ *          flipped again: RD3_TRV1_TARGET_SAME)
+ *          | 1 << 20 when modes 1/2 flipped because the SDMA breaker is
+ *          open (mode then reads 0) | 1 << 21 when modes 1/2
  *          presented the landed buffer instead of the named back
  *          (RD3_TRV1_LANDED, rdna3_swap_copy.h) | 1 << 22 when it found
  *          one but debug.rdna3accel_swap_landed=0 (RD3_TRV1_LANDED_WOULD:

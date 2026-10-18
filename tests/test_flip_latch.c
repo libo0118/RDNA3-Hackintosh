@@ -320,6 +320,30 @@ int main(void)
 
     kmodel();
 
+    /* card run 2026-10-18b: a mode 0 swap to the buffer the panel already scans */
+    {
+        const uint64_t A = 0x89040000ull, B = 0x8a000000ull;
+        /* same and latched (by the record, the scanned address unknown): not flipped, no wait */
+        CHECK(rd3_latch_same_shown(1, A, 1, 0, 0, 0, A) == RD3_SAME_PENDING);   /* record only: never skipped */
+        /* same, the HUBP scans it and no flip pending (the record not latched yet): not flipped */
+        CHECK(rd3_latch_same_shown(1, A, 0, 1, A, 0, A) == RD3_SAME_SKIP);
+        CHECK(rd3_latch_same_shown(1, A, 1, 1, A, 0, A) == RD3_SAME_SKIP);
+        /* same but its flip still pending: flip and wait as before */
+        CHECK(rd3_latch_same_shown(1, A, 0, 0, 0, 0, A) == RD3_SAME_PENDING);
+        CHECK(rd3_latch_same_shown(1, A, 0, 1, A, 1, A) == RD3_SAME_PENDING);
+        CHECK(rd3_latch_same_shown(1, A, 1, 1, A, 1, A) == RD3_SAME_PENDING);   /* a flip pending the record missed */
+        /* a different buffer: flip and wait as before */
+        CHECK(rd3_latch_same_shown(1, A, 1, 0, 0, 0, B) == RD3_SAME_NO);
+        CHECK(rd3_latch_same_shown(1, A, 1, 1, A, 0, B) == RD3_SAME_NO);
+        /* the HUBP scans another buffer than the record says (a stale record): flip */
+        CHECK(rd3_latch_same_shown(1, A, 1, 1, B, 0, A) == RD3_SAME_NO);
+        /* nothing recorded (a forget: mode change, refused flip), no back address, or off: as before */
+        CHECK(rd3_latch_same_shown(1, 0, 1, 0, 0, 0, A) == RD3_SAME_NO);
+        CHECK(rd3_latch_same_shown(1, 0, 1, 1, A, 0, A) == RD3_SAME_NO);
+        CHECK(rd3_latch_same_shown(1, 0, 1, 0, 0, 0, 0) == RD3_SAME_NO);
+        CHECK(rd3_latch_same_shown(0, A, 1, 1, A, 0, A) == RD3_SAME_NO);
+    }
+
     if (fails) {
         printf("test_flip_latch: %d check(s) FAILED\n", fails);
         return 1;

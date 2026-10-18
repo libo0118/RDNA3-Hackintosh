@@ -27,6 +27,13 @@ has "$out" "PASS     Q3: 40 empty backs, 40 delayed re-samples" b2
 hasnt "$out" "H-FREE" b2
 hasnt "$out" "CF-ERROR" b2
 
+# card run 2026-10-18b: mode 0 swaps to the buffer already on the panel, not flipped again (SWAP target 4)
+python3 -I "$ROOT/tests/trace_fixture.py" samebuf "$T/samebuf.bin"
+out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/samebuf.bin" --timeline 400)
+has "$out" "mode 0 flip: back 0x8b100000 (pixels, 0708090a0b0c0d0e) front 0x87040000 (empty) -> panel 0x8b100000 target same buffer, not flipped copy 0 us wait 0 us" samebuf
+has "$out" "-> panel 0x8b100000 target - copy 0 us wait 14800 us" samebuf
+has "$out" "39 same buffer (not flipped), waits 1 (avg 14800 us)" samebuf
+
 # mode 1 held the empty back while the other back had a new frame: frames held back (FAIL), counted in the A/B line
 out=$(dec b2lost)
 has "$out" "FAIL     H-B2: head 0: the back 0x8b8f0000 was named by 40 swaps and read EMPTY at 40" b2lost
