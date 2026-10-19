@@ -128,7 +128,13 @@ ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_a
                     "common/rdna3_trace.h", "common/rdna3_write_gen.h")
 
 
-def fb_source_hash(files=("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h")):
+# fb/Makefile's FB_SRC_HASH inputs and agdc/Makefile's AGDC_SRC_HASH inputs
+FB_HASH_FILES = ("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h")
+AGDC_HASH_FILES = ("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/AppleGraphicsDeviceControl_re.h",
+                   "agdc/Info.plist")
+
+
+def fb_source_hash(files=FB_HASH_FILES):
     """fb/Makefile's FB_SRC_HASH (accel/Makefile's ACCEL_SRC_HASH with the
     accelerator's files): sha1 of the concatenated sources, 10 hex"""
     import hashlib
@@ -2022,7 +2028,84 @@ def stale_builds(stamps_txt, host_txt, plugin_log):
     return bool(reasons)
 
 
+# The kexts macOS loads from the Auxiliary KC only after the user allowed each new build ('rdna3vm approve'):
+# until then macOS keeps running the build approved before. Card runs 2026-10-18b and 2026-10-19b tested the old
+# RDNA3Accelerator (e35e78c275) three times in a row: the new build (4fcf2bc0b7) was installed but never allowed,
+# and nothing said so. kext, the serial log's build line, the sources that build is hashed from
+KEXT_SERIAL_BUILDS = (
+    ("RDNA3Accelerator", re.compile(r"RDNA3Accelerator: build ([0-9a-f]{7,})"), ACCEL_HASH_FILES),
+    ("RDNA3Framebuffer", re.compile(r"RDNA3-fb: started .*?, build ([0-9a-f]{7,})"), FB_HASH_FILES),
+    ("RDNA3AGDC", re.compile(r"RDNA3-agdc: build ([0-9a-f]{7,})"), AGDC_HASH_FILES),
+)
+# autoreport.sh's approve-*.txt (stale_kexts): "<kext>: running <hash>, installed <hash> (not approved yet)"; the
+# tests file's "stale: <kext>: running X, installed Y (not approved yet);..." line holds the same, joined with ';'
+APPROVE_MARKER_RE = re.compile(r"^(RDNA3\w+): running (\w+), installed (\w+)", re.M)
+STALE_LINE_RE = re.compile(r"(RDNA3\w+): running (\w+), installed (\w+)")
+# the action first: result_checklist cuts a long row at the terminal's width
+STALE_KEXTS_HEAD = "old driver ran - run 'rdna3vm approve', then the step again"
+STALE_KEXTS_SHOWN = False   # a STALE KEXTS FAIL was printed (one per run; report() does not repeat it)
+
+
+def stale_marker_text(kext, running, installed):
+    return "%s (%s running %s, installed %s)" % (STALE_KEXTS_HEAD, kext, running, installed)
+
+
+def stale_kext_lines(*dirs):
+    """[(level, text)] of the kexts macOS ran older than the installed build, from a result directory without
+    needing a report from macOS: the approve-*.txt marker autoreport.sh uploads (the exact hashes, certain), and the
+    newest serial log's build lines against the hashes of the checked-out sources (the checkout must be the tested
+    commit). FAIL = stale; INFO = the check could not be done (a marker or log unreadable, a hash not computable,
+    no build line in the newest serial log), never silence"""
+    seen, found, info = [], {}, []
+    for d in dirs:
+        d = os.path.abspath(d)
+        if d not in seen and os.path.isdir(d):
+            seen.append(d)
+    for d in seen:
+        for f in sorted(glob.glob(os.path.join(d, "approve-*.txt"))):
+            try:
+                txt = open(f, errors="replace").read()
+            except OSError as e:
+                info.append("approve marker %s cannot be read (%s): the stale check from it is not done" %
+                            (os.path.basename(f), e.strerror or e))
+                continue
+            for kext, running, installed in APPROVE_MARKER_RE.findall(txt):
+                found.setdefault(kext, stale_marker_text(kext, running, installed))
+    # not rdna3vm's headless install boot (serial-install-*): it never loads the accelerator
+    serials = sorted((f for d in seen for f in glob.glob(os.path.join(d, "serial-*.log"))
+                      if not os.path.basename(f).startswith("serial-install-")), key=os.path.getmtime)
+    if serials:
+        sname = os.path.basename(serials[-1])
+        try:
+            slog = open(serials[-1], errors="replace").read()
+        except OSError as e:
+            slog = ""
+            info.append("serial log %s cannot be read (%s): stale check not done" % (sname, e.strerror or e))
+        else:
+            hits = 0
+            for kext, pat, files in KEXT_SERIAL_BUILDS:
+                m = pat.search(slog)
+                if not m:
+                    continue
+                hits += 1
+                want = fb_source_hash(files)
+                if not want:
+                    info.append("%s: the hash of its sources cannot be computed here (a source file of %s is "
+                                "missing from this checkout): its stale check is not done" % (kext, files[0]))
+                elif m.group(1) != want and kext not in found:
+                    found[kext] = ("%s (%s running %s per %s, the sources of this checkout build %s; a false "
+                                   "alarm if this checkout is not the tested commit)" % (
+                                       STALE_KEXTS_HEAD, kext, m.group(1), sname, want))
+            if not hits:
+                info.append("newest serial log %s has none of the RDNA3Accelerator / RDNA3-fb / RDNA3-agdc build "
+                            "lines (the kexts did not start, or a step without them): stale check not done" % sname)
+    order = [b[0] for b in KEXT_SERIAL_BUILDS]
+    return [("FAIL", found[k]) for k in order if k in found] + \
+        [("FAIL", v) for k, v in sorted(found.items()) if k not in order] + [("INFO", t) for t in info]
+
+
 def report(path, show_all):
+    global STALE_KEXTS_SHOWN
     failed = False
     with tarfile.open(path) as tar:
         args = read_member(tar, "01-boot-args.txt")
@@ -2171,8 +2254,7 @@ def report(path, show_all):
     # them WindowServer should hand display-pipe transactions a plane
     # (rdna3accel_iop_ok / iop_src_surf instead of only iop_empty)
     if re.search(r"rdna3agdc=[1-4]\b", args):
-        want = fb_source_hash(("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/AppleGraphicsDeviceControl_re.h",
-                               "agdc/Info.plist"))
+        want = fb_source_hash(AGDC_HASH_FILES)
         ag = re.search(r"RDNA3-agdc: build ([0-9a-f]+)", log)
         same = bool(want and ag and ag.group(1) == want)
         print("   %s %-20s %s" % ("PASS" if same else "FAIL", "AGDC build",
@@ -2738,6 +2820,13 @@ def main():
     if d != d0:
         load_linux_reference(d)
     failed = False
+    # first of all: a run that tested the old driver (approve marker / serial build line) says so before anything
+    # else, also when macOS never sent a report
+    global STALE_KEXTS_SHOWN
+    for lv, t in stale_kext_lines(d, d0, os.path.join(d0, "rdna3-result")):
+        print("   %s %-20s %s" % (lv, "STALE KEXTS" if lv == "FAIL" else "stale check", t))
+        if lv == "FAIL":
+            STALE_KEXTS_SHOWN = failed = True
     reports = glob.glob(os.path.join(d, "rdna3-report-*.tar.gz"))
     # a tests file whose archive never came (collect.sh killed): its results
     # still count, under the archive's would-be name
@@ -2808,6 +2897,12 @@ def main():
             if skipped:
                 print("   note: %d test(s) not run again, passed before with the same builds (their saved results "
                       "below): %s" % (len(skipped), ", ".join("%s (%s)" % k for k in skipped)))
+            # a non-empty 'stale:' line alone (hashes of the kext macOS ran and of the one installed) proves the old
+            # driver ran, whatever kernelmanagerd logged; one FAIL per run
+            sk = STALE_LINE_RE.findall(stale.group(1)) if stale else []
+            if sk and not STALE_KEXTS_SHOWN:
+                print("   FAIL %-20s %s" % ("STALE KEXTS", "; ".join(stale_marker_text(*x) for x in sk)))
+                STALE_KEXTS_SHOWN = failed = True
             if "not approved to load" in txt and stale and not stale.group(1).strip():
                 # the builds running are the ones installed (same source
                 # hashes): only a relinked copy of the same sources waits
@@ -2821,9 +2916,10 @@ def main():
                 # about the display, the accelerator and Metal on screen is
                 # about those (2026-10-12: an older framebuffer in console
                 # mode, every frame copied by the CPU)
-                print("   FAIL STALE KEXTS this run used the framebuffer/accelerator approved earlier, not "
-                      "this build's: display, accelerator and Metal-on-screen results do not count; "
-                      "'rdna3vm approve', then the step again")
+                if not STALE_KEXTS_SHOWN:
+                    print("   FAIL STALE KEXTS this run used the framebuffer/accelerator approved earlier, not "
+                          "this build's: display, accelerator and Metal-on-screen results do not count; "
+                          "'rdna3vm approve', then the step again")
                 failed = True
             if "== rdna3_drminfo --scanout" in txt:
                 # what the panels showed: per pipe the HUBP state, how much

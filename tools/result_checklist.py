@@ -251,7 +251,8 @@ def render(rows, result, note, color, width):
         if color:
             tag = "\033[%sm%s\033[0m" % (COLOR[lv], tag)
         room = max(width - 7 - 1 - namew - 2, 20)
-        if len(tx) > room:
+        # the STALE KEXTS action ("run 'rdna3vm approve'") must survive a narrow terminal: that row wraps instead
+        if len(tx) > room and "STALE KEXTS" not in nm:
             tx = tx[:room - 3] + "..."
         out.append("%s %-*s  %s" % (tag, namew, nm, tx))
     out.append("")

@@ -157,6 +157,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	tests/test_make_pkg.sh
 	tests/test_triage_a3.sh
 	python3 -I -B tests/test_accel_hash_parity.py
+	python3 -I -B tests/test_fb_agdc_hash_parity.py
 	python3 -I -B tests/test_trace_parity.py
 	python3 -I -B tests/test_accel_slots.py
 	tests/test_triage_tx.sh
@@ -169,6 +170,8 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	tests/test_triage_bisect.sh
 	tests/test_bisect_step.sh
 	tests/test_play_step.sh
+	tests/test_approve_gate.sh
+	tests/test_triage_stale_kexts.sh
 
 tools: $(BUILD)/amd_discovery_dump $(BUILD)/amd_fw_dump
 
