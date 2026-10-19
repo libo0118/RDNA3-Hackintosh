@@ -128,7 +128,13 @@ ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_a
                     "common/rdna3_trace.h", "common/rdna3_write_gen.h")
 
 
-def fb_source_hash(files=("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h")):
+# fb/Makefile's FB_SRC_HASH inputs and agdc/Makefile's AGDC_SRC_HASH inputs
+FB_HASH_FILES = ("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h")
+AGDC_HASH_FILES = ("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/AppleGraphicsDeviceControl_re.h",
+                   "agdc/Info.plist")
+
+
+def fb_source_hash(files=FB_HASH_FILES):
     """fb/Makefile's FB_SRC_HASH (accel/Makefile's ACCEL_SRC_HASH with the
     accelerator's files): sha1 of the concatenated sources, 10 hex"""
     import hashlib
@@ -2022,6 +2028,56 @@ def stale_builds(stamps_txt, host_txt, plugin_log):
     return bool(reasons)
 
 
+# The kexts macOS loads from the Auxiliary KC only after the user allowed each new build ('rdna3vm approve'):
+# until then macOS keeps running the build approved before. Card runs 2026-10-18b and 2026-10-19b tested the old
+# RDNA3Accelerator (e35e78c275) three times in a row: the new build (4fcf2bc0b7) was installed but never allowed,
+# and nothing said so. kext, the serial log's build line, the sources that build is hashed from
+KEXT_SERIAL_BUILDS = (
+    ("RDNA3Accelerator", re.compile(r"RDNA3Accelerator: build ([0-9a-f]{7,})"), ACCEL_HASH_FILES),
+    ("RDNA3Framebuffer", re.compile(r"RDNA3-fb: started .*?, build ([0-9a-f]{7,})"), FB_HASH_FILES),
+    ("RDNA3AGDC", re.compile(r"RDNA3-agdc: build ([0-9a-f]{7,})"), AGDC_HASH_FILES),
+)
+# autoreport.sh's approve-*.txt (stale_kexts): "<kext>: running <hash>, installed <hash> (not approved yet)"
+APPROVE_MARKER_RE = re.compile(r"^(RDNA3\w+): running (\w+), installed (\w+)", re.M)
+STALE_KEXTS_TAIL = "this run tested the old driver; run 'rdna3vm approve', then the step again"
+STALE_KEXTS_SHOWN = False   # main() printed the STALE KEXTS lines (report() then does not repeat its own)
+
+
+def stale_kext_lines(*dirs):
+    """[text] of the kexts macOS ran older than the installed build, from a result directory without needing a
+    report from macOS: the approve-*.txt marker autoreport.sh uploads (the exact hashes, certain), and the newest
+    serial log's build lines against the hashes of the checked-out sources (the checkout must be the tested commit)"""
+    seen, found = [], {}
+    for d in dirs:
+        d = os.path.abspath(d)
+        if d not in seen and os.path.isdir(d):
+            seen.append(d)
+    for d in seen:
+        for f in sorted(glob.glob(os.path.join(d, "approve-*.txt"))):
+            try:
+                txt = open(f, errors="replace").read()
+            except OSError:
+                continue
+            for kext, running, installed in APPROVE_MARKER_RE.findall(txt):
+                found.setdefault(kext, "macOS ran %s %s, the build installed is %s (not allowed yet) - %s" % (
+                    kext, running, installed, STALE_KEXTS_TAIL))
+    serials = sorted((f for d in seen for f in glob.glob(os.path.join(d, "serial-*.log"))), key=os.path.getmtime)
+    if serials:
+        try:
+            slog = open(serials[-1], errors="replace").read()
+        except OSError:
+            slog = ""
+        for kext, pat, files in KEXT_SERIAL_BUILDS:
+            m = pat.search(slog)
+            want = fb_source_hash(files)
+            if m and want and m.group(1) != want and kext not in found:
+                found[kext] = ("macOS ran %s %s (%s), the sources of this checkout build %s: not allowed yet, or this "
+                               "checkout is not the tested commit - if not allowed, %s" % (
+                                   kext, m.group(1), os.path.basename(serials[-1]), want, STALE_KEXTS_TAIL))
+    return [found[k] for k, _, _ in KEXT_SERIAL_BUILDS if k in found] + \
+        [v for k, v in sorted(found.items()) if k not in [b[0] for b in KEXT_SERIAL_BUILDS]]
+
+
 def report(path, show_all):
     failed = False
     with tarfile.open(path) as tar:
@@ -2171,8 +2227,7 @@ def report(path, show_all):
     # them WindowServer should hand display-pipe transactions a plane
     # (rdna3accel_iop_ok / iop_src_surf instead of only iop_empty)
     if re.search(r"rdna3agdc=[1-4]\b", args):
-        want = fb_source_hash(("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/AppleGraphicsDeviceControl_re.h",
-                               "agdc/Info.plist"))
+        want = fb_source_hash(AGDC_HASH_FILES)
         ag = re.search(r"RDNA3-agdc: build ([0-9a-f]+)", log)
         same = bool(want and ag and ag.group(1) == want)
         print("   %s %-20s %s" % ("PASS" if same else "FAIL", "AGDC build",
@@ -2738,6 +2793,12 @@ def main():
     if d != d0:
         load_linux_reference(d)
     failed = False
+    # first of all: a run that tested the old driver (approve marker / serial build line) says so before anything
+    # else, also when macOS never sent a report
+    global STALE_KEXTS_SHOWN
+    for t in stale_kext_lines(d, d0, os.path.join(d0, "rdna3-result")):
+        print("   FAIL %-20s %s" % ("STALE KEXTS", t))
+        STALE_KEXTS_SHOWN = failed = True
     reports = glob.glob(os.path.join(d, "rdna3-report-*.tar.gz"))
     # a tests file whose archive never came (collect.sh killed): its results
     # still count, under the archive's would-be name
@@ -2821,9 +2882,10 @@ def main():
                 # about the display, the accelerator and Metal on screen is
                 # about those (2026-10-12: an older framebuffer in console
                 # mode, every frame copied by the CPU)
-                print("   FAIL STALE KEXTS this run used the framebuffer/accelerator approved earlier, not "
-                      "this build's: display, accelerator and Metal-on-screen results do not count; "
-                      "'rdna3vm approve', then the step again")
+                if not STALE_KEXTS_SHOWN:
+                    print("   FAIL STALE KEXTS this run used the framebuffer/accelerator approved earlier, not "
+                          "this build's: display, accelerator and Metal-on-screen results do not count; "
+                          "'rdna3vm approve', then the step again")
                 failed = True
             if "== rdna3_drminfo --scanout" in txt:
                 # what the panels showed: per pipe the HUBP state, how much

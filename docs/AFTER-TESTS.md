@@ -83,6 +83,13 @@ exactly what to run next. One round = one report batch → one fix → one retes
 2. Run `python3 tools/triage_reports.py reports/<date> --all`.
    A `FAIL STALE PLUGIN/RADV` line means the VM ran an old Metal plugin or
    RADV: see its row in the failure table below before reading any Metal result.
+   A `FAIL STALE KEXTS` line (also without any macOS report) means the run
+   tested the OLD driver: the serial log's `RDNA3Accelerator: build <hash>`
+   (or `RDNA3-fb` / `RDNA3-agdc`) differs from the commit tested, or an
+   `approve-*.txt` came with the result (card runs 2026-10-18b, 2026-10-19b:
+   the new build was installed but never allowed, macOS ran `e35e78c275`).
+   Ask for `rdna3vm approve` (the next `rdna3vm step` also offers it by
+   itself) and the step again before analysing anything else.
    From step 2 on each report comes with `<report>-scanout-pipe<N>.ppm`:
    what that display pipe really scanned out ~2 min after boot
    (`rdna3_drminfo --scanout`, HUBP read back + a 320-wide picture). Triage

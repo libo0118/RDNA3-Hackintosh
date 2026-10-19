@@ -638,31 +638,66 @@ cmd__install() {
     fi
 }
 
+# the approve-*.txt markers a card boot uploaded (autoreport.sh stale_kexts:
+# "RDNA3Accelerator: running <old>, installed <new> (not approved yet)"): macOS
+# ran the framebuffer/accelerator approved earlier, not the installed build
+# (card runs 2026-10-18b and 2026-10-19b: three 'step play' runs tested the old
+# accelerator and nothing said so)
+approve_marker_text() { cat "$WORK"/reports/approve-*.txt 2>/dev/null | tr '\n' ';' || true; }
+approve_marker_clear() { rm -f "$WORK"/reports/approve-*.txt 2>/dev/null || sudo rm -f "$WORK"/reports/approve-*.txt || true; }
+
 # before a card step or queue, in the user's terminal: the new bundle into
 # macOS without the card, and "Allow" for new kexts in a window right away
-# (a card step before it would run the old framebuffer/accelerator)
+# (a card step before it would run the old framebuffer/accelerator). Also when
+# the LAST card run left an approve marker: that run tested the old build, so
+# allow it now instead of testing the old build once more.
 install_first() {
+    local stale
+    # read before _install: an install boot deletes the markers
+    stale=$(approve_marker_text)
     sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _install || true
-    if [ -s "$WORK/needs-allow" ]; then
+    if [ -n "$stale" ]; then
+        say "!! the last card run tested the OLD framebuffer/accelerator, not the installed build"
+        echo "  macOS reported: $stale"
+        echo "  Its results do not test the current code. Allowing the new build in a window first, the card step after it"
+    elif [ -s "$WORK/needs-allow" ]; then
         say "macOS wants 'Allow' for the new $(cat "$WORK/needs-allow")- in a window first, the card step after it"
+    fi
+    if [ -n "$stale" ] || [ -s "$WORK/needs-allow" ]; then
         cmd_approve
         rm -f "$WORK/needs-allow"
+        approve_marker_clear
         say "Allowed (window closed): on to the card"
     fi
 }
 
 # one VM run started by 'rdna3vm step' / 'args' / 'approve'. Like the queue:
 # when the VM installed new kexts and stopped before testing (autoreport's
-# rerun marker: they load from the next boot), the same boot-args once more
+# rerun marker: they load from the next boot), the same boot-args once more.
+# An approve marker after the run (macOS ran an older framebuffer/accelerator
+# than the installed one) means a rerun would test the same old build: no
+# rerun, the marker stays for install_first / 'rdna3vm result'.
 cmd__once() {
     bash "$SELF" _install || true
+    # markers of earlier runs were handled by install_first: only this boot's count
+    rm -f "$WORK"/reports/approve-*.txt
     bash "$SELF" _passthrough || true
+    if ls "$WORK"/reports/approve-*.txt >/dev/null 2>&1; then
+        rm -f "$WORK"/reports/rerun-*.txt
+        echo "== the VM ran an older framebuffer/accelerator than the installed one ($(approve_marker_text)): this run tested the OLD driver, not rerunning"
+        echo "== run 'rdna3vm approve', then the step again (the next step asks for it by itself)"
+        return 0
+    fi
     if ls "$WORK"/reports/rerun-*.txt >/dev/null 2>&1; then
         rm -f "$WORK"/reports/rerun-*.txt
         echo "== the VM installed new kexts; running the same boot-args again in 60 s so they are the ones tested"
         sleep 60
         bash "$SELF" _passthrough || true
         rm -f "$WORK"/reports/rerun-*.txt
+        if ls "$WORK"/reports/approve-*.txt >/dev/null 2>&1; then
+            echo "== the rerun ran an older framebuffer/accelerator than the installed one ($(approve_marker_text)): this run tested the OLD driver"
+            echo "== run 'rdna3vm approve', then the step again (the next step asks for it by itself)"
+        fi
     fi
 }
 
@@ -693,10 +728,14 @@ cmd_approve() {
     echo "    2. when it asks to restart: choose Not Now, then Apple menu -> Shut Down"
     echo "  No 'Allow' button in Privacy & Security = already allowed, just shut down."
     if [ "${1:-}" = --card ]; then
+        # launch runs install_first: without this it would offer the same approval again
+        approve_marker_clear
         launch "$(step_args 0)" 1
     else
         sleep 3
         cmd_window --approve
+        # the user allowed the build: the card run's marker is answered
+        approve_marker_clear
     fi
 }
 
