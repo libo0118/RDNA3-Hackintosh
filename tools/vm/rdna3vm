@@ -623,7 +623,8 @@ cmd__install() {
     wait $qpid 2>/dev/null || true
     kill $tm "$SHARE_PID" 2>/dev/null || true
     # this boot tested nothing: its markers are not the card step's
-    rm -f "$WORK"/reports/rerun-*.txt "$WORK"/reports/approve-*.txt
+    rm -f "$WORK"/reports/rerun-*.txt
+    approve_marker_clear
     vm_bundle_seen
     # new framebuffer / accelerator / AGDC builds: macOS wants "Allow"
     if ls "$WORK"/reports/allow-*.txt >/dev/null 2>&1; then
@@ -642,17 +643,76 @@ cmd__install() {
 # "RDNA3Accelerator: running <old>, installed <new> (not approved yet)"): macOS
 # ran the framebuffer/accelerator approved earlier, not the installed build
 # (card runs 2026-10-18b and 2026-10-19b: three 'step play' runs tested the old
-# accelerator and nothing said so)
-approve_marker_text() { cat "$WORK"/reports/approve-*.txt 2>/dev/null | tr '\n' ';' || true; }
-approve_marker_clear() { rm -f "$WORK"/reports/approve-*.txt 2>/dev/null || sudo rm -f "$WORK"/reports/approve-*.txt || true; }
+# accelerator and nothing said so). approve-seen-*.txt are the ones the queue
+# already reported and set aside (triage reads them too, these functions not).
+approve_markers() {
+    local f
+    for f in "$WORK"/reports/approve-*.txt; do
+        [ -e "$f" ] || continue
+        case ${f##*/} in approve-seen-*) ;; *) printf '%s\n' "$f" ;; esac
+    done
+}
+approve_marker_any() {
+    [ -n "$(approve_markers)" ]
+}
+approve_marker_text() {
+    local f
+    approve_markers | while read -r f; do cat "$f" 2>/dev/null; done | tr '\n' ';' || true
+}
+approve_marker_clear() {
+    local f
+    approve_markers | while read -r f; do rm -f "$f" 2>/dev/null || sudo rm -f "$f" || true; done
+    return 0
+}
+
+# A line about the run that has to reach the owner although cmd__once runs under
+# systemd-run (no terminal, no journal in the result): on stdout, in the newest
+# host-*.log (that is this run's), and in $WORK/last-run-note, which install_first
+# and 'rdna3vm result' print.
+run_note() {
+    local log
+    echo "$*"
+    printf '%s %s\n' "$(date +%T)" "$*" >> "$WORK/last-run-note" 2>/dev/null ||
+        echo "!! cannot write $WORK/last-run-note"
+    log=$(ls -t "$WORK"/reports/host-*.log 2>/dev/null | head -n1) || true
+    if [ -n "$log" ]; then printf '%s\n' "$*" >> "$log" 2>/dev/null || true; fi
+}
+
+# the VM's boot just ended with an approve marker: macOS ran an older
+# framebuffer/accelerator than the installed one. $1 = what ran ("the VM" /
+# "the rerun"), $2 = the end of the sentence. After an 'rdna3vm approve' this is
+# the proof that Allow was not clicked (approve-unverified is still there).
+old_driver_note() {
+    if [ -s "$WORK/approve-unverified" ]; then
+        run_note "!! Allow was not clicked / did not take: macOS still runs $(approve_marker_text) ('rdna3vm approve' ran before this step, for: $(cat "$WORK/approve-unverified" 2>/dev/null)). $1 tested the OLD driver$2"
+        run_note "== in the approval window: Privacy & Security -> scroll down -> Allow (password) -> Not Now -> Apple menu -> Shut Down; then the step again (the next step asks for it by itself)"
+    else
+        run_note "== $1 ran an older framebuffer/accelerator than the installed one ($(approve_marker_text)): this run tested the OLD driver$2"
+        run_note "== run 'rdna3vm approve', then the step again (the next step asks for it by itself)"
+    fi
+}
+
+# the VM's last report says it has the bundle the host publishes
+bundle_current() {
+    local want
+    want=$(cut -c1-64 "$WORK/share/rdna3-bundle.sha256" 2>/dev/null) || true
+    vm_bundle_seen
+    [ -n "$want" ] && [ "$want" = "$(cat "$WORK/vm-bundle.sha256" 2>/dev/null)" ]
+}
 
 # before a card step or queue, in the user's terminal: the new bundle into
 # macOS without the card, and "Allow" for new kexts in a window right away
 # (a card step before it would run the old framebuffer/accelerator). Also when
 # the LAST card run left an approve marker: that run tested the old build, so
-# allow it now instead of testing the old build once more.
+# allow it now instead of testing the old build once more. The notes the last
+# run could not print (cmd__once has no terminal) come first.
 install_first() {
-    local stale
+    local stale rc=0
+    if [ -s "$WORK/last-run-note" ]; then
+        say "!! about the last card run:"
+        sed 's/^/  /' "$WORK/last-run-note"
+        rm -f "$WORK/last-run-note"
+    fi
     # read before _install: an install boot deletes the markers
     stale=$(approve_marker_text)
     sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _install || true
@@ -664,10 +724,16 @@ install_first() {
         say "macOS wants 'Allow' for the new $(cat "$WORK/needs-allow")- in a window first, the card step after it"
     fi
     if [ -n "$stale" ] || [ -s "$WORK/needs-allow" ]; then
-        cmd_approve
-        rm -f "$WORK/needs-allow"
-        approve_marker_clear
-        say "Allowed (window closed): on to the card"
+        # not "cmd_approve || ..." alone: cmd_approve reports its own failure
+        cmd_approve || rc=$?
+        if [ "$rc" != 0 ]; then
+            say "!! the approval window ended with status $rc: the new build may NOT be allowed"
+            echo "  The card step goes on and says if it ran the OLD driver again; 'rdna3vm approve' opens the window once more"
+        else
+            rm -f "$WORK/needs-allow"
+            approve_marker_clear
+            say "Window closed (whether Allow was clicked shows in the next run): on to the card"
+        fi
     fi
 }
 
@@ -676,16 +742,17 @@ install_first() {
 # rerun marker: they load from the next boot), the same boot-args once more.
 # An approve marker after the run (macOS ran an older framebuffer/accelerator
 # than the installed one) means a rerun would test the same old build: no
-# rerun, the marker stays for install_first / 'rdna3vm result'.
+# rerun, the marker stays for install_first / 'rdna3vm result'. This runs under
+# systemd-run: what matters goes through run_note.
 cmd__once() {
+    rm -f "$WORK/last-run-note"
     bash "$SELF" _install || true
     # markers of earlier runs were handled by install_first: only this boot's count
-    rm -f "$WORK"/reports/approve-*.txt
+    approve_marker_clear
     bash "$SELF" _passthrough || true
-    if ls "$WORK"/reports/approve-*.txt >/dev/null 2>&1; then
+    if approve_marker_any; then
         rm -f "$WORK"/reports/rerun-*.txt
-        echo "== the VM ran an older framebuffer/accelerator than the installed one ($(approve_marker_text)): this run tested the OLD driver, not rerunning"
-        echo "== run 'rdna3vm approve', then the step again (the next step asks for it by itself)"
+        old_driver_note "the VM" ", not rerunning"
         return 0
     fi
     if ls "$WORK"/reports/rerun-*.txt >/dev/null 2>&1; then
@@ -694,11 +761,14 @@ cmd__once() {
         sleep 60
         bash "$SELF" _passthrough || true
         rm -f "$WORK"/reports/rerun-*.txt
-        if ls "$WORK"/reports/approve-*.txt >/dev/null 2>&1; then
-            echo "== the rerun ran an older framebuffer/accelerator than the installed one ($(approve_marker_text)): this run tested the OLD driver"
-            echo "== run 'rdna3vm approve', then the step again (the next step asks for it by itself)"
+        if approve_marker_any; then
+            old_driver_note "the rerun" ""
+            return 0
         fi
     fi
+    # this boot ran the installed build: an earlier 'rdna3vm approve' took, once the VM
+    # also reports the current bundle
+    if [ -e "$WORK/approve-unverified" ] && bundle_current; then rm -f "$WORK/approve-unverified"; fi
 }
 
 cmd_step() {
@@ -715,6 +785,7 @@ cmd_step() {
 # Allowing needs no card: by default macOS runs in a window (the card and the
 # screen stay with Linux); --card boots it with the card as before.
 cmd_approve() {
+    local seen rc=0
     say "Allowing the new framebuffer/accelerator build in macOS (once per build)"
     if [ "${1:-}" = --card ]; then
         echo "  macOS starts with the card and stays up. Wait ~2 minutes after the desktop"
@@ -727,14 +798,26 @@ cmd_approve() {
     echo "    1. scroll down: 'System software from developer ... was blocked' -> Allow (password)"
     echo "    2. when it asks to restart: choose Not Now, then Apple menu -> Shut Down"
     echo "  No 'Allow' button in Privacy & Security = already allowed, just shut down."
+    # nothing here can tell whether Allow was clicked (a window closed without it looks the
+    # same): the marker's text stays in approve-unverified until a run's boot shows macOS
+    # running the installed build (cmd__once), or says it still does not (old_driver_note)
+    seen=$(approve_marker_text)
+    printf '%s\n' "${seen:-allow requested $(date '+%F %T')}" > "$WORK/approve-unverified" ||
+        echo "!! cannot write $WORK/approve-unverified: a missed Allow will not be named by the next run"
     if [ "${1:-}" = --card ]; then
         # launch runs install_first: without this it would offer the same approval again
         approve_marker_clear
         launch "$(step_args 0)" 1
     else
         sleep 3
-        cmd_window --approve
-        # the user allowed the build: the card run's marker is answered
+        # a separate process: its own failures keep set -e (here they would be swallowed
+        # by the caller's "|| rc=$?") and its die ends only the window
+        env RDNA3VM_DIR="$WORK" bash "$SELF" window --approve || rc=$?
+        if [ "$rc" != 0 ]; then
+            echo "!! the approval window ended with status $rc: macOS may not have been allowed (the next card step says so if it ran the old driver)"
+            return "$rc"
+        fi
+        # the window is closed: the card run's marker is answered
         approve_marker_clear
     fi
 }
@@ -801,7 +884,7 @@ cmd_queue() {
 
 cmd__queue() {
     load_conf
-    local n a how retried= rerun=
+    local n a how retried= rerun= stamp
     while [ -s "$QUEUE" ]; do
         n=$(head -n1 "$QUEUE")
         sed -i 1d "$QUEUE"
@@ -836,10 +919,13 @@ cmd__queue() {
         # the VM still ran the framebuffer/accelerator macOS approved
         # before (autoreport: the installed build waits for "Allow"): a
         # step now would test those (card run 2026-10-12). Stop, keep it.
-        if ls "$WORK"/reports/approve-*.txt >/dev/null 2>&1; then
-            echo "== queue: stopped before step $n: macOS runs an older framebuffer/accelerator ($(cat "$WORK"/reports/approve-*.txt | tr '\n' ';'))"
-            echo "== queue: run 'rdna3vm approve', then 'rdna3vm queue' goes on with: $n $(tr '\n' ' ' < "$QUEUE")"
-            rm -f "$WORK"/reports/approve-*.txt
+        if approve_marker_any; then
+            echo "== queue: stopped after step $n: it ran on the OLD driver, macOS runs an older framebuffer/accelerator ($(approve_marker_text))"
+            echo "== queue: run 'rdna3vm approve', then 'rdna3vm queue' runs step $n again and goes on with: $n $(tr '\n' ' ' < "$QUEUE")"
+            # set aside, not deleted: the result of this step carries it (triage reads approve-*.txt)
+            stamp=$(date +%Y%m%d-%H%M%S)
+            approve_markers | while read -r f; do cat "$f"; done > "$WORK/reports/approve-seen-$stamp.txt" || true
+            approve_marker_clear
             { printf '%s\n' "$n"; cat "$QUEUE"; } > "$QUEUE.new" && cat "$QUEUE.new" > "$QUEUE"; rm -f "$QUEUE.new"
             return 0
         fi
@@ -1450,6 +1536,11 @@ cmd_result() {
     local -a sel
     if [ "${1:-}" = "--show" ]; then shift; cmd_result_show "$@"; return; fi
     [ -d "$WORK/reports" ] || die "no $WORK/reports yet"
+    # what the last run could not print itself (cmd__once runs without a terminal)
+    if [ -s "$WORK/last-run-note" ]; then
+        say "!! about the last card run:"
+        sed 's/^/  /' "$WORK/last-run-note"
+    fi
     # between two steps the host desktop is back for a minute: the queue
     # is not done yet (card runs 25, 26 were collected in that pause)
     if [ -n "$(systemctl list-units --no-legend --state=active 'rdna3vm-queue-*' 2>/dev/null)" ]; then
@@ -1472,6 +1563,7 @@ cmd_result() {
     mkdir -p "$tmp/rdna3-result"
     for f in "${sel[@]}"; do cp "$WORK/reports/$f" "$tmp/rdna3-result/" 2>/dev/null || sudo cat "$WORK/reports/$f" > "$tmp/rdna3-result/$f"; done
     git -C "$ROOT" log -1 --format='repo %h %s' > "$tmp/rdna3-result/00-host.txt" 2>/dev/null || true
+    sed 's/^/run-note: /' "$WORK/last-run-note" >> "$tmp/rdna3-result/00-host.txt" 2>/dev/null || true
     [ -f "$WORK/artifact-run" ] && echo "artifact from CI run $(cat "$WORK/artifact-run")" >> "$tmp/rdna3-result/00-host.txt" 
     # what the VM's plugin / RADV builds must match (tools/triage_reports.py
     # STALE PLUGIN/RADV): the last commits touching their sources
