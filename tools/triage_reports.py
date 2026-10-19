@@ -2061,7 +2061,9 @@ def stale_kext_lines(*dirs):
             for kext, running, installed in APPROVE_MARKER_RE.findall(txt):
                 found.setdefault(kext, "macOS ran %s %s, the build installed is %s (not allowed yet) - %s" % (
                     kext, running, installed, STALE_KEXTS_TAIL))
-    serials = sorted((f for d in seen for f in glob.glob(os.path.join(d, "serial-*.log"))), key=os.path.getmtime)
+    # not rdna3vm's headless install boot (serial-install-*): it never loads the accelerator
+    serials = sorted((f for d in seen for f in glob.glob(os.path.join(d, "serial-*.log"))
+                      if not os.path.basename(f).startswith("serial-install-")), key=os.path.getmtime)
     if serials:
         try:
             slog = open(serials[-1], errors="replace").read()
