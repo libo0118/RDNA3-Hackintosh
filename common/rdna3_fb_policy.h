@@ -164,38 +164,69 @@ static inline void rd3fb_cur_done(struct rd3fb_cur_q *q, const struct rd3fb_cur_
  * wake (IOGraphicsAccelerator2 counts each WillSleep(false) as a mode change
  * in progress; a sleep from a dark wake sends another one with no DidWake in
  * between), DidPowerOn(false), pagingState set and WindowServer woken.
- * The event values are IOFramebuffer's kIOFBNotifyWillSleep / DidWake. */
+ * The event values are IOFramebuffer's kIOFBNotifyWillSleep / DidWake.
+ * Gates (ECC review): the work runs in the family's order, the system gate
+ * (getGraphicsSystemWorkLoop) and then the controller's, as computeState and
+ * systemWork deliver these events. WindowServer's system entries test
+ * pagingState under both and sleep on fServerConnect in the system gate
+ * (IOFramebuffer::_extEntry): holding that gate while paging is set and the
+ * wakeup sent leaves no window between its test and its sleep; the other
+ * entries sleep in the controller gate, which the work holds too
+ * (tests/test_fb_policy.c models both orders). */
 #define RD3FB_EV_WILLSLEEP 3
 #define RD3FB_EV_DIDWAKE   4
+/* a failed wake work (no gate, stopping) is tried again by a thread call,
+ * this many times in a row, then given up (logged; the next power-on tries) */
+#define RD3FB_WAKE_RETRIES 5
 struct rd3fb_wake {
     int32_t will_sleep_off;   /* WillSleep(false) not yet answered by a DidWake(false) */
     uint32_t sys_slept;       /* a WillSleep(true) came: a system sleep since the last power-on */
     uint32_t sleeps, didwakes_seen, family_wakes, plain_power_ons, owed_max;
+    uint32_t tap_events;      /* every WillSleep / DidWake the tap saw (0 with sleeps behind: a deaf tap) */
+    uint32_t paging_already;  /* power-ons after a system sleep that found paging on: the sleep is cleared */
+    uint32_t dropped;         /* WillSleep(false) dropped then (no stale DidWake(false) owed later) */
+    uint32_t fails, fail_streak, retries, gave_up;   /* wake work that could not run */
 };
 /* every framebuffer notification (the framebuffer's own deliveries too) */
 static inline void rd3fb_wake_event(struct rd3fb_wake *w, int event, int info)
 {
     if (event == RD3FB_EV_WILLSLEEP) {
+        w->tap_events++;
         if (info) {
             w->sys_slept = 1;
             w->sleeps++;
         } else {
             w->will_sleep_off++;
         }
-    } else if (event == RD3FB_EV_DIDWAKE && !info) {
-        w->didwakes_seen++;
-        if (w->will_sleep_off > 0)
-            w->will_sleep_off--;
+    } else if (event == RD3FB_EV_DIDWAKE) {
+        w->tap_events++;
+        if (!info) {
+            w->didwakes_seen++;
+            if (w->will_sleep_off > 0)
+                w->will_sleep_off--;
+        }
     }
 }
-/* setPowerState(on): how many DidWake(false) the family wake work sends (at
- * least 1), or 0 = no system sleep to undo (or off, or paging already on):
- * a plain DidPowerOn as before. The caller delivers, then rd3fb_wake_done. */
-static inline int32_t rd3fb_wake_power_on(struct rd3fb_wake *w, int enabled, int paging_state)
+/* paging on after a system sleep: the family's wake (or someone's) is done,
+ * the sleep and its WillSleep(false) count are history (else the next power-on
+ * after a plain display sleep would send stale DidWakes) */
+static inline void rd3fb_wake_paging_on(struct rd3fb_wake *w)
+{
+    w->paging_already++;
+    w->dropped += w->will_sleep_off > 0 ? (uint32_t)w->will_sleep_off : 0u;
+    w->will_sleep_off = 0;
+    w->sys_slept = 0;
+    w->fail_streak = 0;
+}
+/* the wake work still owed (inside the gates, and the retry): paging on
+ * clears it (0), no system sleep recorded: 0, else the DidWake(false) count */
+static inline int32_t rd3fb_wake_recheck(struct rd3fb_wake *w, int paging_state)
 {
     int32_t owed;
-    if (!enabled || paging_state || !w->sys_slept) {
-        w->plain_power_ons++;
+    if (!w->sys_slept)
+        return 0;
+    if (paging_state) {
+        rd3fb_wake_paging_on(w);
         return 0;
     }
     owed = w->will_sleep_off > 1 ? w->will_sleep_off : 1;
@@ -203,11 +234,43 @@ static inline int32_t rd3fb_wake_power_on(struct rd3fb_wake *w, int enabled, int
         w->owed_max = (uint32_t)owed;
     return owed;
 }
+/* setPowerState(on): how many DidWake(false) the family wake work sends (at
+ * least 1), or 0 = no system sleep to undo (or off, or paging already on):
+ * a plain DidPowerOn as before. The caller runs the work in the family's
+ * gates (rd3fb_wake_recheck there), then rd3fb_wake_done, or
+ * rd3fb_wake_failed when it could not run. */
+static inline int32_t rd3fb_wake_power_on(struct rd3fb_wake *w, int enabled, int paging_state)
+{
+    if (paging_state && w->sys_slept) {
+        rd3fb_wake_paging_on(w);
+        w->plain_power_ons++;
+        return 0;
+    }
+    if (!enabled || paging_state || !w->sys_slept) {
+        w->plain_power_ons++;
+        return 0;
+    }
+    return rd3fb_wake_recheck(w, 0);
+}
 static inline void rd3fb_wake_done(struct rd3fb_wake *w)
 {
     w->will_sleep_off = 0;
     w->sys_slept = 0;
+    w->fail_streak = 0;
     w->family_wakes++;
+}
+/* the wake work could not run (the sleep stays recorded): 1 = try again
+ * (a thread call a little later), 0 = given up until the next power-on */
+static inline int rd3fb_wake_failed(struct rd3fb_wake *w)
+{
+    w->fails++;
+    if (++w->fail_streak <= RD3FB_WAKE_RETRIES) {
+        w->retries++;
+        return 1;
+    }
+    w->gave_up++;
+    w->fail_streak = 0;
+    return 0;
 }
 
 /* ---- validateDetailedTiming ----
@@ -240,6 +303,21 @@ static inline int rd3fb_dt_match(const struct rd3fb_dt *want, const struct rd3fb
             return (int)i;
     }
     return -1;
+}
+
+/* validateDetailedTiming's answer: rdna3fbdtmap=0 answers what the base
+ * class does for every shape (Unsupported, ECC review: a malformed size
+ * answered BadArgument there); 1 refuses a malformed description with
+ * BadArgument and a timing not ours with UnsupportedMode. Every answer but
+ * ACCEPT counts as refused (dt_refused). */
+enum rd3fb_dt_ans { RD3FB_DT_ACCEPT = 0, RD3FB_DT_UNSUPPORTED = 1, RD3FB_DT_UNSUPPORTED_MODE = 2, RD3FB_DT_BADARG = 3 };
+static inline enum rd3fb_dt_ans rd3fb_dt_answer(uint32_t dtmap, int is_timing, int match)
+{
+    if (!dtmap)
+        return RD3FB_DT_UNSUPPORTED;
+    if (!is_timing)
+        return RD3FB_DT_BADARG;
+    return match >= 0 ? RD3FB_DT_ACCEPT : RD3FB_DT_UNSUPPORTED_MODE;
 }
 
 /* ---- isConsoleDevice ----

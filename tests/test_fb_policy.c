@@ -151,12 +151,14 @@ static void sys_sleep(struct rd3fb_wake *w)
     rd3fb_wake_event(w, RD3FB_EV_WILLSLEEP, 0);
     rd3fb_wake_event(w, RD3FB_EV_WILLSLEEP, 1);
 }
-/* the driver's family wake work: what it delivers passes its own tap too */
+/* the driver's family wake work: what it delivers passes its own tap too;
+ * inside the gates it looks again (rd3fb_wake_recheck) */
 static int32_t power_on(struct rd3fb_wake *w, int enabled, int paging)
 {
     int32_t owed = rd3fb_wake_power_on(w, enabled, paging), i;
     if (!owed)
         return 0;
+    owed = rd3fb_wake_recheck(w, paging);
     rd3fb_wake_event(w, RD3FB_EV_DIDWAKE, 1);
     for (i = 0; i < owed; i++)
         rd3fb_wake_event(w, RD3FB_EV_DIDWAKE, 0);
@@ -167,14 +169,17 @@ static int32_t power_on(struct rd3fb_wake *w, int enabled, int paging)
 static void test_wake(void)
 {
     struct rd3fb_wake w;
+    int i;
     memset(&w, 0, sizeof w);
     /* boot: power on with paging clear and no sleep seen: no family wake (it would send a DidWake at boot) */
     CHECK(power_on(&w, 1, 0) == 0 && w.plain_power_ons == 1);
     /* display sleep only (no WillSleep): plain DidPowerOn */
     CHECK(power_on(&w, 1, 1) == 0);
+    CHECK(w.tap_events == 0);
     /* one system sleep: DidWake(true) + one DidWake(false) */
     sys_sleep(&w);
     CHECK(power_on(&w, 1, 0) == 1 && w.family_wakes == 1 && w.will_sleep_off == 0 && !w.sys_slept);
+    CHECK(w.tap_events == 4);   /* two WillSleep, our DidWake(true) and DidWake(false) */
     /* four maintenance dark wakes: four WillSleep(false), no DidWake between: four owed */
     sys_sleep(&w);
     rd3fb_wake_event(&w, RD3FB_EV_WILLSLEEP, 0);
@@ -188,16 +193,165 @@ static void test_wake(void)
     rd3fb_wake_event(&w, RD3FB_EV_DIDWAKE, 0);
     CHECK(w.will_sleep_off == 1);
     CHECK(power_on(&w, 1, 0) == 1);
-    /* paging already on (the family did its work): nothing */
+    /* paging already on at the first power-on after a sleep (the family did its work): nothing, and the sleep
+     * and its WillSleep(false) count are cleared - no stale owed count for a later power-on (ECC review) */
     sys_sleep(&w);
+    rd3fb_wake_event(&w, RD3FB_EV_WILLSLEEP, 0);
     CHECK(power_on(&w, 1, 1) == 0);
+    CHECK(!w.sys_slept && w.will_sleep_off == 0 && w.paging_already == 1 && w.dropped == 2);
+    /* the display sleeps and wakes later with paging cleared by someone: no stale family wake */
+    CHECK(power_on(&w, 1, 0) == 0);
+    /* paging on with the switch off clears it too */
+    sys_sleep(&w);
+    CHECK(power_on(&w, 0, 1) == 0 && !w.sys_slept && w.paging_already == 2);
     /* off (rdna3fbwake=0): never; the sleep stays recorded for a later power-on with it on */
+    sys_sleep(&w);
     CHECK(power_on(&w, 0, 0) == 0 && w.sys_slept);
     CHECK(power_on(&w, 1, 0) == 1);
     /* a mux-style sleep (WillSleep(true) only) still wakes once */
     rd3fb_wake_event(&w, RD3FB_EV_WILLSLEEP, 1);
     CHECK(power_on(&w, 1, 0) == 1);
-    CHECK(w.sleeps == 5);
+    CHECK(w.sleeps == 7);
+    /* inside the gates: paging went on between the power-on's look and the gates: nothing sent, cleared */
+    sys_sleep(&w);
+    CHECK(rd3fb_wake_power_on(&w, 1, 0) == 1);
+    CHECK(rd3fb_wake_recheck(&w, 1) == 0 && !w.sys_slept);
+    CHECK(rd3fb_wake_recheck(&w, 0) == 0);   /* nothing recorded: nothing owed */
+    /* the work could not run: retried RD3FB_WAKE_RETRIES times, the sleep stays recorded, then given up */
+    sys_sleep(&w);
+    CHECK(rd3fb_wake_power_on(&w, 1, 0) == 1);
+    for (i = 0; i < RD3FB_WAKE_RETRIES; i++)
+        CHECK(rd3fb_wake_failed(&w) == 1);
+    CHECK(rd3fb_wake_failed(&w) == 0 && w.gave_up == 1 && w.sys_slept);
+    CHECK(w.fails == RD3FB_WAKE_RETRIES + 1 && w.retries == RD3FB_WAKE_RETRIES);
+    /* the next power-on tries again, a success resets the streak */
+    CHECK(power_on(&w, 1, 0) == 1 && w.fail_streak == 0 && !w.sys_slept);
+    CHECK(rd3fb_wake_failed(&w) == 1 && w.fail_streak == 1);
+}
+
+/* The gate order of the wake work against WindowServer's wait for paging
+ * (IOFramebuffer::_extEntry): a system entry takes the system gate, then the
+ * controller's, tests pagingState, opens the controller gate (FBUNLOCK) and
+ * sleeps on fServerConnect in the system gate (sleepGate releases it and
+ * sleeps at once); a controller entry sleeps in the controller gate. The
+ * wake work sets pagingState and wakes fServerConnect (not gate specific)
+ * holding the controller gate only (the first version) or the system gate
+ * and then the controller's (the family's order, computeState). Every
+ * interleaving is explored; a lost wakeup is the sleeper asleep with the
+ * wake work done. */
+struct gm { int sys, ctl, paging, asleep, spc, wpc, sys_entry, waker_sys; };
+#define GM_DONE 99
+static int gm_sleeper(struct gm *g)
+{
+    switch (g->spc) {
+    case 0:   /* a system entry: the system gate first */
+        if (g->sys_entry) {
+            if (g->sys)
+                return 0;
+            g->sys = 1;
+        }
+        g->spc = 1;
+        return 1;
+    case 1:
+        if (g->ctl)
+            return 0;
+        g->ctl = 1;
+        g->spc = 2;
+        return 1;
+    case 2:   /* the test */
+        g->ctl = 0;
+        if (g->paging) {
+            if (g->sys_entry)
+                g->sys = 0;
+            g->spc = GM_DONE;
+        } else if (g->sys_entry) {
+            g->spc = 3;   /* FBUNLOCK done; sleepGate on the system gate next */
+        } else {
+            g->asleep = 1;   /* sleepGate on the controller gate: released and asleep at once */
+            g->spc = 4;
+        }
+        return 1;
+    case 3:
+        g->sys = 0;
+        g->asleep = 1;
+        g->spc = 4;
+        return 1;
+    case 4:   /* woken: the gates again, the test again */
+        if (g->asleep)
+            return 0;
+        g->spc = 0;
+        return 1;
+    }
+    return 0;
+}
+static int gm_waker(struct gm *g)
+{
+    switch (g->wpc) {
+    case 0:
+        if (g->waker_sys) {
+            if (g->sys)
+                return 0;
+            g->sys = 2;
+        }
+        g->wpc = 1;
+        return 1;
+    case 1:
+        if (g->ctl)
+            return 0;
+        g->ctl = 2;
+        g->wpc = 2;
+        return 1;
+    case 2:
+        g->paging = 1;
+        g->wpc = 3;
+        return 1;
+    case 3:
+        g->asleep = 0;   /* wakeupGate(&fServerConnect): whoever sleeps on it */
+        g->wpc = 4;
+        return 1;
+    case 4:
+        g->ctl = 0;
+        if (g->waker_sys)
+            g->sys = 0;
+        g->wpc = 5;
+        return 1;
+    }
+    return 0;
+}
+static unsigned gm_lost, gm_ends;
+static void gm_explore(struct gm g)
+{
+    struct gm a = g, b = g;
+    const int ps = gm_sleeper(&a), pw = gm_waker(&b);
+    if (ps)
+        gm_explore(a);
+    if (pw)
+        gm_explore(b);
+    if (!ps && !pw) {
+        gm_ends++;
+        if (g.spc != GM_DONE)
+            gm_lost++;
+    }
+}
+static unsigned gm_run(int sys_entry, int waker_sys)
+{
+    struct gm g;
+    memset(&g, 0, sizeof g);
+    g.sys_entry = sys_entry;
+    g.waker_sys = waker_sys;
+    gm_lost = gm_ends = 0;
+    gm_explore(g);
+    CHECK(gm_ends > 0);
+    return gm_lost;
+}
+static void test_wake_gates(void)
+{
+    /* the controller gate alone: a system entry between its FBUNLOCK and its sleep misses the wakeup */
+    CHECK(gm_run(1, 0) > 0);
+    /* the family's order: no interleaving loses it, for either kind of entry */
+    CHECK(gm_run(1, 1) == 0);
+    CHECK(gm_run(0, 1) == 0);
+    CHECK(gm_run(0, 0) == 0);
 }
 
 static void test_timing(void)
@@ -233,6 +387,13 @@ static void test_timing(void)
     t.pclk = 0;
     CHECK(rd3fb_dt_match(&t, modes, 2) == -1);
     CHECK(rd3fb_dt_match(&modes[0], modes, 0) == -1);
+    /* the answer: rdna3fbdtmap=0 is the base class's Unsupported for every shape (ECC review) */
+    CHECK(rd3fb_dt_answer(0, 0, -1) == RD3FB_DT_UNSUPPORTED);
+    CHECK(rd3fb_dt_answer(0, 1, -1) == RD3FB_DT_UNSUPPORTED);
+    CHECK(rd3fb_dt_answer(0, 1, 0) == RD3FB_DT_UNSUPPORTED);
+    CHECK(rd3fb_dt_answer(1, 0, -1) == RD3FB_DT_BADARG);
+    CHECK(rd3fb_dt_answer(1, 1, -1) == RD3FB_DT_UNSUPPORTED_MODE);
+    CHECK(rd3fb_dt_answer(1, 1, 2) == RD3FB_DT_ACCEPT);
 }
 
 static void test_console(void)
@@ -256,6 +417,7 @@ int main(void)
     test_integrated();
     test_cursor();
     test_wake();
+    test_wake_gates();
     test_timing();
     test_console();
     if (fails) {

@@ -110,9 +110,13 @@ static void fbCallDrainFree(OSObject *owner, thread_call_t c)
             owner->release();
 }
 
-/* IOFramebuffer::open() runs under IOGraphics' system gate (newUserClient,
- * and open() itself for the dependents): head 0's open started by head 1's
- * open() opens head 1 again as its dependent, which must not start over */
+/* IOFramebuffer::open() runs under IOGraphics' system gate (newUserClient
+ * takes it, IOFramebuffer.cpp ~4008; open() of the dependents runs inside
+ * the first one's): head 0's open started by head 1's open() opens head 1
+ * again as its dependent, which must not start over. Only touched in the
+ * system gate: RDNA3Framebuffer::open() checks it holds the gate and takes
+ * it when not (counted, logged), so the reads of 'opened' and this before
+ * super::open() are serialised like IOGraphics' own. */
 static int gOpenReenter = 0;
 
 /* ------------------------------------------------------------------ */
@@ -175,6 +179,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
     uint64_t fVblDelivered = 0, fVblPolls = 0, fVblStill = 0;
     volatile SInt32 fVblIn = 0;
     uint32_t fVblOverlap = 0, fStatTick = 0;
+    uint32_t fVblCallFailed = 0;           /* 1: no VBL thread call (no VBLs at all; vblonce not in effect) */
     void     publishStats();
 
     /* DRIVER-PLAN N40 switches (see the top of the file), read at start */
@@ -182,20 +187,34 @@ class RDNA3Framebuffer : public IOFramebuffer {
     uint32_t fArgVblOnce = 1, fArgDtMap = 0, fArgConsole = 1;
     bool     fStarted = false;             /* super::start() succeeded: head 1's open() may open us first */
     bool     fBootConsole = false;
-    bool     fDispFlagsLogged = false, fOpenLogged = false;
+    bool     fDispFlagsLogged = false, fOpenLogged = false, fOpenFailed = false;
+    uint32_t fOpenUngated = 0, fOpenFails = 0;
     uint32_t fIntegLogged = 0;
     uint32_t fDispFlagsAsked = 0;
     RDNA3Framebuffer *copyHead0();
-    void     integratedAB();
+    IOReturn openGated(void *, void *, void *, void *);
+    /* IOFBIntegrated A/B: applied after open(); re-checked every ~2 s (the
+     * family sets the property in each open) */
+    bool     fIntegDone = false;
+    uint32_t fIntegApplied = 0, fIntegReset = 0, fIntegLate = 0;
+    void     integratedAB(const char *when);
+    void     integratedRecheck();
     /* the family's wake work (rdna3fbwake): the WillSleep/DidWake count of
-     * IOGraphics' notifications (rd3fb_wake, under fLock) */
+     * IOGraphics' notifications (rd3fb_wake, under fLock); a command gate on
+     * the controller's workloop (made at start, taken under fLock only while
+     * not stopping, removed at stop) and a thread call that retries a wake
+     * work that could not run (drained at stop) */
     IONotifier   *fSleepTap = nullptr;
     IOCommandGate *fWakeGate = nullptr;
+    thread_call_t fWakeRetry = nullptr;
     struct rd3fb_wake fWake = {};
-    uint32_t fWakeNoGate = 0, fWakeOff = 0;
+    uint32_t fWakeNoGate = 0, fWakeOff = 0, fWakeStopping = 0;
     static IOReturn sleepTap(OSObject *self, void *ref, IOFramebuffer *fb, IOIndex event, void *info);
-    void     familyDidWake(int32_t owed);
-    IOReturn familyDidWakeGated(void *owed, void *, void *, void *);
+    void     familyDidWake(const char *why);
+    void     wakeFailed(IOReturn r, const char *why, const void *sys, const void *gate);
+    static IOReturn wakeSysGated(OSObject *target, void *gate, void *, void *, void *);
+    IOReturn familyDidWakeGated(void *gate, void *, void *, void *);
+    static void wakeRetryFire(thread_call_param_t p0, thread_call_param_t);
     /* validateDetailedTiming (rdna3fbdtmap) and, with 1, the detailed
      * timing ids setDetailedTimings mapped to our modes */
     uint32_t fDtValidates = 0, fDtMatched = 0, fDtRefused = 0, fDtSets = 0, fDtMapped = 0;
@@ -259,6 +278,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
     thread_call_t fCurCall = nullptr;
     struct rd3fb_cur_q fCurQ = {};
     uint32_t fCurSync = 0, fCurFailLogged = 0;
+    uint32_t fCurImageFails = 0, fCurConvertFails = 0;   /* the core refused the first image; convertCursorImage failed */
     void     cursorWant(bool force);
     static void cursorFire(thread_call_param_t p0, thread_call_param_t);
 
@@ -586,12 +606,29 @@ bool RDNA3Framebuffer::start(IOService *provider)
     fVblTimer = fArgVblOnce ? thread_call_allocate_with_options(vblFire, this, THREAD_CALL_PRIORITY_HIGH,
                                                                 THREAD_CALL_OPTIONS_ONCE)
                             : thread_call_allocate(vblFire, this);
-    if (!fVblTimer)
-        FBLOG("head %u: no VBL thread call: no VBL interrupts for IOGraphics", fHead);
+    if (!fVblTimer) {
+        fVblCallFailed = 1;
+        FBLOG("head %u: no VBL thread call (rdna3vblonce=%u): no VBL interrupts for IOGraphics at all", fHead,
+              fArgVblOnce);
+    }
     if (fVblTimer) {
         uint64_t d;
         clock_interval_to_deadline(16667, kMicrosecondScale, &d);
         scheduleVbl(d);
+    }
+    /* the family's wake work (rdna3fbwake): its gate on the controller's
+     * workloop and its retry, ready before the first setPowerState */
+    if (fArgWake) {
+        IOWorkLoop *wl = getWorkLoop();
+        IOCommandGate *g = wl ? IOCommandGate::commandGate(this) : nullptr;
+        if (g && wl->addEventSource(g) != kIOReturnSuccess)
+            OSSafeReleaseNULL(g);
+        fWakeGate = g;
+        fWakeRetry = thread_call_allocate(wakeRetryFire, this);
+        if (!fWakeGate || !fWakeRetry)
+            FBLOG("head %u: family wake work: controller workloop %p, command gate %p, retry call %p: a system wake "
+                  "%s", fHead, wl, fWakeGate, fWakeRetry,
+                  fWakeGate ? "is not retried when it fails" : "cannot do the family's wake work (WindowServer may wait for paging)");
     }
     registerPowerDriver(this, kFBPowerStates, 2);
     if (fDcn)
@@ -604,17 +641,25 @@ bool RDNA3Framebuffer::start(IOService *provider)
           fDcn ? "locked to the OTG frame counter" : "timer", fCurReady ? "hardware" : "software", FB_COMMIT);
     /* DRIVER-PLAN N40: every switch with its default, for the A/B */
     FBLOG("head %u switches: dispflags %u (default 0), glorder %u (default 1), fbintegrated %u (default 0), "
-          "cursorasync %u (default 1%s), fbwake %u (default 1), vblonce %u (default 1), fbdtmap %u (default 0), "
+          "cursorasync %u (default 1%s), fbwake %u (default 1), vblonce %u (default 1%s), fbdtmap %u (default 0), "
           "fbconsole %u (default 1); VBL source: %s (no hardware vblank interrupt in the core yet)",
           fHead, fArgDispFlags, fArgGlOrder, fArgIntegrated, fArgCurAsync, !fCurReady ? ", no hardware cursor" : fCurCall ? "" : ", no thread call: synchronous",
-          fArgWake, fArgVblOnce, fArgDtMap, fArgConsole,
+          fArgWake, fArgVblOnce, fVblTimer ? "" : ", NO VBL thread call", fArgDtMap, fArgConsole,
           fDcn ? "OTG frame counter polled by a thread call" : "timer");
-    OSDictionary *sw = OSDictionary::withCapacity(10);
+    /* the switches as asked (the boot-arg or its default; triage compares
+     * them with the boot-args) and, where they can differ, what is in
+     * effect: cursorasync_active (a thread call moves the cursor), hwcursor,
+     * vbl_call / vblonce_active (the VBL thread call exists, ONCE), waketap /
+     * wakegate (the family wake work can see sleeps and run) */
+    OSDictionary *sw = OSDictionary::withCapacity(16);
     if (sw) {
         const struct { const char *k; uint32_t v; } kv[] = {
             { "dispflags", fArgDispFlags }, { "glorder", fArgGlOrder }, { "fbintegrated", fArgIntegrated },
-            { "cursorasync", fArgCurAsync && fCurCall ? 1u : 0u }, { "fbwake", fArgWake }, { "vblonce", fArgVblOnce },
-            { "fbdtmap", fArgDtMap }, { "fbconsole", fArgConsole }, { "bootconsole", fBootConsole ? 1u : 0u },
+            { "cursorasync", fArgCurAsync }, { "cursorasync_active", fCurCall ? 1u : 0u },
+            { "hwcursor", fCurReady ? 1u : 0u }, { "fbwake", fArgWake }, { "waketap", fSleepTap ? 1u : 0u },
+            { "wakegate", fWakeGate ? 1u : 0u }, { "vblonce", fArgVblOnce }, { "vbl_call", fVblTimer ? 1u : 0u },
+            { "vblonce_active", fArgVblOnce && fVblTimer ? 1u : 0u }, { "fbdtmap", fArgDtMap },
+            { "fbconsole", fArgConsole }, { "bootconsole", fBootConsole ? 1u : 0u },
         };
         for (unsigned i = 0; i < sizeof(kv) / sizeof(kv[0]); i++) {
             OSNumber *n = OSNumber::withNumber((unsigned long long)kv[i].v, 32);
@@ -627,6 +672,12 @@ bool RDNA3Framebuffer::start(IOService *provider)
         sw->release();
     }
     setProperty("RDNA3,VBLSource", fDcn ? "otg-poll" : "timer");
+    {
+        /* replaced after open(); this one left means it was never opened */
+        char txt[80];
+        snprintf(txt, sizeof(txt), "never opened (rdna3fbintegrated=%u)", fArgIntegrated);
+        setProperty("RDNA3,IntegratedAB", txt);
+    }
     publishStats();
     return true;
 }
@@ -656,6 +707,25 @@ void RDNA3Framebuffer::stop(IOService *provider)
         fSleepTap->remove();
         fSleepTap = nullptr;
     }
+    if (fWakeRetry) {
+        fbCallDrainFree(this, fWakeRetry);   /* a retry still running finishes; none re-arms (fStopping) */
+        fWakeRetry = nullptr;
+    }
+    if (fWakeGate) {
+        /* familyDidWake takes the gate (retained) under fLock only while
+         * fStopping is clear: none starts now. removeEventSource closes the
+         * controller gate, so a wake work inside it finishes first; a caller
+         * still holding its reference gets NotReady from runAction */
+        IOCommandGate *g = nullptr;
+        IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+        g = fWakeGate;
+        fWakeGate = nullptr;
+        IOSimpleLockUnlockEnableInterrupt(fLock, st);
+        IOWorkLoop *wl = g->getWorkLoop();
+        if (wl)
+            wl->removeEventSource(g);
+        g->release();
+    }
     if (fVblTimer) {
         fbCallDrainFree(this, fVblTimer);   /* waits for a vblFire still running */
         fVblTimer = nullptr;
@@ -663,12 +733,6 @@ void RDNA3Framebuffer::stop(IOService *provider)
     if (fCurCall) {
         fbCallDrainFree(this, fCurCall);
         fCurCall = nullptr;
-    }
-    if (fWakeGate) {
-        IOWorkLoop *wl = getWorkLoop();
-        if (wl)
-            wl->removeEventSource(fWakeGate);
-        OSSafeReleaseNULL(fWakeGate);
     }
     if (fCurMode) {
         IOLockLock(fModeLock);
@@ -681,6 +745,7 @@ void RDNA3Framebuffer::stop(IOService *provider)
     }
     ownSurfaceFree();
     cursorFree();
+    publishStats();   /* the last counters stay in the registry for a report taken after */
     super::stop(provider);
 }
 
@@ -798,6 +863,7 @@ void RDNA3Framebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
     /* the N40 counters into the registry about every 2 s */
     if (++me->fStatTick >= 120) {
         me->fStatTick = 0;
+        me->integratedRecheck();
         me->publishStats();
     }
     OSDecrementAtomic(&me->fVblIn);
@@ -1283,6 +1349,25 @@ RDNA3Framebuffer *RDNA3Framebuffer::copyHead0()
  * (rd3fb_open_head0_first). Then (3) the IOFBIntegrated A/B. */
 IOReturn RDNA3Framebuffer::open(void)
 {
+    /* IOGraphics calls open() in its system gate (newUserClient, and the
+     * first open's dependents); the reads of 'opened' and gOpenReenter
+     * below rely on it. A caller without it is counted, logged and served
+     * inside the gate (IOWorkLoop::runAction; the gate is recursive, so
+     * IOFramebuffer::open's own SYSGATEGUARD nests) */
+    IOWorkLoop *sys = getGraphicsSystemWorkLoop();
+    if (sys && !sys->inGate()) {
+        fOpenUngated++;
+        if (fOpenUngated <= 4 || (fOpenUngated & 1023) == 0)
+            FBLOG("head %u open: called OUTSIDE IOGraphics' system gate (%u such): run inside it", fHead, fOpenUngated);
+        return sys->runAction(OSMemberFunctionCast(IOWorkLoop::Action, this, &RDNA3Framebuffer::openGated), this);
+    }
+    if (!sys)
+        FBLOG("head %u open: no IOGraphics system workloop: the open order runs unchecked", fHead);
+    return openGated(nullptr, nullptr, nullptr, nullptr);
+}
+
+IOReturn RDNA3Framebuffer::openGated(void *, void *, void *, void *)
+{
     enum rd3fb_order_why why = RD3FB_ORDER_OFF;
     IOReturn r0 = kIOReturnSuccess;
     const bool wasOpen = opened != 0;
@@ -1301,19 +1386,36 @@ IOReturn RDNA3Framebuffer::open(void)
     OSSafeReleaseNULL(h0);
     const bool openBefore = opened != 0;   /* head 0's open may have opened us as its dependent */
     IOReturn r = super::open();
-    if ((!wasOpen && !fOpenLogged) || why == RD3FB_ORDER_FIRST) {
+    /* the first open, a retry after a failed one, and every head-0-first */
+    const bool retry = !wasOpen && fOpenFailed;
+    if ((!wasOpen && (!fOpenLogged || fOpenFailed)) || why == RD3FB_ORDER_FIRST) {
         fOpenLogged = true;
         OSNumber *gl = OSDynamicCast(OSNumber, getProperty("IOFramebufferOpenGLIndex"));
-        FBLOG("head %u open: %s%s -> 0x%x; IOFramebufferOpenGLIndex %d, IOFBDependentIndex %u (rdna3glorder=%u, "
-              "default 1)", fHead, rd3fb_order_text(why), why == RD3FB_ORDER_FIRST ? (r0 ? " (its open FAILED)" : " (ok)") : "",
+        FBLOG("head %u open%s: %s%s -> 0x%x; IOFramebufferOpenGLIndex %d, IOFBDependentIndex %u (rdna3glorder=%u, "
+              "default 1)", fHead, retry ? " (retry after a FAILED open)" : "", rd3fb_order_text(why),
+              why == RD3FB_ORDER_FIRST ? (r0 ? " (its open FAILED)" : " (ok)") : "",
               r, gl ? (int)gl->unsigned32BitValue() : -1, fHead, fArgGlOrder);
         if (why == RD3FB_ORDER_FIRST && r0)
             FBLOG("head %u open: head 0's open answered 0x%x: the GL indices are IOGraphics' own", fHead, r0);
-        setProperty("RDNA3,OpenOrder", rd3fb_order_text(why));
+        char txt[128];
+        if (r == kIOReturnSuccess)
+            snprintf(txt, sizeof(txt), "%s%s", rd3fb_order_text(why), retry ? " (after a failed open)" : "");
+        else
+            snprintf(txt, sizeof(txt), "%s; open FAILED 0x%x (%u failure(s))", rd3fb_order_text(why), (unsigned)r,
+                     fOpenFails + 1);
+        setProperty("RDNA3,OpenOrder", txt);
     }
-    /* once per open by IOGraphics (it sets the property in each open) */
-    if (r == kIOReturnSuccess && !openBefore && opened)
-        integratedAB();
+    if (r != kIOReturnSuccess && !wasOpen) {
+        fOpenFails++;
+        fOpenFailed = true;
+    } else if (r == kIOReturnSuccess) {
+        fOpenFailed = false;
+    }
+    /* once per open by IOGraphics (it sets the property in each open); open
+     * already before super::open() without the A/B done: a path that did not
+     * come through this override (the periodic re-check would catch it too) */
+    if (r == kIOReturnSuccess && opened && (!openBefore || !fIntegDone))
+        integratedAB(openBefore ? "late: already open before this open(), not through it" : "open");
     return r;
 }
 
@@ -1323,7 +1425,7 @@ IOReturn RDNA3Framebuffer::open(void)
  * with an NVIDIA device present. The GPUWrangler "(IG)" flag comes from its
  * own look at the device, which a kext cannot change: rdna3fbintegrated
  * (0 keep, 1 remove, 2 set) changes what readers of the property see. */
-void RDNA3Framebuffer::integratedAB()
+void RDNA3Framebuffer::integratedAB(const char *when)
 {
     const bool present = getProperty("IOFBIntegrated") != nullptr;
     const enum rd3fb_integ_act a = rd3fb_integrated_action(fArgIntegrated, present);
@@ -1333,13 +1435,37 @@ void RDNA3Framebuffer::integratedAB()
         setProperty("IOFBIntegrated", kOSBooleanTrue);
     const char *what = a == RD3FB_INTEG_REMOVE ? "removed" : a == RD3FB_INTEG_SET ? "set Yes" : "kept";
     const unsigned bus = fPci ? (unsigned)fPci->getBusNumber() : 0xffu;
-    char txt[96];
-    snprintf(txt, sizeof(txt), "IOGraphics %s, %s (rdna3fbintegrated=%u), PCI bus %u", present ? "Yes" : "not set", what,
-             fArgIntegrated, bus);
-    if (!fIntegLogged++)
+    char txt[160];
+    snprintf(txt, sizeof(txt), "IOGraphics %s, %s (rdna3fbintegrated=%u), PCI bus %u%s%s", present ? "Yes" : "not set",
+             what, fArgIntegrated, bus, strcmp(when, "open") ? "; " : "", strcmp(when, "open") ? when : "");
+    fIntegDone = true;
+    fIntegApplied++;
+    if (!fIntegLogged++ || (strcmp(when, "open") && fIntegApplied <= 8))
         FBLOG("head %u: IOFBIntegrated: %s (default 0 = as IOGraphics sets it; IOGraphics' rule: bus 0 = integrated)",
               fHead, txt);
     setProperty("RDNA3,IntegratedAB", txt);
+}
+
+/* every ~2 s (vblFire): the A/B still holds - IOGraphics sets the property
+ * again in each open(), and an open that did not come through our override
+ * would leave it as IOGraphics set it */
+void RDNA3Framebuffer::integratedRecheck()
+{
+    if (!opened)
+        return;
+    if (!fIntegDone) {
+        fIntegLate++;
+        integratedAB("late: open without our open() seeing it, applied by the periodic check");
+        return;
+    }
+    const bool present = getProperty("IOFBIntegrated") != nullptr;
+    if (rd3fb_integrated_action(fArgIntegrated, present) == RD3FB_INTEG_KEEP)
+        return;
+    fIntegReset++;
+    if (fIntegReset <= 4 || (fIntegReset & 1023) == 0)
+        FBLOG("head %u: IOFBIntegrated is %s again after our A/B (rdna3fbintegrated=%u): IOGraphics re-set it, "
+              "applied again (%u such)", fHead, present ? "present" : "absent", fArgIntegrated, fIntegReset);
+    integratedAB("re-applied: IOGraphics had re-set it");
 }
 
 /* ------------------------ detailed timings ------------------------ */
@@ -1390,28 +1516,32 @@ IOReturn RDNA3Framebuffer::validateDetailedTiming(void *description, IOByteCount
     else if (description && descripSize == sizeof(IODetailedTimingInformationV2))
         d = (IODetailedTimingInformationV2 *)description;
     fDtValidates++;
-    if (!d) {
-        if (fDtValidates <= 8)
-            FBLOG("head %u validateDetailedTiming: %llu bytes, not a timing: Bad argument", fHead,
-                  (unsigned long long)descripSize);
-        return kIOReturnBadArgument;
-    }
-    const int m = dtMatch(d);
-    const bool accept = fArgDtMap && m >= 0;
+    const int m = d ? dtMatch(d) : -1;
+    /* rdna3fbdtmap=0: the base class's Unsupported for every shape */
+    const enum rd3fb_dt_ans ans = rd3fb_dt_answer(fArgDtMap, d != nullptr, m);
+    const bool accept = ans == RD3FB_DT_ACCEPT;
     if (m >= 0)
         fDtMatched++;
     if (!accept)
         fDtRefused++;
+    if (!d) {
+        if (fDtValidates <= 8 || (fDtValidates & 1023) == 0)
+            FBLOG("head %u validateDetailedTiming #%u: %llu bytes, not a timing -> %s (rdna3fbdtmap=%u)", fHead,
+                  fDtValidates, (unsigned long long)descripSize,
+                  ans == RD3FB_DT_BADARG ? "Bad argument" : "Unsupported (as before)", fArgDtMap);
+        return ans == RD3FB_DT_BADARG ? kIOReturnBadArgument : kIOReturnUnsupported;
+    }
     if (fDtValidates <= 24 || (fDtValidates & 1023) == 0 || accept) {
         const uint64_t tot = (uint64_t)(d->horizontalActive + d->horizontalBlanking) * (d->verticalActive + d->verticalBlanking);
         const uint32_t mhz = tot ? (uint32_t)(d->pixelClock * 1000 / tot) : 0;
         FBLOG("head %u validateDetailedTiming #%u id 0x%x %ux%u@%u.%03u: %s%d -> %s (rdna3fbdtmap=%u)", fHead,
               fDtValidates, (unsigned)d->detailedTimingModeID, (unsigned)d->horizontalActive,
               (unsigned)d->verticalActive, mhz / 1000, mhz % 1000, m >= 0 ? "our mode " : "not one of our modes ", m,
-              accept ? "accepted" : fArgDtMap ? "UnsupportedMode" : "Unsupported (as before)", fArgDtMap);
+              accept ? "accepted" : ans == RD3FB_DT_UNSUPPORTED_MODE ? "UnsupportedMode" : "Unsupported (as before)",
+              fArgDtMap);
     }
     if (!accept)
-        return fArgDtMap ? kIOReturnUnsupportedMode : kIOReturnUnsupported;
+        return ans == RD3FB_DT_UNSUPPORTED_MODE ? kIOReturnUnsupportedMode : kIOReturnUnsupported;
     if (!d->minPixelClock)
         d->minPixelClock = d->pixelClock;
     if (!d->maxPixelClock)
@@ -1476,7 +1606,7 @@ void RDNA3Framebuffer::publishStats()
     IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
     w = fWake;
     IOSimpleLockUnlockEnableInterrupt(fLock, st);
-    OSDictionary *d = OSDictionary::withCapacity(28);
+    OSDictionary *d = OSDictionary::withCapacity(48);
     if (!d)
         return;
     const struct { const char *k; uint64_t v; } kv[] = {
@@ -1489,6 +1619,13 @@ void RDNA3Framebuffer::publishStats()
         { "wake_nogate", fWakeNoGate }, { "wake_off", fWakeOff },
         { "vbl_delivered", fVblDelivered }, { "vbl_polls", fVblPolls }, { "vbl_still", fVblStill },
         { "vbl_overlap", fVblOverlap },
+        { "wake_tap_events", w.tap_events }, { "wake_slept_pending", w.sys_slept },
+        { "wake_paging_already", w.paging_already }, { "wake_dropped", w.dropped }, { "wake_fails", w.fails },
+        { "wake_retries", w.retries }, { "wake_gave_up", w.gave_up }, { "wake_stopping", fWakeStopping },
+        { "vbl_call_failed", fVblCallFailed },
+        { "cursor_image_fails", fCurImageFails }, { "cursor_convert_fails", fCurConvertFails },
+        { "integ_applied", fIntegApplied }, { "integ_reset", fIntegReset }, { "integ_late", fIntegLate },
+        { "open_ungated", fOpenUngated }, { "open_fails", fOpenFails },
         { "dt_validate", fDtValidates }, { "dt_matched", fDtMatched }, { "dt_refused", fDtRefused },
         { "dt_sets", fDtSets }, { "dt_mapped", fDtMapped }, { "dispflags_asked", fDispFlagsAsked },
     };
@@ -1633,22 +1770,24 @@ IOReturn RDNA3Framebuffer::setPowerState(unsigned long ordinal, IOService *)
      * itself (rdna3fbwake=1; NullMoth's familyDidWake), else nobody sends
      * DidWake and WindowServer waits for paging. At boot pagingState is clear
      * too, but no WillSleep came: no wake work then. */
-    const bool paging = pagingState != 0;
+    const bool paging = pagingState != 0;   /* a look outside the gates: familyDidWakeGated looks again inside */
     IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
     const bool slept = fWake.sys_slept != 0;
     const int32_t pend = fWake.will_sleep_off;
     const int32_t owed = rd3fb_wake_power_on(&fWake, fArgWake != 0, paging);
     IOSimpleLockUnlockEnableInterrupt(fLock, st);
     if (owed) {
-        familyDidWake(owed);
+        familyDidWake("power-on");
     } else {
         if (slept)
             FBLOG("system wake: head %u, pagingState %d, %d WillSleep(false) unanswered: the family wake work %s", fHead,
-                  paging ? 1 : 0, (int)pend, !fArgWake ? "is OFF (rdna3fbwake=0): WindowServer may wait for paging"
-                                                       : "is not needed (paging on)");
-        if (slept && !fArgWake)
+                  paging ? 1 : 0, (int)pend, paging ? "is not needed (paging on; the sleep is cleared)"
+                                                    : "is OFF (rdna3fbwake=0): WindowServer may wait for paging");
+        if (slept && !fArgWake && !paging)
             fWakeOff++;
         handleEvent(kIOFBNotifyDidPowerOn);
+        if (slept)
+            publishStats();
     }
     return kIOPMAckImplied;
 }
@@ -1675,49 +1814,125 @@ IOReturn RDNA3Framebuffer::sleepTap(OSObject *self, void *, IOFramebuffer *, IOI
  * a system sleep (IOFBController's power work, then handleEvent(DidWake)):
  * clients told DidWake(true), then DidWake(false) as many times as
  * WillSleep(false) came (IOGraphicsAccelerator2 enables itself again only
- * then), DidPowerOn(false), pagingState set and WindowServer, asleep in the
- * framebuffer's gate on fServerConnect until paging is on, woken. Run in a
- * command gate on the framebuffer's own IOGraphics workloop, so the wakeup
- * cannot slip between WindowServer's look at pagingState and its sleep. */
-void RDNA3Framebuffer::familyDidWake(int32_t owed)
+ * then), DidPowerOn(false), pagingState set and WindowServer, asleep on
+ * fServerConnect until paging is on, woken.
+ *
+ * Gates (ECC review): the family's order, the system gate and then the
+ * controller's (IOFBController::computeState delivers DidWake/DidPowerOn so,
+ * systemWork its WillSleep; the other order risks a deadlock against them).
+ * WindowServer's system entries (IOFramebuffer::_extEntry) test pagingState
+ * holding both, open the controller gate and sleep on fServerConnect in the
+ * system gate, which sleepGate releases as the thread sleeps: with the
+ * system gate held here the test cannot fall between our wakeup and its
+ * sleep. The controller entries sleep in the controller gate, held here
+ * too. The wakeup is not gate specific (IOLockWakeup on the event; the
+ * family wakes system sleepers through the controller's workloop the same
+ * way, IOFramebuffer.cpp ~6589), so it goes through our command gate on the
+ * controller's workloop and no event source is added to the family's
+ * system workloop. tests/test_fb_policy.c (test_wake_gates) explores every
+ * interleaving of both orders: no second, delayed wakeup is needed. */
+void RDNA3Framebuffer::familyDidWake(const char *why)
 {
-    IOWorkLoop *wl = getWorkLoop();
-    if (!fWakeGate && wl) {
-        fWakeGate = IOCommandGate::commandGate(this);
-        if (fWakeGate && wl->addEventSource(fWakeGate) != kIOReturnSuccess)
-            OSSafeReleaseNULL(fWakeGate);
+    IOWorkLoop *sys = getGraphicsSystemWorkLoop();
+    IOCommandGate *g = nullptr;
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    const bool stopping = fStopping != 0;
+    if (!stopping && fWakeGate) {
+        g = fWakeGate;
+        g->retain();   /* stop() drops fWakeGate under fLock: ours stays valid */
     }
-    if (!fWakeGate) {
-        /* the sleep stays recorded: the next power-on tries again */
-        fWakeNoGate++;
-        FBLOG("system wake: head %u has no command gate on its workloop (%p): the family wake work did NOT run, "
-              "WindowServer may wait for paging (%u such)", fHead, wl, fWakeNoGate);
-        handleEvent(kIOFBNotifyDidPowerOn);
+    if (stopping)
+        fWakeStopping++;
+    IOSimpleLockUnlockEnableInterrupt(fLock, st);
+    if (stopping) {
+        FBLOG("system wake (%s): head %u is stopping: the family wake work is skipped", why, fHead);
         return;
     }
-    IOReturn r = fWakeGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, this,
-                                                           &RDNA3Framebuffer::familyDidWakeGated),
-                                      (void *)(intptr_t)owed);
-    if (r != kIOReturnSuccess)
-        FBLOG("system wake: head %u family wake work -> 0x%x", fHead, r);
+    IOReturn r = kIOReturnNotReady;
+    if (sys && g)
+        r = sys->runAction(&RDNA3Framebuffer::wakeSysGated, this, g);
+    if (r == kIOReturnSuccess) {
+        OSSafeReleaseNULL(g);
+        publishStats();
+        return;
+    }
+    wakeFailed(r, why, sys, g);
+    OSSafeReleaseNULL(g);
 }
 
-IOReturn RDNA3Framebuffer::familyDidWakeGated(void *a0, void *, void *, void *)
+/* the system gate is held: the controller gate next (our command gate) */
+IOReturn RDNA3Framebuffer::wakeSysGated(OSObject *target, void *gate, void *, void *, void *)
 {
-    const int32_t owed = (int32_t)(intptr_t)a0;
+    RDNA3Framebuffer *me = OSDynamicCast(RDNA3Framebuffer, target);
+    IOCommandGate *g = (IOCommandGate *)gate;
+    if (!me || !g)
+        return kIOReturnBadArgument;
+    return g->runAction(OSMemberFunctionCast(IOCommandGate::Action, me, &RDNA3Framebuffer::familyDidWakeGated), g);
+}
+
+/* the wake work could not run: the sleep stays recorded, a thread call
+ * tries again RD3FB_WAKE_RETRIES times ~50 ms apart, then the next power-on */
+void RDNA3Framebuffer::wakeFailed(IOReturn r, const char *why, const void *sys, const void *gate)
+{
+    bool armed = false;
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    const int again = rd3fb_wake_failed(&fWake);
+    const uint32_t fails = fWake.fails;
+    if (!gate)
+        fWakeNoGate++;
+    if (again && !fStopping && fWakeRetry) {
+        uint64_t d;
+        clock_interval_to_deadline(50, kMillisecondScale, &d);
+        retain();
+        if (thread_call_enter_delayed(fWakeRetry, d))
+            release();   /* already queued: that one holds the reference */
+        armed = true;
+    }
+    IOSimpleLockUnlockEnableInterrupt(fLock, st);
+    FBLOG("system wake (%s): head %u family wake work did NOT run (0x%x; system workloop %p, controller gate %p, "
+          "stopping %d): %s (%u failure(s)); WindowServer may wait for paging", why, fHead, r, sys, gate,
+          (int)fStopping, armed ? "retried in 50 ms" : again ? "NOT retried (no retry thread call)"
+                                                         : "given up until the next power-on", fails);
+    publishStats();
+}
+
+void RDNA3Framebuffer::wakeRetryFire(thread_call_param_t p0, thread_call_param_t)
+{
+    RDNA3Framebuffer *me = (RDNA3Framebuffer *)p0;
+    if (!me->fStopping)
+        me->familyDidWake("retry");
+    me->release();
+}
+
+/* both gates held (system, then controller) */
+IOReturn RDNA3Framebuffer::familyDidWakeGated(void *gate, void *, void *, void *)
+{
+    IOCommandGate *g = (IOCommandGate *)gate;
+    if (fStopping)
+        return kIOReturnAborted;
+    const bool paging = pagingState != 0;
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    const int32_t owed = rd3fb_wake_recheck(&fWake, paging ? 1 : 0);
+    IOSimpleLockUnlockEnableInterrupt(fLock, st);
+    if (!owed) {
+        FBLOG("system wake: head %u, in the gates: %s: no wake work", fHead,
+              paging ? "paging is on already (the sleep is cleared)" : "no system sleep recorded any more");
+        return kIOReturnSuccess;
+    }
     IOReturn r1 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)true);
     IOReturn r2 = kIOReturnSuccess;
     for (int32_t i = 0; i < owed; i++)
         r2 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)false);
     IOReturn r3 = deliverFramebufferNotification(kIOFBNotifyDidPowerOn, (void *)false);
     pagingState = true;
-    fWakeGate->commandWakeup(&fServerConnect, false);
-    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    g->commandWakeup(&fServerConnect, false);   /* every WindowServer thread waiting for paging */
+    st = IOSimpleLockLockDisableInterrupt(fLock);
     rd3fb_wake_done(&fWake);
     const uint32_t n = fWake.family_wakes;
     IOSimpleLockUnlockEnableInterrupt(fLock, st);
     FBLOG("system wake #%u: head %u clients told DidWake true and %d x false (0x%x/0x%x), DidPowerOn (0x%x), "
-          "paging on, WindowServer woken (rdna3fbwake=1)", n, fHead, (int)owed, r1, r2, r3);
+          "paging on, WindowServer woken in the system and controller gates (rdna3fbwake=1)", n, fHead, (int)owed, r1,
+          r2, r3);
     return kIOReturnSuccess;
 }
 
@@ -2024,9 +2239,11 @@ void RDNA3Framebuffer::cursorFire(thread_call_param_t p0, thread_call_param_t)
             rd3fb_cur_done(&me->fCurQ, &cs, ok ? 1 : 0);
             const uint32_t fails = me->fCurQ.fails;
             IOSimpleLockUnlock(me->fCurLock);
-            if (!ok && (me->fCurFailLogged++ < 8 || (fails & 1023) == 0))
+            if (!ok && (me->fCurFailLogged++ < 8 || (fails & 1023) == 0)) {
                 FBLOG("cursor: head %u move to %d,%d %s FAILED in the core (%u such)", me->fHead, (int)cs.x, (int)cs.y,
                       cs.visible ? "shown" : "hidden", fails);
+                me->publishStats();   /* the counters reach the registry with the log line */
+            }
         }
     }
     me->release();
@@ -2075,6 +2292,12 @@ IOReturn RDNA3Framebuffer::setCursorImage(void *cursorImage)
     }
     IOFree(staging, bytes);
     if (!ok) {
+        fCurConvertFails++;
+        if (fCurConvertFails <= 8 || (fCurConvertFails & 1023) == 0) {
+            FBLOG("cursor: head %u image not converted (%ux%u, limit %u): software cursor for it (%u such)", fHead,
+                  (unsigned)ci.cursorWidth, (unsigned)ci.cursorHeight, kCurDim, fCurConvertFails);
+            publishStats();
+        }
         if (fCurCall) {
             IOSimpleLockLock(fCurLock);
             fCurHaveImage = false;
@@ -2091,8 +2314,17 @@ IOReturn RDNA3Framebuffer::setCursorImage(void *cursorImage)
         FBLOG("cursor image %u: %ux%u", fCurImages, (unsigned)ci.cursorWidth, (unsigned)ci.cursorHeight);
     /* the image address never changes; program it once (here, the answer
      * matters to WindowServer), then only move */
-    if (first && !cursorCallAt(RD3K_CURSOR_OP_IMAGE, fCurX, fCurY, false))
+    if (first && !cursorCallAt(RD3K_CURSOR_OP_IMAGE, fCurX, fCurY, false)) {
+        /* the core refused the cursor's surface: WindowServer draws a
+         * software cursor; the next image tries again (fCurHaveImage clear) */
+        fCurImageFails++;
+        if (fCurImageFails <= 8 || (fCurImageFails & 1023) == 0) {
+            FBLOG("cursor: head %u first image: the core REFUSED the cursor surface at VRAM 0x%llx: Unsupported, "
+                  "software cursor (%u such)", fHead, (unsigned long long)fCurVram.allocationCookie, fCurImageFails);
+            publishStats();
+        }
         return kIOReturnUnsupported;
+    }
     if (fCurCall) {
         IOSimpleLockLock(fCurLock);
         fCurHaveImage = true;
