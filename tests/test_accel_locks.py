@@ -68,8 +68,9 @@ m = re.search(r"virtual void stop\(IOService \*provider\) APPLE_KEXT_OVERRIDE \{
 if not m or not re.search(r"IOGraphicsAccelerator2::stop\(provider\);\s*rd3AccelIopStop\(\);", m.group(1)):
     fails.append("stop(): rd3AccelIopStop() does not follow IOGraphicsAccelerator2::stop")
 ib = body("rd3AccelIopStop")
-for need in ("thread_call_cancel_wait", "thread_call_free", "gIopFlipFront[h] = gIopFlipPrev[h] = nullptr",
-             "IOLockLock(l)", "->release()"):
+# a head still flipped to an IOP surface keeps its front (the HUBP may scan it); the rest are dropped
+for need in ("thread_call_cancel_wait", "thread_call_free", "gIopFlipFront[h] && !gIopFlipped[h]",
+             "gIopFlipFront[h] = nullptr", "gIopFlipPrev[h] = nullptr", "IOLockLock(l)", "->release()"):
     if need not in ib:
         fails.append("rd3AccelIopStop lacks %s" % need)
 if ib.find("->release()") < ib.find("IOLockUnlock(l)"):
