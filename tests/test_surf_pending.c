@@ -13,7 +13,11 @@
  * after a timeout never takes a newer command buffer's count (the dropped
  * marks are forgiven, open item 4), a waiter whose surface was cleared under
  * it is told CLEARED (not a successful wait), and a full table reuses a
- * slot holding only forgiven marks before it drops a pending surface.
+ * slot holding only forgiven marks before it drops a pending surface. Then
+ * the round-2 reviews: a ready that never comes costs at most two bounded
+ * waits, not one per later page-off (the ghost of its forgiven mark goes for
+ * good at the second timeout), forgiven marks age out, and the timeout
+ * budget stops the waits after RD3_SP_BUDGET timeouts with no real ready.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -249,6 +253,100 @@ static void forgiven_evicted_first(void)
     CHECK(rd3_sp_mark(&t, 901, 1, 0, &ev) == RD3_SPM_EVICTED && ev == 1);            /* then the oldest pending */
 }
 
+/* round-2 review of N41: a lost ready, then a page-off and a write (pending + its own ready) per frame. The
+ * write's own ready takes the forgiven mark (the table cannot tell it from the lost one's late ready), so the
+ * lost mark's ghost sits in the count: the second timeout drops it for good. Before the fix every page-off of
+ * the surface ran into the bound (forgiven -> count -> forgiven ...) */
+static void lost_ready_bounded(void)
+{
+    struct rd3_sp t;
+    uint64_t now = 1000 * MS;
+    unsigned timeouts = 0, waits = 0;
+    memset(&t, 0, sizeof t);
+    CHECK(rd3_sp_mark(&t, 7, 1, now, 0) == RD3_SPM_PENDING);   /* write 1: its ready never comes */
+    for (unsigned i = 0; i < 8; i++) {
+        uint64_t ep = 0;
+        enum rd3_sp_wait_res r = rd3_sp_wait_step(&t, 7, now, now + 100 * MS, 0, &ep);
+        if (r == RD3_SPW_WAIT) {
+            waits++;
+            now += 100 * MS;
+            r = rd3_sp_wait_step(&t, 7, now, now, 0, &ep);
+            if (r == RD3_SPW_TIMEOUT) timeouts++;
+        }
+        now += 1 * MS;
+        CHECK(rd3_sp_mark(&t, 7, 1, now, 0) == RD3_SPM_PENDING);   /* the next write */
+        (void)rd3_sp_mark(&t, 7, 0, now + 1 * MS, 0);              /* and its own ready */
+        now += 2 * MS;
+    }
+    CHECK(timeouts == 2 && waits == 2);
+    CHECK(rd3_sp_pending(&t, 7) == 0 && rd3_sp_forgiven(&t, 7) == 0 && rd3_sp_busy(&t) == 0);
+}
+
+/* forgiven marks older than RD3_SP_FORGIVE_MS are aged out: the next write long after is not misread */
+static void forgiven_aged(void)
+{
+    struct rd3_sp t;
+    memset(&t, 0, sizeof t);
+    CHECK(rd3_sp_mark(&t, 3, 1, 0, 0) == RD3_SPM_PENDING);
+    CHECK(rd3_sp_wait_step(&t, 3, 100 * MS, 100 * MS, 0, 0) == RD3_SPW_TIMEOUT && rd3_sp_forgiven(&t, 3) == 1);
+    const uint64_t later = 100 * MS + (uint64_t)RD3_SP_FORGIVE_MS * MS + 1;
+    CHECK(rd3_sp_mark(&t, 3, 1, later, 0) == RD3_SPM_PENDING);
+    CHECK(rd3_sp_mark(&t, 3, 0, later + 1 * MS, 0) == RD3_SPM_READY && t.aged == 1);   /* its own ready */
+    CHECK(rd3_sp_find(&t, 3) == 0 && rd3_sp_wait_step(&t, 3, later + 2 * MS, later + 102 * MS, 0, 0) == RD3_SPW_READY);
+    /* a forgiven-only slot whose late ready comes after the age: LATE, the slot goes */
+    CHECK(rd3_sp_mark(&t, 4, 1, 0, 0) == RD3_SPM_PENDING);
+    CHECK(rd3_sp_wait_step(&t, 4, 100 * MS, 100 * MS, 0, 0) == RD3_SPW_TIMEOUT);
+    CHECK(rd3_sp_mark(&t, 4, 0, later, 0) == RD3_SPM_LATE && rd3_sp_find(&t, 4) == 0 && t.aged == 2);
+    /* within the age a late ready still takes its forgiven mark (the earlier rule) */
+    CHECK(rd3_sp_mark(&t, 5, 1, 0, 0) == RD3_SPM_PENDING);
+    CHECK(rd3_sp_wait_step(&t, 5, 100 * MS, 100 * MS, 0, 0) == RD3_SPW_TIMEOUT);
+    CHECK(rd3_sp_mark(&t, 5, 1, 200 * MS, 0) == RD3_SPM_PENDING);
+    CHECK(rd3_sp_mark(&t, 5, 0, 300 * MS, 0) == RD3_SPM_LATE && rd3_sp_pending(&t, 5) == 1 && t.aged == 2);
+}
+
+/* the timeout budget (security review of N41): RD3_SP_BUDGET timeouts with no real ready between them and new
+ * waits are skipped (SKIP, nothing cleared) until a real ready; LATE readies do not end it */
+static void timeout_budget(void)
+{
+    struct rd3_sp t;
+    uint64_t ep;
+    memset(&t, 0, sizeof t);
+    for (uint32_t i = 1; i <= RD3_SP_BUDGET; i++) {
+        CHECK(rd3_sp_mark(&t, i, 1, 0, 0) == RD3_SPM_PENDING);
+        CHECK(t.starved == 0);
+        CHECK(rd3_sp_wait_step(&t, i, 100 * MS, 100 * MS, 0, 0) == RD3_SPW_TIMEOUT);
+    }
+    CHECK(t.starved == 1 && t.starvations == 1);
+    CHECK(rd3_sp_mark(&t, 50, 1, 101 * MS, 0) == RD3_SPM_PENDING);
+    ep = 0;
+    CHECK(rd3_sp_wait_step(&t, 50, 102 * MS, 202 * MS, 0, &ep) == RD3_SPW_SKIP && ep == 0 && t.skipped == 1);
+    CHECK(rd3_sp_pending(&t, 50) == 1);                                       /* nothing cleared */
+    CHECK(rd3_sp_mark(&t, 1, 0, 103 * MS, 0) == RD3_SPM_LATE && t.starved);   /* a late ready: still starved */
+    CHECK(rd3_sp_mark(&t, 50, 1, 104 * MS, 0) == RD3_SPM_PENDING);
+    CHECK(rd3_sp_mark(&t, 50, 0, 105 * MS, 0) == RD3_SPM_STILL && !t.starved); /* a real one: waits again */
+    ep = 0;
+    CHECK(rd3_sp_wait_step(&t, 50, 106 * MS, 206 * MS, 0, &ep) == RD3_SPW_WAIT && ep);
+    /* a real ready between timeouts starts the count again */
+    memset(&t, 0, sizeof t);
+    for (uint32_t i = 1; i <= 3 * RD3_SP_BUDGET; i++) {
+        CHECK(rd3_sp_mark(&t, i, 1, 0, 0) == RD3_SPM_PENDING);
+        CHECK(rd3_sp_wait_step(&t, i, 100 * MS, 100 * MS, 0, 0) == RD3_SPW_TIMEOUT);
+        if (i % (RD3_SP_BUDGET - 1) == 0) {
+            CHECK(rd3_sp_mark(&t, 1000 + i, 1, 0, 0) == RD3_SPM_PENDING);
+            CHECK(rd3_sp_mark(&t, 1000 + i, 0, 0, 0) == RD3_SPM_READY);
+        }
+    }
+    CHECK(!t.starved && !t.starvations);
+    /* the switch-off starts afresh too */
+    for (uint32_t i = 1; i <= RD3_SP_BUDGET; i++) {
+        (void)rd3_sp_mark(&t, 2000 + i, 1, 0, 0);
+        (void)rd3_sp_wait_step(&t, 2000 + i, 100 * MS, 100 * MS, 0, 0);
+    }
+    CHECK(t.starved);
+    (void)rd3_sp_clear(&t);
+    CHECK(!t.starved && !t.timeouts_in_row);
+}
+
 int main(void)
 {
     marks();
@@ -259,6 +357,9 @@ int main(void)
     late_after_timeout();
     cleared_waiters();
     forgiven_evicted_first();
+    lost_ready_bounded();
+    forgiven_aged();
+    timeout_budget();
     if (fails) { printf("test_surf_pending: %d FAILED\n", fails); return 1; }
     printf("test_surf_pending: ok\n");
     return 0;

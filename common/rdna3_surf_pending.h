@@ -26,8 +26,25 @@
  * forgiven one first and are answered LATE, so a late ready never takes the
  * count of a newer command buffer's pending mark (ECC review of N41, open
  * item 4). A ready that finds forgiven marks while newer marks are pending
- * also takes the forgiven one: the newer write's own ready then ends the
- * wait (later, never earlier; the bound covers a ready that never comes).
+ * also takes the forgiven one (later, never earlier): the table cannot tell
+ * the late ready from the newer write's own one. If it was the newer
+ * write's, the dropped mark's ghost now sits in the count; that pending
+ * mark is remembered as a ghost and the next timeout drops it for good
+ * instead of forgiving it again (round-2 review of N41: a lost ready made
+ * every later page-off of that surface wait the full bound, the forgiven
+ * mark moving between "forgiven" and the count at each write). So a ready
+ * that never comes costs at most two bounded waits: its own, and one more
+ * when a newer write's ready took its forgiven mark (the table cannot tell
+ * the two readies apart; never one per page-off). Forgiven marks older than
+ * RD3_SP_FORGIVE_MS are aged out before a ready takes one: a ready that
+ * late is not coming (counted in aged), the next write's ready ends its own
+ * wait.
+ *
+ * Timeout budget (defence in depth, security review of N41): after
+ * RD3_SP_BUDGET timeouts with no real ready between them (READY / STILL,
+ * not LATE) the table is "starved": new waits answer RD3_SPW_SKIP (pending,
+ * not waited) until the next real ready. A WindowServer whose readies all
+ * get lost costs RD3_SP_BUDGET bounded waits, not one per page-off.
  * A table that is full first reuses a slot that holds only forgiven marks
  * (the oldest), then drops the surface pending the longest (its waiters
  * stop waiting: never longer than the bound; its marks are not kept, its
@@ -55,11 +72,15 @@
 #define RD3_SP_WAIT_MS   100u             /* the page-off's bound: a GPU that has not finished a composite in 100 ms is hung */
 #define RD3_SP_WAIT_MAX_MS 1000u          /* the sysctl's ceiling */
 #define RD3_SP_CLEARED   (2u * RD3_SP_SLOTS) /* clears remembered for the waiters (RD3_SPW_CLEARED): a whole clear() fits */
+#define RD3_SP_FORGIVE_MS (10u * RD3_SP_WAIT_MS) /* forgiven marks older than this are aged out before a ready takes one */
+#define RD3_SP_BUDGET    4u               /* timeouts with no real ready between them: then waits are skipped */
 
 struct rd3_sp_slot {
     uint32_t id;          /* the IOSurface id (0: free) */
     uint32_t count;       /* pending marks */
     uint32_t forgiven;    /* marks a timeout dropped whose readies have not come yet (late) */
+    uint32_t ghost;       /* pending marks that may be a forgiven mark a newer write's ready took (<= count) */
+    uint64_t forgiven_ns; /* when a timeout last added forgiven marks (their age) */
     uint64_t seq;         /* the pending episode: set when count goes 0 -> 1 (the oldest goes when full) */
     uint64_t since_ns;    /* the episode's first pending mark */
 };
@@ -74,6 +95,14 @@ struct rd3_sp {
     uint64_t seq;
     struct rd3_sp_clear_rec cleared[RD3_SP_CLEARED];
     unsigned cleared_next;
+    /* the timeout budget: timeouts since the last real ready, starved (waits skipped) */
+    uint32_t timeouts_in_row;
+    uint32_t starved;
+    /* statistics for the caller's sysctls */
+    uint64_t aged;            /* forgiven marks aged out (their readies never came) */
+    uint64_t ghosts_dropped;  /* pending marks a timeout dropped for good as ghosts */
+    uint64_t starvations;     /* times the budget ran out */
+    uint64_t skipped;         /* waits skipped while starved */
 };
 
 enum rd3_sp_mark_res {
@@ -90,7 +119,8 @@ enum rd3_sp_wait_res {
     RD3_SPW_READY = 0,      /* not pending (or the waited episode ended with its ready): go on */
     RD3_SPW_WAIT = 1,       /* pending, the deadline not reached: sleep until it or a ready */
     RD3_SPW_TIMEOUT = 2,    /* pending at the deadline: the surface was cleared by this waiter */
-    RD3_SPW_CLEARED = 3     /* the episode this waiter waited for was cleared by someone else (not ready) */
+    RD3_SPW_CLEARED = 3,    /* the episode this waiter waited for was cleared by someone else (not ready) */
+    RD3_SPW_SKIP = 4        /* pending, not waited: the timeout budget is spent until a real ready (starved) */
 };
 
 static inline struct rd3_sp_slot *rd3_sp_find(struct rd3_sp *t, uint32_t id)
@@ -102,7 +132,14 @@ static inline struct rd3_sp_slot *rd3_sp_find(struct rd3_sp *t, uint32_t id)
 
 static inline void rd3_sp_slot_free(struct rd3_sp_slot *s)
 {
-    s->id = 0; s->count = 0; s->forgiven = 0; s->seq = 0; s->since_ns = 0;
+    s->id = 0; s->count = 0; s->forgiven = 0; s->ghost = 0; s->forgiven_ns = 0; s->seq = 0; s->since_ns = 0;
+}
+
+/* a real ready (not late): the budget starts again, waits are no longer skipped */
+static inline void rd3_sp_real_ready(struct rd3_sp *t)
+{
+    t->timeouts_in_row = 0;
+    t->starved = 0;
 }
 
 /* an episode of surface 'id' ended without its ready: its waiters are told */
@@ -145,19 +182,27 @@ static inline enum rd3_sp_mark_res rd3_sp_mark(struct rd3_sp *t, uint32_t id, in
     struct rd3_sp_slot *s = rd3_sp_find(t, id);
     if (!pending) {
         if (!s) return RD3_SPM_LATE;
+        if (s->forgiven && now_ns > s->forgiven_ns &&
+            now_ns - s->forgiven_ns > (uint64_t)RD3_SP_FORGIVE_MS * 1000000ull) {   /* their readies are not coming */
+            t->aged += s->forgiven;
+            s->forgiven = 0; s->forgiven_ns = 0;
+            if (!s->count) { rd3_sp_slot_free(s); return RD3_SPM_LATE; }
+        }
         if (s->forgiven) {   /* a ready of a mark a timeout dropped: never a newer mark's count */
             s->forgiven--;
+            if (s->count && s->ghost < s->count) s->ghost++;   /* or the newer write's own: a ghost may stay */
             if (!s->count && !s->forgiven) rd3_sp_slot_free(s);
             return RD3_SPM_LATE;
         }
         if (!s->count) { rd3_sp_slot_free(s); return RD3_SPM_LATE; }   /* not reached: such a slot is free */
-        if (--s->count) return RD3_SPM_STILL;
+        rd3_sp_real_ready(t);
+        if (--s->count) { if (s->ghost > s->count) s->ghost = s->count; return RD3_SPM_STILL; }
         rd3_sp_slot_free(s);
         return RD3_SPM_READY;
     }
     if (s) {
         if (s->count >= RD3_SP_MAX_COUNT) return RD3_SPM_SATURATED;
-        if (!s->count) { s->seq = ++t->seq; s->since_ns = now_ns; }   /* a new episode (forgiven marks kept) */
+        if (!s->count) { s->seq = ++t->seq; s->since_ns = now_ns; s->ghost = 0; }   /* a new episode (forgiven kept) */
         s->count++;
         return RD3_SPM_PENDING;
     }
@@ -187,10 +232,12 @@ static inline uint32_t rd3_sp_forgiven(struct rd3_sp *t, uint32_t id)
 
 /* one step of a bounded wait for surface 'id': READY, WAIT (sleep until
  * deadline_ns or a ready), TIMEOUT (pending at the deadline: cleared by this
- * call, *dropped the marks it held, now forgiven), CLEARED (the episode this
- * waiter saw pending was cleared by another waiter, an eviction or a clear).
- * *epoch (0 before the first step; may be 0 for no CLEARED answers) is the
- * waiter's episode, set at its first WAIT. */
+ * call, *dropped the marks it held, forgiven but for the ghosts, which go for
+ * good), CLEARED (the episode this waiter saw pending was cleared by another
+ * waiter, an eviction or a clear), SKIP (pending, but the timeout budget is
+ * spent: a first step does not wait, nothing is cleared). *epoch (0 before
+ * the first step; may be 0 for no CLEARED answers) is the waiter's episode,
+ * set at its first WAIT. */
 static inline enum rd3_sp_wait_res rd3_sp_wait_step(struct rd3_sp *t, uint32_t id, uint64_t now_ns,
                                                     uint64_t deadline_ns, uint32_t *dropped, uint64_t *epoch)
 {
@@ -200,13 +247,20 @@ static inline enum rd3_sp_wait_res rd3_sp_wait_step(struct rd3_sp *t, uint32_t i
     const uint64_t mine = epoch ? *epoch : 0;
     if (!s || !s->count || (mine && s->seq != mine))   /* the waited episode ended: by its ready, or cleared */
         return rd3_sp_was_cleared(t, id, mine) ? RD3_SPW_CLEARED : RD3_SPW_READY;
+    if (!mine && t->starved) { t->skipped++; return RD3_SPW_SKIP; }
     if (epoch && !mine) *epoch = s->seq;
     if (now_ns < deadline_ns) return RD3_SPW_WAIT;
     if (dropped) *dropped = s->count;
-    const uint64_t fg = (uint64_t)s->forgiven + s->count;
+    const uint32_t ghost = s->ghost > s->count ? s->count : s->ghost;
+    const uint32_t keep = s->count - ghost;   /* the ghosts had their bounded wait already: dropped for good */
+    t->ghosts_dropped += ghost;
+    const uint64_t fg = (uint64_t)s->forgiven + keep;
     s->forgiven = fg > RD3_SP_MAX_COUNT ? RD3_SP_MAX_COUNT : (uint32_t)fg;
+    if (keep) s->forgiven_ns = now_ns;
     rd3_sp_note_cleared(t, id, s->seq);
-    s->count = 0; s->since_ns = 0;
+    s->count = 0; s->ghost = 0; s->since_ns = 0;
+    if (!s->forgiven) rd3_sp_slot_free(s);
+    if (++t->timeouts_in_row >= RD3_SP_BUDGET && !t->starved) { t->starved = 1; t->starvations++; }
     return RD3_SPW_TIMEOUT;
 }
 
@@ -228,6 +282,7 @@ static inline unsigned rd3_sp_clear(struct rd3_sp *t)
         if (t->s[i].id && t->s[i].count) { n++; rd3_sp_note_cleared(t, t->s[i].id, t->s[i].seq); }
         rd3_sp_slot_free(&t->s[i]);
     }
+    if (t) rd3_sp_real_ready(t);   /* a fresh start: the budget too */
     return n;
 }
 
