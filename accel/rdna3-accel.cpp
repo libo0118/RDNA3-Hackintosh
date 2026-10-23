@@ -4569,18 +4569,37 @@ static void rd3AccelPresentForgetVm(const void *vm)
  * then rd3_fq_moved - a queued IOP flip is dropped (its pipe signalled), it
  * would otherwise be programmed over the copied frame at the next latch;
  * the in-flight one completes; the flip home is what the worker waits for;
- * the latch record forgets the legacy buffer */
+ * the latch record forgets the legacy buffer.
+ * The head home already (no IOP flip since the last flip home) is not
+ * flipped again, but an IOP flip queued behind that flip home is dropped
+ * all the same: it is older than the frame copied now and the worker would
+ * program it at the home flip's latch, a stale frame that stays if this was
+ * the last update (ECC review round 2). No look first: a look that saw the
+ * home flip's latch would program it */
 static void rd3AccelIopHome(IOService *fb, unsigned head)
 {
     if (!fb || head >= kRd3MaxFB) return;
     IOLock *l = rd3LockOnce(&gPresLock);
     RD3PresDone d = {};
     if (l) IOLockLock(l);
-    if (!gIopFlipped[head]) {
+    const bool q = gPresReady && l;
+    /* an IOP flip of ours in flight sets gIopFlipped under this lock (rd3AccelPqProgramLocked); should the two
+     * ever disagree the head is flipped home as below rather than trusted to be home */
+    const bool iopInflight = q && gPres[head].q.inflight && gPres[head].q.inflight != RD3_FQ_FOREIGN &&
+                             gPres[head].cur.kind == kPqIop;
+    if (!gIopFlipped[head] && !iopInflight) {
+        RD3Pres &P = gPres[head];
+        uint32_t tok = 0;
+        if (q && P.q.queued && P.next.kind == kPqIop && rd3_fq_drop_queued(&P.q, &tok)) {
+            OSAddAtomic64(1, &gCntPqIopDrop[head]);
+            rd3AccelPqDropLocked(head, tok, "the IOP copy fallback copied a newer frame onto the panel, the head "
+                                 "home already (no flip)", false, &d);
+            IOLockWakeup(gPresLock, &P.q, false);
+        }
         if (l) IOLockUnlock(l);
+        rd3AccelPqDoneRun(&d);
         return;
     }
-    const bool q = gPresReady && l;
     if (q) rd3AccelPqLookLocked(head, &d);
     struct RD3KFlipRequest f; rd3SVZero(&f, sizeof f);
     f.version = RD3K_FLIP_ABI_VERSION; f.flags = RD3K_FLIP_FLAG_HOME;

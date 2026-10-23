@@ -54,6 +54,7 @@ struct sim {
     int foreign;             /* the pending flip is another path's */
     int stuck;               /* the head's flips never latch (blanked, DPMS off, a stuck HUBP) */
     int abandoned;           /* the pending flip is ours, given up by the queue (completed early) */
+    int iop_flipped;         /* the kernel's gIopFlipped: an IOP flip of ours moved the head off home */
     uint64_t latch_t;        /* when the last flip latched */
     uint64_t next_vbl, worker_t;
     uint64_t inflight_t;     /* when the queue's in-flight flip (ours or another path's) began: its cap runs from it */
@@ -65,6 +66,8 @@ struct sim {
     unsigned nprog;
     unsigned nsub, same, queued, replaced, joined, done, refused, dropped;
     unsigned busy, foreign_to, giveup, forced, early;
+    unsigned copied;         /* IOP copy fallbacks: a frame copied onto home, its transaction complete at once */
+    uint32_t last_copy_tok;  /* the newest copied frame: no older present is ever programmed after it */
     uint32_t newest_tok;
     uint64_t newest_addr;
     unsigned waits, inplace, arriving, scanned_free, wrote_on_panel;
@@ -104,6 +107,8 @@ static void hw_program(struct sim *s, uint64_t addr, uint32_t tok, int force)
     CHECK(!s->pend || force);              /* at most one flip in flight (but the framebuffer's flip anyway) */
     CHECK(tok == s->newest_tok);           /* the newest present each time */
     if (s->nprog) CHECK(tok > s->prog_tok[s->nprog - 1]);   /* in order */
+    CHECK(tok > s->last_copy_tok);         /* never over a newer copied frame */
+    s->iop_flipped = 1;                    /* the model's presents are IOP transactions (rd3AccelPqProgramLocked) */
     s->req = addr;
     s->pend = 1;
     s->foreign = 0;
@@ -337,13 +342,40 @@ static void vm_free(struct sim *s, uint64_t t, uint64_t addr)
     inv(s);
 }
 
-/* the IOP copy fallback flips the head home (rd3AccelIopHome): under the queue's lock the look, the flip
- * home - the framebuffer waits up to 20 ms for the pending flip, then programs home - then rd3_fq_moved */
+/* the copy fallback's frame (rd3AccelIopTransaction after rd3AccelIopHome): copied onto home, its
+ * transaction complete at once; it is the newest frame */
+static void copy_frame(struct sim *s)
+{
+    const uint32_t tok = ++s->nsub;
+    if (tok < MAXREC)
+        s->sub_t[tok] = s->now;
+    s->newest_tok = tok;
+    s->newest_addr = HOME;
+    s->last_copy_tok = tok;
+    s->copied++;
+    complete(s, tok);
+    resolve(s, tok);
+}
+
+/* the IOP copy fallback (rd3AccelIopHome, then the copy). Under the queue's lock: with the head home already
+ * (gIopFlipped clear) no flip, a queued IOP present dropped - programmed at the next latch it would cover the
+ * copied frame (ECC review round 2). Else the look, the flip home - the framebuffer waits up to 20 ms for the
+ * pending flip, then programs home - then rd3_fq_moved */
 static void flip_home(struct sim *s, uint64_t t)
 {
     int had = 0;
     uint32_t tok = 0, d = 0;
     run_until(s, t);
+    if (!s->iop_flipped) {
+        if (rd3_fq_drop_queued(&s->q, &d)) {
+            s->dropped++;
+            complete(s, d);
+            resolve(s, d);
+        }
+        copy_frame(s);
+        inv(s);
+        return;
+    }
     look(s);
     if (s->pend && !s->stuck) {
         /* the framebuffer's wait: the pending flip latches at the next vblank (the worker is held off by the
@@ -378,6 +410,8 @@ static void flip_home(struct sim *s, uint64_t t)
     s->pend = 1;
     s->foreign = 1;
     s->inflight_t = s->now;
+    s->iop_flipped = 0;
+    copy_frame(s);
     inv(s);
 }
 
@@ -387,7 +421,7 @@ static void finish(struct sim *s, const char *name)
     run_until(s, s->now + 6 * CAP);
     CHECK(!s->pend && !s->q.inflight && !s->q.queued);
     if (s->newest_tok) CHECK(s->inuse == s->newest_addr);
-    CHECK(s->nsub == s->nprog + s->replaced + s->joined + s->same + s->dropped);
+    CHECK(s->nsub == s->nprog + s->replaced + s->joined + s->same + s->dropped + s->copied);
     CHECK(s->done == s->nprog);
     CHECK(s->scanned_free == 0 && s->wrote_on_panel == 0);
     for (unsigned i = 0; i < s->nprog && i < MAXREC; i++)
@@ -514,6 +548,11 @@ int main(void)
         q.queued = 0x3000; q.queued_tok = 14;
         CHECK(rd3_fq_busy(&q, &d) == 1 && d == 13 && q.queued == 0x3000 && q.inflight == RD3_FQ_FOREIGN);
         CHECK(rd3_fq_busy(&q, &d) == 0);   /* already behind another flip */
+        /* a newer frame copied onto the panel already home: only the queued present goes */
+        q.queued = 0x4000; q.queued_tok = 15; q.shown = 0; q.stuck_run = 2;
+        CHECK(rd3_fq_drop_queued(&q, &d) == 1 && d == 15 && !q.queued && !q.queued_tok &&
+              q.inflight == RD3_FQ_FOREIGN && q.stuck_run == 2);
+        CHECK(rd3_fq_drop_queued(&q, &d) == 0);
     }
     /* the IOP zero-copy flip: VRAM newest AND written by the plugin (its generation: this allocation) */
     {
@@ -731,6 +770,26 @@ int main(void)
         finish(&s, "the IOP copy fallback flips home with a flip queued");
         CHECK(s.inuse == 0xb3000000ull);
         for (unsigned i = 0; i < s.nprog; i++) CHECK(s.prog_tok[i] != 2);   /* the dropped one never programmed */
+    }
+    /* ECC review round 2: a copy fallback (Z1) flipped home; a flippable IOP transaction (Y) queued behind
+     * that flip home (not programmed: the head still home); a newer non-flippable one (Z2) takes the copy
+     * fallback. The head is home already, so no flip, but Y is dropped - programmed at the home flip's latch
+     * it would cover Z2's copied frame, a stale frame that stays if Z2 was the last update */
+    {
+        struct sim s;
+        const uint64_t X = 0xe1000000ull, Y = 0xe2000000ull;
+        sim_init(&s);
+        present(&s, 1000, X, 0);                                 /* tok 1: an IOP flip, programmed */
+        run_until(&s, PERIOD + WORKER + 100);                    /* X latched and seen */
+        flip_home(&s, PERIOD + 2000);                            /* Z1 (tok 2): home in flight */
+        CHECK(s.q.inflight == RD3_FQ_FOREIGN && !s.iop_flipped && s.inuse == X);
+        present(&s, PERIOD + 3000, Y, 0);                        /* tok 3: queued behind the flip home */
+        CHECK(s.q.queued == Y && s.q.queued_tok == 3 && !s.iop_flipped);
+        flip_home(&s, PERIOD + 4000);                            /* Z2 (tok 4): copied, Y dropped */
+        CHECK(s.dropped == 1 && !s.q.queued && s.q.inflight == RD3_FQ_FOREIGN && s.comp[3] == 1);
+        finish(&s, "a copy fallback with an IOP flip queued behind the flip home");
+        CHECK(s.inuse == HOME && s.copied == 2 && s.nprog == 1);
+        for (unsigned i = 0; i < s.nprog; i++) CHECK(s.prog_tok[i] != 3);   /* Y never programmed */
     }
     /* a head whose flips never latch (blanked, DPMS off, a stuck HUBP; B): our flip given up, the next one
      * Busy behind it, that one given up RD3_FQ_STUCK_RUN times, then flipped anyway - each present programmed

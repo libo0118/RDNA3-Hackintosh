@@ -307,6 +307,22 @@ static inline int rd3_fq_forget_addr(struct rd3_fq *q, uint64_t addr, uint32_t *
     return had;
 }
 
+/* a newer frame reached the panel without a flip of ours (the IOP copy
+ * fallback copied onto the framebuffer's own scanout, the head already
+ * home): the queued present is dropped (returns 1, *dropped its token) -
+ * programmed at the next latch it would cover that newer frame. The flip
+ * in flight, the panel's record and the stuck run stay as they are (no
+ * flip was made) */
+static inline int rd3_fq_drop_queued(struct rd3_fq *q, uint32_t *dropped)
+{
+    const int had = q->queued != 0;
+    if (had && dropped)
+        *dropped = q->queued_tok;
+    q->queued = 0;
+    q->queued_tok = 0;
+    return had;
+}
+
 /* what a write into the buffer at 'addr' would hit */
 enum rd3_fq_use {
     RD3_FQ_FREE = 0,      /* not on the panel and not about to be */
