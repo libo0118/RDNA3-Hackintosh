@@ -286,6 +286,31 @@ static inline unsigned rd3_sp_clear(struct rd3_sp *t)
     return n;
 }
 
+/* who may mark (security review of N41): the process name alone is not proof (any local process can be
+ * called "WindowServer" and hold page-offs on the family's lock with its pending marks). A mark is taken
+ * only from a process named WindowServer that runs as _windowserver (uid RD3_SP_WS_UID) or is the display
+ * client (the pid of WindowServer's legacy swaps / display-pipe transactions, 0 none seen yet), pending
+ * marks only while WindowServer's surfaces can be VRAM at all (ws_vram: rdna3a3ws, rdna3a3display or the
+ * IOP flip; else the wait is MOOT and the plugin backs off as for the switch-off). Readies of the real
+ * WindowServer are always taken (a mark pending from before must still clear) */
+#define RD3_SP_WS_UID 88u   /* _windowserver on macOS */
+enum rd3_sp_gate {
+    RD3_SPG_OK = 0,
+    RD3_SPG_OFF = 1,       /* debug.rdna3accel_surface_wait 0 */
+    RD3_SPG_NOTWS = 2,     /* not named WindowServer */
+    RD3_SPG_NOTREAL = 3,   /* named WindowServer, but neither uid 88 nor the display client's pid */
+    RD3_SPG_MOOT = 4       /* a pending mark while no WindowServer surface can be VRAM */
+};
+static inline enum rd3_sp_gate rd3_sp_mark_gate(int on, int pending, int named_ws, unsigned uid, int pid,
+                                                int display_pid, int ws_vram)
+{
+    if (!on) return RD3_SPG_OFF;
+    if (!named_ws) return RD3_SPG_NOTWS;
+    if (uid != RD3_SP_WS_UID && (display_pid <= 0 || pid != display_pid)) return RD3_SPG_NOTREAL;
+    if (pending && !ws_vram) return RD3_SPG_MOOT;
+    return RD3_SPG_OK;
+}
+
 /* the plane word of RD3K_ESC_SURF_DIRTY carries the GPU marks (accel/rdna3k_abi.h
  * RD3K_SS_PLANE_*): decoded here so the host test checks the same bits */
 #define RD3_SP_PLANE_GPU_MARK 0x80000000u   /* a pending/ready mark, not a dirty mark: bit 0 = pending */

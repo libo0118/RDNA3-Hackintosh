@@ -110,10 +110,15 @@ enum rd3_trace_swap {
 #define RD3_TRVM_PARK_GONE 32u
 #define RD3_TRVM_FREE_LIVE 64u
 #define RD3_TRVM_OBJ_GONE  128u   /* VMFREE from RD3VidMemory::free(): the object goes (its address may come back) */
+/* v2 of a VMFREE with RD3_TRVM_PARK_GONE: why the park went. NOBO: released because no GEM BO holds it any
+ * more (VRAM ran out, or past debug.rdna3accel_vm_park_cap_mb; security review of N41): the object's next
+ * allocation at another address is no move of a BO's memory */
+#define RD3_TRVMV2_NOBO   1u
 #define RD3_TRPO_WAITED    1u
 #define RD3_TRPO_TIMEOUT   2u
 #define RD3_TRPO_IOP       4u     /* arg 2: the IOP zero-copy flip's wait, no page-off (v2 the surface) */
 #define RD3_TRPO_CLEARED   8u     /* the wait was cleared under it (another wait's timeout, a full table, off) */
+#define RD3_TRPO_SKIPPED  16u     /* pending, not waited: the timeout budget was spent (rd3_sp RD3_SPW_SKIP) */
 /* RD3_TRS_HOLD with this bit: mode 1 held a back WindowServer did not
  * redraw since the head presented it at swap v3 (no copy forward into it,
  * its samples unchanged, another buffer presented after it: the stale

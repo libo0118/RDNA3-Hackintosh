@@ -17,7 +17,8 @@
  * the round-2 reviews: a ready that never comes costs at most two bounded
  * waits, not one per later page-off (the ghost of its forgiven mark goes for
  * good at the second timeout), forgiven marks age out, and the timeout
- * budget stops the waits after RD3_SP_BUDGET timeouts with no real ready.
+ * budget stops the waits after RD3_SP_BUDGET timeouts with no real ready;
+ * the mark gate takes only the real WindowServer's marks.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -347,6 +348,24 @@ static void timeout_budget(void)
     CHECK(!t.starved && !t.timeouts_in_row);
 }
 
+/* who may mark (security review of N41): WindowServer by name AND (uid 88 or the display client's pid);
+ * pending marks only while its surfaces can be VRAM (else MOOT); readies of the real one always */
+static void mark_gate(void)
+{
+    CHECK(rd3_sp_mark_gate(0, 1, 1, RD3_SP_WS_UID, 10, 10, 1) == RD3_SPG_OFF);
+    CHECK(rd3_sp_mark_gate(1, 1, 0, RD3_SP_WS_UID, 10, 10, 1) == RD3_SPG_NOTWS);
+    CHECK(rd3_sp_mark_gate(1, 1, 1, RD3_SP_WS_UID, 10, 0, 1) == RD3_SPG_OK);       /* uid 88, no swap seen yet */
+    CHECK(rd3_sp_mark_gate(1, 1, 1, 501, 10, 10, 1) == RD3_SPG_OK);                /* the display client */
+    CHECK(rd3_sp_mark_gate(1, 1, 1, 501, 11, 10, 1) == RD3_SPG_NOTREAL);           /* a user's "WindowServer" */
+    CHECK(rd3_sp_mark_gate(1, 0, 1, 501, 11, 10, 1) == RD3_SPG_NOTREAL);           /* its readies too */
+    CHECK(rd3_sp_mark_gate(1, 1, 1, 501, 0, 0, 1) == RD3_SPG_NOTREAL);             /* no display client: no pid matches */
+    CHECK(rd3_sp_mark_gate(1, 1, 1, 0, 10, 10, 1) == RD3_SPG_OK);                  /* root is no proof either way */
+    CHECK(rd3_sp_mark_gate(1, 1, 1, 0, 11, 10, 1) == RD3_SPG_NOTREAL);
+    CHECK(rd3_sp_mark_gate(1, 1, 1, RD3_SP_WS_UID, 10, 10, 0) == RD3_SPG_MOOT);    /* nothing VRAM: MOOT */
+    CHECK(rd3_sp_mark_gate(1, 0, 1, RD3_SP_WS_UID, 10, 10, 0) == RD3_SPG_OK);      /* a ready still clears */
+    CHECK(rd3_sp_mark_gate(1, 1, 0, 501, 11, 10, 0) == RD3_SPG_NOTWS);             /* the identity first */
+}
+
 int main(void)
 {
     marks();
@@ -360,6 +379,7 @@ int main(void)
     lost_ready_bounded();
     forgiven_aged();
     timeout_budget();
+    mark_gate();
     if (fails) { printf("test_surf_pending: %d FAILED\n", fails); return 1; }
     printf("test_surf_pending: ok\n");
     return 0;
