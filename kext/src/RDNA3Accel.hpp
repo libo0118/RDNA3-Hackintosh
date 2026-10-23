@@ -302,6 +302,7 @@ private:
     IOReturn      platformVramFree(struct RD3KVramRequest *r);
     /* RD_NR_XNU_SURFACE_BO: a GEM BO holds an accelerator allocation (A3) */
     IOReturn      platformVramRef(void *handle);
+    IOReturn      platformVramRefs(void *handle, unsigned int *refs);
     void          platformVramPutLocked(struct RDNA3VramHandle *h);
     IOService    *accelService();          /* fDrmLock held; returns a reference */
     IOReturn      accelSurfaceCall(void *arg, void *fileOs, unsigned cmd, bool *svc);

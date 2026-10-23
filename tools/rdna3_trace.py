@@ -545,6 +545,127 @@ def segments(trace, swaps=None):
     return seg
 
 
+# VMALLOC / VMFREE flags of DRIVER-PLAN N41 (common/rdna3_trace.h): the parked allocation handed back (VMALLOC),
+# parked instead of freed (VMFREE); a parked allocation released; a live one released by free()
+VM_PARKED = 16
+VM_PARK_GONE = 32
+VM_FREE_LIVE = 64
+VM_OBJ_GONE = 128   # VMFREE from RD3VidMemory::free(): the object goes, its address may come back (ECC review of N41)
+VM_V2_NOBO = 1      # v2 of a VMFREE with VM_PARK_GONE: no BO held it any more (pressure / cap; security review of N41)
+# PAGEOFF flags (N41): waited for WindowServer's pending GPU write, that wait timed out, cleared under the wait; arg 2
+# with PAGEOFF_IOP: the IOP zero-copy flip's wait (no page-off; v2 the surface)
+PAGEOFF_WAITED = 1
+PAGEOFF_WAIT_TIMEOUT = 2
+PAGEOFF_IOP = 4
+PAGEOFF_WAIT_CLEARED = 8
+PAGEOFF_WAIT_SKIPPED = 16   # pending, not waited: the timeout budget was spent (security review of N41)
+
+
+def vram_moves(trace):
+    """DRIVER-PLAN N41 (traces 2026-10-17d / 17c): the vidmem of a surface imported as a BO (SURFGEM arg 1) given
+    new VRAM at another address after a free, and the dirty marks (SURFGEM arg 2) on such moved VRAM - the plugin's
+    BO keeps the first address. Also the parks seen. {"imported", "freed", "moved": [(obj, surface, was, now)],
+    "dirty_moved", "parked", "reused", "park_released", "free_live", "freed_plain", "obj_gone", "park_nobo"}. A vidmem's
+    VMFREE with VM_OBJ_GONE (free()) ends that object: a new vidmem at the same address starts afresh (ECC review
+    of N41: no H-VMMOVE for a reused object address after a real free). freed_plain: VMFREEs of non-scanout VRAM
+    without any park flag (vm_sticky 0, never BO-imported, or a kernel before N41). park_nobo: parks released because
+    no BO held them any more (VM_V2_NOBO: VRAM ran out or past the cap): the import ends there, no H-VMMOVE after"""
+    imported, state, life, ever = {}, {}, {}, set()
+    out = {"imported": 0, "freed": 0, "moved": [], "dirty_moved": 0, "parked": 0, "reused": 0, "park_released": 0,
+           "free_live": 0, "freed_plain": 0, "obj_gone": 0, "park_nobo": 0}
+
+    for e in trace.events:
+        if e.src != SRC_ACCEL:
+            continue
+        n = TYPES.get(e.type)
+        if n == "SURFGEM" and e.arg == 1 and e.obj:
+            imported[e.obj] = (e.pa, e.v0)
+            ever.add((e.obj, life.get(e.obj, 0)))
+            state.pop(e.obj, None)
+        elif n == "VMFREE":
+            if e.flags & VM_PARKED:
+                out["parked"] += 1
+            if e.flags & VM_PARK_GONE:
+                out["park_released"] += 1
+            if e.flags & VM_FREE_LIVE:
+                out["free_live"] += 1
+            if not e.flags & (1 | VM_PARKED | VM_PARK_GONE | VM_FREE_LIVE | VM_OBJ_GONE):
+                out["freed_plain"] += 1
+            if e.flags & VM_OBJ_GONE:   # the object goes: its address is a new object's from now on
+                out["obj_gone"] += 1
+                imported.pop(e.obj, None)
+                state.pop(e.obj, None)
+                life[e.obj] = life.get(e.obj, 0) + 1
+                continue
+            if e.flags & VM_PARK_GONE and e.v2 == VM_V2_NOBO:   # no BO holds it: the import is over
+                out["park_nobo"] += 1
+                imported.pop(e.obj, None)
+                state.pop(e.obj, None)
+                continue
+            if e.obj in imported and not e.flags & VM_PARKED:
+                out["freed"] += 1
+                state[e.obj] = "freed"
+        elif n == "VMALLOC" and e.arg:
+            if e.flags & VM_PARKED:
+                out["reused"] += 1
+            if e.obj in imported and state.get(e.obj) == "freed":
+                state[e.obj] = "moved" if e.pa != imported[e.obj][0] else None
+                if e.pa != imported[e.obj][0]:
+                    out["moved"].append((e.obj, imported[e.obj][1], imported[e.obj][0], e.pa))
+        elif n == "SURFGEM" and e.arg == 2 and state.get(e.obj) == "moved" and e.pa != imported[e.obj][0]:
+            out["dirty_moved"] += 1
+    out["imported"] = len(ever)
+    return out
+
+
+def h_vram_moved(trace):
+    """H-VMMOVE (DRIVER-PLAN N41): rows for hypotheses()"""
+    m = vram_moves(trace)
+    rows = []
+    if m["moved"]:
+        o = m["moved"][0]
+        rows.append(("WARN", "H-VMMOVE", "%d imported surface(s) got new VRAM at another address after a free (e.g. "
+                     "surface %d: 0x%x -> 0x%x), %d dirty mark(s) on the moved VRAM - the plugin draws into the old "
+                     "one: grey / stale / black windows (vm_sticky 0, or a resource that grew)" % (
+                         len(m["moved"]), o[1], o[2], o[3], m["dirty_moved"])))
+    if m["parked"] or m["reused"]:
+        rows.append(("INFO", "H-VMPARK", "%d allocation(s) parked, %d handed back, %d parked one(s) released, %d "
+                     "imported surface(s) never moved" % (m["parked"], m["reused"], m["park_released"],
+                                                          m["imported"] - len(set(x[0] for x in m["moved"])))))
+    if m["free_live"]:
+        rows.append(("INFO", "H-VMPARK", "%d vidmem object(s) freed with VRAM still live (released in free(); "
+                     "before N41 those leaked)" % m["free_live"]))
+    if m["freed_plain"]:   # ECC review of N41: frees without parking are said, not left to the counters
+        rows.append(("WARN" if m["freed"] else "INFO", "H-VMPARK",
+                     "%d VRAM allocation(s) freed without parking (no BO imported over them - only a BO's allocation "
+                     "is parked since the security review of N41 -, vm_sticky 0, or a kernel before N41)%s" % (
+                         m["freed_plain"], ", %d of them an imported surface's (the plugin keeps drawing into the "
+                         "old VRAM)" % m["freed"] if m["freed"] else "")))
+    po = trace.by("PAGEOFF")
+    for iop, who in ((False, "page-off"), (True, "IOP flip")):
+        evs = [e for e in po if bool(e.flags & PAGEOFF_IOP) == iop and (not iop or e.arg == 2)]
+        waited = [e for e in evs if e.flags & PAGEOFF_WAITED]
+        late = [e for e in evs if e.flags & PAGEOFF_WAIT_TIMEOUT]
+        cleared = [e for e in evs if e.flags & PAGEOFF_WAIT_CLEARED]
+        skipped = [e for e in evs if e.flags & PAGEOFF_WAIT_SKIPPED]
+        if skipped:
+            rows.append(("WARN", "H-SURFWAIT", "%d %s(s) did NOT wait for WindowServer's pending GPU write: the timeout "
+                         "budget was spent (waits in a row timed out with no ready mark; first at %s) - that %s may "
+                         "be stale" % (len(skipped), who, skipped[0].seq, "copy" if not iop else "scan-out")))
+        if late:
+            rows.append(("WARN", "H-SURFWAIT", "%d %s(s) gave up waiting for WindowServer's GPU write (first at %s, "
+                         "%d us) - a lost ready mark or a hung GPU; that %s may be stale" % (
+                             len(late), who, late[0].seq, late[0].v3, "copy" if not iop else "scan-out")))
+        if cleared:
+            rows.append(("WARN", "H-SURFWAIT", "%d %s(s) had their wait cleared under them (another wait's timeout, a "
+                         "full table or the switch-off; first at %s) - not a finished write" % (
+                             len(cleared), who, cleared[0].seq)))
+        if waited:
+            rows.append(("INFO", "H-SURFWAIT", "%d %s(s) waited for WindowServer's GPU write (longest %d us)" % (
+                len(waited), who, max(e.v3 for e in waited))))
+    return rows
+
+
 def hypotheses(trace, ctx=None):
     """[(level, name, text)]: CRITICAL / FAIL / WARN / INFO / PASS, the
     hypothesis each trace pattern names"""
@@ -573,12 +694,13 @@ def hypotheses(trace, ctx=None):
         elif s["inplace"]:
             out.append(("WARN", "H-COPY", "mode 0: %d of %d flipped buffers rewritten in place" %
                         (s["inplace"], s["inplace_checked"])))
-    # H-FREE: VRAM freed while a head scanned it
-    freed = [e for e in trace.by("VMFREE") if e.flags & 0x0e]
+    # H-FREE: VRAM freed while a head scanned it (a parked allocation, VMFREE flag 16, is not freed: N41)
+    freed = [e for e in trace.by("VMFREE") if e.flags & 0x0e and not e.flags & VM_PARKED]
     if freed:
         out.append(("WARN", "H-FREE", "%d buffer(s) freed while a head scanned them (e.g. 0x%x on head %s) - the panel "
                     "reads VRAM that may be reused" % (len(freed), freed[0].pa, freed[0].head if freed[0].head != 0xff
                                                        else "?")))
+    out.extend(h_vram_moved(trace))
     # copy forward answered with an error: CoreDisplay switches it off for good
     cferr = [e for e in trace.by("CF") if e.v4]
     if cferr:
@@ -1014,6 +1136,8 @@ def stale_backs(trace):
                 ap.setdefault(e.pa, []).append(t)
             continue
         if e.type == T["VMFREE"]:
+            if e.flags & VM_PARKED:   # parked, still allocated: the kernel keeps its records (N41)
+                continue
             for hs in st.values():
                 hs["rec"].pop(e.pa, None)
                 if hs["last"] == e.pa:
@@ -1555,10 +1679,31 @@ def _fmt_event(trace, e, ms, n):
     if n == "APERTURE":
         return "%10.3f ms APERTURE %s 0x%x (%d KiB, IOSurface %d)" % (ms, "add" if e.arg == 1 else "desc", e.pa, e.v0,
                                                                       e.v1)
+    if n == "PAGEOFF":   # N41: the wait for WindowServer's GPU write, and the IOP flip's own wait
+        w = ""
+        if e.flags & (PAGEOFF_WAITED | PAGEOFF_WAIT_TIMEOUT | PAGEOFF_WAIT_CLEARED):
+            w = " (waited %d us for WindowServer's GPU%s)" % (e.v3, " - TIMED OUT" if e.flags & PAGEOFF_WAIT_TIMEOUT
+                                                               else " - CLEARED under it" if e.flags & PAGEOFF_WAIT_CLEARED
+                                                               else "")
+        elif e.flags & PAGEOFF_WAIT_SKIPPED:
+            w = " (WindowServer's GPU write pending, NOT waited: the timeout budget was spent)"
+        if e.arg == 2 and e.flags & PAGEOFF_IOP:
+            return "%10.3f ms IOP flip wait, IOSurface %d%s" % (ms, e.v2, w)
+        return "%10.3f ms PAGEOFF 0x%x %d KiB %s in %d us%s" % (ms, e.pa, e.v0, "copied" if e.arg == 1 else "NOT copied",
+                                                               e.v1, w)
     if n in ("VMALLOC", "VMFREE"):
-        return "%10.3f ms %s 0x%x %d KiB%s%s" % (ms, n, e.pa, e.v0, "" if e.arg else " REFUSED 0x%x" % e.v4,
-                                                 " while scanned by head %d" % e.head if n == "VMFREE" and e.flags & 0xe
-                                                 else "")
+        park = ""
+        if e.flags & VM_PARKED:
+            park = " (the PARKED one handed back)" if n == "VMALLOC" else " PARKED, not freed"
+        if n == "VMFREE" and e.flags & VM_PARK_GONE:
+            park += " (a parked one RELEASED)"
+        if n == "VMFREE" and e.flags & VM_FREE_LIVE:
+            park += " (LIVE at free())"
+        if n == "VMFREE" and e.flags & VM_OBJ_GONE:
+            park += " (the object freed)"
+        return "%10.3f ms %s 0x%x %d KiB%s%s%s" % (ms, n, e.pa, e.v0, "" if e.arg else " REFUSED 0x%x" % e.v4,
+                                                   " while scanned by head %d" % e.head if n == "VMFREE" and e.flags & 0xe
+                                                   else "", park)
     if n == "CS" and e.arg == 0xff:
         return "%10.3f ms CS REFUSED pid %d -> %d (that error %d times, %d not traced before this)" % (
             ms, e.v0, e.v4 - (1 << 32) if e.v4 >> 31 else e.v4, e.v1, e.v2)

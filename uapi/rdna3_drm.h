@@ -145,7 +145,21 @@ struct rd_xnu_file_id {
 #define RD_NR_XNU_SURFACE_BO       0xF5
 #define RD_XNU_SURFACE_BO_IMPORT   0
 #define RD_XNU_SURFACE_BO_DIRTY    1
+/* DRIVER-PLAN N41 (a kext without them answers -EINVAL):
+ * MARK: WindowServer's GPU write of the surface is pending (plane 1, at
+ * commit) or done (plane 0, after the GPU finished it); a CPU lock's
+ * page-off waits, bounded, while one is pending. Only WindowServer's marks
+ * are taken; -ENXIO while the accelerator's waits are off.
+ * DIRTY_TRY: DIRTY that answers -EBUSY instead of waiting for the
+ * accelerator's lock (a page-off may hold it while it waits for a mark) */
+#define RD_XNU_SURFACE_BO_MARK     2
+#define RD_XNU_SURFACE_BO_DIRTY_TRY 3
 #define RD_XNU_SURFACE_MAX_PLANE   15
+/* how MARK / DIRTY_TRY reach ops.surface_dirty: flags in the plane word, the
+ * accelerator's RD3K_SS_PLANE_GPU_MARK / _TRYLOCK (accel/rdna3k_abi.h; the
+ * kext checks they agree) */
+#define RD_XNU_SURFACE_PLANE_GPU_MARK 0x80000000u
+#define RD_XNU_SURFACE_PLANE_TRYLOCK  0x40000000u
 /* the most accelerator VRAM one file may hold through surface BOs */
 #define RD_SURFACE_BO_FILE_MAX(dev) ((dev)->vis_vram_size / 2)
 struct rd_xnu_surface_bo {

@@ -22,6 +22,9 @@
  *   rdna3RefVram                     a GEM BO over an accelerator
  *                                    allocation holds it
  *                                    (RD_NR_XNU_SURFACE_BO, A3)
+ *   rdna3VramRefs                    how many hold an accelerator
+ *                                    allocation (N41: parks released
+ *                                    under pressure only without a BO)
  *   rdna3NewAccelClient              an IOAccelRDNA3Bridge (RDNA3UserClient)
  *                                    for a process whose sandbox refuses
  *                                    RDNA3UserClient (WindowServer, card
@@ -46,6 +49,10 @@
 #include <mach/mach_time.h>
 #include <kern/clock.h>
 #include <sys/sysctl.h>
+
+/* DRIVER-PLAN N41: the UAPI's flags reach the accelerator's escape unchanged */
+static_assert(RD_XNU_SURFACE_PLANE_GPU_MARK == RD3K_SS_PLANE_GPU_MARK, "uapi and accelerator GPU mark bits differ");
+static_assert(RD_XNU_SURFACE_PLANE_TRYLOCK == RD3K_SS_PLANE_TRYLOCK, "uapi and accelerator try-lock bits differ");
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
@@ -451,6 +458,27 @@ IOReturn RDNA3Accel::platformVramRef(void *handle)
     return r;
 }
 
+/* RD3K_VRAM_FN_REFS (DRIVER-PLAN N41, security review): how many hold an
+ * accelerator allocation - 1 the accelerator only, more a GEM BO too. The
+ * accelerator gives a parked allocation back under VRAM pressure only when
+ * no BO holds it. */
+IOReturn RDNA3Accel::platformVramRefs(void *handle, unsigned int *refs)
+{
+    IOReturn r = kIOReturnNotFound;
+    if (!handle || !refs || !fDrmLock)
+        return kIOReturnBadArgument;
+    *refs = 0;
+    IOLockLock(fDrmLock);
+    for (RDNA3VramHandle *h = fVramHandles; h; h = h->next)
+        if (h == handle && h->refs) {
+            *refs = h->refs;
+            r = kIOReturnSuccess;
+            break;
+        }
+    IOLockUnlock(fDrmLock);
+    return r;
+}
+
 /* the accelerator kext's service, for the IOSurface lookups it answers
  * (RD3ACCEL_SS_FN); it may start after the first client opens. fDrmLock
  * held; the caller gets its own reference (the lock is dropped around the
@@ -484,6 +512,7 @@ static int surfaceStatusErrno(unsigned int st)
     case RD3K_SS_NO_VRAM:     return -RD_ENODEV;   /* the accelerator has no VRAM for it (yet) */
     case RD3K_SS_DISPLAY:     return -RD_EPERM;    /* a display framebuffer: kept out of A3 (card run 58) */
     case RD3K_SS_POLICY:      return -RD_EPERM;    /* WindowServer's inputs / rdna3a3=0: kept out of A3 */
+    case RD3K_SS_BUSY:        return -RD_EBUSY;    /* N41: a TRYLOCK dirty mark found the accelerator's lock taken */
     default:                  return -RD_ENXIO;    /* accelerator off / not up / other ABI */
     }
 }
@@ -500,6 +529,7 @@ static const char *surfaceStatusName(unsigned int st)
     case RD3K_SS_TOO_SMALL:   return "too small";
     case RD3K_SS_DISPLAY:     return "WindowServer's display framebuffer, kept out of A3 (rdna3a3display=1 lets it in)";
     case RD3K_SS_POLICY:      return "kept out of A3: a WindowServer input (rdna3a3ws=1 lets it in), or rdna3a3=0";
+    case RD3K_SS_BUSY:        return "the accelerator's lock was taken (a try-lock dirty mark, N41)";
     default:                  return "?";
     }
 }
@@ -594,9 +624,12 @@ int RDNA3Accel::drmSurfaceDirty(void *ctx, void *fileOs, uint32_t surfaceId, uin
     IOReturn rr = a->accelSurfaceCall(&e, fileOs, RD3K_ESC_SURF_DIRTY, &svc);
     if (!svc || rr != kIOReturnSuccess)
         return -RD_ENXIO;
-    /* surface 0 is the Metal plugin's probe for the ioctl: not a refusal */
-    if (e.status && surfaceId)
-        surfaceRefusedLog("dirty mark", surfaceId, plane, e.status, rr);
+    /* surface 0 is the Metal plugin's probe for the ioctl: not a refusal. A
+     * try-lock dirty mark that found the lock taken is expected (N41: the
+     * mark taken at commit stands), counted by the accelerator */
+    if (e.status && surfaceId && e.status != RD3K_SS_BUSY)
+        surfaceRefusedLog((plane & RD3K_SS_PLANE_GPU_MARK) ? "GPU pending/ready mark" : "dirty mark", surfaceId,
+                          plane & ~(RD3K_SS_PLANE_GPU_MARK | RD3K_SS_PLANE_TRYLOCK), e.status, rr);
     return surfaceStatusErrno(e.status);
 }
 
@@ -808,6 +841,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return platformVramFree((RD3KVramRequest *)p1);
         if (fn->isEqualTo(RD3K_VRAM_FN_REF))
             return platformVramRef(p1);
+        if (fn->isEqualTo(RD3K_VRAM_FN_REFS))
+            return platformVramRefs(p1, (unsigned int *)p2);
         if (fn->isEqualTo(RD3K_GPUVA_FN_HANDLES)) {
             RD3KRmHandles *h = (RD3KRmHandles *)p1;
             if (!h || h->version != RD3K_GPUVA_ABI_VERSION)

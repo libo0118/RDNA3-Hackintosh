@@ -2812,6 +2812,69 @@ byte positions are next to them; WindowServer's plugin trace is the end-of-run s
 | `INFO ... IOP transaction(s) completed without a flip of their own` (`swaps_pq_iopdrop_h<N>`), `INFO ... flipped home N time(s) over the queue` (`swaps_pq_home_h<N>`) | IOP transactions faster than the panel (newest wins), the copy fallback dropping a queued flip | none |
 | serial only: `present queue (serial): ...` lines | the same verdicts from the kernel's `present queue:` / `perfstats:` lines when the counters were not dumped; `swap latch` latchpend / latchwait do not measure mode 0 flips with swap_async 1 | as the rows above |
 
+### DRIVER-PLAN N41: VRAM parking and WindowServer's pending GPU writes
+
+- What changed (not yet on the card): the family's `deallocPhysical` no
+  longer frees a surface's VRAM; it is parked and the next `allocPhysical`
+  hands the same VRAM back, so the family, its dirty mark and every page-off
+  stay on the allocation the Metal plugin draws into (traces 17d / 17c:
+  imported surfaces moved to never-written VRAM 13 / 19 times: grey, stale or
+  flashing windows, black captures). A dirty mark of a parked surface makes
+  it live again first. `free()` gives back what is parked and what the
+  family left live. WindowServer's plugin marks the surfaces a command buffer
+  writes pending at commit and ready after the GPU; a CPU lock's page-off (a
+  window capture) waits for them, bounded (100 ms).
+- Knobs (each logged at boot: `vm sticky:`, `surface wait:`):
+  `debug.rdna3accel_vm_sticky` / `rdna3vmsticky` (1; 0 = every dealloc frees,
+  the old behaviour), `debug.rdna3accel_surface_wait` / `rdna3surfwait` (1),
+  `_surface_wait_ms` (100); plugin env `NVMTL_SURFACE_WAIT=0`. All change at
+  runtime: the A/B is `sysctl -w debug.rdna3accel_vm_sticky=0` and back.
+  With `rdna3a3ws=0` (the default) the boot line says `MOOT`: WindowServer's
+  surfaces stay in system memory and nothing is marked.
+- What the card must show: no grey / stale / flashing windows, captures not
+  black; triage `VRAM parking` INFO with `vm_parked` close to `vm_unparked`,
+  no H-VMMOVE; `surface wait` INFO with `rdna3a3ws=1` (`MOOT` without it, see
+  N41 open item 1). The N41 WARN / FAIL rows (and MOOT) are also in the
+  SUMMARY. WindowServer's plugin lines are in `24-log-coredisplay.txt`
+  (`surface wait (N41):` decision, `stats` every 4096 command buffers).
+
+| Seen | Meaning | Action |
+|---|---|---|
+| `WARN H-VMMOVE N imported surface(s) got new VRAM at another address` | the family re-backed a surface the plugin had imported: with `vm_sticky 1` only a resource that grew (`vm_park_grow`), else parking is off | `vm sticky:` boot line, `vm_park_grow`; the kernel's `released: the resource grew` lines name the surface sizes |
+| `WARN VRAM parking OFF (vm_sticky 0 ...)` | `rdna3vmsticky=0` or a runtime A/B | the run's steps; with the symptoms back this confirms N41 |
+| `WARN ... dirty mark(s) of an allocation other than the surface's BO import` (`vm_dirty_moved`) | the plugin draws into VRAM the family no longer uses for that surface (a grow, two processes' imports at different times) | the kernel's `marks allocation #` lines (resource, both generations), the trace's SURFGEM / VMALLOC of that vidmem |
+| `WARN ... could NOT restore it` (`vm_restore_miss`) | a dirty mark found the VRAM parked and too small or the wire did not hand it back: the mark was refused, the plugin copied out | the kernel's `its VRAM was parked ... could NOT be made live again` lines (want against bytes) |
+| `WARN ... refused while N bytes were parked` | VRAM ran out while parks held memory the family thinks it gave back (only parks a BO still holds stay: N41 open item 3) | the kernel's `VRAM refused:` and `VRAM parks:` lines; A/B `vm_sticky 0` |
+| `WARN parks released: N time(s) VRAM ran out ...` (`vm_park_trim_pressure`) | an `allocPhysical` was refused; the parks no BO holds any more were given back and the allocation asked once more (`vm_alloc_retry_ok` / `_fail`) | the kernel's `VRAM parks:` lines (kept: a BO holds them); with `_retry_fail`, the heap report (`38-vram-heap.txt`) |
+| `INFO parks released: ... past the cap` (`vm_park_trim_cap`) | parked bytes passed `debug.rdna3accel_vm_park_cap_mb` (512): the oldest parks no BO holds went | none; a lower / higher cap for an A/B |
+| `WARN ... kept because the core's reference count was unknown` (`vm_park_trim_unknown`) | the core kext has no `rdna3VramRefs` (older than the accelerator) | `rdna3vm update` (both kexts) |
+| `INFO ... freed, not parked: no BO was imported` (`vm_park_noimport`) | expected: only an allocation the plugin imported as a BO is parked | none |
+| `WARN ... park(s) replaced an older one` (`vm_reparked`) | never expected (allocPhysical empties the park first) | report the kernel's `an older park` lines |
+| `INFO ... freed with VRAM still live` (`vm_free_live`) | the family freed a vidmem without `deallocPhysical`; that VRAM leaked before N41 | none (answers N41 open item 2) |
+| `WARN ... page-off(s) gave up waiting` (`surface_wait_timeouts`) / H-SURFWAIT WARN | a pending mark's ready never came within the bound: a lost completion, a crashed WindowServer, a hung GPU | the kernel's `still PENDING after` lines, the plugin's `surface wait (N41)` lines; `surface_wait_ms` for an A/B |
+| `FAIL ... pending mark(s) and NO ready mark` | the plugin marks at commit but its ready path never runs | the plugin log; `NVMTL_SURFACE_WAIT=0` as the workaround, report |
+| `WARN ... mark(s) from a process other than WindowServer refused` | another process sent marks (`surface_wait_notws`) | the kernel's `only WindowServer's are taken` lines name it |
+| `WARN ... mark(s) from a process named WindowServer REFUSED` (`surface_wait_notreal`) | a process posing as WindowServer, or the real one under another uid than 88 before its first legacy swap / display-pipe transaction | the kernel's `is neither _windowserver` lines (pid, uid) and `display client is pid` line |
+| `WARN ... of a SECOND process named WindowServer ... refused as the display client` (`surface_wait_ws_pid_refused`) | another process named WindowServer drove the panel while the first display client lived (ECC review round 3: the first one is sticky until no process has its pid or it is no longer named WindowServer) | the kernel's `REFUSED as the display client` lines (pid, uid) and the `display client is pid` line; two real WindowServers would be new: report it |
+| `INFO/WARN the first mark taken came from pid P uid U` (`surface_wait_mark_uid`) | INFO: uid 88, the rule holds; WARN: the real WindowServer runs as another uid on this macOS (taken as the display client only) | the kernel's `the first GPU mark taken` line; report the uid (the rule's constant `RD3_SP_WS_UID`) |
+| `WARN the timeout budget ran out` (`surface_wait_starved`, `_skipped`) / H-SURFWAIT `did NOT wait` | 4 waits in a row timed out with no ready mark: readies are lost wholesale; page-offs stopped waiting until the next ready | the kernel's `STOP waiting` / `WAIT again` lines, the plugin's ready counts in its stats line |
+| `INFO lost ready marks: ... dropped for good ..., ... aged out` (`surface_wait_ghosts`, `_aged`) | ready marks lost; each cost at most two bounded waits | with many: the plugin's completion path, report |
+| `INFO WindowServer's plugin sent N of its M ready mark(s) at the command buffer's end` | those readies came from the completion / error path, not after the part that wrote the surface last: page-offs waited for the whole command buffer | none unless large; with errors, the plugin log |
+| `INFO surface wait MOOT: rdna3a3ws=0 keeps WindowServer's surfaces out of A3` | the default: nothing is marked, the page-off wait was not exercised; pending marks that came anyway are refused as MOOT (`surface_wait_moot`, ENXIO: the plugin's back-offs are then INFO) | `rdna3a3ws=1` for a run that tests it |
+| `WARN surface wait no pending marks taken ...: <the plugin's reason>` | `rdna3a3ws=1` but no mark reached the kernel: the reason is the plugin's decision line (a gate ABSENT, the NVK path, headless, `NVMTL_SURFACE_WAIT=0`), ENOSYS for good, back-offs, or no decision line (an older plugin) | `24-log-coredisplay.txt` `surface wait (N41):` lines; `rdna3vm update` for an old plugin / libdrm_xnu |
+| `WARN ... plugin backed off N time(s) (errno E ...)` | the kernel refused pending marks: ENXIO waits off, ENODEV an older accelerator, ENOENT a surface not WindowServer's | the kernel's `surface wait:` lines (`notown`, `off`); the stamps (an old accelerator) |
+| `WARN ... ready mark(s) before the surface could be marked newest` | the commit's try-lock newest mark and the one after the GPU both found the accelerator's lock taken: a page-off in between copied stale memory | the plugin's stats line, `surface_dirty_trybusy`; if frequent, report (the order needs another rule) |
+| `WARN ... wait(s) cleared under them` (`surface_wait_cleared`, `_iop_cleared`) | a wait ended because another wait timed out, the table was full or the wait was switched off: not a finished write | the kernel's `was CLEARED` lines; with timeouts the same cause |
+| `WARN ... IOP flip(s) gave up` (`surface_wait_iop_timeouts`) | the IOP zero-copy flip scanned out a composite the GPU had not finished within the bound | as for the page-offs; `iop_flip` / `iop_wrote` A/B |
+| `WARN ... pending mark(s) without a ready or late one` | readies lost (the plugin's completion path) | the plugin log, `surface_wait_busy`; report |
+| `WARN ... pending mark(s) of a surface WindowServer could not look up refused` (`surface_wait_notown`) | WindowServer marked a surface its task cannot look up (released already, or a process merely named WindowServer) | the kernel's `not a surface of the calling task` lines |
+| `WARN ... park(s) and NONE handed back` / `... NOTHING parked` / `N MiB still parked` | parking never reused, never engaged, or holds much VRAM at the end | the kernel's `PARKED` lines, `vm_park_grow`; A/B `vm_sticky 0` |
+| `WARN ... release(s) the framebuffer did NOT take back` (`vm_release_failed`) | VRAM leaked (the framebuffer refused the release, or no accelerator) | the kernel's `NOT given back` lines (IOReturn) |
+| `INFO ... vm_alloc ... do not balance with parking` | expected: `vm_dealloc` counts parks, `vm_alloc` only new allocations | none; `vm_released` is what was given back |
+| `WARN N41 counters missing ...: <names>` | the accelerator runs these sources but the dump lacks those keys | the collectors' sysctl grep |
+| H-VMPARK `freed without parking` (WARN for an imported surface's VRAM) | `vm_sticky 0`, or a kernel before N41; INFO: allocations no BO was imported over (not parked by design) | the `vm sticky:` boot line |
+| `WARN VRAM parking counters missing` / `surface wait ... the collector's grep` | the accelerator runs these sources but the dump lacks `vm_` / `surface_` | `tools/macos/collect.sh` / `autoreport.sh` sysctl grep, `rdna3vm update` |
+
 ### Present-mode rows (steps `play-macpro`, `play-rootport`, `play-desktop`)
 
 The triage prints these for every run (SUMMARY `present: ...`; per report

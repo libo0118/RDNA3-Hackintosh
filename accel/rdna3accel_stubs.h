@@ -61,6 +61,11 @@ public:
      * cookie: the cookie is the VRAM offset, which a new allocation can have again (ECC review of N38) */
     unsigned long long fPluginWroteGen = 0;
     IOMemoryDescriptor *fApDesc = nullptr;
+    /* N41: the range fApDesc covers (a VRAM re-backed elsewhere or resized gets a new one), and the
+     * allocation generation the last surface BO import (RD3K_ESC_SURF_GEM) got: a dirty mark of
+     * another generation marks VRAM that import never drew into (counted: vm_dirty_moved) */
+    unsigned long long fApPhys = 0, fApBytes = 0;
+    unsigned long long fImportGen = 0;
 };
 OSDefineMetaClassAndStructors(RD3Resource, IOAccelResource2)
 class RD3SysMemory : public IOAccelSysMemory {
@@ -81,9 +86,29 @@ public:
     /* this allocation's number (allocPhysical; 0: none): never reused, unlike fAllocationCookie */
     unsigned long long fAllocGen = 0;
     bool fScanout = false;
+    /* N41: the allocation kept across the family's deallocPhysical / allocPhysical
+     * (debug.rdna3accel_vm_sticky; common/rdna3_vram_park.h): handed back by the next allocPhysical
+     * when big enough, released when the resource grows or this object is freed */
+    struct rd3_vp_alloc fPark = {};
+    /* N41: backed by an allocation once (free() traces the object's end for the trace decoder) */
+    bool fBacked = false;
+    /* N41 (security review): the generation of the allocation a GEM BO was imported over (rd3AccelSurfGem;
+     * 0 never): only that allocation is parked (rd3_vp_should_park) */
+    unsigned long long fBoGen = 0;
+    /* N41: the global list of vidmems holding a park (gVmParkLock), for the release under VRAM pressure or
+     * past debug.rdna3accel_vm_park_cap_mb; fParkSince orders it (mach_absolute_time at the park) */
+    RD3VidMemory *fParkPrev = nullptr, *fParkNext = nullptr;
+    bool fParkListed = false;
+    unsigned long long fParkSince = 0;
+    /* ECC review round 3 of N41 (gVmParkLock): the address of a park rd3VmParkTrim took out of this object
+     * (0 none). The trim forgets only that address (the object may be re-backed or freed before its release);
+     * the records keyed by this object still describe that allocation and are forgotten by the object itself
+     * at its next allocPhysical or free(), while it is alive */
+    unsigned long long fParkTrimmedPhys = 0;
 
     bool allocPhysical() APPLE_KEXT_OVERRIDE;
     void deallocPhysical() APPLE_KEXT_OVERRIDE;
+    void free() APPLE_KEXT_OVERRIDE;
 
     uint64_t getPhysicalSegment(unsigned long long a0, unsigned long long* a1) APPLE_KEXT_OVERRIDE {
         const unsigned long long total = *(const volatile unsigned long long *)((const unsigned char *)this + 0x40);

@@ -1,7 +1,9 @@
 """tools/check_accel_slots.py on synthetic assembly (ECC review round 1): the
 flip-present hooks' base calls as -fapple-kext compiles them pass; a slot
 that moved, a helper that is no tail jump, a missing helper or a call
-through another class's vtable fail. The real check runs in
+through another class's vtable fail; a free() override that reaches
+OSObject::free instead of its family class's own free fails (ECC review of
+N41). The real check runs in
 tools/kext_check.sh against the compiled accel/rdna3-accel.cpp.
 Run: python3 -I -B tests/test_accel_slots.py"""
 import os
@@ -43,6 +45,13 @@ cases = [
                                                           "__ZTV24IOAccelLegacyDisplayPipe", 2672, "jmpq"))),
     ("the lock override's slot moved", good(change=("__ZN16RDNA3Accelerator18acceleratorDidLockEPKci",
                                                     "__ZTV22IOGraphicsAccelerator2", 2136, "callq"))),
+    # ECC review of N41: a free() that reaches OSObject's vtable (OSObject::free directly) instead of the
+    # family class's own free
+    ("RD3VidMemory::free through OSObject's vtable", good(change=("__ZN12RD3VidMemory4freeEv", "__ZTV8OSObject",
+                                                                  160, "callq"))),
+    ("RD3VidMemory::free at another slot", good(change=("__ZN12RD3VidMemory4freeEv", "__ZTV16IOAccelVidMemory",
+                                                        168, "callq"))),
+    ("RD3VidMemory::free without its base call", good(skip="__ZN12RD3VidMemory4freeEv")),
 ]
 for what, text in cases:
     if not cas.check(text):
@@ -52,8 +61,12 @@ lock = good(change=("__ZN16RDNA3Accelerator18acceleratorDidLockEPKci", "__ZTV22I
                     "callq"))
 if cas.check(lock):
     fails.append("a lock override that calls the base fails: %s" % cas.check(lock))
+# RD3VidMemory::free calls its base (work after it: the stack check), it need not be a tail jump
+vfree = good(change=("__ZN12RD3VidMemory4freeEv", "__ZTV16IOAccelVidMemory", 160, "callq"))
+if cas.check(vfree):
+    fails.append("RD3VidMemory::free calling its base fails: %s" % cas.check(vfree))
 for f in fails:
     print("test_accel_slots: FAIL " + f)
 if fails:
     sys.exit(1)
-print("test_accel_slots: %d cases ok" % (len(cases) + 2))
+print("test_accel_slots: %d cases ok" % (len(cases) + 3))

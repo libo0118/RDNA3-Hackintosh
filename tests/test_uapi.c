@@ -1020,6 +1020,27 @@ int main(void)
         sb.surface_id = 7; sb.plane = RD_XNU_SURFACE_MAX_PLANE + 1; h_dirty_surface = 99;
         CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL && h_dirty_surface == 99);
         sb.plane = 0;
+        /* DRIVER-PLAN N41: the try-lock dirty and the GPU pending / ready marks reach the OS as
+         * flags in the plane word; a mark's plane is 0 or 1, a mark of surface 0 never reaches it */
+        sb.op = RD_XNU_SURFACE_BO_DIRTY_TRY; sb.surface_id = 7; sb.plane = 2;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == 0 && h_dirty_surface == 7 &&
+              h_dirty_plane == (RD_XNU_SURFACE_PLANE_TRYLOCK | 2u));
+        sb.plane = RD_XNU_SURFACE_MAX_PLANE + 1; h_dirty_surface = 99;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL && h_dirty_surface == 99);
+        sb.op = RD_XNU_SURFACE_BO_MARK; sb.plane = 1;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == 0 && h_dirty_surface == 7 &&
+              h_dirty_plane == (RD_XNU_SURFACE_PLANE_GPU_MARK | 1u));
+        sb.plane = 0;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == 0 && h_dirty_plane == RD_XNU_SURFACE_PLANE_GPU_MARK);
+        sb.plane = 2; h_dirty_surface = 99;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL && h_dirty_surface == 99);
+        sb.plane = 1; sb.surface_id = 0;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL && h_dirty_surface == 99);
+        sb.surface_id = 3;
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_ENOENT && h_dirty_surface == 3);
+        sb.op = 4; sb.surface_id = 7; sb.plane = 0;   /* an op this UAPI does not know */
+        CHECK(IOCTL(f, RD_NR_XNU_SURFACE_BO, sb) == -RD_EINVAL);
+        sb.op = RD_XNU_SURFACE_BO_DIRTY; sb.surface_id = 7; sb.plane = 0;
         /* every failure path gives the OS's hold back */
         CHECK(h_surf_refs[7] == 0 && h_surf_refs[9] == 0);
         {

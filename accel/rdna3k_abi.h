@@ -336,6 +336,19 @@ struct RD3KCopyRequest {
  * it is refused with RD3K_SS_NO_CACHE before the lookup */
 #define RD3K_SS_MAX_PLANE     15u
 static inline int rd3k_ss_plane_ok(unsigned int plane) { return plane <= RD3K_SS_MAX_PLANE; }
+/* DRIVER-PLAN N41: flags in the plane word of RD3K_ESC_SURF_DIRTY (the same
+ * bits as common/rdna3_surf_pending.h RD3_SP_PLANE_*; uapi RD_XNU_SURFACE_BO_MARK
+ * and _DIRTY_TRY set them). GPU_MARK: not a dirty mark but WindowServer's
+ * pending (bit 0 set) / ready (bit 0 clear) mark of a surface its GPU
+ * writes; only WindowServer's marks are taken, answered RD3K_SS_OFF while
+ * debug.rdna3accel_surface_wait is 0. TRYLOCK: a dirty mark that gives up
+ * with RD3K_SS_BUSY instead of waiting for the accelerator's lock (a
+ * page-off may hold it while it waits for a pending mark). The plugin
+ * learns the mode from the answer to its pending marks (an older
+ * accelerator answers RD3K_SS_NO_CACHE: a plane out of range). */
+#define RD3K_SS_PLANE_GPU_MARK 0x80000000u
+#define RD3K_SS_PLANE_TRYLOCK  0x40000000u
+#define RD3K_SS_BUSY          0x80000009u   /* TRYLOCK: the accelerator's lock was taken; nothing marked */
 struct RD3KSurfShareEsc {
     unsigned int version;
     unsigned int surfaceID;
@@ -357,6 +370,13 @@ struct RD3KSurfShareEsc {
 #define RD3K_ESC_SURF_GEM      0xE4u
 #define RD3K_SURFGEM_VERSION   1u
 #define RD3K_VRAM_FN_REF      "rdna3RefVram"
+/* DRIVER-PLAN N41 (security review): the core's reference count of an
+ * accelerator allocation (p1 the handle, p2 unsigned int * out): 1 only the
+ * accelerator's own, more a GEM BO holds it. kIOReturnNotFound for a handle
+ * the core does not know; an older core answers kIOReturnUnsupported. The
+ * accelerator releases a parked allocation under VRAM pressure only when
+ * no BO holds it (releasing a held one frees nothing). */
+#define RD3K_VRAM_FN_REFS     "rdna3VramRefs"
 struct RD3KSurfGem {
     unsigned int version;
     unsigned int surfaceID, plane;     /* in */
