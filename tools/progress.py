@@ -56,6 +56,7 @@ AMDGPU_STEPS = {
     "Display: UHBR": ["uhbr"],
     "Display: ODM": ["odm"],
     "Display: hotplug": ["hotplug"],
+    "Display: interrupts": ["vblirq"],
     "Display: color": ["gamma"],
     "Display: audio": ["audio"],
     "VCN / JPEG video": ["vcn"],

@@ -1,10 +1,10 @@
 {
  "amdgpu": {
   "works": 523,
-  "ported": 1504,
-  "total": 1522,
-  "not_applicable": 638,
-  "works_pct": 34.4,
+  "ported": 1512,
+  "total": 1530,
+  "not_applicable": 642,
+  "works_pct": 34.2,
   "ported_pct": 98.8,
   "groups": [
    {
@@ -1871,6 +1871,31 @@
      "dal_hw_hpd_get_pin": "Linux GPIO object accessor (the port reads the HPD registers directly)",
      "dal_hw_hpd_init": "Linux Display Core object constructors",
      "link_disable_hpd": "reached only through dc_link_disable_hpd, which amdgpu calls from debugfs alone (amdgpu_dm_debugfs.c trigger_hotplug); the driver never turns an HPD pin off"
+    }
+   },
+   {
+    "name": "Display: interrupts",
+    "steps": [
+     "vblirq"
+    ],
+    "works": 0,
+    "ported": 8,
+    "todo": 0,
+    "items": {
+     "dal_irq_service_ack": "ported",
+     "dal_irq_service_ack_generic": "ported",
+     "dal_irq_service_set": "ported",
+     "dal_irq_service_set_generic": "ported",
+     "dal_irq_service_to_irq_source": "ported",
+     "find_irq_source_info": "ported",
+     "hpd_ack": "ported",
+     "to_dal_irq_source_dcn32": "ported"
+    },
+    "na": {
+     "dal_irq_service_construct": "Linux Display Core object constructors / destructors",
+     "dal_irq_service_dcn32_create": "Linux Display Core object constructors / destructors",
+     "dal_irq_service_destroy": "Linux Display Core object constructors / destructors",
+     "dcn32_irq_construct": "Linux Display Core object constructors / destructors"
     }
    },
    {

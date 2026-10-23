@@ -57,6 +57,17 @@ static inline int rd3_gamma_on(void)
     return rd3_arg("rdna3gamma", 1) != 0;
 }
 
+/* DRIVER-PLAN N42: IOGraphics' VBL and the flip done from the DCN vblank /
+ * pflip interrupts (the core enables them for the framebuffer that asks),
+ * the OTG frame-counter poll as the fallback; on unless rdna3vblirq=0 (the
+ * A/B: 0 = the poll alone, as before N42). Needs the MSI handler
+ * (rdna3msi=1, in the profile). One place, so the framebuffer and the core
+ * agree. */
+static inline int rd3_vblirq_on(void)
+{
+    return rd3_arg("rdna3vblirq", 1) != 0;
+}
+
 /* A3 and WindowServer's display framebuffers (rdna3_a3_display.h): kept
  * out of A3 unless rdna3a3display=1 (card run 58: the swap scans out the
  * legacy surface's own VRAM, so a BO over the IOSurface's never reached

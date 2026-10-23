@@ -595,6 +595,8 @@ answer ...`) and the triage prints them (`fb N40, switches`).
 | `rdna3vblonce` | 1 | 0: as before | never two VBL runs at once |
 | `rdna3fbdtmap` | 0: as before (logged) | 1: our modes' timings accepted | the `InstallTiming ... FAILED` lines in the CoreDisplay log |
 | `rdna3fbconsole` | 1: the framebuffer that holds the boot console | 0: head 0 | `isConsoleDevice` |
+| `rdna3vblirq` (N42) | 1: VBL from the DCN vblank interrupt, flip done from the pflip interrupt, the OTG poll as fallback (needs `rdna3msi=1`, in the profile) | 0: the OTG poll alone, as before N42 | VBL timing and the present queue's completion; also `sudo sysctl debug.rdna3_vblirq=0` / `=1` at runtime (the framebuffers fall back within 3 frames) |
+| `rdna3hpdirq` (N42) | 0: HPD interrupts counted and logged (`RDNA3,HPDIrqs`), the hotplug poll decides | 1: an HPD interrupt probes the connectors (B7) | what a cable pull / a DP monitor's standby does |
 
 One run per value: take the step's line and add the boot-arg, e.g.
 
@@ -611,6 +613,13 @@ defaults). What decides it is the same pair of rows as above:
 macOS to sleep once during a `play` run and wake it; the `fb N40, wake` row
 must show as many family wakes as system sleeps and the desktop must come
 back.
+
+N42's A/B: one `play` run as the step is (`rdna3vblirq=1`) and one with
+`rdna3vblirq=0` added. The triage rows `fb N40, vblank irq` and `N42, display
+irq` of the first must be INFO with the interrupt counts growing with the
+frames (no fallback, no storm) and the present queue's `flip done from the
+pflip interrupt` rows present; the second shows `rdna3vblirq=0` rows. Compare
+how smooth windows move in both.
 
 ### Tests that already passed
 

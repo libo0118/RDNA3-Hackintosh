@@ -175,6 +175,25 @@ public:
     /* B7: an HPD pin changed (bring-up work loop, after the ack); the
      * connectors are probed again on a thread call */
     void displayHotplug(uint32_t pin, int connected);
+    /* N42: an HPD interrupt, acked (bring-up work loop): counted and logged;
+     * acted on (displayHotplug) only with rdna3hpdirq=1 */
+    void displayHpdIrq(uint32_t pin, int connected, int rx);
+    /* N42 (RDNA3DisplayIrq.cpp): a DCN vblank / vupdate / pflip IV on the
+     * bring-up's interrupt work loop (fIhLock held): acked, counted, handed
+     * to the head's framebuffer. false = not a DCN source of these kinds */
+    bool displayIrq(const struct rdna3_iv *iv);
+    /* the sources enabled again as registered (a wake, a reset, a mode set
+     * moved the head's OTG / HUBP); 'force' re-writes them all */
+    void displayIrqSync(const char *why, bool force);
+    /* after a wake / a mode-1 reset: 'headsUp' (bit n = head n,
+     * rd3_virq_heads_up / rd3_virq_wake_heads_up) = the heads up after the
+     * restore: written again as registered; the others are not written and
+     * keep their enables as stale; 0 = the DCN was not brought back: nothing
+     * written at all */
+    void displayIrqResync(const char *why, uint32_t headsUp);
+    /* a mode set lit 'head' again: a head left down by a wake / reset gets
+     * its sources at the next sync (ECC review round 2) */
+    void displayIrqHeadBack(uint32_t head, const char *why);
     void displayShutdown();
     /* D4 (RDNA3Resume.cpp): a GPU recovery happened (chipReset: the mode-1
      * reset, else a GFX / SDMA soft reset); DRM lock held */
@@ -351,6 +370,10 @@ private:
     struct thread_call *fHotplugCall = nullptr;
     volatile UInt32 fHotplugPending = 0;      /* bit n = HPD pin n changed */
     uint32_t      fHotplugEvents = 0;
+    volatile uint32_t fHpdIrqs = 0;           /* N42: HPD interrupts claimed */
+    volatile uint32_t fHpdNoPin = 0;          /* N42: HPD6 / HPD6 RX IVs (a pin DCN 3.2 does not wire) */
+    uint32_t      fHpdPubIrqs = 0, fHpdPubNoPin = 0;   /* the counts the properties last got */
+    void          displayHpdPublish();        /* RDNA3,HPDIrqs* and RDNA3,DisplayIrq when they moved */
     static void   displayHotplugWork(void *owner, void *);
     /* D6 hotplug to the framebuffer (rdna3hotplug=1, RDNA3Hotplug.cpp) */
     struct RDNA3HotplugState *fHp = nullptr;
@@ -366,6 +389,17 @@ private:
     void          hotplugTidyProps();
     static void   hotplugTick(void *owner, void *);
     IOReturn      displayHotplugQuery(struct RD3KDisplayHotplug *q);
+    /* DRIVER-PLAN N42: display interrupts (RDNA3DisplayIrq.cpp) */
+    struct RDNA3DispIrq *fDirq = nullptr;
+    void          displayIrqInit();
+    void          displayIrqFree();
+    IOReturn      displayIrqCall(struct RD3KDisplayIrq *r);
+    void          displayIrqPublish();
+public:
+    static const uint32_t kDispIrqAllHeads = 0xfu;   /* RD3K_MAX_HEADS heads (asserted in RDNA3DisplayIrq.cpp) */
+    int           displayIrqSysctl(int *on, bool set);         /* debug.rdna3_vblirq */
+    int           displayIrqReport(char *buf, size_t len);     /* debug.rdna3_dispirq */
+private:
     bool          displayInit(const amd_discovery *disc);
     void          displayFree();
     void          displayMeasureRefresh();
@@ -492,7 +526,8 @@ private:
     int           displayHeadDpms(uint32_t head, bool blank);
     void          displayLinkUp(uint32_t head);   /* fDispLock held */
     int           displayHeadRelight(uint32_t head);   /* fDispLock held, rdna3hotplug=2 */
-    uint32_t      displayStateRestore(const char *why, bool restore);   /* fDispLock held */
+    uint32_t      displayStateRestore(const char *why, bool restore, uint32_t *liveMask = nullptr,
+                                      uint32_t *lostMask = nullptr);   /* fDispLock held */
     void          displayWillSleep();
     void          displayDidWake();
     IOReturn      displayEdid(struct RD3KDisplayEdid *e);

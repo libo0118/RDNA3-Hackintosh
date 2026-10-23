@@ -177,6 +177,8 @@ public:
     bool     systemSuspend();
     void     kgqStop();
     bool     suspended() const { return fSuspended; }
+    /* N42: the MSI handler drains the IH (display interrupts can reach the core) */
+    bool     irqLive() const { return fIrqLive; }
     /* VRAM was lost and the live VMs have new, empty roots: the DRM maps
      * every client's ranges again (rdna3_drm_device_vm_replay); true once */
     bool     takeVmReplay() { bool r = fVmReplay; fVmReplay = false; return r; }

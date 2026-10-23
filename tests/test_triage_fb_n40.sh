@@ -16,6 +16,16 @@
 #    not what the boot-arg asked) and a TESTS-ONLY report's AGDC rows: WARN rows
 #  - the SUMMARY rows ("fb N40: ...") and the checklist's levels
 #  - the collectors: collect.sh writes 17-sysctl-agdc.txt, autoreport.sh greps rdna3agdc
+#  - DRIVER-PLAN N42: the framebuffer's 'vblank irq' row (vblirq=0, not registered, silent, fell back, off
+#    after a storm, older than N42) and the core's 'display irq' row (clean, no MSI, enabled but silent, a
+#    storm, the property, TESTS ONLY, missing); collect.sh's 18-sysctl-dispirq.txt, autoreport.sh's grep
+#  - the N42 ECC review round: REGISTER never attempted (and why), a late registration at stop, a framebuffer with
+#    no DCN head (INFO), the live sysctl over a stale property, RDNA3,HPDIrqs over the string's HPD count, unrouted
+#    / bad-instance IVs by kind and instance, ack / disable failures, DCE IVs no handler claims, HPD6 IVs, a display
+#    not brought back, a stall's drained IVs, a core string older than the round; present_verdict's pflip row with
+#    no latch wait yet
+#  - the N42 ECC review round 2: a head still lost after the restore, a stale source on an unregistered head,
+#    stale sources turned off, failed publishes, a core string of round 1
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d)
@@ -37,7 +47,7 @@ FB = """+-o RDNA3Framebuffer  <class RDNA3Framebuffer, id 0x1000002d1, registere
 
 
 def fb(dep, gl, n40=True, glorder=1, vblonce=1, stats=None, console=0, sw=None, drop=(), integ="Yes",
-       integ_ab=None, order=None):
+       integ_ab=None, order=None, mode="dcn"):
     extra = ""
     if n40:
         st = {"cursor_sets": 900, "cursor_kicks": 300, "cursor_coalesced": 550, "cursor_same": 50,
@@ -50,13 +60,21 @@ def fb(dep, gl, n40=True, glorder=1, vblonce=1, stats=None, console=0, sw=None, 
               "vbl_delivered": 3600, "vbl_polls": 7000, "vbl_still": 2, "vbl_overlap": 0, "vbl_call_failed": 0,
               "integ_applied": 1, "integ_reset": 0, "integ_late": 0, "open_ungated": 0, "open_fails": 0,
               "dt_validate": 61, "dt_matched": 4, "dt_refused": 61, "dt_sets": 0, "dt_mapped": 0,
-              "dispflags_asked": 2}
+              "dispflags_asked": 2,
+              # DRIVER-PLAN N42: the vblank / pflip interrupts working
+              "virq_reg": 1, "virq_reg_ret": 0, "virq_reg_tries": 1, "virq_live": 1, "virq_pflip_live": 1,
+              "virq_why": 0, "virq_irqs": 3600, "virq_delivered": 3590, "virq_dup": 10, "virq_fallback": 0,
+              "virq_fallback_runs": 0, "virq_lat_avg_us": 45, "virq_lat_max_us": 300, "virq_pflips": 900,
+              "latch_waits": 900, "latch_timeouts": 0, "latch_irq_woke": 880, "pflip_lat_avg_us": 30,
+              "pflip_lat_max_us": 200, "core_vblank": 3600, "core_pflip": 900, "core_storms": 0,
+              "virq_noreg": 0, "virq_late_unreg": 0}
         st.update(stats or {})
         for k in drop:
             st.pop(k, None)
         sws = {"dispflags": 0, "glorder": glorder, "fbintegrated": 0, "cursorasync": 1, "cursorasync_active": 1,
                "hwcursor": 1, "fbwake": 1, "waketap": 1, "wakegate": 1, "vblonce": vblonce, "vbl_call": 1,
-               "vblonce_active": vblonce, "fbdtmap": 0, "fbconsole": 1, "bootconsole": console}
+               "vblonce_active": vblonce, "fbdtmap": 0, "fbconsole": 1, "bootconsole": console, "vblirq": 1,
+               "vblirq_call": 1}
         sws.update(sw or {})
         d = lambda x: "{" + ",".join('"%s"=%d' % kv for kv in x.items()) + "}"
         extra += '  |   "RDNA3,Switches" = %s\n' % d(sws)
@@ -65,7 +83,7 @@ def fb(dep, gl, n40=True, glorder=1, vblonce=1, stats=None, console=0, sw=None, 
         extra += '  |   "RDNA3,IntegratedAB" = "%s"\n' % (
             integ_ab or "IOGraphics Yes, kept (rdna3fbintegrated=%d), PCI bus 0" % sws["fbintegrated"])
         extra += '  |   "RDNA3,VBLSource" = "otg-poll"\n'
-        extra += '  |   "RDNA3,Mode" = "dcn"\n'
+        extra += '  |   "RDNA3,Mode" = "%s"\n' % mode
     if integ:
         extra += '  |   "IOFBIntegrated" = %s\n' % integ
     return FB % {"dep": dep, "gl": gl, "extra": extra}
@@ -163,6 +181,63 @@ report("j", m, "")
 
 # k: TESTS ONLY: the AGDC rows from the tests file
 report("k", None, "boot-args: rdna3lvl=8 rdna3fb=1 rdna3agdc=3 rdna3agdcvendor=1\n" + AGDC.replace("$ sh -c", "#"))
+
+# DRIVER-PLAN N42, the 'vblank irq' row: l rdna3vblirq=0 (INFO); m not registered (an older core); n live but
+# silent; o fell back to the poll and a storm; p off after a storm; q a framebuffer older than N42 (no virq_*)
+def n42(d, dispirq=None, tests="", props="", **kw):
+    m = dict(BASE)
+    m["11-ioreg-props.txt"] = props
+    m["12-ioreg-fb.txt"] = "$ ioreg\n" + fb(0, 0, console=1, **kw) + "[exit 0]\n"
+    m["17-sysctl-agdc.txt"] = AGDC
+    if dispirq is not None:
+        m["18-sysctl-dispirq.txt"] = "$ sh -c sysctl\ndebug.rdna3_vblirq: 1\ndebug.rdna3_dispirq: %s\n[exit 0]\n" % dispirq
+    report(d, m, tests)
+n42("l", sw={"vblirq": 0}, stats={"virq_reg": 0, "virq_live": 0, "virq_irqs": 0})
+n42("m", stats={"virq_reg": 0, "virq_reg_ret": 0xe00002c7, "virq_reg_tries": 3, "virq_live": 0, "virq_irqs": 0})
+n42("n", stats={"virq_irqs": 0, "core_vblank": 0, "virq_fallback": 3500})
+n42("o", stats={"virq_fallback_runs": 2, "virq_fallback": 40, "core_storms": 1})
+n42("p", stats={"virq_live": 0, "virq_why": 3})
+# the core's 'display irq' row: r clean; s no MSI, the head left off; t enabled but silent, a storm; u the
+# property instead of the sysctl, rdna3vblirq=0; v TESTS ONLY from the tests file; w a core older than N42
+DI = ("vblirq=1 on=1 msi=1 hpdirq=0 hpd=2 hpdnopin=0 total=4500 unrouted=0 unr=0/0/0 unrinst=0x0/0x0/0x0 badinst=0 "
+      "badmask=0x0/0x0/0x0 regfails=0 ackfails=0 offfails=0 stormed=0x0/0x0/0x0 drained=0/0/0 drains=0 down=0 downs=0 "
+      "downivs=0 downheads=0x0 hdowns=0 staleoffs=0 publishfails=0 dceother=0 dce=- syncs=3 | "
+      "h0 reg=1 want=0x3 en=0x3 why=0 otg=0 pipe=0 vblank=3600 pflip=900 vupdate=0 storms=0 stale=0x0")
+DI_OLD = ("vblirq=1 on=1 msi=1 hpdirq=0 hpd=2 total=4500 unrouted=0 badinst=0 regfails=0 stormed=0x0/0x0/0x0 syncs=3 | "
+          "h0 reg=1 want=0x3 en=0x3 why=0 otg=0 pipe=0 vblank=3600 pflip=900 vupdate=0 storms=0")
+n42("r", dispirq=DI)
+n42("s", dispirq=DI.replace("msi=1", "msi=0").replace("en=0x3 why=0", "en=0x0 why=2"))
+n42("t", dispirq=DI.replace("vblank=3600", "vblank=0").replace("stormed=0x0/0x0/0x0", "stormed=0x1/0x0/0x0"))
+n42("w")
+m = dict(BASE)
+m["11-ioreg-props.txt"] = '    |   "RDNA3,DisplayIrq" = "%s"\n' % DI.split(" | ")[0].replace("vblirq=1", "vblirq=0") \
+    .replace("hpd=2", "hpd=0").replace("total=4500", "total=0")
+report("u", m, "")
+# ECC review: x the live sysctl over a stale property, RDNA3,HPDIrqs over the string; y every new failure counter;
+# z a core string older than the round; fa never attempted; fb a late registration; fc no DCN head
+n42("x", dispirq=DI, props='    |   "RDNA3,DisplayIrq" = "%s"\n    |   "RDNA3,HPDIrqs" = 7\n' % DI.replace(
+    "vblank=3600", "vblank=0").replace("total=4500", "total=1"))
+n42("y", dispirq=DI.replace("hpdnopin=0", "hpdnopin=2").replace("unrouted=0 unr=0/0/0 unrinst=0x0/0x0/0x0",
+    "unrouted=5 unr=3/2/0 unrinst=0x6/0x1/0x0").replace("badinst=0 badmask=0x0/0x0/0x0", "badinst=1 badmask=0x10/0x0/0x0")
+    .replace("ackfails=0 offfails=0", "ackfails=4 offfails=1").replace("drained=0/0/0 drains=0", "drained=3/0/0 drains=1")
+    .replace("down=0 downs=0 downivs=0", "down=1 downs=1 downivs=9")
+    .replace("dceother=0 dce=-", "dceother=6 dce=0x2a:0x0:0x0,0x55:0x1:0x0"))
+n42("z", dispirq=DI_OLD)
+# ECC review round 2: g1 head 1 still lost after the restore, a stale source on an unregistered head, a source
+# turned off, a failed publish; g2 a core string of round 1 (no round-2 keys)
+n42("g1", dispirq=DI.replace("downheads=0x0 hdowns=0 staleoffs=0 publishfails=0",
+    "downheads=0x2 hdowns=1 staleoffs=2 publishfails=3") +
+    " | h1 reg=0 want=0x0 en=0x0 why=0 otg=1 pipe=1 vblank=0 pflip=0 vupdate=0 storms=0 stale=0x1")
+n42("g2", dispirq=DI.replace(" downheads=0x0 hdowns=0 staleoffs=0 publishfails=0", ""))
+n42("fa", stats={"virq_reg": 0, "virq_reg_tries": 0, "virq_live": 0, "virq_irqs": 0, "virq_noreg": 4})
+n42("fb", stats={"virq_late_unreg": 1})
+n42("fc", mode="console", dispirq=DI)
+report("v", None, "boot-args: rdna3lvl=8 rdna3fb=1\ndebug.rdna3_vblirq: 1\ndebug.rdna3_dispirq: " + DI + "\n")
+n42("q", drop=[k for k in ("virq_reg", "virq_reg_ret", "virq_reg_tries", "virq_live", "virq_pflip_live", "virq_why",
+                           "virq_irqs", "virq_delivered", "virq_dup", "virq_fallback", "virq_fallback_runs",
+                           "virq_lat_avg_us", "virq_lat_max_us", "virq_pflips", "latch_waits", "latch_timeouts",
+                           "latch_irq_woke", "pflip_lat_avg_us", "pflip_lat_max_us", "core_vblank", "core_pflip",
+                           "core_storms", "virq_noreg", "virq_late_unreg")])
 PY
 
 run() { python3 -I "$ROOT/tools/triage_reports.py" "$T/$1" > "$T/out.txt" 2>&1 || true; }
@@ -179,7 +254,8 @@ row INFO "open order" a | grep -qF "fb 1: head 0 opened first; IOFramebufferOpen
 row INFO "integrated A/B" a | grep -qF "IOGraphics Yes, kept (rdna3fbintegrated=0), PCI bus 0" || fail "a: integrated"
 row INFO cursor a | grep -qF "fb 1: thread call; sets 900, thread-call runs 300, folded 550, unchanged 50, applied 300, FAILED 0" || fail "a: cursor"
 row INFO wake a | grep -qF "system sleeps 0, family wakes 0" || fail "a: wake"
-row INFO VBL a | grep -qF "source otg-poll (no hardware vblank interrupt yet), delivered 3600, 250 us re-looks 7000" || fail "a: VBL"
+row INFO VBL a | grep -qF "source otg-poll (the vblank interrupt: the 'vblank irq' row), delivered 3600, 250 us re-looks 7000" || fail "a: VBL"
+row INFO "vblank irq" a | grep -qF "fb 1: VBL from the vblank interrupt: 3600 interrupt(s), 3590 VBL(s) delivered by it (interrupt -> delivery avg 45 us, max 300 us), 10 same-vblank skip(s); pflip interrupts 900, latch waits 900 (880 ended by the pflip interrupt: avg 30 us, max 200 us; 0 timed out)" || fail "a: vblank irq"
 row INFO "detailed timings" a | grep -qF "validateDetailedTiming 61 (4 one of our modes, 61 refused)" || fail "a: timings"
 row INFO "AGDC vendor" a | grep -qF "vendor info answer NVIDIA 0x10de (debug.rdna3agdc_vendor 1), asked 3 time(s); last answered as NVIDIA 0x10de" || fail "a: AGDC vendor"
 hasnt "WARN fb N40" "a: a clean N40 run has no WARN"
@@ -262,5 +338,91 @@ grep -q 'grep rdna3agdc' "$ROOT/tools/macos/collect.sh" || fail "collect.sh does
 grep -q 'rdna3agdc" || true' "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh no longer greps rdna3agdc into the tests file"
 grep -q 'run 12-ioreg-fb.txt ioreg -l -w0 -r -c RDNA3Framebuffer' "$ROOT/tools/macos/collect.sh" || fail "collect.sh does not dump the framebuffers' properties"
 sh -n "$ROOT/tools/macos/collect.sh" || fail "sh -n collect.sh"
+
+# ---- DRIVER-PLAN N42: the vblank irq row
+run l
+row INFO "vblank irq" l | grep -qF "fb 0: rdna3vblirq=0: the OTG poll alone (the A/B's off side)" || fail "l: vblirq=0"
+run m
+row WARN "vblank irq" m | grep -qF "NOT registered with the core (rdna3DisplayIrq answered 0xe00002c7 after 3 tries: an older core or rdna3vblirq=0 there)" || fail "m: not registered"
+run n
+row WARN "vblank irq" n | grep -qF "the vblank interrupt is on but SILENT: none reached the framebuffer (the core counted 0), the OTG poll delivered 3500" || fail "n: silent"
+run o
+row WARN "vblank irq" o | grep -qF "fell back to the OTG poll 2 time(s), 40 VBL(s) by it; 1 storm(s) cut" || fail "o: fallback"
+run p
+row WARN "vblank irq" p | grep -qF "registered but the vblank interrupt is OFF (why 3: cut after a storm)" || fail "p: storm off"
+run q
+row WARN "vblank irq" q | grep -qF "no virq_* counters (a framebuffer older than DRIVER-PLAN N42)" || fail "q: older"
+row INFO VBL q | grep -qF "(no hardware vblank interrupt yet)" || fail "q: VBL row of an older framebuffer"
+
+run r
+grep -F -- "   INFO N42, display irq: h0 OTG 0 HUBP 0: vblank 3600, pflip 900, vupdate 0, storms 0; total 4500 DCN IV(s), 0 with no framebuffer, 0 of an instance DCN 3.2 lacks; HPD interrupts 2 (counted only: rdna3hpdirq=0, the hotplug poll decides)" "$T/out.txt" >/dev/null || fail "r: display irq INFO"
+grep -qF "  N42: display irq" "$T/out.txt" || fail "r: SUMMARY N42 row"
+run s
+grep -F -- "   WARN N42, display irq:" "$T/out.txt" | grep -qF "NO MSI handler (rdna3msi=1?)" || fail "s: no MSI"
+grep -F -- "   WARN N42, display irq:" "$T/out.txt" | grep -qF "h0: wanted 0x3, enabled 0x0 (no MSI handler)" || fail "s: left off"
+run t
+grep -F -- "   WARN N42, display irq:" "$T/out.txt" | grep -qF "h0: VBLANK enabled on OTG 0 but NO interrupt reached the core" || fail "t: silent"
+grep -F -- "   WARN N42, display irq:" "$T/out.txt" | grep -qF "sources CUT after a storm (VBLANK/PFLIP/VUPDATE instance masks 0x1/0x0/0x0)" || fail "t: storm"
+run u
+grep -qF -- "   INFO N42, display irq: rdna3vblirq=0: no vblank / pflip source enabled" "$T/out.txt" || fail "u: property, vblirq=0"
+run v
+grep -qF -- "   INFO N42, display irq: h0 OTG 0 HUBP 0: vblank 3600" "$T/out.txt" || fail "v: TESTS ONLY"
+run w
+grep -qF -- "   WARN N42, display irq: no debug.rdna3_dispirq / RDNA3,DisplayIrq: a core older than DRIVER-PLAN N42" "$T/out.txt" || fail "w: missing"
+grep -q 'run 18-sysctl-dispirq.txt' "$ROOT/tools/macos/collect.sh" || fail "collect.sh does not write 18-sysctl-dispirq.txt"
+
+# ---- the N42 ECC review round
+DIR() { grep -F -- "   $1 N42, display irq:" "$T/out.txt" || fail "$2: no '$1 N42, display irq' row"; }
+run x
+DIR INFO x | grep -qF "h0 OTG 0 HUBP 0: vblank 3600, pflip 900, vupdate 0, storms 0; total 4500 DCN IV(s)" || fail "x: the live sysctl, not the stale property"
+DIR INFO x | grep -qF "HPD interrupts 7 (counted only" || fail "x: RDNA3,HPDIrqs over the string's count"
+hasnt "[from the RDNA3,DisplayIrq property" "x: the sysctl was there"
+run u
+grep -F -- "   INFO N42, display irq:" "$T/out.txt" | grep -qF "[from the RDNA3,DisplayIrq property (a copy from the last sync / HPD: older than the report)]" || fail "u: the property named as the source"
+run y
+DIR WARN y | grep -qF "5 IV(s) with no framebuffer registered for them (3 VBLANK OTG 1,2, 2 PFLIP HUBP 0): acked, dropped" || fail "y: unrouted by kind"
+DIR WARN y | grep -qF "1 IV(s) of an instance DCN 3.2 lacks (VBLANK OTG 4): dropped" || fail "y: bad instance"
+DIR WARN y | grep -qF "4 ack(s) failed (the source may raise again at once), 1 disable(s) did not take" || fail "y: ack / off failures"
+DIR WARN y | grep -qF "6 DCE IV(s) no handler claims (src_id:ext:ring 0x2a:0x0:0x0,0x55:0x1:0x0): dropped" || fail "y: DCE other"
+DIR WARN y | grep -qF "2 HPD IV(s) of a pin DCN 3.2 does not wire (HPD6 / HPD6 RX)" || fail "y: HPD6"
+DIR WARN y | grep -qF "the display was NOT brought back after a power loss / mode-1 reset: no interrupt register written, the sources forgotten as off (9 IV(s) dropped since)" || fail "y: down"
+DIR WARN y | grep -qF "3 IV(s) drained after 1 handler stall(s), kept out of the storm window" || fail "y: drained"
+run z
+DIR WARN z | grep -qF "the core's report lacks hpdnopin,unr,unrinst,badmask,ackfails,offfails,drained,drains,down,downs,downivs,dceother,dce (older than the ECC review round: unknown, not 0)" || fail "z: an older core string"
+run g1
+DIR WARN g1 | grep -qF "head(s) 1 still LOST after the restore of a wake / mode-1 reset: their interrupt registers not written" || fail "g1: a head still lost"
+DIR WARN g1 | grep -qF "h1: sources 0x1 still enabled from before the head went down" || fail "g1: stale on an unregistered head"
+DIR WARN g1 | grep -qF "2 source(s) left enabled while their head was down, turned off when it came back" || fail "g1: stale offs"
+DIR WARN g1 | grep -qF "3 RDNA3,DisplayIrq publish(es) failed for want of memory" || fail "g1: publish failures"
+run g2
+DIR WARN g2 | grep -qF "the core's report lacks downheads,hdowns,staleoffs,publishfails (older than the ECC review round 2: unknown, not 0)" || fail "g2: a round-1 core string"
+run r
+hasnt "older than the ECC review round 2" "r: the current core string is complete"
+run fa
+row WARN "vblank irq" fa | grep -qF "rdna3vblirq=1 but REGISTER was never attempted (no symbol / thread call for the interrupt)" || fail "fa: never attempted"
+hasnt "NOT registered with the core" "fa: never attempted is not refused"
+run fb
+row WARN "vblank irq" fb | grep -qF "1 registration(s) found at stop after the unregister (unregistered again)" || fail "fb: late registration"
+run fc
+row INFO "vblank irq" fc | grep -qF "fb 0: no DCN head (the console timer delivers): no vblank interrupt to use" || fail "fc: no DCN head"
+# present_verdict: no latch wait yet is not "the pflip interrupt not live"
+python3 -I - "$ROOT" <<'PY' || fail "present_verdict pflip rows"
+import sys
+sys.path.insert(0, sys.argv[1] + "/tools")
+import triage_reports as tr
+c = {"swap_async": 1, "swaps_h0": 10}
+for k in tr.PQ_KEYS:
+    c["swaps_pq_%s_h0" % k] = 0
+c["swaps_pq_prog_h0"] = 5
+c["swaps_pq_irqlive_h0"] = 0
+rows = [t for lv, t in tr.present_verdict(c)]
+assert any("head 0: no latch wait yet: whether the pflip interrupt ends them is not known" in t for t in rows), rows
+assert not any("not live" in t for t in rows), rows
+c["swaps_pq_latched_h0"] = 3
+rows = [t for lv, t in tr.present_verdict(c)]
+assert any("the pflip interrupt not live at the last wait" in t for t in rows), rows
+PY
+grep -q 'sysctl -n debug.rdna3_dispirq' "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh does not read debug.rdna3_dispirq"
+sh -n "$ROOT/tools/vm/macos/autoreport.sh" 2>/dev/null || bash -n "$ROOT/tools/vm/macos/autoreport.sh" || fail "autoreport.sh syntax"
 
 echo "test_triage_fb_n40: ok"

@@ -131,6 +131,7 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
 
     fHotplugCall = thread_call_allocate((thread_call_func_t)displayHotplugWork, this);
     hotplugInit();   /* rdna3hotplug=1: RDNA3Hotplug.cpp polls and handles */
+    displayIrqInit();   /* N42: vblank / pflip interrupts for the framebuffers */
     return true;
 }
 
@@ -601,6 +602,61 @@ void RDNA3Accel::displayHotplug(uint32_t pin, int connected)
         thread_call_enter(fHotplugCall);
 }
 
+/* N42: until N42 the HPD interrupt was never claimed (its src_id was 0x2a,
+ * not DCN_1_0__SRCID__DC_HPD1_INT = 9), so acting on it (B7's
+ * displayHotplug: the connectors probed again, the clone taken down when
+ * its sink is gone) never ran on the card. It is counted and logged now,
+ * acted on only with rdna3hpdirq=1 (the A/B), so a DP monitor's standby
+ * HPD drop changes nothing by default. 'connected' -1: a DP short pulse
+ * (HPD RX, not enabled; counted) */
+void RDNA3Accel::displayHpdIrq(uint32_t pin, int connected, int rx)
+{
+    static uint32_t logs;
+    if (pin >= RD_AUX_ENGINES) {
+        /* HPD6 / HPD6 RX: DCN 3.2 wires HPD1..5 (no ack register to write);
+         * counted and logged, it used to vanish uncounted (ECC review) */
+        const uint32_t m = OSIncrementAtomic((volatile SInt32 *)&fHpdNoPin) + 1;
+        if (m <= 4 || (m & 1023) == 0) {
+            LOG("display: HPD%u%s interrupt #%u on a pin DCN 3.2 does not wire (HPD1..%u): not acked, dropped",
+                pin + 1, rx ? " RX" : "", m, (unsigned)RD_AUX_ENGINES);
+            displayHpdPublish();   /* the log's rule; the 2 s stats tick publishes the rest */
+        }
+        return;
+    }
+    const uint32_t act = rd3_arg("rdna3hpdirq", 0);
+    const uint32_t n = OSIncrementAtomic((volatile SInt32 *)&fHpdIrqs) + 1;
+    if (logs < 8 || (n & 1023) == 0) {
+        logs++;
+        LOG("display: HPD%u interrupt #%u (%s)%s", pin + 1, n,
+            rx ? "DP short pulse" : connected ? "connected" : "disconnected",
+            rx || !act ? " -- not acted on (rdna3hpdirq=0: the hotplug poll decides)" : "");
+    }
+    /* the RDNA3,HPDIrqs / RDNA3,DisplayIrq copies (triage reads them when
+     * no sysctl was taken): the first 8 and every 1024th here, the 2 s stats
+     * tick the rest - an HPD storm no longer builds a 1.5 KB report and an
+     * OSString per IV under fIhLock (ECC review round 2) */
+    if (n <= 8 || (n & 1023) == 0)
+        displayHpdPublish();
+    if (act && !rx)
+        displayHotplug(pin, connected);
+}
+
+/* the HPD counts into RDNA3,HPDIrqs / RDNA3,HPDIrqsNoPin and the
+ * RDNA3,DisplayIrq copy, when they moved since the last time (the HPD IV's
+ * rate rule above, the stats tick every 2 s) */
+void RDNA3Accel::displayHpdPublish()
+{
+    const uint32_t n = fHpdIrqs, m = fHpdNoPin;
+    if (n == fHpdPubIrqs && m == fHpdPubNoPin)
+        return;
+    fHpdPubIrqs = n;
+    fHpdPubNoPin = m;
+    setNumber("RDNA3,HPDIrqs", n);
+    if (m)
+        setNumber("RDNA3,HPDIrqsNoPin", m);
+    displayIrqPublish();
+}
+
 /* handle_hpd_irq -> dc_link_detect: read the sinks again (DPCD, EDID over
  * AUX or the DDC) and publish what changed */
 void RDNA3Accel::displayHotplugWork(void *owner, void *)
@@ -815,6 +871,7 @@ IOReturn RDNA3Accel::displayEdidLocked(RD3KDisplayEdid *e)
 
 void RDNA3Accel::displayFree()
 {
+    displayIrqFree();   /* N42: the bring-up (its interrupt handler) is gone by now */
     displayPowerFree();
     /* the HPD work first: a displayHotplugWork already queued reaches
      * fHp through hotplugKick (PR #2 review) */

@@ -1130,6 +1130,10 @@ bool RDNA3Bringup::hwInit()
                          (unsigned long long)fIrqCount);
                     sdma60_set_trap_interrupt(fDev, fSdma, 0);
                     fIrqLive = false;
+                    /* N42 (ECC review): a framebuffer that registered while
+                     * fIrqLive was set has its sources on with no MSI to
+                     * drain their IVs: off now (WHY_NOIRQ), it polls */
+                    fOwner->displayIrqSync("msi off", false);
                 } else {
                     BLOG("MSI: verified, fence waits now sleep on the interrupt");
                 }
@@ -3902,14 +3906,20 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
     }
     {
         /* DCN hotplug (amdgpu_dm handle_hpd_irq): ack and re-arm here, the
-         * re-probe runs on the display side's thread call */
+         * re-probe runs on the display side's thread call (N42: only with
+         * rdna3hpdirq=1; counted and logged either way) */
         int rx = 0, pin = dchpd_iv_pin(iv->client_id, iv->src_id, iv->src_data[0], &rx);
         if (pin >= 0) {
-            if (!rx && pin < RD_AUX_ENGINES)
-                b->fOwner->displayHotplug((uint32_t)pin, dchpd_irq_ack(b->fDev, (uint32_t)pin));
+            /* HPD6 / HPD6 RX (a pin DCN 3.2 does not wire): counted there, never acked */
+            b->fOwner->displayHpdIrq((uint32_t)pin,
+                                     rx || pin >= RD_AUX_ENGINES ? -1 : dchpd_irq_ack(b->fDev, (uint32_t)pin), rx);
             return;
         }
     }
+    /* N42: DCN vblank / vupdate / pflip (amdgpu_dm_irq_handler ->
+     * dm_crtc_high_irq / dm_pflip_high_irq) */
+    if (b->fOwner->displayIrq(iv))
+        return;
     if (b->fUserqMask && ih60_iv_userq_doorbell(iv)) {
         /* gfx_v11_0_eop_irq / sdma_v6_0_process_fence_irq for a user queue:
          * the fence value is in its seq64 slot, the waiters (woken after

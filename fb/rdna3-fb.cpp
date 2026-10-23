@@ -48,6 +48,14 @@
  *                      1 = accepts our modes' timings, UnsupportedMode else
  *   rdna3fbconsole=1   isConsoleDevice: this framebuffer holds the boot
  *                      console's address; 0 = head 0 as before
+ *
+ * DRIVER-PLAN N42: rdna3vblirq=1 (rd3_vblirq_on, shared with the core) -
+ * the VBL comes from the core's DCN vblank interrupt (rdna3DisplayIrq: a
+ * HIGH ONCE thread call, as NullMoth delivers it) and the accelerator's
+ * latch wait (rdna3FlipLatchWait) is woken by the head's pflip interrupt at
+ * flip done (amdgpu's page-flip event); the OTG frame-counter poll stays as
+ * the fallback when no interrupt came for 3 frames (counted, logged).
+ * rdna3vblirq=0, a core without rdna3DisplayIrq or no MSI: the poll alone.
  */
 
 #include <IOKit/graphics/IOGraphicsTypes.h>
@@ -67,6 +75,7 @@
 #include <libkern/c++/OSSymbol.h>
 #include "../common/rdna3_bootargs.h"
 #include "../common/rdna3_fb_policy.h"
+#include "../common/rdna3_vbl_irq.h"
 #include <libkern/OSAtomic.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
@@ -181,6 +190,41 @@ class RDNA3Framebuffer : public IOFramebuffer {
     uint32_t fVblOverlap = 0, fStatTick = 0;
     uint32_t fVblCallFailed = 0;           /* 1: no VBL thread call (no VBLs at all; vblonce not in effect) */
     void     publishStats();
+    /* DRIVER-PLAN N42: the VBL from the core's vblank interrupt (virqFn ->
+     * fVblIrqCall, HIGH ONCE, vblIrqFire), the flip done from its pflip
+     * interrupt (virqFn wakes fLatchEv); vblFire's poll delivers when no
+     * vblank interrupt came for RD3_VIRQ_FALLBACK_FRAMES frames. Written by
+     * virqFn on the core's interrupt work loop: fVirqAbs / fVirqFrame /
+     * fVirqIrqs, fPflipAbs / fPflipSeq / fVirqPflips (one writer each) */
+    uint32_t fArgVblIrq = 1;
+    const OSSymbol *fSymIrq = nullptr;
+    thread_call_t fVblIrqCall = nullptr;
+    bool     fVirqReg = false, fVirqFallingBack = false;
+    IOReturn fVirqRegRet = kIOReturnNotReady;
+    uint32_t fVirqRegTries = 0, fVirqWhy = 0, fVirqEnabled = 0;
+    /* ECC review: why REGISTER was never asked (RD3FB_VIRQ_NOREG_*, 0 = it
+     * was or will be), REGISTERs past their stopping test (stop() waits for
+     * 0 before it unregisters), registrations found at stop after the timers
+     * were drained (unregistered then; expected 0) */
+    uint32_t fVirqNoReg = 0, fVirqLateUnreg = 0;
+    int32_t  fVirqRegInflight = 0;
+    void     virqRegLeave();
+    void     stopWaitVirqReg();
+    volatile uint32_t fVirqLive = 0, fVirqPflipLive = 0;
+    volatile uint64_t fVirqAbs = 0, fVirqSince = 0, fPflipAbs = 0;
+    volatile uint32_t fVirqFrame = 0, fPflipSeq = 0;
+    volatile UInt32 fVblDeliverBusy = 0;
+    uint64_t fVirqIrqs = 0, fVirqPflips = 0, fVirqDelivered = 0, fVirqDup = 0, fVirqFallback = 0;
+    uint64_t fVirqFallbackRuns = 0, fLatchIrqWoke = 0, fCoreVblank = 0, fCorePflip = 0, fCoreStorms = 0;
+    struct rd3_lat fVirqLat = {}, fPflipLat = {};
+    void     virqRegister(const char *when);
+    void     virqUnregister();
+    void     virqStats();
+    void     virqApply(const struct RD3KDisplayIrq *r, const char *when);
+    static void virqFn(void *target, unsigned int head, unsigned int kind, unsigned int frame,
+                       unsigned long long irqAbs);
+    static void vblIrqFire(thread_call_param_t p0, thread_call_param_t);
+    bool     vblDeliver();
 
     /* DRIVER-PLAN N40 switches (see the top of the file), read at start */
     uint32_t fArgDispFlags = 0, fArgGlOrder = 1, fArgIntegrated = 0, fArgCurAsync = 1, fArgWake = 1;
@@ -543,6 +587,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
     fArgVblOnce = rd3_arg("rdna3vblonce", 1);
     fArgDtMap = rd3_arg("rdna3fbdtmap", 0);
     fArgConsole = rd3_arg("rdna3fbconsole", 1);
+    fArgVblIrq = rd3_vblirq_on() ? 1u : 0u;
 
     if (!fCore)
         fCore = findCore(provider);
@@ -625,6 +670,24 @@ bool RDNA3Framebuffer::start(IOService *provider)
         clock_interval_to_deadline(16667, kMicrosecondScale, &d);
         scheduleVbl(d);
     }
+    /* N42: the vblank / pflip interrupts (the poll above stays the fallback) */
+    if (fArgVblIrq && fDcn && fVblTimer) {
+        fSymIrq = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_IRQ);
+        fVblIrqCall = thread_call_allocate_with_options(vblIrqFire, this, THREAD_CALL_PRIORITY_HIGH,
+                                                        THREAD_CALL_OPTIONS_ONCE);
+        if (!fSymIrq || !fVblIrqCall) {
+            fVirqNoReg = RD3FB_VIRQ_NOREG_NOCALL;
+            FBLOG("head %u: no symbol or thread call for the vblank interrupt: the OTG poll delivers", fHead);
+        } else {
+            virqRegister("start");
+        }
+    } else {
+        /* the reason the 'vblank irq' triage row names (virq_noreg) */
+        fVirqNoReg = !fArgVblIrq ? RD3FB_VIRQ_NOREG_ARG : !fDcn ? RD3FB_VIRQ_NOREG_NODCN : RD3FB_VIRQ_NOREG_NOVBL;
+        if (fArgVblIrq)
+            FBLOG("head %u: the vblank interrupt is not asked for (%s): %s", fHead, !fDcn ? "no DCN head" :
+                  "no VBL thread call", !fDcn ? "the console timer delivers" : "no VBL is delivered at all");
+    }
     /* the family's wake work (rdna3fbwake): its gate on the controller's
      * workloop and its retry, ready before the first setPowerState */
     if (fArgWake) {
@@ -652,10 +715,11 @@ bool RDNA3Framebuffer::start(IOService *provider)
     /* DRIVER-PLAN N40: every switch with its default, for the A/B */
     FBLOG("head %u switches: dispflags %u (default 0), glorder %u (default 1), fbintegrated %u (default 0), "
           "cursorasync %u (default 1%s), fbwake %u (default 1), vblonce %u (default 1%s), fbdtmap %u (default 0), "
-          "fbconsole %u (default 1); VBL source: %s (no hardware vblank interrupt in the core yet)",
+          "fbconsole %u (default 1), vblirq %u (default 1); VBL source: %s",
           fHead, fArgDispFlags, fArgGlOrder, fArgIntegrated, fArgCurAsync, !fCurReady ? ", no hardware cursor" : fCurCall ? "" : ", no thread call: synchronous",
-          fArgWake, fArgVblOnce, fVblTimer ? "" : ", NO VBL thread call", fArgDtMap, fArgConsole,
-          fDcn ? "OTG frame counter polled by a thread call" : "timer");
+          fArgWake, fArgVblOnce, fVblTimer ? "" : ", NO VBL thread call", fArgDtMap, fArgConsole, fArgVblIrq,
+          !fDcn ? "timer" : fVirqLive ? "the DCN vblank interrupt, the OTG frame counter poll as fallback"
+                                      : "OTG frame counter polled by a thread call");
     /* the switches as asked (the boot-arg or its default; triage compares
      * them with the boot-args) and, where they can differ, what is in
      * effect: cursorasync_active (a thread call moves the cursor), hwcursor,
@@ -670,6 +734,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
             { "wakegate", fWakeGate ? 1u : 0u }, { "vblonce", fArgVblOnce }, { "vbl_call", fVblTimer ? 1u : 0u },
             { "vblonce_active", fArgVblOnce && fVblTimer ? 1u : 0u }, { "fbdtmap", fArgDtMap },
             { "fbconsole", fArgConsole }, { "bootconsole", fBootConsole ? 1u : 0u },
+            { "vblirq", fArgVblIrq }, { "vblirq_call", fVblIrqCall ? 1u : 0u },
         };
         for (unsigned i = 0; i < sizeof(kv) / sizeof(kv[0]); i++) {
             OSNumber *n = OSNumber::withNumber((unsigned long long)kv[i].v, 32);
@@ -681,7 +746,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
         setProperty("RDNA3,Switches", sw);
         sw->release();
     }
-    setProperty("RDNA3,VBLSource", fDcn ? "otg-poll" : "timer");
+    setProperty("RDNA3,VBLSource", !fDcn ? "timer" : fVirqLive ? "irq+otg-poll" : "otg-poll");
     {
         /* replaced after open(); this one left means it was never opened */
         char txt[80];
@@ -736,9 +801,29 @@ void RDNA3Framebuffer::stop(IOService *provider)
             wl->removeEventSource(g);
         g->release();
     }
+    /* N42: a REGISTER past its stopping test finishes first (counted under
+     * fLock with fStopping, ECC review); after the unregister no interrupt
+     * function runs, then its thread call goes (its runs hold no reference:
+     * cancelled and waited for, never released) */
+    stopWaitVirqReg();
+    virqUnregister();
+    if (fVblIrqCall) {
+        thread_call_cancel_wait(fVblIrqCall);
+        while (!thread_call_free(fVblIrqCall))
+            thread_call_cancel_wait(fVblIrqCall);
+        fVblIrqCall = nullptr;
+    }
     if (fVblTimer) {
         fbCallDrainFree(this, fVblTimer);   /* waits for a vblFire still running */
         fVblTimer = nullptr;
+    }
+    if (fVirqReg) {
+        /* none can (a REGISTER is counted in flight and waited for above);
+         * if one did, the core must not keep calling into this object.
+         * virqFn sees fStopping and enters no thread call. */
+        fVirqLateUnreg++;
+        FBLOG("stop: head %u: a vblank interrupt registration came after the unregister: unregistered again", fHead);
+        virqUnregister();
     }
     if (fCurCall) {
         fbCallDrainFree(this, fCurCall);
@@ -775,6 +860,7 @@ void RDNA3Framebuffer::free()
     OSSafeReleaseNULL(fSymCursor);
     OSSafeReleaseNULL(fSymEdid);
     OSSafeReleaseNULL(fSymHotplug);
+    OSSafeReleaseNULL(fSymIrq);
     OSSafeReleaseNULL(fSymGamma);
     if (fGamma) {
         IOFree(fGamma, sizeof(*fGamma));
@@ -836,6 +922,33 @@ void RDNA3Framebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
         me->fVblOverlap++;
     uint64_t now = 0, period = me->vblPeriodAbs();
     clock_get_uptime(&now);
+    /* N42: while the vblank interrupt delivers, this only looks again just
+     * after the fallback would be due; when it fell silent for
+     * RD3_VIRQ_FALLBACK_FRAMES frames the poll below delivers (counted) */
+    bool fallback = false;
+    if (me->fVirqLive) {
+        const uint64_t since = me->fVirqSince;
+        if (!rd3_virq_poll_due(1, since, now, period, RD3_VIRQ_FALLBACK_FRAMES)) {
+            me->fVblWaits = 0;
+            OSDecrementAtomic(&me->fVblIn);
+            me->scheduleVbl(rd3_virq_watch_at(since, period, RD3_VIRQ_FALLBACK_FRAMES));
+            me->release();
+            return;
+        }
+        fallback = true;
+        if (!me->fVirqFallingBack) {
+            me->fVirqFallingBack = true;
+            me->fVirqFallbackRuns++;
+            uint64_t ns = 0;
+            absolutetime_to_nanoseconds(now - (since < now ? since : now), &ns);
+            if (me->fVirqFallbackRuns <= 8 || (me->fVirqFallbackRuns & 1023) == 0)
+                FBLOG("VBL: head %u: no vblank interrupt for %llu us (%u frames at most): the OTG poll delivers "
+                      "(fallback #%llu; vblank interrupts %llu, pflip %llu)", me->fHead,
+                      (unsigned long long)(ns / 1000), RD3_VIRQ_FALLBACK_FRAMES,
+                      (unsigned long long)me->fVirqFallbackRuns, (unsigned long long)me->fVirqIrqs,
+                      (unsigned long long)me->fVirqPflips);
+        }
+    }
     RD3KDisplayStatus st;
     if (me->coreStatus(&st)) {
         if (st.frame == me->fLastFrame && me->fVblWaits < 12) {
@@ -853,9 +966,6 @@ void RDNA3Framebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
             me->fVblStill++;   /* 12 looks and the counter did not move: delivered anyway */
         me->fLastFrame = st.frame;
         me->fVblWaits = 0;
-        /* a new frame: a pending flip may have latched (rdna3FlipLatchWait) */
-        if (me->fLatchLock)
-            IOLockWakeup(me->fLatchLock, &me->fLatchEv, false);
         /* next look a little before the next frame */
         me->fVblNext = now + period - period / 8;
     } else {
@@ -865,22 +975,233 @@ void RDNA3Framebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
         if (me->fVblNext <= now)
             me->fVblNext = now + period;
     }
-    if (me->fVbl.proc)
-        me->fVbl.proc(me->fVbl.target, me->fVbl.ref);
-    me->fVblDelivered++;
-    if (me->fHpOn && ++me->fHpTick >= 30) {
-        me->fHpTick = 0;
-        me->hotplugPoll(false);
-    }
-    /* the N40 counters into the registry about every 2 s */
-    if (++me->fStatTick >= 120) {
-        me->fStatTick = 0;
-        me->integratedRecheck();
-        me->publishStats();
-    }
+    if (me->vblDeliver() && fallback)
+        me->fVirqFallback++;
     OSDecrementAtomic(&me->fVblIn);
     me->scheduleVbl(me->fVblNext);
     me->release();
+}
+
+/* one VBL to IOGraphics and what rides on it (the latch waiters, the
+ * hotplug look, the ~2 s counters); the poll and the interrupt's thread call
+ * never deliver at once: the one that finds the other inside skips (the
+ * same vblank, counted) */
+bool RDNA3Framebuffer::vblDeliver()
+{
+    if (!OSCompareAndSwap(0, 1, &fVblDeliverBusy)) {
+        fVirqDup++;
+        return false;
+    }
+    /* a new frame: a pending flip may have latched (rdna3FlipLatchWait) */
+    if (fLatchLock)
+        IOLockWakeup(fLatchLock, &fLatchEv, false);
+    if (fVbl.proc)
+        fVbl.proc(fVbl.target, fVbl.ref);
+    fVblDelivered++;
+    if (fHpOn && ++fHpTick >= 30) {
+        fHpTick = 0;
+        hotplugPoll(false);
+    }
+    /* the N40 / N42 counters into the registry about every 2 s */
+    if (++fStatTick >= 120) {
+        fStatTick = 0;
+        integratedRecheck();
+        if (fVirqReg)
+            virqStats();
+        else if (fVblIrqCall && fVirqRegRet == kIOReturnNotReady)
+            virqRegister("retry");   /* the bring-up's MSI handler was not up yet */
+        publishStats();
+    }
+    OSCompareAndSwap(1, 0, &fVblDeliverBusy);
+    return true;
+}
+
+/* ------------------- N42: the vblank / pflip interrupts ------------------- */
+
+/* on the core's interrupt work loop, under its registration lock: record
+ * and schedule only (dm_crtc_high_irq / dm_pflip_high_irq's place) */
+void RDNA3Framebuffer::virqFn(void *target, unsigned int head, unsigned int kind, unsigned int frame,
+                              unsigned long long irqAbs)
+{
+    RDNA3Framebuffer *me = (RDNA3Framebuffer *)target;
+    (void)head;
+    if (kind == RD3K_DISPIRQ_VBLANK) {
+        me->fVirqAbs = irqAbs;
+        me->fVirqFrame = frame;
+        me->fVirqIrqs++;
+        if (me->fVblIrqCall && !me->fStopping)
+            thread_call_enter(me->fVblIrqCall);
+    } else if (kind == RD3K_DISPIRQ_PFLIP) {
+        /* the flip latched: the accelerator's latch wait finds it at once */
+        me->fPflipAbs = irqAbs;
+        me->fVirqPflips++;
+        OSIncrementAtomic((volatile SInt32 *)&me->fPflipSeq);
+        if (me->fLatchLock)
+            IOLockWakeup(me->fLatchLock, &me->fLatchEv, false);
+    }
+}
+
+void RDNA3Framebuffer::vblIrqFire(thread_call_param_t p0, thread_call_param_t)
+{
+    RDNA3Framebuffer *me = (RDNA3Framebuffer *)p0;
+    if (me->fStopping || !me->fVirqLive)
+        return;
+    uint64_t now = 0;
+    clock_get_uptime(&now);
+    const uint64_t irq = me->fVirqAbs;
+    if (irq && now >= irq) {
+        uint64_t ns = 0;
+        absolutetime_to_nanoseconds(now - irq, &ns);
+        rd3_lat_add(&me->fVirqLat, ns / 1000);
+    }
+    me->fLastFrame = me->fVirqFrame;
+    me->fVblWaits = 0;
+    me->fVirqSince = now;
+    if (me->vblDeliver())
+        me->fVirqDelivered++;
+    if (me->fVirqFallingBack) {
+        me->fVirqFallingBack = false;
+        if (me->fVirqFallbackRuns <= 8 || (me->fVirqFallbackRuns & 1023) == 0)
+            FBLOG("VBL: head %u: the vblank interrupt is back (%llu VBLs by the poll so far)", me->fHead,
+                  (unsigned long long)me->fVirqFallback);
+    }
+}
+
+void RDNA3Framebuffer::virqApply(const RD3KDisplayIrq *r, const char *when)
+{
+    const uint32_t live = (r->enabled & RD3K_DISPIRQ_VBLANK) ? 1u : 0u;
+    const uint32_t plive = (r->enabled & RD3K_DISPIRQ_PFLIP) ? 1u : 0u;
+    if (live && !fVirqLive) {
+        uint64_t now = 0;
+        clock_get_uptime(&now);
+        fVirqSince = now;   /* the fallback counts from here */
+    }
+    if (live != fVirqLive || plive != fVirqPflipLive || r->why != fVirqWhy)
+        FBLOG("VBL: head %u (%s): vblank interrupt %s, pflip interrupt %s (OTG %u, HUBP %u, why %u: %s)", fHead, when,
+              live ? "ON" : "off", plive ? "ON" : "off", r->otg, r->pipe, r->why,
+              r->why == RD3K_DISPIRQ_WHY_NONE      ? "as asked"
+              : r->why == RD3K_DISPIRQ_WHY_SYSCTL  ? "debug.rdna3_vblirq=0"
+              : r->why == RD3K_DISPIRQ_WHY_NOIRQ   ? "no MSI handler"
+              : r->why == RD3K_DISPIRQ_WHY_STORM   ? "cut after a storm"
+              : r->why == RD3K_DISPIRQ_WHY_REG     ? "the enable bit did not read back"
+              : r->why == RD3K_DISPIRQ_WHY_HEAD    ? "the head has no OTG / HUBP"
+              : r->why == RD3K_DISPIRQ_WHY_DOWN    ? "the display was not brought back after a power loss / reset"
+                                                   : "unknown");
+    fVirqLive = live;
+    fVirqPflipLive = plive;
+    fVirqWhy = r->why;
+    fVirqEnabled = r->enabled;
+    fCoreVblank = r->vblank;
+    fCorePflip = r->pflip;
+    fCoreStorms = r->storms;
+    setProperty("RDNA3,VBLSource", live ? "irq+otg-poll" : "otg-poll");
+}
+
+void RDNA3Framebuffer::virqRegister(const char *when)
+{
+    if (!fArgVblIrq || !fDcn || !fCore || !fSymIrq || !fVblIrqCall || fVirqReg || !fLock)
+        return;
+    /* the stopping test and the in-flight count together under fLock (the
+     * family wake work's pattern, rd3fb_wake_enter): stop() sets fStopping
+     * under it and waits for the count before it unregisters, so a REGISTER
+     * from a vblFire / vblIrqFire still running is never left in the core
+     * calling into a freed framebuffer (ECC review) */
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    const bool go = rd3fb_wake_enter(&fVirqRegInflight, fStopping != 0) != 0;
+    IOSimpleLockUnlockEnableInterrupt(fLock, st);
+    if (!go) {
+        if (!fVirqRegTries)
+            fVirqNoReg = RD3FB_VIRQ_NOREG_STOPPING;
+        return;
+    }
+    RD3KDisplayIrq r;
+    bzero(&r, sizeof(r));
+    r.version = RD3K_DISPIRQ_VERSION;
+    r.op = RD3K_DISPIRQ_OP_REGISTER;
+    r.head = fHead;
+    r.want = RD3K_DISPIRQ_VBLANK | RD3K_DISPIRQ_PFLIP;
+    r.fn = virqFn;
+    r.target = this;
+    const IOReturn ret = fCore->callPlatformFunction(fSymIrq, false, &r, nullptr, nullptr, nullptr);
+    fVirqRegRet = ret;
+    fVirqRegTries++;
+    if (ret == kIOReturnSuccess) {
+        fVirqReg = true;
+        virqApply(&r, when);
+        virqRegLeave();
+        return;
+    }
+    virqRegLeave();
+    if (fVirqRegTries <= 4 || (fVirqRegTries & 255) == 0)
+        FBLOG("VBL: head %u: rdna3DisplayIrq REGISTER (%s, try %u) answered 0x%x: %s -- the OTG poll delivers", fHead,
+              when, fVirqRegTries, (unsigned)ret,
+              ret == kIOReturnUnsupported ? "a core older than N42, or rdna3vblirq=0 there"
+              : ret == kIOReturnNotReady  ? "no MSI handler yet (rdna3msi=1?) or no head: asked again every ~2 s"
+                                          : "refused");
+}
+
+void RDNA3Framebuffer::virqRegLeave()
+{
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    rd3fb_wake_leave(&fVirqRegInflight);
+    IOSimpleLockUnlockEnableInterrupt(fLock, st);
+}
+
+/* stop(), fStopping set: a REGISTER in flight finishes before the
+ * unregister (bounded like stopWaitWake; it only waits for the core's
+ * registration lock) */
+void RDNA3Framebuffer::stopWaitVirqReg()
+{
+    if (!fLock)
+        return;
+    uint32_t waited = 0;
+    for (;;) {
+        IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+        const int32_t n = fVirqRegInflight;
+        IOSimpleLockUnlockEnableInterrupt(fLock, st);
+        const int rc = rd3fb_stop_wake_wait(n, waited);
+        if (rc == 1) {
+            if (waited)
+                FBLOG("stop: head %u waited %u ms for a vblank interrupt REGISTER in flight", fHead, waited);
+            return;
+        }
+        if (rc < 0) {
+            FBLOG("stop: head %u: %d vblank interrupt REGISTER(s) STILL in flight after %u ms: unregistering anyway "
+                  "(checked again after the timers are drained)", fHead, (int)n, waited);
+            return;
+        }
+        IOSleep(RD3FB_STOP_WAKE_STEP_MS);
+        waited += RD3FB_STOP_WAKE_STEP_MS;
+    }
+}
+
+void RDNA3Framebuffer::virqStats()
+{
+    if (!fVirqReg || !fCore || !fSymIrq)
+        return;
+    RD3KDisplayIrq r;
+    bzero(&r, sizeof(r));
+    r.version = RD3K_DISPIRQ_VERSION;
+    r.op = RD3K_DISPIRQ_OP_STATS;
+    r.head = fHead;
+    if (fCore->callPlatformFunction(fSymIrq, false, &r, nullptr, nullptr, nullptr) == kIOReturnSuccess)
+        virqApply(&r, "stats");
+}
+
+void RDNA3Framebuffer::virqUnregister()
+{
+    if (!fVirqReg || !fCore || !fSymIrq)
+        return;
+    RD3KDisplayIrq r;
+    bzero(&r, sizeof(r));
+    r.version = RD3K_DISPIRQ_VERSION;
+    r.op = RD3K_DISPIRQ_OP_UNREGISTER;
+    r.head = fHead;
+    const IOReturn ret = fCore->callPlatformFunction(fSymIrq, false, &r, nullptr, nullptr, nullptr);
+    fVirqReg = false;
+    fVirqLive = fVirqPflipLive = 0;
+    if (ret != kIOReturnSuccess)
+        FBLOG("VBL: head %u: rdna3DisplayIrq UNREGISTER answered 0x%x", fHead, (unsigned)ret);
 }
 
 IOReturn RDNA3Framebuffer::registerForInterruptType(IOSelect type, IOFBInterruptProc proc,
@@ -1634,7 +1955,7 @@ void RDNA3Framebuffer::publishStats()
     IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
     w = fWake;
     IOSimpleLockUnlockEnableInterrupt(fLock, st);
-    OSDictionary *d = OSDictionary::withCapacity(48);
+    OSDictionary *d = OSDictionary::withCapacity(72);
     if (!d)
         return;
     const struct { const char *k; uint64_t v; } kv[] = {
@@ -1656,6 +1977,16 @@ void RDNA3Framebuffer::publishStats()
         { "open_ungated", fOpenUngated }, { "open_fails", fOpenFails },
         { "dt_validate", fDtValidates }, { "dt_matched", fDtMatched }, { "dt_refused", fDtRefused },
         { "dt_sets", fDtSets }, { "dt_mapped", fDtMapped }, { "dispflags_asked", fDispFlagsAsked },
+        /* N42 */
+        { "virq_reg", fVirqReg ? 1u : 0u }, { "virq_reg_ret", (uint32_t)fVirqRegRet }, { "virq_reg_tries", fVirqRegTries },
+        { "virq_live", fVirqLive }, { "virq_pflip_live", fVirqPflipLive }, { "virq_why", fVirqWhy },
+        { "virq_irqs", fVirqIrqs }, { "virq_delivered", fVirqDelivered }, { "virq_dup", fVirqDup },
+        { "virq_fallback", fVirqFallback }, { "virq_fallback_runs", fVirqFallbackRuns },
+        { "virq_lat_avg_us", rd3_lat_avg(&fVirqLat) }, { "virq_lat_max_us", fVirqLat.max_us },
+        { "virq_pflips", fVirqPflips }, { "latch_waits", fLatchWaits }, { "latch_timeouts", fLatchWaitTimeouts },
+        { "latch_irq_woke", fLatchIrqWoke }, { "pflip_lat_avg_us", rd3_lat_avg(&fPflipLat) },
+        { "pflip_lat_max_us", fPflipLat.max_us }, { "core_vblank", fCoreVblank }, { "core_pflip", fCorePflip },
+        { "core_storms", fCoreStorms }, { "virq_noreg", fVirqNoReg }, { "virq_late_unreg", fVirqLateUnreg },
     };
     for (unsigned i = 0; i < sizeof(kv) / sizeof(kv[0]); i++) {
         OSNumber *n = OSNumber::withNumber((unsigned long long)kv[i].v, 64);
@@ -2508,12 +2839,18 @@ bool RDNA3Framebuffer::flipToLocked(uint64_t vramOffset, uint32_t w, uint32_t h,
 IOReturn RDNA3Framebuffer::latchWait(struct RD3KFlipLatchWait *w)
 {
     const uint32_t to = w->timeoutUs > RD3K_FLIPWAIT_MAX_US ? RD3K_FLIPWAIT_MAX_US : w->timeoutUs;
+    const bool v2 = w->version >= 2;
+    const uint32_t seq0 = fPflipSeq;   /* N42: a pflip interrupt from here on is this flip's done */
     uint64_t start = 0, deadline = 0;
     clock_get_uptime(&start);
     clock_interval_to_deadline(to, kMicrosecondScale, &deadline);
     w->pending = 0;
     w->frame = 0;
     w->waitedUs = 0;
+    if (v2) {
+        w->irqFlags = fVirqPflipLive ? RD3K_FLIPWAIT_IRQ_LIVE : 0u;
+        w->irqLatUs = 0;
+    }
     fLatchWaits++;
     for (;;) {
         RD3KDisplayStatus st;
@@ -2526,8 +2863,25 @@ IOReturn RDNA3Framebuffer::latchWait(struct RD3KFlipLatchWait *w)
             return kIOReturnNotReady;
         w->pending = st.flipPending;
         w->frame = st.frame;
-        if (!st.flipPending)
+        if (!st.flipPending) {
+            /* N42: ended by the head's flip-done interrupt (amdgpu's
+             * dm_pflip_high_irq), or seen by a look (vblank, nap) first */
+            if (rd3_virq_pflip_seen(seq0, fPflipSeq)) {
+                const uint64_t irq = fPflipAbs;
+                uint64_t lat = 0;
+                if (irq && now >= irq) {
+                    absolutetime_to_nanoseconds(now - irq, &lat);
+                    lat /= 1000;
+                }
+                fLatchIrqWoke++;
+                rd3_lat_add(&fPflipLat, lat);
+                if (v2) {
+                    w->irqFlags |= RD3K_FLIPWAIT_IRQ_WOKE;
+                    w->irqLatUs = (unsigned int)(lat > 0xffffffffull ? 0xffffffffull : lat);
+                }
+            }
             return kIOReturnSuccess;
+        }
         if (now >= deadline || !fLatchLock || fStopping) {
             fLatchWaitTimeouts++;
             if (fLatchWaitTimeouts <= 8 || (fLatchWaitTimeouts & 1023) == 0)
@@ -2594,7 +2948,7 @@ IOReturn RDNA3Framebuffer::callPlatformFunction(const OSSymbol *fn, bool wait, v
     }
     if (fn->isEqualTo(RD3K_FLIP_FN_LATCHWAIT)) {
         RD3KFlipLatchWait *w = (RD3KFlipLatchWait *)p1;
-        if (!w || w->version != RD3K_FLIPWAIT_VERSION)
+        if (!w || !RD3K_FLIPWAIT_OK(w->version))   /* 1 and 2 (N42 appended irqFlags / irqLatUs) */
             return kIOReturnBadArgument;
         return latchWait(w);
     }

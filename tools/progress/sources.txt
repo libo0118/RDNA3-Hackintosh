@@ -49,6 +49,8 @@ Display: modeset     | display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c
 Display: modeset     | display/dc/clk_mgr/dcn32/dcn32_clk_mgr_smu_msg.c
 Display: hotplug     | display/dc/link/protocols/link_hpd.c
 Display: hotplug     | display/dc/gpio/hw_hpd.c
+Display: interrupts  | display/dc/irq/dcn32/irq_service_dcn32.c
+Display: interrupts  | display/dc/irq/irq_service.c
 Display: color       | display/dc/mpc/dcn30/dcn30_mpc.c
 Display: color       | display/dc/dcn30/dcn30_cm_common.c
 Display: modeset     | display/dc/link/link_dpms.c
