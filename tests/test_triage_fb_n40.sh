@@ -24,6 +24,8 @@
 #    / bad-instance IVs by kind and instance, ack / disable failures, DCE IVs no handler claims, HPD6 IVs, a display
 #    not brought back, a stall's drained IVs, a core string older than the round; present_verdict's pflip row with
 #    no latch wait yet
+#  - the N42 ECC review round 2: a head still lost after the restore, a stale source on an unregistered head,
+#    stale sources turned off, failed publishes, a core string of round 1
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d)
@@ -199,8 +201,8 @@ n42("p", stats={"virq_live": 0, "virq_why": 3})
 # property instead of the sysctl, rdna3vblirq=0; v TESTS ONLY from the tests file; w a core older than N42
 DI = ("vblirq=1 on=1 msi=1 hpdirq=0 hpd=2 hpdnopin=0 total=4500 unrouted=0 unr=0/0/0 unrinst=0x0/0x0/0x0 badinst=0 "
       "badmask=0x0/0x0/0x0 regfails=0 ackfails=0 offfails=0 stormed=0x0/0x0/0x0 drained=0/0/0 drains=0 down=0 downs=0 "
-      "downivs=0 dceother=0 dce=- syncs=3 | "
-      "h0 reg=1 want=0x3 en=0x3 why=0 otg=0 pipe=0 vblank=3600 pflip=900 vupdate=0 storms=0")
+      "downivs=0 downheads=0x0 hdowns=0 staleoffs=0 publishfails=0 dceother=0 dce=- syncs=3 | "
+      "h0 reg=1 want=0x3 en=0x3 why=0 otg=0 pipe=0 vblank=3600 pflip=900 vupdate=0 storms=0 stale=0x0")
 DI_OLD = ("vblirq=1 on=1 msi=1 hpdirq=0 hpd=2 total=4500 unrouted=0 badinst=0 regfails=0 stormed=0x0/0x0/0x0 syncs=3 | "
           "h0 reg=1 want=0x3 en=0x3 why=0 otg=0 pipe=0 vblank=3600 pflip=900 vupdate=0 storms=0")
 n42("r", dispirq=DI)
@@ -221,6 +223,12 @@ n42("y", dispirq=DI.replace("hpdnopin=0", "hpdnopin=2").replace("unrouted=0 unr=
     .replace("down=0 downs=0 downivs=0", "down=1 downs=1 downivs=9")
     .replace("dceother=0 dce=-", "dceother=6 dce=0x2a:0x0:0x0,0x55:0x1:0x0"))
 n42("z", dispirq=DI_OLD)
+# ECC review round 2: g1 head 1 still lost after the restore, a stale source on an unregistered head, a source
+# turned off, a failed publish; g2 a core string of round 1 (no round-2 keys)
+n42("g1", dispirq=DI.replace("downheads=0x0 hdowns=0 staleoffs=0 publishfails=0",
+    "downheads=0x2 hdowns=1 staleoffs=2 publishfails=3") +
+    " | h1 reg=0 want=0x0 en=0x0 why=0 otg=1 pipe=1 vblank=0 pflip=0 vupdate=0 storms=0 stale=0x1")
+n42("g2", dispirq=DI.replace(" downheads=0x0 hdowns=0 staleoffs=0 publishfails=0", ""))
 n42("fa", stats={"virq_reg": 0, "virq_reg_tries": 0, "virq_live": 0, "virq_irqs": 0, "virq_noreg": 4})
 n42("fb", stats={"virq_late_unreg": 1})
 n42("fc", mode="console", dispirq=DI)
@@ -381,6 +389,15 @@ DIR WARN y | grep -qF "the display was NOT brought back after a power loss / mod
 DIR WARN y | grep -qF "3 IV(s) drained after 1 handler stall(s), kept out of the storm window" || fail "y: drained"
 run z
 DIR WARN z | grep -qF "the core's report lacks hpdnopin,unr,unrinst,badmask,ackfails,offfails,drained,drains,down,downs,downivs,dceother,dce (older than the ECC review round: unknown, not 0)" || fail "z: an older core string"
+run g1
+DIR WARN g1 | grep -qF "head(s) 1 still LOST after the restore of a wake / mode-1 reset: their interrupt registers not written" || fail "g1: a head still lost"
+DIR WARN g1 | grep -qF "h1: sources 0x1 still enabled from before the head went down" || fail "g1: stale on an unregistered head"
+DIR WARN g1 | grep -qF "2 source(s) left enabled while their head was down, turned off when it came back" || fail "g1: stale offs"
+DIR WARN g1 | grep -qF "3 RDNA3,DisplayIrq publish(es) failed for want of memory" || fail "g1: publish failures"
+run g2
+DIR WARN g2 | grep -qF "the core's report lacks downheads,hdowns,staleoffs,publishfails (older than the ECC review round 2: unknown, not 0)" || fail "g2: a round-1 core string"
+run r
+hasnt "older than the ECC review round 2" "r: the current core string is complete"
 run fa
 row WARN "vblank irq" fa | grep -qF "rdna3vblirq=1 but REGISTER was never attempted (no symbol / thread call for the interrupt)" || fail "fa: never attempted"
 hasnt "NOT registered with the core" "fa: never attempted is not refused"

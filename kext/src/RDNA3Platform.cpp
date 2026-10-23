@@ -825,6 +825,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return displayModes((RD3KDisplayModes *)p1);
         if (fn->isEqualTo(RD3K_DISPLAY_FN_MODE)) {
             const IOReturn r = displaySetMode((RD3KDisplayMode *)p1);
+            if (r == kIOReturnSuccess)   /* a head a wake / reset left down is lit again */
+                displayIrqHeadBack(((RD3KDisplayMode *)p1)->head, "a mode set");
             displayIrqSync("mode set", true);   /* N42: the head's sources as registered, re-written */
             return r;
         }

@@ -94,23 +94,56 @@ static inline int rd3_virq_storm_note(struct rd3_virq_storm *s, uint64_t now_ns)
 /* After a wake (amdgpu_dm_irq_resume_early) or a mode-1 reset
  * (amdgpu_irq_gpu_reset_resume_helper) amdgpu sets the sources again on a
  * DCN its resume / reset path has just brought back (dm_resume). Here the
- * DCN comes back only with rdna3resume=1: 1 = it is up (the card kept its
- * power and was not suspended, or the resume ran and succeeded), the
- * sources are written again; 0 = it lost its power or its state and was
- * not brought back (an un-posted, gated DCN): nothing is written, the
- * sources are forgotten as off until a later wake or reset brings it back
- * (ECC review). */
-static inline int rd3_virq_wake_dcn_up(int power_lost, int suspended, int resume_on, int resumed)
+ * decision is per head, a mask (bit n = head n; 'all' = every head the
+ * table holds): a head gets its sources written again only when it is up
+ * after the restore (dcn32_state_restore with rdna3resume=1) or the check
+ * alone - 'lost' the heads still lost AFTER it, 'live' the heads checked
+ * and running. Nothing lost (or nothing checked): every head. Otherwise a
+ * head still lost gets nothing (a head with no snapshot, or none in the
+ * table, is not lost), and when no head runs the DCN is taken as down (0:
+ * no OTG / HUBP register is written at all, an un-posted, gated DCN; the
+ * sources are forgotten as off until a later wake or reset brings it
+ * back). ECC review round 2: the reset's
+ * rule was "up when the restore ran", so a restore that failed (2 heads
+ * still lost) wrote the enables of heads that were down, and the wake
+ * looked only at whether the GPU resume ran, not at the restore. */
+static inline uint32_t rd3_virq_heads_up(uint32_t all, uint32_t live, uint32_t lost)
 {
-    if (!power_lost && !suspended)
-        return 1;
-    return resume_on && resumed;
+    if (!(lost & all))
+        return all;
+    if (!(live & ~lost & all))
+        return 0;
+    return all & ~lost;
 }
-/* the mode-1 reset: 'restore_on' (rdna3resume=1: the heads were restored
- * from the snapshot), 'heads_lost' the heads the reset took down */
-static inline int rd3_virq_reset_dcn_up(int restore_on, uint32_t heads_lost)
+/* the wake: the card lost its power or was suspended (its IPs down) and
+ * was not resumed (rdna3resume=0, or resumeAfterPowerLoss failed): the DCN
+ * is down whatever the check says (0); otherwise per head as above, with
+ * the restore's result when rdna3resume=1 ran it, the check's otherwise */
+static inline uint32_t rd3_virq_wake_heads_up(int power_lost, int suspended, int resume_on, int resumed,
+                                              uint32_t all, uint32_t live, uint32_t lost)
 {
-    return restore_on || heads_lost == 0;
+    if ((power_lost || suspended) && !(resume_on && resumed))
+        return 0;
+    return rd3_virq_heads_up(all, live, lost);
+}
+
+/* ECC review round 2: a head that went down (the resync above left it out)
+ * keeps the sources it had enabled as 'stale' (bit k at stale_inst[k]):
+ * nothing is written while it is down, but a DCN that kept its state keeps
+ * raising them. At the head's next sync while it is up each stale source
+ * is written off (acked first) unless it is desired again at the same
+ * instance (then the sync writes its enable anyway). Returns the mask to
+ * turn off; 'inst' the head's instance per kind now. */
+static inline uint32_t rd3_virq_stale_off(uint32_t stale, uint32_t desired, const uint32_t *stale_inst,
+                                          const uint32_t *inst, unsigned kinds)
+{
+    uint32_t off = 0;
+    for (unsigned k = 0; k < kinds && k < 32; k++) {
+        const uint32_t bit = 1u << k;
+        if ((stale & bit) && (!(desired & bit) || stale_inst[k] != inst[k]))
+            off |= bit;
+    }
+    return off;
 }
 
 /* why the framebuffer never asked the core to REGISTER (RDNA3,FBStats

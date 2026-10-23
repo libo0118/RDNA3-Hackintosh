@@ -616,11 +616,11 @@ void RDNA3Accel::displayHpdIrq(uint32_t pin, int connected, int rx)
         /* HPD6 / HPD6 RX: DCN 3.2 wires HPD1..5 (no ack register to write);
          * counted and logged, it used to vanish uncounted (ECC review) */
         const uint32_t m = OSIncrementAtomic((volatile SInt32 *)&fHpdNoPin) + 1;
-        if (m <= 4 || (m & 1023) == 0)
+        if (m <= 4 || (m & 1023) == 0) {
             LOG("display: HPD%u%s interrupt #%u on a pin DCN 3.2 does not wire (HPD1..%u): not acked, dropped",
                 pin + 1, rx ? " RX" : "", m, (unsigned)RD_AUX_ENGINES);
-        setNumber("RDNA3,HPDIrqsNoPin", m);
-        displayIrqPublish();
+            displayHpdPublish();   /* the log's rule; the 2 s stats tick publishes the rest */
+        }
         return;
     }
     const uint32_t act = rd3_arg("rdna3hpdirq", 0);
@@ -631,10 +631,30 @@ void RDNA3Accel::displayHpdIrq(uint32_t pin, int connected, int rx)
             rx ? "DP short pulse" : connected ? "connected" : "disconnected",
             rx || !act ? " -- not acted on (rdna3hpdirq=0: the hotplug poll decides)" : "");
     }
-    setNumber("RDNA3,HPDIrqs", n);
-    displayIrqPublish();   /* the RDNA3,DisplayIrq copy with this HPD count (triage reads it when no sysctl was taken) */
+    /* the RDNA3,HPDIrqs / RDNA3,DisplayIrq copies (triage reads them when
+     * no sysctl was taken): the first 8 and every 1024th here, the 2 s stats
+     * tick the rest - an HPD storm no longer builds a 1.5 KB report and an
+     * OSString per IV under fIhLock (ECC review round 2) */
+    if (n <= 8 || (n & 1023) == 0)
+        displayHpdPublish();
     if (act && !rx)
         displayHotplug(pin, connected);
+}
+
+/* the HPD counts into RDNA3,HPDIrqs / RDNA3,HPDIrqsNoPin and the
+ * RDNA3,DisplayIrq copy, when they moved since the last time (the HPD IV's
+ * rate rule above, the stats tick every 2 s) */
+void RDNA3Accel::displayHpdPublish()
+{
+    const uint32_t n = fHpdIrqs, m = fHpdNoPin;
+    if (n == fHpdPubIrqs && m == fHpdPubNoPin)
+        return;
+    fHpdPubIrqs = n;
+    fHpdPubNoPin = m;
+    setNumber("RDNA3,HPDIrqs", n);
+    if (m)
+        setNumber("RDNA3,HPDIrqsNoPin", m);
+    displayIrqPublish();
 }
 
 /* handle_hpd_irq -> dc_link_detect: read the sinks again (DPCD, EDID over

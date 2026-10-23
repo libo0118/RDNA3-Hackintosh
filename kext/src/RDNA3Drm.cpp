@@ -597,6 +597,9 @@ void RDNA3Accel::statsTick(void *owner, void *)
      * whether the SMU's metrics came or not */
     if (!a->fStatsStop)
         a->displayTxCheck(nullptr);
+    /* N42: the HPD counts the interrupt path no longer publishes per IV */
+    if (!a->fStatsStop)
+        a->displayHpdPublish();
     if (!a->fStatsStop && a->fStatsCall) {
         uint64_t dl;
         clock_interval_to_deadline(2000, kMillisecondScale, &dl);

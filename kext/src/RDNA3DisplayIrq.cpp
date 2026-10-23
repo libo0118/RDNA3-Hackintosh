@@ -38,6 +38,16 @@
  * DCN back no interrupt register is written (down=, downivs=; the sources
  * are forgotten as off, RD3K_DISPIRQ_WHY_DOWN).
  *
+ * ECC review (N42 round 2): "up" after a wake / reset is decided per head
+ * from the restore's result (rd3_virq_heads_up): a head still lost gets no
+ * source (downheads=, hdowns=; a mode set that lights it brings it back),
+ * no head running = the DCN down as before; the sources a head had enabled
+ * when it went down are kept as stale and, at its next sync while up,
+ * acked and written off unless wanted again there (stale=, staleoffs=); a
+ * report that could not be published for want of memory is counted
+ * (publishfails=); an HPD IV republishes the report only at the first 8
+ * and every 1024th, the 2 s stats tick otherwise (RDNA3Display.cpp).
+ *
  * SPDX-License-Identifier: MIT
  */
 #include "RDNA3Accel.hpp"
@@ -71,6 +81,8 @@ struct RDNA3DispIrqHead {
     uint32_t         enabled;       /* enabled in hardware at otg / pipe */
     uint32_t         why;           /* RD3K_DISPIRQ_WHY_* of a wanted source left off */
     uint32_t         otg, pipe;     /* where they are enabled (~0u: nowhere yet) */
+    uint32_t         stale;         /* enabled when the head went down, not written since (round 2) */
+    uint32_t         staleInst[kDiKinds];   /* where each stale source is enabled */
     uint64_t         cnt[kDiKinds];
     uint64_t         storms;
     uint32_t         regs;          /* registrations */
@@ -96,12 +108,19 @@ struct RDNA3DispIrq {
     struct { uint32_t src, ext, ring; } dceSeen[4];   /* the first four distinct ones */
     volatile uint32_t down;               /* the DCN was not brought back: no register is written */
     uint32_t         downs;
+    uint32_t         downHeads;           /* bit n: head n not brought back: none of its registers written */
+    uint32_t         hdowns;              /* resyncs that left a head down on a DCN that is up */
+    uint64_t         staleOffs;           /* stale sources acked and written off at an up sync */
+    uint32_t         staleOffLogs;
+    volatile SInt64  publishFails;        /* RDNA3,DisplayIrq not published: no memory for the report */
     uint64_t         downIvs;             /* IVs while down: dropped without an ack */
     bool             sysctl;
 };
 
+static_assert(RDNA3Accel::kDispIrqAllHeads == (1u << RD3K_MAX_HEADS) - 1, "kDispIrqAllHeads is not RD3K_MAX_HEADS bits");
+
 static RDNA3Accel *gDirqOwner;
-static const size_t kDiReportCap = 1280;   /* the key=value report: ~520 bytes of totals, ~150 a head */
+static const size_t kDiReportCap = 1536;   /* the key=value report: ~600 bytes of totals, ~160 a head */
 static SInt32 gDirqSysctlBusy;
 
 static uint32_t diInst(const RDNA3DispIrqHead *H, int k)
@@ -134,6 +153,26 @@ static void diOff(RDNA3DispIrq *d, rdna3_dev *dev, int k, uint32_t inst, const c
         d->offFailLogs++;
         LOG("display irq: %s %u: the disable did not take (%d) at %s (%llu such) -- the source may go on raising",
             kDiName[k], inst, r, where, (unsigned long long)d->offFails);
+    }
+}
+
+/* a source left enabled while its head was down (ECC review round 2): its
+ * pending status acked first (it may have latched while nobody listened),
+ * then written off */
+static void diStaleOff(RDNA3DispIrq *d, rdna3_dev *dev, int k, uint32_t inst, uint32_t head, const char *where)
+{
+    rdna3_dc_irq_source s = { kDiDcKind[k], inst };
+    IOSimpleLockLock(d->reg);
+    const int ar = dcirq_ack(dev, s);
+    IOSimpleLockUnlock(d->reg);
+    if (ar != RDNA3_OK)
+        d->ackFails++;
+    diOff(d, dev, k, inst, where);
+    d->staleOffs++;
+    if (d->staleOffLogs < 8 || (d->staleOffs & 1023) == 0) {
+        d->staleOffLogs++;
+        LOG("display irq: head %u: %s %u was left enabled while the display was down: acked (%d) and turned off at "
+            "%s (%llu such)", head, kDiName[k], inst, ar, where, (unsigned long long)d->staleOffs);
     }
 }
 
@@ -267,7 +306,8 @@ void RDNA3Accel::displayIrqSync(const char *why, bool force)
                             fDcn->head[h].pipe < RD_DCIRQ_INSTS;
         const uint32_t otg = headOk ? fDcn->head[h].otg : ~0u, pipe = headOk ? fDcn->head[h].pipe : ~0u;
         uint32_t desired = H->fn ? H->want : 0, whyNot = RD3K_DISPIRQ_WHY_NONE;
-        if (desired && d->down) {
+        const bool hDown = d->down || (d->downHeads & (1u << h)) != 0;
+        if (desired && hDown) {
             desired = 0;
             whyNot = RD3K_DISPIRQ_WHY_DOWN;   /* displayIrqResync: nothing is written */
         } else if (desired && !d->on) {
@@ -291,6 +331,16 @@ void RDNA3Accel::displayIrqSync(const char *why, bool force)
                 diOff(d, fDispDev, k, diInst(H, k), why);
                 H->enabled &= ~bit;
             }
+        }
+        if (H->stale && !hDown) {
+            /* the head is up again: what it left enabled while down is
+             * turned off unless wanted at the same place (written below) */
+            const uint32_t now[kDiKinds] = { otg, pipe, otg };
+            const uint32_t off = rd3_virq_stale_off(H->stale, desired, H->staleInst, now, kDiKinds);
+            for (int k = 0; k < kDiKinds; k++)
+                if (off & (1u << k))
+                    diStaleOff(d, fDispDev, k, H->staleInst[k], h, why);
+            H->stale = 0;
         }
         H->otg = otg;
         H->pipe = pipe;
@@ -317,40 +367,79 @@ void RDNA3Accel::displayIrqSync(const char *why, bool force)
 }
 
 /* after a wake or a mode-1 reset (amdgpu_dm_irq_resume_early,
- * amdgpu_irq_gpu_reset_resume_helper): 'dcnUp' (rd3_virq_wake_dcn_up /
- * rd3_virq_reset_dcn_up) = the DCN is up: every source as registered is
- * written again; otherwise it lost its power or state and was not brought
- * back: no OTG / HUBP register is written (an un-posted, gated DCN, ECC
- * review), the sources are forgotten as off until a wake or reset brings it
- * back, the framebuffers poll */
-void RDNA3Accel::displayIrqResync(const char *why, bool dcnUp)
+ * amdgpu_irq_gpu_reset_resume_helper): 'headsUp' (rd3_virq_heads_up /
+ * rd3_virq_wake_heads_up, bit n = head n) = the heads up after the restore:
+ * their sources as registered are written again. A head left out is down
+ * (its restore failed): none of its OTG / HUBP registers is written, its
+ * enabled sources are kept as stale (turned off at its first sync while
+ * up again), its framebuffer polls. 0 = the DCN lost its power or state
+ * and was not brought back: no register is written at all (an un-posted,
+ * gated DCN, ECC review), IVs are dropped unacked, until a wake or reset
+ * brings it back. */
+void RDNA3Accel::displayIrqResync(const char *why, uint32_t headsUp)
 {
     RDNA3DispIrq *d = fDirq;
     if (!d || !fDispDev)
         return;
-    if (dcnUp) {
-        if (d->down)
-            LOG("display irq: %s: the display is back: the vblank / pflip sources are written again", why);
-        d->down = 0;
-        displayIrqSync(why, true);
-        return;
-    }
+    headsUp &= kDispIrqAllHeads;
     uint32_t forgot = 0;
     IOLockLock(d->lock);
-    d->down = 1;
-    d->downs++;
+    const bool wasDown = d->down != 0;
+    const uint32_t wasDownHeads = d->downHeads;
+    d->down = headsUp ? 0 : 1;
+    d->downHeads = kDispIrqAllHeads & ~headsUp;
+    if (!headsUp)
+        d->downs++;
+    else if (d->downHeads)
+        d->hdowns++;
     for (uint32_t h = 0; h < RD3K_MAX_HEADS; h++) {
         RDNA3DispIrqHead *H = &d->h[h];
+        if (headsUp & (1u << h))
+            continue;
+        for (int k = 0; k < kDiKinds; k++)
+            if (H->enabled & (1u << k)) {
+                H->stale |= 1u << k;
+                H->staleInst[k] = diInst(H, k);
+            }
         forgot |= H->enabled << (4 * h);
         H->enabled = 0;
         if (H->fn && H->want)
             H->why = RD3K_DISPIRQ_WHY_DOWN;
     }
     IOLockUnlock(d->lock);
-    LOG("display irq: %s: the display was NOT brought back (power or state lost; rdna3resume=0 or its resume / "
-        "restore failed): no interrupt register is written, the sources are forgotten as off (were 0x%x, 4 bits a "
-        "head), the framebuffers poll", why, forgot);
-    displayIrqPublish();
+    if (!headsUp) {
+        LOG("display irq: %s: the display was NOT brought back (power or state lost, or no head running after the "
+            "restore; rdna3resume=0 or its resume / restore failed): no interrupt register is written, the sources "
+            "are forgotten as off (were 0x%x, 4 bits a head), the framebuffers poll", why, forgot);
+        displayIrqPublish();
+        return;
+    }
+    if (d->downHeads)
+        LOG("display irq: %s: head mask 0x%x up, 0x%x still lost after the restore: only the heads up get their "
+            "vblank / pflip sources; the others are not written (were 0x%x, 4 bits a head), their framebuffers poll",
+            why, headsUp, d->downHeads, forgot);
+    else if (wasDown || wasDownHeads)
+        LOG("display irq: %s: the display is back (head mask 0x%x was down): the vblank / pflip sources are written "
+            "again", why, wasDown ? kDispIrqAllHeads : wasDownHeads);
+    displayIrqSync(why, true);
+}
+
+/* a mode set lit 'head' (displaySetMode succeeded): a head left down by a
+ * wake / reset whose restore failed is up again on a DCN that is up; the
+ * caller's sync writes its sources (ECC review round 2) */
+void RDNA3Accel::displayIrqHeadBack(uint32_t head, const char *why)
+{
+    RDNA3DispIrq *d = fDirq;
+    if (!d || head >= RD3K_MAX_HEADS)
+        return;
+    IOLockLock(d->lock);
+    const bool back = !d->down && (d->downHeads & (1u << head)) != 0;
+    if (back)
+        d->downHeads &= ~(1u << head);
+    IOLockUnlock(d->lock);
+    if (back)
+        LOG("display irq: head %u: %s lit it again after a wake / reset left it down: its sources are written again",
+            head, why);
 }
 
 /* ------------------------- the framebuffer's call ------------------------- */
@@ -434,7 +523,8 @@ int RDNA3Accel::displayIrqReport(char *buf, size_t len)
                           "vblirq=%u on=%u msi=%u hpdirq=%u hpd=%u hpdnopin=%u total=%llu unrouted=%llu "
                           "unr=%llu/%llu/%llu unrinst=0x%x/0x%x/0x%x badinst=%llu badmask=0x%x/0x%x/0x%x "
                           "regfails=%llu ackfails=%llu offfails=%llu stormed=0x%x/0x%x/0x%x drained=%llu/%llu/%llu "
-                          "drains=%u down=%u downs=%u downivs=%llu dceother=%llu dce=",
+                          "drains=%u down=%u downs=%u downivs=%llu downheads=0x%x hdowns=%u staleoffs=%llu "
+                          "publishfails=%llu dceother=%llu dce=",
                           d->arg, d->on, fBringup && fBringup->irqLive() ? 1u : 0u, rd3_arg("rdna3hpdirq", 0),
                           fHpdIrqs, fHpdNoPin, (unsigned long long)d->total, (unsigned long long)d->unrouted,
                           (unsigned long long)d->unr[kDiVblank], (unsigned long long)d->unr[kDiPflip],
@@ -444,7 +534,9 @@ int RDNA3Accel::displayIrqReport(char *buf, size_t len)
                           (unsigned long long)d->ackFails, (unsigned long long)d->offFails, d->stormed[kDiVblank],
                           d->stormed[kDiPflip], d->stormed[kDiVupdate], (unsigned long long)drained[kDiVblank],
                           (unsigned long long)drained[kDiPflip], (unsigned long long)drained[kDiVupdate], drains,
-                          d->down, d->downs, (unsigned long long)d->downIvs, (unsigned long long)d->dceOther);
+                          d->down, d->downs, (unsigned long long)d->downIvs, d->down ? 0u : d->downHeads, d->hdowns,
+                          (unsigned long long)d->staleOffs, (unsigned long long)d->publishFails,
+                          (unsigned long long)d->dceOther);
     /* the first four distinct DCE IVs no handler claimed: src_id:ext:ring (hex), '-' none */
     for (uint32_t i = 0; i < d->dceSeenN && o < len; i++)
         o += (size_t)snprintf(buf + o, len - o, "%s0x%x:0x%x:0x%x", i ? "," : "", d->dceSeen[i].src,
@@ -455,15 +547,15 @@ int RDNA3Accel::displayIrqReport(char *buf, size_t len)
         o += (size_t)snprintf(buf + o, len - o, " syncs=%llu", (unsigned long long)d->syncs);
     for (uint32_t h = 0; h < RD3K_MAX_HEADS && o < len; h++) {
         const RDNA3DispIrqHead *H = &d->h[h];
-        if (!H->regs && !H->cnt[kDiVblank] && !H->cnt[kDiPflip])
+        if (!H->regs && !H->cnt[kDiVblank] && !H->cnt[kDiPflip] && !H->stale)
             continue;
         o += (size_t)snprintf(buf + o, len - o,
                               " | h%u reg=%u want=0x%x en=0x%x why=%u otg=%d pipe=%d vblank=%llu pflip=%llu "
-                              "vupdate=%llu storms=%llu",
+                              "vupdate=%llu storms=%llu stale=0x%x",
                               h, H->fn ? 1u : 0u, H->want, H->enabled, H->why, H->otg == ~0u ? -1 : (int)H->otg,
                               H->pipe == ~0u ? -1 : (int)H->pipe, (unsigned long long)H->cnt[kDiVblank],
                               (unsigned long long)H->cnt[kDiPflip], (unsigned long long)H->cnt[kDiVupdate],
-                              (unsigned long long)H->storms);
+                              (unsigned long long)H->storms, H->stale);
     }
     IOLockUnlock(d->lock);
     return 0;
@@ -471,9 +563,18 @@ int RDNA3Accel::displayIrqReport(char *buf, size_t len)
 
 void RDNA3Accel::displayIrqPublish()
 {
+    RDNA3DispIrq *d = fDirq;
+    if (!d)
+        return;
     char *buf = (char *)IOMalloc(kDiReportCap);
-    if (!buf)
-        return;   /* the sysctl still answers */
+    if (!buf) {
+        /* the property stays older; the sysctl still answers (round 2) */
+        const uint64_t f = (uint64_t)OSIncrementAtomic64(&d->publishFails) + 1;
+        if (f <= 4 || (f & 1023) == 0)
+            LOG("display irq: no memory for the RDNA3,DisplayIrq report (%llu such): the property keeps an older copy, "
+                "debug.rdna3_dispirq still answers", (unsigned long long)f);
+        return;
+    }
     bzero(buf, kDiReportCap);
     if (displayIrqReport(buf, kDiReportCap) == 0)
         setProperty("RDNA3,DisplayIrq", buf);
@@ -605,6 +706,9 @@ void RDNA3Accel::displayIrqFree()
         for (int k = 0; k < kDiKinds; k++)
             if ((H->enabled & (1u << k)) && fDispDev && !d->down)
                 diOff(d, fDispDev, k, diInst(H, k), "the end");
+        if (H->stale)
+            LOG("display irq: the end: head %u still down, its sources 0x%x left as they were (not written while "
+                "down)", h, H->stale);
         H->enabled = 0;
         H->fn = nullptr;
     }

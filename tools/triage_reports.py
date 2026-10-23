@@ -2996,7 +2996,8 @@ def _fb_wake_row(name, sw, g):
 # DRIVER-PLAN N42: the VBL from the DCN vblank interrupt, the flip done from the pflip interrupt (RDNA3,FBStats virq_*)
 FB_N42_WHY = {0: "as asked", 1: "debug.rdna3_vblirq=0", 2: "no MSI handler (rdna3msi=1?)", 3: "cut after a storm",
               4: "the enable bit did not read back", 5: "the head has no OTG / HUBP",
-              6: "the display was not brought back after a power loss / mode-1 reset"}
+              6: "the display (or this head: still lost after the restore) was not brought back after a power loss / "
+                 "mode-1 reset"}
 # common/rdna3_vbl_irq.h RD3FB_VIRQ_NOREG_*: why the framebuffer never asked the core to REGISTER
 FB_N42_NOREG = {0: "no reason recorded", 1: "rdna3vblirq=0", 2: "no DCN head", 3: "no VBL thread call",
                 4: "no symbol / thread call for the interrupt", 5: "the framebuffer was stopping at its first try"}
@@ -3161,11 +3162,14 @@ DISPIRQ_SYSCTL_RE = re.compile(r"debug\.rdna3_dispirq: (vblirq=[^\n]*)")
 DISPIRQ_PROP_RE = re.compile(r"\"RDNA3,DisplayIrq\" = \"(vblirq=[^\n\"]*)")
 DISPIRQ_WHY = {0: "as asked", 1: "debug.rdna3_vblirq=0", 2: "no MSI handler", 3: "cut after a storm",
                4: "the enable bit did not read back", 5: "the head has no OTG / HUBP",
-               6: "the display was not brought back after a power loss / mode-1 reset"}
+               6: "the display (or this head: still lost after the restore) was not brought back after a power loss / "
+                  "mode-1 reset"}
 DISPIRQ_KINDS = (("VBLANK", "OTG"), ("PFLIP", "HUBP"), ("VUPDATE", "OTG"))
 # the keys the ECC review round added to the core's report (an older string lacks them: unknown, not 0)
 DISPIRQ_ECC_KEYS = ("hpdnopin", "unr", "unrinst", "badmask", "ackfails", "offfails", "drained", "drains", "down",
                     "downs", "downivs", "dceother", "dce")
+# the keys of the review's round 2 (per-head "up" after a wake / reset, stale sources, failed publishes)
+DISPIRQ_ECC2_KEYS = ("downheads", "hdowns", "staleoffs", "publishfails")
 
 
 def _dispirq_num(v):
@@ -3214,7 +3218,8 @@ def dispirq_lines(path, txt="", args=""):
     g = dict(re.findall(r"(\w+)=(\S+)", parts[0]))
     n = lambda k: _dispirq_num(g.get(k, "0")) or 0
     out = []
-    # the HPD counts: the property RDNA3,HPDIrqs is set at every HPD IV (the string's copy may be older)
+    # the HPD counts: RDNA3,HPDIrqs is set at the first 8 HPD IVs, every 1024th and by the 2 s stats tick (the
+    # string's copy may be older)
     hpd = max(n("hpd"), _dispirq_prop_num(props, "RDNA3,HPDIrqs") or 0)
     nopin = max(n("hpdnopin"), _dispirq_prop_num(props, "RDNA3,HPDIrqsNoPin") or 0)
     hpdt = "HPD interrupts %d (%s)" % (hpd, "acted on: rdna3hpdirq=1" if n("hpdirq") else
@@ -3226,6 +3231,10 @@ def dispirq_lines(path, txt="", args=""):
     missing = [k for k in DISPIRQ_ECC_KEYS if k not in g]
     if missing:
         why.append("the core's report lacks %s (older than the ECC review round: unknown, not 0)" % ",".join(missing))
+    missing2 = [k for k in DISPIRQ_ECC2_KEYS if k not in g] if not missing else []
+    if missing2:
+        why.append("the core's report lacks %s (older than the ECC review round 2: unknown, not 0)" %
+                   ",".join(missing2))
     if g.get("dceother") and n("dceother"):
         why.append("%d DCE IV(s) no handler claims (src_id:ext:ring %s): dropped" % (n("dceother"), g.get("dce", "?")))
     if not n("vblirq"):
@@ -3241,6 +3250,17 @@ def dispirq_lines(path, txt="", args=""):
                    "written, the sources forgotten as off (%d IV(s) dropped since)" % n("downivs"))
     elif n("downs"):
         why.append("the display was not brought back %d time(s) (back now)" % n("downs"))
+    if not n("down") and n("downheads"):
+        why.append("head(s) %s still LOST after the restore of a wake / mode-1 reset: their interrupt registers not "
+                   "written, their framebuffers poll (until a mode set lights them)" % _dispirq_insts(n("downheads")))
+    elif n("hdowns"):
+        why.append("a wake / mode-1 reset left head(s) down %d time(s) (back now)" % n("hdowns"))
+    if n("staleoffs"):
+        why.append("%d source(s) left enabled while their head was down, turned off when it came back" %
+                   n("staleoffs"))
+    if n("publishfails"):
+        why.append("%d RDNA3,DisplayIrq publish(es) failed for want of memory (the property copy is older)" %
+                   n("publishfails"))
     if g.get("stormed", "0x0/0x0/0x0") != "0x0/0x0/0x0":
         why.append("sources CUT after a storm (VBLANK/PFLIP/VUPDATE instance masks %s)" % g.get("stormed"))
     fails = []
@@ -3270,6 +3290,9 @@ def dispirq_lines(path, txt="", args=""):
         h = dict(re.findall(r"(\w+)=(\S+)", p.split(" ", 1)[1] if " " in p else ""))
         hn = p.split(" ", 1)[0]
         hv = lambda k: _dispirq_num(h.get(k, "0")) or 0
+        if hv("stale"):
+            why.append("%s: sources 0x%x still enabled from before the head went down (not written while down; "
+                       "they may raise as IVs with no framebuffer)" % (hn, hv("stale")))
         if not hv("reg"):
             heads.append("%s not registered (vblank %d, pflip %d)" % (hn, hv("vblank"), hv("pflip")))
             continue

@@ -558,11 +558,17 @@ int RDNA3Accel::displayHeadRelight(uint32_t head)
 /* ------------------------------ restore ------------------------------ */
 
 /* Check every saved head; with 'restore' the lost ones are programmed
- * from their snapshot. fDispLock held. Returns the heads still lost. */
-uint32_t RDNA3Accel::displayStateRestore(const char *why, bool restore)
+ * from their snapshot. fDispLock held. Returns the heads still lost;
+ * 'liveMask' / 'lostMask' (optional) get bit n set for a head checked and
+ * running / still lost after it (a head with no snapshot is in neither). */
+uint32_t RDNA3Accel::displayStateRestore(const char *why, bool restore, uint32_t *liveMask, uint32_t *lostMask)
 {
-    uint32_t lost = 0, back = 0, n = fDcn ? fDcn->nheads : 0;
+    uint32_t lost = 0, back = 0, n = fDcn ? fDcn->nheads : 0, live = 0, lostm = 0;
     char val[160];
+    if (liveMask)
+        *liveMask = 0;
+    if (lostMask)
+        *lostMask = 0;
     if (!fDispState || !fDispDev)
         return 0;
     for (uint32_t i = 0; i < n && i < 4; i++) {
@@ -587,6 +593,10 @@ uint32_t RDNA3Accel::displayStateRestore(const char *why, bool restore)
                      k.ndiff);
         }
         lost += r ? 1 : 0;
+        if (r)
+            lostm |= 1u << i;
+        else
+            live |= 1u << i;
         snprintf(key, sizeof(key), "RDNA3,Head%u,State", i);
         setProperty(key, val);
         LOG("display: head %u %s", i, val);
@@ -594,6 +604,10 @@ uint32_t RDNA3Accel::displayStateRestore(const char *why, bool restore)
     setNumber("RDNA3,DisplayStateRestores", fDispState->restores);
     if (back)
         LOG("display: %s: %u head(s) back from the snapshot", why, back);
+    if (liveMask)
+        *liveMask = live;
+    if (lostMask)
+        *lostMask = lostm;
     return lost;
 }
 
@@ -617,8 +631,10 @@ void RDNA3Accel::displayAfterReset(bool chipReset)
     if (!fDispState || !fDispLock || !fDcn)
         return;
     bool restore = chipReset && rd3_arg("rdna3resume", 0) != 0;
+    uint32_t liveMask = 0, lostMask = 0;
     IOLockLock(fDispLock);
-    uint32_t lost = displayStateRestore(chipReset ? "after the mode-1 reset" : "after a GFX/SDMA reset", restore);
+    uint32_t lost = displayStateRestore(chipReset ? "after the mode-1 reset" : "after a GFX/SDMA reset", restore,
+                                        &liveMask, &lostMask);
     IOLockUnlock(fDispLock);
     setNumber("RDNA3,DisplayLostAfterReset", lost);
     if (!chipReset)
@@ -626,12 +642,16 @@ void RDNA3Accel::displayAfterReset(bool chipReset)
             lost ? "LOST (unexpected)" : "still lit");
     else if (lost && !restore)
         LOG("display: the mode-1 reset took %u head(s) down; rdna3resume=1 restores them from the snapshot", lost);
+    else if (lost)
+        LOG("display: after the mode-1 reset %u head(s) are still lost after the restore (mask 0x%x)", lost, lostMask);
     if (chipReset && fBringup && fBringup->lastVramLost())
         displayPictureLost("mode-1 reset");
     /* N42, amdgpu_irq_gpu_reset_resume_helper: the vblank / pflip sources
-     * again - only on a DCN that is back (restored, or the heads stayed) */
+     * again - only on the heads that are up after the restore (or the check
+     * without rdna3resume=1); none running: the DCN is down, nothing written
+     * (ECC review round 2: a failed restore no longer counts as up) */
     if (chipReset)
-        displayIrqResync("mode-1 reset", rd3_virq_reset_dcn_up(restore ? 1 : 0, lost) != 0);
+        displayIrqResync("mode-1 reset", rd3_virq_heads_up(kDispIrqAllHeads, liveMask, lostMask));
 }
 
 /* --------------------------- sleep and wake --------------------------- */
@@ -676,7 +696,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
     uint16_t cmd = a->fPci->configRead16(kIOPCIConfigCommand);
     uint32_t memsize = a->fMmio ? a->rreg(mmRCC_CONFIG_MEMSIZE) : ~0u;
     int needPost = -1, sos = -1;
-    uint32_t lost = 0;
+    uint32_t lost = 0, liveMask = 0, lostMask = 0;
     bool resumed = false;
     char val[256];
 
@@ -686,7 +706,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
     if (a->fAtom)
         needPost = atom_need_post(a->fAtom);   /* BIOS scratch 7: ASIC_INIT_COMPLETE */
     if (a->fDispState)
-        lost = a->displayStateRestore("wake (check)", false);
+        lost = a->displayStateRestore("wake (check)", false, &liveMask, &lostMask);
     if (a->fDispLock)
         IOLockUnlock(a->fDispLock);
     if (a->fBringup && a->fBringup->finished() && a->fDrmLock) {
@@ -748,7 +768,7 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
                 LOG("wake: %d DP display(s) blanked before the restore (link_blank_all_dp_displays)", nb);
         }
         if (resume) {
-            lost = a->displayStateRestore("wake", true);
+            lost = a->displayStateRestore("wake", true, &liveMask, &lostMask);   /* the restore's result */
         } else if (!powerLost && a->fDcn) {
             /* power requests that came while asleep */
             for (uint32_t i = 0; i < a->fDcn->nheads && i < 4; i++)
@@ -772,9 +792,10 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
         a->displayPictureLost("wake after a power loss");
     a->hotplugResume();   /* link_resume: the HPD filters again, then the looks */
     /* N42, amdgpu_dm_irq_resume_early: the vblank / pflip sources again -
-     * only on a DCN that kept its power or was resumed (ECC review) */
-    a->displayIrqResync("wake", rd3_virq_wake_dcn_up(powerLost ? 1 : 0, suspended ? 1 : 0, resume ? 1 : 0,
-                                                     resumed ? 1 : 0) != 0);
+     * only on a DCN that kept its power or was resumed (ECC review), and
+     * there only on the heads up after the restore (round 2) */
+    a->displayIrqResync("wake", rd3_virq_wake_heads_up(powerLost ? 1 : 0, suspended ? 1 : 0, resume ? 1 : 0,
+                                                       resumed ? 1 : 0, kDispIrqAllHeads, liveMask, lostMask));
     /* VCN / JPEG (rdna3vcn): amdgpu_device_ip_resume_phase2 when the card
      * kept its power; after a power loss resumeAfterPowerLoss's hwInit
      * resumed them already (vcnStart), or they wait for the next bring-up */

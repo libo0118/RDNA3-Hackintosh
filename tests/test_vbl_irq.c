@@ -16,6 +16,9 @@
  * only on a DCN that is back; the framebuffer's stop never leaves a
  * registration in the core (every interleaving of a REGISTER from a running
  * VBL thread call with stop(), and the order before the review failing).
+ * Round 2: "up" per head from the restore's result (a failed restore is
+ * down), the sources a head left enabled while down turned off at its next
+ * up sync.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -274,16 +277,72 @@ int main(void)
         }
     }
 
-    /* ECC review: the sources written again only on a DCN that is back */
-    CHECK(rd3_virq_wake_dcn_up(0, 0, 0, 0) == 1);   /* kept its power, not suspended */
-    CHECK(rd3_virq_wake_dcn_up(1, 0, 0, 0) == 0);   /* power lost, rdna3resume=0 */
-    CHECK(rd3_virq_wake_dcn_up(1, 0, 1, 0) == 0);   /* power lost, the resume FAILED */
-    CHECK(rd3_virq_wake_dcn_up(1, 0, 1, 1) == 1);   /* power lost, resumed */
-    CHECK(rd3_virq_wake_dcn_up(0, 1, 0, 0) == 0);   /* suspended (IPs down), not resumed */
-    CHECK(rd3_virq_wake_dcn_up(0, 1, 1, 1) == 1);
-    CHECK(rd3_virq_reset_dcn_up(0, 0) == 1);        /* the mode-1 reset left the heads lit */
-    CHECK(rd3_virq_reset_dcn_up(0, 2) == 0);        /* heads down, rdna3resume=0: not restored */
-    CHECK(rd3_virq_reset_dcn_up(1, 2) == 1);        /* restored from the snapshot */
+    /* ECC review: the sources written again only on a DCN that is back;
+     * round 2: per head, from the restore's result (the heads still lost
+     * AFTER it), not from whether it ran. 'all' 0xf (RD3K_MAX_HEADS 4) */
+    {
+        const uint32_t all = 0xfu;
+        /* the wake: power lost / suspended and not resumed: down whatever the check says */
+        CHECK(rd3_virq_wake_heads_up(1, 0, 0, 0, all, 0x3, 0) == 0);   /* power lost, rdna3resume=0 */
+        CHECK(rd3_virq_wake_heads_up(1, 0, 1, 0, all, 0x3, 0) == 0);   /* power lost, the resume FAILED */
+        CHECK(rd3_virq_wake_heads_up(0, 1, 0, 0, all, 0x3, 0) == 0);   /* suspended (IPs down), not resumed */
+        /* kept its power, not suspended, nothing lost: every head */
+        CHECK(rd3_virq_wake_heads_up(0, 0, 0, 0, all, 0x3, 0) == all);
+        CHECK(rd3_virq_wake_heads_up(0, 0, 0, 0, all, 0, 0) == all);   /* no snapshot checked */
+        /* resumed and the restore brought both heads back */
+        CHECK(rd3_virq_wake_heads_up(1, 0, 1, 1, all, 0x3, 0) == all);
+        CHECK(rd3_virq_wake_heads_up(0, 1, 1, 1, all, 0x3, 0) == all);
+        /* resumed but the restore FAILED on both heads: no head runs, the DCN is down */
+        CHECK(rd3_virq_wake_heads_up(1, 0, 1, 1, all, 0, 0x3) == 0);
+        /* resumed, head 1 still lost after the restore: every head but 1
+         * (heads 2, 3 have no snapshot: not lost, nothing to enable there) */
+        CHECK(rd3_virq_wake_heads_up(1, 0, 1, 1, all, 0x1, 0x2) == 0xd);
+        /* kept its power, rdna3resume=0: the check's lost head gets nothing */
+        CHECK(rd3_virq_wake_heads_up(0, 0, 0, 0, all, 0x1, 0x2) == 0xd);
+        /* the mode-1 reset */
+        CHECK(rd3_virq_heads_up(all, 0x3, 0) == all);      /* the heads stayed lit, or the restore brought them back */
+        CHECK(rd3_virq_heads_up(all, 0, 0x3) == 0);        /* both still down: rdna3resume=0 (not restored), or
+                                                            * rdna3resume=1 and the restore FAILED (the rule
+                                                            * before round 2 said up here) */
+        CHECK(rd3_virq_heads_up(all, 0x1, 0x2) == 0xd);    /* one restored, one still lost */
+        CHECK(rd3_virq_heads_up(0x3, 0x1, 0x2) == 0x1);    /* the same in a 2-head table */
+        CHECK(rd3_virq_heads_up(all, 0x1, 0x10) == all);   /* a lost bit outside the table counts as nothing */
+    }
+
+    /* round 2: a head's sources enabled when it went down are stale; at its
+     * next up sync each is turned off unless wanted again at the same place */
+    {
+        const uint32_t si[3] = { 0, 0, 0 };   /* VBLANK at OTG 0, PFLIP at HUBP 0, VUPDATE at OTG 0 */
+        const uint32_t same[3] = { 0, 0, 0 }, moved[3] = { 1, 0, 1 };
+        CHECK(rd3_virq_stale_off(0, 0x3, si, same, 3) == 0);       /* nothing stale */
+        CHECK(rd3_virq_stale_off(0x3, 0, si, same, 3) == 0x3);     /* unregistered while down: both off */
+        CHECK(rd3_virq_stale_off(0x3, 0x3, si, same, 3) == 0);     /* wanted again where they are */
+        CHECK(rd3_virq_stale_off(0x3, 0x1, si, same, 3) == 0x2);   /* PFLIP no longer wanted */
+        CHECK(rd3_virq_stale_off(0x3, 0x3, si, moved, 3) == 0x1);  /* the head moved to OTG 1: VBLANK off at OTG 0 */
+        CHECK(rd3_virq_stale_off(0x4, 0x3, si, same, 3) == 0x4);   /* a stale VUPDATE nobody wants */
+
+        /* the core's sequence (RDNA3DisplayIrq.cpp): enabled 0x3 -> a resync
+         * leaves the head down (its enables kept as stale, nothing written)
+         * -> the framebuffer unregisters while down -> the next resync with
+         * the head up writes both off; before round 2 they stayed on in a
+         * DCN that kept its state and raised 'unrouted' for ever */
+        uint32_t enabled = 0x3, stale = 0, hw = 0x3, want = 0x3, writes = 0;
+        uint32_t up = rd3_virq_heads_up(0xfu, 0x2, 0x1);        /* head 0 still lost */
+        if (!(up & 1u)) {
+            stale |= enabled;
+            enabled = 0;
+        }
+        CHECK(up == 0xe && stale == 0x3 && hw == 0x3);
+        want = 0;                                                /* unregistered while down */
+        up = rd3_virq_heads_up(0xfu, 0x3, 0);                    /* a later wake brings it back */
+        if (up & 1u) {
+            uint32_t off = rd3_virq_stale_off(stale, want, si, same, 3);
+            hw &= ~off;
+            writes += (uint32_t)__builtin_popcount(off);
+            stale = 0;
+        }
+        CHECK(hw == 0 && stale == 0 && writes == 2 && enabled == 0);
+    }
 
     /* ECC review: stop() against a REGISTER from a running VBL thread call */
     {
