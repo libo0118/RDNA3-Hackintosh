@@ -1631,7 +1631,10 @@ static unsigned long long rd3VmParkTrim(bool pressure, const char *why)
         if (!pick[i]) continue;
         RD3VidMemory *m = gVmParkHead;
         while (m && m != (RD3VidMemory *)vc[i].obj) m = m->fParkNext;   /* still listed: alive */
-        if (!m || !rd3_vp_valid(&m->fPark) || m->fPark.handle != vc[i].handle) continue;
+        /* the same park as listed: a reuse and a new park of the same handle (a BO may hold it now, its refs
+         * were read for the old one) relinks it with a new fParkSince (ECC review of 721bb26) */
+        if (!m || !rd3_vp_valid(&m->fPark) || m->fPark.handle != vc[i].handle || m->fParkSince != vc[i].since)
+            continue;
         rel[nrel] = m->fPark; relVm[nrel] = m; nrel++;
         m->fParkTrimmedPhys = m->fPark.phys;   /* its own records: forgotten by the object (allocPhysical / free) */
         rd3_vp_clear(&m->fPark);
