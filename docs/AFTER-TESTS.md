@@ -2766,7 +2766,7 @@ byte positions are next to them; WindowServer's plugin trace is the end-of-run s
 
 The triage prints these for every run (SUMMARY `present: ...`; per report
 `present mode, ...`). Background and the three steps: [TESTING-VM](TESTING-VM.md),
-"Present-mode A/B"; DRIVER-PLAN N38.
+"Present-mode A/B"; DRIVER-PLAN N39.
 
 | Seen | Cause | Action |
 |---|---|---|
@@ -2778,7 +2778,10 @@ The triage prints these for every run (SUMMARY `present: ...`; per report
 | `WARN SMBIOS: ... BUT macOS reports X: OpenCore did not apply the model` | `vmtool.py plist --smbios` wrote a section OpenCore ignores (PlatformInfo/Automatic false, an OpenCore build that reads PlatformInfo/SMBIOS) | the OpenCore image's config: `vmtool.py plist <config> --show-smbios`; the host log's `SMBIOS model:` line |
 | `WARN SMBIOS: model not in the report` | a collector older than this change | `rdna3vm update`; the model also comes from the `PLATFORM:` line of probe runs and the host log |
 | `WARN SMBIOS: isMobile=YES on a desktop model` | CoreDisplay's mobile paths are chosen by something other than the model (integrated flag, the display's built-in property) | `integrated` / `GPUWrangler` rows; `isBuiltIn=` in the same row; probe output `43-fn-CoreDisplay-isMobile.s` |
-| `WARN fb index: IOFramebufferOpenGLIndex 0,1, IOFBDependentIndex 1,0: they disagree` | the two index properties of the framebuffers carry different numbers (seen in card run 2026-10-17d: 0,1 against 1,0); whether that matters is not known | a separate suspect (DRIVER-PLAN N38 open item 3): find where IOFramebuffer.cpp sets each property and compare with how our two framebuffers are grouped |
-| host log `SMBIOS model changed since the last card run: A -> B` and then `STALE KEXTS` | macOS dropped (or never had) the Allow under the new model | `rdna3vm approve --step <the step>`, run the step again, send the result (closes N38 open item 1) |
+| `INFO fb index: IOFramebufferOpenGLIndex 0,1, IOFBDependentIndex 1,0: they disagree ... (unchanged)` | the two index properties of the framebuffers carry different numbers (card run 2026-10-17d: 0,1 against 1,0, on every run since); whether that matters is not known. WARN only when the mismatch is a different one; an INFO "they agree ... this run differs" means it changed | a separate suspect (DRIVER-PLAN N39 open item 3): find where IOFramebuffer.cpp sets each property and compare with how our two framebuffers are grouped; if it changed, note it there |
+| `WARN host log not matched: none of the N host log(s) has this report's rdna3 boot-args` / `N host logs carry this report's boot-args and ask for different things` | the result directory has host logs of other runs only, or the same step ran twice with another model/bus in between. The rows from the guessed log carry `[UNVERIFIED ...]` | which `host-*.log` is the run's: the `boot-args:` line and the `SMBIOS model:` / `GPU on:` lines of each; send the right one |
+| `WARN request unknown: no host-*.log next to the report` / `host-X.log has no 'SMBIOS model:' line` / `'GPU on:' line` | the result has no host log, or it comes from an rdna3vm older than the A/B, or the run ended before the lines were written | `rdna3vm update`; the model also comes from `hw.model`; `asked bus` cannot be reconstructed |
+| `present mode, asked model / asked bus / guest PCI` with a TESTS-ONLY report or no report | the archive (or the whole report) never came; the rows are from the host log alone | `guest PCI` WARN `NOT mapped: BAR0,5` at 40 s: the card was lost between OVMF and macOS (the old rootport failure); no row at all: the VM ended before 8 s |
+| host log `SMBIOS model changed since the last card run: A -> B` and then `STALE KEXTS` | macOS dropped (or never had) the Allow under the new model | `rdna3vm approve --step <the step>`, run the step again, send the result (closes N39 open item 1) |
 | no AMD device / card unconfigured in a `GPU_BUS=rootport` run; host log `root port windows: ...` | the old rootport failure again (commits 0a80e3c / c21eed6): the windows are not what stops it | send `host-*.log` (guest PCI bus at 8 and 40 s); `GPU_BUS=pcie0` again; judge `play-macpro` alone |
 | host log `!! root port: pref64 window N MiB is larger than OVMF's 64-bit window` | `PCI_MMIO64_MB` in the config is below the card's BARs | remove `PCI_MMIO64_MB` (automatic) or raise it |

@@ -22,19 +22,31 @@ jobs:
         run: |
           sh tools/probe/coredisplay.sh probe-out
           cat probe-out/00-system.txt
-          echo "== assertion and pipe strings"; head -200 probe-out/20-CoreDisplay-strings.txt
-          echo "== IOPresentment strings"; head -100 probe-out/21-IOPresentment-strings.txt
-          echo "== copy forward strings and exports"; cat probe-out/22-copy-forward-strings.txt
-          echo "== IOAccelSetSurfaceFramebufferShape"; head -600 probe-out/15-IOAccelSetSurfaceFramebufferShape.s
-          echo "== copy_forward_region callers"; head -4000 probe-out/16-copy-forward-callers.s
-          echo "== CGXDisplayCreateCopyForwardShape callers"; head -3000 probe-out/17-copy-forward-shape-callers.s
-          echo "== present mode: keyword strings"; head -400 probe-out/30-keyword-strings.txt
-          echo "== present mode: the function that logs the page flip mode"; head -1500 probe-out/40-page-flip-fn-CoreDisplay.s
-          echo "== present mode: the same, found by the address of the string"; head -1500 probe-out/40-page-flip-fn-CoreDisplay-by-address.s
-          echo "== present mode: callers"; head -3000 probe-out/41-page-flip-callers.s
-          echo "== present mode: strings, calls and keys those read"; head -600 probe-out/42-page-flip-keys.txt
-          echo "== present mode: callers' callers"; head -2000 probe-out/41-page-flip-callers2.s
+          # dyld_info's own complaints, per library (an empty disassembly makes every later file empty)
+          for f in probe-out/*.err; do [ -f "$f" ] || continue; echo "== $f"; head -n 40 "$f"; done
+          grep -n '^FAILED' probe-out/00-system.txt || true
+          # show LABEL FILE LINES: a file that is missing is said, it does not abort the step (bash -e)
+          show() { if [ -f "$2" ]; then echo "== $1"; head -n "$3" "$2"; else echo "== $1: MISSING $2"; fi; }
+          show "assertion and pipe strings" probe-out/20-CoreDisplay-strings.txt 200
+          show "IOPresentment strings" probe-out/21-IOPresentment-strings.txt 100
+          show "copy forward strings and exports" probe-out/22-copy-forward-strings.txt 400
+          show "IOAccelSetSurfaceFramebufferShape" probe-out/15-IOAccelSetSurfaceFramebufferShape.s 600
+          show "copy_forward_region callers" probe-out/16-copy-forward-callers.s 4000
+          show "CGXDisplayCreateCopyForwardShape callers" probe-out/17-copy-forward-shape-callers.s 3000
+          show "present mode: keyword strings" probe-out/30-keyword-strings.txt 400
+          show "present mode: the function that logs the page flip mode" probe-out/40-page-flip-fn-CoreDisplay.s 1500
+          show "present mode: the same, found by the address of the string" probe-out/40-page-flip-fn-CoreDisplay-by-address.s 1500
+          show "present mode: callers" probe-out/41-page-flip-callers.s 3000
+          show "present mode: strings, calls and keys those read" probe-out/42-page-flip-keys.txt 600
+          show "present mode: callers' callers" probe-out/41-page-flip-callers2.s 2000
+          # loud failure: a CoreDisplay disassembly this small is an error, not a result
+          n=0; [ -f probe-out/CoreDisplay.dis ] && n=$(wc -l < probe-out/CoreDisplay.dis)
+          if [ "$n" -lt 1000 ]; then
+            echo "::error::CoreDisplay.dis has $n lines (< 1000): dyld_info produced no disassembly, see the .err files above"
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: probe-coredisplay
           path: probe-out
@@ -51,6 +63,7 @@ jobs:
           cat probe-iofam/30-iofam-system.txt
           for f in probe-iofam/40-*.txt; do echo "== $f"; head -3000 "$f"; done
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: probe-iofam
           path: probe-iofam

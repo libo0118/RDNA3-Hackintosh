@@ -501,11 +501,22 @@ use the desktop for ~10 minutes (or just wait), shut macOS down,
 `rdna3vm result`, send the file.
 
 Both can also be set for every run in `~/rdna3-vm/config` (`rdna3vm prepare`
-keeps them): `SMBIOS_MODEL="MacPro7,1"` (also `iMacPro1,1`; the default is
-`MacBookPro16,1`) and `GPU_BUS="rootport"` (default `pcie0`), or for one
-custom run `rdna3vm args "<the step's rdna3 args> @smbios=MacPro7,1 @gpubus=rootport"`.
+keeps them): `SMBIOS_MODEL="MacPro7,1"` (also `iMacPro1,1`) and
+`GPU_BUS="rootport"` (default `pcie0`), or for one custom run
+`rdna3vm args "<the step's rdna3 args> @smbios=MacPro7,1 @gpubus=rootport"`.
 The `@` words are for the host: they are taken out of the boot-args macOS gets,
-and `rdna3vm check` prints what the config selects.
+and `rdna3vm check` prints what the config selects. An unknown `@` word or an
+empty value (`@smbois=...`, `@smbios=`) stops the run with a message.
+
+**Nothing asked, nothing touched.** `rdna3vm` edits the OpenCore config's
+`SystemProductName` only when a model was asked for (`SMBIOS_MODEL` other than
+`MacBookPro16,1`, or a step's `@smbios=`). With nothing asked, `prepare`,
+`window`, the install boot and every card step leave the OpenCore config as it
+is, exactly as before this feature (a config whose `PlatformInfo/Automatic` is
+false, which `--smbios` refuses, still works). If an earlier run wrote another
+model (`play-macpro`), the next run that asks for nothing writes
+`MacBookPro16,1` back, so the model never outlives the step that asked for it;
+the host log says `SMBIOS model:` with the model, or `SMBIOS model: not asked`.
 
 **What changes in the VM with the model.** Only `PlatformInfo/Generic/SystemProductName`
 of the OpenCore config. The serial number, board serial, UUID and ROM stay as
@@ -529,8 +540,11 @@ an old framebuffer/accelerator the run says `STALE KEXTS old driver ran`
 (triage, first line) and the host log names the model change
 (`SMBIOS model changed since the last card run: A -> B`). In that case run
 `rdna3vm approve --step play-desktop` (the window then runs that step's
-model; plain `rdna3vm approve` uses the config's) and send the result so the
-open question in DRIVER-PLAN N38 can be closed.
+model; plain `rdna3vm approve` uses the config's; `approve --card --step` is
+refused, the card boot would use step 0's boot-args) and send the result so the
+open question in DRIVER-PLAN N39 can be closed. The messages that tell you to
+approve (the run's note, the queue stop, the triage's `STALE KEXTS` line) name
+`rdna3vm approve --step <n>` by themselves when the step used `@smbios=`.
 
 **The root port.** `GPU_BUS=rootport` puts the card (VGA function 0 and the
 HDMI audio function 1, together) on `pcie-root-port,id=rp0,hotplug=off`. Earlier
@@ -560,7 +574,8 @@ run (`present: ...` in the SUMMARY and the checklist, `present mode, ...` per re
 | `GPUWrangler` | `flags 0x10 (IG) ... b:d:f=0:16:0` | no `(IG)`, `b:d:f=1:0:0` |
 | `SMBIOS` | `MacBookPro16,1 ... isMobile=YES ... mux_initialize found no match` | `MacPro7,1 (hw.model, board-id ...)`, `isMobile=NO`; a `WARN ... BUT macOS reports X` means OpenCore did not apply the model |
 | `card bus` (WARN only) | - | rdna3vm asked for pcie0/rootport but macOS sees the other bus |
-| `fb index` | WARN: `IOFramebufferOpenGLIndex 0,1, IOFBDependentIndex 1,0: they disagree` | independent of the two variables above; it stays a WARN until the indices agree (a separate suspect, DRIVER-PLAN N38) |
+| `fb index` | INFO: `IOFramebufferOpenGLIndex 0,1, IOFBDependentIndex 1,0: they disagree ... (unchanged)` | independent of the two variables above; INFO while it is the state of card run 2026-10-17d, WARN when the mismatch differs, INFO with a note when the indices now agree (a separate suspect, DRIVER-PLAN N39) |
+| `host log not matched` / `request unknown` (WARN) | - | the host log is found by its `boot-args:` line against the report's boot-args, not by clock stamps. `not matched`: no log has them (or two logs with them ask for different things): the newest is used as a guess and the rows from it say so. `request unknown`: no host log, or one without the `SMBIOS model:` / `GPU on:` lines. A TESTS-ONLY report and a result without any report get `asked model`, `asked bus` and `guest PCI` (the card's bus and BARs in `info pci` at 8 and 40 s) from the host log alone |
 
 ### Tests that already passed
 

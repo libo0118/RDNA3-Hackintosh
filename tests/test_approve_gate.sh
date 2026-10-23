@@ -31,9 +31,9 @@ RV=$ROOT/tools/vm/rdna3vm
 export ROOT
 
 FUNCS="approve_markers approve_marker_any approve_marker_text approve_marker_clear run_note old_driver_note
-bundle_current vm_bundle_seen install_first cmd__once cmd_approve cmd__queue cmd_result"
+bundle_current vm_bundle_seen install_first cmd__once cmd_approve cmd__queue cmd_result approve_cmd host_opt"
 for f in $FUNCS; do sed -n "/^$f() {/,/^}/p" "$RV"; done > "$T/fn.sh"
-[ "$(grep -c '^[a-z_]*() ' "$T/fn.sh")" = 13 ] || fail "functions not found: $(grep -o '^[a-z_]*()' "$T/fn.sh")"
+[ "$(grep -c '^[a-z_]*() ' "$T/fn.sh")" = 15 ] || fail "functions not found: $(grep -o '^[a-z_]*()' "$T/fn.sh")"
 
 export WORK=$T/work
 mkdir -p "$WORK/reports"
@@ -228,5 +228,17 @@ grep -q 'stopped after step play: it ran on the OLD driver' "$T/out.txt" || fail
 # a set-aside marker is not a marker of the next boot (install_first would ask again)
 run "$STUB; cp /dev/null \$WORK/reports/approve-seen-1.txt; echo '$MARK' > \$WORK/reports/approve-seen-1.txt; install_first; ! approve_marker_any"
 [ "$(calls)" = "install " ] || fail "approve-seen counted as a marker: calls [$(calls)]"
+
+# ---- ECC review of 501eae9: a step that asked for a Mac model is approved under it ('--step N')
+RDNA3VM_STEP=play-desktop RDNA3VM_BOOTARGS="-v rdna3play=1 @smbios=MacPro7,1 rdna3vmauto=1" run "echo approve > \$WORK/pass-1; cmd__once"
+grep -q "run 'rdna3vm approve --step play-desktop', then the step again" "$WORK/reports/host-run.log" || fail "note with @smbios=: $(cat "$WORK/reports/host-run.log")"
+RDNA3VM_BOOTARGS="-v rdna3play=1" run "echo approve > \$WORK/pass-1; cmd__once"
+grep -q "run 'rdna3vm approve', then the step again" "$WORK/reports/host-run.log" || fail "note without @smbios= must stay plain"
+run "printf 'play-macpro\n5\n' > \$QUEUE; step_args() { echo 'rdna3play=1 @smbios=MacPro7,1'; }; echo approve > \$WORK/pass-1; cmd__queue"
+grep -q "run 'rdna3vm approve --step play-macpro', then 'rdna3vm queue' runs step play-macpro again" "$T/out.txt" || fail "queue stop with @smbios=: $(cat "$T/out.txt")"
+run "printf 'play\n5\n' > \$QUEUE; step_args() { echo 'rdna3play=1'; }; echo approve > \$WORK/pass-1; cmd__queue"
+grep -q "run 'rdna3vm approve', then 'rdna3vm queue' runs step play again" "$T/out.txt" || fail "queue stop without @smbios=: $(cat "$T/out.txt")"
+run "printf 'play-macpro\n' > \$QUEUE; step_args() { echo 'rdna3play=1 @smbios=MacPro7,1'; }; echo x > \$WORK/needs-allow; cmd__queue"
+grep -q "run 'rdna3vm approve --step play-macpro', then 'rdna3vm queue' goes on with" "$T/out.txt" || fail "queue needs-allow stop with @smbios=: $(cat "$T/out.txt")"
 
 echo "test_approve_gate: ok"

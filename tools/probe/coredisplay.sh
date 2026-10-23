@@ -25,12 +25,21 @@ for lib in /System/Library/Frameworks/CoreDisplay.framework/Versions/A/CoreDispl
            /System/Library/PrivateFrameworks/GPUWrangler.framework/Versions/A/GPUWrangler; do
     n=$(basename "$lib")
     echo "== $lib" >> "$out/00-system.txt"
-    dyld_info -platform "$lib" >> "$out/00-system.txt" 2>&1 || continue
-    dyld_info -arch x86_64 -disassemble "$lib" > "$out/$n.dis" 2>"$out/$n.dis.err" ||
+    # every dyld_info error of this library goes into $n.dis.err (the workflow prints it)
+    : > "$out/$n.dis.err"
+    if ! dyld_info -platform "$lib" >> "$out/00-system.txt" 2>>"$out/$n.dis.err"; then
+        echo "FAILED: $n dyld_info -platform failed (the library is not on this runner?), see $n.dis.err" >> "$out/00-system.txt"
+        continue
+    fi
+    dyld_info -arch x86_64 -disassemble "$lib" > "$out/$n.dis" 2>>"$out/$n.dis.err" ||
         dyld_info -disassemble "$lib" > "$out/$n.dis" 2>>"$out/$n.dis.err"
-    dyld_info -arch x86_64 -section __TEXT __cstring "$lib" > "$out/$n.cstring" 2>&1
-    dyld_info -arch x86_64 -exports "$lib" > "$out/$n.exports" 2>&1
+    dyld_info -arch x86_64 -section __TEXT __cstring "$lib" > "$out/$n.cstring" 2>>"$out/$n.dis.err"
+    dyld_info -arch x86_64 -exports "$lib" > "$out/$n.exports" 2>>"$out/$n.dis.err"
     wc -l "$out/$n.dis" "$out/$n.cstring" "$out/$n.exports" >> "$out/00-system.txt"
+    # an empty disassembly or string table makes every later file empty without a word: say it here
+    for part in dis cstring; do
+        [ -s "$out/$n.$part" ] || echo "FAILED: $n .dis/.cstring empty ($n.$part), see $n.dis.err" >> "$out/00-system.txt"
+    done
 done
 
 # the functions on the crash stack, whole
@@ -96,6 +105,7 @@ blocks_with() { callers "$@"; }
 # the string in __cstring (first hex number on its line there)
 for n in CoreDisplay SkyLight; do
     blocks_with "$out/$n.dis" 'page flip mode is|init_page_flip' "$out/40-page-flip-fn-$n.s"
+    : > "$out/40-page-flip-fn-$n-by-address.s"      # always there, empty when the address is not found
     addr=$(grep -m1 'page flip mode is' "$out/$n.cstring" 2>/dev/null | grep -o -i '0x[0-9a-f]*' | head -1 | sed 's/^0x0*//' | tr 'A-F' 'a-f')
     [ -n "$addr" ] && blocks_with "$out/$n.dis" "0x$addr" "$out/40-page-flip-fn-$n-by-address.s"
     echo "== $n page flip string address: ${addr:-not found in $n.cstring}" >> "$out/00-system.txt"
