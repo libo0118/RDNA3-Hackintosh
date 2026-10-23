@@ -22,7 +22,12 @@
  *     present completes there and not before, and the queued one, if any,
  *     is programmed then;
  *   - the framebuffer answering Busy (another path's flip still pending)
- *     keeps the present queued behind that flip (rd3_fq_busy), never drops it.
+ *     keeps the present queued behind that flip (rd3_fq_busy), never drops it;
+ *     a head whose flips never latch (blanked, a stuck HUBP) is bounded:
+ *     after RD3_FQ_STUCK_RUN such flips given up the queued one is flipped
+ *     anyway (rd3_fq_verdict);
+ *   - a present of the buffer the head scans is not flipped again only with
+ *     nothing in flight or queued (rd3_fq_present, after the latch look).
  * A legacy swap has no event of its own the driver could complete later
  * (submitSwapCopy's IOAccelEvent is the family's; DRIVER-PLAN N38): what
  * WindowServer gets back when the swap returns is the buffer leaving the
@@ -52,6 +57,7 @@ struct rd3_fq {
     uint64_t queued;     /* the newest present waiting for the in-flight flip (0: none) */
     uint32_t inflight_tok, queued_tok;
     uint32_t joined;     /* presents of the in-flight address that complete with it */
+    uint32_t stuck_run;  /* flips given up in a row with another path's flip in flight (rd3_fq_verdict) */
 };
 
 enum rd3_fq_act {
@@ -59,13 +65,26 @@ enum rd3_fq_act {
     RD3_FQ_PROGRAM = 1,   /* program this address now: the head has no flip in flight */
     RD3_FQ_QUEUED = 2,    /* a flip is in flight: queued, programmed once that one latched */
     RD3_FQ_REPLACED = 3,  /* queued, replacing an older queued present (newest wins; *dropped is its token) */
-    RD3_FQ_JOINED = 4     /* the in-flight flip's own address, nothing queued: completes with that flip */
+    RD3_FQ_JOINED = 4,    /* the in-flight flip's own address, nothing queued: completes with that flip */
+    RD3_FQ_SAME = 5       /* the buffer the head already scans, nothing in flight or queued: not flipped
+                           * again (rd3_fq_present) */
 };
+
+/* another path's flip (Busy) given up this many times in a row - a blanked
+ * or DPMS-off head, a stuck HUBP, a flip of another path that never latches
+ * - and the queued present is programmed without RD3K_FLIP_FLAG_NOWAIT:
+ * the framebuffer waits at most 20 ms for the pending flip and flips anyway
+ * (its path before N38; amdgpu: drm_atomic_helper_wait_for_flip_done gives
+ * up on a flip_done that never comes, logs it and commits the next flip).
+ * The same run as the swap latch's (RD3_LATCH_TIMEOUT_RUN): a head that
+ * never latches costs a bounded time per frame, never the frame itself */
+#define RD3_FQ_STUCK_RUN 3u
 
 static inline void rd3_fq_init(struct rd3_fq *q)
 {
     q->shown = q->inflight = q->queued = 0;
     q->inflight_tok = q->queued_tok = q->joined = 0;
+    q->stuck_run = 0;
 }
 
 /* whether a flip of ours or someone else's is in flight */
@@ -102,6 +121,32 @@ static inline enum rd3_fq_act rd3_fq_submit(struct rd3_fq *q, uint64_t addr, uin
     q->queued = addr;
     q->queued_tok = tok;
     return RD3_FQ_QUEUED;
+}
+
+/* whether a present of 'addr' may be the buffer the head already scans:
+ * the queue's own record of the head's last latched flip is 'addr' and
+ * nothing is in flight or queued (the caller then reads the HUBP's address
+ * and passes it to rd3_fq_present). A present behind a flip in flight or a
+ * queued one is never skipped: the queued present would be programmed over
+ * it at the latch (ECC review of N38: a stale frame) */
+static inline int rd3_fq_same_wants(const struct rd3_fq *q, uint64_t addr)
+{
+    return addr && addr != RD3_FQ_FOREIGN && addr == q->shown && !q->inflight && !q->queued;
+}
+
+/* a present, in the accelerator's order (rd3AccelPresentSubmit, under its
+ * lock): the caller has taken a latch it can see now first (the flip-done
+ * path's look), then this decides: the buffer the head scans (the queue's
+ * record and the HUBP's address 'scan', no flip pending, 'same_on' the
+ * swap_samenoflip knob) is RD3_FQ_SAME - not flipped, nothing waits -
+ * anything else goes to rd3_fq_submit. 'scan_known' 0 (the HUBP's address
+ * unreadable) never skips */
+static inline enum rd3_fq_act rd3_fq_present(struct rd3_fq *q, uint64_t addr, uint32_t tok, int same_on,
+                                             int scan_known, uint64_t scan, int scan_pending, uint32_t *dropped)
+{
+    if (same_on && rd3_fq_same_wants(q, addr) && scan_known && scan == addr && !scan_pending)
+        return RD3_FQ_SAME;
+    return rd3_fq_submit(q, addr, tok, dropped);
 }
 
 /* the framebuffer answered Busy to the PROGRAM just returned (or to the
@@ -173,6 +218,58 @@ static inline enum rd3_fq_act rd3_fq_latched(struct rd3_fq *q, int *had_done, ui
     return RD3_FQ_PROGRAM;
 }
 
+/* the flip-done path's verdict on the flip in flight, in the accelerator's
+ * order (rd3AccelPqLatchedLocked): 'latched' 1 seen latched, 0 given up
+ * (not latched in time, the state unreadable). rd3_fq_latched's outputs;
+ * *foreign_gaveup 1 when that was another path's flip (Busy) given up;
+ * *force 1 when the queued present handed out is to be programmed without
+ * RD3K_FLIP_FLAG_NOWAIT: RD3_FQ_STUCK_RUN such flips in a row since a
+ * latch was last seen (the head's flips stay pending: without it, Busy ->
+ * given up -> Busy again forever, no frame and an IOP transaction never
+ * complete). A latch seen ends the run */
+static inline enum rd3_fq_act rd3_fq_verdict(struct rd3_fq *q, int latched, int *had_done, uint32_t *done_tok,
+                                             uint64_t *next_addr, uint32_t *next_tok, int *foreign_gaveup,
+                                             int *force)
+{
+    const int foreign = q->inflight == RD3_FQ_FOREIGN;
+    enum rd3_fq_act a;
+    if (latched)
+        q->stuck_run = 0;
+    else if (foreign && q->stuck_run < 0xffffffffu)
+        q->stuck_run++;
+    if (foreign_gaveup)
+        *foreign_gaveup = !latched && foreign;
+    a = rd3_fq_latched(q, had_done, done_tok, next_addr, next_tok);
+    if (force)
+        *force = a == RD3_FQ_PROGRAM && q->stuck_run >= RD3_FQ_STUCK_RUN;
+    return a;
+}
+
+/* another path flipped the head (the IOP copy fallback's flip home, which
+ * the framebuffer programs after the pending flip latched or 20 ms): the
+ * queued present is dropped (returns 1, *dropped its token - programmed
+ * at the next latch it would cover the picture that path put there), the
+ * in-flight present of ours completes now (*had_done, *done_tok: its buffer
+ * is left by that flip), and that flip is what is in flight now (FOREIGN):
+ * nothing of ours known on the panel */
+static inline int rd3_fq_moved(struct rd3_fq *q, int *had_done, uint32_t *done_tok, uint32_t *dropped)
+{
+    const int had = q->queued != 0;
+    if (had_done)
+        *had_done = q->inflight && q->inflight != RD3_FQ_FOREIGN;
+    if (done_tok)
+        *done_tok = q->inflight != RD3_FQ_FOREIGN ? q->inflight_tok : 0;
+    if (had && dropped)
+        *dropped = q->queued_tok;
+    q->inflight = RD3_FQ_FOREIGN;
+    q->inflight_tok = 0;
+    q->joined = 0;
+    q->queued = 0;
+    q->queued_tok = 0;
+    q->shown = 0;
+    return had;
+}
+
 /* a mode change or another path's flip moved the panel: nothing of ours is
  * known to be on it; the queued present (returns 1, *dropped its token) is
  * dropped - it was meant for a picture that is gone. The in-flight flip
@@ -185,6 +282,7 @@ static inline int rd3_fq_forget(struct rd3_fq *q, uint32_t *dropped)
     q->shown = 0;
     q->queued = 0;
     q->queued_tok = 0;
+    q->stuck_run = 0;   /* a new picture: the head's flips are given their chance again */
     return had;
 }
 
@@ -241,14 +339,16 @@ static inline int rd3_fq_in_use(const struct rd3_fq *q, uint64_t addr)
 /* The zero-copy flip of an IOP transaction's IOSurface (debug.rdna3accel_
  * iop_flip): only VRAM the family marks newest (its validity bit) AND the
  * Metal plugin wrote - the dirty escape (RD3K_ESC_SURF_DIRTY) recorded the
- * allocation's cookie, which the plugin sends from surface-out only after
+ * allocation's generation (a number of its own per allocPhysical, never 0
+ * and never reused: a new allocation at the same VRAM offset is not the
+ * one written, ECC review of N38), which the plugin sends from surface-out only after
  * the command buffer's submission was waited for (NVMTLEventSync.m), so a
  * marked VRAM copy holds the GPU's finished frame. VRAM the family marks
  * newest that the plugin never wrote holds no frame: such a surface is
  * copied from its system memory instead (NullMoth's design, our code) */
-static inline int rd3_iop_flip_ok(int vram_newest, uint64_t wrote_cookie, uint64_t alloc_cookie)
+static inline int rd3_iop_flip_ok(int vram_newest, uint64_t wrote_gen, uint64_t alloc_gen)
 {
-    return vram_newest && wrote_cookie != 0 && wrote_cookie == alloc_cookie;
+    return vram_newest && wrote_gen != 0 && wrote_gen == alloc_gen;
 }
 
 #endif
