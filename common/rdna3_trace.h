@@ -188,6 +188,9 @@ enum rd3_trace_present {
 };
 /* RD3_TR_PRESENT's flags (args 0-10, 12-14): the present's kind */
 enum rd3_trace_pq_kind { RD3_TRPK_SWAP = 0, RD3_TRPK_FLIPBUF = 1, RD3_TRPK_IOP = 2 };
+/* RD3_TRP_LATCHED's flags | this: the framebuffer's latch wait was ended by the head's pflip interrupt (flip done,
+ * DRIVER-PLAN N42), v3 the interrupt's latency in us; without it the latch was seen by a poll */
+#define RD3_TRP_IRQ_DONE 0x40u
 /* where a mode 1/2 swap failed (RD3_TRS_COPY_FAILED's v4) */
 enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD3_TRX_SDMA = 3, RD3_TRX_FLIP = 4 };
 

@@ -2853,6 +2853,11 @@ grey shares) with the boundaries (3.9 / 4.1 % grey, 59 / 60 swaps, no PPMs, pipe
   (only when WindowServer reuses the buffer leaving the panel within a
   frame), the triage `present queue` lines and `H-PRESENT` without FAIL,
   Activity Monitor's GPU % above 0 while windows move (`perf_writes` > 0).
+  With the N42 interrupts live, `H-PRESENT` adds `N latch(es) ended by the
+  pflip interrupt (avg X us after it)` and the timeline's `latched ... (by
+  the pflip interrupt, X us after it)`: close to the latches seen; absent
+  while the latches are only polled (`rdna3vblirq=0`, an older framebuffer,
+  `swaps_pq_irqdone_h<N>` 0).
 
 | Seen | Meaning | Action |
 |---|---|---|

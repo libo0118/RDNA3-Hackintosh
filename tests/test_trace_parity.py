@@ -90,6 +90,12 @@ m6 = re.search(r"enum rd3_trace_present \{(.*?)\};", h, re.S)
 trp = sorted(int(v) for v in re.findall(r"RD3_TRP_\w+\s*=\s*(\d+)", m6.group(1) if m6 else ""))
 if not trp or trp != sorted(rdna3_trace.PRESENT_ARG):
     fails.append("enum rd3_trace_present %s, the decoder's PRESENT_ARG %s" % (trp, sorted(rdna3_trace.PRESENT_ARG)))
+# N42: the LATCHED flag of a latch the pflip interrupt ended, above every kind
+m8 = re.search(r"#define RD3_TRP_IRQ_DONE 0x([0-9a-fA-F]+)u", h)
+if not m8 or int(m8.group(1), 16) != rdna3_trace.PQ_IRQ_DONE or rdna3_trace.PQ_IRQ_DONE & rdna3_trace.PQ_KIND_MASK \
+        or max(rdna3_trace.PQ_KIND) > rdna3_trace.PQ_KIND_MASK:
+    fails.append("RD3_TRP_IRQ_DONE %s, the decoder's PQ_IRQ_DONE 0x%x / PQ_KIND_MASK 0x%x" % (
+        m8.group(1) if m8 else "missing", rdna3_trace.PQ_IRQ_DONE, rdna3_trace.PQ_KIND_MASK))
 m7 = re.search(r"enum rd3_trace_pq_kind \{(.*?)\};", h, re.S)
 trk = sorted(int(v) for v in re.findall(r"RD3_TRPK_\w+\s*=\s*(\d+)", m7.group(1) if m7 else ""))
 if not trk or trk != sorted(rdna3_trace.PQ_KIND):

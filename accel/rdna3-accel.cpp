@@ -5108,7 +5108,8 @@ static void rd3AccelPqBusyLocked(unsigned head, RD3PresDone *d)
  * (timeout, unknown: its completion is early): complete it, program the
  * queued present (rd3_fq_verdict: without NOWAIT once the head's flips
  * stayed pending RD3_FQ_STUCK_RUN times in a row). Under gPresLock */
-static void rd3AccelPqLatchedLocked(unsigned head, enum rd3_latch_step step, uint64_t us, bool inl, RD3PresDone *d)
+static void rd3AccelPqLatchedLocked(unsigned head, enum rd3_latch_step step, uint64_t us, bool inl, RD3PresDone *d,
+                                    bool irq = false, uint32_t irqLatUs = 0)
 {
     RD3Pres &P = gPres[head];
     int had = 0, fg = 0, force = 0;
@@ -5138,8 +5139,11 @@ static void rd3AccelPqLatchedLocked(unsigned head, enum rd3_latch_step step, uin
             if (R.kind != kPqIop && gLatch[head].phys == was)
                 rd3AccelLatchSeen(head, gLatch[head], kSeenLater, "by the present queue");
         }
+        /* N42: a latch the head's pflip interrupt ended is marked in the trace (v3 its latency), not only counted */
+        const bool byIrq = !early && irq;
         rd3AccelPqTrace(head, early ? (step == RD3_LATCH_TIMEOUT ? RD3_TRP_TIMEOUT : RD3_TRP_UNKNOWN)
-                                    : RD3_TRP_LATCHED, R.kind, tok, us, 0, 0, kIOReturnSuccess, was);
+                                    : RD3_TRP_LATCHED, R.kind | (byIrq ? RD3_TRP_IRQ_DONE : 0u), tok, us, 0,
+                        byIrq ? (int)(irqLatUs > 0x7fffffffu ? 0x7fffffffu : irqLatUs) : 0, kIOReturnSuccess, was);
         rd3AccelPqLost(d, &R);   /* completed: the transaction ends, the queue's reference goes */
     }
     if (fg) {
@@ -5205,8 +5209,11 @@ static void rd3AccelPqLookLocked(unsigned head, RD3PresDone *d)
  * lock: the framebuffer's latch wait (woken at its vblank) or 1 ms polls */
 enum { kPqFbWaitUs = 2000 };
 static enum rd3_latch_step rd3AccelPqWait(unsigned head, IOService *fb, uint32_t gen, uint32_t frame0, bool frameKnown,
-                                          uint64_t progAbs, uint64_t cap, uint64_t *usOut)
+                                          uint64_t progAbs, uint64_t cap, uint64_t *usOut, bool *irqOut,
+                                          uint32_t *irqLatOut)
 {
+    *irqOut = false;
+    *irqLatOut = 0;
     const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_FLIP_FN_LATCHWAIT);
     enum rd3_latch_step step = RD3_LATCH_WAIT;
     for (;;) {
@@ -5233,6 +5240,8 @@ static enum rd3_latch_step rd3AccelPqWait(unsigned head, IOService *fb, uint32_t
             if (lw.version >= 2 && (r == kIOReturnSuccess || r == kIOReturnTimeout)) {
                 gCntPqIrqLive[head] = (lw.irqFlags & RD3K_FLIPWAIT_IRQ_LIVE) ? 1 : 0;
                 if (r == kIOReturnSuccess && (lw.irqFlags & RD3K_FLIPWAIT_IRQ_WOKE)) {
+                    *irqOut = true;   /* the trace's LATCHED event says so (RD3_TRP_IRQ_DONE) */
+                    *irqLatOut = lw.irqLatUs;
                     OSAddAtomic64(1, &gCntPqIrqDone[head]);
                     OSAddAtomic64((SInt64)lw.irqLatUs, &gCntPqIrqLatUs[head]);
                     if ((SInt64)lw.irqLatUs > gCntPqIrqLatMax[head]) gCntPqIrqLatMax[head] = (SInt64)lw.irqLatUs;
@@ -5293,10 +5302,13 @@ static void rd3AccelPresentRun(unsigned head)
         const uint64_t progAbs = P.progAbs, cap = P.capUs ? P.capUs : RD3_LATCH_CAP_US;
         IOLockUnlock(gPresLock);
         uint64_t us = 0;
-        const enum rd3_latch_step step = rd3AccelPqWait(head, fb, gen, frame0, frameKnown, progAbs, cap, &us);
+        bool irq = false;
+        uint32_t irqLat = 0;
+        const enum rd3_latch_step step = rd3AccelPqWait(head, fb, gen, frame0, frameKnown, progAbs, cap, &us, &irq,
+                                                        &irqLat);
         IOLockLock(gPresLock);
         if (P.gen == gen && P.q.inflight && step != RD3_LATCH_WAIT) {
-            rd3AccelPqLatchedLocked(head, step, us, false, &d);
+            rd3AccelPqLatchedLocked(head, step, us, false, &d, irq, irqLat);
             IOLockWakeup(gPresLock, &P.q, false);   /* the writers waiting for this latch */
         }
         IOLockUnlock(gPresLock);

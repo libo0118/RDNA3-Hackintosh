@@ -767,7 +767,8 @@ has "$out" "(none: a kext without the write generations" triage-genlog
 # DRIVER-PLAN N38: the present queue's PRESENT events (H-PRESENT)
 python3 -I "$ROOT/tests/trace_fixture.py" present "$T/present.bin"
 out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/present.bin" --timeline 400)
-has "$out" "INFO     H-PRESENT: head 0: 60 present(s) (swap 60): 20 programmed at once, 40 queued (20 replaced: newest wins, 0 Busy kept), 0 joined; 40 latch(es) seen (avg 15000 us, max 16000 us), 20 programmed at a latch; 1 writer wait(s) (max 900 us)" present
+has "$out" "INFO     H-PRESENT: head 0: 60 present(s) (swap 60): 20 programmed at once, 40 queued (20 replaced: newest wins, 0 Busy kept), 0 joined; 40 latch(es) seen (avg 15000 us, max 16000 us), 20 programmed at a latch; 1 writer wait(s) (max 900 us); 20 latch(es) ended by the pflip interrupt (avg 300 us after it)" present
+has "$out" "latched 16000 us (by the pflip interrupt, 300 us after it)" present
 has "$out" "PRESENT h0 swap #3 0x87040000 replaced (newest wins) (replaced #2) -> in flight 0x8b100000, queued 0x87040000" present
 has "$out" "PRESENT h0 a copy forward into 0x8b100000 waited 900 us for the flip away from it" present
 hasnt "$out" "FAIL     H-PRESENT" present
@@ -777,6 +778,7 @@ out=$(python3 "$ROOT/tools/rdna3_trace.py" "$T/presentbad.bin" --timeline 400)
 has "$out" "FAIL     H-PRESENT: head 0: 1 completion(s) BEFORE the latch was seen (1 not latched in time, 0 unreadable; first: present #99 at 0x8b8f0000" presentbad
 has "$out" "FAIL     H-PRESENT: head 0: 2 frame(s) LOST with no newer one (1 dropped: buffer freed, 1 refused when programmed from the queue; first: present #100 at 0x8b100000" presentbad
 has "$out" "INFO     H-PRESENT: head 0: 1 queued present(s) dropped at a display mode change" presentbad
+hasnt "$out" "ended by the pflip interrupt" presentbad   # N42: polled latches only
 has "$out" "WARN     H-PRESENT: head 0: 1 writer wait(s) ran out" presentbad
 has "$out" "TIMEOUT: completed EARLY 40000 us" presentbad
 has "$out" "DROPPED (at a mode change)" presentbad

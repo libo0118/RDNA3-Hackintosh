@@ -82,6 +82,8 @@ PRESENT_ARG = {0: "programmed", 1: "queued", 2: "replaced (newest wins)", 3: "jo
                14: "the IOP copy fallback flipped home"}
 PQ_KIND = {0: "swap", 1: "flip-buffer", 2: "IOP"}
 PQ_DROP_MODE = 0x80                   # PRESENT arg 10's flags: dropped at a display mode change
+PQ_IRQ_DONE = 0x40                    # PRESENT arg 6's flags: ended by the head's pflip interrupt (v3 its latency, us)
+PQ_KIND_MASK = 0x3f                   # the present's kind under those flags
 FLIPPATH_NS = 50 * 10 ** 6            # H-FLIPPATH: a copy forward with no swap of its surface within this
 STALE_NS = 20 * 10 ** 6               # H-STALE: a stale copy follows another back's copy within this
 AB_NAME = {0: "-", 1: "A: mode 1", 2: "B: mode 0", 3: "back"}
@@ -757,21 +759,25 @@ def h_present(trace):
         for e in es:
             n[e.arg] = n.get(e.arg, 0) + 1
         lat = [e.v1 for e in es if e.arg == 6]
+        irq = [e.v3 for e in es if e.arg == 6 and e.flags & PQ_IRQ_DONE]   # N42: latches the pflip interrupt ended
         waits = [e for e in es if e.arg == 11]
         wto = [e for e in waits if e.flags & 4]
         kinds = {}
         for e in es:
             if e.arg in (0, 1, 2, 3):
-                kinds[PQ_KIND.get(e.flags & 0x7f, e.flags)] = kinds.get(PQ_KIND.get(e.flags & 0x7f, e.flags), 0) + 1
+                kinds[PQ_KIND.get(e.flags & PQ_KIND_MASK, e.flags)] = kinds.get(
+                    PQ_KIND.get(e.flags & PQ_KIND_MASK, e.flags), 0) + 1
         hs = h if h != 0xff else "?"
         out.append(("INFO", "H-PRESENT", "head %s: %d present(s) (%s): %d programmed at once, %d queued (%d replaced: "
                     "newest wins, %d Busy kept), %d joined; %d latch(es) seen (avg %d us, max %d us), %d programmed "
-                    "at a latch; %d writer wait(s) (max %d us)" % (
+                    "at a latch; %d writer wait(s) (max %d us)%s" % (
                         hs, sum(n.get(a, 0) for a in (0, 1, 2, 3)),
                         ", ".join("%s %d" % (k, v) for k, v in sorted(kinds.items())) or "-",
                         n.get(0, 0), n.get(1, 0) + n.get(2, 0) + n.get(4, 0), n.get(2, 0), n.get(4, 0), n.get(3, 0),
                         len(lat), sum(lat) // len(lat) if lat else 0, max(lat) if lat else 0, n.get(7, 0),
-                        len(waits), max([e.v1 for e in waits] or [0]))))
+                        len(waits), max([e.v1 for e in waits] or [0]),
+                        "; %d latch(es) ended by the pflip interrupt (avg %d us after it)" % (
+                            len(irq), sum(irq) // len(irq)) if irq else "")))
         early = [e for e in es if e.arg in (8, 9)]
         if early:
             out.append(("FAIL", "H-PRESENT", "head %s: %d completion(s) BEFORE the latch was seen (%d not latched in "
@@ -1648,9 +1654,10 @@ def _fmt_event(trace, e, ms, n):
                 ms, e.head if e.head != 0xff else "-", "copy forward" if e.flags & 1 else "page-on", e.pa, e.v1,
                 " -- TIMED OUT" if e.flags & 4 else "")
         return "%10.3f ms PRESENT h%s %s #%d 0x%x %s%s%s -> in flight 0x%x, queued 0x%x" % (
-            ms, e.head if e.head != 0xff else "-", PQ_KIND.get(e.flags & 0x7f, e.flags), e.v0, e.pa,
+            ms, e.head if e.head != 0xff else "-", PQ_KIND.get(e.flags & PQ_KIND_MASK, e.flags), e.v0, e.pa,
             PRESENT_ARG.get(e.arg, e.arg) + (" (at a mode change)" if e.arg == 10 and e.flags & PQ_DROP_MODE else ""),
-            " %d us" % e.v1 if e.arg in (6, 8, 12) else "", " (replaced #%d)" % e.v2 if e.arg == 2 else
+            (" %d us" % e.v1 if e.arg in (6, 8, 12) else "")
+            + (" (by the pflip interrupt, %d us after it)" % e.v3 if e.arg == 6 and e.flags & PQ_IRQ_DONE else ""), " (replaced #%d)" % e.v2 if e.arg == 2 else
             " (%d in a row)" % e.v2 if e.arg in (12, 13) else
             " (dropped #%d)" % e.v2 if e.arg == 14 and e.v2 else
             " (IOReturn 0x%x flipResult %d)" % (e.v4, e.v3 - (1 << 32) if e.v3 >> 31 else e.v3) if e.arg in (4, 5)

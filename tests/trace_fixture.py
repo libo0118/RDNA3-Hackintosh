@@ -198,7 +198,8 @@ def present_run(w, kind):
         w.add(25, 0, 2, 0, 0, (n + 3, 0, n + 2, 0, 0), F, B1, F)
         w.add(25, 0, 6, 0, 0, (n + 1, 14000, 0, 0, 0), B1, F, 0)
         w.add(25, 0, 7, 0, 0, (n + 3, 0, 0, 0, 0), F, F, 0)
-        w.add(25, 0, 6, 0, 0, (n + 3, 16000, 0, 0, 0), F, 0, 0)
+        w.add(25, 0, 6, 0x40 if kind == "present" else 0, 0, (n + 3, 16000, 0, 300 if kind == "present" else 0, 0),
+              F, 0, 0)   # N42: the present run's second latch ended by the pflip interrupt, 300 us after it
     w.add(25, 0, 11, 1, 0, (0, 900, 0, 0, 0), B1)
     if kind == "presentbad":
         w.add(25, 0, 8, 0, 0, (99, 40000, 0, 0, 0), B2)
