@@ -35,6 +35,7 @@
 #include "gfx11_info.h"
 #include "xfer.h"
 #include "rdna3_drm.h"
+#include "rdna3_flip_queue.h"
 #include "gen/gc_11_0_0_harvest.h"
 #include "gen/gc_11_0_0_gds.h"
 #include "gen/gc_11_0_0_sdma_reset.h"
@@ -11956,6 +11957,58 @@ static void run(const char *fwdir)
             uint64_t inuse = 0, req = 0;
             CHECK(dcn32_scan_addr(&dev, &dc, 0, &inuse, &req) == RDNA3_OK && inuse == req &&
                   inuse == FB_START + 0x5000000);
+        }
+        /* DRIVER-PLAN N38 (common/rdna3_flip_queue.h): the accelerator's present queue over this HUBP, as
+         * amdgpu_dm_commit_planes / dm_pflip_high_irq run a CRTC's flips - one flip in flight, a newer
+         * present queued behind it (the newest wins), the in-flight one completed only once
+         * dcn32_flip_pending (hubp2_is_flip_pending) reads it latched, the queued one programmed then */
+        {
+            const uint64_t A = FB_START + 0x4000000, B = FB_START + 0x4800000, C = FB_START + 0x5800000;
+            struct rd3_fq q;
+            uint32_t dropped = 0, tok = 0, ntok = 0;
+            int had = 0;
+            uint64_t na = 0, inuse = 0, req = 0;
+            const uint32_t flips0 = S.dcn_flips;
+            rd3_fq_init(&q);
+            q.shown = FB_START + 0x5000000;                       /* what the HUBP scans now */
+            CHECK(rd3_fq_submit(&q, A, 1, &dropped) == RD3_FQ_PROGRAM);
+            CHECK(dcn32_flip(&dev, &dc, 0, A, 2560, 0) == RDNA3_OK && dcn32_flip_pending(&dev, &dc, 0));
+            /* two more presents within the frame: queued, the second replaces the first, no register write */
+            CHECK(rd3_fq_submit(&q, B, 2, &dropped) == RD3_FQ_QUEUED);
+            CHECK(rd3_fq_submit(&q, C, 3, &dropped) == RD3_FQ_REPLACED && dropped == 2);
+            CHECK(S.dcn_flips == flips0 + 1 &&
+                  S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, 1)] == (uint32_t)A);
+            /* the buffer the HUBP still scans is leaving, never free */
+            CHECK(rd3_fq_reuse(&q, FB_START + 0x5000000) == RD3_FQ_LEAVING);
+            CHECK(dcn32_scan_addr(&dev, &dc, 0, &inuse, &req) == RDNA3_OK && inuse == FB_START + 0x5000000 &&
+                  req == A);
+            /* the flip-done path looks while it is pending: nothing completes */
+            CHECK(dcn32_flip_pending(&dev, &dc, 0));
+            /* the vblank: the HUBP takes A */
+            S.reg[HUBP(regHUBPREQ0_DCSURF_FLIP_CONTROL, 1)] &= ~HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_PENDING_MASK;
+            S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, 1)] = (uint32_t)A;
+            CHECK(!dcn32_flip_pending(&dev, &dc, 0));
+            CHECK(rd3_fq_latched(&q, &had, &tok, &na, &ntok) == RD3_FQ_PROGRAM && had && tok == 1 && na == C &&
+                  ntok == 3 && q.shown == A);
+            CHECK(dcn32_flip(&dev, &dc, 0, na, 2560, 0) == RDNA3_OK && dcn32_flip_pending(&dev, &dc, 0));
+            CHECK(S.dcn_flips == flips0 + 2 &&
+                  S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, 1)] == (uint32_t)C);
+            CHECK(rd3_fq_reuse(&q, A) == RD3_FQ_LEAVING && rd3_fq_reuse(&q, FB_START + 0x5000000) == RD3_FQ_FREE &&
+                  rd3_fq_reuse(&q, B) == RD3_FQ_FREE);
+            /* the next vblank: C on the panel, its present completes, nothing left */
+            S.reg[HUBP(regHUBPREQ0_DCSURF_FLIP_CONTROL, 1)] &= ~HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_PENDING_MASK;
+            S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, 1)] = (uint32_t)C;
+            CHECK(!dcn32_flip_pending(&dev, &dc, 0));
+            CHECK(rd3_fq_latched(&q, &had, &tok, &na, &ntok) == RD3_FQ_IDLE && had && tok == 3 && q.shown == C &&
+                  !q.inflight);
+            CHECK(dcn32_scan_addr(&dev, &dc, 0, &inuse, &req) == RDNA3_OK && inuse == C && req == C);
+            CHECK(rd3_fq_reuse(&q, C) == RD3_FQ_SCANNED && rd3_fq_reuse(&q, A) == RD3_FQ_FREE);
+            /* back to what the rest of this test expects on the panel */
+            CHECK(dcn32_flip(&dev, &dc, 0, FB_START + 0x5000000, 2560, 0) == RDNA3_OK);
+            S.reg[HUBP(regHUBPREQ0_DCSURF_FLIP_CONTROL, 1)] &= ~HUBPREQ0_DCSURF_FLIP_CONTROL__SURFACE_FLIP_PENDING_MASK;
+            S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, 1)] = (uint32_t)(FB_START + 0x5000000);
+            CHECK(!dcn32_flip_pending(&dev, &dc, 0));
+            S.dcn_flips = flips0;
         }
         S.dcn_hold = 0;
         /* pitch change goes under SURFACE_UPDATE_LOCK, and the lock is released */

@@ -69,6 +69,8 @@ enum rd3_trace_type {
                            * other present path, card run 2026-10-17d's copy forward bursts) */
     RD3_TR_HOOK = 24,     /* IOAccelLegacySurface::pickPresentType / didSubmitSwap / isBackBufferReady /
                            * submitUpdate: traced and forwarded */
+    RD3_TR_PRESENT = 25,  /* the present queue (DRIVER-PLAN N38, rdna3_flip_queue.h): a present queued,
+                           * programmed, latched, dropped; a writer waiting for the buffer leaving the panel */
     RD3_TR_TYPES
 };
 
@@ -125,6 +127,10 @@ enum rd3_trace_swap {
  * whose back was the buffer the head already scanned, its flip latched: not
  * flipped again, no latch wait (card run 2026-10-18b, rd3_latch_same_shown) */
 #define RD3_TRV1_TARGET_SAME 4u
+/* ... and 5: a mode 0 swap queued behind the head's flip in flight (the
+ * present queue, DRIVER-PLAN N38: programmed at that flip's latch, or
+ * replaced by a newer present; the PRESENT events tell) */
+#define RD3_TRV1_TARGET_QUEUED 5u
 /* a mode 1 swap whose back the generations would hold but that presented
  * the surface's buffer written after the head's frame instead
  * (rd3_wg_landed_pick) carries RD3_TRV1_LANDED (v4 >> 24 that buffer's
@@ -139,6 +145,32 @@ enum rd3_trace_flipbuf {
     RD3_TRFB_NORES = 5,     /* neither resource has VRAM of ours */
     RD3_TRFB_BUSY = 6       /* the family's lock is held by another thread: not presented */
 };
+/* RD3_TR_PRESENT's arg (DRIVER-PLAN N38) */
+enum rd3_trace_present {
+    RD3_TRP_PROGRAM = 0,   /* programmed at the present (nothing was in flight) */
+    RD3_TRP_QUEUED = 1,    /* queued behind the in-flight flip */
+    RD3_TRP_REPLACED = 2,  /* queued, replacing an older queued present (v2 its token): that one never shown */
+    RD3_TRP_JOINED = 3,    /* the in-flight flip's own address: completes with it */
+    RD3_TRP_BUSY = 4,      /* the framebuffer answered Busy (another path's flip pending): kept, queued */
+    RD3_TRP_REFUSED = 5,   /* the framebuffer refused it (v4 the IOReturn, v3 flipResult): at the present (v2 0)
+                            * the caller copies it onto the scanout; from the queue (v2 its token) it is lost */
+    RD3_TRP_LATCHED = 6,   /* the in-flight flip seen latched (v1 us from its programming): completed */
+    RD3_TRP_NEXT = 7,      /* the queued present programmed at that latch */
+    RD3_TRP_TIMEOUT = 8,   /* not latched in time (v1 us): completed EARLY, the panel may still read the old buffer */
+    RD3_TRP_UNKNOWN = 9,   /* the flip state unreadable: completed EARLY */
+    RD3_TRP_DROPPED = 10,  /* a queued present lost with no newer one (its buffer freed; flags | 0x80: a display
+                            * mode change, the picture it was for gone) */
+    RD3_TRP_WAIT = 11,     /* a writer waited for the buffer leaving the panel (v1 us; flags 1 copy forward,
+                            * 2 page-on, 4 timed out) */
+    RD3_TRP_FOREIGNTO = 12, /* the flip pending before the queued present (another path's, or one of ours given
+                             * up) not latched in time (v1 us): given up, v2 the run (rd3_fq_verdict) */
+    RD3_TRP_GIVEUP = 13,   /* the queued present programmed WITHOUT waiting for the pending flip (v2 the run: the
+                            * head's flips stay pending - blanked, DPMS off, a stuck HUBP) */
+    RD3_TRP_HOME = 14      /* the IOP copy fallback flipped home: v0 the in-flight present completed (0: none), v2
+                            * the queued one dropped (0: none) */
+};
+/* RD3_TR_PRESENT's flags (args 0-10, 12-14): the present's kind */
+enum rd3_trace_pq_kind { RD3_TRPK_SWAP = 0, RD3_TRPK_FLIPBUF = 1, RD3_TRPK_IOP = 2 };
 /* where a mode 1/2 swap failed (RD3_TRS_COPY_FAILED's v4) */
 enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD3_TRX_SDMA = 3, RD3_TRX_FLIP = 4 };
 
@@ -190,7 +222,8 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *  MODE    arg 0 will change, 1 did change, 2 initFramebufferResource (head,
  *          pa the scanout, v0 w | h << 16, v1 pitch)
  *  FLIP    head, arg 0 mode 0's flip of a back, 1 to the driver's buffer, 2
- *          home, 3 an IOP surface, 4 home when leaving modes 1/2; flags 1 done; v0 flipResult, v4 the
+ *          home, 3 an IOP surface, 4 home when leaving modes 1/2, 5 a flip-buffer
+ *          present, 6 the present queue's (N38); flags 1 done; v0 flipResult, v4 the
  *          IOReturn; pa the target
  *  LATCH   head, arg 0 waited, 1 at once, 2 timed out, 3 unreadable, 4 modes
  *          1/2: latched before the next copy, 5 not in time, 6 not waited
@@ -251,6 +284,13 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          (submitUpdate's count), v2 the base's return value (rax, the low
  *          32 bits; isBackBufferReady: its low byte), v3 this kind's calls so
  *          far (the first 2048 of a kind traced, then every 8th)
+ *  PRESENT head; arg rd3_trace_present; flags rd3_trace_pq_kind (args 0-10) or the
+ *          writer (arg 11: 1 copy forward, 2 page-on, | 4 timed out); v0 the
+ *          present's token (the swap number; IOP: the transaction count), v1
+ *          microseconds (latched / timeout: since the flip was programmed;
+ *          wait: the writer's wait), v2 the replaced or dropped token, v3
+ *          flipResult, v4 the IOReturn; pa the present's address, pb the
+ *          address in flight after it, pc the queued one
  *  SWAP's write generations: v1 bits 25, 26, 27 and 28-31 (RD3_TRV1_GEN_*,
  *          RD3_TRV1_FLIPBUF); v2 = the copy's us (16 bits, saturated at 65535) | the
  *          back's generation << 16 (its low 16 bits); v3 the head's

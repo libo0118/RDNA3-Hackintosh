@@ -45,15 +45,17 @@ READ_ALL, READ_STREAM, READ_SEC = 0, 1, 2
 TYPES = {0: "none", 1: "SWAP", 2: "CF", 3: "SHAPE", 4: "VMALLOC", 5: "VMFREE", 6: "APERTURE", 7: "PAGEOFF",
          8: "SURFGEM", 9: "MODE", 10: "FLIP", 11: "LATCH", 12: "SYNC", 13: "GONE", 14: "MODESET", 15: "SCAN",
          16: "CS", 17: "FENCE", 18: "GPUWAIT", 19: "RESET", 20: "VMFAULT", 21: "SURFRES", 22: "PANEL",
-         23: "FLIPBUF", 24: "HOOK"}
+         23: "FLIPBUF", 24: "HOOK", 25: "PRESENT"}
 T = dict((v, k) for k, v in TYPES.items())
 SWAP_ARG = {0: "skip", 1: "flip", 2: "flip refused, copied", 3: "flip refused", 4: "copy", 5: "hold", 6: "copy FAILED",
             7: "no head"}
 RC = {0: "no res", 1: "no vidmem", 2: "no kva", 3: "no geometry", 4: "empty", 5: "pixels"}
 F_A1_FRONT, F_A2_FRONT, F_A1_PIX, F_A2_PIX, F_EMPTY, F_FRONT_OK, F_DOUBLE, F_WAITED = 1, 2, 4, 8, 16, 32, 64, 128
 TARGET = {0: "-", 1: "home", 2: "D", 3: "home DIRECT",
-          4: "same buffer, not flipped"}   # 4: mode 0, the back already on the panel (card run 2026-10-18b)
+          4: "same buffer, not flipped",   # 4: mode 0, the back already on the panel (card run 2026-10-18b)
+          5: "queued behind the flip in flight"}   # 5: the present queue (DRIVER-PLAN N38)
 TARGET_SAME = 4
+TARGET_QUEUED = 5
 V1_BRK_FLIP = 1 << 20                 # SWAP v1: modes 1/2 flipped, the SDMA breaker open
 V1_LANDED = 1 << 21                   # SWAP v1: modes 1/2 presented the landed buffer (card run 2026-10-17c)
 V1_LANDED_WOULD = 1 << 22             # SWAP v1: one found, not presented (debug.rdna3accel_swap_landed=0)
@@ -72,6 +74,14 @@ COPY_US_CAP = 0xffff                  # SWAP v2's copy time saturates here (v2 >
 FLIPBUF_WHAT = {0: "traced", 1: "PRESENTED", 2: "held", 3: "present FAILED", 4: "no head", 5: "no VRAM resource",
                 6: "lock busy"}
 HOOK_KIND = {0: "pickPresentType", 1: "didSubmitSwap", 2: "isBackBufferReady", 3: "submitUpdate"}
+# PRESENT (DRIVER-PLAN N38, common/rdna3_flip_queue.h): rd3_trace_present
+PRESENT_ARG = {0: "programmed", 1: "queued", 2: "replaced (newest wins)", 3: "joined the flip in flight",
+               4: "Busy, kept", 5: "REFUSED", 6: "latched", 7: "programmed at the latch", 8: "TIMEOUT: completed EARLY",
+               9: "UNREADABLE: completed EARLY", 10: "DROPPED", 11: "writer waited",
+               12: "the flip pending before it GIVEN UP", 13: "programmed WITHOUT waiting (head stuck)",
+               14: "the IOP copy fallback flipped home"}
+PQ_KIND = {0: "swap", 1: "flip-buffer", 2: "IOP"}
+PQ_DROP_MODE = 0x80                   # PRESENT arg 10's flags: dropped at a display mode change
 FLIPPATH_NS = 50 * 10 ** 6            # H-FLIPPATH: a copy forward with no swap of its surface within this
 STALE_NS = 20 * 10 ** 6               # H-STALE: a stale copy follows another back's copy within this
 AB_NAME = {0: "-", 1: "A: mode 1", 2: "B: mode 0", 3: "back"}
@@ -598,10 +608,83 @@ def hypotheses(trace, ctx=None):
     out.extend(h_stale(trace, ctx))
     out.extend(h_gen(trace, ctx))
     out.extend(h_flippath(trace, ctx))
+    out.extend(h_present(trace))
     resets = trace.by("RESET")
     if resets:
         out.append(("WARN", "GPU", "%d hang recover%s (first IP %d seq %d)" % (len(resets), "y" if len(resets) == 1
                                                                               else "ies", resets[0].arg, resets[0].v2)))
+    return out
+
+
+def h_present(trace):
+    """[(level, "H-PRESENT", text)]: the present queue (DRIVER-PLAN N38) per head - presents programmed at once,
+    queued, replaced (newest wins), Busy kept, joined; latches seen (average, max); writers that waited for the
+    buffer leaving the panel. FAIL a completion before its latch (TIMEOUT / UNREADABLE: the panel may still have read
+    the buffer WindowServer had back) and a frame lost with no newer one (DROPPED but at a mode change, REFUSED when
+    programmed from the queue); WARN a writer whose wait ran out and a refusal at the present (copied instead).
+    No PRESENT event: [] (swap_async 0, or an older accelerator)."""
+    evs = trace.by("PRESENT")
+    if not evs:
+        return []
+    out = []
+    per = {}
+    for e in evs:
+        per.setdefault(e.head, []).append(e)
+    for h, es in sorted(per.items()):
+        n = {}
+        for e in es:
+            n[e.arg] = n.get(e.arg, 0) + 1
+        lat = [e.v1 for e in es if e.arg == 6]
+        waits = [e for e in es if e.arg == 11]
+        wto = [e for e in waits if e.flags & 4]
+        kinds = {}
+        for e in es:
+            if e.arg in (0, 1, 2, 3):
+                kinds[PQ_KIND.get(e.flags & 0x7f, e.flags)] = kinds.get(PQ_KIND.get(e.flags & 0x7f, e.flags), 0) + 1
+        hs = h if h != 0xff else "?"
+        out.append(("INFO", "H-PRESENT", "head %s: %d present(s) (%s): %d programmed at once, %d queued (%d replaced: "
+                    "newest wins, %d Busy kept), %d joined; %d latch(es) seen (avg %d us, max %d us), %d programmed "
+                    "at a latch; %d writer wait(s) (max %d us)" % (
+                        hs, sum(n.get(a, 0) for a in (0, 1, 2, 3)),
+                        ", ".join("%s %d" % (k, v) for k, v in sorted(kinds.items())) or "-",
+                        n.get(0, 0), n.get(1, 0) + n.get(2, 0) + n.get(4, 0), n.get(2, 0), n.get(4, 0), n.get(3, 0),
+                        len(lat), sum(lat) // len(lat) if lat else 0, max(lat) if lat else 0, n.get(7, 0),
+                        len(waits), max([e.v1 for e in waits] or [0]))))
+        early = [e for e in es if e.arg in (8, 9)]
+        if early:
+            out.append(("FAIL", "H-PRESENT", "head %s: %d completion(s) BEFORE the latch was seen (%d not latched in "
+                        "time, %d unreadable; first: present #%d at 0x%x, seq %d) - the panel may still have read the "
+                        "buffer WindowServer had back" % (hs, len(early), n.get(8, 0), n.get(9, 0), early[0].v0,
+                                                          early[0].pa, early[0].seq)))
+        lost = [e for e in es if (e.arg == 10 and not e.flags & PQ_DROP_MODE) or (e.arg == 5 and e.v2)]
+        if lost:
+            out.append(("FAIL", "H-PRESENT", "head %s: %d frame(s) LOST with no newer one (%d dropped: buffer freed, "
+                        "%d refused when programmed from the queue; first: present #%d at 0x%x, seq %d)" % (
+                            hs, len(lost), sum(1 for e in lost if e.arg == 10), sum(1 for e in lost if e.arg == 5),
+                            lost[0].v0, lost[0].pa, lost[0].seq)))
+        moded = [e for e in es if e.arg == 10 and e.flags & PQ_DROP_MODE]
+        if moded:
+            out.append(("INFO", "H-PRESENT", "head %s: %d queued present(s) dropped at a display mode change" %
+                        (hs, len(moded))))
+        if wto:
+            out.append(("WARN", "H-PRESENT", "head %s: %d writer wait(s) ran out (a copy forward / page-on wrote the "
+                        "buffer while the panel may still read it; first 0x%x, seq %d)" % (hs, len(wto), wto[0].pa,
+                                                                                          wto[0].seq)))
+        fto, gup = [e for e in es if e.arg == 12], [e for e in es if e.arg == 13]
+        if fto or gup:
+            out.append(("WARN", "H-PRESENT", "head %s: the head's flips stayed pending: %d pending flip(s) given up, "
+                        "%d present(s) programmed without waiting for them (blanked, DPMS off, a stuck HUBP; first "
+                        "at 0x%x, seq %d)" % (hs, len(fto), len(gup), (fto or gup)[0].pa, (fto or gup)[0].seq)))
+        home = [e for e in es if e.arg == 14]
+        if home:
+            out.append(("INFO", "H-PRESENT", "head %s: the IOP copy fallback flipped home %d time(s) over the queue "
+                        "(%d in-flight completed, %d queued dropped)" % (hs, len(home), sum(1 for e in home if e.v0),
+                                                                          sum(1 for e in home if e.v2))))
+        ref = [e for e in es if e.arg == 5 and not e.v2]
+        if ref:
+            out.append(("WARN", "H-PRESENT", "head %s: %d present(s) refused by the framebuffer at the present (copied "
+                        "onto its scanout instead; first 0x%x, IOReturn 0x%x)" % (hs, len(ref), ref[0].pa,
+                                                                                   ref[0].v4)))
     return out
 
 
@@ -1435,6 +1518,19 @@ def _fmt_event(trace, e, ms, n):
             ms, e.head if e.head != 0xff else "-", "submitScanoutFlipBuffer" if e.arg == 1 else "submitFlipBuffer",
             e.v0, e.v1, e.pa, e.pb, FLIPBUF_WHAT.get(e.v4, e.v4), " (flipbuf_present 1)" if e.flags & 1 else "",
             " (took the family's lock)" if e.flags & 2 else "", e.pc))
+    if n == "PRESENT":
+        if e.arg == 11:
+            return "%10.3f ms PRESENT h%s a %s into 0x%x waited %d us for the flip away from it%s" % (
+                ms, e.head if e.head != 0xff else "-", "copy forward" if e.flags & 1 else "page-on", e.pa, e.v1,
+                " -- TIMED OUT" if e.flags & 4 else "")
+        return "%10.3f ms PRESENT h%s %s #%d 0x%x %s%s%s -> in flight 0x%x, queued 0x%x" % (
+            ms, e.head if e.head != 0xff else "-", PQ_KIND.get(e.flags & 0x7f, e.flags), e.v0, e.pa,
+            PRESENT_ARG.get(e.arg, e.arg) + (" (at a mode change)" if e.arg == 10 and e.flags & PQ_DROP_MODE else ""),
+            " %d us" % e.v1 if e.arg in (6, 8, 12) else "", " (replaced #%d)" % e.v2 if e.arg == 2 else
+            " (%d in a row)" % e.v2 if e.arg in (12, 13) else
+            " (dropped #%d)" % e.v2 if e.arg == 14 and e.v2 else
+            " (IOReturn 0x%x flipResult %d)" % (e.v4, e.v3 - (1 << 32) if e.v3 >> 31 else e.v3) if e.arg in (4, 5)
+            else "", e.pb, e.pc)
     if n == "HOOK":
         return "%10.3f ms HOOK h%s %s(%d, %d) -> 0x%x (call %d)" % (
             ms, e.head if e.head != 0xff else "-", HOOK_KIND.get(e.arg, e.arg), e.v0, e.v1, e.v2, e.v3)

@@ -85,14 +85,39 @@ struct RD3KRmHandles {
 /* ---- flips (answered by the framebuffer) ---- */
 #define RD3K_FLIP_ABI_VERSION 2u
 #define RD3K_FLIP_FN          "rdna3FlipToSurface"
+/* RD3KFlipRequest.flags */
+#define RD3K_FLIP_FLAG_HOME   1u      /* flip back to the boot scanout */
+/* DRIVER-PLAN N38: while the head's previous flip is still pending, answer
+ * kIOReturnBusy (flipResult RD3K_FLIP_RESULT_BUSY) and program nothing,
+ * instead of waiting up to 20 ms for it (a framebuffer older than this
+ * flag ignores it and waits as before) */
+#define RD3K_FLIP_FLAG_NOWAIT 2u
+#define RD3K_FLIP_RESULT_BUSY (-2)
 struct RD3KFlipRequest {
     unsigned int version;
-    unsigned int flags;               /* 1 = flip back to the boot scanout */
+    unsigned int flags;               /* RD3K_FLIP_FLAG_* */
     void        *kapiMemory;
     unsigned int width, height;
     unsigned int pitch;
     int          flipResult;
     unsigned long long allocationCookie;
+};
+
+/* DRIVER-PLAN N38: the latch, for the accelerator's flip-done path - the
+ * framebuffer sleeps (woken by its VBL thread, at least every 500 us) until
+ * the head has no flip pending or timeoutUs (at most 100 ms) passed:
+ * kIOReturnSuccess latched, kIOReturnTimeout still pending, kIOReturnNotReady
+ * the state unreadable; 'pending' / 'frame' the last state read, 'waitedUs'
+ * the time spent. A framebuffer without it answers kIOReturnUnsupported
+ * (the accelerator then polls the core's rdna3DisplayStatus itself) */
+#define RD3K_FLIP_FN_LATCHWAIT "rdna3FlipLatchWait"
+#define RD3K_FLIPWAIT_VERSION  1u
+#define RD3K_FLIPWAIT_MAX_US   100000u
+struct RD3KFlipLatchWait {
+    unsigned int version;
+    unsigned int timeoutUs;           /* in */
+    unsigned int pending, frame;      /* out */
+    unsigned int waitedUs, pad;       /* out */
 };
 
 /* ---- display heads (answered by the core kext, asked by RDNA3Framebuffer):
@@ -305,6 +330,12 @@ struct RD3KCopyRequest {
 #define RD3K_SS_TOO_SMALL     0x80000006u
 #define RD3K_SS_DISPLAY       0x80000007u   /* WindowServer's display framebuffer: kept out of A3 (card run 58) */
 #define RD3K_SS_POLICY        0x80000008u   /* kept out of A3 by policy: WindowServer's inputs, or rdna3a3=0 (card run 58) */
+/* the highest IOSurface plane an escape may name: the caller's 32-bit plane
+ * reaches IOGraphicsAccelerator2::deviceCacheForIOSurface, and the device
+ * cache's validity bits (valid[0], valid[6]) hold 16 planes. A plane above
+ * it is refused with RD3K_SS_NO_CACHE before the lookup */
+#define RD3K_SS_MAX_PLANE     15u
+static inline int rd3k_ss_plane_ok(unsigned int plane) { return plane <= RD3K_SS_MAX_PLANE; }
 struct RD3KSurfShareEsc {
     unsigned int version;
     unsigned int surfaceID;

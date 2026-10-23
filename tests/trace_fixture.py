@@ -22,7 +22,10 @@ stale, stalehold, stalemixed, stalewould, stale20ms, stalereset, stalereal
 (head 1, mode 1: copy forward -> B1, swap B1, swap B2 that WindowServer never
 redrew; stale_run says how each differs); card run 2026-10-17d: gen,
 genreal, flippath (the write generations' holds, a hold of a back the trace
-saw written, a copy forward burst with no swap; gen_run says how)."""
+saw written, a copy forward burst with no swap; gen_run says how); DRIVER-PLAN
+N38: present (the present queue on head 0, nothing wrong), presentbad (a
+completion before its latch, frames lost, a writer wait that ran out, a
+drop at a mode change; present_run says how)."""
 import struct
 import sys
 
@@ -183,6 +186,32 @@ def common_tail(w):
     w.add(2, 0, 16 + 1, 1, 0xabcd, (4, 4, 100, 50, 0), F, B1, F)      # CF ok
 
 
+def present_run(w, kind):
+    """DRIVER-PLAN N38's PRESENT events on head 0: 20 rounds of B1 programmed, B2 queued then replaced by F
+    (newest wins), B1 latched after 14 ms, F programmed at that latch and latched after 16 ms; one copy forward
+    that waited 900 us. presentbad adds a timeout (completed early), a present dropped when its buffer was freed,
+    one dropped at a mode change (INFO), a writer wait that ran out and a refusal from the queue (lost)."""
+    for i in range(20):
+        n = 3 * i
+        w.add(25, 0, 0, 0, 0, (n + 1, 0, 0, 0, 0), B1, B1, 0)
+        w.add(25, 0, 1, 0, 0, (n + 2, 0, 0, 0, 0), B2, B1, B2)
+        w.add(25, 0, 2, 0, 0, (n + 3, 0, n + 2, 0, 0), F, B1, F)
+        w.add(25, 0, 6, 0, 0, (n + 1, 14000, 0, 0, 0), B1, F, 0)
+        w.add(25, 0, 7, 0, 0, (n + 3, 0, 0, 0, 0), F, F, 0)
+        w.add(25, 0, 6, 0, 0, (n + 3, 16000, 0, 0, 0), F, 0, 0)
+    w.add(25, 0, 11, 1, 0, (0, 900, 0, 0, 0), B1)
+    if kind == "presentbad":
+        w.add(25, 0, 8, 0, 0, (99, 40000, 0, 0, 0), B2)
+        w.add(25, 0, 10, 0, 0, (100, 0, 100, 0, 0), B1)
+        w.add(25, 0, 10, 0x80, 0, (101, 0, 101, 0, 0), B2)
+        w.add(25, 0, 11, 1 | 4, 0, (0, 35000, 0, 0, 0), B2)
+        w.add(25, 0, 5, 0, 0, (102, 0, 102, 0xffffffff, 0xe00002bc), F)
+        # ECC review of N38: a head whose flips stay pending - given up, then flipped anyway; a flip home
+        w.add(25, 0, 12, 0, 0, (103, 35000, 3, 0, 0), B2)
+        w.add(25, 0, 13, 0, 0, (103, 35000, 3, 0, 0), B2)
+        w.add(25, 0, 14, 2, 0, (104, 0, 105, 0, 0), B1)
+
+
 def make(kind):
     w = W()
     secs = []
@@ -209,6 +238,9 @@ def make(kind):
             else:                  # the landed buffer (B1, index 1) copied instead
                 scan(w, 2 * i + 2, 1, B1, True, True)
                 swap(w, 2 * i + 2, 1, 4, B2, False, pc=HOME, flags=64 | 32, target=1, landed=1)
+        common_tail(w)
+    elif kind in ("present", "presentbad"):   # DRIVER-PLAN N38: the present queue
+        present_run(w, kind)
         common_tail(w)
     elif kind in GEN_KINDS:     # card run 2026-10-17d: the write generations, the flip-buffer path
         gen_run(w, kind)

@@ -66,6 +66,53 @@ m4 = re.search(r"#define RD3_TRV1_TARGET_SAME (\d+)u", h)
 if not m4 or int(m4.group(1)) != rdna3_trace.TARGET_SAME or rdna3_trace.TARGET_SAME not in rdna3_trace.TARGET:
     fails.append("RD3_TRV1_TARGET_SAME %s, the decoder's TARGET_SAME %d / TARGET %s" %
                  (m4.group(1) if m4 else "missing", rdna3_trace.TARGET_SAME, sorted(rdna3_trace.TARGET)))
+# DRIVER-PLAN N38: SWAP's target 5 (queued behind the flip in flight) and the PRESENT event's args
+m5 = re.search(r"#define RD3_TRV1_TARGET_QUEUED (\d+)u", h)
+if not m5 or int(m5.group(1)) != rdna3_trace.TARGET_QUEUED or rdna3_trace.TARGET_QUEUED not in rdna3_trace.TARGET:
+    fails.append("RD3_TRV1_TARGET_QUEUED %s, the decoder's TARGET_QUEUED %d" % (m5.group(1) if m5 else "missing",
+                                                                              rdna3_trace.TARGET_QUEUED))
+m6 = re.search(r"enum rd3_trace_present \{(.*?)\};", h, re.S)
+trp = sorted(int(v) for v in re.findall(r"RD3_TRP_\w+\s*=\s*(\d+)", m6.group(1) if m6 else ""))
+if not trp or trp != sorted(rdna3_trace.PRESENT_ARG):
+    fails.append("enum rd3_trace_present %s, the decoder's PRESENT_ARG %s" % (trp, sorted(rdna3_trace.PRESENT_ARG)))
+m7 = re.search(r"enum rd3_trace_pq_kind \{(.*?)\};", h, re.S)
+trk = sorted(int(v) for v in re.findall(r"RD3_TRPK_\w+\s*=\s*(\d+)", m7.group(1) if m7 else ""))
+if not trk or trk != sorted(rdna3_trace.PQ_KIND):
+    fails.append("enum rd3_trace_pq_kind %s, the decoder's PQ_KIND %s" % (trk, sorted(rdna3_trace.PQ_KIND)))
+# DRIVER-PLAN N38 (ECC review): every present-queue / perfstats counter and knob the accelerator registers reaches
+# the report - the collectors' sysctl grep (tools/macos/collect.sh, tools/vm/macos/autoreport.sh), triage's
+# A3_SYSCTL and, per head, its PQ_KEYS - and triage's stuck run is the header's
+import triage_reports  # noqa: E402
+acc = open(os.path.join(ROOT, "accel", "rdna3-accel.cpp")).read()
+pq4 = re.findall(r"^RD3ACCEL_CNT4\(rdna3accel_swaps_pq_(\w+),", acc, re.M)
+glob = re.findall(r"^RD3ACCEL_CNT\(rdna3accel_((?:swaps_pq|perf)_\w+),", acc, re.M)
+knobs = [k for k in re.findall(r"^SYSCTL_INT\(_debug, OID_AUTO, rdna3accel_(\w+),", acc, re.M)
+         if k in ("swap_async", "iop_queue", "iop_wrote", "perfstats", "present_init_failed")]
+if len(pq4) < 20 or len(glob) < 5 or len(knobs) != 5:
+    fails.append("parsed only %d per-head / %d global present-queue counters and knobs %s from the accelerator" % (
+        len(pq4), len(glob), knobs))
+greps = []
+for coll in ("tools/macos/collect.sh", "tools/vm/macos/autoreport.sh"):
+    gm = re.search(r'grep -E "(rdna3accel_\([^"]*\))"', open(os.path.join(ROOT, coll)).read())
+    if not gm:
+        fails.append("%s: no rdna3accel sysctl grep found" % coll)
+    else:
+        greps.append((coll, re.compile(gm.group(1))))
+names = ["swaps_pq_%s_h0" % k for k in pq4] + glob + knobs
+for nm in names:
+    line = "debug.rdna3accel_%s: 1" % nm
+    if not triage_reports.A3_SYSCTL.search(line):
+        fails.append("triage's A3_SYSCTL does not read debug.rdna3accel_%s" % nm)
+    for coll, rx in greps:
+        if not rx.search(line):
+            fails.append("%s's sysctl grep drops debug.rdna3accel_%s" % (coll, nm))
+miss = sorted(set(pq4) - set(triage_reports.PQ_KEYS))
+if miss:
+    fails.append("triage's PQ_KEYS lacks %s" % ", ".join(miss))
+fq = open(os.path.join(ROOT, "common", "rdna3_flip_queue.h")).read()
+sr = re.search(r"#define RD3_FQ_STUCK_RUN (\d+)u", fq)
+if not sr or int(sr.group(1)) != triage_reports.PQ_STUCK_RUN:
+    fails.append("RD3_FQ_STUCK_RUN %s, triage's PQ_STUCK_RUN %d" % (sr and sr.group(1), triage_reports.PQ_STUCK_RUN))
 if fails:
     sys.exit("test_trace_parity: FAIL " + "; ".join(fails))
 print("test_trace_parity: all checks passed (%d v1 bits, %d swap args)" % (len(bits), len(trs)))

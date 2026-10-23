@@ -116,7 +116,9 @@ commits since. What matters for the open RDNA3 problems (card runs 37-40):
 
 Upstream arms the display in this order (`NVRM.cpp`, auto-go):
 `debug.nvaccelfb=1` → `=4` → `debug.nvrmfb_agdc_k5=1` + `debug.nvrmfb_agdc=1`
-→ `debug.nvaccel_iop=1` (→ zero-copy flip 60 s later). The AGDC object is an
+→ `debug.nvaccel_iop=1` (→ zero-copy flip 60 s later; **outdated 2026-10-23**:
+upstream `75e2e28` flips right after the release, the 60 s sleep is gone,
+`NVRM.cpp` auto-go). The AGDC object is an
 `AppleGraphicsDeviceControl` subclass attached to the GPU's PCI device that
 answers IOPresentment's vendor queries:
 
@@ -136,7 +138,12 @@ plane** (`debug.rdna3accel_iop_empty` ~1000 per boot, `iop_ok` 0,
 pipe, frames reach the panel only through the swap path, gamma arrives as
 plane-less transactions the base class refuses (0xe00002c7), and Metal
 layer presents (M4) are never shown. Upstream gets plane-0 surfaces in
-`performTransaction` once AGDC answers. Plan: an AMD-only AGDC object in
+`performTransaction` once AGDC answers. (**Outdated 2026-10-23**: we have
+the AGDC object now (`agdc/`), and on the agdc profile transactions still do
+not arrive with us - `iop_ok 0`, `iop_empty 0` in 2026-10-17b..18b -:
+WindowServer runs the legacy page-flip mode (`init_page_flip: page flip
+mode is on`), so the desktop reaches the panel through `submitSwapCopy` /
+`submitFlipBuffer`, which upstream treats as a capped probe.) Plan: an AMD-only AGDC object in
 `RDNA3Accelerator` (or its own kext), fed by a timing property from
 `RDNA3Framebuffer`, armed between `rdna3accelfb=4` and `rdna3acceliop=1`;
 the report records `iop_ok` / `iop_src_surf` / the AGDC counters.
@@ -187,3 +194,31 @@ frames copied to the DRM framebuffer. Not loaded on hardware yet, one mode,
 no per-output framebuffers. Our port is further on display, power and
 sleep; their tree is a reference to compare amdgpu behaviour against (for
 example VCN power gating) once it runs.
+
+## Update 2026-10-23: upstream `75e2e28` against our present path (DRIVER-PLAN N38)
+
+Compared: their `kexts/NVRM/accel/nvrm-accel.cpp` (performTransaction,
+the asynchronous flip worker, the flip gate) and
+`kexts/NVRMFB/fb/nvrm-fb.cpp` (the flip and its latch) with ours. Design
+studied, our own code written (`common/rdna3_flip_queue.h`, the
+accelerator's present queue, N38):
+
+| Their behaviour | Ours before | Ours now (N38) |
+|---|---|---|
+| performTransaction waits up to ~1.25 refresh for the flip in flight (an IOLock woken by the worker), then queues the newest frame for the worker (newest replaces queued) | 50 x `IOSleep(1)` on WindowServer's thread, then the frame **dropped** while answering "shown" | queued at once (no wait at all), newest wins, Busy kept |
+| framebuffer Busy while a flip is in flight = "kept" | the framebuffer spun up to 20 ms in `IODelay`, then flipped anyway | `RD3K_FLIP_FLAG_NOWAIT` answers Busy, the present stays queued |
+| the transaction completes (`signalTransactionInterrupt`) after the flip landed; the framebuffer's flip waits for its own latch | completed after the flip call returned (before the latch) | completed by the worker at the latch (`rdna3FlipLatchWait`, woken at the vblank) |
+| the worker waits for the surface's GPU completion (`nvSurfWaitReady`, the plugin's pending/ready marks) | none | not ported: our plugin sends the dirty mark only after waiting for the GPU, so the mark is the GPU-ready gate (open: N38 (5)) |
+| zero-copy flip only when the plugin wrote the VRAM (`fPluginWroteCookie` == the allocation's cookie) and it is the newest | VRAM-newest bit only | both (`rd3_iop_flip_ok`, `debug.rdna3accel_iop_wrote`) |
+| PerformanceStatistics read-copy-modify-write (their temperature) | the core published utilization on its own service only | the accelerator's own, every 250 ms (`debug.rdna3accel_perfstats`) |
+
+Upstream changes in this area not ported (yet): the plugin's GPU pending /
+ready surface marks and `nvSurfWaitReady` (N38 (5)); the copy path's "page
+off only VRAM the plugin wrote" rule as a separate check (ours pages off
+only surfaces with a pending dirty mark, which only the plugin sets); the
+parked-allocation restore before a dirty mark (`nvAccelRestoreParkedForDirty`);
+the framebuffer's late-flip handling (waiting past a period, the stuck limit,
+the present statistics HUD); the accelerator's temperature key; the headless
+check that restores the plugin name without arming; auto-go without the 60 s
+sleep (our boot gates are boot-args).
+

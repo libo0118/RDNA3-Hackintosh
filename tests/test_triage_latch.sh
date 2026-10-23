@@ -222,4 +222,138 @@ has "$o" 'flip to VRAM 0x8b100000: the previous flip still pending after 20 ms' 
 grep -q 'INFO swap/flicker  *head 2: torn test not measured: 0 checks in 120 swaps .*it may be 0 on purpose' <<<"$o" ||
     fail "serial: torn not measured as INFO: $o"
 hasnt "$o" 'WARN swap/flicker         head 2: torn test not measured' serial
+# DRIVER-PLAN N38: the present queue's counters (present_verdict): a clean head, then a completion before its
+# latch and a lost frame (FAILs), a writer wait that ran out (WARN), counters missing, the GPU utilization
+PQ0=""
+for k in prog queued replaced joined busy refused latched latchus latchmax next timeout unknown dropped dropmode \
+         early wait waitus waitmax waittimeout inplace inline polled iop foreigntimeout giveup iopdrop fbwaitto \
+         fbwaitfast freedinflight home; do
+    PQ0+="swaps_pq_${k}_h0 0"$'\n'
+done
+mk pqclean/rdna3-report-pqclean "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 110
+swaps_pq_queued_h0 10
+swaps_pq_replaced_h0 3
+swaps_pq_latched_h0 117
+swaps_pq_latchus_h0 1170000
+swaps_pq_latchmax_h0 16900
+swaps_pq_next_h0 7
+perfstats 1
+perf_writes 400"
+o=$(run pqclean)
+has "$o" "head 0: present queue: 120 present(s): 110 programmed at once, 10 queued (3 replaced: newest wins, 0 Busy kept), 0 joined; 117 latched (avg 10000 us, max 16900 us), 7 programmed at a latch" pq-clean
+has "$o" "GPU utilization published into PerformanceStatistics 400 time(s)" pq-clean
+hasnt "$o" "BEFORE their flip" pq-clean
+hasnt "$o" "LOST with no newer" pq-clean
+mk pqbad/rdna3-report-pqbad "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 120
+swaps_pq_early_h0 2
+swaps_pq_timeout_h0 2
+swaps_pq_dropped_h0 1
+swaps_pq_waittimeout_h0 1
+perfstats 1
+perf_writes 0
+perf_nokey 9"
+o=$(run pqbad)
+grep -q 'FAIL .*head 0: 2 present(s) completed BEFORE their flip was seen latched (2 not latched in time, 0 unreadable)' <<<"$o" || fail "pq-bad: early: $o"
+grep -q 'FAIL .*head 0: 1 frame(s) LOST with no newer one' <<<"$o" || fail "pq-bad: lost: $o"
+grep -q 'WARN .*head 0: 1 writer wait(s) ran out' <<<"$o" || fail "pq-bad: wait: $o"
+grep -q 'WARN .*GPU utilization NOT published into PerformanceStatistics (perf_writes 0; 0 without the core, 9 without' <<<"$o" || fail "pq-bad: perf: $o"
+mk pqmissing/rdna3-report-pqmissing "$ZERO
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 120"
+o=$(run pqmissing)
+has "$o" "present queue counters missing (unknown, not 0): swaps_pq_queued" pq-missing
+mk pqold/rdna3-report-pqold "$ZERO
+swaps_h0 120
+swaps_h1 0"
+o=$(run pqold)
+hasnt "$o" "present queue" pq-old
+# the same dump from a kernel built from these sources: the queue's counters are missing, not absent (ECC review)
+mk pqoldcur/rdna3-report-pqoldcur "$ZERO
+swaps_h0 120
+swaps_h1 0" tests "RDNA3Accelerator: build $HASH"
+o=$(run pqoldcur)
+grep -q 'WARN .*present queue counters missing: the accelerator runs these sources but the dump has no swap_async' <<<"$o" ||
+    fail "pq-old-current: $o"
+# ECC review of N38: a queue that never engaged, a stuck head, Busy heavy, the queue OFF at start, swap_async 0
+# nobody asked for, perfstats with nothing published, a done-list overflow
+mk pqidle/rdna3-report-pqidle "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swap_mode 0"
+o=$(run pqidle)
+grep -q 'WARN .*head 0: 120 swap(s) but the present queue never engaged' <<<"$o" || fail "pq-idle: $o"
+has "$o" "the latch counters swaps_latchpend / _latchwait do not measure mode 0 flips any more" pq-idle
+mk pqstuck/rdna3-report-pqstuck "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 120
+swap_async 1
+swaps_pq_prog_h0 1
+swaps_pq_queued_h0 119
+swaps_pq_busy_h0 40
+swaps_pq_foreigntimeout_h0 3
+swaps_pq_giveup_h0 37
+swaps_pq_early_h0 38
+swaps_pq_timeout_h0 38
+swaps_pq_freedinflight_h0 1
+swaps_pq_prog_h1 100
+swaps_pq_next_h1 10
+swaps_pq_latched_h1 110
+swaps_pq_busy_h1 40
+swaps_pq_donemax 1
+perfstats 1"
+o=$(run pqstuck)
+grep -q 'FAIL .*head 0: 40 Busy answer(s) and no latch ever seen' <<<"$o" || fail "pq-stuck: never latched: $o"
+grep -q "WARN .*head 0: the head's flips stayed pending: 3 pending flip(s) given up, 37 present(s) flipped anyway after 3" <<<"$o" ||
+    fail "pq-stuck: given up: $o"
+grep -q 'WARN .*head 1: Busy heavy: 40 Busy answer(s) for 110 present(s) programmed (36%)' <<<"$o" || fail "pq-stuck: busy: $o"
+grep -q 'WARN .*head 0: 1 buffer(s) freed while their flip was in flight' <<<"$o" || fail "pq-stuck: freed: $o"
+grep -q 'FAIL .*1 time(s) more IOP pipes / surface references at once' <<<"$o" || fail "pq-stuck: donemax: $o"
+grep -q 'WARN .*GPU utilization NOT published into PerformanceStatistics (perf_writes missing' <<<"$o" || fail "pq-stuck: perf: $o"
+mk pqoff/rdna3-report-pqoff "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 0
+present_init_failed 1"
+o=$(run pqoff)
+grep -q 'WARN .*present queue OFF: it could not be set up at start' <<<"$o" || fail "pq-off: $o"
+mk pqsysoff/rdna3-report-pqsysoff "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 0"
+o=$(run pqsysoff)
+grep -q "WARN .*swap_async was 0 but the boot-args do not say rdna3swapasync=0" <<<"$o" || fail "pq-sysoff: $o"
+# the serial log alone: the queue's own lines (ECC review of N38)
+mkdir -p "$T/serpq"
+cat > "$T/serpq/serial-1.log" <<'SERPQ'
+RDNA3Accelerator: swap async: 1 = a mode 0 swap / flip-buffer present programs its flip and returns
+RDNA3Accelerator: swap: surface <ptr> -> head 0 (only head piped)
+RDNA3Accelerator: present queue: head 0: the flip of a mode 0 swap #12 (phys 0x8b100000) had NOT latched 40000 us after it -- completed EARLY, the panel may still read the buffer before it (2 such)
+RDNA3Accelerator: present queue: head 0: the queued a mode 0 swap #13 (phys 0x8b100000) DROPPED: its buffer was freed -- that frame never reached the panel (1 such)
+RDNA3Accelerator: present queue: head 0: the queued a mode 0 swap #14 (phys 0x8b100000) DROPPED: display mode change -- that frame never reached the panel (2 such)
+RDNA3Accelerator: present queue: head 0: its flips stay PENDING (3 given up in a row: blanked, DPMS off, a stuck HUBP or a flip that never latches) -- a mode 0 swap #15 (phys 0x8b100000) programmed WITHOUT waiting for them (the framebuffer waits <= 20 ms, then flips anyway; 5 such)
+RDNA3Accelerator: present queue: head 0: the framebuffer has no rdna3FlipLatchWait (0xe00002c7: an older RDNA3Framebuffer) -- its latches are polled every 1 ms
+RDNA3Accelerator: perfstats: the core has no PerformanceStatistics yet -- the accelerator's GPU utilization not updated (1 such)
+SERPQ
+o=$(python3 "$ROOT/tools/triage_reports.py" "$T/serpq" 2>&1 || true)
+hasnt "$o" Traceback serial-pq
+grep -q "FAIL .*present queue (serial): 2 completion(s) BEFORE the latch was seen" <<<"$o" || fail "serial-pq: early: $o"
+grep -q "FAIL .*present queue (serial): 1 queued frame(s) LOST: the buffer freed" <<<"$o" || fail "serial-pq: dropped: $o"
+grep -q "INFO .*present queue (serial): 2 queued present(s) dropped at a display mode change" <<<"$o" || fail "serial-pq: mode: $o"
+grep -q "WARN .*present queue (serial): 5 present(s) flipped anyway" <<<"$o" || fail "serial-pq: stuck: $o"
+grep -q "INFO .*present queue (serial): 1 an older framebuffer" <<<"$o" || fail "serial-pq: polled: $o"
+grep -q "WARN .*present queue (serial): 1 GPU utilization update(s) skipped or lost" <<<"$o" || fail "serial-pq: perf: $o"
+grep -q "INFO .*present queue on (swap async: 1): the 'swap latch' line's latchpend / latchwait do not" <<<"$o" ||
+    fail "serial-pq: latch INFO: $o"
+
 echo "test_triage_latch: all checks passed"

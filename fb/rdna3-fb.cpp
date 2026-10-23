@@ -137,6 +137,12 @@ class RDNA3Framebuffer : public IOFramebuffer {
     /* flips */
     unsigned fFlips = 0, fFlipRejects = 0, fFlipStillPending = 0;
     bool     fFlipped = false;
+    /* DRIVER-PLAN N38: flips answered Busy (RD3K_FLIP_FLAG_NOWAIT) and the
+     * accelerator's latch waits (rdna3FlipLatchWait), woken from vblFire */
+    unsigned fFlipBusy = 0, fLatchWaits = 0, fLatchWaitTimeouts = 0;
+    IOLock  *fLatchLock = nullptr;
+    int      fLatchEv = 0;                 /* the wakeup's event address */
+    IOReturn latchWait(struct RD3KFlipLatchWait *w);
 
     const OSSymbol *fSymInfo = nullptr, *fSymFlip = nullptr, *fSymStatus = nullptr;
     const OSSymbol *fSymBlank = nullptr;
@@ -174,7 +180,8 @@ class RDNA3Framebuffer : public IOFramebuffer {
     uint64_t   vblPeriodAbs() const;
     bool       coreStatus(RD3KDisplayStatus *s);
     bool       flipTo(uint64_t vramOffset, uint32_t w, uint32_t h, uint32_t pitch, int *rc);
-    bool       flipToLocked(uint64_t vramOffset, uint32_t w, uint32_t h, uint32_t pitch, int *rc);
+    bool       flipToLocked(uint64_t vramOffset, uint32_t w, uint32_t h, uint32_t pitch, int *rc,
+                            bool nowait = false);
     void       scheduleVbl(uint64_t deadline);
     static void vblFire(thread_call_param_t p0, thread_call_param_t);
 
@@ -394,6 +401,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
     }
     fLock = IOSimpleLockAlloc();
     fModeLock = IOLockAlloc();
+    fLatchLock = IOLockAlloc();   /* NULL: rdna3FlipLatchWait answers at once (the accelerator polls) */
     fSymInfo = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_INFO);
     fSymFlip = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_FLIP);
     fSymBlank = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_BLANK);
@@ -539,6 +547,10 @@ void RDNA3Framebuffer::free()
         IOLockFree(fModeLock);
         fModeLock = nullptr;
     }
+    if (fLatchLock) {
+        IOLockFree(fLatchLock);
+        fLatchLock = nullptr;
+    }
     super::free();
 }
 
@@ -588,6 +600,9 @@ void RDNA3Framebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
         }
         me->fLastFrame = st.frame;
         me->fVblWaits = 0;
+        /* a new frame: a pending flip may have latched (rdna3FlipLatchWait) */
+        if (me->fLatchLock)
+            IOLockWakeup(me->fLatchLock, &me->fLatchEv, false);
         /* next look a little before the next frame */
         me->fVblNext = now + period - period / 8;
     } else {
@@ -1489,7 +1504,8 @@ bool RDNA3Framebuffer::flipTo(uint64_t vramOffset, uint32_t w, uint32_t h, uint3
     return ok;
 }
 
-bool RDNA3Framebuffer::flipToLocked(uint64_t vramOffset, uint32_t w, uint32_t h, uint32_t pitch, int *rc)
+bool RDNA3Framebuffer::flipToLocked(uint64_t vramOffset, uint32_t w, uint32_t h, uint32_t pitch, int *rc,
+                                    bool nowait)
 {
     *rc = -1;
     if (!fDcn || !fCore)
@@ -1502,6 +1518,17 @@ bool RDNA3Framebuffer::flipToLocked(uint64_t vramOffset, uint32_t w, uint32_t h,
     /* one flip in flight: the previous one must have latched, else the
      * surface it replaced may still be read by the HUBP */
     RD3KDisplayStatus st;
+    /* DRIVER-PLAN N38: the accelerator's present queue keeps its frame and
+     * programs it from the flip-done path (amdgpu: one flip in flight per
+     * CRTC, the next commit after flip_done) - no wait here */
+    if (nowait && coreStatus(&st) && st.flipPending) {
+        *rc = RD3K_FLIP_RESULT_BUSY;
+        fFlipBusy++;
+        if (fFlipBusy <= 8 || (fFlipBusy & 1023) == 0)
+            FBLOG("flip to VRAM 0x%llx: the previous flip still pending -- answered Busy, nothing programmed "
+                  "(the caller keeps its frame; %u such)", (unsigned long long)vramOffset, fFlipBusy);
+        return false;
+    }
     for (unsigned i = 0; i < 40 && coreStatus(&st) && st.flipPending; i++)
         IODelay(500);
     /* 20 ms and the previous flip still pending (a blanked head, a stuck
@@ -1527,6 +1554,51 @@ bool RDNA3Framebuffer::flipToLocked(uint64_t vramOffset, uint32_t w, uint32_t h,
     if (fFlips++ < 4 || (fFlips % 3600) == 0)
         FBLOG("flip #%u to VRAM 0x%llx pitch %u", fFlips, (unsigned long long)vramOffset, pitch);
     return true;
+}
+
+/* DRIVER-PLAN N38: the accelerator's flip-done path sleeps here until the
+ * head's flip latched (dcn32_flip_pending through the core's
+ * rdna3DisplayStatus); vblFire wakes it at each new frame, a 500 us deadline
+ * covers a wakeup that came between the look and the sleep. Never called
+ * with a spinlock held (a thread call of the accelerator) */
+IOReturn RDNA3Framebuffer::latchWait(struct RD3KFlipLatchWait *w)
+{
+    const uint32_t to = w->timeoutUs > RD3K_FLIPWAIT_MAX_US ? RD3K_FLIPWAIT_MAX_US : w->timeoutUs;
+    uint64_t start = 0, deadline = 0;
+    clock_get_uptime(&start);
+    clock_interval_to_deadline(to, kMicrosecondScale, &deadline);
+    w->pending = 0;
+    w->frame = 0;
+    w->waitedUs = 0;
+    fLatchWaits++;
+    for (;;) {
+        RD3KDisplayStatus st;
+        uint64_t now = 0, ns = 0;
+        const bool ok = coreStatus(&st);
+        clock_get_uptime(&now);
+        absolutetime_to_nanoseconds(now - start, &ns);
+        w->waitedUs = (unsigned int)(ns / 1000 > 0xffffffffull ? 0xffffffffull : ns / 1000);
+        if (!ok)
+            return kIOReturnNotReady;
+        w->pending = st.flipPending;
+        w->frame = st.frame;
+        if (!st.flipPending)
+            return kIOReturnSuccess;
+        if (now >= deadline || !fLatchLock || fStopping) {
+            fLatchWaitTimeouts++;
+            if (fLatchWaitTimeouts <= 8 || (fLatchWaitTimeouts & 1023) == 0)
+                FBLOG("latch wait: head %u's flip still pending after %u us (frame %u; %u such of %u waits)", fHead,
+                      w->waitedUs, st.frame, fLatchWaitTimeouts, fLatchWaits);
+            return kIOReturnTimeout;
+        }
+        uint64_t nap = 0;
+        clock_interval_to_deadline(500, kMicrosecondScale, &nap);
+        if (nap > deadline)
+            nap = deadline;
+        IOLockLock(fLatchLock);
+        IOLockSleepDeadline(fLatchLock, &fLatchEv, nap, THREAD_UNINT);
+        IOLockUnlock(fLatchLock);
+    }
 }
 
 IOReturn RDNA3Framebuffer::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
@@ -1564,15 +1636,23 @@ IOReturn RDNA3Framebuffer::callPlatformFunction(const OSSymbol *fn, bool wait, v
             return kIOReturnBadArgument;
         int rc = -1;
         bool ok = false;
+        const bool nowait = (f->flags & RD3K_FLIP_FLAG_NOWAIT) != 0;
         if (fDcn && fModeLock) {
             /* home is read under the mode lock too: a switch moves it */
             IOLockLock(fModeLock);
-            ok = (f->flags & 1u) ? flipToLocked(fBootVram, fW, fH, fBootPitch, &rc)
-                                 : flipToLocked(f->allocationCookie, f->width, f->height, f->pitch, &rc);
+            ok = (f->flags & RD3K_FLIP_FLAG_HOME)
+                     ? flipToLocked(fBootVram, fW, fH, fBootPitch, &rc, nowait)
+                     : flipToLocked(f->allocationCookie, f->width, f->height, f->pitch, &rc, nowait);
             IOLockUnlock(fModeLock);
         }
         f->flipResult = rc;
-        return ok ? kIOReturnSuccess : kIOReturnIOError;
+        return ok ? kIOReturnSuccess : rc == RD3K_FLIP_RESULT_BUSY ? kIOReturnBusy : kIOReturnIOError;
+    }
+    if (fn->isEqualTo(RD3K_FLIP_FN_LATCHWAIT)) {
+        RD3KFlipLatchWait *w = (RD3KFlipLatchWait *)p1;
+        if (!w || w->version != RD3K_FLIPWAIT_VERSION)
+            return kIOReturnBadArgument;
+        return latchWait(w);
     }
     /* VRAM, handles, CRC: the core kext answers */
     if (fCore && (fn->isEqualTo(RD3K_FN_DISPLAY_CRC) || fn->isEqualTo(RD3K_VRAM_FN_ALLOC) ||

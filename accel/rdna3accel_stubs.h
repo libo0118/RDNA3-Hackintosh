@@ -56,6 +56,10 @@ public:
     void pageoff(IOAccelEvent *, bool, bool *, unsigned long long) APPLE_KEXT_OVERRIDE;
     unsigned int fApLogged = 0;
     unsigned int fApCached = 0;   /* cached aperture descriptors handed out (the trace's rate limit) */
+    /* the generation (RD3VidMemory::fAllocGen) of the VRAM the Metal plugin last wrote (its dirty escape):
+     * the IOP zero-copy flip's marker (DRIVER-PLAN N38, rd3_iop_flip_ok). A generation, not the allocation
+     * cookie: the cookie is the VRAM offset, which a new allocation can have again (ECC review of N38) */
+    unsigned long long fPluginWroteGen = 0;
     IOMemoryDescriptor *fApDesc = nullptr;
 };
 OSDefineMetaClassAndStructors(RD3Resource, IOAccelResource2)
@@ -74,6 +78,8 @@ public:
     void              *fKva      = nullptr;
     unsigned long long fPhys     = 0;
     unsigned long long fBytes    = 0;
+    /* this allocation's number (allocPhysical; 0: none): never reused, unlike fAllocationCookie */
+    unsigned long long fAllocGen = 0;
     bool fScanout = false;
 
     bool allocPhysical() APPLE_KEXT_OVERRIDE;
