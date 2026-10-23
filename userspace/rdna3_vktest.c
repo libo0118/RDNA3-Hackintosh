@@ -18,6 +18,19 @@
  *                               image is cleared and presented; last line
  *                               "WSI: ..."
  *
+ *   rdna3_vktest --membw[=SECONDS] [path]   a memory-bandwidth load (default 10 s)
+ *                               for the power management check (DRIVER-PLAN N43):
+ *                               vkCmdFillBuffer + vkCmdCopyBuffer between two device-local
+ *                               buffers of up to 1 GiB each on the general / compute
+ *                               queue; last line "MEMBW: ...". autoreport.sh reads
+ *                               rdna3_pmctl info three times while it runs: UCLK must
+ *                               leave its idle floor (96 MHz) under this load.
+ *
+ * Also in the normal run: the buffer texture alias check (DRIVER-PLAN N43), a
+ * linear VK_EXT_image_drm_format_modifier image whose explicit rowPitch is 64
+ * (RADV must refuse it, -1000158000) and 256 (it must create it): line
+ * "LINPITCH: ...".
+ *
  * Then on the general queue: a triangle drawn into a 64x64 image through a
  * render pass (graphics pipeline from the SPIR-V below), buffer -> image ->
  * image -> buffer copies of a pattern (optimal tiling), and a timeline
@@ -36,6 +49,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan_core.h>
@@ -62,6 +76,7 @@ static const char *vkr(VkResult r)
     case VK_ERROR_INCOMPATIBLE_DRIVER: return "INCOMPATIBLE_DRIVER";
     case VK_ERROR_FEATURE_NOT_PRESENT: return "FEATURE_NOT_PRESENT";
     case VK_ERROR_EXTENSION_NOT_PRESENT: return "EXTENSION_NOT_PRESENT";
+    case VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT: return "INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT";
     default: return "?";
     }
 }
@@ -265,6 +280,218 @@ out:
 
 /* VK_EXT_external_memory_host (the Metal plugin imports the caller's pages
  * this way; RADV -> GEM_USERPTR): the GPU fills malloc'd memory directly */
+/* DRIVER-PLAN N43 (1): the Metal plugin's buffer texture alias is a linear image with the app's
+ * bytesPerRow as an explicit DRM-modifier row pitch. RADV takes that pitch only as a multiple of
+ * 256 B (ac_surface_override_offset_stride / the GFX10.3+ descriptor); anything else fails with
+ * VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT (-1000158000), card runs 2026-10-17d / 18b.
+ * One 16x16 RGBA8 image per pitch. linear_pitch_test returns 0 when 256 is created and 64 is refused with that
+ * code (or accepted: only a note), 1 otherwise (the line says which of the two was wrong). */
+#define DRM_FORMAT_MOD_LINEAR_ 0ull
+static VkResult linear_pitch_image(struct ctx *c, uint64_t pitch)
+{
+    DFN(c->dev, vkCreateImage);
+    DFN(c->dev, vkDestroyImage);
+    VkSubresourceLayout pl = { .offset = 0, .rowPitch = pitch };
+    VkImageDrmFormatModifierExplicitCreateInfoEXT ex = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
+        .drmFormatModifier = DRM_FORMAT_MOD_LINEAR_, .drmFormatModifierPlaneCount = 1, .pPlaneLayouts = &pl };
+    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = &ex,
+        .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = { 16, 16, 1 },
+        .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED };
+    VkImage img = VK_NULL_HANDLE;
+    VkResult r = vkCreateImage(c->dev, &ii, NULL, &img);
+    if (r == VK_SUCCESS && img)
+        vkDestroyImage(c->dev, img, NULL);
+    return r;
+}
+
+static int linear_pitch_test(struct ctx *c)
+{
+    VkResult r64 = linear_pitch_image(c, 64), r256 = linear_pitch_image(c, 256);
+    printf("LINPITCH: rowPitch 64 -> %d (%s), rowPitch 256 -> %d (%s)\n", r64, vkr(r64), r256, vkr(r256));
+    if (r256 != VK_SUCCESS) {
+        printf("LINPITCH: FAILED a 256 B row pitch is refused: no buffer texture can be aliased at all\n");
+        return 1;
+    }
+    if (r64 == VK_SUCCESS) {
+        printf("LINPITCH: a 64 B row pitch was ACCEPTED: this RADV is less strict than the plugin's 256 B rule "
+               "(metal/plugin/nvmtl_linear_pitch.h); the rule only costs copies, nothing breaks\n");
+        return 0;
+    }
+    if (r64 != VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT) {
+        printf("LINPITCH: FAILED a 64 B row pitch gave %d (%s), not -1000158000\n", r64, vkr(r64));
+        return 1;
+    }
+    return 0;
+}
+
+/* DRIVER-PLAN N43 (2): a memory-bandwidth load, so the PMFW's UCLK DPM can be seen to act. Two device-local
+ * buffers (1 GiB each, less when VRAM is tight: a sixth of the device-local heap, halved on a refused
+ * allocation down to 16 MiB), then for 'secs' seconds command buffers of 8 rounds of vkCmdFillBuffer(A) +
+ * vkCmdCopyBuffer(A -> B): 3 x size of VRAM traffic per round, on a graphics / compute queue (RADV's compute
+ * shaders). 0 = ran, 1 = a failure, 2 = could not start. */
+static VkResult alloc_dev_buf(struct ctx *c, struct buf *o, VkDeviceSize size)
+{
+    DFN(c->dev, vkCreateBuffer);
+    DFN(c->dev, vkDestroyBuffer);
+    DFN(c->dev, vkGetBufferMemoryRequirements);
+    DFN(c->dev, vkAllocateMemory);
+    DFN(c->dev, vkBindBufferMemory);
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    VkMemoryRequirements mr;
+    VkResult r;
+    memset(o, 0, sizeof(*o));
+    if ((r = vkCreateBuffer(c->dev, &bi, NULL, &o->b)) != VK_SUCCESS)
+        return r;
+    vkGetBufferMemoryRequirements(c->dev, o->b, &mr);
+    o->type = find_type(&c->mp, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    if (o->type < 0)   /* resizable BAR: all of VRAM is host visible */
+        o->type = find_type(&c->mp, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    if (o->type < 0) {
+        vkDestroyBuffer(c->dev, o->b, NULL);
+        memset(o, 0, sizeof(*o));
+        return VK_ERROR_FEATURE_NOT_PRESENT;
+    }
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = mr.size, .memoryTypeIndex = (uint32_t)o->type };
+    if ((r = vkAllocateMemory(c->dev, &ai, NULL, &o->m)) != VK_SUCCESS ||
+        (r = vkBindBufferMemory(c->dev, o->b, o->m, 0)) != VK_SUCCESS) {
+        free_buf(c, o);
+        return r;
+    }
+    return VK_SUCCESS;
+}
+
+static double mono_s(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
+static int membw_test(struct ctx *c, uint32_t qf, int secs)
+{
+    enum { ROUNDS = 8 };
+    DFN(c->dev, vkGetDeviceQueue);
+    DFN(c->dev, vkCreateCommandPool);
+    DFN(c->dev, vkDestroyCommandPool);
+    DFN(c->dev, vkAllocateCommandBuffers);
+    DFN(c->dev, vkBeginCommandBuffer);
+    DFN(c->dev, vkEndCommandBuffer);
+    DFN(c->dev, vkCmdFillBuffer);
+    DFN(c->dev, vkCmdCopyBuffer);
+    DFN(c->dev, vkCmdPipelineBarrier);
+    DFN(c->dev, vkCreateFence);
+    DFN(c->dev, vkDestroyFence);
+    DFN(c->dev, vkResetFences);
+    DFN(c->dev, vkQueueSubmit);
+    DFN(c->dev, vkWaitForFences);
+    struct buf a, b;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    VkCommandBuffer cb;
+    VkQueue q;
+    VkResult r;
+    VkDeviceSize heap = 0, size, mib16 = 16ull << 20;
+    int ret = 2;
+
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    for (uint32_t i = 0; i < c->mp.memoryHeapCount; i++)
+        if ((c->mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && c->mp.memoryHeaps[i].size > heap)
+            heap = c->mp.memoryHeaps[i].size;
+    size = heap ? heap / 6 : (256ull << 20);
+    if (size > (1ull << 30))
+        size = 1ull << 30;
+    size &= ~((1ull << 20) - 1);
+    if (size < mib16)
+        size = mib16;
+    for (;;) {
+        r = alloc_dev_buf(c, &a, size);
+        if (r == VK_SUCCESS && (r = alloc_dev_buf(c, &b, size)) != VK_SUCCESS)
+            free_buf(c, &a);
+        if (r == VK_SUCCESS)
+            break;
+        if (size <= mib16) {
+            printf("MEMBW: NOT MEASURED, no 2 x %llu MiB of device-local memory: %d (%s)\n",
+                   (unsigned long long)(size >> 20), r, vkr(r));
+            return 2;
+        }
+        size = (size / 2) & ~((1ull << 20) - 1);
+        if (size < mib16)
+            size = mib16;
+    }
+    printf("MEMBW: 2 x %llu MiB device-local (heap %llu MiB), queue family %u, %d s\n", (unsigned long long)(size >> 20),
+           (unsigned long long)(heap >> 20), qf, secs);
+    fflush(stdout);
+
+    VkCommandPoolCreateInfo pi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = qf };
+    VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    VkFenceCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT };
+    VkBufferCopy region = { 0, 0, size };
+
+    vkGetDeviceQueue(c->dev, qf, 0, &q);
+    if ((r = vkCreateCommandPool(c->dev, &pi, NULL, &pool)) != VK_SUCCESS ||
+        (cai.commandPool = pool, r = vkAllocateCommandBuffers(c->dev, &cai, &cb)) != VK_SUCCESS ||
+        (r = vkCreateFence(c->dev, &fi, NULL, &fence)) != VK_SUCCESS) {
+        printf("MEMBW: NOT MEASURED, pool/command buffer/fence -> %d (%s)\n", r, vkr(r));
+        goto out;
+    }
+    vkBeginCommandBuffer(cb, &bi);
+    for (int i = 0; i < ROUNDS; i++) {
+        vkCmdFillBuffer(cb, a.b, 0, size, 0x5a5a0000u + (uint32_t)i);
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL,
+                             0, NULL);
+        vkCmdCopyBuffer(cb, a.b, b.b, 1, &region);
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL,
+                             0, NULL);
+    }
+    if ((r = vkEndCommandBuffer(cb)) != VK_SUCCESS) {
+        printf("MEMBW: NOT MEASURED, vkEndCommandBuffer -> %d (%s)\n", r, vkr(r));
+        goto out;
+    }
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+    double t0 = mono_s(), t = t0;
+    unsigned long long submits = 0;
+    ret = 1;
+    while (t - t0 < (double)secs) {
+        if ((r = vkQueueSubmit(q, 1, &si, fence)) != VK_SUCCESS) {
+            printf("MEMBW: FAILED vkQueueSubmit #%llu -> %d (%s)\n", submits + 1, r, vkr(r));
+            goto out;
+        }
+        if ((r = vkWaitForFences(c->dev, 1, &fence, VK_TRUE, 20000000000ull)) != VK_SUCCESS) {
+            printf("MEMBW: FAILED fence #%llu not signalled in 20 s -> %d (%s)\n", submits + 1, r, vkr(r));
+            goto out;
+        }
+        vkResetFences(c->dev, 1, &fence);
+        submits++;
+        t = mono_s();
+    }
+    {
+        double el = t - t0, gib = (double)submits * ROUNDS * 3.0 * (double)size / (double)(1ull << 30);
+        printf("MEMBW: %llu submit(s) of %d fill + copy rounds, %.0f GiB of VRAM traffic in %.1f s = %.1f GiB/s\n",
+               submits, ROUNDS, gib, el, el > 0 ? gib / el : 0.0);
+    }
+    ret = 0;
+out:
+    if (fence) vkDestroyFence(c->dev, fence, NULL);
+    if (pool) vkDestroyCommandPool(c->dev, pool, NULL);
+    free_buf(c, &b);
+    free_buf(c, &a);
+    return ret;
+}
+
 static int host_ptr_test(struct ctx *c, uint32_t qf, VkDeviceSize align, uint32_t pat)
 {
     DFN(c->dev, vkGetMemoryHostPointerPropertiesEXT);
@@ -1032,10 +1259,14 @@ static int wsi_test(void)
 int main(int argc, char **argv)
 {
     const char *lib = NULL;
-    int loopback = 0, failed = 0, tested = 0, wsi = 0;
+    int loopback = 0, failed = 0, tested = 0, wsi = 0, membw = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--loopback")) loopback = 1;
         else if (!strcmp(argv[i], "--wsi")) wsi = 1;
+        else if (!strncmp(argv[i], "--membw", 7) && (argv[i][7] == '\0' || argv[i][7] == '=')) {
+            membw = argv[i][7] == '=' ? atoi(argv[i] + 8) : 10;
+            if (membw < 1 || membw > 60) membw = 10;   /* autoreport.sh's time limit is 40 s */
+        }
         else lib = argv[i];
     }
     if (!lib)
@@ -1126,19 +1357,19 @@ int main(int argc, char **argv)
     }
     /* the interop the Metal plugin needs, when RADV offers it */
     IFN(c.inst, vkEnumerateDeviceExtensionProperties);
-    const char *want[3] = { "VK_EXT_external_memory_host", "VK_KHR_external_memory_fd",
-                            "VK_EXT_mutable_descriptor_type" };
-    const char *ext[3];
+    const char *want[4] = { "VK_EXT_external_memory_host", "VK_KHR_external_memory_fd",
+                            "VK_EXT_mutable_descriptor_type", "VK_EXT_image_drm_format_modifier" };
+    const char *ext[4];
     uint32_t next = 0, ne = 0;
-    int has_host = 0, has_fd = 0, has_mut = 0;
+    int has_host = 0, has_fd = 0, has_mut = 0, has_drm = 0;
     vkEnumerateDeviceExtensionProperties(c.pd, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof(*ep));
     if (ep && vkEnumerateDeviceExtensionProperties(c.pd, NULL, &ne, ep) == VK_SUCCESS)
         for (uint32_t i = 0; i < ne; i++)
-            for (int w = 0; w < 3; w++)
+            for (int w = 0; w < 4; w++)
                 if (!strcmp(ep[i].extensionName, want[w])) {
                     ext[next++] = want[w];
-                    if (w == 0) has_host = 1; else if (w == 1) has_fd = 1; else has_mut = 1;
+                    if (w == 0) has_host = 1; else if (w == 1) has_fd = 1; else if (w == 2) has_mut = 1; else has_drm = 1;
                 }
     free(ep);
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostp = {
@@ -1163,6 +1394,25 @@ int main(int argc, char **argv)
         return 2;
     }
     printf("device created\n");
+
+    if (membw) {
+        uint32_t mq = nq;
+        for (uint32_t i = 0; i < nq && mq == nq; i++)
+            if (qp[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))
+                mq = i;
+        int mr = 2;
+        if (loopback)
+            printf("MEMBW: NOT MEASURED under --loopback (nothing executes GFX/compute there)\n");
+        else if (mq == nq)
+            printf("MEMBW: NOT MEASURED, no graphics / compute queue family\n");
+        else
+            mr = membw_test(&c, mq, membw);
+        DFN(c.dev, vkDestroyDevice);
+        vkDestroyDevice(c.dev, NULL);
+        vkDestroyInstance(c.inst, NULL);
+        printf("%s: memory load\n", mr == 0 ? "ALL PASSED" : mr == 1 ? "FAILED" : "NOTHING TESTED");
+        return mr == 1 ? 1 : mr == 2 ? 2 : 0;
+    }
 
     for (uint32_t i = 0; i < nq; i++) {
         VkQueueFlags f = qp[i].queueFlags;
@@ -1209,6 +1459,15 @@ int main(int argc, char **argv)
         printf("%s OPAQUE_FD export + import: fill through one, copy out through the other\n", fr ? "FAIL" : "PASS");
         failed |= fr != 0;
         tested++;
+    }
+    /* DRIVER-PLAN N43: RADV's linear row pitch rule, the Metal plugin's buffer texture alias */
+    if (!failed && has_drm) {
+        int fr = linear_pitch_test(&c);
+        printf("%s linear DRM-modifier image: explicit rowPitch 64 refused (-1000158000), 256 accepted\n", fr ? "FAIL" : "PASS");
+        failed |= fr != 0;
+        tested++;
+    } else if (!failed) {
+        printf("LINPITCH: NOT CHECKED, VK_EXT_image_drm_format_modifier is not offered (the plugin then uses LINEAR tiling)\n");
     }
     /* graphics, images and timeline semaphores on the general queue (the
      * loopback does not execute GFX: submitted and fenced only there) */

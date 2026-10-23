@@ -1326,7 +1326,7 @@ done_() {   # done_ EXIT [UNJUDGED]: the test's exit code and summary line
     if [ "${2:-}" = UNJUDGED ]; then echo "[exit $1: UNJUDGED, not a failure]"; else echo "[exit $1]"; fi
     partial
     sum=$(tail -n +"$((hl + 1))" "$extra" 2>/dev/null |
-          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|PMCTL:|BACO:|CTS:|PLATFORM:|WSI:|A3:|M4:|M5:|M6:|SOME CHECKS|Stage 4 UAPI)' | tail -1)
+          grep -E '^(ALL PASSED|FAILED|NOTHING TESTED|METAL:|SOAK:|HANG TEST:|MODES:|GAMMA:|PMCTL:|BACO:|CTS:|PLATFORM:|WSI:|A3:|M4:|M5:|M6:|SOME CHECKS|Stage 4 UAPI|MEMBW:|LINPITCH:)' | tail -1)
     if [ "${2:-}" = UNJUDGED ]; then prog "    UNJUDGED (exit $1)  ${sum}"
     elif [ "$1" = 0 ]; then prog "    OK  ${sum}"; else prog "    FAIL (exit $1)  ${sum}"; fi
 }
@@ -1396,6 +1396,37 @@ cache_keep() {   # cache_keep EXIT: after done_, the test's output kept when it 
     CFP=
 }
 # ---- step play (rdna3play=1) -------------------------------------------------
+# DRIVER-PLAN N43 (2): does UCLK leave its idle floor (96 MHz) under a memory load? rdna3_vktest --membw
+# (vkCmdFillBuffer + vkCmdCopyBuffer between two device-local buffers, 10 s) runs in the background while
+# rdna3_pmctl info is read three times, and once more 4 s after it ended. Only the lines the triage reads
+# are kept (pp_dpm_mclk, the activity line). The inner markers start with "--", not "==": one test section.
+# Time: about 25 s, every step under its own limit. Returns the load's exit code.
+membw_load() {
+    _mo=/tmp/rdna3-membw.txt; _mp=/tmp/rdna3-membw-pm.txt
+    rm -f "$_mo" "$_mp"
+    DYLD_LIBRARY_PATH="$D/bin" "$D/bin/rdna3_vktest" --membw=10 "$D/bin/libvulkan_radeon.dylib" > "$_mo" 2>&1 &
+    _mb=$!
+    ( sleep 40; kill -9 "$_mb" 2>/dev/null ) & _mw=$!
+    # the buffers are allocated and the load starts when it has printed its first MEMBW: line
+    _mi=0
+    while [ "$_mi" -lt 40 ] && kill -0 "$_mb" 2>/dev/null && ! grep -q '^MEMBW: ' "$_mo" 2>/dev/null; do sleep 0.5; _mi=$((_mi + 1)); done
+    sleep 1
+    for _mk in 1 2 3; do
+        echo "-- pmctl under load $_mk"
+        with_limit 15 "$D/bin/rdna3_pmctl" info > "$_mp" 2>&1
+        grep -E '^(pp_dpm_mclk|pp_dpm_sclk|pp_dpm_fclk|  activity gfx)' "$_mp"
+        sleep 1
+    done
+    wait "$_mb"; _mr=$?
+    kill "$_mw" 2>/dev/null
+    cat "$_mo"
+    sleep 4
+    echo "-- pmctl idle after the load"
+    with_limit 15 "$D/bin/rdna3_pmctl" info > "$_mp" 2>&1
+    grep -E '^(pp_dpm_mclk|pp_dpm_sclk|pp_dpm_fclk|  activity gfx)' "$_mp"
+    rm -f "$_mo" "$_mp"
+    return $_mr
+}
 play_sleep_until() {   # play_sleep_until <seconds after PLAY_T0>
     _pt=$((PLAY_T0 + $1))
     while [ "$(date +%s)" -lt "$_pt" ]; do sleep 5; done
@@ -1762,6 +1793,20 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
             r=$?; done_ $r; cache_keep $r
         fi
     fi
+    # DRIVER-PLAN N43 (2): a memory-bandwidth load with rdna3_pmctl read during it. Only where UCLK DPM is free
+    # (rdna3pm=2: with it off UCLK is pinned and there is nothing to see) and the Vulkan test and the PM tool are
+    # there; every other step prints one line saying why not (the triage reads it).
+    case " $args " in
+    *" rdna3pm=2 "*)
+        if [ "${lvl:-0}" -ge 8 ] && [ -x "$D/bin/rdna3_vktest" ] && [ -x "$D/bin/rdna3_pmctl" ] && [ -f "$D/bin/libvulkan_radeon.dylib" ]; then
+            hdr "rdna3 memory load (rdna3_vktest --membw, rdna3_pmctl info x3 during it)"
+            membw_load
+            done_ $?
+        else
+            echo "== memory load: skipped (needs rdna3lvl>=8, rdna3_vktest, rdna3_pmctl and RADV in the report's bin)"
+        fi ;;
+    *) echo "== memory load: skipped (rdna3pm=2 is not set: UCLK is not free, nothing to see)" ;;
+    esac
     # Vulkan CTS subset (rdna3cts=1, V2): deqp-vk from `rdna3vm cts` through
     # the Khronos loader and RADV's ICD, one run per line of its
     # patterns.txt (a time limit each); totals per group, the failing cases
