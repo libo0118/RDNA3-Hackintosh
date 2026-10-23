@@ -85,14 +85,39 @@ struct RD3KRmHandles {
 /* ---- flips (answered by the framebuffer) ---- */
 #define RD3K_FLIP_ABI_VERSION 2u
 #define RD3K_FLIP_FN          "rdna3FlipToSurface"
+/* RD3KFlipRequest.flags */
+#define RD3K_FLIP_FLAG_HOME   1u      /* flip back to the boot scanout */
+/* DRIVER-PLAN N38: while the head's previous flip is still pending, answer
+ * kIOReturnBusy (flipResult RD3K_FLIP_RESULT_BUSY) and program nothing,
+ * instead of waiting up to 20 ms for it (a framebuffer older than this
+ * flag ignores it and waits as before) */
+#define RD3K_FLIP_FLAG_NOWAIT 2u
+#define RD3K_FLIP_RESULT_BUSY (-2)
 struct RD3KFlipRequest {
     unsigned int version;
-    unsigned int flags;               /* 1 = flip back to the boot scanout */
+    unsigned int flags;               /* RD3K_FLIP_FLAG_* */
     void        *kapiMemory;
     unsigned int width, height;
     unsigned int pitch;
     int          flipResult;
     unsigned long long allocationCookie;
+};
+
+/* DRIVER-PLAN N38: the latch, for the accelerator's flip-done path - the
+ * framebuffer sleeps (woken by its VBL thread, at least every 500 us) until
+ * the head has no flip pending or timeoutUs (at most 100 ms) passed:
+ * kIOReturnSuccess latched, kIOReturnTimeout still pending, kIOReturnNotReady
+ * the state unreadable; 'pending' / 'frame' the last state read, 'waitedUs'
+ * the time spent. A framebuffer without it answers kIOReturnUnsupported
+ * (the accelerator then polls the core's rdna3DisplayStatus itself) */
+#define RD3K_FLIP_FN_LATCHWAIT "rdna3FlipLatchWait"
+#define RD3K_FLIPWAIT_VERSION  1u
+#define RD3K_FLIPWAIT_MAX_US   100000u
+struct RD3KFlipLatchWait {
+    unsigned int version;
+    unsigned int timeoutUs;           /* in */
+    unsigned int pending, frame;      /* out */
+    unsigned int waitedUs, pad;       /* out */
 };
 
 /* ---- display heads (answered by the core kext, asked by RDNA3Framebuffer):
