@@ -73,6 +73,31 @@ _Static_assert(sizeof(struct rd3k5_fb_ext_cap) == 0x196c, "AGDCFBGetExtendedCapa
 _Static_assert(sizeof(struct rd3k5_vendor_info) == 0x2c, "AGDCVendorInfo_t is 0x2c");
 
 static inline void rd3k5_zero(void *p, unsigned long n) { uint8_t *b = (uint8_t *)p; while (n--) *b++ = 0; }
+
+/* the vendor info answer (command 1, AGDCVendorInfo_t). DRIVER-PLAN N40's
+ * A/B, boot-arg rdna3agdcvendor / sysctl debug.rdna3agdc_vendor: 0 = AMD
+ * 0x1002 (the card's own, default), 1 = NVIDIA 0x10de (what NullMoth's
+ * NVRMAGDC answers, and NullMoth's setups get IOPresentment transactions),
+ * 2 = Intel 0x8086. Only the name and the id change; version 0x30000 and
+ * vendorClass 2 stay as all three answered so far. Returns 0, or -1 for an
+ * unknown choice (answered as AMD). */
+#define RD3K5_VENDOR_AMD    0u
+#define RD3K5_VENDOR_NVIDIA 1u
+#define RD3K5_VENDOR_INTEL  2u
+static inline int rd3k5_vendor_fill(struct rd3k5_vendor_info *v, uint32_t which)
+{
+    static const struct { const char *name; uint32_t id; } k[3] = {
+        { "AMD", 0x1002u }, { "NVIDIA", 0x10deu }, { "Intel", 0x8086u } };
+    const uint32_t i = which < 3u ? which : RD3K5_VENDOR_AMD;
+    unsigned n;
+    rd3k5_zero(v, sizeof *v);
+    v->version = 0x30000u;
+    for (n = 0; k[i].name[n] && n + 1 < sizeof v->vendor; n++)
+        v->vendor[n] = k[i].name[n];
+    v->vendorID = k[i].id;
+    v->vendorClass = 2u;
+    return which < 3u ? 0 : -1;
+}
 static inline void rd3k5_put32(uint8_t *e, unsigned off, uint32_t v)
 {
     e[off] = (uint8_t)v; e[off + 1] = (uint8_t)(v >> 8); e[off + 2] = (uint8_t)(v >> 16); e[off + 3] = (uint8_t)(v >> 24);

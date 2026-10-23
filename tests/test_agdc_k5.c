@@ -76,6 +76,21 @@ int main(void)
     CHECK(rd3k5_answer(RD3K5_CMD_FBCAPEX, &cin, sizeof cin, &cout, sizeof cout, h, 2, &why, &idx) == RD3K5_R_UNSUPPORTED);
     CHECK(rd3k5_answer(0x922, &cin, sizeof cin, &cout, sizeof cout, h, 2, &why, &idx) == RD3K5_R_UNSUPPORTED);
 
+    /* the vendor answer A/B (DRIVER-PLAN N40): AMD by default, NVIDIA as NullMoth, Intel; unknown = AMD */
+    {
+        struct rd3k5_vendor_info v;
+        memset(&v, 0xa5, sizeof v);
+        CHECK(rd3k5_vendor_fill(&v, RD3K5_VENDOR_AMD) == 0);
+        CHECK(v.version == 0x30000 && strcmp(v.vendor, "AMD") == 0 && v.vendorID == 0x1002 && v.vendorClass == 2);
+        CHECK(v.vendor[sizeof v.vendor - 1] == 0 && v.vendor[4] == 0);   /* zeroed past the name */
+        CHECK(rd3k5_vendor_fill(&v, RD3K5_VENDOR_NVIDIA) == 0);
+        CHECK(strcmp(v.vendor, "NVIDIA") == 0 && v.vendorID == 0x10de && v.vendorClass == 2);
+        CHECK(rd3k5_vendor_fill(&v, RD3K5_VENDOR_INTEL) == 0);
+        CHECK(strcmp(v.vendor, "Intel") == 0 && v.vendorID == 0x8086);
+        CHECK(rd3k5_vendor_fill(&v, 9) == -1);
+        CHECK(strcmp(v.vendor, "AMD") == 0 && v.vendorID == 0x1002);
+    }
+
     if (fails) {
         printf("test_agdc_k5: %d failure(s)\n", fails);
         return 1;

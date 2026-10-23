@@ -577,6 +577,41 @@ run (`present: ...` in the SUMMARY and the checklist, `present mode, ...` per re
 | `fb index` | INFO: `IOFramebufferOpenGLIndex 0,1, IOFBDependentIndex 1,0: they disagree ... (unchanged)` | independent of the two variables above; INFO while it is the state of card run 2026-10-17d, WARN when the mismatch differs, INFO with a note when the indices now agree (a separate suspect, DRIVER-PLAN N39) |
 | `host log not matched` / `request unknown` (WARN) | - | the host log is found by its `boot-args:` line against the report's boot-args, not by clock stamps. `not matched`: no log has them (or two logs with them ask for different things): the newest is used as a guess and the rows from it say so. `request unknown`: no host log, or one without the `SMBIOS model:` / `GPU on:` lines. A TESTS-ONLY report and a result without any report get `asked model`, `asked bus` and `guest PCI` (the card's bus and BARs in `info pci` at 8 and 40 s) from the host log alone |
 
+### Driver-side A/B (DRIVER-PLAN N40)
+
+The steps above change the VM; these boot-args change what our driver tells
+macOS, so each one can be tried alone on top of any of them. The defaults are
+in every run's log (`RDNA3-fb: head N switches: ...`, `RDNA3-agdc: vendor info
+answer ...`) and the triage prints them (`fb N40, switches`).
+
+| boot-arg | default | other value | what it changes |
+|---|---|---|---|
+| `rdna3agdcvendor` | 0: AMD 0x1002 | 1: NVIDIA 0x10de (what NullMoth's AGDC answers), 2: Intel 0x8086 | the AGDC vendor info IOPresentment asks for; also `sudo sysctl debug.rdna3agdc_vendor=1` at runtime (WindowServer may ask only at its start) |
+| `rdna3fbintegrated` | 0: as IOGraphics sets it | 1: `IOFBIntegrated` removed, 2: set | the property only; GPUWrangler's `(IG)` stays (only `play-rootport` changes the bus) |
+| `rdna3dispflags` | 0 (NullMoth's answer) | 1: the old answer (CEA underscan) | `kConnectionDisplayFlags` |
+| `rdna3glorder` | 1: head 0 opens first | 0: as before | `IOFramebufferOpenGLIndex` (the new default makes it equal `IOFBDependentIndex`) |
+| `rdna3cursorasync` | 1: the cursor moves on a thread call | 0: on WindowServer's thread, as before | cursor smoothness while flips run |
+| `rdna3fbwake` | 1: the framebuffer does the family's wake work | 0: as before | the desktop after a system sleep (Apple menu > Sleep, then a key) |
+| `rdna3vblonce` | 1 | 0: as before | never two VBL runs at once |
+| `rdna3fbdtmap` | 0: as before (logged) | 1: our modes' timings accepted | the `InstallTiming ... FAILED` lines in the CoreDisplay log |
+| `rdna3fbconsole` | 1: the framebuffer that holds the boot console | 0: head 0 | `isConsoleDevice` |
+
+One run per value: take the step's line and add the boot-arg, e.g.
+
+```sh
+rdna3vm args "$(awk '$1 == "play-desktop" { $1 = ""; print }' tools/ladder-steps.txt) rdna3agdcvendor=1"
+rdna3vm args "$(awk '$1 == "play" { $1 = ""; print }' tools/ladder-steps.txt) rdna3fbintegrated=1"
+```
+
+(the step's `@smbios=` / `@gpubus=` words come along). Cheapest order after
+`play-desktop`: `rdna3agdcvendor=1` on `play`, then `rdna3fbintegrated=1`,
+then `rdna3dispflags=1` and `rdna3glorder=0` (both only undo this round's
+defaults). What decides it is the same pair of rows as above:
+`present: page flip mode` and `present: transactions`. For `rdna3fbwake`, put
+macOS to sleep once during a `play` run and wake it; the `fb N40, wake` row
+must show as many family wakes as system sleeps and the desktop must come
+back.
+
 ### Tests that already passed
 
 The report does not run a long test again (scaled modes, gamma, the

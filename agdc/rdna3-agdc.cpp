@@ -9,7 +9,8 @@
  * RDNA3AGDC - an AppleGraphicsDeviceControl object on the card's PCI device:
  * it answers the display-topology queries IOPresentment (WindowServer's
  * display pipe stack) sends the GPU vendor:
- *   1      vendor info (AMD, 0x1002)
+ *   1      vendor info (AMD, 0x1002; rdna3agdcvendor / debug.rdna3agdc_vendor
+ *          answer NVIDIA or Intel for the DRIVER-PLAN N40 A/B)
  *   0x980  GPU capability: the framebuffers by IOFBDependentIndex and their
  *          count (maxFramebuffers)
  *   0x921  kAGDCLinkConfig of a framebuffer index: its timing, one link     } "K5",
@@ -82,6 +83,11 @@ static int    gAgdcK5Why = 0;
 static SInt64 gAgdcCmds = 0, gAgdcUnsupported = 0;
 static int    gAgdcLastRefused = 0;
 static SInt32 gAgdcLogged = 0;
+/* DRIVER-PLAN N40: the vendor command 1 answer (rd3k5_vendor_fill): 0 AMD
+ * (default), 1 NVIDIA as NullMoth's NVRMAGDC, 2 Intel; boot-arg
+ * rdna3agdcvendor, changeable at runtime through the sysctl */
+static int    gAgdcVendor = 0;
+static int    gAgdcVendorAsked = 0, gAgdcVendorLast = -1;
 
 enum { kAgdcMaxFB = 4 };
 /* the framebuffers 0x980 reports, by IOFBDependentIndex (slots 0..n-1, no
@@ -168,13 +174,21 @@ IOReturn RD3DeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned l
 {
     OSAddAtomic64(1, &gAgdcCmds);
     if (cmd == RD3K5_CMD_VENDOR) {
-        if (!out || !outSize || *outSize != sizeof(struct rd3k5_vendor_info)) return kIOReturnBadArgument;
+        if (!out || !outSize || *outSize != sizeof(struct rd3k5_vendor_info)) {
+            if (OSIncrementAtomic(&gAgdcLogged) < 120)
+                AGLOG("vendor info: bad arguments (out %p, size %lu): Bad argument", out, outSize ? *outSize : 0ul);
+            return kIOReturnBadArgument;
+        }
         struct rd3k5_vendor_info *v = (struct rd3k5_vendor_info *)out;
-        bzero(v, sizeof *v);
-        v->version = 0x30000;
-        strlcpy(v->vendor, "AMD", sizeof v->vendor);
-        v->vendorID = 0x1002;
-        v->vendorClass = 2;
+        const int which = gAgdcVendor;
+        const int known = rd3k5_vendor_fill(v, (uint32_t)which) == 0;
+        const SInt32 n = OSIncrementAtomic(&gAgdcVendorAsked);
+        /* the first answers, and every answer that differs from the one
+         * before (the sysctl changed it) */
+        if (n < 4 || which != gAgdcVendorLast)
+            AGLOG("vendor info #%d: answered %s 0x%04x (debug.rdna3agdc_vendor %d%s)", (int)n + 1, v->vendor,
+                  v->vendorID, which, known ? "" : ": unknown, answered AMD");
+        gAgdcVendorLast = which;
         return kIOReturnSuccess;
     }
     if (cmd == RD3K5_CMD_GPUCAPS) {
@@ -525,6 +539,9 @@ SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_link_mask, CTLFLAG_RD | CTLFLAG_LOCKE
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_caps_mask, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5CapsMask, 0, "bit i = the plane-scaler capability answered for index i");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_types, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5Types, 0, "bit t = a 0x711 for capability type t was refused (0x10 = plane scaler, answered with K5 on)");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_last_refused_idx, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5LastRefusedIdx, 0, "the index the last refused K5 query named (-1 none)");
+SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_vendor, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcVendor, 0, "vendor info answer: 0 AMD 0x1002, 1 NVIDIA 0x10de, 2 Intel 0x8086 (DRIVER-PLAN N40)");
+SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_vendor_asked, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcVendorAsked, 0, "vendor info queries answered");
+SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_vendor_last, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcVendorLast, 0, "the vendor choice of the last answer (-1 never asked)");
 #pragma clang diagnostic pop
 
 static struct sysctl_oid *const kOids[] = {
@@ -533,7 +550,8 @@ static struct sysctl_oid *const kOids[] = {
     &sysctl__debug_rdna3agdc_k5_caps, &sysctl__debug_rdna3agdc_k5_why, &sysctl__debug_rdna3agdc_fbmap,
     &sysctl__debug_rdna3agdc_maxfb, &sysctl__debug_rdna3agdc_k5_asked, &sysctl__debug_rdna3agdc_k5_link_mask,
     &sysctl__debug_rdna3agdc_k5_caps_mask, &sysctl__debug_rdna3agdc_k5_last_refused_idx,
-    &sysctl__debug_rdna3agdc_k5_types,
+    &sysctl__debug_rdna3agdc_k5_types, &sysctl__debug_rdna3agdc_vendor, &sysctl__debug_rdna3agdc_vendor_asked,
+    &sysctl__debug_rdna3agdc_vendor_last,
 };
 
 /* ------------------------------------------------------------------ */
@@ -580,6 +598,13 @@ bool RDNA3AGDC::start(IOService *provider)
     for (unsigned i = 0; i < sizeof kOids / sizeof kOids[0]; i++)
         sysctl_register_oid(kOids[i]);
     fSysctl = true;
+    gAgdcVendor = (int)rd3_arg("rdna3agdcvendor", RD3K5_VENDOR_AMD);
+    {
+        struct rd3k5_vendor_info vi;
+        const int known = rd3k5_vendor_fill(&vi, (uint32_t)gAgdcVendor) == 0;
+        AGLOG("vendor info answer: %s 0x%04x (rdna3agdcvendor=%d, default 0 = AMD%s)", vi.vendor, vi.vendorID,
+              gAgdcVendor, known ? "" : "; unknown value, answered as AMD");
+    }
     const uint32_t arg = rd3_arg("rdna3agdc", 0);
     if (arg) {
         gAgdcK5 = arg == 3;
