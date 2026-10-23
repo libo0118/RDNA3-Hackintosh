@@ -31,9 +31,10 @@ RV=$ROOT/tools/vm/rdna3vm
 export ROOT
 
 FUNCS="approve_markers approve_marker_any approve_marker_text approve_marker_clear run_note old_driver_note
-bundle_current vm_bundle_seen install_first cmd__once cmd_approve cmd__queue cmd_result approve_cmd host_opt"
+bundle_current vm_bundle_seen install_first cmd__once cmd_approve cmd__queue cmd_result approve_cmd host_opt
+bundle_source_hashes"
 for f in $FUNCS; do sed -n "/^$f() {/,/^}/p" "$RV"; done > "$T/fn.sh"
-[ "$(grep -c '^[a-z_]*() ' "$T/fn.sh")" = 15 ] || fail "functions not found: $(grep -o '^[a-z_]*()' "$T/fn.sh")"
+[ "$(grep -c '^[a-z_]*() ' "$T/fn.sh")" = 16 ] || fail "functions not found: $(grep -o '^[a-z_]*()' "$T/fn.sh")"
 
 export WORK=$T/work
 mkdir -p "$WORK/reports"
@@ -157,6 +158,29 @@ run "cmd_approve"
 run "echo '$MARK' > \$WORK/reports/approve-x.txt; cmd_approve --card"
 grep -qF "$MARK" "$WORK/approve-unverified" || fail "approve --card: approve-unverified lacks the marker text"
 
+# DRIVER-PLAN N37: after the install boot (no marker) approve-unverified names the kexts asked for
+# and the source hashes of the bundle's builds, not only the date
+mkbundle() {   # a published bundle whose accelerator / framebuffer carry these source hashes
+    local d=$T/bundle
+    mkdir -p "$d/kexts/RDNA3Accelerator.kext/Contents" "$d/kexts/RDNA3Framebuffer.kext/Contents" "$WORK/share"
+    printf '<plist>\n<dict>\n\t<key>RDNA3SourceHash</key>\n\t<string>4fcf2bc0b7</string>\n</dict>\n</plist>\n' \
+        > "$d/kexts/RDNA3Accelerator.kext/Contents/Info.plist"
+    printf '<plist>\n<dict>\n\t<key>RDNA3SourceHash</key>\n\t<string>aa11bb22cc</string>\n</dict>\n</plist>\n' \
+        > "$d/kexts/RDNA3Framebuffer.kext/Contents/Info.plist"
+    tar -czf "$WORK/share/rdna3-bundle.tar.gz" -C "$d" kexts
+}
+export -f mkbundle
+run "mkbundle; echo 'RDNA3Accelerator ' > \$WORK/needs-allow; cmd_approve"
+grep -q '^allow requested .* for RDNA3Accelerator; the bundle.s builds: RDNA3Framebuffer aa11bb22cc, RDNA3Accelerator 4fcf2bc0b7$' \
+    "$WORK/approve-unverified" || fail "approve after the install boot: no kexts / hashes: $(cat "$WORK/approve-unverified" 2>&1)"
+run "cmd_approve"
+grep -q "^allow requested .*; the bundle's builds: unknown (no readable rdna3-bundle.tar.gz)$" "$WORK/approve-unverified" ||
+    fail "approve without a bundle: not said: $(cat "$WORK/approve-unverified" 2>&1)"
+# the hashes name what the next run's marker would ('installed 4fcf2bc0b7'): the note joins the two
+BUNDLE_SEEN=$BUNDLE_OK run "mkbundle; echo 'RDNA3Accelerator ' > \$WORK/needs-allow; cmd_approve; echo approve > \$WORK/pass-1; echo '$BUNDLE_OK' > \$WORK/share/rdna3-bundle.sha256; cmd__once"
+grep -q "Allow was not clicked / did not take: macOS still runs RDNA3Accelerator: running e35e78c275, installed 4fcf2bc0b7.*for: allow requested .*RDNA3Accelerator 4fcf2bc0b7" \
+    "$WORK/last-run-note" || fail "approve then a marker: the note lacks the requested hashes: $(cat "$WORK/last-run-note" 2>&1)"
+
 # a window that fails keeps the marker and says so (cmd_approve returns its status)
 WINDOW_RC=3 run "echo '$MARK' > \$WORK/reports/approve-x.txt; rc=0; cmd_approve || rc=\$?; echo rc=\$rc"
 grep -q 'rc=3' "$T/out.txt" || fail "approve, window rc 3: cmd_approve hid the status"
@@ -183,6 +207,15 @@ BUNDLE_SEEN=$(printf 'c%.0s' $(seq 64)) run "ready; cmd__once"
 # ... no bundle report at all: not proven either
 run "ready; cmd__once"
 [ -e "$WORK/approve-unverified" ] || fail "once, clean boot without a bundle report: approve-unverified cleared"
+# DRIVER-PLAN N37: no bundle report from THIS run (macOS never got that far), although the install
+# boot's / approval window's report of the current bundle is still in vm-bundle.sha256: not proven
+run "ready; echo '$BUNDLE_OK' > \$WORK/vm-bundle.sha256; cmd__once"
+[ -e "$WORK/approve-unverified" ] || fail "once, no report this run + an earlier boot's current bundle: approve-unverified cleared"
+grep -q 'macOS did not report its bundle in this run: whether the Allow of .rdna3vm approve. took is still unknown' \
+    "$WORK/last-run-note" || fail "once, no report this run: no note"
+# ... nor an earlier boot's report still lying in reports/ (cmd__once takes it in before the boot)
+run "ready; echo '$BUNDLE_OK' > \$WORK/reports/bundle-old.txt; cmd__once"
+[ -e "$WORK/approve-unverified" ] || fail "once, an earlier boot's bundle report: approve-unverified cleared"
 # a boot with the approve marker again: Allow did not take, said plainly, in the log and the note
 BUNDLE_SEEN=$BUNDLE_OK run "ready; echo approve > \$WORK/pass-1; cmd__once"
 [ -e "$WORK/approve-unverified" ] || fail "once, marker again: approve-unverified cleared"
