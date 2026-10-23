@@ -492,6 +492,83 @@ def scanout_sizes(log):
         set(re.findall(r"a3 display: head \d+: .*?\((\d+)x(\d+)\)", log))
 
 
+N41_SYSCTL = re.compile(r"^debug\.rdna3accel_((?:vm|surface)_\w+): (-?\d+)", re.M)
+
+
+def n41_rows(sv, log, pluginlog=""):
+    """DRIVER-PLAN N41: the VRAM parking (vm_*) and the page-off's wait for WindowServer's pending GPU writes
+    (surface_wait*) from the sysctl dump in 29-surface-vram.txt. [(level, name, text)]; missing data is a WARN
+    when the accelerator runs these sources (the collector's grep lost them), INFO for an older kext."""
+    c = dict((k, int(v)) for k, v in N41_SYSCTL.findall(sv or ""))
+    rows = []
+    if "vm_sticky" not in c:
+        if accel_current(log):
+            rows.append(("WARN", "VRAM parking", "counters missing: the accelerator runs these sources but the dump "
+                         "has no rdna3accel_vm_sticky - the collector's sysctl grep (vm_, surface_)"))
+        else:
+            rows.append(("INFO", "VRAM parking", "no rdna3accel_vm_sticky: an accelerator before DRIVER-PLAN N41"))
+        return rows
+    g = c.get
+    if not g("vm_sticky"):
+        rows.append(("WARN", "VRAM parking", "OFF (vm_sticky 0: rdna3vmsticky=0 or a runtime A/B): every deallocPhysical "
+                     "frees, imported surfaces move to new VRAM (%d given back)" % g("vm_released", 0)))
+    else:
+        rows.append(("INFO", "VRAM parking", "%d parked, %d handed back, %d released (%d grown), %d bytes parked at the "
+                     "end, %d given back in all" % (g("vm_parked", 0), g("vm_unparked", 0), g("vm_park_released", 0),
+                                                    g("vm_park_grow", 0), g("vm_parked_bytes", 0), g("vm_released", 0))))
+    if g("vm_dirty_moved", 0):
+        rows.append(("WARN", "VRAM parking", "%d dirty mark(s) of an allocation other than the surface's BO import: the "
+                     "plugin drew elsewhere (the kernel's 'marks allocation #' lines)" % g("vm_dirty_moved")))
+    if g("vm_restore_miss", 0):
+        rows.append(("WARN", "VRAM parking", "%d dirty mark(s) found the VRAM parked and could NOT restore it (refused: "
+                     "the plugin copied out; %d restored)" % (g("vm_restore_miss"), g("vm_restored", 0))))
+    elif g("vm_restored", 0):
+        rows.append(("INFO", "VRAM parking", "%d dirty mark(s) restored parked VRAM first" % g("vm_restored")))
+    if g("vm_reparked", 0):
+        rows.append(("WARN", "VRAM parking", "%d park(s) replaced an older one - never expected (the kernel's 'an older "
+                     "park' lines)" % g("vm_reparked")))
+    if g("vm_refused", 0) and g("vm_parked_bytes", 0):
+        rows.append(("WARN", "VRAM parking", "%d VRAM allocation(s) refused while %d bytes were parked: parking may "
+                     "cost VRAM (the kernel's 'VRAM refused:' line; A/B vm_sticky 0)" % (g("vm_refused"),
+                                                                                         g("vm_parked_bytes"))))
+    if g("vm_free_live", 0):
+        rows.append(("INFO", "VRAM parking", "%d vidmem object(s) freed with VRAM still live, released in free() (they "
+                     "leaked before N41)" % g("vm_free_live")))
+    if g("vm_apdesc_moved", 0):
+        rows.append(("INFO", "VRAM parking", "%d aperture descriptor(s) rebuilt: the VRAM had moved" % g("vm_apdesc_moved")))
+    # the page-off's wait
+    if "surface_wait" not in c:
+        rows.append(("WARN" if accel_current(log) else "INFO", "surface wait",
+                     "no rdna3accel_surface_wait in the dump" + (" - the collector's grep" if accel_current(log) else
+                                                                 ": an older accelerator")))
+        return rows
+    pend, ready = g("surface_wait_pending", 0), g("surface_wait_ready", 0)
+    plug = re.findall(r"surface wait \(N41\): WindowServer's IOSurface VRAM writes are ([^(\n]*)", pluginlog or "")
+    if not g("surface_wait"):
+        rows.append(("INFO", "surface wait", "OFF (surface_wait 0): page-offs do not wait for WindowServer's GPU"))
+    elif not pend:
+        rows.append(("INFO", "surface wait", "no pending marks taken: %s" % (
+            "the plugin says: " + plug[-1].strip() if plug else
+            "an older plugin, WindowServer's surfaces private (rdna3a3ws=0), or NVMTL_SURFACE_WAIT=0")))
+    else:
+        rows.append(("INFO", "surface wait", "%d pending / %d ready marks, %d page-off wait(s) (longest %d us), %d "
+                     "timeout(s)" % (pend, ready, g("surface_wait_waits", 0), g("surface_wait_maxus", 0),
+                                     g("surface_wait_timeouts", 0))))
+    if g("surface_wait_timeouts", 0):
+        rows.append(("WARN", "surface wait", "%d page-off(s) gave up waiting for WindowServer's GPU write (ready marks "
+                     "lost or a hung GPU; the kernel's 'still PENDING' lines)" % g("surface_wait_timeouts")))
+    if pend and not ready:
+        rows.append(("FAIL", "surface wait", "%d pending mark(s) and NO ready mark: every page-off of those surfaces ran "
+                     "into the bound (the plugin's 'surface wait (N41)' lines)" % pend))
+    if g("surface_wait_notws", 0):
+        rows.append(("WARN", "surface wait", "%d mark(s) from a process other than WindowServer refused (an app's plugin "
+                     "with NVMTL marks? the kernel's 'only WindowServer' lines)" % g("surface_wait_notws")))
+    if g("surface_wait_evicted", 0) or g("surface_wait_saturated", 0):
+        rows.append(("WARN", "surface wait", "%d surface(s) dropped from the full table, %d mark(s) refused as saturated"
+                     % (g("surface_wait_evicted", 0), g("surface_wait_saturated", 0))))
+    return rows
+
+
 def a3_display_verdict(log, sv):
     """card run 58: WindowServer's display framebuffers and A3 - kept out
     (the refusal lines), the refusal that never fired (display-size BOs in
@@ -2871,6 +2948,11 @@ def report(path, show_all):
         # card run 58: WindowServer's display framebuffers and A3
         failed = a3_display_verdict(log, sv) or failed
         failed = failed or not same or not up or len(pids) > 2
+    # DRIVER-PLAN N41: the VRAM parking and the page-off's wait for WindowServer's GPU
+    if "rdna3accel=1" in args or surfvram.strip():
+        for lvl_, name_, text_ in n41_rows(surfvram, log, pluginlog):
+            print("   %s %-20s %s" % (lvl_, name_, text_))
+            failed = failed or lvl_ == "FAIL"
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
         want = fb_source_hash(ACCEL_HASH_FILES)

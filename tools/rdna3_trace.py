@@ -545,6 +545,84 @@ def segments(trace, swaps=None):
     return seg
 
 
+# VMALLOC / VMFREE flags of DRIVER-PLAN N41 (common/rdna3_trace.h): the parked allocation handed back (VMALLOC),
+# parked instead of freed (VMFREE); a parked allocation released; a live one released by free()
+VM_PARKED = 16
+VM_PARK_GONE = 32
+VM_FREE_LIVE = 64
+# PAGEOFF flags (N41): waited for WindowServer's pending GPU write, that wait timed out
+PAGEOFF_WAITED = 1
+PAGEOFF_WAIT_TIMEOUT = 2
+
+
+def vram_moves(trace):
+    """DRIVER-PLAN N41 (traces 2026-10-17d / 17c): the vidmem of a surface imported as a BO (SURFGEM arg 1) given
+    new VRAM at another address after a free, and the dirty marks (SURFGEM arg 2) on such moved VRAM - the plugin's
+    BO keeps the first address. Also the parks seen. {"imported", "freed", "moved": [(obj, surface, was, now)],
+    "dirty_moved", "parked", "reused", "park_released", "free_live"}"""
+    imported, state = {}, {}
+    out = {"imported": 0, "freed": 0, "moved": [], "dirty_moved": 0, "parked": 0, "reused": 0, "park_released": 0,
+           "free_live": 0}
+    for e in trace.events:
+        if e.src != SRC_ACCEL:
+            continue
+        n = TYPES.get(e.type)
+        if n == "SURFGEM" and e.arg == 1 and e.obj:
+            imported[e.obj] = (e.pa, e.v0)
+            state.pop(e.obj, None)
+        elif n == "VMFREE":
+            if e.flags & VM_PARKED:
+                out["parked"] += 1
+            if e.flags & VM_PARK_GONE:
+                out["park_released"] += 1
+            if e.flags & VM_FREE_LIVE:
+                out["free_live"] += 1
+            if e.obj in imported and not e.flags & VM_PARKED:
+                out["freed"] += 1
+                state[e.obj] = "freed"
+        elif n == "VMALLOC" and e.arg:
+            if e.flags & VM_PARKED:
+                out["reused"] += 1
+            if e.obj in imported and state.get(e.obj) == "freed":
+                state[e.obj] = "moved" if e.pa != imported[e.obj][0] else None
+                if e.pa != imported[e.obj][0]:
+                    out["moved"].append((e.obj, imported[e.obj][1], imported[e.obj][0], e.pa))
+        elif n == "SURFGEM" and e.arg == 2 and state.get(e.obj) == "moved" and e.pa != imported[e.obj][0]:
+            out["dirty_moved"] += 1
+    out["imported"] = len(imported)
+    return out
+
+
+def h_vram_moved(trace):
+    """H-VMMOVE (DRIVER-PLAN N41): rows for hypotheses()"""
+    m = vram_moves(trace)
+    rows = []
+    if m["moved"]:
+        o = m["moved"][0]
+        rows.append(("WARN", "H-VMMOVE", "%d imported surface(s) got new VRAM at another address after a free (e.g. "
+                     "surface %d: 0x%x -> 0x%x), %d dirty mark(s) on the moved VRAM - the plugin draws into the old "
+                     "one: grey / stale / black windows (vm_sticky 0, or a resource that grew)" % (
+                         len(m["moved"]), o[1], o[2], o[3], m["dirty_moved"])))
+    if m["parked"] or m["reused"]:
+        rows.append(("INFO", "H-VMPARK", "%d allocation(s) parked, %d handed back, %d parked one(s) released, %d "
+                     "imported surface(s) never moved" % (m["parked"], m["reused"], m["park_released"],
+                                                          m["imported"] - len(set(x[0] for x in m["moved"])))))
+    if m["free_live"]:
+        rows.append(("INFO", "H-VMPARK", "%d vidmem object(s) freed with VRAM still live (released in free(); "
+                     "before N41 those leaked)" % m["free_live"]))
+    po = trace.by("PAGEOFF")
+    waited = [e for e in po if e.flags & PAGEOFF_WAITED]
+    late = [e for e in po if e.flags & PAGEOFF_WAIT_TIMEOUT]
+    if late:
+        rows.append(("WARN", "H-SURFWAIT", "%d page-off(s) gave up waiting for WindowServer's GPU write (first at %s, "
+                     "%d us) - a lost ready mark or a hung GPU; that copy may be stale" % (
+                         len(late), late[0].seq, late[0].v3)))
+    if waited:
+        rows.append(("INFO", "H-SURFWAIT", "%d page-off(s) waited for WindowServer's GPU write (longest %d us)" % (
+            len(waited), max(e.v3 for e in waited))))
+    return rows
+
+
 def hypotheses(trace, ctx=None):
     """[(level, name, text)]: CRITICAL / FAIL / WARN / INFO / PASS, the
     hypothesis each trace pattern names"""
@@ -573,12 +651,13 @@ def hypotheses(trace, ctx=None):
         elif s["inplace"]:
             out.append(("WARN", "H-COPY", "mode 0: %d of %d flipped buffers rewritten in place" %
                         (s["inplace"], s["inplace_checked"])))
-    # H-FREE: VRAM freed while a head scanned it
-    freed = [e for e in trace.by("VMFREE") if e.flags & 0x0e]
+    # H-FREE: VRAM freed while a head scanned it (a parked allocation, VMFREE flag 16, is not freed: N41)
+    freed = [e for e in trace.by("VMFREE") if e.flags & 0x0e and not e.flags & VM_PARKED]
     if freed:
         out.append(("WARN", "H-FREE", "%d buffer(s) freed while a head scanned them (e.g. 0x%x on head %s) - the panel "
                     "reads VRAM that may be reused" % (len(freed), freed[0].pa, freed[0].head if freed[0].head != 0xff
                                                        else "?")))
+    out.extend(h_vram_moved(trace))
     # copy forward answered with an error: CoreDisplay switches it off for good
     cferr = [e for e in trace.by("CF") if e.v4]
     if cferr:
@@ -1014,6 +1093,8 @@ def stale_backs(trace):
                 ap.setdefault(e.pa, []).append(t)
             continue
         if e.type == T["VMFREE"]:
+            if e.flags & VM_PARKED:   # parked, still allocated: the kernel keeps its records (N41)
+                continue
             for hs in st.values():
                 hs["rec"].pop(e.pa, None)
                 if hs["last"] == e.pa:
@@ -1556,9 +1637,16 @@ def _fmt_event(trace, e, ms, n):
         return "%10.3f ms APERTURE %s 0x%x (%d KiB, IOSurface %d)" % (ms, "add" if e.arg == 1 else "desc", e.pa, e.v0,
                                                                       e.v1)
     if n in ("VMALLOC", "VMFREE"):
-        return "%10.3f ms %s 0x%x %d KiB%s%s" % (ms, n, e.pa, e.v0, "" if e.arg else " REFUSED 0x%x" % e.v4,
-                                                 " while scanned by head %d" % e.head if n == "VMFREE" and e.flags & 0xe
-                                                 else "")
+        park = ""
+        if e.flags & VM_PARKED:
+            park = " (the PARKED one handed back)" if n == "VMALLOC" else " PARKED, not freed"
+        if n == "VMFREE" and e.flags & VM_PARK_GONE:
+            park += " (a parked one RELEASED)"
+        if n == "VMFREE" and e.flags & VM_FREE_LIVE:
+            park += " (LIVE at free())"
+        return "%10.3f ms %s 0x%x %d KiB%s%s%s" % (ms, n, e.pa, e.v0, "" if e.arg else " REFUSED 0x%x" % e.v4,
+                                                   " while scanned by head %d" % e.head if n == "VMFREE" and e.flags & 0xe
+                                                   else "", park)
     if n == "CS" and e.arg == 0xff:
         return "%10.3f ms CS REFUSED pid %d -> %d (that error %d times, %d not traced before this)" % (
             ms, e.v0, e.v4 - (1 << 32) if e.v4 >> 31 else e.v4, e.v1, e.v2)

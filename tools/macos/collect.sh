@@ -100,9 +100,13 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
         # the display rule at start, the refusals, the misses, the verdicts per head
         grep -h -e 'a3 display' -e 'A3: WindowServer' -e "WindowServer's display framebuffer" \
             -e 'is not a display framebuffer' -e 'display check did not run' "$dir/$f" | tail -60 || true
+        # DRIVER-PLAN N41 with a budget of its own: the VRAM parking and the
+        # page-off's wait for WindowServer's GPU (kernel and plugin lines)
+        grep -h -e 'vm sticky:' -e 'surface wait' -e 'PARKED' -e 'parked VRAM' -e 'VRAM refused:' \
+            -e 'marks allocation #' -e 'its VRAM was parked' -e 'still LIVE' -e 'an older park' "$dir/$f" | tail -80 || true
     done
     echo "== sysctl (card run 58)"
-    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:|iop_queue|iop_wrote|perf|present_|flipbuf|hook_)")
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:|iop_queue|iop_wrote|perf|present_|flipbuf|hook_|vm_|surface_)")
     if [ -n "$_a3" ]; then echo "$_a3"; else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
 } > "$dir/29-surface-vram.txt" 2>/dev/null
 # card run 2026-10-17b: the kernel's per-frame trace (common/rdna3_trace.h),

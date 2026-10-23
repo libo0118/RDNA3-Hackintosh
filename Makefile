@@ -170,6 +170,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	python3 -I -B tests/test_accel_hash_parity.py
 	python3 -I -B tests/test_fb_agdc_hash_parity.py
 	python3 -I -B tests/test_trace_parity.py
+	python3 -I -B tests/test_triage_park.py
 	python3 -I -B tests/test_accel_slots.py
 	tests/test_triage_tx.sh
 	tests/test_triage_stale_plugin.sh

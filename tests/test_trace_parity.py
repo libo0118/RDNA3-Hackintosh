@@ -54,6 +54,16 @@ m3 = re.search(r"enum rd3_trace_flipbuf \{(.*?)\};", h, re.S)
 fbw = sorted(int(v) for v in re.findall(r"RD3_TRFB_\w+\s*=\s*(\d+)", m3.group(1) if m3 else ""))
 if fbw != sorted(rdna3_trace.FLIPBUF_WHAT):
     fails.append("enum rd3_trace_flipbuf %s, the decoder's FLIPBUF_WHAT %s" % (fbw, sorted(rdna3_trace.FLIPBUF_WHAT)))
+# DRIVER-PLAN N41: the VRAM parking's VMALLOC / VMFREE flags and PAGEOFF's wait flags
+for cname, pyname in (("RD3_TRVM_PARKED", "VM_PARKED"), ("RD3_TRVM_PARK_GONE", "VM_PARK_GONE"),
+                      ("RD3_TRVM_FREE_LIVE", "VM_FREE_LIVE"), ("RD3_TRPO_WAITED", "PAGEOFF_WAITED"),
+                      ("RD3_TRPO_TIMEOUT", "PAGEOFF_WAIT_TIMEOUT")):
+    mm = re.search(r"#define %s\s+(\d+)u" % cname, h)
+    if not mm or int(mm.group(1)) != getattr(rdna3_trace, pyname, None):
+        fails.append("%s %s, the decoder's %s %s" % (cname, mm and mm.group(1), pyname, getattr(rdna3_trace, pyname, None)))
+vmf = [int(x) for x in re.findall(r"#define RD3_TRVM_\w+\s+(\d+)u", h)]
+if any(f & 0x0f for f in vmf) or len(set(vmf)) != len(vmf):
+    fails.append("RD3_TRVM_* flags %s overlap VMFREE's 1..8 or each other" % vmf)
 types = dict((int(v), n) for n, v in re.findall(r"RD3_TR_(\w+)\s*=\s*(\d+),", h))
 for v, n in sorted((v, n) for v, n in types.items() if v):
     if rdna3_trace.TYPES.get(v) != n:
