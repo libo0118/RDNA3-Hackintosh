@@ -1904,40 +1904,86 @@ int nvmtl_vk_last_dirty_errno(void) { return g_last_dirty_errno; }
 /* DRIVER-PLAN N41: WindowServer's IOSurface writes in VRAM. A kernel that takes WindowServer's pending mark (at commit)
    holds a CPU lock's page-off until the ready mark (after the GPU), bounded; only then is the surface marked newest at
    commit (a try-lock mark: the commit holds the command-buffer lock the completions need), and the mark after the GPU
-   may give up when the accelerator's lock is taken (the commit's stands). Any other answer keeps the old order (marked
-   after the GPU): ENOSYS (a kext without the op) for good, ENXIO (the kernel's waits are off) for a second.
-   NVMTL_SURFACE_WAIT=0 switches it off. NullMoth comparison: its nvmtl_ws_mark / NVAccelSurfaceWait, written here. */
+   may give up when the accelerator's lock is taken (the commit's stands). Any other answer to a pending mark keeps the
+   old order (marked after the GPU): ENOSYS (a kext without the op) for good, anything else but EBUSY (ENXIO the
+   kernel's waits are off, ENODEV an older accelerator, ENOENT a surface the kernel would not mark for us) for a second
+   (ECC review of N41: it backed off only on ENOSYS / ENXIO before). EBUSY (that surface already holds the most marks)
+   costs only that surface's mark. NVMTL_SURFACE_WAIT=0 switches it off. NullMoth comparison: its nvmtl_ws_mark,
+   written here. */
 static _Atomic uint64_t g_ws_wait_retry;   /* 0 on, UINT64_MAX never, else CLOCK_UPTIME_RAW ns to ask again */
 static __thread int g_dirty_committed;
+/* what the marks did (logged with the first command buffers, then every 4096th): command buffers that marked,
+   pending marks taken / refused, surfaces skipped (in system memory: nothing for the kernel to wait for), command
+   buffers while backed off, readies sent before the surface's dirty mark (it could not be marked newest yet) */
+static _Atomic uint64_t g_ws_cbs, g_ws_taken, g_ws_refused, g_ws_sysmem, g_ws_cbs_off, g_ws_ready_early, g_ws_backoffs;
+static void nvmtl_vk_ws_log_stats(const char *why)
+{
+    nvlog("surface wait (N41): stats (%s): %llu command buffer(s) marked, %llu pending mark(s) taken, %llu refused "
+          "(%llu back-off(s)), %llu surface write(s) in system memory not marked, %llu command buffer(s) while backed "
+          "off, %llu ready mark(s) sent before the surface's dirty mark", why,
+          (unsigned long long)atomic_load(&g_ws_cbs), (unsigned long long)atomic_load(&g_ws_taken),
+          (unsigned long long)atomic_load(&g_ws_refused), (unsigned long long)atomic_load(&g_ws_backoffs),
+          (unsigned long long)atomic_load(&g_ws_sysmem), (unsigned long long)atomic_load(&g_ws_cbs_off),
+          (unsigned long long)atomic_load(&g_ws_ready_early));
+}
+void nvmtl_vk_ws_note_cb(unsigned taken, unsigned refused, unsigned sysmem)
+{
+    const uint64_t k = atomic_fetch_add(&g_ws_cbs, 1);
+    atomic_fetch_add(&g_ws_taken, taken);
+    atomic_fetch_add(&g_ws_refused, refused);
+    atomic_fetch_add(&g_ws_sysmem, sysmem);
+    if (k < 4 || ((k + 1) & 4095) == 0) nvmtl_vk_ws_log_stats(k < 4 ? "first command buffers" : "every 4096th");
+}
+void nvmtl_vk_ws_note_ready(int early)
+{
+    if (early && !atomic_fetch_add(&g_ws_ready_early, 1))
+        nvlog("surface wait (N41): a ready mark went out before its surface could be marked newest (the accelerator's "
+              "lock was taken): a page-off in between may copy the stale system memory (counted in the stats line)");
+}
 int nvmtl_vk_ws_wait_on(void)
 {
     static int base = -1;
     if (base < 0) {
         const char *e = getenv("NVMTL_SURFACE_WAIT"), *me = getprogname();
-        const int ws = me && !strcmp(me, "WindowServer");
+        const int ws = me && !strcmp(me, "WindowServer"), headless = nvmtl_gpu_headless();
         base = ws && pdrm_surface_mark && pdrm_surface_dirty_try && pdrm_surface_dirty && !pnvk_surface_dirty &&
-               !(e && e[0] == '0') && !nvmtl_gpu_headless();
-        if (ws) nvlog("surface wait (N41): WindowServer's IOSurface VRAM writes are %s (libdrm_xnu marks %s, try-lock dirty %s, NVMTL_SURFACE_WAIT=%s)",
-                      base ? "marked pending + newest at commit, ready after the GPU (the kernel's page-off waits)" : "marked newest after the GPU only (old order)",
-                      pdrm_surface_mark ? "present" : "ABSENT", pdrm_surface_dirty_try ? "present" : "ABSENT", e ?: "unset");
+               !(e && e[0] == '0') && !headless;
+        /* every gate named: the one that keeps the old order is in the line (silent-failure review of N41) */
+        if (ws) nvlog("surface wait (N41): WindowServer's IOSurface VRAM writes are %s (libdrm_xnu marks %s, try-lock "
+                      "dirty %s, dirty %s; NVK surface dirty %s; headless %d; NVMTL_SURFACE_WAIT=%s)",
+                      base ? "marked pending + newest at commit, ready after the GPU (the kernel's page-off waits)"
+                           : "marked newest after the GPU only (old order)",
+                      pdrm_surface_mark ? "present" : "ABSENT", pdrm_surface_dirty_try ? "present" : "ABSENT",
+                      pdrm_surface_dirty ? "present" : "ABSENT", pnvk_surface_dirty ? "PRESENT (its own path: old order)" : "absent",
+                      headless, e ?: "unset");
     }
     if (!base) return 0;
     const uint64_t r = atomic_load(&g_ws_wait_retry);
-    return !r || (r != UINT64_MAX && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= r);
+    if (!r || (r != UINT64_MAX && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= r)) return 1;
+    atomic_fetch_add(&g_ws_cbs_off, 1);
+    return 0;
 }
 int nvmtl_vk_surface_mark(uint32_t surfaceID, int pending)
 {
     if (!pdrm_surface_mark) { errno = ENOSYS; return -1; }
     if (!pdrm_surface_mark(surfaceID, pending)) {
-        if (pending && atomic_load(&g_ws_wait_retry)) { atomic_store(&g_ws_wait_retry, 0); nvlog("surface wait (N41): marks taken again"); }
+        if (pending && atomic_load(&g_ws_wait_retry)) {
+            atomic_store(&g_ws_wait_retry, 0);
+            nvlog("surface wait (N41): marks taken again");
+            nvmtl_vk_ws_log_stats("marks taken again");
+        }
         return 0;
     }
     const int er = errno;
-    /* a refused pending mark decides the mode; a refused ready only loses its count (the kernel's bound covers it) */
-    if (pending && (er == ENOSYS || er == ENXIO)) {
+    /* a refused pending mark decides the mode (EBUSY only that surface's); a refused ready only loses its count (the
+       kernel's bound covers it) */
+    if (pending && er != EBUSY) {
         const uint64_t was = atomic_exchange(&g_ws_wait_retry, er == ENOSYS ? UINT64_MAX : clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 1000000000ull);
-        if (!was) nvlog("surface wait (N41): pending mark of surface %u refused (errno %d, %s) - %s", surfaceID, er, strerror(er),
-                        er == ENOSYS ? "the kext has no marks: old order for good" : "the kernel's waits are off: old order, asked again in 1 s");
+        const uint64_t k = atomic_fetch_add(&g_ws_backoffs, 1);
+        if (!was && (k < 8 || (k & 1023) == 0))
+            nvlog("surface wait (N41): pending mark of surface %u refused (errno %d, %s) - %s (%llu back-off(s))", surfaceID, er, strerror(er),
+                  er == ENOSYS ? "the kext has no marks: old order for good" : "old order, asked again in 1 s",
+                  (unsigned long long)k + 1);
     } else {
         static _Atomic unsigned n;
         const unsigned k = atomic_fetch_add(&n, 1);
