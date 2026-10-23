@@ -780,5 +780,9 @@ has "$out" "INFO     H-PRESENT: head 0: 1 queued present(s) dropped at a display
 has "$out" "WARN     H-PRESENT: head 0: 1 writer wait(s) ran out" presentbad
 has "$out" "TIMEOUT: completed EARLY 40000 us" presentbad
 has "$out" "DROPPED (at a mode change)" presentbad
+has "$out" "WARN     H-PRESENT: head 0: the head's flips stayed pending: 1 pending flip(s) given up, 1 present(s) programmed without waiting" presentbad
+has "$out" "INFO     H-PRESENT: head 0: the IOP copy fallback flipped home 1 time(s) over the queue (1 in-flight completed, 1 queued dropped)" presentbad
+has "$out" "the flip pending before it GIVEN UP 35000 us (3 in a row)" presentbad
+has "$out" "the IOP copy fallback flipped home (dropped #105)" presentbad
 
 echo "test_triage_trace: all checks passed"

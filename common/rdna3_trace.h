@@ -160,10 +160,16 @@ enum rd3_trace_present {
     RD3_TRP_UNKNOWN = 9,   /* the flip state unreadable: completed EARLY */
     RD3_TRP_DROPPED = 10,  /* a queued present lost with no newer one (its buffer freed; flags | 0x80: a display
                             * mode change, the picture it was for gone) */
-    RD3_TRP_WAIT = 11      /* a writer waited for the buffer leaving the panel (v1 us; flags 1 copy forward,
+    RD3_TRP_WAIT = 11,     /* a writer waited for the buffer leaving the panel (v1 us; flags 1 copy forward,
                             * 2 page-on, 4 timed out) */
+    RD3_TRP_FOREIGNTO = 12, /* the flip pending before the queued present (another path's, or one of ours given
+                             * up) not latched in time (v1 us): given up, v2 the run (rd3_fq_verdict) */
+    RD3_TRP_GIVEUP = 13,   /* the queued present programmed WITHOUT waiting for the pending flip (v2 the run: the
+                            * head's flips stay pending - blanked, DPMS off, a stuck HUBP) */
+    RD3_TRP_HOME = 14      /* the IOP copy fallback flipped home: v0 the in-flight present completed (0: none), v2
+                            * the queued one dropped (0: none) */
 };
-/* RD3_TR_PRESENT's flags (args 0-10): the present's kind */
+/* RD3_TR_PRESENT's flags (args 0-10, 12-14): the present's kind */
 enum rd3_trace_pq_kind { RD3_TRPK_SWAP = 0, RD3_TRPK_FLIPBUF = 1, RD3_TRPK_IOP = 2 };
 /* where a mode 1/2 swap failed (RD3_TRS_COPY_FAILED's v4) */
 enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD3_TRX_SDMA = 3, RD3_TRX_FLIP = 4 };

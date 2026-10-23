@@ -206,6 +206,10 @@ def present_run(w, kind):
         w.add(25, 0, 10, 0x80, 0, (101, 0, 101, 0, 0), B2)
         w.add(25, 0, 11, 1 | 4, 0, (0, 35000, 0, 0, 0), B2)
         w.add(25, 0, 5, 0, 0, (102, 0, 102, 0xffffffff, 0xe00002bc), F)
+        # ECC review of N38: a head whose flips stay pending - given up, then flipped anyway; a flip home
+        w.add(25, 0, 12, 0, 0, (103, 35000, 3, 0, 0), B2)
+        w.add(25, 0, 13, 0, 0, (103, 35000, 3, 0, 0), B2)
+        w.add(25, 0, 14, 2, 0, (104, 0, 105, 0, 0), B1)
 
 
 def make(kind):
