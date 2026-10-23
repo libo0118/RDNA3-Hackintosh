@@ -237,7 +237,7 @@ static void policy(void)
     CHECK(!rd3_vp_should_park(1, 0, 8, 7));    /* imported, then the resource grew: a newer allocation */
     CHECK(!rd3_vp_should_park(1, 0, 0, 0));    /* nothing live */
     const struct rd3_vp_cand c[5] = {
-        { 30, 100, 1 }, { 10, 200, 2 }, { 20, 300, 1 }, { 5, 400, 0 }, { 40, 50, 1 },
+        { 30, 100, 1, 0, 0 }, { 10, 200, 2, 0, 0 }, { 20, 300, 1, 0, 0 }, { 5, 400, 0, 0, 0 }, { 40, 50, 1, 0, 0 },
     };
     unsigned char out[5];
     /* pressure: every park no BO holds; never a BO's (1) or an unknown one (3) */
@@ -256,6 +256,51 @@ static void policy(void)
     CHECK(rd3_vp_pick_release(c, 0, 0, 0, 1, out) == 0);
 }
 
+/* ECC review round 3 of N41: the release pages through the parks (accel rd3VmParkTrim's loop, replayed): 200
+ * parks a BO holds are the oldest, 5 releasable ones behind them. One page of 128 (before) found none; paging
+ * with the held ones dropped (rd3_vp_keep_releasable) finds all 5 */
+#define PAGE 128u
+static void paged_trim(void)
+{
+    enum { NPARK = 205 };
+    static struct rd3_vp_cand list[NPARK];
+    for (unsigned i = 0; i < NPARK; i++) {
+        list[i].since = 100 + i; list[i].bytes = 1000; list[i].refs = i < 200 ? 2 : 1;
+        list[i].obj = &list[i]; list[i].handle = (void *)(unsigned long)(i + 1);
+    }
+    struct rd3_vp_cand vc[PAGE];
+    unsigned char out[PAGE];
+    /* before: the oldest page only */
+    for (unsigned i = 0; i < PAGE; i++) vc[i] = list[i];
+    CHECK(rd3_vp_pick_release(vc, PAGE, NPARK * 1000ull, 0, 1, out) == 0);
+    /* after: pages, the held ones leave each page */
+    unsigned n = 0, looked = 0, pages = 0;
+    for (int more = 1; more && n < PAGE && pages < 8; pages++) {
+        const unsigned base = n;
+        unsigned idx = 0;
+        more = 0;
+        for (unsigned i = 0; i < NPARK; i++) {
+            if (idx++ < looked) continue;
+            if (n >= PAGE) { more = 1; continue; }
+            vc[n] = list[i]; vc[n].refs = 0;
+            n++;
+        }
+        looked += n - base;
+        for (unsigned i = base; i < n; i++) vc[i].refs = ((struct rd3_vp_cand *)vc[i].obj)->refs;   /* the core */
+        n = base + rd3_vp_keep_releasable(vc + base, n - base);
+    }
+    CHECK(pages == 2 && looked == NPARK && n == 5);
+    CHECK(vc[0].obj == &list[200] && vc[4].obj == &list[204] && vc[0].handle == list[200].handle);   /* in order */
+    CHECK(rd3_vp_pick_release(vc, n, NPARK * 1000ull, 0, 1, out) == 5000);
+    /* the cap: the oldest releasable first */
+    CHECK(rd3_vp_pick_release(vc, n, NPARK * 1000ull, NPARK * 1000ull - 1500, 0, out) == 2000 && out[0] && out[1] &&
+          !out[2]);
+    /* unknown counts (0) never stay, a page of releasable ones stays whole */
+    struct rd3_vp_cand m[4] = { { 1, 1, 0, 0, 0 }, { 2, 2, 1, 0, 0 }, { 3, 3, 3, 0, 0 }, { 4, 4, 1, 0, 0 } };
+    CHECK(rd3_vp_keep_releasable(m, 4) == 2 && m[0].since == 2 && m[1].since == 4);
+    CHECK(rd3_vp_keep_releasable(m, 2) == 2 && rd3_vp_keep_releasable(m, 0) == 0);
+}
+
 int main(void)
 {
     transitions();
@@ -264,6 +309,7 @@ int main(void)
     fb_reset();
     apdesc();
     policy();
+    paged_trim();
     if (fails) { printf("test_vram_park: %d FAILED\n", fails); return 1; }
     printf("test_vram_park: ok\n");
     return 0;

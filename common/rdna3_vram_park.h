@@ -183,7 +183,21 @@ struct rd3_vp_cand {
     unsigned long long bytes;
     unsigned refs;              /* the core's references to it: 1 the accelerator's own only (no BO), more a BO
                                  * holds it, 0 unknown (an older core kext): never released */
+    void *obj;                  /* the caller's: the parked object and its allocation's handle (keys only, */
+    void *handle;               /* never dereferenced here) */
 };
+
+/* the release pages through the parks (ECC review round 3 of N41: it looked only at the oldest page, so
+ * parks no BO holds behind a page of held ones were never found): once a page's references are known, the
+ * parks a BO holds (refs > 1) or whose count is unknown (0) - never released - leave the page, so the next
+ * page fills their room. Compacts c[0..n) in place to the refs == 1 ones, in their order; returns how many */
+static inline unsigned rd3_vp_keep_releasable(struct rd3_vp_cand *c, unsigned n)
+{
+    unsigned k = 0;
+    for (unsigned i = 0; i < n; i++)
+        if (c[i].refs == 1) c[k++] = c[i];
+    return k;
+}
 
 #define RD3_VP_CAP_MB_DEFAULT 512u   /* debug.rdna3accel_vm_park_cap_mb: parked bytes kept at most (0: no cap) */
 

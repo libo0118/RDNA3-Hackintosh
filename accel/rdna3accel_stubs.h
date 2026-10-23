@@ -100,6 +100,11 @@ public:
     RD3VidMemory *fParkPrev = nullptr, *fParkNext = nullptr;
     bool fParkListed = false;
     unsigned long long fParkSince = 0;
+    /* ECC review round 3 of N41 (gVmParkLock): the address of a park rd3VmParkTrim took out of this object
+     * (0 none). The trim forgets only that address (the object may be re-backed or freed before its release);
+     * the records keyed by this object still describe that allocation and are forgotten by the object itself
+     * at its next allocPhysical or free(), while it is alive */
+    unsigned long long fParkTrimmedPhys = 0;
 
     bool allocPhysical() APPLE_KEXT_OVERRIDE;
     void deallocPhysical() APPLE_KEXT_OVERRIDE;

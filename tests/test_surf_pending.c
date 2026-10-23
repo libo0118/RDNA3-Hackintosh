@@ -366,6 +366,25 @@ static void mark_gate(void)
     CHECK(rd3_sp_mark_gate(1, 1, 0, 501, 11, 10, 0) == RD3_SPG_NOTWS);             /* the identity first */
 }
 
+/* ECC review round 3 of N41: the first display client is sticky while it lives; a second process named
+ * WindowServer that swaps meanwhile is refused (before: last caller won, so a renamed process passed the
+ * gate with one swap); a dead / renamed-away client is replaced */
+static void display_client_sticky(void)
+{
+    int ws = 0;
+    CHECK(rd3_sp_display_client(ws, 148, 0) == RD3_SPDC_TAKE);       /* none yet: the first one is recorded */
+    ws = 148;
+    CHECK(rd3_sp_display_client(ws, 148, 1) == RD3_SPDC_KEEP);       /* its own swaps: nothing */
+    CHECK(rd3_sp_display_client(ws, 777, 1) == RD3_SPDC_REFUSE);     /* an impostor while 148 lives */
+    CHECK(rd3_sp_mark_gate(1, 1, 1, 501, 777, ws, 1) == RD3_SPG_NOTREAL);   /* so its marks stay refused */
+    CHECK(rd3_sp_display_client(ws, 0, 1) == RD3_SPDC_KEEP);         /* no process (a kernel thread) */
+    CHECK(rd3_sp_display_client(ws, -1, 0) == RD3_SPDC_KEEP);
+    CHECK(rd3_sp_display_client(ws, 200, 0) == RD3_SPDC_TAKE);       /* 148 died (WindowServer restarted) */
+    ws = 200;
+    CHECK(rd3_sp_mark_gate(1, 1, 1, 501, 200, ws, 1) == RD3_SPG_OK);
+    CHECK(rd3_sp_display_client(-5, 300, 1) == RD3_SPDC_TAKE);       /* a bogus record is never sticky */
+}
+
 int main(void)
 {
     marks();
@@ -380,6 +399,7 @@ int main(void)
     forgiven_aged();
     timeout_budget();
     mark_gate();
+    display_client_sticky();
     if (fails) { printf("test_surf_pending: %d FAILED\n", fails); return 1; }
     printf("test_surf_pending: ok\n");
     return 0;

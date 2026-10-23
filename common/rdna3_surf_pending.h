@@ -311,6 +311,19 @@ static inline enum rd3_sp_gate rd3_sp_mark_gate(int on, int pending, int named_w
     return RD3_SPG_OK;
 }
 
+/* ECC review round 3 of N41: who becomes the display client. A process named WindowServer that drives the
+ * panel (a validated legacy swap / display-pipe transaction) is recorded when none is (recorded 0) or the
+ * recorded one is gone (recorded_alive 0: no process with that pid, or one no longer named WindowServer);
+ * while the first one lives, another is refused (never last caller wins: a renamed process would otherwise
+ * become the display client, and pass rd3_sp_mark_gate, with one swap). pid 0 / the recorded pid: nothing */
+enum rd3_sp_dc { RD3_SPDC_KEEP = 0, RD3_SPDC_TAKE = 1, RD3_SPDC_REFUSE = 2 };
+static inline enum rd3_sp_dc rd3_sp_display_client(int recorded, int pid, int recorded_alive)
+{
+    if (pid <= 0 || pid == recorded) return RD3_SPDC_KEEP;
+    if (recorded <= 0 || !recorded_alive) return RD3_SPDC_TAKE;
+    return RD3_SPDC_REFUSE;
+}
+
 /* the plane word of RD3K_ESC_SURF_DIRTY carries the GPU marks (accel/rdna3k_abi.h
  * RD3K_SS_PLANE_*): decoded here so the host test checks the same bits */
 #define RD3_SP_PLANE_GPU_MARK 0x80000000u   /* a pending/ready mark, not a dirty mark: bit 0 = pending */

@@ -1542,13 +1542,28 @@ static void rd3VmRelease(RD3VidMemory *m, const struct rd3_vp_alloc *a, unsigned
              (long long)n + 1);
 }
 
+/* ECC review round 3 of N41: a park rd3VmParkTrim released (at 'phys', 0 none) left the records keyed by this
+ * object (the present queue's / latch's object, the swap copy's front, A3, the copy forward's shown buffer):
+ * forgotten here, while the object is alive and before it is backed again. Never by address: the trim forgot
+ * that one, and the framebuffer may have handed it to another vidmem since */
+static void rd3VmTrimmedGone(RD3VidMemory *m, unsigned long long phys, const char *where)
+{
+    if (!phys) return;
+    rd3AccelVidmemGoneAt(m, 0, true);
+    static volatile SInt32 gVmTrimmedGoneLogs;
+    const SInt32 k = OSIncrementAtomic(&gVmTrimmedGoneLogs);
+    if (rd3_log_due((uint64_t)k, 4, 1023))
+        ALOG("RD3VidMemory(%p): its park at 0x%llx was released by the trim -- the records of the object forgotten "
+             "at its %s (%d such)", m, phys, where, (int)k + 1);
+}
+
 /* security review of N41: parks no GEM BO holds any more are given back - every one when VRAM ran out
  * (pressure, an allocPhysical refusal), else the oldest while the parked bytes exceed
  * debug.rdna3accel_vm_park_cap_mb (common/rdna3_vram_park.h rd3_vp_pick_release). A park a BO still holds
  * (the core's count above 1, rdna3VramRefs) is kept: releasing it frees nothing and moves its surface off
  * the memory the plugin draws into. Called without the family's vidmem state locks held by the caller
  * (gVmParkLock is taken here, never across a call into the core). Returns the bytes given back */
-enum { kVmTrimMax = 128 };
+enum { kVmTrimMax = 128, kVmTrimPages = 8 };   /* candidates kept; pages of parks looked at */
 static IOService *rd3AccelCore();
 /* a cap release that gave nothing back (every park held by a BO) is not tried again for a second: it would
  * ask the core about every park at each deallocPhysical */
@@ -1559,44 +1574,52 @@ static unsigned long long rd3VmParkTrim(bool pressure, const char *why)
     const unsigned long long cap = gVmParkCapMb > 0 ? (unsigned long long)gVmParkCapMb << 20 : 0ull;
     if (!l || (!pressure && (!cap || (unsigned long long)gCntVmParkedBytes <= cap))) return 0;
     if (!pressure && mach_absolute_time() < gVmTrimCapIdleUntil) return 0;
-    struct Cand { RD3VidMemory *m; void *handle; };
-    Cand *cs = (Cand *)IOMalloc(sizeof(Cand) * kVmTrimMax);
     struct rd3_vp_cand *vc = (struct rd3_vp_cand *)IOMalloc(sizeof(struct rd3_vp_cand) * kVmTrimMax);
     unsigned char *pick = (unsigned char *)IOMalloc(kVmTrimMax);
     struct rd3_vp_alloc *rel = (struct rd3_vp_alloc *)IOMalloc(sizeof(struct rd3_vp_alloc) * kVmTrimMax);
     RD3VidMemory **relVm = (RD3VidMemory **)IOMalloc(sizeof(RD3VidMemory *) * kVmTrimMax);
-    if (!cs || !vc || !pick || !rel || !relVm) {
+    if (!vc || !pick || !rel || !relVm) {
         ALOG("VRAM parks: no memory for the %s release (%s) -- parks kept", pressure ? "pressure" : "cap", why);
-        if (cs) IOFree(cs, sizeof(Cand) * kVmTrimMax);
         if (vc) IOFree(vc, sizeof(struct rd3_vp_cand) * kVmTrimMax);
         if (pick) IOFree(pick, kVmTrimMax);
         if (rel) IOFree(rel, sizeof(struct rd3_vp_alloc) * kVmTrimMax);
         if (relVm) IOFree(relVm, sizeof(RD3VidMemory *) * kVmTrimMax);
         return 0;
     }
-    /* 1: the oldest parks (the list is in park order) */
-    unsigned n = 0, listed = 0;
-    IOLockLock(l);
-    for (RD3VidMemory *m = gVmParkHead; m; m = m->fParkNext, listed++) {
-        if (n >= kVmTrimMax || !rd3_vp_valid(&m->fPark)) continue;
-        cs[n].m = m; cs[n].handle = m->fPark.handle;
-        vc[n].since = m->fParkSince; vc[n].bytes = m->fPark.bytes; vc[n].refs = 0;
-        n++;
-    }
-    IOLockUnlock(l);
-    /* 2: who holds each (no lock: the core takes its own) */
+    /* 1+2: the parks in park order (oldest first), a page at a time, and who holds each (no lock: the core takes
+     * its own). Held / unknown ones leave the page (rd3_vp_keep_releasable, ECC review round 3): releasable parks
+     * behind kVmTrimMax held ones are found, up to kVmTrimPages pages. A page skips the parks earlier pages
+     * listed by count: parks gone meanwhile may let one be skipped (the next trim sees it), a park listed twice
+     * is released once (step 4 checks its handle under the lock) */
     IOService *core = rd3AccelCore();
     const OSSymbol *sym = core ? OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_REFS) : nullptr;
-    unsigned held = 0, unknown = 0;
+    unsigned n = 0, listed = 0, looked = 0, pages = 0, held = 0, unknown = 0;
     IOReturn qerr = kIOReturnSuccess;
-    for (unsigned i = 0; i < n; i++) {
-        unsigned int refs = 0;
-        const IOReturn qr = sym ? core->callPlatformFunction(sym, false, cs[i].handle, &refs, nullptr, nullptr)
-                                : kIOReturnNotAttached;
-        if (qr == kIOReturnSuccess) vc[i].refs = refs;
-        else qerr = qr;
-        if (vc[i].refs > 1) held++;
-        else if (!vc[i].refs) unknown++;
+    for (bool more = true; more && n < kVmTrimMax && pages < kVmTrimPages; pages++) {
+        const unsigned base = n;
+        unsigned idx = 0;
+        more = false;
+        listed = 0;
+        IOLockLock(l);
+        for (RD3VidMemory *m = gVmParkHead; m; m = m->fParkNext, listed++) {
+            if (!rd3_vp_valid(&m->fPark) || idx++ < looked) continue;
+            if (n >= kVmTrimMax) { more = true; continue; }
+            vc[n].since = m->fParkSince; vc[n].bytes = m->fPark.bytes; vc[n].refs = 0;
+            vc[n].obj = m; vc[n].handle = m->fPark.handle;
+            n++;
+        }
+        IOLockUnlock(l);
+        looked += n - base;
+        for (unsigned i = base; i < n; i++) {
+            unsigned int refs = 0;
+            const IOReturn qr = sym ? core->callPlatformFunction(sym, false, vc[i].handle, &refs, nullptr, nullptr)
+                                    : kIOReturnNotAttached;
+            if (qr == kIOReturnSuccess) vc[i].refs = refs;
+            else qerr = qr;
+            if (vc[i].refs > 1) held++;
+            else if (!vc[i].refs) unknown++;
+        }
+        n = base + rd3_vp_keep_releasable(vc + base, n - base);
     }
     if (sym) sym->release();
     /* 3: which go, 4: taken out of their objects (still parked, the same allocation) */
@@ -1607,19 +1630,23 @@ static unsigned long long rd3VmParkTrim(bool pressure, const char *why)
     for (unsigned i = 0; i < n; i++) {
         if (!pick[i]) continue;
         RD3VidMemory *m = gVmParkHead;
-        while (m && m != cs[i].m) m = m->fParkNext;   /* still listed: alive */
-        if (!m || !rd3_vp_valid(&m->fPark) || m->fPark.handle != cs[i].handle) continue;
+        while (m && m != (RD3VidMemory *)vc[i].obj) m = m->fParkNext;   /* still listed: alive */
+        if (!m || !rd3_vp_valid(&m->fPark) || m->fPark.handle != vc[i].handle) continue;
         rel[nrel] = m->fPark; relVm[nrel] = m; nrel++;
+        m->fParkTrimmedPhys = m->fPark.phys;   /* its own records: forgotten by the object (allocPhysical / free) */
         rd3_vp_clear(&m->fPark);
         rd3VmParkUnlinkLocked(m);
     }
     IOLockUnlock(l);
-    /* 5: given back. The object may go meanwhile: rd3VmRelease uses it only as a key (the tables, the trace) */
+    /* 5: given back. The object may be re-backed or freed (and its address reused) meanwhile: it is a key only
+     * (the trace), and only the released address leaves the tables (kVmForgetAddr, ECC review round 3): nothing
+     * else can hold that address before this release, so a queued / in-flight present or latch record keyed by
+     * it is this allocation's; the records keyed by the object go in its own allocPhysical / free() */
     unsigned long long bytes = 0;
     for (unsigned i = 0; i < nrel; i++) {
         bytes += rel[i].bytes;
-        rd3VmRelease(relVm[i], &rel[i], kVmForgetAll, true, pressure ? "VRAM ran out (no BO holds it)"
-                                                                     : "past the park cap (no BO holds it)", 0,
+        rd3VmRelease(relVm[i], &rel[i], kVmForgetAddr, true, pressure ? "VRAM ran out (no BO holds it)"
+                                                                      : "past the park cap (no BO holds it)", 0,
                      RD3_TRVMV2_NOBO);
     }
     if (!pressure) {
@@ -1633,14 +1660,17 @@ static unsigned long long rd3VmParkTrim(bool pressure, const char *why)
     OSAddAtomic64((SInt64)held, &gCntVmTrimHeld);
     OSAddAtomic64((SInt64)unknown, &gCntVmTrimUnknown);
     const SInt64 k = pressure ? gCntVmTrimPressure : gCntVmTrimCap;
-    if (rd3_log_due((uint64_t)(k - 1), 8, 1023) || (unknown && qerr != kIOReturnSuccess))
-        ALOG("VRAM parks: %s (%s): %u of %u listed park(s) looked at, %u given back (%llu bytes), %u kept (a BO "
-             "holds them), %u kept (the core's count unknown: 0x%x%s); %lld bytes parked before, cap %d MiB "
-             "(vm_park_trimmed %lld)", pressure ? "VRAM ran out -- parks no BO holds released" : "past the cap",
-             why, n, listed, nrel, bytes, held, unknown, (unsigned)qerr,
+    /* an unknown count (an older core kext) is logged the first time, then every 1024th (ECC review round 3) */
+    static volatile SInt64 gVmTrimUnknownRuns;
+    const bool unk = unknown && qerr != kIOReturnSuccess;
+    const SInt64 u = unk ? OSAddAtomic64(1, &gVmTrimUnknownRuns) : 0;
+    if (rd3_log_due((uint64_t)(k - 1), 8, 1023) || (unk && rd3_log_due((uint64_t)u, 1, 1023)))
+        ALOG("VRAM parks: %s (%s): %u of %u listed park(s) looked at (%u page(s)), %u given back (%llu bytes), %u "
+             "kept (a BO holds them), %u kept (the core's count unknown: 0x%x%s); %lld bytes parked before, cap %d "
+             "MiB (vm_park_trimmed %lld)", pressure ? "VRAM ran out -- parks no BO holds released" : "past the cap",
+             why, looked, listed, pages, nrel, bytes, held, unknown, (unsigned)qerr,
              qerr == kIOReturnUnsupported ? ": an older core kext without rdna3VramRefs" : "", (long long)parked,
              gVmParkCapMb, (long long)gCntVmTrimmed);
-    IOFree(cs, sizeof(Cand) * kVmTrimMax);
     IOFree(vc, sizeof(struct rd3_vp_cand) * kVmTrimMax);
     IOFree(pick, kVmTrimMax);
     IOFree(rel, sizeof(struct rd3_vp_alloc) * kVmTrimMax);
@@ -1675,7 +1705,10 @@ bool RD3VidMemory::allocPhysical()
         struct rd3_vp_alloc rel;
         const enum rd3_vp_take_res t = rd3_vp_take(&v, want, &rel);
         rd3VmStore(this, &v);
+        const unsigned long long trimmed = fParkTrimmedPhys;
+        fParkTrimmedPhys = 0;
         if (pl) { rd3VmParkSyncLocked(this, false); IOLockUnlock(pl); }
+        rd3VmTrimmedGone(this, trimmed, "allocPhysical");
         if (t == RD3_VPT_REUSE) {
             const SInt64 n = OSAddAtomic64(1, &gCntVmUnparked);
             OSAddAtomic64(-(SInt64)fBytes, &gCntVmParkedBytes);
@@ -1776,14 +1809,17 @@ void RD3VidMemory::deallocPhysical()
     struct rd3_vp_alloc rel;
     const enum rd3_vp_drop_res d = rd3_vp_drop(&v, park ? 1 : 0, &rel);
     rd3VmStore(this, &v);
-    if (ll) { rd3VmParkSyncLocked(this, d == RD3_VPD_PARKED || d == RD3_VPD_REPARKED); IOLockUnlock(ll); }
-    if (d == RD3_VPD_PARKED || d == RD3_VPD_REPARKED) {
+    /* ECC review round 3 of N41: what was parked, copied under the lock (v.park) and counted before the
+     * unlock: a trim may release and clear fPark right after it (the parked bytes would go negative) */
+    const bool parkedNow = d == RD3_VPD_PARKED || d == RD3_VPD_REPARKED;
+    if (parkedNow) OSAddAtomic64((SInt64)v.park.bytes, &gCntVmParkedBytes);
+    if (ll) { rd3VmParkSyncLocked(this, parkedNow); IOLockUnlock(ll); }
+    if (parkedNow) {
         const SInt64 n = OSAddAtomic64(1, &gCntVmParked);
-        OSAddAtomic64((SInt64)fPark.bytes, &gCntVmParkedBytes);
         if (rd3_log_due((uint64_t)n, 8, 1023))
             ALOG("RD3VidMemory::deallocPhysical(%p): phys 0x%llx (%llu bytes, generation %llu) PARKED, not freed: "
                  "the next allocPhysical hands it back (vm_parked %lld; debug.rdna3accel_vm_sticky=0 frees)", this,
-                 fPark.phys, fPark.bytes, fPark.gen, (long long)n + 1);
+                 v.park.phys, v.park.bytes, v.park.gen, (long long)n + 1);
     }
     if (d == RD3_VPD_REPARKED) {   /* never expected: allocPhysical empties the park before anything is live */
         const SInt64 n = OSAddAtomic64(1, &gCntVmReparked);
@@ -1794,7 +1830,7 @@ void RD3VidMemory::deallocPhysical()
     } else if (d == RD3_VPD_FREED) {
         rd3VmRelease(this, &rel, kVmForgetNone, false, "deallocPhysical");
     }
-    if (d == RD3_VPD_PARKED || d == RD3_VPD_REPARKED) (void)rd3VmParkTrim(false, "a park");   /* the cap */
+    if (parkedNow) (void)rd3VmParkTrim(false, "a park");   /* the cap */
 }
 
 /* N41: what this object still holds goes with it. The live part counts as vm_free_live: the family freed
@@ -1816,7 +1852,10 @@ void RD3VidMemory::free()
         struct rd3_vp_alloc rel[2];
         const unsigned m = rd3_vp_free(&v, rel);
         rd3VmStore(this, &v);
+        const unsigned long long trimmed = fParkTrimmedPhys;
+        fParkTrimmedPhys = 0;
         if (pl) { rd3VmParkUnlinkLocked(this); IOLockUnlock(pl); }
+        rd3VmTrimmedGone(this, trimmed, "free");
         if (m & 1u) {
             const SInt64 n = OSAddAtomic64(1, &gCntVmFreeLive);
             if (rd3_log_due((uint64_t)n, 8, 1023))
@@ -2041,11 +2080,12 @@ IOReturn RD3DisplayPipe::performTransaction(IOAccelDisplayPipeTransaction2 *txn)
 {
     if (!gRd3Iop) return (IOReturn)0xe00002c7;
     if (!txn) RD3IOP_FAIL(kIOReturnBadArgument, "performTransaction(NULL)");
-    rd3AccelSurfNoteDisplayClient("display-pipe transaction");   /* N41 security review: whose marks are taken */
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     unsigned head = 0;
     IOService *fb = a ? a->pipeFramebuffer(this, &head) : nullptr;
     if (!fb) RD3IOP_FAIL(kIOReturnNotAttached, "no accelerator, or pipe %p drives a framebuffer that is none of ours", this);
+    /* N41 security review: whose marks are taken - only a transaction that drives one of our heads (round 3) */
+    rd3AccelSurfNoteDisplayClient("display-pipe transaction");
 
     IOSurface *s  = txn->getPlaneIOSurface(0, 0);
     OSObject  *ro = txn->getPlaneResource(0, 0);
@@ -2620,20 +2660,48 @@ static volatile SInt64 gCntSurfMarkPend, gCntSurfMarkReady, gCntSurfMarkLate, gC
  * of the first mark taken, for the report (debug.rdna3accel_surface_wait_ws_pid / _mark_pid / _mark_uid) */
 static volatile SInt32 gSurfWsPid;
 static int gSurfMarkPid, gSurfMarkUid = -1;
+/* ECC review round 3 of N41: the first display client is sticky while it lives (rd3_sp_display_client): it
+ * is replaced only when no process has its pid any more, or that process is no longer named WindowServer;
+ * a second WindowServer meanwhile is refused and counted (debug.rdna3accel_surface_wait_ws_pid_refused).
+ * Called only once the swap / transaction was validated (it drives one of our heads / names our VRAM),
+ * never with a spinlock held (proc_name takes the proc list lock) */
+static volatile SInt64 gCntSurfWsPidRefused, gCntSurfWsPidSet;
 static void rd3AccelSurfNoteDisplayClient(const char *path)
 {
     const int pid = proc_selfpid();
-    if (pid <= 0 || pid == gSurfWsPid) return;
+    const SInt32 was = gSurfWsPid;
+    if (pid <= 0 || pid == (int)was) return;
     char nm[32];
     nm[0] = 0;
     proc_selfname(nm, (int)sizeof nm);
     if (strcmp(nm, "WindowServer") != 0) return;
-    const SInt32 was = gSurfWsPid;
-    if (!OSCompareAndSwap((UInt32)was, (UInt32)pid, (volatile UInt32 *)&gSurfWsPid)) return;
+    /* proc_name finds the process (proc_find / proc_rele inside) and leaves the buffer empty when none has the
+     * pid; a pid reused by another program is no longer WindowServer */
+    char wnm[32];
+    wnm[0] = 0;
+    if (was > 0) proc_name((int)was, wnm, (int)sizeof wnm);
+    const bool alive = was > 0 && strcmp(wnm, "WindowServer") == 0;
     const unsigned uid = (unsigned)kauth_cred_getuid(kauth_cred_get());
-    ALOG("surface wait: WindowServer's display client is pid %d, uid %u (%s; pid before %d; seen in its %s): its "
-         "GPU marks are taken", pid, uid, uid == RD3_SP_WS_UID ? "_windowserver" : "NOT _windowserver's 88: marks "
-         "are taken from this pid only", (int)was, path);
+    switch (rd3_sp_display_client((int)was, pid, alive ? 1 : 0)) {
+    case RD3_SPDC_KEEP: return;
+    case RD3_SPDC_REFUSE: {
+        const SInt64 n = OSAddAtomic64(1, &gCntSurfWsPidRefused);
+        if (rd3_log_due((uint64_t)n, 8, 1023))
+            ALOG("surface wait: a second process named WindowServer, pid %d uid %u, drives the panel (its %s) while "
+                 "the display client pid %d lives: REFUSED as the display client (its marks are taken only with "
+                 "_windowserver's uid %u; surface_wait_ws_pid_refused %lld)", pid, uid, path, (int)was,
+                 RD3_SP_WS_UID, (long long)n + 1);
+        return;
+    }
+    case RD3_SPDC_TAKE: break;
+    }
+    if (!OSCompareAndSwap((UInt32)was, (UInt32)pid, (volatile UInt32 *)&gSurfWsPid)) return;   /* another won */
+    const SInt64 k = OSAddAtomic64(1, &gCntSurfWsPidSet);
+    if (rd3_log_due((uint64_t)k, 8, 1023))
+        ALOG("surface wait: WindowServer's display client is pid %d, uid %u (%s; pid before %d%s; seen in its %s): "
+             "its GPU marks are taken (display client #%lld)", pid, uid,
+             uid == RD3_SP_WS_UID ? "_windowserver" : "NOT _windowserver's 88: marks are taken from this pid only",
+             (int)was, was > 0 ? ", no longer running" : "", path, (long long)k + 1);
 }
 static void *rd3AccelSurfaceRoot(void);
 static unsigned rd3AccelSurfGpuMark(unsigned id, bool pending, task_t task)
@@ -2881,6 +2949,7 @@ RD3ACCEL_CNT(rdna3accel_surface_wait_notown,    gCntSurfMarkNotOwn, "N41: pendin
 RD3ACCEL_CNT(rdna3accel_surface_wait_notreal,   gCntSurfMarkNotReal, "N41 security review: marks refused: named WindowServer, neither uid 88 nor the display client's pid");
 RD3ACCEL_CNT(rdna3accel_surface_wait_moot,      gCntSurfMarkMoot,  "N41 security review: pending marks refused: no WindowServer surface can be VRAM (rdna3a3ws=0, rdna3a3display=0, no IOP flip)");
 RD3ACCEL_CNT(rdna3accel_surface_wait_skipped,   gCntSurfSkipped,   "N41 security review: page-offs / IOP flips not waited: the timeout budget was spent");
+RD3ACCEL_CNT(rdna3accel_surface_wait_ws_pid_refused, gCntSurfWsPidRefused, "N41 review round 3: a second WindowServer refused as the display client while the first one lives");
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_surface_wait_ws_pid, CTLFLAG_RD | CTLFLAG_LOCKED, (int *)&gSurfWsPid, 0,
            "N41 security review: WindowServer's display client pid (its legacy swaps / display-pipe transactions), 0 none");
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_surface_wait_mark_pid, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfMarkPid, 0,
@@ -2956,6 +3025,7 @@ static void rd3AccelInstallSysctlPark(void)
     /* the security review and round-2 review of N41 */
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_notreal); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_moot);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_skipped); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_ws_pid);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_ws_pid_refused);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_mark_pid); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_mark_uid);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_aged); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_ghosts);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_starved);
@@ -7109,12 +7179,14 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
      * swaps); modes 1/2 flip while the SDMA breaker is open */
     int mode = gSwapMode;
     rd3AccelScApplyAll();   /* the panel moves posted since the last holder of the lock */
-    rd3AccelSurfNoteDisplayClient("legacy swap");   /* N41 security review: whose GPU marks are taken */
     rd3AccelCopyForwardCheck(a1);
     rd3AccelCopyForwardCheck(a2);
     /* the head framebuffer resources (the fronts): which argument is one */
     IOAccelResource2 *pipeRes[kRd3MaxFB] = {};
     RD3VidMemory *v1 = rd3res_vidmem(a1), *v2 = rd3res_vidmem(a2);
+    /* N41 security review: whose GPU marks are taken - only a swap that names our VRAM (round 3), before the
+     * head table's spinlock (proc_name sleeps) */
+    if (v1 || v2) rd3AccelSurfNoteDisplayClient("legacy swap");
     unsigned frontHead = kRd3MaxFB;
     int front = 0;
     unsigned long long frontPhys = 0;

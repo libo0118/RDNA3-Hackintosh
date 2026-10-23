@@ -511,7 +511,9 @@ N41_SW_KEYS = ("surface_wait", "surface_wait_ms", "surface_wait_maxus", "surface
                # security review / round-2 review of N41: the mark gate, the timeout budget, the forgiven marks
                "surface_wait_notreal", "surface_wait_moot", "surface_wait_skipped", "surface_wait_starved",
                "surface_wait_aged", "surface_wait_ghosts", "surface_wait_ws_pid", "surface_wait_mark_pid",
-               "surface_wait_mark_uid")
+               "surface_wait_mark_uid",
+               # ECC review round 3 of N41: the first display client is sticky while it lives
+               "surface_wait_ws_pid_refused")
 N41_PARKED_BYTES_WARN = 256 << 20   # VRAM parked at the end of a run that says "parks hold VRAM others may need"
 N41_UNACCOUNTED_WARN = 64           # pending marks whose ready never came (more than one frame's surfaces in flight)
 
@@ -714,6 +716,11 @@ def n41_rows(sv, log, pluginlog="", cdlog=""):
                      "(_windowserver) nor the display client's pid %d (a process posing as WindowServer, or the real "
                      "one under another uid before its first swap; the kernel's 'neither _windowserver' lines)" % (
                          g("surface_wait_notreal"), g("surface_wait_ws_pid", 0))))
+    if g("surface_wait_ws_pid_refused", 0):
+        rows.append(("WARN", "surface wait", "%d legacy swap(s) / display-pipe transaction(s) of a SECOND process named "
+                     "WindowServer while the display client pid %d lived: refused as the display client (a process "
+                     "posing as WindowServer, or two WindowServers; the kernel's 'REFUSED as the display client' "
+                     "lines)" % (g("surface_wait_ws_pid_refused"), g("surface_wait_ws_pid", 0))))
     if g("surface_wait_mark_uid", -1) >= 0:
         uid = g("surface_wait_mark_uid")
         rows.append(("INFO" if uid == 88 else "WARN", "surface wait",

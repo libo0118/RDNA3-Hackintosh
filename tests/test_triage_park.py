@@ -167,6 +167,9 @@ check(any(lv == "WARN" and "could not look up" in t for lv, _, t in tr.n41_rows(
 # round-2 review: lost readies (ghosts, aged); the parks under pressure / past the cap
 r = tr.n41_rows(dump(**dict(GOOD, surface_wait_notreal=5)) + A3WS, CUR)
 check(any(lv == "WARN" and "5 mark(s) from a process named WindowServer REFUSED" in t for lv, _, t in r), "notreal WARN")
+r = tr.n41_rows(dump(**dict(GOOD, surface_wait_ws_pid_refused=3)) + A3WS, CUR)
+check(any(lv == "WARN" and "3 legacy swap(s) / display-pipe transaction(s) of a SECOND process named WindowServer"
+          in t and "pid 148 lived" in t for lv, _, t in r), "ws_pid_refused WARN (%s)" % r)
 r = tr.n41_rows(dump(**GOOD) + A3WS, CUR)
 check(any(lv == "INFO" and "pid 148 uid 88 (_windowserver" in t for lv, _, t in r), "the marking uid INFO (%s)" % r)
 r = tr.n41_rows(dump(**dict(GOOD, surface_wait_mark_uid=501)) + A3WS, CUR)
