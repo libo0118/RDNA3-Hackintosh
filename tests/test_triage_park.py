@@ -6,6 +6,11 @@ another process (WARN); counters missing from a dump of these sources (WARN, the
 collector's grep) against an older kext (INFO) - never silence. The trace side: an
 imported surface whose VRAM came back elsewhere (the 2026-10-17d pattern, WARN) against
 one that was parked and handed back (INFO only).
+ECC review of N41: WindowServer's plugin lines read from 24-log-coredisplay.txt (every gate, ENOSYS for good,
+back-offs, refusals, early readies, the stats line), MOOT with rdna3a3ws=0, the parking's verdicts (never handed
+back, nothing parked, much parked at the end, release failures, alloc/dealloc not a leak), lost readies, cleared and
+IOP flip waits apart, missing keys named, the SUMMARY rows from a synthetic archive; the trace: no H-VMMOVE for an
+object address reused after free() (a grow still moves), plain frees in H-VMPARK, IOP waits apart.
 Run: python3 -I -B tests/test_triage_park.py"""
 import os
 import sys
@@ -38,8 +43,13 @@ GOOD = dict(vm_sticky=1, vm_parked=40, vm_unparked=38, vm_park_released=2, vm_pa
             vm_refused=0, surface_wait=1, surface_wait_pending=100, surface_wait_ready=100, surface_wait_waits=4,
             surface_wait_maxus=900, surface_wait_timeouts=0, surface_wait_notws=0, surface_wait_evicted=0,
             surface_wait_saturated=0)
+# ECC review of N41: every key the accelerator of these sources exports
+GOOD.update(dict((k, 0) for k in tr.N41_VM_KEYS + tr.N41_SW_KEYS if k not in GOOD))
+GOOD.update(vm_alloc=50, vm_dealloc=45, vm_released_bytes=5 << 20, surface_wait_ms=100, surface_wait_late=0,
+            surface_wait_us=2000, surface_wait_busy=1)
+A3WS = "debug.rdna3accel_a3ws: 1\n"
 
-r = tr.n41_rows(dump(**GOOD), CUR)
+r = tr.n41_rows(dump(**GOOD) + A3WS, CUR)
 check(set(levels(r)) == {"INFO"}, "a good run is INFO only: %s" % r)
 check(any("40 parked, 38 handed back" in t for _, _, t in r), "the park counts are printed: %s" % r)
 
@@ -59,11 +69,47 @@ bad = dict(GOOD, surface_wait_ready=0)
 check("FAIL" in levels(tr.n41_rows(dump(**bad), CUR), "surface wait"), "pending marks never released FAIL")
 bad = dict(GOOD, surface_wait_notws=1)
 check("WARN" in levels(tr.n41_rows(dump(**bad), CUR), "surface wait"), "a mark from another process is a WARN")
+# silent-failure review 1 / 2: no marks taken - MOOT with rdna3a3ws=0, else a WARN with WindowServer's plugin's
+# reason, read from ITS log (24-log-coredisplay.txt), not 26-log-metal-plugin.txt
 bad = dict(GOOD, surface_wait_pending=0, surface_wait_ready=0)
-r = tr.n41_rows(dump(**bad), CUR, "surface wait (N41): WindowServer's IOSurface VRAM writes are marked newest after "
-                "the GPU only (old order) (libdrm_xnu marks ABSENT, ...)")
-check(levels(r, "surface wait") == ["INFO"] and any("the plugin says" in t for _, _, t in r),
-      "no marks taken: INFO with the plugin's reason: %s" % r)
+CD_OLD = ("2026-10-23 10:00:00.000 Df WindowServer[148:9a2] (RDNA3MTLDriver) NVMTL: surface wait (N41): WindowServer's "
+          "IOSurface VRAM writes are marked newest after the GPU only (old order) (libdrm_xnu marks ABSENT, try-lock "
+          "dirty present, dirty present; NVK surface dirty absent; headless 0; NVMTL_SURFACE_WAIT=unset)\n")
+r = tr.n41_rows(dump(**bad) + "debug.rdna3accel_a3ws: 0\n", CUR, "", CD_OLD)
+check(any(lv == "INFO" and t.startswith("MOOT: rdna3a3ws=0") for lv, _, t in r), "a3ws 0, no marks: MOOT (%s)" % r)
+r = tr.n41_rows(dump(**bad) + A3WS, CUR, "", CD_OLD)
+check(any(lv == "WARN" and "libdrm_xnu marks ABSENT" in t for lv, n, t in r if n == "surface wait"),
+      "a3ws 1, no marks: WARN naming the gate from 24-log-coredisplay.txt (%s)" % r)
+r = tr.n41_rows(dump(**bad) + A3WS, CUR, CD_OLD, "")
+check(any("libdrm_xnu marks ABSENT" in t for _, _, t in r), "the other processes' log is read too")
+CD_ENV = CD_OLD.replace("libdrm_xnu marks ABSENT", "libdrm_xnu marks present").replace("=unset", "=0")
+r = tr.n41_rows(dump(**bad) + A3WS, CUR, "", CD_ENV)
+check(any("NVMTL_SURFACE_WAIT=0" in t for lv, _, t in r if lv == "WARN"), "NVMTL_SURFACE_WAIT=0 named (%s)" % r)
+CD_ON = ("WindowServer[148:9a2] (RDNA3MTLDriver) NVMTL: surface wait (N41): WindowServer's IOSurface VRAM writes are "
+         "marked pending + newest at commit, ready after the GPU (the kernel's page-off waits) (libdrm_xnu marks "
+         "present, try-lock dirty present, dirty present; NVK surface dirty absent; headless 0; NVMTL_SURFACE_WAIT=unset)\n")
+CD_GOOD = CD_ON + ("WindowServer[148:9a2] (RDNA3MTLDriver) NVMTL: surface wait (N41): pending mark of surface 77 refused "
+                   "(errno 6, Device not configured) - the kext has no marks: old order for good (1 back-off(s))\n")
+r = tr.n41_rows(dump(**bad) + A3WS, CUR, "", CD_GOOD)
+check(any(lv == "WARN" and "old order for good" in t for lv, _, t in r), "ENOSYS: old order for good WARN (%s)" % r)
+CD_BACK = CD_ON + "".join("WindowServer[148:9a2] NVMTL: surface wait (N41): pending mark of surface %d refused (errno 19, "
+                          "Operation not supported by device) - old order, asked again in 1 s (%d back-off(s))\n" % (i, i)
+                          for i in (1, 2)) + "WindowServer[148:9a2] NVMTL: surface wait (N41): marks taken again\n"
+r = tr.n41_rows(dump(**bad) + A3WS, CUR, "", CD_BACK)
+check(any(lv == "WARN" and "backed off 2 time(s)" in t and "errno 19" in t and "taken again 1" in t for lv, _, t in r),
+      "back-offs counted with their errno (%s)" % r)
+CD_REF = CD_ON + "WindowServer[148:9a2] NVMTL: surface wait (N41): ready mark of surface 9 refused: errno 2 (No such file or directory) (1 so far)\n"
+r = tr.n41_rows(dump(**GOOD) + A3WS, CUR, "", CD_REF)
+check(any(lv == "WARN" and "ready mark of surface 9 refused" in t for lv, _, t in r), "a refused mark WARNs (%s)" % r)
+CD_STATS = CD_ON + ("WindowServer[148:9a2] NVMTL: surface wait (N41): stats (every 4096th): 4096 command buffer(s) marked, "
+                    "9000 pending mark(s) taken, 0 refused (0 back-off(s)), 12 surface write(s) in system memory not "
+                    "marked, 0 command buffer(s) while backed off, 3 ready mark(s) sent before the surface's dirty mark\n")
+r = tr.n41_rows(dump(**GOOD) + A3WS, CUR, "", CD_STATS)
+check(any(lv == "WARN" and "3 ready mark(s) before" in t for lv, _, t in r), "early readies WARN (%s)" % r)
+check(any(lv == "INFO" and "9000 pending mark(s) taken" in t for lv, _, t in r), "the stats line is printed (%s)" % r)
+r = tr.n41_rows(dump(**bad) + A3WS, CUR, "", "")
+check(any(lv == "WARN" and "no 'surface wait (N41)' decision line" in t for lv, _, t in r),
+      "no decision line at all: WARN (%s)" % r)
 # missing counters: a WARN for these sources, INFO for an older kext
 r = tr.n41_rows("debug.rdna3accel_a3display: 1\n", CUR)
 check(levels(r) == ["WARN"], "these sources without vm_sticky in the dump: WARN (%s)" % r)
@@ -72,6 +118,47 @@ check(levels(r) == ["INFO"], "an older kext: INFO (%s)" % r)
 nowait = dict(GOOD)
 del nowait["surface_wait"]
 check("WARN" in levels(tr.n41_rows(dump(**nowait), CUR), "surface wait"), "surface_wait missing: WARN")
+# silent-failure review 3: a missing key is named
+nokey = dict(GOOD)
+del nokey["surface_wait_iop_waits"], nokey["vm_release_failed"]
+r = tr.n41_rows(dump(**nokey) + A3WS, CUR)
+check(any(lv == "WARN" and "surface_wait_iop_waits" in t and "vm_release_failed" in t for lv, n, t in r
+          if n == "N41 counters"), "missing keys named (%s)" % r)
+check(not [x for x in tr.n41_rows(dump(**nokey) + A3WS, OLD) if x[1] == "N41 counters"], "not for an older kext")
+# silent-failure review 3: the parking's own verdicts
+bad = dict(GOOD, vm_unparked=0)
+check(any(lv == "WARN" and "NONE handed back" in t for lv, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)),
+      "parks never handed back WARN")
+bad = dict(GOOD, vm_parked=0, vm_unparked=0)
+check(any(lv == "WARN" and "NOTHING parked" in t for lv, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)),
+      "sticky on, deallocs, nothing parked WARN")
+bad = dict(GOOD, vm_parked_bytes=300 << 20)
+check(any(lv == "WARN" and "300 MiB still parked" in t for lv, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)),
+      "much VRAM parked at the end WARN")
+# cpp-reviewer L3: vm_alloc / vm_dealloc do not balance with parking - said as INFO, never a leak verdict
+r = tr.n41_rows(dump(**GOOD) + A3WS, CUR)
+check(any(lv == "INFO" and "do not balance with parking" in t for lv, _, t in r), "the alloc/dealloc note (%s)" % r)
+# silent-failure review 6: a release the framebuffer refused
+bad = dict(GOOD, vm_release_failed=2)
+check(any(lv == "WARN" and "NOT take back" in t for lv, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)),
+      "release failures WARN")
+# silent-failure review 5 / 7: lost readies, cleared waits, IOP flip waits apart, notown
+bad = dict(GOOD, surface_wait_pending=1000, surface_wait_ready=800, surface_wait_late=20, surface_wait_evicted=2)
+check(any(lv == "WARN" and "178 pending mark(s) without a ready" in t for lv, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)),
+      "lost readies WARN")
+bad = dict(GOOD, surface_wait_ready=95, surface_wait_late=5)
+check(not any("without a ready" in t for _, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)), "late readies account")
+bad = dict(GOOD, surface_wait_cleared=2, surface_wait_iop_cleared=1)
+check(any(lv == "WARN" and "3 wait(s) cleared" in t for lv, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)),
+      "cleared waits WARN")
+bad = dict(GOOD, surface_wait_iop_timeouts=4)
+check(any(lv == "WARN" and "4 IOP flip(s) gave up" in t for lv, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)),
+      "IOP flip timeouts WARN apart")
+bad = dict(GOOD, surface_wait_iop_waits=7)
+check(any("IOP flips: 7 wait(s)" in t for _, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)), "IOP waits printed")
+bad = dict(GOOD, surface_wait_notown=3)
+check(any(lv == "WARN" and "could not look up" in t for lv, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)),
+      "notown WARN")
 
 
 # ---- the trace: rdna3_trace.vram_moves on synthetic events ----
@@ -84,6 +171,8 @@ class Ev:
         self.obj = kw.get("obj", 0)
         self.pa = kw.get("pa", 0)
         self.v0 = kw.get("v0", 0)
+        self.v1 = kw.get("v1", 0)
+        self.v2 = kw.get("v2", 0)
         self.v3 = kw.get("v3", 0)
         self.seq = kw.get("seq", 0)
         self.head = 0xff
@@ -115,10 +204,106 @@ rows = rt.h_vram_moved(parked)
 check(set(lvl for lvl, _, _ in rows) == {"INFO"}, "parking and a wait in time are INFO only: %s" % rows)
 late = Trace(parked.events + [Ev("PAGEOFF", obj=0x5, flags=rt.PAGEOFF_WAIT_TIMEOUT, v3=100000, seq=9)])
 check("WARN" in [lvl for lvl, n, _ in rt.h_vram_moved(late) if n == "H-SURFWAIT"], "a wait timeout WARNs")
+# silent-failure review 12: the vidmem freed (free(): OBJ_GONE), its address reused by a new vidmem that is
+# imported and gets new VRAM - not a move
+reuse = Trace([Ev("VMALLOC", obj=VM, pa=0x1000), Ev("SURFGEM", arg=1, obj=VM, pa=0x1000, v0=37),
+               Ev("VMFREE", obj=VM, pa=0x1000, flags=rt.VM_PARKED),
+               Ev("VMFREE", obj=VM, pa=0x1000, flags=rt.VM_PARK_GONE | rt.VM_OBJ_GONE),
+               Ev("VMALLOC", obj=VM, pa=0x5000), Ev("SURFGEM", arg=1, obj=VM, pa=0x5000, v0=38)])
+m = rt.vram_moves(reuse)
+check(not m["moved"] and m["obj_gone"] == 1 and m["imported"] == 2, "an object freed and its address reused: %s" % m)
+check("H-VMMOVE" not in [n for _, n, _ in rt.h_vram_moved(reuse)], "no H-VMMOVE for a reused address")
+# the same with sticky 0 (a plain free, then free() with nothing held: OBJ_GONE alone)
+reuse0 = Trace([Ev("VMALLOC", obj=VM, pa=0x1000), Ev("SURFGEM", arg=1, obj=VM, pa=0x1000, v0=37),
+                Ev("VMFREE", obj=VM, pa=0x1000), Ev("VMFREE", obj=VM, pa=0, flags=rt.VM_OBJ_GONE),
+                Ev("VMALLOC", obj=VM, pa=0x5000)])
+check(not rt.vram_moves(reuse0)["moved"], "sticky 0 then free(): no move")
+# a grow (a park released, not the object) is still a move
+grow = Trace([Ev("VMALLOC", obj=VM, pa=0x1000), Ev("SURFGEM", arg=1, obj=VM, pa=0x1000, v0=37),
+              Ev("VMFREE", obj=VM, pa=0x1000, flags=rt.VM_PARKED), Ev("VMFREE", obj=VM, pa=0x1000, flags=rt.VM_PARK_GONE),
+              Ev("VMALLOC", obj=VM, pa=0x9000)])
+check(len(rt.vram_moves(grow)["moved"]) == 1, "a grow still moves: %s" % rt.vram_moves(grow))
+# silent-failure review 3: frees without parking get an H-VMPARK row (WARN for an imported surface's VRAM)
+rows = rt.h_vram_moved(moved)
+check(any(lv == "WARN" and n == "H-VMPARK" and "freed without parking" in t for lv, n, t in rows),
+      "plain frees of an imported surface: H-VMPARK WARN (%s)" % rows)
+plain = Trace([Ev("VMALLOC", obj=0x99, pa=0x2000), Ev("VMFREE", obj=0x99, pa=0x2000)])
+check([lv for lv, n, _ in rt.h_vram_moved(plain) if n == "H-VMPARK"] == ["INFO"], "plain frees elsewhere: INFO")
+# silent-failure review 7: IOP flip waits apart, cleared waits WARN
+iop = Trace([Ev("PAGEOFF", arg=2, obj=0, flags=rt.PAGEOFF_IOP | rt.PAGEOFF_WAITED, v3=500),
+             Ev("PAGEOFF", obj=0x5, flags=rt.PAGEOFF_WAIT_CLEARED, v3=40000, seq=4)])
+rows = rt.h_vram_moved(iop)
+check(any(lv == "INFO" and "1 IOP flip(s) waited" in t for lv, _, t in rows), "IOP waits apart (%s)" % rows)
+check(not any("page-off(s) waited" in t for _, _, t in rows), "an IOP wait is not a page-off wait (%s)" % rows)
+check(any(lv == "WARN" and "1 page-off(s) had their wait cleared" in t for lv, _, t in rows), "cleared WARN")
+check("IOP flip wait, IOSurface" in rt._fmt_event(iop, Ev("PAGEOFF", arg=2, flags=rt.PAGEOFF_IOP | 1, v3=5), 1.0,
+                                                  "PAGEOFF"), "the IOP wait is decoded")
+check("CLEARED" in rt._fmt_event(iop, Ev("PAGEOFF", arg=1, flags=rt.PAGEOFF_WAIT_CLEARED, v3=5), 1.0, "PAGEOFF"),
+      "a cleared page-off wait is decoded")
+check("(the object freed)" in rt._fmt_event(reuse, Ev("VMFREE", obj=VM, flags=rt.VM_OBJ_GONE), 1.0, "VMFREE"),
+      "OBJ_GONE is decoded")
 ev = Ev("VMFREE", obj=VM, pa=0x1000, flags=rt.VM_PARKED, v0=8100)
 check("PARKED, not freed" in rt._fmt_event(parked, ev, 1.0, "VMFREE"), "VMFREE parked is decoded")
 ev = Ev("VMALLOC", obj=VM, pa=0x1000, flags=rt.VM_PARKED, v0=8100)
 check("the PARKED one handed back" in rt._fmt_event(parked, ev, 1.0, "VMALLOC"), "VMALLOC reuse is decoded")
+
+# silent-failure review 4: the N41 WARN / FAIL rows (and MOOT) reach the SUMMARY, from a synthetic report archive
+import contextlib  # noqa: E402
+import io  # noqa: E402
+import tarfile  # noqa: E402
+import tempfile  # noqa: E402
+
+
+def archive(dirname, members):
+    path = os.path.join(dirname, "rdna3-report-2026-10-23-0000.tar.gz")
+    with tarfile.open(path, "w:gz") as tar:
+        for name, text in members.items():
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return path
+
+
+with tempfile.TemporaryDirectory() as d:
+    sv = dump(**dict(GOOD, surface_wait_ready=0, surface_wait_timeouts=3)) + A3WS
+    path = archive(d, {"01-boot-args.txt": "boot-args rdna3accel=1 rdna3lvl=12\n", "29-surface-vram.txt": sv,
+                       "20-log-rdna3.txt": CUR, "24-log-coredisplay.txt": CD_ON})
+    rows = tr.n41_lines(path, "rdna3accel=1")
+    check(any(lv == "FAIL" and "NO ready mark" in t for lv, _, t in rows), "n41_lines reads the archive (%s)" % rows)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        tr.summary(path)
+    out = buf.getvalue()
+    check("N41: surface wait" in out and "FAIL" in out and "gave up waiting" in out,
+          "the SUMMARY holds the N41 FAIL / WARN rows:\n%s" % out)
+    check("parked, " not in out, "INFO rows stay out of the SUMMARY")
+    sv = dump(**dict(GOOD, surface_wait_pending=0, surface_wait_ready=0)) + "debug.rdna3accel_a3ws: 0\n"
+    path = archive(d, {"01-boot-args.txt": "boot-args rdna3accel=1\n", "29-surface-vram.txt": sv,
+                       "20-log-rdna3.txt": CUR})
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        tr.summary(path)
+    check("MOOT: rdna3a3ws=0" in buf.getvalue(), "MOOT reaches the SUMMARY:\n%s" % buf.getvalue())
+
+# silent-failure review 11: collect.sh keeps the N41 boot lines in a budget of their own - its grep block run on a
+# kernel log whose boot lines are followed by 300 later 'surface wait' lines
+import subprocess  # noqa: E402
+
+col = open(os.path.join(ROOT, "tools", "macos", "collect.sh")).read()
+blk = col[col.index("# DRIVER-PLAN N41 with a budget of its own"):]
+blk = blk[:blk.index("\n    done")]
+with tempfile.TemporaryDirectory() as d:
+    f = os.path.join(d, "20-log-rdna3.txt")
+    with open(f, "w") as fh:
+        fh.write("RDNA3Accelerator: vm sticky: 1 = deallocPhysical parks a surface's VRAM\n")
+        fh.write("RDNA3Accelerator: surface wait: 1 = WindowServer's pending GPU writes are marked -- MOOT: rdna3a3ws=0\n")
+        for i in range(300):
+            fh.write("RDNA3Accelerator: surface wait: page-off of surface %d waited 10 us\n" % i)
+    got = subprocess.run(["sh", "-c", blk.replace('"$dir/$f"', '"%s"' % f)], capture_output=True, text=True).stdout
+    check("vm sticky: 1 =" in got and "surface wait: 1 =" in got and "MOOT" in got,
+          "collect.sh's N41 block keeps the boot lines: %s" % got[:300])
+    check(got.count("page-off of surface") == 80 and "surface 299 waited" in got, "and the last 80 others")
 
 if fails:
     print("test_triage_park: FAIL\n  " + "\n  ".join(fails))

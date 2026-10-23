@@ -550,25 +550,34 @@ def segments(trace, swaps=None):
 VM_PARKED = 16
 VM_PARK_GONE = 32
 VM_FREE_LIVE = 64
-# PAGEOFF flags (N41): waited for WindowServer's pending GPU write, that wait timed out
+VM_OBJ_GONE = 128   # VMFREE from RD3VidMemory::free(): the object goes, its address may come back (ECC review of N41)
+# PAGEOFF flags (N41): waited for WindowServer's pending GPU write, that wait timed out, cleared under the wait; arg 2
+# with PAGEOFF_IOP: the IOP zero-copy flip's wait (no page-off; v2 the surface)
 PAGEOFF_WAITED = 1
 PAGEOFF_WAIT_TIMEOUT = 2
+PAGEOFF_IOP = 4
+PAGEOFF_WAIT_CLEARED = 8
 
 
 def vram_moves(trace):
     """DRIVER-PLAN N41 (traces 2026-10-17d / 17c): the vidmem of a surface imported as a BO (SURFGEM arg 1) given
     new VRAM at another address after a free, and the dirty marks (SURFGEM arg 2) on such moved VRAM - the plugin's
     BO keeps the first address. Also the parks seen. {"imported", "freed", "moved": [(obj, surface, was, now)],
-    "dirty_moved", "parked", "reused", "park_released", "free_live"}"""
-    imported, state = {}, {}
+    "dirty_moved", "parked", "reused", "park_released", "free_live", "freed_plain", "obj_gone"}. A vidmem's
+    VMFREE with VM_OBJ_GONE (free()) ends that object: a new vidmem at the same address starts afresh (ECC review
+    of N41: no H-VMMOVE for a reused object address after a real free). freed_plain: VMFREEs of non-scanout VRAM
+    without any park flag (vm_sticky 0, or a kernel before N41)"""
+    imported, state, life, ever = {}, {}, {}, set()
     out = {"imported": 0, "freed": 0, "moved": [], "dirty_moved": 0, "parked": 0, "reused": 0, "park_released": 0,
-           "free_live": 0}
+           "free_live": 0, "freed_plain": 0, "obj_gone": 0}
+
     for e in trace.events:
         if e.src != SRC_ACCEL:
             continue
         n = TYPES.get(e.type)
         if n == "SURFGEM" and e.arg == 1 and e.obj:
             imported[e.obj] = (e.pa, e.v0)
+            ever.add((e.obj, life.get(e.obj, 0)))
             state.pop(e.obj, None)
         elif n == "VMFREE":
             if e.flags & VM_PARKED:
@@ -577,6 +586,14 @@ def vram_moves(trace):
                 out["park_released"] += 1
             if e.flags & VM_FREE_LIVE:
                 out["free_live"] += 1
+            if not e.flags & (1 | VM_PARKED | VM_PARK_GONE | VM_FREE_LIVE | VM_OBJ_GONE):
+                out["freed_plain"] += 1
+            if e.flags & VM_OBJ_GONE:   # the object goes: its address is a new object's from now on
+                out["obj_gone"] += 1
+                imported.pop(e.obj, None)
+                state.pop(e.obj, None)
+                life[e.obj] = life.get(e.obj, 0) + 1
+                continue
             if e.obj in imported and not e.flags & VM_PARKED:
                 out["freed"] += 1
                 state[e.obj] = "freed"
@@ -589,7 +606,7 @@ def vram_moves(trace):
                     out["moved"].append((e.obj, imported[e.obj][1], imported[e.obj][0], e.pa))
         elif n == "SURFGEM" and e.arg == 2 and state.get(e.obj) == "moved" and e.pa != imported[e.obj][0]:
             out["dirty_moved"] += 1
-    out["imported"] = len(imported)
+    out["imported"] = len(ever)
     return out
 
 
@@ -610,16 +627,28 @@ def h_vram_moved(trace):
     if m["free_live"]:
         rows.append(("INFO", "H-VMPARK", "%d vidmem object(s) freed with VRAM still live (released in free(); "
                      "before N41 those leaked)" % m["free_live"]))
+    if m["freed_plain"]:   # ECC review of N41: frees without parking are said, not left to the counters
+        rows.append(("WARN" if m["freed"] else "INFO", "H-VMPARK",
+                     "%d VRAM allocation(s) freed without parking (vm_sticky 0, or a kernel before N41)%s" % (
+                         m["freed_plain"], ", %d of them an imported surface's (the plugin keeps drawing into the "
+                         "old VRAM)" % m["freed"] if m["freed"] else "")))
     po = trace.by("PAGEOFF")
-    waited = [e for e in po if e.flags & PAGEOFF_WAITED]
-    late = [e for e in po if e.flags & PAGEOFF_WAIT_TIMEOUT]
-    if late:
-        rows.append(("WARN", "H-SURFWAIT", "%d page-off(s) gave up waiting for WindowServer's GPU write (first at %s, "
-                     "%d us) - a lost ready mark or a hung GPU; that copy may be stale" % (
-                         len(late), late[0].seq, late[0].v3)))
-    if waited:
-        rows.append(("INFO", "H-SURFWAIT", "%d page-off(s) waited for WindowServer's GPU write (longest %d us)" % (
-            len(waited), max(e.v3 for e in waited))))
+    for iop, who in ((False, "page-off"), (True, "IOP flip")):
+        evs = [e for e in po if bool(e.flags & PAGEOFF_IOP) == iop and (not iop or e.arg == 2)]
+        waited = [e for e in evs if e.flags & PAGEOFF_WAITED]
+        late = [e for e in evs if e.flags & PAGEOFF_WAIT_TIMEOUT]
+        cleared = [e for e in evs if e.flags & PAGEOFF_WAIT_CLEARED]
+        if late:
+            rows.append(("WARN", "H-SURFWAIT", "%d %s(s) gave up waiting for WindowServer's GPU write (first at %s, "
+                         "%d us) - a lost ready mark or a hung GPU; that %s may be stale" % (
+                             len(late), who, late[0].seq, late[0].v3, "copy" if not iop else "scan-out")))
+        if cleared:
+            rows.append(("WARN", "H-SURFWAIT", "%d %s(s) had their wait cleared under them (another wait's timeout, a "
+                         "full table or the switch-off; first at %s) - not a finished write" % (
+                             len(cleared), who, cleared[0].seq)))
+        if waited:
+            rows.append(("INFO", "H-SURFWAIT", "%d %s(s) waited for WindowServer's GPU write (longest %d us)" % (
+                len(waited), who, max(e.v3 for e in waited))))
     return rows
 
 
@@ -1636,6 +1665,16 @@ def _fmt_event(trace, e, ms, n):
     if n == "APERTURE":
         return "%10.3f ms APERTURE %s 0x%x (%d KiB, IOSurface %d)" % (ms, "add" if e.arg == 1 else "desc", e.pa, e.v0,
                                                                       e.v1)
+    if n == "PAGEOFF":   # N41: the wait for WindowServer's GPU write, and the IOP flip's own wait
+        w = ""
+        if e.flags & (PAGEOFF_WAITED | PAGEOFF_WAIT_TIMEOUT | PAGEOFF_WAIT_CLEARED):
+            w = " (waited %d us for WindowServer's GPU%s)" % (e.v3, " - TIMED OUT" if e.flags & PAGEOFF_WAIT_TIMEOUT
+                                                               else " - CLEARED under it" if e.flags & PAGEOFF_WAIT_CLEARED
+                                                               else "")
+        if e.arg == 2 and e.flags & PAGEOFF_IOP:
+            return "%10.3f ms IOP flip wait, IOSurface %d%s" % (ms, e.v2, w)
+        return "%10.3f ms PAGEOFF 0x%x %d KiB %s in %d us%s" % (ms, e.pa, e.v0, "copied" if e.arg == 1 else "NOT copied",
+                                                               e.v1, w)
     if n in ("VMALLOC", "VMFREE"):
         park = ""
         if e.flags & VM_PARKED:
@@ -1644,6 +1683,8 @@ def _fmt_event(trace, e, ms, n):
             park += " (a parked one RELEASED)"
         if n == "VMFREE" and e.flags & VM_FREE_LIVE:
             park += " (LIVE at free())"
+        if n == "VMFREE" and e.flags & VM_OBJ_GONE:
+            park += " (the object freed)"
         return "%10.3f ms %s 0x%x %d KiB%s%s%s" % (ms, n, e.pa, e.v0, "" if e.arg else " REFUSED 0x%x" % e.v4,
                                                    " while scanned by head %d" % e.head if n == "VMFREE" and e.flags & 0xe
                                                    else "", park)

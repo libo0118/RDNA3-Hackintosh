@@ -104,9 +104,17 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
         grep -h -e 'a3 display' -e 'A3: WindowServer' -e "WindowServer's display framebuffer" \
             -e 'is not a display framebuffer' -e 'display check did not run' "$dir/$f" | tail -60 || true
         # DRIVER-PLAN N41 with a budget of its own: the VRAM parking and the
-        # page-off's wait for WindowServer's GPU (kernel and plugin lines)
+        # page-off's wait for WindowServer's GPU (kernel and plugin lines).
+        # The boot lines and the plugin's decision get their own (ECC review
+        # of N41: a busy run's 80 last lines cut them): first and last 4
+        grep -h -e 'vm sticky: [01] =' -e 'surface wait: [01] =' \
+            -e "surface wait (N41): WindowServer's IOSurface VRAM writes are" "$dir/$f" | head -4 || true
+        grep -h -e 'vm sticky: [01] =' -e 'surface wait: [01] =' \
+            -e "surface wait (N41): WindowServer's IOSurface VRAM writes are" "$dir/$f" | tail -4 || true
         grep -h -e 'vm sticky:' -e 'surface wait' -e 'PARKED' -e 'parked VRAM' -e 'VRAM refused:' \
-            -e 'marks allocation #' -e 'its VRAM was parked' -e 'still LIVE' -e 'an older park' "$dir/$f" | tail -80 || true
+            -e 'marks allocation #' -e 'its VRAM was parked' -e 'still LIVE' -e 'an older park' \
+            -e 'NOT given back' -e 'aperture descriptor' -e 'getApertureMemoryDescriptor: the cached' "$dir/$f" \
+            | grep -v -e 'vm sticky: [01] =' -e 'surface wait: [01] =' | tail -80 || true
     done
     echo "== sysctl (card run 58)"
     _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:|iop_queue|iop_wrote|perf|present_|flipbuf|hook_|vm_|surface_)")
