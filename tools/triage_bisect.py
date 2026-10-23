@@ -4,7 +4,7 @@ triage_bisect.py - the per-step table of the display bisect (card run
 2026-10-17d): `rdna3vm step bisect` / `bisect-plugin` / `bisect-agdc`,
 tools/vm/macos/autoreport.sh bisect_run, docs/TESTING-VM.md "Display bisect".
 
-    python3 tools/triage_bisect.py bisect.txt [report-prefix]
+    python3 tools/triage_bisect.py bisect.txt [report-prefix] [--owner 0:n,1:y,3:s | --owner FILE] [--log FILE]...
 
 The run turns every new feature that has a runtime switch off, then on again
 one at a time (oldest first), 30 s each, while the owner looks at both
@@ -15,18 +15,39 @@ two scanout looks (bisect<N>a about 8 s in, bisect<N> about 20 s in; the
 <report>-scanoutbisect<N>[a]-pipe<P>.ppm pictures) and the counters.
 
 analyse() turns that into a table (step, what changed, the owner's answer,
-pipe 0/1 % not black, whether the picture moved between the step's looks,
-the swap / stale-hold counter deltas) and findings. Missing data is a WARN,
-never silence. It names the first step the owner marked n, the first whose
-looks went black, the first whose looks stood still, and what the run says
-about the bug (see verdict()).
+pipe 0/1 % not black, whether the picture moved between the step's looks, the
+verdict of the step, the swap counter deltas) and findings. Missing data is a
+WARN, never silence. It names the first step the owner marked n, the first
+whose looks went black, and what the run says about the bug (see verdict()).
+
+How a step is judged (judge(); card run 2026-10-18b, where the old "a pipe that
+stood still although it moved in another step" rule contradicted the owner on 10
+of 13 steps: the idle second monitor only "moves" in the broken copy steps, where
+stale buffers alternate, and a flip of the picture counted as "bytes changed"):
+every step on its own, on PIPE 0 (the pipe WindowServer draws on; pipe 1 never
+decides). BROKEN when
+  R1  at least GREY_FRACTION of pipe 0's pixels are exactly (170,170,170), the
+      grey placeholder / stale picture, in either look (good steps <= 2.8 %,
+      broken ones >= 4.9 % in that run);
+  R2  pipe 0 stood still (the two looks' PPMs and both looks' "bytes changed"
+      under MOVED_FRACTION) while at least STILL_MIN_SWAPS head-0 swaps ran in the
+      step: a screen that is being swapped to and shows the same thing;
+  R3  (counters only) half or more of the head-0 swaps copied an empty back;
+  or a lit pipe is black (BLACK_PCT).
+RIGHT otherwise, "right-slow" when the flip waited for the latch on half the
+swaps or more and each wait took SLOW_LATCH_US or more (swap_mode 0 of that
+run). Without the PPMs (and without R3) a step is "not judged", never "right".
+The owner's answer at the tty (y / n) overrides; --owner (or owner.txt next to the
+report) gives the owner's verdicts afterwards and every step prints AGREES /
+DISAGREES; DISAGREES is a FAIL. Pipe 1 flicker, the flicker test's hash budget
+(swaps_hashed_h0) used up: INFO / WARN lines.
 
 `bisect-agdc` (variant 4, card run 2026-10-17f) is the same bisect on the agdc
 profile (WindowServer on our Metal plugin). Its steps are not cumulative (each
 sets its whole combination), so there is no "breaks at step N" verdict: the
 table names the steps that LOOKED RIGHT (the owner's answers; the looks'
 black % and movement) and the ones that looked broken, by swap_mode, and a
-second table has the per-step swap counters (swaps, copies, holds, iop flips,
+second table has the per-step swap counters (swaps, copies, empty backs, iop flips,
 buffers rewritten in place, torn) and the FRONT SURFACE sampler's lines
 ("*** MOVED -- A LIVE WRITER IS PAINTING THE SCANNED-OUT SURFACE ***") cut out
 of the kernel log per step (analyse(text, prefix, logs): logs = [(name, text)],
@@ -36,6 +57,7 @@ kernel log at its start, else by the log's own clock).
 
 Python 3, standard library only; imported by tools/triage_reports.py.
 """
+import glob
 import os
 import re
 import sys
@@ -47,11 +69,27 @@ BLACK_PCT = 3
 # pixels stood still (a clock tick in the menu bar is ~0.02 %, Activity
 # Monitor's graphs on the main display far more)
 MOVED_FRACTION = 0.003
+# R1: the grey placeholder (170,170,170) share of pipe 0 that makes a step broken
+GREY_RGB = (170, 170, 170)
+GREY_FRACTION = 0.04
+# R2: head-0 swaps in a step that a standing-still picture cannot have
+STILL_MIN_SWAPS = 60
+# R3: the share of head-0 swaps that copied an empty back
+EMPTY_FRACTION = 0.5
+# right-slow: the share of swaps that waited for the latch, and the microseconds each wait took
+SLOW_WAIT_FRACTION = 0.5
+SLOW_LATCH_US = 10000
+# an idle pipe whose two looks differ in this fraction of the pixels flickered (INFO only)
+FLICKER_FRACTION = 0.005
+# flicker=1 hashes only the first 3000 swaps per head (accel/rdna3-accel.cpp, the flicker sysctl): then abab / bufchg are blind
+HASH_BUDGET = 3000
 # the values the switches have without any boot-arg (accel/rdna3-accel.cpp; swap_mode 1, the copy, again since the
 # write generations of card run 2026-10-17d - it was 0 from 2026-10-17d to 2026-10-17g)
 DEFAULTS = {"a3": "1", "flicker": "1", "swap_latch": "1", "swap_torn": "1", "swap_mode": "1",
             "trace_scan": "0", "swap_stale": "1", "swap_landed": "0", "a3ws": "0"}
 MAIN_KINDS = ("ref", "off", "on", "final", "var")
+# the verdict column
+KIND_WORD = {"right": "right", "right-slow": "right,slow", "broken": "BROKEN", "unknown": "?"}
 # plan 4 (bisect-agdc) also switches these (the agdc profile's own defaults: iop on, iop_flip off; the write
 # generations on, the flip-buffer present off: card run 2026-10-17d)
 DEFAULTS_AGDC = dict(DEFAULTS, iop="1", iop_flip="0", flipbuf_present="0", swap_gen="1")
@@ -180,6 +218,8 @@ def read_ppm(path):
     if not m:
         return None
     w, h = int(m.group(1)), int(m.group(2))
+    if w * h == 0:   # every fraction divides by the pixel count
+        return None
     px = data[m.end():m.end() + w * h * 3]
     return (w, h, px) if len(px) == w * h * 3 else None
 
@@ -204,6 +244,14 @@ def ppm_changed_fraction(a, b):
     return n / float(w * h)
 
 
+def ppm_color_fraction(img, rgb):
+    """the fraction of pixels that are exactly rgb"""
+    w, h, px = img
+    r, g, b = rgb
+    n = sum(1 for x, y, z in zip(px[0::3], px[1::3], px[2::3]) if x == r and y == g and z == b)
+    return n / float(w * h)
+
+
 def _delta(cur, prev, pattern):
     """the sum over the counters matching pattern in cur minus prev; None when either step has none of them"""
     rx = re.compile(pattern)
@@ -219,12 +267,15 @@ def _fmt(v):
 
 
 def step_metrics(step, prev, prefix):
-    """{"pct": {pipe: % or None}, "moved": {pipe: True/False/None}, "lit": [pipes], "problems": [text], "deltas": {...}}
-    of one step: the pictures' numbers from the look's text (the PPMs when the text has none), movement between
-    the step's two looks (the PPMs, else the looks' own 'bytes changed in 2 s')"""
+    """{"pct": {pipe: % or None}, "moved": {pipe: True/False/None}, "lit": [pipes], "problems": [text], "deltas": {...},
+    "ppm_diff" {pipe: fraction of pixels that differ between the looks' PPMs or None}, "text" {pipe: [the looks' 'bytes
+    changed' fractions]}, "grey" {pipe: [share of exactly (170,170,170) per PPM read]}, "ppms" {pipe: how many of
+    the step's 2 PPMs were read}} of one step: the pictures' numbers from the look's text (the PPMs when the text has
+    none), movement between the step's two looks (the PPMs, else the looks' own 'bytes changed in 2 s')"""
     n = step["n"]
     main, early = step["looks"].get("bisect%d" % n), step["looks"].get("bisect%da" % n)
-    met = {"pct": {}, "moved": {}, "lit": [], "problems": [], "deltas": {}, "state": {}}
+    met = {"pct": {}, "moved": {}, "lit": [], "problems": [], "deltas": {}, "state": {}, "ppm_diff": {}, "text": {},
+           "grey": {}, "ppms": {}}
     if not main or main.get("not_taken"):
         met["problems"].append("no look (%s)" % ((main or {}).get("not_taken") or "bisect.txt has none for it"))
         return met
@@ -244,21 +295,31 @@ def step_metrics(step, prev, prefix):
         if pct is None:
             met["problems"].append("pipe %s lit, its picture not readable (tiled, DCC or outside the BAR) and no PPM" % p)
         fracs = []
-        if ppm and ppm_a:
-            f = ppm_changed_fraction(ppm_a, ppm)
-            if f is not None:
-                fracs.append(f)
+        diff = ppm_changed_fraction(ppm_a, ppm) if ppm and ppm_a else None
+        met["ppm_diff"][p] = diff
+        met["ppms"][p] = (1 if ppm else 0) + (1 if ppm_a else 0)
+        if diff is not None:
+            fracs.append(diff)
+        met["grey"][p] = [ppm_color_fraction(i, GREY_RGB) for i in (ppm_a, ppm) if i] if p == "0" else []
+        met["text"][p] = []
         for lk in (main, early):
             q = (lk or {}).get("pipes", {}).get(p)
             if q and q.get("bytes") is not None and q.get("px"):
-                fracs.append(q["bytes"] / float(q["px"] * 3))
+                met["text"][p].append(q["bytes"] / float(q["px"] * 3))
+        fracs.extend(met["text"][p])
         if fracs:
             met["moved"][p] = max(fracs) >= MOVED_FRACTION
         else:
             met["moved"][p] = None
             met["problems"].append("pipe %s: nothing says whether its picture moved (no PPMs, no 'bytes changed')" % p)
+        if p == "0" and met["ppms"][p] < 2:
+            met["problems"].append("pipe 0: %d of the 2 PPMs (%s-scanoutbisect%d[a]-pipe0.ppm) could be read: the step cannot be "
+                                   "judged from the picture (R1 / R2)" % (met["ppms"][p], os.path.basename(prefix or "<prefix>"), n))
     if not early or early.get("not_taken"):
         met["problems"].append("the early look (bisect%da) is missing: movement judged from the main look only" % n)
+    if met["lit"] and "0" not in met["lit"]:
+        met["problems"].append("pipe 0 is not lit (%s): the step cannot be judged from its picture" % (
+            main["pipes"].get("0", {}).get("state", "absent")))
     if not met["lit"] and not any(i["state"] == "asleep" for i in main["pipes"].values()):
         met["problems"].append("no pipe lit in the look (the card showed nothing?)")
     # the counters at the start of this step when the run took them (autoreport's "-- before"), else the step before's
@@ -273,9 +334,11 @@ def step_metrics(step, prev, prefix):
         "iopok": _delta(c, pc, r"^debug\.rdna3accel_iop_ok$"),
         "sw0": _delta(c, pc, r"^debug\.rdna3accel_swaps_h0$"),
         "sw1": _delta(c, pc, r"^debug\.rdna3accel_swaps_h1$"),
-        "hold": _delta(c, pc, r"^debug\.rdna3accel_swaps_stalehold_h\d$"),
-        "would": _delta(c, pc, r"^debug\.rdna3accel_swaps_stalehold_would_h\d$"),
         "empty": _delta(c, pc, r"^debug\.rdna3accel_swaps_copyempty_h\d$"),
+        # head 0 only: what the judgement (R2, R3, right-slow) is made of
+        "empty0": _delta(c, pc, r"^debug\.rdna3accel_swaps_copyempty_h0$"),
+        "lwait0": _delta(c, pc, r"^debug\.rdna3accel_swaps_latchwait_h0$"),
+        "lus0": _delta(c, pc, r"^debug\.rdna3accel_swaps_latchus_h0$"),
         # card run 2026-10-17d: the write generations' holds, the family's flip-buffer calls and their presents
         "genhold": _delta(c, pc, r"^debug\.rdna3accel_swaps_genhold_h\d$"),
         "flipbuf": _delta(c, pc, r"^debug\.rdna3accel_flipbuf(?:_scanout)?_h\d$"),
@@ -284,35 +347,103 @@ def step_metrics(step, prev, prefix):
     return met
 
 
+def _latch_ms(d):
+    """the mean wait for the latch in ms (head 0), None when there was none"""
+    lw, lus = d.get("lwait0"), d.get("lus0")
+    return lus / float(lw) / 1000.0 if lw and lus is not None else None
+
+
 def judge(steps, mets):
-    """{step n: {"bad": bool, "why": [..], "known": bool}}: bad = the owner said n, a lit pipe is black, or a pipe
-    that moved in some other step stood still in this one"""
-    can_move = set()
-    for n, m in mets.items():
-        for p, mv in m["moved"].items():
-            if mv:
-                can_move.add(p)
+    """{step n: {"kind": right / right-slow / broken / unknown, "bad": kind == broken, "known": kind != unknown, "why": [..],
+    "auto": the kind the rules give, "auto_why": [..]}}: every step on its own (see the module docstring: R1 grey
+    placeholder, R2 a standing-still picture under swaps, R3 empty backs, a black lit pipe); the owner's y / n at the
+    tty overrides the rules (then "why" says so and "auto" keeps what the rules said)"""
     res = {}
     for s in steps:
         n = s["n"]
         m = mets[n]
+        d = m["deltas"]
         why = []
-        known = False
-        ans = s.get("answer", "-")
-        if ans in ("y", "n"):
-            known = True
-        if ans == "n":
-            why.append("the owner marked it n")
         for p, pct in sorted(m["pct"].items()):
-            if pct is not None:
-                known = True
-                if pct <= BLACK_PCT:
-                    why.append("pipe %s black (%d%% not black)" % (p, pct))
-        for p, mv in sorted(m["moved"].items()):
-            if mv is False and p in can_move and (m["pct"].get(p) is None or m["pct"][p] > BLACK_PCT):
-                why.append("pipe %s stood still between the step's looks (it moved in other steps)" % p)
-        res[n] = {"bad": bool(why), "why": why, "known": known}
+            if pct is not None and pct <= BLACK_PCT:
+                why.append("pipe %s black (%d%% not black)" % (p, pct))
+        grey = m["grey"].get("0") or []
+        if grey and max(grey) >= GREY_FRACTION:
+            why.append("R1: %.1f%% of pipe 0 is the grey (170,170,170) placeholder (limit %g%%)" % (100 * max(grey), 100 * GREY_FRACTION))
+        sw, empty = d.get("sw0"), d.get("empty0")
+        if sw and sw > 0 and empty is not None and empty / float(sw) >= EMPTY_FRACTION:
+            why.append("R3: %d of %d head-0 swaps copied an empty back" % (empty, sw))
+        diff, texts = m["ppm_diff"].get("0"), m["text"].get("0", [])
+        r2_open = False   # a standing-still picture whose swaps are unknown
+        if diff is not None and diff < MOVED_FRACTION and all(t < MOVED_FRACTION for t in texts):
+            if sw is None:
+                r2_open = True
+            elif sw >= STILL_MIN_SWAPS:
+                why.append("R2: pipe 0 stood still between the step's looks while %d head-0 swaps ran" % sw)
+        slow = None
+        lw, ms = d.get("lwait0"), _latch_ms(d)
+        if sw and lw is not None and ms is not None and lw / float(sw) >= SLOW_WAIT_FRACTION and ms * 1000 >= SLOW_LATCH_US:
+            slow = "%d of %d head-0 swaps waited for the latch, %.1f ms each" % (lw, sw, ms)
+        if why:
+            auto = "broken"
+        elif m["ppms"].get("0", 0) < 2 or r2_open:
+            auto = "unknown"
+            if r2_open:
+                m["problems"].append("pipe 0 stood still and no swap counter says how many swaps ran: R2 cannot decide, not judged")
+        else:
+            auto = "right-slow" if slow else "right"
+        kind, final_why = auto, list(why)
+        ans = s.get("answer", "-")
+        if ans == "n":
+            kind, final_why = "broken", ["the owner marked it n"] + why
+        elif ans == "y":
+            kind, final_why = ("right-slow" if auto == "right-slow" else "right"), []
+        res[n] = {"kind": kind, "bad": kind == "broken", "known": kind != "unknown", "why": final_why,
+                  "auto": auto, "auto_why": why, "slow": slow, "owner_answer": ans if ans in ("y", "n") else None}
     return res
+
+
+def judge_notes(steps, mets, verdicts, vs_owner, owner):
+    """[(level, text)] around the judgement: the owner's tty answer against the rules, pipe 1 flicker (INFO only), the flicker
+    test's hash budget, the owner's verdicts against the rules (DISAGREES is a FAIL)"""
+    out = []
+    for s in steps:
+        v = verdicts[s["n"]]
+        if v["owner_answer"] and v["owner_answer"] == "y" and v["auto"] == "broken":
+            out.append(("INFO", "step %d: the owner's y at the tty overrides the rules' broken [%s]" % (s["n"], "; ".join(v["auto_why"]))))
+        elif v["owner_answer"] == "n" and v["auto"] in ("right", "right-slow"):
+            out.append(("INFO", "step %d: the owner's n at the tty overrides the rules' %s" % (s["n"], v["auto"])))
+    fl = [(s["n"], mets[s["n"]]["ppm_diff"].get("1")) for s in steps]
+    fl = [(n, d) for n, d in fl if d is not None and d >= FLICKER_FRACTION]
+    if fl:
+        out.append(("INFO", "pipe 1 (the idle second monitor) flickered between the looks in step(s) %s: information only, pipe 1 never "
+                            "decides a verdict (it only changes where a stale buffer alternates)" % ", ".join(
+                                "%d (%.1f%%)" % (n, 100 * d) for n, d in fl)))
+    for s in steps:   # the first step that ends with the budget used up
+        h = s["counters"].get("debug.rdna3accel_swaps_hashed_h0")
+        if h is None or h < HASH_BUDGET:
+            continue
+        if s["readback"].get("debug.rdna3accel_flicker") != "2":
+            out.append(("WARN", "head 0 flicker hash budget (swaps_hashed_h0 %d) used up at step %d: abab/bufchg blind from there "
+                                "(flicker=1 hashes only the first %d swaps per head; flicker=2 hashes always): the steps from %d on "
+                                "have no flicker-test evidence" % (HASH_BUDGET, s["n"], HASH_BUDGET, s["n"])))
+        break
+    if owner:
+        bad = [n for n, r in sorted(vs_owner.items()) if r == "DISAGREES"]
+        for n in bad:
+            v = verdicts[n]
+            out.append(("FAIL", "step %d: the owner says %s, the rules say %s%s: DISAGREES" % (
+                n, {"y": "right", "s": "right, slow", "n": "broken"}[owner[n]], v["auto"],
+                " [%s]" % "; ".join(v["auto_why"]) if v["auto_why"] else "")))
+        for n, r in sorted(vs_owner.items()):
+            if r in ("not judged", "no such step"):
+                out.append(("WARN", "step %d: the owner gave a verdict, the tool has %s" % (
+                    n, "no such step" if r == "no such step" else "no judgement for it (see the WARN lines of that step)")))
+        agree = sum(1 for r in vs_owner.values() if r == "AGREES")
+        out.append(("FAIL" if bad else "INFO", "BISECT owner verdict: %s on %d of %d step(s)%s" % (
+            "DISAGREES" if bad else "AGREES", len(bad) if bad else agree, len(vs_owner),
+            " (step(s) %s)" % ", ".join(map(str, bad)) if bad else "")))
+    return out
 
 
 def label(s):
@@ -436,13 +567,83 @@ def front_by_step(steps, hold, logs):
     return out, notes
 
 
-def analyse(text, prefix=None, logs=None):
+OWNER_WORDS = {"y": "y", "yes": "y", "right": "y", "ok": "y", "works": "y", "s": "s", "slow": "s", "right-slow": "s",
+               "n": "n", "no": "n", "broken": "n", "bad": "n"}
+_OWNER = re.compile(r"\s*(\d+)\s*[:= ]\s*([A-Za-z][A-Za-z-]*)\s*")
+
+
+def parse_owner(spec):
+    """({step n: "y" | "s" | "n"}, [errors]) from the owner's verdicts: `0:n,1:y,3:s` or one `1 y` per line
+    (# comments); y = it works, s = it works but slow, n = broken. Every entry must be exactly `N:word`: any text
+    that is not, a word that is not a verdict or a step given twice makes the whole input unread ({} and the
+    errors) - prose read as verdicts would turn into false DISAGREES (review of 8030018)"""
+    out, errs = {}, []
+    cleaned = "\n".join(l.split("#")[0] for l in (spec or "").splitlines())
+    for tok in re.split(r"[,;\n]", cleaned):
+        pos = 0
+        while tok[pos:].strip():   # `0:n 1:s` on one line: entries back to back, nothing else between them
+            m = _OWNER.match(tok, pos)
+            if not m:
+                errs.append("cannot read '%s' (expected 0:n,1:y,3:s)" % _short(tok[pos:].strip(), 40))
+                break
+            pos = m.end()
+            n, v = int(m.group(1)), OWNER_WORDS.get(m.group(2).lower())
+            if v is None:
+                errs.append("step %d: '%s' is not y / s / n" % (n, m.group(2)))
+            elif n in out:
+                errs.append("step %d given twice" % n)
+            else:
+                out[n] = v
+    return ({} if errs else out), errs
+
+
+def locate_owner(report_path):
+    """the owner's verdicts text next to a report: <report>-owner.txt, else owner.txt in its folder; "" when none"""
+    base = report_path[:-len(".tar.gz")] if report_path.endswith(".tar.gz") else report_path
+    if base.endswith("-bisect"):
+        base = base[:-len("-bisect")]
+    folder = os.path.dirname(os.path.abspath(base))
+    paths = [base + "-owner.txt"]
+    # the folder-wide owner.txt only for a folder with this one bisect report (else it would judge every run in it)
+    if len(glob.glob(os.path.join(folder, "*-bisect.txt"))) <= 1:
+        paths.append(os.path.join(folder, "owner.txt"))
+    for path in paths:
+        try:
+            with open(path, errors="replace") as f:
+                return f.read()
+        except OSError:
+            pass
+    return ""
+
+
+def owner_compare(verdicts, owner):
+    """{step n: "AGREES" | "DISAGREES" | "not judged" | "no such step"}: the owner's verdict against the rules' (not the
+    tty answer, which would trivially agree)"""
+    out = {}
+    for n, o in owner.items():
+        v = verdicts.get(n)
+        if v is None:
+            out[n] = "no such step"
+        elif v["auto"] == "unknown":
+            out[n] = "not judged"
+        else:
+            ok = (o == "n") == (v["auto"] == "broken") and (o != "s" or v["auto"] == "right-slow")
+            out[n] = "AGREES" if ok else "DISAGREES"
+    return out
+
+
+def analyse(text, prefix=None, logs=None, owner=None):
     """{"table": [lines], "findings": [(level, text)], "rows": [(name, text)] for the SUMMARY, "steps": n};
-    logs = [(name, kernel log text)] for the agdc variant's FRONT SURFACE column"""
+    logs = [(name, kernel log text)] for the agdc variant's FRONT SURFACE column; owner = {step: y / s / n} (parse_owner)
+    to compare the judgement with"""
     b = parse(text)
     agdc = b["head"].get("variant", "").startswith("4")
     steps = b["steps"]
     f = []
+    if isinstance(owner, str):
+        owner, owner_errs = parse_owner(owner)
+        f.extend(("WARN", "the owner's verdicts: " + e) for e in owner_errs)
+    owner = owner or None
     table = []
     if not steps:
         f.append(("FAIL", "bisect.txt has no step block%s" % ("; " + "; ".join(b["aborts"]) if b["aborts"] else "")))
@@ -454,14 +655,15 @@ def analyse(text, prefix=None, logs=None):
         mets[s["n"]] = step_metrics(s, prev, prefix)
         prev = s
     verdicts = judge(steps, mets)
+    vs_owner = owner_compare(verdicts, owner) if owner else {}
     by_n = dict((s["n"], s) for s in steps)
     head = b["head"]
     table.append("bisect: variant %s, hold %s s, mode %s, started %s, %d step(s) in the file%s" % (
         head.get("variant", "?"), head.get("hold_s", "?"), head.get("mode", "?"), head.get("started", "?"), len(steps),
         "" if b["ended"] else " (NO END LINE: the run was cut)"))
-    table.append("%4s %-6s %-44s %-5s %5s %5s %-11s %s" % (
-        "step", "kind", "what changed", "owner", "pipe0", "pipe1", "moved",
-        ("deltas in the step" if agdc else "deltas since the step before") + ": swaps h0/h1, held, would-hold, empty backs"))
+    table.append("%4s %-6s %-44s %-5s %5s %5s %-11s %6s %-10s %s%s" % (
+        "step", "kind", "what changed", "owner", "pipe0", "pipe1", "moved", "grey0", "verdict", "vs owner  " if owner else "",
+        ("deltas in the step" if agdc else "deltas since the step before") + ": swaps h0/h1, copies, in place, empty backs"))
     for s in steps:
         n = s["n"]
         m, v = mets[n], verdicts[n]
@@ -471,30 +673,35 @@ def analyse(text, prefix=None, logs=None):
                          else "-" for p in ("0", "1"))
         d = m["deltas"]
         ans = s.get("answer", "?")
-        table.append("%4d %-6s %-44s %-5s %5s %5s %-11s %s/%s, %s, %s, %s%s" % (
+        grey = ("%.1f%%" % (100 * max(m["grey"]["0"]))) if m["grey"].get("0") else "-"
+        table.append("%4d %-6s %-44s %-5s %5s %5s %-11s %6s %-10s %s%s/%s, %s, %s, %s%s" % (
             n, s.get("kind", "?"), _short("(the defaults as the boot left them)" if s.get("kind") == "ref" else s.get("changed", s.get("name", "?")), 44), ans, pcts[0], pcts[1], moved,
-            _fmt(d.get("sw0")), _fmt(d.get("sw1")), _fmt(d.get("hold")), _fmt(d.get("would")), _fmt(d.get("empty")),
+            grey, KIND_WORD[v["kind"]], ("%-10s " % vs_owner.get(n, "-")) if owner else "",
+            _fmt(d.get("sw0")), _fmt(d.get("sw1")), _fmt(d.get("copy")), _fmt(d.get("inplace")), _fmt(d.get("empty")),
             "   <-- " + "; ".join(v["why"]) if v["bad"] else ""))
     front = {}
     if agdc:
         front, fnotes = front_by_step(steps, _int(head.get("hold_s")), logs)
         f.extend(fnotes)
         table.append("swap counters per step (from the step's start to its second look, ~20 s in; 'front' = FRONT SURFACE "
-                     "live-writer lines / sampler lines in the kernel log during the step):")
+                     "live-writer lines / sampler lines in the kernel log during the step; lwait / lat ms = head-0 swaps that waited for "
+                     "the latch and the mean wait; hashed = swaps_hashed_h0 at the step's end, the flicker test's budget is %d):" % HASH_BUDGET)
         table.append("(the switch column: swap_mode/stale/iop/a3/lat/flip/fbp/gen = %s; gen hold = the write "
                      "generations' holds, fbuf = the family's flip-buffer calls / of them presented)" % ", ".join(AGDC_SWITCHES))
-        table.append("%4s %-30s %6s %6s %6s %6s %6s %6s %6s %6s %8s %9s %-9s %s" % (
-            "step", "swap_mode/stale/iop/a3/lat/flip/fbp/gen", "sw h0", "sw h1", "copy", "hold", "flips", "inplace", "torn",
-            "iop_ok", "gen hold", "fbuf", "front", "trace events"))
+        table.append("%4s %-30s %6s %6s %6s %6s %6s %7s %6s %6s %6s %6s %6s %8s %9s %-9s %s" % (
+            "step", "swap_mode/stale/iop/a3/lat/flip/fbp/gen", "sw h0", "sw h1", "copy", "empty", "flips", "inplace", "torn",
+            "iop_ok", "lwait", "lat ms", "hashed", "gen hold", "fbuf", "front", "trace events"))
         for s in steps:
             n = s["n"]
             d, rb = mets[n]["deltas"], s["readback"]
             sw = "/".join(rb.get("debug.rdna3accel_" + k, "-") for k in AGDC_SWITCHES)
             fr = ("%d/%d" % front[n]) if n in front else "?"
             e0, e1 = _int(s.get("trace_events_start")), _int(s.get("trace_events"))
-            table.append("%4d %-30s %6s %6s %6s %6s %6s %6s %6s %6s %8s %9s %-9s %s" % (
-                n, sw, _fmt(d.get("sw0")), _fmt(d.get("sw1")), _fmt(d.get("copy")), _fmt(d.get("hold")), _fmt(d.get("flips")),
-                _fmt(d.get("inplace")), _fmt(d.get("torn")), _fmt(d.get("iopok")), _fmt(d.get("genhold")),
+            ms = _latch_ms(d)
+            table.append("%4d %-30s %6s %6s %6s %6s %6s %7s %6s %6s %6s %6s %6s %8s %9s %-9s %s" % (
+                n, sw, _fmt(d.get("sw0")), _fmt(d.get("sw1")), _fmt(d.get("copy")), _fmt(d.get("empty")), _fmt(d.get("flips")),
+                _fmt(d.get("inplace")), _fmt(d.get("torn")), _fmt(d.get("iopok")), _fmt(d.get("lwait0")),
+                "-" if ms is None else "%.1f" % ms, _fmt(s["counters"].get("debug.rdna3accel_swaps_hashed_h0")), _fmt(d.get("genhold")),
                 "%s/%s" % (_fmt(d.get("flipbuf")), _fmt(d.get("fbpres"))), fr,
                 ("%d..%d (stream bytes %s..%s)" % (e0, e1, s.get("stream_bytes_start", "?"), s.get("stream_bytes", "?"))
                  if e0 is not None and e1 is not None else "?")))
@@ -543,16 +750,15 @@ def analyse(text, prefix=None, logs=None):
         f.append(("FAIL", "the first step the owner marked n: step %d (%s)%s" % (
             pick["n"], label(pick), " - the reference, the bug as it is; %s below says where it comes from" % ("BISECT-AGDC" if agdc else "BISECT")
             if pick["n"] == 0 else "")))
-    for what, key in (("black", "black"), ("stood still", "still")):
-        for s in steps:
-            if s.get("kind") not in MAIN_KINDS:
-                continue
-            w = [x for x in verdicts[s["n"]]["why"] if key in x]
-            if w:
-                f.append(("FAIL" if key == "black" else "WARN", "the first step whose looks %s: step %d (%s): %s%s" % (
-                    what, s["n"], label(s), "; ".join(w),
-                    " - the reference, the bug as it is" if s["n"] == 0 else "")))
-                break
+    for s in steps:
+        if s.get("kind") not in MAIN_KINDS:
+            continue
+        w = [x for x in verdicts[s["n"]]["why"] if "black" in x]
+        if w:
+            f.append(("FAIL", "the first step whose looks black: step %d (%s): %s%s" % (
+                s["n"], label(s), "; ".join(w), " - the reference, the bug as it is" if s["n"] == 0 else "")))
+            break
+    f.extend(judge_notes(steps, mets, verdicts, vs_owner, owner))
     f.extend(verdict_agdc(steps, verdicts, by_n) if agdc else verdict(steps, verdicts, by_n))
     for s in steps:
         if s.get("kind") == "extra" and verdicts[s["n"]]["bad"]:
@@ -610,16 +816,6 @@ def verdict(steps, verdicts, by_n):
         else:
             out.append(("INFO", "BISECT: no step looked broken - the bug did not show in this run (or needs real apps, or only "
                                 "with the screens as the owner uses them)"))
-    # a later step with the switches of step 0 (the 'on' steps end there, the final step returns there)
-    r0 = by_n.get(0)
-    for s in steps:
-        if s["n"] == 0 or s.get("kind") not in ("on", "final") or not r0 or not r0["readback"]:
-            continue
-        if r0["readback"] == s["readback"] and verdicts[0]["known"] and verdicts[s["n"]]["known"] \
-                and verdicts[0]["bad"] != verdicts[s["n"]]["bad"]:
-            out.append(("WARN", "BISECT: step %d has the same switches as step 0 but looked %s there, %s here: flaky, or the "
-                                "state before decides" % (s["n"], "broken" if verdicts[s["n"]]["bad"] else "fine",
-                                                         "broken" if verdicts[0]["bad"] else "fine")))
     return out
 
 
@@ -639,10 +835,12 @@ def verdict_agdc(steps, verdicts, by_n):
     judged = [s for s in steps if verdicts[s["n"]]["known"]]
     right = [s for s in judged if not verdicts[s["n"]]["bad"]]
     wrong = [s for s in judged if verdicts[s["n"]]["bad"]]
+    slow = [s for s in right if verdicts[s["n"]]["kind"] == "right-slow"]
     unknown = [s for s in steps if not verdicts[s["n"]]["known"]]
 
     def lst(ss, why=False):
-        return "; ".join("step %d (%s)%s" % (s["n"], _vary(s), " [%s]" % "; ".join(verdicts[s["n"]]["why"]) if why else "")
+        return "; ".join("step %d (%s)%s%s" % (s["n"], _vary(s), " - SLOW" if verdicts[s["n"]]["kind"] == "right-slow" else "",
+                                               " [%s]" % "; ".join(verdicts[s["n"]]["why"]) if why else "")
                          for s in ss) or "none"
     if ref is None or not ref["known"]:
         out.append(("WARN", "BISECT-AGDC: the reference (step 0) has no readable look and no answer: nothing to compare the others with"))
@@ -664,8 +862,11 @@ def verdict_agdc(steps, verdicts, by_n):
         else:
             out.append(("INFO", "BISECT-AGDC: no step looked broken - the bug did not show in this run (or needs real apps, or only "
                                 "with the screens as the owner uses them)"))
+    if slow:
+        out.append(("INFO", "BISECT-AGDC: looked right but SLOW: %s" % "; ".join(
+            "step %d (%s): %s" % (s["n"], _vary(s), verdicts[s["n"]]["slow"]) for s in slow)))
     if unknown:
-        out.append(("WARN", "BISECT-AGDC: not judged (no readable look and no answer): %s" % lst(unknown)))
+        out.append(("WARN", "BISECT-AGDC: not judged (no readable pipe 0 PPMs, no head-0 empty-back counters and no answer): %s" % lst(unknown)))
     # the plan varies swap_gen / flipbuf_present: a kernel without their sysctls ran those steps as step 0
     # (ECC review round 1)
     rb = next((s["readback"] for s in steps if s["readback"]), None)
@@ -681,24 +882,14 @@ def verdict_agdc(steps, verdicts, by_n):
         mode = s["readback"].get("debug.rdna3accel_swap_mode")
         if mode is None:
             continue
-        g = groups.setdefault(mode, {"right": [], "wrong": [], "?": []})
+        g = groups.setdefault(mode, {"right": [], "slow": [], "wrong": [], "?": []})
         v = verdicts[s["n"]]
-        g["?" if not v["known"] else "wrong" if v["bad"] else "right"].append(s["n"])
+        g[{"right": "right", "right-slow": "slow", "broken": "wrong", "unknown": "?"}[v["kind"]]].append(s["n"])
     if groups:
         out.append(("INFO", "BISECT-AGDC by swap_mode: " + "; ".join(
-            "mode %s: right %s, broken %s%s" % (m, g["right"] or "none", g["wrong"] or "none", ", not judged %s" % g["?"] if g["?"] else "")
+            "mode %s: right %s, right-slow %s, broken %s%s" % (m, g["right"] or "none", g["slow"] or "none", g["wrong"] or "none",
+                                                              ", not judged %s" % g["?"] if g["?"] else "")
             for m, g in sorted(groups.items()))))
-    # the same switches as step 0 must look the same (an order effect: the iop steps switch the pipe capabilities at runtime)
-    r0 = by_n.get(0)
-    for s in steps:
-        if s["n"] == 0 or s.get("kind") != "final" or not r0 or not r0["readback"]:
-            continue
-        if r0["readback"] == s["readback"] and verdicts[0]["known"] and verdicts[s["n"]]["known"] \
-                and verdicts[0]["bad"] != verdicts[s["n"]]["bad"]:
-            out.append(("WARN", "BISECT-AGDC: step %d has the same switches as step 0 but looked %s there, %s here: flaky, or an "
-                                "order effect (iop 0 in steps 4 and 5 changes what WindowServer was told about the pipes at runtime)" % (
-                                    s["n"], "broken" if verdicts[s["n"]]["bad"] else "right",
-                                    "broken" if verdicts[0]["bad"] else "right")))
     return out
 
 
@@ -724,12 +915,84 @@ def locate(report_path):
     return max(texts, key=len) if texts else ""
 
 
+def _tar_member(path, suffix):
+    """one member of a report archive, "" when there is none"""
+    if not os.path.exists(path):
+        return ""
+    import tarfile
+    try:
+        with tarfile.open(path) as tar:
+            for m in tar.getmembers():
+                if m.name.endswith(suffix) and m.isfile():
+                    return tar.extractfile(m).read().decode("utf-8", "replace")
+    except (OSError, tarfile.TarError):
+        pass
+    return ""
+
+
+def bisect_logs(report_path):
+    """[(name, text)] of the kernel logs a report has: the archive's 20-log-rdna3.txt and the newest serial-*.log next to it
+    (analyse() picks the one that places most of the bisect's steps)"""
+    import glob
+    out = []
+    t = _tar_member(report_path, "20-log-rdna3.txt") or _tar_member(report_path, "20-log-rdna3-sudo.txt")
+    if t:
+        out.append(("20-log-rdna3.txt", t))
+    d = os.path.dirname(os.path.abspath(report_path))
+    for f in sorted(glob.glob(os.path.join(d, "serial-*.log")), key=os.path.getmtime)[-1:]:
+        try:
+            with open(f, errors="replace") as fh:
+                out.append((os.path.basename(f), fh.read()))
+        except OSError:
+            pass
+    return out
+
+
 def main():
-    if len(sys.argv) < 2:
+    """bisect.txt [report-prefix] [--owner SPEC|FILE] [--log FILE]...: the same analysis triage_reports.py prints; the
+    prefix (<report>-bisect.txt -> <report>), the kernel logs (the archive's and the serial log next to it) and the
+    owner's verdicts (<report>-owner.txt / owner.txt) are found like triage_reports.py finds them when not given"""
+    args = sys.argv[1:]
+    owner_arg, log_files, pos = None, [], []
+    i = 0
+    while i < len(args):
+        if args[i] in ("--owner", "--log") and i + 1 < len(args):
+            if args[i] == "--owner":
+                owner_arg = args[i + 1]
+            else:
+                log_files.append(args[i + 1])
+            i += 2
+        elif args[i].startswith("--"):
+            sys.exit(__doc__)
+        else:
+            pos.append(args[i])
+            i += 1
+    if not pos:
         sys.exit(__doc__)
-    text = open(sys.argv[1], errors="replace").read()
-    prefix = sys.argv[2] if len(sys.argv) > 2 else None
-    r = analyse(text, prefix)
+    path = pos[0]
+    with open(path, errors="replace") as f:
+        text = f.read()
+    prefix = pos[1] if len(pos) > 1 else (path[:-len("-bisect.txt")] if path.endswith("-bisect.txt") else None)
+    report = (prefix + ".tar.gz" if prefix and os.path.exists(prefix + ".tar.gz") else prefix) or path
+    logs = None
+    if re.search(r"^variant: 4\b", text[:2000], re.M):
+        logs = bisect_logs(report)
+        for lf in log_files:
+            try:
+                with open(lf, errors="replace") as fh:
+                    logs.append((os.path.basename(lf), fh.read()))
+            except OSError as e:
+                print("WARN cannot read the log %s: %s" % (lf, e))
+    owner = None
+    if owner_arg is not None:
+        try:
+            with open(owner_arg, errors="replace") as fh:
+                owner = fh.read()
+        except OSError:
+            owner = owner_arg
+    else:
+        owner = locate_owner(report if prefix else path)
+    r = analyse(text, prefix, logs, owner)
     for l in r["table"]:
         print(l)
     for lv, t in r["findings"]:

@@ -2517,16 +2517,20 @@ step, the looks as `<report>-scanoutbisect<N>[a]-pipe<P>.ppm`), the tests
 file only the step headers. `tools/triage_reports.py` prints it
 (`tools/triage_bisect.py`): step, what changed, the owner's answer (tty only;
 `-` on the timer), pipe 0 / 1 % not black, whether the picture moved between
-the step's two looks (`move` / `still`), the deltas of the swaps per head, the
-stale holds, the would-hold count and the empty backs since the step before.
+the step's two looks (`move` / `still`), the share of pipe 0 that is the grey
+(170,170,170) placeholder (`grey0`), the step's verdict (`right`, `right,slow`,
+`BROKEN`, `?` = not judged) and the deltas of the swaps per head, the copies,
+the buffers rewritten in place and the empty backs since the step before.
+A step is judged on its own (see "Card run 2026-10-18b: the bisect judgement"
+below); the owner's `y` / `n` at the tty overrides the rules.
 
 | Triage line | Meaning | Action |
 |---|---|---|
-| `FAIL BISECT: BREAKS AT step K (<switch>)` | step 1 (everything off) was fine, step 0 broken, and step K is the first that switches a feature back on and broke | the switch of step K is the suspect (the steps are cumulative: everything before K is on too): `a3` (2) = A3 (`accel/rdna3-accel.cpp` import rule, N27), `flicker` (3) / `swap_torn` (5) = the BAR reads of the diagnostics (cost per swap: `swaps_hashed_h<N>`; a budget of 3000 / 20000 per head is used up early, then the switch does nothing), `swap_latch` (4) = the wait under the family's lock (N28 open item 2), `swap_mode` (6) = the copy (N29), `trace_scan` (7) = more BAR reads, `swap_stale` (8) = the hold (N31). Ask for the same step again before changing code: the line `WARN BISECT: step 8 has the same switches as step 0 ... flaky` says when the looks differ between two runs of one state |
+| `FAIL BISECT: BREAKS AT step K (<switch>)` | step 1 (everything off) was fine, step 0 broken, and step K is the first that switches a feature back on and broke | the switch of step K is the suspect (the steps are cumulative: everything before K is on too): `a3` (2) = A3 (`accel/rdna3-accel.cpp` import rule, N27), `flicker` (3) / `swap_torn` (5) = the BAR reads of the diagnostics (cost per swap: `swaps_hashed_h<N>`; a budget of 3000 / 20000 per head is used up early, then the switch does nothing), `swap_latch` (4) = the wait under the family's lock (N28 open item 2), `swap_mode` (6) = the copy (N29), `trace_scan` (7) = more BAR reads, `swap_stale` (8) = the hold (N31). Ask for the same step again before changing code if the looks are doubtful |
 | `FAIL BISECT: still broken with every switchable feature off` | step 1 is bad as well | not one of these switches: boot-args (`rdna3gamma`, `rdna3visreserve`, `rdna3accelcf`), the copy forward fixes, the VMID admission, kext code without a switch, the plugin (run `bisect-plugin`) or the hardware; compare an older build (`rdna3vm step default` on the commit before card run 58) |
 | `WARN BISECT: the defaults (step 0) looked fine but every switch off (step 1) broke` | the old behaviour is the broken one, or the bug is intermittent | repeat the step; read the looks of both |
 | `INFO BISECT: no step looked broken` | the bug did not show | needs real apps or the owner's own use; `WARN` lines about missing looks say whether the run proved anything |
-| `FAIL the first step the owner marked n` / `FAIL ... whose looks black` / `WARN ... stood still` | the first step by the owner's `n`, a lit pipe with at most 3 % of its picture not black, a pipe that moved in other steps and did not between the step's two looks | step 0 is the reference (the bug itself); the others are in the `BISECT` line |
+| `FAIL the first step the owner marked n` / `FAIL ... whose looks black` | the first step by the owner's `n`, a lit pipe with at most 3 % of its picture not black | step 0 is the reference (the bug itself); the others are in the `BISECT` line |
 | `WARN step N: no look` / `no counters` / `step(s) ... never ran` / `has no end line` | data missing: `rdna3_drminfo` absent or failed, a sysctl dump empty, the VM's time limit hit | the tests file's `== bisect step N` headers and the serial log say where it stopped; `AUTO_TIMEOUT_MIN` |
 | `FAIL step N: a switch did not take` | `sysctl -w` failed or read back another value (`failed:` in bisect.txt) | the step did not test what its row says; the kext may be older (`absent:` lists switches this kext lacks) |
 | `WARN step 0 is not the compiled defaults` | a boot-arg set a switch (`rdna3a3ws`, `rdna3swaplanded`, `rdna3swapmode=1` ...); the compiled defaults are `swap_mode` 0 and `trace_scan` 0 since 2026-10-17d | the 'on' steps return to what the boot left, not to the compiled default |
@@ -2560,23 +2564,56 @@ debug.rdna3accel_trace_dump)` line in the kernel log.
 
 | Triage line | Meaning | Action |
 |---|---|---|
-| `FAIL BISECT-AGDC: the reference (step 0 ...) looked BROKEN [...]; the steps that looked RIGHT: step K (...)` | the bug shows at the defaults and the listed combinations (the owner's `y`, or lit pipes that are not black and move) did not | the switches that differ in the right steps and are the same in the broken ones are the lead (the steps are not cumulative: compare each with step 0 directly); `INFO BISECT-AGDC by swap_mode` groups right / broken by the mode; port the matching amdgpu behaviour, do not just flip the default |
+| `FAIL BISECT-AGDC: the reference (step 0 ...) looked BROKEN [...]; the steps that looked RIGHT: step K (...)` | the bug shows at the defaults and the listed combinations (the owner's `y`, or the rules R1-R3 below found nothing wrong; ` - SLOW` marks `right,slow`) did not | the switches that differ in the right steps and are the same in the broken ones are the lead (the steps are not cumulative: compare each with step 0 directly); `INFO BISECT-AGDC by swap_mode` groups right / broken by the mode; port the matching amdgpu behaviour, do not just flip the default |
 | `FAIL BISECT-AGDC: ... looked BROKEN ... and NO step looked right` | none of swap_mode 0/1/2, `swap_gen`, `flipbuf_present`, `swap_stale`, `iop`, `a3`, `swap_latch`, `iop_flip` repairs it on the agdc profile (or the answers are missing: read the WARN lines) | not these switches: the writer of the scanned-out buffer itself (WindowServer / the plugin: `rdna3vm step bisect-plugin`, the plugin trace of the same run), the copy forward, the hardware; the `inplace` / `torn` counters say whether the panel reads a buffer that is being drawn |
 | `WARN BISECT-AGDC: the reference (step 0) looked RIGHT ... but these steps looked BROKEN` | the bug did not show at the defaults; the listed steps are what breaks it | repeat the run; the broken steps' switches are the ones to look at |
 | `INFO BISECT-AGDC: no step looked broken` | the bug did not show | needs real apps or the owner's own use (`rdna3vm step play`) |
-| `WARN BISECT-AGDC: step 12 has the same switches as step 0 but looked ...` | flaky, or an order effect: `iop` 0 in step 7 removes the pipe capabilities at runtime and WindowServer may not take `iop` 1 back | read steps 0 and 12 side by side; if only the steps after 7 are broken, run again without step 7 in front (reboot) |
+| `<-- R1: N% of pipe 0 is the grey (170,170,170) placeholder` / `R2: pipe 0 stood still ... while N head-0 swaps ran` / `R3: N of M head-0 swaps copied an empty back` (step row) | why a step is BROKEN: R1 the grey placeholder / stale picture covers 4 % or more of pipe 0 in either look; R2 pipe 0 did not change between the two looks (PPMs and the looks' `bytes changed`, under 0.3 %) while 60 or more swaps ran; R3 (counters only) half of the head-0 swaps copied an empty back | step 12 (the defaults again) judged on its own: a step with the switches of step 0 can differ, that is not a WARN |
+| `INFO BISECT-AGDC: looked right but SLOW: step K ...: N of M head-0 swaps waited for the latch, X ms each` | `right,slow`: half of the swaps or more waited for the flip's latch and each wait took 10 ms or more (swap mode 0: DRIVER-PLAN N35 / N38) | the picture is right, the cost is the wait under the family's lock |
+| `WARN BISECT-AGDC: not judged (...)` / `WARN step N: pipe 0: 0 of the 2 PPMs ... could be read` / `pipe 0 stood still and no swap counter says how many swaps ran` | no PPMs of pipe 0 (and no R3) or a standing picture without swap counters: never "right" without the picture | the run's `<report>-scanoutbisect<N>[a]-pipe0.ppm` files did not come; the owner's answer or `--owner` decides |
+| `INFO pipe 1 (the idle second monitor) flickered between the looks in step(s) ...` | the idle pipe changed in 0.5 % or more of its pixels between the looks (stale buffers alternating in the broken copy steps) | information only: pipe 1 never decides a verdict |
+| `WARN head 0 flicker hash budget (swaps_hashed_h0 3000) used up at step N: abab/bufchg blind from there` | `flicker=1` hashes only the first 3000 swaps per head; later steps have no flicker-test evidence (`abab`, `bufchg`) | set `debug.rdna3accel_flicker=2` (always) before the steps that matter |
+| `AGREES` / `DISAGREES` column, `FAIL step N: the owner says ..., the rules say ...: DISAGREES`, `BISECT owner verdict` | the owner's verdicts (`<report>-owner.txt` or `owner.txt` next to the report, or `tools/triage_bisect.py bisect.txt --owner 0:n,1:s,2:n,...`; y works, s works but slow, n broken) against the rules (not the tty answer) | a DISAGREES is a FAIL: the rules or the owner's reading are wrong, fix the judgement (`judge()` in `tools/triage_bisect.py`) before trusting its verdict |
 | `INFO FRONT SURFACE lines per step: <log>, cut by ...` and the `front` column (`live writer lines / sampler lines`) | the kext's `FRONT SURFACE ... *** MOVED -- A LIVE WRITER ... ***` lines per step, cut out of the serial log by the step's marker line or out of the archive's log by its clock | a live writer in step K = something paints the scanned-out surface in that combination |
 | `WARN the log has N FRONT SURFACE sample line(s), none inside a step` | the sampler logs 40 samples per boot (`rd3AccelSampleFront`) and they were used up before the bisect | the log cannot show a live writer in this run: the per-step `inplace` (buffers rewritten while on the panel and shown again) and `torn` counters in the second table are the evidence; re-arming the sampler per step is the open item in DRIVER-PLAN N36 |
 | `WARN <log>: could not place any step in the log` / `step(s) ... not found in it` / `WARN no kernel log given` | no `trace: events W..W (asked by sysctl` marker near the steps' `trace_events_start` and no clock in the lines (an older kext without `trace_dump`, a log that starts later, the wrong serial log) | the `front` column is `?`; read the serial log by hand with `at:` times and the `trace_events` numbers of bisect.txt |
 
 The second table has, per step, the deltas from that step's own `-- before` block (an older autoreport.sh
-without it falls back to the step before): swaps per head, `copy` (swap mode 1/2 copies), `hold` (stale
-holds), `flips` (`iop_flips`, zero-copy), `inplace`, `torn`, `iop_ok`, `gen hold` (`swaps_genhold_h<N>`: the
-write generations' holds), `fbuf` (the family's flip-buffer calls / of them presented). The switch column is
+without it falls back to the step before): swaps per head, `copy` (swap mode 1/2 copies), `empty` (backs
+copied empty), `flips` (`iop_flips`, zero-copy), `inplace`, `torn`, `iop_ok`, `lwait` / `lat ms` (head-0
+swaps that waited for the latch and the mean wait), `hashed` (`swaps_hashed_h0` at the step's end, the
+flicker test's budget is 3000), `gen hold` (`swaps_genhold_h<N>`: the
+write generations' holds), `fbuf` (the family's flip-buffer calls / of them presented). The stale-hold
+columns are gone (`swaps_stalehold_h<N>` / `_would_` were 0 in every step of card run 2026-10-18b). The switch column is
 `swap_mode/stale/iop/a3/lat/flip/fbp/gen` (`-` for a switch an older run did not have). The trace of each step: events
 `trace_events_start`..`trace_events` of `36-stream-trace-stream.bin` (`tools/rdna3_trace.py`), the stream's
 byte positions are next to them; WindowServer's plugin trace is the end-of-run snapshot (`plugin-end-...`,
 `plugin-bisect-end-...`), per step only with `BISECT_PLUGIN_SNAP=1` (by hand).
+
+### Card run 2026-10-18b: the bisect judgement
+
+The owner's reading of the bisect-agdc run: steps 1, 3, 5, 11 (`swap_mode` 0, the flip) work but are slow,
+every other step (mode 1 and 2, the defaults included) is broken. The first judgement ("a pipe that stood still
+although it moved in another step is broken") contradicted that on 10 of 13 steps: pipe 1 (the idle second
+monitor) only "moves" in the broken copy steps (stale buffers alternate), so the good mode 0 steps looked "stood
+still"; and the flip of the picture counted as "bytes changed". `tools/triage_bisect.py` `judge()` now judges
+every step on its own, on pipe 0 (pipe 1 never decides):
+
+- **R1** (the content signal): 4 % or more of pipe 0's pixels are exactly (170,170,170) in either look (that run:
+  right steps at most 2.8 %, broken ones at least 4.9 %; mode 0's flip shows no placeholder).
+- **R2**: pipe 0's two looks are the same (PPM difference and both `bytes changed` under 0.3 %) while the step
+  ran 60 or more head-0 swaps: the compositor swaps and the screen shows nothing new (step 6, mode 2).
+- **R3** (counters only): half or more of the head-0 swaps copied an empty back (`swaps_copyempty_h0`).
+- RIGHT otherwise; `right,slow` when `swaps_latchwait_h0` is half of `swaps_h0` or more and
+  `swaps_latchus_h0` / `swaps_latchwait_h0` is 10 ms or more. No PPMs and no R3: `not judged`, never right.
+- A lit pipe at most 3 % not black is broken too (BLACK_PCT); the tty answer overrides the rules; `--owner` /
+  `owner.txt` compare (AGREES / DISAGREES, a FAIL).
+
+On that run the tool gives right,slow 1, 3, 5, 11 and broken 0, 2, 4, 6, 7, 8, 9, 10, 12 (13 of 13 as the owner).
+The limits come from one run: if a later run's good step has a grey share near 4 % or a broken one has none,
+`DISAGREES` shows it and the constants (`GREY_FRACTION`, `STILL_MIN_SWAPS`, `EMPTY_FRACTION`) are the place to
+look. `tests/test_triage_bisect.sh` scenario `agdcowner` reproduces the run (13 steps, the real counter deltas and
+grey shares) with the boundaries (3.9 / 4.1 % grey, 59 / 60 swaps, no PPMs, pipe 1 flicker alone).
 
 ### Card run 2026-10-17d: the bisect
 

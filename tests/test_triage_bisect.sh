@@ -234,7 +234,96 @@ def clocklog4(front):
     return "\n".join(out) + "\n"
 
 
-def write(text, archive=True, upload=False, runtests=True, args="rdna3bisect=1 rdna3vmauto=1", log="RDNA3: hello\n", serial=None):
+# ---- the judgement's fixture (card run 2026-10-18b, bisect-agdc: the owner said steps 1, 3, 5, 11 work but slow, the others are
+# broken): 13 steps of PLAN4 (swap_mode 1,0,1,0,1,0,2,1,1,1,1,0,1), pictures of 40x25 = 1000 pixels (1 pixel = 0.1 %)
+REAL = {
+    # per step: swaps h0 / h1 / copy / inplace / latchwait / latchus / copyempty deltas, the hash counter at the end of the step
+    "sw0": [33, 73, 78, 132, 215, 162, 402, 466, 352, 317, 394, 291, 248],
+    "sw1": [3, 2, 2, 0, 13, 10, 60, 38, 35, 26, 26, 7, 18],
+    "copy": [33, 1, 78, 1, 211, 1, 400, 466, 352, 317, 394, 1, 244],
+    "inplace": [0, 69, 0, 102, 0, 125, 2, 0, 0, 0, 0, 284, 4],
+    "lwait": [0, 64, 1, 118, 4, 144, 2, 0, 0, 0, 0, 290, 5],
+    "lus": [0, 878922, 14802, 1657322, 54724, 2072044, 25936, 0, 0, 0, 0, 4304762, 72412],
+    "empty": [0, 0, 78, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "hashed": [1000, 1080, 1166, 1326, 1553, 1894, 2358, 2948, 3000, 3000, 3000, 3000, 3000],
+    # the grey (170,170,170) share of pipe 0 in the early / main look, in tenths of a percent
+    "grey": [(168, 168), (28, 21), (21, 21), (21, 21), (21, 57), (0, 0), (21, 21), (52, 49), (97, 284), (284, 284), (123, 38), (28, 28),
+             (294, 292)],
+    # the share of pipe 0 / pipe 1 that differs between the looks, in tenths of a percent
+    "diff0": [0, 200, 0, 120, 50, 260, 0, 50, 50, 50, 50, 120, 50],
+    "diff1": [0, 0, 0, 0, 34, 0, 0, 34, 9, 23, 25, 0, 13],
+}
+QUIET = {   # nothing wrong anywhere: pipe 0 moves, no grey, swaps without empty backs and waits, the hash budget not reached
+    "sw0": [100] * 13, "sw1": [0] * 13, "copy": [100] * 13, "inplace": [0] * 13, "lwait": [0] * 13, "lus": [0] * 13,
+    "empty": [0] * 13, "hashed": [100 * (i + 1) for i in range(13)], "grey": [(0, 0)] * 13, "diff0": [120] * 13, "diff1": [0] * 13}
+
+
+def ppm_px(path, w, h, base, grey_tail=0, marks=0):
+    """a picture: `base` colour, the first `marks` pixels white (what differs between the looks), the last `grey_tail` pixels the
+    grey placeholder (170,170,170)"""
+    px = bytearray(bytes(base) * (w * h))
+    for i in range(marks):
+        px[i * 3:i * 3 + 3] = bytes((255, 255, 255))
+    for i in range(w * h - grey_tail, w * h):
+        px[i * 3:i * 3 + 3] = bytes((170, 170, 170))
+    with open(path, "wb") as f:
+        f.write(b"P6\n%d %d\n255\n" % (w, h) + bytes(px))
+
+
+def build13(spec, answers=None, noppm=(), nocounters=(), override=None):
+    """bisect.txt (+ the PPMs) of a bisect-agdc run from `spec` (REAL / QUIET), `override` = {key: {step: value}} to change a step's
+    numbers; noppm = steps whose PPMs are not written"""
+    sp = dict((k, list(v)) for k, v in spec.items())
+    for k, ov in (override or {}).items():
+        for n, v in ov.items():
+            sp[k][n] = v
+    head = ["# rdna3 bisect v1", "variant: 4 (bisect-agdc)", "hold_s: 30", "mode: " + ("tty" if answers else "timer"), "started: 12:00:00",
+            "console_user: tester", "autologin: none", "originals: " + " ".join("%s=%s" % kv for kv in zip(KNOBS4, BASE4.split()))]
+    for n, kind, name, vals in PLAN4:
+        head.append("plan: %d|%02d:%02d|%s|%s|x" % (n, n * 30 // 60, n * 30 % 60, kind, name))
+    lines = list(head)
+    tot = {"swaps_h0": 5000, "swaps_h1": 800, "swaps_copy_h0": 4000, "swaps_inplace_h0": 100, "swaps_latchwait_h0": 10,
+           "swaps_latchus_h0": 1000, "swaps_copyempty_h0": 0, "swaps_hashed_h0": 900}
+    hashed_prev = 900
+    for n, kind, name, vals in PLAN4:
+        chg = ", ".join("%s %s->%s" % (k, a, b) for k, a, b in zip(KNOBS4, BASE4.split(), vals.split()) if a != b) or "nothing"
+        o = ["== step %d" % n, "kind: " + kind, "name: " + name, "changed: " + chg]
+        keys = (("swaps_h0", "sw0"), ("swaps_h1", "sw1"), ("swaps_copy_h0", "copy"), ("swaps_inplace_h0", "inplace"),
+                ("swaps_latchwait_h0", "lwait"), ("swaps_latchus_h0", "lus"), ("swaps_copyempty_h0", "empty"))
+        if n not in nocounters:
+            o += ["-- before"] + ["debug.rdna3accel_%s: %d" % (c, tot[c]) for c, _ in keys] + [
+                "debug.rdna3accel_swaps_hashed_h0: %d" % hashed_prev]
+        o += ["stream_bytes_start: %d" % (n * 1000), "trace_events_start: %d" % ev0(n), "set: (nothing)",
+              "readback: " + " ".join("debug.rdna3accel_%s=%s" % kv for kv in zip(KNOBS4, vals.split())),
+              "at: 12:%02d:00" % n, "offset: 00:%02d" % (n * 30)]
+        still = sp["diff0"][n] == 0
+        b0 = 0 if still else 66          # the looks' own text: a few bytes, far under the 0.3 % threshold
+        o += look(n, "bisect%da" % n, [99, 99], [b0, 0]) + look(n, "bisect%d" % n, [99, 99], [b0, 0])
+        o.append("looks: bisect%da bisect%d" % (n, n))
+        if n not in noppm:
+            ga, gm = sp["grey"][n]
+            k0, k1 = sp["diff0"][n], sp["diff1"][n]
+            ppm_px("%s-scanoutbisect%da-pipe0.ppm" % (stem, n), 40, 25, (60, 70, 90), grey_tail=ga)
+            ppm_px("%s-scanoutbisect%d-pipe0.ppm" % (stem, n), 40, 25, (60, 70, 90), grey_tail=gm, marks=k0)
+            ppm_px("%s-scanoutbisect%da-pipe1.ppm" % (stem, n), 40, 25, (89, 95, 109))
+            ppm_px("%s-scanoutbisect%d-pipe1.ppm" % (stem, n), 40, 25, (89, 95, 109), marks=k1)
+        if n not in nocounters:
+            o.append("-- counters")
+            for c, k in keys:
+                tot[c] += sp[k][n]
+                o.append("debug.rdna3accel_%s: %d" % (c, tot[c]))
+            o.append("debug.rdna3accel_swaps_hashed_h0: %d" % sp["hashed"][n])
+        hashed_prev = sp["hashed"][n]
+        o += ["stream_bytes: %d" % (n * 1000 + 900), "trace_events: %d" % (ev0(n) + 4000), "answer: " + (answers or {}).get(n, "enter" if answers else "-"),
+              "== end step %d" % n]
+        lines += o
+    lines += ["restored: " + BASE4, "finished: 12:07:00", "== end"]
+    return "\n".join(lines) + "\n"
+
+
+
+def write(text, archive=True, upload=False, runtests=True, args="rdna3bisect=1 rdna3vmauto=1", log="RDNA3: hello\n", serial=None,
+          owner=None):
     members = {"01-boot-args.txt": "boot-args\t%s\n" % args, "03-kexts.txt": "RDNA3Accel\n", "11-ioreg-props.txt": "",
                "20-log-rdna3.txt": log}
     if serial is not None:
@@ -249,6 +338,8 @@ def write(text, archive=True, upload=False, runtests=True, args="rdna3bisect=1 r
             t.addfile(ti, io.BytesIO(data))
     if upload and text:
         open(stem + "-bisect.txt", "w").write(text)
+    if owner is not None:
+        open(stem + "-owner.txt", "w").write(owner)
     if runtests:
         open(stem + "-tests.txt", "w").write("boot-args: %s\n%s[exit 0]\n" % (
             args, "== bisect (the kernel's switches)\n" if "rdna3bisect" in args else ""))
@@ -260,8 +351,8 @@ elif scen == "alloff":
     write(build(bad_from=None, off_bad=True))
 elif scen == "good":
     write(build(ref_bad=False, tty=False))
-elif scen == "still":
-    write(build(ref_bad=False, still_step=4))
+elif scen == "still":   # no tty: the rules decide (the owner's answer would override them)
+    write(build(ref_bad=False, still_step=4, tty=False))
 elif scen == "cut":
     write(build(bad_from=6, cut_after=7, drop_look=3, drop_counters=5))
 elif scen == "failed":
@@ -287,10 +378,37 @@ elif scen.startswith("agdc"):
         write(build4(right=tuple(range(13)), tty=False), args=A, serial=serial4({}))
     elif scen == "agdcrefok":       # the reference looked right, step 2 broken
         write(build4(right=tuple(n for n in range(13) if n != 2)), args=A, serial=serial4({}))
-    elif scen == "agdcflaky":       # step 12 has the switches of step 0 and looks different
+    elif scen == "agdcflaky":       # step 12 has the switches of step 0 and looks different: the judgement is per step, no WARN
         write(build4(right=(12,)), args=A, serial=serial4({}))
     elif scen == "agdcnogen":       # a kernel without the swap_gen / flipbuf_present sysctls (ECC review round 1)
         write(build4(right=(3, 4), nogen=True), args=A, serial=serial4({}))
+    elif scen.startswith(("agdcowner", "agdcq", "agdctty")):
+        OWN_REAL = "0:n,1:s,2:n,3:s,4:n,5:s,6:n,7:n,8:n,9:n,10:n,11:s,12:n"
+        if scen == "agdcowner":         # card run 2026-10-18b, reproduced: the owner's verdicts in an owner.txt next to the report
+            write(build13(REAL), args=A, serial=serial4({}), owner=OWN_REAL + "\n", upload=True)
+        elif scen == "agdcownerbad":    # the owner says step 1 is broken and step 2 right: two DISAGREES
+            write(build13(REAL), args=A, serial=serial4({}), owner="0:n,1:n,2:y,3:s,4:n\n", upload=True)
+        elif scen == "agdcttyover":     # the owner's y / n at the tty overrides the rules (step 1 n against right-slow, step 2 y against broken)
+            write(build13(REAL, answers={1: "n", 2: "y"}), args=A, serial=serial4({}))
+        elif scen == "agdcownertext":   # what is not a verdict is a WARN
+            write(build13(REAL), args=A, serial=serial4({}), owner="0:n 1:maybe", upload=True)
+        elif scen == "agdcqidle":       # pipe 1 idle everywhere, pipe 0 moving: all right
+            write(build13(QUIET), args=A, serial=serial4({}))
+        elif scen == "agdcqflick":      # pipe 1 flickers in some steps and nothing else: not broken
+            write(build13(QUIET, override={"diff1": {2: 5, 5: 4, 9: 340}}), args=A, serial=serial4({}))
+        elif scen == "agdcqgrey":       # 3.9 % / 4.1 % of grey, in the main look, in the early look
+            write(build13(QUIET, override={"grey": {2: (39, 39), 3: (41, 0), 4: (0, 41), 5: (39, 41), 6: (40, 0)}}), args=A,
+                  serial=serial4({}))
+        elif scen == "agdcqswaps":      # a standing picture: 59 swaps ok, 60 broken; 2 pixels (0.2 %) differ = still, 3 (0.3 %) = moved
+            write(build13(QUIET, override={"diff0": {2: 0, 3: 0, 4: 2, 5: 3, 6: 2}, "sw0": {2: 59, 3: 60, 4: 100, 5: 100, 6: 59}}),
+                  args=A, serial=serial4({}))
+        elif scen == "agdcqnoppm":      # no PPMs: not judged, never right; the counters' R3 still says broken; slow needs no PPM either
+            write(build13(QUIET, noppm=(2, 3, 4), override={"empty": {3: 80}, "sw0": {3: 100}}), args=A, serial=serial4({}))
+        elif scen == "agdcqnocnt":      # no counters at all in step 5, the picture still: R2 cannot decide
+            write(build13(QUIET, nocounters=(5, 6), override={"diff0": {5: 0, 6: 120}}), args=A, serial=serial4({}))
+        elif scen == "agdcqslow":       # the slow boundary: 50 % of the swaps waited, 10 ms each
+            write(build13(QUIET, override={"lwait": {2: 50, 3: 49, 4: 60, 5: 60}, "lus": {2: 500000, 3: 490000, 4: 599940, 5: 600000}}),
+                  args=A, serial=serial4({}))
     elif scen == "agdcnobefore":    # an older autoreport: no "-- before" block, the deltas come from the step before
         write(build4(right=(3,), nobefore=True), args=A, serial=serial4({}))
 elif scen == "plain":    # an ordinary run: no bisect at all
@@ -335,10 +453,13 @@ grep -q 'INFO BISECT: no step looked broken' <<<"$o" || fail "good verdict: $(gr
 ! grep -qE 'FAIL (BISECT|the first)' <<<"$o" || fail "a good run failed: $(grep -E 'FAIL' <<<"$o" | head -3)"
 grep -q 'INFO no owner answers (timer mode' <<<"$o" || fail "timer mode not said"
 
-# ---- a picture that stood still in one step although it moved in the others
+# ---- a picture that stood still in one step while the swaps ran (R2): judged on its own, not against the other steps
 mk "$T/s" still
 o=$(run "$T/s")
-grep -q 'WARN the first step whose looks stood still: step 4 .*pipe 0 stood still' <<<"$o" || fail "still: $(grep -i 'still' <<<"$o" | head -3)"
+grep -qE '^ +4 on .* BROKEN .*<-- R2: pipe 0 stood still between the step.s looks while 100 head-0 swaps ran' <<<"$o" || fail "still: $(grep -E '^ +4 ' <<<"$o")"
+[ "$(grep -cE '^ +[0-9]+ (ref|off|on|extra|final) .* BROKEN ' <<<"$o")" = 1 ] || fail "still: only step 4 is broken: $(grep -E 'BROKEN' <<<"$o")"
+! grep -q 'whose looks stood still' <<<"$o" || fail "still: the old cross-step finding is back: $(grep 'stood still' <<<"$o")"
+grep -qE '^ +0 ref .* right ' <<<"$o" || fail "still: step 0 (no counters before it, the picture moves) is right: $(grep -E '^ +0 ' <<<"$o")"
 
 # ---- missing data is loud
 mk "$T/c" cut
@@ -371,14 +492,16 @@ grep -qE '^ +3 var .*swap_mode 1->0, swap_gen 1->0 +y +45% +30% ' <<<"$o" || fai
 grep -qE '^ +5 var .*swap_mode 1->0, flipbuf_present 0->1 +n ' <<<"$o" || fail "agdc: step 5 row (changed against the boot, not the step before): $(grep -E '^ +5 var' <<<"$o")"
 grep -q 'FAIL BISECT-AGDC: the reference (step 0, the agdc profile.s defaults) looked BROKEN' <<<"$o" || fail "agdc: verdict: $(grep BISECT <<<"$o")"
 grep -q 'the steps that looked RIGHT: step 3 (swap_mode 0, swap_gen 0); step 4 (swap_mode 1, flipbuf_present 1)' <<<"$o" || fail "agdc: the right steps: $(grep 'looked RIGHT' <<<"$o")"
-grep -q 'INFO BISECT-AGDC by swap_mode: mode 0: right \[3\], broken \[1, 5, 11\]; mode 1: right \[4\], broken \[0, 2, 7, 8, 9, 10, 12\]; mode 2: right none, broken \[6\]' <<<"$o" ||
+grep -q 'INFO BISECT-AGDC by swap_mode: mode 0: right \[3\], right-slow none, broken \[1, 5, 11\]; mode 1: right \[4\], right-slow none, broken \[0, 2, 7, 8, 9, 10, 12\]; mode 2: right none, right-slow none, broken \[6\]' <<<"$o" ||
     fail "agdc: by swap_mode: $(grep 'by swap_mode' <<<"$o")"
 ! grep -q 'BREAKS AT' <<<"$o" || fail "agdc: a cumulative verdict for a plan that is not cumulative"
 grep -q 'bisect  *FAIL BISECT-AGDC: the reference' <<<"$o" || fail "agdc: SUMMARY row: $(sed -n '/^SUMMARY/,$p' <<<"$o" | grep -i bisect)"
 # the counters: from the step's own "-- before" block (swaps h0 +300, not +340 from the step before), per step
 grep -q 'swap counters per step' <<<"$o" || fail "agdc: no counter table"
-grep -qE '^ +3 +0/1/1/1/1/0/0/0 +300 +150 +30 +6 +7 +15 +0 +50 ' <<<"$o" || fail "agdc: step 3 counters: $(grep -E '^ +3 +[0-9]/' <<<"$o")"
-grep -qE '^ +10 +1/0/1/1/1/0/0/1 +300 +150 +100 +20 +7 +50 ' <<<"$o" || fail "agdc: step 10 counters: $(grep -E '^ +10 +[0-9]/' <<<"$o")"
+# columns: sw h0, sw h1, copy, empty, flips, inplace, torn, iop_ok, lwait, lat ms, hashed
+grep -qE '^ +3 +0/1/1/1/1/0/0/0 +300 +150 +30 +[?] +7 +15 +0 +50 +[?] +- +[?] ' <<<"$o" || fail "agdc: step 3 counters: $(grep -E '^ +3 +[0-9]/' <<<"$o")"
+grep -qE '^ +10 +1/0/1/1/1/0/0/1 +300 +150 +100 +[?] +7 +50 ' <<<"$o" || fail "agdc: step 10 counters: $(grep -E '^ +10 +[0-9]/' <<<"$o")"
+! grep -qE 'stalehold|would-hold|held,' <<<"$o" || fail "agdc: the dead stale-hold columns are back"
 grep -q 'the switch column: swap_mode/stale/iop/a3/lat/flip/fbp/gen' <<<"$o" || fail "agdc: the switch column is not explained"
 # the trace slice of each step
 grep -qE '^ +3 .* 25000\.\.29000 \(stream bytes 3000\.\.3900\)' <<<"$o" || fail "agdc: step 3 trace slice: $(grep -E '^ +3 +[0-9]/' <<<"$o")"
@@ -424,10 +547,11 @@ mk "$T/g7" agdcrefok
 o=$(run "$T/g7")
 grep -q 'WARN BISECT-AGDC: the reference (step 0) looked RIGHT .*these steps looked BROKEN: step 2 (swap_mode 1, swap_gen 0)' <<<"$o" || fail "agdc ref ok: $(grep BISECT <<<"$o")"
 
-# step 12 = step 0 but not alike
+# step 12 = step 0 but not alike: every step is judged on its own, so no "flaky" WARN (it came from the wrong judgement)
 mk "$T/g8" agdcflaky
 o=$(run "$T/g8")
-grep -q 'WARN BISECT-AGDC: step 12 has the same switches as step 0 but looked right there, broken here' <<<"$o" || fail "agdc flaky: $(grep BISECT <<<"$o")"
+! grep -qi 'flaky\|same switches as step 0' <<<"$o" || fail "agdc flaky: the WARN is back: $(grep -i 'flaky' <<<"$o")"
+grep -qE '^ +12 final .* right ' <<<"$o" || fail "agdc flaky: step 12 should be judged right on its own: $(grep -E '^ +12 ' <<<"$o")"
 
 # an older autoreport without the "-- before" blocks: the deltas come from the step before (1000 swaps, the whole step before's span, not 300)
 mk "$T/g9" agdcnobefore
@@ -440,6 +564,123 @@ o=$(run "$T/g10")
 grep -q 'WARN BISECT-AGDC: the kernel has no swap_gen / flipbuf_present sysctl' <<<"$o" || fail "agdc no gen: $(grep BISECT <<<"$o")"
 o=$(run "$T/g1")
 ! grep -q 'the kernel has no swap_gen' <<<"$o" || fail "agdc: a missing-sysctl WARN with every sysctl read back"
+
+# ---- the judgement (card run 2026-10-18b, bisect-agdc): every step on its own, on pipe 0. The owner said steps 1, 3, 5, 11
+# (swap_mode 0) work but slow and all the others are broken; the old rule ("a pipe that stood still although it moved in another
+# step") said 10 of 13 wrong
+mk "$T/o1" agdcowner
+o=$(run "$T/o1")
+for n in 1 3 5 11; do
+    grep -qE "^ +$n var .* right,slow " <<<"$o" || fail "agdcowner: step $n should be right,slow: $(grep -E "^ +$n var" <<<"$o")"
+done
+for n in 0 2 4 6 7 8 9 10 12; do
+    grep -qE "^ +$n (ref|var|final) .* BROKEN " <<<"$o" || fail "agdcowner: step $n should be BROKEN: $(grep -E "^ +$n (ref|var|final)" <<<"$o")"
+done
+grep -q 'INFO BISECT-AGDC by swap_mode: mode 0: right none, right-slow \[1, 3, 5, 11\], broken none; mode 1: right none, right-slow none, broken \[0, 2, 4, 7, 8, 9, 10, 12\]; mode 2: right none, right-slow none, broken \[6\]' <<<"$o" ||
+    fail "agdcowner: by swap_mode: $(grep 'by swap_mode' <<<"$o")"
+! grep -qi 'stood still between the step.s looks (it moved\|whose looks stood still\|flaky\|same switches as step 0' <<<"$o" || fail "agdcowner: an old finding is back: $(grep -i 'stood still\|flaky' <<<"$o" | head -3)"
+# the rules are named
+grep -qE '^ +0 ref .*<-- R1: 16.8% of pipe 0 is the grey \(170,170,170\) placeholder \(limit 4%\)' <<<"$o" || fail "agdcowner: R1 on step 0: $(grep -E '^ +0 ' <<<"$o")"
+grep -qE '^ +6 var .*<-- R2: pipe 0 stood still between the step.s looks while 402 head-0 swaps ran' <<<"$o" || fail "agdcowner: R2 on step 6: $(grep -E '^ +6 ' <<<"$o")"
+grep -qE '^ +2 var .*<-- R3: 78 of 78 head-0 swaps copied an empty back; R2: ' <<<"$o" || fail "agdcowner: R3 on step 2: $(grep -E '^ +2 ' <<<"$o")"
+grep -q 'INFO BISECT-AGDC: looked right but SLOW: step 1 (.*): 64 of 73 head-0 swaps waited for the latch, 13.7 ms each; step 3 ' <<<"$o" || fail "agdcowner: slow: $(grep SLOW <<<"$o")"
+# the dead columns are gone, the new ones are there
+grep -qE '^ +1 +0/1/1/1/1/0/0/1 +73 +2 +1 +0 +[?] +69 +[?] +[?] +64 +13.7 +1080 ' <<<"$o" || fail "agdcowner: step 1 counters: $(grep -E '^ +1 +[0-9]/' <<<"$o")"
+# the flicker test's budget, pipe 1 only information
+grep -q 'WARN head 0 flicker hash budget (swaps_hashed_h0 3000) used up at step 8: abab/bufchg blind from there' <<<"$o" || fail "agdcowner: hash budget: $(grep 'hash budget' <<<"$o")"
+! grep -q 'budget.*used up at step [^8]' <<<"$o" || fail "agdcowner: the budget WARN names another step"
+grep -q 'INFO pipe 1 (the idle second monitor) flickered between the looks in step(s) 4 (3.4%), 7 (3.4%), 8 (0.9%), 9 (2.3%), 10 (2.5%), 12 (1.3%): information only' <<<"$o" || fail "agdcowner: pipe 1: $(grep 'pipe 1' <<<"$o")"
+# the owner's verdicts (owner.txt next to the report): AGREES on every step
+[ "$(grep -cE '^ +[0-9]+ (ref|var|final) .* AGREES ' <<<"$o")" = 13 ] || fail "agdcowner: AGREES on 13 steps: $(grep -cE ' AGREES ' <<<"$o")"
+grep -q 'INFO BISECT owner verdict: AGREES on 13 of 13 step(s)' <<<"$o" || fail "agdcowner: owner verdict: $(grep 'owner verdict' <<<"$o")"
+! grep -q 'DISAGREES' <<<"$o" || fail "agdcowner: DISAGREES"
+# the same through the standalone tool: the table and the findings are the same (prefix, kernel log and owner.txt found like triage_reports does)
+f1=$(ls "$T"/o1/rdna3-report-*-bisect.txt)
+sa=$(python3 -I "$ROOT/tools/triage_bisect.py" "$f1" 2>&1) || true
+for n in 0 1 2 3 4 5 6 7 8 9 10 11 12; do
+    a=$(grep -E "^ +$n (ref|var|final) " <<<"$o" | sed 's/  */ /g;s/^ //'); b=$(grep -E "^ +$n (ref|var|final) " <<<"$sa" | sed 's/  */ /g;s/^ //')
+    [ -n "$a" ] && [ "$a" = "$b" ] || fail "standalone row $n differs: [$a] vs [$b]"
+done
+grep -q 'INFO FRONT SURFACE lines per step: serial-' <<<"$sa" || fail "standalone: no kernel log used: $(grep FRONT <<<"$sa" | head -2)"
+grep -q 'INFO BISECT owner verdict: AGREES on 13 of 13' <<<"$sa" || fail "standalone: owner.txt not found: $(grep owner <<<"$sa")"
+grep -q 'WARN head 0 flicker hash budget' <<<"$sa" || fail "standalone: hash budget"
+sa2=$(python3 -I "$ROOT/tools/triage_bisect.py" "$f1" --owner "1:n,2:y" 2>&1) && fail "standalone --owner with two disagreements should exit 1" || true
+grep -q 'FAIL BISECT owner verdict: DISAGREES on 2 of 2 step(s) (step(s) 1, 2)' <<<"$sa2" || fail "standalone --owner: $(grep owner <<<"$sa2")"
+
+# the owner says otherwise: DISAGREES is a FAIL and fails the run
+mk "$T/o2" agdcownerbad
+o=$(run "$T/o2")
+grep -qE '^ +1 var .* right,slow +DISAGREES ' <<<"$o" || fail "ownerbad: step 1: $(grep -E '^ +1 var' <<<"$o")"
+grep -qE '^ +2 var .* BROKEN +DISAGREES ' <<<"$o" || fail "ownerbad: step 2: $(grep -E '^ +2 var' <<<"$o")"
+grep -qE '^ +3 var .* right,slow +AGREES ' <<<"$o" || fail "ownerbad: step 3: $(grep -E '^ +3 var' <<<"$o")"
+grep -q 'FAIL step 1: the owner says broken, the rules say right-slow: DISAGREES' <<<"$o" || fail "ownerbad FAIL line: $(grep 'owner says' <<<"$o")"
+grep -q 'FAIL step 2: the owner says right, the rules say broken \[R3: ' <<<"$o" || fail "ownerbad step 2 FAIL line"
+grep -q 'FAIL BISECT owner verdict: DISAGREES on 2 of 5 step(s) (step(s) 1, 2)' <<<"$o" || fail "ownerbad summary: $(grep 'owner verdict' <<<"$o")"
+grep -q 'bisect  *FAIL BISECT owner verdict: DISAGREES' <<<"$o" || fail "ownerbad SUMMARY row"
+# an owner file that is not a verdict list is a WARN, the readable part still counts
+mk "$T/o3" agdcownertext
+o=$(run "$T/o3")
+grep -q "WARN the owner's verdicts: step 1: 'maybe' is not y / s / n" <<<"$o" || fail "ownertext: $(grep "owner's" <<<"$o")"
+# an input with anything unreadable is not used at all (prose read as verdicts would make false DISAGREES)
+grep -q 'owner verdict: AGREES' <<<"$o" && fail "ownertext: a partly unreadable owner input was compared"
+# the tty answer overrides the rules and says so
+mk "$T/o4" agdcttyover
+o=$(run "$T/o4")
+grep -qE '^ +1 var .* n +99% +99% .* BROKEN .*<-- the owner marked it n' <<<"$o" || fail "ttyover step 1: $(grep -E '^ +1 var' <<<"$o")"
+grep -qE '^ +2 var .* y +99% +99% .* right +78/2' <<<"$o" || fail "ttyover step 2: $(grep -E '^ +2 var' <<<"$o")"
+grep -q "INFO step 1: the owner's n at the tty overrides the rules' right-slow" <<<"$o" || fail "ttyover info 1: $(grep 'overrides' <<<"$o")"
+grep -q "INFO step 2: the owner's y at the tty overrides the rules' broken \[R3: " <<<"$o" || fail "ttyover info 2"
+
+# mutation: pipe 1 idle everywhere, pipe 0 moving -> all right; pipe 1 flicker alone is not broken
+mk "$T/q1" agdcqidle
+o=$(run "$T/q1")
+[ "$(grep -cE '^ +[0-9]+ (ref|var|final) .* right ' <<<"$o")" = 13 ] || fail "idle: all 13 steps right: $(grep -E '^ +[0-9]+ (ref|var|final)' <<<"$o")"
+! grep -q 'BROKEN' <<<"$o" || fail "idle: a step is broken"
+grep -q 'INFO BISECT-AGDC: no step looked broken' <<<"$o" || fail "idle: $(grep BISECT <<<"$o")"
+! grep -q 'pipe 1 (the idle second monitor) flickered' <<<"$o" || fail "idle: a flicker INFO without a flicker"
+! grep -q 'hash budget' <<<"$o" || fail "idle: a hash-budget WARN with 1300 hashed"
+mk "$T/q2" agdcqflick
+o=$(run "$T/q2")
+[ "$(grep -cE '^ +[0-9]+ (ref|var|final) .* right ' <<<"$o")" = 13 ] || fail "flick: all 13 steps right: $(grep -E '^ +[0-9]+ (ref|var|final)' <<<"$o")"
+grep -q 'INFO pipe 1 (the idle second monitor) flickered between the looks in step(s) 2 (0.5%), 9 (34.0%): information only' <<<"$o" || fail "flick: 0.5 % flags, 0.4 % does not: $(grep 'pipe 1' <<<"$o")"
+! grep -qE '(FAIL|WARN) .*pipe 1' <<<"$o" || fail "flick: pipe 1 must be INFO only"
+# boundary: 3.9 % of grey is right, 4.1 % broken, in either look
+mk "$T/q3" agdcqgrey
+o=$(run "$T/q3")
+grep -qE '^ +2 var .* 3.9% right ' <<<"$o" || fail "grey 3.9 %: $(grep -E '^ +2 var' <<<"$o")"
+grep -qE '^ +3 var .* 4.1% BROKEN .*<-- R1: 4.1% of pipe 0' <<<"$o" || fail "grey 4.1 % in the early look only: $(grep -E '^ +3 var' <<<"$o")"
+grep -qE '^ +4 var .* 4.1% BROKEN .*<-- R1' <<<"$o" || fail "grey 4.1 % in the main look only: $(grep -E '^ +4 var' <<<"$o")"
+grep -qE '^ +5 var .* 4.1% BROKEN .*<-- R1' <<<"$o" || fail "grey 3.9 % and 4.1 %: the worse look counts: $(grep -E '^ +5 var' <<<"$o")"
+grep -qE '^ +6 var .* 4.0% BROKEN .*<-- R1' <<<"$o" || fail "grey 4.0 % is the limit (>=): $(grep -E '^ +6 var' <<<"$o")"
+# boundary: a standing picture under 59 swaps is idle, under 60 it is broken; 2 differing pixels (0.2 %) = still, 3 (0.3 %) = moved
+mk "$T/q4" agdcqswaps
+o=$(run "$T/q4")
+grep -qE '^ +2 var .* right +59/0' <<<"$o" || fail "59 swaps: $(grep -E '^ +2 var' <<<"$o")"
+grep -qE '^ +3 var .* BROKEN +60/0, .*<-- R2: pipe 0 stood still between the step.s looks while 60 head-0 swaps ran' <<<"$o" || fail "60 swaps: $(grep -E '^ +3 var' <<<"$o")"
+grep -qE '^ +4 var .* BROKEN +100/0, .*<-- R2' <<<"$o" || fail "2 differing pixels = still: $(grep -E '^ +4 var' <<<"$o")"
+grep -qE '^ +5 var .* right +100/0' <<<"$o" || fail "3 differing pixels = moved: $(grep -E '^ +5 var' <<<"$o")"
+# no PPMs: not judged, never right; R3 (counters only) still says broken
+mk "$T/q5" agdcqnoppm
+o=$(run "$T/q5")
+grep -qE '^ +2 var .* \? +100/0' <<<"$o" || fail "no PPM: step 2 should be ?: $(grep -E '^ +2 var' <<<"$o")"
+grep -qE '^ +4 var .* \? +100/0' <<<"$o" || fail "no PPM: step 4 should be ?: $(grep -E '^ +4 var' <<<"$o")"
+grep -qE '^ +3 var .* BROKEN +100/0, .*<-- R3: 80 of 100 head-0 swaps copied an empty back$' <<<"$o" || fail "no PPM, R3: $(grep -E '^ +3 var' <<<"$o")"
+grep -q 'WARN step 2: pipe 0: 0 of the 2 PPMs' <<<"$o" || fail "no PPM: not loud: $(grep 'step 2' <<<"$o")"
+grep -q 'WARN BISECT-AGDC: not judged (.*): step 2 (.*); step 4 (' <<<"$o" || fail "no PPM: not judged: $(grep 'not judged' <<<"$o")"
+grep -q 'not judged \[2, 4\]' <<<"$o" || fail "no PPM: by swap_mode: $(grep 'by swap_mode' <<<"$o")"
+# no counters: a standing picture cannot be judged (R2 needs the swaps), a moving one is right
+mk "$T/q6" agdcqnocnt
+o=$(run "$T/q6")
+grep -qE '^ +5 var .* \? +\?/\?' <<<"$o" || fail "no counters, still: step 5 should be ?: $(grep -E '^ +5 var' <<<"$o")"
+grep -qE '^ +6 var .* right +\?/\?' <<<"$o" || fail "no counters, moving: step 6 should be right: $(grep -E '^ +6 var' <<<"$o")"
+grep -q 'WARN step 5: pipe 0 stood still and no swap counter says how many swaps ran' <<<"$o" || fail "no counters, still: not loud: $(grep 'step 5' <<<"$o")"
+# right-slow: half of the swaps and 10 ms each
+mk "$T/q7" agdcqslow
+o=$(run "$T/q7")
+grep -qE '^ +2 var .* right,slow ' <<<"$o" || fail "slow 50 %, 10 ms: $(grep -E '^ +2 var' <<<"$o")"
+grep -qE '^ +3 var .* right +100/0' <<<"$o" || fail "slow 49 %: $(grep -E '^ +3 var' <<<"$o")"
+grep -qE '^ +4 var .* right +100/0' <<<"$o" || fail "slow 9.999 ms: $(grep -E '^ +4 var' <<<"$o")"
+grep -qE '^ +5 var .* right,slow ' <<<"$o" || fail "slow 60 %, 10 ms: $(grep -E '^ +5 var' <<<"$o")"
 
 # the boot-args of the run reach the group
 python3 -I - "$ROOT" <<'PY' || fail "triage_reports.bisect_run_expected(rdna3bisect=4)"

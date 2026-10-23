@@ -3575,23 +3575,12 @@ def bisect_analysis(path, tests_txt, args=""):
         return False, None, []
     # the agdc variant (rdna3vm step bisect-agdc) cuts the kernel log per step: FRONT SURFACE live-writer lines
     logs = bisect_logs(path) if re.search(r"^variant: 4\b", text[:2000], re.M) else None
-    return True, triage_bisect.analyse(text, base, logs), []
+    return True, triage_bisect.analyse(text, base, logs, triage_bisect.locate_owner(path)), []
 
 
 def bisect_logs(path):
-    """[(name, text)] of the kernel logs a report has: the archive's 20-log-rdna3.txt and the newest serial-*.log next to it
-    (tools/triage_bisect.py picks the one that places most of the bisect's steps)"""
-    out = []
-    t = read_tar_member(path, "20-log-rdna3.txt") or read_tar_member(path, "20-log-rdna3-sudo.txt")
-    if t:
-        out.append(("20-log-rdna3.txt", t))
-    d = os.path.dirname(os.path.abspath(path))
-    for f in sorted(glob.glob(os.path.join(d, "serial-*.log")), key=os.path.getmtime)[-1:]:
-        try:
-            out.append((os.path.basename(f), open(f, errors="replace").read()))
-        except OSError:
-            pass
-    return out
+    """[(name, text)] of the kernel logs a report has (tools/triage_bisect.py picks the one that places most of the steps)"""
+    return triage_bisect.bisect_logs(path)
 
 
 def bisect_print(path, tests_txt, args=""):
