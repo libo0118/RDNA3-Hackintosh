@@ -28,6 +28,12 @@ jobs:
           echo "== IOAccelSetSurfaceFramebufferShape"; head -600 probe-out/15-IOAccelSetSurfaceFramebufferShape.s
           echo "== copy_forward_region callers"; head -4000 probe-out/16-copy-forward-callers.s
           echo "== CGXDisplayCreateCopyForwardShape callers"; head -3000 probe-out/17-copy-forward-shape-callers.s
+          echo "== present mode: keyword strings"; head -400 probe-out/30-keyword-strings.txt
+          echo "== present mode: the function that logs the page flip mode"; head -1500 probe-out/40-page-flip-fn-CoreDisplay.s
+          echo "== present mode: the same, found by the address of the string"; head -1500 probe-out/40-page-flip-fn-CoreDisplay-by-address.s
+          echo "== present mode: callers"; head -3000 probe-out/41-page-flip-callers.s
+          echo "== present mode: strings, calls and keys those read"; head -600 probe-out/42-page-flip-keys.txt
+          echo "== present mode: callers' callers"; head -2000 probe-out/41-page-flip-callers2.s
       - uses: actions/upload-artifact@v4
         with:
           name: probe-coredisplay

@@ -2043,6 +2043,156 @@ APPROVE_MARKER_RE = re.compile(r"^(RDNA3\w+): running (\w+), installed (\w+)", r
 STALE_LINE_RE = re.compile(r"(RDNA3\w+): running (\w+), installed (\w+)")
 # the action first: result_checklist cuts a long row at the terminal's width
 STALE_KEXTS_HEAD = "old driver ran - run 'rdna3vm approve', then the step again"
+# ---- present mode (card run 2026-10-17d): WindowServer presents with the legacy page-flip
+# mode ("init_page_flip: page flip mode is on"), never IOPresentment transactions. What
+# differs from the NVIDIA setups that get transactions: IOGraphics sets IOFBIntegrated
+# when the card's PCI bus number is 0, GPUWrangler then logs "(IG)", and the Mac model
+# is a muxed laptop (CoreDisplay: isBDW=YES isMobile=YES). One INFO row each for every
+# run (rdna3vm steps play-macpro / play-rootport / play-desktop change them), WARN
+# where a value is missing or contradicts what the host asked for.
+GPUW_RE = re.compile(r"gpu (0x[0-9a-f]+) flags (0x[0-9a-f]+)(?: \(([^)]*)\))? vid\.did=(\S+) b:d:f=(\d+):(\d+):(\d+)")
+
+
+def host_log_text(path):
+    """the host-*.log (tools/vm/rdna3vm) of the VM run a report belongs to: the newest one
+    started before the report, else the newest; "" when there is none"""
+    logs = sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(path)), "host-*.log")))
+    if not logs:
+        return ""
+    pick = logs[-1]
+    m = re.search(r"-(\d{8}-\d{6})(?:-tests\.txt|\.tar\.gz)$", path)
+    if m:
+        before = [l for l in logs if re.search(r"host-(\d{8}-\d{6})\.log$", l) and
+                  re.search(r"host-(\d{8}-\d{6})\.log$", l).group(1) <= m.group(1)]
+        if before:
+            pick = before[-1]
+    try:
+        return open(pick, errors="replace").read()
+    except OSError:
+        return ""
+
+
+def _fb_blocks(fbtxt):
+    """[(OpenGLIndex, DependentIndex, Integrated)] of 12-ioreg-fb.txt, one per framebuffer (None = no such key)"""
+    out = []
+    for blk in re.split(r"(?m)^\+-o ", fbtxt)[1:]:
+        g = lambda k: (re.search(r'"%s" = (\w+)' % k, blk) or [None, None])[1]
+        out.append((g("IOFramebufferOpenGLIndex"), g("IOFBDependentIndex"), g("IOFBIntegrated")))
+    return out
+
+
+def present_mode_lines(path, txt="", args="", host=None):
+    """[(level, label, text)]: how the run presents and what could decide it (see above).
+    The report archive (12-ioreg-fb.txt, 20-log-rdna3.txt, 24-log-coredisplay.txt,
+    00-system.txt, 23-windowserver-crash.txt), the tests file text and the host log"""
+    host = host_log_text(path) if host is None else host
+    fbtxt, cd, klog, system, crash = (read_tar_member(path, n) for n in (
+        "12-ioreg-fb.txt", "24-log-coredisplay.txt", "20-log-rdna3.txt", "00-system.txt",
+        "23-windowserver-crash.txt"))
+    out = []
+    # collect.sh wraps a log in "$ command" / "[exit N]": what is left is the log
+    cd_lines = [l for l in cd.splitlines() if l.strip() and not l.startswith(("$ ", "[exit"))]
+    # transactions the accelerator saw
+    ok = re.findall(r"debug\.rdna3accel_iop_ok: (\d+)", txt)
+    empty = re.findall(r"debug\.rdna3accel_iop_empty: (\d+)", txt)
+    planes = bool(ok) and int(ok[-1]) > 0
+    # the mode WindowServer's CoreDisplay chose
+    m = re.findall(r"init_page_flip: page flip mode is (\w+)", cd)
+    sets = len(re.findall(r"MPAccessSurfaceForDisplayDevice: Set up page flip mode", cd))
+    if m:
+        out.append(("INFO", "page flip mode", "init_page_flip: page flip mode is %s%s" % (
+            m[-1], "; 'Set up page flip mode' on a display %d time(s)" % sets if sets else "")))
+    elif cd_lines and planes:
+        out.append(("INFO", "page flip mode", "no 'init_page_flip' line in the CoreDisplay log, and planes arrive "
+                    "in transactions: not the page-flip mode"))
+    elif cd_lines:
+        out.append(("WARN", "page flip mode", "no 'init_page_flip' line in the %d-line CoreDisplay log "
+                    "(24-log-coredisplay.txt): the mode is not known" % len(cd_lines)))
+    else:
+        out.append(("WARN", "page flip mode", "24-log-coredisplay.txt is missing or empty: the present mode is not known"))
+    if ok and empty:
+        o, e = int(ok[-1]), int(empty[-1])
+        out.append(("INFO", "transactions", "iop_ok %d, iop_empty %d: %s" % (
+            o, e, "planes arrive in IOPresentment transactions" if o else
+            "plane-less IOPresentment transactions only" if e else
+            "no IOPresentment transactions at all")))
+    elif "rdna3accel=1" in args + txt:
+        out.append(("WARN", "transactions", "debug.rdna3accel_iop_ok / iop_empty are not in the tests file (an accelerator run)"))
+    else:
+        out.append(("INFO", "transactions", "no accelerator counters (rdna3accel is off in this run)"))
+    # IOGraphics' integrated flag and the two index properties, per framebuffer
+    fbs = _fb_blocks(fbtxt)
+    if not fbs:
+        out.append(("WARN", "integrated", "12-ioreg-fb.txt has no RDNA3Framebuffer: IOFBIntegrated is not known"))
+        out.append(("WARN", "fb index", "12-ioreg-fb.txt has no RDNA3Framebuffer: the index properties are not known"))
+    else:
+        yes = sum(1 for _, _, i in fbs if i == "Yes")
+        out.append(("INFO", "integrated", "IOFBIntegrated = Yes on %d of %d framebuffer(s)%s" % (
+            yes, len(fbs), "" if yes else " (not set: IOGraphics sees a discrete card)")))
+        ogl, dep = [f[0] for f in fbs], [f[1] for f in fbs]
+        text = "IOFramebufferOpenGLIndex %s, IOFBDependentIndex %s" % (
+            ",".join(x or "?" for x in ogl), ",".join(x or "?" for x in dep))
+        bad = [str(i) for i, (a, b) in enumerate(zip(ogl, dep)) if a is None or b is None or a != b]
+        out.append(("WARN" if bad else "INFO", "fb index", text + (
+            ": they disagree on framebuffer(s) %s" % ",".join(bad) if bad else ": they agree")))
+    # GPUWrangler's view of the card
+    seen = sorted(set(GPUW_RE.findall(cd + "\n" + klog)))
+    bus = None
+    if seen:
+        _, flags, tags, did, b, dv, fn = seen[-1]
+        bus = int(b)
+        ig = "IG" in (tags or "").replace(",", " ").split()
+        out.append(("INFO", "GPUWrangler", "flags %s (%s) vid.did=%s b:d:f=%s:%s:%s: %s" % (
+            flags, tags or "no tags", did, b, dv, fn,
+            "an integrated GPU (IG)" if ig else "a discrete GPU")))
+    else:
+        out.append(("WARN", "GPUWrangler", "no 'GPUWrangler (reg) gpu ... flags ... b:d:f=' line in "
+                    "24-log-coredisplay.txt / 20-log-rdna3.txt: the integrated flag is not known"))
+    asked_bus = re.findall(r"^\s*GPU on: (\w+)", host, re.M)
+    if asked_bus and bus is not None and ((asked_bus[-1] == "pcie0") != (bus == 0)):
+        out.append(("WARN", "card bus", "rdna3vm put the card on %s but macOS sees PCI bus %d (b:d:f above): "
+                    "the host log's 'GPU on' and the guest PCI bus lines (host-*.log) say where it really was" % (
+                        asked_bus[-1], bus)))
+    # the Mac model and what CoreDisplay makes of it
+    models = []
+    for src, rx, text in (("hw.model", r"^hw\.model: (\S+)", system),
+                          ("PLATFORM line", r"^PLATFORM: .*?, ([A-Za-z]+\d+,\d+) ", txt),
+                          ("WindowServer crash report", r'"modelCode" : "([^"]+)"', crash)):
+        m = re.search(rx, text, re.M)
+        if m:
+            models.append((m.group(1), src))
+    flags = {}
+    for k in ("isBDW", "isMobile", "isMUX", "isBuiltIn"):
+        v = sorted(set(re.findall(r"get_display_device_info: .*?\b%s=(YES|NO)" % k, cd)))
+        if v:
+            flags[k] = "/".join(v)
+    nomux = "mux_initialize: Couldn't find any matches" in cd
+    asked = re.findall(r"^\s*SMBIOS model: (\S+)", host, re.M)
+    lv, parts = "INFO", []
+    if models:
+        bid = re.search(r"^board-id: (Mac-\S+)", system, re.M)
+        parts.append("%s (%s%s)" % (models[0] + (", board-id " + bid.group(1) if bid else "",)))
+    else:
+        lv = "WARN"
+        parts.append("model not in the report (no hw.model in 00-system.txt, no PLATFORM line, no crash report)")
+    if flags:
+        parts.append("CoreDisplay " + " ".join("%s=%s" % kv for kv in sorted(flags.items())))
+    if nomux:
+        parts.append("mux_initialize found no match")
+    if asked:
+        parts.append("rdna3vm asked for %s" % asked[-1])
+        if models and models[0][0] != asked[-1]:
+            lv = "WARN"
+            parts.append("BUT macOS reports %s: OpenCore did not apply the model" % models[0][0])
+    if models and models[0][0].startswith("MacBook") and flags.get("isMobile") == "YES":
+        parts.append("laptop model: CoreDisplay takes the mobile paths")
+    elif models and not models[0][0].startswith("MacBook") and flags.get("isMobile") == "YES":
+        lv = "WARN"
+        parts.append("isMobile=YES on a desktop model: something else makes CoreDisplay mobile")
+    out.append((lv, "SMBIOS", "; ".join(parts)))
+    return out
+
+
 STALE_KEXTS_SHOWN = False   # a STALE KEXTS FAIL was printed (one per run; report() does not repeat it)
 
 
@@ -2579,6 +2729,9 @@ def summary(path, serial=None):
     out = []
     m = re.search(r"rdna3lvl=\S+.*", args)
     out.append(("boot-args", m.group(0)[:150] if m else "?"))
+    if os.path.exists(path):
+        for lv, label, t in present_mode_lines(path, txt, args):
+            out.append(("present: " + label, "%s %s" % (lv, t[:300])))
     out.append(("DMA/GFX jobs", "%d verified, %d wrong" % (len(re.findall(r"job results verified", txt)),
                                                          len(re.findall(r"job results WRONG", txt)))))
     sec = ""
@@ -2857,6 +3010,10 @@ def main():
         for lv, t in latch_lines(p, ttxt):
             print("   %s flip latch: %s" % (lv, t))
             failed = failed or lv == "FAIL"
+        # card run 2026-10-17d: page flips instead of transactions; the facts that could decide it
+        if os.path.exists(p):
+            for lv, label, t in present_mode_lines(p, ttxt, read_tar_member(p, "01-boot-args.txt")):
+                print("   %s present mode, %s: %s" % (lv, label, t))
         # card run 2026-10-17b: the swap as a copy, and the per-frame trace
         for lv, t in swapcopy_verdict(a3_counters(ttxt) if ttxt else {}):
             print("   %s swap copy: %s" % (lv, t))

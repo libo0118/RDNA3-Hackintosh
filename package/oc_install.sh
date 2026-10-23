@@ -101,6 +101,9 @@ if [ $OFF = 1 ]; then
 elif [ -n "$STEP" ]; then
     a=$(awk -v n="$STEP" '$1 == n { $1 = ""; sub(/^ +/, ""); print; f = 1 } END { exit !f }' \
         "$ROOT/tools/ladder-steps.txt") || { echo "unknown step $STEP (tools/ladder-steps.txt)"; exit 2; }
+    # @name=value tokens are for the VM host (rdna3vm: Mac model, card behind a root port), not boot-args
+    a=$(printf '%s\n' "$a" | tr ' ' '\n' | grep -v '^@' | tr '\n' ' ' || true)
+    a=${a% }
     # -v and keepsyms for readable logs and panics; kept if already there
     for x in -v keepsyms=1; do
         case " $keep " in *" $x "*) ;; *) keep="$keep $x";; esac

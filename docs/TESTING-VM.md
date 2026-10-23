@@ -464,6 +464,104 @@ The swap A/B is no longer part of a normal step (card run 2026-10-17d): add the
 boot-arg `rdna3swapab=1` (`rdna3vm args "<the step's args> rdna3swapab=1"`) to
 run it; it breaks the picture for a minute on purpose (mode 1).
 
+### Present-mode A/B (steps `play-macpro`, `play-rootport`, `play-desktop`)
+
+Why: with our driver WindowServer presents with the legacy page-flip mode
+(CoreDisplay logs `init_page_flip: page flip mode is on`) and never sends
+IOPresentment transactions, while the NullMoth NVIDIA driver gets
+transactions. Two things in our VM differ from that setup, and a card run
+can tell whether either decides the mode:
+
+- **The card is "integrated".** IOGraphics sets `IOFBIntegrated` when the
+  card's PCI bus number is 0 (`fIntegrated = (0 == pciDevice->getBusNumber())`),
+  and the VM puts the card on the root bus (`GPU_BUS=pcie0`, `00:10.0`).
+  GPUWrangler then logs `flags 0x10 (IG) ... b:d:f=0:16:0`. Behind a PCIe
+  root port the card is bus 1.
+- **The Mac model is a muxed laptop.** The OpenCore image says
+  `MacBookPro16,1`; CoreDisplay logs `isBDW=YES ... isMobile=YES` and
+  `mux_initialize: Couldn't find any matches`. A Mac Pro has none of that.
+
+The three steps are the `play` step (the desktop is yours, reports at minute 5
+and 10, the VM stays up) with one or both changed for that run only:
+
+| step | Mac model | card |
+|---|---|---|
+| `play` (as before) | MacBookPro16,1 | root bus (bus 0) |
+| `play-macpro` | **MacPro7,1** | root bus |
+| `play-rootport` | as in the config | **behind a PCIe root port (bus 1)** |
+| `play-desktop` | **MacPro7,1** | **behind a PCIe root port** |
+
+Cheapest order: `rdna3vm step play-desktop` first. If the present mode changes
+there, run `play-macpro` and `play-rootport` to see which of the two did it
+(or whether it takes both); if it does not change, neither is the cause and
+the next suspect is CoreDisplay's own decision (`tools/probe/coredisplay.sh`,
+run by CI on the macOS runner, lists what the function that logs the mode
+reads). Each step is a normal card run: `rdna3vm update`, `rdna3vm step ...`,
+use the desktop for ~10 minutes (or just wait), shut macOS down,
+`rdna3vm result`, send the file.
+
+Both can also be set for every run in `~/rdna3-vm/config` (`rdna3vm prepare`
+keeps them): `SMBIOS_MODEL="MacPro7,1"` (also `iMacPro1,1`; the default is
+`MacBookPro16,1`) and `GPU_BUS="rootport"` (default `pcie0`), or for one
+custom run `rdna3vm args "<the step's rdna3 args> @smbios=MacPro7,1 @gpubus=rootport"`.
+The `@` words are for the host: they are taken out of the boot-args macOS gets,
+and `rdna3vm check` prints what the config selects.
+
+**What changes in the VM with the model.** Only `PlatformInfo/Generic/SystemProductName`
+of the OpenCore config. The serial number, board serial, UUID and ROM stay as
+they are, so the serial belongs to a MacBook model while the VM says it is a
+Mac Pro; that only matters for Apple's online services (iMessage, iCloud
+activation), which this VM does not use. macOS derives the board id
+(`Mac-27AD2F918AE68F61` for MacPro7,1) from the model; the report records
+`hw.model` and `board-id` in `00-system.txt`. Both desktop models are the
+kind the OpenCore sample configs use; `iMacPro1,1` is only for the case
+`MacPro7,1` boots badly (macOS 26 supports the Mac Pro, not the iMac Pro: an
+update from the installer may refuse it, a disk that is already installed
+boots).
+
+**Does a model change need `rdna3vm approve` again? Unknown.** macOS records
+the "Allow" for a third-party kext by team and bundle identifier
+(`/var/db/SystemPolicyConfiguration/KextPolicy`) and builds the Auxiliary KC
+for the architecture, not for the model, so the approval should survive; nobody
+has tried it on this VM. Nothing is silent either way: the install boot and the
+approval window of a step run with that step's model, and if macOS then ran
+an old framebuffer/accelerator the run says `STALE KEXTS old driver ran`
+(triage, first line) and the host log names the model change
+(`SMBIOS model changed since the last card run: A -> B`). In that case run
+`rdna3vm approve --step play-desktop` (the window then runs that step's
+model; plain `rdna3vm approve` uses the config's) and send the result so the
+open question in DRIVER-PLAN N38 can be closed.
+
+**The root port.** `GPU_BUS=rootport` puts the card (VGA function 0 and the
+HDMI audio function 1, together) on `pcie-root-port,id=rp0,hotplug=off`. Earlier
+runs found the card unconfigured behind an unsized port (commits 0a80e3c,
+c21eed6), so the port now carries the windows the card needs: `mem-reserve`
+for the 32-bit BARs (2 MiB or more), `pref32-reserve` (512 MiB for the default
+256 MiB BAR0, all BARs stay below 4 GiB as on the root bus) or, with a 64-bit
+window (`RESIZE_BAR_LOG2` above 8, `PCI_MMIO64_MB`), `pref64-reserve` (a power
+of two above BAR0 + BAR2: 32 GiB for a 16 GiB BAR0) together with
+`-global q35-pcihost.pci-hole64-size` as large as OVMF's window. The sizes
+are read from the card's BARs after BAR0 was resized and printed in the host
+log (`root port windows: ...`). It is **not proven on the card**: OVMF only
+pads ports it treats as hot-plug capable, so with `hotplug=off` the real
+windows come from the BARs OVMF finds behind the port. If the report shows no
+AMD device or an unconfigured card, `host-*.log` has the guest's PCI bus at 8
+and 40 s (`info pci`): send it, set `GPU_BUS=pcie0` again, and judge
+`play-macpro` alone.
+
+**What to look for in the result.** The triage prints one row each, for every
+run (`present: ...` in the SUMMARY and the checklist, `present mode, ...` per report):
+
+| row | before (card run 2026-10-17d) | what a change means |
+|---|---|---|
+| `page flip mode` | `init_page_flip: page flip mode is on` | `is off` or no such line: CoreDisplay chose another mode; the changed variable is the cause |
+| `transactions` | `iop_ok 0, iop_empty 0` | `iop_ok > 0`: planes arrive in IOPresentment transactions (what the NVIDIA setups have); `iop_empty > 0` and `iop_ok 0`: transactions are sent but without planes (AGDC/IOPresentment next) |
+| `integrated` | `IOFBIntegrated = Yes on 2 of 2` | `not set` after `play-rootport`/`play-desktop`: IOGraphics sees a discrete card |
+| `GPUWrangler` | `flags 0x10 (IG) ... b:d:f=0:16:0` | no `(IG)`, `b:d:f=1:0:0` |
+| `SMBIOS` | `MacBookPro16,1 ... isMobile=YES ... mux_initialize found no match` | `MacPro7,1 (hw.model, board-id ...)`, `isMobile=NO`; a `WARN ... BUT macOS reports X` means OpenCore did not apply the model |
+| `card bus` (WARN only) | - | rdna3vm asked for pcie0/rootport but macOS sees the other bus |
+| `fb index` | WARN: `IOFramebufferOpenGLIndex 0,1, IOFBDependentIndex 1,0: they disagree` | independent of the two variables above; it stays a WARN until the indices agree (a separate suspect, DRIVER-PLAN N38) |
+
 ### Tests that already passed
 
 The report does not run a long test again (scaled modes, gamma, the
