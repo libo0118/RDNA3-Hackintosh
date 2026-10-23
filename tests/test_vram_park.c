@@ -14,7 +14,9 @@
  * plugin draws into until the resource grows, the generation is kept
  * across a park and is new after a grow, nothing leaks and nothing is
  * released twice. With parking off: the address moves (the bug, kept as
- * the A/B's other side).
+ * the A/B's other side). Then the security review's policy: only a BO's
+ * allocation is parked, and parks no BO holds go under pressure or past
+ * the cap, oldest first.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -225,6 +227,35 @@ static void apdesc(void)
     fb_release(&v.live);
 }
 
+/* security review of N41: what is parked, and which parks go when VRAM runs out or past the cap */
+static void policy(void)
+{
+    CHECK(rd3_vp_should_park(1, 0, 7, 7));
+    CHECK(!rd3_vp_should_park(0, 0, 7, 7));    /* sticky off */
+    CHECK(!rd3_vp_should_park(1, 1, 7, 7));    /* a scanout */
+    CHECK(!rd3_vp_should_park(1, 0, 7, 0));    /* never imported */
+    CHECK(!rd3_vp_should_park(1, 0, 8, 7));    /* imported, then the resource grew: a newer allocation */
+    CHECK(!rd3_vp_should_park(1, 0, 0, 0));    /* nothing live */
+    const struct rd3_vp_cand c[5] = {
+        { 30, 100, 1 }, { 10, 200, 2 }, { 20, 300, 1 }, { 5, 400, 0 }, { 40, 50, 1 },
+    };
+    unsigned char out[5];
+    /* pressure: every park no BO holds; never a BO's (1) or an unknown one (3) */
+    CHECK(rd3_vp_pick_release(c, 5, 1050, 0, 1, out) == 450);
+    CHECK(out[0] && !out[1] && out[2] && !out[3] && out[4]);
+    /* the cap: the oldest no BO holds until under it */
+    CHECK(rd3_vp_pick_release(c, 5, 1050, 800, 0, out) == 300);   /* 2 (since 20) only: 750 */
+    CHECK(!out[0] && !out[1] && out[2] && !out[3] && !out[4]);
+    CHECK(rd3_vp_pick_release(c, 5, 1050, 700, 0, out) == 400);   /* 2, then 0 (since 30): 650 */
+    CHECK(out[0] && out[2] && !out[4]);
+    /* nothing releasable left: stops, never a BO's */
+    CHECK(rd3_vp_pick_release(c, 5, 1050, 1, 0, out) == 450 && !out[1] && !out[3]);
+    /* under the cap, or no cap: nothing */
+    CHECK(rd3_vp_pick_release(c, 5, 1050, 2000, 0, out) == 0 && !out[0] && !out[2]);
+    CHECK(rd3_vp_pick_release(c, 5, 1050, 0, 0, out) == 0);
+    CHECK(rd3_vp_pick_release(c, 0, 0, 0, 1, out) == 0);
+}
+
 int main(void)
 {
     transitions();
@@ -232,6 +263,7 @@ int main(void)
     model(0);
     fb_reset();
     apdesc();
+    policy();
     if (fails) { printf("test_vram_park: %d FAILED\n", fails); return 1; }
     printf("test_vram_park: ok\n");
     return 0;

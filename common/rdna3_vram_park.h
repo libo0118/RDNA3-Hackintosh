@@ -33,6 +33,15 @@
  * dirty mark of it (RD3Resource::fPluginWroteGen) still describes it. A
  * new allocation after a grow gets a new generation from the caller.
  *
+ * Security review of N41 (parked VRAM never given back under pressure):
+ * only an allocation a GEM BO was imported over is parked
+ * (rd3_vp_should_park: the plugin draws into exactly that memory; the
+ * family pages every other surface's contents itself), and the parks are
+ * released when VRAM runs out (an allocPhysical refusal) or the parked
+ * bytes pass a cap (rd3_vp_pick_release) - only parks no BO holds any
+ * more: one a BO still holds frees nothing when released (the BO keeps the
+ * range) and would move its surface off the memory the plugin draws into.
+ *
  * SPDX-License-Identifier: MIT
  */
 #ifndef RDNA3_VRAM_PARK_H
@@ -158,6 +167,50 @@ static inline int rd3_vp_apdesc_keep(unsigned long long live_phys, unsigned long
     if (!ap_phys || !ap_bytes) return 0;
     if (live_phys) return live_phys == ap_phys && live_bytes == ap_bytes;
     return rd3_vp_valid(park) && park->phys == ap_phys && park->bytes == ap_bytes;
+}
+
+/* deallocPhysical: park the live allocation only when sticky (debug.rdna3accel_vm_sticky), not a
+ * scanout, and a GEM BO was imported over exactly this allocation (bo_gen, RD3VidMemory::fBoGen, is
+ * its generation live_gen); else it is freed as before N41 */
+static inline int rd3_vp_should_park(int sticky, int scanout, unsigned long long live_gen, unsigned long long bo_gen)
+{
+    return sticky && !scanout && live_gen && bo_gen == live_gen;
+}
+
+/* a parked allocation, for rd3_vp_pick_release */
+struct rd3_vp_cand {
+    unsigned long long since;   /* when it was parked: older first */
+    unsigned long long bytes;
+    unsigned refs;              /* the core's references to it: 1 the accelerator's own only (no BO), more a BO
+                                 * holds it, 0 unknown (an older core kext): never released */
+};
+
+#define RD3_VP_CAP_MB_DEFAULT 512u   /* debug.rdna3accel_vm_park_cap_mb: parked bytes kept at most (0: no cap) */
+
+/* which parks go: under pressure (an allocation was refused) every one no BO holds; else, while the
+ * parked bytes exceed 'cap' (0: no cap), the oldest no BO holds. out[i] 1: release c[i]. Returns the
+ * bytes released; parks a BO holds (or whose references are unknown) are never picked */
+static inline unsigned long long rd3_vp_pick_release(const struct rd3_vp_cand *c, unsigned n,
+                                                     unsigned long long parked, unsigned long long cap, int pressure,
+                                                     unsigned char *out)
+{
+    unsigned long long freed = 0;
+    for (unsigned i = 0; i < n; i++) out[i] = 0;
+    if (pressure) {
+        for (unsigned i = 0; i < n; i++)
+            if (c[i].refs == 1) { out[i] = 1; freed += c[i].bytes; }
+        return freed;
+    }
+    while (cap && parked > cap) {
+        unsigned best = n;
+        for (unsigned i = 0; i < n; i++)
+            if (!out[i] && c[i].refs == 1 && (best == n || c[i].since < c[best].since)) best = i;
+        if (best == n) break;
+        out[best] = 1;
+        freed += c[best].bytes;
+        parked = parked > c[best].bytes ? parked - c[best].bytes : 0;
+    }
+    return freed;
 }
 
 #endif
