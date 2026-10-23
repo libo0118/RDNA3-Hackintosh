@@ -2761,3 +2761,42 @@ byte positions are next to them; WindowServer's plugin trace is the end-of-run s
 | trace `SWAP ... mode 0 flip: ... -> panel X target same buffer, not flipped ... wait 0 us`; the A/B line `N same buffer (not flipped)` | the skip in the frame trace (SWAP `v1` target 4, `RD3_TRV1_TARGET_SAME`) | none |
 | picture wrong only with `swap_samenoflip 1` (A/B: `sysctl -w debug.rdna3accel_swap_samenoflip=0`) | a same-address flip did more than the register write (HUBP state refreshed) | report both looks; keep `rdna3swapsamenoflip=0` until DRIVER-PLAN N28 (completing the swap's event from the flip-done) |
 | `WARN flip latch: head N: counter missing ...: swaps_latchsame` | the kernel has `swap_samenoflip` but the dump lacks the counter | the collector's grep (`swaps_`), `rdna3vm update` |
+
+### DRIVER-PLAN N38: presents without blocking WindowServer (the present queue)
+
+- What changed (not yet on the card): a mode 0 swap no longer sleeps for its
+  flip's latch. Each head has one flip in flight; a present while it is
+  pending waits in one slot (a newer one replaces it: newest wins) and the
+  head's worker programs it at the latch (`common/rdna3_flip_queue.h`,
+  amdgpu's `dm_pflip_high_irq` model). The legacy swap's own event cannot be
+  completed later (the family's), so the writers the driver sees - copy
+  forward's target and the family's page-on - wait for the latch only when
+  they target the buffer still leaving the panel. Flip-buffer presents
+  (`flipbuf_present 1`) and IOP transactions (`iop_flip 1`) use the same
+  queue; an IOP transaction completes once its flip latched, and its
+  zero-copy flip needs the plugin's dirty mark of that VRAM. The core's GPU
+  activity goes into the accelerator's PerformanceStatistics (Activity
+  Monitor's GPU column).
+- Knobs (each logged at boot: `swap async:`, `iop queue: ...; iop wrote:`,
+  `perfstats:`): `debug.rdna3accel_swap_async` / `rdna3swapasync` (1; 0 = the
+  old latch wait), `_iop_queue` / `rdna3iopqueue` (1), `_iop_wrote` /
+  `rdna3iopwrote` (1), `_perfstats` / `rdna3perfstats` (1). All four change
+  at runtime: the A/B is `sysctl -w debug.rdna3accel_swap_async=0` and back.
+- What the card must show: window movement smooth in mode 0 (the 18b trace's
+  20 fps gone), `swaps_pq_prog_h<N>` + `_queued` close to the head's flipped
+  swaps, `swaps_pq_early_h<N>` and `_dropped` 0, `swaps_pq_wait_h<N>` small
+  (only when WindowServer reuses the buffer leaving the panel within a
+  frame), the triage `present queue` lines and `H-PRESENT` without FAIL,
+  Activity Monitor's GPU % above 0 while windows move (`perf_writes` > 0).
+
+| Seen | Meaning | Action |
+|---|---|---|
+| `FAIL ... present(s) completed BEFORE their flip was seen latched` / `H-PRESENT ... completion(s) BEFORE the latch` | a flip never latched within the head's cap (35-100 ms) or its state was unreadable: the panel may still have read the buffer WindowServer had back | the PRESENT TIMEOUT / UNREADABLE events and the kernel's `completed EARLY` lines: a blanked head (display sleep) is harmless, a lit one is a stuck HUBP (the PANEL events) |
+| `FAIL ... frame(s) LOST with no newer one` | a queued present's buffer was freed, or the framebuffer refused it when the worker programmed it | the kernel's `DROPPED` / `REFUSED by the framebuffer` lines (the size against the mode: a mode switch in between) |
+| `WARN ... writer wait(s) ran out` | a copy forward / page-on wrote a buffer whose flip away never latched | as the early completions |
+| `swaps_pq_wait_h<N>` high, `waitmax` near a frame | WindowServer reuses the buffer leaving the panel within a frame (two buffers in turn): the panel rate paces it there, as the old latch wait did | none; a third buffer is WindowServer's choice |
+| `swaps_pq_polled_h<N>` > 0, log `the framebuffer has no rdna3FlipLatchWait` | an older RDNA3Framebuffer ran (not approved?): the worker polls every 1 ms | `rdna3vm approve`; harmless meanwhile |
+| movement still slow with `swap_async 1`, `swaps_pq_queued` near the swaps | presents arrive while the flip before is pending (one frame of latency each) | the PRESENT events' times against the vblank; compare `swap_async 0` |
+| picture wrong only with `swap_async 1` (A/B) | a writer the driver does not see wrote the buffer leaving the panel (no page-on, no copy forward) | report both looks; keep `rdna3swapasync=0`; the trace's SCAN events of the leaving buffer |
+| `swaps_pq_iopunwritten` > 0 | IOP zero-copy flips copied: VRAM marked newest that the plugin never wrote | none (correct); `debug.rdna3accel_iop_wrote=0` flips anyway for an A/B |
+| `WARN GPU utilization NOT published` | the core has no `Device Utilization %` yet (SMU metrics off) or no core service | the core's `PM: activity` lines |
