@@ -37,6 +37,10 @@ fi
 
 run 00-system.txt sw_vers
 uname -a >> "$dir/00-system.txt" 2>&1
+# the Mac model the firmware (OpenCore in the VM) gives macOS, and its board id: the
+# triage's "present: SMBIOS" row (card run 2026-10-17d, present-mode A/B)
+echo "hw.model: $(sysctl -n hw.model 2>&1)" >> "$dir/00-system.txt"
+echo "board-id: $(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | sed -n 's/.*"board-id" = <"\(.*\)">.*/\1/p' | head -1)" >> "$dir/00-system.txt"
 run 01-boot-args.txt nvram boot-args
 run 02-csr.txt csrutil status
 run 03-kexts.txt sh -c "kmutil showloaded 2>/dev/null | grep -i -E 'rdna3|amd|radeon|IONDRV' || kextstat | grep -i -E 'rdna3|amd|radeon'"

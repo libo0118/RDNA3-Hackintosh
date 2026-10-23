@@ -10,10 +10,13 @@
 #                                                 picture scaled to the window (GTK zoom-to-fit)
 #   rdna3vm step N [--stay]                       ladder step N with the GPU passed through
 #   rdna3vm args "BOOT-ARGS" [--stay]             the same with your own rdna3* boot-args
+#                                                 (+ @smbios=MODEL @gpubus=pcie0|rootport: the
+#                                                 VM's Mac model / the card behind a root port)
 #   rdna3vm queue STEP... | pending               several steps one after the other, unattended
 #   rdna3vm queue                                 go on with a queue a host reboot interrupted
-#   rdna3vm approve [--card]                      allow a new framebuffer build in macOS (once per
-#                                                 build), in a window without the card
+#   rdna3vm approve [--card] [--step S]           allow a new framebuffer build in macOS (once per
+#                                                 build), in a window without the card; --step S
+#                                                 with the Mac model of step S
 #   rdna3vm reports                               what came back
 #   rdna3vm result                                the last run's reports in ONE file to send
 #                                                 (~/Downloads/rdna3-result.tar.gz, replaced each time)
@@ -42,6 +45,89 @@ dcn_3_2_0_dmcub.bin vcn_4_0_0.bin"
 # called every ad-hoc signed /Library/Extensions kext an "invalid codeful
 # kernel extension" and kept an old RDNA3Framebuffer in the Auxiliary KC
 DEBUG_ARGS="-v keepsyms=1 debug=0x100 serial=3 msgbuf=1048576 amfi=0x80"
+
+# What the VM looks like to macOS besides the rdna3 boot-args, for the present-mode
+# A/B (card run 2026-10-17d: WindowServer used the legacy page-flip mode, the
+# card counted "integrated" because it sits on PCI bus 0, the Mac model is a laptop):
+#  SMBIOS_MODEL (config or environment): the model OpenCore gives macOS; only a value other
+#                                        than the default (or a step's @smbios=) is a request:
+#                                        with nothing asked the OpenCore config is not touched
+#  GPU_BUS (config or environment):      pcie0 = the card on the root bus (00:10.0, PCI
+#                                        bus 0: IOGraphics sets IOFBIntegrated) or
+#                                        rootport = behind a PCIe root port (bus 1, discrete)
+# A ladder step can set them for its own run with the host-only tokens @smbios=MODEL
+# and @gpubus=pcie0|rootport in tools/ladder-steps.txt; cmd__passthrough takes them
+# out of the boot-args macOS gets.
+SMBIOS_DEFAULT="MacBookPro16,1"
+SMBIOS_MODELS="MacBookPro16,1 MacPro7,1 iMacPro1,1"
+GPU_BUSES="pcie0 rootport"
+# sysfs of the PCI devices (a test points it at a fixture)
+PCI_SYSFS=${RDNA3VM_PCI_SYSFS:-/sys/bus/pci/devices}
+
+host_opt() {   # host_opt NAME "boot-args": the value of the last @NAME=value in them, or nothing
+    local t v=""
+    for t in $2; do
+        case $t in "@$1="*) v=${t#*=} ;; esac
+    done
+    printf '%s' "$v"
+}
+strip_host_opts() {   # the boot-args macOS gets: without the host-only @name=value tokens
+    local t o=""
+    for t in $1; do
+        case $t in @*) ;; *) o="$o $t" ;; esac
+    done
+    printf '%s' "${o# }"
+}
+check_host_opts() {   # check_host_opts "boot-args": every @token is a known one with a value
+    local t
+    for t in ${1:-}; do
+        case $t in
+            @smbios=?*|@gpubus=?*) ;;
+            @*) echo "bad host-only token '$t' in the boot-args of a step: the known ones are @smbios=MODEL and @gpubus=pcie0|rootport, each with a value" >&2
+                return 1 ;;
+        esac
+    done
+}
+# The Mac model somebody ASKED for: the step's @smbios=, else SMBIOS_MODEL of the config when
+# it is not the default. Nothing when nothing was asked: then the OpenCore config is not
+# touched at all (it may carry a model the image came with), as before the A/B (ECC review
+# of 501eae9: the default flow must not pass --smbios, which refuses PlatformInfo/Automatic=false)
+smbios_asked() {   # smbios_asked ["boot-args"]
+    local m
+    check_host_opts "${1:-}" || return 1
+    m=$(host_opt smbios "${1:-}")
+    if [ -z "$m" ] && [ "${SMBIOS_MODEL:-$SMBIOS_DEFAULT}" != "$SMBIOS_DEFAULT" ]; then m=$SMBIOS_MODEL; fi
+    [ -n "$m" ] || return 0
+    case " $SMBIOS_MODELS " in
+        *" $m "*) printf '%s\n' "$m" ;;
+        *) echo "unknown SMBIOS model '$m' (SMBIOS_MODEL in the config, or @smbios= of a step): one of $SMBIOS_MODELS" >&2
+           return 1 ;;
+    esac
+}
+# The model to write into the OpenCore config for this run: the asked one; the default again
+# when nothing is asked but an earlier run of this tool wrote another one (smbios-written,
+# set by cmd__oc), so the next ordinary step does not silently keep play-macpro's model;
+# else nothing (--smbios is not passed)
+smbios_want() {   # smbios_want ["boot-args"]
+    local m w
+    m=$(smbios_asked "${1:-}") || return 1
+    if [ -z "$m" ]; then
+        w=$(cat "$WORK/smbios-written" 2>/dev/null) || w=""
+        if [ -n "$w" ] && [ "$w" != "$SMBIOS_DEFAULT" ]; then m=$SMBIOS_DEFAULT; fi
+    fi
+    printf '%s\n' "$m"
+}
+gpu_bus() {   # gpu_bus ["boot-args"]: the step's @gpubus=, else GPU_BUS, else pcie0
+    local b
+    check_host_opts "${1:-}" || return 1
+    b=$(host_opt gpubus "${1:-}")
+    b=${b:-${GPU_BUS:-pcie0}}
+    case " $GPU_BUSES " in
+        *" $b "*) printf '%s\n' "$b" ;;
+        *) echo "unknown GPU bus '$b' (GPU_BUS in the config, or @gpubus= of a step): one of $GPU_BUSES" >&2
+           return 1 ;;
+    esac
+}
 
 say()  { printf '\033[1m== %s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32mOK\033[0m  %s\n' "$*"; }
@@ -114,6 +200,14 @@ cmd_check() {
         bar0=$(( (end - start + 1) / 1048576 ))
         echo "     BAR0 (VRAM window): ${bar0} MiB$( [ "$bar0" -gt 256 ] && echo " (amdgpu enlarges it by itself; step N shrinks it to $(( 1 << ${RESIZE_BAR_LOG2:-8} )) MiB for the VM: RESIZE_BAR_LOG2 in the config)")"
     else bad "no 1002:747e card found"; fail=1; fi
+    say "VM"
+    local sm bus
+    # shellcheck source=/dev/null
+    [ ! -f "$CONF" ] || . "$CONF"
+    if sm=$(smbios_asked) && bus=$(gpu_bus); then
+        ok "Mac model $([ -n "$sm" ] && echo "$sm (asked: SMBIOS_MODEL)" || echo "not asked: the OpenCore config's own, $SMBIOS_DEFAULT unless edited by hand"), card on $bus$([ "$bus" = pcie0 ] || echo " (not the default pcie0: GPU_BUS)")"
+    else fail=1; fi
+    echo "     steps play-macpro / play-rootport / play-desktop change them for one run (docs/TESTING-VM.md, present-mode A/B)"
     say "Programs"
     local t
     for t in qemu-system-x86_64 qemu-img python3 losetup systemd-run systemd-inhibit modprobe; do
@@ -220,6 +314,18 @@ WINDOW_RESOLUTION=${WINDOW_RESOLUTION:-1440x900}
 # below 4 GiB), sized automatically for a bigger BAR0; a number sets it,
 # default = OVMF's own
 # PCI_MMIO64_MB=0
+# The Mac model OpenCore tells macOS (SMBIOS SystemProductName): MacBookPro16,1
+# (what the OpenCore image has: a muxed laptop, CoreDisplay logs isMobile=YES),
+# MacPro7,1 or iMacPro1,1 (desktops). Unset or MacBookPro16,1 = nothing asked, the
+# OpenCore config is left as it is. The serial, board serial and UUID stay as they
+# are (iServices are not used). Steps play-macpro / play-desktop use MacPro7,1 for
+# their own run whatever this says.
+# SMBIOS_MODEL=MacPro7,1
+# Where the card sits in the VM: pcie0 = on the root bus (00:10.0, PCI bus 0:
+# IOGraphics then sets IOFBIntegrated), rootport = behind a PCIe root port
+# (bus 1, a discrete card; BAR windows reserved on the port). Steps
+# play-rootport / play-desktop use rootport for their own run.
+GPU_BUS="${GPU_BUS:-pcie0}"
 EOF
     [ -n "${BASE_ARGS:-}" ] && echo "BASE_ARGS=\"$BASE_ARGS\"" >> "$CONF"
     ok "$CONF (RAM ${RAM_GB:-$ram} GiB, $cpus CPU)"
@@ -229,7 +335,9 @@ EOF
     if [ ! -f "$WORK/OpenCore-rdna3.img" ]; then
         qemu-img convert -O raw "$osx/OpenCore/OpenCore.qcow2" "$WORK/OpenCore-rdna3.img"
     fi
-    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --sip-off --timeout 5 >/dev/null
+    local sm
+    sm=$(smbios_want) || exit 1
+    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --sip-off --timeout 5 ${sm:+--smbios "$sm"} >/dev/null
     local base
     # OSX-KVM's own boot-args, without what earlier runs of this tool added
     base=$(sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --show | tr ' ' '\n' |
@@ -334,8 +442,14 @@ oc_cleanup() {
 }
 
 cmd__oc() {
-    local img=$WORK/OpenCore-rdna3.img part kdir="" old_trap
+    local img=$WORK/OpenCore-rdna3.img part kdir="" old_trap a prev="" sm_written=""
     [ -f "$img" ] || die "no $img"
+    # the model this call writes (smbios_want reads it back: a later run that asks for nothing
+    # puts the default back instead of keeping this one)
+    for a in "$@"; do
+        [ "$prev" = --smbios ] && sm_written=$a
+        prev=$a
+    done
     if [ "${1:-}" = --kexts ]; then kdir=$2; shift 2; fi
     old_trap=$(trap -p EXIT)
     trap 'oc_cleanup' EXIT
@@ -374,6 +488,10 @@ cmd__oc() {
     oc_cleanup
     trap - INT TERM
     if [ -n "$old_trap" ]; then eval "$old_trap"; else trap - EXIT; fi
+    if [ $rc = 0 ] && [ -n "$sm_written" ]; then
+        printf '%s\n' "$sm_written" > "$WORK/smbios-written" ||
+            echo "!! cannot write $WORK/smbios-written: a later run cannot tell that the Mac model was changed"
+    fi
     return $rc
 }
 
@@ -461,9 +579,13 @@ cmd_window() {
     res=${res:-${WINDOW_RESOLUTION:-1440x900}}
     case $res in [0-9]*x[0-9]*) ;; *) die "--res wants WxH, e.g. 1280x800" ;; esac
     msrs
+    # the Mac model of the card step this window is for (RDNA3VM_BOOTARGS, set by launch /
+    # the queue), else the config's: macOS runs the same model it will be tested under
+    local sm
+    sm=$(smbios_want "${RDNA3VM_BOOTARGS:-}") || exit 1
     # verbose boot without our drivers' levels: a hang shows where it stops
     sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --boot-args "$BASE_ARGS -v keepsyms=1 debug=0x100 amfi=0x80$extra" \
-        --resolution "$res" >/dev/null
+        --resolution "$res" ${sm:+--smbios "$sm"} >/dev/null
     qemu_common
     [ -f "$INSTALLER" ] && QARGS+=(-drive id=InstallMedia,if=none,format=raw,file="$INSTALLER"
                                   -device ide-hd,bus=sata.3,drive=InstallMedia)
@@ -546,6 +668,11 @@ launch() {   # launch "rdna3 args" stay(0/1)
     gpu_bdf >/dev/null || die "no 1002:747e card found"
     bootargs="$BASE_ARGS $DEBUG_ARGS $extra"
     [ "$stay" = 1 ] || bootargs="$bootargs rdna3vmauto=1"
+    # a wrong @smbios= / @gpubus= / config value stops here, in the user's terminal, not
+    # inside the systemd unit; the install boot and an approval window run the same model
+    smbios_asked "$bootargs" >/dev/null || exit 1
+    gpu_bus "$bootargs" >/dev/null || exit 1
+    export RDNA3VM_BOOTARGS=$bootargs
     sudo -v || die "sudo is needed"
     install_first
     # an automatic step is done in ~3 min; a stuck one should not keep the
@@ -573,6 +700,7 @@ launch() {   # launch "rdna3 args" stay(0/1)
     sleep 5
     sudo systemd-run --unit="rdna3vm-$(date +%H%M%S)" --collect --quiet \
         --setenv=RDNA3VM_DIR="$WORK" --setenv=RDNA3VM_BOOTARGS="$bootargs" \
+        --setenv=RDNA3VM_STEP="${RDNA3VM_STEP:-}" \
         --setenv=RDNA3VM_TIMEOUT="$limit" \
         bash "$SELF" _once
 }
@@ -597,7 +725,7 @@ vm_bundle_seen() {
 # (rdna3vm approve) - macOS asks for it however it was installed.
 cmd__install() {
     load_conf
-    local want stamp limit=${INSTALL_TIMEOUT_MIN:-10} qpid tm how
+    local want stamp limit=${INSTALL_TIMEOUT_MIN:-10} qpid tm how sm
     want=$(cut -c1-64 "$WORK/share/rdna3-bundle.sha256" 2>/dev/null) || true
     [ -n "$want" ] || return 0
     mkdir -p "$WORK/reports"
@@ -605,7 +733,10 @@ cmd__install() {
     [ "$want" = "$(cat "$WORK/vm-bundle.sha256" 2>/dev/null)" ] && return 0
     stamp=$(date +%Y%m%d-%H%M%S)
     echo "== installing the new bundle in macOS without the card (headless, the screen stays with Linux, ~3 min)"
-    cmd__oc --boot-args "$BASE_ARGS rdna3vmauto=1 rdna3vminstall=1" --resolution "${WINDOW_RESOLUTION:-1440x900}" ||
+    # the model of the step this install is for (RDNA3VM_BOOTARGS), else the config's
+    sm=$(smbios_want "${RDNA3VM_BOOTARGS:-}") || return 0
+    cmd__oc --boot-args "$BASE_ARGS rdna3vmauto=1 rdna3vminstall=1" --resolution "${WINDOW_RESOLUTION:-1440x900}" \
+        ${sm:+--smbios "$sm"} ||
         { echo "!! OpenCore not updated: the card step installs the bundle itself"; return 0; }
     msrs
     qemu_common
@@ -678,17 +809,37 @@ run_note() {
     if [ -n "$log" ]; then printf '%s\n' "$*" >> "$log" 2>/dev/null || true; fi
 }
 
+# The command that gives Allow under the Mac model the step ran with: 'rdna3vm approve
+# --step N' when the step asked for one (@smbios=; plain 'approve' would run the config's
+# model), else plain. $1 = the step's name (default: RDNA3VM_STEP of the run), $2 = its
+# boot-args (default: RDNA3VM_BOOTARGS)
+approve_cmd() {
+    local n=${1:-${RDNA3VM_STEP:-}} a=${2:-${RDNA3VM_BOOTARGS:-}}
+    case " $a " in
+        *" @smbios="*)
+            if [ -n "$n" ]; then printf 'rdna3vm approve --step %s' "$n"
+            else printf 'rdna3vm approve --step <the step these boot-args came from: %s>' "$(host_opt smbios "$a")"
+            fi ;;
+        *) printf 'rdna3vm approve' ;;
+    esac
+}
+
 # the VM's boot just ended with an approve marker: macOS ran an older
 # framebuffer/accelerator than the installed one. $1 = what ran ("the VM" /
 # "the rerun"), $2 = the end of the sentence. After an 'rdna3vm approve' this is
 # the proof that Allow was not clicked (approve-unverified is still there).
 old_driver_note() {
+    # after a change of the Mac model: whether macOS keeps the approval is not known (it stores
+    # it by team and bundle id in KextPolicy, not by model, but nobody has verified that here)
+    if [ -s "$WORK/smbios-changed" ]; then
+        run_note "== the SMBIOS model changed for this run ($(cat "$WORK/smbios-changed" 2>/dev/null)): if 'rdna3vm approve' was done under the other model, macOS may have dropped the approval - tell the maintainer"
+    fi
     if [ -s "$WORK/approve-unverified" ]; then
         run_note "!! Allow was not clicked / did not take: macOS still runs $(approve_marker_text) ('rdna3vm approve' ran before this step, for: $(cat "$WORK/approve-unverified" 2>/dev/null)). $1 tested the OLD driver$2"
         run_note "== in the approval window: Privacy & Security -> scroll down -> Allow (password) -> Not Now -> Apple menu -> Shut Down; then the step again (the next step asks for it by itself)"
     else
         run_note "== $1 ran an older framebuffer/accelerator than the installed one ($(approve_marker_text)): this run tested the OLD driver$2"
-        run_note "== run 'rdna3vm approve', then the step again (the next step asks for it by itself)"
+        run_note "== run '$(approve_cmd)', then the step again (the next step asks for it by itself)"
     fi
 }
 
@@ -715,7 +866,7 @@ install_first() {
     fi
     # read before _install: an install boot deletes the markers
     stale=$(approve_marker_text)
-    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _install || true
+    sudo env RDNA3VM_DIR="$WORK" RDNA3VM_BOOTARGS="${RDNA3VM_BOOTARGS:-}" bash "$SELF" _install || true
     if [ -n "$stale" ]; then
         say "!! the last card run tested the OLD framebuffer/accelerator, not the installed build"
         echo "  macOS reported: $stale"
@@ -773,9 +924,10 @@ cmd__once() {
 
 cmd_step() {
     local n=${1:-} stay=0 a
-    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 big4 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug relight gamma agdc default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall bisect bisect-plugin bisect-agdc play"
+    [ -n "$n" ] || die "give a step: 0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 big4 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug relight gamma agdc default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall bisect bisect-plugin bisect-agdc play play-macpro play-rootport play-desktop"
     [ "${2:-}" = --stay ] && stay=1
-    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 big4 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug relight gamma agdc default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall bisect bisect-plugin bisect-agdc play off)"
+    a=$(step_args "$n") || die "unknown step $n (0 1 2 3 4 5 5b 5c 6 6b 7 8 8c userq vcn vcn2 8u pmctl baco 9 9b 9c 9cu 9b3 9c3 10 10s 10a 10m big big2 big3 big4 metal modeset modeset2 dplink dsc mst uhbr odm mall subvp hotplug relight gamma agdc default amdgpu hanggfx sleep vcnsleep gamma0 otg dmubreset hdmi hdmi20 dcseq audio fmt cursormall bisect bisect-plugin bisect-agdc play play-macpro play-rootport play-desktop off)"
+    RDNA3VM_STEP=$n
     launch "$a" "$stay"
 }
 
@@ -785,9 +937,28 @@ cmd_step() {
 # Allowing needs no card: by default macOS runs in a window (the card and the
 # screen stay with Linux); --card boots it with the card as before.
 cmd_approve() {
-    local seen rc=0
+    local seen rc=0 card=0 st=""
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --card) card=1; shift ;;
+            --step) [ $# -ge 2 ] || die "--step wants a step name"; st=$2; shift 2 ;;
+            *) die "unknown option $1 (--card, --step STEP)" ;;
+        esac
+    done
+    # the window runs the Mac model of that step (play-desktop: MacPro7,1), so the approval is
+    # given under the model the step will be tested with. --card boots with step 0's
+    # boot-args (launch sets RDNA3VM_BOOTARGS itself): the two together would silently
+    # approve under another model than the one asked for
+    if [ -n "$st" ] && [ "$card" = 1 ]; then
+        die "--card and --step cannot be combined: --card boots step 0's boot-args with the config's Mac model. Use 'rdna3vm approve --step $st' (the window) or 'rdna3vm approve --card'"
+    fi
+    if [ -n "$st" ]; then
+        RDNA3VM_BOOTARGS=$(step_args "$st") || die "unknown step $st"
+        export RDNA3VM_BOOTARGS
+        RDNA3VM_STEP=$st
+    fi
     say "Allowing the new framebuffer/accelerator build in macOS (once per build)"
-    if [ "${1:-}" = --card ]; then
+    if [ "$card" = 1 ]; then
         echo "  macOS starts with the card and stays up. Wait ~2 minutes after the desktop"
         echo "  appears: the new kexts are installed then, and Privacy & Security opens by"
         echo "  itself with a dialog. Then:"
@@ -804,7 +975,7 @@ cmd_approve() {
     seen=$(approve_marker_text)
     printf '%s\n' "${seen:-allow requested $(date '+%F %T')}" > "$WORK/approve-unverified" ||
         echo "!! cannot write $WORK/approve-unverified: a missed Allow will not be named by the next run"
-    if [ "${1:-}" = --card ]; then
+    if [ "$card" = 1 ]; then
         # launch runs install_first: without this it would offer the same approval again
         approve_marker_clear
         launch "$(step_args 0)" 1
@@ -826,6 +997,7 @@ cmd_args() {
     local stay=0
     [ -n "${1:-}" ] || die 'give boot-args, e.g. rdna3vm args "rdna3lvl=2"'
     [ "${2:-}" = --stay ] && stay=1
+    RDNA3VM_STEP=
     launch "$1" "$stay"
 }
 
@@ -870,6 +1042,8 @@ cmd_queue() {
     [ -s "$QUEUE" ] || die "no queue: give steps, e.g. rdna3vm queue 5b 8c 9  (or: rdna3vm queue pending = $PENDING_STEPS)"
     gpu_bdf >/dev/null || die "no 1002:747e card found"
     sudo -v || die "sudo is needed"
+    # the install boot / approval window run the Mac model of the first step
+    RDNA3VM_BOOTARGS=$(step_args "$(head -n1 "$QUEUE")") && export RDNA3VM_BOOTARGS || unset RDNA3VM_BOOTARGS
     install_first
     say "Running the steps $(tr '\n' ' ' < "$QUEUE")one after the other"
     echo "  Each step: the screen goes dark, macOS runs and shuts down, the desktop"
@@ -890,10 +1064,10 @@ cmd__queue() {
         sed -i 1d "$QUEUE"
         a=$(step_args "$n") || continue
         echo "== queue: step $n ($a), left: $(tr '\n' ' ' < "$QUEUE")"
-        bash "$SELF" _install || true
+        RDNA3VM_BOOTARGS="$a" bash "$SELF" _install || true
         if [ -s "$WORK/needs-allow" ]; then
             echo "== queue: stopped before step $n: macOS wants 'Allow' for the new $(cat "$WORK/needs-allow")"
-            echo "== queue: run 'rdna3vm approve', then 'rdna3vm queue' goes on with: $n $(tr '\n' ' ' < "$QUEUE")"
+            echo "== queue: run '$(approve_cmd "$n" "$a")', then 'rdna3vm queue' goes on with: $n $(tr '\n' ' ' < "$QUEUE")"
             rm -f "$WORK/needs-allow"
             { printf '%s\n' "$n"; cat "$QUEUE"; } > "$QUEUE.new" && cat "$QUEUE.new" > "$QUEUE"; rm -f "$QUEUE.new"
             return 0
@@ -921,7 +1095,7 @@ cmd__queue() {
         # step now would test those (card run 2026-10-12). Stop, keep it.
         if approve_marker_any; then
             echo "== queue: stopped after step $n: it ran on the OLD driver, macOS runs an older framebuffer/accelerator ($(approve_marker_text))"
-            echo "== queue: run 'rdna3vm approve', then 'rdna3vm queue' runs step $n again and goes on with: $n $(tr '\n' ' ' < "$QUEUE")"
+            echo "== queue: run '$(approve_cmd "$n" "$a")', then 'rdna3vm queue' runs step $n again and goes on with: $n $(tr '\n' ' ' < "$QUEUE")"
             # set aside, not deleted: the result of this step carries it (triage reads approve-*.txt)
             stamp=$(date +%Y%m%d-%H%M%S)
             approve_markers | while read -r f; do cat "$f"; done > "$WORK/reports/approve-seen-$stamp.txt" || true
@@ -1135,41 +1309,113 @@ restore() {
     return 0
 }
 
-cmd__passthrough() {
-    load_conf
-    local stamp log bdf d slot i rp
-    stamp=$(date +%Y%m%d-%H%M%S)
-    log=$WORK/reports/host-$stamp.log
-    RUNLOG=$log
-    exec > >(tee -a "$log") 2>&1
-    echo "boot-args: $RDNA3VM_BOOTARGS"
-    # the card's GOP mode again (rdna3vm window sets its own window size)
-    local res=${OC_RESOLUTION-Max}
-    cmd__oc --boot-args "$RDNA3VM_BOOTARGS" ${res:+--resolution "$res"} || exit 1
-    bdf=$(gpu_bdf)
-    mapfile -t DEVS < <(group_devs "$bdf")
-    echo "to the VM: ${DEVS[*]}"
-    echo 1 > /sys/module/kvm/parameters/ignore_msrs
-    echo 0 > /sys/module/kvm/parameters/report_ignored_msrs 2>/dev/null || true
-
-    qemu_common
-    QARGS+=(-vga none -display none -serial "file:$WORK/reports/serial-$stamp.log")
-    # step sleep (rdna3resume=1): the guest may suspend to RAM (pmset sleepnow)
-    case " $RDNA3VM_BOOTARGS " in *" rdna3resume=1 "*) QARGS+=(-global ICH9-LPC.disable_s3=0) ;; esac
-    slot=${bdf%.*}; i=1; rp=0
-    # GPU_BUS=pcie0 (default, as OSX-KVM's boot-passthrough.sh): directly on
-    # the root bus (00:10.x). rootport: behind a pcie-root-port; macOS leaves
-    # the card unconfigured there (BARs unmapped, nothing behind the port).
-    local gbus=rp0 gaddr="00"
-    if [ "${GPU_BUS:-pcie0}" = pcie0 ]; then
-        gbus=pcie.0; gaddr="10"
-    else
-        QARGS+=(-device pcie-root-port,id=rp0,bus=pcie.0,chassis=1,slot=1,hotplug=off)
+# OVMF's 64-bit PCI window in MiB for a card with a BAR0 of $2 MiB; $1 = PCI_MMIO64_MB:
+# a number, "default" (OVMF's own) or 0 = none while all BARs fit below 4 GiB. A BAR0
+# above 256 MiB (a bigger RESIZE_BAR_LOG2, or a resize that failed) is not planned for
+# the 32-bit window below 4 GiB, which q35's layout keeps well under 1 GiB: the 64-bit
+# window is kept, 4 x the BAR rounded up to a power of two (8 GiB for 2 GiB, 64 GiB for
+# the 16 GiB amdgpu leaves)
+mmio64_mb() {
+    local mm=$1 b0=$2 p2=256
+    if [ "$mm" = 0 ] && [ "$b0" -gt 256 ]; then
+        while [ "$p2" -lt "$b0" ]; do p2=$((p2 * 2)); done
+        mm=$((p2 * 4)); [ "$mm" -lt 4096 ] && mm=4096
     fi
-    echo "  GPU on: ${GPU_BUS:-pcie0}"
+    printf '%s' "$mm"
+}
+
+# A size in MiB as QEMU writes it: 512M, 32G
+qemu_size() {
+    if [ "$1" -ge 1024 ] && [ $(($1 % 1024)) = 0 ]; then printf '%sG' $(($1 / 1024)); else printf '%sM' "$1"; fi
+}
+pow2_at_least() {   # the smallest power of two >= $1 (and >= $2)
+    local p=${2:-1}
+    while [ "$p" -lt "$1" ]; do p=$((p * 2)); done
+    printf '%s' "$p"
+}
+
+# GPU_BUS=rootport: the windows of the pcie-root-port in front of the card (card run
+# 2026-10-17d / amdgpu: a discrete card behind a root port is PCI bus >= 1 and not
+# IOFBIntegrated). Earlier runs (commits 0a80e3c, c21eed6) found it unconfigured behind
+# an unsized port, so the port now advertises what the card needs behind it, the way
+# QEMU documents for firmware (docs/pcie.txt, "resource reservation hints" of the
+# pcie-root-port: mem-reserve, pref32-reserve, pref64-reserve):
+#   mem-reserve    the non-prefetchable 32-bit memory BARs of the slot's functions (BAR5
+#                  registers, the HDMI audio function's BAR) + 2 MiB for the option ROM
+#   pref64-reserve the prefetchable BARs (BAR0 VRAM window, BAR2 doorbells), rounded up to
+#                  a power of two: 512 MiB for the 256 MiB BAR0, 32 GiB for the 16 GiB one
+#   pref32-reserve the same instead of pref64 when OVMF has no 64-bit window (mm 0, every
+#                  BAR below 4 GiB): QEMU refuses a port with both set
+# OVMF's PciHotPlugInitDxe pads a port's windows from these only when the port is
+# hot-plug capable (and macOS reset such a port's slot, hence hotplug=off); without it
+# OVMF sizes the windows from the BARs it finds behind the port, so the hints are a
+# belt for the case the card's BARs are not all there when OVMF enumerates.
+# $1 = OVMF's 64-bit window (mm, MiB), then the PCI addresses of the card's functions.
+# Prints "<mem-reserve MiB> <pref reserve MiB> <pref32|pref64>" and " assumed" after them
+# when no BAR of the card was readable (the sizes are then a guess: gpu_qargs says so).
+rootport_plan() {
+    local mm=$1 d n s e f sz pref=0 non=0 pm nm kind=pref64 assumed=""
+    shift
+    for d in "$@"; do
+        [ -r "$PCI_SYSFS/$d/resource" ] || continue
+        n=0
+        while read -r s e f; do
+            n=$((n + 1))
+            [ "$n" -le 7 ] || break          # BAR0-5, the ROM
+            sz=$(( e > s ? e - s + 1 : 0 ))
+            [ "$sz" -gt 0 ] || continue
+            if [ "$n" -le 6 ] && [ $((f & 0x100)) != 0 ]; then continue   # an I/O BAR
+            elif [ "$n" -le 6 ] && [ $((f & 0x2000)) != 0 ]; then pref=$((pref + sz))
+            else non=$((non + sz)); fi
+        done < "$PCI_SYSFS/$d/resource"
+    done
+    nm=$(pow2_at_least $(( (non + 2097152 + 1048575) >> 20 )) 2)
+    pm=$(( (pref + 1048575) >> 20 ))
+    # nothing readable (the card is not there yet, a fixture): the conservative size
+    if [ "$pm" = 0 ]; then
+        assumed=" assumed"
+        if [ "$mm" = 0 ]; then pm=512; else pm=32768; fi
+    fi
+    pm=$(pow2_at_least "$pm" 2)
+    [ "$mm" = 0 ] && [ "$pm" -le 1024 ] && kind=pref32
+    # with the newline: 'read' in gpu_qargs returns 1 at an unterminated last line, and under
+    # set -e that ended _passthrough right after the card's detach (ECC review of 501eae9)
+    printf '%s %s %s%s\n' "$nm" "$pm" "$kind" "$assumed"
+}
+
+# The card's PCI devices as QEMU arguments (appended to QARGS), from DEVS (every
+# non-bridge device of the card's IOMMU groups). $1 = the card's address, $2 = pcie0
+# (default, as OSX-KVM's boot-passthrough.sh: directly on the root bus, 00:10.x, PCI
+# bus 0) or rootport (behind a pcie-root-port without hot-plug: the card is PCI bus 1;
+# its audio function stays on the same port, as function 1), $3 = OVMF's 64-bit PCI
+# window in MiB.
+gpu_qargs() {
+    local bdf=$1 bus=$2 mm=$3 slot gbus=pcie.0 gaddr=10 d fn o i=1 rp=0 fns=() nm pm kind assumed
+    slot=${bdf%.*}
+    for d in "${DEVS[@]}"; do
+        [ "${d%.*}" = "$slot" ] && fns+=("$d")
+    done
+    if [ "$bus" = rootport ]; then
+        gbus=rp0; gaddr=00
+        read -r nm pm kind assumed < <(rootport_plan "$mm" "${fns[@]}")
+        if [ "${assumed:-}" = assumed ]; then
+            echo "!! root port: none of the card's BARs is readable ($PCI_SYSFS/<device>/resource of ${fns[*]}): assumed mem-reserve $(qemu_size "$nm"), $kind-reserve $(qemu_size "$pm") for PCI_MMIO64_MB=$mm (OVMF's window $([ "$mm" = default ] && echo "is its own, not checked against the reserve" || echo "$mm MiB"))"
+        fi
+        QARGS+=(-device "pcie-root-port,id=rp0,bus=pcie.0,chassis=1,slot=1,hotplug=off,mem-reserve=$(qemu_size "$nm"),$kind-reserve=$(qemu_size "$pm")")
+        echo "  root port windows: mem-reserve $(qemu_size "$nm"), $kind-reserve $(qemu_size "$pm")"
+        # q35's 64-bit hole as large as OVMF's window, so the guest's ACPI _CRS offers
+        # macOS the whole window the port's pref64 range comes from
+        case $mm in
+            ''|*[!0-9]*|0) ;;
+            *) QARGS+=(-global "q35-pcihost.pci-hole64-size=${mm}M")
+               [ "$pm" -le "$mm" ] ||
+                   echo "!! root port: pref64 window $pm MiB is larger than OVMF's 64-bit window ($mm MiB, PCI_MMIO64_MB): the BARs will not fit" ;;
+        esac
+    fi
+    echo "  GPU on: $bus$( [ "$bus" = rootport ] && echo " (behind a PCIe root port: PCI bus 1, not bus 0)" || echo " (root bus 00:10.0: PCI bus 0)")"
     for d in "${DEVS[@]}"; do
         if [ "${d%.*}" = "$slot" ]; then
-            local fn=${d##*.} o=""
+            fn=${d##*.}; o=""
             if [ "$fn" = 0 ]; then
                 o=",multifunction=on,x-no-kvm-intx=on"
                 [ "${USE_ROMFILE:-1}" = 1 ] && [ -f "$WORK/vbios.rom" ] && o="$o,romfile=$WORK/vbios.rom"
@@ -1182,6 +1428,55 @@ cmd__passthrough() {
                     -device "vfio-pci,host=$d,bus=rp$rp")
         fi
     done
+}
+
+# The Mac model of this run into the host log ($1 = the model written into the OpenCore
+# config, empty = nothing asked, the config untouched); a change since the last card run
+# is flagged (old_driver_note names it if the kexts then turn out not to be approved)
+smbios_note() {
+    local prev eff=${1:-$SMBIOS_DEFAULT}
+    prev=$(cat "$WORK/last-smbios" 2>/dev/null) || prev=""
+    if [ -n "${1:-}" ]; then
+        echo "  SMBIOS model: $1"
+    else
+        echo "  SMBIOS model: not asked (the OpenCore config is untouched: the image's own model, $SMBIOS_DEFAULT unless edited by hand)"
+    fi
+    if [ -n "$prev" ] && [ "$prev" != "$eff" ]; then
+        echo "  SMBIOS model changed since the last card run: $prev -> $eff"
+        echo "$prev -> $eff" > "$WORK/smbios-changed" || echo "!! cannot write $WORK/smbios-changed"
+    else
+        rm -f "$WORK/smbios-changed"
+    fi
+    echo "$eff" > "$WORK/last-smbios" || echo "!! cannot write $WORK/last-smbios"
+}
+
+cmd__passthrough() {
+    load_conf
+    local stamp log bdf
+    stamp=$(date +%Y%m%d-%H%M%S)
+    log=$WORK/reports/host-$stamp.log
+    RUNLOG=$log
+    exec > >(tee -a "$log") 2>&1
+    echo "boot-args: $RDNA3VM_BOOTARGS"
+    # the host-only @smbios= / @gpubus= tokens of a step are not macOS's boot-args
+    local sm bus oc_args
+    sm=$(smbios_want "$RDNA3VM_BOOTARGS") || exit 1
+    bus=$(gpu_bus "$RDNA3VM_BOOTARGS") || exit 1
+    oc_args=$(strip_host_opts "$RDNA3VM_BOOTARGS")
+    # the card's GOP mode again (rdna3vm window sets its own window size)
+    local res=${OC_RESOLUTION-Max}
+    cmd__oc --boot-args "$oc_args" ${sm:+--smbios "$sm"} ${res:+--resolution "$res"} || exit 1
+    smbios_note "$sm"
+    bdf=$(gpu_bdf)
+    mapfile -t DEVS < <(group_devs "$bdf")
+    echo "to the VM: ${DEVS[*]}"
+    echo 1 > /sys/module/kvm/parameters/ignore_msrs
+    echo 0 > /sys/module/kvm/parameters/report_ignored_msrs 2>/dev/null || true
+
+    qemu_common
+    QARGS+=(-vga none -display none -serial "file:$WORK/reports/serial-$stamp.log")
+    # step sleep (rdna3resume=1): the guest may suspend to RAM (pmset sleepnow)
+    case " $RDNA3VM_BOOTARGS " in *" rdna3resume=1 "*) QARGS+=(-global ICH9-LPC.disable_s3=0) ;; esac
     # keyboard and mouse: QEMU reads them from Linux (input-linux) and feeds
     # USB HID devices in the guest. Linux keeps the devices, so both Ctrl
     # keys hand them back to Linux and Esc x3 then stops the VM. Without
@@ -1219,22 +1514,16 @@ cmd__passthrough() {
     # every BAR below 4 GiB (fits once detach shrank BAR0 to 256 MiB);
     # "default" = OVMF's own size
     local mm=${PCI_MMIO64_MB:-0} b0=0 r0s r0e
-    read -r r0s r0e _ < "/sys/bus/pci/devices/$bdf/resource" 2>/dev/null &&
+    read -r r0s r0e _ < "$PCI_SYSFS/$bdf/resource" 2>/dev/null &&
         b0=$(( (r0e - r0s + 1) >> 20 ))
-    # a BAR0 above 256 MiB (a bigger RESIZE_BAR_LOG2, or a resize that
-    # failed) is not planned for the 32-bit window below 4 GiB, which q35's
-    # layout keeps well under 1 GiB: the 64-bit window is kept, 4 x the BAR
-    # rounded up to a power of two (8 GiB for 2 GiB, 64 GiB for the 16 GiB
-    # amdgpu leaves)
-    if [ "$mm" = 0 ] && [ "$b0" -gt 256 ]; then
-        local p2=256
-        while [ "$p2" -lt "$b0" ]; do p2=$((p2 * 2)); done
-        mm=$((p2 * 4)); [ "$mm" -lt 4096 ] && mm=4096
-        echo "  BAR0 $b0 MiB: 64-bit PCI window kept"
-    fi
+    mm=$(mmio64_mb "$mm" "$b0")
+    [ "${PCI_MMIO64_MB:-0}" = 0 ] && [ "$mm" != 0 ] && echo "  BAR0 $b0 MiB: 64-bit PCI window kept"
     [ "$mm" != default ] &&
         QARGS+=(-fw_cfg "name=opt/ovmf/X-PciMmio64Mb,string=$mm")
     echo "  OVMF 64-bit PCI window: $mm MiB (BAR0 $b0 MiB)"
+    # the card's devices, after the detach: the root port's windows (GPU_BUS=rootport)
+    # are sized from the BARs the card has now (BAR0 resized)
+    gpu_qargs "$bdf" "$bus" "$mm"
 
     local srv inh pk tm qpid
     start_share || echo "!! no report server: macOS cannot send its report this time"
@@ -1658,5 +1947,5 @@ case "${1:-}" in
     _passthrough) shift; cmd__passthrough "$@" ;;
     _once) shift; cmd__once "$@" ;;
     _install) shift; cmd__install "$@" ;;
-    *) sed -n '2,29p' "$SELF"; exit 1 ;;
+    *) sed -n '2,32p' "$SELF"; exit 1 ;;
 esac

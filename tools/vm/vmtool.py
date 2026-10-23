@@ -2,15 +2,18 @@
 """
 vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
 
-  vmtool.py plist CONFIG [--show] [--boot-args S] [--sip-off] [--timeout N] [--kext NAME[:EXEC[:MIN:MAX]]]
-                  [--remove-kext NAME] [--resolution WxH|Max]
+  vmtool.py plist CONFIG [--show] [--show-smbios] [--boot-args S] [--sip-off] [--timeout N]
+                  [--kext NAME[:EXEC[:MIN:MAX]]] [--remove-kext NAME] [--resolution WxH|Max]
+                  [--smbios MODEL]
       edit an OpenCore config.plist: boot-args and csr-active-config under
       NVRAM/Add (and listed under NVRAM/Delete so OpenCore really applies
       them), SecureBootModel Disabled, picker timeout, a Kernel/Add entry
       for EFI/OC/Kexts/NAME.kext, UEFI/Output/Resolution (the GOP mode
       OpenCore sets before macOS: the boot framebuffer's size);
       --remove-kext deletes the Kernel/Add entries of EFI/OC/Kexts/NAME.kext
-      (only those: other entries stay)
+      (only those: other entries stay); --smbios sets the model OpenCore gives
+      the VM (PlatformInfo/Generic/SystemProductName; the serial, MLB, UUID
+      and ROM of that section stay as they are), --show-smbios prints it
   vmtool.py romcheck FILE        a PCI option ROM with a UEFI (GOP) image?
   vmtool.py unzip ZIP DIR        extract (keeps the tree)
   vmtool.py serve DIR PORT [UP]  HTTP on 127.0.0.1: GET files, PUT into UP (DIR/reports)
@@ -161,6 +164,31 @@ def remove_kext(text, name):
     return text[:found[1]] + arr + text[found[2]:], n
 
 
+SMBIOS_RE = re.compile(r"^[A-Za-z]+[0-9]+,[0-9]+$")
+
+
+def get_smbios(text):
+    """PlatformInfo/Generic/SystemProductName, or '' when the config has none"""
+    sec = _section(text, "PlatformInfo", "Generic")
+    found = _value_after_key(text, "SystemProductName", *sec)
+    m = re.match(r"<string>(.*?)</string>", text[found[1]:found[2]], re.S) if found else None
+    return _unxml(m.group(1)) if m else ""
+
+
+def set_smbios(text, model):
+    """text with PlatformInfo/Generic/SystemProductName = model. OpenCore uses
+    that section only with PlatformInfo/Automatic true: with false the model
+    would silently stay the one of PlatformInfo/SMBIOS, so that is an error"""
+    if not SMBIOS_RE.match(model):
+        raise PlistEditError("SMBIOS model %r is not like MacPro7,1" % model)
+    auto = _value_after_key(text, "Automatic", *_section(text, "PlatformInfo"))
+    if auto and text.startswith("<false", auto[1]):
+        raise PlistEditError("PlatformInfo/Automatic is false in config.plist: OpenCore would ignore "
+                             "PlatformInfo/Generic/SystemProductName")
+    return _set(text, _section(text, "PlatformInfo", "Generic"), "SystemProductName",
+                "<string>%s</string>" % _xml(model))
+
+
 def cmd_plist(argv):
     """Edits only the values it changes, as text: OpenCore accepts plists
     that Python's plistlib refuses (and a rewrite would reformat the file)."""
@@ -173,6 +201,9 @@ def cmd_plist(argv):
         # the file holds XML text: a value with & comes back as the user typed it,
         # so writing it again (which escapes) round-trips byte for byte
         print(_unxml(m.group(1)) if m else "")
+        return 0
+    if "--show-smbios" in argv:
+        print(get_smbios(text))
         return 0
 
     def delete_list(name):
@@ -216,12 +247,17 @@ def cmd_plist(argv):
             text = _set(text, _section(text, "UEFI", "Output"), "Resolution",
                         "<string>%s</string>" % _xml(argv[i + 1]))
             i += 2
+        elif a == "--smbios":
+            text = set_smbios(text, argv[i + 1])
+            i += 2
         else:
             sys.exit("unknown option " + a)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     found = _value_after_key(text, "boot-args", *add())
     print("boot-args:", _unxml(re.sub(r"</?string>", "", text[found[1]:found[2]])) if found else "")
+    if "--smbios" in argv:
+        print("smbios:", get_smbios(text))
     return 0
 
 
@@ -431,7 +467,10 @@ def main():
     fn = cmds.get(sys.argv[1])
     if not fn:
         sys.exit(__doc__)
-    sys.exit(fn(sys.argv[2:]))
+    try:
+        sys.exit(fn(sys.argv[2:]))
+    except PlistEditError as e:
+        sys.exit("vmtool: %s" % e)
 
 
 if __name__ == "__main__":
