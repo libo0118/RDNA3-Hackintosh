@@ -11,6 +11,9 @@ back-offs, refusals, early readies, the stats line), MOOT with rdna3a3ws=0, the 
 back, nothing parked, much parked at the end, release failures, alloc/dealloc not a leak), lost readies, cleared and
 IOP flip waits apart, missing keys named, the SUMMARY rows from a synthetic archive; the trace: no H-VMMOVE for an
 object address reused after free() (a grow still moves), plain frees in H-VMPARK, IOP waits apart.
+Security / round-2 review of N41: the mark gate's rows (notreal, the marking uid), MOOT refusals and their
+back-offs (INFO), the timeout budget, lost readies, the parks under pressure / past the cap, readies at the
+command buffer's end; the trace: a NOBO park release is no move, a skipped wait WARNs.
 Run: python3 -I -B tests/test_triage_park.py"""
 import os
 import sys
@@ -46,7 +49,8 @@ GOOD = dict(vm_sticky=1, vm_parked=40, vm_unparked=38, vm_park_released=2, vm_pa
 # ECC review of N41: every key the accelerator of these sources exports
 GOOD.update(dict((k, 0) for k in tr.N41_VM_KEYS + tr.N41_SW_KEYS if k not in GOOD))
 GOOD.update(vm_alloc=50, vm_dealloc=45, vm_released_bytes=5 << 20, surface_wait_ms=100, surface_wait_late=0,
-            surface_wait_us=2000, surface_wait_busy=1)
+            surface_wait_us=2000, surface_wait_busy=1, vm_park_cap_mb=512, surface_wait_mark_uid=88,
+            surface_wait_mark_pid=148, surface_wait_ws_pid=148)
 A3WS = "debug.rdna3accel_a3ws: 1\n"
 
 r = tr.n41_rows(dump(**GOOD) + A3WS, CUR)
@@ -159,6 +163,47 @@ check(any("IOP flips: 7 wait(s)" in t for _, _, t in tr.n41_rows(dump(**bad) + A
 bad = dict(GOOD, surface_wait_notown=3)
 check(any(lv == "WARN" and "could not look up" in t for lv, _, t in tr.n41_rows(dump(**bad) + A3WS, CUR)),
       "notown WARN")
+# security review of N41: the mark gate (name AND uid 88 / the display client), MOOT refusals, the timeout budget;
+# round-2 review: lost readies (ghosts, aged); the parks under pressure / past the cap
+r = tr.n41_rows(dump(**dict(GOOD, surface_wait_notreal=5)) + A3WS, CUR)
+check(any(lv == "WARN" and "5 mark(s) from a process named WindowServer REFUSED" in t for lv, _, t in r), "notreal WARN")
+r = tr.n41_rows(dump(**GOOD) + A3WS, CUR)
+check(any(lv == "INFO" and "pid 148 uid 88 (_windowserver" in t for lv, _, t in r), "the marking uid INFO (%s)" % r)
+r = tr.n41_rows(dump(**dict(GOOD, surface_wait_mark_uid=501)) + A3WS, CUR)
+check(any(lv == "WARN" and "NOT uid 88" in t for lv, _, t in r), "a mark taken from another uid WARNs (%s)" % r)
+r = tr.n41_rows(dump(**dict(GOOD, surface_wait_starved=1, surface_wait_skipped=40)) + A3WS, CUR)
+check(any(lv == "WARN" and "budget ran out 1 time(s)" in t and "40 page-off" in t for lv, _, t in r), "budget WARN")
+r = tr.n41_rows(dump(**dict(GOOD, surface_wait_ghosts=2, surface_wait_aged=1)) + A3WS, CUR)
+check(any(lv == "INFO" and "2 pending mark(s) dropped for good" in t for lv, _, t in r), "ghosts INFO (%s)" % r)
+mootd = dict(GOOD, surface_wait_pending=0, surface_wait_ready=0, surface_wait_moot=7)
+CD_MOOT = CD_ON + "".join("WindowServer[148:9a2] NVMTL: surface wait (N41): pending mark of surface %d refused (errno 6, "
+                          "Device not configured) - old order, asked again in 1 s (%d back-off(s))\n" % (i, i)
+                          for i in (1, 2))
+r = tr.n41_rows(dump(**mootd) + "debug.rdna3accel_a3ws: 0\n", CUR, "", CD_MOOT)
+check(any(lv == "INFO" and t.startswith("MOOT") and "7 pending mark(s) refused as MOOT" in t for lv, _, t in r),
+      "MOOT names its refusals (%s)" % r)
+check(any(lv == "INFO" and "backed off 2 time(s)" in t and "the MOOT refusals" in t for lv, _, t in r),
+      "MOOT back-offs are INFO (%s)" % r)
+r = tr.n41_rows(dump(**dict(mootd, surface_wait_moot=0)) + "debug.rdna3accel_a3ws: 0\n", CUR, "", CD_MOOT)
+check(any(lv == "WARN" and "backed off 2 time(s)" in t for lv, _, t in r), "back-offs without MOOT still WARN")
+r = tr.n41_rows(dump(**dict(GOOD, vm_park_trim_pressure=2, vm_park_trimmed=9, vm_park_trimmed_bytes=90 << 20,
+                            vm_park_trim_held=3, vm_alloc_retry_ok=2)) + A3WS, CUR)
+check(any(lv == "WARN" and "2 time(s) VRAM ran out" in t and "9 park(s), 90 MiB" in t and "2 granted" in t
+          for lv, _, t in r), "pressure releases WARN (%s)" % r)
+r = tr.n41_rows(dump(**dict(GOOD, vm_park_trim_cap=4, vm_park_trimmed=4)) + A3WS, CUR)
+check(any(lv == "INFO" and "4 time(s) past the cap (512 MiB)" in t for lv, _, t in r), "cap releases INFO (%s)" % r)
+r = tr.n41_rows(dump(**dict(GOOD, vm_park_trim_unknown=3)) + A3WS, CUR)
+check(any(lv == "WARN" and "rdna3VramRefs" in t for lv, _, t in r), "unknown counts WARN")
+r = tr.n41_rows(dump(**dict(GOOD, vm_park_noimport=11)) + A3WS, CUR)
+check(any(lv == "INFO" and "11 deallocPhysical(s) freed, not parked" in t for lv, _, t in r), "noimport INFO")
+CD_STATS2 = CD_ON + ("WindowServer[148:9a2] NVMTL: surface wait (N41): stats (every 4096th): 4096 command buffer(s) marked, "
+                     "9000 pending mark(s) taken, 0 refused (0 back-off(s)), 12 surface write(s) in system memory not "
+                     "marked, 0 command buffer(s) while backed off, 0 ready mark(s) sent before the surface's dirty "
+                     "mark, 9000 ready mark(s) sent (17 at the command buffer's end)\n")
+r = tr.n41_rows(dump(**GOOD) + A3WS, CUR, "", CD_STATS2)
+check(any(lv == "INFO" and "17 of its 9000 ready mark(s) at the command buffer's end" in t for lv, _, t in r),
+      "readies at the end are printed (%s)" % r)
+check(not any("ready mark(s) before" in t for _, _, t in r), "no early readies: no row")
 
 
 # ---- the trace: rdna3_trace.vram_moves on synthetic events ----
@@ -218,6 +263,20 @@ reuse0 = Trace([Ev("VMALLOC", obj=VM, pa=0x1000), Ev("SURFGEM", arg=1, obj=VM, p
                 Ev("VMFREE", obj=VM, pa=0x1000), Ev("VMFREE", obj=VM, pa=0, flags=rt.VM_OBJ_GONE),
                 Ev("VMALLOC", obj=VM, pa=0x5000)])
 check(not rt.vram_moves(reuse0)["moved"], "sticky 0 then free(): no move")
+# security review of N41: a park released because no BO holds it (VRAM ran out / the cap, v2 NOBO) ends the import:
+# the object's next allocation elsewhere is no move
+nobo = Trace([Ev("VMALLOC", obj=VM, pa=0x1000), Ev("SURFGEM", arg=1, obj=VM, pa=0x1000, v0=37),
+              Ev("VMFREE", obj=VM, pa=0x1000, flags=rt.VM_PARKED),
+              Ev("VMFREE", obj=VM, pa=0x1000, flags=rt.VM_PARK_GONE, v2=rt.VM_V2_NOBO),
+              Ev("VMALLOC", obj=VM, pa=0x9000)])
+m = rt.vram_moves(nobo)
+check(not m["moved"] and m["park_nobo"] == 1 and m["park_released"] == 1, "a NOBO release is no move: %s" % m)
+check("H-VMMOVE" not in [n for _, n, _ in rt.h_vram_moved(nobo)], "no H-VMMOVE after a NOBO release")
+skip = Trace([Ev("PAGEOFF", obj=0x5, flags=rt.PAGEOFF_WAIT_SKIPPED, seq=3)])
+check(any(lv == "WARN" and "did NOT wait" in t for lv, n, t in rt.h_vram_moved(skip) if n == "H-SURFWAIT"),
+      "a skipped wait WARNs")
+check("NOT waited" in rt._fmt_event(skip, Ev("PAGEOFF", arg=1, flags=rt.PAGEOFF_WAIT_SKIPPED), 1.0, "PAGEOFF"),
+      "a skipped wait is decoded")
 # a grow (a park released, not the object) is still a move
 grow = Trace([Ev("VMALLOC", obj=VM, pa=0x1000), Ev("SURFGEM", arg=1, obj=VM, pa=0x1000, v0=37),
               Ev("VMFREE", obj=VM, pa=0x1000, flags=rt.VM_PARKED), Ev("VMFREE", obj=VM, pa=0x1000, flags=rt.VM_PARK_GONE),

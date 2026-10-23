@@ -497,13 +497,21 @@ N41_SYSCTL = re.compile(r"^debug\.rdna3accel_((?:vm|surface)_\w+): (-?\d+)", re.
 # every counter an accelerator of these sources exports (ECC review of N41: a missing one is named, never silence)
 N41_VM_KEYS = ("vm_sticky", "vm_alloc", "vm_dealloc", "vm_refused", "vm_parked", "vm_unparked", "vm_park_released",
                "vm_park_grow", "vm_reparked", "vm_parked_bytes", "vm_free_live", "vm_released", "vm_released_bytes",
-               "vm_release_failed", "vm_restored", "vm_restore_miss", "vm_dirty_moved", "vm_apdesc_moved")
+               "vm_release_failed", "vm_restored", "vm_restore_miss", "vm_dirty_moved", "vm_apdesc_moved",
+               # security review of N41: only a BO's allocation parked; parks no BO holds released under pressure / cap
+               "vm_park_noimport", "vm_park_trim_pressure", "vm_park_trim_cap", "vm_park_trimmed",
+               "vm_park_trimmed_bytes", "vm_park_trim_held", "vm_park_trim_unknown", "vm_alloc_retry_ok",
+               "vm_alloc_retry_fail", "vm_park_cap_mb")
 N41_SW_KEYS = ("surface_wait", "surface_wait_ms", "surface_wait_maxus", "surface_wait_iop_maxus", "surface_wait_busy",
                "surface_wait_pending", "surface_wait_ready", "surface_wait_late", "surface_wait_evicted",
                "surface_wait_saturated", "surface_wait_off", "surface_wait_notws", "surface_wait_notown",
                "surface_wait_waits", "surface_wait_timeouts", "surface_wait_cleared", "surface_wait_us",
                "surface_wait_iop_waits", "surface_wait_iop_timeouts", "surface_wait_iop_cleared", "surface_wait_iop_us",
-               "surface_dirty_trybusy")
+               "surface_dirty_trybusy",
+               # security review / round-2 review of N41: the mark gate, the timeout budget, the forgiven marks
+               "surface_wait_notreal", "surface_wait_moot", "surface_wait_skipped", "surface_wait_starved",
+               "surface_wait_aged", "surface_wait_ghosts", "surface_wait_ws_pid", "surface_wait_mark_pid",
+               "surface_wait_mark_uid")
 N41_PARKED_BYTES_WARN = 256 << 20   # VRAM parked at the end of a run that says "parks hold VRAM others may need"
 N41_UNACCOUNTED_WARN = 64           # pending marks whose ready never came (more than one frame's surfaces in flight)
 
@@ -513,10 +521,11 @@ def n41_plugin(cdlog, pluginlog=""):
     (WindowServer's process; 26-log-metal-plugin.txt holds every other process) - both are read. {"decision": the
     one-time line's text or None, "old": the decision kept the old order, "gates": the ABSENT / PRESENT / headless /
     NVMTL_SURFACE_WAIT=0 gates named, "forgood": ENOSYS, "backoffs": [errno text], "again": marks taken again,
-    "refused": [lines], "stats": the last stats line or None, "early": readies sent before their dirty mark}"""
+    "refused": [lines], "stats": the last stats line or None, "early": readies sent before their dirty mark, "ready" /
+    "ready_end": readies sent and those sent at the command buffer's end (None: an older plugin's stats line)}"""
     text = (cdlog or "") + "\n" + (pluginlog or "")
     out = {"decision": None, "old": False, "gates": [], "forgood": False, "backoffs": [], "again": 0, "refused": [],
-           "stats": None, "early": 0}
+           "stats": None, "early": 0, "ready": None, "ready_end": None}
     d = re.findall(r"surface wait \(N41\): WindowServer's IOSurface VRAM writes are ([^\n]*)", text)
     if d:
         out["decision"] = d[-1].strip()
@@ -542,6 +551,9 @@ def n41_plugin(cdlog, pluginlog=""):
     m = re.search(r"(\d+) ready mark\(s\) sent before the surface's dirty mark", out["stats"] or "")
     out["early"] = int(m.group(1)) if m else (1 if "a ready mark went out before its surface could be marked" in text
                                               else 0)
+    m = re.search(r"(\d+) ready mark\(s\) sent \((\d+) at the command buffer's end\)", out["stats"] or "")
+    if m:
+        out["ready"], out["ready_end"] = int(m.group(1)), int(m.group(2))
     return out
 
 
@@ -630,6 +642,22 @@ def n41_rows(sv, log, pluginlog="", cdlog=""):
     if g("vm_apdesc_moved", 0):
         rows.append(("INFO", "VRAM parking", "%d cached aperture descriptor(s) dropped: the VRAM had moved, changed size "
                      "or was released" % g("vm_apdesc_moved")))
+    # security review of N41: only a BO's allocation parked; parks no BO holds go under pressure or past the cap
+    if g("vm_park_noimport", 0):
+        rows.append(("INFO", "VRAM parking", "%d deallocPhysical(s) freed, not parked: no BO was imported over the "
+                     "allocation (the kernel's 'freed, not parked' lines)" % g("vm_park_noimport")))
+    if g("vm_park_trim_pressure", 0) or g("vm_park_trim_cap", 0):
+        rows.append(("WARN" if g("vm_park_trim_pressure", 0) else "INFO", "VRAM parking",
+                     "parks released: %d time(s) VRAM ran out, %d time(s) past the cap (%s MiB): %d park(s), %d MiB "
+                     "given back, %d kept (a BO holds them); refused allocations asked again: %d granted, %d refused "
+                     "again (the kernel's 'VRAM parks:' lines)" % (
+                         g("vm_park_trim_pressure", 0), g("vm_park_trim_cap", 0), g("vm_park_cap_mb", "?"),
+                         g("vm_park_trimmed", 0), g("vm_park_trimmed_bytes", 0) >> 20, g("vm_park_trim_held", 0),
+                         g("vm_alloc_retry_ok", 0), g("vm_alloc_retry_fail", 0))))
+    if g("vm_park_trim_unknown", 0):
+        rows.append(("WARN", "VRAM parking", "%d park(s) kept because the core's reference count was unknown (an older "
+                     "core kext without rdna3VramRefs? the kernel's 'count unknown' lines): they are never given back "
+                     "under pressure" % g("vm_park_trim_unknown")))
     # the page-off's wait
     if "surface_wait" not in c:
         rows.append(("WARN" if cur else "INFO", "surface wait",
@@ -640,12 +668,15 @@ def n41_rows(sv, log, pluginlog="", cdlog=""):
     a3m = re.search(r"^debug\.rdna3accel_a3ws: (-?\d+)", sv or "", re.M)
     a3ws = int(a3m.group(1)) if a3m else None
     pl = n41_plugin(cdlog, pluginlog)
+    moot = g("surface_wait_moot", 0)
     if not g("surface_wait"):
         rows.append(("INFO", "surface wait", "OFF (surface_wait 0): page-offs do not wait for WindowServer's GPU"))
     elif not pend:
         if a3ws == 0:
             rows.append(("INFO", "surface wait", "MOOT: rdna3a3ws=0 keeps WindowServer's surfaces out of A3; the page-off "
-                         "wait was NOT exercised (N41 open item 1)"))
+                         "wait was NOT exercised (N41 open item 1)%s" % (
+                             "; %d pending mark(s) refused as MOOT (ENXIO: the plugin backs off)" % moot if moot
+                             else "")))
         else:
             rows.append(("WARN", "surface wait", "no pending marks taken%s: %s" % (
                 " although rdna3a3ws=1" if a3ws else " (rdna3accel_a3ws not in the dump)", _n41_plugin_reason(pl))))
@@ -678,6 +709,26 @@ def n41_rows(sv, log, pluginlog="", cdlog=""):
     if g("surface_wait_notws", 0):
         rows.append(("WARN", "surface wait", "%d mark(s) from a process other than WindowServer refused (an app's plugin "
                      "with NVMTL marks? the kernel's 'only WindowServer' lines)" % g("surface_wait_notws")))
+    if g("surface_wait_notreal", 0):
+        rows.append(("WARN", "surface wait", "%d mark(s) from a process named WindowServer REFUSED: neither uid 88 "
+                     "(_windowserver) nor the display client's pid %d (a process posing as WindowServer, or the real "
+                     "one under another uid before its first swap; the kernel's 'neither _windowserver' lines)" % (
+                         g("surface_wait_notreal"), g("surface_wait_ws_pid", 0))))
+    if g("surface_wait_mark_uid", -1) >= 0:
+        uid = g("surface_wait_mark_uid")
+        rows.append(("INFO" if uid == 88 else "WARN", "surface wait",
+                     "the first mark taken came from pid %d uid %d (%s; display client pid %d)" % (
+                         g("surface_wait_mark_pid", 0), uid, "_windowserver" if uid == 88 else
+                         "NOT uid 88: taken as the display client - the uid rule did not hold on this macOS",
+                         g("surface_wait_ws_pid", 0))))
+    if g("surface_wait_starved", 0) or g("surface_wait_skipped", 0):
+        rows.append(("WARN", "surface wait", "the timeout budget ran out %d time(s) (waits in a row timed out with no "
+                     "ready mark): %d page-off(s) / IOP flip(s) did NOT wait (ready marks lost; the kernel's 'STOP "
+                     "waiting' lines)" % (g("surface_wait_starved", 0), g("surface_wait_skipped", 0))))
+    if g("surface_wait_ghosts", 0) or g("surface_wait_aged", 0):
+        rows.append(("INFO", "surface wait", "lost ready marks: %d pending mark(s) dropped for good at a second "
+                     "timeout (a newer write's ready took the forgiven mark), %d forgiven mark(s) aged out" % (
+                         g("surface_wait_ghosts", 0), g("surface_wait_aged", 0))))
     if g("surface_wait_notown", 0):
         rows.append(("WARN", "surface wait", "%d pending mark(s) of a surface WindowServer could not look up refused (the "
                      "kernel's 'not a surface of the calling task' lines)" % g("surface_wait_notown")))
@@ -692,9 +743,12 @@ def n41_rows(sv, log, pluginlog="", cdlog=""):
         rows.append(("WARN", "surface wait", "WindowServer's plugin: pending marks refused with ENOSYS - old order for good "
                      "(a kext without the marks)"))
     if pl["backoffs"]:
-        rows.append(("WARN", "surface wait", "WindowServer's plugin backed off %d time(s) (errno %s; asked again in 1 s), "
-                     "marks taken again %d time(s)" % (len(pl["backoffs"]), "; ".join(sorted(set(pl["backoffs"]))),
-                                                       pl["again"])))
+        # the MOOT refusals (security review of N41) are ENXIO back-offs by design: INFO when they explain them all
+        moot_only = moot and not pend and all(b.startswith("6,") for b in pl["backoffs"])
+        rows.append(("INFO" if moot_only else "WARN", "surface wait",
+                     "WindowServer's plugin backed off %d time(s) (errno %s; asked again in 1 s), marks taken again %d "
+                     "time(s)%s" % (len(pl["backoffs"]), "; ".join(sorted(set(pl["backoffs"]))), pl["again"],
+                                    " - the MOOT refusals" if moot_only else "")))
     if pl["refused"]:
         rows.append(("WARN", "surface wait", "WindowServer's plugin: %d mark(s) refused, e.g. %s" % (
             len(pl["refused"]), pl["refused"][0][:140])))
@@ -703,6 +757,10 @@ def n41_rows(sv, log, pluginlog="", cdlog=""):
                      "marked newest: a page-off in between copied stale memory" % pl["early"]))
     if pl["stats"]:
         rows.append(("INFO", "surface wait", "WindowServer's plugin: " + pl["stats"][:300]))
+    if pl["ready_end"]:
+        rows.append(("INFO", "surface wait", "WindowServer's plugin sent %d of its %d ready mark(s) at the command "
+                     "buffer's end (completion or error), not after the part that wrote the surface last: those "
+                     "page-offs waited for the whole command buffer" % (pl["ready_end"], pl["ready"])))
     return rows
 
 

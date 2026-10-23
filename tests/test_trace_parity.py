@@ -58,7 +58,8 @@ if fbw != sorted(rdna3_trace.FLIPBUF_WHAT):
 for cname, pyname in (("RD3_TRVM_PARKED", "VM_PARKED"), ("RD3_TRVM_PARK_GONE", "VM_PARK_GONE"),
                       ("RD3_TRVM_FREE_LIVE", "VM_FREE_LIVE"), ("RD3_TRPO_WAITED", "PAGEOFF_WAITED"),
                       ("RD3_TRPO_TIMEOUT", "PAGEOFF_WAIT_TIMEOUT"), ("RD3_TRVM_OBJ_GONE", "VM_OBJ_GONE"),
-                      ("RD3_TRPO_IOP", "PAGEOFF_IOP"), ("RD3_TRPO_CLEARED", "PAGEOFF_WAIT_CLEARED")):
+                      ("RD3_TRPO_IOP", "PAGEOFF_IOP"), ("RD3_TRPO_CLEARED", "PAGEOFF_WAIT_CLEARED"),
+                      ("RD3_TRPO_SKIPPED", "PAGEOFF_WAIT_SKIPPED"), ("RD3_TRVMV2_NOBO", "VM_V2_NOBO")):
     mm = re.search(r"#define %s\s+(\d+)u" % cname, h)
     if not mm or int(mm.group(1)) != getattr(rdna3_trace, pyname, None):
         fails.append("%s %s, the decoder's %s %s" % (cname, mm and mm.group(1), pyname, getattr(rdna3_trace, pyname, None)))
@@ -120,6 +121,22 @@ for nm in names:
     for coll, rx in greps:
         if not rx.search(line):
             fails.append("%s's sysctl grep drops debug.rdna3accel_%s" % (coll, nm))
+# DRIVER-PLAN N41 (security / round-2 review): every vm_ / surface_ counter and knob the accelerator declares is
+# registered (sysctl_register_oid: a declared, unregistered sysctl never reaches the report) and triage names it when
+# missing (N41_VM_KEYS / N41_SW_KEYS); vm_alloc_bytes / vm_dealloc_bytes predate N41
+n41 = re.findall(r"^(?:RD3ACCEL_CNT\(|SYSCTL_INT\(_debug, OID_AUTO, |SYSCTL_PROC\(_debug, OID_AUTO, )"
+                 r"rdna3accel_((?:vm|surface)_\w+),", acc, re.M)
+if len(n41) < 50:
+    fails.append("parsed only %d N41 counters from the accelerator" % len(n41))
+for k in n41:
+    if "sysctl__debug_rdna3accel_%s)" % k not in acc:
+        fails.append("debug.rdna3accel_%s is declared but never registered (sysctl_register_oid)" % k)
+    if k not in triage_reports.N41_VM_KEYS + triage_reports.N41_SW_KEYS and k not in ("vm_alloc_bytes",
+                                                                                         "vm_dealloc_bytes"):
+        fails.append("debug.rdna3accel_%s is not in triage's N41_VM_KEYS / N41_SW_KEYS" % k)
+    for coll, rx in greps:
+        if not rx.search("debug.rdna3accel_%s: 1" % k):
+            fails.append("%s's sysctl grep drops debug.rdna3accel_%s" % (coll, k))
 miss = sorted(set(pq4) - set(triage_reports.PQ_KEYS))
 if miss:
     fails.append("triage's PQ_KEYS lacks %s" % ", ".join(miss))
