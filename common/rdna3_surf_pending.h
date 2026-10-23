@@ -185,7 +185,8 @@ static inline struct rd3_sp_evict *rd3_sp_evict_find(struct rd3_sp *t, uint32_t 
  * when the ring is full: its readies are LATE as before) */
 static inline void rd3_sp_evict_note(struct rd3_sp *t, const struct rd3_sp_slot *s, uint64_t now_ns)
 {
-    const uint64_t m = (uint64_t)s->count + s->forgiven;
+    /* ghosts are marks whose readies were already taken: they are not owed again (review of 66a814d) */
+    const uint64_t m = (uint64_t)(s->count - (s->ghost < s->count ? s->ghost : s->count)) + s->forgiven;
     if (!s->id || !m) return;
     struct rd3_sp_evict *e = rd3_sp_evict_find(t, s->id);
     if (!e) e = &t->evicted[t->evicted_next++ % RD3_SP_EVICTED];

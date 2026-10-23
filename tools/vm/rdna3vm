@@ -1006,7 +1006,7 @@ cmd_approve() {
     seen=$(approve_marker_text)
     if [ -z "$seen" ]; then
         local na hs
-        na=$(tr -s ' \n' ' ' < "$WORK/needs-allow" 2>/dev/null | sed 's/ $//') || true
+        na=$({ tr -s ' \n' ' ' < "$WORK/needs-allow"; } 2>/dev/null | sed 's/ $//') || true
         hs=$(bundle_source_hashes)
         seen="allow requested $(date '+%F %T')${na:+ for $na}; the bundle's builds: ${hs:-unknown (no readable rdna3-bundle.tar.gz)}"
     fi

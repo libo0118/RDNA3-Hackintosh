@@ -3871,10 +3871,11 @@ static void rd3AccelIopStop(void)
     IOLock *l = gPresLock;
     if (l) IOLockLock(l);
     for (unsigned h = 0; h < kRd3MaxFB; h++) {
-        if (gIopFlipFront[h]) drop[nd++] = gIopFlipFront[h];
+        /* a head still on an IOP surface keeps its front's reference: the HUBP may scan that VRAM until a
+         * modeset, and the release could hand it to another allocation (review of the N38 stop) */
+        if (gIopFlipFront[h] && !gIopFlipped[h]) { drop[nd++] = gIopFlipFront[h]; gIopFlipFront[h] = nullptr; }
         if (gIopFlipPrev[h]) drop[nd++] = gIopFlipPrev[h];
-        gIopFlipFront[h] = gIopFlipPrev[h] = nullptr;
-        gIopFlipped[h] = false;
+        gIopFlipPrev[h] = nullptr;
     }
     if (l) IOLockUnlock(l);
     for (unsigned i = 0; i < nd; i++, released++) ((OSObject *)drop[i])->release();
