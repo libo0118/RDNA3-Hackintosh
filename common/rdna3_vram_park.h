@@ -145,4 +145,19 @@ static inline int rd3_vp_same(const struct rd3_vp_alloc *a, const struct rd3_vp_
            a->cookie == b->cookie;
 }
 
+/* RD3Resource::getApertureMemoryDescriptor's cached descriptor over
+ * [ap_phys, ap_phys + ap_bytes): kept only while it covers exactly what the
+ * vidmem holds - the live allocation, or with nothing live the parked one
+ * (still allocated). A re-backed vidmem (another address or size), or one
+ * whose VRAM was released (nothing live, nothing parked there), gets no
+ * descriptor over freed VRAM: built again or none (ECC review of N41, L1). */
+static inline int rd3_vp_apdesc_keep(unsigned long long live_phys, unsigned long long live_bytes,
+                                     const struct rd3_vp_alloc *park, unsigned long long ap_phys,
+                                     unsigned long long ap_bytes)
+{
+    if (!ap_phys || !ap_bytes) return 0;
+    if (live_phys) return live_phys == ap_phys && live_bytes == ap_bytes;
+    return rd3_vp_valid(park) && park->phys == ap_phys && park->bytes == ap_bytes;
+}
+
 #endif

@@ -199,11 +199,39 @@ static void model(int sticky)
     CHECK(vm_free(&m) == 1u && fb_live() == cycles && fb_double_free == 0);
 }
 
+/* ECC review of N41, L1: the aperture descriptor is kept only over what the vidmem holds */
+static void apdesc(void)
+{
+    struct rd3_vp v;
+    struct rd3_vp_alloc rel;
+    memset(&v, 0, sizeof v);
+    v.live = fb_alloc(0x40000);
+    const unsigned long long p = v.live.phys, b = v.live.bytes;
+    CHECK(rd3_vp_apdesc_keep(v.live.phys, v.live.bytes, &v.park, p, b));
+    CHECK(!rd3_vp_apdesc_keep(v.live.phys, v.live.bytes, &v.park, p, b / 2));     /* same address, other size */
+    CHECK(!rd3_vp_apdesc_keep(v.live.phys + b, v.live.bytes, &v.park, p, b));     /* moved */
+    CHECK(!rd3_vp_apdesc_keep(v.live.phys, v.live.bytes, &v.park, 0, 0));         /* none cached */
+    /* parked: the range is still allocated, the descriptor stays */
+    CHECK(rd3_vp_drop(&v, 1, &rel) == RD3_VPD_PARKED);
+    CHECK(rd3_vp_apdesc_keep(0, 0, &v.park, p, b));
+    /* released (sticky off, or grown): nothing holds it any more */
+    struct rd3_vp_alloc gone = v.park;
+    CHECK(rd3_vp_take(&v, b * 2, &rel) == RD3_VPT_GROW && rel.phys == gone.phys);
+    fb_release(&rel);
+    CHECK(!rd3_vp_apdesc_keep(0, 0, &v.park, p, b));
+    /* a new, bigger allocation elsewhere: rebuilt */
+    v.live = fb_alloc(b * 2);
+    CHECK(!rd3_vp_apdesc_keep(v.live.phys, v.live.bytes, &v.park, p, b));
+    fb_release(&v.live);
+}
+
 int main(void)
 {
     transitions();
     model(1);
     model(0);
+    fb_reset();
+    apdesc();
     if (fails) { printf("test_vram_park: %d FAILED\n", fails); return 1; }
     printf("test_vram_park: ok\n");
     return 0;

@@ -2458,7 +2458,7 @@ static int rd3AccelSurfGpuWait(unsigned id, const char *who, unsigned long long 
     enum rd3_sp_wait_res r;
     IOLockLock(l);
     for (;;) {
-        r = rd3_sp_wait_step(&gSurfPend, id, mach_absolute_time(), deadline, &dropped);
+        r = rd3_sp_wait_step(&gSurfPend, id, mach_absolute_time(), deadline, &dropped, nullptr);
         if (r != RD3_SPW_WAIT) break;
         waited = true;
         IOLockSleepDeadline(l, &gSurfPend, deadline, THREAD_UNINT);
