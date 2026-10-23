@@ -518,6 +518,124 @@ N41_PARKED_BYTES_WARN = 256 << 20   # VRAM parked at the end of a run that says 
 N41_UNACCOUNTED_WARN = 64           # pending marks whose ready never came (more than one frame's surfaces in flight)
 
 
+def n43_buftex_rows(cdlog="", pluginlog=""):
+    """DRIVER-PLAN N43 (1): buffer textures the plugin did not alias because their bytesPerRow is not a multiple of
+    256 B (RADV's linear custom pitch; before N43 each was a vkCreateImage failure, -1000158000, ~32/s from
+    WindowServer). [(level, name, text)]. INFO with the count (the plugin logs the first 8 and every 1024th, and
+    the buffer texture census carries the running count: the largest number seen is a lower bound) and the pitches;
+    WARN for a plugin older than N43 (its log shows the vkCreateImage failure itself), which is also named by the
+    stale-plugin check once the sources changed."""
+    text = (cdlog or "") + "\n" + (pluginlog or "")
+    rows = []
+    seen = [int(n) for n in re.findall(r"buffer texture copy \(pitch\): [^\n]*?\((\d+) so far\)", text)]
+    seen += [int(n) for n in re.findall(r"buffer texture \([a-z]+\): [^\n]*?, (\d+) copy \(pitch\)", text)]
+    pitches = sorted(set(int(p) for p in re.findall(r"buffer texture copy \(pitch\): bytesPerRow (\d+) is not a multiple of 256", text)))
+    seen = [n for n in seen if n]
+    if seen:
+        rows.append(("INFO", "buffer texture copy (pitch)",
+                     "at least %d buffer texture(s) over a bytesPerRow that is not a multiple of 256 B were not aliased (RADV's "
+                     "linear custom pitch) and drew from a private copy refreshed per command buffer (bytesPerRow %s); open "
+                     "(DRIVER-PLAN N43): park the copy instead of a new image + upload per use" %
+                     (max(seen), ", ".join(str(p) for p in pitches[:8]) or "?")))
+    old = len(re.findall(r"vk: vkCreateImage\(buffer texture\) -> -1000158000", text))
+    if old:
+        rows.append(("WARN", "buffer texture copy (pitch)",
+                     "%d vkCreateImage(buffer texture) -> -1000158000 line(s): the plugin is older than N43 (it asks RADV for a "
+                     "linear alias with a pitch that is not a multiple of 256 B and lets it fail); rebuild the plugin" % old))
+    return rows
+
+
+N43_UMC_LOAD_PCT = 20    # umc activity above this is a memory load the PMFW should answer with a higher UCLK
+
+
+def _n43_pm_sample(blk):
+    """one `rdna3_pmctl info` excerpt: {"levels": [MHz], "now": MHz, "umc": %, "uclk": MHz} (None: a key not found)"""
+    m = re.search(r"^pp_dpm_mclk \(now (\d+) MHz\):(.*)$", blk, re.M)
+    a = re.search(r"activity gfx (\d+) % umc (\d+) %.*?uclk (\d+) MHz", blk)
+    return {"levels": [int(x) for x in re.findall(r"\d+: (\d+)Mhz", m.group(2))] if m else [],
+            "now": int(m.group(1)) if m else None, "umc": int(a.group(2)) if a else None,
+            "uclk": int(a.group(3)) if a else None}
+
+
+def n43_vktest_rows(txt, pm2=False):
+    """DRIVER-PLAN N43 from the tests file: (1) rdna3_vktest's `LINPITCH:` line (an explicit linear row pitch of 64 B
+    refused by RADV with -1000158000, 256 B accepted: the rule behind nvmtl_linear_pitch.h) and (2) the memory load
+    (autoreport.sh's `== rdna3 memory load` section: `rdna3_vktest --membw` while `rdna3_pmctl info` is read three
+    times, once more after it). [(level, name, text)]. WARN when UCLK stays at its lowest level while the memory
+    controller is busy (umc activity above N43_UMC_LOAD_PCT) - UCLK DPM does not follow a load; never silence for
+    a report whose boot-args had rdna3pm=2 and which ran the Vulkan test (pm2)."""
+    rows = []
+    lp = re.search(r"^LINPITCH: (rowPitch 64 -> (-?\d+).*rowPitch 256 -> (-?\d+).*)$", txt, re.M)
+    if lp:
+        r64, r256 = int(lp.group(2)), int(lp.group(3))
+        if r256 != 0:
+            rows.append(("FAIL", "linear pitch", "an explicit 256 B linear row pitch is refused by RADV (%d): no buffer texture can "
+                         "be aliased; %s" % (r256, lp.group(1)[:120])))
+        elif r64 == -1000158000:
+            rows.append(("INFO", "linear pitch", "RADV refuses an explicit linear row pitch of 64 B (-1000158000) and takes 256 B: "
+                         "the plugin's 256 B rule (nvmtl_linear_pitch.h) is the RADV rule"))
+        elif r64 == 0:
+            rows.append(("WARN", "linear pitch", "RADV ACCEPTED an explicit linear row pitch of 64 B: the plugin's 256 B rule is "
+                         "stricter than this RADV (only costs copies); a different refusal (%d) is none of the known rule" % r64))
+        else:
+            rows.append(("WARN", "linear pitch", "a 64 B linear row pitch gave %d, not -1000158000: %s" % (r64, lp.group(1)[:120])))
+    elif "== rdna3_vktest" in txt:
+        why = re.search(r"^LINPITCH: (NOT CHECKED[^\n]*)", txt, re.M)
+        rows.append(("INFO" if why else "WARN", "linear pitch",
+                     why.group(1)[:140] if why else "no `LINPITCH:` line in the Vulkan test (an rdna3_vktest older than N43, or it died "
+                     "before the check)"))
+    i = txt.find("\n== rdna3 memory load")
+    if i < 0:
+        sk = re.search(r"^== memory load: skipped[^\n]*", txt, re.M)
+        if sk:
+            rows.append(("INFO", "memory load", sk.group(0)[3:160]))
+        elif pm2 and "== rdna3_vktest" in txt:
+            rows.append(("WARN", "memory load", "no memory load in this report although rdna3pm=2 and the Vulkan test ran "
+                         "(autoreport.sh older than N43, or the report was cut before it)"))
+        return rows
+    sec = txt[i + 1:]
+    j = sec.find("\n== ", 1)
+    sec = sec[:j] if j >= 0 else sec
+    bw = re.search(r"^MEMBW: (\d+) submit\(s\).* = ([\d.]+) GiB/s", sec, re.M)
+    bad = re.search(r"^MEMBW: (FAILED|NOT MEASURED)[^\n]*", sec, re.M)
+    if bad and bad.group(1) == "FAILED":
+        rows.append(("FAIL", "memory load", bad.group(0)[:200]))
+        return rows
+    if bad or not bw:
+        rows.append(("WARN", "memory load", (bad.group(0) if bad else "rdna3_vktest --membw printed no `MEMBW:` result "
+                                             "(died or was cut off by the time limit)")[:200]))
+        return rows
+    load = [_n43_pm_sample(b) for b in re.split(r"^-- pmctl ", sec, flags=re.M)[1:] if b.startswith("under load")]
+    idle = [_n43_pm_sample(b) for b in re.split(r"^-- pmctl ", sec, flags=re.M)[1:] if b.startswith("idle after")]
+    load = [x for x in load if x["now"] is not None or x["uclk"] is not None]
+    if not load:
+        rows.append(("WARN", "memory load", "%s GiB/s moved, but no `rdna3_pmctl info` sample under the load could be read "
+                     "(no pp_dpm_mclk / activity line): UCLK was not judged" % bw.group(2)))
+        return rows
+    lv0 = min((x["levels"][0] for x in load if x["levels"]), default=None)
+    umcs = [x["umc"] for x in load if x["umc"] is not None]
+    uclks = [v for x in load for v in (x["now"], x["uclk"]) if v is not None]
+    umc, uclk = max(umcs) if umcs else None, max(uclks)
+    ilast = idle[-1] if idle else None
+    tail = "; after the load: %s" % ("uclk %s MHz, umc %s %%" % (ilast["now"] if ilast["now"] is not None else ilast["uclk"],
+                                                              ilast["umc"]) if ilast else "no idle sample")
+    desc = ("memory load %s GiB/s (VRAM traffic): umc activity max %s %% (%d sample(s)), UCLK max %d MHz, level 0 is %s MHz%s" %
+            (bw.group(2), umc if umc is not None else "?", len(load), uclk, lv0 if lv0 is not None else "?", tail))
+    if lv0 is None:
+        rows.append(("WARN", "memory load", desc + " - no pp_dpm_mclk levels read, UCLK not judged"))
+    elif umc is None:
+        rows.append(("WARN", "memory load", desc + " - no `activity ... umc` line read, the load was not confirmed"))
+    elif uclk <= lv0 and umc > N43_UMC_LOAD_PCT:
+        rows.append(("WARN", "memory load", desc + " - UCLK STAYED at its lowest level under a busy memory controller: the PMFW's "
+                     "UCLK DPM does not follow the load (Linux reaches the upper levels; compare rdna3pm=2 and the power profile)"))
+    elif uclk <= lv0:
+        rows.append(("INFO", "memory load", desc + " - umc activity stayed at or under %d %%: the load did not register at the "
+                     "memory controller, UCLK cannot be judged" % N43_UMC_LOAD_PCT))
+    else:
+        rows.append(("INFO", "memory load", desc + " - UCLK left level 0 under load"))
+    return rows
+
+
 def n41_plugin(cdlog, pluginlog=""):
     """DRIVER-PLAN N41: what WindowServer's Metal plugin said about its marks. Its log is 24-log-coredisplay.txt
     (WindowServer's process; 26-log-metal-plugin.txt holds every other process) - both are read. {"decision": the
@@ -2780,6 +2898,7 @@ def present_mode_lines(path, txt="", args="", host=None):
     # GPUWrangler's view of the card
     seen = sorted(set(GPUW_RE.findall(cd + "\n" + klog)))
     bus = None
+    seen = [n for n in seen if n]
     if seen:
         _, flags, tags, did, b, dv, fn = seen[-1]
         bus = int(b)
@@ -3415,6 +3534,9 @@ def report(path, show_all):
         for lvl_, name_, text_ in n41_rows(surfvram, log, pluginlog, cdlog):
             print("   %s %-20s %s" % (lvl_, name_, text_))
             failed = failed or lvl_ == "FAIL"
+    # DRIVER-PLAN N43 (1): buffer textures without an alias (bytesPerRow not a multiple of 256 B)
+    for lvl_, name_, text_ in n43_buftex_rows(cdlog, pluginlog):
+        print("   %s %-20s %s" % (lvl_, name_, text_))
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
         want = fb_source_hash(ACCEL_HASH_FILES)
@@ -3645,6 +3767,10 @@ def summary(path, serial=None):
                                                              dead.group(0)[:80] if dead else "no verdict")))
     else:
         out.append(("Vulkan", vk.group(1)[:80] if vk else "not run"))
+    # DRIVER-PLAN N43: the WARN / FAIL rows of the linear row pitch check and the memory load
+    for lv, label, t in n43_vktest_rows(txt, " rdna3pm=2 " in " %s " % args):
+        if lv in ("WARN", "FAIL"):
+            out.append(("N43: " + label, "%s %s" % (lv, t[:300])))
     mt = re.search(r"^METAL: .*$", txt, re.M)
     if not mt and "== mtlprobe" in txt:   # no verdict: the probe died (a driver assert)
         mt = re.search(r"^(Assertion failed.*|.*Assertion .* failed.*|\[exit [1-9]\d*\])$",
@@ -4168,6 +4294,10 @@ def main():
                         print("     " + l[:150])
                 if not re.search(r"^ALL PASSED", vk, re.M):
                     failed = True
+            # DRIVER-PLAN N43: the linear row pitch rule (LINPITCH) and the UCLK reading under a memory load
+            for lv_, nm_, t_ in n43_vktest_rows(txt, " rdna3pm=2 " in " %s " % (re.search(r"^boot-args: (.*)$", txt, re.M) or [None, ""])[1]):
+                print("   %s %-20s %s" % (lv_, nm_, t_))
+                failed = failed or lv_ == "FAIL"
             if "== mtlprobe" in txt:
                 mt = txt[txt.index("== mtlprobe"):]
                 print("   metal:")

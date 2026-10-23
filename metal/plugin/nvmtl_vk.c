@@ -19,6 +19,7 @@
 #include <vulkan/vulkan.h>
 #include "nvmtl_vk.h"
 #include "nvmtl_sampler_state.h"
+#include "nvmtl_linear_pitch.h"
 #include "nvmtl_trace.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
@@ -177,6 +178,7 @@ static void *g_dummyTexAlias, *g_dummyTexView;
 static void nvmtl_spirv_texel_mask(const void *p, size_t n, uint64_t out[4]);
 static int g_host_import; static size_t g_host_align;
 static int g_linmod;
+static _Atomic unsigned long g_buftex_pitch_copy;   /* buffer textures refused for a bytesPerRow RADV cannot take as a linear pitch */
 static PFN_vkGetMemoryHostPointerPropertiesEXT pvkGetMemoryHostPointerPropertiesEXT;
 static int g_sample_locations;
 #include "nvmtl_sample_depth_contract.h"
@@ -6949,6 +6951,7 @@ int nvmtl_vk_buffer_create_placed(size_t size, nvk_heap *heap, size_t offset, nv
 
 static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, int storage, int render,
                                        const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out);
+unsigned long nvmtl_vk_buftex_pitch_copies(void) { return atomic_load(&g_buftex_pitch_copy); }
 int nvmtl_vk_image_create_buffer_alias(uint32_t w, uint32_t h, uint32_t vkfmt, uint32_t bpp, int a8, int storage, int render,
                                        const nvk_buffer *b, size_t offset, size_t row_pitch, nvk_image *out)
 {
@@ -6967,8 +6970,15 @@ static int nvmtl_vk_image_create_buffer_alias_lifetime_body(uint32_t w, uint32_t
     if (!bpp) bpp = 4;
     if (row_pitch < (size_t)w * bpp || row_pitch > UINT32_MAX || row_pitch % bpp) {
         nvlog("buffer texture: bytesPerRow %zu cannot hold %u texels of %u B", row_pitch, w, bpp); return -1; }
-    if (g_linmod && row_pitch % 32) {
-        nvlog("buffer texture: bytesPerRow %zu is not a multiple of 32 B (the texture header's linear pitch unit)", row_pitch); return -1; }
+    /* RADV (ac_surface_override_offset_stride, GFX10.3+ descriptor): a custom linear pitch is a multiple of 256 B. Refused here, not
+       by vkCreateImage (-1000158000 INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT, ~32/s from WindowServer, card runs 2026-10-17d / 18b),
+       so nvt_alloc_fail does not fire; the caller makes the private copy. Counted for the triage ("buffer texture copy (pitch)"). */
+    if (g_linmod && !nvmtl_linear_pitch_ok(row_pitch, bpp)) {
+        const unsigned long k = atomic_fetch_add(&g_buftex_pitch_copy, 1) + 1;
+        if (k <= 8 || !(k & 1023))
+            nvlog("buffer texture copy (pitch): bytesPerRow %zu is not a multiple of 256 B (RADV linear custom pitch) - %ux%u VkFormat %u, "
+                  "a private copy instead of an alias (%lu so far)", row_pitch, w, h, vkfmt, k);
+        return -1; }
     if (offset > b->size || (size_t)row_pitch * (h - 1) + (size_t)w * bpp > b->size - offset) {
         nvlog("buffer texture: %ux%u at offset %zu pitch %zu overruns the %zu-byte buffer", w, h, offset, row_pitch, b->size); return -1; }
     PFN_vkGetPhysicalDeviceFormatProperties gfp = (PFN_vkGetPhysicalDeviceFormatProperties)pvkGetInstanceProcAddr(g_inst, "vkGetPhysicalDeviceFormatProperties");

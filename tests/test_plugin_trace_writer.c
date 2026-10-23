@@ -106,6 +106,10 @@ static int scenario(void)
     nvt_vk_wait(3, "nvmtl_vk_image_read", NVT_WAIT_TIMEOUT, 2, 5001000, 5001, 5000);
     nvt_alloc_fail("vkAllocateMemory(image)", -2);
     nvt_alloc_fail("newBufferWithBytesNoCopy: zero length -> nil", 0);
+    /* a plugin older than DRIVER-PLAN N43: RADV refused a linear buffer texture with a pitch that is not a multiple of 256 B */
+    nvt_alloc_fail("vkCreateImage(buffer texture)", -1000158000);
+    nvt_alloc_fail("vkCreateImage(buffer texture)", -1000158000);
+    nvt_alloc_fail("vkCreateImage(buffer texture)", -1000158000);
     nvt_kreq_import(104, 0, 4096u * 4u, NVT_KI_ALLOC_REFUSED, -2, 12, 300);
     return 0;
 }

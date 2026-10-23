@@ -74,7 +74,7 @@ WAIT_NAMES = {1: "ok", 2: "TIMEOUT", 3: "ERROR", 4: "completion witness missing"
 DIS_NAMES = {1: "queue submit failed", 2: "fence wait failed/timed out", 3: "completion witness missing"}
 KD_NAMES = {1: "accepted", 2: "REFUSED", 3: "dirty path off", 4: "no Vulkan device"}
 KI_NAMES = {1: "ok", 2: "no import fd", 3: "import refused", 4: "buffer bind refused", 5: "share off"}
-WHY_NAMES = {1: "planar surface", 2: "texture wider than a row", 3: "texture taller than the surface", 4: "bytesPerRow not a multiple of 32",
+WHY_NAMES = {1: "planar surface", 2: "texture wider than a row", 3: "texture taller than the surface", 4: "bytesPerRow not a multiple of 256",
              5: "surface sharing off", 6: "family VRAM import failed", 7: "image alias over the VRAM failed"}
 LOAD = {0: "DontCare", 1: "Load", 2: "Clear"}
 STORE = {0: "DontCare", 1: "Store", 2: "MultisampleResolve", 3: "StoreAndMultisampleResolve", 4: "Unknown", 5: "CustomSampleDepthStore"}
@@ -85,7 +85,9 @@ PIXFMT = {10: "R8Unorm", 70: "RGBA8Unorm", 71: "RGBA8Unorm_sRGB", 80: "BGRA8Unor
 VKRES = {0: "VK_SUCCESS", 1: "VK_NOT_READY", 2: "VK_TIMEOUT", -1: "VK_ERROR_OUT_OF_HOST_MEMORY", -2: "VK_ERROR_OUT_OF_DEVICE_MEMORY",
          -3: "VK_ERROR_INITIALIZATION_FAILED", -4: "VK_ERROR_DEVICE_LOST", -5: "VK_ERROR_MEMORY_MAP_FAILED",
          -7: "VK_ERROR_EXTENSION_NOT_PRESENT", -8: "VK_ERROR_FEATURE_NOT_PRESENT", -12: "VK_ERROR_TOO_MANY_OBJECTS",
-         -13: "VK_ERROR_FORMAT_NOT_SUPPORTED", -1000072003: "VK_ERROR_INVALID_EXTERNAL_HANDLE"}
+         -13: "VK_ERROR_FORMAT_NOT_SUPPORTED", -1000072003: "VK_ERROR_INVALID_EXTERNAL_HANDLE",
+         -1000158000: "VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT"}
+RC_DRM_PITCH = -1000158000
 # macOS errno numbers (the card), not this host's
 ERRNO = {1: "EPERM", 2: "ENOENT", 3: "ESRCH", 4: "EINTR", 5: "EIO", 6: "ENXIO", 9: "EBADF", 12: "ENOMEM", 13: "EACCES", 14: "EFAULT",
          16: "EBUSY", 17: "EEXIST", 19: "ENODEV", 20: "ENOTDIR", 22: "EINVAL", 24: "EMFILE", 28: "ENOSPC", 35: "EAGAIN",
@@ -603,6 +605,17 @@ class Analysis:
             self.add("FAIL", "vk-disable", "Vulkan backend switched OFF at +%.3fs (%s, %s, in %s)" %
                      (r.t, DIS_NAMES.get(r.path, r.path), vk_name(r.rc), r.text or "?"))
         al = collections.Counter((r.text, r.rc) for r in tr.recs if r.kind == K_ALLOC_FAIL)
+        # DRIVER-PLAN N43: a buffer texture whose bytesPerRow is not a multiple of 256 B is refused by RADV's linear
+        # custom pitch (vkCreateImage -> -1000158000). A plugin from N43 on refuses it before Vulkan (no record at
+        # all, the log's "buffer texture copy (pitch)" counts it); an older one still files an alloc-fail per call
+        # (~32/s from WindowServer) - the cause is known and the private copy draws it, so INFO, not FAIL
+        pitch = sum(n for (t, rc), n in al.items() if t == "vkCreateImage(buffer texture)" and rc == RC_DRM_PITCH)
+        if pitch:
+            al = collections.Counter({k: n for k, n in al.items()
+                                      if not (k[0] == "vkCreateImage(buffer texture)" and k[1] == RC_DRM_PITCH)})
+            self.add("INFO", "buftex-pitch", "%d buffer texture(s) refused by vkCreateImage with %s (bytesPerRow not a multiple of "
+                     "256 B, RADV's linear custom pitch): a plugin older than DRIVER-PLAN N43; each was drawn from a private "
+                     "copy (the ring holds the last events only, the plugin's log counts them all)" % (pitch, vk_name(RC_DRM_PITCH)))
         if al:
             self.add("FAIL", "alloc-fail", "%d allocation / import failure(s)" % sum(al.values()),
                      ["%s rc=%d x%d" % (t, rc, n) for (t, rc), n in al.most_common(6)])
