@@ -690,9 +690,9 @@ static _Atomic uint64_t gBTNew, gBTRecycled, gBTParked, gBTEvicted;
 static void nvmtl_buftex_census(const char *what) {
     const uint64_t n = atomic_load(&gBTNew) + atomic_load(&gBTRecycled);
     if (n & (n - 1)) return;
-    nvlog("buffer texture (%s): %llu new, %llu recycled, %llu parked, %llu evicted", what,
+    nvlog("buffer texture (%s): %llu new, %llu recycled, %llu parked, %llu evicted, %lu copy (pitch)", what,
           (unsigned long long)atomic_load(&gBTNew), (unsigned long long)atomic_load(&gBTRecycled),
-          (unsigned long long)atomic_load(&gBTParked), (unsigned long long)atomic_load(&gBTEvicted));
+          (unsigned long long)atomic_load(&gBTParked), (unsigned long long)atomic_load(&gBTEvicted), nvmtl_vk_buftex_pitch_copies());
 }
 static int nvmtl_bpark_take(NVMTLBuffer *b, const uint32_t *key, nvk_image *out) {
     int got = -1;

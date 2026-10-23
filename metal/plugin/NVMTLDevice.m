@@ -6,6 +6,7 @@
 
 #include "rdna3mtl_config.h"
 #include "rdna3mtl_allow_policy.h"
+#include "nvmtl_linear_pitch.h"
 #include <libproc.h>
 #include <pwd.h>
 #include <errno.h>
@@ -767,9 +768,9 @@ static int nvmtl_surface_image_create(NVMTLTexture *t, IOSurfaceRef surf, NSUInt
         size_t row = IOSurfaceGetBytesPerRow(surf), sh = IOSurfaceGetHeight(surf);
         /* why a surface stays private, first few of each kind (card logs had only a count) */
         static const char *const kWhy[] = { NULL, "a planar surface", "the texture is wider than a row",
-                                            "the texture is taller than the surface", "bytesPerRow is not a multiple of 32" };
+                                            "the texture is taller than the surface", "bytesPerRow is not a multiple of 256 (RADV linear pitch)" };
         unsigned k = plane != 0 || IOSurfaceGetPlaneCount(surf) > 1 ? 1 : (size_t)w * (bpp ? bpp : 4) > row ? 2
-                   : h > sh ? 3 : row % 32 ? 4 : 0;
+                   : h > sh ? 3 : !nvmtl_linear_pitch_ok(row, bpp ? bpp : 4) ? 4 : 0;
         const char *why = kWhy[k];
         g_tr_why = k;   /* NVT_WHY_PLANAR..NVT_WHY_PITCH are 1..4 like kWhy; 0 until the import decides */
         if (why) {
