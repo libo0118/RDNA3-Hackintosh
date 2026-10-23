@@ -10,7 +10,8 @@ exported vtable symbol: `movq __ZTV<Base>@GOTPCREL(%rip), %rax` then
 the wrong family method. The card runs measured these slots (tahoe_fwd.h,
 card run 2026-10-17d), so the compiled operands must stay exactly these.
 The family-lock overrides (acceleratorDidLock / acceleratorWillUnlock) are
-checked the same way. ECC review round 1.
+checked the same way. ECC review round 1. The free() overrides too (ECC review
+of N41): each must reach the base class's own free through its vtable.
 
     python3 tools/check_accel_slots.py <rdna3-accel.s>
 
@@ -30,6 +31,12 @@ EXPECTED = {
     "_rd3BaseSubmitUpdate": ("__ZTV20IOAccelLegacySurface", 2664),
     "__ZN16RDNA3Accelerator18acceleratorDidLockEPKci": ("__ZTV22IOGraphicsAccelerator2", 2144),
     "__ZN16RDNA3Accelerator21acceleratorWillUnlockEPKci": ("__ZTV22IOGraphicsAccelerator2", 2152),
+    # the free() overrides end in the family class's own free (OSObject::free's slot, 160, of the base's
+    # exported vtable): Apple's IOAccelVidMemory / IOAccelResource2 / IOAccelLegacySurface free chain runs, not
+    # OSObject::free directly (ECC review of N41: RD3VidMemory::free is new; the other two were imported)
+    "__ZN12RD3VidMemory4freeEv": ("__ZTV16IOAccelVidMemory", 160),
+    "__ZN11RD3Resource4freeEv": ("__ZTV16IOAccelResource2", 160),
+    "__ZN10RD3Surface4freeEv": ("__ZTV20IOAccelLegacySurface", 160),
 }
 # the rd3Base* helpers must be a pure tail jump; the lock overrides may call
 TAIL_ONLY = {k for k in EXPECTED if k.startswith("_rd3Base")}

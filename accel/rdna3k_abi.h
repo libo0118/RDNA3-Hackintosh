@@ -343,12 +343,12 @@ static inline int rd3k_ss_plane_ok(unsigned int plane) { return plane <= RD3K_SS
  * writes; only WindowServer's marks are taken, answered RD3K_SS_OFF while
  * debug.rdna3accel_surface_wait is 0. TRYLOCK: a dirty mark that gives up
  * with RD3K_SS_BUSY instead of waiting for the accelerator's lock (a
- * page-off may hold it while it waits for a pending mark). An accelerator
- * that knows them publishes RD3AccelSurfaceWait = 1. */
+ * page-off may hold it while it waits for a pending mark). The plugin
+ * learns the mode from the answer to its pending marks (an older
+ * accelerator answers RD3K_SS_NO_CACHE: a plane out of range). */
 #define RD3K_SS_PLANE_GPU_MARK 0x80000000u
 #define RD3K_SS_PLANE_TRYLOCK  0x40000000u
 #define RD3K_SS_BUSY          0x80000009u   /* TRYLOCK: the accelerator's lock was taken; nothing marked */
-#define RD3K_SS_WAIT_PROP     "RD3AccelSurfaceWait"
 struct RD3KSurfShareEsc {
     unsigned int version;
     unsigned int surfaceID;

@@ -75,7 +75,7 @@ static SInt64             rd3AccelA3WhyCount(unsigned why);
 static void               rd3AccelA3Why(char *why, unsigned long n, unsigned reason, unsigned heads, void *surf);
 static bool               rd3AccelA3RefusedFirst(unsigned surfaceID, SInt64 n);
 void                      rd3AccelVidmemGone(const void *vm);
-static void               rd3AccelVidmemGoneAt(const void *vm, unsigned long long phys);
+static void               rd3AccelVidmemGoneAt(const void *vm, unsigned long long phys, bool vmToo = true);
 static void               rd3AccelWriteStamp(int index, unsigned int value);
 static bool               rd3AccelLocksInit(void);
 /* card run 2026-10-17b: the per-frame trace (rdna3_trace.h) and the swap as
@@ -101,7 +101,8 @@ static void               rd3AccelTraceAperture(const void *res, unsigned what, 
                                                 unsigned count = 0);
 /* VMALLOC / VMFREE flags beyond the scanout's (N41, common/rdna3_trace.h): the parked allocation
  * handed back / parked instead of freed / a parked allocation released */
-enum { kRd3VmTrPark = RD3_TRVM_PARKED, kRd3VmTrParkGone = RD3_TRVM_PARK_GONE, kRd3VmTrFreeLive = RD3_TRVM_FREE_LIVE };
+enum { kRd3VmTrPark = RD3_TRVM_PARKED, kRd3VmTrParkGone = RD3_TRVM_PARK_GONE, kRd3VmTrFreeLive = RD3_TRVM_FREE_LIVE,
+       kRd3VmTrObjGone = RD3_TRVM_OBJ_GONE };
 static void               rd3AccelTraceVm(const void *vm, bool alloc, bool ok, unsigned long long phys,
                                           unsigned long long bytes, unsigned long long mapped, IOReturn ret,
                                           bool scanout, unsigned extra = 0);
@@ -1107,12 +1108,17 @@ public:
              gVmSticky ? "1 = deallocPhysical parks a surface's VRAM, the next allocPhysical hands the same VRAM back "
                          "(the memory the Metal plugin draws into; vm_parked / vm_unparked / vm_park_released)"
                        : "0 = every deallocPhysical frees; the next allocPhysical gets new VRAM (the old behaviour)");
+        /* the plugin learns the mode from the kernel's answer to its first pending mark (ENXIO: off, retried each
+         * second); no property (ECC review of N41: the RD3AccelSurfaceWait property was read by nobody) */
         ALOG("surface wait: %s (N41; boot-arg rdna3surfwait, sysctl debug.rdna3accel_surface_wait, bound "
-             "debug.rdna3accel_surface_wait_ms %d)",
+             "debug.rdna3accel_surface_wait_ms %d)%s",
              gSurfWait ? "1 = WindowServer's pending GPU writes are marked at commit (plugin) and a page-off / IOP "
-                         "flip waits for them, bounded; " RD3K_SS_WAIT_PROP " = 1 published"
-                       : "0 = no marks taken, no wait; " RD3K_SS_WAIT_PROP " = 0 (the plugin marks after GPU completion)",
-             gSurfWaitMs);
+                         "flip waits for them, bounded"
+                       : "0 = no marks taken (answered ENXIO), no wait; the plugin marks after GPU completion",
+             gSurfWaitMs,
+             gSurfWait && !gA3Ws ? " -- MOOT: rdna3a3ws=0 keeps WindowServer's surfaces out of A3 (the plugin draws them "
+                                   "in system memory and marks nothing), so the page-off wait is NOT exercised (N41 "
+                                   "open item 1; rdna3a3ws=1 engages it)" : "");
         ALOG("perfstats: %s (N38; boot-arg rdna3perfstats, sysctl debug.rdna3accel_perfstats)",
              gPerfStats ? "1 = the core's GPU activity into the accelerator's PerformanceStatistics every 250 ms "
                           "(Device / Renderer / Tiler Utilization %)"
@@ -1195,10 +1201,6 @@ public:
         bool r = IOGraphicsAccelerator2::start(provider);
         ALOG("IOGraphicsAccelerator2::start -> %d", r);
         if (r) {
-            /* N41: tells the Metal plugin the page-off waits for a surface WindowServer's GPU still writes
-             * (rd3AccelSurfGpuWait): only then does it mark WindowServer's surfaces newest at commit. 0 (or
-             * an older accelerator without it): the plugin marks them after GPU completion, as before */
-            setProperty(RD3K_SS_WAIT_PROP, gSurfWait ? 1ULL : 0ULL, 32);
             registerService(); ALOG("registerService() called — Metal can now find MetalPluginName=%s", "RDNA3MTLDriver");
             gAccel = this; gEnableAccel = &RDNA3Accelerator::enableFromHook;
             for (unsigned i = 0; i < RD3_CARRIERS; i++) {
@@ -1366,17 +1368,20 @@ void *RD3Resource::getApertureMemoryDescriptor(unsigned long long *a0)
         return nullptr;
     }
     if (fApDesc) {
-        /* N41: a descriptor over an address the vidmem no longer has (re-backed elsewhere: a grown park, or
-         * vm_sticky 0) would send the family's CPU writes into freed VRAM: built again below. With no VRAM
-         * now (parked) the cached one stays (that range is still allocated) */
+        /* N41: a descriptor over a range the vidmem no longer holds (re-backed elsewhere or with another size:
+         * a grown park, vm_sticky 0; or released: nothing live, nothing parked there) would send the family's
+         * CPU writes into freed VRAM: built again below, or none. With no VRAM now but the same range parked
+         * the cached one stays (still allocated). rd3_vp_apdesc_keep (ECC review of N41, L1) */
         RD3VidMemory *cm = rd3res_vidmem(this);
-        if (cm && cm->fPhys && (cm->fPhys != fApPhys)) {
+        if (cm && !rd3_vp_apdesc_keep(cm->fPhys, cm->fBytes, &cm->fPark, fApPhys, fApBytes)) {
             const SInt64 n = OSAddAtomic64(1, &gCntApDescMoved);
             if (rd3_log_due((uint64_t)n, 8, 1023))
-                ALOG("RD3Resource(%p)::getApertureMemoryDescriptor: the cached descriptor covers phys 0x%llx, the "
-                     "VRAM is now at 0x%llx -- built again (vm_apdesc_moved %lld)", this, fApPhys, cm->fPhys,
-                     (long long)n + 1);
-            fApDesc->release(); fApDesc = nullptr; fApPhys = 0; fApCached = 0;
+                ALOG("RD3Resource(%p)::getApertureMemoryDescriptor: the cached descriptor covers phys 0x%llx (%llu "
+                     "bytes), the vidmem now holds 0x%llx (%llu bytes)%s -- %s (vm_apdesc_moved %lld)", this,
+                     fApPhys, fApBytes, cm->fPhys, cm->fBytes,
+                     cm->fPhys ? "" : rd3_vp_valid(&cm->fPark) ? ", another range parked" : ", nothing parked",
+                     cm->fPhys ? "built again" : "dropped", (long long)n + 1);
+            fApDesc->release(); fApDesc = nullptr; fApPhys = 0; fApBytes = 0; fApCached = 0;
         }
     }
     if (fApDesc) {
@@ -1399,7 +1404,7 @@ void *RD3Resource::getApertureMemoryDescriptor(unsigned long long *a0)
     if (!d) { ALOG("RD3Resource::getApertureMemoryDescriptor: IODeviceMemory::withRange(0x%llx, %llu) FAILED",
                    m->fPhys, m->fBytes); rd3AccelTraceAperture(this, 2, false, kApWhyRange); return nullptr; }
     fApDesc = d;
-    fApPhys = m->fPhys;
+    fApPhys = m->fPhys; fApBytes = m->fBytes;
     rd3AccelTraceAperture(this, 2, true, kApWhyNew);
     rd3AccelWgWrite(this, kWgApertureDesc);
     rd3AccelPresentReuseRes(this, 2);
@@ -1435,7 +1440,7 @@ void RD3Resource::free()
  * deallocPhysical frees, as before; a park left from before is still reused or released). */
 static volatile SInt64 gCntVmParked, gCntVmUnparked, gCntVmParkReleased, gCntVmParkGrow, gCntVmReparked,
                        gCntVmFreeLive, gCntVmReleased, gCntVmReleasedBytes, gCntVmParkedBytes,
-                       gCntVmRestored, gCntVmRestoreMiss, gCntVmDirtyMoved;
+                       gCntVmRestored, gCntVmRestoreMiss, gCntVmDirtyMoved, gCntVmReleaseFailed;
 static struct rd3_vp rd3VmState(const RD3VidMemory *m)
 {
     struct rd3_vp v;
@@ -1451,31 +1456,43 @@ static void rd3VmStore(RD3VidMemory *m, const struct rd3_vp *v)
     m->fPark = v->park;
     *(volatile unsigned long long *)((unsigned char *)m + 0xc8) = v->live.phys;
 }
-/* gives 'a' back to the framebuffer. forget: the tables drop the address first (a parked one stayed
- * in them; deallocPhysical's own free already forgot it). park: it was parked (traced VMFREE flag 32) */
-static void rd3VmRelease(RD3VidMemory *m, const struct rd3_vp_alloc *a, bool forget, bool park, const char *why)
+/* gives 'a' back to the framebuffer. forget: the tables drop it first (a parked one stayed in them;
+ * deallocPhysical's own free already forgot it): kVmForgetAll its address and every record of the vidmem,
+ * kVmForgetAddr its address only (the vidmem's records belong to a newer park: ECC review of N41). park:
+ * it was parked (traced VMFREE flag 32; trExtra adds flags, e.g. the object going). A release the
+ * framebuffer refuses (or with no accelerator) is logged and counted (vm_release_failed), not as released */
+enum { kVmForgetNone = 0, kVmForgetAll = 1, kVmForgetAddr = 2 };
+static void rd3VmRelease(RD3VidMemory *m, const struct rd3_vp_alloc *a, unsigned forget, bool park, const char *why,
+                         unsigned trExtra = 0)
 {
     if (!rd3_vp_valid(a)) return;
     SInt64 pr = -1;
     if (park) {
-        rd3AccelTraceVm(m, false, true, a->phys, a->bytes, 0, kIOReturnSuccess, false, kRd3VmTrParkGone);
+        rd3AccelTraceVm(m, false, true, a->phys, a->bytes, 0, kIOReturnSuccess, false, kRd3VmTrParkGone | trExtra);
         pr = OSAddAtomic64(1, &gCntVmParkReleased);
         OSAddAtomic64(-(SInt64)a->bytes, &gCntVmParkedBytes);
     }
-    if (forget) rd3AccelVidmemGoneAt(m, a->phys);
+    if (forget) rd3AccelVidmemGoneAt(m, a->phys, forget == kVmForgetAll);
+    struct RD3KVramRequest r;
+    for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
+    r.version = RD3K_VRAM_ABI_VERSION;
+    r.handle = a->handle; r.kva = a->kva; r.actualSize = a->bytes; r.allocationCookie = a->cookie;
+    const IOReturn ret = RDNA3Accelerator::gAccel ? RDNA3Accelerator::gAccel->askFramebufferForVram(&r, false)
+                                                  : kIOReturnNotReady;
+    if (ret != kIOReturnSuccess) {
+        const SInt64 k = OSAddAtomic64(1, &gCntVmReleaseFailed);
+        if (rd3_log_due((uint64_t)k, 8, 1023))
+            ALOG("RD3VidMemory(%p): VRAM phys 0x%llx (%llu bytes, generation %llu%s) NOT given back (%s; 0x%x%s) -- "
+                 "LEAKED (vm_release_failed %lld)", m, a->phys, a->bytes, a->gen, park ? ", parked" : "", why,
+                 (unsigned)ret, RDNA3Accelerator::gAccel ? "" : ": no accelerator", (long long)k + 1);
+        return;
+    }
     const SInt64 n = OSAddAtomic64(1, &gCntVmReleased);
     OSAddAtomic64((SInt64)a->bytes, &gCntVmReleasedBytes);
     if (park && rd3_log_due((uint64_t)pr, 8, 1023))
         ALOG("RD3VidMemory(%p): parked VRAM phys 0x%llx (%llu bytes, generation %llu) released: %s "
              "(vm_park_released %lld, vm_released %lld)", m, a->phys, a->bytes, a->gen, why, (long long)pr + 1,
              (long long)n + 1);
-    struct RD3KVramRequest r;
-    for (unsigned i = 0; i < sizeof r; i++) ((volatile unsigned char *)&r)[i] = 0;
-    r.version = RD3K_VRAM_ABI_VERSION;
-    r.handle = a->handle; r.kva = a->kva; r.actualSize = a->bytes; r.allocationCookie = a->cookie;
-    if (RDNA3Accelerator::gAccel) RDNA3Accelerator::gAccel->askFramebufferForVram(&r, false);
-    else ALOG("RD3VidMemory(%p): no accelerator to give back phys 0x%llx (%llu bytes, %s) -- LEAKED", m, a->phys,
-              a->bytes, why);
 }
 
 bool RD3VidMemory::allocPhysical()
@@ -1519,7 +1536,7 @@ bool RD3VidMemory::allocPhysical()
                 ALOG("RD3VidMemory::allocPhysical(%p): %llu bytes needed, the parked VRAM (phys 0x%llx) holds %llu "
                      "-- released, a new allocation follows (vm_park_grow %lld)", this, want, rel.phys, rel.bytes,
                      (long long)n + 1);
-            rd3VmRelease(this, &rel, true, true, "the resource grew");
+            rd3VmRelease(this, &rel, kVmForgetAll, true, "the resource grew");
         }
     }
 
@@ -1544,6 +1561,7 @@ bool RD3VidMemory::allocPhysical()
     }
     fRmHandle = r.handle; fKva = r.kva; fPhys = r.phys; fBytes = r.actualSize; fAllocationCookie = r.allocationCookie;
     fAllocGen = (unsigned long long)OSAddAtomic64(1, &gVmAllocGen) + 1;   /* the IOP flip's marker (N38) */
+    fBacked = true;   /* free() traces the object's end (N41) */
     OSAddAtomic64(1, &gCntVmAlloc); OSAddAtomic64((SInt64)fBytes, &gCntVmAllocBytes);
     *(volatile unsigned long long *)((unsigned char *)this + 0xc8) = fPhys;
     rd3AccelVramBase(fPhys, fAllocationCookie);
@@ -1584,15 +1602,22 @@ void RD3VidMemory::deallocPhysical()
         if (rd3_log_due((uint64_t)n, 4, 1023))
             ALOG("RD3VidMemory::deallocPhysical(%p): an older park (phys 0x%llx) was still held -- released "
                  "(vm_reparked %lld, never expected)", this, rel.phys, (long long)n + 1);
-        rd3VmRelease(this, &rel, true, true, "replaced by a newer park");
+        rd3VmRelease(this, &rel, kVmForgetAddr, true, "replaced by a newer park");
     } else if (d == RD3_VPD_FREED) {
-        rd3VmRelease(this, &rel, false, false, "deallocPhysical");
+        rd3VmRelease(this, &rel, kVmForgetNone, false, "deallocPhysical");
     }
 }
 
 /* N41: what this object still holds goes with it. The live part counts as vm_free_live: the family freed
  * the object without deallocPhysical (whether IOAccelVidMemory::free calls it is not known; before N41
- * that allocation was never given back) */
+ * that allocation was never given back). Every VMFREE traced here carries RD3_TRVM_OBJ_GONE (one with no
+ * VRAM when the object held none but was backed once): the trace decoder forgets the object, whose
+ * address a new vidmem may get (ECC review of N41, H-VMMOVE).
+ * The base call: -fapple-kext compiles IOAccelVidMemory::free() into a call through IOAccelVidMemory's
+ * exported vtable (__ZTV16IOAccelVidMemory) at OSObject::free's slot, i.e. Apple's own free of that class
+ * (whatever IOAccelVidMemory / IOAccelMemory override), the same function the family's vtable patching put
+ * into this class's slot before free() was overridden here; tools/check_accel_slots.py checks the
+ * compiled call (ECC review of N41). */
 void RD3VidMemory::free()
 {
     if (!fScanout) {
@@ -1606,10 +1631,12 @@ void RD3VidMemory::free()
                 ALOG("RD3VidMemory::free(%p): VRAM phys 0x%llx (%llu bytes) still LIVE -- the family freed the object "
                      "without deallocPhysical; released here (vm_free_live %lld)", this, rel[0].phys, rel[0].bytes,
                      (long long)n + 1);
-            rd3AccelTraceVm(this, false, true, rel[0].phys, rel[0].bytes, 0, kIOReturnSuccess, false, kRd3VmTrFreeLive);
-            rd3VmRelease(this, &rel[0], true, false, "the object was freed");
+            rd3AccelTraceVm(this, false, true, rel[0].phys, rel[0].bytes, 0, kIOReturnSuccess, false,
+                            kRd3VmTrFreeLive | kRd3VmTrObjGone);
+            rd3VmRelease(this, &rel[0], kVmForgetAll, false, "the object was freed");
         }
-        if (m & 2u) rd3VmRelease(this, &rel[1], true, true, "the object was freed");
+        if (m & 2u) rd3VmRelease(this, &rel[1], kVmForgetAll, true, "the object was freed", kRd3VmTrObjGone);
+        if (!m && fBacked) rd3AccelTraceVm(this, false, true, 0, 0, 0, kIOReturnSuccess, false, kRd3VmTrObjGone);
     }
     IOAccelVidMemory::free();
 }
@@ -2001,10 +2028,10 @@ SYSCTL_PROC(_debug, OID_AUTO, rdna3accelfb, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_L
             NULL, 0, rdna3accelfb_sysctl, "I",
             "register the RDNA3 framebuffer with the accelerator display machine (1 = found_framebuffer, 2 = family sweep)");
 #define RD3ACCEL_CNT(nm, var, desc) SYSCTL_QUAD(_debug, OID_AUTO, nm, CTLFLAG_RD | CTLFLAG_LOCKED, (SInt64 *)&var, desc)
-RD3ACCEL_CNT(rdna3accel_vm_alloc,         gCntVmAlloc,        "RD3VidMemory::allocPhysical successes");
+RD3ACCEL_CNT(rdna3accel_vm_alloc,         gCntVmAlloc,        "RD3VidMemory::allocPhysical new allocations (a parked one handed back counts as vm_unparked, N41)");
 RD3ACCEL_CNT(rdna3accel_vm_alloc_bytes,   gCntVmAllocBytes,   "bytes of VRAM granted to RD3VidMemory");
-RD3ACCEL_CNT(rdna3accel_vm_dealloc,       gCntVmDealloc,      "RD3VidMemory::deallocPhysical calls with a handle");
-RD3ACCEL_CNT(rdna3accel_vm_dealloc_bytes, gCntVmDeallocBytes, "bytes of VRAM given back by RD3VidMemory");
+RD3ACCEL_CNT(rdna3accel_vm_dealloc,       gCntVmDealloc,      "RD3VidMemory::deallocPhysical calls with a handle (parks included, N41: vm_released counts the real releases)");
+RD3ACCEL_CNT(rdna3accel_vm_dealloc_bytes, gCntVmDeallocBytes, "bytes those deallocPhysical calls dropped (parked or freed; N41)");
 RD3ACCEL_CNT(rdna3accel_vm_refused,       gCntVmRefused,      "allocPhysical refused by the framebuffer");
 RD3ACCEL_CNT(rdna3accel_res_new,          gCntResNew,         "RD3Resource objects created");
 RD3ACCEL_CNT(rdna3accel_res_free,         gCntResFree,        "RD3Resource objects freed");
@@ -2377,21 +2404,24 @@ static void rd3SVForgetResource(RD3Resource *resource)
  * A normal IOSurfaceLock waits for GPU work in flight on the surface and WindowServer relies on it (a
  * window capture locks a surface it is still drawing). The Metal plugin marked VRAM newest only after
  * the GPU finished, so a lock that came first read the stale / zero system copy: black captures, stale
- * panes. A plugin that sees RD3AccelSurfaceWait = 1 marks the surfaces a WindowServer command buffer
+ * panes. WindowServer's plugin marks the surfaces a command buffer
  * writes pending at commit (RD3K_SS_PLANE_GPU_MARK | 1), marks them newest then, and ready (GPU_MARK |
  * 0) once the GPU finished the last part writing each; the page-off (and the IOP zero-copy flip) waits
- * here, bounded, while a surface is pending. Only WindowServer's marks are taken (no other process can
- * hold its page-offs). NullMoth comparison: the behaviour of NullMoth's 79f47d0 / 40daaa6 / e75be1e
- * (nvSurfMark / nvSurfWaitReady, NVAccelSurfaceWait), written for this driver; marks counted per surface
- * across command buffers. debug.rdna3accel_surface_wait / boot-arg rdna3surfwait (default 1; 0: marks
+ * here, bounded, while a surface is pending. Only WindowServer's marks are taken, and its pending marks
+ * only for surfaces it can look up (no other process can hold its page-offs). The plugin learns the mode
+ * from the answer to its pending marks (0 taken; ENXIO off; ENOSYS / ENODEV an older kext or accelerator). NullMoth comparison: the behaviour of NullMoth's 79f47d0 / 40daaa6 / e75be1e
+ * (nvSurfMark / nvSurfWaitReady), written for this driver; marks counted per surface across command
+ * buffers, a late ready after a timeout never takes a newer write's count (rd3_sp forgiven marks). debug.rdna3accel_surface_wait / boot-arg rdna3surfwait (default 1; 0: marks
  * answered RD3K_SS_OFF, nothing waits, the plugin keeps its old order), _surface_wait_ms (100, 1..1000) */
-static int gSurfWaitMaxUs;
+static int gSurfWaitMaxUs, gSurfIopWaitMaxUs;
 static struct rd3_sp gSurfPend;
 static IOLock *volatile gSurfPendLock;
 static volatile SInt64 gCntSurfMarkPend, gCntSurfMarkReady, gCntSurfMarkLate, gCntSurfMarkEvict, gCntSurfMarkSat,
-                       gCntSurfMarkOff, gCntSurfMarkNotWs, gCntSurfWaits, gCntSurfTimeouts, gCntSurfWaitUs,
-                       gCntDirtyTryBusy;
-static unsigned rd3AccelSurfGpuMark(unsigned id, bool pending)
+                       gCntSurfMarkOff, gCntSurfMarkNotWs, gCntSurfMarkNotOwn, gCntSurfWaits, gCntSurfTimeouts,
+                       gCntSurfWaitUs, gCntSurfCleared, gCntSurfIopWaits, gCntSurfIopTimeouts, gCntSurfIopCleared,
+                       gCntSurfIopWaitUs, gCntDirtyTryBusy;
+static void *rd3AccelSurfaceRoot(void);
+static unsigned rd3AccelSurfGpuMark(unsigned id, bool pending, task_t task)
 {
     if (!gSurfWait) { OSAddAtomic64(1, &gCntSurfMarkOff); return RD3K_SS_OFF; }
     char nm[32];
@@ -2405,8 +2435,32 @@ static unsigned rd3AccelSurfGpuMark(unsigned id, bool pending)
         return RD3K_SS_OFF;
     }
     if (!id) return RD3K_SS_NO_SURFACE;
+    /* ECC review of N41 (M2): the process name alone is not proof. A pending mark is taken only for a surface
+     * the calling task can look up (its own or a global one), so no other process can hold WindowServer's
+     * page-offs by naming its surfaces. No family lock here: a page-off waiting for a mark holds it. Only the
+     * pending mark: a ready only takes a count away (at worst a page-off copies early, as before N41), and a
+     * surface released before its ready must still lose its marks */
+    if (pending) {
+        void *root = rd3AccelSurfaceRoot();
+        void *surf = (root && task) ? _ZN13IOSurfaceRoot13lookupSurfaceEjP4task(root, id, task) : nullptr;
+        if (!surf) {
+            const SInt64 n = OSAddAtomic64(1, &gCntSurfMarkNotOwn);
+            if (rd3_log_due((uint64_t)n, 4, 1023))
+                ALOG("surface wait: WindowServer's pending mark of surface %u REFUSED: %s (surface_wait_notown %lld)",
+                     id, !root ? "no IOSurfaceRoot" : !task ? "no task" : "not a surface of the calling task",
+                     (long long)n + 1);
+            return RD3K_SS_NO_SURFACE;
+        }
+        ((OSObject *)surf)->release();
+    }
     IOLock *l = rd3LockOnce(&gSurfPendLock);
-    if (!l) { OSAddAtomic64(1, &gCntSurfMarkOff); return RD3K_SS_OFF; }
+    if (!l) {
+        const SInt64 n = OSAddAtomic64(1, &gCntSurfMarkOff);
+        if (rd3_log_due((uint64_t)n, 4, 1023))
+            ALOG("surface wait: no lock for the pending table -- mark of surface %u REFUSED (surface_wait_off %lld)", id,
+                 (long long)n + 1);
+        return RD3K_SS_OFF;
+    }
     uint32_t ev = 0;
     IOLockLock(l);
     const enum rd3_sp_mark_res r = rd3_sp_mark(&gSurfPend, id, pending ? 1 : 0, mach_absolute_time(), &ev);
@@ -2434,8 +2488,8 @@ static unsigned rd3AccelSurfGpuMark(unsigned id, bool pending)
     case RD3_SPM_LATE: {
         const SInt64 n = OSAddAtomic64(1, &gCntSurfMarkLate);
         if (rd3_log_due((uint64_t)n, 4, 1023))
-            ALOG("surface wait: ready mark of surface %u that is not pending (its wait timed out or it was "
-                 "dropped; surface_wait_late %lld)", id, (long long)n + 1);
+            ALOG("surface wait: late ready mark of surface %u (a mark its wait timed out on or the table dropped; "
+                 "never a newer write's count; surface_wait_late %lld)", id, (long long)n + 1);
         return 0;
     }
     default: return RD3K_SS_NO_SURFACE;
@@ -2443,45 +2497,71 @@ static unsigned rd3AccelSurfGpuMark(unsigned id, bool pending)
 }
 /* waits, bounded, while WindowServer's GPU still writes surface 'id' (any thread without a spinlock; the
  * page-off holds the family's lock, which the ready marks never take). 0 nothing pending, 1 waited and
- * ready, 2 timed out (cleared); *us the time waited */
-static int rd3AccelSurfGpuWait(unsigned id, const char *who, unsigned long long *us)
+ * ready, 2 timed out (cleared by this wait), 3 cleared under this wait by another wait's timeout, an
+ * eviction or the switch-off (its write did not finish: not counted as a successful wait); *us the time
+ * waited. iop: the IOP zero-copy flip's wait, counted apart from the page-offs' (ECC review of N41) */
+static int rd3AccelSurfGpuWait(unsigned id, bool iop, unsigned long long *us)
 {
     *us = 0;
     IOLock *l = gSurfPendLock;
     if (!l || !id || !gSurfWait) return 0;
     const int ms = gSurfWaitMs < 1 ? 1 : gSurfWaitMs > (int)RD3_SP_WAIT_MAX_MS ? (int)RD3_SP_WAIT_MAX_MS : gSurfWaitMs;
     const uint64_t start = mach_absolute_time();
-    uint64_t deadline = 0;
+    uint64_t deadline = 0, epoch = 0;
     clock_interval_to_deadline((uint32_t)ms, kMillisecondScale, &deadline);
     bool waited = false;
     uint32_t dropped = 0;
     enum rd3_sp_wait_res r;
     IOLockLock(l);
     for (;;) {
-        r = rd3_sp_wait_step(&gSurfPend, id, mach_absolute_time(), deadline, &dropped, nullptr);
+        r = rd3_sp_wait_step(&gSurfPend, id, mach_absolute_time(), deadline, &dropped, &epoch);
         if (r != RD3_SPW_WAIT) break;
         waited = true;
         IOLockSleepDeadline(l, &gSurfPend, deadline, THREAD_UNINT);
     }
+    if (r == RD3_SPW_TIMEOUT) IOLockWakeup(l, &gSurfPend, false);   /* the surface's other waiters: CLEARED */
     IOLockUnlock(l);
     if (!waited && r == RD3_SPW_READY) return 0;
     uint64_t ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time() - start, &ns);
     *us = ns / 1000;
-    if ((int)*us > gSurfWaitMaxUs) gSurfWaitMaxUs = (int)*us;
-    OSAddAtomic64((SInt64)*us, &gCntSurfWaitUs);
+    const char *who = iop ? "IOP flip" : "page-off";
+    int *maxus = iop ? &gSurfIopWaitMaxUs : &gSurfWaitMaxUs;
+    if ((int)*us > *maxus) *maxus = (int)*us;
+    OSAddAtomic64((SInt64)*us, iop ? &gCntSurfIopWaitUs : &gCntSurfWaitUs);
     if (r == RD3_SPW_TIMEOUT) {
-        const SInt64 n = OSAddAtomic64(1, &gCntSurfTimeouts);
+        const SInt64 n = OSAddAtomic64(1, iop ? &gCntSurfIopTimeouts : &gCntSurfTimeouts);
         if (rd3_log_due((uint64_t)n, 8, 1023))
             ALOG("surface wait: %s of surface %u: WindowServer's GPU write still PENDING after %d ms -- going on "
-                 "without it (%u mark(s) dropped; surface_wait_timeouts %lld)", who, id, ms, dropped, (long long)n + 1);
+                 "without it (%u mark(s) dropped, their readies counted late; surface_wait_%stimeouts %lld)", who, id,
+                 ms, dropped, iop ? "iop_" : "", (long long)n + 1);
         return 2;
     }
-    const SInt64 n = OSAddAtomic64(1, &gCntSurfWaits);
+    if (r == RD3_SPW_CLEARED) {
+        const SInt64 n = OSAddAtomic64(1, iop ? &gCntSurfIopCleared : &gCntSurfCleared);
+        if (rd3_log_due((uint64_t)n, 8, 1023))
+            ALOG("surface wait: %s of surface %u: its pending write was CLEARED after %llu us by another wait's "
+                 "timeout, a full table or the switch-off -- going on without it (surface_wait_%scleared %lld)", who,
+                 id, *us, iop ? "iop_" : "", (long long)n + 1);
+        return 3;
+    }
+    const SInt64 n = OSAddAtomic64(1, iop ? &gCntSurfIopWaits : &gCntSurfWaits);
     if (rd3_log_due((uint64_t)n, 4, 4095))
-        ALOG("surface wait: %s of surface %u waited %llu us for WindowServer's GPU write (surface_wait_waits %lld)",
-             who, id, *us, (long long)n + 1);
+        ALOG("surface wait: %s of surface %u waited %llu us for WindowServer's GPU write (surface_wait_%swaits %lld)",
+             who, id, *us, iop ? "iop_" : "", (long long)n + 1);
     return 1;
+}
+/* the trace flags of a wait's answer (common/rdna3_trace.h RD3_TRPO_*) */
+static unsigned rd3AccelSurfWaitTrFlags(int w)
+{
+    return w == 1 ? RD3_TRPO_WAITED : w == 2 ? RD3_TRPO_TIMEOUT : w == 3 ? RD3_TRPO_CLEARED : 0u;
+}
+static int rd3AccelSurfBusySysctl SYSCTL_HANDLER_ARGS
+{
+    int v = 0;
+    IOLock *l = gSurfPendLock;
+    if (l) { IOLockLock(l); v = (int)rd3_sp_busy(&gSurfPend); IOLockUnlock(l); }
+    return sysctl_handle_int(oidp, &v, 0, req);
 }
 static int rd3AccelSurfWaitSysctl SYSCTL_HANDLER_ARGS
 {
@@ -2509,16 +2589,26 @@ SYSCTL_INT(_debug, OID_AUTO, rdna3accel_surface_wait_ms, CTLFLAG_RW | CTLFLAG_LO
            "N41: the page-off's bound on that wait, ms (1..1000, default 100)");
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_surface_wait_maxus, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfWaitMaxUs, 0,
            "N41: the longest page-off wait for a pending GPU write, us");
+SYSCTL_INT(_debug, OID_AUTO, rdna3accel_surface_wait_iop_maxus, CTLFLAG_RD | CTLFLAG_LOCKED, &gSurfIopWaitMaxUs, 0,
+           "N41: the longest IOP zero-copy flip wait for a pending GPU write, us");
+SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_surface_wait_busy, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0,
+            rd3AccelSurfBusySysctl, "I", "N41: surfaces with WindowServer's GPU writes pending now (a gauge)");
 RD3ACCEL_CNT(rdna3accel_surface_wait_pending,   gCntSurfMarkPend,  "N41: WindowServer's pending marks taken (at commit)");
 RD3ACCEL_CNT(rdna3accel_surface_wait_ready,     gCntSurfMarkReady, "N41: WindowServer's ready marks taken (GPU done)");
-RD3ACCEL_CNT(rdna3accel_surface_wait_late,      gCntSurfMarkLate,  "N41: ready marks of a surface not pending (after a timeout)");
+RD3ACCEL_CNT(rdna3accel_surface_wait_late,      gCntSurfMarkLate,  "N41: late ready marks: of a mark a timeout dropped, or of a surface not held");
 RD3ACCEL_CNT(rdna3accel_surface_wait_evicted,   gCntSurfMarkEvict, "N41: surfaces whose marks were dropped: the table was full");
 RD3ACCEL_CNT(rdna3accel_surface_wait_saturated, gCntSurfMarkSat,   "N41: pending marks refused: the surface held the most");
 RD3ACCEL_CNT(rdna3accel_surface_wait_off,       gCntSurfMarkOff,   "N41: marks refused: surface_wait 0");
 RD3ACCEL_CNT(rdna3accel_surface_wait_notws,     gCntSurfMarkNotWs, "N41: marks refused: not from WindowServer");
-RD3ACCEL_CNT(rdna3accel_surface_wait_waits,     gCntSurfWaits,     "N41: page-offs / IOP flips that waited for a pending GPU write");
-RD3ACCEL_CNT(rdna3accel_surface_wait_timeouts,  gCntSurfTimeouts,  "N41: those whose write was still pending at the bound");
-RD3ACCEL_CNT(rdna3accel_surface_wait_us,        gCntSurfWaitUs,    "N41: time all those waits took, us");
+RD3ACCEL_CNT(rdna3accel_surface_wait_notown,    gCntSurfMarkNotOwn, "N41: pending marks refused: not a surface of the calling task");
+RD3ACCEL_CNT(rdna3accel_surface_wait_waits,     gCntSurfWaits,     "N41: page-offs that waited for a pending GPU write and saw it done");
+RD3ACCEL_CNT(rdna3accel_surface_wait_timeouts,  gCntSurfTimeouts,  "N41: page-offs whose write was still pending at the bound");
+RD3ACCEL_CNT(rdna3accel_surface_wait_cleared,   gCntSurfCleared,   "N41: page-offs whose wait was cleared under them (another timeout, a full table, off)");
+RD3ACCEL_CNT(rdna3accel_surface_wait_us,        gCntSurfWaitUs,    "N41: time all page-off waits took, us");
+RD3ACCEL_CNT(rdna3accel_surface_wait_iop_waits, gCntSurfIopWaits,  "N41: IOP zero-copy flips that waited for a pending GPU write and saw it done");
+RD3ACCEL_CNT(rdna3accel_surface_wait_iop_timeouts, gCntSurfIopTimeouts, "N41: IOP flips whose write was still pending at the bound");
+RD3ACCEL_CNT(rdna3accel_surface_wait_iop_cleared, gCntSurfIopCleared, "N41: IOP flips whose wait was cleared under them");
+RD3ACCEL_CNT(rdna3accel_surface_wait_iop_us,    gCntSurfIopWaitUs, "N41: time all IOP flip waits took, us");
 RD3ACCEL_CNT(rdna3accel_surface_dirty_trybusy,  gCntDirtyTryBusy,  "N41: try-lock dirty marks that found the accelerator's lock taken");
 RD3ACCEL_CNT(rdna3accel_vm_parked,        gCntVmParked,        "N41: deallocPhysical kept the VRAM (parked) instead of freeing it");
 RD3ACCEL_CNT(rdna3accel_vm_unparked,      gCntVmUnparked,      "N41: allocPhysical answered with the parked VRAM");
@@ -2529,17 +2619,22 @@ RD3ACCEL_CNT(rdna3accel_vm_parked_bytes,  gCntVmParkedBytes,   "N41: bytes parke
 RD3ACCEL_CNT(rdna3accel_vm_free_live,     gCntVmFreeLive,      "N41: vidmem objects freed with VRAM still live (released in free())");
 RD3ACCEL_CNT(rdna3accel_vm_released,      gCntVmReleased,      "N41: VRAM allocations really given back to the framebuffer");
 RD3ACCEL_CNT(rdna3accel_vm_released_bytes, gCntVmReleasedBytes, "N41: their bytes");
+RD3ACCEL_CNT(rdna3accel_vm_release_failed, gCntVmReleaseFailed, "N41: VRAM the framebuffer did not take back (or no accelerator): leaked");
 RD3ACCEL_CNT(rdna3accel_vm_restored,      gCntVmRestored,      "N41: dirty marks that made the parked VRAM live again first");
 RD3ACCEL_CNT(rdna3accel_vm_restore_miss,  gCntVmRestoreMiss,   "N41: dirty marks of parked VRAM that could not restore it (refused)");
 RD3ACCEL_CNT(rdna3accel_vm_dirty_moved,   gCntVmDirtyMoved,    "N41: dirty marks of an allocation other than the surface's last BO import");
-RD3ACCEL_CNT(rdna3accel_vm_apdesc_moved,  gCntApDescMoved,     "N41: aperture descriptors rebuilt: the VRAM moved");
+RD3ACCEL_CNT(rdna3accel_vm_apdesc_moved,  gCntApDescMoved,     "N41: cached aperture descriptors dropped: the VRAM moved, changed size or was released");
 SYSCTL_INT(_debug, OID_AUTO, rdna3accel_vm_sticky, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gVmSticky, 0,
            "DRIVER-PLAN N41: 1 (default, boot-arg rdna3vmsticky) = deallocPhysical parks a surface's VRAM and the next "
            "allocPhysical hands it back; 0 = every deallocPhysical frees (the old behaviour)");
 static void rd3AccelInstallSysctlPark(void)
 {
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_ms);
-    sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_maxus);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_maxus); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_iop_maxus);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_busy); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_notown);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_cleared); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_iop_waits);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_iop_timeouts); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_iop_cleared);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_iop_us); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_release_failed);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_pending); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_ready);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_late); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_evicted);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_saturated); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_off);
@@ -2643,28 +2738,26 @@ static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsign
 {
     p->hSrcClient = p->hSrcMemory = 0;
     if (p->version != RD3K_SURFSHARE_VERSION) { p->status = RD3K_SS_BAD_VERSION; return kIOReturnSuccess; }
-    /* N41: WindowServer's pending / ready marks (no lookup, no family lock: a page-off waiting for this
-     * very mark holds that lock) and the try-lock dirty mark */
+    /* N41: WindowServer's pending / ready marks (no family lock: a page-off waiting for this very mark
+     * holds that lock; a pending mark looks the surface up for the caller) and the try-lock dirty mark */
     if (cmd == RD3K_ESC_SURF_DIRTY && (p->plane & RD3K_SS_PLANE_GPU_MARK)) {
         p->status = (p->plane & ~(RD3K_SS_PLANE_GPU_MARK | 1u)) ? RD3K_SS_NO_CACHE
-                                                                 : rd3AccelSurfGpuMark(p->surfaceID, (p->plane & 1u) != 0);
+                                                                 : rd3AccelSurfGpuMark(p->surfaceID, (p->plane & 1u) != 0,
+                                                                                       task);
         return kIOReturnSuccess;
     }
+    /* the plane without the try-lock flag: a local, the caller's escape is not rewritten (ECC review of N41) */
     const bool tryOnly = cmd == RD3K_ESC_SURF_DIRTY && (p->plane & RD3K_SS_PLANE_TRYLOCK);
-    if (tryOnly) p->plane &= ~RD3K_SS_PLANE_TRYLOCK;
-    if (!rd3k_ss_plane_ok(p->plane)) {
+    const unsigned plane = tryOnly ? (p->plane & ~RD3K_SS_PLANE_TRYLOCK) : p->plane;
+    if (!rd3k_ss_plane_ok(plane)) {
         p->status = RD3K_SS_NO_CACHE;
-        rd3AccelSurfPlaneRefused(cmd == RD3K_ESC_SURF_DIRTY ? "surfvram dirty" : "surfvram", p->surfaceID, p->plane);
+        rd3AccelSurfPlaneRefused(cmd == RD3K_ESC_SURF_DIRTY ? "surfvram dirty" : "surfvram", p->surfaceID, plane);
         return kIOReturnSuccess;
     }
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     struct RD3KRmHandles h; rd3SVZero(&h, sizeof h);
     if (!task || !a || !rd3AccelRmHandles(&h)) { p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
-    if (!gNVSVRoot) {
-        OSDictionary *m = IOService::serviceMatching("IOSurfaceRoot");
-        if (m) { gNVSVRoot = IOService::waitForMatchingService(m, 5ULL * 1000 * 1000 * 1000); m->release(); }
-        if (!gNVSVRoot) { p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
-    }
+    if (!rd3AccelSurfaceRoot()) { p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
     void *surf = _ZN13IOSurfaceRoot13lookupSurfaceEjP4task(gNVSVRoot, p->surfaceID, task);
     if (!surf) { p->status = RD3K_SS_NO_SURFACE; gNVSVRefused++; return kIOReturnSuccess; }
     /* card run 58: the RM share is the same VRAM as a GEM import - the same rule, before the wire */
@@ -2675,11 +2768,11 @@ static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsign
             const SInt64 n = rd3AccelA3WhyCount(reason);
             char why[256];
             rd3AccelA3Why(why, sizeof why, reason, dh, surf);
-            rd3AccelTraceSurf(3, p->surfaceID, p->plane, st, reason, surf, nullptr, nullptr);
+            rd3AccelTraceSurf(3, p->surfaceID, plane, st, reason, surf, nullptr, nullptr);
             ((OSObject *)surf)->release();
             p->status = st; gNVSVRefused++;
             if (rd3AccelA3RefusedFirst(p->surfaceID, n))
-                ALOG("surfvram: surface %u plane %u refused: %s (%lld refused)", p->surfaceID, p->plane, why, (long long)n);
+                ALOG("surfvram: surface %u plane %u refused: %s (%lld refused)", p->surfaceID, plane, why, (long long)n);
             return kIOReturnSuccess;
         }
     }
@@ -2689,20 +2782,20 @@ static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsign
         if (tryOnly) OSAddAtomic64(1, &gCntDirtyTryBusy);   /* expected: the plugin's mark at commit stands (N41) */
         return kIOReturnSuccess;
     }
-    void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, p->plane);
+    void *cache = _ZN22IOGraphicsAccelerator223deviceCacheForIOSurfaceEP9IOSurfacej((void *)a, surf, plane);
     OSObject *ctx = cache ? *(OSObject *volatile *)((unsigned char *)cache + 0x20) : nullptr;
     RD3Resource *res = OSDynamicCast(RD3Resource, ctx);
     RD3VidMemory *vm = res ? rd3res_vidmem(res) : nullptr;
     if (cmd == RD3K_ESC_SURF_DIRTY) {
         /* N41: parked VRAM is made live again first: the allocation the plugin drew into */
         const bool sameBacking = rd3AccelRestoreParkedForDirty(res, vm, p->surfaceID);
-        p->status = (sameBacking && cache && res && vm && vm->fRmHandle) ? rd3AccelSurfDirty(cache, res, p->plane)
+        p->status = (sameBacking && cache && res && vm && vm->fRmHandle) ? rd3AccelSurfDirty(cache, res, plane)
                                                                           : RD3K_SS_NO_CACHE;
         if (p->status == 0) gNVSVDirty++; else gNVSVDirtyRefused++;
-        rd3AccelTraceSurf(2, p->surfaceID, p->plane, p->status, 0, surf, res, vm);
+        rd3AccelTraceSurf(2, p->surfaceID, plane, p->status, 0, surf, res, vm);
         if (p->status == 0 && gCntA3DispImported) rd3AccelA3DispDirty(p->surfaceID, vm->fPhys);
         if (gNVSVDirty + gNVSVDirtyRefused <= 6 || ((gNVSVDirty + gNVSVDirtyRefused) & 4095) == 0)
-            ALOG("surfvram dirty: surface %u plane %u type 0x%x -> %#x (dirty %u, refused %u)", p->surfaceID, p->plane,
+            ALOG("surfvram dirty: surface %u plane %u type 0x%x -> %#x (dirty %u, refused %u)", p->surfaceID, plane,
                  res ? (unsigned)((volatile unsigned char *)res)[0x14] : 0u, p->status, gNVSVDirty, gNVSVDirtyRefused);
         if (cache) ((OSObject *)cache)->release();
         rd3FamUnlock(a);
@@ -2724,10 +2817,10 @@ static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsign
         p->status = g.status; p->hSrcClient = g.hClient; p->hSrcMemory = g.hObject; p->size = vm->fBytes;
     }
     if (p->status == 0) gNVSVOk++; else gNVSVRefused++;
-    rd3AccelTraceSurf(3, p->surfaceID, p->plane, p->status, 0, surf, res, vm);
+    rd3AccelTraceSurf(3, p->surfaceID, plane, p->status, 0, surf, res, vm);
     if (gNVSVOk + gNVSVRefused <= 8 || ((gNVSVOk + gNVSVRefused) & 1023) == 0)
         ALOG("surfvram: surface %u plane %u -> cache %p res %p vidmem %p (%llu B) -> client %#x mem %#x status %#x (ok %u, refused %u)",
-             p->surfaceID, p->plane, cache, res, vm, vm ? vm->fBytes : 0ull, p->hSrcClient, p->hSrcMemory, p->status, gNVSVOk, gNVSVRefused);
+             p->surfaceID, plane, cache, res, vm, vm ? vm->fBytes : 0ull, p->hSrcClient, p->hSrcMemory, p->status, gNVSVOk, gNVSVRefused);
     if (cache) ((OSObject *)cache)->release();
     rd3FamUnlock(a);
     ((OSObject *)surf)->release();
@@ -3087,7 +3180,7 @@ void RD3Resource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lo
     /* N41: a CPU lock while WindowServer's GPU still writes the surface waits for that write, as an
      * IOSurfaceLock does on Apple's drivers (the plugin marked it pending at commit), bounded */
     unsigned long long gpuWaitUs = 0;
-    const int gpuWait = rd3AccelSurfGpuWait(_ZNK9IOSurface12getSurfaceIDEv(surf), "page-off", &gpuWaitUs);
+    const int gpuWait = rd3AccelSurfGpuWait(_ZNK9IOSurface12getSurfaceIDEv(surf), false, &gpuWaitUs);
     IOMemoryDescriptor *md = (IOMemoryDescriptor *)_ZNK9IOSurface19getMemoryDescriptorEv(surf);
     if (!md || md->prepare(kIODirectionNone) != kIOReturnSuccess) {
         gNVSVPageoffFail++;
@@ -3159,7 +3252,7 @@ void RD3Resource::pageoff(IOAccelEvent *ev, bool a1, bool *out, unsigned long lo
         e.v1 = rd3TrSat(usec + cpuUs);
         e.v2 = st;
         e.v3 = rd3TrSat(gpuWaitUs);                      /* N41: the wait for WindowServer's GPU write */
-        e.flags = (uint8_t)(gpuWait == 1 ? RD3_TRPO_WAITED : gpuWait == 2 ? RD3_TRPO_TIMEOUT : 0u);
+        e.flags = (uint8_t)rd3AccelSurfWaitTrFlags(gpuWait);
         e.pa = vm->fPhys;
         rd3Trace(e);
         rd3AccelTraceSurfRes(this, _ZNK9IOSurface12getSurfaceIDEv(surf), 0, 2, vm->fPhys, vm->fBytes);
@@ -3349,12 +3442,30 @@ static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSu
 }
 static bool rd3AccelPresentIop(unsigned head, IOService *fb, void *pipe, IOSurface *s,
                                const struct RD3KFlipRequest *f, RD3VidMemory *vm);
+/* the IOP zero-copy flip's wait for WindowServer's pending GPU write (N41), counted apart from the page-offs'
+ * (surface_wait_iop_*) and traced as PAGEOFF arg 2 with RD3_TRPO_IOP when it waited (v2 the surface, v3 us) */
+static void rd3AccelIopGpuWait(unsigned id)
+{
+    unsigned long long us = 0;
+    const int w = rd3AccelSurfGpuWait(id, true, &us);
+    if (!w) return;
+    struct rd3_trace_ev e = rd3TrEv(RD3_TR_PAGEOFF);
+    e.arg = 2;
+    e.flags = (uint8_t)(RD3_TRPO_IOP | rd3AccelSurfWaitTrFlags(w));
+    e.v2 = id;
+    e.v3 = rd3TrSat(us);
+    rd3Trace(e);
+}
 static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pipe)
 {
     if (!gIopFlip || !fb || !s || head >= kRd3MaxFB) return false;
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     if (!a) return rd3AccelIopFlipNo(1);
     if (s->getPixelFormat() != 0x42475241u) return rd3AccelIopFlipNo(2);
+    /* N41: the plugin marks VRAM newest at commit: never scan out a composite the GPU still writes. The wait
+     * comes first, before anything about the surface's VRAM is read: a park, a grow or a free during it would
+     * leave a looked-up handle, cookie or size stale (ECC review of N41, M1); it needs only the surface id */
+    rd3AccelIopGpuWait(s->getSurfaceID());
     RD3Resource *res = nullptr; RD3VidMemory *vm = nullptr; void *kmem = nullptr; unsigned long long bytes = 0;
     if (rd3AccelIopCacheGet(s, &res, &vm, &kmem, &bytes)) {
         OSAddAtomic64(1, &gCntIopFlipHit);
@@ -3375,10 +3486,6 @@ static bool rd3AccelIopFlip(IOService *fb, unsigned head, IOSurface *s, void *pi
     const bool vramNewest = valid && (valid[6] & 1u);
     if (!kmem) return rd3AccelIopFlipNo(4);
     if (!vramNewest) return rd3AccelIopFlipNo(5);
-    {   /* N41: the plugin marks VRAM newest at commit: never scan out a composite the GPU still writes */
-        unsigned long long us = 0;
-        (void)rd3AccelSurfGpuWait(s->getSurfaceID(), "IOP flip", &us);
-    }
     /* VRAM the family marks newest but the Metal plugin never wrote holds no frame: copied instead
      * (rd3_iop_flip_ok; the plugin's dirty mark comes after its GPU work was waited for) */
     if (gIopWrote && !rd3_iop_flip_ok(vramNewest, res ? res->fPluginWroteGen : 0, vm ? vm->fAllocGen : 0)) {
@@ -4269,11 +4376,13 @@ static void rd3AccelCfPanelCheck(unsigned head, const RD3VidMemory *dst, unsigne
 }
 
 /* a vidmem freed (deallocPhysical, any thread) while a head scans it */
-static void rd3AccelLatchVidmemGone(const void *vm)
+/* vmToo false: only a record of exactly the address 'vmPhys' (N41: an older park of the vidmem released) */
+static void rd3AccelLatchVidmemGone(const void *vm, unsigned long long vmPhys, bool vmToo)
 {
     for (unsigned h = 0; vm && h < kRd3MaxFB; h++) {
         RD3HeadLatch &L = gLatch[h];
-        const bool shown = L.vm == vm, leaving = !shown && L.prevVm == vm && !L.st.latched;
+        const bool shown = L.vm == vm && (vmToo || L.phys == vmPhys),
+                   leaving = !shown && L.prevVm == vm && (vmToo || L.prevPhys == vmPhys) && !L.st.latched;
         if (!shown && !leaving) continue;
         const unsigned long long phys = shown ? L.phys : L.prevPhys;
         if (shown) { L.vm = nullptr; L.hashed = false; }
@@ -4954,7 +5063,7 @@ static void rd3AccelPresentForgetAll(const char *why)
  * The queue's part and the latch record's (rd3AccelLatchVidmemGone) under
  * one hold of gPresLock: between them the worker could program the freed
  * buffer and write it back into gLatch (ECC review of N38) */
-static void rd3AccelPresentForgetVm(const void *vm, unsigned long long vmPhys)
+static void rd3AccelPresentForgetVm(const void *vm, unsigned long long vmPhys, bool vmToo)
 {
     if (!vm) return;
     IOLock *l = gPresReady ? gPresLock : nullptr;
@@ -4963,10 +5072,11 @@ static void rd3AccelPresentForgetVm(const void *vm, unsigned long long vmPhys)
     for (unsigned h = 0; l && h < kRd3MaxFB; h++) {
         RD3Pres &P = gPres[h];
         uint32_t tok = 0;
-        const bool queued = P.next.vm == vm;
+        /* vmToo false: only a present of exactly that address is this allocation's */
+        const bool queued = P.next.vm == vm && (vmToo || P.next.phys == vmPhys);
         if (rd3_fq_forget_addr(&P.q, queued ? P.next.phys : vmPhys, &tok) && queued)
             rd3AccelPqDropLocked(h, tok, "its buffer was freed", false, &d);
-        if (P.cur.vm == vm && P.q.inflight && P.q.inflight != RD3_FQ_FOREIGN) {
+        if (P.cur.vm == vm && (vmToo || P.cur.phys == vmPhys) && P.q.inflight && P.q.inflight != RD3_FQ_FOREIGN) {
             const SInt64 k = OSAddAtomic64(1, &gCntPqFreedInflight[h]);
             if (rd3_log_due(gPqFreedLogs++, 8, 1023))
                 ALOG("present queue: head %u: the buffer of %s #%u (phys 0x%llx) was FREED while its flip was in "
@@ -4977,7 +5087,7 @@ static void rd3AccelPresentForgetVm(const void *vm, unsigned long long vmPhys)
         }
         IOLockWakeup(gPresLock, &P.q, false);
     }
-    rd3AccelLatchVidmemGone(vm);
+    rd3AccelLatchVidmemGone(vm, vmPhys, vmToo);
     if (l) IOLockUnlock(l);
     rd3AccelPqDoneRun(&d);
 }
@@ -7224,18 +7334,22 @@ static void rd3AccelForgetShownIf(unsigned head, unsigned long long seq)
  * never-shown buffer */
 void rd3AccelVidmemGone(const void *vm)
 {
-    rd3AccelVidmemGoneAt(vm, vm ? ((const RD3VidMemory *)vm)->fPhys : 0);   /* still set: deallocPhysical calls first */
+    rd3AccelVidmemGoneAt(vm, vm ? ((const RD3VidMemory *)vm)->fPhys : 0, true);   /* still set: deallocPhysical calls first */
 }
 /* the same for the allocation at 'phys' of 'vm' (N41: a parked allocation is released while the
- * vidmem holds no address, or another one; a parked one stayed in every table: still allocated) */
-static void rd3AccelVidmemGoneAt(const void *vm, unsigned long long phys)
+ * vidmem holds no address, or another one; a parked one stayed in every table: still allocated).
+ * vmToo false: only what is keyed by that address (and a queued / in-flight present of exactly that
+ * address) - the vidmem's own records describe a newer allocation of it (a park that replaced an older
+ * one: ECC review of N41) */
+static void rd3AccelVidmemGoneAt(const void *vm, unsigned long long phys, bool vmToo)
 {
     /* a queued present of it never reaches the panel, then the latch record - one hold of the queue's lock
      * (DRIVER-PLAN N38, ECC review: the worker must not program it in between) */
-    rd3AccelPresentForgetVm(vm, phys);
-    rd3AccelScFrontGone(vm);
+    rd3AccelPresentForgetVm(vm, phys, vmToo);
     if (vm) rd3AccelScStaleGone(phys);
     if (vm) rd3AccelWgFreed(phys);       /* its write generation and samples go */
+    if (!vmToo) return;
+    rd3AccelScFrontGone(vm);
     rd3AccelA3DispGone(vm);
     for (unsigned h = 0; vm && h < kRd3MaxFB; h++)
         if (gCfShown[h].vm == vm) gCfShown[h].vm = nullptr;
@@ -8910,7 +9024,7 @@ static void rd3AccelTraceVm(const void *vm, bool alloc, bool ok, unsigned long l
         bool ownD = false;   /* the accelerator's D is no OSObject: never cast */
         for (unsigned h = 0; h < kRd3MaxFB; h++) ownD |= (const void *)&gSc[h] == vm;
         const RD3VidMemory *m = ownD ? nullptr : OSDynamicCast(RD3VidMemory, (OSObject *)vm);
-        if (m && !(extra & (kRd3VmTrParkGone | kRd3VmTrFreeLive))) {   /* a released park is not what the vidmem maps now */
+        if (m && !(extra & (kRd3VmTrParkGone | kRd3VmTrFreeLive | kRd3VmTrObjGone))) {   /* a released park is not what the vidmem maps now */
             RD3Scan sc;
             rd3AccelVmScan(m, &sc);
             memcpy(e.ba, sc.band, 8);

@@ -109,8 +109,11 @@ enum rd3_trace_swap {
 #define RD3_TRVM_PARKED    16u
 #define RD3_TRVM_PARK_GONE 32u
 #define RD3_TRVM_FREE_LIVE 64u
+#define RD3_TRVM_OBJ_GONE  128u   /* VMFREE from RD3VidMemory::free(): the object goes (its address may come back) */
 #define RD3_TRPO_WAITED    1u
 #define RD3_TRPO_TIMEOUT   2u
+#define RD3_TRPO_IOP       4u     /* arg 2: the IOP zero-copy flip's wait, no page-off (v2 the surface) */
+#define RD3_TRPO_CLEARED   8u     /* the wait was cleared under it (another wait's timeout, a full table, off) */
 /* RD3_TRS_HOLD with this bit: mode 1 held a back WindowServer did not
  * redraw since the head presented it at swap v3 (no copy forward into it,
  * its samples unchanged, another buffer presented after it: the stale
@@ -222,8 +225,9 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          by mode 0's record, 4 the flip away from it not latched, 16
  *          parked, NOT freed (N41: still allocated, the tables keep it), 32
  *          a parked allocation really released (grown, the object freed),
- *          64 a live allocation released by free() (no deallocPhysical);
- *          obj the vidmem; v0 KiB; pa its address
+ *          64 a live allocation released by free() (no deallocPhysical),
+ *          128 from free(): the object goes (with 32 / 64, or alone with
+ *          no VRAM held: pa 0); obj the vidmem; v0 KiB; pa its address
  *  APERTURE arg 1 addToAperture, 2 getApertureMemoryDescriptor; flags 1 ok;
  *          obj the resource; v0 KiB, v1 the IOSurface id, v2 the path
  *          (0 new, 1 the gate closed, 2 the cached descriptor, 3 no BAR
@@ -231,7 +235,9 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          count (traced 4 times per resource, then every 256th); pa its address
  *  PAGEOFF arg 1 copied; obj the resource; v0 KiB, v1 us; pa its address;
  *          flags 1 waited for WindowServer's pending GPU write, 2 that wait
- *          timed out (N41), v3 the wait's us
+ *          timed out, 8 it was cleared under the wait (N41), v3 the wait's us.
+ *          arg 2 with flag 4: no page-off but the IOP zero-copy flip's wait
+ *          (flags 1 / 2 / 8 as above), v2 the IOSurface id, v3 us
  *  SURFGEM arg 1 imported / 0 refused; v0 the IOSurface id, v1 the status,
  *          v2 the reason, v3 w | h << 16; pa the VRAM when imported
  *  MODE    arg 0 will change, 1 did change, 2 initFramebufferResource (head,
