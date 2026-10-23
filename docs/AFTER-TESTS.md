@@ -2934,3 +2934,62 @@ Boot-args and what to try: [TESTING-VM](TESTING-VM.md), "Driver-side A/B".
 | `WARN AGDC vendor: AGDC armed but no debug.rdna3agdc_vendor` | an RDNA3AGDC older than N40, or the collector missed it | `STALE KEXTS`; `17-sysctl-agdc.txt` in the archive |
 | `WARN AGDC vendor: the A/B answer ... is set but IOPresentment never asked` | IOPresentment never asked the vendor info (AGDC came up after WindowServer, or not at all): the vendor A/B of this run says nothing | `debug.rdna3agdc` state; GPUWrangler `agdc` count in the CoreDisplay log |
 | `WARN AGDC vendor: boot-args ask rdna3agdcvendor=N but ...` | not armed (no `rdna3agdc=1..`: the answer is never given), or `debug.rdna3agdc_vendor` differs (the boot-arg did not reach it, or the sysctl was changed at runtime) | `01-boot-args.txt`; the AGDC start line |
+
+### Card runs 2026-10-17d / 18b: buffer texture pitch and the UCLK floor (DRIVER-PLAN N43)
+
+- Found in the plugin trace of both runs: `alloc-fail vkCreateImage(buffer
+  texture) rc=-1000158000` (`VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT`),
+  about 32 a second from WindowServer. The caller (`newTextureWithDescriptor:
+  offset:bytesPerRow:` on a buffer) builds a linear DRM-modifier image over the
+  buffer with the app's `bytesPerRow` as the explicit row pitch. RADV takes a
+  custom linear pitch only as a multiple of 256 B (`ac_surface_override_offset_stride`,
+  `ac_surface_get_pitch_align`: 256 / bytes per element pixels on GFX9+; the
+  GFX10.3+ image descriptor takes the pitch in 256 B units, a hardware rule).
+  Every alias that worked had a pitch % 256 == 0, every failure had not. The
+  plugin only checked `% 32` (NVIDIA's unit from the NVK port). The private copy
+  (task 19) then drew the texture, at the cost of a new image and a synchronous
+  GPU upload per use.
+- Done (`metal/plugin/nvmtl_linear_pitch.h`, `tests/test_linear_pitch.c`): with
+  the DRM-modifier path (`g_linmod`) the alias is refused before `vkCreateImage`
+  when `bytesPerRow` is not a multiple of 256 B, so `alloc-fail` no longer fires
+  for it; the caller makes the private copy as before. The IOSurface alias
+  (`item 7: ... stays private: bytesPerRow is not a multiple of 256 (RADV linear
+  pitch)`) uses the same rule. Counted and logged (first 8, then every 1024th):
+  `buffer texture copy (pitch): bytesPerRow N is not a multiple of 256 B (RADV
+  linear custom pitch) - WxH VkFormat F, a private copy instead of an alias (K so
+  far)`, and the buffer texture census line ends `..., K copy (pitch)`.
+  `rdna3_vktest` checks the rule on the card (`LINPITCH:` line: an explicit
+  linear row pitch of 64 B must give -1000158000, 256 B must succeed).
+  Open (needs the card): park the copy (keep its image and refresh it) instead of
+  a new image + upload per use; every copy still costs a GPU upload per command
+  buffer that uses it.
+
+| Seen | Meaning | Action |
+|---|---|---|
+| triage `INFO buffer texture copy (pitch): at least N buffer texture(s) over a bytesPerRow that is not a multiple of 256 B were not aliased ...` | the plugin counted them (the lower bound: the log has the first 8 and every 1024th, the census line the running count) | none; the cost is the open item above. N in the thousands per minute with WindowServer slow: do the copy parking |
+| triage `WARN buffer texture copy (pitch): N vkCreateImage(buffer texture) -> -1000158000 line(s): the plugin is older than N43` | the plugin in the VM was built before the rule | rebuild it (`tools/vm/macos/build_metal.sh`); the plugin trace shows the same as `INFO buftex-pitch` |
+| plugin trace `FAIL alloc-fail ... vkCreateImage(buffer texture) rc=-1000158000` | cannot appear with a plugin from N43 on (the trace row is INFO `buftex-pitch` for an older one) | if it does, the predicate is not used on that path: report the log line |
+| `INFO linear pitch: RADV refuses an explicit linear row pitch of 64 B (-1000158000) and takes 256 B` | `rdna3_vktest` confirms the rule on the card | none |
+| `WARN linear pitch: RADV ACCEPTED an explicit linear row pitch of 64 B` | this RADV is less strict than the plugin's rule | the rule only costs copies; relax `nvmtl_linear_pitch_ok` only with a hardware pitch alignment read from RADV (`ac_surface_get_pitch_align`) |
+| `FAIL linear pitch: an explicit 256 B linear row pitch is refused by RADV` | no buffer texture can be aliased at all | `RADV_DEBUG=startup`; the DRM format modifier support in `vkGetPhysicalDeviceImageFormatProperties2` |
+| `WARN linear pitch: no LINPITCH: line in the Vulkan test` | an `rdna3_vktest` older than N43, or it died before the check | rebuild the report's bin |
+
+UCLK at its idle floor: every report so far read UCLK 96 MHz (level 0 of
+`pp_dpm_mclk`: 96 / 456 / 772 / 1218 MHz, UCLK DPM on, Linux idles at 96 too) and
+`umc` activity 0-2 %, with no memory load ever measured. A report of a step with
+`rdna3pm=2` and RADV now carries a section `== rdna3 memory load (rdna3_vktest
+--membw, rdna3_pmctl info x3 during it)`: ten seconds of `vkCmdFillBuffer` +
+`vkCmdCopyBuffer` between two device-local buffers (1 GiB each, less when VRAM is
+tight), `rdna3_pmctl info` (pp_dpm_mclk / sclk / fclk and the activity line) three
+times during it and once 4 s after. About 25 s; every other step prints one
+`== memory load: skipped (...)` line.
+
+| Seen | Meaning | Action |
+|---|---|---|
+| `INFO memory load X GiB/s: umc activity max U %, UCLK max C MHz ... UCLK left level 0 under load` | the PMFW's UCLK DPM follows a memory load; back to level 0 in the idle sample | none (a few seconds of delay back to 96 MHz is normal; the idle sample is taken 4 s after) |
+| `WARN memory load ...: UCLK STAYED at its lowest level under a busy memory controller` (umc activity above 20 %) | UCLK DPM does not raise the memory clock under load | `PMFeaturesRunning` (the UCLK DPM bit), the power profile (`rdna3_pmctl profiles`: the workload mask) and the DPM thresholds of `smu_v13_0_0`; compare with Linux under the same fill/copy load (`pp_dpm_mclk`); `rdna3pm=2` and no `UCLK pinned` line in the kernel log |
+| `INFO memory load ... umc activity stayed at or under 20 %` | the load did not register at the memory controller (the SMU's activity average is slow, or the GPU did not run it) | the `MEMBW:` GiB/s: a rate near the card's memory bandwidth (about 600 GB/s) with umc low means the metrics are wrong, a low rate means the copy did not run |
+| `WARN memory load: no rdna3_pmctl info sample under the load could be read` | the pmctl calls failed or printed no `pp_dpm_mclk` / `activity` lines | the section's text in the tests file; `rdna3_pmctl info` alone |
+| `WARN memory load: MEMBW: NOT MEASURED ...` | no device-local memory for two buffers (even 16 MiB each), no queue, or the pool/fence setup failed | the line says which; VRAM exhaustion: `vm_*` counters |
+| `FAIL memory load: MEMBW: FAILED ...` | a submit or the fence failed under the load | the kernel log for a GPU reset / ring timeout around the run; same as any `rdna3_vktest` failure |
+| `WARN memory load: no memory load in this report although rdna3pm=2 and the Vulkan test ran` | an autoreport.sh older than N43, or the report was cut before the step | rebuild / reinstall the VM's tools |

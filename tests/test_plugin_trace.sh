@@ -92,7 +92,7 @@ mode() { python3 -I -B -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mod
 $PT "$T/ws/nvmtl" --frames 20 > "$T/ws.txt"
 need "$T/ws.txt" '^WindowServer  pid'
 need "$T/ws.txt" 'WARN ws-uid'
-need "$T/ws.txt" 'events: 83 written, 83 kept'
+need "$T/ws.txt" 'events: 86 written, 86 kept'
 need "$T/ws.txt" 'FAIL never-published surface 103 2560x1440 (shared VRAM): 1 command buffer'
 need "$T/ws.txt" 'FAIL empty-publish   surface 107 2560x1440 (shared VRAM): 1 copy-out(s) published an EMPTY picture although the same command buffer DREW'
 need "$T/ws.txt" 'INFO empty-publish   surface 102 2560x1440 (shared VRAM): 4 of 4 copy-out(s) published an empty picture after a clear-only pass'
@@ -110,6 +110,10 @@ need "$T/ws.txt" 'FAIL vk-wait         1 fence wait(s) timed out'
 need "$T/ws.txt" 'nvmtl_vk_image_read: TIMEOUT VK_TIMEOUT x1'
 need "$T/ws.txt" 'FAIL vk-disable      Vulkan backend switched OFF'
 need "$T/ws.txt" 'vkAllocateMemory(image) rc=-2 x1'
+# DRIVER-PLAN N43: the buffer texture pitch refusal of an older plugin is INFO with its count, never part of the alloc-fail FAIL
+need "$T/ws.txt" 'INFO buftex-pitch    3 buffer texture(s) refused by vkCreateImage with VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT'
+need "$T/ws.txt" 'FAIL alloc-fail      2 allocation / import failure(s)'
+if grep -q 'vkCreateImage(buffer texture) rc=' "$T/ws.txt"; then fail "the buffer texture pitch refusal is still listed as an allocation failure"; fi
 need "$T/ws.txt" 'WARN kreq-import     1 kernel surface import(s) refused'
 need "$T/ws.txt" 'import refused VK_ERROR_OUT_OF_DEVICE_MEMORY kernel errno 12 ENOMEM x1'
 # the per-surface table: 101 rendered and marked dirty, 102 cleared and copied out empty
@@ -125,7 +129,7 @@ need "$T/ws.txt" 'lifetime totals .*clear_only 4, clear_only_big 4'
 # the timeline of one surface and the failure list
 $PT "$T/ws/nvmtl" --surface 102 --all > "$T/s102.txt"
 need "$T/s102.txt" 'timeline of surface 102 2560x1440'
-need "$T/s102.txt" 'surface map surf 102 .* -> private image (bytesPerRow not a multiple of 32)'
+need "$T/s102.txt" 'surface map surf 102 .* -> private image (bytesPerRow not a multiple of 256)'
 need "$T/s102.txt" 'kernel dirty surf 102 plane 0 -> REFUSED errno 19 ENODEV'
 need "$T/s102.txt" 'failure events:'
 need "$T/s102.txt" 'VULKAN BACKEND OFF'
