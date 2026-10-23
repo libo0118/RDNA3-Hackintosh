@@ -335,3 +335,12 @@ int nvmtl_vk_surface_vram(uint32_t surfaceID, uint32_t plane, size_t need, nvk_b
 int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane);
 /* why the calling thread's last nvmtl_vk_surface_dirty returned -1: an errno, -2 the dirty path is off, -3 no Vulkan device, 0 it did not fail (frame trace) */
 int nvmtl_vk_last_dirty_errno(void);
+/* DRIVER-PLAN N41: WindowServer's pending GPU writes. ws_wait_on: this process marks them (WindowServer, a libdrm_xnu
+   and kernel with the marks, NVMTL_SURFACE_WAIT not 0). surface_mark: pending (1, at commit) / ready (0, GPU done),
+   0 or -1 with errno. surface_dirty_commit: the newest mark at commit, never waiting for the accelerator's lock.
+   surface_dirty_committed_scope(1) around nvmtlSurfaceOut of a surface marked at commit: that mark gives up on a taken
+   lock (the commit's stands). */
+int nvmtl_vk_ws_wait_on(void);
+int nvmtl_vk_surface_mark(uint32_t surfaceID, int pending);
+int nvmtl_vk_surface_dirty_commit(uint32_t surfaceID, uint32_t plane);
+void nvmtl_vk_surface_dirty_committed_scope(int on);

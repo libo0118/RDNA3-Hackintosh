@@ -479,6 +479,9 @@ static uint32_t (*pnvk_surface_dirty)(VkDevice, uint32_t, uint32_t);
 static int (*pdrm_surface_fd)(uint32_t, uint32_t, uint64_t);
 static int (*pdrm_surface_dirty)(uint32_t, uint32_t);
 static int (*pdrm_surface_last_error)(void);
+/* DRIVER-PLAN N41: WindowServer's pending / ready marks and the try-lock dirty mark (libdrm_xnu; absent in an older one) */
+static int (*pdrm_surface_mark)(uint32_t, int);
+static int (*pdrm_surface_dirty_try)(uint32_t, uint32_t);
 static int (*pnvk_sparse)(void);
 static int g_qsparse, g_sparse;
 static int g_extfd;
@@ -728,6 +731,8 @@ static int nvmtl_vk_initialize(void)
             pdrm_surface_fd = (int (*)(uint32_t, uint32_t, uint64_t))dlsym(g_lib, "drm_xnu_surface_fd");
             pdrm_surface_dirty = (int (*)(uint32_t, uint32_t))dlsym(g_lib, "drm_xnu_surface_dirty");
             pdrm_surface_last_error = (int (*)(void))dlsym(g_lib, "drm_xnu_surface_last_error");
+            pdrm_surface_mark = (int (*)(uint32_t, int))dlsym(g_lib, "drm_xnu_surface_mark");
+            pdrm_surface_dirty_try = (int (*)(uint32_t, uint32_t))dlsym(g_lib, "drm_xnu_surface_dirty_try");
             pnvk_sample_depth_contract = (VkResult (*)(VkDevice, uint32_t *, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_contract_v1");
             pnvk_sample_depth_image = (VkResult (*)(VkDevice, VkImage, uint32_t *))dlsym(g_lib, "nvmtl_nvk_sample_depth_image_v1");
             pnvk_sparse = (int (*)(void))dlsym(g_lib, "nvmtl_nvk_sparse_bind_v1");
@@ -1896,6 +1901,64 @@ int nvmtl_vk_surface_share_on(void)
 }
 static __thread int g_last_dirty_errno;
 int nvmtl_vk_last_dirty_errno(void) { return g_last_dirty_errno; }
+/* DRIVER-PLAN N41: WindowServer's IOSurface writes in VRAM. A kernel that takes WindowServer's pending mark (at commit)
+   holds a CPU lock's page-off until the ready mark (after the GPU), bounded; only then is the surface marked newest at
+   commit (a try-lock mark: the commit holds the command-buffer lock the completions need), and the mark after the GPU
+   may give up when the accelerator's lock is taken (the commit's stands). Any other answer keeps the old order (marked
+   after the GPU): ENOSYS (a kext without the op) for good, ENXIO (the kernel's waits are off) for a second.
+   NVMTL_SURFACE_WAIT=0 switches it off. NullMoth comparison: its nvmtl_ws_mark / NVAccelSurfaceWait, written here. */
+static _Atomic uint64_t g_ws_wait_retry;   /* 0 on, UINT64_MAX never, else CLOCK_UPTIME_RAW ns to ask again */
+static __thread int g_dirty_committed;
+int nvmtl_vk_ws_wait_on(void)
+{
+    static int base = -1;
+    if (base < 0) {
+        const char *e = getenv("NVMTL_SURFACE_WAIT"), *me = getprogname();
+        const int ws = me && !strcmp(me, "WindowServer");
+        base = ws && pdrm_surface_mark && pdrm_surface_dirty_try && pdrm_surface_dirty && !pnvk_surface_dirty &&
+               !(e && e[0] == '0') && !nvmtl_gpu_headless();
+        if (ws) nvlog("surface wait (N41): WindowServer's IOSurface VRAM writes are %s (libdrm_xnu marks %s, try-lock dirty %s, NVMTL_SURFACE_WAIT=%s)",
+                      base ? "marked pending + newest at commit, ready after the GPU (the kernel's page-off waits)" : "marked newest after the GPU only (old order)",
+                      pdrm_surface_mark ? "present" : "ABSENT", pdrm_surface_dirty_try ? "present" : "ABSENT", e ?: "unset");
+    }
+    if (!base) return 0;
+    const uint64_t r = atomic_load(&g_ws_wait_retry);
+    return !r || (r != UINT64_MAX && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= r);
+}
+int nvmtl_vk_surface_mark(uint32_t surfaceID, int pending)
+{
+    if (!pdrm_surface_mark) { errno = ENOSYS; return -1; }
+    if (!pdrm_surface_mark(surfaceID, pending)) {
+        if (pending && atomic_load(&g_ws_wait_retry)) { atomic_store(&g_ws_wait_retry, 0); nvlog("surface wait (N41): marks taken again"); }
+        return 0;
+    }
+    const int er = errno;
+    /* a refused pending mark decides the mode; a refused ready only loses its count (the kernel's bound covers it) */
+    if (pending && (er == ENOSYS || er == ENXIO)) {
+        const uint64_t was = atomic_exchange(&g_ws_wait_retry, er == ENOSYS ? UINT64_MAX : clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 1000000000ull);
+        if (!was) nvlog("surface wait (N41): pending mark of surface %u refused (errno %d, %s) - %s", surfaceID, er, strerror(er),
+                        er == ENOSYS ? "the kext has no marks: old order for good" : "the kernel's waits are off: old order, asked again in 1 s");
+    } else {
+        static _Atomic unsigned n;
+        const unsigned k = atomic_fetch_add(&n, 1);
+        if (k < 6 || (k & 2047) == 0) nvlog("surface wait (N41): %s mark of surface %u refused: errno %d (%s) (%u so far)", pending ? "pending" : "ready", surfaceID, er, strerror(er), k + 1);
+    }
+    errno = er;
+    return -1;
+}
+/* the surface marked newest at commit: 0 marked, -1 not (errno; EBUSY the accelerator's lock was taken) */
+int nvmtl_vk_surface_dirty_commit(uint32_t surfaceID, uint32_t plane)
+{
+    if (!pdrm_surface_dirty_try) { errno = ENOSYS; return -1; }
+    if (!pdrm_surface_dirty_try(surfaceID, plane)) return 0;
+    const int er = errno;
+    static _Atomic unsigned n;
+    const unsigned k = atomic_fetch_add(&n, 1);
+    if (er != EBUSY && (k < 6 || (k & 2047) == 0)) nvlog("surface wait (N41): commit dirty mark of surface %u plane %u refused: errno %d (%s) - marked after the GPU", surfaceID, plane, er, strerror(er));
+    errno = er;
+    return -1;
+}
+void nvmtl_vk_surface_dirty_committed_scope(int on) { g_dirty_committed = on; }
 int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
 {
     static int on = -1;
@@ -1920,7 +1983,14 @@ int nvmtl_vk_surface_dirty(uint32_t surfaceID, uint32_t plane)
         nvt_kreq_dirty(surfaceID, plane, st ? NVT_KD_REFUSED : NVT_KD_ACCEPTED, st ? -1 : 0, (int)st, nvt_us_since(trT0));
         return st ? -1 : 0;
     }
-    if (!pdrm_surface_dirty(surfaceID, plane)) { nvt_kreq_dirty(surfaceID, plane, NVT_KD_ACCEPTED, 0, 0, nvt_us_since(trT0)); return 0; }
+    if (g_dirty_committed && pdrm_surface_dirty_try) {
+        /* N41: marked newest at commit already: a taken accelerator lock (a page-off waiting for a pending mark) is no
+           reason to wait here, on the thread whose ready marks release that page-off */
+        if (!pdrm_surface_dirty_try(surfaceID, plane) || errno == EBUSY) {
+            nvt_kreq_dirty(surfaceID, plane, NVT_KD_ACCEPTED, 0, 0, nvt_us_since(trT0));
+            return 0;
+        }
+    } else if (!pdrm_surface_dirty(surfaceID, plane)) { nvt_kreq_dirty(surfaceID, plane, NVT_KD_ACCEPTED, 0, 0, nvt_us_since(trT0)); return 0; }
     /* per cause: one noisy surface does not hide the others' reasons */
     int er = errno; static unsigned ncause[8];
     g_last_dirty_errno = er;

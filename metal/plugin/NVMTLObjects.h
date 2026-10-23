@@ -119,6 +119,8 @@ extern id gNVMTLMainDevice;
   NSMutableSet *_resources;
   NSMutableSet *_surfDirty;
   NSMutableSet *_surfOverwrites; // contents defined by writes recorded in this command buffer
+  NSMutableDictionary *_wsMarks;  // DRIVER-PLAN N41: surface id -> index of the last part writing it (pending marks taken at commit)
+  NSMutableSet *_wsCommitDirty;    // N41: "id:plane" of the surfaces marked newest at commit
   unsigned _nEnc, _nEnd, _nHandlers, _nStatus, _nEnqueue, _nLabel, _nPresent, _nWait;
   unsigned _nEncSealed;
   CFTimeInterval _gpuStart, _gpuEnd;

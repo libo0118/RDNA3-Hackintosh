@@ -84,6 +84,59 @@ static void nvmtl_surface_finish_writes(NVMTLCommandBuffer *cb) {
     }
 }
 
+// DRIVER-PLAN N41: WindowServer's IOSurface writes in VRAM (nvmtl_vk_ws_wait_on). At commit each surface a command buffer
+// writes is marked pending once and then newest, so a CPU lock (a window capture) pages it off, and the kernel's page-off
+// waits for the ready mark sent after the GPU finished the last part writing it (or at the end, on any error). Without
+// the kernel's marks nothing changes: surfaces are marked newest after the GPU, as before. NullMoth comparison: its
+// nvmtl_ws_mark_pending / mark_ready (79f47d0, 40daaa6), written here.
+static void nvmtl_ws_mark_pending(NVMTLCommandBuffer *cb) {
+    if (!nvmtl_vk_ws_wait_on()) return;
+    NSMutableDictionary *last = nil;
+    NSUInteger i = 0;
+    for (id p in cb->_parts) {
+        if ([p isKindOfClass:[NVMTLSubmissionPart class]])
+            for (NVMTLTexture *t in ((NVMTLSubmissionPart *)p)->surfaces) if (t->_surf && t->_vramOn) {
+                if (!last) last = [NSMutableDictionary new];
+                last[@((uint32_t)IOSurfaceGetID(t->_surf))] = @(i);
+            }
+        i++;
+    }
+    if (!last) return;
+    NSMutableDictionary *marked = nil;
+    for (NSNumber *sid in last) if (!nvmtl_vk_surface_mark(sid.unsignedIntValue, 1)) {
+        if (!marked) marked = [NSMutableDictionary new];
+        marked[sid] = last[sid];
+    }
+    if (!marked) return;
+    cb->_wsMarks = marked;
+    NSMutableSet *dirty = nil;
+    for (id p in cb->_parts) {
+        if (![p isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+        for (NVMTLTexture *t in ((NVMTLSubmissionPart *)p)->surfaces) {
+            if (!t->_surf || !t->_vramOn || !marked[@((uint32_t)IOSurfaceGetID(t->_surf))]) continue;
+            NSString *k = nvmtl_surface_writer_key(t);
+            if ([dirty containsObject:k]) continue;
+            if (!nvmtl_vk_surface_dirty_commit((uint32_t)IOSurfaceGetID(t->_surf), (uint32_t)t->_plane)) {
+                if (!dirty) dirty = [NSMutableSet new];
+                [dirty addObject:k];
+            }
+        }
+    }
+    cb->_wsCommitDirty = dirty;
+}
+// the ready marks of the surfaces whose last writing part is 'partIndex' (the GPU finished it); -1: every one left
+static void nvmtl_ws_mark_ready(NVMTLCommandBuffer *cb, NSInteger partIndex) {
+    if (!cb->_wsMarks.count) return;
+    for (NSNumber *sid in [cb->_wsMarks.allKeys copy]) {
+        if (partIndex >= 0 && [cb->_wsMarks[sid] integerValue] != partIndex) continue;
+        (void)nvmtl_vk_surface_mark(sid.unsignedIntValue, 0);
+        [cb->_wsMarks removeObjectForKey:sid];
+    }
+}
+static BOOL nvmtl_ws_committed(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
+    return cb->_wsCommitDirty && t->_surf && [cb->_wsCommitDirty containsObject:nvmtl_surface_writer_key(t)];
+}
+
 @implementation NVMTLSubmissionPart
 - (void)dealloc {
     if (inflight) {
@@ -248,6 +301,8 @@ static void nvmtl_tr_cb_done(NVMTLCommandBuffer *cb, NSError *error) {
             [nvmtl_quarantined_parts addObject:p];
         }
     }
+    nvmtl_ws_mark_ready(self, -1);   // N41: no pending mark outlives the command buffer (errors included)
+    _wsMarks = nil; _wsCommitDirty = nil;
     if (!error) {
         for (dispatch_block_t action in _presentations) action();
     }
@@ -431,9 +486,17 @@ static void nvmtl_gsub_ahead_pass1(void) {
         }
         if (result == 0) [self nvmtlCollectDeviceTiming:&part->commands];
         BOOL published = result == 0;
+        // N41: the GPU finished this part: its surfaces' ready marks go first, before the surface work below (a page-off
+        // waiting for them holds the accelerator's lock that work may take)
+        if (published) nvmtl_ws_mark_ready(self, (NSInteger)_nextPart);
         if (published) {
             nvt_set_cb(nvmtl_tr_cb_id(self));
-            for (NVMTLTexture *texture in part->surfaces) if (![texture nvmtlSurfaceOut]) published = NO;
+            for (NVMTLTexture *texture in part->surfaces) {
+                const BOOL committed = nvmtl_ws_committed(self, texture);
+                if (committed) nvmtl_vk_surface_dirty_committed_scope(1);
+                if (![texture nvmtlSurfaceOut]) published = NO;
+                if (committed) nvmtl_vk_surface_dirty_committed_scope(0);
+            }
             nvt_set_cb(0);
             for (id resource in part->resources)
                 if ([resource isKindOfClass:[NVMTLBuffer class]]) nvmtl_buffer_sync_out(resource);
@@ -474,6 +537,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
         [_completionCondition lock]; _cbstatus = MTLCommandBufferStatusCommitted; [_completionCondition unlock];
         [self nvmtlSealPartWithSignal:nil value:0 restart:NO];
         nvmtl_surface_register_writes(self);
+        nvmtl_ws_mark_pending(self);   // N41: before any part reaches the GPU (submit-ahead needs _committed and the pump)
         nvmtl_tr_cb_commit(self);
         if (!nvmtl_pending_buffers) nvmtl_pending_buffers = [NSMutableArray new];
         [nvmtl_pending_buffers addObject:self];
