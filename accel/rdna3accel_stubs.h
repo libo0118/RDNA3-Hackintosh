@@ -56,6 +56,9 @@ public:
     void pageoff(IOAccelEvent *, bool, bool *, unsigned long long) APPLE_KEXT_OVERRIDE;
     unsigned int fApLogged = 0;
     unsigned int fApCached = 0;   /* cached aperture descriptors handed out (the trace's rate limit) */
+    /* the allocation cookie of the VRAM the Metal plugin last wrote (its dirty escape): the IOP zero-copy
+     * flip's marker (DRIVER-PLAN N38, rd3_iop_flip_ok) */
+    unsigned long long fPluginWroteCookie = 0;
     IOMemoryDescriptor *fApDesc = nullptr;
 };
 OSDefineMetaClassAndStructors(RD3Resource, IOAccelResource2)

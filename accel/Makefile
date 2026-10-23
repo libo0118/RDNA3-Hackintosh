@@ -27,12 +27,13 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
 # the user approves a new one, and the report must tell which one ran
 # (the common/ headers the accelerator includes count too: card run 58's
 # display rule lives in common/rdna3_a3_display.h)
-ACCEL_SRC_HASH := $(shell cat rdna3-accel.cpp Info.plist rdna3k_abi.h rdna3accel_stubs.h ../common/rdna3_bootargs.h ../common/rdna3_a3_display.h ../common/rdna3_swap_front.h ../common/rdna3_flip_latch.h ../common/rdna3_swap_copy.h ../common/rdna3_trace.h ../common/rdna3_write_gen.h | shasum | cut -c1-10)
+ACCEL_SRC_HASH := $(shell cat rdna3-accel.cpp Info.plist rdna3k_abi.h rdna3accel_stubs.h ../common/rdna3_bootargs.h ../common/rdna3_a3_display.h ../common/rdna3_swap_front.h ../common/rdna3_flip_latch.h ../common/rdna3_swap_copy.h ../common/rdna3_trace.h ../common/rdna3_write_gen.h ../common/rdna3_flip_queue.h | shasum | cut -c1-10)
 CXXFLAGS += -DACCEL_SRC='"$(ACCEL_SRC_HASH)"'
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext
 
 HDRS     := $(wildcard *.h iofam/*.h re/*.h) ../common/rdna3_bootargs.h ../common/rdna3_a3_display.h ../common/rdna3_swap_front.h \
-            ../common/rdna3_flip_latch.h ../common/rdna3_swap_copy.h ../common/rdna3_trace.h ../common/rdna3_write_gen.h
+            ../common/rdna3_flip_latch.h ../common/rdna3_swap_copy.h ../common/rdna3_trace.h ../common/rdna3_write_gen.h \
+            ../common/rdna3_flip_queue.h
 
 .PHONY: all check clean
 all: $(BUNDLE)
