@@ -152,7 +152,7 @@ static void nvmtl_ws_mark_ready(NVMTLCommandBuffer *cb, NSInteger partIndex, NVM
                 [cb->_wsCommitDirty addObject:nvmtl_surface_writer_key(t)];
             } else early = YES;
         }
-        nvmtl_vk_ws_note_ready(early);
+        nvmtl_vk_ws_note_ready(early, partIndex < 0);   // at the end: counted apart (round-2 review of N41)
         (void)nvmtl_vk_surface_mark(sid.unsignedIntValue, 0);
         [cb->_wsMarks removeObjectForKey:sid];
     }

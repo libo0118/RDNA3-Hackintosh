@@ -345,7 +345,7 @@ int nvmtl_vk_surface_mark(uint32_t surfaceID, int pending);
 int nvmtl_vk_surface_dirty_commit(uint32_t surfaceID, uint32_t plane);
 void nvmtl_vk_surface_dirty_committed_scope(int on);
 /* N41 statistics (the plugin's periodic "surface wait (N41): stats" line): per command buffer the pending marks
-   taken / refused and the surface writes in system memory not marked; a ready mark sent before its surface could be
-   marked newest */
+   taken / refused and the surface writes in system memory not marked; a ready mark sent (at_end: at the command
+   buffer's end, not after the part that wrote the surface last), early: before its surface could be marked newest */
 void nvmtl_vk_ws_note_cb(unsigned taken, unsigned refused, unsigned sysmem);
-void nvmtl_vk_ws_note_ready(int early);
+void nvmtl_vk_ws_note_ready(int early, int at_end);

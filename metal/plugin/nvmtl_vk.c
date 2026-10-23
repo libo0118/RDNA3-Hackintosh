@@ -1914,17 +1914,22 @@ static _Atomic uint64_t g_ws_wait_retry;   /* 0 on, UINT64_MAX never, else CLOCK
 static __thread int g_dirty_committed;
 /* what the marks did (logged with the first command buffers, then every 4096th): command buffers that marked,
    pending marks taken / refused, surfaces skipped (in system memory: nothing for the kernel to wait for), command
-   buffers while backed off, readies sent before the surface's dirty mark (it could not be marked newest yet) */
-static _Atomic uint64_t g_ws_cbs, g_ws_taken, g_ws_refused, g_ws_sysmem, g_ws_cbs_off, g_ws_ready_early, g_ws_backoffs;
+   buffers while backed off, readies sent before the surface's dirty mark (it could not be marked newest yet), readies
+   sent and those of them sent at the command buffer's end (its completion handler or an error, not after the part
+   that wrote the surface last: round-2 review of N41) */
+static _Atomic uint64_t g_ws_cbs, g_ws_taken, g_ws_refused, g_ws_sysmem, g_ws_cbs_off, g_ws_ready_early, g_ws_backoffs,
+                        g_ws_ready, g_ws_ready_end;
 static void nvmtl_vk_ws_log_stats(const char *why)
 {
     nvlog("surface wait (N41): stats (%s): %llu command buffer(s) marked, %llu pending mark(s) taken, %llu refused "
           "(%llu back-off(s)), %llu surface write(s) in system memory not marked, %llu command buffer(s) while backed "
-          "off, %llu ready mark(s) sent before the surface's dirty mark", why,
+          "off, %llu ready mark(s) sent before the surface's dirty mark, %llu ready mark(s) sent (%llu at the command "
+          "buffer's end)", why,
           (unsigned long long)atomic_load(&g_ws_cbs), (unsigned long long)atomic_load(&g_ws_taken),
           (unsigned long long)atomic_load(&g_ws_refused), (unsigned long long)atomic_load(&g_ws_backoffs),
           (unsigned long long)atomic_load(&g_ws_sysmem), (unsigned long long)atomic_load(&g_ws_cbs_off),
-          (unsigned long long)atomic_load(&g_ws_ready_early));
+          (unsigned long long)atomic_load(&g_ws_ready_early), (unsigned long long)atomic_load(&g_ws_ready),
+          (unsigned long long)atomic_load(&g_ws_ready_end));
 }
 void nvmtl_vk_ws_note_cb(unsigned taken, unsigned refused, unsigned sysmem)
 {
@@ -1934,8 +1939,10 @@ void nvmtl_vk_ws_note_cb(unsigned taken, unsigned refused, unsigned sysmem)
     atomic_fetch_add(&g_ws_sysmem, sysmem);
     if (k < 4 || ((k + 1) & 4095) == 0) nvmtl_vk_ws_log_stats(k < 4 ? "first command buffers" : "every 4096th");
 }
-void nvmtl_vk_ws_note_ready(int early)
+void nvmtl_vk_ws_note_ready(int early, int at_end)
 {
+    atomic_fetch_add(&g_ws_ready, 1);
+    if (at_end) atomic_fetch_add(&g_ws_ready_end, 1);
     if (early && !atomic_fetch_add(&g_ws_ready_early, 1))
         nvlog("surface wait (N41): a ready mark went out before its surface could be marked newest (the accelerator's "
               "lock was taken): a page-off in between may copy the stale system memory (counted in the stats line)");
