@@ -138,6 +138,10 @@ a3_sysctls() {
     _vh=$(sysctl -n debug.rdna3_vram 2>/dev/null)
     if [ -n "$_vh" ]; then echo "debug.rdna3_vram: $_vh"
     else echo "(no debug.rdna3_vram sysctl: kext older than card run 2026-10-17c)"; fi
+    # DRIVER-PLAN N42: the core's vblank / pflip / HPD interrupts (tools/triage_reports.py "display irq")
+    _di=$(sysctl -n debug.rdna3_dispirq 2>/dev/null)
+    if [ -n "$_di" ]; then echo "debug.rdna3_vblirq: $(sysctl -n debug.rdna3_vblirq 2>/dev/null)"; echo "debug.rdna3_dispirq: $_di"
+    else echo "(no debug.rdna3_dispirq sysctl: a core older than DRIVER-PLAN N42)"; fi
 }
 
 # card run 2026-10-17b: the kernel's per-frame trace streamed every 3 s

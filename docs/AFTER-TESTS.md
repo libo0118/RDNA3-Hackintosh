@@ -354,13 +354,29 @@ path (soc21 pg_flags VCN | VCN_DPG | JPEG, `adev->vcn.indirect_sram`); its
 
 ### Hotplug (any step from 6b with `rdna3msi=1`)
 
-Unplug and plug a monitor cable while macOS runs: the log shows `HPD: hotplug interrupts enabled`, then `display: HPDn disconnected` / `connected` and `hotplug on pins ...`; `RDNA3,HotplugEvents` counts them.
+Unplug and plug a monitor cable while macOS runs: the log shows `HPD: hotplug interrupts enabled`, then `display: HPDn interrupt #k (connected / disconnected)` (N42: until then the src_id was wrong, 0x2a instead of `DCN_1_0__SRCID__DC_HPD1_INT` = 9, and no HPD IV was ever claimed); `RDNA3,HPDIrqs` counts them. With `rdna3hpdirq=0` (default) the line ends `not acted on` and the hotplug poll decides; with `rdna3hpdirq=1` it is followed by `display: HPDn connected` / `disconnected`, `hotplug on pins ...` and `RDNA3,HotplugEvents`.
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| no `display: HPDn` line on unplug | DCN interrupts do not reach the IH (`DC_HPD_INT_EN` set but no IV) | `RDNA3,IHEarlyIVs`, MSI counters; read `HPDn_DC_HPD_INT_STATUS` (bit 0 latched?) |
+| no `display: HPDn interrupt` line on unplug (`RDNA3,HPDIrqs` absent or 0) | DCN interrupts do not reach the IH (`DC_HPD_INT_EN` set but no IV), or no MSI | `RDNA3,IHEarlyIVs`, MSI counters, the `display irq` triage row (do vblank IVs arrive?); read `HPDn_DC_HPD_INT_STATUS` (bit 0 latched?) |
 | many `HPDn` lines for one unplug | polarity / ack order (`hpd_ack` in irq_service_dcn32.c) | send the log; check `DC_HPD_INT_POLARITY` after the ack |
 | `connected` but the connector has no EDID afterwards | re-probe too early (sink not ready) | delay the re-probe (amdgpu waits through `dc_link_detect` retries) |
+
+### VBL and flip done from the DCN interrupts (N42; default on, `rdna3vblirq=0` for the A/B)
+
+With MSI (`rdna3msi=1`, in the profile) every DCN framebuffer registers with the core (`display irq: head n (OTG o, HUBP p): the framebuffer registered for 0x3, enabled 0x3`), gets its VBL from the OTG VSTARTUP interrupt (a HIGH ONCE thread call) and the accelerator's latch wait is ended by the HUBP flip interrupt; the OTG poll stays as the fallback after 3 silent frames. Triage: `vblank irq` (framebuffer, `RDNA3,FBStats` virq_* / latch_*), `display irq` (core, `debug.rdna3_dispirq` / `RDNA3,DisplayIrq`), the present queue's `flip done from the pflip interrupt` rows (`swaps_pq_irq*_h<N>`).
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `display irq`: `NO MSI handler` / framebuffer `why 2` | `rdna3msi=0`, or the MSI registration failed (`MSI: cannot register`) | boot-args; the `MSI:` log lines. The poll delivered: nothing broken, nothing measured |
+| `vblank irq`: `NOT registered ... 0xe00002c7` | a core older than N42 (stale `RDNA3Accel.kext`: STALE KEXTS row) or `rdna3vblirq=0` in the core only | `rdna3vm approve`, the core's `display irq: rdna3vblirq=` line |
+| `display irq`: `VBLANK enabled on OTG n but NO interrupt reached the core` | the source does not raise (VSTARTUP_INT_TYPE / the OTG's interrupt routing differ from amdgpu's assumptions) or the IH drops client DCE | port check: `irq_service_dcn32.c` `vblank_int_entry`, `optc1_*` VSTARTUP setup; read `OTGn_OTG_GLOBAL_SYNC_STATUS` (EVENT_OCCURRED set? INT_STATUS?) in a register dump; leave `rdna3vblirq=1` (the poll covers it) |
+| `display irq`: interrupts reach the core, `vblank irq`: `SILENT` | the framebuffer's function is not called (registration lost after a mode set / wake, `why` in the row) | the `VBL: head n (...)` log lines: `vblank interrupt off (why ...)` |
+| `vblank irq`: `fell back to the OTG poll N time(s)` | interrupts stop for > 3 frames (display sleep and wake, a mode set, the head blanked) | compare the `VBL: head n: no vblank interrupt for ... us` lines with the mode-set / sleep lines; isolated fallbacks at those moments are fine |
+| `interrupt storm` line, `stormed=` mask set | a level source not cleared by the ack (CLEAR strobe semantics) | send the log; `debug.rdna3_vblirq=0` then `=1` re-arms it; check `dal_irq_service_ack_generic` vs the register's CLEAR bit |
+| `flip done from the pflip interrupt` absent, `the pflip interrupt is live but none of the N latch(es) was ended by it` | HUBP flip interrupt not raised (SURFACE_FLIP_INT_MASK set but no IV) or routed to another HUBP index (ODM, pipe != OTG) | `debug.rdna3_dispirq` pflip count per head; the head's `pipe=` against the HUBP that flips |
+| picture smooth with `rdna3vblirq=0`, not with 1 (or the reverse) | the A/B's answer | send both reports; the `vblank irq` latency (avg / max us) and `virq_dup` say how the deliveries differ |
+| all rows INFO, counts growing with the frames | pass | `vblirq <date> vm` into `docs/status/hw-verified.txt`, regenerate |
 
 ### Step `hotplug` (`rdna3hotplug=1`): hotplug to the framebuffer
 

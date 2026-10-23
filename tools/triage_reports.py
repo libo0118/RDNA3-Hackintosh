@@ -131,7 +131,7 @@ ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_a
 
 # fb/Makefile's FB_SRC_HASH inputs and agdc/Makefile's AGDC_SRC_HASH inputs
 FB_HASH_FILES = ("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h",
-                 "common/rdna3_fb_policy.h")
+                 "common/rdna3_fb_policy.h", "common/rdna3_bootargs.h", "common/rdna3_vbl_irq.h")
 AGDC_HASH_FILES = ("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/AppleGraphicsDeviceControl_re.h",
                    "agdc/Info.plist")
 
@@ -891,7 +891,8 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"_gen_evictpresent|_gen_landed|_gennotjudged|_gen_resets|"
                        r"_pq_(?:prog|queued|replaced|joined|busy|refused|latched|latchus|latchmax|next|timeout|unknown|"
                        r"dropped|dropmode|early|wait|waitus|waitmax|waittimeout|inplace|inline|polled|iop|"
-                       r"foreigntimeout|giveup|iopdrop|fbwaitto|fbwaitfast|freedinflight|home))?_h\d|"
+                       r"foreigntimeout|giveup|iopdrop|fbwaitto|fbwaitfast|freedinflight|home|"
+                       r"irqdone|irqlatus|irqlatmax|irqlive|fbwaitv1))?_h\d|"
                        r"swaps_pq_iopunwritten|swaps_pq_donemax|swap_async|iop_queue|iop_wrote|present_init_failed|"
                        r"perfstats|perf_(?:writes|nocore|nokey|dictfail|setfail)|"
                        r"swaps_gen_(?:aperture|apcached|cf|cfnostamp|evicted|freed|resets)|swap_gen|flipbuf_present|cf_gennewer_h\d|"
@@ -2178,7 +2179,9 @@ def latch_lines(path, txt, args=""):
 PQ_KEYS = ("prog", "queued", "replaced", "joined", "busy", "refused", "latched", "latchus", "latchmax", "next",
            "timeout", "unknown", "dropped", "dropmode", "early", "wait", "waitus", "waitmax", "waittimeout", "inplace",
            "inline", "polled", "iop", "foreigntimeout", "giveup", "iopdrop", "fbwaitto", "fbwaitfast", "freedinflight",
-           "home")
+           "home",
+           # DRIVER-PLAN N42: latches ended by the head's pflip interrupt, its latency, live, a v1-only framebuffer
+           "irqdone", "irqlatus", "irqlatmax", "irqlive", "fbwaitv1")
 # Busy answers per present programmed (at once or at a latch) above which a head reads as stuck behind flips that
 # do not latch (another path's, a blanked head): healthy queues see Busy only when an IOP / home flip interleaves
 PQ_BUSY_SHARE = 0.25
@@ -2291,6 +2294,25 @@ def present_verdict(c, current=False, args=""):
             out.append(("INFO", "head %s: rdna3FlipLatchWait answered %d time(s) at once without a latch (the "
                                 "framebuffer stopping, no latch lock, its state unreadable): the worker slept 1 ms "
                                 "instead" % (h, v("fbwaitfast"))))
+        # DRIVER-PLAN N42: flip done from the HUBP's flip interrupt (amdgpu's page-flip event semantics)
+        if v("fbwaitv1"):
+            out.append(("INFO", "head %s: the framebuffer answers only the version 1 latch wait (older than N42): "
+                                "no flip-done interrupt information" % h))
+        elif g("irqlive") is not None:
+            idone = v("irqdone")
+            if v("irqlive") and lat and not idone:
+                out.append(("WARN", "head %s: the pflip interrupt is live but none of the %d latch(es) was ended by "
+                                    "it - the HUBP's flip interrupt does not reach the framebuffer (the core's "
+                                    "debug.rdna3_dispirq pflip count says whether it reaches the core)" % (h, lat)))
+            elif idone:
+                out.append(("INFO", "head %s: flip done from the pflip interrupt: %d of %d latch(es) (avg %d us, max "
+                                    "%d us from the interrupt to the wait waking)%s" % (
+                                        h, idone, lat, v("irqlatus") // idone, v("irqlatmax"),
+                                        "" if v("irqlive") else "; the interrupt was OFF at the last wait")))
+            else:
+                out.append(("INFO", "head %s: the pflip interrupt %s: latches seen by the vblank / poll looks" % (
+                    h, "live, no latch yet" if v("irqlive") else "not live (rdna3vblirq=0, no MSI, a storm, or an "
+                                                                 "older core)")))
         if v("dropmode"):
             out.append(("INFO", "head %s: %d queued present(s) dropped at a display mode change" % (h, v("dropmode"))))
         if v("iopdrop"):
@@ -2967,6 +2989,66 @@ def _fb_wake_row(name, sw, g):
                 g("wake_off"), sw.get("fbwake", 0), ": " + "; ".join(why) if why else ""))
 
 
+# DRIVER-PLAN N42: the VBL from the DCN vblank interrupt, the flip done from the pflip interrupt (RDNA3,FBStats virq_*)
+FB_N42_WHY = {0: "as asked", 1: "debug.rdna3_vblirq=0", 2: "no MSI handler (rdna3msi=1?)", 3: "cut after a storm",
+              4: "the enable bit did not read back", 5: "the head has no OTG / HUBP"}
+FB_N42_STATS = ("virq_reg", "virq_reg_ret", "virq_reg_tries", "virq_live", "virq_pflip_live", "virq_why", "virq_irqs",
+                "virq_delivered", "virq_dup", "virq_fallback", "virq_fallback_runs", "virq_lat_avg_us",
+                "virq_lat_max_us", "virq_pflips", "latch_waits", "latch_timeouts", "latch_irq_woke",
+                "pflip_lat_avg_us", "pflip_lat_max_us", "core_vblank", "core_pflip", "core_storms")
+
+
+def _fb_vblirq_rows(name, sw, st, g, dcn):
+    """the 'vblank irq' row of one framebuffer (DRIVER-PLAN N42): WARN when the interrupt path is on but not
+    registered, off, silent or fell back to the poll; INFO with the counts and the latencies otherwise"""
+    if not dcn:
+        return []
+    if "virq_live" not in st:
+        return [("WARN", "vblank irq", "%s: RDNA3,FBStats has no virq_* counters (a framebuffer older than DRIVER-PLAN "
+                 "N42): the VBL came from the OTG poll" % name)]
+    miss = [k for k in FB_N42_STATS if k not in st]
+    out = []
+    if miss:
+        out.append(("WARN", "vblank irq", "%s: RDNA3,FBStats MISSING %s (unknown, not 0)" % (name, ",".join(miss))))
+    if not sw.get("vblirq", 1):
+        out.append(("INFO", "vblank irq", "%s: rdna3vblirq=0: the OTG poll alone (the A/B's off side), %d VBL(s)" % (
+            name, g("vbl_delivered"))))
+        return out
+    pfl = "pflip interrupts %d, latch waits %d (%d ended by the pflip interrupt: avg %d us, max %d us; %d timed " \
+          "out)" % (g("virq_pflips"), g("latch_waits"), g("latch_irq_woke"), g("pflip_lat_avg_us"),
+                    g("pflip_lat_max_us"), g("latch_timeouts"))
+    if not g("virq_reg"):
+        ret = g("virq_reg_ret") & 0xffffffff
+        out.append(("WARN", "vblank irq", "%s: rdna3vblirq=1 but NOT registered with the core (rdna3DisplayIrq answered "
+                    "0x%x after %d tries: %s): the OTG poll delivered" % (
+                        name, ret, g("virq_reg_tries"),
+                        "an older core or rdna3vblirq=0 there" if ret == 0xe00002c7 else
+                        "no MSI handler or no head yet (rdna3msi=1?)" if ret == 0xe00002d8 else "refused")))
+        return out
+    if not g("virq_live"):
+        out.append(("WARN", "vblank irq", "%s: registered but the vblank interrupt is OFF (why %d: %s): the OTG poll "
+                    "delivered; %s" % (name, g("virq_why"), FB_N42_WHY.get(g("virq_why"), "?"), pfl)))
+        return out
+    if not g("virq_irqs"):
+        out.append(("WARN", "vblank irq", "%s: the vblank interrupt is on but SILENT: none reached the framebuffer (the "
+                    "core counted %d), the OTG poll delivered %d VBL(s) as the fallback" % (
+                        name, g("core_vblank"), g("virq_fallback"))))
+        return out
+    why = []
+    if g("virq_fallback_runs"):
+        why.append("fell back to the OTG poll %d time(s), %d VBL(s) by it" % (g("virq_fallback_runs"),
+                                                                             g("virq_fallback")))
+    if g("core_storms"):
+        why.append("%d storm(s) cut" % g("core_storms"))
+    if g("virq_pflip_live") and g("latch_waits") > g("latch_timeouts") and not g("latch_irq_woke"):
+        why.append("the pflip interrupt is live but no latch wait was ended by it")
+    out.append(("WARN" if why else "INFO", "vblank irq", "%s: VBL from the vblank interrupt: %d interrupt(s), %d VBL(s) "
+                "delivered by it (interrupt -> delivery avg %d us, max %d us), %d same-vblank skip(s); %s%s" % (
+                    name, g("virq_irqs"), g("virq_delivered"), g("virq_lat_avg_us"), g("virq_lat_max_us"),
+                    g("virq_dup"), pfl, ": " + "; ".join(why) if why else "")))
+    return out
+
+
 def fb_n40_lines(path, txt="", args=""):
     """[(level, label, text)]: the N40 switches and counters of every framebuffer and the AGDC vendor answer"""
     fbtxt = read_tar_member(path, "12-ioreg-fb.txt")
@@ -3039,17 +3121,89 @@ def fb_n40_lines(path, txt="", args=""):
             vwhy.append("NO VBL delivered on a DCN head")
         if g("vbl_call_failed"):
             vwhy.append("NO VBL thread call")
-        out.append(("WARN" if vwhy else "INFO", "VBL", "%s: source %s (no hardware vblank "
-                    "interrupt yet), delivered %d, 250 us re-looks %d, delivered with the counter unmoved %d, "
+        out.append(("WARN" if vwhy else "INFO", "VBL", "%s: source %s (%s), delivered %d, 250 us re-looks %d, "
+                    "delivered with the counter unmoved %d, "
                     "overlapping runs %d (rdna3vblonce %d%s)%s" % (
-                        name, src, g("vbl_delivered"), g("vbl_polls"), g("vbl_still"), overlap, sw.get("vblonce", 0),
+                        name, src, "no hardware vblank interrupt yet" if "virq_live" not in st else
+                        "the vblank interrupt: the 'vblank irq' row", g("vbl_delivered"), g("vbl_polls"),
+                        g("vbl_still"), overlap, sw.get("vblonce", 0),
                         "; overlaps with vblonce=0: the switch's case" if overlap and not sw.get("vblonce") else "",
                         ": " + "; ".join(vwhy) if vwhy else "")))
+        out.extend(_fb_vblirq_rows(name, sw, st, g, dcn))
         out.append(("INFO", "detailed timings", "%s: validateDetailedTiming %d (%d one of our modes, %d refused), "
                     "setDetailedTimings %d, ids mapped %d (rdna3fbdtmap %d)" % (
                         name, g("dt_validate"), g("dt_matched"), g("dt_refused"), g("dt_sets"), g("dt_mapped"),
                         sw.get("fbdtmap", 0))))
     out.extend(agdc_vendor_lines(path, txt, args))
+    return out
+
+
+# DRIVER-PLAN N42: the core's display interrupts (debug.rdna3_dispirq: the tests file, the archive's
+# 18-sysctl-dispirq.txt, or the RDNA3,DisplayIrq property in 11-ioreg-props.txt)
+DISPIRQ_RE = re.compile(r"(?:debug\.rdna3_dispirq: |\"RDNA3,DisplayIrq\" = \")(vblirq=[^\n\"]*)")
+DISPIRQ_WHY = {0: "as asked", 1: "debug.rdna3_vblirq=0", 2: "no MSI handler", 3: "cut after a storm",
+               4: "the enable bit did not read back", 5: "the head has no OTG / HUBP"}
+
+
+def _dispirq_num(v):
+    try:
+        return int(v, 16) if v.lower().startswith("0x") else int(v)
+    except ValueError:
+        return None
+
+
+def dispirq_lines(path, txt="", args=""):
+    """[(level, label, text)] of the core's vblank / pflip / HPD interrupts (DRIVER-PLAN N42): WARN when the path is
+    on but has no MSI handler, was switched off, stormed, failed to enable, or a registered head's sources stay
+    silent; INFO with the per-head counts. Missing data is a WARN row."""
+    src = (txt or "")
+    if path and os.path.exists(path):
+        src += "\n" + read_tar_member(path, "18-sysctl-dispirq.txt") + "\n" + read_tar_member(path, "11-ioreg-props.txt")
+    found = DISPIRQ_RE.findall(src)
+    if not found:
+        return [("WARN", "display irq", "no debug.rdna3_dispirq / RDNA3,DisplayIrq: a core older than DRIVER-PLAN N42, "
+                 "or not collected - whether the vblank / pflip interrupts ran is not known")]
+    parts = found[-1].split(" | ")
+    g = dict(re.findall(r"(\w+)=(\S+)", parts[0]))
+    n = lambda k: _dispirq_num(g.get(k, "0")) or 0
+    out = []
+    hpd = "HPD interrupts %d (%s)" % (n("hpd"), "acted on: rdna3hpdirq=1" if n("hpdirq") else
+                                      "counted only: rdna3hpdirq=0, the hotplug poll decides")
+    if not n("vblirq"):
+        return [("INFO", "display irq", "rdna3vblirq=0: no vblank / pflip source enabled, the framebuffers polled the "
+                 "OTG counter (the A/B's off side); " + hpd)]
+    why = []
+    if not n("msi"):
+        why.append("NO MSI handler (rdna3msi=1?): no display interrupt can arrive, the framebuffers polled")
+    if not n("on"):
+        why.append("debug.rdna3_vblirq was 0 when the report was taken (switched off at runtime)")
+    if g.get("stormed", "0x0/0x0/0x0") != "0x0/0x0/0x0":
+        why.append("sources CUT after a storm (VBLANK/PFLIP/VUPDATE instance masks %s)" % g.get("stormed"))
+    if n("regfails"):
+        why.append("%d enable(s) did not read back" % n("regfails"))
+    heads = []
+    for p in parts[1:]:
+        h = dict(re.findall(r"(\w+)=(\S+)", p.split(" ", 1)[1] if " " in p else ""))
+        hn = p.split(" ", 1)[0]
+        hv = lambda k: _dispirq_num(h.get(k, "0")) or 0
+        if not hv("reg"):
+            heads.append("%s not registered (vblank %d, pflip %d)" % (hn, hv("vblank"), hv("pflip")))
+            continue
+        want, en = hv("want"), hv("en")
+        if en != want:
+            why.append("%s: wanted 0x%x, enabled 0x%x (%s)" % (hn, want, en, DISPIRQ_WHY.get(hv("why"), "?")))
+        if (en & 1) and not hv("vblank"):
+            why.append("%s: VBLANK enabled on OTG %s but NO interrupt reached the core (the DCN source or its IH route "
+                       "is silent: the framebuffer's poll delivered)" % (hn, h.get("otg")))
+        heads.append("%s OTG %s HUBP %s: vblank %d, pflip %d, vupdate %d, storms %d" % (
+            hn, h.get("otg"), h.get("pipe"), hv("vblank"), hv("pflip"), hv("vupdate"), hv("storms")))
+    if not parts[1:]:
+        why.append("no framebuffer registered for the interrupts (an RDNA3Framebuffer older than N42, rdna3vblirq=0 "
+                   "in the framebuffer, or none started)")
+    out.append(("WARN" if why else "INFO", "display irq", "%s; total %d DCN IV(s), %d with no framebuffer, %d of an "
+                "instance DCN 3.2 lacks; %s%s" % (
+                    "; ".join(heads) if heads else "no head", n("total"), n("unrouted"), n("badinst"), hpd,
+                    ": " + "; ".join(why) if why else "")))
     return out
 
 
@@ -3636,6 +3790,8 @@ def summary(path, serial=None):
             out.append(("present: " + label, "%s %s" % (lv, t[:300])))
         for lv, label, t in fb_n40_lines(path, txt, args):
             out.append(("fb N40: " + label, "%s %s" % (lv, t[:300])))
+        for lv, label, t in dispirq_lines(path, txt, args):
+            out.append(("N42: " + label, "%s %s" % (lv, t[:300])))
         # DRIVER-PLAN N41 (ECC review): its WARN / FAIL rows, and MOOT when the page-off wait was not exercised
         for lv, label, t in n41_lines(path, args):
             if lv in ("WARN", "FAIL") or t.startswith("MOOT"):
@@ -3643,6 +3799,8 @@ def summary(path, serial=None):
     else:   # tests only: the AGDC vendor answer still comes from the tests file
         for lv, label, t in agdc_vendor_lines(path, txt, args):
             out.append(("fb N40: " + label, "%s %s" % (lv, t[:300])))
+        for lv, label, t in dispirq_lines(path, txt, args):
+            out.append(("N42: " + label, "%s %s" % (lv, t[:300])))
     out.append(("DMA/GFX jobs", "%d verified, %d wrong" % (len(re.findall(r"job results verified", txt)),
                                                          len(re.findall(r"job results WRONG", txt)))))
     sec = ""
@@ -3935,6 +4093,9 @@ def main():
             # DRIVER-PLAN N40: the framebuffer's A/B switches and counters, the AGDC vendor answer
             for lv, label, t in fb_n40_lines(p, ttxt, read_tar_member(p, "01-boot-args.txt")):
                 print("   %s fb N40, %s: %s" % (lv, label, t))
+            # DRIVER-PLAN N42: the core's vblank / pflip / HPD interrupts
+            for lv, label, t in dispirq_lines(p, ttxt):
+                print("   %s N42, %s: %s" % (lv, label, t))
         else:
             # tests only: the archive's CoreDisplay / ioreg logs are missing, the host log still answers
             targs = (re.search(r"^boot-args: (.*)$", ttxt, re.M) or [None, ""])[1]
@@ -3944,6 +4105,9 @@ def main():
             # the AGDC vendor answer is in the tests file (autoreport.sh's rdna3agdc grep)
             for lv, label, t in agdc_vendor_lines(p, ttxt, targs):
                 print("   %s fb N40, %s: %s" % (lv, label, t))
+            # DRIVER-PLAN N42: debug.rdna3_dispirq is in the tests file (autoreport.sh)
+            for lv, label, t in dispirq_lines(p, ttxt):
+                print("   %s N42, %s: %s" % (lv, label, t))
         # card run 2026-10-17b: the swap as a copy, and the per-frame trace
         for lv, t in swapcopy_verdict(a3_counters(ttxt) if ttxt else {}):
             print("   %s swap copy: %s" % (lv, t))
