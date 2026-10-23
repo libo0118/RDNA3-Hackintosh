@@ -35,6 +35,7 @@ CSRC   := ../common/amd_discovery.c ../common/amd_fw.c ../common/range_alloc.c \
 CXXSRC += src/RDNA3Hotplug.cpp
 CXXSRC += src/RDNA3DisplayPower.cpp
 CSRC   += ../hw/dchpd.c
+CSRC   += ../hw/dcirq.c
 CSRC   += ../hw/dcn32_gamma.c
 CSRC   += ../hw/dcn32_state.c
 CSRC   += ../hw/dcn32_dp.c

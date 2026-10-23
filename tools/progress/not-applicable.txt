@@ -103,7 +103,7 @@ amdgpu_userq_fence_(slab_init|slab_fini|alloc|free|release|cleanup|get_driver_na
 amdgpu_userq_(start|stop)_sched_for_enforce_isolation  process isolation / cleaner shader switched through Linux sysfs
 amdgpu_userq_(ensure_ev_fence|evict|evict_all|restore_all|restore_worker|validate_bos|validate_vm_bo|wait_for_signal)  eviction fences and the restore worker: this driver never evicts a BO (everything stays resident)
 .*_set_[a-z0-9_]*funcs|ih_v6_0_early_init  Linux IP-block function-table wiring
-(dcn|dce|dal|dmub|dccg|hubbub|hubp)[a-z0-9_]*_(construct|destruct|destroy)|dccg32_create|dmub_srv_create  Linux Display Core object constructors / destructors
+(dcn|dce|dal|dmub|dccg|hubbub|hubp)[a-z0-9_]*_(construct|destruct|destroy)|dccg32_create|dmub_srv_create|dal_irq_service_dcn32_create  Linux Display Core object constructors / destructors
 dsc_optc_config_log|log_vcp_x_y|dp_log_training_result|dcn32_auto_dpm_test_log|dce_aux_log_payload|mes_v11_0_get_(misc_)?op_string|psp_gfx_cmd_name  debug logging
 set_dp_phy_pattern_.*|dp_set_hw_test_pattern|disable_prbs_(mode|symbols)|program_pattern_symbols|optc1_set_test_pattern  DisplayPort compliance test patterns (certification equipment)
 enable_link_virtual  Linux virtual display connector

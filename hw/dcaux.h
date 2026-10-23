@@ -59,7 +59,9 @@ int  dcaux_hpd_sense(rdna3_dev *d, uint32_t n);
  * IH client DCE, src DCN_1_0__SRCID__DC_HPD1_INT with the pin in
  * src_data[0] (DCN_1_0__CTXID__DC_HPDn_INT = n, DP short pulses n + 6). */
 #define RD_IH_CLIENT_DCE      0x04
-#define RD_IH_SRC_DC_HPD1_INT 0x2a
+/* irqsrcs_dcn_1_0.h: DCN_1_0__SRCID__DC_HPD1_INT is 9 (DRIVER-PLAN N42:
+ * B7 had 0x2a, a DPP6 perfmon source, so no HPD IV was ever claimed) */
+#define RD_IH_SRC_DC_HPD1_INT 9
 #define RD_HPD_PINS           6     /* context ids; DCN 3.2 wires HPD1..5 */
 
 /* dc_interrupt_set(DC_IRQ_SOURCE_HPDn): polarity set to catch the next

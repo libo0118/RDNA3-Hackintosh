@@ -4480,6 +4480,7 @@ static void sim_doorbell32(void *ctx, uint32_t index, uint32_t v)
 #include "sim_display_dc.inc"
 #include "sim_display_hpo.inc"
 #include "sim_display_audio.inc"
+#include "sim_dc_irq.inc"
 #include "sim_display_pstate.inc"
 #include "sim_display_freesync.inc"
 
@@ -4494,6 +4495,8 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
         if (dw == OTG(regOTG0_OTG_CONTROL, n))
             v &= ~OTG0_OTG_CONTROL__OTG_CURRENT_MASTER_EN_STATE_MASK;
     if (sk_wr(dw, v))
+        return;
+    if (sq_wr(dw, v))   /* DRIVER-PLAN N42: the DCN interrupt sources */
         return;
     if (hpo_wr(dw, v))
         return;
@@ -4698,6 +4701,7 @@ static void sim_wr(void *ctx, uint64_t off, uint32_t v)
                 S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE, n)] = v;
                 S.reg[HUBP(regHUBPREQ0_DCSURF_SURFACE_EARLIEST_INUSE_HIGH, n)] =
                     S.reg[HUBP(regHUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH, n)];
+                sq_flip_event(n);   /* latched now: the HUBP flip interrupt */
             }
             return;
         }
@@ -5193,6 +5197,8 @@ static void dcn_tick(uint32_t ms)
         if (!(S.reg[OTG(regOTG0_OTG_CONTROL, o)] & OTG0_OTG_CONTROL__OTG_MASTER_EN_MASK))
             continue;
         *fc = (*fc + (ms + 15) / 16) & OTG0_OTG_STATUS_FRAME_COUNT__OTG_FRAME_COUNT_MASK;
+        if ((ms + 15) / 16)
+            sq_otg_event(o);   /* the frames' VSTARTUP / VUPDATE (one level IV at most) */
         if (!(S.reg[OTG(regOTG0_OTG_CRC_CNTL, o)] & OTG0_OTG_CRC_CNTL__OTG_CRC_EN_MASK))
             continue;
         for (uint32_t p = 0; p < RD_DCN_MAX_PIPES; p++) {
@@ -10760,6 +10766,8 @@ static void run(const char *fwdir)
                 S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 2)] = 0;
                 S.reg[HPDR(regHPD0_DC_HPD_INT_STATUS, 3)] = 0;
             }
+            /* DRIVER-PLAN N42: the vblank / vupdate / pflip sources through the IH */
+            test_dc_irq(&dev, &ih);
             ih60_disable(&dev, &ih);
             CHECK(!ih.enabled && !(S.reg[OSS_BASE0 + regIH_RB_CNTL] & IH_RB_CNTL__RB_ENABLE_MASK));
         }

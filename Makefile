@@ -11,6 +11,7 @@ BUILD   := build/host
 COMMON  := common/amd_discovery.c common/amd_fw.c common/range_alloc.c
 HW      := hw/rdna3_hw.c hw/psp13.c hw/smu13.c hw/gmc11.c hw/mmhub302.c hw/ih60.c hw/sdma60.c hw/gpuvm.c hw/gfx11.c hw/dcn32.c hw/doorbell.c hw/vbios.c hw/dcaux.c hw/edid.c hw/atom.c hw/dmub32.c hw/dcn32_mode.c hw/dcn32_clone.c hw/dcn32_modeset.c hw/dcn32_clk.c hw/gfx11_info.c hw/xfer.c hw/soc21_cg.c
 HW      += hw/dchpd.c
+HW      += hw/dcirq.c
 HW      += hw/dcn32_gamma.c
 HW      += hw/dcn32_state.c
 HW      += hw/dcn32_dp.c
@@ -43,7 +44,7 @@ $(BUILD)/test_fw: tests/test_fw.c $(COMMON) $(COMMON_H) | $(BUILD)
 $(BUILD)/amd_fw_dump: tools/amd_fw_dump.c $(COMMON) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(INC) -o $@ tools/amd_fw_dump.c $(COMMON)
 
-$(BUILD)/sim_navi32: tests/sim_navi32.c tests/sim_display_dc.inc tests/sim_display_hpo.inc tests/sim_display_audio.inc tests/sim_display_pstate.inc tests/sim_display_freesync.inc $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
+$(BUILD)/sim_navi32: tests/sim_navi32.c tests/sim_display_dc.inc tests/sim_display_hpo.inc tests/sim_display_audio.inc tests/sim_display_pstate.inc tests/sim_display_freesync.inc tests/sim_dc_irq.inc $(COMMON) $(HW) $(UAPI) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/sim_navi32.c $(COMMON) $(HW) $(UAPI)
 
 $(BUILD)/test_uapi: tests/test_uapi.c $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
@@ -64,6 +65,9 @@ $(BUILD)/test_swap_front: tests/test_swap_front.c common/rdna3_swap_front.h comm
 
 $(BUILD)/test_flip_latch: tests/test_flip_latch.c common/rdna3_flip_latch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_flip_latch.c
+# DRIVER-PLAN N42: IOGraphics' VBL from the vblank interrupt, the poll as fallback
+$(BUILD)/test_vbl_irq: tests/test_vbl_irq.c common/rdna3_vbl_irq.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_vbl_irq.c
 # DRIVER-PLAN N38: a head's presents without blocking WindowServer (the flip queue)
 $(BUILD)/test_flip_queue: tests/test_flip_queue.c common/rdna3_flip_queue.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_flip_queue.c
@@ -139,7 +143,7 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOB
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_flip_queue $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_mtl_allow $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_flip_queue $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_mtl_allow $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
@@ -153,6 +157,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	$(BUILD)/test_gamma_judge
 	$(BUILD)/test_swap_front
 	$(BUILD)/test_flip_latch
+	$(BUILD)/test_vbl_irq
 	$(BUILD)/test_flip_queue
 	$(BUILD)/test_fb_policy
 	$(BUILD)/test_swap_copy
