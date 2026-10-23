@@ -178,6 +178,14 @@ r = tr.n41_rows(dump(**dict(GOOD, surface_wait_starved=1, surface_wait_skipped=4
 check(any(lv == "WARN" and "budget ran out 1 time(s)" in t and "40 page-off" in t for lv, _, t in r), "budget WARN")
 r = tr.n41_rows(dump(**dict(GOOD, surface_wait_ghosts=2, surface_wait_aged=1)) + A3WS, CUR)
 check(any(lv == "INFO" and "2 pending mark(s) dropped for good" in t for lv, _, t in r), "ghosts INFO (%s)" % r)
+# N41 open item 4: a dropped surface's marks forgiven at its next mark are named in the eviction WARN
+r = tr.n41_rows(dump(**dict(GOOD, surface_wait_evicted=3, surface_wait_evict_kept=2)) + A3WS, CUR)
+check(any(lv == "WARN" and "3 surface(s) dropped from the full table" in t and "2 mark(s) of dropped surfaces "
+          "forgiven when they were marked again" in t for lv, _, t in r), "evict_kept in the eviction WARN (%s)" % r)
+nok = dict(GOOD)
+del nok["surface_wait_evict_kept"]
+r = tr.n41_rows(dump(**nok) + A3WS, CUR)
+check(any(lv == "WARN" and "surface_wait_evict_kept" in t for lv, _, t in r), "a missing evict_kept is named (%s)" % r)
 mootd = dict(GOOD, surface_wait_pending=0, surface_wait_ready=0, surface_wait_moot=7)
 CD_MOOT = CD_ON + "".join("WindowServer[148:9a2] NVMTL: surface wait (N41): pending mark of surface %d refused (errno 6, "
                           "Device not configured) - old order, asked again in 1 s (%d back-off(s))\n" % (i, i)

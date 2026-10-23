@@ -513,7 +513,9 @@ N41_SW_KEYS = ("surface_wait", "surface_wait_ms", "surface_wait_maxus", "surface
                "surface_wait_aged", "surface_wait_ghosts", "surface_wait_ws_pid", "surface_wait_mark_pid",
                "surface_wait_mark_uid",
                # ECC review round 3 of N41: the first display client is sticky while it lives
-               "surface_wait_ws_pid_refused")
+               "surface_wait_ws_pid_refused",
+               # N41 open item 4: the marks of a surface dropped from the full table, forgiven at its next mark
+               "surface_wait_evict_kept")
 N41_PARKED_BYTES_WARN = 256 << 20   # VRAM parked at the end of a run that says "parks hold VRAM others may need"
 N41_UNACCOUNTED_WARN = 64           # pending marks whose ready never came (more than one frame's surfaces in flight)
 
@@ -859,7 +861,9 @@ def n41_rows(sv, log, pluginlog="", cdlog=""):
                      "kernel's 'not a surface of the calling task' lines)" % g("surface_wait_notown")))
     if g("surface_wait_evicted", 0) or g("surface_wait_saturated", 0):
         rows.append(("WARN", "surface wait", "%d surface(s) dropped from the full table, %d mark(s) refused as saturated"
-                     % (g("surface_wait_evicted", 0), g("surface_wait_saturated", 0))))
+                     "; %d mark(s) of dropped surfaces forgiven when they were marked again (their late readies "
+                     "could not end a newer wait)" % (g("surface_wait_evicted", 0), g("surface_wait_saturated", 0),
+                                                       g("surface_wait_evict_kept", 0))))
     # WindowServer's plugin (24-log-coredisplay.txt): every reason it gave
     if g("surface_wait") and pl["decision"] and pl["old"]:
         rows.append(("WARN", "surface wait", "WindowServer's plugin keeps the old order: %s" % (

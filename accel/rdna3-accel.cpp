@@ -1590,24 +1590,28 @@ static unsigned long long rd3VmParkTrim(bool pressure, const char *why)
     }
     /* 1+2: the parks in park order (oldest first), a page at a time, and who holds each (no lock: the core takes
      * its own). Held / unknown ones leave the page (rd3_vp_keep_releasable, ECC review round 3): releasable parks
-     * behind kVmTrimMax held ones are found, up to kVmTrimPages pages. A page skips the parks earlier pages
-     * listed by count: parks gone meanwhile may let one be skipped (the next trim sees it), a park listed twice
-     * is released once (step 4 checks its handle under the lock) */
+     * behind kVmTrimMax held ones are found, up to kVmTrimPages pages. A page resumes after the last park an
+     * earlier page listed, by its park time (rd3_vp_cursor; DRIVER-PLAN N41 open item 3: by count, a park
+     * unlinked between two pages let one be skipped until the next trim); a park relinked meanwhile is listed
+     * again and released once (step 4 checks its handle and time under the lock) */
     IOService *core = rd3AccelCore();
     const OSSymbol *sym = core ? OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_REFS) : nullptr;
     unsigned n = 0, listed = 0, looked = 0, pages = 0, held = 0, unknown = 0;
     IOReturn qerr = kIOReturnSuccess;
+    struct rd3_vp_cursor cur = { 0, 0, 0 };
     for (bool more = true; more && n < kVmTrimMax && pages < kVmTrimPages; pages++) {
         const unsigned base = n;
-        unsigned idx = 0;
+        const struct rd3_vp_cursor prev = cur;
+        unsigned ties = 0;
         more = false;
         listed = 0;
         IOLockLock(l);
         for (RD3VidMemory *m = gVmParkHead; m; m = m->fParkNext, listed++) {
-            if (!rd3_vp_valid(&m->fPark) || idx++ < looked) continue;
+            if (!rd3_vp_valid(&m->fPark) || rd3_vp_cursor_seen(&prev, m->fParkSince, &ties)) continue;
             if (n >= kVmTrimMax) { more = true; continue; }
             vc[n].since = m->fParkSince; vc[n].bytes = m->fPark.bytes; vc[n].refs = 0;
             vc[n].obj = m; vc[n].handle = m->fPark.handle;
+            rd3_vp_cursor_note(&cur, m->fParkSince);
             n++;
         }
         IOLockUnlock(l);
@@ -2796,7 +2800,8 @@ static unsigned rd3AccelSurfGpuMark(unsigned id, bool pending, task_t task)
         const SInt64 n = OSAddAtomic64(1, &gCntSurfMarkEvict);
         if (rd3_log_due((uint64_t)n, 4, 1023))
             ALOG("surface wait: %u surfaces pending at once -- surface %u's marks dropped for surface %u (its "
-                 "page-offs stop waiting; surface_wait_evicted %lld)", RD3_SP_SLOTS, ev, id, (long long)n + 1);
+                 "page-offs stop waiting; its late readies are remembered, forgiven if it is marked again: "
+                 "surface_wait_evict_kept; surface_wait_evicted %lld)", RD3_SP_SLOTS, ev, id, (long long)n + 1);
         return 0;
     }
     case RD3_SPM_SATURATED: {
@@ -2893,7 +2898,7 @@ static unsigned rd3AccelSurfWaitTrFlags(int w)
     return w == 1 ? RD3_TRPO_WAITED : w == 2 ? RD3_TRPO_TIMEOUT : w == 3 ? RD3_TRPO_CLEARED
          : w == 4 ? RD3_TRPO_SKIPPED : 0u;
 }
-/* the table's own statistics (arg2: 0 aged, 1 ghosts dropped, 2 starvations) */
+/* the table's own statistics (arg2: 0 aged, 1 ghosts dropped, 2 starvations, 3 evicted marks forgiven) */
 static int rd3AccelSurfStatSysctl SYSCTL_HANDLER_ARGS
 {
     (void)arg1;
@@ -2901,7 +2906,8 @@ static int rd3AccelSurfStatSysctl SYSCTL_HANDLER_ARGS
     IOLock *l = gSurfPendLock;
     if (l) {
         IOLockLock(l);
-        v = arg2 == 0 ? gSurfPend.aged : arg2 == 1 ? gSurfPend.ghosts_dropped : gSurfPend.starvations;
+        v = arg2 == 0 ? gSurfPend.aged : arg2 == 1 ? gSurfPend.ghosts_dropped : arg2 == 2 ? gSurfPend.starvations
+                                                                                : gSurfPend.evict_kept;
         IOLockUnlock(l);
     }
     return sysctl_handle_quad(oidp, (long long *)&v, 0, req);
@@ -2967,6 +2973,8 @@ SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_surface_wait_ghosts, CTLTYPE_QUAD | CTL
             rd3AccelSurfStatSysctl, "Q", "N41 review round 2: pending marks a timeout dropped for good (a lost ready's ghost)");
 SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_surface_wait_starved, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 2,
             rd3AccelSurfStatSysctl, "Q", "N41 security review: times the timeout budget ran out (waits skipped until a ready)");
+SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_surface_wait_evict_kept, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 3,
+            rd3AccelSurfStatSysctl, "Q", "N41 item 4: marks of a surface dropped from the full table, forgiven when it was marked again");
 RD3ACCEL_CNT(rdna3accel_surface_wait_waits,     gCntSurfWaits,     "N41: page-offs that waited for a pending GPU write and saw it done");
 RD3ACCEL_CNT(rdna3accel_surface_wait_timeouts,  gCntSurfTimeouts,  "N41: page-offs whose write was still pending at the bound");
 RD3ACCEL_CNT(rdna3accel_surface_wait_cleared,   gCntSurfCleared,   "N41: page-offs whose wait was cleared under them (another timeout, a full table, off)");
@@ -3034,6 +3042,7 @@ static void rd3AccelInstallSysctlPark(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_mark_pid); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_mark_uid);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_aged); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_ghosts);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_starved);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_evict_kept);
     sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_noimport); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_trim_pressure);
     sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_trim_cap); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_trimmed);
     sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_trimmed_bytes); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_trim_held);

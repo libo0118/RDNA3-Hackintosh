@@ -385,6 +385,47 @@ static void display_client_sticky(void)
     CHECK(rd3_sp_display_client(-5, 300, 1) == RD3_SPDC_TAKE);       /* a bogus record is never sticky */
 }
 
+/* DRIVER-PLAN N41 open item 4: a surface dropped from the full table keeps its marks in the ring. Its late
+ * readies while it holds no slot take them; marked again first, the rest are the new slot's forgiven marks, so
+ * a late ready of a dropped mark never ends the newer write's wait (before: READY at the first late ready) */
+static void evicted_marks_kept(void)
+{
+    struct rd3_sp t;
+    uint32_t ev = 0;
+    memset(&t, 0, sizeof t);
+    for (uint32_t i = 1; i <= RD3_SP_SLOTS; i++) CHECK(rd3_sp_mark(&t, i, 1, i, &ev) == RD3_SPM_PENDING);
+    CHECK(rd3_sp_mark(&t, 1, 1, 70, &ev) == RD3_SPM_PENDING && rd3_sp_pending(&t, 1) == 2);   /* two writes on 1 */
+    CHECK(rd3_sp_mark(&t, 1000, 1, 100, &ev) == RD3_SPM_EVICTED && ev == 1);                /* 1 dropped: 2 marks */
+    CHECK(rd3_sp_mark(&t, 1, 0, 2 * MS, 0) == RD3_SPM_LATE);                               /* one late ready: 1 left */
+    CHECK(rd3_sp_mark(&t, 1, 1, 3 * MS, &ev) == RD3_SPM_EVICTED && ev == 2);                /* a newer write on 1 */
+    CHECK(rd3_sp_pending(&t, 1) == 1 && rd3_sp_forgiven(&t, 1) == 1 && t.evict_kept == 1);
+    CHECK(rd3_sp_mark(&t, 1, 0, 4 * MS, 0) == RD3_SPM_LATE && rd3_sp_pending(&t, 1) == 1);  /* the dropped one's */
+    CHECK(rd3_sp_mark(&t, 1, 0, 5 * MS, 0) == RD3_SPM_READY && rd3_sp_pending(&t, 1) == 0); /* the newer write's */
+    /* a forgiven-only slot reused keeps its marks the same way: 2's two marks (a timeout forgave one) */
+    memset(&t, 0, sizeof t);
+    for (uint32_t i = 1; i <= RD3_SP_SLOTS; i++) (void)rd3_sp_mark(&t, i, 1, i, 0);
+    CHECK(rd3_sp_wait_step(&t, 40, 100 * MS, 100 * MS, 0, 0) == RD3_SPW_TIMEOUT && rd3_sp_forgiven(&t, 40) == 1);
+    CHECK(rd3_sp_mark(&t, 900, 1, 101 * MS, &ev) == RD3_SPM_PENDING && ev == 0 && rd3_sp_forgiven(&t, 40) == 0);
+    CHECK(rd3_sp_mark(&t, 900, 0, 102 * MS, 0) == RD3_SPM_READY);                          /* 900's slot free again */
+    CHECK(rd3_sp_mark(&t, 40, 1, 103 * MS, &ev) == RD3_SPM_PENDING && rd3_sp_forgiven(&t, 40) == 1);
+    CHECK(rd3_sp_mark(&t, 40, 0, 104 * MS, 0) == RD3_SPM_LATE && rd3_sp_pending(&t, 40) == 1);
+    /* remembered marks age out like forgiven ones: a re-mark after RD3_SP_FORGIVE_MS starts clean */
+    memset(&t, 0, sizeof t);
+    for (uint32_t i = 1; i <= RD3_SP_SLOTS; i++) (void)rd3_sp_mark(&t, i, 1, i, 0);
+    CHECK(rd3_sp_mark(&t, 1000, 1, 1 * MS, &ev) == RD3_SPM_EVICTED && ev == 1);
+    const uint64_t later = (RD3_SP_FORGIVE_MS + 2) * MS;
+    CHECK(rd3_sp_mark(&t, 1, 1, later, &ev) == RD3_SPM_EVICTED && rd3_sp_forgiven(&t, 1) == 0 && t.aged == 1);
+    CHECK(rd3_sp_mark(&t, 1, 0, later + MS, 0) == RD3_SPM_READY);
+    /* a late ready after the ageing finds nothing: LATE, nothing remembered; the switch-off forgets the ring */
+    memset(&t, 0, sizeof t);
+    for (uint32_t i = 1; i <= RD3_SP_SLOTS; i++) (void)rd3_sp_mark(&t, i, 1, i, 0);
+    CHECK(rd3_sp_mark(&t, 1000, 1, 1 * MS, &ev) == RD3_SPM_EVICTED && ev == 1);
+    CHECK(rd3_sp_mark(&t, 1, 0, later, 0) == RD3_SPM_LATE && t.aged == 1 && !rd3_sp_evict_find(&t, 1));
+    CHECK(rd3_sp_mark(&t, 1001, 1, later, &ev) == RD3_SPM_EVICTED && ev == 2 && rd3_sp_evict_find(&t, 2));
+    (void)rd3_sp_clear(&t);
+    CHECK(!rd3_sp_evict_find(&t, 2));
+}
+
 int main(void)
 {
     marks();
@@ -395,6 +436,7 @@ int main(void)
     late_after_timeout();
     cleared_waiters();
     forgiven_evicted_first();
+    evicted_marks_kept();
     lost_ready_bounded();
     forgiven_aged();
     timeout_budget();
