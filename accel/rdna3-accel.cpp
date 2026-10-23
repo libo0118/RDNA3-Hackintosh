@@ -278,6 +278,7 @@ static int gPresInitFailed;
 static IOLock *volatile gPresLock;
 static bool rd3AccelPresentInit(void);
 static void rd3AccelPresentStop(void);
+static void rd3AccelIopStop(void);
 static void rd3AccelPresentReuseRes(IOAccelResource2 *res, unsigned what);
 static void rd3AccelPresentForgetAll(const char *why);
 static bool rd3AccelPresentIopBusy(const void *pipe);
@@ -1257,6 +1258,7 @@ public:
         rd3AccelPerfStop();
         rd3AccelPresentStop();   /* N38: workers stopped, queued presents completed, thread calls freed */
         IOGraphicsAccelerator2::stop(provider);
+        rd3AccelIopStop();   /* N38 (ECC review round 2): no IOP transaction comes any more */
     }
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
 };
@@ -3829,6 +3831,48 @@ static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSu
     thread_call_enter(e->call);
     return true;
 }
+/* an async IOP flip cancelled before it ran (rd3AccelIopStop): the surface reference it held given back */
+static unsigned rd3AccelIopAsyncCancelled(RD3IopAsync *e)
+{
+    IOSurface *s = e->s;
+    e->s = nullptr;
+    if (s) ((OSObject *)s)->release();
+    __atomic_store_n(&e->busy, 0, __ATOMIC_RELEASE);
+    return 1;
+}
+/* the accelerator's stop, after the family's (no IOP transaction comes any more): an async IOP flip still
+ * pending is cancelled (its surface reference given back; its pipe is not signalled, the family has stopped),
+ * one running is waited for, the thread calls freed; the scanned surfaces' records (gIopFlipFront /
+ * gIopFlipPrev) dropped under gPresLock, their references after it. ECC review round 2 of N38: neither was
+ * released at the stop (a leak at unload only) */
+static void rd3AccelIopStop(void)
+{
+    unsigned cancelled = 0, released = 0;
+    for (unsigned h = 0; h < kRd3MaxFB; h++) {
+        RD3IopAsync *e = &gIopAs[h];
+        struct thread_call *c = e->call;
+        if (!c) continue;
+        while (thread_call_cancel_wait(c)) cancelled += rd3AccelIopAsyncCancelled(e);
+        while (!thread_call_free(c))
+            if (thread_call_cancel_wait(c)) cancelled += rd3AccelIopAsyncCancelled(e);
+        e->call = nullptr;
+    }
+    IOSurface *drop[2 * kRd3MaxFB];
+    unsigned nd = 0;
+    IOLock *l = gPresLock;
+    if (l) IOLockLock(l);
+    for (unsigned h = 0; h < kRd3MaxFB; h++) {
+        if (gIopFlipFront[h]) drop[nd++] = gIopFlipFront[h];
+        if (gIopFlipPrev[h]) drop[nd++] = gIopFlipPrev[h];
+        gIopFlipFront[h] = gIopFlipPrev[h] = nullptr;
+        gIopFlipped[h] = false;
+    }
+    if (l) IOLockUnlock(l);
+    for (unsigned i = 0; i < nd; i++, released++) ((OSObject *)drop[i])->release();
+    if (cancelled || released)
+        ALOG("iop: stop: %u async flip(s) still pending cancelled, %u reference(s) of scanned IOSurfaces released",
+             cancelled, released);
+}
 static bool rd3AccelPresentIop(unsigned head, IOService *fb, void *pipe, IOSurface *s,
                                const struct RD3KFlipRequest *f, RD3VidMemory *vm);
 /* the IOP zero-copy flip's wait for WindowServer's pending GPU write (N41), counted apart from the page-offs'
@@ -4539,6 +4583,18 @@ static void rd3AccelLatchForgetHeads(const char *why)
             ALOG("swap latch: head %u: the record of phys 0x%llx forgotten (%s)", h, gLatch[h].phys, why);
         rd3AccelLatchForget(h, why);
     }
+}
+/* rd3AccelLatchForget outside the present queue's own paths (a flip refused, the SDMA breaker opening, a swap
+ * mode change): under gPresLock like rd3AccelPresentForgetAll, since the queue's worker rewrites the same record
+ * (rd3AccelLatchProgrammed) and a forget between its reads and writes left a half-forgotten record behind - only
+ * counter and log noise, but noise in the data the card runs are read from (ECC review round 2 of N38). The
+ * caller holds no gPresLock (the order is the family's lock, then gPresLock) and no spinlock */
+static void rd3AccelLatchForgetPres(unsigned head, const char *why)
+{
+    IOLock *l = gPresReady ? gPresLock : nullptr;
+    if (l) IOLockLock(l);
+    rd3AccelLatchForget(head, why);
+    if (l) IOLockUnlock(l);
 }
 static void rd3AccelLatchForgetAll(const char *why)
 {
@@ -7667,7 +7723,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
                  head, phys, fw.why ? fw.why : "?", (unsigned)fw.ret, fw.flipResult,
                  copied ? "copied onto the framebuffer's scanout instead"
                         : "neither flipped nor copied, the panel keeps the last picture", (long long)k + 1);
-        rd3AccelLatchForget(head, "a flip refused");   /* the framebuffer's own scanout, not a recorded buffer */
+        rd3AccelLatchForgetPres(head, "a flip refused");   /* the framebuffer's own scanout, not a recorded buffer */
         tr.arg = copied ? RD3_TRS_FLIP_COPIED : RD3_TRS_FLIP_FAILED;
         /* a copy into home is no flip: the panel stays where it was (ECC review round 2) */
     }
@@ -8587,7 +8643,7 @@ static void rd3AccelScBrkEvent(enum rd3_sc_brk_ev ev, unsigned n, unsigned head,
         /* the swaps flip now: mode 0's records start empty, the front record too */
         for (unsigned h = 0; h < kRd3MaxFB; h++) {
             rd3AccelForgetShown(h);
-            rd3AccelLatchForget(h, "the SDMA breaker opened");
+            rd3AccelLatchForgetPres(h, "the SDMA breaker opened");
             gSwapEmptyRun[h] = 0;
             rd3_sc_front_set(&gSc[h].front, nullptr, 0);
         }
@@ -9526,7 +9582,7 @@ static int rd3AccelSetSwapMode(int v, const char *why)
         gSwapMode = v;
         for (unsigned h = 0; h < kRd3MaxFB; h++) {
             rd3AccelForgetShown(h);
-            rd3AccelLatchForget(h, "swap mode change");
+            rd3AccelLatchForgetPres(h, "swap mode change");
             gSwapEmptyRun[h] = 0;
             rd3_sc_front_set(&gSc[h].front, nullptr, 0);
             rd3AccelScStaleReset(h, "a swap mode change");
