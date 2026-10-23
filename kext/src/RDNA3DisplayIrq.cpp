@@ -433,13 +433,20 @@ void RDNA3Accel::displayIrqHeadBack(uint32_t head, const char *why)
     if (!d || head >= RD3K_MAX_HEADS)
         return;
     IOLockLock(d->lock);
-    const bool back = !d->down && (d->downHeads & (1u << head)) != 0;
+    /* the whole DCN marked down (no head came back from the restore): a mode set that succeeded programmed it, so
+     * the DCN is up again with only this head lit (review of 69a7efc: one monitor, restore failed, then a mode set) */
+    const bool wasAll = d->down != 0;
+    const bool back = wasAll || (d->downHeads & (1u << head)) != 0;
+    if (wasAll) {
+        d->down = 0;
+        d->downHeads = kDispIrqAllHeads;
+    }
     if (back)
         d->downHeads &= ~(1u << head);
     IOLockUnlock(d->lock);
     if (back)
-        LOG("display irq: head %u: %s lit it again after a wake / reset left it down: its sources are written again",
-            head, why);
+        LOG("display irq: head %u: %s lit it again after a wake / reset left %s down: its sources are written again",
+            head, why, wasAll ? "the whole display" : "it");
 }
 
 /* ------------------------- the framebuffer's call ------------------------- */
