@@ -2249,11 +2249,309 @@ APPROVE_MARKER_RE = re.compile(r"^(RDNA3\w+): running (\w+), installed (\w+)", r
 STALE_LINE_RE = re.compile(r"(RDNA3\w+): running (\w+), installed (\w+)")
 # the action first: result_checklist cuts a long row at the terminal's width
 STALE_KEXTS_HEAD = "old driver ran - run 'rdna3vm approve', then the step again"
+
+
+def approve_command(host_text):
+    """the command that gives Allow under the Mac model the run had: 'rdna3vm approve', or 'rdna3vm approve --step N'
+    when the run's host log shows an @smbios= token in its boot-args (plain approve runs the config's model, and
+    macOS may not keep an Allow across a model change). N is looked up in ladder-steps.txt by the step's tokens"""
+    ba = _host_boot_args(host_text)
+    m = re.search(r"(?:^|\s)@smbios=(\S+)", ba)
+    if not m:
+        return "rdna3vm approve"
+    toks = set(ba.split())
+    host_at = {t for t in toks if t.startswith("@")}
+    best, best_n = None, -1
+    try:
+        lines = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ladder-steps.txt"), errors="replace").read().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 2 or parts[0].startswith("#"):
+            continue
+        st = set(parts[1:])
+        if st <= toks and {t for t in st if t.startswith("@")} == host_at and len(st) > best_n:
+            best, best_n = parts[0], len(st)
+    return "rdna3vm approve --step %s" % (best or "<the step that ran with @smbios=%s>" % m.group(1))
+# ---- present mode (card run 2026-10-17d): WindowServer presents with the legacy page-flip
+# mode ("init_page_flip: page flip mode is on"), never IOPresentment transactions. What
+# differs from the NVIDIA setups that get transactions: IOGraphics sets IOFBIntegrated
+# when the card's PCI bus number is 0, GPUWrangler then logs "(IG)", and the Mac model
+# is a muxed laptop (CoreDisplay: isBDW=YES isMobile=YES). One INFO row each for every
+# run (rdna3vm steps play-macpro / play-rootport / play-desktop change them), WARN
+# where a value is missing or contradicts what the host asked for.
+GPUW_RE = re.compile(r"gpu (0x[0-9a-f]+) flags (0x[0-9a-f]+)(?: \(([^)]*)\))? vid\.did=(\S+) b:d:f=(\d+):(\d+):(\d+)")
+
+
+def _rdna3_tokens(args):
+    """the rdna3 boot-args of a boot-args string, as a set (what a host log and a report share; the host's own
+    @tokens, -v, debug= etc. are not compared)"""
+    return frozenset(t for t in (args or "").split() if t.lstrip("-").startswith("rdna3"))
+
+
+def _host_boot_args(text):
+    m = re.search(r"^boot-args: (.*)$", text, re.M)
+    return m.group(1) if m else ""
+
+
+def _host_request(text):
+    """(model, bus) a host log says rdna3vm asked for: model = "MacPro7,1" / "not asked" / None (no 'SMBIOS model:'
+    line), bus = "pcie0" / "rootport" / None (no 'GPU on:' line); the last line of each wins"""
+    m = re.findall(r"^\s*SMBIOS model: (not asked|[A-Za-z]+\d+,\d+)", text, re.M)
+    b = re.findall(r"^\s*GPU on: (\w+)", text, re.M)
+    return (m[-1] if m else None, b[-1] if b else None)
+
+
+def _read(path):
+    try:
+        return open(path, errors="replace").read()
+    except OSError:
+        return ""
+
+
+def host_log_for(path, args=""):
+    """(text, status, note, name): the host-*.log (tools/vm/rdna3vm) of the VM run a report belongs to. Matched by
+    CONTENT: the log's 'boot-args:' line against the report's boot-args (01-boot-args.txt, or the tests file's
+    'boot-args:' line), compared on their rdna3 tokens. Not by the clock stamps: the host's file name uses the host's
+    local time, the report's the guest's (QEMU's RTC is UTC), so they differ by the time zone.
+    status: "matched" (one log, or several that ask for the same), "ambiguous" (several logs carry these boot-args and
+    ask for different things: the newest is used), "unmatched" (no log has them, or the report has no boot-args: the
+    newest log by modification time, as the rest of the triage orders files; a guess), "none" (no host log)"""
+    d = os.path.dirname(os.path.abspath(path))
+    logs = sorted(glob.glob(os.path.join(d, "host-*.log")), key=lambda f: (os.path.getmtime(f), f))
+    if not logs:
+        return "", "none", "no host-*.log next to the report", ""
+    texts = {l: _read(l) for l in logs}
+    rt = _rdna3_tokens(args)
+    newest = logs[-1]
+    if not rt:
+        return texts[newest], "unmatched", "the report has no boot-args to match the host logs by", os.path.basename(newest)
+    cands = [l for l in logs if _rdna3_tokens(_host_boot_args(texts[l])) == rt]
+    if not cands:
+        return texts[newest], "unmatched", "none of the %d host log(s) has this report's rdna3 boot-args (%s)" % (
+            len(logs), " ".join(sorted(rt))[:120]), os.path.basename(newest)
+    pick = cands[-1]
+    if len(cands) > 1 and len({_host_request(texts[l]) for l in cands}) > 1:
+        return texts[pick], "ambiguous", "%d host logs carry this report's boot-args and ask for different things (%s)" % (
+            len(cands), ", ".join(os.path.basename(l) for l in cands)), os.path.basename(pick)
+    return texts[pick], "matched", "", os.path.basename(pick)
+
+
+def guest_pci_rows(host):
+    """[(level, text)]: the card in the guest's PCI bus ('info pci' at 8 and 40 s, host-*.log): its bus and whether the
+    BARs are mapped (an address of all ones = not assigned)"""
+    snaps = re.findall(r"== guest PCI bus \(QEMU 'info pci', (\d+) s after start\)\n(.*?)(?=\n== |\Z)", host, re.S)
+    if not snaps:
+        return [("WARN", "the host log has no 'guest PCI bus' (info pci) output: the VM ended before 8 s, or the QEMU "
+                         "monitor did not answer; the card's bus and BARs as the guest has them are unknown")]
+    out = []
+    for secs, blk in snaps:
+        parts = re.split(r"(?m)^\s*Bus\s+(\d+), device\s+(\d+), function (\d+):", blk)
+        card = [(parts[i], parts[i + 1], parts[i + 2], parts[i + 3]) for i in range(1, len(parts) - 3, 4)
+                if re.search(r"1002:747e", parts[i + 3], re.I)]
+        if not card:
+            out.append(("WARN", "%s s: the card (1002:747e) is not in the guest's PCI list%s" % (
+                secs, "" if blk.strip() else " (the list is empty: the monitor did not answer)")))
+            continue
+        for bus, dev, fn, body in card:
+            bars = re.findall(r"BAR([0-5]): .*? at (0x[0-9a-fA-F]+)", body)
+            mapped = [n for n, a in bars if int(a, 16) != 0xFFFFFFFFFFFFFFFF]
+            unmapped = [n for n, a in bars if int(a, 16) == 0xFFFFFFFFFFFFFFFF]
+            out.append(("WARN" if (unmapped or not mapped) else "INFO",
+                        "%s s: PCI bus %s, device %s, function %s; %s%s%s" % (
+                            secs, bus, dev, fn, "BAR%s mapped" % ",".join(mapped) if mapped else "no BAR mapped",
+                            "; NOT mapped: BAR" + ",".join(unmapped) if unmapped else "",
+                            "" if bars else " (no BAR lines)")))
+    return out
+
+
+def host_request_rows(host, status, note, name, bare=False):
+    """[(level, label, text)] about the host log itself: absent, guessed, ambiguous, or without the lines that say what
+    rdna3vm asked for (Mac model, card bus). Never silence: a request that is not known is a WARN"""
+    out = []
+    if status == "none":
+        out.append(("INFO" if bare else "WARN", "request unknown", "%s: %s" % (
+            note, "bare metal run, no VM host log expected" if bare else
+            "what rdna3vm asked for (Mac model, card bus) and where the card sat in the guest are unknown")))
+        return out
+    if status in ("unmatched", "ambiguous"):
+        out.append(("WARN", "host log not matched", "%s; %s is used as a guess (the newest), so the rows from it "
+                    "(asked model, card bus) may belong to another run" % (note, name)))
+    model, bus = _host_request(host)
+    for val, what, line in ((model, "Mac model", "'SMBIOS model:'"), (bus, "card bus", "'GPU on:'")):
+        if val is None:
+            out.append(("WARN", "request unknown", "%s has no %s line: the %s rdna3vm asked for is unknown (an rdna3vm "
+                        "older than the present-mode A/B, or the run ended before it was written)" % (name, line, what)))
+    return out
+
+
+def present_host_rows(host, status, note, name, bare=False):
+    """[(level, label, text)] from the host log alone (a TESTS-ONLY report, or no report at all): the asked model, the
+    asked bus and the card as the guest's PCI bus has it"""
+    out = host_request_rows(host, status, note, name, bare)
+    if status == "none":
+        return out
+    model, bus = _host_request(host)
+    if model:
+        out.append(("INFO", "asked model", "rdna3vm asked for no model: the OpenCore config is untouched" if model == "not asked"
+                    else "rdna3vm asked for %s" % model))
+    if bus:
+        out.append(("INFO", "asked bus", "rdna3vm put the card on %s%s" % (bus, " (PCI bus 1)" if bus == "rootport" else " (PCI bus 0)")))
+    for lv, t in guest_pci_rows(host):
+        out.append((lv, "guest PCI", t))
+    return out
+
+
+def _fb_blocks(fbtxt):
+    """[(OpenGLIndex, DependentIndex, Integrated)] of 12-ioreg-fb.txt, one per framebuffer (None = no such key)"""
+    out = []
+    for blk in re.split(r"(?m)^\+-o ", fbtxt)[1:]:
+        g = lambda k: (re.search(r'"%s" = (\w+)' % k, blk) or [None, None])[1]
+        out.append((g("IOFramebufferOpenGLIndex"), g("IOFBDependentIndex"), g("IOFBIntegrated")))
+    return out
+
+
+def present_mode_lines(path, txt="", args="", host=None):
+    """[(level, label, text)]: how the run presents and what could decide it (see above).
+    The report archive (12-ioreg-fb.txt, 20-log-rdna3.txt, 24-log-coredisplay.txt,
+    00-system.txt, 23-windowserver-crash.txt), the tests file text and the host log"""
+    args = args or (re.search(r"^boot-args: (.*)$", txt or "", re.M) or [None, ""])[1]
+    if host is None:
+        host, hstatus, hnote, hname = host_log_for(path, args)
+    else:
+        hstatus, hnote, hname = "matched", "", "the host log"
+    fbtxt, cd, klog, system, crash = (read_tar_member(path, n) for n in (
+        "12-ioreg-fb.txt", "24-log-coredisplay.txt", "20-log-rdna3.txt", "00-system.txt",
+        "23-windowserver-crash.txt"))
+    out = []
+    # a bare metal run has no VM host log (PLATFORM: ..., bare metal, ...)
+    bare = bool(re.search(r"^PLATFORM: .*, bare metal, ", txt or "", re.M))
+    # collect.sh wraps a log in "$ command" / "[exit N]": what is left is the log
+    cd_lines = [l for l in cd.splitlines() if l.strip() and not l.startswith(("$ ", "[exit"))]
+    # transactions the accelerator saw
+    ok = re.findall(r"debug\.rdna3accel_iop_ok: (\d+)", txt)
+    empty = re.findall(r"debug\.rdna3accel_iop_empty: (\d+)", txt)
+    planes = bool(ok) and int(ok[-1]) > 0
+    # the mode WindowServer's CoreDisplay chose
+    m = re.findall(r"init_page_flip: page flip mode is (\w+)", cd)
+    sets = len(re.findall(r"MPAccessSurfaceForDisplayDevice: Set up page flip mode", cd))
+    if m:
+        out.append(("INFO", "page flip mode", "init_page_flip: page flip mode is %s%s" % (
+            m[-1], "; 'Set up page flip mode' on a display %d time(s)" % sets if sets else "")))
+    elif cd_lines and planes:
+        out.append(("INFO", "page flip mode", "no 'init_page_flip' line in the CoreDisplay log, and planes arrive "
+                    "in transactions: not the page-flip mode"))
+    elif cd_lines:
+        out.append(("WARN", "page flip mode", "no 'init_page_flip' line in the %d-line CoreDisplay log "
+                    "(24-log-coredisplay.txt): the mode is not known" % len(cd_lines)))
+    else:
+        out.append(("WARN", "page flip mode", "24-log-coredisplay.txt is missing or empty: the present mode is not known"))
+    if ok and empty:
+        o, e = int(ok[-1]), int(empty[-1])
+        out.append(("INFO", "transactions", "iop_ok %d, iop_empty %d: %s" % (
+            o, e, "planes arrive in IOPresentment transactions" if o else
+            "plane-less IOPresentment transactions only" if e else
+            "no IOPresentment transactions at all")))
+    elif "rdna3accel=1" in args + txt:
+        out.append(("WARN", "transactions", "debug.rdna3accel_iop_ok / iop_empty are not in the tests file (an accelerator run)"))
+    else:
+        out.append(("INFO", "transactions", "no accelerator counters (rdna3accel is off in this run)"))
+    # IOGraphics' integrated flag and the two index properties, per framebuffer
+    fbs = _fb_blocks(fbtxt)
+    if not fbs:
+        out.append(("WARN", "integrated", "12-ioreg-fb.txt has no RDNA3Framebuffer: IOFBIntegrated is not known"))
+        out.append(("WARN", "fb index", "12-ioreg-fb.txt has no RDNA3Framebuffer: the index properties are not known"))
+    else:
+        yes = sum(1 for _, _, i in fbs if i == "Yes")
+        out.append(("INFO", "integrated", "IOFBIntegrated = Yes on %d of %d framebuffer(s)%s" % (
+            yes, len(fbs), "" if yes else " (not set: IOGraphics sees a discrete card)")))
+        ogl, dep = [f[0] for f in fbs], [f[1] for f in fbs]
+        text = "IOFramebufferOpenGLIndex %s, IOFBDependentIndex %s" % (
+            ",".join(x or "?" for x in ogl), ",".join(x or "?" for x in dep))
+        bad = [str(i) for i, (a, b) in enumerate(zip(ogl, dep)) if a is None or b is None or a != b]
+        # the state of card run 2026-10-17d (DRIVER-PLAN N39 open item 3) is INFO on every run since: a WARN that
+        # never goes away is noise. A different pattern, or the indices agreeing now, is news (a run's data shows
+        # the mismatch changed)
+        if not bad:
+            out.append(("INFO", "fb index", text + ": they agree" + (
+                " (card run 2026-10-17d had 0,1 against 1,0: this run differs, note it in DRIVER-PLAN N39 open item 3)"
+                if len(fbs) > 1 else "")))
+        elif (ogl, dep) == (["0", "1"], ["1", "0"]):
+            out.append(("INFO", "fb index", text + ": they disagree on framebuffer(s) %s, as in card run 2026-10-17d "
+                        "(unchanged; whether it matters is DRIVER-PLAN N39 open item 3)" % ",".join(bad)))
+        else:
+            out.append(("WARN", "fb index", text + ": they disagree on framebuffer(s) %s, and not as 0,1 / 1,0 of card run "
+                        "2026-10-17d: the mismatch CHANGED (DRIVER-PLAN N39 open item 3)" % ",".join(bad)))
+    # GPUWrangler's view of the card
+    seen = sorted(set(GPUW_RE.findall(cd + "\n" + klog)))
+    bus = None
+    if seen:
+        _, flags, tags, did, b, dv, fn = seen[-1]
+        bus = int(b)
+        ig = "IG" in (tags or "").replace(",", " ").split()
+        out.append(("INFO", "GPUWrangler", "flags %s (%s) vid.did=%s b:d:f=%s:%s:%s: %s" % (
+            flags, tags or "no tags", did, b, dv, fn,
+            "an integrated GPU (IG)" if ig else "a discrete GPU")))
+    else:
+        out.append(("WARN", "GPUWrangler", "no 'GPUWrangler (reg) gpu ... flags ... b:d:f=' line in "
+                    "24-log-coredisplay.txt / 20-log-rdna3.txt: the integrated flag is not known"))
+    # the host log: absent, guessed or without the request lines = a WARN row of its own
+    for lv, label, t in host_request_rows(host, hstatus, hnote, hname, bare=bare):
+        out.append((lv, label, t))
+    asked_model, asked_bus = _host_request(host)
+    guess = " [UNVERIFIED: the host log was not matched to this run]" if hstatus in ("unmatched", "ambiguous") else ""
+    if asked_bus and bus is not None and ((asked_bus == "pcie0") != (bus == 0)):
+        out.append(("WARN", "card bus", "rdna3vm put the card on %s but macOS sees PCI bus %d (b:d:f above): "
+                    "the host log's 'GPU on' and the guest PCI bus lines (host-*.log) say where it really was%s" % (
+                        asked_bus, bus, guess)))
+    # the Mac model and what CoreDisplay makes of it
+    models = []
+    for src, rx, text in (("hw.model", r"^hw\.model: (\S+)", system),
+                          ("PLATFORM line", r"^PLATFORM: .*?, ([A-Za-z]+\d+,\d+) ", txt),
+                          ("WindowServer crash report", r'"modelCode" : "([^"]+)"', crash)):
+        m = re.search(rx, text, re.M)
+        if m:
+            models.append((m.group(1), src))
+    flags = {}
+    for k in ("isBDW", "isMobile", "isMUX", "isBuiltIn"):
+        v = sorted(set(re.findall(r"get_display_device_info: .*?\b%s=(YES|NO)" % k, cd)))
+        if v:
+            flags[k] = "/".join(v)
+    nomux = "mux_initialize: Couldn't find any matches" in cd
+    asked = [asked_model] if asked_model and asked_model != "not asked" else []
+    lv, parts = "INFO", []
+    if models:
+        bid = re.search(r"^board-id: (Mac-\S+)", system, re.M)
+        parts.append("%s (%s%s)" % (models[0] + (", board-id " + bid.group(1) if bid else "",)))
+    else:
+        lv = "WARN"
+        parts.append("model not in the report (no hw.model in 00-system.txt, no PLATFORM line, no crash report)")
+    if flags:
+        parts.append("CoreDisplay " + " ".join("%s=%s" % kv for kv in sorted(flags.items())))
+    if nomux:
+        parts.append("mux_initialize found no match")
+    if asked_model == "not asked":
+        parts.append("rdna3vm asked for no model (the OpenCore config was left as it is)")
+    if asked:
+        parts.append("rdna3vm asked for %s" % asked[-1])
+        if models and models[0][0] != asked[-1]:
+            lv = "WARN"
+            parts.append("BUT macOS reports %s: OpenCore did not apply the model%s" % (models[0][0], guess))
+    if models and models[0][0].startswith("MacBook") and flags.get("isMobile") == "YES":
+        parts.append("laptop model: CoreDisplay takes the mobile paths")
+    elif models and not models[0][0].startswith("MacBook") and flags.get("isMobile") == "YES":
+        lv = "WARN"
+        parts.append("isMobile=YES on a desktop model: something else makes CoreDisplay mobile")
+    out.append((lv, "SMBIOS", "; ".join(parts)))
+    return out
+
+
 STALE_KEXTS_SHOWN = False   # a STALE KEXTS FAIL was printed (one per run; report() does not repeat it)
 
 
-def stale_marker_text(kext, running, installed):
-    return "%s (%s running %s, installed %s)" % (STALE_KEXTS_HEAD, kext, running, installed)
+def stale_marker_text(kext, running, installed, cmd="rdna3vm approve"):
+    return "%s (%s running %s, installed %s)" % (STALE_KEXTS_HEAD.replace("rdna3vm approve", cmd), kext, running, installed)
 
 
 def stale_kext_lines(*dirs):
@@ -2267,6 +2565,9 @@ def stale_kext_lines(*dirs):
         d = os.path.abspath(d)
         if d not in seen and os.path.isdir(d):
             seen.append(d)
+    # the newest host log says which Mac model the stale run had (--step N when it asked for one)
+    hosts = sorted((f for d in seen for f in glob.glob(os.path.join(d, "host-*.log"))), key=os.path.getmtime)
+    cmd = approve_command(_read(hosts[-1])) if hosts else "rdna3vm approve"
     for d in seen:
         for f in sorted(glob.glob(os.path.join(d, "approve-*.txt"))):
             try:
@@ -2276,7 +2577,7 @@ def stale_kext_lines(*dirs):
                             (os.path.basename(f), e.strerror or e))
                 continue
             for kext, running, installed in APPROVE_MARKER_RE.findall(txt):
-                found.setdefault(kext, stale_marker_text(kext, running, installed))
+                found.setdefault(kext, stale_marker_text(kext, running, installed, cmd))
     # not rdna3vm's headless install boot (serial-install-*): it never loads the accelerator
     serials = sorted((f for d in seen for f in glob.glob(os.path.join(d, "serial-*.log"))
                       if not os.path.basename(f).startswith("serial-install-")), key=os.path.getmtime)
@@ -2301,7 +2602,7 @@ def stale_kext_lines(*dirs):
                 elif m.group(1) != want and kext not in found:
                     found[kext] = ("%s (%s running %s per %s, the sources of this checkout build %s; a false "
                                    "alarm if this checkout is not the tested commit)" % (
-                                       STALE_KEXTS_HEAD, kext, m.group(1), sname, want))
+                                       STALE_KEXTS_HEAD.replace("rdna3vm approve", cmd), kext, m.group(1), sname, want))
             if not hits:
                 info.append("newest serial log %s has none of the RDNA3Accelerator / RDNA3-fb / RDNA3-agdc build "
                             "lines (the kexts did not start, or a step without them): stale check not done" % sname)
@@ -2785,6 +3086,9 @@ def summary(path, serial=None):
     out = []
     m = re.search(r"rdna3lvl=\S+.*", args)
     out.append(("boot-args", m.group(0)[:150] if m else "?"))
+    if os.path.exists(path):
+        for lv, label, t in present_mode_lines(path, txt, args):
+            out.append(("present: " + label, "%s %s" % (lv, t[:300])))
     out.append(("DMA/GFX jobs", "%d verified, %d wrong" % (len(re.findall(r"job results verified", txt)),
                                                          len(re.findall(r"job results WRONG", txt)))))
     sec = ""
@@ -3045,6 +3349,13 @@ def main():
         print("!! no rdna3-report-*.tar.gz: macOS never sent a report (did not boot far enough,")
         print("   no network to the host, or the VM was stopped before ~2 min) - read the serial log")
         failed = True
+        # the host log alone still says what rdna3vm asked for and where the card sat in the guest
+        newest = sorted(glob.glob(os.path.join(d, "host-*.log")), key=os.path.getmtime)
+        hl = host_log_for(os.path.join(d, "rdna3-report-none.tar.gz"))
+        if newest:
+            hl = (hl[0], "matched", "", hl[3])    # no report to match by: the newest log is the run
+        for lv, label, t in present_host_rows(*hl):
+            print("   %s present mode, %s: %s" % (lv, label, t))
     for p in reports:
         if os.path.exists(p):
             failed |= report(p, show_all)
@@ -3063,6 +3374,16 @@ def main():
         for lv, t in latch_lines(p, ttxt):
             print("   %s flip latch: %s" % (lv, t))
             failed = failed or lv == "FAIL"
+        # card run 2026-10-17d: page flips instead of transactions; the facts that could decide it
+        if os.path.exists(p):
+            for lv, label, t in present_mode_lines(p, ttxt, read_tar_member(p, "01-boot-args.txt")):
+                print("   %s present mode, %s: %s" % (lv, label, t))
+        else:
+            # tests only: the archive's CoreDisplay / ioreg logs are missing, the host log still answers
+            targs = (re.search(r"^boot-args: (.*)$", ttxt, re.M) or [None, ""])[1]
+            bare = bool(re.search(r"^PLATFORM: .*, bare metal, ", ttxt, re.M))
+            for lv, label, t in present_host_rows(*host_log_for(p, targs), bare=bare):
+                print("   %s present mode, %s: %s" % (lv, label, t))
         # card run 2026-10-17b: the swap as a copy, and the per-frame trace
         for lv, t in swapcopy_verdict(a3_counters(ttxt) if ttxt else {}):
             print("   %s swap copy: %s" % (lv, t))
@@ -3098,6 +3419,8 @@ def main():
                 print("     " + l[:220])
         if os.path.exists(tests):
             txt = open(tests, errors="replace").read()
+            # 'rdna3vm approve --step N' when the run asked for a Mac model (@smbios= in its host log)
+            acmd = approve_command(host_log_for(p, (re.search(r"^boot-args: (.*)$", txt, re.M) or [None, ""])[1])[0])
             stale = re.search(r"^stale: (.*)$", txt, re.M)
             skipped = re.findall(r"^== (\S+): SKIPPED - passed on ([0-9-]+ [0-9:]+)", txt, re.M)
             if skipped:
@@ -3107,7 +3430,7 @@ def main():
             # driver ran, whatever kernelmanagerd logged; one FAIL per run
             sk = STALE_LINE_RE.findall(stale.group(1)) if stale else []
             if sk and not STALE_KEXTS_SHOWN:
-                print("   FAIL %-20s %s" % ("STALE KEXTS", "; ".join(stale_marker_text(*x) for x in sk)))
+                print("   FAIL %-20s %s" % ("STALE KEXTS", "; ".join(stale_marker_text(*x, cmd=acmd) for x in sk)))
                 STALE_KEXTS_SHOWN = failed = True
             if "not approved to load" in txt and stale and not stale.group(1).strip():
                 # the builds running are the ones installed (same source
@@ -3117,7 +3440,7 @@ def main():
                       "sources only ('stale:' empty); the results count")
             elif "not approved to load" in txt:
                 print("   !! a new RDNA3Framebuffer/RDNA3Accelerator waits for approval in macOS: run "
-                      "'rdna3vm approve' (System Settings -> Privacy & Security -> Allow)")
+                      "'%s' (System Settings -> Privacy & Security -> Allow)" % acmd)
                 # the ones approved earlier ran instead: what this run says
                 # about the display, the accelerator and Metal on screen is
                 # about those (2026-10-12: an older framebuffer in console
@@ -3125,7 +3448,7 @@ def main():
                 if not STALE_KEXTS_SHOWN:
                     print("   FAIL STALE KEXTS this run used the framebuffer/accelerator approved earlier, not "
                           "this build's: display, accelerator and Metal-on-screen results do not count; "
-                          "'rdna3vm approve', then the step again")
+                          "'%s', then the step again" % acmd)
                 failed = True
             if "== rdna3_drminfo --scanout" in txt:
                 # what the panels showed: per pipe the HUBP state, how much
