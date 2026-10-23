@@ -479,6 +479,10 @@ static void test_uapi_placement(void)
 
 int main(void)
 {
+    /* the IOSurface sharing escapes' plane (security review 2026-10-23): a user client's 32-bit plane
+     * is checked before IOGraphicsAccelerator2::deviceCacheForIOSurface sees it */
+    CHECK(rd3k_ss_plane_ok(0) && rd3k_ss_plane_ok(1) && rd3k_ss_plane_ok(RD3K_SS_MAX_PLANE));
+    CHECK(!rd3k_ss_plane_ok(RD3K_SS_MAX_PLANE + 1) && !rd3k_ss_plane_ok(0xffffffffu) && !rd3k_ss_plane_ok(0x80000000u));
     test_reserve_size();
     test_layout();
     test_align();

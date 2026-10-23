@@ -305,6 +305,12 @@ struct RD3KCopyRequest {
 #define RD3K_SS_TOO_SMALL     0x80000006u
 #define RD3K_SS_DISPLAY       0x80000007u   /* WindowServer's display framebuffer: kept out of A3 (card run 58) */
 #define RD3K_SS_POLICY        0x80000008u   /* kept out of A3 by policy: WindowServer's inputs, or rdna3a3=0 (card run 58) */
+/* the highest IOSurface plane an escape may name: the caller's 32-bit plane
+ * reaches IOGraphicsAccelerator2::deviceCacheForIOSurface, and the device
+ * cache's validity bits (valid[0], valid[6]) hold 16 planes. A plane above
+ * it is refused with RD3K_SS_NO_CACHE before the lookup */
+#define RD3K_SS_MAX_PLANE     15u
+static inline int rd3k_ss_plane_ok(unsigned int plane) { return plane <= RD3K_SS_MAX_PLANE; }
 struct RD3KSurfShareEsc {
     unsigned int version;
     unsigned int surfaceID;

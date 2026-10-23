@@ -2153,10 +2153,25 @@ static void rd3AccelTraceSurf(unsigned arg, unsigned surfaceID, unsigned plane, 
     if (vm && vm->fPhys && res)
         rd3AccelTraceSurfRes(res, surfaceID, plane, arg == 1 ? 4u : arg == 2 ? 5u : 6u, vm->fPhys, vm->fBytes);
 }
+/* a plane above RD3K_SS_MAX_PLANE from a user client: refused before the device cache lookup (the
+ * caller's 32-bit value reached deviceCacheForIOSurface unchecked) */
+static volatile SInt32 gNVSVPlaneRefused;
+static void rd3AccelSurfPlaneRefused(const char *what, unsigned surfaceID, unsigned plane)
+{
+    const SInt32 k = OSIncrementAtomic(&gNVSVPlaneRefused);
+    if (rd3_log_due((uint64_t)k, 8, 1023))
+        ALOG("%s: surface %u plane %u REFUSED: an IOSurface has planes 0..%u -- not looked up (%d such)", what,
+             surfaceID, plane, RD3K_SS_MAX_PLANE, (int)k + 1);
+}
 static IOReturn rd3AccelSurfVram(struct RD3KSurfShareEsc *p, task_t task, unsigned cmd)
 {
     p->hSrcClient = p->hSrcMemory = 0;
     if (p->version != RD3K_SURFSHARE_VERSION) { p->status = RD3K_SS_BAD_VERSION; return kIOReturnSuccess; }
+    if (!rd3k_ss_plane_ok(p->plane)) {
+        p->status = RD3K_SS_NO_CACHE;
+        rd3AccelSurfPlaneRefused(cmd == RD3K_ESC_SURF_DIRTY ? "surfvram dirty" : "surfvram", p->surfaceID, p->plane);
+        return kIOReturnSuccess;
+    }
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
     struct RD3KRmHandles h; rd3SVZero(&h, sizeof h);
     if (!task || !a || !rd3AccelRmHandles(&h)) { p->status = RD3K_SS_OFF; return kIOReturnSuccess; }
@@ -2443,6 +2458,11 @@ static IOReturn rd3AccelSurfGem(struct RD3KSurfGem *p, task_t task)
     p->kapiMemory = nullptr; p->bytes = 0;
     if (p->version != RD3K_SURFGEM_VERSION) {
         p->status = RD3K_SS_BAD_VERSION; rd3AccelSurfGemLog(p, "the core kext speaks another version", nullptr, 0);
+        return kIOReturnSuccess;
+    }
+    if (!rd3k_ss_plane_ok(p->plane)) {
+        p->status = RD3K_SS_NO_CACHE;
+        rd3AccelSurfPlaneRefused("surfgem", p->surfaceID, p->plane);
         return kIOReturnSuccess;
     }
     RDNA3Accelerator *a = RDNA3Accelerator::gAccel;
