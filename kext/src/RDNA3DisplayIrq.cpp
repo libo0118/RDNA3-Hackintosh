@@ -28,6 +28,16 @@
  * again and forgets the storms. Counters: debug.rdna3_dispirq (key=value,
  * tools/triage_reports.py 'DISPLAY IRQ') and the RDNA3,DisplayIrq property.
  *
+ * ECC review (N42 round 1): an IV of a kind / instance no framebuffer owns
+ * is counted per kind with the instances seen (unr=, unrinst=, badmask=);
+ * an ack or a disable that fails is counted (ackfails=, offfails=); a
+ * DCE-client IV no handler claims is counted with the first four src / ext
+ * / ring ids (dceother=, dce=) instead of vanishing in fIrqOther; the IVs of
+ * a backlog drained after a stall are counted apart from the storm window
+ * (drained=, drains=); after a wake or a mode-1 reset that did not bring the
+ * DCN back no interrupt register is written (down=, downivs=; the sources
+ * are forgotten as off, RD3K_DISPIRQ_WHY_DOWN).
+ *
  * SPDX-License-Identifier: MIT
  */
 #include "RDNA3Accel.hpp"
@@ -75,10 +85,23 @@ struct RDNA3DispIrq {
     uint32_t         stormed[kDiKinds];   /* bit n: instance n cut after a storm */
     uint64_t         total, unrouted, badInst, regFails, syncs;
     uint32_t         unroutedLogs, regFailLogs;
+    /* ECC review: what went where (the handler writes, the report reads) */
+    uint64_t         unr[kDiKinds];       /* unrouted per kind */
+    uint32_t         unrInst[kDiKinds];   /* bit n: instance n raised with no framebuffer */
+    uint32_t         badMask[kDiKinds];   /* bit n: instance n (>= RD_DCIRQ_INSTS) raised */
+    uint64_t         ackFails, offFails;
+    uint32_t         ackFailLogs, offFailLogs;
+    uint64_t         dceOther;            /* DCE-client IVs no handler claims */
+    uint32_t         dceOtherLogs, dceSeenN;
+    struct { uint32_t src, ext, ring; } dceSeen[4];   /* the first four distinct ones */
+    volatile uint32_t down;               /* the DCN was not brought back: no register is written */
+    uint32_t         downs;
+    uint64_t         downIvs;             /* IVs while down: dropped without an ack */
     bool             sysctl;
 };
 
 static RDNA3Accel *gDirqOwner;
+static const size_t kDiReportCap = 1280;   /* the key=value report: ~520 bytes of totals, ~150 a head */
 static SInt32 gDirqSysctlBusy;
 
 static uint32_t diInst(const RDNA3DispIrqHead *H, int k)
@@ -99,6 +122,45 @@ static int diSet(RDNA3DispIrq *d, rdna3_dev *dev, int k, uint32_t inst, int enab
     return rb == (enable ? 1 : 0) ? RDNA3_OK : RDNA3_EIO;
 }
 
+/* a source off (a storm, a sync, the end); a disable that does not take is
+ * counted and logged: the source may go on raising (ECC review) */
+static void diOff(RDNA3DispIrq *d, rdna3_dev *dev, int k, uint32_t inst, const char *where)
+{
+    const int r = diSet(d, dev, k, inst, 0);
+    if (r == RDNA3_OK)
+        return;
+    d->offFails++;
+    if (d->offFailLogs < 8 || (d->offFails & 1023) == 0) {
+        d->offFailLogs++;
+        LOG("display irq: %s %u: the disable did not take (%d) at %s (%llu such) -- the source may go on raising",
+            kDiName[k], inst, r, where, (unsigned long long)d->offFails);
+    }
+}
+
+/* a DCE-client IV that is no vblank / vupdate / pflip source and no HPD the
+ * bring-up claimed (an HPD of a pin DCN 3.2 lacks is counted there):
+ * counted, its ids kept, logged (ECC review: it used to end in fIrqOther) */
+static void diOther(RDNA3DispIrq *d, const rdna3_iv *iv)
+{
+    d->dceOther++;
+    bool seen = false;
+    for (uint32_t i = 0; i < d->dceSeenN; i++)
+        if (d->dceSeen[i].src == iv->src_id && d->dceSeen[i].ext == iv->src_data[0] &&
+            d->dceSeen[i].ring == iv->ring_id)
+            seen = true;
+    if (!seen && d->dceSeenN < 4) {
+        d->dceSeen[d->dceSeenN].src = iv->src_id;
+        d->dceSeen[d->dceSeenN].ext = iv->src_data[0];
+        d->dceSeen[d->dceSeenN].ring = iv->ring_id;
+        d->dceSeenN++;
+    }
+    if (d->dceOtherLogs < 8 || (d->dceOther & 1023) == 0) {
+        d->dceOtherLogs++;
+        LOG("display irq: a DCE IV no handler claims: src_id 0x%x, ext 0x%x, ring %u (%llu such): dropped",
+            iv->src_id, iv->src_data[0], iv->ring_id, (unsigned long long)d->dceOther);
+    }
+}
+
 /* ---------------------------- the handler ---------------------------- */
 
 bool RDNA3Accel::displayIrq(const rdna3_iv *iv)
@@ -106,28 +168,47 @@ bool RDNA3Accel::displayIrq(const rdna3_iv *iv)
     rdna3_dc_irq_source s;
     RDNA3DispIrq *d = fDirq;
     if (!dcirq_to_irq_source(iv->client_id, iv->src_id, iv->src_data[0], &s) || s.kind == RD_DCIRQ_HPD ||
-        s.kind == RD_DCIRQ_HPDRX)
-        return false;
+        s.kind == RD_DCIRQ_HPDRX) {
+        /* nothing else listens on the DCE client: counted here, not in fIrqOther */
+        if (iv->client_id != RD_IH_CLIENT_DCE_DCIRQ || !d)
+            return false;
+        diOther(d, iv);
+        return true;
+    }
     if (!d || !fDispDev)
         return true;   /* a DCN IV with no display side: claimed, nothing to do */
     const uint64_t now = mach_absolute_time();
     const int k = s.kind == RD_DCIRQ_VBLANK ? kDiVblank : s.kind == RD_DCIRQ_PFLIP ? kDiPflip : kDiVupdate;
     d->total++;
+    if (d->down) {
+        d->downIvs++;   /* the DCN was not brought back: no register written (displayIrqResync) */
+        return true;
+    }
     if (s.inst >= RD_DCIRQ_INSTS) {
         d->badInst++;   /* OTG / HUBP 4, 5: no such instance on DCN 3.2 (a dummy entry) */
+        if (s.inst < 32)
+            OSBitOrAtomic(1u << s.inst, &d->badMask[k]);
         return true;
     }
     /* amdgpu_dm_irq_handler: dc_interrupt_ack before the handler */
     IOSimpleLockLock(d->reg);
-    dcirq_ack(fDispDev, s);
+    const int ar = dcirq_ack(fDispDev, s);
     IOSimpleLockUnlock(d->reg);
+    if (ar != RDNA3_OK) {
+        d->ackFails++;
+        if (d->ackFailLogs < 8 || (d->ackFails & 1023) == 0) {
+            d->ackFailLogs++;
+            LOG("display irq: %s %u: the ack failed (%d; %llu such) -- the source may raise again at once",
+                kDiName[k], s.inst, ar, (unsigned long long)d->ackFails);
+        }
+    }
     uint64_t ns = 0;
     absolutetime_to_nanoseconds(now, &ns);
     const bool storm = rd3_virq_storm_note(&d->storm[k][s.inst], ns) != 0;
     if (storm) {
         /* no amdgpu counterpart: a source raising without end would keep
          * this work loop (fences, faults) busy; cut it, the poll takes over */
-        diSet(d, fDispDev, k, s.inst, 0);
+        diOff(d, fDispDev, k, s.inst, "a storm");
         OSBitOrAtomic(1u << s.inst, &d->stormed[k]);
         LOG("display irq: %s %u interrupt storm: more than %u in %u ms -- the source is disabled, the framebuffer's "
             "poll delivers (debug.rdna3_vblirq=1 enables it again)", kDiName[k], s.inst, RD3_VIRQ_STORM_MAX,
@@ -144,6 +225,8 @@ bool RDNA3Accel::displayIrq(const rdna3_iv *iv)
     }
     if (head < 0) {
         d->unrouted++;
+        d->unr[k]++;
+        OSBitOrAtomic(1u << s.inst, &d->unrInst[k]);
         if (d->unroutedLogs < 4 || (d->unrouted & 1023) == 0) {
             d->unroutedLogs++;
             LOG("display irq: %s %u with no framebuffer registered for it (%llu such): acked, dropped", kDiName[k],
@@ -184,7 +267,10 @@ void RDNA3Accel::displayIrqSync(const char *why, bool force)
                             fDcn->head[h].pipe < RD_DCIRQ_INSTS;
         const uint32_t otg = headOk ? fDcn->head[h].otg : ~0u, pipe = headOk ? fDcn->head[h].pipe : ~0u;
         uint32_t desired = H->fn ? H->want : 0, whyNot = RD3K_DISPIRQ_WHY_NONE;
-        if (desired && !d->on) {
+        if (desired && d->down) {
+            desired = 0;
+            whyNot = RD3K_DISPIRQ_WHY_DOWN;   /* displayIrqResync: nothing is written */
+        } else if (desired && !d->on) {
             desired = 0;
             whyNot = RD3K_DISPIRQ_WHY_SYSCTL;
         } else if (desired && !live) {
@@ -202,7 +288,7 @@ void RDNA3Accel::displayIrqSync(const char *why, bool force)
             }
             /* off where it was, when it moved or is no longer wanted */
             if ((H->enabled & bit) && (!(desired & bit) || diInst(H, k) != inst)) {
-                diSet(d, fDispDev, k, diInst(H, k), 0);
+                diOff(d, fDispDev, k, diInst(H, k), why);
                 H->enabled &= ~bit;
             }
         }
@@ -227,6 +313,43 @@ void RDNA3Accel::displayIrqSync(const char *why, bool force)
         H->why = whyNot;
     }
     IOLockUnlock(d->lock);
+    displayIrqPublish();
+}
+
+/* after a wake or a mode-1 reset (amdgpu_dm_irq_resume_early,
+ * amdgpu_irq_gpu_reset_resume_helper): 'dcnUp' (rd3_virq_wake_dcn_up /
+ * rd3_virq_reset_dcn_up) = the DCN is up: every source as registered is
+ * written again; otherwise it lost its power or state and was not brought
+ * back: no OTG / HUBP register is written (an un-posted, gated DCN, ECC
+ * review), the sources are forgotten as off until a wake or reset brings it
+ * back, the framebuffers poll */
+void RDNA3Accel::displayIrqResync(const char *why, bool dcnUp)
+{
+    RDNA3DispIrq *d = fDirq;
+    if (!d || !fDispDev)
+        return;
+    if (dcnUp) {
+        if (d->down)
+            LOG("display irq: %s: the display is back: the vblank / pflip sources are written again", why);
+        d->down = 0;
+        displayIrqSync(why, true);
+        return;
+    }
+    uint32_t forgot = 0;
+    IOLockLock(d->lock);
+    d->down = 1;
+    d->downs++;
+    for (uint32_t h = 0; h < RD3K_MAX_HEADS; h++) {
+        RDNA3DispIrqHead *H = &d->h[h];
+        forgot |= H->enabled << (4 * h);
+        H->enabled = 0;
+        if (H->fn && H->want)
+            H->why = RD3K_DISPIRQ_WHY_DOWN;
+    }
+    IOLockUnlock(d->lock);
+    LOG("display irq: %s: the display was NOT brought back (power or state lost; rdna3resume=0 or its resume / "
+        "restore failed): no interrupt register is written, the sources are forgotten as off (were 0x%x, 4 bits a "
+        "head), the framebuffers poll", why, forgot);
     displayIrqPublish();
 }
 
@@ -300,13 +423,36 @@ int RDNA3Accel::displayIrqReport(char *buf, size_t len)
         return ENXIO;
     size_t o = 0;
     IOLockLock(d->lock);
+    uint64_t drained[kDiKinds] = {};
+    uint32_t drains = 0;
+    for (int k = 0; k < kDiKinds; k++)
+        for (uint32_t i = 0; i < RD_DCIRQ_INSTS; i++) {
+            drained[k] += d->storm[k][i].drained;
+            drains += d->storm[k][i].drains;
+        }
     o += (size_t)snprintf(buf + o, len - o,
-                          "vblirq=%u on=%u msi=%u hpdirq=%u hpd=%u total=%llu unrouted=%llu badinst=%llu "
-                          "regfails=%llu stormed=0x%x/0x%x/0x%x syncs=%llu",
+                          "vblirq=%u on=%u msi=%u hpdirq=%u hpd=%u hpdnopin=%u total=%llu unrouted=%llu "
+                          "unr=%llu/%llu/%llu unrinst=0x%x/0x%x/0x%x badinst=%llu badmask=0x%x/0x%x/0x%x "
+                          "regfails=%llu ackfails=%llu offfails=%llu stormed=0x%x/0x%x/0x%x drained=%llu/%llu/%llu "
+                          "drains=%u down=%u downs=%u downivs=%llu dceother=%llu dce=",
                           d->arg, d->on, fBringup && fBringup->irqLive() ? 1u : 0u, rd3_arg("rdna3hpdirq", 0),
-                          fHpdIrqs, (unsigned long long)d->total, (unsigned long long)d->unrouted,
-                          (unsigned long long)d->badInst, (unsigned long long)d->regFails, d->stormed[kDiVblank],
-                          d->stormed[kDiPflip], d->stormed[kDiVupdate], (unsigned long long)d->syncs);
+                          fHpdIrqs, fHpdNoPin, (unsigned long long)d->total, (unsigned long long)d->unrouted,
+                          (unsigned long long)d->unr[kDiVblank], (unsigned long long)d->unr[kDiPflip],
+                          (unsigned long long)d->unr[kDiVupdate], d->unrInst[kDiVblank], d->unrInst[kDiPflip],
+                          d->unrInst[kDiVupdate], (unsigned long long)d->badInst, d->badMask[kDiVblank],
+                          d->badMask[kDiPflip], d->badMask[kDiVupdate], (unsigned long long)d->regFails,
+                          (unsigned long long)d->ackFails, (unsigned long long)d->offFails, d->stormed[kDiVblank],
+                          d->stormed[kDiPflip], d->stormed[kDiVupdate], (unsigned long long)drained[kDiVblank],
+                          (unsigned long long)drained[kDiPflip], (unsigned long long)drained[kDiVupdate], drains,
+                          d->down, d->downs, (unsigned long long)d->downIvs, (unsigned long long)d->dceOther);
+    /* the first four distinct DCE IVs no handler claimed: src_id:ext:ring (hex), '-' none */
+    for (uint32_t i = 0; i < d->dceSeenN && o < len; i++)
+        o += (size_t)snprintf(buf + o, len - o, "%s0x%x:0x%x:0x%x", i ? "," : "", d->dceSeen[i].src,
+                              d->dceSeen[i].ext, d->dceSeen[i].ring);
+    if (!d->dceSeenN && o < len)
+        o += (size_t)snprintf(buf + o, len - o, "-");
+    if (o < len)
+        o += (size_t)snprintf(buf + o, len - o, " syncs=%llu", (unsigned long long)d->syncs);
     for (uint32_t h = 0; h < RD3K_MAX_HEADS && o < len; h++) {
         const RDNA3DispIrqHead *H = &d->h[h];
         if (!H->regs && !H->cnt[kDiVblank] && !H->cnt[kDiPflip])
@@ -325,9 +471,13 @@ int RDNA3Accel::displayIrqReport(char *buf, size_t len)
 
 void RDNA3Accel::displayIrqPublish()
 {
-    char buf[640];
-    if (displayIrqReport(buf, sizeof(buf)) == 0)
+    char *buf = (char *)IOMalloc(kDiReportCap);
+    if (!buf)
+        return;   /* the sysctl still answers */
+    bzero(buf, kDiReportCap);
+    if (displayIrqReport(buf, kDiReportCap) == 0)
         setProperty("RDNA3,DisplayIrq", buf);
+    IOFree(buf, kDiReportCap);
 }
 
 int RDNA3Accel::displayIrqSysctl(int *on, bool set)
@@ -367,7 +517,7 @@ static int rdna3_vblirq_sysctl SYSCTL_HANDLER_ARGS
 static int rdna3_dispirq_sysctl SYSCTL_HANDLER_ARGS
 {
     (void)oidp; (void)arg1; (void)arg2;
-    const size_t cap = 768;
+    const size_t cap = kDiReportCap;
     int err = ENXIO;
     OSIncrementAtomic(&gDirqSysctlBusy);
     RDNA3Accel *a = gDirqOwner;
@@ -453,8 +603,8 @@ void RDNA3Accel::displayIrqFree()
     for (uint32_t h = 0; h < RD3K_MAX_HEADS; h++) {
         RDNA3DispIrqHead *H = &d->h[h];
         for (int k = 0; k < kDiKinds; k++)
-            if ((H->enabled & (1u << k)) && fDispDev)
-                diSet(d, fDispDev, k, diInst(H, k), 0);
+            if ((H->enabled & (1u << k)) && fDispDev && !d->down)
+                diOff(d, fDispDev, k, diInst(H, k), "the end");
         H->enabled = 0;
         H->fn = nullptr;
     }

@@ -612,6 +612,17 @@ void RDNA3Accel::displayHotplug(uint32_t pin, int connected)
 void RDNA3Accel::displayHpdIrq(uint32_t pin, int connected, int rx)
 {
     static uint32_t logs;
+    if (pin >= RD_AUX_ENGINES) {
+        /* HPD6 / HPD6 RX: DCN 3.2 wires HPD1..5 (no ack register to write);
+         * counted and logged, it used to vanish uncounted (ECC review) */
+        const uint32_t m = OSIncrementAtomic((volatile SInt32 *)&fHpdNoPin) + 1;
+        if (m <= 4 || (m & 1023) == 0)
+            LOG("display: HPD%u%s interrupt #%u on a pin DCN 3.2 does not wire (HPD1..%u): not acked, dropped",
+                pin + 1, rx ? " RX" : "", m, (unsigned)RD_AUX_ENGINES);
+        setNumber("RDNA3,HPDIrqsNoPin", m);
+        displayIrqPublish();
+        return;
+    }
     const uint32_t act = rd3_arg("rdna3hpdirq", 0);
     const uint32_t n = OSIncrementAtomic((volatile SInt32 *)&fHpdIrqs) + 1;
     if (logs < 8 || (n & 1023) == 0) {
@@ -621,6 +632,7 @@ void RDNA3Accel::displayHpdIrq(uint32_t pin, int connected, int rx)
             rx || !act ? " -- not acted on (rdna3hpdirq=0: the hotplug poll decides)" : "");
     }
     setNumber("RDNA3,HPDIrqs", n);
+    displayIrqPublish();   /* the RDNA3,DisplayIrq copy with this HPD count (triage reads it when no sysctl was taken) */
     if (act && !rx)
         displayHotplug(pin, connected);
 }

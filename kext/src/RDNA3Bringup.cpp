@@ -1130,6 +1130,10 @@ bool RDNA3Bringup::hwInit()
                          (unsigned long long)fIrqCount);
                     sdma60_set_trap_interrupt(fDev, fSdma, 0);
                     fIrqLive = false;
+                    /* N42 (ECC review): a framebuffer that registered while
+                     * fIrqLive was set has its sources on with no MSI to
+                     * drain their IVs: off now (WHY_NOIRQ), it polls */
+                    fOwner->displayIrqSync("msi off", false);
                 } else {
                     BLOG("MSI: verified, fence waits now sleep on the interrupt");
                 }
@@ -3906,8 +3910,9 @@ void RDNA3Bringup::ivCallback(void *ctx, const rdna3_iv *iv)
          * rdna3hpdirq=1; counted and logged either way) */
         int rx = 0, pin = dchpd_iv_pin(iv->client_id, iv->src_id, iv->src_data[0], &rx);
         if (pin >= 0) {
-            if (pin < RD_AUX_ENGINES)
-                b->fOwner->displayHpdIrq((uint32_t)pin, rx ? -1 : dchpd_irq_ack(b->fDev, (uint32_t)pin), rx);
+            /* HPD6 / HPD6 RX (a pin DCN 3.2 does not wire): counted there, never acked */
+            b->fOwner->displayHpdIrq((uint32_t)pin,
+                                     rx || pin >= RD_AUX_ENGINES ? -1 : dchpd_irq_ack(b->fDev, (uint32_t)pin), rx);
             return;
         }
     }

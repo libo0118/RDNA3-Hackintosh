@@ -185,6 +185,9 @@ public:
     /* the sources enabled again as registered (a wake, a reset, a mode set
      * moved the head's OTG / HUBP); 'force' re-writes them all */
     void displayIrqSync(const char *why, bool force);
+    /* after a wake / a mode-1 reset: 'dcnUp' = the DCN is up (written again
+     * as registered); false = not brought back: nothing written, forgotten */
+    void displayIrqResync(const char *why, bool dcnUp);
     void displayShutdown();
     /* D4 (RDNA3Resume.cpp): a GPU recovery happened (chipReset: the mode-1
      * reset, else a GFX / SDMA soft reset); DRM lock held */
@@ -362,6 +365,7 @@ private:
     volatile UInt32 fHotplugPending = 0;      /* bit n = HPD pin n changed */
     uint32_t      fHotplugEvents = 0;
     volatile uint32_t fHpdIrqs = 0;           /* N42: HPD interrupts claimed */
+    volatile uint32_t fHpdNoPin = 0;          /* N42: HPD6 / HPD6 RX IVs (a pin DCN 3.2 does not wire) */
     static void   displayHotplugWork(void *owner, void *);
     /* D6 hotplug to the framebuffer (rdna3hotplug=1, RDNA3Hotplug.cpp) */
     struct RDNA3HotplugState *fHp = nullptr;

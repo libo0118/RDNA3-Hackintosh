@@ -55,6 +55,7 @@ extern "C" {
 #include "edid.h"
 #include "vbios.h"
 #include "atom.h"
+#include "rdna3_vbl_irq.h"
 }
 
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
@@ -627,9 +628,10 @@ void RDNA3Accel::displayAfterReset(bool chipReset)
         LOG("display: the mode-1 reset took %u head(s) down; rdna3resume=1 restores them from the snapshot", lost);
     if (chipReset && fBringup && fBringup->lastVramLost())
         displayPictureLost("mode-1 reset");
-    /* N42, amdgpu_irq_gpu_reset_resume_helper: the vblank / pflip sources again */
+    /* N42, amdgpu_irq_gpu_reset_resume_helper: the vblank / pflip sources
+     * again - only on a DCN that is back (restored, or the heads stayed) */
     if (chipReset)
-        displayIrqSync("mode-1 reset", true);
+        displayIrqResync("mode-1 reset", rd3_virq_reset_dcn_up(restore ? 1 : 0, lost) != 0);
 }
 
 /* --------------------------- sleep and wake --------------------------- */
@@ -769,8 +771,10 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
     if (powerLost && (!resume || !resumed || (a->fBringup && a->fBringup->lastResumeLostVram())))
         a->displayPictureLost("wake after a power loss");
     a->hotplugResume();   /* link_resume: the HPD filters again, then the looks */
-    /* N42, amdgpu_dm_irq_resume_early: the vblank / pflip sources again */
-    a->displayIrqSync("wake", true);
+    /* N42, amdgpu_dm_irq_resume_early: the vblank / pflip sources again -
+     * only on a DCN that kept its power or was resumed (ECC review) */
+    a->displayIrqResync("wake", rd3_virq_wake_dcn_up(powerLost ? 1 : 0, suspended ? 1 : 0, resume ? 1 : 0,
+                                                     resumed ? 1 : 0) != 0);
     /* VCN / JPEG (rdna3vcn): amdgpu_device_ip_resume_phase2 when the card
      * kept its power; after a power loss resumeAfterPowerLoss's hwInit
      * resumed them already (vcnStart), or they wait for the next bring-up */

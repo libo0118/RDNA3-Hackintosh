@@ -66,7 +66,7 @@ $(BUILD)/test_swap_front: tests/test_swap_front.c common/rdna3_swap_front.h comm
 $(BUILD)/test_flip_latch: tests/test_flip_latch.c common/rdna3_flip_latch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_flip_latch.c
 # DRIVER-PLAN N42: IOGraphics' VBL from the vblank interrupt, the poll as fallback
-$(BUILD)/test_vbl_irq: tests/test_vbl_irq.c common/rdna3_vbl_irq.h | $(BUILD)
+$(BUILD)/test_vbl_irq: tests/test_vbl_irq.c common/rdna3_vbl_irq.h common/rdna3_fb_policy.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_vbl_irq.c
 # DRIVER-PLAN N38: a head's presents without blocking WindowServer (the flip queue)
 $(BUILD)/test_flip_queue: tests/test_flip_queue.c common/rdna3_flip_queue.h | $(BUILD)

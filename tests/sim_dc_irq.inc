@@ -309,6 +309,30 @@ static void test_dc_irq(rdna3_dev *dev, rdna3_ih *ih)
     sq_frame(0);
     CHECK(ih60_process(dev, ih, sq_iv_cb, &s) == 1 && s.vbl[2] == 7 && s.vbl[0] == 13);
 
+    /* ECC review (the storm guard's clock is the handler's): the handler
+     * stalls for 100 frames. A working source raises once and then waits
+     * for its ack (the INT_STATUS latch), so the ring holds ONE IV of it:
+     * drained, it is no storm; the guard notes the quiet stretch, nothing
+     * is counted as a drained backlog, the frames after it count normally */
+    {
+        const unsigned v2 = s.vbl[2], storms0 = s.storms;
+        CHECK(dcirq_set(dev, vbl2, 1) == RDNA3_OK);
+        ih60_process(dev, ih, sq_iv_cb, &s);
+        sq_frame(2);
+        CHECK(ih60_process(dev, ih, sq_iv_cb, &s) == 1);
+        for (i = 0; i < 100; i++)
+            sq_frame(2);   /* 1.67 s, nobody drains the ring */
+        CHECK(ih60_process(dev, ih, sq_iv_cb, &s) == 1 && s.vbl[2] == v2 + 2);
+        CHECK(s.st[0][2].drain_end_ns != 0 && s.st[0][2].drained == 0 && s.storms == storms0);
+        for (i = 0; i < 5; i++) {
+            sq_frame(2);
+            CHECK(ih60_process(dev, ih, sq_iv_cb, &s) == 1);
+        }
+        CHECK(s.vbl[2] == v2 + 7 && s.st[0][2].drained == 0 && s.st[0][2].drains == 0 && s.storms == storms0);
+        CHECK(dcirq_set(dev, vbl2, 0) == RDNA3_OK);
+        ih60_process(dev, ih, NULL, NULL);
+    }
+
     /* a storm (a source that raises without waiting for the ack): cut at
      * RD3_VIRQ_STORM_MAX within the window, the source disabled, then silent */
     {
@@ -319,7 +343,10 @@ static void test_dc_irq(rdna3_dev *dev, rdna3_ih *ih)
             ih60_process(dev, ih, sq_iv_cb, &s);
         }
         CHECK(s.storms == 1 && dcirq_enabled(dev, vbl0) == 0);
-        CHECK(s.vbl[0] - before <= RD3_VIRQ_STORM_MAX + 1 && SQ.ivs - ivs0 <= RD3_VIRQ_STORM_MAX + 1);
+        /* the stall above left head 0 quiet: RD3_VIRQ_DRAIN_MAX more pass first */
+        CHECK(s.vbl[0] - before <= RD3_VIRQ_STORM_MAX + 1 + RD3_VIRQ_DRAIN_MAX &&
+              SQ.ivs - ivs0 <= RD3_VIRQ_STORM_MAX + 1 + RD3_VIRQ_DRAIN_MAX);
+        CHECK(s.st[0][0].drained == RD3_VIRQ_DRAIN_MAX && s.st[0][0].drains == 1);
         SQ.broken_level = 0;
     }
 
