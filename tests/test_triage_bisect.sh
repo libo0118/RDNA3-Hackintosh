@@ -621,7 +621,8 @@ grep -q 'bisect  *FAIL BISECT owner verdict: DISAGREES' <<<"$o" || fail "ownerba
 mk "$T/o3" agdcownertext
 o=$(run "$T/o3")
 grep -q "WARN the owner's verdicts: step 1: 'maybe' is not y / s / n" <<<"$o" || fail "ownertext: $(grep "owner's" <<<"$o")"
-grep -q 'INFO BISECT owner verdict: AGREES on 1 of 1 step(s)' <<<"$o" || fail "ownertext: $(grep 'owner verdict' <<<"$o")"
+# an input with anything unreadable is not used at all (prose read as verdicts would make false DISAGREES)
+grep -q 'owner verdict: AGREES' <<<"$o" && fail "ownertext: a partly unreadable owner input was compared"
 # the tty answer overrides the rules and says so
 mk "$T/o4" agdcttyover
 o=$(run "$T/o4")

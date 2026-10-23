@@ -57,6 +57,7 @@ kernel log at its start, else by the log's own clock).
 
 Python 3, standard library only; imported by tools/triage_reports.py.
 """
+import glob
 import os
 import re
 import sys
@@ -217,6 +218,8 @@ def read_ppm(path):
     if not m:
         return None
     w, h = int(m.group(1)), int(m.group(2))
+    if w * h == 0:   # every fraction divides by the pixel count
+        return None
     px = data[m.end():m.end() + w * h * 3]
     return (w, h, px) if len(px) == w * h * 3 else None
 
@@ -566,24 +569,32 @@ def front_by_step(steps, hold, logs):
 
 OWNER_WORDS = {"y": "y", "yes": "y", "right": "y", "ok": "y", "works": "y", "s": "s", "slow": "s", "right-slow": "s",
                "n": "n", "no": "n", "broken": "n", "bad": "n"}
-_OWNER = re.compile(r"(\d+)\s*[:= ]\s*([A-Za-z][A-Za-z-]*)")
+_OWNER = re.compile(r"\s*(\d+)\s*[:= ]\s*([A-Za-z][A-Za-z-]*)\s*")
 
 
 def parse_owner(spec):
     """({step n: "y" | "s" | "n"}, [errors]) from the owner's verdicts: `0:n,1:y,3:s` or one `1 y` per line
-    (# comments); y = it works, s = it works but slow, n = broken"""
+    (# comments); y = it works, s = it works but slow, n = broken. Every entry must be exactly `N:word`: any text
+    that is not, a word that is not a verdict or a step given twice makes the whole input unread ({} and the
+    errors) - prose read as verdicts would turn into false DISAGREES (review of 8030018)"""
     out, errs = {}, []
     cleaned = "\n".join(l.split("#")[0] for l in (spec or "").splitlines())
-    for n, w in _OWNER.findall(cleaned):
-        v = OWNER_WORDS.get(w.lower())
-        if v is None:
-            errs.append("step %s: '%s' is not y / s / n" % (n, w))
-        else:
-            out[int(n)] = v
-    rest = _OWNER.sub("", cleaned).strip(" ,;\t\n")
-    if rest:
-        errs.append("cannot read '%s' (expected 0:n,1:y,3:s)" % _short(rest, 40))
-    return out, errs
+    for tok in re.split(r"[,;\n]", cleaned):
+        pos = 0
+        while tok[pos:].strip():   # `0:n 1:s` on one line: entries back to back, nothing else between them
+            m = _OWNER.match(tok, pos)
+            if not m:
+                errs.append("cannot read '%s' (expected 0:n,1:y,3:s)" % _short(tok[pos:].strip(), 40))
+                break
+            pos = m.end()
+            n, v = int(m.group(1)), OWNER_WORDS.get(m.group(2).lower())
+            if v is None:
+                errs.append("step %d: '%s' is not y / s / n" % (n, m.group(2)))
+            elif n in out:
+                errs.append("step %d given twice" % n)
+            else:
+                out[n] = v
+    return ({} if errs else out), errs
 
 
 def locate_owner(report_path):
@@ -591,7 +602,12 @@ def locate_owner(report_path):
     base = report_path[:-len(".tar.gz")] if report_path.endswith(".tar.gz") else report_path
     if base.endswith("-bisect"):
         base = base[:-len("-bisect")]
-    for path in (base + "-owner.txt", os.path.join(os.path.dirname(os.path.abspath(base)), "owner.txt")):
+    folder = os.path.dirname(os.path.abspath(base))
+    paths = [base + "-owner.txt"]
+    # the folder-wide owner.txt only for a folder with this one bisect report (else it would judge every run in it)
+    if len(glob.glob(os.path.join(folder, "*-bisect.txt"))) <= 1:
+        paths.append(os.path.join(folder, "owner.txt"))
+    for path in paths:
         try:
             with open(path, errors="replace") as f:
                 return f.read()
