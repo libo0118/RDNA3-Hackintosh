@@ -2553,6 +2553,19 @@ def present_mode_lines(path, txt="", args="", host=None):
 # counters (RDNA3,FBStats) per framebuffer from 12-ioreg-fb.txt, and RDNA3AGDC's vendor answer
 # (debug.rdna3agdc_vendor*) from the tests file. Missing data is a WARN row, never silence.
 FB_N40_SWITCHES = ("dispflags", "glorder", "fbintegrated", "cursorasync", "fbwake", "vblonce", "fbdtmap", "fbconsole")
+# what is in effect where it can differ from the switch as asked (ECC review): a thread call moves the cursor, the
+# hardware cursor exists, the VBL thread call exists (and is ONCE), the wake tap and its gate exist
+FB_N40_EFFECTIVE = ("cursorasync_active", "hwcursor", "vbl_call", "vblonce_active", "waketap", "wakegate")
+# every counter RDNA3,FBStats carries: an absent key is not a 0
+FB_N40_STATS = (
+    "cursor_sets", "cursor_kicks", "cursor_coalesced", "cursor_same", "cursor_applies", "cursor_fails", "cursor_sync",
+    "cursor_images", "cursor_image_fails", "cursor_convert_fails",
+    "wake_sleeps", "wake_family", "wake_owed_max", "wake_plain_on", "wake_didwake_seen", "wake_unanswered",
+    "wake_nogate", "wake_off", "wake_tap_events", "wake_slept_pending", "wake_paging_already", "wake_dropped",
+    "wake_fails", "wake_retries", "wake_gave_up", "wake_stopping",
+    "vbl_delivered", "vbl_polls", "vbl_still", "vbl_overlap", "vbl_call_failed",
+    "integ_applied", "integ_reset", "integ_late", "open_ungated", "open_fails",
+    "dt_validate", "dt_matched", "dt_refused", "dt_sets", "dt_mapped", "dispflags_asked")
 AGDC_VENDORS = {0: "AMD 0x1002", 1: "NVIDIA 0x10de", 2: "Intel 0x8086"}
 
 
@@ -2565,6 +2578,100 @@ def _ioreg_dict(blk, key):
 def _ioreg_str(blk, key):
     m = re.search(r'"%s" = "([^"]*)"' % re.escape(key), blk)
     return m.group(1) if m else None
+
+
+def _boot_arg_num(args, name):
+    """(raw, int or None) of boot-arg 'name=value' as PE_parse_boot_argn reads a number (decimal or 0x), None when
+    the boot-arg is absent; the last one wins"""
+    m = re.findall(r"(?:^|\s)%s=(\S+)" % re.escape(name), args or "")
+    if not m:
+        return None
+    raw = m[-1]
+    try:
+        return raw, int(raw, 16) if raw.lower().startswith("0x") else int(raw)
+    except ValueError:
+        return raw, None
+
+
+def _fb_switch_rows(name, sw, args):
+    """WARN rows: a switch the boot-args ask for that the framebuffer does not publish, and what is not in effect"""
+    out = []
+    for k in FB_N40_SWITCHES:
+        req = _boot_arg_num(args, "rdna3" + k)
+        if req is None or k not in sw:
+            continue
+        raw, val = req
+        if val is None or val != sw[k]:
+            out.append(("WARN", "switch asked", "%s: boot-args ask rdna3%s=%s but the framebuffer publishes %s %d: the "
+                        "boot-arg did not reach it (not a number, or a build that reads it otherwise)" % (
+                            name, k, raw, k, sw[k])))
+    missing = [k for k in FB_N40_EFFECTIVE if k not in sw]
+    if missing:
+        out.append(("WARN", "switch in effect", "%s: RDNA3,Switches has no %s: what is in effect is not known (a build "
+                    "older than the ECC review of N40)" % (name, ",".join(missing))))
+    if sw.get("cursorasync") and sw.get("hwcursor") and sw.get("cursorasync_active") == 0:
+        out.append(("WARN", "switch in effect", "%s: rdna3cursorasync %d but NO cursor thread call: the cursor moves on "
+                    "WindowServer's thread (the serial log's 'hardware cursor: no lock or thread call' line)" % (
+                        name, sw["cursorasync"])))
+    if sw.get("vbl_call") == 0:
+        out.append(("WARN", "switch in effect", "%s: NO VBL thread call: IOGraphics gets no VBL at all%s" % (
+            name, " (rdna3vblonce %d is not in effect)" % sw["vblonce"] if sw.get("vblonce") else "")))
+    if sw.get("fbwake") and sw.get("waketap") == 0:
+        out.append(("WARN", "switch in effect", "%s: rdna3fbwake %d but NO notification tap: a system sleep is never "
+                    "seen, the family wake work never runs" % (name, sw["fbwake"])))
+    if sw.get("fbwake") and sw.get("wakegate") == 0:
+        out.append(("WARN", "switch in effect", "%s: rdna3fbwake %d but NO command gate on the controller workloop: "
+                    "the family wake work cannot run" % (name, sw["fbwake"])))
+    return out
+
+
+def _fb_integrated_rows(name, blk, sw, st, integ):
+    """the IOFBIntegrated A/B: the property the report shows against the switch, and what the kext did"""
+    prop = (re.search(r'"IOFBIntegrated" = (\w+)', blk) or [None, None])[1]
+    mode = sw.get("fbintegrated", 0)
+    shown = "IOFBIntegrated %s" % (prop if prop else "absent")
+    if integ is None:
+        return [("WARN", "integrated A/B", "%s: no RDNA3,IntegratedAB (a build older than DRIVER-PLAN N40); %s" % (name, shown))]
+    if integ.startswith("never opened"):
+        return [("WARN", "integrated A/B", "%s: %s - the A/B was never applied; %s" % (name, integ, shown))]
+    bad = (mode == 1 and prop is not None) or (mode == 2 and prop != "Yes")
+    extra = ""
+    if st.get("integ_reset"):
+        extra += "; IOGraphics re-set it %d time(s), applied again" % st["integ_reset"]
+    if st.get("integ_late"):
+        extra += "; applied late %d time(s) (an open not through our open())" % st["integ_late"]
+    return [("WARN" if bad else "INFO", "integrated A/B", "%s: %s; %s%s%s" % (
+        name, integ, shown, extra, ": NOT what rdna3fbintegrated=%d asks (1 = removed, 2 = Yes)" % mode if bad else ""))]
+
+
+def _fb_wake_row(name, sw, g):
+    tap = sw.get("waketap")
+    power_ons = g("wake_plain_on") + g("wake_family")
+    why = []
+    if g("wake_nogate"):
+        why.append("no gate %d time(s)" % g("wake_nogate"))
+    if g("wake_fails"):
+        why.append("the wake work FAILED %d time(s) (retried %d, given up %d)" % (
+            g("wake_fails"), g("wake_retries"), g("wake_gave_up")))
+    if sw.get("fbwake"):
+        if g("wake_sleeps") > g("wake_family") + g("wake_paging_already"):
+            why.append("a system sleep without the family's wake work and without paging on - the serial log's "
+                       "'system wake' line says whether WindowServer waited")
+        if tap == 0:
+            why.append("no notification tap")
+        if power_ons >= 2 and g("wake_tap_events") == 0:
+            why.append("%d power-ons and the tap saw no WillSleep/DidWake at all (only display sleeps, or a deaf tap: "
+                       "the serial log's 'system sleep #' lines say)" % power_ons)
+        if g("wake_slept_pending"):
+            why.append("a system sleep still recorded when the report was taken (the wake work did not run yet)")
+    return ("WARN" if why else "INFO", "wake", "%s: system sleeps %d, family wakes %d (most DidWake(false) owed %d), "
+            "plain power-ons %d, paging already on %d (WillSleep(false) dropped %d), DidWake(false) seen %d, "
+            "WillSleep(false) unanswered %d, tap events %d (tap %s), sleep pending %d, wake work off at a wake %d "
+            "(rdna3fbwake %d)%s" % (
+                name, g("wake_sleeps"), g("wake_family"), g("wake_owed_max"), g("wake_plain_on"),
+                g("wake_paging_already"), g("wake_dropped"), g("wake_didwake_seen"), g("wake_unanswered"),
+                g("wake_tap_events"), "?" if tap is None else "present" if tap else "ABSENT", g("wake_slept_pending"),
+                g("wake_off"), sw.get("fbwake", 0), ": " + "; ".join(why) if why else ""))
 
 
 def fb_n40_lines(path, txt="", args=""):
@@ -2589,6 +2696,7 @@ def fb_n40_lines(path, txt="", args=""):
             name, ", ".join("%s %s" % (k, sw[k]) for k in FB_N40_SWITCHES if k in sw),
             "; boot console here" if sw.get("bootconsole") else "; not the boot console") +
             ("; MISSING %s" % ",".join(missing) if missing else "")))
+        out.extend(_fb_switch_rows(name, sw, args))
         st = _ioreg_dict(blk, "RDNA3,FBStats") or {}
         out.append(("INFO", "connection flags", "%s: kConnectionDisplayFlags answered %d (rdna3dispflags %d), asked %s" % (
             name, 1 if sw.get("dispflags") else 0, sw.get("dispflags", 0),
@@ -2598,54 +2706,87 @@ def fb_n40_lines(path, txt="", args=""):
             out.append(("WARN", "open order", "%s: no RDNA3,OpenOrder: WindowServer never opened it" % name))
         else:
             bad = sw.get("glorder") and gl != "?" and gl != dep
-            out.append(("WARN" if bad else "INFO", "open order", "%s: %s; IOFramebufferOpenGLIndex %s, IOFBDependentIndex %s%s" % (
+            failed = "open FAILED" in order
+            out.append(("WARN" if bad or failed else "INFO", "open order", "%s: %s; IOFramebufferOpenGLIndex %s, IOFBDependentIndex %s%s" % (
                 name, order, gl, dep, ": STILL DIFFERENT with rdna3glorder=1 (DRIVER-PLAN N40 item 2)" if bad else "")))
-        integ = _ioreg_str(blk, "RDNA3,IntegratedAB")
-        out.append(("INFO" if integ else "WARN", "integrated A/B", "%s: %s" % (
-            name, integ or "no RDNA3,IntegratedAB: the framebuffer was never opened")))
+        out.extend(_fb_integrated_rows(name, blk, sw, st, _ioreg_str(blk, "RDNA3,IntegratedAB")))
         if not st:
             out.append(("WARN", "counters", "%s has no RDNA3,FBStats: the N40 counters are not known" % name))
             continue
+        smiss = [k for k in FB_N40_STATS if k not in st]
+        if smiss:
+            out.append(("WARN", "counters", "%s: RDNA3,FBStats MISSING %s: those counters are not known (not 0; a "
+                        "build older than the ECC review of N40)" % (name, ",".join(smiss))))
         g = lambda k: st.get(k, 0)
-        cfail = g("cursor_fails") > 0 or (sw.get("cursorasync") and g("cursor_sets") > 0 and g("cursor_applies") == 0)
-        out.append(("WARN" if cfail else "INFO", "cursor", "%s: %s; sets %d, thread-call runs %d, folded %d, unchanged %d, "
-                    "applied %d, FAILED %d, on WindowServer's thread %d, images %d" % (
-                        name, "thread call" if sw.get("cursorasync") else "synchronous (rdna3cursorasync=0 or no thread call)",
+        if g("open_ungated") or g("open_fails"):
+            out.append(("WARN", "open", "%s: open() outside IOGraphics' system gate %d time(s), failed opens %d" % (
+                name, g("open_ungated"), g("open_fails"))))
+        async_on = sw.get("cursorasync") and sw.get("hwcursor", 1)
+        unused = async_on and "cursor_sets" in st and "cursor_images" in st and g("cursor_sets") == 0 and g("cursor_images") == 0
+        cfail = g("cursor_fails") > 0 or g("cursor_image_fails") > 0 or \
+            (sw.get("cursorasync") and g("cursor_sets") > 0 and g("cursor_applies") == 0)
+        out.append(("WARN" if cfail or unused else "INFO", "cursor", "%s: %s; sets %d, thread-call runs %d, folded %d, unchanged %d, "
+                    "applied %d, FAILED %d, on WindowServer's thread %d, images %d (first image refused %d, not "
+                    "converted %d)%s" % (
+                        name, "thread call" if sw.get("cursorasync") and sw.get("cursorasync_active", 1) else
+                        "synchronous (rdna3cursorasync=0 or no thread call)",
                         g("cursor_sets"), g("cursor_kicks"), g("cursor_coalesced"), g("cursor_same"),
-                        g("cursor_applies"), g("cursor_fails"), g("cursor_sync"), g("cursor_images"))))
-        # a system sleep and no family wake with the switch on: either paging was on at the power-on (the serial
-        # log's "system wake: ... is not needed" line) or WindowServer waited for paging
-        wbad = g("wake_nogate") > 0 or (sw.get("fbwake") and g("wake_sleeps") > 0 and g("wake_family") == 0)
-        out.append(("WARN" if wbad else "INFO", "wake", "%s: system sleeps %d, family wakes %d (most DidWake(false) owed %d), "
-                    "plain power-ons %d, DidWake(false) seen %d, WillSleep(false) unanswered %d, no gate %d, "
-                    "wake work off at a wake %d (rdna3fbwake %d)%s" % (
-                        name, g("wake_sleeps"), g("wake_family"), g("wake_owed_max"), g("wake_plain_on"),
-                        g("wake_didwake_seen"), g("wake_unanswered"), g("wake_nogate"), g("wake_off"), sw.get("fbwake", 0),
-                        "" if not wbad else ": a system sleep without the family's wake work - the serial log's 'system wake' "
-                        "line says whether paging was on or WindowServer waited")))
+                        g("cursor_applies"), g("cursor_fails"), g("cursor_sync"), g("cursor_images"),
+                        g("cursor_image_fails"), g("cursor_convert_fails"),
+                        ": WindowServer never set a cursor image or position on the hardware cursor" if unused else "")))
+        out.append(_fb_wake_row(name, sw, g))
         src = _ioreg_str(blk, "RDNA3,VBLSource") or "?"
         overlap = g("vbl_overlap")
-        out.append(("WARN" if overlap and sw.get("vblonce") else "INFO", "VBL", "%s: source %s (no hardware vblank "
+        dcn = _ioreg_str(blk, "RDNA3,Mode") == "dcn"
+        novbl = "vbl_delivered" in st and g("vbl_delivered") == 0 and dcn
+        vwhy = []
+        if overlap and sw.get("vblonce") and sw.get("vblonce_active", 1):
+            vwhy.append("overlapping runs with vblonce on")
+        if novbl:
+            vwhy.append("NO VBL delivered on a DCN head")
+        if g("vbl_call_failed"):
+            vwhy.append("NO VBL thread call")
+        out.append(("WARN" if vwhy else "INFO", "VBL", "%s: source %s (no hardware vblank "
                     "interrupt yet), delivered %d, 250 us re-looks %d, delivered with the counter unmoved %d, "
-                    "overlapping runs %d (rdna3vblonce %d%s)" % (
+                    "overlapping runs %d (rdna3vblonce %d%s)%s" % (
                         name, src, g("vbl_delivered"), g("vbl_polls"), g("vbl_still"), overlap, sw.get("vblonce", 0),
-                        "; overlaps with vblonce=0: the switch's case" if overlap and not sw.get("vblonce") else "")))
+                        "; overlaps with vblonce=0: the switch's case" if overlap and not sw.get("vblonce") else "",
+                        ": " + "; ".join(vwhy) if vwhy else "")))
         out.append(("INFO", "detailed timings", "%s: validateDetailedTiming %d (%d one of our modes, %d refused), "
                     "setDetailedTimings %d, ids mapped %d (rdna3fbdtmap %d)" % (
                         name, g("dt_validate"), g("dt_matched"), g("dt_refused"), g("dt_sets"), g("dt_mapped"),
                         sw.get("fbdtmap", 0))))
-    # RDNA3AGDC's vendor answer: the tests file (autoreport.sh) or the archive's 17-sysctl-agdc.txt (collect.sh)
+    out.extend(agdc_vendor_lines(path, txt, args))
+    return out
+
+
+def agdc_vendor_lines(path, txt="", args=""):
+    """[(level, label, text)]: RDNA3AGDC's vendor answer from the tests file (autoreport.sh) or the archive's
+    17-sysctl-agdc.txt (collect.sh); a TESTS-ONLY report has the tests file alone"""
+    args = args or (re.search(r"^boot-args: (.*)$", txt or "", re.M) or [None, ""])[1]
     txt = (txt or "") + "\n" + read_tar_member(path, "17-sysctl-agdc.txt")
-    v = re.findall(r"debug\.rdna3agdc_vendor: (-?\d+)", txt or "")
-    asked = re.findall(r"debug\.rdna3agdc_vendor_asked: (\d+)", txt or "")
-    last = re.findall(r"debug\.rdna3agdc_vendor_last: (-?\d+)", txt or "")
+    out = []
+    v = re.findall(r"debug\.rdna3agdc_vendor: (-?\d+)", txt)
+    asked = re.findall(r"debug\.rdna3agdc_vendor_asked: (\d+)", txt)
+    last = re.findall(r"debug\.rdna3agdc_vendor_last: (-?\d+)", txt)
+    armed = bool(re.search(r"(?:^|\s)rdna3agdc=[1-9]", args or "") or re.search(r"debug\.rdna3agdc: [1-9]\b", txt))
+    req = _boot_arg_num(args, "rdna3agdcvendor")
+    if req is not None and not armed:
+        out.append(("WARN", "AGDC vendor", "boot-args ask rdna3agdcvendor=%s but RDNA3AGDC is not armed (no rdna3agdc=1..): "
+                    "the vendor answer is never given" % req[0]))
     if v:
         n = int(v[-1])
         out.append(("INFO", "AGDC vendor", "vendor info answer %s (debug.rdna3agdc_vendor %d), asked %s time(s)%s" % (
             AGDC_VENDORS.get(n, "AMD 0x1002 (unknown value %d)" % n), n, asked[-1] if asked else "?",
             "; last answered as %s" % AGDC_VENDORS.get(int(last[-1]), last[-1]) if last and last[-1] != "-1" else
             "; never asked" if last else "")))
-    elif re.search(r"\brdna3agdc=[1-9]", args or "") or re.search(r"debug\.rdna3agdc: 1\b", txt or ""):
+        if req is not None and armed and req[1] != n:
+            out.append(("WARN", "AGDC vendor", "boot-args ask rdna3agdcvendor=%s but debug.rdna3agdc_vendor is %d (the "
+                        "boot-arg did not reach RDNA3AGDC, or the sysctl was changed at runtime)" % (req[0], n)))
+        if n and asked and int(asked[-1]) == 0:
+            out.append(("WARN", "AGDC vendor", "the A/B answer %s is set but IOPresentment never asked the vendor info "
+                        "(debug.rdna3agdc_vendor_asked 0): this run says nothing about it" % AGDC_VENDORS.get(n, n)))
+    elif armed:
         out.append(("WARN", "AGDC vendor", "AGDC armed but no debug.rdna3agdc_vendor in the tests file: an RDNA3AGDC "
                     "older than DRIVER-PLAN N40, or the counters were not collected"))
     else:
@@ -3197,6 +3338,9 @@ def summary(path, serial=None):
             out.append(("present: " + label, "%s %s" % (lv, t[:300])))
         for lv, label, t in fb_n40_lines(path, txt, args):
             out.append(("fb N40: " + label, "%s %s" % (lv, t[:300])))
+    else:   # tests only: the AGDC vendor answer still comes from the tests file
+        for lv, label, t in agdc_vendor_lines(path, txt, args):
+            out.append(("fb N40: " + label, "%s %s" % (lv, t[:300])))
     out.append(("DMA/GFX jobs", "%d verified, %d wrong" % (len(re.findall(r"job results verified", txt)),
                                                          len(re.findall(r"job results WRONG", txt)))))
     sec = ""
@@ -3495,6 +3639,9 @@ def main():
             bare = bool(re.search(r"^PLATFORM: .*, bare metal, ", ttxt, re.M))
             for lv, label, t in present_host_rows(*host_log_for(p, targs), bare=bare):
                 print("   %s present mode, %s: %s" % (lv, label, t))
+            # the AGDC vendor answer is in the tests file (autoreport.sh's rdna3agdc grep)
+            for lv, label, t in agdc_vendor_lines(p, ttxt, targs):
+                print("   %s fb N40, %s: %s" % (lv, label, t))
         # card run 2026-10-17b: the swap as a copy, and the per-frame trace
         for lv, t in swapcopy_verdict(a3_counters(ttxt) if ttxt else {}):
             print("   %s swap copy: %s" % (lv, t))

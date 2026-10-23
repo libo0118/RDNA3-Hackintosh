@@ -8,6 +8,12 @@
 #    without the family wake work, VBL runs overlapping with vblonce=1, AGDC armed without
 #    the vendor sysctl: WARN rows
 #  - framebuffers older than N40 (no RDNA3,Switches) and a report without framebuffers: WARN
+#  - the ECC review round: a boot-arg the framebuffer does not publish, a switch not in effect
+#    (cursor thread call, VBL thread call, wake tap/gate), the IOFBIntegrated A/B against the
+#    property, a never-opened head, a failed open, wake counters (power-ons with a deaf tap, a
+#    sleep still pending, failed wake work), FBStats keys missing, no VBL on a DCN head, the
+#    cursor unused or refused, the AGDC vendor (set but never asked, asked without AGDC armed,
+#    not what the boot-arg asked) and a TESTS-ONLY report's AGDC rows: WARN rows
 #  - the SUMMARY rows ("fb N40: ...") and the checklist's levels
 #  - the collectors: collect.sh writes 17-sysctl-agdc.txt, autoreport.sh greps rdna3agdc
 set -euo pipefail
@@ -30,31 +36,47 @@ FB = """+-o RDNA3Framebuffer  <class RDNA3Framebuffer, id 0x1000002d1, registere
 """
 
 
-def fb(dep, gl, n40=True, glorder=1, vblonce=1, stats=None, console=0):
+def fb(dep, gl, n40=True, glorder=1, vblonce=1, stats=None, console=0, sw=None, drop=(), integ="Yes",
+       integ_ab=None, order=None):
     extra = ""
     if n40:
         st = {"cursor_sets": 900, "cursor_kicks": 300, "cursor_coalesced": 550, "cursor_same": 50,
               "cursor_applies": 300, "cursor_fails": 0, "cursor_sync": 0, "cursor_images": 3,
+              "cursor_image_fails": 0, "cursor_convert_fails": 0,
               "wake_sleeps": 0, "wake_family": 0, "wake_owed_max": 0, "wake_plain_on": 1,
               "wake_didwake_seen": 0, "wake_unanswered": 0, "wake_nogate": 0, "wake_off": 0,
-              "vbl_delivered": 3600, "vbl_polls": 7000, "vbl_still": 2, "vbl_overlap": 0,
+              "wake_tap_events": 0, "wake_slept_pending": 0, "wake_paging_already": 0, "wake_dropped": 0,
+              "wake_fails": 0, "wake_retries": 0, "wake_gave_up": 0, "wake_stopping": 0,
+              "vbl_delivered": 3600, "vbl_polls": 7000, "vbl_still": 2, "vbl_overlap": 0, "vbl_call_failed": 0,
+              "integ_applied": 1, "integ_reset": 0, "integ_late": 0, "open_ungated": 0, "open_fails": 0,
               "dt_validate": 61, "dt_matched": 4, "dt_refused": 61, "dt_sets": 0, "dt_mapped": 0,
               "dispflags_asked": 2}
         st.update(stats or {})
-        sw = {"dispflags": 0, "glorder": glorder, "fbintegrated": 0, "cursorasync": 1, "fbwake": 1,
-              "vblonce": vblonce, "fbdtmap": 0, "fbconsole": 1, "bootconsole": console}
+        for k in drop:
+            st.pop(k, None)
+        sws = {"dispflags": 0, "glorder": glorder, "fbintegrated": 0, "cursorasync": 1, "cursorasync_active": 1,
+               "hwcursor": 1, "fbwake": 1, "waketap": 1, "wakegate": 1, "vblonce": vblonce, "vbl_call": 1,
+               "vblonce_active": vblonce, "fbdtmap": 0, "fbconsole": 1, "bootconsole": console}
+        sws.update(sw or {})
         d = lambda x: "{" + ",".join('"%s"=%d' % kv for kv in x.items()) + "}"
-        extra += '  |   "RDNA3,Switches" = %s\n' % d(sw)
+        extra += '  |   "RDNA3,Switches" = %s\n' % d(sws)
         extra += '  |   "RDNA3,FBStats" = %s\n' % d(st)
-        extra += '  |   "RDNA3,OpenOrder" = "%s"\n' % ("head 0 opened first" if dep else "head 0")
-        extra += '  |   "RDNA3,IntegratedAB" = "IOGraphics Yes, kept (rdna3fbintegrated=0), PCI bus 0"\n'
+        extra += '  |   "RDNA3,OpenOrder" = "%s"\n' % (order or ("head 0 opened first" if dep else "head 0"))
+        extra += '  |   "RDNA3,IntegratedAB" = "%s"\n' % (
+            integ_ab or "IOGraphics Yes, kept (rdna3fbintegrated=%d), PCI bus 0" % sws["fbintegrated"])
         extra += '  |   "RDNA3,VBLSource" = "otg-poll"\n'
+        extra += '  |   "RDNA3,Mode" = "dcn"\n'
+    if integ:
+        extra += '  |   "IOFBIntegrated" = %s\n' % integ
     return FB % {"dep": dep, "gl": gl, "extra": extra}
 
 
 def report(d, members, tests):
     os.makedirs(os.path.join(T, d), exist_ok=True)
     base = os.path.join(T, d, "rdna3-report-play-20261023-120000")
+    if members is None:   # TESTS ONLY: the archive never came
+        open(base + "-tests.txt", "w").write(tests)
+        return
     with tarfile.open(base + ".tar.gz", "w:gz") as t:
         for n, body in members.items():
             data = body.encode()
@@ -97,6 +119,50 @@ m = dict(BASE)
 m["12-ioreg-fb.txt"] = "$ ioreg\n" + fb(0, 0, vblonce=0, stats={"vbl_overlap": 7}, console=1) + "[exit 0]\n"
 m["17-sysctl-agdc.txt"] = AGDC.replace("vendor: 1", "vendor: 0").replace("vendor_last: 1", "vendor_last: 0")
 report("e", m, "")
+
+# f: the boot-args ask what the framebuffer does not publish; switches not in effect
+m = dict(BASE)
+m["01-boot-args.txt"] = ARGS.replace("rdna3fb=1", "rdna3fb=1 rdna3fbwake=0 rdna3glorder=1 rdna3vblonce=yes")
+m["12-ioreg-fb.txt"] = "$ ioreg\n" + fb(0, 0, console=1, sw={"cursorasync_active": 0, "vbl_call": 0, "vblonce_active": 0,
+                                                             "waketap": 0, "wakegate": 0}) + "[exit 0]\n"
+m["17-sysctl-agdc.txt"] = AGDC
+report("f", m, "")
+
+# g: the IOFBIntegrated A/B against the property; a never-opened head; a failed open
+m = dict(BASE)
+m["12-ioreg-fb.txt"] = "$ ioreg\n" + \
+    fb(1, 1, sw={"fbintegrated": 1}, order="head 0 opened first; open FAILED 0xe00002c0 (1 failure(s))") + \
+    fb(0, 0, console=1, sw={"fbintegrated": 2}, integ=None, stats={"integ_reset": 2}) + \
+    fb(2, 2, integ=None, integ_ab="never opened (rdna3fbintegrated=0)") + "[exit 0]\n"
+m["17-sysctl-agdc.txt"] = AGDC
+report("g", m, "")
+
+# h: wake: power-ons with a deaf tap, a sleep pending, failed wake work; a sleep covered by paging already on;
+#    old FBStats (keys missing); no VBL on a DCN head; the cursor never used; the first cursor image refused
+m = dict(BASE)
+m["12-ioreg-fb.txt"] = "$ ioreg\n" + \
+    fb(1, 1, stats={"wake_plain_on": 3, "wake_slept_pending": 1, "wake_fails": 6, "wake_retries": 5, "wake_gave_up": 1,
+                    "vbl_delivered": 0, "cursor_sets": 0, "cursor_images": 0}) + \
+    fb(0, 0, console=1, stats={"wake_sleeps": 1, "wake_paging_already": 1, "wake_tap_events": 2, "wake_plain_on": 2,
+                               "cursor_image_fails": 1}, drop=("open_fails", "wake_dropped")) + "[exit 0]\n"
+m["17-sysctl-agdc.txt"] = AGDC
+report("h", m, "")
+
+# i: AGDC: the A/B answer set but never asked, the boot-arg not what the sysctl says
+m = dict(BASE)
+m["01-boot-args.txt"] = ARGS.replace("rdna3agdc=3", "rdna3agdc=3 rdna3agdcvendor=2")
+m["12-ioreg-fb.txt"] = "$ ioreg\n" + fb(0, 0, console=1) + "[exit 0]\n"
+m["17-sysctl-agdc.txt"] = AGDC.replace("asked: 3", "asked: 0")
+report("i", m, "")
+
+# j: rdna3agdcvendor without AGDC armed
+m = dict(BASE)
+m["01-boot-args.txt"] = "boot-args\trdna3lvl=8 rdna3fb=1 rdna3agdcvendor=1\n"
+m["12-ioreg-fb.txt"] = "$ ioreg\n" + fb(0, 0, console=1) + "[exit 0]\n"
+report("j", m, "")
+
+# k: TESTS ONLY: the AGDC rows from the tests file
+report("k", None, "boot-args: rdna3lvl=8 rdna3fb=1 rdna3agdc=3 rdna3agdcvendor=1\n" + AGDC.replace("$ sh -c", "#"))
 PY
 
 run() { python3 -I "$ROOT/tools/triage_reports.py" "$T/$1" > "$T/out.txt" 2>&1 || true; }
@@ -144,6 +210,51 @@ row INFO "AGDC vendor" d | grep -qF "AGDC not armed" || fail "d: AGDC not armed"
 run e
 row INFO VBL e | grep -qF "overlapping runs 7 (rdna3vblonce 0; overlaps with vblonce=0: the switch's case)" || fail "e: VBL"
 row INFO "AGDC vendor" e | grep -qF "AMD 0x1002 (debug.rdna3agdc_vendor 0)" || fail "e: AMD"
+
+# ---- f: what the boot-args ask against what the framebuffer publishes, and what is in effect
+run f
+row WARN "switch asked" f | grep -qF "fb 0: boot-args ask rdna3fbwake=0 but the framebuffer publishes fbwake 1" || fail "f: fbwake asked"
+row WARN "switch asked" f | grep -qF "boot-args ask rdna3vblonce=yes but the framebuffer publishes vblonce 1" || fail "f: vblonce not a number"
+hasnt "rdna3glorder=1 but" "f: a boot-arg the framebuffer publishes as asked"
+row WARN "switch in effect" f | grep -qF "rdna3cursorasync 1 but NO cursor thread call" || fail "f: cursor thread call"
+row WARN "switch in effect" f | grep -qF "NO VBL thread call: IOGraphics gets no VBL at all (rdna3vblonce 1 is not in effect)" || fail "f: VBL call"
+row WARN "switch in effect" f | grep -qF "rdna3fbwake 1 but NO notification tap" || fail "f: tap"
+row WARN "switch in effect" f | grep -qF "NO command gate on the controller workloop" || fail "f: gate"
+row WARN wake f | grep -qF "(tap ABSENT)" || fail "f: the wake row names the tap"
+run c
+hasnt "switch in effect" "c: no RDNA3,Switches at all is the older WARN only"
+
+# ---- g: the IOFBIntegrated A/B
+run g
+row WARN "integrated A/B" g | grep -qF "fb 1: IOGraphics Yes, kept (rdna3fbintegrated=1), PCI bus 0; IOFBIntegrated Yes: NOT what rdna3fbintegrated=1 asks" || fail "g: removed but present"
+row WARN "integrated A/B" g | grep -qF "fb 0: IOGraphics Yes, kept (rdna3fbintegrated=2), PCI bus 0; IOFBIntegrated absent; IOGraphics re-set it 2 time(s), applied again: NOT what rdna3fbintegrated=2 asks" || fail "g: set but absent"
+row WARN "integrated A/B" g | grep -qF "fb 2: never opened (rdna3fbintegrated=0) - the A/B was never applied" || fail "g: never opened"
+row WARN "open order" g | grep -qF "fb 1: head 0 opened first; open FAILED 0xe00002c0" || fail "g: failed open"
+
+# ---- h: wake, FBStats, VBL, cursor
+run h
+row WARN wake h | grep -qF "fb 1: system sleeps 0" || fail "h: wake fb 1"
+row WARN wake h | grep -qF "the wake work FAILED 6 time(s) (retried 5, given up 1)" || fail "h: wake failures"
+row WARN wake h | grep -qF "3 power-ons and the tap saw no WillSleep/DidWake at all" || fail "h: deaf tap"
+row WARN wake h | grep -qF "a system sleep still recorded when the report was taken" || fail "h: pending sleep"
+row INFO wake h | grep -qF "fb 0: system sleeps 1, family wakes 0 (most DidWake(false) owed 0), plain power-ons 2, paging already on 1" || fail "h: a sleep with paging already on is no WARN"
+row WARN counters h | grep -qF "fb 0: RDNA3,FBStats MISSING wake_dropped,open_fails" || fail "h: missing FBStats keys"
+row WARN VBL h | grep -qF "NO VBL delivered on a DCN head" || fail "h: no VBL on DCN"
+row WARN cursor h | grep -qF "WindowServer never set a cursor image or position on the hardware cursor" || fail "h: cursor unused"
+row WARN cursor h | grep -qF "(first image refused 1, not converted 0)" || fail "h: first image refused"
+
+# ---- i, j: the AGDC vendor
+run i
+row WARN "AGDC vendor" i | grep -qF "boot-args ask rdna3agdcvendor=2 but debug.rdna3agdc_vendor is 1" || fail "i: vendor asked"
+row WARN "AGDC vendor" i | grep -qF "the A/B answer NVIDIA 0x10de is set but IOPresentment never asked" || fail "i: never asked"
+run j
+row WARN "AGDC vendor" j | grep -qF "boot-args ask rdna3agdcvendor=1 but RDNA3AGDC is not armed" || fail "j: vendor without AGDC"
+
+# ---- k: a TESTS-ONLY report still has the AGDC rows
+run k
+grep -qF "TESTS ONLY" "$T/out.txt" || fail "k: not a tests-only report"
+row INFO "AGDC vendor" k | grep -qF "vendor info answer NVIDIA 0x10de (debug.rdna3agdc_vendor 1), asked 3 time(s)" || fail "k: AGDC rows"
+grep -qF "  fb N40: AGDC vendor" "$T/out.txt" || fail "k: SUMMARY AGDC row"
 
 # ---- the collectors
 grep -q 'run 17-sysctl-agdc.txt' "$ROOT/tools/macos/collect.sh" || fail "collect.sh does not write 17-sysctl-agdc.txt"
