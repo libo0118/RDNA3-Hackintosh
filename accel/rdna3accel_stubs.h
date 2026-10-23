@@ -92,6 +92,14 @@ public:
     struct rd3_vp_alloc fPark = {};
     /* N41: backed by an allocation once (free() traces the object's end for the trace decoder) */
     bool fBacked = false;
+    /* N41 (security review): the generation of the allocation a GEM BO was imported over (rd3AccelSurfGem;
+     * 0 never): only that allocation is parked (rd3_vp_should_park) */
+    unsigned long long fBoGen = 0;
+    /* N41: the global list of vidmems holding a park (gVmParkLock), for the release under VRAM pressure or
+     * past debug.rdna3accel_vm_park_cap_mb; fParkSince orders it (mach_absolute_time at the park) */
+    RD3VidMemory *fParkPrev = nullptr, *fParkNext = nullptr;
+    bool fParkListed = false;
+    unsigned long long fParkSince = 0;
 
     bool allocPhysical() APPLE_KEXT_OVERRIDE;
     void deallocPhysical() APPLE_KEXT_OVERRIDE;

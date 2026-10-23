@@ -22,6 +22,9 @@
  *   rdna3RefVram                     a GEM BO over an accelerator
  *                                    allocation holds it
  *                                    (RD_NR_XNU_SURFACE_BO, A3)
+ *   rdna3VramRefs                    how many hold an accelerator
+ *                                    allocation (N41: parks released
+ *                                    under pressure only without a BO)
  *   rdna3NewAccelClient              an IOAccelRDNA3Bridge (RDNA3UserClient)
  *                                    for a process whose sandbox refuses
  *                                    RDNA3UserClient (WindowServer, card
@@ -455,6 +458,27 @@ IOReturn RDNA3Accel::platformVramRef(void *handle)
     return r;
 }
 
+/* RD3K_VRAM_FN_REFS (DRIVER-PLAN N41, security review): how many hold an
+ * accelerator allocation - 1 the accelerator only, more a GEM BO too. The
+ * accelerator gives a parked allocation back under VRAM pressure only when
+ * no BO holds it. */
+IOReturn RDNA3Accel::platformVramRefs(void *handle, unsigned int *refs)
+{
+    IOReturn r = kIOReturnNotFound;
+    if (!handle || !refs || !fDrmLock)
+        return kIOReturnBadArgument;
+    *refs = 0;
+    IOLockLock(fDrmLock);
+    for (RDNA3VramHandle *h = fVramHandles; h; h = h->next)
+        if (h == handle && h->refs) {
+            *refs = h->refs;
+            r = kIOReturnSuccess;
+            break;
+        }
+    IOLockUnlock(fDrmLock);
+    return r;
+}
+
 /* the accelerator kext's service, for the IOSurface lookups it answers
  * (RD3ACCEL_SS_FN); it may start after the first client opens. fDrmLock
  * held; the caller gets its own reference (the lock is dropped around the
@@ -817,6 +841,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return platformVramFree((RD3KVramRequest *)p1);
         if (fn->isEqualTo(RD3K_VRAM_FN_REF))
             return platformVramRef(p1);
+        if (fn->isEqualTo(RD3K_VRAM_FN_REFS))
+            return platformVramRefs(p1, (unsigned int *)p2);
         if (fn->isEqualTo(RD3K_GPUVA_FN_HANDLES)) {
             RD3KRmHandles *h = (RD3KRmHandles *)p1;
             if (!h || h->version != RD3K_GPUVA_ABI_VERSION)

@@ -370,6 +370,13 @@ struct RD3KSurfShareEsc {
 #define RD3K_ESC_SURF_GEM      0xE4u
 #define RD3K_SURFGEM_VERSION   1u
 #define RD3K_VRAM_FN_REF      "rdna3RefVram"
+/* DRIVER-PLAN N41 (security review): the core's reference count of an
+ * accelerator allocation (p1 the handle, p2 unsigned int * out): 1 only the
+ * accelerator's own, more a GEM BO holds it. kIOReturnNotFound for a handle
+ * the core does not know; an older core answers kIOReturnUnsupported. The
+ * accelerator releases a parked allocation under VRAM pressure only when
+ * no BO holds it (releasing a held one frees nothing). */
+#define RD3K_VRAM_FN_REFS     "rdna3VramRefs"
 struct RD3KSurfGem {
     unsigned int version;
     unsigned int surfaceID, plane;     /* in */
