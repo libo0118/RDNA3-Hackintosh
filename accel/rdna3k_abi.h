@@ -322,7 +322,8 @@ struct RD3KDisplayHotplug {
 #define RD3K_DISPIRQ_WHY_STORM     3u   /* disabled after a storm */
 #define RD3K_DISPIRQ_WHY_REG       4u   /* the enable bit did not read back */
 #define RD3K_DISPIRQ_WHY_HEAD      5u   /* the head is gone (no OTG / HUBP) */
-#define RD3K_DISPIRQ_WHY_DOWN      6u   /* the DCN was not brought back after a power loss / mode-1 reset */
+#define RD3K_DISPIRQ_WHY_DOWN      6u   /* the display, or this head alone (still lost after the restore), was not
+                                         * brought back after a power loss / mode-1 reset: nothing is written */
 typedef void (*RD3KDisplayIrqFn)(void *target, unsigned int head, unsigned int kind, unsigned int frame,
                                  unsigned long long irqAbs);
 struct RD3KDisplayIrq {

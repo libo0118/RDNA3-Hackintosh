@@ -1085,7 +1085,8 @@ void RDNA3Framebuffer::virqApply(const RD3KDisplayIrq *r, const char *when)
               : r->why == RD3K_DISPIRQ_WHY_STORM   ? "cut after a storm"
               : r->why == RD3K_DISPIRQ_WHY_REG     ? "the enable bit did not read back"
               : r->why == RD3K_DISPIRQ_WHY_HEAD    ? "the head has no OTG / HUBP"
-              : r->why == RD3K_DISPIRQ_WHY_DOWN    ? "the display was not brought back after a power loss / reset"
+              : r->why == RD3K_DISPIRQ_WHY_DOWN    ? "the display (or this head: still lost after the restore) was not "
+                                                     "brought back after a power loss / reset"
                                                    : "unknown");
     fVirqLive = live;
     fVirqPflipLive = plive;
