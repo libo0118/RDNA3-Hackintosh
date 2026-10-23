@@ -175,6 +175,16 @@ public:
     /* B7: an HPD pin changed (bring-up work loop, after the ack); the
      * connectors are probed again on a thread call */
     void displayHotplug(uint32_t pin, int connected);
+    /* N42: an HPD interrupt, acked (bring-up work loop): counted and logged;
+     * acted on (displayHotplug) only with rdna3hpdirq=1 */
+    void displayHpdIrq(uint32_t pin, int connected, int rx);
+    /* N42 (RDNA3DisplayIrq.cpp): a DCN vblank / vupdate / pflip IV on the
+     * bring-up's interrupt work loop (fIhLock held): acked, counted, handed
+     * to the head's framebuffer. false = not a DCN source of these kinds */
+    bool displayIrq(const struct rdna3_iv *iv);
+    /* the sources enabled again as registered (a wake, a reset, a mode set
+     * moved the head's OTG / HUBP); 'force' re-writes them all */
+    void displayIrqSync(const char *why, bool force);
     void displayShutdown();
     /* D4 (RDNA3Resume.cpp): a GPU recovery happened (chipReset: the mode-1
      * reset, else a GFX / SDMA soft reset); DRM lock held */
@@ -351,6 +361,7 @@ private:
     struct thread_call *fHotplugCall = nullptr;
     volatile UInt32 fHotplugPending = 0;      /* bit n = HPD pin n changed */
     uint32_t      fHotplugEvents = 0;
+    volatile uint32_t fHpdIrqs = 0;           /* N42: HPD interrupts claimed */
     static void   displayHotplugWork(void *owner, void *);
     /* D6 hotplug to the framebuffer (rdna3hotplug=1, RDNA3Hotplug.cpp) */
     struct RDNA3HotplugState *fHp = nullptr;
@@ -366,6 +377,16 @@ private:
     void          hotplugTidyProps();
     static void   hotplugTick(void *owner, void *);
     IOReturn      displayHotplugQuery(struct RD3KDisplayHotplug *q);
+    /* DRIVER-PLAN N42: display interrupts (RDNA3DisplayIrq.cpp) */
+    struct RDNA3DispIrq *fDirq = nullptr;
+    void          displayIrqInit();
+    void          displayIrqFree();
+    IOReturn      displayIrqCall(struct RD3KDisplayIrq *r);
+    void          displayIrqPublish();
+public:
+    int           displayIrqSysctl(int *on, bool set);         /* debug.rdna3_vblirq */
+    int           displayIrqReport(char *buf, size_t len);     /* debug.rdna3_dispirq */
+private:
     bool          displayInit(const amd_discovery *disc);
     void          displayFree();
     void          displayMeasureRefresh();

@@ -111,13 +111,25 @@ struct RD3KFlipRequest {
  * the time spent. A framebuffer without it answers kIOReturnUnsupported
  * (the accelerator then polls the core's rdna3DisplayStatus itself) */
 #define RD3K_FLIP_FN_LATCHWAIT "rdna3FlipLatchWait"
-#define RD3K_FLIPWAIT_VERSION  1u
+/* version 2 (DRIVER-PLAN N42) appends irqFlags / irqLatUs: whether the
+ * head's flip-done interrupt (the HUBP's, DC_IRQ_SOURCE_PFLIPn) is live and
+ * ended this wait. The framebuffer answers 1 and 2 (writing the appended
+ * fields for 2 only); one older than N42 refuses 2 with kIOReturnBadArgument
+ * and the accelerator asks again with 1. */
+#define RD3K_FLIPWAIT_VERSION  2u
+#define RD3K_FLIPWAIT_MIN      1u
+#define RD3K_FLIPWAIT_OK(v)    ((v) >= RD3K_FLIPWAIT_MIN && (v) <= RD3K_FLIPWAIT_VERSION)
 #define RD3K_FLIPWAIT_MAX_US   100000u
+#define RD3K_FLIPWAIT_IRQ_LIVE 1u     /* the head's pflip interrupt is enabled for the framebuffer */
+#define RD3K_FLIPWAIT_IRQ_WOKE 2u     /* a pflip interrupt came during this wait (flip done) */
 struct RD3KFlipLatchWait {
     unsigned int version;
     unsigned int timeoutUs;           /* in */
     unsigned int pending, frame;      /* out */
     unsigned int waitedUs, pad;       /* out */
+    /* version 2 */
+    unsigned int irqFlags;            /* out: RD3K_FLIPWAIT_IRQ_* */
+    unsigned int irqLatUs;            /* out, IRQ_WOKE: the core's handler -> this wait saw the latch, us */
 };
 
 /* ---- display heads (answered by the core kext, asked by RDNA3Framebuffer):
@@ -277,6 +289,53 @@ struct RD3KDisplayHotplug {
     unsigned int events;          /* out: debounced changes on all pins since start */
     unsigned int hotplug;         /* out: 1 = rdna3hotplug polls the pins */
     unsigned int lost;            /* out: +1 every time the picture in VRAM was lost */
+};
+
+/* DRIVER-PLAN N42: the display interrupts of a head (amdgpu's
+ * dm_crtc_high_irq / dm_pflip_high_irq model). The framebuffer REGISTERs a
+ * function the core calls from its interrupt work loop (the bring-up's IH
+ * handler, after dc_interrupt_ack) for each VBLANK (OTG VSTARTUP), PFLIP
+ * (the head's HUBP flip latched) or VUPDATE interrupt of its head; the core
+ * enables those sources (dc_interrupt_set) while a function is registered,
+ * the interrupt path is live (rdna3msi=1) and rdna3vblirq / the sysctl
+ * debug.rdna3_vblirq allow it, and disables a source that storms. The
+ * function must only record and schedule (thread_call_enter, IOLockWakeup):
+ * no call back into the core. Calls run under the core's registration lock,
+ * so after UNREGISTER returns none runs or will run (the framebuffer
+ * unregisters in stop() before its kext can go). STATS: the counters and
+ * what is enabled now. Answers: kIOReturnSuccess (out fields valid; 'enabled'
+ * may still be 0: 'why' says), kIOReturnNotReady (no display, or the
+ * interrupt path not up yet: ask again later), kIOReturnUnsupported
+ * (rdna3vblirq=0, or a core older than N42: IOService's answer). */
+#define RD3K_DISPLAY_FN_IRQ        "rdna3DisplayIrq"
+#define RD3K_DISPIRQ_VERSION       1u
+#define RD3K_DISPIRQ_OP_REGISTER   1u
+#define RD3K_DISPIRQ_OP_UNREGISTER 2u
+#define RD3K_DISPIRQ_OP_STATS      3u
+#define RD3K_DISPIRQ_VBLANK        1u   /* DC_IRQ_SOURCE_VBLANKn */
+#define RD3K_DISPIRQ_PFLIP         2u   /* DC_IRQ_SOURCE_PFLIPn */
+#define RD3K_DISPIRQ_VUPDATE       4u   /* DC_IRQ_SOURCE_VUPDATEn */
+/* why a wanted source is not enabled */
+#define RD3K_DISPIRQ_WHY_NONE      0u
+#define RD3K_DISPIRQ_WHY_SYSCTL    1u   /* debug.rdna3_vblirq=0 */
+#define RD3K_DISPIRQ_WHY_NOIRQ     2u   /* no MSI handler (rdna3msi=0, or not registered) */
+#define RD3K_DISPIRQ_WHY_STORM     3u   /* disabled after a storm */
+#define RD3K_DISPIRQ_WHY_REG       4u   /* the enable bit did not read back */
+#define RD3K_DISPIRQ_WHY_HEAD      5u   /* the head is gone (no OTG / HUBP) */
+typedef void (*RD3KDisplayIrqFn)(void *target, unsigned int head, unsigned int kind, unsigned int frame,
+                                 unsigned long long irqAbs);
+struct RD3KDisplayIrq {
+    unsigned int version;          /* RD3K_DISPIRQ_VERSION */
+    unsigned int op;               /* RD3K_DISPIRQ_OP_* */
+    unsigned int head;
+    unsigned int want;             /* REGISTER: RD3K_DISPIRQ_* sources */
+    RD3KDisplayIrqFn fn;           /* REGISTER */
+    void *target;                  /* REGISTER: fn's first argument */
+    unsigned int enabled;          /* out: the sources enabled now */
+    unsigned int why;              /* out: RD3K_DISPIRQ_WHY_* of a wanted source not enabled */
+    unsigned int otg, pipe;        /* out: where (OTG for VBLANK / VUPDATE, HUBP for PFLIP) */
+    unsigned long long vblank, pflip, vupdate;   /* out: interrupts of this head since start */
+    unsigned long long storms;     /* out: storms cut on this head's sources */
 };
 
 /* display CRC: p1 = head (uintptr_t), p2 = unsigned *crc out */

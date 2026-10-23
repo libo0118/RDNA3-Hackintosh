@@ -64,6 +64,19 @@ int main(void)
         test_bootargs = a3ladder;
         CHECK(rd3_a3_display_on());
     }
+    /* DRIVER-PLAN N42: the vblank / pflip interrupt path on unless rdna3vblirq=0, with or without the profile */
+    {
+        static const struct test_bootarg virqoff[] = { { "rdna3vblirq", 0 }, { NULL, 0 } };
+        static const struct test_bootarg virqladder[] = { { "rdna3lvl", 8 }, { "rdna3vblirq", 0 }, { NULL, 0 } };
+        test_bootargs = none;
+        CHECK(rd3_vblirq_on());
+        test_bootargs = ladder;
+        CHECK(rd3_vblirq_on());
+        test_bootargs = virqoff;
+        CHECK(!rd3_vblirq_on() && rd3_gamma_on());
+        test_bootargs = virqladder;
+        CHECK(!rd3_vblirq_on());
+    }
     /* card run 58 (2026-10-15d): WindowServer's inputs out unless rdna3a3ws=1; A3 on unless rdna3a3=0 */
     {
         static const struct test_bootarg wson[] = { { "rdna3a3ws", 1 }, { NULL, 0 } };

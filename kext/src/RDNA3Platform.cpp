@@ -823,8 +823,13 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return displaySetSource((RD3KDisplaySource *)p1);
         if (fn->isEqualTo(RD3K_DISPLAY_FN_MODES))
             return displayModes((RD3KDisplayModes *)p1);
-        if (fn->isEqualTo(RD3K_DISPLAY_FN_MODE))
-            return displaySetMode((RD3KDisplayMode *)p1);
+        if (fn->isEqualTo(RD3K_DISPLAY_FN_MODE)) {
+            const IOReturn r = displaySetMode((RD3KDisplayMode *)p1);
+            displayIrqSync("mode set", true);   /* N42: the head's sources as registered, re-written */
+            return r;
+        }
+        if (fn->isEqualTo(RD3K_DISPLAY_FN_IRQ))
+            return displayIrqCall((RD3KDisplayIrq *)p1);
         if (fn->isEqualTo(RD3K_DISPLAY_FN_BLANK))
             return displayBlank((uint32_t)(uintptr_t)p1, p2 != nullptr);
         if (fn->isEqualTo(RD3K_FN_DISPLAY_CRC))

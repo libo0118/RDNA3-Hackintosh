@@ -627,6 +627,9 @@ void RDNA3Accel::displayAfterReset(bool chipReset)
         LOG("display: the mode-1 reset took %u head(s) down; rdna3resume=1 restores them from the snapshot", lost);
     if (chipReset && fBringup && fBringup->lastVramLost())
         displayPictureLost("mode-1 reset");
+    /* N42, amdgpu_irq_gpu_reset_resume_helper: the vblank / pflip sources again */
+    if (chipReset)
+        displayIrqSync("mode-1 reset", true);
 }
 
 /* --------------------------- sleep and wake --------------------------- */
@@ -766,6 +769,8 @@ void RDNA3Accel::displayWakeWork(void *owner, void *)
     if (powerLost && (!resume || !resumed || (a->fBringup && a->fBringup->lastResumeLostVram())))
         a->displayPictureLost("wake after a power loss");
     a->hotplugResume();   /* link_resume: the HPD filters again, then the looks */
+    /* N42, amdgpu_dm_irq_resume_early: the vblank / pflip sources again */
+    a->displayIrqSync("wake", true);
     /* VCN / JPEG (rdna3vcn): amdgpu_device_ip_resume_phase2 when the card
      * kept its power; after a power loss resumeAfterPowerLoss's hwInit
      * resumed them already (vcnStart), or they wait for the next bring-up */
