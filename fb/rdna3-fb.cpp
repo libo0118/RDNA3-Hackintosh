@@ -189,12 +189,16 @@ class RDNA3Framebuffer : public IOFramebuffer {
     bool     fBootConsole = false;
     bool     fDispFlagsLogged = false, fOpenLogged = false, fOpenFailed = false;
     uint32_t fOpenUngated = 0, fOpenFails = 0;
+    /* openGated() running (nested for head 1 opened by head 0's open):
+     * IOFramebuffer::open sets 'opened' long before our A/B runs, so the
+     * periodic IOFBIntegrated re-check waits while this is not 0 */
+    volatile SInt32 fOpenDepth = 0;
     uint32_t fIntegLogged = 0;
     uint32_t fDispFlagsAsked = 0;
     RDNA3Framebuffer *copyHead0();
     IOReturn openGated(void *, void *, void *, void *);
-    /* IOFBIntegrated A/B: applied after open(); re-checked every ~2 s (the
-     * family sets the property in each open) */
+    /* IOFBIntegrated A/B: applied after open(); re-checked every ~2 s, not
+     * while an open runs (the family sets the property in its first open) */
     bool     fIntegDone = false;
     uint32_t fIntegApplied = 0, fIntegReset = 0, fIntegLate = 0;
     void     integratedAB(const char *when);
@@ -209,6 +213,11 @@ class RDNA3Framebuffer : public IOFramebuffer {
     thread_call_t fWakeRetry = nullptr;
     struct rd3fb_wake fWake = {};
     uint32_t fWakeNoGate = 0, fWakeOff = 0, fWakeStopping = 0;
+    /* wake work past the stopping test (rd3fb_wake_enter, under fLock):
+     * stop() waits for 0 before IOFramebuffer::stop (rd3fb_stop_wake_wait) */
+    int32_t  fWakeInflight = 0;
+    void     wakeLeave();
+    void     stopWaitWake();
     static IOReturn sleepTap(OSObject *self, void *ref, IOFramebuffer *fb, IOIndex event, void *info);
     void     familyDidWake(const char *why);
     void     wakeFailed(IOReturn r, const char *why, const void *sys, const void *gate);
@@ -628,7 +637,8 @@ bool RDNA3Framebuffer::start(IOService *provider)
         if (!fWakeGate || !fWakeRetry)
             FBLOG("head %u: family wake work: controller workloop %p, command gate %p, retry call %p: a system wake "
                   "%s", fHead, wl, fWakeGate, fWakeRetry,
-                  fWakeGate ? "is not retried when it fails" : "cannot do the family's wake work (WindowServer may wait for paging)");
+                  fWakeGate ? "is not retried when it fails"
+                            : "cannot do the family's wake work, nor retry it (WindowServer may wait for paging)");
     }
     registerPowerDriver(this, kFBPowerStates, 2);
     if (fDcn)
@@ -746,6 +756,8 @@ void RDNA3Framebuffer::stop(IOService *provider)
     ownSurfaceFree();
     cursorFree();
     publishStats();   /* the last counters stay in the registry for a report taken after */
+    if (fLock)
+        stopWaitWake();   /* no gate held here; super::stop takes the system and controller gates */
     super::stop(provider);
 }
 
@@ -1368,6 +1380,14 @@ IOReturn RDNA3Framebuffer::open(void)
 
 IOReturn RDNA3Framebuffer::openGated(void *, void *, void *, void *)
 {
+    /* the IOFBIntegrated re-check (vblFire) waits until this returns:
+     * IOFramebuffer::open sets 'opened' and then works for a while before
+     * our A/B below (ECC review round 2: integ_late / integ_reset counted
+     * falsely) */
+    OSIncrementAtomic(&fOpenDepth);
+    /* head 1 opened by head 0's open (below) fails in the nested call and
+     * again here: one open_fails for this open */
+    const uint32_t failsBefore = fOpenFails;
     enum rd3fb_order_why why = RD3FB_ORDER_OFF;
     IOReturn r0 = kIOReturnSuccess;
     const bool wasOpen = opened != 0;
@@ -1402,20 +1422,23 @@ IOReturn RDNA3Framebuffer::openGated(void *, void *, void *, void *)
             snprintf(txt, sizeof(txt), "%s%s", rd3fb_order_text(why), retry ? " (after a failed open)" : "");
         else
             snprintf(txt, sizeof(txt), "%s; open FAILED 0x%x (%u failure(s))", rd3fb_order_text(why), (unsigned)r,
-                     fOpenFails + 1);
+                     fOpenFails == failsBefore ? fOpenFails + 1 : fOpenFails);
         setProperty("RDNA3,OpenOrder", txt);
     }
     if (r != kIOReturnSuccess && !wasOpen) {
-        fOpenFails++;
+        if (fOpenFails == failsBefore)
+            fOpenFails++;
         fOpenFailed = true;
     } else if (r == kIOReturnSuccess) {
         fOpenFailed = false;
     }
-    /* once per open by IOGraphics (it sets the property in each open); open
-     * already before super::open() without the A/B done: a path that did not
-     * come through this override (the periodic re-check would catch it too) */
+    /* after the open that set 'opened' (IOGraphics sets the property in that
+     * one; later opens return at once); open already before super::open()
+     * without the A/B done: a path that did not come through this override
+     * (the periodic re-check would catch it too) */
     if (r == kIOReturnSuccess && opened && (!openBefore || !fIntegDone))
         integratedAB(openBefore ? "late: already open before this open(), not through it" : "open");
+    OSDecrementAtomic(&fOpenDepth);
     return r;
 }
 
@@ -1446,12 +1469,17 @@ void RDNA3Framebuffer::integratedAB(const char *when)
     setProperty("RDNA3,IntegratedAB", txt);
 }
 
-/* every ~2 s (vblFire): the A/B still holds - IOGraphics sets the property
- * again in each open(), and an open that did not come through our override
- * would leave it as IOGraphics set it */
+/* every ~2 s (vblFire): the A/B still holds - an open that did not come
+ * through our override would leave the property as IOGraphics set it.
+ * Skipped while openGated runs. fIntegDone is not cleared on close():
+ * IOFramebuffer sets 'opened' once (IOFramebuffer.cpp open, ~9308) and never
+ * clears it, and its open() sets IOFBIntegrated only on that first pass
+ * (~9031; later calls stop at 'if (opened) continue'), so after a close
+ * nothing re-sets the property and a cleared fIntegDone would only count a
+ * false integ_late */
 void RDNA3Framebuffer::integratedRecheck()
 {
-    if (!opened)
+    if (!opened || fOpenDepth > 0)   /* an open in progress applies the A/B itself at its end */
         return;
     if (!fIntegDone) {
         fIntegLate++;
@@ -1835,8 +1863,10 @@ void RDNA3Framebuffer::familyDidWake(const char *why)
 {
     IOWorkLoop *sys = getGraphicsSystemWorkLoop();
     IOCommandGate *g = nullptr;
+    /* the stopping test and the in-flight count together under fLock: stop()
+     * sets fStopping under it and then waits for the count (stopWaitWake) */
     IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
-    const bool stopping = fStopping != 0;
+    const bool stopping = !rd3fb_wake_enter(&fWakeInflight, fStopping != 0);
     if (!stopping && fWakeGate) {
         g = fWakeGate;
         g->retain();   /* stop() drops fWakeGate under fLock: ours stays valid */
@@ -1851,13 +1881,50 @@ void RDNA3Framebuffer::familyDidWake(const char *why)
     IOReturn r = kIOReturnNotReady;
     if (sys && g)
         r = sys->runAction(&RDNA3Framebuffer::wakeSysGated, this, g);
-    if (r == kIOReturnSuccess) {
-        OSSafeReleaseNULL(g);
+    if (r == kIOReturnSuccess)
         publishStats();
-        return;
-    }
-    wakeFailed(r, why, sys, g);
+    else
+        wakeFailed(r, why, sys, g);
     OSSafeReleaseNULL(g);
+    wakeLeave();   /* every exit past rd3fb_wake_enter; nothing of ours after this */
+}
+
+void RDNA3Framebuffer::wakeLeave()
+{
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    rd3fb_wake_leave(&fWakeInflight);
+    IOSimpleLockUnlockEnableInterrupt(fLock, st);
+}
+
+/* stop(), no gate held, before IOFramebuffer::stop: that one takes the
+ * system and controller gates and holds them across PMstop(), which waits
+ * for a power callout in progress (IOFramebuffer.cpp stop); a familyDidWake
+ * past its stopping test may wait for the system gate in runAction: a
+ * deadlock. Wait for it (bounded); it finishes quickly once the command
+ * gate is removed (runAction answers NotReady). */
+void RDNA3Framebuffer::stopWaitWake()
+{
+    uint32_t waited = 0;
+    int32_t n = 0;
+    for (;;) {
+        IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+        n = fWakeInflight;
+        IOSimpleLockUnlockEnableInterrupt(fLock, st);
+        const int rc = rd3fb_stop_wake_wait(n, waited);
+        if (rc == 1) {
+            if (waited)
+                FBLOG("stop: head %u waited %u ms for a family wake work in flight to finish", fHead, waited);
+            return;
+        }
+        if (rc < 0) {
+            FBLOG("stop: head %u: %d family wake work(s) STILL in flight after %u ms: IOFramebuffer::stop goes on "
+                  "(it may deadlock against the power callout waiting for IOGraphics' system gate)",
+                  fHead, (int)n, waited);
+            return;
+        }
+        IOSleep(RD3FB_STOP_WAKE_STEP_MS);
+        waited += RD3FB_STOP_WAKE_STEP_MS;
+    }
 }
 
 /* the system gate is held: the controller gate next (our command gate) */
@@ -1871,15 +1938,21 @@ IOReturn RDNA3Framebuffer::wakeSysGated(OSObject *target, void *gate, void *, vo
 }
 
 /* the wake work could not run: the sleep stays recorded, a thread call
- * tries again RD3FB_WAKE_RETRIES times ~50 ms apart, then the next power-on */
+ * tries again RD3FB_WAKE_RETRIES times ~50 ms apart, then the next power-on.
+ * Without our command gate (none made at start) a retry could not run
+ * either: given up at once, none armed (ECC review round 2) */
 void RDNA3Framebuffer::wakeFailed(IOReturn r, const char *why, const void *sys, const void *gate)
 {
     bool armed = false;
     IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
-    const int again = rd3fb_wake_failed(&fWake);
-    const uint32_t fails = fWake.fails;
-    if (!gate)
+    int again = 0;
+    if (gate) {
+        again = rd3fb_wake_failed(&fWake);
+    } else {
+        rd3fb_wake_give_up(&fWake);
         fWakeNoGate++;
+    }
+    const uint32_t fails = fWake.fails;
     if (again && !fStopping && fWakeRetry) {
         uint64_t d;
         clock_interval_to_deadline(50, kMillisecondScale, &d);
@@ -1891,8 +1964,11 @@ void RDNA3Framebuffer::wakeFailed(IOReturn r, const char *why, const void *sys, 
     IOSimpleLockUnlockEnableInterrupt(fLock, st);
     FBLOG("system wake (%s): head %u family wake work did NOT run (0x%x; system workloop %p, controller gate %p, "
           "stopping %d): %s (%u failure(s)); WindowServer may wait for paging", why, fHead, r, sys, gate,
-          (int)fStopping, armed ? "retried in 50 ms" : again ? "NOT retried (no retry thread call)"
-                                                         : "given up until the next power-on", fails);
+          (int)fStopping, armed ? "retried in 50 ms"
+          : !gate ? "NOT retried, given up until the next power-on (no command gate on the controller workloop: "
+                    "a retry could not run either)"
+          : !again ? "given up until the next power-on"
+          : fStopping ? "NOT retried (stopping)" : "NOT retried (no retry thread call)", fails);
     publishStats();
 }
 

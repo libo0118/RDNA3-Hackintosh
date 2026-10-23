@@ -175,8 +175,10 @@ static inline void rd3fb_cur_done(struct rd3fb_cur_q *q, const struct rd3fb_cur_
  * (tests/test_fb_policy.c models both orders). */
 #define RD3FB_EV_WILLSLEEP 3
 #define RD3FB_EV_DIDWAKE   4
-/* a failed wake work (no gate, stopping) is tried again by a thread call,
- * this many times in a row, then given up (logged; the next power-on tries) */
+/* a failed wake work (no system workloop, a gate that refused it) is tried
+ * again by a thread call, this many times in a row, then given up (logged;
+ * the next power-on tries); without our command gate it is given up at once
+ * (rd3fb_wake_give_up) */
 #define RD3FB_WAKE_RETRIES 5
 struct rd3fb_wake {
     int32_t will_sleep_off;   /* WillSleep(false) not yet answered by a DidWake(false) */
@@ -271,6 +273,52 @@ static inline int rd3fb_wake_failed(struct rd3fb_wake *w)
     w->gave_up++;
     w->fail_streak = 0;
     return 0;
+}
+/* the wake work could not run and a retry could not either (no command
+ * gate: none made at start, or stopping): counted as given up at once, no
+ * retry counted (ECC review round 2) */
+static inline void rd3fb_wake_give_up(struct rd3fb_wake *w)
+{
+    w->fails++;
+    w->gave_up++;
+    w->fail_streak = 0;
+}
+
+/* ---- stop() against a wake work in flight (ECC review round 2) ----
+ * A power callout (setPowerState -> familyDidWake) that passed the stopping
+ * test may wait for IOGraphics' system gate. IOFramebuffer::stop takes the
+ * system and controller gates and holds them across PMstop(), which waits
+ * for that callout: a deadlock. So the wake work counts itself in flight,
+ * tested and counted under the framebuffer's lock together with the
+ * stopping flag (rd3fb_wake_enter; the count drops on every exit,
+ * rd3fb_wake_leave), and stop() waits with no gate held for the count to
+ * reach 0 before IOFramebuffer::stop (rd3fb_stop_wake_wait), at most
+ * RD3FB_STOP_WAKE_WAIT_MS (then logged and stop goes on).
+ * tests/test_fb_policy.c (test_stop_wake) explores every interleaving. */
+#define RD3FB_STOP_WAKE_WAIT_MS 2000u
+#define RD3FB_STOP_WAKE_STEP_MS 10u
+/* under the lock that sets 'stopping': 1 = the wake work runs (counted in
+ * flight; rd3fb_wake_leave on every exit), 0 = stopping, skipped */
+static inline int rd3fb_wake_enter(int32_t *inflight, int stopping)
+{
+    if (stopping)
+        return 0;
+    (*inflight)++;
+    return 1;
+}
+static inline void rd3fb_wake_leave(int32_t *inflight)
+{
+    if (*inflight > 0)
+        (*inflight)--;
+}
+/* stop(), 'waited_ms' into its wait: 1 = none in flight (go on), 0 = wait
+ * RD3FB_STOP_WAKE_STEP_MS more, -1 = still in flight at the limit (go on,
+ * logged: IOFramebuffer::stop may then deadlock against it) */
+static inline int rd3fb_stop_wake_wait(int32_t inflight, uint32_t waited_ms)
+{
+    if (inflight <= 0)
+        return 1;
+    return waited_ms >= RD3FB_STOP_WAKE_WAIT_MS ? -1 : 0;
 }
 
 /* ---- validateDetailedTiming ----

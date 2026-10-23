@@ -227,6 +227,15 @@ static void test_wake(void)
     /* the next power-on tries again, a success resets the streak */
     CHECK(power_on(&w, 1, 0) == 1 && w.fail_streak == 0 && !w.sys_slept);
     CHECK(rd3fb_wake_failed(&w) == 1 && w.fail_streak == 1);
+    /* no command gate: given up at once, the streak cleared, no retry counted, the sleep kept */
+    sys_sleep(&w);
+    CHECK(rd3fb_wake_power_on(&w, 1, 0) == 1);
+    {
+        const uint32_t retries = w.retries, gave = w.gave_up, f = w.fails;
+        rd3fb_wake_give_up(&w);
+        CHECK(w.retries == retries && w.gave_up == gave + 1 && w.fails == f + 1 && w.fail_streak == 0);
+        CHECK(w.sys_slept);
+    }
 }
 
 /* The gate order of the wake work against WindowServer's wait for paging
@@ -354,6 +363,142 @@ static void test_wake_gates(void)
     CHECK(gm_run(0, 0) == 0);
 }
 
+/* stop() against a wake work in flight (ECC review round 2). The wake work
+ * W (a setPowerState callout): enters, tests 'stopping' and counts itself
+ * in flight, takes the system gate (runAction), gets NotReady from the
+ * removed command gate, opens the system gate, leaves. stop() S: sets
+ * 'stopping' (under the same lock), waits for the in-flight count to reach
+ * 0 (the fix), then IOFramebuffer::stop: the system gate, PMstop (waits for
+ * a callout that started and has not returned; none starts after it), the
+ * gate opened. A deadlock is both blocked before the end. 'mode' 0 = no
+ * wait, 1 = the wait with the test and the count as two steps, 2 = the wait
+ * with both under the lock (rd3fb_wake_enter). */
+struct sm { int stopping, sys, pm_stopped, wpc, spc, mode; int32_t inflight; };
+#define SM_DONE 99
+static int sm_w(struct sm *m)
+{
+    switch (m->wpc) {
+    case 0:   /* the callout starts */
+        if (m->pm_stopped)
+            return 0;
+        m->wpc = 1;
+        return 1;
+    case 1:
+        if (m->mode == 1) {   /* the test alone; the count a step later */
+            if (m->stopping) {
+                m->wpc = SM_DONE;
+            } else {
+                m->wpc = 5;
+            }
+            return 1;
+        }
+        m->wpc = rd3fb_wake_enter(&m->inflight, m->stopping) ? 2 : SM_DONE;
+        return 1;
+    case 5:
+        m->inflight++;
+        m->wpc = 2;
+        return 1;
+    case 2:   /* getGraphicsSystemWorkLoop()->runAction */
+        if (m->sys)
+            return 0;
+        m->sys = 1;
+        m->wpc = 3;
+        return 1;
+    case 3:   /* the removed command gate answers NotReady; the system gate opens */
+        m->sys = 0;
+        m->wpc = 4;
+        return 1;
+    case 4:
+        rd3fb_wake_leave(&m->inflight);
+        m->wpc = SM_DONE;
+        return 1;
+    }
+    return 0;
+}
+static int sm_s(struct sm *m)
+{
+    switch (m->spc) {
+    case 0:
+        m->stopping = 1;
+        m->spc = m->mode ? 1 : 2;
+        return 1;
+    case 1:   /* the wait, no gate held */
+        if (rd3fb_stop_wake_wait(m->inflight, 0) != 1)
+            return 0;
+        m->spc = 2;
+        return 1;
+    case 2:   /* IOFramebuffer::stop: SYSGATEGUARD */
+        if (m->sys)
+            return 0;
+        m->sys = 2;
+        m->spc = 3;
+        return 1;
+    case 3:   /* PMstop: waits for a callout in progress */
+        if (m->wpc != 0 && m->wpc != SM_DONE)
+            return 0;
+        m->pm_stopped = 1;
+        m->spc = 4;
+        return 1;
+    case 4:
+        m->sys = 0;
+        m->spc = SM_DONE;
+        return 1;
+    }
+    return 0;
+}
+static unsigned sm_dead, sm_ends;
+static void sm_explore(struct sm m)
+{
+    struct sm a = m, b = m;
+    const int pw = sm_w(&a), ps = sm_s(&b);
+    if (pw)
+        sm_explore(a);
+    if (ps)
+        sm_explore(b);
+    if (!pw && !ps) {
+        sm_ends++;
+        if (m.spc != SM_DONE || (m.wpc != SM_DONE && !(m.wpc == 0 && m.pm_stopped)))
+            sm_dead++;
+        else if (m.inflight != 0)
+            sm_dead++;   /* a count left behind would make the next stop wait in vain */
+    }
+}
+static unsigned sm_run(int mode)
+{
+    struct sm m;
+    memset(&m, 0, sizeof m);
+    m.mode = mode;
+    sm_dead = sm_ends = 0;
+    sm_explore(m);
+    CHECK(sm_ends > 0);
+    return sm_dead;
+}
+static void test_stop_wake(void)
+{
+    int32_t n = 0;
+    /* the in-flight count: no entry while stopping, every leave drops it, never below 0 */
+    CHECK(rd3fb_wake_enter(&n, 1) == 0 && n == 0);
+    CHECK(rd3fb_wake_enter(&n, 0) == 1 && n == 1);
+    CHECK(rd3fb_wake_enter(&n, 0) == 1 && n == 2);
+    rd3fb_wake_leave(&n);
+    rd3fb_wake_leave(&n);
+    CHECK(n == 0);
+    rd3fb_wake_leave(&n);
+    CHECK(n == 0);
+    /* the wait: done at 0, bounded otherwise */
+    CHECK(rd3fb_stop_wake_wait(0, 0) == 1);
+    CHECK(rd3fb_stop_wake_wait(0, RD3FB_STOP_WAKE_WAIT_MS * 2) == 1);
+    CHECK(rd3fb_stop_wake_wait(1, 0) == 0);
+    CHECK(rd3fb_stop_wake_wait(1, RD3FB_STOP_WAKE_WAIT_MS - RD3FB_STOP_WAKE_STEP_MS) == 0);
+    CHECK(rd3fb_stop_wake_wait(1, RD3FB_STOP_WAKE_WAIT_MS) == -1);
+    /* no wait: stop holds the system gate in PMstop while the callout waits for it */
+    CHECK(sm_run(0) > 0);
+    /* a wait whose count is not taken with the stopping test still deadlocks */
+    CHECK(sm_run(1) > 0);
+    /* the count taken with the test under the lock: no interleaving deadlocks */
+    CHECK(sm_run(2) == 0);
+}
+
 static void test_timing(void)
 {
     /* the native 1920x1080@60 (148.5 MHz, 2200x1125) and 1280x720@60 (74.25 MHz, 1650x750) */
@@ -418,6 +563,7 @@ int main(void)
     test_cursor();
     test_wake();
     test_wake_gates();
+    test_stop_wake();
     test_timing();
     test_console();
     if (fails) {
