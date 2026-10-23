@@ -2409,9 +2409,11 @@ static void rd3SVForgetResource(RD3Resource *resource)
  * 0) once the GPU finished the last part writing each; the page-off (and the IOP zero-copy flip) waits
  * here, bounded, while a surface is pending. Only WindowServer's marks are taken, and its pending marks
  * only for surfaces it can look up (no other process can hold its page-offs). The plugin learns the mode
- * from the answer to its pending marks (0 taken; ENXIO off; ENOSYS / ENODEV an older kext or accelerator). NullMoth comparison: the behaviour of NullMoth's 79f47d0 / 40daaa6 / e75be1e
+ * from the answer to its pending marks (0 taken; ENXIO off; ENOSYS / ENODEV an older kext or
+ * accelerator). NullMoth comparison: the behaviour of NullMoth's 79f47d0 / 40daaa6 / e75be1e
  * (nvSurfMark / nvSurfWaitReady), written for this driver; marks counted per surface across command
- * buffers, a late ready after a timeout never takes a newer write's count (rd3_sp forgiven marks). debug.rdna3accel_surface_wait / boot-arg rdna3surfwait (default 1; 0: marks
+ * buffers, a late ready after a timeout never takes a newer write's count (rd3_sp forgiven marks).
+ * debug.rdna3accel_surface_wait / boot-arg rdna3surfwait (default 1; 0: marks
  * answered RD3K_SS_OFF, nothing waits, the plugin keeps its old order), _surface_wait_ms (100, 1..1000) */
 static int gSurfWaitMaxUs, gSurfIopWaitMaxUs;
 static struct rd3_sp gSurfPend;
