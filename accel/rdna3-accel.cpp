@@ -4847,6 +4847,13 @@ struct RD3Pres {
 static RD3Pres gPres[kRd3MaxFB];
 static void rd3AccelPresentRunTc(void *p0, void *);
 static int gPresFbWait[kRd3MaxFB] = { -1, -1, -1, -1 };   /* the framebuffer has rdna3FlipLatchWait: 1 yes, 0 no */
+/* N42: the latch wait's version the framebuffer answers (2: with the pflip interrupt's flags, 1: an older one) */
+static unsigned gPresFbWaitVer[kRd3MaxFB] = { RD3K_FLIPWAIT_VERSION, RD3K_FLIPWAIT_VERSION, RD3K_FLIPWAIT_VERSION,
+                                              RD3K_FLIPWAIT_VERSION };
+/* N42: latches the framebuffer saw ended by the head's pflip interrupt (flip done), the interrupt -> wake time
+ * summed / longest, whether the head's pflip interrupt is live (the last wait's flag), a v1-only framebuffer */
+static SInt64 gCntPqIrqDone[kRd3MaxFB], gCntPqIrqLatUs[kRd3MaxFB], gCntPqIrqLatMax[kRd3MaxFB];
+static SInt64 gCntPqIrqLive[kRd3MaxFB], gCntPqFbWaitV1[kRd3MaxFB];
 static SInt64 gCntPqProg[kRd3MaxFB], gCntPqQueued[kRd3MaxFB], gCntPqReplaced[kRd3MaxFB], gCntPqJoined[kRd3MaxFB];
 static SInt64 gCntPqBusy[kRd3MaxFB], gCntPqRefused[kRd3MaxFB], gCntPqLatched[kRd3MaxFB], gCntPqLatchUs[kRd3MaxFB];
 static SInt64 gCntPqLatchMax[kRd3MaxFB], gCntPqNext[kRd3MaxFB], gCntPqTimeout[kRd3MaxFB], gCntPqUnknown[kRd3MaxFB];
@@ -5144,9 +5151,28 @@ static enum rd3_latch_step rd3AccelPqWait(unsigned head, IOService *fb, uint32_t
             struct RD3KFlipLatchWait lw;
             volatile unsigned char *z = (volatile unsigned char *)&lw;
             for (unsigned i = 0; i < sizeof lw; i++) z[i] = 0;
-            lw.version = RD3K_FLIPWAIT_VERSION;
+            lw.version = gPresFbWaitVer[head];
             lw.timeoutUs = kPqFbWaitUs;
-            const IOReturn r = fb->callPlatformFunction(sym, false, &lw, nullptr, nullptr, nullptr);
+            IOReturn r = fb->callPlatformFunction(sym, false, &lw, nullptr, nullptr, nullptr);
+            if (r == kIOReturnBadArgument && lw.version > 1) {
+                /* N42: a framebuffer older than the version 2 latch wait: version 1 from now on */
+                gPresFbWaitVer[head] = 1;
+                gCntPqFbWaitV1[head] = 1;
+                ALOG("present queue: head %u: the framebuffer refused the version %u latch wait: an older "
+                     "RDNA3Framebuffer -- version 1 (no flip-done interrupt flags)", head, lw.version);
+                for (unsigned i = 0; i < sizeof lw; i++) z[i] = 0;
+                lw.version = 1;
+                lw.timeoutUs = kPqFbWaitUs;
+                r = fb->callPlatformFunction(sym, false, &lw, nullptr, nullptr, nullptr);
+            }
+            if (lw.version >= 2 && (r == kIOReturnSuccess || r == kIOReturnTimeout)) {
+                gCntPqIrqLive[head] = (lw.irqFlags & RD3K_FLIPWAIT_IRQ_LIVE) ? 1 : 0;
+                if (r == kIOReturnSuccess && (lw.irqFlags & RD3K_FLIPWAIT_IRQ_WOKE)) {
+                    OSAddAtomic64(1, &gCntPqIrqDone[head]);
+                    OSAddAtomic64((SInt64)lw.irqLatUs, &gCntPqIrqLatUs[head]);
+                    if ((SInt64)lw.irqLatUs > gCntPqIrqLatMax[head]) gCntPqIrqLatMax[head] = (SInt64)lw.irqLatUs;
+                }
+            }
             if (r == kIOReturnSuccess || r == kIOReturnTimeout || r == kIOReturnNotReady) {
                 gPresFbWait[head] = 1;
                 /* slept, unless it answered at once without a latch: a framebuffer stopping, without its latch
@@ -5704,6 +5730,11 @@ RD3ACCEL_CNT4(rdna3accel_swaps_pq_foreigntimeout, gCntPqForeignTo, "N38: flips p
 RD3ACCEL_CNT4(rdna3accel_swaps_pq_giveup, gCntPqGiveup, "N38: queued presents programmed without waiting (the head's flips stayed pending RD3_FQ_STUCK_RUN times)");
 RD3ACCEL_CNT4(rdna3accel_swaps_pq_iopdrop, gCntPqIopDrop, "N38: IOP transactions completed without a flip of their own (replaced, joined, dropped at a flip home)");
 RD3ACCEL_CNT4(rdna3accel_swaps_pq_fbwaitto, gCntPqFbWaitTo, "N38: the framebuffer's rdna3FlipLatchWait answered Timeout (2 ms each)");
+RD3ACCEL_CNT4(rdna3accel_swaps_pq_irqdone, gCntPqIrqDone, "N42: latches the framebuffer saw ended by the head's pflip interrupt (flip done)");
+RD3ACCEL_CNT4(rdna3accel_swaps_pq_irqlatus, gCntPqIrqLatUs, "N42: microseconds from the pflip interrupt to the latch wait waking, summed");
+RD3ACCEL_CNT4(rdna3accel_swaps_pq_irqlatmax, gCntPqIrqLatMax, "N42: the longest pflip interrupt -> wake time, microseconds");
+RD3ACCEL_CNT4(rdna3accel_swaps_pq_irqlive, gCntPqIrqLive, "N42: 1 = the framebuffer's last latch wait said the head's pflip interrupt is live");
+RD3ACCEL_CNT4(rdna3accel_swaps_pq_fbwaitv1, gCntPqFbWaitV1, "N42: 1 = the framebuffer only answers the version 1 latch wait (older than N42)");
 RD3ACCEL_CNT4(rdna3accel_swaps_pq_fbwaitfast, gCntPqFbWaitFast, "N38: rdna3FlipLatchWait answered at once without a latch (stopping, no lock, unreadable): 1 ms sleeps");
 RD3ACCEL_CNT4(rdna3accel_swaps_pq_freedinflight, gCntPqFreedInflight, "N38: buffers freed while their flip was in flight (the HUBP may scan freed VRAM)");
 RD3ACCEL_CNT4(rdna3accel_swaps_pq_home, gCntPqHome, "N38: IOP copy fallbacks that flipped home over the queue's flip in flight or queued");
@@ -5853,7 +5884,10 @@ static void rd3AccelInstallSysctlPq(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_pq_iopunwritten);
     RD3ACCEL_REG4(rdna3accel_swaps_pq_foreigntimeout); RD3ACCEL_REG4(rdna3accel_swaps_pq_giveup);
     RD3ACCEL_REG4(rdna3accel_swaps_pq_iopdrop);  RD3ACCEL_REG4(rdna3accel_swaps_pq_fbwaitto);
-    RD3ACCEL_REG4(rdna3accel_swaps_pq_fbwaitfast); RD3ACCEL_REG4(rdna3accel_swaps_pq_freedinflight);
+    RD3ACCEL_REG4(rdna3accel_swaps_pq_fbwaitfast);
+    RD3ACCEL_REG4(rdna3accel_swaps_pq_irqdone); RD3ACCEL_REG4(rdna3accel_swaps_pq_irqlatus);
+    RD3ACCEL_REG4(rdna3accel_swaps_pq_irqlatmax); RD3ACCEL_REG4(rdna3accel_swaps_pq_irqlive);
+    RD3ACCEL_REG4(rdna3accel_swaps_pq_fbwaitv1); RD3ACCEL_REG4(rdna3accel_swaps_pq_freedinflight);
     RD3ACCEL_REG4(rdna3accel_swaps_pq_home);
     sysctl_register_oid(&sysctl__debug_rdna3accel_swaps_pq_donemax);
     sysctl_register_oid(&sysctl__debug_rdna3accel_present_init_failed);

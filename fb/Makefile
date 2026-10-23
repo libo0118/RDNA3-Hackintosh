@@ -23,7 +23,7 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
 # user to allow every new binary (Auxiliary KC), so the binary may change
 # only when the framebuffer itself does (tools/triage_reports.py computes
 # the same hash)
-FB_SRC_HASH := $(shell cat rdna3-fb.cpp Info.plist ../accel/rdna3k_abi.h ../agdc/rdna3_agdc_k5.h ../common/rdna3_fb_policy.h | shasum | cut -c1-10)
+FB_SRC_HASH := $(shell cat rdna3-fb.cpp Info.plist ../accel/rdna3k_abi.h ../agdc/rdna3_agdc_k5.h ../common/rdna3_fb_policy.h ../common/rdna3_bootargs.h ../common/rdna3_vbl_irq.h | shasum | cut -c1-10)
 CXXFLAGS += -DFB_COMMIT='"$(FB_SRC_HASH)"'
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext
 
