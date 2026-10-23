@@ -2548,6 +2548,111 @@ def present_mode_lines(path, txt="", args="", host=None):
     return out
 
 
+# ---- DRIVER-PLAN N40 (the driver side of the present-mode A/B): RDNA3Framebuffer's switches
+# (RDNA3,Switches), what they did (RDNA3,OpenOrder, RDNA3,IntegratedAB, RDNA3,VBLSource) and its
+# counters (RDNA3,FBStats) per framebuffer from 12-ioreg-fb.txt, and RDNA3AGDC's vendor answer
+# (debug.rdna3agdc_vendor*) from the tests file. Missing data is a WARN row, never silence.
+FB_N40_SWITCHES = ("dispflags", "glorder", "fbintegrated", "cursorasync", "fbwake", "vblonce", "fbdtmap", "fbconsole")
+AGDC_VENDORS = {0: "AMD 0x1002", 1: "NVIDIA 0x10de", 2: "Intel 0x8086"}
+
+
+def _ioreg_dict(blk, key):
+    """{name: int} of an ioreg dictionary property, None when the property is missing"""
+    m = re.search(r'"%s" = \{([^}]*)\}' % re.escape(key), blk)
+    return None if not m else {k: int(v) for k, v in re.findall(r'"(\w+)"=(\d+)', m.group(1))}
+
+
+def _ioreg_str(blk, key):
+    m = re.search(r'"%s" = "([^"]*)"' % re.escape(key), blk)
+    return m.group(1) if m else None
+
+
+def fb_n40_lines(path, txt="", args=""):
+    """[(level, label, text)]: the N40 switches and counters of every framebuffer and the AGDC vendor answer"""
+    fbtxt = read_tar_member(path, "12-ioreg-fb.txt")
+    args = args or (re.search(r"^boot-args: (.*)$", txt or "", re.M) or [None, ""])[1]
+    out = []
+    blocks = re.split(r"(?m)^\+-o ", fbtxt)[1:]
+    if not blocks:
+        out.append(("WARN", "switches", "12-ioreg-fb.txt has no RDNA3Framebuffer: the N40 switches and counters are not known"))
+    for i, blk in enumerate(blocks):
+        dep = (re.search(r'"IOFBDependentIndex" = (\d+)', blk) or [None, "?"])[1]
+        gl = (re.search(r'"IOFramebufferOpenGLIndex" = (\d+)', blk) or [None, "?"])[1]
+        name = "fb %s" % dep
+        sw = _ioreg_dict(blk, "RDNA3,Switches")
+        if sw is None:
+            out.append(("WARN", "switches", "%s has no RDNA3,Switches: a framebuffer older than DRIVER-PLAN N40 "
+                        "(or not the installed build): the A/B switches are not known" % name))
+            continue
+        missing = [k for k in FB_N40_SWITCHES if k not in sw]
+        out.append(("WARN" if missing else "INFO", "switches", "%s: %s%s" % (
+            name, ", ".join("%s %s" % (k, sw[k]) for k in FB_N40_SWITCHES if k in sw),
+            "; boot console here" if sw.get("bootconsole") else "; not the boot console") +
+            ("; MISSING %s" % ",".join(missing) if missing else "")))
+        st = _ioreg_dict(blk, "RDNA3,FBStats") or {}
+        out.append(("INFO", "connection flags", "%s: kConnectionDisplayFlags answered %d (rdna3dispflags %d), asked %s" % (
+            name, 1 if sw.get("dispflags") else 0, sw.get("dispflags", 0),
+            "%d time(s)" % st["dispflags_asked"] if "dispflags_asked" in st else "? times")))
+        order = _ioreg_str(blk, "RDNA3,OpenOrder")
+        if order is None:
+            out.append(("WARN", "open order", "%s: no RDNA3,OpenOrder: WindowServer never opened it" % name))
+        else:
+            bad = sw.get("glorder") and gl != "?" and gl != dep
+            out.append(("WARN" if bad else "INFO", "open order", "%s: %s; IOFramebufferOpenGLIndex %s, IOFBDependentIndex %s%s" % (
+                name, order, gl, dep, ": STILL DIFFERENT with rdna3glorder=1 (DRIVER-PLAN N40 item 2)" if bad else "")))
+        integ = _ioreg_str(blk, "RDNA3,IntegratedAB")
+        out.append(("INFO" if integ else "WARN", "integrated A/B", "%s: %s" % (
+            name, integ or "no RDNA3,IntegratedAB: the framebuffer was never opened")))
+        if not st:
+            out.append(("WARN", "counters", "%s has no RDNA3,FBStats: the N40 counters are not known" % name))
+            continue
+        g = lambda k: st.get(k, 0)
+        cfail = g("cursor_fails") > 0 or (sw.get("cursorasync") and g("cursor_sets") > 0 and g("cursor_applies") == 0)
+        out.append(("WARN" if cfail else "INFO", "cursor", "%s: %s; sets %d, thread-call runs %d, folded %d, unchanged %d, "
+                    "applied %d, FAILED %d, on WindowServer's thread %d, images %d" % (
+                        name, "thread call" if sw.get("cursorasync") else "synchronous (rdna3cursorasync=0 or no thread call)",
+                        g("cursor_sets"), g("cursor_kicks"), g("cursor_coalesced"), g("cursor_same"),
+                        g("cursor_applies"), g("cursor_fails"), g("cursor_sync"), g("cursor_images"))))
+        # a system sleep and no family wake with the switch on: either paging was on at the power-on (the serial
+        # log's "system wake: ... is not needed" line) or WindowServer waited for paging
+        wbad = g("wake_nogate") > 0 or (sw.get("fbwake") and g("wake_sleeps") > 0 and g("wake_family") == 0)
+        out.append(("WARN" if wbad else "INFO", "wake", "%s: system sleeps %d, family wakes %d (most DidWake(false) owed %d), "
+                    "plain power-ons %d, DidWake(false) seen %d, WillSleep(false) unanswered %d, no gate %d, "
+                    "wake work off at a wake %d (rdna3fbwake %d)%s" % (
+                        name, g("wake_sleeps"), g("wake_family"), g("wake_owed_max"), g("wake_plain_on"),
+                        g("wake_didwake_seen"), g("wake_unanswered"), g("wake_nogate"), g("wake_off"), sw.get("fbwake", 0),
+                        "" if not wbad else ": a system sleep without the family's wake work - the serial log's 'system wake' "
+                        "line says whether paging was on or WindowServer waited")))
+        src = _ioreg_str(blk, "RDNA3,VBLSource") or "?"
+        overlap = g("vbl_overlap")
+        out.append(("WARN" if overlap and sw.get("vblonce") else "INFO", "VBL", "%s: source %s (no hardware vblank "
+                    "interrupt yet), delivered %d, 250 us re-looks %d, delivered with the counter unmoved %d, "
+                    "overlapping runs %d (rdna3vblonce %d%s)" % (
+                        name, src, g("vbl_delivered"), g("vbl_polls"), g("vbl_still"), overlap, sw.get("vblonce", 0),
+                        "; overlaps with vblonce=0: the switch's case" if overlap and not sw.get("vblonce") else "")))
+        out.append(("INFO", "detailed timings", "%s: validateDetailedTiming %d (%d one of our modes, %d refused), "
+                    "setDetailedTimings %d, ids mapped %d (rdna3fbdtmap %d)" % (
+                        name, g("dt_validate"), g("dt_matched"), g("dt_refused"), g("dt_sets"), g("dt_mapped"),
+                        sw.get("fbdtmap", 0))))
+    # RDNA3AGDC's vendor answer: the tests file (autoreport.sh) or the archive's 17-sysctl-agdc.txt (collect.sh)
+    txt = (txt or "") + "\n" + read_tar_member(path, "17-sysctl-agdc.txt")
+    v = re.findall(r"debug\.rdna3agdc_vendor: (-?\d+)", txt or "")
+    asked = re.findall(r"debug\.rdna3agdc_vendor_asked: (\d+)", txt or "")
+    last = re.findall(r"debug\.rdna3agdc_vendor_last: (-?\d+)", txt or "")
+    if v:
+        n = int(v[-1])
+        out.append(("INFO", "AGDC vendor", "vendor info answer %s (debug.rdna3agdc_vendor %d), asked %s time(s)%s" % (
+            AGDC_VENDORS.get(n, "AMD 0x1002 (unknown value %d)" % n), n, asked[-1] if asked else "?",
+            "; last answered as %s" % AGDC_VENDORS.get(int(last[-1]), last[-1]) if last and last[-1] != "-1" else
+            "; never asked" if last else "")))
+    elif re.search(r"\brdna3agdc=[1-9]", args or "") or re.search(r"debug\.rdna3agdc: 1\b", txt or ""):
+        out.append(("WARN", "AGDC vendor", "AGDC armed but no debug.rdna3agdc_vendor in the tests file: an RDNA3AGDC "
+                    "older than DRIVER-PLAN N40, or the counters were not collected"))
+    else:
+        out.append(("INFO", "AGDC vendor", "no debug.rdna3agdc_vendor (AGDC not armed in this run)"))
+    return out
+
+
 STALE_KEXTS_SHOWN = False   # a STALE KEXTS FAIL was printed (one per run; report() does not repeat it)
 
 
@@ -3090,6 +3195,8 @@ def summary(path, serial=None):
     if os.path.exists(path):
         for lv, label, t in present_mode_lines(path, txt, args):
             out.append(("present: " + label, "%s %s" % (lv, t[:300])))
+        for lv, label, t in fb_n40_lines(path, txt, args):
+            out.append(("fb N40: " + label, "%s %s" % (lv, t[:300])))
     out.append(("DMA/GFX jobs", "%d verified, %d wrong" % (len(re.findall(r"job results verified", txt)),
                                                          len(re.findall(r"job results WRONG", txt)))))
     sec = ""
@@ -3379,6 +3486,9 @@ def main():
         if os.path.exists(p):
             for lv, label, t in present_mode_lines(p, ttxt, read_tar_member(p, "01-boot-args.txt")):
                 print("   %s present mode, %s: %s" % (lv, label, t))
+            # DRIVER-PLAN N40: the framebuffer's A/B switches and counters, the AGDC vendor answer
+            for lv, label, t in fb_n40_lines(p, ttxt, read_tar_member(p, "01-boot-args.txt")):
+                print("   %s fb N40, %s: %s" % (lv, label, t))
         else:
             # tests only: the archive's CoreDisplay / ioreg logs are missing, the host log still answers
             targs = (re.search(r"^boot-args: (.*)$", ttxt, re.M) or [None, ""])[1]

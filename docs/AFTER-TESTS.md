@@ -2835,3 +2835,26 @@ The triage prints these for every run (SUMMARY `present: ...`; per report
 | host log `SMBIOS model changed since the last card run: A -> B` and then `STALE KEXTS` | macOS dropped (or never had) the Allow under the new model | `rdna3vm approve --step <the step>`, run the step again, send the result (closes N39 open item 1) |
 | no AMD device / card unconfigured in a `GPU_BUS=rootport` run; host log `root port windows: ...` | the old rootport failure again (commits 0a80e3c / c21eed6): the windows are not what stops it | send `host-*.log` (guest PCI bus at 8 and 40 s); `GPU_BUS=pcie0` again; judge `play-macpro` alone |
 | host log `!! root port: pref64 window N MiB is larger than OVMF's 64-bit window` | `PCI_MMIO64_MB` in the config is below the card's BARs | remove `PCI_MMIO64_MB` (automatic) or raise it |
+
+### DRIVER-PLAN N40: the framebuffer's A/B switches (`fb N40, ...` rows)
+
+The triage prints these for every framebuffer (SUMMARY `fb N40: ...`; per
+report `fb N40, ...`), from the properties `RDNA3,Switches`, `RDNA3,OpenOrder`,
+`RDNA3,IntegratedAB`, `RDNA3,VBLSource`, `RDNA3,FBStats` in `12-ioreg-fb.txt`
+and RDNA3AGDC's `debug.rdna3agdc_vendor*` (tests file or `17-sysctl-agdc.txt`).
+Boot-args and what to try: [TESTING-VM](TESTING-VM.md), "Driver-side A/B".
+
+| Seen | Cause | Action |
+|---|---|---|
+| `WARN switches: fb N has no RDNA3,Switches` | a framebuffer older than N40 ran (not approved, or a stale build) | `STALE KEXTS` line; `rdna3vm approve` |
+| `INFO switches: fb N: dispflags 0, glorder 1, ...` | the switch values of the run | compare with the boot-args asked for; the present-mode rows of the same run decide the A/B |
+| `WARN open order: ... STILL DIFFERENT with rdna3glorder=1` | head 0 was not opened first (the row's reason: not started, another controller, already open) or IOGraphics assigned the indices another way | serial log `RDNA3-fb: head 1 open: ...`; DRIVER-PLAN N40 open item (b) |
+| `WARN open order: no RDNA3,OpenOrder` / `WARN integrated A/B: ... never opened` | WindowServer never opened that framebuffer | the WindowServer / CoreDisplay logs of the run |
+| `WARN cursor: ... FAILED N` | the core refused cursor moves (`rdna3DisplayCursor`) | serial log `cursor: head N move ... FAILED`; core log around it |
+| `WARN cursor: ... sets N ... applied 0` with the thread call | the cursor thread call never ran | serial log `hardware cursor: no lock or thread call`; try `rdna3cursorasync=0` |
+| `WARN wake: system sleeps N, family wakes 0` | a system sleep without the family's wake work: paging was already on (log `system wake: ... is not needed`) or the work did not run (`no gate`) | serial log `system sleep #` / `system wake` lines; a desktop that did not come back is DRIVER-PLAN N40 (6) |
+| `WARN VBL: ... overlapping runs N (rdna3vblonce 1)` | two `vblFire` at once despite ONCE (should not happen) | report it; `rdna3vblonce=0` for comparison |
+| `INFO VBL: ... delivered with the counter unmoved N` large | the OTG frame counter did not move for 12 looks (blanked head, stopped OTG) | the core's display status lines; DPMS state |
+| `INFO detailed timings: validateDetailedTiming N (M one of our modes, ...)` | CoreDisplay's `InstallTiming` calls; `rdna3fbdtmap=0` answers Unsupported as before | with `rdna3fbdtmap=1`: `ids mapped` > 0 and fewer `InstallTiming ... FAILED` lines for our modes |
+| `WARN AGDC vendor: AGDC armed but no debug.rdna3agdc_vendor` | an RDNA3AGDC older than N40, or the collector missed it | `STALE KEXTS`; `17-sysctl-agdc.txt` in the archive |
+| `INFO AGDC vendor: vendor info answer NVIDIA 0x10de ... asked 0 time(s)` | IOPresentment never asked (AGDC came up after WindowServer, or not at all) | `debug.rdna3agdc` state; GPUWrangler `agdc` count in the CoreDisplay log |
