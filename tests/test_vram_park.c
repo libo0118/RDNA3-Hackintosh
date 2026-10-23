@@ -301,6 +301,78 @@ static void paged_trim(void)
     CHECK(rd3_vp_keep_releasable(m, 2) == 2 && rd3_vp_keep_releasable(m, 0) == 0);
 }
 
+/* DRIVER-PLAN N41 open item 3: the pages resume after the last park listed (rd3_vp_cursor), not after a count.
+ * A list of 12 parks (times 10, 20, 20, 30, ...: two parked in the same tick), pages of 4; between the pages
+ * parks already looked at leave the list (reused / released) and one is relinked at the tail with a new time.
+ * Every park that stays listed is looked at exactly once; the relinked one comes again with its new time. The
+ * old count-based skip, run on the same changes, misses parks (the bug) */
+#define CPARKS 12u
+struct cpark { unsigned long long since; int linked; unsigned looked; };
+static unsigned cursor_walk(struct cpark *l, unsigned *order, unsigned norder, int byCount, unsigned *looked_n,
+                            struct rd3_vp_cursor *cur, unsigned max, int *more)
+{
+    /* one page: walk the list in order, skip what earlier pages listed, list up to 'max' */
+    const struct rd3_vp_cursor prev = *cur;
+    unsigned ties = 0, idx = 0, n = 0;
+    *more = 0;
+    for (unsigned k = 0; k < norder; k++) {
+        struct cpark *m = &l[order[k]];
+        if (!m->linked) continue;
+        if (byCount ? idx++ < *looked_n : rd3_vp_cursor_seen(&prev, m->since, &ties)) continue;
+        if (n >= max) { *more = 1; continue; }
+        m->looked++;
+        rd3_vp_cursor_note(cur, m->since);
+        n++;
+    }
+    *looked_n += n;
+    return n;
+}
+static void cursor_run(int byCount, unsigned *missed, unsigned *twice, unsigned *relinked_looked)
+{
+    struct cpark l[CPARKS + 1];
+    unsigned order[CPARKS + 1], norder = CPARKS;
+    for (unsigned i = 0; i < CPARKS; i++) {
+        l[i].since = 10ull * (i + 1) - (i == 2 ? 10 : 0);   /* parks 1 and 2 share time 20 */
+        l[i].linked = 1; l[i].looked = 0; order[i] = i;
+    }
+    struct rd3_vp_cursor cur = { 0, 0, 0 };
+    unsigned looked_n = 0;
+    int more = 1;
+    for (unsigned page = 0; more && page < 8; page++) {
+        cursor_walk(l, order, norder, byCount, &looked_n, &cur, 4, &more);
+        if (page == 0) {   /* parks 0 and 1 (looked at) leave; park 2 (looked at, time 20) is relinked newest */
+            l[0].linked = 0; l[1].linked = 0;
+            l[2].linked = 0;
+            l[CPARKS] = l[2]; l[CPARKS].since = 1000; l[CPARKS].linked = 1; l[CPARKS].looked = 0;
+            order[norder++] = CPARKS;
+        }
+        if (page == 1) l[5].linked = 0;   /* looked at in page 1: leaves */
+    }
+    *missed = *twice = 0;
+    for (unsigned i = 0; i < CPARKS; i++) {
+        if (l[i].linked && !l[i].looked) (*missed)++;
+        if (l[i].looked > 1) (*twice)++;
+    }
+    *relinked_looked = l[CPARKS].looked;
+}
+static void cursor_pages(void)
+{
+    unsigned missed = 0, twice = 0, rel = 0;
+    cursor_run(0, &missed, &twice, &rel);
+    CHECK(missed == 0 && twice == 0 && rel == 1);
+    cursor_run(1, &missed, &twice, &rel);
+    CHECK(missed > 0);   /* the count-based skip lost parks: the bug the cursor fixes */
+    /* the cursor's tie rule alone */
+    struct rd3_vp_cursor c = { 0, 0, 0 };
+    unsigned t = 0;
+    CHECK(!rd3_vp_cursor_seen(&c, 5, &t));
+    rd3_vp_cursor_note(&c, 5); rd3_vp_cursor_note(&c, 7); rd3_vp_cursor_note(&c, 7);
+    CHECK(c.valid && c.since == 7 && c.same == 2);
+    t = 0;
+    CHECK(rd3_vp_cursor_seen(&c, 5, &t) && rd3_vp_cursor_seen(&c, 7, &t) && rd3_vp_cursor_seen(&c, 7, &t));
+    CHECK(!rd3_vp_cursor_seen(&c, 7, &t) && !rd3_vp_cursor_seen(&c, 8, &t));
+}
+
 int main(void)
 {
     transitions();
@@ -310,6 +382,7 @@ int main(void)
     apdesc();
     policy();
     paged_trim();
+    cursor_pages();
     if (fails) { printf("test_vram_park: %d FAILED\n", fails); return 1; }
     printf("test_vram_park: ok\n");
     return 0;

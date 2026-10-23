@@ -199,6 +199,38 @@ static inline unsigned rd3_vp_keep_releasable(struct rd3_vp_cand *c, unsigned n)
     return k;
 }
 
+/* where the next page of the release starts (DRIVER-PLAN N41 open item 3: the pages skipped the parks earlier
+ * pages listed by COUNT, so a park unlinked between two pages - reused, released - shifted the list and the
+ * first park not yet looked at was skipped until the next release). The parks are listed oldest first: a park
+ * is linked at the tail with the time it was parked (a new park of the same object relinks it, with a new
+ * time), so the times along the list never go down. The cursor is the last listed park's time and how many
+ * listed parks carried exactly that time: a page skips the parks older than it and the first 'same' of that
+ * time, wherever earlier parks left the list. A park relinked meanwhile comes again with its new time (the
+ * release takes it once: it checks the handle and the time under the lock). */
+struct rd3_vp_cursor {
+    unsigned long long since;     /* the time of the last park listed */
+    unsigned same;                /* parks listed with exactly that time */
+    int valid;                    /* 0: the first page (nothing skipped) */
+};
+
+/* 1: the park parked at 'since' was listed by an earlier page. '*ties' counts, along one walk of the list, the
+ * parks parked at the cursor's time (0 before the walk) */
+static inline int rd3_vp_cursor_seen(const struct rd3_vp_cursor *c, unsigned long long since, unsigned *ties)
+{
+    if (!c->valid || since > c->since) return 0;
+    if (since < c->since) return 1;
+    return (*ties)++ < c->same;
+}
+
+/* a park parked at 'since' listed by this page (in list order) */
+static inline void rd3_vp_cursor_note(struct rd3_vp_cursor *c, unsigned long long since)
+{
+    if (c->valid && since == c->since) { c->same++; return; }
+    c->valid = 1;
+    c->since = since;
+    c->same = 1;
+}
+
 #define RD3_VP_CAP_MB_DEFAULT 512u   /* debug.rdna3accel_vm_park_cap_mb: parked bytes kept at most (0: no cap) */
 
 /* which parks go: under pressure (an allocation was refused) every one no BO holds; else, while the

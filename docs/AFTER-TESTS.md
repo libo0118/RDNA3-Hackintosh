@@ -2853,6 +2853,11 @@ grey shares) with the boundaries (3.9 / 4.1 % grey, 59 / 60 swaps, no PPMs, pipe
   (only when WindowServer reuses the buffer leaving the panel within a
   frame), the triage `present queue` lines and `H-PRESENT` without FAIL,
   Activity Monitor's GPU % above 0 while windows move (`perf_writes` > 0).
+  With the N42 interrupts live, `H-PRESENT` adds `N latch(es) ended by the
+  pflip interrupt (avg X us after it)` and the timeline's `latched ... (by
+  the pflip interrupt, X us after it)`: close to the latches seen; absent
+  while the latches are only polled (`rdna3vblirq=0`, an older framebuffer,
+  `swaps_pq_irqdone_h<N>` 0).
 
 | Seen | Meaning | Action |
 |---|---|---|
@@ -2924,6 +2929,7 @@ grey shares) with the boundaries (3.9 / 4.1 % grey, 59 / 60 swaps, no PPMs, pipe
 | `INFO/WARN the first mark taken came from pid P uid U` (`surface_wait_mark_uid`) | INFO: uid 88, the rule holds; WARN: the real WindowServer runs as another uid on this macOS (taken as the display client only) | the kernel's `the first GPU mark taken` line; report the uid (the rule's constant `RD3_SP_WS_UID`) |
 | `WARN the timeout budget ran out` (`surface_wait_starved`, `_skipped`) / H-SURFWAIT `did NOT wait` | 4 waits in a row timed out with no ready mark: readies are lost wholesale; page-offs stopped waiting until the next ready | the kernel's `STOP waiting` / `WAIT again` lines, the plugin's ready counts in its stats line |
 | `INFO lost ready marks: ... dropped for good ..., ... aged out` (`surface_wait_ghosts`, `_aged`) | ready marks lost; each cost at most two bounded waits | with many: the plugin's completion path, report |
+| `WARN N surface(s) dropped from the full table, ... mark(s) refused as saturated; ... mark(s) of dropped surfaces forgiven ...` (`surface_wait_evicted`, `_saturated`, `_evict_kept`) | more than 64 surfaces pending at once (the oldest dropped: its waits stop), or one surface with 65535 marks (readies lost); `_evict_kept`: a dropped surface marked again, its remembered marks forgiven so their late readies could not end the newer wait (DRIVER-PLAN N41 item 4) | the kernel's `surfaces pending at once` / `already holds` lines; many evictions: report (the table size) |
 | `INFO WindowServer's plugin sent N of its M ready mark(s) at the command buffer's end` | those readies came from the completion / error path, not after the part that wrote the surface last: page-offs waited for the whole command buffer | none unless large; with errors, the plugin log |
 | `INFO surface wait MOOT: rdna3a3ws=0 keeps WindowServer's surfaces out of A3` | the default: nothing is marked, the page-off wait was not exercised; pending marks that came anyway are refused as MOOT (`surface_wait_moot`, ENXIO: the plugin's back-offs are then INFO) | `rdna3a3ws=1` for a run that tests it |
 | `WARN surface wait no pending marks taken ...: <the plugin's reason>` | `rdna3a3ws=1` but no mark reached the kernel: the reason is the plugin's decision line (a gate ABSENT, the NVK path, headless, `NVMTL_SURFACE_WAIT=0`), ENOSYS for good, back-offs, or no decision line (an older plugin) | `24-log-coredisplay.txt` `surface wait (N41):` lines; `rdna3vm update` for an old plugin / libdrm_xnu |

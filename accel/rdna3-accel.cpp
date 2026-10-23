@@ -278,6 +278,7 @@ static int gPresInitFailed;
 static IOLock *volatile gPresLock;
 static bool rd3AccelPresentInit(void);
 static void rd3AccelPresentStop(void);
+static void rd3AccelIopStop(void);
 static void rd3AccelPresentReuseRes(IOAccelResource2 *res, unsigned what);
 static void rd3AccelPresentForgetAll(const char *why);
 static bool rd3AccelPresentIopBusy(const void *pipe);
@@ -1257,6 +1258,7 @@ public:
         rd3AccelPerfStop();
         rd3AccelPresentStop();   /* N38: workers stopped, queued presents completed, thread calls freed */
         IOGraphicsAccelerator2::stop(provider);
+        rd3AccelIopStop();   /* N38 (ECC review round 2): no IOP transaction comes any more */
     }
     virtual IOReturn callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2, void *p3, void *p4) APPLE_KEXT_OVERRIDE;
 };
@@ -1588,24 +1590,28 @@ static unsigned long long rd3VmParkTrim(bool pressure, const char *why)
     }
     /* 1+2: the parks in park order (oldest first), a page at a time, and who holds each (no lock: the core takes
      * its own). Held / unknown ones leave the page (rd3_vp_keep_releasable, ECC review round 3): releasable parks
-     * behind kVmTrimMax held ones are found, up to kVmTrimPages pages. A page skips the parks earlier pages
-     * listed by count: parks gone meanwhile may let one be skipped (the next trim sees it), a park listed twice
-     * is released once (step 4 checks its handle under the lock) */
+     * behind kVmTrimMax held ones are found, up to kVmTrimPages pages. A page resumes after the last park an
+     * earlier page listed, by its park time (rd3_vp_cursor; DRIVER-PLAN N41 open item 3: by count, a park
+     * unlinked between two pages let one be skipped until the next trim); a park relinked meanwhile is listed
+     * again and released once (step 4 checks its handle and time under the lock) */
     IOService *core = rd3AccelCore();
     const OSSymbol *sym = core ? OSSymbol::withCStringNoCopy(RD3K_VRAM_FN_REFS) : nullptr;
     unsigned n = 0, listed = 0, looked = 0, pages = 0, held = 0, unknown = 0;
     IOReturn qerr = kIOReturnSuccess;
+    struct rd3_vp_cursor cur = { 0, 0, 0 };
     for (bool more = true; more && n < kVmTrimMax && pages < kVmTrimPages; pages++) {
         const unsigned base = n;
-        unsigned idx = 0;
+        const struct rd3_vp_cursor prev = cur;
+        unsigned ties = 0;
         more = false;
         listed = 0;
         IOLockLock(l);
         for (RD3VidMemory *m = gVmParkHead; m; m = m->fParkNext, listed++) {
-            if (!rd3_vp_valid(&m->fPark) || idx++ < looked) continue;
+            if (!rd3_vp_valid(&m->fPark) || rd3_vp_cursor_seen(&prev, m->fParkSince, &ties)) continue;
             if (n >= kVmTrimMax) { more = true; continue; }
             vc[n].since = m->fParkSince; vc[n].bytes = m->fPark.bytes; vc[n].refs = 0;
             vc[n].obj = m; vc[n].handle = m->fPark.handle;
+            rd3_vp_cursor_note(&cur, m->fParkSince);
             n++;
         }
         IOLockUnlock(l);
@@ -2794,7 +2800,8 @@ static unsigned rd3AccelSurfGpuMark(unsigned id, bool pending, task_t task)
         const SInt64 n = OSAddAtomic64(1, &gCntSurfMarkEvict);
         if (rd3_log_due((uint64_t)n, 4, 1023))
             ALOG("surface wait: %u surfaces pending at once -- surface %u's marks dropped for surface %u (its "
-                 "page-offs stop waiting; surface_wait_evicted %lld)", RD3_SP_SLOTS, ev, id, (long long)n + 1);
+                 "page-offs stop waiting; its late readies are remembered, forgiven if it is marked again: "
+                 "surface_wait_evict_kept; surface_wait_evicted %lld)", RD3_SP_SLOTS, ev, id, (long long)n + 1);
         return 0;
     }
     case RD3_SPM_SATURATED: {
@@ -2891,7 +2898,7 @@ static unsigned rd3AccelSurfWaitTrFlags(int w)
     return w == 1 ? RD3_TRPO_WAITED : w == 2 ? RD3_TRPO_TIMEOUT : w == 3 ? RD3_TRPO_CLEARED
          : w == 4 ? RD3_TRPO_SKIPPED : 0u;
 }
-/* the table's own statistics (arg2: 0 aged, 1 ghosts dropped, 2 starvations) */
+/* the table's own statistics (arg2: 0 aged, 1 ghosts dropped, 2 starvations, 3 evicted marks forgiven) */
 static int rd3AccelSurfStatSysctl SYSCTL_HANDLER_ARGS
 {
     (void)arg1;
@@ -2899,7 +2906,8 @@ static int rd3AccelSurfStatSysctl SYSCTL_HANDLER_ARGS
     IOLock *l = gSurfPendLock;
     if (l) {
         IOLockLock(l);
-        v = arg2 == 0 ? gSurfPend.aged : arg2 == 1 ? gSurfPend.ghosts_dropped : gSurfPend.starvations;
+        v = arg2 == 0 ? gSurfPend.aged : arg2 == 1 ? gSurfPend.ghosts_dropped : arg2 == 2 ? gSurfPend.starvations
+                                                                                : gSurfPend.evict_kept;
         IOLockUnlock(l);
     }
     return sysctl_handle_quad(oidp, (long long *)&v, 0, req);
@@ -2965,6 +2973,8 @@ SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_surface_wait_ghosts, CTLTYPE_QUAD | CTL
             rd3AccelSurfStatSysctl, "Q", "N41 review round 2: pending marks a timeout dropped for good (a lost ready's ghost)");
 SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_surface_wait_starved, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 2,
             rd3AccelSurfStatSysctl, "Q", "N41 security review: times the timeout budget ran out (waits skipped until a ready)");
+SYSCTL_PROC(_debug, OID_AUTO, rdna3accel_surface_wait_evict_kept, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 3,
+            rd3AccelSurfStatSysctl, "Q", "N41 item 4: marks of a surface dropped from the full table, forgiven when it was marked again");
 RD3ACCEL_CNT(rdna3accel_surface_wait_waits,     gCntSurfWaits,     "N41: page-offs that waited for a pending GPU write and saw it done");
 RD3ACCEL_CNT(rdna3accel_surface_wait_timeouts,  gCntSurfTimeouts,  "N41: page-offs whose write was still pending at the bound");
 RD3ACCEL_CNT(rdna3accel_surface_wait_cleared,   gCntSurfCleared,   "N41: page-offs whose wait was cleared under them (another timeout, a full table, off)");
@@ -3032,6 +3042,7 @@ static void rd3AccelInstallSysctlPark(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_mark_pid); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_mark_uid);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_aged); sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_ghosts);
     sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_starved);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_surface_wait_evict_kept);
     sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_noimport); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_trim_pressure);
     sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_trim_cap); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_trimmed);
     sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_trimmed_bytes); sysctl_register_oid(&sysctl__debug_rdna3accel_vm_park_trim_held);
@@ -3829,6 +3840,49 @@ static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSu
     thread_call_enter(e->call);
     return true;
 }
+/* an async IOP flip cancelled before it ran (rd3AccelIopStop): the surface reference it held given back */
+static unsigned rd3AccelIopAsyncCancelled(RD3IopAsync *e)
+{
+    IOSurface *s = e->s;
+    e->s = nullptr;
+    if (s) ((OSObject *)s)->release();
+    __atomic_store_n(&e->busy, 0, __ATOMIC_RELEASE);
+    return 1;
+}
+/* the accelerator's stop, after the family's (no IOP transaction comes any more): an async IOP flip still
+ * pending is cancelled (its surface reference given back; its pipe is not signalled, the family has stopped),
+ * one running is waited for, the thread calls freed; the scanned surfaces' records (gIopFlipFront /
+ * gIopFlipPrev) dropped under gPresLock, their references after it. ECC review round 2 of N38: neither was
+ * released at the stop (a leak at unload only) */
+static void rd3AccelIopStop(void)
+{
+    unsigned cancelled = 0, released = 0;
+    for (unsigned h = 0; h < kRd3MaxFB; h++) {
+        RD3IopAsync *e = &gIopAs[h];
+        struct thread_call *c = e->call;
+        if (!c) continue;
+        while (thread_call_cancel_wait(c)) cancelled += rd3AccelIopAsyncCancelled(e);
+        while (!thread_call_free(c))
+            if (thread_call_cancel_wait(c)) cancelled += rd3AccelIopAsyncCancelled(e);
+        e->call = nullptr;
+    }
+    IOSurface *drop[2 * kRd3MaxFB];
+    unsigned nd = 0;
+    IOLock *l = gPresLock;
+    if (l) IOLockLock(l);
+    for (unsigned h = 0; h < kRd3MaxFB; h++) {
+        /* a head still on an IOP surface keeps its front's reference: the HUBP may scan that VRAM until a
+         * modeset, and the release could hand it to another allocation (review of the N38 stop) */
+        if (gIopFlipFront[h] && !gIopFlipped[h]) { drop[nd++] = gIopFlipFront[h]; gIopFlipFront[h] = nullptr; }
+        if (gIopFlipPrev[h]) drop[nd++] = gIopFlipPrev[h];
+        gIopFlipPrev[h] = nullptr;
+    }
+    if (l) IOLockUnlock(l);
+    for (unsigned i = 0; i < nd; i++, released++) ((OSObject *)drop[i])->release();
+    if (cancelled || released)
+        ALOG("iop: stop: %u async flip(s) still pending cancelled, %u reference(s) of scanned IOSurfaces released",
+             cancelled, released);
+}
 static bool rd3AccelPresentIop(unsigned head, IOService *fb, void *pipe, IOSurface *s,
                                const struct RD3KFlipRequest *f, RD3VidMemory *vm);
 /* the IOP zero-copy flip's wait for WindowServer's pending GPU write (N41), counted apart from the page-offs'
@@ -4540,6 +4594,18 @@ static void rd3AccelLatchForgetHeads(const char *why)
         rd3AccelLatchForget(h, why);
     }
 }
+/* rd3AccelLatchForget outside the present queue's own paths (a flip refused, the SDMA breaker opening, a swap
+ * mode change): under gPresLock like rd3AccelPresentForgetAll, since the queue's worker rewrites the same record
+ * (rd3AccelLatchProgrammed) and a forget between its reads and writes left a half-forgotten record behind - only
+ * counter and log noise, but noise in the data the card runs are read from (ECC review round 2 of N38). The
+ * caller holds no gPresLock (the order is the family's lock, then gPresLock) and no spinlock */
+static void rd3AccelLatchForgetPres(unsigned head, const char *why)
+{
+    IOLock *l = gPresReady ? gPresLock : nullptr;
+    if (l) IOLockLock(l);
+    rd3AccelLatchForget(head, why);
+    if (l) IOLockUnlock(l);
+}
 static void rd3AccelLatchForgetAll(const char *why)
 {
     rd3AccelPresentForgetAll(why);   /* the queued presents were meant for a picture that is gone (N38), then the records */
@@ -5043,7 +5109,8 @@ static void rd3AccelPqBusyLocked(unsigned head, RD3PresDone *d)
  * (timeout, unknown: its completion is early): complete it, program the
  * queued present (rd3_fq_verdict: without NOWAIT once the head's flips
  * stayed pending RD3_FQ_STUCK_RUN times in a row). Under gPresLock */
-static void rd3AccelPqLatchedLocked(unsigned head, enum rd3_latch_step step, uint64_t us, bool inl, RD3PresDone *d)
+static void rd3AccelPqLatchedLocked(unsigned head, enum rd3_latch_step step, uint64_t us, bool inl, RD3PresDone *d,
+                                    bool irq = false, uint32_t irqLatUs = 0)
 {
     RD3Pres &P = gPres[head];
     int had = 0, fg = 0, force = 0;
@@ -5073,8 +5140,11 @@ static void rd3AccelPqLatchedLocked(unsigned head, enum rd3_latch_step step, uin
             if (R.kind != kPqIop && gLatch[head].phys == was)
                 rd3AccelLatchSeen(head, gLatch[head], kSeenLater, "by the present queue");
         }
+        /* N42: a latch the head's pflip interrupt ended is marked in the trace (v3 its latency), not only counted */
+        const bool byIrq = !early && irq;
         rd3AccelPqTrace(head, early ? (step == RD3_LATCH_TIMEOUT ? RD3_TRP_TIMEOUT : RD3_TRP_UNKNOWN)
-                                    : RD3_TRP_LATCHED, R.kind, tok, us, 0, 0, kIOReturnSuccess, was);
+                                    : RD3_TRP_LATCHED, R.kind | (byIrq ? RD3_TRP_IRQ_DONE : 0u), tok, us, 0,
+                        byIrq ? (int)(irqLatUs > 0x7fffffffu ? 0x7fffffffu : irqLatUs) : 0, kIOReturnSuccess, was);
         rd3AccelPqLost(d, &R);   /* completed: the transaction ends, the queue's reference goes */
     }
     if (fg) {
@@ -5140,8 +5210,11 @@ static void rd3AccelPqLookLocked(unsigned head, RD3PresDone *d)
  * lock: the framebuffer's latch wait (woken at its vblank) or 1 ms polls */
 enum { kPqFbWaitUs = 2000 };
 static enum rd3_latch_step rd3AccelPqWait(unsigned head, IOService *fb, uint32_t gen, uint32_t frame0, bool frameKnown,
-                                          uint64_t progAbs, uint64_t cap, uint64_t *usOut)
+                                          uint64_t progAbs, uint64_t cap, uint64_t *usOut, bool *irqOut,
+                                          uint32_t *irqLatOut)
 {
+    *irqOut = false;
+    *irqLatOut = 0;
     const OSSymbol *sym = OSSymbol::withCStringNoCopy(RD3K_FLIP_FN_LATCHWAIT);
     enum rd3_latch_step step = RD3_LATCH_WAIT;
     for (;;) {
@@ -5168,6 +5241,8 @@ static enum rd3_latch_step rd3AccelPqWait(unsigned head, IOService *fb, uint32_t
             if (lw.version >= 2 && (r == kIOReturnSuccess || r == kIOReturnTimeout)) {
                 gCntPqIrqLive[head] = (lw.irqFlags & RD3K_FLIPWAIT_IRQ_LIVE) ? 1 : 0;
                 if (r == kIOReturnSuccess && (lw.irqFlags & RD3K_FLIPWAIT_IRQ_WOKE)) {
+                    *irqOut = true;   /* the trace's LATCHED event says so (RD3_TRP_IRQ_DONE) */
+                    *irqLatOut = lw.irqLatUs;
                     OSAddAtomic64(1, &gCntPqIrqDone[head]);
                     OSAddAtomic64((SInt64)lw.irqLatUs, &gCntPqIrqLatUs[head]);
                     if ((SInt64)lw.irqLatUs > gCntPqIrqLatMax[head]) gCntPqIrqLatMax[head] = (SInt64)lw.irqLatUs;
@@ -5228,10 +5303,13 @@ static void rd3AccelPresentRun(unsigned head)
         const uint64_t progAbs = P.progAbs, cap = P.capUs ? P.capUs : RD3_LATCH_CAP_US;
         IOLockUnlock(gPresLock);
         uint64_t us = 0;
-        const enum rd3_latch_step step = rd3AccelPqWait(head, fb, gen, frame0, frameKnown, progAbs, cap, &us);
+        bool irq = false;
+        uint32_t irqLat = 0;
+        const enum rd3_latch_step step = rd3AccelPqWait(head, fb, gen, frame0, frameKnown, progAbs, cap, &us, &irq,
+                                                        &irqLat);
         IOLockLock(gPresLock);
         if (P.gen == gen && P.q.inflight && step != RD3_LATCH_WAIT) {
-            rd3AccelPqLatchedLocked(head, step, us, false, &d);
+            rd3AccelPqLatchedLocked(head, step, us, false, &d, irq, irqLat);
             IOLockWakeup(gPresLock, &P.q, false);   /* the writers waiting for this latch */
         }
         IOLockUnlock(gPresLock);
@@ -7667,7 +7745,7 @@ void rd3AccelSwapToPanel(const void *surf, IOAccelResource2 *a1, IOAccelResource
                  head, phys, fw.why ? fw.why : "?", (unsigned)fw.ret, fw.flipResult,
                  copied ? "copied onto the framebuffer's scanout instead"
                         : "neither flipped nor copied, the panel keeps the last picture", (long long)k + 1);
-        rd3AccelLatchForget(head, "a flip refused");   /* the framebuffer's own scanout, not a recorded buffer */
+        rd3AccelLatchForgetPres(head, "a flip refused");   /* the framebuffer's own scanout, not a recorded buffer */
         tr.arg = copied ? RD3_TRS_FLIP_COPIED : RD3_TRS_FLIP_FAILED;
         /* a copy into home is no flip: the panel stays where it was (ECC review round 2) */
     }
@@ -8587,7 +8665,7 @@ static void rd3AccelScBrkEvent(enum rd3_sc_brk_ev ev, unsigned n, unsigned head,
         /* the swaps flip now: mode 0's records start empty, the front record too */
         for (unsigned h = 0; h < kRd3MaxFB; h++) {
             rd3AccelForgetShown(h);
-            rd3AccelLatchForget(h, "the SDMA breaker opened");
+            rd3AccelLatchForgetPres(h, "the SDMA breaker opened");
             gSwapEmptyRun[h] = 0;
             rd3_sc_front_set(&gSc[h].front, nullptr, 0);
         }
@@ -9526,7 +9604,7 @@ static int rd3AccelSetSwapMode(int v, const char *why)
         gSwapMode = v;
         for (unsigned h = 0; h < kRd3MaxFB; h++) {
             rd3AccelForgetShown(h);
-            rd3AccelLatchForget(h, "swap mode change");
+            rd3AccelLatchForgetPres(h, "swap mode change");
             gSwapEmptyRun[h] = 0;
             rd3_sc_front_set(&gSc[h].front, nullptr, 0);
             rd3AccelScStaleReset(h, "a swap mode change");

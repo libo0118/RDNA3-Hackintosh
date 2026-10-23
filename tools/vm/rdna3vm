@@ -714,6 +714,24 @@ vm_bundle_seen() {
     rm -f "$WORK"/reports/bundle-*.txt
 }
 
+# the RDNA3SourceHash of each framebuffer / accelerator / AGDC kext in the published
+# bundle, as macOS's approve markers name them ("RDNA3Accelerator 4fcf2bc0b7, ..."):
+# what an 'rdna3vm approve' after the install boot asked macOS to allow. Empty when the
+# bundle or its Info.plists cannot be read
+bundle_source_hashes() {
+    local b=$WORK/share/rdna3-bundle.tar.gz t k h out=""
+    [ -s "$b" ] || return 0
+    t=$(mktemp -d) || return 0
+    tar -xzf "$b" -C "$t" --wildcards 'kexts/*.kext/Contents/Info.plist' 2>/dev/null || true
+    for k in RDNA3Framebuffer RDNA3Accelerator RDNA3AcceleratorTahoe RDNA3AGDC; do
+        h=$(sed -n '/<key>RDNA3SourceHash<\/key>/{n;s/.*<string>\([0-9a-fA-F]*\)<\/string>.*/\1/p;}' \
+            "$t/kexts/$k.kext/Contents/Info.plist" 2>/dev/null | head -n1) || true
+        [ -n "$h" ] && out="$out${out:+, }$k $h"
+    done
+    rm -rf -- "$t"
+    printf '%s' "$out"
+}
+
 # Install a new bundle (rdna3vm prepare / update) into the macOS disk
 # WITHOUT the card: macOS boots headless on QEMU's own display adapter, the
 # card stays with Linux (the screen too), autoreport (rdna3vminstall=1)
@@ -898,8 +916,11 @@ install_first() {
 cmd__once() {
     rm -f "$WORK/last-run-note"
     bash "$SELF" _install || true
-    # markers of earlier runs were handled by install_first: only this boot's count
+    # markers of earlier runs were handled by install_first: only this boot's count. The
+    # same for the bundle reports: an earlier boot's (the install boot's, the approval
+    # window's) said nothing about whether this boot runs the allowed build
     approve_marker_clear
+    vm_bundle_seen
     bash "$SELF" _passthrough || true
     if approve_marker_any; then
         rm -f "$WORK"/reports/rerun-*.txt
@@ -917,9 +938,17 @@ cmd__once() {
             return 0
         fi
     fi
-    # this boot ran the installed build: an earlier 'rdna3vm approve' took, once the VM
-    # also reports the current bundle
-    if [ -e "$WORK/approve-unverified" ] && bundle_current; then rm -f "$WORK/approve-unverified"; fi
+    # this boot ran the installed build: an earlier 'rdna3vm approve' took, once THIS run's
+    # boot also reported the current bundle (DRIVER-PLAN N37: a boot where macOS never
+    # reported left the install boot's / window's report in vm-bundle.sha256, which
+    # matched, and cleared the proof that Allow was still unverified)
+    if [ -e "$WORK/approve-unverified" ]; then
+        if ! ls "$WORK"/reports/bundle-*.txt >/dev/null 2>&1; then
+            run_note "== macOS did not report its bundle in this run: whether the Allow of 'rdna3vm approve' took is still unknown ($(cat "$WORK/approve-unverified" 2>/dev/null))"
+        elif bundle_current; then
+            rm -f "$WORK/approve-unverified"
+        fi
+    fi
 }
 
 cmd_step() {
@@ -972,8 +1001,16 @@ cmd_approve() {
     # nothing here can tell whether Allow was clicked (a window closed without it looks the
     # same): the marker's text stays in approve-unverified until a run's boot shows macOS
     # running the installed build (cmd__once), or says it still does not (old_driver_note)
+    # after the install boot (no marker: macOS has not run the new build yet) the request
+    # names the kexts and the source hashes asked for, as a marker would (DRIVER-PLAN N37)
     seen=$(approve_marker_text)
-    printf '%s\n' "${seen:-allow requested $(date '+%F %T')}" > "$WORK/approve-unverified" ||
+    if [ -z "$seen" ]; then
+        local na hs
+        na=$({ tr -s ' \n' ' ' < "$WORK/needs-allow"; } 2>/dev/null | sed 's/ $//') || true
+        hs=$(bundle_source_hashes)
+        seen="allow requested $(date '+%F %T')${na:+ for $na}; the bundle's builds: ${hs:-unknown (no readable rdna3-bundle.tar.gz)}"
+    fi
+    printf '%s\n' "$seen" > "$WORK/approve-unverified" ||
         echo "!! cannot write $WORK/approve-unverified: a missed Allow will not be named by the next run"
     if [ "$card" = 1 ]; then
         # launch runs install_first: without this it would offer the same approval again

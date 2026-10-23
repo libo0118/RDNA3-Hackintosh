@@ -47,9 +47,15 @@
  * get lost costs RD3_SP_BUDGET bounded waits, not one per page-off.
  * A table that is full first reuses a slot that holds only forgiven marks
  * (the oldest), then drops the surface pending the longest (its waiters
- * stop waiting: never longer than the bound; its marks are not kept, its
- * late readies find no slot and are LATE). A ready for a surface the table
- * does not hold is counted as late, nothing else.
+ * stop waiting: never longer than the bound). The marks such a slot held
+ * (pending and forgiven) are remembered for the surface in a small ring
+ * (RD3_SP_EVICTED, DRIVER-PLAN N41 open item 4): its late readies that come
+ * while it holds no slot take one each (LATE), and if it is marked pending
+ * again first, the rest become the new slot's forgiven marks (aged from the
+ * eviction), so a late ready of a mark dropped by the eviction never takes
+ * the newer write's count. Before, the marks were not kept: a re-marked
+ * surface's late ready ended the newer wait early. A ready for a surface
+ * the table does not hold otherwise is counted as late, nothing else.
  *
  * A waiter whose surface was cleared under it (another waiter's timeout,
  * an eviction, the waits switched off) is told so (RD3_SPW_CLEARED) rather
@@ -74,6 +80,7 @@
 #define RD3_SP_CLEARED   (2u * RD3_SP_SLOTS) /* clears remembered for the waiters (RD3_SPW_CLEARED): a whole clear() fits */
 #define RD3_SP_FORGIVE_MS (10u * RD3_SP_WAIT_MS) /* forgiven marks older than this are aged out before a ready takes one */
 #define RD3_SP_BUDGET    4u               /* timeouts with no real ready between them: then waits are skipped */
+#define RD3_SP_EVICTED   16u              /* surfaces dropped from a full table whose marks are remembered */
 
 struct rd3_sp_slot {
     uint32_t id;          /* the IOSurface id (0: free) */
@@ -90,8 +97,17 @@ struct rd3_sp_clear_rec {
     uint64_t seq;         /* the episode that was cleared */
 };
 
+/* the marks of a surface a full table dropped (its readies still to come late) */
+struct rd3_sp_evict {
+    uint32_t id;          /* 0: free */
+    uint32_t marks;       /* pending + forgiven marks the slot held */
+    uint64_t ns;          /* when it was dropped (their age, as forgiven_ns) */
+};
+
 struct rd3_sp {
     struct rd3_sp_slot s[RD3_SP_SLOTS];
+    struct rd3_sp_evict evicted[RD3_SP_EVICTED];
+    unsigned evicted_next;
     uint64_t seq;
     struct rd3_sp_clear_rec cleared[RD3_SP_CLEARED];
     unsigned cleared_next;
@@ -103,6 +119,7 @@ struct rd3_sp {
     uint64_t ghosts_dropped;  /* pending marks a timeout dropped for good as ghosts */
     uint64_t starvations;     /* times the budget ran out */
     uint64_t skipped;         /* waits skipped while starved */
+    uint64_t evict_kept;      /* marks of a dropped surface carried into its new slot as forgiven (N41 item 4) */
 };
 
 enum rd3_sp_mark_res {
@@ -156,9 +173,43 @@ static inline int rd3_sp_was_cleared(const struct rd3_sp *t, uint32_t id, uint64
     return 0;
 }
 
+/* the ring entry of surface 'id' (0: none) */
+static inline struct rd3_sp_evict *rd3_sp_evict_find(struct rd3_sp *t, uint32_t id)
+{
+    for (unsigned i = 0; id && i < RD3_SP_EVICTED; i++)
+        if (t->evicted[i].id == id) return &t->evicted[i];
+    return 0;
+}
+
+/* the marks slot 's' still holds when its surface leaves the table, remembered for it (the oldest entry goes
+ * when the ring is full: its readies are LATE as before) */
+static inline void rd3_sp_evict_note(struct rd3_sp *t, const struct rd3_sp_slot *s, uint64_t now_ns)
+{
+    /* ghosts are marks whose readies were already taken: they are not owed again (review of 66a814d) */
+    const uint64_t m = (uint64_t)(s->count - (s->ghost < s->count ? s->ghost : s->count)) + s->forgiven;
+    if (!s->id || !m) return;
+    struct rd3_sp_evict *e = rd3_sp_evict_find(t, s->id);
+    if (!e) e = &t->evicted[t->evicted_next++ % RD3_SP_EVICTED];
+    else { const uint64_t sum = m + e->marks; e->marks = sum > RD3_SP_MAX_COUNT ? RD3_SP_MAX_COUNT : (uint32_t)sum;
+           e->ns = now_ns; return; }
+    e->id = s->id;
+    e->marks = m > RD3_SP_MAX_COUNT ? RD3_SP_MAX_COUNT : (uint32_t)m;
+    e->ns = now_ns;
+}
+
+/* an entry whose readies are not coming any more (older than RD3_SP_FORGIVE_MS) goes: 1 when it went */
+static inline int rd3_sp_evict_aged(struct rd3_sp *t, struct rd3_sp_evict *e, uint64_t now_ns)
+{
+    if (now_ns <= e->ns || now_ns - e->ns <= (uint64_t)RD3_SP_FORGIVE_MS * 1000000ull) return 0;
+    t->aged += e->marks;
+    e->id = 0; e->marks = 0; e->ns = 0;
+    return 1;
+}
+
 /* a slot for a new surface: a free one, else the oldest holding only forgiven marks, else the oldest
- * pending one (*evicted: its id; its episode is noted cleared) */
-static inline struct rd3_sp_slot *rd3_sp_take_slot(struct rd3_sp *t, uint32_t *evicted)
+ * pending one (*evicted: its id; its episode is noted cleared). The marks the slot held are remembered
+ * for its surface (rd3_sp_evict_note) */
+static inline struct rd3_sp_slot *rd3_sp_take_slot(struct rd3_sp *t, uint32_t *evicted, uint64_t now_ns)
 {
     struct rd3_sp_slot *s = rd3_sp_find(t, 0), *fg = 0, *old = 0;
     if (s) return s;
@@ -167,9 +218,10 @@ static inline struct rd3_sp_slot *rd3_sp_take_slot(struct rd3_sp *t, uint32_t *e
         if (!c->count) { if (!fg || c->seq < fg->seq) fg = c; }
         else if (!old || c->seq < old->seq) old = c;
     }
-    if (fg) return fg;
+    if (fg) { rd3_sp_evict_note(t, fg, now_ns); return fg; }
     if (evicted) *evicted = old->id;
     rd3_sp_note_cleared(t, old->id, old->seq);
+    rd3_sp_evict_note(t, old, now_ns);
     return old;
 }
 
@@ -181,7 +233,11 @@ static inline enum rd3_sp_mark_res rd3_sp_mark(struct rd3_sp *t, uint32_t id, in
     if (!t || !id) return RD3_SPM_BAD;
     struct rd3_sp_slot *s = rd3_sp_find(t, id);
     if (!pending) {
-        if (!s) return RD3_SPM_LATE;
+        if (!s) {   /* a late ready of a surface a full table dropped takes one of its remembered marks */
+            struct rd3_sp_evict *e = rd3_sp_evict_find(t, id);
+            if (e && !rd3_sp_evict_aged(t, e, now_ns) && e->marks && !--e->marks) { e->id = 0; e->ns = 0; }
+            return RD3_SPM_LATE;
+        }
         if (s->forgiven && now_ns > s->forgiven_ns &&
             now_ns - s->forgiven_ns > (uint64_t)RD3_SP_FORGIVE_MS * 1000000ull) {   /* their readies are not coming */
             t->aged += s->forgiven;
@@ -207,10 +263,16 @@ static inline enum rd3_sp_mark_res rd3_sp_mark(struct rd3_sp *t, uint32_t id, in
         return RD3_SPM_PENDING;
     }
     uint32_t ev = 0;
-    s = rd3_sp_take_slot(t, &ev);
+    s = rd3_sp_take_slot(t, &ev, now_ns);
     if (evicted) *evicted = ev;
     rd3_sp_slot_free(s);
     s->id = id; s->count = 1; s->seq = ++t->seq; s->since_ns = now_ns;
+    struct rd3_sp_evict *e = rd3_sp_evict_find(t, id);
+    if (e && !rd3_sp_evict_aged(t, e, now_ns)) {   /* dropped before: its late readies are forgiven ones */
+        s->forgiven = e->marks; s->forgiven_ns = e->ns;
+        t->evict_kept += e->marks;
+        e->id = 0; e->marks = 0; e->ns = 0;
+    }
     return ev ? RD3_SPM_EVICTED : RD3_SPM_PENDING;
 }
 
@@ -282,6 +344,7 @@ static inline unsigned rd3_sp_clear(struct rd3_sp *t)
         if (t->s[i].id && t->s[i].count) { n++; rd3_sp_note_cleared(t, t->s[i].id, t->s[i].seq); }
         rd3_sp_slot_free(&t->s[i]);
     }
+    for (unsigned i = 0; t && i < RD3_SP_EVICTED; i++) { t->evicted[i].id = 0; t->evicted[i].marks = 0; }
     if (t) rd3_sp_real_ready(t);   /* a fresh start: the budget too */
     return n;
 }

@@ -188,6 +188,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	python3 -I -B tests/test_triage_n43.py
 	tests/test_membw_load.sh
 	python3 -I -B tests/test_accel_slots.py
+	python3 -I -B tests/test_accel_locks.py
 	tests/test_triage_tx.sh
 	tests/test_triage_stale_plugin.sh
 	tests/test_triage_latch.sh
