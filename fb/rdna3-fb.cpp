@@ -27,6 +27,27 @@
  * NVRMFBClaim lesson). Starts only with the boot-arg rdna3fb=1: probe()
  * declines otherwise and IONDRVFramebuffer keeps the display; if start()
  * fails, IOKit falls back to it too. -rdna3off disables it.
+ *
+ * DRIVER-PLAN N40 (card run 2026-10-17d: WindowServer stays in the legacy
+ * page-flip present mode with us, NullMoth's setups get IOPresentment
+ * transactions), each behind a boot-arg read at start and logged in the
+ * "switches" line and RDNA3,Switches:
+ *   rdna3dispflags=0   kConnectionDisplayFlags 0 (NullMoth 1baebac); 1 = the
+ *                      old answer 1, kIODisplayNeedsCEAUnderscan
+ *   rdna3glorder=1     head 1's open() opens head 0 first, so
+ *                      IOFramebufferOpenGLIndex follows IOFBDependentIndex
+ *   rdna3fbintegrated  0 = IOFBIntegrated as IOGraphics sets it (default),
+ *                      1 = removed after open(), 2 = set Yes
+ *   rdna3cursorasync=1 setCursorState / setCursorImage's moves applied by a
+ *                      thread call, off WindowServer's thread (NullMoth)
+ *   rdna3fbwake=1      the family's wake work after a system sleep (DidWake,
+ *                      pagingState, WindowServer woken), as NullMoth does
+ *   rdna3vblonce=1     the VBL thread call never runs twice at once
+ *   rdna3fbdtmap=0     validateDetailedTiming answers Unsupported as before,
+ *                      logged with whether the timing is one of our modes;
+ *                      1 = accepts our modes' timings, UnsupportedMode else
+ *   rdna3fbconsole=1   isConsoleDevice: this framebuffer holds the boot
+ *                      console's address; 0 = head 0 as before
  */
 
 #include <IOKit/graphics/IOGraphicsTypes.h>
@@ -37,12 +58,15 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOPlatformExpert.h>
+#include <IOKit/IOCommandGate.h>
+#include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOSubMemoryDescriptor.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSSymbol.h>
 #include "../common/rdna3_bootargs.h"
+#include "../common/rdna3_fb_policy.h"
 #include <libkern/OSAtomic.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
@@ -71,6 +95,25 @@ static bool bootArgOn(const char *name)
 {
     return rd3_arg(name, 0) != 0;   /* with the default profile (rdna3_bootargs.h) */
 }
+
+/* a thread call that re-arms itself (or that a racing kick may enter once
+ * more), each invocation holding a reference of 'owner': the owner's stop
+ * flag is set first, so a run that sees it re-arms nothing; every
+ * invocation cancelled gives its reference back */
+static void fbCallDrainFree(OSObject *owner, thread_call_t c)
+{
+    __sync_synchronize();
+    while (thread_call_cancel_wait(c))
+        owner->release();
+    while (!thread_call_free(c))
+        if (thread_call_cancel_wait(c))
+            owner->release();
+}
+
+/* IOFramebuffer::open() runs under IOGraphics' system gate (newUserClient,
+ * and open() itself for the dependents): head 0's open started by head 1's
+ * open() opens head 1 again as its dependent, which must not start over */
+static int gOpenReenter = 0;
 
 /* ------------------------------------------------------------------ */
 
@@ -127,6 +170,40 @@ class RDNA3Framebuffer : public IOFramebuffer {
     uint64_t fVblNext = 0;
     uint32_t fLastFrame = 0;
     unsigned fVblWaits = 0;
+    /* N40: VBLs delivered, 250 us re-looks, frames the OTG counter did not
+     * move for (12 looks), runs that found another run of vblFire inside */
+    uint64_t fVblDelivered = 0, fVblPolls = 0, fVblStill = 0;
+    volatile SInt32 fVblIn = 0;
+    uint32_t fVblOverlap = 0, fStatTick = 0;
+    void     publishStats();
+
+    /* DRIVER-PLAN N40 switches (see the top of the file), read at start */
+    uint32_t fArgDispFlags = 0, fArgGlOrder = 1, fArgIntegrated = 0, fArgCurAsync = 1, fArgWake = 1;
+    uint32_t fArgVblOnce = 1, fArgDtMap = 0, fArgConsole = 1;
+    bool     fStarted = false;             /* super::start() succeeded: head 1's open() may open us first */
+    bool     fBootConsole = false;
+    bool     fDispFlagsLogged = false, fOpenLogged = false;
+    uint32_t fIntegLogged = 0;
+    uint32_t fDispFlagsAsked = 0;
+    RDNA3Framebuffer *copyHead0();
+    void     integratedAB();
+    /* the family's wake work (rdna3fbwake): the WillSleep/DidWake count of
+     * IOGraphics' notifications (rd3fb_wake, under fLock) */
+    IONotifier   *fSleepTap = nullptr;
+    IOCommandGate *fWakeGate = nullptr;
+    struct rd3fb_wake fWake = {};
+    uint32_t fWakeNoGate = 0, fWakeOff = 0;
+    static IOReturn sleepTap(OSObject *self, void *ref, IOFramebuffer *fb, IOIndex event, void *info);
+    void     familyDidWake(int32_t owed);
+    IOReturn familyDidWakeGated(void *owed, void *, void *, void *);
+    /* validateDetailedTiming (rdna3fbdtmap) and, with 1, the detailed
+     * timing ids setDetailedTimings mapped to our modes */
+    uint32_t fDtValidates = 0, fDtMatched = 0, fDtRefused = 0, fDtSets = 0, fDtMapped = 0;
+    static const uint32_t kMaxDt = 16;
+    IODisplayModeID fDtId[kMaxDt] = {};
+    uint32_t fDtIdx[kMaxDt] = {}, fNDt = 0;
+    bool     modeIndex(IODisplayModeID mode, uint32_t *idx) const;
+    int      dtMatch(const IODetailedTimingInformationV2 *d) const;
     IOSimpleLock *fLock = nullptr;
     /* a mode switch and a flip never interleave: a WindowServer frame of
      * the old size must not reach a head mid-switch (card run 2026-10-12:
@@ -173,6 +250,17 @@ class RDNA3Framebuffer : public IOFramebuffer {
     bool     cursorInit();
     void     cursorFree();
     bool     cursorCall(unsigned op);
+    bool     cursorCallAt(unsigned op, int32_t x, int32_t y, bool visible);
+    /* rdna3cursorasync: the newest state, applied by fCurCall (ONCE, high
+     * priority) - the core's cursor call takes its display lock, which
+     * flips, VBL status, EDID and the DP link take too (NullMoth's cursor
+     * thread call); fCurLock guards fCurQ and the fCur* state */
+    IOSimpleLock *fCurLock = nullptr;
+    thread_call_t fCurCall = nullptr;
+    struct rd3fb_cur_q fCurQ = {};
+    uint32_t fCurSync = 0, fCurFailLogged = 0;
+    void     cursorWant(bool force);
+    static void cursorFire(thread_call_param_t p0, thread_call_param_t);
 
     IOService *findCore(IOService *provider);
     bool       readCore();
@@ -222,7 +310,12 @@ public:
     IODeviceMemory *getApertureRange(IOPixelAperture aperture) override;
     IODeviceMemory *getVRAMRange() override;
     IOReturn setApertureEnable(IOPixelAperture, IOOptionBits) override { return kIOReturnSuccess; }
-    bool isConsoleDevice(void) override { return fHead == 0; }
+    /* the framebuffer whose scanout held the boot console at start
+     * (rdna3fbconsole=0: head 0) */
+    bool isConsoleDevice(void) override { return fArgConsole ? fBootConsole : fHead == 0; }
+    IOReturn open(void) override;
+    IOReturn validateDetailedTiming(void *description, IOByteCount descripSize) override;
+    IOReturn setDetailedTimings(OSArray *array) override;
 
     IOReturn getAttribute(IOSelect attribute, uintptr_t *value) override;
     IOReturn setAttribute(IOSelect attribute, uintptr_t value) override;
@@ -413,6 +506,14 @@ bool RDNA3Framebuffer::start(IOService *provider)
     fSymEdid = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_EDID);
     if (!fLock || !fModeLock || !fSymInfo || !fSymFlip || !fSymStatus || !fSymCursor || !fSymEdid)
         return false;
+    fArgDispFlags = rd3_arg("rdna3dispflags", 0);
+    fArgGlOrder = rd3_arg("rdna3glorder", 1);
+    fArgIntegrated = rd3_arg("rdna3fbintegrated", 0);
+    fArgCurAsync = rd3_arg("rdna3cursorasync", 1);
+    fArgWake = rd3_arg("rdna3fbwake", 1);
+    fArgVblOnce = rd3_arg("rdna3vblonce", 1);
+    fArgDtMap = rd3_arg("rdna3fbdtmap", 0);
+    fArgConsole = rd3_arg("rdna3fbconsole", 1);
 
     if (!fCore)
         fCore = findCore(provider);
@@ -431,6 +532,22 @@ bool RDNA3Framebuffer::start(IOService *provider)
     }
     FBLOG("%s mode: %ux%u pitch %u at phys 0x%llx, %u.%03u Hz", fDcn ? "DCN" : "console", fW, fH,
           fPitch, (unsigned long long)fPhys, fRefreshMilliHz / 1000, fRefreshMilliHz % 1000);
+    {
+        /* the boot console: the scanout that holds its address now, before
+         * IOGraphics takes it over (heads > 0 show a surface of their own) */
+        PE_Video v;
+        bzero(&v, sizeof(v));
+        IOPlatformExpert *pe = getPlatform();
+        const bool known = pe && pe->getConsoleInfo(&v) == kIOReturnSuccess && v.v_baseAddr;
+        fBootConsole = rd3fb_owns_console(known, known ? (uint64_t)v.v_baseAddr : 0, fPhys, fBytes, fHead) != 0;
+        FBLOG("head %u: boot console %s: %s (rdna3fbconsole=%u, default 1; 0 = head 0 as before)", fHead,
+              known ? "at" : "unknown", fBootConsole ? "this framebuffer holds it" : "not this framebuffer", fArgConsole);
+        if (known)
+            FBLOG("head %u: console base 0x%llx, scanout 0x%llx + 0x%llx", fHead, (unsigned long long)v.v_baseAddr,
+                  (unsigned long long)fPhys, (unsigned long long)fBytes);
+        if (fArgConsole && !fHead && !fBootConsole)
+            FBLOG("head 0 does NOT hold the boot console: isConsoleDevice answers no (rdna3fbconsole=0 restores yes)");
+    }
     /* the core probed the connectors before it registered: ask for the
      * EDID now, so IOGraphics' first HLDDC sense / hasDDCConnect question
      * (asked once, while the display is attached) already gets a yes */
@@ -462,7 +579,15 @@ bool RDNA3Framebuffer::start(IOService *provider)
         FBLOG("IOFramebuffer::start failed");
         return false;
     }
-    fVblTimer = thread_call_allocate(vblFire, this);
+    fStarted = true;
+    /* ONCE: a re-arm while vblFire still runs (a slow status call under the
+     * core's display lock) queues one more run instead of a second vblFire
+     * beside it (NullMoth #295); both run at THREAD_CALL_PRIORITY_HIGH */
+    fVblTimer = fArgVblOnce ? thread_call_allocate_with_options(vblFire, this, THREAD_CALL_PRIORITY_HIGH,
+                                                                THREAD_CALL_OPTIONS_ONCE)
+                            : thread_call_allocate(vblFire, this);
+    if (!fVblTimer)
+        FBLOG("head %u: no VBL thread call: no VBL interrupts for IOGraphics", fHead);
     if (fVblTimer) {
         uint64_t d;
         clock_interval_to_deadline(16667, kMicrosecondScale, &d);
@@ -471,8 +596,38 @@ bool RDNA3Framebuffer::start(IOService *provider)
     registerPowerDriver(this, kFBPowerStates, 2);
     if (fDcn)
         cursorInit();
+    /* the WillSleep / DidWake count for the family's wake work; passive */
+    fSleepTap = addFramebufferNotification(&RDNA3Framebuffer::sleepTap, this, nullptr);
+    if (!fSleepTap)
+        FBLOG("head %u: no framebuffer notification tap: a system wake cannot do the family's wake work", fHead);
     FBLOG("started (head %u, VBL %s, %s cursor), build %s", fHead,
           fDcn ? "locked to the OTG frame counter" : "timer", fCurReady ? "hardware" : "software", FB_COMMIT);
+    /* DRIVER-PLAN N40: every switch with its default, for the A/B */
+    FBLOG("head %u switches: dispflags %u (default 0), glorder %u (default 1), fbintegrated %u (default 0), "
+          "cursorasync %u (default 1%s), fbwake %u (default 1), vblonce %u (default 1), fbdtmap %u (default 0), "
+          "fbconsole %u (default 1); VBL source: %s (no hardware vblank interrupt in the core yet)",
+          fHead, fArgDispFlags, fArgGlOrder, fArgIntegrated, fArgCurAsync, !fCurReady ? ", no hardware cursor" : fCurCall ? "" : ", no thread call: synchronous",
+          fArgWake, fArgVblOnce, fArgDtMap, fArgConsole,
+          fDcn ? "OTG frame counter polled by a thread call" : "timer");
+    OSDictionary *sw = OSDictionary::withCapacity(10);
+    if (sw) {
+        const struct { const char *k; uint32_t v; } kv[] = {
+            { "dispflags", fArgDispFlags }, { "glorder", fArgGlOrder }, { "fbintegrated", fArgIntegrated },
+            { "cursorasync", fArgCurAsync && fCurCall ? 1u : 0u }, { "fbwake", fArgWake }, { "vblonce", fArgVblOnce },
+            { "fbdtmap", fArgDtMap }, { "fbconsole", fArgConsole }, { "bootconsole", fBootConsole ? 1u : 0u },
+        };
+        for (unsigned i = 0; i < sizeof(kv) / sizeof(kv[0]); i++) {
+            OSNumber *n = OSNumber::withNumber((unsigned long long)kv[i].v, 32);
+            if (n) {
+                sw->setObject(kv[i].k, n);
+                n->release();
+            }
+        }
+        setProperty("RDNA3,Switches", sw);
+        sw->release();
+    }
+    setProperty("RDNA3,VBLSource", fDcn ? "otg-poll" : "timer");
+    publishStats();
     return true;
 }
 
@@ -496,15 +651,24 @@ void RDNA3Framebuffer::stop(IOService *provider)
         fStopping = 1;
         IOSimpleLockUnlockEnableInterrupt(fLock, st);
     }
+    fStarted = false;
+    if (fSleepTap) {
+        fSleepTap->remove();
+        fSleepTap = nullptr;
+    }
     if (fVblTimer) {
-        if (thread_call_cancel(fVblTimer))
-            release();
-        while (!thread_call_free(fVblTimer)) {
-            if (thread_call_cancel(fVblTimer))
-                release();
-            IOSleep(1);
-        }
+        fbCallDrainFree(this, fVblTimer);   /* waits for a vblFire still running */
         fVblTimer = nullptr;
+    }
+    if (fCurCall) {
+        fbCallDrainFree(this, fCurCall);
+        fCurCall = nullptr;
+    }
+    if (fWakeGate) {
+        IOWorkLoop *wl = getWorkLoop();
+        if (wl)
+            wl->removeEventSource(fWakeGate);
+        OSSafeReleaseNULL(fWakeGate);
     }
     if (fCurMode) {
         IOLockLock(fModeLock);
@@ -551,6 +715,10 @@ void RDNA3Framebuffer::free()
         IOLockFree(fLatchLock);
         fLatchLock = nullptr;
     }
+    if (fCurLock) {
+        IOSimpleLockFree(fCurLock);
+        fCurLock = nullptr;
+    }
     super::free();
 }
 
@@ -585,6 +753,10 @@ void RDNA3Framebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
         me->release();
         return;
     }
+    /* two runs at once (rdna3vblonce=0 and a re-arm that fired while this
+     * one waited for the core): counted, the evidence for the switch */
+    if (OSIncrementAtomic(&me->fVblIn) > 0)
+        me->fVblOverlap++;
     uint64_t now = 0, period = me->vblPeriodAbs();
     clock_get_uptime(&now);
     RD3KDisplayStatus st;
@@ -592,12 +764,16 @@ void RDNA3Framebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
         if (st.frame == me->fLastFrame && me->fVblWaits < 12) {
             /* not yet: look again in 250 us */
             me->fVblWaits++;
+            me->fVblPolls++;
             uint64_t d;
             clock_interval_to_deadline(250, kMicrosecondScale, &d);
+            OSDecrementAtomic(&me->fVblIn);
             me->scheduleVbl(d);
             me->release();
             return;
         }
+        if (st.frame == me->fLastFrame)
+            me->fVblStill++;   /* 12 looks and the counter did not move: delivered anyway */
         me->fLastFrame = st.frame;
         me->fVblWaits = 0;
         /* a new frame: a pending flip may have latched (rdna3FlipLatchWait) */
@@ -614,10 +790,17 @@ void RDNA3Framebuffer::vblFire(thread_call_param_t p0, thread_call_param_t)
     }
     if (me->fVbl.proc)
         me->fVbl.proc(me->fVbl.target, me->fVbl.ref);
+    me->fVblDelivered++;
     if (me->fHpOn && ++me->fHpTick >= 30) {
         me->fHpTick = 0;
         me->hotplugPoll(false);
     }
+    /* the N40 counters into the registry about every 2 s */
+    if (++me->fStatTick >= 120) {
+        me->fStatTick = 0;
+        me->publishStats();
+    }
+    OSDecrementAtomic(&me->fVblIn);
     me->scheduleVbl(me->fVblNext);
     me->release();
 }
@@ -880,10 +1063,26 @@ IOReturn RDNA3Framebuffer::setTiming(uint32_t idx)
     return kIOReturnSuccess;
 }
 
+/* our mode ids (kModeId + index) and, with rdna3fbdtmap=1, the detailed
+ * timing ids setDetailedTimings mapped to one of our modes */
+bool RDNA3Framebuffer::modeIndex(IODisplayModeID mode, uint32_t *idx) const
+{
+    if (mode >= kModeId && (uint32_t)(mode - kModeId) < fNModes) {
+        *idx = (uint32_t)(mode - kModeId);
+        return true;
+    }
+    for (uint32_t i = 0; i < fNDt; i++)
+        if (fDtId[i] == mode && fDtIdx[i] < fNModes) {
+            *idx = fDtIdx[i];
+            return true;
+        }
+    return false;
+}
+
 IOReturn RDNA3Framebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth)
 {
-    uint32_t idx = (uint32_t)(mode - kModeId);
-    if (mode < kModeId || idx >= fNModes || depth != 0)
+    uint32_t idx = 0;
+    if (!modeIndex(mode, &idx) || depth != 0)
         return kIOReturnUnsupportedMode;
     if (idx == fCurMode)
         return kIOReturnSuccess;
@@ -924,8 +1123,8 @@ void RDNA3Framebuffer::publishK5Timing()
 
 IOReturn RDNA3Framebuffer::getInformationForDisplayMode(IODisplayModeID mode, IODisplayModeInformation *info)
 {
-    uint32_t idx = (uint32_t)(mode - kModeId);
-    if (!info || mode < kModeId || idx >= fNModes)
+    uint32_t idx = 0;
+    if (!info || !modeIndex(mode, &idx))
         return kIOReturnBadArgument;
     bzero(info, sizeof(*info));
     info->nominalWidth = fModes[idx].w;
@@ -938,8 +1137,8 @@ IOReturn RDNA3Framebuffer::getInformationForDisplayMode(IODisplayModeID mode, IO
 
 IOReturn RDNA3Framebuffer::getTimingInfoForDisplayMode(IODisplayModeID mode, IOTimingInformation *info)
 {
-    uint32_t idx = (uint32_t)(mode - kModeId);
-    if (!info || mode < kModeId || idx >= fNModes)
+    uint32_t idx = 0;
+    if (!info || !modeIndex(mode, &idx))
         return kIOReturnUnsupportedMode;
     bzero(info, sizeof(*info));
     info->appleTimingID = kIOTimingIDInvalid;
@@ -991,8 +1190,8 @@ IOReturn RDNA3Framebuffer::getTimingInfoForDisplayMode(IODisplayModeID mode, IOT
 IOReturn RDNA3Framebuffer::getPixelInformation(IODisplayModeID mode, IOIndex depth,
                                                IOPixelAperture aperture, IOPixelInformation *pi)
 {
-    uint32_t idx = (uint32_t)(mode - kModeId);
-    if (mode < kModeId || idx >= fNModes || depth != 0 || aperture != kIOFBSystemAperture || !pi)
+    uint32_t idx = 0;
+    if (!modeIndex(mode, &idx) || depth != 0 || aperture != kIOFBSystemAperture || !pi)
         return kIOReturnUnsupportedMode;
     bzero(pi, sizeof(*pi));
     pi->activeWidth = fModes[idx].w;
@@ -1054,6 +1253,256 @@ IODeviceMemory *RDNA3Framebuffer::getVRAMRange()
     return getApertureRange(kIOFBSystemAperture);
 }
 
+/* ---------------------- open order, integrated ---------------------- */
+
+/* head 0's framebuffer on the same PCI device, started, retained; or null */
+RDNA3Framebuffer *RDNA3Framebuffer::copyHead0()
+{
+    RDNA3Framebuffer *found = nullptr;
+    OSIterator *it = fPci ? fPci->getChildIterator(gIOServicePlane) : nullptr;
+    if (!it)
+        return nullptr;
+    while (OSObject *o = it->getNextObject()) {
+        RDNA3Framebuffer *f = OSDynamicCast(RDNA3Framebuffer, o);
+        if (f && f != this && f->fHead == 0 && f->fStarted && !f->isInactive()) {
+            f->retain();
+            found = f;
+            break;
+        }
+    }
+    it->release();
+    return found;
+}
+
+/* DRIVER-PLAN N40 (2): IOFramebuffer::open() of a controller's first
+ * framebuffer gives it IOFramebufferOpenGLIndex 0 and its dependents the
+ * next ones (assignGLIndex). WindowServer opened head 1 first in card run
+ * 2026-10-17d (GL 0,1 against IOFBDependentIndex 1,0; AGDC slots and
+ * IOAccelIndex follow the dependent index): with rdna3glorder=1 head 1's
+ * open() opens head 0 first, which opens head 1 as its dependent
+ * (rd3fb_open_head0_first). Then (3) the IOFBIntegrated A/B. */
+IOReturn RDNA3Framebuffer::open(void)
+{
+    enum rd3fb_order_why why = RD3FB_ORDER_OFF;
+    IOReturn r0 = kIOReturnSuccess;
+    const bool wasOpen = opened != 0;
+    RDNA3Framebuffer *h0 = (fArgGlOrder && fHead && !wasOpen && !gOpenReenter) ? copyHead0() : nullptr;
+    bool sameDep = false;
+    if (h0) {
+        OSObject *a = getProperty("IOFBDependentID"), *b = h0->getProperty("IOFBDependentID");
+        sameDep = a && b && a->isEqualTo(b);
+    }
+    if (rd3fb_open_head0_first(fArgGlOrder != 0, fHead, wasOpen, gOpenReenter != 0, h0 != nullptr, sameDep,
+                               h0 && h0->opened, &why)) {
+        gOpenReenter++;
+        r0 = h0->open();
+        gOpenReenter--;
+    }
+    OSSafeReleaseNULL(h0);
+    const bool openBefore = opened != 0;   /* head 0's open may have opened us as its dependent */
+    IOReturn r = super::open();
+    if ((!wasOpen && !fOpenLogged) || why == RD3FB_ORDER_FIRST) {
+        fOpenLogged = true;
+        OSNumber *gl = OSDynamicCast(OSNumber, getProperty("IOFramebufferOpenGLIndex"));
+        FBLOG("head %u open: %s%s -> 0x%x; IOFramebufferOpenGLIndex %d, IOFBDependentIndex %u (rdna3glorder=%u, "
+              "default 1)", fHead, rd3fb_order_text(why), why == RD3FB_ORDER_FIRST ? (r0 ? " (its open FAILED)" : " (ok)") : "",
+              r, gl ? (int)gl->unsigned32BitValue() : -1, fHead, fArgGlOrder);
+        if (why == RD3FB_ORDER_FIRST && r0)
+            FBLOG("head %u open: head 0's open answered 0x%x: the GL indices are IOGraphics' own", fHead, r0);
+        setProperty("RDNA3,OpenOrder", rd3fb_order_text(why));
+    }
+    /* once per open by IOGraphics (it sets the property in each open) */
+    if (r == kIOReturnSuccess && !openBefore && opened)
+        integratedAB();
+    return r;
+}
+
+/* DRIVER-PLAN N40 (3): IOGraphics publishes IOFBIntegrated in open() when
+ * the card's IOPCIDevice is on PCI bus 0 (IOFBController::init); in
+ * IOFramebuffer.cpp fIntegrated is used beyond the property only in close()
+ * with an NVIDIA device present. The GPUWrangler "(IG)" flag comes from its
+ * own look at the device, which a kext cannot change: rdna3fbintegrated
+ * (0 keep, 1 remove, 2 set) changes what readers of the property see. */
+void RDNA3Framebuffer::integratedAB()
+{
+    const bool present = getProperty("IOFBIntegrated") != nullptr;
+    const enum rd3fb_integ_act a = rd3fb_integrated_action(fArgIntegrated, present);
+    if (a == RD3FB_INTEG_REMOVE)
+        removeProperty("IOFBIntegrated");
+    else if (a == RD3FB_INTEG_SET)
+        setProperty("IOFBIntegrated", kOSBooleanTrue);
+    const char *what = a == RD3FB_INTEG_REMOVE ? "removed" : a == RD3FB_INTEG_SET ? "set Yes" : "kept";
+    const unsigned bus = fPci ? (unsigned)fPci->getBusNumber() : 0xffu;
+    char txt[96];
+    snprintf(txt, sizeof(txt), "IOGraphics %s, %s (rdna3fbintegrated=%u), PCI bus %u", present ? "Yes" : "not set", what,
+             fArgIntegrated, bus);
+    if (!fIntegLogged++)
+        FBLOG("head %u: IOFBIntegrated: %s (default 0 = as IOGraphics sets it; IOGraphics' rule: bus 0 = integrated)",
+              fHead, txt);
+    setProperty("RDNA3,IntegratedAB", txt);
+}
+
+/* ------------------------ detailed timings ------------------------ */
+
+/* which of our modes a detailed timing is (rd3fb_dt_match), -1 none */
+int RDNA3Framebuffer::dtMatch(const IODetailedTimingInformationV2 *d) const
+{
+    struct rd3fb_dt want, modes[kMaxModes];
+    unsigned n = 0;
+    bzero(&want, sizeof(want));
+    want.pclk = d->pixelClock;
+    want.hact = d->horizontalActive;
+    want.hblank = d->horizontalBlanking;
+    want.vact = d->verticalActive;
+    want.vblank = d->verticalBlanking;
+    want.hscaled = d->horizontalScaled;
+    want.vscaled = d->verticalScaled;
+    for (uint32_t i = 0; i < fNModes && i < kMaxModes; i++) {
+        IOTimingInformation ti;
+        bzero(&modes[n], sizeof(modes[n]));
+        /* getTimingInfoForDisplayMode is const in effect; the cast keeps
+         * IOFramebuffer's signature */
+        if (const_cast<RDNA3Framebuffer *>(this)->getTimingInfoForDisplayMode(kModeId + (IODisplayModeID)i, &ti) ==
+                kIOReturnSuccess &&
+            (ti.flags & kIODetailedTimingValid) && !(ti.flags & kIOScalingInfoValid)) {
+            const IODetailedTimingInformationV2 &m = ti.detailedInfo.v2;
+            modes[n].pclk = m.pixelClock;
+            modes[n].hact = m.horizontalActive;
+            modes[n].hblank = m.horizontalBlanking;
+            modes[n].vact = m.verticalActive;
+            modes[n].vblank = m.verticalBlanking;
+        }
+        n++;   /* modes[k] is mode k: an empty entry (no clock) never matches */
+    }
+    return rd3fb_dt_match(&want, modes, n);
+}
+
+/* CoreDisplay's InstallTiming (card run 2026-10-17d: 57 x 0xe00002c7, the
+ * base class's unsupported, for the EDID's 720x480 .. 1920x1080@72):
+ * rdna3fbdtmap=0 (default) answers as before, logged with whether the timing
+ * is one of our modes; 1 accepts our modes' timings (setDetailedTimings maps
+ * their ids to the mode) and refuses the rest with UnsupportedMode */
+IOReturn RDNA3Framebuffer::validateDetailedTiming(void *description, IOByteCount descripSize)
+{
+    IODetailedTimingInformationV2 *d = nullptr;
+    if (description && descripSize == sizeof(IOFBDisplayModeDescription))
+        d = &((IOFBDisplayModeDescription *)description)->timingInfo.detailedInfo.v2;
+    else if (description && descripSize == sizeof(IODetailedTimingInformationV2))
+        d = (IODetailedTimingInformationV2 *)description;
+    fDtValidates++;
+    if (!d) {
+        if (fDtValidates <= 8)
+            FBLOG("head %u validateDetailedTiming: %llu bytes, not a timing: Bad argument", fHead,
+                  (unsigned long long)descripSize);
+        return kIOReturnBadArgument;
+    }
+    const int m = dtMatch(d);
+    const bool accept = fArgDtMap && m >= 0;
+    if (m >= 0)
+        fDtMatched++;
+    if (!accept)
+        fDtRefused++;
+    if (fDtValidates <= 24 || (fDtValidates & 1023) == 0 || accept) {
+        const uint64_t tot = (uint64_t)(d->horizontalActive + d->horizontalBlanking) * (d->verticalActive + d->verticalBlanking);
+        const uint32_t mhz = tot ? (uint32_t)(d->pixelClock * 1000 / tot) : 0;
+        FBLOG("head %u validateDetailedTiming #%u id 0x%x %ux%u@%u.%03u: %s%d -> %s (rdna3fbdtmap=%u)", fHead,
+              fDtValidates, (unsigned)d->detailedTimingModeID, (unsigned)d->horizontalActive,
+              (unsigned)d->verticalActive, mhz / 1000, mhz % 1000, m >= 0 ? "our mode " : "not one of our modes ", m,
+              accept ? "accepted" : fArgDtMap ? "UnsupportedMode" : "Unsupported (as before)", fArgDtMap);
+    }
+    if (!accept)
+        return fArgDtMap ? kIOReturnUnsupportedMode : kIOReturnUnsupported;
+    if (!d->minPixelClock)
+        d->minPixelClock = d->pixelClock;
+    if (!d->maxPixelClock)
+        d->maxPixelClock = d->pixelClock;
+    if (descripSize == sizeof(IOFBDisplayModeDescription)) {
+        IODisplayModeInformation *info = &((IOFBDisplayModeDescription *)description)->info;
+        IODisplayModeInformation ours;
+        if (getInformationForDisplayMode(kModeId + (IODisplayModeID)m, &ours) == kIOReturnSuccess) {
+            info->nominalWidth = ours.nominalWidth;
+            info->nominalHeight = ours.nominalHeight;
+            info->refreshRate = ours.refreshRate;
+            info->maxDepthIndex = 0;
+        }
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn RDNA3Framebuffer::setDetailedTimings(OSArray *array)
+{
+    fDtSets++;
+    if (!fArgDtMap) {
+        if (fDtSets <= 4)
+            FBLOG("head %u setDetailedTimings(%u timing(s)): Unsupported as before (rdna3fbdtmap=0)", fHead,
+                  array ? (unsigned)array->getCount() : 0u);
+        return kIOReturnUnsupported;
+    }
+    uint32_t n = 0, bad = 0;
+    for (unsigned i = 0; array && i < array->getCount(); i++) {
+        OSData *o = OSDynamicCast(OSData, array->getObject(i));
+        const IODetailedTimingInformationV2 *d =
+            o && o->getLength() >= sizeof(IODetailedTimingInformationV2)
+                ? (const IODetailedTimingInformationV2 *)o->getBytesNoCopy()
+                : nullptr;
+        const int m = d ? dtMatch(d) : -1;
+        if (m < 0 || n >= kMaxDt) {
+            bad++;
+            continue;
+        }
+        fDtId[n] = (IODisplayModeID)d->detailedTimingModeID;
+        fDtIdx[n] = (uint32_t)m;
+        n++;
+    }
+    fNDt = n;
+    fDtMapped = n;
+    FBLOG("head %u setDetailedTimings: %u timing(s) mapped to our modes, %u not ours%s (rdna3fbdtmap=1)", fHead, n,
+          bad, array ? "" : " (cleared)");
+    return bad ? kIOReturnUnsupportedMode : kIOReturnSuccess;
+}
+
+/* the DRIVER-PLAN N40 counters, RDNA3,FBStats in the registry (the report's
+ * 12-ioreg-fb.txt; tools/triage_reports.py "fb N40") */
+void RDNA3Framebuffer::publishStats()
+{
+    struct rd3fb_cur_q q;
+    struct rd3fb_wake w;
+    bzero(&q, sizeof(q));
+    if (fCurLock) {
+        IOSimpleLockLock(fCurLock);
+        q = fCurQ;
+        IOSimpleLockUnlock(fCurLock);
+    }
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    w = fWake;
+    IOSimpleLockUnlockEnableInterrupt(fLock, st);
+    OSDictionary *d = OSDictionary::withCapacity(28);
+    if (!d)
+        return;
+    const struct { const char *k; uint64_t v; } kv[] = {
+        { "cursor_sets", q.sets }, { "cursor_kicks", q.kicks }, { "cursor_coalesced", q.coalesced },
+        { "cursor_same", q.same }, { "cursor_applies", q.applies }, { "cursor_fails", q.fails },
+        { "cursor_sync", fCurSync }, { "cursor_images", fCurImages },
+        { "wake_sleeps", w.sleeps }, { "wake_family", w.family_wakes }, { "wake_owed_max", w.owed_max },
+        { "wake_plain_on", w.plain_power_ons }, { "wake_didwake_seen", w.didwakes_seen },
+        { "wake_unanswered", (uint64_t)(w.will_sleep_off > 0 ? w.will_sleep_off : 0) },
+        { "wake_nogate", fWakeNoGate }, { "wake_off", fWakeOff },
+        { "vbl_delivered", fVblDelivered }, { "vbl_polls", fVblPolls }, { "vbl_still", fVblStill },
+        { "vbl_overlap", fVblOverlap },
+        { "dt_validate", fDtValidates }, { "dt_matched", fDtMatched }, { "dt_refused", fDtRefused },
+        { "dt_sets", fDtSets }, { "dt_mapped", fDtMapped }, { "dispflags_asked", fDispFlagsAsked },
+    };
+    for (unsigned i = 0; i < sizeof(kv) / sizeof(kv[0]); i++) {
+        OSNumber *n = OSNumber::withNumber((unsigned long long)kv[i].v, 64);
+        if (n) {
+            d->setObject(kv[i].k, n);
+            n->release();
+        }
+    }
+    setProperty("RDNA3,FBStats", d);
+    d->release();
+}
+
 /* --------------------------- attributes --------------------------- */
 
 IOReturn RDNA3Framebuffer::getAttribute(IOSelect attribute, uintptr_t *value)
@@ -1096,7 +1545,17 @@ IOReturn RDNA3Framebuffer::getAttributeForConnection(IOIndex idx, IOSelect attri
     case kConnectionControllerDepthsSupported: if (value) *value = 0x00000002; return kIOReturnSuccess;
     case kConnectionColorMode:                 if (value) *value = 0x00000001; return kIOReturnSuccess;
     case kConnectionCheckEnable:               if (value) *value = fConnected ? 1 : 0; return kIOReturnSuccess;
-    case kConnectionDisplayFlags:              if (value) *value = 1; return kIOReturnSuccess;
+    case kConnectionDisplayFlags:
+        /* 0 (NullMoth 1baebac); 1 was kIODisplayNeedsCEAUnderscan, which
+         * no DP/HDMI sink of ours asked for (rdna3dispflags=1 restores it) */
+        if (value) *value = fArgDispFlags ? 1 : 0;
+        fDispFlagsAsked++;
+        if (!fDispFlagsLogged) {
+            fDispFlagsLogged = true;
+            FBLOG("head %u: kConnectionDisplayFlags -> %u (rdna3dispflags=%u, default 0)", fHead,
+                  fArgDispFlags ? 1u : 0u, fArgDispFlags);
+        }
+        return kIOReturnSuccess;
     case kConnectionSupportsHLDDCSense: {
         /* IOGraphics asks hasDDCConnect / getDDCBlock only when this
          * succeeds: the EDID the core read over AUX or the DDC */
@@ -1163,8 +1622,103 @@ IOReturn RDNA3Framebuffer::setPowerState(unsigned long ordinal, IOService *)
 {
     FBLOG("setPowerState %lu", ordinal);
     powerBlank(ordinal != 0, "power state");
-    handleEvent(ordinal ? kIOFBNotifyDidPowerOn : kIOFBNotifyWillPowerOff);
+    if (!ordinal) {
+        handleEvent(kIOFBNotifyWillPowerOff);
+        return kIOPMAckImplied;
+    }
+    /* IOGraphics' system sleep cleared pagingState and told every client
+     * WillSleep; its wake work runs from IOFramebuffer::setPowerState, which
+     * this one replaces, and handleEvent() does nothing off the controller's
+     * power thread. So after a system sleep the framebuffer does that work
+     * itself (rdna3fbwake=1; NullMoth's familyDidWake), else nobody sends
+     * DidWake and WindowServer waits for paging. At boot pagingState is clear
+     * too, but no WillSleep came: no wake work then. */
+    const bool paging = pagingState != 0;
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    const bool slept = fWake.sys_slept != 0;
+    const int32_t pend = fWake.will_sleep_off;
+    const int32_t owed = rd3fb_wake_power_on(&fWake, fArgWake != 0, paging);
+    IOSimpleLockUnlockEnableInterrupt(fLock, st);
+    if (owed) {
+        familyDidWake(owed);
+    } else {
+        if (slept)
+            FBLOG("system wake: head %u, pagingState %d, %d WillSleep(false) unanswered: the family wake work %s", fHead,
+                  paging ? 1 : 0, (int)pend, !fArgWake ? "is OFF (rdna3fbwake=0): WindowServer may wait for paging"
+                                                       : "is not needed (paging on)");
+        if (slept && !fArgWake)
+            fWakeOff++;
+        handleEvent(kIOFBNotifyDidPowerOn);
+    }
     return kIOPMAckImplied;
+}
+
+/* IOGraphics' notifications to every client of this framebuffer, ours
+ * included: WillSleep(false) is counted until a DidWake(false) answers it,
+ * WillSleep(true) marks a system sleep (rdna3_fb_policy.h) */
+IOReturn RDNA3Framebuffer::sleepTap(OSObject *self, void *, IOFramebuffer *, IOIndex event, void *info)
+{
+    RDNA3Framebuffer *fb = OSDynamicCast(RDNA3Framebuffer, self);
+    if (!fb || !fb->fLock || (event != kIOFBNotifyWillSleep && event != kIOFBNotifyDidWake))
+        return kIOReturnSuccess;
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fb->fLock);
+    rd3fb_wake_event(&fb->fWake, (int)event, info != nullptr);
+    const int32_t off = fb->fWake.will_sleep_off;
+    const uint32_t sleeps = fb->fWake.sleeps;
+    IOSimpleLockUnlockEnableInterrupt(fb->fLock, st);
+    if (event == kIOFBNotifyWillSleep && info)
+        FBLOG("system sleep #%u: head %u told WillSleep, %d WillSleep(false) unanswered", sleeps, fb->fHead, (int)off);
+    return kIOReturnSuccess;
+}
+
+/* What IOFramebuffer's own wake does for a framebuffer that powers on after
+ * a system sleep (IOFBController's power work, then handleEvent(DidWake)):
+ * clients told DidWake(true), then DidWake(false) as many times as
+ * WillSleep(false) came (IOGraphicsAccelerator2 enables itself again only
+ * then), DidPowerOn(false), pagingState set and WindowServer, asleep in the
+ * framebuffer's gate on fServerConnect until paging is on, woken. Run in a
+ * command gate on the framebuffer's own IOGraphics workloop, so the wakeup
+ * cannot slip between WindowServer's look at pagingState and its sleep. */
+void RDNA3Framebuffer::familyDidWake(int32_t owed)
+{
+    IOWorkLoop *wl = getWorkLoop();
+    if (!fWakeGate && wl) {
+        fWakeGate = IOCommandGate::commandGate(this);
+        if (fWakeGate && wl->addEventSource(fWakeGate) != kIOReturnSuccess)
+            OSSafeReleaseNULL(fWakeGate);
+    }
+    if (!fWakeGate) {
+        /* the sleep stays recorded: the next power-on tries again */
+        fWakeNoGate++;
+        FBLOG("system wake: head %u has no command gate on its workloop (%p): the family wake work did NOT run, "
+              "WindowServer may wait for paging (%u such)", fHead, wl, fWakeNoGate);
+        handleEvent(kIOFBNotifyDidPowerOn);
+        return;
+    }
+    IOReturn r = fWakeGate->runAction(OSMemberFunctionCast(IOCommandGate::Action, this,
+                                                           &RDNA3Framebuffer::familyDidWakeGated),
+                                      (void *)(intptr_t)owed);
+    if (r != kIOReturnSuccess)
+        FBLOG("system wake: head %u family wake work -> 0x%x", fHead, r);
+}
+
+IOReturn RDNA3Framebuffer::familyDidWakeGated(void *a0, void *, void *, void *)
+{
+    const int32_t owed = (int32_t)(intptr_t)a0;
+    IOReturn r1 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)true);
+    IOReturn r2 = kIOReturnSuccess;
+    for (int32_t i = 0; i < owed; i++)
+        r2 = deliverFramebufferNotification(kIOFBNotifyDidWake, (void *)false);
+    IOReturn r3 = deliverFramebufferNotification(kIOFBNotifyDidPowerOn, (void *)false);
+    pagingState = true;
+    fWakeGate->commandWakeup(&fServerConnect, false);
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    rd3fb_wake_done(&fWake);
+    const uint32_t n = fWake.family_wakes;
+    IOSimpleLockUnlockEnableInterrupt(fLock, st);
+    FBLOG("system wake #%u: head %u clients told DidWake true and %d x false (0x%x/0x%x), DidPowerOn (0x%x), "
+          "paging on, WindowServer woken (rdna3fbwake=1)", n, fHead, (int)owed, r1, r2, r3);
+    return kIOReturnSuccess;
 }
 
 /* ----------------------------- cursor ----------------------------- */
@@ -1241,8 +1795,17 @@ bool RDNA3Framebuffer::cursorInit()
     }
     fCurKva = (volatile uint32_t *)fCurVram.kva;   /* zeroed by the core */
     fCurReady = true;
-    FBLOG("hardware cursor: %ux%u at VRAM 0x%llx", kCurDim, kCurDim,
-          (unsigned long long)fCurVram.allocationCookie);
+    if (fArgCurAsync) {
+        fCurLock = IOSimpleLockAlloc();
+        fCurCall = fCurLock ? thread_call_allocate_with_options(cursorFire, this, THREAD_CALL_PRIORITY_HIGH,
+                                                                THREAD_CALL_OPTIONS_ONCE)
+                            : nullptr;
+        if (!fCurCall)
+            FBLOG("hardware cursor: no lock or thread call (%p): the cursor is moved on WindowServer's thread", fCurLock);
+    }
+    FBLOG("hardware cursor: %ux%u at VRAM 0x%llx, moved %s (rdna3cursorasync=%u, default 1)", kCurDim, kCurDim,
+          (unsigned long long)fCurVram.allocationCookie,
+          fCurCall ? "by a thread call off WindowServer's thread" : "on WindowServer's thread", fArgCurAsync);
     return true;
 }
 
@@ -1406,6 +1969,12 @@ bool RDNA3Framebuffer::fetchEdid()
 
 bool RDNA3Framebuffer::cursorCall(unsigned op)
 {
+    return cursorCallAt(op, fCurX, fCurY, fCurVisible && fCurHaveImage);
+}
+
+/* the core's cursor call (rdna3DisplayCursor): takes its display lock */
+bool RDNA3Framebuffer::cursorCallAt(unsigned op, int32_t x, int32_t y, bool visible)
+{
     if (!fCore || !fSymCursor)
         return false;
     RD3KDisplayCursor c;
@@ -1415,10 +1984,52 @@ bool RDNA3Framebuffer::cursorCall(unsigned op)
     c.op = op;
     c.size = kCurDim;
     c.vramOffset = fCurVram.allocationCookie;
-    c.x = fCurX;
-    c.y = fCurY;
-    c.visible = (fCurVisible && fCurHaveImage) ? 1 : 0;
+    c.x = x;
+    c.y = y;
+    c.visible = visible ? 1 : 0;
     return fCore->callPlatformFunction(fSymCursor, false, &c, nullptr, nullptr, nullptr) == kIOReturnSuccess;
+}
+
+/* rdna3cursorasync: the state as it is now becomes the newest wish; the
+ * thread call is entered when a run is not already owed. 'force' applies it
+ * even when it is the state shown. */
+void RDNA3Framebuffer::cursorWant(bool force)
+{
+    IOSimpleLockLock(fCurLock);
+    const int kick = rd3fb_cur_set(&fCurQ, fCurX, fCurY, (fCurVisible && fCurHaveImage) ? 1u : 0u, force ? 1 : 0);
+    IOSimpleLockUnlock(fCurLock);
+    if (!kick)
+        return;
+    IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
+    if (!fStopping) {
+        retain();
+        if (thread_call_enter(fCurCall))
+            release();   /* already queued: that one holds the reference */
+    }
+    IOSimpleLockUnlockEnableInterrupt(fLock, st);
+}
+
+/* the cursor thread call (ONCE, high priority): the newest wish to the core */
+void RDNA3Framebuffer::cursorFire(thread_call_param_t p0, thread_call_param_t)
+{
+    RDNA3Framebuffer *me = (RDNA3Framebuffer *)p0;
+    struct rd3fb_cur_state cs;
+    if (!me->fStopping && me->fCurReady && me->fCurLock) {
+        IOSimpleLockLock(me->fCurLock);
+        const int have = rd3fb_cur_take(&me->fCurQ, &cs);
+        IOSimpleLockUnlock(me->fCurLock);
+        if (have) {
+            const bool ok = me->cursorCallAt(RD3K_CURSOR_OP_MOVE, cs.x, cs.y, cs.visible != 0);
+            IOSimpleLockLock(me->fCurLock);
+            rd3fb_cur_done(&me->fCurQ, &cs, ok ? 1 : 0);
+            const uint32_t fails = me->fCurQ.fails;
+            IOSimpleLockUnlock(me->fCurLock);
+            if (!ok && (me->fCurFailLogged++ < 8 || (fails & 1023) == 0))
+                FBLOG("cursor: head %u move to %d,%d %s FAILED in the core (%u such)", me->fHead, (int)cs.x, (int)cs.y,
+                      cs.visible ? "shown" : "hidden", fails);
+        }
+    }
+    me->release();
 }
 
 IOReturn RDNA3Framebuffer::setCursorImage(void *cursorImage)
@@ -1464,19 +2075,32 @@ IOReturn RDNA3Framebuffer::setCursorImage(void *cursorImage)
     }
     IOFree(staging, bytes);
     if (!ok) {
-        fCurHaveImage = false;
-        cursorCall(RD3K_CURSOR_OP_MOVE);
+        if (fCurCall) {
+            IOSimpleLockLock(fCurLock);
+            fCurHaveImage = false;
+            IOSimpleLockUnlock(fCurLock);
+            cursorWant(false);   /* hidden by the thread call */
+        } else {
+            fCurHaveImage = false;
+            cursorCall(RD3K_CURSOR_OP_MOVE);
+        }
         return kIOReturnUnsupported;
     }
     bool first = !fCurHaveImage;
-    fCurHaveImage = true;
     if (fCurImages++ < 4)
         FBLOG("cursor image %u: %ux%u", fCurImages, (unsigned)ci.cursorWidth, (unsigned)ci.cursorHeight);
-    /* the image address never changes; program it once, then only move */
-    if (first && !cursorCall(RD3K_CURSOR_OP_IMAGE)) {
-        fCurHaveImage = false;
+    /* the image address never changes; program it once (here, the answer
+     * matters to WindowServer), then only move */
+    if (first && !cursorCallAt(RD3K_CURSOR_OP_IMAGE, fCurX, fCurY, false))
         return kIOReturnUnsupported;
+    if (fCurCall) {
+        IOSimpleLockLock(fCurLock);
+        fCurHaveImage = true;
+        IOSimpleLockUnlock(fCurLock);
+        cursorWant(first);
+        return kIOReturnSuccess;
     }
+    fCurHaveImage = true;
     cursorCall(RD3K_CURSOR_OP_MOVE);
     return kIOReturnSuccess;
 }
@@ -1485,6 +2109,18 @@ IOReturn RDNA3Framebuffer::setCursorState(SInt32 x, SInt32 y, bool visible)
 {
     if (!fCurReady)
         return kIOReturnUnsupported;
+    if (fCurCall) {
+        /* WindowServer's thread only records it: the core's cursor call
+         * waits for its display lock (flips, VBL status, EDID, DP link) */
+        IOSimpleLockLock(fCurLock);
+        fCurX = x;
+        fCurY = y;
+        fCurVisible = visible;
+        IOSimpleLockUnlock(fCurLock);
+        cursorWant(false);
+        return kIOReturnSuccess;
+    }
+    fCurSync++;
     fCurX = x;
     fCurY = y;
     fCurVisible = visible;
