@@ -131,7 +131,7 @@ rdna3_allow_mode() {
 # card run 58: WindowServer's display framebuffers and A3 (refused /
 # imported, the legacy swaps per head and those that scanned out an A3 BO)
 a3_sysctls() {
-    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:|iop_queue|iop_wrote|perf|flipbuf|hook_)")
+    _a3=$(sysctl debug 2>/dev/null | grep -E "rdna3accel_(a3display|a3ws|a3off|a3:|flicker:|swaps_|swap_|trace_scan:|cf_|bufs_|iop_flip:|iop_queue|iop_wrote|perf|present_|flipbuf|hook_)")
     if [ -n "$_a3" ]; then echo "$_a3"
     else echo "(no rdna3accel_a3display sysctl: kext older than card run 58)"; fi
     # card run 2026-10-17c: who holds the CPU-visible VRAM now (tools/triage_reports.py "VISIBLE VRAM")
