@@ -72,6 +72,11 @@ $(BUILD)/test_swap_copy: tests/test_swap_copy.c common/rdna3_swap_copy.h common/
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_swap_copy.c
 $(BUILD)/test_write_gen: tests/test_write_gen.c common/rdna3_write_gen.h common/rdna3_swap_copy.h common/rdna3_swap_front.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_write_gen.c
+# DRIVER-PLAN N41: a surface's VRAM kept across the family's dealloc/alloc, and WindowServer's pending GPU writes
+$(BUILD)/test_vram_park: tests/test_vram_park.c common/rdna3_vram_park.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_vram_park.c
+$(BUILD)/test_surf_pending: tests/test_surf_pending.c common/rdna3_surf_pending.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_surf_pending.c
 $(BUILD)/test_trace: tests/test_trace.c common/rdna3_trace.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Icommon -o $@ tests/test_trace.c
 # common/rdna3_gamma_judge.h: rdna3_modetest's gamma verdict (card run 58)
@@ -131,7 +136,7 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOB
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_flip_queue $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_mtl_allow $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_flip_queue $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_mtl_allow $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
@@ -148,6 +153,8 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	$(BUILD)/test_flip_queue
 	$(BUILD)/test_swap_copy
 	$(BUILD)/test_write_gen
+	$(BUILD)/test_vram_park
+	$(BUILD)/test_surf_pending
 	$(BUILD)/test_trace
 	$(BUILD)/test_libdrm_amdgpu
 	rm -f $(BUILD)/scanout-pipe*.ppm
