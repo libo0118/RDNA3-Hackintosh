@@ -66,6 +66,19 @@ m4 = re.search(r"#define RD3_TRV1_TARGET_SAME (\d+)u", h)
 if not m4 or int(m4.group(1)) != rdna3_trace.TARGET_SAME or rdna3_trace.TARGET_SAME not in rdna3_trace.TARGET:
     fails.append("RD3_TRV1_TARGET_SAME %s, the decoder's TARGET_SAME %d / TARGET %s" %
                  (m4.group(1) if m4 else "missing", rdna3_trace.TARGET_SAME, sorted(rdna3_trace.TARGET)))
+# DRIVER-PLAN N38: SWAP's target 5 (queued behind the flip in flight) and the PRESENT event's args
+m5 = re.search(r"#define RD3_TRV1_TARGET_QUEUED (\d+)u", h)
+if not m5 or int(m5.group(1)) != rdna3_trace.TARGET_QUEUED or rdna3_trace.TARGET_QUEUED not in rdna3_trace.TARGET:
+    fails.append("RD3_TRV1_TARGET_QUEUED %s, the decoder's TARGET_QUEUED %d" % (m5.group(1) if m5 else "missing",
+                                                                              rdna3_trace.TARGET_QUEUED))
+m6 = re.search(r"enum rd3_trace_present \{(.*?)\};", h, re.S)
+trp = sorted(int(v) for v in re.findall(r"RD3_TRP_\w+\s*=\s*(\d+)", m6.group(1) if m6 else ""))
+if not trp or trp != sorted(rdna3_trace.PRESENT_ARG):
+    fails.append("enum rd3_trace_present %s, the decoder's PRESENT_ARG %s" % (trp, sorted(rdna3_trace.PRESENT_ARG)))
+m7 = re.search(r"enum rd3_trace_pq_kind \{(.*?)\};", h, re.S)
+trk = sorted(int(v) for v in re.findall(r"RD3_TRPK_\w+\s*=\s*(\d+)", m7.group(1) if m7 else ""))
+if not trk or trk != sorted(rdna3_trace.PQ_KIND):
+    fails.append("enum rd3_trace_pq_kind %s, the decoder's PQ_KIND %s" % (trk, sorted(rdna3_trace.PQ_KIND)))
 if fails:
     sys.exit("test_trace_parity: FAIL " + "; ".join(fails))
 print("test_trace_parity: all checks passed (%d v1 bits, %d swap args)" % (len(bits), len(trs)))

@@ -222,4 +222,59 @@ has "$o" 'flip to VRAM 0x8b100000: the previous flip still pending after 20 ms' 
 grep -q 'INFO swap/flicker  *head 2: torn test not measured: 0 checks in 120 swaps .*it may be 0 on purpose' <<<"$o" ||
     fail "serial: torn not measured as INFO: $o"
 hasnt "$o" 'WARN swap/flicker         head 2: torn test not measured' serial
+# DRIVER-PLAN N38: the present queue's counters (present_verdict): a clean head, then a completion before its
+# latch and a lost frame (FAILs), a writer wait that ran out (WARN), counters missing, the GPU utilization
+PQ0=""
+for k in prog queued replaced joined busy refused latched latchus latchmax next timeout unknown dropped dropmode \
+         early wait waitus waitmax waittimeout inplace inline polled iop; do
+    PQ0+="swaps_pq_${k}_h0 0"$'\n'
+done
+mk pqclean/rdna3-report-pqclean "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 110
+swaps_pq_queued_h0 10
+swaps_pq_replaced_h0 3
+swaps_pq_latched_h0 117
+swaps_pq_latchus_h0 1170000
+swaps_pq_latchmax_h0 16900
+swaps_pq_next_h0 7
+perfstats 1
+perf_writes 400"
+o=$(run pqclean)
+has "$o" "head 0: present queue: 120 present(s): 110 programmed at once, 10 queued (3 replaced: newest wins, 0 Busy kept), 0 joined; 117 latched (avg 10000 us, max 16900 us), 7 programmed at a latch" pq-clean
+has "$o" "GPU utilization published into PerformanceStatistics 400 time(s)" pq-clean
+hasnt "$o" "BEFORE their flip" pq-clean
+hasnt "$o" "LOST with no newer" pq-clean
+mk pqbad/rdna3-report-pqbad "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 120
+swaps_pq_early_h0 2
+swaps_pq_timeout_h0 2
+swaps_pq_dropped_h0 1
+swaps_pq_waittimeout_h0 1
+perfstats 1
+perf_writes 0
+perf_nokey 9"
+o=$(run pqbad)
+grep -q 'FAIL .*head 0: 2 present(s) completed BEFORE their flip was seen latched (2 not latched in time, 0 unreadable)' <<<"$o" || fail "pq-bad: early: $o"
+grep -q 'FAIL .*head 0: 1 frame(s) LOST with no newer one' <<<"$o" || fail "pq-bad: lost: $o"
+grep -q 'WARN .*head 0: 1 writer wait(s) ran out' <<<"$o" || fail "pq-bad: wait: $o"
+grep -q 'WARN .*GPU utilization NOT published into PerformanceStatistics (0 without the core, 9 without' <<<"$o" || fail "pq-bad: perf: $o"
+mk pqmissing/rdna3-report-pqmissing "$ZERO
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 120"
+o=$(run pqmissing)
+has "$o" "present queue counters missing (unknown, not 0): swaps_pq_queued" pq-missing
+mk pqold/rdna3-report-pqold "$ZERO
+swaps_h0 120
+swaps_h1 0"
+o=$(run pqold)
+hasnt "$o" "present queue" pq-old
+
 echo "test_triage_latch: all checks passed"

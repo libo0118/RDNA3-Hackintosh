@@ -594,7 +594,10 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"_stalecheck_(?:norecord|changed|cf|sameshown|nopanel|nohead)|_copyblack|_copybytes|_copyus|_copyusmax|_copywait|_copywaitus|"
                        r"_copylatchto|_copyfail|_copydirect|_copyfront|_copyfrontfail|_copynowait|_copybrkflip|_copyfreewait|"
                        r"_genpresent|_genhold|_genhold_would|_genfirst|_gencontent|_genunwritten|_gen_judged|_gen_aged|"
-                       r"_gen_evictpresent|_gen_landed|_gennotjudged|_gen_resets)?_h\d|"
+                       r"_gen_evictpresent|_gen_landed|_gennotjudged|_gen_resets|"
+                       r"_pq_(?:prog|queued|replaced|joined|busy|refused|latched|latchus|latchmax|next|timeout|unknown|"
+                       r"dropped|dropmode|early|wait|waitus|waitmax|waittimeout|inplace|inline|polled|iop))?_h\d|"
+                       r"swaps_pq_iopunwritten|swap_async|iop_queue|iop_wrote|perfstats|perf_(?:writes|nocore|nokey)|"
                        r"swaps_gen_(?:aperture|apcached|cf|cfnostamp|evicted|freed|resets)|swap_gen|flipbuf_present|cf_gennewer_h\d|"
                        r"flipbuf(?:_scanout|_presented|_held|_failed|_busy|_unlocked|_emptyheld)?_h\d|"
                        r"flipbuf_(?:nohead|nores|intoff|badptr|busy|unlocked)|"
@@ -1868,9 +1871,87 @@ def latch_lines(path, txt, args=""):
         if "rdna3accel=1" in args or "rdna3accel=1" in txt:
             return [("INFO", "not measured: no rdna3accel counters in the tests file or 29-surface-vram.txt")]
         return []
-    out = latch_verdict(c, current)
+    out = latch_verdict(c, current) + present_verdict(c, current)
     if out and where != "the tests file":
         out.append(("INFO", "(counters from %s: no tests file dump)" % where))
+    return out
+
+
+# DRIVER-PLAN N38: the present queue's per-head counters (debug.rdna3accel_swaps_pq_<key>_h<N>)
+PQ_KEYS = ("prog", "queued", "replaced", "joined", "busy", "refused", "latched", "latchus", "latchmax", "next",
+           "timeout", "unknown", "dropped", "dropmode", "early", "wait", "waitus", "waitmax", "waittimeout", "inplace",
+           "inline", "polled", "iop")
+
+
+def present_verdict(c, current=False):
+    """[(level, text)] of the present queue (DRIVER-PLAN N38, common/rdna3_flip_queue.h) from its counters. Per
+    head: presents programmed at once, queued (replaced: newest wins; Busy kept), joined; latches seen (avg, max),
+    queued presents programmed at a latch, latches taken before the worker; writers (copy forward, page-on) that
+    waited for the buffer leaving the panel; writes in place; IOP transactions. FAIL a completion before its latch
+    (swaps_pq_early: the panel may still have read the buffer WindowServer had back) and a frame lost with no newer
+    one (swaps_pq_dropped); WARN a writer wait that ran out, flips the framebuffer refused, counters missing; INFO
+    the worker polling (an older framebuffer), drops at a mode change, IOP flips copied for lack of the plugin's
+    mark, the GPU utilization published or not. [] for a kernel without the queue (no swap_async)."""
+    on = c.get("swap_async")
+    if on is None:
+        return []
+    out = []
+    if on == 0:
+        out.append(("INFO", "present queue: debug.rdna3accel_swap_async was 0 - mode 0 swaps waited for their latch "
+                            "(the old path)"))
+    heads = sorted(set(m.group(1) for m in (re.match(r"swaps_h(\d)$", k) for k in c) if m))
+    for h in heads:
+        def g(k):
+            return c.get("swaps_pq_%s_h%s" % (k, h))
+
+        def v(k):
+            x = g(k)
+            return 0 if x is None else x
+        if not v("prog") + v("queued") + v("joined") and not any(v(k) for k in PQ_KEYS):
+            continue
+        missing = [k for k in PQ_KEYS if g(k) is None]
+        if missing:
+            out.append(("WARN", "head %s: present queue counters missing (unknown, not 0): %s" % (
+                h, ", ".join("swaps_pq_" + k for k in missing))))
+        lat, waits = v("latched"), v("wait")
+        out.append(("INFO", "head %s: present queue: %d present(s): %d programmed at once, %d queued (%d replaced: "
+                    "newest wins, %d Busy kept), %d joined; %d latched (avg %d us, max %d us), %d programmed at a "
+                    "latch, %d latch(es) taken before the worker; writers waited %d time(s) (avg %d us, max %d us), "
+                    "%d write(s) in place; IOP %d (swap_async %s)" % (
+                        h, v("prog") + v("queued") + v("joined"), v("prog"), v("queued"), v("replaced"), v("busy"),
+                        v("joined"), lat, v("latchus") // lat if lat else 0, v("latchmax"), v("next"), v("inline"),
+                        waits, v("waitus") // waits if waits else 0, v("waitmax"), v("inplace"), v("iop"), on)))
+        if v("early"):
+            out.append(("FAIL", "head %s: %d present(s) completed BEFORE their flip was seen latched (%d not latched in "
+                                "time, %d unreadable) - the panel may still have read the buffer WindowServer had back"
+                        % (h, v("early"), v("timeout"), v("unknown"))))
+        if v("dropped"):
+            out.append(("FAIL", "head %s: %d frame(s) LOST with no newer one (the buffer freed while queued, or "
+                                "refused when programmed from the queue)" % (h, v("dropped"))))
+        if v("waittimeout"):
+            out.append(("WARN", "head %s: %d writer wait(s) ran out: a copy forward / page-on wrote a buffer the panel "
+                                "may still have read" % (h, v("waittimeout"))))
+        if v("refused"):
+            out.append(("WARN", "head %s: %d flip(s) refused by the framebuffer (at the present: copied onto its "
+                                "scanout instead)" % (h, v("refused"))))
+        if v("polled"):
+            out.append(("INFO", "head %s: the present worker polled %d time(s) (an RDNA3Framebuffer without "
+                                "rdna3FlipLatchWait: an older build)" % (h, v("polled"))))
+        if v("dropmode"):
+            out.append(("INFO", "head %s: %d queued present(s) dropped at a display mode change" % (h, v("dropmode"))))
+    if c.get("swaps_pq_iopunwritten"):
+        out.append(("INFO", "%d IOP zero-copy flip(s) copied instead: VRAM marked newest that the plugin never wrote "
+                            "(iop_wrote %s)" % (c["swaps_pq_iopunwritten"], c.get("iop_wrote", "?"))))
+    ps = c.get("perfstats")
+    if ps is not None:
+        w, nc, nk = c.get("perf_writes"), c.get("perf_nocore", 0), c.get("perf_nokey", 0)
+        if ps and w == 0 and (nc or nk):
+            out.append(("WARN", "GPU utilization NOT published into PerformanceStatistics (%d without the core, %d "
+                                "without its Device Utilization %%): Activity Monitor shows the family's own value" %
+                        (nc, nk)))
+        elif ps:
+            out.append(("INFO", "GPU utilization published into PerformanceStatistics %s time(s) (perfstats 1)" %
+                        ("?" if w is None else w)))
     return out
 
 
