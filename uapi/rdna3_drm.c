@@ -2236,10 +2236,18 @@ static int surface_bo(rdna3_drm_file *f, struct rd_xnu_surface_bo *s)
 
     if (s->plane > RD_XNU_SURFACE_MAX_PLANE)   /* IOSurface planes; never handed on to the OS unchecked */
         return -RD_EINVAL;
-    if (s->op == RD_XNU_SURFACE_BO_DIRTY) {
+    if (s->op == RD_XNU_SURFACE_BO_DIRTY || s->op == RD_XNU_SURFACE_BO_DIRTY_TRY) {
         if (!dev->ops.surface_dirty)
             return -RD_ENOSYS;
-        return dev->ops.surface_dirty(dev->ops.ctx, f->os, s->surface_id, s->plane);
+        return dev->ops.surface_dirty(dev->ops.ctx, f->os, s->surface_id,
+                                      s->plane | (s->op == RD_XNU_SURFACE_BO_DIRTY_TRY ? RD_XNU_SURFACE_PLANE_TRYLOCK : 0u));
+    }
+    if (s->op == RD_XNU_SURFACE_BO_MARK) {   /* plane: 1 pending, 0 ready (N41) */
+        if (s->plane > 1 || !s->surface_id)
+            return -RD_EINVAL;
+        if (!dev->ops.surface_dirty)
+            return -RD_ENOSYS;
+        return dev->ops.surface_dirty(dev->ops.ctx, f->os, s->surface_id, RD_XNU_SURFACE_PLANE_GPU_MARK | s->plane);
     }
     if (s->op != RD_XNU_SURFACE_BO_IMPORT || !s->surface_id)
         return -RD_EINVAL;

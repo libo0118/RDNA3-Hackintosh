@@ -47,6 +47,10 @@
 #include <kern/clock.h>
 #include <sys/sysctl.h>
 
+/* DRIVER-PLAN N41: the UAPI's flags reach the accelerator's escape unchanged */
+static_assert(RD_XNU_SURFACE_PLANE_GPU_MARK == RD3K_SS_PLANE_GPU_MARK, "uapi and accelerator GPU mark bits differ");
+static_assert(RD_XNU_SURFACE_PLANE_TRYLOCK == RD3K_SS_PLANE_TRYLOCK, "uapi and accelerator try-lock bits differ");
+
 #define LOG(fmt, ...) IOLog("RDNA3: " fmt "\n", ##__VA_ARGS__)
 
 /* GPU VA window for the family's tasks: 1 TiB at 64 TiB, inside the low
@@ -484,6 +488,7 @@ static int surfaceStatusErrno(unsigned int st)
     case RD3K_SS_NO_VRAM:     return -RD_ENODEV;   /* the accelerator has no VRAM for it (yet) */
     case RD3K_SS_DISPLAY:     return -RD_EPERM;    /* a display framebuffer: kept out of A3 (card run 58) */
     case RD3K_SS_POLICY:      return -RD_EPERM;    /* WindowServer's inputs / rdna3a3=0: kept out of A3 */
+    case RD3K_SS_BUSY:        return -RD_EBUSY;    /* N41: a TRYLOCK dirty mark found the accelerator's lock taken */
     default:                  return -RD_ENXIO;    /* accelerator off / not up / other ABI */
     }
 }
@@ -500,6 +505,7 @@ static const char *surfaceStatusName(unsigned int st)
     case RD3K_SS_TOO_SMALL:   return "too small";
     case RD3K_SS_DISPLAY:     return "WindowServer's display framebuffer, kept out of A3 (rdna3a3display=1 lets it in)";
     case RD3K_SS_POLICY:      return "kept out of A3: a WindowServer input (rdna3a3ws=1 lets it in), or rdna3a3=0";
+    case RD3K_SS_BUSY:        return "the accelerator's lock was taken (a try-lock dirty mark, N41)";
     default:                  return "?";
     }
 }
@@ -594,9 +600,12 @@ int RDNA3Accel::drmSurfaceDirty(void *ctx, void *fileOs, uint32_t surfaceId, uin
     IOReturn rr = a->accelSurfaceCall(&e, fileOs, RD3K_ESC_SURF_DIRTY, &svc);
     if (!svc || rr != kIOReturnSuccess)
         return -RD_ENXIO;
-    /* surface 0 is the Metal plugin's probe for the ioctl: not a refusal */
-    if (e.status && surfaceId)
-        surfaceRefusedLog("dirty mark", surfaceId, plane, e.status, rr);
+    /* surface 0 is the Metal plugin's probe for the ioctl: not a refusal. A
+     * try-lock dirty mark that found the lock taken is expected (N41: the
+     * mark taken at commit stands), counted by the accelerator */
+    if (e.status && surfaceId && e.status != RD3K_SS_BUSY)
+        surfaceRefusedLog((plane & RD3K_SS_PLANE_GPU_MARK) ? "GPU pending/ready mark" : "dirty mark", surfaceId,
+                          plane & ~(RD3K_SS_PLANE_GPU_MARK | RD3K_SS_PLANE_TRYLOCK), e.status, rr);
     return surfaceStatusErrno(e.status);
 }
 

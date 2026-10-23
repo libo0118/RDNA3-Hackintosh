@@ -61,6 +61,11 @@ public:
      * cookie: the cookie is the VRAM offset, which a new allocation can have again (ECC review of N38) */
     unsigned long long fPluginWroteGen = 0;
     IOMemoryDescriptor *fApDesc = nullptr;
+    /* N41: the address fApDesc covers (a VRAM re-backed elsewhere gets a new descriptor), and the
+     * allocation generation the last surface BO import (RD3K_ESC_SURF_GEM) got: a dirty mark of
+     * another generation marks VRAM that import never drew into (counted: vm_dirty_moved) */
+    unsigned long long fApPhys = 0;
+    unsigned long long fImportGen = 0;
 };
 OSDefineMetaClassAndStructors(RD3Resource, IOAccelResource2)
 class RD3SysMemory : public IOAccelSysMemory {
@@ -81,9 +86,14 @@ public:
     /* this allocation's number (allocPhysical; 0: none): never reused, unlike fAllocationCookie */
     unsigned long long fAllocGen = 0;
     bool fScanout = false;
+    /* N41: the allocation kept across the family's deallocPhysical / allocPhysical
+     * (debug.rdna3accel_vm_sticky; common/rdna3_vram_park.h): handed back by the next allocPhysical
+     * when big enough, released when the resource grows or this object is freed */
+    struct rd3_vp_alloc fPark = {};
 
     bool allocPhysical() APPLE_KEXT_OVERRIDE;
     void deallocPhysical() APPLE_KEXT_OVERRIDE;
+    void free() APPLE_KEXT_OVERRIDE;
 
     uint64_t getPhysicalSegment(unsigned long long a0, unsigned long long* a1) APPLE_KEXT_OVERRIDE {
         const unsigned long long total = *(const volatile unsigned long long *)((const unsigned char *)this + 0x40);

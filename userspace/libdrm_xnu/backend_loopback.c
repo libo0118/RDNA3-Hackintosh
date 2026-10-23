@@ -38,7 +38,7 @@ static void lb_bo_free(void *c, rdna3_bo *bo)
 #define LB_SURFACE_ID   0x51u
 #define LB_SURFACE_SIZE (64u << 10)
 static void *lb_surface;
-uint32_t lb_surface_dirty_count;
+uint32_t lb_surface_dirty_count, lb_surface_try_count, lb_surface_mark_count[2];
 static int lb_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
 {
     (void)c; (void)os;
@@ -58,7 +58,17 @@ static int lb_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t 
 static int lb_surface_dirty(void *c, void *os, uint32_t id, uint32_t plane)
 {
     (void)c; (void)os;
-    if (id != LB_SURFACE_ID || plane)
+    if (id != LB_SURFACE_ID)
+        return -RD_ENOENT;
+    if (plane & RD_XNU_SURFACE_PLANE_GPU_MARK) {   /* N41: a pending (1) / ready (0) mark */
+        lb_surface_mark_count[plane & 1u]++;
+        return 0;
+    }
+    if (plane & RD_XNU_SURFACE_PLANE_TRYLOCK) {
+        plane &= ~RD_XNU_SURFACE_PLANE_TRYLOCK;
+        lb_surface_try_count++;
+    }
+    if (plane)
         return -RD_ENOENT;
     lb_surface_dirty_count++;
     return 0;

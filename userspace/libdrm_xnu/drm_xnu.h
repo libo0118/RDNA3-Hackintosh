@@ -51,6 +51,16 @@ int   drm_xnu_surface_fd(uint32_t surface_id, uint32_t plane, uint64_t size);
  * the accelerator (or the device) is not up yet, ENOSYS the kext has no
  * such ioctl (asked once). Surface 0 never exists: a probe of the kext. */
 int   drm_xnu_surface_dirty(uint32_t surface_id, uint32_t plane);
+/* DRIVER-PLAN N41. The same mark, answering EBUSY instead of waiting when
+ * the accelerator's lock is taken (a page-off may hold it while it waits
+ * for a GPU mark). */
+int   drm_xnu_surface_dirty_try(uint32_t surface_id, uint32_t plane);
+/* WindowServer's GPU write of the surface is pending (at commit) or done:
+ * a CPU lock's page-off waits, bounded, while one is pending. 0, or -1:
+ * ENXIO the accelerator's waits are off or it is not up (or not
+ * WindowServer), ENOSYS a kext without the op (asked once), EINVAL
+ * surface 0. */
+int   drm_xnu_surface_mark(uint32_t surface_id, int pending);
 /* the kernel's errno for this thread's last surface fd import (0: it
  * worked), which Vulkan reports only as a VkResult */
 int   drm_xnu_surface_last_error(void);

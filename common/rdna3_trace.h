@@ -102,6 +102,15 @@ enum rd3_trace_swap {
  * what arg says, v4 >> 24 names the buffer it would have presented */
 #define RD3_TRV1_LANDED_WOULD (1u << 22)
 #define RD3_TRV4_LANDED_A1 0xfeu   /* the landed buffer's index << 24: a1 (not in the surface's array) */
+/* DRIVER-PLAN N41: VMALLOC / VMFREE flags beyond 1 (a scanout) .. 8 - the
+ * parked allocation handed back (VMALLOC) / parked, not freed (VMFREE); a
+ * parked allocation really released; a live one released by free() - and
+ * PAGEOFF's flags: waited for WindowServer's pending GPU write, timed out */
+#define RD3_TRVM_PARKED    16u
+#define RD3_TRVM_PARK_GONE 32u
+#define RD3_TRVM_FREE_LIVE 64u
+#define RD3_TRPO_WAITED    1u
+#define RD3_TRPO_TIMEOUT   2u
 /* RD3_TRS_HOLD with this bit: mode 1 held a back WindowServer did not
  * redraw since the head presented it at swap v3 (no copy forward into it,
  * its samples unchanged, another buffer presented after it: the stale
@@ -206,17 +215,23 @@ enum rd3_trace_fail { RD3_TRX_NONE = 0, RD3_TRX_SRC = 1, RD3_TRX_SCANOUT = 2, RD
  *          private mode bits, v3 present | shaped << 8; pa..pc buffers 0..2
  *  VMALLOC arg 1 granted / 0 refused, flags 1 a scanout, 8 a swap copy's
  *          second scanout buffer D (head: its head; the stale-back records
- *          of that head are forgotten); obj the vidmem; v0
+ *          of that head are forgotten), 16 the parked allocation handed back
+ *          (N41: no new VRAM, same address); obj the vidmem; v0
  *          KiB, v1 MiB handed out, v4 the IOReturn; pa its address
  *  VMFREE  head the head scanning it (0xff none), flags 1 a scanout, 2 shown
- *          by mode 0's record, 4 the flip away from it not latched; obj the
- *          vidmem; v0 KiB; pa its address
+ *          by mode 0's record, 4 the flip away from it not latched, 16
+ *          parked, NOT freed (N41: still allocated, the tables keep it), 32
+ *          a parked allocation really released (grown, the object freed),
+ *          64 a live allocation released by free() (no deallocPhysical);
+ *          obj the vidmem; v0 KiB; pa its address
  *  APERTURE arg 1 addToAperture, 2 getApertureMemoryDescriptor; flags 1 ok;
  *          obj the resource; v0 KiB, v1 the IOSurface id, v2 the path
  *          (0 new, 1 the gate closed, 2 the cached descriptor, 3 no BAR
  *          VRAM, 4 IODeviceMemory::withRange failed), v3 the cached path's
  *          count (traced 4 times per resource, then every 256th); pa its address
- *  PAGEOFF arg 1 copied; obj the resource; v0 KiB, v1 us; pa its address
+ *  PAGEOFF arg 1 copied; obj the resource; v0 KiB, v1 us; pa its address;
+ *          flags 1 waited for WindowServer's pending GPU write, 2 that wait
+ *          timed out (N41), v3 the wait's us
  *  SURFGEM arg 1 imported / 0 refused; v0 the IOSurface id, v1 the status,
  *          v2 the reason, v3 w | h << 16; pa the VRAM when imported
  *  MODE    arg 0 will change, 1 did change, 2 initFramebufferResource (head,

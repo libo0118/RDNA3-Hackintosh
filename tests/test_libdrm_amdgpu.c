@@ -218,6 +218,18 @@ int main(void)
             CHECK(drm_xnu_ioctl_nr(fd, 0xF9, junk, sizeof(junk)) == -1 && errno == EINVAL);
         }
         CHECK(drm_xnu_surface_dirty(0x51, 0) == 0 && lb_surface_dirty_count == 2);   /* still asked */
+        /* DRIVER-PLAN N41: the try-lock dirty and the GPU marks; an unknown op poisons only itself */
+        {
+            extern uint32_t lb_surface_try_count, lb_surface_mark_count[2];
+            CHECK(drm_xnu_surface_dirty_try(0x51, 0) == 0 && lb_surface_try_count == 1 && lb_surface_dirty_count == 3);
+            CHECK(drm_xnu_surface_dirty_try(0x52, 0) == -1 && errno == ENOENT);
+            CHECK(drm_xnu_surface_mark(0x51, 1) == 0 && lb_surface_mark_count[1] == 1);
+            CHECK(drm_xnu_surface_mark(0x51, 0) == 0 && lb_surface_mark_count[0] == 1);
+            CHECK(drm_xnu_surface_mark(0x52, 7) == -1 && errno == ENOENT);
+            CHECK(drm_xnu_surface_mark(0, 1) == -1 && errno == EINVAL);   /* not taken as "no such op" */
+            CHECK(drm_xnu_surface_mark(0x51, 1) == 0 && lb_surface_mark_count[1] == 2);
+            CHECK(drm_xnu_surface_dirty(0x51, 0) == 0 && lb_surface_dirty_count == 4);
+        }
     }
     /* malformed surface files: refused, nothing imported, the reason kept */
     {

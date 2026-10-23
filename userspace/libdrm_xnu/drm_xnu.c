@@ -75,6 +75,8 @@ struct xnu_surface_bo { uint32_t op, surface_id, plane, handle; uint64_t size; }
 static int rd_errno_to_host(int e);
 #define XNU_SURFACE_BO_IMPORT        0
 #define XNU_SURFACE_BO_DIRTY         1
+#define XNU_SURFACE_BO_MARK          2   /* DRIVER-PLAN N41 */
+#define XNU_SURFACE_BO_DIRTY_TRY     3
 #define XNU_NR_BO_EXPORT             0xF1   /* RD_NR_XNU_BO_EXPORT */
 #define XNU_NR_BO_IMPORT             0xF2
 #define XNU_DRM_CLOEXEC              02000000   /* Linux O_CLOEXEC, as drm.h DRM_CLOEXEC */
@@ -629,27 +631,27 @@ int drm_xnu_surface_fd(uint32_t surface_id, uint32_t plane, uint64_t size)
     return fd;
 }
 
-int drm_xnu_surface_dirty(uint32_t surface_id, uint32_t plane)
+/* one connection for the process's dirty and GPU marks. A kext without the
+ * ioctl, or without the op (EINVAL for an unknown nr or op; the plane is
+ * in range here) is asked no more for that op ('*unknown'); a failed open
+ * is tried again after 256 calls (the device may not be up yet) */
+static int surface_op(uint32_t op, uint32_t surface_id, uint32_t plane, int *unknown)
 {
-    /* one connection for the process's dirty marks. A kext without the
-     * ioctl (EINVAL for an unknown nr; plane is in range here) is asked no
-     * more; a failed open is tried again after 256 calls (the device may
-     * not be up yet) */
-    static int fd = -1, unknown, skip;
+    static int fd = -1, skip;
     struct xnu_surface_bo s;
     int r, e = 0;
     pthread_mutex_lock(&g_surf_lock);
-    if (fd < 0 && !unknown && !skip) {
+    if (fd < 0 && !*unknown && !skip) {
         fd = drm_xnu_open(DRM_XNU_RENDER_NODE, O_RDWR);
         if (fd < 0) {
             e = errno ? errno : ENODEV;
             skip = 256;
         }
-    } else if (fd < 0 && skip) {
+    } else if (fd < 0 && skip && !*unknown) {
         skip--;
         e = ENXIO;
     }
-    if (unknown)
+    if (*unknown)
         e = ENOSYS;
     pthread_mutex_unlock(&g_surf_lock);
     if (e) {
@@ -657,17 +659,35 @@ int drm_xnu_surface_dirty(uint32_t surface_id, uint32_t plane)
         return -1;
     }
     memset(&s, 0, sizeof(s));
-    s.op = XNU_SURFACE_BO_DIRTY;
+    s.op = op;
     s.surface_id = surface_id;
     s.plane = plane;
     r = drm_xnu_ioctl_nr(fd, XNU_NR_SURFACE_BO, &s, sizeof(s));
-    if (r && errno == EINVAL && plane <= 15) {
+    if (r && errno == EINVAL && plane <= 15 && (op != XNU_SURFACE_BO_MARK || surface_id)) {
         pthread_mutex_lock(&g_surf_lock);
-        unknown = 1;
+        *unknown = 1;
         pthread_mutex_unlock(&g_surf_lock);
         errno = ENOSYS;
     }
     return r;
+}
+
+int drm_xnu_surface_dirty(uint32_t surface_id, uint32_t plane)
+{
+    static int unknown;
+    return surface_op(XNU_SURFACE_BO_DIRTY, surface_id, plane, &unknown);
+}
+
+int drm_xnu_surface_dirty_try(uint32_t surface_id, uint32_t plane)
+{
+    static int unknown;
+    return surface_op(XNU_SURFACE_BO_DIRTY_TRY, surface_id, plane, &unknown);
+}
+
+int drm_xnu_surface_mark(uint32_t surface_id, int pending)
+{
+    static int unknown;
+    return surface_op(XNU_SURFACE_BO_MARK, surface_id, pending ? 1u : 0u, &unknown);
 }
 
 int drm_xnu_pci_info(uint16_t *vendor, uint16_t *device, uint16_t *subvendor,
