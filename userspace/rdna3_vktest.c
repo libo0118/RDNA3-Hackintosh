@@ -472,6 +472,9 @@ static int membw_test(struct ctx *c, uint32_t qf, int secs)
         }
         if ((r = vkWaitForFences(c->dev, 1, &fence, VK_TRUE, 20000000000ull)) != VK_SUCCESS) {
             printf("MEMBW: FAILED fence #%llu not signalled in 20 s -> %d (%s)\n", submits + 1, r, vkr(r));
+            /* the copy may still run: the buffers are not freed under a live job */
+            DFN(c->dev, vkDeviceWaitIdle);
+            vkDeviceWaitIdle(c->dev);
             goto out;
         }
         vkResetFences(c->dev, 1, &fence);
