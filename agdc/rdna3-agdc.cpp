@@ -15,6 +15,14 @@
  *          count (maxFramebuffers)
  *   0x921  kAGDCLinkConfig of a framebuffer index: its timing, one link     } "K5",
  *   0x711  extended capability 0x10 (plane scaler) of a framebuffer index   } debug.rdna3agdc_k5
+ *          and, with K5 on, after Navi48-MacOS (DRIVER-PLAN N45, rdna3_agdc_n48.h):
+ *          type 0x40 (inline buffer) and the other types zero-filled
+ *          (rdna3agdcib / debug.rdna3agdc_ib, default 3), the 0x921 flags
+ *          (rdna3agdclinkflags / debug.rdna3agdc_linkflags, default 0 =
+ *          NullMoth's 0xb) and the plane-scaler markers (rdna3agdcscaler /
+ *          debug.rdna3agdc_scaler, default 0 = NullMoth's). IOPresentment
+ *          gathers them when it builds a display's capabilities (WindowServer
+ *          start), so a sysctl change counts from the next WindowServer start.
  * The NVIDIA driver arms it between the accelerator's framebuffer
  * registration (level 4) and its display-pipe transactions; without it our
  * card runs got only plane-less transactions (rdna3accel_iop_empty, never
@@ -60,6 +68,7 @@
 #include "../common/rdna3_bootargs.h"
 #include "AppleGraphicsDeviceControl_re.h"
 #include "rdna3_agdc_k5.h"
+#include "rdna3_agdc_n48.h"
 
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d);
 extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
@@ -88,6 +97,17 @@ static SInt32 gAgdcLogged = 0;
  * rdna3agdcvendor, changeable at runtime through the sysctl */
 static int    gAgdcVendor = 0;
 static int    gAgdcVendorAsked = 0, gAgdcVendorLast = -1;
+/* DRIVER-PLAN N45 (rdna3_agdc_n48.h): the answers after Navi48-MacOS, each
+ * its own switch (boot-arg, then the sysctl), used only with K5 on */
+static int    gAgdcIb = RD3N48_IB_DEFAULT, gAgdcLinkFlags = RD3N48_LINKFLAGS_DEFAULT, gAgdcScaler = RD3N48_SCALER_DEFAULT;
+static SInt64 gAgdcIbAnswered = 0, gAgdcZeroFilled = 0, gAgdcScalerAlt = 0;
+static int    gAgdcLinkFlagsLast = -1;      /* the flags of the last 0x921 answer (-1 never) */
+static SInt32 gAgdcLogLink = 0, gAgdcLogCaps = 0, gAgdcLogIb = 0, gAgdcLogZero = 0;
+static int    gAgdcLoggedLink = -1, gAgdcLoggedScaler = -1, gAgdcLoggedIb = -1;
+/* every 0x711 by capability type (slot k = type 1 << k, slot 16 any other):
+ * asked, and answered with success */
+static SInt32 gAgdcTypeAsked[RD3N48_TYPE_SLOTS], gAgdcTypeAnswered[RD3N48_TYPE_SLOTS];
+static int    gAgdcTypesMask = 0;
 
 enum { kAgdcMaxFB = 4 };
 /* the framebuffers 0x980 reports, by IOFBDependentIndex (slots 0..n-1, no
@@ -155,17 +175,58 @@ static IOReturn rd3K5Answer(IOService *pci, unsigned int cmd, unsigned long *in,
     IOLockUnlock(gTabLock);
     int why = 0;
     int32_t idx = -1;
-    int r = rd3k5_answer(cmd, in, inSize, out, outSize ? *outSize : 0, h, nh, &why, &idx);
+    struct rd3n48_sw sw = { (uint32_t)gAgdcIb, (uint32_t)gAgdcLinkFlags, (uint32_t)gAgdcScaler };
+    struct rd3n48_info inf;
+    (void)rd3n48_sw_fix(&sw);   /* the boot-args and the sysctls take only known values */
+    int r = rd3n48_answer(cmd, in, inSize, out, outSize ? *outSize : 0, h, nh, &sw, &why, &idx, &inf);
     const UInt32 bit = (idx >= 0 && idx < 32) ? (1u << idx) : 0;
     if (bit) OSBitOrAtomic(bit, (volatile UInt32 *)&gAgdcK5Asked);
-    if (r == RD3K5_R_LINK) { OSAddAtomic64(1, &gAgdcK5Link); OSBitOrAtomic(bit, (volatile UInt32 *)&gAgdcK5LinkMask); return kIOReturnSuccess; }
-    if (r == RD3K5_R_CAPS) { OSAddAtomic64(1, &gAgdcK5Caps); OSBitOrAtomic(bit, (volatile UInt32 *)&gAgdcK5CapsMask); return kIOReturnSuccess; }
+    if (r == RD3K5_R_LINK) {
+        OSAddAtomic64(1, &gAgdcK5Link);
+        OSBitOrAtomic(bit, (volatile UInt32 *)&gAgdcK5LinkMask);
+        gAgdcLinkFlagsLast = (int)inf.flags;
+        if (OSIncrementAtomic(&gAgdcLogLink) < 4 || (int)sw.linkflags != gAgdcLoggedLink)
+            AGLOG("K5: 0x921 index %d answered %ux%u, flags %#llx (debug.rdna3agdc_linkflags %u: %s)", idx, inf.w, inf.h,
+                  (unsigned long long)inf.flags, sw.linkflags, rd3n48_linkflags_text(sw.linkflags));
+        gAgdcLoggedLink = (int)sw.linkflags;
+        return kIOReturnSuccess;
+    }
+    if (r == RD3K5_R_CAPS) {
+        OSAddAtomic64(1, &gAgdcK5Caps);
+        OSBitOrAtomic(bit, (volatile UInt32 *)&gAgdcK5CapsMask);
+        if (inf.scaler != RD3N48_SCALER_NULLMOTH) OSAddAtomic64(1, &gAgdcScalerAlt);
+        if (OSIncrementAtomic(&gAgdcLogCaps) < 4 || (int)inf.scaler != gAgdcLoggedScaler)
+            AGLOG("K5: 0x711 index %d plane scaler answered %ux%u, %s (debug.rdna3agdc_scaler %u)", idx, inf.w, inf.h,
+                  rd3n48_scaler_text(inf.scaler), sw.scaler);
+        gAgdcLoggedScaler = (int)inf.scaler;
+        return kIOReturnSuccess;
+    }
+    if (r == RD3N48_R_IB) {
+        OSAddAtomic64(1, &gAgdcIbAnswered);
+        if (OSIncrementAtomic(&gAgdcLogIb) < 4 || (int)sw.ib != gAgdcLoggedIb)
+            AGLOG("K5: 0x711 index %d type 0x40 answered: inline buffer MaxWidth %u MaxHeight %u, latencies 1.0, pixel formats 1 "
+                  "(debug.rdna3agdc_ib %u: %s)", idx, inf.w, inf.h, sw.ib, rd3n48_ib_text(sw.ib));
+        gAgdcLoggedIb = (int)sw.ib;
+        return kIOReturnSuccess;
+    }
+    if (r == RD3N48_R_ZERO) {
+        const SInt64 n = OSAddAtomic64(1, &gAgdcZeroFilled) + 1;
+        const SInt32 l = OSIncrementAtomic(&gAgdcLogZero);
+        if (l < 16 || !(l % 1024))
+            AGLOG("K5: 0x711 index %d type %#x zero-filled + success (count 0; debug.rdna3agdc_ib %u), %lld so far", idx, inf.type,
+                  sw.ib, n);
+        return kIOReturnSuccess;
+    }
     if (r == RD3K5_R_UNSUPPORTED) return kIOReturnUnsupported;
     if (r == RD3K5_R_NOTFOUND && idx >= 0 && (unsigned)idx < nh && !h[idx].t) why = 0x30;
     gAgdcK5Why = why;
     gAgdcK5LastRefusedIdx = idx;
-    if (OSIncrementAtomic(&gAgdcLogged) < 120)
-        AGLOG("K5: command %#x index %d NOT answered (why %#x, %u slot(s))", cmd, idx, why, nh);
+    if (OSIncrementAtomic(&gAgdcLogged) < 120) {
+        if (inf.type != 0xffffffffu)
+            AGLOG("K5: command %#x index %d type %#x NOT answered (why %#x, %u slot(s))", cmd, idx, inf.type, why, nh);
+        else
+            AGLOG("K5: command %#x index %d NOT answered (why %#x, %u slot(s))", cmd, idx, why, nh);
+    }
     return r == RD3K5_R_BADARG ? kIOReturnBadArgument : kIOReturnNotFound;
 }
 
@@ -225,17 +286,23 @@ IOReturn RD3DeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned l
         gAgdcMaxFBOut = (int)n;
         return kIOReturnSuccess;
     }
+    /* AGDCFBGetExtendedCapability_t: fbIndex, then the capability type
+     * (card run 45: hundreds of 0x711 for types other than the plane
+     * scaler); every 0x711 is counted by type, K5 on or off */
+    const uint32_t type = (cmd == RD3K5_CMD_FBCAPEX && in && inSize >= 8) ? ((const uint32_t *)in)[1] : 0xffffffffu;
+    const unsigned slot = rd3n48_type_slot(type);
+    if (cmd == RD3K5_CMD_FBCAPEX) {
+        OSIncrementAtomic(&gAgdcTypeAsked[slot]);
+        OSBitOrAtomic(1u << slot, (volatile UInt32 *)&gAgdcTypesMask);
+    }
     if (gAgdcK5 && (cmd == RD3K5_CMD_LINKCONFIG || cmd == RD3K5_CMD_FBCAPEX)) {
         IOReturn k5 = rd3K5Answer(fPci, cmd, in, inSize, out, outSize);
+        if (k5 == kIOReturnSuccess && cmd == RD3K5_CMD_FBCAPEX) OSIncrementAtomic(&gAgdcTypeAnswered[slot]);
         if (k5 != kIOReturnUnsupported) return k5;
     }
     OSAddAtomic64(1, &gAgdcUnsupported);
     gAgdcLastRefused = (int)cmd;
-    /* AGDCFBGetExtendedCapability_t: fbIndex, then the capability type
-     * (card run 45: hundreds of 0x711 for types other than the plane
-     * scaler) */
-    uint32_t type = (cmd == RD3K5_CMD_FBCAPEX && in && inSize >= 8) ? ((const uint32_t *)in)[1] : 0xffffffffu;
-    if (type < 32) OSBitOrAtomic(1u << type, (volatile UInt32 *)&gAgdcK5Types);
+    if (type < 32) OSBitOrAtomic(1u << type, (volatile UInt32 *)&gAgdcK5Types);   /* the old counter: types below 32 only */
     if (OSIncrementAtomic(&gAgdcLogged) < 120) {
         if (type != 0xffffffffu)
             AGLOG("command %#x (in %lu bytes, index %u, type %#x) -> Unsupported", cmd, inSize, ((const uint32_t *)in)[0], type);
@@ -520,6 +587,43 @@ static int rdna3agdc_sysctl SYSCTL_HANDLER_ARGS
     rd3AgdcKick();
     return 0;
 }
+/* DRIVER-PLAN N45's switches: arg2 0 = debug.rdna3agdc_ib, 1 = _linkflags,
+ * 2 = _scaler; values outside the switch are refused (EINVAL) */
+static const char *rd3N48Text(int which, uint32_t v)
+{
+    return which == 0 ? rd3n48_ib_text(v) : which == 1 ? rd3n48_linkflags_text(v) : rd3n48_scaler_text(v);
+}
+static int rdna3agdc_n48_sysctl SYSCTL_HANDLER_ARGS
+{
+    int *p = (int *)arg1;
+    const int which = arg2;
+    const int max = which == 0 ? (int)RD3N48_IB_ALL : which == 1 ? (int)RD3N48_LINKFLAGS_MAX : (int)RD3N48_SCALER_MAX;
+    int v = *p;
+    int err = sysctl_handle_int(oidp, &v, 0, req);
+    if (err || !req->newptr) return err;
+    if (v < 0 || v > max) {
+        AGLOG("%s=%d refused: 0..%d (stays %d)", oidp->oid_name, v, max, *p);
+        return EINVAL;
+    }
+    const int old = *p;
+    *p = v;
+    AGLOG("%s %d -> %d: %s (counts from the next capability gather, i.e. WindowServer start)", oidp->oid_name, old, v,
+          rd3N48Text(which, (uint32_t)v));
+    return 0;
+}
+/* debug.rdna3agdc_types: per 0x711 capability type, asked / answered */
+static int rdna3agdc_types_sysctl SYSCTL_HANDLER_ARGS
+{
+    char b[RD3N48_TYPES_TEXT];
+    uint32_t asked[RD3N48_TYPE_SLOTS], answered[RD3N48_TYPE_SLOTS];
+    for (unsigned k = 0; k < RD3N48_TYPE_SLOTS; k++) {
+        asked[k] = (uint32_t)gAgdcTypeAsked[k];
+        answered[k] = (uint32_t)gAgdcTypeAnswered[k];
+    }
+    rd3n48_types_text(b, sizeof b, asked, answered);
+    return sysctl_handle_string(oidp, b, 0, req);
+}
+
 /* the SDK's SYSCTL_* initializers leave oid_link to the registration */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
@@ -542,6 +646,19 @@ SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_last_refused_idx, CTLFLAG_RD | CTLFLA
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_vendor, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcVendor, 0, "vendor info answer: 0 AMD 0x1002, 1 NVIDIA 0x10de, 2 Intel 0x8086 (DRIVER-PLAN N40)");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_vendor_asked, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcVendorAsked, 0, "vendor info queries answered");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_vendor_last, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcVendorLast, 0, "the vendor choice of the last answer (-1 never asked)");
+SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_ib, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcIb, 0, rdna3agdc_n48_sysctl, "I",
+            "K5 0x711 (N45): bit 0 = answer type 0x40 (inline buffer), bit 1 = zero-fill the other types but 0x10 with success (default 3)");
+SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_linkflags, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcLinkFlags, 1, rdna3agdc_n48_sysctl, "I",
+            "K5 0x921 flags (N45): 0 = 0xb NullMoth (default), 1 = 0xa (bit 0 clear), 2 = 0 (Navi48)");
+SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_scaler, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcScaler, 2, rdna3agdc_n48_sysctl, "I",
+            "K5 plane scaler (N45): 0 = NullMoth (default), 1 = AMD markers 0x50005/4, 2 = Navi48 as written (width first)");
+SYSCTL_QUAD(_debug, OID_AUTO, rdna3agdc_ib_answered, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcIbAnswered, "K5: 0x711 type 0x40 (inline buffer) answered");
+SYSCTL_QUAD(_debug, OID_AUTO, rdna3agdc_zero_filled, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcZeroFilled, "K5: 0x711 of another type zero-filled with success");
+SYSCTL_QUAD(_debug, OID_AUTO, rdna3agdc_scaler_alt, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcScalerAlt, "K5: plane-scaler answers with debug.rdna3agdc_scaler 1 or 2");
+SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_linkflags_last, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcLinkFlagsLast, 0, "K5: the flags of the last 0x921 answer (-1 never)");
+SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_types_mask, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcTypesMask, 0, "bit k = a 0x711 asked capability type 1 << k (bit 16 any other type)");
+SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_types, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0, rdna3agdc_types_sysctl, "A",
+            "per 0x711 capability type: queries / answered with success");
 #pragma clang diagnostic pop
 
 static struct sysctl_oid *const kOids[] = {
@@ -551,7 +668,10 @@ static struct sysctl_oid *const kOids[] = {
     &sysctl__debug_rdna3agdc_maxfb, &sysctl__debug_rdna3agdc_k5_asked, &sysctl__debug_rdna3agdc_k5_link_mask,
     &sysctl__debug_rdna3agdc_k5_caps_mask, &sysctl__debug_rdna3agdc_k5_last_refused_idx,
     &sysctl__debug_rdna3agdc_k5_types, &sysctl__debug_rdna3agdc_vendor, &sysctl__debug_rdna3agdc_vendor_asked,
-    &sysctl__debug_rdna3agdc_vendor_last,
+    &sysctl__debug_rdna3agdc_vendor_last, &sysctl__debug_rdna3agdc_ib, &sysctl__debug_rdna3agdc_linkflags,
+    &sysctl__debug_rdna3agdc_scaler, &sysctl__debug_rdna3agdc_ib_answered, &sysctl__debug_rdna3agdc_zero_filled,
+    &sysctl__debug_rdna3agdc_scaler_alt, &sysctl__debug_rdna3agdc_linkflags_last, &sysctl__debug_rdna3agdc_types_mask,
+    &sysctl__debug_rdna3agdc_types,
 };
 
 /* ------------------------------------------------------------------ */
@@ -604,6 +724,21 @@ bool RDNA3AGDC::start(IOService *provider)
         const int known = rd3k5_vendor_fill(&vi, (uint32_t)gAgdcVendor) == 0;
         AGLOG("vendor info answer: %s 0x%04x (rdna3agdcvendor=%d, default 0 = AMD%s)", vi.vendor, vi.vendorID,
               gAgdcVendor, known ? "" : "; unknown value, answered as AMD");
+    }
+    {
+        struct rd3n48_sw sw = { rd3_arg("rdna3agdcib", RD3N48_IB_DEFAULT), rd3_arg("rdna3agdclinkflags", RD3N48_LINKFLAGS_DEFAULT),
+                                rd3_arg("rdna3agdcscaler", RD3N48_SCALER_DEFAULT) };
+        const struct rd3n48_sw asked = sw;
+        const unsigned bad = rd3n48_sw_fix(&sw);
+        gAgdcIb = (int)sw.ib;
+        gAgdcLinkFlags = (int)sw.linkflags;
+        gAgdcScaler = (int)sw.scaler;
+        AGLOG("N45 answers (with K5 on): rdna3agdcib=%u (%s), rdna3agdclinkflags=%u (%s), rdna3agdcscaler=%u (%s)", sw.ib,
+              rd3n48_ib_text(sw.ib), sw.linkflags, rd3n48_linkflags_text(sw.linkflags), sw.scaler, rd3n48_scaler_text(sw.scaler));
+        if (bad)
+            AGLOG("N45 boot-args with unknown values taken as the defaults: rdna3agdcib=%u%s, rdna3agdclinkflags=%u%s, "
+                  "rdna3agdcscaler=%u%s", asked.ib, (bad & 1) ? " (unknown)" : "", asked.linkflags, (bad & 2) ? " (unknown)" : "",
+                  asked.scaler, (bad & 4) ? " (unknown)" : "");
     }
     const uint32_t arg = rd3_arg("rdna3agdc", 0);
     if (arg) {

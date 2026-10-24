@@ -34,3 +34,9 @@ NullMoth NVIDIA driver.
   has the size this build knows (`getClassSize`).
 * `rdna3_agdc_k5.h` also builds the timing words from a mode's detailed
   timing; `tests/test_agdc_k5.c` checks the answers on the host.
+* `rdna3_agdc_n48.h` (DRIVER-PLAN N45, our code on top of the K5 answers)
+  adds the answers Navi48-MacOS by Almosst-DEV gives (BSD-3-Clause, see
+  `/NOTICE`): 0x711 type 0x40 (inline buffer), the other types
+  zero-filled, the 0x921 flags without bit 0 and AMD's plane-scaler
+  markers, each behind its own switch (`rdna3agdcib`, `rdna3agdclinkflags`,
+  `rdna3agdcscaler`); `tests/test_agdc_n48.c` checks them.

@@ -28,7 +28,7 @@ LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -
 .PHONY: all check clean
 all: $(BUNDLE)
 
-$(OBJDIR)/rdna3-agdc.o: rdna3-agdc.cpp rdna3_agdc_k5.h AppleGraphicsDeviceControl_re.h ../common/rdna3_bootargs.h
+$(OBJDIR)/rdna3-agdc.o: rdna3-agdc.cpp rdna3_agdc_k5.h rdna3_agdc_n48.h AppleGraphicsDeviceControl_re.h ../common/rdna3_bootargs.h
 	mkdir -p $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
