@@ -357,8 +357,12 @@ plugin_trace_conf() {
 #  - ByHost:   /Library/Preferences/ByHost/com.apple.CoreDisplay.<host UUID>.plist (AnyUser +
 #    CurrentHost). Fact from Navi48-MacOS (Almosst-DEV, MIT, tools/pc/cdpref.c, macOS 26):
 #    CoreDisplay::GetBoolCFPreference calls CFPreferencesCopyValue(key, "com.apple.CoreDisplay",
-#    kCFPreferencesAnyUser, kCFPreferencesCurrentHost), the ByHost store; `defaults -currentHost`
-#    with an absolute path ignores -currentHost, so the file is written by its path. Unproven on
+#    kCFPreferencesAnyUser, kCFPreferencesCurrentHost), the ByHost store. The file is written by
+#    its path because `defaults -currentHost write com.apple.CoreDisplay` as root goes to
+#    /var/root/Library/Preferences/ByHost, the wrong store (AnyUser + CurrentHost is
+#    /Library/Preferences/ByHost); and `defaults -currentHost write <abs path>` is no way either
+#    (macOS 26.4.1 appends the host UUID itself: <path>.<IOPlatformUUID>.plist), so the path
+#    given is the one WITH the UUID and no -currentHost. Unproven on
 #    macOS 15 (DRIVER-PLAN N44 open item). The host UUID in the file name is IOPlatformUUID, the
 #    one CFPreferences uses for ByHost files since 10.8; its files in the directory are listed
 #    in 19-coredisplay-prefs.txt (collect.sh), so a wrong UUID shows.

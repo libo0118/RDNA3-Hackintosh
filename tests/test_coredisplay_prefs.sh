@@ -147,6 +147,26 @@ python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1] + "/tools"); import tr
 r, amd = tr.cd_prefs_rows("", "", open(sys.argv[2]).read()); assert amd == "1" and r[0][0] == "INFO", (r, amd)
 r, amd = tr.cd_prefs_rows("", "", ""); assert amd is False and r[0][0] == "WARN", (r, amd)' "$ROOT" "$T/m19" ||
     fail "19-coredisplay-prefs.txt fallback / missing data"
+# ... in the two-store format (autoreport.sh since N45 (1)): both stores read, and a ByHost store that is unknown (ioreg gave
+# no IOPlatformUUID) is a WARN here too, as the tests-file path WARNs through autoreport.sh's "could NOT be written" line
+m19b() {   # m19b <state line> -> the member text as collect.sh packs it
+    printf '$ sh -c defaults read ...\n{\n    useIOP = 1;\n}\n== ByHost store (IOPlatformUUID ):\n== at the start of the boot (autoreport.sh):\nboot 100\n%s\n[exit 0]\n' "$1" > "$T/m19b"
+}
+m19b "AnyHost: (none); ByHost(unknown): (unknown)"
+python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1] + "/tools"); import triage_reports as tr
+r, amd = tr.cd_prefs_rows("", "", open(sys.argv[2]).read())
+assert [x[0] for x in r] == ["INFO", "WARN"] and "ByHost store is NOT known" in r[1][2] and "not known (ioreg" in r[0][2], r
+assert amd is None, amd' "$ROOT" "$T/m19b" || fail "19-coredisplay-prefs.txt fallback: two-store line with an unknown ByHost store must WARN"
+m19b "AnyHost: $BOTH; ByHost($UUID1): $BOTH"
+python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1] + "/tools"); import triage_reports as tr
+r, amd = tr.cd_prefs_rows("", "", open(sys.argv[2]).read())
+assert [x[0] for x in r] == ["INFO"] and amd == "1" and "ByHost(" in r[0][2], (r, amd)' "$ROOT" "$T/m19b" ||
+    fail "19-coredisplay-prefs.txt fallback: two-store line, both stores holding the keys"
+m19b "AnyHost: $BOTH; ByHost($UUID1): (none)"
+python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1] + "/tools"); import triage_reports as tr
+r, amd = tr.cd_prefs_rows("", "", open(sys.argv[2]).read())
+assert [x[0] for x in r] == ["INFO", "WARN"] and "AnyHost store only" in r[1][2], r' "$ROOT" "$T/m19b" ||
+    fail "19-coredisplay-prefs.txt fallback: AnyHost-only line must WARN"
 
 # the boot time as macOS prints it has microseconds (usec != 0): the second is what counts, not the usec
 call u1 BOOTSEC=700 USEC=999999

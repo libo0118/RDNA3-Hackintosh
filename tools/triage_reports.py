@@ -2953,12 +2953,14 @@ def cd_prefs_rows(txt, args="", prefs_member=""):
     seen = CD_PREFS_SEEN_RE.findall(txt or "")
     did = CD_PREFS_DID_RE.findall(txt or "")
     stale = any("could NOT keep" in d or "could NOT tell" in d for d in did)
+    from_member = False
     if not seen and prefs_member:
         m = re.search(r"^== at the start of the boot.*\n(?:\$ .*\n)?boot (\S+)\n(.*)$", prefs_member, re.M)
         if m:
             g = m.group(2).strip()
             # an empty domain leaves no second line: collect.sh's "[exit 0]" follows the "boot <sec>" line
             seen = ["(none)" if not g or g.startswith("[exit") else g]
+            from_member = True
             stale = stale or m.group(1) == "?"
     if not seen:
         return [("WARN", label, "no '== CoreDisplay prefs' line in the tests file and no 19-coredisplay-prefs.txt: "
@@ -3002,6 +3004,11 @@ def cd_prefs_rows(txt, args="", prefs_member=""):
             out.append(("WARN", label, "rdna3iopprefs=0 but WindowServer started with useIOP_onAMD 1 (%s): the keys are "
                         "from an earlier boot and no boot took them out in between: this run is NOT the A/B without "
                         "them (autoreport.sh takes them out after WindowServer started: the next boot is)" % st))
+    if from_member and st_bh == "(unknown)":
+        # the tests file's "could NOT be written (host UUID unknown ...)" line is not there to say it: the ByHost
+        # store of this boot is unknown (ioreg gave no IOPlatformUUID), so a missing ByHost write must not be silent
+        out.append(("WARN", label, "the ByHost store is NOT known (%s): ioreg gave no IOPlatformUUID, so autoreport.sh "
+                    "could not write or read /Library/Preferences/ByHost/com.apple.CoreDisplay.<IOPlatformUUID>" % st))
     for d in did:
         if "could NOT" in d:
             out.append(("WARN", label, "autoreport.sh: " + d))
