@@ -464,6 +464,15 @@ The swap A/B is no longer part of a normal step (card run 2026-10-17d): add the
 boot-arg `rdna3swapab=1` (`rdna3vm args "<the step's args> rdna3swapab=1"`) to
 run it; it breaks the picture for a minute on purpose (mode 1).
 
+CoreDisplay's IOPresentment switches (DRIVER-PLAN N44): every boot of the VM
+(the install boot included) writes `useIOP` and `useIOP_onAMD` = true into
+`/Library/Preferences/com.apple.CoreDisplay`; WindowServer reads them when it
+starts, so a change counts from the next boot. For the A/B without them add
+`rdna3iopprefs=0` (`rdna3vm args "<the step's args> rdna3iopprefs=0"`): that
+boot takes both keys out, and the boot after it starts without them. The
+tests file says what this boot's WindowServer started with (`== CoreDisplay
+prefs ...`), triage prints it as `present mode, CoreDisplay prefs`.
+
 ### Present-mode A/B (steps `play-macpro`, `play-rootport`, `play-desktop`)
 
 Why: with our driver WindowServer presents with the legacy page-flip mode

@@ -47,7 +47,7 @@ cap=${NVMTL_COLLECT_MAXBYTES:-268435456}
 me=$(id -u)
 note() { echo "$*" >> "$info"; }
 # this boot's start (seconds since 1970): "{ sec = 1792310400, usec = 0 } ..." on macOS
-boot=${NVMTL_BOOTTIME:-$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9]*\).*/\1/p')}
+boot=${NVMTL_BOOTTIME:-$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ *sec = \([0-9]*\).*/\1/p')}
 case "$boot" in ''|*[!0-9]*) boot=; note "boottime unknown: traces of older boots are not filtered" ;; *) note "boottime $boot" ;; esac
 tol=120   # seconds: a clock set after the boot (NTP) must not make this boot's traces "older"
 mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }   # GNU first: its -f is the file system

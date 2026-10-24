@@ -291,6 +291,38 @@ grep -q 'nomagic-5' "$T/col6/31-plugin-trace/info.txt" && fail "--only took anot
 mkdir -p "$T/col7"
 PATH="$T/bin:$PATH" NVMTL_BOOTTIME=$(( $(date +%s) + 60 )) NVMTL_TRACE_DIR="$T/colsrc" sh "$ROOT/tools/macos/collect_plugin_trace.sh" --traces-only --only Finder "$T/col7" || fail "collector (tolerance)"
 need "$T/col7/31-plugin-trace/info.txt" 'ACCEPT .* Finder-[0-9]*\.trace'
+# kern.boottime as macOS prints it ("{ sec = N, usec = M } <date>", usec != 0) and no NVMTL_BOOTTIME: the collector
+# takes the boot SECOND, not the microseconds (a greedy parse took usec: every old trace passed)
+mkdir -p "$T/bin-bt" "$T/btsrc" "$T/col8" "$T/col9"
+chmod 700 "$T/btsrc"
+cat > "$T/bin-bt/sysctl" <<'SYSCTL'
+#!/bin/sh
+[ "$2" = kern.boottime ] || exit 1
+case "$BT_STUB" in
+real) echo "{ sec = $BT_SEC, usec = 123456 } $(date)" ;;
+*) echo "$BT_STUB" ;;
+esac
+SYSCTL
+chmod +x "$T/bin-bt/sysctl"
+cp "$good" "$T/btsrc/Finder-new.trace"
+cp "$good" "$T/btsrc/Finder-old.trace"
+touch -t 200001010000 "$T/btsrc/Finder-old.trace"
+BT_NOW=$(date +%s)
+( unset NVMTL_BOOTTIME; PATH="$T/bin-bt:$T/bin:$PATH" BT_STUB=real BT_SEC=$((BT_NOW - 3600)) NVMTL_TRACE_DIR="$T/btsrc" \
+  sh "$ROOT/tools/macos/collect_plugin_trace.sh" --traces-only --only Finder "$T/col8" ) || fail "collector (kern.boottime)"
+need "$T/col8/31-plugin-trace/info.txt" "^boottime $((BT_NOW - 3600))\$"
+need "$T/col8/31-plugin-trace/info.txt" 'REJECT .* Finder-old\.trace: written before this boot'
+need "$T/col8/31-plugin-trace/info.txt" 'ACCEPT .* Finder-new\.trace'
+[ -e "$T/col8/31-plugin-trace/Finder-old.trace" ] && fail "an old trace was collected"
+# unparseable kern.boottime: said, nothing filtered
+for g in "garbage" "{ usec = 5 }" ""; do
+    rm -rf "$T/col9"; mkdir -p "$T/col9"
+    ( unset NVMTL_BOOTTIME; PATH="$T/bin-bt:$T/bin:$PATH" BT_STUB="$g" NVMTL_TRACE_DIR="$T/btsrc" \
+      sh "$ROOT/tools/macos/collect_plugin_trace.sh" --traces-only --only Finder "$T/col9" ) || fail "collector (garbage kern.boottime '$g')"
+    need "$T/col9/31-plugin-trace/info.txt" 'boottime unknown: traces of older boots are not filtered'
+    grep -q '^boottime [0-9]' "$T/col9/31-plugin-trace/info.txt" && fail "a boot time was invented from '$g'"
+    need "$T/col9/31-plugin-trace/info.txt" 'ACCEPT .* Finder-old\.trace'
+done
 # an archive whose info.txt says the boot began after the trace was opened: OLD, not judged
 mkdir -p "$T/old/rdna3-report-o/31-plugin-trace"
 cp "$f" "$T/old/rdna3-report-o/31-plugin-trace/"

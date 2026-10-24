@@ -25,6 +25,9 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
 # the same hash)
 FB_SRC_HASH := $(shell cat rdna3-fb.cpp Info.plist ../accel/rdna3k_abi.h ../agdc/rdna3_agdc_k5.h ../common/rdna3_fb_policy.h ../common/rdna3_bootargs.h ../common/rdna3_vbl_irq.h | shasum | cut -c1-10)
 CXXFLAGS += -DFB_COMMIT='"$(FB_SRC_HASH)"'
+# the leaf class IOKit instantiates (DRIVER-PLAN N44): Info.plist's two
+# IOClass strings must name it (checked when the bundle is built)
+FB_CLASS := $(shell sed -n 's/^.define RDNA3_FB_CLASS[[:space:]]\{1,\}\([A-Za-z0-9_]\{1,\}\).*/\1/p' rdna3-fb.cpp)
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext
 
 .PHONY: all check clean
@@ -35,6 +38,9 @@ $(OBJDIR)/rdna3-fb.o: rdna3-fb.cpp ../accel/rdna3k_abi.h ../agdc/rdna3_agdc_k5.h
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(BUNDLE): $(OBJDIR)/rdna3-fb.o Info.plist
+	@test -n "$(FB_CLASS)" || { echo "rdna3-fb.cpp has no #define RDNA3_FB_CLASS"; exit 1; }
+	@test "$$(grep -c '<key>IOClass</key><string>$(FB_CLASS)</string>' Info.plist)" = 2 || \
+		{ echo "Info.plist: both IOClass strings must be $(FB_CLASS) (RDNA3_FB_CLASS)"; exit 1; }
 	mkdir -p $@/Contents/MacOS
 	$(CXX) $(LDFLAGS) $< -o $@/Contents/MacOS/$(KEXT)
 	cp Info.plist $@/Contents/Info.plist
@@ -46,6 +52,7 @@ $(BUNDLE): $(OBJDIR)/rdna3-fb.o Info.plist
 
 check: $(BUNDLE)
 	nm -m $(BUNDLE)/Contents/MacOS/$(KEXT) | grep -E "_kmod_info|RDNA3Framebuffer10gMetaClassE"
+	nm $(BUNDLE)/Contents/MacOS/$(KEXT) | grep -q "[0-9]$(FB_CLASS)10gMetaClassE"
 	@! nm $(BUNDLE)/Contents/MacOS/$(KEXT) | grep -E "__ZN[0-9]+NV[A-Za-z0-9]*10gMetaClassE"
 
 clean:

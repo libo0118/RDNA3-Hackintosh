@@ -21,6 +21,10 @@
 	</dict>
 	<key>IOKitPersonalities</key>
 	<dict>
+		<!-- IOClass is the leaf class RDNA3_FB_CLASS of rdna3-fb.cpp (DRIVER-PLAN
+		     N44): CoreDisplay classifies a framebuffer's GPU vendor by its class
+		     name and keeps IOPresentment off for an unknown one. The service
+		     name stays RDNA3Framebuffer. -->
 		<!-- Head 0 on the PCI device. The IOFramebuffer match
 		     category with a score above IONDRVFramebuffer (20000): only one
 		     framebuffer publishes the boot VRAM. probe() declines without the
@@ -28,7 +32,7 @@
 		<key>RDNA3Framebuffer</key>
 		<dict>
 			<key>CFBundleIdentifier</key><string>io.github.voten641.RDNA3Framebuffer</string>
-			<key>IOClass</key><string>RDNA3Framebuffer</string>
+			<key>IOClass</key><string>AMDRDNA3Framebuffer</string>
 			<key>IOProviderClass</key><string>IOPCIDevice</string>
 			<key>IOPCIPrimaryMatch</key><string>0x747e1002</string>
 			<key>IOMatchCategory</key><string>IOFramebuffer</string>
@@ -39,7 +43,7 @@
 		<key>RDNA3FramebufferHead</key>
 		<dict>
 			<key>CFBundleIdentifier</key><string>io.github.voten641.RDNA3Framebuffer</string>
-			<key>IOClass</key><string>RDNA3Framebuffer</string>
+			<key>IOClass</key><string>AMDRDNA3Framebuffer</string>
 			<key>IOProviderClass</key><string>IOService</string>
 			<key>IONameMatch</key><string>RDNA3DisplayHead</string>
 			<key>IOMatchCategory</key><string>IOFramebuffer</string>

@@ -19,6 +19,12 @@
 #    log alone (asked model, asked bus, the card in the guest's `info pci`: bus and BARs)
 #  - 'rdna3vm approve --step N' in the STALE KEXTS action when the run asked for a Mac model
 #  - the fb index row is INFO for the state of card run 2026-10-17d (unchanged), WARN when it changed
+#  - the GPU vendor CoreDisplay gave each framebuffer (DRIVER-PLAN N44): vendor 1 of an old class INFO,
+#    vendor 4 of the AMD class PASS, no CoreDisplay log WARN
+#  - the lead without planes by what is known (useIOP_onAMD 1 / unknown / rdna3iopprefs=0 with the keys still
+#    there / no accelerator counters), the prefs fallback through 19-coredisplay-prefs.txt ("[exit 0]" is not the
+#    domain), the kext's "-- NOT AMDRDNA3Framebuffer" line as a FAIL, the "planes in transactions" FAIL naming
+#    vendor 1 only when CoreDisplay said so
 #  - SUMMARY rows and the checklist's levels (WARN stays WARN, INFO INFO)
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -65,6 +71,16 @@ SETUP = ("2026-10-17 19:23:44.580 I  WindowServer[158:28c] [com.apple.CoreDispla
 NOMUX = ("2026-10-17 19:23:43.994 I  WindowServer[158:28c] [com.apple.CoreDisplay:default] [INFO] - "
          "mux_initialize: Couldn't find any matches\n")
 OTHER = "2026-10-17 19:23:43.435 I  WindowServer[158:28c] (IOPresentment) Info: AGDC Plane Scaler successful\n"
+
+
+def vendors(v, klass):
+    """CoreDisplay's GetSystemGPUVendors lines for both heads (DRIVER-PLAN N44)"""
+    out = ""
+    for eid, path in (("0x1000002f2", "RDNA3Framebuffer"), ("0x1000002d1", "RDNA3Accel/RDNA3DisplayHead/RDNA3Framebuffer")):
+        out += ("2026-10-17 19:23:43.429 I  WindowServer[158:28c] [com.apple.CoreDisplay:default] [INFO] - "
+                "GetSystemGPUVendors_block_invoke: %s %d %s IOService:/AppleACPIPlatformExpert/PCI0/AppleACPIPCI/S80@10/%s\n"
+                % (eid, v, klass, path))
+    return out
 
 
 def system(model):
@@ -130,7 +146,8 @@ def counters(ok, empty):
 # a: like card run 2026-10-17d (the model from the tests file's PLATFORM line, an older collector)
 m = dict(BASE)
 m.update({"12-ioreg-fb.txt": fb([(0, 1), (1, 0)], True),
-          "24-log-coredisplay.txt": PAGEFLIP + OTHER + NOMUX + display_line("YES") + SETUP + SETUP + GPUW % ("0x10 (IG)", "0:16:0")})
+          "24-log-coredisplay.txt": PAGEFLIP + OTHER + NOMUX + display_line("YES") + SETUP + SETUP + GPUW % ("0x10 (IG)", "0:16:0")
+          + vendors(1, "RDNA3Framebuffer")})
 report("a", "play", "20261017-195000", m,
        "PLATFORM: macOS 15.8.1 (24H32), Darwin 24.6.0, virtual machine, MacBookPro16,1 Intel Core Processor (Skylake)\n" + counters(0, 0))
 # the host's stamps are local time, the report's the guest's UTC: nothing here lines up by name, and the log of
@@ -142,8 +159,12 @@ host("a", "20261017-200000", "MacPro7,1", "rootport (behind a PCIe root port: PC
 # b: play-desktop
 m = dict(BASE)
 m.update({"00-system.txt": system("MacPro7,1"), "12-ioreg-fb.txt": fb([(0, 0), (1, 1)], False),
-          "24-log-coredisplay.txt": OTHER + display_line("NO", "NO") + GPUW % ("0x0", "1:0:0")})
-report("b", "play", "20261017-195000", m, counters(12, 3))
+          "24-log-coredisplay.txt": OTHER + display_line("NO", "NO") + GPUW % ("0x0", "1:0:0") + vendors(4, "AMDRDNA3Framebuffer")})
+report("b", "play", "20261017-195000", m, counters(12, 3) +
+       "== CoreDisplay prefs (/Library/Preferences/com.apple.CoreDisplay, DRIVER-PLAN N44): this boot's WindowServer "
+       "started with: { useIOP = 1; \"useIOP_onAMD\" = 1; }\n"
+       "== CoreDisplay prefs: useIOP / useIOP_onAMD true (rdna3iopprefs=0 takes them out); now: { useIOP = 1; "
+       "\"useIOP_onAMD\" = 1; }\n")
 host("b", "20261017-190000", "MacPro7,1", "rootport (behind a PCIe root port: PCI bus 1, not bus 0)")
 
 # c: the host asked for a root port and MacPro7,1; macOS sees bus 0 and a MacBook
@@ -233,6 +254,33 @@ os.makedirs(os.path.join(T, "s"), exist_ok=True)     # the same without a model:
 open(os.path.join(T, "s", "approve-1.txt"), "w").write(
     "RDNA3Accelerator: running e35e78c275, installed 4fcf2bc0b7 (not approved yet)\n")
 host("s", "20261017-190000", None, "pcie0", args="-v keepsyms=1 " + steps["play"] + " rdna3vmauto=1")
+# t..y: the GPU vendor lead and the prefs rows by what is known (DRIVER-PLAN N44)
+PREFS1 = ("== CoreDisplay prefs (/Library/Preferences/com.apple.CoreDisplay, DRIVER-PLAN N44): this boot's WindowServer "
+          "started with: { useIOP = 1; \"useIOP_onAMD\" = 1; }\n")
+V4 = {"12-ioreg-fb.txt": fb([(0, 0), (1, 1)], False), "00-system.txt": system("MacPro7,1"),
+      "24-log-coredisplay.txt": OTHER + display_line("NO", "NO") + GPUW % ("0x0", "1:0:0") + vendors(4, "AMDRDNA3Framebuffer")}
+# t: vendor 4, no planes, useIOP_onAMD 1 at WindowServer's start: the _windowserver lead
+m = dict(BASE); m.update(V4)
+report("t", "play", "20261017-195000", m, counters(0, 5) + PREFS1)
+# u: vendor 4, no planes, no prefs line anywhere: useIOP_onAMD is unknown, not "not 1"
+report("u", "play", "20261017-195000", m, counters(0, 5))
+# v: rdna3iopprefs=0 but the keys of an earlier boot were still there: not the A/B without them
+mv = dict(m)
+mv["01-boot-args.txt"] = ARGS.replace("rdna3vmauto=1", "rdna3vmauto=1 rdna3iopprefs=0")
+report("v", "play", "20261017-195000", mv, counters(0, 5) + PREFS1)
+# w: no prefs lines in the tests file, 19-coredisplay-prefs.txt of an empty domain ("[exit 0]" is not the domain)
+m19 = dict(m)
+m19["19-coredisplay-prefs.txt"] = ("$ sh -c x\nDomain does not exist\n== at the start of the boot (autoreport.sh):\n"
+                                    "boot 100\n[exit 0]\n")
+report("w", "play", "20261017-195000", m19, counters(0, 5))
+# x: the kext logged that head 1 is not its leaf class (a stale Info.plist)
+mx = dict(m)
+mx["20-log-rdna3.txt"] = ("RDNA3-fb: head 1 class RDNA3Framebuffer, name RDNA3Framebuffer: CoreDisplay classifies the "
+                          "framebuffer by this class name -- NOT AMDRDNA3Framebuffer: Info.plist IOClass is not the leaf "
+                          "class, CoreDisplay counts it as vendor 1 (unknown) and keeps IOPresentment off\n")
+report("x", "play", "20261017-195000", mx, counters(0, 5) + PREFS1)
+# y: vendor 4 and no accelerator counters at all (the accelerator never ran)
+report("y", "play", "20261017-195000", m, PREFS1)
 PY
 
 run() { python3 -I "$ROOT/tools/triage_reports.py" "$T/$1" > "$T/out.txt" 2>&1 || true; }
@@ -243,6 +291,7 @@ hasnt() { ! grep -qF -- "$1" "$T/out.txt" || fail "$2: '$1' unexpected"; }
 # ---- a
 run a
 row INFO "page flip mode" a | grep -qF "init_page_flip: page flip mode is on; 'Set up page flip mode' on a display 2 time(s)" || fail "a: page flip row"
+row INFO "GPU vendor" a | grep -qF "IOPresentment off: framebuffer classed vendor 1 (unknown): framebuffer 0x1000002f2 class RDNA3Framebuffer: vendor 1 (unknown), a framebuffer older than DRIVER-PLAN N44" || fail "a: GPU vendor row (an old report)"
 row INFO transactions a | grep -qF "iop_ok 0, iop_empty 0: no IOPresentment transactions at all" || fail "a: transactions row"
 row INFO integrated a | grep -qF "IOFBIntegrated = Yes on 2 of 2 framebuffer(s)" || fail "a: integrated row"
 row INFO "fb index" a | grep -qF "IOFramebufferOpenGLIndex 0,1, IOFBDependentIndex 1,0: they disagree on framebuffer(s) 0,1, as in card run 2026-10-17d (unchanged; whether it matters is DRIVER-PLAN N39 open item 3)" || fail "a: fb index row (INFO: the known state is not a standing WARN)"
@@ -261,6 +310,10 @@ grep -q '^INFO    present: fb index ' "$T/ck.txt" || fail "a: the checklist does
 grep -q '^INFO    present: GPUWrangler ' "$T/ck.txt" || fail "a: the checklist does not show the GPUWrangler row as INFO"
 grep -q '^INFO    present: integrated ' "$T/ck.txt" || fail "a: integrated row"
 
+row WARN "CoreDisplay prefs" a | grep -qF "are not known" || fail "a: an old report: the prefs are not known (WARN)"
+! grep -F "present mode, " "$T/out.txt" | grep -q "FAIL" || fail "a: an old report has no FAIL present-mode row"
+grep "FAIL planes in transactions" "$T/out.txt" | grep -qF "CoreDisplay classed framebuffer(s) RDNA3Framebuffer vendor 1" || fail "a: the planes FAIL names the vendor-1 class"
+
 # ---- b: the desktop variant
 run b
 row INFO "page flip mode" b | grep -qF "no 'init_page_flip' line in the CoreDisplay log, and planes arrive in transactions: not the page-flip mode" || fail "b: page flip row"
@@ -269,7 +322,11 @@ row INFO integrated b | grep -qF "IOFBIntegrated = Yes on 0 of 2 framebuffer(s) 
 row INFO "fb index" b | grep -qF "IOFramebufferOpenGLIndex 0,1, IOFBDependentIndex 0,1: they agree" || fail "b: fb index row"
 row INFO GPUWrangler b | grep -qF "flags 0x0 (no tags) vid.did=1002.747e b:d:f=1:0:0: a discrete GPU" || fail "b: GPUWrangler row"
 row INFO SMBIOS b | grep -qF "MacPro7,1 (hw.model, board-id Mac-27AD2F918AE68F61); CoreDisplay isBDW=NO isBuiltIn=NO isMUX=NO isMobile=NO; rdna3vm asked for MacPro7,1" || fail "b: SMBIOS row: $(grep 'SMBIOS:' "$T/out.txt")"
+row PASS "GPU vendor" b | grep -qF "framebuffer 0x1000002d1 class AMDRDNA3Framebuffer: vendor 4 (AMD): CoreDisplay counts it as AMD" || fail "b: GPU vendor row"
+hasnt "next lead" "b: planes arrive: no useIOP_onAMD lead"
+row INFO "CoreDisplay prefs" b | grep -qF "this boot's WindowServer started with useIOP_onAMD 1, useIOP 1" || fail "b: CoreDisplay prefs row"
 hasnt "WARN present mode" "b: a clean desktop run has no WARN"
+grep -q "FAIL planes in transactions" "$T/out.txt" && fail "b: planes arrive" || true
 hasnt "card bus" "b: asked rootport, bus 1"
 
 # ---- c: the host asked for something macOS does not show
@@ -292,11 +349,39 @@ row WARN integrated e | grep -qF "12-ioreg-fb.txt has no RDNA3Framebuffer" || fa
 row WARN "fb index" e | grep -qF "the index properties are not known" || fail "e: fb index row"
 row WARN GPUWrangler e | grep -qF "no 'GPUWrangler (reg) gpu ... flags ... b:d:f=' line" || fail "e: GPUWrangler row"
 row WARN SMBIOS e | grep -qF "model not in the report" || fail "e: SMBIOS row"
+row WARN "GPU vendor" e | grep -qF "24-log-coredisplay.txt is missing or empty: the framebuffers' GPU vendor" || fail "e: GPU vendor row"
+row WARN "CoreDisplay prefs" e | grep -qF "useIOP / useIOP_onAMD of this boot are not known" || fail "e: CoreDisplay prefs row"
 row WARN "request unknown" e | grep -qF "no host-*.log next to the report" || fail "e: no host log"
+
+
+# ---- t..y: the lead without planes, by what is known
+run t
+row INFO "GPU vendor" t | grep -qF "no planes arrive in IOPresentment transactions: useIOP_onAMD was 1 in /Library/Preferences at WindowServer's start: next lead the _windowserver user's" || fail "t: the _windowserver lead"
+grep -qF "FAIL planes in transactions" "$T/out.txt" || fail "t: planes FAIL"
+grep "FAIL planes in transactions" "$T/out.txt" | grep -qF "vendor 1" && fail "t: vendor 4 must not blame vendor 1" || true
+run u
+row INFO "GPU vendor" u | grep -qF "useIOP_onAMD at WindowServer's start is unknown" || fail "u: unknown prefs text"
+row INFO "GPU vendor" u | grep -qF "not 1 at WindowServer's start" && fail "u: unknown must not say 'not 1'" || true
+row WARN "CoreDisplay prefs" u | grep -qF "are not known" || fail "u: prefs WARN"
+run v
+row WARN "CoreDisplay prefs" v | grep -qF "rdna3iopprefs=0 but WindowServer started with useIOP_onAMD 1" || fail "v: the =0 with keys WARN"
+row WARN "CoreDisplay prefs" v | grep -qF "this run is NOT the A/B without them" || fail "v: not the A/B"
+row INFO "GPU vendor" v | grep -qF "although rdna3iopprefs=0 is set" || fail "v: the lead must not call it the with case"
+row INFO "CoreDisplay prefs" v | grep -qF "A/B without them" && fail "v: the INFO row calls it the A/B" || true
+run w
+row INFO "CoreDisplay prefs" w | grep -qF "useIOP_onAMD unset (CoreDisplay's static 0), useIOP unset (static 1) ((none))" || fail "w: [exit 0] taken as the domain: $(grep 'CoreDisplay prefs' "$T/out.txt")"
+hasnt "[exit 0]) " "w: [exit 0] in a prefs row"
+run x
+row FAIL "fb class" x | grep -qF "the kext logged head 1 as class RDNA3Framebuffer" || fail "x: fb class FAIL"
+run y
+row INFO "GPU vendor" y | grep -qF "the accelerator's counters (debug.rdna3accel_iop_ok) are not in the report" || fail "y: no counters text"
+hasnt "no planes arrive" "y: no counters, no 'no planes arrive' lead"
+grep "FAIL planes in transactions" "$T/out.txt" | grep -qF "not in the report" || fail "y: planes FAIL says no counters"
 
 # ---- f: an empty CoreDisplay log, a run without the accelerator
 run f
 row WARN "page flip mode" f | grep -qF "is missing or empty" || fail "f: page flip row"
+row WARN "GPU vendor" f | grep -qF "is missing or empty" || fail "f: GPU vendor row"
 row INFO transactions f | grep -qF "no accelerator counters (rdna3accel is off in this run)" || fail "f: transactions row"
 row INFO SMBIOS f | grep -qF "MacBookPro16,1 (hw.model, board-id Mac-27AD2F918AE68F61)" || fail "f: SMBIOS row"
 
