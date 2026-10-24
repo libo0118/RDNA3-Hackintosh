@@ -3120,6 +3120,79 @@ def _gpu_vendor_cd_rows(cd, planes, iop_amd, prefs_off):
     return out
 
 
+# DRIVER-PLAN N46 (1): WindowServer pairs a display with its accelerator at display init through
+# IOAccelFindAccelerator(fb), which reads IOAccelTypes (the registry path of an IOAccelerator),
+# IOAccelIndex (SInt32) and IOAccelRevision (2) from the IOFramebuffer (the family's
+# IOAccelDisplayPipe::init stamps them). collect.sh's pairing_report() prints, per framebuffer
+# instance of the class (RDNA3Framebuffer matches the leaf AMDRDNA3Framebuffer and the older class),
+# the keys that are set, then the registry path of every RDNA3Accelerator:
+#   +-o RDNA3Framebuffer  <class AMDRDNA3Framebuffer, id 0x..., ...>
+#   "RDNA3,Head" = 1 / "RDNA3,Connected" = Yes / "IOAccelTypes" = "..." / "IOAccelIndex" = 0 / "IOAccelRevision" = 2
+#   accelerator: IOService:/...
+PAIRING_MEMBER = "16-ioaccel-pairing.txt"
+PAIRING_ACCEL = "RDNA3Accelerator"   # the class (and service name) the pairing has to name
+PAIRING_REVISION = "2"
+
+
+def _pairing_blocks(txt):
+    """[{name, class, head, connected, types, index, revision}] of a pairing file (None = key not printed)"""
+    out = []
+    for blk in re.split(r"(?m)^\+-o ", txt)[1:]:
+        head_line = blk.split("\n", 1)[0]
+        m = re.match(r"(\S+)\s+<class (\w+)", head_line)
+        g = lambda k: (re.search(r'^"%s" = (.*?)\s*$' % re.escape(k), blk, re.M) or [None, None])[1]
+        out.append({"name": m.group(1) if m else head_line.split()[0] if head_line.split() else "?",
+                    "class": m.group(2) if m else "?", "head": g("RDNA3,Head"), "connected": g("RDNA3,Connected"),
+                    "types": g("IOAccelTypes"), "index": g("IOAccelIndex"), "revision": g("IOAccelRevision")})
+    return out
+
+
+def pairing_rows(txt):
+    """[(level, label, text)]: does each lit head's framebuffer name our accelerator the way
+    IOAccelFindAccelerator reads it? PASS: IOAccelTypes names RDNA3Accelerator, IOAccelRevision 2 and an
+    IOAccelIndex is set; WARN: a key missing, another accelerator named, another revision, no framebuffer or
+    no lit head to judge; INFO: no 16-ioaccel-pairing.txt in the report (an older collect.sh)"""
+    label = "display pairing"
+    lines = [l for l in (txt or "").splitlines() if l.strip() and not l.startswith(("$ ", "[exit"))]
+    if not lines:
+        return [("INFO", label, "no %s in the report (a collect.sh older than DRIVER-PLAN N46): the IOAccel keys "
+                 "WindowServer pairs a display with its accelerator by are not known" % PAIRING_MEMBER)]
+    body = "\n".join(lines)
+    fbs = _pairing_blocks(body)
+    if not fbs:
+        return [("WARN", label, "%s has no framebuffer instance (ioreg -c RDNA3Framebuffer printed none): no display "
+                 "can be paired with %s" % (PAIRING_MEMBER, PAIRING_ACCEL))]
+    accels = re.findall(r"^accelerator: (\S+)", body, re.M)
+    # a head the core marks disconnected has no display to pair; no RDNA3,Connected key = judge it
+    lit = [f for f in fbs if (f["connected"] or "").lower() != "no"]
+    if not lit:
+        return [("INFO", label, "%d framebuffer(s), none connected (RDNA3,Connected = No): no display to pair" % len(fbs))]
+    out = []
+    for f in lit:
+        who = "framebuffer %s (head %s, class %s%s)" % (f["name"], f["head"] if f["head"] is not None else "?", f["class"],
+                                                      ", older than DRIVER-PLAN N44" if f["class"] == FB_CLASS_OLD else "")
+        have = "IOAccelTypes %s, IOAccelIndex %s, IOAccelRevision %s" % (
+            (f["types"] or "not set")[:200], f["index"] if f["index"] is not None else "not set",
+            f["revision"] if f["revision"] is not None else "not set")
+        why = []
+        if f["types"] is None:
+            why.append("IOAccelTypes is not set (IOAccelFindAccelerator finds no accelerator for this display)")
+        elif PAIRING_ACCEL not in f["types"]:
+            why.append("IOAccelTypes names something else than %s" % PAIRING_ACCEL)
+        if f["revision"] is None:
+            why.append("IOAccelRevision is not set")
+        elif f["revision"] != PAIRING_REVISION:
+            why.append("IOAccelRevision is %s, not %s" % (f["revision"], PAIRING_REVISION))
+        if f["index"] is None:
+            why.append("IOAccelIndex is not set")
+        if why:
+            out.append(("WARN", label, "%s: %s; %s; registered accelerator(s): %s (DRIVER-PLAN N46)" % (
+                who, "; ".join(why), have, ", ".join(accels) or "none printed")))
+        else:
+            out.append(("PASS", label, "%s: %s: WindowServer can pair the display with the accelerator" % (who, have)))
+    return out
+
+
 def present_mode_lines(path, txt="", args="", host=None):
     """[(level, label, text)]: how the run presents and what could decide it (see above).
     The report archive (12-ioreg-fb.txt, 20-log-rdna3.txt, 24-log-coredisplay.txt,
@@ -3171,6 +3244,7 @@ def present_mode_lines(path, txt="", args="", host=None):
     out.extend(gpu_vendor_rows(cd, planes if ok else None, iop_amd, iop_prefs_off(args), klog))
     out.extend(prefs_rows)
     out.extend(iop_log_rows(cd))
+    out.extend(pairing_rows(read_tar_member(path, PAIRING_MEMBER)))
     # IOGraphics' integrated flag and the two index properties, per framebuffer
     fbs = _fb_blocks(fbtxt)
     if not fbs:
