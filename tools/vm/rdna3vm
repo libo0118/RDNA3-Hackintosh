@@ -722,7 +722,9 @@ bundle_source_hashes() {
     local b=$WORK/share/rdna3-bundle.tar.gz t k h out=""
     [ -s "$b" ] || return 0
     t=$(mktemp -d) || return 0
-    tar -xzf "$b" -C "$t" --wildcards 'kexts/*.kext/Contents/Info.plist' 2>/dev/null || true
+    # GNU tar needs --wildcards for a glob; bsdtar (macOS, the host tests in CI) has no such option and globs anyway
+    tar -xzf "$b" -C "$t" --wildcards 'kexts/*.kext/Contents/Info.plist' 2>/dev/null ||
+        tar -xzf "$b" -C "$t" 'kexts/*.kext/Contents/Info.plist' 2>/dev/null || true
     for k in RDNA3Framebuffer RDNA3Accelerator RDNA3AcceleratorTahoe RDNA3AGDC; do
         h=$(sed -n '/<key>RDNA3SourceHash<\/key>/{n;s/.*<string>\([0-9a-fA-F]*\)<\/string>.*/\1/p;}' \
             "$t/kexts/$k.kext/Contents/Info.plist" 2>/dev/null | head -n1) || true
