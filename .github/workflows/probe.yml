@@ -67,6 +67,9 @@ jobs:
           show "run 10: useIOP users, strings, calls, reads" probe-out/56-useIOP-keys.txt 250
           show "run 10: CFSTR keys of the functions above (address, text)" probe-out/57-cfstr-resolved.txt 400
           show "run 10: IOP / vendor strings of CoreDisplay and SkyLight" probe-out/58-cstring-iop.txt 150
+          # the raw section format the CFSTR / block resolver parses (the artifact cannot be fetched from the session)
+          show "run 10: raw __cfstring dump (format check)" probe-out/CoreDisplay.cfstring 40
+          show "run 10: raw __const dump (format check)" probe-out/CoreDisplay.const 40
           # loud failure: a CoreDisplay disassembly this small is an error, not a result
           n=0; [ -f probe-out/CoreDisplay.dis ] && n=$(wc -l < probe-out/CoreDisplay.dis | tr -d ' ')
           if [ "$n" -lt 1000 ]; then
