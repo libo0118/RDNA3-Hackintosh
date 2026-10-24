@@ -1100,7 +1100,9 @@ cmd__queue() {
     local n a how retried= rerun= stamp
     while [ -s "$QUEUE" ]; do
         n=$(head -n1 "$QUEUE")
-        sed -i 1d "$QUEUE"
+        # .bak: BSD sed too (host tests on macOS); a step not dropped would run again forever
+        sed -i.bak 1d "$QUEUE" || die "queue: cannot drop step $n from $QUEUE"
+        rm -f "$QUEUE.bak"
         a=$(step_args "$n") || continue
         echo "== queue: step $n ($a), left: $(tr '\n' ' ' < "$QUEUE")"
         RDNA3VM_BOOTARGS="$a" bash "$SELF" _install || true
