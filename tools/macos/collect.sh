@@ -59,6 +59,9 @@ run 17-sysctl-agdc.txt sh -c "sysctl debug 2>/dev/null | grep rdna3agdc || echo 
 # DRIVER-PLAN N42: the core's vblank / pflip / HPD interrupts (tools/triage_reports.py "display irq"); the
 # framebuffers' side is RDNA3,FBStats virq_* in 12-ioreg-fb.txt
 run 18-sysctl-dispirq.txt sh -c "sysctl debug.rdna3_vblirq 2>/dev/null || echo '(no debug.rdna3_vblirq sysctl: a core older than DRIVER-PLAN N42)'; sysctl debug.rdna3_dispirq 2>/dev/null || echo '(no debug.rdna3_dispirq sysctl)'"
+# DRIVER-PLAN N44: CoreDisplay's IOPresentment switches now, and as this boot's WindowServer
+# started with them (kept by autoreport.sh; "boot <sec>" then the domain on one line)
+run 19-coredisplay-prefs.txt sh -c 'defaults read /Library/Preferences/com.apple.CoreDisplay; echo "== at the start of the boot (autoreport.sh):"; cat /var/db/rdna3-coredisplay-prefs-boot.txt'
 run 14-ioreg-displays.txt sh -c "ioreg -l -w0 -r -c IODisplayConnect | head -200"
 run 15-system-profiler.txt system_profiler SPDisplaysDataType
 # the logs of a whole card run: 45 s cut card run 54's plugin log off

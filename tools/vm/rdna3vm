@@ -755,7 +755,11 @@ cmd__install() {
     echo "== installing the new bundle in macOS without the card (headless, the screen stays with Linux, ~3 min)"
     # the model of the step this install is for (RDNA3VM_BOOTARGS), else the config's
     sm=$(smbios_want "${RDNA3VM_BOOTARGS:-}") || return 0
-    cmd__oc --boot-args "$BASE_ARGS rdna3vmauto=1 rdna3vminstall=1" --resolution "${WINDOW_RESOLUTION:-1440x900}" \
+    # DRIVER-PLAN N44: the install boot writes CoreDisplay's useIOP_onAMD for the card boot's
+    # WindowServer; the step's off switch (rdna3iopprefs=0) must reach it too
+    local iop=
+    case " ${RDNA3VM_BOOTARGS:-} " in *" rdna3iopprefs=0 "*) iop=" rdna3iopprefs=0" ;; esac
+    cmd__oc --boot-args "$BASE_ARGS rdna3vmauto=1 rdna3vminstall=1$iop" --resolution "${WINDOW_RESOLUTION:-1440x900}" \
         ${sm:+--smbios "$sm"} ||
         { echo "!! OpenCore not updated: the card step installs the bundle itself"; return 0; }
     msrs

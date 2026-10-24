@@ -2854,6 +2854,102 @@ def _fb_blocks(fbtxt):
     return out
 
 
+# DRIVER-PLAN N44: CoreDisplay's GetSystemGPUVendors logs, per IOFramebuffer, the vendor bit
+# _GetGPUVendorForFramebufferService gave it from the LEAF class name (IOObjectCopyClass):
+# "GetSystemGPUVendors_block_invoke: <entry id> <vendor> <class> IOService:/<path>". Vendor 1
+# (unknown) on any framebuffer keeps IOPresentment off for the whole WindowServer session.
+# FB_CLASS is RDNA3_FB_CLASS of fb/rdna3-fb.cpp (tests/test_fb_class.sh keeps them equal);
+# FB_CLASS_OLD is the class of every framebuffer before N44 (old reports still parse). The strings
+# CoreDisplay looks for (probe on 24H32, in this order): "Intel" 2, "AMD" 4, "AppleParavirt" 0x10, "NVDA" 8.
+FB_CLASS = "AMDRDNA3Framebuffer"
+FB_CLASS_OLD = "RDNA3Framebuffer"
+GPU_VENDOR_RE = re.compile(r"GetSystemGPUVendors_block_invoke: (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+|\d+) (\S+)")
+GPU_VENDOR_NAMES = {1: "unknown", 2: "Intel (IG)", 4: "AMD", 8: "NVIDIA (NVDA)", 0x10: "AppleParavirt"}
+
+
+def gpu_vendors(cd):
+    """{entry id: (vendor, class)} of the GetSystemGPUVendors lines of a CoreDisplay log (the last per id)"""
+    out = {}
+    for eid, v, cls in GPU_VENDOR_RE.findall(cd or ""):
+        out[eid.lower()] = (int(v, 0), cls)
+    return out
+
+
+CD_PREFS_SEEN_RE = re.compile(r"^== CoreDisplay prefs \(.*?\): this boot's WindowServer started with: (.*)$", re.M)
+CD_PREFS_DID_RE = re.compile(r"^== CoreDisplay prefs: (.*)$", re.M)
+
+
+def cd_pref(text, key):
+    """the value of key in a `defaults read` domain flattened to one line, or None"""
+    m = re.search(r'(?:^|[{;\s])"?%s"?\s*=\s*"?(\w+)"?\s*;' % re.escape(key), text or "")
+    return m.group(1) if m else None
+
+
+def cd_prefs_rows(txt, args="", prefs_member=""):
+    """[(level, label, text)], useIOP_onAMD: CoreDisplay's IOPresentment switches as this boot's
+    WindowServer started with them (autoreport.sh's tests-file lines, else 19-coredisplay-prefs.txt;
+    DRIVER-PLAN N44); useIOP_onAMD is "1"/"0"/None (not set: CoreDisplay's static 0)/False (unknown)"""
+    label = "CoreDisplay prefs"
+    seen = CD_PREFS_SEEN_RE.findall(txt or "")
+    did = CD_PREFS_DID_RE.findall(txt or "")
+    if not seen and prefs_member:
+        m = re.search(r"^== at the start of the boot.*\n(?:\$ .*\n)?boot \S+\n(.*)$", prefs_member, re.M)
+        if m:
+            seen = [m.group(1) or "(none)"]
+    if not seen:
+        return [("WARN", label, "no '== CoreDisplay prefs' line in the tests file and no 19-coredisplay-prefs.txt: "
+                 "useIOP / useIOP_onAMD of this boot are not known (autoreport.sh older than DRIVER-PLAN N44?)")], False
+    st = seen[-1].strip() or "(none)"
+    amd, iop = cd_pref(st, "useIOP_onAMD"), cd_pref(st, "useIOP")
+    off = re.search(r"(^|\s)rdna3iopprefs=0(\s|$)", args or "") is not None
+    text = "this boot's WindowServer started with useIOP_onAMD %s, useIOP %s (%s)" % (
+        amd if amd is not None else "unset (CoreDisplay's static 0)", iop if iop is not None else "unset (static 1)", st)
+    if amd != "1":
+        text += "; " + ("rdna3iopprefs=0: the A/B without them" if off else
+                        "the switch counts from the next boot (WindowServer started before autoreport wrote it)")
+    out = [("INFO", label, text)]
+    for d in did:
+        if "could NOT" in d:
+            out.append(("WARN", label, "autoreport.sh: " + d))
+    return out, amd
+
+
+def gpu_vendor_rows(cd, planes=False, iop_amd=False):
+    """[(level, label, text)]: the GPU vendor CoreDisplay gave each framebuffer (DRIVER-PLAN N44);
+    iop_amd: useIOP_onAMD as this boot's WindowServer started with it (cd_prefs_rows)"""
+    label = "GPU vendor"
+    # collect.sh wraps a log in "$ command" / "[exit N]": what is left is the log
+    if not [l for l in (cd or "").splitlines() if l.strip() and not l.startswith(("$ ", "[exit"))]:
+        return [("WARN", label, "24-log-coredisplay.txt is missing or empty: the framebuffers' GPU vendor "
+                 "(CoreDisplay's IOPresentment gate, DRIVER-PLAN N44) is not known")]
+    seen = gpu_vendors(cd)
+    if not seen:
+        return [("WARN", label, "no 'GetSystemGPUVendors_block_invoke' line in the CoreDisplay log: the framebuffers' "
+                 "GPU vendor (CoreDisplay's IOPresentment gate, DRIVER-PLAN N44) is not known")]
+    out = []
+    for eid, (v, cls) in sorted(seen.items()):
+        what = "framebuffer %s class %s: vendor %d (%s)" % (eid, cls, v, GPU_VENDOR_NAMES.get(v, "?"))
+        if v == 4:
+            out.append(("PASS", label, what + ": CoreDisplay counts it as AMD, IOPresentment allowed"))
+        elif v == 1 and cls == FB_CLASS_OLD:
+            out.append(("INFO", label, "IOPresentment off: framebuffer classed vendor 1 (unknown): %s, a framebuffer "
+                        "older than DRIVER-PLAN N44 (no AMD in its class name)" % what))
+        elif v == 1:
+            out.append(("FAIL", label, "IOPresentment off: framebuffer classed vendor 1 (unknown): %s; %s" % (
+                what, "CoreDisplay's AMD string is not in this class name: change RDNA3_FB_CLASS "
+                "(fb/rdna3-fb.cpp, fb/Info.plist) to what the probe names (DRIVER-PLAN N44)" if cls == FB_CLASS else
+                "not the class this checkout builds (%s): stale RDNA3Framebuffer.kext or Info.plist" % FB_CLASS)))
+        else:
+            out.append(("WARN", label, what + ": not AMD (DRIVER-PLAN N44)"))
+    if all(v == 4 for v, _ in seen.values()) and not planes:
+        out.append(("INFO", label, "every framebuffer is vendor 4 (AMD) but no planes arrive in IOPresentment "
+                    "transactions: %s (DRIVER-PLAN N44)" % (
+                        "useIOP_onAMD was 1 in /Library/Preferences at WindowServer's start: next lead the "
+                        "_windowserver user's com.apple.CoreDisplay domain" if iop_amd == "1" else
+                        "next lead CoreDisplay's useIOP_onAMD default (not 1 at WindowServer's start)")))
+    return out
+
+
 def present_mode_lines(path, txt="", args="", host=None):
     """[(level, label, text)]: how the run presents and what could decide it (see above).
     The report archive (12-ioreg-fb.txt, 20-log-rdna3.txt, 24-log-coredisplay.txt,
@@ -2899,6 +2995,11 @@ def present_mode_lines(path, txt="", args="", host=None):
         out.append(("WARN", "transactions", "debug.rdna3accel_iop_ok / iop_empty are not in the tests file (an accelerator run)"))
     else:
         out.append(("INFO", "transactions", "no accelerator counters (rdna3accel is off in this run)"))
+    # DRIVER-PLAN N44: the vendor CoreDisplay gave each framebuffer (its IOPresentment gate) and the
+    # useIOP / useIOP_onAMD preferences WindowServer started with
+    prefs_rows, iop_amd = cd_prefs_rows(txt, args, read_tar_member(path, "19-coredisplay-prefs.txt"))
+    out.extend(gpu_vendor_rows(cd, planes, iop_amd))
+    out.extend(prefs_rows)
     # IOGraphics' integrated flag and the two index properties, per framebuffer
     fbs = _fb_blocks(fbtxt)
     if not fbs:
@@ -3718,8 +3819,11 @@ def report(path, show_all):
             print("   PASS %-20s WindowServer composites on the Metal plugin, %d zero-copy flip(s) logged; "
                   "display-pipe transactions %s" % ("WindowServer on Metal", flips, ok or "0"))
         else:
-            print("   FAIL %-20s rdna3accel_iop_ok %s%s" % ("planes in transactions", ok if ok else "not in the report",
-                  "" if wsmetal else "; WindowServer has no Metal device (24-log-coredisplay.txt NVMTL lines)"))
+            unknown = sorted(set(cls for v, cls in gpu_vendors(cdlog).values() if v == 1))
+            print("   FAIL %-20s rdna3accel_iop_ok %s%s%s" % ("planes in transactions", ok if ok else "not in the report",
+                  "" if wsmetal else "; WindowServer has no Metal device (24-log-coredisplay.txt NVMTL lines)",
+                  "; CoreDisplay classed framebuffer(s) %s vendor 1 (unknown): IOPresentment is off for the session "
+                  "(DRIVER-PLAN N44)" % ",".join(unknown) if unknown else ""))
         # card run 2026-10-14: an AGDC answer CoreDisplay could not use made
         # WindowServer abort at every start (both screens black)
         # the WindowServer log is in the report archive (card run 45: the

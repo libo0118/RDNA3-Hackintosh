@@ -56,6 +56,21 @@
  * flip done (amdgpu's page-flip event); the OTG frame-counter poll stays as
  * the fallback when no interrupt came for 3 frames (counted, logged).
  * rdna3vblirq=0, a core without rdna3DisplayIrq or no MSI: the poll alone.
+ *
+ * DRIVER-PLAN N44: the class IOKit instantiates (Info.plist IOClass) is the
+ * leaf RDNA3_FB_CLASS below, a subclass of RDNA3Framebuffer that only
+ * renames it. CoreDisplay's _GetGPUVendorForFramebufferService (macOS
+ * 15.8.1, 0x7FF80412CC38; probe run 10) classifies every IOFramebuffer by
+ * IOObjectCopyClass, the leaf C++ class name, with case-insensitive
+ * substring checks in this order: "Intel" 2, "AMD" 4, "AppleParavirt"
+ * 0x10, "NVDA" 8, none = 1 (unknown);
+ * GetSystemGPUVendors drops the unknown bit and UseIOPresentment() is off
+ * for the session unless a known vendor is left. "RDNA3Framebuffer" was
+ * unknown, so WindowServer never sent IOPresentment transactions. The name
+ * must contain "AMD" and none of the other three strings; the service
+ * name stays "RDNA3Framebuffer" (setName in start), so ioreg paths, the
+ * IOKitPersonalities keys and serviceMatching("RDNA3Framebuffer") (a
+ * subclass matches) are unchanged.
  */
 
 #include <IOKit/graphics/IOGraphicsTypes.h>
@@ -83,6 +98,13 @@
 #include <mach/kmod.h>
 #include "../accel/rdna3k_abi.h"
 #include "../agdc/rdna3_agdc_k5.h"
+
+/* the leaf class name CoreDisplay sees (DRIVER-PLAN N44): change it here
+ * and in Info.plist's two IOClass strings together (fb/Makefile and
+ * tests/test_fb_class.sh check that they agree) */
+#define RDNA3_FB_CLASS AMDRDNA3Framebuffer
+#define RD3_FB_STR2(x) #x
+#define RD3_FB_STR(x) RD3_FB_STR2(x)
 
 extern "C" kern_return_t _start(kmod_info_t *ki, void *d);
 extern "C" kern_return_t _stop(kmod_info_t *ki, void *d);
@@ -452,6 +474,13 @@ public:
 };
 OSDefineMetaClassAndStructors(RDNA3Framebuffer, IOFramebuffer)
 
+/* what IOKit instantiates: only the class name differs (DRIVER-PLAN N44,
+ * see RDNA3_FB_CLASS above) */
+class RDNA3_FB_CLASS : public RDNA3Framebuffer {
+    OSDeclareDefaultStructors(RDNA3_FB_CLASS)
+};
+OSDefineMetaClassAndStructors(RDNA3_FB_CLASS, RDNA3Framebuffer)
+
 #define super IOFramebuffer
 
 static IOPMPowerState kFBPowerStates[2] = {
@@ -712,6 +741,16 @@ bool RDNA3Framebuffer::start(IOService *provider)
         FBLOG("head %u: no framebuffer notification tap: a system wake cannot do the family's wake work", fHead);
     FBLOG("started (head %u, VBL %s, %s cursor), build %s", fHead,
           fDcn ? "locked to the OTG frame counter" : "timer", fCurReady ? "hardware" : "software", FB_COMMIT);
+    /* DRIVER-PLAN N44: the leaf class CoreDisplay's GetSystemGPUVendors reads */
+    {
+        const char *cls = getMetaClass()->getClassName();
+        bool leaf = cls && !strcmp(cls, RD3_FB_STR(RDNA3_FB_CLASS));
+        FBLOG("head %u class %s, name %s: CoreDisplay classifies the framebuffer by this class name%s", fHead,
+              cls ? cls : "(none)", getName(),
+              leaf ? " (contains AMD: vendor 4 expected, IOPresentment allowed)"
+                   : " -- NOT " RD3_FB_STR(RDNA3_FB_CLASS) ": Info.plist IOClass is not the leaf class, "
+                     "CoreDisplay counts it as vendor 1 (unknown) and keeps IOPresentment off");
+    }
     /* DRIVER-PLAN N40: every switch with its default, for the A/B */
     FBLOG("head %u switches: dispflags %u (default 0), glorder %u (default 1), fbintegrated %u (default 0), "
           "cursorasync %u (default 1%s), fbwake %u (default 1), vblonce %u (default 1%s), fbdtmap %u (default 0), "

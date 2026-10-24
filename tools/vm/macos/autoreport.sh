@@ -346,6 +346,49 @@ plugin_trace_conf() {
         echo "== plugin trace ring: could NOT write $_cf"
 }
 
+# DRIVER-PLAN N44: CoreDisplay's IOPresentment switches, read by GetBoolCFPreference from
+# the com.apple.CoreDisplay domain (probe run on 24H32; CoreDisplay's static values:
+# useIOP 1, useIOP_onAMD 0). A framebuffer CoreDisplay classes as AMD (vendor 4) may use
+# IOPresentment only with useIOP_onAMD: written AnyUser/AnyHost on every boot of the VM
+# (the install boot included, so the card boot's WindowServer starts with them);
+# rdna3iopprefs=0 in the boot-args takes both keys out again (the A/B). WindowServer
+# reads them at its start, before this script: what this boot's WindowServer saw is
+# the state at the first call of the boot (kept in CD_PREFS_BOOT), a change here
+# takes effect from the next boot. Which user/host domain the lookup really uses is
+# not proven (DRIVER-PLAN N44 open item). A standalone run only reports them.
+CD_PREFS=${RDNA3_CD_PREFS:-/Library/Preferences/com.apple.CoreDisplay}
+CD_PREFS_BOOT=${RDNA3_CD_PREFS_BOOT:-/var/db/rdna3-coredisplay-prefs-boot.txt}
+cd_prefs_read() {   # the domain on one line, empty when it does not exist
+    defaults read "$CD_PREFS" 2>/dev/null | tr -s ' \n\t' '   ' | sed 's/^ //; s/ $//'
+}
+coredisplay_iop_prefs() {
+    _bt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ *sec = \([0-9]*\).*/\1/p')
+    if [ "$(head -n 1 "$CD_PREFS_BOOT" 2>/dev/null)" != "boot ${_bt:-?}" ]; then
+        { echo "boot ${_bt:-?}"; cd_prefs_read; } > "$CD_PREFS_BOOT" 2>/dev/null ||
+            echo "== CoreDisplay prefs: could NOT keep this boot's state in $CD_PREFS_BOOT"
+    fi
+    _seen=$(sed -n '2p' "$CD_PREFS_BOOT" 2>/dev/null)
+    echo "== CoreDisplay prefs ($CD_PREFS, DRIVER-PLAN N44): this boot's WindowServer started with: ${_seen:-(none)}"
+    if [ -n "${STANDALONE:-}" ]; then
+        _what="left as they are (standalone run)"
+    elif sysctl -n kern.bootargs 2>/dev/null | tr ' ' '\n' | grep -qx 'rdna3iopprefs=0'; then
+        defaults delete "$CD_PREFS" useIOP >/dev/null 2>&1
+        defaults delete "$CD_PREFS" useIOP_onAMD >/dev/null 2>&1
+        if [ -z "$(defaults read "$CD_PREFS" useIOP_onAMD 2>/dev/null)" ]; then
+            _what="rdna3iopprefs=0: useIOP / useIOP_onAMD taken out"
+        else _what="rdna3iopprefs=0: useIOP_onAMD could NOT be taken out"; fi
+    else
+        defaults write "$CD_PREFS" useIOP -bool true >/dev/null 2>&1
+        defaults write "$CD_PREFS" useIOP_onAMD -bool true >/dev/null 2>&1
+        if [ "$(defaults read "$CD_PREFS" useIOP_onAMD 2>/dev/null)" = 1 ] &&
+           [ "$(defaults read "$CD_PREFS" useIOP 2>/dev/null)" = 1 ]; then
+            _what="useIOP / useIOP_onAMD true (rdna3iopprefs=0 takes them out)"
+        else _what="useIOP / useIOP_onAMD could NOT be written"; fi
+    fi
+    _now=$(cd_prefs_read)
+    echo "== CoreDisplay prefs: $_what; now: ${_now:-(none)}$([ "$_now" = "$_seen" ] || echo '; WindowServer takes the change at its next start (the next boot)')"
+}
+
 # card run 2026-10-17b: one run decides between the swap models. 60 s with
 # debug.rdna3accel_swap_mode=1 (the copy), 60 s with 0 (the flip), back to
 # what it was. Opt-in since card run 2026-10-17d: only with the boot-arg
@@ -1014,6 +1057,9 @@ if [ "${1:-}" != --updated ] && [ -z "$STANDALONE" ] && [ -z "$BISECT_HAND" ]; t
     # the plugin's trace ring knob on every boot of the VM (the install boot
 # included: the card boot's WindowServer then starts with the big ring)
 [ -z "$STANDALONE" ] && plugin_trace_conf
+# DRIVER-PLAN N44: on every boot, the install boot included (its output is not kept: the
+# tests file of the card boot prints the state again)
+[ -z "$STANDALONE" ] && coredisplay_iop_prefs >/dev/null 2>&1
 if [ -n "$INSTALL_ONLY" ]; then
         w=0
         until curl -sf --max-time 5 -o /dev/null "$HOST/rdna3-bundle.sha256" || [ $w -ge 120 ]; do
@@ -1500,6 +1546,8 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     fix_tracedir
     prune_old_traces
     plugin_trace_conf
+    # DRIVER-PLAN N44: CoreDisplay's useIOP / useIOP_onAMD, this boot's and from the next boot on
+    coredisplay_iop_prefs
     # the kernel's frame trace for the whole run (card run 2026-10-17b)
     trace_pump_start
     # why the Auxiliary KC keeps an old RDNA3Framebuffer (first card runs:

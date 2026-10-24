@@ -186,6 +186,8 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	python3 -I -B tests/test_trace_parity.py
 	python3 -I -B tests/test_triage_park.py
 	python3 -I -B tests/test_triage_n43.py
+	python3 -I -B tests/test_fb_class.py
+	tests/test_coredisplay_prefs.sh
 	tests/test_membw_load.sh
 	python3 -I -B tests/test_accel_slots.py
 	python3 -I -B tests/test_accel_locks.py
