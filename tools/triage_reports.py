@@ -2922,11 +2922,33 @@ def iop_prefs_off(args):
     return re.search(r"(^|\s)rdna3iopprefs=0(\s|$)", args or "") is not None
 
 
+# autoreport.sh's state of the two stores on one line: "AnyHost: <domain>; ByHost(<uuid>): <domain>"
+# ("unknown" for the uuid and "(unknown)" for the domain when ioreg gave no IOPlatformUUID). An older
+# autoreport.sh printed the AnyHost domain alone.
+CD_PREFS_STORES_RE = re.compile(r"^AnyHost: (.*?); ByHost\(([^)]*)\): (.*)$")
+
+
+def cd_prefs_stores(st):
+    """(AnyHost domain, uuid, ByHost domain) of a state line; (st, None, None) for the older single-store line"""
+    m = CD_PREFS_STORES_RE.match(st)
+    return (m.group(1), m.group(2), m.group(3)) if m else (st, None, None)
+
+
+def _cd_switches(domain):
+    """(useIOP_onAMD, useIOP) of one flattened `defaults read` domain, "1"/"0"/raw/None (not set)"""
+    return tuple(CD_PREF_BOOL.get((cd_pref(domain, k) or "").lower(), cd_pref(domain, k))
+                 for k in ("useIOP_onAMD", "useIOP"))
+
+
 def cd_prefs_rows(txt, args="", prefs_member=""):
     """[(level, label, text)], useIOP_onAMD: CoreDisplay's IOPresentment switches as this boot's
     WindowServer started with them (autoreport.sh's tests-file lines, else 19-coredisplay-prefs.txt;
     DRIVER-PLAN N44); useIOP_onAMD is "1"/"0"/None (not set: CoreDisplay's static 0)/False (unknown:
-    no line, the boot's start state could not be kept, or the boot time was unknown)"""
+    no line, the boot's start state could not be kept, or the boot time was unknown). Two stores are
+    reported separately: AnyHost (/Library/Preferences/com.apple.CoreDisplay.plist) and ByHost
+    (/Library/Preferences/ByHost/com.apple.CoreDisplay.<IOPlatformUUID>.plist, the store
+    CFPreferencesCopyValue(AnyUser, CurrentHost) reads: found for CoreDisplay on macOS 26 by
+    Navi48-MacOS, Almosst-DEV, MIT; unproven on macOS 15). useIOP_onAMD is "1" when either holds it."""
     label = "CoreDisplay prefs"
     seen = CD_PREFS_SEEN_RE.findall(txt or "")
     did = CD_PREFS_DID_RE.findall(txt or "")
@@ -2946,15 +2968,33 @@ def cd_prefs_rows(txt, args="", prefs_member=""):
     if st == "(unknown)" or stale:
         out.append(("WARN", label, "what this boot's WindowServer started with is NOT known (%s): the boot's start state "
                     "could not be kept or told from an earlier boot's; useIOP_onAMD at WindowServer's start is unknown" % st))
-    amd, iop = (CD_PREF_BOOL.get((cd_pref(st, k) or "").lower(), cd_pref(st, k)) for k in ("useIOP_onAMD", "useIOP"))
+    st_any, uuid, st_bh = cd_prefs_stores(st)
+    amd_any, iop_any = _cd_switches(st_any)
+    bh_known = st_bh is not None and st_bh != "(unknown)"
+    amd_bh, iop_bh = _cd_switches(st_bh) if bh_known else (None, None)
+    amd = "1" if "1" in (amd_any, amd_bh) else ("0" if "0" in (amd_any, amd_bh) else None)
     off = iop_prefs_off(args)
     if not out:
-        text = "this boot's WindowServer started with useIOP_onAMD %s, useIOP %s (%s)" % (
-            amd if amd is not None else "unset (CoreDisplay's static 0)", iop if iop is not None else "unset (static 1)", st)
+        def unset(v, static):
+            return v if v is not None else "unset (%s)" % static
+        if st_bh is None:
+            # the older autoreport.sh line (the AnyHost domain alone): the text of that time
+            what = "useIOP_onAMD %s, useIOP %s (%s)" % (
+                unset(amd_any, "CoreDisplay's static 0"), unset(iop_any, "static 1"), st)
+        else:
+            what = "AnyHost: useIOP_onAMD %s, useIOP %s; ByHost(%s): %s (%s)" % (
+                unset(amd_any, "CoreDisplay's static 0"), unset(iop_any, "static 1"), uuid,
+                "useIOP_onAMD %s, useIOP %s" % (unset(amd_bh, "static 0"), unset(iop_bh, "static 1")) if bh_known else
+                "not known (ioreg gave no IOPlatformUUID)", st)
+        text = "this boot's WindowServer started with " + what
         if amd != "1":
             text += "; " + ("rdna3iopprefs=0: the A/B without them" if off else
                             "the switch counts from the next boot (WindowServer started before autoreport wrote it)")
         out.append(("INFO", label, text))
+        if amd_any == "1" and bh_known and amd_bh != "1":
+            out.append(("WARN", label, "useIOP_onAMD is in the AnyHost store only, not in ByHost(%s): CoreDisplay may read "
+                        "the ByHost store (CFPreferencesCopyValue AnyUser + CurrentHost: Navi48-MacOS evidence on macOS 26, "
+                        "unproven on 15), so this boot's IOPresentment switch may have been off (%s)" % (uuid, st)))
         if off and amd == "1":
             # the keys of an earlier boot were still there: rdna3vm's install step returns early when the bundle is
             # current, so rdna3iopprefs=0 reached no install boot; autoreport.sh takes them out only after
@@ -2966,6 +3006,56 @@ def cd_prefs_rows(txt, args="", prefs_member=""):
         if "could NOT" in d:
             out.append(("WARN", label, "autoreport.sh: " + d))
     return out, (False if (st == "(unknown)" or stale) else amd)
+
+
+# CoreDisplay's / IOPresentment's own words on the display-pipe capabilities (display_pipe_guard.h and
+# tools/pc/agdc-probe.c of Navi48-MacOS, Almosst-DEV, MIT: macOS 26; the strings are CoreDisplay's, not the
+# driver's, and are expected to be the same on 15): each failure ends the IOPresentment path before Submit
+IOP_LOG_FAILS = (
+    ("Invalid end point size", "the capabilities' end point (HorizontalActive / VerticalActive, from AGDC "
+     "getLinkConfig) is zero: every IOPTransaction dies before Submit"),
+    ("capabilities with no devices", "the capabilities' DeviceArray is empty (AGDC answered 0 devices): "
+     "LoadCapabilities returns FALSE"),
+    ("device with no planes", "the device's PlaneArray is empty (AGDC answered 0 planes): LoadCapabilities returns FALSE"),
+    ("Failed to get capabilities", "IOPresentment capabilities could not be read from the AGDC: LoadCapabilities returns FALSE"),
+)
+IOP_LOG_OK = "AGDC IB successful"
+IOP_LOG_QUEUE = "QueueDepth"
+
+
+def iop_log_rows(cd):
+    """[(level, label, text)]: what CoreDisplay / IOPresentment logged about the display pipe's capabilities in
+    the WindowServer log (24-log-coredisplay.txt, DRIVER-PLAN N44): FAIL per failure string, PASS for 'AGDC IB
+    successful' (the inline buffer was built), INFO whether 'QueueDepth' appears (a key present only when the
+    capabilities came from the display-pipe class, not the base IOPresentmentCapabilities)"""
+    label = "IOPresentment log"
+    # collect.sh wraps a log in "$ command" / "[exit N]": what is left is the log
+    lines = [l for l in (cd or "").splitlines() if l.strip() and not l.startswith(("$ ", "[exit"))]
+    if not lines:
+        return [("WARN", label, "24-log-coredisplay.txt is missing or empty: whether IOPresentment accepted the display "
+                 "pipe's capabilities is not known (DRIVER-PLAN N44)")]
+    out = []
+    ok = sum(1 for l in lines if IOP_LOG_OK in l)
+    qd = sum(1 for l in lines if IOP_LOG_QUEUE in l)
+    failed = False
+    for needle, meaning in IOP_LOG_FAILS:
+        hits = [l for l in lines if needle in l]
+        if hits:
+            failed = True
+            # a failure and later a success: the first attempt failed, the capabilities were read in the end (WARN)
+            out.append(("WARN" if ok else "FAIL", label, "'%s' %d time(s) in the CoreDisplay log%s: %s (first: %s)" % (
+                needle, len(hits), " (and '%s' too)" % IOP_LOG_OK if ok else "", meaning, hits[0].strip()[:200])))
+    if ok:
+        out.append(("PASS", label, "'%s' %d time(s): IOPresentment built the inline buffer from the AGDC's answer" % (IOP_LOG_OK, ok)))
+    elif not failed:
+        out.append(("INFO", label, "no '%s' and no capabilities failure in the %d-line CoreDisplay log: IOPresentment "
+                    "did not get as far as the capabilities (or does not log it)" % (IOP_LOG_OK, len(lines))))
+    out.append(("INFO", label, "'%s' %s in the CoreDisplay log%s" % (
+        IOP_LOG_QUEUE, "appears %d time(s)" % qd if qd else "does not appear",
+        ": the capabilities came from the display-pipe class" if qd else
+        " (the key exists only when the capabilities came from the display-pipe class; the base class leaves it out, "
+        "or the log does not show it)")))
+    return out
 
 
 def gpu_vendor_rows(cd, planes=False, iop_amd=False, prefs_off=False, klog=""):
@@ -3073,6 +3163,7 @@ def present_mode_lines(path, txt="", args="", host=None):
     prefs_rows, iop_amd = cd_prefs_rows(txt, args, read_tar_member(path, "19-coredisplay-prefs.txt"))
     out.extend(gpu_vendor_rows(cd, planes if ok else None, iop_amd, iop_prefs_off(args), klog))
     out.extend(prefs_rows)
+    out.extend(iop_log_rows(cd))
     # IOGraphics' integrated flag and the two index properties, per framebuffer
     fbs = _fb_blocks(fbtxt)
     if not fbs:

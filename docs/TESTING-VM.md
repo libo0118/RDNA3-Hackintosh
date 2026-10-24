@@ -466,10 +466,13 @@ run it; it breaks the picture for a minute on purpose (mode 1).
 
 CoreDisplay's IOPresentment switches (DRIVER-PLAN N44): every boot of the VM
 (the install boot included) writes `useIOP` and `useIOP_onAMD` = true into
-`/Library/Preferences/com.apple.CoreDisplay`; WindowServer reads them when it
+`/Library/Preferences/com.apple.CoreDisplay` (AnyHost) and into the ByHost store
+`/Library/Preferences/ByHost/com.apple.CoreDisplay.<IOPlatformUUID>` (the one
+Navi48-MacOS found CoreDisplay reading on macOS 26; each store is reported on
+its own); WindowServer reads them when it
 starts, so a change counts from the next boot. For the A/B without them add
 `rdna3iopprefs=0` (`rdna3vm args "<the step's args> rdna3iopprefs=0"`): that
-boot takes both keys out, and the boot after it starts without them. The
+boot takes both keys out of both stores, and the boot after it starts without them. The
 tests file says what this boot's WindowServer started with (`== CoreDisplay
 prefs ...`), triage prints it as `present mode, CoreDisplay prefs`.
 
