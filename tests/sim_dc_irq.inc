@@ -202,6 +202,8 @@ static void test_dc_irq(rdna3_dev *dev, rdna3_ih *ih)
     }
     memset(&s, 0, sizeof(s));
     s.d = dev;
+    /* the model's counters from a run before (with real firmware the bring-up block runs again) */
+    memset(&SQ, 0, sizeof(SQ));
     ih60_process(dev, ih, NULL, NULL);
 
     /* the decode: to_dal_irq_source_dcn32 on client DCE only */
