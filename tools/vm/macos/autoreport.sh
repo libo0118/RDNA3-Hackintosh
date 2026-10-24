@@ -307,7 +307,7 @@ PLUGIN_TRACE_RING=262144
 # traces of earlier boots at the start of each run; a standalone run takes
 # the knob out again once its report is collected (the VM keeps it).
 prune_old_traces() {
-    _td=/var/tmp/rdna3-nvmtl
+    _td=${RDNA3_TRACE_DIR:-/var/tmp/rdna3-nvmtl}   # the variable only for tests/test_prune_traces.sh
     [ -d "$_td" ] && [ ! -L "$_td" ] || return 0
     case "$(stat -f %u "$_td" 2>/dev/null)" in 0|88) ;; *) echo "== plugin traces: $_td is not root's or _windowserver's: not pruned"; return 0 ;; esac
     _bt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ *sec = \([0-9]*\).*/\1/p')
@@ -363,20 +363,31 @@ cd_prefs_read() {   # the domain on one line, empty when it does not exist
 }
 coredisplay_iop_prefs() {
     _bt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ *sec = \([0-9]*\).*/\1/p')
-    if [ "$(head -n 1 "$CD_PREFS_BOOT" 2>/dev/null)" != "boot ${_bt:-?}" ]; then
-        { echo "boot ${_bt:-?}"; cd_prefs_read; } > "$CD_PREFS_BOOT" 2>/dev/null ||
-            echo "== CoreDisplay prefs: could NOT keep this boot's state in $CD_PREFS_BOOT"
+    _rec=ok
+    if [ -z "$_bt" ]; then
+        # no boot time to tell this boot's record from an earlier boot's: rewrite it every call, and say so
+        # (the state kept may already be the one after this script's own change)
+        { echo "boot ?"; cd_prefs_read; } > "$CD_PREFS_BOOT" 2>/dev/null || _rec=lost
+        echo "== CoreDisplay prefs: boot time unknown: could NOT tell this boot's start state, it may be stale"
+    elif [ "$(head -n 1 "$CD_PREFS_BOOT" 2>/dev/null)" != "boot $_bt" ]; then
+        { echo "boot $_bt"; cd_prefs_read; } > "$CD_PREFS_BOOT" 2>/dev/null || _rec=lost
     fi
-    _seen=$(sed -n '2p' "$CD_PREFS_BOOT" 2>/dev/null)
+    if [ "$_rec" = lost ]; then
+        echo "== CoreDisplay prefs: could NOT keep this boot's state in $CD_PREFS_BOOT"
+        _seen="(unknown)"
+    else
+        _seen=$(sed -n '2p' "$CD_PREFS_BOOT" 2>/dev/null)
+    fi
     echo "== CoreDisplay prefs ($CD_PREFS, DRIVER-PLAN N44): this boot's WindowServer started with: ${_seen:-(none)}"
     if [ -n "${STANDALONE:-}" ]; then
         _what="left as they are (standalone run)"
     elif sysctl -n kern.bootargs 2>/dev/null | tr ' ' '\n' | grep -qx 'rdna3iopprefs=0'; then
         defaults delete "$CD_PREFS" useIOP >/dev/null 2>&1
         defaults delete "$CD_PREFS" useIOP_onAMD >/dev/null 2>&1
-        if [ -z "$(defaults read "$CD_PREFS" useIOP_onAMD 2>/dev/null)" ]; then
+        if [ -z "$(defaults read "$CD_PREFS" useIOP_onAMD 2>/dev/null)" ] &&
+           [ -z "$(defaults read "$CD_PREFS" useIOP 2>/dev/null)" ]; then
             _what="rdna3iopprefs=0: useIOP / useIOP_onAMD taken out"
-        else _what="rdna3iopprefs=0: useIOP_onAMD could NOT be taken out"; fi
+        else _what="rdna3iopprefs=0: useIOP / useIOP_onAMD could NOT be taken out"; fi
     else
         defaults write "$CD_PREFS" useIOP -bool true >/dev/null 2>&1
         defaults write "$CD_PREFS" useIOP_onAMD -bool true >/dev/null 2>&1

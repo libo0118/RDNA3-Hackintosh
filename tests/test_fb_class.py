@@ -9,7 +9,11 @@ WindowServer may use IOPresentment.
  (3) triage: gpu_vendor_rows on CoreDisplay lines of an old report (vendor 1, class
      RDNA3Framebuffer: INFO "IOPresentment off ..."), of the new class (vendor 4: PASS, and the
      useIOP_onAMD lead without planes), the new class still vendor 1 (FAIL: rename), another
-     class (FAIL: stale kext), another vendor (WARN), no line / no log (WARN, never silence);
+     class (FAIL: another driver's framebuffer), another vendor (WARN), a combined mask (WARN naming
+     useIOP_onIG), no line / no log (WARN, never silence); the lead without planes by what is known
+     (useIOP_onAMD 1 / not 1 / unknown / rdna3iopprefs=0 with the keys still there, no counters);
+     the kext's own "-- NOT AMDRDNA3Framebuffer" line (FAIL fb class); gpu_vendors() forms;
+     cd_pref / cd_prefs_rows edge cases;
  (4) the ioreg parsers (_fb_blocks, fb_n40_lines) read a block printed with the new class
      exactly as one with the old class, and present_mode_lines carries the vendor row.
 Run: python3 -I -B tests/test_fb_class.py"""
@@ -105,7 +109,8 @@ check([x[0] for x in r] == ["FAIL", "FAIL"], "new class still vendor 1: FAIL, go
 check(all("IOPresentment off: framebuffer classed vendor 1 (unknown)" in x[2] and "change RDNA3_FB_CLASS" in x[2]
           for x in r), "rename hint: %r" % r)
 r = rows_of(tr.gpu_vendor_rows(cd(1, "SomethingElse")))
-check([x[0] for x in r] == ["FAIL", "FAIL"] and "stale" in r[0][2], "another class: stale FAIL, got %r" % r)
+check([x[0] for x in r] == ["FAIL", "FAIL"] and "another driver's framebuffer" in r[0][2] and "stale" not in r[0][2],
+      "another class: FAIL naming another driver (not a stale kext), got %r" % r)
 r = rows_of(tr.gpu_vendor_rows(cd(8, cls, twice=False)))
 check([x[0] for x in r] == ["WARN", "WARN"] and "NVIDIA" in r[0][2], "vendor 8: WARN, got %r" % r)
 mixed = LINE % ("0x1000002f2", 4, cls, H0) + LINE % ("0x1000002d1", 1, "RDNA3Framebuffer", H1)
@@ -159,6 +164,127 @@ with tempfile.TemporaryDirectory() as d:
         fbr = [r for r in tr.present_mode_lines(p, "", "rdna3fb=1", host="") if r[1] == "fb index"]
         check(fbr and "they agree" in fbr[0][2], "present_mode_lines %s: fb index %r" % (klass, fbr))
     check(sw[cls] == sw["RDNA3Framebuffer"] and len(sw[cls]) == 2, "fb_n40_lines switches differ: %r" % sw)
+
+# ---- (5) more of gpu_vendor_rows ----
+def lead(rows):
+    return [x for x in rows_of(rows) if x[0] == "INFO"]
+
+
+r = lead(tr.gpu_vendor_rows(new, planes=False, iop_amd="1"))
+check(len(r) == 1 and "was 1 in /Library/Preferences" in r[0][2] and "_windowserver" in r[0][2], "lead, onAMD 1: %r" % r)
+r = lead(tr.gpu_vendor_rows(new, planes=False, iop_amd="1", prefs_off=True))
+check(len(r) == 1 and "rdna3iopprefs=0 is set" in r[0][2] and "not the A/B without them" in r[0][2]
+      and "_windowserver" not in r[0][2], "lead, onAMD 1 although rdna3iopprefs=0 (not the with case): %r" % r)
+for v in (None, "0"):
+    r = lead(tr.gpu_vendor_rows(new, planes=False, iop_amd=v))
+    check(len(r) == 1 and "not 1 at WindowServer's start" in r[0][2], "lead, onAMD %r: %r" % (v, r))
+r = lead(tr.gpu_vendor_rows(new, planes=False, iop_amd=False))
+check(len(r) == 1 and "useIOP_onAMD at WindowServer's start is unknown" in r[0][2] and "not 1" not in r[0][2],
+      "lead, prefs unknown: %r" % r)
+r = lead(tr.gpu_vendor_rows(new, planes=None, iop_amd="1"))
+check(len(r) == 1 and "counters" in r[0][2] and "no planes arrive" not in r[0][2], "lead, no counters at all: %r" % r)
+check(lead(tr.gpu_vendor_rows(new, planes=True, iop_amd="1")) == [], "planes arrive: no lead")
+
+# a combined mask: allowed only with useIOP_onIG too, said instead of the generic "not AMD"
+r = rows_of(tr.gpu_vendor_rows(cd(6, cls, twice=False)))
+check([x[0] for x in r] == ["WARN", "WARN"] and all("useIOP_onIG" in x[2] and "Intel (IG) + AMD" in x[2]
+      and ": not AMD (" not in x[2] for x in r), "vendor 0x6: %r" % r)
+r = rows_of(tr.gpu_vendor_rows(cd(0x14, cls, twice=False)))
+check(all("useIOP_onIG" not in x[2] and "combined mask" in x[2] for x in r), "vendor 0x14: %r" % r)
+r = rows_of(tr.gpu_vendor_rows(cd(2, cls, twice=False)))
+check(all("not AMD" in x[2] and "Intel (IG)" in x[2] for x in r), "vendor 2: %r" % r)
+
+# gpu_vendors(): hex, decimal, zero-padded decimal, a combined mask, the last line wins, the id is case folded
+def one(v, eid="0x1000002D1"):
+    return tr.gpu_vendors(LINE % (eid, v, "X", H0))
+
+
+check(one("0x4") == {"0x1000002d1": (4, "X")}, "gpu_vendors 0x4: %r" % one("0x4"))
+check(one("4") == {"0x1000002d1": (4, "X")}, "gpu_vendors 4")
+check(one("04") == {"0x1000002d1": (4, "X")}, "gpu_vendors 04 (int(v, 0) crashed on it)")
+check(one("0x6")["0x1000002d1"][0] == 6 and one("06")["0x1000002d1"][0] == 6, "gpu_vendors 0x6 / 06")
+check(one("0X4") == {}, "gpu_vendors: 0X4 is not a form CoreDisplay logs: %r" % one("0X4"))
+last = LINE % ("0x1000002d1", 1, "A", H0) + LINE % ("0x1000002d1", 4, "B", H0)
+check(tr.gpu_vendors(last) == {"0x1000002d1": (4, "B")}, "gpu_vendors: the last line wins: %r" % tr.gpu_vendors(last))
+check(tr.gpu_vendors("") == {} and tr.gpu_vendors(None) == {}, "gpu_vendors of nothing")
+
+# the kext's own class line (fb/rdna3-fb.cpp start()): good, and "-- NOT AMDRDNA3Framebuffer"
+KOK = ("RDNA3-fb: head 0 class AMDRDNA3Framebuffer, name RDNA3Framebuffer: CoreDisplay classifies the framebuffer by "
+       "this class name (contains AMD: vendor 4 expected, IOPresentment allowed)\n")
+KBAD = ("RDNA3-fb: head 1 class RDNA3Framebuffer, name RDNA3Framebuffer: CoreDisplay classifies the framebuffer by "
+        "this class name -- NOT AMDRDNA3Framebuffer: Info.plist IOClass is not the leaf class, CoreDisplay counts it "
+        "as vendor 1 (unknown) and keeps IOPresentment off\n")
+check(tr.fb_class_rows(KOK) == [] and tr.fb_class_rows("") == [] and tr.fb_class_rows(None) == [], "kext class line OK: no row")
+r = tr.fb_class_rows("noise\n" + KOK + KBAD)
+check(len(r) == 1 and r[0][0] == "FAIL" and r[0][1] == "fb class" and "head 1" in r[0][2] and "RDNA3Framebuffer" in r[0][2]
+      and "AMDRDNA3Framebuffer" in r[0][2] and "Info.plist" in r[0][2], "kext NOT line: FAIL: %r" % r)
+r = tr.gpu_vendor_rows(new, planes=True, klog=KBAD)
+check([x[:2] for x in r][:1] == [("FAIL", "fb class")] and len(rows_of(r)) == 2, "klog reaches gpu_vendor_rows: %r" % r)
+r = tr.gpu_vendor_rows("", klog=KBAD)
+check([x[0] for x in r] == ["FAIL", "WARN"], "kext FAIL also without a CoreDisplay log: %r" % r)
+
+# cd_pref: a key is not found inside a longer key; values 0 / true / "1"
+check(tr.cd_pref('{ useIOP = 1; "useIOP_onAMD" = 0; }', "useIOP") == "1", "cd_pref useIOP")
+check(tr.cd_pref('{ "useIOP_onAMD" = 0; }', "useIOP") is None, "cd_pref: useIOP must not match inside useIOP_onAMD")
+check(tr.cd_pref('{ useIOP = 1; "useIOP_onAMD" = 0; }', "useIOP_onAMD") == "0", "cd_pref onAMD 0")
+check(tr.cd_pref('{ useIOP_onAMD = true; }', "useIOP_onAMD") == "true", "cd_pref true")
+check(tr.cd_pref('{ "useIOP_onAMD" = "1"; }', "useIOP_onAMD") == "1", "cd_pref quoted 1")
+check(tr.cd_pref("", "useIOP") is None and tr.cd_pref(None, "useIOP") is None, "cd_pref of nothing")
+
+
+def prefs(seen, args="", did=(), member=""):
+    txt = ""
+    if seen is not None:
+        txt = ("== CoreDisplay prefs (/Library/Preferences/com.apple.CoreDisplay, DRIVER-PLAN N44): this boot's "
+               "WindowServer started with: %s\n" % seen)
+        txt += "".join("== CoreDisplay prefs: %s\n" % d for d in did)
+    return tr.cd_prefs_rows(txt, args, member)
+
+
+r, amd = prefs('{ useIOP = 1; "useIOP_onAMD" = 1; }')
+check(amd == "1" and [x[0] for x in r] == ["INFO"] and "useIOP_onAMD 1, useIOP 1" in r[0][2], "prefs 1/1: %r %r" % (r, amd))
+r, amd = prefs('{ "useIOP_onAMD" = true; }')
+check(amd == "1", "prefs: true is 1: %r" % amd)
+r, amd = prefs('{ "useIOP_onAMD" = 0; }')
+check(amd == "0" and "the switch counts from the next boot" in r[0][2], "prefs onAMD 0: %r %r" % (r, amd))
+r, amd = prefs("(none)", args="rdna3fb=1 rdna3iopprefs=0")
+check(amd is None and [x[0] for x in r] == ["INFO"] and r[0][2].endswith("rdna3iopprefs=0: the A/B without them"), "prefs A/B: %r" % r)
+# rdna3iopprefs=0 with the keys of an earlier boot still there: WARN, not the A/B
+r, amd = prefs('{ useIOP = 1; "useIOP_onAMD" = 1; }', args="rdna3fb=1 rdna3iopprefs=0")
+check(amd == "1" and [x[0] for x in r] == ["INFO", "WARN"] and "A/B without them" not in r[0][2]
+      and "rdna3iopprefs=0 but WindowServer started with useIOP_onAMD 1" in r[1][2]
+      and "this run is NOT the A/B without them" in r[1][2], "prefs =0 with keys: %r %r" % (r, amd))
+for a in ("rdna3iopprefs=01", "rdna3iopprefs=1", "xrdna3iopprefs=0", "rdna3iopprefs=0x"):
+    r, amd = prefs('{ "useIOP_onAMD" = 1; }', args=a)
+    check([x[0] for x in r] == ["INFO"], "prefs: %r is not the off switch: %r" % (a, r))
+# unknown start state: the unwritable record, the unknown boot time; useIOP_onAMD unknown (False)
+r, amd = prefs("(unknown)", did=["could NOT keep this boot's state in /var/db/x"])
+check(amd is False and [x[0] for x in r] == ["WARN", "WARN"] and "NOT known" in r[0][2]
+      and "unknown" in r[0][2] and "could NOT keep" in r[1][2], "prefs unknown record: %r %r" % (r, amd))
+r, amd = prefs('{ "useIOP_onAMD" = 1; }', did=["boot time unknown: could NOT tell this boot's start state, it may be stale"])
+check(amd is False and r[0][0] == "WARN" and "could NOT tell" in r[-1][2], "prefs unknown boot time: %r %r" % (r, amd))
+# 19-coredisplay-prefs.txt: an empty domain leaves no second line, "[exit 0]" is not the domain
+M19 = "$ sh -c x\nDomain does not exist\n== at the start of the boot (autoreport.sh):\nboot 100\n%s[exit 0]\n"
+for body, want in (("", "(none)"), ("\n", "(none)"), ('{ "useIOP_onAMD" = 1; }\n', '{ "useIOP_onAMD" = 1; }')):
+    r, amd = prefs(None, member=M19 % body)
+    check(len(r) == 1 and ("(%s)" % want) in r[0][2] and "[exit" not in r[0][2], "19- fallback %r: %r" % (body, r))
+    check(amd == ("1" if "AMD" in want else None), "19- fallback amd %r: %r" % (body, amd))
+r, amd = prefs(None, member=M19.replace("boot 100", "boot ?") % "\n")
+check(amd is False and r[0][0] == "WARN", "19- fallback with an unknown boot: %r %r" % (r, amd))
+r, amd = prefs(None)
+check(amd is False and r[0][0] == "WARN" and "are not known" in r[0][2], "no prefs at all: %r" % r)
+
+# present_mode_lines: no accelerator counters -> no "no planes arrive" lead; counters 0 -> the lead
+with tempfile.TemporaryDirectory() as d:
+    p = archive(d, "rdna3-report-x.tar.gz", {"12-ioreg-fb.txt": ioreg(cls), "24-log-coredisplay.txt": new,
+                                              "20-log-rdna3.txt": KBAD})
+    pm = tr.present_mode_lines(p, "", "rdna3fb=1", host="")
+    lt = [x for x in rows_of(pm) if x[0] == "INFO"]
+    check(len(lt) == 1 and "counters" in lt[0][2] and "no planes arrive" not in lt[0][2], "present: no counters: %r" % lt)
+    check([x[0] for x in rows_of(pm, "fb class")] == ["FAIL"], "present: the kext's NOT line: %r" % rows_of(pm, "fb class"))
+    pm = tr.present_mode_lines(p, "debug.rdna3accel_iop_ok: 0\ndebug.rdna3accel_iop_empty: 5\n", "rdna3fb=1", host="")
+    lt = [x for x in rows_of(pm) if x[0] == "INFO"]
+    check(len(lt) == 1 and "no planes arrive" in lt[0][2] and "is unknown" in lt[0][2], "present: counters 0, prefs unknown: %r" % lt)
 
 if fails:
     for f in fails:
