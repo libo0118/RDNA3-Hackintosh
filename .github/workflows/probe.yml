@@ -40,7 +40,7 @@ jobs:
           show "present mode: strings, calls and keys those read" probe-out/42-page-flip-keys.txt 600
           show "present mode: callers' callers" probe-out/41-page-flip-callers2.s 2000
           # loud failure: a CoreDisplay disassembly this small is an error, not a result
-          n=0; [ -f probe-out/CoreDisplay.dis ] && n=$(wc -l < probe-out/CoreDisplay.dis)
+          n=0; [ -f probe-out/CoreDisplay.dis ] && n=$(wc -l < probe-out/CoreDisplay.dis | tr -d ' ')
           if [ "$n" -lt 1000 ]; then
             echo "::error::CoreDisplay.dis has $n lines (< 1000): dyld_info produced no disassembly, see the .err files above"
             exit 1
