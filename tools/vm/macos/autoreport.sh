@@ -310,7 +310,7 @@ prune_old_traces() {
     _td=/var/tmp/rdna3-nvmtl
     [ -d "$_td" ] && [ ! -L "$_td" ] || return 0
     case "$(stat -f %u "$_td" 2>/dev/null)" in 0|88) ;; *) echo "== plugin traces: $_td is not root's or _windowserver's: not pruned"; return 0 ;; esac
-    _bt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*sec = \([0-9]*\).*/\1/p')
+    _bt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ *sec = \([0-9]*\).*/\1/p')
     [ -n "$_bt" ] || { echo "== plugin traces: boot time unknown: not pruned"; return 0; }
     _n=0; _kb=0
     for _f in "$_td"/*.trace; do
