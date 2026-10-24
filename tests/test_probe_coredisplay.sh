@@ -22,7 +22,7 @@ for a in "$@"; do
     -platform) echo "platform: macOS"; exit 0 ;;
     -help) echo "dyld_info help"; exit 0 ;;
     -disassemble) cat "$FAKE_DIS"; exit 0 ;;
-    -section) printf '0x00001234  init_page_flip: page flip mode is %%s\n0x00001300  isMobile=%%s\n0x00001400  AAPL,slot-name\n0x00001500  TransactionsSupported\n'; exit 0 ;;
+    -section) printf '0x00001234  init_page_flip: page flip mode is %%s\n0x00001300  isMobile=%%s\n0x00001400  AAPL,slot-name\n0x00001500  TransactionsSupported\n0x00001600  displayPipeIsAvailable\n0x00001700  IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING\n0x00001800  DisplayPipeSupported\n0x00001900  AGDC Extended Capabilities not found\n'; exit 0 ;;
     -exports) echo "_CoreDisplay_PageFlipSetup"; exit 0 ;;
   esac
 done
@@ -42,7 +42,41 @@ _top_level:
   0x2100  call _setup_display
 _unrelated:
   0x3000  ret
+__ZN11CoreDisplay16UseIOPresentmentEv:
+  0x4000  push rbp
+  0x4004  call __ZN11CoreDisplay20DisplayPipeAvailableEv
+  0x4008  call _CFPreferencesGetAppBooleanValue
+  0x400c  lea rdi, [rip + 0x10]   ## 0x1a00 "IOPresentmentSwitch"
+  0x4010  call _isMobileSystem
+  0x4014  jmp __ZN11CoreDisplay15BigHelperEv
+__ZN11CoreDisplay20DisplayPipeAvailableEv:
+  0x4100  lea rdi, [rip + 0x20]   ## 0x1600 "displayPipeIsAvailable"
+  0x4104  call _pipe_probe_leaf
+  0x4108  ret
+_pipe_probe_leaf:
+  0x4200  mov eax, 1
+  0x4204  ret
+_isMobileSystem:
+  0x4500  lea rdi, [rip + 0x30]   ## "hw.model"
+  0x4504  call _sysctlbyname_wrapper
+_sysctlbyname_wrapper:
+  0x4600  ret
+__ZN11CoreDisplay18InitializeDisplayPipesEv:
+  0x5000  lea rax, [rip + 0x40]   ## 0x00001700
+  0x5004  call _pipe_probe_leaf
+_decoy_longer_address:
+  0x5100  lea rax, [rip + 0x50]   ## 0x17000
+-[IOPresentmentDisplayPipe copyCapabilities]:
+  0x6000  lea rdi, [rip + 0x60]   ## 0x1800 "DisplayPipeSupported"
+  0x6004  call _ioPresentmentFindAGDCMatch
+_ioPresentmentFindAGDCMatch:
+  0x6100  lea rdi, [rip + 0x70]   ## "AGDC Extended Capabilities not found"
+  0x6104  ret
 EOF
+# a callee of UseIOPresentment that is longer than the 62-line "small" limit: its own callee must not be listed
+{ echo "__ZN11CoreDisplay15BigHelperEv:"; echo "  0x4300  call _big_leaf_never_shown"
+  i=0; while [ $i -lt 90 ]; do echo "  0x43$i  nop"; i=$((i + 1)); done
+  echo "  0x4308  ret"; echo "_big_leaf_never_shown:"; echo "  0x4400  ret"; } >> "$T/fake.dis"
 O=$T/out
 PATH="$T/bin:$PATH" FAKE_DIS="$T/fake.dis" sh "$ROOT/tools/probe/coredisplay.sh" "$O" > "$T/log.txt" 2>&1 || fail "the script failed: $(tail -5 "$T/log.txt")"
 
@@ -72,6 +106,51 @@ grep -q 'CFPreferencesGetAppBooleanValue' "$O/42-page-flip-keys.txt" || fail "42
 grep -q '^## the callers. callers' "$O/42-page-flip-keys.txt" || fail "42: no section for the callers' callers"
 ls "$O"/43-fn-CoreDisplay-isMobile.s "$O"/43-fn-GPUWrangler-IOFBIntegrated___IG__.s >/dev/null 2>&1 || fail "43: the integrated / mobile function files: $(ls "$O" | grep '^43')"
 [ ! -e "$O/.callers.tmp" ] || fail "a temp file is left in the output"
+# ---- the switch (50-..54- files): CoreDisplay::UseIOPresentment and what feeds it
+has() { grep -q -- "$2" "$O/$1" || fail "$1: lacks [$2]: $(head -5 "$O/$1")"; }
+hasnt() { ! grep -q -- "$2" "$O/$1" || fail "$1: must not contain [$2]"; }
+has 50-UseIOPresentment.s '^__ZN11CoreDisplay16UseIOPresentmentEv:$'
+hasnt 50-UseIOPresentment.s '_unrelated'
+hasnt 50-UseIOPresentment.s '^_init_page_flip:$'
+# callees, one level: the local ones (call and tail jmp), not the external ones
+has 50-UseIOPresentment-callees.s '^== __ZN11CoreDisplay20DisplayPipeAvailableEv$'
+has 50-UseIOPresentment-callees.s '^== _isMobileSystem$'
+has 50-UseIOPresentment-callees.s '^== __ZN11CoreDisplay15BigHelperEv$'
+hasnt 50-UseIOPresentment-callees.s 'truncated at'
+hasnt 50-UseIOPresentment-callees.s '^== _CFPreferencesGetAppBooleanValue$'
+hasnt 50-UseIOPresentment-callees.s '^== __ZN11CoreDisplay16UseIOPresentmentEv$'
+# second level: only the callees of small callees
+has 50-UseIOPresentment-callees2.s '^== _pipe_probe_leaf$'
+has 50-UseIOPresentment-callees2.s '^== _sysctlbyname_wrapper$'
+hasnt 50-UseIOPresentment-callees2.s '_big_leaf_never_shown'
+hasnt 50-UseIOPresentment-callees2.s '^== __ZN11CoreDisplay20DisplayPipeAvailableEv$'
+# strings, calls and reads of the switch
+has 50-UseIOPresentment-keys.txt '"IOPresentmentSwitch"'
+has 50-UseIOPresentment-keys.txt '^_CFPreferencesGetAppBooleanValue$'
+has 50-UseIOPresentment-keys.txt '^_pipe_probe_leaf$'
+# the users of the capability strings, by the text of the string and by its address (also zero-padded)
+has 51-CoreDisplay-str-displayPipeIsAvailable.s '^__ZN11CoreDisplay20DisplayPipeAvailableEv:$'
+hasnt 51-CoreDisplay-str-displayPipeIsAvailable.s '^_unrelated:$'
+has 51-CoreDisplay-str-IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING.s '^__ZN11CoreDisplay18InitializeDisplayPipesEv:$'
+hasnt 51-CoreDisplay-str-IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING.s '_decoy_longer_address'
+has 52-CoreDisplay-InitializeDisplayPipes.s '^__ZN11CoreDisplay18InitializeDisplayPipesEv:$'
+# a symbol that is not in the disassembly: a "not found" file, not a failure
+has 52-CoreDisplay-DisplayPipeForService.s '^not found: CoreDisplay::DisplayPipeForService'
+has 53-IOPresentment-Init.s '^not found: _IOPresentmentInit'
+# the IOPresentment capability path (an ObjC method label counts as a function boundary)
+has 53-IOPresentment-CopyCapabilities.s '^-\[IOPresentmentDisplayPipe copyCapabilities\]:$'
+hasnt 53-IOPresentment-CopyCapabilities.s '^_ioPresentmentFindAGDCMatch:$'
+has 53-IOPresentment-ioPresentmentFindAGDCMatch.s '^_ioPresentmentFindAGDCMatch:$'
+has 53-IOPresentment-str-DisplayPipeSupported.s '^-\[IOPresentmentDisplayPipe copyCapabilities\]:$'
+has 53-IOPresentment-str-TransactionsSupported.s '^not found: no function of IOPresentment.dis uses "TransactionsSupported"'
+has 53-IOPresentment-str-AGDC_Extended_Capabilities_not_found.s '^_ioPresentmentFindAGDCMatch:$'
+# isMobileSystem, whole, and its callee
+has 54-isMobileSystem.s '^_isMobileSystem:$'
+hasnt 54-isMobileSystem.s '^__ZN11CoreDisplay16UseIOPresentmentEv:$'
+has 54-isMobileSystem-callees.s '^== _sysctlbyname_wrapper$'
+has 43-fn-CoreDisplay-isMobile.s '^__ZN11CoreDisplay16UseIOPresentmentEv:$'
+has 00-system.txt '^== CoreDisplay string "displayPipeIsAvailable" address: 1600$'
+! ls -A "$O" | grep -q '^\.' || fail "a hidden temp file is left in the output: $(ls -A "$O" | grep '^\.')"
 # read-only on the runner: nothing but the output directory is written
 ! grep -nE '(^|[^>])>[^>&]*(/System|/Library|/usr|/private|/etc)|\bsudo\b|defaults +write|nvram +[A-Za-z]|rm +-rf? +[^"$ ]' "$ROOT/tools/probe/coredisplay.sh" ||
     fail "the script writes or deletes outside its output directory"
@@ -101,6 +180,16 @@ for lib in CoreDisplay SkyLight IOPresentment GPUWrangler; do
     grep -q 'dyld_info: no such image' "$O2/$lib.dis.err" || fail "$lib.dis.err lacks dyld_info's complaint"
 done
 [ -f "$O2/40-page-flip-fn-CoreDisplay-by-address.s" ] || fail "by-address file missing when nothing was found"
+for f in 50-UseIOPresentment.s 50-UseIOPresentment-callees.s 50-UseIOPresentment-callees2.s \
+         51-CoreDisplay-str-displayPipeIsAvailable.s 51-CoreDisplay-str-IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING.s \
+         52-CoreDisplay-InitializeDisplayPipes.s 52-CoreDisplay-DisplayPipeForService.s \
+         53-IOPresentment-CopyCapabilities.s 53-IOPresentment-Init.s 53-IOPresentment-ioPresentmentFindAGDCMatch.s \
+         53-IOPresentment-str-DisplayPipeSupported.s 53-IOPresentment-str-TransactionsSupported.s \
+         53-IOPresentment-str-AGDC_Extended_Capabilities_not_found.s 54-isMobileSystem.s 54-isMobileSystem-callees.s; do
+    [ -f "$O2/$f" ] || fail "empty runner: $f does not exist (the workflow reads it under bash -e)"
+    grep -q '^not found: ' "$O2/$f" || fail "empty runner: $f lacks its 'not found' line: $(head -2 "$O2/$f")"
+done
+[ -f "$O2/50-UseIOPresentment-keys.txt" ] || fail "empty runner: 50-UseIOPresentment-keys.txt does not exist"
 # a library that dyld_info -platform refuses
 cat > "$T/bin2/dyld_info" <<'EOF'
 #!/bin/sh
@@ -108,6 +197,7 @@ for a in "$@"; do case $a in -platform) echo "dyld_info: cannot open" >&2; exit 
 EOF
 O3=$T/out3
 PATH="$T/bin2:$PATH" sh "$ROOT/tools/probe/coredisplay.sh" "$O3" > "$T/log3.txt" 2>&1 || fail "the script failed when -platform failed"
+[ -f "$O3/50-UseIOPresentment.s" ] && [ -f "$O3/54-isMobileSystem-callees.s" ] || fail "no 50-/54- files when -platform failed"
 grep -q '^FAILED: CoreDisplay dyld_info -platform failed' "$O3/00-system.txt" || fail "no FAILED line for -platform: $(grep FAILED "$O3/00-system.txt")"
 
 # ---- the workflow step, run under bash -e like Actions does: it prints the .err files and
@@ -126,11 +216,24 @@ sed -i.bak "s#^sh tools/probe/coredisplay.sh probe-out#sh $ROOT/tools/probe/core
 mkdir -p "$T/wf1" "$T/wf2"
 # a tiny disassembly: the step fails loudly, after printing what there is
 if ( cd "$T/wf1" && PATH="$T/bin:$PATH" FAKE_DIS="$T/fake.dis" bash -eo pipefail "$T/step.sh" ) > "$T/wf1.log" 2>&1; then
-    fail "the workflow step passed with a 13-line CoreDisplay.dis"
+    fail "the workflow step passed with a tiny CoreDisplay.dis"
 fi
-grep -q '::error::CoreDisplay.dis has 13 lines (< 1000)' "$T/wf1.log" || fail "no loud error: $(tail -3 "$T/wf1.log")"
+nfake=$(wc -l < "$T/fake.dis" | tr -d ' ')
+grep -q "::error::CoreDisplay.dis has $nfake lines (< 1000)" "$T/wf1.log" || fail "no loud error: $(tail -3 "$T/wf1.log")"
 grep -q '^== present mode: callers' "$T/wf1.log" || fail "the step aborted before printing its sections (a missing file under bash -e?): $(tail -5 "$T/wf1.log")"
 grep -q '^== probe-out/CoreDisplay.dis.err' "$T/wf1.log" || fail "the .err files are not printed"
+for f in 50-UseIOPresentment.s 50-UseIOPresentment-callees.s 50-UseIOPresentment-callees2.s 50-UseIOPresentment-keys.txt \
+         51-CoreDisplay-str-displayPipeIsAvailable.s 51-CoreDisplay-str-IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING.s \
+         52-CoreDisplay-InitializeDisplayPipes.s 52-CoreDisplay-DisplayPipeForService.s \
+         53-IOPresentment-CopyCapabilities.s 53-IOPresentment-Init.s 53-IOPresentment-ioPresentmentFindAGDCMatch.s \
+         53-IOPresentment-str-DisplayPipeSupported.s 53-IOPresentment-str-TransactionsSupported.s \
+         53-IOPresentment-str-AGDC_Extended_Capabilities_not_found.s 54-isMobileSystem.s 54-isMobileSystem-callees.s \
+         43-fn-CoreDisplay-isMobile.s; do
+    grep -q "probe-out/$f " "$T/step.sh" || fail "probe.yml does not show $f"
+done
+grep -q '^== switch: CoreDisplay::UseIOPresentment' "$T/wf1.log" || fail "the step did not print the UseIOPresentment section: $(tail -5 "$T/wf1.log")"
+grep -q '^__ZN11CoreDisplay16UseIOPresentmentEv:$' "$T/wf1.log" || fail "the step did not print the UseIOPresentment body"
+grep -q '^not found: CoreDisplay::DisplayPipeForService' "$T/wf1.log" || fail "the step did not print a not-found file"
 # a real-size disassembly passes, also when the by-address file would be missing
 { cat "$T/fake.dis"; i=0; while [ $i -lt 1100 ]; do echo "  0x$i  nop"; i=$((i + 1)); done; } > "$T/big.dis"
 ( cd "$T/wf2" && PATH="$T/bin:$PATH" FAKE_DIS="$T/big.dis" bash -eo pipefail "$T/step.sh" ) > "$T/wf2.log" 2>&1 || fail "the workflow step failed with a 1100-line CoreDisplay.dis: $(tail -5 "$T/wf2.log")"

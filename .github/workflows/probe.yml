@@ -39,6 +39,24 @@ jobs:
           show "present mode: callers" probe-out/41-page-flip-callers.s 3000
           show "present mode: strings, calls and keys those read" probe-out/42-page-flip-keys.txt 600
           show "present mode: callers' callers" probe-out/41-page-flip-callers2.s 2000
+          # the real switch (page flip mode is a constant): CoreDisplay::UseIOPresentment and what feeds it
+          show "switch: CoreDisplay::UseIOPresentment" probe-out/50-UseIOPresentment.s 400
+          show "switch: UseIOPresentment callees" probe-out/50-UseIOPresentment-callees.s 1200
+          show "switch: UseIOPresentment callees of the small callees" probe-out/50-UseIOPresentment-callees2.s 600
+          show "switch: UseIOPresentment strings, calls, reads" probe-out/50-UseIOPresentment-keys.txt 300
+          show "switch: users of displayPipeIsAvailable (CoreDisplay)" probe-out/51-CoreDisplay-str-displayPipeIsAvailable.s 500
+          show "switch: users of IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING (CoreDisplay)" probe-out/51-CoreDisplay-str-IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING.s 500
+          show "switch: CoreDisplay::InitializeDisplayPipes" probe-out/52-CoreDisplay-InitializeDisplayPipes.s 700
+          show "switch: CoreDisplay::DisplayPipeForService" probe-out/52-CoreDisplay-DisplayPipeForService.s 500
+          show "switch: IOPresentment copy capabilities" probe-out/53-IOPresentment-CopyCapabilities.s 500
+          show "switch: IOPresentmentInit" probe-out/53-IOPresentment-Init.s 300
+          show "switch: ioPresentmentFindAGDCMatch" probe-out/53-IOPresentment-ioPresentmentFindAGDCMatch.s 500
+          show "switch: IOPresentment users of DisplayPipeSupported" probe-out/53-IOPresentment-str-DisplayPipeSupported.s 300
+          show "switch: IOPresentment users of TransactionsSupported" probe-out/53-IOPresentment-str-TransactionsSupported.s 300
+          show "switch: IOPresentment users of AGDC Extended Capabilities not found" probe-out/53-IOPresentment-str-AGDC_Extended_Capabilities_not_found.s 300
+          show "switch: isMobileSystem" probe-out/54-isMobileSystem.s 150
+          show "switch: isMobileSystem callees" probe-out/54-isMobileSystem-callees.s 300
+          show "switch: functions using isMobile (CoreDisplay)" probe-out/43-fn-CoreDisplay-isMobile.s 300
           # loud failure: a CoreDisplay disassembly this small is an error, not a result
           n=0; [ -f probe-out/CoreDisplay.dis ] && n=$(wc -l < probe-out/CoreDisplay.dis | tr -d ' ')
           if [ "$n" -lt 1000 ]; then

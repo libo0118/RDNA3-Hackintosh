@@ -11,6 +11,12 @@
 # transactions): which strings of CoreDisplay, SkyLight, IOPresentment and GPUWrangler
 # name the mode switch, the function that logs it with its callers, and every
 # string / CFSTR / sysctl / defaults key those functions read.
+# The switch itself (50-/51-/52-/53-/54- files, probe run 9): "page flip mode is on"
+# is a constant, CoreDisplay::UseIOPresentment() is the real switch between page
+# flips and IOPresentment transactions. Its body and callees, the users of the
+# capability strings, the display pipe setup, the IOPresentment capability path and
+# isMobileSystem. Every one of these files exists; a symbol that is missing leaves a
+# one-line "not found: ..." file (the workflow prints them under bash -e).
 out=${1:-probe-out}
 mkdir -p "$out"
 sw_vers > "$out/00-system.txt"; uname -a >> "$out/00-system.txt"
@@ -45,7 +51,7 @@ done
 # the functions on the crash stack, whole
 fn() {   # fn FILE SYMBOL-REGEX OUT
     awk -v re="$2" '
-        /^[_A-Za-z0-9$.]+.*:$/ || /^_[^ ]*:$/ { on = ($0 ~ re) }
+        /^[_A-Za-z0-9$.]+.*:$/ || /^_[^ ]*:$/ || /^[-+]\[.*\]:$/ { on = ($0 ~ re) }
         on { print }' "$1" > "$3"
     wc -l "$3" >> "$out/00-system.txt"
 }
@@ -73,7 +79,7 @@ grep -n 'SetSurfaceFramebufferShape' "$out/IOAccelerator.dis" | head -20 >> "$ou
 # function that calls it, and every one that calls those
 callers() {   # callers FILE SYMBOL-REGEX OUT
     awk -v re="$2" '
-        /^[_A-Za-z0-9$.]+.*:$/ || /^_[^ ]*:$/ { if (hit) printf "%s", buf; buf = ""; hit = 0; name = $0 }
+        /^[_A-Za-z0-9$.]+.*:$/ || /^_[^ ]*:$/ || /^[-+]\[.*\]:$/ { if (hit) printf "%s", buf; buf = ""; hit = 0; name = $0 }
         { buf = buf $0 "\n" }
         $0 ~ re && $0 !~ /:$/ { hit = 1 }
         END { if (hit) printf "%s", buf }' "$1" > "$3"
@@ -165,6 +171,84 @@ for pat in 'isMobile' 'IOFBIntegrated|\(IG\)' 'AAPL,slot-name|built-in'; do
         [ -f "$out/$n.dis" ] && blocks_with "$out/$n.dis" "$pat" "$out/43-fn-$n-$tag.s"
     done
 done
+# ---- the switch itself (probe run 9): CoreDisplay::UseIOPresentment() and what feeds it
+# "init_page_flip: page flip mode is on" is a constant (_CGXDisplayDriverInitialize
+# stores 1 unconditionally); UseIOPresentment() is what MPHWCopyPixels and
+# CGXAcquireDisplayDeviceSurface branch on. Every file below exists: a symbol or
+# string that is not found leaves a "not found: ..." line, never a missing file.
+nf() {   # nf FILE WHAT: an empty file says why, so the workflow can always show it
+    [ -s "$1" ] || echo "not found: $2" > "$1"
+}
+fn_nf() {   # fn_nf DIS LABEL-REGEX OUT WHAT: the whole function(s) whose label matches
+    fn "$1" "$2" "$3" 2>/dev/null
+    nf "$3" "$4 (no label matching $2 in $(basename "$1"))"
+}
+string_users() {   # string_users LIB STRING OUT: functions using STRING, by its text and by its address in LIB.cstring
+    addr=$(grep -m1 -F -- "$2" "$out/$1.cstring" 2>/dev/null | grep -o -i '0x[0-9a-f]*' | head -1 | sed 's/^0x0*//' | tr 'A-F' 'a-f')
+    re=$(printf '%s' "$2" | sed 's/[^A-Za-z0-9_ ]/./g')
+    if [ -n "$addr" ]; then re="$re|0x0*$addr([^0-9a-fA-F]|\$)"; fi
+    echo "== $1 string \"$2\" address: ${addr:-not found in $1.cstring}" >> "$out/00-system.txt"
+    callers "$out/$1.dis" "$re" "$3" 2>/dev/null
+    nf "$3" "no function of $1.dis uses \"$2\" (address in $1.cstring: ${addr:-not found})"
+}
+call_targets() {   # call_targets FILE: the symbols named on call / jmp lines
+    grep -E 'call|jmp' "$1" 2>/dev/null | grep -o '_[A-Za-z0-9_$.]*' | sort -u
+}
+label_names() {   # label_names FILE...: the function labels (without the colon)
+    cat "$@" 2>/dev/null | grep -E '^[^[:space:]].*:$' | sed 's/:$//' | sort -u
+}
+callee_bodies() {   # callee_bodies SRC DIS OUT MAXFN MAXLINES [SKIPFILE...]
+    src=$1; dis=$2; dst=$3; maxfn=$4; maxln=$5; shift 5
+    call_targets "$src" > "$out/.want.tmp"
+    label_names "$src" "$@" > "$out/.skip.tmp"
+    awk -v want="$out/.want.tmp" -v skip="$out/.skip.tmp" -v maxn="$maxfn" -v maxl="$maxln" '
+        BEGIN { while ((getline l < want) > 0) w[l] = 1
+                while ((getline l < skip) > 0) seen[l] = 1 }
+        /^[_A-Za-z0-9$.]+.*:$/ || /^_[^ ]*:$/ || /^[-+]\[.*\]:$/ {
+            nm = $0; sub(/:[ \t]*$/, "", nm); on = 0
+            if ((nm in w) && !(nm in seen) && nfn < maxn) { on = 1; seen[nm] = 1; nfn++; lines = 0; print "== " nm }
+        }
+        on { lines++; if (lines <= maxl) print; else if (lines == maxl + 1) print "   ... truncated at " maxl " lines" }
+    ' "$dis" > "$dst" 2>/dev/null
+    nf "$dst" "no callee of $(basename "$src") is a function of $(basename "$dis")"
+    rm -f "$out/.want.tmp" "$out/.skip.tmp"
+}
+small_blocks() {   # small_blocks FILE MAXLINES: the "== name" blocks of at most MAXLINES lines
+    awk -v max="$2" '
+        function flush() { if (n > 0 && n <= max) printf "%s", buf; buf = ""; n = 0 }
+        /^== / { flush() }
+        { buf = buf $0 "\n"; n++ }
+        END { flush() }' "$1"
+}
+io_dis=$out/IOPresentment.dis
+# 1. the switch, its callees (one level), and the callees of the small ones (two levels)
+fn_nf "$cd_dis" 'ZN11CoreDisplay16UseIOPresentmentEv' "$out/50-UseIOPresentment.s" "CoreDisplay::UseIOPresentment"
+callee_bodies "$out/50-UseIOPresentment.s" "$cd_dis" "$out/50-UseIOPresentment-callees.s" 25 300
+small_blocks "$out/50-UseIOPresentment-callees.s" 62 > "$out/.small.tmp"
+callee_bodies "$out/.small.tmp" "$cd_dis" "$out/50-UseIOPresentment-callees2.s" 25 80 \
+    "$out/50-UseIOPresentment.s" "$out/50-UseIOPresentment-callees.s"
+rm -f "$out/.small.tmp"
+keys "$out/50-UseIOPresentment.s" "$out/50-UseIOPresentment-callees.s" "$out/50-UseIOPresentment-callees2.s" \
+    > "$out/50-UseIOPresentment-keys.txt"
+# 2. who uses the capability strings in CoreDisplay, and the display pipe setup
+string_users CoreDisplay displayPipeIsAvailable "$out/51-CoreDisplay-str-displayPipeIsAvailable.s"
+string_users CoreDisplay IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING "$out/51-CoreDisplay-str-IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING.s"
+fn_nf "$cd_dis" 'InitializeDisplayPipes' "$out/52-CoreDisplay-InitializeDisplayPipes.s" "CoreDisplay::InitializeDisplayPipes"
+fn_nf "$cd_dis" 'DisplayPipeForService' "$out/52-CoreDisplay-DisplayPipeForService.s" "CoreDisplay::DisplayPipeForService"
+# 3. the IOPresentment capability path
+fn_nf "$io_dis" 'IOPresentmentCopyCapabilities|IOPresentmentDisplayPipe.*apabilit' "$out/53-IOPresentment-CopyCapabilities.s" "IOPresentmentCopyCapabilities (IOPresentmentDisplayPipe)"
+fn_nf "$io_dis" 'IOPresentmentInit($|[^A-Za-z])' "$out/53-IOPresentment-Init.s" "_IOPresentmentInit"
+fn_nf "$io_dis" '[iI][oO]PresentmentFindAGDCMatch' "$out/53-IOPresentment-ioPresentmentFindAGDCMatch.s" "ioPresentmentFindAGDCMatch"
+string_users IOPresentment DisplayPipeSupported "$out/53-IOPresentment-str-DisplayPipeSupported.s"
+string_users IOPresentment TransactionsSupported "$out/53-IOPresentment-str-TransactionsSupported.s"
+string_users IOPresentment "AGDC Extended Capabilities not found" "$out/53-IOPresentment-str-AGDC_Extended_Capabilities_not_found.s"
+# 4. isMobileSystem (CoreDisplay), whole, and its callees
+fn_nf "$cd_dis" 'isMobileSystem' "$out/54-isMobileSystem.s" "isMobileSystem"
+callee_bodies "$out/54-isMobileSystem.s" "$cd_dis" "$out/54-isMobileSystem-callees.s" 10 120
+{
+    echo "== the switch (probe run 9)"
+    wc -l "$out"/50-* "$out"/51-* "$out"/52-* "$out"/53-* "$out"/54-* 2>/dev/null
+} >> "$out/00-system.txt"
 {
     echo "== present-mode probe"
     wc -l "$out"/40-* "$out"/41-* "$out"/42-* "$out"/43-* 2>/dev/null
