@@ -29,6 +29,21 @@ for d, var, name in CASES:
     for f in make_files:
         if not os.path.exists(os.path.join(ROOT, f)):
             sys.exit("test_fb_agdc_hash_parity: FAIL %s does not exist" % f)
+    # every repository file the hashed sources #include "..." (transitively)
+    # is hashed too: an edit to a missing header would not change the build id
+    seen, todo = set(), [f for f in make_files if f.endswith((".cpp", ".c", ".h"))]
+    while todo:
+        f = todo.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        for inc in re.findall(r'^\s*#\s*include\s+"([^"]+)"', open(os.path.join(ROOT, f)).read(), re.M):
+            g = os.path.normpath(os.path.join(os.path.dirname(f), inc))
+            if not os.path.exists(os.path.join(ROOT, g)):
+                continue   # an SDK header found through -I, not ours
+            if g not in make_files:
+                sys.exit("test_fb_agdc_hash_parity: FAIL %s includes %s, which %s/Makefile's %s does not hash" % (f, g, d, var))
+            todo.append(g)
     # and the hash is computable from them (a None would silence the stale check)
     if not triage_reports.fb_source_hash(want):
         sys.exit("test_fb_agdc_hash_parity: FAIL fb_source_hash(%s) is None" % name)

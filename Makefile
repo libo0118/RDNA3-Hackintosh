@@ -52,6 +52,9 @@ $(BUILD)/test_uapi: tests/test_uapi.c $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
 
 $(BUILD)/test_agdc_k5: tests/test_agdc_k5.c agdc/rdna3_agdc_k5.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -o $@ tests/test_agdc_k5.c
+# DRIVER-PLAN N45: the AGDC answers after Navi48-MacOS, per switch value
+$(BUILD)/test_agdc_n48: tests/test_agdc_n48.c agdc/rdna3_agdc_n48.h agdc/rdna3_agdc_k5.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -o $@ tests/test_agdc_n48.c
 
 # common/rdna3_bootargs.h with a stubbed PE_parse_boot_argn (tests/stub)
 $(BUILD)/test_bootargs: tests/test_bootargs.c common/rdna3_bootargs.h tests/stub/pexpert/pexpert.h | $(BUILD)
@@ -147,7 +150,7 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOB
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_flip_queue $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_flip_queue $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
@@ -157,6 +160,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	$(BUILD)/test_mtl_allow metal/rdna3mtl-allow.txt
 	$(BUILD)/test_linear_pitch
 	$(BUILD)/test_agdc_k5
+	$(BUILD)/test_agdc_n48
 	$(BUILD)/test_bootargs
 	$(BUILD)/test_a3_display
 	$(BUILD)/test_gamma_judge
@@ -188,6 +192,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BU
 	python3 -I -B tests/test_triage_n43.py
 	python3 -I -B tests/test_fb_class.py
 	python3 -I -B tests/test_triage_iop_log.py
+	python3 -I -B tests/test_triage_agdc_n48.py
 	tests/test_coredisplay_prefs.sh
 	tests/test_prune_traces.sh
 	tests/test_membw_load.sh
