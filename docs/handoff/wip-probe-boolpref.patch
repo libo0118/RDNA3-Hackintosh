@@ -1,0 +1,367 @@
+diff --git a/.github/workflows/probe.yml b/.github/workflows/probe.yml
+index e951b4f..03abfb7 100644
+--- a/.github/workflows/probe.yml
++++ b/.github/workflows/probe.yml
+@@ -67,6 +67,16 @@ jobs:
+           show "run 10: useIOP users, strings, calls, reads" probe-out/56-useIOP-keys.txt 250
+           show "run 10: CFSTR keys of the functions above (address, text)" probe-out/57-cfstr-resolved.txt 400
+           show "run 10: IOP / vendor strings of CoreDisplay and SkyLight" probe-out/58-cstring-iop.txt 150
++          # run 11: which user / host GetBoolCFPreference passes to CFPreferencesCopyValue, and the keys it reads
++          show "run 11: GetBoolCFPreference" probe-out/60-GetBoolCFPreference.s 250
++          show "run 11: GetIntCFPreference / GetCFPreference variants" probe-out/60-GetCFPreference-variants.s 250
++          show "run 11: rip-relative loads of the preference functions (user / host GOT slots) and their fixups" probe-out/60-GetBoolCFPreference-riploads.txt 150
++          show "run 11: kCFPreferences* references" probe-out/60-kCFPreferences-refs.txt 100
++          show "run 11: GetBoolCFPreference call sites (10 instructions before each call)" probe-out/60-GetBoolCFPreference-callsites.s 400
++          show "run 11: keys passed to GetBoolCFPreference (CFSTRs, address and text)" probe-out/60-GetBoolCFPreference-keys.txt 250
++          show "run 11: CoreDisplay::InitializeUserDefaults" probe-out/60-InitializeUserDefaults.s 400
++          show "run 11: _CGXMappedDisplayStart" probe-out/60-CGXMappedDisplayStart.s 300
++          show "run 11: functions calling GetBoolCFPreference" probe-out/60-GetBoolCFPreference-callers.s 400
+           # the raw section format the CFSTR / block resolver parses (the artifact cannot be fetched from the session)
+           show "run 10: raw __cfstring dump (format check)" probe-out/CoreDisplay.cfstring 40
+           show "run 10: raw __const dump (format check)" probe-out/CoreDisplay.const 40
+@@ -99,7 +109,7 @@ jobs:
+           else
+             echo "not found: cfstr_peek was not built" > probe-out/59-cfstr-peek.txt
+           fi
+-          show "run 10: CoreDisplay vendor CFSTRs, domain, useIOP flags, preferences (cfstr_peek)" probe-out/59-cfstr-peek.txt 100
++          show "run 10: CoreDisplay vendor CFSTRs, domain, useIOP flags, preferences (cfstr_peek)" probe-out/59-cfstr-peek.txt 150
+       - uses: actions/upload-artifact@v4
+         if: always()
+         with:
+diff --git a/tests/test_probe_coredisplay.sh b/tests/test_probe_coredisplay.sh
+index 326c5ae..5cd130d 100755
+--- a/tests/test_probe_coredisplay.sh
++++ b/tests/test_probe_coredisplay.sh
+@@ -28,16 +28,19 @@ for a in "$@"; do
+ 7FF80405B000  0000000000000000 00000000000007C8 00007FF8040A0000 0000000000000009
+ 7FF80405B020  0000000000000000 00000000000007C8 00007FF8040A0010 0000000000000007
+ 7FF80405B040  0000000000000000 00000000000007C8 00007FF8040A0030 000000000000000e
++7FF80405B060  0000000000000000 00000000000007C8 00007FF8040A0050 000000000000001b
++7FF80405B080  0000000000000000 00000000000007C8 00007FF8040A0070 0000000000000012
+ CFS
+         ;;
+         *__const*) cat <<'CST'
+ 7FF804059000  0000000000000000 0000000000000000 00007FF804058100 0000000000000000
+ CST
+         ;;
+-        *) printf '0x00001234  init_page_flip: page flip mode is %%s\n0x00001300  isMobile=%%s\n0x00001400  AAPL,slot-name\n0x00001500  TransactionsSupported\n0x00001600  displayPipeIsAvailable\n0x00001700  IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING\n0x00001800  DisplayPipeSupported\n0x00001900  AGDC Extended Capabilities not found\n0x00001b00  ioPresentmentFindAGDCMatch\n0x00007FF8040A0000  vendor-id\n0x00007FF8040A0010  IOClass\n0x00007FF8040A0030  useIOPOverride\n' ;;
++        *) printf '0x00001234  init_page_flip: page flip mode is %%s\n0x00001300  isMobile=%%s\n0x00001400  AAPL,slot-name\n0x00001500  TransactionsSupported\n0x00001600  displayPipeIsAvailable\n0x00001700  IOPRESENTMENT_CAPABILITIES_AGDCEXTENDED_MISSING\n0x00001800  DisplayPipeSupported\n0x00001900  AGDC Extended Capabilities not found\n0x00001b00  ioPresentmentFindAGDCMatch\n0x00007FF8040A0000  vendor-id\n0x00007FF8040A0010  IOClass\n0x00007FF8040A0030  useIOPOverride\n0x00007FF8040A0050  displaySurfaceUsesIOSurface\n0x00007FF8040A0070  useIOP_gamma_onAMD\n' ;;
+       esac
+       exit 0 ;;
+     -exports) echo "_CoreDisplay_PageFlipSetup"; exit 0 ;;
++    -fixups) printf '__DATA_CONST __got 0x7FF80405F00F bind CoreFoundation/_kCFPreferencesCurrentHost\n__DATA_CONST __got 0x7FF80405F026 bind CoreFoundation/_kCFPreferencesAnyUser\n'; exit 0 ;;
+   esac
+ done
+ EOF
+@@ -130,6 +133,36 @@ _read_default_helper:
+ __ZN24IOPresentmentDisplayPipe18_IOPresentmentInitEP15__IOPresentment:
+     7FF80405D000 retq
+ REAL
++# probe run 11: GetBoolCFPreference with its user / host loads (one named in the comment, one only a
++# rip-relative GOT address that dyld_info -fixups names), a variant, InitializeUserDefaults, _CGXMappedDisplayStart
++# and a caller that loads two key CFSTRs (bare "; ") before calling it
++cat >> "$T/fake.dis" <<'REAL'
++__ZN11CoreDisplayL17GetBoolCFPreferenceEPK10__CFStringb:
++    7FF80405E000 pushq %rbp
++    7FF80405E001 movq %rdi, %rsi
++    7FF80405E008 movq 0x1000(%rip), %rdx ; _kCFPreferencesCurrentHost
++    7FF80405E00F movq 0x1010(%rip), %rcx
++    7FF80405E016 callq _CFPreferencesCopyValue
++    7FF80405E01B retq
++__ZN11CoreDisplayL16GetIntCFPreferenceEPK10__CFStringi:
++    7FF80405E040 movq 0x20(%rip), %rcx ; _kCFPreferencesAnyHost
++    7FF80405E047 callq _CFPreferencesCopyValue
++    7FF80405E04C retq
++_caller_of_bool:
++    7FF80405E100 pushq %rbp
++    7FF80405E101 leaq -0x30a8(%rip), %rdi ; 
++    7FF80405E108 callq __ZN11CoreDisplayL17GetBoolCFPreferenceEPK10__CFStringb
++    7FF80405E10D leaq -0x3094(%rip), %rdi ; 
++    7FF80405E114 callq __ZN11CoreDisplayL17GetBoolCFPreferenceEPK10__CFStringb
++    7FF80405E119 retq
++__ZN11CoreDisplay22InitializeUserDefaultsEv:
++    7FF80405E200 callq __ZN11CoreDisplayL17GetBoolCFPreferenceEPK10__CFStringb
++    7FF80405E205 movb %al, __ZN11CoreDisplayL17useIOP_gamma_onAMDE(%rip) ; __ZN11CoreDisplayL17useIOP_gamma_onAMDE
++    7FF80405E20B retq
++_CGXMappedDisplayStart:
++    7FF80405E300 callq __ZN11CoreDisplayL17GetBoolCFPreferenceEPK10__CFStringb
++    7FF80405E305 retq
++REAL
+ O=$T/out
+ PATH="$T/bin:$PATH" FAKE_DIS="$T/fake.dis" sh "$ROOT/tools/probe/coredisplay.sh" "$O" > "$T/log.txt" 2>&1 || fail "the script failed: $(tail -5 "$T/log.txt")"
+ 
+@@ -235,7 +268,7 @@ has 57-cfstr-resolved.txt '^7FF80405C100  IOClass$'
+ hasnt 57-cfstr-resolved.txt '7FF804058300'
+ hasnt 57-cfstr-resolved.txt '7FF804058008'
+ hasnt 57-cfstr-resolved.txt '7FF80405C01D'
+-has 00-system.txt '^CFSTR resolver (cfstr): 3 dump rows, [0-9]* cstring entries, 5 lea candidates: 4 resolved,'
++has 00-system.txt '^CFSTR resolver (cfstr): 5 dump rows, [0-9]* cstring entries, 5 lea candidates: 4 resolved,'
+ has 00-system.txt '^CFSTR resolver (blk): '
+ # the cstring tables
+ has 58-cstring-iop.txt '^== CoreDisplay: '
+@@ -244,6 +277,45 @@ has 58-cstring-iop.txt 'vendor-id'
+ has 58-cstring-iop.txt 'useIOPOverride'
+ hasnt 58-cstring-iop.txt '^not found'
+ has 00-system.txt '^== CoreDisplay string "displayPipeIsAvailable" address: 1600$'
++# ---- probe run 11 (60- files): GetBoolCFPreference's user / host, the variants, the keys
++has 60-GetBoolCFPreference.s '^# CoreDisplay.dis$'
++has 60-GetBoolCFPreference.s '^__ZN11CoreDisplayL17GetBoolCFPreferenceEPK10__CFStringb:$'
++has 60-GetBoolCFPreference.s '; _kCFPreferencesCurrentHost$'
++hasnt 60-GetBoolCFPreference.s '^_caller_of_bool:$'
++hasnt 60-GetBoolCFPreference.s 'GetIntCFPreference'
++has 60-GetCFPreference-variants.s '^__ZN11CoreDisplayL16GetIntCFPreferenceEPK10__CFStringi:$'
++has 60-GetCFPreference-variants.s '; _kCFPreferencesAnyHost$'
++hasnt 60-GetCFPreference-variants.s 'GetBoolCFPreference'
++has 60-InitializeUserDefaults.s '^__ZN11CoreDisplay22InitializeUserDefaultsEv:$'
++hasnt 60-InitializeUserDefaults.s '^_CGXMappedDisplayStart:$'
++has 60-CGXMappedDisplayStart.s '^_CGXMappedDisplayStart:$'
++has 60-CGXMappedDisplayStart.s '^# SkyLight.dis$'
++has 60-GetBoolCFPreference-callers.s '^_caller_of_bool:$'
++has 60-GetBoolCFPreference-callers.s '^__ZN11CoreDisplay22InitializeUserDefaultsEv:$'
++has 60-GetBoolCFPreference-callers.s '^_CGXMappedDisplayStart:$'
++hasnt 60-GetBoolCFPreference-callers.s '^_unrelated:$'
++hasnt 60-GetBoolCFPreference-callers.s '^__ZN11CoreDisplayL17GetBoolCFPreferenceEPK10__CFStringb:$'
++has 60-GetBoolCFPreference-callsites.s '^== _caller_of_bool (call site 7FF80405E108)$'
++has 60-GetBoolCFPreference-callsites.s '^== _caller_of_bool (call site 7FF80405E114)$'
++has 60-GetBoolCFPreference-callsites.s '^== _CGXMappedDisplayStart (call site 7FF80405E300)$'
++has 60-GetBoolCFPreference-callsites.s '7FF80405E101 leaq -0x30a8'
++# the key CFSTRs loaded before the calls, resolved through the cfstring dump
++has 60-GetBoolCFPreference-keys.txt '^== _caller_of_bool (call site 7FF80405E108)$'
++has 60-GetBoolCFPreference-keys.txt '^7FF80405E101  displaySurfaceUsesIOSurface$'
++has 60-GetBoolCFPreference-keys.txt '^7FF80405E10D  useIOP_gamma_onAMD$'
++# the user / host loads: named in a comment, or only a rip-relative address looked up in the fixups dump
++has 60-kCFPreferences-refs.txt '^__ZN11CoreDisplayL17GetBoolCFPreferenceEPK10__CFStringb | .*; _kCFPreferencesCurrentHost$'
++has 60-kCFPreferences-refs.txt '^__ZN11CoreDisplayL16GetIntCFPreferenceEPK10__CFStringi | .*; _kCFPreferencesAnyHost$'
++has 60-kCFPreferences-refs.txt 'bind CoreFoundation/_kCFPreferencesAnyUser'
++hasnt 60-kCFPreferences-refs.txt '^not found'
++has 60-GetBoolCFPreference-riploads.txt '7FF80405E008 movq 0x1000(%rip), %rdx ; _kCFPreferencesCurrentHost => 0x7FF80405F00F$'
++has 60-GetBoolCFPreference-riploads.txt '7FF80405E00F movq 0x1010(%rip), %rcx => 0x7FF80405F026$'
++has 60-GetBoolCFPreference-riploads.txt '7FF80405E205 movb %al, .*useIOP_gamma_onAMDE(%rip) ; .* => 0x'
++[ "$(grep -A1 '^-- 7FF80405F026$' "$O/60-GetBoolCFPreference-riploads.txt" | tail -1)" = "__DATA_CONST __got 0x7FF80405F026 bind CoreFoundation/_kCFPreferencesAnyUser" ] ||
++    fail "60-riploads: the GOT slot is not matched to _kCFPreferencesAnyUser in the fixups: $(cat "$O/60-GetBoolCFPreference-riploads.txt")"
++hasnt 60-GetBoolCFPreference-riploads.txt '^not found'
++has 00-system.txt '^== GetBoolCFPreference, its user / host and keys (probe run 11)$'
++has 00-system.txt '^CFSTR resolver (cfstr): 5 dump rows, [0-9]* cstring entries, 3 lea candidates: 3 resolved,'
+ ! ls -A "$O" | grep -q '^\.' || fail "a hidden temp file is left in the output: $(ls -A "$O" | grep '^\.')"
+ # read-only on the runner: nothing but the output directory is written
+ ! grep -nE '(^|[^>])>[^>&]*(/System|/Library|/usr|/private|/etc)|\bsudo\b|defaults +write|nvram +[A-Za-z]|rm +-rf? +[^"$ ]' "$ROOT/tools/probe/coredisplay.sh" ||
+@@ -281,7 +353,10 @@ for f in 50-UseIOPresentment.s 50-UseIOPresentment-callees.s 50-UseIOPresentment
+          53-IOPresentment-str-DisplayPipeSupported.s 53-IOPresentment-str-TransactionsSupported.s \
+          53-IOPresentment-str-AGDC_Extended_Capabilities_not_found.s 54-isMobileSystem.s 54-isMobileSystem-callees.s \
+          55-GetSystemGPUVendors.s 55-GetSystemGPUVendors-blocks.s 55-GetSystemGPUVendors-callees.s \
+-         56-useIOP-users.s 56-useIOP-callees.s 57-cfstr-resolved.txt 58-cstring-iop.txt; do
++         56-useIOP-users.s 56-useIOP-callees.s 57-cfstr-resolved.txt 58-cstring-iop.txt \
++         60-GetBoolCFPreference.s 60-GetCFPreference-variants.s 60-InitializeUserDefaults.s 60-CGXMappedDisplayStart.s \
++         60-GetBoolCFPreference-callers.s 60-GetBoolCFPreference-callsites.s 60-GetBoolCFPreference-keys.txt \
++         60-kCFPreferences-refs.txt 60-GetBoolCFPreference-riploads.txt; do
+     [ -f "$O2/$f" ] || fail "empty runner: $f does not exist (the workflow reads it under bash -e)"
+     grep -q '^not found: ' "$O2/$f" || fail "empty runner: $f lacks its 'not found' line: $(head -2 "$O2/$f")"
+ done
+@@ -335,13 +410,19 @@ for f in 50-UseIOPresentment.s 50-UseIOPresentment-callees.s 50-UseIOPresentment
+          53-IOPresentment-str-DisplayPipeSupported.s 53-IOPresentment-str-TransactionsSupported.s \
+          53-IOPresentment-str-AGDC_Extended_Capabilities_not_found.s 54-isMobileSystem.s 54-isMobileSystem-callees.s \
+          43-fn-CoreDisplay-isMobile.s 55-GetSystemGPUVendors.s 55-GetSystemGPUVendors-blocks.s 55-GetSystemGPUVendors-callees.s \
+-         55-GetSystemGPUVendors-keys.txt 56-useIOP-users.s 56-useIOP-callees.s 56-useIOP-keys.txt 57-cfstr-resolved.txt 58-cstring-iop.txt; do
++         55-GetSystemGPUVendors-keys.txt 56-useIOP-users.s 56-useIOP-callees.s 56-useIOP-keys.txt 57-cfstr-resolved.txt 58-cstring-iop.txt \
++         60-GetBoolCFPreference.s 60-GetCFPreference-variants.s 60-InitializeUserDefaults.s 60-CGXMappedDisplayStart.s \
++         60-GetBoolCFPreference-callers.s 60-GetBoolCFPreference-callsites.s 60-GetBoolCFPreference-keys.txt \
++         60-kCFPreferences-refs.txt 60-GetBoolCFPreference-riploads.txt; do
+     grep -q "probe-out/$f " "$T/step.sh" || fail "probe.yml does not show $f"
+ done
+ grep -q '^== switch: CoreDisplay::UseIOPresentment' "$T/wf1.log" || fail "the step did not print the UseIOPresentment section: $(tail -5 "$T/wf1.log")"
+ grep -q '^__ZN11CoreDisplay16UseIOPresentmentEv:$' "$T/wf1.log" || fail "the step did not print the UseIOPresentment body"
+ grep -q '^== run 10: GetSystemGPUVendors' "$T/wf1.log" || fail "the step did not print the GetSystemGPUVendors section"
+ grep -q '^7FF804058101  vendor-id$' "$T/wf1.log" || fail "the step did not print the resolved CFSTRs"
++grep -q '^== run 11: GetBoolCFPreference$' "$T/wf1.log" || fail "the step did not print the run 11 section"
++grep -q '^__ZN11CoreDisplayL17GetBoolCFPreferenceEPK10__CFStringb:$' "$T/wf1.log" || fail "the step did not print the GetBoolCFPreference body"
++grep -q '^7FF80405E101  displaySurfaceUsesIOSurface$' "$T/wf1.log" || fail "the step did not print the resolved GetBoolCFPreference keys"
+ grep -q '^not found: CoreDisplay::DisplayPipeForService' "$T/wf1.log" || fail "the step did not print a not-found file"
+ # a real-size disassembly passes, also when the by-address file would be missing
+ { cat "$T/fake.dis"; i=0; while [ $i -lt 1100 ]; do echo "  0x$i  nop"; i=$((i + 1)); done; } > "$T/big.dis"
+@@ -350,6 +431,9 @@ grep -q '^not found: CoreDisplay::DisplayPipeForService' "$T/wf1.log" || fail "t
+ sed -i.bak 's#^show "present mode: the same, found by the address of the string" probe-out/40-page-flip-fn-CoreDisplay-by-address.s#show "gone" probe-out/does-not-exist.s#' "$T/step.sh"
+ ( cd "$T/wf2" && PATH="$T/bin:$PATH" FAKE_DIS="$T/big.dis" bash -eo pipefail "$T/step.sh" ) > "$T/wf3.log" 2>&1 || fail "a missing file aborted the step"
+ grep -q '^== gone: MISSING probe-out/does-not-exist.s' "$T/wf3.log" || fail "a missing file is not named"
++# probe run 11 shows less than 3000 extra lines
++extra=$(grep -o 'probe-out/60-[^ ]* [0-9]*$' "$WF" | awk '{ n += $2 } END { print n + 0 }')
++[ "$extra" -gt 0 ] && [ "$extra" -lt 3000 ] || fail "probe.yml: run 11 shows $extra lines (want 1..2999)"
+ # ---- tools/probe/cfstr_peek.c: the CoreDisplay CFSTR / useIOP default reader (macOS-only C)
+ C=$ROOT/tools/probe/cfstr_peek.c
+ [ -f "$C" ] || fail "tools/probe/cfstr_peek.c is missing"
+@@ -363,13 +447,13 @@ fi
+     fail "cfstr_peek.c must be read-only (stdout only)"
+ for needle in 'dlopen' 'CoreDisplay.framework' 'LC_SEGMENT_64' '_dyld_get_image_vmaddr_slide' 'outside CoreDisplay' \
+               'CFStringGetTypeID' 'CFPreferencesCopyValue' 'kCFPreferencesAnyUser' 'kCFPreferencesCurrentHost' \
+-              'kern.osversion' '24H32' 'unset' 'useIOP_onAMD' 'useIOP_onNVIDIA' 'useIOP_onAPV' 'useIOP_onIG'; do
++              'kern.osversion' '24H32' 'unset' 'useIOP_onAMD' 'useIOP_onNVIDIA' 'useIOP_onAPV' 'useIOP_onIG' 'displaySurfaceUsesIOSurface' 'useIOP_gamma_onAMD'; do
+     grep -qF -- "$needle" "$C" || fail "cfstr_peek.c lacks [$needle]"
+ done
+ # probe.yml builds, runs and shows it, and none of it can fail the step
+ grep -q '^ *cc -O0 -o probe-out/cfstr_peek tools/probe/cfstr_peek.c -framework CoreFoundation || echo ' "$WF" || fail "probe.yml: no cfstr_peek build line with || echo"
+ grep -qE '> probe-out/59-cfstr-peek.txt 2>&1 \|\| echo "cfstr_peek exited \$\?"' "$WF" || fail "probe.yml: the cfstr_peek run must not fail the step"
+-grep -q 'show ".*" probe-out/59-cfstr-peek.txt 100' "$WF" || fail "probe.yml does not show 59-cfstr-peek.txt (100 lines)"
++grep -q 'show ".*" probe-out/59-cfstr-peek.txt 150' "$WF" || fail "probe.yml does not show 59-cfstr-peek.txt (150 lines)"
+ for a in s:0x7ff8405067b8 s:0x7ff840502798 s:0x7ff8405067d8 s:0x7ff8404fec98 0x7ff8404fd578 \
+          b:0x7ff843bac76d b:0x7ff843bac76e b:0x7ff843bad281 b:0x7ff843bad282 b:0x7ff843bad283; do
+     grep -qF -- "$a" "$WF" || fail "probe.yml does not pass $a to cfstr_peek"
+diff --git a/tools/probe/cfstr_peek.c b/tools/probe/cfstr_peek.c
+index 77cf927..6774c7e 100644
+--- a/tools/probe/cfstr_peek.c
++++ b/tools/probe/cfstr_peek.c
+@@ -229,8 +229,10 @@ static void print_value(CFTypeRef v)
+ 
+ static void prefs_pass(CFStringRef domain)
+ {
++    /* the useIOP* flags, and the keys CoreDisplay's GetBoolCFPreference reads (probe run 11) */
+     static const char *keys[] = {"useIOP", "useIOP_onIG", "useIOP_onAMD", "useIOP_onNVIDIA",
+-                                 "useIOP_onAPV", NULL};
++                                 "useIOP_onAPV", "displaySurfaceUsesIOSurface",
++                                 "useIOP_gamma_onAMD", NULL};
+     CFStringRef users[2] = {kCFPreferencesAnyUser, kCFPreferencesCurrentUser};
+     const char *uname[2] = {"AnyUser", "CurrentUser"};
+     CFStringRef hosts[2] = {kCFPreferencesAnyHost, kCFPreferencesCurrentHost};
+@@ -242,7 +244,7 @@ static void prefs_pass(CFStringRef domain)
+             for (k = 0; keys[k]; k++) {
+                 CFStringRef key = CFStringCreateWithCString(NULL, keys[k], kCFStringEncodingUTF8);
+                 CFPropertyListRef v = key ? CFPreferencesCopyValue(key, domain, users[u], hosts[h]) : NULL;
+-                printf("pref %-11s %-11s %-16s = ", uname[u], hname[h], keys[k]);
++                printf("pref %-11s %-11s %-28s = ", uname[u], hname[h], keys[k]);
+                 if (v) {
+                     print_value(v);
+                     CFRelease(v);
+diff --git a/tools/probe/coredisplay.sh b/tools/probe/coredisplay.sh
+index 1d2845a..206f988 100755
+--- a/tools/probe/coredisplay.sh
++++ b/tools/probe/coredisplay.sh
+@@ -23,6 +23,13 @@
+ # useIOP_on*, the CFSTR keys those functions use (a CFSTR reference is a bare "; " in the
+ # disassembly: it points to the __cfstring object, resolved here through a dump of that
+ # section) and the IOP / vendor strings of the cstring tables.
++# Probe run 11 (60- files): which user / host CoreDisplay::GetBoolCFPreference passes to
++# CFPreferencesCopyValue(key, "com.apple.CoreDisplay", user, host) (another project found AnyUser +
++# CurrentHost, the ByHost store, on macOS 26) and which keys CoreDisplay reads through it: the
++# function (and the Int / CF variants), InitializeUserDefaults, _CGXMappedDisplayStart, every
++# call site with the instructions before it (the key CFSTR is resolved like in run 10), and the
++# loads of kCFPreferences{AnyUser,CurrentUser,AnyHost,CurrentHost} (a GOT load shows the symbol
++# in its comment, or only a rip-relative address: that is resolved against the dyld_info -fixups dump).
+ out=${1:-probe-out}
+ mkdir -p "$out"
+ sw_vers > "$out/00-system.txt"; uname -a >> "$out/00-system.txt"
+@@ -55,7 +62,9 @@ for lib in /System/Library/Frameworks/CoreDisplay.framework/Versions/A/CoreDispl
+         [ -s "$out/$n.cfstring" ] || dyld_info -arch x86_64 -section __DATA __cfstring "$lib" > "$out/$n.cfstring" 2>>"$out/$n.dis.err"
+         dyld_info -arch x86_64 -section __DATA_CONST __const "$lib" > "$out/$n.const" 2>>"$out/$n.dis.err"
+         dyld_info -arch x86_64 -section __DATA __const "$lib" >> "$out/$n.const" 2>>"$out/$n.dis.err"
+-        wc -l "$out/$n.cfstring" "$out/$n.const" >> "$out/00-system.txt"
++        # probe run 11: which GOT slot is which symbol (kCFPreferencesAnyUser, ...)
++        dyld_info -arch x86_64 -fixups "$lib" > "$out/$n.fixups" 2>>"$out/$n.dis.err"
++        wc -l "$out/$n.cfstring" "$out/$n.const" "$out/$n.fixups" >> "$out/00-system.txt"
+     fi
+     # an empty disassembly or string table makes every later file empty without a word: say it here
+     for part in dis cstring; do
+@@ -358,7 +367,7 @@ function lea(line,    s, neg, d) {
+ function emit(tok, text,    f) {
+     if (tok in seen) return
+     seen[tok] = 1
+-    if (pfn != lastfn) { f = pfn; sub(/:[ \t]*$/, "", f); print "== " f; lastfn = pfn }
++    if (pfn != lastfn) { f = pfn; sub(/:[ \t]*$/, "", f); sub(/^== /, "", f); print "== " f; lastfn = pfn }
+     print tok "  " text
+ }
+ function resolve(nextad,    t, p, ps) {
+@@ -464,6 +473,97 @@ for n in CoreDisplay SkyLight; do
+     grep -n -E "$iop" "$out/$n.cstring" >> "$out/58-cstring-iop.txt" 2>/dev/null
+     [ "${c:-0}" -gt 0 ] || echo "not found: no cstring of $n matches (is $n.cstring empty?)" >> "$out/58-cstring-iop.txt"
+ done
++# ---- probe run 11: the user / host GetBoolCFPreference passes to CFPreferencesCopyValue, and its keys
++# 1. the functions, whole (CoreDisplay and, for _CGXMappedDisplayStart, SkyLight too)
++fn_both() {   # fn_both LABEL-REGEX OUT WHAT: the whole function(s) of CoreDisplay.dis and SkyLight.dis
++    fn "$cd_dis" "$1" "$out/.fa.tmp" 2>/dev/null
++    fn "$out/SkyLight.dis" "$1" "$out/.fb.tmp" 2>/dev/null
++    { [ -s "$out/.fa.tmp" ] && { echo "# CoreDisplay.dis"; cat "$out/.fa.tmp"; }
++      [ -s "$out/.fb.tmp" ] && { echo "# SkyLight.dis"; cat "$out/.fb.tmp"; }
++      true; } > "$2"
++    rm -f "$out/.fa.tmp" "$out/.fb.tmp"
++    nf "$2" "$3 (no label matching $1 in CoreDisplay.dis or SkyLight.dis)"
++}
++fn_both 'GetBoolCFPreference' "$out/60-GetBoolCFPreference.s" "GetBoolCFPreference"
++fn_both 'Get(Int|CF|Float|Double|String|Number)[A-Za-z]*Pref' "$out/60-GetCFPreference-variants.s" "GetIntCFPreference / GetCFPreference variants"
++fn_both 'InitializeUserDefaults' "$out/60-InitializeUserDefaults.s" "CoreDisplay::InitializeUserDefaults"
++fn_both 'CGXMappedDisplayStart' "$out/60-CGXMappedDisplayStart.s" "_CGXMappedDisplayStart"
++# 2. the callers of GetBoolCFPreference, whole, and every call site with the 10 instructions before it
++callers "$cd_dis" 'GetBoolCFPreference' "$out/60-GetBoolCFPreference-callers.s" 2>/dev/null
++nf "$out/60-GetBoolCFPreference-callers.s" "no function of CoreDisplay.dis calls GetBoolCFPreference"
++callsites() {   # callsites DIS REGEX OUT MAXSITES: "== function (call site ADDR)" and the instructions up to the call
++    awk -v re="$2" -v maxn="$4" '
++        /^[_A-Za-z0-9$.]+.*:$/ || /^_[^ ]*:$/ || /^[-+]\[.*\]:$/ { fname = $0; sub(/:[ \t]*$/, "", fname); n = 0; next }
++        { hist[n % 10] = $0; n++ }
++        $0 ~ re && $0 !~ /:$/ && nsite < maxn {
++            nsite++; print "== " fname " (call site " $1 ")"
++            for (i = (n > 10 ? n - 10 : 0); i < n; i++) print hist[i % 10]
++        }' "$1" > "$3" 2>/dev/null
++    nf "$3" "no call to $2 in $(basename "$1")"
++}
++callsites "$cd_dis" 'Get(Bool|Int|CF|Float|Double|String|Number)[A-Za-z]*Pref' "$out/60-GetBoolCFPreference-callsites.s" 400
++# 3. the keys: the CFSTRs loaded before those calls (resolver of run 10)
++: > "$out/.stats.tmp"
++if [ -s "$out/CoreDisplay.cfstring" ] && [ -s "$out/60-GetBoolCFPreference-callsites.s" ]; then
++    awk -v mode=cfstr -v memfile="$out/CoreDisplay.cfstring" -v cst="$out/CoreDisplay.cstring" -v stats="$out/.stats.tmp" \
++        "$RES_FN $RES_MAIN" "$out/60-GetBoolCFPreference-callsites.s" > "$out/60-GetBoolCFPreference-keys.txt" 2>>"$out/CoreDisplay.dis.err"
++    cat "$out/.stats.tmp" >> "$out/00-system.txt"
++    nf "$out/60-GetBoolCFPreference-keys.txt" "no CFSTR before a GetBoolCFPreference call resolved (see 60-GetBoolCFPreference-callsites.s and the CFSTR resolver line of 00-system.txt)"
++else
++    echo "not found: no __cfstring dump or no call site (see CoreDisplay.dis.err); read the keys in 60-GetBoolCFPreference-callsites.s" > "$out/60-GetBoolCFPreference-keys.txt"
++fi
++rm -f "$out/.stats.tmp"
++# 4. the user / host arguments: kCFPreferences* named in comments anywhere, then the rip-relative
++# operands of the preference functions (target = next instruction address + displacement) looked up in the fixups dump
++{
++    echo "== lines naming kCFPreferencesAnyUser / CurrentUser / AnyHost / CurrentHost (function | instruction), CoreDisplay.dis"
++    awk '
++        /^[_A-Za-z0-9$.]+.*:$/ || /^_[^ ]*:$/ || /^[-+]\[.*\]:$/ { fname = $0; sub(/:[ \t]*$/, "", fname); next }
++        /kCFPreferences(AnyUser|CurrentUser|AnyHost|CurrentHost|AnyApplication|CurrentApplication)/ { n++; if (n <= 300) print fname " | " $0 }
++        END { if (n > 300) print "... " n - 300 " more" }' "$cd_dis" 2>/dev/null
++    echo "== fixups / binds naming them, CoreDisplay.fixups"
++    grep -n 'kCFPreferences' "$out/CoreDisplay.fixups" 2>/dev/null | head -40
++} > "$out/60-kCFPreferences-refs.txt"
++grep -q ' | ' "$out/60-kCFPreferences-refs.txt" || echo "not found: no line of CoreDisplay.dis names kCFPreferencesAnyUser / CurrentUser / AnyHost / CurrentHost (GOT loads without a symbol comment: see 60-GetBoolCFPreference-riploads.txt)" >> "$out/60-kCFPreferences-refs.txt"
++{
++    echo "== rip-relative operands of the preference functions: address, instruction => target"
++    awk "$RES_FN"'
++    function rip(line,    s, neg, d) {
++        ripok = 0
++        if (match(line, /-?0[xX][0-9a-fA-F]+[(]%rip[)]/)) {
++            s = substr(line, RSTART, RLENGTH); sub(/[(]%rip[)]/, "", s)
++            neg = (substr(s, 1, 1) == "-"); sub(/^-/, "", s); d = hex2dec(s)
++        } else if (match(line, /[(]%rip[)]/)) { d = 0; neg = 0 }
++        else if (match(line, /\[rip *[-+] *0[xX][0-9a-fA-F]+\]/)) {
++            s = substr(line, RSTART, RLENGTH); neg = (index(s, "-") > 0)
++            sub(/^\[rip *[-+] */, "", s); sub(/\]$/, "", s); d = hex2dec(s)
++        } else return
++        if (d < 0) return
++        rdisp = neg ? -d : d; ripok = 1
++    }
++    function flush(nextad) { if (pend) { printf "%s => 0x%s\n", ptext, (nextad >= 0 ? dec2hex(nextad + rdisp) : "?"); pend = 0 } }
++    /^== / || /^[^ \t].*:[ \t]*$/ { flush(-1); print; next }
++    {
++        if (!ishexaddr($1)) next
++        flush(addrof($1))
++        rip($0)
++        if (ripok) { pend = 1; ptext = $0 }
++    }
++    END { flush(-1) }' "$out/60-GetBoolCFPreference.s" "$out/60-GetCFPreference-variants.s" "$out/60-InitializeUserDefaults.s" 2>/dev/null
++} > "$out/60-GetBoolCFPreference-riploads.txt"
++grep -q '=> 0x' "$out/60-GetBoolCFPreference-riploads.txt" || echo "not found: no rip-relative operand in the GetBoolCFPreference / variants / InitializeUserDefaults dumps" >> "$out/60-GetBoolCFPreference-riploads.txt"
++{
++    echo "== fixups lines for the targets above (best effort: the dyld_info -fixups format is not known)"
++    grep -o '=> 0x[0-9A-F]*' "$out/60-GetBoolCFPreference-riploads.txt" 2>/dev/null | sed 's/^=> 0x//' | sort -u | head -60 | while IFS= read -r t; do
++        [ -n "$t" ] && [ "$t" != "?" ] || continue
++        echo "-- $t"
++        grep -i -F -- "$t" "$out/CoreDisplay.fixups" 2>/dev/null | head -3
++    done
++} >> "$out/60-GetBoolCFPreference-riploads.txt"
++{
++    echo "== GetBoolCFPreference, its user / host and keys (probe run 11)"
++    wc -l "$out"/60-* 2>/dev/null
++} >> "$out/00-system.txt"
+ {
+     echo "== GetSystemGPUVendors, useIOP, CFSTR keys (probe run 10)"
+     wc -l "$out"/55-* "$out"/56-* "$out"/57-* "$out"/58-* 2>/dev/null

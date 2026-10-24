@@ -1,5 +1,8 @@
 # Notes for AI agents working in this repository
 
+- **Session agent (the manager), before anything else: read
+  [docs/HANDOFF.md](docs/HANDOFF.md)** — the state of the work, what the last
+  session learned and left to do, and the owner's check phrase.
 - macOS driver for AMD RX 7800 XT (Navi 32), ported from Linux amdgpu.
   Working branch: `stage1-kext`.
 - Talk to the user in Polish; everything committed is English only.

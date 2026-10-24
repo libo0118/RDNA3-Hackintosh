@@ -1,0 +1,418 @@
+diff --git a/tests/test_coredisplay_prefs.sh b/tests/test_coredisplay_prefs.sh
+index fb51de7..79a26a2 100755
+--- a/tests/test_coredisplay_prefs.sh
++++ b/tests/test_coredisplay_prefs.sh
+@@ -1,8 +1,12 @@
+ #!/bin/bash
+ # DRIVER-PLAN N44: autoreport.sh's coredisplay_iop_prefs (CoreDisplay's useIOP / useIOP_onAMD in
+-# /Library/Preferences/com.apple.CoreDisplay, written on every boot of the VM, taken out with the
+-# boot-arg rdna3iopprefs=0) run on the host with a stub `defaults` and `sysctl`, and what it prints read
+-# by tools/triage_reports.py's cd_prefs_rows:
++# /Library/Preferences/com.apple.CoreDisplay (AnyHost) and in /Library/Preferences/ByHost/
++# com.apple.CoreDisplay.<IOPlatformUUID> (ByHost; Navi48-MacOS, Almosst-DEV, MIT, found CoreDisplay reading it),
++# written on every boot of the VM, taken out with the boot-arg rdna3iopprefs=0) run on the host with a stub
++# `defaults`, `sysctl` and `ioreg`, and what it prints read by tools/triage_reports.py's cd_prefs_rows:
++#  - both stores written / taken out, each reported on its own; one store failing is "could NOT" for that store
++#    only (the other is still written); the host UUID unknown ("could NOT", AnyHost still written)
++#  - only AnyHost holding the keys at WindowServer's start: triage WARN "may read the ByHost store"
+ #  - the first boot: the domain did not exist (WindowServer started without them), both keys written,
+ #    "the next boot" said; a second call in the same boot keeps the state of the boot's start
+ #  - the next boot: WindowServer started with both = 1 (triage INFO with useIOP_onAMD 1)
+@@ -22,28 +26,34 @@ fail() { echo "test_coredisplay_prefs: FAIL $*"; [ -f "$T/out" ] && sed 's/^/  |
+ AR="$ROOT/tools/vm/macos/autoreport.sh"
+ 
+ { sed -n '/^CD_PREFS=/p; /^CD_PREFS_BOOT=/p' "$AR"; sed -n '/^cd_prefs_read() {/,/^}/p' "$AR"
++  sed -n '/^CD_BYHOST_DIR=/p' "$AR"; sed -n '/^cd_host_uuid() {/,/^}/p; /^cd_prefs_state() {/,/^}/p; /^cd_prefs_on() {/,/^}/p; /^cd_prefs_off() {/,/^}/p' "$AR"
+   sed -n '/^coredisplay_iop_prefs() {/,/^}/p' "$AR"; } > "$T/fn.sh"
+-[ "$(wc -l < "$T/fn.sh")" -gt 25 ] || fail "coredisplay_iop_prefs not found in autoreport.sh"
++[ "$(wc -l < "$T/fn.sh" | tr -d " ")" -gt 40 ] || fail "coredisplay_iop_prefs not found in autoreport.sh"
+ grep -q '^\[ -z "\$STANDALONE" \] && coredisplay_iop_prefs >/dev/null 2>&1$' "$AR" || fail "not called on every boot"
+ grep -q '^    coredisplay_iop_prefs$' "$AR" || fail "not printed into the tests file"
+ grep -q "run 19-coredisplay-prefs.txt sh -c 'defaults read /Library/Preferences/com.apple.CoreDisplay;" \
+     "$ROOT/tools/macos/collect.sh" || fail "collect.sh does not pack 19-coredisplay-prefs.txt"
++grep -q "19-coredisplay-prefs.txt .*defaults read /Library/Preferences/ByHost/com.apple.CoreDisplay.\$u" "$ROOT/tools/macos/collect.sh" ||
++    fail "collect.sh does not read the ByHost store into 19-coredisplay-prefs.txt"
++grep -q 'ls -l /Library/Preferences/ByHost/ | grep CoreDisplay' "$ROOT/tools/macos/collect.sh" || fail "collect.sh does not list the ByHost files"
+ grep -q 'case " ${RDNA3VM_BOOTARGS:-} " in \*" rdna3iopprefs=0 "\*) iop=" rdna3iopprefs=0"' "$ROOT/tools/vm/rdna3vm" ||
+     fail "rdna3vm does not pass rdna3iopprefs=0 to the install boot"
+ 
+-mkdir -p "$T/bin" "$T/store"
++mkdir -p "$T/bin" "$T/store" "$T/store_bh" "$T/ByHost"
+ cat > "$T/bin/defaults" <<'STUB'
+ #!/bin/sh
+ # a domain = a directory of key files; the output looks like macOS's defaults
+-s=$STORE
++# the ByHost domain (a path under /ByHost/) is a second directory; a stub failure can hit one store only
++case $2 in */ByHost/*) s=$STORE_BH; bh=1 ;; *) s=$STORE; bh= ;; esac
+ case $1 in
+ read)
+     if [ -n "${3:-}" ]; then [ -f "$s/$3" ] && cat "$s/$3" && exit 0; echo "does not exist" >&2; exit 1; fi
+     [ -n "$(ls "$s")" ] || { echo "Domain $2 does not exist" >&2; exit 1; }
+     echo "{"; for k in $(ls "$s"); do case $k in *_*) q="\"$k\"" ;; *) q=$k ;; esac; echo "    $q = $(cat "$s/$k");"; done; echo "}" ;;
+ write) [ -n "${DEFAULTS_FAIL:-}" ] && exit 1; [ -n "${PARTIAL_FAIL:-}" ] && [ "$3" = useIOP_onAMD ] && exit 1
++       [ -n "$bh" ] && [ -n "${FAIL_BH:-}" ] && exit 1; [ -z "$bh" ] && [ -n "${FAIL_ANY:-}" ] && exit 1
+        [ "$4" = -bool ] && [ "$5" = true ] && echo 1 > "$s/$3" ;;
+-delete) [ -n "${DELETE_FAIL:-}" ] && exit 1; rm -f "$s/$3" ;;
++delete) [ -n "${DELETE_FAIL:-}" ] && exit 1; [ -n "$bh" ] && [ -n "${DELETE_FAIL_BH:-}" ] && exit 1; rm -f "$s/$3" ;;
+ esac
+ STUB
+ cat > "$T/bin/sysctl" <<'STUB'
+@@ -53,10 +63,20 @@ kern.boottime) if [ -n "${BTRAW+x}" ]; then echo "$BTRAW"; else echo "{ sec = $B
+ kern.bootargs) echo "$BOOTARGS" ;;
+ esac
+ STUB
+-chmod +x "$T/bin/defaults" "$T/bin/sysctl"
++cat > "$T/bin/ioreg" <<'STUB'
++#!/bin/sh
++# ioreg -rd1 -c IOPlatformExpertDevice: the UUID line only when UUID is set (an empty one = ioreg without it)
++echo '+-o Root  <class IORegistryEntry, id 0x100000100, retain 20>'
++echo '  | "IOPlatformSerialNumber" = "SERIAL123"'
++[ -n "${UUID:-}" ] && echo "  | \"IOPlatformUUID\" = \"$UUID\""
++exit 0
++STUB
++chmod +x "$T/bin/defaults" "$T/bin/sysctl" "$T/bin/ioreg"
++UUID1=11111111-2222-3333-4444-555555555555
+ 
+ call() {   # call <out> <env...>
+-    ( export PATH="$T/bin:$PATH" STORE="$T/store" RDNA3_CD_PREFS=/Library/Preferences/com.apple.CoreDisplay \
++    ( export PATH="$T/bin:$PATH" STORE="$T/store" STORE_BH="$T/store_bh" RDNA3_CD_PREFS=/Library/Preferences/com.apple.CoreDisplay \
++             RDNA3_CD_BYHOST_DIR="$T/ByHost" UUID=$UUID1 FAIL_BH= FAIL_ANY= DELETE_FAIL_BH= \
+              RDNA3_CD_PREFS_BOOT="$T/boot.txt" STANDALONE= BOOTARGS="rdna3fb=1" BOOTSEC=100 DEFAULTS_FAIL= PARTIAL_FAIL= DELETE_FAIL=
+       unset BTRAW
+       export "${@:2}"
+@@ -123,7 +143,7 @@ head -n 1 "$T/boot.txt" | grep -qx "boot 700" || fail "u1: the boot record is no
+ call u2 BOOTSEC=700 USEC=1
+ head -n 1 "$T/boot.txt" | grep -qx "boot 700" || fail "u2: another usec of the same boot changed the record"
+ grep -qF "started with: (none)" "$T/u2" || fail "u2: the same boot (another usec) overwrote the boot's start state"
+-rm -f "$T"/store/*
++rm -f "$T"/store/* "$T"/store_bh/*
+ 
+ # the boot time cannot be parsed: the record is rewritten on every call and the line says it could NOT tell;
+ # triage WARNs and does not trust the state
+@@ -140,7 +160,7 @@ call t3 BTRAW=""
+ grep -qF "could NOT tell this boot's start state" "$T/t3" || fail "t3: an empty kern.boottime"
+ call t4 BTRAW="{ usec = 5 }"
+ grep -qF "could NOT tell this boot's start state" "$T/t4" || fail "t4: no sec = in kern.boottime"
+-rm -f "$T"/store/*
++rm -f "$T"/store/* "$T"/store_bh/*
+ 
+ # the boot's record cannot be written: "could NOT keep", the old file's content is not this boot's state
+ mkdir -p "$T/boots"
+@@ -150,10 +170,10 @@ grep -qF "started with: (unknown)" "$T/k1" || fail "k1: the state of a lost reco
+ rows k1 "rdna3fb=1" > "$T/rk1"; cp "$T/rk1" "$T/out"
+ grep -q "^WARN autoreport.sh: could NOT keep this boot's state" "$T/rk1" || fail "k1: triage WARN"
+ grep -qx "amd=False" "$T/rk1" || fail "k1: useIOP_onAMD must be unknown"
+-rm -f "$T"/store/*
++rm -f "$T"/store/* "$T"/store_bh/*
+ call k2 RDNA3_CD_PREFS_BOOT="$T/boots"     # a directory at the record's name
+ grep -qF "could NOT keep this boot's state" "$T/k2" && grep -qF "started with: (unknown)" "$T/k2" || fail "k2: a directory as the record"
+-rm -f "$T"/store/*
++rm -f "$T"/store/* "$T"/store_bh/*
+ 
+ # rdna3iopprefs=0 but the keys do not go away
+ call d1 BOOTSEC=800
+@@ -165,14 +185,14 @@ grep -q "^WARN autoreport.sh: rdna3iopprefs=0: useIOP / useIOP_onAMD could NOT b
+ # ... and WindowServer had started with the keys although rdna3iopprefs=0: not the A/B without them (triage WARN)
+ grep -q "^WARN rdna3iopprefs=0 but WindowServer started with useIOP_onAMD 1" "$T/rd2" || fail "d2: triage WARN (=0 with the keys at the start)"
+ ! grep -q "A/B without them$" "$T/rd2" || fail "d2: the row calls the run the A/B"
+-rm -f "$T"/store/*
++rm -f "$T"/store/* "$T"/store_bh/*
+ 
+ # a write that takes for one key only
+ call p1 BOOTSEC=810 PARTIAL_FAIL=1
+ grep -qF "useIOP / useIOP_onAMD could NOT be written" "$T/p1" || fail "p1: partial write not said"
+ rows p1 "rdna3fb=1" > "$T/rp1"; cp "$T/rp1" "$T/out"
+ grep -q "^WARN autoreport.sh: useIOP / useIOP_onAMD could NOT be written" "$T/rp1" || fail "p1: triage WARN"
+-rm -f "$T"/store/*
++rm -f "$T"/store/* "$T"/store_bh/*
+ 
+ # the boot-arg is a whole token: =0 alone or last or first takes the keys out; =01, =1, a prefix or suffix do not
+ n=820
+@@ -182,11 +202,11 @@ for ba in "rdna3iopprefs=0" "rdna3fb=1 rdna3iopprefs=0" "rdna3iopprefs=0 rdna3fb
+     grep -qF "rdna3iopprefs=0: useIOP / useIOP_onAMD taken out" "$T/w${n}o" || fail "'$ba': taken out not said"
+ done
+ for ba in "rdna3iopprefs=01" "rdna3iopprefs=1" "xrdna3iopprefs=0" "rdna3iopprefs=0x" "rdna3iopprefs=" "rdna3iopprefs"; do
+-    n=$((n + 1)); rm -f "$T"/store/*; call w$n BOOTSEC=$n BOOTARGS="$ba"
++    n=$((n + 1)); rm -f "$T"/store/* "$T"/store_bh/*; call w$n BOOTSEC=$n BOOTARGS="$ba"
+     [ -f "$T/store/useIOP_onAMD" ] && [ -f "$T/store/useIOP" ] || fail "'$ba' must write the keys"
+     grep -qF "useIOP / useIOP_onAMD true" "$T/w$n" || fail "'$ba': written not said"
+ done
+-rm -f "$T"/store/*
++rm -f "$T"/store/* "$T"/store_bh/*
+ 
+ # rdna3vm passes the off switch to the install boot only as a whole token (the case of cmd__install, run as it is)
+ sed -n '/^    case " ${RDNA3VM_BOOTARGS:-} " in \*" rdna3iopprefs=0 "\*) iop=/p' "$ROOT/tools/vm/rdna3vm" > "$T/rv.sh"
+diff --git a/tools/macos/collect.sh b/tools/macos/collect.sh
+index 868bda5..ed30acf 100755
+--- a/tools/macos/collect.sh
++++ b/tools/macos/collect.sh
+@@ -60,8 +60,12 @@ run 17-sysctl-agdc.txt sh -c "sysctl debug 2>/dev/null | grep rdna3agdc || echo
+ # framebuffers' side is RDNA3,FBStats virq_* in 12-ioreg-fb.txt
+ run 18-sysctl-dispirq.txt sh -c "sysctl debug.rdna3_vblirq 2>/dev/null || echo '(no debug.rdna3_vblirq sysctl: a core older than DRIVER-PLAN N42)'; sysctl debug.rdna3_dispirq 2>/dev/null || echo '(no debug.rdna3_dispirq sysctl)'"
+ # DRIVER-PLAN N44: CoreDisplay's IOPresentment switches now, and as this boot's WindowServer
+-# started with them (kept by autoreport.sh; "boot <sec>" then the domain on one line)
+-run 19-coredisplay-prefs.txt sh -c 'defaults read /Library/Preferences/com.apple.CoreDisplay; echo "== at the start of the boot (autoreport.sh):"; cat /var/db/rdna3-coredisplay-prefs-boot.txt'
++# started with them (kept by autoreport.sh; "boot <sec>" then "AnyHost: ...; ByHost(<uuid>): ..." on one
++# line). Two stores: AnyHost (/Library/Preferences/com.apple.CoreDisplay.plist) and ByHost
++# (/Library/Preferences/ByHost/com.apple.CoreDisplay.<IOPlatformUUID>.plist, the one Navi48-MacOS,
++# Almosst-DEV, MIT, found CoreDisplay reading on macOS 26); the ByHost files that exist are listed
++# so a wrong UUID in the name shows
++run 19-coredisplay-prefs.txt sh -c 'defaults read /Library/Preferences/com.apple.CoreDisplay; u=$(ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | head -n 1 | cut -d\" -f4); echo "== ByHost store (IOPlatformUUID $u):"; defaults read /Library/Preferences/ByHost/com.apple.CoreDisplay.$u; echo "== ByHost files:"; ls -l /Library/Preferences/ByHost/ | grep CoreDisplay; echo "== at the start of the boot (autoreport.sh):"; cat /var/db/rdna3-coredisplay-prefs-boot.txt'
+ run 14-ioreg-displays.txt sh -c "ioreg -l -w0 -r -c IODisplayConnect | head -200"
+ run 15-system-profiler.txt system_profiler SPDisplaysDataType
+ # the logs of a whole card run: 45 s cut card run 54's plugin log off
+diff --git a/tools/triage_reports.py b/tools/triage_reports.py
+index a9ef1cf..fbc72ce 100755
+--- a/tools/triage_reports.py
++++ b/tools/triage_reports.py
+@@ -2922,11 +2922,33 @@ def iop_prefs_off(args):
+     return re.search(r"(^|\s)rdna3iopprefs=0(\s|$)", args or "") is not None
+ 
+ 
++# autoreport.sh's state of the two stores on one line: "AnyHost: <domain>; ByHost(<uuid>): <domain>"
++# ("unknown" for the uuid and "(unknown)" for the domain when ioreg gave no IOPlatformUUID). An older
++# autoreport.sh printed the AnyHost domain alone.
++CD_PREFS_STORES_RE = re.compile(r"^AnyHost: (.*?); ByHost\(([^)]*)\): (.*)$")
++
++
++def cd_prefs_stores(st):
++    """(AnyHost domain, uuid, ByHost domain) of a state line; (st, None, None) for the older single-store line"""
++    m = CD_PREFS_STORES_RE.match(st)
++    return (m.group(1), m.group(2), m.group(3)) if m else (st, None, None)
++
++
++def _cd_switches(domain):
++    """(useIOP_onAMD, useIOP) of one flattened `defaults read` domain, "1"/"0"/raw/None (not set)"""
++    return tuple(CD_PREF_BOOL.get((cd_pref(domain, k) or "").lower(), cd_pref(domain, k))
++                 for k in ("useIOP_onAMD", "useIOP"))
++
++
+ def cd_prefs_rows(txt, args="", prefs_member=""):
+     """[(level, label, text)], useIOP_onAMD: CoreDisplay's IOPresentment switches as this boot's
+     WindowServer started with them (autoreport.sh's tests-file lines, else 19-coredisplay-prefs.txt;
+     DRIVER-PLAN N44); useIOP_onAMD is "1"/"0"/None (not set: CoreDisplay's static 0)/False (unknown:
+-    no line, the boot's start state could not be kept, or the boot time was unknown)"""
++    no line, the boot's start state could not be kept, or the boot time was unknown). Two stores are
++    reported separately: AnyHost (/Library/Preferences/com.apple.CoreDisplay.plist) and ByHost
++    (/Library/Preferences/ByHost/com.apple.CoreDisplay.<IOPlatformUUID>.plist, the store
++    CFPreferencesCopyValue(AnyUser, CurrentHost) reads: found for CoreDisplay on macOS 26 by
++    Navi48-MacOS, Almosst-DEV, MIT; unproven on macOS 15). useIOP_onAMD is "1" when either holds it."""
+     label = "CoreDisplay prefs"
+     seen = CD_PREFS_SEEN_RE.findall(txt or "")
+     did = CD_PREFS_DID_RE.findall(txt or "")
+@@ -2946,15 +2968,32 @@ def cd_prefs_rows(txt, args="", prefs_member=""):
+     if st == "(unknown)" or stale:
+         out.append(("WARN", label, "what this boot's WindowServer started with is NOT known (%s): the boot's start state "
+                     "could not be kept or told from an earlier boot's; useIOP_onAMD at WindowServer's start is unknown" % st))
+-    amd, iop = (CD_PREF_BOOL.get((cd_pref(st, k) or "").lower(), cd_pref(st, k)) for k in ("useIOP_onAMD", "useIOP"))
++    st_any, uuid, st_bh = cd_prefs_stores(st)
++    amd_any, iop_any = _cd_switches(st_any)
++    bh_known = st_bh is not None and st_bh != "(unknown)"
++    amd_bh, iop_bh = _cd_switches(st_bh) if bh_known else (None, None)
++    amd = "1" if "1" in (amd_any, amd_bh) else ("0" if "0" in (amd_any, amd_bh) else None)
+     off = iop_prefs_off(args)
+     if not out:
+-        text = "this boot's WindowServer started with useIOP_onAMD %s, useIOP %s (%s)" % (
+-            amd if amd is not None else "unset (CoreDisplay's static 0)", iop if iop is not None else "unset (static 1)", st)
++        def unset(v, static):
++            return v if v is not None else "unset (%s)" % static
++        if st_bh is None:
++            what = "useIOP_onAMD %s, useIOP %s (%s; this autoreport.sh reported the AnyHost store only)" % (
++                unset(amd_any, "CoreDisplay's static 0"), unset(iop_any, "static 1"), st)
++        else:
++            what = "AnyHost: useIOP_onAMD %s, useIOP %s; ByHost(%s): %s (%s)" % (
++                unset(amd_any, "CoreDisplay's static 0"), unset(iop_any, "static 1"), uuid,
++                "useIOP_onAMD %s, useIOP %s" % (unset(amd_bh, "static 0"), unset(iop_bh, "static 1")) if bh_known else
++                "not known (ioreg gave no IOPlatformUUID)", st)
++        text = "this boot's WindowServer started with " + what
+         if amd != "1":
+             text += "; " + ("rdna3iopprefs=0: the A/B without them" if off else
+                             "the switch counts from the next boot (WindowServer started before autoreport wrote it)")
+         out.append(("INFO", label, text))
++        if amd_any == "1" and bh_known and amd_bh != "1":
++            out.append(("WARN", label, "useIOP_onAMD is in the AnyHost store only, not in ByHost(%s): CoreDisplay may read "
++                        "the ByHost store (CFPreferencesCopyValue AnyUser + CurrentHost: Navi48-MacOS evidence on macOS 26, "
++                        "unproven on 15), so this boot's IOPresentment switch may have been off (%s)" % (uuid, st)))
+         if off and amd == "1":
+             # the keys of an earlier boot were still there: rdna3vm's install step returns early when the bundle is
+             # current, so rdna3iopprefs=0 reached no install boot; autoreport.sh takes them out only after
+@@ -2968,6 +3007,53 @@ def cd_prefs_rows(txt, args="", prefs_member=""):
+     return out, (False if (st == "(unknown)" or stale) else amd)
+ 
+ 
++# CoreDisplay's / IOPresentment's own words on the display-pipe capabilities (display_pipe_guard.h and
++# tools/pc/agdc-probe.c of Navi48-MacOS, Almosst-DEV, MIT: macOS 26; the strings are CoreDisplay's, not the
++# driver's, and are expected to be the same on 15): each failure ends the IOPresentment path before Submit
++IOP_LOG_FAILS = (
++    ("Invalid end point size", "the capabilities' end point (HorizontalActive / VerticalActive, from AGDC "
++     "getLinkConfig) is zero: every IOPTransaction dies before Submit"),
++    ("capabilities with no devices", "the capabilities' DeviceArray is empty (AGDC answered 0 devices): "
++     "LoadCapabilities returns FALSE"),
++    ("device with no planes", "the device's PlaneArray is empty (AGDC answered 0 planes): LoadCapabilities returns FALSE"),
++    ("Failed to get capabilities", "IOPresentment capabilities could not be read from the AGDC: LoadCapabilities returns FALSE"),
++)
++IOP_LOG_OK = "AGDC IB successful"
++IOP_LOG_QUEUE = "QueueDepth"
++
++
++def iop_log_rows(cd):
++    """[(level, label, text)]: what CoreDisplay / IOPresentment logged about the display pipe's capabilities in
++    the WindowServer log (24-log-coredisplay.txt, DRIVER-PLAN N44): FAIL per failure string, PASS for 'AGDC IB
++    successful' (the inline buffer was built), INFO whether 'QueueDepth' appears (a key present only when the
++    capabilities came from the display-pipe class, not the base IOPresentmentCapabilities)"""
++    label = "IOPresentment log"
++    # collect.sh wraps a log in "$ command" / "[exit N]": what is left is the log
++    lines = [l for l in (cd or "").splitlines() if l.strip() and not l.startswith(("$ ", "[exit"))]
++    if not lines:
++        return [("WARN", label, "24-log-coredisplay.txt is missing or empty: whether IOPresentment accepted the display "
++                 "pipe's capabilities is not known (DRIVER-PLAN N44)")]
++    out = []
++    for needle, meaning in IOP_LOG_FAILS:
++        hits = [l for l in lines if needle in l]
++        if hits:
++            out.append(("FAIL", label, "'%s' %d time(s) in the CoreDisplay log: %s (first: %s)" % (
++                needle, len(hits), meaning, hits[0].strip()[:200])))
++    ok = sum(1 for l in lines if IOP_LOG_OK in l)
++    qd = sum(1 for l in lines if IOP_LOG_QUEUE in l)
++    if ok:
++        out.append(("PASS", label, "'%s' %d time(s): IOPresentment built the inline buffer from the AGDC's answer" % (IOP_LOG_OK, ok)))
++    elif not any(lv == "FAIL" for lv, _, _ in out):
++        out.append(("INFO", label, "no '%s' and no capabilities failure in the %d-line CoreDisplay log: IOPresentment "
++                    "did not get as far as the capabilities (or does not log it)" % (IOP_LOG_OK, len(lines))))
++    out.append(("INFO", label, "'%s' %s in the CoreDisplay log%s" % (
++        IOP_LOG_QUEUE, "appears %d time(s)" % qd if qd else "does not appear",
++        ": the capabilities came from the display-pipe class" if qd else
++        " (the key exists only when the capabilities came from the display-pipe class; the base class leaves it out, "
++        "or the log does not show it)")))
++    return out
++
++
+ def gpu_vendor_rows(cd, planes=False, iop_amd=False, prefs_off=False, klog=""):
+     """[(level, label, text)]: the GPU vendor CoreDisplay gave each framebuffer (DRIVER-PLAN N44), and the
+     kext's own word on its class (klog, 20-log-rdna3.txt). planes: planes arrive in IOPresentment transactions
+@@ -3073,6 +3159,7 @@ def present_mode_lines(path, txt="", args="", host=None):
+     prefs_rows, iop_amd = cd_prefs_rows(txt, args, read_tar_member(path, "19-coredisplay-prefs.txt"))
+     out.extend(gpu_vendor_rows(cd, planes if ok else None, iop_amd, iop_prefs_off(args), klog))
+     out.extend(prefs_rows)
++    out.extend(iop_log_rows(cd))
+     # IOGraphics' integrated flag and the two index properties, per framebuffer
+     fbs = _fb_blocks(fbtxt)
+     if not fbs:
+diff --git a/tools/vm/macos/autoreport.sh b/tools/vm/macos/autoreport.sh
+index 5ec06aa..4f3337c 100755
+--- a/tools/vm/macos/autoreport.sh
++++ b/tools/vm/macos/autoreport.sh
+@@ -349,28 +349,66 @@ plugin_trace_conf() {
+ # DRIVER-PLAN N44: CoreDisplay's IOPresentment switches, read by GetBoolCFPreference from
+ # the com.apple.CoreDisplay domain (probe run on 24H32; CoreDisplay's static values:
+ # useIOP 1, useIOP_onAMD 0). A framebuffer CoreDisplay classes as AMD (vendor 4) may use
+-# IOPresentment only with useIOP_onAMD: written AnyUser/AnyHost on every boot of the VM
+-# (the install boot included, so the card boot's WindowServer starts with them);
+-# rdna3iopprefs=0 in the boot-args takes both keys out again (the A/B). WindowServer
+-# reads them at its start, before this script: what this boot's WindowServer saw is
+-# the state at the first call of the boot (kept in CD_PREFS_BOOT), a change here
+-# takes effect from the next boot. Which user/host domain the lookup really uses is
+-# not proven (DRIVER-PLAN N44 open item). A standalone run only reports them.
++# IOPresentment only with useIOP_onAMD: written on every boot of the VM (the install boot
++# included, so the card boot's WindowServer starts with them) into BOTH stores that could be
++# the one CoreDisplay reads:
++#  - AnyHost:  /Library/Preferences/com.apple.CoreDisplay.plist (AnyUser + AnyHost, what
++#    `defaults write /Library/Preferences/com.apple.CoreDisplay` reaches)
++#  - ByHost:   /Library/Preferences/ByHost/com.apple.CoreDisplay.<host UUID>.plist (AnyUser +
++#    CurrentHost). Fact from Navi48-MacOS (Almosst-DEV, MIT, tools/pc/cdpref.c, macOS 26):
++#    CoreDisplay::GetBoolCFPreference calls CFPreferencesCopyValue(key, "com.apple.CoreDisplay",
++#    kCFPreferencesAnyUser, kCFPreferencesCurrentHost), the ByHost store; `defaults -currentHost`
++#    with an absolute path ignores -currentHost, so the file is written by its path. Unproven on
++#    macOS 15 (DRIVER-PLAN N44 open item). The host UUID in the file name is IOPlatformUUID, the
++#    one CFPreferences uses for ByHost files since 10.8; its files in the directory are listed
++#    in 19-coredisplay-prefs.txt (collect.sh), so a wrong UUID shows.
++# The keys are useIOP and useIOP_onAMD only (Navi48-MacOS also names displaySurfaceUsesIOSurface
++# and useIOP_gamma_onAMD, read by _CGXMappedDisplayStart: the next A/B, DRIVER-PLAN N44).
++# rdna3iopprefs=0 in the boot-args takes both keys out of both stores again (the A/B).
++# WindowServer reads them at its start, before this script: what this boot's WindowServer saw
++# is the state at the first call of the boot (kept in CD_PREFS_BOOT, "AnyHost: ...;
++# ByHost(<uuid>): ..." on its second line), a change here takes effect from the next boot.
++# A standalone run only reports them.
+ CD_PREFS=${RDNA3_CD_PREFS:-/Library/Preferences/com.apple.CoreDisplay}
++CD_BYHOST_DIR=${RDNA3_CD_BYHOST_DIR:-/Library/Preferences/ByHost}
+ CD_PREFS_BOOT=${RDNA3_CD_PREFS_BOOT:-/var/db/rdna3-coredisplay-prefs-boot.txt}
+-cd_prefs_read() {   # the domain on one line, empty when it does not exist
+-    defaults read "$CD_PREFS" 2>/dev/null | tr -s ' \n\t' '   ' | sed 's/^ //; s/ $//'
++cd_prefs_read() {   # cd_prefs_read <domain>: the domain on one line, empty when it does not exist
++    defaults read "$1" 2>/dev/null | tr -s ' \n\t' '   ' | sed 's/^ //; s/ $//'
++}
++cd_host_uuid() {   # IOPlatformUUID, empty when ioreg does not give a plausible one (it ends up in a path)
++    _u=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4; exit}')
++    case $_u in ''|*[!0-9A-Fa-f-]*) _u= ;; esac
++    printf '%s' "$_u"
++}
++cd_prefs_state() {   # cd_prefs_state <uuid>: "AnyHost: <domain>; ByHost(<uuid>): <domain>" (triage parses it)
++    _sa=$(cd_prefs_read "$CD_PREFS")
++    if [ -n "$1" ]; then _sb=$(cd_prefs_read "$CD_BYHOST_DIR/com.apple.CoreDisplay.$1"); _sb=${_sb:-(none)}
++    else _sb="(unknown)"; fi
++    printf 'AnyHost: %s; ByHost(%s): %s' "${_sa:-(none)}" "${1:-unknown}" "$_sb"
++}
++cd_prefs_on() {   # cd_prefs_on <domain>: both keys true, read back
++    defaults write "$1" useIOP -bool true >/dev/null 2>&1
++    defaults write "$1" useIOP_onAMD -bool true >/dev/null 2>&1
++    [ "$(defaults read "$1" useIOP_onAMD 2>/dev/null)" = 1 ] && [ "$(defaults read "$1" useIOP 2>/dev/null)" = 1 ]
++}
++cd_prefs_off() {   # cd_prefs_off <domain>: both keys taken out, read back
++    defaults delete "$1" useIOP >/dev/null 2>&1
++    defaults delete "$1" useIOP_onAMD >/dev/null 2>&1
++    [ -z "$(defaults read "$1" useIOP_onAMD 2>/dev/null)" ] && [ -z "$(defaults read "$1" useIOP 2>/dev/null)" ]
+ }
+ coredisplay_iop_prefs() {
++    _uuid=$(cd_host_uuid)
++    _bh=
++    [ -n "$_uuid" ] && _bh="$CD_BYHOST_DIR/com.apple.CoreDisplay.$_uuid"
+     _bt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ *sec = \([0-9]*\).*/\1/p')
+     _rec=ok
+     if [ -z "$_bt" ]; then
+         # no boot time to tell this boot's record from an earlier boot's: rewrite it every call, and say so
+         # (the state kept may already be the one after this script's own change)
+-        { echo "boot ?"; cd_prefs_read; } > "$CD_PREFS_BOOT" 2>/dev/null || _rec=lost
++        { echo "boot ?"; cd_prefs_state "$_uuid"; echo; } > "$CD_PREFS_BOOT" 2>/dev/null || _rec=lost
+         echo "== CoreDisplay prefs: boot time unknown: could NOT tell this boot's start state, it may be stale"
+     elif [ "$(head -n 1 "$CD_PREFS_BOOT" 2>/dev/null)" != "boot $_bt" ]; then
+-        { echo "boot $_bt"; cd_prefs_read; } > "$CD_PREFS_BOOT" 2>/dev/null || _rec=lost
++        { echo "boot $_bt"; cd_prefs_state "$_uuid"; echo; } > "$CD_PREFS_BOOT" 2>/dev/null || _rec=lost
+     fi
+     if [ "$_rec" = lost ]; then
+         echo "== CoreDisplay prefs: could NOT keep this boot's state in $CD_PREFS_BOOT"
+@@ -382,22 +420,21 @@ coredisplay_iop_prefs() {
+     if [ -n "${STANDALONE:-}" ]; then
+         _what="left as they are (standalone run)"
+     elif sysctl -n kern.bootargs 2>/dev/null | tr ' ' '\n' | grep -qx 'rdna3iopprefs=0'; then
+-        defaults delete "$CD_PREFS" useIOP >/dev/null 2>&1
+-        defaults delete "$CD_PREFS" useIOP_onAMD >/dev/null 2>&1
+-        if [ -z "$(defaults read "$CD_PREFS" useIOP_onAMD 2>/dev/null)" ] &&
+-           [ -z "$(defaults read "$CD_PREFS" useIOP 2>/dev/null)" ]; then
+-            _what="rdna3iopprefs=0: useIOP / useIOP_onAMD taken out"
+-        else _what="rdna3iopprefs=0: useIOP / useIOP_onAMD could NOT be taken out"; fi
++        if cd_prefs_off "$CD_PREFS"; then _ra="taken out"; else _ra="could NOT be taken out"; fi
++        if [ -z "$_bh" ]; then _rb="could NOT be taken out (host UUID unknown: ioreg gave no IOPlatformUUID)"
++        elif cd_prefs_off "$_bh"; then _rb="taken out"; else _rb="could NOT be taken out"; fi
++        _what="rdna3iopprefs=0: useIOP / useIOP_onAMD: AnyHost $_ra; ByHost(${_uuid:-unknown}) $_rb"
+     else
+-        defaults write "$CD_PREFS" useIOP -bool true >/dev/null 2>&1
+-        defaults write "$CD_PREFS" useIOP_onAMD -bool true >/dev/null 2>&1
+-        if [ "$(defaults read "$CD_PREFS" useIOP_onAMD 2>/dev/null)" = 1 ] &&
+-           [ "$(defaults read "$CD_PREFS" useIOP 2>/dev/null)" = 1 ]; then
+-            _what="useIOP / useIOP_onAMD true (rdna3iopprefs=0 takes them out)"
+-        else _what="useIOP / useIOP_onAMD could NOT be written"; fi
++        if cd_prefs_on "$CD_PREFS"; then _ra="written"; else _ra="could NOT be written"; fi
++        if [ -z "$_bh" ]; then _rb="could NOT be written (host UUID unknown: ioreg gave no IOPlatformUUID)"
++        else
++            [ -d "$CD_BYHOST_DIR" ] || mkdir -p "$CD_BYHOST_DIR" 2>/dev/null
++            if cd_prefs_on "$_bh"; then _rb="written"; else _rb="could NOT be written"; fi
++        fi
++        _what="useIOP / useIOP_onAMD true: AnyHost $_ra; ByHost(${_uuid:-unknown}) $_rb (rdna3iopprefs=0 takes them out)"
+     fi
+-    _now=$(cd_prefs_read)
+-    echo "== CoreDisplay prefs: $_what; now: ${_now:-(none)}$([ "$_now" = "$_seen" ] || echo '; WindowServer takes the change at its next start (the next boot)')"
++    _now=$(cd_prefs_state "$_uuid")
++    echo "== CoreDisplay prefs: $_what; now: $_now$([ "$_now" = "$_seen" ] || echo '; WindowServer takes the change at its next start (the next boot)')"
+ }
+ 
+ # card run 2026-10-17b: one run decides between the swap models. 60 s with
