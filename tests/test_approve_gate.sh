@@ -85,7 +85,8 @@ ready() {
 SC
 run() {   # run <body>: a fresh WORK, the stubs, then the body
     rm -rf "$WORK"; mkdir -p "$WORK/reports"; : > "$WORK/calls"
-    ( export T; . "$T/h.sh"; eval "$1" ) > "$T/out.txt" 2>&1
+    # a case that fails is named (set -e alone ended the test without a word: CI run #249, bash 3.2)
+    ( export T; . "$T/h.sh"; eval "$1" ) > "$T/out.txt" 2>&1 || fail "the case exited with status $?: $1"
 }
 MARK="RDNA3Accelerator: running e35e78c275, installed 4fcf2bc0b7 (not approved yet)"
 BUNDLE_OK=$(printf 'b%.0s' $(seq 64))

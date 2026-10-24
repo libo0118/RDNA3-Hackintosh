@@ -1875,16 +1875,18 @@ cmd_result() {
         say "!! the queue is still running (left: $(tr '\n' ' ' < "$QUEUE" 2>/dev/null)) - the desktop is only back between two steps"
         echo "   wait for 'queue done' (rdna3vm queue status) and run 'rdna3vm result' then; collecting what is there so far"
     fi
+    # no mapfile / find -printf: the host tests run this on macOS too (bash 3.2, BSD find)
+    sel=()
     if [ -f "$RUN_MARK" ]; then
-        mapfile -t sel < <(find "$WORK/reports" -maxdepth 1 -type f -newer "$RUN_MARK" -printf '%P\n' | sort)
+        while IFS= read -r f; do sel+=("$f"); done < <(find "$WORK/reports" -maxdepth 1 -type f -newer "$RUN_MARK" | sed 's|.*/||' | sort)
     else
-        mapfile -t sel < <(find "$WORK/reports" -maxdepth 1 -type f -mmin -180 -printf '%P\n' | sort)
+        while IFS= read -r f; do sel+=("$f"); done < <(find "$WORK/reports" -maxdepth 1 -type f -mmin -180 | sed 's|.*/||' | sort)
     fi
     if [ ${#sel[@]} -eq 0 ]; then
         # nothing since the run started (a hung VM, a hard reset of the
         # computer): the newest serial and host log are still worth sending
         say "no files since the last run started ($(date -r "$RUN_MARK" '+%F %T' 2>/dev/null || echo '3 h ago')): taking the newest serial and host log"
-        mapfile -t sel < <(cd "$WORK/reports" && { ls -t serial-*.log 2>/dev/null | head -1; ls -t host-*.log 2>/dev/null | head -1; })
+        while IFS= read -r f; do [ -n "$f" ] && sel+=("$f"); done < <(cd "$WORK/reports" && { ls -t serial-*.log 2>/dev/null | head -1; ls -t host-*.log 2>/dev/null | head -1; })
         [ ${#sel[@]} -gt 0 ] || die "no serial or host logs in $WORK/reports at all"
     fi
     tmp=$(mktemp -d)

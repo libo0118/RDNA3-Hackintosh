@@ -122,7 +122,7 @@ body = job.split("run: |\n", 1)[1].split("      - uses: actions/upload-artifact"
 open(sys.argv[2], "w").write("".join(l[10:] + "\n" for l in body.splitlines()))
 PY
 grep -q '^sh tools/probe/coredisplay.sh probe-out$' "$T/step.sh" || fail "probe.yml: could not extract the coredisplay step"
-sed -i "s#^sh tools/probe/coredisplay.sh probe-out#sh $ROOT/tools/probe/coredisplay.sh probe-out#" "$T/step.sh"
+sed -i.bak "s#^sh tools/probe/coredisplay.sh probe-out#sh $ROOT/tools/probe/coredisplay.sh probe-out#" "$T/step.sh"
 mkdir -p "$T/wf1" "$T/wf2"
 # a tiny disassembly: the step fails loudly, after printing what there is
 if ( cd "$T/wf1" && PATH="$T/bin:$PATH" FAKE_DIS="$T/fake.dis" bash -eo pipefail "$T/step.sh" ) > "$T/wf1.log" 2>&1; then
@@ -135,7 +135,7 @@ grep -q '^== probe-out/CoreDisplay.dis.err' "$T/wf1.log" || fail "the .err files
 { cat "$T/fake.dis"; i=0; while [ $i -lt 1100 ]; do echo "  0x$i  nop"; i=$((i + 1)); done; } > "$T/big.dis"
 ( cd "$T/wf2" && PATH="$T/bin:$PATH" FAKE_DIS="$T/big.dis" bash -eo pipefail "$T/step.sh" ) > "$T/wf2.log" 2>&1 || fail "the workflow step failed with a 1100-line CoreDisplay.dis: $(tail -5 "$T/wf2.log")"
 # the old step did `head` of a file that exists only when an address was found: a missing file is said, not fatal
-sed -i 's#^show "present mode: the same, found by the address of the string" probe-out/40-page-flip-fn-CoreDisplay-by-address.s#show "gone" probe-out/does-not-exist.s#' "$T/step.sh"
+sed -i.bak 's#^show "present mode: the same, found by the address of the string" probe-out/40-page-flip-fn-CoreDisplay-by-address.s#show "gone" probe-out/does-not-exist.s#' "$T/step.sh"
 ( cd "$T/wf2" && PATH="$T/bin:$PATH" FAKE_DIS="$T/big.dis" bash -eo pipefail "$T/step.sh" ) > "$T/wf3.log" 2>&1 || fail "a missing file aborted the step"
 grep -q '^== gone: MISSING probe-out/does-not-exist.s' "$T/wf3.log" || fail "a missing file is not named"
 echo "test_probe_coredisplay: ok"
