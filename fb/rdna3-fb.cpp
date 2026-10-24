@@ -101,7 +101,7 @@
 
 /* the leaf class name CoreDisplay sees (DRIVER-PLAN N44): change it here
  * and in Info.plist's two IOClass strings together (fb/Makefile and
- * tests/test_fb_class.sh check that they agree) */
+ * tests/test_fb_class.py check that they agree) */
 #define RDNA3_FB_CLASS AMDRDNA3Framebuffer
 #define RD3_FB_STR2(x) #x
 #define RD3_FB_STR(x) RD3_FB_STR2(x)
