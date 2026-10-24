@@ -190,7 +190,7 @@ rm -f "$T"/store/*
 
 # rdna3vm passes the off switch to the install boot only as a whole token (the case of cmd__install, run as it is)
 sed -n '/^    case " ${RDNA3VM_BOOTARGS:-} " in \*" rdna3iopprefs=0 "\*) iop=/p' "$ROOT/tools/vm/rdna3vm" > "$T/rv.sh"
-[ "$(wc -l < "$T/rv.sh")" = 1 ] || fail "rdna3vm: the iop case line not found"
+[ "$(wc -l < "$T/rv.sh" | tr -d " ")" = 1 ] || fail "rdna3vm: the iop case line not found"
 passes() { ( iop=; RDNA3VM_BOOTARGS="$1"; . "$T/rv.sh"; printf '%s' "$iop" ); }
 [ "$(passes "rdna3iopprefs=0")" = " rdna3iopprefs=0" ] || fail "rdna3vm: =0 alone is not passed"
 [ "$(passes "-v rdna3iopprefs=0 rdna3fb=1")" = " rdna3iopprefs=0" ] || fail "rdna3vm: =0 in the middle is not passed"
