@@ -91,7 +91,9 @@ grep -q 'INFO stale check .*serial-1.log has none of the RDNA3Accelerator / RDNA
     fail "e: no INFO that the stale check was not done"
 # the newest serial log decides (an older boot's builds are another run's)
 mkdir -p "$T/f"
-serial "$T/f/serial-1.log" e35e78c275 "$FB" "$AG"; touch -d '2 hours ago' "$T/f/serial-1.log"
+serial "$T/f/serial-1.log" e35e78c275 "$FB" "$AG"
+# 2 hours older (python: BSD touch on the macOS runner has no -d '2 hours ago')
+python3 -c 'import os, sys, time; t = time.time() - 7200; os.utime(sys.argv[1], (t, t))' "$T/f/serial-1.log"
 serial "$T/f/serial-2.log" "$ACC" "$FB" "$AG"
 run "$T/f"
 ! grep -q 'STALE KEXTS' "$T/out.txt" || fail "f: an older serial log decided"
