@@ -35,9 +35,9 @@ run() {   # run <file> <command...>: output and exit code, never stops the
 # indentation of `ioreg -p IOService`: two columns per level). Triage row
 # "display pairing" (tools/triage_reports.py); a key that is not printed is not set.
 pairing_report() {
-    echo "== framebuffers (ioreg -c RDNA3Framebuffer; IOAccel keys, RDNA3,Head, RDNA3,Connected)"
+    echo "== framebuffers (ioreg -c RDNA3Framebuffer; IOAccel keys, RDNA3,Connected)"
     ioreg -l -w0 -r -c RDNA3Framebuffer -d 1 2>&1 \
-        | grep -E '^\+-o |"(IOAccelTypes|IOAccelIndex|IOAccelRevision|RDNA3,Head|RDNA3,Connected)" =' \
+        | grep -E '^\+-o |"(IOAccelTypes|IOAccelIndex|IOAccelRevision|RDNA3,Connected)" =' \
         | sed 's/^[ |]*//'
     echo "== accelerators (registry path of each RDNA3Accelerator)"
     ioreg -p IOService -w0 2>&1 | awk -v cls="${RDNA3_PAIRING_CLASS:-RDNA3Accelerator}" '

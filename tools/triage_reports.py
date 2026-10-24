@@ -3127,7 +3127,7 @@ def _gpu_vendor_cd_rows(cd, planes, iop_amd, prefs_off):
 # instance of the class (RDNA3Framebuffer matches the leaf AMDRDNA3Framebuffer and the older class),
 # the keys that are set, then the registry path of every RDNA3Accelerator:
 #   +-o RDNA3Framebuffer  <class AMDRDNA3Framebuffer, id 0x..., ...>
-#   "RDNA3,Head" = 1 / "RDNA3,Connected" = Yes / "IOAccelTypes" = "..." / "IOAccelIndex" = 0 / "IOAccelRevision" = 2
+#   "RDNA3,Connected" = Yes / "IOAccelTypes" = "..." / "IOAccelIndex" = 0 / "IOAccelRevision" = 2
 #   accelerator: IOService:/...
 PAIRING_MEMBER = "16-ioaccel-pairing.txt"
 PAIRING_ACCEL = "RDNA3Accelerator"   # the class (and service name) the pairing has to name
@@ -3135,14 +3135,14 @@ PAIRING_REVISION = "2"
 
 
 def _pairing_blocks(txt):
-    """[{name, class, head, connected, types, index, revision}] of a pairing file (None = key not printed)"""
+    """[{name, class, id, connected, types, index, revision}] of a pairing file (None = key not printed)"""
     out = []
     for blk in re.split(r"(?m)^\+-o ", txt)[1:]:
         head_line = blk.split("\n", 1)[0]
-        m = re.match(r"(\S+)\s+<class (\w+)", head_line)
+        m = re.match(r"(\S+)\s+<class (\w+), id (0x[0-9a-fA-F]+)", head_line)
         g = lambda k: (re.search(r'^"%s" = (.*?)\s*$' % re.escape(k), blk, re.M) or [None, None])[1]
         out.append({"name": m.group(1) if m else head_line.split()[0] if head_line.split() else "?",
-                    "class": m.group(2) if m else "?", "head": g("RDNA3,Head"), "connected": g("RDNA3,Connected"),
+                    "class": m.group(2) if m else "?", "id": m.group(3) if m else "?", "connected": g("RDNA3,Connected"),
                     "types": g("IOAccelTypes"), "index": g("IOAccelIndex"), "revision": g("IOAccelRevision")})
     return out
 
@@ -3169,14 +3169,26 @@ def pairing_rows(txt):
         return [("INFO", label, "%d framebuffer(s), none connected (RDNA3,Connected = No): no display to pair" % len(fbs))]
     out = []
     for f in lit:
-        who = "framebuffer %s (head %s, class %s%s)" % (f["name"], f["head"] if f["head"] is not None else "?", f["class"],
+        who = "framebuffer id %s (%s, class %s%s)" % (f["id"], "IOAccelIndex %s" % f["index"] if f["index"] is not None
+                                                      else "no IOAccelIndex", f["class"],
                                                       ", older than DRIVER-PLAN N44" if f["class"] == FB_CLASS_OLD else "")
         have = "IOAccelTypes %s, IOAccelIndex %s, IOAccelRevision %s" % (
             (f["types"] or "not set")[:200], f["index"] if f["index"] is not None else "not set",
             f["revision"] if f["revision"] is not None else "not set")
         why = []
+        matched = None
         if f["types"] is None:
             why.append("IOAccelTypes is not set (IOAccelFindAccelerator finds no accelerator for this display)")
+        elif accels:
+            # IOAccelTypes is the registry path of an accelerator (or, bare, its class name): it has to be one
+            # of the accelerators this report registered, not just any string containing the class name
+            matched = next((a for a in accels if a in f["types"]), None)
+            if matched is None and f["types"].strip().strip('"') == PAIRING_ACCEL:
+                matched = PAIRING_ACCEL
+            if matched is None:
+                why.append("IOAccelTypes names %s" % (
+                    "a %s that is not a registered one" % PAIRING_ACCEL if PAIRING_ACCEL in f["types"] else
+                    "something else than %s" % PAIRING_ACCEL))
         elif PAIRING_ACCEL not in f["types"]:
             why.append("IOAccelTypes names something else than %s" % PAIRING_ACCEL)
         if f["revision"] is None:
@@ -3189,7 +3201,8 @@ def pairing_rows(txt):
             out.append(("WARN", label, "%s: %s; %s; registered accelerator(s): %s (DRIVER-PLAN N46)" % (
                 who, "; ".join(why), have, ", ".join(accels) or "none printed")))
         else:
-            out.append(("PASS", label, "%s: %s: WindowServer can pair the display with the accelerator" % (who, have)))
+            out.append(("PASS", label, "%s: %s: WindowServer can pair the display with the accelerator%s" % (
+                who, have, " (registered accelerator %s)" % matched if matched else "")))
     return out
 
 

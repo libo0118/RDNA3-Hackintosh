@@ -39,8 +39,8 @@ TYPES = '"IOAccelTypes" = "IOService:/MacPro/PCI0/AppleACPIPCI/GFX0@0/RDNA3Accel
 
 def fb(head, cls="AMDRDNA3Framebuffer", connected="Yes", types=TYPES, index='"IOAccelIndex" = 0\n',
        revision='"IOAccelRevision" = 2\n'):
-    return ("+-o RDNA3Framebuffer  <class %s, id 0x10000%04d, registered, matched, active, busy 0, retain 12>\n"
-            '"RDNA3,Head" = %d\n"RDNA3,Connected" = %s\n' % (cls, head, head, connected)) + types + index + revision
+    return ("+-o RDNA3Framebuffer  <class %s, id 0x1000%05d, registered, matched, active, busy 0, retain 12>\n"
+            '"RDNA3,Connected" = %s\n' % (cls, head, connected)) + types + index + revision
 
 
 def pfile(*blocks, accel=ACCEL):
@@ -50,7 +50,8 @@ def pfile(*blocks, accel=ACCEL):
 # both heads paired: PASS per framebuffer, nothing else
 r = tr.pairing_rows(pfile(fb(1), fb(2)))
 check(levels(r) == ["PASS", "PASS"] and all(x[1] == "display pairing" for x in r), "two paired heads: %r" % r)
-check("IOAccelRevision 2" in r[0][2] and "head 1" in r[0][2] and "AMDRDNA3Framebuffer" in r[0][2], "PASS text: %r" % (r[0],))
+check("IOAccelRevision 2" in r[0][2] and "id 0x100000001" in r[0][2] and "IOAccelIndex 0" in r[0][2] and "head" not in r[0][2]
+      and "AMDRDNA3Framebuffer" in r[0][2] and "registered accelerator IOService:/MacPro/" in r[0][2], "PASS text: %r" % (r[0],))
 
 # the older class (reports before N44) pairs the same way and says it is the old class
 r = tr.pairing_rows(pfile(fb(1, cls="RDNA3Framebuffer")))
@@ -72,6 +73,19 @@ for what, blk, want in cases:
 # one head fine, one not: one PASS, one WARN
 r = tr.pairing_rows(pfile(fb(1), fb(2, types="")))
 check(levels(r) == ["PASS", "WARN"], "one bad head: %r" % r)
+# IOAccelTypes must be one of the registered accelerators, not any string with the class name in it
+other = '"IOAccelTypes" = "IOService:/MacPro/PCI0/GFX1@0/RDNA3Accel/RDNA3Accelerator"\n'
+r = tr.pairing_rows(pfile(fb(1, types=other)))
+check(levels(r) == ["WARN"] and "not a registered one" in r[0][2] and "GFX0@0" in r[0][2], "unregistered path: %r" % r)
+# a bare class name is accepted and printed as the match; the other registered path of two is found
+r = tr.pairing_rows(pfile(fb(1, types='"IOAccelTypes" = "RDNA3Accelerator"\n')))
+check(levels(r) == ["PASS"] and "registered accelerator RDNA3Accelerator" in r[0][2], "bare class name: %r" % r)
+two = ACCEL + "accelerator: IOService:/MacPro/PCI0/GFX1@0/RDNA3Accel/RDNA3Accelerator\n"
+r = tr.pairing_rows(pfile(fb(1, types=other), accel=two))
+check(levels(r) == ["PASS"] and "registered accelerator IOService:/MacPro/PCI0/GFX1@0" in r[0][2], "second accelerator: %r" % r)
+# no accelerator path printed: the class name in the value has to do
+r = tr.pairing_rows(pfile(fb(1), accel="(no RDNA3Accelerator in the IOService plane)\n"))
+check(levels(r) == ["PASS"] and "registered accelerator" not in r[0][2], "no registered list: %r" % r)
 # no accelerator registered: the WARN says none was printed
 r = tr.pairing_rows(pfile(fb(1, types=""), accel="(no RDNA3Accelerator in the IOService plane)\n"))
 check(levels(r) == ["WARN"] and "none printed" in r[0][2], "no accelerator: %r" % r)
@@ -136,7 +150,6 @@ cat <<'EOT'
 +-o RDNA3Framebuffer  <class AMDRDNA3Framebuffer, id 0x100000200, registered, matched, active, busy 0, retain 12>
   | {
   |   "IOFBIntegrated" = Yes
-  |   "RDNA3,Head" = 1
   |   "RDNA3,Connected" = Yes
   |   "IOAccelTypes" = "IOService:/MacPro/PCI0/GFX0@0/RDNA3Accel/RDNA3Accelerator"
   |   "IOAccelIndex" = 0
@@ -145,7 +158,6 @@ cat <<'EOT'
   | 
 +-o RDNA3Framebuffer  <class AMDRDNA3Framebuffer, id 0x100000201, registered, matched, active, busy 0, retain 12>
   | {
-  |   "RDNA3,Head" = 2
   |   "RDNA3,Connected" = Yes
   | }
   | 
@@ -168,6 +180,7 @@ with tempfile.TemporaryDirectory() as d:
               "accelerator path: %r" % out)
         check("IOFBIntegrated" not in out, "only the pairing keys are printed: %r" % out)
         rows = tr.pairing_rows("$ pairing_report\n" + out + "[exit 0]\n")
+        check("RDNA3,Head" not in out and "IOFBIntegrated" not in out, "only the pairing keys are printed: %r" % out)
         check(levels(rows) == ["PASS", "WARN"], "fake ioreg through the triage (head 1 paired, head 2 without keys): %r\n%s" % (rows, out))
         check("IOAccelTypes is not set" in rows[1][2] if len(rows) > 1 else False, "head 2 WARN text: %r" % rows)
 
