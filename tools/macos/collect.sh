@@ -25,6 +25,30 @@ run() {   # run <file> <command...>: output and exit code, never stops the
       echo "[exit $r]"; } > "$dir/$f" 2>&1
 }
 
+# DRIVER-PLAN N46 (1): WindowServer pairs a display with its accelerator through
+# IOAccelFindAccelerator(fb), which reads IOAccelTypes (the registry path of an
+# IOAccelerator), IOAccelIndex (SInt32) and IOAccelRevision (2) from the
+# IOFramebuffer; the family's IOAccelDisplayPipe::init stamps them. One block per
+# framebuffer instance (-c RDNA3Framebuffer matches AMDRDNA3Framebuffer, the leaf
+# class since N44, and the older class of earlier reports), then the registry path
+# of every RDNA3Accelerator to compare IOAccelTypes with (the path is built from the
+# indentation of `ioreg -p IOService`: two columns per level). Triage row
+# "display pairing" (tools/triage_reports.py); a key that is not printed is not set.
+pairing_report() {
+    echo "== framebuffers (ioreg -c RDNA3Framebuffer; IOAccel keys, RDNA3,Connected)"
+    ioreg -l -w0 -r -c RDNA3Framebuffer -d 1 2>&1 \
+        | grep -E '^\+-o |"(IOAccelTypes|IOAccelIndex|IOAccelRevision|RDNA3,Connected)" =' \
+        | sed 's/^[ |]*//'
+    echo "== accelerators (registry path of each RDNA3Accelerator)"
+    ioreg -p IOService -w0 2>&1 | awk -v cls="${RDNA3_PAIRING_CLASS:-RDNA3Accelerator}" '
+        { p = index($0, "+-o "); if (!p) next
+          d = int((p - 1) / 2); n = substr($0, p + 4); sub(/  <.*/, "", n); comp[d] = n
+          if (index($0, "<class " cls ",") || index($0, "<class " cls ">")) {
+              path = "IOService:"; for (i = 1; i <= d; i++) path = path "/" comp[i]
+              print "accelerator: " path; found++ } }
+        END { if (!found) print "(no " cls " in the IOService plane)" }'
+}
+
 # the Metal plugin's traces first (tools/macos/collect_plugin_trace.sh, as
 # root, at most 120 s): before the slow log shows below, so WindowServer's
 # live ring still holds the A/B when it is copied (ECC review round 2); its
@@ -53,6 +77,8 @@ run 10-ioreg-core.txt ioreg -l -w0 -r -c RDNA3Accel
 run 11-ioreg-props.txt sh -c "ioreg -l -w0 -r -c RDNA3Accel | grep -E '\"RDNA3,' | grep -v -E 'DiscoveryBinary|,EDID\"'"
 run 12-ioreg-fb.txt ioreg -l -w0 -r -c RDNA3Framebuffer
 run 13-ioreg-accel.txt ioreg -l -w0 -r -c RDNA3Accelerator
+# DRIVER-PLAN N46 (1): the keys WindowServer pairs a display with its accelerator by (pairing_report above)
+run 16-ioaccel-pairing.txt pairing_report
 # DRIVER-PLAN N40: RDNA3AGDC's counters and its vendor answer A/B (debug.rdna3agdc_vendor*);
 # the framebuffer's switches and counters are properties in 12-ioreg-fb.txt
 run 17-sysctl-agdc.txt sh -c "sysctl debug 2>/dev/null | grep rdna3agdc || echo '(no debug.rdna3agdc sysctl: RDNA3AGDC not loaded)'"
