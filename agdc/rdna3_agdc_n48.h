@@ -59,11 +59,15 @@
  *      debug.rdna3agdc_ib, a bit mask: bit 0 answers type 0x40 (one entry:
  *      count 1, Flags 1, both latencies 1.0f as its bit pattern - the
  *      kernel has no FPU -, MaxHeight / MaxWidth = the head's raster,
- *      pixel formats 1), bit 1 zero-fills every other type but 0x10 and
- *      0x40 with success (count 0, Navi48's answer: on 26 it sets that
- *      type's present byte with no entries). Default 3, Navi48's working
- *      set: our card runs so far (every type but 0x10 refused) never had
- *      planes in a transaction.
+ *      pixel formats 1), bit 1 zero-fills every other capability type
+ *      (0x1 .. 0x8000) but 0x10 and 0x40 with success (count 0, Navi48's
+ *      answer: on 26 it sets that type's present byte with no entries); a
+ *      value that is no capability type stays refused. Default 0, the
+ *      answers before N45: K5-on boots crash-looped before (card runs 41,
+ *      45) and the next card run tests N44 first; 3 (Navi48's set) is the
+ *      A/B arm (rdna3vm step play-agdcib).
+ *      A query for an index past the slot table is refused as before N45
+ *      (Unsupported, the old counters), not as a K5 refusal.
  *  (b) 0x921 kAGDCLinkConfig flags. Switch rdna3agdclinkflags /
  *      debug.rdna3agdc_linkflags: 0 = 0x8|0x2|0x1 (NullMoth's NVRMAGDC, as
  *      before), 1 = 0x8|0x2 (bit 0 clear), 2 = 0 (Navi48 answers no flag).
@@ -96,7 +100,7 @@
 #define RD3N48_IB_ANSWER      0x1u
 #define RD3N48_IB_ZERO        0x2u
 #define RD3N48_IB_ALL         (RD3N48_IB_ANSWER | RD3N48_IB_ZERO)
-#define RD3N48_IB_DEFAULT     RD3N48_IB_ALL
+#define RD3N48_IB_DEFAULT     0u
 /* (b) debug.rdna3agdc_linkflags */
 #define RD3N48_LINKFLAGS_NULLMOTH 0u
 #define RD3N48_LINKFLAGS_NOBIT0   1u
@@ -113,11 +117,26 @@
 /* the answers on top of rd3k5_answer's (RD3K5_R_*) */
 #define RD3N48_R_IB          3   /* type 0x40 answered with the inline-buffer entry */
 #define RD3N48_R_ZERO        4   /* another type zero-filled, success */
-/* *why for the new refusals (rd3k5_answer's stay as they are) */
-#define RD3N48_WHY_IB_INDEX   0x41
-#define RD3N48_WHY_ZERO_INDEX 0x51
 
 struct rd3n48_sw { uint32_t ib, linkflags, scaler; };
+
+/* the switches by number (the kext's sysctl handler and the boot-args) */
+#define RD3N48_SW_IB        0
+#define RD3N48_SW_LINKFLAGS 1
+#define RD3N48_SW_SCALER    2
+/* the largest value switch 'which' takes */
+static inline int rd3n48_sw_max(int which)
+{
+    return which == RD3N48_SW_IB ? (int)RD3N48_IB_ALL : which == RD3N48_SW_LINKFLAGS ? (int)RD3N48_LINKFLAGS_MAX
+                                                                                     : (int)RD3N48_SCALER_MAX;
+}
+/* a value written to switch 'which' through its sysctl: 0 taken, 1 out of
+ * range (the sysctl answers EINVAL and keeps the old value) */
+static inline int rd3n48_sw_check(int which, int v)
+{
+    if (which < RD3N48_SW_IB || which > RD3N48_SW_SCALER) return 1;
+    return v < 0 || v > rd3n48_sw_max(which);
+}
 
 /* a value a switch does not have becomes its default; returns a mask of the
  * switches replaced (1 ib, 2 linkflags, 4 scaler) for the log line */
@@ -139,20 +158,39 @@ static inline uint64_t rd3n48_link_flags(uint32_t sw)
     return 0x8u | 0x1u | 0x2u;
 }
 
+/* ---- the 0x711 capability types -----------------------------------------
+ * IOPresentment asks sixteen capability types, one bit each (0x1 CSC ..
+ * 0x8000 Cursor; 0x10 plane scaler, 0x40 inline buffer). The old counter
+ * (debug.rdna3agdc_k5_types, bit t = type t) stopped at type 31, so 0x40
+ * and up were never seen. Slot k counts type 1 << k, slot 16 any other
+ * value (no capability type: never zero-filled). */
+#define RD3N48_TYPE_SLOTS 17u
+#define RD3N48_TYPE_OTHER 16u
+static inline unsigned rd3n48_type_slot(uint32_t type)
+{
+    unsigned k;
+    if (!type || (type & (type - 1u)) || type > 0x8000u) return RD3N48_TYPE_OTHER;
+    for (k = 0; !(type & (1u << k)); k++) {}
+    return k;
+}
+
+/* the fills write fbIndex and type from the values the caller checked,
+ * never from the reply buffer again */
+
 /* (c) the plane-scaler entry with AMD's markers: rd3k5_fill_planescaler's
  * entry (count 1, 0x80004, both record groups of one record) with pixel
  * formats 0x00050005 and filter type 4; widthFirst puts the width at the
  * records' +0x00 as Navi48 wrote it (IOPresentment 26 reads +0x00 as the
  * height) */
-static inline void rd3n48_fill_scaler_amd(struct rd3k5_fb_ext_cap *c, uint32_t w, uint32_t h, int widthFirst)
+static inline void rd3n48_fill_scaler_amd(struct rd3k5_fb_ext_cap *c, uint32_t fi, uint32_t type, uint32_t w, uint32_t h,
+                                          int widthFirst)
 {
     static const unsigned rec[2] = { 0x024, 0x1ac };
     const uint32_t a = widthFirst ? w : h, b = widthFirst ? h : w;
-    uint32_t idx = c->fbIndex, type = c->type;
     uint8_t *e = c->entry[0];
     unsigned i;
     rd3k5_zero(c, sizeof *c);
-    c->fbIndex = idx; c->type = type;
+    c->fbIndex = fi; c->type = type;
     c->count = 1;
     rd3k5_put32(e, 0x000, 0x80004u);
     rd3k5_put32(e, 0x01c, 1);   /* u64 record count, first group */
@@ -166,12 +204,11 @@ static inline void rd3n48_fill_scaler_amd(struct rd3k5_fb_ext_cap *c, uint32_t w
 }
 
 /* (a) the inline-buffer reply: one entry (reply +0x0c, stride 0x32c) */
-static inline void rd3n48_fill_inline_buffer(struct rd3k5_fb_ext_cap *c, uint32_t w, uint32_t h)
+static inline void rd3n48_fill_inline_buffer(struct rd3k5_fb_ext_cap *c, uint32_t fi, uint32_t type, uint32_t w, uint32_t h)
 {
-    uint32_t idx = c->fbIndex, type = c->type;
     uint8_t *e = c->entry[0];
     rd3k5_zero(c, sizeof *c);
-    c->fbIndex = idx; c->type = type;
+    c->fbIndex = fi; c->type = type;
     c->count = 1;
     rd3k5_put32(e, 0x00, 1);                       /* Flags */
     rd3k5_put32(e, 0x04, RD3N48_IB_LATENCY_1F);    /* ActivationLatency */
@@ -182,25 +219,33 @@ static inline void rd3n48_fill_inline_buffer(struct rd3k5_fb_ext_cap *c, uint32_
 }
 
 /* a capability type we have no answer for: count 0, no entry */
-static inline void rd3n48_fill_zero(struct rd3k5_fb_ext_cap *c)
+static inline void rd3n48_fill_zero(struct rd3k5_fb_ext_cap *c, uint32_t fi, uint32_t type)
 {
-    uint32_t idx = c->fbIndex, type = c->type;
     rd3k5_zero(c, sizeof *c);
-    c->fbIndex = idx; c->type = type;
+    c->fbIndex = fi; c->type = type;
 }
 
 /* what an answer was, for the log lines and counters */
 struct rd3n48_info { uint32_t type, w, h; uint64_t flags; uint32_t scaler; };
 
+/* the host test's hook between reading the query and using it (it rewrites
+ * the reply buffer there to prove nothing reads it twice) */
+#ifndef RD3N48_TEST_AFTER_READ
+#define RD3N48_TEST_AFTER_READ(c) ((void)0)
+#endif
+
 /* rd3k5_answer with the switches (*sw already through rd3n48_sw_fix): the
  * same arguments and RD3K5_R_* codes, plus RD3N48_R_IB / RD3N48_R_ZERO;
- * *inf says what was answered (type 0xffffffff: not a 0x711) */
+ * *inf says what was answered (type 0xffffffff: not a 0x711). fbIndex and
+ * the type are read from the reply buffer once (in == out: IOPresentment's
+ * buffer) and only those checked values are used. */
 static inline int rd3n48_answer(unsigned cmd, const void *in, unsigned long inSize, void *out, unsigned long outSize,
                                 const struct rd3k5_head *h, unsigned nh, const struct rd3n48_sw *sw, int *why,
                                 int32_t *idxOut, struct rd3n48_info *inf)
 {
     int r = rd3k5_answer(cmd, in, inSize, out, outSize, h, nh, why, idxOut);
     struct rd3k5_fb_ext_cap *c = (struct rd3k5_fb_ext_cap *)out;
+    uint32_t fi, type;
     rd3k5_zero(inf, sizeof *inf);
     inf->type = 0xffffffffu;
     if (r == RD3K5_R_LINK) {
@@ -210,58 +255,45 @@ static inline int rd3n48_answer(unsigned cmd, const void *in, unsigned long inSi
         inf->w = l->timing.hActive; inf->h = l->timing.vActive;
         return r;
     }
-    if (cmd != RD3K5_CMD_FBCAPEX)
+    /* *idxOut is not -1 once rd3k5_answer checked both sizes and copied the
+     * query into 'out'; it is the fbIndex rd3k5_answer checked */
+    if (cmd != RD3K5_CMD_FBCAPEX || (*idxOut == -1 && r != RD3K5_R_CAPS && r != RD3K5_R_UNSUPPORTED))
         return r;
-    /* *idxOut is set once rd3k5_answer checked both sizes and copied the
-     * query into 'out' */
-    if (*idxOut >= 0 || r == RD3K5_R_CAPS || r == RD3K5_R_UNSUPPORTED)
-        inf->type = c->type;
+    fi = (uint32_t)*idxOut;
+    type = c->type;
+    RD3N48_TEST_AFTER_READ(c);
+    inf->type = type;
     if (r != RD3K5_R_CAPS && r != RD3K5_R_UNSUPPORTED)
         return r;
-    if (r == RD3K5_R_CAPS) {
-        const uint32_t *t = h[c->fbIndex].t;
+    if (r == RD3K5_R_CAPS) {   /* fi < nh with a good timing: rd3k5_answer checked it */
+        const uint32_t *t = h[fi].t;
         inf->w = t[RD3K5_T_HVIS]; inf->h = t[RD3K5_T_VVIS];
         inf->scaler = sw->scaler;
         if (sw->scaler == RD3N48_SCALER_AMD || sw->scaler == RD3N48_SCALER_NAVI48)
-            rd3n48_fill_scaler_amd(c, inf->w, inf->h, sw->scaler == RD3N48_SCALER_NAVI48);
+            rd3n48_fill_scaler_amd(c, fi, type, inf->w, inf->h, sw->scaler == RD3N48_SCALER_NAVI48);
         else
             inf->scaler = RD3N48_SCALER_NULLMOTH;
         return r;
     }
-    if (c->type == RD3N48_CAP_INLINEBUF) {
-        const uint32_t *t;
+    /* not ours: refused as before N45 (Unsupported), an index past the
+     * table too */
+    if (fi >= nh)
+        return r;
+    if (type == RD3N48_CAP_INLINEBUF) {
+        const uint32_t *t = h[fi].t;
         int bad;
         if (!(sw->ib & RD3N48_IB_ANSWER)) return r;   /* refused: no InlineBuffer dictionary */
-        if (c->fbIndex >= nh) { *why = RD3N48_WHY_IB_INDEX; return RD3K5_R_BADARG; }
-        t = h[c->fbIndex].t;
-        bad = t ? rd3k5_timing_bad(t, h[c->fbIndex].tBytes) : 0x31;
+        bad = t ? rd3k5_timing_bad(t, h[fi].tBytes) : 0x31;
         if (bad) { *why = bad; return RD3K5_R_NOTFOUND; }
         inf->w = t[RD3K5_T_HVIS]; inf->h = t[RD3K5_T_VVIS];
-        rd3n48_fill_inline_buffer(c, inf->w, inf->h);
+        rd3n48_fill_inline_buffer(c, fi, type, inf->w, inf->h);
         return RD3N48_R_IB;
     }
-    if (sw->ib & RD3N48_IB_ZERO) {
-        if (c->fbIndex >= nh) { *why = RD3N48_WHY_ZERO_INDEX; return RD3K5_R_BADARG; }
-        rd3n48_fill_zero(c);
+    if ((sw->ib & RD3N48_IB_ZERO) && rd3n48_type_slot(type) != RD3N48_TYPE_OTHER) {
+        rd3n48_fill_zero(c, fi, type);
         return RD3N48_R_ZERO;
     }
     return r;
-}
-
-/* ---- the 0x711 type counters --------------------------------------------
- * IOPresentment asks sixteen capability types, one bit each (0x1 CSC ..
- * 0x8000 Cursor; 0x10 plane scaler, 0x40 inline buffer). The old counter
- * (debug.rdna3agdc_k5_types, bit t = type t) stopped at type 31, so 0x40
- * and up were never seen. Slot k counts type 1 << k, slot 16 any other
- * value. */
-#define RD3N48_TYPE_SLOTS 17u
-#define RD3N48_TYPE_OTHER 16u
-static inline unsigned rd3n48_type_slot(uint32_t type)
-{
-    unsigned k;
-    if (!type || (type & (type - 1u)) || type > 0x8000u) return RD3N48_TYPE_OTHER;
-    for (k = 0; !(type & (1u << k)); k++) {}
-    return k;
 }
 
 /* appends s to buf (cap bytes, always NUL-terminated); the new length */

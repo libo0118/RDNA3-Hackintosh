@@ -107,7 +107,12 @@ def report(d, members, tests):
 ARGS = "boot-args\t-v keepsyms=1 rdna3lvl=8 rdna3fb=1 rdna3accel=1 rdna3agdc=3 rdna3play=1 rdna3vmauto=1\n"
 BASE = {"01-boot-args.txt": ARGS, "03-kexts.txt": "RDNA3Accel\n", "11-ioreg-props.txt": "", "20-log-rdna3.txt": ""}
 AGDC = ("$ sh -c sysctl debug | grep rdna3agdc\ndebug.rdna3agdc: 1\ndebug.rdna3agdc_vendor: 1\n"
-        "debug.rdna3agdc_vendor_asked: 3\ndebug.rdna3agdc_vendor_last: 1\n[exit 0]\n")
+        "debug.rdna3agdc_vendor_asked: 3\ndebug.rdna3agdc_vendor_last: 1\n"
+        # DRIVER-PLAN N45: the switches at their defaults and their counters (a current RDNA3AGDC)
+        "debug.rdna3agdc_k5: 1\ndebug.rdna3agdc_ib: 0\ndebug.rdna3agdc_linkflags: 0\ndebug.rdna3agdc_scaler: 0\n"
+        "debug.rdna3agdc_ib_answered: 0\ndebug.rdna3agdc_zero_filled: 0\ndebug.rdna3agdc_scaler_alt: 0\n"
+        "debug.rdna3agdc_linkflags_last: 11\ndebug.rdna3agdc_types: 0x10 4/4, 0x40 4/0\ndebug.rdna3agdc_k5_refused: 0\n"
+        "debug.rdna3agdc_k5_why: 0\n[exit 0]\n")
 
 # a: the change works: both framebuffers carry N40, GL = dependent index, AGDC answers NVIDIA (the A/B)
 m = dict(BASE)
@@ -258,6 +263,7 @@ row INFO VBL a | grep -qF "source otg-poll (the vblank interrupt: the 'vblank ir
 row INFO "vblank irq" a | grep -qF "fb 1: VBL from the vblank interrupt: 3600 interrupt(s), 3590 VBL(s) delivered by it (interrupt -> delivery avg 45 us, max 300 us), 10 same-vblank skip(s); pflip interrupts 900, latch waits 900 (880 ended by the pflip interrupt: avg 30 us, max 200 us; 0 timed out)" || fail "a: vblank irq"
 row INFO "detailed timings" a | grep -qF "validateDetailedTiming 61 (4 one of our modes, 61 refused)" || fail "a: timings"
 row INFO "AGDC vendor" a | grep -qF "vendor info answer NVIDIA 0x10de (debug.rdna3agdc_vendor 1), asked 3 time(s); last answered as NVIDIA 0x10de" || fail "a: AGDC vendor"
+row INFO "AGDC N45" a | grep -qF "ib 0, linkflags 0, scaler 0; 0x711 types (asked/answered) 0x10 4/4, 0x40 4/0" || fail "a: AGDC N45"
 hasnt "WARN fb N40" "a: a clean N40 run has no WARN"
 grep -qF "  fb N40: switches" "$T/out.txt" || fail "a: SUMMARY fb N40 rows"
 python3 -I "$ROOT/tools/result_checklist.py" --no-color --width 400 "$T/out.txt" > "$T/ck.txt"

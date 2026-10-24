@@ -8,6 +8,14 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
+
+/* rewrites the reply buffer after rd3n48_answer read the query: the answer
+ * must still use the values it checked (IOPresentment's buffer is in == out) */
+static int g_mutate;
+static uint32_t g_mutateIdx, g_mutateType;
+#define RD3N48_TEST_AFTER_READ(c) \
+    do { if (g_mutate) { (c)->fbIndex = g_mutateIdx; (c)->type = g_mutateType; } } while (0)
 #include "../agdc/rdna3_agdc_n48.h"
 
 static int fails;
@@ -41,7 +49,17 @@ static int exactly(const void *p, unsigned len, const unsigned *offs, const uint
     return 1;
 }
 
-static struct rd3k5_fb_ext_cap cq, cr;
+/* each reply buffer with a canary behind it: nothing writes past the reply */
+#define CANARY 0xc3
+static struct { struct rd3k5_fb_ext_cap r; uint8_t canary[64]; } cqb, crb;
+#define cq (cqb.r)
+#define cr (crb.r)
+static int canary_ok(const uint8_t *b, unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        if (b[i] != CANARY) return 0;
+    return 1;
+}
 static struct rd3k5_link_config lq, lr;
 
 /* a 0x711 query as IOPresentment writes it: fbIndex, then the u64
@@ -64,13 +82,22 @@ int main(void)
     int32_t idx = -1;
     const unsigned len = sizeof cr;
 
+    memset(cqb.canary, CANARY, sizeof cqb.canary);
+    memset(crb.canary, CANARY, sizeof crb.canary);
     CHECK(rd3k5_timing_from(t[0], 148500000ull, 1920, 280, 88, 44, 1080, 45, 4, 5, 60000, 1, 1) == 0);
     h[0].t = t[0]; h[0].tBytes = sizeof t[0];
     h[1].t = NULL; h[1].tBytes = 0;
 
-    /* ---- (a) type 0x40, the inline buffer */
+    /* ---- the defaults: every switch as before N45 (ib 3 is the A/B arm) */
     sw.ib = RD3N48_IB_DEFAULT; sw.linkflags = RD3N48_LINKFLAGS_DEFAULT; sw.scaler = RD3N48_SCALER_DEFAULT;
-    CHECK(sw.ib == 3 && sw.linkflags == 0 && sw.scaler == 0);
+    CHECK(sw.ib == 0 && sw.linkflags == 0 && sw.scaler == 0);
+    query711(0, RD3N48_CAP_INLINEBUF);
+    CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) == RD3K5_R_UNSUPPORTED);
+    query711(0, 0x2);
+    CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) == RD3K5_R_UNSUPPORTED);
+
+    /* ---- (a) type 0x40, the inline buffer */
+    sw.ib = RD3N48_IB_ALL;
     query711(0, RD3N48_CAP_INLINEBUF);
     CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) == RD3N48_R_IB);
     {
@@ -90,10 +117,22 @@ int main(void)
     query711(1, RD3N48_CAP_INLINEBUF);
     CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) == RD3K5_R_NOTFOUND);
     CHECK(why == 0x31 && idx == 1);
-    /* index 2 does not exist */
+    /* an index past the table: refused as before N45 (Unsupported) */
+    why = 0;
     query711(2, RD3N48_CAP_INLINEBUF);
-    CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) == RD3K5_R_BADARG);
-    CHECK(why == (int)RD3N48_WHY_IB_INDEX && idx == 2);
+    CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) == RD3K5_R_UNSUPPORTED);
+    CHECK(why == 0 && idx == 2 && inf.type == 0x40);
+    {
+        static const uint32_t big[] = { 0x80000000u, 0xfffffffeu, 0xffffffffu };
+        static const uint32_t ty[] = { 0x40, 0x2, 0x8000 };
+        for (unsigned i = 0; i < 3; i++)
+            for (unsigned j = 0; j < 3; j++) {
+                query711(big[i], ty[j]);
+                CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) ==
+                      RD3K5_R_UNSUPPORTED);
+                CHECK(idx == (int32_t)big[i] && inf.type == ty[j]);
+            }
+    }
     /* a wrong size is still rd3k5_answer's refusal */
     query711(0, RD3N48_CAP_INLINEBUF);
     CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr - 4, h, 2, &sw, &why, &idx, &inf) == RD3K5_R_BADARG);
@@ -101,7 +140,8 @@ int main(void)
 
     /* ---- (a) the other types: zero-filled + success, fbIndex/type kept */
     {
-        static const uint32_t types[] = { 0x1, 0x2, 0x4, 0x8, 0x20, 0x80, 0x100, 0x8000, 0x11, 0x10000 };
+        static const uint32_t types[] = { 0x1, 0x2, 0x4, 0x8, 0x20, 0x80, 0x100, 0x200, 0x400, 0x800, 0x1000, 0x2000,
+                                          0x4000, 0x8000 };
         static const unsigned o[] = { 0x00, 0x04 };
         for (unsigned i = 0; i < sizeof types / sizeof types[0]; i++) {
             uint32_t v[2] = { 1, types[i] };
@@ -111,8 +151,17 @@ int main(void)
             CHECK(inf.type == types[i]);
         }
         query711(2, 0x1);
-        CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) == RD3K5_R_BADARG);
-        CHECK(why == (int)RD3N48_WHY_ZERO_INDEX);
+        CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) == RD3K5_R_UNSUPPORTED);
+        /* values that are no capability type stay refused */
+        {
+            static const uint32_t no[] = { 0, 0x3, 0x11, 0x10000, 0x80000000u, 0xffffffffu };
+            for (unsigned i = 0; i < sizeof no / sizeof no[0]; i++) {
+                query711(0, no[i]);
+                CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) ==
+                      RD3K5_R_UNSUPPORTED);
+                CHECK(inf.type == no[i]);
+            }
+        }
     }
 
     /* ---- (a) per switch value */
@@ -137,6 +186,36 @@ int main(void)
     query711(1, RD3K5_CAP_PLANESCALER);
     CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cr, sizeof cr, h, 2, &sw, &why, &idx, &inf) == RD3K5_R_NOTFOUND);
     sw.ib = RD3N48_IB_DEFAULT;
+
+    /* ---- the sysctl range check: values outside a switch are EINVAL */
+    {
+        static const struct { int which, v, bad; } k[] = {
+            { RD3N48_SW_IB, 0, 0 }, { RD3N48_SW_IB, 3, 0 }, { RD3N48_SW_IB, 4, 1 }, { RD3N48_SW_IB, -1, 1 },
+            { RD3N48_SW_LINKFLAGS, 2, 0 }, { RD3N48_SW_LINKFLAGS, 3, 1 }, { RD3N48_SW_SCALER, 2, 0 },
+            { RD3N48_SW_SCALER, 3, 1 }, { RD3N48_SW_SCALER, -2147483647 - 1, 1 }, { 3, 0, 1 }, { -1, 0, 1 } };
+        for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++)
+            CHECK(rd3n48_sw_check(k[i].which, k[i].v) == k[i].bad);
+        CHECK(rd3n48_sw_max(RD3N48_SW_IB) == 3 && rd3n48_sw_max(RD3N48_SW_LINKFLAGS) == 2 && rd3n48_sw_max(RD3N48_SW_SCALER) == 2);
+    }
+
+    /* ---- the query is read once: rewriting the buffer after the read
+     * changes nothing (in == out, as IOPresentment calls) */
+    g_mutate = 1;
+    g_mutateIdx = 0x7fffffffu;
+    g_mutateType = 0x2;
+    sw.ib = RD3N48_IB_ALL; sw.scaler = RD3N48_SCALER_AMD;
+    query711(0, RD3N48_CAP_INLINEBUF);
+    CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cq, sizeof cq, h, 2, &sw, &why, &idx, &inf) == RD3N48_R_IB);
+    CHECK(cq.fbIndex == 0 && cq.type == 0x40 && cq.count == 1 && rd32(&cq, 0x1c) == 1920 && inf.type == 0x40);
+    query711(0, RD3K5_CAP_PLANESCALER);
+    CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cq, sizeof cq, h, 2, &sw, &why, &idx, &inf) == RD3K5_R_CAPS);
+    CHECK(cq.fbIndex == 0 && cq.type == 0x10 && rd32(&cq, 0x40) == 0x00050005u && inf.type == 0x10);
+    g_mutateType = RD3N48_CAP_INLINEBUF;
+    query711(1, 0x2);   /* a zero fill must not turn into an inline buffer of index 0x7fffffff */
+    CHECK(rd3n48_answer(RD3K5_CMD_FBCAPEX, &cq, sizeof cq, &cq, sizeof cq, h, 2, &sw, &why, &idx, &inf) == RD3N48_R_ZERO);
+    CHECK(cq.fbIndex == 1 && cq.type == 0x2 && cq.count == 0 && inf.type == 0x2);
+    g_mutate = 0;
+    sw.ib = RD3N48_IB_DEFAULT; sw.scaler = RD3N48_SCALER_DEFAULT;
 
     /* ---- unknown switch values become the defaults */
     {
@@ -257,6 +336,8 @@ int main(void)
     CHECK(strstr(rd3n48_ib_text(9), "unknown") && strstr(rd3n48_linkflags_text(1), "0xa"));
     CHECK(strstr(rd3n48_linkflags_text(5), "unknown") && strstr(rd3n48_scaler_text(1), "AMD"));
     CHECK(strstr(rd3n48_scaler_text(3), "unknown"));
+
+    CHECK(canary_ok(cqb.canary, sizeof cqb.canary) && canary_ok(crb.canary, sizeof crb.canary));
 
     if (fails) {
         printf("test_agdc_n48: %d failure(s)\n", fails);

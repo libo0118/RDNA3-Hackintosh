@@ -17,7 +17,8 @@
  *   0x711  extended capability 0x10 (plane scaler) of a framebuffer index   } debug.rdna3agdc_k5
  *          and, with K5 on, after Navi48-MacOS (DRIVER-PLAN N45, rdna3_agdc_n48.h):
  *          type 0x40 (inline buffer) and the other types zero-filled
- *          (rdna3agdcib / debug.rdna3agdc_ib, default 3), the 0x921 flags
+ *          (rdna3agdcib / debug.rdna3agdc_ib, default 0 = as before; 3 is
+ *          the A/B arm, rdna3vm step play-agdcib), the 0x921 flags
  *          (rdna3agdclinkflags / debug.rdna3agdc_linkflags, default 0 =
  *          NullMoth's 0xb) and the plane-scaler markers (rdna3agdcscaler /
  *          debug.rdna3agdc_scaler, default 0 = NullMoth's). IOPresentment
@@ -104,6 +105,11 @@ static SInt64 gAgdcIbAnswered = 0, gAgdcZeroFilled = 0, gAgdcScalerAlt = 0;
 static int    gAgdcLinkFlagsLast = -1;      /* the flags of the last 0x921 answer (-1 never) */
 static SInt32 gAgdcLogLink = 0, gAgdcLogCaps = 0, gAgdcLogIb = 0, gAgdcLogZero = 0;
 static int    gAgdcLoggedLink = -1, gAgdcLoggedScaler = -1, gAgdcLoggedIb = -1;
+/* K5 queries refused (index without timing, wrong size, ...); the reason
+ * of the last one is debug.rdna3agdc_k5_why. Their log lines have their own
+ * budget: first 64, then every 1024th */
+static SInt64 gAgdcK5Refused = 0;
+static SInt32 gAgdcLogK5Refused = 0;
 /* every 0x711 by capability type (slot k = type 1 << k, slot 16 any other):
  * asked, and answered with success */
 static SInt32 gAgdcTypeAsked[RD3N48_TYPE_SLOTS], gAgdcTypeAnswered[RD3N48_TYPE_SLOTS];
@@ -221,11 +227,14 @@ static IOReturn rd3K5Answer(IOService *pci, unsigned int cmd, unsigned long *in,
     if (r == RD3K5_R_NOTFOUND && idx >= 0 && (unsigned)idx < nh && !h[idx].t) why = 0x30;
     gAgdcK5Why = why;
     gAgdcK5LastRefusedIdx = idx;
-    if (OSIncrementAtomic(&gAgdcLogged) < 120) {
+    const SInt64 nRef = OSAddAtomic64(1, &gAgdcK5Refused) + 1;
+    const SInt32 lRef = OSIncrementAtomic(&gAgdcLogK5Refused);
+    if (lRef < 64 || !(lRef % 1024)) {
         if (inf.type != 0xffffffffu)
-            AGLOG("K5: command %#x index %d type %#x NOT answered (why %#x, %u slot(s))", cmd, idx, inf.type, why, nh);
+            AGLOG("K5: command %#x index %d type %#x NOT answered (why %#x, %u slot(s)), %lld refused so far", cmd, idx, inf.type,
+                  why, nh, nRef);
         else
-            AGLOG("K5: command %#x index %d NOT answered (why %#x, %u slot(s))", cmd, idx, why, nh);
+            AGLOG("K5: command %#x index %d NOT answered (why %#x, %u slot(s)), %lld refused so far", cmd, idx, why, nh, nRef);
     }
     return r == RD3K5_R_BADARG ? kIOReturnBadArgument : kIOReturnNotFound;
 }
@@ -237,7 +246,7 @@ IOReturn RD3DeviceControl::vendor_doDeviceAttribute(unsigned int cmd, unsigned l
     if (cmd == RD3K5_CMD_VENDOR) {
         if (!out || !outSize || *outSize != sizeof(struct rd3k5_vendor_info)) {
             if (OSIncrementAtomic(&gAgdcLogged) < 120)
-                AGLOG("vendor info: bad arguments (out %p, size %lu): Bad argument", out, outSize ? *outSize : 0ul);
+                AGLOG("vendor info: bad arguments (out %s, size %lu): Bad argument", out ? "given" : "NULL", outSize ? *outSize : 0ul);
             return kIOReturnBadArgument;
         }
         struct rd3k5_vendor_info *v = (struct rd3k5_vendor_info *)out;
@@ -591,18 +600,18 @@ static int rdna3agdc_sysctl SYSCTL_HANDLER_ARGS
  * 2 = _scaler; values outside the switch are refused (EINVAL) */
 static const char *rd3N48Text(int which, uint32_t v)
 {
-    return which == 0 ? rd3n48_ib_text(v) : which == 1 ? rd3n48_linkflags_text(v) : rd3n48_scaler_text(v);
+    return which == RD3N48_SW_IB ? rd3n48_ib_text(v) : which == RD3N48_SW_LINKFLAGS ? rd3n48_linkflags_text(v)
+                                                                                    : rd3n48_scaler_text(v);
 }
 static int rdna3agdc_n48_sysctl SYSCTL_HANDLER_ARGS
 {
     int *p = (int *)arg1;
     const int which = arg2;
-    const int max = which == 0 ? (int)RD3N48_IB_ALL : which == 1 ? (int)RD3N48_LINKFLAGS_MAX : (int)RD3N48_SCALER_MAX;
     int v = *p;
     int err = sysctl_handle_int(oidp, &v, 0, req);
     if (err || !req->newptr) return err;
-    if (v < 0 || v > max) {
-        AGLOG("%s=%d refused: 0..%d (stays %d)", oidp->oid_name, v, max, *p);
+    if (rd3n48_sw_check(which, v)) {
+        AGLOG("%s=%d refused: 0..%d (stays %d)", oidp->oid_name, v, rd3n48_sw_max(which), *p);
         return EINVAL;
     }
     const int old = *p;
@@ -646,15 +655,16 @@ SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_k5_last_refused_idx, CTLFLAG_RD | CTLFLA
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_vendor, CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcVendor, 0, "vendor info answer: 0 AMD 0x1002, 1 NVIDIA 0x10de, 2 Intel 0x8086 (DRIVER-PLAN N40)");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_vendor_asked, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcVendorAsked, 0, "vendor info queries answered");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_vendor_last, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcVendorLast, 0, "the vendor choice of the last answer (-1 never asked)");
-SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_ib, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcIb, 0, rdna3agdc_n48_sysctl, "I",
-            "K5 0x711 (N45): bit 0 = answer type 0x40 (inline buffer), bit 1 = zero-fill the other types but 0x10 with success (default 3)");
-SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_linkflags, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcLinkFlags, 1, rdna3agdc_n48_sysctl, "I",
+SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_ib, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcIb, RD3N48_SW_IB, rdna3agdc_n48_sysctl, "I",
+            "K5 0x711 (N45): bit 0 = answer type 0x40 (inline buffer), bit 1 = zero-fill the other capability types but 0x10 with success (default 0)");
+SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_linkflags, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcLinkFlags, RD3N48_SW_LINKFLAGS, rdna3agdc_n48_sysctl, "I",
             "K5 0x921 flags (N45): 0 = 0xb NullMoth (default), 1 = 0xa (bit 0 clear), 2 = 0 (Navi48)");
-SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_scaler, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcScaler, 2, rdna3agdc_n48_sysctl, "I",
+SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_scaler, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED | CTLFLAG_KERN, &gAgdcScaler, RD3N48_SW_SCALER, rdna3agdc_n48_sysctl, "I",
             "K5 plane scaler (N45): 0 = NullMoth (default), 1 = AMD markers 0x50005/4, 2 = Navi48 as written (width first)");
 SYSCTL_QUAD(_debug, OID_AUTO, rdna3agdc_ib_answered, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcIbAnswered, "K5: 0x711 type 0x40 (inline buffer) answered");
 SYSCTL_QUAD(_debug, OID_AUTO, rdna3agdc_zero_filled, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcZeroFilled, "K5: 0x711 of another type zero-filled with success");
 SYSCTL_QUAD(_debug, OID_AUTO, rdna3agdc_scaler_alt, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcScalerAlt, "K5: plane-scaler answers with debug.rdna3agdc_scaler 1 or 2");
+SYSCTL_QUAD(_debug, OID_AUTO, rdna3agdc_k5_refused, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcK5Refused, "K5: queries refused (the last reason: debug.rdna3agdc_k5_why)");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_linkflags_last, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcLinkFlagsLast, 0, "K5: the flags of the last 0x921 answer (-1 never)");
 SYSCTL_INT (_debug, OID_AUTO, rdna3agdc_types_mask, CTLFLAG_RD | CTLFLAG_LOCKED, &gAgdcTypesMask, 0, "bit k = a 0x711 asked capability type 1 << k (bit 16 any other type)");
 SYSCTL_PROC(_debug, OID_AUTO, rdna3agdc_types, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED, NULL, 0, rdna3agdc_types_sysctl, "A",
@@ -671,7 +681,7 @@ static struct sysctl_oid *const kOids[] = {
     &sysctl__debug_rdna3agdc_vendor_last, &sysctl__debug_rdna3agdc_ib, &sysctl__debug_rdna3agdc_linkflags,
     &sysctl__debug_rdna3agdc_scaler, &sysctl__debug_rdna3agdc_ib_answered, &sysctl__debug_rdna3agdc_zero_filled,
     &sysctl__debug_rdna3agdc_scaler_alt, &sysctl__debug_rdna3agdc_linkflags_last, &sysctl__debug_rdna3agdc_types_mask,
-    &sysctl__debug_rdna3agdc_types,
+    &sysctl__debug_rdna3agdc_types, &sysctl__debug_rdna3agdc_k5_refused,
 };
 
 /* ------------------------------------------------------------------ */

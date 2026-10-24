@@ -633,6 +633,30 @@ frames (no fallback, no storm) and the present queue's `flip done from the
 pflip interrupt` rows present; the second shows `rdna3vblirq=0` rows. Compare
 how smooth windows move in both.
 
+N45's AGDC A/B (the answers after Navi48-MacOS, `agdc/rdna3_agdc_n48.h`):
+`play` runs them all at their defaults (as before N45); each of these steps
+is `play` with one switch changed, judged against a plain `play` run of the
+same build:
+
+| Step | Switch | What changes |
+|---|---|---|
+| `play-agdcib` | `rdna3agdcib=3` | 0x711 type 0x40 (inline buffer) answered, the other capability types zero-filled with success |
+| `play-agdclink` | `rdna3agdclinkflags=1` | the 0x921 flags without bit 0 (0xa) |
+| `play-agdcscaler` | `rdna3agdcscaler=1` | the plane scaler with AMD's markers (0x50005 / 4) |
+
+`rdna3agdcib=1` (type 0x40 only, no zero fill) and `rdna3agdcscaler=2`
+(Navi48's width-first entry) are `rdna3vm args` lines:
+
+```sh
+rdna3vm args "$(awk '$1 == "play" { $1 = ""; print }' tools/ladder-steps.txt) rdna3agdcib=1"
+```
+
+Run `play-agdcib` first. What decides it: the triage rows `AGDC N45` (the
+switch values this boot ran, the per-type `asked/answered` text) and
+`planes in transactions` (`iop_ok` > 0). The sysctls
+(`sudo sysctl debug.rdna3agdc_ib=3`) count only from the next WindowServer
+start, so a boot-arg step is the clean A/B.
+
 ### Tests that already passed
 
 The report does not run a long test again (scaled modes, gamma, the

@@ -132,8 +132,8 @@ ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_a
 # fb/Makefile's FB_SRC_HASH inputs and agdc/Makefile's AGDC_SRC_HASH inputs
 FB_HASH_FILES = ("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h",
                  "common/rdna3_fb_policy.h", "common/rdna3_bootargs.h", "common/rdna3_vbl_irq.h")
-AGDC_HASH_FILES = ("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/AppleGraphicsDeviceControl_re.h",
-                   "agdc/Info.plist")
+AGDC_HASH_FILES = ("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/rdna3_agdc_n48.h",
+                   "agdc/AppleGraphicsDeviceControl_re.h", "agdc/Info.plist", "common/rdna3_bootargs.h")
 
 
 def fb_source_hash(files=FB_HASH_FILES):
@@ -3742,6 +3742,75 @@ def agdc_vendor_lines(path, txt="", args=""):
                     "older than DRIVER-PLAN N40, or the counters were not collected"))
     else:
         out.append(("INFO", "AGDC vendor", "no debug.rdna3agdc_vendor (AGDC not armed in this run)"))
+    out.extend(agdc_n48_lines(txt, args))
+    return out
+
+
+# DRIVER-PLAN N45 (2), (3) (agdc/rdna3_agdc_n48.h): sysctl name, boot-arg, default, largest value
+AGDC_N48_SWITCHES = (("ib", "rdna3agdcib", 0, 3), ("linkflags", "rdna3agdclinkflags", 0, 2),
+                     ("scaler", "rdna3agdcscaler", 0, 2))
+AGDC_N48_COUNTERS = ("ib_answered", "zero_filled", "scaler_alt", "linkflags_last", "types", "k5_refused")
+
+
+def agdc_n48_lines(txt, args):
+    """[(level, label, text)]: N45's AGDC switches against the boot-args, the per-type 0x711 text and the counters
+    (txt: the tests file + 17-sysctl-agdc.txt). WARN: a boot-arg the kext does not show, the inline buffer asked
+    but never answered with ib bit 0 set, no zero fill with ib bit 1 set while other types were asked, counters
+    missing while K5 is armed, N45 switches set while K5 is off"""
+    label = "AGDC N45"
+
+    def last(name, rx=r"(-?\d+)"):
+        m = re.findall(r"debug\.rdna3agdc_%s: %s[ \t]*$" % (name, rx), txt or "", re.M)
+        return m[-1] if m else None
+    k5 = bool(re.search(r"(?:^|\s)rdna3agdc=[34]\b", args or "")) or last("k5") == "1"
+    asked = {k: _boot_arg_num(args, b) for k, b, _, _ in AGDC_N48_SWITCHES}
+    vals = {k: last(k) for k, _, _, _ in AGDC_N48_SWITCHES}
+    if all(v is None for v in vals.values()):
+        given = ["%s=%s" % (b, asked[k][0]) for k, b, _, _ in AGDC_N48_SWITCHES if asked[k] is not None]
+        if k5 or given:
+            return [("WARN", label, "%sno debug.rdna3agdc_ib / _linkflags / _scaler in the report: an RDNA3AGDC older "
+                     "than DRIVER-PLAN N45, or the counters were not collected%s" % (
+                         "K5 armed but " if k5 else "", "; boot-args ask " + ", ".join(given) if given else ""))]
+        return [("INFO", label, "no N45 counters (K5 not armed in this run)")]
+    out, why = [], []
+    sw = {}
+    for k, b, dflt, top in AGDC_N48_SWITCHES:
+        v = int(vals[k]) if vals[k] is not None else None
+        sw[k] = v
+        if v is None:
+            why.append("no debug.rdna3agdc_%s" % k)
+            continue
+        if asked[k] is not None:
+            want = asked[k][1] if asked[k][1] is not None and 0 <= asked[k][1] <= top else dflt
+            if want != v:
+                why.append("boot-args ask %s=%s%s but debug.rdna3agdc_%s is %d (the boot-arg did not reach RDNA3AGDC, "
+                           "or the sysctl was changed at runtime)" % (
+                               b, asked[k][0], "" if want == asked[k][1] else " (unknown: the default %d)" % dflt, k, v))
+    if not k5 and any(sw[k] not in (None, d) for k, _, d, _ in AGDC_N48_SWITCHES):
+        why.append("N45 switches off their defaults while K5 is off (no rdna3agdc=3/4, debug.rdna3agdc_k5 not 1): "
+                   "they answer nothing in this run")
+    cnt = {c: last(c, r"(.*?)" if c == "types" else r"(-?\d+)") for c in AGDC_N48_COUNTERS}
+    if k5:
+        miss = [c for c in AGDC_N48_COUNTERS if cnt[c] is None]
+        if miss:
+            why.append("K5 armed but no debug.rdna3agdc_%s" % ", _".join(miss))
+    types = {t: (int(a), int(s)) for t, a, s in re.findall(r"(0x[0-9a-f]+|other) (\d+)/(\d+)", cnt["types"] or "")}
+    ib = sw.get("ib") or 0
+    if k5 and ib & 1 and types.get("0x40", (0, 0))[0] and not types["0x40"][1]:
+        why.append("the inline buffer (0x40) was asked %d time(s) and never answered with rdna3agdcib bit 0 set "
+                   "(no timing on the head? see debug.rdna3agdc_k5_why)" % types["0x40"][0])
+    others = sum(a for t, (a, _) in types.items() if t not in ("0x10", "0x40", "other"))
+    if k5 and ib & 2 and others and cnt["zero_filled"] is not None and int(cnt["zero_filled"]) == 0:
+        why.append("other capability types were asked %d time(s) but none was zero-filled with rdna3agdcib bit 1 set"
+                   % others)
+    out.append(("WARN" if why else "INFO", label, "K5 %s; ib %s, linkflags %s, scaler %s; 0x711 types (asked/answered) "
+                "%s; inline buffer answered %s, zero-filled %s, scaler with AMD markers %s, last 0x921 flags %s, "
+                "K5 refused %s (last why %s)%s" % (
+                    "armed" if k5 else "off",
+                    *("?" if sw[k] is None else sw[k] for k, _, _, _ in AGDC_N48_SWITCHES),
+                    cnt["types"] if cnt["types"] is not None else "?",
+                    *(cnt[c] if cnt[c] is not None else "?" for c in AGDC_N48_COUNTERS if c != "types"),
+                    last("k5_why") or "?", ": " + "; ".join(why) if why else "")))
     return out
 
 

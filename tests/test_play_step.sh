@@ -20,6 +20,14 @@ agdc=$(awk '$1 == "agdc" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder
 play=$(awk '$1 == "play" { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
 [ -n "$agdc" ] && [ "$play" = "$agdc rdna3play=1" ] || fail "ladder-steps.txt: play is [$play], agdc [$agdc]"
 [ "$(grep -c 'cursormall bisect bisect-plugin bisect-agdc play' "$ROOT/tools/vm/rdna3vm")" = 2 ] || fail "rdna3vm: play is not in both step lists"
+# DRIVER-PLAN N45's A/B steps: play plus exactly one AGDC switch, in both step lists
+for kv in play-agdcib:rdna3agdcib=3 play-agdclink:rdna3agdclinkflags=1 play-agdcscaler:rdna3agdcscaler=1; do
+    n=${kv%%:*}
+    s=$(awk -v n="$n" '$1 == n { $1 = ""; sub(/^ +/, ""); print }' "$ROOT/tools/ladder-steps.txt")
+    [ "$s" = "$play ${kv#*:}" ] || fail "ladder-steps.txt: $n is [$s], expected the play step + ${kv#*:}"
+    [ "$(grep -c "play-desktop play-agdcib play-agdclink play-agdcscaler" "$ROOT/tools/vm/rdna3vm")" = 2 ] || fail "rdna3vm: $n is not in both step lists"
+done
+case " $play " in *" rdna3agdcib="*|*" rdna3agdclinkflags="*|*" rdna3agdcscaler="*) fail "the play step sets an N45 switch: [$play]" ;; esac
 sed -n '/^auto_limit() {/,/^}/p' "$ROOT/tools/vm/rdna3vm" > "$T/limit.sh"
 [ -s "$T/limit.sh" ] || fail "rdna3vm: auto_limit not found"
 m=$(AUTO_TIMEOUT_MIN=8 bash -c '. "$1"; auto_limit "$2"' _ "$T/limit.sh" "$play")

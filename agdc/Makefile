@@ -21,7 +21,7 @@ CXXFLAGS := $(ARCH) -isysroot $(SDK) -mkernel -nostdinc -I$(KHDR) -isystem $(RES
             -Wno-inconsistent-missing-override -Wno-deprecated-declarations
 # the build id is a hash of the sources (like fb/ and accel/): macOS asks the
 # user to allow every new binary; tools/triage_reports.py computes the same
-AGDC_SRC_HASH := $(shell cat rdna3-agdc.cpp rdna3_agdc_k5.h AppleGraphicsDeviceControl_re.h Info.plist | shasum | cut -c1-10)
+AGDC_SRC_HASH := $(shell cat rdna3-agdc.cpp rdna3_agdc_k5.h rdna3_agdc_n48.h AppleGraphicsDeviceControl_re.h Info.plist ../common/rdna3_bootargs.h | shasum | cut -c1-10)
 CXXFLAGS += -DAGDC_SRC='"$(AGDC_SRC_HASH)"'
 LDFLAGS  := $(ARCH) -isysroot $(SDK) -nostdlib -Xlinker -kext -lkmodc++ -lkmod -lcc_kext
 
