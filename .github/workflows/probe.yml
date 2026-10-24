@@ -76,6 +76,30 @@ jobs:
             echo "::error::CoreDisplay.dis has $n lines (< 1000): dyld_info produced no disassembly, see the .err files above"
             exit 1
           fi
+      - name: CoreDisplay GPU vendor CFSTRs and useIOP defaults (cfstr_peek)
+        if: always()
+        run: |
+          mkdir -p probe-out
+          # The addresses below are unslid dyld shared cache addresses of macOS build 24H32 ONLY
+          # (probe run 10): the CFSTRs CoreDisplay's GetSystemGPUVendors matches the IOFramebuffer
+          # class against (-> IG 2, AMD 4, APV 0x10, NVIDIA 8), the preferences domain
+          # (GetBoolCFPreference) and the static initial values of the useIOP* byte flags.
+          # The helper is read-only (stdout only) and every step below survives its failure.
+          build=$(sysctl -n kern.osversion 2>/dev/null || true)
+          echo "macOS build: $build"
+          [ "$build" = "24H32" ] || echo "::warning::macOS build is '$build', the cfstr_peek addresses are for 24H32 only"
+          show() { if [ -f "$2" ]; then echo "== $1"; head -n "$3" "$2"; else echo "== $1: MISSING $2"; fi; }
+          cc -O0 -o probe-out/cfstr_peek tools/probe/cfstr_peek.c -framework CoreFoundation || echo "cfstr_peek build exited $?"
+          if [ -x probe-out/cfstr_peek ]; then
+            ./probe-out/cfstr_peek \
+              s:0x7ff8405067b8 s:0x7ff840502798 s:0x7ff8405067d8 s:0x7ff8404fec98 \
+              d:0x7ff8404fd578 \
+              b:0x7ff843bac76d b:0x7ff843bac76e b:0x7ff843bad281 b:0x7ff843bad282 b:0x7ff843bad283 \
+              w:0x7ff843bb1d64 > probe-out/59-cfstr-peek.txt 2>&1 || echo "cfstr_peek exited $?"
+          else
+            echo "not found: cfstr_peek was not built" > probe-out/59-cfstr-peek.txt
+          fi
+          show "run 10: CoreDisplay vendor CFSTRs, domain, useIOP flags, preferences (cfstr_peek)" probe-out/59-cfstr-peek.txt 100
       - uses: actions/upload-artifact@v4
         if: always()
         with:

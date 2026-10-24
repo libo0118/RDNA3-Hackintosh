@@ -303,12 +303,19 @@ grep -q '^FAILED: CoreDisplay dyld_info -platform failed' "$O3/00-system.txt" ||
 # 00-system.txt, survives missing files, and fails loudly when CoreDisplay.dis is tiny
 WF=$ROOT/.github/workflows/probe.yml
 grep -q 'if: always()' "$WF" || fail "probe.yml: the artifact upload must run after a failure"
-python3 -I - "$WF" "$T/step.sh" <<'PY'
+python3 -I - "$WF" "$T/step.sh" "$T/peek_step.sh" <<'PY'
 import sys
 t = open(sys.argv[1]).read()
 job = t.split("  coredisplay:")[1].split("  iofam:")[0]
-body = job.split("run: |\n", 1)[1].split("      - uses: actions/upload-artifact", 1)[0]
-open(sys.argv[2], "w").write("".join(l[10:] + "\n" for l in body.splitlines()))
+import re
+def step_body(job, marker):
+    # the run block of the step whose text contains marker, up to the next step ("      - ")
+    s = job.split(marker, 1)[1].split("run: |\n", 1)[1]
+    return re.split(r"^      - ", s, flags=re.M)[0]
+def dedent(body):
+    return "".join(l[10:] + "\n" for l in body.splitlines())
+open(sys.argv[2], "w").write(dedent(step_body(job, "name: CoreDisplay / SkyLight")))
+open(sys.argv[3], "w").write(dedent(step_body(job, "name: CoreDisplay GPU vendor CFSTRs")))
 PY
 grep -q '^sh tools/probe/coredisplay.sh probe-out$' "$T/step.sh" || fail "probe.yml: could not extract the coredisplay step"
 sed -i.bak "s#^sh tools/probe/coredisplay.sh probe-out#sh $ROOT/tools/probe/coredisplay.sh probe-out#" "$T/step.sh"
@@ -343,4 +350,61 @@ grep -q '^not found: CoreDisplay::DisplayPipeForService' "$T/wf1.log" || fail "t
 sed -i.bak 's#^show "present mode: the same, found by the address of the string" probe-out/40-page-flip-fn-CoreDisplay-by-address.s#show "gone" probe-out/does-not-exist.s#' "$T/step.sh"
 ( cd "$T/wf2" && PATH="$T/bin:$PATH" FAKE_DIS="$T/big.dis" bash -eo pipefail "$T/step.sh" ) > "$T/wf3.log" 2>&1 || fail "a missing file aborted the step"
 grep -q '^== gone: MISSING probe-out/does-not-exist.s' "$T/wf3.log" || fail "a missing file is not named"
+# ---- tools/probe/cfstr_peek.c: the CoreDisplay CFSTR / useIOP default reader (macOS-only C)
+C=$ROOT/tools/probe/cfstr_peek.c
+[ -f "$C" ] || fail "tools/probe/cfstr_peek.c is missing"
+if [ "$(uname -s)" = Darwin ]; then
+    cc -fsyntax-only -Wall -Wextra "$C" || fail "cfstr_peek.c does not compile"
+else
+    echo "test_probe_coredisplay: skip cc -fsyntax-only of cfstr_peek.c (not Darwin)"
+fi
+# read-only: stdout only (no file, no preference write, no exec)
+! grep -nE '\b(fopen|open|creat|unlink|remove|rename|system|popen|exec[lv]p?e?|CFPreferencesSet|CFPreferencesAppSynchronize|CFPreferencesSynchronize)\b *\(' "$C" ||
+    fail "cfstr_peek.c must be read-only (stdout only)"
+for needle in 'dlopen' 'CoreDisplay.framework' 'LC_SEGMENT_64' '_dyld_get_image_vmaddr_slide' 'outside CoreDisplay' \
+              'CFStringGetTypeID' 'CFPreferencesCopyValue' 'kCFPreferencesAnyUser' 'kCFPreferencesCurrentHost' \
+              'kern.osversion' '24H32' 'unset' 'useIOP_onAMD' 'useIOP_onNVIDIA' 'useIOP_onAPV' 'useIOP_onIG'; do
+    grep -qF -- "$needle" "$C" || fail "cfstr_peek.c lacks [$needle]"
+done
+# probe.yml builds, runs and shows it, and none of it can fail the step
+grep -q '^ *cc -O0 -o probe-out/cfstr_peek tools/probe/cfstr_peek.c -framework CoreFoundation || echo ' "$WF" || fail "probe.yml: no cfstr_peek build line with || echo"
+grep -qE '> probe-out/59-cfstr-peek.txt 2>&1 \|\| echo "cfstr_peek exited \$\?"' "$WF" || fail "probe.yml: the cfstr_peek run must not fail the step"
+grep -q 'show ".*" probe-out/59-cfstr-peek.txt 100' "$WF" || fail "probe.yml does not show 59-cfstr-peek.txt (100 lines)"
+for a in s:0x7ff8405067b8 s:0x7ff840502798 s:0x7ff8405067d8 s:0x7ff8404fec98 0x7ff8404fd578 \
+         b:0x7ff843bac76d b:0x7ff843bac76e b:0x7ff843bad281 b:0x7ff843bad282 b:0x7ff843bad283; do
+    grep -qF -- "$a" "$WF" || fail "probe.yml does not pass $a to cfstr_peek"
+done
+grep -q '24H32' "$WF" || fail "probe.yml does not say the addresses are for 24H32"
+grep -q 'build is .*24H32 only' "$WF" || fail "probe.yml: no warning for another macOS build"
+# the step, under bash -e with stub cc / cfstr_peek: builds, runs, shows; a failing cc or helper never fails it
+grep -q '^cc -O0 -o probe-out/cfstr_peek' "$T/peek_step.sh" || fail "probe.yml: could not extract the cfstr_peek step"
+mkdir -p "$T/bin3" "$T/bin4" "$T/wf4" "$T/wf5" "$T/wf6"
+cat > "$T/bin3/cc" <<'EOF'
+#!/bin/sh
+# stub compiler: writes a stub cfstr_peek to the -o target
+out=
+while [ $# -gt 0 ]; do case $1 in -o) out=$2; shift ;; esac; shift; done
+[ -n "$out" ] || exit 2
+cat > "$out" <<'SH'
+#!/bin/sh
+echo "stub cfstr_peek args: $*"
+echo "s:0x7ff840502798 -> \"AMD\""
+exit "${PEEK_EXIT:-0}"
+SH
+chmod +x "$out"
+EOF
+chmod +x "$T/bin3/cc"
+printf '#!/bin/sh\nexit 1\n' > "$T/bin4/cc"; chmod +x "$T/bin4/cc"
+( cd "$T/wf4" && PATH="$T/bin3:$PATH" bash -eo pipefail "$T/peek_step.sh" ) > "$T/wf4.log" 2>&1 || fail "the cfstr_peek step failed: $(tail -5 "$T/wf4.log")"
+grep -q '^== run 10: CoreDisplay vendor CFSTRs' "$T/wf4.log" || fail "the cfstr_peek step did not show its output: $(tail -5 "$T/wf4.log")"
+grep -q 'stub cfstr_peek args: s:0x7ff8405067b8 .* d:0x7ff8404fd578 b:0x7ff843bac76d' "$T/wf4.log" || fail "cfstr_peek got the wrong arguments: $(grep 'stub cfstr_peek' "$T/wf4.log")"
+grep -q '^macOS build: ' "$T/wf4.log" || fail "the step does not print the macOS build"
+[ -f "$T/wf4/probe-out/59-cfstr-peek.txt" ] || fail "no 59-cfstr-peek.txt"
+# the helper crashes / exits nonzero: said, not fatal
+( cd "$T/wf5" && PEEK_EXIT=3 PATH="$T/bin3:$PATH" bash -eo pipefail "$T/peek_step.sh" ) > "$T/wf5.log" 2>&1 || fail "a failing cfstr_peek failed the step: $(tail -5 "$T/wf5.log")"
+grep -q '^cfstr_peek exited 3$' "$T/wf5.log" || fail "a failing cfstr_peek is not said: $(tail -5 "$T/wf5.log")"
+# the compiler fails: said, the step still passes and the output file says why
+( cd "$T/wf6" && PATH="$T/bin4:$PATH" bash -eo pipefail "$T/peek_step.sh" ) > "$T/wf6.log" 2>&1 || fail "a failing cc failed the step: $(tail -5 "$T/wf6.log")"
+grep -q '^cfstr_peek build exited 1$' "$T/wf6.log" || fail "a failing cc is not said: $(tail -5 "$T/wf6.log")"
+grep -q '^not found: cfstr_peek was not built' "$T/wf6/probe-out/59-cfstr-peek.txt" || fail "no 'not built' note in 59-cfstr-peek.txt"
 echo "test_probe_coredisplay: ok"
