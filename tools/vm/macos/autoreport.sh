@@ -349,28 +349,70 @@ plugin_trace_conf() {
 # DRIVER-PLAN N44: CoreDisplay's IOPresentment switches, read by GetBoolCFPreference from
 # the com.apple.CoreDisplay domain (probe run on 24H32; CoreDisplay's static values:
 # useIOP 1, useIOP_onAMD 0). A framebuffer CoreDisplay classes as AMD (vendor 4) may use
-# IOPresentment only with useIOP_onAMD: written AnyUser/AnyHost on every boot of the VM
-# (the install boot included, so the card boot's WindowServer starts with them);
-# rdna3iopprefs=0 in the boot-args takes both keys out again (the A/B). WindowServer
-# reads them at its start, before this script: what this boot's WindowServer saw is
-# the state at the first call of the boot (kept in CD_PREFS_BOOT), a change here
-# takes effect from the next boot. Which user/host domain the lookup really uses is
-# not proven (DRIVER-PLAN N44 open item). A standalone run only reports them.
+# IOPresentment only with useIOP_onAMD: written on every boot of the VM (the install boot
+# included, so the card boot's WindowServer starts with them) into BOTH stores that could be
+# the one CoreDisplay reads:
+#  - AnyHost:  /Library/Preferences/com.apple.CoreDisplay.plist (AnyUser + AnyHost, what
+#    `defaults write /Library/Preferences/com.apple.CoreDisplay` reaches)
+#  - ByHost:   /Library/Preferences/ByHost/com.apple.CoreDisplay.<host UUID>.plist (AnyUser +
+#    CurrentHost). Fact from Navi48-MacOS (Almosst-DEV, MIT, tools/pc/cdpref.c, macOS 26):
+#    CoreDisplay::GetBoolCFPreference calls CFPreferencesCopyValue(key, "com.apple.CoreDisplay",
+#    kCFPreferencesAnyUser, kCFPreferencesCurrentHost), the ByHost store. The file is written by
+#    its path because `defaults -currentHost write com.apple.CoreDisplay` as root goes to
+#    /var/root/Library/Preferences/ByHost, the wrong store (AnyUser + CurrentHost is
+#    /Library/Preferences/ByHost); and `defaults -currentHost write <abs path>` is no way either
+#    (macOS 26.4.1 appends the host UUID itself: <path>.<IOPlatformUUID>.plist), so the path
+#    given is the one WITH the UUID and no -currentHost. Unproven on
+#    macOS 15 (DRIVER-PLAN N44 open item). The host UUID in the file name is IOPlatformUUID, the
+#    one CFPreferences uses for ByHost files since 10.8; its files in the directory are listed
+#    in 19-coredisplay-prefs.txt (collect.sh), so a wrong UUID shows.
+# The keys are useIOP and useIOP_onAMD only (Navi48-MacOS also names displaySurfaceUsesIOSurface
+# and useIOP_gamma_onAMD, read by _CGXMappedDisplayStart: the next A/B, DRIVER-PLAN N44).
+# rdna3iopprefs=0 in the boot-args takes both keys out of both stores again (the A/B).
+# WindowServer reads them at its start, before this script: what this boot's WindowServer saw
+# is the state at the first call of the boot (kept in CD_PREFS_BOOT, "AnyHost: ...;
+# ByHost(<uuid>): ..." on its second line), a change here takes effect from the next boot.
+# A standalone run only reports them.
 CD_PREFS=${RDNA3_CD_PREFS:-/Library/Preferences/com.apple.CoreDisplay}
+CD_BYHOST_DIR=${RDNA3_CD_BYHOST_DIR:-/Library/Preferences/ByHost}
 CD_PREFS_BOOT=${RDNA3_CD_PREFS_BOOT:-/var/db/rdna3-coredisplay-prefs-boot.txt}
-cd_prefs_read() {   # the domain on one line, empty when it does not exist
-    defaults read "$CD_PREFS" 2>/dev/null | tr -s ' \n\t' '   ' | sed 's/^ //; s/ $//'
+cd_prefs_read() {   # cd_prefs_read <domain>: the domain on one line, empty when it does not exist
+    defaults read "$1" 2>/dev/null | tr -s ' \n\t' '   ' | sed 's/^ //; s/ $//'
+}
+cd_host_uuid() {   # IOPlatformUUID, empty when ioreg does not give a plausible one (it ends up in a path)
+    _u=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4; exit}')
+    case $_u in ''|*[!0-9A-Fa-f-]*) _u= ;; esac
+    printf '%s' "$_u"
+}
+cd_prefs_state() {   # cd_prefs_state <uuid>: "AnyHost: <domain>; ByHost(<uuid>): <domain>" (triage parses it)
+    _sa=$(cd_prefs_read "$CD_PREFS")
+    if [ -n "$1" ]; then _sb=$(cd_prefs_read "$CD_BYHOST_DIR/com.apple.CoreDisplay.$1"); _sb=${_sb:-(none)}
+    else _sb="(unknown)"; fi
+    printf 'AnyHost: %s; ByHost(%s): %s' "${_sa:-(none)}" "${1:-unknown}" "$_sb"
+}
+cd_prefs_on() {   # cd_prefs_on <domain>: both keys true, read back
+    defaults write "$1" useIOP -bool true >/dev/null 2>&1
+    defaults write "$1" useIOP_onAMD -bool true >/dev/null 2>&1
+    [ "$(defaults read "$1" useIOP_onAMD 2>/dev/null)" = 1 ] && [ "$(defaults read "$1" useIOP 2>/dev/null)" = 1 ]
+}
+cd_prefs_off() {   # cd_prefs_off <domain>: both keys taken out, read back
+    defaults delete "$1" useIOP >/dev/null 2>&1
+    defaults delete "$1" useIOP_onAMD >/dev/null 2>&1
+    [ -z "$(defaults read "$1" useIOP_onAMD 2>/dev/null)" ] && [ -z "$(defaults read "$1" useIOP 2>/dev/null)" ]
 }
 coredisplay_iop_prefs() {
+    _uuid=$(cd_host_uuid)
+    _bh=
+    [ -n "$_uuid" ] && _bh="$CD_BYHOST_DIR/com.apple.CoreDisplay.$_uuid"
     _bt=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ *sec = \([0-9]*\).*/\1/p')
     _rec=ok
     if [ -z "$_bt" ]; then
         # no boot time to tell this boot's record from an earlier boot's: rewrite it every call, and say so
         # (the state kept may already be the one after this script's own change)
-        { echo "boot ?"; cd_prefs_read; } > "$CD_PREFS_BOOT" 2>/dev/null || _rec=lost
+        { echo "boot ?"; cd_prefs_state "$_uuid"; echo; } > "$CD_PREFS_BOOT" 2>/dev/null || _rec=lost
         echo "== CoreDisplay prefs: boot time unknown: could NOT tell this boot's start state, it may be stale"
     elif [ "$(head -n 1 "$CD_PREFS_BOOT" 2>/dev/null)" != "boot $_bt" ]; then
-        { echo "boot $_bt"; cd_prefs_read; } > "$CD_PREFS_BOOT" 2>/dev/null || _rec=lost
+        { echo "boot $_bt"; cd_prefs_state "$_uuid"; echo; } > "$CD_PREFS_BOOT" 2>/dev/null || _rec=lost
     fi
     if [ "$_rec" = lost ]; then
         echo "== CoreDisplay prefs: could NOT keep this boot's state in $CD_PREFS_BOOT"
@@ -382,22 +424,21 @@ coredisplay_iop_prefs() {
     if [ -n "${STANDALONE:-}" ]; then
         _what="left as they are (standalone run)"
     elif sysctl -n kern.bootargs 2>/dev/null | tr ' ' '\n' | grep -qx 'rdna3iopprefs=0'; then
-        defaults delete "$CD_PREFS" useIOP >/dev/null 2>&1
-        defaults delete "$CD_PREFS" useIOP_onAMD >/dev/null 2>&1
-        if [ -z "$(defaults read "$CD_PREFS" useIOP_onAMD 2>/dev/null)" ] &&
-           [ -z "$(defaults read "$CD_PREFS" useIOP 2>/dev/null)" ]; then
-            _what="rdna3iopprefs=0: useIOP / useIOP_onAMD taken out"
-        else _what="rdna3iopprefs=0: useIOP / useIOP_onAMD could NOT be taken out"; fi
+        if cd_prefs_off "$CD_PREFS"; then _ra="taken out"; else _ra="could NOT be taken out"; fi
+        if [ -z "$_bh" ]; then _rb="could NOT be taken out (host UUID unknown: ioreg gave no IOPlatformUUID)"
+        elif cd_prefs_off "$_bh"; then _rb="taken out"; else _rb="could NOT be taken out"; fi
+        _what="rdna3iopprefs=0: useIOP / useIOP_onAMD: AnyHost $_ra; ByHost(${_uuid:-unknown}) $_rb"
     else
-        defaults write "$CD_PREFS" useIOP -bool true >/dev/null 2>&1
-        defaults write "$CD_PREFS" useIOP_onAMD -bool true >/dev/null 2>&1
-        if [ "$(defaults read "$CD_PREFS" useIOP_onAMD 2>/dev/null)" = 1 ] &&
-           [ "$(defaults read "$CD_PREFS" useIOP 2>/dev/null)" = 1 ]; then
-            _what="useIOP / useIOP_onAMD true (rdna3iopprefs=0 takes them out)"
-        else _what="useIOP / useIOP_onAMD could NOT be written"; fi
+        if cd_prefs_on "$CD_PREFS"; then _ra="written"; else _ra="could NOT be written"; fi
+        if [ -z "$_bh" ]; then _rb="could NOT be written (host UUID unknown: ioreg gave no IOPlatformUUID)"
+        else
+            [ -d "$CD_BYHOST_DIR" ] || mkdir -p "$CD_BYHOST_DIR" 2>/dev/null
+            if cd_prefs_on "$_bh"; then _rb="written"; else _rb="could NOT be written"; fi
+        fi
+        _what="useIOP / useIOP_onAMD true: AnyHost $_ra; ByHost(${_uuid:-unknown}) $_rb (rdna3iopprefs=0 takes them out)"
     fi
-    _now=$(cd_prefs_read)
-    echo "== CoreDisplay prefs: $_what; now: ${_now:-(none)}$([ "$_now" = "$_seen" ] || echo '; WindowServer takes the change at its next start (the next boot)')"
+    _now=$(cd_prefs_state "$_uuid")
+    echo "== CoreDisplay prefs: $_what; now: $_now$([ "$_now" = "$_seen" ] || echo '; WindowServer takes the change at its next start (the next boot)')"
 }
 
 # card run 2026-10-17b: one run decides between the swap models. 60 s with

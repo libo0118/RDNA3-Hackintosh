@@ -60,8 +60,12 @@ run 17-sysctl-agdc.txt sh -c "sysctl debug 2>/dev/null | grep rdna3agdc || echo 
 # framebuffers' side is RDNA3,FBStats virq_* in 12-ioreg-fb.txt
 run 18-sysctl-dispirq.txt sh -c "sysctl debug.rdna3_vblirq 2>/dev/null || echo '(no debug.rdna3_vblirq sysctl: a core older than DRIVER-PLAN N42)'; sysctl debug.rdna3_dispirq 2>/dev/null || echo '(no debug.rdna3_dispirq sysctl)'"
 # DRIVER-PLAN N44: CoreDisplay's IOPresentment switches now, and as this boot's WindowServer
-# started with them (kept by autoreport.sh; "boot <sec>" then the domain on one line)
-run 19-coredisplay-prefs.txt sh -c 'defaults read /Library/Preferences/com.apple.CoreDisplay; echo "== at the start of the boot (autoreport.sh):"; cat /var/db/rdna3-coredisplay-prefs-boot.txt'
+# started with them (kept by autoreport.sh; "boot <sec>" then "AnyHost: ...; ByHost(<uuid>): ..." on one
+# line). Two stores: AnyHost (/Library/Preferences/com.apple.CoreDisplay.plist) and ByHost
+# (/Library/Preferences/ByHost/com.apple.CoreDisplay.<IOPlatformUUID>.plist, the one Navi48-MacOS,
+# Almosst-DEV, MIT, found CoreDisplay reading on macOS 26); the ByHost files that exist are listed
+# so a wrong UUID in the name shows
+run 19-coredisplay-prefs.txt sh -c 'defaults read /Library/Preferences/com.apple.CoreDisplay; u=$(ioreg -rd1 -c IOPlatformExpertDevice | grep IOPlatformUUID | head -n 1 | cut -d\" -f4); echo "== ByHost store (IOPlatformUUID $u):"; defaults read /Library/Preferences/ByHost/com.apple.CoreDisplay.$u; echo "== ByHost files:"; ls -l /Library/Preferences/ByHost/ | grep CoreDisplay; echo "== at the start of the boot (autoreport.sh):"; cat /var/db/rdna3-coredisplay-prefs-boot.txt'
 run 14-ioreg-displays.txt sh -c "ioreg -l -w0 -r -c IODisplayConnect | head -200"
 run 15-system-profiler.txt system_profiler SPDisplaysDataType
 # the logs of a whole card run: 45 s cut card run 54's plugin log off
@@ -77,7 +81,7 @@ run 23-windowserver-crash.txt sh -c "for f in \$(ls -t /Library/Logs/DiagnosticR
 run 22-log-windowserver.txt log show --last boot --style compact --predicate 'process == "WindowServer" AND (eventMessage CONTAINS "GPU" OR eventMessage CONTAINS "Metal" OR eventMessage CONTAINS "accel")'
 # CoreDisplay / IOPresentment / GPUWrangler / the Metal plugin in
 # WindowServer, unfiltered: why a display pipe or Metal device failed
-run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --predicate 'process == \"WindowServer\" AND (subsystem BEGINSWITH \"com.apple.CoreDisplay\" OR subsystem BEGINSWITH \"com.apple.IOPresentment\" OR subsystem BEGINSWITH \"com.apple.GPUWrangler\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS[c] \"agdc\" OR eventMessage CONTAINS \"MetalDevice\")' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture'"
+run 24-log-coredisplay.txt sh -c "log show --last boot --info --style compact --predicate 'process == \"WindowServer\" AND (subsystem BEGINSWITH \"com.apple.CoreDisplay\" OR subsystem BEGINSWITH \"com.apple.IOPresentment\" OR subsystem BEGINSWITH \"com.apple.GPUWrangler\" OR eventMessage CONTAINS \"NVMTL\" OR eventMessage CONTAINS[c] \"agdc\" OR eventMessage CONTAINS \"MetalDevice\" OR eventMessage CONTAINS \"Invalid end point size\" OR eventMessage CONTAINS \"capabilities with no devices\" OR eventMessage CONTAINS \"device with no planes\" OR eventMessage CONTAINS \"Failed to get capabilities\")' 2>/dev/null | grep -v -e 'lazy air' -e sizequery -e 'heap texture'"
 # whole (card run 48 lost the plugin's start to a tail, run 49 the middle
 # where WindowServer restarted six times)
 # every WindowServer crash of this boot, its termination reason and the

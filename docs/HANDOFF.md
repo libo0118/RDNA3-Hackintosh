@@ -28,8 +28,11 @@ with the work below when the owner asks.
   (`step play-desktop`, `vblirq` / `vblirq-off`) are still open.
 - Stopped mid-way at the owner's request (no code merged from them):
   1. CoreDisplay prefs also in the ByHost store + "IOPresentment log" triage
-     row: WIP in `docs/handoff/wip-prefs-byhost.patch` (unreviewed, partly done,
-     tests incomplete; apply with `git apply` in a worktree, finish, review).
+     row: finished on branch `quick/prefs-byhost` (autoreport.sh, collect.sh,
+     triage `cd_prefs_rows` / `iop_log_rows`, `tests/test_coredisplay_prefs.sh`,
+     `tests/test_triage_iop_log.py`; the WIP patch is removed). Still to do
+     after the merge: ECC review round, CI, one card run (the ByHost file name
+     and whether CoreDisplay on 15 reads it are unproven).
   2. Probe of `GetBoolCFPreference` on macOS 15 (which user/host it passes, and
      the keys `_CGXMappedDisplayStart` / `InitializeUserDefaults` read): WIP in
      `docs/handoff/wip-probe-boolpref.patch` (unreviewed).
