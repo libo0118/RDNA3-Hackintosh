@@ -15,6 +15,9 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d)
+# the collector's system directory: never the host's own /var/tmp/rdna3-nvmtl (a Mac runner with the plugin
+# installed has real traces there - CI run #247)
+export NVMTL_COLLECT_SYSDIR="$T/no-system-traces"
 trap 'rm -rf -- "$T"' EXIT
 fail() { echo "test_plugin_trace: FAIL $*"; exit 1; }
 need() {   # need <file> <pattern>: the decoder output must contain it

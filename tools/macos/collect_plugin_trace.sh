@@ -64,7 +64,9 @@ bounded_copy() {
     return "$cp_rc"
 }
 n=0; rejected=0
-for src in ${NVMTL_TRACE_DIR:-} /var/tmp/rdna3-nvmtl; do
+# the system trace directory (NVMTL_COLLECT_SYSDIR only for the host tests: a Mac with the plugin has real traces)
+sysdir=${NVMTL_COLLECT_SYSDIR:-/var/tmp/rdna3-nvmtl}
+for src in ${NVMTL_TRACE_DIR:-} $sysdir; do
     [ -n "$src" ] || continue
     if [ -L "$src" ] || [ ! -d "$src" ]; then
         [ -e "$src" ] || [ -L "$src" ] && note "REJECT dir $src: a symlink or not a directory"
@@ -132,7 +134,7 @@ done
     echo "== plugin frame traces collected: $n (rejected: $rejected)"
     date -u '+collected %Y-%m-%d %H:%M:%S UTC'
     echo "== directory (numeric owner and group)"
-    ls -ldn /var/tmp/rdna3-nvmtl 2>&1 || true
+    ls -ldn "$sysdir" 2>&1 || true
     echo "== copied files"
     ls -ln "$out" 2>&1 | grep '\.trace' || echo "(none)"
     echo "== processes with the plugin loaded now (a trace of a live process keeps growing)"
