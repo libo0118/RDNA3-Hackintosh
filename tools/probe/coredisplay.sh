@@ -17,6 +17,12 @@
 # capability strings, the display pipe setup, the IOPresentment capability path and
 # isMobileSystem. Every one of these files exists; a symbol that is missing leaves a
 # one-line "not found: ..." file (the workflow prints them under bash -e).
+# Probe run 10 (55-/56-/57-/58- files): how ___GetSystemGPUVendors_block_invoke classifies a
+# framebuffer (CoreDisplay logs "GetSystemGPUVendors_block_invoke: 0x1000002d1 1 RDNA3Framebuffer":
+# vendor bit 1 is never in the allowed mask of UseIOPresentment), who writes useIOP and
+# useIOP_on*, the CFSTR keys those functions use (a CFSTR reference is a bare "; " in the
+# disassembly: it points to the __cfstring object, resolved here through a dump of that
+# section) and the IOP / vendor strings of the cstring tables.
 out=${1:-probe-out}
 mkdir -p "$out"
 sw_vers > "$out/00-system.txt"; uname -a >> "$out/00-system.txt"
@@ -42,6 +48,15 @@ for lib in /System/Library/Frameworks/CoreDisplay.framework/Versions/A/CoreDispl
     dyld_info -arch x86_64 -section __TEXT __cstring "$lib" > "$out/$n.cstring" 2>>"$out/$n.dis.err"
     dyld_info -arch x86_64 -exports "$lib" > "$out/$n.exports" 2>>"$out/$n.dis.err"
     wc -l "$out/$n.dis" "$out/$n.cstring" "$out/$n.exports" >> "$out/00-system.txt"
+    if [ "$n" = CoreDisplay ]; then
+        # probe run 10: the CFSTR objects (isa, flags, cstring pointer at +16, length) and the
+        # constant data (block literals: invoke pointer at +16) for the resolvers below
+        dyld_info -arch x86_64 -section __DATA_CONST __cfstring "$lib" > "$out/$n.cfstring" 2>>"$out/$n.dis.err"
+        [ -s "$out/$n.cfstring" ] || dyld_info -arch x86_64 -section __DATA __cfstring "$lib" > "$out/$n.cfstring" 2>>"$out/$n.dis.err"
+        dyld_info -arch x86_64 -section __DATA_CONST __const "$lib" > "$out/$n.const" 2>>"$out/$n.dis.err"
+        dyld_info -arch x86_64 -section __DATA __const "$lib" >> "$out/$n.const" 2>>"$out/$n.dis.err"
+        wc -l "$out/$n.cfstring" "$out/$n.const" >> "$out/00-system.txt"
+    fi
     # an empty disassembly or string table makes every later file empty without a word: say it here
     for part in dis cstring; do
         [ -s "$out/$n.$part" ] || echo "FAILED: $n .dis/.cstring empty ($n.$part), see $n.dis.err" >> "$out/00-system.txt"
@@ -237,14 +252,222 @@ fn_nf "$cd_dis" 'InitializeDisplayPipes' "$out/52-CoreDisplay-InitializeDisplayP
 fn_nf "$cd_dis" 'DisplayPipeForService' "$out/52-CoreDisplay-DisplayPipeForService.s" "CoreDisplay::DisplayPipeForService"
 # 3. the IOPresentment capability path
 fn_nf "$io_dis" 'IOPresentmentCopyCapabilities|IOPresentmentDisplayPipe.*apabilit' "$out/53-IOPresentment-CopyCapabilities.s" "IOPresentmentCopyCapabilities (IOPresentmentDisplayPipe)"
-fn_nf "$io_dis" 'IOPresentmentInit($|[^A-Za-z])' "$out/53-IOPresentment-Init.s" "_IOPresentmentInit"
-fn_nf "$io_dis" '[iI][oO]PresentmentFindAGDCMatch' "$out/53-IOPresentment-ioPresentmentFindAGDCMatch.s" "ioPresentmentFindAGDCMatch"
+fn_nf "$io_dis" '_IOPresentmentInitE|IOPresentmentInit($|[^A-Za-z])' "$out/53-IOPresentment-Init.s" "_IOPresentmentInit"
+# probe run 9: ioPresentmentFindAGDCMatch is a string, not a function
+string_users IOPresentment ioPresentmentFindAGDCMatch "$out/53-IOPresentment-str-ioPresentmentFindAGDCMatch.s"
 string_users IOPresentment DisplayPipeSupported "$out/53-IOPresentment-str-DisplayPipeSupported.s"
 string_users IOPresentment TransactionsSupported "$out/53-IOPresentment-str-TransactionsSupported.s"
 string_users IOPresentment "AGDC Extended Capabilities not found" "$out/53-IOPresentment-str-AGDC_Extended_Capabilities_not_found.s"
 # 4. isMobileSystem (CoreDisplay), whole, and its callees
 fn_nf "$cd_dis" 'isMobileSystem' "$out/54-isMobileSystem.s" "isMobileSystem"
 callee_bodies "$out/54-isMobileSystem.s" "$cd_dis" "$out/54-isMobileSystem-callees.s" 10 120
+# ---- probe run 10: how GetSystemGPUVendors classifies a framebuffer, who writes useIOP*
+# dyld_info prints labels at column 0 ("__ZN11CoreDisplay16UseIOPresentmentEv:"), globals in a
+# trailing "; __ZN11CoreDisplayL12useIOP_onAMDE" comment and string literals as
+# "; string literal: ...". A CFSTR reference is a bare "; " (the code points to the __cfstring
+# object, not to the cstring), so the resolver below computes the target of every
+# `leaq disp(%rip)` with an empty comment (next instruction address + disp), reads the cstring
+# pointer at entry+16 of the CoreDisplay.cfstring dump and looks the text up in CoreDisplay.cstring.
+# Blocks passed to dispatch_once are only referenced (`leaq ___block_literal_global...` into rsi):
+# the block literal is read from CoreDisplay.const, its invoke pointer (+16) names the function.
+# awk functions shared by the two passes (POSIX / BSD awk: no strtonum, no intervals)
+RES_FN='
+function hex2dec(s,    i, n, d, v) {
+    sub(/^0[xX]/, "", s); v = 0; n = length(s)
+    if (n == 0) return -1
+    for (i = 1; i <= n; i++) {
+        d = index("0123456789abcdef", tolower(substr(s, i, 1))) - 1
+        if (d < 0) return -1
+        v = v * 16 + d
+    }
+    return v
+}
+function key(v) { return sprintf("%.0f", v) }
+function dec2hex(v,    s, d) {
+    if (v <= 0) return "0"
+    s = ""
+    while (v > 0) { d = v % 16; s = substr("0123456789ABCDEF", d + 1, 1) s; v = (v - d) / 16 }
+    return s
+}
+function ishexaddr(t) {
+    sub(/:$/, "", t)
+    if (t ~ /^0[xX][0-9a-fA-F]+$/) return 1
+    return (length(t) >= 8 && t ~ /^[0-9a-fA-F]+$/)
+}
+function addrof(t) { sub(/:$/, "", t); return hex2dec(t) }
+'
+# pass 1: the lea targets of the disassembly files (mode cfstr: empty comment -> text; mode blk: block literal -> invoke)
+RES_MAIN='
+# memory image of a section dump: rows "ADDR  w0 w1 ..." with words of 2, 4, 8 or 16 hex digits
+# (little-endian numbers, or single bytes), so a pointer at entry+16 can be read back
+function loadmem(file,    line, n, t, i, tok, w, k, off, a, rows) {
+    rows = 0
+    while ((getline line < file) > 0) {
+        sub(/^[ \t]+/, "", line)
+        n = split(line, t, /[ \t]+/)
+        if (n < 2 || !ishexaddr(t[1])) continue
+        a = addrof(t[1]); if (a < 0) continue
+        rows++
+        off = a
+        for (i = 2; i <= n; i++) {
+            tok = t[i]; sub(/^0[xX]/, "", tok); w = length(tok)
+            if (tok !~ /^[0-9a-fA-F]+$/ || (w != 2 && w != 4 && w != 8 && w != 16)) break
+            for (k = 0; k < w / 2; k++) mem[key(off + k)] = tolower(substr(tok, w - 2 * k - 1, 2))
+            off += w / 2
+        }
+    }
+    close(file)
+    return rows
+}
+function loadstr(file,    line, tok, rest, a) {
+    while ((getline line < file) > 0) {
+        sub(/^[ \t]+/, "", line)
+        tok = line; sub(/[ \t].*$/, "", tok)
+        if (!ishexaddr(tok)) continue
+        a = addrof(tok); if (a < 0) continue
+        rest = line; sub(/^[^ \t]+[ \t]*/, "", rest)
+        if (rest ~ /^".*"$/) rest = substr(rest, 2, length(rest) - 2)
+        str[key(a)] = rest; nstr++
+    }
+    close(file)
+}
+function readptr(a,    k, s, b) {
+    s = ""
+    for (k = 7; k >= 0; k--) { b = key(a + k); if (!(b in mem)) return -1; s = s mem[b] }
+    return hex2dec(substr(s, 5))
+}
+function emptycomment(line,    p) {
+    p = index(line, ";")
+    if (p == 0) { p = index(line, "##"); if (p == 0) return 1; return (substr(line, p + 2) ~ /^[ \t]*$/) }
+    return (substr(line, p + 1) ~ /^[ \t]*$/)
+}
+function lea(line,    s, neg, d) {
+    leaok = 0
+    if (line !~ /(^|[ \t])lea[a-z]?[ \t]/) return
+    if (match(line, /-?0[xX][0-9a-fA-F]+[(]%rip[)]/)) {
+        s = substr(line, RSTART, RLENGTH); sub(/[(]%rip[)]/, "", s)
+        neg = (substr(s, 1, 1) == "-"); sub(/^-/, "", s); d = hex2dec(s)
+    } else if (match(line, /[(]%rip[)]/)) { d = 0; neg = 0 }
+    else if (match(line, /\[rip *[-+] *0[xX][0-9a-fA-F]+\]/)) {
+        s = substr(line, RSTART, RLENGTH); neg = (index(s, "-") > 0)
+        sub(/^\[rip *[-+] */, "", s); sub(/\]$/, "", s); d = hex2dec(s)
+    } else return
+    if (d < 0) return
+    disp = neg ? -d : d; leaok = 1
+}
+function emit(tok, text,    f) {
+    if (tok in seen) return
+    seen[tok] = 1
+    if (pfn != lastfn) { f = pfn; sub(/:[ \t]*$/, "", f); print "== " f; lastfn = pfn }
+    print tok "  " text
+}
+function resolve(nextad,    t, p, ps) {
+    t = nextad + pdisp
+    if (mode == "blk") {
+        p = readptr(t + 16)
+        if (p >= 0) { nblk++; print "BLOCK " ptok " " dec2hex(t) " " dec2hex(p) " " key(p) }
+        else { nmiss++; print "BLOCKFAIL " ptok " " dec2hex(t) }
+        return
+    }
+    p = readptr(t + 16)
+    if (p >= 0) {
+        ps = key(p)
+        if (ps in str) { nres++; emit(ptok, str[ps]) }
+        else { nnostr++; emit(ptok, "<cfstring " dec2hex(t) " -> cstring " dec2hex(p) " is not in the cstring dump>") }
+    } else if (key(t) in str) { ndirect++; emit(ptok, str[key(t)]) }
+    else nmiss++
+}
+BEGIN {
+    nrows = loadmem(memfile)
+    if (mode == "cfstr") loadstr(cst)
+}
+/^== / || /^[^ \t].*:[ \t]*$/ { pend = 0; pfn = $0; next }
+{
+    tok = $1
+    if (!ishexaddr(tok)) next
+    ad = addrof(tok)
+    if (pend) { resolve(ad); pend = 0 }
+    lea($0)
+    if (!leaok) next
+    if (mode == "blk") want1 = (index($0, "__block_literal_global") > 0)
+    else want1 = emptycomment($0)
+    if (want1) { ncand++; pend = 1; ptok = tok; pdisp = disp }
+}
+END {
+    print "CFSTR resolver (" mode "): " nrows + 0 " dump rows, " nstr + 0 " cstring entries, " ncand + 0 " lea candidates: " \
+        nres + 0 " resolved, " nnostr + 0 " cfstring entries whose cstring is not in the dump, " ndirect + 0 " direct cstring refs, " \
+        nblk + 0 " blocks, " nmiss + 0 " unresolved" > stats
+}
+'
+# pass 2: the functions whose first instruction is one of the wanted addresses (block invoke functions)
+RES_BODY='
+BEGIN { while ((getline l < want) > 0) w[l] = 1; close(want) }
+/^== / || /^[^ \t].*:[ \t]*$/ { lab = $0; first = 1; on = 0; next }
+{
+    if (first && ishexaddr($1)) {
+        first = 0
+        if ((key(addrof($1)) in w) && nfn < maxn) { on = 1; nfn++; lines = 0; print "== block invoke function at 0x" dec2hex(addrof($1)); print lab }
+    }
+    if (on) { lines++; if (lines <= maxl) print; else if (lines == maxl + 1) print "   ... truncated at " maxl " lines" }
+}
+'
+# 1. GetSystemGPUVendors: every function whose label matches (the block invoke included), the
+# blocks it passes to dispatch_once (resolved through the block literal), and the callees one level
+fn_nf "$cd_dis" 'GetSystemGPUVendors' "$out/55-GetSystemGPUVendors.s" "GetSystemGPUVendors"
+: > "$out/.blk.tmp"; : > "$out/.want.tmp"; : > "$out/.stats.tmp"
+if [ -s "$out/CoreDisplay.const" ]; then
+    awk -v mode=blk -v memfile="$out/CoreDisplay.const" -v stats="$out/.stats.tmp" "$RES_FN $RES_MAIN" \
+        "$out/55-GetSystemGPUVendors.s" > "$out/.blk.tmp" 2>>"$out/CoreDisplay.dis.err"
+    awk '$1 == "BLOCK" { print $5 }' "$out/.blk.tmp" > "$out/.want.tmp"
+    cat "$out/.stats.tmp" >> "$out/00-system.txt"
+else
+    echo "GetSystemGPUVendors blocks: dyld_info could not print __const of CoreDisplay (CoreDisplay.dis.err); only the labels matching GetSystemGPUVendors are dumped" >> "$out/00-system.txt"
+fi
+if [ -s "$out/.want.tmp" ]; then
+    { echo "# block literals passed to dispatch_once (literal address, invoke address read at literal+16):"
+      sed 's/^/# /' "$out/.blk.tmp"
+      awk -v want="$out/.want.tmp" -v maxn=10 -v maxl=300 "$RES_FN $RES_BODY" "$cd_dis" 2>>"$out/CoreDisplay.dis.err"; } > "$out/55-GetSystemGPUVendors-blocks.s"
+else
+    echo "not found: no block literal of GetSystemGPUVendors resolved through CoreDisplay.const (labels matching GetSystemGPUVendors are in 55-GetSystemGPUVendors.s)" > "$out/55-GetSystemGPUVendors-blocks.s"
+fi
+cat "$out/55-GetSystemGPUVendors.s" "$out/55-GetSystemGPUVendors-blocks.s" > "$out/.gv.tmp"
+callee_bodies "$out/.gv.tmp" "$cd_dis" "$out/55-GetSystemGPUVendors-callees.s" 25 300
+rm -f "$out/.gv.tmp" "$out/.blk.tmp" "$out/.want.tmp"
+keys "$out/55-GetSystemGPUVendors.s" "$out/55-GetSystemGPUVendors-blocks.s" "$out/55-GetSystemGPUVendors-callees.s" \
+    > "$out/55-GetSystemGPUVendors-keys.txt"
+# 2. who writes useIOP, useIOP_onIG / _onAMD / _onNVIDIA / _onAPV (comments name the globals)
+callers "$cd_dis" 'useIOP' "$out/56-useIOP-users.s"
+nf "$out/56-useIOP-users.s" "no function of CoreDisplay.dis references useIOP*"
+callee_bodies "$out/56-useIOP-users.s" "$cd_dis" "$out/56-useIOP-callees.s" 12 200
+{
+    keys "$out/56-useIOP-users.s" "$out/56-useIOP-callees.s"
+    echo "-- useIOP globals named in comments"
+    cat "$out/56-useIOP-users.s" "$out/56-useIOP-callees.s" | grep -o '[A-Za-z0-9_]*useIOP[A-Za-z0-9_]*' | sort -u
+} > "$out/56-useIOP-keys.txt"
+# 3. the CFSTR resolver over the functions dumped in 50-, 55- and 56-
+if [ -s "$out/CoreDisplay.cfstring" ]; then
+    awk -v mode=cfstr -v memfile="$out/CoreDisplay.cfstring" -v cst="$out/CoreDisplay.cstring" -v stats="$out/.stats.tmp" \
+        "$RES_FN $RES_MAIN" "$out"/50-*.s "$out"/55-*.s "$out"/56-*.s > "$out/57-cfstr-resolved.txt" 2>>"$out/CoreDisplay.dis.err"
+    cat "$out/.stats.tmp" >> "$out/00-system.txt"
+    nf "$out/57-cfstr-resolved.txt" "no lea with an empty comment resolved to a CFSTR (see the CFSTR resolver line in 00-system.txt)"
+else
+    echo "CFSTR resolver: dyld_info cannot print __DATA_CONST __cfstring (nor __DATA __cfstring) of CoreDisplay, see CoreDisplay.dis.err; 57-cfstr-resolved.txt is empty" >> "$out/00-system.txt"
+    echo "not found: dyld_info cannot print the __cfstring section of CoreDisplay (see CoreDisplay.dis.err), the CFSTR keys stay unresolved" > "$out/57-cfstr-resolved.txt"
+fi
+rm -f "$out/.stats.tmp"
+# 4. the IOP / vendor strings of the cstring tables
+iop='useIOP|IOP_on|vendor-id|IOVendor|GPUVendor|Paravirt|IOPresentment|UseIOP'
+: > "$out/58-cstring-iop.txt"
+for n in CoreDisplay SkyLight; do
+    echo "== $n: $iop" >> "$out/58-cstring-iop.txt"
+    c=$(grep -c -E "$iop" "$out/$n.cstring" 2>/dev/null)
+    grep -n -E "$iop" "$out/$n.cstring" >> "$out/58-cstring-iop.txt" 2>/dev/null
+    [ "${c:-0}" -gt 0 ] || echo "not found: no cstring of $n matches (is $n.cstring empty?)" >> "$out/58-cstring-iop.txt"
+done
+{
+    echo "== GetSystemGPUVendors, useIOP, CFSTR keys (probe run 10)"
+    wc -l "$out"/55-* "$out"/56-* "$out"/57-* "$out"/58-* 2>/dev/null
+} >> "$out/00-system.txt"
 {
     echo "== the switch (probe run 9)"
     wc -l "$out"/50-* "$out"/51-* "$out"/52-* "$out"/53-* "$out"/54-* 2>/dev/null

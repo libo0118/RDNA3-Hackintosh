@@ -50,13 +50,23 @@ jobs:
           show "switch: CoreDisplay::DisplayPipeForService" probe-out/52-CoreDisplay-DisplayPipeForService.s 500
           show "switch: IOPresentment copy capabilities" probe-out/53-IOPresentment-CopyCapabilities.s 500
           show "switch: IOPresentmentInit" probe-out/53-IOPresentment-Init.s 300
-          show "switch: ioPresentmentFindAGDCMatch" probe-out/53-IOPresentment-ioPresentmentFindAGDCMatch.s 500
+          show "switch: IOPresentment users of the string ioPresentmentFindAGDCMatch" probe-out/53-IOPresentment-str-ioPresentmentFindAGDCMatch.s 500
           show "switch: IOPresentment users of DisplayPipeSupported" probe-out/53-IOPresentment-str-DisplayPipeSupported.s 300
           show "switch: IOPresentment users of TransactionsSupported" probe-out/53-IOPresentment-str-TransactionsSupported.s 300
           show "switch: IOPresentment users of AGDC Extended Capabilities not found" probe-out/53-IOPresentment-str-AGDC_Extended_Capabilities_not_found.s 300
           show "switch: isMobileSystem" probe-out/54-isMobileSystem.s 150
           show "switch: isMobileSystem callees" probe-out/54-isMobileSystem-callees.s 300
           show "switch: functions using isMobile (CoreDisplay)" probe-out/43-fn-CoreDisplay-isMobile.s 300
+          # run 10: how GetSystemGPUVendors classifies a framebuffer (vendor bit 1 is never allowed), who writes useIOP*
+          show "run 10: GetSystemGPUVendors (every function whose label matches, the block invoke included)" probe-out/55-GetSystemGPUVendors.s 500
+          show "run 10: GetSystemGPUVendors blocks (block literal -> invoke function)" probe-out/55-GetSystemGPUVendors-blocks.s 600
+          show "run 10: GetSystemGPUVendors callees" probe-out/55-GetSystemGPUVendors-callees.s 1200
+          show "run 10: GetSystemGPUVendors strings, calls, reads" probe-out/55-GetSystemGPUVendors-keys.txt 200
+          show "run 10: functions referencing useIOP*" probe-out/56-useIOP-users.s 1200
+          show "run 10: useIOP users, callees" probe-out/56-useIOP-callees.s 600
+          show "run 10: useIOP users, strings, calls, reads" probe-out/56-useIOP-keys.txt 250
+          show "run 10: CFSTR keys of the functions above (address, text)" probe-out/57-cfstr-resolved.txt 400
+          show "run 10: IOP / vendor strings of CoreDisplay and SkyLight" probe-out/58-cstring-iop.txt 150
           # loud failure: a CoreDisplay disassembly this small is an error, not a result
           n=0; [ -f probe-out/CoreDisplay.dis ] && n=$(wc -l < probe-out/CoreDisplay.dis | tr -d ' ')
           if [ "$n" -lt 1000 ]; then
