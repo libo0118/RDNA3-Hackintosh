@@ -623,8 +623,11 @@ qemu_common() {
     cpu_arg=$(cpu_qemu_model) || exit 1
     echo "VM CPU: $cpu_line"
     echo "VM CPU: -cpu $cpu_arg -smp $CPUS,sockets=1,cores=$cpu_cores_n,threads=$cpu_threads_n"
-    { echo "$cpu_line"; echo "-cpu $cpu_arg -smp $CPUS,sockets=1,cores=$cpu_cores_n,threads=$cpu_threads_n"; } > "$WORK/last-cpu" ||
-        echo "!! cannot write $WORK/last-cpu: the result will not say which CPU the VM had"
+    # a temp file renamed over it: a card step (root) and 'window' (the user) both replace it,
+    # whoever owns the old one (a rename only needs the user's $WORK)
+    { echo "$cpu_line"; echo "-cpu $cpu_arg -smp $CPUS,sockets=1,cores=$cpu_cores_n,threads=$cpu_threads_n"; } > "$WORK/last-cpu.$$" &&
+        mv -f "$WORK/last-cpu.$$" "$WORK/last-cpu" ||
+        { rm -f "$WORK/last-cpu.$$"; echo "!! cannot write $WORK/last-cpu: the result will not say which CPU the VM had"; }
     QARGS=(-enable-kvm -machine q35,accel=kvm -m "${RAM_GB}G"
         -smp "$CPUS",sockets=1,cores="$cpu_cores_n",threads="$cpu_threads_n" -cpu "$cpu_arg"
         -device isa-applesmc,osk="$OSK" -smbios type=2

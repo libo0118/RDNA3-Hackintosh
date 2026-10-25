@@ -894,7 +894,7 @@ commits). `rdna3vm update --no-wait` stops instead of waiting. By hand:
    `curl ... | sudo sh` command as in step D. Then `sudo shutdown -h now`.
 4. Go back to step E.
 
-### The VM on this computer's real CPU (`CPU_MODEL="host"`, AMD hosts; DRIVER-PLAN N52)
+### The VM on this computer's real CPU (`CPU_MODEL="host"`, AMD hosts; DRIVER-PLAN N53)
 
 By default the VM shows macOS an emulated Intel Skylake CPU. For the planned
 bare-metal hackintosh on the same Ryzen the card can be tested with the real
