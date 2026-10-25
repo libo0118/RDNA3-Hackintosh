@@ -1080,7 +1080,28 @@ public:
     static RDNA3BoMemory *withBo(RDNA3Accel *a, IOMemoryDescriptor *of, rdna3_bo *bo);
 protected:
     virtual void free() override;
+    /* DRIVER-PLAN N47 (b): IOSubMemoryDescriptor does not override these,
+     * so without the overrides this class's vtable imports
+     * IOMemoryDescriptor::doMap / doUnmap as the public SDK declares them
+     * (vm_map_t = ipc_port *: __ZN18IOMemoryDescriptor5doMapEP8ipc_portPyjyy).
+     * The kernel exports them only as built with its private vm_map_t
+     * (EP7_vm_map, config/IOKit.x86_64.exports of xnu-11417 and
+     * xnu-12377), so no kext exports what the core imported and kmutil
+     * would refuse to link the core; OpenCore's prelinker bound it anyway.
+     * xnu never calls either on a sub-range descriptor: createMappingInTask
+     * calls makeMapping, which IOSubMemoryDescriptor forwards to the parent
+     * (IOSubMemoryDescriptor.cpp, makeMapping); the parent's
+     * IOMemoryDescriptor::makeMapping calls doMap on itself (or on a
+     * withAddressRange copy for kIOMapUnique) and stores that descriptor,
+     * never this one, in the IOMemoryMap (setMemoryDescriptor), so
+     * IOMemoryMap::unmap's fMemory->doUnmap goes to the parent too. Both
+     * answer kIOReturnUnsupported (IOMemoryDescriptor::doMap's own answer)
+     * and log, so a future xnu that does reach them shows in the report. */
+    virtual IOReturn doMap(vm_map_t addressMap, IOVirtualAddress *atAddress, IOOptionBits options,
+                           IOByteCount sourceOffset = 0, IOByteCount length = 0) override;
+    virtual IOReturn doUnmap(vm_map_t addressMap, IOVirtualAddress logical, IOByteCount length) override;
 private:
+    void logUnreached(const char *what, IOOptionBits options, IOByteCount length);
     RDNA3Accel *fAccel = nullptr;
     rdna3_bo   *fBo = nullptr;
 };
@@ -1112,6 +1133,32 @@ void RDNA3BoMemory::free()
     fBo = nullptr;
     OSSafeReleaseNULL(fAccel);
     IOSubMemoryDescriptor::free();
+}
+
+/* N47 (b): a call xnu-11417 / xnu-12377 never makes (see the class); the
+ * first 8, then every 1024th, with the BO's range and the call's options */
+void RDNA3BoMemory::logUnreached(const char *what, IOOptionBits options, IOByteCount length)
+{
+    static SInt32 gBoMemUnreached;
+    const SInt32 n = OSIncrementAtomic(&gBoMemUnreached) + 1;
+    if (n <= 8 || (n & 1023) == 0)
+        LOG("GEM: RDNA3BoMemory::%s called (%d such): kIOReturnUnsupported, this xnu maps a sub-range "
+            "other than through its parent (BO 0x%llx+%llu KiB, options 0x%x, length 0x%llx; DRIVER-PLAN N47)",
+            what, (int)n, (unsigned long long)(fBo ? fBo->vram_offset : 0),
+            (unsigned long long)(fBo ? fBo->size >> 10 : 0), (unsigned)options, (unsigned long long)length);
+}
+
+IOReturn RDNA3BoMemory::doMap(vm_map_t addressMap, IOVirtualAddress *atAddress, IOOptionBits options,
+                              IOByteCount sourceOffset, IOByteCount length)
+{
+    logUnreached("doMap", options, length);
+    return kIOReturnUnsupported;
+}
+
+IOReturn RDNA3BoMemory::doUnmap(vm_map_t addressMap, IOVirtualAddress logical, IOByteCount length)
+{
+    logUnreached("doUnmap", 0, length);
+    return kIOReturnUnsupported;
 }
 
 void RDNA3Accel::drmBoRelease(rdna3_bo *bo)

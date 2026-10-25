@@ -2976,6 +2976,23 @@ def tcall_rows(klog):
     return out
 
 
+
+# kext/src/RDNA3Drm.cpp RDNA3BoMemory::doMap / doUnmap (DRIVER-PLAN N47 (b)): xnu-11417 / xnu-12377 never call them
+# on a sub-range descriptor (makeMapping goes to the parent); a line means a newer xnu does, and a client's map of a
+# VRAM or doorbell BO failed (doMap) or left its range mapped (doUnmap)
+BOMEM_LOG_RE = re.compile(r"RDNA3: GEM: RDNA3BoMemory::(doMap|doUnmap) called \((\d+) such\)")
+
+
+def bomem_rows(klog):
+    """[(level, label, text)]: FAIL per call the kernel log shows (the count is the highest the log prints, so
+    "at least"); nothing when there is none"""
+    seen = {}
+    for m in BOMEM_LOG_RE.finditer(klog or ""):
+        seen[m.group(1)] = max(seen.get(m.group(1), 0), int(m.group(2)))
+    return [("FAIL", "BO map", "RDNA3BoMemory::%s called at least %d time(s): this macOS maps a sub-range "
+             "descriptor other than through its parent (xnu-12377 never does); the call answered "
+             "kIOReturnUnsupported (DRIVER-PLAN N47 (b))" % (k, seen[k])) for k in sorted(seen)]
+
 CD_PREFS_SEEN_RE = re.compile(r"^== CoreDisplay prefs \(.*?\): this boot's WindowServer started with: (.*)$", re.M)
 CD_PREFS_DID_RE = re.compile(r"^== CoreDisplay prefs: (.*)$", re.M)
 
@@ -4846,6 +4863,9 @@ def main():
         klog = kernel_text(p, d)
         # common/rdna3_tcall.h: thread call stops (card run 2026-10-25b, DRIVER-PLAN N47)
         for lv, label, t in tcall_rows(klog):
+            print("   %s %s: %s" % (lv, label, t))
+            failed = failed or lv == "FAIL"
+        for lv, label, t in bomem_rows(klog):
             print("   %s %s: %s" % (lv, label, t))
             failed = failed or lv == "FAIL"
         for lv, t in gen_verdict(a3_counters(ttxt) if ttxt else {}, accel_current(klog)):
