@@ -16,10 +16,10 @@
 		<key>com.apple.iokit.IOGraphicsFamily</key><string>1.0.0b1</string>
 		<key>com.apple.iokit.IOPCIFamily</key><string>1.0.0b1</string>
 		<key>com.apple.iokit.IOSurface</key><string>1.0</string>
-		<key>com.apple.kpi.iokit</key><string>8.0</string>
-		<key>com.apple.kpi.libkern</key><string>8.0</string>
-		<key>com.apple.kpi.mach</key><string>8.0</string>
-		<key>com.apple.kpi.bsd</key><string>8.0</string>
+		<key>com.apple.kpi.iokit</key><string>19.0</string>
+		<key>com.apple.kpi.libkern</key><string>19.0</string>
+		<key>com.apple.kpi.mach</key><string>19.0</string>
+		<key>com.apple.kpi.bsd</key><string>19.0</string>
 	</dict>
 	<key>IOKitPersonalities</key>
 	<dict>
