@@ -746,7 +746,8 @@ IOReturn RDNA3Accel::platformPageoff(RD3KSurfPageoff *q)
     uint64_t t0 = mach_absolute_time(), ns = 0;
     if (fBringup && fDrmLock) {
         IOLockLock(fDrmLock);
-        int r = fBringup->copyVramToPages(h->offset, q->pages, q->pageCount, q->length);
+        /* re-checked under the lock: stop takes fBringup out under it */
+        int r = fBringup ? fBringup->copyVramToPages(h->offset, q->pages, q->pageCount, q->length) : RDNA3_ENODEV;
         IOLockUnlock(fDrmLock);
         if (r == RDNA3_OK) {
             absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
@@ -796,7 +797,9 @@ IOReturn RDNA3Accel::platformCopyVram(RD3KCopyRequest *q)
      * drained before the engine reads it (the HDP flush is the ring's) */
     __asm__ volatile("mfence" ::: "memory");
     IOLockLock(fDrmLock);
-    int r = fBringup->copyVramRect(q->srcCookie, q->srcPitch, q->dstCookie, q->dstPitch, q->rowBytes, q->rows);
+    /* re-checked under the lock: stop takes fBringup out under it */
+    int r = fBringup ? fBringup->copyVramRect(q->srcCookie, q->srcPitch, q->dstCookie, q->dstPitch, q->rowBytes, q->rows)
+                     : RDNA3_ENODEV;
     IOLockUnlock(fDrmLock);
     absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     q->usec = ns / 1000;
@@ -805,6 +808,50 @@ IOReturn RDNA3Accel::platformCopyVram(RD3KCopyRequest *q)
         LOG("copy: %ux%u bytes 0x%llx (pitch %u) -> 0x%llx (pitch %u) by SDMA failed (%d)", q->rowBytes, q->rows,
             q->srcCookie, q->srcPitch, q->dstCookie, q->dstPitch, r);
     return r == RDNA3_OK ? kIOReturnSuccess : kIOReturnIOError;
+}
+
+/* DRIVER-PLAN N49: the kernel rings' busy time and the GPU time per process
+ * since the last take, for the accelerator's PerformanceStatistics and its
+ * contexts' accumulatedGPUTime (Activity Monitor) */
+IOReturn RDNA3Accel::platformGpuBusy(RD3KGpuBusy *q)
+{
+    rd3_busy_snap s;
+    rd3_busy_take_ent t[RD3K_GPUBUSY_PIDS];
+    if (!q || q->version != RD3K_GPUBUSY_VERSION)
+        return kIOReturnBadArgument;
+    q->npids = 0;
+    if (!fDrm || !fBringup || !fDrmLock)
+        return kIOReturnNotReady;   /* no GPU (yet): not 'an older core' (ECC round 1) */
+    IOLockLock(fDrmLock);
+    const uint32_t n = fBringup ? fBringup->busyTake(&s, t, RD3K_GPUBUSY_PIDS) : 0;
+    const bool live = fBringup && s.now != 0;
+    if (live)
+        fBringup->busyCounts(q->uncounted, q->sdmaEnds);
+    IOLockUnlock(fDrmLock);
+    if (!live)
+        return kIOReturnNotReady;   /* no busy accounting (no memory at start): the accelerator logs it */
+    q->nowNs = s.now;
+    q->busyNs = s.any_ns;
+    for (uint32_t r = 0; r < RD3K_GPUBUSY_RINGS && r < RD3_BUSY_RINGS; r++)
+        q->ringNs[r] = s.ring_ns[r];
+    q->jobs = s.jobs;
+    q->merged = s.merged;
+    q->flushed = s.flushed;
+    q->stale = s.stale;
+    q->lostJobs = s.lost_jobs;
+    q->lostNs = s.lost_ns;
+    q->inflight = s.inflight;
+    q->cappedNs = s.capped_ns;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t abs = 0;
+        nanoseconds_to_absolutetime(t[i].last_sub, &abs);
+        q->pids[i].pid = t[i].pid;
+        q->pids[i].jobs = t[i].jobs;
+        q->pids[i].gpuNs = t[i].ns;
+        q->pids[i].lastSubmitAbs = abs;
+    }
+    q->npids = n;
+    return kIOReturnSuccess;
 }
 
 IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
@@ -845,6 +892,10 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
         if (fn->isEqualTo(RD3K_DISPLAY_FN_GAMMA))
             return displayGamma((RD3KDisplayGamma *)p1);
     }
+    /* before the fDrm gate: without the DRM it answers NotReady, not
+     * IOService's Unsupported ('an older core', ECC round 1) */
+    if (fn && fn->isEqualTo(RD3K_GPUBUSY_FN))
+        return platformGpuBusy((RD3KGpuBusy *)p1);
     if (fn && fDrm) {
         if (fn->isEqualTo(RD3K_VRAM_FN_ALLOC))
             return platformVramAlloc((RD3KVramRequest *)p1);

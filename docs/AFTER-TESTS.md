@@ -3169,3 +3169,31 @@ thread_call_cancel_wait, waits for the last run however long it takes and logs
 | triage `thread call stop: FAIL <call>: freed from inside its own run` | a free of the thread call from inside its own function (refused, left allocated): a driver bug | move the free to the stop path |
 | triage `thread call stop: WARN ... stopped from inside its own run` / `WARN ... thread_call_free refused` / `INFO ... enter(s) refused during its stop` | a drain inside the call's own run (not waited for; cancel_wait would have panicked), a free racing a run that keeps re-queueing, a kick racing the stop (no run queued) | the call path; harmless unless repeated |
 | triage `thread call stop: INFO no kernel log` | neither 20-log-rdna3.txt nor a serial log | nothing to judge; collect the serial log |
+
+### Activity Monitor's GPU numbers (card runs 2026-10-25c..e, DRIVER-PLAN N49)
+
+Activity Monitor's GPU History reads the accelerator's `PerformanceStatistics`
+/ `Device Utilization %`; its per-process `% GPU` / `GPU Time` columns sum the
+`accumulatedGPUTime` of the `IOAccelSubmitter2` entries (contexts, command
+queues) under the accelerator per `IOUserClientCreator` pid. Since N49 the
+utilisation is the kernel rings' busy time (GFX, compute, SDMA; the SMU's GFX
+activity reads 100 % at idle, P2) and each process's GPU time is added to its
+first IOAccelSubmitter2. `ioreg -l -r -c RDNA3Accelerator | grep -E
+'Utilization|accumulatedGPUTime|IOUserClientCreator'` shows both on the card.
+
+| Seen | Meaning | Action |
+|---|---|---|
+| triage `INFO GPU utilization from the rings' busy time: N update(s), last X % (GFX Y %), J job(s)` | the accelerator published the rings' busy time (`perf_rings`, `perf_util`, `perf_utilgfx`) | compare with what the owner saw in Window > GPU History: near 0 at idle, moving with load |
+| triage `WARN GPU utilization from the SMU's GFX activity (100 % at idle ...)`; kernel `perfstats: the core did not give its ring busy time (0x...: ...)` | the core did not answer `rdna3GpuBusyTake` (`perf_noanswer`): an older core (0xe00002c7), no busy accounting (`RDNA3: GPU busy: no memory ...`) or the GPU not up yet (0xe00002d8, only before the rings) | stale core kext: reinstall; otherwise the core's log at start |
+| triage `INFO N s of GPU time added to the processes' contexts`; kernel `perfstats: GPU time: pid N +X us (J job(s)) into RD32DContext accumulatedGPUTime T` | those processes' time reaches Activity Monitor (`perf_gpuns`) | WindowServer should show % GPU while windows move |
+| triage `INFO N s of GPU time (K take(s)) of processes with no IOAccelSubmitter2`; kernel `perfstats: pid N used the GPU (...) but has no IOAccelSubmitter2 ...` | expected until the Metal plugin opens an IOAccelCommandQueue per device (N49 open item 1): Activity Monitor shows 0 % for those pids (`perf_nosubns`, `perf_nosub`) | the plugin change (metal/); nothing in the kernel |
+| triage `WARN the rings ran N job(s) but no process got GPU time` | jobs seen but no time charged (no completion read, or every slot lost) | `perf_lostns`, `perf_flushed`, the core's `GPU busy:` lines |
+| triage `WARN ... GPU time NOT credited`; kernel `perfstats: no child iterator` / `perfstats: pid N's <class> has no accumulatedGPUTime number` (`perf_creditfail`) | memory pressure, or a family whose submitter no longer publishes the number (a new macOS) | `ioreg` of the accelerator's contexts: are `accumulatedGPUTime` / `lastSubmittedTime` there? |
+| kernel `RDNA3: GPU busy: N job(s) flushed with no time (GFX a, compute b, SDMA c; S stale: no fence for 30 s, R ring(s) now) of J` (triage serial INFO; WARN when S > 0, and triage `WARN N job(s) flushed as stale` from `perf_stale`) | a ring's fence went back without a reset the core saw, or a job had no fence for 30 s: those jobs get no time | stale without a GPU hang in the log: the fence read (`gfx11_fence_read` / `sdma60_fence_read`) on that ring |
+| kernel `GPU busy: N job(s) merged into a full queue`, `... with no process slot ... us lost`, `... us of process GPU time dropped above the wall time` (`perf_merged`, `perf_lostjobs` / `perf_lostns`, `perf_cappedns`) | more than 64 jobs in flight on a ring (its time stays exact); more than 32 processes with time between two takes; a process on several rings at once (capped at the wall time per take) | informational unless large |
+| kernel `GPU busy: <what> ... ended a GFX / b compute / c SDMA job(s) in flight` | a reset forced the fences: the jobs in flight ended with their time before the rings start again at 0 | with the reset's own lines |
+| kernel `GPU busy: <kind> (IP n) is not in the ring busy time` (once per kind); triage `INFO not in the busy time: ...`, `WARN GPU work the busy time does not count (...) and no counted job at all` (`perf_unc_vcn` / `_jpeg` / `_other` / `_kcopy` / `_userq`) | VCN / JPEG jobs, jobs on rings other than 0, the kernel's own SDMA copies and user queues are not in the utilisation | the WARN: the GPU worked but nothing reached the busy time - user queues on (`rdna3userq=1`)? |
+| triage `INFO N of M SDMA job(s) ended only at the 250 ms take` (`perf_sdmaend_*`) | the SDMA fence raises no interrupt and nobody waited: the SDMA busy time runs up to 250 ms long | informational |
+| kernel `perfstats: the core's ring busy time: <answer> (0x..., before 0x...)` (every change; `perf_lastret`) | answered = 0; 0xe00002d8 no GPU / no busy accounting yet; 0xe00002c7 an older core; 0xe00002c2 the ABI versions differ (a stale kext) | a lasting non-zero answer: the core's start log, reinstall both kexts |
+| triage `WARN N IOAccelSubmitter2 entr(y/ies) without a readable IOUserClientCreator pid`, kernel `perfstats: a <class> with ... IOUserClientCreator` (`perf_uccbad`) | a context whose creator string is not `pid N, name`: its process's time counts as 'no IOAccelSubmitter2' wrongly | the ioreg of that context |
+| triage `INFO 13-ioreg-accel.txt: every accumulatedGPUTime is 0 although N s were credited` / `WARN ... Device Utilization % = 100 while the rings' last value is X %` | the credited processes exited before the ioreg ran (the usual case), the family replaced the numbers we add to, or it overwrote our utilisation (the ioreg and the counters are read at different times: a single report can mislead) | repeat on the next run before acting |

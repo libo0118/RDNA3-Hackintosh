@@ -106,6 +106,7 @@ void sdma60_emit_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t va
 void sdma60_set_trap_interrupt(rdna3_dev *d, rdna3_sdma_ring *r, int enable);
 /* fence 'seq' has been written back */
 int  sdma60_fence_passed(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq);
+uint32_t sdma60_fence_read(rdna3_dev *d, rdna3_sdma_ring *r);   /* amdgpu_fence_read */
 /* emit a fence write of ++fence_seq; returns that sequence number */
 uint32_t sdma60_emit_fence(rdna3_dev *d, rdna3_sdma_ring *r);
 /* a user fence (AMDGPU_CHUNK_ID_FENCE): sdma_v6_0_ring_emit_fence with

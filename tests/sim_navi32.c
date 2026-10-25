@@ -10847,6 +10847,8 @@ static void run(const char *fwdir)
                       pkt[2] == 0x123 && pkt[3] == 48 && pkt[4] == 0 && pkt[5] == 0);
                 CHECK(!sdma60_fence_passed(&dev, &sd, sd.fence_seq + 1));
                 CHECK(sdma60_fence_passed(&dev, &sd, sd.fence_seq));
+                /* amdgpu_fence_read: the newest seq done (DRIVER-PLAN N49's ring busy time) */
+                CHECK(sdma60_fence_read(&dev, &sd) == sd.fence_seq);
             }
             /* a hung engine: the fence never lands until the soft reset,
              * which completes it and brings the queue back on the same ring */
@@ -11539,6 +11541,7 @@ static void run(const char *fwdir)
                         S.reg[GCR(regCP_ME_CNTL)] |= CP_ME_CNTL__ME_HALT_MASK;
                         seq = gfx11_submit_job(&dev, &gr, 7, 5, 0, jobs, 1);
                         CHECK(seq != 0 && !gfx11_fence_passed(&dev, &gr, seq) && gr.last_vmid == 5);
+                        CHECK(gfx11_fence_read(&dev, &gr) == seq - 1);   /* amdgpu_fence_read: the job not done (N49) */
                         gfx11_read_status(&dev, &gr, &st);
                         CHECK(st.cp_me_cntl & CP_ME_CNTL__ME_HALT_MASK);
                         CHECK(st.rb0_rptr_wb != (uint32_t)gr.wptr);   /* the ring did not drain */

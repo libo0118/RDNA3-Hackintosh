@@ -375,6 +375,39 @@ struct RD3KCopyRequest {
     unsigned long long usec;                   /* out: the copy's time */
 };
 
+/* ---- GPU busy time (answered by the core kext; DRIVER-PLAN N49) ----
+ * The accelerator's 250 ms perfstats tick takes the kernel rings' busy time
+ * (common/rdna3_gpu_busy.h: amdgpu_ctx_fence_time's model) for Activity
+ * Monitor: the totals give "Device Utilization %" (the SMU's GFX activity
+ * reads 100 % at idle, P2), the per-process GPU time since the last take is
+ * added to the process's IOAccelSubmitter2 "accumulatedGPUTime". */
+#define RD3K_GPUBUSY_FN      "rdna3GpuBusyTake"
+#define RD3K_GPUBUSY_VERSION 2u   /* 2: cappedNs, uncounted[], sdmaEnds[] (ECC round 1) */
+#define RD3K_GPUBUSY_PIDS    32u
+#define RD3K_GPUBUSY_RINGS   3u   /* GFX, compute, SDMA (RD3_BUSY_*) */
+#define RD3K_GPUBUSY_UNC     5u   /* not counted: VCN, JPEG, other rings, kernel SDMA copies, user queues */
+#define RD3K_GPUBUSY_BY      5u   /* SDMA job ends by: interrupt, waiter, take, submission, reset */
+struct RD3KGpuBusyPid {
+    int                pid;
+    unsigned int       jobs;           /* jobs ended since the last take */
+    unsigned long long gpuNs;          /* their GPU time */
+    unsigned long long lastSubmitAbs;  /* mach_absolute_time of the newest submission */
+};
+struct RD3KGpuBusy {
+    unsigned int       version;        /* in: RD3K_GPUBUSY_VERSION */
+    unsigned int       npids;          /* out: entries in pids[] */
+    unsigned long long nowNs;          /* out: the core's clock at the take */
+    unsigned long long busyNs;         /* out: any ring with work, total since load (up to nowNs) */
+    unsigned long long ringNs[RD3K_GPUBUSY_RINGS];
+    unsigned long long jobs, merged, flushed, stale, lostJobs, lostNs;   /* out: totals */
+    unsigned int       inflight;       /* out: jobs in flight at the take */
+    unsigned int       pad;
+    unsigned long long cappedNs;       /* out: process time dropped above the wall time (total) */
+    unsigned long long uncounted[RD3K_GPUBUSY_UNC];   /* out: submissions / copies / queues the busy time misses */
+    unsigned long long sdmaEnds[RD3K_GPUBUSY_BY];     /* out: SDMA job ends per fence reader */
+    struct RD3KGpuBusyPid pids[RD3K_GPUBUSY_PIDS];
+};
+
 /* user clients: newUserClient types 'RD'xxxx go to the core kext */
 #define RD3K_UC_TYPE_BASE     0x52440000u
 #define RD3K_FN_NEW_CLIENT    "rdna3NewAccelClient"

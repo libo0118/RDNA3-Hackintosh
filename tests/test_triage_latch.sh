@@ -26,11 +26,11 @@ for h in 0 1; do
     done
 done
 
-mk() {   # mk <dir/name> <counters> [where: tests | sv | none] [log]
+mk() {   # mk <dir/name> <counters> [where: tests | sv | none] [log] [13-ioreg-accel.txt]
     mkdir -p "$T/$(dirname "$1")"
-    python3 -I - "$T/$1" "$2" "${3:-tests}" "${4:-RDNA3: hello}" <<'PY'
+    python3 -I - "$T/$1" "$2" "${3:-tests}" "${4:-RDNA3: hello}" "${5:-}" <<'PY'
 import io, sys, tarfile
-path, counters, where, log = sys.argv[1:5]
+path, counters, where, log, ioreg = sys.argv[1:6]
 vals = {}
 for l in counters.strip().splitlines():
     if l.strip():
@@ -44,6 +44,8 @@ members = {
     "20-log-rdna3.txt": log + "\n",
     "24-log-coredisplay.txt": "",
 }
+if ioreg:
+    members["13-ioreg-accel.txt"] = ioreg + "\n"
 if where == "sv":
     members["29-surface-vram.txt"] = "== sysctl (card run 58)\n" + dump
 with tarfile.open(path + ".tar.gz", "w:gz") as t:
@@ -265,6 +267,83 @@ grep -q 'FAIL .*head 0: 2 present(s) completed BEFORE their flip was seen latche
 grep -q 'FAIL .*head 0: 1 frame(s) LOST with no newer one' <<<"$o" || fail "pq-bad: lost: $o"
 grep -q 'WARN .*head 0: 1 writer wait(s) ran out' <<<"$o" || fail "pq-bad: wait: $o"
 grep -q 'WARN .*GPU utilization NOT published into PerformanceStatistics (perf_writes 0; 0 without the core, 9 without' <<<"$o" || fail "pq-bad: perf: $o"
+# DRIVER-PLAN N49: the utilization from the rings' busy time, the GPU time credited and not creditable, the SMU
+# fallback of a core without busy accounting
+mk perfn49/rdna3-report-perfn49 "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 120
+perfstats 1
+perf_writes 400
+perf_rings 396
+perf_smu 0
+perf_noanswer 0
+perf_util 23
+perf_utilgfx 17
+perf_jobs 5120
+perf_flushed 0
+perf_lostns 0
+perf_gpuns 4200000000
+perf_nosubns 1500000000
+perf_nosub 12
+perf_creditfail 0
+perf_submitters 2
+perf_uccbad 0" tests "RDNA3: hello" '  |   "PerformanceStatistics" = {"Device Utilization %"=21,"GPU Activity(%)"=21}
+  |     "accumulatedGPUTime" = 4200000000
+  |     "accumulatedGPUTime" = 0'
+o=$(run perfn49)
+has "$o" "13-ioreg-accel.txt: Device Utilization % = 21 (the rings' last value 23 %" perf-n49
+hasnt "$o" "every accumulatedGPUTime is 0" perf-n49
+! grep -E "^  flip latch +WARN .*(GPU|accumulatedGPUTime|IOAccelSubmitter2|busy|stale)" <<<"$o" || fail "perf-n49: a GPU utilization WARN: $o"
+has "$o" "GPU utilization from the rings' busy time: 396 update(s), last 23 % (GFX 17 %), 5120 job(s)" perf-n49
+has "$o" "4.2 s of GPU time added to the processes' contexts" perf-n49
+has "$o" "1.5 s of GPU time (12 take(s)) of processes with no IOAccelSubmitter2" perf-n49
+hasnt "$o" "GPU utilization from the SMU" perf-n49
+mk perfsmu/rdna3-report-perfsmu "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 120
+perfstats 1
+perf_writes 40
+perf_rings 0
+perf_smu 40
+perf_noanswer 41
+perf_gpuns 0
+perf_nosubns 0"
+o=$(run perfsmu)
+grep -q "WARN .*GPU utilization from the SMU's GFX activity (100 % at idle on this card, P2) in 40 update(s): the core gave no ring busy time 41 time(s), last answer ?" <<<"$o" || fail "perf-smu: $o"
+# ECC round 1 of N49: the ioreg against the counters, uncounted work, stale flushes, unreadable creators
+mk perfbad/rdna3-report-perfbad "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 120
+perfstats 1
+perf_writes 40
+perf_rings 40
+perf_smu 0
+perf_noanswer 0
+perf_util 5
+perf_utilgfx 3
+perf_jobs 0
+perf_gpuns 2000000000
+perf_nosubns 0
+perf_unc_vcn 3
+perf_unc_kcopy 7
+perf_stale 2
+perf_uccbad 1
+perf_sdmaend_take 9
+perf_sdmaend_wait 1" tests "RDNA3: hello" '  |   "PerformanceStatistics" = {"Device Utilization %"=100}
+  |     "accumulatedGPUTime" = 0'
+o=$(run perfbad)
+grep -q "WARN .*GPU work the busy time does not count (3 VCN encode jobs, 7 kernel SDMA copies / clears) and no counted job" <<<"$o" || fail "perf-bad: unc: $o"
+grep -q "WARN .*2 job(s) flushed as stale" <<<"$o" || fail "perf-bad: stale: $o"
+grep -q "WARN .*1 IOAccelSubmitter2 entr(y/ies) without a readable IOUserClientCreator pid" <<<"$o" || fail "perf-bad: ucc: $o"
+grep -q "INFO .*every accumulatedGPUTime is 0 although 2.0 s were credited" <<<"$o" || fail "perf-bad: acc: $o"
+grep -q "WARN .*Device Utilization % = 100 while the rings' last value is 5 %" <<<"$o" || fail "perf-bad: util: $o"
+has "$o" "9 of 10 SDMA job(s) ended only at the 250 ms take" perf-bad
 mk pqmissing/rdna3-report-pqmissing "$ZERO
 swaps_h0 120
 swaps_h1 0
