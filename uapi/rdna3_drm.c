@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "rdna3_drm.h"
+#include "rdna3_bo_map.h"
 #include "amd_fw.h"
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -2214,16 +2215,85 @@ static int gem_userptr(rdna3_drm_file *f, struct drm_amdgpu_gem_userptr *a)
     return 0;
 }
 
-/* the accelerator VRAM a file pins through surface BOs (they cannot be
- * exported, so only the importing file has handles on them) */
+static rdna3_bomap_owner *bomap_owner(rdna3_bomap_quota *q, uint32_t uid, int add)
+{
+    uint32_t i, freei = RD_BOMAP_OWNERS;
+    for (i = 0; i < RD_BOMAP_OWNERS; i++) {
+        if (q->o[i].used && q->o[i].uid == uid)
+            return &q->o[i];
+        if (!q->o[i].used && freei == RD_BOMAP_OWNERS)
+            freei = i;
+    }
+    if (!add || freei == RD_BOMAP_OWNERS)
+        return NULL;
+    zero(&q->o[freei], sizeof(q->o[freei]));
+    q->o[freei].used = 1;
+    q->o[freei].uid = uid;
+    return &q->o[freei];
+}
+
+int rdna3_drm_bomap_charge(rdna3_drm_device *dev, const rdna3_drm_file *f, rdna3_bo *bo)
+{
+    rdna3_bomap_quota *q = &dev->bomap;
+    rdna3_bomap_owner *o;
+    int v;
+    if (bo->map_charged)   /* one descriptor per BO: never twice */
+        return 0;
+    o = bomap_owner(q, f->owner, 0);
+    v = (int)rd3_bomap_quota_admit(f->owner, o ? o->n : 0, o ? o->bytes : 0, q->n, bo->size,
+                                   RD3_BOMAP_OWNER_BYTES_MAX(dev->vis_vram_size));
+    if (v)
+        return v;
+    if (!o && !(o = bomap_owner(q, f->owner, 1)))
+        return (int)RD3_BOMAP_Q_TABLE_FULL;
+    o->n++;
+    o->bytes += bo->size;
+    if (bo->foreign)
+        o->foreign_bytes += bo->size;
+    q->n++;
+    q->bytes += bo->size;
+    bo->map_owner = f->owner;
+    bo->map_charged = 1;
+    return 0;
+}
+
+void rdna3_drm_bomap_uncharge(rdna3_drm_device *dev, rdna3_bo *bo)
+{
+    rdna3_bomap_quota *q = &dev->bomap;
+    rdna3_bomap_owner *o;
+    if (!bo->map_charged)
+        return;
+    bo->map_charged = 0;
+    o = bomap_owner(q, bo->map_owner, 0);
+    if (o) {
+        o->n--;
+        o->bytes -= bo->size;
+        if (bo->foreign)
+            o->foreign_bytes -= bo->size;
+        if (!o->n)
+            o->used = 0;
+    }
+    q->n--;
+    q->bytes -= bo->size;
+}
+
+/* the accelerator VRAM a file's owner pins through surface BOs: the file's
+ * own (they cannot be exported, so only the importing file has handles on
+ * them) and, since N47 (b), those its owner's CPU mappings hold after their
+ * handles (or their file) are gone - each BO once, and a closed and
+ * reopened file still sees what its mappings pin */
 static uint64_t file_foreign_bytes(const rdna3_drm_file *f)
 {
-    uint64_t n = 0;
+    const rdna3_bomap_owner *o = bomap_owner(&f->dev->bomap, f->owner, 0);
+    uint64_t n = 0, charged_here = 0;
     uint32_t i;
     for (i = 0; i < RD_MAX_HANDLES; i++)
-        if (f->bos[i] && f->bos[i]->foreign)
+        if (f->bos[i] && f->bos[i]->foreign) {
             n += f->bos[i]->size;
-    return n;
+            if (f->bos[i]->map_charged && f->bos[i]->map_owner == f->owner)
+                charged_here += f->bos[i]->size;
+        }
+    return n + (o && o->foreign_bytes > charged_here ? o->foreign_bytes - charged_here : 0);
 }
 
 /* RD_NR_XNU_SURFACE_BO: a handle on an IOSurface's VRAM, or its dirty mark */

@@ -823,6 +823,7 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
     fDrmLock = IOLockAlloc();
     if (!fBoMapLock)   /* freed in free(): BO mapping descriptors may outlive drmFree */
         fBoMapLock = IOLockAlloc();
+    fBoMapGone = false;
     fDrm = (rdna3_drm_device *)drmZalloc(this, sizeof(*fDrm));
     fVramAcc = (range_alloc *)drmZalloc(this, sizeof(*fVramAcc));
     fVramHeap = (range_alloc *)drmZalloc(this, sizeof(*fVramHeap));
@@ -953,6 +954,19 @@ bool RDNA3Accel::drmInit(const amd_discovery *disc)
 
 void RDNA3Accel::drmFree()
 {
+    /* N47 (b): CPU-mapping descriptors still alive (their tasks' mappings)
+     * find fDrmLock and the device gone from here on (drmBoMapRelease); one
+     * already inside waits to finish first */
+    if (fBoMapLock) {
+        IOLockLock(fBoMapLock);
+        fBoMapGone = true;
+        while (fBoMapInflight)
+            IOLockSleep(fBoMapLock, &fBoMapInflight, THREAD_UNINT);
+        IOLockUnlock(fBoMapLock);
+        if (fBoMapLive)
+            LOG("DRM teardown with %u CPU-mapping descriptor(s) alive holding %llu KiB of BOs: they stay allocated",
+                fBoMapLive, (unsigned long long)(fBoMapLiveBytes >> 10));
+    }
     rdna3TraceCoreFini();
     vramSysctlUnregister();   /* before anything it reads goes */
     if (fDrm && fDrm->ops.bo_free)   /* user fence BOs still held (rings are down) */
@@ -999,6 +1013,8 @@ int RDNA3Accel::drmOpen(rdna3_drm_file *f, bool console)
         return -RD_ENOSPC;
     }
     int r = rdna3_drm_file_open(fDrm, f);
+    if (!r)
+        f->owner = uid;   /* charged for the BOs its CPU mappings hold (N47 (b)) */
     IOLockUnlock(fDrmLock);
     if (r)
         LOG("DRM open failed (%d)", r);
@@ -1103,11 +1119,21 @@ int RDNA3Accel::drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t si
  * retains a descriptor that is being freed. GTT BOs are
  * IOBufferMemoryDescriptors the map retains itself: their pages are never
  * handed to anyone else while mapped. */
+/* why RDNA3BoMemory::withBo made nothing (logged by drmBoMapDescriptor
+ * with the values, counted in bomap_nodesc) */
+struct RDNA3BoMemCause {
+    const char *why;
+    addr64_t    phys;
+    IOByteCount segLen;
+};
+
 class RDNA3BoMemory : public IOSubMemoryDescriptor {
     OSDeclareDefaultStructors(RDNA3BoMemory)
 public:
-    /* fDrmLock held; 'bar': fVramDev or fDoorbellDev */
-    static RDNA3BoMemory *withBo(RDNA3Accel *a, IOMemoryDescriptor *bar, rdna3_bo *bo);
+    /* fDrmLock held; 'bar': fVramDev or fDoorbellDev; 'cacheMode': what
+     * every mapping of it gets, whatever the client's map flags ask */
+    static RDNA3BoMemory *withBo(RDNA3Accel *a, IOMemoryDescriptor *bar, rdna3_bo *bo, IOOptionBits cacheMode,
+                                 RDNA3BoMemCause *cause);
     /* the map is made on this descriptor, not forwarded to the parent, so
      * the IOMemoryMap holds this descriptor and with it the BO */
     virtual IOMemoryMap *makeMapping(IOMemoryDescriptor *owner, task_t intoTask, IOVirtualAddress atAddress,
@@ -1129,6 +1155,7 @@ private:
     rdna3_bo           *fBo = nullptr;      /* one BO reference, for this object's whole life */
     IOMemoryDescriptor *fPhys = nullptr;    /* the BO's physical range: the parent, held by IOSubMemoryDescriptor */
     uint64_t            fSize = 0;
+    IOOptionBits        fCacheMode = 0;     /* kIOMapWriteCombineCache (VRAM) / kIOMapInhibitCache (doorbell) */
 };
 OSDefineMetaClassAndStructors(RDNA3BoMemory, IOSubMemoryDescriptor)
 
@@ -1147,19 +1174,28 @@ struct RDNA3MdCall : public IOMemoryDescriptor {
     }
 };
 
-RDNA3BoMemory *RDNA3BoMemory::withBo(RDNA3Accel *a, IOMemoryDescriptor *bar, rdna3_bo *bo)
+RDNA3BoMemory *RDNA3BoMemory::withBo(RDNA3Accel *a, IOMemoryDescriptor *bar, rdna3_bo *bo, IOOptionBits cacheMode,
+                                     RDNA3BoMemCause *cause)
 {
     IOByteCount segLen = 0;
     const addr64_t phys = bar->getPhysicalSegment((IOByteCount)bo->vram_offset, &segLen, kIOMemoryMapperNone);
-    if (!phys || segLen < bo->size)
+    cause->phys = phys;
+    cause->segLen = segLen;
+    if (!phys || segLen < bo->size) {
+        cause->why = !phys ? "the BAR has no physical segment at the BO's offset"
+                           : "the BAR's physical segment there is shorter than the BO";
         return nullptr;
+    }
     /* as IODeviceMemory::withRange makes BAR0's own descriptor */
     IOMemoryDescriptor *pm = IOMemoryDescriptor::withAddressRange(phys, bo->size,
                                                                   kIODirectionNone | kIOMemoryMapperNone, TASK_NULL);
-    if (!pm)
+    if (!pm) {
+        cause->why = "IOMemoryDescriptor::withAddressRange of the BO's physical range failed";
         return nullptr;
+    }
     RDNA3BoMemory *m = OSTypeAlloc(RDNA3BoMemory);
     if (!m || !m->initSubRange(pm, 0, (IOByteCount)bo->size, kIODirectionInOut)) {
+        cause->why = m ? "initSubRange failed" : "no memory for the descriptor";
         OSSafeReleaseNULL(m);   /* not linked yet: a plain release */
         pm->release();
         return nullptr;
@@ -1167,6 +1203,7 @@ RDNA3BoMemory *RDNA3BoMemory::withBo(RDNA3Accel *a, IOMemoryDescriptor *bar, rdn
     pm->release();   /* the sub-range retained it */
     m->fPhys = pm;
     m->fSize = bo->size;
+    m->fCacheMode = cacheMode;
     a->retain();
     m->fAccel = a;
     rdna3_drm_bo_get(bo);
@@ -1183,6 +1220,10 @@ IOMemoryMap *RDNA3BoMemory::makeMapping(IOMemoryDescriptor *owner, task_t intoTa
 IOReturn RDNA3BoMemory::doMap(vm_map_t addressMap, IOVirtualAddress *atAddress, IOOptionBits options,
                               IOByteCount sourceOffset, IOByteCount length)
 {
+    /* the cache mode is ours: IOUserClient::mapClientMemory64 replaces
+     * kIOMapUserOptionsMask (cache bits included) of clientMemoryForType's
+     * options with the client's map flags (ECC security review of N47 (b)) */
+    options = (options & ~kIOMapCacheMask) | fCacheMode;
     /* fPhys covers exactly this descriptor's range: the offsets carry over */
     const IOReturn r = RDNA3MdCall::doMapOf(fPhys, addressMap, atAddress, options, sourceOffset, length);
     if (r != kIOReturnSuccess && fAccel && fBo)
@@ -1206,7 +1247,12 @@ void RDNA3BoMemory::taggedRelease(const void *tag) const
 /* common/rdna3_bo_map.h: the release that frees this object clears the BO's
  * link under fBoMapLock first and frees outside it (the free takes
  * fDrmLock, which lookups hold while they take fBoMapLock); any other
- * release decrements under fBoMapLock */
+ * release decrements under fBoMapLock. fBo stays valid memory for as long
+ * as this object lives, after drmFree too: it holds a BO reference, the
+ * UAPI frees a BO only when its last reference goes (bo_put_dev), and after
+ * the teardown nothing drops this one (drmBoMapRelease leaves it), so the
+ * BO is leaked rather than freed under us; fBoMapLock lives until
+ * RDNA3Accel::free, which waits for this object's reference on the accel. */
 void RDNA3BoMemory::taggedRelease(const void *tag, const int when) const
 {
     IOLock *lk = fAccel ? fAccel->boMapLock() : nullptr;
@@ -1239,16 +1285,37 @@ void RDNA3BoMemory::free()
     IOSubMemoryDescriptor::free();
 }
 
+/* The descriptors outlive the DRM teardown when their mappings do (a task
+ * that exits, a connection port that dies, during or after stop()): drmFree
+ * frees fDrmLock and the device. fBoMapLock (alive until free()) orders the
+ * two: a release in flight finishes before drmFree goes on, and one after
+ * it leaves the BO as it is (the device's memory is gone), logged. */
 void RDNA3Accel::drmBoMapRelease(rdna3_bo *bo, uint64_t size)
 {
-    if (!fDrmLock)
+    IOLockLock(fBoMapLock);
+    if (fBoMapGone) {
+        const uint32_t n = ++fBoMapLate;
+        IOLockUnlock(fBoMapLock);
+        if (n <= 8 || (n & 1023) == 0)
+            LOG("GEM: a CPU mapping of a %llu KiB BO at 0x%llx went after the DRM teardown: the BO is left "
+                "allocated, the device's memory is gone (%u such)", (unsigned long long)(size >> 10),
+                (unsigned long long)bo->vram_offset, n);
         return;
+    }
+    fBoMapInflight++;
+    IOLockUnlock(fBoMapLock);
+
     IOLockLock(fDrmLock);
     fBoMapLive--;
     fBoMapLiveBytes -= size;
-    if (fDrm)   /* after drmFree the device's BOs are gone with it */
-        rdna3_drm_bo_put(fDrm, bo);
+    rdna3_drm_bomap_uncharge(fDrm, bo);
+    rdna3_drm_bo_put(fDrm, bo);
     IOLockUnlock(fDrmLock);
+
+    IOLockLock(fBoMapLock);
+    if (--fBoMapInflight == 0 && fBoMapGone)
+        IOLockWakeup(fBoMapLock, &fBoMapInflight, false);
+    IOLockUnlock(fBoMapLock);
 }
 
 /* xnu refused to map (or unmap) a BO's range: the client gets no pointer
@@ -1264,9 +1331,10 @@ void RDNA3Accel::drmBoMapFailed(const rdna3_bo *bo, const char *what, IOReturn e
             (unsigned long long)bo->vram_offset, (unsigned)err, proc_selfpid(), (int)n);
 }
 
-/* fDrmLock held: the BO's descriptor, retained for the caller (a new one
- * when it has none) */
-IOMemoryDescriptor *RDNA3Accel::drmBoMapDescriptor(rdna3_bo *bo, IOMemoryDescriptor *bar)
+/* fDrmLock held: the BO's descriptor, retained for the caller (a new one,
+ * charged to the file's uid, when it has none); nullptr logged and counted */
+IOMemoryDescriptor *RDNA3Accel::drmBoMapDescriptor(rdna3_drm_file *f, rdna3_bo *bo, enum rd3_bomap_kind k,
+                                                  uint64_t off)
 {
     IOLockLock(fBoMapLock);
     RDNA3BoMemory *m = (RDNA3BoMemory *)rd3_bomap_lookup(&bo->os_map);
@@ -1277,9 +1345,26 @@ IOMemoryDescriptor *RDNA3Accel::drmBoMapDescriptor(rdna3_bo *bo, IOMemoryDescrip
         fBoMapReused++;
         return m;
     }
-    m = RDNA3BoMemory::withBo(this, bar, bo);
-    if (!m)
+    const int q = rdna3_drm_bomap_charge(fDrm, f, bo);
+    if (q) {
+        fBoMapQuota++;
+        drmBoMapRefused(k, bo, off, rd3_bomap_quota_name(q));
         return nullptr;
+    }
+    const bool db = k == RD3_BOMAP_DOORBELL;
+    RDNA3BoMemCause cause = { "?", 0, 0 };
+    m = RDNA3BoMemory::withBo(this, db ? fDoorbellDev : fVramDev, bo,
+                              db ? kIOMapInhibitCache : kIOMapWriteCombineCache, &cause);
+    if (!m) {
+        rdna3_drm_bomap_uncharge(fDrm, bo);
+        const uint32_t n = ++fBoMapNoDesc;
+        if (n <= 8 || (n & 1023) == 0)
+            LOG("GEM: CPU map of offset 0x%llx: no descriptor for the %llu KiB %s BO at 0x%llx: %s (physical 0x%llx, "
+                "segment %llu KiB; pid %d, %u such)", (unsigned long long)off, (unsigned long long)(bo->size >> 10),
+                db ? "doorbell" : "VRAM", (unsigned long long)bo->vram_offset, cause.why,
+                (unsigned long long)cause.phys, (unsigned long long)(cause.segLen >> 10), proc_selfpid(), n);
+        return nullptr;
+    }
     IOLockLock(fBoMapLock);
     rd3_bomap_link(&bo->os_map, m);   /* creation runs under fDrmLock: nobody linked one meanwhile */
     IOLockUnlock(fBoMapLock);
@@ -1328,11 +1413,9 @@ IOMemoryDescriptor *RDNA3Accel::drmMemoryForOffset(rdna3_drm_file *f, uint64_t o
         md->retain();
         *options = 0;
     } else if (rd3_bomap_per_bo(k)) {
-        md = drmBoMapDescriptor(bo, k == RD3_BOMAP_DOORBELL ? fDoorbellDev : fVramDev);
-        if (md)
+        md = drmBoMapDescriptor(f, bo, k, off);   /* logs its own refusals */
+        if (md)   /* what xnu sees; doMap forces the cache mode whatever the client's flags say */
             *options = k == RD3_BOMAP_DOORBELL ? kIOMapInhibitCache : kIOMapWriteCombineCache;
-        else
-            drmBoMapRefused(k, bo, off, "no memory for the BO's mapping descriptor, or no physical range");
     } else {
         /* outside the BAR: the client's map fails (its driver says
          * OUT_OF_DEVICE_MEMORY) */

@@ -2985,6 +2985,11 @@ def tcall_rows(klog):
 BOMEM_LOG_RE = re.compile(r"RDNA3: GEM: RDNA3BoMemory::(doMap|doUnmap) called \((\d+) such\)")
 BOMAP_FAIL_RE = re.compile(r"RDNA3: GEM: CPU (map|unmap) of a (\d+) KiB (\w+) BO at (0x[0-9a-f]+) failed in xnu "
                            r"\((0x[0-9a-f]+)\) \(pid (-?\d+), (\d+) such\)")
+BOMAP_NODESC_RE = re.compile(r"RDNA3: GEM: CPU map of offset (0x[0-9a-f]+): no descriptor for the (\d+) KiB (\w+) BO "
+                             r"at (0x[0-9a-f]+): (.*?) \(physical (0x[0-9a-f]+), segment (\d+) KiB; pid (-?\d+), "
+                             r"(\d+) such\)")
+BOMAP_LATE_RE = re.compile(r"RDNA3: GEM: a CPU mapping of a (\d+) KiB BO at (0x[0-9a-f]+) went after the DRM "
+                           r"teardown.*?\((\d+) such\)")
 BOMAP_REFUSED_RE = re.compile(r"RDNA3: GEM: CPU map of offset (0x[0-9a-f]+) refused: (.*?) \((?:BO [^)]*; )?pid "
                               r"(-?\d+), (\d+) such\)")
 
@@ -3032,12 +3037,27 @@ def bomem_rows(klog):
     for why in sorted(refused):
         rows.append(("WARN", "BO map", "a CPU map refused: %s (at least %d time(s); the counter covers every "
                      "reason)" % (why, refused[why])))
+    nodesc = {}
+    for m in BOMAP_NODESC_RE.finditer(klog or ""):
+        n = int(m.group(9))
+        if m.group(5) not in nodesc or n > nodesc[m.group(5)][0]:
+            nodesc[m.group(5)] = (n, m.group(2), m.group(3), m.group(4), m.group(6), m.group(7))
+    for why, (n, kib, kind, at, phys, seg) in sorted(nodesc.items()):
+        rows.append(("FAIL", "BO map", "no mapping descriptor for a %s BO, at least %d time(s): %s (the last logged: "
+                     "%s KiB at %s, physical %s, segment %s KiB): the client's map failed" % (kind, n, why, kib, at,
+                                                                                            phys, seg)))
+    late = 0
+    for m in BOMAP_LATE_RE.finditer(klog or ""):
+        late = max(late, int(m.group(3)))
+    if late:
+        rows.append(("WARN", "BO map", "at least %d CPU mapping(s) went after the DRM teardown (the kext stopped "
+                     "with mappings alive): their BOs were left allocated" % late))
     return rows
 
 
 # debug.rdna3_vram's bomap_* counters (DRIVER-PLAN N47 (b)): the per-BO mapping descriptors, each holding its BO
-BOMAP_KEYS = ("bomap_live", "bomap_live_kib", "bomap_made", "bomap_reused", "bomap_refused", "bomap_nobo",
-              "bomap_fail")
+BOMAP_KEYS = ("bomap_live", "bomap_live_kib", "bomap_made", "bomap_reused", "bomap_refused", "bomap_quota",
+              "bomap_nodesc", "bomap_nobo", "bomap_fail")
 
 
 def bomap_counter_lines(c):
@@ -3058,10 +3078,15 @@ def bomap_counter_lines(c):
                             "libdrm_xnu before N47 unmapping with memory type 0: those mappings and their BOs stay "
                             "until the device is closed); the kernel log's 'CPU map of offset' lines"
                     % c["bomap_nobo"]))
+    if c["bomap_nodesc"]:
+        out.append(("FAIL", "%d CPU map(s) of VRAM / doorbell BOs found no descriptor (no physical range in the BAR, "
+                            "or no memory): the kernel log's 'no descriptor for the' lines" % c["bomap_nodesc"]))
     if c["bomap_refused"]:
-        out.append(("WARN", "%d CPU map(s) refused (userptr, no CPU access, outside the BAR, or no memory for the "
-                            "descriptor): the kernel log's 'CPU map of offset ... refused' lines"
-                    % c["bomap_refused"]))
+        out.append(("WARN", "%d CPU map(s) refused (userptr, no CPU access, outside the BAR%s): the kernel log's "
+                            "'CPU map of offset ... refused' lines"
+                    % (c["bomap_refused"], ", and %d by the uid's quota of mapped BOs (a client mapping and closing "
+                                           "BOs in a loop, or never unmapping)" % c["bomap_quota"]
+                       if c["bomap_quota"] else "")))
     return out
 
 CD_PREFS_SEEN_RE = re.compile(r"^== CoreDisplay prefs \(.*?\): this boot's WindowServer started with: (.*)$", re.M)

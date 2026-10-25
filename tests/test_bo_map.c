@@ -15,7 +15,9 @@
  * createMappingInTask; the IOMemoryMap holds one reference to it; a second
  * map of it in the same task reuses that map; the unmap finds it through
  * clientMemoryForType again). VRAM placement goes through range_alloc as
- * the kext's heap does, so a reused range is visible.
+ * the kext's heap does, so a reused range is visible. A descriptor is
+ * charged to the file's uid (rdna3_drm_bomap_charge) while it lives, as
+ * drmBoMapDescriptor / drmBoMapRelease do (ECC review round 1).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -57,10 +59,13 @@ static int h_bo_alloc(void *c, rdna3_bo *bo)
     live_bos++;
     return 0;
 }
+static int surf_holds;   /* the "accelerator's" holds on surface VRAM */
 static void h_bo_free(void *c, rdna3_bo *bo)
 {
     (void)c;
-    if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM)
+    if (bo->foreign)
+        surf_holds--;
+    else if (bo->placement == AMDGPU_GEM_DOMAIN_VRAM)
         CHECK(range_alloc_put(&heap, bo->vram_offset, bo->size) == 0);
     else if (!bo->userptr)
         free(bo->backing);
@@ -70,6 +75,20 @@ static int h_bo_userptr(void *c, void *os, rdna3_bo *bo, uint64_t uaddr, uint32_
 {
     (void)c; (void)os; (void)flags;
     bo->backing = (void *)(uintptr_t)uaddr;
+    live_bos++;
+    return 0;
+}
+/* IOSurface 7: 100 MiB of the accelerator's VRAM at 128 MiB (more than
+ * half of RD_SURFACE_BO_FILE_MAX's 128 MiB over two imports) */
+static int h_surface_bo(void *c, void *os, rdna3_bo *bo, uint32_t id, uint32_t plane)
+{
+    (void)c; (void)os;
+    if (id != 7 || plane)
+        return -RD_ENOENT;
+    bo->vram_offset = 128ull << 20;
+    bo->size = 100ull << 20;
+    bo->backing = &surf_holds;
+    surf_holds++;
     live_bos++;
     return 0;
 }
@@ -85,14 +104,19 @@ typedef struct md {
 } md;
 static int md_made, md_freed;
 
-/* drmMemoryForOffset: a reference for the caller, or NULL with the kind */
+static int last_quota;   /* the last rdna3_drm_bomap_charge refusal */
+
+/* drmMemoryForOffset: a reference for the caller, or NULL with the kind
+ * (and last_quota when the uid's quota refused it) */
 static md *map_ref(rdna3_drm_file *f, uint64_t off, enum rd3_bomap_kind *kind)
 {
     rdna3_bo *bo = rdna3_drm_bo_by_mmap_offset(f, off);
     enum rd3_bomap_kind k = rd3_bomap_classify(bo, BAR0, BAR2);
     md *m;
+    int q;
     if (kind)
         *kind = k;
+    last_quota = 0;
     if (!rd3_bomap_per_bo(k))
         return NULL;
     m = (md *)rd3_bomap_lookup(&bo->os_map);
@@ -100,9 +124,16 @@ static md *map_ref(rdna3_drm_file *f, uint64_t off, enum rd3_bomap_kind *kind)
         m->refs++;
         return m;
     }
-    m = (md *)calloc(1, sizeof(*m));
-    if (!m)
+    q = rdna3_drm_bomap_charge(f->dev, f, bo);
+    if (q) {
+        last_quota = q;
         return NULL;
+    }
+    m = (md *)calloc(1, sizeof(*m));
+    if (!m) {
+        rdna3_drm_bomap_uncharge(f->dev, bo);
+        return NULL;
+    }
     m->refs = 1;
     m->bo = bo;
     m->dev = f->dev;
@@ -116,6 +147,7 @@ static md *map_ref(rdna3_drm_file *f, uint64_t off, enum rd3_bomap_kind *kind)
 static void md_release(md *m)
 {
     if (rd3_bomap_release_unlinks(&m->bo->os_map, m, m->refs, 1)) {
+        rdna3_drm_bomap_uncharge(m->dev, m->bo);
         rdna3_drm_bo_put(m->dev, m->bo);
         free(m);
         md_freed++;
@@ -254,6 +286,24 @@ static void test_release_rule(void)
     CHECK(rd3_bomap_lookup(&link) == &a);
 }
 
+static void test_quota_rule(void)
+{
+    const uint64_t max = RD3_BOMAP_OWNER_BYTES_MAX(BAR0);
+    CHECK(rd3_bomap_quota_admit(501, 0, 0, 0, 4096, max) == RD3_BOMAP_Q_OK);
+    CHECK(rd3_bomap_quota_admit(501, RD_MAX_HANDLES - 1, 0, 0, 4096, max) == RD3_BOMAP_Q_OK);
+    CHECK(rd3_bomap_quota_admit(501, RD_MAX_HANDLES, 0, 0, 4096, max) == RD3_BOMAP_Q_OWNER_COUNT);
+    CHECK(rd3_bomap_quota_admit(501, 1, max - 4096, 0, 4096, max) == RD3_BOMAP_Q_OK);
+    CHECK(rd3_bomap_quota_admit(501, 1, max - 4095, 0, 4096, max) == RD3_BOMAP_Q_OWNER_BYTES);
+    CHECK(rd3_bomap_quota_admit(501, 0, 0, 0, UINT64_MAX, max) == RD3_BOMAP_Q_OWNER_BYTES);   /* no wrap */
+    /* root and _windowserver meet only the device's limit, as rdna3_vmid_admit */
+    CHECK(rd3_bomap_quota_admit(0, RD_MAX_HANDLES * 2, max * 2, 0, 4096, max) == RD3_BOMAP_Q_OK);
+    CHECK(rd3_bomap_quota_admit(RD_UID_WINDOWSERVER, RD_MAX_HANDLES * 2, 0, 0, 4096, max) == RD3_BOMAP_Q_OK);
+    CHECK(rd3_bomap_quota_admit(0, 0, 0, RD3_BOMAP_DEVICE_MAX, 4096, max) == RD3_BOMAP_Q_DEVICE_COUNT);
+    CHECK(rd3_bomap_quota_admit(501, 0, 0, RD3_BOMAP_DEVICE_MAX, 4096, max) == RD3_BOMAP_Q_DEVICE_COUNT);
+    for (int q = RD3_BOMAP_Q_OK; q <= RD3_BOMAP_Q_TABLE_FULL; q++)
+        CHECK(strcmp(rd3_bomap_quota_name(q), "?") != 0);
+}
+
 int main(void)
 {
     static rdna3_drm_device dev;
@@ -263,6 +313,7 @@ int main(void)
 
     test_classify();
     test_release_rule();
+    test_quota_rule();
 
     memset(&ops, 0, sizeof(ops));
     ops.zalloc = h_zalloc;
@@ -270,6 +321,7 @@ int main(void)
     ops.bo_alloc = h_bo_alloc;
     ops.bo_free = h_bo_free;
     ops.bo_userptr = h_bo_userptr;
+    ops.surface_bo = h_surface_bo;
     ops.copyin = h_copyin;
     ops.copyout = h_copyout;
     memset(&disc, 0, sizeof(disc));
@@ -280,7 +332,7 @@ int main(void)
     disc.num_ips = 1;
     disc.ips[0].hw_id = AMD_HWID_GC; disc.ips[0].major = 11; disc.ips[0].minor = 0;
     disc.ips[0].revision = 3;
-    range_alloc_init(&heap, 1u << 20, 64u << 20);
+    range_alloc_init(&heap, 1u << 20, 96u << 20);   /* below the surface at 128 MiB */
     rdna3_drm_device_init(&dev, &ops, &disc, 0x747E, 0xC8, 0x0, 16ull << 30, BAR0, 8ull << 30);
     CHECK(rdna3_drm_file_open(&dev, &f1) == 0);
     f1.os = (void *)0x7a5c;
@@ -422,6 +474,94 @@ int main(void)
         CHECK(!map_ref(&f1, 0, &k) && k == RD3_BOMAP_NO_BO);
         gem_close(&f1, hn);
         gem_close(&f1, hg);
+    }
+
+    /* 7. the uid's quota (ECC review round 1): a map + GEM_CLOSE loop stops at the
+     * uid's limit, a reopened file does not reset it, another uid is not hit */
+    {
+        static md *held[RD_MAX_HANDLES + 1];
+        static rdna3_drm_file f3;
+        uint32_t n = 0, h, i, live0 = live_bos;   /* test 4's export lives until f1 closes */
+        CHECK(rdna3_drm_file_open(&dev, &f2) == 0);
+        f2.os = (void *)0x7a5d;
+        f2.owner = 501;
+        for (;;) {
+            md *m = NULL;
+            h = gem_create(&f2, 4096, AMDGPU_GEM_DOMAIN_VRAM, 0);
+            if (!h || xnu_map(&f2, bo_off(&f2, h), &m) != 0) {
+                if (h)
+                    gem_close(&f2, h);
+                break;
+            }
+            held[n++] = m;
+            gem_close(&f2, h);
+            if (n > RD_MAX_HANDLES)
+                break;
+        }
+        CHECK(n == RD_MAX_HANDLES && last_quota == RD3_BOMAP_Q_OWNER_COUNT);
+        CHECK(dev.bomap.n == RD_MAX_HANDLES && dev.bomap.bytes == (uint64_t)RD_MAX_HANDLES * 4096);
+        rdna3_drm_file_close(&f2);   /* the mappings live on (the connection port) */
+        CHECK(rdna3_drm_file_open(&dev, &f2) == 0);
+        f2.owner = 501;
+        h = gem_create(&f2, 4096, AMDGPU_GEM_DOMAIN_VRAM, 0);
+        CHECK(h && xnu_map(&f2, bo_off(&f2, h), NULL) == -1 && last_quota == RD3_BOMAP_Q_OWNER_COUNT);
+        CHECK(rdna3_drm_file_open(&dev, &f3) == 0);   /* another uid */
+        f3.owner = 502;
+        {
+            uint32_t h3 = gem_create(&f3, 4096, AMDGPU_GEM_DOMAIN_VRAM, 0);
+            md *m3 = NULL;
+            CHECK(h3 && xnu_map(&f3, bo_off(&f3, h3), &m3) == 0 && m3 && m3->bo->map_owner == 502);
+            CHECK(xnu_unmap(&f3, bo_off(&f3, h3)) == 0);
+            gem_close(&f3, h3);
+        }
+        rdna3_drm_file_close(&f3);
+        for (i = 0; i < n; i++)
+            conn_close(held[i]);
+        CHECK(dev.bomap.n == 0 && dev.bomap.bytes == 0);
+        CHECK(xnu_map(&f2, bo_off(&f2, h), NULL) == 0);   /* room again */
+        CHECK(xnu_unmap(&f2, bo_off(&f2, h)) == 0);
+        gem_close(&f2, h);
+        rdna3_drm_file_close(&f2);
+        CHECK(live_bos == live0);
+        for (i = 0; i < RD_BOMAP_OWNERS; i++)
+            CHECK(!dev.bomap.o[i].used);
+    }
+
+    /* 8. the surface quota counts what mappings hold: import, map, GEM_CLOSE, and
+     * the next import (100 + 100 MiB > 128 MiB) is refused, in a reopened file too */
+    {
+        struct rd_xnu_surface_bo s;
+        md *m = NULL;
+        CHECK(rdna3_drm_file_open(&dev, &f2) == 0);
+        f2.os = (void *)0x7a5d;
+        f2.owner = 501;
+        memset(&s, 0, sizeof(s));
+        s.op = RD_XNU_SURFACE_BO_IMPORT;
+        s.surface_id = 7;
+        CHECK(IOCTL(&f2, RD_NR_XNU_SURFACE_BO, s) == 0 && s.handle);
+        CHECK(xnu_map(&f2, bo_off(&f2, s.handle), &m) == 0 && m->bo->foreign);
+        gem_close(&f2, s.handle);
+        s.handle = 0;
+        s.size = 0;
+        CHECK(IOCTL(&f2, RD_NR_XNU_SURFACE_BO, s) == -RD_ENOSPC);
+        rdna3_drm_file_close(&f2);
+        CHECK(rdna3_drm_file_open(&dev, &f2) == 0);
+        f2.owner = 501;
+        CHECK(IOCTL(&f2, RD_NR_XNU_SURFACE_BO, s) == -RD_ENOSPC);   /* reopen: still pinned */
+        conn_close(m);
+        CHECK(surf_holds == 0);
+        CHECK(IOCTL(&f2, RD_NR_XNU_SURFACE_BO, s) == 0 && s.handle);   /* the mapping went */
+        {
+            /* mapped while its handle is open: counted once, not twice */
+            struct rd_xnu_surface_bo s2 = s;
+            CHECK(xnu_map(&f2, bo_off(&f2, s.handle), &m) == 0);
+            s2.handle = 0;
+            CHECK(IOCTL(&f2, RD_NR_XNU_SURFACE_BO, s2) == -RD_ENOSPC);   /* 200 > 128 either way */
+            CHECK(xnu_unmap(&f2, bo_off(&f2, s.handle)) == 0);
+        }
+        gem_close(&f2, s.handle);
+        rdna3_drm_file_close(&f2);
+        CHECK(surf_holds == 0);
     }
 
     rdna3_drm_file_close(&f1);

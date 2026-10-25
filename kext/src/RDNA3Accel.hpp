@@ -233,10 +233,18 @@ private:
     uint32_t      fBoMapLive = 0;        /* descriptors alive, each holding its BO */
     uint64_t      fBoMapLiveBytes = 0;   /* the sizes of their BOs */
     uint32_t      fBoMapMade = 0, fBoMapReused = 0;
-    uint32_t      fBoMapRefused = 0;     /* userptr, no CPU access, outside the BAR, no memory */
+    uint32_t      fBoMapRefused = 0;     /* userptr, no CPU access, outside the BAR, the quota */
+    uint32_t      fBoMapQuota = 0;       /* of those: rdna3_drm_bomap_charge refused */
+    uint32_t      fBoMapNoDesc = 0;      /* withBo made nothing (no physical range, no memory) */
     uint32_t      fBoMapNoBo = 0;        /* an offset that names no BO of the file */
     volatile SInt32 fBoMapFail = 0;      /* xnu's map / unmap failed */
-    IOMemoryDescriptor *drmBoMapDescriptor(rdna3_bo *bo, IOMemoryDescriptor *bar);   /* fDrmLock held */
+    /* the DRM teardown (fBoMapLock): drmFree sets fBoMapGone and waits for
+     * the releases in flight; a release after it leaves its BO (fBoMapLate) */
+    bool          fBoMapGone = false;
+    uint32_t      fBoMapInflight = 0;
+    uint32_t      fBoMapLate = 0;
+    IOMemoryDescriptor *drmBoMapDescriptor(rdna3_drm_file *f, rdna3_bo *bo, enum rd3_bomap_kind k,
+                                           uint64_t off);   /* fDrmLock held */
     void          drmBoMapRefused(enum rd3_bomap_kind k, const rdna3_bo *bo, uint64_t off, const char *why);
     IOThread      fDrmHeldBy = nullptr;
     /* the heaps (common/rdna3_vram_place.h, card run 2026-10-17c): the

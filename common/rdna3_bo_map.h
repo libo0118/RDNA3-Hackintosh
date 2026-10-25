@@ -94,6 +94,55 @@ static inline enum rd3_bomap_kind rd3_bomap_classify(const rdna3_bo *bo, uint64_
                                                                  : RD3_BOMAP_REFUSE_OUTSIDE;
 }
 
+/* What a BO held by a CPU mapping costs is charged to the uid that made the
+ * mapping (rdna3_drm_bomap_charge), since such a BO outlives its handles,
+ * its file and the file's per-file limits (ECC security review of N47 (b):
+ * map + GEM_CLOSE loops, or close and reopen, pinned VRAM and kernel
+ * objects without bound). The caps: RD3_BOMAP_DEVICE_MAX descriptors on the
+ * device; for any uid but root and _windowserver (as rdna3_vmid_admit) at
+ * most RD_MAX_HANDLES descriptors (a file's own handle cap) and
+ * RD3_BOMAP_OWNER_BYTES_MAX bytes: twice the CPU-visible VRAM, which ranges
+ * of VRAM BOs cannot exceed; the rest is IOSurface imports, which the
+ * surface quota (RD_SURFACE_BO_FILE_MAX, counting what mappings hold) bounds. */
+#define RD3_BOMAP_DEVICE_MAX 65536u
+#define RD3_BOMAP_OWNER_BYTES_MAX(vis) (2 * (uint64_t)(vis))
+
+enum rd3_bomap_quota {
+    RD3_BOMAP_Q_OK = 0,
+    RD3_BOMAP_Q_DEVICE_COUNT,
+    RD3_BOMAP_Q_OWNER_COUNT,
+    RD3_BOMAP_Q_OWNER_BYTES,
+    RD3_BOMAP_Q_TABLE_FULL,
+};
+
+static inline const char *rd3_bomap_quota_name(int q)
+{
+    switch (q) {
+    case RD3_BOMAP_Q_OK:           return "ok";
+    case RD3_BOMAP_Q_DEVICE_COUNT: return "the device's limit of mapped BOs (RD3_BOMAP_DEVICE_MAX)";
+    case RD3_BOMAP_Q_OWNER_COUNT:  return "this uid's limit of mapped BOs (RD_MAX_HANDLES)";
+    case RD3_BOMAP_Q_OWNER_BYTES:  return "this uid's limit of mapped bytes (twice the visible VRAM)";
+    case RD3_BOMAP_Q_TABLE_FULL:   return "no slot left for another uid (RD_BOMAP_OWNERS)";
+    default:                       return "?";
+    }
+}
+
+/* may 'uid', holding 'owner_n' descriptors of 'owner_bytes', get one more of
+ * 'size' bytes while the device holds 'dev_n'? */
+static inline enum rd3_bomap_quota rd3_bomap_quota_admit(uint32_t uid, uint32_t owner_n, uint64_t owner_bytes,
+                                                         uint32_t dev_n, uint64_t size, uint64_t owner_bytes_max)
+{
+    if (dev_n >= RD3_BOMAP_DEVICE_MAX)
+        return RD3_BOMAP_Q_DEVICE_COUNT;
+    if (uid == 0 || uid == RD_UID_WINDOWSERVER)
+        return RD3_BOMAP_Q_OK;
+    if (owner_n >= RD_MAX_HANDLES)
+        return RD3_BOMAP_Q_OWNER_COUNT;
+    if (size > owner_bytes_max || owner_bytes > owner_bytes_max - size)
+        return RD3_BOMAP_Q_OWNER_BYTES;
+    return RD3_BOMAP_Q_OK;
+}
+
 /* a per-BO descriptor holds a BO reference for its whole life */
 static inline int rd3_bomap_per_bo(enum rd3_bomap_kind k)
 {
