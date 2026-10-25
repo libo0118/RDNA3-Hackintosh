@@ -57,7 +57,7 @@ On a Mac with Xcode (the kext is built only there):
 make kext     # -> build/RDNA3Accel.kext (x86_64)
 ```
 
-CI (GitHub Actions, self-hosted macOS runner) builds the kext and attaches it as an artifact.
+CI (Forgejo Actions at https://forgejo.voten.me, self-hosted macOS and Linux runners) builds the kext and attaches it as an artifact.
 
 **Test on Linux with this card as the only one (macOS in a VM, passthrough):**
 [docs/TESTING-VM.md](docs/TESTING-VM.md), i.e. a single script `tools/vm/rdna3vm`, step by step.

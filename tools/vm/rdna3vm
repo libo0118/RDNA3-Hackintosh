@@ -263,7 +263,7 @@ cmd_prepare() {
     done
     if [ -f "$CONF" ]; then . "$CONF"; osx=${osx:-$OSXKVM}; fi
     [ -n "$osx" ] && [ -d "$osx/OpenCore" ] || die "give --osx-kvm <OSX-KVM directory> (git clone https://github.com/kholia/OSX-KVM)"
-    [ -n "$zip" ] && [ -f "$zip" ] || die "give --artifact <RDNA3Accel-kext.zip from GitHub Actions>"
+    [ -n "$zip" ] && [ -f "$zip" ] || die "give --artifact <RDNA3Accel-kext.zip from CI (rdna3vm update fetches it)>"
     mkdir -p "$WORK/reports" "$WORK/share"
 
     say "Configuration"
@@ -289,6 +289,11 @@ CPUS=${CPUS:-$cpus}
 CPU_MODEL="${CPU_MODEL:-$CPU_DEFAULT}"
 TIMEOUT_MIN=${TIMEOUT_MIN:-30}
 AUTO_TIMEOUT_MIN=${AUTO_TIMEOUT_MIN:-8}
+# where 'rdna3vm update' / 'rdna3vm cts' fetch the builds from (the defaults
+# are right for the owner's CI; CI_FORGE=github is the old GitHub Actions setup)
+#CI_FORGE=forgejo
+#FORGEJO_URL=https://forgejo.voten.me
+#FORGEJO_REPO=Voten641/RDNA3-Hackintosh
 # after the VM: suspend = suspend-to-RAM for 5 s (powers the card off and
 # on; amdgpu cannot take an RDNA3 card back from passthrough otherwise),
 # auto = no suspend; both reboot cleanly if amdgpu still cannot drive the
@@ -1641,9 +1646,16 @@ cmd__passthrough() {
 # ------------------------------------------------------------------ update
 # rdna3vm update: git pull in this checkout, download the newest successful
 # build.yml artifact (RDNA3Accel-kext) of the current branch over the old
-# ~/Downloads/RDNA3Accel-kext.zip, then prepare with it. GitHub access: the
-# gh CLI if it is logged in, else a token (Actions: read) in $GITHUB_TOKEN or
-# ~/.config/rdna3vm/github-token.
+# ~/Downloads/RDNA3Accel-kext.zip, then prepare with it.
+#
+# CI runs on the owner's Forgejo (CI_FORGE=forgejo, the default; FORGEJO_URL
+# and FORGEJO_REPO say where: https://forgejo.voten.me, Voten641/RDNA3-Hackintosh).
+# The repository is public, so listing and downloading work without a token;
+# a token ($FORGEJO_TOKEN, ~/.config/rdna3vm/forgejo-token, or FORGEJO_TOKEN=
+# in the checkout's git-ignored .env) is sent as a header when there is one.
+# CI_FORGE=github keeps the old setup: the gh CLI if it is logged in, else a
+# token (Actions: read) in $GITHUB_TOKEN or ~/.config/rdna3vm/github-token.
+# Each of the three keys: the environment, else the config file, else the default.
 cmd_update() {
     say "git pull ($ROOT)"
     git -C "$ROOT" pull --ff-only || die "git pull failed (local changes?)"
@@ -1661,6 +1673,161 @@ gh_api() {   # gh_api PATH [OUTFILE]: GitHub REST GET, JSON to stdout or a file
     [ -n "$tok" ] || die "no GitHub access: run 'gh auth login', or put a token with Actions: read in ~/.config/rdna3vm/github-token"
     curl -fsSL -H "Authorization: Bearer $tok" -H "Accept: application/vnd.github+json" \
         ${out:+-o "$out"} "https://api.github.com/$path"
+}
+
+# ci_cfg KEY DEFAULT: the environment's KEY, else KEY=value of the config file, else DEFAULT
+ci_cfg() {
+    local k=$1 d=$2 v=${!1:-}
+    [ -n "$v" ] || v=$(sed -n "s/^$k=//p" "$CONF" 2>/dev/null | tail -n 1 | sed -E 's/^"(.*)"$/\1/')
+    printf '%s' "${v:-$d}"
+}
+
+# ci_setup: CI_FORGE (forgejo | github), CI_URL, CI_REPO (owner/name), CI_NAME
+# and CI_PAGE (the Actions page of the repository, for messages)
+ci_setup() {
+    CI_FORGE=$(ci_cfg CI_FORGE forgejo)
+    case $CI_FORGE in
+    forgejo)
+        CI_URL=$(ci_cfg FORGEJO_URL https://forgejo.voten.me); CI_URL=${CI_URL%/}
+        CI_REPO=$(ci_cfg FORGEJO_REPO Voten641/RDNA3-Hackintosh)
+        CI_NAME="Forgejo Actions" ;;
+    github)
+        CI_URL=https://github.com
+        CI_REPO=$(git -C "$ROOT" remote get-url origin | sed -E 's#^.*github\.com[:/]+##; s#\.git$##')
+        CI_NAME="GitHub Actions" ;;
+    *) die "CI_FORGE is '$CI_FORGE': use forgejo (default) or github (environment or $CONF)" ;;
+    esac
+    CI_PAGE=$CI_URL/$CI_REPO/actions
+}
+
+# the Forgejo token, never printed and never put on a command line
+forgejo_token() {
+    local t=${FORGEJO_TOKEN:-}
+    [ -n "$t" ] || t=$(head -n 1 "$HOME/.config/rdna3vm/forgejo-token" 2>/dev/null || true)
+    [ -n "$t" ] || t=$(sed -n 's/^FORGEJO_TOKEN=//p' "$ROOT/.env" 2>/dev/null | tail -n 1 | tr -d "\"' " || true)
+    printf '%s' "$t"
+}
+
+# forgejo_api PATH [OUTFILE]: Forgejo REST GET (PATH below the repository),
+# JSON to stdout or a file; follows the redirect of an artifact download. The
+# token goes in as a header through a curl config on a pipe, not in argv.
+forgejo_api() {
+    local path=$1 out=${2:-} tok
+    tok=$(forgejo_token)
+    if [ -n "$tok" ]; then
+        curl -fsSL -K <(printf 'header = "Authorization: token %s"\n' "$tok") \
+            ${out:+-o "$out"} "$CI_URL/api/v1/repos/$CI_REPO/$path"
+    else
+        curl -fsSL ${out:+-o "$out"} "$CI_URL/api/v1/repos/$CI_REPO/$path"
+    fi
+}
+
+# ci_api PATH [OUTFILE]: GET of PATH below the repository on the configured forge
+ci_api() {
+    if [ "$CI_FORGE" = github ]; then gh_api "repos/$CI_REPO/$1" ${2:+"$2"}; else forgejo_api "$@"; fi
+}
+
+# ci_norm KIND [ARG]: Forgejo JSON on stdin -> the GitHub shape the readers
+# below expect (with CI_FORGE=github the JSON passes through unchanged).
+#   runs [N]   {"workflow_runs": [{id, run_number, head_sha, status, conclusion}]}, newest first, N at most
+#   run        one such run
+#   jobs DET   {"jobs": [{name, status, conclusion, started_at, steps}]}; DET = the detail
+#              JSON (with steps) of the running jobs, one document per line
+#   artifacts  {"artifacts": [{id, name, expired, workflow_run: {id}}]}, newest first
+# Forgejo has one status field: running = in_progress, waiting / blocked /
+# unknown = queued, success / failure / cancelled / skipped = completed with
+# that conclusion. Its run list ignores 'limit' on page 1, hence N here.
+ci_norm() {
+    [ "$CI_FORGE" = forgejo ] || { cat; return; }
+    python3 -c '
+import json, sys
+kind = sys.argv[1]
+arg = sys.argv[2] if len(sys.argv) > 2 else ""
+d = json.load(sys.stdin)
+def listof(key):
+    return d if isinstance(d, list) else (d.get(key) or [])
+def status(s):
+    s = s or "unknown"
+    if s == "running": return "in_progress", None
+    if s in ("waiting", "blocked", "unknown"): return "queued", None
+    return "completed", s
+def run(r):
+    st, co = status(r.get("status"))
+    return {"id": r["id"], "run_number": r.get("index_in_repo"), "head_sha": r.get("commit_sha"),
+            "status": st, "conclusion": co, "html_url": r.get("html_url")}
+if kind == "runs":
+    rs = sorted(listof("workflow_runs"), key=lambda r: -r["id"])
+    out = {"workflow_runs": [run(r) for r in rs[:int(arg or 1000)]]}
+elif kind == "run":
+    out = run(d)
+elif kind == "jobs":
+    det = {}
+    for line in arg.splitlines():
+        try:
+            j = json.loads(line); det[j["id"]] = j
+        except Exception:
+            pass
+    jobs = []
+    for j in listof("jobs"):
+        st, co = status(j.get("status"))
+        raw = det.get(j["id"], {}).get("steps") or j.get("steps") or []
+        jobs.append({"id": j["id"], "name": j.get("name"), "status": st, "conclusion": co,
+                     "started_at": next((x["started"] for x in raw if x.get("started")), None),
+                     "completed_at": None,
+                     "steps": [{"name": x.get("name", ""), "status": status(x.get("status"))[0]} for x in raw]})
+    out = {"jobs": jobs}
+elif kind == "artifacts":
+    a = sorted(listof("artifacts"), key=lambda x: -x["id"])
+    out = {"artifacts": [{"id": x["id"], "name": x["name"], "expired": bool(x.get("expired")),
+                          "size_in_bytes": x.get("size_in_bytes"), "workflow_run": {"id": x.get("run_id")}}
+                         for x in a]}
+else:
+    sys.exit("ci_norm: unknown kind " + kind)
+print(json.dumps(out))
+' "$@"
+}
+
+# ci_runs BRANCH N [success]: the newest N build.yml runs of the branch (only the successful ones with the 3rd argument)
+ci_runs() {
+    local branch=$1 n=$2 st=${3:-}
+    if [ "$CI_FORGE" = github ]; then
+        ci_api "actions/workflows/build.yml/runs?branch=$branch&per_page=$n${st:+&status=$st}"
+    else
+        ci_api "actions/runs?workflow_id=build.yml&ref=refs/heads/$branch&limit=50${st:+&status=$st}" | ci_norm runs "$n"
+    fi
+}
+
+# ci_run ID: one run (status, conclusion; run_number and html_url on Forgejo)
+ci_run() {
+    ci_api "actions/runs/$1" | ci_norm run
+}
+
+# ci_jobs ID: the run's jobs; on Forgejo the running ones are read once more for their steps
+ci_jobs() {
+    local raw ids j det=""
+    raw=$(ci_api "actions/runs/$1/jobs?per_page=50") || return 1
+    if [ "$CI_FORGE" = github ]; then printf '%s' "$raw"; return; fi
+    ids=$(printf '%s' "$raw" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(*[j["id"] for j in (d if isinstance(d, list) else d.get("jobs") or []) if j.get("status") == "running"])' 2>/dev/null) || ids=""
+    for j in $ids; do
+        det+=$(ci_api "actions/jobs/$j" 2>/dev/null | tr -d '\n' || true)$'\n'
+    done
+    printf '%s' "$raw" | ci_norm jobs "$det"
+}
+
+# ci_artifacts NAME [RUN_ID]: the artifacts called NAME, of the run or (no run) the newest of the repository
+ci_artifacts() {
+    local name=$1 run=${2:-} q=""
+    [ "$CI_FORGE" = forgejo ] && q="name=$name&limit=50"
+    if [ -n "$run" ]; then
+        ci_api "actions/runs/$run/artifacts${q:+?$q}" | ci_norm artifacts
+    elif [ "$CI_FORGE" = github ]; then
+        ci_api "actions/artifacts?name=$name&per_page=10"
+    else
+        ci_api "actions/artifacts?$q" | ci_norm artifacts
+    fi
 }
 
 # a build.yml run's jobs, one line each (status, current step, time)
@@ -1696,12 +1863,12 @@ wait_build() {
     local slug=$1 id=$2 no=$3 start=$SECONDS shown=0 info st co lines jobs kextok
     say "build #$no of the checked-out commit is still running: waiting for it (Ctrl+C stops; 'rdna3vm update --no-wait' does not wait)"
     while :; do
-        info=$(gh_api "repos/$slug/actions/runs/$id" | python3 -c '
+        info=$(ci_run "$id" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
 print(r.get("status") or "-", r.get("conclusion") or "-")' 2>/dev/null) || info="unknown -"
         st=${info% *}; co=${info#* }
-        jobs=$(gh_api "repos/$slug/actions/runs/$id/jobs?per_page=50" 2>/dev/null) || jobs='{}'
+        jobs=$(ci_jobs "$id" 2>/dev/null) || jobs='{}'
         lines=$(printf '%s' "$jobs" | build_jobs_lines)
         # the job that uploads RDNA3Accel-kext: once it succeeded the
         # artifact is there; RADV / Metal / CTS jobs may run much longer
@@ -1723,7 +1890,7 @@ print(any(j.get("name") == "kext" and j.get("conclusion") == "success" for j in 
             warn "build #$no ended: $co"
             return 1
         fi
-        [ $(( SECONDS - start )) -lt 7200 ] || die "build #$no still not finished after 2 hours: check GitHub Actions"
+        [ $(( SECONDS - start )) -lt 7200 ] || die "build #$no still not finished after 2 hours: check $CI_NAME: $CI_PAGE"
         sleep 15
     done
 }
@@ -1743,13 +1910,13 @@ commit_unbuilt() {
 cmd__update() {
     local nowait=0
     [ "${1:-}" = --no-wait ] && nowait=1
-    local remote slug branch zip=$HOME/Downloads/RDNA3Accel-kext.zip runs run_id run_no sha art tmp
-    remote=$(git -C "$ROOT" remote get-url origin)
-    slug=$(printf '%s\n' "$remote" | sed -E 's#^.*github\.com[:/]+##; s#\.git$##')
+    local slug branch zip=$HOME/Downloads/RDNA3Accel-kext.zip runs run_id run_no sha art tmp
+    ci_setup
+    slug=$CI_REPO
     branch=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)
-    say "newest successful build of $slug ($branch)"
-    runs=$(gh_api "repos/$slug/actions/workflows/build.yml/runs?branch=$branch&status=success&per_page=1") ||
-        die "cannot list the workflow runs"
+    say "newest successful build of $slug on $CI_NAME ($branch)"
+    runs=$(ci_runs "$branch" 1 success) ||
+        die "cannot list the workflow runs of $slug on $CI_NAME ($CI_FORGE; CI_FORGE / FORGEJO_URL / FORGEJO_REPO in $CONF)"
     read -r run_id run_no sha < <(printf '%s' "$runs" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)["workflow_runs"]
@@ -1762,14 +1929,14 @@ print(*(r[0]["id"], r[0]["run_number"], r[0]["head_sha"]) if r else ("", "", "")
     head=$(git -C "$ROOT" rev-parse HEAD)
     if [ "$sha" != "$head" ]; then
         while :; do
-            newest=$(gh_api "repos/$slug/actions/workflows/build.yml/runs?branch=$branch&per_page=5" | python3 -c '
+            newest=$(ci_runs "$branch" 5 | python3 -c '
 import json, sys
 head = sys.argv[1]
 for r in json.load(sys.stdin)["workflow_runs"]:
     if r["head_sha"] == head:
         print(r["status"], r.get("conclusion") or "-", r["id"], r["run_number"])
         break' "$head") || newest=""
-            # just pushed: GitHub lists the run a few seconds later. A
+            # just pushed: the forge lists the run a few seconds later. A
             # [skip ci] or docs-only commit never gets one.
             [ -z "$newest" ] && [ "$nowait" = 0 ] && [ "$tries" -lt 8 ] &&
                 ! git -C "$ROOT" log -1 --format=%B | grep -q '\[skip ci\]' && ! commit_unbuilt &&
@@ -1783,7 +1950,7 @@ for r in json.load(sys.stdin)["workflow_runs"]:
         # this checkout's code comes from - wait for that one instead
         if [ -z "$newest" ]; then
             local cand c_st c_co c_id c_no c_sha
-            cand=$(gh_api "repos/$slug/actions/workflows/build.yml/runs?branch=$branch&per_page=10" | python3 -c '
+            cand=$(ci_runs "$branch" 10 | python3 -c '
 import json, sys
 for r in json.load(sys.stdin)["workflow_runs"]:
     print(r["status"], r.get("conclusion") or "-", r["id"], r["run_number"], r["head_sha"])') || cand=""
@@ -1817,14 +1984,14 @@ for r in json.load(sys.stdin)["workflow_runs"]:
     if [ "$(cat "$WORK/artifact-run" 2>/dev/null)" = "$run_id" ] && [ -f "$zip" ]; then
         ok "already downloaded: $zip"
     else
-        art=$(gh_api "repos/$slug/actions/runs/$run_id/artifacts" | python3 -c '
+        art=$(ci_artifacts RDNA3Accel-kext "$run_id" | python3 -c '
 import json, sys
 a = [x for x in json.load(sys.stdin)["artifacts"] if x["name"] == "RDNA3Accel-kext" and not x["expired"]]
 print(a[0]["id"] if a else "")')
         [ -n "$art" ] || die "build #$run_no has no RDNA3Accel-kext artifact"
         mkdir -p "$(dirname "$zip")" "$WORK"
         tmp=$zip.part
-        gh_api "repos/$slug/actions/artifacts/$art/zip" "$tmp" || die "download failed"
+        ci_api "actions/artifacts/$art/zip" "$tmp" || die "download failed ($CI_NAME artifact $art of build #$run_no)"
         python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).testzip()' "$tmp" ||
             die "the download is not a valid zip"
         mv "$tmp" "$zip"
@@ -1939,21 +2106,22 @@ cmd_result() {
 # cts-macos job (a run with cts), put
 # next to the bundle; the report fetches it in step cts (rdna3cts=1)
 cmd_cts() {
-    local zip=${1:-} remote slug run_no art st f
+    local zip=${1:-} slug run_no art st f rid
     mkdir -p "$WORK/share"
     if [ -z "$zip" ]; then
-        remote=$(git -C "$ROOT" remote get-url origin)
-        slug=$(printf '%s\n' "$remote" | sed -E 's#^.*github\.com[:/]+##; s#\.git$##')
-        say "newest rdna3-cts artifact of $slug (build.yml run with cts)"
-        read -r art run_no < <(gh_api "repos/$slug/actions/artifacts?name=rdna3-cts&per_page=10" | python3 -c '
+        ci_setup
+        slug=$CI_REPO
+        say "newest rdna3-cts artifact of $slug on $CI_NAME (build.yml run with cts)"
+        read -r art rid < <(ci_artifacts rdna3-cts | python3 -c '
 import json, sys
 a = [x for x in json.load(sys.stdin)["artifacts"] if not x["expired"]]
 print(*(a[0]["id"], a[0]["workflow_run"]["id"]) if a else ("", ""))')
-        [ -n "$art" ] || die "no rdna3-cts artifact (Actions -> build -> Run workflow with cts; it expires after 30 days)"
+        [ -n "$art" ] || die "no rdna3-cts artifact ($CI_PAGE -> build -> Run workflow with cts; it expires after 30 days)"
         zip=$WORK/rdna3-cts.zip
-        gh_api "repos/$slug/actions/artifacts/$art/zip" "$zip.part" || die "download failed"
+        ci_api "actions/artifacts/$art/zip" "$zip.part" || die "download failed ($CI_NAME artifact $art)"
         mv "$zip.part" "$zip"
-        ok "artifact of run $run_no"
+        run_no=$(ci_run "$rid" 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin).get("run_number") or "")' 2>/dev/null || true)
+        ok "artifact of run ${run_no:+#$run_no (id }$rid${run_no:+)}"
     fi
     [ -f "$zip" ] || die "no $zip"
     st=$(mktemp -d)
