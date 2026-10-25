@@ -12,3 +12,6 @@ reports/
 
 # graphify code graph (built per checkout, see CLAUDE.md "graphify")
 graphify-out
+
+# local secrets (FORGEJO_TOKEN)
+.env
