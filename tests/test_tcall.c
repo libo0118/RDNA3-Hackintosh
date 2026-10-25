@@ -17,9 +17,10 @@
  * a run going on while the drain cancels is waited for; a run that re-arms
  * itself during the drain (plain and ONCE) has that run cancelled and
  * reported (its reference goes back); a drain from inside the call's own
- * run does not wait for itself; a run that never ends is logged slow at
- * RD3_TCALL_SLOW_MS and given up at RD3_TCALL_GIVEUP_MS; after the free's
- * stop every arm is refused.
+ * run does not wait for itself; a stop never gives up (ECC review round 1:
+ * a give-up was a use-after-free): a run that takes 95 s is waited for,
+ * noted at RD3_TCALL_SLOW_MS and then every RD3_TCALL_REPORT_MS; after the
+ * free's stop every arm is refused, holding its count until it is done.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -51,7 +52,8 @@ struct sim {
     unsigned dispatch_at, end_at, rearm_at;   /* events (0 = none) */
     int rearm_on_end;    /* the run re-arms itself as it ends (read the stop flag before it was set) */
     int notes[8], nnotes;
-    unsigned note_ms[8];
+    uint64_t note_ms[8];
+    int32_t out_at_refuse;   /* outstanding seen by a refused arm before its unhold */
 };
 
 static int sim_enter(struct sim *s)
@@ -69,8 +71,11 @@ static int sim_enter(struct sim *s)
 /* the wrapper's arm: rd3_tcall_enter */
 static int sim_arm(struct sim *s)
 {
-    if (!rd3_tcall_st_arm(&s->st))
+    if (!rd3_tcall_st_arm(&s->st)) {
+        s->out_at_refuse = s->st.outstanding;   /* its count still held: the state is alive */
+        rd3_tcall_st_unhold(&s->st);
         return 1;
+    }
     const int was = sim_enter(s);
     rd3_tcall_st_entered(&s->st, was);
     return was;
@@ -139,7 +144,7 @@ static void op_nap(void *ctx, unsigned ms)
     }
 }
 
-static void op_note(void *ctx, int what, unsigned waited, int32_t left)
+static void op_note(void *ctx, int what, uint64_t waited, int32_t left)
 {
     struct sim *s = (struct sim *)ctx;
     (void)left;
@@ -153,7 +158,8 @@ static const struct rd3_tcall_ops OPS = { op_cancel, op_nap, op_note };
 
 static int drain(struct sim *s, int self, struct rd3_tcall_drain_res *r)
 {
-    return rd3_tcall_st_drain(&s->st, self, &OPS, s, RD3_TCALL_SLOW_MS, RD3_TCALL_GIVEUP_MS, r);
+    rd3_tcall_st_drain(&s->st, self, &OPS, s, RD3_TCALL_SLOW_MS, RD3_TCALL_REPORT_MS, r);
+    return 1;
 }
 
 static void reset(struct sim *s, int once)
@@ -196,8 +202,8 @@ int main(void)
     s.end_at = 7;
     CHECK(drain(&s, 0, &r) == 1, "running run drained");
     CHECK(r.cancelled == 0 && r.waited_ms >= 7 && !s.running && s.st.outstanding == 0,
-          "waited for the running run (waited %u, cancelled %u)", r.waited_ms, r.cancelled);
-    CHECK(!r.slow && s.nnotes == 0, "a short wait is not slow");
+          "waited for the running run (waited %u, cancelled %u)", (unsigned)r.waited_ms, r.cancelled);
+    CHECK(r.notes == 0 && s.nnotes == 0, "a short wait is not slow");
 
     /* dequeued, not yet in the trampoline: a counter bumped at entry would
      * read 0 here; the arm-time count waits for it */
@@ -207,7 +213,7 @@ int main(void)
     s.dispatch_at = 3;
     s.end_at = 9;
     CHECK(drain(&s, 0, &r) == 1 && r.waited_ms >= 9 && s.st.runs == 1 && s.st.outstanding == 0,
-          "the run between dequeue and trampoline waited for (waited %u, runs %u)", r.waited_ms, s.st.runs);
+          "the run between dequeue and trampoline waited for (waited %u, runs %u)", (unsigned)r.waited_ms, s.st.runs);
 
     /* a run that re-arms itself as it ends during the drain (it read the
      * stop flag before the caller set it): that new run is cancelled */
@@ -230,7 +236,7 @@ int main(void)
     s.rearm_at = 2;
     s.end_at = 6;
     CHECK(drain(&s, 0, &r) == 1 && r.cancelled == 1 && r.waited_ms >= 6 && s.st.outstanding == 0,
-          "plain re-arm while running (cancelled %u waited %u)", r.cancelled, r.waited_ms);
+          "plain re-arm while running (cancelled %u waited %u)", r.cancelled, (unsigned)r.waited_ms);
 
     /* ONCE re-armed while running: a reschedule, cancelled */
     reset(&s, 1);
@@ -263,24 +269,27 @@ int main(void)
     sim_tramp_enter(&s);
     sim_arm(&s);
     CHECK(drain(&s, 1, &r) == 1 && r.cancelled == 1 && r.waited_ms == 0 && s.st.outstanding == 1,
-          "self drain (cancelled %u, waited %u, out %d)", r.cancelled, r.waited_ms, s.st.outstanding);
+          "self drain (cancelled %u, waited %u, out %d)", r.cancelled, (unsigned)r.waited_ms, s.st.outstanding);
     CHECK(s.nnotes == 1 && s.notes[0] == RD3_TCALL_NOTE_SELF && s.st.self_drains == 1, "self drain noted");
 
-    /* a run that never ends: slow at RD3_TCALL_SLOW_MS (once), given up at
-     * RD3_TCALL_GIVEUP_MS */
+    /* a run that takes 95 s (a hang for a while): never given up, noted at
+     * RD3_TCALL_SLOW_MS, then every RD3_TCALL_REPORT_MS while it waits */
     reset(&s, 0);
     sim_arm(&s);
     sim_dequeue(&s);
     sim_tramp_enter(&s);
-    CHECK(drain(&s, 0, &r) == 0 && r.gaveup && r.slow, "a hung run: gave up");
-    CHECK(r.waited_ms >= RD3_TCALL_GIVEUP_MS && r.waited_ms < RD3_TCALL_GIVEUP_MS + 20, "gave up at %u ms",
-          r.waited_ms);
-    CHECK(s.nnotes == 2 && s.notes[0] == RD3_TCALL_NOTE_SLOW && s.notes[1] == RD3_TCALL_NOTE_GAVEUP,
-          "notes: slow then gave up (%d notes)", s.nnotes);
-    CHECK(s.note_ms[0] >= RD3_TCALL_SLOW_MS && s.note_ms[0] < RD3_TCALL_SLOW_MS + 20, "slow noted at %u ms",
-          s.note_ms[0]);
-    CHECK(s.st.slow == 1 && s.st.gaveup == 1 && s.st.outstanding == 1, "hung run still counted");
-    CHECK(s.now >= RD3_TCALL_GIVEUP_MS, "the naps took the time (%u ms)", s.now);
+    s.end_at = 95000;
+    CHECK(drain(&s, 0, &r) == 1 && !s.running && s.st.outstanding == 0, "a 95 s run waited for to its end");
+    CHECK(r.waited_ms >= 95000 && r.waited_ms < 95000 + 20, "waited %llu ms", (unsigned long long)r.waited_ms);
+    CHECK(s.nnotes == 4 && r.notes == 4, "4 notes (2 s, 32 s, 62 s, 92 s): %d", s.nnotes);
+    CHECK(s.notes[0] == RD3_TCALL_NOTE_SLOW && s.notes[1] == RD3_TCALL_NOTE_STILL && s.notes[3] == RD3_TCALL_NOTE_STILL,
+          "first note slow, the rest still-waiting");
+    for (int k = 0; k < 4 && k < s.nnotes; k++) {
+        const uint64_t want = RD3_TCALL_SLOW_MS + (uint64_t)k * RD3_TCALL_REPORT_MS;
+        CHECK(s.note_ms[k] >= want && s.note_ms[k] < want + 20, "note %d at %llu ms, want %llu", k,
+              (unsigned long long)s.note_ms[k], (unsigned long long)want);
+    }
+    CHECK(s.st.slow == 1, "one slow stop counted (%u)", s.st.slow);
 
     /* a run slower than the slow bound but ending: slow, drained */
     reset(&s, 0);
@@ -288,7 +297,7 @@ int main(void)
     sim_dequeue(&s);
     sim_tramp_enter(&s);
     s.end_at = RD3_TCALL_SLOW_MS + 500;
-    CHECK(drain(&s, 0, &r) == 1 && r.slow && !r.gaveup && s.st.outstanding == 0, "slow run drained");
+    CHECK(drain(&s, 0, &r) == 1 && r.notes == 1 && s.st.outstanding == 0, "slow run drained, noted once");
 
     /* the free's stop: every arm refused, nothing counted; a drain after it
      * still waits for the run going on */
@@ -299,6 +308,7 @@ int main(void)
     rd3_tcall_st_stop(&s.st);
     CHECK(sim_arm(&s) == 1 && !s.queued && s.st.refused == 1 && s.st.outstanding == 1,
           "arm after stop refused (refused %u, out %d)", s.st.refused, s.st.outstanding);
+    CHECK(s.out_at_refuse == 2, "a refused arm holds a count until its unhold (out %d then)", s.out_at_refuse);
     s.end_at = 5;
     s.rearm_on_end = 1;   /* the run's own re-arm is refused too */
     CHECK(drain(&s, 0, &r) == 1 && r.cancelled == 0 && s.st.refused == 2 && s.st.outstanding == 0,

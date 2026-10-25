@@ -21,6 +21,15 @@ and FAILS when an import
 kmutil or nm missing or failing, or a line of kmutil's output this script
 does not know, is an error too (exit 2): the guard never passes silently.
 
+CI's runner runs an older macOS than the driver also runs on (macOS 15 vs
+26), so its kmutil cannot see what the newer kernel moved to
+com.apple.kpi.private (the very bug). Every import is therefore also checked
+offline against xnu's own export lists of the newest macOS (tools/ci/data/
+xnu-<tag>-x86_64-{private,unsupported}-only.txt, made by
+gen_xnu_kpi_lists.py; xnu-12377.101.15 = macOS 26.4, the owner's VM): an
+import exported there only by com.apple.kpi.private FAILS, one exported only
+by com.apple.kpi.unsupported FAILS unless Info.plist declares it.
+
 The output format it reads (macOS 26.4.1, `kmutil libraries -p X --undef-symbols`):
 
     No variant specified, falling back to release
@@ -36,6 +45,8 @@ Usage:
     kmutil_kpi_guard.py --kmutil-out FILE --plist INFO.PLIST --undef NM_U_FILE   (captured output, the host test)
 Exit: 0 clean, 1 a symbol kmutil would refuse, 2 the check could not run.
 """
+import fnmatch
+import glob
 import os
 import plistlib
 import re
@@ -43,6 +54,8 @@ import subprocess
 import sys
 
 PRIVATE = "com.apple.kpi.private"
+UNSUPPORTED = "com.apple.kpi.unsupported"
+DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 RE_SINGLE = re.compile(r"^\s+(\S+) in (/.+?): (\S+) \(([^)]*)\)\s*$")
 RE_MULTI = re.compile(r"^\s+(\S+) in multiple:\s*$")
@@ -130,13 +143,63 @@ def verdicts(syms, undef, declared):
     return out
 
 
-def check(name, kmutil_text, nm_text, plist_path, warn_unresolved=False, expect_id=None):
+def _tag_key(tag):
+    return [int(x) if x.isdigit() else x for x in re.split(r"[.-]", tag)]
+
+
+def load_xnu_lists(data=DATA):
+    """(tag, private-only list, unsupported-only list) of the newest xnu in tools/ci/data; each list is
+    (exact names, patterns, exceptions ('!name'))"""
+    tags = set()
+    for p in glob.glob(os.path.join(data, "xnu-*-x86_64-private-only.txt")):
+        tags.add(os.path.basename(p)[:-len("-x86_64-private-only.txt")])
+    if not tags:
+        raise GuardError("no xnu export lists in %s (gen_xnu_kpi_lists.py makes them)" % data)
+    tag = max(tags, key=_tag_key)
+    lists = []
+    for kind in ("private-only", "unsupported-only"):
+        p = os.path.join(data, "%s-x86_64-%s.txt" % (tag, kind))
+        try:
+            with open(p) as f:
+                names = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+        except OSError as e:
+            raise GuardError("cannot read %s: %s" % (p, e))
+        if not names:
+            raise GuardError("%s is empty" % p)
+        exc = {n[1:] for n in names if n.startswith("!")}
+        names = [n for n in names if not n.startswith("!")]
+        lists.append(({n for n in names if "*" not in n}, [n for n in names if "*" in n], exc))
+    return tag, lists[0], lists[1]
+
+
+def in_list(sym, lst):
+    exact, pats, exc = lst
+    return sym not in exc and (sym in exact or any(fnmatch.fnmatchcase(sym, p) for p in pats))
+
+
+def xnu_verdicts(undef, declared, priv, unsup):
+    """[(kind, symbol)] by xnu's export lists: 'private' (only com.apple.kpi.private exports it there),
+    'unsupported' (only com.apple.kpi.unsupported, and Info.plist does not declare it)"""
+    out = []
+    for s in sorted(undef):
+        if in_list(s, priv):
+            out.append(("private", s))
+        elif in_list(s, unsup) and UNSUPPORTED not in declared:
+            out.append(("unsupported", s))
+    return out
+
+
+def check(name, kmutil_text, nm_text, plist_path, warn_unresolved=False, expect_id=None, xnu=None):
     """prints the result for one kext; returns 0 clean, 1 refused symbols"""
     syms, exts = parse_kmutil(kmutil_text)
     undef = parse_nm_undef(nm_text)
     pl, declared = declared_libs(plist_path)
+    tag, priv, unsup = xnu or load_xnu_lists()
     bid = expect_id or pl.get("CFBundleIdentifier")
-    if bid and exts and bid not in exts:
+    if not exts:
+        raise GuardError("%s: kmutil's output has no 'For extension <id>:' line: the listing is not this kext's"
+                         % name)
+    if bid and bid not in exts:
         raise GuardError("%s: kmutil listed %s, not the kext's own %s" % (name, ", ".join(exts), bid))
     if not syms:
         raise GuardError("%s: kmutil listed no symbol at all (%d imports by nm -u): its output was not read "
@@ -145,6 +208,7 @@ def check(name, kmutil_text, nm_text, plist_path, warn_unresolved=False, expect_
         raise GuardError("%s: nm -u listed no import at all: not a kext executable?" % name)
     bad = verdicts(syms, undef, declared)
     rc = 0
+    unresolved = []
     for kind, s, libs in bad:
         if kind == "private":
             print("kmutil_kpi_guard: FAIL %s: %s is exported only by com.apple.kpi.private: kmutil refuses the "
@@ -156,14 +220,31 @@ def check(name, kmutil_text, nm_text, plist_path, warn_unresolved=False, expect_
                   "does not declare" % (name, s, ", ".join(libs)))
             rc = 1
         elif warn_unresolved:
+            unresolved.append(s)
             print("kmutil_kpi_guard: WARN %s: %s is exported by no kext on this macOS (--warn-unresolved: a build "
                   "for another macOS)" % (name, s))
         else:
             print("kmutil_kpi_guard: FAIL %s: %s is exported by no kext on this macOS (kmutil leaves it out of its "
                   "listing; the link fails)" % (name, s))
             rc = 1
-    print("kmutil_kpi_guard: %s %s: %d imports, %d resolved by kmutil, libraries declared: %s"
-          % ("FAIL" if rc else "ok", name, len(undef), len(syms), ", ".join(sorted(declared)) or "none"))
+    if unresolved:
+        print("kmutil_kpi_guard: WARN %s: %d import(s) unresolved on this macOS (warned, not failed): %s"
+              % (name, len(unresolved), " ".join(unresolved)))
+    # the newest macOS, offline: what this runner's kmutil cannot see
+    reported = {s for kind, s, _ in bad if kind != "unresolved"}   # kmutil already failed it: not twice
+    for kind, s in xnu_verdicts(undef, declared, priv, unsup):
+        if s in reported:
+            continue
+        if kind == "private":
+            print("kmutil_kpi_guard: FAIL %s: %s is exported only by com.apple.kpi.private in %s (xnu's export "
+                  "lists): kmutil there refuses the kext" % (name, s, tag))
+            rc = 1
+        elif kind == "unsupported":
+            print("kmutil_kpi_guard: FAIL %s: %s is exported only by com.apple.kpi.unsupported in %s: declare "
+                  "com.apple.kpi.unsupported in Info.plist" % (name, s, tag))
+            rc = 1
+    print("kmutil_kpi_guard: %s %s: %d imports, %d resolved by kmutil, checked against %s too, libraries declared: "
+          "%s" % ("FAIL" if rc else "ok", name, len(undef), len(syms), tag, ", ".join(sorted(declared)) or "none"))
     return rc
 
 
@@ -214,6 +295,10 @@ def main(argv):
         return rc
     except GuardError as e:
         print("kmutil_kpi_guard: ERROR %s -- the KPI check did NOT run, the kexts are NOT verified" % e)
+        return 2
+    except Exception as e:  # noqa: BLE001 - any crash of the guard is "not verified", never a pass
+        print("kmutil_kpi_guard: ERROR %s: %s -- the KPI check did NOT run, the kexts are NOT verified"
+              % (type(e).__name__, e))
         return 2
 
 

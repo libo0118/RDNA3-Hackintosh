@@ -3819,6 +3819,7 @@ static void rd3AccelIopAsyncRun(void *p0, void *)
     __atomic_store_n(&e->busy, 0, __ATOMIC_RELEASE);
     _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(e->pipe, nullptr);
 }
+static unsigned rd3AccelIopAsyncCancelled(RD3IopAsync *e);
 static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSurface *s, const struct RD3KFlipRequest *f,
                                   unsigned long long seq)
 {
@@ -3838,7 +3839,20 @@ static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSu
     e->pipe = pipe; e->fb = fb; e->s = s; e->seq = seq;
     for (unsigned i = 0; i < sizeof *f; i++) ((volatile unsigned char *)&e->f)[i] = ((const unsigned char *)f)[i];
     __atomic_store_n(&e->busy, 1, __ATOMIC_RELEASE);
-    rd3_tcall_enter(e->call);
+    const int how = rd3_tcall_enter3(e->call);
+    if (how == RD3_TCALL_REFUSED) {
+        /* the stop began (rd3_tcall_free logged it): no run will give the surface back or clear busy;
+         * the caller copies instead, so this record is not on the panel (ECC review round 1) */
+        rd3AccelIopAsyncCancelled(e);
+        rd3AccelForgetShownIf(head, seq);
+        return false;
+    }
+    if (how == RD3_TCALL_MERGED && gIopFlipLogs < 8) {
+        /* busy kept a second flip out until the last run ended: a run still pending here means that
+         * guard broke; the pending run flips the fields set above */
+        gIopFlipLogs++;
+        ALOG("iop: async flip head %u merged into a run still pending (busy guard broken?)", head);
+    }
     return true;
 }
 /* an async IOP flip cancelled before it ran (rd3AccelIopStop): the surface reference it held given back */

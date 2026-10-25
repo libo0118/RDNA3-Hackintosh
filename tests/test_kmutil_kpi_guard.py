@@ -10,8 +10,15 @@ private) fails the accelerator until its Info.plist declares
 com.apple.kpi.unsupported; the kexts built today (no thread_call_cancel_wait,
 unsupported declared) pass; an import kmutil leaves out of its listing (no
 kext exports it: kmutil prints nothing for it) fails, or warns with
---warn-unresolved; an unknown output line, an empty listing, a missing kmutil
-and a missing nm -u list are errors (exit 2), never a pass.
+--warn-unresolved (listed and counted); an unknown output line, an empty
+listing, a missing 'For extension' line, a missing kmutil, a missing nm -u
+list and any crash of the guard are errors (exit 2), never a pass.
+
+ECC review round 1: the runner's kmutil (macOS 15) cannot see what macOS 26
+made private, so every import is also checked against xnu-12377.101.15's
+export lists (tools/ci/data): a private-only import fails even when the
+runner's kmutil resolves it to a public KPI; an unsupported-only one fails
+unless com.apple.kpi.unsupported is declared.
 """
 import os
 import plistlib
@@ -135,7 +142,52 @@ with tempfile.TemporaryDirectory() as tmp:
     check(rc == 2 and "not understood" in out and "NOT verified" in out, "unknown line: rc %d\n%s" % (rc, out))
     rc, out = cli("--kmutil-out", w("empty.txt", "No variant specified, falling back to release\n"), "--plist",
                   fb_pl, "--undef", undef_of(fb_new))
-    check(rc == 2 and "listed no symbol" in out, "empty listing: rc %d\n%s" % (rc, out))
+    check(rc == 2 and "no 'For extension" in out, "empty listing: rc %d\n%s" % (rc, out))
+    rc, out = cli("--kmutil-out", w("empty2.txt", "For arch x86_64:\n\tFor extension io.github.voten641.RDNA3Framebuffer:\n"),
+                  "--plist", fb_pl, "--undef", undef_of(fb_new))
+    check(rc == 2 and "listed no symbol" in out, "no symbol listed: rc %d\n%s" % (rc, out))
+    rc, out = cli("--kmutil-out", w("noext.txt", "\n".join(l for l in fb_new.splitlines() if "For extension" not in l)),
+                  "--plist", fb_pl, "--undef", undef_of(fb_new))
+    check(rc == 2 and "no 'For extension" in out, "missing For extension line: rc %d\n%s" % (rc, out))
+    rc, out = cli("--kmutil-out", w("fbx.txt", fb_new), "--plist", fb_pl, "--undef", os.path.join(tmp, "missing"))
+    check(rc == 2 and "NOT verified" in out, "a crash (missing file) is not verified: rc %d\n%s" % (rc, out))
+
+    # the macOS 26 gate: the runner's kmutil (older macOS) resolves the symbol to a public KPI, xnu's lists say
+    # private / unsupported only
+    old_fb = fb_txt.replace("_thread_call_cancel_wait in /System/Library/KernelCollections/BootKernelExtensions.kc: "
+                            "com.apple.kpi.private (25.4.0)",
+                            "_thread_call_cancel_wait in /System/Library/KernelCollections/BootKernelExtensions.kc: "
+                            "com.apple.kpi.mach (24.6.0)")
+    check(old_fb != fb_txt, "fixture edit for the 26 gate")
+    rc, out = cli("--kmutil-out", w("fb15.txt", old_fb), "--plist", fb_pl, "--undef", undef_of(old_fb))
+    check(rc == 1 and "_thread_call_cancel_wait is exported only by com.apple.kpi.private in xnu-12377" in out,
+          "26 gate, private-only: rc %d\n%s" % (rc, out))
+    i = acc_new.index("\t\t_kauth_cred_issuser in multiple:")
+    j = acc_new.index("\t\t_current_task")
+    old_acc = acc_new[:i] + ("\t\t_kauth_cred_issuser in /System/Library/KernelCollections/BootKernelExtensions.kc: "
+                             "com.apple.kpi.bsd (24.6.0)\n") + acc_new[j:]
+    rc, out = cli("--kmutil-out", w("acc15.txt", old_acc), "--plist", acc_pl_old, "--undef", undef_of(old_acc))
+    check(rc == 1 and "_kauth_cred_issuser is exported only by com.apple.kpi.unsupported in xnu-12377" in out,
+          "26 gate, unsupported-only undeclared: rc %d\n%s" % (rc, out))
+    rc, out = cli("--kmutil-out", w("acc15b.txt", old_acc), "--plist", acc_pl_new, "--undef", undef_of(old_acc))
+    check(rc == 0, "26 gate, unsupported declared: rc %d\n%s" % (rc, out))
+    # --warn-unresolved lists and counts
+    und2 = undef_of(fb_new, extra=["__Zfoo1", "__Zfoo2"])
+    rc, out = cli("--warn-unresolved", "--kmutil-out", w("fbu3.txt", fb_new), "--plist", fb_pl, "--undef", und2)
+    check(rc == 0 and "2 import(s) unresolved on this macOS (warned, not failed): __Zfoo1 __Zfoo2" in out,
+          "unresolved count: rc %d\n%s" % (rc, out))
+    # a 26-private import this runner cannot resolve at all: --warn-unresolved warns, the 26 gate still fails
+    und3 = undef_of(fb_new, extra=["_thread_call_cancel_wait"])
+    noline = fb_new.replace([l for l in fb_txt.splitlines() if "_thread_call_cancel_wait" in l][0] + "\n", "")
+    rc, out = cli("--warn-unresolved", "--kmutil-out", w("fbu4.txt", noline), "--plist", fb_pl, "--undef", und3)
+    check(rc == 1 and "WARN" in out and "only by com.apple.kpi.private in xnu-12377" in out,
+          "unresolved here, private on 26: rc %d\n%s" % (rc, out))
+    # no lists: an error
+    try:
+        g.load_xnu_lists(tmp)
+        check(False, "load_xnu_lists without lists did not raise")
+    except g.GuardError:
+        pass
     rc, out = cli("--kmutil-out", w("other.txt", acc_new), "--plist", fb_pl, "--undef", undef_of(acc_new))
     check(rc == 2 and "not the kext's own" in out, "another kext's listing: rc %d\n%s" % (rc, out))
     rc, out = cli("--kmutil-out", w("fbe.txt", fb_new), "--plist", fb_pl, "--undef", w("none.txt", "\n"))
@@ -150,6 +202,48 @@ with tempfile.TemporaryDirectory() as tmp:
     check(rc == 2 and "cannot run kmutil" in out and "NOT verified" in out, "no kmutil: rc %d\n%s" % (rc, out))
     rc, out = cli()
     check(rc == 2 and "no kext given" in out, "no argument: rc %d\n%s" % (rc, out))
+
+# the generator on a tiny config/: aliases, patterns, the x86_64 files, a public exception to a private pattern
+import importlib.util  # noqa: E402
+spec = importlib.util.spec_from_file_location("gen", os.path.join(ROOT, "tools", "ci", "gen_xnu_kpi_lists.py"))
+gen = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gen)
+with tempfile.TemporaryDirectory() as tmp:
+    cfg = os.path.join(tmp, "config")
+    os.makedirs(cfg)
+    files = {"Mach.exports": "_thread_call_cancel\n_pub_alias:_pub_alias_external\n",
+             "IOKit.x86_64.exports": "__ZN5IOCPU5startEv\n# a comment\n",
+             "BSDKernel.exports": "_kauth_cred_get\n", "Libkern.exports": "_OSAddAtomic\n",
+             "MACFramework.exports": "_mac_x\n",
+             "Private.exports": "_thread_call_cancel_wait\n_kauth_cred_issuser\n_pub_alias\n",
+             "Private.x86_64.MacOSX.exports": "__ZN5IOCPU*\n",
+             "Unsupported.exports": "_kauth_cred_issuser\n_unsup_x : _unsup_x_impl\n"}
+    for k, v in files.items():
+        with open(os.path.join(cfg, k), "w") as f:
+            f.write(v)
+    import contextlib  # noqa: E402
+    import io  # noqa: E402
+    with contextlib.redirect_stdout(io.StringIO()):
+        gen.main(["--tag", "xnu-1.2.3", "--src", cfg, "--out", tmp])
+    t2, p2, u2 = g.load_xnu_lists(tmp)
+    check(t2 == "xnu-1.2.3", "generated tag %s" % t2)
+    check(g.in_list("_thread_call_cancel_wait", p2) and not g.in_list("_kauth_cred_issuser", p2) and
+          not g.in_list("_pub_alias", p2), "generated private-only: %r" % (p2,))
+    check(g.in_list("__ZN5IOCPU4stopEv", p2) and not g.in_list("__ZN5IOCPU5startEv", p2),
+          "private pattern with a public exception: %r" % (p2,))
+    check(g.in_list("_kauth_cred_issuser", u2) and g.in_list("_unsup_x", u2) and not g.in_list("_thread_call_cancel", u2),
+          "generated unsupported-only: %r" % (u2,))
+
+# the committed lists: the two symbols of card run 2026-10-25b, and the public KPIs rdna3_tcall.h uses in neither
+tag, priv, unsup = g.load_xnu_lists()
+check(tag.startswith("xnu-12377."), "lists of macOS 26 (xnu-12377): %s" % tag)
+check(g.in_list("_thread_call_cancel_wait", priv), "thread_call_cancel_wait private-only")
+check(g.in_list("_kauth_cred_issuser", unsup) and not g.in_list("_kauth_cred_issuser", priv),
+      "kauth_cred_issuser unsupported-only")
+for pub in ("_thread_call_cancel", "_thread_call_allocate_with_options", "_thread_call_enter_delayed",
+            "_thread_call_free", "_current_thread", "_IOSleep", "_IOLog", "_IOMalloc", "_kauth_cred_get"):
+    check(not g.in_list(pub, priv) and not g.in_list(pub, unsup), "%s is public in %s" % (pub, tag))
+check(len(priv[0]) > 1000 and len(unsup[0]) > 100, "list sizes %d / %d" % (len(priv[0]), len(unsup[0])))
 
 if fails:
     for f in fails:

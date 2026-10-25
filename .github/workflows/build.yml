@@ -128,7 +128,9 @@ jobs:
       # only by com.apple.kpi.private); the build never noticed. Each kext
       # kmutil links on its own (the Auxiliary KC) must bind every import to
       # a library its Info.plist declares, never to kpi.private, against this
-      # runner's kernel collections. No kmutil = an error, not a pass.
+      # runner's kernel collections, and (this runner being macOS 15) never to
+      # what xnu-12377 (macOS 26.4) exports only from kpi.private or, if not
+      # declared, kpi.unsupported (tools/ci/data). No kmutil = an error, not a pass.
       - name: KPI guard (kmutil libraries) for the kexts kmutil links
         run: |
           python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Framebuffer.kext build/RDNA3Accelerator.kext \

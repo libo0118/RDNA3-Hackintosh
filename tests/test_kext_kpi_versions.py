@@ -15,8 +15,13 @@ does not enforce the KPI exports. So:
   - a kext that calls a com.apple.kpi.unsupported symbol (kauth_cred_issuser:
     unsupported or private on 26) declares com.apple.kpi.unsupported;
   - every com.apple.kpi.* stays at 19.0 or newer.
-The built binaries are checked on CI's macOS runner by
-tools/ci/kmutil_kpi_guard.py (kmutil libraries).
+The C symbols come from xnu-12377's (macOS 26.4) own export lists in
+tools/ci/data/ (tools/ci/gen_xnu_kpi_lists.py; ECC review round 1: CI's
+macOS 15 runner cannot see what 26 made private), so any private-only or
+unsupported-only call is caught here on Linux too, not only
+thread_call_cancel_wait / kauth_cred_issuser. The built binaries are checked
+on CI's macOS runner by tools/ci/kmutil_kpi_guard.py (kmutil libraries, nm -u
+and the same lists).
 """
 import glob
 import os
@@ -34,10 +39,23 @@ KEXTS = {
     "agdc/Info.plist": ["agdc/*.cpp", "agdc/*.h"],
 }
 COMMON = ["common/*.h"]
-# macOS 26.4.1 (kmutil libraries): exported only by com.apple.kpi.private
+# macOS 26.4.1 (kmutil libraries): exported only by com.apple.kpi.private; the lists must hold these
 PRIVATE_ONLY = ("thread_call_cancel_wait",)
 # exported by com.apple.kpi.unsupported (and private): the kext must declare unsupported
 NEEDS_UNSUPPORTED = ("kauth_cred_issuser",)
+DATA = os.path.join(ROOT, "tools", "ci", "data")
+
+
+def xnu_c_names(kind):
+    """the C function names (no C++ manglings, no patterns) of the newest xnu list of that kind"""
+    paths = sorted(glob.glob(os.path.join(DATA, "xnu-*-x86_64-%s.txt" % kind)))
+    if not paths:
+        return None, set()
+    tag_of = lambda p: [int(x) if x.isdigit() else x for x in re.split(r"[.-]", os.path.basename(p))]  # noqa: E731
+    p = max(paths, key=tag_of)
+    with open(p) as f:
+        names = [l.strip() for l in f if l.strip() and l[0] not in "#!"]
+    return os.path.basename(p), {n[1:] for n in names if n.startswith("_") and not n.startswith("__Z") and "*" not in n}
 
 
 def code_of(path):
@@ -49,13 +67,29 @@ def code_of(path):
     return re.sub(r'"(\\.|[^"\\\n])*"', '""', txt)
 
 
-def calls(paths, sym):
-    rx = re.compile(r"\b%s\s*\(" % re.escape(sym))
-    return [os.path.relpath(p, ROOT) for p in paths if rx.search(code_of(p))]
+def called_names(paths):
+    """{identifier followed by '(' : [files]} in the code (comments and strings out)"""
+    out = {}
+    for p in paths:
+        for m in re.finditer(r"\b([A-Za-z_]\w*)\s*\(", code_of(p)):
+            out.setdefault(m.group(1), set()).add(os.path.relpath(p, ROOT))
+    return out
 
 
 def main():
     bad = []
+    plist_priv, priv = xnu_c_names("private-only")
+    plist_uns, uns = xnu_c_names("unsupported-only")
+    if not priv or not uns:
+        bad.append("no xnu export lists in tools/ci/data (tools/ci/gen_xnu_kpi_lists.py makes them)")
+    for sym in PRIVATE_ONLY:
+        if priv and sym not in priv:
+            bad.append("%s does not list %s as private-only" % (plist_priv, sym))
+    for sym in NEEDS_UNSUPPORTED:
+        if uns and sym not in uns:
+            bad.append("%s does not list %s as unsupported-only" % (plist_uns, sym))
+    priv = priv | set(PRIVATE_ONLY)
+    uns = uns | set(NEEDS_UNSUPPORTED)
     common = sorted(p for g in COMMON for p in glob.glob(os.path.join(ROOT, g)))
     for rel, globs in sorted(KEXTS.items()):
         with open(os.path.join(ROOT, rel), "rb") as f:
@@ -75,21 +109,21 @@ def main():
         srcs = sorted(p for g in globs for p in glob.glob(os.path.join(ROOT, g))) + common
         if not srcs:
             bad.append("%s: no sources found for it (the table in this test is stale)" % rel)
-        for sym in PRIVATE_ONLY:
-            for src in calls(srcs, sym):
+        used = called_names(srcs)
+        for sym in sorted(priv & set(used)):
+            for src in sorted(used[sym]):
                 bad.append("%s calls %s: macOS 26 exports it from com.apple.kpi.private only, kmutil refuses "
-                           "the kext (use common/rdna3_tcall.h)" % (src, sym))
-        for sym in NEEDS_UNSUPPORTED:
-            users = calls(srcs, sym)
-            if users and "com.apple.kpi.unsupported" not in libs:
+                           "the kext (thread_call_cancel_wait: use common/rdna3_tcall.h)" % (src, sym))
+        if "com.apple.kpi.unsupported" not in libs:
+            for sym in sorted(uns & set(used)):
                 bad.append("%s: %s calls %s but com.apple.kpi.unsupported is not in OSBundleLibraries"
-                           % (rel, ", ".join(users), sym))
+                           % (rel, ", ".join(sorted(used[sym])), sym))
     if bad:
         for b in bad:
             print("test_kext_kpi_versions: FAIL " + b)
         sys.exit(1)
-    print("test_kext_kpi_versions: ok (%d kexts: KPI >= %d.0, no private-only symbol, unsupported declared where "
-          "used)" % (len(KEXTS), MIN_MAJOR))
+    print("test_kext_kpi_versions: ok (%d kexts: KPI >= %d.0, none of %s's %d private-only calls, unsupported "
+          "declared where one of its %d is used)" % (len(KEXTS), MIN_MAJOR, plist_priv, len(priv), len(uns)))
 
 
 if __name__ == "__main__":

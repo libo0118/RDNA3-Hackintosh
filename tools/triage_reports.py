@@ -2905,52 +2905,74 @@ def fb_class_rows(klog):
     return out
 
 
-# common/rdna3_tcall.h (card run 2026-10-25b, DRIVER-PLAN N47): a thread call's stop that waited long, gave up,
-# or ran from inside the call's own run; the names are the kexts' ("fb.vbl", "accel.iop_async", "core.hotplugTick")
-TCALL_LOG_RE = re.compile(r"RDNA3-tcall: (\S+): (the stop waits for (\d+) run\(s\) still outstanding after (\d+) ms"
-                          r"|the stop GAVE UP after (\d+) ms with (\d+) run\(s\) outstanding"
-                          r"|stopped from inside its own run|thread_call_free refused \d+ times|drained after (\d+) ms)")
+# common/rdna3_tcall.h (card run 2026-10-25b, DRIVER-PLAN N47; ECC review round 1): a thread call's stop that
+# waited long (it never gives up), ran from inside the call's own run, a free refused there, an enter refused during
+# the stop, a failed allocation; the names are the kexts' ("fb.vbl", "accel.iop_async", "core.hotplugTick")
+TCALL_LOG_RE = re.compile(r"RDNA3-tcall: (\S+): (the stop has waited (\d+) ms for (\d+) run\(s\) still outstanding"
+                          r"|drained after (\d+) ms|stopped from inside its own run"
+                          r"|FAIL: freed from inside its own run|thread_call_free refused (\d+) times"
+                          r"|an enter during its stop was refused|thread call allocation failed \(([^)]*)\))")
 
 
 def tcall_rows(klog):
-    """[(level, label, text)] per thread call whose stop the kernel log names: FAIL when it gave up (the call was
-    left allocated, a run may still touch a stopped object), WARN when it waited past the slow bound or stopped
-    from inside its own run; nothing when no stop was slow"""
+    """[(level, label, text)] per thread call the kernel log (archive + serial: kernel_text) names: FAIL for a
+    failed allocation, a free refused inside its own run, or a stop still waiting (30 s or more) when the log ends;
+    WARN for a slow stop that drained, a stop from inside its own run, thread_call_free refusing; INFO for enters
+    refused during a stop and when there is no kernel log at all. The counts are log lines (rate limited), so
+    "at least"."""
     label = "thread call stop"
+    if not (klog or "").strip():
+        return [("INFO", label, "no kernel log (20-log-rdna3.txt, serial log): thread call stops not known")]
     seen = {}
-    for m in TCALL_LOG_RE.finditer(klog or ""):
+    for m in TCALL_LOG_RE.finditer(klog):
         name, what = m.group(1), m.group(2)
-        e = seen.setdefault(name, {"slow": 0, "gaveup": 0, "self": 0, "free": 0, "drained": [], "max_out": 0,
-                                   "gave_ms": 0})
-        if what.startswith("the stop waits"):
-            e["slow"] += 1
-            e["max_out"] = max(e["max_out"], int(m.group(3)))
-        elif what.startswith("the stop GAVE UP"):
-            e["gaveup"] += 1
-            e["gave_ms"] = int(m.group(5))
-            e["max_out"] = max(e["max_out"], int(m.group(6)))
+        e = seen.setdefault(name, {"waits": 0, "max_ms": 0, "max_out": 0, "pending": False, "drained": [],
+                                   "self": 0, "selffree": 0, "free": 0, "refused": 0, "alloc": []})
+        if what.startswith("the stop has waited"):
+            e["waits"] += 1
+            e["max_ms"] = max(e["max_ms"], int(m.group(3)))
+            e["max_out"] = max(e["max_out"], int(m.group(4)))
+            e["pending"] = True
+        elif what.startswith("drained after"):
+            e["drained"].append(int(m.group(5)))
+            e["pending"] = False
         elif what.startswith("stopped from inside"):
             e["self"] += 1
-        elif what.startswith("thread_call_free"):
-            e["free"] += 1
+        elif what.startswith("FAIL: freed"):
+            e["selffree"] += 1
+        elif what.startswith("thread_call_free refused"):
+            e["free"] = max(e["free"], int(m.group(6)))
+        elif what.startswith("an enter during"):
+            e["refused"] += 1
         else:
-            e["drained"].append(int(m.group(7)))
+            e["alloc"].append(m.group(7))
     out = []
     for name in sorted(seen):
         e = seen[name]
-        if e["gaveup"] or e["free"]:
-            out.append(("FAIL", label, "%s: the stop gave up %d time(s) (after %d ms, %d run(s) still outstanding)%s: "
-                        "a run of it never ended (a hang in its function, or a lock the stop holds), the thread call "
-                        "was left allocated" % (name, e["gaveup"], e["gave_ms"], e["max_out"],
-                                                ", thread_call_free refused %d time(s)" % e["free"] if e["free"] else "")))
-        elif e["slow"]:
-            out.append(("WARN", label, "%s: the stop waited past 2 s %d time(s) (%d run(s) outstanding), drained after "
-                        "%s ms: a slow run of its function at the stop" % (
-                            name, e["slow"], e["max_out"],
-                            "/".join(str(x) for x in e["drained"]) if e["drained"] else "?")))
+        for why in e["alloc"]:
+            out.append(("FAIL", label, "%s: thread call allocation failed (%s): the work it runs never happens"
+                        % (name, why)))
+        if e["selffree"]:
+            out.append(("FAIL", label, "%s: freed from inside its own run at least %d time(s): refused, left "
+                        "allocated (a driver bug in the stop path)" % (name, e["selffree"])))
+        if e["waits"] and e["pending"] and e["max_ms"] >= 30000:
+            out.append(("FAIL", label, "%s: a stop still waiting %d s for %d run(s) when the log ends (at least %d "
+                        "log line(s)): a run of it hangs (its function, or a lock the stopping thread holds)"
+                        % (name, e["max_ms"] // 1000, e["max_out"], e["waits"])))
+        elif e["waits"]:
+            out.append(("WARN", label, "%s: the stop waited at least %.1f s for %d run(s) (at least %d log line(s)), "
+                        "drained after %s ms: a slow run of its function at the stop" % (
+                            name, e["max_ms"] / 1000.0, e["max_out"], e["waits"],
+                            "/".join(str(x) for x in e["drained"]) if e["drained"] else "? (no drained line)")))
         if e["self"]:
-            out.append(("WARN", label, "%s: stopped %d time(s) from inside its own run (not waited for: "
+            out.append(("WARN", label, "%s: stopped at least %d time(s) from inside its own run (not waited for: "
                         "thread_call_cancel_wait would have panicked there)" % (name, e["self"])))
+        if e["free"]:
+            out.append(("WARN", label, "%s: thread_call_free refused at least %d times at its free (a queued run "
+                        "or a ONCE reschedule kept coming back)" % (name, e["free"])))
+        if e["refused"]:
+            out.append(("INFO", label, "%s: at least %d enter(s) refused during its stop (a kick racing the stop; "
+                        "no run queued)" % (name, e["refused"])))
     return out
 
 
@@ -3305,7 +3327,6 @@ def present_mode_lines(path, txt="", args="", host=None):
     # useIOP / useIOP_onAMD preferences WindowServer started with
     prefs_rows, iop_amd = cd_prefs_rows(txt, args, read_tar_member(path, "19-coredisplay-prefs.txt"))
     out.extend(gpu_vendor_rows(cd, planes if ok else None, iop_amd, iop_prefs_off(args), klog))
-    out.extend(tcall_rows(klog))
     out.extend(prefs_rows)
     out.extend(iop_log_rows(cd))
     out.extend(pairing_rows(read_tar_member(path, PAIRING_MEMBER)))
@@ -4823,6 +4844,10 @@ def main():
             print("   %s swap copy: %s" % (lv, t))
             failed = failed or lv == "FAIL"
         klog = kernel_text(p, d)
+        # common/rdna3_tcall.h: thread call stops (card run 2026-10-25b, DRIVER-PLAN N47)
+        for lv, label, t in tcall_rows(klog):
+            print("   %s %s: %s" % (lv, label, t))
+            failed = failed or lv == "FAIL"
         for lv, t in gen_verdict(a3_counters(ttxt) if ttxt else {}, accel_current(klog)):
             print("   %s swap gen: %s" % (lv, t))
             failed = failed or lv == "FAIL"
