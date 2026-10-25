@@ -1,4 +1,4 @@
-"""Triage rows of DRIVER-PLAN N48 (Metal plugin: blit copies, buffer -> multisample upload, [[color(n)]] framebuffer fetch).
+"""Triage rows of DRIVER-PLAN N48 / N52 (Metal plugin: blit copies, buffer -> multisample upload, multisample -> buffer download, [[color(n)]] framebuffer fetch).
 Read from 26-log-metal-plugin.txt (every process that loaded the plugin; lines `... Name[pid:tid] (RDNA3MTLDriver) NVMTL: msg`).
 Kept in a module of its own so that tools/triage_reports.py only gains one call. The lines are the plugin's
 (metal/plugin/nvmtl_vk.c, NVMTLObjects.m); docs/AFTER-TESTS.md "Metal plugin: blit copies ..." explains them."""
@@ -6,12 +6,14 @@ import collections
 import re
 
 _LINE = re.compile(r"\b([^\s\[\]]+)\[(\d+):([0-9a-f]+)\] \(RDNA3MTLDriver\) NVMTL: (.*)$")
-_REFUSED = re.compile(r"^(copy_image_to_buffer|copy_buffer_to_image|blit copyFromTexture:toBuffer|blit copyFromBuffer:toTexture|msupload): REFUSED - (.*)$")
+_REFUSED = re.compile(r"^(copy_image_to_buffer|copy_buffer_to_image|blit copyFromTexture:toBuffer|blit copyFromBuffer:toTexture|msupload|msdl): REFUSED - (.*)$")
 _BRACKET = re.compile(r"^copy_image_to_buffer: (?:\(special copy\) )?(recording|layout transition recorded|vkCmdCopyImageToBuffer recorded)")
 _BRACKET_B2I = re.compile(r"^copy_buffer_to_image: (?:\(special copy\) )?(recording|vkCmdCopyBufferToImage recorded)")
 _MSU = re.compile(r"^msupload: buffer -> (\d+)-sample image (\d+)x(\d+) \(vk format (\d+) via view (\d+), mode (\d+)\).*?\[(\d+) so far\]")
 _FBF = re.compile(r"^vk: fbfetch: fragment module #(\d+) declares .*? and (READS them|no read is left \(folded away\));.*?: (.*?) "
                   r"\[(?:(\d+) served / )?(\d+) read / (\d+) declared-only / (\d+) zeroed / (\d+) zeroing failed so far\]")
+# multisample texture -> buffer (N52): the first 8 and every 1024th "msdl: N-sample image WxH -> buffer (vk format F, aspect A via view V, mode M): ... [K so far]"
+_MSDL = re.compile(r"^msdl: (\d+)-sample image (\d+)x(\d+) -> buffer \(vk format (\d+), aspect (\d+) via view (\d+), mode (\d+)\).*?\[(\d+) so far\]")
 # the implemented path (N48 follow-up): per-pass sets, draws, restarts, and every way it refuses. The plugin's log keeps only the first 8
 # lines of each format literal, so the TOTALS are in the SUMMARY line (key=value; the newest per process wins) and every kind of event has a literal
 # of its own (metal/plugin/nvmtl_log_cap.h, nvmtl_fbfetch_plan.h).
@@ -47,6 +49,8 @@ def n48_plugin_rows(pluginlog=""):
     refused = collections.Counter()         # (process, call, reason) -> lines
     msu = {}                                 # (process, samples, fmt) -> highest running count
     msu_failed = []
+    msdl = {}                                # (process, samples, fmt, aspect) -> highest running count
+    msdl_failed = []
     fbf_read, fbf_gone = {}, {}              # process -> highest module number
     fbf_impl, fbf_zmod = {}, {}              # process -> highest module number: implemented / zeroed (the module line)
     fbf_unsup = collections.Counter()        # reason -> process -> lines (real limits; "pipeline lacks the attachment" is normal)
@@ -74,6 +78,14 @@ def n48_plugin_rows(pluginlog=""):
         if m:
             k = (proc, int(m.group(1)), int(m.group(4)))
             msu[k] = max(msu.get(k, 0), int(m.group(7)))
+            continue
+        m = _MSDL.match(msg)
+        if m:
+            k = (proc, int(m.group(1)), int(m.group(4)), int(m.group(5)))
+            msdl[k] = max(msdl.get(k, 0), int(m.group(8)))
+            continue
+        if msg.startswith("msdl: FAILED"):
+            msdl_failed.append("%s: %s" % (proc, msg[:140]))
             continue
         if msg.startswith("msupload: ") and not msg.startswith(("msupload: buffer ->", "msupload: pass built")) and re.search(
                 r"^msupload: (FAILED\b|vkCreate\w*|no attachment view|more than)|->\s*-?\d+", msg):
@@ -126,6 +138,13 @@ def n48_plugin_rows(pluginlog=""):
                      "; ".join("%s %d-sample vk format %d: %d" % (p, s, f, n) for (p, s, f), n in sorted(msu.items())[:4])))
     if msu_failed:
         rows.append(("WARN", "multisample upload", "%d failure line(s), e.g. %s" % (len(msu_failed), msu_failed[0])))
+    if msdl:
+        rows.append(("INFO", "multisample download",
+                     "multisample texture -> buffer copies ran through the plugin's own compute pass (Vulkan has no such copy; before N52 the copy was dropped and "
+                     "Chess's stencil resolve read uninitialised memory; aspect 1 colour / 2 depth / 4 stencil): " +
+                     "; ".join("%s %d-sample vk format %d aspect %d: %d" % (p, s_, f, a, n) for (p, s_, f, a), n in sorted(msdl.items())[:4])))
+    if msdl_failed:
+        rows.append(("WARN", "multisample download", "%d failure line(s), e.g. %s" % (len(msdl_failed), msdl_failed[0])))
     if fbf_read:
         rows.append(("WARN", "framebuffer fetch",
                      "fragment module(s) READ [[color(n)]] (binding 192+n) from an UNDEFINED descriptor in %s (%s): the zeroing failed (see the ZEROING FAILED line), "

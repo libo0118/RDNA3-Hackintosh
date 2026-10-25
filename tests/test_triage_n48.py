@@ -64,6 +64,20 @@ check(rows_of(L("Chess", 3005, "3b4f", "msupload: pass built for view format 44 
 rr = rows_of(L("Chess", 3005, "3b4f", "msupload: REFUSED - a render pass is open [1 refused, 0 failed, 0 done so far]"))
 check(list(rr) == ["plugin copy refused"], "msupload REFUSED: %r" % rr)
 
+# multisample texture -> buffer (N52; line formats of nvmtl_vk.c: nvmtl_vk_cmd_copy_msimage_to_buffer, nvmtl_msd_fail)
+dl = L("Chess", 3005, "3b4f", "msdl: 4-sample image 971x680 -> buffer (vk format 130, aspect 4 via view 130, mode 0): region (0,0) 971x680 to buffer offset 0 row 3884 B, 660280 word(s) in 10317x1 group(s) [3 so far]")
+rr = rows_of(dl + L("Chess", 3005, "3b4f", "msdl: pass built for the unsigned-integer (stencil, R8_UINT ...) module") + L("Chess", 3005, "3b4f", "msdl: descriptor pool 1 opened (256 sets each)"))
+check(list(rr) == ["multisample download"] and rr["multisample download"][0] == "INFO" and "Chess 4-sample vk format 130 aspect 4: 3" in rr["multisample download"][2], "msdl INFO: %r" % rr)
+for line in ("msdl: FAILED - vkCreateComputePipelines (-3) [1 failed, 0 refused, 0 done so far]",
+             "msdl: FAILED - descriptor set allocation (-1000069000) [2 failed, 0 refused, 5 done so far]",
+             "msdl: FAILED - no sampled view of format 130 aspect 4 over the format-130 image (0) [1 failed, 0 refused, 0 done so far]"):
+    rr = [x for x in t48.n48_plugin_rows(dl + L("Chess", 3005, "3b4f", line)) if x[0] == "WARN"]
+    check(len(rr) == 1 and rr[0][1] == "multisample download", "msdl failure is a WARN: %s -> %r" % (line, rr))
+for line in ("msdl: REFUSED - a render pass is open [1 refused, 0 failed, 0 done so far]",
+             "copy_image_to_buffer: REFUSED - a 4-sample image: the 24-bit depth of this format has no byte layout in a Metal blit (vk format 129, type 4, aspect option 2, region (0,0) 8x8, row 32 B, buffer offset 0 of 256) [1 refused, 0 failed so far]"):
+    rr = rows_of(L("Chess", 3005, "3b4f", line))
+    check(list(rr) == ["plugin copy refused"], "msdl refusal: %s -> %r" % (line[:50], rr))
+
 # framebuffer fetch
 FB = ("vk: fbfetch: fragment module #%d declares [[color(n)]] subpass inputs 0x1 (binding 192+n) and %s; pipeline has 1 colour attachment(s), 1 sample(s); "
       "the set layout has no such binding and no render pass an input attachment: %s [%d read / %d declared-only / %d zeroed / %d zeroing failed so far]")
