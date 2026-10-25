@@ -715,12 +715,17 @@ cmd_window() {
     local sm
     sm=$(smbios_want "${RDNA3VM_BOOTARGS:-}") || exit 1
     # verbose boot without our drivers' levels: a hang shows where it stops
-    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --boot-args "$BASE_ARGS -v keepsyms=1 debug=0x100 amfi=0x80$extra" \
+    # serial=3: the kernel's log also goes to the serial port, kept in $WORK/reports (a hang before the
+    # console, e.g. right after EXITBS:START, shows only there)
+    sudo env RDNA3VM_DIR="$WORK" bash "$SELF" _oc --boot-args "$BASE_ARGS $DEBUG_ARGS$extra" \
         --resolution "$res" ${sm:+--smbios "$sm"} >/dev/null
     qemu_common
     [ -f "$INSTALLER" ] && QARGS+=(-drive id=InstallMedia,if=none,format=raw,file="$INSTALLER"
                                   -device ide-hd,bus=sata.3,drive=InstallMedia)
     QARGS+=(-device usb-kbd,bus=xhci.0 -device usb-tablet,bus=xhci.0 -device vmware-svga)
+    local wserial
+    wserial=$WORK/reports/serial-window-$(date +%Y%m%d-%H%M%S).log
+    mkdir -p "$WORK/reports" && QARGS+=(-serial "file:$wserial") && echo "  serial log: $wserial"
     # the guest's picture scaled to the window (any window size, the whole
     # desktop visible); GTK only - a QEMU without it keeps its default display
     if qemu-system-x86_64 -display help 2>/dev/null | grep -qx gtk; then
