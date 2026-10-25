@@ -357,8 +357,13 @@ int RDNA3Accel::drmUserqWait(void *ctx, int (*done)(void *), void *arg, uint64_t
         now = drmNowNs(ctx);
         if (now >= until)
             return -RD_ETIME;
+        /* stop() nulls fBringup under fDrmLock before stopAndFree (N49
+         * ECC round 3): read it again under the lock on every round */
+        RDNA3Bringup *b = a->fBringup;
+        if (!b)
+            return done(arg) ? 0 : -RD_ETIME;
         IOLockUnlock(a->fDrmLock);
-        a->fBringup->waitInterrupt(until);
+        b->waitInterrupt(until);
         IOLockLock(a->fDrmLock);
     }
 }
