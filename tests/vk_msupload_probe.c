@@ -1,7 +1,9 @@
 /* Probe, not a unit test (needs a Vulkan device with bufferDeviceAddress + shaderInt64, e.g. the host's RADV; not in `make test`):
  * the buffer -> multisampled colour upload pass of metal/plugin/nvmtl_msupload.h on a real driver. Uploads a random region
  * into 2/4/8-sample images (sRGB through a UNORM view, R8, RG8, an unaligned buffer offset), resolves, reads back and compares:
- * every texel of the region must equal the buffer's bytes, everything else must stay 0.
+ * every texel of the region must equal the buffer's bytes, everything else must stay 0. R8_UINT with Apple's layout (a row holds
+ * `samples` elements per pixel, one draw per sample): the integer resolve takes sample 0, so the texel must equal element
+ * x * samples + 0. (Per-sample content of all samples is checked by tests/vk_msdl_probe.c, which downloads them again.)
  *   cc -I metal/plugin -o /tmp/msu_probe tests/vk_msupload_probe.c -lvulkan && /tmp/msu_probe
  * SPDX-License-Identifier: MIT */
 #include <vulkan/vulkan.h>
@@ -34,10 +36,10 @@ static void bar(VkCommandBuffer cb, VkImage im, VkImageLayout o, VkImageLayout n
 }
 static void mem(VkCommandBuffer cb) { VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, 0, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, 0, 0, 0); }
-struct pc { uint32_t base[2]; uint32_t row; int32_t ox, oy; uint32_t w, h, mode; };
-static int run(VkFormat imgfmt, VkFormat viewfmt, uint32_t samples, uint32_t mode, uint32_t bpp, uint32_t offs)
+struct pc { uint32_t base[2]; uint32_t row; int32_t ox, oy; uint32_t w, h, mode, samples, sidx, inter; };
+static int run(VkFormat imgfmt, VkFormat viewfmt, uint32_t samples, uint32_t mode, uint32_t bpp, uint32_t offs, int uint_out, uint32_t inter)
 {
-    const uint32_t IW = 100, IH = 80, RW = 61, RH = 47, OX = 10, OY = 5, ROW = 300;
+    const uint32_t IW = 100, IH = 80, RW = 61, RH = 47, OX = 10, OY = 5, ROW = 800;
     VkBuffer sb; VkDeviceMemory sm; uint8_t *sp; mkbuf(ROW * RH + 64, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &sb, &sm, (void **)&sp);
     srand(7); for (uint32_t i = 0; i < ROW * RH + 64; i++) sp[i] = (uint8_t)rand();
     VkBuffer ob; VkDeviceMemory om; uint8_t *op; mkbuf(IW * IH * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ob, &om, (void **)&op);
@@ -53,7 +55,7 @@ static int run(VkFormat imgfmt, VkFormat viewfmt, uint32_t samples, uint32_t mod
     VkRenderPassCreateInfo rc = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, 0, 0, 1, &ad, 1, &sd, 2, dp }; VkRenderPass rp; CK(vkCreateRenderPass(dev, &rc, 0, &rp));
     VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(struct pc) };
     VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, 0, 0, 0, 0, 1, &pr }; VkPipelineLayout pl; CK(vkCreatePipelineLayout(dev, &li, 0, &pl));
-    VkShaderModuleCreateInfo s1 = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, 0, 0, sizeof nvmtl_msu_vert_spv, nvmtl_msu_vert_spv }, s2 = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, 0, 0, sizeof nvmtl_msu_frag_spv, nvmtl_msu_frag_spv };
+    VkShaderModuleCreateInfo s1 = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, 0, 0, sizeof nvmtl_msu_vert_spv, nvmtl_msu_vert_spv }, s2 = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, 0, 0, uint_out ? sizeof nvmtl_msu_frag_u_spv : sizeof nvmtl_msu_frag_spv, uint_out ? nvmtl_msu_frag_u_spv : nvmtl_msu_frag_spv };
     VkShaderModule vm, fm; CK(vkCreateShaderModule(dev, &s1, 0, &vm)); CK(vkCreateShaderModule(dev, &s2, 0, &fm));
     VkPipelineShaderStageCreateInfo st[2] = { { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, 0, 0, VK_SHADER_STAGE_VERTEX_BIT, vm, "main" }, { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, 0, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fm, "main" } };
     VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
@@ -74,11 +76,12 @@ static int run(VkFormat imgfmt, VkFormat viewfmt, uint32_t samples, uint32_t mod
     bar(cb, ms, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     mem(cb);
     VkBufferDeviceAddressInfo ai = { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, 0, sb }; VkDeviceAddress addr = vkGetBufferDeviceAddress(dev, &ai) + offs;
-    struct pc p = { { (uint32_t)addr, (uint32_t)(addr >> 32) }, ROW, OX, OY, RW, RH, mode };
+    struct pc p = { { (uint32_t)addr, (uint32_t)(addr >> 32) }, ROW, OX, OY, RW, RH, mode, samples, 0, inter };
     VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, 0, rp, fb, { { 0, 0 }, { IW, IH } }, 0, 0 };
     vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE); vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     VkViewport v = { 0, 0, (float)IW, (float)IH, 0, 1 }; VkRect2D sc = { { OX, OY }, { RW, RH } }; vkCmdSetViewport(cb, 0, 1, &v); vkCmdSetScissor(cb, 0, 1, &sc);
-    vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof p, &p); vkCmdDraw(cb, 3, 1, 0, 0); vkCmdEndRenderPass(cb);
+    for (uint32_t sm = 0; sm < (inter ? samples : 1u); sm++) { p.sidx = sm; vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof p, &p); vkCmdDraw(cb, 3, 1, 0, 0); }
+    vkCmdEndRenderPass(cb);
     mem(cb);
     bar(cb, ss, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkImageResolve rr = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { IW, IH, 1 } };
@@ -91,15 +94,14 @@ static int run(VkFormat imgfmt, VkFormat viewfmt, uint32_t samples, uint32_t mod
     int bad = 0, inside = 0;
     for (uint32_t y = 0; y < IH; y++) for (uint32_t x = 0; x < IW; x++) {
         int in = x >= OX && x < OX + RW && y >= OY && y < OY + RH; uint8_t exp[4] = { 0, 0, 0, 0 };
-        if (in) { const uint8_t *s = sp + offs + (y - OY) * ROW + (x - OX) * bpp;
-            if (mode == 2) { exp[0] = s[0]; } else if (mode == 3) { exp[0] = s[0]; exp[1] = s[1]; } else memcpy(exp, s, 4); inside++; }
-        else if (imgfmt == VK_FORMAT_R8_UNORM) { } 
-        uint32_t nb = (mode == 2 ? 1 : mode == 3 ? 2 : 4);
+        const uint32_t nb = uint_out ? 1 : (mode == 2 ? 1 : mode == 3 ? 2 : 4);
+        if (in) { const uint8_t *s = sp + offs + (y - OY) * ROW + (inter ? (uint64_t)(x - OX) * samples * bpp : (uint64_t)(x - OX) * bpp);   /* sample 0 of the pixel */
+            if (nb == 1) { exp[0] = s[0]; } else if (nb == 2) { exp[0] = s[0]; exp[1] = s[1]; } else memcpy(exp, s, 4); inside++; }
         const uint8_t *g = op + (y * IW + x) * nb;
         if (in) { if (memcmp(g, exp, nb)) { if (bad < 4) printf("  (%u,%u) got %02x%02x%02x%02x want %02x%02x%02x%02x\n", x, y, g[0], g[1], g[2], g[3], exp[0], exp[1], exp[2], exp[3]); bad++; } }
         else if ((g[0] | (nb > 1 ? g[1] : 0) | (nb > 2 ? g[2] : 0) | (nb > 2 ? g[3] : 0))) { if (bad < 4) printf("  outside (%u,%u) = %02x%02x%02x%02x\n", x, y, g[0], g[1], g[2], g[3]); bad++; }
     }
-    printf("fmt %d view %d samples %u mode %u offs %u: %d bad of %d inside\n", imgfmt, viewfmt, samples, mode, offs, bad, inside);
+    printf("fmt %d view %d samples %u mode %u offs %u inter %u: %d bad of %d inside\n", imgfmt, viewfmt, samples, mode, offs, inter, bad, inside);
     return bad;
 }
 int main(void)
@@ -111,14 +113,20 @@ int main(void)
     float pr = 1; VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, 0, 0, 0, 1, &pr };
     VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &f2, 0, 1, &qci }; CK(vkCreateDevice(pd, &dci, 0, &dev));
     int bad = 0;
-    bad += run(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, 4, 1, 4, 0);
-    bad += run(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, 4, 1, 4, 3);   /* unaligned buffer offset */
-    bad += run(VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, 4, 1, 4, 0);
-    bad += run(VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, 8, 1, 4, 0);
-    bad += run(VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, 2, 1, 4, 0);
-    bad += run(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, 4, 0, 4, 0);
-    bad += run(VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, 4, 0, 4, 0);
-    bad += run(VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, 4, 2, 1, 1);
-    bad += run(VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_UNORM, 4, 3, 2, 2);
+    /* the single-sample layout: every sample of a pixel gets the element at x (float modes: the resolve of identical samples is exact) */
+    bad += run(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, 4, 1, 4, 0, 0, 0);
+    bad += run(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, 4, 1, 4, 3, 0, 0);   /* unaligned buffer offset */
+    bad += run(VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, 4, 1, 4, 0, 0, 0);
+    bad += run(VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, 8, 1, 4, 0, 0, 0);
+    bad += run(VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM, 2, 1, 4, 0, 0, 0);
+    bad += run(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, 4, 0, 4, 0, 0, 0);
+    bad += run(VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, 4, 0, 4, 0, 0, 0);
+    bad += run(VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, 4, 2, 1, 1, 0, 0);
+    bad += run(VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_UNORM, 4, 3, 2, 2, 0, 0);
+    /* the integer module (Chess: the 4-sample R8_UINT texture of the stencil resolve), both layouts */
+    bad += run(VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, 4, 0, 1, 0, 1, 0);
+    bad += run(VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, 4, 0, 1, 0, 1, 1);   /* sample-interleaved: Apple's layout, sample 0 survives the resolve */
+    bad += run(VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, 8, 0, 1, 3, 1, 1);
+    bad += run(VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, 2, 0, 1, 1, 1, 1);
     printf("TOTAL bad %d\n", bad); return bad != 0;
 }

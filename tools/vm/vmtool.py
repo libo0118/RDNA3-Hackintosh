@@ -4,7 +4,7 @@ vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
 
   vmtool.py plist CONFIG [--show] [--show-smbios] [--boot-args S] [--sip-off] [--timeout N]
                   [--kext NAME[:EXEC[:MIN:MAX]]] [--remove-kext NAME] [--resolution WxH|Max]
-                  [--smbios MODEL]
+                  [--smbios MODEL] [--amd-cpu CORES | --no-amd-cpu] [--show-cpu]
       edit an OpenCore config.plist: boot-args and csr-active-config under
       NVRAM/Add (and listed under NVRAM/Delete so OpenCore really applies
       them), SecureBootModel Disabled, picker timeout, a Kernel/Add entry
@@ -13,7 +13,14 @@ vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
       --remove-kext deletes the Kernel/Add entries of EFI/OC/Kexts/NAME.kext
       (only those: other entries stay); --smbios sets the model OpenCore gives
       the VM (PlatformInfo/Generic/SystemProductName; the serial, MLB, UUID
-      and ROM of that section stay as they are), --show-smbios prints it
+      and ROM of that section stay as they are), --show-smbios prints it;
+      --amd-cpu CORES puts the AMD_Vanilla kernel patches (tools/vm/data) into
+      Kernel/Patch (their Comment starts with "rdna3vm-amd:"), the core count
+      CORES into the four cpuid_cores_per_package ones, and sets
+      Kernel/Quirks/ProvideCurrentCpuInfo, Kernel/Emulate/DummyPowerManagement
+      true and the Cpuid1 spoof empty (what it replaced is kept in a "#" key of
+      Kernel); --no-amd-cpu takes exactly those back; --show-cpu prints the state
+  vmtool.py amdpatches           the vendored AMD_Vanilla patch file: count, or why it is unusable
   vmtool.py romcheck FILE        a PCI option ROM with a UEFI (GOP) image?
   vmtool.py unzip ZIP DIR        extract (keeps the tree)
   vmtool.py serve DIR PORT [UP]  HTTP on 127.0.0.1: GET files, PUT into UP (DIR/reports)
@@ -22,8 +29,12 @@ vmtool.py - helpers for tools/vm/rdna3vm (Linux host, stdlib only).
   vmtool.py usbhid               USB keyboards / mice: "vendor product name"
   vmtool.py monitor SOCK CMD     run one QEMU human-monitor command, print its output
 """
+import base64
+import hashlib
 import http.server
+import json
 import os
+import plistlib
 import re
 import select
 import struct
@@ -189,6 +200,212 @@ def set_smbios(text, model):
                 "<string>%s</string>" % _xml(model))
 
 
+# ---------------------------------------------------------------- AMD CPU (-cpu host)
+# The card VM can run with QEMU's `-cpu host` on an AMD host (CPU_MODEL=host in
+# ~/rdna3-vm/config). macOS then needs the AMD_Vanilla kernel patches in OpenCore,
+# exactly as on a bare-metal Ryzen hackintosh. rdna3vm calls `plist --amd-cpu N`
+# before every boot with CPU_MODEL=host and `--no-amd-cpu` otherwise, so switching
+# CPU_MODEL back to the Skylake model needs no manual edit of the OpenCore image.
+AMD_PATCH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "amd_vanilla-a174cca.plist")
+AMD_PATCH_SHA256 = "dc147342ba068f8221783b43ca5d233587167e4907ae523d83146e5451bf3298"
+AMD_MARK = "rdna3vm-amd:"                 # Comment prefix of every entry this tool adds
+AMD_RESTORE_KEY = "#rdna3vm-amd-restore"  # OpenCore ignores keys that start with #
+AMD_CORES_COMMENT = "Force cpuid_cores_per_package"
+# what the AMD mode needs and what it replaces (xml of the value, as OpenCore reads it)
+AMD_EMULATE = (("Cpuid1Data", "<data></data>"), ("Cpuid1Mask", "<data></data>"),
+               ("DummyPowerManagement", "<true/>"))
+AMD_QUIRKS = (("ProvideCurrentCpuInfo", "<true/>"),)
+PATCH_FIELDS = ("Arch", "Base", "Comment", "Count", "Enabled", "Find", "Identifier", "Limit", "Mask",
+                "MaxKernel", "MinKernel", "Replace", "ReplaceMask", "Skip")
+
+
+def amd_patches(path=None):
+    """the Kernel/Patch entries of the vendored AMD_Vanilla file that patch the kernel
+    itself (Identifier "kernel"; the IOPCIFamily ones are for Zen 4 boards)"""
+    path = path or AMD_PATCH_FILE
+    with open(path, "rb") as f:
+        raw = f.read()
+    if path == AMD_PATCH_FILE and hashlib.sha256(raw).hexdigest() != AMD_PATCH_SHA256:
+        raise PlistEditError("%s was edited (sha256 differs from tools/vm/data/amd_vanilla.SOURCE)" % path)
+    patches = plistlib.loads(raw)["Kernel"]["Patch"]
+    return [p for p in patches if p.get("Identifier") == "kernel"]
+
+
+def _patch_xml(p, cores):
+    """one Kernel/Patch dict as the text OpenCore's own plists use (tabs, three deep)"""
+    p = dict(p)
+    p["Comment"] = "%s %s" % (AMD_MARK, p.get("Comment", ""))
+    if AMD_CORES_COMMENT in p["Comment"]:
+        rep = bytearray(p["Replace"])
+        # mov eax|edx, imm32: the byte after the opcode is the core count (README of
+        # AMD_Vanilla: B8|BA <core count> 0000 0000 ...)
+        if len(rep) < 2 or rep[0] not in (0xB8, 0xBA) or rep[1] != 0:
+            raise PlistEditError("AMD_Vanilla core count patch has an unexpected Replace %s" % bytes(rep).hex())
+        rep[1] = cores
+        p["Replace"] = bytes(rep)
+    out = ["\t\t\t<dict>"]
+    for k in PATCH_FIELDS:
+        v = p.get(k)
+        out.append("\t\t\t\t<key>%s</key>" % k)
+        if k in ("Count", "Limit", "Skip"):
+            out.append("\t\t\t\t<integer>%d</integer>" % int(v or 0))
+        elif k == "Enabled":
+            out.append("\t\t\t\t<%s/>" % ("true" if v else "false"))
+        elif k in ("Find", "Mask", "Replace", "ReplaceMask"):
+            out.append("\t\t\t\t<data>%s</data>" % base64.b64encode(v or b"").decode())
+        else:
+            out.append("\t\t\t\t<string>%s</string>" % _xml(str(v or "")))
+    out.append("\t\t\t</dict>")
+    return "\n".join(out)
+
+
+_AMD_ENTRY_RE = re.compile(r"[ \t]*<dict>(?:(?!</dict>).)*?<key>Comment</key>\s*<string>%s[^<]*</string>"
+                           r".*?</dict>[ \t]*\n?" % re.escape(AMD_MARK), re.S)
+
+
+def _patch_array(text):
+    found = _value_after_key(text, "Patch", *_section(text, "Kernel"))
+    if not found or not text.startswith("<array", found[1]):
+        raise PlistEditError("no Kernel/Patch array in config.plist")
+    return found
+
+
+def _remove_amd_patches(text):
+    """(text without the entries this tool added, how many)"""
+    found = _patch_array(text)
+    arr, n = _AMD_ENTRY_RE.subn("", text[found[1]:found[2]])
+    return text[:found[1]] + arr + text[found[2]:], n
+
+
+def _add_amd_patches(text, cores):
+    """(text with the AMD_Vanilla kernel patches appended to Kernel/Patch, how many)"""
+    patches = amd_patches()
+    block = "\n".join(_patch_xml(p, cores) for p in patches)
+    found = _patch_array(text)
+    arr = text[found[1]:found[2]]
+    if arr.endswith("/>"):                  # <array/>
+        return text[:found[1]] + "<array>\n%s\n\t\t</array>" % block + text[found[2]:], len(patches)
+    line = close = found[1] + arr.rindex("</array>")
+    while line > 0 and text[line - 1] in " \t":
+        line -= 1
+    return text[:line] + block + "\n" + text[line:], len(patches)
+
+
+def _norm(xml):
+    """a value's xml in one comparable form: whitespace-only data is empty data"""
+    m = re.match(r"<data>\s*(.*?)\s*</data>$", xml, re.S)
+    if m:
+        return "<data>%s</data>" % re.sub(r"\s+", "", m.group(1))
+    return xml
+
+
+def _get(text, sec, key):
+    found = _value_after_key(text, key, *sec)
+    return _norm(text[found[1]:found[2]]) if found else None
+
+
+def _delete_key(text, sec, key):
+    found = _value_after_key(text, key, *sec)
+    if not found:
+        return text
+    start = found[0]
+    while start > 0 and text[start - 1] in " \t":
+        start -= 1
+    end = found[2]
+    if text[end:end + 1] == "\n":
+        end += 1
+    return text[:start] + text[end:]
+
+
+def _put(text, sec, key, xml):
+    """key = xml in the dict text[sec[0]:sec[1]]: replaced, or added on lines of its own with
+    the dict's indentation (so that _delete_key takes back exactly the lines added)"""
+    found = _value_after_key(text, key, *sec)
+    if found:
+        return text[:found[1]] + xml + text[found[2]:]
+    close = text.rindex("</dict>", sec[0], sec[1])
+    line = close
+    while line > 0 and text[line - 1] in " \t":
+        line -= 1
+    ind = text[line:close] + "\t"
+    return text[:line] + "%s<key>%s</key>\n%s%s\n" % (ind, key, ind, xml) + text[line:]
+
+
+def _set_value(text, path, key, xml):
+    """key = xml in the dict at path; the text stays byte for byte when it already says that"""
+    sec = _section(text, *path)
+    if _get(text, sec, key) == _norm(xml):
+        return text
+    return _put(text, sec, key, xml)
+
+
+def amd_cpu_state(text):
+    """(core count of the AMD patches in the config or None, how many of them)"""
+    found = _value_after_key(text, "Patch", *_section(text, "Kernel"))
+    if not found or not text.startswith("<array", found[1]):
+        return None, 0
+    arr = text[found[1]:found[2]]
+    n = len(_AMD_ENTRY_RE.findall(arr))
+    cores = None
+    for m in _AMD_ENTRY_RE.finditer(arr):
+        e = m.group(0)
+        if AMD_CORES_COMMENT in e:
+            rep = re.search(r"<key>Replace</key>\s*<data>([^<]*)</data>", e)
+            if rep:
+                b = base64.b64decode(rep.group(1))
+                cores = b[1] if len(b) > 1 else None
+                break
+    return cores, n
+
+
+def set_amd_cpu(text, cores):
+    """AMD mode: the patches (the core count in the cpuid_cores_per_package ones), the quirk,
+    the Cpuid1 spoof off; what was there before goes into the restore key once"""
+    if not isinstance(cores, int) or not 1 <= cores <= 255:
+        raise PlistEditError("AMD core count %r is not 1..255" % (cores,))
+    kernel = ("Kernel",)
+    if AMD_RESTORE_KEY not in text:
+        saved = {}
+        for path, items in ((("Kernel", "Emulate"), AMD_EMULATE), (("Kernel", "Quirks"), AMD_QUIRKS)):
+            sec = _section(text, *path)
+            for key, _ in items:
+                saved[key] = _get(text, sec, key)
+        text = _put(text, _section(text, *kernel), AMD_RESTORE_KEY,
+                    "<string>%s</string>" % _xml(json.dumps(saved, sort_keys=True)))
+    for path, items in ((("Kernel", "Emulate"), AMD_EMULATE), (("Kernel", "Quirks"), AMD_QUIRKS)):
+        for key, xml in items:
+            text = _set_value(text, path, key, xml)
+    text, _ = _remove_amd_patches(text)
+    return _add_amd_patches(text, cores)
+
+
+def unset_amd_cpu(text):
+    """the other CPU modes: the patches this tool added go, the values it replaced come back
+    (nothing else changes); (text, patches removed, values restored)"""
+    if AMD_MARK not in text and AMD_RESTORE_KEY not in text:
+        return text, 0, 0                   # never in AMD mode: nothing to take back (any config)
+    text, removed = _remove_amd_patches(text)
+    restored = 0
+    found = _value_after_key(text, AMD_RESTORE_KEY, *_section(text, "Kernel"))
+    if found:
+        m = re.match(r"<string>(.*?)</string>", text[found[1]:found[2]], re.S)
+        try:
+            saved = json.loads(_unxml(m.group(1))) if m else {}
+        except ValueError as e:
+            raise PlistEditError("%s in config.plist is not valid: %s" % (AMD_RESTORE_KEY, e))
+        for path, items in ((("Kernel", "Emulate"), AMD_EMULATE), (("Kernel", "Quirks"), AMD_QUIRKS)):
+            for key, _ in items:
+                if key not in saved:
+                    continue
+                if saved[key] is None:
+                    text = _delete_key(text, _section(text, *path), key)
+                else:
+                    text = _set_value(text, path, key, saved[key])
+                restored += 1
+        text = _delete_key(text, _section(text, "Kernel"), AMD_RESTORE_KEY)
+    return text, removed, restored
+
+
 def cmd_plist(argv):
     """Edits only the values it changes, as text: OpenCore accepts plists
     that Python's plistlib refuses (and a rewrite would reformat the file)."""
@@ -205,6 +422,10 @@ def cmd_plist(argv):
     if "--show-smbios" in argv:
         print(get_smbios(text))
         return 0
+    if "--show-cpu" in argv:
+        cores, n = amd_cpu_state(text)
+        print("amd-cpu: %s" % ("off" if not n else "on, %d patches, core count %s" % (n, cores)))
+        return 0
 
     def delete_list(name):
         nonlocal text
@@ -218,6 +439,7 @@ def cmd_plist(argv):
             close = found[1] + arr.rindex("</array>")
             text = text[:close] + "\t<string>%s</string>\n\t\t\t" % name + text[close:]
 
+    amd_note = ""
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -250,6 +472,18 @@ def cmd_plist(argv):
         elif a == "--smbios":
             text = set_smbios(text, argv[i + 1])
             i += 2
+        elif a == "--amd-cpu":
+            try:
+                n = int(argv[i + 1])
+            except (IndexError, ValueError):
+                raise PlistEditError("--amd-cpu wants the core count (1..255)")
+            text, count = set_amd_cpu(text, n)
+            amd_note = "amd-cpu: on, %d AMD_Vanilla kernel patches, core count %d (0x%02X)" % (count, n, n)
+            i += 2
+        elif a == "--no-amd-cpu":
+            text, removed, restored = unset_amd_cpu(text)
+            amd_note = "amd-cpu: off (%d AMD_Vanilla patches removed, %d values restored)" % (removed, restored)
+            i += 1
         else:
             sys.exit("unknown option " + a)
     with open(path, "w", encoding="utf-8") as f:
@@ -258,6 +492,19 @@ def cmd_plist(argv):
     print("boot-args:", _unxml(re.sub(r"</?string>", "", text[found[1]:found[2]])) if found else "")
     if "--smbios" in argv:
         print("smbios:", get_smbios(text))
+    if amd_note:
+        print(amd_note)
+    return 0
+
+
+def cmd_amdpatches(argv):
+    """amdpatches: how many AMD_Vanilla kernel patches the vendored file gives (or why not)"""
+    try:
+        n = len(amd_patches())
+    except (OSError, ValueError, KeyError, PlistEditError) as e:
+        print("%s: %s" % (AMD_PATCH_FILE, e))
+        return 1
+    print("%d AMD_Vanilla kernel patches (%s, sha256 ok)" % (n, os.path.basename(AMD_PATCH_FILE)))
     return 0
 
 
@@ -461,7 +708,7 @@ def cmd_monitor(argv):
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
-    cmds = {"plist": cmd_plist, "romcheck": cmd_romcheck, "unzip": cmd_unzip,
+    cmds = {"plist": cmd_plist, "amdpatches": cmd_amdpatches, "romcheck": cmd_romcheck, "unzip": cmd_unzip,
             "serve": cmd_serve, "stopkeys": cmd_stopkeys, "evdev": cmd_evdev,
             "usbhid": cmd_usbhid, "monitor": cmd_monitor}
     fn = cmds.get(sys.argv[1])

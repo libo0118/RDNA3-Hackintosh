@@ -1098,7 +1098,7 @@ use it on a run where that is the question. Triage: `plugin_trace.triage_lines(r
 Card run 2026-10-25c: Chess died three times in glReadPixels (crash reports: `__assert_rtn` in RADV's `gfx_or_compute_copy_memory_to_image`,
 which asserts `image->vk.samples == 1`, called from the plugin's `copyFromBuffer:toTexture:` on a 4-sample texture; DRIVER-PLAN N48). The
 plugin now uploads into multisample colour textures itself (`msupload:` lines below). Read `26-log-metal-plugin.txt` for the Chess pid
-(`tools/triage_n48.py` prints the rows `plugin copy refused`, `multisample upload`, `framebuffer fetch`, `plugin copy bracket`):
+(`tools/triage_n48.py` prints the rows `plugin copy refused`, `multisample upload`, `multisample download`, `framebuffer fetch`, `plugin copy bracket`):
 
 | Line | Meaning | Action |
 |---|---|---|
@@ -1106,9 +1106,21 @@ plugin now uploads into multisample colour textures itself (`msupload:` lines be
 | `copy_image_to_buffer: recording vk format ... layout L` then `layout transition recorded` then `vkCmdCopyImageToBuffer recorded` | the first 8 distinct copy shapes are bracketed | the LAST of the three lines in the log before the process disappears says where it died: no `recording` = the ObjC side (guard in the blit method), `recording` only = the barrier (RADV `radv_CmdPipelineBarrier`, depth decompress), `transition recorded` only = inside `vkCmdCopyImageToBuffer`, all three = after the copy (commit, submit, the next command) |
 | `copy_image_to_buffer: REFUSED - ...` / `copy_buffer_to_image: REFUSED - ...` | the copy broke Vulkan valid usage (multisampled image, an aspect the format has not, depth/stencil buffer offset not a multiple of 4, null VkImage / VkBuffer, region outside the image / buffer) and was not handed to RADV; the log has the numbers | the app reads an unfilled buffer: if Chess now survives, the refusal is the cause and the numbers say which rule |
 | `msupload: buffer -> N-sample image WxH (vk format F via view V, mode M): region ... [K so far]` | a buffer -> multisample texture upload ran through the plugin's pass (first 8, then every 1024th); `msupload: pass built for view format V at N samples` once per pair | INFO. `msupload: REFUSED`, `vkCreateFramebuffer`, `vkCreateGraphicsPipelines ... -> N` lines are the failures (WARN row) |
-| `copy_buffer_to_image: REFUSED - a N-sample image: <reason>` | an upload the pass does not carry (multisample depth/stencil, array, a format beyond 8-bit RGBA/BGRA/R/RG) | the reason names it; extending the pass is the fix |
+| `copy_buffer_to_image: REFUSED - a N-sample image: <reason>` | an upload the pass does not carry (multisample depth/stencil, array, a format beyond 8-bit RGBA/BGRA/R/RG UNORM/sRGB and R8/RG8/RGBA8/R16/R32 UINT) | the reason names it; extending the pass is the fix |
+| `msupload: ... row R B, sample-interleaved (a row holds samples x elements per pixel) layout, integer output [K so far]` | the layout the pass used: `sample-interleaved` when R >= width * samples * bytes (Apple's own multisample blits, N52), `one element per pixel` for a single-sample row | Chess: `vk format 13`, row 3884 = 971 * 4 is the stencil-resolve upload |
+| `msdl: N-sample image WxH -> buffer (vk format F, aspect A via view V, mode M): region ... to buffer offset O row R B, K word(s) in GXxGY group(s) [S so far]` | a multisample texture -> buffer blit ran through the plugin's compute pass (DRIVER-PLAN N52; first 8, then every 1024th). Aspect 1 colour / 2 depth / 4 stencil | INFO. Chess: `vk format 130, aspect 4, row 3884` once per resolve. `msdl: FAILED - ...` / `msdl: REFUSED - ...` (own literals, WARN rows `multisample download` / `plugin copy refused`) are the failures; `copy_image_to_buffer: REFUSED - a N-sample image: <reason>` is a format/aspect/region the pass does not carry (24-bit depth, arrays, other colour formats) |
+| `msdl: pass built for the float / unsigned-integer module`, `msdl: descriptor pool N opened` | once per process and module / per 256 sets | INFO |
 | `copy_image_to_buffer: recording (depth/stencil, multisample or non-colour copy) ...` and `(special copy)` lines | the bracket of copies that are not plain single-sample colour ones (always logged: 16, then every 256th) | read like the plain bracket |
 | `blit copyFromTexture:toBuffer: REFUSED - source is a X, destination a Y` | a Metal object that is not this plugin's | the GL layer hands over something the plugin does not model |
+
+Chess stencil resolve (N52, card run 2026-10-25f; the cyan streaks on the pieces and red specks in EVERY rung of the A/B ladder, PARANOID included). Apple's GL
+resolves the stencil of its 4-sample D32_S8 framebuffer with five blits, and the plugin used to drop the first two (the lines are in every Chess process, 8 to 16
+times per minute): `copy_image_to_buffer: REFUSED - the image is multisampled ... (vk format 130, 4 sample(s), type 4, aspect option 4, buffer offset 0, region
+971x680)` then `copy_buffer_to_image: REFUSED - a 4-sample image: this colour format is not carried ... (vk format 13, ..., row 3884 B ...)`; the rest of the chain
+(`begin_render: par1 4-sample pass resolves colour 0x0 of 0x1`, `copy_image_to_buffer: recording vk format 13 ...`, `copy_buffer_to_image: recording (depth/stencil, ...) vk
+format 130 ... 1 sample(s) ... aspect 4 element 1 B`) then moved an uninitialised texture into the stencil. With the pass in, a Chess process must show, per frame that
+resolves: one `msdl:` line (first 8), no `plugin copy refused` row for `vk format 130` / `vk format 13`, no `msdl: FAILED`. If the streaks stay although the lines are
+there, the layout guess is wrong (see DRIVER-PLAN N52, Risks): compare the `msupload:`/`msdl:` row values (3884 = 971 * 4 samples * 1 B) with what the blit asked for.
 
 Framebuffer fetch (`[[color(n)]]`, binding 192+n; card run 2026-10-25d: rectangles over text cells with a red/green gradient and broken glyphs in Terminal/Maps/Settings
 were reads of an undefined descriptor; now implemented with render-pass input attachments, DRIVER-PLAN N48, unverified on the card). Lines, in the order a run prints them:

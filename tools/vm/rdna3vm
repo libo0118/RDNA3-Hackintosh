@@ -151,6 +151,70 @@ load_conf() {
     esac
 }
 
+# CPU_MODEL=host (or host,<more QEMU cpu flags>): the VM runs with QEMU's `-cpu host`, the
+# host's real CPU (an AMD Ryzen: the bare-metal hackintosh test). macOS then needs the
+# AMD_Vanilla kernel patches in OpenCore; cmd__oc puts them in before every boot (vmtool.py
+# plist --amd-cpu, data/amd_vanilla.SOURCE) and takes them out again for any other CPU_MODEL.
+#  host            the vendor stays AuthenticAMD (the patches expect it: no vendor=GenuineIntel),
+#                  kvm=on gives macOS the hypervisor leaf, +invtsc the invariant TSC (macOS
+#                  since Monterey panics when the TSC is not), vmware-cpuid-freq=on the TSC
+#                  frequency leaf (QEMU already does when it can), check prints what the host
+#                  cannot give
+#  CPUS            the number of vCPUs (logical processors)
+#  CPU_THREADS     threads per core, default 1: the VM then has CPUS cores of one thread. The
+#                  AMD core count patch is CPUS / CPU_THREADS, so the topology and the patch
+#                  always agree (CPUS=16 CPU_THREADS=2 = the 5800X's 8 cores / 16 threads, patch 08;
+#                  +topoext is added for threads above 1: QEMU warns about an AMD CPU without it)
+CPU_HOST_BASE="host,kvm=on,+invtsc,vmware-cpuid-freq=on,check"
+cpu_is_host() { case "${CPU_MODEL:-}" in host|host,*) return 0 ;; esac; return 1; }
+CPUINFO=${RDNA3VM_CPUINFO:-/proc/cpuinfo}   # (a fake one in tests/test_vm_amd_cpu.sh)
+cpu_host_vendor() { awk -F': *' '/^vendor_id/ {print $2; exit}' "$CPUINFO" 2>/dev/null || true; }
+cpu_threads() {   # CPU_THREADS validated against CPUS; prints it
+    local t=${CPU_THREADS:-1} n=${CPUS:-}
+    case "$t" in ''|*[!0-9]*) die "CPU_THREADS ('$t') in the config must be a whole number" ;; esac
+    case "$n" in ''|*[!0-9]*) die "CPUS ('$n') in the config must be a whole number" ;; esac
+    [ "$t" -ge 1 ] && [ "$n" -ge 1 ] || die "CPUS ('$n') and CPU_THREADS ('$t') must be at least 1"
+    [ $((n % t)) = 0 ] || die "CPUS=$n is not a multiple of CPU_THREADS=$t (the VM has CPUS/CPU_THREADS cores)"
+    [ $((n / t)) -le 255 ] || die "CPUS/CPU_THREADS=$((n / t)) cores: more than the 255 the AMD core count patch can hold"
+    printf '%s\n' "$t"
+}
+cpu_cores() { local t; t=$(cpu_threads) || return 1; printf '%s\n' $((CPUS / t)); }
+cpu_qemu_model() {   # the -cpu argument
+    local base=$CPU_HOST_BASE t
+    # QEMU on an AMD CPU: "doesn't support hyperthreading(2)" (and a topology without threads)
+    # unless topoext is on
+    if cpu_is_host; then
+        t=$(cpu_threads) || return 1
+        [ "$t" -gt 1 ] && base="$base,+topoext"
+    fi
+    case "${CPU_MODEL:-}" in
+        host) printf '%s\n' "$base" ;;
+        host,*) printf '%s,%s\n' "$base" "${CPU_MODEL#host,}" ;;   # later flags win in QEMU
+        *) printf '%s\n' "${CPU_MODEL:-$CPU_DEFAULT}" ;;
+    esac
+}
+cpu_amd_patches() {   # does this run need the AMD_Vanilla patches? (host mode on an AMD host)
+    cpu_is_host && [ "$(cpu_host_vendor)" = AuthenticAMD ]
+}
+cpu_oc_args() {   # the vmtool.py plist options for the CPU mode
+    local c
+    if cpu_amd_patches; then c=$(cpu_cores) || return 1; printf '%s\n' "--amd-cpu $c"
+    else printf '%s\n' "--no-amd-cpu"; fi
+}
+cpu_summary() {   # one line: what the VM's CPU is
+    local c t
+    c=$(cpu_cores) || return 1; t=$(cpu_threads) || return 1
+    if cpu_is_host; then
+        if cpu_amd_patches; then
+            echo "host CPU ($(awk -F': *' '/^model name/ {print $2; exit}' "$CPUINFO")) passed through, ${CPUS} vCPUs = ${c} cores x ${t} threads, AMD_Vanilla patches on (core count ${c}, see tools/vm/data/amd_vanilla.SOURCE)"
+        else
+            echo "host CPU passed through ($(cpu_host_vendor)), ${CPUS} vCPUs = ${c} cores x ${t} threads, NOT an AMD host: no AMD_Vanilla patches"
+        fi
+    else
+        echo "QEMU model ${CPU_MODEL:-$CPU_DEFAULT}, ${CPUS} vCPUs = ${c} cores x ${t} threads, AMD_Vanilla patches off"
+    fi
+}
+
 gpu_bdf() {
     local d
     for d in /sys/bus/pci/devices/*; do
@@ -179,12 +243,41 @@ group_devs() {
 }
 
 # ------------------------------------------------------------------ check
+# the CPU the VM will have, and for CPU_MODEL=host what the host must give it
+cpu_check() {
+    local rc=0 line n
+    say "VM CPU"
+    # shellcheck source=/dev/null
+    [ ! -f "$CONF" ] || . "$CONF"
+    CPU_MODEL=${CPU_MODEL:-$CPU_DEFAULT}
+    CPUS=${CPUS:-2}
+    if line=$(cpu_summary); then ok "$line"; else bad "CPUS / CPU_THREADS in $CONF"; return 1; fi
+    cpu_is_host || return 0
+    if [ "$(cpu_host_vendor)" != AuthenticAMD ]; then
+        warn "the host CPU is $(cpu_host_vendor), not AMD: CPU_MODEL=host runs without the AMD_Vanilla patches"
+        return 0
+    fi
+    if n=$($VMTOOL amdpatches); then ok "$n"; else bad "the vendored AMD_Vanilla patch file ($n)"; rc=1; fi
+    # macOS (Monterey and later) panics when the TSC differs between its cores
+    if [ "$(cat /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null)" = tsc ]; then
+        ok "host clocksource tsc"
+    else
+        bad "host clocksource is $(cat /sys/devices/system/clocksource/clocksource0/current_clocksource 2>/dev/null || echo unknown), not tsc: macOS panics on a TSC that is not stable (dmesg | grep -i -e tsc -e clocksource)"; rc=1
+    fi
+    if grep -q -w constant_tsc "$CPUINFO" && grep -q -w nonstop_tsc "$CPUINFO"; then ok "host TSC is invariant (+invtsc)"
+    else warn "no constant_tsc / nonstop_tsc in /proc/cpuinfo: +invtsc cannot be given to the VM"; fi
+    if [ "$(cat /sys/module/kvm/parameters/ignore_msrs 2>/dev/null)" = Y ]; then ok "kvm ignore_msrs=Y"
+    else echo "  ?   kvm ignore_msrs is not Y (the VM start sets it: macOS reads MSRs KVM does not know)"; fi
+    return $rc
+}
+
 cmd_check() {
     local fail=0 bdf
     say "CPU and KVM"
     if grep -qE 'vmx|svm' /proc/cpuinfo; then ok "CPU virtualization"; else bad "enable SVM/VT-x in the BIOS"; fail=1; fi
     if [ -e /dev/kvm ]; then ok "/dev/kvm"; else bad "no /dev/kvm (module kvm_amd / kvm_intel)"; fail=1; fi
     [ -w /dev/kvm ] || echo "     (join the kvm group: sudo usermod -aG kvm $USER, then log out and back in)"
+    cpu_check || fail=1
     say "IOMMU"
     if [ -n "$(ls /sys/kernel/iommu_groups 2>/dev/null)" ]; then ok "IOMMU enabled"
     else bad "IOMMU disabled: BIOS (AMD-Vi/VT-d) + kernel parameter iommu=pt (Intel: intel_iommu=on iommu=pt)"; fail=1; fi
@@ -287,6 +380,10 @@ INSTALLER="$osx/BaseSystem.img"
 RAM_GB=${RAM_GB:-$ram}
 CPUS=${CPUS:-$cpus}
 CPU_MODEL="${CPU_MODEL:-$CPU_DEFAULT}"
+# CPU_MODEL="host" = the real CPU of this computer (AMD Ryzen: OpenCore gets the AMD_Vanilla
+# kernel patches by itself before every boot, and loses them again with any other model);
+# docs/TESTING-VM.md. CPU_THREADS = threads per core (CPUS / CPU_THREADS cores), default 1
+#CPU_THREADS=1
 TIMEOUT_MIN=${TIMEOUT_MIN:-30}
 AUTO_TIMEOUT_MIN=${AUTO_TIMEOUT_MIN:-8}
 # where 'rdna3vm update' / 'rdna3vm cts' fetch the builds from (the defaults
@@ -447,8 +544,23 @@ oc_cleanup() {
 }
 
 cmd__oc() {
-    local img=$WORK/OpenCore-rdna3.img part kdir="" old_trap a prev="" sm_written=""
+    local img=$WORK/OpenCore-rdna3.img part kdir="" old_trap a prev="" sm_written="" edits=1
     [ -f "$img" ] || die "no $img"
+    # the CPU mode of the config goes into the OpenCore config on every edit: the AMD_Vanilla
+    # patches for CPU_MODEL=host on an AMD host, none (and the old values back) otherwise. _oc
+    # runs under sudo without the config's variables
+    for a in "$@"; do case "$a" in --show|--show-smbios|--show-cpu) edits=0 ;; esac; done
+    if [ $edits = 1 ]; then
+        if [ -z "${CPU_MODEL:-}" ] && [ -f "$CONF" ]; then
+            # shellcheck source=/dev/null
+            . "$CONF"
+        fi
+        CPU_MODEL=${CPU_MODEL:-$CPU_DEFAULT}
+        local cpu_args
+        cpu_args=$(cpu_oc_args) || exit 1
+        # shellcheck disable=SC2086
+        set -- "$@" $cpu_args
+    fi
     # the model this call writes (smbios_want reads it back: a later run that asks for nothing
     # puts the default back instead of keeping this one)
     for a in "$@"; do
@@ -502,8 +614,22 @@ cmd__oc() {
 
 # ---------------------------------------------------------------- qemu
 qemu_common() {
+    local cpu_cores_n cpu_threads_n cpu_line cpu_arg
+    cpu_cores_n=$(cpu_cores) || exit 1
+    cpu_threads_n=$(cpu_threads) || exit 1
+    # what this run's CPU is: on the screen, in the host log (cmd__passthrough tees it) and in
+    # $WORK/last-cpu, which 'rdna3vm result' puts into 00-host.txt
+    cpu_line=$(cpu_summary) || exit 1
+    cpu_arg=$(cpu_qemu_model) || exit 1
+    echo "VM CPU: $cpu_line"
+    echo "VM CPU: -cpu $cpu_arg -smp $CPUS,sockets=1,cores=$cpu_cores_n,threads=$cpu_threads_n"
+    # a temp file renamed over it: a card step (root) and 'window' (the user) both replace it,
+    # whoever owns the old one (a rename only needs the user's $WORK)
+    { echo "$cpu_line"; echo "-cpu $cpu_arg -smp $CPUS,sockets=1,cores=$cpu_cores_n,threads=$cpu_threads_n"; } > "$WORK/last-cpu.$$" &&
+        mv -f "$WORK/last-cpu.$$" "$WORK/last-cpu" ||
+        { rm -f "$WORK/last-cpu.$$"; echo "!! cannot write $WORK/last-cpu: the result will not say which CPU the VM had"; }
     QARGS=(-enable-kvm -machine q35,accel=kvm -m "${RAM_GB}G"
-        -smp "$CPUS",sockets=1,cores="$CPUS",threads=1 -cpu "$CPU_MODEL"
+        -smp "$CPUS",sockets=1,cores="$cpu_cores_n",threads="$cpu_threads_n" -cpu "$cpu_arg"
         -device isa-applesmc,osk="$OSK" -smbios type=2
         -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE"
         -drive if=pflash,format=raw,file="$WORK/OVMF_VARS.fd"
@@ -2117,6 +2243,9 @@ cmd_result() {
     for f in "${sel[@]}"; do cp "$WORK/reports/$f" "$tmp/rdna3-result/" 2>/dev/null || sudo cat "$WORK/reports/$f" > "$tmp/rdna3-result/$f"; done
     git -C "$ROOT" log -1 --format='repo %h %s' > "$tmp/rdna3-result/00-host.txt" 2>/dev/null || true
     sed 's/^/run-note: /' "$WORK/last-run-note" >> "$tmp/rdna3-result/00-host.txt" 2>/dev/null || true
+    # the VM's CPU of the newest run (qemu_common): the QEMU model or the host CPU with the AMD patches
+    if [ -s "$WORK/last-cpu" ]; then sed 's/^/vm-cpu: /' "$WORK/last-cpu" >> "$tmp/rdna3-result/00-host.txt"
+    else echo "vm-cpu: unknown (no $WORK/last-cpu: a run from before CPU_MODEL=host support)" >> "$tmp/rdna3-result/00-host.txt"; fi
     [ -f "$WORK/artifact-run" ] && echo "artifact from CI run $(cat "$WORK/artifact-run")" >> "$tmp/rdna3-result/00-host.txt" 
     # what the VM's plugin / RADV builds must match (tools/triage_reports.py
     # STALE PLUGIN/RADV): the last commits touching their sources

@@ -30,6 +30,7 @@ void nvlog(const char *fmt, ...);
 static __thread uint32_t g_copy_aspect_override, g_copy_bpp_override;
 void nvmtl_vk_copy_aspect_override(uint32_t aspect, uint32_t bpp) { g_copy_aspect_override = aspect; g_copy_bpp_override = bpp; }
 #include "nvmtl_copy_pack.h"
+#include "nvmtl_msdl.h"
 /* A blit copy that is recorded for the first time in this shape is logged before and after the Vulkan call (card run
  * 2026-10-25c: Chess died right after such a copy and the log could not say whether it was inside the call). The shape is
  * the image's format, samples, type, the aspect and the element size - NOT the region (WindowServer's many differently sized
@@ -65,6 +66,15 @@ void nvmtl_vk_copy_describe(const nvk_image *img, char *out, size_t n)
 {
     uint32_t aspect = 0, bpp = 0; const char *why = NULL;
     if (!img) { snprintf(out, n, "no image"); return; }
+    if (img->samples > 1) {   /* carried by the plugin's own pass (nvmtl_msdl.h) unless the format/aspect is outside it */
+        uint32_t view, mode, u;
+        if (nvmtl_msdl_format(img->fmt, g_copy_aspect_override, &view, &aspect, &mode, &u, &bpp, &why))
+            snprintf(out, n, "vkfmt %u samples %u type %u layers %u mips %u: REFUSED (%s)", img->fmt, img->samples, img->mtl_type, img->layers, img->mips, why);
+        else
+            snprintf(out, n, "vkfmt %u samples %u type %u layers %u mips %u aspect %u bpp %u: multisample, carried by the plugin's download pass (view format %u, mode %u)",
+                     img->fmt, img->samples, img->mtl_type, img->layers, img->mips, aspect, bpp, view, mode);
+        return;
+    }
     if (nvmtl_cp_resolve(img->fmt, img->samples, img->bpp, g_copy_aspect_override, 0, &aspect, &bpp, &why))
         snprintf(out, n, "vkfmt %u samples %u type %u layers %u mips %u: REFUSED (%s)", img->fmt, img->samples ? img->samples : 1u,
                  img->mtl_type, img->layers, img->mips, why);
@@ -7304,18 +7314,21 @@ static inline uint32_t nvmtl_lvl(uint32_t d, uint32_t l) { d >>= l; return d ? d
 /* ---- buffer -> multisampled colour image (nvmtl_msupload.h) ---------------------------------------------------------
  * Vulkan has no such copy and RADV asserts on it (card run 2026-10-25c, Chess: glReadPixels -> gldBlitFramebufferData ->
  * copyFromBuffer:toTexture: on a 4-sample texture). A full-screen-triangle pass at the image's sample count reads the
- * region's bytes from the buffer by device address and writes them; scissor = the region, load op LOAD keeps the rest. */
+ * region's bytes from the buffer by device address and writes them; scissor = the region, load op LOAD keeps the rest.
+ * Apple's buffer holds `samples` elements per pixel (card run 2026-10-25f, nvmtl_msbuf.h): one draw per sample, each restricted
+ * to its sample by the fragment shader's coverage mask. Integer attachments (R8_UINT: Chess's stencil resolve) use a second
+ * fragment module with an unsigned output. */
 #include "nvmtl_msupload.h"
 #include "nvmtl_msupload_spv.h"
 static pthread_mutex_t g_msu_lock = PTHREAD_MUTEX_INITIALIZER;
 static VkPipelineLayout g_msu_layout;
-/* 4 formats x 3 sample counts = 12 pairs the plan can ask for; 16 slots. A pair whose build failed stays in the table as failed:
+/* 9 view formats x 3 sample counts = 27 pairs the plan can ask for; 32 slots. A pair whose build failed stays in the table as failed:
  * it is not rebuilt (shader modules, render pass, pipeline) on every call. */
-static struct { uint32_t fmt, samples; int failed; VkRenderPass rp; VkPipeline pipe; } g_msu_tab[16];
+static struct { uint32_t fmt, samples; int failed; VkRenderPass rp; VkPipeline pipe; } g_msu_tab[32];
 static unsigned g_msu_n;
 static _Atomic unsigned g_msu_done, g_msu_refused, g_msu_failed;
-struct nvmtl_msu_pc { uint32_t base[2]; uint32_t row; int32_t ox, oy; uint32_t w, h, mode; };   /* 32 bytes, nvmtl_msupload_spv.h */
-_Static_assert(sizeof(struct nvmtl_msu_pc) == 32, "msu.frag push constant block");
+struct nvmtl_msu_pc { uint32_t base[2]; uint32_t row; int32_t ox, oy; uint32_t w, h, mode, samples, sidx, inter; };   /* 44 bytes, nvmtl_msupload_spv.h */
+_Static_assert(sizeof(struct nvmtl_msu_pc) == 44, "msu.frag push constant block");
 
 /* every failure of the upload pass: counted, and logged for the first 8 and every 1024th, with the running count */
 static void nvmtl_msu_fail(const char *what, long code)
@@ -7332,7 +7345,7 @@ static void nvmtl_msu_refuse(const char *what)
 }
 
 /* build the render pass and pipeline of one (view format, samples) pair; called with g_msu_lock held, once per pair */
-static int nvmtl_msu_build(uint32_t fmt, uint32_t samples, VkRenderPass *rp_out, VkPipeline *pipe_out)
+static int nvmtl_msu_build(uint32_t fmt, uint32_t samples, int uint_out, VkRenderPass *rp_out, VkPipeline *pipe_out)
 {
     VkShaderModule vm = VK_NULL_HANDLE, fm = VK_NULL_HANDLE; VkRenderPass rp = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
     VkResult r;
@@ -7355,7 +7368,8 @@ static int nvmtl_msu_build(uint32_t fmt, uint32_t samples, VkRenderPass *rp_out,
     if ((r = pvkCreateRenderPass(g_dev, &rci, NULL, &rp)) != VK_SUCCESS) {
         snprintf(what, sizeof what, "vkCreateRenderPass (format %u, %u samples)", fmt, samples); nvmtl_msu_fail(what, r); return -1; }
     VkShaderModuleCreateInfo vsi = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msu_vert_spv, nvmtl_msu_vert_spv };
-    VkShaderModuleCreateInfo fsi = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msu_frag_spv, nvmtl_msu_frag_spv };
+    VkShaderModuleCreateInfo fsi = uint_out ? (VkShaderModuleCreateInfo){ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msu_frag_u_spv, nvmtl_msu_frag_u_spv }
+                                            : (VkShaderModuleCreateInfo){ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msu_frag_spv, nvmtl_msu_frag_spv };
     if ((r = pvkCreateShaderModule(g_dev, &vsi, NULL, &vm)) != VK_SUCCESS || (r = pvkCreateShaderModule(g_dev, &fsi, NULL, &fm)) != VK_SUCCESS) {
         nvmtl_msu_fail("vkCreateShaderModule (the device lacks Int64 / PhysicalStorageBuffer64?)", r); goto fail; }
     VkPipelineShaderStageCreateInfo st[2] = {
@@ -7385,7 +7399,7 @@ fail:
     return -1;
 }
 
-static int nvmtl_msu_pipeline(uint32_t fmt, uint32_t samples, VkRenderPass *rp_out, VkPipeline *pipe_out)
+static int nvmtl_msu_pipeline(uint32_t fmt, uint32_t samples, int uint_out, VkRenderPass *rp_out, VkPipeline *pipe_out)
 {
     int rc = -1;
     pthread_mutex_lock(&g_msu_lock);
@@ -7397,9 +7411,9 @@ static int nvmtl_msu_pipeline(uint32_t fmt, uint32_t samples, VkRenderPass *rp_o
     if (g_msu_n == sizeof g_msu_tab / sizeof *g_msu_tab) { rc = -2; nvmtl_msu_fail("more (format, samples) pairs than the pass table holds", (long)g_msu_n); goto out; }
     VkRenderPass rp = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
     g_msu_tab[g_msu_n].fmt = fmt; g_msu_tab[g_msu_n].samples = samples;
-    if (nvmtl_msu_build(fmt, samples, &rp, &pipe)) { g_msu_tab[g_msu_n].failed = 1; g_msu_n++; goto out; }
+    if (nvmtl_msu_build(fmt, samples, uint_out, &rp, &pipe)) { g_msu_tab[g_msu_n].failed = 1; g_msu_n++; goto out; }
     g_msu_tab[g_msu_n].rp = rp; g_msu_tab[g_msu_n].pipe = pipe; g_msu_n++;
-    nvlog("msupload: pass built for view format %u at %u samples (%u in this process)", fmt, samples, g_msu_n);
+    nvlog("msupload: pass built for view format %u at %u samples, %s output (%u in this process)", fmt, samples, uint_out ? "unsigned-integer" : "float", g_msu_n);
     *rp_out = rp; *pipe_out = pipe; rc = 0;
 out:
     pthread_mutex_unlock(&g_msu_lock);
@@ -7424,7 +7438,7 @@ static int nvmtl_vk_cmd_copy_buffer_to_msimage(nvk_cmdbuf *c, nvk_buffer *b, siz
         return -1;
     }
     VkRenderPass rp = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
-    { const int pr_ = nvmtl_msu_pipeline(plan.view_fmt, img->samples, &rp, &pipe);
+    { const int pr_ = nvmtl_msu_pipeline(plan.view_fmt, img->samples, (int)plan.uint_out, &rp, &pipe);
       if (pr_ == -2) nvmtl_msu_refuse("the pass for this (view format, samples) pair failed to build earlier");
       if (pr_) return -1; }
     void *view = NULL; uint32_t vw = 0, vh = 0;
@@ -7443,8 +7457,9 @@ static int nvmtl_vk_cmd_copy_buffer_to_msimage(nvk_cmdbuf *c, nvk_buffer *b, siz
     c->fbs[c->nfb++] = fb;
     const unsigned seq = atomic_fetch_add(&g_msu_done, 1) + 1;
     if (seq <= 8 || seq % 1024 == 0)
-        nvlog("msupload: buffer -> %u-sample image %ux%u (vk format %u via view %u, mode %u): region (%u,%u) %ux%u from buffer offset %zu row %llu B [%u so far]",
-              img->samples, img->w, img->h, img->fmt, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row, seq);
+        nvlog("msupload: buffer -> %u-sample image %ux%u (vk format %u via view %u, mode %u): region (%u,%u) %ux%u from buffer offset %zu row %llu B, %s layout, %s output [%u so far]",
+              img->samples, img->w, img->h, img->fmt, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row,
+              plan.inter ? "sample-interleaved (a row holds samples x elements per pixel)" : "one element per pixel", plan.uint_out ? "integer" : "float", seq);
     nvmtl_vk_cmd_barrier(c);
     img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -7455,11 +7470,164 @@ static int nvmtl_vk_cmd_copy_buffer_to_msimage(nvk_cmdbuf *c, nvk_buffer *b, siz
     VkRect2D sc = { { (int32_t)x, (int32_t)y }, { w, h } };
     pvkCmdSetViewport(c->cb, 0, 1, &vpt); pvkCmdSetScissor(c->cb, 0, 1, &sc);
     const uint64_t base = addr + off;   /* the device address of texel (0,0) of the region */
-    struct nvmtl_msu_pc pc = { { (uint32_t)base, (uint32_t)(base >> 32) }, (uint32_t)plan.row, (int32_t)x, (int32_t)y, w, h, plan.mode };
-    pvkCmdPushConstants(c->cb, g_msu_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
-    pvkCmdDraw(c->cb, 3, 1, 0, 0);
+    struct nvmtl_msu_pc pc = { { (uint32_t)base, (uint32_t)(base >> 32) }, (uint32_t)plan.row, (int32_t)x, (int32_t)y, w, h, plan.mode,
+                               img->samples, 0, plan.inter };
+    for (uint32_t s = 0; s < (plan.inter ? img->samples : 1u); s++) {   /* interleaved: one draw per sample, the shader masks its coverage to it */
+        pc.sidx = s;
+        pvkCmdPushConstants(c->cb, g_msu_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof pc, &pc);
+        pvkCmdDraw(c->cb, 3, 1, 0, 0);
+    }
     pvkCmdEndRenderPass(c->cb);
     img->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    nvmtl_vk_cmd_barrier(c);
+    return 0;
+}
+
+/* ---- multisampled image -> buffer (nvmtl_msdl.h, nvmtl_msbuf.h) ---------------------------------------------------------
+ * Vulkan has no such copy; until this pass the plugin dropped it (card run 2026-10-25f, Chess: the stencil of a 4-sample
+ * D32_S8 texture, the first step of Apple's GL stencil resolve, so the 1-sample stencil came from uninitialised memory).
+ * A compute shader reads the image through a SAMPLED view of the aspect (texelFetch per sample) and writes the bytes into
+ * the buffer by device address, in Apple's layout: `samples` elements per pixel per row. The image's layout becomes
+ * SHADER_READ_ONLY_OPTIMAL. */
+#include "nvmtl_msdl_spv.h"
+static pthread_mutex_t g_msd_lock = PTHREAD_MUTEX_INITIALIZER;
+static VkDescriptorSetLayout g_msd_setlayout;
+static VkPipelineLayout g_msd_layout;
+static struct { VkPipeline pipe; int failed; } g_msd_pipe[2];   /* [0] float module, [1] unsigned-integer module; a failed build is not retried */
+#define NVMTL_MSD_POOLS 8
+#define NVMTL_MSD_POOL_SETS 256
+static VkDescriptorPool g_msd_pools[NVMTL_MSD_POOLS]; static unsigned g_msd_npools;   /* under g_desc_lock */
+static _Atomic unsigned g_msd_done, g_msd_refused, g_msd_failed;
+struct nvmtl_msd_pc { uint32_t base[2], row, used, w, h; int32_t ox, oy; uint32_t samples, mode, bpp, stride, nwords; };   /* 52 bytes, msdl.comp */
+_Static_assert(sizeof(struct nvmtl_msd_pc) == 52, "msdl.comp push constant block");
+
+static void nvmtl_msd_fail(const char *what, long code)
+{
+    const unsigned n = atomic_fetch_add(&g_msd_failed, 1) + 1;
+    if (n <= 8 || n % 1024 == 0) nvlog("msdl: FAILED - %s (%ld) [%u failed, %u refused, %u done so far]", what, code, n,
+                                       atomic_load(&g_msd_refused), atomic_load(&g_msd_done));
+}
+static void nvmtl_msd_refuse(const char *what)
+{
+    const unsigned n = atomic_fetch_add(&g_msd_refused, 1) + 1;
+    if (n <= 8 || n % 1024 == 0) nvlog("msdl: REFUSED - %s [%u refused, %u failed, %u done so far]", what, n,
+                                       atomic_load(&g_msd_failed), atomic_load(&g_msd_done));
+}
+/* the set layout, the pipeline layout and the pipeline of one module kind (0 float, 1 unsigned integer); 0 = ready, -1 = failed (logged) */
+static int nvmtl_msd_pipeline(int uint_in, VkPipeline *pipe_out)
+{
+    int rc = -1;
+    pthread_mutex_lock(&g_msd_lock);
+    if (g_msd_pipe[uint_in].pipe) { *pipe_out = g_msd_pipe[uint_in].pipe; rc = 0; goto out; }
+    if (g_msd_pipe[uint_in].failed) goto out;   /* built (and logged) once, never retried */
+    VkResult r; VkShaderModule mod = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
+    if (!g_msd_setlayout) {
+        VkDescriptorSetLayoutBinding bnd = { 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
+        VkDescriptorSetLayoutCreateInfo li = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, 1, &bnd };
+        if ((r = pvkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_msd_setlayout)) != VK_SUCCESS) { g_msd_setlayout = VK_NULL_HANDLE; nvmtl_msd_fail("vkCreateDescriptorSetLayout", r); goto fail; }
+    }
+    if (!g_msd_layout) {
+        VkPushConstantRange pr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(struct nvmtl_msd_pc) };
+        VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &g_msd_setlayout, 1, &pr };
+        if ((r = pvkCreatePipelineLayout(g_dev, &li, NULL, &g_msd_layout)) != VK_SUCCESS) { g_msd_layout = VK_NULL_HANDLE; nvmtl_msd_fail("vkCreatePipelineLayout", r); goto fail; }
+    }
+    VkShaderModuleCreateInfo sm = uint_in ? (VkShaderModuleCreateInfo){ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msdl_uint_spv, nvmtl_msdl_uint_spv }
+                                          : (VkShaderModuleCreateInfo){ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msdl_float_spv, nvmtl_msdl_float_spv };
+    if ((r = pvkCreateShaderModule(g_dev, &sm, NULL, &mod)) != VK_SUCCESS) { nvmtl_msd_fail("vkCreateShaderModule (the device lacks Int64 / PhysicalStorageBuffer64?)", r); goto fail; }
+    VkPipelineShaderStageCreateInfo st = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL };
+    VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, st, g_msd_layout, VK_NULL_HANDLE, -1 };
+    if ((r = pvkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &pi, NULL, &pipe)) != VK_SUCCESS) { nvmtl_msd_fail("vkCreateComputePipelines", r); goto fail; }
+    pvkDestroyShaderModule(g_dev, mod, NULL);
+    g_msd_pipe[uint_in].pipe = pipe; *pipe_out = pipe; rc = 0;
+    nvlog("msdl: pass built for the %s module", uint_in ? "unsigned-integer (stencil, R8_UINT ...)" : "float (depth, colour)");
+    goto out;
+fail:
+    if (mod) pvkDestroyShaderModule(g_dev, mod, NULL);
+    g_msd_pipe[uint_in].failed = 1;
+out:
+    pthread_mutex_unlock(&g_msd_lock);
+    return rc;
+}
+/* one descriptor set for this command buffer, freed with the others when it retires (c->sets) */
+static VkDescriptorSet nvmtl_msd_alloc_set(nvk_cmdbuf *c)
+{
+    VkDescriptorSet set = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE; VkResult r = VK_ERROR_OUT_OF_POOL_MEMORY;
+    unsigned opened = 0;
+    pthread_mutex_lock(&g_desc_lock);
+    for (unsigned k = g_msd_npools; k > 0 && r != VK_SUCCESS; k--) {   /* newest first; an older pool has room again once its command buffers retired */
+        VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_msd_pools[k - 1], 1, &g_msd_setlayout };
+        r = pvkAllocateDescriptorSets(g_dev, &ai, &set); pool = g_msd_pools[k - 1];
+    }
+    if (r != VK_SUCCESS && g_msd_npools < NVMTL_MSD_POOLS) {
+        VkDescriptorPoolSize sz = { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, NVMTL_MSD_POOL_SETS };
+        VkDescriptorPoolCreateInfo pci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, NVMTL_MSD_POOL_SETS, 1, &sz };
+        VkDescriptorPool np = VK_NULL_HANDLE;
+        r = pvkCreateDescriptorPool(g_dev, &pci, NULL, &np);
+        if (r == VK_SUCCESS) {
+            g_msd_pools[g_msd_npools++] = np; opened = g_msd_npools;
+            VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, np, 1, &g_msd_setlayout };
+            r = pvkAllocateDescriptorSets(g_dev, &ai, &set); pool = np;
+        }
+    }
+    if (r == VK_SUCCESS && c->nsets == c->capsets) {
+        unsigned cap = c->capsets ? c->capsets * 2 : 64;
+        nvk_setref *grown = (nvk_setref *)realloc(c->sets, cap * sizeof *grown);
+        if (grown) { c->sets = grown; c->capsets = cap; }
+        else { pvkFreeDescriptorSets(g_dev, pool, 1, &set); r = VK_ERROR_OUT_OF_HOST_MEMORY; }
+    }
+    if (r == VK_SUCCESS) c->sets[c->nsets++] = (nvk_setref){ pool, set };
+    pthread_mutex_unlock(&g_desc_lock);   /* no log file I/O under the lock */
+    if (opened) nvlog("msdl: descriptor pool %u opened (%d sets each)", opened, NVMTL_MSD_POOL_SETS);
+    if (r != VK_SUCCESS) { nvmtl_msd_fail("descriptor set allocation", r); return VK_NULL_HANDLE; }
+    return set;
+}
+
+static int nvmtl_vk_cmd_copy_msimage_to_buffer(nvk_cmdbuf *c, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                               nvk_buffer *b, size_t off, uint32_t row_bytes, uint32_t level, uint32_t layer)
+{
+    nvmtl_msdl_plan plan; const char *why = NULL;
+    if (nvmtl_msdl_plan_make(img->fmt, img->samples, img->mtl_type, img->layers ? img->layers : 1, img->mips ? img->mips : 1, level, layer,
+                             g_copy_aspect_override, img->w, img->h, x, y, w, h, row_bytes, off, b->size, &plan, &why)) {
+        unsigned n = atomic_fetch_add(&g_msd_refused, 1) + 1;
+        if (n <= 8 || n % 1024 == 0)
+            nvlog("copy_image_to_buffer: REFUSED - a %u-sample image: %s (vk format %u, type %u, aspect option %u, region (%u,%u) %ux%u, row %u B, buffer offset %zu of %zu) [%u refused, %u failed so far]",
+                  img->samples, why, img->fmt, img->mtl_type, g_copy_aspect_override, x, y, w, h, row_bytes, off, b->size, n, atomic_load(&g_msd_failed));
+        return -1;
+    }
+    const uint64_t addr = nvmtl_vk_buffer_address(b);
+    if (c->in_rp || !addr || !g_dev) {
+        nvmtl_msd_refuse(c->in_rp ? "a render pass is open" : "the buffer has no device address (bufferDeviceAddress is not enabled)");
+        return -1;
+    }
+    if (img->usage && !(img->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) {   /* the shader reads the image through a sampled view */
+        char w_[96]; snprintf(w_, sizeof w_, "the format-%u image was created without SAMPLED usage (usage 0x%x)", img->fmt, img->usage); nvmtl_msd_refuse(w_); return -1; }
+    VkPipeline pipe = VK_NULL_HANDLE;
+    if (nvmtl_msd_pipeline((int)plan.uint_in, &pipe)) { nvmtl_msd_refuse("the pass for this module failed to build earlier (see the FAILED line)"); return -1; }
+    void *view = NULL;
+    if (nvmtl_vk_image_view_create_range_aspect(img, plan.view_fmt, 0, plan.aspect, 0, 1, 0, 1, 4u, &view) || !view) {
+        char w_[120]; snprintf(w_, sizeof w_, "no sampled view of format %u aspect %u over the format-%u image", plan.view_fmt, plan.aspect, img->fmt); nvmtl_msd_fail(w_, 0); return -1; }
+    if (nvmtl_vk_cmd_retire_view(c, view)) { nvmtl_msd_fail("view retention allocation", 0); return -1; }   /* a failed retire destroyed the view itself */
+    VkDescriptorSet set = nvmtl_msd_alloc_set(c);
+    if (!set) return -1;
+    VkDescriptorImageInfo ii = { VK_NULL_HANDLE, (VkImageView)view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet wr = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, 0, 0, 1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, &ii, NULL, NULL };
+    pvkUpdateDescriptorSets(g_dev, 1, &wr, 0, NULL);
+    const uint64_t base = addr + off;   /* the device address of byte 0 of the region */
+    const uint32_t nwords = nvmtl_msbuf_words((uint32_t)(base & 3u), plan.span);
+    uint32_t gx, gy, stride; nvmtl_msbuf_dispatch(nwords, &gx, &gy, &stride);
+    const unsigned seq = atomic_fetch_add(&g_msd_done, 1) + 1;
+    if (seq <= 8 || seq % 1024 == 0)
+        nvlog("msdl: %u-sample image %ux%u -> buffer (vk format %u, aspect %u via view %u, mode %u): region (%u,%u) %ux%u to buffer offset %zu row %llu B, %u word(s) in %ux%u group(s) [%u so far]",
+              img->samples, img->w, img->h, img->fmt, plan.aspect, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row, nwords, gx, gy, seq);
+    nvmtl_vk_cmd_barrier(c);
+    img_to(c, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+    pvkCmdBindDescriptorSets(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_msd_layout, 0, 1, &set, 0, NULL);
+    struct nvmtl_msd_pc pc = { { (uint32_t)base, (uint32_t)(base >> 32) }, (uint32_t)plan.row, (uint32_t)plan.used, w, h, (int32_t)x, (int32_t)y,
+                               img->samples, plan.mode, plan.bpp, stride, nwords };
+    pvkCmdPushConstants(c->cb, g_msd_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    pvkCmdDispatch(c->cb, gx, gy, 1);
     nvmtl_vk_cmd_barrier(c);
     return 0;
 }
@@ -7529,6 +7697,7 @@ int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img,
               !b ? "no buffer" : !b->buf ? "the buffer has no VkBuffer (not bound yet?)" : "");
         return -1;
     }
+    if (img->samples > 1) return nvmtl_vk_cmd_copy_msimage_to_buffer(c, img, x, y, w, h, b, off, row_bytes, level, layer);
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_image_to_buffer: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
     uint32_t aspect = 0, bpp = 0; const char *why = NULL;
