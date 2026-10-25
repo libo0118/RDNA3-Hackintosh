@@ -123,6 +123,26 @@ jobs:
         run: |
           file build/RDNA3Accel.kext/Contents/MacOS/RDNA3Accel
           make -C kext check
+      # card run 2026-10-25b (DRIVER-PLAN N47): kmutil refused the framebuffer
+      # and the accelerator on macOS 26 (thread_call_cancel_wait is exported
+      # only by com.apple.kpi.private); the build never noticed. Each kext
+      # kmutil links on its own (the Auxiliary KC) must bind every import to
+      # a library its Info.plist declares, never to kpi.private, against this
+      # runner's kernel collections. No kmutil = an error, not a pass.
+      - name: KPI guard (kmutil libraries) for the kexts kmutil links
+        run: |
+          python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Framebuffer.kext build/RDNA3Accelerator.kext \
+            build/RDNA3AGDC.kext
+          # the macOS 26 layout of the accelerator: a symbol only 26 exports
+          # would not resolve on this runner's older collections (a warning)
+          python3 tools/ci/kmutil_kpi_guard.py --warn-unresolved build/RDNA3AcceleratorTahoe.kext
+      # the core is injected by OpenCore, whose prelinker binds kernel
+      # symbols kmutil would refuse (26.4.1: IOMemoryDescriptor::doMap /
+      # doUnmap through RDNA3BoMemory's vtable, DRIVER-PLAN N47): reported,
+      # not yet a build failure
+      - name: KPI guard for the core (advisory)
+        continue-on-error: true
+        run: python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Accel.kext
       - name: Userspace (libdrm_xnu, rdna3_drminfo, rdna3_modetest, rdna3_pmctl)
         run: make -C userspace
       - name: rdna3_vktest + mtlprobe (bundled into the VM's report bin)

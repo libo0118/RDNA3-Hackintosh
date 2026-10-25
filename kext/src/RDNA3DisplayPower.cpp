@@ -82,11 +82,11 @@ void RDNA3Accel::displayPowerInit(rdna3_dev *d, rdna3_dmub *dm, uint64_t wmTable
     LOG("display power: init %s", val);
     if (fPowerOn && !fPowerIdleCall) {
         fPowerStop = false;
-        fPowerIdleCall = thread_call_allocate((thread_call_func_t)displayPowerTick, this);
+        fPowerIdleCall = rd3_tcall_alloc("core.displayPowerTick", (thread_call_func_t)displayPowerTick, this);
         if (fPowerIdleCall) {
             uint64_t dl;
             clock_interval_to_deadline(POWER_IDLE_MS, kMillisecondScale, &dl);
-            thread_call_enter_delayed(fPowerIdleCall, dl);
+            rd3_tcall_enter_delayed(fPowerIdleCall, dl);
         }
     }
 }
@@ -253,7 +253,7 @@ void RDNA3Accel::displayPowerTick(void *owner, void *)
     uint64_t dl;
     clock_interval_to_deadline(POWER_IDLE_MS, kMillisecondScale, &dl);
     if (a->fPowerIdleCall && !a->fPowerStop)
-        thread_call_enter_delayed(a->fPowerIdleCall, dl);
+        rd3_tcall_enter_delayed(a->fPowerIdleCall, dl);
 }
 
 /* idle optimizations off, SubVP's phantoms off (the firmware told under
@@ -316,7 +316,7 @@ void RDNA3Accel::displayPowerFree()
 {
     fPowerStop = true;
     if (fPowerIdleCall) {
-        rd3_thread_call_drain_free(fPowerIdleCall);
+        rd3_tcall_free(fPowerIdleCall);
         fPowerIdleCall = nullptr;
     }
     /* the flag and the pointers change under fDispLock, which the flip

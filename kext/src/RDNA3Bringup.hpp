@@ -272,7 +272,7 @@ private:
      * The hardware CTF is handled in the IV callback; whatever needs the
      * PMFW mailbox runs from fSmuIrqCall under the DRM lock (50 ms later
      * for the software CTF check, AMDGPU_SWCTF_EXTRA_DELAY) */
-    struct thread_call *fSmuIrqCall = nullptr;
+    struct rd3_tcall *fSmuIrqCall = nullptr;
     struct SmuIv { uint32_t client, src, ctx; };
     static const uint32_t kSmuIvMax = 8;
     SmuIv            fSmuIrqQ[kSmuIvMax] = {};
@@ -309,7 +309,7 @@ private:
      * (GFX_OFF_DELAY_ENABLE). Holds and the SMU mailbox: under the DRM lock. */
     bool             fGfxOffWanted = false, fGfxOffOn = false, fGfxOffStop = false;
     uint32_t         fGfxOffHolds = 1;    /* the bring-up holds it until done */
-    struct thread_call *fGfxOffCall = nullptr;
+    struct rd3_tcall *fGfxOffCall = nullptr;
     static void      gfxOffTick(void *owner, void *);
     void             cgStart(const char *why);
     void             mesStart(const char *why);
@@ -322,7 +322,7 @@ private:
     uint32_t         fVcnMode = 0;
     rdna3_vcn       *fVcn = nullptr;
     uint32_t         fVcnHangs = 0;
-    struct thread_call *fVcnIdleCall = nullptr;
+    struct rd3_tcall *fVcnIdleCall = nullptr;
     volatile uint64_t fIrqVcn = 0, fIrqJpeg = 0;
     void             vcnStart();
     void             vcnFreeSaved();

@@ -65,7 +65,7 @@ extern "C" {
 
 struct RDNA3HotplugState {
     rdna3_hpd_track track;
-    thread_call_t   call;
+    struct rd3_tcall *call;
     volatile bool   stop;
     uint64_t        lastPoll;                 /* mach absolute time */
     uint32_t        headGen[RD3K_MAX_HEADS];
@@ -91,8 +91,8 @@ void RDNA3Accel::hotplugInit()
     if (!fHp)
         return;
     bzero(fHp, sizeof(*fHp));
-    fHp->call = thread_call_allocate_with_options((thread_call_func_t)hotplugTick, this,
-                                                  THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+    fHp->call = rd3_tcall_alloc_with("core.hotplugTick", (thread_call_func_t)hotplugTick, this,
+                                     THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
     if (!fHp->call) {
         IOFree(fHp, sizeof(*fHp));
         fHp = nullptr;
@@ -119,7 +119,7 @@ void RDNA3Accel::hotplugInit()
     LOG("hotplug: polling %u HPD pins every %u ms, a change counts after %u looks", fHp->track.npins,
         RD_HPD_POLL_MS, RD_HPD_DEBOUNCE);
     clock_get_uptime(&fHp->lastPoll);
-    thread_call_enter_delayed(fHp->call, fHp->lastPoll + hpPollAbs());
+    rd3_tcall_enter_delayed(fHp->call, fHp->lastPoll + hpPollAbs());
 }
 
 /* the bring-up is going or the system shuts down: no more looks, none
@@ -130,7 +130,7 @@ void RDNA3Accel::hotplugStop()
         return;
     fHp->stop = true;
     if (fHp->call)
-        rd3_thread_call_drain(fHp->call);
+        rd3_tcall_drain(fHp->call);
 }
 
 /* amdgpu_dm_irq_suspend for the looks: none while the card sleeps or comes
@@ -142,7 +142,7 @@ void RDNA3Accel::hotplugSuspend()
     if (!fHp || fHp->stop)
         return;   /* not running (or stopped for good: the bring-up went) */
     if (fHotplugCall)
-        thread_call_cancel_wait(fHotplugCall);   /* an HPD interrupt's work */
+        rd3_tcall_drain(fHotplugCall);   /* an HPD interrupt's work */
     hotplugStop();
     fHp->suspended = true;
 }
@@ -168,7 +168,7 @@ void RDNA3Accel::hotplugResume()
         RD_HPD_RESUME_SETTLE_MS);
     clock_get_uptime(&fHp->lastPoll);
     nanoseconds_to_absolutetime((uint64_t)RD_HPD_RESUME_SETTLE_MS * 1000000ull, &settle);
-    thread_call_enter_delayed(fHp->call, fHp->lastPoll + settle);
+    rd3_tcall_enter_delayed(fHp->call, fHp->lastPoll + settle);
 }
 
 void RDNA3Accel::hotplugFree()
@@ -177,7 +177,7 @@ void RDNA3Accel::hotplugFree()
         return;
     hotplugStop();
     if (fHp->call)
-        rd3_thread_call_drain_free(fHp->call);   /* a late hotplugKick */
+        rd3_tcall_free(fHp->call);   /* a late hotplugKick */
     IOFree(fHp, sizeof(*fHp));
     fHp = nullptr;
 }
@@ -192,7 +192,7 @@ bool RDNA3Accel::hotplugKick()
     uint64_t now;
     clock_get_uptime(&now);
     if (now - fHp->lastPoll >= hpPollAbs() / 2)
-        thread_call_enter(fHp->call);
+        rd3_tcall_enter(fHp->call);
     return true;
 }
 
@@ -214,7 +214,7 @@ void RDNA3Accel::hotplugTick(void *owner, void *)
     if (!hp->stop) {
         uint64_t now;
         clock_get_uptime(&now);
-        thread_call_enter_delayed(hp->call, now + hpPollAbs());
+        rd3_tcall_enter_delayed(hp->call, now + hpPollAbs());
     }
 }
 

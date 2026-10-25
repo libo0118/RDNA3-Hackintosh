@@ -91,6 +91,7 @@
 #include "../common/rdna3_bootargs.h"
 #include "../common/rdna3_fb_policy.h"
 #include "../common/rdna3_vbl_irq.h"
+#include "../common/rdna3_tcall.h"
 #include <libkern/OSAtomic.h>
 #include <kern/thread_call.h>
 #include <kern/clock.h>
@@ -129,16 +130,15 @@ static bool bootArgOn(const char *name)
 
 /* a thread call that re-arms itself (or that a racing kick may enter once
  * more), each invocation holding a reference of 'owner': the owner's stop
- * flag is set first, so a run that sees it re-arms nothing; every
- * invocation cancelled gives its reference back */
-static void fbCallDrainFree(OSObject *owner, thread_call_t c)
+ * flag is set first, so a run that sees it re-arms nothing; a run still
+ * going is waited for; every invocation cancelled gives its reference back.
+ * common/rdna3_tcall.h: public KPIs only (thread_call_cancel_wait is
+ * com.apple.kpi.private on macOS 26, card run 2026-10-25b) */
+static void fbCallDrainFree(OSObject *owner, struct rd3_tcall *c)
 {
     __sync_synchronize();
-    while (thread_call_cancel_wait(c))
+    for (unsigned n = rd3_tcall_free(c); n; n--)
         owner->release();
-    while (!thread_call_free(c))
-        if (thread_call_cancel_wait(c))
-            owner->release();
 }
 
 /* IOFramebuffer::open() runs under IOGraphics' system gate (newUserClient
@@ -201,7 +201,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
 
     /* VBL */
     struct { IOFBInterruptProc proc; OSObject *target; void *ref; } fVbl = {}, fConnect = {};
-    thread_call_t fVblTimer = nullptr;
+    struct rd3_tcall *fVblTimer = nullptr;
     uint64_t fVblNext = 0;
     uint32_t fLastFrame = 0;
     unsigned fVblWaits = 0;
@@ -220,7 +220,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
      * fVirqIrqs, fPflipAbs / fPflipSeq / fVirqPflips (one writer each) */
     uint32_t fArgVblIrq = 1;
     const OSSymbol *fSymIrq = nullptr;
-    thread_call_t fVblIrqCall = nullptr;
+    struct rd3_tcall *fVblIrqCall = nullptr;
     bool     fVirqReg = false, fVirqFallingBack = false;
     IOReturn fVirqRegRet = kIOReturnNotReady;
     uint32_t fVirqRegTries = 0, fVirqWhy = 0, fVirqEnabled = 0;
@@ -276,7 +276,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
      * work that could not run (drained at stop) */
     IONotifier   *fSleepTap = nullptr;
     IOCommandGate *fWakeGate = nullptr;
-    thread_call_t fWakeRetry = nullptr;
+    struct rd3_tcall *fWakeRetry = nullptr;
     struct rd3fb_wake fWake = {};
     uint32_t fWakeNoGate = 0, fWakeOff = 0, fWakeStopping = 0;
     /* wake work past the stopping test (rd3fb_wake_enter, under fLock):
@@ -350,7 +350,7 @@ class RDNA3Framebuffer : public IOFramebuffer {
      * flips, VBL status, EDID and the DP link take too (NullMoth's cursor
      * thread call); fCurLock guards fCurQ and the fCur* state */
     IOSimpleLock *fCurLock = nullptr;
-    thread_call_t fCurCall = nullptr;
+    struct rd3_tcall *fCurCall = nullptr;
     struct rd3fb_cur_q fCurQ = {};
     uint32_t fCurSync = 0, fCurFailLogged = 0;
     uint32_t fCurImageFails = 0, fCurConvertFails = 0;   /* the core refused the first image; convertCursorImage failed */
@@ -686,9 +686,9 @@ bool RDNA3Framebuffer::start(IOService *provider)
     /* ONCE: a re-arm while vblFire still runs (a slow status call under the
      * core's display lock) queues one more run instead of a second vblFire
      * beside it (NullMoth #295); both run at THREAD_CALL_PRIORITY_HIGH */
-    fVblTimer = fArgVblOnce ? thread_call_allocate_with_options(vblFire, this, THREAD_CALL_PRIORITY_HIGH,
-                                                                THREAD_CALL_OPTIONS_ONCE)
-                            : thread_call_allocate(vblFire, this);
+    fVblTimer = fArgVblOnce ? rd3_tcall_alloc_with("fb.vbl", vblFire, this, THREAD_CALL_PRIORITY_HIGH,
+                                                   THREAD_CALL_OPTIONS_ONCE)
+                            : rd3_tcall_alloc("fb.vbl", vblFire, this);
     if (!fVblTimer) {
         fVblCallFailed = 1;
         FBLOG("head %u: no VBL thread call (rdna3vblonce=%u): no VBL interrupts for IOGraphics at all", fHead,
@@ -702,8 +702,8 @@ bool RDNA3Framebuffer::start(IOService *provider)
     /* N42: the vblank / pflip interrupts (the poll above stays the fallback) */
     if (fArgVblIrq && fDcn && fVblTimer) {
         fSymIrq = OSSymbol::withCStringNoCopy(RD3K_DISPLAY_FN_IRQ);
-        fVblIrqCall = thread_call_allocate_with_options(vblIrqFire, this, THREAD_CALL_PRIORITY_HIGH,
-                                                        THREAD_CALL_OPTIONS_ONCE);
+        fVblIrqCall = rd3_tcall_alloc_with("fb.vblirq", vblIrqFire, this, THREAD_CALL_PRIORITY_HIGH,
+                                           THREAD_CALL_OPTIONS_ONCE);
         if (!fSymIrq || !fVblIrqCall) {
             fVirqNoReg = RD3FB_VIRQ_NOREG_NOCALL;
             FBLOG("head %u: no symbol or thread call for the vblank interrupt: the OTG poll delivers", fHead);
@@ -725,7 +725,7 @@ bool RDNA3Framebuffer::start(IOService *provider)
         if (g && wl->addEventSource(g) != kIOReturnSuccess)
             OSSafeReleaseNULL(g);
         fWakeGate = g;
-        fWakeRetry = thread_call_allocate(wakeRetryFire, this);
+        fWakeRetry = rd3_tcall_alloc("fb.wakeretry", wakeRetryFire, this);
         if (!fWakeGate || !fWakeRetry)
             FBLOG("head %u: family wake work: controller workloop %p, command gate %p, retry call %p: a system wake "
                   "%s", fHead, wl, fWakeGate, fWakeRetry,
@@ -803,7 +803,7 @@ void RDNA3Framebuffer::scheduleVbl(uint64_t deadline)
     IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
     if (!fStopping) {
         retain();
-        if (thread_call_enter_delayed(fVblTimer, deadline))
+        if (rd3_tcall_enter_delayed(fVblTimer, deadline))
             release();   /* was already queued: that one holds the reference */
     }
     IOSimpleLockUnlockEnableInterrupt(fLock, st);
@@ -847,9 +847,7 @@ void RDNA3Framebuffer::stop(IOService *provider)
     stopWaitVirqReg();
     virqUnregister();
     if (fVblIrqCall) {
-        thread_call_cancel_wait(fVblIrqCall);
-        while (!thread_call_free(fVblIrqCall))
-            thread_call_cancel_wait(fVblIrqCall);
+        rd3_tcall_free(fVblIrqCall);   /* a vblIrqFire still running finishes first */
         fVblIrqCall = nullptr;
     }
     if (fVblTimer) {
@@ -1069,7 +1067,7 @@ void RDNA3Framebuffer::virqFn(void *target, unsigned int head, unsigned int kind
         me->fVirqFrame = frame;
         me->fVirqIrqs++;
         if (me->fVblIrqCall && !me->fStopping)
-            thread_call_enter(me->fVblIrqCall);
+            rd3_tcall_enter(me->fVblIrqCall);
     } else if (kind == RD3K_DISPIRQ_PFLIP) {
         /* the flip latched: the accelerator's latch wait finds it at once */
         me->fPflipAbs = irqAbs;
@@ -2328,7 +2326,7 @@ void RDNA3Framebuffer::wakeFailed(IOReturn r, const char *why, const void *sys, 
         uint64_t d;
         clock_interval_to_deadline(50, kMillisecondScale, &d);
         retain();
-        if (thread_call_enter_delayed(fWakeRetry, d))
+        if (rd3_tcall_enter_delayed(fWakeRetry, d))
             release();   /* already queued: that one holds the reference */
         armed = true;
     }
@@ -2459,8 +2457,8 @@ bool RDNA3Framebuffer::cursorInit()
     fCurReady = true;
     if (fArgCurAsync) {
         fCurLock = IOSimpleLockAlloc();
-        fCurCall = fCurLock ? thread_call_allocate_with_options(cursorFire, this, THREAD_CALL_PRIORITY_HIGH,
-                                                                THREAD_CALL_OPTIONS_ONCE)
+        fCurCall = fCurLock ? rd3_tcall_alloc_with("fb.cursor", cursorFire, this, THREAD_CALL_PRIORITY_HIGH,
+                                                   THREAD_CALL_OPTIONS_ONCE)
                             : nullptr;
         if (!fCurCall)
             FBLOG("hardware cursor: no lock or thread call (%p): the cursor is moved on WindowServer's thread", fCurLock);
@@ -2665,7 +2663,7 @@ void RDNA3Framebuffer::cursorWant(bool force)
     IOInterruptState st = IOSimpleLockLockDisableInterrupt(fLock);
     if (!fStopping) {
         retain();
-        if (thread_call_enter(fCurCall))
+        if (rd3_tcall_enter(fCurCall))
             release();   /* already queued: that one holds the reference */
     }
     IOSimpleLockUnlockEnableInterrupt(fLock, st);

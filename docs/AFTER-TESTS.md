@@ -3079,3 +3079,24 @@ times during it and once 4 s after. About 25 s; every other step prints one
 | `WARN memory load: MEMBW: NOT MEASURED ...` | no device-local memory for two buffers (even 16 MiB each), no queue, or the pool/fence setup failed | the line says which; VRAM exhaustion: `vm_*` counters |
 | `FAIL memory load: MEMBW: FAILED ...` | a submit or the fence failed under the load | the kernel log for a GPU reset / ring timeout around the run; same as any `rdna3_vktest` failure |
 | `WARN memory load: no memory load in this report although rdna3pm=2 and the Vulkan test ran` | an autoreport.sh older than N43, or the report was cut before the step | rebuild / reinstall the VM's tools |
+
+### Kexts kmutil refuses, thread call stops (macOS 26, card run 2026-10-25b, DRIVER-PLAN N47)
+
+On macOS 26 the framebuffer, the accelerator and the AGDC go into the Auxiliary
+KC through kmutil, which binds every import only to a library the kext's
+`OSBundleLibraries` declares and never to `com.apple.kpi.private`; the core is
+injected by OpenCore, whose prelinker binds kernel symbols kmutil would refuse.
+CI's `KPI guard` step runs `tools/ci/kmutil_kpi_guard.py` (kmutil libraries +
+nm -u) on every build. The kexts stop their thread calls with
+`common/rdna3_tcall.h` (public KPIs; thread_call_cancel_wait is private on 26),
+which logs `RDNA3-tcall: <call>: ...` when a stop waits long.
+
+| Seen | Meaning | Action |
+|---|---|---|
+| only RDNA3Accel and RDNA3AGDC loaded; the install log or `kmutil log` says `Failed to bind '_<symbol>' ... could not find a kext which exports this symbol` | that kext imports a symbol its declared libraries do not export on this macOS (26: kpi.private only) | `kmutil libraries -p /Library/Extensions/<kext>.kext --undef-symbols` on the VM (read-only), or `python3 tools/ci/kmutil_kpi_guard.py <kext>` there: it names the symbol and the libraries; replace a private one with public KPIs, declare the library (`com.apple.kpi.unsupported` for kauth_cred_issuser); add it to `tests/test_kext_kpi_versions.py`'s tables |
+| CI `KPI guard ...: FAIL <kext>: _X is exported only by com.apple.kpi.private` / `... which Info.plist's OSBundleLibraries does not declare` / `... exported by no kext` | the same, caught at build time against the runner's macOS 15 collections | as above; an `exported by no kext` on the Tahoe accelerator is a WARN (a 26-only symbol), elsewhere a real missing export |
+| CI `KPI guard ...: ERROR ... the KPI check did NOT run` | kmutil or nm missing or failing on the runner, or a kmutil output line the parser does not know (a new macOS) | the message names it; for a new format add the captured output to `tests/data/kmutil/` and the parser (never make the step pass without the check) |
+| CI `KPI guard for the core (advisory)` failing | the core imports symbols kmutil would refuse (26.4.1: `IOMemoryDescriptor::doMap` / `doUnmap` through RDNA3BoMemory's vtable); harmless while OpenCore injects the core | DRIVER-PLAN N47 (open): needed only before the core is installed through kmutil |
+| triage `thread call stop: FAIL <call>: the stop gave up ...` (`RDNA3-tcall: <call>: the stop GAVE UP after 30000 ms`) | a run of that thread call never ended within 30 s of its stop (a hang in its function, or a lock the stopping thread holds that the function waits for); the call was left allocated, the object may be touched after its stop | the kernel log before the line: what the call's function does (`fb.vbl` vblFire, `core.displayWakeWork` the wake, `core.hotplugTick` ...) and which lock the stop path holds; a panic soon after is that run touching freed memory |
+| triage `thread call stop: WARN <call>: the stop waited past 2 s ...` | a run was slow at the stop (`drained after N ms` says how long) | usually benign (the wake work, a modeset in the hotplug work); repeated or growing: the function's own log lines around it |
+| triage `thread call stop: WARN <call>: stopped ... from inside its own run` | the function stopped its own thread call (thread_call_cancel_wait would have panicked); that run is not waited for | the call path: harmless if the function returns without touching freed state |

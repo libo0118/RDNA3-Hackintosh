@@ -129,7 +129,7 @@ bool RDNA3Accel::displayInit(const amd_discovery *disc)
     displayTxCheck("at the start (as the firmware left it)");
     displayOtgCheck(this, fDispDev, fDcn);   /* rdna3otg=1: step otg */
 
-    fHotplugCall = thread_call_allocate((thread_call_func_t)displayHotplugWork, this);
+    fHotplugCall = rd3_tcall_alloc("core.displayHotplugWork", (thread_call_func_t)displayHotplugWork, this);
     hotplugInit();   /* rdna3hotplug=1: RDNA3Hotplug.cpp polls and handles */
     displayIrqInit();   /* N42: vblank / pflip interrupts for the framebuffers */
     return true;
@@ -599,7 +599,7 @@ void RDNA3Accel::displayHotplug(uint32_t pin, int connected)
     fHotplugEvents++;
     LOG("display: HPD%u %s", pin + 1, connected ? "connected" : "disconnected");
     if (fHotplugCall)
-        thread_call_enter(fHotplugCall);
+        rd3_tcall_enter(fHotplugCall);
 }
 
 /* N42: until N42 the HPD interrupt was never claimed (its src_id was 0x2a,
@@ -750,7 +750,7 @@ void RDNA3Accel::displayShutdown()
     rdna3_dmub *dm = fMirrorDm;
     fMirrorDm = nullptr;
     if (fHotplugCall)
-        thread_call_cancel_wait(fHotplugCall);
+        rd3_tcall_drain(fHotplugCall);
     hotplugStop();
     /* item O: no phantom pipe or CAB left for the next driver, UCLK pinned */
     fPowerStop = true;
@@ -778,7 +778,7 @@ void RDNA3Accel::displayMirrorOff(rdna3_dmub *dm)
     fMirrorDm = nullptr;
     fDisplayDm = nullptr;
     if (fHotplugCall)
-        thread_call_cancel_wait(fHotplugCall);
+        rd3_tcall_drain(fHotplugCall);
     hotplugStop();
     displayMirrorDisable(dm);
 }
@@ -876,7 +876,7 @@ void RDNA3Accel::displayFree()
     /* the HPD work first: a displayHotplugWork already queued reaches
      * fHp through hotplugKick (PR #2 review) */
     if (fHotplugCall) {
-        rd3_thread_call_drain_free(fHotplugCall);
+        rd3_tcall_free(fHotplugCall);
         fHotplugCall = nullptr;
     }
     hotplugFree();

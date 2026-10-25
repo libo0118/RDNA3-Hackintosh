@@ -126,12 +126,13 @@ ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_a
                     "common/rdna3_bootargs.h", "common/rdna3_a3_display.h",
                     "common/rdna3_swap_front.h", "common/rdna3_flip_latch.h", "common/rdna3_swap_copy.h",
                     "common/rdna3_trace.h", "common/rdna3_write_gen.h", "common/rdna3_flip_queue.h",
-                    "common/rdna3_vram_park.h", "common/rdna3_surf_pending.h")
+                    "common/rdna3_vram_park.h", "common/rdna3_surf_pending.h", "common/rdna3_tcall.h")
 
 
 # fb/Makefile's FB_SRC_HASH inputs and agdc/Makefile's AGDC_SRC_HASH inputs
 FB_HASH_FILES = ("fb/rdna3-fb.cpp", "fb/Info.plist", "accel/rdna3k_abi.h", "agdc/rdna3_agdc_k5.h",
-                 "common/rdna3_fb_policy.h", "common/rdna3_bootargs.h", "common/rdna3_vbl_irq.h")
+                 "common/rdna3_fb_policy.h", "common/rdna3_bootargs.h", "common/rdna3_vbl_irq.h",
+                 "common/rdna3_tcall.h")
 AGDC_HASH_FILES = ("agdc/rdna3-agdc.cpp", "agdc/rdna3_agdc_k5.h", "agdc/rdna3_agdc_n48.h",
                    "agdc/AppleGraphicsDeviceControl_re.h", "agdc/Info.plist", "common/rdna3_bootargs.h")
 
@@ -2904,6 +2905,55 @@ def fb_class_rows(klog):
     return out
 
 
+# common/rdna3_tcall.h (card run 2026-10-25b, DRIVER-PLAN N47): a thread call's stop that waited long, gave up,
+# or ran from inside the call's own run; the names are the kexts' ("fb.vbl", "accel.iop_async", "core.hotplugTick")
+TCALL_LOG_RE = re.compile(r"RDNA3-tcall: (\S+): (the stop waits for (\d+) run\(s\) still outstanding after (\d+) ms"
+                          r"|the stop GAVE UP after (\d+) ms with (\d+) run\(s\) outstanding"
+                          r"|stopped from inside its own run|thread_call_free refused \d+ times|drained after (\d+) ms)")
+
+
+def tcall_rows(klog):
+    """[(level, label, text)] per thread call whose stop the kernel log names: FAIL when it gave up (the call was
+    left allocated, a run may still touch a stopped object), WARN when it waited past the slow bound or stopped
+    from inside its own run; nothing when no stop was slow"""
+    label = "thread call stop"
+    seen = {}
+    for m in TCALL_LOG_RE.finditer(klog or ""):
+        name, what = m.group(1), m.group(2)
+        e = seen.setdefault(name, {"slow": 0, "gaveup": 0, "self": 0, "free": 0, "drained": [], "max_out": 0,
+                                   "gave_ms": 0})
+        if what.startswith("the stop waits"):
+            e["slow"] += 1
+            e["max_out"] = max(e["max_out"], int(m.group(3)))
+        elif what.startswith("the stop GAVE UP"):
+            e["gaveup"] += 1
+            e["gave_ms"] = int(m.group(5))
+            e["max_out"] = max(e["max_out"], int(m.group(6)))
+        elif what.startswith("stopped from inside"):
+            e["self"] += 1
+        elif what.startswith("thread_call_free"):
+            e["free"] += 1
+        else:
+            e["drained"].append(int(m.group(7)))
+    out = []
+    for name in sorted(seen):
+        e = seen[name]
+        if e["gaveup"] or e["free"]:
+            out.append(("FAIL", label, "%s: the stop gave up %d time(s) (after %d ms, %d run(s) still outstanding)%s: "
+                        "a run of it never ended (a hang in its function, or a lock the stop holds), the thread call "
+                        "was left allocated" % (name, e["gaveup"], e["gave_ms"], e["max_out"],
+                                                ", thread_call_free refused %d time(s)" % e["free"] if e["free"] else "")))
+        elif e["slow"]:
+            out.append(("WARN", label, "%s: the stop waited past 2 s %d time(s) (%d run(s) outstanding), drained after "
+                        "%s ms: a slow run of its function at the stop" % (
+                            name, e["slow"], e["max_out"],
+                            "/".join(str(x) for x in e["drained"]) if e["drained"] else "?")))
+        if e["self"]:
+            out.append(("WARN", label, "%s: stopped %d time(s) from inside its own run (not waited for: "
+                        "thread_call_cancel_wait would have panicked there)" % (name, e["self"])))
+    return out
+
+
 CD_PREFS_SEEN_RE = re.compile(r"^== CoreDisplay prefs \(.*?\): this boot's WindowServer started with: (.*)$", re.M)
 CD_PREFS_DID_RE = re.compile(r"^== CoreDisplay prefs: (.*)$", re.M)
 
@@ -3255,6 +3305,7 @@ def present_mode_lines(path, txt="", args="", host=None):
     # useIOP / useIOP_onAMD preferences WindowServer started with
     prefs_rows, iop_amd = cd_prefs_rows(txt, args, read_tar_member(path, "19-coredisplay-prefs.txt"))
     out.extend(gpu_vendor_rows(cd, planes if ok else None, iop_amd, iop_prefs_off(args), klog))
+    out.extend(tcall_rows(klog))
     out.extend(prefs_rows)
     out.extend(iop_log_rows(cd))
     out.extend(pairing_rows(read_tar_member(path, PAIRING_MEMBER)))

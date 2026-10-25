@@ -23,6 +23,7 @@
 #include "../common/rdna3_flip_queue.h"
 #include "../common/rdna3_vram_park.h"
 #include "../common/rdna3_surf_pending.h"
+#include "../common/rdna3_tcall.h"   // thread calls stopped with public KPIs only (macOS 26: card run 2026-10-25b)
 #include <mach/mach_time.h>
 #include <sys/kauth.h>
 #include <sys/random.h>
@@ -3777,7 +3778,7 @@ static bool rd3AccelLocksInit(void)
 extern "C" {
 void _ZN18IOAccelDisplayPipe26signalTransactionInterruptEPv(void *pipe, void *arg);
 }
-struct RD3IopAsync { void *pipe; IOService *fb; IOSurface *s; struct RD3KFlipRequest f; volatile SInt32 busy; struct thread_call *call;
+struct RD3IopAsync { void *pipe; IOService *fb; IOSurface *s; struct RD3KFlipRequest f; volatile SInt32 busy; struct rd3_tcall *call;
                      unsigned long long seq; /* the shown record this flip set */ };
 static RD3IopAsync gIopAs[kRd3MaxFB];
 static SInt32 gIopAsyncRefuseRun;
@@ -3828,7 +3829,7 @@ static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSu
         rd3AccelForgetShownIf(head, seq);   /* this frame never reaches the panel */
         return true;
     }
-    if (!e->call) e->call = thread_call_allocate(rd3AccelIopAsyncRun, e);
+    if (!e->call) e->call = rd3_tcall_alloc("accel.iop_async", rd3AccelIopAsyncRun, e);
     if (!e->call) {
         rd3AccelForgetShownIf(head, seq);   /* the caller copies instead: this record is not on the panel */
         return false;
@@ -3837,7 +3838,7 @@ static bool rd3AccelIopAsyncStart(void *pipe, IOService *fb, unsigned head, IOSu
     e->pipe = pipe; e->fb = fb; e->s = s; e->seq = seq;
     for (unsigned i = 0; i < sizeof *f; i++) ((volatile unsigned char *)&e->f)[i] = ((const unsigned char *)f)[i];
     __atomic_store_n(&e->busy, 1, __ATOMIC_RELEASE);
-    thread_call_enter(e->call);
+    rd3_tcall_enter(e->call);
     return true;
 }
 /* an async IOP flip cancelled before it ran (rd3AccelIopStop): the surface reference it held given back */
@@ -3859,11 +3860,11 @@ static void rd3AccelIopStop(void)
     unsigned cancelled = 0, released = 0;
     for (unsigned h = 0; h < kRd3MaxFB; h++) {
         RD3IopAsync *e = &gIopAs[h];
-        struct thread_call *c = e->call;
+        struct rd3_tcall *c = e->call;
         if (!c) continue;
-        while (thread_call_cancel_wait(c)) cancelled += rd3AccelIopAsyncCancelled(e);
-        while (!thread_call_free(c))
-            if (thread_call_cancel_wait(c)) cancelled += rd3AccelIopAsyncCancelled(e);
+        /* common/rdna3_tcall.h: a run still going is waited for, each one cancelled before it ran gives its
+         * surface back (thread_call_cancel_wait is com.apple.kpi.private on macOS 26) */
+        for (unsigned n = rd3_tcall_free(c); n; n--) cancelled += rd3AccelIopAsyncCancelled(e);
         e->call = nullptr;
     }
     IOSurface *drop[2 * kRd3MaxFB];
