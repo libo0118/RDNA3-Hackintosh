@@ -448,8 +448,8 @@ for r, c in conf.items():
         assert '"%s"' % k in src[src.index("nvmtl_ab_knobs[]"):][:3000], "%s: %s is not on the list `vk: ab switches` shows" % (r, k)
 # the values mean what the rung says: =1 for the knobs that test the first character / presence, SKIP_EMPTY=0 turns the default off
 assert conf["skip-empty-0"] == {"NVMTL_SKIP_EMPTY": "0"} and all(v == "1" for r, c in conf.items() if r != "skip-empty-0" for v in c.values())
-assert 'on = !(e && e[0] == \'0\')' in src[src.index('"NVMTL_SKIP_EMPTY"') - 60:src.index('"NVMTL_SKIP_EMPTY"') + 120], "SKIP_EMPTY is on unless it starts with 0"
-assert 'on = !(e && e[0] == \'1\')' in src[src.index('"NVMTL_MANAGED_EAGER_ZERO"') - 60:src.index('"NVMTL_MANAGED_EAGER_ZERO"') + 120], "MANAGED_EAGER_ZERO=1 is the old behaviour"
+assert 'on = !(e && e[0] == \'0\')' in src[src.index('getenv("NVMTL_SKIP_EMPTY")') - 60:src.index('getenv("NVMTL_SKIP_EMPTY")') + 120], "SKIP_EMPTY is on unless it starts with 0"
+assert 'on = !(e && e[0] == \'1\')' in src[src.index('getenv("NVMTL_MANAGED_EAGER_ZERO")') - 60:src.index('getenv("NVMTL_MANAGED_EAGER_ZERO")') + 120], "MANAGED_EAGER_ZERO=1 is the old behaviour"
 PYEOF
     # the triage reads it: no WARN, the rungs in order, a rung that did not reach the plugin is caught
     python3 -I - "$L" "$T/par" <<'PYEOF' || fail "$SH: variant 3: tools/triage_glyphs.py does not read the ladder"

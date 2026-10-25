@@ -1361,7 +1361,7 @@ ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServ
     elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
     _LADDER_WS=; _LADDER_PIDS=; _LADDER_TEXTDIR=; _LADDER_BASE_SET=; _LADDER_CUR=
     ladder_w "# rdna3 ladder v1"
-    ladder_w "variant: $_lv ($(case $_lv in 2) echo ladder-ws ;; 3) echo ladder-glyphs ;; *) echo ladder ;; esac))"
+    ladder_w "variant: $_lv ($(case $_lv in (2) echo ladder-ws ;; (3) echo ladder-glyphs ;; (*) echo ladder ;; esac))"   # (pattern): bash 3.2 reads an unbalanced ) inside $( ) as its end
     ladder_w "started: $(date +%T)"
     ladder_w "mode: $([ -n "$_btty" ] && echo tty || echo timer)"
     ladder_w "console_user: $(bisect_console_user)"
