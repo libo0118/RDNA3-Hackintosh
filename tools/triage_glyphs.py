@@ -3,7 +3,7 @@ The plugin gained a set of A/B switches and counters for those artefacts; this m
 (26-log-metal-plugin.txt = the other processes, 24-log-coredisplay.txt = WindowServer; lines `... Name[pid:tid] (RDNA3MTLDriver) NVMTL: msg`,
 process names may contain blanks: "Activity Monitor"), so that a report says which profile it was taken with and what the counters saw.
 Kept in a module of its own so that tools/triage_reports.py only gains one call. docs/AFTER-TESTS.md "Rendering artefacts: the A/B ladder"
-explains every line."""
+explains every line. Also per-rung summaries of the ladder (`parse_ladder` + `ladder_rows`, tools/vm/macos/autoreport.sh ladder_run: 41-ladder.txt, 41-ladder-<rung>.log)."""
 import re
 
 _LINE = re.compile(r"^\S+ \S+ +\S+ +(.+?)\[(\d+):([0-9a-f]+)\] \(RDNA3MTLDriver\) NVMTL: (.*)$")
@@ -200,3 +200,98 @@ def n50_plugin_rows(text=""):
         rows.append(("INFO", "managed shadow", "%s: the shadow check / snapshot was on and no managed upload was seen (no didModifyRange upload in that process)" % key[0]))
     return rows
 
+
+# the ladder: tools/vm/macos/autoreport.sh ladder_run writes ladder.txt (one block per rung: what it ran with, the looks, the answer) and <rung>.log
+# (the plugin log slice of the rung's processes); collect.sh packs them as 41-ladder.txt and 41-ladder-<rung>.log. The rung list is the same as
+# autoreport.sh's LADDER_RUNGS / LADDER_WS_RUNGS (tests/test_ladder_step.sh compares them)
+LADDER_RUNGS = ("baseline", "radv", "sync", "managed", "alignguard", "paranoid", "loadbarrier")
+LADDER_WS_RUNGS = ("radv-ws", "paranoid-ws")
+
+
+def ladder_log_name(rung):
+    """the archive member of a rung's log slice"""
+    return "41-ladder-%s.log" % rung
+
+
+def parse_ladder(text, logs=None):
+    """ladder.txt (+ {rung: log text}) -> (variant, {rung: dict for ladder_rows}, [problems]). A rung block is `== rung NAME` ... `== end rung NAME`; a block
+    without its end line is a rung that was cut off (it is kept and marked "cut")."""
+    logs = logs or {}
+    variant, rungs, cur, problems, ended = 1, {}, None, [], False
+    for raw in (text or "").splitlines():
+        line = raw.rstrip()
+        m = re.match(r"^variant: (\d+)", line)
+        if m and cur is None:
+            variant = int(m.group(1)); continue
+        m = re.match(r"^== rung (\S+?)(?::.*)?$", line)
+        if m:
+            cur = rungs.setdefault(m.group(1), {"conf": [], "scope": "?", "looks": [], "verdict": None, "cut": True, "warn": [], "name": m.group(1)})
+            continue
+        m = re.match(r"^== end rung (\S+)", line)
+        if m:
+            if m.group(1) in rungs:
+                rungs[m.group(1)]["cut"] = False
+            cur = None; continue
+        if line == "== end":
+            ended = True; continue
+        if cur is None:
+            continue
+        m = re.match(r"^(scope|conf|looks|answer|pids|log|env|set): ?(.*)$", line)
+        if m:
+            k, v = m.group(1), m.group(2).strip()
+            if k == "scope": cur["scope"] = v
+            elif k == "conf": cur["conf"] = [] if v.startswith("(nothing)") else v.split()
+            elif k == "looks": cur["looks"] = v.split()
+            elif k == "answer": cur["verdict"] = v if v in ("y", "n") else None
+            elif k == "pids": cur["pids"] = v
+            elif k == "log": cur["logline"] = v
+            continue
+        if line.startswith("WARN:") or line.startswith("failed:") or line.startswith("NOT TAKEN:"):
+            cur["warn"].append(line[:200])
+    for name, r in rungs.items():
+        r["log"] = logs.get(name, "")
+    if not ended:
+        problems.append("ladder.txt has no closing '== end' line: the run was cut short or is still going")
+    return variant, rungs, problems
+
+
+def ladder_rows(rungs, variant=1, problems=()):
+    """rungs: {rung name: {"conf": [lines], "scope": "apps"|"windowserver", "log": plugin log slice, "looks": [file names], "verdict": "y"|"n"|None}}.
+    One row per rung: what it set, which processes show it in the log (the plugin's own `vk: ab switches` line), the load pass / fence / managed counters
+    of the slice, and the owner's verdict when one was given. [(level, name, text)]."""
+    rows = [("WARN", "ladder", p) for p in problems]
+    names = LADDER_RUNGS + (LADDER_WS_RUNGS if variant == 2 else ())
+    for name in names:
+        r = rungs.get(name)
+        if r is None:
+            rows.append(("WARN", "ladder " + name, "the rung did not run or left nothing in the report"))
+            continue
+        sub = n50_plugin_rows(r.get("log", ""))
+        warn = [t for lvl, nm, t in sub if lvl == "WARN" and nm in ("fence early", "managed shadow", "plugin conf")]
+        sw = [t for lvl, nm, t in sub if nm in ("plugin switch", "radv debug", "paranoid profile") and lvl == "WARN"]
+        looks = r.get("looks") or []
+        v = r.get("verdict")
+        reached = sw or not r.get("conf")
+        txt = "set %s (%s)%s; %d look(s); %s%s" % (", ".join(r.get("conf") or []) or "nothing", r.get("scope", "?"),
+                                                  "" if reached else " - BUT the plugin log slice shows no such switch: the rung did not reach the plugin", len(looks),
+                                                  ("verdict " + {"y": "PICTURE RIGHT", "n": "picture broken"}.get(v, str(v))) if v else "no verdict (the owner was not asked or did not answer)",
+                                                  ("; counters: " + " | ".join(w)[:200]) if warn else "")
+        extra = list(r.get("warn") or [])
+        if r.get("cut"):
+            extra.append("the rung has no end line (cut off)")
+        if r.get("log") == "" and r.get("conf"):
+            extra.append("no plugin log slice for this rung")
+        if extra:
+            txt += "; " + "; ".join(extra)[:240]
+        rows.append(("INFO" if reached and not extra else "WARN", "ladder " + name, txt))
+    # the verdict of the whole ladder: which rung made the picture right
+    ans = {n: rungs[n].get("verdict") for n in names if n in rungs}
+    if ans.get("baseline") == "n":
+        fixed = [n for n, v in ans.items() if v == "y"]
+        rows.append(("INFO", "ladder", ("the baseline picture was broken and the picture was RIGHT with: %s - that switch is the discriminator (docs/AFTER-TESTS.md)" % ", ".join(fixed)) if fixed
+                     else "the baseline picture was broken and no rung made it right"))
+    elif ans.get("baseline") == "y":
+        rows.append(("INFO", "ladder", "the baseline picture was right in this run: the artefact did not show, the other rungs prove nothing"))
+    elif ans:
+        rows.append(("INFO", "ladder", "no owner verdicts (a timer run, or no answer): compare the rungs' looks (41-ladder.txt names them, <report>-scanoutladder-<rung>h-pipe*.ppm)"))
+    return rows

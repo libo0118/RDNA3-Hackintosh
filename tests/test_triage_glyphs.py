@@ -2,7 +2,7 @@
 Cases: a clean default log (INFO only), a RADV debug profile (WARN, quoted values, an empty value is not a profile, process names with blanks), a
 rejected flag (WARN with the reason), the paranoid profile and the switch list (WARN), a plugin older than N50 (WARN), conf lines applied and skipped,
 the load pass / fence counters of `vk: ab: SUMMARY` (INFO / WARN, pool reuse OFF = no evidence), the managed SUMMARY (changed, inert, skipped,
-snapshot), and the hook in triage_reports.py.
+snapshot), the per-rung rows of the ladder, and the hook in triage_reports.py.
 Run: python3 -I -B tests/test_triage_glyphs.py"""
 import os
 import sys
@@ -106,10 +106,65 @@ check("managed shadow" not in r, "both off: nothing, %r" % r)
 r = rows_of(L("Terminal", 907, "managed: shadow check ON - each upload's shadow range is hashed at the flush and again when the GPU is done"))
 check(r["managed shadow"][0][0] == "INFO" and "no managed upload was seen" in r["managed shadow"][0][1], "the check on and nothing seen: INFO")
 
+# the ladder, per rung
+conf = {"radv": ["NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears"], "sync": ["NVMTL_ASYNC_COMMIT=0"]}
+rungs = {"baseline": {"conf": [], "scope": "apps", "log": L("Terminal", 907, 'vk: ab switches: none set (x)'), "looks": ["a.png"], "verdict": "n"},
+         "radv": {"conf": conf["radv"], "scope": "apps", "log": L("Terminal", 907, on) + L("Terminal", 907, 'vk: ab switches [1]: NVMTL_RADV_DEBUG="nodcc,nohiz,nofmask,nofastclears"'), "looks": ["b.png", "c.png"], "verdict": "y"},
+         "sync": {"conf": conf["sync"], "scope": "apps", "log": L("Terminal", 907, 'vk: ab switches: none set (x)'), "looks": [], "verdict": None}}
+lr = {name: (lvl, text) for lvl, name, text in tg.ladder_rows(rungs)}
+check(lr["ladder baseline"][0] == "INFO" and "picture broken" in lr["ladder baseline"][1], "baseline row, %r" % (lr["ladder baseline"],))
+check(lr["ladder radv"][0] == "INFO" and "PICTURE RIGHT" in lr["ladder radv"][1] and "2 look(s)" in lr["ladder radv"][1], "radv row, %r" % (lr["ladder radv"],))
+check(lr["ladder sync"][0] == "WARN" and "did not reach the plugin" in lr["ladder sync"][1], "a rung whose switch is not in its log slice is WARNed, %r" % (lr["ladder sync"],))
+check(lr["ladder paranoid"][0] == "WARN" and "did not run" in lr["ladder paranoid"][1], "a missing rung is WARNed")
+check([k for k in lr if k != "ladder"] == ["ladder " + n for n in tg.LADDER_RUNGS], "one row per rung, in order")
+check(lr["ladder"][0] == "INFO" and "RIGHT with: radv" in lr["ladder"][1] and "discriminator" in lr["ladder"][1], "the ladder's verdict names the rung that fixed it, %r" % (lr["ladder"],))
+
+# ladder.txt as autoreport.sh's ladder_run writes it
+LT = '''# rdna3 ladder v1
+variant: 2 (ladder-ws)
+started: 12:00:00
+== rung baseline
+scope: apps
+conf: (nothing)
+env: (nothing)
+pids: Terminal=101 Chess=102
+looks: ladder-baselinea ladder-baselineh
+answer: n
+log: baseline.log (12 lines, pids 101 102 , since 2026-10-25 12:00:01)
+== end rung baseline
+== rung radv
+scope: apps
+conf: NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears
+WARN: an app did not start (Terminal: 201 Chess: no): the rung proves little
+looks: ladder-radva ladder-radvh
+answer: y
+== end rung radv
+== rung sync
+scope: apps
+conf: NVMTL_ASYNC_COMMIT=0
+looks: x
+'''
+v, pr, probs = tg.parse_ladder(LT, {"baseline": "BL", "radv": "RV"})
+check(v == 2 and list(pr) == ["baseline", "radv", "sync"], "parse_ladder: variant and rung order, %r %r" % (v, list(pr)))
+check(pr["baseline"]["conf"] == [] and pr["baseline"]["verdict"] == "n" and pr["baseline"]["looks"] == ["ladder-baselinea", "ladder-baselineh"] and pr["baseline"]["log"] == "BL" and not pr["baseline"]["cut"], "parse_ladder: baseline, %r" % (pr["baseline"],))
+check(pr["radv"]["conf"] == ["NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears"] and pr["radv"]["verdict"] == "y" and pr["radv"]["warn"], "parse_ladder: radv with its WARN line, %r" % (pr["radv"],))
+check(pr["sync"]["cut"] and pr["sync"]["verdict"] is None, "parse_ladder: a rung without its end line is cut")
+check(probs and "no closing" in probs[0], "parse_ladder: no '== end' is a problem, %r" % (probs,))
+rows = tg.ladder_rows(pr, v, probs)
+d = {}
+for lvl, name, text in rows:
+    d.setdefault(name, []).append((lvl, text))
+check(d["ladder"][0][0] == "WARN" and "cut short" in d["ladder"][0][1], "the cut run is WARNed, %r" % (d.get("ladder"),))
+check("ladder radv-ws" in d and "ladder paranoid-ws" in d and "did not run" in d["ladder radv-ws"][0][1], "variant 2 expects the WindowServer rungs, %r" % (list(d),))
+check(d["ladder radv"][0][0] == "WARN" and "an app did not start" in d["ladder radv"][0][1], "a rung with an app that did not start is WARNed, %r" % (d["ladder radv"],))
+check(d["ladder sync"][0][0] == "WARN" and "cut off" in d["ladder sync"][0][1], "a cut rung is WARNed, %r" % (d["ladder sync"],))
+check(tg.ladder_log_name("radv-ws") == "41-ladder-radv-ws.log", "log member name")
+
 # the hook in triage_reports.py
 src = open(os.path.join(ROOT, "tools", "triage_reports.py")).read()
 check("from triage_glyphs import n50_plugin_rows" in src and "n50_plugin_rows(" in src, "triage_reports.py calls n50_plugin_rows")
 check("tools/triage_glyphs.py is missing" in src, "triage_reports.py says so loudly when the module is missing")
+check("41-ladder.txt" in src and "parse_ladder" in src and "ladder_rows(" in src, "triage_reports.py reads the archive's 41-ladder members")
 
 if fails:
     print("FAIL: %d check(s)" % len(fails))

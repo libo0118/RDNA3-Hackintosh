@@ -308,6 +308,14 @@ grep -h -i -e 'refused' -e 'failed' -e 'NOT ' -e 'not a multiple' -e 'swizzle' -
 if [ -s "$HOME/rdna3-bisect/bisect.txt" ]; then
     cp "$HOME/rdna3-bisect/bisect.txt" "$dir/39-bisect.txt" 2>/dev/null
 fi
+# DRIVER-PLAN N50: the A/B ladder (rdna3vm step ladder, autoreport.sh ladder_run): ladder.txt (one block per rung: the switches it ran with,
+# the looks, the owner's answer, the rung's log file) and each rung's plugin log slice; tools/triage_reports.py prints one row per rung
+if [ -s "$HOME/rdna3-ladder/ladder.txt" ]; then
+    cp "$HOME/rdna3-ladder/ladder.txt" "$dir/41-ladder.txt" 2>/dev/null
+    for _lf in "$HOME"/rdna3-ladder/*.log; do
+        [ -f "$_lf" ] && cp "$_lf" "$dir/41-ladder-$(basename "$_lf")" 2>/dev/null
+    done
+fi
 # N1: which processes the Metal plugin served and why. The list, the
 # boot-args (rdna3mtlapps=0 ends apps mode) and the plugin's decision line of
 # every process that loaded it: "allow mode: <mode>; <process>: <reason>"

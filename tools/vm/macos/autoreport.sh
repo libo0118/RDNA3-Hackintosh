@@ -26,6 +26,13 @@ fi
 # rdna3bisect=1 / 2 / 4 asks for it (rdna3vm step bisect / bisect-plugin /
 # bisect-agdc).
 BISECT=; BISECT_HAND=
+# the A/B ladder (DRIVER-PLAN N50, ladder_run below): sudo sh autoreport.sh --standalone --ladder | --ladder-ws;
+# in the VM the boot-arg rdna3ladder=1 / 2 (rdna3vm step ladder / ladder-ws)
+LADDER=
+case "${1:-}" in
+    --ladder) LADDER=1; BISECT_HAND=1; shift ;;
+    --ladder-ws) LADDER=2; BISECT_HAND=1; shift ;;
+esac
 case "${1:-}" in
     --bisect) BISECT=1; BISECT_HAND=1; shift ;;
     --bisect-plugin) BISECT=2; BISECT_HAND=1; shift ;;
@@ -1065,6 +1072,210 @@ bisect_run() {   # bisect_run <1|2|4>: the whole sequence; 0 when every step ran
 }
 # BISECT-END
 
+# LADDER-BEGIN (tests/test_ladder_step.sh runs this block, with the BISECT block's helpers, on the host)
+# The A/B ladder of DRIVER-PLAN N50 in ONE card run (docs/AFTER-TESTS.md "Rendering artefacts: the A/B ladder"): the rungs that used to be a
+# conf line, a restart and a report each. `rdna3vm step ladder` (boot-arg rdna3ladder=1: the play step's boot-args, no desktop to drive) or by
+# hand: sudo sh autoreport.sh --standalone --ladder. Per rung: Terminal gets text (a colored listing, then a line a second so that it draws
+# all the time) and Chess a game, both as NEW instances (`open -n -a APP --env NVMTL_X=1`: the plugin reads its switches from the environment
+# of the process as well as from rdna3mtl.conf, the environment wins), then a 320-wide and a 1280-wide scanout look and the plugin log of
+# exactly those processes (log show --start, by pid), labelled by rung. Nothing is written to rdna3mtl.conf and WindowServer is not restarted
+# for the app rungs. `rdna3vm step ladder-ws` (rdna3ladder=2, standalone --ladder-ws) adds rungs whose switch must reach WindowServer
+# (radv-ws, paranoid-ws): rdna3mtl.conf edited, WindowServer restarted through the bisect-plugin machinery (bisect_restart_ws: the login
+# window shows, log in), the conf put back exactly (bisect_plugin_save / bisect_plugin_restore, also on an interrupt, and by the top of this
+# script after a dead run). Evidence: $HOME/rdna3-ladder/ladder.txt (collect.sh: 41-ladder.txt) and <rung>.log (41-ladder-<rung>.log);
+# tools/triage_reports.py (tools/triage_glyphs.py ladder_rows) prints one row per rung.
+LADDER_RUNGS="baseline radv sync managed alignguard paranoid loadbarrier"
+LADDER_WS_RUNGS="radv-ws paranoid-ws"
+ladder_rung_env() {   # the NAME=value switches of a rung, blank separated
+    case $1 in
+        baseline) ;;
+        radv|radv-ws) echo "NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears" ;;
+        sync) echo "NVMTL_ASYNC_COMMIT=0" ;;
+        managed) echo "NVMTL_MANAGED_CHECK=1 NVMTL_MANAGED_SNAPSHOT=1" ;;
+        alignguard) echo "NVMTL_NO_ALIGN_GUARD=1" ;;
+        paranoid|paranoid-ws) echo "NVMTL_PARANOID=1" ;;
+        loadbarrier) echo "NVMTL_LOAD_BARRIER=1" ;;
+        *) return 1 ;;
+    esac
+}
+ladder_env_args() {   # "A=1 B=2" -> "--env A=1 --env B=2"
+    for _le in $1; do printf '%s %s ' --env "$_le"; done
+}
+ladder_w() { printf '%s\n' "$*" >> "$LF"; }
+ladder_text_script() {   # the Terminal's text: a colored listing, ANSI colors, then a line a second so that the window draws all the time
+    _lt=${LADDER_TEXT:-/Users/Shared/rdna3-ladder-text.command}
+    cat > "$_lt" <<'TXT'
+#!/bin/sh
+clear
+echo "RDNA3 ladder: text for the glyph check (do not close, this window is closed by the run)"
+CLICOLOR_FORCE=1 ls -laG /System/Library /usr/bin 2>/dev/null | head -n 70
+i=0
+while [ $i -lt 8 ]; do printf '\033[%sm The quick brown fox jumps over the lazy dog 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ \033[0m\n' $((31 + i)); i=$((i + 1)); done
+while :; do i=$((i + 1)); printf '\033[1;3%sm %s  rdna3 ladder tick  abcdefghijklmnopqrstuvwxyz\033[0m\n' $((i % 7 + 1)) "$(date +%T)"; sleep 1; done
+TXT
+    chmod 755 "$_lt" 2>/dev/null
+    echo "$_lt"
+}
+ladder_new_pids() {   # ladder_new_pids NAME "<pids before>": the pids of NAME that are new
+    for _lp in $(pgrep -x "$1" 2>/dev/null); do
+        case " $2 " in *" $_lp "*) ;; *) printf '%s ' "$_lp" ;; esac
+    done
+}
+ladder_look_hires() {   # ladder_look_hires NAME: the 1280-wide look (small text-cell rectangles and broken glyphs are too small at 320)
+    ladder_w "-- look $1 (hires, $(date +%T))"
+    if [ ! -x "$D/bin/rdna3_drminfo" ]; then ladder_w "NOT TAKEN: no $D/bin/rdna3_drminfo"; return 1; fi
+    mkdir -p "$HOME/rdna3-scanout/$1"
+    with_limit 90 "$D/bin/rdna3_drminfo" --scanout-hires "$HOME/rdna3-scanout/$1" > "$LD/look.out" 2>&1
+    _lr=$?
+    grep -E '^pipe [0-9]+: |pipe\(s\) lit|asleep' "$LD/look.out" | cut -c1-140 >> "$LF"
+    ladder_w "exit: $_lr"
+}
+ladder_log_slice() {   # ladder_log_slice RUNG START_EPOCH "<pids>": the plugin's log lines of those processes since the rung began
+    _ls_start=$(date -r "$2" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -d "@$2" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
+    _ls_pred='eventMessage CONTAINS "NVMTL" AND ('
+    _ls_or=
+    for _lp in $3; do _ls_pred="$_ls_pred${_ls_or}processID == $_lp"; _ls_or=" OR "; done
+    _ls_pred="$_ls_pred)"
+    : > "$LD/$1.log"
+    with_limit 90 sh -c "log show --start \"$_ls_start\" --info --style compact --predicate '$_ls_pred' 2>/dev/null | grep -v -e 'lazy air' -e sizequery | head -c 600000" > "$LD/$1.log" 2>/dev/null
+    ladder_w "log: $1.log ($(wc -l < "$LD/$1.log" | tr -d ' ') lines, pids $3, since $_ls_start)"
+}
+ladder_ws_conf() {   # ladder_ws_conf "<NAME=value ...>": rdna3mtl.conf = the run's original without these keys, then these lines (the original stays in the backup)
+    bisect_plugin_save
+    {
+        if [ -f "$BISECT_CONFBAK" ]; then
+            _lk=; for _le in $1; do _lk="$_lk -e ^${_le%%=*}="; done
+            # shellcheck disable=SC2086
+            grep -v $_lk "$BISECT_CONFBAK" 2>/dev/null
+        fi
+        for _le in $1; do echo "$_le"; done
+        true
+    } > "$BISECT_CONF.new" && bisect_own "$BISECT_CONF.new" && mv -f "$BISECT_CONF.new" "$BISECT_CONF"
+}
+ladder_quit() {   # ladder_quit "<pids>": the instances this rung started, and only those
+    kill -TERM $1 2>/dev/null
+    sleep "${LADDER_QUITWAIT:-2}"
+    kill -KILL $1 2>/dev/null
+    return 0
+}
+ladder_rung() {   # ladder_rung NAME SCOPE: one rung's evidence in $LF
+    _rn=$1; _rs=$2
+    _renv=$(ladder_rung_env "$_rn") || { ladder_w "== rung $_rn: unknown"; return 1; }
+    ladder_w "== rung $_rn"
+    ladder_w "scope: $_rs"
+    ladder_w "conf: ${_renv:-(nothing)}"
+    hdr "ladder rung $_rn ($_rs): ${_renv:-the plugin as it is}"
+    _rargs=
+    if [ "$_rs" = windowserver ]; then
+        ladder_w "set: rdna3mtl.conf $_renv; WindowServer restart"
+        ladder_ws_conf "$_renv" || ladder_w "failed: rdna3mtl.conf not written"
+        bisect_restart_ws || return 1
+        _LADDER_WS=1
+    else
+        _rargs=$(ladder_env_args "$_renv")
+        ladder_w "env: ${_rargs:-(nothing)}"
+    fi
+    _rt0=$(date +%s)
+    ladder_w "started: $(date +%T)"
+    _tb=$(pgrep -x Terminal 2>/dev/null | tr '\n' ' '); _cb=$(pgrep -x Chess 2>/dev/null | tr '\n' ' ')
+    # shellcheck disable=SC2086
+    as_user open -n -a Terminal $_rargs "$(ladder_text_script)" >/dev/null 2>&1
+    sleep "${LADDER_LAUNCHWAIT:-4}"
+    # shellcheck disable=SC2086
+    as_user open -n -a Chess $_rargs >/dev/null 2>&1
+    sleep "${LADDER_LAUNCHWAIT:-4}"
+    _tp=$(ladder_new_pids Terminal "$_tb"); _cp=$(ladder_new_pids Chess "$_cb")
+    _LADDER_PIDS="$_tp$_cp"
+    ladder_w "pids: Terminal=${_tp:-none}Chess=${_cp:-none}"
+    [ -n "$_tp" ] && [ -n "$_cp" ] || ladder_w "WARN: an app did not start (Terminal: ${_tp:-no} Chess: ${_cp:-no}): the rung proves little"
+    sleep "${LADDER_SETTLE:-25}"
+    bisect_look "ladder-${_rn}a" 12
+    ladder_look_hires "ladder-${_rn}h"
+    ladder_w "looks: ladder-${_rn}a ladder-${_rn}h"
+    _rwait=
+    if [ -n "${_btty:-}" ]; then
+        bisect_say "LADDER rung $_rn: is the picture right? y / n / Enter (20 s)"
+        _rk=$(bisect_key 20); _rwait=${_rk:-}
+    fi
+    case $_rwait in y) _rans=y ;; n) _rans=n ;; *) _rans=- ;; esac
+    ladder_w "answer: $_rans"
+    sleep "${LADDER_TAIL:-12}"   # the plugin's counters go out every 10 s while something moved (`vk: ab: SUMMARY`, `managed: SUMMARY`)
+    ladder_log_slice "$_rn" "$_rt0" "$_tp$_cp$([ "$_rs" = windowserver ] && pgrep -x WindowServer 2>/dev/null | tr '\n' ' ')"
+    ladder_quit "$_tp$_cp"
+    _LADDER_PIDS=
+    ladder_w "== end rung $_rn"
+    ladder_push
+    return 0
+}
+ladder_push() {   # up to the host after every rung: a run cut short keeps what it did
+    [ -n "$HOST" ] || return 0
+    curl -sf --max-time 10 -T "$LF" "$HOST/reports/$base-ladder.txt" >/dev/null 2>&1
+    for _pp in "$HOME"/rdna3-scanout/ladder-*/scanout-pipe*.ppm; do
+        [ -f "$_pp" ] || continue
+        [ -f "$LD/sent.$(basename "$(dirname "$_pp")").$(basename "$_pp")" ] && continue
+        curl -sf --max-time 20 -T "$_pp" "$HOST/reports/$base-scanout$(basename "$(dirname "$_pp")")-$(basename "$_pp" | sed 's/^scanout-//')" >/dev/null 2>&1 &&
+            : > "$LD/sent.$(basename "$(dirname "$_pp")").$(basename "$_pp")"
+    done
+    return 0
+}
+ladder_restore() {   # the plugin's conf and allow list exactly as the run found them; the instances still running are quit
+    [ -n "${_LADDER_PIDS:-}" ] && ladder_quit "$_LADDER_PIDS"
+    _LADDER_PIDS=
+    bisect_plugin_restore
+    [ -n "${_LADDER_WS:-}" ] && [ -n "${LF:-}" ] && ladder_w "restored: rdna3mtl.conf as the run found it (a WindowServer started during a rung keeps that rung's conf until it restarts)"
+    if [ -n "${_btty:-}" ] && [ -z "${BISECT_KEYFILE:-}" ]; then stty sane < /dev/tty 2>/dev/null; fi
+    return 0
+}
+ladder_run() {   # ladder_run <1|2>: 1 = the app rungs, 2 = and the WindowServer rungs; 0 when every rung ran
+    _lv=$1
+    LD=${LADDER_OUT:-$HOME/rdna3-ladder}; LF=$LD/ladder.txt; BD=$LD; BF=$LF
+    rm -rf "$LD"; mkdir -p "$LD" || { echo "== ladder: cannot make $LD"; return 1; }
+    _btty=
+    if [ -n "${BISECT_KEYFILE:-}" ]; then _btty=1
+    elif [ -t 0 ] && ( : < /dev/tty ) 2>/dev/null; then _btty=1; fi
+    _LADDER_WS=; _LADDER_PIDS=
+    ladder_w "# rdna3 ladder v1"
+    ladder_w "variant: $_lv ($([ "$_lv" = 2 ] && echo ladder-ws || echo ladder))"
+    ladder_w "started: $(date +%T)"
+    ladder_w "mode: $([ -n "$_btty" ] && echo tty || echo timer)"
+    ladder_w "console_user: $(bisect_console_user)"
+    ladder_w "conf_before: $(tr '\n' ';' < "$BISECT_CONF" 2>/dev/null | cut -c1-300)"
+    # somebody must be logged in: the apps open in the console user's session
+    _w=0; _u=
+    while [ "$_w" -lt 120 ]; do
+        _u=$(bisect_console_user)
+        case "$_u" in ""|root|loginwindow) sleep 5; _w=$((_w + 5)) ;; *) break ;; esac
+    done
+    case "$_u" in ""|root|loginwindow)
+        ladder_w "ABORT: nobody logged in after $_w s: no app can be opened"
+        bisect_say "LADDER: NOBODY LOGGED IN - nothing ran"
+        return 1 ;; esac
+    trap 'ladder_restore' EXIT
+    trap 'ladder_restore; exit 130' INT
+    trap 'ladder_restore; exit 143' TERM
+    [ "$_lv" = 2 ] && trap '' HUP   # a WindowServer restart closes the Terminal this was started from
+    caffeinate -u -t 5 >/dev/null 2>&1 &
+    notify "ladder: $(echo $LADDER_RUNGS | wc -w | tr -d ' ') rungs, Terminal and Chess open and close by themselves - look at the screen"
+    _lfail=0
+    for _lr in $LADDER_RUNGS; do ladder_rung "$_lr" apps || _lfail=1; done
+    if [ "$_lv" = 2 ]; then
+        for _lr in $LADDER_WS_RUNGS; do ladder_rung "$_lr" windowserver || { _lfail=1; break; }; done
+    fi
+    ladder_restore
+    # the plugin's files are back; a WindowServer that ran with a rung's conf is restarted once more so that the desktop is the default again
+    [ -n "$_LADDER_WS" ] && [ -z "${LADDER_NO_FINAL_RESTART:-}" ] && { ladder_w "ws_restart: final ($(date +%T))"; bisect_restart_ws; }
+    ladder_w "conf_after: $(tr '\n' ';' < "$BISECT_CONF" 2>/dev/null | cut -c1-300)"
+    ladder_w "finished: $(date +%T)"
+    ladder_w "== end"
+    ladder_push
+    trap - EXIT INT TERM
+    [ -n "$STANDALONE" ] && trap 'restore_sleep' EXIT && trap 'restore_sleep; exit 130' INT && trap 'restore_sleep; exit 143' TERM
+    echo "LADDER: $_lv, $([ "$_lfail" = 0 ] && echo "every rung ran" || echo "A RUNG DID NOT RUN"); ladder.txt in the report"
+    bisect_say "LADDER done: the report has the table (41-ladder.txt)"
+    return $_lfail
+}
+# LADDER-END
+
 # an M6 hi-res look keeps only its picture; the pipes' state stays in the
 # results (a pipe not lit or asleep must not look like a frozen picture)
 m6_look_state() {
@@ -1295,6 +1506,12 @@ case " $args " in
     *" rdna3bisect=4 "*) [ -n "$BISECT" ] || BISECT=4 ;;   # rdna3vm step bisect-agdc: the kernel's switches on the agdc profile
 esac
 [ -n "$BISECT" ] && label="bisect-$BISECT"
+# rdna3ladder=1 / 2 (rdna3vm step ladder / ladder-ws): only the A/B ladder runs (a standalone run takes the flag)
+case " $args " in
+    *" rdna3ladder=1 "*) [ -n "$LADDER" ] || LADDER=1 ;;
+    *" rdna3ladder=2 "*) [ -n "$LADDER" ] || LADDER=2 ;;
+esac
+[ -n "$LADDER" ] && [ -z "$BISECT" ] && label="ladder-$LADDER"
 # rdna3bisect=3 (rdna3vm args "rdna3bisect=3" --stay): nothing runs at boot, so the bisect can be started by hand in
 # a Terminal of the guest, with a keyboard to answer on: sudo sh <this script> --bisect | --bisect-plugin | --bisect-agdc
 case " $args " in
@@ -1643,7 +1860,14 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
     # to the report; the host's triage turns them into PNGs
     # three looks 20 s apart: card run 17's second monitor switched
     # between its own picture and the first one's
-    rm -rf "$HOME/rdna3-scanout" "$HOME/rdna3-bisect"
+    rm -rf "$HOME/rdna3-scanout" "$HOME/rdna3-bisect" "$HOME/rdna3-ladder"
+    if [ -n "$LADDER" ] && [ -z "$BISECT" ]; then
+        # the A/B ladder replaces the other tests: they would draw on the screens the apps are drawn on
+        # (collect.sh packs ladder.txt and the rungs' plugin logs)
+        hdr "ladder (DRIVER-PLAN N50: Terminal + Chess per rung, the plugin's switches one by one)"
+        ladder_run "$LADDER"
+        echo "[exit $?]"
+    fi
     if [ -n "$BISECT" ]; then
         # the display bisect replaces the other tests: they would draw on the
         # screens the owner is looking at (collect.sh packs bisect.txt)
@@ -1662,7 +1886,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
         play_first
     fi
     # (not re-indented: every other test, from here to the trace pump's stop)
-    if [ -z "$BISECT" ] && [ -z "$PLAY" ]; then
+    if [ -z "$BISECT" ] && [ -z "$PLAY" ] && [ -z "$LADDER" ]; then
     if [ "${lvl:-0}" -ge 2 ] && [ -x "$D/bin/rdna3_drminfo" ]; then
         for k in 1 2 3; do
             mkdir -p "$HOME/rdna3-scanout/$k"
@@ -2244,7 +2468,7 @@ prog "boot-args: $(echo "$args" | tr ' ' '\n' | grep '^rdna3' | tr '\n' ' ')"
                 done_ $?
             fi ;;
     esac
-    fi   # [ -z "$BISECT" ] && [ -z "$PLAY" ]
+    fi   # [ -z "$BISECT" ] && [ -z "$PLAY" ] && [ -z "$LADDER" ]
     [ -n "$PLAY" ] || trace_pump_stop
 } > "$extra" 2>&1
 if [ -n "$PLAY" ]; then
@@ -2284,6 +2508,7 @@ if [ -n "$STANDALONE" ]; then
         [ -f "$p" ] && cp "$p" "$out/$base-scanout$(basename "$(dirname "$p")")-$(basename "$p" | sed 's/^scanout-//')"
     done
     [ -s "$HOME/rdna3-bisect/bisect.txt" ] && cp "$HOME/rdna3-bisect/bisect.txt" "$out/$base-bisect.txt"
+    [ -s "$HOME/rdna3-ladder/ladder.txt" ] && cp "$HOME/rdna3-ladder/ladder.txt" "$out/$base-ladder.txt"
     prog "tests done - the full report (up to 9 min)"
     RDNA3_STAMP=$stamp with_limit 540 sh "$D/tools/macos/collect.sh" "$label"
     [ -f "$HOME/$base.tar.gz" ] && mv "$HOME/$base.tar.gz" "$out/"
@@ -2309,6 +2534,8 @@ for p in "$HOME"/rdna3-scanout/*/scanout-pipe*.ppm; do
 done
 # the display bisect's table once more (bisect_push sent it after every step)
 [ -s "$HOME/rdna3-bisect/bisect.txt" ] && curl -sf --max-time 30 -T "$HOME/rdna3-bisect/bisect.txt" "$HOST/reports/$base-bisect.txt" >/dev/null 2>&1
+# the A/B ladder's table once more (ladder_push sent it after every rung)
+[ -s "$HOME/rdna3-ladder/ladder.txt" ] && curl -sf --max-time 30 -T "$HOME/rdna3-ladder/ladder.txt" "$HOST/reports/$base-ladder.txt" >/dev/null 2>&1
 # collect.sh packs everything from ~/rdna3-*
 RDNA3_STAMP=$stamp with_limit 540 sh "$D/tools/macos/collect.sh" "$label"
 f="$HOME/$base.tar.gz"

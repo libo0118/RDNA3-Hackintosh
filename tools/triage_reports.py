@@ -4294,6 +4294,13 @@ def report(path, show_all):
         mtlallow = read_member(tar, "34-metal-allow.txt") or ""
         stamps_txt = read_member(tar, "35-build-stamps.txt") or ""
         pluginlog = read_member(tar, "26-log-metal-plugin.txt") or ""
+        # DRIVER-PLAN N50: the A/B ladder (rdna3vm step ladder): ladder.txt and each rung's plugin log slice
+        ladder_txt = read_member(tar, "41-ladder.txt") or ""
+        ladder_logs = {}
+        for m_ in tar.getmembers():
+            lm_ = re.search(r"41-ladder-(.+)\.log$", m_.name)
+            if lm_ and m_.isfile():
+                ladder_logs[lm_.group(1)] = tar.extractfile(m_).read().decode("utf-8", "replace")
     args = " ".join(l for l in args.splitlines() if not l.startswith("$") and not l.startswith("[exit"))
     args = args.replace("boot-args", "").strip()
     lvl = bootarg_level(args)
@@ -4572,6 +4579,15 @@ def report(path, show_all):
                       "fence and managed shadow lines were NOT read")]
     for lvl_, name_, text_ in n50_rows_:
         print("   %s %-20s %s" % (lvl_, name_, text_))
+    if ladder_txt:
+        try:
+            from triage_glyphs import parse_ladder, ladder_rows
+            lv_, lr_, lp_ = parse_ladder(ladder_txt, ladder_logs)
+            ladder_rows_ = ladder_rows(lr_, lv_, lp_)
+        except ImportError:
+            ladder_rows_ = [("WARN", "ladder", "tools/triage_glyphs.py is missing next to triage_reports.py: the ladder's rungs were NOT read")]
+        for lvl_, name_, text_ in ladder_rows_:
+            print("   %s %-20s %s" % (lvl_, name_, text_))
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
         want = fb_source_hash(ACCEL_HASH_FILES)

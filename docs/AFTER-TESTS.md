@@ -1181,6 +1181,30 @@ Lines and rows (`tools/triage_glyphs.py`, `tests/test_triage_glyphs.py`):
 The order to try: `NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears`; `NVMTL_ASYNC_COMMIT=0`; `NVMTL_MANAGED_CHECK=1` and `NVMTL_MANAGED_SNAPSHOT=1`;
 `NVMTL_NO_ALIGN_GUARD=1`; `NVMTL_PARANOID=1`; `NVMTL_LOAD_BARRIER=1`. If `PARANOID` does not change the picture the cause is not in anything the plugin schedules or reuses.
 
+### The whole ladder in one card run: `rdna3vm step ladder`
+
+One run instead of one report per switch (autoreport.sh `ladder_run`, boot-arg `rdna3ladder=1`; the profile of the `play` step, nothing else runs, about 26 minutes;
+by hand in the guest's Terminal: `sudo sh "/Library/Application Support/RDNA3/autoreport.sh" --standalone --ladder`). Seven rungs: `baseline`, `radv`
+(`NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears`), `sync` (`NVMTL_ASYNC_COMMIT=0`), `managed` (`NVMTL_MANAGED_CHECK=1` + `NVMTL_MANAGED_SNAPSHOT=1`),
+`alignguard` (`NVMTL_NO_ALIGN_GUARD=1`), `paranoid` (`NVMTL_PARANOID=1`), `loadbarrier` (`NVMTL_LOAD_BARRIER=1`). Per rung the run opens Terminal (a colour
+listing, then a tick line every second) and Chess as NEW instances with that rung's switches in their environment
+(`open -n -a Terminal --env NVMTL_X=1`: the plugin reads its switches from the process's environment as well as from the conf file, the environment wins),
+waits 25 s, takes a 320-wide and a 1280-wide scanout look (`ladder-<rung>a`, `ladder-<rung>h`), keeps the plugin's log of exactly those two processes (by pid, labelled
+by rung), then quits the two instances (the Terminal you started it from is not touched). `rdna3mtl.conf` is not written and WindowServer is not restarted: the
+switch reaches the two apps only, which is where the artefacts show. At the desktop, the run asks nothing; from a Terminal (`--standalone --ladder`) it asks `y` (picture right) /
+`n` (broken) / Enter per rung (20 s each) and the answers go into the table.
+
+`rdna3vm step ladder-ws` (`rdna3ladder=2`, `--ladder-ws`, about 45 minutes) adds `radv-ws` and `paranoid-ws`: the same switches for WindowServer itself. These
+edit `rdna3mtl.conf` (the file's other lines stay, a same-named line is replaced), restart WindowServer (log in at the login window; Terminal and Chess then open under it)
+and put the conf back exactly (also with no conf file at all, on Ctrl-C / SIGTERM, and at the next start of autoreport.sh after a dead run); the desktop is restarted once more at the end so that it
+runs with the default conf. Run `ladder-ws` only when the app rungs say the switch matters.
+
+Evidence: `ladder.txt` (archive member `41-ladder.txt`, uploaded after every rung as `<report>-ladder.txt`), each rung's `41-ladder-<rung>.log` and the looks
+`<report>-scanoutladder-<rung>[a|h]-pipe<P>.ppm`. `tools/triage_reports.py` prints one row per rung (`ladder <rung>`: what it set, whether the plugin's own
+`vk: ab switches` line in that rung's log shows the switch, the counters of the slice, the look count, your answer) and a `ladder` row: "the baseline picture was broken and the
+picture was RIGHT with: X" names the discriminator. Reading it: a rung whose WARN says the switch did not reach the plugin proves nothing (the `--env` was not
+taken: check `34-metal-conf.txt` and `26-log-metal-plugin.txt`); without your answers, compare `ladder-<rung>h` pictures by eye (the text is the quickest test).
+
 Encode time (kind 17 records, `tools/plugin_trace.py`, the same report): WindowServer, 3948 render encoders and 26152 draws in `101618`: 4256 ms in
 encoders, of which the surface-in checks are 1605 ms (38 %, 104 us per call; 81 % of it in 205 encoders that include a real upload, 465 uploads of 856 us
 each = 398 ms; in the 3533 encoders without a big upload the calls average 43 us: a lock, a seed query and a VRAM tag check per bound texture and draw), descriptor writes 99 ms (4 us per draw), pipeline lookup 27 ms
