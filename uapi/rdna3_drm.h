@@ -232,8 +232,11 @@ typedef struct rdna3_bo {
     uint64_t user_addr;
     void    *os_map;          /* the OS layer's CPU-mapping object of this BO, a weak link it
                                  keeps itself (common/rdna3_bo_map.h); the UAPI never reads it */
-    uint32_t map_owner;       /* rdna3_drm_bomap_charge: the uid charged while map_charged */
-    uint8_t  map_charged;
+    /* the newest CPU-mapping charge of this BO (rdna3_drm_bomap_charge):
+     * its generation (0: none) and uid, for file_foreign_bytes' view only;
+     * the charge itself is the descriptor's (rdna3_bomap_charge) */
+    uint64_t map_gen;
+    uint32_t map_owner;
 } rdna3_bo;
 
 /* BOs a CPU mapping holds (DRIVER-PLAN N47 (b)): such a BO outlives its
@@ -246,10 +249,19 @@ typedef struct rdna3_bomap_owner {
     uint64_t bytes, foreign_bytes;   /* foreign: IOSurface VRAM (RD_NR_XNU_SURFACE_BO) */
 } rdna3_bomap_owner;
 typedef struct rdna3_bomap_quota {
-    rdna3_bomap_owner o[RD_BOMAP_OWNERS];
+    rdna3_bomap_owner o[RD_BOMAP_OWNERS];   /* uids the caps apply to (not root, _windowserver) */
     uint32_t n;
     uint64_t bytes;
+    uint64_t gen;                           /* the last charge's generation */
 } rdna3_bomap_quota;
+/* one descriptor's charge, kept by the descriptor and given back exactly:
+ * a BO's next descriptor can be charged while the last one's uncharge is
+ * still to come (ECC review round 2 of N47 (b)) */
+typedef struct rdna3_bomap_charge {
+    uint64_t gen, size;
+    uint32_t uid;
+    uint8_t  foreign, exempt, charged;
+} rdna3_bomap_charge;
 
 typedef struct rdna3_va {
     uint32_t handle;          /* 0 = free slot */
@@ -642,13 +654,16 @@ void rdna3_drm_file_close(rdna3_drm_file *f);
  * ioctl payload of 'size' bytes; results are written back into it. */
 int  rdna3_drm_ioctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size);
 
-/* DRIVER-PLAN N47 (b): the OS layer made a CPU-mapping descriptor of 'bo'
- * for file 'f' (it holds the BO until the last mapping goes): charge it to
- * f->owner. Returns 0, or an rd3_bomap_quota reason (common/rdna3_bo_map.h)
- * and charges nothing. uncharge when the descriptor goes (no-op if not
- * charged). Under the OS lock, as the ioctls. */
-int  rdna3_drm_bomap_charge(rdna3_drm_device *dev, const rdna3_drm_file *f, rdna3_bo *bo);
-void rdna3_drm_bomap_uncharge(rdna3_drm_device *dev, rdna3_bo *bo);
+/* DRIVER-PLAN N47 (b): the OS layer makes a new CPU-mapping descriptor of
+ * 'bo' for file 'f' (it holds the BO until the last mapping goes): charge
+ * it to f->owner, always (one charge per descriptor, never per BO), filling
+ * '*c', which the descriptor keeps. Returns 0, or an rd3_bomap_quota
+ * reason (common/rdna3_bo_map.h) with nothing charged. uncharge gives back
+ * exactly '*c' when the descriptor goes (no-op if not charged); 'bo' is
+ * still alive then (the descriptor's reference). Under the OS lock, as the
+ * ioctls. */
+int  rdna3_drm_bomap_charge(rdna3_drm_device *dev, const rdna3_drm_file *f, rdna3_bo *bo, rdna3_bomap_charge *c);
+void rdna3_drm_bomap_uncharge(rdna3_drm_device *dev, rdna3_bo *bo, rdna3_bomap_charge *c);
 
 /* Enumeration-only mode: report accel_working and one ring per GFX /
  * COMPUTE / DMA so libdrm_amdgpu and RADV can create a device (vulkaninfo,

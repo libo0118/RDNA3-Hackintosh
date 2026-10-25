@@ -2990,6 +2990,8 @@ BOMAP_NODESC_RE = re.compile(r"RDNA3: GEM: CPU map of offset (0x[0-9a-f]+): no d
                              r"(\d+) such\)")
 BOMAP_LATE_RE = re.compile(r"RDNA3: GEM: a CPU mapping of a (\d+) KiB BO at (0x[0-9a-f]+) went after the DRM "
                            r"teardown.*?\((\d+) such\)")
+BOMAP_QUOTA_RE = re.compile(r"RDNA3: GEM: CPU map of offset (0x[0-9a-f]+) refused by the quota for the first time: "
+                            r"(.*?) \(uid (\d+), BO (\d+) KiB; pid (-?\d+), (\d+) quota refusals\)")
 BOMAP_REFUSED_RE = re.compile(r"RDNA3: GEM: CPU map of offset (0x[0-9a-f]+) refused: (.*?) \((?:BO [^)]*; )?pid "
                               r"(-?\d+), (\d+) such\)")
 
@@ -3037,6 +3039,10 @@ def bomem_rows(klog):
     for why in sorted(refused):
         rows.append(("WARN", "BO map", "a CPU map refused: %s (at least %d time(s); the counter covers every "
                      "reason)" % (why, refused[why])))
+    for m in BOMAP_QUOTA_RE.finditer(klog or ""):
+        rows.append(("WARN", "BO map", "the quota of mapped BOs refused uid %s for the first time: %s (a %s KiB BO, "
+                     "pid %s): a client mapping BOs and dropping their handles without unmapping"
+                     % (m.group(3), m.group(2), m.group(4), m.group(5))))
     nodesc = {}
     for m in BOMAP_NODESC_RE.finditer(klog or ""):
         n = int(m.group(9))

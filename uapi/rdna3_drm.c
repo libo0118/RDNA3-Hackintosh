@@ -2232,56 +2232,77 @@ static rdna3_bomap_owner *bomap_owner(rdna3_bomap_quota *q, uint32_t uid, int ad
     return &q->o[freei];
 }
 
-int rdna3_drm_bomap_charge(rdna3_drm_device *dev, const rdna3_drm_file *f, rdna3_bo *bo)
+/* The charge is the descriptor's, made whenever one is made (the OS makes
+ * one only while the BO links to none) and given back with exactly its own
+ * values: a flag on the BO let a new descriptor, made between the last
+ * one's unlink and its uncharge, go uncharged (ECC review round 2). Root and
+ * _windowserver take no slot of the per-uid table (rd3_bomap_quota_admit
+ * exempts them; they could otherwise fill it and be refused TABLE_FULL):
+ * they count only towards the device's limit. */
+int rdna3_drm_bomap_charge(rdna3_drm_device *dev, const rdna3_drm_file *f, rdna3_bo *bo, rdna3_bomap_charge *c)
 {
     rdna3_bomap_quota *q = &dev->bomap;
-    rdna3_bomap_owner *o;
+    const int exempt = rd3_bomap_uid_exempt(f->owner);
+    rdna3_bomap_owner *o = exempt ? NULL : bomap_owner(q, f->owner, 0);
     int v;
-    if (bo->map_charged)   /* one descriptor per BO: never twice */
-        return 0;
-    o = bomap_owner(q, f->owner, 0);
+    zero(c, sizeof(*c));
     v = (int)rd3_bomap_quota_admit(f->owner, o ? o->n : 0, o ? o->bytes : 0, q->n, bo->size,
                                    RD3_BOMAP_OWNER_BYTES_MAX(dev->vis_vram_size));
     if (v)
         return v;
-    if (!o && !(o = bomap_owner(q, f->owner, 1)))
+    if (!exempt && !o && !(o = bomap_owner(q, f->owner, 1)))
         return (int)RD3_BOMAP_Q_TABLE_FULL;
-    o->n++;
-    o->bytes += bo->size;
-    if (bo->foreign)
-        o->foreign_bytes += bo->size;
+    c->gen = ++q->gen;
+    c->size = bo->size;
+    c->uid = f->owner;
+    c->foreign = bo->foreign ? 1 : 0;
+    c->exempt = (uint8_t)exempt;
+    c->charged = 1;
+    if (o) {
+        o->n++;
+        o->bytes += c->size;
+        if (c->foreign)
+            o->foreign_bytes += c->size;
+    }
     q->n++;
-    q->bytes += bo->size;
-    bo->map_owner = f->owner;
-    bo->map_charged = 1;
+    q->bytes += c->size;
+    bo->map_gen = c->gen;   /* the BO's newest charge, for file_foreign_bytes */
+    bo->map_owner = c->uid;
     return 0;
 }
 
-void rdna3_drm_bomap_uncharge(rdna3_drm_device *dev, rdna3_bo *bo)
+void rdna3_drm_bomap_uncharge(rdna3_drm_device *dev, rdna3_bo *bo, rdna3_bomap_charge *c)
 {
     rdna3_bomap_quota *q = &dev->bomap;
     rdna3_bomap_owner *o;
-    if (!bo->map_charged)
+    if (!c->charged)
         return;
-    bo->map_charged = 0;
-    o = bomap_owner(q, bo->map_owner, 0);
+    c->charged = 0;
+    o = c->exempt ? NULL : bomap_owner(q, c->uid, 0);
     if (o) {
         o->n--;
-        o->bytes -= bo->size;
-        if (bo->foreign)
-            o->foreign_bytes -= bo->size;
+        o->bytes -= c->size;
+        if (c->foreign)
+            o->foreign_bytes -= c->size;
         if (!o->n)
             o->used = 0;
     }
     q->n--;
-    q->bytes -= bo->size;
+    q->bytes -= c->size;
+    if (bo && bo->map_gen == c->gen)   /* a newer descriptor's charge stays the BO's view */
+        bo->map_gen = 0;
 }
 
 /* the accelerator VRAM a file's owner pins through surface BOs: the file's
  * own (they cannot be exported, so only the importing file has handles on
  * them) and, since N47 (b), those its owner's CPU mappings hold after their
- * handles (or their file) are gone - each BO once, and a closed and
- * reopened file still sees what its mappings pin */
+ * handles (or their file) are gone - each BO once (its newest charge; while
+ * a descriptor's uncharge is pending next to a new one the owner's sum may
+ * hold the BO twice, which only refuses earlier), and a closed and reopened
+ * file still sees what its mappings pin. The mapped part covers every uid
+ * the table holds, across its files; root and _windowserver are not in it
+ * (only their per-file handles count), which is fine today: the Metal
+ * plugin does not CPU-map the surfaces it imports. */
 static uint64_t file_foreign_bytes(const rdna3_drm_file *f)
 {
     const rdna3_bomap_owner *o = bomap_owner(&f->dev->bomap, f->owner, 0);
@@ -2290,7 +2311,7 @@ static uint64_t file_foreign_bytes(const rdna3_drm_file *f)
     for (i = 0; i < RD_MAX_HANDLES; i++)
         if (f->bos[i] && f->bos[i]->foreign) {
             n += f->bos[i]->size;
-            if (f->bos[i]->map_charged && f->bos[i]->map_owner == f->owner)
+            if (f->bos[i]->map_gen && f->bos[i]->map_owner == f->owner)
                 charged_here += f->bos[i]->size;
         }
     return n + (o && o->foreign_bytes > charged_here ? o->foreign_bytes - charged_here : 0);

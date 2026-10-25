@@ -114,7 +114,7 @@ public:
     int   drmIoctl(rdna3_drm_file *f, uint32_t nr, void *data, uint32_t size);
     /* a BO's CPU-mapping descriptor (RDNA3BoMemory, RDNA3Drm.cpp) gives
      * back its BO reference; takes fDrmLock */
-    void drmBoMapRelease(rdna3_bo *bo, uint64_t size);
+    void drmBoMapRelease(rdna3_bo *bo, uint64_t size, rdna3_bomap_charge *charge);
     /* xnu refused to map / unmap a BO's range (logged, bomap_fail) */
     void drmBoMapFailed(const rdna3_bo *bo, const char *what, IOReturn err);
     /* the BOs' weak links to their mapping descriptors (common/rdna3_bo_map.h);
@@ -235,6 +235,7 @@ private:
     uint32_t      fBoMapMade = 0, fBoMapReused = 0;
     uint32_t      fBoMapRefused = 0;     /* userptr, no CPU access, outside the BAR, the quota */
     uint32_t      fBoMapQuota = 0;       /* of those: rdna3_drm_bomap_charge refused */
+    uint32_t      fBoMapQuotaSeen = 0;   /* 1 << rd3_bomap_quota reason: its first refusal was logged */
     uint32_t      fBoMapNoDesc = 0;      /* withBo made nothing (no physical range, no memory) */
     uint32_t      fBoMapNoBo = 0;        /* an offset that names no BO of the file */
     volatile SInt32 fBoMapFail = 0;      /* xnu's map / unmap failed */
@@ -246,6 +247,7 @@ private:
     IOMemoryDescriptor *drmBoMapDescriptor(rdna3_drm_file *f, rdna3_bo *bo, enum rd3_bomap_kind k,
                                            uint64_t off);   /* fDrmLock held */
     void          drmBoMapRefused(enum rd3_bomap_kind k, const rdna3_bo *bo, uint64_t off, const char *why);
+    void          drmBoMapQuotaRefused(int q, uint32_t uid, enum rd3_bomap_kind k, const rdna3_bo *bo, uint64_t off);
     IOThread      fDrmHeldBy = nullptr;
     /* the heaps (common/rdna3_vram_place.h, card run 2026-10-17c): the
      * reserve at the start of the CPU-visible part belongs to the

@@ -127,6 +127,12 @@ static inline const char *rd3_bomap_quota_name(int q)
     }
 }
 
+/* the system's own clients, as rdna3_vmid_admit: only the device's limit */
+static inline int rd3_bomap_uid_exempt(uint32_t uid)
+{
+    return uid == 0 || uid == RD_UID_WINDOWSERVER;
+}
+
 /* may 'uid', holding 'owner_n' descriptors of 'owner_bytes', get one more of
  * 'size' bytes while the device holds 'dev_n'? */
 static inline enum rd3_bomap_quota rd3_bomap_quota_admit(uint32_t uid, uint32_t owner_n, uint64_t owner_bytes,
@@ -134,7 +140,7 @@ static inline enum rd3_bomap_quota rd3_bomap_quota_admit(uint32_t uid, uint32_t 
 {
     if (dev_n >= RD3_BOMAP_DEVICE_MAX)
         return RD3_BOMAP_Q_DEVICE_COUNT;
-    if (uid == 0 || uid == RD_UID_WINDOWSERVER)
+    if (rd3_bomap_uid_exempt(uid))
         return RD3_BOMAP_Q_OK;
     if (owner_n >= RD_MAX_HANDLES)
         return RD3_BOMAP_Q_OWNER_COUNT;

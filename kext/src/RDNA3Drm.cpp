@@ -1156,6 +1156,10 @@ private:
     IOMemoryDescriptor *fPhys = nullptr;    /* the BO's physical range: the parent, held by IOSubMemoryDescriptor */
     uint64_t            fSize = 0;
     IOOptionBits        fCacheMode = 0;     /* kIOMapWriteCombineCache (VRAM) / kIOMapInhibitCache (doorbell) */
+public:
+    /* this descriptor's own charge (rdna3_drm_bomap_charge), given back in
+     * free (drmBoMapRelease); set and read under fDrmLock */
+    rdna3_bomap_charge  fCharge = {};
 };
 OSDefineMetaClassAndStructors(RDNA3BoMemory, IOSubMemoryDescriptor)
 
@@ -1278,7 +1282,7 @@ void RDNA3BoMemory::taggedRelease(const void *tag, const int when) const
 void RDNA3BoMemory::free()
 {
     if (fBo && fAccel)
-        fAccel->drmBoMapRelease(fBo, fSize);
+        fAccel->drmBoMapRelease(fBo, fSize, &fCharge);
     fBo = nullptr;
     fPhys = nullptr;
     OSSafeReleaseNULL(fAccel);
@@ -1290,7 +1294,7 @@ void RDNA3BoMemory::free()
  * frees fDrmLock and the device. fBoMapLock (alive until free()) orders the
  * two: a release in flight finishes before drmFree goes on, and one after
  * it leaves the BO as it is (the device's memory is gone), logged. */
-void RDNA3Accel::drmBoMapRelease(rdna3_bo *bo, uint64_t size)
+void RDNA3Accel::drmBoMapRelease(rdna3_bo *bo, uint64_t size, rdna3_bomap_charge *charge)
 {
     IOLockLock(fBoMapLock);
     if (fBoMapGone) {
@@ -1308,7 +1312,7 @@ void RDNA3Accel::drmBoMapRelease(rdna3_bo *bo, uint64_t size)
     IOLockLock(fDrmLock);
     fBoMapLive--;
     fBoMapLiveBytes -= size;
-    rdna3_drm_bomap_uncharge(fDrm, bo);
+    rdna3_drm_bomap_uncharge(fDrm, bo, charge);   /* exactly this descriptor's charge */
     rdna3_drm_bo_put(fDrm, bo);
     IOLockUnlock(fDrmLock);
 
@@ -1345,10 +1349,13 @@ IOMemoryDescriptor *RDNA3Accel::drmBoMapDescriptor(rdna3_drm_file *f, rdna3_bo *
         fBoMapReused++;
         return m;
     }
-    const int q = rdna3_drm_bomap_charge(fDrm, f, bo);
+    /* the link is empty and fDrmLock held: this is the BO's only new
+     * descriptor, charged for itself (an older one may still be waiting for
+     * its uncharge in drmBoMapRelease, with its own charge) */
+    rdna3_bomap_charge charge;
+    const int q = rdna3_drm_bomap_charge(fDrm, f, bo, &charge);
     if (q) {
-        fBoMapQuota++;
-        drmBoMapRefused(k, bo, off, rd3_bomap_quota_name(q));
+        drmBoMapQuotaRefused(q, f->owner, k, bo, off);
         return nullptr;
     }
     const bool db = k == RD3_BOMAP_DOORBELL;
@@ -1356,7 +1363,7 @@ IOMemoryDescriptor *RDNA3Accel::drmBoMapDescriptor(rdna3_drm_file *f, rdna3_bo *
     m = RDNA3BoMemory::withBo(this, db ? fDoorbellDev : fVramDev, bo,
                               db ? kIOMapInhibitCache : kIOMapWriteCombineCache, &cause);
     if (!m) {
-        rdna3_drm_bomap_uncharge(fDrm, bo);
+        rdna3_drm_bomap_uncharge(fDrm, bo, &charge);
         const uint32_t n = ++fBoMapNoDesc;
         if (n <= 8 || (n & 1023) == 0)
             LOG("GEM: CPU map of offset 0x%llx: no descriptor for the %llu KiB %s BO at 0x%llx: %s (physical 0x%llx, "
@@ -1365,6 +1372,7 @@ IOMemoryDescriptor *RDNA3Accel::drmBoMapDescriptor(rdna3_drm_file *f, rdna3_bo *
                 (unsigned long long)cause.phys, (unsigned long long)(cause.segLen >> 10), proc_selfpid(), n);
         return nullptr;
     }
+    m->fCharge = charge;
     IOLockLock(fBoMapLock);
     rd3_bomap_link(&bo->os_map, m);   /* creation runs under fDrmLock: nobody linked one meanwhile */
     IOLockUnlock(fBoMapLock);
@@ -1372,6 +1380,21 @@ IOMemoryDescriptor *RDNA3Accel::drmBoMapDescriptor(rdna3_drm_file *f, rdna3_bo *
     fBoMapLiveBytes += bo->size;
     fBoMapMade++;
     return m;
+}
+
+/* fDrmLock held: the uid's quota refused a new descriptor; every reason's
+ * first occurrence is logged whatever the other refusals did (its own
+ * limiter on fBoMapQuota), then the common one */
+void RDNA3Accel::drmBoMapQuotaRefused(int q, uint32_t uid, enum rd3_bomap_kind k, const rdna3_bo *bo, uint64_t off)
+{
+    const uint32_t n = ++fBoMapQuota;
+    if (q > 0 && q < 32 && !(fBoMapQuotaSeen & (1u << q))) {
+        fBoMapQuotaSeen |= 1u << q;
+        LOG("GEM: CPU map of offset 0x%llx refused by the quota for the first time: %s (uid %u, BO %llu KiB; "
+            "pid %d, %u quota refusals)", (unsigned long long)off, rd3_bomap_quota_name(q),
+            uid, (unsigned long long)(bo->size >> 10), proc_selfpid(), n);
+    }
+    drmBoMapRefused(k, bo, off, rd3_bomap_quota_name(q));
 }
 
 /* fDrmLock held: why a map request got nothing, the first 8 then every

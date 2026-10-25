@@ -49,7 +49,8 @@ rfmt = log_format("GEM: CPU map of offset 0x%llx refused: %s (BO %llu KiB", r"\(
 dfmt = log_format("GEM: CPU map of offset 0x%llx: no descriptor for the", r"\(unsigned long long\)off")
 lfmt = log_format("GEM: a CPU mapping of a %llu KiB BO at 0x%llx went after the DRM teardown",
                   r"\(unsigned long long\)\(size")
-if ffmt and nfmt and rfmt and dfmt and lfmt:
+qfmt = log_format("GEM: CPU map of offset 0x%llx refused by the quota for the first time", r"\(unsigned long long\)off")
+if ffmt and nfmt and rfmt and dfmt and lfmt and qfmt:
     log = "\n".join([   # values of %llx / %x without their 0x: the format has it
         fill(ffmt, "map", 64, "VRAM", "2000000", "e00002bc", 501, 1),
         fill(ffmt, "map", 64, "VRAM", "2000000", "e00002bc", 501, 3),
@@ -61,6 +62,7 @@ if ffmt and nfmt and rfmt and dfmt and lfmt:
         fill(dfmt, "100005000", 64, "VRAM", "8000000", "the BAR has no physical segment at the BO's offset", "0", 0,
              79, 1),
         fill(lfmt, 64, "8000000", 3),
+        fill(qfmt, "100009000", "this uid's limit of mapped BOs (RD_MAX_HANDLES)", 501, 4, 80, 1),
     ])
     rows = tr.bomem_rows(log)
     got = [(lv, t.split(" (")[0]) for lv, _, t in rows]
@@ -69,6 +71,7 @@ if ffmt and nfmt and rfmt and dfmt and lfmt:
             ("WARN", "map / unmap requests for offset 0"),
             ("WARN", "map / unmap requests for offsets that name no BO of the file"),
             ("WARN", "a CPU map refused: a userptr BO"),
+            ("WARN", "the quota of mapped BOs refused uid 501 for the first time: this uid's limit of mapped BOs"),
             ("FAIL", "no mapping descriptor for a VRAM BO, at least 1 time(s): the BAR has no physical segment at "
                      "the BO's offset"),
             ("WARN", "at least 3 CPU mapping(s) went after the DRM teardown")]

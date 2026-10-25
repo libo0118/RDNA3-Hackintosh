@@ -111,8 +111,8 @@ $(BUILD)/test_bo_map: tests/test_bo_map.c common/rdna3_bo_map.h $(COMMON) $(UAPI
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/test_bo_map.c $(COMMON) $(UAPI)
 
 # the descriptor's release protocol under threads (ECC review round 1 of N47 (b))
-$(BUILD)/test_bo_map_race: tests/test_bo_map_race.c common/rdna3_bo_map.h $(COMMON_H) | $(BUILD)
-	$(CC) $(CFLAGS) $(WARN) -std=c11 -Wno-conversion $(SAN) -pthread $(INC) -o $@ tests/test_bo_map_race.c
+$(BUILD)/test_bo_map_race: tests/test_bo_map_race.c common/rdna3_bo_map.h $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) -std=c11 -Wno-conversion -Wno-cast-align $(SAN) -pthread $(INC) -o $@ tests/test_bo_map_race.c $(COMMON) $(UAPI)
 
 $(BUILD)/test_vram_place: tests/test_vram_place.c common/rdna3_vram_place.h accel/rdna3k_abi.h $(COMMON) $(UAPI) $(COMMON_H) | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) -Wno-conversion -Wno-cast-align $(SAN) $(INC) -o $@ tests/test_vram_place.c $(COMMON) $(UAPI)

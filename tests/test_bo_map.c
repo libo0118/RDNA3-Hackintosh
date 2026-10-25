@@ -101,6 +101,7 @@ typedef struct md {
     int mapped;             /* an IOMemoryMap of it exists in the (single) task */
     rdna3_bo *bo;
     rdna3_drm_device *dev;
+    rdna3_bomap_charge charge;   /* RDNA3BoMemory::fCharge */
 } md;
 static int md_made, md_freed;
 
@@ -124,14 +125,13 @@ static md *map_ref(rdna3_drm_file *f, uint64_t off, enum rd3_bomap_kind *kind)
         m->refs++;
         return m;
     }
-    q = rdna3_drm_bomap_charge(f->dev, f, bo);
+    m = (md *)calloc(1, sizeof(*m));
+    if (!m)
+        return NULL;
+    q = rdna3_drm_bomap_charge(f->dev, f, bo, &m->charge);
     if (q) {
         last_quota = q;
-        return NULL;
-    }
-    m = (md *)calloc(1, sizeof(*m));
-    if (!m) {
-        rdna3_drm_bomap_uncharge(f->dev, bo);
+        free(m);
         return NULL;
     }
     m->refs = 1;
@@ -143,14 +143,20 @@ static md *map_ref(rdna3_drm_file *f, uint64_t off, enum rd3_bomap_kind *kind)
     return m;
 }
 
+/* RDNA3BoMemory::free -> drmBoMapRelease: exactly its own charge, then the BO */
+static void md_free(md *m)
+{
+    rdna3_drm_bomap_uncharge(m->dev, m->bo, &m->charge);
+    rdna3_drm_bo_put(m->dev, m->bo);
+    free(m);
+    md_freed++;
+}
+
 /* RDNA3BoMemory::taggedRelease (OSObject's freeWhen 1) and free */
 static void md_release(md *m)
 {
     if (rd3_bomap_release_unlinks(&m->bo->os_map, m, m->refs, 1)) {
-        rdna3_drm_bomap_uncharge(m->dev, m->bo);
-        rdna3_drm_bo_put(m->dev, m->bo);
-        free(m);
-        md_freed++;
+        md_free(m);
         return;
     }
     m->refs--;
@@ -510,7 +516,8 @@ int main(void)
         {
             uint32_t h3 = gem_create(&f3, 4096, AMDGPU_GEM_DOMAIN_VRAM, 0);
             md *m3 = NULL;
-            CHECK(h3 && xnu_map(&f3, bo_off(&f3, h3), &m3) == 0 && m3 && m3->bo->map_owner == 502);
+            CHECK(h3 && xnu_map(&f3, bo_off(&f3, h3), &m3) == 0 && m3 && m3->charge.uid == 502 &&
+                  m3->bo->map_owner == 502);
             CHECK(xnu_unmap(&f3, bo_off(&f3, h3)) == 0);
             gem_close(&f3, h3);
         }
@@ -525,6 +532,68 @@ int main(void)
         CHECK(live_bos == live0);
         for (i = 0; i < RD_BOMAP_OWNERS; i++)
             CHECK(!dev.bomap.o[i].used);
+    }
+
+    /* 9. (ECC review round 2) a new descriptor made between the last one's unlink
+     * (taggedRelease, fBoMapLock) and its uncharge (drmBoMapRelease, fDrmLock)
+     * is charged for itself; the old one's uncharge takes back only its own */
+    {
+        rdna3_bomap_owner *o;
+        md *m1 = NULL, *m2 = NULL;
+        uint32_t h, i;
+        CHECK(rdna3_drm_file_open(&dev, &f2) == 0);
+        f2.os = (void *)0x7a5d;
+        f2.owner = 501;
+        h = gem_create(&f2, 8192, AMDGPU_GEM_DOMAIN_VRAM, 0);
+        CHECK(xnu_map(&f2, bo_off(&f2, h), &m1) == 0 && m1->charge.charged);
+        m1->mapped = 0;   /* its map goes: the last reference, unlinked; free not run yet */
+        CHECK(rd3_bomap_release_unlinks(&m1->bo->os_map, m1, m1->refs, 1) == 1 && !m1->bo->os_map);
+        CHECK(xnu_map(&f2, bo_off(&f2, h), &m2) == 0 && m2 != m1 && m2->charge.charged);
+        CHECK(dev.bomap.n == 2);   /* both charged until m1's free */
+        md_free(m1);
+        for (o = NULL, i = 0; i < RD_BOMAP_OWNERS; i++)
+            if (dev.bomap.o[i].used && dev.bomap.o[i].uid == 501)
+                o = &dev.bomap.o[i];
+        CHECK(dev.bomap.n == 1 && o && o->n == 1 && o->bytes == 8192);
+        CHECK(m2->bo->map_gen == m2->charge.gen);   /* the BO's view is m2's */
+        CHECK(xnu_unmap(&f2, bo_off(&f2, h)) == 0 && dev.bomap.n == 0 && dev.bomap.bytes == 0);
+        gem_close(&f2, h);
+        rdna3_drm_file_close(&f2);
+    }
+
+    /* 10. root and _windowserver take no slot of the per-uid table: 64 other uids
+     * fill it, WindowServer still maps */
+    {
+        static rdna3_drm_file fu[RD_BOMAP_OWNERS + 1];
+        static md *mu[RD_BOMAP_OWNERS + 1];
+        static uint32_t hu[RD_BOMAP_OWNERS + 1];
+        uint32_t i;
+        for (i = 0; i < RD_BOMAP_OWNERS + 1; i++) {
+            CHECK(rdna3_drm_file_open(&dev, &fu[i]) == 0);
+            fu[i].os = (void *)0x7a5d;
+            fu[i].owner = i < RD_BOMAP_OWNERS ? 1000 + i : RD_UID_WINDOWSERVER;
+            hu[i] = gem_create(&fu[i], 4096, AMDGPU_GEM_DOMAIN_VRAM, 0);
+            mu[i] = NULL;
+            CHECK(hu[i] && xnu_map(&fu[i], bo_off(&fu[i], hu[i]), &mu[i]) == 0);
+        }
+        CHECK(mu[RD_BOMAP_OWNERS] && mu[RD_BOMAP_OWNERS]->charge.exempt && dev.bomap.n == RD_BOMAP_OWNERS + 1);
+        {
+            /* a 65th non-exempt uid finds the table full */
+            static rdna3_drm_file fx;
+            uint32_t hx;
+            CHECK(rdna3_drm_file_open(&dev, &fx) == 0);
+            fx.owner = 4242;
+            hx = gem_create(&fx, 4096, AMDGPU_GEM_DOMAIN_VRAM, 0);
+            CHECK(xnu_map(&fx, bo_off(&fx, hx), NULL) == -1 && last_quota == RD3_BOMAP_Q_TABLE_FULL);
+            gem_close(&fx, hx);
+            rdna3_drm_file_close(&fx);
+        }
+        for (i = 0; i < RD_BOMAP_OWNERS + 1; i++) {
+            CHECK(xnu_unmap(&fu[i], bo_off(&fu[i], hu[i])) == 0);
+            gem_close(&fu[i], hu[i]);
+            rdna3_drm_file_close(&fu[i]);
+        }
+        CHECK(dev.bomap.n == 0);
     }
 
     /* 8. the surface quota counts what mappings hold: import, map, GEM_CLOSE, and
