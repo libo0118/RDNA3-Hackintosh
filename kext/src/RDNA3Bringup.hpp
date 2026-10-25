@@ -320,7 +320,7 @@ private:
            RD3_BUSY_BY_N };
     volatile uint64_t fBusySdmaBy[RD3_BUSY_BY_N] = {};
     static uint32_t  busyRing(uint32_t ip, uint32_t ring);   /* RD3_BUSY_* or RD3_BUSY_RINGS */
-    void             busySubmit(uint32_t ip, uint32_t ring, uint64_t seq, int32_t pid);
+    void             busySubmit(uint32_t ip, uint32_t ring, uint64_t seq, int32_t pid, uint64_t irq0);
     void             busyObserve(uint32_t r, uint32_t by);    /* a RD3_BUSY_* ring's fence read */
     void             busyEndAll(int ring, const char *why);   /* a reset forced the fences: -1 = every ring */
     void             busyUncounted(uint32_t kind, uint32_t ip);

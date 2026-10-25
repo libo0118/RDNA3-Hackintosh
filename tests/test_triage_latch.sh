@@ -341,7 +341,7 @@ o=$(run perfbad)
 grep -q "WARN .*GPU work the busy time does not count (3 VCN encode jobs, 7 kernel SDMA copies / clears) and no counted job" <<<"$o" || fail "perf-bad: unc: $o"
 grep -q "WARN .*2 job(s) flushed as stale" <<<"$o" || fail "perf-bad: stale: $o"
 grep -q "WARN .*1 IOAccelSubmitter2 entr(y/ies) without a readable IOUserClientCreator pid" <<<"$o" || fail "perf-bad: ucc: $o"
-grep -q "WARN .*every accumulatedGPUTime is 0 although 2.0 s were credited" <<<"$o" || fail "perf-bad: acc: $o"
+grep -q "INFO .*every accumulatedGPUTime is 0 although 2.0 s were credited" <<<"$o" || fail "perf-bad: acc: $o"
 grep -q "WARN .*Device Utilization % = 100 while the rings' last value is 5 %" <<<"$o" || fail "perf-bad: util: $o"
 has "$o" "9 of 10 SDMA job(s) ended only at the 250 ms take" perf-bad
 mk pqmissing/rdna3-report-pqmissing "$ZERO

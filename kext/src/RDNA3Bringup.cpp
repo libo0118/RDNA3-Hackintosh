@@ -344,8 +344,12 @@ void RDNA3Bringup::stopAndFree()
     if (fLock) IOLockFree(fLock);
     if (fIhLock) IOLockFree(fIhLock);
     fIhLock = nullptr;
-    /* after teardownInterrupt (no IV handler) and the engines' fini; fBusy
-     * goes out under its lock so a late reader sees nullptr (ECC round 1) */
+    /* after teardownInterrupt (no IV handler) and the engines' fini; the
+     * accelerator's take cannot run any more (RDNA3Accel::stop took
+     * fBringup out under fDrmLock first). fBusy is cleared under its lock,
+     * but a fence waiter still inside this object after stop (stop with DRM
+     * files open) touches freed memory here as it does the rings: not
+     * covered (ECC round 2) */
     if (fBusyLock) {
         IOSimpleLockLock(fBusyLock);
         rd3_busy *b = fBusy;
@@ -3565,9 +3569,10 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
         if (r)
             return r;
     }
+    const uint64_t irq0 = fIrqCount;   /* N49: an interrupt between the doorbell and the record */
     int r = submitRing(v, ip, ring, ibs, n, job, ufMc, seq);
     if (!r)
-        busySubmit(ip, ring, *seq, (int32_t)v->ownerPid);   /* N49: amdgpu's scheduled timestamp */
+        busySubmit(ip, ring, *seq, (int32_t)v->ownerPid, irq0);   /* N49: amdgpu's scheduled timestamp */
     if (!r && ufSlot >= 0) {
         fUfSlot[ufSlot].ip = ip;
         fUfSlot[ufSlot].ring = ring;
@@ -3784,7 +3789,7 @@ void RDNA3Bringup::busyUncounted(uint32_t kind, uint32_t ip)
              "(counted from here on)", what[kind], ip);
 }
 
-void RDNA3Bringup::busySubmit(uint32_t ip, uint32_t ring, uint64_t seq, int32_t pid)
+void RDNA3Bringup::busySubmit(uint32_t ip, uint32_t ring, uint64_t seq, int32_t pid, uint64_t irq0)
 {
     const uint32_t r = busyRing(ip, ring);
     if (r >= RD3_BUSY_RINGS) {
@@ -3799,8 +3804,12 @@ void RDNA3Bringup::busySubmit(uint32_t ip, uint32_t ring, uint64_t seq, int32_t 
         rd3_busy_submit(fBusy, r, (uint32_t)seq, pid, busyNowNs());
     IOSimpleLockUnlock(fBusyLock);
     /* the doorbell rang before this: an EOP interrupt that came in between
-     * found nothing to end (ECC round 1) */
-    busyObserve(r, RD3_BUSY_BY_SUBMIT);
+     * found nothing to end (ECC round 1). The fence slot is in VRAM (an
+     * uncached read across the BAR), so it is read again only when an
+     * interrupt landed since the doorbell (ECC round 2); otherwise the next
+     * interrupt, a waiter or the take ends the job */
+    if (fIrqCount != irq0)
+        busyObserve(r, RD3_BUSY_BY_SUBMIT);
 }
 
 /* amdgpu_fence_process: the ring's fence value read, every job up to it ends

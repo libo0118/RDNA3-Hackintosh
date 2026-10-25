@@ -40,11 +40,15 @@
  * force_completion) ends every job of the ring at once with its time
  * (rd3_busy_end_all), before the ring's fence_seq starts again at 0.
  *
- * A process's time summed over several rings can be more than the wall
- * time (GFX and SDMA at once); Activity Monitor would show more than 100 %.
- * rd3_busy_take hands out at most the wall time since the last take per
- * process and carries the rest over, at most one more such span (the
- * excess is dropped, counted in capped_ns).
+ * A take first charges each ring's running job (the head) its time up to
+ * now (rd3_busy_charge_running: amdgpu_ctx_fence_time charges an unfinished
+ * fence now - scheduled the same way), so one ring never gives a process
+ * more than the wall time per take, however long the job. A process's time
+ * summed over several rings can still be more than the wall time (GFX and
+ * SDMA at once); Activity Monitor would show more than 100 %. rd3_busy_take
+ * hands out at most the wall time since the last take per process and
+ * carries the rest over, at most one more such span (the excess, real
+ * overlap only, is dropped and counted in capped_ns).
  *
  * SPDX-License-Identifier: MIT
  */
@@ -170,17 +174,17 @@ static inline struct rd3_busy_pid *rd3_busy_pid_slot(struct rd3_busy *b, int32_t
     return freep;
 }
 
-static inline void rd3_busy_charge_(struct rd3_busy *b, int32_t pid, uint64_t ns)
+static inline void rd3_busy_charge_(struct rd3_busy *b, int32_t pid, uint64_t ns, uint32_t ended)
 {
     struct rd3_busy_pid *p = rd3_busy_pid_slot(b, pid, 1);
     if (!p) {
-        b->lost_jobs++;
+        b->lost_jobs += ended;
         b->lost_ns += ns;
         return;
     }
     p->pend_ns += ns;
     p->total_ns += ns;
-    p->pend_jobs++;
+    p->pend_jobs += ended;
     p->dirty = 1;
 }
 
@@ -243,7 +247,7 @@ static inline uint32_t rd3_busy_done(struct rd3_busy *b, uint32_t ring, uint32_t
     while (r->n && !rd3_busy_seq_after(r->q[r->head].seq, done_seq)) {
         const struct rd3_busy_job *j = &r->q[r->head];
         const uint64_t start = j->sub_ns > r->last_end ? j->sub_ns : r->last_end;
-        rd3_busy_charge_(b, j->pid, rd3_busy_since(now, start));
+        rd3_busy_charge_(b, j->pid, rd3_busy_since(now, start), 1);
         if (now > r->last_end)
             r->last_end = now;
         r->head = (r->head + 1) % RD3_BUSY_FIFO;
@@ -305,6 +309,25 @@ static inline void rd3_busy_totals(const struct rd3_busy *b, uint64_t now, struc
     s->capped_ns = b->capped_ns;
 }
 
+/* each ring's running job charged up to now; its end then charges from now */
+static inline void rd3_busy_charge_running(struct rd3_busy *b, uint64_t now)
+{
+    uint32_t i;
+    for (i = 0; i < RD3_BUSY_RINGS; i++) {
+        struct rd3_busy_ring *r = &b->ring[i];
+        const struct rd3_busy_job *j;
+        uint64_t start;
+        if (!r->n)
+            continue;
+        j = &r->q[r->head];
+        start = j->sub_ns > r->last_end ? j->sub_ns : r->last_end;
+        if (now <= start)
+            continue;
+        rd3_busy_charge_(b, j->pid, now - start, 0);
+        r->last_end = now;
+    }
+}
+
 /* the processes with time or a submission since the last take, at most
  * 'max' (the rest wait for the next take); each gets at most the wall time
  * since the last take, the rest carried over (at most one more such span);
@@ -313,6 +336,7 @@ static inline uint32_t rd3_busy_take(struct rd3_busy *b, uint64_t now, struct rd
 {
     const uint64_t span = rd3_busy_since(now, b->take_last);
     uint32_t i, n = 0;
+    rd3_busy_charge_running(b, now);
     for (i = 0; i < RD3_BUSY_PIDS && n < max; i++) {
         struct rd3_busy_pid *p = &b->pid[i];
         uint64_t ns;

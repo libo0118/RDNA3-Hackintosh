@@ -746,7 +746,8 @@ IOReturn RDNA3Accel::platformPageoff(RD3KSurfPageoff *q)
     uint64_t t0 = mach_absolute_time(), ns = 0;
     if (fBringup && fDrmLock) {
         IOLockLock(fDrmLock);
-        int r = fBringup->copyVramToPages(h->offset, q->pages, q->pageCount, q->length);
+        /* re-checked under the lock: stop takes fBringup out under it */
+        int r = fBringup ? fBringup->copyVramToPages(h->offset, q->pages, q->pageCount, q->length) : RDNA3_ENODEV;
         IOLockUnlock(fDrmLock);
         if (r == RDNA3_OK) {
             absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
@@ -796,7 +797,9 @@ IOReturn RDNA3Accel::platformCopyVram(RD3KCopyRequest *q)
      * drained before the engine reads it (the HDP flush is the ring's) */
     __asm__ volatile("mfence" ::: "memory");
     IOLockLock(fDrmLock);
-    int r = fBringup->copyVramRect(q->srcCookie, q->srcPitch, q->dstCookie, q->dstPitch, q->rowBytes, q->rows);
+    /* re-checked under the lock: stop takes fBringup out under it */
+    int r = fBringup ? fBringup->copyVramRect(q->srcCookie, q->srcPitch, q->dstCookie, q->dstPitch, q->rowBytes, q->rows)
+                     : RDNA3_ENODEV;
     IOLockUnlock(fDrmLock);
     absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     q->usec = ns / 1000;

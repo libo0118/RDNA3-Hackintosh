@@ -2557,8 +2557,10 @@ def gpu_util_verdict(c, ioreg=""):
                     % (c["perf_winreset"] - 1)))
     util, acc = ioreg_gpu(ioreg)
     if acc and gpu and not any(acc):
-        out.append(("WARN", "13-ioreg-accel.txt: every accumulatedGPUTime is 0 although %.1f s were credited (the "
-                            "family replaced its numbers, or the ioreg is from before the credits)" % (gpu / 1e9)))
+        # INFO (ECC round 2): the credited processes may have exited before the ioreg ran
+        out.append(("INFO", "13-ioreg-accel.txt: every accumulatedGPUTime is 0 although %.1f s were credited (the "
+                            "credited processes exited before the ioreg, it ran before the credits, or the family "
+                            "replaced its numbers)" % (gpu / 1e9)))
     if util is not None and rings:
         if util == 100 and c.get("perf_util", 100) <= 50:
             out.append(("WARN", "13-ioreg-accel.txt: Device Utilization %% = 100 while the rings' last value is %s %%: "

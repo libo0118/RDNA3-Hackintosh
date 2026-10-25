@@ -206,6 +206,12 @@ void RDNA3Accel::stop(IOService *provider)
             root->releasePMAssertion(fSleepAssertion);
         fSleepAssertion = 0;
     }
+    /* the bring-up taken out under fDrmLock (ECC round 2 of N49): every
+     * entry point that checks fBringup under the lock (the accelerator's
+     * GPU busy take, VRAM copies, GPU VA calls, statsTick) sees nullptr from
+     * here on instead of an object being freed; stopAndFree runs without
+     * the lock (its GFXOFF drain takes it) */
+    RDNA3Bringup *bringup = nullptr;
     if (fDrmLock) {
         /* no new accelerator VM from here on (platformGpuVa,
          * platformVmReady check it under the lock), and the current one
@@ -217,12 +223,16 @@ void RDNA3Accel::stop(IOService *provider)
         if (fBringup && fAccelVm)
             fBringup->vmDestroy(fAccelVm);
         fAccelVm = nullptr;
-        IOLockUnlock(fDrmLock);
-    }
-    if (fBringup) {
-        fBringup->stopAndFree();   /* frees the orphans' VMs (vmFreeLeftovers) */
-        delete fBringup;
+        bringup = fBringup;
         fBringup = nullptr;
+        IOLockUnlock(fDrmLock);
+    } else {
+        bringup = fBringup;
+        fBringup = nullptr;
+    }
+    if (bringup) {
+        bringup->stopAndFree();   /* frees the orphans' VMs (vmFreeLeftovers) */
+        delete bringup;
     }
     platformFree();
     drmFree();

@@ -513,14 +513,18 @@ int RDNA3Accel::drmFenceWait(void *ctx, uint32_t ip, uint32_t ring, uint64_t seq
     if (!a->fBringup)
         return 0;
     const uint64_t t0 = mach_absolute_time();
+    /* read under the lock: stop takes fBringup out under it (ECC round 2
+     * of N49); a stop during this unlocked wait still frees the object
+     * (the kext's stop with DRM files open, as before) */
+    RDNA3Bringup *b = a->fBringup;
     IOLockUnlock(a->fDrmLock);
-    r = a->fBringup->fenceWait(ip, ring, seq, absNs, &cap);
+    r = b->fenceWait(ip, ring, seq, absNs, &cap);
     IOLockLock(a->fDrmLock);
     uint64_t ns = 0;
     absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
     bool recovered = false;
     int rr = 0;
-    if (cap) {
+    if (cap && a->fBringup) {
         recovered = !a->fBringup->fenceSignaled(ip, ring, seq);
         r = recovered ? (rr = a->fBringup->recoverHang(ip, ring, seq)) : 0;
     }

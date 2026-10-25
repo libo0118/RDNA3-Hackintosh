@@ -134,12 +134,12 @@ static void takes(void)
     int32_t p;
     rd3_busy_init(&B);
     rd3_busy_submit(&B, RD3_BUSY_GFX, 1, 208, 0);
-    n = rd3_busy_take(&B, 1 * MS, t, 8);   /* submitted, nothing done: last_sub only */
-    CHECK(n == 1 && t[0].pid == 208 && t[0].ns == 0 && t[0].jobs == 0 && t[0].last_sub == 0);
-    CHECK(rd3_busy_take(&B, 2 * MS, t, 8) == 0);
+    n = rd3_busy_take(&B, 1 * MS, t, 8);   /* submitted, running: its time so far, no job ended */
+    CHECK(n == 1 && t[0].pid == 208 && t[0].ns == 1 * MS && t[0].jobs == 0 && t[0].last_sub == 0);
+    CHECK(rd3_busy_take(&B, 2 * MS, t, 8) == 1 && t[0].ns == 1 * MS);
     rd3_busy_done(&B, RD3_BUSY_GFX, 1, 6 * MS);
     n = rd3_busy_take(&B, 20 * MS, t, 8);
-    CHECK(n == 1 && t[0].pid == 208 && t[0].ns == 6 * MS && t[0].jobs == 1);
+    CHECK(n == 1 && t[0].pid == 208 && t[0].ns == 4 * MS && t[0].jobs == 1 && pid_total(208) == 6 * MS);
     CHECK(rd3_busy_take(&B, 21 * MS, t, 8) == 0);
     /* 40 processes, one job each: 32 slots, the idle ones reused after a take */
     for (p = 1000; p < 1040; p++) {
@@ -201,6 +201,36 @@ static void cap_and_reset(void)
     CHECK(s.flushed == 1 && s.ring_flushed[RD3_BUSY_COMPUTE] == 1 && s.inflight == 1);
 }
 
+/* one long job on one ring: each take gets the wall time it ran, nothing capped (ECC round 2: before the
+ * running job was charged at the take, a 2 s job kept about a quarter of its time) */
+static void long_job(void)
+{
+    struct rd3_busy_take_ent t[4];
+    struct rd3_busy_snap s;
+    uint64_t got = 0, now;
+    uint32_t jobs = 0;
+    rd3_busy_init(&B);
+    rd3_busy_submit(&B, RD3_BUSY_GFX, 1, 9, 0);
+    for (now = 250 * MS; now <= 2000 * MS; now += 250 * MS) {
+        CHECK(rd3_busy_take(&B, now, t, 4) == 1 && t[0].pid == 9 && t[0].ns == 250 * MS);
+        got += t[0].ns;
+        jobs += t[0].jobs;
+    }
+    CHECK(jobs == 0);   /* still running: partial charges are not jobs */
+    rd3_busy_done(&B, RD3_BUSY_GFX, 1, 2100 * MS);
+    CHECK(rd3_busy_take(&B, 2250 * MS, t, 4) == 1 && t[0].ns == 100 * MS && t[0].jobs == 1);
+    got += t[0].ns;
+    rd3_busy_totals(&B, 2250 * MS, &s);
+    CHECK(got == 2100 * MS && s.capped_ns == 0 && pid_total(9) == 2100 * MS && s.ring_ns[RD3_BUSY_GFX] == 2100 * MS);
+    /* a queued job behind the running one starts at its end, not at the take */
+    rd3_busy_submit(&B, RD3_BUSY_GFX, 2, 9, 3000 * MS);
+    rd3_busy_submit(&B, RD3_BUSY_GFX, 3, 10, 3010 * MS);
+    rd3_busy_take(&B, 3100 * MS, t, 4);
+    rd3_busy_done(&B, RD3_BUSY_GFX, 2, 3200 * MS);
+    rd3_busy_done(&B, RD3_BUSY_GFX, 3, 3300 * MS);
+    CHECK(pid_total(10) == 100 * MS && pid_total(9) == 2100 * MS + 200 * MS);
+}
+
 /* the utilisation window and the creator string */
 static void util(void)
 {
@@ -235,6 +265,7 @@ int main(void)
     full();
     takes();
     cap_and_reset();
+    long_job();
     util();
     if (fails) {
         printf("test_gpu_busy: %d failure(s)\n", fails);
