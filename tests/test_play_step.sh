@@ -57,7 +57,8 @@ while [ $# -gt 0 ]; do [ "$1" = -T ] && { echo "$2 -> $3" >> "$STUBLOG"; }; shif
 exit 0
 SC
 chmod +x "$T/bin/sysctl" "$T/bin/curl"
-printf '#!/bin/sh\necho "pipe 0: LIT"\n' > "$T/D/bin/rdna3_drminfo"
+# --scanout-hires DIR also leaves a picture, the way the real one does
+printf '#!/bin/sh\necho "pipe 0: LIT"\n[ "$1" = --scanout-hires ] && printf "P6\\n1 1\\n255\\n000" > "$2/scanout-pipe0.ppm"\nexit 0\n' > "$T/D/bin/rdna3_drminfo"
 printf '#!/bin/sh\necho "SMU: ok"\n' > "$T/D/bin/rdna3_pmctl"
 # collect.sh stub: makes the archive the way the real one names it
 printf '#!/bin/sh\necho "collect label=$1 stamp=$RDNA3_STAMP" >> "$STUBLOG"\ntouch "$HOME/rdna3-report-$1-$RDNA3_STAMP.tar.gz"\n' > "$T/D/tools/macos/collect.sh"
@@ -89,6 +90,12 @@ EOF
 env HT="$T" STUBLOG="$T/stub.log" PATH="$T/bin:$PATH" bash "$T/h.sh" > "$T/out.txt" 2>&1 || fail "the play functions failed: $(tail -5 "$T/out.txt")"
 grep -q '^notify: RDNA3 play: use the desktop; the report is taken at minute 1 and again at minute 2' "$T/stub.log" || fail "no start notification: $(cat "$T/stub.log")"
 [ "$(grep -c 'rdna3_drminfo --scanout (look play1' "$T/home/rdna3-extra.txt")" = 3 ] || fail "first moment: not three looks: $(grep 'look' "$T/home/rdna3-extra.txt")"
+# one 1280-wide look per report (--scanout-hires, look play<N>h), beside the three 320-wide ones
+[ "$(grep -c 'rdna3_drminfo --scanout-hires (look play1h)' "$T/home/rdna3-extra.txt")" = 1 ] || fail "first moment: no hires look: $(grep 'look' "$T/home/rdna3-extra.txt")"
+[ "$(grep -c 'rdna3_drminfo --scanout-hires (look play2h)' "$T/home/rdna3-extra-2.txt")" = 1 ] || fail "second report: no hires look: $(grep 'look' "$T/home/rdna3-extra-2.txt")"
+[ -f "$T/home/rdna3-scanout/play2h/scanout-pipe0.ppm" ] || fail "the stub's hires picture is missing"
+grep -q -- '-scanoutplay2h-pipe0\.ppm$' "$T/stub.log" || fail "the hires picture of the second report was not uploaded: $(cat "$T/stub.log")"
+[ -d "$T/home/rdna3-scanout/play1h" ] && [ -d "$T/home/rdna3-scanout/play2h" ] || fail "the hires look directories were not made"
 grep -q 'rdna3_pmctl info (play' "$T/home/rdna3-extra.txt" && grep -q 'SMU: ok' "$T/home/rdna3-extra.txt" || fail "no PM lines at the first moment"
 grep -q '^snapshot play10$' "$T/stub.log" || fail "no snapshot for the second report"
 grep -q '^collect label=play stamp=[0-9]*-[0-9]*$' "$T/stub.log" || fail "collect.sh not run for the second report: $(grep collect "$T/stub.log")"
