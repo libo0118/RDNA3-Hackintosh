@@ -1022,7 +1022,7 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"perfstats|perf_(?:writes|nocore|nokey|dictfail|setfail|rings|smu|noanswer|util|utilgfx|jobs|flushed|lostns|"
                        r"gpuns|nosubns|nosub|creditfail|stale|merged|lostjobs|inflight|cappedns|ringns_(?:gfx|comp|sdma)|"
                        r"unc_(?:vcn|jpeg|other|kcopy|userq)|sdmaend_(?:irq|wait|take|sub|reset)|lastret|winreset|"
-                       r"submitters|uccbad|nolast)|"
+                       r"submitters|uccbad|cmdqueues|nolast)|"
                        r"swaps_gen_(?:aperture|apcached|cf|cfnostamp|evicted|freed|resets)|swap_gen|flipbuf_present|cf_gennewer_h\d|"
                        r"flipbuf(?:_scanout|_presented|_held|_failed|_busy|_unlocked|_emptyheld)?_h\d|"
                        r"flipbuf_(?:nohead|nores|intoff|badptr|busy|unlocked)|"
@@ -2481,6 +2481,37 @@ def present_verdict(c, current=False, args="", ioreg=""):
     return out
 
 
+def gpu_time_queue_rows(cdlog="", pluginlog=""):
+    """DRIVER-PLAN N49 open item 1: the Metal plugin's one IOAccelCommandQueue per process (the IOAccelSubmitter2 the
+    kernel credits the process's GPU time to: Activity Monitor's % GPU). [(level, name, text)] from its 'GPU time
+    queue:' lines in WindowServer's (24-log-coredisplay.txt) and the other processes' (26-log-metal-plugin.txt) plugin
+    logs: INFO with the processes that opened one, WARN with each failure step and IOReturn, INFO when switched off."""
+    text = (cdlog or "") + "\n" + (pluginlog or "")
+    rows = []
+    opened = re.findall(r"GPU time queue: IOAccelCommandQueue opened for (.+?) \(pid (\d+)", text)
+    failed = re.findall(r"GPU time queue: FAILED at (.+?), IOReturn (0x[0-9a-f]+)[^\n]*? for (.+?) \(pid (\d+)", text)
+    off = re.findall(r"GPU time queue: off \(NVMTL_GPUTIME_QUEUE=0\) for (.+?) \(pid (\d+)", text)
+    if opened:
+        names = sorted(set(n for n, _ in opened))
+        rows.append(("INFO", "GPU time queue", "%d process(es) opened their IOAccelCommandQueue (Activity Monitor can show their %% GPU): %s"
+                     % (len(set(opened)), ", ".join(names[:10]) + (" ..." if len(names) > 10 else ""))))
+    for (step, ret), procs in sorted(_group_gpuq(failed).items()):
+        rows.append(("WARN", "GPU time queue", "%d process(es) without their IOAccelCommandQueue (Activity Monitor shows 0 %% GPU for "
+                     "them): FAILED at %s, IOReturn %s (%s)" % (len(procs), step, ret, ", ".join(sorted(procs)[:8]))))
+    if off:
+        rows.append(("INFO", "GPU time queue", "switched off (NVMTL_GPUTIME_QUEUE=0) in %d process(es): Activity Monitor shows 0 %% "
+                     "GPU for them" % len(set(off))))
+    return rows
+
+
+def _group_gpuq(failed):
+    """{(step, IOReturn): {"name (pid)"}} of the plugin's 'GPU time queue: FAILED' lines"""
+    out = {}
+    for step, ret, name, pid in failed:
+        out.setdefault((step, ret), set()).add("%s (%s)" % (name, pid))
+    return out
+
+
 UNC_KINDS = (("vcn", "VCN encode jobs"), ("jpeg", "JPEG jobs"), ("other", "jobs on rings other than 0"),
              ("kcopy", "kernel SDMA copies / clears"), ("userq", "user queues (their jobs never reach the kernel)"))
 
@@ -2528,6 +2559,15 @@ def gpu_util_verdict(c, ioreg=""):
                             "accelerator: Activity Monitor shows 0 %% GPU for them (DRIVER-PLAN N49 open item; the "
                             "kernel's 'has no IOAccelSubmitter2' lines name the pids; the last walk saw %s submitter(s))"
                     % (nosub / 1e9, c.get("perf_nosub", 0), c.get("perf_submitters", "?"))))
+    cq = c.get("perf_cmdqueues")
+    if cq is not None:
+        if cq:
+            out.append(("INFO", "%d IOAccelCommandQueue(s) under the accelerator at the last credit walk (the Metal plugin "
+                                "opens one per Metal process: DRIVER-PLAN N49 open item 1)" % cq))
+        elif nosub:
+            out.append(("WARN", "no IOAccelCommandQueue under the accelerator although %.1f s of GPU time had no "
+                                "IOAccelSubmitter2: the Metal plugin opened none (a plugin older than N49 item 1, "
+                                "NVMTL_GPUTIME_QUEUE=0, or its 'GPU time queue: FAILED' lines)" % (nosub / 1e9)))
     if c.get("perf_uccbad"):
         out.append(("WARN", "%d IOAccelSubmitter2 entr(y/ies) without a readable IOUserClientCreator pid: their "
                             "processes' time counts as 'no IOAccelSubmitter2' though they have one" % c["perf_uccbad"]))
@@ -4671,6 +4711,9 @@ def report(path, show_all):
             failed = failed or lvl_ == "FAIL"
     # DRIVER-PLAN N43 (1): buffer textures without an alias (bytesPerRow not a multiple of 256 B)
     for lvl_, name_, text_ in n43_buftex_rows(cdlog, pluginlog):
+        print("   %s %-20s %s" % (lvl_, name_, text_))
+    # DRIVER-PLAN N49 open item 1: the plugin's IOAccelCommandQueue per process (Activity Monitor's % GPU)
+    for lvl_, name_, text_ in gpu_time_queue_rows(cdlog, pluginlog):
         print("   %s %-20s %s" % (lvl_, name_, text_))
     # DRIVER-PLAN N48: the plugin's blit copies, the multisample upload, [[color(n)]] framebuffer fetch (tools/triage_n48.py)
     try:

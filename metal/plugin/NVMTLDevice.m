@@ -28,6 +28,8 @@
 #include <time.h>
 #include "nvmtl_sample_positions.h"
 #include "nvmtl_log_failure.h"
+#include "nvmtl_gpu_time_queue.h"
+#include <dlfcn.h>
 #include <sys/sysctl.h>
 #ifndef NVMTL_RELEASE
 #define NVMTL_RELEASE 0
@@ -383,6 +385,58 @@ static bool nvmtl_process_is_allowed(void)
     nvlog("NVMTLDevice +load in pid %d (static class, image-owned) image %s at %s", getpid(),
           nvmtl_image_ident((const void *)nvmtl_image_ident, me, sizeof me), ts);
 }
+/* DRIVER-PLAN N49 open item 1: one IOAccelCommandQueue per process under the accelerator, so the kernel has an
+ * IOAccelSubmitter2 of this pid to add its GPU time to (Activity Monitor's % GPU / GPU Time; nvmtl_gpu_time_queue.h has the
+ * evidence). Apple's Metal opens one per MTLCommandQueue (MTLIOAccelCommandQueue); NVMTLCommandQueue runs on Vulkan, so the
+ * device opens one for the process and keeps it until the process exits (one Metal device per process here). Nothing is
+ * submitted through it. A failure is logged once with its IOReturn and changes nothing else: Metal works as before. */
+static uint32_t g_gpuq_conn;        /* the open queue (0: none); closed by the kernel when the process exits */
+static _Atomic int g_gpuq_tried;
+typedef kern_return_t (*nvmtl_ioso_fn)(mach_port_t, task_port_t, uint32_t, mach_port_t *);
+typedef kern_return_t (*nvmtl_ioadd_fn)(mach_port_t, mach_port_t);
+typedef kern_return_t (*nvmtl_iocl_fn)(mach_port_t);
+static struct { nvmtl_ioso_fn open; nvmtl_ioadd_fn add; nvmtl_iocl_fn close; } g_gpuq_io;
+static int32_t nvmtl_gpuq_io_open(void *ctx, uint32_t svc, uint32_t type, uint32_t *conn) {
+    (void)ctx; mach_port_t c = MACH_PORT_NULL;
+    kern_return_t kr = g_gpuq_io.open((mach_port_t)svc, mach_task_self(), type, &c);
+    *conn = (uint32_t)c; return (int32_t)kr; }
+static int32_t nvmtl_gpuq_io_add(void *ctx, uint32_t conn, uint32_t client) {
+    (void)ctx; return (int32_t)g_gpuq_io.add((mach_port_t)conn, (mach_port_t)client); }
+static int32_t nvmtl_gpuq_io_close(void *ctx, uint32_t conn) {
+    (void)ctx; return (int32_t)g_gpuq_io.close((mach_port_t)conn); }
+static void nvmtl_gpu_time_queue_open(id dev, mach_port_t accel)
+{
+    if (atomic_exchange(&g_gpuq_tried, 1)) return;   /* once per process: the first device that came up */
+    nvmtl_gpuq_result r = { NVMTL_GPUQ_OFF, 0, 0, 0 };
+    uint32_t shared = 0;
+    if (nvmtl_gpuq_enabled(getenv("NVMTL_GPUTIME_QUEUE"))) {
+        g_gpuq_io.open  = (nvmtl_ioso_fn)dlsym(RTLD_DEFAULT, "IOServiceOpen");
+        g_gpuq_io.add   = (nvmtl_ioadd_fn)dlsym(RTLD_DEFAULT, "IOConnectAddClient");
+        g_gpuq_io.close = (nvmtl_iocl_fn)dlsym(RTLD_DEFAULT, "IOServiceClose");
+        uint32_t (*get_conn)(void *) = (uint32_t (*)(void *))dlsym(RTLD_DEFAULT, "IOAccelSharedGetConnect");
+        SEL sr = sel_registerName("sharedRef");
+        void *ref = [dev respondsToSelector:sr] ? ((void *(*)(id, SEL))objc_msgSend)(dev, sr) : NULL;
+        shared = (get_conn && ref) ? get_conn(ref) : 0;
+        nvmtl_gpuq_ops ops = { nvmtl_gpuq_io_open, nvmtl_gpuq_io_add, nvmtl_gpuq_io_close, NULL };
+        r = nvmtl_gpuq_open((g_gpuq_io.open && g_gpuq_io.add && g_gpuq_io.close) ? &ops : NULL, (uint32_t)accel, shared);
+        if (r.step == NVMTL_GPUQ_NO_SHARED && (!get_conn || !ref))
+            nvlog("GPU time queue: %s", !get_conn ? "IOAccelSharedGetConnect missing (IOAccelerator.framework not loaded?)"
+                                                  : "the device's sharedRef is NULL (lazy device initialisation?)");
+    }
+    if (r.step == NVMTL_GPUQ_OPENED) {
+        g_gpuq_conn = r.conn;
+        nvlog("GPU time queue: IOAccelCommandQueue opened for %s (pid %d; connection 0x%x, accelerator 0x%x, shared 0x%x): the kernel "
+              "credits this process's GPU time to it (Activity Monitor %% GPU); nothing is submitted through it",
+              getprogname(), getpid(), g_gpuq_conn, (unsigned)accel, shared);
+    } else if (r.step == NVMTL_GPUQ_OFF) {
+        nvlog("GPU time queue: off (NVMTL_GPUTIME_QUEUE=0) for %s (pid %d): Activity Monitor shows 0 %% GPU for it",
+              getprogname(), getpid());
+    } else {
+        nvlog("GPU time queue: FAILED at %s, IOReturn 0x%08x%s for %s (pid %d): Activity Monitor shows 0 %% GPU for it; Metal works as before",
+              nvmtl_gpuq_step_name(r.step), (unsigned)r.ret, r.step == NVMTL_GPUQ_ADD_FAILED ? " (the queue was closed again)" : "",
+              getprogname(), getpid());
+    }
+}
 static void nvmtl_fill_pool_args(uint8_t *a, int second)
 {
     memset(a, 0, 2440);
@@ -444,6 +498,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
               NVMTL_U("featureProfile"), NVMTL_U("maxTextureWidth2D"), NVMTL_U("maxComputeTextures"), NVMTL_U("maxComputeBuffers"));
         #undef NVMTL_U
     } else nvlog("limits: -initLimits not found - every table-served limit stays 0 (CoreImage will refuse renders)");
+    nvmtl_gpu_time_queue_open(self, port);
     return self;
 }
 

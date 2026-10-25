@@ -105,6 +105,8 @@ $(BUILD)/test_mtl_allow: tests/test_mtl_allow.c metal/plugin/rdna3mtl_allow_poli
 # the linear buffer texture's pitch rule (RADV: a multiple of 256 B), card runs 2026-10-17d / 18b
 $(BUILD)/test_linear_pitch: tests/test_linear_pitch.c metal/plugin/nvmtl_linear_pitch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_linear_pitch.c
+$(BUILD)/test_gpu_time_queue: tests/test_gpu_time_queue.c metal/plugin/nvmtl_gpu_time_queue.h | $(BUILD)
+	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_gpu_time_queue.c
 
 $(BUILD)/test_ab_switch: tests/test_ab_switch.c metal/plugin/nvmtl_ab_switch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_ab_switch.c
@@ -179,7 +181,7 @@ $(BUILD)/rdna3_drminfo_host: userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOB
 	  userspace/rdna3_drminfo.c $(LIBDRM_HOST_OBJS) $(KOBJS) -lpthread
 
 # RDNA3_FW_DIR=<linux-firmware/amdgpu> additionally checks real Navi 32 files
-test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_flip_queue $(BUILD)/test_gpu_busy $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_bo_map $(BUILD)/test_bo_map_race $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_ab_switch $(BUILD)/test_copy_pack $(BUILD)/test_msupload $(BUILD)/test_spirv_fbfetch $(BUILD)/test_fbfetch_plan $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
+test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUILD)/test_a3_display $(BUILD)/test_gamma_judge $(BUILD)/test_swap_front $(BUILD)/test_flip_latch $(BUILD)/test_vbl_irq $(BUILD)/test_tcall $(BUILD)/test_flip_queue $(BUILD)/test_gpu_busy $(BUILD)/test_fb_policy $(BUILD)/test_swap_copy $(BUILD)/test_write_gen $(BUILD)/test_vram_park $(BUILD)/test_surf_pending $(BUILD)/test_trace $(BUILD)/test_discovery $(BUILD)/test_fw $(BUILD)/sim_navi32 $(BUILD)/test_uapi $(BUILD)/test_range_alloc $(BUILD)/test_vram_place $(BUILD)/test_bo_map $(BUILD)/test_bo_map_race $(BUILD)/test_mtl_allow $(BUILD)/test_linear_pitch $(BUILD)/test_gpu_time_queue $(BUILD)/test_ab_switch $(BUILD)/test_copy_pack $(BUILD)/test_msupload $(BUILD)/test_spirv_fbfetch $(BUILD)/test_fbfetch_plan $(BUILD)/test_libdrm_amdgpu $(BUILD)/rdna3_drminfo_host
 	$(BUILD)/test_discovery
 	$(BUILD)/test_fw $(RDNA3_FW_DIR)
 	$(BUILD)/sim_navi32 $(RDNA3_FW_DIR)
@@ -190,6 +192,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	$(BUILD)/test_bo_map_race
 	$(BUILD)/test_mtl_allow metal/rdna3mtl-allow.txt
 	$(BUILD)/test_linear_pitch
+	$(BUILD)/test_gpu_time_queue
 	$(BUILD)/test_ab_switch
 	$(BUILD)/test_copy_pack
 	$(BUILD)/test_msupload
@@ -231,6 +234,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	python3 -I -B tests/test_trace_parity.py
 	python3 -I -B tests/test_triage_park.py
 	python3 -I -B tests/test_triage_n43.py
+	python3 -I -B tests/test_triage_gpuq.py
 	python3 -I -B tests/test_triage_n48.py
 	python3 -I -B tests/test_triage_glyphs.py
 	python3 -I -B tests/test_fb_class.py
