@@ -254,6 +254,9 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 /* a buffer texture the GPU cannot alias (RADV: memory type or row pitch): a private image refreshed from the
    buffer's CPU contents before each command buffer that uses it (card run 56: glyph and icon textures came back nil) */
 @interface NVMTLTexture () { @public BOOL _bufCopy; } @end
+/* N51: the shadow of the bytes the private image of a buffer texture was last refreshed with (nvmtl_surfin_cache.h) */
+#include "nvmtl_surfin_cache.h"
+@interface NVMTLTexture () { @public nvmtl_bshadow _bsh; uint32_t _bshTried; } @end
 @interface NVMTLCommandBuffer () { @public NSMutableSet *_bufCopied; } @end
 /* the frame trace (nvmtl_trace.h, NVMTLTrace.m): ids and times only, read by no decision */
 @interface NVMTLCommandBuffer () { @public uint32_t _trId; uint64_t _trCommitAbs; } @end

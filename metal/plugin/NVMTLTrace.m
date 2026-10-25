@@ -96,8 +96,11 @@ static void nvmtl_tr_pass_end(NVMTLRenderCommandEncoder *e, unsigned path, int r
  * Per thread: an encoder is encoded by one thread. t0 != 0 only between a render encoder's creation and its endEncoding, so
  * the surface-in checks of blit and compute encoders are not counted. With the trace off nvmtl_split_now() is 0 and every
  * add is a branch. Reads clocks only; changes no decision. */
-typedef struct { uint64_t t0, pipe, desc, sin, pipe_max, desc_max; uint32_t draws, builds, sin_calls; } nvmtl_split;
+/* N51: what the surface-in calls were. g_sin_path is set by the call's body (0 other / locked skip, 1 fast probe hit, 2 buffer-texture refresh uploaded,
+ * 3 refresh skipped because the bytes did not change, 4 surface upload), wait is the time spent getting the per-surface monitor. */
+typedef struct { uint64_t t0, pipe, desc, sin, pipe_max, desc_max, bc_up, bc_skip, fast, wait; uint32_t draws, builds, sin_calls, bc_up_n, bc_skip_n, fast_n, up_n; } nvmtl_split;
 static __thread nvmtl_split g_split;
+static __thread unsigned g_sin_path;
 static inline uint64_t nvmtl_split_now(void) { return g_split.t0 ? nvt_now() : 0; }
 static inline void nvmtl_split_add(uint64_t t0, uint64_t *sum, uint64_t *mx)
 {
@@ -105,6 +108,20 @@ static inline void nvmtl_split_add(uint64_t t0, uint64_t *sum, uint64_t *mx)
     const uint64_t now = nvt_now(), d = now > t0 ? now - t0 : 0;
     *sum += d;
     if (mx && d > *mx) *mx = d;
+}
+/* one surface-in call that took d ticks, ending in `path` (g_sin_path) */
+static inline void nvmtl_split_sin(uint64_t t0, unsigned path)
+{
+    if (!t0) return;
+    const uint64_t now = nvt_now(), d = now > t0 ? now - t0 : 0;
+    g_split.sin += d; g_split.sin_calls++;
+    switch (path) {
+    case 1: g_split.fast += d; g_split.fast_n++; break;
+    case 2: g_split.bc_up += d; g_split.bc_up_n++; break;
+    case 3: g_split.bc_skip += d; g_split.bc_skip_n++; break;
+    case 4: g_split.up_n++; break;
+    default: break;
+    }
 }
 static void nvmtl_split_begin(void)
 {
@@ -124,7 +141,9 @@ static void nvmtl_split_end(NVMTLRenderCommandEncoder *e)
     memset(&g_split, 0, sizeof g_split);
     if (!s.draws) return;
     const uint64_t now = nvt_now();
+    const uint32_t x[8] = { s.bc_up_n, nvmtl_split_us(s.bc_up), s.bc_skip_n, nvmtl_split_us(s.bc_skip), s.fast_n, nvmtl_split_us(s.fast),
+                            nvmtl_split_us(s.wait), s.up_n };
     nvt_ev_enc_split(nvmtl_tr_cb_id(e->_cb), e->_trPass, s.draws, s.builds, nvmtl_split_us(now > s.t0 ? now - s.t0 : 0),
                      nvmtl_split_us(s.pipe), nvmtl_split_us(s.desc), nvmtl_split_us(s.sin), s.sin_calls,
-                     nvmtl_split_us(s.pipe_max), nvmtl_split_us(s.desc_max));
+                     nvmtl_split_us(s.pipe_max), nvmtl_split_us(s.desc_max), x);
 }

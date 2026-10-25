@@ -1164,7 +1164,7 @@ profile is on, so a profile left in the file cannot hide in a report:
 | `NVMTL_LOAD_BARRIER=1` | makes the declared initial layout of every LOAD pass true (a barrier from the tracked layout) | gone = the layout lie matters on the plugin's Mesa (it does not on the dev host's) |
 | `NVMTL_NO_ALIGN_GUARD=1` | (older) the translator's SAFE module variants (built for shaders whose buffer reads rest on a promised 16-byte alignment: Terminal logs `align guard: 4 render module(s) built SAFE ... (bindings 0x2) 427 accesses`) are not used | the strokes go away = the SAFE lowering reads wrong bytes at the offsets the dirty rectangles land on (not in `NVMTL_PARANOID`: it removes a safety, not an optimisation) |
 | `NVMTL_FBFETCH_ZERO=1` | (N48) every framebuffer fetch read is a zero vector | the pattern changes = the fetch is in the picture |
-| `NVMTL_PARANOID=1` | the RADV flags above, `NVMTL_ASYNC_COMMIT=0`, plus: no pool / address-page reuse, no buffer / buffer-texture / heap-texture recycling or placement, no descriptor-set reuse or dirty-only copies, no barrier folding (`ENC78_OFF=all`, `G79_OFF=all`), no pre-submit prologue, no residency paging, one part in flight (14 switches; the log line lists the ones it set and the ones it found set already and kept: a knob of its own, in the file or the environment, wins over the profile). NOT in it: `NVMTL_MANAGED_CHECK` / `NVMTL_MANAGED_SNAPSHOT` (they live in the pre-submit prologue it removes, so they would log ON and do nothing: the managed rung is its own), `NVMTL_NO_ALIGN_GUARD`, `NVMTL_LOAD_BARRIER`, `NVMTL_FBFETCH_ZERO` | still broken = it is not the plugin's scheduling or reuse: the kernel side (cache / coherency of CPU-written system memory, fences) or the translator / RADV build |
+| `NVMTL_PARANOID=1` | the RADV flags above, `NVMTL_ASYNC_COMMIT=0`, plus: no pool / address-page reuse, no buffer / buffer-texture / heap-texture recycling or placement, no descriptor-set reuse or dirty-only copies, no barrier folding (`ENC78_OFF=all`, `G79_OFF=all`), no pre-submit prologue, no residency paging, one part in flight, no surface-in cache (`NVMTL_NO_SURFIN_CACHE`, N51) (15 switches; the log line lists the ones it set and the ones it found set already and kept: a knob of its own, in the file or the environment, wins over the profile). NOT in it: `NVMTL_MANAGED_CHECK` / `NVMTL_MANAGED_SNAPSHOT` (they live in the pre-submit prologue it removes, so they would log ON and do nothing: the managed rung is its own), `NVMTL_NO_ALIGN_GUARD`, `NVMTL_LOAD_BARRIER`, `NVMTL_FBFETCH_ZERO` | still broken = it is not the plugin's scheduling or reuse: the kernel side (cache / coherency of CPU-written system memory, fences) or the translator / RADV build |
 
 Lines and rows (`tools/triage_glyphs.py`, `tests/test_triage_glyphs.py`):
 
@@ -1214,6 +1214,32 @@ each = 398 ms; in the 3533 encoders without a big upload the calls average 43 us
 (1 us per draw); the other 60 % is time the split does not cover (the app's own calls, the recording of passes, framebuffers, views, 32768 images
 made and destroyed in 13 minutes). Terminal's first encoders spend 95 to 350 us per draw in descriptor writes (the first draw of a process builds the
 pools and sets), later ones 4.5 us.
+
+### Surface-in cost and the cache (N51)
+
+Card run 2026-10-25e, WindowServer: the surface-in checks were 38 % of the encode time (1605 ms of 4256 in 3948 encoders, 104 us per call). Joined by command buffer
+(the `ENC_SPLIT` records with the `SURF_IN` records) that time was: 466 surface uploads 399 ms (25 %, 855 us each, a 971x680 window surface re-uploaded per frame:
+the producer's copy-out moved the seed), ~12 ms in cheap seed checks (1.6 to 5.5 us per call) and about 1100 ms in calls of 30 to 300 us that leave NO record:
+buffer textures the GPU cannot alias (112 of the first 128, `bytesPerRow` not a multiple of 256) are private images re-uploaded from the buffer's bytes once per command
+buffer, each a synchronous submit and wait. Measured on macOS 26.4.1: `IOSurfaceGetSeed` 0.003 us, the tag query 0.8 us, the pending-write scan 1.3 us, the per-surface
+monitor 0.06 us: the decision itself was never the cost. The plugin now (all behind `NVMTL_NO_SURFIN_CACHE=1`, also in the `NVMTL_PARANOID` profile):
+
+1. answers a surface texture whose seed (and tag generation) did not move before the pending-write scan and the monitor (`fast`, misses counted by reason);
+2. skips a buffer texture's refresh when the bytes it would upload equal the bytes it last uploaded (a shadow, up to 1 MiB per image and 32 MiB per process; the upload reads
+   the shadow, so it is exactly what the image holds; dropped after a failed upload and by every writer of the image: blit, replaceRegion, mipmaps, resolve);
+3. parks the private copy images by shape when their texture dies and reuses them (`NVMTL_NO_BUFTEX_RECYCLE` also turns this off).
+
+| Line | Meaning | Action |
+|---|---|---|
+| `vk: surfin cache ON/OFF (NVMTL_NO_SURFIN_CACHE=...)` | once per process | OFF: this run does not show the default plugin |
+| `vk: surfin: SUMMARY cache=1 calls=.. fast=.. miss_unsynced=.. miss_seed=.. miss_gen=.. locked_upload=.. locked_skip_vram=.. bufcopy=.. bufcopy_uploaded=.. bufcopy_skipped=.. bufcopy_noshadow=.. bufcopy_failed=.. bufcopy_forgotten=.. bufcopy_up_us=.. bufcopy_skip_us=.. shadow_bytes=.. shadow_refused=.. cimg_new=.. cimg_recycled=.. cimg_parked=.. cimg_evicted=.. cimg_refused=..` | totals, at most every 10 s while one moved, and at exit; the newest line of a process counts | `bufcopy_skipped` high and `bufcopy_up_us` low = the saving; `bufcopy_failed` > 0 = WARN; `bufcopy_noshadow` ~ `bufcopy` = images over 1 MiB or the budget (`shadow_refused`) |
+| `buffer texture copy: no shadow for a WxH image ...` | the first 4, then powers of two | the image is uploaded every command buffer, as before |
+
+Triage row `surface-in cache` (INFO with the counts, WARN for the kill switch, failed refreshes, no shadow). The trace's `ENC_SPLIT` record now also says what the surface-in calls
+were (`tools/plugin_trace.py`: `[buffer-texture refresh N uploaded X ms + M unchanged Y ms, K probe hit(s), U surface upload(s), monitor wait Z ms]` and the
+`surface-in calls (...)` line of the summary block). If an artefact appears only with the cache on, `NVMTL_NO_SURFIN_CACHE=1` in `rdna3mtl.conf` restores the old behaviour.
+What is NOT cut: the surface uploads themselves (a producer that rewrites the surface every frame; there is no dirty range, only the seed), and the synchronous submit + wait of every
+upload that is still needed (the next step would be to record small uploads into the command buffer instead).
 
 ## Linux reference dump (`tools/linux/card_dump.sh`)
 

@@ -145,7 +145,7 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
           static const char *const kv[][2] = { { "NVMTL_RADV_DEBUG", "nodcc,nohiz,nofmask,nofastclears" }, { "NVMTL_ASYNC_COMMIT", "0" }, { "NVMTL_GSUB_INFLIGHT", "1" },
               { "NVMTL_PRESUBMIT_PROLOGUE", "0" }, { "NVMTL_NO_POOL_REUSE", "1" }, { "NVMTL_NO_BUFREUSE", "1" }, { "NVMTL_NO_BUFTEX_RECYCLE", "1" },
               { "NVMTL_NO_HEAPTEX_RECYCLE", "1" }, { "NVMTL_NO_HEAPTEX_PLACE", "1" }, { "NVMTL_NO_DIRTYONLY", "1" }, { "NVMTL_ENC78_OFF", "all" },
-              { "NVMTL_G79_OFF", "all" }, { "NVMTL_NO_RES2", "1" }, { "NVMTL_NO_PURGE_RECLAIM", "1" } };
+              { "NVMTL_G79_OFF", "all" }, { "NVMTL_NO_RES2", "1" }, { "NVMTL_NO_PURGE_RECLAIM", "1" }, { "NVMTL_NO_SURFIN_CACHE", "1" } };
           /* MANAGED_CHECK / MANAGED_SNAPSHOT are not in the profile: they live in the pre-submit prologue, which PRESUBMIT_PROLOGUE=0 removes, so
            * they would log ON and do nothing. They are rungs of their own. */
           char setl[480]; size_t setn = 0; setl[0] = 0;
@@ -872,6 +872,106 @@ static void nvmtl_bpark_put(NVMTLBuffer *b, nvk_image *img, const uint32_t *key)
     if (parked) { memset(img, 0, sizeof *img); atomic_fetch_add(&gBTParked, 1); }
     if (evict) { nvmtl_vk_image_destroy(&ev); atomic_fetch_add(&gBTEvicted, 1); }
 }
+/* ---- DRIVER-PLAN N51: the surface-in cache. Card run 2026-10-25e: the surface-in checks were 38 % of WindowServer's encode time. Joined by command
+ * buffer, the ENC_SPLIT and SURF_IN records say what they were: surface UPLOADs 25 %, the cheap seed check a few us, and ~75 % in calls of 30 to 300 us that
+ * leave no record: the private image of a buffer texture the GPU cannot alias (bytesPerRow not a multiple of 256) re-uploaded from the buffer's bytes once
+ * per command buffer, each a synchronous submit and wait. Three things, all behind NVMTL_NO_SURFIN_CACHE=1 (decisions in nvmtl_surfin_cache.h, host test
+ * tests/test_surfin_cache.c):
+ *   1. a surface texture whose seed (and generation tag) did not move is answered without the pending-write scan, the string key and the monitor;
+ *   2. a buffer texture's refresh compares the bytes it would upload with the bytes it last uploaded (a shadow, the exact copy the upload reads) and does
+ *      nothing when they are equal; every writer of the image (blit, replaceRegion, mipmaps) drops the shadow;
+ *   3. the private copy images are parked by shape when their texture dies and reused by the next one of that shape (NVMTL_NO_BUFTEX_RECYCLE also turns it off).
+ * The totals go out as `vk: surfin: SUMMARY` (nvlog_uncapped, at most every 10 s while one moved, and at exit); the capped nvlog lines show the first 8 only. */
+static int nvmtl_sin_cache_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_NO_SURFIN_CACHE"); on = !(e && *e && *e != '0');
+        nvlog("vk: surfin cache %s (NVMTL_NO_SURFIN_CACHE=%s)", on ? "ON - a surface whose seed did not move is not re-checked under locks, a buffer texture whose bytes did not change is not re-uploaded, "
+              "private copy images are reused by shape" : "OFF - every surface-in call takes the locked path, every buffer texture is re-uploaded per command buffer, no copy image is reused", e ? e : "unset"); }
+    return on;
+}
+static int nvmtl_cimg_on(void) {
+    static int on = -1;
+    if (on < 0) on = nvmtl_sin_cache_on() && !getenv("NVMTL_NO_BUFTEX_RECYCLE");
+    return on;
+}
+static _Atomic unsigned long long gSinCalls, gSinFast, gSinMissNs, gSinMissSeed, gSinMissGen, gBcRefresh, gBcUp, gBcSkip, gBcNoShadow, gBcFail, gBcForget,
+    gBcUpUs, gBcSkipUs, gShadowBytes, gShadowRefused, gCiNew, gCiRecycled, gCiParked, gCiEvicted, gCiRefused;
+static _Atomic uint64_t gSinSumNs; static unsigned long long gSinSumLast; static int gSinArmed;
+static void nvmtl_sin_summary(int force);
+static void nvmtl_sin_atexit(void) { nvmtl_sin_summary(1); }
+static void nvmtl_sin_summary(int force) {
+    if (!gSinArmed) { gSinArmed = 1; atexit(nvmtl_sin_atexit); }
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC), last = atomic_load(&gSinSumNs);
+    if (!force && now - last < 10ull * 1000000000ull) return;
+    const unsigned long long calls = atomic_load(&gSinCalls), fast = atomic_load(&gSinFast), mn = atomic_load(&gSinMissNs), ms = atomic_load(&gSinMissSeed),
+        mg = atomic_load(&gSinMissGen), br = atomic_load(&gBcRefresh), bu = atomic_load(&gBcUp), bs = atomic_load(&gBcSkip), bn = atomic_load(&gBcNoShadow),
+        bf = atomic_load(&gBcFail), bg = atomic_load(&gBcForget), bus = atomic_load(&gBcUpUs), bss = atomic_load(&gBcSkipUs), sb = atomic_load(&gShadowBytes),
+        sr = atomic_load(&gShadowRefused), cn = atomic_load(&gCiNew), cr = atomic_load(&gCiRecycled), cp = atomic_load(&gCiParked), ce = atomic_load(&gCiEvicted),
+        cf = atomic_load(&gCiRefused);
+    const unsigned long long total = calls + br + cn + cr;
+    if (!total || total == gSinSumLast) return;
+    if (!atomic_compare_exchange_strong(&gSinSumNs, (uint64_t *)&last, now) && !force) return;
+    gSinSumLast = total;
+    nvlog_uncapped("vk: surfin: SUMMARY cache=%d calls=%llu fast=%llu miss_unsynced=%llu miss_seed=%llu miss_gen=%llu locked_upload=%llu locked_skip_vram=%llu "
+                   "bufcopy=%llu bufcopy_uploaded=%llu bufcopy_skipped=%llu bufcopy_noshadow=%llu bufcopy_failed=%llu bufcopy_forgotten=%llu bufcopy_up_us=%llu bufcopy_skip_us=%llu "
+                   "shadow_bytes=%llu shadow_refused=%llu cimg_new=%llu cimg_recycled=%llu cimg_parked=%llu cimg_evicted=%llu cimg_refused=%llu",
+                   nvmtl_sin_cache_on(), calls, fast, mn, ms, mg, g_surfin_copy, g_surfin_skip, br, bu, bs, bn, bf, bg, bus, bss, sb, sr, cn, cr, cp, ce, cf);
+}
+/* the copy images: parked by (w, h, VkFormat, bpp, a8) - the shape nvmtl_vk_image_create_typed(..., 1, 0, 2u, 1u) makes, so any parked image fits a new texture of that shape */
+static os_unfair_lock gCpLock = OS_UNFAIR_LOCK_INIT;
+static nvmtl_cpool gCp;
+static nvk_image gCpImg[NVMTL_CPOOL_SLOTS];
+static void nvmtl_cimg_key(uint32_t *k, uint32_t w, uint32_t h, uint32_t vkf, uint32_t bpp, uint32_t a8) {
+    memset(k, 0, NVMTL_CPOOL_KEY_WORDS * sizeof *k); k[0] = w; k[1] = h; k[2] = vkf; k[3] = bpp; k[4] = a8; k[5] = 0x43504931u;
+}
+/* a private copy image for a buffer texture: a parked one when the shape matches (its contents are NOT trusted: the caller refreshes it, and the new texture's shadow is not valid), else a new one */
+static int nvmtl_cimg_create(uint32_t w, uint32_t h, uint32_t vkf, uint32_t bpp, int a8, nvk_image *out) {
+    if (nvmtl_cimg_on()) {
+        uint32_t k[NVMTL_CPOOL_KEY_WORDS]; nvmtl_cimg_key(k, w, h, vkf, bpp, (uint32_t)a8);
+        os_unfair_lock_lock(&gCpLock);
+        const int slot = nvmtl_cpool_take(&gCp, k);
+        if (slot >= 0) { *out = gCpImg[slot]; memset(&gCpImg[slot], 0, sizeof gCpImg[slot]); }
+        os_unfair_lock_unlock(&gCpLock);
+        if (slot >= 0) { atomic_fetch_add(&gCiRecycled, 1); return 0; }
+    }
+    const int rc = nvmtl_vk_image_create_typed(w, h, vkf, bpp, a8, 1, 0, 2u, 1u, out);
+    if (!rc) atomic_fetch_add(&gCiNew, 1);
+    return rc;
+}
+/* the dying copy texture's image: parked, or left for the caller to destroy */
+static void nvmtl_cimg_park(NVMTLTexture *t) {
+    if (!nvmtl_cimg_on() || !t->_i.img || t->_i.placed || t->_i.view == NULL) return;
+    if (!nvmtl_cpool_admit(t->_i.alloc)) { atomic_fetch_add(&gCiRefused, 1); return; }
+    uint32_t k[NVMTL_CPOOL_KEY_WORDS]; nvmtl_cimg_key(k, t->_pkey[1], t->_pkey[2], t->_pkey[3], t->_pkey[4], t->_pkey[5]);
+    nvk_image ev[NVMTL_CPOOL_SLOTS]; int nev = 0, slot;
+    os_unfair_lock_lock(&gCpLock);
+    for (int v; nev < NVMTL_CPOOL_SLOTS && (v = nvmtl_cpool_victim(&gCp, t->_i.alloc)) >= 0; ) {
+        ev[nev++] = gCpImg[v]; memset(&gCpImg[v], 0, sizeof gCpImg[v]); nvmtl_cpool_drop(&gCp, v); }
+    slot = nvmtl_cpool_add(&gCp, k, t->_i.alloc);
+    if (slot >= 0) gCpImg[slot] = t->_i;
+    os_unfair_lock_unlock(&gCpLock);
+    for (int i = 0; i < nev; i++) { nvmtl_vk_image_destroy(&ev[i]); atomic_fetch_add(&gCiEvicted, 1); }
+    if (slot >= 0) { memset(&t->_i, 0, sizeof t->_i); atomic_fetch_add(&gCiParked, 1); }
+    else atomic_fetch_add(&gCiRefused, 1);
+}
+/* a shadow for this texture's refreshes, once; not having one (too big, over the budget, no memory) leaves the refresh as it was and is counted */
+static void nvmtl_bsh_prepare(NVMTLTexture *r, size_t tight, uint32_t rows) {
+    if (r->_bsh.buf || r->_bshTried) return;
+    r->_bshTried = 1;
+    const uint64_t bytes = (uint64_t)tight * rows;
+    uint8_t *p = nvmtl_bshadow_admit(bytes, atomic_load(&gShadowBytes)) ? (uint8_t *)malloc((size_t)bytes) : NULL;
+    if (!p) { const unsigned long long k = atomic_fetch_add(&gShadowRefused, 1) + 1;
+        if (k <= 4 || !(k & (k - 1))) nvlog("buffer texture copy: no shadow for a %ux%u image (%llu bytes, %llu shadow bytes in use): it is re-uploaded every command buffer (%llu so far)",
+                                            r->_i.w, r->_i.h, (unsigned long long)bytes, (unsigned long long)atomic_load(&gShadowBytes), k);
+        return; }
+    r->_bsh.buf = p; r->_bsh.len = (size_t)bytes; r->_bsh.valid = 0;
+    atomic_fetch_add(&gShadowBytes, bytes);
+}
+/* something wrote this texture's image other than a refresh: the shadow no longer describes it */
+static inline void nvmtl_bsh_forget(NVMTLTexture *r) {
+    if (!r->_bufCopy || !r->_bsh.buf) return;
+    @synchronized (r) { if (r->_bsh.valid) atomic_fetch_add(&gBcForget, 1); nvmtl_bshadow_forget(&r->_bsh); }
+}
 static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, NSUInteger offset)
 {
     extern int nvmtl_pixfmt_public(MTLPixelFormat f, uint32_t *vk, uint32_t *bpp, int *a8);
@@ -937,7 +1037,7 @@ static NVMTLTexture *nvmtl_texbuf_make(NVMTLBuffer *b, MTLTextureDescriptor *d, 
         const BOOL ro = !(d.usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget));
         const BOOL fits = bpr >= w * bpp && offset <= _b.size && bpr * (h - 1) + w * bpp <= _b.size - offset;
         if (!ro || !fits || ![self contents] ||
-            nvmtl_vk_image_create_typed((uint32_t)w, (uint32_t)h, vkf, bpp, a8, 1, 0, 2u, 1u, &t->_i)) {
+            nvmtl_cimg_create((uint32_t)w, (uint32_t)h, vkf, bpp, a8, &t->_i)) {
             nvlog("buffer newTextureWithDescriptor:offset:%lu bytesPerRow:%lu (%zux%zu fmt %lu, buffer %lu B, storage %lu, usage 0x%lx) -> nil "
                   "(reason above%s)", (unsigned long)offset, (unsigned long)bpr, w, h, (unsigned long)d.pixelFormat, (unsigned long)_b.size,
                   (unsigned long)_storage, (unsigned long)d.usage, !ro ? "; written by the GPU, so no copy either" : !fits ? "; outside the buffer" :
@@ -1034,6 +1134,7 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
 static void nvmtl_surf_dirty(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!cb || !t) return;
     NVMTLTexture *r = t->_parent ? t->_parent : t;
+    nvmtl_bsh_forget(r);   /* N51: every recorded write to a texture comes through here; a buffer texture's shadow of its last upload is then stale */
     if (!r->_surf) return;
     if (!cb->_surfDirty) cb->_surfDirty = [NSMutableSet new];
     [cb->_surfDirty addObject:r];
@@ -1169,6 +1270,20 @@ static void nvmtl_surface_in_for_cb_body(NVMTLCommandBuffer *cb, NVMTLTexture *t
         [r nvmtlBufCopyIn];
         return;
     }
+    /* N51: a surface whose seed (and tag generation) did not move holds nothing to upload: the locked path below would answer the same, after a scan of every
+       queue's pending writes (a string key, a lock) and the monitor. Misses are counted by reason and take the locked path unchanged. */
+    if (r->_surf && nvmtl_sin_cache_on()) {
+        const uint32_t seedNow = IOSurfaceGetSeed(r->_surf), seedHave = __atomic_load_n(&r->_surfSeed, __ATOMIC_RELAXED);
+        const int synced = __atomic_load_n(&r->_surfSynced, __ATOMIC_RELAXED) != 0, vram = r->_vramOn != 0;
+        uint32_t genHave = 0, genNow = 0;
+        if (synced && seedHave == seedNow && !vram) { genHave = __atomic_load_n(&r->_surfGen, __ATOMIC_RELAXED); genNow = nvmtl_vram_gen(r->_surf, r->_plane); }
+        switch (nvmtl_sin_probe(synced, seedHave, seedNow, vram, genHave, genNow)) {
+        case NVMTL_SIN_FRESH: nvt_count(NVT_C_IN_SYNCED, 1); atomic_fetch_add(&gSinFast, 1); g_sin_path = 1; return;
+        case NVMTL_SIN_NOT_SYNCED: atomic_fetch_add(&gSinMissNs, 1); break;
+        case NVMTL_SIN_SEED: atomic_fetch_add(&gSinMissSeed, 1); break;
+        default: atomic_fetch_add(&gSinMissGen, 1); break;
+        }
+    }
     if (cb && r->_surf && [cb->_surfOverwrites containsObject:r]) return;
     // A prior committed buffer defines this GPU backing's contents.
     // Importing the old CPU surface here would run ahead of this buffer and
@@ -1181,8 +1296,11 @@ static void nvmtl_surface_in_for_cb_body(NVMTLCommandBuffer *cb, NVMTLTexture *t
 /* the render encoder's encode-time split (nvt_ev_enc_split): the surface-in checks, whether they end at a skip or an upload */
 static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     const uint64_t sp = nvmtl_split_now();
+    g_sin_path = 0;
     nvmtl_surface_in_for_cb_body(cb, t);
-    if (sp) { g_split.sin_calls++; nvmtl_split_add(sp, &g_split.sin, NULL); }
+    nvmtl_split_sin(sp, g_sin_path);
+    const unsigned long long n = atomic_fetch_add(&gSinCalls, 1) + 1;
+    if (!(n & 255) || (n <= 4096 && !(n & (n - 1)))) nvmtl_sin_summary(0);
 }
 static unsigned nvmtl_surf_id(NVMTLTexture *t) { NVMTLTexture *r = (t && t->_parent) ? t->_parent : t; return (r && r->_surf) ? (unsigned)IOSurfaceGetID(r->_surf) : 0u; }
 static int nvmtl_noseed(void) { static uint64_t next; static int on; uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
@@ -1311,6 +1429,8 @@ void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d) {
     if (_swzView) nvmtl_vk_image_view_destroy(_swzView);
     if (!_parent && _parkable && _subHeap && _i.img) nvmtl_heap_park(_subHeap, &_i, _pkey, _heapOffset, _pkLen);
     if (!_parent && _bparkable && _backBuf && _i.img) nvmtl_bpark_put(_backBuf, &_i, _pkey);
+    if (!_parent && _bufCopy && _i.img) nvmtl_cimg_park(self);   /* N51: a private copy image is parked by shape (the destroy below then has nothing) */
+    if (_bsh.buf) { atomic_fetch_sub(&gShadowBytes, (unsigned long long)_bsh.len); free(_bsh.buf); _bsh.buf = NULL; _bsh.len = 0; }
     if (!_parent) nvmtl_vk_image_destroy(&_i);
     if (_stTwin.img) nvmtl_vk_image_destroy(&_stTwin);
     if (!_parent && _vramOn) { nvmtl_vk_buffer_destroy(&_vramBuf); _vramOn = NO; }
@@ -1353,14 +1473,40 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     /* -contents: the app's own pages for a no-copy buffer (nvmtl_buf_cpu would give the private copy, refreshed
        from them only at commit) */
     const uint8_t *src = r->_backBuf ? (const uint8_t *)[(id<MTLBuffer>)r->_backBuf contents] : NULL;
-    if (!src || nvmtl_vk_image_write(r->_q, &r->_i, src + r->_backOff, r->_backBPR))
-        nvlog("buffer texture copy: refresh FAILED (%ux%u)", r->_i.w, r->_i.h);
+    const uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    int rc = -1, skipped = 0, shadowed = 0;
+    atomic_fetch_add(&gBcRefresh, 1);
+    if (src && nvmtl_sin_cache_on()) {
+        /* N51: upload only when the bytes changed since the last upload. The shadow IS what the upload reads (nvmtl_bshadow_refresh packs the rows once), so it
+           cannot claim contents the image does not hold; the lock keeps two threads' refreshes of one texture in order. */
+        const uint32_t bw = r->_i.bw > 1 ? r->_i.bw : 1, bh = r->_i.bh > 1 ? r->_i.bh : 1;
+        const uint32_t cols = (r->_i.w + bw - 1) / bw, rows = (r->_i.h + bh - 1) / bh;
+        const size_t tight = (size_t)cols * (r->_i.bpp ? r->_i.bpp : 4);
+        @synchronized (r) {
+            nvmtl_bsh_prepare(r, tight, rows);
+            switch (nvmtl_bshadow_refresh(&r->_bsh, src + r->_backOff, r->_backBPR, tight, rows)) {
+            case NVMTL_BS_SKIP: skipped = 1; shadowed = 1; rc = 0; break;
+            case NVMTL_BS_UPLOAD:
+                rc = nvmtl_vk_image_write(r->_q, &r->_i, r->_bsh.buf, tight);
+                nvmtl_bshadow_done(&r->_bsh, rc == 0); shadowed = 1; break;
+            default: nvmtl_bshadow_forget(&r->_bsh); break;
+            }
+        }
+    }
+    if (!shadowed) { rc = src ? nvmtl_vk_image_write(r->_q, &r->_i, src + r->_backOff, r->_backBPR) : -1; atomic_fetch_add(&gBcNoShadow, 1); }
+    const unsigned long long us = (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - t0) / 1000u;
+    if (skipped) { atomic_fetch_add(&gBcSkip, 1); atomic_fetch_add(&gBcSkipUs, us); g_sin_path = 3; }
+    else { atomic_fetch_add(&gBcUp, 1); atomic_fetch_add(&gBcUpUs, us); g_sin_path = 2; }
+    if (rc) { atomic_fetch_add(&gBcFail, 1);
+        nvlog("buffer texture copy: refresh FAILED (%ux%u)", r->_i.w, r->_i.h); }
 }
 - (void)nvmtlSurfaceIn {
     NVMTLTexture *r = _parent ? _parent : self;
     if (r->_bufCopy) { [r nvmtlBufCopyIn]; return; }
     if (!r->_surf) return;
+    const uint64_t spw = nvmtl_split_now();   /* N51: the time to get the surface's monitor (a refresh or a read-back of the same surface holds it) */
     @synchronized (nvmtl_surface_sync(r)) {
+    nvmtl_split_add(spw, &g_split.wait, NULL);
     const uint32_t vgen = r->_vramOn ? 0 : nvmtl_vram_gen(r->_surf, r->_plane);
     if (r->_surfSynced && IOSurfaceGetSeed(r->_surf) == r->_surfSeed && (r->_vramOn || vgen == r->_surfGen)) { nvt_count(NVT_C_IN_SYNCED, 1); return; }
     const uint64_t trT0 = nvt_now();   // frame trace (nvmtl_trace.h): every decision below is recorded, none depends on it
@@ -1388,7 +1534,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
     if (rc) { nvlog("G13 surface-in: upload FAILED (%ux%u) — retried at the next use", r->_i.w, r->_i.h);
         nvmtl_tr_surf(r, NVT_K_SURF_IN, NVT_IN_UPLOAD_FAILED, rc, trSeed0, seed, trT0, 0, NULL, NVT_F_RO_LOCK); return; }
     r->_surfSeed = seed; r->_surfSynced = YES; r->_surfGen = vgen;
-    g_surfin_copy++; if (r->_vramOn) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
+    g_surfin_copy++; g_sin_path = 4; if (r->_vramOn) nvmtl_vram_tag_set(r->_surf, r->_plane, seed);
     static unsigned n; if (n++ < 6 || n % 2000 == 0) nvlog("G13 surface-in #%u: %ux%u surface %p seed %u uploaded", n, r->_i.w, r->_i.h, (void *)r->_surf, seed);
     nvmtl_tr_surf(r, NVT_K_SURF_IN, NVT_IN_UPLOAD, 0, trSeed0, seed, trT0, (uint64_t)r->_i.w * r->_i.h * (r->_i.bpp ? r->_i.bpp : 4),
                   trHashed ? trBands : NULL, NVT_F_RO_LOCK);
@@ -1556,6 +1702,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
                   memcpy(dst + r->_backOff + (region.origin.y + y) * r->_backBPR + region.origin.x * bpp,
                          (const uint8_t *)bytes + y * row, region.size.width * bpp);
       } }
+    nvmtl_bsh_forget(_parent ? _parent : self);   /* N51: the image is written below, the shadow of the last refresh no longer describes it */
     if (!bytes || row < (size_t)_i.w * (_i.bpp ? _i.bpp : 4) || !nvmtl_surface_full_overwrite(self, region, level, 0)) [self nvmtlSurfaceIn];
     if (nvmtl_vk_image_write_region_level_layer(_q, [self nvi], (const uint8_t *)bytes, row, (uint32_t)region.origin.x, (uint32_t)region.origin.y,
                                                 (uint32_t)region.size.width, (uint32_t)region.size.height, (uint32_t)level + _baseLevel, _baseSlice))
@@ -1571,6 +1718,7 @@ static id nvmtl_surface_sync(NVMTLTexture *t) {
         if (bb.storageMode == MTLStorageModeManaged) [bb didModifyRange:NSMakeRange(at, len)];
         return; }
     if (level >= [self mipmapLevelCount]) { nvlog("replaceRegion: mip level %lu — this texture has %lu", (unsigned long)level, (unsigned long)[self mipmapLevelCount]); return; }
+    nvmtl_bsh_forget(_parent ? _parent : self);   /* N51: as above */
     if (!bytes || row < (size_t)_i.w * (_i.bpp ? _i.bpp : 4) || !nvmtl_surface_full_overwrite(self, region, level, slice)) [self nvmtlSurfaceIn];
     nvk_image *im = [self nvi]; BOOL vol = im->mtl_type == 7; NSUInteger nz = vol ? (region.size.depth ? region.size.depth : 1) : 1;
     if (!vol && (region.size.depth > 1 || region.origin.z)) { nvlog("replaceRegion:slice: depth %lu@z%lu on a non-3D texture — REFUSED", (unsigned long)region.size.depth, (unsigned long)region.origin.z); return; }

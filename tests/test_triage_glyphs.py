@@ -203,6 +203,22 @@ check(d["ladder radv"][0][0] == "WARN" and "an app did not start" in d["ladder r
 check(d["ladder sync"][0][0] == "WARN" and "cut off" in d["ladder sync"][0][1], "a cut rung is WARNed, %r" % (d["ladder sync"],))
 check(tg.ladder_log_name("radv-ws") == "41-ladder-radv-ws.log", "log member name")
 
+# N51: the surface-in cache rows
+SIN = ("vk: surfin: SUMMARY cache=1 calls=15430 fast=9000 miss_unsynced=10 miss_seed=400 miss_gen=2 locked_upload=466 locked_skip_vram=3 bufcopy=5000 bufcopy_uploaded=500 "
+       "bufcopy_skipped=4500 bufcopy_noshadow=0 bufcopy_failed=%d bufcopy_forgotten=3 bufcopy_up_us=40000 bufcopy_skip_us=9000 shadow_bytes=100000 shadow_refused=0 "
+       "cimg_new=40 cimg_recycled=400 cimg_parked=410 cimg_evicted=5 cimg_refused=0")
+r = rows_of(L("WindowServer", 208, "vk: ab switches: none set (no NVMTL_* diagnostic or optimisation switch is in the environment of this process)") + L("WindowServer", 208, SIN % 0))
+check(r["surface-in cache"][0][0] == "INFO" and "9000 answered by the probe" in r["surface-in cache"][0][1] and "4500 skipped unchanged" in r["surface-in cache"][0][1]
+      and "400 reused" in r["surface-in cache"][0][1], "surfin SUMMARY: INFO with the hit / skip numbers, %r" % r)
+r = rows_of(L("WindowServer", 208, SIN % 2))
+check(r["surface-in cache"][0][0] == "WARN" and "FAILED" in r["surface-in cache"][0][1], "a failed refresh is WARNed, %r" % r)
+r = rows_of(L("WindowServer", 208, (SIN % 0).replace("cache=1", "cache=0")))
+check(r["surface-in cache"][0][0] == "WARN" and "NVMTL_NO_SURFIN_CACHE" in r["surface-in cache"][0][1], "the kill switch is WARNed, %r" % r)
+r = rows_of(L("WindowServer", 208, (SIN % 0).replace("bufcopy_noshadow=0", "bufcopy_noshadow=4000").replace("shadow_refused=0", "shadow_refused=9")))
+check(r["surface-in cache"][0][0] == "WARN" and "no shadow" in r["surface-in cache"][0][1], "refreshes without a shadow are WARNed, %r" % r)
+r = rows_of(L("Terminal", 907, 'vk: ab switches [1]: NVMTL_NO_SURFIN_CACHE="1"'))
+check(r["surface-in cache"][0][0] == "INFO" and "no `vk: surfin: SUMMARY`" in r["surface-in cache"][0][1], "a process without the SUMMARY is said, %r" % r)
+
 # the hook in triage_reports.py
 src = open(os.path.join(ROOT, "tools", "triage_reports.py")).read()
 check("from triage_glyphs import n50_plugin_rows" in src and "n50_plugin_rows(" in src, "triage_reports.py calls n50_plugin_rows")
