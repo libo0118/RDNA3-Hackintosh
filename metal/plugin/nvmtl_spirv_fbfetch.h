@@ -40,69 +40,53 @@ typedef struct {
 enum { NVMTL_OP_TYPE_IMAGE = 25, NVMTL_OP_TYPE_POINTER = 32, NVMTL_OP_VARIABLE = 59, NVMTL_OP_LOAD = 61, NVMTL_OP_DECORATE = 71,
        NVMTL_OP_IMAGE_READ = 98, NVMTL_OP_COPY_OBJECT = 83, NVMTL_OP_CONSTANT_NULL = 46, NVMTL_OP_FUNCTION = 54, NVMTL_OP_NOP = 0 };
 
-/* The ids a module's subpass inputs have. ids are bounded by the module's id bound, which the caller has checked. */
-typedef struct { uint8_t *img_type, *ptr_type, *var; uint8_t *loaded; uint32_t *var_binding; uint32_t *loaded_binding; uint32_t bound; } nvmtl_fbfetch_ids;
-
-static inline int nvmtl_fbfetch_ids_alloc(nvmtl_fbfetch_ids *t, uint32_t bound)
-{
-    memset(t, 0, sizeof *t); t->bound = bound;
-    t->img_type = (uint8_t *)calloc(bound, 1); t->ptr_type = (uint8_t *)calloc(bound, 1); t->var = (uint8_t *)calloc(bound, 1);
-    t->loaded = (uint8_t *)calloc(bound, 1);
-    t->var_binding = (uint32_t *)calloc(bound, sizeof(uint32_t)); t->loaded_binding = (uint32_t *)calloc(bound, sizeof(uint32_t));
-    return t->img_type && t->ptr_type && t->var && t->loaded && t->var_binding && t->loaded_binding ? 0 : -1;
-}
-static inline void nvmtl_fbfetch_ids_free(nvmtl_fbfetch_ids *t)
-{
-    free(t->img_type); free(t->ptr_type); free(t->var); free(t->loaded); free(t->var_binding); free(t->loaded_binding);
-}
+/* Per id, one byte of facts about it (ids are bounded by the module's id bound, which is capped below) and one byte for the
+ * binding band: 0 none, 1 + n = binding 192 + n. 2 bytes per id: a 1M-id module costs 2 MB. */
+enum { NVMTL_FB_IMG_TYPE = 1, NVMTL_FB_PTR_TYPE = 2, NVMTL_FB_VAR = 4, NVMTL_FB_LOADED = 8 };
+#define NVMTL_FBFETCH_MAX_BOUND (1u << 20)
 
 /* One walk. When `zero` is set the reads found are rewritten in place (OpCopyObject of a null constant + OpNop padding)
  * and the module grows by the null constants: the caller's buffer holds cap words, *nw is the module's length and is
- * updated. Returns 0 (also when the module has no subpass input), -1 for a malformed module or one that does not fit; after
- * a -1 with `zero` set the buffer may be half rewritten: the caller discards it (it works on a copy). */
+ * updated. Returns 0 (also when the module has no subpass input), -1 for a malformed module, an id bound over
+ * NVMTL_FBFETCH_MAX_BOUND, out of memory, or one that does not fit; after a -1 with `zero` set the buffer may be half
+ * rewritten: the caller discards it (it works on a copy). */
 static inline int nvmtl_spirv_fbfetch(uint32_t *w, size_t *nw_io, size_t cap, int zero, nvmtl_fbfetch *out)
 {
     size_t nw = *nw_io;
     memset(out, 0, sizeof *out);
     if (nw < 5 || w[0] != 0x07230203u) return -1;
     const uint32_t bound = w[3];
-    if (!bound || bound > (1u << 22)) return -1;
-    nvmtl_fbfetch_ids t;
-    if (nvmtl_fbfetch_ids_alloc(&t, bound)) { nvmtl_fbfetch_ids_free(&t); return -1; }
+    if (!bound || bound > NVMTL_FBFETCH_MAX_BOUND) return -1;
+    uint8_t *fact = (uint8_t *)calloc(bound, 1), *band = (uint8_t *)calloc(bound, 1);   /* band: of a decorated id, then of a variable, then of a loaded image */
+    if (!fact || !band) { free(fact); free(band); return -1; }
     int rc = 0;
-    /* pass 1: image types with Dim SubpassData (6), pointers to them, variables of those pointers, bindings */
-    uint32_t *bind = (uint32_t *)calloc(bound, sizeof(uint32_t)), *has_bind = (uint32_t *)calloc(bound, sizeof(uint32_t));
-    if (!bind || !has_bind) { free(bind); free(has_bind); nvmtl_fbfetch_ids_free(&t); return -1; }
     size_t first_fn = 0;
+    /* pass 1: decorations (they precede the types), image types with Dim SubpassData (6), pointers to them, their variables */
     for (size_t i = 5; i < nw; ) {
         uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
         if (!wc || i + wc > nw) { rc = -1; break; }
         if (op == NVMTL_OP_FUNCTION && !first_fn) first_fn = i;
-        if (op == NVMTL_OP_DECORATE && wc >= 4 && w[i + 1] < bound && w[i + 2] == 33) { bind[w[i + 1]] = w[i + 3]; has_bind[w[i + 1]] = 1; }
-        if (op == NVMTL_OP_TYPE_IMAGE && wc >= 9 && w[i + 1] < bound && w[i + 3] == 6) t.img_type[w[i + 1]] = 1;
-        if (op == NVMTL_OP_TYPE_POINTER && wc == 4 && w[i + 1] < bound && w[i + 2] == 0 && w[i + 3] < bound && t.img_type[w[i + 3]]) t.ptr_type[w[i + 1]] = 1;
-        if (op == NVMTL_OP_VARIABLE && wc >= 4 && w[i + 2] < bound && w[i + 1] < bound && t.ptr_type[w[i + 1]]) {
-            t.var[w[i + 2]] = 1;
+        if (op == NVMTL_OP_DECORATE && wc >= 4 && w[i + 1] < bound && w[i + 2] == 33 && w[i + 3] >= NVMTL_FBFETCH_BASE
+            && w[i + 3] < NVMTL_FBFETCH_BASE + NVMTL_FBFETCH_COUNT) band[w[i + 1]] = (uint8_t)(1u + (w[i + 3] - NVMTL_FBFETCH_BASE));
+        if (op == NVMTL_OP_TYPE_IMAGE && wc >= 9 && w[i + 1] < bound && w[i + 3] == 6) fact[w[i + 1]] |= NVMTL_FB_IMG_TYPE;
+        if (op == NVMTL_OP_TYPE_POINTER && wc == 4 && w[i + 1] < bound && w[i + 2] == 0 && w[i + 3] < bound && (fact[w[i + 3]] & NVMTL_FB_IMG_TYPE))
+            fact[w[i + 1]] |= NVMTL_FB_PTR_TYPE;
+        if (op == NVMTL_OP_VARIABLE && wc >= 4 && w[i + 2] < bound && w[i + 1] < bound && (fact[w[i + 1]] & NVMTL_FB_PTR_TYPE)) {
+            fact[w[i + 2]] |= NVMTL_FB_VAR;
+            if (band[w[i + 2]]) out->decl_mask |= 1u << (band[w[i + 2]] - 1u);   /* outside 192..199: not ours */
         }
         i += wc;
     }
-    /* decorations come before the types: resolve the binding of each subpass variable after the walk */
     if (!rc) {
-        for (uint32_t id = 1; id < bound; id++) {
-            if (!t.var[id]) continue;
-            if (has_bind[id] && bind[id] >= NVMTL_FBFETCH_BASE && bind[id] < NVMTL_FBFETCH_BASE + NVMTL_FBFETCH_COUNT) {
-                t.var_binding[id] = bind[id]; out->decl_mask |= 1u << (bind[id] - NVMTL_FBFETCH_BASE);
-            } else t.var_binding[id] = 0;
-        }
-        /* pass 2: loads of those variables, then the reads */
+        /* pass 2: loads of the in-band variables, then the reads */
         uint32_t nulls[NVMTL_FBFETCH_COUNT][2]; uint32_t nnull = 0;
         uint32_t next_id = bound;
         for (size_t i = 5; i < nw && !rc; ) {
             uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
-            if (op == NVMTL_OP_LOAD && wc >= 4 && w[i + 2] < bound && w[i + 3] < bound && t.var[w[i + 3]] && t.var_binding[w[i + 3]]) {
-                t.loaded[w[i + 2]] = 1; t.loaded_binding[w[i + 2]] = t.var_binding[w[i + 3]];
-            } else if (op == NVMTL_OP_IMAGE_READ && wc >= 5 && w[i + 3] < bound && t.loaded[w[i + 3]]) {
-                const uint32_t n = t.loaded_binding[w[i + 3]] - NVMTL_FBFETCH_BASE;
+            if (op == NVMTL_OP_LOAD && wc >= 4 && w[i + 2] < bound && w[i + 3] < bound && (fact[w[i + 3]] & NVMTL_FB_VAR) && band[w[i + 3]]) {
+                fact[w[i + 2]] |= NVMTL_FB_LOADED; band[w[i + 2]] = band[w[i + 3]];
+            } else if (op == NVMTL_OP_IMAGE_READ && wc >= 5 && w[i + 3] < bound && (fact[w[i + 3]] & NVMTL_FB_LOADED)) {
+                const uint32_t n = (uint32_t)band[w[i + 3]] - 1u;
                 out->reads++; out->read_mask |= 1u << n;
                 if (zero) {
                     /* a null constant of the read's result type, declared once before the first function */
@@ -131,7 +115,7 @@ static inline int nvmtl_spirv_fbfetch(uint32_t *w, size_t *nw_io, size_t cap, in
             }
         }
     }
-    free(bind); free(has_bind); nvmtl_fbfetch_ids_free(&t);
+    free(fact); free(band);
     return rc;
 }
 #endif

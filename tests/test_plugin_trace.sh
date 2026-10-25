@@ -96,6 +96,19 @@ $PT "$T/ws/nvmtl" --frames 20 > "$T/ws.txt"
 need "$T/ws.txt" '^WindowServer  pid'
 need "$T/ws.txt" 'WARN ws-uid'
 need "$T/ws.txt" 'events: 87 written, 87 kept'
+need "$T/ws.txt" 'encode-time split (1 render encoder(s), 40 draw(s)): per draw pipeline lookup 7.5us, descriptor writes 22.5us, surface-in 11.2us'
+need "$T/ws.txt" 'worst encoder: cb [0-9]*, 40 draw(s), pipeline 0.30ms, descriptors 0.90ms, surface-in 0.45ms (12 call(s)), slowest draw: lookup 60us, descriptors 140us'
+# the one-line form of a kind 17 record (not on the frame listings; the failure listing prints it with the other events)
+python3 -I -B -c '
+import sys, types
+sys.path.insert(0, sys.argv[1])
+import plugin_trace as pt
+r = types.SimpleNamespace(id=7, seed0=0, a0=40, rc=1, dur_us=2500, a1=300, a2=900, words=[0] * 8 + [450, 12, 60, 140])
+got = pt.enc_split_line(r)
+want = "encoder cb 7: 40 draw(s) in 2.50ms = pipeline lookup 0.30ms (worst draw 60us), descriptor writes 0.90ms (worst 140us), surface-in checks 0.45ms (12 call(s)), rest 0.85ms, 1 pipeline variant(s) built on a draw"
+assert got == want, got
+assert pt.KIND_NAMES[17] == "ENC_SPLIT" and pt.K_ENC_SPLIT == 17
+' "$ROOT/tools" || fail "the kind 17 (ENC_SPLIT) line"
 need "$T/ws.txt" 'FAIL never-published surface 103 2560x1440 (shared VRAM): 1 command buffer'
 need "$T/ws.txt" 'FAIL empty-publish   surface 107 2560x1440 (shared VRAM): 1 copy-out(s) published an EMPTY picture although the same command buffer DREW'
 need "$T/ws.txt" 'INFO empty-publish   surface 102 2560x1440 (shared VRAM): 4 of 4 copy-out(s) published an empty picture after a clear-only pass'

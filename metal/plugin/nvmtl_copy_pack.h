@@ -66,7 +66,7 @@ static inline int nvmtl_cp_resolve(uint32_t vkfmt, uint32_t samples, uint32_t im
     } else {
         *bpp = (vkfmt == NVMTL_CP_D16 || vkfmt == NVMTL_CP_D16S8) ? 2u : 4u;
     }
-    if (a != NVMTL_CP_ASPECT_COLOR && (offset & 3u)) { *why = "a depth/stencil copy needs a buffer offset that is a multiple of 4"; return -1; }
+    if (a != NVMTL_CP_ASPECT_COLOR && (offset & 3u)) { *why = "a depth/stencil copy needs a buffer offset that is a multiple of 4 (Vulkan valid usage of vkCmdCopyImageToBuffer / BufferToImage, bufferOffset for depth/stencil formats; Metal allows other offsets) - the copy is DROPPED"; return -1; }
     *aspect = a;
     return 0;
 }

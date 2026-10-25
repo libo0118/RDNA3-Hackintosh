@@ -61,9 +61,10 @@ K_SURF_IN, K_SURF_OUT, K_PASS_BEGIN, K_PASS_END = 2, 3, 4, 5
 K_CB_COMMIT, K_CB_DIRTY, K_CB_DONE = 6, 7, 8
 K_VK_SUBMIT, K_VK_WAIT, K_VK_DISABLE, K_ALLOC_FAIL = 9, 10, 11, 12
 K_KREQ_PROBE, K_KREQ_DIRTY, K_KREQ_IMPORT, K_SURF_MAP = 13, 14, 15, 16
+K_ENC_SPLIT = 17   # one per render encoder that drew: where its encode time went (nvt_ev_enc_split)
 KIND_NAMES = {1: "START", 2: "SURF_IN", 3: "SURF_OUT", 4: "PASS_BEGIN", 5: "PASS_END", 6: "CB_COMMIT", 7: "CB_DIRTY",
               8: "CB_DONE", 9: "VK_SUBMIT", 10: "VK_WAIT", 11: "VK_DISABLE", 12: "ALLOC_FAIL", 13: "KREQ_PROBE",
-              14: "KREQ_DIRTY", 15: "KREQ_IMPORT", 16: "SURF_MAP"}
+              14: "KREQ_DIRTY", 15: "KREQ_IMPORT", 16: "SURF_MAP", 17: "ENC_SPLIT"}
 IN_NAMES = {1: "UPLOAD", 2: "SKIP(shared VRAM current)", 3: "LOCK-FAILED", 4: "UPLOAD-FAILED", 5: "NOT-COPYABLE"}
 OUT_NAMES = {1: "DIRTY(no copy)", 2: "COPY-OUT(private image)", 3: "COPY-OUT after dirty refused", 4: "LOCK-FAILED",
              5: "READBACK-FAILED", 6: "NOT-COPYABLE"}
@@ -729,7 +730,44 @@ def describe(tr, r, off, prefix=True):
     if k == K_SURF_MAP:
         return pre + "surface map surf %d %s -> %s%s" % (
             r.surf, geo, "family VRAM" if r.path == 1 else "private image (%s)" % WHY_NAMES.get(r.a0, r.a0), " (VRAM already current)" if r.flags & F_CURRENT else "")
+    if k == K_ENC_SPLIT:
+        return pre + "%s" % enc_split_line(r)
     return pre + "%s" % KIND_NAMES.get(k, "kind %d" % k)
+
+
+def enc_split_fields(r):
+    """K_ENC_SPLIT (nvmtl_trace.h nvt_ev_enc_split): the encode time of one render encoder, split. All times in us."""
+    return {"cb": r.id, "pass": r.seed0, "draws": r.a0, "builds": r.rc, "total_us": r.dur_us, "pipe_us": r.a1, "desc_us": r.a2,
+            "sin_us": r.words[8], "sin_calls": r.words[9], "pipe_max_us": r.words[10], "desc_max_us": r.words[11]}
+
+
+def enc_split_line(r):
+    f = enc_split_fields(r)
+    other = f["total_us"] - f["pipe_us"] - f["desc_us"] - f["sin_us"]
+    return ("encoder cb %d%s: %d draw(s) in %.2fms = pipeline lookup %.2fms (worst draw %.0fus), descriptor writes %.2fms (worst %.0fus), "
+            "surface-in checks %.2fms (%d call(s)), rest %.2fms%s" % (
+                f["cb"], (" pass %d" % f["pass"]) if f["pass"] else "", f["draws"], f["total_us"] / 1000.0, f["pipe_us"] / 1000.0, f["pipe_max_us"],
+                f["desc_us"] / 1000.0, f["desc_max_us"], f["sin_us"] / 1000.0, f["sin_calls"], other / 1000.0,
+                (", %d pipeline variant(s) built on a draw" % f["builds"]) if f["builds"] else ""))
+
+
+def print_enc_split(tr, out):
+    """a summary of the kind 17 records still in the ring: which of the three suspects the draws spend their encode time in"""
+    rows = [enc_split_fields(r) for r in tr.recs if r.kind == K_ENC_SPLIT]
+    if not rows:
+        return
+    tot = collections.Counter()
+    for f in rows:
+        for k in ("draws", "builds", "total_us", "pipe_us", "desc_us", "sin_us", "sin_calls"):
+            tot[k] += f[k]
+    d = max(tot["draws"], 1)
+    out.write("\nencode-time split (%d render encoder(s), %d draw(s)): per draw pipeline lookup %.1fus, descriptor writes %.1fus, surface-in %.1fus "
+              "(of %.1fus per draw in the encoders; the rest is the app's own time between calls)%s\n" % (
+                  len(rows), tot["draws"], tot["pipe_us"] / d, tot["desc_us"] / d, tot["sin_us"] / d, tot["total_us"] / d,
+                  ("; %d pipeline variant(s) built while drawing" % tot["builds"]) if tot["builds"] else ""))
+    for f in sorted(rows, key=lambda f: -(f["pipe_us"] + f["desc_us"] + f["sin_us"]))[:3]:
+        out.write("  worst encoder: cb %d, %d draw(s), pipeline %.2fms, descriptors %.2fms, surface-in %.2fms (%d call(s)), slowest draw: lookup %.0fus, descriptors %.0fus\n" % (
+            f["cb"], f["draws"], f["pipe_us"] / 1000.0, f["desc_us"] / 1000.0, f["sin_us"] / 1000.0, f["sin_calls"], f["pipe_max_us"], f["desc_max_us"]))
 
 
 def print_header(tr, an, out):
@@ -971,6 +1009,7 @@ def main(argv=None):
         an = Analysis(tr, (bw, bh))
         print_header(tr, an, out)
         print_surfaces(an, out)
+        print_enc_split(tr, out)
         print_findings(an, out)
         for sid in a.surface or []:
             print_surface_timeline(tr, an, sid, a.utc_offset, out)

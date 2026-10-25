@@ -4324,6 +4324,15 @@ def report(path, show_all):
     # DRIVER-PLAN N43 (1): buffer textures without an alias (bytesPerRow not a multiple of 256 B)
     for lvl_, name_, text_ in n43_buftex_rows(cdlog, pluginlog):
         print("   %s %-20s %s" % (lvl_, name_, text_))
+    # DRIVER-PLAN N48: the plugin's blit copies, the multisample upload, [[color(n)]] framebuffer fetch (tools/triage_n48.py)
+    try:
+        from triage_n48 import n48_plugin_rows
+        n48_rows_ = n48_plugin_rows(pluginlog)
+    except ImportError:
+        n48_rows_ = [("WARN", "plugin copies", "tools/triage_n48.py is missing next to triage_reports.py: the plugin's copy / multisample / "
+                      "framebuffer-fetch lines were NOT read")]
+    for lvl_, name_, text_ in n48_rows_:
+        print("   %s %-20s %s" % (lvl_, name_, text_))
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
         want = fb_source_hash(ACCEL_HASH_FILES)
