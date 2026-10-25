@@ -1007,7 +1007,7 @@ static void nvmtl_surface_overwrite_recorded(NVMTLCommandBuffer *cb, NVMTLTextur
     [cb->_surfOverwrites addObject:r];
 }
 static BOOL nvmtl_surface_pending_write(NVMTLCommandBuffer *cb, NVMTLTexture *t);
-static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
+static void nvmtl_surface_in_for_cb_body(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     if (!t) return;
     NVMTLTexture *r = t->_parent ? t->_parent : t;
     if (r->_bufCopy) {   /* the buffer's bytes as of this command buffer, once per command buffer */
@@ -1024,6 +1024,12 @@ static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
     nvt_set_cb(nvmtl_tr_cb_id(cb));
     [t nvmtlSurfaceIn];
     nvt_set_cb(0);
+}
+/* the render encoder's encode-time split (nvt_ev_enc_split): the surface-in checks, whether they end at a skip or an upload */
+static void nvmtl_surface_in_for_cb(NVMTLCommandBuffer *cb, NVMTLTexture *t) {
+    const uint64_t sp = nvmtl_split_now();
+    nvmtl_surface_in_for_cb_body(cb, t);
+    if (sp) { g_split.sin_calls++; nvmtl_split_add(sp, &g_split.sin, NULL); }
 }
 static unsigned nvmtl_surf_id(NVMTLTexture *t) { NVMTLTexture *r = (t && t->_parent) ? t->_parent : t; return (r && r->_surf) ? (unsigned)IOSurfaceGetID(r->_surf) : 0u; }
 static int nvmtl_noseed(void) { static uint64_t next; static int on; uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
@@ -2614,6 +2620,8 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
 }
 - (BOOL)nvmtlBindSamplerPipeline {
     if (!_ps) return NO;
+    const uint64_t sp_pipe = nvmtl_split_now();   /* encode-time split (nvt_ev_enc_split): pipeline lookup, then descriptor writes */
+    if (sp_pipe) g_split.draws++;
     NVMTLRenderPipelineState *selected=_ps;
     if(_vertexSamplers.count || _fragmentSamplers.count) {
         NSDictionary *vS=nvmtl_pixel_sampler_norm(_vertexSamplers),*fS=nvmtl_pixel_sampler_norm(_fragmentSamplers);
@@ -2639,15 +2647,19 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
                 }
                 if(!selected){nvlog("pixel sampler specialization REFUSED %s: %s",_ps->_fname.UTF8String,why.UTF8String);_ps->_samplerVariants[key]=[NSNull null];return NO;}
                 _ps->_samplerVariants[key]=selected;
+                if (sp_pipe) g_split.builds++;
                 nvlog("pixel sampler variant built: %s / %s",_ps->_vname.UTF8String,_ps->_fname.UTF8String);
             }
         }
     }
     if(!_cb->_resources)_cb->_resources=[NVMTLResSet new];[_cb->_resources addObject:selected];
     nvmtl_vk_cmd_bind_pipeline(&_cb->_c,&selected->_p);
+    nvmtl_split_add(sp_pipe, &g_split.pipe, &g_split.pipe_max);
+    const uint64_t sp_desc = nvmtl_split_now();
     nvmtl_bind_embedded(_cb, NVMTL_SET_VERTEX,   (NVMTLFunction *)_ps->_descriptor.vertexFunction,   _vbufAt);
     nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_descriptor.fragmentFunction, _fbufAt);
     nvmtl_vk_cmd_bind_set(&_cb->_c,&selected->_p);
+    nvmtl_split_add(sp_desc, &g_split.desc, &g_split.desc_max);
     return YES;
 }
 - (BOOL)nvmtlSamplePositionError:(NSString *)message {
@@ -3090,6 +3102,7 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
 }
 - (void)endEncoding {
     _cb->_nEnd++;
+    nvmtl_split_end(self);   /* frame trace: where this encoder's encode time went (before the pass is closed) */
     [self nvmtlCloseVisibility];
     if (_begun) nvmtl_vk_cmd_end_render(&_cb->_c);
     NSMutableDictionary *groups = [NSMutableDictionary new];
@@ -4562,6 +4575,10 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
       destinationSlice:(NSUInteger)ds destinationLevel:(NSUInteger)dl destinationOrigin:(MTLOrigin)dof {
     NVMTLBuffer *b = (NVMTLBuffer *)src; NVMTLTexture *t = (NVMTLTexture *)dst;
     if (!b || !t) { nvlog("blit copyFromBuffer:toTexture: nil"); return; }
+    if (![(id)src isKindOfClass:[NVMTLBuffer class]] || ![(id)dst isKindOfClass:[NVMTLTexture class]]) {
+        nvlog("blit copyFromBuffer:toTexture: REFUSED - source is a %s, destination a %s (this plugin's buffer and texture are needed)",
+              object_getClassName(src), object_getClassName(dst));
+        return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:b];
     [_cb->_resources addObject:t];
@@ -4603,6 +4620,10 @@ static NSUInteger nvmtl_texture_slice_count(NVMTLTexture *t) {
 destinationBytesPerImage:(NSUInteger)img {
     NVMTLTexture *t = (NVMTLTexture *)src; NVMTLBuffer *b = (NVMTLBuffer *)dst;
     if (!t || !b) { nvlog("blit copyFromTexture:toBuffer: nil"); return; }
+    if (![(id)src isKindOfClass:[NVMTLTexture class]] || ![(id)dst isKindOfClass:[NVMTLBuffer class]]) {
+        nvlog("blit copyFromTexture:toBuffer: REFUSED - source is a %s, destination a %s (this plugin's texture and buffer are needed)",
+              object_getClassName(src), object_getClassName(dst));
+        return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
     [_cb->_resources addObject:t];
     [_cb->_resources addObject:b];
@@ -4610,7 +4631,19 @@ destinationBytesPerImage:(NSUInteger)img {
       if (ss >= tl || sl >= tm || (vol ? (so.z + size.depth > MAX((NSUInteger)1, t.depth >> sl)) : (size.depth != 1 || so.z))) {
           nvlog("blit copyFromTexture:toBuffer: slice %lu/%u level %lu/%u depth %lu@z%lu — outside this texture", (unsigned long)ss, tl, (unsigned long)sl, tm, (unsigned long)size.depth, (unsigned long)so.z); return; } }
     nvmtl_surface_in_for_cb(_cb, t);
-    nvmtl_census("copy texture->buffer", [t nvi]->w, [t nvi]->h, t->_surf != NULL);
+    { /* once per distinct (size, iosurface, shape): what the copy is made of, so a card report can tell a multisample or depth/stencil source from a colour one */
+      static struct { uint32_t w, h, fmt, samples; int surf; } seen[16]; static int n;
+      nvk_image *ci = [t nvi]; BOOL fresh = YES;
+      @synchronized([NSObject class]) {
+          for (int i = 0; i < n && fresh; i++) if (seen[i].w == ci->w && seen[i].h == ci->h && seen[i].fmt == ci->fmt && seen[i].samples == ci->samples
+                                                    && seen[i].surf == (t->_surf != NULL)) fresh = NO;
+          if (fresh && n < 16) { seen[n].w = ci->w; seen[n].h = ci->h; seen[n].fmt = ci->fmt; seen[n].samples = ci->samples; seen[n].surf = t->_surf != NULL; n++; }
+          else fresh = NO;
+      }
+      if (fresh) { char d[200]; nvmtl_vk_copy_describe(ci, d, sizeof d);
+          nvlog("G14 census: copy texture->buffer %ux%u iosurface=%d, %s, metal pixel format %lu, region %lux%lu slice %lu level %lu -> buffer offset %lu row %lu (first time in this process)",
+                ci->w, ci->h, t->_surf != NULL, d, (unsigned long)t.pixelFormat, (unsigned long)size.width, (unsigned long)size.height,
+                (unsigned long)ss, (unsigned long)sl, (unsigned long)dof, (unsigned long)row); } }
     { int was = nvtrace_scope([t nvi]->w, [t nvi]->h);
       nvtrace("BLIT tex %ux%u surf %u (%lu,%lu %lux%lu) -> buf len %lu off %lu row %lu", [t nvi]->w, [t nvi]->h, nvmtl_surf_id(t), (unsigned long)so.x, (unsigned long)so.y,
           (unsigned long)size.width, (unsigned long)size.height, (unsigned long)b->_b.size, (unsigned long)dof, (unsigned long)row);
@@ -4739,6 +4772,7 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
     e->_visBuf = (NVMTLBuffer *)d.visibilityResultBuffer;
     MTLClearColor cc = d.colorAttachments[0].clearColor;
     e->_clear[0] = (float)cc.red; e->_clear[1] = (float)cc.green; e->_clear[2] = (float)cc.blue; e->_clear[3] = (float)cc.alpha;
+    nvmtl_split_begin();   // frame trace: the encode-time split of this encoder starts here
     (void)nvmtl_tr_pass_begin(self, e, d);   // frame trace: which IOSurface(s) this pass writes, load/store, clear colour
     if (![e nvmtlBuildPass:d]) e->_refused = YES;
     return e;

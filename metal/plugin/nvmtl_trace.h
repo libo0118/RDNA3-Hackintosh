@@ -83,7 +83,9 @@ enum {
     NVT_K_KREQ_PROBE = 13,/* "kext surface BOs probe"                                                     */
     NVT_K_KREQ_DIRTY = 14,/* the dirty ioctl for a surface                                                */
     NVT_K_KREQ_IMPORT = 15,/* the kernel's surface BO import (family VRAM) for a surface                  */
-    NVT_K_SURF_MAP = 16   /* a surface got its texture backing: family VRAM or a private image            */
+    NVT_K_SURF_MAP = 16,  /* a surface got its texture backing: family VRAM or a private image            */
+    NVT_K_ENC_SPLIT = 17  /* a render encoder's encode time, split: pipeline lookup / descriptor writes /
+                             surface-in checks (one record per encoder that drew; see nvt_ev_enc_split)   */
 };
 
 /* SURF_IN paths */
@@ -828,6 +830,27 @@ static inline void nvt_ev_map(uint32_t surf, unsigned plane, uint32_t w, uint32_
     nvt_rec r; nvt_rec_init(&r, NVT_K_SURF_MAP);
     r.path = (uint8_t)(vram ? NVT_MAP_VRAM : NVT_MAP_PRIVATE); r.plane = (uint8_t)plane; r.surf = surf; r.w = w; r.h = h; r.fmt = fmt; r.bpr = bpr;
     r.flags = (uint8_t)((vram ? NVT_F_VRAM : 0u) | (current ? NVT_F_CURRENT : 0u)); r.a0 = why;
+    nvt_emit(&r, NVT_RING_MAIN);
+}
+
+/* A render encoder's encode time split by where it went (card run 2026-10-25c: WindowServer's per-draw cost was
+ * unexplained). One record per encoder that drew, at its endEncoding; the accumulators are plain adds around the three
+ * suspects (NVMTLTrace.m nvmtl_split_*), so a draw costs two clock reads per bucket with the trace on and a load and a
+ * branch with it off. Fields: id = command buffer; seed0 = the traced pass id (0: the pass writes no IOSurface);
+ * dur_us = encoder begin -> endEncoding (includes the app's own time between calls); rc = pipeline-state variants built
+ * while drawing (sampler specialisation: a compile on the draw); a0 draws; a1 pipeline lookup us (sampler-variant key,
+ * dictionary lookup, bind pipeline); a2 descriptor writes us (embedded argument tables + the descriptor set of the draw);
+ * n.a3 surface-in checks us (CPU->GPU IOSurface pixels, incl. the uploads) over n.a4 calls; n.a5 / n.a6 the slowest
+ * single draw's pipeline lookup / descriptor writes in us. Old decoders show it as "kind 17". */
+static inline void nvt_ev_enc_split(uint32_t cb, uint32_t pass, uint32_t draws, uint32_t builds, uint32_t total_us,
+                                    uint32_t pipe_us, uint32_t desc_us, uint32_t sin_us, uint32_t sin_calls,
+                                    uint32_t pipe_max_us, uint32_t desc_max_us)
+{
+    if (!nvt_on()) return;
+    nvt_rec r; nvt_rec_init(&r, NVT_K_ENC_SPLIT);
+    r.path = 1; r.id = cb; r.seed0 = pass; r.dur_us = total_us; r.rc = (int32_t)builds;
+    r.a0 = draws; r.a1 = pipe_us; r.a2 = desc_us;
+    r.u.n.a3 = sin_us; r.u.n.a4 = sin_calls; r.u.n.a5 = pipe_max_us; r.u.n.a6 = desc_max_us;
     nvt_emit(&r, NVT_RING_MAIN);
 }
 

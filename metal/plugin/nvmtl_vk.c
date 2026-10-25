@@ -28,6 +28,39 @@ void nvlog(const char *fmt, ...);
 
 static __thread uint32_t g_copy_aspect_override, g_copy_bpp_override;
 void nvmtl_vk_copy_aspect_override(uint32_t aspect, uint32_t bpp) { g_copy_aspect_override = aspect; g_copy_bpp_override = bpp; }
+#include "nvmtl_copy_pack.h"
+/* A blit copy that is recorded for the first time in this shape is logged before and after the Vulkan call (card run
+ * 2026-10-25c: Chess died right after such a copy and the log could not say whether it was inside the call). The
+ * shape is the image's format, samples, type, the aspect and element size and the region; the first 8 shapes. */
+static int nvmtl_copy_shape_first(uint64_t key)
+{
+    static _Atomic uint64_t seen[8]; static _Atomic unsigned n;
+    for (unsigned i = 0, m = atomic_load(&n); i < m && i < 8; i++) if (atomic_load(&seen[i]) == key) return 0;
+    unsigned at = atomic_fetch_add(&n, 1);
+    if (at >= 8) return 0;
+    atomic_store(&seen[at], key);
+    return 1;
+}
+static uint64_t nvmtl_copy_shape_key(const nvk_image *img, uint32_t aspect, uint32_t bpp, uint32_t w, uint32_t h, int to_buffer)
+{
+    uint64_t k = 1469598103934665603ull;
+    const uint32_t v[] = { img->fmt, img->samples, img->mtl_type, aspect, bpp, w, h, (uint32_t)to_buffer };
+    for (unsigned i = 0; i < sizeof v / sizeof *v; i++) k = (k ^ v[i]) * 1099511628211ull;
+    return k;
+}
+/* what a G14 census of a texture<->buffer copy should say about the image: Vulkan format, samples, the aspect and element
+ * size the copy would use ("-" when it would be refused) */
+void nvmtl_vk_copy_describe(const nvk_image *img, char *out, size_t n)
+{
+    uint32_t aspect = 0, bpp = 0; const char *why = NULL;
+    if (!img) { snprintf(out, n, "no image"); return; }
+    if (nvmtl_cp_resolve(img->fmt, img->samples, img->bpp, g_copy_aspect_override, 0, &aspect, &bpp, &why))
+        snprintf(out, n, "vkfmt %u samples %u type %u layers %u mips %u: REFUSED (%s)", img->fmt, img->samples ? img->samples : 1u,
+                 img->mtl_type, img->layers, img->mips, why);
+    else
+        snprintf(out, n, "vkfmt %u samples %u type %u layers %u mips %u aspect %u bpp %u", img->fmt, img->samples ? img->samples : 1u,
+                 img->mtl_type, img->layers, img->mips, aspect, bpp);
+}
 static VkImageAspectFlags nvmtl_copy_aspect(const nvk_image *img)
 {
     if (g_copy_aspect_override) return (VkImageAspectFlags)g_copy_aspect_override;
@@ -2173,6 +2206,45 @@ static int nvmtl_spirv_bands_ok(const void *p, size_t n, const char *what)
     free(heap);
     return ok;
 }
+
+#include "nvmtl_spirv_fbfetch.h"
+/* [[color(n)]] framebuffer fetch (nvmtl_spirv_fbfetch.h): the set layout has no binding 192..199 and no render pass here has
+ * an input attachment, so a read that is still in the fragment module makes RADV load a descriptor that is not there (card
+ * run 2026-10-25c: WindowServer and Terminal). Logged once per pipeline (first 16, then every 256th) with the numbers that
+ * tell "declared but folded away" from "read"; NVMTL_FBFETCH_ZERO=1 replaces each read by a zero vector, a defined value
+ * for an A/B on the card (random colours / corrupt glyphs gone or not). Default off: the read is left as translated. */
+static _Atomic unsigned g_fbf_modules, g_fbf_declared_only, g_fbf_read, g_fbf_zeroed, g_fbf_zero_failed;
+static int nvmtl_fbfetch_zero_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_FBFETCH_ZERO"); on = e && *e && *e != '0';
+        nvlog("vk: framebuffer fetch ([[color(n)]]) reads %s (NVMTL_FBFETCH_ZERO=%s)",
+              on ? "become a ZERO vector (experiment: a defined value instead of an undefined descriptor)" : "are left as translated (undefined descriptor)", e ? e : "unset"); }
+    return on;
+}
+static void nvmtl_fbfetch_pipeline_note(uint32_t *fcopy, size_t *fwords, const void *orig, uint32_t ncol, uint32_t samples)
+{
+    nvmtl_fbfetch fb; const size_t orig_words = *fwords;
+    if (nvmtl_spirv_fbfetch(fcopy, fwords, orig_words + NVMTL_FBFETCH_GROW, 0, &fb) || !fb.decl_mask) return;
+    unsigned seq = atomic_fetch_add(&g_fbf_modules, 1) + 1;
+    int zeroed = 0;
+    if (!fb.reads) atomic_fetch_add(&g_fbf_declared_only, 1);
+    else {
+        atomic_fetch_add(&g_fbf_read, 1);
+        if (nvmtl_fbfetch_zero_on()) {
+            nvmtl_fbfetch zb; size_t nw = orig_words;
+            if (!nvmtl_spirv_fbfetch(fcopy, &nw, orig_words + NVMTL_FBFETCH_GROW, 1, &zb)) { *fwords = nw; zeroed = 1; atomic_fetch_add(&g_fbf_zeroed, 1); }
+            else { memcpy(fcopy, orig, orig_words * sizeof(uint32_t)); *fwords = orig_words; atomic_fetch_add(&g_fbf_zero_failed, 1); }
+        }
+    }
+    if (seq <= 16 || seq % 256 == 0)
+        nvlog("vk: fbfetch: fragment module #%u declares [[color(n)]] subpass inputs 0x%x (binding 192+n) and %s; pipeline has %u colour attachment(s), %u sample(s); "
+              "the set layout has no such binding and no render pass an input attachment: %s [%u read / %u declared-only / %u zeroed / %u zeroing failed so far]",
+              seq, fb.decl_mask, fb.reads ? "READS them" : "no read is left (folded away)", ncol, samples ? samples : 1u,
+              !fb.reads ? "harmless" : zeroed ? "each read replaced by a zero vector (NVMTL_FBFETCH_ZERO=1)"
+                        : "the read hits an undefined descriptor (NVMTL_FBFETCH_ZERO=1 makes it a defined zero)",
+              atomic_load(&g_fbf_read), atomic_load(&g_fbf_declared_only), atomic_load(&g_fbf_zeroed), atomic_load(&g_fbf_zero_failed));
+}
 static int nvmtl_spirv_bmask(const void *p, size_t n, uint64_t out[4])
 {
     const uint32_t *w = (const uint32_t *)p; size_t nw = n / 4;
@@ -3893,14 +3965,16 @@ static int nvmtl_vk_pipeline_create_impl_lifetime_body(const void *vs, size_t vn
     if (!nvmtl_spirv_ok(vs, vn, "vertex module") || !nvmtl_spirv_ok(fs, fn, "fragment module")) return -1;
     if (!td) out->gmask_ok = (uint32_t)(nvmtl_spirv_bmask(vs, vn, out->gmask[0]) && nvmtl_spirv_bmask(fs, fn, out->gmask[1]));
     VkShaderModuleCreateInfo vsm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, vn, (const uint32_t *)vs };
-    uint32_t *fcopy = (uint32_t *)malloc(fn);
+    uint32_t *fcopy = (uint32_t *)malloc(fn + NVMTL_FBFETCH_GROW * sizeof(uint32_t));
     if (!fcopy) { nvlog("vk: out of memory copying the fragment module"); return -1; }
     memcpy(fcopy, fs, fn);
+    size_t fwords = fn / 4;
+    nvmtl_fbfetch_pipeline_note(fcopy, &fwords, fs, out->ncol ? out->ncol : (out->cfmt ? 1u : 0u), samples);
     if (ensure_descriptors()) { free(fcopy); return -1; }
     if (!g_heapSet && (nvmtl_spirv_uses_set(vs, vn / 4, 2) || nvmtl_spirv_uses_set(fs, fn / 4, 2))) {
         free(fcopy); nvlog("vk: render pipeline REFUSED - a shader indexes the bindless heap (set 2) and this device has none"); return -1; }
     nvmtl_spirv_retarget_set(fcopy, fn / 4, 1);
-    VkShaderModuleCreateInfo fsm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, fn, fcopy };
+    VkShaderModuleCreateInfo fsm = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, fwords * 4, fcopy };
     VkShaderModule vmod = VK_NULL_HANDLE, fmod = VK_NULL_HANDLE, tvm = VK_NULL_HANDLE, tcm = VK_NULL_HANDLE;
     NVMTL_PIPELINE_STAGE(pvkCreateShaderModule(g_dev, &vsm, NULL, &vmod), "vkCreateShaderModule(vertex)");
     NVMTL_PIPELINE_STAGE(pvkCreateShaderModule(g_dev, &fsm, NULL, &fmod), "vkCreateShaderModule(fragment)");
@@ -5993,6 +6067,7 @@ int nvmtl_vk_image_write_region_level(nvk_queue *q, nvk_image *img, const void *
 int nvmtl_vk_image_write_region_level_layer(nvk_queue *q, nvk_image *img, const void *src, size_t row_bytes,
                                       uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
 {
+    if (img->samples > 1) { nvlog("image_write_region: REFUSED - the image has %u samples (a Vulkan image copy needs 1)", img->samples); return -1; }
     if (layer >= (img->layers ? img->layers : 1)) { nvlog("image_write_region: layer %u — this image has %u", layer, img->layers ? img->layers : 1); return -1; }
     { const uint32_t lw = img->w >> level ? img->w >> level : 1, lh = img->h >> level ? img->h >> level : 1;
       if (!w || !h || x + w > lw || y + h > lh) { nvlog("image_write_region: %ux%u at (%u,%u) is outside %ux%u (level %u)", w, h, x, y, lw, lh, level); return -1; } }
@@ -6020,6 +6095,7 @@ int nvmtl_vk_image_read_region_level(nvk_queue *q, nvk_image *img, void *dst, si
 int nvmtl_vk_image_read_region_level_layer(nvk_queue *q, nvk_image *img, void *dst, size_t row_bytes,
                                      uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
 {
+    if (img->samples > 1) { nvlog("image_read_region: REFUSED - the image has %u samples (a Vulkan image copy needs 1)", img->samples); return -1; }
     if (layer >= (img->layers ? img->layers : 1)) { nvlog("image_read_region: layer %u — this image has %u", layer, img->layers ? img->layers : 1); return -1; }
     { const uint32_t lw = img->w >> level ? img->w >> level : 1, lh = img->h >> level ? img->h >> level : 1;
       if (!w || !h || x + w > lw || y + h > lh) { nvlog("image_read_region: %ux%u at (%u,%u) is outside %ux%u (level %u)", w, h, x, y, lw, lh, level); return -1; } }
@@ -6762,23 +6838,42 @@ int nvmtl_vk_cmd_copy_buffer_to_image_layer(nvk_cmdbuf *c, nvk_buffer *b, size_t
 int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b, size_t off, uint32_t row_bytes,
                                   nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
 {
+    if (!c || !img || !img->img || !b || !b->buf) {
+        nvlog("copy_buffer_to_image: REFUSED - %s%s%s", !c ? "no command buffer " : "", !img ? "no image " : !img->img ? "the image has no VkImage " : "",
+              !b ? "no buffer" : !b->buf ? "the buffer has no VkBuffer (not bound yet?)" : "");
+        return -1;
+    }
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_buffer_to_image: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
-    const uint32_t bpp = g_copy_bpp_override ? g_copy_bpp_override : (img->bpp ? img->bpp : 4);
+    uint32_t aspect = 0, bpp = 0; const char *why = NULL;
+    if (nvmtl_cp_resolve(img->fmt, img->samples, img->bpp, g_copy_aspect_override, off, &aspect, &bpp, &why)) {
+        nvlog("copy_buffer_to_image: REFUSED - %s (vk format %u, %u sample(s), type %u, aspect option %u, buffer offset %zu, region %ux%u)",
+              why, img->fmt, img->samples ? img->samples : 1u, img->mtl_type, g_copy_aspect_override, off, w, h);
+        return -1;
+    }
     const uint32_t bw = img->bw ? img->bw : 1, bh = img->bh ? img->bh : 1;
     const uint32_t cols = nvmtl_blocks(w, bw), rows = nvmtl_blocks(h, bh);
     const uint64_t tight = (uint64_t)cols * bpp;
     if (!row_bytes) { if (tight > UINT32_MAX) return -1; row_bytes = (uint32_t)tight; }
     if (bw > 1 && ((x % bw) || (y % bh))) { nvlog("copy: origin (%u,%u) is not block-aligned", x, y); return -1; }
     if (layer >= (img->layers ? img->layers : 1) || !w || !h || x > lw || w > lw-x || y > lh || h > lh-y
-        || row_bytes < tight || row_bytes % bpp || off > b->size || (uint64_t)(rows-1)*row_bytes+tight > b->size-off) return -1;
+        || row_bytes < tight || row_bytes % bpp || off > b->size || (uint64_t)(rows-1)*row_bytes+tight > b->size-off) {
+        nvlog("copy_buffer_to_image: REFUSED - region (%u,%u) %ux%u layer %u of level %u (%ux%u, %u layer(s)) <- row %u B (needs %llu), offset %zu of a %zu B buffer, element %u B",
+              x, y, w, h, layer, level, lw, lh, img->layers ? img->layers : 1, row_bytes, (unsigned long long)tight, off, b->size, bpp);
+        return -1;
+    }
     if (!w || !h || x + w > lw || y + h > lh) { nvlog("copy_buffer_to_image: out of bounds (level %u is %ux%u)", level, lw, lh); return -1; }
+    const int first = nvmtl_copy_shape_first(nvmtl_copy_shape_key(img, aspect, bpp, w, h, 0));
+    if (first) nvlog("copy_buffer_to_image: recording vk format %u %ux%u (level %u of %u, layer %u of %u) %u sample(s) type %u aspect %u element %u B region (%u,%u) %ux%u <- row %u B offset %zu of %zu, image layout %u",
+                     img->fmt, lw, lh, level, img->mips ? img->mips : 1u, layer, img->layers ? img->layers : 1u, img->samples ? img->samples : 1u, img->mtl_type,
+                     aspect, bpp, x, y, w, h, row_bytes, off, b->size, img->layout);
     nvmtl_vk_cmd_barrier(c);
     img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    VkBufferImageCopy bic = { off, row_bytes / bpp * bw, 0, { nvmtl_copy_aspect(img), level, img->mtl_type == 7 ? 0u : layer, 1 },
+    VkBufferImageCopy bic = { off, row_bytes / bpp * bw, 0, { aspect, level, img->mtl_type == 7 ? 0u : layer, 1 },
                               { (int32_t)x, (int32_t)y, img->mtl_type == 7 ? (int32_t)layer : 0 }, { w, h, 1 } };
     pvkCmdCopyBufferToImage(c->cb, (VkBuffer)b->buf, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    if (first) nvlog("copy_buffer_to_image: vkCmdCopyBufferToImage recorded");
     img_to(c, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     nvmtl_vk_cmd_barrier(c);
@@ -6791,23 +6886,46 @@ int nvmtl_vk_cmd_copy_image_to_buffer_layer(nvk_cmdbuf *c, nvk_image *img, uint3
 int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                   nvk_buffer *b, size_t off, uint32_t row_bytes, uint32_t level, uint32_t layer)
 {
+    /* a null VkImage / VkBuffer handle goes straight into RADV, which dereferences it */
+    if (!c || !img || !img->img || !b || !b->buf) {
+        nvlog("copy_image_to_buffer: REFUSED - %s%s%s", !c ? "no command buffer " : "", !img ? "no image " : !img->img ? "the image has no VkImage " : "",
+              !b ? "no buffer" : !b->buf ? "the buffer has no VkBuffer (not bound yet?)" : "");
+        return -1;
+    }
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_image_to_buffer: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
-    const uint32_t bpp = g_copy_bpp_override ? g_copy_bpp_override : (img->bpp ? img->bpp : 4);
+    uint32_t aspect = 0, bpp = 0; const char *why = NULL;
+    /* Vulkan valid usage (nvmtl_copy_pack.h): 1 sample, one aspect the format has, the depth/stencil packing, a buffer offset
+     * that is a multiple of 4 for them. A copy that breaks one is refused here, with the numbers, not handed to RADV. */
+    if (nvmtl_cp_resolve(img->fmt, img->samples, img->bpp, g_copy_aspect_override, off, &aspect, &bpp, &why)) {
+        nvlog("copy_image_to_buffer: REFUSED - %s (vk format %u, %u sample(s), type %u, aspect option %u, buffer offset %zu, region %ux%u)",
+              why, img->fmt, img->samples ? img->samples : 1u, img->mtl_type, g_copy_aspect_override, off, w, h);
+        return -1;
+    }
     const uint32_t bw = img->bw ? img->bw : 1, bh = img->bh ? img->bh : 1;
     const uint32_t cols = nvmtl_blocks(w, bw), rows = nvmtl_blocks(h, bh);
     const uint64_t tight = (uint64_t)cols * bpp;
     if (!row_bytes) { if (tight > UINT32_MAX) return -1; row_bytes = (uint32_t)tight; }
     if (bw > 1 && ((x % bw) || (y % bh))) { nvlog("copy: origin (%u,%u) is not block-aligned", x, y); return -1; }
     if (layer >= (img->layers ? img->layers : 1) || !w || !h || x > lw || w > lw-x || y > lh || h > lh-y
-        || row_bytes < tight || row_bytes % bpp || off > b->size || (uint64_t)(rows-1)*row_bytes+tight > b->size-off) return -1;
+        || row_bytes < tight || row_bytes % bpp || off > b->size || (uint64_t)(rows-1)*row_bytes+tight > b->size-off) {
+        nvlog("copy_image_to_buffer: REFUSED - region (%u,%u) %ux%u layer %u of level %u (%ux%u, %u layer(s)) -> row %u B (needs %llu), offset %zu of a %zu B buffer, element %u B",
+              x, y, w, h, layer, level, lw, lh, img->layers ? img->layers : 1, row_bytes, (unsigned long long)tight, off, b->size, bpp);
+        return -1;
+    }
     if (!w || !h || x + w > lw || y + h > lh) { nvlog("copy_image_to_buffer: out of bounds (level %u is %ux%u)", level, lw, lh); return -1; }
+    const int first = nvmtl_copy_shape_first(nvmtl_copy_shape_key(img, aspect, bpp, w, h, 1));
+    if (first) nvlog("copy_image_to_buffer: recording vk format %u %ux%u (level %u of %u, layer %u of %u) %u sample(s) type %u aspect %u element %u B region (%u,%u) %ux%u -> row %u B offset %zu of %zu, image layout %u",
+                     img->fmt, lw, lh, level, img->mips ? img->mips : 1u, layer, img->layers ? img->layers : 1u, img->samples ? img->samples : 1u, img->mtl_type,
+                     aspect, bpp, x, y, w, h, row_bytes, off, b->size, img->layout);
     nvmtl_vk_cmd_barrier(c);
     img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    VkBufferImageCopy bic = { off, row_bytes / bpp * bw, 0, { nvmtl_copy_aspect(img), level, img->mtl_type == 7 ? 0u : layer, 1 },
+    if (first) nvlog("copy_image_to_buffer: layout transition recorded");
+    VkBufferImageCopy bic = { off, row_bytes / bpp * bw, 0, { aspect, level, img->mtl_type == 7 ? 0u : layer, 1 },
                               { (int32_t)x, (int32_t)y, img->mtl_type == 7 ? (int32_t)layer : 0 }, { w, h, 1 } };
     pvkCmdCopyImageToBuffer(c->cb, (VkImage)img->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, (VkBuffer)b->buf, 1, &bic);
+    if (first) nvlog("copy_image_to_buffer: vkCmdCopyImageToBuffer recorded");
     nvmtl_vk_cmd_barrier(c);
     return 0;
 }

@@ -95,7 +95,7 @@ mode() { python3 -I -B -c 'import os, sys; print(oct(os.stat(sys.argv[1]).st_mod
 $PT "$T/ws/nvmtl" --frames 20 > "$T/ws.txt"
 need "$T/ws.txt" '^WindowServer  pid'
 need "$T/ws.txt" 'WARN ws-uid'
-need "$T/ws.txt" 'events: 86 written, 86 kept'
+need "$T/ws.txt" 'events: 87 written, 87 kept'
 need "$T/ws.txt" 'FAIL never-published surface 103 2560x1440 (shared VRAM): 1 command buffer'
 need "$T/ws.txt" 'FAIL empty-publish   surface 107 2560x1440 (shared VRAM): 1 copy-out(s) published an EMPTY picture although the same command buffer DREW'
 need "$T/ws.txt" 'INFO empty-publish   surface 102 2560x1440 (shared VRAM): 4 of 4 copy-out(s) published an empty picture after a clear-only pass'

@@ -321,6 +321,8 @@ int nvmtl_vk_cmd_copy_image(nvk_cmdbuf *c, nvk_image *src, uint32_t sx, uint32_t
                         nvk_image *dst, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
 
 void nvmtl_vk_copy_aspect_override(uint32_t aspect, uint32_t bpp);
+/* "vkfmt N samples S type T layers L mips M aspect A bpp B" (or "... REFUSED (reason)") for the G14 census of a texture<->buffer copy */
+void nvmtl_vk_copy_describe(const nvk_image *img, char *out, size_t n);
 int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b, size_t off, uint32_t row_bytes, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer);
 int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, nvk_buffer *b, size_t off, uint32_t row_bytes, uint32_t level, uint32_t layer);
 int nvmtl_vk_cmd_copy_buffer_to_image_layer(nvk_cmdbuf *c, nvk_buffer *b, size_t off, uint32_t row_bytes,
