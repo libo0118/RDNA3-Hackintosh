@@ -738,7 +738,18 @@ def describe(tr, r, off, prefix=True):
 def enc_split_fields(r):
     """K_ENC_SPLIT (nvmtl_trace.h nvt_ev_enc_split): the encode time of one render encoder, split. All times in us."""
     return {"cb": r.id, "pass": r.seed0, "draws": r.a0, "builds": r.rc, "total_us": r.dur_us, "pipe_us": r.a1, "desc_us": r.a2,
-            "sin_us": r.words[8], "sin_calls": r.words[9], "pipe_max_us": r.words[10], "desc_max_us": r.words[11]}
+            "sin_us": r.words[8], "sin_calls": r.words[9], "pipe_max_us": r.words[10], "desc_max_us": r.words[11],
+            # N51 (zero in a trace of an older plugin): what the surface-in calls were
+            "bc_up_n": r.words[0], "bc_up_us": r.words[1], "bc_skip_n": r.words[2], "bc_skip_us": r.words[3],
+            "fast_n": r.words[4], "fast_us": r.words[5], "wait_us": r.words[6], "up_n": r.words[7]}
+
+
+def enc_split_kinds(f):
+    """'' for a trace without the N51 fields, else what the surface-in calls were: buffer-texture refreshes (uploaded / skipped), probe hits, uploads, monitor wait"""
+    if not any(f[k] for k in ("bc_up_n", "bc_skip_n", "fast_n", "wait_us", "up_n")):
+        return ""
+    return "buffer-texture refresh %d uploaded %.2fms + %d unchanged %.2fms, %d probe hit(s) %.2fms, %d surface upload(s), monitor wait %.2fms" % (
+        f["bc_up_n"], f["bc_up_us"] / 1000.0, f["bc_skip_n"], f["bc_skip_us"] / 1000.0, f["fast_n"], f["fast_us"] / 1000.0, f["up_n"], f["wait_us"] / 1000.0)
 
 
 def enc_split_line(r):
@@ -748,7 +759,8 @@ def enc_split_line(r):
             "surface-in checks %.2fms (%d call(s)), rest %.2fms%s" % (
                 f["cb"], (" pass %d" % f["pass"]) if f["pass"] else "", f["draws"], f["total_us"] / 1000.0, f["pipe_us"] / 1000.0, f["pipe_max_us"],
                 f["desc_us"] / 1000.0, f["desc_max_us"], f["sin_us"] / 1000.0, f["sin_calls"], other / 1000.0,
-                (", %d pipeline variant(s) built on a draw" % f["builds"]) if f["builds"] else ""))
+                (", %d pipeline variant(s) built on a draw" % f["builds"]) if f["builds"] else "") +
+            ((" [" + enc_split_kinds(f) + "]") if enc_split_kinds(f) else ""))
 
 
 def print_enc_split(tr, out):
@@ -758,13 +770,22 @@ def print_enc_split(tr, out):
         return
     tot = collections.Counter()
     for f in rows:
-        for k in ("draws", "builds", "total_us", "pipe_us", "desc_us", "sin_us", "sin_calls"):
+        for k in ("draws", "builds", "total_us", "pipe_us", "desc_us", "sin_us", "sin_calls", "bc_up_n", "bc_up_us", "bc_skip_n", "bc_skip_us",
+                  "fast_n", "fast_us", "wait_us", "up_n"):
             tot[k] += f[k]
     d = max(tot["draws"], 1)
     out.write("\nencode-time split (%d render encoder(s), %d draw(s)): per draw pipeline lookup %.1fus, descriptor writes %.1fus, surface-in %.1fus "
               "(of %.1fus per draw in the encoders; the rest is the app's own time between calls)%s\n" % (
                   len(rows), tot["draws"], tot["pipe_us"] / d, tot["desc_us"] / d, tot["sin_us"] / d, tot["total_us"] / d,
                   ("; %d pipeline variant(s) built while drawing" % tot["builds"]) if tot["builds"] else ""))
+    kinds = enc_split_kinds(tot)
+    if not kinds:
+        out.write("  (no N51 ENC_SPLIT data: the trace is from a plugin older than DRIVER-PLAN N51, or none of its %d surface-in call(s) was a refresh, a probe hit, an upload or a monitor wait - "
+                  "what the surface-in time was cannot be split)\n" % tot["sin_calls"])
+    if kinds:
+        known = tot["bc_up_us"] + tot["bc_skip_us"] + tot["fast_us"] + tot["wait_us"]
+        out.write("  surface-in calls (%d, %.1fms): %s; the rest of the surface-in time (%.1fms: surface uploads, tag queries, locked skips) is in neither\n" % (
+            tot["sin_calls"], tot["sin_us"] / 1000.0, kinds, max(tot["sin_us"] - known, 0) / 1000.0))
     for f in sorted(rows, key=lambda f: -(f["pipe_us"] + f["desc_us"] + f["sin_us"]))[:3]:
         out.write("  worst encoder: cb %d, %d draw(s), pipeline %.2fms, descriptors %.2fms, surface-in %.2fms (%d call(s)), slowest draw: lookup %.0fus, descriptors %.0fus\n" % (
             f["cb"], f["draws"], f["pipe_us"] / 1000.0, f["desc_us"] / 1000.0, f["sin_us"] / 1000.0, f["sin_calls"], f["pipe_max_us"], f["desc_max_us"]))

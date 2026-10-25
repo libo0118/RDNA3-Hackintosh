@@ -20,6 +20,7 @@ _SWITCHES_NONE = re.compile(r"^vk: ab switches: none set")
 _TOKEN = re.compile(r'(NVMTL_[A-Z0-9_]+)=("(?:[^"\\]|\\.)*")')
 _SUM_AB = re.compile(r"^vk: ab: SUMMARY (.*)$")
 _SUM_MG = re.compile(r"^managed: SUMMARY (.*)$")
+_SUM_SIN = re.compile(r"^vk: surfin: SUMMARY (.*)$")
 _KV = re.compile(r"(\w+)=([\d,]+)")
 _WIT = re.compile(r"^vk: keep witness (\d+) landed only (\d+) us AFTER the flush returned")
 _POOL_OFF = re.compile(r"^vk: pool reuse OFF")
@@ -39,6 +40,13 @@ def _unq(v):
     return v[1:-1].replace('\\"', '"').replace("\\\\", "\\") if v.startswith('"') else None
 
 
+def _seq(kv):
+    try:
+        return int(kv.get("seq", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _kv(text):
     out = {}
     for k, v in _KV.findall(text):
@@ -49,7 +57,7 @@ def _kv(text):
 # the switches NVMTL_PARANOID=1 sets (metal/plugin/NVMTLObjects.m, tests/test_triage_glyphs.py compares the two lists)
 PARANOID_KEYS = ("NVMTL_RADV_DEBUG", "NVMTL_ASYNC_COMMIT", "NVMTL_GSUB_INFLIGHT", "NVMTL_PRESUBMIT_PROLOGUE", "NVMTL_NO_POOL_REUSE", "NVMTL_NO_BUFREUSE",
                  "NVMTL_NO_BUFTEX_RECYCLE", "NVMTL_NO_HEAPTEX_RECYCLE", "NVMTL_NO_HEAPTEX_PLACE", "NVMTL_NO_DIRTYONLY", "NVMTL_ENC78_OFF", "NVMTL_G79_OFF",
-                 "NVMTL_NO_RES2", "NVMTL_NO_PURGE_RECLAIM")
+                 "NVMTL_NO_RES2", "NVMTL_NO_PURGE_RECLAIM", "NVMTL_NO_SURFIN_CACHE")
 
 
 def ab_switch_keys(text):
@@ -76,7 +84,7 @@ def n50_plugin_rows(text=""):
     paranoid, paranoid_off = {}, []
     conf_set, conf_skip = {}, []
     switches, switch_procs, switch_none = {}, set(), set()
-    ab, mg = {}, {}            # key -> newest SUMMARY dict
+    ab, mg, sin = {}, {}, {}   # key -> newest SUMMARY dict
     wit_lines = {}             # key -> (lines, worst) when there is no SUMMARY (an older plugin)
     pool_off = set()
     mg_on = set()
@@ -117,6 +125,13 @@ def n50_plugin_rows(text=""):
         m = _SUM_MG.match(msg)
         if m:
             mg[key] = _kv(m.group(1)); continue
+        m = _SUM_SIN.match(msg)
+        if m:
+            kv = _kv(m.group(1))
+            # a timer tick and the exit line can reach the log out of order: keep the highest seq
+            if key not in sin or _seq(kv) >= _seq(sin[key]):
+                sin[key] = kv
+            continue
         m = _WIT.match(msg)
         if m:
             old = wit_lines.get(key, (0, 0)); wit_lines[key] = (old[0] + 1, max(old[1], int(m.group(2)))); continue
@@ -220,6 +235,49 @@ def n50_plugin_rows(text=""):
             rows.append(("WARN", "managed shadow", "%s: %s" % (key[0], "; ".join(bad))))
         elif snap and d.get("snapped", 0):
             rows.append(("INFO", "managed shadow", "%s: %d upload(s) read a private snapshot" % (key[0], d["snapped"])))
+    # N51: the surface-in cache (docs/AFTER-TESTS.md "Surface-in cost and the cache")
+    for key, d in sorted(sin.items()):
+        calls, fast, br = d.get("calls", 0), d.get("fast", 0), d.get("bufcopy", 0)
+        miss = d.get("miss_unsynced", 0) + d.get("miss_seed", 0) + d.get("miss_gen", 0)
+        refresh_us = d.get("bufcopy_up_us", 0) + d.get("bufcopy_skip_us", 0) + d.get("bufcopy_noshadow_us", 0)
+        tot_us = d.get("sin_us_total", 0)
+        share = ("%.0f %% of the %.1f ms spent in surface-in calls" % (100.0 * refresh_us / tot_us, tot_us / 1000.0)) if tot_us else "no surface-in time recorded"
+        refused = d.get("cimg_refused_size", 0) + d.get("cimg_refused_form", 0) + d.get("cimg_refused_full", 0)
+        txt = ("%s (SUMMARY #%d after %.0f s): %d surface-in call(s) in %.1f ms: %d answered by the probe (%.1f ms), %d missed (%d never synced, %d seed moved, %d generation moved) and took the locked path "
+               "(%d uploads, %d shared-VRAM skips, %d pending-write skips, %d overwrite skips, %d failures), %d buffer-texture repeat(s) in one command buffer; "
+               "%d buffer-texture refresh(es) = %.1f ms = %s: %d uploaded (%.1f ms), %d skipped unchanged (%.1f ms), %d without a shadow (%.1f ms), %d failed, %d dropped by a writer of the image, "
+               "%d skips refused by the image's layout; shadows %.1f KB, %d refused; copy images %d new, %d reused, %d parked, %d evicted, %d refused (size %d, shape %d, pool full %d), pool %s" % (
+                   key[0], d.get("seq", 0), d.get("t_ms", 0) / 1000.0, calls, tot_us / 1000.0, fast, d.get("fast_us", 0) / 1000.0, miss, d.get("miss_unsynced", 0), d.get("miss_seed", 0), d.get("miss_gen", 0),
+                   d.get("locked_upload", 0), d.get("locked_skip_vram", 0), d.get("locked_skip_pending", 0), d.get("locked_skip_overwrite", 0), d.get("locked_fail", 0), d.get("bufcopy_dedup", 0),
+                   br, refresh_us / 1000.0, share, d.get("bufcopy_uploaded", 0), d.get("bufcopy_up_us", 0) / 1000.0, d.get("bufcopy_skipped", 0), d.get("bufcopy_skip_us", 0) / 1000.0,
+                   d.get("bufcopy_noshadow", 0), d.get("bufcopy_noshadow_us", 0) / 1000.0, d.get("bufcopy_failed", 0), d.get("bufcopy_forgotten", 0), d.get("bufcopy_skip_refused_layout", 0),
+                   d.get("shadow_bytes", 0) / 1024.0, d.get("shadow_refused", 0), d.get("cimg_new", 0), d.get("cimg_recycled", 0), d.get("cimg_parked", 0), d.get("cimg_evicted", 0), refused,
+                   d.get("cimg_refused_size", 0), d.get("cimg_refused_form", 0), d.get("cimg_refused_full", 0), "ON" if d.get("cimg_on", 1) else "OFF"))
+        vchk, vbad = d.get("verify_checked", 0), d.get("verify_mismatch", 0)
+        if vbad:
+            rows.append(("FAIL", "surface-in cache", "%s: NVMTL_SURFIN_VERIFY found %d STALE image(s) in %d verified skips: the shadow claimed contents the image did not hold. %s" % (key[0], vbad, vchk, txt)))
+        elif not d.get("cache", 1):
+            rows.append(("WARN", "surface-in cache", "%s: NVMTL_NO_SURFIN_CACHE is set, this run does not show the default plugin. %s" % (key[0], txt)))
+        elif d.get("bufcopy_failed", 0):
+            rows.append(("WARN", "surface-in cache", "%s: %d buffer-texture refresh(es) FAILED (the image keeps its old pixels, the next refresh uploads again). %s" % (key[0], d["bufcopy_failed"], txt)))
+        elif br and d.get("bufcopy_noshadow", 0) * 2 > br:
+            rows.append(("WARN", "surface-in cache", "%s: most buffer-texture refreshes had no shadow (images over 1 MiB or the 32 MiB budget: shadow_refused=%d), so they are uploaded every time. %s" % (
+                key[0], d.get("shadow_refused", 0), txt)))
+        elif d.get("verify", 0) and not vchk:
+            rows.append(("WARN", "surface-in cache", "%s: NVMTL_SURFIN_VERIFY=%d is on and no skip was verified (no refresh was skipped). %s" % (key[0], d["verify"], txt)))
+        else:
+            rows.append(("INFO", "surface-in cache", txt + ("; VERIFY: %d skip(s) read back, 0 stale" % vchk if vchk else "")))
+    for key, d in sorted(sin.items()):
+        rs = d.get("rsample_by_layout")
+        if isinstance(rs, list) and len(rs) == 6 and sum(rs):
+            names = ("UNDEFINED", "GENERAL", "SHADER_READ_ONLY", "TRANSFER_SRC", "TRANSFER_DST", "other")
+            lie = sum(rs) - rs[2]
+            rows.append(("INFO", "sampled layout", "%s: %d render-encoder sample(s) of a texture, %d (%.0f %%) with the image resting in a layout other than the SHADER_READ_ONLY_OPTIMAL the descriptor declares "
+                         "and no transition recorded (%s). The host probe (tests/vk_meta_probe.c LIE=1/2, stock RADV 26.2.5, DCC on and off) shows no wrong pixel for it; the plugin's own Mesa is unchecked: "
+                         "a non-zero count here with the artefacts is the lead to follow" % (key[0], sum(rs), lie, 100.0 * lie / sum(rs), ", ".join("%s %d" % (n, c) for n, c in zip(names, rs) if c))))
+    for key in sorted(switch_procs - set(sin)):
+        lvl = "WARN" if key[0] == "WindowServer" else "INFO"
+        rows.append((lvl, "surface-in cache", "%s logged `vk: ab switches` but no `vk: surfin: SUMMARY`%s" % (key[0], " - WindowServer is never quit gracefully and the plugin prints the totals from a 10 s timer: an older plugin, or no surface-in call at all" if lvl == "WARN" else " (an older plugin, or no surface-in call)")))
     for key in sorted(mg_on - set(mg)):
         rows.append(("INFO", "managed shadow", "%s: the shadow check / snapshot was on and no managed upload was seen (no didModifyRange upload in that process)" % key[0]))
     return rows

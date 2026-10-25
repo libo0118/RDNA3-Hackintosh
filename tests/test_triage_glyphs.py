@@ -203,6 +203,36 @@ check(d["ladder radv"][0][0] == "WARN" and "an app did not start" in d["ladder r
 check(d["ladder sync"][0][0] == "WARN" and "cut off" in d["ladder sync"][0][1], "a cut rung is WARNed, %r" % (d["ladder sync"],))
 check(tg.ladder_log_name("radv-ws") == "41-ladder-radv-ws.log", "log member name")
 
+# N51: the surface-in cache rows
+SIN = ("vk: surfin: SUMMARY seq=7 t_ms=70000 cache=1 cimg_on=1 verify=%d calls=15430 sin_us_total=1000000 fast=9000 fast_us=20000 miss_unsynced=10 miss_seed=400 miss_gen=2 "
+       "locked_upload=466 locked_skip_vram=3 locked_skip_pending=1 locked_skip_overwrite=2 locked_fail=0 bufcopy=5000 bufcopy_dedup=800 bufcopy_uploaded=500 bufcopy_up_us=40000 bufcopy_skipped=4500 "
+       "bufcopy_skip_us=9000 bufcopy_noshadow=0 bufcopy_noshadow_us=0 bufcopy_failed=%d bufcopy_forgotten=3 bufcopy_skip_refused_layout=4 shadow_bytes=100000 shadow_refused=0 "
+       "verify_checked=%d verify_mismatch=%d verify_failed=0 rsample_by_layout=0,16,100,283,0,1 cimg_new=40 cimg_recycled=400 cimg_parked=410 cimg_evicted=5 cimg_refused_size=1 cimg_refused_form=2 cimg_refused_full=3")
+def sin(verify=0, failed=0, checked=0, bad=0): return SIN % (verify, failed, checked, bad)
+r = rows_of(L("WindowServer", 208, "vk: ab switches: none set (no NVMTL_* diagnostic or optimisation switch is in the environment of this process)") + L("WindowServer", 208, sin()))
+t = r["surface-in cache"][0][1]
+check(r["surface-in cache"][0][0] == "INFO" and "9000 answered by the probe" in t and "4500 skipped unchanged" in t and "400 reused" in t, "surfin SUMMARY: INFO with the hit / skip numbers, %r" % r)
+check("5 %" in t and "SUMMARY #7 after 70 s" in t and "4 skips refused by the image's layout" in t and "3 dropped by a writer" in t and "refused (size 1, shape 2, pool full 3)" in t
+      and "shadows 97.7 KB" in t and "800 buffer-texture repeat" in t and "2 overwrite skips" in t, "the refresh share, the seq, forgotten, layout refusals and refusals are printed, %r" % t)
+check(r["sampled layout"][0][0] == "INFO" and "400 render-encoder sample(s)" in r["sampled layout"][0][1] and "300 (75 %)" in r["sampled layout"][0][1] and "TRANSFER_SRC 283" in r["sampled layout"][0][1],
+      "the layout the render samples saw is printed, %r" % r)
+r = rows_of(L("WindowServer", 208, sin(failed=2)))
+check(r["surface-in cache"][0][0] == "WARN" and "FAILED" in r["surface-in cache"][0][1], "a failed refresh is WARNed, %r" % r)
+r = rows_of(L("WindowServer", 208, sin().replace("cache=1", "cache=0")))
+check(r["surface-in cache"][0][0] == "WARN" and "NVMTL_NO_SURFIN_CACHE" in r["surface-in cache"][0][1], "the kill switch is WARNed, %r" % r)
+r = rows_of(L("WindowServer", 208, sin().replace("bufcopy_noshadow=0", "bufcopy_noshadow=4000").replace("shadow_refused=0", "shadow_refused=9")))
+check(r["surface-in cache"][0][0] == "WARN" and "no shadow" in r["surface-in cache"][0][1], "refreshes without a shadow are WARNed, %r" % r)
+r = rows_of(L("WindowServer", 208, sin(verify=50, checked=90, bad=2)))
+check(r["surface-in cache"][0][0] == "FAIL" and "2 STALE" in r["surface-in cache"][0][1], "a verified stale image is a FAIL, %r" % r)
+r = rows_of(L("WindowServer", 208, sin(verify=50, checked=90)))
+check(r["surface-in cache"][0][0] == "INFO" and "90 skip(s) read back, 0 stale" in r["surface-in cache"][0][1], "a clean verify is said, %r" % r)
+r = rows_of(L("WindowServer", 208, sin(verify=50)))
+check(r["surface-in cache"][0][0] == "WARN" and "no skip was verified" in r["surface-in cache"][0][1], "verify on with nothing verified is WARNed, %r" % r)
+r = rows_of(L("Terminal", 907, 'vk: ab switches [1]: NVMTL_NO_SURFIN_CACHE="1"'))
+check(r["surface-in cache"][0][0] == "INFO" and "no `vk: surfin: SUMMARY`" in r["surface-in cache"][0][1], "another process without the SUMMARY is INFO, %r" % r)
+r = rows_of(L("WindowServer", 208, 'vk: ab switches: none set (no NVMTL_* diagnostic or optimisation switch is in the environment of this process)'))
+check(r["surface-in cache"][0][0] == "WARN" and "timer" in r["surface-in cache"][0][1], "WindowServer without the SUMMARY is a WARN, %r" % r)
+
 # the hook in triage_reports.py
 src = open(os.path.join(ROOT, "tools", "triage_reports.py")).read()
 check("from triage_glyphs import n50_plugin_rows" in src and "n50_plugin_rows(" in src, "triage_reports.py calls n50_plugin_rows")

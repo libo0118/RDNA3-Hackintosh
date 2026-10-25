@@ -841,16 +841,20 @@ static inline void nvt_ev_map(uint32_t surf, unsigned plane, uint32_t w, uint32_
  * while drawing (sampler specialisation: a compile on the draw); a0 draws; a1 pipeline lookup us (sampler-variant key,
  * dictionary lookup, bind pipeline); a2 descriptor writes us (embedded argument tables + the descriptor set of the draw);
  * n.a3 surface-in checks us (CPU->GPU IOSurface pixels, incl. the uploads) over n.a4 calls; n.a5 / n.a6 the slowest
- * single draw's pipeline lookup / descriptor writes in us. Old decoders show it as "kind 17". */
+ * single draw's pipeline lookup / descriptor writes in us. N51: n.band[0..7] (unused by this kind before) say what those calls were:
+ * [0] buffer-texture refreshes that uploaded, [1] their us, [2] refreshes skipped (bytes unchanged), [3] their us, [4] calls answered by
+ * the lock-free probe (nothing to upload), [5] their us, [6] us spent waiting for a surface's monitor, [7] surface uploads (their time
+ * is in a3 and in the SURF_IN records). Zero in a trace of an older plugin. Old decoders show it as "kind 17". */
 static inline void nvt_ev_enc_split(uint32_t cb, uint32_t pass, uint32_t draws, uint32_t builds, uint32_t total_us,
                                     uint32_t pipe_us, uint32_t desc_us, uint32_t sin_us, uint32_t sin_calls,
-                                    uint32_t pipe_max_us, uint32_t desc_max_us)
+                                    uint32_t pipe_max_us, uint32_t desc_max_us, const uint32_t *x)
 {
     if (!nvt_on()) return;
     nvt_rec r; nvt_rec_init(&r, NVT_K_ENC_SPLIT);
     r.path = 1; r.id = cb; r.seed0 = pass; r.dur_us = total_us; r.rc = (int32_t)builds;
     r.a0 = draws; r.a1 = pipe_us; r.a2 = desc_us;
     r.u.n.a3 = sin_us; r.u.n.a4 = sin_calls; r.u.n.a5 = pipe_max_us; r.u.n.a6 = desc_max_us;
+    if (x) for (unsigned i = 0; i < NVT_BANDS; i++) r.u.n.band[i] = x[i];
     nvt_emit(&r, NVT_RING_MAIN);
 }
 
