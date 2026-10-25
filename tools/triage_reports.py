@@ -127,7 +127,8 @@ ACCEL_HASH_FILES = ("accel/rdna3-accel.cpp", "accel/Info.plist", "accel/rdna3k_a
                     "common/rdna3_bootargs.h", "common/rdna3_a3_display.h",
                     "common/rdna3_swap_front.h", "common/rdna3_flip_latch.h", "common/rdna3_swap_copy.h",
                     "common/rdna3_trace.h", "common/rdna3_write_gen.h", "common/rdna3_flip_queue.h",
-                    "common/rdna3_vram_park.h", "common/rdna3_surf_pending.h", "common/rdna3_tcall.h")
+                    "common/rdna3_vram_park.h", "common/rdna3_surf_pending.h", "common/rdna3_tcall.h",
+                    "common/rdna3_gpu_util.h")
 
 
 # fb/Makefile's FB_SRC_HASH inputs and agdc/Makefile's AGDC_SRC_HASH inputs
@@ -1018,7 +1019,8 @@ A3_SYSCTL = re.compile(r"^debug\.rdna3accel_(a3display(?:_\w+)?|a3ws(?:_refused)
                        r"foreigntimeout|giveup|iopdrop|fbwaitto|fbwaitfast|freedinflight|home|"
                        r"irqdone|irqlatus|irqlatmax|irqlive|fbwaitv1))?_h\d|"
                        r"swaps_pq_iopunwritten|swaps_pq_donemax|swap_async|iop_queue|iop_wrote|present_init_failed|"
-                       r"perfstats|perf_(?:writes|nocore|nokey|dictfail|setfail)|"
+                       r"perfstats|perf_(?:writes|nocore|nokey|dictfail|setfail|rings|smu|noanswer|util|utilgfx|jobs|flushed|lostns|"
+                       r"gpuns|nosubns|nosub|creditfail)|"
                        r"swaps_gen_(?:aperture|apcached|cf|cfnostamp|evicted|freed|resets)|swap_gen|flipbuf_present|cf_gennewer_h\d|"
                        r"flipbuf(?:_scanout|_presented|_held|_failed|_busy|_unlocked|_emptyheld)?_h\d|"
                        r"flipbuf_(?:nohead|nores|intoff|badptr|busy|unlocked)|"
@@ -2472,6 +2474,44 @@ def present_verdict(c, current=False, args=""):
             if fails["dictfail"] or fails["setfail"]:
                 out.append(("WARN", "GPU utilization updates lost: %d allocation(s) failed, %d refused by setProperty"
                             % (fails["dictfail"], fails["setfail"])))
+        out += gpu_util_verdict(c) if ps else []
+    return out
+
+
+def gpu_util_verdict(c):
+    """[(level, text)] for Activity Monitor's GPU numbers from the rings' busy time (DRIVER-PLAN N49): the
+    accelerator's perf_rings / perf_smu / perf_util* and the per-process GPU time it credited (perf_gpuns) or
+    could not (perf_nosubns: no IOAccelSubmitter2 for the process)"""
+    out = []
+    if c.get("perf_rings") is None:
+        return out   # an accelerator older than N49
+    rings, smu, noans = c.get("perf_rings", 0), c.get("perf_smu", 0), c.get("perf_noanswer", 0)
+    if rings:
+        out.append(("INFO", "GPU utilization from the rings' busy time: %d update(s), last %s %% (GFX %s %%), %s job(s)"
+                    % (rings, c.get("perf_util", "?"), c.get("perf_utilgfx", "?"), c.get("perf_jobs", "?"))))
+    if smu or (noans and not rings):
+        out.append(("WARN", "GPU utilization from the SMU's GFX activity (100 %% at idle on this card, P2) in %d "
+                            "update(s): the core gave no ring busy time %d time(s) (an older core, or no busy "
+                            "accounting: the kernel's 'perfstats: the core did not give' line)" % (smu, noans)))
+    gpu, nosub = c.get("perf_gpuns", 0), c.get("perf_nosubns", 0)
+    if gpu:
+        out.append(("INFO", "%.1f s of GPU time added to the processes' contexts (accumulatedGPUTime: Activity "
+                            "Monitor's %% GPU / GPU Time)" % (gpu / 1e9)))
+    if nosub:
+        out.append(("INFO", "%.1f s of GPU time (%d take(s)) of processes with no IOAccelSubmitter2 under the "
+                            "accelerator: Activity Monitor shows 0 %% GPU for them (DRIVER-PLAN N49 open item; the "
+                            "kernel's 'has no IOAccelSubmitter2' lines name the pids)" % (nosub / 1e9,
+                                                                                         c.get("perf_nosub", 0))))
+    if rings and not gpu and not nosub and c.get("perf_jobs"):
+        out.append(("WARN", "the rings ran %s job(s) but no process got GPU time (perf_gpuns 0, perf_nosubns 0)"
+                    % c.get("perf_jobs")))
+    if c.get("perf_creditfail"):
+        out.append(("WARN", "%d time(s) GPU time NOT credited: no child iterator, or a context without its "
+                            "accumulatedGPUTime number (the kernel's perfstats lines)" % c["perf_creditfail"]))
+    if c.get("perf_flushed") or c.get("perf_lostns"):
+        out.append(("INFO", "busy accounting: %d job(s) flushed with no time (a ring reset / a fence never seen), "
+                            "%.1f ms of GPU time with no process slot" % (c.get("perf_flushed", 0),
+                                                                          c.get("perf_lostns", 0) / 1e6)))
     return out
 
 
@@ -2496,6 +2536,14 @@ SERIAL_PQ = (
      "buffer(s) freed with their flip in flight"),
     ("WARN", r"perfstats: [^\n]*? -- (?:the accelerator's GPU utilization not updated|GPU utilization \d+ % NOT "
              r"published)", "GPU utilization update(s) skipped or lost"),
+    ("WARN", r"perfstats: the core did not give its ring busy time", "GPU utilization from the SMU (100 % at idle, P2):"
+             " no ring busy time from the core (N49)"),
+    ("WARN", r"perfstats: (?:no child iterator|pid \d+'s \S+ has no accumulatedGPUTime number)",
+     "time(s) a process's GPU time was NOT credited (N49)"),
+    ("WARN", r"GPU busy: no memory for the ring busy accounting", "no ring busy accounting in the core (N49)"),
+    ("INFO", r"perfstats: pid \d+ used the GPU [^\n]*? has no IOAccelSubmitter2",
+     "process(es) with GPU time Activity Monitor cannot show: no IOAccelSubmitter2 (N49)"),
+    ("INFO", r"GPU busy: \d+ job\(s\) flushed", "busy accounting line(s): jobs flushed / merged / with no slot (N49)"),
     ("INFO", r"present queue: head \d+: the queued .*? DROPPED: (?!its buffer was freed)",
      "queued present(s) dropped at a display mode change"),
     ("INFO", r"present queue: head \d+: the framebuffer has no rdna3FlipLatchWait", "an older framebuffer: the "

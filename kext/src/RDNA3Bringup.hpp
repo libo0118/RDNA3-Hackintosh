@@ -47,6 +47,7 @@ extern "C" {
 #include "dmub32.h"
 #include "xfer.h"
 #include "rdna3_drm.h"
+#include "rdna3_gpu_busy.h"
 #include "amd_fw.h"
 #include "atom.h"
 #include "vcn40.h"
@@ -118,6 +119,12 @@ public:
     int   fenceWait(uint32_t ip, uint32_t ring, uint64_t seq, uint64_t absNs,
                     bool *capHit = nullptr);
     int   recoverHang(uint32_t ip, uint32_t ring, uint64_t seq) { return recover(ip, ring, seq); }
+    /* DRIVER-PLAN N49: the kernel rings' busy time and the GPU time per
+     * process (common/rdna3_gpu_busy.h, amdgpu_ctx_fence_time's model) for
+     * Activity Monitor. busyTake: the fences read, stale jobs flushed, the
+     * totals and the processes' time since the last take (any context; it
+     * takes only fBusyLock, a spinlock) */
+    uint32_t busyTake(rd3_busy_snap *s, rd3_busy_take_ent *out, uint32_t max);
 
     /* MSI: called on the work loop for every interrupt */
     void  handleInterrupt();
@@ -298,6 +305,13 @@ private:
     bool             fPmExpWanted = false; /* rdna3pmexp=1 */
     bool             fIdleCapWanted = false, fIdleCapped = false;   /* rdna3idlecap=1 */
     uint64_t         fLastSubmit = 0;      /* mach_absolute_time */
+    rd3_busy        *fBusy = nullptr;      /* N49, under fBusyLock */
+    IOSimpleLock    *fBusyLock = nullptr;
+    uint64_t         fBusyOdd = 0;         /* flushed + merged + lost at the last take */
+    uint32_t         fBusyLogs = 0;
+    static uint32_t  busyRing(uint32_t ip, uint32_t ring);   /* RD3_BUSY_* or RD3_BUSY_RINGS */
+    void             busySubmit(uint32_t ip, uint32_t ring, uint64_t seq, int32_t pid);
+    void             busyObserve(uint32_t r);                 /* a RD3_BUSY_* ring's fence read */
     uint32_t         fIdleCaps = 0;
     uint32_t         fSmuVersion = 0;      /* smu_cmn_get_smc_version */
     void             idleCapLift();

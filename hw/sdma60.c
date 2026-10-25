@@ -117,6 +117,12 @@ void sdma60_emit_ib(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t vmid, uint64_t va
     sdma60_write(d, r, 0);
 }
 
+/* amdgpu_fence_read: the ring's fence writeback slot, the newest seq done */
+uint32_t sdma60_fence_read(rdna3_dev *d, rdna3_sdma_ring *r)
+{
+    return wb_read32(d, r, RD_SDMA_WB_FENCE);
+}
+
 int sdma60_fence_passed(rdna3_dev *d, rdna3_sdma_ring *r, uint32_t seq)
 {
     return (int32_t)(wb_read32(d, r, RD_SDMA_WB_FENCE) - seq) >= 0;

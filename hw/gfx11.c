@@ -870,7 +870,12 @@ void gfx11_set_eop_interrupt(rdna3_dev *d, rdna3_gfx_ring *r, int enable)
     r->fence_irq = enable;
 }
 
-/* amdgpu_fence_read: the ring's fence writeback slot */
+/* amdgpu_fence_read: the ring's fence writeback slot, the newest seq done */
+uint32_t gfx11_fence_read(rdna3_dev *d, rdna3_gfx_ring *r)
+{
+    return wb_read32(d, r, RD_GFX_WB_FENCE);
+}
+
 int gfx11_fence_passed(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq)
 {
     return (int32_t)(wb_read32(d, r, RD_GFX_WB_FENCE) - seq) >= 0;

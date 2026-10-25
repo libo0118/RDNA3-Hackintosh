@@ -807,6 +807,47 @@ IOReturn RDNA3Accel::platformCopyVram(RD3KCopyRequest *q)
     return r == RDNA3_OK ? kIOReturnSuccess : kIOReturnIOError;
 }
 
+/* DRIVER-PLAN N49: the kernel rings' busy time and the GPU time per process
+ * since the last take, for the accelerator's PerformanceStatistics and its
+ * contexts' accumulatedGPUTime (Activity Monitor) */
+IOReturn RDNA3Accel::platformGpuBusy(RD3KGpuBusy *q)
+{
+    rd3_busy_snap s;
+    rd3_busy_take_ent t[RD3K_GPUBUSY_PIDS];
+    if (!q || q->version != RD3K_GPUBUSY_VERSION)
+        return kIOReturnBadArgument;
+    q->npids = 0;
+    if (!fBringup || !fDrmLock)
+        return kIOReturnNotReady;
+    IOLockLock(fDrmLock);
+    const uint32_t n = fBringup ? fBringup->busyTake(&s, t, RD3K_GPUBUSY_PIDS) : 0;
+    const bool live = fBringup && s.now != 0;
+    IOLockUnlock(fDrmLock);
+    if (!live)
+        return kIOReturnNotReady;   /* no busy accounting (no memory at start): the accelerator logs it */
+    q->nowNs = s.now;
+    q->busyNs = s.any_ns;
+    for (uint32_t r = 0; r < RD3K_GPUBUSY_RINGS && r < RD3_BUSY_RINGS; r++)
+        q->ringNs[r] = s.ring_ns[r];
+    q->jobs = s.jobs;
+    q->merged = s.merged;
+    q->flushed = s.flushed;
+    q->stale = s.stale;
+    q->lostJobs = s.lost_jobs;
+    q->lostNs = s.lost_ns;
+    q->inflight = s.inflight;
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t abs = 0;
+        nanoseconds_to_absolutetime(t[i].last_sub, &abs);
+        q->pids[i].pid = t[i].pid;
+        q->pids[i].jobs = t[i].jobs;
+        q->pids[i].gpuNs = t[i].ns;
+        q->pids[i].lastSubmitAbs = abs;
+    }
+    q->npids = n;
+    return kIOReturnSuccess;
+}
+
 IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p1, void *p2,
                                           void *p3, void *p4)
 {
@@ -891,6 +932,8 @@ IOReturn RDNA3Accel::callPlatformFunction(const OSSymbol *fn, bool wait, void *p
             return platformPageoff((RD3KSurfPageoff *)p1);
         if (fn->isEqualTo(RD3K_COPY_FN))
             return platformCopyVram((RD3KCopyRequest *)p1);
+        if (fn->isEqualTo(RD3K_GPUBUSY_FN))
+            return platformGpuBusy((RD3KGpuBusy *)p1);
     }
     return IOService::callPlatformFunction(fn, wait, p1, p2, p3, p4);
 }

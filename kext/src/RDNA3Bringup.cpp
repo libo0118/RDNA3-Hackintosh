@@ -147,6 +147,20 @@ bool RDNA3Bringup::init(RDNA3Accel *owner, IOPCIDevice *pci, IOMemoryMap *mmio,
     fPlan = (amd_ucode_plan *)IOMalloc(sizeof(*fPlan));
     if (!fLock || !fIhLock || !fDisc || !fDev || !fPsp || !fPlan)
         return false;
+    /* N49: the rings' busy time for Activity Monitor; without it the
+     * accelerator falls back to the SMU's activity (logged there) */
+    fBusy = (rd3_busy *)IOMalloc(sizeof(*fBusy));
+    fBusyLock = IOSimpleLockAlloc();
+    if (fBusy && fBusyLock) {
+        rd3_busy_init(fBusy);
+    } else {
+        BLOG("GPU busy: no memory for the ring busy accounting (%p, lock %p) -- Activity Monitor's GPU numbers "
+             "stay the SMU's", fBusy, fBusyLock);
+        if (fBusy) IOFree(fBusy, sizeof(*fBusy));
+        if (fBusyLock) IOSimpleLockFree(fBusyLock);
+        fBusy = nullptr;
+        fBusyLock = nullptr;
+    }
     memcpy(fDisc, disc, sizeof(*fDisc));
     return true;
 }
@@ -330,6 +344,10 @@ void RDNA3Bringup::stopAndFree()
     if (fLock) IOLockFree(fLock);
     if (fIhLock) IOLockFree(fIhLock);
     fIhLock = nullptr;
+    if (fBusyLock) IOSimpleLockFree(fBusyLock);
+    if (fBusy) IOFree(fBusy, sizeof(*fBusy));
+    fBusyLock = nullptr;
+    fBusy = nullptr;
     fDisc = nullptr; fDev = nullptr; fPsp = nullptr; fPlan = nullptr; fGmc = nullptr; fIh = nullptr; fSdma = nullptr; fGfx = nullptr; fLock = nullptr;
 }
 
@@ -3530,6 +3548,8 @@ int RDNA3Bringup::submit(void *p, uint32_t ip, uint32_t ring, const rdna3_ib *ib
             return r;
     }
     int r = submitRing(v, ip, ring, ibs, n, job, ufMc, seq);
+    if (!r)
+        busySubmit(ip, ring, *seq, (int32_t)v->ownerPid);   /* N49: amdgpu's scheduled timestamp */
     if (!r && ufSlot >= 0) {
         fUfSlot[ufSlot].ip = ip;
         fUfSlot[ufSlot].ring = ring;
@@ -3710,7 +3730,93 @@ static int fenceTraced(uint32_t ip, uint32_t ring, uint64_t seq, int done)
 
 int RDNA3Bringup::fenceSignaled(uint32_t ip, uint32_t ring, uint64_t seq)
 {
-    return fenceTraced(ip, ring, seq, fenceSignaledRaw(ip, ring, seq));
+    const int done = fenceSignaledRaw(ip, ring, seq);
+    if (done)
+        busyObserve(busyRing(ip, ring));   /* N49: a waiter saw the fence: its jobs end now */
+    return fenceTraced(ip, ring, seq, done);
+}
+
+/* ---- DRIVER-PLAN N49: the kernel rings' busy time (rdna3_gpu_busy.h) ---- */
+uint32_t RDNA3Bringup::busyRing(uint32_t ip, uint32_t ring)
+{
+    if (ring != 0)
+        return RD3_BUSY_RINGS;
+    return ip == AMDGPU_HW_IP_GFX ? RD3_BUSY_GFX : ip == AMDGPU_HW_IP_COMPUTE ? RD3_BUSY_COMPUTE
+         : ip == AMDGPU_HW_IP_DMA ? RD3_BUSY_SDMA : RD3_BUSY_RINGS;
+}
+
+static uint64_t busyNowNs()
+{
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+    return ns;
+}
+
+void RDNA3Bringup::busySubmit(uint32_t ip, uint32_t ring, uint64_t seq, int32_t pid)
+{
+    const uint32_t r = busyRing(ip, ring);
+    if (!fBusy || !fBusyLock || r >= RD3_BUSY_RINGS)
+        return;   /* VCN / JPEG: the video engines are not counted (Apple's 'Video' channel) */
+    const uint64_t now = busyNowNs();
+    IOSimpleLockLock(fBusyLock);
+    rd3_busy_submit(fBusy, r, (uint32_t)seq, pid, now);
+    IOSimpleLockUnlock(fBusyLock);
+}
+
+/* amdgpu_fence_process: the ring's fence value read, every job up to it ends
+ * now (the EOP interrupt, a waiter, the accelerator's take) */
+void RDNA3Bringup::busyObserve(uint32_t r)
+{
+    uint32_t seq;
+    if (!fBusy || !fBusyLock || !fDev || r >= RD3_BUSY_RINGS || !fBusy->ring[r].n)
+        return;   /* nothing in flight: no fence read (an unlocked look; the next one catches a race) */
+    if (r == RD3_BUSY_GFX) {
+        if (!fGfx)
+            return;
+        seq = gfx11_fence_read(fDev, fGfx);
+    } else if (r == RD3_BUSY_COMPUTE) {
+        if (!fKcq)
+            return;
+        seq = gfx11_fence_read(fDev, &fKcq->rb);
+    } else {
+        if (!fSdma)
+            return;
+        seq = sdma60_fence_read(fDev, fSdma);
+    }
+    const uint64_t now = busyNowNs();
+    IOSimpleLockLock(fBusyLock);
+    rd3_busy_done(fBusy, r, seq, now);
+    IOSimpleLockUnlock(fBusyLock);
+}
+
+uint32_t RDNA3Bringup::busyTake(rd3_busy_snap *s, rd3_busy_take_ent *out, uint32_t max)
+{
+    uint32_t n, stale;
+    if (!fBusy || !fBusyLock) {
+        bzero(s, sizeof(*s));
+        return 0;
+    }
+    for (uint32_t r = 0; r < RD3_BUSY_RINGS; r++)
+        busyObserve(r);   /* the SDMA fence raises no interrupt: its jobs end here at the latest */
+    const uint64_t now = busyNowNs();
+    IOSimpleLockLock(fBusyLock);
+    stale = rd3_busy_stale(fBusy, now);
+    rd3_busy_totals(fBusy, now, s);
+    n = rd3_busy_take(fBusy, out, max);
+    IOSimpleLockUnlock(fBusyLock);
+    const uint64_t odd = s->flushed + s->merged + s->lost_jobs;
+    bool log = stale != 0;   /* a stale flush always; other changes the first 8, then every 1024th */
+    if (odd != fBusyOdd) {
+        log = log || fBusyLogs < 8 || (fBusyLogs & 1023) == 0;
+        fBusyLogs++;
+        fBusyOdd = odd;
+    }
+    if (log)
+        BLOG("GPU busy: %llu job(s) flushed (%llu stale: no fence for %llu s, %u ring(s) now), %llu merged into a "
+             "full queue, %llu with no process slot (%llu us lost) of %llu",
+             s->flushed, s->stale, RD3_BUSY_STALE_NS / 1000000000ull, stale, s->merged, s->lost_jobs,
+             s->lost_ns / 1000, s->jobs);
+    return n;
 }
 
 int RDNA3Bringup::fenceSignaledRaw(uint32_t ip, uint32_t ring, uint64_t seq)
@@ -4134,6 +4240,9 @@ void RDNA3Bringup::handleInterrupt()
     fIvCount += n;
     IOLockWakeup(fLock, &fFenceEvent, false);
     IOLockUnlock(fLock);
+    /* N49: amdgpu_fence_process's timestamp: the EOP interrupt ends the jobs */
+    for (uint32_t r = 0; r < RD3_BUSY_RINGS; r++)
+        busyObserve(r);
 }
 
 bool RDNA3Bringup::setupInterrupt()

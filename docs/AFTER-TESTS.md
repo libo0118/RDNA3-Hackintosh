@@ -3169,3 +3169,24 @@ thread_call_cancel_wait, waits for the last run however long it takes and logs
 | triage `thread call stop: FAIL <call>: freed from inside its own run` | a free of the thread call from inside its own function (refused, left allocated): a driver bug | move the free to the stop path |
 | triage `thread call stop: WARN ... stopped from inside its own run` / `WARN ... thread_call_free refused` / `INFO ... enter(s) refused during its stop` | a drain inside the call's own run (not waited for; cancel_wait would have panicked), a free racing a run that keeps re-queueing, a kick racing the stop (no run queued) | the call path; harmless unless repeated |
 | triage `thread call stop: INFO no kernel log` | neither 20-log-rdna3.txt nor a serial log | nothing to judge; collect the serial log |
+
+### Activity Monitor's GPU numbers (card runs 2026-10-25c..e, DRIVER-PLAN N49)
+
+Activity Monitor's GPU History reads the accelerator's `PerformanceStatistics`
+/ `Device Utilization %`; its per-process `% GPU` / `GPU Time` columns sum the
+`accumulatedGPUTime` of the `IOAccelSubmitter2` entries (contexts, command
+queues) under the accelerator per `IOUserClientCreator` pid. Since N49 the
+utilisation is the kernel rings' busy time (GFX, compute, SDMA; the SMU's GFX
+activity reads 100 % at idle, P2) and each process's GPU time is added to its
+first IOAccelSubmitter2. `ioreg -l -r -c RDNA3Accelerator | grep -E
+'Utilization|accumulatedGPUTime|IOUserClientCreator'` shows both on the card.
+
+| Seen | Meaning | Action |
+|---|---|---|
+| triage `INFO GPU utilization from the rings' busy time: N update(s), last X % (GFX Y %), J job(s)` | the accelerator published the rings' busy time (`perf_rings`, `perf_util`, `perf_utilgfx`) | compare with what the owner saw in Window > GPU History: near 0 at idle, moving with load |
+| triage `WARN GPU utilization from the SMU's GFX activity (100 % at idle ...)`; kernel `perfstats: the core did not give its ring busy time (0x...: ...)` | the core did not answer `rdna3GpuBusyTake` (`perf_noanswer`): an older core (0xe00002c7), no busy accounting (`RDNA3: GPU busy: no memory ...`) or the GPU not up yet (0xe00002d8, only before the rings) | stale core kext: reinstall; otherwise the core's log at start |
+| triage `INFO N s of GPU time added to the processes' contexts`; kernel `perfstats: GPU time: pid N +X us (J job(s)) into RD32DContext accumulatedGPUTime T` | those processes' time reaches Activity Monitor (`perf_gpuns`) | WindowServer should show % GPU while windows move |
+| triage `INFO N s of GPU time (K take(s)) of processes with no IOAccelSubmitter2`; kernel `perfstats: pid N used the GPU (...) but has no IOAccelSubmitter2 ...` | expected until the Metal plugin opens an IOAccelCommandQueue per device (N49 open item 1): Activity Monitor shows 0 % for those pids (`perf_nosubns`, `perf_nosub`) | the plugin change (metal/); nothing in the kernel |
+| triage `WARN the rings ran N job(s) but no process got GPU time` | jobs seen but no time charged (no completion read, or every slot lost) | `perf_lostns`, `perf_flushed`, the core's `GPU busy:` lines |
+| triage `WARN ... GPU time NOT credited`; kernel `perfstats: no child iterator` / `perfstats: pid N's <class> has no accumulatedGPUTime number` (`perf_creditfail`) | memory pressure, or a family whose submitter no longer publishes the number (a new macOS) | `ioreg` of the accelerator's contexts: are `accumulatedGPUTime` / `lastSubmittedTime` there? |
+| kernel `RDNA3: GPU busy: N job(s) flushed (S stale: no fence for 30 s, R ring(s) now), M merged into a full queue, L with no process slot (U us lost) of J` (triage serial INFO) | flushed: a ring reset (its fence went back) or a fence never seen for 30 s - those jobs get no time; merged: more than 64 jobs in flight on a ring (its time stays exact, the job's goes to the newest one's process); no slot: more than 32 processes with time between two 250 ms takes | flushed with GPU hangs in the log: expected; stale without a hang: the fence read (`gfx11_fence_read` / `sdma60_fence_read`) |

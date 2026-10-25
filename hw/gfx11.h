@@ -247,6 +247,7 @@ void gfx11_emit_gds_switch(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t vmid,
  * me 0 pipe 0); also switches the fences to interrupt-raising */
 void gfx11_set_eop_interrupt(rdna3_dev *d, rdna3_gfx_ring *r, int enable);
 int  gfx11_fence_passed(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq);
+uint32_t gfx11_fence_read(rdna3_dev *d, rdna3_gfx_ring *r);   /* amdgpu_fence_read */
 int  gfx11_wait_fence(rdna3_dev *d, rdna3_gfx_ring *r, uint32_t seq);
 
 /* ---- hang detection and recovery ----

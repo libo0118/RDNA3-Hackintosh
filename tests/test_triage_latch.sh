@@ -265,6 +265,46 @@ grep -q 'FAIL .*head 0: 2 present(s) completed BEFORE their flip was seen latche
 grep -q 'FAIL .*head 0: 1 frame(s) LOST with no newer one' <<<"$o" || fail "pq-bad: lost: $o"
 grep -q 'WARN .*head 0: 1 writer wait(s) ran out' <<<"$o" || fail "pq-bad: wait: $o"
 grep -q 'WARN .*GPU utilization NOT published into PerformanceStatistics (perf_writes 0; 0 without the core, 9 without' <<<"$o" || fail "pq-bad: perf: $o"
+# DRIVER-PLAN N49: the utilization from the rings' busy time, the GPU time credited and not creditable, the SMU
+# fallback of a core without busy accounting
+mk perfn49/rdna3-report-perfn49 "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 120
+perfstats 1
+perf_writes 400
+perf_rings 396
+perf_smu 0
+perf_noanswer 0
+perf_util 23
+perf_utilgfx 17
+perf_jobs 5120
+perf_flushed 0
+perf_lostns 0
+perf_gpuns 4200000000
+perf_nosubns 1500000000
+perf_nosub 12
+perf_creditfail 0"
+o=$(run perfn49)
+has "$o" "GPU utilization from the rings' busy time: 396 update(s), last 23 % (GFX 17 %), 5120 job(s)" perf-n49
+has "$o" "4.2 s of GPU time added to the processes' contexts" perf-n49
+has "$o" "1.5 s of GPU time (12 take(s)) of processes with no IOAccelSubmitter2" perf-n49
+hasnt "$o" "GPU utilization from the SMU" perf-n49
+mk perfsmu/rdna3-report-perfsmu "$ZERO$PQ0
+swaps_h0 120
+swaps_h1 0
+swap_async 1
+swaps_pq_prog_h0 120
+perfstats 1
+perf_writes 40
+perf_rings 0
+perf_smu 40
+perf_noanswer 41
+perf_gpuns 0
+perf_nosubns 0"
+o=$(run perfsmu)
+grep -q "WARN .*GPU utilization from the SMU's GFX activity (100 % at idle on this card, P2) in 40 update(s): the core gave no ring busy time 41 time(s)" <<<"$o" || fail "perf-smu: $o"
 mk pqmissing/rdna3-report-pqmissing "$ZERO
 swaps_h0 120
 swaps_h1 0

@@ -23,6 +23,7 @@
 #include "../common/rdna3_flip_queue.h"
 #include "../common/rdna3_vram_park.h"
 #include "../common/rdna3_surf_pending.h"
+#include "../common/rdna3_gpu_util.h"   // N49: Activity Monitor's GPU numbers
 #include "../common/rdna3_tcall.h"   // thread calls stopped with public KPIs only (macOS 26: card run 2026-10-25b)
 #include <mach/mach_time.h>
 #include <sys/kauth.h>
@@ -5836,24 +5837,71 @@ SYSCTL_INT(_debug, OID_AUTO, rdna3accel_present_init_failed, CTLFLAG_RD | CTLFLA
            "DRIVER-PLAN N38: 1 = the present queue could not be set up at start (no lock or thread call): swap_async "
            "and iop_queue were forced to 0");
 
-/* ---- GPU utilization into the accelerator's PerformanceStatistics (N38) ----
- * Activity Monitor reads the IOAccelerator's PerformanceStatistics; the core
- * (RDNA3Accel) publishes the SMU's activity as "Device Utilization %" on its
- * own service, which no tool reads there. Every 250 ms the accelerator copies
- * it into its own dictionary, read-copy-modify-write: the family keeps its
- * own keys there and replaces the dictionary every 0.25-2 s (NullMoth's
- * temperature key works the same way). An immediate-mode GPU has no
- * separate tiler: the three keys carry the one activity. */
+/* ---- GPU utilization into the accelerator's PerformanceStatistics (N38, N49) ----
+ * Activity Monitor reads the IOAccelerator's PerformanceStatistics ("Device
+ * Utilization %", SafeEjectGPU's getPercentUtilization) and, per process,
+ * the "accumulatedGPUTime" / "lastSubmittedTime" of the IOAccelSubmitter2
+ * entries under the accelerator (common/rdna3_gpu_util.h has the evidence).
+ * Every 250 ms the accelerator takes the core's ring busy time
+ * (RD3K_GPUBUSY_FN, common/rdna3_gpu_busy.h): the utilisation over the last
+ * second goes into its own dictionary, read-copy-modify-write (the family
+ * keeps its own keys there and replaces the dictionary every 0.25-2 s), and
+ * each process's GPU time since the last take is added to its first
+ * IOAccelSubmitter2's accumulatedGPUTime (the family's own OSNumber, the way
+ * IOAccelBlockFence::notifyClient adds to it). Device / GPU Activity: any
+ * kernel ring with work; Renderer / Tiler: the GFX ring (an immediate-mode
+ * GPU has no separate tiler). A core that does not answer (older, no busy
+ * accounting): the core's own Device Utilization % (the SMU's GFX activity,
+ * 100 % at idle on this card, P2) as before N49, counted. */
 static struct thread_call *gPerfCall;
 static IOLock *volatile gPerfLock;      /* gPerfStop, gPerfRunning and the re-arm (ECC review of N38) */
 static bool gPerfStop, gPerfRunning;
 static SInt64 gCntPerfWrites, gCntPerfNoCore, gCntPerfNoKey, gCntPerfDictFail, gCntPerfSetFail;
-static unsigned gPerfLogs, gPerfFailLogs;
+/* N49 */
+static SInt64 gCntPerfRings, gCntPerfSmu, gCntPerfNoAnswer, gCntPerfUtil, gCntPerfUtilGfx, gCntPerfJobs,
+              gCntPerfFlushed, gCntPerfLostNs, gCntPerfGpuNs, gCntPerfNoSubNs, gCntPerfNoSub, gCntPerfCreditFail;
+static unsigned gPerfLogs, gPerfFailLogs, gPerfAnswerLogs, gPerfCreditLogs, gPerfNoSubLogs;
+static struct rd3_util_win gUtilDev, gUtilGfx;
+static struct RD3KGpuBusy gPerfBusy;   /* only the tick uses it (gPerfRunning) */
+static int32_t gPerfNoSubPid[16];      /* the processes already logged with no submitter */
 static const uint32_t kPerfPeriodMs = 250;
-/* one update: the core's Device Utilization % into the accelerator's dictionary */
-static void rd3AccelPerfUpdate(RDNA3Accelerator *a)
+
+/* the values into the accelerator's dictionary */
+static void rd3AccelPerfPublish(RDNA3Accelerator *a, unsigned dev, unsigned gfx, const char *src)
 {
-    IOService *core = rd3AccelCore();
+    if (dev > 100) dev = 100;
+    if (gfx > 100) gfx = 100;
+    OSObject *mo = a->copyProperty("PerformanceStatistics");
+    OSDictionary *cur = OSDynamicCast(OSDictionary, mo);
+    OSDictionary *d = cur ? OSDynamicCast(OSDictionary, cur->copyCollection()) : nullptr;
+    if (!d) d = OSDictionary::withCapacity(4);
+    OSNumber *n = d ? OSNumber::withNumber((unsigned long long)dev, 32) : nullptr;
+    OSNumber *g = d ? OSNumber::withNumber((unsigned long long)gfx, 32) : nullptr;
+    const char *fail = !d ? "no dictionary (allocation failed)" : !n || !g ? "no OSNumber (allocation failed)" : nullptr;
+    if (!fail && !(d->setObject("Device Utilization %", n) && d->setObject("Renderer Utilization %", g) &&
+                   d->setObject("Tiler Utilization %", g) && d->setObject("GPU Activity(%)", n)))
+        fail = "the dictionary refused a key";
+    if (!fail && !a->setProperty("PerformanceStatistics", d))
+        fail = "setProperty(PerformanceStatistics) refused";
+    if (fail) {
+        const SInt64 k = OSAddAtomic64(1, (!d || !n || !g) ? &gCntPerfDictFail : &gCntPerfSetFail);
+        if (rd3_log_due(gPerfFailLogs++, 4, 1023))
+            ALOG("perfstats: %s -- GPU utilization %u %% NOT published (%lld such)", fail, dev, (long long)k + 1);
+    } else {
+        const SInt64 k = OSAddAtomic64(1, &gCntPerfWrites);
+        if (rd3_log_due(gPerfLogs++, 2, 2047))
+            ALOG("perfstats: GPU utilization %u %% (GFX %u %%, %s) into PerformanceStatistics (%s; %lld writes)", dev,
+                 gfx, src, cur ? "the family's keys kept" : "a new dictionary", (long long)k + 1);
+    }
+    if (g) g->release();
+    if (n) n->release();
+    if (d) d->release();
+    if (mo) mo->release();
+}
+
+/* before N49 / a core without busy accounting: the core's Device Utilization % (the SMU's) */
+static void rd3AccelPerfFromCore(RDNA3Accelerator *a, IOService *core)
+{
     OSObject *co = core ? core->copyProperty("PerformanceStatistics") : nullptr;
     OSDictionary *cd = OSDynamicCast(OSDictionary, co);
     OSNumber *un = cd ? OSDynamicCast(OSNumber, cd->getObject("Device Utilization %")) : nullptr;
@@ -5867,33 +5915,116 @@ static void rd3AccelPerfUpdate(RDNA3Accelerator *a)
         if (co) co->release();
         return;
     }
-    unsigned v = un->unsigned32BitValue();
-    if (v > 100) v = 100;
-    OSObject *mo = a->copyProperty("PerformanceStatistics");
-    OSDictionary *cur = OSDynamicCast(OSDictionary, mo);
-    OSDictionary *d = cur ? OSDynamicCast(OSDictionary, cur->copyCollection()) : nullptr;
-    if (!d) d = OSDictionary::withCapacity(4);
-    OSNumber *n = d ? OSNumber::withNumber((unsigned long long)v, 32) : nullptr;
-    const char *fail = !d ? "no dictionary (allocation failed)" : !n ? "no OSNumber (allocation failed)" : nullptr;
-    if (!fail && !(d->setObject("Device Utilization %", n) && d->setObject("Renderer Utilization %", n) &&
-                   d->setObject("Tiler Utilization %", n) && d->setObject("GPU Activity(%)", n)))
-        fail = "the dictionary refused a key";
-    if (!fail && !a->setProperty("PerformanceStatistics", d))
-        fail = "setProperty(PerformanceStatistics) refused";
-    if (fail) {
-        const SInt64 k = OSAddAtomic64(1, (!d || !n) ? &gCntPerfDictFail : &gCntPerfSetFail);
-        if (rd3_log_due(gPerfFailLogs++, 4, 1023))
-            ALOG("perfstats: %s -- GPU utilization %u %% NOT published (%lld such)", fail, v, (long long)k + 1);
-    } else {
-        const SInt64 k = OSAddAtomic64(1, &gCntPerfWrites);
-        if (rd3_log_due(gPerfLogs++, 2, 2047))
-            ALOG("perfstats: GPU utilization %u %% into PerformanceStatistics (%s; %lld writes)", v,
-                 cur ? "the family's keys kept" : "a new dictionary", (long long)k + 1);
-    }
-    if (n) n->release();
-    if (d) d->release();
-    if (mo) mo->release();
+    const unsigned v = un->unsigned32BitValue();
     if (co) co->release();
+    OSAddAtomic64(1, &gCntPerfSmu);
+    rd3AccelPerfPublish(a, v, v, "the SMU's GFX activity");
+}
+
+/* N49: each process's GPU time since the last take into the
+ * accumulatedGPUTime of its first IOAccelSubmitter2 under the accelerator
+ * (the sum per pid is what Activity Monitor shows), its newest submission
+ * into lastSubmittedTime. A process with no IOAccelSubmitter2 (a Metal app
+ * on the plugin opens IOAccelDevice2 / IOAccelSharedUserClient2 and the DRM
+ * bridge only) cannot be shown: counted and logged once per pid. */
+static void rd3AccelPerfCredit(RDNA3Accelerator *a, const struct RD3KGpuBusy *q)
+{
+    bool done[RD3K_GPUBUSY_PIDS] = {};
+    const unsigned np = q->npids < RD3K_GPUBUSY_PIDS ? q->npids : RD3K_GPUBUSY_PIDS;
+    if (!np) return;
+    OSIterator *it = a->getChildIterator(gIOServicePlane);   /* a copy of the child list */
+    if (!it) {
+        const SInt64 k = OSAddAtomic64(1, &gCntPerfCreditFail);
+        if (rd3_log_due((uint64_t)k, 4, 1023))
+            ALOG("perfstats: no child iterator -- %u process(es)' GPU time NOT credited (%lld such)", np, (long long)k + 1);
+        return;
+    }
+    while (OSObject *o = it->getNextObject()) {
+        IORegistryEntry *e = OSDynamicCast(IORegistryEntry, o);
+        if (!e || !e->metaCast("IOAccelSubmitter2")) continue;
+        OSObject *co = e->copyProperty("IOUserClientCreator");
+        OSString *cs = OSDynamicCast(OSString, co);
+        int32_t pid = -1;
+        const bool named = cs && rd3_ucc_pid(cs->getCStringNoCopy(), &pid);
+        if (co) co->release();
+        if (!named) continue;
+        for (unsigned i = 0; i < np; i++) {
+            if (done[i] || q->pids[i].pid != pid) continue;
+            OSObject *ao = e->copyProperty("accumulatedGPUTime");
+            OSObject *lo = e->copyProperty("lastSubmittedTime");
+            OSNumber *an = OSDynamicCast(OSNumber, ao), *ln = OSDynamicCast(OSNumber, lo);
+            uint64_t abs = 0;
+            nanoseconds_to_absolutetime(q->pids[i].gpuNs, &abs);   /* the family's host time: mach units */
+            if (an) {
+                an->addValue((SInt64)abs);
+                OSAddAtomic64((SInt64)q->pids[i].gpuNs, &gCntPerfGpuNs);
+                done[i] = true;
+                if (rd3_log_due(gPerfCreditLogs++, 4, 4095))
+                    ALOG("perfstats: GPU time: pid %d +%llu us (%u job(s)) into %s accumulatedGPUTime %llu",
+                         pid, q->pids[i].gpuNs / 1000, q->pids[i].jobs, e->getMetaClass()->getClassName(),
+                         an->unsigned64BitValue());
+            } else {
+                const SInt64 k = OSAddAtomic64(1, &gCntPerfCreditFail);
+                if (rd3_log_due((uint64_t)k, 4, 1023))
+                    ALOG("perfstats: pid %d's %s has no accumulatedGPUTime number -- not credited (%lld such)", pid,
+                         e->getMetaClass()->getClassName(), (long long)k + 1);
+            }
+            if (an && ln && q->pids[i].lastSubmitAbs > ln->unsigned64BitValue())
+                ln->setValue(q->pids[i].lastSubmitAbs);
+            if (ao) ao->release();
+            if (lo) lo->release();
+            break;
+        }
+    }
+    it->release();
+    for (unsigned i = 0; i < np; i++) {
+        if (done[i] || !q->pids[i].gpuNs) continue;
+        OSAddAtomic64((SInt64)q->pids[i].gpuNs, &gCntPerfNoSubNs);
+        OSAddAtomic64(1, &gCntPerfNoSub);
+        bool seen = false;
+        for (unsigned k = 0; k < sizeof gPerfNoSubPid / sizeof gPerfNoSubPid[0]; k++)
+            if (gPerfNoSubPid[k] == q->pids[i].pid) seen = true;
+        if (seen) continue;
+        gPerfNoSubPid[gPerfNoSubLogs++ % (sizeof gPerfNoSubPid / sizeof gPerfNoSubPid[0])] = q->pids[i].pid;
+        ALOG("perfstats: pid %d used the GPU (%llu us, %u job(s)) but has no IOAccelSubmitter2 (context / command "
+             "queue) under the accelerator -- Activity Monitor shows 0 %% GPU for it", q->pids[i].pid,
+             q->pids[i].gpuNs / 1000, q->pids[i].jobs);
+    }
+}
+
+/* one update: the core's ring busy time (else its SMU value) into the accelerator's dictionary */
+static void rd3AccelPerfUpdate(RDNA3Accelerator *a)
+{
+    IOService *core = rd3AccelCore();
+    const OSSymbol *sym = core ? OSSymbol::withCStringNoCopy(RD3K_GPUBUSY_FN) : nullptr;
+    struct RD3KGpuBusy *q = &gPerfBusy;
+    bzero(q, sizeof(*q));
+    q->version = RD3K_GPUBUSY_VERSION;
+    const IOReturn r = sym ? core->callPlatformFunction(sym, false, q, nullptr, nullptr, nullptr)
+                           : (core ? kIOReturnNoMemory : kIOReturnNotAttached);
+    if (sym) sym->release();
+    if (r != kIOReturnSuccess) {
+        const SInt64 k = OSAddAtomic64(1, &gCntPerfNoAnswer);
+        if (rd3_log_due(gPerfAnswerLogs++, 2, 1023))
+            ALOG("perfstats: the core did not give its ring busy time (0x%x: %s; %lld such) -- the SMU's activity "
+                 "(100 %% at idle on this card, P2) published instead", r,
+                 r == kIOReturnUnsupported ? "an older core" : r == kIOReturnNotReady ? "no busy accounting / no GPU yet"
+                 : r == kIOReturnNotAttached ? "no core" : "refused", (long long)k + 1);
+        rd3AccelPerfFromCore(a, core);
+        return;
+    }
+    int vd = 0, vg = 0;
+    const unsigned dev = rd3_util_feed(&gUtilDev, q->busyNs, q->nowNs, &vd);
+    const unsigned gfx = rd3_util_feed(&gUtilGfx, q->ringNs[0], q->nowNs, &vg);
+    gCntPerfJobs = (SInt64)q->jobs;
+    gCntPerfFlushed = (SInt64)q->flushed;
+    gCntPerfLostNs = (SInt64)q->lostNs;
+    rd3AccelPerfCredit(a, q);
+    if (!vd || !vg) return;   /* the first take (or the core's totals went back): the window starts */
+    gCntPerfUtil = dev;
+    gCntPerfUtilGfx = gfx;
+    OSAddAtomic64(1, &gCntPerfRings);
+    rd3AccelPerfPublish(a, dev, gfx, "the rings' busy time");
 }
 static void rd3AccelPerfTick(void *, void *)
 {
@@ -5957,6 +6088,18 @@ RD3ACCEL_CNT(rdna3accel_perf_nocore, gCntPerfNoCore, "N38: updates skipped: no c
 RD3ACCEL_CNT(rdna3accel_perf_nokey, gCntPerfNoKey, "N38: updates skipped: the core published no Device Utilization %");
 RD3ACCEL_CNT(rdna3accel_perf_dictfail, gCntPerfDictFail, "N38: updates lost: the dictionary or OSNumber allocation failed");
 RD3ACCEL_CNT(rdna3accel_perf_setfail, gCntPerfSetFail, "N38: updates lost: a key or setProperty(PerformanceStatistics) refused");
+RD3ACCEL_CNT(rdna3accel_perf_rings, gCntPerfRings, "N49: updates from the core's ring busy time");
+RD3ACCEL_CNT(rdna3accel_perf_smu, gCntPerfSmu, "N49: updates from the SMU's GFX activity (the core gave no ring busy time)");
+RD3ACCEL_CNT(rdna3accel_perf_noanswer, gCntPerfNoAnswer, "N49: takes the core did not answer (older core, no busy accounting)");
+RD3ACCEL_CNT(rdna3accel_perf_util, gCntPerfUtil, "N49: the last Device Utilization % from the rings (any ring with work, 1 s)");
+RD3ACCEL_CNT(rdna3accel_perf_utilgfx, gCntPerfUtilGfx, "N49: the last Renderer Utilization % (the GFX ring, 1 s)");
+RD3ACCEL_CNT(rdna3accel_perf_jobs, gCntPerfJobs, "N49: jobs the core's busy accounting saw (total)");
+RD3ACCEL_CNT(rdna3accel_perf_flushed, gCntPerfFlushed, "N49: jobs flushed with no time (a ring reset or a fence never seen)");
+RD3ACCEL_CNT(rdna3accel_perf_lostns, gCntPerfLostNs, "N49: GPU time (ns) of processes the core had no slot for");
+RD3ACCEL_CNT(rdna3accel_perf_gpuns, gCntPerfGpuNs, "N49: GPU time (ns) added to the processes' IOAccelSubmitter2 accumulatedGPUTime");
+RD3ACCEL_CNT(rdna3accel_perf_nosubns, gCntPerfNoSubNs, "N49: GPU time (ns) of processes with no IOAccelSubmitter2 (Activity Monitor shows 0 %)");
+RD3ACCEL_CNT(rdna3accel_perf_nosub, gCntPerfNoSub, "N49: takes of a process with GPU time and no IOAccelSubmitter2");
+RD3ACCEL_CNT(rdna3accel_perf_creditfail, gCntPerfCreditFail, "N49: GPU time not credited: no child iterator, or the submitter has no accumulatedGPUTime");
 
 static void rd3AccelInstallSysctlPq(void)
 {
@@ -5988,6 +6131,13 @@ static void rd3AccelInstallSysctlPq(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_perf_nokey);
     sysctl_register_oid(&sysctl__debug_rdna3accel_perf_dictfail);
     sysctl_register_oid(&sysctl__debug_rdna3accel_perf_setfail);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_perf_rings); sysctl_register_oid(&sysctl__debug_rdna3accel_perf_smu);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_perf_noanswer); sysctl_register_oid(&sysctl__debug_rdna3accel_perf_util);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_perf_utilgfx); sysctl_register_oid(&sysctl__debug_rdna3accel_perf_jobs);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_perf_flushed); sysctl_register_oid(&sysctl__debug_rdna3accel_perf_lostns);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_perf_gpuns); sysctl_register_oid(&sysctl__debug_rdna3accel_perf_nosubns);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_perf_nosub);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_perf_creditfail);
 }
 
 
