@@ -86,9 +86,11 @@ dmg2img -i BaseSystem.dmg BaseSystem.img
 
 ## Step C. Driver package (once and after every new version)
 
-1. Open [GitHub → Actions](https://github.com/Voten641/RDNA3-Hackintosh/actions).
-   Go to the latest green **build** run on the `stage1-kext` branch and
-   download the **RDNA3Accel-kext** artifact (a `.zip` file).
+1. Open [Forgejo → Actions](https://forgejo.voten.me/Voten641/RDNA3-Hackintosh/actions)
+   (CI runs only there; GitHub just mirrors the code). Go to the latest
+   green **build** run on the `stage1-kext` branch and download the
+   **RDNA3Accel-kext** artifact (a `.zip` file). `rdna3vm update` does
+   this for you (see "New driver version").
 2. Run:
 
 ```sh
@@ -841,9 +843,19 @@ prints PASS / FAIL per step. What happens with the reports next is in
 
 `rdna3vm update` does steps 1-2 in one go: `git pull` in the checkout, the
 newest successful CI build's artifact over `~/Downloads/RDNA3Accel-kext.zip`,
-then `prepare`. It needs GitHub access once: `gh auth login` (GitHub CLI), or
-a token with *Actions: read* for the repository in
-`~/.config/rdna3vm/github-token`. When the build of the pulled commit is
+then `prepare`. The builds come from the owner's Forgejo
+(`https://forgejo.voten.me`, repository `Voten641/RDNA3-Hackintosh`); the
+repository is public, so no login is needed. A token is used when there is one
+(`FORGEJO_TOKEN` in the environment, else the first line of
+`~/.config/rdna3vm/forgejo-token`, else `FORGEJO_TOKEN=...` in the checkout's
+git-ignored `.env`); it may only contain letters, digits, `_` and `-`, goes
+only to an `https://` Forgejo and only as a request header, and when the
+server refuses it (401) `rdna3vm` says which source it came from and asks
+again without it. The three config keys (in `~/rdna3-vm/config`, or the
+environment) are optional: `CI_FORGE=forgejo` (default) or `github` for the
+old GitHub Actions setup (`gh auth login`, or a token with *Actions: read*
+in `~/.config/rdna3vm/github-token`), `FORGEJO_URL`, `FORGEJO_REPO`. The same
+holds for `rdna3vm cts` (the `rdna3-cts` artifact). When the build of the pulled commit is
 still running, `update` shows its jobs live (each job's current step and
 time, refreshed every 15 s) and carries on by itself once its `kext` job
 (the artifact) finished, without waiting for the longer RADV/Metal jobs; a

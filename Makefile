@@ -211,6 +211,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	tests/test_bisect_step.sh
 	tests/test_play_step.sh
 	tests/test_approve_gate.sh
+	tests/test_forgejo_update.sh
 	tests/test_triage_stale_kexts.sh
 	tests/test_vm_present_ab.sh
 	tests/test_triage_present.sh
