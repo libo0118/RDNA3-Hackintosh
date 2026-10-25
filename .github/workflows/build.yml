@@ -156,8 +156,11 @@ jobs:
       # doUnmap through RDNA3BoMemory's vtable, DRIVER-PLAN N47): reported,
       # not yet a build failure
       - name: KPI guard for the core (advisory)
-        continue-on-error: true
-        run: python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Accel.kext
+        run: |
+          # a warning, not a red step: the known gap (doMap / doUnmap) stays
+          # visible in the log and the job's annotations
+          python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Accel.kext ||
+            echo "::warning::RDNA3Accel.kext would not link through kmutil (DRIVER-PLAN N47 (b)); OpenCore injects it, so it still loads"
       - name: Userspace (libdrm_xnu, rdna3_drminfo, rdna3_modetest, rdna3_pmctl)
         run: make -C userspace
       - name: rdna3_vktest + mtlprobe (bundled into the VM's report bin)
