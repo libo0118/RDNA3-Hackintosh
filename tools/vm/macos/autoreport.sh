@@ -1161,7 +1161,7 @@ ladder_look_hires() {   # ladder_look_hires NAME: the 1280-wide look (small text
 }
 ladder_log_slice() {   # ladder_log_slice RUNG START_EPOCH "<pids>": the plugin's log lines of those processes since the rung began
     _ls_start=$(date -r "$2" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -d "@$2" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
-    _ls_pred='eventMessage CONTAINS "NVMTL" AND ('
+    _ls_pred='(eventMessage CONTAINS "NVMTL" OR eventMessage CONTAINS "NullMoth:") AND ('
     _ls_or=
     for _lp in $3; do _ls_pred="$_ls_pred${_ls_or}processID == $_lp"; _ls_or=" OR "; done
     _ls_pred="$_ls_pred)"

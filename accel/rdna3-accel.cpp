@@ -5864,6 +5864,12 @@ static SInt64 gCntPerfRings, gCntPerfSmu, gCntPerfNoAnswer, gCntPerfUtil, gCntPe
 static SInt64 gCntPerfStale, gCntPerfMerged, gCntPerfLostJobs, gCntPerfInflight, gCntPerfCappedNs, gCntPerfRingNs[3],
               gCntPerfUnc[RD3K_GPUBUSY_UNC], gCntPerfSdmaEnd[RD3K_GPUBUSY_BY], gCntPerfWinReset,
               gCntPerfSubmitters, gCntPerfUccBad, gCntPerfNoLast;
+/* N49 open item 1: the IOAccelCommandQueues among them (the Metal plugin opens one per process) */
+static SInt64 gCntPerfCmdQueues;
+/* ECC round 1 of item 1: a submitter that has no accumulatedGPUTime yet is one not started (an IOAccelCommandQueue
+ * between IOServiceOpen and IOConnectAddClient: IOAccelSubmitter2::start creates the number): a transient miss,
+ * counted apart from a lasting creditfail, its time apart from perf_nosubns */
+static SInt64 gCntPerfCreditWait, gCntPerfPendingNs;
 static SInt64 gCntPerfLastRet = 1;   /* the core's last answer to the take (1: none yet) */
 static unsigned gPerfLogs, gPerfFailLogs, gPerfAnswerLogs, gPerfCreditLogs, gPerfNoSubLogs, gPerfWalkLogs;
 static struct rd3_util_win gUtilDev, gUtilGfx;
@@ -5939,7 +5945,8 @@ static void rd3AccelPerfFromCore(RDNA3Accelerator *a, IOService *core)
 struct rd3PerfWalk {
     const struct RD3KGpuBusy *q;
     bool done[RD3K_GPUBUSY_PIDS];
-    unsigned np, submitters, uccbad;
+    bool pending[RD3K_GPUBUSY_PIDS];   /* a submitter of the pid not started yet */
+    unsigned np, submitters, uccbad, cmdqueues;
 };
 static void rd3AccelPerfCreditOne(struct rd3PerfWalk *w, IORegistryEntry *e)
 {
@@ -5984,6 +5991,13 @@ static void rd3AccelPerfCreditOne(struct rd3PerfWalk *w, IORegistryEntry *e)
                                                                        : "no lastSubmittedTime")
                                                                  : "lastSubmittedTime is not 64 bits", (long long)k + 1);
             }
+        } else if (!ao) {   /* not started yet (no number at all): only the time after its start is credited (later takes); this take's is lost */
+            w->pending[i] = true;
+            const SInt64 k = OSAddAtomic64(1, &gCntPerfCreditWait);
+            if (rd3_log_due((uint64_t)k, 4, 1023))
+                ALOG("perfstats: pid %d's %s has no accumulatedGPUTime yet (not started: opened, not yet connected) -- "
+                     "this take's %llu us are lost (perf_pendingns), later takes credit it once started (%lld such)", pid, e->getMetaClass()->getClassName(),
+                     pp->gpuNs / 1000, (long long)k + 1);
         } else {
             const SInt64 k = OSAddAtomic64(1, &gCntPerfCreditFail);
             if (rd3_log_due((uint64_t)k, 4, 1023))
@@ -6010,8 +6024,10 @@ static void rd3AccelPerfWalk(struct rd3PerfWalk *w, IORegistryEntry *at, unsigne
     while (OSObject *o = it->getNextObject()) {
         IORegistryEntry *e = OSDynamicCast(IORegistryEntry, o);
         if (!e) continue;
-        if (e->metaCast("IOAccelSubmitter2"))
+        if (e->metaCast("IOAccelSubmitter2")) {
+            if (e->metaCast("IOAccelCommandQueue")) w->cmdqueues++;
             rd3AccelPerfCreditOne(w, e);
+        }
         else if (depth + 1 < kPerfWalkDepth)
             rd3AccelPerfWalk(w, e, depth + 1);
     }
@@ -6026,9 +6042,14 @@ static void rd3AccelPerfCredit(RDNA3Accelerator *a, const struct RD3KGpuBusy *q)
     if (!w.np) return;
     rd3AccelPerfWalk(&w, a, 0);
     gCntPerfSubmitters = (SInt64)w.submitters;
+    gCntPerfCmdQueues = (SInt64)w.cmdqueues;
     for (unsigned i = 0; i < w.np; i++) {
         const struct RD3KGpuBusyPid *pp = &q->pids[i];
         if (w.done[i] || !pp->gpuNs) continue;
+        if (w.pending[i]) {   /* its only submitters are not started yet: counted apart, no 'has no submitter' line */
+            OSAddAtomic64((SInt64)pp->gpuNs, &gCntPerfPendingNs);
+            continue;
+        }
         OSAddAtomic64((SInt64)pp->gpuNs, &gCntPerfNoSubNs);
         OSAddAtomic64(1, &gCntPerfNoSub);
         bool seen = false;
@@ -6040,7 +6061,8 @@ static void rd3AccelPerfCredit(RDNA3Accelerator *a, const struct RD3KGpuBusy *q)
         if (n >= kPerfNoSubLogMax && (n & 1023)) continue;
         ALOG("perfstats: pid %d used the GPU (%llu us, %u job(s)) but has no IOAccelSubmitter2 (context / command "
              "queue) under the accelerator -- Activity Monitor shows 0 %% GPU for it (the walk saw %u submitter(s), "
-             "%u without a readable pid)", pp->pid, pp->gpuNs / 1000, pp->jobs, w.submitters, w.uccbad);
+             "%u of them command queues, %u without a readable pid; the plugin's 'GPU time queue:' line of that pid "
+             "says why it has none)", pp->pid, pp->gpuNs / 1000, pp->jobs, w.submitters, w.cmdqueues, w.uccbad);
     }
 }
 
@@ -6202,6 +6224,9 @@ RD3ACCEL_CNT(rdna3accel_perf_lastret, gCntPerfLastRet, "N49: the core's last ans
 RD3ACCEL_CNT(rdna3accel_perf_winreset, gCntPerfWinReset, "N49: takes not published: the first one, or the core's totals went back");
 RD3ACCEL_CNT(rdna3accel_perf_submitters, gCntPerfSubmitters, "N49: IOAccelSubmitter2 entries the last credit walk saw");
 RD3ACCEL_CNT(rdna3accel_perf_uccbad, gCntPerfUccBad, "N49: IOAccelSubmitter2 entries with no readable IOUserClientCreator pid");
+RD3ACCEL_CNT(rdna3accel_perf_cmdqueues, gCntPerfCmdQueues, "N49: IOAccelCommandQueue entries the last credit walk saw (the Metal plugin opens one per process)");
+RD3ACCEL_CNT(rdna3accel_perf_creditwait, gCntPerfCreditWait, "N49: credits missed because the pid's submitter was not started yet (no accumulatedGPUTime: a transient miss)");
+RD3ACCEL_CNT(rdna3accel_perf_pendingns, gCntPerfPendingNs, "N49: GPU time (ns) of processes whose only submitters were not started yet at the take");
 RD3ACCEL_CNT(rdna3accel_perf_nolast, gCntPerfNoLast, "N49: credited submitters without a 64-bit lastSubmittedTime");
 RD3ACCEL_CNT(rdna3accel_perf_creditfail, gCntPerfCreditFail, "N49: GPU time not credited: no child iterator, or the submitter has no accumulatedGPUTime");
 
@@ -6264,6 +6289,9 @@ static void rd3AccelInstallSysctlPq(void)
     sysctl_register_oid(&sysctl__debug_rdna3accel_perf_winreset);
     sysctl_register_oid(&sysctl__debug_rdna3accel_perf_submitters);
     sysctl_register_oid(&sysctl__debug_rdna3accel_perf_uccbad);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_perf_cmdqueues);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_perf_creditwait);
+    sysctl_register_oid(&sysctl__debug_rdna3accel_perf_pendingns);
     sysctl_register_oid(&sysctl__debug_rdna3accel_perf_nolast);
 }
 
