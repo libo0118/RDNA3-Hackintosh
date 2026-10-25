@@ -3392,7 +3392,9 @@ def no_card_boot(path):
     driver and lost the card is a real failure and is not demoted. Card run 2026-10-25c:
     rdna3-report-default-profile-20261025-023935 (the VM's default profile: no card)"""
     pci = read_tar_member(path, "04-pci.txt")
-    if "vendor-id" not in pci:
+    # only a complete device list counts (collect.sh's AMD section and the ioreg run's exit line): an ioreg
+    # killed at the time limit before it reached the card must not demote a real card report
+    if "vendor-id" not in pci or "== AMD devices" not in pci:
         return None
     for blk in re.split(r"(?m)^[ |]*\+-o ", pci):
         v = re.search(r'"vendor-id" = <([0-9a-fA-F]{8})>', blk)
@@ -5261,11 +5263,15 @@ def main():
             one_report(p)
             continue
         # a boot without the card: its rows are printed as INFO and it does not fail the run
-        before, buf = failed, io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            one_report(p)
-        failed = before
-        sys.stdout.write(demote_nocard(buf.getvalue()))
+        before, stale_before, buf = failed, STALE_KEXTS_SHOWN, io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                one_report(p)
+        finally:
+            # the rows printed before an exception are not lost; a no-card report neither fails the run nor
+            # uses up the one STALE KEXTS FAIL a later real report must still print
+            failed, STALE_KEXTS_SHOWN = before, stale_before
+            sys.stdout.write(demote_nocard(buf.getvalue()))
     serials = sorted(glob.glob(os.path.join(d, "serial-*.log")), key=os.path.getmtime)
     hosts = sorted(glob.glob(os.path.join(d, "host-*.log")), key=os.path.getmtime)
     for s in serials:
