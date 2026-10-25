@@ -2661,6 +2661,10 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
     nvmtl_bind_embedded(_cb, NVMTL_SET_FRAGMENT, (NVMTLFunction *)_ps->_descriptor.fragmentFunction, _fbufAt);
     nvmtl_vk_cmd_bind_set(&_cb->_c,&selected->_p);
     nvmtl_split_add(sp_desc, &g_split.desc, &g_split.desc_max);
+    if (_cb->_c.nobind) {   /* no descriptor set, or a framebuffer-fetch draw that cannot read its input: the vk layer drops the draw; say so in the trace */
+        nvtrace("DRAW NOT DRAWN: bind_set refused it (nobind; vs %s | fs %s) - see the vk: fbfetch / descriptor lines", _ps ? _ps->_vname.UTF8String : "-", _ps ? _ps->_fname.UTF8String : "-");
+        return NO;
+    }
     return YES;
 }
 /* Framebuffer fetch ([[color(n)]]): the pass was begun by the first pipeline of the encoder, so it carries input attachments only for what THAT
@@ -2675,10 +2679,10 @@ static NSDictionary *nvmtl_pixel_sampler_norm(NSDictionary *m) {
     const BOOL vis = _visActive; const NSUInteger visOffset = _visOffset;
     if (vis) [self nvmtlCloseVisibility];
     nvmtl_vk_cmd_end_render(&_cb->_c);
-    const uint32_t keepLoad = _pass.load;
+    /* LOAD stays for good: the pass already drew, so any later re-begin (after a failure here, the mesh stage) must keep the contents,
+     * not repeat the first begin's clear actions */
     _pass.load = NVMTL_LOAD_ALL; _pass.fbin |= had | p->fbread;
     const int rc = nvmtl_vk_cmd_begin_pass(&_cb->_c, &_pass, p);
-    _pass.load = keepLoad;
     if (rc) {
         _begun = NO;
         nvlog("fbfetch: the render pass could not be RESTARTED with input attachments 0x%x - the rest of this encoder is not drawn", _pass.fbin);

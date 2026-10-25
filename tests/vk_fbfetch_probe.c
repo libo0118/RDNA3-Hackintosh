@@ -196,6 +196,39 @@ static int run_restart(VkFormat f, const char *name)
     }
     printf("%-34s restart (pass A without input attachments, pass B with): %d bad\n", name, bad); return bad;
 }
+/* case 4 (write-after-read): fetch draws and ordinary draws interleaved over overlapping rectangles in ONE pass, the barrier recorded only
+ * before the fetch draws (what the plugin does). An ordinary draw that follows a fetch draw overwrites pixels the fetch draw just read: the
+ * result must be the CPU replay of the sequence. RGBA32F so that a missing ordering shows exactly. */
+static int run_mixed(void)
+{
+    VkFormat f = VK_FORMAT_R32G32B32A32_SFLOAT; VkRenderPass rp = mkpass(f, 1, 0); VkPipeline pg = mkpipe(rp, g_vm, g_gm), pf = mkpipe(rp, g_vm, g_fm);
+    target t = mktarget(f, f, rp, 0); VkDescriptorSet set = mkset(t.img, f);
+    VkCommandBuffer cb = begincb(); bar(cb, t.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkClearValue cv = { { { 0, 0, 0, 0 } } }; VkRenderPassBeginInfo rbi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, 0, rp, t.fb[0], { { 0, 0 }, { W, H } }, 1, &cv };
+    vkCmdBeginRenderPass(cb, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g_pl, FBF_SET, 1, &set, 0, 0);
+    enum { N = 60 }; int kind[N], rx[N], ry[N], rw[N], rh[N]; srand(23);
+    for (int i = 0; i < N; i++) {
+        kind[i] = i == 0 ? 0 : rand() % 2;   /* 0: ordinary draw (gradient * 0.5 replaces), 1: fetch draw (+0.01) */
+        rw[i] = 300 + rand() % 900; rh[i] = 200 + rand() % 600; rx[i] = rand() % (W - rw[i]); ry[i] = rand() % (H - rh[i]);
+        if (kind[i]) { fbf_barrier(cb); draw(cb, pf, 1.f, 0.01f, rx[i], ry[i], rw[i], rh[i]); }
+        else draw(cb, pg, 0.5f, 0.f, rx[i], ry[i], rw[i], rh[i]);
+    }
+    vkCmdEndRenderPass(cb); finish(cb, &t);
+    int bad = 0, wrong_px = 0;
+    for (uint32_t y = 0; y < H; y++) for (uint32_t x = 0; x < W; x++) {
+        float v[4] = { 0, 0, 0, 0 };
+        for (int i = 0; i < N; i++) if ((int)x >= rx[i] && (int)x < rx[i] + rw[i] && (int)y >= ry[i] && (int)y < ry[i] + rh[i]) {
+            if (kind[i]) v[0] += 0.01f, v[1] += 0.01f, v[2] += 0.01f;
+            else { v[0] = (x + .5f) / W * .5f; v[1] = (y + .5f) / H * .5f; v[2] = .125f; v[3] = .5f; }
+        }
+        float got[4]; px(&t, f, x, y, got); int b0 = bad;
+        for (int c = 0; c < 4; c++) check_tol("mixed", got[c], v[c], 5e-5f, &bad, x, y, c);
+        if (bad != b0) wrong_px++;
+    }
+    printf("%-34s %d interleaved fetch / ordinary draws (write after read): %d wrong pixels (%d channel errors)\n", "R32G32B32A32_SFLOAT", N, wrong_px, bad);
+    return bad;
+}
 int main(void)
 {
     VkApplicationInfo ai = { VK_STRUCTURE_TYPE_APPLICATION_INFO, 0, 0, 0, 0, 0, VK_API_VERSION_1_3 }; VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, 0, 0, &ai }; VkInstance inst; CK(vkCreateInstance(&ici, 0, &inst));
@@ -226,6 +259,7 @@ int main(void)
     bad += run_one(VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, "R16G16B16A16_SFLOAT");
     bad += run_one(VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, "R32G32B32A32_SFLOAT");
     bad += run_order();
+    bad += run_mixed();
     bad += run_restart(VK_FORMAT_B8G8R8A8_UNORM, "B8G8R8A8_UNORM");
     bad += run_restart(VK_FORMAT_R32G32B32A32_SFLOAT, "R32G32B32A32_SFLOAT");
     printf("TOTAL bad %d\n", bad); return bad != 0;

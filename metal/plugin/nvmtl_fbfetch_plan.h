@@ -33,6 +33,7 @@ enum {
     NVMTL_FBF_NO_VIEW,         /* vkCreateImageView of the input view failed */
     NVMTL_FBF_FORCED_ZERO,     /* NVMTL_FBFETCH_ZERO=1 */
     NVMTL_FBF_TESS,            /* a tessellation pipeline draws through a path the barrier does not cover */
+    NVMTL_FBF_NO_IMAGE,        /* the pass has no image for that colour slot */
     NVMTL_FBF_REASONS
 };
 
@@ -41,8 +42,21 @@ static inline const char *nvmtl_fbf_reason_text(unsigned r)
     static const char *const t[NVMTL_FBF_REASONS] = {
         "served", "the pipeline has no colour attachment at that index (normal: the translator reads every colour input it declares)", "a multisample target (per-sample fetch is not carried)",
         "an integer colour format", "no input-attachment descriptor layout", "a layered render pass", "a slice of a 3D texture",
-        "the image has no INPUT_ATTACHMENT usage", "the input view could not be created", "NVMTL_FBFETCH_ZERO=1", "a tessellation pipeline" };
+        "the image has no INPUT_ATTACHMENT usage", "the input view could not be created (the image_view_create line before has the reason)", "NVMTL_FBFETCH_ZERO=1", "a tessellation pipeline",
+        "the pass has no image for that colour slot" };
     return r < NVMTL_FBF_REASONS ? t[r] : "?";
+}
+
+/* How much a reason matters when a pipeline has several: a real limit outranks the normal "the pipeline lacks that attachment". */
+static inline unsigned nvmtl_fbf_reason_rank(unsigned r)
+{
+    switch (r) {
+        case NVMTL_FBF_OK: return 0;
+        case NVMTL_FBF_NO_ATTACHMENT: return 1;      /* normal: the translator reads every colour input it declares */
+        case NVMTL_FBF_FORCED_ZERO: return 2;        /* asked for */
+        case NVMTL_FBF_INTEGER_FORMAT: case NVMTL_FBF_TESS: case NVMTL_FBF_MULTISAMPLE: return 3;
+        default: return 4;                            /* NO_LAYOUT and anything else: the implementation itself is not there */
+    }
 }
 
 typedef struct {
@@ -60,7 +74,8 @@ typedef struct {
  * every other read is zeroed (the module is patched, a defined value). A module the translator wrote declares AND reads all the colour
  * inputs of the function it came from, used or not (card run 2026-10-25d: Terminal, 0x7 declared, one colour attachment), so reads of
  * slots the pipeline does not have are normal and are simply zeroed while the real one is served.
- * *serve: mask of served reads (out->fbread), *zero: mask of reads to zero, *why: the first reason a read is zeroed (NVMTL_FBF_OK if none). */
+ * *serve: mask of served reads (out->fbread), *zero: mask of reads to zero, *why: the MOST SEVERE reason a read is zeroed
+ * (nvmtl_fbf_reason_rank; NVMTL_FBF_OK if none), so a benign "no such attachment" never hides a real limit. */
 static inline void nvmtl_fbf_plan(const nvmtl_fbf_in *in, uint32_t *serve, uint32_t *zero, unsigned *why)
 {
     unsigned r = NVMTL_FBF_OK;
@@ -76,12 +91,24 @@ static inline void nvmtl_fbf_plan(const nvmtl_fbf_in *in, uint32_t *serve, uint3
         unsigned rr = g;
         if (!rr && (n >= in->ncol || !(in->cfmt_present & (1u << n)))) rr = NVMTL_FBF_NO_ATTACHMENT;
         else if (!rr && (in->cfmt_int & (1u << n))) rr = NVMTL_FBF_INTEGER_FORMAT;
-        if (rr) { zr |= 1u << n; if (r == NVMTL_FBF_OK) r = rr; } else sv |= 1u << n;
+        if (rr) { zr |= 1u << n; if (nvmtl_fbf_reason_rank(rr) > nvmtl_fbf_reason_rank(r)) r = rr; } else sv |= 1u << n;
     }
     if (serve) *serve = sv;
     if (zero) *zero = zr;
     if (why) *why = r;
 }
+
+/* One log call per reason, each with a format literal of its own (see nvmtl_log_cap.h: the plugin log caps every literal separately, so a flood of
+ * the benign reason must not use up the slots of a serious one). `LOG` is nvlog in the plugin. */
+#define NVMTL_FBF_LOG_REASON(LOG, why, zeroed, served, count) do { switch (why) { \
+    case NVMTL_FBF_NO_ATTACHMENT: LOG("vk: fbfetch: reads of attachments the pipeline lacks (normal, the translator reads every colour input it declares): reads of colour attachment(s) 0x%x are zeroed, 0x%x are served [%u such pipeline(s) so far]", zeroed, served, count); break; \
+    case NVMTL_FBF_MULTISAMPLE: LOG("vk: fbfetch: UNSUPPORTED (a multisample target, per-sample fetch is not carried): reads of colour attachment(s) 0x%x are zeroed, 0x%x are served [%u such pipeline(s) so far]", zeroed, served, count); break; \
+    case NVMTL_FBF_INTEGER_FORMAT: LOG("vk: fbfetch: UNSUPPORTED (an integer colour format): reads of colour attachment(s) 0x%x are zeroed, 0x%x are served [%u such pipeline(s) so far]", zeroed, served, count); break; \
+    case NVMTL_FBF_TESS: LOG("vk: fbfetch: UNSUPPORTED (a tessellation pipeline): reads of colour attachment(s) 0x%x are zeroed, 0x%x are served [%u such pipeline(s) so far]", zeroed, served, count); break; \
+    case NVMTL_FBF_NO_LAYOUT: LOG("vk: fbfetch: UNSUPPORTED (no input-attachment descriptor layout on this device): reads of colour attachment(s) 0x%x are zeroed, 0x%x are served [%u such pipeline(s) so far]", zeroed, served, count); break; \
+    case NVMTL_FBF_FORCED_ZERO: LOG("vk: fbfetch: UNSUPPORTED (NVMTL_FBFETCH_ZERO=1, nothing is fetched): reads of colour attachment(s) 0x%x are zeroed, 0x%x are served [%u such pipeline(s) so far]", zeroed, served, count); break; \
+    default: LOG("vk: fbfetch: UNSUPPORTED (reason code %u): reads of colour attachment(s) 0x%x are zeroed, 0x%x are served [%u such pipeline(s) so far]", (unsigned)(why), zeroed, served, count); break; \
+    } } while (0)
 
 /* Can this attachment of the pass in progress be an input attachment? (the pipeline said yes, the pass has the facts) */
 static inline unsigned nvmtl_fbf_attachment_reason(uint32_t samples, uint32_t layers, uint32_t mtl_type, int has_input_usage)

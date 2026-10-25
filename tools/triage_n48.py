@@ -12,12 +12,25 @@ _BRACKET_B2I = re.compile(r"^copy_buffer_to_image: (?:\(special copy\) )?(record
 _MSU = re.compile(r"^msupload: buffer -> (\d+)-sample image (\d+)x(\d+) \(vk format (\d+) via view (\d+), mode (\d+)\).*?\[(\d+) so far\]")
 _FBF = re.compile(r"^vk: fbfetch: fragment module #(\d+) declares .*? and (READS them|no read is left \(folded away\));.*?: (.*?) "
                   r"\[(?:(\d+) served / )?(\d+) read / (\d+) declared-only / (\d+) zeroed / (\d+) zeroing failed so far\]")
-# the implemented path (N48 follow-up): per-pass sets, draws, restarts, and every way it refuses
-_FBF_DRAW = re.compile(r"^vk: fbfetch: draw (\d+) reads .*?\[(\d+) set\(s\), (\d+) skipped, (\d+) restart\(s\)\]")
+# the implemented path (N48 follow-up): per-pass sets, draws, restarts, and every way it refuses. The plugin's log keeps only the first 8
+# lines of each format literal, so the TOTALS are in the SUMMARY line (key=value; the newest per process wins) and every kind of event has a literal
+# of its own (metal/plugin/nvmtl_log_cap.h, nvmtl_fbfetch_plan.h).
+_FBF_SUM = re.compile(r"^vk: fbfetch: SUMMARY (.*)$")
+_FBF_RESTART = re.compile(r"^vk: fbfetch: a pipeline that reads .* RESTARTED")
 _FBF_REASON = re.compile(r"^vk: fbfetch: (UNSUPPORTED|reads of attachments the pipeline lacks) \((.*?)\): reads of colour attachment\(s\) 0x([0-9a-f]+) are zeroed")
-_FBF_BAD = re.compile(r"^(?:vk: fbfetch: (a draw that reads .*? is SKIPPED: .*?|colour attachment \d+ of this pass cannot be an input attachment: .*?|"
-                      r"input-attachment descriptor set allocation FAILED.*?|descriptor layouts FAILED.*?|moving the subpass inputs.*? FAILED.*?)|"
-                      r"fbfetch: the render pass could not be RESTARTED.*?)(?: \(|\s*\[|$)")
+# lines that are failures by themselves (the start of the text after "vk: fbfetch: " / "fbfetch: ")
+_FBF_BAD_PREFIX = ("a draw that reads", "BUG: ", "colour attachment ", "input-attachment descriptor set allocation FAILED", "descriptor layouts FAILED",
+                   "this device allows only", "moving the subpass inputs", "ZEROING FAILED")
+
+
+def _fbf_bad(msg):
+    if msg.startswith("fbfetch: the render pass could not be RESTARTED"):
+        return "the render pass could not be RESTARTED (the rest of that encoder is not drawn)"
+    if msg.startswith("vk: fbfetch: "):
+        t = msg[len("vk: fbfetch: "):]
+        if t.startswith(_FBF_BAD_PREFIX):
+            return re.sub(r"\s*[(\[].*$", "", t)[:110]
+    return None
 
 
 def _lines(pluginlog):
@@ -38,7 +51,8 @@ def n48_plugin_rows(pluginlog=""):
     fbf_impl, fbf_zmod = {}, {}              # process -> highest module number: implemented / zeroed (the module line)
     fbf_unsup = collections.Counter()        # reason -> process -> lines (real limits; "pipeline lacks the attachment" is normal)
     fbf_bad = collections.Counter()          # process + message -> lines (draw skipped, attachment refused, allocation failed, restart failed)
-    fbf_draw = {}                            # process -> (draws, sets, skipped, restarts) at the highest draw line
+    fbf_sum = {}                             # (process, pid) -> {key: int} of the newest SUMMARY line
+    fbf_restart_lines = collections.Counter()  # process -> RESTARTED lines (a lower bound; the summary has the total)
     fbf_zeroed = 0
     scan_failed = 0
     brackets = {}                            # (pid, tid) -> (process, call, last state)
@@ -79,20 +93,21 @@ def n48_plugin_rows(pluginlog=""):
             tab[proc] = max(tab.get(proc, 0), int(m.group(1)))
             fbf_zeroed = max(fbf_zeroed, int(m.group(7)))
             continue
-        m = _FBF_DRAW.match(msg)
+        m = _FBF_SUM.match(msg)
         if m:
-            cur = fbf_draw.get(proc, (0, 0, 0, 0))
-            if int(m.group(1)) >= cur[0]:
-                fbf_draw[proc] = tuple(int(m.group(i)) for i in (1, 2, 3, 4))
+            fbf_sum[(proc, pid)] = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", m.group(1))}
+            continue
+        if _FBF_RESTART.match(msg):
+            fbf_restart_lines[proc] += 1
             continue
         m = _FBF_REASON.match(msg)
         if m:
             if m.group(1) == "UNSUPPORTED":
                 fbf_unsup[(m.group(2)[:80], proc)] += 1
             continue
-        m = _FBF_BAD.match(msg)
-        if m:
-            fbf_bad[(proc, (m.group(1) or "the render pass could not be RESTARTED")[:120])] += 1
+        bad = _fbf_bad(msg)
+        if bad:
+            fbf_bad[(proc, bad)] += 1
             continue
         if msg.startswith("vk: fbfetch: the scan of a fragment module"):
             scan_failed += 1
@@ -113,26 +128,45 @@ def n48_plugin_rows(pluginlog=""):
         rows.append(("WARN", "multisample upload", "%d failure line(s), e.g. %s" % (len(msu_failed), msu_failed[0])))
     if fbf_read:
         rows.append(("WARN", "framebuffer fetch",
-                     "fragment module(s) still READ [[color(n)]] (binding 192+n) in %s: the plugin's set layout has no such binding and no render pass "
-                     "an input attachment, so RADV reads an undefined descriptor (random colours / corrupt glyphs are the suspects); %s; open: "
-                     "DRIVER-PLAN N48 (real input attachment); NVMTL_FBFETCH_ZERO=1 makes the read a defined zero for an A/B" %
+                     "fragment module(s) READ [[color(n)]] (binding 192+n) from an UNDEFINED descriptor in %s (%s): the zeroing failed (see the ZEROING FAILED line), "
+                     "or this log is from before the N48 implementation (no set layout / input attachment); random colours / corrupt glyphs are the suspects" %
                      (", ".join("%s (up to module #%d)" % (p, n) for p, n in sorted(fbf_read.items())[:4]),
-                      ("%d read(s) replaced by zero" % fbf_zeroed) if fbf_zeroed else "reads left as translated")))
+                      ("%d module(s) with zeroed reads" % fbf_zeroed) if fbf_zeroed else "reads left as translated")))
     elif fbf_gone and not (fbf_impl or fbf_zmod):
         rows.append(("INFO", "framebuffer fetch", "[[color(n)]] declared in %s but no read is left in the module (folded away)" %
                      ", ".join(sorted(fbf_gone)[:4])))
-    if fbf_impl or fbf_draw:
+    if fbf_impl or fbf_sum:
+        tot = ["%s %d pipeline(s) served, %d draw(s), %d pass set(s), %d restart(s)" % (p, v.get("served", 0), v.get("draws", 0), v.get("sets", 0), v.get("restarts", 0))
+               for (p, _), v in sorted(fbf_sum.items())[:4]]
         rows.append(("INFO", "framebuffer fetch",
-                     "IMPLEMENTED (render-pass input attachments, DRIVER-PLAN N48): modules served in %s; draws that fetched: %s" %
+                     "IMPLEMENTED (render-pass input attachments, DRIVER-PLAN N48): modules served in %s; %s" %
                      (", ".join("%s (up to module #%d)" % (p, n) for p, n in sorted(fbf_impl.items())[:4]) or "-",
-                      "; ".join("%s %d draw(s), %d pass set(s), %d skipped, %d pass restart(s)" % ((p,) + v) for p, v in sorted(fbf_draw.items())[:4]) or "none logged")))
+                      "; ".join(tot) or "no SUMMARY line (the process ended before the first one, or the plugin predates it)")))
+    # problems seen in the totals (they are not capped, the individual lines are)
+    probs = []
+    for (p, pid), v in sorted(fbf_sum.items()):
+        for key, what in (("skipped", "draw(s) SKIPPED (nothing drawn from an undefined input)"), ("zero_failed", "zeroing failure(s): reads of an undefined descriptor"),
+                          ("scan_failed", "module scan failure(s)"), ("move_failed", "failure(s) moving the inputs to their set"),
+                          ("att_refused", "attachment(s) that cannot be input attachments"), ("alloc_failed", "descriptor-set allocation failure(s)"),
+                          ("zr_ms", "pipeline(s) with a multisample read zeroed"), ("zr_int", "pipeline(s) with an integer-format read zeroed"),
+                          ("zr_tess", "tessellation pipeline(s) with a read zeroed"), ("zr_nolayout", "pipeline(s) zeroed for lack of a descriptor layout"),
+                          ("zr_forced", "pipeline(s) zeroed by NVMTL_FBFETCH_ZERO=1")):
+            if v.get(key, 0) > 0:
+                probs.append("%s[%d]: %d %s" % (p, pid, v[key], what))
+        if v.get("restarts", 0) > 100:
+            probs.append("%s[%d]: %d pass restart(s) (> 100: each costs a render-pass end/begin; a pipeline mix that reads after a non-reading one)" % (p, pid, v["restarts"]))
+    for p, n in fbf_restart_lines.items():
+        if n > 100:
+            probs.append("%s: %d RESTARTED lines (> 100)" % (p, n))
+    if probs:
+        rows.append(("WARN", "framebuffer fetch", "totals: " + "; ".join(probs[:6])))
     if fbf_unsup:
         rows.append(("WARN", "framebuffer fetch",
                      "reads the implementation does not carry were replaced by a zero vector (a black / wrong blend for them): " +
                      "; ".join("%s in %s (%d)" % (r, p, n) for (r, p), n in sorted(fbf_unsup.items(), key=lambda kv: -kv[1])[:4])))
     if fbf_bad:
         rows.append(("WARN", "framebuffer fetch",
-                     "the implemented path refused or failed (the draws that read are SKIPPED, nothing is drawn from an undefined descriptor): " +
+                     "the implemented path refused or failed (a draw that reads is SKIPPED, nothing is drawn from an undefined descriptor; BUG lines are logic errors): " +
                      "; ".join("%s: %s (%d)" % (p, msg, n) for (p, msg), n in sorted(fbf_bad.items(), key=lambda kv: -kv[1])[:4])))
     if scan_failed:
         rows.append(("WARN", "framebuffer fetch", "%d scan failure line(s): the plugin could not scan a fragment module for [[color(n)]] reads" % scan_failed))

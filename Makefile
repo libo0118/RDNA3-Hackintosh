@@ -106,7 +106,7 @@ $(BUILD)/test_linear_pitch: tests/test_linear_pitch.c metal/plugin/nvmtl_linear_
 $(BUILD)/test_spirv_fbfetch: tests/test_spirv_fbfetch.c metal/plugin/nvmtl_spirv_fbfetch.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_spirv_fbfetch.c
 
-$(BUILD)/test_fbfetch_plan: tests/test_fbfetch_plan.c metal/plugin/nvmtl_fbfetch_plan.h | $(BUILD)
+$(BUILD)/test_fbfetch_plan: tests/test_fbfetch_plan.c metal/plugin/nvmtl_fbfetch_plan.h metal/plugin/nvmtl_log_cap.h metal/plugin/nvmtl_log_failure.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_fbfetch_plan.c
 
 $(BUILD)/test_msupload: tests/test_msupload.c metal/plugin/nvmtl_msupload.h | $(BUILD)

@@ -72,7 +72,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void *counter_recording; unsigned counter_error;
                  nvmtl_sample_pattern sample_pattern;
                  void **rvs; unsigned nrv, caprv;
-                 uint32_t fbin, fbf_bad, fbf_layers;   /* input attachments the pass in progress declares; of them the ones that cannot be served; its layer count */
+                 uint32_t fbin, fbf_bad, fbf_layers, fbf_noset;   /* input attachments the pass in progress declares; of them the ones that cannot be served; its layer count */
                  void *fbf_set; uint32_t fbf_ready;     /* the pass's descriptor set (set NVMTL_FBF_SET) and whether it was built (or failed) */
                  nvk_fbf_att fbf_att[NVMTL_NCOL];
                } nvk_cmdbuf;
