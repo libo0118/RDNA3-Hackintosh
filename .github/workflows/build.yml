@@ -35,9 +35,6 @@ concurrency:
   group: build-${{ github.ref }}${{ inputs.cts && '-cts' || '' }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-
 jobs:
   changes:
     runs-on: linux

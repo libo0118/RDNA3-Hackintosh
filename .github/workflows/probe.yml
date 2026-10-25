@@ -9,9 +9,6 @@ on:
       - '.github/workflows/probe.yml'
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   coredisplay:
     runs-on: macOS
