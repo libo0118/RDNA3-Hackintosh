@@ -40,7 +40,7 @@ permissions:
 
 jobs:
   changes:
-    runs-on: [self-hosted, Linux]
+    runs-on: linux
     outputs:
       metal: ${{ steps.f.outputs.metal }}
       radv: ${{ steps.f.outputs.radv }}
@@ -70,7 +70,7 @@ jobs:
           echo "$changed" | grep -qE '^(userspace/|third_party/libdrm/)' && echo "radv=true" >> "$GITHUB_OUTPUT" || echo "radv=false" >> "$GITHUB_OUTPUT"
 
   host-tests:
-    runs-on: [self-hosted, Linux]
+    runs-on: linux
     steps:
       - uses: actions/checkout@v4
       - name: Fetch Navi 32 firmware for header tests (not redistributed)
@@ -92,7 +92,7 @@ jobs:
         run: python3 tools/progress.py --check
 
   kext:
-    runs-on: [self-hosted, macOS]
+    runs-on: macOS
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
@@ -161,7 +161,7 @@ jobs:
   metal:
     needs: changes
     if: needs.changes.outputs.metal == 'true'
-    runs-on: [self-hosted, macOS]
+    runs-on: macOS
     steps:
       - uses: actions/checkout@v4
       - name: Metal plugin (RDNA3MTLDriver.bundle)
@@ -189,7 +189,7 @@ jobs:
     # SPIRV-Tools, built here once and kept in the runner's tool cache.
     needs: changes
     if: needs.changes.outputs.metal == 'true'
-    runs-on: [self-hosted, Linux]
+    runs-on: linux
     steps:
       - uses: actions/checkout@v4
       - name: Tools (rustup, cmake / ninja from PyPI, SPIRV-Tools from source)
@@ -240,7 +240,7 @@ jobs:
     # stay in the runner's tool cache, so a rebuild is quick. The artifact
     # goes to the VM with `rdna3vm cts`; step cts runs it.
     if: inputs.cts
-    runs-on: [self-hosted, macOS]
+    runs-on: macOS
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -273,7 +273,7 @@ jobs:
     # Builds x86_64 (-arch x86_64).
     needs: changes
     if: needs.changes.outputs.radv == 'true'
-    runs-on: [self-hosted, macOS]
+    runs-on: macOS
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

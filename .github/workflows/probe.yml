@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   coredisplay:
-    runs-on: [self-hosted, macOS]
+    runs-on: macOS
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +108,7 @@ jobs:
           retention-days: 7
 
   iofam:
-    runs-on: [self-hosted, macOS]
+    runs-on: macOS
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
