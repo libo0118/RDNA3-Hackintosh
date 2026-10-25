@@ -99,31 +99,40 @@ echo "[]" > "$A/empty.json"
 # ---- the curl stub: serves $A by URL, records argv, checks nothing leaks
 : > "$T/curl.log"
 curl() {
-    local out="" url="" cfg="" hdr=""
+    local out="" url="" cfg="" hdr="" wfmt="" code=200
     while [ $# -gt 0 ]; do
         case $1 in
             -o) out=$2; shift 2 ;;
             -K) cfg=$2; shift 2 ;;
             -H) hdr=$2; shift 2 ;;
+            -w) wfmt=$2; shift 2 ;;
+            --proto|--proto-redir) echo "$1 $2" >> "$T/curl.proto"; shift 2 ;;
             -*) shift ;;
             *) url=$1; shift ;;
         esac
     done
     echo "$url" >> "$T/curl.log"
     [ -z "$cfg" ] || { cat "$cfg" >> "$T/curl.hdr"; }
+    # failures: curl -f prints the code with -w and exits 22
+    curl_fail() { [ -z "$wfmt" ] || printf '%s' "$1"; return 22; }
+    # a server that refuses every request carrying a token
+    if [ -n "$cfg" ] && [ -f "$T/refuse401" ]; then
+        echo "curl: (22) The requested URL returned error: 401" >&2; curl_fail 401; return
+    fi
+    [ -z "$wfmt" ] || WF=1
     case $url in
         *nowhere.example*) echo "curl: (6) Could not resolve host" >&2; return 6 ;;
         "$CI_URL/api/v1/repos/$CI_REPO/"*) ;;
-        *) echo "curl stub: unexpected URL $url" >&2; return 22 ;;
+        *) echo "curl stub: unexpected URL $url" >&2; curl_fail 404; return ;;
     esac
     local p=${url#"$CI_URL/api/v1/repos/$CI_REPO/"} f="" n
     case $p in
         actions/runs\?*)
             case $p in
                 *"ref=refs/heads/stage1-kext"*) ;;
-                *) echo "curl stub: runs without the branch ref: $p" >&2; return 22 ;;
+                *) echo "curl stub: runs without the branch ref: $p" >&2; curl_fail 404; return ;;
             esac
-            case $p in *"workflow_id=build.yml"*) ;; *) echo "curl stub: no workflow_id: $p" >&2; return 22 ;; esac
+            case $p in *"workflow_id=build.yml"*) ;; *) echo "curl stub: no workflow_id: $p" >&2; curl_fail 404; return ;; esac
             case $p in *"status=success"*) f=runs_success ;; *) f=runs_all ;; esac ;;
         actions/runs/*/artifacts*) n=${p#actions/runs/}; n=${n%%/*}; f=runart_$n ;;
         actions/runs/*/jobs*) n=${p#actions/runs/}; n=${n%%/*}; f=jobs_$n ;;
@@ -131,17 +140,20 @@ curl() {
         actions/jobs/*) f=job_${p#actions/jobs/} ;;
         actions/artifacts\?name=rdna3-cts*) f=allart_cts ;;
         actions/artifacts/*/zip) n=${p#actions/artifacts/}; n=${n%/zip}; f=zip_$n ;;
-        *) echo "curl stub: unknown path $p" >&2; return 22 ;;
+        *) echo "curl stub: unknown path $p" >&2; curl_fail 404; return ;;
     esac
     # the k-th request of the same path gets FILE.k.json when it exists
     local key; key=$(printf '%s' "$p" | tr -c 'a-zA-Z0-9' _)
     local k=$(( $(cat "$T/cnt.$key" 2>/dev/null || echo 0) + 1 )); echo "$k" > "$T/cnt.$key"
     case $f in
-        zip_*) [ -f "$A/$f.zip" ] || return 22; cp "$A/$f.zip" "${out:-/dev/stdout}"; return 0 ;;
+        zip_*) [ -f "$A/$f.zip" ] || { curl_fail 404; return; }
+               cp "$A/$f.zip" "${out:-/dev/stdout}"; [ -z "$wfmt" ] || printf 200; return 0 ;;
     esac
     [ -f "$A/$f.$((k - 1)).json" ] && f=$f.$((k - 1))
-    if [ ! -f "$A/$f.json" ]; then echo "curl stub: 404 $p" >&2; return 22; fi
+    if [ ! -f "$A/$f.json" ]; then echo "curl stub: 404 $p" >&2; curl_fail 404; return; fi
     if [ -n "$out" ]; then cp "$A/$f.json" "$out"; else cat "$A/$f.json"; fi
+    [ -z "$wfmt" ] || printf 200
+    return 0
 }
 sleep() { :; }
 say()  { printf '== %s\n' "$*"; }
@@ -154,7 +166,7 @@ VMTOOL="python3 $(dirname "$RV")/vmtool.py"
 cmd_prepare() { echo "prepare $*" >> "$T/prepared"; }
 . "$T/fn.sh"
 unset FORGEJO_TOKEN GITHUB_TOKEN CI_FORGE FORGEJO_URL FORGEJO_REPO 2>/dev/null || true
-reset_api() { rm -f "$T"/cnt.* "$T/prepared" "$T/curl.hdr"; : > "$T/curl.log"; rm -f "$WORK/artifact-run" "$HOME/Downloads/RDNA3Accel-kext.zip"; }
+reset_api() { rm -f "$T"/cnt.* "$T/prepared" "$T/curl.hdr" "$T/curl.proto" "$T/refuse401"; : > "$T/curl.log"; rm -f "$WORK/artifact-run" "$HOME/Downloads/RDNA3Accel-kext.zip"; }
 
 # ---- ci_cfg: environment > config file > default; a commented key is nothing
 printf '# comment\n#FORGEJO_URL=https://commented.example\nFORGEJO_URL="https://cfg.example/"\nFORGEJO_REPO=cfg/repo\n' > "$CONF"
@@ -172,13 +184,38 @@ ci_setup
 ( CI_FORGE=gitlab ci_setup ) > "$T/out.txt" 2>&1 && fail "ci_setup: an unknown CI_FORGE was accepted"
 grep -q "CI_FORGE is 'gitlab'" "$T/out.txt" || fail "ci_setup: no message for an unknown CI_FORGE"
 
-# ---- the token: environment, ~/.config file, .env; sent as a header, not in argv
-[ -z "$(forgejo_token)" ] || fail "forgejo_token: a token out of nowhere"
+# ---- the token: environment, ~/.config file, .env; a bad value is refused naming its source
+tok() { forgejo_token 2>/dev/null; printf '%s' "$FJ_TOK"; }
+[ -z "$(tok)" ] || fail "forgejo_token: a token out of nowhere"
 echo "FORGEJO_TOKEN=\"from-env-file\"" > "$ROOT/.env"
-[ "$(forgejo_token)" = from-env-file ] || fail "forgejo_token: .env"
+[ "$(tok)" = from-env-file ] || fail "forgejo_token: .env"
+forgejo_token; [ "$FJ_TOK_SRC" = "$ROOT/.env" ] || fail "forgejo_token: source of the .env token: $FJ_TOK_SRC"
+printf 'X=1\nexport FORGEJO_TOKEN=exp_tok-1   # my comment\n' > "$ROOT/.env"
+[ "$(tok)" = exp_tok-1 ] || fail "forgejo_token: .env with 'export' and a trailing comment: $(tok)"
+printf "FORGEJO_TOKEN='quoted-tok' # c\r\n" > "$ROOT/.env"
+[ "$(tok)" = quoted-tok ] || fail "forgejo_token: .env with single quotes and CRLF: $(tok)"
+echo "FORGEJO_TOKEN=\"from-env-file\"" > "$ROOT/.env"
 mkdir -p "$HOME/.config/rdna3vm"; echo "from-config-file" > "$HOME/.config/rdna3vm/forgejo-token"
-[ "$(forgejo_token)" = from-config-file ] || fail "forgejo_token: ~/.config/rdna3vm/forgejo-token before .env"
-[ "$(FORGEJO_TOKEN=from-env forgejo_token)" = from-env ] || fail "forgejo_token: the environment must win"
+[ "$(tok)" = from-config-file ] || fail "forgejo_token: ~/.config/rdna3vm/forgejo-token before .env"
+[ "$(FORGEJO_TOKEN=from-env tok)" = from-env ] || fail "forgejo_token: the environment must win"
+# bad characters: refused, the source is named, the value never printed, the next source is tried
+w=$(FORGEJO_TOKEN=$'bad"tok\nheader = "X: y"' forgejo_token 2>&1 >/dev/null; true)
+case $w in *"the environment (FORGEJO_TOKEN)"*"ignored"*) ;; *) fail "forgejo_token: no warning naming the environment: $w" ;; esac
+case $w in *bad*|*header*) fail "forgejo_token: the bad value was printed: $w" ;; esac
+[ "$(FORGEJO_TOKEN='a b' tok)" = from-config-file ] || fail "forgejo_token: a bad env token must fall through to the config file"
+echo 'bad token with space' > "$HOME/.config/rdna3vm/forgejo-token"
+w=$(forgejo_token 2>&1 >/dev/null; true)
+case $w in *"$HOME/.config/rdna3vm/forgejo-token"*"ignored"*) ;; *) fail "forgejo_token: no warning naming the config file: $w" ;; esac
+[ "$(tok)" = from-env-file ] || fail "forgejo_token: a bad config token must fall through to .env"
+echo 'FORGEJO_TOKEN=bad;token' > "$ROOT/.env"
+w=$(forgejo_token 2>&1 >/dev/null; true)
+case $w in *"$ROOT/.env"*"ignored"*) ;; *) fail "forgejo_token: no warning naming .env: $w" ;; esac
+[ -z "$(tok)" ] || fail "forgejo_token: every source bad must mean no token"
+# xtrace: the token is never traced, and xtrace is restored
+echo 'FORGEJO_TOKEN=trace-secret-1' > "$ROOT/.env"; rm -f "$HOME/.config/rdna3vm/forgejo-token"
+tr_out=$( { set -x; forgejo_token; case $- in *x*) echo XTRACE_ON >&2 ;; esac; set +x; } 2>&1 )
+case $tr_out in *trace-secret-1*) fail "forgejo_token: the token went into the xtrace" ;; esac
+case $tr_out in *XTRACE_ON*) ;; *) fail "forgejo_token: xtrace was not restored" ;; esac
 rm -f "$ROOT/.env" "$HOME/.config/rdna3vm/forgejo-token"
 
 # ---- the normaliser, on the recorded shapes
@@ -307,6 +344,52 @@ reset_api
 ( FORGEJO_URL=https://nowhere.example cmd__update ) > "$T/out.txt" 2>&1 && fail "update 5: an unreachable forge must fail"
 grep -q 'cannot list the workflow runs of Voten641/RDNA3-Hackintosh on Forgejo Actions' "$T/out.txt" || fail "update 5: message"
 
+# 6. artifact listing fails (a 5xx / not JSON): a message, no traceback
+write_runs "$RUN_OK" > "$A/runs_success.json"; write_runs "$RUN_OK" > "$A/runs_all.json"
+write_runs "$(run 30 5 "$HEAD" success)" > "$A/runs_success.json"; write_runs "$(run 30 5 "$HEAD" success)" > "$A/runs_all.json"
+mv "$A/runart_30.json" "$A/runart_30.json.keep"
+reset_api
+( cmd__update ) > "$T/out.txt" 2>&1 && fail "update 6: a failing artifact listing must fail"
+grep -q 'cannot list the artifacts of build #5 on Forgejo Actions (https://forgejo.voten.me/Voten641/RDNA3-Hackintosh/actions)' "$T/out.txt" || fail "update 6: message"
+grep -q 'Traceback' "$T/out.txt" && fail "update 6: a traceback"
+echo 'not json at all' > "$A/runart_30.json"
+reset_api
+( cmd__update ) > "$T/out.txt" 2>&1 && fail "update 6b: a non-JSON listing must fail"
+grep -q 'Traceback' "$T/out.txt" && fail "update 6b: a traceback"
+grep -q 'cannot list the artifacts\|empty or non-JSON' "$T/out.txt" || fail "update 6b: message: $(tail -n 3 "$T/out.txt")"
+: > "$A/runart_30.json"
+reset_api
+( cmd__update ) > "$T/out.txt" 2>&1 && fail "update 6c: an empty listing must fail"
+grep -q 'Traceback' "$T/out.txt" && fail "update 6c: a traceback"
+mv "$A/runart_30.json.keep" "$A/runart_30.json"
+# an empty / non-JSON run list: a short message too
+echo 'oops' > "$A/runs_success.json"
+reset_api
+( cmd__update ) > "$T/out.txt" 2>&1 && fail "update 6d: a non-JSON run list must fail"
+grep -q 'Traceback' "$T/out.txt" && fail "update 6d: a traceback"
+grep -q 'cannot list the workflow runs' "$T/out.txt" || fail "update 6d: message"
+write_runs "$(run 30 5 "$HEAD" success)" > "$A/runs_success.json"
+
+# 7. the forge refuses the token (401): a warning naming the source, then it works anonymously
+reset_api; touch "$T/refuse401"
+FORGEJO_TOKEN=$TOKEN cmd__update > "$T/out.txt" 2>&1 || fail "update 7 (401 with a token, retried anonymously) failed"
+grep -q 'Forgejo refused the token from the environment (FORGEJO_TOKEN): fix or remove it' "$T/out.txt" || fail "update 7: no 401 warning naming the source"
+grep -q "$TOKEN" "$T/out.txt" && fail "update 7: the token was printed"
+[ "$(cat "$WORK/artifact-run")" = 30 ] || fail "update 7: artifact-run"
+# 7b. a 404 with a token is no 401: no retry warning, a plain failure
+reset_api
+( FORGEJO_REPO=Voten641/RDNA3-Hackintosh FORGEJO_TOKEN=$TOKEN cmd_cts ) > "$T/out.txt" 2>&1 || true
+grep -q 'refused the token' "$T/out.txt" && fail "update 7b: a non-401 must not say the token was refused"
+
+# 8. a plain http:// forge never gets the token, https:// forges are held to https
+reset_api
+write_runs "$RUN_OK" > "$A/runs_success.json"
+http_hdr=$( ( FORGEJO_URL=http://forge.test; export FORGEJO_URL; ci_setup; FORGEJO_TOKEN=$TOKEN ci_run 30 >/dev/null 2>&1 || true; cat "$T/curl.hdr" 2>/dev/null || true ) )
+[ -z "$http_hdr" ] || fail "update 8: the token was sent to an http:// forge"
+reset_api
+FORGEJO_TOKEN=$TOKEN ci_setup; FORGEJO_TOKEN=$TOKEN ci_run 30 > /dev/null || fail "update 8: ci_run"
+grep -q -- '--proto =https' "$T/curl.proto" && grep -q -- '--proto-redir =https' "$T/curl.proto" || fail "update 8: an https forge is not held to https"
+
 # ---- cmd_cts: the newest unexpired rdna3-cts artifact
 reset_api
 mkdir -p "$WORK/share"
@@ -318,6 +401,22 @@ echo "[$(art 61 rdna3-cts 40 true)]" > "$A/allart_cts.json"
 reset_api
 ( cmd_cts ) > "$T/out.txt" 2>&1 && fail "cts: only an expired artifact must fail"
 grep -q 'no rdna3-cts artifact (https://forgejo.voten.me/Voten641/RDNA3-Hackintosh/actions' "$T/out.txt" || fail "cts: message names the Forgejo page"
+
+# the forge failing is not "no artifact"
+reset_api
+mv "$A/allart_cts.json" "$A/allart_cts.json.keep"
+( cmd_cts ) > "$T/out.txt" 2>&1 && fail "cts: a failing listing must fail"
+grep -q 'cannot list the artifacts of Voten641/RDNA3-Hackintosh on Forgejo Actions' "$T/out.txt" || fail "cts: listing failure reported as something else"
+grep -q 'no rdna3-cts artifact' "$T/out.txt" && fail "cts: a forge failure was reported as no artifact"
+grep -q 'Traceback' "$T/out.txt" && fail "cts: a traceback"
+mv "$A/allart_cts.json.keep" "$A/allart_cts.json"
+# a download that is not a zip is kept out of $WORK
+echo "[$(art 53 rdna3-cts 38 false)]" > "$A/allart_cts.json"
+rm -f "$WORK/rdna3-cts.zip"
+reset_api
+( cmd_cts ) > "$T/out.txt" 2>&1 && fail "cts: a bad zip must fail"
+grep -q 'not a valid zip' "$T/out.txt" || fail "cts: bad zip message"
+[ ! -e "$WORK/rdna3-cts.zip" ] && [ ! -e "$WORK/rdna3-cts.zip.part" ] || fail "cts: the bad zip is in $WORK"
 
 # ---- CI_FORGE=github: the old path (gh_api stubbed) still works
 GH_LOG=$T/gh.log; : > "$GH_LOG"

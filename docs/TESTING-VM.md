@@ -845,9 +845,13 @@ prints PASS / FAIL per step. What happens with the reports next is in
 newest successful CI build's artifact over `~/Downloads/RDNA3Accel-kext.zip`,
 then `prepare`. The builds come from the owner's Forgejo
 (`https://forgejo.voten.me`, repository `Voten641/RDNA3-Hackintosh`); the
-repository is public, so no login is needed. A token (`FORGEJO_TOKEN`, or
-`~/.config/rdna3vm/forgejo-token`) is used when there is one, and is sent only
-as a request header. The three config keys (in `~/rdna3-vm/config`, or the
+repository is public, so no login is needed. A token is used when there is one
+(`FORGEJO_TOKEN` in the environment, else the first line of
+`~/.config/rdna3vm/forgejo-token`, else `FORGEJO_TOKEN=...` in the checkout's
+git-ignored `.env`); it may only contain letters, digits, `_` and `-`, goes
+only to an `https://` Forgejo and only as a request header, and when the
+server refuses it (401) `rdna3vm` says which source it came from and asks
+again without it. The three config keys (in `~/rdna3-vm/config`, or the
 environment) are optional: `CI_FORGE=forgejo` (default) or `github` for the
 old GitHub Actions setup (`gh auth login`, or a token with *Actions: read*
 in `~/.config/rdna3vm/github-token`), `FORGEJO_URL`, `FORGEJO_REPO`. The same

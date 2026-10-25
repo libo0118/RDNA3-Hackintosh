@@ -1700,26 +1700,63 @@ ci_setup() {
     CI_PAGE=$CI_URL/$CI_REPO/actions
 }
 
-# the Forgejo token, never printed and never put on a command line
+# forgejo_token: FJ_TOK (the token, or empty) and FJ_TOK_SRC (where it came from:
+# the environment, ~/.config/rdna3vm/forgejo-token, or the checkout's .env, which
+# may say 'export FORGEJO_TOKEN=... # comment'). Never printed, never on a command
+# line. A value outside [A-Za-z0-9_-] is refused with a warning naming its
+# source (and the next source is tried): that also keeps a newline or a quote
+# out of the curl config the header is written into.
 forgejo_token() {
-    local t=${FORGEJO_TOKEN:-}
-    [ -n "$t" ] || t=$(head -n 1 "$HOME/.config/rdna3vm/forgejo-token" 2>/dev/null || true)
-    [ -n "$t" ] || t=$(sed -n 's/^FORGEJO_TOKEN=//p' "$ROOT/.env" 2>/dev/null | tail -n 1 | tr -d "\"' " || true)
-    printf '%s' "$t"
+    local xt=$- src t i
+    { set +x; } 2>/dev/null
+    FJ_TOK=""; FJ_TOK_SRC=""
+    for i in 1 2 3; do
+        case $i in
+        1) src="the environment (FORGEJO_TOKEN)"; t=${FORGEJO_TOKEN:-} ;;
+        2) src="$HOME/.config/rdna3vm/forgejo-token"
+           t=$(head -n 1 "$HOME/.config/rdna3vm/forgejo-token" 2>/dev/null || true) ;;
+        3) src="$ROOT/.env"
+           t=$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?FORGEJO_TOKEN=(.*)$/\2/p' "$ROOT/.env" 2>/dev/null |
+               tail -n 1 | sed -E 's/[[:space:]]+#.*$//; s/^[[:space:]]+//; s/[[:space:]]+$//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/' || true) ;;
+        esac
+        t=${t%$'\r'}
+        [ -n "$t" ] || continue
+        if [[ $t =~ ^[A-Za-z0-9_-]+$ ]]; then FJ_TOK=$t; FJ_TOK_SRC=$src; break; fi
+        warn "the Forgejo token from $src has a character outside A-Z a-z 0-9 _ -: ignored (fix or remove it)" >&2
+    done
+    case $xt in *x*) set -x ;; esac
+    return 0
 }
 
 # forgejo_api PATH [OUTFILE]: Forgejo REST GET (PATH below the repository),
 # JSON to stdout or a file; follows the redirect of an artifact download. The
-# token goes in as a header through a curl config on a pipe, not in argv.
+# token goes in as a header through a curl config on a pipe, not in argv, and
+# only to an https:// forge (which curl is then held to, redirects included).
+# A 401 with a token: warn and ask again without it (the repository is public).
 forgejo_api() {
-    local path=$1 out=${2:-} tok
-    tok=$(forgejo_token)
-    if [ -n "$tok" ]; then
-        curl -fsSL -K <(printf 'header = "Authorization: token %s"\n' "$tok") \
-            ${out:+-o "$out"} "$CI_URL/api/v1/repos/$CI_REPO/$path"
-    else
-        curl -fsSL ${out:+-o "$out"} "$CI_URL/api/v1/repos/$CI_REPO/$path"
+    local path=$1 out=${2:-} xt=$- url body code rc=0 use=0 errf
+    local -a px=()
+    url=$CI_URL/api/v1/repos/$CI_REPO/$path
+    case $CI_URL in https://*) px=(--proto =https --proto-redir =https) ;; esac
+    body=${out:-$(mktemp)}; errf=$(mktemp)
+    { set +x; } 2>/dev/null
+    forgejo_token
+    [ -n "$FJ_TOK" ] && [ ${#px[@]} -gt 0 ] && use=1
+    if [ "$use" = 1 ]; then
+        code=$(curl -fsSL "${px[@]}" -K <(printf 'header = "Authorization: token %s"\n' "$FJ_TOK") \
+            -w '%{http_code}' -o "$body" "$url" 2>"$errf") || rc=$?
+        if [ "$rc" != 0 ] && [ "$code" = 401 ]; then
+            warn "Forgejo refused the token from $FJ_TOK_SRC: fix or remove it (asking again without it)" >&2
+            use=0; rc=0
+        fi
     fi
+    if [ "$use" = 0 ]; then
+        curl -fsSL ${px[@]+"${px[@]}"} -o "$body" "$url" 2>"$errf" || rc=$?
+    fi
+    case $xt in *x*) set -x ;; esac
+    [ "$rc" = 0 ] || { cat "$errf" >&2; rm -f "$errf"; [ -n "$out" ] || rm -f "$body"; return "$rc"; }
+    rm -f "$errf"
+    [ -n "$out" ] || { cat "$body"; rm -f "$body"; }
 }
 
 # ci_api PATH [OUTFILE]: GET of PATH below the repository on the configured forge
@@ -1743,7 +1780,10 @@ ci_norm() {
 import json, sys
 kind = sys.argv[1]
 arg = sys.argv[2] if len(sys.argv) > 2 else ""
-d = json.load(sys.stdin)
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    sys.exit("the forge sent an empty or non-JSON answer (wrong FORGEJO_URL / FORGEJO_REPO, or the server is down)")
 def listof(key):
     return d if isinstance(d, list) else (d.get(key) or [])
 def status(s):
@@ -1910,7 +1950,7 @@ commit_unbuilt() {
 cmd__update() {
     local nowait=0
     [ "${1:-}" = --no-wait ] && nowait=1
-    local slug branch zip=$HOME/Downloads/RDNA3Accel-kext.zip runs run_id run_no sha art tmp
+    local slug branch zip=$HOME/Downloads/RDNA3Accel-kext.zip runs run_id run_no sha art tmp list
     ci_setup
     slug=$CI_REPO
     branch=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)
@@ -1984,15 +2024,18 @@ for r in json.load(sys.stdin)["workflow_runs"]:
     if [ "$(cat "$WORK/artifact-run" 2>/dev/null)" = "$run_id" ] && [ -f "$zip" ]; then
         ok "already downloaded: $zip"
     else
-        art=$(ci_artifacts RDNA3Accel-kext "$run_id" | python3 -c '
+        list=$(ci_artifacts RDNA3Accel-kext "$run_id") ||
+            die "cannot list the artifacts of build #$run_no on $CI_NAME ($CI_PAGE)"
+        art=$(printf '%s' "$list" | python3 -c '
 import json, sys
 a = [x for x in json.load(sys.stdin)["artifacts"] if x["name"] == "RDNA3Accel-kext" and not x["expired"]]
-print(a[0]["id"] if a else "")')
+print(a[0]["id"] if a else "")') ||
+            die "the artifact list of build #$run_no on $CI_NAME could not be read"
         [ -n "$art" ] || die "build #$run_no has no RDNA3Accel-kext artifact"
         mkdir -p "$(dirname "$zip")" "$WORK"
         tmp=$zip.part
         ci_api "actions/artifacts/$art/zip" "$tmp" || die "download failed ($CI_NAME artifact $art of build #$run_no)"
-        python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).testzip()' "$tmp" ||
+        python3 -c 'import sys, zipfile; sys.exit(1 if zipfile.ZipFile(sys.argv[1]).testzip() else 0)' "$tmp" ||
             die "the download is not a valid zip"
         mv "$tmp" "$zip"
         echo "$run_id" > "$WORK/artifact-run"
@@ -2106,19 +2149,23 @@ cmd_result() {
 # cts-macos job (a run with cts), put
 # next to the bundle; the report fetches it in step cts (rdna3cts=1)
 cmd_cts() {
-    local zip=${1:-} slug run_no art st f rid
+    local zip=${1:-} slug run_no art st f rid list
     mkdir -p "$WORK/share"
     if [ -z "$zip" ]; then
         ci_setup
         slug=$CI_REPO
         say "newest rdna3-cts artifact of $slug on $CI_NAME (build.yml run with cts)"
-        read -r art rid < <(ci_artifacts rdna3-cts | python3 -c '
+        list=$(ci_artifacts rdna3-cts) ||
+            die "cannot list the artifacts of $slug on $CI_NAME ($CI_PAGE)"
+        read -r art rid < <(printf '%s' "$list" | python3 -c '
 import json, sys
 a = [x for x in json.load(sys.stdin)["artifacts"] if not x["expired"]]
 print(*(a[0]["id"], a[0]["workflow_run"]["id"]) if a else ("", ""))')
         [ -n "$art" ] || die "no rdna3-cts artifact ($CI_PAGE -> build -> Run workflow with cts; it expires after 30 days)"
         zip=$WORK/rdna3-cts.zip
         ci_api "actions/artifacts/$art/zip" "$zip.part" || die "download failed ($CI_NAME artifact $art)"
+        python3 -c 'import sys, zipfile; sys.exit(1 if zipfile.ZipFile(sys.argv[1]).testzip() else 0)' "$zip.part" ||
+            { rm -f "$zip.part"; die "the download is not a valid zip (artifact $art on $CI_NAME)"; }
         mv "$zip.part" "$zip"
         run_no=$(ci_run "$rid" 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin).get("run_number") or "")' 2>/dev/null || true)
         ok "artifact of run ${run_no:+#$run_no (id }$rid${run_no:+)}"
