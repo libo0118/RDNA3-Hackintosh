@@ -37,19 +37,33 @@ typedef struct { nvc_surf s[NVC_MAX]; unsigned n; uint64_t tot[NVC_N], overflow;
 /* the letter of a counter in the `top=` list (the bytes of the uploads are only a total) */
 static const char nvc_letter[NVC_N] = { 'u', 'U', 's', '!', 'P', 'c', 'D', 'B', 'F', 'E', 'R', 'X', 'T', 'O', 'C', '?', 0 };
 
-/* count `n` of `kind` for surface `id` (a surface table slot is made at the first sight; a full table counts the event in the totals and in `overflow` only) */
-static inline void nvc_note(nvc_table *t, uint32_t id, uint32_t w, uint32_t h, int vram, int kind, uint64_t n)
+/* The slot of surface `id` (made at the first sight; its size and placement are refreshed), or NULL for id 0 or a full table (counted in `overflow`). The caller holds the
+ * table's lock. A slot never moves and is never freed, so the pointer may be kept (a render encoder keeps it for the draws of its pass) and counted into with nvc_add. */
+static inline nvc_surf *nvc_slot(nvc_table *t, uint32_t id, uint32_t w, uint32_t h, int vram)
 {
-    if (kind < 0 || kind >= NVC_N || !id) return;
-    t->tot[kind] += n;
+    if (!id) return NULL;
     nvc_surf *f = NULL;
     for (unsigned i = 0; i < t->n; i++) if (t->s[i].id == id) { f = &t->s[i]; break; }
     if (!f) {
-        if (t->n >= NVC_MAX) { t->overflow++; return; }
-        f = &t->s[t->n++]; memset(f, 0, sizeof *f); f->id = id;
+        if (t->n >= NVC_MAX) { __atomic_fetch_add(&t->overflow, 1, __ATOMIC_RELAXED); return NULL; }
+        f = &t->s[t->n]; memset(f, 0, sizeof *f); f->id = id;
+        __atomic_store_n(&t->n, t->n + 1, __ATOMIC_RELEASE);
     }
     f->w = w; f->h = h; f->vram = vram ? 1 : 0;
-    f->c[kind] += n;
+    return f;
+}
+/* count `n` of `kind` on a slot (NULL: only the total): lock-free, so a draw does not take the table's lock */
+static inline void nvc_add(nvc_table *t, nvc_surf *f, int kind, uint64_t n)
+{
+    if (kind < 0 || kind >= NVC_N) return;
+    __atomic_fetch_add(&t->tot[kind], n, __ATOMIC_RELAXED);
+    if (f) __atomic_fetch_add(&f->c[kind], n, __ATOMIC_RELAXED);
+}
+/* count `n` of `kind` for surface `id` (a full table counts the event in the totals and in `overflow` only) */
+static inline void nvc_note(nvc_table *t, uint32_t id, uint32_t w, uint32_t h, int vram, int kind, uint64_t n)
+{
+    if (kind < 0 || kind >= NVC_N || !id) return;
+    nvc_add(t, nvc_slot(t, id, w, h, vram), kind, n);
 }
 
 /* how busy a surface is: every touch but a skip */

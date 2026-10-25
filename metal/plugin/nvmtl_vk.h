@@ -196,6 +196,8 @@ int  nvmtl_vk_submit_begin_at(nvk_cmdbuf *c, nvmtl_inflight *f, const char *who)
 #define nvmtl_vk_submit_begin(c, f) nvmtl_vk_submit_begin_at((c), (f), __func__)
 int  nvmtl_vk_submit_finish(nvmtl_inflight *f);
 void nvmtl_vk_gsub_nvk_stats(uint64_t *out, unsigned n);
+void nvmtl_vk_note_dontcare(int cleared);   /* a render pass attachment with a don't-care load action (cleared = NVMTL_DONTCARE_CLEARS turned it into a clear) */
+void nvmtl_vk_summaries(void);              /* print the `vk: ab:` and `vk: fbfetch:` SUMMARY lines when a counter moved (the shared timer) */
 int nvmtl_vk_pre_open(void);
 int nvmtl_vk_pre_copy(nvk_buffer *src, size_t srcOff, nvk_buffer *dst, size_t dstOff, size_t size);
 int nvmtl_vk_pre_fill(nvk_buffer *b, size_t offset, size_t size, uint32_t word);

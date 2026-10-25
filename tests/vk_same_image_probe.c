@@ -99,8 +99,11 @@ static void same_copy(VkCommandBuffer cb, im_t *im, int mode, int sx, int sy, in
     } else {
         img_to(cb, im, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         if (mode == 0 && ov) {
-            im_t *s = &g_scr[g_scr_n++]; mkimg((uint32_t)w, (uint32_t)h, s);
-            img_to(cb, s, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            /* like the plugin: one scratch image per command buffer, reused by every overlapping copy that fits, a larger one made when none does */
+            im_t *s = NULL; uint32_t sw = (uint32_t)w, sh = (uint32_t)h;
+            for (int i = 0; i < g_scr_n; i++) { if (g_scr[i].w >= (uint32_t)w && g_scr[i].h >= (uint32_t)h) { s = &g_scr[i]; break; } if (g_scr[i].w > sw) sw = g_scr[i].w; if (g_scr[i].h > sh) sh = g_scr[i].h; }
+            if (!s) { s = &g_scr[g_scr_n++]; mkimg(sw, sh, s); }
+            img_to(cb, s, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
             VkImageCopy in = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { sx, sy, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { (uint32_t)w, (uint32_t)h, 1 } };
             vkCmdCopyImage(cb, im->img, VK_IMAGE_LAYOUT_GENERAL, s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &in);
             img_to(cb, s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);

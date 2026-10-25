@@ -5032,6 +5032,9 @@ static _Atomic unsigned g_ldp_barriers[2];
  * tmp = overlap, copied through a scratch image, tmpfail = overlap, scratch image could not be made, unsafe = overlap, a shape the scratch image does not cover (3D, depth,
  * multisample, compressed) copied in place as before */
 static _Atomic unsigned g_sic_all, g_sic_overlap, g_sic_general, g_sic_tmp, g_sic_tmpfail, g_sic_unsafe;
+/* attachments with a don't-care load action, and of them the ones NVMTL_DONTCARE_CLEARS turned into a clear (the only thing that knob changes) */
+static _Atomic unsigned g_dc_seen, g_dc_cleared;
+void nvmtl_vk_note_dontcare(int cleared) { atomic_fetch_add_explicit(&g_dc_seen, 1, memory_order_relaxed); if (cleared) atomic_fetch_add_explicit(&g_dc_cleared, 1, memory_order_relaxed); }
 static _Atomic uint64_t g_ab_sum_ns; static _Atomic unsigned long long g_ab_sum_last; static int g_ab_armed;
 static int nvmtl_load_barrier_on(void)
 {
@@ -5059,7 +5062,8 @@ static void nvmtl_ab_summary(int force)
     const unsigned sic[6] = { atomic_load_explicit(&g_sic_all, memory_order_relaxed), atomic_load_explicit(&g_sic_overlap, memory_order_relaxed),
         atomic_load_explicit(&g_sic_general, memory_order_relaxed), atomic_load_explicit(&g_sic_tmp, memory_order_relaxed),
         atomic_load_explicit(&g_sic_tmpfail, memory_order_relaxed), atomic_load_explicit(&g_sic_unsafe, memory_order_relaxed) };
-    const unsigned long long total = sum + we + wo + ww + wb + sic[0] + sic[1] + sic[2] + sic[3] + sic[4] + sic[5];
+    const unsigned dcs = atomic_load_explicit(&g_dc_seen, memory_order_relaxed), dcc = atomic_load_explicit(&g_dc_cleared, memory_order_relaxed);
+    const unsigned long long total = sum + we + wo + ww + wb + sic[0] + sic[1] + sic[2] + sic[3] + sic[4] + sic[5] + dcs + dcc;
     if (!total || total == atomic_load_explicit(&g_ab_sum_last, memory_order_relaxed)) { if (!force) atomic_store(&g_ab_sum_ns, now); return; }   /* nothing new: look again in 10 s, not at every call */
     if (!atomic_compare_exchange_strong(&g_ab_sum_ns, (uint64_t *)&last, now) && !force) return;
     atomic_store_explicit(&g_ab_sum_last, total, memory_order_relaxed);
@@ -5067,13 +5071,16 @@ static void nvmtl_ab_summary(int force)
                    "load_depth_all=%u load_depth_mismatch=%u load_depth_inrp=%u load_depth_barriers=%u "
                    "colour_by_layout=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u depth_by_layout=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u "
                    "wit_early=%llu wit_ok=%llu wit_blind=%llu wit_worst_us=%llu "
-                   "same_image_copies=%u same_image_overlap=%u same_image_general=%u same_image_tmp=%u same_image_tmpfail=%u same_image_unsafe=%u",
+                   "same_image_copies=%u same_image_overlap=%u same_image_general=%u same_image_tmp=%u same_image_tmpfail=%u same_image_unsafe=%u "
+                   "dontcare_seen=%u dontcare_cleared=%u",
                    all[0], c[0][0] + c[0][1] + c[0][2] + c[0][3] + c[0][4] + c[0][5] + c[0][6] + c[0][7] + c[0][8] + c[0][9], inrp[0], bar[0],
                    all[1], c[1][0] + c[1][1] + c[1][2] + c[1][3] + c[1][4] + c[1][5] + c[1][6] + c[1][7] + c[1][8] + c[1][9], inrp[1], bar[1],
                    c[0][0], c[0][1], c[0][2], c[0][3], c[0][4], c[0][5], c[0][6], c[0][7], c[0][8], c[0][9],
                    c[1][0], c[1][1], c[1][2], c[1][3], c[1][4], c[1][5], c[1][6], c[1][7], c[1][8], c[1][9], we, wo, wb, ww,
-                   sic[0], sic[1], sic[2], sic[3], sic[4], sic[5]);
+                   sic[0], sic[1], sic[2], sic[3], sic[4], sic[5], dcs, dcc);
 }
+/* the shared 10 s timer (NVMTLObjects.m nvmtl_summary_timer_arm): force skips each summary's own clock, a line is printed only when a counter moved */
+void nvmtl_vk_summaries(void) { nvmtl_ab_summary(1); nvmtl_fbf_summary(1); }
 static void nvmtl_load_layout(nvk_cmdbuf *c, nvk_image *img, int depth, uint32_t level, uint32_t layer, uint32_t layers)
 {
     if (!img) return;
@@ -8346,13 +8353,25 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
         else {
             atomic_fetch_add(&g_sic_overlap, 1);
             how = "OVERLAP, through a scratch image";
-            nvk_image tmp; memset(&tmp, 0, sizeof tmp);
+            /* one scratch image per command buffer is reused by every overlapping copy that fits (a scroll makes many); one that does not fit makes a larger one (the old one stays until the retire) */
             if (!tmp_fits) { atomic_fetch_add(&g_sic_unsafe, 1); how = "OVERLAP, a shape the scratch image does not cover (3D, depth, multisample or compressed): copied in place, undefined by Vulkan"; }
-            else if (nvmtl_vk_image_create_ex2(w, h, src->fmt, src->bpp, 0, 1, 0, &tmp)) { atomic_fetch_add(&g_sic_tmpfail, 1); how = "OVERLAP, the scratch image could not be made: copied in place, undefined by Vulkan"; }
             else {
-                nvk_image *grown = (nvk_image *)realloc(c->tmpimg, (c->ntmpimg + 1) * sizeof *grown);
-                if (!grown) { nvmtl_vk_image_destroy(&tmp); atomic_fetch_add(&g_sic_tmpfail, 1); how = "OVERLAP, no memory for the scratch list: copied in place, undefined by Vulkan"; }
-                else { c->tmpimg = grown; c->tmpimg[c->ntmpimg++] = tmp; scratch = &c->tmpimg[c->ntmpimg - 1]; atomic_fetch_add(&g_sic_tmp, 1); }
+                for (unsigned i = 0; i < c->ntmpimg; i++) {
+                    nvk_image *t = &c->tmpimg[i];
+                    if (t->fmt == src->fmt && t->w >= (uint32_t)w && t->h >= (uint32_t)h) { scratch = t; break; }
+                }
+                if (!scratch) {
+                    uint32_t sw = (uint32_t)w, sh = (uint32_t)h;
+                    for (unsigned i = 0; i < c->ntmpimg; i++) if (c->tmpimg[i].fmt == src->fmt) { if (c->tmpimg[i].w > sw) sw = c->tmpimg[i].w; if (c->tmpimg[i].h > sh) sh = c->tmpimg[i].h; }
+                    nvk_image tmp; memset(&tmp, 0, sizeof tmp);
+                    if (nvmtl_vk_image_create_ex2(sw, sh, src->fmt, src->bpp, 0, 1, 0, &tmp)) { atomic_fetch_add(&g_sic_tmpfail, 1); how = "OVERLAP, the scratch image could not be made: copied in place, undefined by Vulkan"; }
+                    else {
+                        nvk_image *grown = (nvk_image *)realloc(c->tmpimg, (c->ntmpimg + 1) * sizeof *grown);
+                        if (!grown) { nvmtl_vk_image_destroy(&tmp); atomic_fetch_add(&g_sic_tmpfail, 1); how = "OVERLAP, no memory for the scratch list: copied in place, undefined by Vulkan"; }
+                        else { c->tmpimg = grown; c->tmpimg[c->ntmpimg++] = tmp; scratch = &c->tmpimg[c->ntmpimg - 1]; }
+                    }
+                }
+                if (scratch) atomic_fetch_add(&g_sic_tmp, 1);
             }
         }
         if (n <= 8 || n % 1024 == 0)
@@ -8363,7 +8382,7 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
         img_to(c, src, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         if (scratch) {
-            img_to(c, scratch, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            img_to(c, scratch, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);   /* (a reused scratch image: the earlier copy's read of it ends first) */
             const VkImageCopy in = { { VK_IMAGE_ASPECT_COLOR_BIT, sl, ss, 1 }, { (int32_t)sx, (int32_t)sy, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { w, h, 1 } };
             pvkCmdCopyImage(c->cb, (VkImage)src->img, VK_IMAGE_LAYOUT_GENERAL, (VkImage)scratch->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &in);
             img_to(c, scratch, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,

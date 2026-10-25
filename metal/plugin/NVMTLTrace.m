@@ -15,7 +15,7 @@ static inline NVMTLTexture *nvmtl_tr_root(NVMTLTexture *t) { return (t && t->_pa
 void nvlog_uncapped(const char *fmt, ...);
 static nvc_table g_cen;
 static os_unfair_lock g_cen_lock = OS_UNFAIR_LOCK_INIT;
-static uint64_t g_cen_last_ns, g_cen_t0_ns, g_cen_last_total, g_cen_calls; static unsigned g_cen_seq; static int g_cen_armed;
+static uint64_t g_cen_last_ns, g_cen_t0_ns, g_cen_last_total; static unsigned g_cen_seq; static int g_cen_armed;
 static void nvmtl_cen_summary(int force);
 static void nvmtl_cen_atexit(void) { nvmtl_cen_summary(1); }
 static void nvmtl_cen_summary(int force)
@@ -33,31 +33,35 @@ static void nvmtl_cen_summary(int force)
     os_unfair_lock_unlock(&g_cen_lock);
     if (have) nvlog_uncapped("census: SUMMARY seq=%u t_ms=%llu %s", seq, (unsigned long long)((now - g_cen_t0_ns) / 1000000ull), body);
 }
-/* count `kind` for a texture's root surface (nothing for a texture that is not an IOSurface's) */
+/* count `kind` for a texture's root surface (nothing for a texture that is not an IOSurface's). The lock is the slot's creation; the adds are atomic. */
 static void nvmtl_cen_note(NVMTLTexture *t, int kind, uint64_t n)
 {
     NVMTLTexture *r = nvmtl_tr_root(t);
     if (!r || !r->_surf) return;
     const uint32_t id = (uint32_t)IOSurfaceGetID(r->_surf);
     os_unfair_lock_lock(&g_cen_lock);
-    nvc_note(&g_cen, id, r->_i.w, r->_i.h, r->_vramOn ? 1 : 0, kind, n);
-    const uint64_t c = ++g_cen_calls;
+    nvc_surf *f = nvc_slot(&g_cen, id, r->_i.w, r->_i.h, r->_vramOn ? 1 : 0);
     os_unfair_lock_unlock(&g_cen_lock);
-    if (!(c & 63)) nvmtl_cen_summary(0);
+    nvc_add(&g_cen, f, kind, n);
 }
-/* one draw into a surface target: all draws, Apple's buffer_image_blit draws, framebuffer-fetch draws */
-static void nvmtl_cen_draw(NVMTLTexture *t, int blit, int fbf)
+/* the census slot of a render pass's first colour target, found ONCE per pass (the draws then count lock-free): NULL when it is not an IOSurface's */
+static void *nvmtl_cen_pass_slot(NVMTLTexture *t)
 {
     NVMTLTexture *r = nvmtl_tr_root(t);
-    if (!r || !r->_surf) return;
+    if (!r || !r->_surf) return NULL;
     const uint32_t id = (uint32_t)IOSurfaceGetID(r->_surf);
     os_unfair_lock_lock(&g_cen_lock);
-    nvc_note(&g_cen, id, r->_i.w, r->_i.h, r->_vramOn ? 1 : 0, NVC_DRAW, 1);
-    if (blit) nvc_note(&g_cen, id, r->_i.w, r->_i.h, r->_vramOn ? 1 : 0, NVC_DRAW_BLIT, 1);
-    if (fbf) nvc_note(&g_cen, id, r->_i.w, r->_i.h, r->_vramOn ? 1 : 0, NVC_DRAW_FBF, 1);
-    const uint64_t c = ++g_cen_calls;
+    nvc_surf *f = nvc_slot(&g_cen, id, r->_i.w, r->_i.h, r->_vramOn ? 1 : 0);
     os_unfair_lock_unlock(&g_cen_lock);
-    if (!(c & 63)) nvmtl_cen_summary(0);
+    return f;
+}
+/* one draw into a pass's surface target: all draws, Apple's buffer_image_blit draws, framebuffer-fetch draws (a table slot never moves: nvmtl_surf_census.h) */
+static inline void nvmtl_cen_draw(void *slot, int blit, int fbf)
+{
+    nvc_surf *f = (nvc_surf *)slot;
+    nvc_add(&g_cen, f, NVC_DRAW, 1);
+    if (blit) nvc_add(&g_cen, f, NVC_DRAW_BLIT, 1);
+    if (fbf) nvc_add(&g_cen, f, NVC_DRAW_FBF, 1);
 }
 
 /* one id per command buffer for the life of the process; 0 when tracing is off */

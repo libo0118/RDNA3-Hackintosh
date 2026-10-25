@@ -496,6 +496,7 @@ static void nvmtl_install_hw_resource_pools(id dev)
        submitter to go to. If Vulkan then fails the device is refused and the queue stays, idle, until the process exits. */
     nvmtl_gpu_time_queue_open(self, port);
     nvlog("MTLIOAccelDevice's initWithAcceleratorPort: -> %p", (__bridge void *)self);
+    nvmtl_summary_timer_arm();
     gNVMTLMainDevice = self;
     nvmtl_install_hw_resource_pools(self);
     [self nvmtlProbeGPUPass];
@@ -569,6 +570,8 @@ static void nvmtl_install_hw_resource_pools(id dev)
     nvlog("newCommandQueue -> %p (NVK command pool)", (__bridge void *)q); return q; }
 
 static void nvmtl_zero_new_buffer(NVMTLBuffer *b, NSUInteger len);
+static void nvmtl_ud_managed_created(void);   /* DRIVER-PLAN N50: the undeclared-write detector counts the managed buffers it could watch */
+static void nvmtl_summary_timer_arm(void);   /* the shared 10 s timer of the plugin's SUMMARY lines */
 static __thread int gZeroSkip;
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)len options:(MTLResourceOptions)opt {
     if (nvmtl_vk_init()) return nil;
@@ -589,6 +592,7 @@ static __thread int gZeroSkip;
         if (nvmtl_vk_buffer_create(len, 1, &b->_b)) { nvmtl_alloc_failed("newBufferWithLength"); return nil; }
     }
     if (!gZeroSkip) nvmtl_zero_new_buffer(b, len);
+    if (b->_shadow.map) nvmtl_ud_managed_created();
     nvlog("newBufferWithLength:%lu storage %d -> %p%s", (unsigned long)len, (int)b->_storage, (__bridge void *)b, b->_b.map ? "" : " VRAM"); return b; }
 
 - (id<MTLBuffer>)newBufferWithBytes:(const void *)bytes length:(NSUInteger)len options:(MTLResourceOptions)opt {

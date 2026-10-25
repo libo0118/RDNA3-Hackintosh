@@ -49,6 +49,19 @@ int main(void)
     for (uint32_t id = 1; id <= 12; id++) for (int k = 0; k < NVC_SIN_BYTES; k++) nvc_note(&b, 100000 + id, 3840, 2160, 1, k, 123456789ull);
     CHECK(nvc_format(&b, out, 760, 5) > 0 && strlen(out) < 760);
 
+    /* a slot is found once and counted into lock-free (a render pass keeps it for its draws); it never moves, a full table gives NULL and the total still counts */
+    static nvc_table sl;
+    nvc_surf *a = nvc_slot(&sl, 42, 100, 50, 1);
+    CHECK(a && a->id == 42 && a->w == 100 && a->vram == 1 && sl.n == 1);
+    nvc_add(&sl, a, NVC_DRAW, 3); nvc_add(&sl, a, NVC_DRAW_BLIT, 2);
+    for (uint32_t id = 100; id < 100 + 60; id++) nvc_note(&sl, id, 8, 8, 0, NVC_PASS, 1);   /* more slots: the first one must not move */
+    CHECK(nvc_slot(&sl, 42, 200, 60, 0) == a && a->w == 200 && a->vram == 0 && a->c[NVC_DRAW] == 3 && a->c[NVC_DRAW_BLIT] == 2 && sl.tot[NVC_DRAW] == 3);
+    CHECK(nvc_slot(&sl, 0, 1, 1, 0) == NULL);
+    nvc_add(&sl, NULL, NVC_DRAW, 4); CHECK(sl.tot[NVC_DRAW] == 7);
+    static nvc_table full;
+    for (uint32_t id = 1; id <= NVC_MAX; id++) CHECK(nvc_slot(&full, id, 1, 1, 0) != NULL);
+    CHECK(nvc_slot(&full, 9999, 1, 1, 0) == NULL && full.overflow == 1);
+
     CHECK(nvc_is_blit_pipeline("buffer_image_blit_vert_lpf", "x") && nvc_is_blit_pipeline("x", "buffer_image_blit_frag_lpf"));
     CHECK(!nvc_is_blit_pipeline("fixed_vert", "fixed_frag_lpf_cpf") && !nvc_is_blit_pipeline(NULL, NULL));
 
