@@ -137,7 +137,10 @@ def n48_plugin_rows(pluginlog=""):
     for proc, pid, tid, msg in _lines(pluginlog):
         m = _CENSUS.match(msg)
         if m:
-            if int(m.group(1)) == 130 and int(m.group(2)) > 1:   # D32_S8, multisample: the stencil resolve chain of Apple's GL
+            asp = re.search(r" aspect (\d+) ", msg)
+            # D32_S8, multisample, the stencil aspect (an older plugin's census has no aspect: counted): the stencil resolve chain of
+            # Apple's GL; a depth or colour download of the same texture is not the chain
+            if int(m.group(1)) == 130 and int(m.group(2)) > 1 and (not asp or asp.group(1) == "4"):
                 chain_seen.add((proc, pid))
             continue
         m = _SUMMARY.match(msg)
@@ -265,7 +268,8 @@ def n48_plugin_rows(pluginlog=""):
     if probs_d:
         rows.append(("WARN", "multisample download", "failures / refusals in the totals: " + "; ".join(probs_d[:6])))
     for key, v in list(sums["msdl"].items()) + list(sums["msupload"].items()):
-        if v.get("d_stencil", 0) or v.get("up_inter_13", 0) or v.get("up_flat_13", 0) or v.get("resolve_r8u", 0):
+        # a resolve into R8_UINT alone (an object-ID pass of any MSAA app) is not the chain: only a stencil download or an R8_UINT upload starts it
+        if v.get("d_stencil", 0) or v.get("up_inter_13", 0) or v.get("up_flat_13", 0):
             chain_seen.add(key)
     rows.extend(_chain_row(chain_seen, sums["msdl"], sums["msupload"]))
     if fbf_read:

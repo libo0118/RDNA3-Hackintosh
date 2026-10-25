@@ -35,6 +35,7 @@ void nvmtl_vk_copy_aspect_override(uint32_t aspect, uint32_t bpp) { g_copy_aspec
  * `msdl: SUMMARY` line, defined with the other multisample-copy counters further down */
 static _Atomic unsigned g_ms_resolve_r8u, g_ms_resolve_other;
 static void nvmtl_ms_arm(void);
+static void nvmtl_ms_event(unsigned err_count);
 /* A blit copy that is recorded for the first time in this shape is logged before and after the Vulkan call (card run
  * 2026-10-25c: Chess died right after such a copy and the log could not say whether it was inside the call). The shape is
  * the image's format, samples, type, the aspect and the element size - NOT the region (WindowServer's many differently sized
@@ -5224,7 +5225,7 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
         if (!(prm & (1u << i)) || !ps->res[i]) continue;
         const uint32_t rf = ps->resfmt[i] ? ps->resfmt[i] : ps->res[i]->fmt;
         atomic_fetch_add(rf == 13u ? &g_ms_resolve_r8u : &g_ms_resolve_other, 1);
-        nvmtl_ms_arm();
+        nvmtl_ms_event(0);   /* a resolve moves the 10 s SUMMARY too: after a signal there is no exit line */
         static uint32_t seen[8]; static unsigned nseen; static pthread_mutex_t seen_lock = PTHREAD_MUTEX_INITIALIZER;
         int fresh = 0;
         pthread_mutex_lock(&seen_lock);
@@ -7756,12 +7757,12 @@ int nvmtl_vk_cmd_copy_buffer_to_image_layer(nvk_cmdbuf *c, nvk_buffer *b, size_t
 int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b, size_t off, uint32_t row_bytes,
                                   nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
 {
+    nvmtl_ms_reason_clear();   /* before the guard: a refusal here must not leave an earlier copy's reason for the FAILED line */
     if (!c || !img || !img->img || !b || !b->buf) {
         nvlog("copy_buffer_to_image: REFUSED - %s%s%s", !c ? "no command buffer " : "", !img ? "no image " : !img->img ? "the image has no VkImage " : "",
               !b ? "no buffer" : !b->buf ? "the buffer has no VkBuffer (not bound yet?)" : "");
         return -1;
     }
-    nvmtl_ms_reason_clear();
     if (img->samples > 1) return nvmtl_vk_cmd_copy_buffer_to_msimage(c, b, off, row_bytes, img, x, y, w, h, level, layer);
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_buffer_to_image: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
@@ -7812,12 +7813,12 @@ int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img,
                                   nvk_buffer *b, size_t off, uint32_t row_bytes, uint32_t level, uint32_t layer)
 {
     /* a null VkImage / VkBuffer handle goes straight into RADV, which dereferences it */
+    nvmtl_ms_reason_clear();   /* before the guard: a refusal here must not leave an earlier copy's reason for the FAILED line */
     if (!c || !img || !img->img || !b || !b->buf) {
         nvlog("copy_image_to_buffer: REFUSED - %s%s%s", !c ? "no command buffer " : "", !img ? "no image " : !img->img ? "the image has no VkImage " : "",
               !b ? "no buffer" : !b->buf ? "the buffer has no VkBuffer (not bound yet?)" : "");
         return -1;
     }
-    nvmtl_ms_reason_clear();
     if (img->samples > 1) return nvmtl_vk_cmd_copy_msimage_to_buffer(c, img, x, y, w, h, b, off, row_bytes, level, layer);
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_image_to_buffer: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
