@@ -20,7 +20,9 @@ static inline NSMutableData *nvmtl_fc_storage(NSUInteger count) {
     void *_hostPtr; size_t _hostLen; id _hostDealloc;
     NVMTLHeap *_subHeap; NSUInteger _subCharge; BOOL _aliased;
     nvk_buffer _shadow; int _syncOut; int _zshadow;
-    NSUInteger _dirtyLo, _dirtyHi, _dirtyN; } @end
+    NSUInteger _dirtyLo, _dirtyHi, _dirtyN;
+    /* NVMTL_MANAGED_CHECK (N50 undeclared-write detector): the shadow as the last scan saw it, the buffer's own hit count, the newest hit not yet seen declared */
+    uint8_t *_mirror; int _mirrorOff; uint32_t _udLogged; NSUInteger _udPendLo, _udPendHi; unsigned long long _udPendBytes; } @end
 #include <sched.h>
 static inline void nvmtl_buf_settle(NVMTLBuffer *b) {
     if (!__atomic_load_n(&b->_zshadow, __ATOMIC_ACQUIRE)) return;

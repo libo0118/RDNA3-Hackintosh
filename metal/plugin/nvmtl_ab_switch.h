@@ -125,6 +125,52 @@ static inline int nvmtl_load_depth_declared(uint32_t load, int has_stencil)
 /* 1: a managed upload range of n bytes is read from a private snapshot taken at the flush (0 < n <= 1 MiB, the knob on) */
 static inline int nvmtl_snap_wanted(size_t n, int enabled) { return enabled && n && n <= NVMTL_SNAP_MAX_BYTES; }
 
+/* DRIVER-PLAN N50, hypothesis A of the glyph artefacts: Apple's drivers copy a managed buffer's modified range in whole pages (or the whole buffer),
+ * ours is byte-exact, so bytes an app wrote but did not declare reach the GPU on Apple's and stay stale in VRAM on ours.
+ * NVMTL_MANAGED_WHOLE=1 uploads the whole buffer at every flush, NVMTL_MANAGED_PAGES=1 widens the range to whole 4 KiB pages (WHOLE wins). */
+#define NVMTL_PAGE_BYTES 4096u
+static inline void nvmtl_managed_widen(size_t size, size_t lo, size_t hi, int whole, int pages, size_t *nlo, size_t *nhi)
+{
+    if (hi > size) hi = size;
+    if (lo > hi) lo = hi;
+    if (whole) { *nlo = 0; *nhi = size; return; }
+    if (pages) {
+        lo &= ~(size_t)(NVMTL_PAGE_BYTES - 1);
+        hi = (hi + NVMTL_PAGE_BYTES - 1) & ~(size_t)(NVMTL_PAGE_BYTES - 1);
+        if (hi > size) hi = size;
+    }
+    *nlo = lo; *nhi = hi;
+}
+
+/* The undeclared-write detector (NVMTL_MANAGED_CHECK): `cur` is the shadow now, `prev` the shadow at the previous flush; the bytes that changed OUTSIDE the
+ * range [lo, hi) declared since (the range a flush uploads) were written by the app without a didModifyRange. Fills `o`: how many bytes, the first and last
+ * offset, the distance of the nearest one to the range and whether one lies in a page the range touches (what a page-granular copy would have carried). 0 = none. */
+typedef struct { size_t bytes, first, last, nearest; int samepage; } nvmtl_undecl;
+static inline int nvmtl_undeclared_scan(const uint8_t *cur, const uint8_t *prev, size_t size, size_t lo, size_t hi, nvmtl_undecl *o)
+{
+    memset(o, 0, sizeof *o);
+    if (hi > size) hi = size;
+    if (lo > hi) lo = hi;
+    const size_t plo = lo & ~(size_t)(NVMTL_PAGE_BYTES - 1), phi = (hi + NVMTL_PAGE_BYTES - 1) & ~(size_t)(NVMTL_PAGE_BYTES - 1);
+    int any = 0;
+    for (int part = 0; part < 2; part++) {
+        size_t a = part ? hi : 0, b = part ? size : lo;
+        for (size_t i = a; i < b; ) {
+            if (!(i & 7) && i + 8 <= b && !memcmp(cur + i, prev + i, 8)) { i += 8; continue; }
+            if (cur[i] != prev[i]) {
+                const size_t dist = i < lo ? lo - i : i - hi + 1;
+                if (!any || i < o->first) o->first = i;
+                if (!any || i > o->last) o->last = i;
+                if (!any || dist < o->nearest) o->nearest = dist;
+                if (i >= plo && i < phi) o->samepage = 1;
+                o->bytes++; any = 1;
+            }
+            i++;
+        }
+    }
+    return any;
+}
+
 /* The knobs a report must show. A process logs the ones that are SET once, at the start (`vk: ab switches`); triage names them. Every
  * optimisation NVMTL_PARANOID turns off, every switch of the ladder and the older ones the ladder uses. */
 static const char *const nvmtl_ab_knobs[] = {
@@ -132,7 +178,7 @@ static const char *const nvmtl_ab_knobs[] = {
     "NVMTL_NO_POOL_REUSE", "NVMTL_POOL_REUSE", "NVMTL_NO_BUFREUSE", "NVMTL_NO_BUFTEX_RECYCLE", "NVMTL_NO_HEAPTEX_RECYCLE", "NVMTL_NO_HEAPTEX_PLACE",
     "NVMTL_NO_DIRTYONLY", "NVMTL_ENC78_OFF", "NVMTL_G79_OFF", "NVMTL_NO_RES2", "NVMTL_NO_PURGE_RECLAIM", "NVMTL_MANAGED_CHECK", "NVMTL_MANAGED_SNAPSHOT",
     "NVMTL_LOAD_BARRIER", "NVMTL_NO_ALIGN_GUARD", "NVMTL_FBFETCH_ZERO", "NVMTL_SKIP_EMPTY", "NVMTL_EVFOLD", "NVMTL_DONTCARE_CLEARS", "NVMTL_NO_TEXBUF",
-    "NVMTL_NO_SAMPVAR", "NVMTL_NO_SURFIN_CACHE", "NVMTL_SURFIN_VERIFY", "NVMTL_NO_SURFACE_SHARE", "NVMTL_NO_SURFACE_PAGEOFF", "NVMTL_SHARED_VRAM", "NVMTL_ZERO_FILL", "NVMTL_MANAGED_EAGER_ZERO", "NVMTL_NO_BINDLESS",
+    "NVMTL_NO_SAMPVAR", "NVMTL_MANAGED_WHOLE", "NVMTL_MANAGED_PAGES", "NVMTL_NO_SURFIN_CACHE", "NVMTL_SURFIN_VERIFY", "NVMTL_NO_SURFACE_SHARE", "NVMTL_NO_SURFACE_PAGEOFF", "NVMTL_SHARED_VRAM", "NVMTL_ZERO_FILL", "NVMTL_MANAGED_EAGER_ZERO", "NVMTL_NO_BINDLESS",
     NULL };
 
 /* Fill `out` (cap bytes) with `KEY="value"` tokens of the knobs that are set, starting at knob index *next, as many as fit; *next moves past them.

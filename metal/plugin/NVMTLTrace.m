@@ -8,6 +8,58 @@
 
 static inline NVMTLTexture *nvmtl_tr_root(NVMTLTexture *t) { return (t && t->_parent) ? t->_parent : t; }
 
+/* ---- the surface census (DRIVER-PLAN N50, nvmtl_surf_census.h): what touched the IOSurface-backed render targets of this process, and how. Not part of the frame trace:
+ * it runs with the trace off. One table behind a lock, `census: SUMMARY` at most every 10 s while a counter moved, and at exit. ---- */
+#include <os/lock.h>
+#include "nvmtl_surf_census.h"
+void nvlog_uncapped(const char *fmt, ...);
+static nvc_table g_cen;
+static os_unfair_lock g_cen_lock = OS_UNFAIR_LOCK_INIT;
+static uint64_t g_cen_last_ns, g_cen_t0_ns, g_cen_last_total, g_cen_calls; static unsigned g_cen_seq; static int g_cen_armed;
+static void nvmtl_cen_summary(int force);
+static void nvmtl_cen_atexit(void) { nvmtl_cen_summary(1); }
+static void nvmtl_cen_summary(int force)
+{
+    char body[760];
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    os_unfair_lock_lock(&g_cen_lock);
+    if (!g_cen_armed) { g_cen_armed = 1; g_cen_t0_ns = now; g_cen_last_ns = now; atexit(nvmtl_cen_atexit); }
+    if (!force && now - g_cen_last_ns < 10ull * 1000000000ull) { os_unfair_lock_unlock(&g_cen_lock); return; }
+    uint64_t total = g_cen.overflow; for (int k = 0; k < NVC_N; k++) total += g_cen.tot[k];
+    if (!total || total == g_cen_last_total) { g_cen_last_ns = now; os_unfair_lock_unlock(&g_cen_lock); return; }   /* nothing new: look again in 10 s */
+    g_cen_last_ns = now; g_cen_last_total = total;
+    const int have = nvc_format(&g_cen, body, sizeof body, 5);
+    const unsigned seq = ++g_cen_seq;
+    os_unfair_lock_unlock(&g_cen_lock);
+    if (have) nvlog_uncapped("census: SUMMARY seq=%u t_ms=%llu %s", seq, (unsigned long long)((now - g_cen_t0_ns) / 1000000ull), body);
+}
+/* count `kind` for a texture's root surface (nothing for a texture that is not an IOSurface's) */
+static void nvmtl_cen_note(NVMTLTexture *t, int kind, uint64_t n)
+{
+    NVMTLTexture *r = nvmtl_tr_root(t);
+    if (!r || !r->_surf) return;
+    const uint32_t id = (uint32_t)IOSurfaceGetID(r->_surf);
+    os_unfair_lock_lock(&g_cen_lock);
+    nvc_note(&g_cen, id, r->_i.w, r->_i.h, r->_vramOn ? 1 : 0, kind, n);
+    const uint64_t c = ++g_cen_calls;
+    os_unfair_lock_unlock(&g_cen_lock);
+    if (!(c & 63)) nvmtl_cen_summary(0);
+}
+/* one draw into a surface target: all draws, Apple's buffer_image_blit draws, framebuffer-fetch draws */
+static void nvmtl_cen_draw(NVMTLTexture *t, int blit, int fbf)
+{
+    NVMTLTexture *r = nvmtl_tr_root(t);
+    if (!r || !r->_surf) return;
+    const uint32_t id = (uint32_t)IOSurfaceGetID(r->_surf);
+    os_unfair_lock_lock(&g_cen_lock);
+    nvc_note(&g_cen, id, r->_i.w, r->_i.h, r->_vramOn ? 1 : 0, NVC_DRAW, 1);
+    if (blit) nvc_note(&g_cen, id, r->_i.w, r->_i.h, r->_vramOn ? 1 : 0, NVC_DRAW_BLIT, 1);
+    if (fbf) nvc_note(&g_cen, id, r->_i.w, r->_i.h, r->_vramOn ? 1 : 0, NVC_DRAW_FBF, 1);
+    const uint64_t c = ++g_cen_calls;
+    os_unfair_lock_unlock(&g_cen_lock);
+    if (!(c & 63)) nvmtl_cen_summary(0);
+}
+
 /* one id per command buffer for the life of the process; 0 when tracing is off */
 static uint32_t nvmtl_tr_cb_id(NVMTLCommandBuffer *cb)
 {
@@ -30,6 +82,14 @@ static BOOL nvmtl_tr_hash(NVMTLTexture *rt, const void *base, size_t bpr, uint32
 static void nvmtl_tr_surf(NVMTLTexture *rt, unsigned kind, unsigned path, int rc, uint32_t seed0, uint32_t seed1,
                           uint64_t t0, uint64_t bytes, const uint32_t *bands, unsigned flags)
 {
+    if (rt && rt->_surf) {   /* the census counts with the trace off as well */
+        if (kind == NVT_K_SURF_IN) {
+            if (path == NVT_IN_UPLOAD) { nvmtl_cen_note(rt, rt->_vramOn ? NVC_SIN_UP_VRAM : NVC_SIN_UP_PRIV, 1); nvmtl_cen_note(rt, NVC_SIN_BYTES, bytes); }
+            else if (path == NVT_IN_SKIP_VRAM) nvmtl_cen_note(rt, NVC_SIN_SKIP, 1);
+            else nvmtl_cen_note(rt, NVC_SIN_FAIL, 1);
+        } else if (kind == NVT_K_SURF_OUT)
+            nvmtl_cen_note(rt, path == NVT_OUT_DIRTY ? NVC_OUT_DIRTY : (path == NVT_OUT_COPY_PRIVATE || path == NVT_OUT_COPY_AFTER_REFUSE) ? NVC_OUT_COPY : NVC_OUT_FAIL, 1);
+    }
     if (!rt || !rt->_surf || !nvt_on()) return;
     nvt_ev_surf(kind, path, (uint32_t)IOSurfaceGetID(rt->_surf), (unsigned)rt->_plane, rt->_i.w, rt->_i.h, (uint32_t)rt->_fmt,
                 (uint32_t)IOSurfaceGetBytesPerRowOfPlane(rt->_surf, rt->_plane), flags | (rt->_vramOn ? NVT_F_VRAM : 0u),

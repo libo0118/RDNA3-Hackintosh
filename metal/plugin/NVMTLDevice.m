@@ -118,9 +118,9 @@ const char *nvmtl_log_path(void) {
     return path;
 }
 static void nvlog_emit(const char *fmt, uint64_t rep, va_list a) {
-    char b[768];
+    char b[1024];   /* (the summary lines are long: they were cut at 767 characters)  */
     vsnprintf(b, sizeof b, fmt, a);
-    char t[900];
+    char t[1200];
     if (rep) snprintf(t, sizeof t, "%s   [logged %llu times now]", b, (unsigned long long)rep);
     else     snprintf(t, sizeof t, "%s", b);
 #if NVMTL_RELEASE

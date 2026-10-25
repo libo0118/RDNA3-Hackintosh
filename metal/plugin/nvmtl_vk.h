@@ -74,6 +74,7 @@ typedef struct { void *cb; void *fb; void *pool; void *dset[2]; void *depth_view
                  void **rvs; unsigned nrv, caprv;
                  uint32_t fbin, fbf_bad, fbf_layers, fbf_noset;   /* input attachments the pass in progress declares; of them the ones that cannot be served; its layer count */
                  void *fbf_set; uint32_t fbf_ready;     /* the pass's descriptor set (set NVMTL_FBF_SET) and whether it was built (or failed) */
+                 nvk_image *tmpimg; unsigned ntmpimg;     /* scratch images the recording made (a copy inside one image goes through one); destroyed with the command buffer */
                  nvk_fbf_att fbf_att[NVMTL_NCOL];
                } nvk_cmdbuf;
 int  nvmtl_vk_init(void);

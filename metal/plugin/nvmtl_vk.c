@@ -5017,6 +5017,11 @@ static _Atomic unsigned g_ldp_bad[2];
 static _Atomic unsigned g_ldp[2][10];   /* LOAD passes whose image rests in another layout than the declared one, by tracked layout (colour, depth) */
 static _Atomic unsigned g_ldp_all[2], g_ldp_inrp[2];   /* all LOAD passes (the denominator); passes seen with a render pass already open (not counted, not transitioned) */
 static _Atomic unsigned g_ldp_barriers[2];
+/* DRIVER-PLAN N50: copies with one VkImage on both sides (a scroll by blitting a window texture onto itself; found by reading, nvmtl_vk_cmd_copy_image_sub3).
+ * all = every one, overlap = the two regions share texels (Vulkan: undefined), general = no overlap, copied between two GENERAL-layout sides,
+ * tmp = overlap, copied through a scratch image, tmpfail = overlap, scratch image could not be made, unsafe = overlap, a shape the scratch image does not cover (3D, depth,
+ * multisample, compressed) copied in place as before */
+static _Atomic unsigned g_sic_all, g_sic_overlap, g_sic_general, g_sic_tmp, g_sic_tmpfail, g_sic_unsafe;
 static _Atomic uint64_t g_ab_sum_ns; static _Atomic unsigned long long g_ab_sum_last; static int g_ab_armed;
 static int nvmtl_load_barrier_on(void)
 {
@@ -5041,18 +5046,23 @@ static void nvmtl_ab_summary(int force)
     }
     const unsigned long long we = __atomic_load_n(&g_wit_waited, __ATOMIC_RELAXED), wo = __atomic_load_n(&g_wit_ok, __ATOMIC_RELAXED),
                              ww = __atomic_load_n(&g_wit_skew_max, __ATOMIC_RELAXED), wb = __atomic_load_n(&g_wit_blind, __ATOMIC_RELAXED);
-    const unsigned long long total = sum + we + wo + ww + wb;
+    const unsigned sic[6] = { atomic_load_explicit(&g_sic_all, memory_order_relaxed), atomic_load_explicit(&g_sic_overlap, memory_order_relaxed),
+        atomic_load_explicit(&g_sic_general, memory_order_relaxed), atomic_load_explicit(&g_sic_tmp, memory_order_relaxed),
+        atomic_load_explicit(&g_sic_tmpfail, memory_order_relaxed), atomic_load_explicit(&g_sic_unsafe, memory_order_relaxed) };
+    const unsigned long long total = sum + we + wo + ww + wb + sic[0] + sic[1] + sic[2] + sic[3] + sic[4] + sic[5];
     if (!total || total == atomic_load_explicit(&g_ab_sum_last, memory_order_relaxed)) { if (!force) atomic_store(&g_ab_sum_ns, now); return; }   /* nothing new: look again in 10 s, not at every call */
     if (!atomic_compare_exchange_strong(&g_ab_sum_ns, (uint64_t *)&last, now) && !force) return;
     atomic_store_explicit(&g_ab_sum_last, total, memory_order_relaxed);
     nvlog_uncapped("vk: ab: SUMMARY load_colour_all=%u load_colour_mismatch=%u load_colour_inrp=%u load_colour_barriers=%u "
                    "load_depth_all=%u load_depth_mismatch=%u load_depth_inrp=%u load_depth_barriers=%u "
                    "colour_by_layout=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u depth_by_layout=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u "
-                   "wit_early=%llu wit_ok=%llu wit_blind=%llu wit_worst_us=%llu",
+                   "wit_early=%llu wit_ok=%llu wit_blind=%llu wit_worst_us=%llu "
+                   "same_image_copies=%u same_image_overlap=%u same_image_general=%u same_image_tmp=%u same_image_tmpfail=%u same_image_unsafe=%u",
                    all[0], c[0][0] + c[0][1] + c[0][2] + c[0][3] + c[0][4] + c[0][5] + c[0][6] + c[0][7] + c[0][8] + c[0][9], inrp[0], bar[0],
                    all[1], c[1][0] + c[1][1] + c[1][2] + c[1][3] + c[1][4] + c[1][5] + c[1][6] + c[1][7] + c[1][8] + c[1][9], inrp[1], bar[1],
                    c[0][0], c[0][1], c[0][2], c[0][3], c[0][4], c[0][5], c[0][6], c[0][7], c[0][8], c[0][9],
-                   c[1][0], c[1][1], c[1][2], c[1][3], c[1][4], c[1][5], c[1][6], c[1][7], c[1][8], c[1][9], we, wo, wb, ww);
+                   c[1][0], c[1][1], c[1][2], c[1][3], c[1][4], c[1][5], c[1][6], c[1][7], c[1][8], c[1][9], we, wo, wb, ww,
+                   sic[0], sic[1], sic[2], sic[3], sic[4], sic[5]);
 }
 static void nvmtl_load_layout(nvk_cmdbuf *c, nvk_image *img, int depth, uint32_t level, uint32_t layer, uint32_t layers)
 {
@@ -5774,6 +5784,8 @@ static void nvmtl_cmd_retire(nvk_cmdbuf *c)
     free(c->fbs); c->fbs = NULL; c->nfb = c->capfb = 0; c->fb = NULL;
     for (unsigned i = 0; i < c->nrv; i++) pvkDestroyImageView(g_dev, (VkImageView)c->rvs[i], NULL);
     free(c->rvs); c->rvs = NULL; c->nrv = c->caprv = 0;
+    for (unsigned i = 0; i < c->ntmpimg; i++) nvmtl_vk_image_destroy(&c->tmpimg[i]);
+    free(c->tmpimg); c->tmpimg = NULL; c->ntmpimg = 0;
     if (c->ndcache) {
         pthread_mutex_lock(&g_desc_lock);
         VkDescriptorSet back[NVMTL_DESC_BATCH_MAX];
@@ -8150,6 +8162,51 @@ int nvmtl_vk_cmd_copy_image_sub3(nvk_cmdbuf *c, nvk_image *src, uint32_t sl, uin
         regions[count++] = (VkImageCopy){ { aspect, sl, s3 ? 0u : ss, s3 ? 1u : (d3 ? depth : 1u) }, { (int32_t)sx, (int32_t)sy, s3 ? (int32_t)sz : 0 },
                                          { aspect, dl, d3 ? 0u : ds, d3 ? 1u : (s3 ? depth : 1u) }, { (int32_t)dx, (int32_t)dy, d3 ? (int32_t)dz : 0 },
                                          { w, h, depth } };
+    }
+    if ((VkImage)src->img == (VkImage)dst->img) {
+        /* DRIVER-PLAN N50: one image on both sides. WAS: the image was moved to TRANSFER_SRC and then to TRANSFER_DST and vkCmdCopyImage got TRANSFER_SRC for the
+         * source while the image rested in TRANSFER_DST; Vulkan also leaves the result of overlapping regions of one image undefined. Now: both sides in GENERAL
+         * (the one layout Vulkan allows for a copy within an image) when the regions share no texel, a scratch image when they do (source -> scratch -> destination). */
+        const int same_sub = sl == dl && (s3 ? 1 : ss == ds);
+        const int z_overlap = s3 ? (sz < dz + depth && dz < sz + depth) : 1;
+        const int overlap = same_sub && z_overlap && sx < dx + w && dx < sx + w && sy < dy + h && dy < sy + h;
+        const unsigned n = atomic_fetch_add(&g_sic_all, 1) + 1;
+        const int tmp_fits = !s3 && !d3 && (src->samples ? src->samples : 1) == 1 && aspects == VK_IMAGE_ASPECT_COLOR_BIT && src->bw <= 1 && src->bh <= 1 && src->bpp;
+        nvk_image *scratch = NULL; const char *how = "no overlap, both sides in GENERAL";
+        if (!overlap) atomic_fetch_add(&g_sic_general, 1);
+        else {
+            atomic_fetch_add(&g_sic_overlap, 1);
+            how = "OVERLAP, through a scratch image";
+            nvk_image tmp; memset(&tmp, 0, sizeof tmp);
+            if (!tmp_fits) { atomic_fetch_add(&g_sic_unsafe, 1); how = "OVERLAP, a shape the scratch image does not cover (3D, depth, multisample or compressed): copied in place, undefined by Vulkan"; }
+            else if (nvmtl_vk_image_create_ex2(w, h, src->fmt, src->bpp, 0, 1, 0, &tmp)) { atomic_fetch_add(&g_sic_tmpfail, 1); how = "OVERLAP, the scratch image could not be made: copied in place, undefined by Vulkan"; }
+            else {
+                nvk_image *grown = (nvk_image *)realloc(c->tmpimg, (c->ntmpimg + 1) * sizeof *grown);
+                if (!grown) { nvmtl_vk_image_destroy(&tmp); atomic_fetch_add(&g_sic_tmpfail, 1); how = "OVERLAP, no memory for the scratch list: copied in place, undefined by Vulkan"; }
+                else { c->tmpimg = grown; c->tmpimg[c->ntmpimg++] = tmp; scratch = &c->tmpimg[c->ntmpimg - 1]; atomic_fetch_add(&g_sic_tmp, 1); }
+            }
+        }
+        if (n <= 8 || n % 1024 == 0)
+            nvlog("vk: same-image copy %ux%ux%u fmt %u from (%u,%u,%u) level %u slice %u to (%u,%u,%u) level %u slice %u: %s [%u same-image copies so far, %u overlapping]",
+                  w, h, depth, src->fmt, sx, sy, sz, sl, ss, dx, dy, dz, dl, ds, how, n, atomic_load(&g_sic_overlap));
+        if (n == 1 || !(n & (n - 1))) nvmtl_ab_summary(1);
+        nvmtl_vk_cmd_barrier(c);
+        img_to(c, src, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        if (scratch) {
+            img_to(c, scratch, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+            const VkImageCopy in = { { VK_IMAGE_ASPECT_COLOR_BIT, sl, ss, 1 }, { (int32_t)sx, (int32_t)sy, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { w, h, 1 } };
+            pvkCmdCopyImage(c->cb, (VkImage)src->img, VK_IMAGE_LAYOUT_GENERAL, (VkImage)scratch->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &in);
+            img_to(c, scratch, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);   /* (also the execution dependency: the read of the image ends before it is written) */
+            const VkImageCopy out = { { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { 0, 0, 0 }, { VK_IMAGE_ASPECT_COLOR_BIT, dl, ds, 1 }, { (int32_t)dx, (int32_t)dy, 0 }, { w, h, 1 } };
+            pvkCmdCopyImage(c->cb, (VkImage)scratch->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, (VkImage)dst->img, VK_IMAGE_LAYOUT_GENERAL, 1, &out);
+        } else
+            pvkCmdCopyImage(c->cb, (VkImage)src->img, VK_IMAGE_LAYOUT_GENERAL, (VkImage)dst->img, VK_IMAGE_LAYOUT_GENERAL, count, regions);
+        img_to(c, dst, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+               VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        nvmtl_vk_cmd_barrier(c);
+        return 0;
     }
     nvmtl_vk_cmd_barrier(c);
     img_to(c, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
