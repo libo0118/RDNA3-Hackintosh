@@ -828,6 +828,7 @@ It does not harm the card.
 | `step` ends immediately, the desktop does not disappear | read `~/rdna3-vm/reports/host-*.log` (the newest) and send it |
 | macOS did not send a report | run the same step with `--stay` and in the macOS Terminal run `sudo sh "/Library/Application Support/RDNA3VM/autoreport.sh"` |
 | the keyboard does not work in macOS | the VM started without input capture: send `host-*.log`; exit with the power button |
+| macOS does not boot with `CPU_MODEL="host"` | [back to the Skylake model](#the-vm-on-this-computers-real-cpu-cpu_modelhost-amd-hosts-driver-plan-n52): one `sed` line; send `serial-*.log`, `host-*.log` |
 
 A computer without a login manager (booting to a console) also works. The script itself
 stops `display-manager` and then starts it again.
@@ -892,6 +893,87 @@ commits). `rdna3vm update --no-wait` stops instead of waiting. By hand:
 3. Run `rdna3vm window` and in the macOS Terminal paste the same
    `curl ... | sudo sh` command as in step D. Then `sudo shutdown -h now`.
 4. Go back to step E.
+
+### The VM on this computer's real CPU (`CPU_MODEL="host"`, AMD hosts; DRIVER-PLAN N53)
+
+By default the VM shows macOS an emulated Intel Skylake CPU. For the planned
+bare-metal hackintosh on the same Ryzen the card can be tested with the real
+CPU instead: QEMU's `-cpu host`, and OpenCore gets the AMD_Vanilla kernel
+patches that every AMD hackintosh needs.
+
+Switch (one line, nothing else to edit; `rdna3vm` changes the OpenCore image
+itself before every boot):
+
+```sh
+sed -i 's/^CPU_MODEL=.*/CPU_MODEL="host"/' ~/rdna3-vm/config      # the real CPU
+rdna3vm check                                                     # the "VM CPU" part must be green
+rdna3vm window                                                    # first try: macOS in a window, the card stays with Linux
+```
+
+Back to the Intel model (the patches are removed and what they replaced
+is restored the same way, no manual edit):
+
+```sh
+sed -i 's/^CPU_MODEL=.*/CPU_MODEL="Skylake-Client,-hle,-rtm,kvm=on,vendor=GenuineIntel,+invtsc,vmware-cpuid-freq=on,+ssse3,+sse4.2,+popcnt,+avx,+aes,+xsave,+xsaveopt,check"/' ~/rdna3-vm/config
+```
+
+What `host` does:
+
+- QEMU gets `-cpu host,kvm=on,+invtsc,vmware-cpuid-freq=on,check` (more flags
+  after `host,` in `CPU_MODEL` are appended). The vendor stays AuthenticAMD:
+  the patches expect it. `+invtsc` is the invariant TSC (macOS since Monterey
+  panics when the host's TSC is not stable: `rdna3vm check` wants the host
+  clocksource to be `tsc`). `ignore_msrs` is set by the VM start as before.
+- The topology is `CPUS` vCPUs = `CPUS / CPU_THREADS` cores x `CPU_THREADS`
+  threads (`CPU_THREADS` in the config, default 1; `+topoext` is added for
+  2 or more, QEMU warns without it). The AMD core-count patch gets the same
+  number of cores, so the topology macOS reads and the patch agree. With
+  `CPUS=12` that is 12 cores / 12 threads, patch `0C`; the 5800X as it will
+  be on bare metal is `CPUS=16` and `CPU_THREADS=2` (8 cores, patch `08`).
+- Before every boot (`window`, `step`, the install boot) `vmtool.py plist
+  --amd-cpu <cores>` writes 24 Kernel/Patch entries into the image's
+  `config.plist` (their Comment starts with `rdna3vm-amd:`), sets
+  `Kernel/Quirks/ProvideCurrentCpuInfo` and `Kernel/Emulate/DummyPowerManagement`
+  on and the Cpuid1 spoof empty. What it replaced is kept in the key
+  `#rdna3vm-amd-restore` of `Kernel` (OpenCore ignores `#` keys) and comes
+  back with `--no-amd-cpu`, which every other `CPU_MODEL` runs. A second run changes
+  nothing. The patch list is vendored in `tools/vm/data/` (source, commit,
+  licence and sha256 in `amd_vanilla.SOURCE`; nothing is downloaded when the
+  VM starts). Only the kernel patches are used, not AMD_Vanilla's IOPCIFamily
+  ones (Zen 4 boards).
+- The run says what it did: `VM CPU: ...` and `amd-cpu: on, 24 AMD_Vanilla
+  kernel patches, core count 12 (0x0C)` in the terminal and in `host-*.log`,
+  and the result file's `00-host.txt` has `vm-cpu:` lines (CPU, topology, the
+  exact `-cpu` / `-smp`). In macOS: `sysctl machdep.cpu.brand_string
+  machdep.cpu.core_count machdep.cpu.thread_count` shows the Ryzen and the
+  counts above.
+
+What a failed boot looks like (**needs the card / the VM: not run yet**).
+`-v` is on in every step, so the window or `serial-*.log` shows it:
+
+| What you see | Meaning |
+|---|---|
+| a restart loop at the Apple logo or right after `EXITBS:START`; a panic naming `cpuid_set_info`, `commpage`, `Non-monotonic time` or `thread_invoke` | an AMD patch did not match this macOS (Apple changed the kernel; macOS 26.4 needed a new one, which the vendored file has). Send `serial-*.log`, `host-*.log` and `00-host.txt`; the Darwin number is in the panic text. The fix is a newer AMD_Vanilla `patches.plist` (see `amd_vanilla.SOURCE`), not a change here |
+| a panic about the topology or a CPU count | `CPUS` / `CPU_THREADS` / core count disagree or macOS dislikes the number; try `CPUS=8` or `CPUS=16 CPU_THREADS=2` |
+| `kernel_task` panics about the TSC or the clock | the host TSC; `dmesg \| grep -i -e tsc -e clocksource` on Linux, a power cycle of the computer helps sometimes |
+| QEMU prints `warning: host doesn't support requested feature` | read the feature: `+invtsc` missing means the host reports no invariant TSC |
+
+Going back is the sed line above, then any `rdna3vm window` or `step` (the
+OpenCore image is cleaned at its start). If macOS does not boot even in
+the Skylake model afterwards, copy the original again:
+`qemu-img convert -O raw /mnt/data/OSX-KVM/OpenCore/OpenCore.qcow2 ~/rdna3-vm/OpenCore-rdna3.img`
+and `rdna3vm prepare ...` once more (it re-applies SIP off and the kexts).
+
+What was checked on this computer (Ryzen 7 5800X, Zen 3, host kernel 7.2): QEMU 11.1.2 accepts
+the `-cpu` and `-smp` lines (no warning; `threads=2` needs `+topoext`); the
+OpenCore 1.0.6 image (`ocvalidate` of the same version: no issues on the
+edited config and on the one switched back, which is byte for byte the
+original); `make test` runs `tests/test_vm_amd_cpu.sh`. Not checked: that macOS
+26.4.1 boots with these patches in a KVM guest. Known risks: a future Darwin
+that breaks a patch; how macOS finds the TSC frequency in this guest
+(the `vmware-cpuid-freq` leaf, or what OpenCore's `ProvideCurrentCpuInfo`
+gives; OSX-KVM's flags were chosen for an Intel guest) is untested; the PAT patch is AMD_Vanilla's default (Algrey's), the
+alternative of Shaneee changes how GPU memory is mapped and is off.
 
 ### macOS 26 (Tahoe) on a second disk
 
@@ -1039,5 +1121,7 @@ tell what window the run really had.
 - In macOS the `org.rdna3.vmreport` daemon collects a report 90 s after boot, i.e.
   `tools/macos/collect.sh` plus the `rdna3_drminfo` tests. It sends it and, if the host
   asked for it (`rdna3vmauto=1`), shuts down the system.
+- `CPU_MODEL` decides the VM's CPU (an emulated Skylake by default, the real one with `host`);
+  `rdna3vm` adjusts the OpenCore image for it before every boot (see above).
 - The kernel log goes to the VM serial port (`serial=3`) into `serial-*.log`, and
   `debug=0x100` halts macOS on a panic instead of restarting.

@@ -1,0 +1,31 @@
+amd_vanilla-a174cca.plist - AMD_Vanilla kernel patches, vendored unmodified.
+
+What:     patches.plist of the AMD_Vanilla OpenCore patch set (AMD CPUs 15h-19h on
+          macOS 10.13 - 26): the Kernel/Patch entries that make the XNU kernel boot on
+          an AMD CPU. tools/vm/vmtool.py (plist --amd-cpu) copies the entries whose
+          Identifier is "kernel" into the OpenCore config of the card VM.
+Source:   https://github.com/AMD-OSX/AMD_Vanilla, master eaf52ef292abf4ebec899df6d48626569ba50cc6
+          (2025-10-17, "Minor readme updates"; README lists macOS Tahoe (26) as supported)
+          plus the two commits of its open pull request #215
+          (https://github.com/AMD-OSX/AMD_Vanilla/pull/215, branch master of
+          laobamac/AMD_Vanilla):
+            2878877  non-monotonic time panic fix for Darwin 25.4.0+ (macOS 26.4+)
+            a174cca  probeBusGated patch for macOS 26 (IOPCIFamily, Zen 4 only; not used here)
+          The file is the one of a174cca80efe2377fde3b902666c70863ea66454:
+          https://raw.githubusercontent.com/laobamac/AMD_Vanilla/a174cca80efe2377fde3b902666c70863ea66454/patches.plist
+          Why the PR: master's thread_invoke / thread_dispatch patch does not match the
+          kernel of macOS 26.4 and later (Darwin 25.4.0, struct thread grew by 8 bytes:
+          cmp r13,[r14+0x488] became cmp r12,[r14+0x490]); without it that kernel panics
+          at boot ("non-monotonic time"). Reported working on macOS 26.4.1 (Lenovo Legion
+          laptop, review on the PR) and macOS 26.7.1 / Darwin 25.6.0 (Ryzen 9 3900X, the
+          same a174cca file, comment of 2026-10-22).
+sha256:   dc147342ba068f8221783b43ca5d233587167e4907ae523d83146e5451bf3298
+Licence:  the repository carries no LICENSE file (GitHub API: license null; same for the
+          laobamac fork). The file is a table of binary patch bytes (Find / Replace of
+          Apple's kernel code) with credits in the README: AlGrey, XLNC, Acidanthera,
+          CaseySJ, Visual, Shaneee, Zormeister, Goldfish64 and others. Kept unmodified,
+          with its source here, for use in the owner's private test VM; not to be
+          re-licensed. tests/test_vm_amd_cpu.sh checks the sha256 above.
+Update:   replace the .plist by a newer commit's patches.plist, set AMD_PATCH_FILE in
+          tools/vm/vmtool.py, this file and the sha256 in tests/test_vm_amd_cpu.sh. Look
+          at the PR list of AMD-OSX/AMD_Vanilla first (a new Darwin may need a new patch).
