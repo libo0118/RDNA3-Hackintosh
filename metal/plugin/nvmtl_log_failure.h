@@ -30,6 +30,9 @@ static inline int nvmtl_log_failure(const char *text)
                     strstr(text, "no device") ||
                     /* DRIVER-PLAN N49 open item 1: whether this process has its IOAccelCommandQueue (Activity Monitor's % GPU), once per
                      * process, opened or not: triage needs the line either way */
-                    strstr(text, "GPU time queue:"));
+                    strstr(text, "GPU time queue:") ||
+                    /* DRIVER-PLAN N52: the totals of the multisample copy passes (Chess's stencil resolve chain), once per process and every 10 s while they move:
+                     * triage proves the chain from them, in a release build too */
+                    strstr(text, "msdl: SUMMARY") || strstr(text, "msupload: SUMMARY"));
 }
 #endif

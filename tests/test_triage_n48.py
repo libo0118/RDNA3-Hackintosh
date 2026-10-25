@@ -43,7 +43,7 @@ check("4 logged refusal line(s)" in r["plugin copy refused"][2] and "Chess copy_
 # multisample uploads
 ok = L("Chess", 3005, "3b4f", "msupload: buffer -> 4-sample image 971x680 (vk format 50 via view 44, mode 1): region (0,0) 971x680 from buffer offset 0 row 3904 B [3 so far]")
 r = rows_of(ok + L("Chess", 3005, "3b4f", "msupload: pass built for view format 44 at 4 samples (1 in this process)"))
-check(list(r) == ["multisample upload"] and r["multisample upload"][0] == "INFO" and "Chess 4-sample vk format 50: 3" in r["multisample upload"][2], "msupload INFO: %r" % r)
+check(list(r) == ["multisample upload"] and r["multisample upload"][0] == "INFO" and "Chess 4-sample vk format 50: 1 line(s)" in r["multisample upload"][2], "msupload INFO: %r" % r)
 r = rows_of(ok + L("Chess", 3005, "3b4f", "msupload: vkCreateGraphicsPipelines(format 44, 4 samples) -> -3"))
 check(r["multisample upload"][0] == "WARN" and "vkCreateGraphicsPipelines" in r["multisample upload"][2] or
       any(x[0] == "WARN" for x in t48.n48_plugin_rows(ok + L("Chess", 3005, "3b4f", "msupload: vkCreateGraphicsPipelines(format 44, 4 samples) -> -3"))), "msupload failure: WARN")
@@ -64,19 +64,84 @@ check(rows_of(L("Chess", 3005, "3b4f", "msupload: pass built for view format 44 
 rr = rows_of(L("Chess", 3005, "3b4f", "msupload: REFUSED - a render pass is open [1 refused, 0 failed, 0 done so far]"))
 check(list(rr) == ["plugin copy refused"], "msupload REFUSED: %r" % rr)
 
-# multisample texture -> buffer (N52; line formats of nvmtl_vk.c: nvmtl_vk_cmd_copy_msimage_to_buffer, nvmtl_msd_fail)
-dl = L("Chess", 3005, "3b4f", "msdl: 4-sample image 971x680 -> buffer (vk format 130, aspect 4 via view 130, mode 0): region (0,0) 971x680 to buffer offset 0 row 3884 B, 660280 word(s) in 10317x1 group(s) [3 so far]")
+# multisample texture -> buffer (N52; line formats of nvmtl_vk.c: nvmtl_vk_cmd_copy_msimage_to_buffer, nvmtl_msd_fail / nvmtl_msd_refuse; the SUMMARY lines of
+# nvmtl_msstat.h, whose text the C host test pins)
+dl = L("Chess", 3005, "3b4f", "msdl: STENCIL 4-sample image 971x680 -> buffer (vk format 130, aspect 4 via view 130, mode 0): region (0,0) 971x680 to buffer offset 0 row 3884 B, 660280 word(s) in 10317x1 group(s) [stencil #3]")
 rr = rows_of(dl + L("Chess", 3005, "3b4f", "msdl: pass built for the unsigned-integer (stencil, R8_UINT ...) module") + L("Chess", 3005, "3b4f", "msdl: descriptor pool 1 opened (256 sets each)"))
-check(list(rr) == ["multisample download"] and rr["multisample download"][0] == "INFO" and "Chess 4-sample vk format 130 aspect 4: 3" in rr["multisample download"][2], "msdl INFO: %r" % rr)
-for line in ("msdl: FAILED - vkCreateComputePipelines (-3) [1 failed, 0 refused, 0 done so far]",
-             "msdl: FAILED - descriptor set allocation (-1000069000) [2 failed, 0 refused, 5 done so far]",
-             "msdl: FAILED - no sampled view of format 130 aspect 4 over the format-130 image (0) [1 failed, 0 refused, 0 done so far]"):
-    rr = [x for x in t48.n48_plugin_rows(dl + L("Chess", 3005, "3b4f", line)) if x[0] == "WARN"]
-    check(len(rr) == 1 and rr[0][1] == "multisample download", "msdl failure is a WARN: %s -> %r" % (line, rr))
-for line in ("msdl: REFUSED - a render pass is open [1 refused, 0 failed, 0 done so far]",
-             "copy_image_to_buffer: REFUSED - a 4-sample image: the 24-bit depth of this format has no byte layout in a Metal blit (vk format 129, type 4, aspect option 2, region (0,0) 8x8, row 32 B, buffer offset 0 of 256) [1 refused, 0 failed so far]"):
+check("multisample download" in rr and rr["multisample download"][0] == "INFO" and "Chess 4-sample vk format 130 aspect 4: 1 line(s)" in rr["multisample download"][2], "msdl INFO (no SUMMARY): %r" % rr)
+for line in ("msdl: FAILED (pipeline) - vkCreateComputePipelines (VkResult -3) [1 of this kind]",
+             "msdl: FAILED (descriptor set) - descriptor set allocation (8 of 8 pools open with 256 sets each, 64 set(s) already in this command buffer) (VkResult -1000069000) [2 of this kind]",
+             "msdl: FAILED (image view) - no sampled view of format 130 aspect 4 over the format-130 image (the image_view_create line before names the cause) [1 of this kind]"):
+    rr = [x for x in t48.n48_plugin_rows(dl + L("Chess", 3005, "3b4f", line)) if x[0] == "WARN" and x[1] == "multisample download"]
+    check(len(rr) == 1, "msdl failure is a WARN: %s -> %r" % (line, rr))
+for line in ("msdl: REFUSED (a render pass is open) - the copy was recorded inside an open render pass [1 of this kind]",
+             "msdl: REFUSED (no buffer device address) - the buffer has no device address (bufferDeviceAddress is not enabled) [1 of this kind]",
+             "copy_image_to_buffer: REFUSED - a 4-sample image: the 24-bit depth of this format has no byte layout in a Metal blit (vk format 129, type 4, aspect option 2, region (0,0) 8x8, row 32 B, buffer offset 0 of 256) [this reason 1 time(s), 1 plan refusals in all]"):
     rr = rows_of(L("Chess", 3005, "3b4f", line))
     check(list(rr) == ["plugin copy refused"], "msdl refusal: %s -> %r" % (line[:50], rr))
+# the reason keeps its own parentheses and loses the detail group and the counters (ECC round 1, F6)
+rr = rows_of(L("Chess", 3005, "3b4f", "msupload: REFUSED (pass unavailable) - the pass for this (view format, samples) pair failed to build earlier [3 of this kind]") +
+             L("Chess", 3005, "3b4f", "copy_buffer_to_image: REFUSED - a 4-sample image: this colour format is not carried by the multisample upload pass (8-bit RGBA/BGRA/R/RG UNORM or sRGB, R8/RG8/RGBA8/R16/R32 UINT only) (vk format 97, type 4, region (0,0) 8x8, row 64 B, buffer offset 0 of 4096) [this reason 2 time(s), 5 plan refusals in all]"))
+txt = rr["plugin copy refused"][2]
+check("(view format, samples) pair failed to build earlier (1)" in txt and "UINT only) (1)" in txt and "[" not in txt.split("blit copies):")[1], "reason keys: %r" % txt)
+# more than 4 reasons are shown
+many = "".join(L("Chess", 3005, "3b4f", "copy_image_to_buffer: REFUSED - reason number %d (vk format 1) [x]" % i) for i in range(7))
+check(rows_of(many)["plugin copy refused"][2].count("reason number") == 7, "up to 8 reasons")
+
+def SUMD(sten=0, colour=0, depth=0, r8u=0, **kw):
+    v = dict(done=sten + colour + depth, d_colour=colour, d_depth=depth, d_stencil=sten, refused=0, r_plan=0, r_inrp=0, r_nodev=0, r_noaddr=0, r_nousage=0, r_pipe=0,
+             failed=0, f_setlayout=0, f_pipelayout=0, f_module=0, f_pipeline=0, f_view=0, f_retire=0, f_set=0, resolve_r8u=r8u, resolve_other=3)
+    v.update(kw)
+    return "msdl: SUMMARY " + " ".join("%s=%d" % kv for kv in v.items())
+
+def SUMU(f13=0, flat13=0, wide=0, **kw):
+    v = dict(done=f13 + flat13, done_int=f13 + flat13, inter=f13, flat=flat13, wide=wide, refused=0, r_plan=0, r_inrp=0, r_nodev=0, r_noaddr=0, r_pipe=0, failed=0,
+             f_pipelayout=0, f_renderpass=0, f_module=0, f_pipeline=0, f_table=0, f_view=0, f_framebuffer=0, f_retire=0)
+    v.update(kw)
+    out = "msupload: SUMMARY " + " ".join("%s=%d" % kv for kv in v.items())
+    if f13: out += " up_inter_13=%d" % f13
+    if flat13: out += " up_flat_13=%d" % flat13
+    return out
+
+CEN = "G14 census: copy texture->buffer 971x680 iosurface=0, vkfmt 130 samples 4 type 4 layers 1 mips 1 aspect 4 bpp 1: multisample, format/aspect carried by the plugin's download pass (view format 130, mode 0; the region is decided at the copy), metal pixel format 260, region 971x680 slice 0 level 0 -> buffer offset 0 row 3884 (first time in this process)"
+ok_chain = L("Chess", 3005, "3b4f", CEN) + L("Chess", 3005, "3b4f", SUMD(sten=14, r8u=14)) + L("Chess", 3005, "3b4f", SUMU(f13=14))
+r = rows_of(ok_chain)
+check(r["multisample chain"][0] == "INFO" and "stencil downloads 14, R8_UINT uploads 14, resolves into R8_UINT 14" in r["multisample chain"][2], "chain ok: %r" % (r.get("multisample chain"),))
+check(r["multisample upload"][0] == "INFO" and "14 upload(s)" in r["multisample upload"][2] and "inter_13: 14" in r["multisample upload"][2], "upload INFO from the SUMMARY: %r" % (r["multisample upload"],))
+check(all(x[0] == "INFO" for x in t48.n48_plugin_rows(ok_chain)), "a complete chain has no WARN: %r" % t48.n48_plugin_rows(ok_chain))
+def chain(log): return [x for x in t48.n48_plugin_rows(log) if x[1] == "multisample chain"]
+# the census shows the multisample stencil copy, the plugin predates N52 (no SUMMARY): WARN
+w = chain(L("Chess", 3005, "3b4f", "G14 census: copy texture->buffer 971x680 iosurface=0, vkfmt 130 samples 4 type 4 layers 1 mips 1: REFUSED (the image is multisampled (Vulkan copies need 1 sample; a Metal blit cannot copy a multisample texture)), metal pixel format 260, region 971x680 slice 0 level 0 -> buffer offset 0 row 3884 (first time in this process)"))
+check(len(w) == 1 and w[0][0] == "WARN" and "no msdl / msupload SUMMARY" in w[0][2], "census without SUMMARY: %r" % w)
+# a refusal of the stencil download / the R8_UINT upload (old plugin lines) shows the chain too
+w = chain(L("Chess", 3005, "3b4f", "copy_image_to_buffer: REFUSED - the image is multisampled (Vulkan copies need 1 sample; a Metal blit cannot copy a multisample texture) (vk format 130, 4 sample(s), type 4, aspect option 4, buffer offset 0, region 971x680)"))
+check(len(w) == 1 and w[0][0] == "WARN", "refused stencil download: %r" % w)
+w = chain(L("Chess", 3005, "3b4f", "copy_buffer_to_image: REFUSED - a 4-sample image: this colour format is not carried by the multisample upload pass (8-bit RGBA/BGRA/R/RG UNORM or sRGB only) (vk format 13, type 4, region (0,0) 971x680, row 3884 B, buffer offset 0 of 4194304) [1 refused, 0 failed so far]"))
+check(len(w) == 1 and w[0][0] == "WARN", "refused R8_UINT upload: %r" % w)
+# a colour-only process and a D24 depth refusal are not the chain
+check(chain(L("Chess", 3005, "3b4f", SUMD(colour=5)) + L("Chess", 3005, "3b4f", SUMU())) == [] or all(x[0] == "INFO" for x in chain(L("Chess", 3005, "3b4f", SUMD(colour=5)))), "colour only: no chain row")
+check(chain(L("Chess", 3005, "3b4f", "copy_image_to_buffer: REFUSED - a 4-sample image: the 24-bit depth of this format has no byte layout in a Metal blit (vk format 129, type 4, aspect option 2, region (0,0) 8x8, row 32 B, buffer offset 0 of 256) [this reason 1 time(s), 1 plan refusals in all]")) == [], "D24 depth refusal is not the chain")
+# each missing link, and a large difference
+for log, what in ((SUMD(sten=0, r8u=14) + "\n" + SUMU(f13=14), "stencil downloads 0"), (SUMD(sten=14, r8u=14) + "\n" + SUMU(f13=0, colour=1) if False else SUMD(sten=14, r8u=14) + "\n" + SUMU(), "R8_UINT uploads 0"),
+                  (SUMD(sten=14, r8u=0) + "\n" + SUMU(f13=14), "no resolve into a 1-sample R8_UINT"), (SUMD(sten=14, r8u=14) + "\n" + SUMU(f13=7), "differ by more than 25%"),
+                  (SUMD(sten=14, r8u=3) + "\n" + SUMU(f13=14), "differ by more than 25%")):
+    lg = "".join(L("Chess", 3005, "3b4f", ln) for ln in log.split("\n"))
+    w = chain(L("Chess", 3005, "3b4f", CEN) + lg)
+    check(len(w) == 1 and w[0][0] == "WARN" and what in w[0][2], "chain link %r: %r" % (what, w))
+check(chain(L("Chess", 3005, "3b4f", CEN) + L("Chess", 3005, "3b4f", SUMD(sten=14, r8u=13)) + L("Chess", 3005, "3b4f", SUMU(f13=15)))[0][0] == "INFO", "small differences are not a WARN")
+# flat layout, wide rows, refusals and failures in the totals are WARN rows of their own
+w = [x for x in t48.n48_plugin_rows(ok_chain + L("Chess", 3005, "3b4f", SUMU(f13=14, flat13=2, wide=1)) +
+                                      L("Chess", 3005, "3b4f", "msupload: FLAT layout fallback (the row is not a multiple of samples * bytes) - buffer -> 4-sample image 100x80 (vk format 44 via view 44, mode 1): region (0,0) 10x10 from buffer offset 0 row 3884 B, every sample of a pixel gets the one element, float output")) if x[0] == "WARN"]
+check(any("FLAT layout fallback" in x[2] and "2 upload(s)" in x[2] and "not a multiple of samples * bytes" in x[2] for x in w) and any("WIDE interleaved row" in x[2] for x in w), "flat / wide WARN rows: %r" % w)
+w = [x for x in t48.n48_plugin_rows(ok_chain + L("Chess", 3005, "3b4f", SUMD(sten=14, r8u=14, r_noaddr=2, f_set=1, failed=1)) + L("Chess", 3005, "3b4f", SUMU(f13=14, r_pipe=4)))
+     if x[0] == "WARN"]
+check(any("r_noaddr=2, f_set=1" in x[2] and x[1] == "multisample download" for x in w) and any("r_pipe=4" in x[2] and x[1] == "multisample upload" for x in w), "totals problems: %r" % w)
+# the newest SUMMARY of a process wins, a second process is judged on its own
+two = (L("Chess", 3005, "3b4f", CEN) + L("Chess", 3005, "3b4f", SUMD(sten=2, r8u=2)) + L("Chess", 3005, "3b4f", SUMU(f13=2)) +
+       L("Chess", 3005, "3b4f", SUMD(sten=14, r8u=14)) + L("Chess", 3005, "3b4f", SUMU(f13=14)) +
+       L("Chess", 4000, "1", CEN) + L("Chess", 4000, "1", SUMD(sten=5, r8u=5)))
+w = chain(two)
+check(len(w) == 2 and w[0][0] == "WARN" and "Chess[4000]" in w[0][2] and "R8_UINT uploads 0" in w[0][2] and "Chess[3005]" not in w[0][2] and w[1][0] == "INFO" and "Chess[3005]" in w[1][2], "per-process chain: %r" % w)
 
 # framebuffer fetch
 FB = ("vk: fbfetch: fragment module #%d declares [[color(n)]] subpass inputs 0x1 (binding 192+n) and %s; pipeline has 1 colour attachment(s), 1 sample(s); "

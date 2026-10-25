@@ -331,6 +331,8 @@ int nvmtl_vk_cmd_copy_buffer(nvk_cmdbuf *c, nvk_buffer *src, size_t srcOff, nvk_
 int nvmtl_vk_cmd_copy_image(nvk_cmdbuf *c, nvk_image *src, uint32_t sx, uint32_t sy,
                         nvk_image *dst, uint32_t dx, uint32_t dy, uint32_t w, uint32_t h);
 
+/* why the last texture<->buffer copy of this thread was refused or failed ("" when it was not): for the encoder's FAILED line */
+const char *nvmtl_vk_copy_reason(void);
 void nvmtl_vk_copy_aspect_override(uint32_t aspect, uint32_t bpp);
 /* "vkfmt N samples S type T layers L mips M aspect A bpp B" (or "... REFUSED (reason)") for the G14 census of a texture<->buffer copy */
 void nvmtl_vk_copy_describe(const nvk_image *img, char *out, size_t n);

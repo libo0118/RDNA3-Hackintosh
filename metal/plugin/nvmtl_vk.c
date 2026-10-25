@@ -31,6 +31,10 @@ static __thread uint32_t g_copy_aspect_override, g_copy_bpp_override;
 void nvmtl_vk_copy_aspect_override(uint32_t aspect, uint32_t bpp) { g_copy_aspect_override = aspect; g_copy_bpp_override = bpp; }
 #include "nvmtl_copy_pack.h"
 #include "nvmtl_msdl.h"
+/* resolves of a multisample colour target into a 1-sample one, by format (the Chess stencil chain resolves into R8_UINT = 13): counted for the
+ * `msdl: SUMMARY` line, defined with the other multisample-copy counters further down */
+static _Atomic unsigned g_ms_resolve_r8u, g_ms_resolve_other;
+static void nvmtl_ms_arm(void);
 /* A blit copy that is recorded for the first time in this shape is logged before and after the Vulkan call (card run
  * 2026-10-25c: Chess died right after such a copy and the log could not say whether it was inside the call). The shape is
  * the image's format, samples, type, the aspect and the element size - NOT the region (WindowServer's many differently sized
@@ -71,7 +75,7 @@ void nvmtl_vk_copy_describe(const nvk_image *img, char *out, size_t n)
         if (nvmtl_msdl_format(img->fmt, g_copy_aspect_override, &view, &aspect, &mode, &u, &bpp, &why))
             snprintf(out, n, "vkfmt %u samples %u type %u layers %u mips %u: REFUSED (%s)", img->fmt, img->samples, img->mtl_type, img->layers, img->mips, why);
         else
-            snprintf(out, n, "vkfmt %u samples %u type %u layers %u mips %u aspect %u bpp %u: multisample, carried by the plugin's download pass (view format %u, mode %u)",
+            snprintf(out, n, "vkfmt %u samples %u type %u layers %u mips %u aspect %u bpp %u: multisample, format/aspect carried by the plugin's download pass (view format %u, mode %u; the region is decided at the copy)",
                      img->fmt, img->samples, img->mtl_type, img->layers, img->mips, aspect, bpp, view, mode);
         return;
     }
@@ -5213,6 +5217,21 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
         if (!rpShape) { nvlog("begin_render: par1 no resolve-shape render pass — pass REFUSED"); return -1; }
         static int said; if (said++ < 8) nvlog("begin_render: par1 %u-sample pass resolves colour 0x%x of 0x%x%s", p->samples, prm, rmask, dres ? " + depth/stencil" : "");
     }
+    /* The resolves that DO happen, by target format (Chess's stencil chain resolves a 4-sample R8_UINT texture, format 13): counted for `msdl: SUMMARY`; the
+     * first of each format in this process has a line of its own (the capped line above says nothing about formats). Counted whether or not the pass needed
+     * a resolve-shape variant: the empty pass of the stencil chain asks for exactly the shape of its own pipeline. */
+    for (uint32_t i = 0; p->samples > 1 && i < ncol; i++) {
+        if (!(prm & (1u << i)) || !ps->res[i]) continue;
+        const uint32_t rf = ps->resfmt[i] ? ps->resfmt[i] : ps->res[i]->fmt;
+        atomic_fetch_add(rf == 13u ? &g_ms_resolve_r8u : &g_ms_resolve_other, 1);
+        nvmtl_ms_arm();
+        static uint32_t seen[8]; static unsigned nseen; static pthread_mutex_t seen_lock = PTHREAD_MUTEX_INITIALIZER;
+        int fresh = 0;
+        pthread_mutex_lock(&seen_lock);
+        { unsigned k = 0; while (k < nseen && seen[k] != rf) k++; if (k == nseen && nseen < 8) { seen[nseen++] = rf; fresh = 1; } }
+        pthread_mutex_unlock(&seen_lock);
+        if (fresh) nvlog("begin_render: par1 first resolve into a format-%u %u-sample colour target (colour %u, %ux%u) in this process", rf, p->samples, i, ps->w, ps->h);
+    }
     for (uint32_t i = 0; i < ncol; i++) {
         if (!cf[i]) continue;
         if (first) { was = ps->col[i]->layout; first = 0; }
@@ -7314,22 +7333,96 @@ static VkPipelineLayout g_msu_layout;
  * it is not rebuilt (shader modules, render pass, pipeline) on every call. */
 static struct { uint32_t fmt, samples; int failed; VkRenderPass rp; VkPipeline pipe; } g_msu_tab[32];
 static unsigned g_msu_n;
-static _Atomic unsigned g_msu_done, g_msu_refused, g_msu_failed;
+#include "nvmtl_msstat.h"
+/* ---- bookkeeping of both multisample copy passes (nvmtl_msstat.h): counters per kind, a literal of its own per kind (nvlog keeps the first 8
+ * calls of each literal), the distinct REASON of a plan refusal at its 1st, 2nd, 4th ... occurrence, and the `msdl:` / `msupload: SUMMARY` lines
+ * on a time schedule (every 10 s while a counter moved, at a power of two of an error counter, at exit). */
+static _Atomic unsigned g_msu_done_uint, g_msu_wide, g_msu_ref[NVMTL_MSS_R_N], g_msu_fail[NVMTL_MSS_F_N], g_msu_up_inter[NVMTL_MSS_NFMT], g_msu_up_flat[NVMTL_MSS_NFMT];
+static _Atomic unsigned g_msd_done[NVMTL_MSS_A_N], g_msd_ref[NVMTL_MSS_R_N], g_msd_fail[NVMTL_MSS_F_N];
+static nvmtl_mss_reason g_msu_reasons[NVMTL_MSS_REASONS], g_msd_reasons[NVMTL_MSS_REASONS];
+static pthread_mutex_t g_ms_lock = PTHREAD_MUTEX_INITIALIZER;   /* the two reason tables */
+static _Atomic uint64_t g_ms_sum_ns; static _Atomic unsigned long long g_ms_sum_last;
 struct nvmtl_msu_pc { uint32_t base[2]; uint32_t row; int32_t ox, oy; uint32_t w, h, mode, samples, sidx, inter; };   /* 44 bytes, nvmtl_msupload_spv.h */
 _Static_assert(sizeof(struct nvmtl_msu_pc) == 44, "msu.frag push constant block");
-
-/* every failure of the upload pass: counted, and logged for the first 8 and every 1024th, with the running count */
-static void nvmtl_msu_fail(const char *what, long code)
+static __thread char g_ms_reason[200];
+const char *nvmtl_vk_copy_reason(void) { return g_ms_reason; }
+static void nvmtl_ms_reason_clear(void) { g_ms_reason[0] = 0; }
+static void nvmtl_ms_reason_set(const char *pass, const char *what) { snprintf(g_ms_reason, sizeof g_ms_reason, "%s: %s", pass, what); }
+/* One line per pass with every total (key=value; tools/triage_n48.py reads the newest line of a process). `force`: skip the clock. */
+static void nvmtl_ms_summary(int force)
 {
-    const unsigned n = atomic_fetch_add(&g_msu_failed, 1) + 1;
-    if (n <= 8 || n % 1024 == 0) nvlog("msupload: FAILED - %s (%ld) [%u failed, %u refused, %u done so far]", what, code, n,
-                                       atomic_load(&g_msu_refused), atomic_load(&g_msu_done));
+    const uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC), last = atomic_load(&g_ms_sum_ns);
+    if (!force && now - last < 10ull * 1000000000ull) return;
+    unsigned dd[NVMTL_MSS_A_N], dr[NVMTL_MSS_R_N], df[NVMTL_MSS_F_N], ur[NVMTL_MSS_R_N], uf[NVMTL_MSS_F_N], ui[NVMTL_MSS_NFMT], ufl[NVMTL_MSS_NFMT];
+    for (int i = 0; i < NVMTL_MSS_A_N; i++) dd[i] = atomic_load(&g_msd_done[i]);
+    for (int i = 0; i < NVMTL_MSS_R_N; i++) { dr[i] = atomic_load(&g_msd_ref[i]); ur[i] = atomic_load(&g_msu_ref[i]); }
+    for (int i = 0; i < NVMTL_MSS_F_N; i++) { df[i] = atomic_load(&g_msd_fail[i]); uf[i] = atomic_load(&g_msu_fail[i]); }
+    for (int i = 0; i < NVMTL_MSS_NFMT; i++) { ui[i] = atomic_load(&g_msu_up_inter[i]); ufl[i] = atomic_load(&g_msu_up_flat[i]); }
+    const unsigned r8u = atomic_load(&g_ms_resolve_r8u), roth = atomic_load(&g_ms_resolve_other), uuint = atomic_load(&g_msu_done_uint), uwide = atomic_load(&g_msu_wide);
+    const unsigned dsum = nvmtl_mss_sum(dd, NVMTL_MSS_A_N) + nvmtl_mss_sum(dr, NVMTL_MSS_R_N) + nvmtl_mss_sum(df, NVMTL_MSS_F_N) + r8u + roth;
+    const unsigned usum = nvmtl_mss_sum(ui, NVMTL_MSS_NFMT) + nvmtl_mss_sum(ufl, NVMTL_MSS_NFMT) + nvmtl_mss_sum(ur, NVMTL_MSS_R_N) + nvmtl_mss_sum(uf, NVMTL_MSS_F_N);
+    const unsigned long long total = (unsigned long long)dsum + usum;
+    if (!total) return;
+    if (total == atomic_load(&g_ms_sum_last) && !force) { atomic_store(&g_ms_sum_ns, now); return; }
+    if (!atomic_compare_exchange_strong(&g_ms_sum_ns, (uint64_t *)&last, now) && !force) return;
+    atomic_store(&g_ms_sum_last, total);
+    char b[760];
+    if (dsum) { nvmtl_msdl_summary_text(b, sizeof b, dd, dr, df, r8u, roth); nvlog_uncapped("%s", b); }
+    if (usum) { nvmtl_msupload_summary_text(b, sizeof b, ui, ufl, uuint, uwide, ur, uf); nvlog_uncapped("%s", b); }
 }
-static void nvmtl_msu_refuse(const char *what)
+static void nvmtl_ms_atexit(void) { nvmtl_ms_summary(1); }
+static void nvmtl_ms_arm(void) { static _Atomic int armed; if (!atomic_exchange(&armed, 1)) atexit(nvmtl_ms_atexit); }
+/* after every event of a pass: the schedule, and a forced line at a power of two of an error counter */
+static void nvmtl_ms_event(unsigned err_count) { nvmtl_ms_arm(); nvmtl_ms_summary(err_count && nvmtl_mss_pow2(err_count)); }
+
+#define NVMTL_MS_REFUSE_SWITCH(P) \
+    switch (kind) { \
+    case NVMTL_MSS_R_INRP:    nvlog(P ": REFUSED (a render pass is open) - %s [%u of this kind]", what, n); break; \
+    case NVMTL_MSS_R_NODEV:   nvlog(P ": REFUSED (no Vulkan device) - %s [%u of this kind]", what, n); break; \
+    case NVMTL_MSS_R_NOADDR:  nvlog(P ": REFUSED (no buffer device address) - %s [%u of this kind]", what, n); break; \
+    case NVMTL_MSS_R_NOUSAGE: nvlog(P ": REFUSED (image usage) - %s [%u of this kind]", what, n); break; \
+    case NVMTL_MSS_R_PIPE:    nvlog(P ": REFUSED (pass unavailable) - %s [%u of this kind]", what, n); break; \
+    default:                  nvlog(P ": REFUSED - %s [%u of this kind]", what, n); break; }
+#define NVMTL_MS_FAIL_SWITCH(P) \
+    switch (kind) { \
+    case NVMTL_MSS_F_SETLAYOUT:  nvlog(P ": FAILED (descriptor set layout) - %s (VkResult %ld) [%u of this kind]", what, code, n); break; \
+    case NVMTL_MSS_F_PIPELAYOUT: nvlog(P ": FAILED (pipeline layout) - %s (VkResult %ld) [%u of this kind]", what, code, n); break; \
+    case NVMTL_MSS_F_RENDERPASS: nvlog(P ": FAILED (render pass) - %s (VkResult %ld) [%u of this kind]", what, code, n); break; \
+    case NVMTL_MSS_F_MODULE:     nvlog(P ": FAILED (shader module) - %s (VkResult %ld) [%u of this kind]", what, code, n); break; \
+    case NVMTL_MSS_F_PIPELINE:   nvlog(P ": FAILED (pipeline) - %s (VkResult %ld) [%u of this kind]", what, code, n); break; \
+    case NVMTL_MSS_F_TABLE:      nvlog(P ": FAILED (pass table) - %s [%u of this kind]", what, n); break; \
+    case NVMTL_MSS_F_VIEW:       nvlog(P ": FAILED (image view) - %s [%u of this kind]", what, n); break; \
+    case NVMTL_MSS_F_RETIRE:     nvlog(P ": FAILED (retention list) - %s [%u of this kind]", what, n); break; \
+    case NVMTL_MSS_F_SET:        nvlog(P ": FAILED (descriptor set) - %s (VkResult %ld) [%u of this kind]", what, code, n); break; \
+    case NVMTL_MSS_F_FRAMEBUFFER: nvlog(P ": FAILED (framebuffer) - %s (VkResult %ld) [%u of this kind]", what, code, n); break; \
+    default:                     nvlog(P ": FAILED - %s (%ld) [%u of this kind]", what, code, n); break; }
+static void nvmtl_msu_fail(unsigned kind, const char *what, long code)
 {
-    const unsigned n = atomic_fetch_add(&g_msu_refused, 1) + 1;
-    if (n <= 8 || n % 1024 == 0) nvlog("msupload: REFUSED - %s [%u refused, %u failed, %u done so far]", what, n,
-                                       atomic_load(&g_msu_failed), atomic_load(&g_msu_done));
+    const unsigned n = atomic_fetch_add(&g_msu_fail[kind], 1) + 1;
+    NVMTL_MS_FAIL_SWITCH("msupload")
+    nvmtl_ms_reason_set("msupload FAILED", what);
+    nvmtl_ms_event(n);
+}
+static void nvmtl_msu_refuse(unsigned kind, const char *what)
+{
+    const unsigned n = atomic_fetch_add(&g_msu_ref[kind], 1) + 1;
+    NVMTL_MS_REFUSE_SWITCH("msupload")
+    nvmtl_ms_reason_set("msupload REFUSED", what);
+    nvmtl_ms_event(n);
+}
+static void nvmtl_msd_fail(unsigned kind, const char *what, long code)
+{
+    const unsigned n = atomic_fetch_add(&g_msd_fail[kind], 1) + 1;
+    NVMTL_MS_FAIL_SWITCH("msdl")
+    nvmtl_ms_reason_set("msdl FAILED", what);
+    nvmtl_ms_event(n);
+}
+static void nvmtl_msd_refuse(unsigned kind, const char *what)
+{
+    const unsigned n = atomic_fetch_add(&g_msd_ref[kind], 1) + 1;
+    NVMTL_MS_REFUSE_SWITCH("msdl")
+    nvmtl_ms_reason_set("msdl REFUSED", what);
+    nvmtl_ms_event(n);
 }
 
 /* build the render pass and pipeline of one (view format, samples) pair; called with g_msu_lock held, once per pair */
@@ -7341,7 +7434,7 @@ static int nvmtl_msu_build(uint32_t fmt, uint32_t samples, int uint_out, VkRende
     if (!g_msu_layout) {
         VkPushConstantRange pr = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(struct nvmtl_msu_pc) };
         VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 0, NULL, 1, &pr };
-        if ((r = pvkCreatePipelineLayout(g_dev, &li, NULL, &g_msu_layout)) != VK_SUCCESS) { g_msu_layout = VK_NULL_HANDLE; nvmtl_msu_fail("vkCreatePipelineLayout", r); return -1; }
+        if ((r = pvkCreatePipelineLayout(g_dev, &li, NULL, &g_msu_layout)) != VK_SUCCESS) { g_msu_layout = VK_NULL_HANDLE; nvmtl_msu_fail(NVMTL_MSS_F_PIPELAYOUT, "vkCreatePipelineLayout", r); return -1; }
     }
     VkAttachmentDescription ad = { 0, (VkFormat)fmt, (VkSampleCountFlagBits)samples, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE,
         VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL };
@@ -7354,12 +7447,12 @@ static int nvmtl_msu_build(uint32_t fmt, uint32_t samples, int uint_out, VkRende
           VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, 0 } };
     VkRenderPassCreateInfo rci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, NULL, 0, 1, &ad, 1, &sd, 2, deps };
     if ((r = pvkCreateRenderPass(g_dev, &rci, NULL, &rp)) != VK_SUCCESS) {
-        snprintf(what, sizeof what, "vkCreateRenderPass (format %u, %u samples)", fmt, samples); nvmtl_msu_fail(what, r); return -1; }
+        snprintf(what, sizeof what, "vkCreateRenderPass (format %u, %u samples)", fmt, samples); nvmtl_msu_fail(NVMTL_MSS_F_RENDERPASS, what, r); return -1; }
     VkShaderModuleCreateInfo vsi = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msu_vert_spv, nvmtl_msu_vert_spv };
     VkShaderModuleCreateInfo fsi = uint_out ? (VkShaderModuleCreateInfo){ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msu_frag_u_spv, nvmtl_msu_frag_u_spv }
                                             : (VkShaderModuleCreateInfo){ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msu_frag_spv, nvmtl_msu_frag_spv };
     if ((r = pvkCreateShaderModule(g_dev, &vsi, NULL, &vm)) != VK_SUCCESS || (r = pvkCreateShaderModule(g_dev, &fsi, NULL, &fm)) != VK_SUCCESS) {
-        nvmtl_msu_fail("vkCreateShaderModule (the device lacks Int64 / PhysicalStorageBuffer64?)", r); goto fail; }
+        nvmtl_msu_fail(NVMTL_MSS_F_MODULE, "vkCreateShaderModule (the device lacks Int64 / PhysicalStorageBuffer64?)", r); goto fail; }
     VkPipelineShaderStageCreateInfo st[2] = {
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_VERTEX_BIT, vm, "main", NULL },
         { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fm, "main", NULL } };
@@ -7376,7 +7469,7 @@ static int nvmtl_msu_build(uint32_t fmt, uint32_t samples, int uint_out, VkRende
     VkGraphicsPipelineCreateInfo gp = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, NULL, 0, 2, st, &vi, &ia, NULL, &vp, &rs, &ms, NULL, &cbs, &dsi,
         g_msu_layout, rp, 0, VK_NULL_HANDLE, -1 };
     if ((r = pvkCreateGraphicsPipelines(g_dev, VK_NULL_HANDLE, 1, &gp, NULL, &pipe)) != VK_SUCCESS) {
-        snprintf(what, sizeof what, "vkCreateGraphicsPipelines (format %u, %u samples)", fmt, samples); nvmtl_msu_fail(what, r); goto fail; }
+        snprintf(what, sizeof what, "vkCreateGraphicsPipelines (format %u, %u samples)", fmt, samples); nvmtl_msu_fail(NVMTL_MSS_F_PIPELINE, what, r); goto fail; }
     pvkDestroyShaderModule(g_dev, vm, NULL); pvkDestroyShaderModule(g_dev, fm, NULL);
     *rp_out = rp; *pipe_out = pipe;
     return 0;
@@ -7396,7 +7489,7 @@ static int nvmtl_msu_pipeline(uint32_t fmt, uint32_t samples, int uint_out, VkRe
             if (g_msu_tab[i].failed) { rc = -2; goto out; }   /* built (and logged) once, never retried */
             *rp_out = g_msu_tab[i].rp; *pipe_out = g_msu_tab[i].pipe; rc = 0; goto out;
         }
-    if (g_msu_n == sizeof g_msu_tab / sizeof *g_msu_tab) { rc = -2; nvmtl_msu_fail("more (format, samples) pairs than the pass table holds", (long)g_msu_n); goto out; }
+    if (g_msu_n == sizeof g_msu_tab / sizeof *g_msu_tab) { rc = -2; nvmtl_msu_fail(NVMTL_MSS_F_TABLE, "more (format, samples) pairs than the pass table holds", 0); goto out; }
     VkRenderPass rp = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
     g_msu_tab[g_msu_n].fmt = fmt; g_msu_tab[g_msu_n].samples = samples;
     if (nvmtl_msu_build(fmt, samples, uint_out, &rp, &pipe)) { g_msu_tab[g_msu_n].failed = 1; g_msu_n++; goto out; }
@@ -7408,46 +7501,68 @@ out:
     return rc;
 }
 
+/* a plan refusal: counted, and its REASON logged at the 1st, 2nd, 4th, 8th ... time (uncapped: a benign reason must not use up the slots of a serious one) */
+static void nvmtl_msu_plan_refused(const nvk_image *img, const char *why, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t row_bytes, size_t off, size_t bufsize)
+{
+    const unsigned n = atomic_fetch_add(&g_msu_ref[NVMTL_MSS_R_PLAN], 1) + 1;
+    pthread_mutex_lock(&g_ms_lock); const unsigned k = nvmtl_mss_reason_count(g_msu_reasons, why); pthread_mutex_unlock(&g_ms_lock);
+    nvmtl_ms_reason_set("copy_buffer_to_image REFUSED", why);
+    if (nvmtl_mss_pow2(k))
+        nvlog_uncapped("copy_buffer_to_image: REFUSED - a %u-sample image: %s (vk format %u, type %u, region (%u,%u) %ux%u, row %u B, buffer offset %zu of %zu) [this reason %u time(s), %u plan refusals in all]",
+                       img->samples, why, img->fmt, img->mtl_type, x, y, w, h, row_bytes, off, bufsize, k, n);
+    nvmtl_ms_event(nvmtl_mss_pow2(k) ? n : 0);
+}
+
 static int nvmtl_vk_cmd_copy_buffer_to_msimage(nvk_cmdbuf *c, nvk_buffer *b, size_t off, uint32_t row_bytes, nvk_image *img,
                                                uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t level, uint32_t layer)
 {
     nvmtl_msu_plan plan; const char *why = NULL;
     if (nvmtl_msu_plan_make(img->fmt, img->samples, img->mtl_type, img->layers ? img->layers : 1, img->mips ? img->mips : 1, level, layer,
                             g_copy_aspect_override, img->w, img->h, x, y, w, h, row_bytes, off, b->size, &plan, &why)) {
-        unsigned n = atomic_fetch_add(&g_msu_refused, 1) + 1;
-        if (n <= 8 || n % 1024 == 0)
-            nvlog("copy_buffer_to_image: REFUSED - a %u-sample image: %s (vk format %u, type %u, region (%u,%u) %ux%u, row %u B, buffer offset %zu of %zu) [%u refused, %u failed so far]",
-                  img->samples, why, img->fmt, img->mtl_type, x, y, w, h, row_bytes, off, b->size, n, atomic_load(&g_msu_failed));
+        nvmtl_msu_plan_refused(img, why, x, y, w, h, row_bytes, off, b->size);
         return -1;
     }
+    if (c->in_rp) { nvmtl_msu_refuse(NVMTL_MSS_R_INRP, "the copy was recorded inside an open render pass"); return -1; }
+    if (!g_dev) { nvmtl_msu_refuse(NVMTL_MSS_R_NODEV, "the Vulkan device is gone"); return -1; }
     const uint64_t addr = nvmtl_vk_buffer_address(b);
-    if (c->in_rp || !addr || !g_dev) {
-        nvmtl_msu_refuse(c->in_rp ? "a render pass is open" : "the buffer has no device address (bufferDeviceAddress is not enabled)");
-        return -1;
-    }
+    if (!addr) { nvmtl_msu_refuse(NVMTL_MSS_R_NOADDR, "the buffer has no device address (bufferDeviceAddress is not enabled)"); return -1; }
     VkRenderPass rp = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
     { const int pr_ = nvmtl_msu_pipeline(plan.view_fmt, img->samples, (int)plan.uint_out, &rp, &pipe);
-      if (pr_ == -2) nvmtl_msu_refuse("the pass for this (view format, samples) pair failed to build earlier");
+      if (pr_ == -2) nvmtl_msu_refuse(NVMTL_MSS_R_PIPE, "the pass for this (view format, samples) pair failed to build earlier");
       if (pr_) return -1; }
     void *view = NULL; uint32_t vw = 0, vh = 0;
     if (nvmtl_vk_cmd_attachment_view_fmt(c, img, 0, 0, 0, plan.view_fmt, 0, &view, &vw, &vh) || !view) {
-        char w_[96]; snprintf(w_, sizeof w_, "no attachment view of format %u over the format-%u image", plan.view_fmt, img->fmt); nvmtl_msu_fail(w_, 0); return -1; }
+        char w_[96]; snprintf(w_, sizeof w_, "no attachment view of format %u over the format-%u image", plan.view_fmt, img->fmt); nvmtl_msu_fail(NVMTL_MSS_F_VIEW, w_, 0); return -1; }
     VkImageView views[1] = { (VkImageView)view };
     VkFramebufferCreateInfo fci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, rp, 1, views, vw, vh, 1 };
     VkFramebuffer fb = VK_NULL_HANDLE; VkResult r = pvkCreateFramebuffer(g_dev, &fci, NULL, &fb);
-    if (r != VK_SUCCESS) { nvmtl_msu_fail("vkCreateFramebuffer", r); return -1; }
+    if (r != VK_SUCCESS) { nvmtl_msu_fail(NVMTL_MSS_F_FRAMEBUFFER, "vkCreateFramebuffer", r); return -1; }
     if (c->nfb == c->capfb) {
         unsigned cap = c->capfb ? c->capfb * 2 : 16;
         void **grown = (void **)realloc(c->fbs, cap * sizeof *grown);
         if (grown) { c->fbs = grown; c->capfb = cap; }
     }
-    if (c->nfb >= c->capfb) { pvkDestroyFramebuffer(g_dev, fb, NULL); nvmtl_msu_fail("framebuffer retention allocation", 0); return -1; }
+    if (c->nfb >= c->capfb) { pvkDestroyFramebuffer(g_dev, fb, NULL); nvmtl_msu_fail(NVMTL_MSS_F_RETIRE, "framebuffer retention allocation", 0); return -1; }
     c->fbs[c->nfb++] = fb;
-    const unsigned seq = atomic_fetch_add(&g_msu_done, 1) + 1;
-    if (seq <= 8 || seq % 1024 == 0)
-        nvlog("msupload: buffer -> %u-sample image %ux%u (vk format %u via view %u, mode %u): region (%u,%u) %ux%u from buffer offset %zu row %llu B, %s layout, %s output [%u so far]",
-              img->samples, img->w, img->h, img->fmt, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row,
-              plan.inter ? "sample-interleaved (a row holds samples x elements per pixel)" : "one element per pixel", plan.uint_out ? "integer" : "float", seq);
+    {   /* done: counted per view format and layout; the first 8 of each kind of line have a literal of their own, the totals are in `msupload: SUMMARY` */
+        const int fi = nvmtl_mss_fmt_index(plan.view_fmt);
+        if (fi >= 0) atomic_fetch_add(plan.inter ? &g_msu_up_inter[fi] : &g_msu_up_flat[fi], 1);
+        if (plan.uint_out) atomic_fetch_add(&g_msu_done_uint, 1);
+        if (plan.wide) atomic_fetch_add(&g_msu_wide, 1);
+        if (plan.wide)
+            nvlog("msupload: WIDE interleaved row - %u-sample image %ux%u (vk format %u via view %u): region (%u,%u) %ux%u row %llu B is more than 255 B longer than one row of the region (%llu B); ambiguous with the pitch of a one-element-per-pixel buffer under a sub-region",
+                  img->samples, img->w, img->h, img->fmt, plan.view_fmt, x, y, w, h, (unsigned long long)plan.row, (unsigned long long)nvmtl_msbuf_used(w, img->samples, plan.bpp));
+        if (!plan.inter)
+            nvlog("msupload: FLAT layout fallback (%s) - buffer -> %u-sample image %ux%u (vk format %u via view %u, mode %u): region (%u,%u) %ux%u from buffer offset %zu row %llu B, every sample of a pixel gets the one element, %s output",
+                  plan.flat_why ? plan.flat_why : "?", img->samples, img->w, img->h, img->fmt, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row, plan.uint_out ? "integer" : "float");
+        else if (plan.uint_out)
+            nvlog("msupload: buffer -> %u-sample image %ux%u (vk format %u via view %u, mode %u): region (%u,%u) %ux%u from buffer offset %zu row %llu B, sample-interleaved layout (a row holds samples x elements per pixel), integer output",
+                  img->samples, img->w, img->h, img->fmt, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row);
+        else
+            nvlog("msupload: buffer -> %u-sample image %ux%u (vk format %u via view %u, mode %u): region (%u,%u) %ux%u from buffer offset %zu row %llu B, sample-interleaved layout (a row holds samples x elements per pixel), float output",
+                  img->samples, img->w, img->h, img->fmt, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row);
+        nvmtl_ms_event(0);
+    }
     nvmtl_vk_cmd_barrier(c);
     img_to(c, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -7485,22 +7600,9 @@ static struct { VkPipeline pipe; int failed; } g_msd_pipe[2];   /* [0] float mod
 #define NVMTL_MSD_POOLS 8
 #define NVMTL_MSD_POOL_SETS 256
 static VkDescriptorPool g_msd_pools[NVMTL_MSD_POOLS]; static unsigned g_msd_npools;   /* under g_desc_lock */
-static _Atomic unsigned g_msd_done, g_msd_refused, g_msd_failed;
 struct nvmtl_msd_pc { uint32_t base[2], row, used, w, h; int32_t ox, oy; uint32_t samples, mode, bpp, stride, nwords; };   /* 52 bytes, msdl.comp */
 _Static_assert(sizeof(struct nvmtl_msd_pc) == 52, "msdl.comp push constant block");
 
-static void nvmtl_msd_fail(const char *what, long code)
-{
-    const unsigned n = atomic_fetch_add(&g_msd_failed, 1) + 1;
-    if (n <= 8 || n % 1024 == 0) nvlog("msdl: FAILED - %s (%ld) [%u failed, %u refused, %u done so far]", what, code, n,
-                                       atomic_load(&g_msd_refused), atomic_load(&g_msd_done));
-}
-static void nvmtl_msd_refuse(const char *what)
-{
-    const unsigned n = atomic_fetch_add(&g_msd_refused, 1) + 1;
-    if (n <= 8 || n % 1024 == 0) nvlog("msdl: REFUSED - %s [%u refused, %u failed, %u done so far]", what, n,
-                                       atomic_load(&g_msd_failed), atomic_load(&g_msd_done));
-}
 /* the set layout, the pipeline layout and the pipeline of one module kind (0 float, 1 unsigned integer); 0 = ready, -1 = failed (logged) */
 static int nvmtl_msd_pipeline(int uint_in, VkPipeline *pipe_out)
 {
@@ -7512,19 +7614,19 @@ static int nvmtl_msd_pipeline(int uint_in, VkPipeline *pipe_out)
     if (!g_msd_setlayout) {
         VkDescriptorSetLayoutBinding bnd = { 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL };
         VkDescriptorSetLayoutCreateInfo li = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0, 1, &bnd };
-        if ((r = pvkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_msd_setlayout)) != VK_SUCCESS) { g_msd_setlayout = VK_NULL_HANDLE; nvmtl_msd_fail("vkCreateDescriptorSetLayout", r); goto fail; }
+        if ((r = pvkCreateDescriptorSetLayout(g_dev, &li, NULL, &g_msd_setlayout)) != VK_SUCCESS) { g_msd_setlayout = VK_NULL_HANDLE; nvmtl_msd_fail(NVMTL_MSS_F_SETLAYOUT, "vkCreateDescriptorSetLayout", r); goto fail; }
     }
     if (!g_msd_layout) {
         VkPushConstantRange pr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(struct nvmtl_msd_pc) };
         VkPipelineLayoutCreateInfo li = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0, 1, &g_msd_setlayout, 1, &pr };
-        if ((r = pvkCreatePipelineLayout(g_dev, &li, NULL, &g_msd_layout)) != VK_SUCCESS) { g_msd_layout = VK_NULL_HANDLE; nvmtl_msd_fail("vkCreatePipelineLayout", r); goto fail; }
+        if ((r = pvkCreatePipelineLayout(g_dev, &li, NULL, &g_msd_layout)) != VK_SUCCESS) { g_msd_layout = VK_NULL_HANDLE; nvmtl_msd_fail(NVMTL_MSS_F_PIPELAYOUT, "vkCreatePipelineLayout", r); goto fail; }
     }
     VkShaderModuleCreateInfo sm = uint_in ? (VkShaderModuleCreateInfo){ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msdl_uint_spv, nvmtl_msdl_uint_spv }
                                           : (VkShaderModuleCreateInfo){ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, sizeof nvmtl_msdl_float_spv, nvmtl_msdl_float_spv };
-    if ((r = pvkCreateShaderModule(g_dev, &sm, NULL, &mod)) != VK_SUCCESS) { nvmtl_msd_fail("vkCreateShaderModule (the device lacks Int64 / PhysicalStorageBuffer64?)", r); goto fail; }
+    if ((r = pvkCreateShaderModule(g_dev, &sm, NULL, &mod)) != VK_SUCCESS) { nvmtl_msd_fail(NVMTL_MSS_F_MODULE, "vkCreateShaderModule (the device lacks Int64 / PhysicalStorageBuffer64?)", r); goto fail; }
     VkPipelineShaderStageCreateInfo st = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0, VK_SHADER_STAGE_COMPUTE_BIT, mod, "main", NULL };
     VkComputePipelineCreateInfo pi = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, NULL, 0, st, g_msd_layout, VK_NULL_HANDLE, -1 };
-    if ((r = pvkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &pi, NULL, &pipe)) != VK_SUCCESS) { nvmtl_msd_fail("vkCreateComputePipelines", r); goto fail; }
+    if ((r = pvkCreateComputePipelines(g_dev, VK_NULL_HANDLE, 1, &pi, NULL, &pipe)) != VK_SUCCESS) { nvmtl_msd_fail(NVMTL_MSS_F_PIPELINE, "vkCreateComputePipelines", r); goto fail; }
     pvkDestroyShaderModule(g_dev, mod, NULL);
     g_msd_pipe[uint_in].pipe = pipe; *pipe_out = pipe; rc = 0;
     nvlog("msdl: pass built for the %s module", uint_in ? "unsigned-integer (stencil, R8_UINT ...)" : "float (depth, colour)");
@@ -7540,7 +7642,7 @@ out:
 static VkDescriptorSet nvmtl_msd_alloc_set(nvk_cmdbuf *c)
 {
     VkDescriptorSet set = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE; VkResult r = VK_ERROR_OUT_OF_POOL_MEMORY;
-    unsigned opened = 0;
+    unsigned opened = 0, npools, cmdsets;
     pthread_mutex_lock(&g_desc_lock);
     for (unsigned k = g_msd_npools; k > 0 && r != VK_SUCCESS; k--) {   /* newest first; an older pool has room again once its command buffers retired */
         VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, g_msd_pools[k - 1], 1, &g_msd_setlayout };
@@ -7564,37 +7666,51 @@ static VkDescriptorSet nvmtl_msd_alloc_set(nvk_cmdbuf *c)
         else { pvkFreeDescriptorSets(g_dev, pool, 1, &set); r = VK_ERROR_OUT_OF_HOST_MEMORY; }
     }
     if (r == VK_SUCCESS) c->sets[c->nsets++] = (nvk_setref){ pool, set };
+    npools = g_msd_npools; cmdsets = c->nsets;
     pthread_mutex_unlock(&g_desc_lock);   /* no log file I/O under the lock */
     if (opened) nvlog("msdl: descriptor pool %u opened (%d sets each)", opened, NVMTL_MSD_POOL_SETS);
-    if (r != VK_SUCCESS) { nvmtl_msd_fail("descriptor set allocation", r); return VK_NULL_HANDLE; }
+    if (r != VK_SUCCESS) {
+        char w_[160]; snprintf(w_, sizeof w_, "descriptor set allocation (%u of %u pools open with %d sets each, %u set(s) already in this command buffer)", npools, NVMTL_MSD_POOLS, NVMTL_MSD_POOL_SETS, cmdsets);
+        nvmtl_msd_fail(NVMTL_MSS_F_SET, w_, r); return VK_NULL_HANDLE; }
     return set;
+}
+/* a plan refusal: counted, its REASON logged at the 1st, 2nd, 4th, 8th ... time (uncapped, see nvmtl_msu_plan_refused) */
+static void nvmtl_msd_plan_refused(const nvk_image *img, const char *why, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t row_bytes, size_t off, size_t bufsize)
+{
+    const unsigned n = atomic_fetch_add(&g_msd_ref[NVMTL_MSS_R_PLAN], 1) + 1;
+    pthread_mutex_lock(&g_ms_lock); const unsigned k = nvmtl_mss_reason_count(g_msd_reasons, why); pthread_mutex_unlock(&g_ms_lock);
+    nvmtl_ms_reason_set("copy_image_to_buffer REFUSED", why);
+    if (nvmtl_mss_pow2(k))
+        nvlog_uncapped("copy_image_to_buffer: REFUSED - a %u-sample image: %s (vk format %u, type %u, aspect option %u, region (%u,%u) %ux%u, row %u B, buffer offset %zu of %zu) [this reason %u time(s), %u plan refusals in all]",
+                       img->samples, why, img->fmt, img->mtl_type, g_copy_aspect_override, x, y, w, h, row_bytes, off, bufsize, k, n);
+    nvmtl_ms_event(nvmtl_mss_pow2(k) ? n : 0);
 }
 
 static int nvmtl_vk_cmd_copy_msimage_to_buffer(nvk_cmdbuf *c, nvk_image *img, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                                                nvk_buffer *b, size_t off, uint32_t row_bytes, uint32_t level, uint32_t layer)
 {
     nvmtl_msdl_plan plan; const char *why = NULL;
+    /* the last 32-bit word of the region may end beyond the Metal length when the buffer is a plain allocation (not pooled, imported or sparse):
+     * its memory is rounded up by the driver to its alignment, so the word is inside it */
+    const uint64_t cap = (!b->imported && !b->sparse && !b->pool && !b->placed && !b->bar1 && b->alloc > b->size) ? (uint64_t)b->alloc : (uint64_t)b->size;
     if (nvmtl_msdl_plan_make(img->fmt, img->samples, img->mtl_type, img->layers ? img->layers : 1, img->mips ? img->mips : 1, level, layer,
-                             g_copy_aspect_override, img->w, img->h, x, y, w, h, row_bytes, off, b->size, &plan, &why)) {
-        unsigned n = atomic_fetch_add(&g_msd_refused, 1) + 1;
-        if (n <= 8 || n % 1024 == 0)
-            nvlog("copy_image_to_buffer: REFUSED - a %u-sample image: %s (vk format %u, type %u, aspect option %u, region (%u,%u) %ux%u, row %u B, buffer offset %zu of %zu) [%u refused, %u failed so far]",
-                  img->samples, why, img->fmt, img->mtl_type, g_copy_aspect_override, x, y, w, h, row_bytes, off, b->size, n, atomic_load(&g_msd_failed));
+                             g_copy_aspect_override, img->w, img->h, x, y, w, h, row_bytes, off, b->size, cap, &plan, &why)) {
+        nvmtl_msd_plan_refused(img, why, x, y, w, h, row_bytes, off, b->size);
         return -1;
     }
+    if (c->in_rp) { nvmtl_msd_refuse(NVMTL_MSS_R_INRP, "the copy was recorded inside an open render pass"); return -1; }
+    if (!g_dev) { nvmtl_msd_refuse(NVMTL_MSS_R_NODEV, "the Vulkan device is gone"); return -1; }
     const uint64_t addr = nvmtl_vk_buffer_address(b);
-    if (c->in_rp || !addr || !g_dev) {
-        nvmtl_msd_refuse(c->in_rp ? "a render pass is open" : "the buffer has no device address (bufferDeviceAddress is not enabled)");
-        return -1;
-    }
+    if (!addr) { nvmtl_msd_refuse(NVMTL_MSS_R_NOADDR, "the buffer has no device address (bufferDeviceAddress is not enabled)"); return -1; }
     if (img->usage && !(img->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) {   /* the shader reads the image through a sampled view */
-        char w_[96]; snprintf(w_, sizeof w_, "the format-%u image was created without SAMPLED usage (usage 0x%x)", img->fmt, img->usage); nvmtl_msd_refuse(w_); return -1; }
+        char w_[96]; snprintf(w_, sizeof w_, "the format-%u image was created without SAMPLED usage (usage 0x%x)", img->fmt, img->usage); nvmtl_msd_refuse(NVMTL_MSS_R_NOUSAGE, w_); return -1; }
     VkPipeline pipe = VK_NULL_HANDLE;
-    if (nvmtl_msd_pipeline((int)plan.uint_in, &pipe)) { nvmtl_msd_refuse("the pass for this module failed to build earlier (see the FAILED line)"); return -1; }
+    if (nvmtl_msd_pipeline((int)plan.uint_in, &pipe)) { nvmtl_msd_refuse(NVMTL_MSS_R_PIPE, "the pass for this module failed to build earlier (see the FAILED line)"); return -1; }
     void *view = NULL;
     if (nvmtl_vk_image_view_create_range_aspect(img, plan.view_fmt, 0, plan.aspect, 0, 1, 0, 1, 4u, &view) || !view) {
-        char w_[120]; snprintf(w_, sizeof w_, "no sampled view of format %u aspect %u over the format-%u image", plan.view_fmt, plan.aspect, img->fmt); nvmtl_msd_fail(w_, 0); return -1; }
-    if (nvmtl_vk_cmd_retire_view(c, view)) { nvmtl_msd_fail("view retention allocation", 0); return -1; }   /* a failed retire destroyed the view itself */
+        char w_[120]; snprintf(w_, sizeof w_, "no sampled view of format %u aspect %u over the format-%u image (the image_view_create line before names the cause)", plan.view_fmt, plan.aspect, img->fmt);
+        nvmtl_msd_fail(NVMTL_MSS_F_VIEW, w_, 0); return -1; }
+    if (nvmtl_vk_cmd_retire_view(c, view)) { nvmtl_msd_fail(NVMTL_MSS_F_RETIRE, "view retention allocation", 0); return -1; }   /* a failed retire destroyed the view itself */
     VkDescriptorSet set = nvmtl_msd_alloc_set(c);
     if (!set) return -1;
     VkDescriptorImageInfo ii = { VK_NULL_HANDLE, (VkImageView)view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -7603,10 +7719,21 @@ static int nvmtl_vk_cmd_copy_msimage_to_buffer(nvk_cmdbuf *c, nvk_image *img, ui
     const uint64_t base = addr + off;   /* the device address of byte 0 of the region */
     const uint32_t nwords = nvmtl_msbuf_words((uint32_t)(base & 3u), plan.span);
     uint32_t gx, gy, stride; nvmtl_msbuf_dispatch(nwords, &gx, &gy, &stride);
-    const unsigned seq = atomic_fetch_add(&g_msd_done, 1) + 1;
-    if (seq <= 8 || seq % 1024 == 0)
-        nvlog("msdl: %u-sample image %ux%u -> buffer (vk format %u, aspect %u via view %u, mode %u): region (%u,%u) %ux%u to buffer offset %zu row %llu B, %u word(s) in %ux%u group(s) [%u so far]",
-              img->samples, img->w, img->h, img->fmt, plan.aspect, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row, nwords, gx, gy, seq);
+    {   /* done: counted per aspect; each aspect's first 8 lines have a literal of their own (a colour copy cannot use up the stencil's slots) */
+        const unsigned ai = plan.aspect == NVMTL_MSDL_ASPECT_STENCIL ? NVMTL_MSS_A_STENCIL : plan.aspect == NVMTL_MSDL_ASPECT_DEPTH ? NVMTL_MSS_A_DEPTH : NVMTL_MSS_A_COLOUR;
+        const unsigned seq = atomic_fetch_add(&g_msd_done[ai], 1) + 1;
+        if (ai == NVMTL_MSS_A_STENCIL)
+            nvlog("msdl: STENCIL %u-sample image %ux%u -> buffer (vk format %u, aspect 4 via view %u, mode %u): region (%u,%u) %ux%u to buffer offset %zu row %llu B, %u word(s) in %ux%u group(s) [stencil #%u]",
+                  img->samples, img->w, img->h, img->fmt, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row, nwords, gx, gy, seq);
+        else if (ai == NVMTL_MSS_A_DEPTH)
+            nvlog("msdl: DEPTH %u-sample image %ux%u -> buffer (vk format %u, aspect 2 via view %u, mode %u): region (%u,%u) %ux%u to buffer offset %zu row %llu B, %u word(s) in %ux%u group(s) [depth #%u]",
+                  img->samples, img->w, img->h, img->fmt, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row, nwords, gx, gy, seq);
+        else
+            nvlog("msdl: COLOUR %u-sample image %ux%u -> buffer (vk format %u, aspect 1 via view %u, mode %u): region (%u,%u) %ux%u to buffer offset %zu row %llu B, %u word(s) in %ux%u group(s) [colour #%u]",
+                  img->samples, img->w, img->h, img->fmt, plan.view_fmt, plan.mode, x, y, w, h, off, (unsigned long long)plan.row, nwords, gx, gy, seq);
+        nvmtl_ms_event(0);
+    }
+    const VkImageLayout prev = (VkImageLayout)img->layout;   /* put it back afterwards: a following LOAD pass trusts the tracked layout (HTILE / FMASK) */
     nvmtl_vk_cmd_barrier(c);
     img_to(c, img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -7616,6 +7743,9 @@ static int nvmtl_vk_cmd_copy_msimage_to_buffer(nvk_cmdbuf *c, nvk_image *img, ui
                                img->samples, plan.mode, plan.bpp, stride, nwords };
     pvkCmdPushConstants(c->cb, g_msd_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
     pvkCmdDispatch(c->cb, gx, gy, 1);
+    if (prev != VK_IMAGE_LAYOUT_UNDEFINED && prev != VK_IMAGE_LAYOUT_PREINITIALIZED && prev != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        img_to(c, img, prev, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+               VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     nvmtl_vk_cmd_barrier(c);
     return 0;
 }
@@ -7631,6 +7761,7 @@ int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b, 
               !b ? "no buffer" : !b->buf ? "the buffer has no VkBuffer (not bound yet?)" : "");
         return -1;
     }
+    nvmtl_ms_reason_clear();
     if (img->samples > 1) return nvmtl_vk_cmd_copy_buffer_to_msimage(c, b, off, row_bytes, img, x, y, w, h, level, layer);
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_buffer_to_image: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
@@ -7638,6 +7769,7 @@ int nvmtl_vk_cmd_copy_buffer_to_image_level_layer(nvk_cmdbuf *c, nvk_buffer *b, 
     if (nvmtl_cp_resolve(img->fmt, img->samples, img->bpp, g_copy_aspect_override, off, &aspect, &bpp, &why)) {
         nvlog("copy_buffer_to_image: REFUSED - %s (vk format %u, %u sample(s), type %u, aspect option %u, buffer offset %zu, region %ux%u)",
               why, img->fmt, img->samples ? img->samples : 1u, img->mtl_type, g_copy_aspect_override, off, w, h);
+        nvmtl_ms_reason_set("copy REFUSED", why);
         return -1;
     }
     const uint32_t bw = img->bw ? img->bw : 1, bh = img->bh ? img->bh : 1;
@@ -7685,6 +7817,7 @@ int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img,
               !b ? "no buffer" : !b->buf ? "the buffer has no VkBuffer (not bound yet?)" : "");
         return -1;
     }
+    nvmtl_ms_reason_clear();
     if (img->samples > 1) return nvmtl_vk_cmd_copy_msimage_to_buffer(c, img, x, y, w, h, b, off, row_bytes, level, layer);
     if (level >= (img->mips ? img->mips : 1)) { nvlog("copy_image_to_buffer: level %u — this image has %u", level, img->mips ? img->mips : 1); return -1; }
     const uint32_t lw = nvmtl_lvl(img->w, level), lh = nvmtl_lvl(img->h, level);
@@ -7694,6 +7827,7 @@ int nvmtl_vk_cmd_copy_image_to_buffer_level_layer(nvk_cmdbuf *c, nvk_image *img,
     if (nvmtl_cp_resolve(img->fmt, img->samples, img->bpp, g_copy_aspect_override, off, &aspect, &bpp, &why)) {
         nvlog("copy_image_to_buffer: REFUSED - %s (vk format %u, %u sample(s), type %u, aspect option %u, buffer offset %zu, region %ux%u)",
               why, img->fmt, img->samples ? img->samples : 1u, img->mtl_type, g_copy_aspect_override, off, w, h);
+        nvmtl_ms_reason_set("copy REFUSED", why);
         return -1;
     }
     const uint32_t bw = img->bw ? img->bw : 1, bh = img->bh ? img->bh : 1;

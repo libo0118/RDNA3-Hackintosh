@@ -123,7 +123,7 @@ $(BUILD)/test_fbfetch_plan: tests/test_fbfetch_plan.c metal/plugin/nvmtl_fbfetch
 $(BUILD)/test_msupload: tests/test_msupload.c metal/plugin/nvmtl_msupload.h metal/plugin/nvmtl_msbuf.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_msupload.c
 
-$(BUILD)/test_msdl: tests/test_msdl.c metal/plugin/nvmtl_msdl.h metal/plugin/nvmtl_msbuf.h | $(BUILD)
+$(BUILD)/test_msdl: tests/test_msdl.c metal/plugin/nvmtl_msdl.h metal/plugin/nvmtl_msbuf.h metal/plugin/nvmtl_msstat.h metal/plugin/nvmtl_msupload.h | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) $(SAN) -Imetal/plugin -o $@ tests/test_msdl.c
 
 $(BUILD)/test_copy_pack: tests/test_copy_pack.c metal/plugin/nvmtl_copy_pack.h | $(BUILD)

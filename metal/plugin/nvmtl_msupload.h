@@ -11,8 +11,11 @@
  * What the card showed (run 2026-10-25f): the upload Chess makes is into a 4-sample R8_UINT texture, bytesPerRow 3884 =
  * 971 * 4 samples * 1 B, from the buffer that the stencil of a 4-sample D32_S8 texture was copied to (nvmtl_msbuf.h). So a row
  * holds `samples` elements per pixel and the pass writes sample s from element x * samples + s (one draw per sample, the
- * fragment shader restricts its coverage to that sample). A row too short for that (a single-sample layout) falls back to the
- * first version: every sample of a pixel gets the element at x.
+ * fragment shader restricts its coverage to that sample). The layout is chosen from the row, and only the exact evidence is trusted:
+ * interleaved when the row is a whole number of pixels' samples (row % (samples * bytes) == 0) and holds at least width * samples *
+ * bytes. Any other row (a single-sample layout, or a pitch that is not a multiple) is the FLAT layout of the first version: every
+ * sample of a pixel gets the element at x. A very wide interleaved row (more than 255 B beyond one row of the region) is ambiguous - it
+ * may be the pitch of a flat buffer under a sub-region - and is flagged `wide` so that the log and triage can say so.
  *
  * This file is the decision: which images and regions the pass carries, the colour mode and the view format it needs.
  * Everything else is refused with the reason (a log line in the plugin). Pure C99, no Vulkan headers (numeric VkFormat
@@ -21,6 +24,7 @@
 #ifndef NVMTL_MSUPLOAD_H
 #define NVMTL_MSUPLOAD_H
 #include <stdint.h>
+#include <stddef.h>
 #include "nvmtl_msbuf.h"
 
 /* the fragment shader's mode: float output (msu.frag) ... */
@@ -34,6 +38,8 @@ typedef struct {
     uint32_t uint_out;   /* 1: the integer shader module (R8_UINT ...), 0: the float one */
     uint32_t bpp;        /* bytes per element in the buffer */
     uint32_t inter;      /* 1: a row holds `samples` elements per pixel (one draw per sample); 0: one element per pixel for every sample */
+    uint32_t wide;       /* 1: interleaved by the rule, but the row is more than 255 B longer than the region's (ambiguous with a flat pitch) */
+    const char *flat_why; /* when inter == 0: why the interleaved layout was not chosen (a static string), else NULL */
     uint64_t row;        /* bytes per row of the buffer (row_bytes, or one tight row when it was 0) */
 } nvmtl_msu_plan;
 
@@ -67,14 +73,16 @@ static inline int nvmtl_msu_plan_make(uint32_t img_fmt, uint32_t samples, uint32
     }
     if (!w || !h || !img_w || !img_h || x >= img_w || y >= img_h || w > img_w - x || h > img_h - y) { *why = "the region is empty or outside the image"; return -1; }
     const uint64_t used = nvmtl_msbuf_used(w, samples, bpp);
-    uint32_t inter = 1;
+    uint32_t inter = 1; const char *flat_why = NULL;
     if (!row_bytes) row_bytes = used;                       /* no pitch given: one tight row of `samples` elements per pixel */
-    else if (row_bytes < used) inter = 0;                   /* a single-sample row: every sample of a pixel gets the one element */
+    else if (row_bytes < used) { inter = 0; flat_why = "the row is shorter than width * samples * bytes"; }   /* a single-sample row: every sample of a pixel gets the one element */
+    else if (row_bytes % ((uint64_t)samples * bpp)) { inter = 0; flat_why = "the row is not a multiple of samples * bytes"; }
     if (row_bytes < (uint64_t)w * bpp) { *why = "bytesPerRow is smaller than one row of the region"; return -1; }
     if (row_bytes > 0xffffffffu) { *why = "bytesPerRow does not fit the pass's 32-bit row"; return -1; }
     const uint64_t need = inter ? used : (uint64_t)w * bpp;
     if (off > buf_size || (uint64_t)(h - 1) * row_bytes + need > buf_size - off) { *why = "the region reads past the end of the buffer"; return -1; }
     plan->view_fmt = view; plan->mode = mode; plan->uint_out = u; plan->bpp = bpp; plan->inter = inter; plan->row = row_bytes;
+    plan->flat_why = flat_why; plan->wide = inter && row_bytes > used + 255u;
     return 0;
 }
 #endif

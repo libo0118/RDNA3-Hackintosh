@@ -85,11 +85,13 @@ static inline int nvmtl_msdl_format(uint32_t fmt, uint32_t aspect_override, uint
 }
 
 /* Returns 0 and fills *plan, or -1 and *why (a static string). img_* describe the source image (mtl_type 4 = 2D multisample,
- * 8 = array), level/layer the Metal source subresource, x/y/w/h the region, row_bytes/off/buf_size the destination buffer. */
+ * 8 = array), level/layer the Metal source subresource, x/y/w/h the region, row_bytes/off/buf_size the destination buffer. buf_cap is
+ * the memory the buffer owns behind buf_size (the plugin passes its allocation when it is a plain one, else buf_size): the shader stores
+ * whole 32-bit words, so a last word that starts inside the buffer may end beyond buf_size when buf_cap covers it. */
 static inline int nvmtl_msdl_plan_make(uint32_t img_fmt, uint32_t samples, uint32_t mtl_type, uint32_t layers, uint32_t mips,
                                        uint32_t level, uint32_t layer, uint32_t aspect_override,
                                        uint32_t img_w, uint32_t img_h, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                                       uint64_t row_bytes, uint64_t off, uint64_t buf_size,
+                                       uint64_t row_bytes, uint64_t off, uint64_t buf_size, uint64_t buf_cap,
                                        nvmtl_msdl_plan *plan, const char **why)
 {
     uint32_t view, aspect, mode, u, bpp;
@@ -105,8 +107,9 @@ static inline int nvmtl_msdl_plan_make(uint32_t img_fmt, uint32_t samples, uint3
     const uint64_t span = nvmtl_msbuf_span(row_bytes, h, w, samples, bpp);
     if (span >= 0x80000000ull) { *why = "the region is 2 GiB or more"; return -1; }
     if (off > buf_size || span > buf_size - off) { *why = "the region writes past the end of the buffer"; return -1; }
-    /* the shader stores whole 32-bit words (a buffer's address is aligned to at least 4): the last word touched must be inside it */
-    if (((off + span + 3u) & ~(uint64_t)3u) > buf_size) { *why = "the region's last 32-bit word is not inside the buffer (its size is not a multiple of 4)"; return -1; }
+    /* the shader stores whole 32-bit words (a buffer's address is aligned to at least 4): the last word touched must be inside its memory */
+    if (buf_cap < buf_size) buf_cap = buf_size;
+    if (((off + span + 3u) & ~(uint64_t)3u) > buf_cap) { *why = "the region's last 32-bit word is not inside the buffer (its size is not a multiple of 4)"; return -1; }
     plan->view_fmt = view; plan->aspect = aspect; plan->mode = mode; plan->uint_in = u; plan->bpp = bpp;
     plan->row = row_bytes; plan->used = used; plan->span = span;
     return 0;

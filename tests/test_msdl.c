@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "nvmtl_msdl.h"
+#include "nvmtl_msstat.h"
+#include "nvmtl_msupload.h"
 
 static int failures;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
@@ -15,7 +17,7 @@ static int mk(uint32_t fmt, uint32_t smp, uint32_t type, uint32_t layers, uint32
               uint32_t W, uint32_t H, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint64_t row, uint64_t off, uint64_t buf, nvmtl_msdl_plan *p)
 {
     const char *why = 0;
-    int rc = nvmtl_msdl_plan_make(fmt, smp, type, layers, mips, lvl, lay, asp, W, H, x, y, w, h, row, off, buf, p, &why);
+    int rc = nvmtl_msdl_plan_make(fmt, smp, type, layers, mips, lvl, lay, asp, W, H, x, y, w, h, row, off, buf, buf, p, &why);
     CHECK(rc == 0 || (why && why[0]));
     return rc;
 }
@@ -107,6 +109,12 @@ int main(void)
     CHECK(mk(130, 4, 4, 1, 1, 0, 0, 4, 64, 64, 0, 0, 5, 1, 20, 4, 23, &p) != 0);   /* too short */
     CHECK(mk(130, 4, 4, 1, 1, 0, 0, 4, 64, 64, 0, 0, 5, 1, 20, 1, 21, &p) != 0);   /* fits to the byte, but its last word [20,24) is not inside a 21 B buffer */
     CHECK(mk(130, 4, 4, 1, 1, 0, 0, 4, 64, 64, 0, 0, 5, 1, 20, 0xfffffffffffffff0ull, 1000, &p) != 0);
+    /* the allocation behind the Metal length (ECC round 1): the last word may end beyond the length when the buffer owns that memory */
+    { const char *why = 0; nvmtl_msdl_plan q;
+      CHECK(nvmtl_msdl_plan_make(130, 4, 4, 1, 1, 0, 0, 4, 64, 64, 0, 0, 5, 1, 20, 1, 21, 24, &q, &why) == 0);   /* [1,21) -> the word [20,24) is inside 24 */
+      CHECK(nvmtl_msdl_plan_make(130, 4, 4, 1, 1, 0, 0, 4, 64, 64, 0, 0, 5, 1, 20, 1, 21, 23, &q, &why) != 0);
+      CHECK(nvmtl_msdl_plan_make(130, 4, 4, 1, 1, 0, 0, 4, 64, 64, 0, 0, 5, 1, 20, 1, 21, 0, &q, &why) != 0);   /* a cap below the length is the length */
+      CHECK(nvmtl_msdl_plan_make(130, 4, 4, 1, 1, 0, 0, 4, 64, 64, 0, 0, 5, 1, 20, 2, 21, 1000, &q, &why) != 0);   /* the region itself must fit the LENGTH */ }
     /* region */
     CHECK(mk(130, 4, 4, 1, 1, 0, 0, 4, 64, 64, 0, 0, 0, 4, 16, 0, 64, &p) != 0);
     CHECK(mk(130, 4, 4, 1, 1, 0, 0, 4, 64, 64, 0, 0, 4, 0, 16, 0, 64, &p) != 0);
@@ -130,6 +138,42 @@ int main(void)
         CHECK(gx >= 1 && gx <= 32768 && gy >= 1 && stride == gx * 64u && (uint64_t)gx * gy * 64u >= n && (gy == 1 || (uint64_t)gx * (gy - 1) * 64u < n));
     }
     { uint32_t gx, gy, stride; nvmtl_msbuf_dispatch(0, &gx, &gy, &stride); CHECK(gx == 1 && gy == 1); }
+    /* ---- nvmtl_msstat.h: the SUMMARY lines, the reason table, the format index ---- */
+    {
+        unsigned done[NVMTL_MSS_A_N] = { 1, 2, 4 }, ref[NVMTL_MSS_R_N] = { 5, 0, 0, 1, 0, 2 }, fail[NVMTL_MSS_F_N] = { 0, 0, 0, 0, 1, 0, 0, 0, 3, 0 };
+        char b[1024]; int n = nvmtl_msdl_summary_text(b, sizeof b, done, ref, fail, 7, 8);
+        CHECK(n > 0 && n < 700);   /* the plugin's log line buffer is 768 B */
+        CHECK(strstr(b, "msdl: SUMMARY done=7 d_colour=1 d_depth=2 d_stencil=4 refused=8 r_plan=5 r_inrp=0 r_nodev=0 r_noaddr=1 r_nousage=0 r_pipe=2 failed=4 ") == b);
+        CHECK(strstr(b, "f_pipeline=1 f_view=0 f_retire=0 f_set=3 resolve_r8u=7 resolve_other=8"));
+        unsigned ui[NVMTL_MSS_NFMT] = { 4 }, uf[NVMTL_MSS_NFMT] = { 0, 0, 0, 0, 0, 3 }, ur[NVMTL_MSS_R_N] = { 0 }, uff[NVMTL_MSS_F_N] = { 0 };
+        n = nvmtl_msupload_summary_text(b, sizeof b, ui, uf, 4, 1, ur, uff);
+        CHECK(n > 0 && n < 700);
+        CHECK(strstr(b, "msupload: SUMMARY done=7 done_int=4 inter=4 flat=3 wide=1 refused=0 ") == b);
+        CHECK(strstr(b, " up_inter_13=4") && strstr(b, " up_flat_44=3") && !strstr(b, "up_inter_44") && !strstr(b, "up_flat_13"));
+        for (int i = 0; i < NVMTL_MSS_NFMT; i++) { ui[i] = 99999999u; uf[i] = 99999999u; }   /* counts of 8 digits: the longest line still fits the log's 768 B line buffer */
+        for (int i = 0; i < NVMTL_MSS_R_N; i++) ur[i] = 99999999u;
+        for (int i = 0; i < NVMTL_MSS_F_N; i++) uff[i] = 99999999u;
+        n = nvmtl_msupload_summary_text(b, sizeof b, ui, uf, 99999999u, 99999999u, ur, uff);
+        CHECK(n > 0 && n < 760);
+        for (int i = 0; i < NVMTL_MSS_A_N; i++) done[i] = 99999999u;
+        for (int i = 0; i < NVMTL_MSS_R_N; i++) ref[i] = 99999999u;
+        for (int i = 0; i < NVMTL_MSS_F_N; i++) fail[i] = 99999999u;
+        n = nvmtl_msdl_summary_text(b, sizeof b, done, ref, fail, 99999999u, 99999999u);
+        CHECK(n > 0 && n < 760);
+        CHECK(nvmtl_mss_fmt_index(13) == 0 && nvmtl_mss_fmt_index(44) == 5 && nvmtl_mss_fmt_index(97) == -1);
+        for (uint32_t f = 0; f < NVMTL_MSS_NFMT; f++) {   /* every view format the upload plan can return has a slot */
+            nvmtl_msu_plan q; const char *why = 0;
+            const uint32_t fmts[] = { 13, 20, 41, 74, 98, 44, 37, 9, 16 };
+            CHECK(nvmtl_msu_plan_make(fmts[f], 4, 4, 1, 1, 0, 0, 0, 64, 64, 0, 0, 4, 4, 0, 0, 1u << 20, &q, &why) == 0 && nvmtl_mss_fmt_index(q.view_fmt) >= 0);
+        }
+        nvmtl_mss_reason tab[NVMTL_MSS_REASONS]; memset(tab, 0, sizeof tab);
+        char dup[40]; strcpy(dup, "same text");
+        CHECK(nvmtl_mss_reason_count(tab, "same text") == 1 && nvmtl_mss_reason_count(tab, dup) == 2 && nvmtl_mss_reason_count(tab, "other") == 1 && nvmtl_mss_reason_count(tab, "same text") == 3);
+        char buf[32]; unsigned last = 0;   /* a full table: the surplus is counted, none is lost */
+        for (int i = 0; i < 40; i++) { snprintf(buf, sizeof buf, "reason %d", i); last = nvmtl_mss_reason_count(tab, buf); }
+        CHECK(last >= 25);
+        CHECK(nvmtl_mss_pow2(1) && nvmtl_mss_pow2(2) && nvmtl_mss_pow2(1024) && !nvmtl_mss_pow2(0) && !nvmtl_mss_pow2(3) && !nvmtl_mss_pow2(1023));
+    }
     if (failures) { fprintf(stderr, "%d failure(s)\n", failures); return 1; }
     printf("test_msdl: ok\n");
     return 0;

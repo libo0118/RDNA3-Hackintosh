@@ -6,14 +6,20 @@ import collections
 import re
 
 _LINE = re.compile(r"\b([^\s\[\]]+)\[(\d+):([0-9a-f]+)\] \(RDNA3MTLDriver\) NVMTL: (.*)$")
-_REFUSED = re.compile(r"^(copy_image_to_buffer|copy_buffer_to_image|blit copyFromTexture:toBuffer|blit copyFromBuffer:toTexture|msupload|msdl): REFUSED - (.*)$")
+_REFUSED = re.compile(r"^(copy_image_to_buffer|copy_buffer_to_image|blit copyFromTexture:toBuffer|blit copyFromBuffer:toTexture|msupload|msdl): REFUSED(?: \([^)]*\))? - (.*)$")
 _BRACKET = re.compile(r"^copy_image_to_buffer: (?:\(special copy\) )?(recording|layout transition recorded|vkCmdCopyImageToBuffer recorded)")
 _BRACKET_B2I = re.compile(r"^copy_buffer_to_image: (?:\(special copy\) )?(recording|vkCmdCopyBufferToImage recorded)")
-_MSU = re.compile(r"^msupload: buffer -> (\d+)-sample image (\d+)x(\d+) \(vk format (\d+) via view (\d+), mode (\d+)\).*?\[(\d+) so far\]")
+# the lines of one upload (the first 8 of each kind have a literal of their own; the totals are in `msupload: SUMMARY`): interleaved / flat / wide
+_MSU = re.compile(r"^msupload: buffer -> (\d+)-sample image (\d+)x(\d+) \(vk format (\d+) via view (\d+), mode (\d+)\)(.*)$")
+_MSU_FLAT = re.compile(r"^msupload: FLAT layout fallback \((.*?)\) - buffer -> (\d+)-sample image (\d+)x(\d+) \(vk format (\d+) via view")
+_MSU_WIDE = re.compile(r"^msupload: WIDE interleaved row - (\d+)-sample image (\d+)x(\d+) \(vk format (\d+) via view")
+_SUMMARY = re.compile(r"^(msdl|msupload): SUMMARY (.*)$")
+_CENSUS = re.compile(r"^G14 census: copy texture->buffer .*?vkfmt (\d+) samples (\d+) ")
+_REF_FMT = re.compile(r"\(vk format (\d+)")
 _FBF = re.compile(r"^vk: fbfetch: fragment module #(\d+) declares .*? and (READS them|no read is left \(folded away\));.*?: (.*?) "
                   r"\[(?:(\d+) served / )?(\d+) read / (\d+) declared-only / (\d+) zeroed / (\d+) zeroing failed so far\]")
-# multisample texture -> buffer (N52): the first 8 and every 1024th "msdl: N-sample image WxH -> buffer (vk format F, aspect A via view V, mode M): ... [K so far]"
-_MSDL = re.compile(r"^msdl: (\d+)-sample image (\d+)x(\d+) -> buffer \(vk format (\d+), aspect (\d+) via view (\d+), mode (\d+)\).*?\[(\d+) so far\]")
+# multisample texture -> buffer (N52): the first 8 of each aspect "msdl: STENCIL|DEPTH|COLOUR N-sample image WxH -> buffer (vk format F, aspect A via view V, mode M): ..."
+_MSDL = re.compile(r"^msdl: (?:STENCIL|DEPTH|COLOUR) (\d+)-sample image (\d+)x(\d+) -> buffer \(vk format (\d+), aspect (\d+) via view (\d+), mode (\d+)\)")
 # the implemented path (N48 follow-up): per-pass sets, draws, restarts, and every way it refuses. The plugin's log keeps only the first 8
 # lines of each format literal, so the TOTALS are in the SUMMARY line (key=value; the newest per process wins) and every kind of event has a literal
 # of its own (metal/plugin/nvmtl_log_cap.h, nvmtl_fbfetch_plan.h).
@@ -42,6 +48,70 @@ def _lines(pluginlog):
             yield m.group(1), int(m.group(2)), m.group(3), m.group(4)
 
 
+def _reason(text):
+    """The reason of a refusal line without its detail group and counters: `<reason> (vk format F, ...) [this reason N time(s) ...]` -> `<reason>`.
+    Reasons contain parentheses themselves ("(8-bit RGBA ...)", "(view format, samples) pair"), so only a trailing detail group that starts like
+    the plugin's (`(vk format`, `(format`, `(level`) is cut."""
+    t = re.sub(r"\s*\[[^\]]*\]\s*$", "", text)
+    for m in ("(vk format ", "(format ", "(level ", "(region ", "(usage "):
+        i = t.rfind(" " + m)
+        if i > 0:
+            t = t[:i]
+            break
+    return t[:160]
+
+
+def _kv(text):
+    return {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", text)}
+
+
+# the SUMMARY keys that are problems by themselves (plan refusals have their own row `plugin copy refused`)
+_MS_PROBLEM_KEYS = ("r_inrp", "r_nodev", "r_noaddr", "r_nousage", "r_pipe", "f_setlayout", "f_pipelayout", "f_renderpass", "f_module", "f_pipeline", "f_table",
+                    "f_view", "f_retire", "f_set", "f_framebuffer")
+
+
+def _ms_problems(v):
+    return ", ".join("%s=%d" % (k, v[k]) for k in _MS_PROBLEM_KEYS if v.get(k, 0) > 0)
+
+
+def _chain_row(chain_seen, dl_sum, up_sum):
+    """The row `multisample chain`: Apple's GL resolves the stencil of a 4-sample D32_S8 framebuffer with a stencil download, an R8_UINT upload, a resolve
+    into a 1-sample R8_UINT texture, and two single-sample copies (DRIVER-PLAN N52). WARN when a process shows the first of them (census / refusal /
+    counters) but a link of the chain is missing or the links differ by a large margin."""
+    probs, ok = [], []
+    for key in sorted(chain_seen):
+        proc, pid = key
+        dl, up = dl_sum.get(key), up_sum.get(key)
+        who = "%s[%d]" % (proc, pid)
+        if dl is None and up is None:
+            probs.append("%s: a multisample stencil copy is in the census/refusals but there is no msdl / msupload SUMMARY line (the plugin predates N52, or the process ended before the first one)" % who)
+            continue
+        st = (dl or {}).get("d_stencil", 0)
+        u13 = (up or {}).get("up_inter_13", 0) + (up or {}).get("up_flat_13", 0)
+        r8 = (dl or {}).get("resolve_r8u", 0)
+        bad = []
+        if st == 0:
+            bad.append("stencil downloads 0 (the first step of the chain never ran)")
+        if u13 == 0:
+            bad.append("R8_UINT uploads 0 (the second step never ran)")
+        if r8 == 0:
+            bad.append("no resolve into a 1-sample R8_UINT texture counted (resolve_r8u=0: the empty resolve pass never ran or was refused)")
+        for a, b, what in ((st, u13, "stencil downloads %d vs R8_UINT uploads %d" % (st, u13)), (st, r8, "stencil downloads %d vs resolves %d" % (st, r8))):
+            if a and b and abs(a - b) > max(2, max(a, b) // 4):
+                bad.append("%s differ by more than 25%%" % what)
+        if bad:
+            probs.append("%s: %s" % (who, "; ".join(bad)))
+        else:
+            ok.append("%s: stencil downloads %d, R8_UINT uploads %d, resolves into R8_UINT %d" % (who, st, u13, r8))
+    rows = []
+    if probs:
+        rows.append(("WARN", "multisample chain", "Chess's stencil resolve chain is not complete (stencil -> buffer -> 4-sample R8_UINT -> resolve -> 1-sample stencil; "
+                     "a missing link leaves the 1-sample stencil with uninitialised bytes = streaks on the pieces): " + " | ".join(probs[:6])))
+    if ok:
+        rows.append(("INFO", "multisample chain", "the stencil resolve chain ran in every process that showed it: " + " | ".join(ok[:6])))
+    return rows
+
+
 def n48_plugin_rows(pluginlog=""):
     """[(level, name, text)]. WARN for a copy the plugin dropped, a multisample upload that failed, a framebuffer fetch read that
     is still in a pipeline, a scan that failed and a copy bracket that stays open (the process died at or after its last
@@ -49,8 +119,12 @@ def n48_plugin_rows(pluginlog=""):
     refused = collections.Counter()         # (process, call, reason) -> lines
     msu = {}                                 # (process, samples, fmt) -> highest running count
     msu_failed = []
-    msdl = {}                                # (process, samples, fmt, aspect) -> highest running count
+    msu_flat = collections.Counter()         # (process, reason) -> FLAT-layout lines
+    msu_wide = collections.Counter()         # process -> WIDE lines
+    msdl = {}                                # (process, samples, fmt, aspect) -> lines (the plugin logs the first 8 of each aspect; the totals are in SUMMARY)
     msdl_failed = []
+    sums = {"msdl": {}, "msupload": {}}      # kind -> (process, pid) -> {key: int} of the newest SUMMARY line
+    chain_seen = set()                       # (process, pid) that shows a multisample stencil copy / the R8_UINT upload (census, refusal, counters)
     fbf_read, fbf_gone = {}, {}              # process -> highest module number
     fbf_impl, fbf_zmod = {}, {}              # process -> highest module number: implemented / zeroed (the module line)
     fbf_unsup = collections.Counter()        # reason -> process -> lines (real limits; "pipeline lacks the attachment" is normal)
@@ -61,10 +135,23 @@ def n48_plugin_rows(pluginlog=""):
     scan_failed = 0
     brackets = {}                            # (pid, tid) -> (process, call, last state)
     for proc, pid, tid, msg in _lines(pluginlog):
+        m = _CENSUS.match(msg)
+        if m:
+            if int(m.group(1)) == 130 and int(m.group(2)) > 1:   # D32_S8, multisample: the stencil resolve chain of Apple's GL
+                chain_seen.add((proc, pid))
+            continue
+        m = _SUMMARY.match(msg)
+        if m:
+            sums[m.group(1)][(proc, pid)] = _kv(m.group(2))
+            continue
         m = _REFUSED.match(msg)
         if m:
-            reason = re.sub(r"\s*\(.*$", "", m.group(2))[:110]
+            reason = _reason(m.group(2))
             refused[(proc, m.group(1), reason)] += 1
+            fm = _REF_FMT.search(m.group(2))
+            if fm and (("copy_image_to_buffer" == m.group(1) and 127 <= int(fm.group(1)) <= 130 and "aspect option 4" in m.group(2)) or
+                       ("copy_buffer_to_image" == m.group(1) and int(fm.group(1)) == 13)) and ("multisample" in m.group(2) or "-sample image" in m.group(2)):
+                chain_seen.add((proc, pid))
             continue
         m = _BRACKET.match(msg)
         if m:
@@ -74,15 +161,23 @@ def n48_plugin_rows(pluginlog=""):
         if m:
             brackets[(pid, tid, "b2i")] = (proc, "copy_buffer_to_image", m.group(1))
             continue
+        m = _MSU_FLAT.match(msg)
+        if m:
+            msu_flat[(proc, m.group(1))] += 1
+            continue
+        m = _MSU_WIDE.match(msg)
+        if m:
+            msu_wide[proc] += 1
+            continue
         m = _MSU.match(msg)
         if m:
             k = (proc, int(m.group(1)), int(m.group(4)))
-            msu[k] = max(msu.get(k, 0), int(m.group(7)))
+            msu[k] = msu.get(k, 0) + 1
             continue
         m = _MSDL.match(msg)
         if m:
             k = (proc, int(m.group(1)), int(m.group(4)), int(m.group(5)))
-            msdl[k] = max(msdl.get(k, 0), int(m.group(8)))
+            msdl[k] = msdl.get(k, 0) + 1
             continue
         if msg.startswith("msdl: FAILED"):
             msdl_failed.append("%s: %s" % (proc, msg[:140]))
@@ -131,20 +226,48 @@ def n48_plugin_rows(pluginlog=""):
         rows.append(("WARN", "plugin copy refused",
                      "%d logged refusal line(s) (a lower bound: the plugin logs the first few of each kind): the copy was DROPPED, the destination keeps "
                      "its old bytes (see docs/AFTER-TESTS.md, Metal plugin: blit copies): %s" %
-                     (sum(refused.values()), "; ".join("%s (%d)" % (k, n) for k, n in list(by.items())[:4]))))
-    if msu:
+                     (sum(refused.values()), "; ".join("%s (%d)" % (k, n) for k, n in list(by.items())[:8]))))
+    # the totals (SUMMARY, not capped) win over the first lines of each kind (capped at 8 per literal)
+    for (proc, pid), v in sorted(sums["msupload"].items()):
+        pf = ", ".join("%s: %s" % (k[len("up_"):], v[k]) for k in sorted(v) if k.startswith(("up_inter_", "up_flat_")))
+        rows.append(("INFO", "multisample upload", "%s[%d]: %d upload(s) through the plugin's own pass (%d integer-output), %d sample-interleaved / %d flat (one element per pixel)%s" %
+                     (proc, pid, v.get("done", 0), v.get("done_int", 0), v.get("inter", 0), v.get("flat", 0), (": " + pf) if pf else "")))
+    flat_tot = [(key, v["flat"]) for key, v in sorted(sums["msupload"].items()) if v.get("flat", 0) > 0]
+    if flat_tot or msu_flat:
+        why = "; ".join("%s: %s (%d line(s))" % (p, r, n) for (p, r), n in sorted(msu_flat.items(), key=lambda kv: -kv[1])[:4])
+        rows.append(("WARN", "multisample upload", "FLAT layout fallback (the row did not match Apple's sample-interleaved layout: every sample of a pixel got the one element, "
+                     "which is wrong if Apple meant interleaved): %s%s" % (", ".join("%s[%d] %d upload(s)" % (k[0], k[1], n) for k, n in flat_tot[:4]), (" - " + why) if why else "")))
+    wide_tot = [(key, v["wide"]) for key, v in sorted(sums["msupload"].items()) if v.get("wide", 0) > 0]
+    if wide_tot or msu_wide:
+        rows.append(("WARN", "multisample upload", "WIDE interleaved row (more than 255 B beyond one row of the region: it may be the pitch of a flat buffer under a sub-region, "
+                     "i.e. the wrong layout): %s" % (", ".join("%s[%d] %d upload(s)" % (k[0], k[1], n) for k, n in wide_tot[:4]) or ", ".join("%s %d line(s)" % (p, n) for p, n in sorted(msu_wide.items())[:4]))))
+    if msu and not sums["msupload"]:
         rows.append(("INFO", "multisample upload",
-                     "buffer -> multisample texture uploads ran through the plugin's own pass (Vulkan has no such copy; Chess aborted in RADV before): " +
-                     "; ".join("%s %d-sample vk format %d: %d" % (p, s, f, n) for (p, s, f), n in sorted(msu.items())[:4])))
+                     "buffer -> multisample texture uploads ran through the plugin's own pass (no SUMMARY line: the plugin predates it; counts are the logged lines): " +
+                     "; ".join("%s %d-sample vk format %d: %d line(s)" % (p, s_, f, n) for (p, s_, f), n in sorted(msu.items())[:6])))
     if msu_failed:
         rows.append(("WARN", "multisample upload", "%d failure line(s), e.g. %s" % (len(msu_failed), msu_failed[0])))
-    if msdl:
+    probs_u = ["%s[%d]: %s" % (k[0], k[1], _ms_problems(v)) for k, v in sorted(sums["msupload"].items()) if _ms_problems(v)]
+    if probs_u:
+        rows.append(("WARN", "multisample upload", "failures / refusals in the totals: " + "; ".join(probs_u[:6])))
+    for (proc, pid), v in sorted(sums["msdl"].items()):
+        if v.get("done", 0) or v.get("d_colour", 0) or v.get("d_depth", 0) or v.get("d_stencil", 0):
+            rows.append(("INFO", "multisample download",
+                         "%s[%d]: %d download(s) through the plugin's own compute pass (colour %d, depth %d, stencil %d; Vulkan has no such copy, before N52 it was dropped and "
+                         "Chess's stencil resolve read uninitialised memory)" % (proc, pid, v.get("done", 0), v.get("d_colour", 0), v.get("d_depth", 0), v.get("d_stencil", 0))))
+    if msdl and not sums["msdl"]:
         rows.append(("INFO", "multisample download",
-                     "multisample texture -> buffer copies ran through the plugin's own compute pass (Vulkan has no such copy; before N52 the copy was dropped and "
-                     "Chess's stencil resolve read uninitialised memory; aspect 1 colour / 2 depth / 4 stencil): " +
-                     "; ".join("%s %d-sample vk format %d aspect %d: %d" % (p, s_, f, a, n) for (p, s_, f, a), n in sorted(msdl.items())[:4])))
+                     "multisample texture -> buffer copies ran through the plugin's own compute pass (no SUMMARY line: the plugin predates it; aspect 1 colour / 2 depth / 4 stencil): " +
+                     "; ".join("%s %d-sample vk format %d aspect %d: %d line(s)" % (p, s_, f, a, n) for (p, s_, f, a), n in sorted(msdl.items())[:6])))
     if msdl_failed:
         rows.append(("WARN", "multisample download", "%d failure line(s), e.g. %s" % (len(msdl_failed), msdl_failed[0])))
+    probs_d = ["%s[%d]: %s" % (k[0], k[1], _ms_problems(v)) for k, v in sorted(sums["msdl"].items()) if _ms_problems(v)]
+    if probs_d:
+        rows.append(("WARN", "multisample download", "failures / refusals in the totals: " + "; ".join(probs_d[:6])))
+    for key, v in list(sums["msdl"].items()) + list(sums["msupload"].items()):
+        if v.get("d_stencil", 0) or v.get("up_inter_13", 0) or v.get("up_flat_13", 0) or v.get("resolve_r8u", 0):
+            chain_seen.add(key)
+    rows.extend(_chain_row(chain_seen, sums["msdl"], sums["msupload"]))
     if fbf_read:
         rows.append(("WARN", "framebuffer fetch",
                      "fragment module(s) READ [[color(n)]] (binding 192+n) from an UNDEFINED descriptor in %s (%s): the zeroing failed (see the ZEROING FAILED line), "
