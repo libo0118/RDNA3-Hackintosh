@@ -767,7 +767,7 @@ static void nvmtl_ud_idle_scan(void)
 /* the GPU writes this buffer's shadow (synchronizeResource, commit's sync-out): the detector leaves it alone from now on */
 static void nvmtl_ud_gpu_written(NVMTLBuffer *b)
 {
-    if (!b || b->_mirrorOff || !nvmtl_managed_check_on()) return;
+    if (!b || b->_mirrorOff || !nvmtl_ud_watch_on()) return;   /* WHOLE watches too: a GPU write is not an undeclared CPU write */
     os_unfair_lock_lock(&gUdLock);
     if (!b->_mirrorOff) {
         b->_mirrorOff = 1; atomic_fetch_add(&gUdGpuOff, 1);
@@ -813,6 +813,7 @@ static void nvmtl_summary_timer_arm(void)
 {
     static dispatch_once_t once; static dispatch_source_t timer;
     dispatch_once(&once, ^{
+        nvmtl_cen_summary(0);   /* arms the census's atexit and t0 now: a process shorter than the first tick still prints at exit */
         timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_queue_create("rdna3.summaries", DISPATCH_QUEUE_SERIAL));
         if (!timer) { nvlog("summaries: the shared 10 s timer could not be made - the managed / census / ab / fbfetch totals go out at their events and at exit only"); return; }
         dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 10ll * NSEC_PER_SEC), 10ull * NSEC_PER_SEC, 1ull * NSEC_PER_SEC);

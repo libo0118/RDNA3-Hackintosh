@@ -176,6 +176,8 @@ static void nvmtl_alloc_failed(const char *what) {
 @end
 #import "NVMTLObjects.h"
 #import "NVMTLTrace.m"
+static void nvmtl_ud_managed_created(void);   /* DRIVER-PLAN N50: the undeclared-write detector counts the managed buffers it could watch */
+static void nvmtl_summary_timer_arm(void);   /* the shared 10 s timer of the plugin's SUMMARY lines */
 void nvmtl_vendor_compile_airs(NSDictionary<NSString *, NSString *> *airs,
                                NSDictionary<NSString *, NSString *> *stages);
 void nvmtl_vendor_attach_sass(id device, id pipelineState, id function);
@@ -570,8 +572,6 @@ static void nvmtl_install_hw_resource_pools(id dev)
     nvlog("newCommandQueue -> %p (NVK command pool)", (__bridge void *)q); return q; }
 
 static void nvmtl_zero_new_buffer(NVMTLBuffer *b, NSUInteger len);
-static void nvmtl_ud_managed_created(void);   /* DRIVER-PLAN N50: the undeclared-write detector counts the managed buffers it could watch */
-static void nvmtl_summary_timer_arm(void);   /* the shared 10 s timer of the plugin's SUMMARY lines */
 static __thread int gZeroSkip;
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)len options:(MTLResourceOptions)opt {
     if (nvmtl_vk_init()) return nil;

@@ -1200,11 +1200,14 @@ ladder_log_slice() {   # ladder_log_slice RUNG START_EPOCH "<pids>": the plugin'
     _ls_pred="$_ls_pred)"
     : > "$LD/$1.full"
     with_limit 90 sh -c "log show --start \"$_ls_start\" --info --style compact --predicate '$_ls_pred' 2>/dev/null | grep -v -e 'lazy air' -e sizequery > \"$LD/$1.full\"" 2>/dev/null
+    _ls_rc=$?
     _ls_sz=$(wc -c < "$LD/$1.full" | tr -d ' ')
     _ls_note=
+    # a log show killed by the 90 s limit ends mid-stream: its end is not the rung's end (the last SUMMARY lines may be missing)
+    [ "$_ls_rc" = 0 ] || _ls_note=", log show did not finish in 90 s (exit $_ls_rc): the slice ends early"
     if [ "${_ls_sz:-0}" -gt 600000 ]; then
         tail -c 600000 "$LD/$1.full" > "$LD/$1.log"
-        _ls_note=", slice truncated: kept the last 600000 of $_ls_sz bytes"
+        _ls_note="$_ls_note, slice truncated: kept the last 600000 of $_ls_sz bytes"
     else
         cp "$LD/$1.full" "$LD/$1.log"
     fi
@@ -1341,6 +1344,7 @@ ladder_restore() {   # the plugin's conf and allow list exactly as the run found
     return 0
 }
 ladder_abort() {   # ladder_abort SIGNAME EXITCODE: the run is ending because of a signal
+    trap '' INT TERM HUP   # a second signal must not run the restore and the push again
     ladder_w "ABORTED by SIG$1 at rung ${_LADDER_CUR:-none} ($(date +%T)): the rungs after it did not run"
     ladder_restore
     ladder_push
@@ -1384,7 +1388,7 @@ ladder_run() {   # ladder_run <1|2|3>: 1 = the app rungs, 2 = and the WindowServ
     # tick windows that were already there: the text script of an earlier run still printing its lines in some Terminal. They are live too, so the glyph verdict could judge them as well as ours
     _old_ticks=$(pgrep -f 'rdna3-ladder-text\.' 2>/dev/null | tr '\n' ' ')
     [ -z "$_old_ticks" ] || ladder_w "WARN: the text script of an earlier run is still running (pids $_old_ticks): its Terminal window shows tick lines too and is as live as this run's; close it and run again if a verdict says STATIC/live windows"
-    ladder_text_script || { ladder_w "ABORT: no text script"; ladder_restore; trap - EXIT INT TERM; return 1; }
+    ladder_text_script || { ladder_w "ABORT: no text script"; ladder_restore; trap - EXIT INT TERM HUP; return 1; }
     caffeinate -u -t 5 >/dev/null 2>&1 &
     notify "ladder: $(echo $_lrungs | wc -w | tr -d ' ') rungs, Terminal and Chess open and close by themselves - look at the screen"
     _lfail=0
