@@ -77,6 +77,12 @@ static inline int nvmtl_bshadow_refresh(nvmtl_bshadow *sh, const uint8_t *src, s
     return NVMTL_BS_UPLOAD;
 }
 
+/* VkImageLayout of an image the refresh may SKIP: only SHADER_READ_ONLY_OPTIMAL (5), the layout every refresh upload leaves the image in and the one the render descriptors
+ * declare. A copy-source use, a copy to a buffer or a getBytes leaves TRANSFER_SRC (6), a blit TRANSFER_DST (7), a compute write GENERAL (1): the render encoders do not
+ * transition a sampled image, so for those the refresh must upload again (which also puts the layout right). */
+#define NVMTL_BS_LAYOUT_SRO 5u
+static inline int nvmtl_bshadow_skip_allowed(uint32_t layout) { return layout == NVMTL_BS_LAYOUT_SRO; }
+
 /* the upload of the shadow's bytes finished: ok = it succeeded. A failed upload leaves the image in an unknown state, so the next refresh uploads again. */
 static inline void nvmtl_bshadow_done(nvmtl_bshadow *sh, int ok) { if (sh) sh->valid = ok ? 1 : 0; }
 

@@ -779,6 +779,9 @@ def print_enc_split(tr, out):
                   len(rows), tot["draws"], tot["pipe_us"] / d, tot["desc_us"] / d, tot["sin_us"] / d, tot["total_us"] / d,
                   ("; %d pipeline variant(s) built while drawing" % tot["builds"]) if tot["builds"] else ""))
     kinds = enc_split_kinds(tot)
+    if not kinds:
+        out.write("  (no N51 ENC_SPLIT data: the trace is from a plugin older than DRIVER-PLAN N51, or none of its %d surface-in call(s) was a refresh, a probe hit, an upload or a monitor wait - "
+                  "what the surface-in time was cannot be split)\n" % tot["sin_calls"])
     if kinds:
         known = tot["bc_up_us"] + tot["bc_skip_us"] + tot["fast_us"] + tot["wait_us"]
         out.write("  surface-in calls (%d, %.1fms): %s; the rest of the surface-in time (%.1fms: surface uploads, tag queries, locked skips) is in neither\n" % (

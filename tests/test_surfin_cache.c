@@ -113,6 +113,31 @@ static void test_shadow(void)
         CHECK(image_equals_app());
     }
 
+    /* replaceRegion (ECC round 1): the plugin does SurfaceIn (a refresh, which re-validates the shadow) BEFORE it patches the image. forget must come after the patch:
+     * replace after a refresh, then a refresh with EQUAL bytes must upload, and the image must equal the app again (the slice variant never writes the buffer) */
+    {
+        CHECK(refresh(&sh) != NVMTL_BS_NOSHADOW);
+        CHECK(refresh(&sh) == NVMTL_BS_SKIP && image_equals_app());
+        nvmtl_bshadow_forget(&sh);                                        /* the early forget (before SurfaceIn) ... */
+        CHECK(refresh(&sh) == NVMTL_BS_UPLOAD && sh.valid);               /* ... is undone by the refresh SurfaceIn does */
+        memset(image, 0x31, 3);                                           /* the patch of the image */
+        CHECK(refresh(&sh) == NVMTL_BS_SKIP && !image_equals_app());      /* without a forget AFTER the patch the cache keeps the patch: the bug */
+        nvmtl_bshadow_forget(&sh);                                        /* forget after the patch */
+        CHECK(refresh(&sh) == NVMTL_BS_UPLOAD && image_equals_app());     /* equal bytes, uploaded anyway */
+    }
+    /* the layout (ECC round 1): a skip is only allowed for SHADER_READ_ONLY_OPTIMAL (5); TRANSFER_SRC 6, TRANSFER_DST 7, GENERAL 1, UNDEFINED 0 are not */
+    CHECK(nvmtl_bshadow_skip_allowed(5));
+    CHECK(!nvmtl_bshadow_skip_allowed(0) && !nvmtl_bshadow_skip_allowed(1) && !nvmtl_bshadow_skip_allowed(6) && !nvmtl_bshadow_skip_allowed(7));
+    {   /* the plugin's rule: a valid shadow with a layout that does not allow a skip is forgotten first, so the refresh uploads */
+        uint32_t layout = 6;
+        CHECK(refresh(&sh) == NVMTL_BS_SKIP);
+        if (sh.valid && !nvmtl_bshadow_skip_allowed(layout)) nvmtl_bshadow_forget(&sh);
+        CHECK(refresh(&sh) == NVMTL_BS_UPLOAD && image_equals_app());
+        layout = 5;
+        if (sh.valid && !nvmtl_bshadow_skip_allowed(layout)) nvmtl_bshadow_forget(&sh);
+        CHECK(refresh(&sh) == NVMTL_BS_SKIP);
+    }
+
     /* bad arguments never skip */
     CHECK(nvmtl_bshadow_refresh(&sh, app, W - 1, W, H) == NVMTL_BS_NOSHADOW);
     CHECK(nvmtl_bshadow_refresh(&sh, NULL, PITCH, W, H) == NVMTL_BS_NOSHADOW);

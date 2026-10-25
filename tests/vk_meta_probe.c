@@ -21,6 +21,7 @@
  * the control), NOPOLLUTE=1, NOC2C=1 (no barrier between two compute dispatches: the negative control, it must FAIL with 16x16-tile-shaped wrong regions).
  *   cc -o /tmp/meta_probe tests/vk_meta_probe.c -lvulkan -lm && /tmp/meta_probe
  *   RADV_DEBUG=nodcc /tmp/meta_probe        (the metadata off: must agree)
+ *   LIE=1 /tmp/meta_probe                   (render-pass samples WITHOUT a layout transition, like the plugin's render encoders; LIE=2 also leaves uploads in TRANSFER_DST)
  * Shaders (glslc --target-env=vulkan1.1 -O; the SPIR-V is in vk_meta_probe_spv.h):
  *   q.vert   : fullscreen triangle from gl_VertexIndex (a rectangle is a scissor)
  *   pat.frag : o = hash(gl_FragCoord.xy, pc.seed) as 4 bytes (r, g, b, 255) / 255   (exact in a UNORM 8-bit target)
@@ -90,7 +91,7 @@ static void bar(VkCommandBuffer cb, VkImage im, VkImageLayout o, VkImageLayout n
     vkCmdPipelineBarrier(cb, ss, ds, 0, 0, 0, 0, 0, 1, &b);
 }
 /* the plugin's img_to(): srcAccess MEMORY_RW, ALL_COMMANDS -> COMPUTE_SHADER stage (nvmtl_vk_cmd_prepare_sampled_image) */
-static int g_trace, g_noc2c;   /* NOC2C=1: no barrier between two compute dispatches (the negative control: what a missing ordering looks like) */
+static int g_trace, g_noc2c, g_lie, g_lie_n[16];   /* NOC2C=1: no barrier between two compute dispatches (the negative control: what a missing ordering looks like) */
 static void to_sampled(VkCommandBuffer cb, subj *s)
 { bar(cb, s->img, s->lay, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
   s->lay = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
@@ -269,8 +270,10 @@ static void op_upload(subj *s, int x, int y, int w, int h)
     else bar(cb, s->img, s->lay, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkBufferImageCopy bic = { 0, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, { x, y, 0 }, { (uint32_t)w, (uint32_t)h, 1 } };
     vkCmdCopyBufferToImage(cb, b, s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    if (g_lie == 2 && (rnd() & 1)) s->lay = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;   /* LIE=2: a copy that does not transition back (the image rests in TRANSFER_DST when it is sampled) */
+    else {
     bar(cb, s->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-    s->lay = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    s->lay = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; }
     for (int j = 0; j < h; j++) for (int i = 0; i < w; i++) { s->model[(size_t)(y + j) * s->w + x + i] = s->bpp == 1 ? p[j * w + i] : ((uint32_t *)p)[j * w + i]; s->known[(size_t)(y + j) * s->w + x + i] = 1; }
     vkUnmapMemory(dev, m); defer_buf(b, m); op_done();
 }
@@ -281,7 +284,14 @@ static void op_sample(subj *s, VkFormat svf, int as_r32, const char *tag, int op
     subj t = mksubj(as_r32 ? VK_FORMAT_R32_UINT : svf, s->w, s->h, 1, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
     VkImageView sv = mkview(s->img, as_r32 ? VK_FORMAT_R32_UINT : svf), tv = mkview(t.img, t.fmt);
     VkRenderPass rp = mkrp(t.fmt, 1, 0, 0); VkPipeline pp = mkpipe(rp, as_r32 ? g_smpu : g_smp, 1);
-    VkDescriptorSet set = mkset(sv); VkCommandBuffer cb = opcb(); to_sampled(cb, s);
+    VkDescriptorSet set = mkset(sv); VkCommandBuffer cb = opcb();
+    if (g_lie) {   /* LIE=1 (N51 ECC round 1): what the plugin's render encoders do - NO layout transition before a sampled bind: the descriptor declares SHADER_READ_ONLY
+                    * whatever the image rests in (TRANSFER_SRC after a render pass, GENERAL after a compute write, TRANSFER_DST). Only a memory dependency, so the layout lie is
+                    * the one thing that differs from the honest probe. */
+        VkMemoryBarrier mb = { VK_STRUCTURE_TYPE_MEMORY_BARRIER, 0, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, 0, 0, 0);
+        g_lie_n[(unsigned)s->lay < 16 ? (unsigned)s->lay : 15]++;
+    } else to_sampled(cb, s);
     VkFramebufferCreateInfo fc = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, 0, 0, rp, 1, &tv, t.w, t.h, 1 }; VkFramebuffer fb; CK(vkCreateFramebuffer(dev, &fc, 0, &fb));
     VkClearValue cv; memset(&cv, 0, sizeof cv); VkRenderPassBeginInfo rb = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, 0, rp, fb, { { 0, 0 }, { t.w, t.h } }, 1, &cv };
     vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE); draw_rect(cb, pp, t.w, t.h, 0, 0, t.w, t.h, 0, set); vkCmdEndRenderPass(cb);
@@ -352,11 +362,12 @@ static int run_srgb(int ms, int rounds)
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    g_rng = (uint64_t)(getenv("SEED") ? atoi(getenv("SEED")) : 1) * 0x9E3779B97F4A7C15ull + 1; g_honest = getenv("HONEST") != 0; g_noc2c = getenv("NOC2C") != 0; g_trace = getenv("TRACE") != 0; g_pollute = !getenv("NOPOLLUTE");
+    g_rng = (uint64_t)(getenv("SEED") ? atoi(getenv("SEED")) : 1) * 0x9E3779B97F4A7C15ull + 1; g_honest = getenv("HONEST") != 0; g_noc2c = getenv("NOC2C") != 0; g_trace = getenv("TRACE") != 0; g_lie = getenv("LIE") ? atoi(getenv("LIE")) : 0; g_pollute = !getenv("NOPOLLUTE");
     const int nops = getenv("OPS") ? atoi(getenv("OPS")) : 80; g_batch = getenv("BATCH") ? atoi(getenv("BATCH")) : 1; if (g_batch < 1) g_batch = 1;
     setup();
     const VkFormat fs[3] = { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8_UNORM };
     for (int i = 0; i < 3; i++) { g_rp_load[i] = mkrp(fs[i], 1, 1, 0); g_rp_clr[i] = mkrp(fs[i], 1, 0, 0); g_pipe_pat[i] = mkpipe(g_rp_load[i], g_pat, 1); g_pipe_smp[i] = mkpipe(g_rp_load[i], g_smp, 1); }
+    if (g_lie) printf("LIE=%d: render-pass samples are recorded WITHOUT a layout transition (the plugin's render encoders)\n", g_lie);
     printf("honest layouts: %s, polluted memory: %s\n", g_honest ? "yes (control)" : "no (the plugin's declared TRANSFER_SRC)", g_pollute ? "yes" : "no");
     int bad = 0;
     bad += run_seq("BGRA8 colour image, plugin-style sequence", VK_FORMAT_B8G8R8A8_UNORM, 1920, 1080, nops, 0, 0);
@@ -368,6 +379,8 @@ int main(int argc, char **argv)
     bad += run_seq("R8 glyph atlas, plugin-style sequence", VK_FORMAT_R8_UNORM, 1024, 1024, nops, 1, 0);
     bad += run_srgb(0, 40);
     bad += run_srgb(1, 40);
+    if (g_lie) printf("samples taken with the image resting in: UNDEFINED %d, GENERAL %d, SHADER_READ_ONLY %d, TRANSFER_SRC %d, TRANSFER_DST %d (declared SHADER_READ_ONLY)\n",
+                      g_lie_n[0], g_lie_n[1], g_lie_n[5], g_lie_n[6], g_lie_n[7]);
     printf(bad ? "FAILED: %d bad pixels\n" : "ok: no pixel the model defines is wrong (%d)\n", bad);
     return bad ? 1 : 0;
 }

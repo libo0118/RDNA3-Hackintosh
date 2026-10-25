@@ -99,6 +99,15 @@ need "$T/ws.txt" 'events: 87 written, 87 kept'
 need "$T/ws.txt" 'encode-time split (1 render encoder(s), 40 draw(s)): per draw pipeline lookup 7.5us, descriptor writes 22.5us, surface-in 11.2us'
 need "$T/ws.txt" 'surface-in calls (12, 0.5ms): buffer-texture refresh 3 uploaded 0.30ms + 5 unchanged 0.02ms, 2 probe hit(s) 0.00ms, 1 surface upload(s), monitor wait 0.03ms; the rest of the surface-in time (0.1ms'
 need "$T/ws.txt" 'worst encoder: cb [0-9]*, 40 draw(s), pipeline 0.30ms, descriptors 0.90ms, surface-in 0.45ms (12 call(s)), slowest draw: lookup 60us, descriptors 140us'
+# a trace without the N51 words says so instead of printing nothing
+python3 -I -B -c '
+import sys, types, io
+sys.path.insert(0, sys.argv[1])
+import plugin_trace as pt
+r = types.SimpleNamespace(kind=pt.K_ENC_SPLIT, id=7, seed0=0, a0=40, rc=1, dur_us=2500, a1=300, a2=900, words=[0] * 8 + [450, 12, 60, 140])
+out = io.StringIO(); pt.print_enc_split(types.SimpleNamespace(recs=[r]), out)
+assert "(no N51 ENC_SPLIT data:" in out.getvalue() and "12 surface-in call(s)" in out.getvalue(), out.getvalue()
+' "$ROOT/tools" || fail "the old-trace note of the encode-time split"
 # the one-line form of a kind 17 record (not on the frame listings; the failure listing prints it with the other events)
 python3 -I -B -c '
 import sys, types
