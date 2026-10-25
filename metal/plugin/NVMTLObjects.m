@@ -11,6 +11,7 @@
 void nvlog(const char *fmt, ...);
 
 #import "NVMTLObjects.h"
+#include "nvmtl_ab_switch.h"
 #import <objc/runtime.h>
 #import <objc/message.h>
 static int nvmtl_trace_on(void);
@@ -120,7 +121,25 @@ __attribute__((constructor)) static void nvmtl_conf_knobs(void)
             if (k > 0 && (size_t)k < sizeof recbuf - recn) recn += (size_t)k; else recbuf[recn] = 0; }
     }
     fclose(f);
+    /* DRIVER-PLAN N49: one line for the card's A/B run. NVMTL_PARANOID=1 in rdna3mtl.conf switches off every optimisation that moves work in time or
+     * shares / reuses memory (async commit and submit-ahead, the pre-submit prologue, buffer / buffer-texture / heap-texture recycling, command pool and
+     * address page reuse, descriptor set reuse and dirty-only copies, barrier folding, residency paging) and turns RADV's compression metadata off. A line
+     * of its own in the same file still wins (setenv without overwrite), and the profile is logged by the conf line below and by the per-switch lines. */
+    unsigned paranoid = 0;
+    { const char *pv = getenv("NVMTL_PARANOID");
+      if (pv && *pv && *pv != '0') {
+          static const char *const kv[][2] = { { "NVMTL_RADV_DEBUG", "nodcc,nohiz,nofmask,nofastclears" }, { "NVMTL_ASYNC_COMMIT", "0" }, { "NVMTL_GSUB_INFLIGHT", "1" },
+              { "NVMTL_PRESUBMIT_PROLOGUE", "0" }, { "NVMTL_NO_POOL_REUSE", "1" }, { "NVMTL_NO_BUFREUSE", "1" }, { "NVMTL_NO_BUFTEX_RECYCLE", "1" },
+              { "NVMTL_NO_HEAPTEX_RECYCLE", "1" }, { "NVMTL_NO_HEAPTEX_PLACE", "1" }, { "NVMTL_NO_DIRTYONLY", "1" }, { "NVMTL_ENC78_OFF", "all" },
+              { "NVMTL_G79_OFF", "all" }, { "NVMTL_NO_RES2", "1" }, { "NVMTL_NO_PURGE_RECLAIM", "1" }, { "NVMTL_MANAGED_CHECK", "1" }, { "NVMTL_MANAGED_SNAPSHOT", "1" } };
+          for (unsigned i = 0; i < sizeof kv / sizeof kv[0]; i++) {
+              if (getenv(kv[i][0])) continue;
+              if (setenv(kv[i][0], kv[i][1], 0) == 0) { paranoid++; took++;
+                  int k = snprintf(recbuf + recn, sizeof recbuf - recn, "%s%s=%s", recn ? ";" : "", kv[i][0], kv[i][1]);
+                  if (k > 0 && (size_t)k < sizeof recbuf - recn) recn += (size_t)k; else recbuf[recn] = 0; }
+          } } }
     if (recn) setenv("NVMTL_CONF_SET", recbuf, 1);
+    if (paranoid) nvlog("conf: NVMTL_PARANOID=1 - the diagnostic profile is ON (%u switch(es) set: no async commit, no recycling or reuse, no barrier folding, no residency paging, RADV compression metadata off): this run does NOT show the default plugin", paranoid);
     if (took || forgot) nvlog("conf: %u knob(s) read from " RDNA3MTL_CONF ", %u inherited conf knob(s) forgotten first (the environment still wins)", took, forgot);
 }
 static int nvmtl_dontcare_clears(void) {
@@ -577,24 +596,93 @@ static void nvmtl_purge_report(const char *why) {
           (unsigned long long)nemp, (unsigned long long)(bemp >> 20),
           (unsigned long long)atomic_load(&gPurgeAsks), (unsigned long long)(bemp >> 20));
 }
-static void nvmtl_pre_release(void *held) { @autoreleasepool { (void)CFBridgingRelease(held); } }
+/* DRIVER-PLAN N49, NVMTL_MANAGED_CHECK=1 (default off): a managed buffer's upload is a GPU copy from the CPU shadow into the VRAM copy that rides the next
+ * submit, so the GPU reads the shadow when it EXECUTES the copy, not when the app called didModifyRange: and an app that rewrites the range as soon as
+ * it believes the copy is queued (Apple's drivers may snapshot it) gives the GPU a mix. The flush hashes each uploaded range, the release of the
+ * prologue (after the GPU finished and before the app is told) hashes it again: a changed hash is a CPU write into the range while the copy was in flight. */
+static int nvmtl_managed_check_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_MANAGED_CHECK"); on = e && *e && *e != '0';
+        nvlog("managed: shadow check %s (NVMTL_MANAGED_CHECK=%s)", on ? "ON - each upload's shadow range is hashed at the flush and again when the GPU is done" : "off", e ? e : "unset"); }
+    return on;
+}
+static int nvmtl_managed_snap_on(void);
+static uint64_t nvmtl_range_hash(const uint8_t *p, size_t n) {
+    uint64_t h = 1469598103934665603ull; size_t i = 0;
+    for (; i + 8 <= n; i += 8) { uint64_t w; memcpy(&w, p + i, 8); h = (h ^ w) * 1099511628211ull; h ^= h >> 29; }
+    for (; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+/* NVMTL_MANAGED_SNAPSHOT=1 (default off; DRIVER-PLAN N49): the copy that uploads a managed range reads a private copy of the shadow made at the flush
+ * (ranges up to 1 MiB), not the shadow itself when the GPU gets to it. What Apple's drivers do for small ranges is not documented; an app that rewrites a
+ * range right after didModifyRange:/commit (Terminal's 3 x 256 KB upload buffers) is safe with it and gets a mix of two states without it. */
+static int nvmtl_managed_snap_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_MANAGED_SNAPSHOT"); on = e && *e && *e != '0';
+        nvlog("managed: upload snapshot %s (NVMTL_MANAGED_SNAPSHOT=%s)", on ? "ON - the GPU copy reads a private copy of the shadow range made at the flush (ranges up to 1 MiB)" : "off - the GPU copy reads the shadow when it runs", e ? e : "unset"); }
+    return on;
+}
+static _Atomic unsigned long long gMgChecked, gMgChangedExact, gMgChangedEnvelope, gMgSnapped, gMgSnapFailed;
+static void nvmtl_pre_release(void *held) {
+    @autoreleasepool {
+        NSArray *a = CFBridgingRelease(held);
+        if (!nvmtl_managed_check_on()) return;
+        for (id e in a) {
+            if (![e isKindOfClass:[NSArray class]] || [(NSArray *)e count] != 5) continue;
+            NVMTLBuffer *b = [(NSArray *)e objectAtIndex:0]; if (!b->_shadow.map) continue;
+            const NSUInteger lo = [[(NSArray *)e objectAtIndex:1] unsignedIntegerValue], hi = [[(NSArray *)e objectAtIndex:2] unsignedIntegerValue];
+            const uint64_t h1 = [[(NSArray *)e objectAtIndex:3] unsignedLongLongValue]; const NSUInteger marks = [[(NSArray *)e objectAtIndex:4] unsignedIntegerValue];
+            const unsigned long long n = atomic_fetch_add(&gMgChecked, 1) + 1;
+            if (nvmtl_range_hash((const uint8_t *)b->_shadow.map + lo, hi - lo) == h1) continue;
+            const unsigned long long k = atomic_fetch_add(marks == 1 ? &gMgChangedExact : &gMgChangedEnvelope, 1) + 1;
+            if (k <= 8 || !(k & (k - 1)))
+                nvlog("managed: the CPU shadow of a %zu-byte buffer CHANGED at bytes %lu..%lu between the flush and the GPU's completion (%s) [%llu exact, %llu envelope of several marks, in %llu uploads checked]%s",
+                      (size_t)b->_b.size, (unsigned long)lo, (unsigned long)hi, marks == 1 ? "one didModifyRange: the GPU copy may have read a mix of two states" : "several didModifyRange ranges merged: the gap between them may legitimately change",
+                      atomic_load(&gMgChangedExact), atomic_load(&gMgChangedEnvelope), n,
+                      nvmtl_managed_snap_on() ? " - NVMTL_MANAGED_SNAPSHOT is on: a range up to 1 MiB was read from the snapshot, the GPU saw the state of the flush" : "");
+        }
+        const unsigned long long n = atomic_load(&gMgChecked);
+        if (n == 1 || !(n & (n - 1))) nvlog("managed: shadow check: %llu upload(s) checked, %llu changed under a single didModifyRange, %llu merged ranges changed", n, atomic_load(&gMgChangedExact), atomic_load(&gMgChangedEnvelope));
+    }
+}
 static void nvmtl_managed_flush(void) {
     if (!atomic_load(&gManagedAny) || gManagedInFlush) return;
     gManagedInFlush = 1;
     NSMutableArray *todo = [NSMutableArray new];
+    const BOOL chk = nvmtl_managed_check_on();   /* before the lock: it logs once */
     os_unfair_lock_lock(&gManagedLock);
     for (NVMTLBuffer *b in gManagedDirty.allObjects) {
-        if (b->_dirtyHi > b->_dirtyLo) [todo addObject:@[b, @(b->_dirtyLo), @(b->_dirtyHi)]];
-        b->_dirtyLo = b->_dirtyHi = 0;
+        if (b->_dirtyHi > b->_dirtyLo) {
+            if (chk && b->_shadow.map && b->_dirtyHi <= b->_b.size)
+                [todo addObject:@[b, @(b->_dirtyLo), @(b->_dirtyHi), @(nvmtl_range_hash((const uint8_t *)b->_shadow.map + b->_dirtyLo, b->_dirtyHi - b->_dirtyLo)), @(b->_dirtyN)]];
+            else [todo addObject:@[b, @(b->_dirtyLo), @(b->_dirtyHi)]];
+        }
+        b->_dirtyLo = b->_dirtyHi = 0; b->_dirtyN = 0;
     }
     [gManagedDirty removeAllObjects]; atomic_store(&gManagedAny, 0);
     os_unfair_lock_unlock(&gManagedLock);
     if (todo.count && nvmtl_vk_pre_open()) {
+        NSMutableArray *stages = nil; const BOOL snap = nvmtl_managed_snap_on();
         for (NSArray *t in todo) {
             NVMTLBuffer *b = t[0]; NSUInteger lo = [t[1] unsignedIntegerValue], n = [t[2] unsignedIntegerValue] - lo;
-            if (nvmtl_vk_pre_copy(&b->_shadow, lo, &b->_b, lo, n))
+            nvk_buffer *src = &b->_shadow; size_t soff = lo;
+            if (nvmtl_snap_wanted(n, snap) && b->_shadow.map) {
+                NVMTLBuffer *st = [NVMTLBuffer new];
+                if (nvmtl_vk_buffer_create(n, 1, &st->_b) == 0 && st->_b.map) {
+                    memcpy(st->_b.map, (const uint8_t *)b->_shadow.map + lo, n); src = &st->_b; soff = 0;
+                    if (!stages) stages = [NSMutableArray new];
+                    [stages addObject:st];   /* released with the prologue, after the GPU is done with the copy */
+                    const unsigned long long k = atomic_fetch_add(&gMgSnapped, 1) + 1;
+                    if (k == 1 || !(k & (k - 1))) nvlog("managed: %llu upload(s) read a private snapshot of the shadow so far (%llu snapshot allocation(s) failed)", k, atomic_load(&gMgSnapFailed));
+                } else {
+                    const unsigned long long k = atomic_fetch_add(&gMgSnapFailed, 1) + 1;
+                    if (k <= 8 || !(k & (k - 1))) nvlog("managed: the snapshot of %lu bytes could not be allocated - this upload reads the shadow itself [%llu so far]", (unsigned long)n, k);
+                }
+            }
+            if (nvmtl_vk_pre_copy(src, soff, &b->_b, lo, n))
                 nvlog("managed: upload of %lu bytes at %lu FAILED - the GPU keeps the old bytes", (unsigned long)n, (unsigned long)lo);
         }
+        if (stages) [todo addObjectsFromArray:stages];
         nvmtl_pre_release_hook = nvmtl_pre_release;
         nvmtl_vk_pre_hold((__bridge_retained void *)todo);
     } else
@@ -609,8 +697,8 @@ static void nvmtl_presubmit(void);
 static void nvmtl_managed_mark(NVMTLBuffer *b, NSUInteger lo, NSUInteger hi) {
     os_unfair_lock_lock(&gManagedLock);
     if (!gManagedDirty) gManagedDirty = [NSHashTable weakObjectsHashTable];
-    if (b->_dirtyHi <= b->_dirtyLo) { b->_dirtyLo = lo; b->_dirtyHi = hi; }
-    else { b->_dirtyLo = MIN(b->_dirtyLo, lo); b->_dirtyHi = MAX(b->_dirtyHi, hi); }
+    if (b->_dirtyHi <= b->_dirtyLo) { b->_dirtyLo = lo; b->_dirtyHi = hi; b->_dirtyN = 1; }
+    else { b->_dirtyLo = MIN(b->_dirtyLo, lo); b->_dirtyHi = MAX(b->_dirtyHi, hi); b->_dirtyN++; }
     @autoreleasepool { [gManagedDirty addObject:b]; } atomic_store(&gManagedAny, 1);
     nvmtl_pre_submit_hook = nvmtl_presubmit;
     os_unfair_lock_unlock(&gManagedLock);

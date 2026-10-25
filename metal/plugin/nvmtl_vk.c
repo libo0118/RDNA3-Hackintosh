@@ -20,6 +20,7 @@
 #include "nvmtl_vk.h"
 #include "nvmtl_sampler_state.h"
 #include "nvmtl_linear_pitch.h"
+#include "nvmtl_ab_switch.h"
 #include "nvmtl_trace.h"
 static int g_sampler_anisotropy, g_sampler_mirror_clamp;
 static int g_scalar_layout;
@@ -737,6 +738,30 @@ static void nvmtl_vkmsg_arm(void)
     }
 }
 
+/* DRIVER-PLAN N49: an A/B switch for the card. Mesa RADV reads RADV_DEBUG / RADV_PERFTEST when its instance is made, so the flags go into the
+ * environment BEFORE the library is opened. `NVMTL_RADV_DEBUG=nodcc,nohiz,nofmask,nofastclears` in rdna3mtl.conf (or the environment where the build
+ * keeps it) turns RADV's colour/depth compression metadata (DCC, HiZ/HTILE, FMASK, fast clears) off for every process that loads the plugin:
+ * tile-shaped blocks of wrong colour that go away with it are metadata, those that stay are not. Only [a-z0-9_,] is taken (the value reaches the
+ * environment of WindowServer). The result is always logged: a debug profile left in rdna3mtl.conf must be visible in the report. */
+static void nvmtl_radv_env(void)
+{
+    static const struct { const char *knob, *var; } k[2] = { { "NVMTL_RADV_DEBUG", "RADV_DEBUG" }, { "NVMTL_RADV_PERFTEST", "RADV_PERFTEST" } };
+    char shown[2][260];
+    for (int i = 0; i < 2; i++) {
+        const char *v = getenv(k[i].knob), *old = getenv(k[i].var);
+        if (v && *v && !nvmtl_radv_flag_ok(v)) { nvlog("vk: %s=%s REJECTED (only lowercase letters, digits, '_' and ',' are taken, at most 200 characters) - %s unchanged", k[i].knob, v, k[i].var); v = NULL; }
+        if (v && *v) {
+            char buf[480];
+            if (nvmtl_radv_flag_join(buf, sizeof buf, old, v)) nvlog("vk: %s=%s does not fit next to the %s that is already there (%s) - %s unchanged", k[i].knob, v, k[i].var, old ? old : "", k[i].var);
+            else setenv(k[i].var, buf, 1);
+        }
+        snprintf(shown[i], sizeof shown[i], "%s", getenv(k[i].var) ? getenv(k[i].var) : "unset");
+    }
+    nvlog("vk: RADV_DEBUG=%s RADV_PERFTEST=%s (NVMTL_RADV_DEBUG=%s, NVMTL_RADV_PERFTEST=%s)%s", shown[0], shown[1],
+          getenv("NVMTL_RADV_DEBUG") ? getenv("NVMTL_RADV_DEBUG") : "unset", getenv("NVMTL_RADV_PERFTEST") ? getenv("NVMTL_RADV_PERFTEST") : "unset",
+          (getenv("RADV_DEBUG") && *getenv("RADV_DEBUG")) || (getenv("RADV_PERFTEST") && *getenv("RADV_PERFTEST")) ? " - A DEBUG PROFILE IS ON: this run does not show the default driver" : "");
+}
+
 static int nvmtl_vk_initialize(void)
 {
     if (g_state) return g_state == 1 ? 0 : -1;
@@ -759,6 +784,7 @@ static int nvmtl_vk_initialize(void)
             }
         }
     }
+    nvmtl_radv_env();
     g_lib = dlopen(NVMTL_ICD_LIB, RTLD_NOW | RTLD_LOCAL);
     if (g_lib) {
         pvkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(g_lib, "vkGetInstanceProcAddr");
@@ -2864,7 +2890,7 @@ static int nvmtl_keep_page_push(nvmtl_address_page *p)
 #define NVMTL_WSEQ_BLIND 0xFFFFFFFFu
 static nvk_buffer g_wit; static int g_wit_state;
 static uint32_t g_wit_seq;
-static uint64_t g_wit_ok, g_wit_waited, g_wit_leak, g_wit_blind, g_wit_ctl_run, g_wit_ctl_fired;
+static uint64_t g_wit_ok, g_wit_waited, g_wit_leak, g_wit_blind, g_wit_ctl_run, g_wit_ctl_fired, g_wit_skew_max;
 static int nvmtl_wit_ready(void)
 {
     int st = __atomic_load_n(&g_wit_state, __ATOMIC_ACQUIRE);
@@ -2913,8 +2939,14 @@ static int nvmtl_keep_verdict(uint32_t s)
         const uint32_t v = nvmtl_wit_read(s);
         const uint64_t us = (clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) - w0) / 1000;
         if (v == s) {
-            if (!__atomic_fetch_add(&g_wit_waited, 1, __ATOMIC_RELAXED))
-                nvlog("vk: keep witness %u landed only %llu us AFTER the flush returned - the flush is not synchronous any more", s, (unsigned long long)us);
+            /* N49: how OFTEN the fence returns before the GPU's last write is visible, and how late (it was logged once per process before) */
+            const uint64_t n = __atomic_add_fetch(&g_wit_waited, 1, __ATOMIC_RELAXED);
+            uint64_t mx = __atomic_load_n(&g_wit_skew_max, __ATOMIC_RELAXED);
+            while (us > mx && !__atomic_compare_exchange_n(&g_wit_skew_max, &mx, us, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+            if (!(n & (n - 1)))
+                nvlog("vk: keep witness %u landed only %llu us AFTER the flush returned - the flush is not synchronous any more [%llu time(s) so far in %llu witnessed submit(s), worst %llu us]",
+                      s, (unsigned long long)us, (unsigned long long)n, (unsigned long long)(__atomic_load_n(&g_wit_ok, __ATOMIC_RELAXED) + n),
+                      (unsigned long long)(us > mx ? us : mx));
             return 1;
         }
         if (us >= (uint64_t)wait_ms * 1000) {
@@ -4931,6 +4963,41 @@ static void nvmtl_clear_colour(VkClearColorValue *cv, uint32_t fmt, const float 
     }
 }
 
+/* DRIVER-PLAN N49. Every render pass the plugin builds that LOADs an attachment declares its initialLayout as TRANSFER_SRC_OPTIMAL (colour) or
+ * DEPTH_STENCIL_ATTACHMENT_OPTIMAL (depth), whatever layout the image really rests in (nvmtl_make_render_pass); the Chess card log says it happens
+ * ("G11 a Load pass began on an image resting in layout 5"). Vulkan wants the declared layout to be the real one; RADV takes the image's
+ * compression metadata state from the declaration. On the dev host's RADV the lie is harmless in every sequence tests/vk_meta_probe.c tries, so the
+ * default only COUNTS it per tracked layout (census line at every power of two of the mismatches). NVMTL_LOAD_BARRIER=1 makes it true: a barrier from the
+ * tracked layout to the declared one before the pass (UNDEFINED included: the image was never written, which initialises its metadata). Colour = 0, depth = 1. */
+static _Atomic unsigned g_ldp[2][10];
+static _Atomic unsigned g_ldp_bad[2];
+static int nvmtl_load_barrier_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("NVMTL_LOAD_BARRIER"); on = e && *e && *e != '0';
+        nvlog("vk: load passes: the declared initial layout is %s (NVMTL_LOAD_BARRIER=%s)", on ? "MADE TRUE by a barrier from the tracked layout (experiment)" : "not enforced, only counted", e ? e : "unset"); }
+    return on;
+}
+static void nvmtl_load_layout(nvk_cmdbuf *c, nvk_image *img, int depth, uint32_t level, uint32_t layer, uint32_t layers)
+{
+    if (!img || c->in_rp) return;
+    const VkImageLayout want = depth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, have = (VkImageLayout)img->layout;
+    atomic_fetch_add(&g_ldp[depth][nvmtl_load_layout_slot((uint32_t)have)], 1);
+    if (have == want) return;   /* nvmtl_load_needs_barrier(have, want, 1) */
+    const unsigned k = atomic_fetch_add(&g_ldp_bad[depth], 1) + 1;
+    if (k <= 8 || !(k & (k - 1)))
+        nvlog("vk: load pass %s of an image resting in layout %u, the pass declares %u [%u such pass(es) so far; per layout (UNDEFINED GENERAL COLOR DS DSRO SRO SRC DST PREINIT other): "
+              "%u %u %u %u %u %u %u %u %u %u]%s", depth ? "depth" : "colour", (unsigned)have, (unsigned)want, k,
+              atomic_load(&g_ldp[depth][0]), atomic_load(&g_ldp[depth][1]), atomic_load(&g_ldp[depth][2]), atomic_load(&g_ldp[depth][3]), atomic_load(&g_ldp[depth][4]),
+              atomic_load(&g_ldp[depth][5]), atomic_load(&g_ldp[depth][6]), atomic_load(&g_ldp[depth][7]), atomic_load(&g_ldp[depth][8]), atomic_load(&g_ldp[depth][9]),
+              nvmtl_load_barrier_on() ? " - transitioned (NVMTL_LOAD_BARRIER)" : "");
+    if (!nvmtl_load_needs_barrier((uint32_t)have, (uint32_t)want, nvmtl_load_barrier_on())) return;
+    const uint32_t nl = layers > 1 ? layers : 1u;
+    VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL, VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
+        VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT, have, want, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, (VkImage)img->img,
+        { nvmtl_barrier_aspect(img), level, 1, layer, nl } };
+    pvkCmdPipelineBarrier(c->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+}
 static void nvmtl_private_depth_layout(nvk_cmdbuf *, nvk_image *, VkImageLayout);
 int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
 {
@@ -5062,9 +5129,11 @@ int nvmtl_vk_cmd_begin_pass(nvk_cmdbuf *c, const nvk_pass *ps, nvk_pipeline *p)
     for (uint32_t i = 0; i < ncol; i++) {
         if (!cf[i]) continue;
         if (first) { was = ps->col[i]->layout; first = 0; }
+        if (ps->load & NVMTL_LOAD_COLOUR(i)) nvmtl_load_layout(c, ps->col[i], 0, ps->col_level[i], ps->col_layer[i], ps->layers);
         ps->col[i]->layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         views[nviews++] = (VkImageView)ps->colview[i];
     }
+    if (p->has_depth && ps->ds && (ps->load & (NVMTL_LOAD_DEPTH | NVMTL_LOAD_STENCIL))) nvmtl_load_layout(c, ps->ds, 1, ps->ds_level, ps->ds_layer, ps->layers);
     if (p->has_depth) { views[nviews++] = (VkImageView)ps->dsview; if (ps->ds) ps->ds->layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
     for (uint32_t i = 0; p->samples > 1 && i < ncol; i++) {
         if (!cf[i] || !(prm & (1u << i))) continue;

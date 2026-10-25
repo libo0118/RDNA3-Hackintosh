@@ -4563,6 +4563,15 @@ def report(path, show_all):
                       "framebuffer-fetch lines were NOT read")]
     for lvl_, name_, text_ in n48_rows_:
         print("   %s %-20s %s" % (lvl_, name_, text_))
+    # DRIVER-PLAN N49: the A/B switches and counters for the glyph / tile artefacts (tools/triage_glyphs.py)
+    try:
+        from triage_glyphs import n49_plugin_rows
+        n49_rows_ = n49_plugin_rows((cdlog or "") + "\n" + (pluginlog or ""))
+    except ImportError:
+        n49_rows_ = [("WARN", "plugin A/B", "tools/triage_glyphs.py is missing next to triage_reports.py: the plugin's RADV profile, load pass layout, "
+                      "fence and managed shadow lines were NOT read")]
+    for lvl_, name_, text_ in n49_rows_:
+        print("   %s %-20s %s" % (lvl_, name_, text_))
     # step 10: the accelerator also loads from the Auxiliary KC
     if "rdna3accel=1" in args:
         want = fb_source_hash(ACCEL_HASH_FILES)
