@@ -1186,6 +1186,8 @@ ladder_quit() {   # ladder_quit "<pids>" [graceful]: the instances this rung sta
     if [ "${2:-}" = graceful ]; then
         # ask each one to quit (System Events, by unix id: the instance, not the app name, which would also hit the owner's own), so that it runs its atexit
         # (the plugin's last `vk: ab: SUMMARY`); whatever is still there after LADDER_QUITGRACE s gets SIGTERM, then SIGKILL
+        # end the text script first: Terminal asks "terminate running processes?" on a quit while it runs, and the TERM below would skip the atexit
+        [ -n "${_LADDER_TEXT:-}" ] && pkill -f "$_LADDER_TEXT" 2>/dev/null && sleep 1
         for _qp in $1; do
             with_limit 15 as_user osascript -e "tell application \"System Events\" to tell (first process whose unix id is $_qp) to quit" >/dev/null 2>&1
         done
@@ -1196,6 +1198,10 @@ ladder_quit() {   # ladder_quit "<pids>" [graceful]: the instances this rung sta
             [ -z "$_qa" ] && break
             sleep 1; _qw=$((_qw + 1))
         done
+        _ql=
+        for _qp in $1; do kill -0 "$_qp" 2>/dev/null && _ql="$_ql $_qp"; done
+        # a pid still here did not quit (Automation denied or not answered, or a dialog): its last SUMMARY is lost, say so
+        [ -n "$_ql" ] && ladder_w "quit: still running after ${LADDER_QUITGRACE:-8}s, TERM:$_ql"
     fi
     kill -TERM $1 2>/dev/null
     sleep "${LADDER_QUITWAIT:-2}"

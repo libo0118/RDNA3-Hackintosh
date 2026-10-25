@@ -5017,7 +5017,7 @@ static _Atomic unsigned g_ldp_bad[2];
 static _Atomic unsigned g_ldp[2][10];   /* LOAD passes whose image rests in another layout than the declared one, by tracked layout (colour, depth) */
 static _Atomic unsigned g_ldp_all[2], g_ldp_inrp[2];   /* all LOAD passes (the denominator); passes seen with a render pass already open (not counted, not transitioned) */
 static _Atomic unsigned g_ldp_barriers[2];
-static _Atomic uint64_t g_ab_sum_ns; static unsigned long long g_ab_sum_last; static int g_ab_armed;
+static _Atomic uint64_t g_ab_sum_ns; static _Atomic unsigned long long g_ab_sum_last; static int g_ab_armed;
 static int nvmtl_load_barrier_on(void)
 {
     static int on = -1;
@@ -5042,9 +5042,9 @@ static void nvmtl_ab_summary(int force)
     const unsigned long long we = __atomic_load_n(&g_wit_waited, __ATOMIC_RELAXED), wo = __atomic_load_n(&g_wit_ok, __ATOMIC_RELAXED),
                              ww = __atomic_load_n(&g_wit_skew_max, __ATOMIC_RELAXED), wb = __atomic_load_n(&g_wit_blind, __ATOMIC_RELAXED);
     const unsigned long long total = sum + we + wo + ww + wb;
-    if (!total || total == g_ab_sum_last) { if (!force) atomic_store(&g_ab_sum_ns, now); return; }   /* nothing new: look again in 10 s, not at every call */
+    if (!total || total == atomic_load_explicit(&g_ab_sum_last, memory_order_relaxed)) { if (!force) atomic_store(&g_ab_sum_ns, now); return; }   /* nothing new: look again in 10 s, not at every call */
     if (!atomic_compare_exchange_strong(&g_ab_sum_ns, (uint64_t *)&last, now) && !force) return;
-    g_ab_sum_last = total;
+    atomic_store_explicit(&g_ab_sum_last, total, memory_order_relaxed);
     nvlog_uncapped("vk: ab: SUMMARY load_colour_all=%u load_colour_mismatch=%u load_colour_inrp=%u load_colour_barriers=%u "
                    "load_depth_all=%u load_depth_mismatch=%u load_depth_inrp=%u load_depth_barriers=%u "
                    "colour_by_layout=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u depth_by_layout=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u "
