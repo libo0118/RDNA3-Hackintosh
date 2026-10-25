@@ -201,6 +201,7 @@ test: $(BUILD)/test_agdc_k5 $(BUILD)/test_agdc_n48 $(BUILD)/test_bootargs $(BUIL
 	python3 -I -B tests/test_kext_kpi_versions.py
 	python3 -I -B tests/test_kmutil_kpi_guard.py
 	python3 -I -B tests/test_triage_tcall.py
+	python3 -I -B tests/test_triage_bomem.py
 	tests/test_coredisplay_prefs.sh
 	tests/test_prune_traces.sh
 	tests/test_membw_load.sh

@@ -151,16 +151,15 @@ jobs:
             echo "runner Darwin $darwin: both accelerator layouts with unresolved imports as warnings (OpenCore injects the Sequoia one)"
             python3 tools/ci/kmutil_kpi_guard.py --warn-unresolved build/RDNA3Accelerator.kext build/RDNA3AcceleratorTahoe.kext
           fi
-      # the core is injected by OpenCore, whose prelinker binds kernel
-      # symbols kmutil would refuse (26.4.1: IOMemoryDescriptor::doMap /
-      # doUnmap through RDNA3BoMemory's vtable, DRIVER-PLAN N47): reported,
-      # not yet a build failure
-      - name: KPI guard for the core (advisory)
-        run: |
-          # a warning, not a red step: the known gap (doMap / doUnmap) stays
-          # visible in the log and the job's annotations
-          python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Accel.kext ||
-            echo "::warning::RDNA3Accel.kext would not link through kmutil (DRIVER-PLAN N47 (b)); OpenCore injects it, so it still loads"
+      # the core too, blocking (DRIVER-PLAN N47 (b)): OpenCore injects it and
+      # its prelinker bound what kmutil would refuse, IOMemoryDescriptor::doMap
+      # / doUnmap through RDNA3BoMemory's vtable (the public SDK mangles
+      # vm_map_t as ipc_port *, xnu-11417 and xnu-12377 export only the
+      # _vm_map * names); RDNA3BoMemory overrides both now, so a new import
+      # no kext exports, or one kept private, turns this red before it ever
+      # has to be installed through kmutil
+      - name: KPI guard for the core
+        run: python3 tools/ci/kmutil_kpi_guard.py build/RDNA3Accel.kext
       - name: Userspace (libdrm_xnu, rdna3_drminfo, rdna3_modetest, rdna3_pmctl)
         run: make -C userspace
       - name: rdna3_vktest + mtlprobe (bundled into the VM's report bin)
